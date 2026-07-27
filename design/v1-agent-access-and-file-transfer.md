@@ -1,7 +1,7 @@
 # V1 Agent 接入与文件传输设计
 
 状态：已确认的方向设计
-更新时间：2026-07-24
+更新时间：2026-07-27
 
 说明：本文中的接口路径、字段和时序用于表达已确认的接入方向，在总体框架完成并进入统一详细设计前，不视为最终接口契约。方案比较和未采纳原因见[《V1 方案选择记录》](v1-option-decisions.md)。
 
@@ -15,6 +15,7 @@ V1 采用以下方案：
 - 结构化诊断结果通过 Remote MCP 返回；结果文件通过 HTTP API 下载。
 - 诊断执行底层统一异步；客户端可以立即返回或有限同步等待，等待超时后自然转为异步，不取消或重建任务。
 - 服务端 Case 是客户端可见业务状态的唯一权威来源；同一 Agent 的非持久化完整对话由服务端 Agent Session 持有。
+- Application Service 是业务状态的唯一写入入口；Diagnosis Coordinator 只根据 Case 快照和触发事件计算下一步决策。
 - 同一个 Agent 的多个 Job 保持原 Session，不同 Agent 之间使用结构化信息交接。
 - Remote MCP 与 HTTP 对客户端使用同一个稳定服务地址；V1 在同一服务进程和监听地址上按不同路径挂载两个 Adapter。
 - V1 只保证当前服务进程生命周期内基于已知 `case_id` 的继续操作；不考虑服务重启后的未完成诊断恢复。
@@ -56,8 +57,8 @@ flowchart LR
     MCP --> App["Application Service"]
     HTTP --> App
     App --> Coordinator["Diagnosis Coordinator"]
-    Coordinator --> Case["Case / Typed Job"]
-    Coordinator --> Dispatcher["In-process Job Dispatcher"]
+    App --> Case["Case / Typed Job"]
+    App --> Dispatcher["In-process Job Dispatcher"]
     Dispatcher --> Worker["Typed Worker Handler"]
     App --> Attachment["Attachment / Artifact"]
     Worker --> Runtime["Shared Diagnosis Runtime"]
@@ -189,14 +190,16 @@ sequenceDiagram
     participant W as Worker
     participant R as Diagnosis Runtime
 
+    Note over S,C: 简图省略每次写命令内部的 Case 读取、Coordinator 决策和同一业务状态提交；6.1 展开这些步骤
+
     U->>A: 提交问题
     A->>M: 创建 Case
     M->>S: 创建 Case 命令
     S-->>M: Case 当前状态
     M-->>A: case_id / WAITING_INPUT
     U->>A: 补充诊断信息
-    A->>M: 继续 Case
-    M->>S: 补充输入命令
+    A->>M: 提交补充信息语义（工具名待定）
+    M->>S: 补充输入应用命令
     S-->>M: Case 当前状态
     M-->>A: WAITING_ATTACHMENT
     A->>M: 准备 Attachment
@@ -207,22 +210,222 @@ sequenceDiagram
     H->>S: 发布 READY Attachment
     S-->>H: Attachment 当前状态
     H-->>A: READY
-    A->>M: 继续或查询 Case
-    M->>S: 应用命令
-    S->>C: 推进 Case
-    C->>D: 提交类型化 Job
+    A->>M: 补充资料已就绪，请求继续诊断（概念命令名待定）
+    M->>S: 推进应用命令
+    S->>C: CaseSnapshot + 触发事件
+    C-->>S: 下一步决策 + 可选 Job 规格
+    S->>S: 更新 Case 并创建 Job
+    S->>D: 状态提交后提交类型化 Job
     D->>W: 按类型分发
     W->>R: 创建或复用 Agent Session 并执行
-    R-->>W: 结构化 Job Outcome
-    W-->>D: Job Outcome
-    D-->>C: Job Outcome
-    C-->>S: 更新后的 Case 状态
+    R-->>W: Typed JobOutcome
+    W-->>D: Typed JobOutcome
+    D-->>S: 异步回送 Typed JobOutcome
+    S->>C: CaseSnapshot + Typed JobOutcome
+    C-->>S: 下一步决策
+    S->>S: 保存 Outcome 并更新 Case
     S-->>M: Case 状态 + Artifact 元数据
     M-->>A: RESOLVED
     A-->>U: 展示结果和可选下载地址
 ```
 
 Skill/curl 是 V1 默认文件传输路径。若客户端没有 Shell 或 curl，V1 可以明确报告当前客户端不支持本地直传；Web 上传作为后续能力补充。
+
+上图中的“提交补充信息”和“请求继续诊断”是逻辑动作，不是已经确定的 MCP 工具名或通用 `CONTINUE` Job 类型。Case 查询是独立的只读操作，不进入 Job 创建或诊断推进链。
+
+### 6.1 多轮补充资料、Job 与 Session 复用示例
+
+下图演示同一个 Specialist 在三轮诊断中先后索取“初始参数和一份日志”以及“另一份日志”。这是逻辑交互示例，不定义 MCP 工具名、请求实体、状态枚举或接口字段。
+
+```mermaid
+sequenceDiagram
+    autonumber
+
+    actor U as 用户<br/>User
+    participant CLI as Agent CLI + 客户端接入 Skill<br/>CLI + Client Access Skill
+    participant MCP as 远程 MCP<br/>Remote MCP Adapter
+    participant HTTP as HTTP 文件接口<br/>HTTP File Adapter
+    participant App as 应用服务<br/>Application Service
+    participant C as 诊断协调器<br/>Diagnosis Coordinator
+    participant Repo as 结构化 Case Repository<br/>Structured Case Repository
+    participant Blob as 文件字节存储<br/>BlobStore
+    participant Exec as 执行链<br/>Dispatcher · Worker · Runtime · Backend
+    participant Sess as Agent Sessions<br/>Router / Specialist
+
+    Note over App,C: Coordinator 只计算下一步，不写状态、不创建持久化 Job、不提交 Dispatcher
+    Note over CLI,MCP: 服务端不主动回连；资料要求由有限等待响应或 CLI 只读查询获得
+
+    U->>CLI: 提交初始问题<br/>Submit initial problem
+    CLI->>MCP: 创建 Case 语义（命令名待定）<br/>Create Case semantic (name TBD)
+    MCP->>App: 初始问题应用命令<br/>Initial problem command
+    App->>C: 新 CaseSnapshot + 初始触发<br/>New snapshot + initial trigger
+    C-->>App: 下一步决策 + 可选 ROUTE Job 规格<br/>Next-step decision + optional ROUTE Job spec
+    App->>Repo: 同一业务状态提交：创建 Case 与 ROUTE Job<br/>Commit Case and ROUTE Job together
+    App->>Exec: 状态提交后分发 ROUTE Job<br/>Dispatch ROUTE Job after commit
+    App-->>MCP: case_id + 当前状态<br/>case_id + current state
+    MCP-->>CLI: 已受理<br/>Accepted
+
+    Note over Exec,Sess: Router 与 Specialist 使用独立的逻辑 Session
+    Exec->>Sess: 执行 Router Turn<br/>Run Router turn
+    Sess-->>Exec: Agent 路由输出<br/>Raw routing output
+    Exec-->>App: Typed JobOutcome（路由结果）<br/>Typed JobOutcome (routing result)
+    Note over Exec,App: Runtime 生成、校验并标准化结果；Worker / Dispatcher 回送
+
+    App->>Repo: 读取并校验当前 Case<br/>Read and validate current Case
+    Repo-->>App: CaseSnapshot
+    App->>C: CaseSnapshot + Typed JobOutcome
+    C-->>App: 下一步决策 + 可选 DIAGNOSE Job 规格<br/>Next-step decision + optional DIAGNOSE Job spec
+    App->>Repo: 同一业务状态提交：保存 Outcome、结束 ROUTE Job、创建 DIAGNOSE Job 并固定上下文引用<br/>Save outcome, finish ROUTE Job, create DIAGNOSE Job with fixed references
+    App->>Exec: 状态提交后分发 DIAGNOSE Job<br/>Dispatch after commit
+
+    Exec->>Repo: 按 Job 固定引用只读加载上下文<br/>Read context by fixed Job references
+    Repo-->>Exec: Case 输入与已有结构化数据<br/>Case input and existing structured data
+    Exec->>Sess: Specialist Turn 1
+    Sess-->>Exec: 需要初始参数和一份日志（示例）<br/>Initial parameters and one log required (example)
+    Exec-->>App: Typed JobOutcome（诊断结果）<br/>Typed JobOutcome (diagnosis result)
+
+    App->>Repo: 读取并校验当前 Case<br/>Read and validate current Case
+    Repo-->>App: CaseSnapshot
+    App->>C: CaseSnapshot + Typed JobOutcome
+    C-->>App: 下一步决策：等待补充资料，无新 Job<br/>Wait for supplemental data; no new Job
+    App->>Repo: 同一业务状态提交：保存 Outcome、结束 Job、记录待补资料描述<br/>Save outcome, finish Job, record requirements
+
+    Note over Exec,Sess: 等待用户时当前 Job 已结束并释放 Worker；Session 可以空闲保留
+    Note over CLI,MCP: 可立即返回后轮询，也可有限等待；超时不取消或重建 Job
+
+    CLI->>MCP: 只读查询 Case（工具名待定）<br/>Read-only Case query (name TBD)
+    MCP->>App: 查询当前状态<br/>Query current state
+    App->>Repo: 只读查询<br/>Read-only query
+    Repo-->>App: 当前 Case 状态与待补资料描述
+    App-->>MCP: 需要初始参数和一份日志<br/>Initial parameters and one log required
+    MCP-->>CLI: 当前状态与资料要求<br/>Current state and requirements
+    CLI-->>U: 请提供初始参数和一份日志<br/>Request initial parameters and one log
+
+    U->>CLI: 提供参数并选择本地日志<br/>Provide parameters and select a local log
+    CLI->>MCP: 提交补充参数语义（工具名待定）<br/>Submit input semantic (name TBD)
+    MCP->>App: 补充参数应用命令<br/>Supplemental input command
+    App->>Repo: 读取并校验当前 Case<br/>Read and validate current Case
+    Repo-->>App: CaseSnapshot
+    App->>C: CaseSnapshot + 补充参数触发<br/>Snapshot + supplemental-input trigger
+    C-->>App: 下一步决策：仍需日志，无新 Job<br/>Log still required; no new Job
+    App->>Repo: 同一业务状态提交：保存参数并更新 Case<br/>Save input and update Case together
+    App-->>MCP: 当前状态<br/>Current state
+    MCP-->>CLI: 参数已接收，仍需日志<br/>Input accepted; log still required
+
+    CLI->>MCP: 准备附件语义（工具名待定）<br/>Prepare Attachment semantic (name TBD)
+    MCP->>App: 准备附件应用命令<br/>Prepare Attachment command
+    App->>Repo: 读取并校验当前 Case<br/>Read and validate current Case
+    Repo-->>App: CaseSnapshot
+    App->>C: CaseSnapshot + 准备附件触发<br/>Snapshot + prepare-attachment trigger
+    C-->>App: 下一步决策：允许准备附件，无诊断 Job<br/>Allow attachment preparation; no diagnosis Job
+    App->>Repo: 同一业务状态提交：创建 UPLOADING Attachment 元数据<br/>Create UPLOADING Attachment metadata
+    App-->>MCP: attachment_id + 结构化上传信息（schema TBD）<br/>Structured upload information (schema TBD)
+    MCP-->>CLI: attachment_id + 结构化上传信息
+
+    CLI->>HTTP: HTTP PUT 日志文件字节<br/>HTTP PUT log bytes
+    HTTP->>App: 上传 Attachment 内容<br/>Upload attachment content
+    App->>Blob: 写临时对象、计算校验值并原子发布正式 Blob<br/>Write temp, verify and atomically publish Blob
+    Blob-->>App: 不透明 Blob 引用 + 已校验元数据（schema TBD）<br/>Opaque Blob reference + verified metadata
+    App->>Repo: 同一业务状态提交：绑定 Blob 元数据并标记 READY<br/>Bind Blob metadata and mark READY
+    App-->>HTTP: Attachment READY
+    HTTP-->>CLI: READY
+    Note over App,Blob: 上传中断时清理临时对象，不发布正式 Blob，也不标记 READY
+
+    CLI->>MCP: 补充资料已就绪，请求继续诊断（命令名待定）<br/>Supplemental data ready; request diagnosis continuation (name TBD)
+    MCP->>App: 概念性推进应用命令<br/>Conceptual progression command
+    App->>Repo: 读取并校验当前 Case<br/>Read and validate current Case
+    Repo-->>App: CaseSnapshot
+    App->>C: CaseSnapshot + 补充资料已就绪触发<br/>Snapshot + supplemental-data-ready trigger
+    C-->>App: 下一步决策 + 可选的同语义 DIAGNOSE Job 规格
+    App->>Repo: 同一业务状态提交：更新 Case、创建新 DIAGNOSE Job 并固定上下文引用<br/>Update Case and create new DIAGNOSE Job with fixed references
+    App->>Exec: 状态提交后分发 DIAGNOSE Job<br/>Dispatch after commit
+    App-->>MCP: 已受理 + 当前状态<br/>Accepted + current state
+    MCP-->>CLI: 诊断任务运行中<br/>Diagnosis running
+
+    Note over Exec,Sess: 仅当同一 Case、Profile、skill_id@version 和运行配置不变且 Session 有效时复用；否则新建 Session 并结构化交接
+    Exec->>Repo: 按新 Job 固定引用只读加载参数、Evidence 与附件元数据<br/>Read input, evidence and attachment metadata by fixed references
+    Repo-->>Exec: 结构化上下文<br/>Structured context
+    Exec->>Blob: 经 Workspace Manager 只读物化 READY 日志<br/>Materialize READY log through Workspace Manager
+    Blob-->>Exec: 日志文件字节<br/>Log bytes
+    Exec->>Sess: Specialist Turn 2
+    Sess-->>Exec: 还需要另一份日志（示例）<br/>Another log is required (example)
+    Exec-->>App: Typed JobOutcome（诊断结果）<br/>Typed JobOutcome (diagnosis result)
+
+    App->>Repo: 读取并校验当前 Case<br/>Read and validate current Case
+    Repo-->>App: CaseSnapshot
+    App->>C: CaseSnapshot + Typed JobOutcome
+    C-->>App: 下一步决策：等待另一份日志，无新 Job
+    App->>Repo: 同一业务状态提交：保存 Outcome、结束 Job、记录待补资料描述<br/>Save outcome, finish Job, record requirement
+
+    CLI->>MCP: 只读查询 Case（工具名待定）<br/>Read-only Case query (name TBD)
+    MCP->>App: 查询当前状态<br/>Query current state
+    App->>Repo: 只读查询<br/>Read-only query
+    Repo-->>App: 当前 Case 状态与待补资料描述
+    App-->>MCP: 需要另一份日志<br/>Another log required
+    MCP-->>CLI: 当前状态与资料要求<br/>Current state and requirements
+    CLI-->>U: 请再提供一份日志<br/>Request another log
+
+    U->>CLI: 选择另一份本地日志<br/>Select another local log
+    CLI->>MCP: 准备附件语义（工具名待定）<br/>Prepare Attachment semantic (name TBD)
+    MCP->>App: 准备附件应用命令
+    App->>Repo: 读取并校验当前 Case
+    Repo-->>App: CaseSnapshot
+    App->>C: CaseSnapshot + 准备附件触发
+    C-->>App: 下一步决策：允许准备附件，无诊断 Job
+    App->>Repo: 同一业务状态提交：创建 UPLOADING Attachment 元数据
+    App-->>MCP: attachment_id + 结构化上传信息（schema TBD）
+    MCP-->>CLI: attachment_id + 结构化上传信息
+
+    CLI->>HTTP: HTTP PUT 另一份日志字节<br/>HTTP PUT another log
+    HTTP->>App: 上传 Attachment 内容
+    App->>Blob: 写临时对象、计算校验值并原子发布正式 Blob
+    Blob-->>App: 不透明 Blob 引用 + 已校验元数据（schema TBD）
+    App->>Repo: 同一业务状态提交：绑定 Blob 元数据并标记 READY
+    App-->>HTTP: Attachment READY
+    HTTP-->>CLI: READY
+
+    CLI->>MCP: 补充资料已就绪，请求继续诊断（命令名待定）<br/>Supplemental data ready; request diagnosis continuation (name TBD)
+    MCP->>App: 概念性推进应用命令
+    App->>Repo: 读取并校验当前 Case
+    Repo-->>App: CaseSnapshot
+    App->>C: CaseSnapshot + 补充资料已就绪触发
+    C-->>App: 下一步决策 + 可选的同语义 DIAGNOSE Job 规格
+    App->>Repo: 同一业务状态提交：更新 Case、创建新 DIAGNOSE Job 并固定上下文引用
+    App->>Exec: 状态提交后分发 DIAGNOSE Job
+    App-->>MCP: 已受理 + 当前状态<br/>Accepted + current state
+    MCP-->>CLI: 诊断任务运行中<br/>Diagnosis running
+
+    Exec->>Repo: 按新 Job 固定引用只读加载上下文与附件元数据
+    Repo-->>Exec: 结构化上下文
+    Exec->>Blob: 经 Workspace Manager 只读物化 READY 日志
+    Blob-->>Exec: 两份日志文件字节
+    Exec->>Sess: Specialist Turn 3
+    Sess-->>Exec: 诊断完成<br/>Diagnosis completed
+    Exec-->>App: Typed JobOutcome（诊断结果）<br/>Typed JobOutcome (diagnosis result)
+
+    App->>Repo: 读取并校验当前 Case
+    Repo-->>App: CaseSnapshot
+    App->>C: CaseSnapshot + Typed JobOutcome
+    C-->>App: 下一步决策：完成，无新 Job<br/>Complete; no new Job
+    App->>Repo: 同一业务状态提交：保存 Outcome、结束 Job、更新 Case、结果与 Evidence<br/>Save outcome, finish Job, update Case, result and evidence
+
+    CLI->>MCP: 只读查询最终结果（工具名待定）<br/>Read-only final-result query (name TBD)
+    MCP->>App: 查询当前状态
+    App->>Repo: 只读查询
+    Repo-->>App: RESOLVED + 结构化结果 + Artifact 元数据
+    App-->>MCP: RESOLVED + result + artifact metadata
+    MCP-->>CLI: 最终定位结果<br/>Final diagnosis result
+    CLI-->>U: 展示定位结论、证据与建议<br/>Show diagnosis, evidence and recommendations
+```
+
+该示例遵循以下约束：
+
+- “初始参数和一份日志”“另一份日志”仅用于说明多轮补充资料，不代表已经定义独立请求实体、编号、数量或组合等待状态。
+- 图中的创建、提交输入、准备附件、查询和请求继续诊断均为逻辑语义；正式 MCP 工具名、字段和触发规则留到详细设计。查询始终只读，服务端不主动建立到 CLI 的回连。
+- “同一业务状态提交”确认 Application Service 的单写入和一致性边界，但不指定数据库、事务 API 或状态提交后分发失败的处理技术。
+- Attachment 文件采用临时对象到正式 Blob 的原子发布；Blob 发布与结构化 Metadata 提交之间的失败补偿留到详细设计。
+- Agent 执行结果统一由 Runtime 校验并转换为 `Typed JobOutcome`；路由结果和诊断结果的精确结构与枚举留到详细设计。
+- 每次等待补充资料时当前 Job 均已结束并释放 Worker。相同 Specialist Session 只在当前服务进程内、Session 有效，且 Case、Agent Profile、`skill_id@version` 和运行配置不变时复用；否则创建新 Session 并使用结构化信息交接。
 
 ## 7. 后续增加 Web 上传
 

@@ -1,7 +1,7 @@
 # V1 方案选择记录
 
 状态：总体粗设计决策已确认；详细设计事项持续更新
-更新时间：2026-07-25
+更新时间：2026-07-27
 
 ## 1. 文档定位
 
@@ -52,6 +52,7 @@
 | OPT-022 | Agent Backend 边界 | Runtime 依赖统一 Agent Backend 接口 | 已确认 |
 | OPT-023 | 数据保留边界 | 持久化业务数据，不持久化或恢复 Agent 运行上下文 | 已确认 |
 | OPT-024 | General Code Agent 的 V1 范围 | 保留扩展边界，V1 不实现 | 已确认 |
+| OPT-025 | Application Service、Coordinator 与 Dispatcher 职责 | Application Service 单写入，Coordinator 纯决策，状态提交后分发 | 已确认 |
 
 ## 4. 方案比较
 
@@ -257,7 +258,7 @@ V1 的 Router Agent 和 Specialist Agent 使用不同 Session；切换 Agent 时
 | 进程内 Dispatcher + 有界 Worker Handler | 保持单进程部署，同时分离编排、调度和执行 | 运行任务仍依赖当前进程，不提供跨重启恢复 | **已确认** |
 | 外部任务队列 + 独立 Worker 服务 | 可独立扩容并支持多实例执行 | 引入消息队列、多进程部署和运维复杂度 | 暂缓 |
 
-Application Service 负责业务命令和 Case 状态，不直接运行耗时 Agent。Diagnosis Coordinator 创建 Job，Dispatcher 按类型选择 Worker Handler。V1 的 Dispatcher、Worker Handler 和共享 Diagnosis Runtime 都位于同一个服务进程。
+Application Service 负责业务命令和 Case 状态，不直接运行耗时 Agent。Diagnosis Coordinator 决定下一步 Job 规格，Application Service 创建并在业务状态提交后将 Job 交给 Dispatcher，Dispatcher 再按类型选择 Worker Handler。V1 的 Dispatcher、Worker Handler 和共享 Diagnosis Runtime 都位于同一个服务进程。
 
 复议条件：出现独立扩容、跨实例调度或明确的高可用要求。
 
@@ -267,9 +268,9 @@ Application Service 负责业务命令和 Case 状态，不直接运行耗时 Ag
 |---|---|---|---|
 | Router Agent 内部直接调用下一个 Agent | Agent 间调用直观 | 路由和诊断形成不透明长任务，难以独立调度和记录状态 | 未采纳 |
 | 一个通用 Agent 同时承担路由、专项和代码分析 | 上下文无需交接 | Agent 职责和配置耦合，难以让不同 Worker 承担不同工作 | 未采纳 |
-| Coordinator 根据结构化结果创建类型化 Job | 不同诊断阶段可以由不同 Worker/Agent 执行，Case 中保留清晰执行链 | 增加 Job 边界和结构化结果约定 | **已确认** |
+| Coordinator 根据结构化结果决定下一类型化 Job，由 Application Service 创建 | 不同诊断阶段可以由不同 Worker/Agent 执行，Case 中保留清晰执行链 | 增加 Job 边界和结构化结果约定 | **已确认** |
 
-初始问题由路由类 Job 交给 Router Agent。V1 中 Router Agent 返回结构化 RouteDecision，Coordinator 再创建专项 Skill Job；没有匹配 Skill 时返回“无可用诊断能力”的结构化结果。后续 Agent 返回的等待输入、等待附件、完成、失败或重新路由结果也由 Coordinator 推进 Case。
+初始问题由路由类 Job 交给 Router Agent。V1 中 Router Agent 返回结构化 RouteDecision，Coordinator 决定后续专项 Skill Job，Application Service 创建并提交；没有匹配 Skill 时返回“无可用诊断能力”的结构化结果。后续 Agent 返回的等待输入、等待附件、完成、失败或重新路由结果也由 Application Service 持久化，并由 Coordinator 决定下一步。
 
 V1 实现 Routing Worker 和 Skill Diagnosis Worker。General Code Worker 作为后续扩展，不在 V1 创建空 Handler 或占位实现，详见 OPT-024。
 
@@ -342,7 +343,7 @@ V1 为 Skill 保留稳定的 `skill_id` 和不可原地覆盖的 `skill_version`
 | Runtime 依赖统一 Agent Backend 接口 | 逻辑 Session、业务结果与物理执行解耦，方便测试及增加其他 Agent 实现 | 需要定义一套通用 Session 和 Turn 执行协议 | **已确认** |
 | Backend 同时管理 Skill、Workspace、逻辑 Session 和 Agent 执行 | 单个 Backend 自包含 | 不同 Backend 会重复 Runtime 职责，Profile、Skill 和 Session 规则容易漂移 | 未采纳 |
 
-Coordinator 创建 Job，Runtime 将一个面向 Agent 的 Job 转换为目标逻辑 Agent Session 上的一次 Turn。一个 Job 执行一次后结束；多个顺序 Job 可以复用同一个 Session。`WAITING_INPUT` 或 `WAITING_ATTACHMENT` 结束当前 Job，但不要求关闭对应 Session。
+Coordinator 决定 Job 规格，Application Service 创建并提交 Job，Runtime 将一个面向 Agent 的 Job 转换为目标逻辑 Agent Session 上的一次 Turn。一个 Job 执行一次后结束；多个顺序 Job 可以复用同一个 Session。`WAITING_INPUT` 或 `WAITING_ATTACHMENT` 结束当前 Job，但不要求关闭对应 Session。
 
 Runtime 负责 Profile、Skill、Tool Bundle、Workspace、逻辑 Session 解析以及从 Agent 结果到 `JobOutcome` 的转换。Backend 只负责物理 Session 的创建、单轮调用、提供方响应与错误标准化以及关闭。物理 Session Handle 是 Backend 的不透明值，不进入 Case、Job 或外部接口。
 
@@ -387,6 +388,22 @@ V1 的 Router 只在已启用的 Diagnosis Skill 中选择目标；没有匹配�
 
 复议条件：V1 发布前出现必须由通用代码分析覆盖、且无法通过 Diagnosis Skill 实现的明确场景。
 
+### OPT-025：Application Service、Coordinator 与 Dispatcher 职责
+
+| 候选方案 | 优点 | 代价或局限 | 结论 |
+|---|---|---|---|
+| Coordinator 直接读写 Case、创建 Job 并提交 Dispatcher | 调用链较短 | 与 Application Service 的业务归一职责重叠，容易形成两个状态写入者 | 未采纳 |
+| Application Service 单写入，Coordinator 纯决策，状态提交后分发 | 状态、Job 和 Outcome 的写入边界唯一；决策逻辑可独立测试；异步结果可以复用同一闭环 | 需要明确状态提交与进程内分发之间的失败处理 | **已确认** |
+| Worker 或 Dispatcher 直接更新 Case 并创建后续 Job | 执行完成后推进直接 | 执行层与业务状态机耦合，难以保证一致性 | 未采纳 |
+
+Application Service 接收外部应用命令和内部 `JobOutcome`，加载 Case 后调用无副作用的 Coordinator。Coordinator 根据 `CaseSnapshot + Trigger` 返回下一步状态决策和可选 Job 规格；Application Service 负责保存当前 Outcome、更新 Case、结束当前 Job、创建下一 Job，并在状态提交后交给 Dispatcher。
+
+Dispatcher、Worker、Runtime 和 Agent Backend 不修改 Case，也不创建后续 Job。Runtime 生成、校验并标准化 `JobOutcome`，由 Worker / Dispatcher 异步回送 Application Service。具体 DTO 字段、事务技术、重试方式和状态提交后分发失败的处理机制留到详细设计。
+
+Job 使用创建时固定的上下文引用。Runtime 只读解析这些引用所指向的结构化业务数据，并通过 Case Workspace Manager 将 `READY` Attachment 从 BlobStore 物化到派生工作区；Workspace 和 Agent Session 都不是业务状态权威来源。
+
+复议条件：未来采用可靠消息队列、Outbox、多实例 Worker 或跨进程事务，需要重新评估状态提交与 Job 分发的一致性机制，但不改变 Application Service 单写入和 Coordinator 纯决策的职责边界。
+
 ## 5. 尚未选择或待详细设计
 
 以下事项尚未形成最终方案，不得从本文推断为既定实现要求：
@@ -400,7 +417,7 @@ V1 的 Router 只在已启用的 Diagnosis Skill 中选择目标；没有匹配�
 - 诊断完成前后再次请求补充参数或附件的完整循环。
 - Case Session Registry、空闲回收、容量上限和 Session 串行调用方式。
 - 跨 Agent 结构化交接信息的具体格式。
-- Application Service、Coordinator 和 Dispatcher 的具体接口及事务边界。
+- Application Service、Coordinator 和 Dispatcher 的具体接口、事务实现及状态提交后分发失败的处理机制。
 - Job 类型、Job 结果、RouteDecision 的精确结构和 Worker 并发参数。
 - Agent Profile、逻辑 Session Key 和 Job 目标的具体字段。
 - Agent Backend 的 Session 配置、Turn 输入、标准化结果、错误分类和关闭协议。

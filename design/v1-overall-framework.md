@@ -1,7 +1,7 @@
 # V1 总体框架粗设计
 
 状态：总体粗设计已确认；General Code Agent 作为后续扩展预留
-更新时间：2026-07-25
+更新时间：2026-07-27
 
 ## 1. 文档定位
 
@@ -35,8 +35,8 @@ flowchart LR
     HTTP --> App
 
     App --> Coordinator["Diagnosis Coordinator"]
-    Coordinator --> CaseJob["Case / Typed Job"]
-    Coordinator --> Dispatcher["In-process Job Dispatcher"]
+    App --> CaseJob["Case / Typed Job"]
+    App --> Dispatcher["In-process Job Dispatcher"]
 
     Dispatcher --> RouteWorker["Routing Worker"]
     Dispatcher --> SkillWorker["Skill Diagnosis Worker"]
@@ -62,7 +62,7 @@ flowchart LR
     Router --> Capability["Skill / 工具 / 领域能力"]
     Specialist --> Capability
     General -.-> Capability
-    Coordinator --> Storage["Case / Job / Attachment / Artifact"]
+    App --> Storage["Case / Job / Attachment / Artifact"]
 ```
 
 Remote MCP 和 HTTP 都是接入适配器，不分别实现业务规则。Application Service 后通过 Diagnosis Coordinator、类型化 Job 和 Dispatcher 组织诊断执行。
@@ -116,9 +116,10 @@ Case 不负责持久化到足以重建完整 Agent 对话的全部工作上下�
 
 ### 7.2 Application Service 与 Diagnosis Coordinator
 
-- Application Service 负责接收应用命令、读取和更新 Case、创建 Job，并返回客户端可见状态。
+- Application Service 是业务状态的唯一写入入口，负责接收外部应用命令和内部 `JobOutcome`、读取和更新 Case、结束当前 Job、创建下一 Job，并返回客户端可见状态。
+- Application Service 根据 Coordinator 返回的下一步决策，在业务状态提交后将已经创建的 Job 交给 Dispatcher。具体事务机制和提交失败处理留到详细设计。
 - Application Service 不直接运行耗时 Agent 诊断。
-- Diagnosis Coordinator 根据 Case 当前状态和 Job 结果确定下一步应创建哪类 Job。
+- Diagnosis Coordinator 根据 `CaseSnapshot` 和当前触发事件确定下一步状态变化及可选 Job 规格；它是无副作用的决策组件，不读写 Repository、不创建持久化 Job，也不提交 Dispatcher。
 - Coordinator 是确定性的流程编排组件，不等同于负责语义判断的 Router Agent。
 
 ### 7.3 Dispatcher 与类型化 Worker
@@ -127,7 +128,7 @@ Case 不负责持久化到足以重建完整 Agent 对话的全部工作上下�
 - V1 实现问题路由和专项 Skill 诊断两类 Agent Job，由 Routing Worker 和 Skill Diagnosis Worker 分别执行。
 - General Code Job、General Code Worker 和 General Code Agent Profile 只在架构中保留扩展位置，V1 不创建或运行这些对象。
 - Routing Worker 使用 Router Agent；Skill Diagnosis Worker 使用加载了目标 Skill 的 Specialist Agent。
-- Router Agent 返回结构化路由结论，由 Coordinator 创建后续 Job；Router Agent 不在内部直接隐式启动专项 Agent。
+- Router Agent 返回结构化路由结论，由 Coordinator 决定后续 Job，Application Service 创建并提交该 Job；Router Agent 不在内部直接隐式启动专项 Agent。
 - V1 的 Router 只在已启用的 Diagnosis Skill 中选择目标；没有匹配能力时返回结构化的“无可用诊断能力”结果，不转入 General Code Agent。具体结果名称留到详细设计。
 - Specialist Agent 可以返回需要补充信息、需要附件、完成、失败或重新路由等逻辑结果，具体结果集合留到详细设计。
 
@@ -148,14 +149,23 @@ sequenceDiagram
     participant R as Router Agent
     participant S as Specialist Agent
 
-    A->>C: 新 Case 可以开始诊断
-    C->>D: 创建并提交 ROUTE Job
+    A->>C: CaseSnapshot + 新 Case 触发事件
+    C-->>A: 下一步决策 + ROUTE Job 规格
+    A->>A: 更新 Case 并创建 ROUTE Job
+    A->>D: 状态提交后提交 ROUTE Job
     D->>R: 执行问题路由
-    R-->>C: 结构化 RouteDecision
-    C->>D: 创建专项 Skill Job
+    R-->>D: Typed JobOutcome / RouteDecision
+    D-->>A: 异步回送 Typed JobOutcome
+    A->>C: CaseSnapshot + RouteDecision
+    C-->>A: 下一步决策 + 专项 Skill Job 规格
+    A->>A: 保存 RouteDecision 并创建专项 Skill Job
+    A->>D: 状态提交后提交专项 Skill Job
     D->>S: 执行目标诊断
-    S-->>C: DiagnosisOutcome
-    C-->>A: 更新 Case 与下一步状态
+    S-->>D: Typed JobOutcome / DiagnosisOutcome
+    D-->>A: 异步回送 Typed JobOutcome
+    A->>C: CaseSnapshot + DiagnosisOutcome
+    C-->>A: 下一步决策
+    A->>A: 保存结果并更新 Case
 ```
 
 ## 8. 已确认的 Diagnosis Runtime
@@ -166,7 +176,8 @@ sequenceDiagram
 - 类型化 Job 指向逻辑 Agent Profile，不暴露 Claude Code、其他模型后端的物理进程或 Session 标识。
 - Agent Profile 描述 Agent 角色、基础工作指令、输出约定、Skill 注入方式、Tool Bundle 和 Workspace 类型。
 - Runtime 根据 Job 和 Agent Profile 组装执行环境，创建或复用 Agent Session，并将 Agent 输出转换为结构化 Job Outcome。
-- Runtime 不决定业务路由，也不直接修改 Case；Coordinator 根据 Job Outcome 推进 Case。
+- Job 使用创建时固定的上下文引用；Runtime 只读解析所需的 Case 输入、Attachment、已有 Outcome 和 Evidence，不以执行时最新 Case 内容静默替换 Job 上下文。
+- Runtime 不决定业务路由，也不直接修改 Case；`JobOutcome` 由 Worker / Dispatcher 回送 Application Service。Application Service 读取当前 Case 后先调用 Coordinator 得到下一步决策，再在同一业务事务中保存 Outcome、更新 Case、结束当前 Job并创建可选的下一 Job。
 
 ### 8.2 Case 级 Session Registry
 
@@ -179,7 +190,7 @@ sequenceDiagram
 ### 8.3 Agent Backend 边界
 
 - Diagnosis Runtime 依赖统一的逻辑 Agent Backend 接口，不直接依赖 Claude Code 子进程、特定模型 SDK 或远程 Agent API。
-- Coordinator 创建 Job；Runtime 将一个面向 Agent 的 Job 转换为目标逻辑 Agent Session 上的一次 Turn；Agent Backend 驱动物理 Agent Session 完成该 Turn。
+- Coordinator 决定 Job 规格，Application Service 创建并在状态提交后提交 Job；Runtime 将一个面向 Agent 的 Job 转换为目标逻辑 Agent Session 上的一次 Turn；Agent Backend 驱动物理 Agent Session 完成该 Turn。
 - Runtime 负责解析 Agent Profile，加载 Skill、Tool Bundle 和 Workspace，通过 Case Session Registry 决定创建或复用逻辑 Session，组织本轮输入，并将 Agent 结果校验、转换为 `JobOutcome`。
 - Agent Backend 负责创建物理 Session、发送一轮输入、接收并标准化提供方响应与错误，以及关闭物理 Session。
 - Backend 返回的物理 Session Handle 对 Runtime 是不透明值，只保存在进程内 Session 记录中，不进入 Case、Job 或外部接口。
@@ -323,7 +334,7 @@ V1 通过逻辑 Repository 和 BlobStore 边界持久化业务数据。单节点
 - MCP 工具名称、HTTP 路径、请求字段和响应字段。
 - 任务创建、幂等、错误码及重试规则。
 - `WAITING_INPUT`、`WAITING_ATTACHMENT` 等状态的完整转换规则。
-- Application Service、Coordinator 和 Dispatcher 的具体接口及事务边界。
+- Application Service、Coordinator 和 Dispatcher 的具体接口、事务实现及状态提交后分发失败的处理机制。
 - Job 类型、Job 结果和 RouteDecision 的精确结构。
 - Worker 总并发数、是否按类型单独限流及队列细节。
 - 同一个 Case 的并发修改控制、幂等和冲突处理机制。

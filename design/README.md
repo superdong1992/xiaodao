@@ -9,6 +9,7 @@
 - [V1 总体框架粗设计](v1-overall-framework.md)
 - [V1 方案选择记录](v1-option-decisions.md)
 - [V1 Agent 接入与文件传输设计](v1-agent-access-and-file-transfer.md)
+- [目标问题定位静态架构](target-diagnosis-architecture.md)
 
 ## 文档约定
 
