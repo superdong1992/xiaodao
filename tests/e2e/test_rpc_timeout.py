@@ -1,0 +1,868 @@
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import json
+import os
+import shlex
+import sys
+import time
+import zipfile
+from pathlib import Path
+from typing import Any, Sequence
+
+from fastapi.testclient import TestClient
+
+from problem_locator.application import build_application_service
+from problem_locator.contracts import (
+    ArtifactKind,
+    AttachmentStatus,
+    CandidateStatus,
+    CaseStatus,
+    FixtureManifest,
+    JobStatus,
+    JobType,
+    OutcomeResultType,
+    RequirementStatus,
+    ReviewVerdict,
+    UserResultPayload,
+    canonical_json_bytes,
+    parse_canonical_json_bytes,
+)
+from problem_locator.dispatch import SchedulerService
+from problem_locator.domain import DomainCoordinator, PureContextSnapshotProjector
+from problem_locator.integrations.logparse import build_logparse_runtime
+from problem_locator.interfaces.http_app import create_http_app
+from problem_locator.interfaces.mcp_server import McpAdapter
+from problem_locator.runtime.agent_backend import AgentBackend, BackendExecutionLimits
+from problem_locator.runtime.catalog import VersionedAssetCatalog
+from problem_locator.runtime.diagnosis_runtime import DiagnosisRuntime
+from problem_locator.runtime.workspace import WorkspaceManager
+from problem_locator.storage.coordination import (
+    AttachmentUploadRegistry,
+    InProcessAttachmentUploadGuard,
+    InProcessPublicationCommitGuard,
+    StorageCoordinationLock,
+)
+from problem_locator.storage.execution_records import FileExecutionRecordStore
+from problem_locator.storage.layout import StorageLayout
+from problem_locator.storage.resource_store import FileResourceStore
+from problem_locator.storage.state_repository import JsonFileStateRepository
+from tests.contracts.fakes import (
+    DeterministicIdGenerator,
+    FakeClock,
+    InMemoryStateChangeNotifier,
+)
+from tests.unit.interfaces.fakes import FakeStateAdmin
+from tests.unit.interfaces.helpers import readiness
+
+
+ROOT = Path(__file__).resolve().parents[2]
+FIXTURES = ROOT / "tests/fixtures/rpc_timeout"
+FAKE_AGENT = FIXTURES / "fake_agent.py"
+ARCHIVE = FIXTURES / "payment-inventory-rpc.zip"
+EXPECTED_USER_RESULT = FIXTURES / "expected-user-result.json"
+EXPECTED_PARSE_MANIFEST = FIXTURES / "expected-parse-manifest.json"
+EXPECTED_TARGET_LOGS = FIXTURES / "expected-target-logs.json"
+EXPECTED_PARSE_COUNTER = FIXTURES / "expected-parse-counter.json"
+FAKE_LOGPARSE_REPO = ROOT / "tests/fixtures/components/logparse/fake/repo"
+FAKE_LOGPARSE_CONFIG = FAKE_LOGPARSE_REPO / "config.yaml"
+SKILL_DIR = ROOT / ".claude/skills"
+EVIDENCE_ID = "00000000-0000-0000-0000-000000000040"
+EXPECTED_USER_RESULT_SHA256 = (
+    "37ee245a8ae705561575e2c353fd1cc4e2a57653ed05d095f4d2292c287cdf09"
+)
+ARCHIVE_BYTES_MARKER = b"synthetic payment-to-inventory RPC timeout archive"
+RAW_LOGPARSE_ENV = {
+    "LOGPARSE_REPO": "s08-raw-logparse-repo-sentinel",
+    "LOGPARSE_CONFIG_PATH": "s08-raw-logparse-config-sentinel",
+    "LOGPARSE_PYTHON": "s08-raw-logparse-python-sentinel",
+    "PROBLEM_LOCATOR_LOGPARSE_ENDPOINT": (
+        "http://127.0.0.1:9/s08-stale-broker-endpoint-sentinel"
+    ),
+    "PROBLEM_LOCATOR_LOGPARSE_TOKEN": "s08-stale-broker-token-sentinel",
+}
+PARAMETER_GROUP_A = {
+    "caller_service": "payment-service",
+    "server_service": "inventory-service",
+    "rpc_method": "ReserveStock",
+    "problem_time": "2026-07-31T00:00:03.000Z",
+}
+
+
+class _E2EIds(DeterministicIdGenerator):
+    """Keep every ID deterministic and pin the golden Evidence identity."""
+
+    def derive(self, kind: str, stable_parts: Sequence[str]) -> str:
+        if kind == "evidence" and tuple(stable_parts)[-1] == "rpc-timeout-evidence":
+            self.derive_calls.append((kind, tuple(stable_parts)))
+            return EVIDENCE_ID
+        return super().derive(kind, stable_parts)
+
+
+class _LateDispatcher:
+    """Close the Application↔Scheduler composition cycle exactly once."""
+
+    def __init__(self) -> None:
+        self._scheduler: SchedulerService | None = None
+
+    def bind(self, scheduler: SchedulerService) -> None:
+        assert self._scheduler is None
+        self._scheduler = scheduler
+
+    def submit(self, job_id: str):
+        assert self._scheduler is not None
+        return self._scheduler.submit(job_id)
+
+    def cancel(self, job_id: str):
+        assert self._scheduler is not None
+        return self._scheduler.cancel(job_id)
+
+
+class _CapturingBrokerFactory:
+    """Retain real in-memory capabilities solely for the final leak oracle."""
+
+    def __init__(self, delegate: Any) -> None:
+        self._delegate = delegate
+        self.capabilities: list[dict[str, str]] = []
+
+    def open(self, job, workspace_root, workspace_manifest, cancellation):
+        session = self._delegate.open(
+            job,
+            workspace_root,
+            workspace_manifest,
+            cancellation,
+        )
+        environment = session.agent_environment()
+        assert set(environment) == {
+            "PROBLEM_LOCATOR_LOGPARSE_ENDPOINT",
+            "PROBLEM_LOCATOR_LOGPARSE_TOKEN",
+        }
+        self.capabilities.append(dict(environment))
+        return session
+
+
+class _RecordingMcpAdapter:
+    """Record exact black-box MCP envelopes without changing adapter behavior."""
+
+    def __init__(self, delegate: McpAdapter) -> None:
+        self._delegate = delegate
+        self.responses: list[bytes] = []
+
+    async def call(self, name: str, arguments: dict[str, object]) -> Any:
+        result = await self._delegate.call(name, arguments)
+        self.responses.append(canonical_json_bytes(result))
+        return result
+
+
+class _Stack:
+    def __init__(
+        self,
+        data_root: Path,
+        *,
+        logparse_record: Path,
+        agent_record: Path,
+        review_entered: Path,
+        review_release: Path,
+        seed: str,
+    ) -> None:
+        self.data_root = data_root
+        self.clock = FakeClock("2026-07-31T00:10:00.000Z")
+        self.ids = _E2EIds(seed=seed)
+        self.coordination_lock = StorageCoordinationLock()
+        self.attachment_registry = AttachmentUploadRegistry()
+        self.layout = StorageLayout.at(data_root)
+        self.layout.ensure_directories()
+        self.records = FileExecutionRecordStore(
+            data_root,
+            self.coordination_lock,
+        )
+        self.repository = JsonFileStateRepository(
+            data_root,
+            self.coordination_lock,
+            self.clock,
+            self.ids,
+            execution_record_store=self.records,
+        )
+        self.resources = FileResourceStore(
+            self.layout,
+            self.coordination_lock,
+            self.attachment_registry,
+            self.ids,
+        )
+        self.publication_guard = InProcessPublicationCommitGuard(
+            self.coordination_lock
+        )
+        self.upload_guard = InProcessAttachmentUploadGuard(
+            self.attachment_registry
+        )
+        logparse_asset, broker_factory = build_logparse_runtime(
+            FAKE_LOGPARSE_REPO,
+            FAKE_LOGPARSE_CONFIG,
+            Path(sys.executable),
+        )
+        self.broker_factory = _CapturingBrokerFactory(broker_factory)
+        self.catalog = VersionedAssetCatalog(
+            skill_dir=SKILL_DIR,
+            logparse_tool=logparse_asset,
+            logparse_broker_factory=self.broker_factory,
+        )
+        environment = dict(os.environ)
+        environment.update(
+            {
+                "S07_FAKE_LOGPARSE_RECORD": os.fspath(logparse_record),
+                "S08_FAKE_AGENT_RECORD": os.fspath(agent_record),
+                "S08_REVIEW_ENTERED": os.fspath(review_entered),
+                "S08_REVIEW_RELEASE": os.fspath(review_release),
+            }
+        )
+        backend = AgentBackend(
+            shlex.join((sys.executable, os.fspath(FAKE_AGENT))),
+            parent_environment=environment,
+        )
+        self.runtime = DiagnosisRuntime(
+            state_repository=self.repository,
+            resource_store=self.resources,
+            asset_catalog=self.catalog,
+            logparse_broker_factory=self.broker_factory,
+            execution_records=self.records,
+            clock=self.clock,
+            id_generator=self.ids,
+            workspace_manager=WorkspaceManager(data_root),
+            backend=backend,
+            backend_test_limits=BackendExecutionLimits(
+                wall_time_seconds=30.0,
+                stdout_stderr_bytes=1024 * 1024,
+                workspace_bytes=16 * 1024 * 1024,
+                poll_interval_seconds=0.01,
+                termination_grace_seconds=1.0,
+            ),
+        )
+        late_dispatcher = _LateDispatcher()
+        self.application = build_application_service(
+            repository=self.repository,
+            resource_store=self.resources,
+            publication_guard=self.publication_guard,
+            upload_guard=self.upload_guard,
+            execution_records=self.records,
+            coordinator=DomainCoordinator(),
+            projector=PureContextSnapshotProjector(),
+            asset_catalog=self.catalog,
+            dispatcher=late_dispatcher,
+            notifier=InMemoryStateChangeNotifier(),
+            clock=self.clock,
+            ids=self.ids,
+        )
+        self.scheduler = SchedulerService(
+            repository=self.repository,
+            execution_records=self.records,
+            job_control=self.application,
+            runtime=self.runtime,
+            id_generator=self.ids,
+        )
+        late_dispatcher.bind(self.scheduler)
+        self.mcp = _RecordingMcpAdapter(
+            McpAdapter(
+                self.application,
+                self.application,
+                public_base_url="http://127.0.0.1:18080",
+            )
+        )
+        self.http_app = create_http_app(
+            command_port=self.application,
+            query_port=self.application,
+            state_admin=FakeStateAdmin(readiness=readiness()),
+            public_base_url="http://127.0.0.1:18080",
+        )
+
+    def start(self) -> None:
+        recovery = self.scheduler.start()
+        assert recovery.completed is True
+        assert self.scheduler.ready is True
+
+    def wait_idle(self) -> None:
+        assert self.scheduler.wait_until_idle(30.0)
+        assert self.scheduler.fatal_worker_error_type is None
+
+    def shutdown(self) -> None:
+        assert self.scheduler.shutdown(10.0)
+
+
+def _mcp(adapter: Any, name: str, arguments: dict[str, object]) -> Any:
+    result = asyncio.run(adapter.call(name, arguments))
+    assert result["ok"] is True, result
+    assert result["error"] is None
+    return result["data"]
+
+
+def _query(adapter: McpAdapter, case_id: str) -> dict[str, Any]:
+    return _mcp(
+        adapter,
+        "problem_locator_get_case",
+        {"case_id": case_id, "wait_for_job_id": None, "wait_seconds": 0},
+    )["case_view"]
+
+
+def _wait_for_file(path: Path, timeout_seconds: float = 10.0) -> None:
+    deadline = time.monotonic() + timeout_seconds
+    while not path.is_file():
+        if time.monotonic() >= deadline:
+            raise AssertionError(f"timed out waiting for {path.name}")
+        time.sleep(0.02)
+
+
+def _record(path: Path) -> dict[str, Any]:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _agent_records(path: Path) -> list[dict[str, Any]]:
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+
+def _canonical_fixture(path: Path) -> object:
+    payload = path.read_bytes()
+    parsed = parse_canonical_json_bytes(payload)
+    assert canonical_json_bytes(parsed) == payload
+    return parsed
+
+
+def _assert_logparse_record(
+    path: Path,
+    *,
+    expected_target_count: int,
+) -> dict[str, Any]:
+    record = _record(path)
+    expected_counter = _canonical_fixture(EXPECTED_PARSE_COUNTER)
+    assert isinstance(expected_counter, dict)
+    assert record["parse_count"] == expected_counter["parse_count"] == 1
+    assert record["target_logs_count"] == expected_target_count
+    assert [item["command"] for item in record["invocations"]] == [
+        "parse",
+        *(["mech-target-logs"] * expected_target_count),
+    ]
+    assert all(
+        item["reserved_environment_present"] is False
+        for item in record["invocations"]
+    )
+    return record
+
+
+def _assert_no_sensitive_surfaces(
+    *,
+    data_root: Path,
+    excluded_attachment: Path,
+    public_responses: Sequence[bytes],
+    broker_capabilities: Sequence[dict[str, str]],
+    archive: bytes,
+) -> None:
+    needles: list[tuple[str, bytes]] = [
+        ("DATA_ROOT", os.fspath(data_root).encode("utf-8")),
+        ("archive marker", ARCHIVE_BYTES_MARKER),
+        ("archive body", archive),
+    ]
+    needles.extend(
+        (f"raw key {name}", name.encode("ascii")) for name in RAW_LOGPARSE_ENV
+    )
+    needles.extend(
+        (f"raw sentinel {name}", value.encode("utf-8"))
+        for name, value in RAW_LOGPARSE_ENV.items()
+    )
+    for capability_index, capability in enumerate(broker_capabilities):
+        needles.extend(
+            (f"broker capability {capability_index}/{name}", value.encode("utf-8"))
+            for name, value in capability.items()
+        )
+
+    surfaces: list[tuple[str, bytes]] = [
+        (f"public response {index}", payload)
+        for index, payload in enumerate(public_responses)
+    ]
+    excluded = excluded_attachment.resolve(strict=True)
+    for path in sorted(data_root.rglob("*")):
+        if not path.is_file() or path.is_symlink():
+            continue
+        if path.resolve(strict=True) == excluded:
+            continue
+        relative_path = path.relative_to(data_root)
+        relative = relative_path.as_posix()
+        parts = relative_path.parts
+        is_execution_surface = (
+            len(parts) >= 3
+            and parts[0] == "jobs"
+            and path.name in {"stdout.log", "stderr.log", "job_outcome.json"}
+        )
+        is_published_proposal = bool(parts) and parts[0] == "resources"
+        is_workspace_proposal = (
+            len(parts) >= 5
+            and parts[0:2] == ("tmp", "workspaces")
+            and parts[3:5] == ("output", "proposals")
+        )
+        is_staged_proposal = len(parts) >= 2 and parts[0:2] == (
+            "tmp",
+            "proposals",
+        )
+        if not (
+            is_execution_surface
+            or is_published_proposal
+            or is_workspace_proposal
+            or is_staged_proposal
+        ):
+            continue
+        payload = path.read_bytes()
+        surfaces.append((relative, payload))
+
+    for surface, payload in surfaces:
+        for label, needle in needles:
+            assert needle not in payload, f"{label} leaked into {surface}"
+
+
+def test_rpc_timeout_fixture_manifest_is_schema_valid_and_exhaustive() -> None:
+    manifest_path = FIXTURES / "fixture-manifest.json"
+    manifest_bytes = manifest_path.read_bytes()
+    manifest = FixtureManifest.model_validate_json(manifest_bytes)
+    assert canonical_json_bytes(manifest) == manifest_bytes
+    assert manifest.owner_spec == "S08"
+    assert manifest.root == "tests/fixtures/rpc_timeout"
+    actual = sorted(
+        path.relative_to(FIXTURES).as_posix()
+        for path in FIXTURES.rglob("*")
+        if path.is_file() and path != manifest_path
+    )
+    assert [item.path for item in manifest.files] == actual
+    for item in manifest.files:
+        payload = (FIXTURES / item.path).read_bytes()
+        assert item.size == len(payload)
+        assert item.sha256 == hashlib.sha256(payload).hexdigest()
+        if item.schema_ref is not None:
+            assert (ROOT / item.schema_ref).is_file()
+        if item.path.endswith(".json"):
+            assert canonical_json_bytes(parse_canonical_json_bytes(payload)) == payload
+
+
+def test_r01_r14_rpc_timeout_is_one_durable_cross_module_path(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    data_root = tmp_path / "data"
+    logparse_record = tmp_path / "logparse-invocations.json"
+    agent_record = tmp_path / "agent-sessions.jsonl"
+    review_entered = tmp_path / "review-entered"
+    review_release = tmp_path / "review-release"
+    for name, value in RAW_LOGPARSE_ENV.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setenv("S07_FAKE_LOGPARSE_RECORD", os.fspath(logparse_record))
+    stack = _Stack(
+        data_root,
+        logparse_record=logparse_record,
+        agent_record=agent_record,
+        review_entered=review_entered,
+        review_release=review_release,
+        seed="s08-rpc-timeout-first-process",
+    )
+    archive = ARCHIVE.read_bytes()
+    archive_sha256 = hashlib.sha256(archive).hexdigest()
+    assert ARCHIVE_BYTES_MARKER in archive
+    with zipfile.ZipFile(ARCHIVE) as fixture_archive:
+        assert fixture_archive.testzip() is None
+        assert fixture_archive.namelist() == [
+            "payment.log",
+            "inventory.log",
+            "archive-marker.txt",
+        ]
+        assert ARCHIVE_BYTES_MARKER in fixture_archive.read("archive-marker.txt")
+    expected_result = EXPECTED_USER_RESULT.read_bytes()
+    assert len(expected_result) == 622
+    assert hashlib.sha256(expected_result).hexdigest() == EXPECTED_USER_RESULT_SHA256
+
+    # R01: queue the fixed ROUTE Job while recovery still keeps claiming paused.
+    created = _mcp(
+        stack.mcp,
+        "problem_locator_create_case",
+        {
+            "request_id": "s08-r01-create",
+            "problem_spec": {
+                "statement": "A payment service call to inventory times out.",
+                "expected_behavior": "The payment request completes.",
+                "actual_behavior": "The payment request times out.",
+                "scope": "payment-to-inventory RPC",
+                "goals": ["Locate the timeout cause."],
+                "non_goals": [],
+                "constraints": [],
+                "completion_criteria": ["Identify the timed-out request."],
+            },
+            "initial_user_facts": [],
+            "wait_seconds": 0,
+        },
+    )
+    case_id = created["business_receipt"]["case_id"]
+    route_job_id = created["business_receipt"]["job_id"]
+    assert created["case_view"]["status"] == CaseStatus.RUNNING.value
+    assert created["case_view"]["active_job"]["job_type"] == JobType.ROUTE.value
+    assert created["case_view"]["active_job"]["job_id"] == route_job_id
+
+    # R02/R03: real scheduler + Runtime accept MATCHED, then persist group A.
+    stack.start()
+    stack.wait_idle()
+    waiting_a = _query(stack.mcp, case_id)
+    assert waiting_a["status"] == CaseStatus.WAITING_INPUT.value
+    open_a = [
+        item
+        for item in waiting_a["pending_requirements"]
+        if item["status"] == RequirementStatus.OPEN.value
+    ]
+    assert [item["name"] for item in open_a] == list(PARAMETER_GROUP_A)
+    first_snapshot = stack.repository.read_snapshot()
+    aggregate = first_snapshot.cases[case_id]
+    route_job = aggregate.jobs[route_job_id]
+    assert route_job.status is JobStatus.SUCCEEDED
+    route_outcome = next(
+        item for item in aggregate.outcomes.values() if item.job_id == route_job_id
+    )
+    assert route_outcome.result_type is OutcomeResultType.COMPLETED
+    assert route_outcome.payload.kind.value == "MATCHED"
+    initial_diagnose = next(
+        job
+        for job in aggregate.jobs.values()
+        if job.job_type is JobType.DIAGNOSE
+    )
+    initial_outcome = next(
+        item
+        for item in aggregate.outcomes.values()
+        if item.job_id == initial_diagnose.job_id
+    )
+    assert initial_outcome.result_type is OutcomeResultType.NEED_INPUT
+
+    # R04: a strict partial supplement persists facts but creates no Job.
+    r04_revision = waiting_a["case_revision"]
+    partial = _mcp(
+        stack.mcp,
+        "problem_locator_submit_supplement",
+        {
+            "request_id": "s08-r04-partial-a",
+            "case_id": case_id,
+            "expected_case_revision": r04_revision,
+            "inputs": {
+                "caller_service": PARAMETER_GROUP_A["caller_service"],
+                "server_service": PARAMETER_GROUP_A["server_service"],
+            },
+            "attachment_ids": [],
+            "wait_seconds": 0,
+        },
+    )
+    assert partial["business_receipt"]["job_id"] is None
+    assert partial["case_view"]["status"] == CaseStatus.WAITING_INPUT.value
+    assert {
+        item["provenance"]["input_name"] for item in partial["case_view"]["user_facts"]
+    } == {"caller_service", "server_service"}
+    job_count_after_partial = len(stack.repository.read_snapshot().cases[case_id].jobs)
+
+    # R05/R06: completing group A creates one DIAGNOSE Job which asks once for logs.
+    completed_a = _mcp(
+        stack.mcp,
+        "problem_locator_submit_supplement",
+        {
+            "request_id": "s08-r05-complete-a",
+            "case_id": case_id,
+            "expected_case_revision": partial["case_view"]["case_revision"],
+            "inputs": {
+                "rpc_method": PARAMETER_GROUP_A["rpc_method"],
+                "problem_time": PARAMETER_GROUP_A["problem_time"],
+            },
+            "attachment_ids": [],
+            "wait_seconds": 0,
+        },
+    )
+    assert completed_a["business_receipt"]["job_id"] is not None
+    stack.wait_idle()
+    waiting_attachment = _query(stack.mcp, case_id)
+    assert waiting_attachment["status"] == CaseStatus.WAITING_ATTACHMENT.value
+    assert len(stack.repository.read_snapshot().cases[case_id].jobs) == (
+        job_count_after_partial + 1
+    )
+    open_attachment = [
+        item
+        for item in waiting_attachment["pending_requirements"]
+        if item["status"] == RequirementStatus.OPEN.value
+    ]
+    assert [(item["name"], item["kind"]) for item in open_attachment] == [
+        ("log_archive", "ATTACHMENT")
+    ]
+
+    # R07: prepare through MCP and upload through the real streaming HTTP route.
+    prepared = _mcp(
+        stack.mcp,
+        "problem_locator_prepare_attachment",
+        {
+            "request_id": "s08-r07-prepare-log",
+            "case_id": case_id,
+            "expected_case_revision": waiting_attachment["case_revision"],
+            "name": "payment-inventory-rpc.zip",
+            "content_type": "application/zip",
+            "declared_size": len(archive),
+            "declared_sha256": archive_sha256,
+        },
+    )
+    attachment_id = prepared["upload"]["attachment_id"]
+    with TestClient(stack.http_app) as http:
+        upload = http.put(
+            f"/api/v1/attachments/{attachment_id}/content",
+            content=archive,
+            headers={
+                name: value
+                for name, value in prepared["upload"]["required_headers"].items()
+                if value is not None
+            },
+        )
+    assert upload.status_code == 200, upload.text
+    http_responses = [
+        upload.content,
+        canonical_json_bytes(dict(upload.headers)),
+    ]
+    upload_data = upload.json()["data"]
+    assert upload_data["status"] == AttachmentStatus.READY.value
+    ready_snapshot = stack.repository.read_snapshot()
+    ready_aggregate = ready_snapshot.cases[case_id]
+    ready_attachment = ready_aggregate.attachments[attachment_id]
+    assert ready_attachment.status is AttachmentStatus.READY
+    assert ready_attachment.size == len(archive)
+    assert ready_attachment.sha256 == archive_sha256
+    assert ready_aggregate.case.status is CaseStatus.WAITING_ATTACHMENT
+    assert ready_aggregate.case.active_job_id is None
+
+    # R08/R09/R10: explicit reference dispatches; parse executes exactly once.
+    submitted_attachment = _mcp(
+        stack.mcp,
+        "problem_locator_submit_supplement",
+        {
+            "request_id": "s08-r08-submit-log",
+            "case_id": case_id,
+            "expected_case_revision": upload_data["case_revision"],
+            "inputs": {},
+            "attachment_ids": [attachment_id],
+            "wait_seconds": 0,
+        },
+    )
+    assert submitted_attachment["business_receipt"]["job_id"] is not None
+    stack.wait_idle()
+    r08_job_id = submitted_attachment["business_receipt"]["job_id"]
+    r08_job = stack.repository.read_snapshot().cases[case_id].jobs[r08_job_id]
+    assert r08_job.attachment_refs == [attachment_id]
+    waiting_order = _query(stack.mcp, case_id)
+    assert waiting_order["status"] == CaseStatus.WAITING_INPUT.value
+    assert [
+        item["name"]
+        for item in waiting_order["pending_requirements"]
+        if item["status"] == RequirementStatus.OPEN.value
+    ] == ["order_id"]
+    _assert_logparse_record(
+        logparse_record,
+        expected_target_count=2,
+    )
+    r10_snapshot = stack.repository.read_snapshot()
+    r10 = r10_snapshot.cases[case_id]
+    logparse_runs = [
+        item for item in r10.artifacts.values() if item.kind is ArtifactKind.LOGPARSE_RUN
+    ]
+    assert len(logparse_runs) == 1
+    logparse_run = logparse_runs[0]
+    assert logparse_run.created_by_job_id == r08_job_id
+    assert list(r10.evidence) == [EVIDENCE_ID]
+    logparse_evidence = r10.evidence[EVIDENCE_ID]
+    assert logparse_evidence.source_type.value == "LOGPARSE"
+    assert logparse_evidence.source_ref == logparse_run.artifact_id
+    order_outcome = next(
+        outcome
+        for outcome in r10.outcomes.values()
+        if outcome.result_type is OutcomeResultType.NEED_INPUT
+        and any(
+            requirement.name == "order_id"
+            for requirement in outcome.payload.state_delta.add_pending_requirements
+        )
+    )
+    r10_processing = r10.outcome_processing_records[order_outcome.outcome_id]
+    assert r10_processing.job_id == r08_job_id
+    assert r10_processing.accepted_evidence_ids == [EVIDENCE_ID]
+    assert r10_processing.accepted_artifact_ids == [logparse_run.artifact_id]
+
+    # R11/R12: the next immutable Job closes over R10 and reuses the run.
+    submitted_order = _mcp(
+        stack.mcp,
+        "problem_locator_submit_supplement",
+        {
+            "request_id": "s08-r11-submit-order",
+            "case_id": case_id,
+            "expected_case_revision": waiting_order["case_revision"],
+            "inputs": {"order_id": "synthetic-order-0001"},
+            "attachment_ids": [],
+            "wait_seconds": 0,
+        },
+    )
+    candidate_job_id = submitted_order["business_receipt"]["job_id"]
+    _wait_for_file(review_entered)
+    reviewing_snapshot = stack.repository.read_snapshot()
+    reviewing = reviewing_snapshot.cases[case_id]
+    candidate_job = reviewing.jobs[candidate_job_id]
+    assert candidate_job.evidence_refs == [EVIDENCE_ID]
+    assert candidate_job.attachment_refs == [attachment_id]
+    assert candidate_job.artifact_refs == [logparse_run.artifact_id]
+    assert candidate_job.previous_outcome_refs == [
+        order_outcome.outcome_id,
+        *r08_job.previous_outcome_refs,
+    ]
+    assert reviewing.case.status is CaseStatus.REVIEWING
+    candidate = reviewing.case.diagnosis_state.candidate_conclusion
+    assert candidate is not None
+    assert candidate.status is CandidateStatus.REVIEWING
+    assert candidate.proposed_by_job_id == candidate_job_id
+    user_results = [
+        item for item in reviewing.artifacts.values() if item.kind is ArtifactKind.USER_RESULT
+    ]
+    assert len(user_results) == 1
+    user_result = user_results[0]
+    assert user_result.created_by_job_id == candidate_job_id
+    assert user_result.size == 622
+    assert user_result.sha256 == EXPECTED_USER_RESULT_SHA256
+    candidate_outcome = next(
+        outcome
+        for outcome in reviewing.outcomes.values()
+        if outcome.job_id == candidate_job_id
+    )
+    candidate_processing = reviewing.outcome_processing_records[
+        candidate_outcome.outcome_id
+    ]
+    assert candidate_processing.job_id == candidate_job_id
+    assert candidate_processing.accepted_artifact_ids == [user_result.artifact_id]
+    assert candidate_processing.created_job_id == reviewing.case.active_job_id
+    _assert_logparse_record(
+        logparse_record,
+        expected_target_count=4,
+    )
+
+    # R13: capture the independent RUNNING review session, then release PASS.
+    review_job_id = review_entered.read_text(encoding="utf-8")
+    review_job = reviewing.jobs[review_job_id]
+    assert review_job.job_type is JobType.REVIEW
+    assert review_job.status is JobStatus.RUNNING
+    assert review_job.review_target is not None
+    assert review_job.review_target.candidate_conclusion_id == candidate.conclusion_id
+    assert review_job.review_target.candidate_revision == candidate.revision
+    assert review_job.review_target.candidate_content_hash == candidate.content_hash
+    assert review_job.evidence_refs == candidate.supporting_evidence_refs
+    review_release.write_text("pass\n", encoding="utf-8")
+    stack.wait_idle()
+    resolved_view = _query(stack.mcp, case_id)
+    assert resolved_view["status"] == CaseStatus.RESOLVED.value
+    assert resolved_view["final_result"]["status"] == CandidateStatus.ACCEPTED.value
+    resolved_snapshot = stack.repository.read_snapshot()
+    resolved = resolved_snapshot.cases[case_id]
+    review_outcome = next(
+        outcome
+        for outcome in resolved.outcomes.values()
+        if outcome.job_id == review_job_id
+    )
+    assert review_outcome.payload.verdict is ReviewVerdict.PASS
+    assert review_outcome.payload.unsupported_findings == []
+    assert review_outcome.payload.evidence_conflicts == []
+    assert review_outcome.payload.missing_evidence == []
+    assert review_outcome.payload.stale_references == []
+    sessions = _agent_records(agent_record)
+    assert [item["job_type"] for item in sessions] == [
+        "ROUTE",
+        "DIAGNOSE",
+        "DIAGNOSE",
+        "DIAGNOSE",
+        "DIAGNOSE",
+        "REVIEW",
+    ]
+    assert len({item["pid"] for item in sessions}) == len(sessions)
+
+    # R14: restart every file adapter/service, query, and stream the exact bytes.
+    stack.shutdown()
+    restarted = _Stack(
+        data_root,
+        logparse_record=logparse_record,
+        agent_record=agent_record,
+        review_entered=review_entered,
+        review_release=review_release,
+        seed="s08-rpc-timeout-restarted-process",
+    )
+    restarted.start()
+    restarted.wait_idle()
+    restarted_view = _query(restarted.mcp, case_id)
+    assert restarted_view == resolved_view
+    restarted_aggregate = restarted.repository.read_snapshot().cases[case_id]
+    for field_name in (
+        "jobs",
+        "outcomes",
+        "outcome_processing_records",
+        "execution_failure_records",
+        "evidence",
+        "attachments",
+        "artifacts",
+    ):
+        assert getattr(restarted_aggregate, field_name) == getattr(resolved, field_name)
+    listed = _mcp(
+        restarted.mcp,
+        "problem_locator_list_artifacts",
+        {"case_id": case_id},
+    )
+    assert [item["artifact_id"] for item in listed["artifacts"]] == [
+        user_result.artifact_id
+    ]
+    with TestClient(restarted.http_app) as http:
+        download = http.get(
+            f"/api/v1/artifacts/{user_result.artifact_id}/content",
+            params={"case_id": case_id},
+        )
+        hidden = http.get(
+            f"/api/v1/artifacts/{logparse_run.artifact_id}/content",
+            params={"case_id": case_id},
+        )
+    assert download.status_code == 200
+    assert download.content == expected_result
+    assert download.headers["content-length"] == "622"
+    assert download.headers["x-content-sha256"] == EXPECTED_USER_RESULT_SHA256
+    payload = UserResultPayload.model_validate_json(download.content)
+    assert payload.problem_statement == restarted_view["problem_spec"]["statement"]
+    assert payload.candidate_statement == restarted_view["final_result"]["statement"]
+    assert [
+        item.existing_evidence_id for item in payload.supporting_evidence_bindings
+    ] == restarted_view["final_result"]["supporting_evidence_refs"]
+    assert [
+        [binding.existing_evidence_id for binding in item.evidence_bindings]
+        for item in payload.completion_criteria_mapping
+    ] == [
+        item["evidence_refs"]
+        for item in restarted_view["final_result"]["completion_criteria_mapping"]
+    ]
+    assert hidden.status_code == 404
+    assert hidden.json()["error"]["code"] == "ARTIFACT_NOT_FOUND"
+    _assert_logparse_record(logparse_record, expected_target_count=4)
+    assert len(_agent_records(agent_record)) == 6
+    restarted.shutdown()
+    http_responses.extend(
+        [
+            download.content,
+            canonical_json_bytes(dict(download.headers)),
+            hidden.content,
+            canonical_json_bytes(dict(hidden.headers)),
+        ]
+    )
+    assert len(stack.broker_factory.capabilities) == 4
+    assert len(restarted.broker_factory.capabilities) == 0
+    attachment_path = data_root / ready_attachment.storage_key
+    assert attachment_path.read_bytes() == archive
+    _assert_no_sensitive_surfaces(
+        data_root=data_root,
+        excluded_attachment=attachment_path,
+        public_responses=[
+            *stack.mcp.responses,
+            *restarted.mcp.responses,
+            *http_responses,
+        ],
+        broker_capabilities=[
+            *stack.broker_factory.capabilities,
+            *restarted.broker_factory.capabilities,
+        ],
+        archive=archive,
+    )
