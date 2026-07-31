@@ -1,6 +1,6 @@
 # Problem Locator V1 基线设计
 
-状态：当前唯一有效的 V1 规范基线
+状态：V1 产品与架构基线；详细合同已分册冻结
 
 基线日期：2026-07-31
 
@@ -10,7 +10,7 @@
 
 本文统一定义 Problem Locator V1（问题定位系统第一版）的产品边界、静态架构、模块职责、领域状态、Job（任务）模型、上下文策略、Agent Session（智能体会话）策略、文件接入、执行流程、持久化范围和可靠性边界。
 
-本文是 V1 实现与后续详细设计的唯一规范来源。若调研材料、历史讨论或旧文档与本文冲突，以本文为准。
+本文是 V1 产品语义与架构不变量的最高规范来源。公共机器合同以 [S00](v1-specs/S00-contract-freeze.md) 为权威，组件内部行为以 [S01～S07](v1-specs/README.md) 为权威，未来组合规则以 [S08](v1-composition-spec.md) 为权威；后一级不得覆盖前一级。
 
 设计理由和被替代方案记录在[《V1 决策记录》](v1-decision-record.md)中。业界调研位于 `../doc/`，仅提供参考，不自动构成设计要求。
 
@@ -26,7 +26,7 @@ V1 的上下文与状态原则可以归纳为：
 - Job（任务）在创建时固定本轮目标、状态版本、证据、附件、Agent Profile（智能体配置）和 Diagnosis Skill（诊断技能）版本。
 - Context Builder（上下文构建器）只根据 Job 固定的引用构造本轮输入。
 - 每个 Agent Job 默认创建新的 Agent Session；Session 结束或丢失不影响后续 Job 正确执行。
-- Agent（智能体）只返回 Typed JobOutcome（类型化任务结果）和 DiagnosisStateDelta（诊断状态增量）提案，不能直接修改 Case。
+- Agent（智能体）只原子写入 AgentJobOutcome（智能体任务结果草稿）和 DiagnosisStateDelta（诊断状态增量）提案；Runtime 规范化为 Typed JobOutcome，二者都不能直接修改 Case。
 
 ### 1.2 本文不提前引入的复杂机制
 
@@ -54,7 +54,7 @@ V1 不把以下机制画成核心组件，也不要求首版实现：
 - 在最终结论前使用 Reviewer Agent（复核智能体）核对结论与证据。
 - 将 Case、诊断状态、Job、结果、证据和产物持久化。
 - 保证关闭全部 Agent Session 后，仍可根据持久化状态继续未完成 Case。
-- 保持模块边界可以后续演进到多实例，但 V1 仍采用单节点、低并发部署。
+- 保持模块边界可以后续演进到多实例，但 V1 固定为单机、单服务进程、单 Uvicorn worker、Agent Job 并发 1。
 
 ### 2.2 V1 非目标
 
@@ -66,7 +66,8 @@ V1 不把以下机制画成核心组件，也不要求首版实现：
 - 不实现动态 Skill Registry（技能注册中心）和运行期热更新。
 - 不实现 Web（网页）管理或上传页面，但保留复用服务端接口的边界。
 - 不实现本地 Case Locator（案例定位器）或自动查找用户历史 Case。
-- 不在当前设计仓库实现正式版本代码；正式实现使用新的代码仓库。
+- 不另建正式代码仓库；后续实现、测试和 Skill 资产仍写入当前仓库。
+- 不使用数据库或 Docker；结构化状态使用本地 `state.json`，文件使用 FileResourceStore。
 
 ## 3. 核心不变量
 
@@ -91,10 +92,10 @@ V1 不把以下机制画成核心组件，也不要求首版实现：
    Runtime 负责 Schema（结构）解析；Application Service 负责幂等、归属、版本和引用等技术校验；Coordinator 负责决定业务上接受哪些 DiagnosisStateDelta；Application Service 只执行并持久化 TransitionPlan。
 
 7. **同一 Case 同时只运行一个活跃 Job。**
-   不同 Case 可以由有界 Worker Pool（工作器池）并发执行。
+   不同 Case 可以同时排队，但 V1 的 Agent Job 全局执行并发固定为 1。
 
 8. **文件字节与结构化业务状态分离。**
-   Repository 保存文件元数据和引用；BlobStore（文件字节存储）保存 Attachment 和 Artifact（产物）的字节。
+   StateRepository 保存结构化业务状态和文件元数据；FileResourceStore 保存 Attachment、Evidence 与 Artifact 的文件或目录资源。
 
 9. **最终结论必须经过独立复核。**
    Reviewer 使用新的 Session，只读取候选结论、当前问题、结构化诊断状态和相关证据，不继承 Specialist 的完整对话。
@@ -135,7 +136,7 @@ flowchart TB
         subgraph Persistence["Persistence（持久化层）"]
             Repository["Case Repository（案例仓库）<br/>Case（诊断案例）· DiagnosisState（诊断状态）<br/>Job（任务）· JobOutcome（任务结果）<br/>Evidence / Attachment / Artifact Metadata（文件元数据）"]
 
-            BlobStore["BlobStore（文件字节存储）<br/>Attachment（附件）· Evidence File（证据文件）<br/>Artifact（产物）"]
+            FileResourceStore["FileResourceStore（文件资源存储）<br/>Attachment（附件）· Evidence File（证据文件）<br/>Artifact（产物）"]
         end
 
         Dispatcher["Job Dispatcher（任务分发器）"]
@@ -167,7 +168,7 @@ flowchart TB
         Coordinator -->|"TransitionPlan + JobSpec<br/>状态转换计划 + 任务规格"| App
 
         App -->|"读写业务状态"| Repository
-        App -->|"保存和读取文件"| BlobStore
+        App -->|"保存和读取文件"| FileResourceStore
         App -->|"状态提交后分发 Job"| Dispatcher
 
         Dispatcher --> RouterWorker
@@ -180,7 +181,7 @@ flowchart TB
 
         Runtime -->|"请求本 Job 有界输入"| ContextBuilder
         ContextBuilder -->|"读取 Job 的 context_snapshot<br/>上下文快照和固定引用"| Repository
-        ContextBuilder -->|"读取相关附件和证据"| BlobStore
+        ContextBuilder -->|"读取相关附件和证据"| FileResourceStore
         ContextBuilder -->|"返回 Bounded Context（有界上下文）"| Runtime
         Catalog --> Runtime
         Runtime -->|"创建并驱动"| Backend
@@ -209,7 +210,7 @@ flowchart TB
 
 - 承载控制命令、小型结构化输入和结构化结果。
 - 将协议请求转换为 Application Service 的应用命令。
-- 不直接操作数据库、BlobStore、Dispatcher 或 Agent。
+- 不直接操作 StateRepository、FileResourceStore、Dispatcher 或 Agent。
 - 不实现独立于 Application Service 的 Case 状态机。
 
 ### 5.3 HTTP File Adapter（HTTP 文件适配器）
@@ -226,8 +227,8 @@ flowchart TB
 - 执行幂等、资源归属、活跃 Job、Job 状态、`base_state_revision` 和 Evidence 引用等技术校验。
 - 将通过技术校验的 Trigger 与 CaseSnapshot 交给 Diagnosis Coordinator。
 - 执行 Coordinator 返回的 TransitionPlan：保存输入或 Outcome、登记已接受的 Evidence / Artifact、更新 Case 和 DiagnosisState、结束当前 Job，并创建可选的下一 Job。
-- 对包含文件的候选 Evidence / Artifact，先完成 BlobStore 内发布，再在一次 Repository 事务中执行 TransitionPlan；“原子”只描述 Repository 内的业务提交，不表示两个存储之间存在分布式事务。
-- 下一 Job 的 `context_snapshot` 必须从 TransitionPlan 应用后的目标 DiagnosisState 物化，并与状态更新和 Job 创建在同一次业务提交中固定。
+- 对包含文件的候选 Evidence / Artifact，先完成 FileResourceStore 内发布，再在一次 StateRepository 提交中执行 TransitionPlan；PublicationCommitGuard 持有同一存储协调锁覆盖“正式发布/采用→state commit”，避免孤立清理在两者之间删除对象。“原子”仍只描述结构化状态提交，不表示两个存储之间存在分布式事务。
+- TransitionPlan 的 JobSpec 只携带目标语义 revision 和尚待解析的资源/候选 binding，不预造含 proposal key 的 ContextSnapshot。Application Service 先用确定性 ID 正式化 proposal、构造目标 DiagnosisState，再调用 S01 公共纯 projector 生成 `context_snapshot`，并与状态更新和 Job 创建在同一次业务提交中固定。
 - 在状态提交成功后将已创建的 Job 交给 Dispatcher。
 - 对外返回当前 Case 状态，不直接执行耗时诊断。
 
@@ -235,7 +236,7 @@ flowchart TB
 
 - 输入为 `CaseSnapshot + Trigger`。
 - 输入中的 JobOutcome 已由 Application Service 完成结构、归属、版本和引用等技术校验。
-- 输出为确定性的 `TransitionPlan（状态转换计划）`，其中包含业务上接受的 `accepted_state_delta（已接受状态增量）`、目标 Case 状态以及可选的下一 Job 规格。
+- 输出为确定性的 `TransitionPlan（状态转换计划）`，其中包含业务上接受的 `accepted_state_delta（已接受状态增量）`、目标 Case 状态、selected skill/CaseFailure/Candidate 的显式 mutation，以及可选的下一 Job 规格。
 - 决定何时路由、诊断、等待用户、等待附件、复核、完成、失败或取消。
 - 不读取 Repository，不写入业务状态，不提交 Dispatcher，不调用 Agent。
 - 不承担 Router Agent 的语义路由能力。
@@ -262,9 +263,9 @@ Repository 不保存文件字节，也不把 Agent Session、临时 Workspace �
 - 根据 Job 类型选择对应 Worker。
 - 只分发已经持久化的 Job。
 - Worker 通过 Application Service 请求条件认领 `PENDING` Job；Application Service 将其更新为 `RUNNING`。同一 `job_id` 的重复分发最多只有一次认领成功。
-- V1 使用进程内队列和有界并发。
+- V1 使用进程内队列，执行并发上限固定为 1。
 - 不修改 Case，不创建后续 Job。
-- 分发失败时保留 Job 的 `PENDING` 状态；V1 由显式 `ResumeCase` 重新提交，自动扫描后置。
+- 分发失败时保留 Job 的 `PENDING` 状态；服务启动会自动重投同一 Job，显式 `ResumeCase` 也可以主动唤醒它。
 
 ### 5.8 Typed Worker（类型化工作器）
 
@@ -280,9 +281,12 @@ Worker 负责把类型化 Job 交给共享 Runtime，并把 Runtime 返回的 Ty
 
 - 根据 Job 中固定的上下文引用读取指定版本数据。
 - 根据 Agent 角色构造不同的有限上下文。
+- 把 `{job_id,job_type,goal,base_state_revision}` 作为不可截断 `JOB_INSTRUCTION` Canonical JSON section，使 Agent 明确获得本 Job 目标。
+- 将 Job 固定的规范 previous outcomes 按数组顺序作为不可截断的 `PREVIOUS_OUTCOME` sections 注入，使补参 continuation 和复核返工不依赖旧 Session。
+- 把逐字等于只读 `inputs/manifest.json` 的 `RESOURCE_MANIFEST` 作为最低必需 section；先为它和全部其他必需 section 预留预算，再按 Job 顺序选择可选 Evidence。
 - 对重复状态去重，排除被替代内容和无关历史。
-- 将大型日志保留在 BlobStore 或 Evidence 中，只按 Job 固定 locator（定位信息）或固定 `context_policy_version` 的确定性规则选择片段。
-- 执行 Token（令牌）预算检查。
+- 将大型日志保留在 FileResourceStore 或 Evidence 中，只按 Job 固定 locator（定位信息）或固定 `context_policy_ref` 的确定性规则选择片段。
+- 执行 UTF-8 字节预算检查。
 - 不修改 Repository，不生成业务状态。
 
 ### 5.10 Diagnosis Runtime（诊断运行时）
@@ -290,31 +294,44 @@ Worker 负责把类型化 Job 交给共享 Runtime，并把 Runtime 返回的 Ty
 - 加载 Agent Profile、Diagnosis Skill 和 Tool Bundle。
 - 通过 Context Builder 获得本 Job 的模型输入。
 - 为每个 Job 创建临时 Workspace。
+- 按公共 WorkspaceInputManifest Schema 生成只读 `inputs/manifest.json`，其中 `logparse_product` 来自 Job 固定 Skill，并把同一 Canonical JSON 用作 RESOURCE_MANIFEST section；Skill 与 logparse broker 不扫描猜测路径。
+- 固定 logparse Job 启动服务侧 job-scoped broker；Agent 只得到 endpoint/token，原始 `LOGPARSE_REPO/CONFIG_PATH/PYTHON` 从 Agent 环境剥离，broker close 同步回收其子进程。
 - 调用 Agent Backend 创建新的物理 Agent Session。
 - 驱动本 Job 内必要的模型与工具循环。
-- 校验并标准化 Agent 输出，形成 Typed JobOutcome。
-- Job 结束后关闭 Session；临时 Workspace 中需要保留的内容通过 JobOutcome 提交为候选 Evidence 或 Artifact，由 Application Service 决定是否发布。
+- 校验 Agent 写入的 AgentJobOutcome；USER_RESULT 在 stage 前必须逐字通过公共 UserResultPayload Schema 并匹配 Candidate，LOGPARSE_RUN 的 manifest 路径必须从实际 tree 重建；随后把 Workspace 相对路径引用的 Draft 内容写入持久化暂存区，再形成不含 Workspace 路径的 Typed JobOutcome。
+- 系统失败 Outcome 的时间和 ID只来自注入的 Clock/IdGenerator；parse-once claim 使用公共 LogparseParseClaim Schema。
+- Agent stdout/stderr 进入执行日志前对当前 broker endpoint/token 做跨分块精确脱敏，资源限额按原始字节计算。
+- Job 结束后关闭 Session；规范 JobOutcome 中需要保留的内容以带 `StagedResourceRef` 的候选 Evidence 或 Artifact 交给 Application Service 决定是否正式发布。
 
 ### 5.11 Agent Backend（智能体执行后端）
 
 - 创建、调用和关闭物理 Agent Session。
 - 标准化不同提供方的响应、错误和中断。
 - 对 Runtime 隐藏物理 Session Handle（会话句柄）、进程 PID 和具体 SDK。
+- 以 `CLAUDE_COMMAND` 单字符串启动外部客户端：除 logparse 保留变量外复用 `issue-locator` 的平台化 `shlex`、可选前置环境赋值、继承环境、不使用 Shell、Windows shim 解析和 argv 不隐式追加参数语义。启动前大小写不敏感地移除原始 `LOGPARSE_REPO`、`LOGPARSE_CONFIG_PATH`、`LOGPARSE_PYTHON` 与既有 `PROBLEM_LOCATOR_LOGPARSE_*`；命令前置赋值不得重设这些键，固定 logparse Job 只加入本 Job broker session 返回的 endpoint/token。
+- env-file 只补充未存在的变量，进程环境优先；运行模型和认证完全由外部客户端及继承环境管理，Problem Locator 不保存模型凭据。
+- Prompt 只经 stdin；业务输出只读取成功退出后原子发布的 `output/job_outcome.json`，stdout/stderr 只作执行日志。
+- 默认 wall time 30 分钟、stdout+stderr 64 MiB、Workspace 1 GiB。
 - 不选择 Skill，不决定下一 Job，不修改 Case。
 - V1 可以只有一个 Backend 实现。
 
 ### 5.12 Versioned Catalog（版本化目录）
 
-- Agent Profile、Diagnosis Skill、Tool Bundle、Context Policy 和 Output Contract 随服务版本发布。
-- 服务启动时扫描并加载，运行期间只读。
-- 使用稳定 ID 和不可原地覆盖的版本号。
+- Agent Profile、Tool Bundle、Context Policy 和 Output Contract 作为 S04 内置资产随服务版本发布；Diagnosis Skill 从配置的 `SKILL_DIR` 扫描，logparse 运行资产由 S07 根据固定仓库、配置和解释器生成。
+- Catalog 只在服务启动时构建，运行期间只读；`SKILL_DIR` 中只有带合法 `diagnosis-skill.json` 的直接子目录进入路由候选。
+- 所有资产使用稳定 ID、不可原地覆盖的版本号和内容 SHA-256。
 - Job 只记录逻辑版本引用，不记录发布包中的物理路径。
 
-### 5.13 BlobStore（文件字节存储）
+### 5.13 FileResourceStore（文件资源存储）
 
 - 保存 READY Attachment（就绪附件）的原始字节。
-- 保存 Evidence 文件和已发布 Artifact。
-- 返回不透明 `blob_key` 或等价引用。
+- 保存 Evidence 文件和已发布 Artifact；`LOGPARSE_RUN` 使用不可变只读目录树。
+- 返回不透明相对 `storage_key`、大小和 SHA-256 引用。
+- Outcome proposal 的正式 ID 从 installation/case/outcome/proposal key 确定性派生；state commit 前故障后可跨重启校验并采用同一正式目标。
+- 与 StateRepository、ExecutionRecordStore 和孤立清理共享可重入协调锁；清理在锁内重验后先原子隔离到 quarantine，锁外才删除。
+- 单 Case 5 GiB 按正式 resources 根中唯一、可采用且非 quarantine 的 storage_key 计数，包含 state 引用、未确认 outbox 目标和 ordinary orphan；全批目标在同一 publication lease 内、移动任一 stage 前原子校验。
+- 既有正式目标、job.json 和 job_outcome.json 的幂等采用仍重施只读权限与文件/父目录同步，不能在 replace 后故障窗口直接返回。
+- finalized 且尚无 OutcomeProcessingRecord 的 Outcome 是 durable outbox；其 staged refs、确定性正式目标和 next job 在确认前不清理，损坏的未确认 Outcome 会暂停破坏性清理并使 readiness 失败。
 - 不保存 Case 状态机。
 
 ## 6. 领域模型
@@ -334,6 +351,7 @@ Case
 ├── active_job_id?
 ├── selected_skill_ref?
 ├── final_result?
+├── failure?
 ├── created_at
 └── updated_at
 ```
@@ -383,6 +401,7 @@ DiagnosisState 保存跨 Job 必须延续的最小结构化诊断信息：
 DiagnosisState
 ├── revision
 ├── problem_spec
+├── user_facts[]
 ├── confirmed_facts[]
 ├── active_hypotheses[]
 ├── rejected_hypotheses[]
@@ -392,7 +411,7 @@ DiagnosisState
 └── candidate_conclusion?
 ```
 
-`problem_spec` 自身带版本，至少包含问题陈述、期望行为、实际行为、范围、约束和完成条件。实质改变诊断目标时创建新 Case；同一目标下的澄清和补充递增 `DiagnosisState.revision`。
+`problem_spec` 自身带版本，至少包含问题陈述、期望行为、实际行为、范围、约束和完成条件。外部创建请求使用不带 revision 的 `ProblemSpecInput`，由服务端验证后生成 revision 1；初始事实使用 `{name,value}`，补充参数使用 requirement name 到字符串值的对象。字段形状、name 规则、文本边界和 provenance 以 S00 为唯一权威。实质改变诊断目标时创建新 Case；同一目标下的澄清和补充递增 `DiagnosisState.revision`。
 
 最小条目结构：
 
@@ -416,6 +435,7 @@ CandidateConclusion
 ├── content_hash
 ├── statement
 ├── supporting_evidence_refs[]
+├── completion_criteria_mapping[]
 ├── proposed_by_job_id
 └── status
     ├── PROPOSED
@@ -424,11 +444,15 @@ CandidateConclusion
     └── ACCEPTED
 ```
 
-`content_hash` 覆盖候选陈述、`supporting_evidence_refs[]`、完成条件映射和其他影响复核结论的规范化字段；证据集合变化必须产生新的 revision 和 hash。
+`content_hash` 只覆盖候选陈述、按固定顺序的 `supporting_evidence_refs[]` 和完整完成条件映射的 Canonical JSON；明确排除 ID、revision、status、proposed_by_job_id 和 hash 本身。状态从 REVIEWING 变为 ACCEPTED/REJECTED 不改 hash，语义内容或证据变化必须产生新 revision 和 hash。
+
+`completion_criteria_mapping[]` 按索引恰好覆盖当前 ProblemSpec 的全部完成条件，逐字回显条件原文并为每项记录 `satisfied`、Evidence 引用和解释；进入 REVIEW 前每项都必须满足且至少有一个 Evidence。Agent 草稿使用 Evidence binding，Application Service 解析为正式 Evidence ID。
+
+更新既有候选时只沿用 conclusion ID、revision 增加 1，`proposed_by_job_id` 必须改成本轮 Outcome 的 Job ID；这保证最终可下载 USER_RESULT 对应被接受的候选 revision，而不是旧的被拒结果。
 
 规则：
 
-- 用户提供的信息和 Agent 推断必须通过 `provenance` 区分。
+- 用户提供的信息进入 `user_facts`；Agent 推断只能先进入候选事实，二者必须通过 `provenance` 区分。
 - Agent 输出的新事实只能先进入 `proposed_facts（候选事实）`；没有充分 Evidence 且未经 Coordinator 纳入 `accepted_state_delta` 的内容不得进入 `confirmed_facts`。
 - 被排除假设必须记录排除原因和对应 Evidence。
 - 被新信息替代的条目不物理删除，通过状态和 `supersedes` 关系失效。
@@ -450,40 +474,47 @@ Job
 ├── evidence_refs[]
 ├── attachment_refs[]
 ├── previous_outcome_refs[]
+├── artifact_refs[]
 ├── agent_profile_ref
 ├── available_skill_refs[]
 ├── skill_ref?
 ├── tool_bundle_ref
-├── context_policy_version
-├── output_contract_version
+├── context_policy_ref
+├── output_contract_ref
+├── logparse_tool_ref?
+├── logparse_product?
 ├── review_target?
 │   ├── candidate_conclusion_id
 │   ├── candidate_revision
 │   └── candidate_content_hash
 ├── replacement_for_job_id?
 ├── resource_limits
-│   ├── max_turns
-│   ├── max_tokens
-│   ├── max_duration
-│   └── max_tool_output
+│   ├── context_bytes
+│   ├── wall_time_seconds
+│   ├── stdout_stderr_bytes
+│   └── workspace_bytes
 ├── created_at
 ├── started_at?
 ├── finished_at?
 └── runtime_epoch?
 ```
 
-其中从 `goal` 到版本化运行配置的字段共同构成 Job 的 Context Manifest（上下文清单）。V1 不建立独立 `JobContextManifest` 实体。
+其中从 `goal` 到版本化运行配置的字段共同构成 Job 的 Context Manifest（上下文清单）。V1 不建立独立 `JobContextManifest` 实体。`logparse_tool_ref` 与 `logparse_product` 必须同为 null 或同为非 null；非 null 值在 Job 创建时从固定 Diagnosis Skill manifest 一次性复制，后续 Agent request、重启 Catalog 或包装器不得改写。
 
-`context_snapshot（上下文快照）`是在 Job 创建时复制的一份小型结构化执行视图，至少包含该 Job 需要的 ProblemSpec、确认事实、相关假设、未决问题、待补要求和完成条件。大型文件不复制，只保存不可变引用。
+V1 固定默认限制：ROUTE 上下文 131072 bytes，DIAGNOSE/REVIEW 上下文 204800 bytes；三类 Job 的 wall time 均为 1800 秒、stdout+stderr 合计 67108864 bytes、Workspace 1073741824 bytes。
+
+`context_snapshot（上下文快照）`是在 Job 创建时复制的一份小型结构化执行视图，至少包含该 Job 需要的 ProblemSpec、用户事实、确认事实、相关假设、未决问题、待补要求和完成条件。大型文件不复制，只保存不可变引用。
 
 它不是：
 
 - 完整历史聊天的快照；
-- 整个 Case 数据库记录的副本；
+- 整个 Case 聚合记录的副本；
 - Workspace 文件系统副本；
 - 由另一个 Agent 自动总结出来的自由文本。
 
 `base_state_revision` 用于并发和过期校验，`context_snapshot` 用于重现该 Job 的实际业务输入。两者缺一不可。由于 V1 只直接保存当前 DiagnosisState、不通过事件回放重建旧版本，把小型快照直接放入 Job 是首版最简单的可重现方案。
+
+`previous_outcome_refs[]` 不是死审计字段：补参 continuation 固定使 Case 进入等待态的 Outcome，复核非 PASS 后的新 Specialist 固定当前 ReviewAssessment。Runtime 将每个规范 Outcome 以 Canonical JSON 写入 Workspace 并作为必需 `PREVIOUS_OUTCOME` section 注入。REVIEW Job 的固定 target 必须与 snapshot 中 REVIEWING candidate 相同，其 supporting Evidence 必须全部位于 `evidence_refs[]`。
 
 ROUTE Job 固定 `available_skill_refs[]`，DIAGNOSE Job 固定选中的 `skill_ref`，REVIEW Job 固定 `review_target`。所有非终态 Job 引用的版本化资产必须在允许恢复期间仍可加载，不得由“当前最新版本”替代。
 
@@ -501,16 +532,15 @@ PENDING
 RUNNING
 SUCCEEDED
 FAILED
-STALE
 CANCELLED
 INTERRUPTED
 ```
 
 Job 状态表示执行生命周期，不等同于 Case 业务状态。
 
-`PENDING` 和 `RUNNING` 是非终态；`SUCCEEDED`、`FAILED`、`STALE`、`CANCELLED` 和 `INTERRUPTED` 是终态。`STALE` 由 Application Service 在发现活跃 Job、基础诊断版本或固定复核目标不匹配时判定，不是 Reviewer 的业务意见。
+`PENDING` 和 `RUNNING` 是非终态；`SUCCEEDED`、`FAILED`、`CANCELLED` 和 `INTERRUPTED` 是终态。`STALE` 是 Application Service 在发现活跃 Job、基础诊断版本或固定复核目标不匹配时保存的 Outcome disposition，不是 JobStatus，也不是 Reviewer 的业务意见。
 
-V1 不提供业务级自动重试。需要再次运行时创建新 Job；Agent Backend 内部可以执行不改变业务语义的有界瞬时重试。Context Builder 无法在预算内保留最低必需内容时，Job 以 `FAILED` 结束并记录 `error.code = CONTEXT_LIMIT`。
+V1 不自动重跑 Agent。Runtime 已 finalized 规范 Outcome 后，即使其首次业务投递失败，也只能重投同一持久化 receipt，永远不得再次执行该 Job 的 Agent；这属于 submission replay，不是 Agent retry。只有确实没有 finalized Outcome 的可恢复执行失败才先进入 `INTERRUPTED`，再由显式 Resume 创建替代 Job；不可恢复失败必须新建 Case。Context Builder 无法在预算内保留最低必需内容时，Job 以 `FAILED` 结束并记录 `error.code = CONTEXT_LIMIT`。
 
 Agent 返回“需要用户输入”时：
 
@@ -518,7 +548,9 @@ Agent 返回“需要用户输入”时：
 - JobOutcome 的业务结果为 `NEED_INPUT`；
 - Case 进入 `WAITING_INPUT`。
 
-### 6.6 Typed JobOutcome（类型化任务结果）
+### 6.6 AgentJobOutcome 与 Typed JobOutcome
+
+Agent 原子写入 Workspace 的 `output/job_outcome.json`，其内容是 AgentJobOutcome：文件型 Evidence/Artifact 使用 Draft 和受限 Workspace 相对路径。Runtime 校验并持久化暂存 Draft 后，构造下列规范 JobOutcome；只有规范结果进入 Application Service、执行记录与状态文件。Runtime 对完整规范 Outcome 执行 Canonical JSON finalize 后，该 `job_outcome.json` 就是 durable outbox；`OutcomeProcessingRecord` 是其业务投递确认。
 
 ```text
 JobOutcome
@@ -531,16 +563,16 @@ JobOutcome
 ├── payload
 │   ├── RouteDecision
 │   ├── DiagnosisOutcome
-│   ├── ReviewAssessment
-│   └── ExecutionFailure
+│   └── ReviewAssessment
 ├── consumed_evidence_refs[]
 ├── proposed_evidence[]
 ├── proposed_artifacts[]
-├── error
+├── error?
+│   └── ExecutionFailure
 └── produced_at
 ```
 
-成功的 `payload` 必须与 `job_type` 一一对应。`result_type = FAILED` 时使用 `ExecutionFailure（执行失败）`，不要求 Agent 已经产生业务载荷。DIAGNOSE Job 的载荷为：
+非失败 `payload` 必须与 `job_type` 一一对应且 `error=null`。`result_type = FAILED` 时 `payload=null`、`error=ExecutionFailure（执行失败）`，不要求 Agent 已经产生业务载荷。DIAGNOSE Job 的载荷为：
 
 ```text
 DiagnosisOutcome
@@ -548,7 +580,7 @@ DiagnosisOutcome
 ├── state_delta
 ├── requested_input[]
 ├── requested_attachments[]
-├── candidate_conclusion?
+├── candidate_conclusion_draft?
 └── recommended_next_step
 ```
 
@@ -558,16 +590,18 @@ ExecutionFailure
 ├── code
 ├── message
 ├── retryable
-└── details?
+└── details[]: ApplicationErrorDetail
 ```
 
-`CONTEXT_LIMIT`、Backend 创建失败、工具超时和输出 Schema 无法修复等都通过 ExecutionFailure 表达。Application Service 完成技术校验后，仍把失败 Trigger 交给 Coordinator 决定 Case 是等待、创建替代 Job 还是进入 `FAILED`。
+`details[]` 始终存在，没有条目时写空数组，并与公共 `ApplicationErrorDetail` 使用相同的安全字段和敏感信息禁令。`CONTEXT_LIMIT`、Backend 创建失败、工具超时和输出 Schema 不合法等都通过 ExecutionFailure 表达。V1 不调用模型修复非法输出；Application Service 完成技术校验后，仍把失败 Trigger 交给 Coordinator 决定 Case 进入 `INTERRUPTED` 还是 `FAILED`。
 
-新 Evidence 或 Artifact 不能在 Agent 输出前预先拥有正式业务 ID。Runtime 将结构化候选内容和需要保留的文件作为 `proposed_evidence[]` / `proposed_artifacts[]` 回送；需要跨 Outcome 处理保存的文件先写入 BlobStore 的持久化暂存区，不能只留在易失 Job Workspace。每个候选项带 Job 内唯一 `proposal_key`、来源、locator、摘要、内容哈希和可选 `staged_blob_ref`。
+新 Evidence、Artifact 或 CandidateConclusion 不能在 Agent 输出前预先拥有正式业务 ID。Agent Draft 只带 Job 内唯一 `proposal_key`、语义字段和可选 Workspace 相对路径；Runtime 计算实际大小与哈希，把文件或目录写入 FileResourceStore 的持久化暂存区，并在规范 Proposal 中加入不含路径的 `StagedResourceRef`。规范 JobOutcome 不得保留 Workspace 路径。
 
-Application Service 先校验候选内容和暂存文件，Coordinator 在 TransitionPlan 中分别返回 `accepted_evidence_proposal_keys[]` 与 `accepted_artifact_proposal_keys[]`。Application Service 随后分配正式 ID，把被接受的暂存 Blob 发布为可读的不可变正式 Blob，再在一次 Repository 事务中保存 Outcome、正式元数据、状态引用和下一 Job，并把 `proposal_key` 解析为正式 ID。Worker、Runtime 和 Agent 不得绕过该流程创建正式业务记录。
+Application Service 先校验候选内容和暂存资源，Coordinator 在 TransitionPlan 中分别返回被接受的 Evidence、Artifact 和 Candidate proposal key，并在下一 Job 中使用 proposal-key placeholder。LOGPARSE Evidence 可以用 `EvidenceSourceBinding.artifact_proposal_key` 引用同一 Outcome 尚未分配正式 ID 的 `LOGPARSE_RUN`，但 Coordinator 必须共同接受二者。Application Service 随后分配正式 ID，把被接受的暂存资源发布为不可变正式资源，解析 Evidence 来源、Candidate 的 Evidence binding 和下一 Job 的全部 placeholder，再在一次 StateRepository 提交中保存 Outcome、正式元数据、状态引用和下一 Job。Worker、Runtime、Coordinator 和 Agent 都不得绕过该流程创建正式业务记录。
 
-如果 Blob 发布失败，Repository 业务事务不得提交；如果 Blob 已发布但 Repository 事务失败，正式 Blob 成为待清理或待重试登记的孤立对象。发布键和 Outcome 处理必须幂等。Job Workspace 只有在 Outcome 处理完成，或暂存/补偿信息已经可靠登记后才能删除。
+Outcome proposal 的 Evidence、Artifact、首次 Candidate 和 next Job ID 必须从 installation/case/outcome/proposal key 确定性派生；它们的业务创建时间固定使用 JobOutcome.produced_at，使重交时完整 job.json 也保持相同字节。Application Service 在全部 binding 正式化并得到目标 DiagnosisState 后，才调用公共纯 projector 生成下一 Job snapshot。若重放时确定性 next Job 已存在，必须从旧 `job.json` 机械复用 RuntimeBindings 与创建时间、重构后逐字比对 Canonical bytes，不得因当前 Catalog 漂移改写；旧文件损坏或冲突必须拒绝覆盖。带 Candidate 的 Outcome 必须同时带且同批接受唯一 USER_RESULT JSON Artifact；其公开 payload 逐字符合公共 UserResultPayload Schema，problem/candidate 和 draft→正式 Evidence binding 必须与本轮正式化结果语义一致，该结果只有在所属 candidate 最终 ACCEPTED 后才可下载。
+
+如果资源发布失败，StateRepository 业务提交不得发生；如果资源已发布但状态提交失败，正式资源成为待重放对象。发布键和 Outcome 处理必须幂等；同进程只重投同一 finalized receipt，重启先读取权威执行记录再走相同提交路径，同 Outcome 得到相同 ID，并可通过正式目标的 size/hash 采用已发布字节，不要求已移动的 stage 仍存在。未确认 durable outbox 的 staged refs、确定性正式目标和预发布 next Job 不受临时或孤立清理；执行记录损坏时 readiness 保持失败且不得回退到当前 Catalog 或重跑 Agent。Job Workspace 只有在 Outcome 处理完成，或暂存/补偿信息已经可靠登记后才能删除。
 
 V1 通用 `result_type`：
 
@@ -588,6 +622,8 @@ JobOutcome 及其 RouteDecision、DiagnosisOutcome、ReviewAssessment 载荷一�
 
 ```text
 DiagnosisStateDelta
+├── problem_spec_patch?
+├── add_user_facts[]
 ├── proposed_facts[]
 ├── add_active_hypotheses[]
 ├── update_hypotheses[]
@@ -596,9 +632,7 @@ DiagnosisStateDelta
 ├── resolve_questions[]
 ├── add_pending_requirements[]
 ├── fulfill_requirements[]
-├── add_evidence_refs[]
-├── add_proposed_evidence_keys[]
-└── propose_conclusion?
+└── add_evidence_bindings[]
 ```
 
 Application Service 的技术校验至少包括：
@@ -613,24 +647,23 @@ Application Service 的技术校验至少包括：
 - proposed Evidence / Artifact 的临时内容存在且哈希一致；
 - 同一个 Outcome 没有重复应用。
 
-Coordinator 根据通过技术校验的 Outcome 与 CaseSnapshot 决定 Delta 是否符合业务转换，并把接受的事实、假设、要求、Evidence 提案和候选结论写入 `TransitionPlan.accepted_state_delta`。Application Service 不自行作第二套业务判断，只负责执行计划。
+Coordinator 根据通过技术校验的 Outcome 与 CaseSnapshot 决定 Delta 是否符合业务转换，并在 `TransitionPlan` 中分别返回 `accepted_state_delta`、接受的 Evidence/Artifact proposal keys、可选的 Candidate proposal key，以及 selected skill、CaseFailure、Candidate 状态的显式 mutation。Application Service 不从 result type 或 verdict 推导遗漏的业务变化，只负责解析占位符并执行计划。
 
-Delta 中的 `proposed_facts` 和 `propose_conclusion` 都是候选内容。候选事实只有进入 `accepted_state_delta` 后才能成为 `confirmed_facts`；候选结论还必须经过 REVIEW Job 才能成为 `final_result`。
+Delta 中的 `proposed_facts` 是候选内容，只有进入 `accepted_state_delta` 后才能成为 `confirmed_facts`。Agent 侧条目和 `add_evidence_bindings[]` 可以引用同一 Outcome 的 Evidence proposal key；Application Service 必须在提交前解析为正式 Evidence ID，draft、binding 和 proposal key 不得进入 `state.json`。候选结论由 `DiagnosisOutcome.candidate_conclusion_draft` 独立提出，并在 Coordinator 接受、Application Service 分配正式 ID 后进入候选状态；它还必须经过 REVIEW Job 才能成为 `final_result`。
 
-如果当前 Case 已经超过基础版本，Application Service 将 Job 置为 `STALE`，把 Outcome 保存为只读审计记录且不应用 Delta；后续是否创建替代 Job 由 Coordinator 根据当前 CaseSnapshot 决定。
+如果当前 Case 已经超过基础版本，Application Service 把 Outcome 以 `STALE` disposition 保存为只读审计记录且不应用 Delta。首次保存使 `case_revision + 1`、DiagnosisState revision 不变；重复同一 Outcome 为 `DUPLICATE`，任何 revision 都不变。仍为 active RUNNING 的异常漂移通过 `STALE_ACTIVE_OUTCOME` Trigger 由 Coordinator 转入 `INTERRUPTED`；非 active 或已终态旧 Job 的状态不变。
 
 ### 6.8 RouteDecision（路由决定）
 
 ```text
 RouteDecision
-├── matched
-├── skill_id@version
+├── kind
+├── skill_ref?
 ├── reason
-├── required_inputs[]
 └── confidence
 ```
 
-Router Agent 只能从 ROUTE Job 固定的 `available_skill_refs[]` 中选择，Application Service 必须拒绝集合外的 `skill_id@version`。没有匹配能力时返回 `NO_CAPABILITY`，V1 不转入 General Code Agent。
+Router Agent 只能返回 `MATCHED` 或 `NO_CAPABILITY`，并只能从 ROUTE Job 固定的 `available_skill_refs[]` 中选择；Application Service 必须拒绝集合外的 `skill_ref`。没有匹配能力时返回 `NO_CAPABILITY`，V1 不转入 General Code Agent，也不由 Router 索要资料。
 
 ### 6.9 ReviewAssessment（复核结果）
 
@@ -657,7 +690,7 @@ NEED_MORE_EVIDENCE
 REJECT
 ```
 
-`PASS` 只能接受 REVIEW Job 的 `review_target` 所固定的候选结论；ID、版本、哈希或基础状态不匹配时，由 Application Service 将结果判为系统级 `STALE`，不交给 Reviewer 选择。`reviewed_evidence_refs[]` 必须全部来自 REVIEW Job 的固定 Evidence 集合，且 `PASS` 必须覆盖候选结论的全部 `supporting_evidence_refs[]`；引用未固定 Evidence 或遗漏支持证据时不得 `PASS`。Reviewer 不能直接修改 Case，也不能直接调用 Specialist。Application Service 技术校验 ReviewAssessment 后交给 Coordinator，再原子保存 Outcome 并执行完成、补证或重新诊断的 TransitionPlan。
+`PASS` 只能接受 REVIEW Job 的 `review_target` 所固定的候选结论；ReviewAssessment 没有逐字回显该固定 ID、版本和哈希时是 `OUTCOME_INVALID/REJECTED`。只有 Job 固定目标后来被 Case 的合法新版本替代时才是系统级 `STALE`。`reviewed_evidence_refs[]` 必须全部来自 REVIEW Job 的固定 Evidence 集合，且 `PASS` 必须覆盖候选结论的全部 `supporting_evidence_refs[]`；引用未固定 Evidence 或遗漏支持证据时不得 `PASS`。PASS 还要求 unsupported/conflict/missing/stale 四个问题数组全空；NEED_MORE_EVIDENCE 至少有 missing 或 unsupported，REJECT 至少有 unsupported、conflict 或 stale。Reviewer 不能直接修改 Case，也不能直接调用 Specialist。Application Service 技术校验 ReviewAssessment 后交给 Coordinator，再原子保存 Outcome；`PASS` 完成 Case，`NEED_MORE_EVIDENCE` 或 `REJECT` 都创建新的 DIAGNOSE Job，并把本 ReviewAssessment 作为固定 PREVIOUS_OUTCOME 交给新 Specialist。
 
 ### 6.10 Attachment、Evidence 与 Artifact（附件、证据与产物）
 
@@ -678,7 +711,7 @@ Attachment
 ├── content_type
 ├── size
 ├── sha256
-└── blob_key
+└── storage_key
 
 Evidence
 ├── evidence_id
@@ -693,14 +726,18 @@ Evidence
 Artifact
 ├── artifact_id
 ├── case_id
+├── kind
 ├── name
 ├── content_type
+├── resource_kind
 ├── size
 ├── sha256
-└── blob_key
+└── storage_key
 ```
 
-Evidence 可以定位到附件行号、时间区间、请求 ID、命令结果或结构化用户输入。原始日志、截图、转储和大型工具输出保存在 BlobStore；模型上下文只接收必要片段和 Evidence 引用。
+Evidence 可以定位到附件行号、时间区间、请求 ID、命令结果或结构化用户输入。原始日志、截图、转储和大型工具输出保存在 FileResourceStore；模型上下文只接收必要片段和 Evidence 引用。
+
+V1 不使用任意 JSON locator/metadata：Evidence locator 由 USER_FACT、ATTACHMENT、LOGPARSE、TOOL_OUTPUT、PREVIOUS_OUTCOME 判别，并分别约束 source_ref 指向 DiagnosisItem、READY Attachment、LOGPARSE_RUN Artifact、DIAGNOSTIC_EXPORT Artifact 或规范 JobOutcome。Artifact metadata 由 USER_RESULT、DIAGNOSTIC_EXPORT、LOGPARSE_RUN 判别；后者固定目录 hash、logparse VersionedRef、manifest 相对路径、源 Attachment ID/hash 和仅含 product 的 parse 参数。
 
 一旦被 Job 引用，Attachment、Evidence、Artifact、JobOutcome 及其类型化载荷的内容与定位语义必须不可变；内容变化时创建新 ID。Evidence 如果来自会变化的外部资源，必须先物化内容或固定可重现的版本，不能让旧 Job 在执行时读到新内容。
 
@@ -769,15 +806,19 @@ Reviewer 不读取执行时最新 DiagnosisState，也默认不读取 Specialist
 
 ### 7.6 Context 预算
 
-V1 使用固定优先级和 Token 预算，不实现模型自动摘要。
+V1 使用固定优先级和 UTF-8 字节预算，不实现模型自动摘要。Router 默认上限为 128 KiB（131072 bytes），Specialist 与 Reviewer 默认上限均为 200 KiB（204800 bytes）；准确计数对象是提交给 Backend 的最终上下文正文。
 
 最低必需内容包括：
 
+- 固定 Agent Profile；
+- 选定 Diagnosis Skill，或 Router 的固定 Skill 摘要目录；
 - 当前 Job 目标；
 - 当前 ProblemSpec；
 - 输出 Schema；
+- 当前开放 requirements；
 - 直接相关的确认事实、假设和 Evidence；
 - 用户当前有效约束。
+- Reviewer 的固定候选结论与 review target。
 
 如果最低必需内容超过预算：
 
@@ -803,11 +844,14 @@ V1 使用固定优先级和 Token 预算，不实现模型自动摘要。
 ### 8.2 Job Workspace（任务工作区）
 
 - Runtime 为每个 Job 创建临时 Workspace。
-- 根据 Job 固定引用只读物化 READY Attachment。
+- 根据 Job 固定引用只读物化 READY Attachment、Evidence、Artifact，并把 previous JobOutcome 的 Canonical JSON 写入固定 `inputs/outcomes/` 路径。
+- `inputs/manifest.json` 按公共 discriminated schema 逐项记录四组输入、相对路径、size/hash、Artifact kind/metadata 和 Job 固定 logparse ref；S04 是唯一生产者，S07 只消费。
+- `runtime/tool-state/logparse-parse.claim` 在真正启动首次 parse 前以 create-new 语义写入完整公共 claim；固定输入已含 LOGPARSE_RUN 时禁止产生 claim。
 - Agent 草稿、临时命令输出和中间文件留在该 Workspace。
 - 需要跨 Job 保留的结果必须作为 `proposed_evidence` 或 `proposed_artifact` 回送，并由 Application Service 发布为 Evidence 或 Artifact。
 - Application Service 完成 Outcome 处理后，Job Workspace 可以删除；未被接受的暂存内容按清理策略删除。
 - Workspace 用于文件归属和并发正确性，不构成安全沙箱。
+- V1 因此只允许运行受信任的 Diagnosis Skill、外部 Agent 客户端和 logparse 资产；job-scoped broker 只缩小 logparse 调用面，不把 Workspace 提升为恶意代码隔离边界。
 
 ## 9. 服务端执行流程
 
@@ -824,13 +868,13 @@ sequenceDiagram
 
     U->>C: 提交问题
     C->>A: 创建 Case 命令
-    A->>D: CaseSnapshot + CREATE
+    A->>D: CaseSnapshot + CREATE_CASE
     D-->>A: TransitionPlan + ROUTE JobSpec
     A->>R: 原子保存目标状态和带快照的 ROUTE Job
     A->>J: 提交已持久化 Job
     J-->>A: 使用新 Session 返回 RouteDecision 提案
     A->>A: 技术校验 RouteDecision
-    A->>D: 当前 CaseSnapshot + Validated RouteDecision
+    A->>D: 当前 CaseSnapshot + ROUTE_OUTCOME
     D-->>A: TransitionPlan + DIAGNOSE JobSpec 或 NO_CAPABILITY
     A->>R: 原子保存 Outcome、目标状态和带快照的下一 Job
 ```
@@ -897,12 +941,12 @@ Attachment 上传完成本身不会自动推进 Case。只有 `SubmitSupplement`
 5. Review Worker 使用独立新 Session 和固定的受限上下文执行；
 6. Reviewer 返回绑定 `review_target` 的 ReviewAssessment；
 7. `PASS` 时 Coordinator 返回完成转换，Application Service 原子将该固定候选结论接受为 `final_result` 并把 Case 置为 `RESOLVED`；
-8. `NEED_MORE_EVIDENCE` 或 `REJECT` 时，Coordinator 返回继续诊断或等待资料的计划，Application Service 标记原候选结论并创建需要的新 Job；
-9. 如果 Application Service 判定 REVIEW Job、基础状态或候选结论绑定已经过期，则结果记为系统级 `STALE`，不得完成 Case；后续只能根据当前持久化状态创建新的 REVIEW 或 DIAGNOSE Job。
+8. `NEED_MORE_EVIDENCE` 或 `REJECT` 时，Coordinator 标记原候选结论并创建新的 DIAGNOSE Job；是否还需资料由该 Specialist 在下一 Job 中判断；
+9. 如果 REVIEW Job 的固定目标已被合法状态更新替代，则结果记为系统级 `STALE`，不得完成 Case；若 ReviewAssessment 自身伪造或错误回显固定目标，则为 `OUTCOME_INVALID/REJECTED`。后续只能根据当前持久化状态创建新的 REVIEW 或 DIAGNOSE Job。
 
 ### 9.5 多次索要参数与日志分析中途补参
 
-以下时序展示一个 Case 先后经历“索要参数组 A”“索要一次日志”“分析日志后发现还需要参数 B”，最后形成候选结论并通过独立复核的完整过程。
+以下时序展示一个 Case 先后经历“索要参数组 A”“索要一次日志”“分析日志后发现还需要参数 B”，最后形成候选结论并通过独立复核的完整过程。RPC 超时 Fixture 中参数组 A 的 requirement name 固定为 `caller_service`、`server_service`、`rpc_method`、`problem_time`，其中 problem_time 是毫秒精度 UTC RFC 3339 时刻；日志 requirement 为 `log_archive`，参数 B 为 `order_id`。
 
 ```mermaid
 sequenceDiagram
@@ -912,20 +956,22 @@ sequenceDiagram
     participant A as Application Service（应用服务）
     participant D as Diagnosis Coordinator（诊断协调器）
     participant R as Repository（仓库）
-    participant B as HTTP File Adapter / BlobStore（文件接入与存储）
+    participant B as HTTP File Adapter / FileResourceStore（文件接入与存储）
     participant X as Dispatcher / Worker / Runtime（任务执行链）
+    participant G as Job-scoped logparse broker（受控代理）
+    participant L as logparse CLI（压缩日志唯一处理方）
 
     Note over U,X: 创建 Case 并完成路由
 
     U->>C: 提交待诊断问题
     C->>A: CreateCase
-    A->>D: CaseSnapshot + CREATE
+    A->>D: CaseSnapshot + CREATE_CASE
     D-->>A: TransitionPlan + ROUTE JobSpec
     A->>R: 原子保存 Case 和 ROUTE Job
     A->>X: 分发 ROUTE Job
     Note over X: 创建新的 Router Session
     X-->>A: RouteDecision
-    A->>D: Validated RouteDecision
+    A->>D: ROUTE_OUTCOME
     D-->>A: 创建 DIAGNOSE Job #1
     A->>R: 保存路由结果和 Job #1 固定快照
 
@@ -934,7 +980,7 @@ sequenceDiagram
     A->>X: 执行 DIAGNOSE Job #1
     Note over X: 创建新的 Specialist Session
     X-->>A: NEED_INPUT（参数组 A）
-    A->>D: Validated DiagnosisOutcome
+    A->>D: DIAGNOSIS_OUTCOME
     D-->>A: Case → WAITING_INPUT
     A->>R: 保存 Outcome，Job #1 → SUCCEEDED
     Note over X: Session 关闭
@@ -950,7 +996,7 @@ sequenceDiagram
     A->>X: 执行 DIAGNOSE Job #2
     Note over X: 创建新的 Specialist Session
     X-->>A: NEED_ATTACHMENT（诊断日志）
-    A->>D: Validated DiagnosisOutcome
+    A->>D: DIAGNOSIS_OUTCOME
     D-->>A: Case → WAITING_ATTACHMENT
     A->>R: 保存 Outcome，Job #2 → SUCCEEDED
     Note over X: Session 关闭
@@ -961,7 +1007,7 @@ sequenceDiagram
     A-->>C: attachment_id + 上传描述
     C->>B: PUT 日志字节
     B->>A: 发布附件请求（大小、哈希）
-    A->>B: 发布不可变 Blob
+    A->>B: 发布不可变文件资源
     A->>R: Attachment → READY
     Note over A,R: READY 本身不推进诊断
 
@@ -974,12 +1020,19 @@ sequenceDiagram
 
     A->>X: 执行 DIAGNOSE Job #3
     Note over X: 新 Specialist Session，读取固定日志
-    X->>X: 模型与工具循环：分析部分日志
+    X->>G: problem-locator-logparse parse-targets
+    G->>L: 固定 argv 执行 parse（唯一一次）
+    L-->>G: parse_manifest + 解析目录
+    G->>L: 固定 argv 执行 mech-target-logs
+    L-->>G: target_logs
+    G-->>X: 受控结果相对路径
+    X->>X: 模型与工具循环：分析到中途
     X->>X: 发现缺少参数 B
-    X-->>A: NEED_INPUT（参数 B）+ 中间发现 / Evidence 提案
-    A->>D: Validated DiagnosisOutcome
+    X-->>A: NEED_INPUT（参数 B）+ Evidence / LOGPARSE_RUN 提案
+    A->>D: DIAGNOSIS_OUTCOME
     D-->>A: 接受中间状态增量，Case → WAITING_INPUT
-    A->>R: 原子保存中间发现、Evidence 和 Outcome
+    A->>B: 发布只读 LOGPARSE_RUN 目录树
+    A->>R: 原子保存中间发现、Evidence、Artifact 和 Outcome
     A->>R: Job #3 → SUCCEEDED
     Note over X: Session 关闭，中间进度由 Repository 承接
 
@@ -990,12 +1043,18 @@ sequenceDiagram
     A->>D: CaseSnapshot + 补充参数
     D-->>A: 更新状态并创建 DIAGNOSE Job #4
     A->>R: 保存新状态版本和 Job #4
-    Note over A,R: 快照包含日志引用、中间发现和参数 B
+    Note over A,R: 快照固定中间发现、参数 B 和 LOGPARSE_RUN 引用
 
     A->>X: 执行 DIAGNOSE Job #4
     Note over X: 新 Specialist Session，从结构化状态继续
+    X->>B: 只读物化已保存 LOGPARSE_RUN
+    X->>G: problem-locator-logparse target-logs
+    G->>L: 对已保存目录执行 mech-target-logs
+    L-->>G: target_logs
+    G-->>X: 受控结果相对路径
+    Note over X,L: 禁止再次解包或调用 parse；Case parse 计数仍为 1
     X-->>A: COMPLETED + CandidateConclusion
-    A->>D: Validated DiagnosisOutcome
+    A->>D: DIAGNOSIS_OUTCOME
     D-->>A: Case → REVIEWING，创建 REVIEW Job
     A->>R: 原子保存候选结论和 REVIEW Job
 
@@ -1004,7 +1063,7 @@ sequenceDiagram
     A->>X: 执行 REVIEW Job
     Note over X: 创建独立 Reviewer Session
     X-->>A: ReviewAssessment.PASS
-    A->>D: Validated ReviewAssessment
+    A->>D: REVIEW_OUTCOME
     D-->>A: Case → RESOLVED
     A->>R: 保存 final_result
     A-->>C: 返回最终诊断结果
@@ -1015,9 +1074,10 @@ sequenceDiagram
 
 - 每次 `NEED_INPUT` 或 `NEED_ATTACHMENT` 都结束当前 Job，Job 状态为 `SUCCEEDED`，Case 进入对应等待状态，当前 Agent Session 随后关闭。
 - Attachment 达到 `READY` 只表示文件可以被引用；只有后续 `SubmitSupplement` 才会推进 Case 并创建新 Job。
-- Job #3 在分析日志后发现参数 B 时，必须通过 DiagnosisOutcome 提交中间发现、DiagnosisStateDelta 和候选 Evidence；只有 Coordinator 接受并由 Application Service 持久化的内容，才能进入后续 Job。
-- Job #4 使用新的 Agent Session，其固定 `context_snapshot` 必须包含已接受的中间状态、日志或 Evidence 引用和参数 B，不能依赖 Job #3 的对话历史继续。
-- 最终候选结论仍必须进入独立 REVIEW Job，并在 `ReviewAssessment.PASS` 后才能写入 `final_result`。
+- Job #3 必须经 `diagnose-* → logparse-diagnose → problem-locator-logparse broker → logparse parse/mech-target-logs` 处理日志；只有 job-scoped broker 能启动固定 CLI，Problem Locator 其他组件不得打开、枚举或解压压缩包。
+- Job #3 在分析日志后发现参数 B 时，必须通过 DiagnosisOutcome 提交中间发现、DiagnosisStateDelta、候选 Evidence 和目录型 `LOGPARSE_RUN`；只有 Coordinator 接受并由 Application Service 持久化的内容，才能进入后续 Job。
+- Job #4 使用新的 Agent Session，其固定输入必须包含已接受的中间状态、参数 B、源 Attachment、`LOGPARSE_RUN` 和使 Case 进入等待态的 Job #3 Outcome，不能依赖 Job #3 的对话历史；它只读物化解析目录，不再次调用 `logparse parse`，整个无故障场景 parse 次数严格为 1。
+- Job #4 的候选必须与唯一 `diagnosis-result.json` USER_RESULT 同 Outcome、同批发布；最终候选仍进入独立 REVIEW Job，只有 `ReviewAssessment.PASS` 后该 Artifact 才可下载并写入 `final_result`。
 
 ## 10. 客户端接入与文件传输
 
@@ -1044,17 +1104,19 @@ V1 使用同一个稳定服务地址：
 
 ### 10.3 Remote MCP 能力
 
-至少提供以下业务语义：
+固定提供七个工具：
 
-- 创建 Case；
-- `PrepareAttachment（准备附件）`：创建 `UPLOADING（上传中）` 元数据并返回结构化上传描述；
-- `SubmitSupplement（提交补充资料）`：一次提交可选的结构化文本输入和已经 `READY` 的 Attachment 引用；
-- `ResumeCase（恢复案例）`：显式恢复因服务重启或分发中断而停住的 Case；
-- 查询 Case 当前状态；
-- 取消 Case；
-- 获取结构化诊断结果和 Artifact 元数据。
+```text
+problem_locator_create_case
+problem_locator_prepare_attachment
+problem_locator_submit_supplement
+problem_locator_get_case
+problem_locator_resume_case
+problem_locator_cancel_case
+problem_locator_list_artifacts
+```
 
-具体 MCP 工具名称和字段留到接口详细设计。
+精确字段和 envelope 由 [S06](v1-specs/S06-mcp-http-cli.md) 独占定义。
 
 `SubmitSupplement` 是唯一推进等待中 Case 的补充资料命令。它必须幂等，并在同一次业务提交中校验等待状态、Attachment 所属 Case 与 `READY` 状态、满足待补要求、递增状态版本并创建下一 Job。查询始终只读，服务端不主动回连 CLI。
 
@@ -1065,9 +1127,9 @@ Agent CLI 通过 Remote MCP 调用 `PrepareAttachment`；Web 或普通 HTTP 客�
 - Application Service 先读取 Case 与相关 Job，只做幂等、状态、`runtime_epoch` 和固定资产可用性技术校验；
 - Case 存在 `PENDING` Job 且其固定版本仍可加载时，幂等地重新分发同一个 `job_id`、同一个快照；
 - 每次服务进程启动产生新的 `runtime_epoch（运行代次）`；Job 从 `PENDING` 被认领时记录当前代次；
-- 只有属于旧代次的 `RUNNING` Job 才能进入恢复分支；Application Service 将 `RESUME_INTERRUPTED + 原 job_type` 作为已校验 Trigger 交给 Coordinator；
-- Coordinator 返回一个 Resume TransitionPlan，其中同时包含“旧 Job 转 `INTERRUPTED`（若尚未转换）、清除旧 `active_job_id`、保持同一业务阶段的替代 JobSpec”；
-- Case 已经是 `INTERRUPTED` 且没有活跃 Job 时，Application Service 查找最近一个尚无替代项的 `INTERRUPTED` Job，并把同一个 Trigger 交给 Coordinator；
+- 服务启动先按 `{case_id,job_id}` 扫描全部尚无 processing record 的 finalized Outcome，并通过正常提交路径重放；只有全部重放得到 APPLIED、DUPLICATE、STALE 或 REJECTED 后，才以 `MARK_OLD_EPOCH_INTERRUPTED` 将确实没有 finalized Outcome 的旧代次 `RUNNING` Job 转为 `INTERRUPTED` 并清除 active，不自动创建替代项。执行记录损坏或重放仍有瞬时错误时 readiness=false，禁止提前中断或重跑；
+- Case 已经是 `INTERRUPTED` 且没有活跃 Job 时，Application Service 查找最近一个尚无替代项的 `INTERRUPTED` Job，再把 `RESUME_INTERRUPTED` 交给 Coordinator；
+- Coordinator 返回保持同一业务阶段的替代 JobSpec；
 - 被中断的 REVIEW 仍替换为 REVIEW，不能退回 DIAGNOSE 绕过复核；
 - Application Service 在一次 Repository 条件事务中执行 Resume TransitionPlan，为替代执行创建新的 `job_id`、记录 `replacement_for_job_id`，并根据目标 DiagnosisState 生成新的 `base_state_revision` 和 `context_snapshot`；
 - Case 正在等待补充资料时，拒绝恢复并提示使用 `SubmitSupplement`；
@@ -1090,15 +1152,17 @@ FAILED
 规则：
 
 - 准备上传时先创建 `UPLOADING` Attachment 元数据。
-- 上传内容先写入临时 Blob。
+- 上传内容先通过 Attachment 专用 `AttachmentStagedRef` 写入临时资源；它不带 Job/proposal 字段，也不能出现在 Agent Proposal 中。
 - 服务端计算大小和内容哈希。
-- 校验成功后原子发布正式 Blob，并将 Attachment 标记为 `READY`。
+- 校验成功后原子发布正式资源，并将 Attachment 标记为 `READY`。
 - `READY` Attachment 不允许原地覆盖；重新上传产生新的 Attachment ID。
-- 上传失败或中断时不发布正式 Blob。
+- 上传失败或中断时不发布正式资源。
 - Worker 只消费 `READY` Attachment。
 - Attachment 不记录文件来自 curl、Web 还是其他客户端。
 
-这里的“原子发布”只指临时 Blob 到正式 Blob 的存储内发布，不假设 BlobStore 与 Repository 之间存在跨存储事务。必须保证 Repository 不会在正式 Blob 可读之前提交 `READY`。如果正式 Blob 已发布而 `READY` 元数据提交失败，Attachment 仍不可消费，并由后续补偿或对账完成提交或清理孤立 Blob；具体重试、对账频率和清理期限留到详细设计。
+这里的“原子发布”只指暂存资源到正式资源的 FileResourceStore 内发布，不假设 FileResourceStore 与 StateRepository 之间存在跨存储事务。必须保证 StateRepository 不会在正式资源可读之前提交 `READY`。如果资源已发布而 `READY` 元数据提交失败，Attachment 仍不可消费；相同 attachment_id 与相同 size/hash 的后续 PUT 必须采用该正式目标并完成 commit，不要求旧 stage；不同 size/hash 固定返回 `IDEMPOTENCY_CONFLICT` 且绝不覆盖。只有在既无 state 引用也无未确认 durable outbox 保护时，它才可按 7 日孤立规则清理。
+
+同一 attachment_id 的完整上传从重新读取状态、流式 stage、容量校验、发布到状态提交都持有同一个进程内 `AttachmentUploadGuard`；不同 attachment_id 可并行。网络流期间不得持有全局 publication lease；body 只消费一次，流结束后才在短 lease 内重新读取最新 snapshot/generation，并覆盖全批 Case 5 GiB 校验、正式目标发布/采用和 state commit。期间发生的全局 generation 变化只重算使用同一 completed stage 的 post-stage 阶段，绝不重读流。
 
 ### 10.5 HTTP 接口语义
 
@@ -1122,7 +1186,7 @@ Content-Type: application/octet-stream
 GET /api/v1/artifacts/{artifact_id}/content
 ```
 
-正式字段、错误码、重试规则和上传限制留到接口详细设计。
+PrepareAttachment 返回的 UploadDescriptor 固定含 `method=PUT`、`max_bytes=2684354560`、`expires_at=null`，以及恰好四个必填 header 键：`Idempotency-Key=attachment_id`、`Content-Type`、`Content-Length`、`X-Content-SHA256`；后两者若返回 null，客户端必须在 PUT 前计算并替换，不能省略。正式字段、错误码、流式上传头和限制见 [S06](v1-specs/S06-mcp-http-cli.md)；单 Attachment 上限 2.5 GiB，单 Case 正式文件总量上限 5 GiB。
 
 HTTP 完成 Attachment 发布后只改变文件对象状态，不自动创建诊断 Job。Client Access Skill 随后把需要采用的 Attachment ID 放入 `SubmitSupplement`。
 
@@ -1141,7 +1205,7 @@ HTTP 完成 Attachment 发布后只改变文件对象状态，不自动创建诊
 ### 11.1 Case 内并发
 
 - 同一个 Case 同时只允许一个活跃 Job。
-- 不同 Case 可以并发。
+- 不同 Case 可以同时存在 PENDING Job，但 V1 Agent Job 全局执行并发固定为 1。
 - 同一个 Case 的用户写命令和 JobOutcome 应串行化或使用条件更新。
 - 所有 Case、活跃 Job 和命令状态更新使用 `case_revision` 条件写；JobOutcome 是否仍可合并额外校验 `base_state_revision == DiagnosisState.revision`。
 - Job 和 Attachment 等独立资源的生命周期转换使用各自当前状态做条件更新。
@@ -1160,14 +1224,14 @@ HTTP 完成 Attachment 发布后只改变文件对象状态，不自动创建诊
 - 应用 JobOutcome；
 - 取消 Case。
 
-精确幂等键字段和保存期限留到详细设计。
+外部写操作使用 `request_id → idempotency_key`；同 operation/key 与相同 Canonical request hash 返回原 business receipt，不增加 revision，同键不同 hash 返回 `IDEMPOTENCY_CONFLICT`。`wait_seconds` 不参与业务 hash，重放时按本次等待值重新读取状态。记录在 V1 不自动删除。
 
 ### 11.3 状态提交与分发
 
 - Application Service 必须先持久化 Job，再提交 Dispatcher。
 - Dispatcher 只接收已经存在的 `job_id`。
 - 重复提交同一 Job 不得创建第二份业务 Job。
-- 状态提交成功但进程内分发失败时，Job 保持 `PENDING`；V1 由显式 `ResumeCase` 重新分发同一个 Job，自动扫描、外部队列和 Outbox 后置。
+- 状态提交成功但进程内分发失败时，Job 保持 `PENDING`；服务启动会自动重投同一 Job，`ResumeCase` 也可主动唤醒它。外部队列和 Outbox 后置。
 
 ## 12. 持久化与恢复边界
 
@@ -1175,11 +1239,14 @@ HTTP 完成 Attachment 发布后只改变文件对象状态，不自动创建诊
 
 - Case 和 DiagnosisState；
 - Job 和 Typed JobOutcome；
+- finalized `job.json`、`job_outcome.json` 执行记录及其业务投递确认；
 - RouteDecision、DiagnosisOutcome 和 ReviewAssessment；
 - Evidence；
 - Attachment 和 Artifact 元数据；
 - READY Attachment、Evidence 文件和 Artifact 字节；
 - 实际使用的 Profile、Skill、Tool Bundle、Context Policy 和 Output Contract 版本。
+
+V1 使用一个由 `.instance.lock` 独占的 `DATA_ROOT/state.json` 保存全部权威结构化状态；`state.json.prev` 只供人工恢复，不自动 fallback。附件、Evidence、Artifact 和目录型 `LOGPARSE_RUN` 位于 FileResourceStore，状态只保存相对 storage key、大小和 SHA-256。V1 无数据库、无 Docker，精确布局和原子写见 [S02](v1-specs/S02-json-resource-storage.md)。
 
 ### 12.2 非持久化运行数据
 
@@ -1195,8 +1262,9 @@ HTTP 完成 Attachment 发布后只改变文件对象状态，不自动创建诊
 - 已完成 Case 可以通过 `case_id` 查询。
 - 未完成 Case 可以通过已知 `case_id` 从持久化 DiagnosisState 继续。
 - 原 Agent Session 不恢复，也不需要恢复。
-- 服务重启后，属于旧 `runtime_epoch` 的 `RUNNING` Job 在继续 Case 前必须按 10.3 节的条件事务标记为 `INTERRUPTED`，不得把不存在的执行仍视为活跃。
-- 用户可以通过幂等的 `ResumeCase` 显式继续被中断的 Case；自动重新调度留到后续版本。
+- 服务重启后先扫描所有未确认 finalized Outcome 并以原字节重放；只有合法 Outcome 全部得到终态 disposition 后，才把确实没有 finalized Outcome 的旧 `runtime_epoch` `RUNNING` Job 通过 S03/S05 条件事务标记为 `INTERRUPTED`。重放或执行记录校验失败时 readiness=false，禁止先中断、Resume 或重跑 Agent。
+- 服务启动自动重投仍为 `PENDING` 的同一 Job；不会自动为 `INTERRUPTED` Job 创建替代项。
+- 用户可以通过幂等的 `ResumeCase` 显式继续被中断的 Case。
 - 客户端丢失 `case_id` 时，V1 不负责自动找回 Case。
 
 ## 13. Reviewer（复核智能体）规则
@@ -1248,11 +1316,11 @@ V1 仍按受控内网、用户可信、文件可信的假设设计，不默认�
 - MCP 返回结构化上传信息，不返回绑定某种 Shell 的完整命令。
 - Application Service 使用协议无关的内部类型。
 - 后续 Web、普通 CLI 或其他客户端复用相同 Application Service。
-- Session Cache、JobAttempt、独立 JobContextManifest、Outbox、外部队列和多实例 Worker 可以后续增加，但不得让 Agent Session 重新成为正确性来源。
+- Session Cache、JobAttempt、独立 JobContextManifest、通用事务 Outbox、外部队列和多实例 Worker 可以后续增加；V1 已把 finalized Outcome 执行记录作为窄 durable outbox，但不得让 Agent Session 重新成为正确性来源。
 
 ## 16. V1 验收条件
 
-实现设计进入编码前，至少应能通过以下架构验收：
+V1 实现与总装必须通过以下架构验收：
 
 1. 删除或关闭所有 Agent Session 后，未完成 Case 仍能根据 Repository 创建下一 Job。
 2. 同一个 Job 在新 Session 中可以获得完整的业务输入。
@@ -1272,38 +1340,39 @@ V1 仍按受控内网、用户可信、文件可信的假设设计，不默认�
 16. 必需上下文超过预算时明确返回 `CONTEXT_LIMIT（上下文超限）`，不静默裁剪。
 17. 同一 `job_id` 重复分发只有一次 `PENDING → RUNNING` 认领成功。
 18. Remote MCP 和 HTTP 不各自实现一套 Case 状态机。
+19. 一个进程独占 `DATA_ROOT`，损坏 `state.json` 时 readiness 失败且不自动使用 `.prev`。
+20. V1 不需要数据库或 Docker 即可启动、诊断、重启恢复和导出状态。
+21. Router、Specialist、Reviewer 的默认上下文上限分别为 131072、204800、204800 bytes。
+22. `CLAUDE_COMMAND` 的解析、argv、stdin 和 Windows shim 行为通过 `issue-locator` characterization tests；唯一环境差异是移除所有 raw/既有 logparse 保留变量，并只注入本 Job broker endpoint/token。
+23. 无故障 RPC 超时场景只索要一次日志；首次 Job 调用一次 `logparse parse`，补参后的新 Job 复用已接受 `LOGPARSE_RUN`，总 parse count 为 1；正式 Artifact 接受前的失败恢复遵循至少一次语义，不宣称全故障 exactly-once。
+24. `STALE` 只作为 Outcome disposition，JobStatus 中不存在该值。
+25. 单 Attachment 2.5 GiB、单 Case 5 GiB、Job 30 分钟、日志 64 MiB、Workspace 1 GiB 和全局并发 1 的边界均被验证。
+26. Runtime finalized Outcome 后 Agent 调用次数永久保持 1；同进程投递重试与重启恢复都重放同一 receipt，且启动顺序严格为 replay-before-interrupt。
+27. 同 attachment_id 并发 PUT 串行化；发布成功但 commit 失败后，相同字节采用既有目标，不同字节返回 `IDEMPOTENCY_CONFLICT`，Case 全批容量检查不存在 partial publish。
+28. job-scoped logparse broker 拒绝跨 Job、第二次 parse、任意 argv 和 direct-CLI 降级；关闭或取消后 token 失效且全部子进程被回收，endpoint/token 不进入日志、Workspace 输出、Outcome 或响应。
 
-## 17. 留到详细设计的事项
+## 17. 详细设计权威落点
 
-- Case 与 Job 的完整状态转换表；
-- DiagnosisState 各条目的精确 Schema；
-- DiagnosisStateDelta 的合法转换和去重规则；
-- Coordinator 的输入输出 DTO；
-- `case_revision` 与 `DiagnosisState.revision` 的条件更新矩阵；
-- Context Builder 的 Token 预算、片段选择和错误格式；
-- Agent Backend 的执行协议和错误分类；
-- Job 幂等键和条件更新机制；
-- `runtime_epoch` 的生成、Job 认领以及 `PENDING` / `INTERRUPTED` Job 的恢复细节；
-- 候选 Evidence / Artifact 的 proposal key、暂存和正式发布协议；
-- REVIEW Job 的候选绑定与失败后转换表；
-- Dispatcher 并发数和队列策略；
-- 版本化运行资产的保留期限与 `ASSET_VERSION_UNAVAILABLE` 处理；
-- MCP 工具名与请求响应字段；
-- HTTP 错误码、上传限制和清理策略；
-- BlobStore 正式发布与 Repository `READY` 提交之间的补偿、对账和孤立 Blob 清理；
-- Repository 与 BlobStore 的具体产品和布局；
-- 数据保留时间；
-- Reviewer 的置信度、补证和拒绝细则；
-- 安全能力的后续版本规划。
+原待细化事项均已有唯一归属：
 
-## 18. 下一阶段建议
+| 范围 | 权威说明书 |
+|---|---|
+| 公共 Schema、Port、状态、错误码、revision 和限制 | [S00](v1-specs/S00-contract-freeze.md) |
+| Case/Job 状态机、DiagnosisStateDelta、Coordinator、Review 转换 | [S01](v1-specs/S01-domain-coordinator.md) |
+| `state.json`、实例锁、原子写、资源布局、保留与孤立清理 | [S02](v1-specs/S02-json-resource-storage.md) |
+| 应用命令、幂等、Outcome 技术校验、提案发布与条件提交 | [S03](v1-specs/S03-application-service.md) |
+| 字节预算、Workspace、Catalog、`CLAUDE_COMMAND` 与 Outcome 文件 | [S04](v1-specs/S04-runtime-context-backend.md) |
+| Dispatcher、单 worker、runtime epoch、取消、启动恢复与 Resume | [S05](v1-specs/S05-scheduler-recovery.md) |
+| Remote MCP、HTTP、CLI、配置、上传限制、错误映射和 Client Access Skill | [S06](v1-specs/S06-mcp-http-cli.md) |
+| Diagnosis Skill 生成器 2.0.0、logparse 与解析复用 | [S07](v1-specs/S07-skill-logparse.md) |
+| 依赖批次、接缝、RPC 超时 E2E、返工和 PostgreSQL 边界 | [S08](v1-composition-spec.md) |
 
-进入下一会话后，建议按以下顺序继续：
+## 18. 后续实施入口
 
-1. 定义 Case、Job 和 JobOutcome 状态机；
-2. 定义 DiagnosisState 与 DiagnosisStateDelta Schema；
-3. 定义 Coordinator 的确定性转换表；
-4. 定义 Context Builder 输入、输出和预算规则；
-5. 定义 Agent Backend 执行协议；
-6. 定义 Repository 事务和 Job 恢复语义；
-7. 最后再细化 MCP 与 HTTP 接口字段。
+本次只完成并提交设计分册，不创建产品代码、开发任务、额外分支、worktree 或 PR。只有用户另行明确要求“开始实现”后，才按 S08 执行：
+
+1. S00 先冻结机器合同和工程骨架；
+2. S01～S07 以冻结 Port 和 Fake 独立开发、验证；
+3. S08 按固定顺序完成接缝与总装。
+
+所有未来开发任务使用 `model: gpt-5.6-sol`、`reasoning_effort: ultra`。该配置只约束 Codex 开发任务，不进入 Problem Locator 运行时。
