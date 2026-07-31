@@ -132,6 +132,7 @@ class JsonFileStateRepository:
         )
         self._read_file = read_file
         self._state: StateFile | None = None
+        self._state_failure: ApplicationError | None = None
 
         try:
             self._layout.ensure_directories(self._file_sync)
@@ -391,8 +392,14 @@ class JsonFileStateRepository:
 
     def _require_state(self) -> StateFile:
         if self._state is None:
-            raise RuntimeError(
-                "state repository is unavailable after an unrecoverable reload failure"
+            failure = self._state_failure
+            if failure is None:
+                failure = _port_error(
+                    ErrorCode.STATE_CORRUPT,
+                    "The authoritative state is unavailable.",
+                ).error
+            raise ApplicationPortError(
+                failure.model_copy(deep=True)
             )
         return self._state
 
@@ -675,9 +682,28 @@ class JsonFileStateRepository:
 
     def _reload_after_failed_commit(self) -> None:
         try:
-            self._state = self._load_disk_state()
-        except (ApplicationPortError, OSError, TypeError, ValueError, ValidationError):
+            reloaded = self._load_disk_state()
+        except ApplicationPortError as exc:
             self._state = None
+            if exc.error.code in {
+                ErrorCode.STATE_CORRUPT,
+                ErrorCode.STATE_SCHEMA_UNSUPPORTED,
+            }:
+                self._state_failure = exc.error.model_copy(deep=True)
+            else:  # pragma: no cover - _load_disk_state closes to state failures
+                self._state_failure = _port_error(
+                    ErrorCode.STATE_CORRUPT,
+                    "The authoritative state could not be reloaded safely.",
+                ).error
+        except (OSError, TypeError, ValueError, ValidationError):
+            self._state = None
+            self._state_failure = _port_error(
+                ErrorCode.STATE_CORRUPT,
+                "The authoritative state could not be reloaded safely.",
+            ).error
+        else:
+            self._state = reloaded
+            self._state_failure = None
 
     def commit(
         self,
@@ -698,7 +724,13 @@ class JsonFileStateRepository:
             raise TypeError("mutation must be a StateMutation")
 
         with self._coordination_lock:
-            current = self._require_state()
+            try:
+                current = self._require_state()
+            except ApplicationPortError as exc:
+                raise _port_error(
+                    ErrorCode.STATE_WRITE_FAILED,
+                    "The state repository is fail-stopped and cannot accept writes.",
+                ) from exc
             if current.generation != expected_generation:
                 raise _port_error(
                     ErrorCode.REVISION_CONFLICT,
@@ -729,6 +761,7 @@ class JsonFileStateRepository:
                 ) from exc
 
             self._state = committed
+            self._state_failure = None
             case_revision = (
                 committed.cases[affected_case_id].case.case_revision
                 if affected_case_id is not None

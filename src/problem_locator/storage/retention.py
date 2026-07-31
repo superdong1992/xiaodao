@@ -1,7 +1,7 @@
 """Clock-driven physical candidate discovery for the S02 cleaner.
 
 Business-reference, active-publication, and durable-outbox decisions are made
-by the r2 cleaner adapter.  This module only enumerates exact filesystem nodes
+by the r3 cleaner adapter.  This module only enumerates exact filesystem nodes
 and applies the frozen strict age thresholds.
 """
 

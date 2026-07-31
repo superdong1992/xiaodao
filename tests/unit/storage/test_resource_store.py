@@ -8,7 +8,9 @@ from pathlib import Path
 import pytest
 
 from problem_locator.contracts import (
+    ApplicationErrorDetail,
     ApplicationPortError,
+    AttachmentFilenameSuffix,
     AttachmentStagedRef,
     ErrorCode,
     PlannedResourceTarget,
@@ -17,6 +19,7 @@ from problem_locator.contracts import (
     ResourceType,
     StagedResourceRef,
     canonical_json_bytes,
+    workspace_attachment_relative_path,
 )
 from problem_locator.contracts.limits import (
     MAX_ATTACHMENT_BYTES,
@@ -44,6 +47,8 @@ OTHER_CASE_ID = "00000000-0000-0000-0000-000000000102"
 ATTACHMENT_ID = "00000000-0000-0000-0000-000000000201"
 RESOURCE_ID = "00000000-0000-0000-0000-000000000202"
 OTHER_RESOURCE_ID = "00000000-0000-0000-0000-000000000203"
+FIRST_BATCH_RESOURCE_ID = "00000000-0000-0000-0000-000000000204"
+SECOND_BATCH_RESOURCE_ID = "00000000-0000-0000-0000-000000000205"
 JOB_ID = "00000000-0000-0000-0000-000000000301"
 
 
@@ -162,6 +167,20 @@ def _plan(
         staged.size,
         staged.sha256,
     )
+
+
+def _write_formal_file(
+    harness: Harness,
+    target: PlannedResourceTarget,
+    payload: bytes,
+) -> Path:
+    assert target.resource_kind is ResourceKind.FILE
+    assert target.size == len(payload)
+    assert target.sha256 == _sha(payload)
+    path = harness.layout.data_root / target.final_storage_key
+    path.parent.mkdir(parents=True)
+    path.write_bytes(payload)
+    return path
 
 
 def test_store_structurally_implements_the_frozen_port(harness: Harness) -> None:
@@ -357,7 +376,7 @@ def test_attachment_limit_stops_at_first_forbidden_byte(harness: Harness) -> Non
         (ResourceType.ARTIFACT, ResourceKind.DIRECTORY, "artifacts"),
     ],
 )
-def test_plan_target_consumes_r2_identity_contract(
+def test_plan_target_consumes_r3_identity_contract(
     harness: Harness,
     resource_type: ResourceType,
     resource_kind: ResourceKind,
@@ -435,21 +454,140 @@ def test_batch_capacity_requires_lease_is_sorted_and_has_no_partial_publish(
     with pytest.raises(RuntimeError, match="publication lease"):
         harness.store.validate_case_capacity(CASE_ID, [first_target])
 
-    with harness.guard.acquire():
-        code = _error_code(
-            lambda: harness.store.validate_case_capacity(
-                CASE_ID,
-                sorted(
-                    [first_target, second_target],
-                    key=lambda item: item.final_storage_key,
-                ),
-            )
+    with harness.guard.acquire(), pytest.raises(ApplicationPortError) as raised:
+        harness.store.validate_case_capacity(
+            CASE_ID,
+            sorted(
+                [first_target, second_target],
+                key=lambda item: item.final_storage_key,
+            ),
         )
-    assert code is ErrorCode.RESOURCE_LIMIT_EXCEEDED
+    assert raised.value.error.code is ErrorCode.RESOURCE_LIMIT_EXCEEDED
+    assert raised.value.error.retryable is False
+    assert raised.value.error.details == [
+        ApplicationErrorDetail(
+            field="case_resource_bytes",
+            resource_type="CASE",
+            resource_id=CASE_ID,
+            resource_ref=None,
+            expected=None,
+            actual=None,
+            limit=MAX_CASE_RESOURCE_BYTES,
+            observed=MAX_CASE_RESOURCE_BYTES + 1,
+        )
+    ]
     assert (proposal_stage_path(harness.layout.data_root, JOB_ID, "first") / "payload").exists()
     assert (proposal_stage_path(harness.layout.data_root, JOB_ID, "second") / "payload").exists()
     assert not (harness.layout.data_root / first_target.final_storage_key).exists()
     assert not (harness.layout.data_root / second_target.final_storage_key).exists()
+
+
+def test_capacity_error_observed_counts_every_physical_formal_class_atomically(
+    harness: Harness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import problem_locator.storage.resource_store as resource_store_module
+
+    # Capacity accounting is deliberately reference-agnostic once an object is
+    # under the formal root: state-referenced, durable-outbox-protected, and
+    # ordinary-orphan targets all contribute their unique physical key once.
+    state_payload = b"state-ref"
+    outbox_payload = b"durable-outbox"
+    orphan_payload = b"orphan"
+    state_referenced = harness.store.plan_target(
+        CASE_ID,
+        ResourceType.ATTACHMENT,
+        ATTACHMENT_ID,
+        ResourceKind.FILE,
+        len(state_payload),
+        _sha(state_payload),
+    )
+    durable_outbox = harness.store.plan_target(
+        CASE_ID,
+        ResourceType.EVIDENCE,
+        RESOURCE_ID,
+        ResourceKind.FILE,
+        len(outbox_payload),
+        _sha(outbox_payload),
+    )
+    ordinary_orphan = harness.store.plan_target(
+        CASE_ID,
+        ResourceType.ARTIFACT,
+        OTHER_RESOURCE_ID,
+        ResourceKind.FILE,
+        len(orphan_payload),
+        _sha(orphan_payload),
+    )
+    formal_paths = {
+        _write_formal_file(harness, state_referenced, state_payload),
+        _write_formal_file(harness, durable_outbox, outbox_payload),
+        _write_formal_file(harness, ordinary_orphan, orphan_payload),
+    }
+    current_bytes = sum(path.stat().st_size for path in formal_paths)
+
+    first_new = harness.store.plan_target(
+        CASE_ID,
+        ResourceType.ARTIFACT,
+        FIRST_BATCH_RESOURCE_ID,
+        ResourceKind.FILE,
+        MAX_CASE_RESOURCE_BYTES - current_bytes,
+        "d" * 64,
+    )
+    second_new = harness.store.plan_target(
+        CASE_ID,
+        ResourceType.ARTIFACT,
+        SECOND_BATCH_RESOURCE_ID,
+        ResourceKind.FILE,
+        1,
+        "e" * 64,
+    )
+    batch = sorted(
+        [first_new, second_new],
+        key=lambda item: item.final_storage_key,
+    )
+
+    real_scan = resource_store_module.scan_case_resources
+    scan_lock_observations: list[tuple[bool, bool]] = []
+
+    def scan_while_observing_lock(
+        layout: StorageLayout,
+        case_id: str,
+    ):
+        scan_lock_observations.append(
+            (
+                harness.lock.held_by_current_thread(),
+                harness.lock.publication_held_by_current_thread(),
+            )
+        )
+        return real_scan(layout, case_id)
+
+    monkeypatch.setattr(
+        resource_store_module,
+        "scan_case_resources",
+        scan_while_observing_lock,
+    )
+
+    with harness.guard.acquire(), pytest.raises(ApplicationPortError) as raised:
+        harness.store.validate_case_capacity(CASE_ID, batch)
+
+    assert scan_lock_observations == [(True, True)]
+    assert raised.value.error.code is ErrorCode.RESOURCE_LIMIT_EXCEEDED
+    assert raised.value.error.retryable is False
+    assert raised.value.error.details == [
+        ApplicationErrorDetail(
+            field="case_resource_bytes",
+            resource_type="CASE",
+            resource_id=CASE_ID,
+            resource_ref=None,
+            expected=None,
+            actual=None,
+            limit=MAX_CASE_RESOURCE_BYTES,
+            observed=MAX_CASE_RESOURCE_BYTES + 1,
+        )
+    ]
+    assert all(path.exists() for path in formal_paths)
+    assert not (harness.layout.data_root / first_new.final_storage_key).exists()
+    assert not (harness.layout.data_root / second_new.final_storage_key).exists()
 
 
 def test_publish_moves_then_adopts_without_old_staged_content(harness: Harness) -> None:
@@ -540,6 +678,51 @@ def test_attachment_publish_identity_and_live_lease_are_enforced(
             assert harness.store.publish(staged, target.final_storage_key) == published
     finally:
         replay_lease.release()
+
+
+def test_attachment_archive_suffix_changes_only_the_workspace_path(
+    harness: Harness,
+) -> None:
+    payload = b"opaque tar-gzip attachment bytes"
+    lease = harness.attachments.acquire(ATTACHMENT_ID)
+    try:
+        staged = harness.store.stage_attachment(
+            ATTACHMENT_ID,
+            lease,
+            InMemoryBinaryStream(payload),
+        )
+        target = harness.store.plan_target(
+            CASE_ID,
+            ResourceType.ATTACHMENT,
+            ATTACHMENT_ID,
+            ResourceKind.FILE,
+            staged.size,
+            staged.sha256,
+        )
+        with harness.guard.acquire():
+            published = harness.store.publish(staged, target.final_storage_key)
+    finally:
+        lease.release()
+
+    assert published.storage_key.endswith(f"/attachments/{ATTACHMENT_ID}/payload")
+    destination = (
+        harness.layout.workspaces
+        / JOB_ID
+        / Path(
+            workspace_attachment_relative_path(
+                ATTACHMENT_ID,
+                AttachmentFilenameSuffix.TAR_GZ,
+            )
+        )
+    )
+
+    materialized = harness.store.materialize_read_only(published, destination)
+
+    assert materialized.path == str(destination)
+    assert materialized.read_only is True
+    assert destination.name == "payload.tar.gz"
+    assert destination.read_bytes() == payload
+    assert is_read_only(destination)
 
 
 def test_open_and_materialize_file_are_revalidated_and_read_only(

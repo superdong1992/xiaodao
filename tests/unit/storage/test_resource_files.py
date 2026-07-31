@@ -7,7 +7,12 @@ from pathlib import Path
 
 import pytest
 
-from problem_locator.contracts import ResourceKind, ResourceRef
+from problem_locator.contracts import (
+    AttachmentFilenameSuffix,
+    ResourceKind,
+    ResourceRef,
+    workspace_attachment_relative_path,
+)
 from problem_locator.contracts.limits import MAX_CASE_RESOURCE_BYTES
 from problem_locator.storage import resource_files
 from problem_locator.storage.atomic import finalize_read_only_tree, is_read_only
@@ -534,6 +539,114 @@ def test_reader_materializes_file_at_fixed_workspace_path_by_hardlink(
         reader.materialize(ref, layout.workspaces / JOB_ID / "inputs" / "wrong")
 
 
+@pytest.mark.parametrize("suffix", [None, *tuple(AttachmentFilenameSuffix)])
+def test_reader_materializes_attachment_file_at_exact_archive_workspace_path(
+    tmp_path: Path,
+    suffix: AttachmentFilenameSuffix | None,
+) -> None:
+    layout = _layout(tmp_path)
+    source, ref = _formal_file(
+        layout,
+        b"opaque attachment archive bytes",
+        category="attachments",
+        read_only=True,
+    )
+    destination = (
+        layout.workspaces
+        / JOB_ID
+        / Path(workspace_attachment_relative_path(RESOURCE_ID, suffix))
+    )
+    reader = FormalResourceReader(layout, DurableRecordingFileSync())
+
+    assert reader.materialize(ref, destination) == destination
+
+    assert destination.read_bytes() == b"opaque attachment archive bytes"
+    assert destination.stat().st_ino == source.stat().st_ino
+    assert destination.name == f"payload{'' if suffix is None else suffix.value}"
+    assert is_read_only(destination)
+    assert ref.storage_key.endswith(f"/attachments/{RESOURCE_ID}/payload")
+    assert source.name == "payload"
+
+
+def test_reader_rejects_attachment_path_traversal_and_suffix_drift(
+    tmp_path: Path,
+) -> None:
+    layout = _layout(tmp_path)
+    source, ref = _formal_file(
+        layout,
+        b"untrusted destination must not move source",
+        category="attachments",
+        read_only=True,
+    )
+    attachment_root = (
+        layout.workspaces / JOB_ID / "inputs" / "attachments" / RESOURCE_ID
+    )
+    reader = FormalResourceReader(layout, DurableRecordingFileSync())
+    invalid_destinations = [
+        attachment_root / "payload.GZ",
+        attachment_root / "payload.rar",
+        attachment_root / "payload.tar.gz-extra",
+        attachment_root / "nested" / "payload.zip",
+        attachment_root / "payload.zip" / ".." / "payload.tar.gz",
+        attachment_root / ".." / OTHER_RESOURCE_ID / "payload.zip",
+        tmp_path / "outside" / "payload.zip",
+    ]
+
+    for destination in invalid_destinations:
+        with pytest.raises(ValueError, match="frozen|traversal|escapes"):
+            reader.materialize(ref, destination)
+
+    assert source.read_bytes() == b"untrusted destination must not move source"
+    assert not attachment_root.exists()
+
+
+def test_attachment_archive_copy_uses_private_temp_and_retries_atomically(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    layout = _layout(tmp_path)
+    source, ref = _formal_file(
+        layout,
+        b"complete tar gzip bytes",
+        category="attachments",
+        read_only=True,
+    )
+    destination = (
+        layout.workspaces
+        / JOB_ID
+        / Path(
+            workspace_attachment_relative_path(
+                RESOURCE_ID,
+                AttachmentFilenameSuffix.TAR_GZ,
+            )
+        )
+    )
+    replacer = FaultInjectingReplace()
+    replacer.fail_next(OSError("injected archive materialization replace failure"))
+    reader = FormalResourceReader(
+        layout,
+        DurableRecordingFileSync(),
+        replacer,
+        temp_token_factory=lambda: "archive-copy-retry",
+    )
+
+    def unavailable_hardlink(*args: object, **kwargs: object) -> None:
+        raise OSError("cross-device")
+
+    monkeypatch.setattr(resource_files.os, "link", unavailable_hardlink)
+
+    with pytest.raises(OSError, match="replace failure"):
+        reader.materialize(ref, destination)
+    assert not destination.exists()
+    assert not list(destination.parent.glob(".*.materializing"))
+    assert source.read_bytes() == b"complete tar gzip bytes"
+
+    assert reader.materialize(ref, destination) == destination
+    assert destination.read_bytes() == b"complete tar gzip bytes"
+    assert is_read_only(destination)
+    assert replacer.call_count == 2
+
+
 @pytest.mark.parametrize(
     ("operation", "occurrence"),
     [
@@ -679,6 +792,9 @@ def test_reader_materializes_read_only_tree_and_rejects_linked_trees(
     assert destination.joinpath("nested", "b.txt").read_bytes() == b"bb"
     _assert_read_only_tree(destination)
     assert inspect_tree(destination) == inspection
+    with pytest.raises(ValueError, match="frozen workspace"):
+        reader.materialize(ref, destination.with_name("tree.tar.gz"))
+    assert ref.storage_key.endswith(f"/artifacts/{RESOURCE_ID}/tree")
 
     linked_layout = _layout(tmp_path / "linked")
     linked_key = _key(category="artifacts", kind=ResourceKind.DIRECTORY)

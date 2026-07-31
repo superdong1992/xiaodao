@@ -9,11 +9,14 @@ from jsonschema import Draft202012Validator
 from pydantic import ValidationError
 
 from problem_locator.contracts import (
+    AttachmentFilenameSuffix,
     ErrorCode,
     FixtureManifest,
     StateFile,
     canonical_json_bytes,
+    derive_attachment_filename_suffix,
     parse_canonical_json_bytes,
+    workspace_attachment_relative_path,
 )
 
 
@@ -24,6 +27,7 @@ STATE_SCHEMA_PATH = REPOSITORY_ROOT / "schemas" / "v1" / "state.schema.json"
 FIXTURE_MANIFEST_SCHEMA_PATH = (
     REPOSITORY_ROOT / "schemas" / "v1" / "fixture-manifest.schema.json"
 )
+ATTACHMENT_ID = "00000000-0000-0000-0000-000000000050"
 
 
 def _fixture_bytes(relative: str) -> bytes:
@@ -78,12 +82,12 @@ def test_all_complete_storage_json_fixtures_use_canonical_bytes() -> None:
         assert canonical_json_bytes(json.loads(raw.decode("utf-8"))) == raw
 
 
-def test_valid_empty_r2_state_fixture_is_accepted() -> None:
-    payload = parse_canonical_json_bytes(_fixture_bytes("state/valid-empty-r2.json"))
+def test_valid_empty_r3_state_fixture_is_accepted() -> None:
+    payload = parse_canonical_json_bytes(_fixture_bytes("state/valid-empty-r3.json"))
     _schema_validator(STATE_SCHEMA_PATH).validate(payload)
     state = StateFile.model_validate(payload)
     assert state.schema_version == 1
-    assert state.contract_revision == "v1-contract-r2"
+    assert state.contract_revision == "v1-contract-r3"
     assert state.generation == 1
     assert state.runtime_epochs == []
     assert state.recovery_processing_records == {}
@@ -96,7 +100,7 @@ def test_valid_empty_r2_state_fixture_is_accepted() -> None:
     [
         ("state/invalid-unknown-schema-version.json", "schema_version"),
         (
-            "state/invalid-unknown-contract-revision.json",
+            "state/invalid-r2-contract-revision.json",
             "contract_revision",
         ),
     ],
@@ -148,6 +152,45 @@ def test_resource_hash_mismatch_scenario_has_a_single_deterministic_mismatch() -
         "1b161e5c1fa7425e73043362938b9824"
     )
     assert hashlib.sha256(actual).hexdigest() != payload["declared_sha256"]
+
+
+def test_workspace_attachment_materialization_scenario_uses_r3_helpers() -> None:
+    payload = _fixture_json(
+        "scenarios/workspace-attachment-materialization-paths.json"
+    )
+    assert isinstance(payload, dict)
+    assert set(payload) == {
+        "directory_workspace_leaf",
+        "entries",
+        "formal_file_storage_leaf",
+        "scenario",
+    }
+    assert payload["scenario"] == "attachment_workspace_archive_paths"
+    assert payload["formal_file_storage_leaf"] == "payload"
+    assert payload["directory_workspace_leaf"] == "tree"
+
+    entries = payload["entries"]
+    assert isinstance(entries, list)
+    assert {
+        entry["filename_suffix"]
+        for entry in entries
+        if isinstance(entry, dict)
+    } == {None, *(suffix.value for suffix in AttachmentFilenameSuffix)}
+    for entry in entries:
+        assert isinstance(entry, dict)
+        assert set(entry) == {
+            "content_type",
+            "filename_suffix",
+            "name",
+            "workspace_leaf",
+        }
+        suffix = derive_attachment_filename_suffix(
+            entry["name"],
+            entry["content_type"],
+        )
+        assert (None if suffix is None else suffix.value) == entry["filename_suffix"]
+        relative = workspace_attachment_relative_path(ATTACHMENT_ID, suffix)
+        assert PurePosixPath(relative).name == entry["workspace_leaf"]
 
 
 def test_atomic_write_fault_scenario_freezes_disk_truth_per_boundary() -> None:

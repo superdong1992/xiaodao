@@ -1,4 +1,4 @@
-"""Physical formal-resource operations below the r2 ResourceStore adapter."""
+"""Physical formal-resource operations below the r3 ResourceStore adapter."""
 
 from __future__ import annotations
 
@@ -16,12 +16,14 @@ from typing import Protocol, Self, Sequence
 from pydantic import TypeAdapter
 
 from problem_locator.contracts import (
+    AttachmentFilenameSuffix,
     BinaryStream,
     OpaqueId,
     ResourceKind,
     ResourceRef,
     Sha256,
     TreeManifest,
+    workspace_attachment_relative_path,
 )
 from problem_locator.contracts.limits import MAX_CASE_RESOURCE_BYTES
 
@@ -447,22 +449,43 @@ class FormalResourceReader:
         return FileBinaryStream(path)
 
     def _validate_destination(self, resource_ref: ResourceRef, destination: Path) -> Path:
-        destination = Path(os.path.abspath(destination))
+        lexical_destination = Path(destination)
+        if ".." in lexical_destination.parts:
+            raise ValueError("materialization destination contains path traversal")
+        destination = Path(os.path.abspath(lexical_destination))
         root = Path(os.path.abspath(self._layout.data_root))
         try:
             parts = destination.relative_to(root).parts
         except ValueError as exc:
             raise ValueError("materialization destination escapes DATA_ROOT") from exc
-        address = parse_storage_key(resource_ref.storage_key)
-        expected_tail = (address.category, address.resource_id, address.leaf)
         if (
             len(parts) != 7
             or parts[:2] != ("tmp", "workspaces")
             or parts[3] != "inputs"
-            or parts[4:] != expected_tail
         ):
             raise ValueError("destination is not the frozen workspace input path")
         _OPAQUE_ID_ADAPTER.validate_python(parts[2])
+
+        address = parse_storage_key(resource_ref.storage_key)
+        workspace_relative_path = "/".join(parts[3:])
+        if address.category == "attachments":
+            if (
+                resource_ref.resource_kind is not ResourceKind.FILE
+                or address.leaf != "payload"
+            ):
+                raise ValueError("Attachment materialization requires a FILE payload")
+            allowed_paths = {
+                workspace_attachment_relative_path(address.resource_id, suffix)
+                for suffix in (None, *tuple(AttachmentFilenameSuffix))
+            }
+            if workspace_relative_path not in allowed_paths:
+                raise ValueError(
+                    "destination is not the frozen attachment workspace path"
+                )
+        elif parts[4:] != (address.category, address.resource_id, address.leaf):
+            # Evidence and Artifact paths retain the formal payload/tree leaf;
+            # DIRECTORY resources in particular are always an unsuffixed tree.
+            raise ValueError("destination is not the frozen workspace input path")
         return destination
 
     def _ensure_materialization_parent(self, destination: Path) -> None:

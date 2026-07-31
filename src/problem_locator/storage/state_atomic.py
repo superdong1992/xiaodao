@@ -1,9 +1,8 @@
 """Durable whole-file replacement for the single V1 ``state.json``.
 
 This module contains only the physical write boundary.  State DTO validation,
-generation checks, mutation application, and typed Port errors belong to the
-repository adapter and are intentionally kept out until the r2 contract shape
-is available.
+generation checks, mutation application, and typed Port errors remain in the
+repository adapter that consumes the frozen r3 contract.
 """
 
 from __future__ import annotations

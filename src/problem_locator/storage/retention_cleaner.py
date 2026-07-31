@@ -270,7 +270,7 @@ class StorageRetentionCleaner:
         outbox_resource_keys: set[str] = set()
         outbox_job_ids: set[str] = set()
         for job_id in self._finalized_job_ids():
-            # A persisted disposition is authoritative even for the r2
+            # A persisted disposition is authoritative even for the r3
             # technical REJECTED branch that deliberately stores no trusted
             # JobOutcome.  Do not re-open that final file merely for cleanup.
             if job_id in processed_job_ids:

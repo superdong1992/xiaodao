@@ -24,6 +24,7 @@ from problem_locator.contracts import (
     StateRepository,
     canonical_json_bytes,
 )
+from problem_locator.storage.atomic import read_stable_file_bytes
 from problem_locator.storage.coordination import StorageCoordinationLock
 from problem_locator.storage.layout import StorageLayout
 from problem_locator.storage.state_repository import JsonFileStateRepository
@@ -47,6 +48,28 @@ PENDING_JOB_ID = "00000000-0000-0000-0000-000000000011"
 INITIAL_TIME = "2026-07-31T00:00:00.000Z"
 COMMIT_TIME = "2026-07-31T00:01:00.000Z"
 COMPLETED_TIME = "2026-07-31T00:02:00.000Z"
+
+
+class _MutatingStateReader:
+    """Corrupt the just-replaced state before the commit verification read."""
+
+    def __init__(self) -> None:
+        self._replacement: bytes | None = None
+        self._armed_reads = 0
+
+    def arm(self, replacement: bytes) -> None:
+        self._replacement = replacement
+        self._armed_reads = 0
+
+    def __call__(self, path: Path) -> bytes:
+        replacement = self._replacement
+        if replacement is not None and path.name == "state.json":
+            self._armed_reads += 1
+            if self._armed_reads == 2:
+                path.write_bytes(replacement)
+                self._replacement = None
+                raise OSError("injected post-replace state damage")
+        return read_stable_file_bytes(path)
 
 
 def _load_json(name: str) -> dict:
@@ -160,7 +183,7 @@ def test_empty_directory_initializes_generation_one_canonical_state(
     snapshot = repository.read_snapshot()
     assert isinstance(repository, StateRepository)
     assert snapshot.schema_version == 1
-    assert snapshot.contract_revision == "v1-contract-r2"
+    assert snapshot.contract_revision == "v1-contract-r3"
     assert snapshot.generation == 1
     assert snapshot.created_at == INITIAL_TIME
     assert snapshot.updated_at == INITIAL_TIME
@@ -183,7 +206,7 @@ def test_empty_directory_initializes_generation_one_canonical_state(
             canonical_json_bytes(
                 {
                     "schema_version": 2,
-                    "contract_revision": "v1-contract-r2",
+                    "contract_revision": "v1-contract-r3",
                 }
             ),
             ErrorCode.STATE_SCHEMA_UNSUPPORTED,
@@ -192,7 +215,7 @@ def test_empty_directory_initializes_generation_one_canonical_state(
             canonical_json_bytes(
                 {
                     "schema_version": 1,
-                    "contract_revision": "v1-contract-r1",
+                    "contract_revision": "v1-contract-r2",
                 }
             ),
             ErrorCode.STATE_SCHEMA_UNSUPPORTED,
@@ -653,6 +676,65 @@ def test_post_replace_directory_sync_failure_reloads_new_disk_truth(
     assert StateFile.model_validate_json(
         repository.layout.previous_state.read_bytes()
     ).generation == 1
+
+
+@pytest.mark.parametrize(
+    "expected_code",
+    [ErrorCode.STATE_CORRUPT, ErrorCode.STATE_SCHEMA_UNSUPPORTED],
+)
+def test_failed_commit_reload_fail_stops_every_read_with_exact_state_error(
+    tmp_path: Path,
+    expected_code: ErrorCode,
+) -> None:
+    reader = _MutatingStateReader()
+    repository = JsonFileStateRepository(
+        tmp_path,
+        StorageCoordinationLock(),
+        FixedClock(INITIAL_TIME),
+        DeterministicIdGenerator(seed="fail-stopped-state"),
+        file_sync=FakeFileSync(),
+        replacer=FaultInjectingReplace(),
+        execution_record_store=InMemoryExecutionRecordStore(),
+        read_file=reader,
+    )
+    healthy_bytes = repository.layout.state.read_bytes()
+    if expected_code is ErrorCode.STATE_CORRUPT:
+        damaged_bytes = b'{"truncated":\n'
+    else:
+        old_revision = json.loads(healthy_bytes.decode("utf-8"))
+        old_revision["contract_revision"] = "v1-contract-r2"
+        damaged_bytes = canonical_json_bytes(old_revision)
+    reader.arm(damaged_bytes)
+
+    _assert_port_error(
+        ErrorCode.STATE_WRITE_FAILED,
+        lambda: repository.commit(1, None, _recovery_mutation()),
+    )
+    assert repository.layout.state.read_bytes() == damaged_bytes
+
+    for callback in (
+        repository.read_snapshot,
+        lambda: repository.read_case(CASE_ID),
+        lambda: repository.read_job(JOB_ID),
+        lambda: repository.read_artifact(ATTACHMENT_ID),
+    ):
+        error = _assert_port_error(expected_code, callback)
+        assert error.error.retryable is False
+
+    report = repository.validate_all()
+    assert report.valid is False
+    assert report.errors[0].code == expected_code.value
+    _assert_port_error(expected_code, repository.export_snapshot)
+    _assert_port_error(
+        ErrorCode.STATE_WRITE_FAILED,
+        lambda: repository.commit(1, None, _empty_mutation()),
+    )
+
+    # An online repair can be validated, but this repository instance remains
+    # fail-stopped until a restart reconstructs its in-memory authority.
+    repository.layout.state.write_bytes(healthy_bytes)
+    assert repository.validate_all().valid
+    _assert_port_error(expected_code, repository.read_snapshot)
 
 
 def test_validate_and_export_recheck_authoritative_disk_without_mutating_snapshot(

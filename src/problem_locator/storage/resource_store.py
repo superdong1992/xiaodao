@@ -1,4 +1,4 @@
-"""Frozen r2 ``ResourceStore`` backed by the S02 filesystem layout.
+"""Frozen r3 ``ResourceStore`` backed by the S02 filesystem layout.
 
 The adapter is deliberately thin around the content-only staging and formal
 resource primitives.  This module owns the public DTO boundary, the sole
@@ -59,7 +59,7 @@ from .platform import PlatformFileSync, PlatformReplaceOperation
 from .resource_files import (
     FormalResourcePublisher,
     FormalResourceReader,
-    calculate_case_usage,
+    scan_case_resources,
 )
 from .staging import StagedObjectWriter
 from .streams import hash_file
@@ -210,7 +210,7 @@ class StagePathRegistry:
 
 
 class FileResourceStore:
-    """Filesystem implementation of the frozen r2 ``ResourceStore`` Port."""
+    """Filesystem implementation of the frozen r3 ``ResourceStore`` Port."""
 
     def __init__(
         self,
@@ -815,23 +815,62 @@ class FileResourceStore:
                 )
                 for target in targets
             ]
+            for storage_key, resource_kind, size, sha256 in tuples:
+                address = parse_storage_key(storage_key)
+                if address.case_id != case_id:
+                    raise ValueError("planned resource target belongs to another Case")
+                if address.resource_kind is not resource_kind:
+                    raise ValueError(
+                        "planned resource kind does not match its storage key"
+                    )
+                if not isinstance(size, int) or isinstance(size, bool) or size < 0:
+                    raise ValueError(
+                        "planned resource size must be a non-negative integer"
+                    )
+                _SHA256_ADAPTER.validate_python(sha256)
             with self.coordination_lock:
-                current, new, total = calculate_case_usage(
-                    self.layout,
-                    case_id,
-                    tuples,
+                existing = scan_case_resources(self.layout, case_id)
+                current = sum(
+                    observation.size for observation in existing.values()
                 )
-            return CaseResourceUsage(
-                current_bytes=current,
-                new_bytes=new,
-                total_bytes=total,
-                limit_bytes=MAX_CASE_RESOURCE_BYTES,
-            )
-        except OverflowError:
-            raise _port_error(
-                ErrorCode.RESOURCE_LIMIT_EXCEEDED,
-                "The Case resource capacity is exceeded.",
-            ) from None
+                new = 0
+                for storage_key, resource_kind, size, sha256 in tuples:
+                    present = existing.get(storage_key)
+                    if present is None:
+                        new += size
+                        continue
+                    if (
+                        present.resource_kind is not resource_kind
+                        or present.size != size
+                        or present.sha256 != sha256
+                    ):
+                        raise ValueError(
+                            "formal target exists with different content"
+                        )
+                usage = CaseResourceUsage(
+                    current_bytes=current,
+                    new_bytes=new,
+                    total_bytes=current + new,
+                    limit_bytes=MAX_CASE_RESOURCE_BYTES,
+                )
+                if usage.total_bytes > MAX_CASE_RESOURCE_BYTES:
+                    raise _port_error(
+                        ErrorCode.RESOURCE_LIMIT_EXCEEDED,
+                        "The Case resource capacity is exceeded.",
+                        details=(
+                            ApplicationErrorDetail(
+                                field="case_resource_bytes",
+                                resource_type="CASE",
+                                resource_id=case_id,
+                                resource_ref=None,
+                                expected=None,
+                                actual=None,
+                                limit=MAX_CASE_RESOURCE_BYTES,
+                                observed=usage.total_bytes,
+                            ),
+                        ),
+                    )
+            return usage
         except ValueError as error:
             text = str(error).lower()
             if "different content" in text or "conflict" in text:

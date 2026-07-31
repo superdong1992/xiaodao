@@ -1,4 +1,4 @@
-"""Content-only staging mechanics shared by the r2 ResourceStore adapter.
+"""Content-only staging mechanics shared by the r3 ResourceStore adapter.
 
 The public adapter constructs and validates the frozen staged-reference DTOs.
 This module owns only streaming/copying, expected-byte checks, and the rule
