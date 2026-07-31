@@ -1,0 +1,105 @@
+{
+  "spec_id": "S03",
+  "title": "Application Service",
+  "executor": {
+    "model": "gpt-5.6-sol",
+    "reasoning_effort": "ultra"
+  },
+  "contract_revision": "v1-contract-r3",
+  "contract_base_commit": "99279d082938dce2a0cdd65f99835cf69571ae84",
+  "branch": "codex/v1-s03-application-service",
+  "head_commit": "6ef0f9f64b1b6e8e0cc884a3d78f6861abd8759c",
+  "scope_completed": [
+    "Implemented all external application commands, idempotent receipts, publication leases, post-commit notification, dispatch, and bounded wait behavior.",
+    "Implemented single-pass attachment upload staging, frozen content validation, capacity preflight, deterministic publication, and retry-safe finalization.",
+    "Implemented deterministic Outcome validation, rejection audit, proposal formalization, pinned next-Job recovery, asset failure parking, and submission-only retry.",
+    "Implemented ClaimJob, infrastructure failure reporting, exact previous-epoch recovery replay, typed State fault propagation, and raw Port input validation.",
+    "Implemented read-only Case and Artifact queries with pre-dependency raw validation, deterministic projections, and downloadable-resource enforcement.",
+    "Added deterministic component fixtures and unit coverage for r3 contract closure, fault boundaries, retries, and adversarial Coordinator and Catalog results."
+  ],
+  "changed_files": [
+    "src/problem_locator/application/__init__.py",
+    "src/problem_locator/application/errors.py",
+    "src/problem_locator/application/external_commands.py",
+    "src/problem_locator/application/formalization.py",
+    "src/problem_locator/application/idempotency.py",
+    "src/problem_locator/application/job_control.py",
+    "src/problem_locator/application/mutations.py",
+    "src/problem_locator/application/outcome_processing.py",
+    "src/problem_locator/application/outcome_submission.py",
+    "src/problem_locator/application/preparation.py",
+    "src/problem_locator/application/projection.py",
+    "src/problem_locator/application/queries.py",
+    "src/problem_locator/application/runtime_bindings.py",
+    "src/problem_locator/application/service.py",
+    "src/problem_locator/application/uploads.py",
+    "tests/fixtures/components/application/contract-blockers.json",
+    "tests/fixtures/components/application/fixture-manifest.json",
+    "tests/fixtures/components/application/scenario-matrix.json",
+    "tests/unit/application/test_contract_readiness.py",
+    "tests/unit/application/test_external_commands.py",
+    "tests/unit/application/test_formalization.py",
+    "tests/unit/application/test_idempotency.py",
+    "tests/unit/application/test_job_control.py",
+    "tests/unit/application/test_mutations.py",
+    "tests/unit/application/test_outcome_processing.py",
+    "tests/unit/application/test_outcome_submission.py",
+    "tests/unit/application/test_preparation.py",
+    "tests/unit/application/test_projection.py",
+    "tests/unit/application/test_queries.py",
+    "tests/unit/application/test_service.py",
+    "tests/unit/application/test_uploads.py"
+  ],
+  "fixtures_consumed": [
+    "tests/fixtures/contracts/fixture-manifest.json",
+    "tests/fixtures/contracts/positive/job-diagnose.json",
+    "tests/fixtures/contracts/positive/job-outcome-diagnosis.json",
+    "tests/fixtures/contracts/positive/job-outcome-failure.json",
+    "tests/fixtures/contracts/positive/job-outcome-route.json",
+    "tests/fixtures/contracts/positive/job-route.json",
+    "tests/fixtures/contracts/positive/state.json"
+  ],
+  "fixtures_produced": [
+    "tests/fixtures/components/application/contract-blockers.json",
+    "tests/fixtures/components/application/fixture-manifest.json",
+    "tests/fixtures/components/application/scenario-matrix.json"
+  ],
+  "tests": [
+    {
+      "command": "PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /private/tmp/problem-locator-s00-env/bin/python -m pytest tests/unit/application -q -p no:cacheprovider",
+      "status": "passed",
+      "summary": "219 passed in 0.61s"
+    },
+    {
+      "command": "PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /private/tmp/problem-locator-s00-env/bin/python -m pytest tests/contracts -q -p no:cacheprovider",
+      "status": "passed",
+      "summary": "505 passed in 1.24s"
+    },
+    {
+      "command": "PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /private/tmp/problem-locator-s00-env/bin/python -m pytest tests/unit/application/test_contract_readiness.py -q -p no:cacheprovider",
+      "status": "passed",
+      "summary": "20 passed in 0.16s; the component fixture manifest matches every owned fixture byte"
+    },
+    {
+      "command": "PYTHONPYCACHEPREFIX=/private/tmp/problem-locator-s03-pycache PYTHONPATH=src /private/tmp/problem-locator-s00-env/bin/python -m compileall -q src/problem_locator/application tests/unit/application",
+      "status": "passed",
+      "summary": "Application production and unit-test sources compiled without errors"
+    },
+    {
+      "command": "git diff --check 99279d082938dce2a0cdd65f99835cf69571ae84..6ef0f9f64b1b6e8e0cc884a3d78f6861abd8759c",
+      "status": "passed",
+      "summary": "No whitespace errors in the complete implementation diff"
+    }
+  ],
+  "dependency_requests": [],
+  "contract_change_requests": [],
+  "known_limitations": [],
+  "risks": [],
+  "integration_notes": [
+    "All S03 contract gaps recorded during r1 and r2 development are resolved by the frozen r2 or r3 contracts; no unresolved contract change request remains.",
+    "Post-commit State read faults preserve the durable business receipt and return case_view=null without reporting a false wait timeout.",
+    "Coordinator next-Job plans must copy the trigger-specific pinned RuntimeBindings exactly; recovered published Jobs are replayed without consulting or replacing Catalog versions.",
+    "S08 should compose only the frozen Port implementations and must retain the S03 publication-lease, finalized-outbox replay, notification, and dispatch ordering."
+  ],
+  "forbidden_scope_touched": false
+}
