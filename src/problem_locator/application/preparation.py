@@ -191,6 +191,22 @@ def fixed_asset_refs(job: Job) -> list[VersionedRef]:
     return result
 
 
+def runtime_bindings_from_job(job: Job) -> RuntimeBindings:
+    """Mechanically recover the complete frozen bindings from job.json."""
+
+    return RuntimeBindings(
+        agent_profile_ref=job.agent_profile_ref,
+        available_skill_refs=list(job.available_skill_refs),
+        skill_ref=job.skill_ref,
+        tool_bundle_ref=job.tool_bundle_ref,
+        context_policy_ref=job.context_policy_ref,
+        output_contract_ref=job.output_contract_ref,
+        logparse_tool_ref=job.logparse_tool_ref,
+        logparse_product=job.logparse_product,
+        resource_limits=job.resource_limits,
+    )
+
+
 def claim_lifecycle_update(
     job: Job,
     *,
@@ -220,4 +236,5 @@ __all__ = [
     "fixed_asset_refs",
     "make_user_fact",
     "problem_spec_at_revision_one",
+    "runtime_bindings_from_job",
 ]

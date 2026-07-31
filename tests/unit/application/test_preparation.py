@@ -10,6 +10,7 @@ from problem_locator.application.preparation import (
     claim_lifecycle_update,
     finalize_attachment,
     fixed_asset_refs,
+    runtime_bindings_from_job,
 )
 from problem_locator.contracts import (
     AttachmentStatus,
@@ -192,6 +193,16 @@ def test_fixed_asset_refs_are_complete_stable_and_unique() -> None:
     ]
     assert len(refs) == len(
         {(item.id, item.version, item.content_hash) for item in refs}
+    )
+
+
+def test_runtime_bindings_are_recovered_without_catalog_substitution() -> None:
+    job = _route_job()
+
+    bindings = runtime_bindings_from_job(job)
+
+    assert bindings.model_dump(mode="json") == _route_bindings().model_dump(
+        mode="json"
     )
 
 
