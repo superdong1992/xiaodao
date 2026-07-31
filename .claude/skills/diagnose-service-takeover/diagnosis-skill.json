@@ -1,0 +1,1 @@
+{"capability":"service-takeover","entry_document":"SKILL.md","id":"diagnose-service-takeover","logparse_product":"compact","requires_logparse":true,"schema_version":1,"summary":"定位合成服务接管场景中的 RPC 超时","tool_bundle_id":"tool-bundle/diagnose","version":"2.0.0"}

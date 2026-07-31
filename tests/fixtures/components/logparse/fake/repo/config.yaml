@@ -1,0 +1,10 @@
+schema_version: 2
+pipeline:
+  debug_expand_gz: false
+  extraction_workers: auto
+  diagnostic_scan_workers: auto
+  keep_workspace: false
+products:
+  compact:
+    archive:
+      compressed_extensions: [.gz, .zip, .tar.gz, .tgz, .tar]

@@ -1,0 +1,50 @@
+{
+  "repository": "https://github.com/superdong1992/problem-locator-mcp.git",
+  "source_commit": "97d0446580f49e7b1add1c5fc6d6a41c97884884",
+  "source_root": ".claude/skills/wiki-to-diagnosis-skill",
+  "files": [
+    {
+      "path": "SKILL.md",
+      "mode": "100644",
+      "size": 4403,
+      "sha256": "6abb4f71feead1e2baabe94c9c03c5dede92a91dcc34fa0a611fd746b586bab2"
+    },
+    {
+      "path": "references/generated-skill-contract.md",
+      "mode": "100644",
+      "size": 5475,
+      "sha256": "3d6f79eef00887a4588784b91f0a9f8d1659343d88e5d327e48ac710a3be6783"
+    },
+    {
+      "path": "references/wiki-template.md",
+      "mode": "100644",
+      "size": 2163,
+      "sha256": "cb5d1620fa66fff1d622b5c2332e71140c4f0648691a7753192a77c1ed742914"
+    },
+    {
+      "path": "scripts/pack_result_zip.py",
+      "mode": "100644",
+      "size": 1782,
+      "sha256": "0a5de3a135dc1cf4f11c71d01cdea0b11758860b0644a33f0a880cdd2e57e46e"
+    },
+    {
+      "path": "scripts/validate_generated_skill.py",
+      "mode": "100644",
+      "size": 14670,
+      "sha256": "e7af52cd53860343e129ed243e43e8f0e7a6795388348c2bf575e570c70ea30a"
+    }
+  ],
+  "excluded_patterns": [
+    "**/__pycache__/**",
+    "**/.pytest_cache/**",
+    "**/*.pyc",
+    "**/.DS_Store",
+    "**/.managed",
+    "**/.managed.*",
+    "**/.codex-managed"
+  ],
+  "observed_excluded_paths": [
+    "scripts/__pycache__/pack_result_zip.cpython-312.pyc",
+    "scripts/__pycache__/validate_generated_skill.cpython-312.pyc"
+  ]
+}
