@@ -11,8 +11,11 @@ from problem_locator.contracts import (
     CaseQueryResponse,
     CaseStatus,
     ErrorCode,
+    GetCase,
     Job,
     JobStatus,
+    ListArtifacts,
+    OpenArtifact,
     OpenArtifactResult,
     ResourceKind,
     ResourceRef,
@@ -66,6 +69,24 @@ class ApplicationQueryService:
         wait_for_job_id: str | None = None,
         wait_seconds: int = 0,
     ) -> CaseQueryResponse:
+        try:
+            query = GetCase.model_validate(
+                {
+                    "case_id": case_id,
+                    "wait_for_job_id": wait_for_job_id,
+                    "wait_seconds": wait_seconds,
+                },
+                strict=True,
+            )
+        except (TypeError, ValueError):
+            raise_port_error(
+                ErrorCode.VALIDATION_ERROR,
+                "ApplicationQueryPort.get_case received invalid raw input.",
+            )
+        case_id = query.case_id
+        wait_for_job_id = query.wait_for_job_id
+        wait_seconds = query.wait_seconds
+
         snapshot = self._repository.read_snapshot()
         aggregate = snapshot.cases.get(case_id)
         if aggregate is None:
@@ -122,6 +143,22 @@ class ApplicationQueryService:
         case_id: str,
         include_internal: bool = False,
     ) -> ArtifactListResponse:
+        try:
+            query = ListArtifacts.model_validate(
+                {
+                    "case_id": case_id,
+                    "include_internal": include_internal,
+                },
+                strict=True,
+            )
+        except (TypeError, ValueError):
+            raise_port_error(
+                ErrorCode.VALIDATION_ERROR,
+                "ApplicationQueryPort.list_artifacts received invalid raw input.",
+            )
+        case_id = query.case_id
+        include_internal = query.include_internal
+
         snapshot = self._repository.read_snapshot()
         aggregate = snapshot.cases.get(case_id)
         if aggregate is None:
@@ -139,6 +176,19 @@ class ApplicationQueryService:
         case_id: str,
         artifact_id: str,
     ) -> OpenArtifactResult:
+        try:
+            query = OpenArtifact.model_validate(
+                {"case_id": case_id, "artifact_id": artifact_id},
+                strict=True,
+            )
+        except (TypeError, ValueError):
+            raise_port_error(
+                ErrorCode.VALIDATION_ERROR,
+                "ApplicationQueryPort.open_artifact received invalid raw input.",
+            )
+        case_id = query.case_id
+        artifact_id = query.artifact_id
+
         snapshot = self._repository.read_snapshot()
         aggregate = snapshot.cases.get(case_id)
         if aggregate is None:

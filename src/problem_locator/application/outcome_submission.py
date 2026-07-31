@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
+
+from pydantic import BaseModel, ValidationError
 
 from problem_locator.contracts import (
     ApplicationError,
@@ -43,11 +46,12 @@ from problem_locator.contracts import (
     TriggerType,
     UserResultPayload,
     ValidatedTrigger,
+    VersionedRef,
     canonical_json_bytes,
 )
 from problem_locator.contracts.errors import deterministic_outcome_failure
-from problem_locator.contracts.limits import MAX_CASE_RESOURCE_BYTES
 from problem_locator.contracts.outcomes import (
+    coordinator_outcome_error_failure,
     validate_coordinator_plan_result,
     validate_outcome_for_job,
     validate_transition_plan_for_outcome,
@@ -90,6 +94,11 @@ from .projection import (
     continuation_for_outcome,
     project_case_components,
     project_case_view,
+)
+from .runtime_bindings import (
+    rebuild_runtime_bindings_for_role,
+    runtime_bindings_from_job_spec,
+    runtime_bindings_match_role,
 )
 
 
@@ -144,12 +153,26 @@ class OutcomeSubmissionService:
         job_outcome: JobOutcome,
         outcome_file_ref: ExecutionFileRef,
     ) -> OutcomeReceipt:
-        # Reconstructing this contract DTO checks the caller's canonical file
-        # receipt without introducing a second command or error shape.
-        command = SubmitJobOutcome(
-            job_outcome=job_outcome,
-            outcome_file_ref=outcome_file_ref,
-        )
+        # Rebuild nested contract objects as raw data first. Pydantic accepts
+        # already-constructed nested models without re-running every nested
+        # validator, including deliberately unsafe ``model_construct`` input.
+        # The public Port boundary must reject that input before any clock,
+        # ID, repository, execution-record, Catalog, Coordinator, or lease use.
+        try:
+            command = SubmitJobOutcome.model_validate(
+                {
+                    "job_outcome": _rebuild_contract_input(job_outcome),
+                    "outcome_file_ref": _rebuild_contract_input(
+                        outcome_file_ref
+                    ),
+                },
+                strict=True,
+            )
+        except (TypeError, ValueError, ValidationError):
+            raise_port_error(
+                ErrorCode.VALIDATION_ERROR,
+                "JobControlPort.submit_outcome received invalid raw input.",
+            )
         processed_at = self._clock.now()
         outcome_trigger_id = self._ids.new("trigger")
         control_trigger_id = self._ids.new("trigger")
@@ -355,11 +378,44 @@ class OutcomeSubmissionService:
                 reclassify_stale=True,
             )
 
-        bindings = (
-            {recovered_job.job.job_type: runtime_bindings_from_job(recovered_job.job)}
-            if recovered_job is not None
-            else self._bindings_for_outcome(located, outcome)
+        expected_next_job_type = _expected_next_job_type(located, outcome)
+        recovered_bindings = (
+            None
+            if recovered_job is None
+            else runtime_bindings_from_job(recovered_job.job)
         )
+        if recovered_job is not None and (
+            expected_next_job_type is None
+            or recovered_job.job.job_type is not expected_next_job_type
+            or not runtime_bindings_match_role(
+                expected_next_job_type,
+                recovered_bindings,
+                expected_skill_ref=_expected_next_job_skill_ref(
+                    located,
+                    outcome,
+                    expected_next_job_type,
+                ),
+            )
+        ):
+            return self._reject(
+                snapshot,
+                located,
+                outcome,
+                command.outcome_file_ref,
+                trusted_outcome=outcome,
+                rejection=_DeterministicRejection(
+                    ErrorCode.EXECUTION_RECORD_FAILED
+                ),
+                processed_at=processed_at,
+                control_trigger_id=control_trigger_id,
+                reclassify_stale=True,
+            )
+        if recovered_job is not None:
+            assert expected_next_job_type is not None
+            assert recovered_bindings is not None
+            bindings = {expected_next_job_type: recovered_bindings}
+        else:
+            bindings = self._bindings_for_outcome(located, outcome)
         try:
             trigger = _outcome_trigger(
                 snapshot,
@@ -375,22 +431,51 @@ class OutcomeSubmissionService:
                     trigger,
                 ),
             )
-            if isinstance(result, ApplicationError):
-                return self._reject(
+        except (TypeError, ValueError):
+            return self._reject(
+                snapshot,
+                located,
+                outcome,
+                command.outcome_file_ref,
+                trusted_outcome=outcome,
+                rejection=_DeterministicRejection(ErrorCode.OUTCOME_INVALID),
+                processed_at=processed_at,
+                control_trigger_id=control_trigger_id,
+                reclassify_stale=True,
+            )
+
+        if isinstance(result, ApplicationError):
+            if result.code is ErrorCode.INVALID_CASE_STATE:
+                return self._record_stale(
                     snapshot,
                     located,
                     outcome,
                     command.outcome_file_ref,
-                    trusted_outcome=outcome,
-                    rejection=_DeterministicRejection(ErrorCode.OUTCOME_INVALID),
                     processed_at=processed_at,
                     control_trigger_id=control_trigger_id,
-                    reclassify_stale=True,
                 )
+            failure = coordinator_outcome_error_failure(trigger, result)
+            return self._reject(
+                snapshot,
+                located,
+                outcome,
+                command.outcome_file_ref,
+                trusted_outcome=outcome,
+                rejection=_DeterministicRejection(
+                    failure.code,
+                    tuple(failure.details),
+                ),
+                processed_at=processed_at,
+                control_trigger_id=control_trigger_id,
+                reclassify_stale=True,
+            )
+
+        try:
             plan = validate_transition_plan_for_outcome(result, outcome)
             if plan.outcome_disposition is not OutcomeDisposition.APPLIED:
                 raise ValueError("an active valid Outcome requires an APPLIED plan")
             _validate_applied_outcome_lifecycle(located, outcome, plan)
+            _validate_next_job_bindings(plan, bindings)
         except (TypeError, ValueError):
             return self._reject(
                 snapshot,
@@ -447,7 +532,7 @@ class OutcomeSubmissionService:
     ) -> _DeterministicRejection | None:
         aggregate = snapshot.cases[job.case_id]
         try:
-            # r2's non-mutating preflight covers both an existing completed
+            # The frozen non-mutating preflight covers both an existing completed
             # stage and its immutable already-published history.
             for proposal in outcome.proposed_evidence:
                 if proposal.staged_resource_ref is not None:
@@ -473,48 +558,35 @@ class OutcomeSubmissionService:
         job: Job,
         outcome: JobOutcome,
     ) -> dict[JobType, RuntimeBindings]:
-        payload = outcome.payload
-        if job.job_type is JobType.ROUTE:
-            if (
-                outcome.result_type is OutcomeResultType.COMPLETED
-                and payload is not None
-                and getattr(payload, "kind", None) is RouteKind.MATCHED
-            ):
-                assert payload.skill_ref is not None
-                return {
-                    JobType.DIAGNOSE: self._asset_catalog.diagnose_bindings(
-                        payload.skill_ref
-                    )
-                }
+        next_job_type = _expected_next_job_type(job, outcome)
+        if next_job_type is None:
             return {}
-        if job.job_type is JobType.DIAGNOSE:
-            if outcome.result_type is OutcomeResultType.REROUTE:
-                return {JobType.ROUTE: self._asset_catalog.route_bindings()}
-            if (
-                outcome.result_type is OutcomeResultType.COMPLETED
-                and isinstance(payload, DiagnosisOutcome)
-                and payload.candidate_conclusion_draft is not None
-                and job.skill_ref is not None
-            ):
-                return {
-                    JobType.REVIEW: self._asset_catalog.review_bindings(
-                        job.skill_ref
-                    )
-                }
-            return {}
-        if (
-            job.job_type is JobType.REVIEW
-            and outcome.result_type is OutcomeResultType.COMPLETED
-            and getattr(payload, "verdict", None) is not None
-            and payload.verdict is not ReviewVerdict.PASS
-            and job.skill_ref is not None
-        ):
+        if next_job_type is JobType.ROUTE:
             return {
-                JobType.DIAGNOSE: self._asset_catalog.diagnose_bindings(
-                    job.skill_ref
+                JobType.ROUTE: _validate_catalog_bindings(
+                    JobType.ROUTE,
+                    self._asset_catalog.route_bindings(),
                 )
             }
-        return {}
+        payload = outcome.payload
+        skill_ref = (
+            getattr(payload, "skill_ref", None)
+            if job.job_type is JobType.ROUTE
+            else job.skill_ref
+        )
+        assert skill_ref is not None
+        bindings = (
+            self._asset_catalog.review_bindings(skill_ref)
+            if next_job_type is JobType.REVIEW
+            else self._asset_catalog.diagnose_bindings(skill_ref)
+        )
+        return {
+            next_job_type: _validate_catalog_bindings(
+                next_job_type,
+                bindings,
+                expected_skill_ref=skill_ref,
+            )
+        }
 
     def _apply_plan(
         self,
@@ -618,12 +690,9 @@ class OutcomeSubmissionService:
                     )
                 except ApplicationPortError as error:
                     if error.error.code is ErrorCode.RESOURCE_LIMIT_EXCEEDED:
-                        details = tuple(error.error.details) or (
-                            _capacity_detail(),
-                        )
                         rejection = _DeterministicRejection(
                             ErrorCode.RESOURCE_LIMIT_EXCEEDED,
-                            details,
+                            tuple(error.error.details),
                         )
                     elif error.error.code in {
                         ErrorCode.RESOURCE_HASH_MISMATCH,
@@ -806,13 +875,16 @@ class OutcomeSubmissionService:
                     try:
                         self._execution_records.publish_job(created_job)
                     except ApplicationPortError as error:
-                        if error.error.code in {
-                            ErrorCode.IDEMPOTENCY_CONFLICT,
-                            ErrorCode.EXECUTION_RECORD_FAILED,
-                        }:
+                        if error.error.code is ErrorCode.IDEMPOTENCY_CONFLICT:
                             rejection = _DeterministicRejection(
                                 ErrorCode.EXECUTION_RECORD_FAILED
                             )
+                        elif error.error.code is ErrorCode.EXECUTION_RECORD_FAILED:
+                            # A finalized Outcome is already the durable outbox.
+                            # Failure of its first next-job publication has no
+                            # disposition: the caller retries only this exact
+                            # submission receipt and never Runtime.execute.
+                            raise
                         else:
                             raise
 
@@ -930,13 +1002,19 @@ class OutcomeSubmissionService:
                 processed_at,
                 control_trigger_id,
             )
-            result = validate_coordinator_plan_result(
-                trigger,
-                self._coordinator.plan(
-                    _case_snapshot(snapshot, job.case_id),
+            try:
+                result = validate_coordinator_plan_result(
                     trigger,
-                ),
-            )
+                    self._coordinator.plan(
+                        _case_snapshot(snapshot, job.case_id),
+                        trigger,
+                    ),
+                )
+            except (TypeError, ValueError):
+                raise_port_error(
+                    ErrorCode.STATE_WRITE_FAILED,
+                    "The active Outcome rejection decision is invalid.",
+                )
             if isinstance(result, ApplicationError):
                 raise_port_error(
                     ErrorCode.STATE_WRITE_FAILED,
@@ -1032,13 +1110,19 @@ class OutcomeSubmissionService:
                 processed_at,
                 control_trigger_id,
             )
-            result = validate_coordinator_plan_result(
-                trigger,
-                self._coordinator.plan(
-                    _case_snapshot(snapshot, job.case_id),
+            try:
+                result = validate_coordinator_plan_result(
                     trigger,
-                ),
-            )
+                    self._coordinator.plan(
+                        _case_snapshot(snapshot, job.case_id),
+                        trigger,
+                    ),
+                )
+            except (TypeError, ValueError):
+                raise_port_error(
+                    ErrorCode.STATE_WRITE_FAILED,
+                    "The stale active Outcome decision is invalid.",
+                )
             if isinstance(result, ApplicationError):
                 raise_port_error(
                     ErrorCode.STATE_WRITE_FAILED,
@@ -1157,12 +1241,107 @@ def _find_job(snapshot: StateFile, job_id: str) -> Job | None:
     return None
 
 
+def _rebuild_contract_input(value: Any) -> Any:
+    if isinstance(value, BaseModel):
+        return value.model_dump(mode="python", warnings=False)
+    return value
+
+
 def _find_processing_record(snapshot: StateFile, outcome_id: str):
     for case_id, aggregate in snapshot.cases.items():
         record = aggregate.outcome_processing_records.get(outcome_id)
         if record is not None:
             return case_id, record
     return None
+
+
+def _expected_next_job_type(
+    job: Job,
+    outcome: JobOutcome,
+) -> JobType | None:
+    """Return the sole role for which this Outcome may need pinned bindings."""
+
+    payload = outcome.payload
+    if job.job_type is JobType.ROUTE:
+        if (
+            outcome.result_type is OutcomeResultType.COMPLETED
+            and getattr(payload, "kind", None) is RouteKind.MATCHED
+            and getattr(payload, "skill_ref", None) is not None
+        ):
+            return JobType.DIAGNOSE
+        return None
+    if job.job_type is JobType.DIAGNOSE:
+        if outcome.result_type is OutcomeResultType.REROUTE:
+            return JobType.ROUTE
+        if (
+            outcome.result_type is OutcomeResultType.COMPLETED
+            and isinstance(payload, DiagnosisOutcome)
+            and job.skill_ref is not None
+        ):
+            return (
+                JobType.DIAGNOSE
+                if payload.candidate_conclusion_draft is None
+                else JobType.REVIEW
+            )
+        return None
+    if (
+        job.job_type is JobType.REVIEW
+        and outcome.result_type is OutcomeResultType.COMPLETED
+        and getattr(payload, "verdict", None) is not None
+        and payload.verdict is not ReviewVerdict.PASS
+        and job.skill_ref is not None
+    ):
+        return JobType.DIAGNOSE
+    return None
+
+
+def _expected_next_job_skill_ref(
+    job: Job,
+    outcome: JobOutcome,
+    next_job_type: JobType,
+) -> VersionedRef | None:
+    if next_job_type is JobType.ROUTE:
+        return None
+    if job.job_type is JobType.ROUTE:
+        return getattr(outcome.payload, "skill_ref", None)
+    return job.skill_ref
+
+
+def _validate_catalog_bindings(
+    job_type: JobType,
+    bindings: RuntimeBindings,
+    *,
+    expected_skill_ref: VersionedRef | None = None,
+) -> RuntimeBindings:
+    """Reject a malformed Catalog success without substituting asset versions."""
+
+    try:
+        return rebuild_runtime_bindings_for_role(
+            job_type,
+            bindings,
+            expected_skill_ref=expected_skill_ref,
+        )
+    except (TypeError, ValueError, ValidationError):
+        raise_port_error(
+            ErrorCode.CONFIG_INVALID,
+            "The pinned runtime bindings are invalid for their requested role.",
+        )
+
+
+def _validate_next_job_bindings(
+    plan: TransitionPlan,
+    offered: dict[JobType, RuntimeBindings],
+) -> None:
+    """Require Coordinator to copy the one offered pinned binding verbatim."""
+
+    spec = plan.next_job_spec
+    if spec is None:
+        return
+    expected = offered.get(spec.job_type)
+    if expected is None or runtime_bindings_from_job_spec(spec) != expected:
+        raise ValueError(
+            "next Job runtime bindings must exactly match the Trigger binding"
+        )
 
 
 def _case_snapshot(snapshot: StateFile, case_id: str):
@@ -1365,19 +1544,6 @@ def _validate_applied_outcome_lifecycle(
         or update.runtime_epoch is not None
     ):
         raise ValueError("Outcome plan has an invalid source Job lifecycle update")
-
-
-def _capacity_detail() -> ApplicationErrorDetail:
-    return ApplicationErrorDetail(
-        field=None,
-        resource_type=None,
-        resource_id=None,
-        resource_ref=None,
-        expected=None,
-        actual=None,
-        limit=MAX_CASE_RESOURCE_BYTES,
-        observed=MAX_CASE_RESOURCE_BYTES + 1,
-    )
 
 
 __all__ = ["OutcomeSubmissionService"]

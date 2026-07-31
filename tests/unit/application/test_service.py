@@ -4,6 +4,8 @@ import hashlib
 import json
 from pathlib import Path
 
+import pytest
+
 from problem_locator.application.projection import project_case_view
 from problem_locator.application.service import (
     ApplicationService,
@@ -161,7 +163,13 @@ def test_facade_routes_streaming_and_nonstreaming_commands_once() -> None:
     assert upload_response.dispatch_pending is False
 
 
-def test_upload_projection_state_failure_does_not_hide_durable_receipt() -> None:
+@pytest.mark.parametrize(
+    "code",
+    [ErrorCode.STATE_CORRUPT, ErrorCode.STATE_SCHEMA_UNSUPPORTED],
+)
+def test_upload_projection_state_failure_does_not_hide_durable_receipt(
+    code: ErrorCode,
+) -> None:
     receipt = BusinessReceipt(
         operation="UploadAttachmentContent",
         primary_resource_id=ATTACHMENT_ID,
@@ -171,7 +179,7 @@ def test_upload_projection_state_failure_does_not_hide_durable_receipt() -> None
         status="READY",
     )
     upload = _Upload(receipt)
-    queries = _FailingQueries(_port_error(ErrorCode.STATE_CORRUPT))
+    queries = _FailingQueries(_port_error(code))
     service = ApplicationService(object(), upload, queries, object(), object())
     payload = b"payload"
     command = UploadAttachmentContent(

@@ -206,20 +206,44 @@ class _CountingRepository(InMemoryStateRepository):
 
 
 class _ReadFailsAfterCommitRepository(_CountingRepository):
-    def __init__(self, state: StateFile) -> None:
+    def __init__(
+        self,
+        state: StateFile,
+        error_code: ErrorCode = ErrorCode.STATE_CORRUPT,
+    ) -> None:
         super().__init__(state)
         self.fail_next_read = False
+        self.error_code = error_code
 
     def read_snapshot(self) -> StateFile:
         if self.fail_next_read:
             self.fail_next_read = False
-            raise _application_error(ErrorCode.STATE_CORRUPT)
+            raise _application_error(self.error_code)
         return super().read_snapshot()
 
     def commit(self, expected_generation: int, expected_case_revision: int | None, mutation: Any):
         receipt = super().commit(expected_generation, expected_case_revision, mutation)
         self.fail_next_read = True
         return receipt
+
+
+class _ReadFailsOnSnapshotNumberRepository(_CountingRepository):
+    def __init__(
+        self,
+        state: StateFile,
+        failure: ApplicationPortError,
+        *,
+        fail_on_snapshot_number: int,
+    ) -> None:
+        super().__init__(state)
+        self.failure = failure
+        self.fail_on_snapshot_number = fail_on_snapshot_number
+
+    def read_snapshot(self) -> StateFile:
+        if self.snapshot_reads + 1 == self.fail_on_snapshot_number:
+            self.snapshot_reads += 1
+            raise self.failure
+        return super().read_snapshot()
 
 
 class _ReadyOnPostStageRepository(_CountingRepository):
@@ -393,8 +417,86 @@ def test_upload_streams_once_then_publishes_and_returns_persisted_receipt() -> N
     assert clock.calls == 1
 
 
-def test_post_commit_state_read_failure_cannot_replace_upload_success() -> None:
-    repository = _ReadFailsAfterCommitRepository(_state())
+@pytest.mark.parametrize(
+    "code",
+    [ErrorCode.STATE_CORRUPT, ErrorCode.STATE_SCHEMA_UNSUPPORTED],
+)
+def test_precommit_state_read_fault_is_exact_and_never_consumes_body(
+    code: ErrorCode,
+) -> None:
+    repository = _CountingRepository(_state())
+    failure = _application_error(code, "The frozen state could not be read.")
+    repository.inject_read_failure("read_snapshot", failure)
+    service, _, resources, upload_guard, publication_guard, notifier, clock = _rig(
+        repository=repository
+    )
+    body = InMemoryBinaryStream(PAYLOAD)
+
+    with pytest.raises(ApplicationPortError) as captured:
+        service.execute(_command(body))
+
+    assert captured.value is failure
+    assert body.read_requests == []
+    assert body.close_calls == 1
+    assert resources.stage_attachment_calls == []
+    assert publication_guard.acquire_calls == 0
+    assert upload_guard.acquire_calls == [ATTACHMENT_ID]
+    assert upload_guard.release_calls == [ATTACHMENT_ID]
+    assert notifier.notify_calls == []
+    assert clock.calls == 0
+
+
+@pytest.mark.parametrize(
+    "code",
+    [ErrorCode.STATE_CORRUPT, ErrorCode.STATE_SCHEMA_UNSUPPORTED],
+)
+def test_post_stage_state_read_fault_discards_stage_without_publish_or_commit(
+    code: ErrorCode,
+) -> None:
+    failure = _application_error(code, "The fresh frozen state could not be read.")
+    repository = _ReadFailsOnSnapshotNumberRepository(
+        _state(),
+        failure,
+        fail_on_snapshot_number=2,
+    )
+    service, _, resources, upload_guard, publication_guard, notifier, clock = _rig(
+        repository=repository
+    )
+    body = _ObservedStream(PAYLOAD, publication_guard)
+
+    with pytest.raises(ApplicationPortError) as captured:
+        service.execute(_command(body))
+
+    assert captured.value is failure
+    assert repository.snapshot_reads == 2
+    assert repository.commit_attempts == []
+    assert resources.stage_attachment_calls == [ATTACHMENT_ID]
+    assert resources.plan_target_calls == []
+    assert resources.capacity_calls == []
+    assert resources.publish_calls == []
+    assert len(resources.discard_calls) == 1
+    assert resources.discard_calls[0].attachment_id == ATTACHMENT_ID
+    assert resources.staged_resource_count == 0
+    assert body.bytes_read == len(PAYLOAD)
+    assert body.returned_sizes == [len(PAYLOAD), 0]
+    assert body.publication_lease_during_reads == [False, False]
+    assert body.close_calls == 1
+    assert upload_guard.acquire_calls == [ATTACHMENT_ID]
+    assert upload_guard.release_calls == [ATTACHMENT_ID]
+    assert publication_guard.acquire_calls == publication_guard.release_calls == 1
+    assert publication_guard.held_by_current_thread() is False
+    assert notifier.notify_calls == []
+    assert clock.calls == 1
+
+
+@pytest.mark.parametrize(
+    "code",
+    [ErrorCode.STATE_CORRUPT, ErrorCode.STATE_SCHEMA_UNSUPPORTED],
+)
+def test_post_commit_state_read_fault_cannot_replace_upload_success(
+    code: ErrorCode,
+) -> None:
+    repository = _ReadFailsAfterCommitRepository(_state(), code)
     service, _, resources, upload_guard, publication_guard, _, _ = _rig(
         repository=repository
     )
@@ -735,6 +837,11 @@ def test_capacity_failure_moves_no_stage_and_discards_after_lease_release() -> N
         service.execute(_command(body))
 
     assert captured.value.error.code is ErrorCode.RESOURCE_LIMIT_EXCEEDED
+    assert len(captured.value.error.details) == 1
+    assert captured.value.error.details[0].limit == MAX_CASE_RESOURCE_BYTES
+    assert captured.value.error.details[0].observed == (
+        MAX_CASE_RESOURCE_BYTES + len(PAYLOAD)
+    )
     assert len(resources.capacity_calls) == 1
     assert resources.publish_calls == []
     assert len(resources.discard_calls) == 1

@@ -3,9 +3,12 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from problem_locator.application.external_commands import ExternalCommandHandler
 from problem_locator.contracts import (
     ApplicationError,
+    ApplicationErrorDetail,
     ApplicationPortError,
     AttachmentStatus,
     CancelCase,
@@ -24,6 +27,7 @@ from problem_locator.contracts import (
     JobStatus,
     JobType,
     MAX_ATTACHMENT_BYTES,
+    MAX_CASE_RESOURCE_BYTES,
     OutcomeDisposition,
     OutcomeProcessingRecord,
     OutcomeResultType,
@@ -204,6 +208,27 @@ class _ImmediateTimeoutNotifier:
         return False
 
 
+class _InjectReadFaultOnWaitNotifier(_ImmediateTimeoutNotifier):
+    def __init__(
+        self,
+        repository: InMemoryStateRepository,
+        failure: ApplicationPortError,
+    ) -> None:
+        super().__init__()
+        self._repository = repository
+        self._failure = failure
+
+    def wait_for_change(
+        self,
+        case_id: str,
+        after_generation: int,
+        timeout_seconds: float,
+    ) -> bool:
+        self.wait_calls.append((case_id, after_generation, timeout_seconds))
+        self._repository.inject_read_failure("read_snapshot", self._failure)
+        return False
+
+
 class _LeaseCheckingExecutionRecords(InMemoryExecutionRecordStore):
     def __init__(self) -> None:
         super().__init__()
@@ -218,16 +243,21 @@ class _LeaseCheckingExecutionRecords(InMemoryExecutionRecordStore):
 
 
 class _ReadFailsAfterCommitRepository(InMemoryStateRepository):
-    def __init__(self, state: StateFile) -> None:
+    def __init__(
+        self,
+        state: StateFile,
+        error_code: ErrorCode = ErrorCode.STATE_CORRUPT,
+    ) -> None:
         super().__init__(state)
         self.fail_next_read = False
+        self.error_code = error_code
 
     def read_snapshot(self) -> StateFile:
         if self.fail_next_read:
             self.fail_next_read = False
             raise ApplicationPortError(
                 _command_error(
-                    ErrorCode.STATE_CORRUPT,
+                    self.error_code,
                     "injected post-commit state failure",
                 )
             )
@@ -430,6 +460,153 @@ def test_create_job_publication_errors_propagate_without_state_commit() -> None:
         assert dispatcher.submit_calls == []
 
 
+def test_precommit_state_read_faults_propagate_without_touching_dependencies() -> None:
+    for code in {
+        ErrorCode.STATE_CORRUPT,
+        ErrorCode.STATE_SCHEMA_UNSUPPORTED,
+    }:
+        repository = InMemoryStateRepository(
+            _state().model_copy(update={"generation": 0, "cases": {}})
+        )
+        failure = ApplicationPortError(
+            _command_error(code, "The frozen state could not be read.")
+        )
+        repository.inject_read_failure("read_snapshot", failure)
+        coordinator = ScriptedCoordinator()
+        catalog = FakeAssetCatalog(route=_bindings(_job("job-route.json")))
+        handler, _, guard, _, dispatcher, notifier, clock, ids = _handler(
+            _state().model_copy(update={"generation": 0, "cases": {}}),
+            coordinator,
+            repository=repository,
+            catalog=catalog,
+        )
+
+        captured = _expect_port_error(
+            lambda: handler.execute(_create_command()),
+            code,
+        )
+
+        assert captured is failure
+        assert repository.commit_calls == []
+        assert coordinator.calls == []
+        assert catalog.route_calls == 0
+        assert guard.acquire_calls == 0
+        assert dispatcher.submit_calls == []
+        assert notifier.notify_calls == []
+        assert clock.calls == 0
+        assert ids.new_calls == []
+
+
+def test_create_rejects_trigger_illegal_coordinator_error_without_commit() -> None:
+    coordinator = ScriptedCoordinator(
+        [
+            _command_error(
+                ErrorCode.NEW_CASE_REQUIRED,
+                "This code is not legal for CREATE_CASE.",
+            )
+        ]
+    )
+    execution_records = InMemoryExecutionRecordStore()
+    handler, repository, guard, _, dispatcher, notifier, _, _ = _handler(
+        _state().model_copy(update={"generation": 0, "cases": {}}),
+        coordinator,
+        execution_records=execution_records,
+    )
+
+    _expect_port_error(
+        lambda: handler.execute(_create_command()),
+        ErrorCode.VALIDATION_ERROR,
+    )
+
+    assert len(coordinator.calls) == 1
+    assert repository.commit_calls == []
+    assert execution_records.publish_job_calls == []
+    assert guard.acquire_calls == 0
+    assert dispatcher.submit_calls == []
+    assert notifier.notify_calls == []
+
+
+def test_create_rejects_wrong_coordinator_union_type_without_commit() -> None:
+    coordinator = ScriptedCoordinator([object()])
+    execution_records = InMemoryExecutionRecordStore()
+    handler, repository, guard, _, dispatcher, notifier, _, _ = _handler(
+        _state().model_copy(update={"generation": 0, "cases": {}}),
+        coordinator,
+        execution_records=execution_records,
+    )
+
+    _expect_port_error(
+        lambda: handler.execute(_create_command()),
+        ErrorCode.VALIDATION_ERROR,
+    )
+
+    assert len(coordinator.calls) == 1
+    assert repository.commit_calls == []
+    assert execution_records.publish_job_calls == []
+    assert guard.acquire_calls == 0
+    assert dispatcher.submit_calls == []
+    assert notifier.notify_calls == []
+
+
+def test_create_rejects_coordinator_runtime_binding_substitution() -> None:
+    route = _job("job-route.json")
+    replacement_profile = route.agent_profile_ref.model_copy(
+        update={"version": "9.9.9", "content_hash": "f" * 64}
+    )
+
+    def substituted_plan(snapshot, trigger):
+        assert trigger.runtime_bindings_by_job_type[JobType.ROUTE] == _bindings(
+            route
+        )
+        return _plan(
+            target_status=CaseStatus.RUNNING,
+            next_job_spec=_job_spec(route, target_revision=1).model_copy(
+                update={"agent_profile_ref": replacement_profile}
+            ),
+        )
+
+    execution_records = InMemoryExecutionRecordStore()
+    handler, repository, guard, _, dispatcher, notifier, _, _ = _handler(
+        _state().model_copy(update={"generation": 0, "cases": {}}),
+        ScriptedCoordinator([substituted_plan]),
+        execution_records=execution_records,
+    )
+
+    _expect_port_error(
+        lambda: handler.execute(_create_command()),
+        ErrorCode.VALIDATION_ERROR,
+    )
+
+    assert repository.commit_calls == []
+    assert execution_records.publish_job_calls == []
+    assert guard.acquire_calls == 0
+    assert dispatcher.submit_calls == []
+    assert notifier.notify_calls == []
+
+
+def test_create_catalog_config_fault_is_typed_and_commits_nothing() -> None:
+    catalog = FakeAssetCatalog()
+    coordinator = ScriptedCoordinator()
+    handler, repository, guard, _, dispatcher, notifier, _, _ = _handler(
+        _state().model_copy(update={"generation": 0, "cases": {}}),
+        coordinator,
+        catalog=catalog,
+    )
+
+    error = _expect_port_error(
+        lambda: handler.execute(_create_command()),
+        ErrorCode.CONFIG_INVALID,
+    )
+
+    assert error.error.retryable is False
+    assert catalog.route_calls == 1
+    assert coordinator.calls == []
+    assert repository.commit_calls == []
+    assert guard.acquire_calls == 0
+    assert dispatcher.submit_calls == []
+    assert notifier.notify_calls == []
+
+
 def test_prepare_attachment_classifies_limits_and_only_bumps_case_revision() -> None:
     coordinator = ScriptedCoordinator()
     ids = DeterministicIdGenerator(
@@ -481,38 +658,126 @@ def test_prepare_attachment_classifies_limits_and_only_bumps_case_revision() -> 
     assert len(repository.commit_calls) == 1
 
 
-def test_post_commit_state_read_failure_preserves_external_business_receipt() -> None:
-    repository = _ReadFailsAfterCommitRepository(_state())
-    handler, _, guard, _, _, notifier, _, _ = _handler(
-        _state(),
-        ScriptedCoordinator(),
+def test_post_commit_state_read_faults_preserve_external_business_receipt() -> None:
+    for code in {
+        ErrorCode.STATE_CORRUPT,
+        ErrorCode.STATE_SCHEMA_UNSUPPORTED,
+    }:
+        repository = _ReadFailsAfterCommitRepository(_state(), code)
+        handler, _, guard, _, _, notifier, _, _ = _handler(
+            _state(),
+            ScriptedCoordinator(),
+            ids=DeterministicIdGenerator(
+                scripted_ids={"attachment": [ATTACHMENT_ID]}
+            ),
+            repository=repository,
+        )
+        command = PrepareAttachment(
+            idempotency_key=f"prepare-post-commit-{code.value}",
+            case_id=CASE_ID,
+            expected_case_revision=1,
+            name="server.log",
+            content_type="text/plain",
+            declared_size=5,
+            declared_sha256=(
+                "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+            ),
+        )
+
+        response = handler.execute(command)
+
+        assert response.business_receipt.primary_resource_id == ATTACHMENT_ID
+        assert response.business_receipt.case_revision == 2
+        assert response.case_view is None
+        assert response.wait_timed_out is False
+        assert repository.fail_next_read is False
+        assert guard.acquire_calls == guard.release_calls == 1
+        assert notifier.notify_calls == [(CASE_ID, 2)]
+        assert repository.read_snapshot().cases[CASE_ID].case.case_revision == 2
+
+
+@pytest.mark.parametrize(
+    "code",
+    [ErrorCode.STATE_CORRUPT, ErrorCode.STATE_SCHEMA_UNSUPPORTED],
+)
+def test_post_commit_read_fault_does_not_report_a_wait_timeout(
+    code: ErrorCode,
+) -> None:
+    route = _job("job-route.json")
+    state = _state().model_copy(update={"generation": 0, "cases": {}})
+    repository = _ReadFailsAfterCommitRepository(state, code)
+    handler, _, guard, _, dispatcher, notifier, _, _ = _handler(
+        state,
+        ScriptedCoordinator(
+            [
+                lambda snapshot, trigger: _plan(
+                    target_status=CaseStatus.RUNNING,
+                    next_job_spec=_job_spec(route, target_revision=1),
+                )
+            ]
+        ),
         ids=DeterministicIdGenerator(
-            scripted_ids={"attachment": [ATTACHMENT_ID]}
+            scripted_ids={
+                "case": [NEW_CASE_ID],
+                "trigger": [TRIGGER_ID],
+                "job": [NEW_JOB_ID],
+                "diagnosis_item": [FACT_ID],
+            }
         ),
         repository=repository,
     )
-    command = PrepareAttachment(
-        idempotency_key="prepare-post-commit-read-failure",
-        case_id=CASE_ID,
-        expected_case_revision=1,
-        name="server.log",
-        content_type="text/plain",
-        declared_size=5,
-        declared_sha256=(
-            "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
-        ),
-    )
 
-    response = handler.execute(command)
+    response = handler.execute(_create_command(wait_seconds=5))
 
-    assert response.business_receipt.primary_resource_id == ATTACHMENT_ID
-    assert response.business_receipt.case_revision == 2
+    assert response.business_receipt.case_id == NEW_CASE_ID
     assert response.case_view is None
     assert response.wait_timed_out is False
-    assert repository.fail_next_read is False
+    assert response.dispatch_pending is False
     assert guard.acquire_calls == guard.release_calls == 1
-    assert notifier.notify_calls == [(CASE_ID, 2)]
-    assert repository.read_snapshot().cases[CASE_ID].case.case_revision == 2
+    assert dispatcher.submit_calls == [NEW_JOB_ID]
+    assert notifier.notify_calls == [(NEW_CASE_ID, 1)]
+
+
+@pytest.mark.parametrize(
+    "code",
+    [ErrorCode.STATE_CORRUPT, ErrorCode.STATE_SCHEMA_UNSUPPORTED],
+)
+def test_replay_wait_read_fault_preserves_the_saved_business_receipt(
+    code: ErrorCode,
+) -> None:
+    state = _state()
+    active_job_id = state.cases[CASE_ID].case.active_job_id
+    assert active_job_id is not None
+    repository = InMemoryStateRepository(state)
+    failure = ApplicationPortError(
+        _command_error(code, "The replay projection could not read state.")
+    )
+    notifier = _InjectReadFaultOnWaitNotifier(repository, failure)
+    handler, _, guard, _, dispatcher, _, clock, _ = _handler(
+        state,
+        ScriptedCoordinator(),
+        repository=repository,
+        notifier=notifier,
+    )
+    command = ResumeCase(
+        idempotency_key=f"resume-replay-{code.value}",
+        case_id=CASE_ID,
+        expected_case_revision=1,
+        wait_seconds=0,
+    )
+
+    first = handler.execute(command)
+    replay = handler.execute(command.model_copy(update={"wait_seconds": 5}))
+
+    assert replay.business_receipt == first.business_receipt
+    assert replay.case_view is None
+    assert replay.wait_timed_out is False
+    assert replay.dispatch_pending is False
+    assert len(repository.commit_calls) == 1
+    assert guard.acquire_calls == guard.release_calls == 1
+    assert notifier.wait_calls == [(CASE_ID, 2, 5.0)]
+    assert dispatcher.submit_calls == [active_job_id, active_job_id]
+    assert clock.calls == 1
 
 
 def test_prepare_attachment_recomputes_at_most_three_conflicting_commits() -> None:
@@ -609,6 +874,58 @@ def test_prepare_attachment_maps_capacity_path_error_and_releases_lease() -> Non
     )
 
     assert error.error.retryable is True
+    assert repository.commit_calls == []
+    assert guard.acquire_calls == guard.release_calls == 1
+    assert dispatcher.submit_calls == []
+    assert notifier.notify_calls == []
+
+
+def test_prepare_attachment_preserves_r3_capacity_observation_details() -> None:
+    handler, repository, guard, resources, dispatcher, notifier, _, _ = _handler(
+        _state(),
+        ScriptedCoordinator(),
+        ids=DeterministicIdGenerator(
+            scripted_ids={"attachment": [ATTACHMENT_ID]}
+        ),
+    )
+    detail = ApplicationErrorDetail(
+        field="case_resource_bytes",
+        resource_type="CASE",
+        resource_id=CASE_ID,
+        resource_ref=None,
+        expected=None,
+        actual=None,
+        limit=MAX_CASE_RESOURCE_BYTES,
+        observed=MAX_CASE_RESOURCE_BYTES + 17,
+    )
+    failure = ApplicationPortError(
+        ApplicationError(
+            code=ErrorCode.RESOURCE_LIMIT_EXCEEDED,
+            message="The Case resource capacity is exceeded.",
+            details=[detail],
+            retryable=False,
+        )
+    )
+    resources.inject_failure("validate_case_capacity", failure)
+    command = PrepareAttachment(
+        idempotency_key="prepare-capacity-observed",
+        case_id=CASE_ID,
+        expected_case_revision=1,
+        name="server.log",
+        content_type="text/plain",
+        declared_size=5,
+        declared_sha256=(
+            "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+        ),
+    )
+
+    captured = _expect_port_error(
+        lambda: handler.execute(command),
+        ErrorCode.RESOURCE_LIMIT_EXCEEDED,
+    )
+
+    assert captured is failure
+    assert captured.error.details == [detail]
     assert repository.commit_calls == []
     assert guard.acquire_calls == guard.release_calls == 1
     assert dispatcher.submit_calls == []
@@ -734,6 +1051,108 @@ def _waiting_state(requirement_name: str = "rpc_method") -> StateFile:
     )
 
 
+def test_submit_supplement_catalog_binding_faults_are_typed_and_commit_nothing() -> None:
+    waiting = _waiting_state()
+    command = SubmitSupplement(
+        idempotency_key="supplement-catalog-failure",
+        case_id=CASE_ID,
+        expected_case_revision=2,
+        inputs={"rpc_method": "ReserveStock"},
+        attachment_ids=[],
+        wait_seconds=0,
+    )
+
+    for code in {
+        ErrorCode.ASSET_VERSION_UNAVAILABLE,
+        ErrorCode.CONFIG_INVALID,
+    }:
+        catalog = FakeAssetCatalog()
+        if code is ErrorCode.CONFIG_INVALID:
+            catalog.inject_failure(
+                "diagnose_bindings",
+                ApplicationPortError(
+                    _command_error(
+                        code,
+                        "The diagnosis runtime bindings are invalid.",
+                    )
+                ),
+            )
+        coordinator = ScriptedCoordinator()
+        execution_records = InMemoryExecutionRecordStore()
+        handler, repository, guard, _, dispatcher, notifier, _, _ = _handler(
+            waiting,
+            coordinator,
+            ids=DeterministicIdGenerator(
+                scripted_ids={
+                    "trigger": [TRIGGER_ID],
+                    "job": [NEW_JOB_ID],
+                    "diagnosis_item": [FACT_ID],
+                }
+            ),
+            catalog=catalog,
+            execution_records=execution_records,
+        )
+
+        error = _expect_port_error(lambda: handler.execute(command), code)
+
+        assert error.error.retryable is False
+        assert coordinator.calls == []
+        assert repository.commit_calls == []
+        assert execution_records.publish_job_calls == []
+        assert guard.acquire_calls == 0
+        assert dispatcher.submit_calls == []
+        assert notifier.notify_calls == []
+
+
+def test_submit_supplement_rejects_catalog_binding_for_another_skill() -> None:
+    waiting = _waiting_state()
+    aggregate = waiting.cases[CASE_ID]
+    source = aggregate.jobs[SOURCE_JOB_ID]
+    selected = aggregate.case.selected_skill_ref
+    assert selected is not None
+    wrong_skill = selected.model_copy(
+        update={"version": "9.9.9", "content_hash": "f" * 64}
+    )
+    wrong_bindings = _bindings(source).model_copy(
+        deep=True,
+        update={"skill_ref": wrong_skill},
+    )
+    catalog = FakeAssetCatalog(
+        diagnose={
+            (selected.id, selected.version, selected.content_hash): wrong_bindings
+        }
+    )
+    coordinator = ScriptedCoordinator()
+    execution_records = InMemoryExecutionRecordStore()
+    handler, repository, guard, _, dispatcher, notifier, _, _ = _handler(
+        waiting,
+        coordinator,
+        catalog=catalog,
+        execution_records=execution_records,
+    )
+    command = SubmitSupplement(
+        idempotency_key="supplement-wrong-skill-binding",
+        case_id=CASE_ID,
+        expected_case_revision=2,
+        inputs={"rpc_method": "ReserveStock"},
+        attachment_ids=[],
+        wait_seconds=0,
+    )
+
+    _expect_port_error(
+        lambda: handler.execute(command),
+        ErrorCode.CONFIG_INVALID,
+    )
+
+    assert len(catalog.diagnose_calls) == 1
+    assert coordinator.calls == []
+    assert repository.commit_calls == []
+    assert execution_records.publish_job_calls == []
+    assert guard.acquire_calls == 0
+    assert dispatcher.submit_calls == []
+    assert notifier.notify_calls == []
+
+
 def test_submit_supplement_validates_then_commits_one_diagnose_job() -> None:
     waiting = _waiting_state()
     source = waiting.cases[CASE_ID].jobs[SOURCE_JOB_ID]
@@ -812,6 +1231,70 @@ def test_submit_supplement_validates_then_commits_one_diagnose_job() -> None:
     assert [job.job_id for job in execution_records.publish_job_calls] == [
         NEW_JOB_ID
     ]
+
+
+def test_submit_supplement_rejects_coordinator_binding_substitution() -> None:
+    waiting = _waiting_state()
+    aggregate = waiting.cases[CASE_ID]
+    source = aggregate.jobs[SOURCE_JOB_ID]
+    selected = aggregate.case.selected_skill_ref
+    assert selected is not None
+    replacement_profile = source.agent_profile_ref.model_copy(
+        update={"version": "9.9.9", "content_hash": "f" * 64}
+    )
+
+    def substituted_plan(snapshot, trigger):
+        fact = trigger.payload.user_facts[0]
+        return _plan(
+            target_status=CaseStatus.RUNNING,
+            delta=_empty_delta(
+                add_user_facts=[fact],
+                fulfill_requirements=[
+                    RequirementFulfillment(
+                        requirement_id=REQUIREMENT_ID,
+                        fulfilled_by_refs=[fact.item_id],
+                    )
+                ],
+            ),
+            next_job_spec=_job_spec(
+                source,
+                target_revision=3,
+                previous_outcome_refs=[WAIT_OUTCOME_ID],
+            ).model_copy(update={"agent_profile_ref": replacement_profile}),
+        )
+
+    execution_records = InMemoryExecutionRecordStore()
+    handler, repository, guard, _, dispatcher, notifier, _, _ = _handler(
+        waiting,
+        ScriptedCoordinator([substituted_plan]),
+        catalog=FakeAssetCatalog(
+            diagnose={
+                (selected.id, selected.version, selected.content_hash): _bindings(
+                    source
+                )
+            }
+        ),
+        execution_records=execution_records,
+    )
+    command = SubmitSupplement(
+        idempotency_key="supplement-substituted-binding",
+        case_id=CASE_ID,
+        expected_case_revision=2,
+        inputs={"rpc_method": "ReserveStock"},
+        attachment_ids=[],
+        wait_seconds=0,
+    )
+
+    _expect_port_error(
+        lambda: handler.execute(command),
+        ErrorCode.VALIDATION_ERROR,
+    )
+
+    assert repository.commit_calls == []
+    assert execution_records.publish_job_calls == []
+    assert guard.acquire_calls == 0
+    assert dispatcher.submit_calls == []
+    assert notifier.notify_calls == []
 
 
 def test_submit_supplement_rejects_swapped_input_fulfillments_without_commit() -> None:
@@ -1115,7 +1598,7 @@ def test_pending_resume_persists_receipt_without_revision_change_and_resubmits()
     assert clock.calls == 1
 
 
-def test_interrupted_resume_reuses_pinned_bindings_and_creates_one_replacement() -> None:
+def _interrupted_route_state() -> tuple[StateFile, Job]:
     base = _state()
     aggregate = base.cases[CASE_ID]
     source = next(iter(aggregate.jobs.values()))
@@ -1143,12 +1626,16 @@ def test_interrupted_resume_reuses_pinned_bindings_and_creates_one_replacement()
         evidence={},
         artifacts={},
     )
-    state = base.model_copy(
+    return base.model_copy(
         update={
             "generation": 2,
             "cases": {CASE_ID: interrupted_aggregate},
         }
-    )
+    ), interrupted_job
+
+
+def test_interrupted_resume_reuses_pinned_bindings_and_creates_one_replacement() -> None:
+    state, interrupted_job = _interrupted_route_state()
 
     def resume_plan(snapshot, trigger):
         assert trigger.trigger_type is TriggerType.RESUME_INTERRUPTED
@@ -1204,12 +1691,65 @@ def test_interrupted_resume_reuses_pinned_bindings_and_creates_one_replacement()
     assert _bindings(replacement) == bindings
     assert stored.jobs[interrupted_job.job_id].status is JobStatus.INTERRUPTED
     assert len(catalog.check_calls) == 1
+    assert catalog.resolve_calls == []
+    assert catalog.route_calls == 0
+    assert catalog.diagnose_calls == []
+    assert catalog.review_calls == []
     assert guard.acquire_calls == guard.release_calls == 1
     assert notifier.notify_calls == [(CASE_ID, 3)]
     assert dispatcher.submit_calls == [NEW_JOB_ID]
     assert [job.job_id for job in execution_records.publish_job_calls] == [
         NEW_JOB_ID
     ]
+
+
+def test_interrupted_resume_rejects_coordinator_binding_substitution() -> None:
+    state, interrupted_job = _interrupted_route_state()
+    bindings = _bindings(interrupted_job)
+    replacement_profile = bindings.agent_profile_ref.model_copy(
+        update={"version": "9.9.9", "content_hash": "f" * 64}
+    )
+
+    def substituted_plan(snapshot, trigger):
+        assert trigger.runtime_bindings_by_job_type[JobType.ROUTE] == bindings
+        return _plan(
+            target_status=CaseStatus.RUNNING,
+            next_job_spec=_job_spec(
+                interrupted_job,
+                target_revision=1,
+                replacement_for_job_id=interrupted_job.job_id,
+            ).model_copy(update={"agent_profile_ref": replacement_profile}),
+        )
+
+    catalog = FakeAssetCatalog(
+        assets=assets_for_bindings(bindings),
+        route=bindings,
+    )
+    execution_records = InMemoryExecutionRecordStore()
+    handler, repository, guard, _, dispatcher, notifier, _, _ = _handler(
+        state,
+        ScriptedCoordinator([substituted_plan]),
+        catalog=catalog,
+        execution_records=execution_records,
+    )
+    command = ResumeCase(
+        idempotency_key="resume-substituted-binding",
+        case_id=CASE_ID,
+        expected_case_revision=2,
+        wait_seconds=0,
+    )
+
+    _expect_port_error(
+        lambda: handler.execute(command),
+        ErrorCode.VALIDATION_ERROR,
+    )
+
+    assert len(catalog.check_calls) == 1
+    assert repository.commit_calls == []
+    assert execution_records.publish_job_calls == []
+    assert guard.acquire_calls == 0
+    assert dispatcher.submit_calls == []
+    assert notifier.notify_calls == []
 
 
 def test_cancel_uses_plan_and_signals_only_after_guarded_commit() -> None:

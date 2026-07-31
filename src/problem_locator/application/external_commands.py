@@ -65,6 +65,7 @@ from problem_locator.contracts import (
     TriggerType,
     UserFactInput,
     ValidatedTrigger,
+    VersionedRef,
     validate_coordinator_plan_result,
 )
 
@@ -89,6 +90,10 @@ from .projection import (
     continuation_for_supplement,
     empty_continuation_resources,
     project_case_view,
+)
+from .runtime_bindings import (
+    rebuild_runtime_bindings_for_role,
+    runtime_bindings_from_job_spec,
 )
 
 
@@ -139,6 +144,25 @@ def _raise_port_error(
     details: Sequence[ApplicationErrorDetail] = (),
 ) -> None:
     _raise_shared_port_error(code, message, details=details)
+
+
+def _validated_catalog_bindings(
+    job_type: JobType,
+    bindings: RuntimeBindings,
+    *,
+    expected_skill_ref: VersionedRef | None = None,
+) -> RuntimeBindings:
+    try:
+        return rebuild_runtime_bindings_for_role(
+            job_type,
+            bindings,
+            expected_skill_ref=expected_skill_ref,
+        )
+    except (TypeError, ValueError):
+        _raise_port_error(
+            ErrorCode.CONFIG_INVALID,
+            "The Asset Catalog returned invalid runtime bindings.",
+        )
 
 
 def _default_stable_target_detector(
@@ -223,7 +247,7 @@ class ExternalCommandHandler:
                 return self._cancel_case(command)
         except ApplicationPortError:
             raise
-        except ValueError:
+        except (TypeError, ValueError):
             _raise_port_error(
                 ErrorCode.VALIDATION_ERROR,
                 "The command could not be applied to the validated state.",
@@ -253,7 +277,10 @@ class ExternalCommandHandler:
                     self._ids.new("diagnosis_item")
                     for _ in command.initial_user_facts
                 ]
-                route_bindings = self._asset_catalog.route_bindings()
+                route_bindings = _validated_catalog_bindings(
+                    JobType.ROUTE,
+                    self._asset_catalog.route_bindings(),
+                )
 
             assert case_id is not None
             assert trigger_id is not None
@@ -284,7 +311,10 @@ class ExternalCommandHandler:
                 replacement_job_ids_by_source={},
             )
             plan = self._plan(coordinator_snapshot, trigger)
-            self._validate_external_plan(plan)
+            self._validate_external_plan(
+                plan,
+                trigger.runtime_bindings_by_job_type,
+            )
             if (
                 plan.next_job_spec is None
                 or plan.next_job_spec.job_type is not JobType.ROUTE
@@ -445,7 +475,11 @@ class ExternalCommandHandler:
                     command.case_id,
                     [],
                 )
-                observed = usage.current_bytes + (command.declared_size or 0)
+                # r3 makes ``CaseResourceUsage.total_bytes`` the authoritative
+                # observation, including formal outbox and orphan bytes.  An
+                # empty target batch has ``new_bytes == 0`` today, but consume
+                # the frozen total directly rather than reconstructing it.
+                observed = usage.total_bytes + (command.declared_size or 0)
                 if observed > MAX_CASE_RESOURCE_BYTES:
                     _raise_port_error(
                         ErrorCode.RESOURCE_LIMIT_EXCEEDED,
@@ -554,8 +588,10 @@ class ExternalCommandHandler:
                     "The waiting Case has no selected diagnosis skill.",
                 )
             if fixed_diagnose_bindings is None:
-                fixed_diagnose_bindings = self._asset_catalog.diagnose_bindings(
-                    selected_skill
+                fixed_diagnose_bindings = _validated_catalog_bindings(
+                    JobType.DIAGNOSE,
+                    self._asset_catalog.diagnose_bindings(selected_skill),
+                    expected_skill_ref=selected_skill,
                 )
             trigger = ValidatedTrigger(
                 trigger_id=trigger_id,
@@ -581,7 +617,10 @@ class ExternalCommandHandler:
                 occurred_at=occurred_at,
             )
             plan = self._plan(build_case_snapshot(snapshot, command.case_id), trigger)
-            self._validate_external_plan(plan)
+            self._validate_external_plan(
+                plan,
+                trigger.runtime_bindings_by_job_type,
+            )
             self._validate_supplement_plan(plan, user_facts)
             try:
                 committed = self._commit_case_plan(
@@ -735,7 +774,10 @@ class ExternalCommandHandler:
                     occurred_at=occurred_at,
                 )
             plan = self._plan(case_snapshot, trigger)
-            self._validate_external_plan(plan)
+            self._validate_external_plan(
+                plan,
+                trigger.runtime_bindings_by_job_type,
+            )
             self._validate_resume_plan(
                 plan,
                 source_job,
@@ -795,7 +837,10 @@ class ExternalCommandHandler:
                 occurred_at=occurred_at,
             )
             plan = self._plan(build_case_snapshot(snapshot, command.case_id), trigger)
-            self._validate_external_plan(plan)
+            self._validate_external_plan(
+                plan,
+                trigger.runtime_bindings_by_job_type,
+            )
             self._validate_cancel_plan(
                 plan,
                 aggregate,
@@ -965,7 +1010,10 @@ class ExternalCommandHandler:
         return result
 
     @staticmethod
-    def _validate_external_plan(plan: TransitionPlan) -> None:
+    def _validate_external_plan(
+        plan: TransitionPlan,
+        offered_bindings: Mapping[JobType, RuntimeBindings],
+    ) -> None:
         if (
             plan.outcome_disposition is not None
             or plan.accepted_evidence_proposal_keys
@@ -975,6 +1023,15 @@ class ExternalCommandHandler:
             _raise_port_error(
                 ErrorCode.VALIDATION_ERROR,
                 "An external command plan cannot accept Outcome proposals.",
+            )
+        spec = plan.next_job_spec
+        if spec is None:
+            return
+        expected = offered_bindings.get(spec.job_type)
+        if expected is None or runtime_bindings_from_job_spec(spec) != expected:
+            _raise_port_error(
+                ErrorCode.VALIDATION_ERROR,
+                "The Coordinator replaced the trigger's pinned runtime bindings.",
             )
 
     @staticmethod
@@ -1495,12 +1552,8 @@ class ExternalCommandHandler:
             # that success even when the optional post-commit projection or
             # finite wait cannot refresh state; readiness reports the storage
             # fault independently.
-            return ApplicationResponse(
-                business_receipt=committed.receipt,
-                case_view=None,
-                wait_timed_out=(
-                    wait_seconds > 0 and committed.receipt.job_id is not None
-                ),
+            return self._saved_response_without_projection(
+                committed.receipt,
                 dispatch_pending=dispatch_pending,
             )
 
@@ -1525,10 +1578,37 @@ class ExternalCommandHandler:
                     dispatch_pending = not (dispatch.accepted or dispatch.duplicate)
                 except Exception:
                     dispatch_pending = True
-        return self._response_from_state(
-            snapshot,
-            receipt,
-            wait_seconds=wait_seconds,
+        try:
+            return self._response_from_state(
+                snapshot,
+                receipt,
+                wait_seconds=wait_seconds,
+                dispatch_pending=dispatch_pending,
+            )
+        except ApplicationPortError as error:
+            if error.error.code not in {
+                ErrorCode.STATE_CORRUPT,
+                ErrorCode.STATE_SCHEMA_UNSUPPORTED,
+            }:
+                raise
+            # An idempotent replay is backed by the same durable receipt as a
+            # just-committed command.  A dynamic wait reread must not replace
+            # that receipt with a state-projection failure.
+            return self._saved_response_without_projection(
+                receipt,
+                dispatch_pending=dispatch_pending,
+            )
+
+    @staticmethod
+    def _saved_response_without_projection(
+        receipt: BusinessReceipt,
+        *,
+        dispatch_pending: bool,
+    ) -> ApplicationResponse:
+        return ApplicationResponse(
+            business_receipt=receipt,
+            case_view=None,
+            wait_timed_out=False,
             dispatch_pending=dispatch_pending,
         )
 

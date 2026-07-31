@@ -92,6 +92,16 @@ class _FailingReadRepository(InMemoryStateRepository):
         raise self.error
 
 
+class _CountingRepository(InMemoryStateRepository):
+    def __init__(self, state: StateFile) -> None:
+        super().__init__(state)
+        self.read_snapshot_calls = 0
+
+    def read_snapshot(self) -> StateFile:
+        self.read_snapshot_calls += 1
+        return super().read_snapshot()
+
+
 def _service(
     repository: InMemoryStateRepository,
     store: InMemoryResourceStore,
@@ -145,6 +155,42 @@ def test_get_case_uses_one_snapshot_when_no_wait_is_requested() -> None:
     assert response.case_view.case_id == CASE_ID
     assert response.case_view.active_job is not None
     assert response.wait_timed_out is False
+    assert notifier.wait_calls == []
+
+
+@pytest.mark.parametrize(
+    ("operation", "args"),
+    [
+        ("get_case", ("not-a-case-id", None, 0)),
+        ("get_case", (CASE_ID, "not-a-job-id", 0)),
+        ("get_case", (CASE_ID, None, -1)),
+        ("get_case", (CASE_ID, None, 31)),
+        ("get_case", (CASE_ID, None, True)),
+        ("get_case", (CASE_ID, None, 1.5)),
+        ("get_case", (CASE_ID, None, "1")),
+        ("list_artifacts", ("not-a-case-id", False)),
+        ("list_artifacts", (CASE_ID, 0)),
+        ("list_artifacts", (CASE_ID, 1)),
+        ("list_artifacts", (CASE_ID, "true")),
+        ("open_artifact", ("not-a-case-id", ARTIFACT_ID)),
+        ("open_artifact", (CASE_ID, "not-an-artifact-id")),
+    ],
+)
+def test_raw_query_input_is_rebuilt_before_any_dependency_call(
+    operation: str,
+    args: tuple[object, ...],
+) -> None:
+    repository = _CountingRepository(_state())
+    store = InMemoryResourceStore()
+    notifier = _Notifier()
+    service = _service(repository, store, notifier)
+
+    with pytest.raises(ApplicationPortError) as captured:
+        getattr(service, operation)(*args)
+
+    assert captured.value.error.code is ErrorCode.VALIDATION_ERROR
+    assert captured.value.error.retryable is False
+    assert repository.read_snapshot_calls == 0
     assert notifier.wait_calls == []
 
 
@@ -241,7 +287,7 @@ def test_wait_notifier_failure_still_rereads_and_returns_normal_timeout() -> Non
     assert repository.commit_calls == []
 
 
-def test_query_not_found_failures_use_the_r2_typed_port_error() -> None:
+def test_query_not_found_failures_use_the_frozen_typed_port_error() -> None:
     service = _service(
         InMemoryStateRepository(_state()),
         InMemoryResourceStore(),

@@ -17,12 +17,14 @@ from collections.abc import Iterable
 
 from problem_locator.contracts import (
     ApplicationError,
+    ApplicationErrorDetail,
     ApplicationPortError,
     AssetCatalogPort,
     AssetUnavailableTriggerPayload,
     Case,
     CaseAggregate,
     CaseStatus,
+    ClaimJob,
     ClaimReceipt,
     Clock,
     CommitReceipt,
@@ -35,6 +37,7 @@ from problem_locator.contracts import (
     FailureReceipt,
     FailureReportDisposition,
     IdGenerator,
+    InterruptPreviousEpoch,
     Job,
     JobLifecycleUpdate,
     JobStatus,
@@ -70,12 +73,17 @@ from .projection import (
 _MAX_COMMIT_ATTEMPTS = 3
 
 
-def _application_error(code: ErrorCode, message: str) -> ApplicationPortError:
+def _application_error(
+    code: ErrorCode,
+    message: str,
+    *,
+    details: Iterable[ApplicationErrorDetail] = (),
+) -> ApplicationPortError:
     return ApplicationPortError(
         ApplicationError(
             code=code,
             message=message,
-            details=[],
+            details=list(details),
             retryable=ERROR_SPECS[code].application_retryable,
         )
     )
@@ -115,16 +123,6 @@ def _find_failure_record(
 
 def _is_revision_conflict(error: ApplicationPortError) -> bool:
     return error.error.code is ErrorCode.REVISION_CONFLICT
-
-
-def _require_plan(
-    trigger: ValidatedTrigger,
-    result: TransitionPlan | ApplicationError,
-) -> TransitionPlan:
-    result = validate_coordinator_plan_result(trigger, result)
-    if isinstance(result, ApplicationError):
-        raise ApplicationPortError(result)
-    return result
 
 
 def _expected_case_status(job_type: JobType) -> CaseStatus:
@@ -273,6 +271,19 @@ class JobControlService:
             return
 
     def claim_job(self, job_id: str, runtime_epoch: str) -> ClaimReceipt:
+        try:
+            command = ClaimJob.model_validate(
+                {"job_id": job_id, "runtime_epoch": runtime_epoch},
+                strict=True,
+            )
+        except (TypeError, ValueError):
+            raise _application_error(
+                ErrorCode.VALIDATION_ERROR,
+                "JobControlPort.claim_job received invalid raw input.",
+            ) from None
+        job_id = command.job_id
+        runtime_epoch = command.runtime_epoch
+
         occurred_at: str | None = None
         trigger_id: str | None = None
 
@@ -286,9 +297,11 @@ class JobControlService:
                 )
             case_id, aggregate, job = found
             if not _claimable(aggregate, job):
-                raise _application_error(
-                    ErrorCode.CLAIM_REJECTED,
-                    "The Job is no longer claimable.",
+                return ClaimReceipt(
+                    claimed=False,
+                    job=None,
+                    failure_applied=False,
+                    failure_code=None,
                 )
 
             availability = self._asset_catalog.check(fixed_asset_refs(job))
@@ -343,17 +356,40 @@ class JobControlService:
                 runtime_bindings_by_job_type={},
                 occurred_at=occurred_at,
             )
-            plan = _require_plan(
-                trigger,
-                self._coordinator.plan(build_case_snapshot(state, case_id), trigger)
-            )
-            updated_case = _validate_control_plan(
-                aggregate,
-                plan,
-                source_job=job,
-                target_job_statuses=[JobStatus.FAILED],
-                occurred_at=occurred_at,
-            )
+            try:
+                decision = validate_coordinator_plan_result(
+                    trigger,
+                    self._coordinator.plan(
+                        build_case_snapshot(state, case_id),
+                        trigger,
+                    ),
+                )
+            except (TypeError, ValueError):
+                raise _application_error(
+                    ErrorCode.VALIDATION_ERROR,
+                    "The asset-unavailable Claim decision is invalid.",
+                ) from None
+            if isinstance(decision, ApplicationError):
+                return ClaimReceipt(
+                    claimed=False,
+                    job=None,
+                    failure_applied=False,
+                    failure_code=None,
+                )
+            plan = decision
+            try:
+                updated_case = _validate_control_plan(
+                    aggregate,
+                    plan,
+                    source_job=job,
+                    target_job_statuses=[JobStatus.FAILED],
+                    occurred_at=occurred_at,
+                )
+            except (TypeError, ValueError):
+                raise _application_error(
+                    ErrorCode.VALIDATION_ERROR,
+                    "The asset-unavailable Claim plan is invalid.",
+                ) from None
             mutation = build_state_mutation(
                 upsert_case=updated_case,
                 job_lifecycle_updates=plan.job_updates,
@@ -459,17 +495,71 @@ class JobControlService:
                 runtime_bindings_by_job_type={},
                 occurred_at=occurred_at,
             )
-            plan = _require_plan(
-                trigger,
-                self._coordinator.plan(build_case_snapshot(state, case_id), trigger)
-            )
-            updated_case = _validate_control_plan(
-                aggregate,
-                plan,
-                source_job=job,
-                target_job_statuses=[JobStatus.FAILED, JobStatus.INTERRUPTED],
-                occurred_at=occurred_at,
-            )
+            try:
+                decision = validate_coordinator_plan_result(
+                    trigger,
+                    self._coordinator.plan(
+                        build_case_snapshot(state, case_id),
+                        trigger,
+                    ),
+                )
+            except (TypeError, ValueError):
+                raise _application_error(
+                    ErrorCode.VALIDATION_ERROR,
+                    "The execution-failure decision is invalid.",
+                ) from None
+            if isinstance(decision, ApplicationError):
+                if decision.code is not ErrorCode.INVALID_CASE_STATE:
+                    raise ApplicationPortError(decision)
+                fresh_state = self._repository.read_snapshot()
+                fresh_previous = _find_failure_record(
+                    fresh_state,
+                    command.failure_id,
+                )
+                if fresh_previous is not None:
+                    fresh_case_id, _, record = fresh_previous
+                    same_report = (
+                        record.job_id == command.job_id
+                        and record.runtime_epoch == command.runtime_epoch
+                        and canonical_json_sha256(record.failure)
+                        == canonical_json_sha256(command.execution_failure)
+                    )
+                    if not same_report:
+                        raise _application_error(
+                            ErrorCode.IDEMPOTENCY_CONFLICT,
+                            "The failure ID is already bound to different content.",
+                        )
+                    return FailureReceipt(
+                        failure_id=command.failure_id,
+                        disposition=FailureReportDisposition.DUPLICATE,
+                        case_view=project_case_view(fresh_state, fresh_case_id),
+                    )
+                fresh_found = _find_job(fresh_state, command.job_id)
+                if fresh_found is None:
+                    raise _application_error(
+                        ErrorCode.JOB_NOT_FOUND,
+                        "The requested Job does not exist.",
+                    )
+                fresh_case_id = fresh_found[0]
+                return FailureReceipt(
+                    failure_id=command.failure_id,
+                    disposition=FailureReportDisposition.STALE,
+                    case_view=project_case_view(fresh_state, fresh_case_id),
+                )
+            plan = decision
+            try:
+                updated_case = _validate_control_plan(
+                    aggregate,
+                    plan,
+                    source_job=job,
+                    target_job_statuses=[JobStatus.FAILED, JobStatus.INTERRUPTED],
+                    occurred_at=occurred_at,
+                )
+            except (TypeError, ValueError):
+                raise _application_error(
+                    ErrorCode.VALIDATION_ERROR,
+                    "The execution-failure plan is invalid.",
+                ) from None
             failure_record = ExecutionFailureRecord(
                 failure_id=command.failure_id,
                 job_id=job.job_id,
@@ -511,6 +601,22 @@ class JobControlService:
         current_runtime_epoch: str,
         recovery_id: str,
     ) -> RecoveryReceipt:
+        try:
+            command = InterruptPreviousEpoch.model_validate(
+                {
+                    "current_runtime_epoch": current_runtime_epoch,
+                    "recovery_id": recovery_id,
+                },
+                strict=True,
+            )
+        except (TypeError, ValueError):
+            raise _application_error(
+                ErrorCode.VALIDATION_ERROR,
+                "JobControlPort.interrupt_previous_epoch received invalid raw input.",
+            ) from None
+        current_runtime_epoch = command.current_runtime_epoch
+        recovery_id = command.recovery_id
+
         record = self._ensure_recovery_started(current_runtime_epoch, recovery_id)
         if record.completed_at is not None:
             return self._recovery_receipt(record)
@@ -626,7 +732,10 @@ class JobControlService:
             state = self._repository.read_snapshot()
             found = _find_job(state, job_id)
             if found is None:
-                raise ValueError("persisted recovery Job no longer exists")
+                raise _application_error(
+                    ErrorCode.STATE_CORRUPT,
+                    "A persisted recovery Job no longer exists.",
+                )
             case_id, aggregate, job = found
             if not (
                 job.status is JobStatus.RUNNING
@@ -637,7 +746,10 @@ class JobControlService:
                 aggregate.case.active_job_id != job.job_id
                 or aggregate.case.status is not _expected_case_status(job.job_type)
             ):
-                raise ValueError("old-epoch RUNNING Job is not the active Case Job")
+                raise _application_error(
+                    ErrorCode.STATE_CORRUPT,
+                    "An old-epoch RUNNING Job is not its Case active Job.",
+                )
 
             if occurred_at is None:
                 occurred_at = self._clock.now()
@@ -658,17 +770,48 @@ class JobControlService:
                 runtime_bindings_by_job_type={},
                 occurred_at=occurred_at,
             )
-            plan = _require_plan(
-                trigger,
-                self._coordinator.plan(build_case_snapshot(state, case_id), trigger)
-            )
-            updated_case = _validate_control_plan(
-                aggregate,
-                plan,
-                source_job=job,
-                target_job_statuses=[JobStatus.INTERRUPTED],
-                occurred_at=occurred_at,
-            )
+            try:
+                decision = validate_coordinator_plan_result(
+                    trigger,
+                    self._coordinator.plan(
+                        build_case_snapshot(state, case_id),
+                        trigger,
+                    ),
+                )
+            except (TypeError, ValueError):
+                raise _application_error(
+                    ErrorCode.VALIDATION_ERROR,
+                    "The old-epoch interruption decision is invalid.",
+                ) from None
+            if isinstance(decision, ApplicationError):
+                if decision.code is not ErrorCode.INVALID_CASE_STATE:
+                    raise ApplicationPortError(decision)
+                fresh_state = self._repository.read_snapshot()
+                fresh_found = _find_job(fresh_state, job_id)
+                if fresh_found is None or not (
+                    fresh_found[2].status is JobStatus.RUNNING
+                    and fresh_found[2].runtime_epoch != current_runtime_epoch
+                ):
+                    return
+                raise _application_error(
+                    ErrorCode.VALIDATION_ERROR,
+                    decision.message,
+                    details=decision.details,
+                )
+            plan = decision
+            try:
+                updated_case = _validate_control_plan(
+                    aggregate,
+                    plan,
+                    source_job=job,
+                    target_job_statuses=[JobStatus.INTERRUPTED],
+                    occurred_at=occurred_at,
+                )
+            except (TypeError, ValueError):
+                raise _application_error(
+                    ErrorCode.VALIDATION_ERROR,
+                    "The old-epoch interruption plan is invalid.",
+                ) from None
             mutation = build_state_mutation(
                 upsert_case=updated_case,
                 job_lifecycle_updates=plan.job_updates,
@@ -707,13 +850,19 @@ class JobControlService:
             for job_id in processing.interrupted_job_ids:
                 found = _find_job(state, job_id)
                 if found is None:
-                    raise ValueError("persisted recovery Job no longer exists")
+                    raise _application_error(
+                        ErrorCode.STATE_CORRUPT,
+                        "A persisted recovery Job no longer exists.",
+                    )
                 job = found[2]
                 if (
                     job.status is JobStatus.RUNNING
                     and job.runtime_epoch != current_runtime_epoch
                 ):
-                    raise ValueError("recovery cannot complete while an old Job is RUNNING")
+                    raise _application_error(
+                        ErrorCode.STATE_CORRUPT,
+                        "Recovery cannot complete while an old Job remains RUNNING.",
+                    )
 
             runtime_matches = [
                 item
@@ -721,7 +870,10 @@ class JobControlService:
                 if item.recovery_id == recovery_id
             ]
             if len(runtime_matches) != 1:
-                raise ValueError("recovery has no unique RuntimeEpochRecord")
+                raise _application_error(
+                    ErrorCode.STATE_CORRUPT,
+                    "Recovery has no unique RuntimeEpochRecord.",
+                )
             runtime = runtime_matches[0]
             if runtime.runtime_epoch != current_runtime_epoch:
                 raise _application_error(

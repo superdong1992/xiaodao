@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from problem_locator.application.preparation import (
     build_create_case_trigger,
@@ -160,6 +161,34 @@ def test_prepare_and_finalize_attachment_preserve_immutable_metadata() -> None:
     assert ready.content_type == attachment.content_type
     assert ready.storage_key == published.storage_key
     assert ready.updated_at == "2026-07-31T01:03:00.000Z"
+
+
+def test_build_uploading_attachment_consumes_frozen_archive_name_type_rule() -> None:
+    archive = _prepare_command().model_copy(
+        update={
+            "name": "logs.tar.gz",
+            "content_type": "application/gzip",
+        }
+    )
+
+    attachment = build_uploading_attachment(
+        archive,
+        attachment_id="00000000-0000-0000-0000-000000000003",
+        occurred_at=NOW,
+    )
+
+    assert attachment.name == "logs.tar.gz"
+    assert attachment.content_type == "application/gzip"
+
+    drifted = PrepareAttachment.model_construct(
+        **(archive.model_dump(mode="python") | {"name": "logs.zip"})
+    )
+    with pytest.raises(ValidationError, match="suffix|content_type"):
+        build_uploading_attachment(
+            drifted,
+            attachment_id="00000000-0000-0000-0000-000000000004",
+            occurred_at=NOW,
+        )
 
 
 def test_finalize_attachment_requires_uploading_file() -> None:

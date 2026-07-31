@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "owner_spec": "S03",
-  "contract_revision": "v1-contract-r2",
+  "contract_revision": "v1-contract-r3",
   "resolutions": [
     {"id": "application_port_error", "resolved_by": "v1-contract-r2"},
     {"id": "coordinator_plan_result", "resolved_by": "v1-contract-r2"},
@@ -11,56 +11,14 @@
     {"id": "recovery_receipt_persistence", "resolved_by": "v1-contract-r2"},
     {"id": "rejected_processing_without_valid_outcome", "resolved_by": "v1-contract-r2"},
     {"id": "prepare_size_classification", "resolved_by": "v1-contract-r2"},
-    {"id": "resource_target_key_derivation", "resolved_by": "v1-contract-r2"}
+    {"id": "resource_target_key_derivation", "resolved_by": "v1-contract-r2"},
+    {"id": "CCR-S03-R2-STATE-READ-ERROR-CLOSURE", "resolved_by": "v1-contract-r3"},
+    {"id": "CCR-S03-R2-COORDINATOR-ERROR-CLOSURE", "resolved_by": "v1-contract-r3"},
+    {"id": "CCR-S03-R2-CAPACITY-OBSERVED-CLOSURE", "resolved_by": "v1-contract-r3"},
+    {"id": "CCR-S03-R2-NEXT-JOB-PUBLISH-ERROR-CLOSURE", "resolved_by": "v1-contract-r3"},
+    {"id": "CCR-S03-R2-ASSET-BINDING-FAILURE-CLOSURE", "resolved_by": "v1-contract-r3"},
+    {"id": "CCR-S03-R2-QUERY-RAW-VALIDATION-ERROR-CLOSURE", "resolved_by": "v1-contract-r3"},
+    {"id": "CCR-S03-R2-JOBCONTROL-RAW-VALIDATION-ERROR-CLOSURE", "resolved_by": "v1-contract-r3"}
   ],
-  "unresolved_contract_change_requests": [
-    {
-      "id": "CCR-S03-R2-STATE-READ-ERROR-CLOSURE",
-      "status": "accepted_for_v1-contract-r3"
-    },
-    {
-      "id": "CCR-S03-R2-COORDINATOR-ERROR-CLOSURE",
-      "status": "accepted_for_v1-contract-r3"
-    },
-    {
-      "id": "CCR-S03-R2-CAPACITY-OBSERVED-CLOSURE",
-      "status": "accepted_for_v1-contract-r3"
-    },
-    {
-      "id": "CCR-S03-R2-NEXT-JOB-PUBLISH-ERROR-CLOSURE",
-      "status": "accepted_for_v1-contract-r3"
-    },
-    {
-      "id": "CCR-S03-R2-ASSET-BINDING-FAILURE-CLOSURE",
-      "status": "reported_for_v1-contract-r3"
-    },
-    {
-      "id": "CCR-S03-R2-QUERY-RAW-VALIDATION-ERROR-CLOSURE",
-      "status": "reported_for_v1-contract-r3",
-      "failure_fixture": {
-        "methods": {
-          "ApplicationQueryPort.get_case": ["invalid_case_id", "invalid_job_id", "wait_seconds=-1", "wait_seconds=31", "wait_seconds=true"],
-          "ApplicationQueryPort.list_artifacts": ["invalid_case_id", "include_internal=1", "include_internal=false-string"],
-          "ApplicationQueryPort.open_artifact": ["invalid_case_id", "invalid_artifact_id"]
-        },
-        "expected_error": "VALIDATION_ERROR",
-        "expected_repository_reads": 0,
-        "expected_side_effect_calls": 0
-      }
-    },
-    {
-      "id": "CCR-S03-R2-JOBCONTROL-RAW-VALIDATION-ERROR-CLOSURE",
-      "status": "reported_for_v1-contract-r3",
-      "failure_fixture": {
-        "methods": {
-          "JobControlPort.claim_job": ["invalid_job_id", "invalid_runtime_epoch"],
-          "JobControlPort.submit_outcome": ["outcome_file_ref_binding_mismatch"],
-          "JobControlPort.interrupt_previous_epoch": ["invalid_runtime_epoch", "invalid_recovery_id"]
-        },
-        "expected_error": "VALIDATION_ERROR",
-        "expected_repository_reads": 0,
-        "expected_side_effect_calls": 0
-      }
-    }
-  ]
+  "unresolved_contract_change_requests": []
 }

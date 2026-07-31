@@ -10,6 +10,7 @@ from problem_locator.application.outcome_submission import OutcomeSubmissionServ
 from problem_locator.application.preparation import runtime_bindings_from_job
 from problem_locator.contracts import (
     ApplicationError,
+    ApplicationErrorDetail,
     ApplicationPortError,
     ArtifactKind,
     ArtifactProposal,
@@ -38,6 +39,7 @@ from problem_locator.contracts import (
     VersionedRef,
     canonical_json_bytes,
 )
+from problem_locator.contracts.limits import MAX_CASE_RESOURCE_BYTES
 from tests.contracts.fakes import (
     DeterministicIdGenerator,
     FakeAssetCatalog,
@@ -111,6 +113,20 @@ class _WrongStorageKeyResourceStore(InMemoryResourceStore):
                 )
             }
         )
+
+
+class _PublishThenFailExecutionRecordStore(InMemoryExecutionRecordStore):
+    def __init__(self) -> None:
+        super().__init__()
+        self.fail_after_publish: ApplicationPortError | None = None
+
+    def publish_job(self, job: Job) -> ExecutionFileRef:
+        file_ref = super().publish_job(job)
+        failure = self.fail_after_publish
+        self.fail_after_publish = None
+        if failure is not None:
+            raise failure
+        return file_ref
 
 
 def _load(name: str) -> dict:
@@ -401,15 +417,141 @@ def _diagnose_catalog(bindings: RuntimeBindings) -> FakeAssetCatalog:
     )
 
 
-def _port_error(code: ErrorCode, message: str) -> ApplicationPortError:
+def _port_error(
+    code: ErrorCode,
+    message: str,
+    *,
+    details: tuple[ApplicationErrorDetail, ...] = (),
+) -> ApplicationPortError:
     return ApplicationPortError(
         ApplicationError(
             code=code,
             message=message,
-            details=[],
+            details=list(details),
             retryable=ERROR_SPECS[code].application_retryable,
         )
     )
+
+
+@pytest.mark.parametrize(
+    "invalid_field",
+    ["outcome", "nested_ref", "file_ref", "binding"],
+)
+def test_submit_outcome_rebuilds_raw_nested_dtos_before_every_dependency(
+    invalid_field: str,
+) -> None:
+    outcome = _outcome("job-outcome-route.json")
+    file_ref = _file_ref(outcome)
+    invalid_outcome: object = outcome
+    invalid_ref: object = file_ref
+    if invalid_field == "outcome":
+        payload = outcome.model_dump(mode="python")
+        payload["job_id"] = "not-a-job-id"
+        invalid_outcome = JobOutcome.model_construct(**payload)
+    elif invalid_field == "nested_ref":
+        invalid_skill_ref = VersionedRef.model_construct(
+            id="",
+            version="",
+            content_hash="not-a-sha256",
+        )
+        invalid_payload = outcome.payload.model_copy(
+            update={"skill_ref": invalid_skill_ref}
+        )
+        invalid_outcome = outcome.model_copy(update={"payload": invalid_payload})
+    elif invalid_field == "file_ref":
+        payload = file_ref.model_dump(mode="python")
+        payload["size"] = -1
+        invalid_ref = ExecutionFileRef.model_construct(**payload)
+    else:
+        payload = file_ref.model_dump(mode="python")
+        payload["sha256"] = "f" * 64
+        invalid_ref = ExecutionFileRef.model_construct(**payload)
+
+    repository = _CountingRepository(_running_state())
+    records = InMemoryExecutionRecordStore()
+    coordinator = ScriptedCoordinator()
+    catalog = FakeAssetCatalog()
+    ids = DeterministicIdGenerator(seed="raw-submit-validation")
+    guard = InMemoryPublicationCommitGuard()
+    resources = InMemoryResourceStore(publication_guard=guard)
+    service, _, _, _, dispatcher, notifier, clock = _service(
+        repository,
+        coordinator,
+        records,
+        catalog=catalog,
+        ids=ids,
+        resources=resources,
+        guard=guard,
+    )
+
+    with pytest.raises(ApplicationPortError) as captured:
+        service.submit_outcome(invalid_outcome, invalid_ref)  # type: ignore[arg-type]
+
+    assert captured.value.error.code is ErrorCode.VALIDATION_ERROR
+    assert captured.value.error.retryable is False
+    assert clock.calls == 0
+    assert ids.new_calls == []
+    assert ids.derive_calls == []
+    assert repository.read_snapshot_calls == 0
+    assert repository.commit_calls == []
+    assert records.publish_job_calls == []
+    assert records.publish_outcome_calls == []
+    assert catalog.check_calls == []
+    assert catalog.resolve_calls == []
+    assert catalog.route_calls == 0
+    assert catalog.diagnose_calls == []
+    assert catalog.review_calls == []
+    assert coordinator.calls == []
+    assert resources.validate_staged_calls == []
+    assert guard.acquire_calls == guard.release_calls == 0
+    assert dispatcher.submit_calls == []
+    assert notifier.notify_calls == []
+
+
+@pytest.mark.parametrize(
+    "code",
+    [ErrorCode.STATE_CORRUPT, ErrorCode.STATE_SCHEMA_UNSUPPORTED],
+)
+def test_submit_outcome_propagates_precommit_state_read_fault_exactly(
+    code: ErrorCode,
+) -> None:
+    outcome = _outcome("job-outcome-route.json")
+    file_ref = _file_ref(outcome)
+    repository = InMemoryStateRepository(_running_state())
+    state_fault = _port_error(code, "The frozen state cannot be read.")
+    repository.inject_read_failure("read_snapshot", state_fault)
+    records = InMemoryExecutionRecordStore()
+    coordinator = ScriptedCoordinator()
+    catalog = FakeAssetCatalog()
+    ids = DeterministicIdGenerator(seed="state-read-fault")
+    guard = InMemoryPublicationCommitGuard()
+    resources = InMemoryResourceStore(publication_guard=guard)
+    service, _, _, _, dispatcher, notifier, _ = _service(
+        repository,
+        coordinator,
+        records,
+        catalog=catalog,
+        ids=ids,
+        resources=resources,
+        guard=guard,
+    )
+
+    with pytest.raises(ApplicationPortError) as captured:
+        service.submit_outcome(outcome, file_ref)
+
+    assert captured.value is state_fault
+    assert repository.commit_calls == []
+    assert records.publish_job_calls == []
+    assert records.publish_outcome_calls == []
+    assert catalog.check_calls == []
+    assert catalog.route_calls == 0
+    assert catalog.diagnose_calls == []
+    assert catalog.review_calls == []
+    assert coordinator.calls == []
+    assert resources.validate_staged_calls == []
+    assert guard.acquire_calls == guard.release_calls == 0
+    assert dispatcher.submit_calls == []
+    assert notifier.notify_calls == []
 
 
 def test_missing_finalized_record_is_rejected_atomically_then_replays_duplicate() -> None:
@@ -664,6 +806,48 @@ def test_stale_active_control_plan_cannot_smuggle_semantic_acceptance() -> None:
     assert guard.acquire_calls == 0
 
 
+@pytest.mark.parametrize("control_path", ["rejection", "stale"])
+def test_invalid_secondary_coordinator_union_uses_typed_state_write_failure(
+    control_path: str,
+) -> None:
+    outcome = _outcome("job-outcome-route.json")
+    records = InMemoryExecutionRecordStore()
+    if control_path == "stale":
+        file_ref = records.publish_outcome_bytes(
+            outcome.job_id,
+            canonical_json_bytes(outcome),
+        )
+        state = _active_base_drift_state()
+    else:
+        file_ref = _file_ref(outcome)
+        state = _running_state()
+    invalid_decision = ApplicationError(
+        code=ErrorCode.ACTIVE_JOB_EXISTS,
+        message="This error code is not legal for the secondary control Trigger.",
+        details=[],
+        retryable=False,
+    )
+    coordinator = ScriptedCoordinator([invalid_decision])
+    service, repository, _, guard, _, _, _ = _service(
+        state,
+        coordinator,
+        records,
+    )
+
+    with pytest.raises(ApplicationPortError) as captured:
+        service.submit_outcome(outcome, file_ref)
+
+    assert captured.value.error.code is ErrorCode.STATE_WRITE_FAILED
+    assert repository.commit_calls == []
+    assert guard.acquire_calls == 0
+    assert len(coordinator.calls) == 1
+    assert coordinator.calls[0][1].trigger_type is (
+        TriggerType.STALE_ACTIVE_OUTCOME
+        if control_path == "stale"
+        else TriggerType.EXECUTION_FAILED
+    )
+
+
 def test_finalized_failure_outcome_applies_with_processing_in_one_commit() -> None:
     outcome = _outcome("job-outcome-failure.json")
     records = InMemoryExecutionRecordStore()
@@ -811,6 +995,281 @@ def test_applied_plan_must_exactly_terminate_its_active_source_job(
     assert guard.acquire_calls == guard.release_calls == 1
 
 
+def test_finalized_outcome_coordinator_semantic_error_becomes_deterministic_invalid() -> None:
+    outcome = _outcome("job-outcome-route.json")
+    records = InMemoryExecutionRecordStore()
+    file_ref = records.publish_outcome_bytes(
+        outcome.job_id,
+        canonical_json_bytes(outcome),
+    )
+    detail = ApplicationErrorDetail(
+        field="route_decision",
+        resource_type="JOB",
+        resource_id=JOB_ID,
+        resource_ref=None,
+        expected="accepted",
+        actual="invalid",
+        limit=None,
+        observed=None,
+    )
+    semantic_error = ApplicationError(
+        code=ErrorCode.VALIDATION_ERROR,
+        message="The finalized route decision is not semantically acceptable.",
+        details=[detail],
+        retryable=False,
+    )
+
+    def failure_plan(snapshot, trigger):
+        assert trigger.trigger_type is TriggerType.EXECUTION_FAILED
+        failure = trigger.payload.execution_failure
+        assert failure.code is ErrorCode.OUTCOME_INVALID
+        assert failure.retryable is False
+        assert failure.details == [detail]
+        return _failed_plan(snapshot, trigger, applied=False)
+
+    binding = runtime_bindings_from_job(
+        Job.model_validate(_load("job-diagnose.json"))
+    )
+    coordinator = ScriptedCoordinator([semantic_error, failure_plan])
+    service, repository, _, guard, dispatcher, _, _ = _service(
+        _running_state(),
+        coordinator,
+        records,
+        catalog=_diagnose_catalog(binding),
+    )
+
+    receipt = service.submit_outcome(outcome, file_ref)
+
+    assert receipt.disposition is OutcomeDisposition.REJECTED
+    aggregate = repository.read_snapshot().cases[CASE_ID]
+    assert (
+        aggregate.outcome_processing_records[outcome.outcome_id].error_code
+        is ErrorCode.OUTCOME_INVALID
+    )
+    assert aggregate.jobs[JOB_ID].status is JobStatus.FAILED
+    assert len(coordinator.calls) == 2
+    assert records.publish_job_calls == []
+    assert dispatcher.submit_calls == []
+    assert guard.acquire_calls == guard.release_calls == 1
+
+
+def test_outcome_coordinator_invalid_case_state_uses_stale_receipt_channel() -> None:
+    outcome = _outcome("job-outcome-route.json")
+    records = InMemoryExecutionRecordStore()
+    file_ref = records.publish_outcome_bytes(
+        outcome.job_id,
+        canonical_json_bytes(outcome),
+    )
+    binding = runtime_bindings_from_job(
+        Job.model_validate(_load("job-diagnose.json"))
+    )
+    stale_decision = ApplicationError(
+        code=ErrorCode.INVALID_CASE_STATE,
+        message="The Case no longer admits this finalized Outcome transition.",
+        details=[],
+        retryable=False,
+    )
+    coordinator = ScriptedCoordinator([stale_decision])
+    service, repository, _, guard, dispatcher, _, _ = _service(
+        _running_state(),
+        coordinator,
+        records,
+        catalog=_diagnose_catalog(binding),
+    )
+
+    receipt = service.submit_outcome(outcome, file_ref)
+
+    assert receipt.disposition is OutcomeDisposition.STALE
+    aggregate = repository.read_snapshot().cases[CASE_ID]
+    processing = aggregate.outcome_processing_records[outcome.outcome_id]
+    assert processing.disposition is OutcomeDisposition.STALE
+    assert processing.error_code is None
+    assert aggregate.jobs[JOB_ID].status is JobStatus.RUNNING
+    assert aggregate.case.active_job_id == JOB_ID
+    assert records.publish_job_calls == []
+    assert dispatcher.submit_calls == []
+    assert guard.acquire_calls == guard.release_calls == 1
+
+
+def test_coordinator_cannot_replace_the_catalog_runtime_binding() -> None:
+    outcome = _outcome("job-outcome-route.json")
+    records = InMemoryExecutionRecordStore()
+    file_ref = records.publish_outcome_bytes(
+        outcome.job_id,
+        canonical_json_bytes(outcome),
+    )
+    binding = runtime_bindings_from_job(
+        Job.model_validate(_load("job-diagnose.json"))
+    )
+
+    def substituted_binding_plan(snapshot, trigger):
+        plan = _route_to_diagnose_plan(snapshot, trigger)
+        assert plan.next_job_spec is not None
+        replacement = plan.next_job_spec.model_copy(
+            update={
+                "agent_profile_ref": VersionedRef(
+                    id="replacement-profile",
+                    version="9.9.9",
+                    content_hash="9" * 64,
+                )
+            }
+        )
+        return plan.model_copy(update={"next_job_spec": replacement})
+
+    coordinator = ScriptedCoordinator(
+        [
+            substituted_binding_plan,
+            lambda snapshot, trigger: _failed_plan(
+                snapshot,
+                trigger,
+                applied=False,
+            ),
+        ]
+    )
+    service, repository, _, guard, dispatcher, _, _ = _service(
+        _running_state(),
+        coordinator,
+        records,
+        catalog=_diagnose_catalog(binding),
+    )
+
+    receipt = service.submit_outcome(outcome, file_ref)
+
+    assert receipt.disposition is OutcomeDisposition.REJECTED
+    aggregate = repository.read_snapshot().cases[CASE_ID]
+    assert (
+        aggregate.outcome_processing_records[outcome.outcome_id].error_code
+        is ErrorCode.OUTCOME_INVALID
+    )
+    assert len(aggregate.jobs) == 1
+    assert records.publish_job_calls == []
+    assert dispatcher.submit_calls == []
+    assert guard.acquire_calls == guard.release_calls == 1
+
+
+@pytest.mark.parametrize(
+    "code",
+    [ErrorCode.ASSET_VERSION_UNAVAILABLE, ErrorCode.CONFIG_INVALID],
+)
+def test_finalized_outcome_asset_binding_failure_parks_outbox_until_retry(
+    code: ErrorCode,
+) -> None:
+    guard = InMemoryPublicationCommitGuard()
+    resources = InMemoryResourceStore(publication_guard=guard)
+    outcome, staged = _route_outcome_with_export(resources)
+    records = InMemoryExecutionRecordStore()
+    file_ref = records.publish_outcome_bytes(
+        outcome.job_id,
+        canonical_json_bytes(outcome),
+    )
+    binding = runtime_bindings_from_job(
+        Job.model_validate(_load("job-diagnose.json"))
+    )
+    catalog = _diagnose_catalog(binding)
+    parked = _port_error(code, "The pinned Outcome binding is unavailable.")
+    catalog.inject_failure("diagnose_bindings", parked)
+    coordinator = ScriptedCoordinator([_route_to_diagnose_plan])
+    service, repository, _, _, dispatcher, _, _ = _service(
+        _running_state(),
+        coordinator,
+        records,
+        catalog=catalog,
+        resources=resources,
+        guard=guard,
+    )
+
+    with pytest.raises(ApplicationPortError) as captured:
+        service.submit_outcome(outcome, file_ref)
+
+    assert captured.value is parked
+    aggregate = repository.read_snapshot().cases[CASE_ID]
+    assert outcome.outcome_id not in aggregate.outcome_processing_records
+    assert repository.commit_calls == []
+    assert coordinator.calls == []
+    assert records.publish_job_calls == []
+    assert resources.publish_calls == []
+    assert resources.discard_calls == []
+    assert resources.staged_resource_count == 1
+    assert staged.proposal_key == "diagnostic_export"
+    assert guard.acquire_calls == guard.release_calls == 0
+
+    receipt = service.submit_outcome(outcome, file_ref)
+
+    assert receipt.disposition is OutcomeDisposition.APPLIED
+    assert catalog.diagnose_calls == [outcome.payload.skill_ref]
+    assert resources.discard_calls == [staged]
+    assert dispatcher.submit_calls
+    assert guard.acquire_calls == guard.release_calls == 1
+
+
+def test_catalog_success_cannot_substitute_a_different_skill_version() -> None:
+    outcome = _outcome("job-outcome-route.json")
+    records = InMemoryExecutionRecordStore()
+    file_ref = records.publish_outcome_bytes(
+        outcome.job_id,
+        canonical_json_bytes(outcome),
+    )
+    expected_ref = outcome.payload.skill_ref
+    assert expected_ref is not None
+    binding = runtime_bindings_from_job(
+        Job.model_validate(_load("job-diagnose.json"))
+    )
+    substituted = binding.model_copy(
+        update={
+            "skill_ref": VersionedRef(
+                id=expected_ref.id,
+                version="9.9.9",
+                content_hash="8" * 64,
+            )
+        }
+    )
+    catalog = FakeAssetCatalog(
+        diagnose={
+            (expected_ref.id, expected_ref.version, expected_ref.content_hash): substituted
+        }
+    )
+    service, repository, _, guard, _, _, _ = _service(
+        _running_state(),
+        ScriptedCoordinator(),
+        records,
+        catalog=catalog,
+    )
+
+    with pytest.raises(ApplicationPortError) as captured:
+        service.submit_outcome(outcome, file_ref)
+
+    assert captured.value.error.code is ErrorCode.CONFIG_INVALID
+    assert repository.commit_calls == []
+    assert records.publish_job_calls == []
+    assert guard.acquire_calls == guard.release_calls == 0
+
+
+def test_completed_diagnosis_without_candidate_offers_same_pinned_diagnose_binding() -> None:
+    source_job = Job.model_validate(_load("job-diagnose.json"))
+    assert source_job.skill_ref is not None
+    payload = _outcome("job-outcome-diagnosis.json").model_dump(mode="python")
+    payload["payload"]["candidate_conclusion_draft"] = None
+    payload["proposed_artifacts"] = [
+        proposal
+        for proposal in payload["proposed_artifacts"]
+        if proposal["artifact_kind"] is not ArtifactKind.USER_RESULT
+    ]
+    outcome = JobOutcome.model_validate(payload)
+    binding = runtime_bindings_from_job(source_job)
+    catalog = _diagnose_catalog(binding)
+    service, _, _, _, _, _, _ = _service(
+        _running_state(),
+        ScriptedCoordinator(),
+        InMemoryExecutionRecordStore(),
+        catalog=catalog,
+    )
+
+    offered = service._bindings_for_outcome(source_job, outcome)
+
+    assert offered == {JobType.DIAGNOSE: binding}
+    assert catalog.diagnose_calls == [source_job.skill_ref]
+
+
 def test_state_write_retry_reuses_published_next_job_a_not_current_catalog_b() -> None:
     outcome = _outcome("job-outcome-route.json")
     records = InMemoryExecutionRecordStore()
@@ -880,6 +1339,313 @@ def test_state_write_retry_reuses_published_next_job_a_not_current_catalog_b() -
     assert len(records.publish_job_calls) == 1
     assert second_dispatcher.submit_calls == [created_job_id]
     assert second_guard.acquire_calls == second_guard.release_calls == 1
+
+
+def test_first_next_job_publish_failure_has_no_disposition_and_reuses_durable_job() -> None:
+    guard = InMemoryPublicationCommitGuard()
+    resources = InMemoryResourceStore(publication_guard=guard)
+    outcome, staged = _route_outcome_with_export(resources)
+    records = _PublishThenFailExecutionRecordStore()
+    file_ref = records.publish_outcome_bytes(
+        outcome.job_id,
+        canonical_json_bytes(outcome),
+    )
+    publish_failure = _port_error(
+        ErrorCode.EXECUTION_RECORD_FAILED,
+        "The first next Job publication acknowledgement failed.",
+    )
+    records.fail_after_publish = publish_failure
+    binding = runtime_bindings_from_job(
+        Job.model_validate(_load("job-diagnose.json"))
+    )
+    catalog = _diagnose_catalog(binding)
+    coordinator = ScriptedCoordinator(
+        [
+            _route_to_diagnose_with_export_plan,
+            _route_to_diagnose_with_export_plan,
+        ]
+    )
+    service, repository, _, _, dispatcher, _, _ = _service(
+        _running_state(),
+        coordinator,
+        records,
+        catalog=catalog,
+        ids=DeterministicIdGenerator(seed="next-job-publication-retry"),
+        resources=resources,
+        guard=guard,
+    )
+
+    with pytest.raises(ApplicationPortError) as captured:
+        service.submit_outcome(outcome, file_ref)
+
+    assert captured.value is publish_failure
+    aggregate = repository.read_snapshot().cases[CASE_ID]
+    assert outcome.outcome_id not in aggregate.outcomes
+    assert outcome.outcome_id not in aggregate.outcome_processing_records
+    assert repository.commit_calls == []
+    assert len(records.publish_job_calls) == 1
+    published_job = records.publish_job_calls[0]
+    assert catalog.diagnose_calls == [outcome.payload.skill_ref]
+    assert len(resources.publish_calls) == 1
+    assert resources.discard_calls == []
+    assert resources.staged_resource_count == 0
+    assert staged.proposal_key == "diagnostic_export"
+    assert dispatcher.submit_calls == []
+    assert guard.acquire_calls == guard.release_calls == 1
+
+    receipt = service.submit_outcome(outcome, file_ref)
+
+    assert receipt.disposition is OutcomeDisposition.APPLIED
+    aggregate = repository.read_snapshot().cases[CASE_ID]
+    processing = aggregate.outcome_processing_records[outcome.outcome_id]
+    assert processing.disposition is OutcomeDisposition.APPLIED
+    assert processing.created_job_id == published_job.job_id
+    assert aggregate.jobs[published_job.job_id] == published_job
+    assert len(aggregate.artifacts) == 1
+    assert len(records.publish_job_calls) == 1
+    assert catalog.diagnose_calls == [outcome.payload.skill_ref]
+    assert len(resources.publish_calls) == 2
+    assert resources.discard_calls == []
+    assert dispatcher.submit_calls == [published_job.job_id]
+    assert guard.acquire_calls == guard.release_calls == 2
+
+
+def test_existing_next_job_record_read_fault_is_deterministically_rejected() -> None:
+    outcome = _outcome("job-outcome-route.json")
+    records = InMemoryExecutionRecordStore()
+    file_ref = records.publish_outcome_bytes(
+        outcome.job_id,
+        canonical_json_bytes(outcome),
+    )
+    records.inject_failure(
+        "read_published_job",
+        _port_error(
+            ErrorCode.EXECUTION_RECORD_FAILED,
+            "The existing deterministic next Job record is corrupt.",
+        ),
+    )
+    coordinator = ScriptedCoordinator(
+        [lambda snapshot, trigger: _failed_plan(snapshot, trigger, applied=False)]
+    )
+    service, repository, _, guard, dispatcher, _, _ = _service(
+        _running_state(),
+        coordinator,
+        records,
+    )
+
+    receipt = service.submit_outcome(outcome, file_ref)
+
+    assert receipt.disposition is OutcomeDisposition.REJECTED
+    aggregate = repository.read_snapshot().cases[CASE_ID]
+    processing = aggregate.outcome_processing_records[outcome.outcome_id]
+    assert processing.error_code is ErrorCode.EXECUTION_RECORD_FAILED
+    assert coordinator.calls[0][1].trigger_type is TriggerType.EXECUTION_FAILED
+    assert records.publish_job_calls == []
+    assert dispatcher.submit_calls == []
+    assert guard.acquire_calls == guard.release_calls == 1
+
+
+def test_legal_existing_next_job_with_drifted_bytes_is_rejected_without_overwrite() -> None:
+    state = _running_state()
+    outcome = _outcome("job-outcome-route.json")
+    seed = "existing-next-job-byte-drift"
+    prospective_job_id = DeterministicIdGenerator(seed=seed).derive(
+        "job",
+        [
+            state.installation_id,
+            CASE_ID,
+            outcome.outcome_id,
+            "next_job",
+        ],
+    )
+    drifted_payload = Job.model_validate(
+        _load("job-diagnose.json")
+    ).model_dump(mode="python")
+    drifted_payload.update(
+        job_id=prospective_job_id,
+        case_id=CASE_ID,
+        status=JobStatus.PENDING,
+        goal="A different but individually valid recovered Job goal.",
+        created_at=outcome.produced_at,
+        started_at=None,
+        finished_at=None,
+        runtime_epoch=None,
+    )
+    drifted_job = Job.model_validate(drifted_payload)
+    records = InMemoryExecutionRecordStore()
+    records.publish_job(drifted_job)
+    file_ref = records.publish_outcome_bytes(
+        outcome.job_id,
+        canonical_json_bytes(outcome),
+    )
+    catalog = FakeAssetCatalog()
+    coordinator = ScriptedCoordinator(
+        [
+            _route_to_diagnose_plan,
+            lambda snapshot, trigger: _failed_plan(
+                snapshot,
+                trigger,
+                applied=False,
+            ),
+        ]
+    )
+    service, repository, _, guard, dispatcher, _, _ = _service(
+        state,
+        coordinator,
+        records,
+        catalog=catalog,
+        ids=DeterministicIdGenerator(seed=seed),
+    )
+
+    receipt = service.submit_outcome(outcome, file_ref)
+
+    assert receipt.disposition is OutcomeDisposition.REJECTED
+    aggregate = repository.read_snapshot().cases[CASE_ID]
+    processing = aggregate.outcome_processing_records[outcome.outcome_id]
+    assert processing.error_code is ErrorCode.EXECUTION_RECORD_FAILED
+    assert aggregate.jobs[JOB_ID].status is JobStatus.FAILED
+    assert records.publish_job_calls == [drifted_job]
+    assert records.read_published_job(prospective_job_id).job == drifted_job
+    assert catalog.route_calls == 0
+    assert catalog.diagnose_calls == []
+    assert catalog.review_calls == []
+    assert len(coordinator.calls) == 2
+    assert coordinator.calls[1][1].trigger_type is TriggerType.EXECUTION_FAILED
+    assert dispatcher.submit_calls == []
+    assert guard.acquire_calls == guard.release_calls == 2
+
+
+def test_legal_existing_next_job_with_wrong_role_is_rejected_before_outcome_plan() -> None:
+    state = _running_state()
+    outcome = _outcome("job-outcome-route.json")
+    seed = "existing-next-job-role-drift"
+    prospective_job_id = DeterministicIdGenerator(seed=seed).derive(
+        "job",
+        [
+            state.installation_id,
+            CASE_ID,
+            outcome.outcome_id,
+            "next_job",
+        ],
+    )
+    wrong_role_payload = Job.model_validate(
+        _load("job-route.json")
+    ).model_dump(mode="python")
+    wrong_role_payload.update(
+        job_id=prospective_job_id,
+        case_id=CASE_ID,
+        status=JobStatus.PENDING,
+        created_at=outcome.produced_at,
+        started_at=None,
+        finished_at=None,
+        runtime_epoch=None,
+    )
+    wrong_role_job = Job.model_validate(wrong_role_payload)
+    records = InMemoryExecutionRecordStore()
+    records.publish_job(wrong_role_job)
+    file_ref = records.publish_outcome_bytes(
+        outcome.job_id,
+        canonical_json_bytes(outcome),
+    )
+    catalog = FakeAssetCatalog()
+    coordinator = ScriptedCoordinator(
+        [lambda snapshot, trigger: _failed_plan(snapshot, trigger, applied=False)]
+    )
+    service, repository, _, guard, dispatcher, _, _ = _service(
+        state,
+        coordinator,
+        records,
+        catalog=catalog,
+        ids=DeterministicIdGenerator(seed=seed),
+    )
+
+    receipt = service.submit_outcome(outcome, file_ref)
+
+    assert receipt.disposition is OutcomeDisposition.REJECTED
+    aggregate = repository.read_snapshot().cases[CASE_ID]
+    processing = aggregate.outcome_processing_records[outcome.outcome_id]
+    assert processing.error_code is ErrorCode.EXECUTION_RECORD_FAILED
+    assert aggregate.jobs[JOB_ID].status is JobStatus.FAILED
+    assert records.publish_job_calls == [wrong_role_job]
+    assert records.read_published_job(prospective_job_id).job == wrong_role_job
+    assert catalog.route_calls == 0
+    assert catalog.diagnose_calls == []
+    assert catalog.review_calls == []
+    assert len(coordinator.calls) == 1
+    assert coordinator.calls[0][1].trigger_type is TriggerType.EXECUTION_FAILED
+    assert dispatcher.submit_calls == []
+    assert guard.acquire_calls == guard.release_calls == 1
+
+
+def test_recovered_next_job_cannot_replace_the_outcome_selected_skill() -> None:
+    state = _running_state()
+    outcome = _outcome("job-outcome-route.json")
+    expected_skill_ref = getattr(outcome.payload, "skill_ref", None)
+    assert expected_skill_ref is not None
+    seed = "existing-next-job-skill-drift"
+    prospective_job_id = DeterministicIdGenerator(seed=seed).derive(
+        "job",
+        [
+            state.installation_id,
+            CASE_ID,
+            outcome.outcome_id,
+            "next_job",
+        ],
+    )
+    replacement_skill_ref = VersionedRef(
+        id=expected_skill_ref.id,
+        version="9.9.9",
+        content_hash="8" * 64,
+    )
+    drifted_payload = Job.model_validate(
+        _load("job-diagnose.json")
+    ).model_dump(mode="python")
+    drifted_payload.update(
+        job_id=prospective_job_id,
+        case_id=CASE_ID,
+        status=JobStatus.PENDING,
+        skill_ref=replacement_skill_ref,
+        created_at=outcome.produced_at,
+        started_at=None,
+        finished_at=None,
+        runtime_epoch=None,
+    )
+    drifted_job = Job.model_validate(drifted_payload)
+    records = InMemoryExecutionRecordStore()
+    records.publish_job(drifted_job)
+    file_ref = records.publish_outcome_bytes(
+        outcome.job_id,
+        canonical_json_bytes(outcome),
+    )
+    catalog = FakeAssetCatalog()
+    coordinator = ScriptedCoordinator(
+        [lambda snapshot, trigger: _failed_plan(snapshot, trigger, applied=False)]
+    )
+    service, repository, _, guard, dispatcher, _, _ = _service(
+        state,
+        coordinator,
+        records,
+        catalog=catalog,
+        ids=DeterministicIdGenerator(seed=seed),
+    )
+
+    receipt = service.submit_outcome(outcome, file_ref)
+
+    assert receipt.disposition is OutcomeDisposition.REJECTED
+    aggregate = repository.read_snapshot().cases[CASE_ID]
+    processing = aggregate.outcome_processing_records[outcome.outcome_id]
+    assert processing.error_code is ErrorCode.EXECUTION_RECORD_FAILED
+    assert prospective_job_id not in aggregate.jobs
+    assert aggregate.jobs[JOB_ID].status is JobStatus.FAILED
+    assert records.publish_job_calls == [drifted_job]
+    assert records.read_published_job(prospective_job_id).job == drifted_job
+    assert catalog.route_calls == 0
+    assert catalog.diagnose_calls == []
+    assert catalog.review_calls == []
+    assert len(coordinator.calls) == 1
+    assert coordinator.calls[0][1].trigger_type is TriggerType.EXECUTION_FAILED
+    assert dispatcher.submit_calls == []
+    assert guard.acquire_calls == guard.release_calls == 1
 
 
 def test_applied_outcome_discards_unaccepted_stage_after_releasing_lease() -> None:
@@ -988,11 +1754,24 @@ def test_capacity_rejection_reloads_state_and_calls_failure_coordinator_unlocked
         canonical_json_bytes(outcome),
     )
     repository = _CountingRepository(_running_state())
+    observed = MAX_CASE_RESOURCE_BYTES + 37
+    capacity_detail = ApplicationErrorDetail(
+        field="case_resource_bytes",
+        resource_type="CASE",
+        resource_id=CASE_ID,
+        resource_ref=None,
+        expected=None,
+        actual=None,
+        limit=MAX_CASE_RESOURCE_BYTES,
+        observed=observed,
+    )
 
     def failure_plan(snapshot, trigger):
         assert trigger.trigger_type is TriggerType.EXECUTION_FAILED
         assert repository.read_snapshot_calls == 2
         assert guard.held_by_current_thread() is False
+        assert trigger.payload.execution_failure.details == [capacity_detail]
+        assert trigger.payload.execution_failure.details[0].observed == observed
         return _failed_plan(snapshot, trigger, applied=False)
 
     coordinator = ScriptedCoordinator(
@@ -1003,6 +1782,7 @@ def test_capacity_rejection_reloads_state_and_calls_failure_coordinator_unlocked
         _port_error(
             ErrorCode.RESOURCE_LIMIT_EXCEEDED,
             "Case resource capacity exceeded.",
+            details=(capacity_detail,),
         ),
     )
     binding = runtime_bindings_from_job(Job.model_validate(_load("job-diagnose.json")))

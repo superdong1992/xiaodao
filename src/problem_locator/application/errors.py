@@ -1,7 +1,7 @@
 """Frozen application-facing error construction helpers.
 
 S03 never invents a second exception hierarchy.  Every modeled failure that
-crosses an application or JobControl Port is carried by the r2
+crosses an application or JobControl Port is carried by the frozen
 ``ApplicationPortError`` and uses S00's retryability table verbatim.
 """
 

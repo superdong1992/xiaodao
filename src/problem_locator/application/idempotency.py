@@ -1,7 +1,7 @@
 """Pure idempotency helpers for the application-service command pipeline.
 
 The helpers are pure and therefore return an explicit internal decision.
-Orchestrators map ``CONFLICT`` through r2's frozen ``ApplicationPortError`` at
+Orchestrators map ``CONFLICT`` through the frozen ``ApplicationPortError`` at
 the public Port boundary.
 """
 

@@ -40,6 +40,9 @@ ROOT = Path(__file__).resolve().parents[3]
 READINESS_FIXTURE = (
     ROOT / "tests/fixtures/components/application/contract-blockers.json"
 )
+SCENARIO_FIXTURE = (
+    ROOT / "tests/fixtures/components/application/scenario-matrix.json"
+)
 COMPONENT_FIXTURE_ROOT = ROOT / "tests/fixtures/components/application"
 CONTRACT_STATE_FIXTURE = ROOT / "tests/fixtures/contracts/positive/state.json"
 
@@ -73,87 +76,59 @@ def _methods_accepting(protocol: type[object], target: type[object]) -> list[str
     return sorted(consumers)
 
 
-def test_fixture_records_all_r1_gaps_as_resolved_by_r2() -> None:
+def test_fixture_records_every_s03_contract_gap_as_resolved_by_r3() -> None:
     fixture = _readiness_fixture()
 
     assert fixture["schema_version"] == 1
     assert fixture["owner_spec"] == "S03"
-    assert fixture["contract_revision"] == CONTRACT_REVISION == "v1-contract-r2"
-    assert [item["id"] for item in fixture["resolutions"]] == [
-        "application_port_error",
-        "coordinator_plan_result",
-        "stable_target_changed",
-        "expected_content_type",
-        "staged_preflight",
-        "recovery_receipt_persistence",
-        "rejected_processing_without_valid_outcome",
-        "prepare_size_classification",
-        "resource_target_key_derivation",
-    ]
-    assert {item["resolved_by"] for item in fixture["resolutions"]} == {
-        "v1-contract-r2"
+    assert fixture["contract_revision"] == CONTRACT_REVISION == "v1-contract-r3"
+    expected_resolutions = {
+        "application_port_error": "v1-contract-r2",
+        "coordinator_plan_result": "v1-contract-r2",
+        "stable_target_changed": "v1-contract-r2",
+        "expected_content_type": "v1-contract-r2",
+        "staged_preflight": "v1-contract-r2",
+        "recovery_receipt_persistence": "v1-contract-r2",
+        "rejected_processing_without_valid_outcome": "v1-contract-r2",
+        "prepare_size_classification": "v1-contract-r2",
+        "resource_target_key_derivation": "v1-contract-r2",
+        "CCR-S03-R2-STATE-READ-ERROR-CLOSURE": "v1-contract-r3",
+        "CCR-S03-R2-COORDINATOR-ERROR-CLOSURE": "v1-contract-r3",
+        "CCR-S03-R2-CAPACITY-OBSERVED-CLOSURE": "v1-contract-r3",
+        "CCR-S03-R2-NEXT-JOB-PUBLISH-ERROR-CLOSURE": "v1-contract-r3",
+        "CCR-S03-R2-ASSET-BINDING-FAILURE-CLOSURE": "v1-contract-r3",
+        "CCR-S03-R2-QUERY-RAW-VALIDATION-ERROR-CLOSURE": "v1-contract-r3",
+        "CCR-S03-R2-JOBCONTROL-RAW-VALIDATION-ERROR-CLOSURE": "v1-contract-r3",
     }
-    assert [
-        item["id"] for item in fixture["unresolved_contract_change_requests"]
-    ] == [
-        "CCR-S03-R2-STATE-READ-ERROR-CLOSURE",
-        "CCR-S03-R2-COORDINATOR-ERROR-CLOSURE",
-        "CCR-S03-R2-CAPACITY-OBSERVED-CLOSURE",
-        "CCR-S03-R2-NEXT-JOB-PUBLISH-ERROR-CLOSURE",
-        "CCR-S03-R2-ASSET-BINDING-FAILURE-CLOSURE",
-        "CCR-S03-R2-QUERY-RAW-VALIDATION-ERROR-CLOSURE",
-        "CCR-S03-R2-JOBCONTROL-RAW-VALIDATION-ERROR-CLOSURE",
-    ]
     assert {
-        item["id"]: item["status"]
-        for item in fixture["unresolved_contract_change_requests"]
-    } == {
-        "CCR-S03-R2-STATE-READ-ERROR-CLOSURE": "accepted_for_v1-contract-r3",
-        "CCR-S03-R2-COORDINATOR-ERROR-CLOSURE": "accepted_for_v1-contract-r3",
-        "CCR-S03-R2-CAPACITY-OBSERVED-CLOSURE": "accepted_for_v1-contract-r3",
-        "CCR-S03-R2-NEXT-JOB-PUBLISH-ERROR-CLOSURE": "accepted_for_v1-contract-r3",
-        "CCR-S03-R2-ASSET-BINDING-FAILURE-CLOSURE": "reported_for_v1-contract-r3",
-        "CCR-S03-R2-QUERY-RAW-VALIDATION-ERROR-CLOSURE": (
-            "reported_for_v1-contract-r3"
-        ),
-        "CCR-S03-R2-JOBCONTROL-RAW-VALIDATION-ERROR-CLOSURE": (
-            "reported_for_v1-contract-r3"
-        ),
-    }
-    query_validation_request = next(
-        item
-        for item in fixture["unresolved_contract_change_requests"]
-        if item["id"] == "CCR-S03-R2-QUERY-RAW-VALIDATION-ERROR-CLOSURE"
-    )
-    assert set(query_validation_request["failure_fixture"]["methods"]) == {
-        "ApplicationQueryPort.get_case",
-        "ApplicationQueryPort.list_artifacts",
-        "ApplicationQueryPort.open_artifact",
-    }
-    job_control_validation_request = next(
-        item
-        for item in fixture["unresolved_contract_change_requests"]
-        if item["id"]
-        == "CCR-S03-R2-JOBCONTROL-RAW-VALIDATION-ERROR-CLOSURE"
-    )
-    assert set(job_control_validation_request["failure_fixture"]["methods"]) == {
-        "JobControlPort.claim_job",
-        "JobControlPort.submit_outcome",
-        "JobControlPort.interrupt_previous_epoch",
-    }
-    for request in (query_validation_request, job_control_validation_request):
-        assert {
-            key: value
-            for key, value in request["failure_fixture"].items()
-            if key != "methods"
-        } == {
-            "expected_error": "VALIDATION_ERROR",
-            "expected_repository_reads": 0,
-            "expected_side_effect_calls": 0,
-        }
+        item["id"]: item["resolved_by"] for item in fixture["resolutions"]
+    } == expected_resolutions
+    assert fixture["unresolved_contract_change_requests"] == []
 
 
-def test_r2_exposes_one_typed_application_port_failure() -> None:
+def test_r3_scenario_matrix_has_unique_ids_and_closed_boundary_examples() -> None:
+    fixture = json.loads(SCENARIO_FIXTURE.read_text(encoding="utf-8"))
+
+    assert fixture["schema_version"] == 1
+    assert fixture["owner_spec"] == "S03"
+    assert fixture["contract_revision"] == CONTRACT_REVISION
+    scenarios = fixture["scenarios"]
+    assert all(set(item) == {"id", "disposition", "error"} for item in scenarios)
+    scenario_ids = [item["id"] for item in scenarios]
+    assert len(scenario_ids) == len(set(scenario_ids))
+    assert {
+        "upload.post_stage_state_read_fault",
+        "outcome.first_next_job_publish_failure",
+        "outcome.existing_next_job_bytes_drift",
+        "outcome.finalized_asset_failure_parked",
+        "claim.normal_competition",
+        "query.invalid_raw_input",
+        "recovery.concurrent_interrupt",
+        "state.postcommit_replay_projection_fault",
+    } <= set(scenario_ids)
+
+
+def test_contract_exposes_one_typed_application_port_failure() -> None:
     error = ApplicationError(
         code=ErrorCode.CASE_NOT_FOUND,
         message="The Case does not exist.",

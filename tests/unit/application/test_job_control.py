@@ -7,9 +7,11 @@ from pathlib import Path
 import pytest
 
 from problem_locator.application.job_control import JobControlService
+from problem_locator.application.mutations import build_state_mutation
 from problem_locator.application.preparation import fixed_asset_refs
 from problem_locator.contracts import (
     ApplicationError,
+    ApplicationErrorDetail,
     ApplicationPortError,
     AssetKind,
     CaseFailure,
@@ -231,6 +233,16 @@ class _ReadFailsAfterCommitRepository(InMemoryStateRepository):
         return receipt
 
 
+class _CountingRepository(InMemoryStateRepository):
+    def __init__(self, state: StateFile) -> None:
+        super().__init__(state)
+        self.read_snapshot_calls = 0
+
+    def read_snapshot(self) -> StateFile:
+        self.read_snapshot_calls += 1
+        return super().read_snapshot()
+
+
 def _service(
     state: StateFile,
     coordinator: ScriptedCoordinator,
@@ -316,20 +328,211 @@ def test_claim_missing_asset_uses_coordinator_failure_plan_without_claiming() ->
     assert notifier.notify_calls == [(CASE_ID, 2)]
 
 
-def test_claim_rejects_a_non_pending_job_without_side_effects() -> None:
+def test_claim_returns_the_normal_rejection_receipt_for_a_non_pending_job() -> None:
     state = _running_state(runtime_epoch=CURRENT_EPOCH)
-    service, repository, guard, _, clock, _ = _service(
+    coordinator = ScriptedCoordinator()
+    catalog = _available_catalog(state)
+    service, repository, guard, _, clock, ids = _service(
         state,
-        ScriptedCoordinator(),
+        coordinator,
+        catalog=catalog,
+    )
+
+    receipt = service.claim_job(JOB_ID, CURRENT_EPOCH)
+
+    assert receipt.claimed is False
+    assert receipt.job is None
+    assert receipt.failure_applied is False
+    assert receipt.failure_code is None
+    assert repository.commit_calls == []
+    assert catalog.check_calls == []
+    assert coordinator.calls == []
+    assert guard.acquire_calls == 0
+    assert clock.calls == 0
+    assert ids.new_calls == []
+
+
+@pytest.mark.parametrize(
+    "code",
+    [ErrorCode.INVALID_CASE_STATE, ErrorCode.VALIDATION_ERROR],
+)
+def test_claim_coordinator_rejection_uses_the_same_normal_receipt_channel(
+    code: ErrorCode,
+) -> None:
+    state = _state()
+    decision = ApplicationError(
+        code=code,
+        message="The asset-unavailable transition is not applicable.",
+        details=[],
+        retryable=False,
+    )
+    coordinator = ScriptedCoordinator([decision])
+    service, repository, guard, notifier, _, _ = _service(
+        state,
+        coordinator,
+        catalog=FakeAssetCatalog(),
+    )
+
+    receipt = service.claim_job(JOB_ID, CURRENT_EPOCH)
+
+    assert receipt.claimed is False
+    assert receipt.job is None
+    assert receipt.failure_applied is False
+    assert receipt.failure_code is None
+    assert len(coordinator.calls) == 1
+    assert coordinator.calls[0][1].trigger_type is TriggerType.ASSET_VERSION_UNAVAILABLE
+    assert repository.commit_calls == []
+    assert guard.acquire_calls == 0
+    assert notifier.notify_calls == []
+
+
+@pytest.mark.parametrize(
+    ("operation", "target_status"),
+    [
+        ("claim", JobStatus.FAILED),
+        ("report", JobStatus.FAILED),
+        ("recovery", JobStatus.INTERRUPTED),
+    ],
+)
+@pytest.mark.parametrize("invalid_output", ["decision", "plan"])
+def test_invalid_job_control_coordinator_output_uses_typed_validation_error(
+    operation: str,
+    target_status: JobStatus,
+    invalid_output: str,
+) -> None:
+    state = _recovery_state() if operation == "recovery" else (
+        _running_state() if operation == "report" else _state()
+    )
+
+    def invalid_result(snapshot, trigger):
+        if invalid_output == "decision":
+            return ApplicationError(
+                code=ErrorCode.ACTIVE_JOB_EXISTS,
+                message="This error code is not legal for the control Trigger.",
+                details=[],
+                retryable=False,
+            )
+        return _control_plan(snapshot, trigger, target_status).model_copy(
+            update={"clear_active_job": False}
+        )
+
+    coordinator = ScriptedCoordinator([invalid_result])
+    catalog = FakeAssetCatalog() if operation == "claim" else _available_catalog(state)
+    service, repository, guard, notifier, _, _ = _service(
+        state,
+        coordinator,
+        catalog=catalog,
     )
 
     with pytest.raises(ApplicationPortError) as captured:
-        service.claim_job(JOB_ID, CURRENT_EPOCH)
+        if operation == "claim":
+            service.claim_job(JOB_ID, CURRENT_EPOCH)
+        elif operation == "report":
+            service.report_execution_infrastructure_failure(
+                JOB_ID,
+                OLD_EPOCH,
+                FAILURE_ID,
+                _execution_failure(),
+            )
+        else:
+            service.interrupt_previous_epoch(CURRENT_EPOCH, RECOVERY_ID)
 
-    assert captured.value.error.code is ErrorCode.CLAIM_REJECTED
+    assert captured.value.error.code is ErrorCode.VALIDATION_ERROR
+    expected_audit_commits = 1 if operation == "recovery" else 0
+    assert len(repository.commit_calls) == expected_audit_commits
+    assert guard.acquire_calls == guard.release_calls == expected_audit_commits
+    assert notifier.notify_calls == []
+    assert len(coordinator.calls) == 1
+    if operation == "recovery":
+        record = repository.read_snapshot().recovery_processing_records[RECOVERY_ID]
+        assert record.completed_at is None
+
+
+@pytest.mark.parametrize(
+    ("operation", "args"),
+    [
+        ("claim_job", ("not-a-job-id", CURRENT_EPOCH)),
+        ("claim_job", (JOB_ID, "not-a-runtime-epoch")),
+        ("claim_job", (True, CURRENT_EPOCH)),
+        ("interrupt_previous_epoch", ("not-a-runtime-epoch", RECOVERY_ID)),
+        ("interrupt_previous_epoch", (CURRENT_EPOCH, "not-a-recovery-id")),
+        ("interrupt_previous_epoch", (CURRENT_EPOCH, 1.5)),
+    ],
+)
+def test_raw_job_control_input_is_rebuilt_before_any_dependency_call(
+    operation: str,
+    args: tuple[object, ...],
+) -> None:
+    state = _state()
+    repository = _CountingRepository(state)
+    coordinator = ScriptedCoordinator()
+    catalog = _available_catalog(state)
+    service, _, guard, notifier, clock, ids = _service(
+        state,
+        coordinator,
+        catalog=catalog,
+        repository=repository,
+    )
+
+    with pytest.raises(ApplicationPortError) as captured:
+        getattr(service, operation)(*args)
+
+    assert captured.value.error.code is ErrorCode.VALIDATION_ERROR
+    assert captured.value.error.retryable is False
+    assert repository.read_snapshot_calls == 0
     assert repository.commit_calls == []
+    assert catalog.check_calls == []
+    assert coordinator.calls == []
     assert guard.acquire_calls == 0
+    assert notifier.notify_calls == []
     assert clock.calls == 0
+    assert ids.new_calls == []
+
+
+@pytest.mark.parametrize(
+    "code",
+    [ErrorCode.STATE_CORRUPT, ErrorCode.STATE_SCHEMA_UNSUPPORTED],
+)
+@pytest.mark.parametrize(
+    ("operation", "args"),
+    [
+        ("claim_job", (JOB_ID, CURRENT_EPOCH)),
+        (
+            "report_execution_infrastructure_failure",
+            (JOB_ID, OLD_EPOCH, FAILURE_ID, _execution_failure()),
+        ),
+        ("interrupt_previous_epoch", (CURRENT_EPOCH, RECOVERY_ID)),
+    ],
+)
+def test_job_control_preserves_the_exact_precommit_state_read_fault(
+    code: ErrorCode,
+    operation: str,
+    args: tuple[object, ...],
+) -> None:
+    state = _running_state()
+    repository = InMemoryStateRepository(state)
+    failure = _port_error(code, "injected state read failure")
+    repository.inject_read_failure("read_snapshot", failure)
+    coordinator = ScriptedCoordinator()
+    catalog = _available_catalog(state)
+    service, _, guard, notifier, clock, ids = _service(
+        state,
+        coordinator,
+        catalog=catalog,
+        repository=repository,
+    )
+
+    with pytest.raises(ApplicationPortError) as captured:
+        getattr(service, operation)(*args)
+
+    assert captured.value is failure
+    assert repository.commit_calls == []
+    assert catalog.check_calls == []
+    assert coordinator.calls == []
+    assert guard.acquire_calls == 0
+    assert notifier.notify_calls == []
+    assert clock.calls == 0
+    assert ids.new_calls == []
 
 
 def test_claim_propagates_the_exact_repository_port_error_and_releases_lease() -> None:
@@ -472,6 +675,38 @@ def test_execution_failure_consumes_coordinator_application_error_union() -> Non
     assert guard.acquire_calls == 0
 
 
+def test_execution_failure_coordinator_state_race_returns_fresh_stale_receipt() -> None:
+    state = _running_state()
+    repository = _CountingRepository(state)
+    decision = ApplicationError(
+        code=ErrorCode.INVALID_CASE_STATE,
+        message="The Case state advanced before the failure was applied.",
+        details=[],
+        retryable=False,
+    )
+    coordinator = ScriptedCoordinator([decision])
+    service, _, guard, notifier, _, _ = _service(
+        state,
+        coordinator,
+        repository=repository,
+    )
+
+    receipt = service.report_execution_infrastructure_failure(
+        JOB_ID,
+        OLD_EPOCH,
+        FAILURE_ID,
+        _execution_failure(),
+    )
+
+    assert receipt.failure_id == FAILURE_ID
+    assert receipt.disposition is FailureReportDisposition.STALE
+    assert receipt.case_view.case_id == CASE_ID
+    assert repository.read_snapshot_calls == 2
+    assert repository.commit_calls == []
+    assert guard.acquire_calls == 0
+    assert notifier.notify_calls == []
+
+
 def test_recovery_persists_exact_lists_interrupts_each_case_and_replays_receipt() -> None:
     state = _recovery_state()
     coordinator = _coordinator_for(JobStatus.INTERRUPTED)
@@ -550,3 +785,124 @@ def test_incomplete_recovery_resumes_from_persisted_first_receipt() -> None:
     with pytest.raises(ApplicationPortError) as captured:
         first_service.interrupt_previous_epoch(CURRENT_EPOCH, OTHER_RECOVERY_ID)
     assert captured.value.error.code is ErrorCode.IDEMPOTENCY_CONFLICT
+
+
+def test_recovery_state_rejection_rereads_then_keeps_the_audit_incomplete() -> None:
+    state = _recovery_state()
+    detail = ApplicationErrorDetail(
+        field="case_status",
+        resource_type="CASE",
+        resource_id=CASE_ID,
+        resource_ref=None,
+        expected="RUNNING",
+        actual="INTERRUPTED",
+        limit=None,
+        observed=None,
+    )
+    decision = ApplicationError(
+        code=ErrorCode.INVALID_CASE_STATE,
+        message="The old-epoch Job cannot be interrupted in this Case state.",
+        details=[detail],
+        retryable=False,
+    )
+    coordinator = ScriptedCoordinator([decision])
+    service, repository, guard, notifier, _, _ = _service(state, coordinator)
+
+    with pytest.raises(ApplicationPortError) as captured:
+        service.interrupt_previous_epoch(CURRENT_EPOCH, RECOVERY_ID)
+
+    assert captured.value.error.code is ErrorCode.VALIDATION_ERROR
+    assert captured.value.error.message == decision.message
+    assert captured.value.error.details == [detail]
+    persisted = repository.read_snapshot()
+    assert persisted.recovery_processing_records[RECOVERY_ID].completed_at is None
+    assert persisted.cases[CASE_ID].jobs[JOB_ID].status is JobStatus.RUNNING
+    assert len(repository.commit_calls) == 1
+    assert guard.acquire_calls == guard.release_calls == 1
+    assert notifier.notify_calls == []
+    assert len(coordinator.calls) == 1
+
+
+def test_recovery_relational_state_contradiction_is_typed_state_corrupt() -> None:
+    payload = _recovery_state().model_dump(mode="python")
+    payload["cases"][CASE_ID]["case"].update(
+        status=CaseStatus.INTERRUPTED,
+        active_job_id=None,
+    )
+    contradictory = StateFile.model_validate(payload)
+    coordinator = ScriptedCoordinator()
+    service, repository, guard, notifier, _, _ = _service(
+        contradictory,
+        coordinator,
+    )
+
+    with pytest.raises(ApplicationPortError) as captured:
+        service.interrupt_previous_epoch(CURRENT_EPOCH, RECOVERY_ID)
+
+    assert captured.value.error.code is ErrorCode.STATE_CORRUPT
+    record = repository.read_snapshot().recovery_processing_records[RECOVERY_ID]
+    assert record.completed_at is None
+    assert record.interrupted_job_ids == [JOB_ID]
+    assert len(repository.commit_calls) == 1
+    assert guard.acquire_calls == guard.release_calls == 1
+    assert coordinator.calls == []
+    assert notifier.notify_calls == []
+
+
+def test_recovery_state_rejection_accepts_a_freshly_completed_race() -> None:
+    state = _recovery_state()
+    repository = InMemoryStateRepository(state)
+    decision = ApplicationError(
+        code=ErrorCode.INVALID_CASE_STATE,
+        message="Another writer already interrupted the old-epoch Job.",
+        details=[],
+        retryable=False,
+    )
+
+    def race_then_reject(snapshot, trigger):
+        current = repository.read_snapshot()
+        aggregate = current.cases[CASE_ID]
+        case_payload = aggregate.case.model_dump(mode="python")
+        case_payload.update(
+            status=CaseStatus.INTERRUPTED,
+            active_job_id=None,
+            case_revision=aggregate.case.case_revision + 1,
+            updated_at=NOW,
+        )
+        repository.commit(
+            current.generation,
+            aggregate.case.case_revision,
+            build_state_mutation(
+                upsert_case=aggregate.case.model_validate(case_payload),
+                job_lifecycle_updates=[
+                    JobLifecycleUpdate(
+                        job_id=JOB_ID,
+                        expected_status=JobStatus.RUNNING,
+                        target_status=JobStatus.INTERRUPTED,
+                        started_at=None,
+                        finished_at=NOW,
+                        runtime_epoch=None,
+                    )
+                ],
+            ),
+        )
+        return decision
+
+    coordinator = ScriptedCoordinator([race_then_reject])
+    service, _, guard, notifier, _, _ = _service(
+        state,
+        coordinator,
+        repository=repository,
+    )
+
+    receipt = service.interrupt_previous_epoch(CURRENT_EPOCH, RECOVERY_ID)
+
+    persisted = repository.read_snapshot()
+    assert receipt.interrupted_job_ids == [JOB_ID]
+    assert receipt.pending_job_ids == [SECOND_JOB_ID]
+    assert persisted.cases[CASE_ID].jobs[JOB_ID].status is JobStatus.INTERRUPTED
+    assert persisted.recovery_processing_records[RECOVERY_ID].completed_at == NOW
+    assert len(repository.commit_calls) == 3
+    assert guard.acquire_calls == guard.release_calls == 2
+    assert notifier.notify_calls == []
+    assert len(coordinator.calls) == 1
