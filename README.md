@@ -195,6 +195,52 @@ fork.
   validation, deterministic fake E2E, and real Logparse smoke are release
   gates; test or handoff records must state which platform was actually run.
 
+### Native Windows and Linux startup gates
+
+The native gates deliberately remain skipped on any other operating system;
+that skip is an unexecuted release gate, never a pass. Each runner must use the
+same release-candidate Git head, CPython 3.12, locked dependencies, and a clean
+Logparse checkout at
+`a233b500d9c99e6815d1ffd82cb4ca55bbfe657a`.
+
+Windows PowerShell:
+
+```powershell
+uv sync --frozen --all-groups
+$env:S08_NATIVE_STARTUP_GATE = "windows"
+$env:SKILL_DIR = (Resolve-Path ".claude\skills").Path
+$env:LOGPARSE_REPO = "C:\absolute\path\to\logparse"
+$env:LOGPARSE_CONFIG_PATH = "C:\absolute\path\to\logparse\config.yaml"
+$env:LOGPARSE_PYTHON = "C:\absolute\path\to\logparse\.venv\Scripts\python.exe"
+$env:CLAUDE_COMMAND = "claude"
+uv run pytest tests/e2e/test_native_startup_gate.py::test_native_windows_startup_gate -q -p no:cacheprovider
+```
+
+Linux shell:
+
+```sh
+uv sync --frozen --all-groups
+export S08_NATIVE_STARTUP_GATE=linux
+export SKILL_DIR="$(pwd)/.claude/skills"
+export LOGPARSE_REPO=/absolute/path/to/logparse
+export LOGPARSE_CONFIG_PATH=/absolute/path/to/logparse/config.yaml
+export LOGPARSE_PYTHON=/absolute/path/to/logparse/.venv/bin/python
+export CLAUDE_COMMAND=claude
+uv run pytest tests/e2e/test_native_startup_gate.py::test_native_linux_startup_gate -q -p no:cacheprovider
+```
+
+Each test asserts the native OS, Logparse commit and clean tree, startup from an
+env file, `/live`, all five `/ready` checks, bounded shutdown, canonical
+`validate-state` and `export-state`, instance-lock release, and a second
+recovery startup. A successful result must report the exact release-candidate
+SHA, OS/build, architecture, Python version, command, and pytest count.
+
+If a native result is available before the final S08 handoff-only commit, add
+its real command and summary to `handoff/S08.json.tests[]`. If it arrives after
+that immutable tip, do not amend or rewrite the handoff; attach the same fields
+to the downstream release verification record and retain the S08 limitation
+until an approved successor handoff incorporates the evidence.
+
 ## Release checks
 
 Run the full explicit test roots; a bare historical pytest configuration must
