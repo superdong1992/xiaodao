@@ -152,6 +152,7 @@ def _manifest(
                 "size": 128,
                 "sha256": attachment_sha,
                 "content_type": "application/octet-stream",
+                "filename_suffix": None,
             }
         )
     for item in evidence:

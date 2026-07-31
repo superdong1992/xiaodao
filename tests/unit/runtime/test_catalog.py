@@ -11,10 +11,13 @@ import pytest
 
 from problem_locator.runtime import catalog as catalog_module
 from problem_locator.contracts import (
+    ApplicationPortError,
     AssetCatalogPort,
     AssetKind,
+    ErrorCode,
     FixtureManifest,
     JobType,
+    PORT_ERROR_CODES,
     ResolvedAsset,
     VersionedRef,
     bytes_sha256,
@@ -58,6 +61,19 @@ def _catalog() -> VersionedAssetCatalog:
         logparse_tool=_logparse_asset(),
         logparse_broker_factory=_BrokerFactory(),
     )
+
+
+def _assert_catalog_error(
+    caught: pytest.ExceptionInfo[ApplicationPortError],
+    *,
+    operation: str,
+    code: ErrorCode,
+) -> None:
+    assert caught.value.error.code is code
+    assert caught.value.error.retryable is False
+    assert caught.value.error.details == []
+    assert code in PORT_ERROR_CODES[f"AssetCatalogPort.{operation}"]
+    assert not isinstance(caught.value, LookupError)
 
 
 def _write_skill(
@@ -141,10 +157,20 @@ def test_builtin_assets_and_port_use_exact_versioned_refs() -> None:
     report = catalog.check([exact, wrong_version, wrong_hash, wrong_version])
     assert report.available is False
     assert report.missing_refs == [wrong_version, wrong_hash, wrong_version]
-    with pytest.raises(LookupError, match="asset unavailable"):
+    with pytest.raises(ApplicationPortError) as wrong_version_error:
         catalog.resolve(wrong_version)
-    with pytest.raises(LookupError, match="asset unavailable"):
+    _assert_catalog_error(
+        wrong_version_error,
+        operation="resolve",
+        code=ErrorCode.ASSET_VERSION_UNAVAILABLE,
+    )
+    with pytest.raises(ApplicationPortError) as wrong_hash_error:
         catalog.resolve(wrong_hash)
+    _assert_catalog_error(
+        wrong_hash_error,
+        operation="resolve",
+        code=ErrorCode.ASSET_VERSION_UNAVAILABLE,
+    )
 
 
 def test_direct_child_skill_scan_bindings_and_deep_copy_isolation() -> None:
@@ -183,8 +209,13 @@ def test_direct_child_skill_scan_bindings_and_deep_copy_isolation() -> None:
     resolved = catalog.resolve(log_ref)
     resolved.root_path = "changed-by-caller"
     assert catalog.resolve(log_ref).root_path != "changed-by-caller"
-    with pytest.raises(LookupError, match="exact skill ref"):
+    with pytest.raises(ApplicationPortError) as missing_binding:
         catalog.diagnose_bindings(log_ref.model_copy(update={"content_hash": "f" * 64}))
+    _assert_catalog_error(
+        missing_binding,
+        operation="diagnose_bindings",
+        code=ErrorCode.ASSET_VERSION_UNAVAILABLE,
+    )
 
 
 def test_logparse_asset_and_factory_must_be_paired() -> None:
@@ -273,8 +304,13 @@ def test_hash_drift_never_resolves_the_previous_ref(tmp_path: Path) -> None:
     assert new_ref.version == old_ref.version
     assert new_ref.content_hash != old_ref.content_hash
     assert second.check([old_ref]).missing_refs == [old_ref]
-    with pytest.raises(LookupError):
+    with pytest.raises(ApplicationPortError) as missing:
         second.resolve(old_ref)
+    _assert_catalog_error(
+        missing,
+        operation="resolve",
+        code=ErrorCode.ASSET_VERSION_UNAVAILABLE,
+    )
 
 
 def test_same_catalog_instance_rejects_product_drift_on_every_port_view(
@@ -299,20 +335,126 @@ def test_same_catalog_instance_rejects_product_drift_on_every_port_view(
     report = catalog.check([route.agent_profile_ref])
     assert report.available is False
     assert report.missing_refs == [route.agent_profile_ref]
-    with pytest.raises(LookupError):
+    with pytest.raises(ApplicationPortError) as unavailable:
         catalog.resolve(route.agent_profile_ref)
-    with pytest.raises(LookupError):
+    _assert_catalog_error(
+        unavailable,
+        operation="resolve",
+        code=ErrorCode.ASSET_VERSION_UNAVAILABLE,
+    )
+    with pytest.raises(ApplicationPortError) as route_corrupt:
         catalog.route_bindings()
+    _assert_catalog_error(
+        route_corrupt,
+        operation="route_bindings",
+        code=ErrorCode.CONFIG_INVALID,
+    )
 
     (skill_dir / "fixed/SKILL.md").write_text(
         "skill drifted after startup\n",
         encoding="utf-8",
     )
     assert catalog.check([skill_ref]).missing_refs == [skill_ref]
-    with pytest.raises(LookupError):
+    with pytest.raises(ApplicationPortError) as diagnose_missing:
         catalog.diagnose_bindings(skill_ref)
-    with pytest.raises(LookupError):
+    _assert_catalog_error(
+        diagnose_missing,
+        operation="diagnose_bindings",
+        code=ErrorCode.ASSET_VERSION_UNAVAILABLE,
+    )
+    with pytest.raises(ApplicationPortError) as review_missing:
         catalog.review_bindings(skill_ref)
+    _assert_catalog_error(
+        review_missing,
+        operation="review_bindings",
+        code=ErrorCode.ASSET_VERSION_UNAVAILABLE,
+    )
+
+
+def test_binding_configuration_damage_uses_only_typed_port_errors(
+    tmp_path: Path,
+) -> None:
+    assets_root = tmp_path / "assets"
+    shutil.copytree(BUILTIN_ASSET_ROOT, assets_root)
+    skill_dir = tmp_path / "skills"
+    _write_skill(skill_dir / "fixed")
+    catalog = VersionedAssetCatalog(skill_dir=skill_dir, assets_root=assets_root)
+    skill_ref = catalog.route_bindings().available_skill_refs[0]
+
+    (assets_root / "tool-bundles/diagnose/tool-bundle.json").write_text(
+        "corrupt after startup\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ApplicationPortError) as diagnose_corrupt:
+        catalog.diagnose_bindings(skill_ref)
+    _assert_catalog_error(
+        diagnose_corrupt,
+        operation="diagnose_bindings",
+        code=ErrorCode.CONFIG_INVALID,
+    )
+
+    (assets_root / "tool-bundles/review/tool-bundle.json").write_text(
+        "corrupt after startup\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ApplicationPortError) as review_corrupt:
+        catalog.review_bindings(skill_ref)
+    _assert_catalog_error(
+        review_corrupt,
+        operation="review_bindings",
+        code=ErrorCode.CONFIG_INVALID,
+    )
+
+    catalog._builtin_refs.pop("agent-profile/router")
+    with pytest.raises(ApplicationPortError) as route_missing_config:
+        catalog.route_bindings()
+    _assert_catalog_error(
+        route_missing_config,
+        operation="route_bindings",
+        code=ErrorCode.CONFIG_INVALID,
+    )
+
+    structural_assets = tmp_path / "structural-assets"
+    shutil.copytree(BUILTIN_ASSET_ROOT, structural_assets)
+    structural_skills = tmp_path / "structural-skills"
+    _write_skill(structural_skills / "fixed")
+    structural = VersionedAssetCatalog(
+        skill_dir=structural_skills,
+        assets_root=structural_assets,
+    )
+    structural_skill = structural.route_bindings().available_skill_refs[0]
+    structural._builtin_refs["agent-profile/router"] = structural._builtin_refs[
+        "agent-profile/reviewer"
+    ]
+    with pytest.raises(ApplicationPortError) as corrupt_role:
+        structural.route_bindings()
+    _assert_catalog_error(
+        corrupt_role,
+        operation="route_bindings",
+        code=ErrorCode.CONFIG_INVALID,
+    )
+
+    structural._skills.pop(
+        (
+            structural_skill.id,
+            structural_skill.version,
+            structural_skill.content_hash,
+        )
+    )
+    with pytest.raises(ApplicationPortError) as corrupt_diagnose_index:
+        structural.diagnose_bindings(structural_skill)
+    _assert_catalog_error(
+        corrupt_diagnose_index,
+        operation="diagnose_bindings",
+        code=ErrorCode.CONFIG_INVALID,
+    )
+    with pytest.raises(ApplicationPortError) as corrupt_review_index:
+        structural.review_bindings(structural_skill)
+    _assert_catalog_error(
+        corrupt_review_index,
+        operation="review_bindings",
+        code=ErrorCode.CONFIG_INVALID,
+    )
 
 
 def test_product_hash_rejects_symbolic_links(tmp_path: Path) -> None:

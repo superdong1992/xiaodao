@@ -33,7 +33,9 @@ from problem_locator.contracts.models import (
     WorkspaceEvidenceInput,
     WorkspaceInputManifest,
     WorkspacePreviousOutcomeInput,
+    derive_attachment_filename_suffix,
     validate_workspace_manifest_for_job,
+    workspace_attachment_relative_path,
 )
 from problem_locator.contracts.ports import ResourceStore
 from problem_locator.contracts.serialization import (
@@ -1164,7 +1166,14 @@ class WorkspaceManager:
         ] = []
         for attachment in attachments:
             reference = _attachment_ref(attachment)
-            relative = f"inputs/attachments/{attachment.attachment_id}/payload"
+            filename_suffix = derive_attachment_filename_suffix(
+                attachment.name,
+                attachment.content_type,
+            )
+            relative = workspace_attachment_relative_path(
+                attachment.attachment_id,
+                filename_suffix,
+            )
             destination = _safe_destination(root, relative)
             _verify_materialized(resource_store, reference, destination)
             entries.append(
@@ -1176,6 +1185,7 @@ class WorkspaceManager:
                     size=reference.size,
                     sha256=reference.sha256,
                     content_type=attachment.content_type,
+                    filename_suffix=filename_suffix,
                 )
             )
         for item in evidence:

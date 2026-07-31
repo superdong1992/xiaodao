@@ -15,7 +15,10 @@ from problem_locator.contracts import (
     AgentArtifactProposalDraft,
     AgentJobOutcome,
     ApplicationError,
+    ApplicationErrorDetail,
     ApplicationPortError,
+    Attachment,
+    AttachmentStatus,
     ArtifactKind,
     AssetKind,
     CaseAggregate,
@@ -30,6 +33,7 @@ from problem_locator.contracts import (
     JobOutcome,
     JobStatus,
     LogparseBrokerError,
+    LogparseParseClaim,
     MaterializedPath,
     OutcomeResultType,
     ResolvedAsset,
@@ -39,13 +43,17 @@ from problem_locator.contracts import (
     RuntimeInfrastructureError,
     StateFile,
     VersionedRef,
+    WorkspaceInputManifest,
     canonical_json_bytes,
     parse_canonical_json_bytes,
 )
 from tests.contracts.fakes import (
+    FakeAssetCatalog,
+    FakeLogparseBrokerFactory,
     InMemoryCancellationSignal,
     InMemoryExecutionRecordStore,
     InMemoryResourceStore,
+    InMemoryStateRepository,
 )
 from problem_locator.runtime.agent_backend import BackendExecution
 from problem_locator.runtime.catalog import VersionedAssetCatalog
@@ -462,7 +470,7 @@ class _StateView:
         self,
         aggregate: CaseAggregate,
         *,
-        failure: ApplicationPortError | None = None,
+        failure: BaseException | None = None,
         events: list[str] | None = None,
     ) -> None:
         self.aggregate = aggregate
@@ -555,7 +563,7 @@ def _runtime_fixture(
     tmp_path: Path,
     *,
     backend: _RuntimeBackend | _NeverBackend | None = None,
-    state_failure: ApplicationPortError | None = None,
+    state_failure: BaseException | None = None,
     records: InMemoryExecutionRecordStore | None = None,
     resource_store: Any = None,
     context_builder: Any = None,
@@ -589,6 +597,67 @@ def _runtime_fixture(
         context_builder=context_builder,
     )
     return runtime, job, state, actual_backend, actual_records
+
+
+def test_public_asset_fake_typed_resolve_failure_preserves_details_as_outcome(
+    tmp_path: Path,
+) -> None:
+    source_catalog = _make_route_catalog(tmp_path)
+    job = _running_route_job(source_catalog)
+    detail = ApplicationErrorDetail(
+        field="asset_ref",
+        resource_type="ASSET",
+        resource_id=None,
+        resource_ref=job.agent_profile_ref,
+        expected="available",
+        actual="unavailable",
+        limit=None,
+        observed=None,
+    )
+    typed_failure = ApplicationPortError(
+        ApplicationError(
+            code=ErrorCode.ASSET_VERSION_UNAVAILABLE,
+            message="Injected public AssetCatalog resolve failure.",
+            details=[detail],
+            retryable=ERROR_SPECS[
+                ErrorCode.ASSET_VERSION_UNAVAILABLE
+            ].application_retryable,
+        )
+    )
+    catalog = FakeAssetCatalog(
+        assets=[
+            ResolvedAsset(
+                ref=job.agent_profile_ref,
+                asset_kind=AssetKind.AGENT_PROFILE,
+                root_path=str(tmp_path),
+            )
+        ]
+    )
+    catalog.inject_failure("resolve", typed_failure)
+    state = _StateView(_route_aggregate(job))
+    records = InMemoryExecutionRecordStore()
+    runtime = DiagnosisRuntime(
+        state_repository=state,
+        resource_store=_UnusedResourceStore(),
+        asset_catalog=catalog,
+        logparse_broker_factory=None,
+        execution_records=records,
+        clock=_Clock(),
+        id_generator=_Ids(),
+        workspace_manager=WorkspaceManager(tmp_path / "asset-failure-data"),
+        backend=_NeverBackend(),  # type: ignore[arg-type]
+    )
+
+    receipt = runtime.execute(job, InMemoryCancellationSignal())
+
+    assert receipt.job_outcome.error is not None
+    assert receipt.job_outcome.error.stage is ExecutionStage.ASSET_RESOLUTION
+    assert receipt.job_outcome.error.code is ErrorCode.ASSET_VERSION_UNAVAILABLE
+    assert receipt.job_outcome.error.details == [detail]
+    assert state.calls == []
+    assert records.log_sinks == {}
+    assert len(records.publish_outcome_calls) == 1
+    assert catalog.check_calls == [(job.agent_profile_ref,)]
 
 
 def test_runtime_executes_one_frozen_route_and_publishes_canonical_receipt(
@@ -920,6 +989,64 @@ def test_state_read_typed_missing_maps_without_backend_or_state_fallback(
 
 
 @pytest.mark.parametrize(
+    "code",
+    [ErrorCode.STATE_CORRUPT, ErrorCode.STATE_SCHEMA_UNSUPPORTED],
+)
+def test_state_read_fault_propagates_exact_public_fake_error_without_records(
+    code: ErrorCode,
+    tmp_path: Path,
+) -> None:
+    runtime, job, _, _, records = _runtime_fixture(
+        tmp_path,
+        backend=_NeverBackend(),
+    )
+    state_payload = _json("state.json")
+    state_payload["cases"] = {
+        job.case_id: _route_aggregate(job).model_dump(mode="json")
+    }
+    state = InMemoryStateRepository(StateFile.model_validate(state_payload))
+    expected = _application_port_error(code)
+    state.inject_read_failure("read_case", expected)
+    runtime._state_repository = state
+
+    with pytest.raises(ApplicationPortError) as caught:
+        runtime.execute(job, InMemoryCancellationSignal())
+
+    assert caught.value is expected
+    assert records.publish_outcome_calls == []
+    assert records.log_sinks == {}
+
+
+@pytest.mark.parametrize(
+    "state_failure",
+    [
+        _application_port_error(ErrorCode.EXECUTION_RECORD_FAILED),
+        OSError("unsafe adapter detail must not escape"),
+    ],
+    ids=["disallowed-typed-code", "ordinary-exception"],
+)
+def test_disallowed_state_read_failures_remain_safe_outcomes(
+    state_failure: BaseException,
+    tmp_path: Path,
+) -> None:
+    records = InMemoryExecutionRecordStore()
+    runtime, job, _, _, _ = _runtime_fixture(
+        tmp_path,
+        backend=_NeverBackend(),
+        state_failure=state_failure,
+        records=records,
+    )
+
+    receipt = runtime.execute(job, InMemoryCancellationSignal())
+
+    assert receipt.job_outcome.error is not None
+    assert receipt.job_outcome.error.stage is ExecutionStage.WORKSPACE_PREPARE
+    assert receipt.job_outcome.error.code is ErrorCode.WORKSPACE_PREPARE_FAILED
+    assert len(records.publish_outcome_calls) == 1
+    assert b"unsafe adapter detail" not in records.publish_outcome_calls[0][1]
+
+
+@pytest.mark.parametrize(
     "port_code",
     [
         ErrorCode.RESOURCE_NOT_FOUND,
@@ -1147,7 +1274,7 @@ class _RuntimeBrokerFactory:
 
 def _logparse_catalog(
     tmp_path: Path,
-    factory: _RuntimeBrokerFactory,
+    factory: _RuntimeBrokerFactory | FakeLogparseBrokerFactory,
 ) -> VersionedAssetCatalog:
     skill_dir = tmp_path / "logparse-skills"
     shutil.copytree(CATALOG_FIXTURES / "skill-dir", skill_dir)
@@ -1189,6 +1316,199 @@ def _running_logparse_job(catalog: VersionedAssetCatalog) -> Job:
     return Job.model_validate(payload)
 
 
+_LOGPARSE_ATTACHMENT_ID = "00000000-0000-4000-8000-000000000450"
+
+
+def _claimed_logparse_job_state_and_resources(
+    catalog: VersionedAssetCatalog,
+) -> tuple[Job, CaseAggregate, InMemoryResourceStore]:
+    attachment_bytes = b"request timed out while calling inventory\n"
+    attachment_sha256 = hashlib.sha256(attachment_bytes).hexdigest()
+    job_payload = _running_logparse_job(catalog).model_dump(mode="json")
+    job_payload["attachment_refs"] = [_LOGPARSE_ATTACHMENT_ID]
+    job = Job.model_validate(job_payload)
+    storage_key = (
+        f"resources/cases/{job.case_id}/attachments/"
+        f"{_LOGPARSE_ATTACHMENT_ID}/request.log"
+    )
+    attachment = Attachment(
+        attachment_id=_LOGPARSE_ATTACHMENT_ID,
+        case_id=job.case_id,
+        status=AttachmentStatus.READY,
+        name="request.log",
+        content_type="text/plain",
+        declared_size=len(attachment_bytes),
+        declared_sha256=attachment_sha256,
+        size=len(attachment_bytes),
+        sha256=attachment_sha256,
+        storage_key=storage_key,
+        created_at="2026-07-31T00:00:00.000Z",
+        updated_at="2026-07-31T00:00:00.000Z",
+    )
+    state = StateFile.model_validate(_json("state.json"))
+    aggregate_payload = next(iter(state.cases.values())).model_dump(mode="json")
+    aggregate_payload["jobs"] = {job.job_id: job.model_dump(mode="json")}
+    aggregate_payload["attachments"] = {
+        attachment.attachment_id: attachment.model_dump(mode="json")
+    }
+    aggregate = CaseAggregate.model_validate(aggregate_payload)
+    resources = InMemoryResourceStore()
+    resources.seed_formal_resource(
+        ResourceRef(
+            resource_kind=ResourceKind.FILE,
+            storage_key=storage_key,
+            size=len(attachment_bytes),
+            sha256=attachment_sha256,
+        ),
+        state_reference_count=1,
+        payload=attachment_bytes,
+    )
+    return job, aggregate, resources
+
+
+class _PublicFakeClaimingBackend:
+    def __init__(
+        self,
+        factory: FakeLogparseBrokerFactory,
+        job: Job,
+        result: str,
+        *,
+        accept_request: bool = True,
+        emit_claim: bool = True,
+    ) -> None:
+        self.factory = factory
+        self.job = job
+        self.result = result
+        self.accept_request = accept_request
+        self.emit_claim = emit_claim
+        self.claim: LogparseParseClaim | None = None
+        self.request_bytes: bytes | None = None
+        self.calls: list[dict[str, Any]] = []
+
+    @staticmethod
+    def _close_sinks(kwargs: dict[str, Any]) -> None:
+        sinks: ExecutionLogSinks = kwargs["log_sinks"]
+        unique = {id(sinks.stdout): sinks.stdout, id(sinks.stderr): sinks.stderr}
+        for sink in unique.values():
+            sink.flush()
+            sink.close()
+
+    @staticmethod
+    def _completed_outcome(
+        job: Job,
+        workspace_root: Path,
+        claim: LogparseParseClaim,
+    ) -> AgentJobOutcome:
+        proposal_root = workspace_root / "output/proposals/logparse_run/tree"
+        task_root = proposal_root / "task-0001"
+        (task_root / "targets").mkdir(parents=True)
+        (task_root / "parse_manifest.json").write_bytes(
+            canonical_json_bytes(
+                {
+                    "product": job.logparse_product,
+                    "target_logs": ["targets/request.log"],
+                    "version": 1,
+                }
+            )
+        )
+        (task_root / "targets/request.log").write_bytes(b"request timed out\n")
+        size, tree_sha256, _ = inspect_tree(proposal_root)
+        draft = AgentArtifactProposalDraft(
+            proposal_key=claim.artifact_proposal_key,
+            artifact_kind=ArtifactKind.LOGPARSE_RUN,
+            name="new-logparse-run",
+            content_type="application/vnd.problem-locator.logparse-run+directory",
+            resource_kind=ResourceKind.DIRECTORY,
+            workspace_relative_path="output/proposals/logparse_run/tree",
+            declared_size=size,
+            declared_sha256=tree_sha256,
+            metadata={
+                "tree_manifest_sha256": tree_sha256,
+                "logparse_version_ref": job.logparse_tool_ref,
+                "parse_manifest_relative_path": "task-0001/parse_manifest.json",
+                "source_attachment_id": claim.attachment_id,
+                "source_attachment_sha256": claim.attachment_sha256,
+                "parse_parameters": {"product": job.logparse_product},
+            },
+        )
+        payload = _json("agent-job-outcome-diagnosis.json")
+        payload.update(
+            {
+                "job_id": job.job_id,
+                "case_id": job.case_id,
+                "job_type": job.job_type.value,
+                "base_state_revision": job.base_state_revision,
+            }
+        )
+        payload["payload"]["candidate_conclusion_draft"] = None
+        payload["consumed_evidence_refs"] = []
+        payload["proposed_evidence_drafts"] = []
+        payload["proposed_artifact_drafts"] = [draft.model_dump(mode="json")]
+        return AgentJobOutcome.model_validate(payload)
+
+    def execute(self, **kwargs: Any) -> BackendExecution:
+        self.calls.append(kwargs)
+        workspace_root = Path(kwargs["workspace_root"])
+        manifest = parse_canonical_json_bytes(
+            (workspace_root / "inputs/manifest.json").read_bytes(),
+            WorkspaceInputManifest,
+        )
+        attachment = next(
+            entry for entry in manifest.entries if entry.input_kind == "ATTACHMENT"
+        )
+        request_bytes = canonical_json_bytes(
+            {
+                "attachment_id": attachment.resource_id,
+                "product": manifest.logparse_product,
+            }
+        )
+        if self.accept_request:
+            session = self.factory.sessions[-1]
+            record_request = getattr(session, "_record_parse_request")
+            record_request(request_bytes)
+            self.request_bytes = request_bytes
+        if self.emit_claim:
+            assert manifest.logparse_tool_ref is not None
+            self.claim = LogparseParseClaim(
+                schema_version=1,
+                job_id=manifest.job_id,
+                attachment_id=attachment.resource_id,
+                attachment_sha256=attachment.sha256,
+                artifact_proposal_key="logparse_run",
+                logparse_tool_ref=manifest.logparse_tool_ref,
+                request_sha256=hashlib.sha256(request_bytes).hexdigest(),
+            )
+            (workspace_root / "runtime/tool-state/logparse-parse.claim").write_bytes(
+                canonical_json_bytes(self.claim)
+            )
+
+        if self.result == "timeout":
+            self._close_sinks(kwargs)
+            raise _failure()
+        if self.result == "failed":
+            outcome = _failed_logparse_agent_outcome(self.job)
+        elif self.result == "completed":
+            assert self.claim is not None
+            outcome = self._completed_outcome(
+                self.job,
+                workspace_root,
+                self.claim,
+            )
+        else:
+            raise AssertionError("unknown claiming backend result")
+
+        temporary = workspace_root / "output/.job_outcome.json.part"
+        temporary.write_bytes(canonical_json_bytes(outcome))
+        os.replace(temporary, workspace_root / "output/job_outcome.json")
+        self._close_sinks(kwargs)
+        return BackendExecution(
+            returncode=0,
+            stdout_stderr_bytes=0,
+            workspace_bytes=0,
+            elapsed_seconds=0.01,
+        )
+
+
 def _failed_logparse_agent_outcome(job: Job) -> AgentJobOutcome:
     return AgentJobOutcome(
         outcome_id="00000000-0000-4000-8000-000000000497",
@@ -1210,6 +1530,135 @@ def _failed_logparse_agent_outcome(job: Job) -> AgentJobOutcome:
         ),
         produced_at="2026-07-31T00:00:30.000Z",
     )
+
+
+def _public_fake_claiming_runtime(
+    tmp_path: Path,
+    result: str,
+    *,
+    accept_request: bool = True,
+    emit_claim: bool = True,
+) -> tuple[
+    DiagnosisRuntime,
+    Job,
+    FakeLogparseBrokerFactory,
+    _PublicFakeClaimingBackend,
+    InMemoryResourceStore,
+]:
+    factory = FakeLogparseBrokerFactory()
+    catalog = _logparse_catalog(tmp_path, factory)
+    job, aggregate, resources = _claimed_logparse_job_state_and_resources(catalog)
+    backend = _PublicFakeClaimingBackend(
+        factory,
+        job,
+        result,
+        accept_request=accept_request,
+        emit_claim=emit_claim,
+    )
+    runtime = DiagnosisRuntime(
+        state_repository=_StateView(aggregate),
+        resource_store=resources,
+        asset_catalog=catalog,
+        logparse_broker_factory=factory,
+        execution_records=InMemoryExecutionRecordStore(),
+        clock=_Clock(),
+        id_generator=_Ids(),
+        workspace_manager=WorkspaceManager(tmp_path / "public-fake-logparse-data"),
+        backend=backend,  # type: ignore[arg-type]
+    )
+    return runtime, job, factory, backend, resources
+
+
+@pytest.mark.parametrize(
+    ("accept_request", "expected_code"),
+    [
+        (False, ErrorCode.LOGPARSE_FAILED),
+        (True, ErrorCode.LOGPARSE_OUTPUT_INVALID),
+    ],
+)
+def test_public_broker_fake_enforces_claim_none_request_bytes_invariant(
+    accept_request: bool,
+    expected_code: ErrorCode,
+    tmp_path: Path,
+) -> None:
+    runtime, job, factory, backend, _ = _public_fake_claiming_runtime(
+        tmp_path,
+        "failed",
+        accept_request=accept_request,
+        emit_claim=False,
+    )
+
+    receipt = runtime.execute(job, InMemoryCancellationSignal())
+
+    assert receipt.job_outcome.error is not None
+    assert receipt.job_outcome.error.code is expected_code
+    assert backend.claim is None
+    session = factory.sessions[0]
+    assert session.closed is True  # type: ignore[attr-defined]
+    assert session.close_calls == 1  # type: ignore[attr-defined]
+    assert session.parse_request_bytes() == backend.request_bytes
+    assert (backend.request_bytes is None) is (not accept_request)
+
+
+@pytest.mark.parametrize(
+    ("result", "expected_code"),
+    [
+        ("timeout", ErrorCode.BACKEND_TIMEOUT),
+        ("failed", ErrorCode.LOGPARSE_FAILED),
+    ],
+)
+def test_public_broker_fake_closes_claimed_timeout_and_failed_executions(
+    result: str,
+    expected_code: ErrorCode,
+    tmp_path: Path,
+) -> None:
+    runtime, job, factory, backend, _ = _public_fake_claiming_runtime(
+        tmp_path,
+        result,
+    )
+
+    receipt = runtime.execute(job, InMemoryCancellationSignal())
+
+    assert receipt.job_outcome.error is not None
+    assert receipt.job_outcome.error.code is expected_code
+    assert backend.claim is not None
+    assert backend.request_bytes is not None
+    session = factory.sessions[0]
+    assert session.closed is True  # type: ignore[attr-defined]
+    assert session.close_calls == 1  # type: ignore[attr-defined]
+    assert session.parse_request_bytes() == backend.request_bytes
+    if result == "timeout":
+        assert not any(
+            detail.field == "logparse_claim"
+            for detail in receipt.job_outcome.error.details
+        )
+
+
+def test_public_broker_fake_closes_claimed_success_and_stages_one_run(
+    tmp_path: Path,
+) -> None:
+    runtime, job, factory, backend, resources = _public_fake_claiming_runtime(
+        tmp_path,
+        "completed",
+    )
+
+    receipt = runtime.execute(job, InMemoryCancellationSignal())
+
+    assert receipt.job_outcome.result_type is OutcomeResultType.COMPLETED
+    assert receipt.job_outcome.error is None
+    assert backend.claim is not None
+    assert backend.request_bytes is not None
+    assert len(receipt.job_outcome.proposed_artifacts) == 1
+    proposal = receipt.job_outcome.proposed_artifacts[0]
+    assert proposal.artifact_kind is ArtifactKind.LOGPARSE_RUN
+    assert proposal.proposal_key == backend.claim.artifact_proposal_key
+    assert proposal.metadata.logparse_version_ref == backend.claim.logparse_tool_ref
+    assert proposal.metadata.source_attachment_id == backend.claim.attachment_id
+    assert resources.stage_tree_calls[0][1] == backend.claim.artifact_proposal_key
+    session = factory.sessions[0]
+    assert session.closed is True  # type: ignore[attr-defined]
+    assert session.close_calls == 1  # type: ignore[attr-defined]
+    assert session.parse_request_bytes() == backend.request_bytes
 
 
 def test_runtime_closes_logparse_then_audits_request_bytes_before_finalize(

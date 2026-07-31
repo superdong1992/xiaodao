@@ -224,15 +224,13 @@ def _detail() -> ApplicationErrorDetail:
 
 def _port_error(
     code: ErrorCode,
-    *,
-    retryable: bool = False,
 ) -> ApplicationPortError:
     return ApplicationPortError(
         ApplicationError(
             code=code,
             message=f"Injected {code.value}.",
             details=[_detail()],
-            retryable=retryable,
+            retryable=False,
         )
     )
 
@@ -354,16 +352,15 @@ def test_foreign_receipt_is_rejected_without_cross_job_discard(
 
 
 @pytest.mark.parametrize(
-    ("port_code", "port_retryable", "expected_retryable"),
+    ("port_code", "expected_retryable"),
     [
-        (ErrorCode.PATH_VIOLATION, False, False),
-        (ErrorCode.RESOURCE_STAGE_FAILED, True, True),
+        (ErrorCode.PATH_VIOLATION, False),
+        (ErrorCode.RESOURCE_STAGE_FAILED, True),
     ],
 )
 def test_typed_stage_errors_collapse_to_frozen_stage_failure(
     tmp_path: Path,
     port_code: ErrorCode,
-    port_retryable: bool,
     expected_retryable: bool,
 ) -> None:
     job, manifest = _route_inputs()
@@ -375,7 +372,7 @@ def test_typed_stage_errors_collapse_to_frozen_stage_failure(
     store = InMemoryResourceStore()
     store.inject_failure(
         "stage_file",
-        _port_error(port_code, retryable=port_retryable),
+        _port_error(port_code),
     )
 
     with pytest.raises(RuntimeExecutionError) as captured:
@@ -470,7 +467,7 @@ def test_later_typed_stage_error_rolls_back_an_audited_prefix(
     store = InMemoryResourceStore()
     store.inject_failure(
         "stage_tree",
-        _port_error(ErrorCode.RESOURCE_STAGE_FAILED, retryable=True),
+        _port_error(ErrorCode.RESOURCE_STAGE_FAILED),
     )
 
     with pytest.raises(RuntimeExecutionError) as captured:

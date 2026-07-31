@@ -17,10 +17,14 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from problem_locator.contracts import (
+    ApplicationError,
+    ApplicationPortError,
     AssetAvailabilityReport,
     AssetKind,
+    ErrorCode,
     JobType,
     LogparseBrokerFactory,
+    PORT_ERROR_CODES,
     ResolvedAsset,
     RuntimeBindings,
     VersionedRef,
@@ -34,6 +38,26 @@ BUILTIN_ASSET_ROOT = Path(__file__).with_name("assets")
 _ASSET_VERSION = "1.0.0"
 _SKILL_ID_PATTERN = re.compile(r"[a-z][a-z0-9-]{1,63}\Z")
 _WINDOWS_DRIVE_PATTERN = re.compile(r"[A-Za-z]:")
+
+
+def _catalog_port_error(
+    operation: str,
+    code: ErrorCode,
+    message: str,
+) -> ApplicationPortError:
+    """Build only an error allowed by the frozen method-qualified channel."""
+
+    method_key = f"AssetCatalogPort.{operation}"
+    if code not in PORT_ERROR_CODES[method_key]:
+        raise AssertionError(f"{code.value} is not allowed for {method_key}")
+    return ApplicationPortError(
+        ApplicationError(
+            code=code,
+            message=message,
+            details=[],
+            retryable=False,
+        )
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,6 +124,7 @@ _BUILTIN_SPECS = (
         "output-contract/review",
     ),
 )
+_BUILTIN_SPECS_BY_ID = {item.asset_id: item for item in _BUILTIN_SPECS}
 
 
 def _ref_key(ref: VersionedRef) -> tuple[str, str, str]:
@@ -518,7 +543,17 @@ class VersionedAssetCatalog:
         return tuple(descriptors)
 
     def _builtin_ref(self, asset_id: str) -> VersionedRef:
-        return _clone_model(self._builtin_refs[asset_id])
+        expected = _BUILTIN_SPECS_BY_ID[asset_id]
+        ref = self._builtin_refs[asset_id]
+        resolved = self._assets[_ref_key(ref)]
+        if (
+            ref.id != asset_id
+            or not isinstance(resolved, ResolvedAsset)
+            or resolved.ref != ref
+            or resolved.asset_kind is not expected.asset_kind
+        ):
+            raise ValueError("built-in role binding is invalid")
+        return _clone_model(ref)
 
     @staticmethod
     def _asset_is_current(resolved: ResolvedAsset) -> bool:
@@ -529,116 +564,323 @@ class VersionedAssetCatalog:
         directory.  Its paired broker remains the authority for that asset.
         """
 
-        if resolved.asset_kind is AssetKind.LOGPARSE_TOOL:
-            return True
         try:
+            root = Path(resolved.root_path)
+            root_metadata = root.lstat()
+            if stat.S_ISLNK(root_metadata.st_mode) or not stat.S_ISDIR(
+                root_metadata.st_mode
+            ):
+                return False
+            if resolved.asset_kind is AssetKind.LOGPARSE_TOOL:
+                return True
             return (
-                hash_product_directory(Path(resolved.root_path))
-                == resolved.ref.content_hash
+                hash_product_directory(root) == resolved.ref.content_hash
             )
-        except (OSError, TypeError, ValueError):
+        except (AttributeError, OSError, TypeError, ValueError):
             return False
 
-    def _require_current(self, refs: Sequence[VersionedRef]) -> None:
-        if not self.check(refs).available:
-            raise LookupError("one or more fixed asset versions are unavailable")
+    def _ref_is_current(self, ref: VersionedRef) -> bool:
+        try:
+            resolved = self._assets.get(_ref_key(ref))
+            return (
+                isinstance(resolved, ResolvedAsset)
+                and resolved.ref == ref
+                and self._asset_is_current(resolved)
+            )
+        except (AttributeError, TypeError, ValueError):
+            return False
+
+    @staticmethod
+    def _descriptor_is_configured(descriptor: object) -> bool:
+        if not isinstance(descriptor, _SkillDescriptor):
+            return False
+        resolved = descriptor.resolved_asset
+        if (
+            not isinstance(resolved, ResolvedAsset)
+            or resolved.asset_kind is not AssetKind.DIAGNOSIS_SKILL
+            or descriptor.tool_bundle_id != "tool-bundle/diagnose"
+            or not isinstance(descriptor.capability, str)
+            or not descriptor.capability
+            or not isinstance(descriptor.summary, str)
+            or not descriptor.summary
+            or not isinstance(descriptor.entry_document, str)
+            or not descriptor.entry_document
+            or type(descriptor.requires_logparse) is not bool
+        ):
+            return False
+        if descriptor.requires_logparse:
+            return (
+                isinstance(descriptor.logparse_product, str)
+                and bool(descriptor.logparse_product)
+            )
+        return descriptor.logparse_product is None
+
+    def _route_skill_configuration_is_valid(self) -> bool:
+        try:
+            descriptors = tuple(self._skills.values())
+            if not all(self._descriptor_is_configured(item) for item in descriptors):
+                return False
+            expected = tuple(
+                item.resolved_asset.ref
+                for item in sorted(
+                    descriptors,
+                    key=lambda item: (
+                        item.resolved_asset.ref.id,
+                        item.resolved_asset.ref.version,
+                        item.resolved_asset.ref.content_hash,
+                    ),
+                )
+            )
+            return expected == self._route_skill_refs and len(self._skills) == len(
+                self._route_skill_refs
+            )
+        except (AttributeError, TypeError, ValueError):
+            return False
 
     def check(self, refs: Sequence[VersionedRef]) -> AssetAvailabilityReport:
-        missing: list[VersionedRef] = []
-        for ref in refs:
-            resolved = self._assets.get(_ref_key(ref))
-            if resolved is None or not self._asset_is_current(resolved):
-                missing.append(_clone_model(ref))
+        missing = [_clone_model(ref) for ref in refs if not self._ref_is_current(ref)]
         return AssetAvailabilityReport(available=not missing, missing_refs=missing)
 
     def resolve(self, ref: VersionedRef) -> ResolvedAsset:
-        resolved = self._assets.get(_ref_key(ref))
-        if resolved is None or not self._asset_is_current(resolved):
-            raise LookupError(f"asset unavailable: {ref.id}@{ref.version}#{ref.content_hash}")
+        try:
+            resolved = self._assets.get(_ref_key(ref))
+        except (AttributeError, TypeError, ValueError):
+            resolved = None
+        if not isinstance(resolved, ResolvedAsset) or not self._ref_is_current(ref):
+            raise _catalog_port_error(
+                "resolve",
+                ErrorCode.ASSET_VERSION_UNAVAILABLE,
+                "The requested pinned asset version is unavailable.",
+            ) from None
         return _clone_model(resolved)
 
     def route_bindings(self) -> RuntimeBindings:
-        bindings = RuntimeBindings(
-            agent_profile_ref=self._builtin_ref("agent-profile/router"),
-            available_skill_refs=[_clone_model(ref) for ref in self._route_skill_refs],
-            skill_ref=None,
-            tool_bundle_ref=self._builtin_ref("tool-bundle/router"),
-            context_policy_ref=self._builtin_ref("context-policy/route"),
-            output_contract_ref=self._builtin_ref("output-contract/route"),
-            logparse_tool_ref=None,
-            logparse_product=None,
-            resource_limits=default_resource_limits(JobType.ROUTE),
-        )
-        self._require_current(
-            (
+        try:
+            if not self._route_skill_configuration_is_valid():
+                raise ValueError("route skill configuration is invalid")
+            bindings = RuntimeBindings(
+                agent_profile_ref=self._builtin_ref("agent-profile/router"),
+                available_skill_refs=[
+                    _clone_model(ref) for ref in self._route_skill_refs
+                ],
+                skill_ref=None,
+                tool_bundle_ref=self._builtin_ref("tool-bundle/router"),
+                context_policy_ref=self._builtin_ref("context-policy/route"),
+                output_contract_ref=self._builtin_ref("output-contract/route"),
+                logparse_tool_ref=None,
+                logparse_product=None,
+                resource_limits=default_resource_limits(JobType.ROUTE),
+            )
+            refs = (
                 bindings.agent_profile_ref,
                 *bindings.available_skill_refs,
                 bindings.tool_bundle_ref,
                 bindings.context_policy_ref,
                 bindings.output_contract_ref,
             )
-        )
+            if not all(self._ref_is_current(ref) for ref in refs):
+                raise ValueError("route binding asset is unavailable")
+            for descriptor in self._skills.values():
+                if descriptor.requires_logparse:
+                    if (
+                        self._logparse_tool_ref is None
+                        or not self._ref_is_current(self._logparse_tool_ref)
+                    ):
+                        raise ValueError("route logparse asset is unavailable")
+                    logparse_asset = self._assets[
+                        _ref_key(self._logparse_tool_ref)
+                    ]
+                    if (
+                        not isinstance(logparse_asset, ResolvedAsset)
+                        or logparse_asset.asset_kind is not AssetKind.LOGPARSE_TOOL
+                        or self._logparse_broker_factory is None
+                    ):
+                        raise ValueError("route logparse configuration is invalid")
+        except ApplicationPortError:
+            raise
+        except Exception:
+            raise _catalog_port_error(
+                "route_bindings",
+                ErrorCode.CONFIG_INVALID,
+                "The route runtime binding configuration is invalid.",
+            ) from None
         return _clone_model(bindings)
 
     def diagnose_bindings(self, skill_ref: VersionedRef) -> RuntimeBindings:
-        descriptor = self._skills.get(_ref_key(skill_ref))
+        try:
+            skill_key = _ref_key(skill_ref)
+        except (AttributeError, TypeError, ValueError):
+            raise _catalog_port_error(
+                "diagnose_bindings",
+                ErrorCode.ASSET_VERSION_UNAVAILABLE,
+                "The pinned diagnosis runtime bindings are unavailable.",
+            ) from None
+        try:
+            descriptor = self._skills.get(skill_key)
+        except Exception:
+            raise _catalog_port_error(
+                "diagnose_bindings",
+                ErrorCode.CONFIG_INVALID,
+                "The diagnosis runtime binding configuration is invalid.",
+            ) from None
         if descriptor is None:
-            raise LookupError("diagnose bindings unavailable for the exact skill ref")
-        if descriptor.requires_logparse and self._logparse_tool_ref is None:
-            raise LookupError("required logparse binding is unavailable")
-        bindings = RuntimeBindings(
-            agent_profile_ref=self._builtin_ref("agent-profile/specialist"),
-            available_skill_refs=[],
-            skill_ref=_clone_model(descriptor.resolved_asset.ref),
-            tool_bundle_ref=self._builtin_ref(descriptor.tool_bundle_id),
-            context_policy_ref=self._builtin_ref("context-policy/diagnose"),
-            output_contract_ref=self._builtin_ref("output-contract/diagnose"),
-            logparse_tool_ref=(
-                _clone_model(self._logparse_tool_ref)
-                if descriptor.requires_logparse
-                else None
-            ),
-            logparse_product=descriptor.logparse_product,
-            resource_limits=default_resource_limits(JobType.DIAGNOSE),
-        )
-        current_refs = [
-            bindings.agent_profile_ref,
-            bindings.skill_ref,
-            bindings.tool_bundle_ref,
-            bindings.context_policy_ref,
-            bindings.output_contract_ref,
-        ]
-        if bindings.logparse_tool_ref is not None:
-            current_refs.append(bindings.logparse_tool_ref)
-        self._require_current(
-            [ref for ref in current_refs if ref is not None]
-        )
-        return _clone_model(bindings)
-
-    def review_bindings(self, skill_ref: VersionedRef) -> RuntimeBindings:
-        descriptor = self._skills.get(_ref_key(skill_ref))
-        if descriptor is None:
-            raise LookupError("review bindings unavailable for the exact skill ref")
-        bindings = RuntimeBindings(
-            agent_profile_ref=self._builtin_ref("agent-profile/reviewer"),
-            available_skill_refs=[],
-            skill_ref=_clone_model(descriptor.resolved_asset.ref),
-            tool_bundle_ref=self._builtin_ref("tool-bundle/review"),
-            context_policy_ref=self._builtin_ref("context-policy/review"),
-            output_contract_ref=self._builtin_ref("output-contract/review"),
-            logparse_tool_ref=None,
-            logparse_product=None,
-            resource_limits=default_resource_limits(JobType.REVIEW),
-        )
-        self._require_current(
-            (
+            if self._ref_is_current(skill_ref):
+                raise _catalog_port_error(
+                    "diagnose_bindings",
+                    ErrorCode.CONFIG_INVALID,
+                    "The diagnosis runtime binding configuration is invalid.",
+                ) from None
+            raise _catalog_port_error(
+                "diagnose_bindings",
+                ErrorCode.ASSET_VERSION_UNAVAILABLE,
+                "The pinned diagnosis runtime bindings are unavailable.",
+            ) from None
+        if (
+            not self._descriptor_is_configured(descriptor)
+            or descriptor.resolved_asset.ref != skill_ref
+        ):
+            raise _catalog_port_error(
+                "diagnose_bindings",
+                ErrorCode.CONFIG_INVALID,
+                "The diagnosis runtime binding configuration is invalid.",
+            ) from None
+        if not self._ref_is_current(skill_ref):
+            raise _catalog_port_error(
+                "diagnose_bindings",
+                ErrorCode.ASSET_VERSION_UNAVAILABLE,
+                "The pinned diagnosis runtime bindings are unavailable.",
+            ) from None
+        if descriptor.requires_logparse and (
+            self._logparse_tool_ref is None
+            or not self._ref_is_current(self._logparse_tool_ref)
+        ):
+            raise _catalog_port_error(
+                "diagnose_bindings",
+                ErrorCode.ASSET_VERSION_UNAVAILABLE,
+                "The pinned diagnosis runtime bindings are unavailable.",
+            ) from None
+        if descriptor.requires_logparse:
+            try:
+                assert self._logparse_tool_ref is not None
+                logparse_asset = self._assets[_ref_key(self._logparse_tool_ref)]
+                if (
+                    not isinstance(logparse_asset, ResolvedAsset)
+                    or logparse_asset.asset_kind is not AssetKind.LOGPARSE_TOOL
+                    or self._logparse_broker_factory is None
+                ):
+                    raise ValueError("logparse role binding is invalid")
+            except Exception:
+                raise _catalog_port_error(
+                    "diagnose_bindings",
+                    ErrorCode.CONFIG_INVALID,
+                    "The diagnosis runtime binding configuration is invalid.",
+                ) from None
+        try:
+            bindings = RuntimeBindings(
+                agent_profile_ref=self._builtin_ref("agent-profile/specialist"),
+                available_skill_refs=[],
+                skill_ref=_clone_model(descriptor.resolved_asset.ref),
+                tool_bundle_ref=self._builtin_ref(descriptor.tool_bundle_id),
+                context_policy_ref=self._builtin_ref("context-policy/diagnose"),
+                output_contract_ref=self._builtin_ref("output-contract/diagnose"),
+                logparse_tool_ref=(
+                    _clone_model(self._logparse_tool_ref)
+                    if descriptor.requires_logparse
+                    else None
+                ),
+                logparse_product=descriptor.logparse_product,
+                resource_limits=default_resource_limits(JobType.DIAGNOSE),
+            )
+            builtin_refs = (
                 bindings.agent_profile_ref,
-                descriptor.resolved_asset.ref,
                 bindings.tool_bundle_ref,
                 bindings.context_policy_ref,
                 bindings.output_contract_ref,
             )
-        )
+            if not all(self._ref_is_current(ref) for ref in builtin_refs):
+                raise ValueError("diagnosis built-in configuration is unavailable")
+        except ApplicationPortError:
+            raise
+        except Exception:
+            raise _catalog_port_error(
+                "diagnose_bindings",
+                ErrorCode.CONFIG_INVALID,
+                "The diagnosis runtime binding configuration is invalid.",
+            ) from None
+        return _clone_model(bindings)
+
+    def review_bindings(self, skill_ref: VersionedRef) -> RuntimeBindings:
+        try:
+            skill_key = _ref_key(skill_ref)
+        except (AttributeError, TypeError, ValueError):
+            raise _catalog_port_error(
+                "review_bindings",
+                ErrorCode.ASSET_VERSION_UNAVAILABLE,
+                "The pinned review runtime bindings are unavailable.",
+            ) from None
+        try:
+            descriptor = self._skills.get(skill_key)
+        except Exception:
+            raise _catalog_port_error(
+                "review_bindings",
+                ErrorCode.CONFIG_INVALID,
+                "The review runtime binding configuration is invalid.",
+            ) from None
+        if descriptor is None:
+            if self._ref_is_current(skill_ref):
+                raise _catalog_port_error(
+                    "review_bindings",
+                    ErrorCode.CONFIG_INVALID,
+                    "The review runtime binding configuration is invalid.",
+                ) from None
+            raise _catalog_port_error(
+                "review_bindings",
+                ErrorCode.ASSET_VERSION_UNAVAILABLE,
+                "The pinned review runtime bindings are unavailable.",
+            ) from None
+        if (
+            not self._descriptor_is_configured(descriptor)
+            or descriptor.resolved_asset.ref != skill_ref
+        ):
+            raise _catalog_port_error(
+                "review_bindings",
+                ErrorCode.CONFIG_INVALID,
+                "The review runtime binding configuration is invalid.",
+            ) from None
+        if not self._ref_is_current(skill_ref):
+            raise _catalog_port_error(
+                "review_bindings",
+                ErrorCode.ASSET_VERSION_UNAVAILABLE,
+                "The pinned review runtime bindings are unavailable.",
+            ) from None
+        try:
+            bindings = RuntimeBindings(
+                agent_profile_ref=self._builtin_ref("agent-profile/reviewer"),
+                available_skill_refs=[],
+                skill_ref=_clone_model(descriptor.resolved_asset.ref),
+                tool_bundle_ref=self._builtin_ref("tool-bundle/review"),
+                context_policy_ref=self._builtin_ref("context-policy/review"),
+                output_contract_ref=self._builtin_ref("output-contract/review"),
+                logparse_tool_ref=None,
+                logparse_product=None,
+                resource_limits=default_resource_limits(JobType.REVIEW),
+            )
+            builtin_refs = (
+                bindings.agent_profile_ref,
+                bindings.tool_bundle_ref,
+                bindings.context_policy_ref,
+                bindings.output_contract_ref,
+            )
+            if not all(self._ref_is_current(ref) for ref in builtin_refs):
+                raise ValueError("review built-in configuration is unavailable")
+        except ApplicationPortError:
+            raise
+        except Exception:
+            raise _catalog_port_error(
+                "review_bindings",
+                ErrorCode.CONFIG_INVALID,
+                "The review runtime binding configuration is invalid.",
+            ) from None
         return _clone_model(bindings)
 
 

@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import json
 import stat
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 
 from problem_locator.contracts import (
+    ApplicationErrorDetail,
+    ApplicationPortError,
     AssetCatalogPort,
     AssetKind,
     ErrorCode,
@@ -82,11 +85,14 @@ class ResolvedJobAssets:
         )
 
 
-def _invalid_asset() -> Exception:
+def _invalid_asset(
+    details: Iterable[ApplicationErrorDetail] = (),
+) -> Exception:
     return runtime_failure(
         stage=ExecutionStage.ASSET_RESOLUTION,
         code=ErrorCode.ASSET_VERSION_UNAVAILABLE,
         message="A fixed runtime asset version is unavailable.",
+        details=details,
     )
 
 
@@ -237,6 +243,10 @@ class RuntimeAssetResolver:
             raise _invalid_asset() from None
         try:
             resolved = self._catalog.resolve(ref)
+        except ApplicationPortError as exc:
+            if exc.error.code is ErrorCode.ASSET_VERSION_UNAVAILABLE:
+                raise _invalid_asset(exc.error.details) from None
+            raise _invalid_asset() from None
         except Exception:
             raise _invalid_asset() from None
         _validate_resolved_asset(resolved, ref, kind)

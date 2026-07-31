@@ -1,18 +1,29 @@
 from __future__ import annotations
 
+import hashlib
 import os
+import stat
 from pathlib import Path
 from typing import cast
 
 import pytest
 
+from problem_locator.contracts import models as contract_models
 from problem_locator.contracts import (
+    Attachment,
+    AttachmentStatus,
+    CaseAggregate,
     ErrorCode,
     ExecutionStage,
+    Job,
     LogparseParseClaim,
+    MaterializedPath,
+    ResourceRef,
+    StateFile,
     VersionedRef,
     WorkspaceInputManifest,
 )
+from problem_locator.contracts.enums import AttachmentFilenameSuffix, ResourceKind
 from problem_locator.contracts.serialization import canonical_json_bytes
 from problem_locator.runtime import workspace as workspace_module
 from problem_locator.runtime.failures import RuntimeExecutionError
@@ -20,6 +31,9 @@ from problem_locator.runtime.workspace import PreparedWorkspace, WorkspaceManage
 
 
 SAFE_DIR_FDS = workspace_module._safe_dir_fd_operations_supported()
+REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
+CONTRACT_FIXTURES = REPOSITORY_ROOT / "tests/fixtures/contracts/positive"
+ATTACHMENT_ID = "00000000-0000-0000-0000-000000000050"
 
 
 def _identity(path: Path) -> tuple[int, int]:
@@ -82,6 +96,264 @@ def _assert_failure(
 ) -> None:
     assert captured.value.failure.stage is stage
     assert captured.value.failure.code is code
+
+
+class _AttachmentStore:
+    def __init__(self, payload: bytes, *, failure: BaseException | None = None) -> None:
+        self.payload = payload
+        self.failure = failure
+        self.calls: list[tuple[ResourceRef, Path]] = []
+
+    def materialize_read_only(
+        self,
+        resource_ref: ResourceRef,
+        destination: Path,
+    ) -> MaterializedPath:
+        self.calls.append((resource_ref, destination))
+        if self.failure is not None:
+            raise self.failure
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(self.payload)
+        destination.chmod(0o444)
+        return MaterializedPath(path=str(destination), read_only=True)
+
+
+def _attachment_job_and_aggregate(
+    *,
+    name: str,
+    content_type: str,
+    payload: bytes,
+) -> tuple[Job, CaseAggregate, Attachment]:
+    job_payload = Job.model_validate_json(
+        (CONTRACT_FIXTURES / "job-route.json").read_bytes()
+    ).model_dump(mode="json")
+    job_payload["attachment_refs"] = [ATTACHMENT_ID]
+    job = Job.model_validate(job_payload)
+    attachment = Attachment(
+        attachment_id=ATTACHMENT_ID,
+        case_id=job.case_id,
+        status=AttachmentStatus.READY,
+        name=name,
+        content_type=content_type,
+        declared_size=len(payload),
+        declared_sha256=hashlib.sha256(payload).hexdigest(),
+        size=len(payload),
+        sha256=hashlib.sha256(payload).hexdigest(),
+        storage_key=(
+            f"resources/cases/{job.case_id}/attachments/"
+            f"{ATTACHMENT_ID}/payload"
+        ),
+        created_at="2026-07-31T00:00:00.000Z",
+        updated_at="2026-07-31T00:00:00.000Z",
+    )
+    state = StateFile.model_validate_json(
+        (CONTRACT_FIXTURES / "state.json").read_bytes()
+    )
+    aggregate_payload = next(iter(state.cases.values())).model_dump(mode="json")
+    aggregate_payload["jobs"] = {job.job_id: job.model_dump(mode="json")}
+    aggregate_payload["attachments"] = {
+        attachment.attachment_id: attachment.model_dump(mode="json")
+    }
+    aggregate = CaseAggregate.model_validate(aggregate_payload)
+    return job, aggregate, attachment
+
+
+def _restore_inputs_permissions(root: Path) -> None:
+    inputs = root / "inputs"
+    if not inputs.exists():
+        return
+    for path in sorted(inputs.rglob("*"), reverse=True):
+        path.chmod(0o755 if path.is_dir() else 0o644)
+    inputs.chmod(0o755)
+
+
+@pytest.mark.parametrize(
+    ("name", "content_type", "expected_suffix", "expected_leaf"),
+    [
+        ("logs.gz", "application/gzip", ".gz", "payload.gz"),
+        ("logs.zip", "application/zip", ".zip", "payload.zip"),
+        ("logs.tar.gz", "application/gzip", ".tar.gz", "payload.tar.gz"),
+        ("logs.tgz", "application/gzip", ".tgz", "payload.tgz"),
+        ("logs.tar", "application/x-tar", ".tar", "payload.tar"),
+        ("notes.txt", "text/plain", None, "payload"),
+    ],
+)
+def test_attachment_suffix_helper_drives_exact_read_only_workspace_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    content_type: str,
+    expected_suffix: str | None,
+    expected_leaf: str,
+) -> None:
+    payload = f"immutable bytes for {name}\n".encode()
+    job, aggregate, attachment = _attachment_job_and_aggregate(
+        name=name,
+        content_type=content_type,
+        payload=payload,
+    )
+    derive_calls: list[tuple[str, str]] = []
+    path_calls: list[tuple[str, AttachmentFilenameSuffix | None]] = []
+
+    def derive(
+        source_name: str,
+        source_content_type: str,
+    ) -> AttachmentFilenameSuffix | None:
+        derive_calls.append((source_name, source_content_type))
+        return contract_models.derive_attachment_filename_suffix(
+            source_name,
+            source_content_type,
+        )
+
+    def relative_path(
+        attachment_id: str,
+        filename_suffix: AttachmentFilenameSuffix | None,
+    ) -> str:
+        path_calls.append((attachment_id, filename_suffix))
+        return contract_models.workspace_attachment_relative_path(
+            attachment_id,
+            filename_suffix,
+        )
+
+    monkeypatch.setattr(
+        workspace_module,
+        "derive_attachment_filename_suffix",
+        derive,
+    )
+    monkeypatch.setattr(
+        workspace_module,
+        "workspace_attachment_relative_path",
+        relative_path,
+    )
+    store = _AttachmentStore(payload)
+    manager = WorkspaceManager(tmp_path / "data")
+
+    workspace = manager.prepare(job, aggregate, store)  # type: ignore[arg-type]
+    try:
+        entry = workspace.manifest.entries[0]
+        expected_relative = (
+            f"inputs/attachments/{ATTACHMENT_ID}/{expected_leaf}"
+        )
+        materialized = workspace.root / expected_relative
+        assert derive_calls == [(attachment.name, attachment.content_type)]
+        assert len(path_calls) == 1
+        assert path_calls[0][0] == ATTACHMENT_ID
+        assert (
+            None if path_calls[0][1] is None else path_calls[0][1].value
+        ) == expected_suffix
+        assert entry.relative_path == expected_relative
+        assert (
+            None if entry.filename_suffix is None else entry.filename_suffix.value
+        ) == expected_suffix
+        assert store.calls == [(_attachment_ref_for_test(attachment), materialized)]
+        assert materialized.read_bytes() == payload
+        assert materialized.stat().st_mode & (
+            stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH
+        ) == 0
+        manifest_path = workspace.root / "inputs/manifest.json"
+        assert manifest_path.read_bytes() == workspace.manifest_bytes
+        assert workspace.manifest_bytes == canonical_json_bytes(workspace.manifest)
+    finally:
+        _restore_inputs_permissions(workspace.root)
+
+
+def _attachment_ref_for_test(attachment: Attachment) -> ResourceRef:
+    assert attachment.storage_key is not None
+    assert attachment.size is not None
+    assert attachment.sha256 is not None
+    return ResourceRef(
+        resource_kind=ResourceKind.FILE,
+        storage_key=attachment.storage_key,
+        size=attachment.size,
+        sha256=attachment.sha256,
+    )
+
+
+def test_attachment_hash_drift_remains_non_retryable_at_suffixed_path(
+    tmp_path: Path,
+) -> None:
+    expected = b"expected"
+    job, aggregate, _ = _attachment_job_and_aggregate(
+        name="logs.tar.gz",
+        content_type="application/gzip",
+        payload=expected,
+    )
+    store = _AttachmentStore(b"tampered")
+
+    with pytest.raises(RuntimeExecutionError) as captured:
+        WorkspaceManager(tmp_path / "data").prepare(
+            job,
+            aggregate,
+            store,  # type: ignore[arg-type]
+        )
+
+    _assert_failure(
+        captured,
+        stage=ExecutionStage.WORKSPACE_PREPARE,
+        code=ErrorCode.RESOURCE_HASH_MISMATCH,
+    )
+    assert captured.value.failure.retryable is False
+    assert store.calls[0][1].name == "payload.tar.gz"
+
+
+def test_transient_attachment_materialization_failure_remains_retryable(
+    tmp_path: Path,
+) -> None:
+    payload = b"archive"
+    job, aggregate, _ = _attachment_job_and_aggregate(
+        name="logs.zip",
+        content_type="application/zip",
+        payload=payload,
+    )
+    store = _AttachmentStore(payload, failure=OSError("transient storage fault"))
+
+    with pytest.raises(RuntimeExecutionError) as captured:
+        WorkspaceManager(tmp_path / "data").prepare(
+            job,
+            aggregate,
+            store,  # type: ignore[arg-type]
+        )
+
+    _assert_failure(
+        captured,
+        stage=ExecutionStage.WORKSPACE_PREPARE,
+        code=ErrorCode.WORKSPACE_PREPARE_FAILED,
+    )
+    assert captured.value.failure.retryable is True
+    assert store.calls[0][1].name == "payload.zip"
+
+
+def test_attachment_suffix_workspace_is_usable_on_no_dirfd_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = b"zip archive"
+    job, aggregate, _ = _attachment_job_and_aggregate(
+        name="logs.zip",
+        content_type="application/zip",
+        payload=payload,
+    )
+    monkeypatch.setattr(
+        workspace_module,
+        "_safe_dir_fd_operations_supported",
+        lambda: False,
+    )
+    workspace = WorkspaceManager(tmp_path / "data").prepare(
+        job,
+        aggregate,
+        _AttachmentStore(payload),  # type: ignore[arg-type]
+    )
+    try:
+        WorkspaceManager.write_context(workspace, "fallback context\n")
+        attachment_path = (
+            workspace.root
+            / f"inputs/attachments/{ATTACHMENT_ID}/payload.zip"
+        )
+        assert attachment_path.read_bytes() == payload
+        assert workspace.manifest.entries[0].relative_path.endswith("/payload.zip")
+        assert workspace.context_path.read_text(encoding="utf-8") == "fallback context\n"
+    finally:
+        _restore_inputs_permissions(workspace.root)
 
 
 @pytest.mark.skipif(not SAFE_DIR_FDS, reason="safe dirfd primitives unavailable")

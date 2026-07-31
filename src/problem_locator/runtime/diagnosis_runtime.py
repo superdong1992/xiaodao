@@ -159,6 +159,13 @@ class DiagnosisRuntime:
             return self._execute(job, cancellation)
         except RuntimeInfrastructureError:
             raise
+        except ApplicationPortError as exc:
+            if exc.error.code in {
+                ErrorCode.STATE_CORRUPT,
+                ErrorCode.STATE_SCHEMA_UNSUPPORTED,
+            }:
+                raise
+            failure = _unexpected_failure().failure
         except RuntimeExecutionError as exc:
             failure = exc.failure
         except (KeyboardInterrupt, SystemExit):
@@ -262,6 +269,11 @@ class DiagnosisRuntime:
                     message="The fixed Job Case is unavailable.",
                     details=exc.error.details,
                 ) from None
+            if exc.error.code in {
+                ErrorCode.STATE_CORRUPT,
+                ErrorCode.STATE_SCHEMA_UNSUPPORTED,
+            }:
+                raise
             raise runtime_failure(
                 stage=ExecutionStage.WORKSPACE_PREPARE,
                 code=ErrorCode.WORKSPACE_PREPARE_FAILED,
