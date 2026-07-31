@@ -231,6 +231,8 @@ def _run_native_startup_gate(expected_system: str, tmp_path: Path) -> None:
         capture_output=True,
     )
     report = ValidationReport.model_validate_json(validated.stdout)
+    assert validated.stdout == canonical_json_bytes(report)
+    assert validated.stderr == b""
     assert report.valid is True and report.errors == []
 
     exported = subprocess.run(
