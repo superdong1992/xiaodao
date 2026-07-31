@@ -45,6 +45,7 @@ from .enums import (
     RequirementKind,
     RequirementStatus,
     ResourceKind,
+    ResourceType,
     ReviewVerdict,
     RouteKind,
     TriggerType,
@@ -956,10 +957,36 @@ class AttachmentStagedRef(ContractModel):
 
 
 class PlannedResourceTarget(ContractModel):
-    final_storage_key: RelativePosixPath
+    case_id: OpaqueId
+    resource_type: ResourceType
+    resource_id: OpaqueId
     resource_kind: ResourceKind
     size: NonNegativeInt
     sha256: Sha256
+    final_storage_key: RelativePosixPath
+
+    @model_validator(mode="after")
+    def validate_identity_key(self) -> PlannedResourceTarget:
+        if (
+            self.resource_type is ResourceType.ATTACHMENT
+            and self.resource_kind is not ResourceKind.FILE
+        ):
+            raise ValueError("Attachment targets must be FILE resources")
+        collection = {
+            ResourceType.ATTACHMENT: "attachments",
+            ResourceType.EVIDENCE: "evidence",
+            ResourceType.ARTIFACT: "artifacts",
+        }[self.resource_type]
+        suffix = "payload" if self.resource_kind is ResourceKind.FILE else "tree"
+        expected_key = (
+            f"resources/cases/{self.case_id}/{collection}/"
+            f"{self.resource_id}/{suffix}"
+        )
+        if self.final_storage_key != expected_key:
+            raise ValueError(
+                "final_storage_key must be the deterministic target for its identity"
+            )
+        return self
 
 
 class CaseResourceUsage(ContractModel):
@@ -1219,6 +1246,22 @@ class ApplicationError(ContractModel):
         ):
             raise ValueError("this ApplicationError code is not retryable")
         return self
+
+
+UNTRUSTED_OUTCOME_REJECTION_CODES = frozenset(
+    {
+        ErrorCode.OUTCOME_MISSING,
+        ErrorCode.EXECUTION_RECORD_FAILED,
+        ErrorCode.OUTCOME_INVALID,
+    }
+)
+OUTCOME_REJECTION_CODES = frozenset(
+    {
+        *UNTRUSTED_OUTCOME_REJECTION_CODES,
+        ErrorCode.RESOURCE_LIMIT_EXCEEDED,
+        ErrorCode.RESOURCE_HASH_MISMATCH,
+    }
+)
 
 
 class ExecutionFailure(ContractModel):
@@ -2037,6 +2080,7 @@ class ReviewOutcomeTriggerPayload(ContractModel):
 class SubmitSupplementTriggerPayload(ContractModel):
     user_facts: list[DiagnosisItem]
     ready_attachment_ids: list[OpaqueId]
+    stable_target_changed: Annotated[bool, Field(strict=True)]
 
     @model_validator(mode="after")
     def validate_payload(self) -> SubmitSupplementTriggerPayload:
@@ -2284,6 +2328,9 @@ class TransitionPlan(ContractModel):
         return self
 
 
+CoordinatorPlanResult: TypeAlias = TransitionPlan | ApplicationError
+
+
 class BusinessReceipt(ContractModel):
     operation: NonEmptyText
     primary_resource_id: OpaqueId
@@ -2303,10 +2350,24 @@ class IdempotencyRecord(ContractModel):
 
 
 class OutcomeProcessingRecord(ContractModel):
-    outcome_id: OpaqueId
+    """Durable first-processing audit for one claimed Outcome submission.
+
+    For the narrowly allowed technical rejection branch with no trusted
+    ``JobOutcome``, ``outcome_id``, ``outcome_hash`` and ``outcome_file_ref``
+    are the immutable values claimed by the worker receipt; they are not an
+    assertion that a valid finalized DTO was observed on disk.
+    """
+
+    outcome_id: OpaqueId = Field(
+        description="Trusted saved Outcome ID, or caller-claimed ID for a technical rejection without a trusted DTO."
+    )
     job_id: OpaqueId
-    outcome_hash: Sha256
-    outcome_file_ref: ExecutionFileRef
+    outcome_hash: Sha256 = Field(
+        description="Trusted canonical hash, or caller-claimed receipt hash for an untrusted technical rejection."
+    )
+    outcome_file_ref: ExecutionFileRef = Field(
+        description="Trusted finalized reference, or caller-claimed receipt reference for an untrusted technical rejection."
+    )
     disposition: OutcomeDisposition
     processed_at: UtcTimestamp
     error_code: ErrorCode | None
@@ -2333,6 +2394,13 @@ class OutcomeProcessingRecord(ContractModel):
                 raise ValueError("non-APPLIED processing records cannot accept or create objects")
             if (self.disposition is OutcomeDisposition.REJECTED) != (self.error_code is not None):
                 raise ValueError("error_code must be present exactly for REJECTED processing")
+            if (
+                self.disposition is OutcomeDisposition.REJECTED
+                and self.error_code not in OUTCOME_REJECTION_CODES
+            ):
+                raise ValueError(
+                    "REJECTED processing requires a frozen technical rejection code"
+                )
         return self
 
 
@@ -2349,6 +2417,27 @@ class RuntimeEpochRecord(ContractModel):
     started_at: UtcTimestamp
     recovery_id: OpaqueId
     recovery_completed_at: UtcTimestamp | None
+
+
+class RecoveryProcessingRecord(ContractModel):
+    recovery_id: OpaqueId
+    current_runtime_epoch: OpaqueId
+    interrupted_job_ids: list[OpaqueId]
+    pending_job_ids: list[OpaqueId]
+    completed_at: UtcTimestamp | None
+
+    @model_validator(mode="after")
+    def validate_job_ids(self) -> RecoveryProcessingRecord:
+        for field_name in ("interrupted_job_ids", "pending_job_ids"):
+            values = getattr(self, field_name)
+            _unique(values, field_name)
+            if values != sorted(values):
+                raise ValueError(f"{field_name} must be sorted")
+        if set(self.interrupted_job_ids) & set(self.pending_job_ids):
+            raise ValueError(
+                "interrupted_job_ids and pending_job_ids must be disjoint"
+            )
+        return self
 
 
 class ExecutionFileRef(ContractModel):
@@ -2396,10 +2485,20 @@ class CaseAggregate(ContractModel):
         for label, (mapping, attribute) in mappings.items():
             if any(key != getattr(value, attribute) for key, value in mapping.items()):
                 raise ValueError(f"{label} map keys must equal object IDs")
-        if set(self.outcomes) != set(self.outcome_processing_records):
+        if not set(self.outcomes) <= set(self.outcome_processing_records):
             raise ValueError(
-                "saved Outcomes and OutcomeProcessingRecords must form an exact pair set"
+                "every saved Outcome requires an OutcomeProcessingRecord"
             )
+        untrusted_outcome_ids = set(self.outcome_processing_records) - set(self.outcomes)
+        for outcome_id in untrusted_outcome_ids:
+            record = self.outcome_processing_records[outcome_id]
+            if (
+                record.disposition is not OutcomeDisposition.REJECTED
+                or record.error_code not in UNTRUSTED_OUTCOME_REJECTION_CODES
+            ):
+                raise ValueError(
+                    "only fixed technical REJECTED processing may omit a trusted Outcome"
+                )
         for collection in (self.jobs.values(), self.outcomes.values(), self.attachments.values(), self.evidence.values(), self.artifacts.values()):
             if any(item.case_id != self.case.case_id for item in collection):
                 raise ValueError("case aggregate contains a resource owned by another case")
@@ -2546,8 +2645,15 @@ class CaseAggregate(ContractModel):
         for record in self.outcome_processing_records.values():
             outcome = self.outcomes.get(record.outcome_id)
             job = self.jobs.get(record.job_id)
-            if outcome is None or job is None:
-                raise ValueError("OutcomeProcessingRecord must resolve its Outcome and Job")
+            if job is None:
+                raise ValueError("OutcomeProcessingRecord must resolve its Job")
+            if outcome is None:
+                if (
+                    record.disposition is OutcomeDisposition.REJECTED
+                    and record.error_code in UNTRUSTED_OUTCOME_REJECTION_CODES
+                ):
+                    continue
+                raise ValueError("OutcomeProcessingRecord must resolve its Outcome")
             outcome_bytes = _canonical_json_bytes(outcome.model_dump(mode="json"))
             if (
                 len(outcome_bytes) != record.outcome_file_ref.size
@@ -2604,6 +2710,7 @@ class StateFile(ContractModel):
     created_at: UtcTimestamp
     updated_at: UtcTimestamp
     runtime_epochs: list[RuntimeEpochRecord]
+    recovery_processing_records: dict[OpaqueId, RecoveryProcessingRecord]
     cases: dict[OpaqueId, CaseAggregate]
     idempotency_records: dict[str, IdempotencyRecord]
 
@@ -2612,6 +2719,46 @@ class StateFile(ContractModel):
         if any(key != aggregate.case.case_id for key, aggregate in self.cases.items()):
             raise ValueError("cases map keys must equal Case.case_id")
         _unique([record.runtime_epoch for record in self.runtime_epochs], "runtime epoch IDs")
+        _unique(
+            [record.recovery_id for record in self.runtime_epochs],
+            "runtime epoch recovery IDs",
+        )
+        if any(
+            key != record.recovery_id
+            for key, record in self.recovery_processing_records.items()
+        ):
+            raise ValueError(
+                "recovery processing record map keys must equal recovery_id"
+            )
+        runtime_by_recovery_id = {
+            record.recovery_id: record for record in self.runtime_epochs
+        }
+        if set(runtime_by_recovery_id) != set(self.recovery_processing_records):
+            raise ValueError(
+                "RuntimeEpochRecords and RecoveryProcessingRecords must form an exact recovery_id pair set"
+            )
+        for recovery_record in self.recovery_processing_records.values():
+            runtime_record = runtime_by_recovery_id.get(recovery_record.recovery_id)
+            if (
+                runtime_record is None
+                or runtime_record.runtime_epoch
+                != recovery_record.current_runtime_epoch
+            ):
+                raise ValueError(
+                    "RecoveryProcessingRecord must match its RuntimeEpochRecord"
+                )
+            if (
+                runtime_record.recovery_completed_at
+                != recovery_record.completed_at
+            ):
+                raise ValueError(
+                    "recovery completion timestamps must match exactly"
+                )
+        if sum(
+            record.completed_at is None
+            for record in self.recovery_processing_records.values()
+        ) > 1:
+            raise ValueError("at most one recovery may be incomplete")
         if any(
             key != f"{record.operation}:{record.idempotency_key}"
             for key, record in self.idempotency_records.items()
@@ -2638,6 +2785,7 @@ class StateFile(ContractModel):
 class StateMutation(ContractModel):
     upsert_case: Case | None
     upsert_runtime_epoch_records: list[RuntimeEpochRecord]
+    upsert_recovery_processing_records: list[RecoveryProcessingRecord]
     insert_jobs: list[Job]
     job_lifecycle_updates: list[JobLifecycleUpdate]
     insert_outcomes: list[JobOutcome]
@@ -2654,6 +2802,10 @@ class StateMutation(ContractModel):
             "upsert_runtime_epoch_records": (
                 self.upsert_runtime_epoch_records,
                 lambda item: item.runtime_epoch,
+            ),
+            "upsert_recovery_processing_records": (
+                self.upsert_recovery_processing_records,
+                lambda item: item.recovery_id,
             ),
             "insert_jobs": (self.insert_jobs, lambda item: item.job_id),
             "job_lifecycle_updates": (
@@ -2906,17 +3058,8 @@ class PrepareAttachment(ContractModel):
     expected_case_revision: PositiveInt
     name: NonEmptyText
     content_type: ContentType
-    declared_size: Annotated[
-        int, Field(ge=0, le=MAX_ATTACHMENT_BYTES, strict=True)
-    ] | None = None
+    declared_size: NonNegativeInt | None = None
     declared_sha256: Sha256 | None = None
-
-    @field_validator("declared_size")
-    @classmethod
-    def validate_size(cls, value: int | None) -> int | None:
-        if value is not None and value > MAX_ATTACHMENT_BYTES:
-            raise ValueError("declared attachment size exceeds the V1 limit")
-        return value
 
 
 class UploadAttachmentContent(ContractModel):
@@ -2924,6 +3067,7 @@ class UploadAttachmentContent(ContractModel):
 
     idempotency_key: OpaqueId
     attachment_id: OpaqueId
+    expected_content_type: ContentType
     expected_size: Annotated[
         int, Field(ge=0, le=MAX_ATTACHMENT_BYTES, strict=True)
     ]
@@ -3273,8 +3417,15 @@ class RecoveryReceipt(ContractModel):
 
     @model_validator(mode="after")
     def validate_ids(self) -> RecoveryReceipt:
-        _unique(self.interrupted_job_ids, "interrupted_job_ids")
-        _unique(self.pending_job_ids, "pending_job_ids")
+        for field_name in ("interrupted_job_ids", "pending_job_ids"):
+            values = getattr(self, field_name)
+            _unique(values, field_name)
+            if values != sorted(values):
+                raise ValueError(f"{field_name} must be sorted")
+        if set(self.interrupted_job_ids) & set(self.pending_job_ids):
+            raise ValueError(
+                "interrupted_job_ids and pending_job_ids must be disjoint"
+            )
         return self
 
 
@@ -3314,6 +3465,7 @@ class StateExportObjectCounts(ContractModel):
     artifacts: NonNegativeInt
     idempotency_records: NonNegativeInt
     runtime_epochs: NonNegativeInt
+    recovery_processing_records: NonNegativeInt
 
 
 def _state_object_counts(state: StateFile) -> StateExportObjectCounts:
@@ -3336,6 +3488,7 @@ def _state_object_counts(state: StateFile) -> StateExportObjectCounts:
         artifacts=sum(len(aggregate.artifacts) for aggregate in state.cases.values()),
         idempotency_records=len(state.idempotency_records),
         runtime_epochs=len(state.runtime_epochs),
+        recovery_processing_records=len(state.recovery_processing_records),
     )
 
 
@@ -3590,6 +3743,7 @@ __all__ = [model.__name__ for model in _CONTRACT_MODEL_TYPES] + [
     "ApplicationCommand",
     "ArtifactMetadata",
     "CanonicalJsonBytes",
+    "CoordinatorPlanResult",
     "Confidence",
     "ContentType",
     "ContractName",
@@ -3599,12 +3753,14 @@ __all__ = [model.__name__ for model in _CONTRACT_MODEL_TYPES] + [
     "NonEmptyText",
     "NonNegativeInt",
     "OpaqueId",
+    "OUTCOME_REJECTION_CODES",
     "OutcomePayload",
     "PositiveInt",
     "RelativePosixPath",
     "RequirementConstraints",
     "Sha256",
     "TriggerPayload",
+    "UNTRUSTED_OUTCOME_REJECTION_CODES",
     "UtcTimestamp",
     "WaitSeconds",
     "WorkspaceInputEntry",

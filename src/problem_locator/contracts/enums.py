@@ -99,6 +99,12 @@ class ResourceKind(StrEnum):
     DIRECTORY = "DIRECTORY"
 
 
+class ResourceType(StrEnum):
+    ATTACHMENT = "ATTACHMENT"
+    EVIDENCE = "EVIDENCE"
+    ARTIFACT = "ARTIFACT"
+
+
 class CancellationReason(StrEnum):
     USER_CANCEL = "USER_CANCEL"
     SERVICE_SHUTDOWN = "SERVICE_SHUTDOWN"

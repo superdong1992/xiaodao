@@ -126,6 +126,7 @@ def _empty_mutation_payload() -> dict:
     return {
         "upsert_case": None,
         "upsert_runtime_epoch_records": [],
+        "upsert_recovery_processing_records": [],
         "insert_jobs": [],
         "job_lifecycle_updates": [],
         "insert_outcomes": [],
@@ -286,6 +287,7 @@ def _object_counts(**updates: int) -> dict:
         "artifacts": 0,
         "idempotency_records": 0,
         "runtime_epochs": 0,
+        "recovery_processing_records": 0,
     }
     counts.update(updates)
     return counts
@@ -373,7 +375,7 @@ def test_case_aggregate_rejects_completed_outcome_without_processing_record() ->
 @pytest.mark.parametrize(
     ("drift", "message"),
     [
-        ("missing_outcome", "exact pair set"),
+        ("missing_outcome", "technical REJECTED processing"),
         ("wrong_saved_hash", "canonical saved Outcome"),
         ("header_mismatch", "headers must match"),
     ],

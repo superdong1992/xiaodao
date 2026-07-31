@@ -46,7 +46,7 @@ def test_handoff_fixture_freezes_every_required_top_level_field() -> None:
         "model": "gpt-5.6-sol",
         "reasoning_effort": "ultra",
     }
-    assert payload["contract_revision"] == "v1-contract-r1"
+    assert payload["contract_revision"] == "v1-contract-r2"
     assert payload["branch"].startswith("codex/")
     assert payload["forbidden_scope_touched"] is False
     _validate_handoff(payload)
@@ -67,7 +67,7 @@ def test_handoff_path_arrays_are_repository_relative_posix_paths() -> None:
     [
         ("spec_id", "S09"),
         ("branch", "feature/no-codex-prefix"),
-        ("contract_revision", "v1-contract-r2"),
+        ("contract_revision", "v1-contract-r1"),
         ("contract_base_commit", "A" * 40),
         ("head_commit", "1" * 39),
     ],
@@ -111,7 +111,7 @@ def test_handoff_rejects_extra_fields_in_every_nested_record() -> None:
             "affected_specs": ["S01"],
             "affected_types_or_codes": ["Job"],
             "compatibility": "breaking",
-            "current_contract_revision": "v1-contract-r1",
+            "current_contract_revision": "v1-contract-r2",
             "fixture_and_test_changes": ["update fixture"],
             "problem": "example",
             "proposed_change": "example",

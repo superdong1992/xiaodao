@@ -127,6 +127,7 @@ def test_attachment_size_boundary_uses_counting_stream_without_giant_allocation(
     exact = UploadAttachmentContent(
         idempotency_key=ATTACHMENT_ID,
         attachment_id=ATTACHMENT_ID,
+        expected_content_type="application/octet-stream",
         expected_size=MAX_ATTACHMENT_BYTES,
         expected_sha256="a" * 64,
         byte_stream=exact_stream,
@@ -142,6 +143,7 @@ def test_attachment_size_boundary_uses_counting_stream_without_giant_allocation(
         UploadAttachmentContent(
             idempotency_key=ATTACHMENT_ID,
             attachment_id=ATTACHMENT_ID,
+            expected_content_type="application/octet-stream",
             expected_size=MAX_ATTACHMENT_BYTES + 1,
             expected_sha256="b" * 64,
             byte_stream=oversized_stream,

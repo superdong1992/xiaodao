@@ -22,7 +22,7 @@ from pathlib import Path
 from types import TracebackType
 from typing import Any, Self
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from problem_locator.contracts.commands import (
     ApplicationCommand,
@@ -39,13 +39,21 @@ from problem_locator.contracts.commands import (
 )
 from problem_locator.contracts.enums import (
     CancellationReason,
+    ErrorCode,
     JobStatus,
     ResourceKind,
+    ResourceType,
 )
-from problem_locator.contracts.errors import ExecutionFailure
+from problem_locator.contracts.errors import (
+    ApplicationPortError,
+    ERROR_SPECS,
+    ExecutionFailure,
+    PORT_ERROR_CODES,
+)
 from problem_locator.contracts.limits import MAX_ATTACHMENT_BYTES, MAX_CASE_RESOURCE_BYTES
 from problem_locator.contracts.models import (
     Artifact,
+    ApplicationError,
     AssetAvailabilityReport,
     AttachmentStagedRef,
     CaseAggregate,
@@ -76,9 +84,10 @@ from problem_locator.contracts.models import (
 )
 from problem_locator.contracts.outcomes import (
     CaseSnapshot,
+    CoordinatorPlanResult,
     JobOutcome,
-    TransitionPlan,
     ValidatedTrigger,
+    validate_coordinator_plan_result,
 )
 from problem_locator.contracts.ports import (
     AppendOnlyByteSink,
@@ -131,6 +140,41 @@ def _raise_or_return(item: Any, *args: Any, **kwargs: Any) -> Any:
     if callable(item):
         return item(*args, **kwargs)
     return _clone(item)
+
+
+def _port_error(code: ErrorCode, message: str) -> ApplicationPortError:
+    """Build the one frozen modeled-failure channel used by public fakes."""
+
+    return ApplicationPortError(
+        ApplicationError(
+            code=code,
+            message=message,
+            details=[],
+            retryable=ERROR_SPECS[code].application_retryable,
+        )
+    )
+
+
+def _validate_scripted_port_error(
+    method_key: str,
+    error: ApplicationPortError,
+) -> None:
+    if error.error.code not in PORT_ERROR_CODES[method_key]:
+        raise ValueError(
+            f"{method_key} does not allow {error.error.code.value}"
+        ) from error
+
+
+def _take_port_script(
+    method_key: str,
+    script: _Script,
+    *args: Any,
+) -> Any:
+    try:
+        return script.take(method_key, *args)
+    except ApplicationPortError as error:
+        _validate_scripted_port_error(method_key, error)
+        raise
 
 
 class _Script:
@@ -552,6 +596,13 @@ class InMemoryResourceStore:
         self.upload_guard = upload_guard
         self.publication_guard = publication_guard
         self._staged: dict[tuple[str, str], _StoredResource] = {}
+        self._staged_refs: dict[
+            tuple[str, str], StagedResourceRef | AttachmentStagedRef
+        ] = {}
+        self._staged_completion_markers: set[tuple[str, str]] = set()
+        self._published_stage_history: dict[
+            tuple[str, str], tuple[StagedResourceRef | AttachmentStagedRef, str]
+        ] = {}
         self._published: dict[str, _StoredResource] = {}
         self._quarantined: dict[str, tuple[str, _StoredResource]] = {}
         self._state_reference_counts: defaultdict[str, int] = defaultdict(int)
@@ -560,6 +611,10 @@ class InMemoryResourceStore:
         self.stage_file_calls: list[tuple[str, str]] = []
         self.stage_tree_calls: list[tuple[str, str, Path]] = []
         self.stage_attachment_calls: list[str] = []
+        self.validate_staged_calls: list[StagedResourceRef] = []
+        self.plan_target_calls: list[
+            tuple[str, ResourceType, str, ResourceKind, int, str]
+        ] = []
         self.publish_calls: list[tuple[Any, str]] = []
         self.capacity_calls: list[tuple[str, tuple[PlannedResourceTarget, ...]]] = []
         self.discard_calls: list[Any] = []
@@ -781,7 +836,13 @@ class InMemoryResourceStore:
     def _maybe_fail(self, operation: str) -> None:
         failures = self._failures[operation]
         if failures:
-            raise failures.popleft()
+            failure = failures.popleft()
+            if isinstance(failure, ApplicationPortError):
+                _validate_scripted_port_error(
+                    f"ResourceStore.{operation}",
+                    failure,
+                )
+            raise failure
 
     @staticmethod
     def _read_stream(
@@ -802,7 +863,10 @@ class InMemoryResourceStore:
                 break
             size += len(chunk)
             if byte_limit is not None and size > byte_limit:
-                raise ValueError("resource byte limit exceeded")
+                raise _port_error(
+                    ErrorCode.RESOURCE_LIMIT_EXCEEDED,
+                    "The resource exceeds its byte limit.",
+                )
             digest.update(chunk)
             payload.extend(chunk)
         return bytes(payload), size, digest.hexdigest()
@@ -815,9 +879,15 @@ class InMemoryResourceStore:
         expected_sha256: str | None,
     ) -> None:
         if expected_size is not None and size != expected_size:
-            raise ValueError("resource size mismatch")
+            raise _port_error(
+                ErrorCode.RESOURCE_SIZE_MISMATCH,
+                "The resource size does not match the expected size.",
+            )
         if expected_sha256 is not None and sha256 != expected_sha256:
-            raise ValueError("resource SHA-256 mismatch")
+            raise _port_error(
+                ErrorCode.RESOURCE_HASH_MISMATCH,
+                "The resource digest does not match the expected SHA-256.",
+            )
 
     @staticmethod
     def _staging_id(owner_job_id: str, proposal_key: str) -> str:
@@ -837,14 +907,14 @@ class InMemoryResourceStore:
         expected_sha256: str | None = None,
     ) -> StagedResourceRef:
         self._maybe_fail("stage_file")
-        payload, size, sha256 = self._read_stream(stream)
+        payload, size, sha256 = self._read_stream(
+            stream,
+            byte_limit=MAX_CASE_RESOURCE_BYTES,
+        )
         self._check_expected(size, sha256, expected_size, expected_sha256)
         staging_id = self._staging_id(owner_job_id, proposal_key)
         value = _StoredResource(ResourceKind.FILE, size, sha256, payload=payload)
-        with self._lock:
-            self.stage_file_calls.append((owner_job_id, proposal_key))
-            self._staged[("proposal", staging_id)] = value
-        return StagedResourceRef(
+        staged_ref = StagedResourceRef(
             staging_id=staging_id,
             owner_job_id=owner_job_id,
             proposal_key=proposal_key,
@@ -853,6 +923,14 @@ class InMemoryResourceStore:
             sha256=sha256,
             tree_manifest=None,
         )
+        key = ("proposal", staging_id)
+        with self._lock:
+            self.stage_file_calls.append((owner_job_id, proposal_key))
+            self._staged[key] = value
+            self._staged_refs[key] = _clone(staged_ref)
+            self._staged_completion_markers.add(key)
+            self._published_stage_history.pop(key, None)
+        return staged_ref
 
     def stage_tree(
         self,
@@ -864,20 +942,32 @@ class InMemoryResourceStore:
         self._maybe_fail("stage_tree")
         root = Path(root)
         if not root.is_dir() or root.is_symlink():
-            raise ValueError("tree root must be a real directory")
+            raise _port_error(
+                ErrorCode.PATH_VIOLATION,
+                "The staged tree root must be a real directory.",
+            )
         files: dict[str, bytes] = {}
         entries: list[TreeManifestEntry] = []
         for candidate in sorted(root.rglob("*"), key=lambda item: item.relative_to(root).as_posix()):
             if candidate.is_symlink():
-                raise ValueError("tree links are forbidden")
+                raise _port_error(
+                    ErrorCode.PATH_VIOLATION,
+                    "Links are forbidden in staged trees.",
+                )
             if candidate.is_dir():
                 continue
             file_stat = candidate.stat(follow_symlinks=False)
             mode = file_stat.st_mode
             if not stat.S_ISREG(mode):
-                raise ValueError("tree entries must be ordinary files")
+                raise _port_error(
+                    ErrorCode.PATH_VIOLATION,
+                    "Staged tree entries must be ordinary files.",
+                )
             if file_stat.st_nlink != 1:
-                raise ValueError("tree hard links are forbidden")
+                raise _port_error(
+                    ErrorCode.PATH_VIOLATION,
+                    "Hard links are forbidden in staged trees.",
+                )
             relative = candidate.relative_to(root).as_posix()
             data = candidate.read_bytes()
             files[relative] = data
@@ -891,8 +981,16 @@ class InMemoryResourceStore:
         manifest = TreeManifest(version=1, entries=entries)
         tree_sha256 = hashlib.sha256(canonical_json_bytes(manifest)).hexdigest()
         if expected_manifest_hash is not None and tree_sha256 != expected_manifest_hash:
-            raise ValueError("tree manifest SHA-256 mismatch")
+            raise _port_error(
+                ErrorCode.RESOURCE_HASH_MISMATCH,
+                "The tree manifest digest does not match the expected SHA-256.",
+            )
         size = sum(entry.size for entry in entries)
+        if size > MAX_CASE_RESOURCE_BYTES:
+            raise _port_error(
+                ErrorCode.RESOURCE_LIMIT_EXCEEDED,
+                "The staged tree exceeds the Case resource byte limit.",
+            )
         staging_id = self._staging_id(owner_job_id, proposal_key)
         value = _StoredResource(
             ResourceKind.DIRECTORY,
@@ -901,10 +999,7 @@ class InMemoryResourceStore:
             tree=files,
             tree_manifest=manifest,
         )
-        with self._lock:
-            self.stage_tree_calls.append((owner_job_id, proposal_key, root))
-            self._staged[("proposal", staging_id)] = value
-        return StagedResourceRef(
+        staged_ref = StagedResourceRef(
             staging_id=staging_id,
             owner_job_id=owner_job_id,
             proposal_key=proposal_key,
@@ -913,6 +1008,14 @@ class InMemoryResourceStore:
             sha256=tree_sha256,
             tree_manifest=manifest,
         )
+        key = ("proposal", staging_id)
+        with self._lock:
+            self.stage_tree_calls.append((owner_job_id, proposal_key, root))
+            self._staged[key] = value
+            self._staged_refs[key] = _clone(staged_ref)
+            self._staged_completion_markers.add(key)
+            self._published_stage_history.pop(key, None)
+        return staged_ref
 
     def stage_attachment(
         self,
@@ -924,37 +1027,57 @@ class InMemoryResourceStore:
     ) -> AttachmentStagedRef:
         self._maybe_fail("stage_attachment")
         if self.upload_guard is not None:
-            self.upload_guard._validate(attachment_id, upload_lease)
+            try:
+                self.upload_guard._validate(attachment_id, upload_lease)
+            except ValueError:
+                raise _port_error(
+                    ErrorCode.UPLOAD_INCOMPLETE,
+                    "The attachment upload lease is no longer valid.",
+                ) from None
         else:
             if upload_lease.attachment_id != attachment_id or upload_lease.is_released():
-                raise ValueError("invalid attachment upload lease")
+                raise _port_error(
+                    ErrorCode.UPLOAD_INCOMPLETE,
+                    "The attachment upload lease is no longer valid.",
+                )
         payload, size, sha256 = self._read_stream(
             stream,
             byte_limit=MAX_ATTACHMENT_BYTES,
         )
         self._check_expected(size, sha256, expected_size, expected_sha256)
-        with self._lock:
-            self.stage_attachment_calls.append(attachment_id)
-            self._staged[("attachment", attachment_id)] = _StoredResource(
-                ResourceKind.FILE,
-                size,
-                sha256,
-                payload=payload,
-            )
-        return AttachmentStagedRef(
+        staged_ref = AttachmentStagedRef(
             attachment_id=attachment_id,
             resource_kind=ResourceKind.FILE,
             size=size,
             sha256=sha256,
         )
+        key = ("attachment", attachment_id)
+        with self._lock:
+            self.stage_attachment_calls.append(attachment_id)
+            self._staged[key] = _StoredResource(
+                ResourceKind.FILE,
+                size,
+                sha256,
+                payload=payload,
+            )
+            self._staged_refs[key] = _clone(staged_ref)
+            self._staged_completion_markers.add(key)
+            self._published_stage_history.pop(key, None)
+        return staged_ref
 
     @staticmethod
     def _validate_storage_key(storage_key: str) -> None:
         if not storage_key or storage_key.startswith("/") or "\\" in storage_key:
-            raise ValueError("invalid storage key")
+            raise _port_error(
+                ErrorCode.PATH_VIOLATION,
+                "The formal storage key is outside the allowed resource root.",
+            )
         parts = storage_key.split("/")
         if any(part in {"", ".", ".."} for part in parts):
-            raise ValueError("invalid storage key")
+            raise _port_error(
+                ErrorCode.PATH_VIOLATION,
+                "The formal storage key contains an unsafe segment.",
+            )
 
     @staticmethod
     def _staged_key(
@@ -974,6 +1097,146 @@ class InMemoryResourceStore:
             and value.sha256 == ref.sha256
         )
 
+    @staticmethod
+    def _content_matches_metadata(value: _StoredResource) -> bool:
+        try:
+            if value.resource_kind is ResourceKind.FILE:
+                return (
+                    value.payload is not None
+                    and len(value.payload) == value.size
+                    and hashlib.sha256(value.payload).hexdigest() == value.sha256
+                )
+            if value.tree is None or value.tree_manifest is None:
+                return False
+            entries = [
+                TreeManifestEntry(
+                    path=relative,
+                    size=len(payload),
+                    sha256=hashlib.sha256(payload).hexdigest(),
+                )
+                for relative, payload in sorted(value.tree.items())
+            ]
+            manifest = TreeManifest(version=1, entries=entries)
+            manifest_hash = hashlib.sha256(canonical_json_bytes(manifest)).hexdigest()
+            return (
+                manifest == value.tree_manifest
+                and sum(entry.size for entry in entries) == value.size
+                and manifest_hash == value.sha256
+            )
+        except (TypeError, ValueError):
+            return False
+
+    def validate_staged(self, staged_ref: StagedResourceRef) -> None:
+        self._maybe_fail("validate_staged")
+        if not isinstance(staged_ref, StagedResourceRef):
+            raise _port_error(
+                ErrorCode.RESOURCE_HASH_MISMATCH,
+                "The staged resource receipt has an invalid shape.",
+            )
+        key = self._staged_key(staged_ref)
+        with self._lock:
+            self.validate_staged_calls.append(_clone(staged_ref))
+            value = self._staged.get(key)
+            if value is not None:
+                stored_ref = self._staged_refs.get(key)
+                if key not in self._staged_completion_markers:
+                    raise _port_error(
+                        ErrorCode.RESOURCE_NOT_FOUND,
+                        "The staged resource completion marker is missing.",
+                    )
+                if (
+                    stored_ref != staged_ref
+                    or not self._matches_ref(value, staged_ref)
+                    or not self._content_matches_metadata(value)
+                ):
+                    raise _port_error(
+                        ErrorCode.RESOURCE_HASH_MISMATCH,
+                        "The staged resource receipt or bytes have drifted.",
+                    )
+                return None
+
+            history = self._published_stage_history.get(key)
+            if history is None:
+                raise _port_error(
+                    ErrorCode.RESOURCE_NOT_FOUND,
+                    "The staged resource does not exist.",
+                )
+            stored_ref, final_storage_key = history
+            published = self._published.get(final_storage_key)
+            if (
+                stored_ref != staged_ref
+                or published is None
+                or not self._matches_ref(published, staged_ref)
+                or not self._content_matches_metadata(published)
+            ):
+                raise _port_error(
+                    ErrorCode.RESOURCE_HASH_MISMATCH,
+                    "The previously published staged resource has drifted.",
+                )
+            return None
+
+    def plan_target(
+        self,
+        case_id: str,
+        resource_type: ResourceType,
+        resource_id: str,
+        resource_kind: ResourceKind,
+        size: int,
+        sha256: str,
+    ) -> PlannedResourceTarget:
+        self._maybe_fail("plan_target")
+        if (
+            not isinstance(resource_type, ResourceType)
+            or not isinstance(resource_kind, ResourceKind)
+            or not isinstance(size, int)
+            or isinstance(size, bool)
+            or size < 0
+            or (resource_type is ResourceType.ATTACHMENT and resource_kind is not ResourceKind.FILE)
+        ):
+            raise _port_error(
+                ErrorCode.VALIDATION_ERROR,
+                "The requested resource target has an invalid shape.",
+            )
+        size_limit = (
+            MAX_ATTACHMENT_BYTES
+            if resource_type is ResourceType.ATTACHMENT
+            else MAX_CASE_RESOURCE_BYTES
+        )
+        if size > size_limit:
+            raise _port_error(
+                ErrorCode.VALIDATION_ERROR,
+                "The requested resource target exceeds its byte limit.",
+            )
+        collection = {
+            ResourceType.ATTACHMENT: "attachments",
+            ResourceType.EVIDENCE: "evidence",
+            ResourceType.ARTIFACT: "artifacts",
+        }[resource_type]
+        suffix = "payload" if resource_kind is ResourceKind.FILE else "tree"
+        final_storage_key = (
+            f"resources/cases/{case_id}/{collection}/{resource_id}/{suffix}"
+        )
+        try:
+            target = PlannedResourceTarget(
+                case_id=case_id,
+                resource_type=resource_type,
+                resource_id=resource_id,
+                resource_kind=resource_kind,
+                size=size,
+                sha256=sha256,
+                final_storage_key=final_storage_key,
+            )
+        except (TypeError, ValidationError, ValueError):
+            raise _port_error(
+                ErrorCode.VALIDATION_ERROR,
+                "The requested resource target identifiers or digest are invalid.",
+            ) from None
+        with self._lock:
+            self.plan_target_calls.append(
+                (case_id, resource_type, resource_id, resource_kind, size, sha256)
+            )
+        return target
+
     def publish(
         self,
         staged_ref: StagedResourceRef | AttachmentStagedRef,
@@ -987,8 +1250,43 @@ class InMemoryResourceStore:
             self.publish_calls.append((_clone(staged_ref), final_storage_key))
             existing = self._published.get(final_storage_key)
             if existing is not None:
-                if not self._matches_ref(existing, staged_ref):
-                    raise ValueError("published resource content conflicts")
+                if (
+                    not self._matches_ref(existing, staged_ref)
+                    or not self._content_matches_metadata(existing)
+                ):
+                    raise _port_error(
+                        ErrorCode.RESOURCE_HASH_MISMATCH,
+                        "The formal resource conflicts with the staged receipt.",
+                    )
+                staged_value = self._staged.get(key)
+                staged_receipt = self._staged_refs.get(key)
+                if staged_value is not None and (
+                    key not in self._staged_completion_markers
+                    or staged_receipt != staged_ref
+                    or not self._matches_ref(staged_value, staged_ref)
+                    or not self._content_matches_metadata(staged_value)
+                ):
+                    raise _port_error(
+                        ErrorCode.RESOURCE_HASH_MISMATCH,
+                        "The staged resource receipt or bytes have drifted.",
+                    )
+                previous = self._published_stage_history.get(key)
+                if (
+                    staged_value is None
+                    and previous is not None
+                    and previous[1] != final_storage_key
+                ):
+                    raise _port_error(
+                        ErrorCode.RESOURCE_NOT_FOUND,
+                        "The staged resource was already moved to another target.",
+                    )
+                self._published_stage_history[key] = (
+                    _clone(staged_ref),
+                    final_storage_key,
+                )
+                self._staged.pop(key, None)
+                self._staged_refs.pop(key, None)
+                self._staged_completion_markers.discard(key)
                 return ResourceRef(
                     resource_kind=existing.resource_kind,
                     storage_key=final_storage_key,
@@ -997,12 +1295,29 @@ class InMemoryResourceStore:
                 )
             value = self._staged.get(key)
             if value is None:
-                raise LookupError("staged resource not found")
-            if not self._matches_ref(value, staged_ref):
-                raise ValueError("staged resource metadata drift")
+                raise _port_error(
+                    ErrorCode.RESOURCE_NOT_FOUND,
+                    "The staged resource does not exist.",
+                )
+            if (
+                key not in self._staged_completion_markers
+                or self._staged_refs.get(key) != staged_ref
+                or not self._matches_ref(value, staged_ref)
+                or not self._content_matches_metadata(value)
+            ):
+                raise _port_error(
+                    ErrorCode.RESOURCE_HASH_MISMATCH,
+                    "The staged resource receipt or bytes have drifted.",
+                )
             self._published[final_storage_key] = value
             self._ordinary_orphans.add(final_storage_key)
             del self._staged[key]
+            self._staged_refs.pop(key, None)
+            self._staged_completion_markers.discard(key)
+            self._published_stage_history[key] = (
+                _clone(staged_ref),
+                final_storage_key,
+            )
             return ResourceRef(
                 resource_kind=value.resource_kind,
                 storage_key=final_storage_key,
@@ -1020,7 +1335,10 @@ class InMemoryResourceStore:
         targets = tuple(planned_final_targets)
         keys = [target.final_storage_key for target in targets]
         if keys != sorted(keys) or len(keys) != len(set(keys)):
-            raise ValueError("planned targets must be uniquely sorted by storage key")
+            raise _port_error(
+                ErrorCode.PATH_VIOLATION,
+                "Planned targets must be uniquely sorted by storage key.",
+            )
         prefix = f"resources/cases/{case_id}/"
         with self._lock:
             self.capacity_calls.append((case_id, _clone(targets)))
@@ -1032,12 +1350,18 @@ class InMemoryResourceStore:
             new_bytes = 0
             for target in targets:
                 if not target.final_storage_key.startswith(prefix):
-                    raise ValueError("planned target is outside the Case resource root")
+                    raise _port_error(
+                        ErrorCode.PATH_VIOLATION,
+                        "A planned target is outside the Case resource root.",
+                    )
                 existing = self._published.get(target.final_storage_key)
                 if existing is None:
                     new_bytes += target.size
                 elif not self._matches_ref(existing, target):
-                    raise ValueError("planned target conflicts with published resource")
+                    raise _port_error(
+                        ErrorCode.RESOURCE_HASH_MISMATCH,
+                        "A planned target conflicts with a published resource.",
+                    )
             total_bytes = current_bytes + new_bytes
             usage = CaseResourceUsage(
                 current_bytes=current_bytes,
@@ -1046,15 +1370,34 @@ class InMemoryResourceStore:
                 limit_bytes=MAX_CASE_RESOURCE_BYTES,
             )
             if total_bytes > MAX_CASE_RESOURCE_BYTES:
-                raise ValueError("Case resource capacity exceeded")
+                raise _port_error(
+                    ErrorCode.RESOURCE_LIMIT_EXCEEDED,
+                    "The Case resource capacity is exceeded.",
+                )
             return usage
 
     def open_read(self, resource_ref: ResourceRef) -> BinaryStream:
         self._maybe_fail("open_read")
         with self._lock:
             value = self._published.get(resource_ref.storage_key)
-            if value is None or not self._matches_ref(value, resource_ref):
-                raise LookupError("published resource not found or metadata drifted")
+            if value is None:
+                raise _port_error(
+                    ErrorCode.RESOURCE_NOT_FOUND,
+                    "The published resource does not exist.",
+                )
+            if value.size != resource_ref.size:
+                raise _port_error(
+                    ErrorCode.RESOURCE_SIZE_MISMATCH,
+                    "The published resource size has drifted.",
+                )
+            if (
+                value.resource_kind != resource_ref.resource_kind
+                or value.sha256 != resource_ref.sha256
+            ):
+                raise _port_error(
+                    ErrorCode.RESOURCE_HASH_MISMATCH,
+                    "The published resource metadata has drifted.",
+                )
             if value.resource_kind != ResourceKind.FILE or value.payload is None:
                 raise ValueError("directory resources cannot be opened as a byte stream")
             return InMemoryBinaryStream(value.payload)
@@ -1068,8 +1411,24 @@ class InMemoryResourceStore:
         destination = Path(destination)
         with self._lock:
             value = self._published.get(resource_ref.storage_key)
-            if value is None or not self._matches_ref(value, resource_ref):
-                raise LookupError("published resource not found or metadata drifted")
+            if value is None:
+                raise _port_error(
+                    ErrorCode.RESOURCE_NOT_FOUND,
+                    "The published resource does not exist.",
+                )
+            if value.size != resource_ref.size:
+                raise _port_error(
+                    ErrorCode.RESOURCE_SIZE_MISMATCH,
+                    "The published resource size has drifted.",
+                )
+            if (
+                value.resource_kind != resource_ref.resource_kind
+                or value.sha256 != resource_ref.sha256
+            ):
+                raise _port_error(
+                    ErrorCode.RESOURCE_HASH_MISMATCH,
+                    "The published resource metadata has drifted.",
+                )
             if value.resource_kind == ResourceKind.FILE:
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 destination.write_bytes(value.payload or b"")
@@ -1112,6 +1471,8 @@ class InMemoryResourceStore:
         with self._lock:
             self.discard_calls.append(_clone(staged_ref))
             self._staged.pop(key, None)
+            self._staged_refs.pop(key, None)
+            self._staged_completion_markers.discard(key)
 
 
 class InMemoryStateRepository:
@@ -1140,7 +1501,10 @@ class InMemoryStateRepository:
         with self._lock:
             aggregate = self._require_state().cases.get(case_id)
             if aggregate is None:
-                raise LookupError(f"Case not found: {case_id}")
+                raise _port_error(
+                    ErrorCode.CASE_NOT_FOUND,
+                    "The requested Case does not exist.",
+                )
             return _clone(aggregate)
 
     def read_job(self, job_id: str) -> Job:
@@ -1149,7 +1513,10 @@ class InMemoryStateRepository:
                 job = aggregate.jobs.get(job_id)
                 if job is not None:
                     return _clone(job)
-            raise LookupError(f"Job not found: {job_id}")
+            raise _port_error(
+                ErrorCode.JOB_NOT_FOUND,
+                "The requested Job does not exist.",
+            )
 
     def read_artifact(self, artifact_id: str) -> Artifact:
         with self._lock:
@@ -1157,7 +1524,10 @@ class InMemoryStateRepository:
                 artifact = aggregate.artifacts.get(artifact_id)
                 if artifact is not None:
                     return _clone(artifact)
-            raise LookupError(f"Artifact not found: {artifact_id}")
+            raise _port_error(
+                ErrorCode.ARTIFACT_NOT_FOUND,
+                "The requested Artifact does not exist.",
+            )
 
     def read_snapshot(self) -> StateFile:
         with self._lock:
@@ -1189,6 +1559,38 @@ class InMemoryStateRepository:
             raise ValueError(f"duplicate immutable object: {key}")
         target[key] = value
 
+    @staticmethod
+    def _upsert_recovery_processing_record(
+        target: dict[str, Any],
+        record: dict[str, Any],
+    ) -> None:
+        recovery_id = record["recovery_id"]
+        existing = target.get(recovery_id)
+        if existing is None:
+            target[recovery_id] = record
+            return
+        if existing == record:
+            return
+        identity_fields = (
+            "recovery_id",
+            "current_runtime_epoch",
+            "interrupted_job_ids",
+            "pending_job_ids",
+        )
+        same_first_receipt = all(
+            existing[field] == record[field] for field in identity_fields
+        )
+        if (
+            same_first_receipt
+            and existing["completed_at"] is None
+            and record["completed_at"] is not None
+        ):
+            target[recovery_id] = record
+            return
+        raise ValueError(
+            "RecoveryProcessingRecord is immutable except for its first completion"
+        )
+
     def commit(
         self,
         expected_generation: int,
@@ -1197,13 +1599,22 @@ class InMemoryStateRepository:
     ) -> CommitReceipt:
         with self._lock:
             if self._commit_failures:
-                raise self._commit_failures.popleft()
+                failure = self._commit_failures.popleft()
+                if isinstance(failure, ApplicationPortError):
+                    _validate_scripted_port_error(
+                        "StateRepository.commit",
+                        failure,
+                    )
+                raise failure
             current = self._require_state()
             self.commit_calls.append(
                 (expected_generation, expected_case_revision, _clone(mutation))
             )
             if current.generation != expected_generation:
-                raise ValueError("state generation conflict")
+                raise _port_error(
+                    ErrorCode.REVISION_CONFLICT,
+                    "The state generation changed before commit.",
+                )
             state_data = current.model_dump(mode="python")
             cases: dict[str, Any] = state_data["cases"]
             mutation_data = mutation.model_dump(mode="python")
@@ -1234,7 +1645,10 @@ class InMemoryStateRepository:
                     affected_case_id = candidates.pop()
                 existing_case = current.cases.get(affected_case_id)
                 if existing_case is None or existing_case.case.case_revision != expected_case_revision:
-                    raise ValueError("Case revision conflict")
+                    raise _port_error(
+                        ErrorCode.REVISION_CONFLICT,
+                        "The Case revision changed before commit.",
+                    )
 
             runtime_by_id = {
                 record["runtime_epoch"]: record for record in state_data["runtime_epochs"]
@@ -1242,6 +1656,12 @@ class InMemoryStateRepository:
             for record in mutation_data["upsert_runtime_epoch_records"]:
                 runtime_by_id[record["runtime_epoch"]] = record
             state_data["runtime_epochs"] = list(runtime_by_id.values())
+
+            for record in mutation_data["upsert_recovery_processing_records"]:
+                self._upsert_recovery_processing_record(
+                    state_data["recovery_processing_records"],
+                    record,
+                )
 
             for job in mutation_data["insert_jobs"]:
                 aggregate = cases[job["case_id"]]
@@ -1324,6 +1744,7 @@ class InMemoryStateRepository:
             artifacts=sum(len(item.artifacts) for item in aggregates),
             idempotency_records=len(state.idempotency_records),
             runtime_epochs=len(state.runtime_epochs),
+            recovery_processing_records=len(state.recovery_processing_records),
         )
 
     def validate_all(self) -> ValidationReport:
@@ -1417,6 +1838,7 @@ class _FakeLogparseBrokerSession:
         self.token_valid = True
         self.close_calls = 0
         self.live_children = 0
+        self._accepted_parse_request_bytes: bytes | None = None
         self._lock = threading.Lock()
 
     def agent_environment(self) -> dict[str, str]:
@@ -1427,6 +1849,23 @@ class _FakeLogparseBrokerSession:
                 "PROBLEM_LOCATOR_LOGPARSE_ENDPOINT": self.endpoint,
                 "PROBLEM_LOCATOR_LOGPARSE_TOKEN": self.token,
             }
+
+    def parse_request_bytes(self) -> bytes | None:
+        with self._lock:
+            return self._accepted_parse_request_bytes
+
+    def _record_parse_request(self, request_bytes: bytes) -> None:
+        """Fake-only hook recording the broker's one accepted parse request."""
+
+        if type(request_bytes) is not bytes:
+            raise TypeError("parse request bytes must be bytes")
+        parse_canonical_json_bytes(request_bytes)
+        with self._lock:
+            if self.closed:
+                raise RuntimeError("a closed broker cannot accept a parse request")
+            if self._accepted_parse_request_bytes is not None:
+                raise RuntimeError("the broker already accepted its parse request")
+            self._accepted_parse_request_bytes = request_bytes
 
     def close(self) -> None:
         with self._lock:
@@ -1617,7 +2056,13 @@ class InMemoryExecutionRecordStore:
     def _maybe_fail(self, operation: str) -> None:
         failures = self._failures[operation]
         if failures:
-            raise failures.popleft()
+            failure = failures.popleft()
+            if isinstance(failure, ApplicationPortError):
+                _validate_scripted_port_error(
+                    f"ExecutionRecordStore.{operation}",
+                    failure,
+                )
+            raise failure
 
     @staticmethod
     def _file_ref(relative_key: str, data: bytes) -> ExecutionFileRef:
@@ -1630,13 +2075,19 @@ class InMemoryExecutionRecordStore:
     def publish_job(self, job: Job) -> ExecutionFileRef:
         self._maybe_fail("publish_job")
         if job.status != JobStatus.PENDING:
-            raise ValueError("published job.json must have status PENDING")
+            raise _port_error(
+                ErrorCode.EXECUTION_RECORD_FAILED,
+                "The Job execution record is not publishable.",
+            )
         data = canonical_json_bytes(job)
         with self._lock:
             self.publish_job_calls.append(_clone(job))
             existing = self._job_bytes.get(job.job_id)
             if existing is not None and existing != data:
-                raise ValueError("published job content conflicts")
+                raise _port_error(
+                    ErrorCode.IDEMPOTENCY_CONFLICT,
+                    "The Job execution record conflicts with existing bytes.",
+                )
             self._job_bytes[job.job_id] = data
             return self._file_ref(f"jobs/{job.job_id}/job.json", data)
 
@@ -1646,14 +2097,26 @@ class InMemoryExecutionRecordStore:
         canonical_bytes: bytes,
     ) -> ExecutionFileRef:
         self._maybe_fail("publish_outcome_bytes")
-        outcome = parse_canonical_json_bytes(canonical_bytes, JobOutcome)
+        try:
+            outcome = parse_canonical_json_bytes(canonical_bytes, JobOutcome)
+        except (TypeError, ValueError, ValidationError):
+            raise _port_error(
+                ErrorCode.EXECUTION_RECORD_FAILED,
+                "The Outcome execution record is invalid.",
+            ) from None
         if outcome.job_id != job_id:
-            raise ValueError("Outcome job_id does not match publication path")
+            raise _port_error(
+                ErrorCode.EXECUTION_RECORD_FAILED,
+                "The Outcome execution record does not match its Job.",
+            )
         with self._lock:
             self.publish_outcome_calls.append((job_id, canonical_bytes))
             existing = self._outcome_bytes.get(job_id)
             if existing is not None and existing != canonical_bytes:
-                raise ValueError("published Outcome content conflicts")
+                raise _port_error(
+                    ErrorCode.IDEMPOTENCY_CONFLICT,
+                    "The Outcome execution record conflicts with existing bytes.",
+                )
             self._outcome_bytes[job_id] = canonical_bytes
             return self._file_ref(
                 f"jobs/{job_id}/job_outcome.json",
@@ -1666,13 +2129,19 @@ class InMemoryExecutionRecordStore:
             data = self._job_bytes.get(job_id)
             if data is None:
                 return None
-            job = parse_canonical_json_bytes(data, Job)
-            if job.job_id != job_id or job.status != JobStatus.PENDING:
-                raise ValueError("published job record binding is invalid")
-            return PublishedJobReceipt(
-                job=job,
-                job_file_ref=self._file_ref(f"jobs/{job_id}/job.json", data),
-            )
+            try:
+                job = parse_canonical_json_bytes(data, Job)
+                if job.job_id != job_id or job.status != JobStatus.PENDING:
+                    raise ValueError("invalid binding")
+                return PublishedJobReceipt(
+                    job=job,
+                    job_file_ref=self._file_ref(f"jobs/{job_id}/job.json", data),
+                )
+            except (TypeError, ValueError, ValidationError):
+                raise _port_error(
+                    ErrorCode.EXECUTION_RECORD_FAILED,
+                    "The published Job execution record is invalid.",
+                ) from None
 
     def read_published_outcome(
         self,
@@ -1683,16 +2152,22 @@ class InMemoryExecutionRecordStore:
             data = self._outcome_bytes.get(job_id)
             if data is None:
                 return None
-            outcome = parse_canonical_json_bytes(data, JobOutcome)
-            if outcome.job_id != job_id:
-                raise ValueError("published Outcome record binding is invalid")
-            return RuntimeExecutionReceipt(
-                job_outcome=outcome,
-                outcome_file_ref=self._file_ref(
-                    f"jobs/{job_id}/job_outcome.json",
-                    data,
-                ),
-            )
+            try:
+                outcome = parse_canonical_json_bytes(data, JobOutcome)
+                if outcome.job_id != job_id:
+                    raise ValueError("invalid binding")
+                return RuntimeExecutionReceipt(
+                    job_outcome=outcome,
+                    outcome_file_ref=self._file_ref(
+                        f"jobs/{job_id}/job_outcome.json",
+                        data,
+                    ),
+                )
+            except (TypeError, ValueError, ValidationError):
+                raise _port_error(
+                    ErrorCode.EXECUTION_RECORD_FAILED,
+                    "The published Outcome execution record is invalid.",
+                ) from None
 
     def open_log_sinks(
         self,
@@ -1742,9 +2217,10 @@ class ScriptedCoordinator:
         self,
         snapshot: CaseSnapshot,
         trigger: ValidatedTrigger,
-    ) -> TransitionPlan:
+    ) -> CoordinatorPlanResult:
         self.calls.append((_clone(snapshot), _clone(trigger)))
-        return self._script.take("Coordinator.plan", snapshot, trigger)
+        result = self._script.take("Coordinator.plan", snapshot, trigger)
+        return validate_coordinator_plan_result(trigger, result)
 
 
 class RecordingApplicationCommand:
@@ -1758,7 +2234,11 @@ class RecordingApplicationCommand:
 
     def execute(self, command: ApplicationCommand) -> ApplicationResponse:
         self.calls.append(_clone(command))
-        return self._script.take("ApplicationCommandPort.execute", command)
+        return _take_port_script(
+            "ApplicationCommandPort.execute",
+            self._script,
+            command,
+        )
 
 
 class StubApplicationQuery:
@@ -1785,7 +2265,11 @@ class StubApplicationQuery:
     ) -> CaseQueryResponse:
         args = (case_id, wait_for_job_id, wait_seconds)
         self.calls.append(("get_case", args))
-        return self._scripts["get_case"].take("get_case", *args)
+        return _take_port_script(
+            "ApplicationQueryPort.get_case",
+            self._scripts["get_case"],
+            *args,
+        )
 
     def list_artifacts(
         self,
@@ -1794,7 +2278,11 @@ class StubApplicationQuery:
     ) -> ArtifactListResponse:
         args = (case_id, include_internal)
         self.calls.append(("list_artifacts", args))
-        return self._scripts["list_artifacts"].take("list_artifacts", *args)
+        return _take_port_script(
+            "ApplicationQueryPort.list_artifacts",
+            self._scripts["list_artifacts"],
+            *args,
+        )
 
     def open_artifact(
         self,
@@ -1803,7 +2291,11 @@ class StubApplicationQuery:
     ) -> OpenArtifactResult:
         args = (case_id, artifact_id)
         self.calls.append(("open_artifact", args))
-        return self._scripts["open_artifact"].take("open_artifact", *args)
+        return _take_port_script(
+            "ApplicationQueryPort.open_artifact",
+            self._scripts["open_artifact"],
+            *args,
+        )
 
 
 class StubJobControl:
@@ -1826,7 +2318,11 @@ class StubJobControl:
     def claim_job(self, job_id: str, runtime_epoch: str) -> ClaimReceipt:
         args = (job_id, runtime_epoch)
         self.calls.append(("claim_job", args))
-        return self._scripts["claim_job"].take("claim_job", *args)
+        return _take_port_script(
+            "JobControlPort.claim_job",
+            self._scripts["claim_job"],
+            *args,
+        )
 
     def submit_outcome(
         self,
@@ -1835,8 +2331,11 @@ class StubJobControl:
     ) -> OutcomeReceipt:
         args = (_clone(job_outcome), _clone(outcome_file_ref))
         self.calls.append(("submit_outcome", args))
-        return self._scripts["submit_outcome"].take(
-            "submit_outcome", job_outcome, outcome_file_ref
+        return _take_port_script(
+            "JobControlPort.submit_outcome",
+            self._scripts["submit_outcome"],
+            job_outcome,
+            outcome_file_ref,
         )
 
     def report_execution_infrastructure_failure(
@@ -1848,8 +2347,9 @@ class StubJobControl:
     ) -> FailureReceipt:
         args = (job_id, runtime_epoch, failure_id, _clone(execution_failure))
         self.calls.append(("report_execution_infrastructure_failure", args))
-        return self._scripts["report_execution_infrastructure_failure"].take(
-            "report_execution_infrastructure_failure",
+        return _take_port_script(
+            "JobControlPort.report_execution_infrastructure_failure",
+            self._scripts["report_execution_infrastructure_failure"],
             job_id,
             runtime_epoch,
             failure_id,
@@ -1863,8 +2363,10 @@ class StubJobControl:
     ) -> RecoveryReceipt:
         args = (current_runtime_epoch, recovery_id)
         self.calls.append(("interrupt_previous_epoch", args))
-        return self._scripts["interrupt_previous_epoch"].take(
-            "interrupt_previous_epoch", *args
+        return _take_port_script(
+            "JobControlPort.interrupt_previous_epoch",
+            self._scripts["interrupt_previous_epoch"],
+            *args,
         )
 
 
@@ -1886,15 +2388,24 @@ class StubStateAdmin:
 
     def readiness(self) -> ReadinessReport:
         self.calls.append("readiness")
-        return self._scripts["readiness"].take("readiness")
+        return _take_port_script(
+            "StateAdminPort.readiness",
+            self._scripts["readiness"],
+        )
 
     def validate_state(self) -> ValidationReport:
         self.calls.append("validate_state")
-        return self._scripts["validate_state"].take("validate_state")
+        return _take_port_script(
+            "StateAdminPort.validate_state",
+            self._scripts["validate_state"],
+        )
 
     def export_state(self) -> bytes:
         self.calls.append("export_state")
-        return self._scripts["export_state"].take("export_state")
+        return _take_port_script(
+            "StateAdminPort.export_state",
+            self._scripts["export_state"],
+        )
 
 
 class CountingLogparseAdapter:

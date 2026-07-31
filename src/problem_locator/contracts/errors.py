@@ -10,7 +10,13 @@ from typing import Mapping
 from pydantic import TypeAdapter
 
 from .enums import ErrorCode, ExecutionStage
-from .models import ApplicationError, ApplicationErrorDetail, ExecutionFailure, OpaqueId
+from .models import (
+    ApplicationError,
+    ApplicationErrorDetail,
+    ExecutionFailure,
+    OpaqueId,
+    UNTRUSTED_OUTCOME_REJECTION_CODES,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -149,6 +155,201 @@ ERROR_SPECS: Mapping[ErrorCode, ErrorSpec] = MappingProxyType(
 )
 ERROR_CODES = tuple(code.value for code in ErrorCode)
 
+COORDINATOR_PLAN_ERROR_CODES = frozenset(
+    {
+        ErrorCode.INVALID_CASE_STATE,
+        ErrorCode.ACTIVE_JOB_EXISTS,
+        ErrorCode.NEW_CASE_REQUIRED,
+        ErrorCode.VALIDATION_ERROR,
+    }
+)
+
+# Method-qualified, immutable modeled failure vocabulary.  Normal negative
+# receipts/reports (readiness, validation, claim, Outcome disposition and
+# recovery replay) remain on their declared success return channel and are not
+# duplicated here.
+PORT_ERROR_CODES: Mapping[str, frozenset[ErrorCode]] = MappingProxyType(
+    {
+        "ApplicationCommandPort.execute": frozenset(
+            {
+                ErrorCode.VALIDATION_ERROR,
+                ErrorCode.CASE_NOT_FOUND,
+                ErrorCode.ATTACHMENT_NOT_FOUND,
+                ErrorCode.INVALID_CASE_STATE,
+                ErrorCode.ACTIVE_JOB_EXISTS,
+                ErrorCode.NEW_CASE_REQUIRED,
+                ErrorCode.REVISION_CONFLICT,
+                ErrorCode.IDEMPOTENCY_CONFLICT,
+                ErrorCode.RESOURCE_CASE_MISMATCH,
+                ErrorCode.ATTACHMENT_NOT_READY,
+                ErrorCode.UPLOAD_INCOMPLETE,
+                ErrorCode.RESOURCE_HASH_MISMATCH,
+                ErrorCode.RESOURCE_SIZE_MISMATCH,
+                ErrorCode.RESOURCE_LIMIT_EXCEEDED,
+                ErrorCode.EXECUTION_RECORD_FAILED,
+                ErrorCode.STATE_WRITE_FAILED,
+                ErrorCode.RESOURCE_PUBLISH_FAILED,
+            }
+        ),
+        "ApplicationQueryPort.get_case": frozenset(
+            {
+                ErrorCode.CASE_NOT_FOUND,
+                ErrorCode.JOB_NOT_FOUND,
+                ErrorCode.JOB_CASE_MISMATCH,
+            }
+        ),
+        "ApplicationQueryPort.list_artifacts": frozenset(
+            {ErrorCode.CASE_NOT_FOUND}
+        ),
+        "ApplicationQueryPort.open_artifact": frozenset(
+            {
+                ErrorCode.CASE_NOT_FOUND,
+                ErrorCode.ARTIFACT_NOT_FOUND,
+                ErrorCode.RESOURCE_NOT_FOUND,
+                ErrorCode.RESOURCE_HASH_MISMATCH,
+                ErrorCode.RESOURCE_SIZE_MISMATCH,
+            }
+        ),
+        "StateAdminPort.readiness": frozenset(),
+        "StateAdminPort.validate_state": frozenset(),
+        "StateAdminPort.export_state": frozenset(
+            {
+                ErrorCode.INSTANCE_LOCKED,
+                ErrorCode.STATE_CORRUPT,
+                ErrorCode.STATE_SCHEMA_UNSUPPORTED,
+                ErrorCode.RESOURCE_NOT_FOUND,
+                ErrorCode.RESOURCE_HASH_MISMATCH,
+                ErrorCode.RESOURCE_SIZE_MISMATCH,
+            }
+        ),
+        "StateRepository.read_case": frozenset({ErrorCode.CASE_NOT_FOUND}),
+        "StateRepository.read_job": frozenset({ErrorCode.JOB_NOT_FOUND}),
+        "StateRepository.read_artifact": frozenset(
+            {ErrorCode.ARTIFACT_NOT_FOUND}
+        ),
+        "StateRepository.read_snapshot": frozenset(
+            {ErrorCode.STATE_CORRUPT, ErrorCode.STATE_SCHEMA_UNSUPPORTED}
+        ),
+        "StateRepository.commit": frozenset(
+            {ErrorCode.REVISION_CONFLICT, ErrorCode.STATE_WRITE_FAILED}
+        ),
+        "StateRepository.validate_all": frozenset(),
+        "StateRepository.export_snapshot": frozenset(
+            {ErrorCode.STATE_CORRUPT, ErrorCode.STATE_SCHEMA_UNSUPPORTED}
+        ),
+        "ResourceStore.stage_file": frozenset(
+            {
+                ErrorCode.RESOURCE_SIZE_MISMATCH,
+                ErrorCode.RESOURCE_HASH_MISMATCH,
+                ErrorCode.RESOURCE_LIMIT_EXCEEDED,
+                ErrorCode.PATH_VIOLATION,
+                ErrorCode.RESOURCE_STAGE_FAILED,
+            }
+        ),
+        "ResourceStore.stage_tree": frozenset(
+            {
+                ErrorCode.RESOURCE_HASH_MISMATCH,
+                ErrorCode.RESOURCE_LIMIT_EXCEEDED,
+                ErrorCode.PATH_VIOLATION,
+                ErrorCode.RESOURCE_STAGE_FAILED,
+            }
+        ),
+        "ResourceStore.stage_attachment": frozenset(
+            {
+                ErrorCode.VALIDATION_ERROR,
+                ErrorCode.UPLOAD_INCOMPLETE,
+                ErrorCode.RESOURCE_SIZE_MISMATCH,
+                ErrorCode.RESOURCE_HASH_MISMATCH,
+                ErrorCode.RESOURCE_LIMIT_EXCEEDED,
+            }
+        ),
+        "ResourceStore.validate_staged": frozenset(
+            {ErrorCode.RESOURCE_NOT_FOUND, ErrorCode.RESOURCE_HASH_MISMATCH}
+        ),
+        "ResourceStore.plan_target": frozenset({ErrorCode.VALIDATION_ERROR}),
+        "ResourceStore.publish": frozenset(
+            {
+                ErrorCode.RESOURCE_NOT_FOUND,
+                ErrorCode.RESOURCE_HASH_MISMATCH,
+                ErrorCode.PATH_VIOLATION,
+                ErrorCode.RESOURCE_PUBLISH_FAILED,
+            }
+        ),
+        "ResourceStore.validate_case_capacity": frozenset(
+            {
+                ErrorCode.RESOURCE_LIMIT_EXCEEDED,
+                ErrorCode.RESOURCE_HASH_MISMATCH,
+                ErrorCode.PATH_VIOLATION,
+            }
+        ),
+        "ResourceStore.open_read": frozenset(
+            {
+                ErrorCode.RESOURCE_NOT_FOUND,
+                ErrorCode.RESOURCE_SIZE_MISMATCH,
+                ErrorCode.RESOURCE_HASH_MISMATCH,
+                ErrorCode.PATH_VIOLATION,
+            }
+        ),
+        "ResourceStore.materialize_read_only": frozenset(
+            {
+                ErrorCode.RESOURCE_NOT_FOUND,
+                ErrorCode.RESOURCE_SIZE_MISMATCH,
+                ErrorCode.RESOURCE_HASH_MISMATCH,
+                ErrorCode.PATH_VIOLATION,
+            }
+        ),
+        "ResourceStore.discard": frozenset(),
+        "ExecutionRecordStore.publish_job": frozenset(
+            {ErrorCode.IDEMPOTENCY_CONFLICT, ErrorCode.EXECUTION_RECORD_FAILED}
+        ),
+        "ExecutionRecordStore.publish_outcome_bytes": frozenset(
+            {ErrorCode.IDEMPOTENCY_CONFLICT, ErrorCode.EXECUTION_RECORD_FAILED}
+        ),
+        "ExecutionRecordStore.read_published_job": frozenset(
+            {ErrorCode.EXECUTION_RECORD_FAILED}
+        ),
+        "ExecutionRecordStore.read_published_outcome": frozenset(
+            {ErrorCode.EXECUTION_RECORD_FAILED}
+        ),
+        "ExecutionRecordStore.open_log_sinks": frozenset(
+            {ErrorCode.EXECUTION_RECORD_FAILED}
+        ),
+        "JobControlPort.claim_job": frozenset(
+            {
+                ErrorCode.JOB_NOT_FOUND,
+                ErrorCode.CLAIM_REJECTED,
+                ErrorCode.REVISION_CONFLICT,
+                ErrorCode.STATE_WRITE_FAILED,
+            }
+        ),
+        "JobControlPort.submit_outcome": frozenset(
+            {
+                ErrorCode.JOB_NOT_FOUND,
+                ErrorCode.IDEMPOTENCY_CONFLICT,
+                ErrorCode.RESOURCE_PUBLISH_FAILED,
+                ErrorCode.STATE_WRITE_FAILED,
+                ErrorCode.REVISION_CONFLICT,
+            }
+        ),
+        "JobControlPort.report_execution_infrastructure_failure": frozenset(
+            {
+                ErrorCode.VALIDATION_ERROR,
+                ErrorCode.JOB_NOT_FOUND,
+                ErrorCode.IDEMPOTENCY_CONFLICT,
+                ErrorCode.REVISION_CONFLICT,
+                ErrorCode.STATE_WRITE_FAILED,
+            }
+        ),
+        "JobControlPort.interrupt_previous_epoch": frozenset(
+            {
+                ErrorCode.IDEMPOTENCY_CONFLICT,
+                ErrorCode.REVISION_CONFLICT,
+                ErrorCode.STATE_WRITE_FAILED,
+            }
+        ),
+    }
+)
+
 CLI_EXIT_SUCCESS = 0
 CLI_EXIT_REQUEST_OR_STATE_CONFLICT = 2
 CLI_EXIT_CONFIG_OR_STATE_CORRUPT = 3
@@ -228,6 +429,50 @@ def deterministic_outcome_failure(
     )
 
 
+class ApplicationPortError(Exception):
+    """The sole typed failure channel for frozen application-facing ports."""
+
+    __slots__ = ("_error",)
+
+    def __init__(self, error: ApplicationError) -> None:
+        if not isinstance(error, ApplicationError):
+            raise TypeError("error must be an ApplicationError")
+        super().__init__()
+        object.__setattr__(self, "_error", error)
+
+    @property
+    def error(self) -> ApplicationError:
+        return self._error
+
+    def __str__(self) -> str:
+        return self._error.message
+
+class LogparseBrokerError(Exception):
+    """Typed broker-open failure carrying only the frozen asset failure DTO."""
+
+    __slots__ = ("_failure",)
+
+    def __init__(self, failure: ExecutionFailure) -> None:
+        if not isinstance(failure, ExecutionFailure):
+            raise TypeError("failure must be an ExecutionFailure")
+        if failure.stage is not ExecutionStage.ASSET_RESOLUTION:
+            raise ValueError("LogparseBrokerError stage must be ASSET_RESOLUTION")
+        if failure.code is not ErrorCode.ASSET_VERSION_UNAVAILABLE:
+            raise ValueError(
+                "LogparseBrokerError code must be ASSET_VERSION_UNAVAILABLE"
+            )
+        if failure.retryable:
+            raise ValueError("LogparseBrokerError failure must not be retryable")
+        super().__init__()
+        object.__setattr__(self, "_failure", failure)
+
+    @property
+    def failure(self) -> ExecutionFailure:
+        return self._failure
+
+    def __str__(self) -> str:
+        return self._failure.message
+
 class RuntimeInfrastructureError(Exception):
     """The sole typed exception raised when execution records cannot publish."""
 
@@ -247,6 +492,7 @@ class RuntimeInfrastructureError(Exception):
 
 __all__ = [
     "APPLICATION_ERROR_RETRYABLE_CODES",
+    "ApplicationPortError",
     "ApplicationError",
     "ApplicationErrorDetail",
     "CLI_EXIT_CONFIG_OR_STATE_CORRUPT",
@@ -257,6 +503,7 @@ __all__ = [
     "CLI_CONFIG_OR_STATE_CORRUPT_CODES",
     "CLI_REQUEST_OR_STATE_CONFLICT_CODES",
     "CLI_RUNTIME_FAILURE_CODES",
+    "COORDINATOR_PLAN_ERROR_CODES",
     "DETERMINISTIC_OUTCOME_FAILURE_SPECS",
     "DeterministicFailureSpec",
     "ERROR_CODES",
@@ -265,6 +512,9 @@ __all__ = [
     "ErrorCode",
     "ErrorSpec",
     "ExecutionFailure",
+    "LogparseBrokerError",
+    "PORT_ERROR_CODES",
     "RuntimeInfrastructureError",
+    "UNTRUSTED_OUTCOME_REJECTION_CODES",
     "deterministic_outcome_failure",
 ]

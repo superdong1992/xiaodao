@@ -9,6 +9,7 @@ from .enums import (
     ArtifactKind,
     AttachmentStatus,
     CandidateStatus,
+    ErrorCode,
     EvidenceSourceType,
     FieldUpdateAction,
     OutcomeDisposition,
@@ -22,6 +23,7 @@ from .models import (
     AgentArtifactProposalDraft,
     AgentEvidenceProposalDraft,
     AgentJobOutcome,
+    ApplicationError,
     ArtifactProposal,
     AssetUnavailableTriggerPayload,
     CancelCaseTriggerPayload,
@@ -32,6 +34,7 @@ from .models import (
     CaseFailureUpdate,
     CaseSnapshot,
     CompletionCriterionDraftMapping,
+    CoordinatorPlanResult,
     CreateCaseTriggerPayload,
     DiagnosisItemChange,
     DiagnosisItemDraft,
@@ -113,6 +116,42 @@ def apply_problem_spec_patch(
     payload.update(updates)
     payload["revision"] = current.revision + 1
     return ProblemSpec.model_validate(payload), True
+
+
+def validate_coordinator_plan_result(
+    trigger: ValidatedTrigger,
+    result: CoordinatorPlanResult,
+) -> CoordinatorPlanResult:
+    """Validate the frozen non-exception Coordinator decision channel.
+
+    A stable-target change is already a validated application fact when it
+    reaches the Coordinator, so it has exactly one legal decision:
+    ``NEW_CASE_REQUIRED`` with no TransitionPlan or mutation side channel.
+    """
+
+    from .errors import COORDINATOR_PLAN_ERROR_CODES
+
+    if isinstance(result, ApplicationError):
+        if result.code not in COORDINATOR_PLAN_ERROR_CODES or result.retryable:
+            raise ValueError(
+                "Coordinator ApplicationError must use a frozen non-retryable code"
+            )
+    elif not isinstance(result, TransitionPlan):
+        raise TypeError("Coordinator result must be TransitionPlan or ApplicationError")
+
+    payload = getattr(trigger, "payload", None)
+    if (
+        isinstance(payload, SubmitSupplementTriggerPayload)
+        and payload.stable_target_changed
+        and (
+            not isinstance(result, ApplicationError)
+            or result.code is not ErrorCode.NEW_CASE_REQUIRED
+        )
+    ):
+        raise ValueError(
+            "stable_target_changed requires NEW_CASE_REQUIRED without a plan"
+        )
+    return result
 
 
 def _payload_evidence_bindings(payload: OutcomePayload | None) -> list[EvidenceBinding]:
@@ -709,6 +748,7 @@ __all__ = [
     "CaseFailureUpdate",
     "CaseSnapshot",
     "CompletionCriterionDraftMapping",
+    "CoordinatorPlanResult",
     "CreateCaseTriggerPayload",
     "DiagnosisItemChange",
     "DiagnosisItemDraft",
@@ -746,6 +786,7 @@ __all__ = [
     "ValidatedTrigger",
     "apply_problem_spec_patch",
     "validate_logparse_claim_for_job",
+    "validate_coordinator_plan_result",
     "validate_outcome_for_job",
     "validate_outcome_resources_for_job",
     "validate_transition_plan_for_outcome",

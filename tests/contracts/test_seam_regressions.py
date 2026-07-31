@@ -807,6 +807,7 @@ def test_stream_and_sink_contracts_reject_nonconforming_capabilities_and_limit_d
     upload = UploadAttachmentContent(
         idempotency_key=attachment_id,
         attachment_id=attachment_id,
+        expected_content_type="application/octet-stream",
         expected_size=7,
         expected_sha256=hashlib.sha256(b"payload").hexdigest(),
         byte_stream=stream,
@@ -816,6 +817,7 @@ def test_stream_and_sink_contracts_reject_nonconforming_capabilities_and_limit_d
         UploadAttachmentContent(
             idempotency_key=attachment_id,
             attachment_id=attachment_id,
+            expected_content_type="application/octet-stream",
             expected_size=7,
             expected_sha256=hashlib.sha256(b"payload").hexdigest(),
             byte_stream=object(),

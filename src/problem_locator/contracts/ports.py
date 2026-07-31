@@ -26,7 +26,7 @@ from .commands import (
     OutcomeReceipt,
     RecoveryReceipt,
 )
-from .enums import CancellationReason
+from .enums import CancellationReason, ResourceKind, ResourceType
 from .errors import ExecutionFailure
 from .models import (
     Artifact,
@@ -41,6 +41,7 @@ from .models import (
     ExecutionLogSinks,
     Job,
     MaterializedPath,
+    NonNegativeInt,
     OpaqueId,
     PlannedResourceTarget,
     PublishedJobReceipt,
@@ -49,6 +50,7 @@ from .models import (
     ResourceRef,
     RuntimeBindings,
     RuntimeExecutionReceipt,
+    Sha256,
     StagedResourceRef,
     StateFile,
     StateMutation,
@@ -57,7 +59,12 @@ from .models import (
     WorkspaceInputManifest,
     UtcTimestamp,
 )
-from .outcomes import CaseSnapshot, JobOutcome, TransitionPlan, ValidatedTrigger
+from .outcomes import (
+    CaseSnapshot,
+    CoordinatorPlanResult,
+    JobOutcome,
+    ValidatedTrigger,
+)
 
 
 @runtime_checkable
@@ -107,6 +114,8 @@ class LogparseBrokerSession(Protocol):
 
     def agent_environment(self) -> dict[str, str]: ...
 
+    def parse_request_bytes(self) -> bytes | None: ...
+
     def close(self) -> None: ...
 
 
@@ -135,7 +144,7 @@ class Coordinator(Protocol):
         self,
         snapshot: CaseSnapshot,
         trigger: ValidatedTrigger,
-    ) -> TransitionPlan: ...
+    ) -> CoordinatorPlanResult: ...
 
 
 @runtime_checkable
@@ -202,6 +211,18 @@ class ResourceStore(Protocol):
         expected_size: int | None = None,
         expected_sha256: str | None = None,
     ) -> AttachmentStagedRef: ...
+
+    def validate_staged(self, staged_ref: StagedResourceRef) -> None: ...
+
+    def plan_target(
+        self,
+        case_id: OpaqueId,
+        resource_type: ResourceType,
+        resource_id: OpaqueId,
+        resource_kind: ResourceKind,
+        size: NonNegativeInt,
+        sha256: Sha256,
+    ) -> PlannedResourceTarget: ...
 
     def publish(
         self,

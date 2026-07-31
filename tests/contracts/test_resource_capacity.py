@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import hashlib
 import threading
+import uuid
 
 import pytest
 
-from problem_locator.contracts.enums import ResourceKind
+from problem_locator.contracts.enums import ErrorCode, ResourceKind, ResourceType
+from problem_locator.contracts.errors import ApplicationPortError
 from problem_locator.contracts.limits import MAX_CASE_RESOURCE_BYTES
 from problem_locator.contracts.models import PlannedResourceTarget
 
@@ -25,8 +27,14 @@ def _target(
     size: int,
     sha256: str,
 ) -> PlannedResourceTarget:
+    resource_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"resource-target:{name}"))
     return PlannedResourceTarget(
-        final_storage_key=f"resources/cases/{CASE_ID}/artifacts/{name}/payload",
+        case_id=CASE_ID,
+        resource_type=ResourceType.ARTIFACT,
+        resource_id=resource_id,
+        final_storage_key=(
+            f"resources/cases/{CASE_ID}/artifacts/{resource_id}/payload"
+        ),
         resource_kind=ResourceKind.FILE,
         size=size,
         sha256=sha256,
@@ -106,11 +114,12 @@ def test_same_key_replay_has_zero_delta_and_different_key_same_hash_counts_again
     assert two_key_usage.total_bytes == 200
 
     conflicting_replay = original.model_copy(update={"sha256": "f" * 64})
-    with pytest.raises(ValueError, match="conflicts"):
+    with pytest.raises(ApplicationPortError) as raised:
         _with_lease(
             guard,
             lambda: store.validate_case_capacity(CASE_ID, [conflicting_replay]),
         )
+    assert raised.value.error.code is ErrorCode.RESOURCE_HASH_MISMATCH
     assert store.published_storage_keys == (original.final_storage_key,)
 
 
@@ -141,11 +150,12 @@ def test_over_limit_batch_is_rejected_before_any_partial_publish() -> None:
 
     lease = guard.acquire()
     try:
-        with pytest.raises(ValueError, match="capacity"):
+        with pytest.raises(ApplicationPortError) as raised:
             store.validate_case_capacity(
                 CASE_ID,
                 [first_target, second_target],
             )
+        assert raised.value.error.code is ErrorCode.RESOURCE_LIMIT_EXCEEDED
         assert store.publish_calls == []
         assert store.published_storage_keys == (existing.final_storage_key,)
         assert store.staged_resource_count == 2

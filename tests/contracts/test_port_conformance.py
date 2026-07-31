@@ -12,7 +12,8 @@ from pydantic import TypeAdapter
 
 from problem_locator.contracts import SCHEMA_MODELS
 from problem_locator.contracts import ports
-from problem_locator.contracts.enums import CancellationReason
+from problem_locator.contracts.enums import CancellationReason, ErrorCode
+from problem_locator.contracts.errors import ApplicationPortError
 from problem_locator.contracts.limits import JOB_STDOUT_STDERR_BYTES
 from problem_locator.contracts.models import DiagnosisState
 from problem_locator.contracts.serialization import canonical_json_bytes
@@ -136,12 +137,13 @@ def test_attachment_guard_lease_is_capability_bound_and_idempotent() -> None:
     lease.release()
     lease.release()
     assert lease.is_released()
-    with pytest.raises(ValueError, match="released"):
+    with pytest.raises(ApplicationPortError) as raised:
         store.stage_attachment(
             attachment_id,
             lease,
             fakes.InMemoryBinaryStream(b"archive"),
         )
+    assert raised.value.error.code is ErrorCode.UPLOAD_INCOMPLETE
 
 
 def test_attachment_guard_serializes_the_same_id_but_not_other_ids() -> None:
@@ -196,8 +198,9 @@ def test_resource_store_file_round_trip_preserves_exact_bytes() -> None:
     opened = store.open_read(published)
     assert opened.read(len(payload) + 1) == payload
     assert opened.read(1) == b""
-    with pytest.raises(ValueError):
+    with pytest.raises(ApplicationPortError) as raised:
         store.publish(staged, "../escape")
+    assert raised.value.error.code is ErrorCode.PATH_VIOLATION
 
 
 def test_dispatcher_deduplicates_submit_and_cancel() -> None:

@@ -22,6 +22,7 @@ from problem_locator.contracts.enums import (
     ErrorCode,
     OutcomeDisposition,
     ResourceKind,
+    ResourceType,
 )
 from problem_locator.contracts.limits import MAX_ATTACHMENT_BYTES
 from problem_locator.contracts.models import (
@@ -460,14 +461,13 @@ class ExecutionReplayScenario:
     def _resource_target(self, artifact_id: str) -> PlannedResourceTarget:
         proposal = self.outcome.proposed_artifacts[0]
         assert proposal.artifact_kind is ArtifactKind.USER_RESULT
-        return PlannedResourceTarget(
-            final_storage_key=(
-                f"resources/cases/{self.outcome.case_id}/"
-                f"artifacts/{artifact_id}/payload"
-            ),
-            resource_kind=proposal.resource_kind,
-            size=proposal.size,
-            sha256=proposal.sha256,
+        return self.resources.plan_target(
+            self.outcome.case_id,
+            ResourceType.ARTIFACT,
+            artifact_id,
+            proposal.resource_kind,
+            proposal.size,
+            proposal.sha256,
         )
 
     @staticmethod
@@ -626,14 +626,13 @@ class UploadScenario:
         return self.generation
 
     def _target(self, sha256: str) -> PlannedResourceTarget:
-        return PlannedResourceTarget(
-            final_storage_key=(
-                f"resources/cases/{CASE_ID}/attachments/"
-                f"{self.attachment_id}/payload"
-            ),
-            resource_kind=ResourceKind.FILE,
-            size=self.declared_size,
-            sha256=sha256,
+        return self.resources.plan_target(
+            CASE_ID,
+            ResourceType.ATTACHMENT,
+            self.attachment_id,
+            ResourceKind.FILE,
+            self.declared_size,
+            sha256,
         )
 
     def publish_then_fail_ready_commit(

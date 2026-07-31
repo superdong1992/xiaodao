@@ -91,6 +91,7 @@ def test_upload_hash_never_serializes_or_consumes_the_transport_stream() -> None
     base = UploadAttachmentContent(
         idempotency_key=ATTACHMENT_ID,
         attachment_id=ATTACHMENT_ID,
+        expected_content_type="application/octet-stream",
         expected_size=len(PAYLOAD),
         expected_sha256=PAYLOAD_SHA256,
         byte_stream=first_stream,
@@ -98,6 +99,7 @@ def test_upload_hash_never_serializes_or_consumes_the_transport_stream() -> None
     replay = base.model_copy(update={"byte_stream": second_stream})
     assert business_request_preimage(base) == {
         "attachment_id": ATTACHMENT_ID,
+        "expected_content_type": "application/octet-stream",
         "expected_sha256": PAYLOAD_SHA256,
         "expected_size": len(PAYLOAD),
         "idempotency_key": ATTACHMENT_ID,
