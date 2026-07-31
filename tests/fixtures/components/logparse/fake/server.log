@@ -1,0 +1,2 @@
+2026-07-31T00:00:00.100Z server=inventory-synthetic method=ReserveStock order_id=synthetic-order-0001 request accepted
+2026-07-31T00:00:02.900Z server=inventory-synthetic order_id=synthetic-order-0001 connection pool wait 2800ms
