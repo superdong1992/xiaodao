@@ -1,0 +1,213 @@
+# Problem Locator V1
+
+Problem Locator is a single-instance diagnosis service. It accepts a structured
+problem, gathers facts and attachments, runs pinned routing/diagnosis/review
+jobs, and publishes a reviewed `USER_RESULT` artifact. V1 uses a durable local
+JSON state file and filesystem resources; all business writes go through the
+application service and its repository ports.
+
+## Requirements and installation
+
+- CPython 3.12 (the package requires `>=3.12,<3.13`)
+- `uv` and the checked-in `uv.lock`
+- a pinned Logparse checkout, config file, and Python launcher
+- a Claude-compatible command for real Agent jobs
+
+Install the exact locked runtime and development dependencies:
+
+```sh
+uv sync --frozen --all-groups
+uv lock --check
+```
+
+Do not upgrade the locked MCP, HTTP, or storage-facing dependencies as part of
+an operational install.
+
+## Configuration
+
+Copy `.env.example` to a private file and replace every placeholder with an
+absolute path. An explicit `--env-file` is parsed as UTF-8 dotenv data. Values
+already present in the process environment take precedence over the file.
+
+| Variable | Required | Default | Meaning |
+|---|---:|---|---|
+| `DATA_ROOT` | yes | — | Exclusive durable state/resources/jobs root |
+| `PUBLIC_BASE_URL` | yes | — | External HTTP(S) base URL, without query or fragment |
+| `SKILL_DIR` | yes | — | Directory containing pinned diagnosis skills |
+| `LOGPARSE_REPO` | yes | — | Pinned Logparse Git checkout |
+| `LOGPARSE_CONFIG_PATH` | yes | — | Logparse configuration inside that checkout |
+| `BIND_HOST` | no | `127.0.0.1` | Uvicorn bind host |
+| `PORT` | no | `8000` | Uvicorn port |
+| `CLAUDE_COMMAND` | no | `claude` | Agent command parsed as an argv template |
+| `LOGPARSE_PYTHON` | no | current Python | Lexical Python launcher for Logparse |
+
+Runtime limits are frozen contract constants, not configuration. V1 rejects
+`JOB_CONCURRENCY` and unknown limit/max/retention overrides so an operator
+cannot believe an ineffective limit was applied. Never configure or persist
+`PROBLEM_LOCATOR_LOGPARSE_ENDPOINT` or `PROBLEM_LOCATOR_LOGPARSE_TOKEN`; those
+capabilities are created per Job and are removed when the broker session ends.
+
+## Run the service
+
+Validate configuration and start exactly one worker:
+
+```sh
+uv run python -m problem_locator serve --env-file /absolute/path/to/service.env
+```
+
+V1 permits one service process and one Uvicorn worker for a `DATA_ROOT`. A
+second process fails the instance-lock readiness check. Do not place a
+multi-worker process manager in front of the same root.
+
+Process interfaces:
+
+- MCP transport: `/mcp`
+- liveness: `GET /live`
+- readiness: `GET /ready`
+- prepare attachment: `POST /api/v1/cases/{case_id}/attachments`
+- upload prepared bytes: `PUT /api/v1/attachments/{attachment_id}/content`
+- download a public artifact: `GET /api/v1/artifacts/{artifact_id}/content`
+
+The seven Remote MCP tools are:
+
+- `problem_locator_create_case`
+- `problem_locator_prepare_attachment`
+- `problem_locator_submit_supplement`
+- `problem_locator_get_case`
+- `problem_locator_resume_case`
+- `problem_locator_cancel_case`
+- `problem_locator_list_artifacts`
+
+The bundled `.claude/skills/problem-locator-client` skill documents safe
+request IDs, revision handling, upload headers, and artifact hash checks. File
+bytes travel only over HTTP; they are never embedded in MCP messages.
+
+`/live` indicates that the HTTP process is serving. `/ready` additionally
+checks configuration, the instance lock, state validity, data directories, and
+startup recovery. During recovery, or after a fatal state/worker fault,
+liveness can remain true while readiness is false.
+
+## Attachment and result behavior
+
+Preparing an attachment creates metadata and an upload descriptor. Uploading
+the bytes verifies their exact size and SHA-256 and moves the attachment to
+`READY`; upload alone never advances a Case. The caller must explicitly submit
+the READY attachment as a supplement.
+
+`WorkspaceAttachmentInput.filename_suffix` is required but nullable. Archive
+suffix and content-type validation uses the frozen public contract helpers;
+paths, uppercase aliases, and mismatched suffixes are rejected.
+
+Only downloadable public artifacts are listed by default. A reviewed
+`USER_RESULT` can be downloaded and must match its advertised byte count and
+SHA-256. Internal `LOGPARSE_RUN` directories are durable inputs for later Jobs
+but are never downloadable.
+
+## Startup recovery and retry semantics
+
+On each start the scheduler creates a new runtime epoch and completes recovery
+before it accepts new claims:
+
+1. Replay every durable, finalized but unconfirmed Job Outcome byte-for-byte.
+2. Only after replay, mark an old `RUNNING` Job with no finalized Outcome as
+   `INTERRUPTED`.
+3. Redispatch already-persisted `PENDING` Jobs.
+
+Outcome submission retries reuse the same finalized receipt and never rerun
+the Agent. Asset/configuration errors and typed state-read errors park the
+worker and fail readiness. Recovered Jobs retain every frozen runtime binding;
+the current Catalog cannot replace them with a newer version. An interrupted
+REVIEW resumes as REVIEW, never as DIAGNOSE.
+
+A command whose business mutation committed but whose post-commit Case reread
+failed returns the durable receipt with `case_view=null`. Treat that response
+as persisted success and query the Case again; do not create a second logical
+request.
+
+## Validate, export, back up, and restore
+
+These administration commands acquire the same exclusive instance lock. Run
+them only while the service for that `DATA_ROOT` is stopped:
+
+```sh
+uv run python -m problem_locator validate-state \
+  --data-root /absolute/path/to/problem-locator-data
+
+uv run python -m problem_locator export-state \
+  --data-root /absolute/path/to/problem-locator-data \
+  --output /absolute/path/outside-data-root/state-export.json
+```
+
+`validate-state` emits a canonical `ValidationReport`. `export-state` writes a
+canonical `StateExport` containing one state generation, complete object
+counts, and a sorted resource size/hash inventory. The output must be outside
+`DATA_ROOT` and is an audit/migration artifact, not a resource backup.
+
+For a recoverable backup:
+
+1. Stop the service and wait for shutdown to finish.
+2. Run `validate-state` and `export-state`.
+3. Copy the complete `DATA_ROOT` tree atomically enough to preserve
+   `state.json`, `jobs/**`, and `resources/**` from the same stopped point.
+4. Keep the export beside the backup for count/hash reconciliation.
+
+To restore, keep the damaged root read-only, copy a complete known-good backup
+to a new absolute root, run `validate-state`, compare its export counts and
+hashes, then start the service against the new root. Do not hand-edit
+`state.json`, discard a finalized outbox file, or silently fall back to
+`state.json.prev`.
+
+The r3 state schema is intentionally incompatible with pre-release r2 data.
+Old data may only be rebuilt or migrated offline into a fresh r3 installation;
+the service contains no in-place r2 compatibility path.
+
+## PostgreSQL migration boundary
+
+V1 does not ship PostgreSQL, an ORM, dual writes, or a distributed lock. Start
+an offline PostgreSQL migration design when any of these becomes true:
+
+- a second service instance or high availability is required;
+- `state.json` approaches 16 MiB;
+- retained history approaches 500 Cases;
+- state write latency is materially affecting operation.
+
+The migration must stop writes, export one canonical generation, import
+through equivalent repository/resource records, reconcile every object count
+and resource hash, and keep the original JSON root read-only until acceptance.
+Domain/application/runtime code depends on frozen ports rather than the JSON
+adapter so this remains an offline adapter replacement, not a business-model
+fork.
+
+## Security and known constraints
+
+- V1 is intended for a controlled network with trusted users, pinned Skills,
+  and a trusted Agent command. It does not implement tenant authorization.
+- The process and Agent are not an operating-system sandbox. Run them under a
+  dedicated OS account with only the required repository/data access.
+- Secrets, raw environment values, server paths, log archive bytes, broker
+  tokens, and internal execution logs must not appear in MCP/HTTP responses.
+- Logparse is fingerprinted at startup. The first eligible diagnosis Job may
+  parse once; continuation Jobs consume the persisted `LOGPARSE_RUN` and must
+  not unpack or parse the original archive again.
+- V1 has fixed concurrency `1`, fixed context/workspace/output limits, local
+  filesystem durability, and no multi-instance failover.
+- Native Windows and Linux startup validation, macOS process-tree/cancellation
+  validation, deterministic fake E2E, and real Logparse smoke are release
+  gates; test or handoff records must state which platform was actually run.
+
+## Release checks
+
+Run the full explicit test roots; a bare historical pytest configuration must
+not be assumed to include every suite:
+
+```sh
+uv run pytest tests/contracts tests/unit tests/integration tests/e2e
+uv run python -m compileall -q src tests
+uv lock --check
+git diff --check
+```
+
+Real Logparse, process-tree/cancellation, clean-environment installation,
+installed import/CLI/server smoke, fixture manifests, and Git ancestry/blob
+integrity are separate release-candidate gates and must not be reported as
+passed unless actually executed.
