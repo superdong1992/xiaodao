@@ -1,0 +1,1 @@
+{"files":[{"path":"../outside.json","purpose":"This path escapes the owned fixture root.","schema_ref":null,"sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":1}],"owner_spec":"S00","root":"tests/fixtures/contracts","schema_version":1}

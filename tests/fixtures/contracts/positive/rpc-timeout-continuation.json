@@ -1,0 +1,1 @@
+{"log_attachment_requirement":"log_archive","parameter_group_a":{"caller_service":"payment-service","problem_time":"2026-07-31T00:00:00.000Z","rpc_method":"ReserveStock","server_service":"inventory-service"},"parameter_group_b":{"order_id":"order-2026-0001"},"scenario":"rpc-timeout"}
