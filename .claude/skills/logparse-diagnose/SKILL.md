@@ -77,7 +77,11 @@ Invoke it exactly once. A failure ends this Job through the current S00 failure
 contract; do not retry parse in the same Job. Do not open, enumerate, unpack,
 scan, grep, or infer anything from the original archive.
 
-The single result file must be one JSON object. Return it, the controlled
+The single result file is always a machine-readable JSON object. On success it
+is the broker's `target_logs` object; on a nonzero broker rejection it is the
+exact public S00 `ExecutionFailure`, including `retryable`. Return that failure
+unchanged and end the Job; never infer retryability from the process exit code or
+safe stderr summary. On success, return the result, the controlled
 `parse_manifest.json` relative reference, and the proposal tree root to the
 calling Skill without rewriting lifecycle selection or target paths.
 

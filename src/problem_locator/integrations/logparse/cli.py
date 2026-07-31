@@ -13,7 +13,13 @@ import sys
 from pathlib import Path
 from urllib.parse import SplitResult, urlsplit
 
-from problem_locator.contracts import canonical_json_bytes, parse_canonical_json_bytes
+from problem_locator.contracts import (
+    ErrorCode,
+    ExecutionFailure,
+    ExecutionStage,
+    canonical_json_bytes,
+    parse_canonical_json_bytes,
+)
 
 from .paths import resolve_workspace_path, validate_proposal_io_paths
 from .requests import BrokerEnvelope, ParseTargetsRequest, TargetLogsRequest
@@ -93,7 +99,7 @@ def _invoke_broker(
     endpoint: SplitResult,
     token: str,
     envelope: BrokerEnvelope,
-) -> bytes:
+) -> tuple[bytes | None, ExecutionFailure | None]:
     body = canonical_json_bytes(envelope)
     connection = http.client.HTTPConnection(endpoint.hostname, endpoint.port)
     try:
@@ -110,12 +116,29 @@ def _invoke_broker(
         result = response.read(_MAX_RESULT_BYTES + 1)
     finally:
         connection.close()
-    if response.status != 200 or len(result) > _MAX_RESULT_BYTES:
+    if len(result) > _MAX_RESULT_BYTES:
         raise RuntimeError("logparse broker rejected the request")
+    if response.status != 200:
+        try:
+            failure = parse_canonical_json_bytes(result, ExecutionFailure)
+        except ValueError as exc:
+            raise RuntimeError("logparse broker rejected the request") from exc
+        allowed = (
+            failure.stage is ExecutionStage.ASSET_RESOLUTION
+            and failure.code is ErrorCode.ASSET_VERSION_UNAVAILABLE
+            and not failure.retryable
+        ) or (
+            failure.stage is ExecutionStage.TOOL_EXECUTE
+            and failure.code
+            in {ErrorCode.LOGPARSE_FAILED, ErrorCode.LOGPARSE_OUTPUT_INVALID}
+        )
+        if not allowed:
+            raise RuntimeError("logparse broker returned an invalid failure")
+        return None, failure
     parsed = parse_canonical_json_bytes(result)
     if not isinstance(parsed, dict):
         raise ValueError("logparse broker result must be one JSON object")
-    return result
+    return result, None
 
 
 def _atomic_write_result(target: Path, payload: bytes) -> None:
@@ -159,7 +182,11 @@ def _atomic_write_result(target: Path, payload: bytes) -> None:
                 pass
 
 
-def run(operation: str, request_path: str, result_path: str) -> None:
+def run(
+    operation: str,
+    request_path: str,
+    result_path: str,
+) -> ExecutionFailure | None:
     """Validate one fixed request and relay it to the current broker session."""
 
     validate_proposal_io_paths(request_path, result_path)
@@ -178,16 +205,27 @@ def run(operation: str, request_path: str, result_path: str) -> None:
         result_path=result_path,
         request_base64=base64.b64encode(request_bytes).decode("ascii"),
     )
-    result_bytes = _invoke_broker(endpoint, token, envelope)
+    result_bytes, failure = _invoke_broker(endpoint, token, envelope)
+    if failure is not None:
+        _atomic_write_result(result_file, canonical_json_bytes(failure))
+        return failure
+    assert result_bytes is not None
     _atomic_write_result(result_file, result_bytes)
+    return None
 
 
 def main(argv: list[str] | None = None) -> int:
     arguments = _parser().parse_args(argv)
     try:
-        run(arguments.operation, arguments.request, arguments.result)
+        failure = run(arguments.operation, arguments.request, arguments.result)
     except (OSError, ValueError, RuntimeError, http.client.HTTPException, json.JSONDecodeError):
         sys.stderr.write("problem-locator-logparse: broker request failed\n")
+        return 2
+    if failure is not None:
+        sys.stderr.write(
+            "problem-locator-logparse: "
+            f"{failure.stage.value}/{failure.code.value}\n"
+        )
         return 2
     sys.stdout.write("problem-locator-logparse: broker request completed\n")
     return 0

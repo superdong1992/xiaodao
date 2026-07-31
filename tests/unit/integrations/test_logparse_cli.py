@@ -12,7 +12,13 @@ from typing import cast
 
 import pytest
 
-from problem_locator.contracts import canonical_json_bytes
+from problem_locator.contracts import (
+    ErrorCode,
+    ExecutionFailure,
+    ExecutionStage,
+    canonical_json_bytes,
+    parse_canonical_json_bytes,
+)
 from problem_locator.integrations.logparse import cli
 from problem_locator.integrations.logparse.requests import (
     Anchor,
@@ -355,6 +361,39 @@ def test_cli_http_rejection_is_generic_and_does_not_write_a_result(
     assert captured.err == "problem-locator-logparse: broker request failed\n"
     for secret in (TOKEN, endpoint, "broker-body-secret"):
         assert secret not in captured.err
+
+
+@pytest.mark.parametrize("retryable", [False, True])
+def test_cli_preserves_the_complete_public_failure_as_the_machine_result(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    broker_server: _Server,
+    capsys: pytest.CaptureFixture[str],
+    retryable: bool,
+) -> None:
+    workspace, _payload = _prepare_workspace(tmp_path, "parse-targets")
+    monkeypatch.chdir(workspace)
+    _set_capability(monkeypatch, broker_server)
+    failure = ExecutionFailure(
+        stage=ExecutionStage.TOOL_EXECUTE,
+        code=ErrorCode.LOGPARSE_FAILED,
+        message="Logparse execution failed.",
+        retryable=retryable,
+        details=[],
+    )
+    broker_server.response_status = 422
+    broker_server.response_body = canonical_json_bytes(failure)
+
+    assert _main("parse-targets") == 2
+
+    result = workspace / RESULT_PATH
+    assert result.read_bytes() == canonical_json_bytes(failure)
+    assert parse_canonical_json_bytes(result.read_bytes(), ExecutionFailure) == failure
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == (
+        "problem-locator-logparse: TOOL_EXECUTE/LOGPARSE_FAILED\n"
+    )
 
 
 @pytest.mark.parametrize(

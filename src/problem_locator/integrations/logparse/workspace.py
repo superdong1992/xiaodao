@@ -39,7 +39,12 @@ class BoundLogparseRun:
     run: ControlledRun
 
 
-def _plain_read_only_file(path: Path, *, maximum_bytes: int | None = None) -> os.stat_result:
+def _plain_read_only_file(
+    path: Path,
+    *,
+    maximum_bytes: int | None = None,
+    allow_hardlinks: bool = False,
+) -> os.stat_result:
     try:
         metadata = path.lstat()
     except OSError as exc:
@@ -47,7 +52,7 @@ def _plain_read_only_file(path: Path, *, maximum_bytes: int | None = None) -> os
     if (
         stat.S_ISLNK(metadata.st_mode)
         or not stat.S_ISREG(metadata.st_mode)
-        or metadata.st_nlink != 1
+        or (not allow_hardlinks and metadata.st_nlink != 1)
         or metadata.st_mode & 0o222
         or (maximum_bytes is not None and metadata.st_size > maximum_bytes)
     ):
@@ -55,8 +60,8 @@ def _plain_read_only_file(path: Path, *, maximum_bytes: int | None = None) -> os
     return metadata
 
 
-def _sha256_file(path: Path) -> tuple[int, str]:
-    before = _plain_read_only_file(path)
+def _sha256_file(path: Path, *, allow_hardlinks: bool = False) -> tuple[int, str]:
+    before = _plain_read_only_file(path, allow_hardlinks=allow_hardlinks)
     digest = hashlib.sha256()
     size = 0
     with path.open("rb") as stream:
@@ -66,8 +71,8 @@ def _sha256_file(path: Path) -> tuple[int, str]:
                 break
             size += len(chunk)
             digest.update(chunk)
-    after = _plain_read_only_file(path)
-    stable = ("st_dev", "st_ino", "st_mode", "st_size", "st_mtime_ns")
+    after = _plain_read_only_file(path, allow_hardlinks=allow_hardlinks)
+    stable = ("st_dev", "st_ino", "st_mode", "st_nlink", "st_size", "st_mtime_ns")
     if any(getattr(before, field) != getattr(after, field) for field in stable):
         raise ValueError("Workspace input changed while it was verified")
     return size, digest.hexdigest()
@@ -139,7 +144,10 @@ def bind_attachment(
         raise ValueError("parse request attachment is not fixed by this Workspace manifest")
     entry = matches[0]
     path = resolve_workspace_path(workspace_root, entry.relative_path, must_exist=True)
-    size, digest = _sha256_file(path)
+    # S02 may materialize immutable file resources by hard link or copy.  S07
+    # never creates such a link; it only accepts the exact manifest path after
+    # revalidating read-only mode, size, hash, and read stability.
+    size, digest = _sha256_file(path, allow_hardlinks=True)
     if size != entry.size or digest != entry.sha256:
         raise ValueError("materialized Attachment differs from its frozen manifest entry")
     return BoundAttachment(entry=entry, path=path)

@@ -180,12 +180,12 @@ class SubprocessExecutor:
         stdout_reader = threading.Thread(
             target=_drain_bounded,
             args=(process.stdout, stdout_chunks, stdout_limited),
-            daemon=True,
+            daemon=False,
         )
         stderr_reader = threading.Thread(
             target=_drain_bounded,
             args=(process.stderr, stderr_chunks, stderr_limited),
-            daemon=True,
+            daemon=False,
         )
         stdout_reader.start()
         stderr_reader.start()
@@ -210,8 +210,11 @@ class SubprocessExecutor:
                 stderr_limited.set()
                 process.stdout.close()
                 process.stderr.close()
-                stdout_reader.join(timeout=1.0)
-                stderr_reader.join(timeout=1.0)
+                # The child is already reaped and both pipe descriptors are
+                # closed, so these readers must reach EOF before ownership can
+                # leave the session.
+                stdout_reader.join()
+                stderr_reader.join()
             return ProcessResult(
                 returncode=process.returncode,
                 stdout=b"".join(stdout_chunks),

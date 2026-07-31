@@ -17,6 +17,7 @@ from problem_locator.contracts import OpaqueId, UtcTimestamp
 
 _SAFE_PROPOSAL_KEY = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 _UTC_TIMESTAMP = TypeAdapter(UtcTimestamp)
+_MAX_REQUEST_BASE64_CHARS = ((2_000_000 + 2) // 3) * 4
 
 
 class _PrivateWireModel(BaseModel):
@@ -84,7 +85,10 @@ class BrokerEnvelope(_PrivateWireModel):
     operation: Literal["parse-targets", "target-logs"]
     request_path: Annotated[str, Field(min_length=1, max_length=512)]
     result_path: Annotated[str, Field(min_length=1, max_length=512)]
-    request_base64: Annotated[str, Field(min_length=1, max_length=2_000_000)]
+    request_base64: Annotated[
+        str,
+        Field(min_length=1, max_length=_MAX_REQUEST_BASE64_CHARS),
+    ]
 
 
 Request: type = ParseTargetsRequest | TargetLogsRequest

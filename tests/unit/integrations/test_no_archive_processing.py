@@ -247,7 +247,11 @@ def test_no_shell_or_search_command_can_scan_workspace_inputs() -> None:
 
 def test_only_the_controlled_executor_can_spawn_the_fixed_logparse_process() -> None:
     calls: list[_ProcessCall] = []
-    for path in sorted(SRC_ROOT.rglob("*.py")):
+    # Other slices may legitimately own unrelated subprocess adapters (for
+    # example the Agent Backend).  This invariant is intentionally scoped to
+    # S07's integration package; the raw-logparse argv scan below remains
+    # repository-wide and catches any broker bypass.
+    for path in sorted(LOGPARSE_ROOT.rglob("*.py")):
         visitor = _ProcessVisitor(path)
         visitor.visit(ast.parse(path.read_text(encoding="utf-8"), filename=str(path)))
         calls.extend(visitor.calls)
@@ -320,13 +324,21 @@ def test_raw_logparse_argv_is_owned_only_by_the_broker_adapter() -> None:
         for path, _line, _constants in owners
     ), owners
     broker_path = LOGPARSE_ROOT / "broker.py"
-    if broker_path.exists():
-        combined = set().union(*(constants for _path, _line, constants in owners))
-        assert "parse" in combined
-        assert "mech-target-logs" in combined
-        assert "--debug-expand-gz" not in combined
-        assert "--profile" not in combined
-        assert "--keep-workspace" not in combined
+    assert broker_path.is_file()
+    combined = set().union(*(constants for _path, _line, constants in owners))
+    assert "parse" in combined
+    assert "mech-target-logs" in combined
+    assert {"-c", "-o", "--product"} <= combined
+    assert {
+        "--output",
+        "--problem-time",
+        "--module",
+        "--slot",
+        "--process-name",
+    } <= combined
+    assert "--debug-expand-gz" not in combined
+    assert "--profile" not in combined
+    assert "--keep-workspace" not in combined
 
     agent_stub = (LOGPARSE_ROOT / "cli.py").read_text(encoding="utf-8")
     for raw_name in ("LOGPARSE_REPO", "LOGPARSE_CONFIG_PATH", "LOGPARSE_PYTHON"):

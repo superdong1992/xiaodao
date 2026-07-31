@@ -18,6 +18,7 @@ from problem_locator.contracts import (
 
 
 _READ_CHUNK_BYTES = 1024 * 1024
+_COMMAND_TIMEOUT_SECONDS = 10.0
 
 
 def _resolved_file(value: str | os.PathLike[str], *, executable: bool = False) -> Path:
@@ -98,8 +99,9 @@ def _git_paths(repo: Path) -> list[str]:
             stderr=subprocess.PIPE,
             check=False,
             env=environment,
+            timeout=_COMMAND_TIMEOUT_SECONDS,
         )
-    except OSError as exc:
+    except (OSError, subprocess.TimeoutExpired) as exc:
         raise ValueError("git cannot enumerate the configured logparse repository") from exc
     if completed.returncode != 0:
         raise ValueError("git cannot enumerate the configured logparse repository")
@@ -148,8 +150,9 @@ def _python_version(python: Path) -> str:
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             check=False,
+            timeout=_COMMAND_TIMEOUT_SECONDS,
         )
-    except OSError as exc:
+    except (OSError, subprocess.TimeoutExpired) as exc:
         raise ValueError("configured logparse Python cannot be executed") from exc
     if completed.returncode != 0:
         raise ValueError("configured logparse Python version check failed")
@@ -205,4 +208,18 @@ def fingerprint_logparse_asset(
     )
 
 
-__all__ = ["fingerprint_logparse_asset"]
+def resolve_logparse_configuration(
+    logparse_repo: str | os.PathLike[str],
+    logparse_config_path: str | os.PathLike[str],
+    logparse_python: str | os.PathLike[str],
+) -> tuple[Path, Path, Path]:
+    """Resolve the three service-only settings with fingerprint-equivalent rules."""
+
+    return (
+        _resolved_repo(logparse_repo),
+        _resolved_file(logparse_config_path),
+        _resolved_file(logparse_python, executable=True),
+    )
+
+
+__all__ = ["fingerprint_logparse_asset", "resolve_logparse_configuration"]

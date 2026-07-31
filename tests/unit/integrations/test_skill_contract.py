@@ -134,9 +134,7 @@ def test_requirement_names_and_current_s00_constraint_seam_are_fixed() -> None:
 
     assert "只接受一个 Attachment" in generated_skill
 
-    # S00 owns the DTO shape.  This intentionally checks only the stable fields
-    # consumed by S07, so r2 additions such as expected_content_type are picked
-    # up from the installed model instead of being copied into Skill prose.
+    # S00 owns the DTO shape; S07 only asserts the public fields it consumes.
     assert {
         "allowed_content_types",
         "min_count",

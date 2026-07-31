@@ -7,10 +7,8 @@ import stat
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any
 
 import pytest
-from pydantic import BaseModel
 
 from problem_locator.contracts import (
     ArtifactKind,
@@ -62,26 +60,12 @@ OTHER_TOOL_REF = VersionedRef(
 )
 
 
-def _contract_model(model_type: type[BaseModel], **values: Any) -> BaseModel:
-    """Build against r1 without freezing a field that may first appear in r2."""
-
-    if (
-        "expected_content_type" in model_type.model_fields
-        and "expected_content_type" not in values
-    ):
-        values["expected_content_type"] = values.get(
-            "content_type", "application/octet-stream"
-        )
-    return model_type(**values)
-
-
 def _attachment_entry(
     *,
     attachment_id: str = ATTACHMENT_ID,
     payload: bytes = SOURCE_BYTES,
 ) -> WorkspaceAttachmentInput:
-    return _contract_model(
-        WorkspaceAttachmentInput,
+    return WorkspaceAttachmentInput(
         input_kind="ATTACHMENT",
         resource_id=attachment_id,
         relative_path=f"inputs/attachments/{attachment_id}/payload",
@@ -89,7 +73,7 @@ def _attachment_entry(
         size=len(payload),
         sha256=hashlib.sha256(payload).hexdigest(),
         content_type="application/octet-stream",
-    )  # type: ignore[return-value]
+    )
 
 
 def _manifest(
@@ -98,8 +82,7 @@ def _manifest(
     tool_ref: VersionedRef = TOOL_REF,
     product: str = "compact",
 ) -> WorkspaceInputManifest:
-    return _contract_model(
-        WorkspaceInputManifest,
+    return WorkspaceInputManifest(
         schema_version=1,
         job_id=JOB_ID,
         case_id=CASE_ID,
@@ -107,7 +90,7 @@ def _manifest(
         logparse_tool_ref=tool_ref,
         logparse_product=product,
         entries=entries,
-    )  # type: ignore[return-value]
+    )
 
 
 def _write_read_only(path: Path, payload: bytes) -> Path:
@@ -205,8 +188,7 @@ def _run_entry(
     sha256: str | None = None,
 ) -> WorkspaceArtifactInput:
     frozen_sha256 = run.sha256 if sha256 is None else sha256
-    metadata = _contract_model(
-        LogparseRunMetadata,
+    metadata = LogparseRunMetadata(
         tree_manifest_sha256=frozen_sha256,
         logparse_version_ref=tool_ref,
         parse_manifest_relative_path=(
@@ -218,8 +200,7 @@ def _run_entry(
         source_attachment_sha256=source_attachment_sha256,
         parse_parameters=LogparseParseParameters(product=product),
     )
-    return _contract_model(
-        WorkspaceArtifactInput,
+    return WorkspaceArtifactInput(
         input_kind="ARTIFACT",
         resource_id=artifact_id,
         relative_path=f"inputs/artifacts/{artifact_id}/tree",
@@ -230,7 +211,7 @@ def _run_entry(
         name="synthetic logparse run",
         content_type="application/vnd.problem-locator.logparse-run+directory",
         metadata=metadata,
-    )  # type: ignore[return-value]
+    )
 
 
 def _valid_workspace(
@@ -332,8 +313,29 @@ def test_bind_attachment_uses_exact_fixed_id_path_size_and_hash(tmp_path: Path) 
         bind_attachment(workspace, manifest, OTHER_ATTACHMENT_ID)
 
 
-@pytest.mark.parametrize("fault", ["writable", "symlink", "hardlink", "drift"])
-def test_bind_attachment_rejects_mutable_aliased_or_drifted_materialization(
+def test_bind_attachment_accepts_s02_read_only_hardlink_materialization(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    attachment = _attachment_entry()
+    manifest = _manifest([attachment])
+    source = _write_read_only(tmp_path / "resource-store-payload", SOURCE_BYTES)
+    path = workspace / attachment.relative_path
+    path.parent.mkdir(parents=True)
+    try:
+        os.link(source, path)
+    except OSError:
+        pytest.skip("hard links are unavailable on this platform")
+
+    bound = bind_attachment(workspace, manifest, ATTACHMENT_ID)
+
+    assert bound.path == path.resolve()
+    assert path.stat().st_nlink == 2
+
+
+@pytest.mark.parametrize("fault", ["writable", "symlink", "drift"])
+def test_bind_attachment_rejects_mutable_symlinked_or_drifted_materialization(
     tmp_path: Path,
     fault: str,
 ) -> None:
@@ -352,11 +354,6 @@ def test_bind_attachment_rejects_mutable_aliased_or_drifted_materialization(
             path.symlink_to(external)
         except (NotImplementedError, OSError):
             pytest.skip("symbolic links are unavailable on this platform")
-    elif fault == "hardlink":
-        try:
-            os.link(path, path.parent / "second-link")
-        except OSError:
-            pytest.skip("hard links are unavailable on this platform")
     elif fault == "drift":
         path.chmod(0o644)
         path.write_bytes(b"different bytes after the manifest was frozen\n")
@@ -404,8 +401,7 @@ def test_bind_logparse_run_rejects_a_non_logparse_artifact_with_the_target_id(
     _materialize_attachment(workspace, attachment)
     payload = b"{}\n"
     payload_sha256 = hashlib.sha256(payload).hexdigest()
-    user_result = _contract_model(
-        WorkspaceArtifactInput,
+    user_result = WorkspaceArtifactInput(
         input_kind="ARTIFACT",
         resource_id=ARTIFACT_ID,
         relative_path=f"inputs/artifacts/{ARTIFACT_ID}/payload",

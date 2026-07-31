@@ -6,10 +6,18 @@ handling and target-log selection remain entirely inside the pinned logparse
 CLI.
 """
 
+from .broker import (
+    PinnedLogparseBrokerFactory,
+    PinnedLogparseBrokerSession,
+    build_logparse_runtime,
+)
 from .requests import Anchor, ParseTargetsRequest, TargetLogsRequest
 
 __all__ = [
     "Anchor",
     "ParseTargetsRequest",
+    "PinnedLogparseBrokerFactory",
+    "PinnedLogparseBrokerSession",
     "TargetLogsRequest",
+    "build_logparse_runtime",
 ]

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -23,17 +24,22 @@ SERVER_LOG = (
 )
 
 
-def _workspace_root(output: Path) -> Path:
-    resolved = output.resolve()
-    if len(resolved.parents) < 4:
-        raise ValueError("fake output does not use a Job Workspace layout")
-    return resolved.parents[3]
+def _reserved_environment_present() -> bool:
+    reserved = {"logparse_repo", "logparse_config_path", "logparse_python"}
+    return any(
+        key.casefold() in reserved
+        or key.casefold().startswith("problem_locator_logparse_")
+        for key in os.environ
+    )
 
 
 def _record_invocation(command: str, output: Path, argv: list[str]) -> None:
-    state_root = _workspace_root(output) / "runtime" / "tool-state"
-    state_root.mkdir(parents=True, exist_ok=True)
-    record_path = state_root / "fake-logparse-invocations.json"
+    del output
+    configured = os.environ.get("S07_FAKE_LOGPARSE_RECORD")
+    if configured is None:
+        return
+    record_path = Path(configured)
+    record_path.parent.mkdir(parents=True, exist_ok=True)
     if record_path.is_file():
         record = json.loads(record_path.read_text(encoding="utf-8"))
     else:
@@ -45,13 +51,19 @@ def _record_invocation(command: str, output: Path, argv: list[str]) -> None:
         }
     counter = "parse_count" if command == "parse" else "target_logs_count"
     record[counter] += 1
-    record["invocations"].append({"command": command, "argv": argv})
+    record["invocations"].append(
+        {
+            "command": command,
+            "argv": argv,
+            "reserved_environment_present": _reserved_environment_present(),
+        }
+    )
     record_path.write_text(
         json.dumps(record, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
         + "\n",
         encoding="utf-8",
     )
-    (state_root / "parse_counter.json").write_text(
+    record_path.with_name("parse_counter.json").write_text(
         json.dumps(
             {"parse_count": record["parse_count"]},
             separators=(",", ":"),

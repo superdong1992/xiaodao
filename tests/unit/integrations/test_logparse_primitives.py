@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import os
 import subprocess
 import sys
@@ -12,6 +11,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
+import problem_locator.integrations.logparse.fingerprint as fingerprint_module
 from problem_locator.contracts import (
     AssetKind,
     CancellationReason,
@@ -179,6 +179,43 @@ def test_fingerprint_rejects_a_symlinked_repo_entry(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError):
         fingerprint_logparse_asset(repo, config, sys.executable)
+
+
+@pytest.mark.parametrize(
+    ("command_kind", "message"),
+    [
+        ("git", "git cannot enumerate"),
+        ("python", "Python cannot be executed"),
+    ],
+)
+def test_fingerprint_helper_processes_have_a_fixed_timeout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    command_kind: str,
+    message: str,
+) -> None:
+    repo, config = _make_repo(tmp_path)
+    real_run = subprocess.run
+    observed_timeouts: list[float] = []
+
+    def timeout_selected_command(*args: object, **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        argv = args[0]
+        assert isinstance(argv, list)
+        timeout = kwargs.get("timeout")
+        if (command_kind == "git" and argv[0] == "git") or (
+            command_kind == "python" and argv[1:] == ["--version"]
+        ):
+            assert isinstance(timeout, float)
+            observed_timeouts.append(timeout)
+            raise subprocess.TimeoutExpired(argv, timeout)
+        return real_run(*args, **kwargs)  # type: ignore[call-overload]
+
+    monkeypatch.setattr(fingerprint_module.subprocess, "run", timeout_selected_command)
+
+    with pytest.raises(ValueError, match=message):
+        fingerprint_logparse_asset(repo, config, sys.executable)
+
+    assert observed_timeouts == [10.0]
 
 
 def test_requests_accept_only_the_fixed_wire_fields() -> None:
