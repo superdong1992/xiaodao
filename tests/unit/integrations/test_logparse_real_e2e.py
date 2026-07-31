@@ -22,6 +22,7 @@ from typing import Any
 import pytest
 
 from problem_locator.contracts import (
+    AttachmentFilenameSuffix,
     ArtifactKind,
     AssetKind,
     Job,
@@ -34,6 +35,8 @@ from problem_locator.contracts import (
     WorkspaceInputManifest,
     canonical_json_bytes,
     parse_canonical_json_bytes,
+    validate_logparse_claim_for_job,
+    workspace_attachment_relative_path,
 )
 from problem_locator.integrations.logparse import (
     Anchor,
@@ -97,7 +100,10 @@ def _configured_real_logparse(pytestconfig: pytest.Config) -> tuple[Path, Path, 
 
 
 def _materialize_archive(workspace: Path, archive_bytes: bytes) -> Path:
-    path = workspace / f"inputs/attachments/{_ATTACHMENT_ID}/payload"
+    path = workspace / workspace_attachment_relative_path(
+        _ATTACHMENT_ID,
+        AttachmentFilenameSuffix.ZIP,
+    )
     path.parent.mkdir(parents=True)
     path.write_bytes(archive_bytes)
     path.chmod(0o444)
@@ -199,11 +205,15 @@ def _attachment_entry(archive_bytes: bytes) -> WorkspaceAttachmentInput:
     return WorkspaceAttachmentInput(
         input_kind="ATTACHMENT",
         resource_id=_ATTACHMENT_ID,
-        relative_path=f"inputs/attachments/{_ATTACHMENT_ID}/payload",
+        relative_path=workspace_attachment_relative_path(
+            _ATTACHMENT_ID,
+            AttachmentFilenameSuffix.ZIP,
+        ),
         resource_kind=ResourceKind.FILE,
         size=len(archive_bytes),
         sha256=hashlib.sha256(archive_bytes).hexdigest(),
         content_type="application/zip",
+        filename_suffix=AttachmentFilenameSuffix.ZIP,
     )
 
 
@@ -368,8 +378,12 @@ def test_real_parse_then_parameter_b_continuation_parses_once(
     assert _input_values(first_job) == _PARAMETERS_A
     first_workspace = tmp_path / "first-job"
     first_workspace.mkdir()
-    _materialize_archive(first_workspace, archive_bytes)
+    first_archive_path = _materialize_archive(first_workspace, archive_bytes)
     first_manifest = _first_manifest(first_job, archive_bytes)
+    assert (
+        first_archive_path
+        == first_workspace / first_manifest.entries[0].relative_path
+    )
     _materialize_manifest(first_workspace, first_manifest)
     parse_request = ParseTargetsRequest(
         schema_version=1,
@@ -384,6 +398,8 @@ def test_real_parse_then_parameter_b_continuation_parses_once(
         parse_request,
     )
     parse_request_bytes = canonical_json_bytes(parse_request)
+    claim_path = first_workspace / "runtime/tool-state/logparse-parse.claim"
+    assert not claim_path.exists()
 
     session = factory.open(
         first_job,
@@ -410,10 +426,42 @@ def test_real_parse_then_parameter_b_continuation_parses_once(
             parse_request_path,
             parse_result_path,
         ) is None
-        assert session.parse_request_bytes() == parse_request_bytes
+        accepted_request_bytes = session.parse_request_bytes()
+        assert accepted_request_bytes == parse_request_bytes
+        assert claim_path.is_file()
+        claim = parse_canonical_json_bytes(
+            claim_path.read_bytes(),
+            LogparseParseClaim,
+        )
+        assert (
+            validate_logparse_claim_for_job(
+                claim,
+                first_job,
+                first_manifest,
+                accepted_request_bytes,
+            )
+            == claim
+        )
+        with pytest.raises(ValueError, match="request bytes require a parse claim"):
+            validate_logparse_claim_for_job(
+                None,
+                first_job,
+                first_manifest,
+                accepted_request_bytes,
+            )
     finally:
         session.close()
-    assert session.parse_request_bytes() == parse_request_bytes
+    closed_request_bytes = session.parse_request_bytes()
+    assert closed_request_bytes == parse_request_bytes
+    assert (
+        validate_logparse_claim_for_job(
+            claim,
+            first_job,
+            first_manifest,
+            closed_request_bytes,
+        )
+        == claim
+    )
     with pytest.raises(RuntimeError, match="closed"):
         session.agent_environment()
 
@@ -427,8 +475,6 @@ def test_real_parse_then_parameter_b_continuation_parses_once(
     )
     _assert_dual_anchor_result(first_result, first_run.root)
 
-    claim_path = first_workspace / "runtime/tool-state/logparse-parse.claim"
-    claim = parse_canonical_json_bytes(claim_path.read_bytes(), LogparseParseClaim)
     assert claim.job_id == first_job.job_id
     assert claim.attachment_id == _ATTACHMENT_ID
     assert claim.artifact_proposal_key == "logparse-run"
@@ -444,7 +490,10 @@ def test_real_parse_then_parameter_b_continuation_parses_once(
     assert _input_values(continuation_job) == _PARAMETERS_A | _PARAMETER_B
     continuation_workspace = tmp_path / "continuation-job"
     continuation_workspace.mkdir()
-    _materialize_archive(continuation_workspace, archive_bytes)
+    continuation_archive_path = _materialize_archive(
+        continuation_workspace,
+        archive_bytes,
+    )
     materialized_run = (
         continuation_workspace / f"inputs/artifacts/{_ARTIFACT_ID}/tree"
     )
@@ -457,6 +506,10 @@ def test_real_parse_then_parameter_b_continuation_parses_once(
         run_size=first_run.size,
         run_sha256=first_run.sha256,
         parse_manifest_relative_path=first_run.parse_manifest_relative_path,
+    )
+    assert (
+        continuation_archive_path
+        == continuation_workspace / continuation_manifest.entries[0].relative_path
     )
     _materialize_manifest(continuation_workspace, continuation_manifest)
     target_request = TargetLogsRequest(
@@ -509,6 +562,9 @@ def test_real_parse_then_parameter_b_continuation_parses_once(
     assert continuation_result_bytes == first_result_bytes
 
     real_operations = [argv[2] for argv in invocations]
+    assert {argv[0] for argv in invocations} == {
+        os.fspath(Path(os.path.abspath(logparse_python)))
+    }
     assert real_operations == [
         "parse",
         "mech-target-logs",

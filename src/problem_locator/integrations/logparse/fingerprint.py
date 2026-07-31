@@ -41,6 +41,21 @@ def _resolved_file(value: str | os.PathLike[str], *, executable: bool = False) -
     return resolved
 
 
+def _lexical_executable(value: str | os.PathLike[str]) -> Path:
+    """Validate an executable while preserving its absolute launcher path."""
+
+    text = os.fspath(value)
+    candidate = Path(text).expanduser()
+    if candidate.parent == Path(".") and not candidate.is_absolute():
+        discovered = shutil.which(text)
+        if discovered is None:
+            raise ValueError("configured logparse executable is unavailable")
+        candidate = Path(discovered)
+    absolute = Path(os.path.abspath(candidate))
+    _resolved_file(absolute, executable=True)
+    return absolute
+
+
 def _resolved_repo(value: str | os.PathLike[str]) -> Path:
     try:
         resolved = Path(value).expanduser().resolve(strict=True)
@@ -213,12 +228,12 @@ def resolve_logparse_configuration(
     logparse_config_path: str | os.PathLike[str],
     logparse_python: str | os.PathLike[str],
 ) -> tuple[Path, Path, Path]:
-    """Resolve the three service-only settings with fingerprint-equivalent rules."""
+    """Validate service settings and retain the configured Python launcher path."""
 
     return (
         _resolved_repo(logparse_repo),
         _resolved_file(logparse_config_path),
-        _resolved_file(logparse_python, executable=True),
+        _lexical_executable(logparse_python),
     )
 
 

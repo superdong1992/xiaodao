@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from problem_locator.contracts import (
+    AttachmentFilenameSuffix,
     ArtifactKind,
     JobType,
     LogparseParseParameters,
@@ -22,6 +23,8 @@ from problem_locator.contracts import (
     WorkspaceAttachmentInput,
     WorkspaceInputManifest,
     canonical_json_bytes,
+    derive_attachment_filename_suffix,
+    workspace_attachment_relative_path,
 )
 from problem_locator.integrations.logparse.outputs import (
     ControlledRun,
@@ -64,15 +67,21 @@ def _attachment_entry(
     *,
     attachment_id: str = ATTACHMENT_ID,
     payload: bytes = SOURCE_BYTES,
+    content_type: str = "application/octet-stream",
+    filename_suffix: AttachmentFilenameSuffix | None = None,
 ) -> WorkspaceAttachmentInput:
     return WorkspaceAttachmentInput(
         input_kind="ATTACHMENT",
         resource_id=attachment_id,
-        relative_path=f"inputs/attachments/{attachment_id}/payload",
+        relative_path=workspace_attachment_relative_path(
+            attachment_id,
+            filename_suffix,
+        ),
         resource_kind=ResourceKind.FILE,
         size=len(payload),
         sha256=hashlib.sha256(payload).hexdigest(),
-        content_type="application/octet-stream",
+        content_type=content_type,
+        filename_suffix=filename_suffix,
     )
 
 
@@ -311,6 +320,65 @@ def test_bind_attachment_uses_exact_fixed_id_path_size_and_hash(tmp_path: Path) 
     assert bound.path == path.resolve()
     with pytest.raises(ValueError, match="not fixed"):
         bind_attachment(workspace, manifest, OTHER_ATTACHMENT_ID)
+
+
+@pytest.mark.parametrize(
+    ("name", "content_type", "filename_suffix"),
+    [
+        ("logs.zip", "application/zip", AttachmentFilenameSuffix.ZIP),
+        ("logs.tar", "application/x-tar", AttachmentFilenameSuffix.TAR),
+        ("logs.gz", "application/gzip", AttachmentFilenameSuffix.GZ),
+        ("logs.tar.gz", "application/gzip", AttachmentFilenameSuffix.TAR_GZ),
+        ("logs.tgz", "application/gzip", AttachmentFilenameSuffix.TGZ),
+    ],
+)
+def test_bind_attachment_uses_exact_manifest_archive_path_for_every_frozen_suffix(
+    tmp_path: Path,
+    name: str,
+    content_type: str,
+    filename_suffix: AttachmentFilenameSuffix,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    derived_suffix = derive_attachment_filename_suffix(name, content_type)
+    assert derived_suffix is filename_suffix
+    attachment = _attachment_entry(
+        content_type=content_type,
+        filename_suffix=derived_suffix,
+    )
+    manifest = _manifest([attachment])
+    exact_path = _materialize_attachment(workspace, attachment)
+
+    bound = bind_attachment(workspace, manifest, ATTACHMENT_ID)
+
+    assert attachment.relative_path == workspace_attachment_relative_path(
+        ATTACHMENT_ID,
+        filename_suffix,
+    )
+    assert bound.path == exact_path.resolve()
+    assert bound.path.name == f"payload{filename_suffix.value}"
+    if filename_suffix is AttachmentFilenameSuffix.TAR_GZ:
+        assert bound.path.name == "payload.tar.gz"
+
+
+@pytest.mark.parametrize(
+    ("content_type", "filename_suffix"),
+    [
+        ("application/gzip", AttachmentFilenameSuffix.ZIP),
+        ("application/zip", AttachmentFilenameSuffix.GZ),
+        ("application/x-tar", AttachmentFilenameSuffix.TGZ),
+        ("text/plain", AttachmentFilenameSuffix.TAR),
+    ],
+)
+def test_attachment_entry_rejects_content_type_suffix_matrix_drift(
+    content_type: str,
+    filename_suffix: AttachmentFilenameSuffix,
+) -> None:
+    with pytest.raises(ValueError, match="filename_suffix"):
+        _attachment_entry(
+            content_type=content_type,
+            filename_suffix=filename_suffix,
+        )
 
 
 def test_bind_attachment_accepts_s02_read_only_hardlink_materialization(

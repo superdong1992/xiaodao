@@ -17,7 +17,10 @@ from problem_locator.contracts import (
     CancellationReason,
     canonical_json_bytes,
 )
-from problem_locator.integrations.logparse.fingerprint import fingerprint_logparse_asset
+from problem_locator.integrations.logparse.fingerprint import (
+    fingerprint_logparse_asset,
+    resolve_logparse_configuration,
+)
 from problem_locator.integrations.logparse.paths import (
     resolve_workspace_path,
     validate_proposal_io_paths,
@@ -135,6 +138,32 @@ def test_fingerprint_uses_the_canonical_repo_config_and_python_hashes(
     assert asset.ref.content_hash == expected_hash
     assert asset.ref.version == f"sha256-{expected_hash[:16]}"
     assert fingerprint_logparse_asset(repo, config, sys.executable) == asset
+
+
+def test_configuration_preserves_a_validated_python_launcher_symlink(
+    tmp_path: Path,
+) -> None:
+    repo, config = _make_repo(tmp_path)
+    launcher = tmp_path / "venv" / "bin" / "python"
+    launcher.parent.mkdir(parents=True)
+    try:
+        launcher.symlink_to(Path(sys.executable))
+    except (NotImplementedError, OSError):
+        pytest.skip("symbolic links are unavailable on this platform")
+
+    configured_repo, configured_config, configured_python = (
+        resolve_logparse_configuration(repo, config, launcher)
+    )
+
+    assert configured_repo == repo.resolve()
+    assert configured_config == config.resolve()
+    assert configured_python == Path(os.path.abspath(launcher))
+    assert configured_python.is_symlink()
+    assert fingerprint_logparse_asset(
+        configured_repo,
+        configured_config,
+        configured_python,
+    ) == fingerprint_logparse_asset(repo, config, Path(sys.executable).resolve())
 
 
 def test_fingerprint_detects_repo_and_config_drift_but_excludes_ignored_files(

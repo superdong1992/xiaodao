@@ -626,19 +626,44 @@ class PinnedLogparseBrokerSession:
             request_sha256=hashlib.sha256(request_bytes).hexdigest(),
         )
         with self._state_lock:
-            if self._closed or self._accepted_parse_request_bytes is not None:
-                failure = _tool_failure(ErrorCode.LOGPARSE_FAILED)
-                return HTTPStatus.UNPROCESSABLE_ENTITY, canonical_json_bytes(failure)
-            self._accepted_parse_request_bytes = bytes(request_bytes)
+            if (
+                self._closed
+                or self._stopping.is_set()
+                or self._accepted_parse_request_bytes is not None
+            ):
+                return HTTPStatus.SERVICE_UNAVAILABLE, canonical_json_bytes({})
+
+        accepted_request_bytes = bytes(request_bytes)
+
+        def claim_fault_point(point: str) -> None:
+            if point == "claim_written":
+                # create_parse_claim emits this only after the exact public claim
+                # bytes have been written and fsynced. Publish the matching audit
+                # bytes first so an injected post-persistence fault cannot split
+                # the public claim/request seam.
+                with self._state_lock:
+                    if self._accepted_parse_request_bytes is None:
+                        self._accepted_parse_request_bytes = accepted_request_bytes
+            self._fault_point(point)
+
         try:
             create_parse_claim(
                 self._workspace_root,
                 claim,
-                fault_point=self._fault_point,
+                fault_point=claim_fault_point,
             )
         except (OSError, ValueError):
             failure = _tool_failure(ErrorCode.LOGPARSE_FAILED)
             return HTTPStatus.UNPROCESSABLE_ENTITY, canonical_json_bytes(failure)
+        with self._state_lock:
+            if self._accepted_parse_request_bytes is None:
+                self._accepted_parse_request_bytes = accepted_request_bytes
+            elif self._accepted_parse_request_bytes != accepted_request_bytes:
+                failure = _tool_failure(ErrorCode.LOGPARSE_FAILED)
+                return HTTPStatus.UNPROCESSABLE_ENTITY, canonical_json_bytes(failure)
+            stopped = self._closed or self._stopping.is_set()
+        if stopped:
+            return HTTPStatus.SERVICE_UNAVAILABLE, canonical_json_bytes({})
 
         argv = [
             os.fspath(self._python),

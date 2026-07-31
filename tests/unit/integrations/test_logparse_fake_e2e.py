@@ -16,6 +16,7 @@ import pytest
 from problem_locator.contracts import (
     AgentArtifactProposalDraft,
     AgentJobOutcome,
+    AttachmentFilenameSuffix,
     ArtifactProposal,
     ArtifactKind,
     AssetKind,
@@ -49,6 +50,7 @@ from problem_locator.contracts import (
     parse_canonical_json_bytes,
     validate_logparse_claim_for_job,
     validate_outcome_for_job,
+    workspace_attachment_relative_path,
 )
 from problem_locator.integrations.logparse import (
     Anchor,
@@ -144,11 +146,15 @@ def _attachment(payload: bytes) -> WorkspaceAttachmentInput:
     return WorkspaceAttachmentInput(
         input_kind="ATTACHMENT",
         resource_id=ATTACHMENT_ID,
-        relative_path=f"inputs/attachments/{ATTACHMENT_ID}/payload",
+        relative_path=workspace_attachment_relative_path(
+            ATTACHMENT_ID,
+            AttachmentFilenameSuffix.ZIP,
+        ),
         resource_kind=ResourceKind.FILE,
         size=len(payload),
         sha256=hashlib.sha256(payload).hexdigest(),
         content_type="application/zip",
+        filename_suffix=AttachmentFilenameSuffix.ZIP,
     )
 
 
@@ -555,6 +561,17 @@ def test_first_parse_dual_anchor_claim_audit_close_and_fixed_argv(
             == expected_claim
         )
         assert stat.S_IMODE(claim_path.stat().st_mode) == 0o600
+        assert (
+            validate_logparse_claim_for_job(
+                expected_claim,
+                job,
+                manifest,
+                audited,
+            )
+            is expected_claim
+        )
+        with pytest.raises(ValueError, match="request bytes require a parse claim"):
+            validate_logparse_claim_for_job(None, job, manifest, audited)
 
         tree = workspace / "output" / "proposals" / "logparse-run" / "tree"
         record = _record(record_path)
@@ -624,8 +641,85 @@ def test_first_parse_dual_anchor_claim_audit_close_and_fixed_argv(
         session.close()
 
     assert session.parse_request_bytes() == request_bytes
+    assert (
+        validate_logparse_claim_for_job(
+            expected_claim,
+            job,
+            manifest,
+            session.parse_request_bytes(),
+        )
+        is expected_claim
+    )
     with pytest.raises(RuntimeError, match="closed"):
         session.agent_environment()
+
+
+@pytest.mark.parametrize(
+    ("failure_point", "claim_is_complete", "request_is_audited"),
+    [
+        ("claim_reserved", False, False),
+        ("claim_written", True, True),
+    ],
+)
+def test_claim_fault_never_publishes_request_before_create_new_claim_is_durable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    pinned_asset: ResolvedAsset,
+    failure_point: str,
+    claim_is_complete: bool,
+    request_is_audited: bool,
+) -> None:
+    source = b"faulted synthetic archive"
+    job = _job(pinned_asset.ref)
+    workspace = tmp_path / "workspace"
+    manifest, attachment = _materialize_workspace(workspace, job, source)
+    request = _parse_request("faulted-run")
+    request_bytes = _write_request(workspace, "faulted-run", request)
+
+    def inject_fault(point: str) -> None:
+        if point == failure_point:
+            raise OSError(f"injected {point}")
+
+    session = _factory(pinned_asset, fault_point=inject_fault).open(
+        job,
+        workspace,
+        manifest,
+        InMemoryCancellationSignal(),
+    )
+    try:
+        assert (
+            _invoke(
+                monkeypatch,
+                workspace,
+                session.agent_environment(),
+                "parse-targets",
+                "faulted-run",
+            )
+            == 2
+        )
+        captured = capsys.readouterr()
+        assert captured.err == (
+            "problem-locator-logparse: TOOL_EXECUTE/LOGPARSE_FAILED\n"
+        )
+    finally:
+        session.close()
+
+    audited = session.parse_request_bytes()
+    assert (audited == request_bytes) is request_is_audited
+    claim_path = workspace / "runtime" / "tool-state" / "logparse-parse.claim"
+    if not claim_is_complete:
+        assert claim_path.read_bytes() == b""
+        assert audited is None
+        assert validate_logparse_claim_for_job(None, job, manifest, audited) is None
+        return
+
+    claim = parse_canonical_json_bytes(claim_path.read_bytes(), LogparseParseClaim)
+    assert claim.attachment_id == attachment.resource_id
+    assert audited is not None
+    assert validate_logparse_claim_for_job(claim, job, manifest, audited) is claim
+    with pytest.raises(ValueError, match="request bytes require a parse claim"):
+        validate_logparse_claim_for_job(None, job, manifest, audited)
 
 
 def test_same_session_rejects_same_and_changed_parse_key_without_second_process(
