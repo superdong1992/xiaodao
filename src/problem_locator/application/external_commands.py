@@ -610,6 +610,7 @@ class ExternalCommandHandler:
                 continuation_resources=continuation_for_supplement(
                     snapshot,
                     command.case_id,
+                    ready_attachment_ids=command.attachment_ids,
                 ),
                 runtime_bindings_by_job_type={
                     JobType.DIAGNOSE: fixed_diagnose_bindings

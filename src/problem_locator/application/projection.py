@@ -9,7 +9,7 @@ services map them to the public typed error contract at their boundary.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 
 from problem_locator.contracts import (
     Artifact,
@@ -218,6 +218,8 @@ def continuation_for_outcome(
 def continuation_for_supplement(
     state: StateFile,
     case_id: str,
+    *,
+    ready_attachment_ids: Sequence[str],
 ) -> ContinuationResourceView:
     """Build the continuation anchored by the current waiting Outcome."""
 
@@ -252,10 +254,25 @@ def continuation_for_supplement(
     if len(waiting_outcome_ids) != 1:
         raise ValueError("waiting source Job must have exactly one APPLIED waiting Outcome")
 
+    open_attachment_requirement_id: str | None = None
+    if ready_attachment_ids:
+        open_attachment_requirements = [
+            requirement
+            for requirement in open_requirements
+            if requirement.kind is RequirementKind.ATTACHMENT
+        ]
+        if len(open_attachment_requirements) != 1:
+            raise ValueError(
+                "supplement Attachments require exactly one OPEN Attachment requirement"
+            )
+        open_attachment_requirement_id = open_attachment_requirements[0].requirement_id
+
     return _continuation_closure(
         aggregate,
         source_job,
         leading_previous_outcome_ids=waiting_outcome_ids,
+        supplement_attachment_requirement_id=open_attachment_requirement_id,
+        supplement_attachment_ids=ready_attachment_ids,
     )
 
 
@@ -334,6 +351,8 @@ def _continuation_closure(
     *,
     leading_previous_outcome_ids: list[str],
     allowed_unsaved_outcome_id: str | None = None,
+    supplement_attachment_requirement_id: str | None = None,
+    supplement_attachment_ids: Sequence[str] = (),
 ) -> ContinuationResourceView:
     evidence_ids = list(aggregate.case.diagnosis_state.evidence_refs)
     attachment_ids = list(source_job.attachment_refs)
@@ -356,13 +375,18 @@ def _continuation_closure(
         _applied_outcome(aggregate, outcome_id)
 
     for requirement in aggregate.case.diagnosis_state.pending_requirements:
-        if (
-            requirement.kind is RequirementKind.ATTACHMENT
-            and requirement.status is RequirementStatus.FULFILLED
-        ):
-            for attachment_id in requirement.fulfilled_by_refs:
-                _ready_attachment(aggregate, attachment_id)
-                _append_unique(attachment_ids, attachment_id)
+        if requirement.kind is not RequirementKind.ATTACHMENT:
+            continue
+        requirement_attachment_ids: Sequence[str]
+        if requirement.status is RequirementStatus.FULFILLED:
+            requirement_attachment_ids = requirement.fulfilled_by_refs
+        elif requirement.requirement_id == supplement_attachment_requirement_id:
+            requirement_attachment_ids = supplement_attachment_ids
+        else:
+            continue
+        for attachment_id in requirement_attachment_ids:
+            _ready_attachment(aggregate, attachment_id)
+            _append_unique(attachment_ids, attachment_id)
 
     for evidence_id in evidence_ids:
         evidence = _formal_evidence(aggregate, evidence_id)

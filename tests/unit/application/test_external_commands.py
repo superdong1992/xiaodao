@@ -10,6 +10,8 @@ from problem_locator.contracts import (
     ApplicationError,
     ApplicationErrorDetail,
     ApplicationPortError,
+    Attachment,
+    AttachmentRequirementConstraints,
     AttachmentStatus,
     CancelCase,
     Case,
@@ -69,6 +71,8 @@ NEW_JOB_ID = "00000000-0000-0000-0000-000000000103"
 FACT_ID = "00000000-0000-0000-0000-000000000104"
 SECOND_FACT_ID = "00000000-0000-0000-0000-000000000106"
 ATTACHMENT_ID = "00000000-0000-0000-0000-000000000105"
+SECOND_ATTACHMENT_ID = "00000000-0000-0000-0000-000000000107"
+SOURCE_ATTACHMENT_ID = "00000000-0000-0000-0000-000000000109"
 SOURCE_JOB_ID = "00000000-0000-0000-0000-000000000111"
 WAIT_OUTCOME_ID = "00000000-0000-0000-0000-000000000121"
 REQUIREMENT_ID = "00000000-0000-0000-0000-000000000131"
@@ -1051,6 +1055,126 @@ def _waiting_state(requirement_name: str = "rpc_method") -> StateFile:
     )
 
 
+def _attachment_record(
+    attachment_id: str,
+    *,
+    status: AttachmentStatus = AttachmentStatus.READY,
+) -> Attachment:
+    ready = status is AttachmentStatus.READY
+    return Attachment(
+        attachment_id=attachment_id,
+        case_id=CASE_ID,
+        status=status,
+        name=f"{attachment_id}.log",
+        content_type="text/plain",
+        declared_size=16,
+        declared_sha256="a" * 64,
+        size=16 if ready else None,
+        sha256="a" * 64 if ready else None,
+        storage_key=(
+            f"resources/cases/{CASE_ID}/attachments/{attachment_id}/payload"
+            if ready
+            else None
+        ),
+        created_at="2026-07-31T00:00:10.000Z",
+        updated_at="2026-07-31T00:00:20.000Z",
+    )
+
+
+def _waiting_attachment_state(
+    attachments: list[Attachment],
+    *,
+    source_attachment_refs: list[str] | None = None,
+) -> StateFile:
+    base = _waiting_state()
+    aggregate = base.cases[CASE_ID]
+    source_job = aggregate.jobs[SOURCE_JOB_ID].model_copy(
+        update={
+            "goal": "Collect the requested logs.",
+            "attachment_refs": list(source_attachment_refs or []),
+        }
+    )
+    input_requirement = aggregate.case.diagnosis_state.pending_requirements[0]
+    attachment_requirement = PendingRequirement(
+        requirement_id=SECOND_REQUIREMENT_ID,
+        kind=RequirementKind.ATTACHMENT,
+        name="server_logs",
+        prompt="Provide the server logs.",
+        required=True,
+        constraints=AttachmentRequirementConstraints(
+            allowed_content_types=["text/plain"],
+            min_count=1,
+            max_count=3,
+        ),
+        status=RequirementStatus.OPEN,
+        requested_by_job_id=SOURCE_JOB_ID,
+        fulfilled_by_refs=[],
+    )
+    outcome = JobOutcome(
+        outcome_id=WAIT_OUTCOME_ID,
+        job_id=SOURCE_JOB_ID,
+        case_id=CASE_ID,
+        job_type=JobType.DIAGNOSE,
+        base_state_revision=1,
+        result_type=OutcomeResultType.NEED_ATTACHMENT,
+        payload=DiagnosisOutcome(
+            findings=[],
+            state_delta=_empty_delta(
+                add_pending_requirements=[attachment_requirement]
+            ),
+            requested_input=[],
+            requested_attachments=[SECOND_REQUIREMENT_ID],
+            candidate_conclusion_draft=None,
+            recommended_next_step="Wait for the requested logs.",
+        ),
+        consumed_evidence_refs=[],
+        proposed_evidence=[],
+        proposed_artifacts=[],
+        error=None,
+        produced_at="2026-07-31T00:01:00.000Z",
+    )
+    outcome_bytes = canonical_json_bytes(outcome)
+    outcome_ref = ExecutionFileRef(
+        relative_key=f"jobs/{SOURCE_JOB_ID}/job_outcome.json",
+        size=len(outcome_bytes),
+        sha256=canonical_json_sha256(outcome),
+    )
+    processing = OutcomeProcessingRecord(
+        outcome_id=WAIT_OUTCOME_ID,
+        job_id=SOURCE_JOB_ID,
+        outcome_hash=outcome_ref.sha256,
+        outcome_file_ref=outcome_ref,
+        disposition=OutcomeDisposition.APPLIED,
+        processed_at="2026-07-31T00:01:01.000Z",
+        error_code=None,
+        accepted_evidence_ids=[],
+        accepted_artifact_ids=[],
+        created_job_id=None,
+        reason="Waiting Attachment was applied.",
+    )
+    diagnosis_payload = aggregate.case.diagnosis_state.model_dump(mode="python")
+    diagnosis_payload.update(
+        pending_requirements=[attachment_requirement, input_requirement]
+    )
+    case_payload = aggregate.case.model_dump(mode="python")
+    case_payload.update(
+        status=CaseStatus.WAITING_ATTACHMENT,
+        diagnosis_state=diagnosis_payload,
+    )
+    waiting_case = Case.model_validate(case_payload)
+    waiting_aggregate = CaseAggregate(
+        case=waiting_case,
+        jobs={SOURCE_JOB_ID: source_job},
+        outcomes={WAIT_OUTCOME_ID: outcome},
+        outcome_processing_records={WAIT_OUTCOME_ID: processing},
+        execution_failure_records={},
+        attachments={item.attachment_id: item for item in attachments},
+        evidence={},
+        artifacts={},
+    )
+    return base.model_copy(update={"cases": {CASE_ID: waiting_aggregate}})
+
+
 def test_submit_supplement_catalog_binding_faults_are_typed_and_commit_nothing() -> None:
     waiting = _waiting_state()
     command = SubmitSupplement(
@@ -1231,6 +1355,141 @@ def test_submit_supplement_validates_then_commits_one_diagnose_job() -> None:
     assert [job.job_id for job in execution_records.publish_job_calls] == [
         NEW_JOB_ID
     ]
+
+
+def test_submit_supplement_sends_current_ready_attachments_in_canonical_continuation() -> None:
+    source_attachment = _attachment_record(SOURCE_ATTACHMENT_ID)
+    current_first = _attachment_record(SECOND_ATTACHMENT_ID)
+    current_second = _attachment_record(ATTACHMENT_ID)
+    waiting = _waiting_attachment_state(
+        [source_attachment, current_first, current_second],
+        source_attachment_refs=[SOURCE_ATTACHMENT_ID],
+    )
+    source = waiting.cases[CASE_ID].jobs[SOURCE_JOB_ID]
+    submitted_ids = [
+        SECOND_ATTACHMENT_ID,
+        SOURCE_ATTACHMENT_ID,
+        ATTACHMENT_ID,
+    ]
+
+    def supplement_plan(snapshot, trigger):
+        assert snapshot.case.status is CaseStatus.WAITING_ATTACHMENT
+        assert trigger.trigger_type is TriggerType.SUBMIT_SUPPLEMENT
+        assert trigger.payload.user_facts == []
+        assert trigger.payload.ready_attachment_ids == submitted_ids
+        assert trigger.continuation_resources.attachment_refs == [
+            SOURCE_ATTACHMENT_ID,
+            SECOND_ATTACHMENT_ID,
+            ATTACHMENT_ID,
+        ]
+        assert trigger.continuation_resources.previous_outcome_refs == [
+            WAIT_OUTCOME_ID
+        ]
+        return _plan(
+            target_status=CaseStatus.WAITING_INPUT,
+            delta=_empty_delta(
+                fulfill_requirements=[
+                    RequirementFulfillment(
+                        requirement_id=SECOND_REQUIREMENT_ID,
+                        fulfilled_by_refs=submitted_ids,
+                    )
+                ]
+            ),
+        )
+
+    selected = waiting.cases[CASE_ID].case.selected_skill_ref
+    assert selected is not None
+    catalog = FakeAssetCatalog(
+        diagnose={
+            (selected.id, selected.version, selected.content_hash): _bindings(source)
+        }
+    )
+    coordinator = ScriptedCoordinator([supplement_plan])
+    execution_records = InMemoryExecutionRecordStore()
+    handler, repository, guard, _, dispatcher, notifier, _, _ = _handler(
+        waiting,
+        coordinator,
+        ids=DeterministicIdGenerator(
+            scripted_ids={"trigger": [TRIGGER_ID], "job": [NEW_JOB_ID]}
+        ),
+        catalog=catalog,
+        execution_records=execution_records,
+    )
+    command = SubmitSupplement(
+        idempotency_key="supplement-ready-attachments",
+        case_id=CASE_ID,
+        expected_case_revision=2,
+        inputs={},
+        attachment_ids=submitted_ids,
+        wait_seconds=0,
+    )
+
+    response = handler.execute(command)
+
+    stored = repository.read_snapshot().cases[CASE_ID]
+    attachment_requirement = stored.case.diagnosis_state.pending_requirements[0]
+    assert response.business_receipt.job_id is None
+    assert response.business_receipt.status == CaseStatus.WAITING_INPUT.value
+    assert attachment_requirement.status is RequirementStatus.FULFILLED
+    assert attachment_requirement.fulfilled_by_refs == submitted_ids
+    assert len(coordinator.calls) == 1
+    captured_trigger = coordinator.calls[0][1]
+    assert captured_trigger.payload.ready_attachment_ids == submitted_ids
+    assert captured_trigger.continuation_resources.attachment_refs == [
+        SOURCE_ATTACHMENT_ID,
+        SECOND_ATTACHMENT_ID,
+        ATTACHMENT_ID,
+    ]
+    assert len(catalog.diagnose_calls) == 1
+    assert len(repository.commit_calls) == 1
+    assert execution_records.publish_job_calls == []
+    assert guard.acquire_calls == guard.release_calls == 1
+    assert dispatcher.submit_calls == []
+    assert notifier.notify_calls == [(CASE_ID, 3)]
+
+
+def test_submit_supplement_rejects_nonready_attachment_before_any_dependency_call() -> None:
+    uploading = _attachment_record(
+        ATTACHMENT_ID,
+        status=AttachmentStatus.UPLOADING,
+    )
+    waiting = _waiting_attachment_state([uploading])
+    coordinator = ScriptedCoordinator()
+    catalog = FakeAssetCatalog()
+    execution_records = InMemoryExecutionRecordStore()
+    ids = DeterministicIdGenerator()
+    clock = FakeClock(NOW)
+    handler, repository, guard, _, dispatcher, notifier, _, _ = _handler(
+        waiting,
+        coordinator,
+        ids=ids,
+        clock=clock,
+        catalog=catalog,
+        execution_records=execution_records,
+    )
+    command = SubmitSupplement(
+        idempotency_key="supplement-nonready-attachment",
+        case_id=CASE_ID,
+        expected_case_revision=2,
+        inputs={},
+        attachment_ids=[ATTACHMENT_ID],
+        wait_seconds=0,
+    )
+
+    _expect_port_error(
+        lambda: handler.execute(command),
+        ErrorCode.ATTACHMENT_NOT_READY,
+    )
+
+    assert coordinator.calls == []
+    assert catalog.diagnose_calls == []
+    assert repository.commit_calls == []
+    assert execution_records.publish_job_calls == []
+    assert guard.acquire_calls == 0
+    assert dispatcher.submit_calls == []
+    assert notifier.notify_calls == []
+    assert clock.calls == 0
+    assert ids.new_calls == []
 
 
 def test_submit_supplement_rejects_coordinator_binding_substitution() -> None:

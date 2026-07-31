@@ -612,7 +612,11 @@ def test_supplement_continuation_starts_with_unique_applied_waiting_outcome() ->
         )
     )
 
-    continuation = continuation_for_supplement(state, CASE_ID)
+    continuation = continuation_for_supplement(
+        state,
+        CASE_ID,
+        ready_attachment_ids=[],
+    )
 
     assert continuation.previous_outcome_refs == [
         waiting.outcome_id,
@@ -650,8 +654,164 @@ def test_supplement_continuation_starts_with_unique_applied_waiting_outcome() ->
     )
 
     assert continuation_for_supplement(
-        continued_state, CASE_ID
+        continued_state,
+        CASE_ID,
+        ready_attachment_ids=[],
     ).previous_outcome_refs == [waiting.outcome_id, prior.outcome_id]
+
+
+def test_supplement_continuation_inserts_current_ready_attachments_in_requirement_order() -> None:
+    source_attachment = _attachment(59, "1")
+    prior_requirement_attachment = _attachment(58, "2")
+    current_first = _attachment(57, "3")
+    current_second = _attachment(55, "4")
+    later_requirement_attachment = _attachment(56, "5")
+    evidence_attachment = _attachment(54, "6")
+    evidence = _evidence(
+        40,
+        source_type="ATTACHMENT",
+        source_ref=evidence_attachment.attachment_id,
+    )
+    source = _diagnose_job(status=JobStatus.SUCCEEDED)
+    prior = _outcome(21, source, OutcomeResultType.COMPLETED)
+    waiting = _outcome(22, source, OutcomeResultType.NEED_ATTACHMENT)
+    source = _diagnose_job(
+        status=JobStatus.SUCCEEDED,
+        attachment_refs=[source_attachment.attachment_id],
+        previous_outcome_refs=[prior.outcome_id],
+    )
+    requirements = [
+        PendingRequirement(
+            requirement_id=_uuid(900),
+            kind="ATTACHMENT",
+            name="earlier_log",
+            prompt="Previously supplied log.",
+            required=True,
+            constraints={
+                "allowed_content_types": ["text/plain"],
+                "min_count": 1,
+                "max_count": 1,
+            },
+            status="FULFILLED",
+            requested_by_job_id=source.job_id,
+            fulfilled_by_refs=[prior_requirement_attachment.attachment_id],
+        ),
+        PendingRequirement(
+            requirement_id=_uuid(902),
+            kind="ATTACHMENT",
+            name="current_logs",
+            prompt="Supply the current logs.",
+            required=True,
+            constraints={
+                "allowed_content_types": ["text/plain"],
+                "min_count": 1,
+                "max_count": 4,
+            },
+            status="OPEN",
+            requested_by_job_id=source.job_id,
+            fulfilled_by_refs=[],
+        ),
+        PendingRequirement(
+            requirement_id=_uuid(901),
+            kind="ATTACHMENT",
+            name="later_log",
+            prompt="Previously supplied later log.",
+            required=True,
+            constraints={
+                "allowed_content_types": ["text/plain"],
+                "min_count": 1,
+                "max_count": 1,
+            },
+            status="FULFILLED",
+            requested_by_job_id=source.job_id,
+            fulfilled_by_refs=[later_requirement_attachment.attachment_id],
+        ),
+    ]
+    attachments = {
+        attachment.attachment_id: attachment
+        for attachment in (
+            source_attachment,
+            prior_requirement_attachment,
+            current_first,
+            current_second,
+            later_requirement_attachment,
+            evidence_attachment,
+        )
+    }
+    outcomes = {prior.outcome_id: prior, waiting.outcome_id: waiting}
+    aggregate = _aggregate(
+        _case(
+            status=CaseStatus.WAITING_ATTACHMENT,
+            diagnosis=_diagnosis_with(
+                evidence_refs=[evidence.evidence_id],
+                requirements=requirements,
+            ),
+        ),
+        jobs={source.job_id: source},
+        outcomes=outcomes,
+        records={key: _applied_record(value) for key, value in outcomes.items()},
+        attachments=attachments,
+        evidence={evidence.evidence_id: evidence},
+    )
+    state = _state(aggregate)
+
+    continuation = continuation_for_supplement(
+        state,
+        CASE_ID,
+        ready_attachment_ids=[
+            current_first.attachment_id,
+            source_attachment.attachment_id,
+            current_second.attachment_id,
+            current_first.attachment_id,
+        ],
+    )
+
+    assert continuation.attachment_refs == [
+        source_attachment.attachment_id,
+        prior_requirement_attachment.attachment_id,
+        current_first.attachment_id,
+        current_second.attachment_id,
+        later_requirement_attachment.attachment_id,
+        evidence_attachment.attachment_id,
+    ]
+    assert continuation.previous_outcome_refs == [
+        waiting.outcome_id,
+        prior.outcome_id,
+    ]
+
+    for invalid_attachments, message in (
+        (
+            {
+                key: value
+                for key, value in attachments.items()
+                if key != current_first.attachment_id
+            },
+            "missing Attachment",
+        ),
+        (
+            {
+                **attachments,
+                current_first.attachment_id: current_first.model_copy(
+                    update={
+                        "status": AttachmentStatus.UPLOADING,
+                        "size": None,
+                        "sha256": None,
+                        "storage_key": None,
+                    }
+                ),
+            },
+            "not a complete READY resource",
+        ),
+    ):
+        invalid_state = _state(
+            aggregate.model_copy(update={"attachments": invalid_attachments})
+        )
+        with pytest.raises(ValueError, match=message):
+            continuation_for_supplement(
+                invalid_state,
+                CASE_ID,
+                ready_attachment_ids=[current_first.attachment_id],
+            )
 
 
 def test_supplement_continuation_rejects_requirements_from_different_jobs() -> None:
@@ -692,7 +852,11 @@ def test_supplement_continuation_rejects_requirements_from_different_jobs() -> N
     )
 
     with pytest.raises(ValueError, match="share one waiting source Job"):
-        continuation_for_supplement(state, CASE_ID)
+        continuation_for_supplement(
+            state,
+            CASE_ID,
+            ready_attachment_ids=[],
+        )
 
 
 def test_resume_continuation_is_an_exact_copy_and_validates_its_closure() -> None:
