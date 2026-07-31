@@ -203,6 +203,19 @@ same release-candidate Git head, CPython 3.12, locked dependencies, and a clean
 Logparse checkout at
 `a233b500d9c99e6815d1ffd82cb4ca55bbfe657a`.
 
+macOS shell (the S08 release-candidate gate executed locally):
+
+```sh
+uv sync --frozen --all-groups
+export S08_NATIVE_STARTUP_GATE=darwin
+export SKILL_DIR="$(pwd)/.claude/skills"
+export LOGPARSE_REPO=/absolute/path/to/logparse
+export LOGPARSE_CONFIG_PATH=/absolute/path/to/logparse/config.yaml
+export LOGPARSE_PYTHON=/absolute/path/to/logparse/.venv/bin/python
+export CLAUDE_COMMAND=claude
+uv run pytest tests/e2e/test_native_startup_gate.py::test_native_macos_startup_gate -q -p no:cacheprovider
+```
+
 Windows PowerShell:
 
 ```powershell

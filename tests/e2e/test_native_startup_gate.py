@@ -107,7 +107,9 @@ def _stop_service(process: subprocess.Popen[str], expected_system: str) -> None:
     if expected_system == "Windows":
         process.send_signal(signal.CTRL_BREAK_EVENT)
     else:
-        process.send_signal(signal.SIGTERM)
+        # Exercise Uvicorn's normal interactive shutdown path.  This is the
+        # portable POSIX equivalent of the Windows CTRL_BREAK below.
+        process.send_signal(signal.SIGINT)
     try:
         exit_code = process.wait(timeout=15)
     except subprocess.TimeoutExpired:
@@ -257,6 +259,14 @@ def _run_native_startup_gate(expected_system: str, tmp_path: Path) -> None:
         _assert_service_ready(second, port)
     finally:
         _stop_service(second, expected_system)
+
+
+@pytest.mark.skipif(
+    platform.system() != "Darwin",
+    reason="requires an explicitly configured native macOS runner",
+)
+def test_native_macos_startup_gate(tmp_path: Path) -> None:
+    _run_native_startup_gate("Darwin", tmp_path)
 
 
 @pytest.mark.skipif(
