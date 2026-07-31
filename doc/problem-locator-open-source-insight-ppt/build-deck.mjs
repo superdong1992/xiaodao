@@ -172,12 +172,12 @@ add(`
   <div class="opensre-overview">
     <header data-anim>
       <div class="kicker">OPEN-SOURCE AI-SRE INVESTIGATION FRAMEWORK</div>
-      <h2 class="h-xl">OpenSRE：开源的线上故障调查 Agent 框架</h2>
+      <h2 class="h-xl">OpenSRE：开源的线上故障定位 Agent 框架</h2>
     </header>
 
     <div class="opensre-definition" data-anim>
       <strong>核心定位</strong>
-      <p>OpenSRE 自己实现了一套线上故障调查 Agent 运行机制：通用大模型负责推理、提出假设和选择下一步；外层流水线负责解析告警、确定工具范围，并在调查结束后<span class="nowrap">调用推理模型</span><span class="nowrap">提取 RCA 字段</span>，<span class="nowrap">再由外层交付结果</span>；OpenSRE 运行时负责向模型提供提示词和范围内的工具定义、执行工具调用、控制循环、记录证据和管理上下文。</p>
+      <p>OpenSRE 在通用大模型之上实现了一个线上故障定位 Agent。模型负责提出假设、选择下一步；OpenSRE 负责限定工具、执行查询、记录证据、控制循环并交付报告。</p>
     </div>
 
     <div class="opensre-overview-bars" data-anim>
@@ -187,14 +187,14 @@ add(`
           <span>接收告警</span><i data-lucide="arrow-right"></i>
           <span>查询运维数据</span><i data-lucide="arrow-right"></i>
           <span>验证根因假设</span><i data-lucide="arrow-right"></i>
-          <span>输出调查报告</span>
+          <span>输出故障分析报告</span>
         </div>
       </div>
       <div class="opensre-composition">
         <b>核心组成</b>
-        <span>固定调查流水线</span><i data-lucide="plus"></i>
-        <span>单个故障调查 Agent</span><i data-lucide="plus"></i>
-        <span>运维工具集成</span><i data-lucide="plus"></i>
+        <span>固定的外层流程</span><i data-lucide="plus"></i>
+        <span>单个故障定位 Agent</span><i data-lucide="plus"></i>
+        <span>运维工具接入</span><i data-lucide="plus"></i>
         <span>评测机制</span>
       </div>
     </div>
@@ -203,26 +203,26 @@ add(`
       <article class="card" data-anim>
         <div class="feature-index">01</div>
         <div class="card-title">接入现有系统</div>
-        <p class="card-body">通过工具接入企业已有的日志、指标、调用链、发布、<span class="nowrap">数据库</span>和云平台，无需迁移全部数据。</p>
-        <div class="feature-tags"><span>日志</span><span>指标</span><span>调用链</span><span>发布 / 云平台</span></div>
+        <p class="card-body">通过工具接入企业已有的日志、指标、调用链、<span class="nowrap">发布与配置</span>、<span class="nowrap">数据库</span>和云平台，无需迁移全部数据。</p>
+        <div class="feature-tags"><span>日志</span><span>指标</span><span>调用链</span><span>发布与配置</span><span>数据库 / 云平台</span></div>
       </article>
       <article class="card" data-anim>
         <div class="feature-index">02</div>
-        <div class="card-title">Agent 动态调查</div>
-        <p class="card-body">不依赖 RPC 超时等固定故障剧本；Agent 在<span class="nowrap">允许的工具范围</span>内提出假设、选择查询并迭代验证。</p>
-        <div class="feature-tags"><span>单 Agent</span><span>动态选工具</span><span>逐轮验证</span></div>
+        <div class="card-title">Agent 动态排查</div>
+        <p class="card-body">不依赖固定流程的故障定位脚本；Agent 会在<span class="nowrap">可用工具范围</span>内提出假设、选择查询并逐轮验证。</p>
+        <div class="feature-tags"><span>单 Agent</span><span>动态选用工具</span><span>逐轮验证</span></div>
       </article>
       <article class="card" data-anim>
         <div class="feature-index">03</div>
         <div class="card-title">结论附带证据</div>
-        <p class="card-body">报告给出可能根因、原因链、查询结果、未确认项与<span class="nowrap">处置建议</span>，供人工核对。</p>
-        <div class="feature-tags"><span>查询结果</span><span>原因链</span><span>未确认项</span></div>
+        <p class="card-body">报告给出可能的根因、因果链、查询证据、<span class="nowrap">待确认项与处置建议</span>，供人工复核。</p>
+        <div class="feature-tags"><span>查询证据</span><span>因果链</span><span>待确认项</span></div>
       </article>
     </div>
 
     <div class="opensre-boundary" data-anim>
       <strong>实现边界</strong>
-      <span>通用大模型，未训练新基础模型</span><span>当前主流程为单 Agent</span><span>能力取决于已接入工具</span><span>公开早期测试阶段</span>
+      <span>使用通用大模型，不另行训练基础模型</span><span>当前主流程为单 Agent</span><span>能力取决于已接入工具</span><span>项目仍处于公开测试早期</span>
     </div>
   </div>
   ${source([["OpenSRE README", `${opensreBase}/README.md`]])}
@@ -234,72 +234,72 @@ add(`
   <div class="opensre-process-slide">
     <header data-anim>
       <div class="kicker">FIXED OUTER PIPELINE</div>
-      <h2 class="h-xl">一条告警怎样进入并离开 OpenSRE</h2>
+      <h2 class="h-xl">OpenSRE 如何按六步处理一条告警</h2>
     </header>
 
     <div class="opensre-six-flow" data-anim>
       <article class="opensre-flow-step">
-        <span class="step-no">01</span><strong>确认可用集成</strong>
-        <p>找到已连接且当前可用的<span class="nowrap">外部系统集成</span></p><small>resolve_integrations</small>
+        <span class="step-no">01</span><strong>确认系统接入</strong>
+        <p>确认当前已连接且可用的<span class="nowrap">外部系统</span></p><small>resolve_integrations</small>
       </article>
       <article class="opensre-flow-step">
         <span class="step-no">02</span><strong>解析告警</strong>
-        <p>提取服务、错误与时间范围</p><small>extract_alert</small>
+        <p>提取服务名、错误信息与<span class="nowrap">时间范围</span></p><small>extract_alert</small>
       </article>
       <article class="opensre-flow-step selected">
-        <span class="step-no">03</span><strong>选择允许工具</strong>
-        <p>按确定性规则筛选本次可用工具</p><small>plan_actions</small>
+        <span class="step-no">03</span><strong>确定工具范围</strong>
+        <p>按固定规则筛选本次可用工具</p><small>plan_actions</small>
       </article>
       <article class="opensre-flow-step active">
-        <span class="step-no">04</span><strong>Agent 调查</strong>
-        <p>在允许范围内逐轮查询，验证<span class="nowrap">根因假设</span></p><small title="ConnectedInvestigationAgent.run">agent.run</small>
+        <span class="step-no">04</span><strong>Agent 排查</strong>
+        <p>在可用工具范围内逐轮查询并<span class="nowrap">验证根因假设</span></p><small title="ConnectedInvestigationAgent.run">agent.run</small>
       </article>
       <article class="opensre-flow-step">
-        <span class="step-no">05</span><strong>整理结论</strong>
-        <p>通常结构化提取 <span class="nowrap">RCA 字段</span></p><small>diagnose</small>
+        <span class="step-no">05</span><strong>整理 RCA 结论</strong>
+        <p>按预定义结构整理最终输出</p><small>diagnose</small>
       </article>
       <article class="opensre-flow-step">
         <span class="step-no">06</span><strong>交付报告</strong>
-        <p>生成、保存或发送调查报告</p><small>deliver</small>
+        <p>生成、保存或发送故障分析报告</p><small>deliver</small>
       </article>
     </div>
 
     <div class="stage-relation" data-anim>
-      <strong>第 3 步</strong>代码确定本次调查的工具边界
+      <strong>第 3 步</strong>由程序按固定规则确定 Agent 可以使用哪些工具
       <i data-lucide="arrow-right"></i>
-      <strong>第 4 步</strong>故障调查 Agent 在边界内动态查询，具体循环见下一页
+      <strong>第 4 步</strong>由 Agent 在这些工具中动态选择并调用，具体循环见下一页
     </div>
 
     <div class="opensre-stage-grid">
       <article class="opensre-stage-card selected" data-anim>
-        <div class="stage-card-head"><span>03</span><div><strong>代码确定工具边界</strong><small>确定性选择，不调用模型规划</small></div></div>
+        <div class="stage-card-head"><span>03</span><div><strong>程序按规则确定工具范围</strong><small>固定规则筛选，不由模型规划</small></div></div>
         <ul>
-          <li>候选来自已注册且当前可用的调查工具，再按固定规则排序。</li>
-          <li><code>planned_actions</code> 是<strong>工具名短名单</strong>；阶段还记录选择理由、审计信息及建议检索参数。</li>
-          <li>它不提出根因假设，也不生成每次实际工具调用的查询语句。默认预算 <strong>10</strong> 个，可配 <strong>1—50</strong> 个；入选数可少于预算。</li>
-          <li>正常情况下 Agent 只获得短名单中仍可用的工具；计划为空或全部失效时，才进入最多 <strong>32</strong> 个工具的回退筛选。</li>
+          <li>候选来自已注册且当前可用的排查工具，再由程序按固定规则排序。</li>
+          <li>代码字段 <code>planned_actions</code> 保存<strong>入选工具名短名单</strong>；规划阶段还记录选择理由、审计信息和建议的检索参数。</li>
+          <li>本阶段不提出根因假设，也不生成实际工具调用参数。默认最多选择 <strong>10</strong> 个工具，可配置为 <strong>1—50</strong> 个；实际数量可能少于上限。</li>
+          <li>Agent 只能调用短名单中仍可用的工具；如果短名单为空或其中工具均不可用，系统才会从最多 <strong>32</strong> 个候选工具中重新筛选。</li>
         </ul>
       </article>
       <article class="opensre-stage-card active" data-anim>
-        <div class="stage-card-head"><span>04</span><div><strong>Agent 在边界内动态调查</strong><small>模型决策 + OpenSRE 运行时执行</small></div></div>
+        <div class="stage-card-head"><span>04</span><div><strong>Agent 在可用工具范围内动态排查</strong><small>模型负责决策，OpenSRE 运行时负责执行</small></div></div>
         <ul>
-          <li>对于已配置种子查询的告警来源，OpenSRE 运行时代码会在首次调用模型前执行该查询。</li>
-          <li>模型读取告警和已有证据，决定下一工具、查询参数、时间范围和是否继续。</li>
-          <li>Agent 结束后，外层第 5 步 <strong>diagnose</strong> 通常调用推理模型，以结构化输出从最终文本提取 RCA 字段；<span class="nowrap">失败时回退旧解析器</span>。它不继续调查，也不做<span class="nowrap">独立复核</span>。</li>
-          <li>随后，外层第 6 步 <strong>deliver</strong> 生成、保存或发送报告。</li>
+          <li>第 4 步接收告警内容、可用工具范围和已有证据，再进入 Agent 排查循环。</li>
+          <li>模型读取告警和已有证据，决定下一步调用哪个工具，并确定查询参数、时间范围和是否继续。</li>
+          <li><strong>结论整理（diagnose）</strong>通常由推理模型按预定义结构整理 Agent 的最终输出；失败时改用<span class="nowrap">旧版标签解析规则</span>。该步骤不会继续排查，也不会独立复核结论。</li>
+          <li><strong>报告交付（deliver）</strong>负责生成、保存或发送报告。</li>
         </ul>
       </article>
     </div>
     <div class="outer-pipeline-note" data-anim>
-      <span><b>外层实现：</b>六步由 Python 按固定顺序编排：第 3 步按规则选工具，第 4 步运行调查模型循环，第 5 步通常调用推理模型，以<span class="nowrap">结构化输出</span>提取字段；失败时回退旧解析器。</span>
-      <span><b>当前缺口：</b><code>retrieval_controls</code> 中的建议时窗与结果数量，尚未被 Agent / 工具执行链强制注入真实调用参数。</span>
+      <span><b>外层实现：</b>非噪声告警按六步固定顺序执行；噪声告警在第 2 步后结束。第 3—5 步依次确定<span class="nowrap">工具范围</span>、运行 Agent、整理 RCA 结论。</span>
+      <span><b>当前缺口：</b>计划阶段建议的时间范围和返回条数（<code>retrieval_controls</code>）目前不会自动写入实际查询参数。</span>
     </div>
   </div>
   ${source([
-    ["Pipeline", `${opensreBase}/tools/investigation/lifecycle.py`],
-    ["Plan stage", `${opensreBase}/tools/investigation/stages/plan_evidence/node.py`],
-    ["Tool selection", `${opensreBase}/tools/investigation/stages/gather_evidence/tools.py`],
-    ["Diagnose", `${opensreBase}/tools/investigation/stages/diagnose/node.py`],
+    ["外层流程", `${opensreBase}/tools/investigation/lifecycle.py`],
+    ["规划阶段", `${opensreBase}/tools/investigation/stages/plan_evidence/node.py`],
+    ["工具筛选", `${opensreBase}/tools/investigation/stages/gather_evidence/tools.py`],
+    ["结论整理", `${opensreBase}/tools/investigation/stages/diagnose/node.py`],
   ])}
 </section>`);
 
@@ -309,44 +309,44 @@ add(`
   <div class="opensre-agent-slide">
     <header data-anim>
       <div class="kicker">CONNECTEDINVESTIGATIONAGENT.RUN</div>
-      <h2 class="h-xl">OpenSRE 自己实现的故障调查 Agent 怎样运行</h2>
+      <h2 class="h-xl">OpenSRE 的故障定位 Agent 如何运行</h2>
     </header>
 
     <div class="agent-equation" data-anim>
-      <strong>ConnectedInvestigationAgent</strong><span>=</span>
-      <b>调查提示词</b><i data-lucide="plus"></i><b>可用工具</b><i data-lucide="plus"></i><b>模型调用循环</b><i data-lucide="plus"></i><b>工具执行</b><i data-lucide="plus"></i><b>证据记录</b><i data-lucide="plus"></i><b>运行控制</b>
+      <strong>故障定位 Agent</strong><small>（ConnectedInvestigationAgent）</small><span>=</span>
+      <b>排查提示词</b><i data-lucide="plus"></i><b>可用工具</b><i data-lucide="plus"></i><b>模型决策循环</b><i data-lucide="plus"></i><b>工具执行</b><i data-lucide="plus"></i><b>证据记录</b><i data-lucide="plus"></i><b>运行控制</b>
     </div>
 
     <div class="agent-method-strip" data-anim>
       <strong>提示词引导</strong>
-      <span>分诊</span><i data-lucide="arrow-right"></i><span>提出假设</span><i data-lucide="arrow-right"></i><span>查询验证</span><i data-lucide="arrow-right"></i><span>处置建议</span>
-      <small>不是代码状态机；首轮新工具结果返回后，运行时会追加一次 checkpoint，推动模型明确<br>分诊结论、根因假设与待确认问题</small>
+      <span>初步判断</span><i data-lucide="arrow-right"></i><span>提出假设</span><i data-lucide="arrow-right"></i><span>查询并验证</span><i data-lucide="arrow-right"></i><span>给出处置建议</span>
+      <small>由提示词引导，并非代码状态机；首轮模型调用产生新工具结果后，运行时追加阶段复盘提示，要求模型明确当前判断、根因假设和待确认问题。</small>
     </div>
 
     <div class="agent-workbench">
       <div class="agent-main-flow" data-anim>
         <div class="agent-start-grid">
           <article class="agent-step">
-            <em>01</em><div><strong>准备本次运行</strong><p>读取当前流水线中的告警、解析字段、连接信息和工具短名单；新建<span class="nowrap">消息历史</span>、证据集合和工具调用缓存。</p></div>
+            <em>01</em><div><strong>准备本次运行</strong><p>读取本次任务的告警、已解析字段、连接信息和可用工具列表；初始化<span class="nowrap">消息历史</span>、证据集和工具调用缓存。</p></div>
           </article>
           <article class="agent-step">
-            <em>02</em><div><strong>可选的预设种子查询</strong><p>如告警来源已配置种子查询，OpenSRE 运行时会在<span class="nowrap">首次调用模型前</span>执行；结果写入证据并加入<span class="nowrap">模型上下文</span>。</p></div>
+            <em>02</em><div><strong>可选：执行预置首查</strong><p>如果告警来源配置了预置首查，运行时会在<span class="nowrap">首次调用模型前</span>执行；结果保存为初始证据并加入<span class="nowrap">模型上下文</span>。</p></div>
           </article>
         </div>
-        <div class="agent-loop-label"><span>单 Agent 调查循环</span><small>查询结果返回同一个模型继续推理</small></div>
+        <div class="agent-loop-label"><span>单 Agent 排查循环</span><small>每轮查询结果都会返回模型，供其继续推理</small></div>
         <div class="agent-loop-row">
           <article class="agent-loop-step model"><em>03</em><strong>模型决定下一步</strong><p>提出假设，选择工具，生成<span class="nowrap">查询参数</span>和时间范围。</p></article>
           <i data-lucide="chevron-right"></i>
-          <article class="agent-loop-step"><em>04</em><strong>运行时检查并执行</strong><p>校验模型可填写的调用参数；受保护<span class="nowrap">连接字段</span><span class="nowrap">由运行时注入</span>。<span class="nowrap">同轮默认并行</span>，遇到串行工具则<span class="nowrap">整批顺序执行</span>；异常以错误结果<span class="nowrap">送回循环</span>。</p></article>
+          <article class="agent-loop-step"><em>04</em><strong>运行时校验并执行</strong><p>模型生成调用参数；运行时<span class="nowrap">校验参数</span>、<span class="nowrap">注入连接凭据</span><span class="nowrap">并执行工具</span>。同轮多个工具<span class="nowrap">默认并行</span>，包含串行工具时<span class="nowrap">整批顺序执行</span>；工具失败时，<span class="nowrap">错误信息</span>返回 Agent，<span class="nowrap">排查继续</span>。</p></article>
           <i data-lucide="chevron-right"></i>
-          <article class="agent-loop-step"><em>05</em><strong>记录新证据</strong><p>新结果加入模型消息，并写入脱敏的 <code>EvidenceEntry</code>；<span class="nowrap">缓存复用</span>不新增证据条目。</p></article>
+          <article class="agent-loop-step"><em>05</em><strong>记录新证据</strong><p>新结果加入<span class="nowrap">模型上下文</span>，<span class="nowrap">并保存为</span>脱敏的<span class="nowrap">证据溯源记录</span>（<code>EvidenceEntry</code>）；<span class="nowrap">复用缓存结果时</span><span class="nowrap">不新增证据记录</span>。</p></article>
           <i data-lucide="chevron-right"></i>
-          <article class="agent-loop-step end"><em>06</em><strong>继续或结束</strong><p>有新调用则进入下一轮；<span class="nowrap">无工具调用时</span>检查结论标记，首次缺失最多再提示一次。模型调用上限为 20 次。</p></article>
+          <article class="agent-loop-step end"><em>06</em><strong>继续或结束</strong><p>有新调用则进入下一轮；模型不再调用工具时，运行时检查结论格式，首次不完整时最多再提醒一次。模型调用上限为 20 次。</p></article>
         </div>
         <div class="agent-feedback">
-          <span><b>继续：</b>证据回到步骤 03，模型调整假设与查询</span>
+          <span><b>继续：</b>新证据返回步骤 03，模型调整假设和查询</span>
           <i data-lucide="refresh-cw"></i>
-          <span><b>结束：</b>最后一条助手消息 + 证据 + 循环次数 → 外层流程</span>
+          <span><b>结束：</b>模型最终回复 + 证据集 + 循环次数 → 外层流程</span>
         </div>
       </div>
 
@@ -355,34 +355,34 @@ add(`
           <div class="control-head"><span>A</span><strong>模型上下文长度控制</strong></div>
           <p>每轮调用模型前，运行时估算<strong>系统提示词、工具定义和消息历史</strong>的总长度。本轮输入上限 = <span class="nowrap">模型上下文窗口</span> − 为输出预留 <strong>16,000 个 token</strong>。</p>
           <ol>
-            <li>超限时优先删除完全重复的工具调用及其返回结果，<span class="nowrap">同类中</span>先删除占用最大的。</li>
-            <li>再删除占用最大的非种子工具调用及其返回结果；<span class="nowrap">种子查询</span>的调用及返回结果不整组删除。</li>
-            <li>仍超限才截断最大可裁剪消息。</li>
+            <li>超限时先删除重复的工具调用及其结果；有多组<span class="nowrap">可删内容</span>时，优先删除占用上下文最多的一组。</li>
+            <li>再删除占用上下文最多的普通工具调用及其结果；预置首查及其结果不会整组删除。</li>
+            <li>如果仍超限，再截断可裁剪消息中最长的一条。</li>
           </ol>
-          <small>这是消息历史的删除与截断，不是自动总结；被裁内容不再进入后续模型调用，但脱敏的 <code>EvidenceEntry</code> 仍单独保留。</small>
+          <small>这里只做删除或截断，不自动生成摘要。被裁掉的工具结果不再发送给模型，但已有脱敏证据记录仍<span class="nowrap">单独保留</span>；<span class="nowrap">普通消息</span>不保证另有备份。</small>
         </article>
         <article class="agent-control-card cache-card" data-anim>
-          <div class="control-head"><span>B</span><strong>当前调查内复用相同工具调用</strong></div>
-          <p>OpenSRE 运行时把<strong>工具名 + 模型或种子查询提供的输入参数</strong>按键排序规范化，作为缓存键；<span class="nowrap">受保护连接字段不计入缓存键</span>。完全相同且仍在缓存中的调用直接复用结果；参数变化时重新执行。缓存按最近最少使用（LRU）策略淘汰条目。</p>
-          <div class="cache-metrics"><span><b>最多 128 项</b>缓存条目</span><span><b>约 200 万字符</b>缓存总容量</span><span><b>8,000 字符</b>重复结果回放上限</span></div>
-          <small>如果连续两轮的全部工具调用都命中缓存，下一轮将不再向模型提供工具，只要求它输出结论。</small>
+          <div class="control-head"><span>B</span><strong>同一次排查中复用相同调用的结果</strong></div>
+          <p>运行时用<strong>工具名和调用参数</strong>生成缓存键；连接凭据等受保护参数不参与生成。完全相同的调用复用已有结果，参数变化则重新执行。缓存满时按照 LRU 策略<span class="nowrap">淘汰旧记录</span>。</p>
+          <div class="cache-metrics"><span><b>最多 128 条</b>缓存记录</span><span><b>约 200 万字符</b>缓存总容量</span><span><b>最多 8,000 字符</b>重复调用时<br>返回模型</span></div>
+          <small>如果连续两轮都只有重复调用，下一轮暂不提供工具，<span class="nowrap">只要求模型给出结论</span>。</small>
         </article>
       </aside>
     </div>
 
     <div class="agent-boundary-strip" data-anim>
       <strong>实现边界</strong>
-      <span>上下文裁剪与缓存由 OpenSRE 运行时负责，不是模型能力</span>
+      <span>上下文裁剪与缓存由 OpenSRE 运行时负责，不是模型自身能力</span>
       <span>同轮工具并行 ≠ 多 Agent 协作</span>
-      <span><span class="agent-boundary-copy"><code>diagnose</code> 通常调用推理模型提取字段；不继续调查或独立复核</span></span>
-      <span>计划阶段的建议检索参数未被强制采用</span>
+      <span><span class="agent-boundary-copy">结论整理（<code>diagnose</code>）只整理最终结论，<span class="nowrap">不继续排查</span>或独立复核</span></span>
+      <span>计划阶段建议的时间范围和返回条数不会自动写入实际查询参数</span>
     </div>
   </div>
   ${source([
-    ["Agent loop", `${opensreBase}/tools/investigation/stages/gather_evidence/agent.py`],
-    ["Prompt", `${opensreBase}/tools/investigation/stages/gather_evidence/prompt.py`],
-    ["Context budget", `${opensreBase}/core/context_budget.py`],
-    ["Evidence", `${opensreBase}/core/state/evidence.py`],
+    ["Agent 循环", `${opensreBase}/tools/investigation/stages/gather_evidence/agent.py`],
+    ["提示词", `${opensreBase}/tools/investigation/stages/gather_evidence/prompt.py`],
+    ["上下文控制", `${opensreBase}/core/context_budget.py`],
+    ["证据记录", `${opensreBase}/core/state/evidence.py`],
   ])}
 </section>`);
 
@@ -392,20 +392,20 @@ add(`
   <div class="opensre-case-slide">
     <header data-anim>
       <div class="kicker">END-TO-END WALKTHROUGH</div>
-      <h2 class="h-xl">一次 RPC 超时，调查 Agent 会怎样逐步定位？</h2>
+      <h2 class="h-xl">以 RPC 超时为例：Agent 如何逐步定位根因</h2>
     </header>
 
     <div class="teaching-notice" data-anim>
       <i data-lucide="info"></i>
-      <span>教学构造：用于说明一种可能的调查过程；并非 OpenSRE 官方案例或内置剧本。</span>
+      <span>演示场景：以下内容为便于讲解而构造，只展示一种可能的排查路径；不是 OpenSRE 官方案例，也不是内置的 RPC 超时固定定位流程。</span>
     </div>
 
     <div class="case-stage-rail" data-anim aria-label="与第 2 页对应的六个步骤">
-      <span><b>01</b>确认可用集成</span><i data-lucide="chevron-right"></i>
+      <span><b>01</b>确认系统接入</span><i data-lucide="chevron-right"></i>
       <span><b>02</b>解析告警</span><i data-lucide="chevron-right"></i>
-      <span class="selected"><b>03</b>选择工具</span><i data-lucide="chevron-right"></i>
-      <span class="active"><b>04</b>Agent 调查</span><i data-lucide="chevron-right"></i>
-      <span><b>05</b>整理结论</span><i data-lucide="chevron-right"></i>
+      <span class="selected"><b>03</b>确定工具范围</span><i data-lucide="chevron-right"></i>
+      <span class="active"><b>04</b>Agent 排查</span><i data-lucide="chevron-right"></i>
+      <span><b>05</b>整理 RCA 结论</span><i data-lucide="chevron-right"></i>
       <span><b>06</b>交付报告</span>
     </div>
 
@@ -414,43 +414,43 @@ add(`
         <article class="alert-card" data-anim>
           <div class="alert-card-head"><span>P1 告警</span><strong>2026-07-29 10:02</strong></div>
           <dl>
-            <div><dt>环境</dt><dd>prod / <code>commerce-prod</code></dd></div>
-            <div><dt>调用</dt><dd><code>order-service</code> → <code>inventory-service</code></dd></div>
-            <div><dt>接口</dt><dd><code>/Inventory/Reserve</code></dd></div>
-            <div><dt>现象</dt><dd>P99 <b>3.2 秒</b>，阈值 800 毫秒</dd></div>
-            <div><dt>错误率</dt><dd>12% · <code>DEADLINE_EXCEEDED</code></dd></div>
-            <div><dt>来源</dt><dd>Datadog</dd></div>
+            <div><dt>环境</dt><dd>生产环境 prod / <code>commerce-prod</code></dd></div>
+            <div><dt>调用</dt><dd>订单服务 <code>order-service</code> → 库存服务 <code>inventory-service</code></dd></div>
+            <div><dt>接口</dt><dd>库存预留 <code>/Inventory/Reserve</code></dd></div>
+            <div><dt>现象</dt><dd>P99 延迟 <b>3.2 秒</b>，告警阈值 800 毫秒</dd></div>
+            <div><dt>错误率</dt><dd>12% · gRPC 超时 <code>DEADLINE_EXCEEDED</code></dd></div>
+            <div><dt>来源</dt><dd>Datadog 监控</dd></div>
           </dl>
-          <small>教学假设：除 Datadog 外，还已接入 Grafana Tempo、<span class="nowrap">配置变更</span>和数据库<span class="nowrap">观测工具</span>；未接入时无法完成对应验证。</small>
+          <small>场景前提：已接入 Datadog、<span class="nowrap">Grafana Tempo 调用链</span>、<span class="nowrap">配置变更查询</span>和数据库监控工具；<span class="nowrap">未接入相应数据源时</span>，无法<span class="nowrap">完成对应验证</span>。</small>
         </article>
 
         <article class="tool-plan-card" data-anim>
-          <div><span>工具边界</span><strong>本次允许使用的调查工具（类型示意）</strong></div>
-          <p>调用链查询 · 库存服务日志查询 · 发布与配置查询 · <span class="nowrap">连接池</span>和数据库指标查询</p>
-          <small>第 3 步确定工具范围；第 4 步由模型决定查询参数和调查顺序。</small>
+          <div><span>可用工具范围</span><strong>本次可用的排查工具（仅示意工具类型）</strong></div>
+          <p><span class="nowrap">Datadog 上下文查询</span> · <span class="nowrap">调用链查询</span> · <span class="nowrap">库存日志查询</span> · <span class="nowrap">发布与配置查询</span> · <span class="nowrap">连接池与数据库指标查询</span></p>
+          <small>第 3 步确定工具范围；第 4 步由模型决定查询参数和排查顺序。</small>
         </article>
       </div>
 
       <div class="evidence-path" data-anim>
         <article>
           <span class="evidence-no">4A</span>
-          <div><strong>无需模型选择：运行时执行 Datadog 种子查询</strong><p>按告警来源路由，在首次调用模型前取回相关监控、日志和变更事件，作为初始证据。</p></div>
+          <div><strong>模型调用前：运行时执行 Datadog 预置首查</strong><p>OpenSRE 根据告警来源自动执行该查询，在首次调用模型前获取相关监控、日志和变更事件，作为初始证据。</p></div>
         </article>
         <article>
           <span class="evidence-no">4B</span>
-          <div><strong>模型首轮分诊：选择调用链查询</strong><p>模型选择 Grafana Tempo 并生成查询参数，OpenSRE 运行时执行查询：总耗时 <b>3.21 秒</b>，库存服务 <code>db.acquire</code> 占 <b>3.02 秒</b>。</p></div>
+          <div><strong>模型首轮判断：选择调用链查询</strong><p>模型选择 Grafana Tempo 并生成参数；运行时执行后返回：总耗时 <b>3.21 秒</b>，其中库存服务获取数据库连接阶段（<code>db.acquire</code>）耗时 <b>3.02 秒</b>。</p></div>
         </article>
         <article>
           <span class="evidence-no">4C</span>
-          <div><strong>模型提出假设，并选择日志验证</strong><p>模型提出“库存服务在等待数据库连接”的假设并选择日志查询；运行时执行后发现，日志从 10:00 起出现 <code>connection acquisition timeout after 3000ms</code>。</p></div>
+          <div><strong>模型提出假设，并查询日志验证</strong><p>模型提出“库存服务在等待数据库连接”的假设；运行时查询后发现，日志从 10:00 起出现“获取数据库连接等待 3,000 毫秒后超时”（<code>connection acquisition timeout after 3000ms</code>）。</p></div>
         </article>
         <article>
           <span class="evidence-no">4D</span>
-          <div><strong>模型继续选择发布与配置查询</strong><p>OpenSRE 运行时执行后发现：09:58 发布的 <code>inventory-service v4.8.3</code> 将连接池上限从 <b>80</b> 改成 <b>8</b>。</p></div>
+          <div><strong>模型继续查询发布记录和配置变更</strong><p>运行时发现：09:58 发布的库存服务 v4.8.3（<code>inventory-service</code>）将连接池上限从 <b>80</b> 下调至 <b>8</b>。</p></div>
         </article>
         <article>
           <span class="evidence-no">4E</span>
-          <div><strong>模型选择指标查询，继续交叉验证</strong><p>模型生成查询参数，运行时执行并返回：活动连接数 active=8、等待请求数 waiters=120；数据库 SQL 耗时、CPU、网络和其他下游<span class="nowrap">无对应异常</span>。结果支持<span class="nowrap">连接池耗尽</span>判断，并降低其他原因的可能性。</p></div>
+          <div><strong>模型查询指标，继续交叉验证</strong><p>运行时返回：活动连接数 active=8、等待请求数 waiters=120；数据库 SQL 耗时、CPU、网络和其他下游<span class="nowrap">均无异常</span>。结果进一步支持<span class="nowrap">连接池耗尽</span>判断，并降低其他原因的可能性。</p></div>
         </article>
       </div>
     </div>
@@ -458,29 +458,29 @@ add(`
     <div class="case-conclusion" data-anim>
       <div>
         <span class="nowrap">Agent 结论</span>
-        <strong>09:58 的发布将连接池上限由 80 改为 8；连接池耗尽使请求排队、库存服务响应超过 3 秒，触发上游 RPC 超时。</strong>
+        <strong>09:58 发布的版本将连接池上限从 80 下调至 8，导致连接池耗尽、请求排队，库存服务响应时间超过 3 秒，最终触发上游 RPC 超时。</strong>
       </div>
       <div class="cause-chain">
-        <span>连接池 80 → 8</span><i data-lucide="arrow-right"></i><span>连接池占满</span><i data-lucide="arrow-right"></i><span><code>db.acquire</code> 等待</span><i data-lucide="arrow-right"></i><span>库存服务响应超时</span><i data-lucide="arrow-right"></i><span>上游 RPC 超时</span>
+        <span>连接池上限 80 → 8</span><i data-lucide="arrow-right"></i><span>连接池耗尽</span><i data-lucide="arrow-right"></i><span>等待获取数据库连接（<code>db.acquire</code>）</span><i data-lucide="arrow-right"></i><span>库存服务响应超过 3 秒</span><i data-lucide="arrow-right"></i><span>上游 RPC 超时</span>
       </div>
-      <p><b>处置建议（人工执行）：</b>经审批恢复正确配置，并增加配置校验和连接等待告警。</p>
+      <p><b>处置建议（人工执行）：</b>经审批将连接池上限恢复到经验证的合理值，并增加配置校验和连接池等待请求数告警。</p>
     </div>
 
     <div class="case-outer-finish" data-anim>
-      <strong>外层收尾</strong><span>Agent 最终文本</span><i data-lucide="arrow-right"></i><span><code>diagnose</code> 结构化提取字段；失败回退旧解析器</span><i data-lucide="arrow-right"></i><span><code>deliver</code> 生成并交付报告</span>
+      <strong>外层报告流程</strong><span>Agent 最终结论</span><i data-lucide="arrow-right"></i><span>结论整理（<code>diagnose</code>）</span><i data-lucide="arrow-right"></i><span>报告交付（<code>deliver</code>）</span>
     </div>
 
     <div class="case-boundary" data-anim>
       <strong>能力边界</strong>
       <div class="case-boundary-tags">
-        <span>教学构造，并非官方案例</span><span>没有内置 RPC 超时剧本</span><span>默认不自动回滚</span><span>Agent 结束调查 ≠ 独立复核通过</span>
+        <span>演示场景，并非官方案例</span><span>未内置针对 RPC 超时的固定定位流程</span><span>默认不会自动回滚</span><span>Agent 完成排查不等于结论已通过独立复核</span>
       </div>
     </div>
   </div>
   ${source([
-    ["Agent loop", `${opensreBase}/tools/investigation/stages/gather_evidence/agent.py`],
-    ["Investigation prompt", `${opensreBase}/tools/investigation/stages/gather_evidence/prompt.py`],
-    ["Evidence state", `${opensreBase}/core/state/evidence.py`],
+    ["Agent 循环", `${opensreBase}/tools/investigation/stages/gather_evidence/agent.py`],
+    ["排查提示词", `${opensreBase}/tools/investigation/stages/gather_evidence/prompt.py`],
+    ["证据状态", `${opensreBase}/core/state/evidence.py`],
   ])}
 </section>`);
 
@@ -2045,6 +2045,7 @@ const customCss = `
     background:#fff;border-left:5px solid var(--brand-red);box-shadow:var(--shadow-soft);
   }
   .agent-equation strong{font:800 .9vw var(--mono);color:var(--brand-red)}
+  .agent-equation > small{font:700 .68vw var(--mono);color:#667180;white-space:nowrap}
   .agent-equation > span{font:800 1vw var(--mono);color:var(--ink)}
   .agent-equation b{padding:.36vh .5vw;background:var(--brand-grey);font-size:.84vw;white-space:nowrap}
   .agent-equation .lucide{width:.72vw;height:.72vw;color:var(--brand-red)}
@@ -2058,7 +2059,10 @@ const customCss = `
     border:1px solid rgba(255,255,255,.2);font-size:.9vw;font-weight:750;
   }
   .agent-method-strip .lucide{width:.75vw;height:.75vw}
-  .agent-method-strip small{margin-left:auto;max-width:34vw;font-size:.84vw;line-height:1.22;color:rgba(255,255,255,.8);text-align:right}
+  .agent-method-strip small{
+    margin-left:auto;max-width:52vw;font-size:.76vw;line-height:1.18;
+    color:rgba(255,255,255,.8);text-align:right;white-space:nowrap;
+  }
   .agent-workbench{display:grid;grid-template-columns:2.45fr .95fr;gap:.9vw;min-height:0}
   .agent-main-flow{
     min-height:0;display:grid;grid-template-rows:10.5vh 2.7vh minmax(0,1fr) 4.3vh;gap:.55vh;
