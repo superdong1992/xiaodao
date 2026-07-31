@@ -248,6 +248,22 @@ env file, `/live`, all five `/ready` checks, bounded shutdown, canonical
 recovery startup. A successful result must report the exact release-candidate
 SHA, OS/build, architecture, Python version, command, and pytest count.
 
+The real Agent Backend release smoke is separate from the deterministic fake
+Agent E2E. Run it only in an isolated temporary workspace with an authenticated
+Claude Code installation; the command below disables repository customizations,
+session persistence, and every tool except writing the fixed output file:
+
+```sh
+export S08_REAL_AGENT_GATE=1
+export S08_REAL_AGENT_COMMAND='/absolute/path/to/claude -p --safe-mode --no-chrome --no-session-persistence --dangerously-skip-permissions --tools Write --model haiku --max-budget-usd 0.05'
+uv run pytest tests/e2e/test_real_agent_backend_gate.py -q -p no:cacheprovider
+```
+
+The gate verifies an actual Claude Code version, stdin delivery through the
+production `AgentBackend`, exact canonical `AgentJobOutcome` bytes, immutable
+input/runtime markers, output topology, bounded execution, and process-tree
+cleanup. A skipped result is not a pass.
+
 If a native result is available before the final S08 handoff-only commit, add
 its real command and summary to `handoff/S08.json.tests[]`. If it arrives after
 that immutable tip, do not amend or rewrite the handoff; attach the same fields
