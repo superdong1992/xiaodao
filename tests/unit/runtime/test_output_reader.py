@@ -1,0 +1,529 @@
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from problem_locator.contracts.enums import ErrorCode, ExecutionStage, ResourceKind
+from problem_locator.contracts.models import (
+    AgentJobOutcome,
+    FixtureManifest,
+    Job,
+    TreeManifest,
+    TreeManifestEntry,
+    WorkspaceInputManifest,
+)
+from problem_locator.contracts.serialization import (
+    bytes_sha256,
+    canonical_json_bytes,
+    parse_canonical_json_bytes,
+)
+from problem_locator.runtime.failures import RuntimeExecutionError
+from problem_locator.runtime.output_reader import read_agent_output
+
+
+REPOSITORY_ROOT = Path(__file__).parents[3]
+CONTRACT_FIXTURES = REPOSITORY_ROOT / "tests/fixtures/contracts/positive"
+FIXTURE_ROOT = REPOSITORY_ROOT / "tests/fixtures/components/runtime-output"
+
+
+def _fixture_payload(name: str) -> dict[str, Any]:
+    return json.loads((CONTRACT_FIXTURES / name).read_bytes())
+
+
+def _diagnosis_inputs() -> tuple[Job, WorkspaceInputManifest, dict[str, Any], bytes]:
+    job = parse_canonical_json_bytes(
+        (CONTRACT_FIXTURES / "job-diagnose.json").read_bytes(),
+        model_type=Job,
+    )
+    manifest = parse_canonical_json_bytes(
+        (CONTRACT_FIXTURES / "workspace-input-manifest.json").read_bytes(),
+        model_type=WorkspaceInputManifest,
+    )
+    return (
+        job,
+        manifest,
+        _fixture_payload("agent-job-outcome-diagnosis.json"),
+        (CONTRACT_FIXTURES / "user-result.json").read_bytes(),
+    )
+
+
+def _route_inputs() -> tuple[Job, WorkspaceInputManifest, dict[str, Any]]:
+    job = parse_canonical_json_bytes(
+        (CONTRACT_FIXTURES / "job-route.json").read_bytes(),
+        model_type=Job,
+    )
+    manifest = WorkspaceInputManifest(
+        schema_version=1,
+        job_id=job.job_id,
+        case_id=job.case_id,
+        job_type=job.job_type,
+        logparse_tool_ref=None,
+        logparse_product=None,
+        entries=[],
+    )
+    return job, manifest, _fixture_payload("agent-job-outcome-route.json")
+
+
+def _write_outcome(root: Path, payload: dict[str, Any] | bytes) -> Path:
+    output = root / "output"
+    output.mkdir(parents=True, exist_ok=True)
+    data = payload if isinstance(payload, bytes) else canonical_json_bytes(payload)
+    path = output / "job_outcome.json"
+    path.write_bytes(data)
+    return path
+
+
+def _write_file_proposal(root: Path, relative_path: str, content: bytes) -> Path:
+    path = root / relative_path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(content)
+    return path
+
+
+def _diagnostic_draft(
+    *,
+    proposal_key: str = "diagnostic_export",
+    relative_path: str = "output/proposals/diagnostic_export/export.bin",
+    resource_kind: str = "FILE",
+    declared_size: int | None = None,
+    declared_sha256: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "proposal_key": proposal_key,
+        "artifact_kind": "DIAGNOSTIC_EXPORT",
+        "name": "diagnostic-export",
+        "content_type": "application/octet-stream",
+        "resource_kind": resource_kind,
+        "workspace_relative_path": relative_path,
+        "declared_size": declared_size,
+        "declared_sha256": declared_sha256,
+        "metadata": {
+            "schema_version": 1,
+            "format_id": "runtime-output",
+            "description": "Opaque diagnostic export for output-reader tests.",
+        },
+    }
+
+
+def _assert_failure(
+    captured: pytest.ExceptionInfo[RuntimeExecutionError],
+    code: ErrorCode,
+) -> None:
+    failure = captured.value.failure
+    assert failure.stage is ExecutionStage.OUTCOME_VALIDATE
+    assert failure.code is code
+    assert failure.retryable is False
+    assert failure.details == []
+
+
+def test_reads_only_final_canonical_outcome_and_validates_user_result(
+    tmp_path: Path,
+) -> None:
+    job, manifest, payload, user_result_bytes = _diagnosis_inputs()
+    outcome_path = _write_outcome(tmp_path, payload)
+    (outcome_path.parent / "job_outcome.json.part").write_bytes(b"not JSON")
+    draft = payload["proposed_artifact_drafts"][0]
+    _write_file_proposal(tmp_path, draft["workspace_relative_path"], user_result_bytes)
+
+    result = read_agent_output(tmp_path, job, manifest)
+
+    expected_outcome = AgentJobOutcome.model_validate(payload)
+    assert result.outcome == expected_outcome
+    assert result.canonical_bytes == canonical_json_bytes(expected_outcome)
+    assert result.user_result is not None
+    assert result.user_result.candidate_statement == (
+        "The inventory RPC exceeded its deadline."
+    )
+    assert len(result.proposal_resources) == 1
+    resource = result.proposal_resources[0]
+    assert resource.proposal_key == "user_result"
+    assert resource.resource_kind is ResourceKind.FILE
+    assert resource.size == len(user_result_bytes)
+    assert resource.sha256 == hashlib.sha256(user_result_bytes).hexdigest()
+    assert resource.tree_manifest is None
+
+
+def test_part_file_without_final_is_outcome_missing(tmp_path: Path) -> None:
+    job, manifest, _ = _route_inputs()
+    output = tmp_path / "output"
+    output.mkdir()
+    (output / "job_outcome.json.part").write_bytes(b"complete-looking bytes")
+
+    with pytest.raises(RuntimeExecutionError) as captured:
+        read_agent_output(tmp_path, job, manifest)
+
+    _assert_failure(captured, ErrorCode.OUTCOME_MISSING)
+
+
+@pytest.mark.parametrize(
+    "invalid_bytes",
+    [
+        b"not-json\n",
+        b' {"valid":"json but not canonical"}\n',
+        b'{"unexpected":true}\n',
+    ],
+)
+def test_invalid_json_canonical_form_or_schema_is_outcome_invalid(
+    tmp_path: Path,
+    invalid_bytes: bytes,
+) -> None:
+    job, manifest, _ = _route_inputs()
+    _write_outcome(tmp_path, invalid_bytes)
+
+    with pytest.raises(RuntimeExecutionError) as captured:
+        read_agent_output(tmp_path, job, manifest)
+
+    _assert_failure(captured, ErrorCode.OUTCOME_INVALID)
+
+
+def test_outcome_job_binding_must_match_exactly(tmp_path: Path) -> None:
+    job, manifest, payload = _route_inputs()
+    payload["job_id"] = "00000000-0000-0000-0000-000000000099"
+    _write_outcome(tmp_path, payload)
+
+    with pytest.raises(RuntimeExecutionError) as captured:
+        read_agent_output(tmp_path, job, manifest)
+
+    _assert_failure(captured, ErrorCode.OUTCOME_INVALID)
+
+
+def test_outcome_must_be_an_ordinary_single_link_file(tmp_path: Path) -> None:
+    job, manifest, payload = _route_inputs()
+    output = tmp_path / "output"
+    output.mkdir()
+    source = tmp_path / "source.json"
+    source.write_bytes(canonical_json_bytes(payload))
+    os.link(source, output / "job_outcome.json")
+
+    with pytest.raises(RuntimeExecutionError) as captured:
+        read_agent_output(tmp_path, job, manifest)
+
+    _assert_failure(captured, ErrorCode.OUTCOME_INVALID)
+
+
+def test_outcome_symlink_is_not_followed(tmp_path: Path) -> None:
+    job, manifest, payload = _route_inputs()
+    output = tmp_path / "output"
+    output.mkdir()
+    target = tmp_path / "target.json"
+    target.write_bytes(canonical_json_bytes(payload))
+    try:
+        (output / "job_outcome.json").symlink_to(target)
+    except (NotImplementedError, OSError):
+        pytest.skip("symbolic links are unavailable on this platform")
+
+    with pytest.raises(RuntimeExecutionError) as captured:
+        read_agent_output(tmp_path, job, manifest)
+
+    _assert_failure(captured, ErrorCode.OUTCOME_INVALID)
+
+
+def test_valid_directory_proposal_builds_the_frozen_tree_manifest(
+    tmp_path: Path,
+) -> None:
+    job, manifest, payload = _route_inputs()
+    root_relative = "output/proposals/diagnostic_export/tree"
+    files = {"a.txt": b"alpha", "nested/b.bin": b"beta\x00bytes"}
+    entries = [
+        TreeManifestEntry(
+            path=path,
+            size=len(content),
+            sha256=hashlib.sha256(content).hexdigest(),
+        )
+        for path, content in sorted(files.items())
+    ]
+    expected_manifest = TreeManifest(version=1, entries=entries)
+    expected_hash = bytes_sha256(canonical_json_bytes(expected_manifest))
+    expected_size = sum(len(content) for content in files.values())
+    payload["proposed_artifact_drafts"] = [
+        _diagnostic_draft(
+            relative_path=root_relative,
+            resource_kind="DIRECTORY",
+            declared_size=expected_size,
+            declared_sha256=expected_hash,
+        )
+    ]
+    _write_outcome(tmp_path, payload)
+    for path, content in files.items():
+        _write_file_proposal(tmp_path, f"{root_relative}/{path}", content)
+
+    result = read_agent_output(tmp_path, job, manifest)
+
+    assert result.user_result is None
+    assert len(result.proposal_resources) == 1
+    resource = result.proposal_resources[0]
+    assert resource.resource_kind is ResourceKind.DIRECTORY
+    assert resource.size == expected_size
+    assert resource.sha256 == expected_hash
+    assert resource.tree_manifest == expected_manifest
+
+
+@pytest.mark.parametrize("field", ["declared_size", "declared_sha256"])
+def test_declared_proposal_size_and_hash_are_verified(
+    tmp_path: Path,
+    field: str,
+) -> None:
+    job, manifest, payload = _route_inputs()
+    content = b"actual proposal bytes"
+    draft = _diagnostic_draft(
+        declared_size=len(content),
+        declared_sha256=hashlib.sha256(content).hexdigest(),
+    )
+    draft[field] = len(content) + 1 if field == "declared_size" else "9" * 64
+    payload["proposed_artifact_drafts"] = [draft]
+    _write_outcome(tmp_path, payload)
+    _write_file_proposal(tmp_path, draft["workspace_relative_path"], content)
+
+    with pytest.raises(RuntimeExecutionError) as captured:
+        read_agent_output(tmp_path, job, manifest)
+
+    _assert_failure(captured, ErrorCode.OUTCOME_INVALID)
+
+
+def test_missing_or_linked_proposal_is_outcome_invalid(tmp_path: Path) -> None:
+    job, manifest, payload = _route_inputs()
+    draft = _diagnostic_draft()
+    payload["proposed_artifact_drafts"] = [draft]
+    _write_outcome(tmp_path, payload)
+
+    with pytest.raises(RuntimeExecutionError) as missing:
+        read_agent_output(tmp_path, job, manifest)
+    _assert_failure(missing, ErrorCode.OUTCOME_INVALID)
+
+    target = tmp_path / "target.bin"
+    target.write_bytes(b"outside")
+    path = tmp_path / draft["workspace_relative_path"]
+    path.parent.mkdir(parents=True)
+    try:
+        path.symlink_to(target)
+    except (NotImplementedError, OSError):
+        pytest.skip("symbolic links are unavailable on this platform")
+    with pytest.raises(RuntimeExecutionError) as linked:
+        read_agent_output(tmp_path, job, manifest)
+    _assert_failure(linked, ErrorCode.OUTCOME_INVALID)
+
+
+def test_proposal_parent_symlink_cannot_escape_workspace(tmp_path: Path) -> None:
+    job, manifest, payload = _route_inputs()
+    draft = _diagnostic_draft()
+    payload["proposed_artifact_drafts"] = [draft]
+    _write_outcome(tmp_path, payload)
+    outside = tmp_path / "outside"
+    (outside / "diagnostic_export").mkdir(parents=True)
+    (outside / "diagnostic_export/export.bin").write_bytes(b"outside")
+    try:
+        (tmp_path / "output/proposals").symlink_to(outside, target_is_directory=True)
+    except (NotImplementedError, OSError):
+        pytest.skip("symbolic links are unavailable on this platform")
+
+    with pytest.raises(RuntimeExecutionError) as captured:
+        read_agent_output(tmp_path, job, manifest)
+
+    _assert_failure(captured, ErrorCode.OUTCOME_INVALID)
+
+
+def test_user_result_must_be_canonical_and_semantically_exact(tmp_path: Path) -> None:
+    job, manifest, payload, canonical_result = _diagnosis_inputs()
+    result_payload = json.loads(canonical_result)
+    result_payload["candidate_statement"] = "A different conclusion."
+    wrong_result = canonical_json_bytes(result_payload)
+    draft = payload["proposed_artifact_drafts"][0]
+    draft["declared_size"] = len(wrong_result)
+    draft["declared_sha256"] = hashlib.sha256(wrong_result).hexdigest()
+    _write_outcome(tmp_path, payload)
+    _write_file_proposal(tmp_path, draft["workspace_relative_path"], wrong_result)
+
+    with pytest.raises(RuntimeExecutionError) as semantic:
+        read_agent_output(tmp_path, job, manifest)
+    _assert_failure(semantic, ErrorCode.OUTCOME_INVALID)
+
+    noncanonical = json.dumps(result_payload, indent=2).encode("utf-8") + b"\n"
+    draft["declared_size"] = len(noncanonical)
+    draft["declared_sha256"] = hashlib.sha256(noncanonical).hexdigest()
+    _write_outcome(tmp_path, payload)
+    _write_file_proposal(tmp_path, draft["workspace_relative_path"], noncanonical)
+    with pytest.raises(RuntimeExecutionError) as spelling:
+        read_agent_output(tmp_path, job, manifest)
+    _assert_failure(spelling, ErrorCode.OUTCOME_INVALID)
+
+
+def test_duplicate_proposal_key_is_rejected_before_any_resource_is_returned(
+    tmp_path: Path,
+) -> None:
+    job, manifest, payload = _route_inputs()
+    first = _diagnostic_draft()
+    second = _diagnostic_draft(relative_path="output/proposals/diagnostic_export/two.bin")
+    payload["proposed_artifact_drafts"] = [first, second]
+    _write_outcome(tmp_path, payload)
+    _write_file_proposal(tmp_path, first["workspace_relative_path"], b"first")
+    _write_file_proposal(tmp_path, second["workspace_relative_path"], b"second")
+
+    with pytest.raises(RuntimeExecutionError) as captured:
+        read_agent_output(tmp_path, job, manifest)
+
+    _assert_failure(captured, ErrorCode.OUTCOME_INVALID)
+
+
+def _secret_cases() -> dict[str, Any]:
+    return json.loads((FIXTURE_ROOT / "output-reader-cases.json").read_bytes())
+
+
+def test_secret_in_canonical_outcome_is_rejected_without_leak(tmp_path: Path) -> None:
+    cases = _secret_cases()
+    endpoint = cases["endpoint"]
+    token = cases["token"]
+    job, manifest, payload = _route_inputs()
+    payload["payload"]["reason"] = f"unsafe endpoint {endpoint}"
+    _write_outcome(tmp_path, payload)
+
+    with pytest.raises(RuntimeExecutionError) as captured:
+        read_agent_output(tmp_path, job, manifest, secrets=(endpoint, token))
+
+    _assert_failure(captured, ErrorCode.OUTCOME_INVALID)
+    rendered = f"{captured.value!r} {captured.value} {captured.value.failure}"
+    assert endpoint not in rendered
+    assert token not in rendered
+    assert captured.value.__context__ is None
+
+
+def test_secret_crossing_a_canonical_outcome_chunk_is_rejected(tmp_path: Path) -> None:
+    cases = _secret_cases()
+    endpoint = cases["endpoint"]
+    job, manifest, payload = _route_inputs()
+    payload["payload"]["reason"] = endpoint
+    marker_offset = canonical_json_bytes(payload).index(endpoint.encode())
+    padding = 65_536 - marker_offset - 5
+    assert padding > 0
+    payload["payload"]["reason"] = "x" * padding + endpoint
+    outcome_bytes = canonical_json_bytes(payload)
+    secret_offset = outcome_bytes.index(endpoint.encode())
+    assert secret_offset < 65_536 < secret_offset + len(endpoint.encode())
+    _write_outcome(tmp_path, outcome_bytes)
+
+    with pytest.raises(RuntimeExecutionError) as captured:
+        read_agent_output(tmp_path, job, manifest, secrets=(endpoint,))
+
+    _assert_failure(captured, ErrorCode.OUTCOME_INVALID)
+    assert endpoint not in str(captured.value)
+
+
+def test_schema_invalid_secret_input_is_not_retained_as_exception_context(
+    tmp_path: Path,
+) -> None:
+    token = _secret_cases()["token"]
+    job, manifest, _ = _route_inputs()
+    _write_outcome(tmp_path, canonical_json_bytes({"agent_value": token}))
+
+    with pytest.raises(RuntimeExecutionError) as captured:
+        read_agent_output(tmp_path, job, manifest, secrets=(token,))
+
+    _assert_failure(captured, ErrorCode.OUTCOME_INVALID)
+    assert token not in repr(captured.value)
+    assert captured.value.__context__ is None
+
+
+def test_secret_in_proposal_relative_path_is_rejected(tmp_path: Path) -> None:
+    cases = _secret_cases()
+    token = cases["token"]
+    job, manifest, payload = _route_inputs()
+    relative_path = f"output/proposals/diagnostic_export/{token}.bin"
+    draft = _diagnostic_draft(relative_path=relative_path)
+    payload["proposed_artifact_drafts"] = [draft]
+    _write_outcome(tmp_path, payload)
+    _write_file_proposal(tmp_path, relative_path, b"safe bytes")
+
+    with pytest.raises(RuntimeExecutionError) as captured:
+        read_agent_output(tmp_path, job, manifest, secrets=(token,))
+
+    _assert_failure(captured, ErrorCode.OUTCOME_INVALID)
+
+
+def test_secret_in_file_content_is_found_across_read_chunks(tmp_path: Path) -> None:
+    cases = _secret_cases()
+    endpoint = cases["endpoint"].encode()
+    prefix = b"x" * cases["cross_chunk_prefix_bytes"]
+    content = prefix + endpoint + b"-suffix"
+    job, manifest, payload = _route_inputs()
+    draft = _diagnostic_draft(
+        declared_size=len(content),
+        declared_sha256=hashlib.sha256(content).hexdigest(),
+    )
+    payload["proposed_artifact_drafts"] = [draft]
+    _write_outcome(tmp_path, payload)
+    _write_file_proposal(tmp_path, draft["workspace_relative_path"], content)
+
+    with pytest.raises(RuntimeExecutionError) as captured:
+        read_agent_output(tmp_path, job, manifest, secrets=(endpoint,))
+
+    _assert_failure(captured, ErrorCode.OUTCOME_INVALID)
+    assert endpoint.decode() not in str(captured.value)
+
+
+@pytest.mark.parametrize("secret_location", ["content", "path"])
+def test_secret_in_directory_tree_content_or_path_is_rejected(
+    tmp_path: Path,
+    secret_location: str,
+) -> None:
+    cases = _secret_cases()
+    token = cases["token"]
+    job, manifest, payload = _route_inputs()
+    root_relative = "output/proposals/diagnostic_export/tree"
+    draft = _diagnostic_draft(
+        relative_path=root_relative,
+        resource_kind="DIRECTORY",
+    )
+    payload["proposed_artifact_drafts"] = [draft]
+    _write_outcome(tmp_path, payload)
+    if secret_location == "content":
+        child = "nested/result.bin"
+        content = b"left-" + token.encode() + b"-right"
+    else:
+        child = f"nested/{token}.bin"
+        content = b"safe"
+    _write_file_proposal(tmp_path, f"{root_relative}/{child}", content)
+
+    with pytest.raises(RuntimeExecutionError) as captured:
+        read_agent_output(tmp_path, job, manifest, secrets=(token,))
+
+    _assert_failure(captured, ErrorCode.OUTCOME_INVALID)
+
+
+def test_partial_secret_bytes_do_not_false_positive(tmp_path: Path) -> None:
+    cases = _secret_cases()
+    token = cases["token"]
+    partial = cases["safe_partial_token"].encode()
+    job, manifest, payload = _route_inputs()
+    draft = _diagnostic_draft(
+        declared_size=len(partial),
+        declared_sha256=hashlib.sha256(partial).hexdigest(),
+    )
+    payload["proposed_artifact_drafts"] = [draft]
+    _write_outcome(tmp_path, payload)
+    _write_file_proposal(tmp_path, draft["workspace_relative_path"], partial)
+
+    result = read_agent_output(tmp_path, job, manifest, secrets=(token,))
+
+    assert result.proposal_resources[0].size == len(partial)
+
+
+def test_runtime_output_fixture_manifest_is_complete_and_hash_valid() -> None:
+    manifest_path = FIXTURE_ROOT / "fixture-manifest.json"
+    manifest = FixtureManifest.model_validate_json(manifest_path.read_bytes())
+    assert manifest.owner_spec == "S04"
+    assert manifest.root == "tests/fixtures/components/runtime-output"
+
+    actual = {
+        path.relative_to(FIXTURE_ROOT).as_posix(): path
+        for path in FIXTURE_ROOT.rglob("*")
+        if path.is_file() and path != manifest_path
+    }
+    assert [entry.path for entry in manifest.files] == sorted(actual)
+    for entry in manifest.files:
+        data = actual[entry.path].read_bytes()
+        assert entry.size == len(data)
+        assert entry.sha256 == hashlib.sha256(data).hexdigest()

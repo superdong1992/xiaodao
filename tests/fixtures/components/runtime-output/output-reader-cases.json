@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "endpoint": "ipc://runtime-output-endpoint",
+  "token": "runtime-output-token",
+  "cross_chunk_prefix_bytes": 65531,
+  "safe_partial_token": "runtime-output-toke"
+}

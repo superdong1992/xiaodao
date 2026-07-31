@@ -1,0 +1,1 @@
+{"files":[{"path":"claude-command-golden.json","purpose":"Golden CLAUDE_COMMAND tokenization, leading environment, inheritance, sanitization, quoting, and Windows shim cases.","schema_ref":null,"sha256":"897919b9d61ccda9cb88a21f45f842ecec54636b57f2d63681e45966322f3998","size":2843}],"owner_spec":"S04","root":"tests/fixtures/components/runtime-command","schema_version":1}
