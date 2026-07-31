@@ -277,6 +277,44 @@ def test_hash_drift_never_resolves_the_previous_ref(tmp_path: Path) -> None:
         second.resolve(old_ref)
 
 
+def test_same_catalog_instance_rejects_product_drift_on_every_port_view(
+    tmp_path: Path,
+) -> None:
+    assets_root = tmp_path / "assets"
+    shutil.copytree(BUILTIN_ASSET_ROOT, assets_root)
+    skill_dir = tmp_path / "skills"
+    _write_skill(skill_dir / "fixed")
+    catalog = VersionedAssetCatalog(
+        skill_dir=skill_dir,
+        assets_root=assets_root,
+    )
+    route = catalog.route_bindings()
+    skill_ref = route.available_skill_refs[0]
+
+    (assets_root / "profiles/router/profile.md").write_text(
+        "drifted after startup\n",
+        encoding="utf-8",
+    )
+
+    report = catalog.check([route.agent_profile_ref])
+    assert report.available is False
+    assert report.missing_refs == [route.agent_profile_ref]
+    with pytest.raises(LookupError):
+        catalog.resolve(route.agent_profile_ref)
+    with pytest.raises(LookupError):
+        catalog.route_bindings()
+
+    (skill_dir / "fixed/SKILL.md").write_text(
+        "skill drifted after startup\n",
+        encoding="utf-8",
+    )
+    assert catalog.check([skill_ref]).missing_refs == [skill_ref]
+    with pytest.raises(LookupError):
+        catalog.diagnose_bindings(skill_ref)
+    with pytest.raises(LookupError):
+        catalog.review_bindings(skill_ref)
+
+
 def test_product_hash_rejects_symbolic_links(tmp_path: Path) -> None:
     symlink_root = tmp_path / "symlink-product"
     symlink_root.mkdir()

@@ -40,6 +40,48 @@ class ResolvedContextAssets:
     materials: ContextMaterials
 
 
+@dataclass(frozen=True, slots=True)
+class ResolvedJobAssets:
+    """Exact Job assets resolved before any mutable application-state read."""
+
+    profile: ResolvedAsset
+    tool_bundle: ResolvedAsset
+    context_policy: ResolvedAsset
+    output_contract: ResolvedAsset
+    skill: ResolvedAsset | None
+    available_skills: tuple[ResolvedAsset, ...]
+    logparse_tool: ResolvedAsset | None
+    profile_text: str
+    tool_bundle_text: str
+    output_contract_text: str
+    skill_text: str | None
+    skill_index_text: str | None
+
+    def bind_workspace(self, workspace: PreparedWorkspace) -> ResolvedContextAssets:
+        """Attach only the already-frozen Workspace view to context materials."""
+
+        materials = ContextMaterials(
+            profile=self.profile_text,
+            skill=self.skill_text,
+            skill_index=self.skill_index_text,
+            tool_bundle=self.tool_bundle_text,
+            output_contract=self.output_contract_text,
+            manifest=workspace.manifest,
+            previous_outcomes=workspace.previous_outcomes,
+            evidence=workspace.evidence,
+        )
+        return ResolvedContextAssets(
+            profile=self.profile,
+            tool_bundle=self.tool_bundle,
+            context_policy=self.context_policy,
+            output_contract=self.output_contract,
+            skill=self.skill,
+            available_skills=self.available_skills,
+            logparse_tool=self.logparse_tool,
+            materials=materials,
+        )
+
+
 def _invalid_asset() -> Exception:
     return runtime_failure(
         stage=ExecutionStage.ASSET_RESOLUTION,
@@ -109,7 +151,15 @@ def _validate_resolved_asset(
         metadata = root.stat(follow_symlinks=False)
         if root.is_symlink() or not stat.S_ISDIR(metadata.st_mode):
             raise ValueError("asset root is not a real directory")
-        if hash_product_directory(root) != expected_ref.content_hash:
+        # Built-in assets and Diagnosis Skills use the S04 product-directory
+        # hash.  LOGPARSE_TOOL uses S07's wider runtime fingerprint (repository,
+        # config, interpreter path and version), so its paired Catalog/Broker
+        # is the authority and this resolver must not substitute a second hash
+        # algorithm for that frozen ref.
+        if (
+            expected_kind is not AssetKind.LOGPARSE_TOOL
+            and hash_product_directory(root) != expected_ref.content_hash
+        ):
             raise ValueError("asset directory content drifted")
     except (OSError, ValueError):
         raise _invalid_asset() from None
@@ -192,11 +242,9 @@ class RuntimeAssetResolver:
         _validate_resolved_asset(resolved, ref, kind)
         return resolved
 
-    def resolve(
-        self,
-        job: Job,
-        workspace: PreparedWorkspace,
-    ) -> ResolvedContextAssets:
+    def resolve_job(self, job: Job) -> ResolvedJobAssets:
+        """Resolve every exact version and entry before reading Case state."""
+
         profile = self._resolve(job.agent_profile_ref, AssetKind.AGENT_PROFILE)
         tool_bundle = self._resolve(job.tool_bundle_ref, AssetKind.TOOL_BUNDLE)
         context_policy = self._resolve(job.context_policy_ref, AssetKind.CONTEXT_POLICY)
@@ -259,17 +307,7 @@ class RuntimeAssetResolver:
                 AssetKind.DIAGNOSIS_SKILL,
             )
 
-        materials = ContextMaterials(
-            profile=profile_text,
-            skill=skill_text,
-            skill_index=skill_index,
-            tool_bundle=tool_text,
-            output_contract=output_text,
-            manifest=workspace.manifest,
-            previous_outcomes=workspace.previous_outcomes,
-            evidence=workspace.evidence,
-        )
-        return ResolvedContextAssets(
+        return ResolvedJobAssets(
             profile=profile,
             tool_bundle=tool_bundle,
             context_policy=context_policy,
@@ -277,8 +315,21 @@ class RuntimeAssetResolver:
             skill=skill,
             available_skills=available_skills,
             logparse_tool=logparse_tool,
-            materials=materials,
+            profile_text=profile_text,
+            tool_bundle_text=tool_text,
+            output_contract_text=output_text,
+            skill_text=skill_text,
+            skill_index_text=skill_index,
         )
 
+    def resolve(
+        self,
+        job: Job,
+        workspace: PreparedWorkspace,
+    ) -> ResolvedContextAssets:
+        """Compatibility convenience for callers with a prepared Workspace."""
 
-__all__ = ["ResolvedContextAssets", "RuntimeAssetResolver"]
+        return self.resolve_job(job).bind_workspace(workspace)
+
+
+__all__ = ["ResolvedContextAssets", "ResolvedJobAssets", "RuntimeAssetResolver"]

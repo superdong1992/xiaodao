@@ -520,17 +520,40 @@ class VersionedAssetCatalog:
     def _builtin_ref(self, asset_id: str) -> VersionedRef:
         return _clone_model(self._builtin_refs[asset_id])
 
+    @staticmethod
+    def _asset_is_current(resolved: ResolvedAsset) -> bool:
+        """Revalidate S04-owned product bytes without replacing their ref.
+
+        The S07 logparse ref fingerprints repository, configuration, and
+        interpreter facts that are intentionally wider than one product
+        directory.  Its paired broker remains the authority for that asset.
+        """
+
+        if resolved.asset_kind is AssetKind.LOGPARSE_TOOL:
+            return True
+        try:
+            return (
+                hash_product_directory(Path(resolved.root_path))
+                == resolved.ref.content_hash
+            )
+        except (OSError, TypeError, ValueError):
+            return False
+
+    def _require_current(self, refs: Sequence[VersionedRef]) -> None:
+        if not self.check(refs).available:
+            raise LookupError("one or more fixed asset versions are unavailable")
+
     def check(self, refs: Sequence[VersionedRef]) -> AssetAvailabilityReport:
-        missing = [
-            _clone_model(ref)
-            for ref in refs
-            if _ref_key(ref) not in self._assets
-        ]
+        missing: list[VersionedRef] = []
+        for ref in refs:
+            resolved = self._assets.get(_ref_key(ref))
+            if resolved is None or not self._asset_is_current(resolved):
+                missing.append(_clone_model(ref))
         return AssetAvailabilityReport(available=not missing, missing_refs=missing)
 
     def resolve(self, ref: VersionedRef) -> ResolvedAsset:
         resolved = self._assets.get(_ref_key(ref))
-        if resolved is None:
+        if resolved is None or not self._asset_is_current(resolved):
             raise LookupError(f"asset unavailable: {ref.id}@{ref.version}#{ref.content_hash}")
         return _clone_model(resolved)
 
@@ -545,6 +568,15 @@ class VersionedAssetCatalog:
             logparse_tool_ref=None,
             logparse_product=None,
             resource_limits=default_resource_limits(JobType.ROUTE),
+        )
+        self._require_current(
+            (
+                bindings.agent_profile_ref,
+                *bindings.available_skill_refs,
+                bindings.tool_bundle_ref,
+                bindings.context_policy_ref,
+                bindings.output_contract_ref,
+            )
         )
         return _clone_model(bindings)
 
@@ -569,6 +601,18 @@ class VersionedAssetCatalog:
             logparse_product=descriptor.logparse_product,
             resource_limits=default_resource_limits(JobType.DIAGNOSE),
         )
+        current_refs = [
+            bindings.agent_profile_ref,
+            bindings.skill_ref,
+            bindings.tool_bundle_ref,
+            bindings.context_policy_ref,
+            bindings.output_contract_ref,
+        ]
+        if bindings.logparse_tool_ref is not None:
+            current_refs.append(bindings.logparse_tool_ref)
+        self._require_current(
+            [ref for ref in current_refs if ref is not None]
+        )
         return _clone_model(bindings)
 
     def review_bindings(self, skill_ref: VersionedRef) -> RuntimeBindings:
@@ -585,6 +629,15 @@ class VersionedAssetCatalog:
             logparse_tool_ref=None,
             logparse_product=None,
             resource_limits=default_resource_limits(JobType.REVIEW),
+        )
+        self._require_current(
+            (
+                bindings.agent_profile_ref,
+                descriptor.resolved_asset.ref,
+                bindings.tool_bundle_ref,
+                bindings.context_policy_ref,
+                bindings.output_contract_ref,
+            )
         )
         return _clone_model(bindings)
 

@@ -8,6 +8,8 @@ from typing import Any
 
 import pytest
 
+import problem_locator.runtime.output_reader as output_reader_module
+
 from problem_locator.contracts.enums import ErrorCode, ExecutionStage, ResourceKind
 from problem_locator.contracts.models import (
     AgentJobOutcome,
@@ -24,6 +26,7 @@ from problem_locator.contracts.serialization import (
 )
 from problem_locator.runtime.failures import RuntimeExecutionError
 from problem_locator.runtime.output_reader import read_agent_output
+from problem_locator.runtime.workspace import PreparedWorkspace
 
 
 REPOSITORY_ROOT = Path(__file__).parents[3]
@@ -223,6 +226,45 @@ def test_outcome_symlink_is_not_followed(tmp_path: Path) -> None:
     _assert_failure(captured, ErrorCode.OUTCOME_INVALID)
 
 
+def test_prepared_workspace_root_replacement_is_rejected(tmp_path: Path) -> None:
+    job, manifest, payload = _route_inputs()
+    root = tmp_path / "workspace"
+    for relative in ("inputs", "runtime/tool-state", "output"):
+        (root / relative).mkdir(parents=True, exist_ok=True)
+    _write_outcome(root, payload)
+    root_stat = root.stat(follow_symlinks=False)
+    inputs_stat = (root / "inputs").stat(follow_symlinks=False)
+    runtime_stat = (root / "runtime").stat(follow_symlinks=False)
+    tool_state_stat = (root / "runtime/tool-state").stat(follow_symlinks=False)
+    output_stat = (root / "output").stat(follow_symlinks=False)
+    prepared = PreparedWorkspace(
+        root=root,
+        root_device=root_stat.st_dev,
+        root_inode=root_stat.st_ino,
+        inputs_device=inputs_stat.st_dev,
+        inputs_inode=inputs_stat.st_ino,
+        runtime_device=runtime_stat.st_dev,
+        runtime_inode=runtime_stat.st_ino,
+        tool_state_device=tool_state_stat.st_dev,
+        tool_state_inode=tool_state_stat.st_ino,
+        output_device=output_stat.st_dev,
+        output_inode=output_stat.st_ino,
+        manifest=manifest,
+        manifest_bytes=canonical_json_bytes(manifest),
+        attachments=(),
+        evidence=(),
+        artifacts=(),
+        previous_outcomes=(),
+    )
+    root.rename(tmp_path / "original-workspace")
+    _write_outcome(root, payload)
+
+    with pytest.raises(RuntimeExecutionError) as captured:
+        read_agent_output(prepared, job, manifest)
+
+    _assert_failure(captured, ErrorCode.OUTCOME_INVALID)
+
+
 def test_valid_directory_proposal_builds_the_frozen_tree_manifest(
     tmp_path: Path,
 ) -> None:
@@ -306,6 +348,217 @@ def test_missing_or_linked_proposal_is_outcome_invalid(tmp_path: Path) -> None:
     with pytest.raises(RuntimeExecutionError) as linked:
         read_agent_output(tmp_path, job, manifest)
     _assert_failure(linked, ErrorCode.OUTCOME_INVALID)
+
+
+def test_fifo_proposal_is_rejected_without_blocking(tmp_path: Path) -> None:
+    if not hasattr(os, "mkfifo"):
+        pytest.skip("FIFOs are unavailable on this platform")
+    job, manifest, payload = _route_inputs()
+    draft = _diagnostic_draft()
+    payload["proposed_artifact_drafts"] = [draft]
+    _write_outcome(tmp_path, payload)
+    path = tmp_path / draft["workspace_relative_path"]
+    path.parent.mkdir(parents=True)
+    os.mkfifo(path)
+
+    with pytest.raises(RuntimeExecutionError) as captured:
+        read_agent_output(tmp_path, job, manifest)
+
+    _assert_failure(captured, ErrorCode.OUTCOME_INVALID)
+
+
+def test_proposal_parent_swap_between_snapshot_and_open_never_reads_outside(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    job, manifest, payload = _route_inputs()
+    draft = _diagnostic_draft()
+    payload["proposed_artifact_drafts"] = [draft]
+    _write_outcome(tmp_path, payload)
+    proposal = _write_file_proposal(
+        tmp_path,
+        draft["workspace_relative_path"],
+        b"validated",
+    )
+    outside_directory = tmp_path / "outside-parent"
+    outside_directory.mkdir()
+    outside_file = outside_directory / proposal.name
+    outside_file.write_bytes(b"outside bytes must not be read")
+    outside_inode = outside_file.stat().st_ino
+    outside_read = False
+    original_open_snapshot = output_reader_module._open_snapshot_path
+    original_read = os.read
+    swapped = False
+
+    def swap_before_open(snapshot: object, relative_path: str) -> int:
+        nonlocal swapped
+        if relative_path == draft["workspace_relative_path"] and not swapped:
+            swapped = True
+            proposal.parent.rename(tmp_path / "original-proposal-parent")
+            outside_directory.rename(proposal.parent)
+        return original_open_snapshot(snapshot, relative_path)
+
+    def observe_read(descriptor: int, count: int) -> bytes:
+        nonlocal outside_read
+        if os.fstat(descriptor).st_ino == outside_inode:
+            outside_read = True
+        return original_read(descriptor, count)
+
+    monkeypatch.setattr(output_reader_module, "_open_snapshot_path", swap_before_open)
+    monkeypatch.setattr(os, "read", observe_read)
+
+    with pytest.raises(RuntimeExecutionError) as captured:
+        read_agent_output(tmp_path, job, manifest)
+
+    _assert_failure(captured, ErrorCode.OUTCOME_INVALID)
+    assert swapped is True
+    assert outside_read is False
+
+
+def test_tree_root_swap_between_snapshot_and_open_never_reads_outside(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    if not output_reader_module._supports_anchored_tree():
+        pytest.skip("directory-fd traversal is unavailable on this platform")
+    job, manifest, payload = _route_inputs()
+    relative_path = "output/proposals/diagnostic_export/tree"
+    content = b"validated tree bytes"
+    expected_manifest = TreeManifest(
+        version=1,
+        entries=[
+            TreeManifestEntry(
+                path="result.bin",
+                size=len(content),
+                sha256=hashlib.sha256(content).hexdigest(),
+            )
+        ],
+    )
+    payload["proposed_artifact_drafts"] = [
+        _diagnostic_draft(
+            relative_path=relative_path,
+            resource_kind="DIRECTORY",
+            declared_size=len(content),
+            declared_sha256=bytes_sha256(canonical_json_bytes(expected_manifest)),
+        )
+    ]
+    _write_outcome(tmp_path, payload)
+    tree_root = tmp_path / relative_path
+    tree_root.mkdir(parents=True)
+    (tree_root / "result.bin").write_bytes(content)
+    outside_tree = tmp_path / "outside-tree"
+    outside_tree.mkdir()
+    outside_file = outside_tree / "result.bin"
+    outside_file.write_bytes(b"outside bytes must not be read")
+    outside_inode = outside_file.stat().st_ino
+    outside_read = False
+    original_open_directory = output_reader_module._open_snapshot_directory
+    original_read = os.read
+    swapped = False
+
+    def swap_before_open(snapshot: object, candidate: str) -> int:
+        nonlocal swapped
+        if candidate == relative_path and not swapped:
+            swapped = True
+            tree_root.rename(tmp_path / "original-tree")
+            outside_tree.rename(tree_root)
+        return original_open_directory(snapshot, candidate)
+
+    def observe_read(descriptor: int, count: int) -> bytes:
+        nonlocal outside_read
+        if os.fstat(descriptor).st_ino == outside_inode:
+            outside_read = True
+        return original_read(descriptor, count)
+
+    monkeypatch.setattr(
+        output_reader_module,
+        "_open_snapshot_directory",
+        swap_before_open,
+    )
+    monkeypatch.setattr(os, "read", observe_read)
+
+    with pytest.raises(RuntimeExecutionError) as captured:
+        read_agent_output(tmp_path, job, manifest)
+
+    _assert_failure(captured, ErrorCode.OUTCOME_INVALID)
+    assert swapped is True
+    assert outside_read is False
+
+
+def test_tree_child_swap_before_open_never_reads_outside(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    if not output_reader_module._supports_anchored_tree():
+        pytest.skip("directory-fd traversal is unavailable on this platform")
+    job, manifest, payload = _route_inputs()
+    relative_path = "output/proposals/diagnostic_export/tree"
+    content = b"validated nested bytes"
+    expected_manifest = TreeManifest(
+        version=1,
+        entries=[
+            TreeManifestEntry(
+                path="nested/result.bin",
+                size=len(content),
+                sha256=hashlib.sha256(content).hexdigest(),
+            )
+        ],
+    )
+    payload["proposed_artifact_drafts"] = [
+        _diagnostic_draft(
+            relative_path=relative_path,
+            resource_kind="DIRECTORY",
+            declared_size=len(content),
+            declared_sha256=bytes_sha256(canonical_json_bytes(expected_manifest)),
+        )
+    ]
+    _write_outcome(tmp_path, payload)
+    tree_root = tmp_path / relative_path
+    nested = tree_root / "nested"
+    nested.mkdir(parents=True)
+    (nested / "result.bin").write_bytes(content)
+    outside_nested = tmp_path / "outside-nested"
+    outside_nested.mkdir()
+    outside_file = outside_nested / "result.bin"
+    outside_file.write_bytes(b"outside bytes must not be read")
+    outside_inode = outside_file.stat().st_ino
+    outside_read = False
+    original_open = os.open
+    original_read = os.read
+    swapped = False
+
+    def swap_child_open(
+        path: str | bytes | int,
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        nonlocal swapped
+        if path == "nested" and dir_fd is not None and not swapped:
+            swapped = True
+            nested.rename(tmp_path / "original-nested")
+            outside_nested.rename(nested)
+        if dir_fd is None:
+            return original_open(path, flags, mode)
+        return original_open(path, flags, mode, dir_fd=dir_fd)
+
+    def observe_read(descriptor: int, count: int) -> bytes:
+        nonlocal outside_read
+        if os.fstat(descriptor).st_ino == outside_inode:
+            outside_read = True
+        return original_read(descriptor, count)
+
+    monkeypatch.setattr(os, "open", swap_child_open)
+    monkeypatch.setattr(os, "read", observe_read)
+    monkeypatch.setattr(output_reader_module, "_supports_anchored_tree", lambda: True)
+
+    with pytest.raises(RuntimeExecutionError) as captured:
+        read_agent_output(tmp_path, job, manifest)
+
+    _assert_failure(captured, ErrorCode.OUTCOME_INVALID)
+    assert swapped is True
+    assert outside_read is False
 
 
 def test_proposal_parent_symlink_cannot_escape_workspace(tmp_path: Path) -> None:

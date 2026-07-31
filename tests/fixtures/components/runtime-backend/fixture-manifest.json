@@ -7,8 +7,8 @@
       "path": "fake_claude.py",
       "purpose": "Executable Agent fixture covering stdin, atomic output, exit, hang, child tree, log flood, and Workspace flood behavior.",
       "schema_ref": null,
-      "size": 2898,
-      "sha256": "313fb288c234eb83f471f4f03be94eb33241dd06e0947bbb0b0fa5686ad78e90"
+      "size": 3418,
+      "sha256": "4a62a94dab283ccb74f88a7939a45d58d108124f6851a53e736574deff68f251"
     }
   ]
 }

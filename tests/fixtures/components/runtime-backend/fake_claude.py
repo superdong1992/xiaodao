@@ -54,6 +54,12 @@ def main() -> int:
         marker.parent.mkdir(parents=True, exist_ok=True)
         marker.write_text(str(child.pid), encoding="ascii")
         _sleep_forever()
+    if mode == "child-after-parent-exit":
+        child = subprocess.Popen([sys.executable, __file__, "--child"])
+        marker = proposals / "child" / "child.pid"
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(str(child.pid), encoding="ascii")
+        return 0
     if mode == "emit":
         _write_repeated(sys.stdout.buffer, b"o", _integer("FAKE_STDOUT_BYTES"))
         _write_repeated(sys.stderr.buffer, b"e", _integer("FAKE_STDERR_BYTES"))
@@ -65,6 +71,11 @@ def main() -> int:
         time.sleep(0.02)
         sys.stdout.buffer.write(endpoint[3:] + b":" + token + b":suffix")
         sys.stdout.buffer.flush()
+    if mode == "emit-secret-prefix-hang":
+        token = os.environ["PROBLEM_LOCATOR_LOGPARSE_TOKEN"].encode("utf-8")
+        sys.stdout.buffer.write(token[:3])
+        sys.stdout.buffer.flush()
+        _sleep_forever()
     if mode == "workspace-flood":
         target = proposals / "flood" / "payload.bin"
         target.parent.mkdir(parents=True, exist_ok=True)

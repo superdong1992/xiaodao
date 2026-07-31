@@ -7,12 +7,14 @@ Object.  No code path intentionally degrades to parent-only termination.
 
 from __future__ import annotations
 
+import ctypes
 import os
 import signal
 import subprocess
 import sys
 import time
 from collections.abc import Mapping, Sequence
+from ctypes import wintypes
 from pathlib import Path
 from typing import BinaryIO
 
@@ -20,6 +22,148 @@ from .limits import PROCESS_TERMINATION_GRACE_SECONDS
 
 
 _WINDOWS_CREATE_SUSPENDED = 0x00000004
+_WINDOWS_THREAD_SUSPEND_RESUME = 0x0002
+_WINDOWS_THREAD_SNAPSHOT = 0x00000004
+_WINDOWS_JOB_BASIC_ACCOUNTING_INFORMATION_CLASS = 1
+
+
+class _IO_COUNTERS(ctypes.Structure):
+    _fields_ = [
+        ("ReadOperationCount", ctypes.c_ulonglong),
+        ("WriteOperationCount", ctypes.c_ulonglong),
+        ("OtherOperationCount", ctypes.c_ulonglong),
+        ("ReadTransferCount", ctypes.c_ulonglong),
+        ("WriteTransferCount", ctypes.c_ulonglong),
+        ("OtherTransferCount", ctypes.c_ulonglong),
+    ]
+
+
+class _BASIC_LIMIT_INFORMATION(ctypes.Structure):
+    _fields_ = [
+        ("PerProcessUserTimeLimit", ctypes.c_longlong),
+        ("PerJobUserTimeLimit", ctypes.c_longlong),
+        ("LimitFlags", wintypes.DWORD),
+        ("MinimumWorkingSetSize", ctypes.c_size_t),
+        ("MaximumWorkingSetSize", ctypes.c_size_t),
+        ("ActiveProcessLimit", wintypes.DWORD),
+        ("Affinity", ctypes.c_size_t),
+        ("PriorityClass", wintypes.DWORD),
+        ("SchedulingClass", wintypes.DWORD),
+    ]
+
+
+class _EXTENDED_LIMIT_INFORMATION(ctypes.Structure):
+    _fields_ = [
+        ("BasicLimitInformation", _BASIC_LIMIT_INFORMATION),
+        ("IoInfo", _IO_COUNTERS),
+        ("ProcessMemoryLimit", ctypes.c_size_t),
+        ("JobMemoryLimit", ctypes.c_size_t),
+        ("PeakProcessMemoryUsed", ctypes.c_size_t),
+        ("PeakJobMemoryUsed", ctypes.c_size_t),
+    ]
+
+
+class _BASIC_ACCOUNTING_INFORMATION(ctypes.Structure):
+    _fields_ = [
+        ("TotalUserTime", ctypes.c_longlong),
+        ("TotalKernelTime", ctypes.c_longlong),
+        ("ThisPeriodTotalUserTime", ctypes.c_longlong),
+        ("ThisPeriodTotalKernelTime", ctypes.c_longlong),
+        ("TotalPageFaultCount", wintypes.DWORD),
+        ("TotalProcesses", wintypes.DWORD),
+        ("ActiveProcesses", wintypes.DWORD),
+        ("TotalTerminatedProcesses", wintypes.DWORD),
+    ]
+
+
+class _THREADENTRY32(ctypes.Structure):
+    _fields_ = [
+        ("dwSize", wintypes.DWORD),
+        ("cntUsage", wintypes.DWORD),
+        ("th32ThreadID", wintypes.DWORD),
+        ("th32OwnerProcessID", wintypes.DWORD),
+        ("tpBasePri", ctypes.c_long),
+        ("tpDeltaPri", ctypes.c_long),
+        ("dwFlags", wintypes.DWORD),
+    ]
+
+
+def _configure_windows_kernel32(kernel32: object) -> object:
+    """Attach pointer-width-safe signatures to every Win32 call we use."""
+
+    kernel32.CreateJobObjectW.argtypes = [  # type: ignore[attr-defined]
+        ctypes.c_void_p,
+        wintypes.LPCWSTR,
+    ]
+    kernel32.CreateJobObjectW.restype = wintypes.HANDLE  # type: ignore[attr-defined]
+    kernel32.SetInformationJobObject.argtypes = [  # type: ignore[attr-defined]
+        wintypes.HANDLE,
+        ctypes.c_int,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+    ]
+    kernel32.SetInformationJobObject.restype = (  # type: ignore[attr-defined]
+        wintypes.BOOL
+    )
+    kernel32.AssignProcessToJobObject.argtypes = [  # type: ignore[attr-defined]
+        wintypes.HANDLE,
+        wintypes.HANDLE,
+    ]
+    kernel32.AssignProcessToJobObject.restype = (  # type: ignore[attr-defined]
+        wintypes.BOOL
+    )
+    kernel32.QueryInformationJobObject.argtypes = [  # type: ignore[attr-defined]
+        wintypes.HANDLE,
+        ctypes.c_int,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.LPDWORD,
+    ]
+    kernel32.QueryInformationJobObject.restype = (  # type: ignore[attr-defined]
+        wintypes.BOOL
+    )
+    kernel32.TerminateJobObject.argtypes = [  # type: ignore[attr-defined]
+        wintypes.HANDLE,
+        wintypes.UINT,
+    ]
+    kernel32.TerminateJobObject.restype = wintypes.BOOL  # type: ignore[attr-defined]
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]  # type: ignore[attr-defined]
+    kernel32.CloseHandle.restype = wintypes.BOOL  # type: ignore[attr-defined]
+    kernel32.CreateToolhelp32Snapshot.argtypes = [  # type: ignore[attr-defined]
+        wintypes.DWORD,
+        wintypes.DWORD,
+    ]
+    kernel32.CreateToolhelp32Snapshot.restype = (  # type: ignore[attr-defined]
+        wintypes.HANDLE
+    )
+    thread_entry_pointer = ctypes.POINTER(_THREADENTRY32)
+    kernel32.Thread32First.argtypes = [  # type: ignore[attr-defined]
+        wintypes.HANDLE,
+        thread_entry_pointer,
+    ]
+    kernel32.Thread32First.restype = wintypes.BOOL  # type: ignore[attr-defined]
+    kernel32.Thread32Next.argtypes = [  # type: ignore[attr-defined]
+        wintypes.HANDLE,
+        thread_entry_pointer,
+    ]
+    kernel32.Thread32Next.restype = wintypes.BOOL  # type: ignore[attr-defined]
+    kernel32.OpenThread.argtypes = [  # type: ignore[attr-defined]
+        wintypes.DWORD,
+        wintypes.BOOL,
+        wintypes.DWORD,
+    ]
+    kernel32.OpenThread.restype = wintypes.HANDLE  # type: ignore[attr-defined]
+    kernel32.ResumeThread.argtypes = [wintypes.HANDLE]  # type: ignore[attr-defined]
+    kernel32.ResumeThread.restype = wintypes.DWORD  # type: ignore[attr-defined]
+    return kernel32
+
+
+def _windows_kernel32() -> object:
+    if sys.platform != "win32":
+        raise ProcessTreeError("Windows process APIs are unavailable")
+    return _configure_windows_kernel32(
+        ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
+    )
 
 
 class ProcessTreeError(RuntimeError):
@@ -40,6 +184,7 @@ class ManagedProcess:
         self._process_group_id = process_group_id
         self._windows_job = windows_job
         self._closed = False
+        self._cleanup_result: bool | None = None
 
     @property
     def stdin(self) -> BinaryIO:
@@ -61,9 +206,21 @@ class ManagedProcess:
     ) -> bool:
         if grace_seconds < 0:
             raise ValueError("grace_seconds must be non-negative")
+        if self._closed:
+            return self._cleanup_result is True
         if os.name == "nt":
-            return self._terminate_windows(grace_seconds)
-        return self._terminate_posix(grace_seconds)
+            try:
+                clean = self._terminate_windows(grace_seconds)
+            except ProcessTreeError:
+                self._closed = True
+                self._cleanup_result = False
+                raise
+        else:
+            clean = self._terminate_posix(grace_seconds)
+        if clean or os.name == "nt":
+            self._closed = True
+            self._cleanup_result = clean
+        return clean
 
     def _terminate_posix(self, grace_seconds: float) -> bool:
         group_id = self._process_group_id
@@ -140,7 +297,7 @@ class ManagedProcess:
         """Release ownership after normal exit, killing any lingering child."""
 
         if self._closed:
-            return True
+            return self._cleanup_result is True
         if os.name == "nt":
             job = self._windows_job
             if job is None:
@@ -159,12 +316,17 @@ class ManagedProcess:
                     job.close()
                 finally:
                     self._reap_parent(PROCESS_TERMINATION_GRACE_SECONDS)
+                    self._closed = True
+                    self._cleanup_result = False
                 raise
             self._reap_parent(PROCESS_TERMINATION_GRACE_SECONDS)
             self._closed = True
+            self._cleanup_result = clean
             return clean
         group_id = self._process_group_id
         if group_id is None:
+            self._closed = True
+            self._cleanup_result = False
             return False
         # A reaped process group no longer exists.  If descendants retained
         # the group after the executable exited, clean them up and report that
@@ -172,9 +334,13 @@ class ManagedProcess:
         self.process.poll()
         if not _posix_group_exists(group_id):
             self._closed = True
+            self._cleanup_result = True
             return True
         self.terminate_tree()
         self._closed = True
+        # Descendants surviving the parent required forced cleanup, so normal
+        # completion is unclean even when that cleanup succeeded.
+        self._cleanup_result = False
         return False
 
 
@@ -284,74 +450,14 @@ def _stop_posix_group_after_verification_failure(
     _stop_parent_after_group_failure(process)
 
 
-if sys.platform == "win32":
-    import ctypes
-    from ctypes import wintypes
-
-    _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
-    _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_CLASS = 9
-
-    class _IO_COUNTERS(ctypes.Structure):
-        _fields_ = [
-            ("ReadOperationCount", ctypes.c_ulonglong),
-            ("WriteOperationCount", ctypes.c_ulonglong),
-            ("OtherOperationCount", ctypes.c_ulonglong),
-            ("ReadTransferCount", ctypes.c_ulonglong),
-            ("WriteTransferCount", ctypes.c_ulonglong),
-            ("OtherTransferCount", ctypes.c_ulonglong),
-        ]
-
-    class _BASIC_LIMIT_INFORMATION(ctypes.Structure):
-        _fields_ = [
-            ("PerProcessUserTimeLimit", ctypes.c_longlong),
-            ("PerJobUserTimeLimit", ctypes.c_longlong),
-            ("LimitFlags", wintypes.DWORD),
-            ("MinimumWorkingSetSize", ctypes.c_size_t),
-            ("MaximumWorkingSetSize", ctypes.c_size_t),
-            ("ActiveProcessLimit", wintypes.DWORD),
-            ("Affinity", ctypes.c_size_t),
-            ("PriorityClass", wintypes.DWORD),
-            ("SchedulingClass", wintypes.DWORD),
-        ]
-
-    class _EXTENDED_LIMIT_INFORMATION(ctypes.Structure):
-        _fields_ = [
-            ("BasicLimitInformation", _BASIC_LIMIT_INFORMATION),
-            ("IoInfo", _IO_COUNTERS),
-            ("ProcessMemoryLimit", ctypes.c_size_t),
-            ("JobMemoryLimit", ctypes.c_size_t),
-            ("PeakProcessMemoryUsed", ctypes.c_size_t),
-            ("PeakJobMemoryUsed", ctypes.c_size_t),
-        ]
-
-    class _BASIC_ACCOUNTING_INFORMATION(ctypes.Structure):
-        _fields_ = [
-            ("TotalUserTime", ctypes.c_longlong),
-            ("TotalKernelTime", ctypes.c_longlong),
-            ("ThisPeriodTotalUserTime", ctypes.c_longlong),
-            ("ThisPeriodTotalKernelTime", ctypes.c_longlong),
-            ("TotalPageFaultCount", wintypes.DWORD),
-            ("TotalProcesses", wintypes.DWORD),
-            ("ActiveProcesses", wintypes.DWORD),
-            ("TotalTerminatedProcesses", wintypes.DWORD),
-        ]
-
-    class _THREADENTRY32(ctypes.Structure):
-        _fields_ = [
-            ("dwSize", wintypes.DWORD),
-            ("cntUsage", wintypes.DWORD),
-            ("th32ThreadID", wintypes.DWORD),
-            ("th32OwnerProcessID", wintypes.DWORD),
-            ("tpBasePri", ctypes.c_long),
-            ("tpDeltaPri", ctypes.c_long),
-            ("dwFlags", wintypes.DWORD),
-        ]
+_JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
+_JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_CLASS = 9
 
 
 class _WindowsJob:
     """Small ctypes owner for a kill-on-close Windows Job Object."""
 
-    def __init__(self, handle: object) -> None:
+    def __init__(self, handle: wintypes.HANDLE) -> None:
         self._handle = handle
         self._closed = False
 
@@ -359,11 +465,11 @@ class _WindowsJob:
     def create_and_assign(cls, process: subprocess.Popen[bytes]) -> _WindowsJob:
         if sys.platform != "win32":
             raise ProcessTreeError("Windows Job Objects are unavailable")
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        kernel32.CreateJobObjectW.restype = wintypes.HANDLE
-        handle = kernel32.CreateJobObjectW(None, None)
-        if not handle:
+        kernel32 = _windows_kernel32()
+        raw_handle = kernel32.CreateJobObjectW(None, None)  # type: ignore[attr-defined]
+        if not raw_handle:
             raise ctypes.WinError(ctypes.get_last_error())
+        handle = wintypes.HANDLE(raw_handle)
         job = cls(handle)
         try:
             limits = _EXTENDED_LIMIT_INFORMATION()
@@ -377,7 +483,9 @@ class _WindowsJob:
                 ctypes.sizeof(limits),
             ):
                 raise ctypes.WinError(ctypes.get_last_error())
-            process_handle = wintypes.HANDLE(int(process._handle))  # type: ignore[attr-defined]
+            process_handle = wintypes.HANDLE(
+                int(process._handle)  # type: ignore[attr-defined]
+            )
             if not kernel32.AssignProcessToJobObject(handle, process_handle):
                 raise ctypes.WinError(ctypes.get_last_error())
         except Exception:
@@ -390,18 +498,17 @@ class _WindowsJob:
             return 0
         if sys.platform != "win32":
             raise ProcessTreeError("Windows Job Objects are unavailable")
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32 = _windows_kernel32()
         information = _BASIC_ACCOUNTING_INFORMATION()
         if not kernel32.QueryInformationJobObject(
             self._handle,
-            1,
+            _WINDOWS_JOB_BASIC_ACCOUNTING_INFORMATION_CLASS,
             ctypes.byref(information),
             ctypes.sizeof(information),
             None,
         ):
-            raise ProcessTreeError("failed to query the Windows Job Object") from ctypes.WinError(
-                ctypes.get_last_error()
-            )
+            cause = ctypes.WinError(ctypes.get_last_error())
+            raise ProcessTreeError("failed to query the Windows Job Object") from cause
         return int(information.ActiveProcesses)
 
     def terminate_all(self) -> None:
@@ -409,11 +516,12 @@ class _WindowsJob:
             return
         if sys.platform != "win32":
             raise ProcessTreeError("Windows Job Objects are unavailable")
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32 = _windows_kernel32()
         if not kernel32.TerminateJobObject(self._handle, 1):
-            raise ProcessTreeError("failed to terminate the Windows Job Object") from ctypes.WinError(
-                ctypes.get_last_error()
-            )
+            cause = ctypes.WinError(ctypes.get_last_error())
+            raise ProcessTreeError(
+                "failed to terminate the Windows Job Object"
+            ) from cause
 
     def wait_empty(self, timeout: float) -> bool:
         deadline = time.monotonic() + max(0.0, timeout)
@@ -428,11 +536,12 @@ class _WindowsJob:
         if self._closed:
             return
         if sys.platform == "win32":
-            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel32 = _windows_kernel32()
             if not kernel32.CloseHandle(self._handle):
-                raise ProcessTreeError("failed to close the Windows Job Object") from ctypes.WinError(
-                    ctypes.get_last_error()
-                )
+                cause = ctypes.WinError(ctypes.get_last_error())
+                raise ProcessTreeError(
+                    "failed to close the Windows Job Object"
+                ) from cause
         self._closed = True
 
 
@@ -441,14 +550,18 @@ def _resume_windows_process(process: subprocess.Popen[bytes]) -> None:
 
     if sys.platform != "win32":
         raise ProcessTreeError("Windows thread control is unavailable")
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
-    snapshot = kernel32.CreateToolhelp32Snapshot(0x00000004, 0)
+    kernel32 = _windows_kernel32()
+    raw_snapshot = kernel32.CreateToolhelp32Snapshot(  # type: ignore[attr-defined]
+        _WINDOWS_THREAD_SNAPSHOT,
+        0,
+    )
     invalid_handle = ctypes.c_void_p(-1).value
-    if not snapshot or int(snapshot) == invalid_handle:
-        raise ProcessTreeError("failed to enumerate the suspended Agent thread") from ctypes.WinError(
-            ctypes.get_last_error()
-        )
+    if not raw_snapshot or raw_snapshot == invalid_handle:
+        cause = ctypes.WinError(ctypes.get_last_error())
+        raise ProcessTreeError(
+            "failed to enumerate the suspended Agent thread"
+        ) from cause
+    snapshot = wintypes.HANDLE(raw_snapshot)
     thread_ids: list[int] = []
     try:
         entry = _THREADENTRY32()
@@ -463,14 +576,16 @@ def _resume_windows_process(process: subprocess.Popen[bytes]) -> None:
     if len(thread_ids) != 1:
         raise ProcessTreeError("suspended Agent must have exactly one primary thread")
 
-    kernel32.OpenThread.restype = wintypes.HANDLE
-    thread_handle = kernel32.OpenThread(0x0002, False, thread_ids[0])
-    if not thread_handle:
-        raise ProcessTreeError("failed to open the suspended Agent thread") from ctypes.WinError(
-            ctypes.get_last_error()
-        )
+    raw_thread_handle = kernel32.OpenThread(  # type: ignore[attr-defined]
+        _WINDOWS_THREAD_SUSPEND_RESUME,
+        False,
+        thread_ids[0],
+    )
+    if not raw_thread_handle:
+        cause = ctypes.WinError(ctypes.get_last_error())
+        raise ProcessTreeError("failed to open the suspended Agent thread") from cause
+    thread_handle = wintypes.HANDLE(raw_thread_handle)
     try:
-        kernel32.ResumeThread.restype = wintypes.DWORD
         previous_count = int(kernel32.ResumeThread(thread_handle))
         if previous_count != 1:
             raise ProcessTreeError("failed to resume the suspended Agent thread")

@@ -6,6 +6,7 @@ import os
 import stat
 import threading
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -67,6 +68,18 @@ class BackendExecution:
     elapsed_seconds: float
 
 
+@dataclass(frozen=True, slots=True)
+class _WorkspaceIdentity:
+    root: tuple[int, int]
+    top_level: tuple[tuple[str, int, int], ...]
+
+    def top_level_identity(self, name: str) -> tuple[int, int] | None:
+        for candidate, device, inode in self.top_level:
+            if candidate == name:
+                return device, inode
+        return None
+
+
 class _OutputState:
     def __init__(self, limit: int) -> None:
         self.limit = limit
@@ -108,26 +121,40 @@ class _OwnedSink:
         self._sink = sink
         self._closed = False
         self.finalization_failed = False
+        self._lock = threading.RLock()
 
     def write(self, chunk: bytes) -> None:
-        self._sink.write(chunk)
+        with self._lock:
+            if self._closed:
+                self.finalization_failed = True
+                raise ValueError("execution log sink owner is closed")
+            try:
+                self._sink.write(chunk)
+            except BaseException:
+                self.finalization_failed = True
+                raise
 
     def flush(self) -> None:
-        try:
-            self._sink.flush()
-        except BaseException:
-            self.finalization_failed = True
-            raise
+        with self._lock:
+            if self._closed:
+                self.finalization_failed = True
+                raise ValueError("execution log sink owner is closed")
+            try:
+                self._sink.flush()
+            except BaseException:
+                self.finalization_failed = True
+                raise
 
     def close(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
-        try:
-            self._sink.close()
-        except BaseException:
-            self.finalization_failed = True
-            raise
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            try:
+                self._sink.close()
+            except BaseException:
+                self.finalization_failed = True
+                raise
 
 
 class AgentBackend:
@@ -248,7 +275,8 @@ class AgentBackend:
             ) from exc
 
         root = Path(workspace_root)
-        if not root.is_dir():
+        workspace_identity = _capture_workspace_identity(root)
+        if workspace_identity is None:
             raise runtime_failure(
                 stage=ExecutionStage.BACKEND_START,
                 code=ErrorCode.BACKEND_START_FAILED,
@@ -289,33 +317,60 @@ class AgentBackend:
         tree_released = False
         readers: tuple[threading.Thread, ...] = ()
         lifecycle_threads: tuple[threading.Thread, ...] = ()
+        io_stop = threading.Event()
+        pipes = (managed.stdin, managed.stdout, managed.stderr)
         try:
-            readers = (
-                threading.Thread(
-                    target=_drain_pipe,
-                    args=(managed.stdout, stdout_sink, output_state),
-                    name="problem-locator-agent-stdout",
-                    daemon=True,
-                ),
-                threading.Thread(
-                    target=_drain_pipe,
-                    args=(managed.stderr, stderr_sink, output_state),
-                    name="problem-locator-agent-stderr",
-                    daemon=True,
-                ),
-            )
-            input_writer = threading.Thread(
-                target=_write_prompt,
-                args=(managed.stdin, prompt, input_state),
-                name="problem-locator-agent-stdin",
-                daemon=True,
-            )
-            lifecycle_threads = (input_writer, *readers)
-            started = self._monotonic()
-            for thread in lifecycle_threads:
-                thread.start()
+            try:
+                stdin_fd, stdout_fd, stderr_fd = tuple(
+                    _set_pipe_nonblocking(pipe) for pipe in pipes
+                )
+            except (AttributeError, OSError, TypeError, ValueError):
+                primary_failure = ExecutionFailure(
+                    stage=ExecutionStage.BACKEND_START,
+                    code=ErrorCode.BACKEND_START_FAILED,
+                    message="Agent process pipes could not be configured safely.",
+                    retryable=True,
+                    details=[],
+                )
+            else:
+                readers = (
+                    threading.Thread(
+                        target=_drain_pipe,
+                        args=(managed.stdout, stdout_sink, output_state),
+                        kwargs={
+                            "file_descriptor": stdout_fd,
+                            "stop": io_stop,
+                            "poll_interval_seconds": limits.poll_interval_seconds,
+                        },
+                        name="problem-locator-agent-stdout",
+                    ),
+                    threading.Thread(
+                        target=_drain_pipe,
+                        args=(managed.stderr, stderr_sink, output_state),
+                        kwargs={
+                            "file_descriptor": stderr_fd,
+                            "stop": io_stop,
+                            "poll_interval_seconds": limits.poll_interval_seconds,
+                        },
+                        name="problem-locator-agent-stderr",
+                    ),
+                )
+                input_writer = threading.Thread(
+                    target=_write_prompt,
+                    args=(managed.stdin, prompt, input_state),
+                    kwargs={
+                        "file_descriptor": stdin_fd,
+                        "stop": io_stop,
+                        "poll_interval_seconds": limits.poll_interval_seconds,
+                    },
+                    name="problem-locator-agent-stdin",
+                )
+                lifecycle_threads = (input_writer, *readers)
+                started = self._monotonic()
+                for thread in lifecycle_threads:
+                    thread.start()
 
-            while managed.process.poll() is None and primary_failure is None:
+            while primary_failure is None and managed.process.poll() is None:
                 if cancellation.is_cancelled():
                     primary_failure = _cancelled_failure(cancellation.reason)
                     break
@@ -323,7 +378,9 @@ class AgentBackend:
                     primary_failure = ExecutionFailure(
                         stage=ExecutionStage.BACKEND_EXECUTE,
                         code=ErrorCode.BACKEND_EXIT_FAILED,
-                        message="Agent process closed stdin before receiving the prompt.",
+                        message=(
+                            "Agent process closed stdin before receiving the prompt."
+                        ),
                         retryable=False,
                         details=[],
                     )
@@ -348,6 +405,12 @@ class AgentBackend:
                         deadline=started + limits.wall_time_seconds,
                         cancellation=cancellation,
                         monotonic=self._monotonic,
+                        identity=workspace_identity,
+                        failure_probe=lambda: _background_io_failure(
+                            input_state,
+                            output_state,
+                        ),
+                        allow_transient_changes=True,
                     )
                 except RuntimeExecutionError as exc:
                     primary_failure = exc.failure
@@ -371,18 +434,18 @@ class AgentBackend:
             if primary_failure is None:
                 # The executable has exited. Drain its final pipe bytes before
                 # deciding whether output limits or sink failures won the race.
-                _join_threads(lifecycle_threads, limits.termination_grace_seconds)
-                if output_state.failed.is_set():
-                    primary_failure = _output_failure(output_state)
-                elif input_state.failure is not None:
-                    primary_failure = ExecutionFailure(
-                        stage=ExecutionStage.BACKEND_EXECUTE,
-                        code=ErrorCode.BACKEND_EXIT_FAILED,
-                        message="Agent process did not consume the submitted prompt.",
-                        retryable=False,
-                        details=[],
-                    )
-                elif any(thread.is_alive() for thread in lifecycle_threads):
+                primary_failure = _wait_for_lifecycle_threads(
+                    lifecycle_threads,
+                    input_state=input_state,
+                    output_state=output_state,
+                    cancellation=cancellation,
+                    started=started,
+                    limits=limits,
+                    monotonic=self._monotonic,
+                )
+                if primary_failure is None and any(
+                    thread.is_alive() for thread in lifecycle_threads
+                ):
                     primary_failure = ExecutionFailure(
                         stage=ExecutionStage.BACKEND_EXECUTE,
                         code=ErrorCode.BACKEND_EXIT_FAILED,
@@ -390,7 +453,7 @@ class AgentBackend:
                         retryable=False,
                         details=[],
                     )
-                elif managed.process.returncode != 0:
+                elif primary_failure is None and managed.process.returncode != 0:
                     primary_failure = ExecutionFailure(
                         stage=ExecutionStage.BACKEND_EXECUTE,
                         code=ErrorCode.BACKEND_EXIT_FAILED,
@@ -449,18 +512,14 @@ class AgentBackend:
                 except ProcessTreeError:
                     primary_failure = _append_cleanup_detail(primary_failure)
 
+            # No process in the owned tree can now produce useful output.
+            # Stop nonblocking pipe workers and confirm they have exited
+            # before closing either redactor or either public sink.
+            io_stop.set()
             _join_threads(lifecycle_threads, limits.termination_grace_seconds)
             if any(thread.is_alive() for thread in lifecycle_threads):
-                primary_failure = _append_cleanup_detail(
-                    primary_failure
-                    or ExecutionFailure(
-                        stage=ExecutionStage.BACKEND_EXECUTE,
-                        code=ErrorCode.BACKEND_EXIT_FAILED,
-                        message="Agent execution pipes could not be reclaimed.",
-                        retryable=False,
-                        details=[],
-                    )
-                )
+                _join_threads_until_stopped(lifecycle_threads)
+            _close_pipes(pipes)
 
             sink_failure: BaseException | None = None
             for sink in (stdout_sink, stderr_sink):
@@ -468,20 +527,27 @@ class AgentBackend:
                     sink.close()
                 except BaseException as exc:  # sink failures must be normalized
                     sink_failure = sink_failure or exc
-            if sink_failure is not None and primary_failure is None:
-                primary_failure = ExecutionFailure(
-                    stage=ExecutionStage.EXECUTION_RECORD,
-                    code=ErrorCode.EXECUTION_RECORD_FAILED,
-                    message="Execution log could not be finalized.",
-                    retryable=True,
-                    details=[],
-                )
+            if sink_failure is not None:
+                if primary_failure is None:
+                    primary_failure = ExecutionFailure(
+                        stage=ExecutionStage.EXECUTION_RECORD,
+                        code=ErrorCode.EXECUTION_RECORD_FAILED,
+                        message="Execution log could not be finalized.",
+                        retryable=True,
+                        details=[],
+                    )
+                else:
+                    primary_failure = _append_execution_log_detail(primary_failure)
 
         if primary_failure is not None:
             raise RuntimeExecutionError(primary_failure)
         workspace_bytes = _temporary_workspace_bytes(
             root,
             limit=limits.workspace_bytes,
+            deadline=started + limits.wall_time_seconds,
+            cancellation=cancellation,
+            monotonic=self._monotonic,
+            identity=workspace_identity,
         )
         if workspace_bytes > limits.workspace_bytes:
             raise runtime_failure(
@@ -504,17 +570,74 @@ def _join_threads(threads: tuple[threading.Thread, ...], timeout: float) -> None
             thread.join(timeout=max(0.0, deadline - time.monotonic()))
 
 
-def _write_prompt(pipe: object, prompt: str, state: _InputState) -> None:
+def _join_threads_until_stopped(threads: tuple[threading.Thread, ...]) -> None:
+    for thread in threads:
+        if thread.ident is not None:
+            while thread.is_alive():
+                thread.join(timeout=0.05)
+
+
+def _close_pipes(pipes: tuple[object, ...]) -> None:
+    for pipe in pipes:
+        try:
+            pipe.close()  # type: ignore[attr-defined]
+        except BaseException:
+            pass
+
+
+def _set_pipe_nonblocking(pipe: object) -> int:
+    file_descriptor = pipe.fileno()  # type: ignore[attr-defined]
+    if isinstance(file_descriptor, bool) or not isinstance(file_descriptor, int):
+        raise TypeError("Agent pipe file descriptor is invalid")
+    os.set_blocking(file_descriptor, False)
+    return file_descriptor
+
+
+def _write_prompt(
+    pipe: object,
+    prompt: str,
+    state: _InputState,
+    *,
+    file_descriptor: int | None = None,
+    stop: threading.Event | None = None,
+    poll_interval_seconds: float = 0.01,
+) -> None:
+    def stopped() -> bool:
+        return stop is not None and stop.is_set()
+
+    def wait_to_retry() -> None:
+        if stop is None:
+            time.sleep(poll_interval_seconds)
+        else:
+            stop.wait(poll_interval_seconds)
+
     try:
-        pipe.write(prompt.encode("utf-8"))  # type: ignore[attr-defined]
-        pipe.flush()  # type: ignore[attr-defined]
+        payload = prompt.encode("utf-8")
+        offset = 0
+        while offset < len(payload):
+            if stopped():
+                break
+            try:
+                if file_descriptor is None:
+                    written = pipe.write(payload[offset:])  # type: ignore[attr-defined]
+                else:
+                    written = os.write(file_descriptor, payload[offset:])
+            except BlockingIOError:
+                wait_to_retry()
+                continue
+            if not isinstance(written, int) or written <= 0:
+                raise BrokenPipeError("Agent stdin did not accept prompt bytes")
+            offset += written
+        if not stopped():
+            pipe.flush()  # type: ignore[attr-defined]
     except BaseException as exc:
-        state.failure = exc
+        if not stopped():
+            state.failure = exc
     finally:
         try:
             pipe.close()  # type: ignore[attr-defined]
         except BaseException as exc:
-            if state.failure is None:
+            if state.failure is None and not stopped():
                 state.failure = exc
         state.finished.set()
 
@@ -523,10 +646,30 @@ def _drain_pipe(
     pipe: object,
     sink: StreamingSecretRedactor,
     state: _OutputState,
+    *,
+    file_descriptor: int | None = None,
+    stop: threading.Event | None = None,
+    poll_interval_seconds: float = 0.01,
 ) -> None:
+    def stopped() -> bool:
+        return stop is not None and stop.is_set()
+
+    def wait_to_retry() -> None:
+        if stop is None:
+            time.sleep(poll_interval_seconds)
+        else:
+            stop.wait(poll_interval_seconds)
+
     try:
-        while True:
-            chunk = pipe.read(_PIPE_CHUNK_BYTES)  # type: ignore[attr-defined]
+        while not stopped():
+            try:
+                if file_descriptor is None:
+                    chunk = pipe.read(_PIPE_CHUNK_BYTES)  # type: ignore[attr-defined]
+                else:
+                    chunk = os.read(file_descriptor, _PIPE_CHUNK_BYTES)
+            except BlockingIOError:
+                wait_to_retry()
+                continue
             if not chunk:
                 break
             accepted = state.reserve(len(chunk))
@@ -535,7 +678,8 @@ def _drain_pipe(
             if accepted != len(chunk):
                 break
     except BaseException as exc:
-        state.record_failure(exc)
+        if not stopped():
+            state.record_failure(exc)
     finally:
         try:
             pipe.close()  # type: ignore[attr-defined]
@@ -559,6 +703,77 @@ def _output_failure(state: _OutputState) -> ExecutionFailure:
         retryable=True,
         details=[],
     )
+
+
+def _background_io_failure(
+    input_state: _InputState,
+    output_state: _OutputState,
+) -> ExecutionFailure | None:
+    if input_state.failure is not None:
+        return ExecutionFailure(
+            stage=ExecutionStage.BACKEND_EXECUTE,
+            code=ErrorCode.BACKEND_EXIT_FAILED,
+            message="Agent process closed stdin before receiving the prompt.",
+            retryable=False,
+            details=[],
+        )
+    if output_state.failed.is_set():
+        return _output_failure(output_state)
+    return None
+
+
+def _wait_for_lifecycle_threads(
+    threads: tuple[threading.Thread, ...],
+    *,
+    input_state: _InputState,
+    output_state: _OutputState,
+    cancellation: CancellationSignal,
+    started: float,
+    limits: BackendExecutionLimits,
+    monotonic: Callable[[], float],
+) -> ExecutionFailure | None:
+    cleanup_deadline = time.monotonic() + limits.termination_grace_seconds
+    execution_deadline = started + limits.wall_time_seconds
+    while any(thread.is_alive() for thread in threads):
+        if cancellation.is_cancelled():
+            return _cancelled_failure(cancellation.reason)
+        io_failure = _background_io_failure(input_state, output_state)
+        if io_failure is not None:
+            return io_failure
+        execution_remaining = execution_deadline - monotonic()
+        if execution_remaining <= 0:
+            return ExecutionFailure(
+                stage=ExecutionStage.BACKEND_EXECUTE,
+                code=ErrorCode.BACKEND_TIMEOUT,
+                message="Agent execution exceeded the fixed wall time.",
+                retryable=True,
+                details=[],
+            )
+        cleanup_remaining = cleanup_deadline - time.monotonic()
+        if cleanup_remaining <= 0:
+            break
+        _join_threads(
+            threads,
+            min(
+                limits.poll_interval_seconds,
+                execution_remaining,
+                cleanup_remaining,
+            ),
+        )
+    if cancellation.is_cancelled():
+        return _cancelled_failure(cancellation.reason)
+    io_failure = _background_io_failure(input_state, output_state)
+    if io_failure is not None:
+        return io_failure
+    if monotonic() >= execution_deadline:
+        return ExecutionFailure(
+            stage=ExecutionStage.BACKEND_EXECUTE,
+            code=ErrorCode.BACKEND_TIMEOUT,
+            message="Agent execution exceeded the fixed wall time.",
+            retryable=True,
+            details=[],
+        )
+    return None
 
 
 def _cancelled_failure(reason: CancellationReason | None) -> ExecutionFailure:
@@ -637,6 +852,360 @@ def _append_execution_log_detail(failure: ExecutionFailure) -> ExecutionFailure:
     )
 
 
+_WORKSPACE_TOP_LEVEL = frozenset({"inputs", "runtime", "output"})
+
+
+def _metadata_identity(metadata: os.stat_result) -> tuple[int, int]:
+    return int(metadata.st_dev), int(metadata.st_ino)
+
+
+def _is_link_like(metadata: os.stat_result) -> bool:
+    if stat.S_ISLNK(metadata.st_mode):
+        return True
+    attributes = int(getattr(metadata, "st_file_attributes", 0))
+    reparse_point = int(getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0))
+    return bool(reparse_point and attributes & reparse_point)
+
+
+def _supports_anchored_workspace_scan() -> bool:
+    return (
+        os.name != "nt"
+        and hasattr(os, "O_DIRECTORY")
+        and hasattr(os, "O_NOFOLLOW")
+        and os.scandir in os.supports_fd
+        and os.open in os.supports_dir_fd
+    )
+
+
+def _directory_open_flags() -> int:
+    return (
+        os.O_RDONLY
+        | int(getattr(os, "O_CLOEXEC", 0))
+        | int(getattr(os, "O_DIRECTORY", 0))
+        | int(getattr(os, "O_NOFOLLOW", 0))
+    )
+
+
+def _capture_workspace_identity(root: Path) -> _WorkspaceIdentity | None:
+    """Capture immutable directory identities used by every later scan."""
+
+    try:
+        if _supports_anchored_workspace_scan():
+            root_fd = os.open(root, _directory_open_flags())
+            try:
+                root_metadata = os.fstat(root_fd)
+                top_level = _top_level_from_scandir(os.scandir(root_fd))
+            finally:
+                os.close(root_fd)
+        else:
+            root_metadata = os.stat(root, follow_symlinks=False)
+            top_level = _top_level_from_scandir(os.scandir(root))
+        if _is_link_like(root_metadata) or not stat.S_ISDIR(root_metadata.st_mode):
+            return None
+        if top_level is None:
+            return None
+        identity = _WorkspaceIdentity(
+            root=_metadata_identity(root_metadata),
+            top_level=tuple(
+                (name, *node_identity)
+                for name, node_identity in sorted(top_level.items())
+            ),
+        )
+        if not _workspace_path_matches_identity(root, identity):
+            return None
+        return identity
+    except (OSError, TypeError, ValueError):
+        return None
+
+
+def _top_level_from_scandir(
+    iterator: Iterator[os.DirEntry[str]],
+) -> dict[str, tuple[int, int]] | None:
+    top_level: dict[str, tuple[int, int]] = {}
+    try:
+        for entry in iterator:
+            if entry.name not in _WORKSPACE_TOP_LEVEL:
+                return None
+            metadata = entry.stat(follow_symlinks=False)
+            if _is_link_like(metadata) or not stat.S_ISDIR(metadata.st_mode):
+                return None
+            top_level[entry.name] = _metadata_identity(metadata)
+    finally:
+        close = getattr(iterator, "close", None)
+        if close is not None:
+            close()
+    if set(top_level) != _WORKSPACE_TOP_LEVEL:
+        return None
+    return top_level
+
+
+def _workspace_path_matches_identity(
+    root: Path,
+    identity: _WorkspaceIdentity,
+) -> bool:
+    try:
+        root_metadata = os.stat(root, follow_symlinks=False)
+        if (
+            _is_link_like(root_metadata)
+            or not stat.S_ISDIR(root_metadata.st_mode)
+            or _metadata_identity(root_metadata) != identity.root
+        ):
+            return False
+        top_level = _top_level_from_scandir(os.scandir(root))
+        if top_level is None:
+            return False
+        return all(
+            top_level.get(name) == (device, inode)
+            for name, device, inode in identity.top_level
+        )
+    except (OSError, TypeError, ValueError):
+        return False
+
+
+def _workspace_measurement_failure(message: str) -> RuntimeExecutionError:
+    return runtime_failure(
+        stage=ExecutionStage.BACKEND_EXECUTE,
+        code=ErrorCode.WORKSPACE_LIMIT,
+        message=message,
+    )
+
+
+def _validate_anchored_top_level(
+    root_fd: int,
+    identity: _WorkspaceIdentity,
+    check_abort: Callable[[], None],
+) -> None:
+    check_abort()
+    root_metadata = os.fstat(root_fd)
+    if (
+        not stat.S_ISDIR(root_metadata.st_mode)
+        or _metadata_identity(root_metadata) != identity.root
+    ):
+        raise OSError("workspace root identity changed")
+    observed = _top_level_from_scandir(os.scandir(root_fd))
+    if observed is None:
+        raise OSError("workspace root shape changed")
+    for name, device, inode in identity.top_level:
+        if observed.get(name) != (device, inode):
+            raise OSError("workspace top-level identity changed")
+
+
+def _measure_anchored_directory(
+    directory_fd: int,
+    *,
+    total: int,
+    limit: int,
+    check_abort: Callable[[], None],
+    allow_transient_changes: bool,
+) -> int:
+    with os.scandir(directory_fd) as iterator:
+        for entry in iterator:
+            check_abort()
+            entry.name.encode("utf-8", errors="strict")
+            try:
+                metadata = entry.stat(follow_symlinks=False)
+            except FileNotFoundError:
+                if allow_transient_changes:
+                    continue
+                raise
+            if _is_link_like(metadata):
+                raise _workspace_measurement_failure(
+                    "Workspace contains an invalid output node."
+                )
+            if stat.S_ISDIR(metadata.st_mode):
+                try:
+                    child_fd = os.open(
+                        entry.name,
+                        _directory_open_flags(),
+                        dir_fd=directory_fd,
+                    )
+                except FileNotFoundError:
+                    if allow_transient_changes:
+                        continue
+                    raise
+                try:
+                    current = os.fstat(child_fd)
+                    if (
+                        not stat.S_ISDIR(current.st_mode)
+                        or _metadata_identity(current) != _metadata_identity(metadata)
+                    ):
+                        if allow_transient_changes:
+                            continue
+                        raise OSError("workspace directory identity changed")
+                    total = _measure_anchored_directory(
+                        child_fd,
+                        total=total,
+                        limit=limit,
+                        check_abort=check_abort,
+                        allow_transient_changes=allow_transient_changes,
+                    )
+                finally:
+                    os.close(child_fd)
+            elif stat.S_ISREG(metadata.st_mode):
+                if metadata.st_nlink != 1:
+                    raise _workspace_measurement_failure(
+                        "Workspace contains a linked output file."
+                    )
+                file_flags = (
+                    os.O_RDONLY
+                    | int(getattr(os, "O_CLOEXEC", 0))
+                    | int(getattr(os, "O_NOFOLLOW", 0))
+                    | int(getattr(os, "O_NONBLOCK", 0))
+                )
+                try:
+                    file_fd = os.open(entry.name, file_flags, dir_fd=directory_fd)
+                except FileNotFoundError:
+                    if allow_transient_changes:
+                        continue
+                    raise
+                try:
+                    current = os.fstat(file_fd)
+                    if (
+                        not stat.S_ISREG(current.st_mode)
+                        or _metadata_identity(current) != _metadata_identity(metadata)
+                    ):
+                        if allow_transient_changes:
+                            continue
+                        raise OSError("workspace file identity changed")
+                    if current.st_nlink != 1:
+                        raise _workspace_measurement_failure(
+                            "Workspace contains a linked output file."
+                        )
+                    total += current.st_size
+                finally:
+                    os.close(file_fd)
+            else:
+                raise _workspace_measurement_failure(
+                    "Workspace contains an invalid output node."
+                )
+            if total > limit:
+                return total
+    return total
+
+
+def _measure_anchored_workspace(
+    root_fd: int,
+    *,
+    identity: _WorkspaceIdentity,
+    limit: int,
+    check_abort: Callable[[], None],
+    allow_transient_changes: bool,
+) -> int:
+    _validate_anchored_top_level(root_fd, identity, check_abort)
+    total = 0
+    for name in ("runtime", "output"):
+        expected = identity.top_level_identity(name)
+        if expected is None:
+            raise OSError("workspace top-level identity is incomplete")
+        child_fd = os.open(name, _directory_open_flags(), dir_fd=root_fd)
+        try:
+            metadata = os.fstat(child_fd)
+            if (
+                not stat.S_ISDIR(metadata.st_mode)
+                or _metadata_identity(metadata) != expected
+            ):
+                raise OSError("workspace top-level identity changed")
+            total = _measure_anchored_directory(
+                child_fd,
+                total=total,
+                limit=limit,
+                check_abort=check_abort,
+                allow_transient_changes=allow_transient_changes,
+            )
+        finally:
+            os.close(child_fd)
+        if total > limit:
+            break
+    _validate_anchored_top_level(root_fd, identity, check_abort)
+    return total
+
+
+def _measure_portable_directory(
+    directory: Path,
+    *,
+    root: Path,
+    identity: _WorkspaceIdentity,
+    total: int,
+    limit: int,
+    check_abort: Callable[[], None],
+    allow_transient_changes: bool,
+) -> int:
+    if not _workspace_path_matches_identity(root, identity):
+        raise OSError("workspace root identity changed")
+    with os.scandir(directory) as iterator:
+        for entry in iterator:
+            check_abort()
+            if not _workspace_path_matches_identity(root, identity):
+                raise OSError("workspace root identity changed")
+            entry.name.encode("utf-8", errors="strict")
+            try:
+                metadata = entry.stat(follow_symlinks=False)
+            except FileNotFoundError:
+                if allow_transient_changes:
+                    continue
+                raise
+            if _is_link_like(metadata):
+                raise _workspace_measurement_failure(
+                    "Workspace contains an invalid output node."
+                )
+            if stat.S_ISDIR(metadata.st_mode):
+                current = os.stat(entry.path, follow_symlinks=False)
+                if (
+                    _is_link_like(current)
+                    or not stat.S_ISDIR(current.st_mode)
+                    or _metadata_identity(current) != _metadata_identity(metadata)
+                ):
+                    if allow_transient_changes:
+                        continue
+                    raise OSError("workspace directory identity changed")
+                total = _measure_portable_directory(
+                    Path(entry.path),
+                    root=root,
+                    identity=identity,
+                    total=total,
+                    limit=limit,
+                    check_abort=check_abort,
+                    allow_transient_changes=allow_transient_changes,
+                )
+            elif stat.S_ISREG(metadata.st_mode):
+                if metadata.st_nlink != 1:
+                    raise _workspace_measurement_failure(
+                        "Workspace contains a linked output file."
+                    )
+                total += metadata.st_size
+            else:
+                raise _workspace_measurement_failure(
+                    "Workspace contains an invalid output node."
+                )
+            if total > limit:
+                return total
+    return total
+
+
+def _measure_portable_workspace(
+    root: Path,
+    *,
+    identity: _WorkspaceIdentity,
+    limit: int,
+    check_abort: Callable[[], None],
+    allow_transient_changes: bool,
+) -> int:
+    total = 0
+    for name in ("runtime", "output"):
+        total = _measure_portable_directory(
+            root / name,
+            root=root,
+            identity=identity,
+            total=total,
+            limit=limit,
+            check_abort=check_abort,
+            allow_transient_changes=allow_transient_changes,
+        )
+        if total > limit:
+            break
+    return total
+
+
 def _temporary_workspace_bytes(
     root: Path,
     *,
@@ -644,83 +1213,67 @@ def _temporary_workspace_bytes(
     deadline: float | None = None,
     cancellation: CancellationSignal | None = None,
     monotonic: Callable[[], float] = time.monotonic,
+    identity: _WorkspaceIdentity | None = None,
+    failure_probe: Callable[[], ExecutionFailure | None] | None = None,
+    allow_transient_changes: bool = False,
 ) -> int:
-    try:
-        root_metadata = root.stat(follow_symlinks=False)
-        if root.is_symlink() or not stat.S_ISDIR(root_metadata.st_mode):
-            raise OSError("workspace root is not a directory")
-        top_level = {candidate.name: candidate for candidate in root.iterdir()}
-        if set(top_level) != {"inputs", "runtime", "output"}:
-            raise OSError("workspace root shape changed")
-        for name, candidate in top_level.items():
-            metadata = candidate.stat(follow_symlinks=False)
-            if candidate.is_symlink() or not stat.S_ISDIR(metadata.st_mode):
-                raise OSError(f"workspace {name} root changed")
-    except OSError as exc:
-        raise runtime_failure(
-            stage=ExecutionStage.BACKEND_EXECUTE,
-            code=ErrorCode.WORKSPACE_LIMIT,
-            message="Workspace output roots could not be measured safely.",
-        ) from exc
-
-    total = 0
-    for relative in ("runtime", "output"):
-        subtree = root / relative
-        try:
-            for candidate in subtree.rglob("*"):
-                if cancellation is not None and cancellation.is_cancelled():
-                    raise RuntimeExecutionError(
-                        _cancelled_failure(cancellation.reason)
-                    )
-                if deadline is not None and monotonic() >= deadline:
-                    raise RuntimeExecutionError(
-                        ExecutionFailure(
-                            stage=ExecutionStage.BACKEND_EXECUTE,
-                            code=ErrorCode.BACKEND_TIMEOUT,
-                            message="Agent execution exceeded the fixed wall time.",
-                            retryable=True,
-                            details=[],
-                        )
-                    )
-                candidate.relative_to(subtree).as_posix().encode(
-                    "utf-8", errors="strict"
+    def check_abort() -> None:
+        if failure_probe is not None:
+            failure = failure_probe()
+            if failure is not None:
+                raise RuntimeExecutionError(failure)
+        if cancellation is not None and cancellation.is_cancelled():
+            raise RuntimeExecutionError(_cancelled_failure(cancellation.reason))
+        if deadline is not None and monotonic() >= deadline:
+            raise RuntimeExecutionError(
+                ExecutionFailure(
+                    stage=ExecutionStage.BACKEND_EXECUTE,
+                    code=ErrorCode.BACKEND_TIMEOUT,
+                    message="Agent execution exceeded the fixed wall time.",
+                    retryable=True,
+                    details=[],
                 )
-                metadata = candidate.stat(follow_symlinks=False)
-                if candidate.is_symlink() or (
-                    not stat.S_ISDIR(metadata.st_mode)
-                    and not stat.S_ISREG(metadata.st_mode)
-                ):
-                    raise RuntimeExecutionError(
-                        ExecutionFailure(
-                            stage=ExecutionStage.BACKEND_EXECUTE,
-                            code=ErrorCode.WORKSPACE_LIMIT,
-                            message="Workspace contains an invalid output node.",
-                            retryable=False,
-                            details=[],
-                        )
-                    )
-                if stat.S_ISREG(metadata.st_mode):
-                    if metadata.st_nlink != 1:
-                        raise RuntimeExecutionError(
-                            ExecutionFailure(
-                                stage=ExecutionStage.BACKEND_EXECUTE,
-                                code=ErrorCode.WORKSPACE_LIMIT,
-                                message="Workspace contains a linked output file.",
-                                retryable=False,
-                                details=[],
-                            )
-                        )
-                    total += metadata.st_size
-                    if total > limit:
-                        return total
-        except RuntimeExecutionError:
-            raise
-        except (OSError, UnicodeEncodeError, ValueError) as exc:
-            raise runtime_failure(
-                stage=ExecutionStage.BACKEND_EXECUTE,
-                code=ErrorCode.WORKSPACE_LIMIT,
-                message="Workspace output could not be measured safely.",
-            ) from exc
+            )
+
+    check_abort()
+    expected_identity = identity or _capture_workspace_identity(root)
+    if expected_identity is None or not _workspace_path_matches_identity(
+        root, expected_identity
+    ):
+        raise _workspace_measurement_failure(
+            "Workspace output roots could not be measured safely."
+        )
+    try:
+        if _supports_anchored_workspace_scan():
+            root_fd = os.open(root, _directory_open_flags())
+            try:
+                total = _measure_anchored_workspace(
+                    root_fd,
+                    identity=expected_identity,
+                    limit=limit,
+                    check_abort=check_abort,
+                    allow_transient_changes=allow_transient_changes,
+                )
+            finally:
+                os.close(root_fd)
+        else:
+            total = _measure_portable_workspace(
+                root,
+                identity=expected_identity,
+                limit=limit,
+                check_abort=check_abort,
+                allow_transient_changes=allow_transient_changes,
+            )
+    except RuntimeExecutionError:
+        raise
+    except (OSError, UnicodeEncodeError, TypeError, ValueError) as exc:
+        raise _workspace_measurement_failure(
+            "Workspace output could not be measured safely."
+        ) from exc
+    if not _workspace_path_matches_identity(root, expected_identity):
+        raise _workspace_measurement_failure(
+            "Workspace output roots could not be measured safely."
+        )
     return total
 
 
