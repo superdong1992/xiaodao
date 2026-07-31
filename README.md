@@ -195,7 +195,7 @@ fork.
   validation, deterministic fake E2E, and real Logparse smoke are release
   gates; test or handoff records must state which platform was actually run.
 
-### Native Windows and Linux startup gates
+### Native startup gates
 
 The native gates deliberately remain skipped on any other operating system;
 that skip is an unexecuted release gate, never a pass. Each runner must use the
@@ -203,7 +203,14 @@ same release-candidate Git head, CPython 3.12, locked dependencies, and a clean
 Logparse checkout at
 `a233b500d9c99e6815d1ffd82cb4ca55bbfe657a`.
 
-macOS shell (the S08 release-candidate gate executed locally):
+The current S08 candidate has no native Windows or Linux startup result. It
+therefore must not be described as cross-platform release-ready. Until those
+two native commands pass against the same candidate head, record them as
+unexecuted gates in `handoff/S08.json` under `known_limitations` and `risks`,
+and state the same restriction in `integration_notes`; do not add them to the
+handoff `tests` array as passed results.
+
+macOS shell (run on the release-candidate head):
 
 ```sh
 uv sync --frozen --all-groups
@@ -263,6 +270,33 @@ The gate verifies an actual Claude Code version, stdin delivery through the
 production `AgentBackend`, exact canonical `AgentJobOutcome` bytes, immutable
 input/runtime markers, output topology, bounded execution, and process-tree
 cleanup. A skipped result is not a pass.
+
+### Clean installed-distribution gate
+
+This gate builds the release-candidate wheel, exports only runtime dependencies
+from `uv.lock` with hashes, installs both into a new CPython 3.12 environment,
+and runs every installed command from outside the source tree. Set
+`S08_UV_OFFLINE=1` only when the selected uv cache is already complete; leave it
+at `0` on a cold runner.
+
+```sh
+export S08_INSTALLED_DISTRIBUTION_GATE=1
+export S08_UV="$(command -v uv)"
+export S08_UV_OFFLINE=0
+export SKILL_DIR="$(pwd)/.claude/skills"
+export LOGPARSE_REPO=/absolute/path/to/logparse
+export LOGPARSE_CONFIG_PATH=/absolute/path/to/logparse/config.yaml
+export LOGPARSE_PYTHON=/absolute/path/to/logparse/.venv/bin/python
+export CLAUDE_COMMAND=/absolute/path/to/claude
+uv run pytest tests/e2e/test_installed_distribution_gate.py -q -p no:cacheprovider
+```
+
+Expected result: exactly one passed test. It asserts a wheel-only import from
+the fresh environment's `site-packages`, the locked runtime versions, absence
+of pytest and Hatchling from that runtime environment, the pinned clean
+Logparse commit and Skill product hash, installed env-file startup, `/live`,
+all five `/ready` checks, bounded shutdown, and canonical installed
+`validate-state`/`export-state` commands.
 
 If a native result is available before the final S08 handoff-only commit, add
 its real command and summary to `handoff/S08.json.tests[]`. If it arrives after
