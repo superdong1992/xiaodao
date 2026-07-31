@@ -16,6 +16,7 @@ from problem_locator.contracts import (
     JobLifecycleUpdate,
     JobOutcome,
     OutcomeProcessingRecord,
+    RecoveryProcessingRecord,
     RuntimeEpochRecord,
     StateMutation,
     TransitionPlan,
@@ -32,6 +33,7 @@ def build_state_mutation(
     *,
     upsert_case: Case | None = None,
     upsert_runtime_epoch_records: Sequence[RuntimeEpochRecord] = (),
+    upsert_recovery_processing_records: Sequence[RecoveryProcessingRecord] = (),
     insert_jobs: Sequence[Job] = (),
     job_lifecycle_updates: Sequence[JobLifecycleUpdate] = (),
     insert_outcomes: Sequence[JobOutcome] = (),
@@ -47,6 +49,9 @@ def build_state_mutation(
     return StateMutation(
         upsert_case=upsert_case,
         upsert_runtime_epoch_records=list(upsert_runtime_epoch_records),
+        upsert_recovery_processing_records=list(
+            upsert_recovery_processing_records
+        ),
         insert_jobs=list(insert_jobs),
         job_lifecycle_updates=list(job_lifecycle_updates),
         insert_outcomes=list(insert_outcomes),

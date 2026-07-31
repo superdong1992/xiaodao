@@ -53,6 +53,7 @@ def test_mutation_builder_populates_every_collection_independently() -> None:
     assert first.model_dump(mode="json") == {
         "upsert_case": None,
         "upsert_runtime_epoch_records": [],
+        "upsert_recovery_processing_records": [],
         "insert_jobs": [],
         "job_lifecycle_updates": [],
         "insert_outcomes": [],

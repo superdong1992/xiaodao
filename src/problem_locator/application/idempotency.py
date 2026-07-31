@@ -1,9 +1,8 @@
 """Pure idempotency helpers for the application-service command pipeline.
 
-The helpers in this module deliberately stop short of transporting an
-``ApplicationError`` across a Port boundary.  That transport is not present in
-``v1-contract-r1``.  Instead, callers receive an explicit internal decision and
-can map ``CONFLICT`` through the public error carrier once S00 freezes it.
+The helpers are pure and therefore return an explicit internal decision.
+Orchestrators map ``CONFLICT`` through r2's frozen ``ApplicationPortError`` at
+the public Port boundary.
 """
 
 from __future__ import annotations

@@ -93,8 +93,27 @@ def project_case_view(state: StateFile, case_id: str) -> CaseView:
     """Build the public current Case projection from exactly one StateFile."""
 
     aggregate = _case_aggregate(state, case_id)
-    case = aggregate.case
-    active_job = _active_job(aggregate)
+    return project_case_components(
+        aggregate.case,
+        _active_job(aggregate),
+        aggregate.artifacts.values(),
+    )
+
+
+def project_case_components(
+    case: Case,
+    active_job: Job | None,
+    artifacts: Iterable[Artifact],
+) -> CaseView:
+    """Project a fully materialized target Case without another state read."""
+
+    if (active_job is None) != (case.active_job_id is None):
+        raise ValueError("Case and active Job projection inputs disagree")
+    if active_job is not None and (
+        active_job.case_id != case.case_id
+        or active_job.job_id != case.active_job_id
+    ):
+        raise ValueError("active Job projection input does not match the Case")
     return CaseView(
         case_id=case.case_id,
         status=case.status,
@@ -109,7 +128,7 @@ def project_case_view(state: StateFile, case_id: str) -> CaseView:
         selected_skill_ref=case.selected_skill_ref,
         final_result=case.final_result,
         failure=case.failure,
-        artifacts=project_artifact_summaries(case, aggregate.artifacts.values()),
+        artifacts=project_artifact_summaries(case, artifacts),
         created_at=case.created_at,
         updated_at=case.updated_at,
     )
@@ -579,5 +598,6 @@ __all__ = [
     "is_artifact_downloadable",
     "project_artifact_summaries",
     "project_artifact_summary",
+    "project_case_components",
     "project_case_view",
 ]

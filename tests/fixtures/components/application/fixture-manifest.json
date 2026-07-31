@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "owner_spec": "S03",
+  "root": "tests/fixtures/components/application",
+  "files": [
+    {
+      "path": "contract-blockers.json",
+      "purpose": "Records r2 resolutions and S03 contract changes tracked for r3.",
+      "schema_ref": null,
+      "size": 2650,
+      "sha256": "7ea6ab067963b2030dc76a4a3d479e5154e047a939403263d2d9ab44301c6fa4"
+    },
+    {
+      "path": "scenario-matrix.json",
+      "purpose": "Indexes core S03 production scenarios and their expected disposition or error without duplicating public DTOs.",
+      "schema_ref": null,
+      "size": 3988,
+      "sha256": "05a1abf67fdf93f34428d59d2b66db0e60afba62f15fd6daf03d5d207fe3a304"
+    }
+  ]
+}

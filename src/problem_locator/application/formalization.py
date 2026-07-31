@@ -24,6 +24,7 @@ from problem_locator.contracts.enums import (
     FieldUpdateAction,
     JobStatus,
     RequirementStatus,
+    ResourceType,
 )
 from problem_locator.contracts.models import (
     Artifact,
@@ -48,6 +49,7 @@ from problem_locator.contracts.models import (
     JobSpec,
     PendingRequirement,
     PlannedResourceBinding,
+    PlannedResourceTarget,
     ResourceRef,
     ReviewTargetBinding,
     SelectedSkillUpdate,
@@ -184,12 +186,23 @@ def resolve_review_target_binding(
 def _resource_matches_staged(
     resource_ref: ResourceRef,
     *,
+    planned_target: PlannedResourceTarget,
+    case_id: str,
+    resource_type: ResourceType,
+    resource_id: str,
     resource_kind: object,
     size: int,
     sha256: str,
 ) -> bool:
     return (
-        resource_ref.resource_kind == resource_kind
+        planned_target.case_id == case_id
+        and planned_target.resource_type is resource_type
+        and planned_target.resource_id == resource_id
+        and planned_target.resource_kind == resource_kind
+        and planned_target.size == size
+        and planned_target.sha256 == sha256
+        and resource_ref.storage_key == planned_target.final_storage_key
+        and resource_ref.resource_kind == resource_kind
         and resource_ref.size == size
         and resource_ref.sha256 == sha256
     )
@@ -202,6 +215,7 @@ def formalize_accepted_artifacts(
     case_id: str,
     created_by_job_id: str,
     artifact_ids_by_proposal_key: Mapping[str, str],
+    planned_targets_by_proposal_key: Mapping[str, PlannedResourceTarget],
     published_resources_by_proposal_key: Mapping[str, ResourceRef],
     occurred_at: str,
 ) -> dict[str, Artifact]:
@@ -225,8 +239,17 @@ def formalize_accepted_artifacts(
             key,
             "published Artifact ResourceRef",
         )
+        planned_target = _require(
+            planned_targets_by_proposal_key,
+            key,
+            "planned Artifact resource target",
+        )
         if not _resource_matches_staged(
             resource_ref,
+            planned_target=planned_target,
+            case_id=case_id,
+            resource_type=ResourceType.ARTIFACT,
+            resource_id=artifact_id,
             resource_kind=proposal.resource_kind,
             size=proposal.size,
             sha256=proposal.sha256,
@@ -259,6 +282,7 @@ def formalize_accepted_evidence(
     evidence_ids_by_proposal_key: Mapping[str, str],
     existing_source_refs: Collection[str],
     artifacts_by_proposal_key: Mapping[str, Artifact],
+    planned_targets_by_proposal_key: Mapping[str, PlannedResourceTarget],
     published_resources_by_proposal_key: Mapping[str, ResourceRef],
     occurred_at: str,
 ) -> dict[str, Evidence]:
@@ -315,9 +339,18 @@ def formalize_accepted_evidence(
                 key,
                 "published Evidence ResourceRef",
             )
+            planned_target = _require(
+                planned_targets_by_proposal_key,
+                key,
+                "planned Evidence resource target",
+            )
             staged = proposal.staged_resource_ref
             if not _resource_matches_staged(
                 resource_ref,
+                planned_target=planned_target,
+                case_id=case_id,
+                resource_type=ResourceType.EVIDENCE,
+                resource_id=evidence_id,
                 resource_kind=staged.resource_kind,
                 size=staged.size,
                 sha256=staged.sha256,

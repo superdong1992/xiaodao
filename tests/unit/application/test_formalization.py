@@ -25,6 +25,7 @@ from problem_locator.contracts.enums import (
     RequirementKind,
     RequirementStatus,
     ResourceKind,
+    ResourceType,
 )
 from problem_locator.contracts.limits import default_resource_limits
 from problem_locator.contracts.models import (
@@ -53,6 +54,7 @@ from problem_locator.contracts.models import (
     LogparseRunMetadata,
     PendingRequirement,
     PlannedResourceBinding,
+    PlannedResourceTarget,
     ProblemSpec,
     ProblemSpecPatch,
     RequirementFulfillment,
@@ -210,9 +212,20 @@ def test_formalizes_published_artifact_and_logparse_evidence_at_stable_time() ->
             description="Validated trace export.",
         ),
     )
+    target = PlannedResourceTarget(
+        case_id=CASE_ID,
+        resource_type=ResourceType.ARTIFACT,
+        resource_id=ARTIFACT_1,
+        resource_kind=ResourceKind.FILE,
+        size=7,
+        sha256=sha256,
+        final_storage_key=(
+            f"resources/cases/{CASE_ID}/artifacts/{ARTIFACT_1}/payload"
+        ),
+    )
     resource = ResourceRef(
         resource_kind=ResourceKind.FILE,
-        storage_key=f"cases/{CASE_ID}/resources/{ARTIFACT_1}/payload",
+        storage_key=target.final_storage_key,
         size=7,
         sha256=sha256,
     )
@@ -222,11 +235,33 @@ def test_formalizes_published_artifact_and_logparse_evidence_at_stable_time() ->
         case_id=CASE_ID,
         created_by_job_id=JOB_ID,
         artifact_ids_by_proposal_key={artifact_proposal.proposal_key: ARTIFACT_1},
+        planned_targets_by_proposal_key={artifact_proposal.proposal_key: target},
         published_resources_by_proposal_key={artifact_proposal.proposal_key: resource},
         occurred_at=OCCURRED_AT,
     )
     assert artifacts[artifact_proposal.proposal_key].storage_key == resource.storage_key
     assert artifacts[artifact_proposal.proposal_key].created_at == OCCURRED_AT
+
+    wrong_key_resource = resource.model_copy(
+        update={
+            "storage_key": (
+                f"resources/cases/{CASE_ID}/artifacts/{ARTIFACT_2}/payload"
+            )
+        }
+    )
+    with pytest.raises(ValueError, match="does not match proposal"):
+        formalize_accepted_artifacts(
+            [artifact_proposal],
+            [artifact_proposal.proposal_key],
+            case_id=CASE_ID,
+            created_by_job_id=JOB_ID,
+            artifact_ids_by_proposal_key={artifact_proposal.proposal_key: ARTIFACT_1},
+            planned_targets_by_proposal_key={artifact_proposal.proposal_key: target},
+            published_resources_by_proposal_key={
+                artifact_proposal.proposal_key: wrong_key_resource
+            },
+            occurred_at=OCCURRED_AT,
+        )
 
     logparse_sha256 = "b" * 64
     logparse_artifact = Artifact(
@@ -277,6 +312,7 @@ def test_formalizes_published_artifact_and_logparse_evidence_at_stable_time() ->
         evidence_ids_by_proposal_key={evidence_proposal.proposal_key: EVIDENCE_1},
         existing_source_refs=set(),
         artifacts_by_proposal_key={"logparse-run": logparse_artifact},
+        planned_targets_by_proposal_key={},
         published_resources_by_proposal_key={},
         occurred_at=OCCURRED_AT,
     )[evidence_proposal.proposal_key]
@@ -294,6 +330,7 @@ def test_formalizes_published_artifact_and_logparse_evidence_at_stable_time() ->
             artifacts_by_proposal_key={
                 "logparse-run": artifacts[artifact_proposal.proposal_key]
             },
+            planned_targets_by_proposal_key={},
             published_resources_by_proposal_key={},
             occurred_at=OCCURRED_AT,
         )
