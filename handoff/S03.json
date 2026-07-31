@@ -8,7 +8,7 @@
   "contract_revision": "v1-contract-r3",
   "contract_base_commit": "99279d082938dce2a0cdd65f99835cf69571ae84",
   "branch": "codex/v1-s03-application-service",
-  "head_commit": "33a6dd274af147c6b45098a03fb4c6154774fb89",
+  "head_commit": "0fa7d106416495d2f4cd26c9a47cd51b0111e2e0",
   "scope_completed": [
     "Implemented all external application commands, idempotent receipts, publication leases, post-commit notification, dispatch, and bounded wait behavior.",
     "Implemented single-pass attachment upload staging, frozen content validation, capacity preflight, deterministic publication, and retry-safe finalization.",
@@ -16,7 +16,8 @@
     "Implemented ClaimJob, infrastructure failure reporting, exact previous-epoch recovery replay, typed State fault propagation, and raw Port input validation.",
     "Implemented read-only Case and Artifact queries with pre-dependency raw validation, deterministic projections, and downloadable-resource enforcement.",
     "Added deterministic component fixtures and unit coverage for r3 contract closure, fault boundaries, retries, and adversarial Coordinator and Catalog results.",
-    "Reworked candidate USER_RESULT construction to include the frozen schema/version identifiers and verified canonical publication through REVIEW Job creation."
+    "Reworked candidate USER_RESULT construction to include the frozen schema/version identifiers and verified canonical publication through REVIEW Job creation.",
+    "Reworked SubmitSupplement continuation construction so this submission's validated READY Attachments enter the matching requirement position with frozen first-seen ordering and duplicate elimination."
   ],
   "changed_files": [
     "src/problem_locator/application/__init__.py",
@@ -71,7 +72,17 @@
     {
       "command": "PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /private/tmp/problem-locator-s00-env/bin/python -m pytest tests/unit/application -q -p no:cacheprovider",
       "status": "passed",
-      "summary": "222 passed in 0.60s"
+      "summary": "225 passed in 0.75s"
+    },
+    {
+      "command": "PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /private/tmp/problem-locator-s00-env/bin/python -m pytest -q -p no:cacheprovider tests/unit/application/test_projection.py -k supplement_continuation",
+      "status": "passed",
+      "summary": "3 passed, 7 deselected in 0.19s; locks source, requirement, current READY Attachment, and Evidence first-seen closure ordering"
+    },
+    {
+      "command": "PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /private/tmp/problem-locator-s00-env/bin/python -m pytest -q -p no:cacheprovider tests/unit/application/test_external_commands.py -k 'submit_supplement_sends_current_ready or submit_supplement_rejects_nonready'",
+      "status": "passed",
+      "summary": "2 passed, 28 deselected in 0.23s; captures the public Coordinator trigger and proves non-READY rejection has zero dependency or publication calls"
     },
     {
       "command": "PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /private/tmp/problem-locator-s00-env/bin/python -m pytest tests/unit/application/test_outcome_submission.py -q -p no:cacheprovider",
@@ -81,20 +92,20 @@
     {
       "command": "PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /private/tmp/problem-locator-s00-env/bin/python -m pytest tests/contracts -q -p no:cacheprovider",
       "status": "passed",
-      "summary": "505 passed in 1.30s"
+      "summary": "505 passed in 1.39s"
     },
     {
       "command": "PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /private/tmp/problem-locator-s00-env/bin/python -m pytest tests/unit/application/test_contract_readiness.py -q -p no:cacheprovider",
       "status": "passed",
-      "summary": "20 passed in 0.15s; the component fixture manifest matches every owned fixture byte"
+      "summary": "20 passed in 0.20s; the component fixture manifest matches every owned fixture byte"
     },
     {
-      "command": "PYTHONPYCACHEPREFIX=/private/tmp/problem-locator-s03-rework-pycache PYTHONPATH=src /private/tmp/problem-locator-s00-env/bin/python -m compileall -q src/problem_locator/application tests/unit/application",
+      "command": "PYTHONPYCACHEPREFIX=/private/tmp/problem-locator-s03-r08-final-pycache PYTHONPATH=src /private/tmp/problem-locator-s00-env/bin/python -m compileall -q src/problem_locator/application tests/unit/application",
       "status": "passed",
       "summary": "Application production and unit-test sources compiled without errors"
     },
     {
-      "command": "git diff --check 99279d082938dce2a0cdd65f99835cf69571ae84..33a6dd274af147c6b45098a03fb4c6154774fb89",
+      "command": "git diff --check 99279d082938dce2a0cdd65f99835cf69571ae84..0fa7d106416495d2f4cd26c9a47cd51b0111e2e0",
       "status": "passed",
       "summary": "No whitespace errors in the complete implementation diff"
     }
@@ -108,6 +119,7 @@
     "Post-commit State read faults preserve the durable business receipt and return case_view=null without reporting a false wait timeout.",
     "Coordinator next-Job plans must copy the trigger-specific pinned RuntimeBindings exactly; recovered published Jobs are replayed without consulting or replacing Catalog versions.",
     "The append-only S03 rework constructs UserResultPayload with schema_version=1 and format_id=problem-locator-diagnosis-v1; canonical bytes now match the frozen 622-byte fixture before publication.",
+    "SubmitSupplement now inserts only the current command's already validated READY Attachment IDs at the matching OPEN Attachment requirement position in continuation_resources, preserving source-then-requirement-then-Evidence first-seen order; S08 remains responsible for verifying S01 copies this frozen view into the next Job.",
     "S08 should compose only the frozen Port implementations and must retain the S03 publication-lease, finalized-outbox replay, notification, and dispatch ordering."
   ],
   "forbidden_scope_touched": false
