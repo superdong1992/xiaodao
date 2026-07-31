@@ -1,0 +1,1 @@
+{"capability":"rpc-timeout-log-analysis","entry_document":"SKILL.md","id":"rpc-log-analysis","logparse_product":"payment-service","requires_logparse":true,"schema_version":1,"summary":"Correlate a payment-service RPC timeout with its parsed target logs.","tool_bundle_id":"tool-bundle/diagnose","version":"2.0.0"}

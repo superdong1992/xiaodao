@@ -1,0 +1,1 @@
+{"files":[{"path":"output-reader-cases.json","purpose":"Fixed endpoint/token and cross-chunk boundary values for output secret scanning tests.","schema_ref":null,"sha256":"0c437a66031fa7b004ef13e3a8d33271205968fd883c47635b093c92a4a478eb","size":192}],"owner_spec":"S04","root":"tests/fixtures/components/runtime-output","schema_version":1}

@@ -1,0 +1,171 @@
+{
+  "spec_id": "S04",
+  "title": "Runtime, Context Builder and Agent Backend",
+  "executor": {
+    "model": "gpt-5.6-sol",
+    "reasoning_effort": "ultra"
+  },
+  "contract_revision": "v1-contract-r3",
+  "contract_base_commit": "99279d082938dce2a0cdd65f99835cf69571ae84",
+  "branch": "codex/v1-s04-runtime-context-backend",
+  "head_commit": "24dd5451d111a79244f7128ef4e502e7ddf5a61e",
+  "scope_completed": [
+    "implemented deterministic ROUTE, DIAGNOSE, and REVIEW context assembly with fixed asset and resource bindings, UTF-8 byte budgets, required-section priority, previous-outcome continuity, and context-limit failures",
+    "implemented the immutable built-in AssetCatalog with content fingerprints, fixed diagnosis-skill and LOGPARSE_TOOL bindings, typed ApplicationPortError channels, availability reports, and drift diagnostics",
+    "implemented strict CLAUDE_COMMAND tokenization and environment sanitization plus the cancellable AgentBackend with wall-time, log, Workspace, output, and complete process-tree controls",
+    "implemented secure read-only Workspace materialization for fixed Attachments and Artifacts, including r3 public archive-suffix and relative-path helpers, exact manifests, byte freezing, retry semantics, and no-dirfd fallback checks",
+    "implemented atomic output validation, secret scanning, deterministic failure normalization, proposal staging, and durable outcome publication through frozen ResourceStore and StateRepository Ports",
+    "implemented DiagnosisRuntime orchestration with fixed State reads, exact STATE_CORRUPT and STATE_SCHEMA_UNSUPPORTED propagation, safe CASE_NOT_FOUND mapping, job-scoped broker lifecycle, post-close parse request auditing, and claim/request hash invariants",
+    "added injectable clocks, IDs, failure points, public Port Fake conformance coverage, deterministic component fixtures, and unit coverage for success, timeout, cancellation, corruption, drift, retry, size, hash, and cross-platform process behavior"
+  ],
+  "changed_files": [
+    "src/problem_locator/runtime/agent_backend.py",
+    "src/problem_locator/runtime/assets/context-policies/diagnose/asset.json",
+    "src/problem_locator/runtime/assets/context-policies/diagnose/policy.md",
+    "src/problem_locator/runtime/assets/context-policies/review/asset.json",
+    "src/problem_locator/runtime/assets/context-policies/review/policy.md",
+    "src/problem_locator/runtime/assets/context-policies/route/asset.json",
+    "src/problem_locator/runtime/assets/context-policies/route/policy.md",
+    "src/problem_locator/runtime/assets/output-contracts/diagnose/asset.json",
+    "src/problem_locator/runtime/assets/output-contracts/diagnose/output-contract.md",
+    "src/problem_locator/runtime/assets/output-contracts/review/asset.json",
+    "src/problem_locator/runtime/assets/output-contracts/review/output-contract.md",
+    "src/problem_locator/runtime/assets/output-contracts/route/asset.json",
+    "src/problem_locator/runtime/assets/output-contracts/route/output-contract.md",
+    "src/problem_locator/runtime/assets/profiles/reviewer/asset.json",
+    "src/problem_locator/runtime/assets/profiles/reviewer/profile.md",
+    "src/problem_locator/runtime/assets/profiles/router/asset.json",
+    "src/problem_locator/runtime/assets/profiles/router/profile.md",
+    "src/problem_locator/runtime/assets/profiles/specialist/asset.json",
+    "src/problem_locator/runtime/assets/profiles/specialist/profile.md",
+    "src/problem_locator/runtime/assets/tool-bundles/diagnose/asset.json",
+    "src/problem_locator/runtime/assets/tool-bundles/diagnose/tool-bundle.json",
+    "src/problem_locator/runtime/assets/tool-bundles/review/asset.json",
+    "src/problem_locator/runtime/assets/tool-bundles/review/tool-bundle.json",
+    "src/problem_locator/runtime/assets/tool-bundles/router/asset.json",
+    "src/problem_locator/runtime/assets/tool-bundles/router/tool-bundle.json",
+    "src/problem_locator/runtime/catalog.py",
+    "src/problem_locator/runtime/claude_command.py",
+    "src/problem_locator/runtime/context_builder.py",
+    "src/problem_locator/runtime/context_policy.py",
+    "src/problem_locator/runtime/diagnosis_runtime.py",
+    "src/problem_locator/runtime/failures.py",
+    "src/problem_locator/runtime/limits.py",
+    "src/problem_locator/runtime/outcome_publisher.py",
+    "src/problem_locator/runtime/output_reader.py",
+    "src/problem_locator/runtime/process_tree.py",
+    "src/problem_locator/runtime/proposal_stager.py",
+    "src/problem_locator/runtime/secret_redactor.py",
+    "src/problem_locator/runtime/workspace.py",
+    "tests/fixtures/components/runtime-backend/fake_claude.py",
+    "tests/fixtures/components/runtime-backend/fixture-manifest.json",
+    "tests/fixtures/components/runtime-catalog/fixture-manifest.json",
+    "tests/fixtures/components/runtime-catalog/logparse-tool/product.txt",
+    "tests/fixtures/components/runtime-catalog/skill-dir/manual-triage/SKILL.md",
+    "tests/fixtures/components/runtime-catalog/skill-dir/manual-triage/diagnosis-skill.json",
+    "tests/fixtures/components/runtime-catalog/skill-dir/non-routable-client/README.md",
+    "tests/fixtures/components/runtime-catalog/skill-dir/rpc-log-analysis/SKILL.md",
+    "tests/fixtures/components/runtime-catalog/skill-dir/rpc-log-analysis/diagnosis-skill.json",
+    "tests/fixtures/components/runtime-command/claude-command-golden.json",
+    "tests/fixtures/components/runtime-command/fixture-manifest.json",
+    "tests/fixtures/components/runtime-context/expected-section-order.json",
+    "tests/fixtures/components/runtime-context/fixture-manifest.json",
+    "tests/fixtures/components/runtime-context/materials.json",
+    "tests/fixtures/components/runtime-context/unicode-evidence.txt",
+    "tests/fixtures/components/runtime-logparse/fixture-manifest.json",
+    "tests/fixtures/components/runtime-logparse/saved-run/task-0001/parse_manifest.json",
+    "tests/fixtures/components/runtime-output/fixture-manifest.json",
+    "tests/fixtures/components/runtime-output/output-reader-cases.json",
+    "tests/unit/runtime/test_agent_backend.py",
+    "tests/unit/runtime/test_catalog.py",
+    "tests/unit/runtime/test_claude_command.py",
+    "tests/unit/runtime/test_context_builder.py",
+    "tests/unit/runtime/test_diagnosis_runtime.py",
+    "tests/unit/runtime/test_output_reader.py",
+    "tests/unit/runtime/test_proposal_stager.py",
+    "tests/unit/runtime/test_workspace_security.py"
+  ],
+  "fixtures_consumed": [
+    "tests/fixtures/contracts/fixture-manifest.json"
+  ],
+  "fixtures_produced": [
+    "tests/fixtures/components/runtime-backend/fixture-manifest.json",
+    "tests/fixtures/components/runtime-catalog/fixture-manifest.json",
+    "tests/fixtures/components/runtime-command/fixture-manifest.json",
+    "tests/fixtures/components/runtime-context/fixture-manifest.json",
+    "tests/fixtures/components/runtime-logparse/fixture-manifest.json",
+    "tests/fixtures/components/runtime-output/fixture-manifest.json"
+  ],
+  "tests": [
+    {
+      "command": "env PYTHONPATH=src PYTHONPYCACHEPREFIX=/tmp/problem-locator-s04-r3-context /tmp/problem-locator-s04-catalog-019fb89c/bin/python -m pytest -q tests/unit/runtime/test_context_builder.py -p no:cacheprovider",
+      "status": "passed",
+      "summary": "12 passed in 0.18s"
+    },
+    {
+      "command": "env PYTHONPATH=src PYTHONPYCACHEPREFIX=/tmp/problem-locator-s04-r3-catalog /tmp/problem-locator-s04-catalog-019fb89c/bin/python -m pytest -q tests/unit/runtime/test_catalog.py -p no:cacheprovider",
+      "status": "passed",
+      "summary": "24 passed in 0.31s"
+    },
+    {
+      "command": "env PYTHONPATH=src PYTHONPYCACHEPREFIX=/tmp/problem-locator-s04-r3-command /tmp/problem-locator-s04-catalog-019fb89c/bin/python -m pytest -q tests/unit/runtime/test_claude_command.py -p no:cacheprovider",
+      "status": "passed",
+      "summary": "40 passed in 0.17s"
+    },
+    {
+      "command": "env PYTHONPATH=src PYTHONPYCACHEPREFIX=/tmp/problem-locator-s04-r3-backend /tmp/problem-locator-s04-catalog-019fb89c/bin/python -m pytest -q tests/unit/runtime/test_agent_backend.py -p no:cacheprovider",
+      "status": "passed",
+      "summary": "26 passed, 1 skipped in 1.69s; the skip is the Windows-only Job Object assertion on macOS"
+    },
+    {
+      "command": "env PYTHONPATH=src PYTHONPYCACHEPREFIX=/tmp/problem-locator-s04-r3-diagnosis /tmp/problem-locator-s04-catalog-019fb89c/bin/python -m pytest -q tests/unit/runtime/test_diagnosis_runtime.py -p no:cacheprovider",
+      "status": "passed",
+      "summary": "48 passed in 0.50s"
+    },
+    {
+      "command": "env PYTHONPATH=src PYTHONPYCACHEPREFIX=/tmp/problem-locator-s04-r3-full /tmp/problem-locator-s04-catalog-019fb89c/bin/python -m pytest -q tests/unit/runtime -p no:cacheprovider",
+      "status": "passed",
+      "summary": "218 passed, 1 skipped in 2.17s"
+    },
+    {
+      "command": "env PYTHONPATH=src PYTHONPYCACHEPREFIX=/tmp/problem-locator-s04-r3-contracts /tmp/problem-locator-s04-catalog-019fb89c/bin/python -m pytest -q tests/contracts -p no:cacheprovider",
+      "status": "passed",
+      "summary": "505 passed in 1.08s"
+    },
+    {
+      "command": "env PYTHONPATH=src PYTHONPYCACHEPREFIX=/tmp/problem-locator-s04-r3-compile /tmp/problem-locator-s04-catalog-019fb89c/bin/python -m compileall -q src/problem_locator/runtime tests/unit/runtime",
+      "status": "passed",
+      "summary": "Runtime production and unit-test sources compiled successfully"
+    },
+    {
+      "command": "env PYTHONPATH=src PYTHONPYCACHEPREFIX=/tmp/problem-locator-s04-r3-fixture-test /tmp/problem-locator-s04-catalog-019fb89c/bin/python -m pytest -q tests/unit/runtime/test_diagnosis_runtime.py::test_diagnosis_runtime_fixture_manifests_remain_contract_valid -p no:cacheprovider",
+      "status": "passed",
+      "summary": "1 passed in 0.31s; 6 manifests and all 13 owned files were checked for exact paths, sizes, and SHA-256 values"
+    },
+    {
+      "command": "git diff --check 99279d082938dce2a0cdd65f99835cf69571ae84..24dd5451d111a79244f7128ef4e502e7ddf5a61e",
+      "status": "passed",
+      "summary": "No whitespace errors"
+    }
+  ],
+  "dependency_requests": [],
+  "contract_change_requests": [],
+  "known_limitations": [
+    "The Windows Job Object runtime assertion is platform-specific and was skipped on macOS; POSIX process-group and descendant termination tests passed on the current platform, and S08 must execute the Windows assertion on native Windows before claiming Windows release coverage."
+  ],
+  "risks": [
+    "A caller-supplied synchronous AppendOnlyByteSink.write implementation that blocks forever cannot be safely interrupted by Python; shutdown waits for an already-started sink write so that no background writer can outlive backend return.",
+    "S08 must inject the same fixed AssetCatalog and job-scoped LogparseBrokerFactory pair owned by the composition root; using independently resolved LOGPARSE_TOOL products would correctly fail fixed-binding diagnostics."
+  ],
+  "integration_notes": [
+    "The implementation head is 24dd5451d111a79244f7128ef4e502e7ddf5a61e and does not contain handoff/S04.json; the immediately following commit is reserved for this handoff only.",
+    "The former S04 ResourceStore and StateRepository typed-error request and broker parse-request audit request were resolved centrally by v1-contract-r2/r3; there are no outstanding contract change requests.",
+    "Workspace attachment filenames are derived only from immutable Attachment.name and content_type through derive_attachment_filename_suffix and workspace_attachment_relative_path, and consumers must use the exact manifest relative_path.",
+    "Runtime.execute propagates the identical StateRepository.read_case ApplicationPortError only for STATE_CORRUPT and STATE_SCHEMA_UNSUPPORTED, creates no JobOutcome for those faults, and retains the safe CASE_NOT_FOUND and ordinary-exception mappings.",
+    "AssetCatalog resolve, route_bindings, diagnose_bindings, and review_bindings use their frozen method-specific ApplicationPortError codes; check remains the negative AssetAvailabilityReport channel.",
+    "A broker session is closed before parse_request_bytes is audited; claim=None requires request bytes to be null, while claimed success, timeout, and failure all validate the frozen request hash invariant without matching exception text.",
+    "Catalog fixed-skill and LOGPARSE_TOOL fingerprints are execution inputs, not latest-state lookups; S07 remains authoritative for the real logparse product and S08 must preserve those ResolvedAsset refs byte-for-byte.",
+    "TREE resources are globally sorted before hashing and materialization, all reads remain anchored to the frozen inode, and per-file plus aggregate byte limits prevent replacement and size-growth races on dirfd and fallback paths."
+  ],
+  "forbidden_scope_touched": false
+}
