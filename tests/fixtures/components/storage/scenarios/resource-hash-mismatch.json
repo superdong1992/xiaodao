@@ -1,0 +1,1 @@
+{"actual_content_utf8":"hello","declared_sha256":"0000000000000000000000000000000000000000000000000000000000000000","declared_size":5,"expected_error_code":"RESOURCE_HASH_MISMATCH","resource_kind":"FILE","scenario":"staged_file_hash_mismatch"}
