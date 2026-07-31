@@ -13,7 +13,7 @@ from typing import BinaryIO, Self
 
 from problem_locator.contracts.ports import BinaryStream
 
-from .atomic import FileSync, require_real_directory
+from .atomic import FileSync, is_reparse_point, require_real_directory
 
 
 _STREAM_CHUNK_BYTES = 1024 * 1024
@@ -30,22 +30,66 @@ class FileBinaryStream:
 
     def __init__(self, path: Path) -> None:
         path = Path(path)
-        flags = os.O_RDONLY
-        if hasattr(os, "O_BINARY"):
-            flags |= os.O_BINARY
-        if hasattr(os, "O_NOFOLLOW"):
-            flags |= os.O_NOFOLLOW
+        path_metadata = path.lstat()
+        if not stat.S_ISREG(path_metadata.st_mode) or is_reparse_point(path_metadata):
+            raise ValueError("binary resource must be an ordinary file")
+        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
+        flags |= getattr(os, "O_CLOEXEC", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0)
         descriptor = os.open(path, flags)
         try:
             value = os.fstat(descriptor)
-            if not stat.S_ISREG(value.st_mode):
+            if not stat.S_ISREG(value.st_mode) or is_reparse_point(value):
                 raise ValueError("binary resource must be an ordinary file")
+            if (value.st_dev, value.st_ino) != (
+                path_metadata.st_dev,
+                path_metadata.st_ino,
+            ):
+                raise OSError("binary resource changed while it was opened")
+            final_path_metadata = path.lstat()
+            if (
+                not stat.S_ISREG(final_path_metadata.st_mode)
+                or is_reparse_point(final_path_metadata)
+            ) or (
+                final_path_metadata.st_dev,
+                final_path_metadata.st_ino,
+            ) != (value.st_dev, value.st_ino):
+                raise OSError("binary resource path changed while it was opened")
             self._handle: BinaryIO = os.fdopen(descriptor, "rb", closefd=True)
         except BaseException:
             os.close(descriptor)
             raise
+        self._path = path
+        self._initial_metadata = value
         self._closed = False
         self._lock = threading.Lock()
+
+    def _validate_stable_at_eof(self) -> None:
+        descriptor_metadata = os.fstat(self._handle.fileno())
+        path_metadata = self._path.lstat()
+        fields = (
+            "st_dev",
+            "st_ino",
+            "st_size",
+            "st_mtime_ns",
+            "st_ctime_ns",
+            "st_nlink",
+        )
+        if (
+            not stat.S_ISREG(path_metadata.st_mode)
+            or is_reparse_point(path_metadata)
+            or any(
+                getattr(descriptor_metadata, field)
+                != getattr(self._initial_metadata, field)
+                for field in fields
+            )
+            or any(
+                getattr(path_metadata, field)
+                != getattr(descriptor_metadata, field)
+                for field in fields
+            )
+        ):
+            raise OSError("binary resource changed while it was read")
 
     def read(self, max_bytes: int) -> bytes:
         if not isinstance(max_bytes, int) or isinstance(max_bytes, bool) or max_bytes <= 0:
@@ -56,6 +100,8 @@ class FileBinaryStream:
             value = self._handle.read(max_bytes)
             if not isinstance(value, bytes) or len(value) > max_bytes:
                 raise OSError("file stream violated the BinaryStream contract")
+            if not value:
+                self._validate_stable_at_eof()
             return value
 
     def close(self) -> None:

@@ -11,6 +11,8 @@ from pathlib import Path
 from problem_locator.contracts.models import TreeManifest, TreeManifestEntry
 from problem_locator.contracts.serialization import canonical_json_bytes
 
+from .atomic import is_reparse_point
+
 
 _COPY_CHUNK_BYTES = 1024 * 1024
 
@@ -28,7 +30,7 @@ def _scan_files(
     """Return ordinary files and directories after a no-links tree walk."""
 
     root_stat = root.lstat()
-    if not stat.S_ISDIR(root_stat.st_mode):
+    if not stat.S_ISDIR(root_stat.st_mode) or is_reparse_point(root_stat):
         raise ValueError("tree root must be a real directory")
     files: list[Path] = []
     directories: list[Path] = [root]
@@ -41,7 +43,7 @@ def _scan_files(
             child_path = Path(child.path)
             child_stat = child.stat(follow_symlinks=False)
             scanned_metadata[child_path] = child_stat
-            if stat.S_ISLNK(child_stat.st_mode):
+            if stat.S_ISLNK(child_stat.st_mode) or is_reparse_point(child_stat):
                 raise ValueError("directory resources cannot contain symbolic links")
             if stat.S_ISDIR(child_stat.st_mode):
                 directories.append(child_path)
@@ -49,10 +51,17 @@ def _scan_files(
             elif stat.S_ISREG(child_stat.st_mode):
                 files.append(child_path)
             else:
-                raise ValueError("directory resources may contain only regular files and directories")
+                raise ValueError(
+                    "directory resources may contain only regular files and directories"
+                )
     files.sort(key=lambda value: value.relative_to(root).as_posix())
     directories.sort(key=lambda value: value.relative_to(root).as_posix())
-    file_parents = {parent for file in files for parent in file.parents if parent != root.parent}
+    file_parents = {
+        parent
+        for file in files
+        for parent in file.parents
+        if parent != root.parent
+    }
     if any(directory != root and directory not in file_parents for directory in directories):
         raise ValueError("unrepresented empty directories are forbidden in directory resources")
     return files, directories, scanned_metadata
@@ -64,19 +73,31 @@ def _require_unchanged_metadata(
     *,
     label: str,
 ) -> None:
-    fields = ("st_dev", "st_ino", "st_mode", "st_size", "st_mtime_ns")
+    fields = (
+        "st_dev",
+        "st_ino",
+        "st_mode",
+        "st_size",
+        "st_mtime_ns",
+        "st_ctime_ns",
+        "st_nlink",
+    )
     if any(getattr(expected, field) != getattr(observed, field) for field in fields):
         raise ValueError(f"{label} changed while the tree was inspected")
 
 
 def _require_real_ancestors(root: Path, candidate: Path) -> None:
     current = root
-    if not stat.S_ISDIR(current.lstat().st_mode):
+    current_metadata = current.lstat()
+    if not stat.S_ISDIR(current_metadata.st_mode) or is_reparse_point(current_metadata):
         raise ValueError("tree root changed while it was inspected")
     relative = candidate.relative_to(root)
     for part in relative.parts:
         current = current / part
-        if not stat.S_ISDIR(current.lstat().st_mode):
+        current_metadata = current.lstat()
+        if not stat.S_ISDIR(current_metadata.st_mode) or is_reparse_point(
+            current_metadata
+        ):
             raise ValueError("tree directory changed while it was inspected")
 
 
@@ -109,7 +130,7 @@ def inspect_tree(
             before,
             label="tree entry",
         )
-        if not stat.S_ISREG(before.st_mode):
+        if not stat.S_ISREG(before.st_mode) or is_reparse_point(before):
             raise ValueError("tree entries must remain ordinary files")
         if reject_hardlinks and before.st_nlink != 1:
             raise ValueError("directory resources cannot contain hard-linked files")
@@ -123,6 +144,7 @@ def inspect_tree(
                 target_handle = target.open("xb")
             flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
             flags |= getattr(os, "O_NOFOLLOW", 0)
+            flags |= getattr(os, "O_BINARY", 0)
             descriptor = os.open(source, flags)
             try:
                 opened = os.fstat(descriptor)

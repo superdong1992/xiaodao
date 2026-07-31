@@ -20,6 +20,7 @@ from .atomic import (
     FileSync,
     Replacer,
     atomic_write_bytes,
+    is_reparse_point,
     read_stable_file_bytes,
     require_ordinary_file,
     require_real_directory,
@@ -81,7 +82,9 @@ class StagedObjectWriter:
             except FileNotFoundError:
                 child.mkdir(mode=0o700)
                 require_real_directory(child)
-                self._file_sync.sync_directory(current)
+            # A retry must complete a parent sync that may have failed after
+            # the directory entry itself was created by the prior attempt.
+            self._file_sync.sync_directory(current)
             current = child
         return directory
 
@@ -198,7 +201,9 @@ class StagedObjectWriter:
         except FileNotFoundError:
             tree_metadata = None
         if tree_metadata is not None:
-            if not stat.S_ISDIR(tree_metadata.st_mode):
+            if not stat.S_ISDIR(tree_metadata.st_mode) or is_reparse_point(
+                tree_metadata
+            ):
                 raise ValueError("existing staged tree is not a real directory")
             abandoned = self._new_temporary_path(directory, "tree-abandoned")
             self._replacer.replace(tree, abandoned)

@@ -15,6 +15,8 @@ from pathlib import Path
 from types import TracebackType
 from typing import BinaryIO, Protocol, Self, runtime_checkable
 
+from .atomic import is_reparse_point
+
 
 @runtime_checkable
 class InstanceLockBackend(Protocol):
@@ -130,13 +132,16 @@ class FileInstanceLock:
         flags = os.O_RDWR | os.O_CREAT
         flags |= getattr(os, "O_CLOEXEC", 0)
         flags |= getattr(os, "O_NOFOLLOW", 0)
+        flags |= getattr(os, "O_BINARY", 0)
         descriptor = os.open(path, flags, 0o600)
         try:
             descriptor_stat = os.fstat(descriptor)
-            if not stat.S_ISREG(descriptor_stat.st_mode):
+            if not stat.S_ISREG(descriptor_stat.st_mode) or is_reparse_point(
+                descriptor_stat
+            ):
                 raise OSError("instance lock path is not a regular file")
             path_stat = os.lstat(path)
-            if not stat.S_ISREG(path_stat.st_mode):
+            if not stat.S_ISREG(path_stat.st_mode) or is_reparse_point(path_stat):
                 raise OSError("instance lock path is not a regular file")
             if (descriptor_stat.st_dev, descriptor_stat.st_ino) != (
                 path_stat.st_dev,
@@ -185,42 +190,73 @@ class FileInstanceLock:
         self.release()
 
 
-def _sync_windows_directory(path: Path) -> None:
+def _sync_windows_directory(
+    path: Path,
+    *,
+    create_file_fn: Callable[..., object] | None = None,
+    flush_file_buffers_fn: Callable[[object], object] | None = None,
+    close_handle_fn: Callable[[object], object] | None = None,
+    invalid_handle_value: object | None = None,
+    get_last_error_fn: Callable[[], int] | None = None,
+    win_error_fn: Callable[[int], BaseException] | None = None,
+) -> None:
     """Flush a Windows directory handle using ``FlushFileBuffers``."""
 
-    import ctypes
-    from ctypes import wintypes
+    injected = (
+        create_file_fn,
+        flush_file_buffers_fn,
+        close_handle_fn,
+        invalid_handle_value,
+        get_last_error_fn,
+        win_error_fn,
+    )
+    if all(value is None for value in injected):
+        import ctypes
+        from ctypes import wintypes
 
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    create_file = kernel32.CreateFileW
-    create_file.argtypes = [
-        wintypes.LPCWSTR,
-        wintypes.DWORD,
-        wintypes.DWORD,
-        wintypes.LPVOID,
-        wintypes.DWORD,
-        wintypes.DWORD,
-        wintypes.HANDLE,
-    ]
-    create_file.restype = wintypes.HANDLE
-    flush_file_buffers = kernel32.FlushFileBuffers
-    flush_file_buffers.argtypes = [wintypes.HANDLE]
-    flush_file_buffers.restype = wintypes.BOOL
-    close_handle = kernel32.CloseHandle
-    close_handle.argtypes = [wintypes.HANDLE]
-    close_handle.restype = wintypes.BOOL
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        create_file = kernel32.CreateFileW
+        create_file.argtypes = [
+            wintypes.LPCWSTR,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.LPVOID,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.HANDLE,
+        ]
+        create_file.restype = wintypes.HANDLE
+        flush_file_buffers = kernel32.FlushFileBuffers
+        flush_file_buffers.argtypes = [wintypes.HANDLE]
+        flush_file_buffers.restype = wintypes.BOOL
+        close_handle = kernel32.CloseHandle
+        close_handle.argtypes = [wintypes.HANDLE]
+        close_handle.restype = wintypes.BOOL
+        create_file_fn = create_file
+        flush_file_buffers_fn = flush_file_buffers
+        close_handle_fn = close_handle
+        invalid_handle_value = ctypes.c_void_p(-1).value
+        get_last_error_fn = ctypes.get_last_error
+        win_error_fn = ctypes.WinError
+    elif any(value is None for value in injected):
+        raise TypeError("Windows directory sync injection must be complete")
+
+    assert create_file_fn is not None
+    assert flush_file_buffers_fn is not None
+    assert close_handle_fn is not None
+    assert get_last_error_fn is not None
+    assert win_error_fn is not None
 
     generic_read = 0x80000000
+    generic_write = 0x40000000
     share_read = 0x00000001
     share_write = 0x00000002
     share_delete = 0x00000004
     open_existing = 3
     backup_semantics = 0x02000000
-    invalid_handle_value = ctypes.c_void_p(-1).value
-
-    handle = create_file(
+    handle = create_file_fn(
         str(path),
-        generic_read,
+        generic_read | generic_write,
         share_read | share_write | share_delete,
         None,
         open_existing,
@@ -228,12 +264,16 @@ def _sync_windows_directory(path: Path) -> None:
         None,
     )
     if handle == invalid_handle_value:
-        raise ctypes.WinError(ctypes.get_last_error())
+        raise win_error_fn(get_last_error_fn())
+    failure: BaseException | None = None
     try:
-        if not flush_file_buffers(handle):
-            raise ctypes.WinError(ctypes.get_last_error())
+        if not flush_file_buffers_fn(handle):
+            failure = win_error_fn(get_last_error_fn())
     finally:
-        close_handle(handle)
+        if not close_handle_fn(handle) and failure is None:
+            failure = win_error_fn(get_last_error_fn())
+    if failure is not None:
+        raise failure
 
 
 def _chmod_no_follow(path: Path | str, mode: int) -> None:
@@ -264,7 +304,7 @@ class PlatformFileSync:
             return
         if hasattr(path_or_handle, "fileno"):
             metadata = os.fstat(path_or_handle.fileno())
-            if not stat.S_ISREG(metadata.st_mode):
+            if not stat.S_ISREG(metadata.st_mode) or is_reparse_point(metadata):
                 raise OSError("file sync handle is not a regular file")
             flush = getattr(path_or_handle, "flush", None)
             if flush is not None:
@@ -278,10 +318,15 @@ class PlatformFileSync:
         descriptor = self._open(path, flags)
         try:
             descriptor_stat = os.fstat(descriptor)
-            if not stat.S_ISREG(descriptor_stat.st_mode):
+            if not stat.S_ISREG(descriptor_stat.st_mode) or is_reparse_point(
+                descriptor_stat
+            ):
                 raise OSError("file sync target is not a regular file")
             path_stat = os.lstat(path)
-            if not stat.S_ISREG(path_stat.st_mode) or (
+            if (
+                not stat.S_ISREG(path_stat.st_mode)
+                or is_reparse_point(path_stat)
+            ) or (
                 descriptor_stat.st_dev,
                 descriptor_stat.st_ino,
             ) != (path_stat.st_dev, path_stat.st_ino):
@@ -293,7 +338,9 @@ class PlatformFileSync:
     def sync_directory(self, path: Path | str) -> None:
         directory = Path(path)
         directory_metadata = os.lstat(directory)
-        if not stat.S_ISDIR(directory_metadata.st_mode):
+        if not stat.S_ISDIR(directory_metadata.st_mode) or is_reparse_point(
+            directory_metadata
+        ):
             raise OSError("directory sync target is not a real directory")
         if self._directory_sync is not None:
             self._directory_sync(directory)
@@ -308,10 +355,15 @@ class PlatformFileSync:
         descriptor = self._open(directory, flags)
         try:
             descriptor_stat = os.fstat(descriptor)
-            if not stat.S_ISDIR(descriptor_stat.st_mode):
+            if not stat.S_ISDIR(descriptor_stat.st_mode) or is_reparse_point(
+                descriptor_stat
+            ):
                 raise OSError("directory sync target is not a directory")
             path_stat = os.lstat(directory)
-            if not stat.S_ISDIR(path_stat.st_mode) or (
+            if (
+                not stat.S_ISDIR(path_stat.st_mode)
+                or is_reparse_point(path_stat)
+            ) or (
                 descriptor_stat.st_dev,
                 descriptor_stat.st_ino,
             ) != (path_stat.st_dev, path_stat.st_ino):
@@ -323,10 +375,17 @@ class PlatformFileSync:
     def make_read_only(self, path: Path | str) -> None:
         target = Path(path)
         target_stat = os.lstat(target)
-        if stat.S_ISLNK(target_stat.st_mode):
+        if stat.S_ISLNK(target_stat.st_mode) or is_reparse_point(target_stat):
             raise OSError("read-only target must not be a symbolic link")
         if stat.S_ISDIR(target_stat.st_mode):
-            mode = stat.S_IRUSR | stat.S_IXUSR | stat.S_IRGRP | stat.S_IXGRP | stat.S_IROTH | stat.S_IXOTH
+            mode = (
+                stat.S_IRUSR
+                | stat.S_IXUSR
+                | stat.S_IRGRP
+                | stat.S_IXGRP
+                | stat.S_IROTH
+                | stat.S_IXOTH
+            )
         elif stat.S_ISREG(target_stat.st_mode):
             mode = stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH
         else:

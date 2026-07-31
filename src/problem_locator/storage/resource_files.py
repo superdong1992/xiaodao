@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import stat
+import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from types import TracebackType
@@ -27,12 +30,14 @@ from .atomic import (
     Replacer,
     finalize_read_only_file,
     finalize_read_only_tree,
+    is_reparse_point,
     is_read_only,
     require_ordinary_file,
     require_real_directory,
 )
 from .layout import StorageLayout
 from .paths import ensure_no_symlink_ancestors, parse_storage_key, resource_path
+from .platform import PlatformReplaceOperation
 from .streams import FileBinaryStream, copy_binary_stream, hash_file
 from .tree import TreeInspection, inspect_tree, verify_tree
 
@@ -40,6 +45,7 @@ from .tree import TreeInspection, inspect_tree, verify_tree
 _OPAQUE_ID_ADAPTER = TypeAdapter(OpaqueId)
 _SHA256_ADAPTER = TypeAdapter(Sha256)
 _PROPOSAL_DIRECTORY_PATTERN = re.compile(r"^p-[0-9a-f]{64}$")
+_TEMP_TOKEN_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 
 class _CoordinationLock(Protocol):
@@ -141,6 +147,7 @@ def scan_case_resources(
         if (
             category_entry.name not in expected_categories
             or not stat.S_ISDIR(category_metadata.st_mode)
+            or is_reparse_point(category_metadata)
         ):
             raise ValueError("Case resources contain an invalid category node")
         category = category_entry.name
@@ -151,7 +158,9 @@ def scan_case_resources(
         ):
             _OPAQUE_ID_ADAPTER.validate_python(resource_entry.name)
             resource_metadata = resource_entry.stat(follow_symlinks=False)
-            if not stat.S_ISDIR(resource_metadata.st_mode):
+            if not stat.S_ISDIR(resource_metadata.st_mode) or is_reparse_point(
+                resource_metadata
+            ):
                 raise ValueError("formal resource ID node must be a real directory")
             resource_id_path = Path(resource_entry.path)
             leaves = sorted(os.scandir(resource_id_path), key=lambda item: item.name)
@@ -160,10 +169,13 @@ def scan_case_resources(
             if len(leaves) != 1:
                 raise ValueError("formal resource ID node must have exactly one leaf")
             leaf = leaves[0]
-            if category in {"attachments", "evidence"} and leaf.name != "payload":
-                raise ValueError("attachment/evidence resource leaf must be payload")
-            if category == "artifacts" and leaf.name not in {"payload", "tree"}:
-                raise ValueError("artifact resource leaf must be payload or tree")
+            if category == "attachments" and leaf.name != "payload":
+                raise ValueError("attachment resource leaf must be payload")
+            if category in {"evidence", "artifacts"} and leaf.name not in {
+                "payload",
+                "tree",
+            }:
+                raise ValueError("evidence/artifact resource leaf must be payload or tree")
             kind = ResourceKind.DIRECTORY if leaf.name == "tree" else ResourceKind.FILE
             storage_key = (
                 f"resources/cases/{validated_case_id}/{category}/"
@@ -192,7 +204,7 @@ def scan_all_resources(layout: StorageLayout) -> dict[str, _ObservedFormalResour
     ):
         _OPAQUE_ID_ADAPTER.validate_python(case_entry.name)
         metadata = case_entry.stat(follow_symlinks=False)
-        if not stat.S_ISDIR(metadata.st_mode):
+        if not stat.S_ISDIR(metadata.st_mode) or is_reparse_point(metadata):
             raise ValueError("formal Case resource root must be a real directory")
         result.update(scan_case_resources(layout, case_entry.name))
     return result
@@ -267,7 +279,9 @@ class FormalResourcePublisher:
             except FileNotFoundError:
                 child.mkdir(mode=0o700)
                 require_real_directory(child)
-                self._file_sync.sync_directory(current)
+            # Idempotently close the durability boundary even when adopting a
+            # directory created by an earlier attempt whose parent sync failed.
+            self._file_sync.sync_directory(current)
             current = child
 
     def _validated_stage_path(
@@ -344,7 +358,11 @@ class FormalResourcePublisher:
         if address.resource_kind is not expected_kind:
             raise ValueError("formal target kind does not match the staged reference")
         _SHA256_ADAPTER.validate_python(expected_sha256)
-        if not isinstance(expected_size, int) or isinstance(expected_size, bool) or expected_size < 0:
+        if (
+            not isinstance(expected_size, int)
+            or isinstance(expected_size, bool)
+            or expected_size < 0
+        ):
             raise ValueError("resource size must be a non-negative integer")
         final_path = self._layout.data_root / Path(final_storage_key)
 
@@ -405,9 +423,18 @@ class FormalResourcePublisher:
 class FormalResourceReader:
     """Strict reads and read-only workspace materialization."""
 
-    def __init__(self, layout: StorageLayout, file_sync: FileSync) -> None:
+    def __init__(
+        self,
+        layout: StorageLayout,
+        file_sync: FileSync,
+        replacer: Replacer | None = None,
+        *,
+        temp_token_factory: Callable[[], str] | None = None,
+    ) -> None:
         self._layout = layout
         self._file_sync = file_sync
+        self._replacer = replacer or PlatformReplaceOperation()
+        self._temp_token_factory = temp_token_factory or (lambda: uuid.uuid4().hex)
 
     def open_file(self, resource_ref: ResourceRef) -> BinaryStream:
         if resource_ref.resource_kind is not ResourceKind.FILE:
@@ -449,8 +476,42 @@ class FormalResourceReader:
             except FileNotFoundError:
                 child.mkdir(mode=0o700)
                 require_real_directory(child)
-                self._file_sync.sync_directory(current)
+            self._file_sync.sync_directory(current)
             current = child
+
+    def _new_materialization_temp(self, destination: Path) -> Path:
+        token = self._temp_token_factory()
+        if not isinstance(token, str) or _TEMP_TOKEN_PATTERN.fullmatch(token) is None:
+            raise ValueError("materialization temp token must be safe ASCII")
+        return destination.parent / f".{destination.name}.{token}.materializing"
+
+    @staticmethod
+    def _discard_materialization_temp(path: Path) -> None:
+        """Best-effort removal of one private, never-published temp node."""
+
+        try:
+            metadata = path.lstat()
+        except FileNotFoundError:
+            return
+        if is_reparse_point(metadata) or stat.S_ISLNK(metadata.st_mode):
+            return
+        if stat.S_ISREG(metadata.st_mode):
+            path.unlink()
+            return
+        if not stat.S_ISDIR(metadata.st_mode):
+            return
+        for current, directory_names, filenames in os.walk(
+            path,
+            topdown=True,
+            followlinks=False,
+        ):
+            current_path = Path(current)
+            require_real_directory(current_path)
+            for name in directory_names:
+                require_real_directory(current_path / name)
+            for name in filenames:
+                require_ordinary_file(current_path / name)
+        shutil.rmtree(path)
 
     def materialize(self, resource_ref: ResourceRef, destination: Path) -> Path:
         source = validate_formal_resource(
@@ -459,22 +520,87 @@ class FormalResourceReader:
             require_read_only=True,
         )
         destination = self._validate_destination(resource_ref, destination)
-        if destination.exists() or destination.is_symlink():
-            raise FileExistsError("workspace materialization destination already exists")
         self._ensure_materialization_parent(destination)
         ensure_no_symlink_ancestors(self._layout.workspaces, destination)
 
-        if resource_ref.resource_kind is ResourceKind.FILE:
-            try:
-                os.link(source, destination, follow_symlinks=False)
-            except OSError:
-                with FileBinaryStream(source) as stream:
-                    copy_binary_stream(
-                        stream,
-                        destination,
-                        file_sync=self._file_sync,
+        source_tree: TreeInspection | None = None
+        if resource_ref.resource_kind is ResourceKind.DIRECTORY:
+            source_tree = inspect_tree(source, reject_hardlinks=True)
+            if (
+                source_tree.size != resource_ref.size
+                or source_tree.sha256 != resource_ref.sha256
+            ):
+                raise ValueError("formal directory bytes changed before materialization")
+
+        try:
+            destination.lstat()
+        except FileNotFoundError:
+            destination_exists = False
+        else:
+            destination_exists = True
+
+        if not destination_exists:
+            if resource_ref.resource_kind is ResourceKind.FILE:
+                try:
+                    os.link(source, destination, follow_symlinks=False)
+                except OSError:
+                    # FileExistsError may mean an identical concurrent attempt
+                    # already published the complete destination.  Adopt it;
+                    # every other hard-link failure falls back to an isolated
+                    # temp copy so a short write never poisons the final name.
+                    try:
+                        destination.lstat()
+                    except FileNotFoundError:
+                        temporary = self._new_materialization_temp(destination)
+                        try:
+                            with FileBinaryStream(source) as stream:
+                                copy_binary_stream(
+                                    stream,
+                                    temporary,
+                                    file_sync=self._file_sync,
+                                    byte_limit=resource_ref.size,
+                                )
+                            observed = hash_file(temporary)
+                            if (
+                                observed.size != resource_ref.size
+                                or observed.sha256 != resource_ref.sha256
+                            ):
+                                raise OSError(
+                                    "temporary materialized bytes differ from ResourceRef"
+                                )
+                            finalize_read_only_file(temporary, self._file_sync)
+                            self._replacer.replace(temporary, destination)
+                        finally:
+                            try:
+                                self._discard_materialization_temp(temporary)
+                            except (OSError, ValueError):
+                                pass
+            else:
+                assert source_tree is not None
+                temporary = self._new_materialization_temp(destination)
+                try:
+                    inspect_tree(
+                        source,
+                        copy_to=temporary,
                         byte_limit=resource_ref.size,
+                        reject_hardlinks=True,
                     )
+                    finalize_read_only_tree(temporary, self._file_sync)
+                    verify_tree(
+                        temporary,
+                        expected_manifest=source_tree.manifest,
+                        expected_size=resource_ref.size,
+                        expected_sha256=resource_ref.sha256,
+                    )
+                    self._replacer.replace(temporary, destination)
+                finally:
+                    try:
+                        self._discard_materialization_temp(temporary)
+                    except (OSError, ValueError):
+                        pass
+
+        if resource_ref.resource_kind is ResourceKind.FILE:
+            require_ordinary_file(destination)
             finalize_read_only_file(destination, self._file_sync)
             observed = hash_file(destination)
             if (
@@ -483,18 +609,8 @@ class FormalResourceReader:
             ):
                 raise OSError("materialized file bytes differ from ResourceRef")
         else:
-            source_tree = inspect_tree(source, reject_hardlinks=True)
-            if (
-                source_tree.size != resource_ref.size
-                or source_tree.sha256 != resource_ref.sha256
-            ):
-                raise ValueError("formal directory bytes changed before materialization")
-            inspect_tree(
-                source,
-                copy_to=destination,
-                byte_limit=resource_ref.size,
-                reject_hardlinks=True,
-            )
+            assert source_tree is not None
+            require_real_directory(destination)
             finalize_read_only_tree(destination, self._file_sync)
             verify_tree(
                 destination,

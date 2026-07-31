@@ -26,7 +26,7 @@ from problem_locator.contracts.limits import (
     WORKSPACE_RETENTION_SECONDS,
 )
 
-from .atomic import require_ordinary_file, require_real_directory
+from .atomic import is_reparse_point, require_ordinary_file, require_real_directory
 from .layout import StorageLayout
 from .resource_files import scan_all_resources
 
@@ -99,7 +99,7 @@ class RetentionScanner:
         entries = sorted(os.scandir(root), key=lambda item: item.name)
         for entry in entries:
             metadata = entry.stat(follow_symlinks=False)
-            if not stat.S_ISDIR(metadata.st_mode):
+            if not stat.S_ISDIR(metadata.st_mode) or is_reparse_point(metadata):
                 raise ValueError("retention root contains a non-directory candidate")
         return entries
 

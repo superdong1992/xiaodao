@@ -14,7 +14,7 @@ from pydantic import TypeAdapter
 
 from problem_locator.contracts import OpaqueId
 
-from .atomic import FileSync, Replacer, require_real_directory
+from .atomic import FileSync, Replacer, is_reparse_point, require_real_directory
 from .layout import StorageLayout
 from .paths import ensure_no_symlink_ancestors
 
@@ -80,7 +80,9 @@ class QuarantineMover:
     @staticmethod
     def _require_candidate_node(candidate: Path) -> os.stat_result:
         metadata = candidate.lstat()
-        if not (stat.S_ISREG(metadata.st_mode) or stat.S_ISDIR(metadata.st_mode)):
+        if is_reparse_point(metadata) or not (
+            stat.S_ISREG(metadata.st_mode) or stat.S_ISDIR(metadata.st_mode)
+        ):
             raise ValueError("cleanup candidate must be a real file or directory")
         return metadata
 
@@ -96,7 +98,7 @@ class QuarantineMover:
             except FileNotFoundError:
                 child.mkdir(mode=0o700)
                 require_real_directory(child)
-                self._file_sync.sync_directory(current)
+            self._file_sync.sync_directory(current)
             current = child
 
     def move_if(
@@ -114,12 +116,23 @@ class QuarantineMover:
 
         with self._coordination_lock:
             relative = self._candidate_relative_path(candidate)
+            destination = self._layout.quarantine / validated_cleanup_id / relative
+            destination_present = destination.exists() or destination.is_symlink()
+            candidate_present = candidate.exists() or candidate.is_symlink()
+            if not candidate_present:
+                if not destination_present:
+                    raise FileNotFoundError(candidate)
+                ensure_no_symlink_ancestors(self._layout.quarantine, destination)
+                self._require_candidate_node(destination)
+                self._ensure_directory_chain(destination.parent)
+                self._file_sync.sync_directory(candidate.parent)
+                self._file_sync.sync_directory(destination.parent)
+                return destination
             if not revalidate():
                 return None
             candidate_metadata = self._require_candidate_node(candidate)
-            destination = self._layout.quarantine / validated_cleanup_id / relative
             self._ensure_directory_chain(destination.parent)
-            if destination.exists() or destination.is_symlink():
+            if destination_present:
                 raise FileExistsError("quarantine destination already exists")
             original_mode: int | None = None
             if stat.S_ISDIR(candidate_metadata.st_mode) and not (
@@ -155,7 +168,9 @@ class QuarantineMover:
         ):
             _OPAQUE_ID_ADAPTER.validate_python(cleanup_entry.name)
             cleanup_metadata = cleanup_entry.stat(follow_symlinks=False)
-            if not stat.S_ISDIR(cleanup_metadata.st_mode):
+            if not stat.S_ISDIR(cleanup_metadata.st_mode) or is_reparse_point(
+                cleanup_metadata
+            ):
                 raise ValueError("quarantine cleanup root must be a real directory")
             cleanup_root = Path(cleanup_entry.path)
             pending = [cleanup_root]
@@ -166,15 +181,14 @@ class QuarantineMover:
                     relative = path.relative_to(cleanup_root)
                     metadata = entry.stat(follow_symlinks=False)
                     if self._is_candidate_shape(relative.parts):
-                        if not (
+                        if is_reparse_point(metadata) or not (
                             stat.S_ISREG(metadata.st_mode)
                             or stat.S_ISDIR(metadata.st_mode)
-                            or stat.S_ISLNK(metadata.st_mode)
                         ):
                             raise ValueError("quarantine candidate has an unsafe node type")
                         discovered.append(path)
                         continue
-                    if stat.S_ISDIR(metadata.st_mode):
+                    if stat.S_ISDIR(metadata.st_mode) and not is_reparse_point(metadata):
                         pending.append(path)
                         continue
                     raise ValueError("quarantine contains an unrecognized isolated path")
@@ -198,13 +212,23 @@ class QuarantineMover:
         _OPAQUE_ID_ADAPTER.validate_python(relative.parts[0])
         if not self._is_candidate_shape(relative.parts[1:]):
             raise ValueError("delete target is not one isolated cleanup candidate")
-        if target.is_symlink() or target.is_file():
+        # Deletion is deliberately outside the coordination lock, so never
+        # follow an adopted/replaced link anywhere under the quarantine root.
+        ensure_no_symlink_ancestors(quarantine_root, target)
+        try:
+            target_metadata = target.lstat()
+        except FileNotFoundError:
+            self._complete_parent_deletion(target.parent, quarantine_root)
+            return
+        if is_reparse_point(target_metadata):
+            raise ValueError("quarantine delete target must not be a reparse point")
+        if stat.S_ISREG(target_metadata.st_mode):
             try:
                 target.unlink()
             except PermissionError:
                 os.chmod(target, stat.S_IRUSR | stat.S_IWUSR, follow_symlinks=False)
                 target.unlink()
-        elif target.is_dir():
+        elif stat.S_ISDIR(target_metadata.st_mode):
             for current, directory_names, _ in os.walk(
                 target,
                 topdown=True,
@@ -215,7 +239,9 @@ class QuarantineMover:
                 for directory_name in directory_names:
                     child = current_path / directory_name
                     child_metadata = child.lstat()
-                    if stat.S_ISDIR(child_metadata.st_mode):
+                    if stat.S_ISDIR(child_metadata.st_mode) and not is_reparse_point(
+                        child_metadata
+                    ):
                         os.chmod(child, stat.S_IRWXU, follow_symlinks=False)
 
             def make_writable_and_retry(
@@ -234,11 +260,28 @@ class QuarantineMover:
             shutil.rmtree(target, onexc=make_writable_and_retry)
         else:
             raise FileNotFoundError(target)
-        self._file_sync.sync_directory(target.parent)
-        parent = target.parent
+
+        self._complete_parent_deletion(target.parent, quarantine_root)
+
+    def _complete_parent_deletion(
+        self,
+        target_parent: Path,
+        quarantine_root: Path,
+    ) -> None:
+        """Idempotently persist a deletion and prune its empty receipt path."""
+
+        existing_parent = target_parent
+        while existing_parent != quarantine_root and not existing_parent.exists():
+            existing_parent = existing_parent.parent
+        require_real_directory(existing_parent)
+        self._file_sync.sync_directory(existing_parent)
+
+        parent = target_parent
         while parent != quarantine_root:
             try:
                 parent.rmdir()
+            except FileNotFoundError:
+                pass
             except OSError:
                 break
             self._file_sync.sync_directory(parent.parent)

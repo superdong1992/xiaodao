@@ -6,6 +6,7 @@ import stat
 from dataclasses import dataclass
 from pathlib import Path
 
+from .atomic import FileSync, is_reparse_point, require_real_directory
 from .paths import validate_data_root
 
 
@@ -65,8 +66,13 @@ class StorageLayout:
     def state_temporary(self) -> Path:
         return self.temporary / "state"
 
-    def ensure_directories(self) -> None:
+    def ensure_directories(self, file_sync: FileSync | None = None) -> None:
         """Create only the directories permitted by the frozen S02 layout."""
+
+        if file_sync is None:
+            from .platform import PlatformFileSync
+
+            file_sync = PlatformFileSync()
 
         ordered = (
             self.data_root,
@@ -81,16 +87,17 @@ class StorageLayout:
             self.state_temporary,
         )
         for directory in ordered:
+            require_real_directory(directory.parent)
             try:
                 value = directory.lstat()
             except FileNotFoundError:
-                directory.mkdir(
-                    mode=0o700,
-                    parents=directory == self.data_root,
-                )
-                continue
-            if not stat.S_ISDIR(value.st_mode):
+                directory.mkdir(mode=0o700)
+                value = directory.lstat()
+            if not stat.S_ISDIR(value.st_mode) or is_reparse_point(value):
                 raise ValueError("DATA_ROOT layout nodes must be real directories")
+            # Re-apply on adoption so a retry completes a create whose parent
+            # sync failed after the directory entry became visible.
+            file_sync.sync_directory(directory.parent)
 
     def has_business_content_without_state(self) -> bool:
         """Return whether initializing a new StateFile would hide existing data."""

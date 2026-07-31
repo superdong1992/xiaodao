@@ -150,6 +150,26 @@ def test_candidate_symlink_is_rejected_without_touching_target(tmp_path: Path) -
     assert target.read_bytes() == b"keep"
 
 
+def test_delete_rejects_quarantine_symlink_ancestor_without_touching_sentinel(
+    tmp_path: Path,
+) -> None:
+    layout, _, _, _, mover = _mover(tmp_path)
+    outside = tmp_path / "outside-quarantine"
+    external_target = outside / "tmp" / "uploads" / RESOURCE_ID
+    external_target.mkdir(parents=True)
+    sentinel = external_target / "sentinel"
+    sentinel.write_bytes(b"keep")
+    (layout.quarantine / CLEANUP_ID).symlink_to(outside, target_is_directory=True)
+
+    apparent_target = (
+        layout.quarantine / CLEANUP_ID / "tmp" / "uploads" / RESOURCE_ID
+    )
+    with pytest.raises(ValueError, match="symbolic links"):
+        mover.delete(apparent_target)
+
+    assert sentinel.read_bytes() == b"keep"
+
+
 def test_read_only_tree_is_deleted_only_after_lock_release(tmp_path: Path) -> None:
     layout, lock, _, _, mover = _mover(tmp_path)
     tree = (
@@ -253,7 +273,42 @@ def test_failed_quarantine_delete_remains_discoverable_for_retry(
     assert mover.discover() == ()
 
 
-@pytest.mark.parametrize("sync_occurrence", [1, 2])
+def test_delete_parent_sync_failure_is_idempotently_completed_by_retry(
+    tmp_path: Path,
+) -> None:
+    layout, _, sync, _, mover = _mover(tmp_path)
+    candidate = layout.state_temporary / "old-state.tmp"
+    candidate.write_bytes(b"old")
+    isolated = mover.move_if(CLEANUP_ID, candidate, lambda: True)
+    assert isolated is not None
+    sync.fail_next("sync_directory", OSError("delete parent sync failed"))
+
+    with pytest.raises(OSError, match="delete parent sync"):
+        mover.delete(isolated)
+
+    assert not isolated.exists()
+    mover.delete(isolated)
+    assert mover.discover() == ()
+
+
+def test_directory_creation_sync_failure_is_reapplied_before_move_retry(
+    tmp_path: Path,
+) -> None:
+    layout, _, sync, replace, mover = _mover(tmp_path)
+    candidate = layout.state_temporary / "old-state.tmp"
+    candidate.write_bytes(b"old")
+    sync.fail_next("sync_directory", OSError("new directory sync failed"))
+
+    with pytest.raises(OSError, match="new directory sync"):
+        mover.move_if(CLEANUP_ID, candidate, lambda: True)
+
+    assert candidate.exists()
+    assert replace.call_count == 0
+    isolated = mover.move_if(CLEANUP_ID, candidate, lambda: True)
+    assert isolated is not None and isolated.read_bytes() == b"old"
+
+
+@pytest.mark.parametrize("sync_occurrence", [4, 5])
 def test_post_move_directory_sync_failure_is_recovered_by_discovery(
     tmp_path: Path,
     sync_occurrence: int,
@@ -283,4 +338,7 @@ def test_post_move_directory_sync_failure_is_recovered_by_discovery(
 
     assert not candidate.exists()
     assert destination.read_bytes() == b"old"
+    assert mover.discover() == (destination,)
+
+    assert mover.move_if(CLEANUP_ID, candidate, lambda: False) == destination
     assert mover.discover() == (destination,)

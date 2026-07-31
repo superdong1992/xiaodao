@@ -282,6 +282,25 @@ def test_layout_creates_fixed_empty_structure_and_detects_business_content(
     assert layout.has_business_content_without_state()
 
 
+def test_layout_directory_parent_sync_failure_is_reapplied_on_retry(
+    tmp_path: Path,
+) -> None:
+    layout = StorageLayout.at(tmp_path / "data")
+    sync = FakeFileSync()
+    sync.fail_next("sync_directory", OSError("layout parent sync failed"))
+
+    with pytest.raises(OSError, match="layout parent sync"):
+        layout.ensure_directories(sync)
+
+    assert layout.data_root.is_dir()
+    layout.ensure_directories(sync)
+    assert layout.state_temporary.is_dir()
+    assert [event.path for event in sync.calls("sync_directory")[:2]] == [
+        tmp_path,
+        tmp_path,
+    ]
+
+
 def test_layout_detects_job_or_previous_state_and_rejects_symlink_nodes(
     tmp_path: Path,
 ) -> None:

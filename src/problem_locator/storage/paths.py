@@ -18,6 +18,8 @@ from pydantic import TypeAdapter
 from problem_locator.contracts.enums import ResourceKind
 from problem_locator.contracts.models import OpaqueId, ResourceRef
 
+from .atomic import is_reparse_point
+
 
 _OPAQUE_ID = TypeAdapter(OpaqueId)
 
@@ -67,15 +69,21 @@ def ensure_no_symlink_ancestors(root: Path, candidate: Path) -> None:
     except ValueError as exc:
         raise ValueError("path escapes its permitted root") from exc
     current = root
-    if current.exists() and current.is_symlink():
-        raise ValueError("filesystem roots cannot be symbolic links")
+    try:
+        root_metadata = current.lstat()
+    except FileNotFoundError:
+        root_metadata = None
+    if root_metadata is not None and (
+        stat.S_ISLNK(root_metadata.st_mode) or is_reparse_point(root_metadata)
+    ):
+        raise ValueError("filesystem roots cannot be links or reparse points")
     for part in relative.parts:
         current = current / part
         try:
-            mode = current.lstat().st_mode
+            metadata = current.lstat()
         except FileNotFoundError:
             continue
-        if stat.S_ISLNK(mode):
+        if stat.S_ISLNK(metadata.st_mode) or is_reparse_point(metadata):
             raise ValueError("symbolic links are forbidden in storage paths")
 
 
@@ -96,10 +104,10 @@ def parse_storage_key(storage_key: str) -> StorageAddress:
     _OPAQUE_ID.validate_python(resource_id)
     if category not in {"attachments", "evidence", "artifacts"}:
         raise ValueError("unknown formal resource category")
-    if category in {"attachments", "evidence"} and leaf != "payload":
-        raise ValueError("attachments and evidence must use payload files")
-    if category == "artifacts" and leaf not in {"payload", "tree"}:
-        raise ValueError("artifacts must use payload or tree")
+    if category == "attachments" and leaf != "payload":
+        raise ValueError("attachments must use payload files")
+    if category in {"evidence", "artifacts"} and leaf not in {"payload", "tree"}:
+        raise ValueError("evidence and artifacts must use payload or tree")
     return StorageAddress(case_id, category, resource_id, leaf)
 
 
@@ -115,8 +123,8 @@ def formal_storage_key(
     _OPAQUE_ID.validate_python(resource_id)
     if category not in {"attachments", "evidence", "artifacts"}:
         raise ValueError("unknown formal resource category")
-    if resource_kind is ResourceKind.DIRECTORY and category != "artifacts":
-        raise ValueError("only artifacts may be directory resources")
+    if resource_kind is ResourceKind.DIRECTORY and category == "attachments":
+        raise ValueError("attachments cannot be directory resources")
     leaf = "tree" if resource_kind is ResourceKind.DIRECTORY else "payload"
     return f"resources/cases/{case_id}/{category}/{resource_id}/{leaf}"
 

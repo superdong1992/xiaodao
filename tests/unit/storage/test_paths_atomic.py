@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -9,6 +10,7 @@ from problem_locator.contracts.enums import ResourceKind
 from problem_locator.contracts.models import ResourceRef
 from problem_locator.storage.atomic import (
     atomic_write_bytes,
+    is_reparse_point,
     require_ordinary_file,
     require_real_directory,
     write_synced_file,
@@ -30,6 +32,12 @@ RESOURCE_ID = "00000000-0000-0000-0000-000000000002"
 ZERO_HASH = hashlib.sha256(b"").hexdigest()
 
 
+def test_windows_reparse_metadata_is_rejected_independently_of_posix_mode() -> None:
+    assert is_reparse_point(SimpleNamespace(st_file_attributes=0x00000400))
+    assert not is_reparse_point(SimpleNamespace(st_file_attributes=0))
+    assert not is_reparse_point(SimpleNamespace())
+
+
 @pytest.mark.parametrize(
     "key",
     [
@@ -40,7 +48,6 @@ ZERO_HASH = hashlib.sha256(b"").hexdigest()
         f"resources/cases/{CASE_ID}//{RESOURCE_ID}/payload",
         f"resources/cases/{CASE_ID}/unknown/{RESOURCE_ID}/payload",
         f"resources/cases/{CASE_ID}/attachments/{RESOURCE_ID}/tree",
-        f"resources/cases/{CASE_ID}/evidence/{RESOURCE_ID}/tree",
         f"resources/cases/{CASE_ID}/artifacts/{RESOURCE_ID}/other",
         f"other/cases/{CASE_ID}/evidence/{RESOURCE_ID}/payload",
         f"resources/cases/not-a-uuid/evidence/{RESOURCE_ID}/payload",
@@ -55,6 +62,7 @@ def test_formal_storage_key_round_trips_all_legal_shapes() -> None:
     expected = {
         ("attachments", ResourceKind.FILE): "payload",
         ("evidence", ResourceKind.FILE): "payload",
+        ("evidence", ResourceKind.DIRECTORY): "tree",
         ("artifacts", ResourceKind.FILE): "payload",
         ("artifacts", ResourceKind.DIRECTORY): "tree",
     }
@@ -68,7 +76,7 @@ def test_formal_storage_key_round_trips_all_legal_shapes() -> None:
         assert address.resource_id == RESOURCE_ID
         assert address.resource_kind is kind
 
-    with pytest.raises(ValueError, match="only artifacts"):
+    with pytest.raises(ValueError, match="attachments"):
         formal_storage_key(CASE_ID, "attachments", RESOURCE_ID, ResourceKind.DIRECTORY)
 
 
@@ -99,6 +107,11 @@ def test_symlink_ancestor_and_final_symlink_are_rejected(tmp_path: Path) -> None
     final_link.symlink_to(real_file)
     with pytest.raises(ValueError, match="symbolic"):
         ensure_no_symlink_ancestors(root, final_link)
+
+    linked_root = tmp_path / "linked-root"
+    linked_root.symlink_to(root, target_is_directory=True)
+    with pytest.raises(ValueError, match="links or reparse"):
+        ensure_no_symlink_ancestors(linked_root, linked_root / "candidate")
 
 
 def test_resource_path_rejects_kind_mismatch_and_symlinked_case_root(tmp_path: Path) -> None:
@@ -200,6 +213,26 @@ def test_atomic_write_file_sync_failure_keeps_temp_and_skips_replace(tmp_path: P
     assert not destination.exists()
     assert replacer.call_count == 0
     assert sync.count("sync_directory") == 0
+
+
+def test_write_synced_file_rejects_path_exchange_during_handle_sync(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "candidate.tmp"
+    displaced = tmp_path / "displaced.tmp"
+
+    class PathSwappingSync(FakeFileSync):
+        def sync_file(self, path_or_handle: object) -> None:
+            super().sync_file(path_or_handle)  # type: ignore[arg-type]
+            synced_path = Path(path_or_handle.name)  # type: ignore[union-attr]
+            synced_path.rename(displaced)
+            synced_path.write_bytes(b"replacement inode")
+
+    with pytest.raises(OSError, match="changed before its sync completed"):
+        write_synced_file(path, b"original bytes", PathSwappingSync())
+
+    assert displaced.read_bytes() == b"original bytes"
+    assert path.read_bytes() == b"replacement inode"
 
 
 def test_atomic_write_replace_failure_keeps_synced_temp_and_old_destination(

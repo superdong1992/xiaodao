@@ -21,6 +21,10 @@ from typing import BinaryIO, Protocol, Self, TypeVar, cast
 from pydantic import TypeAdapter
 
 from problem_locator.contracts import (
+    ApplicationError,
+    ApplicationPortError,
+    ERROR_SPECS,
+    ErrorCode,
     ExecutionFileRef,
     ExecutionLogSinks,
     Job,
@@ -34,6 +38,7 @@ from problem_locator.contracts import (
     parse_canonical_json_bytes,
 )
 from problem_locator.contracts.limits import JOB_STDOUT_STDERR_BYTES
+from problem_locator.storage.atomic import is_reparse_point
 from problem_locator.storage.platform import PlatformFileSync, PlatformReplaceOperation
 
 
@@ -51,7 +56,7 @@ class _CoordinationLock(Protocol):
 
 
 class _FileSync(Protocol):
-    def sync_file(self, path: Path) -> None: ...
+    def sync_file(self, path_or_handle: Path | BinaryIO) -> None: ...
 
     def sync_directory(self, path: Path) -> None: ...
 
@@ -65,6 +70,42 @@ class _Replacer(Protocol):
 _OPAQUE_ID_ADAPTER = TypeAdapter(OpaqueId)
 _TEMP_TOKEN_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 _MODEL = TypeVar("_MODEL", Job, JobOutcome)
+_BINARY_FLAG = getattr(os, "O_BINARY", 0)
+
+
+class _RecordConflict(Exception):
+    """Internal marker that distinguishes byte drift from I/O failures."""
+
+
+class _NamedSyncTarget:
+    """Bind an injectable sync call to the exact descriptor being written."""
+
+    def __init__(
+        self,
+        path: Path,
+        descriptor: int,
+        flush_fn: Callable[[], None],
+    ) -> None:
+        self.name = path
+        self._descriptor = descriptor
+        self._flush = flush_fn
+
+    def fileno(self) -> int:
+        return self._descriptor
+
+    def flush(self) -> None:
+        self._flush()
+
+
+def _port_error(code: ErrorCode, message: str) -> ApplicationPortError:
+    return ApplicationPortError(
+        ApplicationError(
+            code=code,
+            message=message,
+            details=[],
+            retryable=ERROR_SPECS[code].application_retryable,
+        )
+    )
 
 
 def _validated_job_id(value: OpaqueId) -> str:
@@ -72,17 +113,24 @@ def _validated_job_id(value: OpaqueId) -> str:
 
 
 def _open_read_only(path: Path) -> int:
-    return os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    return os.open(
+        path,
+        os.O_RDONLY | _BINARY_FLAG | getattr(os, "O_NOFOLLOW", 0),
+    )
 
 
 def _require_regular_metadata(path: Path, metadata: os.stat_result) -> None:
-    if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_nlink != 1
+        or is_reparse_point(metadata)
+    ):
         raise OSError(f"execution record must be one ordinary, unlinked file: {path}")
 
 
 def _require_regular_path(path: Path) -> os.stat_result:
     metadata = path.lstat()
-    if stat.S_ISLNK(metadata.st_mode):
+    if stat.S_ISLNK(metadata.st_mode) or is_reparse_point(metadata):
         raise OSError(f"symbolic links are forbidden for execution records: {path}")
     _require_regular_metadata(path, metadata)
     return metadata
@@ -99,12 +147,15 @@ def _same_file(left: os.stat_result, right: os.stat_result) -> bool:
     return left.st_dev == right.st_dev and left.st_ino == right.st_ino
 
 
-def _stable_metadata(metadata: os.stat_result) -> tuple[int, int, int, int, int]:
+def _stable_metadata(
+    metadata: os.stat_result,
+) -> tuple[int, int, int, int, int, int]:
     return (
         metadata.st_dev,
         metadata.st_ino,
         metadata.st_size,
         metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
         metadata.st_nlink,
     )
 
@@ -143,8 +194,14 @@ def _read_regular_bytes(path: Path) -> bytes:
     return payload
 
 
-def _write_new_file(path: Path, payload: bytes) -> None:
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+def _write_new_file(path: Path, payload: bytes, file_sync: _FileSync) -> None:
+    flags = (
+        os.O_WRONLY
+        | os.O_CREAT
+        | os.O_EXCL
+        | _BINARY_FLAG
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
     descriptor = os.open(path, flags, 0o600)
     try:
         view = memoryview(payload)
@@ -154,12 +211,25 @@ def _write_new_file(path: Path, payload: bytes) -> None:
             if written <= 0:
                 raise OSError(f"zero-length write while creating execution record: {path}")
             offset += written
+        file_sync.sync_file(
+            _NamedSyncTarget(path, descriptor, lambda: None)  # type: ignore[arg-type]
+        )
+        descriptor_metadata = os.fstat(descriptor)
+        path_metadata = _require_regular_path(path)
+        if not _same_file(descriptor_metadata, path_metadata):
+            raise OSError("execution-record temp path changed before sync completed")
     finally:
         os.close(descriptor)
 
 
 def _create_empty_file(path: Path) -> None:
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    flags = (
+        os.O_WRONLY
+        | os.O_CREAT
+        | os.O_EXCL
+        | _BINARY_FLAG
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
     descriptor = os.open(path, flags, 0o600)
     try:
         _require_regular_metadata(path, os.fstat(descriptor))
@@ -169,7 +239,11 @@ def _create_empty_file(path: Path) -> None:
 
 def _ensure_existing_directory(path: Path, *, label: str) -> None:
     metadata = path.lstat()
-    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+    if (
+        stat.S_ISLNK(metadata.st_mode)
+        or not stat.S_ISDIR(metadata.st_mode)
+        or is_reparse_point(metadata)
+    ):
         raise OSError(f"{label} must be an ordinary directory: {path}")
 
 
@@ -219,7 +293,17 @@ class _AppendOnlyFileSink:
 
     def _flush_locked(self) -> None:
         self._handle.flush()
-        self._file_sync.sync_file(self._path)
+        self._file_sync.sync_file(
+            _NamedSyncTarget(
+                self._path,
+                self._handle.fileno(),
+                self._handle.flush,
+            )  # type: ignore[arg-type]
+        )
+        descriptor_metadata = os.fstat(self._handle.fileno())
+        path_metadata = _require_regular_path(self._path)
+        if not _same_file(descriptor_metadata, path_metadata):
+            raise OSError("execution log path changed while it was flushed")
 
     def flush(self) -> None:
         with self._session.lock:
@@ -283,6 +367,22 @@ class FileExecutionRecordStore:
         self._active_log_sessions: dict[str, _LogSession] = {}
 
     def publish_job(self, job: Job) -> ExecutionFileRef:
+        try:
+            return self._publish_job(job)
+        except ApplicationPortError:
+            raise
+        except _RecordConflict:
+            raise _port_error(
+                ErrorCode.IDEMPOTENCY_CONFLICT,
+                "The Job execution record conflicts with existing bytes.",
+            ) from None
+        except Exception:
+            raise _port_error(
+                ErrorCode.EXECUTION_RECORD_FAILED,
+                "The Job execution record could not be published.",
+            ) from None
+
+    def _publish_job(self, job: Job) -> ExecutionFileRef:
         if not isinstance(job, Job):
             raise TypeError("job must be a Job DTO")
         canonical_bytes = canonical_json_bytes(job)
@@ -307,6 +407,26 @@ class FileExecutionRecordStore:
         job_id: OpaqueId,
         canonical_bytes: bytes,
     ) -> ExecutionFileRef:
+        try:
+            return self._publish_outcome_bytes(job_id, canonical_bytes)
+        except ApplicationPortError:
+            raise
+        except _RecordConflict:
+            raise _port_error(
+                ErrorCode.IDEMPOTENCY_CONFLICT,
+                "The Outcome execution record conflicts with existing bytes.",
+            ) from None
+        except Exception:
+            raise _port_error(
+                ErrorCode.EXECUTION_RECORD_FAILED,
+                "The Outcome execution record could not be published.",
+            ) from None
+
+    def _publish_outcome_bytes(
+        self,
+        job_id: OpaqueId,
+        canonical_bytes: bytes,
+    ) -> ExecutionFileRef:
         validated_job_id = _validated_job_id(job_id)
         outcome = parse_canonical_json_bytes(canonical_bytes, JobOutcome)
         if outcome.job_id != validated_job_id:
@@ -327,6 +447,20 @@ class FileExecutionRecordStore:
             )
 
     def read_published_job(self, job_id: OpaqueId) -> PublishedJobReceipt | None:
+        try:
+            return self._read_published_job(job_id)
+        except ApplicationPortError:
+            raise
+        except Exception:
+            raise _port_error(
+                ErrorCode.EXECUTION_RECORD_FAILED,
+                "The published Job execution record is invalid.",
+            ) from None
+
+    def _read_published_job(
+        self,
+        job_id: OpaqueId,
+    ) -> PublishedJobReceipt | None:
         validated_job_id = _validated_job_id(job_id)
         with self._coordination_lock:
             job_directory = self._find_job_directory(validated_job_id)
@@ -353,6 +487,20 @@ class FileExecutionRecordStore:
         self,
         job_id: OpaqueId,
     ) -> RuntimeExecutionReceipt | None:
+        try:
+            return self._read_published_outcome(job_id)
+        except ApplicationPortError:
+            raise
+        except Exception:
+            raise _port_error(
+                ErrorCode.EXECUTION_RECORD_FAILED,
+                "The published Outcome execution record is invalid.",
+            ) from None
+
+    def _read_published_outcome(
+        self,
+        job_id: OpaqueId,
+    ) -> RuntimeExecutionReceipt | None:
         validated_job_id = _validated_job_id(job_id)
         with self._coordination_lock:
             job_directory = self._find_job_directory(validated_job_id)
@@ -376,6 +524,21 @@ class FileExecutionRecordStore:
             )
 
     def open_log_sinks(
+        self,
+        job_id: OpaqueId,
+        combined_limit_bytes: int,
+    ) -> ExecutionLogSinks:
+        try:
+            return self._open_log_sinks(job_id, combined_limit_bytes)
+        except ApplicationPortError:
+            raise
+        except Exception:
+            raise _port_error(
+                ErrorCode.EXECUTION_RECORD_FAILED,
+                "The execution log sinks could not be opened.",
+            ) from None
+
+    def _open_log_sinks(
         self,
         job_id: OpaqueId,
         combined_limit_bytes: int,
@@ -449,7 +612,9 @@ class FileExecutionRecordStore:
         except FileNotFoundError:
             self._jobs_root.mkdir(mode=0o700)
             _ensure_existing_directory(self._jobs_root, label="jobs root")
-            self._file_sync.sync_directory(self._data_root)
+        # Re-applying this boundary is required when a prior create succeeded
+        # but its parent-directory sync failed before the call returned.
+        self._file_sync.sync_directory(self._data_root)
         return self._jobs_root
 
     def _ensure_job_directory(self, job_id: OpaqueId) -> Path:
@@ -461,7 +626,7 @@ class FileExecutionRecordStore:
         except FileNotFoundError:
             job_directory.mkdir(mode=0o700)
             _ensure_existing_directory(job_directory, label="job directory")
-            self._file_sync.sync_directory(jobs_root)
+        self._file_sync.sync_directory(jobs_root)
         return job_directory
 
     def _find_job_directory(self, job_id: str) -> Path | None:
@@ -496,16 +661,22 @@ class FileExecutionRecordStore:
                 expected_job_id,
             )
             if stored_bytes != expected_bytes:
-                raise FileExistsError(
+                raise _RecordConflict(
                     f"different canonical bytes already exist at {final_path}"
                 )
             self._finalize_record(final_path)
-            return model, stored_bytes
+            finalized_model, finalized_bytes = self._validated_final_record(
+                final_path,
+                model_type,
+                expected_job_id,
+            )
+            if finalized_bytes != expected_bytes:
+                raise OSError("execution record changed while it was finalized")
+            return finalized_model, finalized_bytes
 
         temp_path = self._new_temp_path(final_path.parent, final_path.name)
         try:
-            _write_new_file(temp_path, expected_bytes)
-            self._file_sync.sync_file(temp_path)
+            _write_new_file(temp_path, expected_bytes, self._file_sync)
             if _regular_path_if_present(final_path) is not None:
                 model, stored_bytes = self._validated_final_record(
                     final_path,
@@ -513,11 +684,18 @@ class FileExecutionRecordStore:
                     expected_job_id,
                 )
                 if stored_bytes != expected_bytes:
-                    raise FileExistsError(
+                    raise _RecordConflict(
                         f"different canonical bytes already exist at {final_path}"
                     )
                 self._finalize_record(final_path)
-                return model, stored_bytes
+                finalized_model, finalized_bytes = self._validated_final_record(
+                    final_path,
+                    model_type,
+                    expected_job_id,
+                )
+                if finalized_bytes != expected_bytes:
+                    raise OSError("execution record changed while it was finalized")
+                return finalized_model, finalized_bytes
             self._replacer.replace(temp_path, final_path)
         finally:
             try:
@@ -534,7 +712,14 @@ class FileExecutionRecordStore:
         if stored_bytes != expected_bytes:
             raise OSError("atomic replacer published different execution-record bytes")
         self._finalize_record(final_path)
-        return model, stored_bytes
+        finalized_model, finalized_bytes = self._validated_final_record(
+            final_path,
+            model_type,
+            expected_job_id,
+        )
+        if finalized_bytes != expected_bytes:
+            raise OSError("execution record changed while it was finalized")
+        return finalized_model, finalized_bytes
 
     def _validated_final_record(
         self,
@@ -551,9 +736,14 @@ class FileExecutionRecordStore:
         return model, canonical_bytes
 
     def _finalize_record(self, final_path: Path) -> None:
-        _require_regular_path(final_path)
+        before = _require_regular_path(final_path)
         self._file_sync.make_read_only(final_path)
-        _require_regular_path(final_path)
+        after = _require_regular_path(final_path)
+        if (
+            not _same_file(before, after)
+            or after.st_mode & 0o222
+        ):
+            raise OSError("execution record was not made read-only in place")
         self._file_sync.sync_file(final_path)
         self._file_sync.sync_directory(final_path.parent)
 
@@ -604,7 +794,12 @@ class FileExecutionRecordStore:
     @staticmethod
     def _open_empty_append_handle(path: Path) -> BinaryIO:
         path_metadata = _require_regular_path(path)
-        flags = os.O_WRONLY | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0)
+        flags = (
+            os.O_WRONLY
+            | os.O_APPEND
+            | _BINARY_FLAG
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
         descriptor = os.open(path, flags)
         try:
             descriptor_metadata = os.fstat(descriptor)

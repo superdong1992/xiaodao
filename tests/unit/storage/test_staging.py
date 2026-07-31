@@ -190,6 +190,29 @@ def test_file_content_sync_failure_never_replaces_payload(
     assert len(tuple(directory.glob(".payload-*.tmp"))) == 1
 
 
+def test_stage_directory_parent_sync_failure_is_reapplied_on_retry(
+    harness: WriterHarness,
+) -> None:
+    directory = _upload_directory(harness)
+    first_stream = RecordingStream(b"abcde")
+    harness.sync.fail_next("sync_directory", OSError("stage parent sync failed"))
+
+    with pytest.raises(OSError, match="stage parent sync"):
+        harness.writer.stage_file_content(
+            directory,
+            first_stream,
+            byte_limit=5,
+            expected_size=5,
+            expected_sha256=hashlib.sha256(b"abcde").hexdigest(),
+        )
+
+    assert directory.is_dir()
+    assert first_stream.requests == []
+    retried = _stage_file(harness)
+    assert retried.returned_bytes == 5
+    assert (directory / "payload").read_bytes() == b"abcde"
+
+
 def test_file_content_replace_failure_keeps_synced_incomplete_temp(
     harness: WriterHarness,
 ) -> None:
@@ -267,6 +290,22 @@ def test_marker_replace_failure_leaves_only_synced_temporary_marker(
     assert len(marker_temps) == 1
     assert marker_temps[0].read_bytes() == MARKER_BYTES
     assert (directory / "payload").read_bytes() == b"abcde"
+
+
+def test_marker_directory_sync_failure_is_completed_by_adoption_retry(
+    harness: WriterHarness,
+) -> None:
+    directory = _upload_directory(harness)
+    _stage_file(harness)
+    harness.sync.fail_next("sync_directory", OSError("marker directory sync failed"))
+
+    with pytest.raises(OSError, match="marker directory sync"):
+        harness.writer.publish_marker(directory, MARKER_BYTES)
+
+    assert (directory / "staged.json").read_bytes() == MARKER_BYTES
+    replace_count = harness.replacer.call_count
+    harness.writer.publish_marker(directory, MARKER_BYTES)
+    assert harness.replacer.call_count == replace_count
 
 
 def test_temporary_marker_is_ignored_and_completed_stage_is_not_overwritten(

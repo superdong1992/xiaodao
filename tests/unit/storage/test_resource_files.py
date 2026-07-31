@@ -204,7 +204,7 @@ def test_strict_scan_counts_orphans_and_excludes_tmp_and_quarantine(
             parents=True
         ),
         lambda layout: (
-            layout.cases_resources / CASE_ID / "evidence" / RESOURCE_ID / "tree"
+            layout.cases_resources / CASE_ID / "attachments" / RESOURCE_ID / "tree"
         ).mkdir(parents=True),
         lambda layout: (
             layout.cases_resources / CASE_ID / "evidence" / RESOURCE_ID / "payload"
@@ -455,7 +455,10 @@ def test_finalize_failure_after_move_is_completed_by_idempotent_retry(
     payload = b"finalize retry"
     staged = _staged_file(layout, payload)
     sync = DurableRecordingFileSync()
-    sync.fail_next(operation, OSError(message))  # type: ignore[arg-type]
+    if operation == "sync_directory":
+        sync.fail_on(operation, 5, OSError(message))
+    else:
+        sync.fail_next(operation, OSError(message))  # type: ignore[arg-type]
     _, guard, _, replacer, publisher = _publisher(layout, sync=sync)
     final = layout.data_root / _key()
     if operation == "sync_directory":
@@ -523,10 +526,51 @@ def test_reader_materializes_file_at_fixed_workspace_path_by_hardlink(
     assert destination.stat().st_ino == source.stat().st_ino
     assert is_read_only(destination)
     assert sync.calls("sync_directory")[-1].path == destination.parent
-    with pytest.raises(FileExistsError):
-        reader.materialize(ref, destination)
+    # Exact bytes at the frozen destination are an idempotent adoption.  This
+    # lets a retry close a prior chmod/fsync/parent-sync durability boundary.
+    assert reader.materialize(ref, destination) == destination
+    assert destination.stat().st_ino == source.stat().st_ino
     with pytest.raises(ValueError, match="frozen workspace"):
         reader.materialize(ref, layout.workspaces / JOB_ID / "inputs" / "wrong")
+
+
+@pytest.mark.parametrize(
+    ("operation", "occurrence"),
+    [
+        ("readonly_file", 1),
+        ("sync_file", 1),
+        ("sync_directory", 5),
+    ],
+)
+def test_reader_materialization_finalize_failure_is_retried_by_adoption(
+    tmp_path: Path,
+    operation: str,
+    occurrence: int,
+) -> None:
+    layout = _layout(tmp_path)
+    _, ref = _formal_file(layout, b"retry materialization", read_only=True)
+    sync = DurableRecordingFileSync()
+    sync.fail_on(
+        operation,  # type: ignore[arg-type]
+        occurrence,
+        OSError("injected materialization durability failure"),
+    )
+    reader = FormalResourceReader(layout, sync)
+    destination = (
+        layout.workspaces
+        / JOB_ID
+        / "inputs"
+        / "evidence"
+        / RESOURCE_ID
+        / "payload"
+    )
+
+    with pytest.raises(OSError, match="durability failure"):
+        reader.materialize(ref, destination)
+
+    assert destination.read_bytes() == b"retry materialization"
+    assert reader.materialize(ref, destination) == destination
+    assert is_read_only(destination)
 
 
 def test_reader_falls_back_to_copy_when_hardlink_is_unavailable(
@@ -556,6 +600,51 @@ def test_reader_falls_back_to_copy_when_hardlink_is_unavailable(
     assert destination.stat().st_ino != source.stat().st_ino
     assert is_read_only(destination)
     assert sync.count("sync_file") >= 2
+
+
+def test_reader_file_partial_copy_never_claims_final_name_and_retry_succeeds(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    layout = _layout(tmp_path)
+    _, ref = _formal_file(layout, b"complete file bytes", read_only=True)
+    reader = FormalResourceReader(
+        layout,
+        DurableRecordingFileSync(),
+        temp_token_factory=lambda: "file-copy-retry",
+    )
+    destination = (
+        layout.workspaces
+        / JOB_ID
+        / "inputs"
+        / "evidence"
+        / RESOURCE_ID
+        / "payload"
+    )
+    real_copy = resource_files.copy_binary_stream
+    failed = False
+
+    def unavailable_hardlink(*args: object, **kwargs: object) -> None:
+        raise OSError("cross-device")
+
+    def fail_first_copy(*args: object, **kwargs: object):
+        nonlocal failed
+        if not failed:
+            failed = True
+            Path(args[1]).write_bytes(b"partial")
+            raise OSError("injected mid-copy failure")
+        return real_copy(*args, **kwargs)
+
+    monkeypatch.setattr(resource_files.os, "link", unavailable_hardlink)
+    monkeypatch.setattr(resource_files, "copy_binary_stream", fail_first_copy)
+
+    with pytest.raises(OSError, match="mid-copy"):
+        reader.materialize(ref, destination)
+    assert not destination.exists()
+    assert not list(destination.parent.glob("*.materializing"))
+
+    assert reader.materialize(ref, destination) == destination
+    assert destination.read_bytes() == b"complete file bytes"
 
 
 def test_reader_materializes_read_only_tree_and_rejects_linked_trees(
@@ -617,3 +706,60 @@ def test_reader_materializes_read_only_tree_and_rejects_linked_trees(
             linked_ref,
             linked_destination,
         )
+
+
+def test_reader_tree_partial_copy_never_claims_final_name_and_retry_succeeds(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    layout = _layout(tmp_path)
+    storage_key = _key(category="artifacts", kind=ResourceKind.DIRECTORY)
+    source = layout.data_root / storage_key
+    (source / "nested").mkdir(parents=True)
+    (source / "nested" / "complete.txt").write_bytes(b"complete tree bytes")
+    inspection = inspect_tree(source)
+    finalize_read_only_tree(source, PlatformFileSync())
+    ref = ResourceRef(
+        resource_kind=ResourceKind.DIRECTORY,
+        storage_key=storage_key,
+        size=inspection.size,
+        sha256=inspection.sha256,
+    )
+    destination = (
+        layout.workspaces
+        / JOB_ID
+        / "inputs"
+        / "artifacts"
+        / RESOURCE_ID
+        / "tree"
+    )
+    reader = FormalResourceReader(
+        layout,
+        PlatformFileSync(),
+        temp_token_factory=lambda: "tree-copy-retry",
+    )
+    real_inspect = resource_files.inspect_tree
+    failed = False
+
+    def fail_first_tree_copy(root: Path, **kwargs: object):
+        nonlocal failed
+        copy_to = kwargs.get("copy_to")
+        if copy_to is not None and not failed:
+            failed = True
+            partial = Path(copy_to)
+            partial.mkdir()
+            (partial / "partial.txt").write_bytes(b"partial")
+            raise OSError("injected mid-tree-copy failure")
+        return real_inspect(root, **kwargs)
+
+    monkeypatch.setattr(resource_files, "inspect_tree", fail_first_tree_copy)
+
+    with pytest.raises(OSError, match="mid-tree-copy"):
+        reader.materialize(ref, destination)
+    assert not destination.exists()
+    assert not list(destination.parent.glob("*.materializing"))
+
+    assert reader.materialize(ref, destination) == destination
+    assert (destination / "nested" / "complete.txt").read_bytes() == (
+        b"complete tree bytes"
+    )

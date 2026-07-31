@@ -15,6 +15,7 @@ from problem_locator.storage.platform import (
     PosixInstanceLockBackend,
     ReplaceOperation,
     WindowsInstanceLockBackend,
+    _sync_windows_directory,
 )
 
 
@@ -73,6 +74,61 @@ def test_simulated_windows_backend_locks_one_byte_and_unlocks(tmp_path: Path) ->
             (handle.fileno(), 17, 1),
             (handle.fileno(), 23, 1),
         ]
+
+
+def test_windows_directory_sync_requests_write_access_and_closes_handle(
+    tmp_path: Path,
+) -> None:
+    create_calls: list[tuple[object, ...]] = []
+    flush_calls: list[object] = []
+    close_calls: list[object] = []
+    handle = object()
+
+    _sync_windows_directory(
+        tmp_path,
+        create_file_fn=lambda *arguments: (
+            create_calls.append(arguments),
+            handle,
+        )[1],
+        flush_file_buffers_fn=lambda value: flush_calls.append(value) or True,
+        close_handle_fn=lambda value: close_calls.append(value) or True,
+        invalid_handle_value=-1,
+        get_last_error_fn=lambda: 5,
+        win_error_fn=lambda code: OSError(code, "simulated Win32 failure"),
+    )
+
+    assert create_calls[0][1] == 0x80000000 | 0x40000000
+    assert create_calls[0][2] == 0x00000001 | 0x00000002 | 0x00000004
+    assert create_calls[0][5] == 0x02000000
+    assert flush_calls == [handle]
+    assert close_calls == [handle]
+
+
+@pytest.mark.parametrize("failure_point", ["create", "flush", "close"])
+def test_windows_directory_sync_propagates_each_win32_failure(
+    tmp_path: Path,
+    failure_point: str,
+) -> None:
+    handle = object()
+    close_calls: list[object] = []
+
+    with pytest.raises(OSError, match="simulated Win32 failure"):
+        _sync_windows_directory(
+            tmp_path,
+            create_file_fn=lambda *arguments: -1
+            if failure_point == "create"
+            else handle,
+            flush_file_buffers_fn=lambda value: failure_point != "flush",
+            close_handle_fn=lambda value: (
+                close_calls.append(value),
+                failure_point != "close",
+            )[1],
+            invalid_handle_value=-1,
+            get_last_error_fn=lambda: 5,
+            win_error_fn=lambda code: OSError(code, "simulated Win32 failure"),
+        )
+
+    assert close_calls == ([] if failure_point == "create" else [handle])
 
 
 def test_file_instance_lock_holds_handle_and_never_unlinks(tmp_path: Path) -> None:

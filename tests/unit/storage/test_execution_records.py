@@ -12,6 +12,8 @@ from typing import Iterator, Self
 import pytest
 
 from problem_locator.contracts import (
+    ApplicationPortError,
+    ErrorCode,
     ExecutionRecordStore,
     Job,
     JobOutcome,
@@ -25,6 +27,7 @@ from problem_locator.storage.coordination import (
     StorageCoordinationLock,
 )
 from problem_locator.storage.execution_records import FileExecutionRecordStore
+from tests.unit.storage.fakes import FakeFileSync
 
 
 REPOSITORY_ROOT = Path(__file__).parents[3]
@@ -43,6 +46,13 @@ def _route_job() -> Job:
 
 def _route_outcome_bytes() -> bytes:
     return _fixture_bytes("job-outcome-route.json")
+
+
+@contextmanager
+def _raises_port_error(code: ErrorCode) -> Iterator[None]:
+    with pytest.raises(ApplicationPortError) as caught:
+        yield
+    assert caught.value.error.code is code
 
 
 class CoordinationLock:
@@ -83,8 +93,21 @@ class RecordingFileSync:
         self.directory_calls: list[Path] = []
         self.read_only_calls: list[Path] = []
 
-    def sync_file(self, path: Path) -> None:
+    @staticmethod
+    def _sync_path(path_or_handle: object) -> Path:
+        if isinstance(path_or_handle, (str, os.PathLike)):
+            return Path(path_or_handle)
+        name = getattr(path_or_handle, "name", None)
+        if isinstance(name, (str, os.PathLike)):
+            return Path(name)
+        raise TypeError("file-sync target must be a path or named handle")
+
+    def sync_file(self, path_or_handle: object) -> None:
+        path = self._sync_path(path_or_handle)
         self.file_calls.append(path)
+        if hasattr(path_or_handle, "fileno"):
+            os.fsync(path_or_handle.fileno())  # type: ignore[union-attr]
+            return
         descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
         try:
             os.fsync(descriptor)
@@ -136,21 +159,64 @@ class FailFirstReadOnly(RecordingFileSync):
         os.chmod(path, mode, follow_symlinks=False)
 
 
+class NoOpReadOnly(RecordingFileSync):
+    def make_read_only(self, path: Path) -> None:
+        self.read_only_calls.append(path)
+
+
 class FailFirstFileSync(RecordingFileSync):
     def __init__(self) -> None:
         super().__init__()
         self.failed = False
 
-    def sync_file(self, path: Path) -> None:
+    def sync_file(self, path_or_handle: object) -> None:
+        path = self._sync_path(path_or_handle)
         self.file_calls.append(path)
         if not self.failed:
             self.failed = True
             raise OSError("injected fsync failure")
+        if hasattr(path_or_handle, "fileno"):
+            os.fsync(path_or_handle.fileno())  # type: ignore[union-attr]
+            return
         descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
         try:
             os.fsync(descriptor)
         finally:
             os.close(descriptor)
+
+
+class DurableFaultFileSync(FakeFileSync):
+    """Fault-scheduled sync double that also performs the filesystem effect."""
+
+    def sync_file(self, path_or_handle: object) -> None:
+        super().sync_file(path_or_handle)  # type: ignore[arg-type]
+        if hasattr(path_or_handle, "fileno"):
+            os.fsync(path_or_handle.fileno())  # type: ignore[union-attr]
+            return
+        descriptor = os.open(
+            Path(path_or_handle),  # type: ignore[arg-type]
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+        )
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
+    def sync_directory(self, path: Path) -> None:
+        super().sync_directory(path)
+        descriptor = os.open(
+            path,
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+        )
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
+    def make_read_only(self, path: Path) -> None:
+        super().make_read_only(path)
+        mode = stat.S_IMODE(path.lstat().st_mode) & ~0o222
+        os.chmod(path, mode, follow_symlinks=False)
 
 
 class FailingReplacer:
@@ -200,7 +266,7 @@ def test_publish_job_requires_publication_lease_without_side_effects(
 ) -> None:
     store = _store(tmp_path, coordination)
 
-    with pytest.raises(RuntimeError, match="publication lease"):
+    with _raises_port_error(ErrorCode.EXECUTION_RECORD_FAILED):
         store.publish_job(_route_job())
 
     assert not (tmp_path / "jobs").exists()
@@ -235,6 +301,35 @@ def test_publish_job_writes_canonical_read_only_file_and_reads_receipt(
     assert receipt is not None
     assert receipt.job == job
     assert receipt.job_file_ref == file_ref
+
+
+@pytest.mark.parametrize("sync_occurrence", [1, 2])
+def test_directory_creation_sync_failure_is_reapplied_on_publish_retry(
+    tmp_path: Path,
+    coordination: CoordinationLock,
+    sync_occurrence: int,
+) -> None:
+    sync = DurableFaultFileSync()
+    sync.fail_on(
+        "sync_directory",
+        sync_occurrence,
+        OSError("directory creation sync failed"),
+    )
+    store = FileExecutionRecordStore(
+        tmp_path,
+        coordination,
+        sync,
+        temp_token_factory=lambda: "directory-sync-retry",
+    )
+
+    with coordination.publication(), _raises_port_error(
+        ErrorCode.EXECUTION_RECORD_FAILED
+    ):
+        store.publish_job(_route_job())
+
+    with coordination.publication():
+        published = store.publish_job(_route_job())
+    assert published.relative_key == f"jobs/{ROUTE_JOB_ID}/job.json"
 
 
 def test_publish_job_composes_with_shared_s02_lock_guard_and_platform(
@@ -281,7 +376,11 @@ def test_same_job_bytes_are_adopted_and_finalize_is_reapplied(
     assert replacer.calls and len(replacer.calls) == 1
     assert file_sync.read_only_calls == [final_path]
     assert file_sync.file_calls == [final_path]
-    assert file_sync.directory_calls == [final_path.parent]
+    assert file_sync.directory_calls == [
+        tmp_path,
+        tmp_path / "jobs",
+        final_path.parent,
+    ]
 
 
 def test_different_valid_job_bytes_conflict_without_overwrite(
@@ -298,7 +397,9 @@ def test_different_valid_job_bytes_conflict_without_overwrite(
     final_path = tmp_path / "jobs" / ROUTE_JOB_ID / "job.json"
     original_bytes = final_path.read_bytes()
 
-    with coordination.publication(), pytest.raises(FileExistsError):
+    with coordination.publication(), _raises_port_error(
+        ErrorCode.IDEMPOTENCY_CONFLICT
+    ):
         store.publish_job(different_job)
 
     assert final_path.read_bytes() == original_bytes
@@ -319,7 +420,9 @@ def test_non_pending_job_is_rejected_before_filesystem_publication(
     )
     store = _store(tmp_path, coordination)
 
-    with coordination.publication(), pytest.raises(ValueError, match="PENDING"):
+    with coordination.publication(), _raises_port_error(
+        ErrorCode.EXECUTION_RECORD_FAILED
+    ):
         store.publish_job(running_job)
 
     assert not (tmp_path / "jobs").exists()
@@ -333,7 +436,9 @@ def test_replace_success_then_finalize_failure_is_completed_by_retry(
     store = _store(tmp_path, coordination, file_sync=file_sync)
     job = _route_job()
 
-    with coordination.publication(), pytest.raises(OSError, match="chmod"):
+    with coordination.publication(), _raises_port_error(
+        ErrorCode.EXECUTION_RECORD_FAILED
+    ):
         store.publish_job(job)
 
     final_path = tmp_path / "jobs" / ROUTE_JOB_ID / "job.json"
@@ -347,13 +452,50 @@ def test_replace_success_then_finalize_failure_is_completed_by_retry(
     assert stat.S_IMODE(final_path.stat().st_mode) & 0o222 == 0
 
 
+def test_noop_read_only_adapter_never_yields_a_publication_receipt(
+    tmp_path: Path,
+    coordination: CoordinationLock,
+) -> None:
+    replacer = RecordingReplacer()
+    unsafe_store = _store(
+        tmp_path,
+        coordination,
+        file_sync=NoOpReadOnly(),
+        replacer=replacer,
+    )
+    job = _route_job()
+
+    with coordination.publication(), _raises_port_error(
+        ErrorCode.EXECUTION_RECORD_FAILED
+    ):
+        unsafe_store.publish_job(job)
+
+    final_path = tmp_path / "jobs" / ROUTE_JOB_ID / "job.json"
+    assert final_path.read_bytes() == canonical_json_bytes(job)
+    assert stat.S_IMODE(final_path.stat().st_mode) & 0o222
+
+    safe_store = _store(
+        tmp_path,
+        coordination,
+        file_sync=RecordingFileSync(),
+        replacer=replacer,
+    )
+    with coordination.publication():
+        safe_store.publish_job(job)
+
+    assert stat.S_IMODE(final_path.stat().st_mode) & 0o222 == 0
+    assert len(replacer.calls) == 1
+
+
 def test_replace_failure_leaves_no_final_or_temp_record(
     tmp_path: Path,
     coordination: CoordinationLock,
 ) -> None:
     store = _store(tmp_path, coordination, replacer=FailingReplacer())
 
-    with coordination.publication(), pytest.raises(OSError, match="replace"):
+    with coordination.publication(), _raises_port_error(
+        ErrorCode.EXECUTION_RECORD_FAILED
+    ):
         store.publish_job(_route_job())
 
     job_directory = tmp_path / "jobs" / ROUTE_JOB_ID
@@ -406,20 +548,24 @@ def test_same_outcome_is_adopted_but_different_valid_outcome_conflicts(
     assert len(replacer.calls) == 1
     assert file_sync.read_only_calls == [final_path]
     assert file_sync.file_calls == [final_path]
-    assert file_sync.directory_calls == [final_path.parent]
+    assert file_sync.directory_calls == [
+        tmp_path,
+        tmp_path / "jobs",
+        final_path.parent,
+    ]
 
     conflicting_bytes = _fixture_bytes("job-outcome-failure.json")
-    with pytest.raises(FileExistsError):
+    with _raises_port_error(ErrorCode.IDEMPOTENCY_CONFLICT):
         store.publish_outcome_bytes(ROUTE_JOB_ID, conflicting_bytes)
     assert final_path.read_bytes() == canonical_bytes
 
 
 @pytest.mark.parametrize(
-    ("job_id", "payload", "message"),
+    ("job_id", "payload"),
     [
-        (DIAGNOSE_JOB_ID, _route_outcome_bytes(), "match its path"),
-        (ROUTE_JOB_ID, _route_outcome_bytes().rstrip(b"\n"), "not canonical"),
-        (ROUTE_JOB_ID, b"{}\n", "validation"),
+        (DIAGNOSE_JOB_ID, _route_outcome_bytes()),
+        (ROUTE_JOB_ID, _route_outcome_bytes().rstrip(b"\n")),
+        (ROUTE_JOB_ID, b"{}\n"),
     ],
 )
 def test_invalid_outcome_bytes_are_rejected_before_filesystem_publication(
@@ -427,11 +573,10 @@ def test_invalid_outcome_bytes_are_rejected_before_filesystem_publication(
     coordination: CoordinationLock,
     job_id: str,
     payload: bytes,
-    message: str,
 ) -> None:
     store = _store(tmp_path, coordination)
 
-    with pytest.raises(ValueError, match=message):
+    with _raises_port_error(ErrorCode.EXECUTION_RECORD_FAILED):
         store.publish_outcome_bytes(job_id, payload)
 
     assert not (tmp_path / "jobs").exists()
@@ -474,7 +619,7 @@ def test_read_job_rejects_corrupt_or_non_ordinary_final_files(
         os.link(source, final_path)
 
     store = _store(tmp_path, coordination)
-    with pytest.raises((OSError, ValueError)):
+    with _raises_port_error(ErrorCode.EXECUTION_RECORD_FAILED):
         store.read_published_job(ROUTE_JOB_ID)
 
 
@@ -489,13 +634,13 @@ def test_read_rejects_final_file_and_job_directory_symlinks(
     (job_directory / "job.json").symlink_to(target)
     store = _store(tmp_path, coordination)
 
-    with pytest.raises(OSError, match="symbolic links"):
+    with _raises_port_error(ErrorCode.EXECUTION_RECORD_FAILED):
         store.read_published_job(ROUTE_JOB_ID)
 
     (job_directory / "job.json").unlink()
     job_directory.rmdir()
     job_directory.symlink_to(tmp_path)
-    with pytest.raises(OSError, match="ordinary directory"):
+    with _raises_port_error(ErrorCode.EXECUTION_RECORD_FAILED):
         store.read_published_job(ROUTE_JOB_ID)
 
 
@@ -517,19 +662,19 @@ def test_open_log_sinks_atomically_creates_pair_and_appends_bytes(
     assert stdout_path.read_bytes() == b"stdout"
     assert stderr_path.read_bytes() == b"stderr"
 
-    with pytest.raises(RuntimeError, match="already open"):
+    with _raises_port_error(ErrorCode.EXECUTION_RECORD_FAILED):
         store.open_log_sinks(ROUTE_JOB_ID, JOB_STDOUT_STDERR_BYTES)
 
     sinks.stdout.close()
     sinks.stdout.flush()
     sinks.stdout.close()
-    with pytest.raises(RuntimeError, match="already open"):
+    with _raises_port_error(ErrorCode.EXECUTION_RECORD_FAILED):
         store.open_log_sinks(ROUTE_JOB_ID, JOB_STDOUT_STDERR_BYTES)
     sinks.stderr.close()
     sinks.stderr.flush()
     sinks.stderr.close()
 
-    with pytest.raises(FileExistsError, match="cannot be reused"):
+    with _raises_port_error(ErrorCode.EXECUTION_RECORD_FAILED):
         store.open_log_sinks(ROUTE_JOB_ID, JOB_STDOUT_STDERR_BYTES)
     assert stdout_path.read_bytes() == b"stdout"
     assert stderr_path.read_bytes() == b"stderr"
@@ -570,7 +715,7 @@ def test_invalid_log_limit_has_no_filesystem_side_effects(
 ) -> None:
     store = _store(tmp_path, coordination)
 
-    with pytest.raises(ValueError, match="combined_limit_bytes"):
+    with _raises_port_error(ErrorCode.EXECUTION_RECORD_FAILED):
         store.open_log_sinks(ROUTE_JOB_ID, invalid_limit)
 
     assert not (tmp_path / "jobs").exists()
@@ -591,7 +736,7 @@ def test_empty_log_pair_can_be_reopened_but_partial_pair_is_rejected(
 
     stderr_path = tmp_path / "jobs" / ROUTE_JOB_ID / "stderr.log"
     stderr_path.unlink()
-    with pytest.raises(OSError, match="one pair"):
+    with _raises_port_error(ErrorCode.EXECUTION_RECORD_FAILED):
         store.open_log_sinks(ROUTE_JOB_ID, JOB_STDOUT_STDERR_BYTES)
 
 
@@ -607,7 +752,7 @@ def test_nonempty_or_linked_logs_are_never_truncated_or_reused(
     stderr_path.write_bytes(b"")
     store = _store(tmp_path, coordination)
 
-    with pytest.raises(FileExistsError, match="cannot be reused"):
+    with _raises_port_error(ErrorCode.EXECUTION_RECORD_FAILED):
         store.open_log_sinks(ROUTE_JOB_ID, JOB_STDOUT_STDERR_BYTES)
     assert stdout_path.read_bytes() == b"old stdout"
     assert stderr_path.read_bytes() == b""
@@ -616,7 +761,7 @@ def test_nonempty_or_linked_logs_are_never_truncated_or_reused(
     target = tmp_path / "outside-log"
     target.write_bytes(b"")
     stdout_path.symlink_to(target)
-    with pytest.raises(OSError, match="symbolic links"):
+    with _raises_port_error(ErrorCode.EXECUTION_RECORD_FAILED):
         store.open_log_sinks(ROUTE_JOB_ID, JOB_STDOUT_STDERR_BYTES)
     assert target.read_bytes() == b""
 
@@ -628,7 +773,7 @@ def test_log_pair_creation_failure_rolls_back_both_names(
     file_sync = FailFirstFileSync()
     store = _store(tmp_path, coordination, file_sync=file_sync)
 
-    with pytest.raises(OSError, match="fsync"):
+    with _raises_port_error(ErrorCode.EXECUTION_RECORD_FAILED):
         store.open_log_sinks(ROUTE_JOB_ID, JOB_STDOUT_STDERR_BYTES)
 
     job_directory = tmp_path / "jobs" / ROUTE_JOB_ID
