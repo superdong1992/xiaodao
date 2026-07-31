@@ -56,6 +56,7 @@ from .models import (
     StateMutation,
     ValidationReport,
     VersionedRef,
+    WaitSeconds,
     WorkspaceInputManifest,
     UtcTimestamp,
 )
@@ -337,7 +338,7 @@ class ApplicationQueryPort(Protocol):
         self,
         case_id: OpaqueId,
         wait_for_job_id: OpaqueId | None = None,
-        wait_seconds: int = 0,
+        wait_seconds: WaitSeconds = 0,
     ) -> CaseQueryResponse: ...
 
     def list_artifacts(

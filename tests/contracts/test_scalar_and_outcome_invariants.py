@@ -45,6 +45,10 @@ def test_content_type_accepts_the_exact_127_ascii_character_boundary() -> None:
     content_type = f"{'a' * 63}/{'b' * 63}"
     assert len(content_type) == 127
     payload["entries"][0]["content_type"] = content_type
+    payload["entries"][0]["filename_suffix"] = None
+    payload["entries"][0]["relative_path"] = (
+        "inputs/attachments/00000000-0000-0000-0000-000000000050/payload"
+    )
     _validate("workspace-input-manifest.schema.json", payload)
 
 

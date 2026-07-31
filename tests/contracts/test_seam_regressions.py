@@ -689,6 +689,39 @@ def test_logparse_outcome_proposal_requires_a_claim() -> None:
         validate_logparse_claim_for_job(None, job, manifest, None, outcome)
 
 
+@pytest.mark.parametrize("outcome_kind", ["none", "success", "failure"])
+def test_broker_accepted_parse_bytes_require_the_create_new_claim(
+    outcome_kind: str,
+) -> None:
+    job, manifest, claim, request_bytes = _first_parse_seam()
+    outcome = {
+        "none": None,
+        "success": _successful_logparse_outcome(job),
+        "failure": _failed_diagnosis_outcome(job),
+    }[outcome_kind]
+
+    with pytest.raises(ValueError, match="request bytes require a parse claim"):
+        validate_logparse_claim_for_job(
+            None,
+            job,
+            manifest,
+            request_bytes,
+            outcome,
+        )
+
+    assert validate_logparse_claim_for_job(None, job, manifest, None, None) is None
+    assert (
+        validate_logparse_claim_for_job(
+            claim,
+            job,
+            manifest,
+            request_bytes,
+            _successful_logparse_outcome(job),
+        )
+        is claim
+    )
+
+
 def test_logparse_claim_is_mutually_exclusive_with_an_existing_manifest_run() -> None:
     job = _model("job-diagnose.json", Job)
     manifest = _model("workspace-input-manifest.json", WorkspaceInputManifest)

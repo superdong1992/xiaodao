@@ -9,7 +9,7 @@ from typing import Mapping
 
 from pydantic import TypeAdapter
 
-from .enums import ErrorCode, ExecutionStage
+from .enums import ErrorCode, ExecutionStage, TriggerType
 from .models import (
     ApplicationError,
     ApplicationErrorDetail,
@@ -155,12 +155,86 @@ ERROR_SPECS: Mapping[ErrorCode, ErrorSpec] = MappingProxyType(
 )
 ERROR_CODES = tuple(code.value for code in ErrorCode)
 
-COORDINATOR_PLAN_ERROR_CODES = frozenset(
+COORDINATOR_PLAN_ERROR_CODES_BY_TRIGGER: Mapping[
+    TriggerType, frozenset[ErrorCode]
+] = MappingProxyType(
     {
-        ErrorCode.INVALID_CASE_STATE,
-        ErrorCode.ACTIVE_JOB_EXISTS,
-        ErrorCode.NEW_CASE_REQUIRED,
-        ErrorCode.VALIDATION_ERROR,
+        TriggerType.CREATE_CASE: frozenset(
+            {
+                ErrorCode.INVALID_CASE_STATE,
+                ErrorCode.ACTIVE_JOB_EXISTS,
+                ErrorCode.VALIDATION_ERROR,
+            }
+        ),
+        TriggerType.ROUTE_OUTCOME: frozenset(
+            {ErrorCode.INVALID_CASE_STATE, ErrorCode.VALIDATION_ERROR}
+        ),
+        TriggerType.DIAGNOSIS_OUTCOME: frozenset(
+            {
+                ErrorCode.INVALID_CASE_STATE,
+                ErrorCode.NEW_CASE_REQUIRED,
+                ErrorCode.VALIDATION_ERROR,
+            }
+        ),
+        TriggerType.REVIEW_OUTCOME: frozenset(
+            {ErrorCode.INVALID_CASE_STATE, ErrorCode.VALIDATION_ERROR}
+        ),
+        TriggerType.SUBMIT_SUPPLEMENT: frozenset(
+            {
+                ErrorCode.INVALID_CASE_STATE,
+                ErrorCode.ACTIVE_JOB_EXISTS,
+                ErrorCode.NEW_CASE_REQUIRED,
+                ErrorCode.VALIDATION_ERROR,
+            }
+        ),
+        TriggerType.CANCEL_CASE: frozenset(
+            {ErrorCode.INVALID_CASE_STATE, ErrorCode.VALIDATION_ERROR}
+        ),
+        TriggerType.RESUME_INTERRUPTED: frozenset(
+            {
+                ErrorCode.INVALID_CASE_STATE,
+                ErrorCode.ACTIVE_JOB_EXISTS,
+                ErrorCode.VALIDATION_ERROR,
+            }
+        ),
+        TriggerType.EXECUTION_FAILED: frozenset(
+            {ErrorCode.INVALID_CASE_STATE, ErrorCode.VALIDATION_ERROR}
+        ),
+        TriggerType.ASSET_VERSION_UNAVAILABLE: frozenset(
+            {ErrorCode.INVALID_CASE_STATE, ErrorCode.VALIDATION_ERROR}
+        ),
+        TriggerType.MARK_OLD_EPOCH_INTERRUPTED: frozenset(
+            {ErrorCode.INVALID_CASE_STATE, ErrorCode.VALIDATION_ERROR}
+        ),
+        TriggerType.STALE_ACTIVE_OUTCOME: frozenset(
+            {ErrorCode.INVALID_CASE_STATE, ErrorCode.VALIDATION_ERROR}
+        ),
+    }
+)
+COORDINATOR_PLAN_ERROR_CODES = frozenset().union(
+    *COORDINATOR_PLAN_ERROR_CODES_BY_TRIGGER.values()
+)
+
+# A finalized Outcome has already crossed the Runtime exactly-once boundary.
+# These failures therefore retry only JobControlPort.submit_outcome with the
+# identical RuntimeExecutionReceipt; they do not make the error code globally
+# retryable and must never cause Runtime.execute to run again.
+JOB_OUTCOME_SUBMISSION_RETRY_ERROR_CODES = frozenset(
+    {
+        ErrorCode.REVISION_CONFLICT,
+        ErrorCode.STATE_WRITE_FAILED,
+        ErrorCode.RESOURCE_PUBLISH_FAILED,
+        ErrorCode.EXECUTION_RECORD_FAILED,
+    }
+)
+
+# Read-only Catalog drift cannot heal inside the current process. Keep the
+# finalized Runtime receipt durable, mark readiness false, and resume the same
+# submit after the operator repairs configuration and restarts the process.
+JOB_OUTCOME_SUBMISSION_PARK_ERROR_CODES = frozenset(
+    {
+        ErrorCode.ASSET_VERSION_UNAVAILABLE,
+        ErrorCode.CONFIG_INVALID,
     }
 )
 
@@ -187,27 +261,42 @@ PORT_ERROR_CODES: Mapping[str, frozenset[ErrorCode]] = MappingProxyType(
                 ErrorCode.RESOURCE_SIZE_MISMATCH,
                 ErrorCode.RESOURCE_LIMIT_EXCEEDED,
                 ErrorCode.EXECUTION_RECORD_FAILED,
+                ErrorCode.ASSET_VERSION_UNAVAILABLE,
+                ErrorCode.CONFIG_INVALID,
+                ErrorCode.STATE_CORRUPT,
+                ErrorCode.STATE_SCHEMA_UNSUPPORTED,
                 ErrorCode.STATE_WRITE_FAILED,
                 ErrorCode.RESOURCE_PUBLISH_FAILED,
             }
         ),
         "ApplicationQueryPort.get_case": frozenset(
             {
+                ErrorCode.VALIDATION_ERROR,
                 ErrorCode.CASE_NOT_FOUND,
                 ErrorCode.JOB_NOT_FOUND,
                 ErrorCode.JOB_CASE_MISMATCH,
+                ErrorCode.STATE_CORRUPT,
+                ErrorCode.STATE_SCHEMA_UNSUPPORTED,
             }
         ),
         "ApplicationQueryPort.list_artifacts": frozenset(
-            {ErrorCode.CASE_NOT_FOUND}
+            {
+                ErrorCode.VALIDATION_ERROR,
+                ErrorCode.CASE_NOT_FOUND,
+                ErrorCode.STATE_CORRUPT,
+                ErrorCode.STATE_SCHEMA_UNSUPPORTED,
+            }
         ),
         "ApplicationQueryPort.open_artifact": frozenset(
             {
+                ErrorCode.VALIDATION_ERROR,
                 ErrorCode.CASE_NOT_FOUND,
                 ErrorCode.ARTIFACT_NOT_FOUND,
                 ErrorCode.RESOURCE_NOT_FOUND,
                 ErrorCode.RESOURCE_HASH_MISMATCH,
                 ErrorCode.RESOURCE_SIZE_MISMATCH,
+                ErrorCode.STATE_CORRUPT,
+                ErrorCode.STATE_SCHEMA_UNSUPPORTED,
             }
         ),
         "StateAdminPort.readiness": frozenset(),
@@ -222,10 +311,26 @@ PORT_ERROR_CODES: Mapping[str, frozenset[ErrorCode]] = MappingProxyType(
                 ErrorCode.RESOURCE_SIZE_MISMATCH,
             }
         ),
-        "StateRepository.read_case": frozenset({ErrorCode.CASE_NOT_FOUND}),
-        "StateRepository.read_job": frozenset({ErrorCode.JOB_NOT_FOUND}),
+        "StateRepository.read_case": frozenset(
+            {
+                ErrorCode.CASE_NOT_FOUND,
+                ErrorCode.STATE_CORRUPT,
+                ErrorCode.STATE_SCHEMA_UNSUPPORTED,
+            }
+        ),
+        "StateRepository.read_job": frozenset(
+            {
+                ErrorCode.JOB_NOT_FOUND,
+                ErrorCode.STATE_CORRUPT,
+                ErrorCode.STATE_SCHEMA_UNSUPPORTED,
+            }
+        ),
         "StateRepository.read_artifact": frozenset(
-            {ErrorCode.ARTIFACT_NOT_FOUND}
+            {
+                ErrorCode.ARTIFACT_NOT_FOUND,
+                ErrorCode.STATE_CORRUPT,
+                ErrorCode.STATE_SCHEMA_UNSUPPORTED,
+            }
         ),
         "StateRepository.read_snapshot": frozenset(
             {ErrorCode.STATE_CORRUPT, ErrorCode.STATE_SCHEMA_UNSUPPORTED}
@@ -314,21 +419,45 @@ PORT_ERROR_CODES: Mapping[str, frozenset[ErrorCode]] = MappingProxyType(
         "ExecutionRecordStore.open_log_sinks": frozenset(
             {ErrorCode.EXECUTION_RECORD_FAILED}
         ),
+        "AssetCatalogPort.check": frozenset(),
+        "AssetCatalogPort.resolve": frozenset(
+            {ErrorCode.ASSET_VERSION_UNAVAILABLE}
+        ),
+        "AssetCatalogPort.route_bindings": frozenset(
+            {ErrorCode.CONFIG_INVALID}
+        ),
+        "AssetCatalogPort.diagnose_bindings": frozenset(
+            {ErrorCode.ASSET_VERSION_UNAVAILABLE, ErrorCode.CONFIG_INVALID}
+        ),
+        "AssetCatalogPort.review_bindings": frozenset(
+            {ErrorCode.ASSET_VERSION_UNAVAILABLE, ErrorCode.CONFIG_INVALID}
+        ),
+        "Runtime.execute": frozenset(
+            {ErrorCode.STATE_CORRUPT, ErrorCode.STATE_SCHEMA_UNSUPPORTED}
+        ),
         "JobControlPort.claim_job": frozenset(
             {
+                ErrorCode.VALIDATION_ERROR,
                 ErrorCode.JOB_NOT_FOUND,
-                ErrorCode.CLAIM_REJECTED,
                 ErrorCode.REVISION_CONFLICT,
+                ErrorCode.STATE_CORRUPT,
+                ErrorCode.STATE_SCHEMA_UNSUPPORTED,
                 ErrorCode.STATE_WRITE_FAILED,
             }
         ),
         "JobControlPort.submit_outcome": frozenset(
             {
+                ErrorCode.VALIDATION_ERROR,
                 ErrorCode.JOB_NOT_FOUND,
                 ErrorCode.IDEMPOTENCY_CONFLICT,
                 ErrorCode.RESOURCE_PUBLISH_FAILED,
                 ErrorCode.STATE_WRITE_FAILED,
                 ErrorCode.REVISION_CONFLICT,
+                ErrorCode.EXECUTION_RECORD_FAILED,
+                ErrorCode.ASSET_VERSION_UNAVAILABLE,
+                ErrorCode.CONFIG_INVALID,
+                ErrorCode.STATE_CORRUPT,
+                ErrorCode.STATE_SCHEMA_UNSUPPORTED,
             }
         ),
         "JobControlPort.report_execution_infrastructure_failure": frozenset(
@@ -337,13 +466,18 @@ PORT_ERROR_CODES: Mapping[str, frozenset[ErrorCode]] = MappingProxyType(
                 ErrorCode.JOB_NOT_FOUND,
                 ErrorCode.IDEMPOTENCY_CONFLICT,
                 ErrorCode.REVISION_CONFLICT,
+                ErrorCode.STATE_CORRUPT,
+                ErrorCode.STATE_SCHEMA_UNSUPPORTED,
                 ErrorCode.STATE_WRITE_FAILED,
             }
         ),
         "JobControlPort.interrupt_previous_epoch": frozenset(
             {
+                ErrorCode.VALIDATION_ERROR,
                 ErrorCode.IDEMPOTENCY_CONFLICT,
                 ErrorCode.REVISION_CONFLICT,
+                ErrorCode.STATE_CORRUPT,
+                ErrorCode.STATE_SCHEMA_UNSUPPORTED,
                 ErrorCode.STATE_WRITE_FAILED,
             }
         ),
@@ -409,6 +543,7 @@ def deterministic_outcome_failure(
             item.field or "",
             item.resource_type or "",
             item.resource_id or "",
+            TypeAdapter(ApplicationErrorDetail).dump_json(item),
         ),
     )
     if code is ErrorCode.RESOURCE_LIMIT_EXCEEDED and not any(
@@ -503,6 +638,7 @@ __all__ = [
     "CLI_CONFIG_OR_STATE_CORRUPT_CODES",
     "CLI_REQUEST_OR_STATE_CONFLICT_CODES",
     "CLI_RUNTIME_FAILURE_CODES",
+    "COORDINATOR_PLAN_ERROR_CODES_BY_TRIGGER",
     "COORDINATOR_PLAN_ERROR_CODES",
     "DETERMINISTIC_OUTCOME_FAILURE_SPECS",
     "DeterministicFailureSpec",
@@ -513,6 +649,8 @@ __all__ = [
     "ErrorSpec",
     "ExecutionFailure",
     "LogparseBrokerError",
+    "JOB_OUTCOME_SUBMISSION_PARK_ERROR_CODES",
+    "JOB_OUTCOME_SUBMISSION_RETRY_ERROR_CODES",
     "PORT_ERROR_CODES",
     "RuntimeInfrastructureError",
     "UNTRUSTED_OUTCOME_REJECTION_CODES",

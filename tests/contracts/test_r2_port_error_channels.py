@@ -32,6 +32,8 @@ PORT_TYPES = (
     ports.StateRepository,
     ports.ResourceStore,
     ports.ExecutionRecordStore,
+    ports.AssetCatalogPort,
+    ports.Runtime,
     ports.JobControlPort,
 )
 
@@ -167,6 +169,12 @@ EXPECTED_SUCCESS_RETURNS: dict[str, Any] = {
     "ExecutionRecordStore.read_published_job": models.PublishedJobReceipt | None,
     "ExecutionRecordStore.read_published_outcome": models.RuntimeExecutionReceipt | None,
     "ExecutionRecordStore.open_log_sinks": models.ExecutionLogSinks,
+    "AssetCatalogPort.check": models.AssetAvailabilityReport,
+    "AssetCatalogPort.resolve": models.ResolvedAsset,
+    "AssetCatalogPort.route_bindings": models.RuntimeBindings,
+    "AssetCatalogPort.diagnose_bindings": models.RuntimeBindings,
+    "AssetCatalogPort.review_bindings": models.RuntimeBindings,
+    "Runtime.execute": models.RuntimeExecutionReceipt,
     "JobControlPort.claim_job": commands.ClaimReceipt,
     "JobControlPort.submit_outcome": commands.OutcomeReceipt,
     "JobControlPort.report_execution_infrastructure_failure": commands.FailureReceipt,
@@ -174,7 +182,7 @@ EXPECTED_SUCCESS_RETURNS: dict[str, Any] = {
 }
 
 
-def test_seven_port_families_keep_their_success_return_annotations() -> None:
+def test_modeled_port_families_keep_their_success_return_annotations() -> None:
     actual_methods = {
         f"{protocol.__name__}.{method_name}": method
         for protocol in PORT_TYPES
@@ -191,27 +199,47 @@ def test_seven_port_families_keep_their_success_return_annotations() -> None:
 
 def test_key_method_error_code_sets_are_exact_where_the_v1_spec_is_closed() -> None:
     mapping = _port_error_codes()
+    state_failures = {
+        ErrorCode.STATE_CORRUPT,
+        ErrorCode.STATE_SCHEMA_UNSUPPORTED,
+    }
     exact = {
         "ApplicationQueryPort.get_case": frozenset(
             {
+                ErrorCode.VALIDATION_ERROR,
                 ErrorCode.CASE_NOT_FOUND,
                 ErrorCode.JOB_NOT_FOUND,
                 ErrorCode.JOB_CASE_MISMATCH,
+                *state_failures,
             }
         ),
-        "ApplicationQueryPort.list_artifacts": frozenset({ErrorCode.CASE_NOT_FOUND}),
+        "ApplicationQueryPort.list_artifacts": frozenset(
+            {
+                ErrorCode.VALIDATION_ERROR,
+                ErrorCode.CASE_NOT_FOUND,
+                *state_failures,
+            }
+        ),
         "ApplicationQueryPort.open_artifact": frozenset(
             {
+                ErrorCode.VALIDATION_ERROR,
                 ErrorCode.CASE_NOT_FOUND,
                 ErrorCode.ARTIFACT_NOT_FOUND,
                 ErrorCode.RESOURCE_NOT_FOUND,
                 ErrorCode.RESOURCE_HASH_MISMATCH,
                 ErrorCode.RESOURCE_SIZE_MISMATCH,
+                *state_failures,
             }
         ),
-        "StateRepository.read_case": frozenset({ErrorCode.CASE_NOT_FOUND}),
-        "StateRepository.read_job": frozenset({ErrorCode.JOB_NOT_FOUND}),
-        "StateRepository.read_artifact": frozenset({ErrorCode.ARTIFACT_NOT_FOUND}),
+        "StateRepository.read_case": frozenset(
+            {ErrorCode.CASE_NOT_FOUND, *state_failures}
+        ),
+        "StateRepository.read_job": frozenset(
+            {ErrorCode.JOB_NOT_FOUND, *state_failures}
+        ),
+        "StateRepository.read_artifact": frozenset(
+            {ErrorCode.ARTIFACT_NOT_FOUND, *state_failures}
+        ),
         "StateRepository.commit": frozenset(
             {ErrorCode.REVISION_CONFLICT, ErrorCode.STATE_WRITE_FAILED}
         ),
@@ -242,7 +270,9 @@ def test_coordinator_uses_an_explicit_result_union_and_fake_supports_both_branch
     application_error = _application_error(ErrorCode.INVALID_CASE_STATE)
     coordinator = ScriptedCoordinator([plan, application_error])
     snapshot = outcomes.CaseSnapshot.model_construct()
-    trigger = outcomes.ValidatedTrigger.model_construct()
+    trigger = outcomes.ValidatedTrigger.model_construct(
+        trigger_type=enums.TriggerType.CREATE_CASE,
+    )
     assert isinstance(coordinator.plan(snapshot, trigger), outcomes.TransitionPlan)
     returned_error = coordinator.plan(snapshot, trigger)
     assert isinstance(returned_error, ApplicationError)
@@ -261,6 +291,7 @@ def test_coordinator_error_codes_and_stable_target_decision_are_closed() -> None
     assert errors.COORDINATOR_PLAN_ERROR_CODES == expected_codes
 
     trigger = outcomes.ValidatedTrigger.model_construct(
+        trigger_type=enums.TriggerType.SUBMIT_SUPPLEMENT,
         payload=outcomes.SubmitSupplementTriggerPayload(
             user_facts=[],
             ready_attachment_ids=[RESOURCE_ID],

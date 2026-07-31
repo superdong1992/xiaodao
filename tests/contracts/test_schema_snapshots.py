@@ -45,7 +45,7 @@ def _walk_json(value: Any) -> Iterator[Any]:
 def test_schema_registry_is_the_exact_frozen_public_set() -> None:
     assert set(SCHEMA_MODELS) == EXPECTED_SCHEMA_NAMES
     assert SCHEMA_VERSION == 1
-    assert CONTRACT_REVISION == "v1-contract-r2"
+    assert CONTRACT_REVISION == "v1-contract-r3"
     assert isinstance(GENERATOR_VERSION, str)
     assert GENERATOR_VERSION.strip()
 

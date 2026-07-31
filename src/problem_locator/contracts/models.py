@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import unicodedata
 from datetime import datetime
 from typing import Annotated, Any, Literal, TypeAlias
 
@@ -26,6 +27,7 @@ from pydantic import (
 from .enums import (
     ArtifactKind,
     AssetKind,
+    AttachmentFilenameSuffix,
     AttachmentStatus,
     CandidateMutationAction,
     CandidateStatus,
@@ -108,6 +110,93 @@ def _validate_relative_path(value: str) -> str:
     if re.match(r"^[A-Za-z]:", value):
         raise ValueError("drive-qualified paths are forbidden")
     return value
+
+
+_ATTACHMENT_SUFFIXES_BY_CONTENT_TYPE = {
+    "application/gzip": (
+        AttachmentFilenameSuffix.TAR_GZ,
+        AttachmentFilenameSuffix.TGZ,
+        AttachmentFilenameSuffix.GZ,
+    ),
+    "application/zip": (AttachmentFilenameSuffix.ZIP,),
+    "application/x-tar": (AttachmentFilenameSuffix.TAR,),
+}
+_ATTACHMENT_SUFFIXES_LONGEST_FIRST = tuple(
+    sorted(AttachmentFilenameSuffix, key=lambda suffix: len(suffix.value), reverse=True)
+)
+
+
+def _validate_attachment_filename(name: str) -> str:
+    if not isinstance(name, str):
+        raise TypeError("attachment name must be a string")
+    _utf8_nonblank(name)
+    if name in {".", ".."} or "/" in name or "\\" in name:
+        raise ValueError("attachment name must be a safe filename, not a path")
+    if re.match(r"^[A-Za-z]:", name):
+        raise ValueError("drive-qualified attachment names are forbidden")
+    if any(unicodedata.category(character) == "Cc" for character in name):
+        raise ValueError("attachment name must not contain control characters")
+    return name
+
+
+def _validate_attachment_content_type(content_type: str) -> str:
+    if not isinstance(content_type, str):
+        raise TypeError("content_type must be a string")
+    if re.fullmatch(CONTENT_TYPE_PATTERN, content_type) is None:
+        raise ValueError("content_type must use the canonical lowercase media-type form")
+    return content_type
+
+
+def _validate_attachment_suffix_for_content_type(
+    content_type: str,
+    filename_suffix: AttachmentFilenameSuffix | None,
+) -> None:
+    allowed_suffixes = _ATTACHMENT_SUFFIXES_BY_CONTENT_TYPE.get(content_type)
+    if allowed_suffixes is None:
+        if filename_suffix is not None:
+            raise ValueError("filename_suffix is forbidden for this content_type")
+        return
+    if filename_suffix not in allowed_suffixes:
+        raise ValueError("filename_suffix does not match content_type")
+
+
+def derive_attachment_filename_suffix(
+    name: str,
+    content_type: str,
+) -> AttachmentFilenameSuffix | None:
+    """Derive the frozen canonical archive suffix from a safe attachment name."""
+
+    _validate_attachment_filename(name)
+    _validate_attachment_content_type(content_type)
+    lowercase_name = name.lower()
+    filename_suffix = next(
+        (
+            suffix
+            for suffix in _ATTACHMENT_SUFFIXES_LONGEST_FIRST
+            if lowercase_name.endswith(suffix.value)
+        ),
+        None,
+    )
+    if filename_suffix is not None and not name.endswith(filename_suffix.value):
+        raise ValueError("attachment filename suffix must use canonical lowercase spelling")
+    _validate_attachment_suffix_for_content_type(content_type, filename_suffix)
+    return filename_suffix
+
+
+def workspace_attachment_relative_path(
+    attachment_id: str,
+    filename_suffix: AttachmentFilenameSuffix | None,
+) -> str:
+    """Construct the only valid workspace path for a materialized attachment."""
+
+    if not isinstance(attachment_id, str) or re.fullmatch(UUID_PATTERN, attachment_id) is None:
+        raise ValueError("attachment_id must be a canonical lowercase UUID")
+    if filename_suffix is not None and not isinstance(
+        filename_suffix, AttachmentFilenameSuffix
+    ):
+        raise TypeError("filename_suffix must be AttachmentFilenameSuffix or None")
+    suffix = "" if filename_suffix is None else filename_suffix.value
+    return f"inputs/attachments/{attachment_id}/payload{suffix}"
 
 
 def _validate_json_pointer(value: str) -> str:
@@ -734,6 +823,7 @@ class Attachment(ContractModel):
 
     @model_validator(mode="after")
     def validate_attachment(self) -> Attachment:
+        derive_attachment_filename_suffix(self.name, self.content_type)
         if self.declared_size is not None and self.declared_size > MAX_ATTACHMENT_BYTES:
             raise ValueError("declared attachment size exceeds the V1 limit")
         actuals = (self.size, self.sha256, self.storage_key)
@@ -1054,12 +1144,23 @@ class WorkspaceAttachmentInput(ContractModel):
     size: NonNegativeInt
     sha256: Sha256
     content_type: ContentType
+    filename_suffix: AttachmentFilenameSuffix | None
 
     @model_validator(mode="after")
     def validate_materialized_path(self) -> WorkspaceAttachmentInput:
-        expected = f"inputs/attachments/{self.resource_id}/payload"
+        _validate_attachment_suffix_for_content_type(
+            self.content_type,
+            self.filename_suffix,
+        )
+        expected = workspace_attachment_relative_path(
+            self.resource_id,
+            self.filename_suffix,
+        )
         if self.relative_path != expected:
-            raise ValueError("Attachment input must use its fixed materialization path")
+            raise ValueError(
+                "Attachment input must use its fixed materialization path "
+                "derived from filename_suffix"
+            )
         return self
 
 
@@ -1235,15 +1336,11 @@ class ApplicationError(ContractModel):
 
     @model_validator(mode="after")
     def validate_retryability(self) -> ApplicationError:
-        from .errors import APPLICATION_ERROR_RETRYABLE_CODES, EXECUTION_FAILURE_RETRYABLE_CODES
+        from .errors import APPLICATION_ERROR_RETRYABLE_CODES
 
         if self.code in APPLICATION_ERROR_RETRYABLE_CODES and not self.retryable:
             raise ValueError("this ApplicationError code is always retryable")
-        if (
-            self.code not in APPLICATION_ERROR_RETRYABLE_CODES
-            and self.code not in EXECUTION_FAILURE_RETRYABLE_CODES
-            and self.retryable
-        ):
+        if self.code not in APPLICATION_ERROR_RETRYABLE_CODES and self.retryable:
             raise ValueError("this ApplicationError code is not retryable")
         return self
 
@@ -3061,6 +3158,11 @@ class PrepareAttachment(ContractModel):
     declared_size: NonNegativeInt | None = None
     declared_sha256: Sha256 | None = None
 
+    @model_validator(mode="after")
+    def validate_filename_and_content_type(self) -> PrepareAttachment:
+        derive_attachment_filename_suffix(self.name, self.content_type)
+        return self
+
 
 class UploadAttachmentContent(ContractModel):
     model_config = ConfigDict(json_schema_extra={"hash_excluded_fields": ["byte_stream"]})
@@ -3135,7 +3237,7 @@ class GetCase(ContractModel):
 
 class ListArtifacts(ContractModel):
     case_id: OpaqueId
-    include_internal: bool = False
+    include_internal: Annotated[bool, Field(strict=True)] = False
 
 
 class OpenArtifact(ContractModel):
@@ -3396,18 +3498,25 @@ class ClaimReceipt(ContractModel):
             raise ValueError("failure_applied must be true exactly when failure_code is present")
         if self.claimed and self.failure_applied:
             raise ValueError("claim and failure application are mutually exclusive")
+        if (
+            self.failure_applied
+            and self.failure_code is not ErrorCode.ASSET_VERSION_UNAVAILABLE
+        ):
+            raise ValueError(
+                "failure_applied is reserved for ASSET_VERSION_UNAVAILABLE"
+            )
         return self
 
 
 class OutcomeReceipt(ContractModel):
     disposition: OutcomeDisposition
-    case_view: CaseView
+    case_view: CaseView | None
 
 
 class FailureReceipt(ContractModel):
     failure_id: OpaqueId
     disposition: FailureReportDisposition
-    case_view: CaseView
+    case_view: CaseView | None
 
 
 class RecoveryReceipt(ContractModel):
@@ -3765,6 +3874,8 @@ __all__ = [model.__name__ for model in _CONTRACT_MODEL_TYPES] + [
     "WaitSeconds",
     "WorkspaceInputEntry",
     "default_resource_limits",
+    "derive_attachment_filename_suffix",
     "validate_job_instruction_for_job",
     "validate_workspace_manifest_for_job",
+    "workspace_attachment_relative_path",
 ]

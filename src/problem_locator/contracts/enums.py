@@ -60,6 +60,14 @@ class AttachmentStatus(StrEnum):
     FAILED = "FAILED"
 
 
+class AttachmentFilenameSuffix(StrEnum):
+    GZ = ".gz"
+    ZIP = ".zip"
+    TAR_GZ = ".tar.gz"
+    TGZ = ".tgz"
+    TAR = ".tar"
+
+
 class CandidateStatus(StrEnum):
     PROPOSED = "PROPOSED"
     REVIEWING = "REVIEWING"

@@ -18,6 +18,7 @@ from .enums import (
     RequirementStatus,
     ReviewVerdict,
     RouteKind,
+    TriggerType,
 )
 from .models import (
     AgentArtifactProposalDraft,
@@ -44,6 +45,7 @@ from .models import (
     EvidenceBinding,
     EvidenceProposal,
     EvidenceSourceBinding,
+    ExecutionFailure,
     ExecutionFailedTriggerPayload,
     Finding,
     Job,
@@ -129,17 +131,39 @@ def validate_coordinator_plan_result(
     ``NEW_CASE_REQUIRED`` with no TransitionPlan or mutation side channel.
     """
 
-    from .errors import COORDINATOR_PLAN_ERROR_CODES
+    from .errors import COORDINATOR_PLAN_ERROR_CODES_BY_TRIGGER
 
+    payload = getattr(trigger, "payload", None)
     if isinstance(result, ApplicationError):
-        if result.code not in COORDINATOR_PLAN_ERROR_CODES or result.retryable:
+        trigger_type = getattr(trigger, "trigger_type", None)
+        if trigger_type is None:
+            trigger_type = {
+                CreateCaseTriggerPayload: TriggerType.CREATE_CASE,
+                RouteOutcomeTriggerPayload: TriggerType.ROUTE_OUTCOME,
+                DiagnosisOutcomeTriggerPayload: TriggerType.DIAGNOSIS_OUTCOME,
+                ReviewOutcomeTriggerPayload: TriggerType.REVIEW_OUTCOME,
+                SubmitSupplementTriggerPayload: TriggerType.SUBMIT_SUPPLEMENT,
+                CancelCaseTriggerPayload: TriggerType.CANCEL_CASE,
+                ResumeInterruptedTriggerPayload: TriggerType.RESUME_INTERRUPTED,
+                ExecutionFailedTriggerPayload: TriggerType.EXECUTION_FAILED,
+                AssetUnavailableTriggerPayload: TriggerType.ASSET_VERSION_UNAVAILABLE,
+                OldEpochTriggerPayload: TriggerType.MARK_OLD_EPOCH_INTERRUPTED,
+                StaleActiveOutcomeTriggerPayload: TriggerType.STALE_ACTIVE_OUTCOME,
+            }.get(type(payload))
+        if trigger_type is None:
             raise ValueError(
-                "Coordinator ApplicationError must use a frozen non-retryable code"
+                "Coordinator ApplicationError must use a frozen non-retryable "
+                "code allowed for this Trigger; Trigger type is required"
+            )
+        allowed_codes = COORDINATOR_PLAN_ERROR_CODES_BY_TRIGGER[trigger_type]
+        if result.code not in allowed_codes or result.retryable:
+            raise ValueError(
+                "Coordinator ApplicationError must use a frozen non-retryable "
+                "code allowed for this Trigger"
             )
     elif not isinstance(result, TransitionPlan):
         raise TypeError("Coordinator result must be TransitionPlan or ApplicationError")
 
-    payload = getattr(trigger, "payload", None)
     if (
         isinstance(payload, SubmitSupplementTriggerPayload)
         and payload.stable_target_changed
@@ -152,6 +176,45 @@ def validate_coordinator_plan_result(
             "stable_target_changed requires NEW_CASE_REQUIRED without a plan"
         )
     return result
+
+
+def coordinator_outcome_error_failure(
+    trigger: ValidatedTrigger,
+    error: ApplicationError,
+) -> ExecutionFailure:
+    """Normalize a finalized Outcome semantic rejection to one terminal failure.
+
+    State drift is deliberately excluded: ``INVALID_CASE_STATE`` belongs to
+    S03's STALE path and must never be made into a second terminal rejection.
+    """
+
+    from .errors import deterministic_outcome_failure
+
+    validate_coordinator_plan_result(trigger, error)
+    if trigger.trigger_type not in {
+        TriggerType.ROUTE_OUTCOME,
+        TriggerType.DIAGNOSIS_OUTCOME,
+        TriggerType.REVIEW_OUTCOME,
+    }:
+        raise ValueError(
+            "Coordinator error normalization requires a finalized Outcome Trigger"
+        )
+    if error.code is ErrorCode.INVALID_CASE_STATE:
+        raise ValueError(
+            "INVALID_CASE_STATE belongs to the STALE Outcome path"
+        )
+    semantic_codes = {
+        TriggerType.ROUTE_OUTCOME: frozenset({ErrorCode.VALIDATION_ERROR}),
+        TriggerType.DIAGNOSIS_OUTCOME: frozenset(
+            {ErrorCode.VALIDATION_ERROR, ErrorCode.NEW_CASE_REQUIRED}
+        ),
+        TriggerType.REVIEW_OUTCOME: frozenset({ErrorCode.VALIDATION_ERROR}),
+    }
+    if error.code not in semantic_codes[trigger.trigger_type]:
+        raise ValueError(
+            "Coordinator error is not a finalized Outcome semantic rejection"
+        )
+    return deterministic_outcome_failure(ErrorCode.OUTCOME_INVALID, error.details)
 
 
 def _payload_evidence_bindings(payload: OutcomePayload | None) -> list[EvidenceBinding]:
@@ -564,6 +627,8 @@ def validate_logparse_claim_for_job(
             if proposal.artifact_kind is ArtifactKind.LOGPARSE_RUN
         ]
     if claim is None:
+        if parse_request_bytes is not None:
+            raise ValueError("request bytes require a parse claim")
         if proposals:
             raise ValueError("LOGPARSE_RUN proposal requires a parse claim")
         return None
@@ -785,6 +850,7 @@ __all__ = [
     "UserResultPayload",
     "ValidatedTrigger",
     "apply_problem_spec_patch",
+    "coordinator_outcome_error_failure",
     "validate_logparse_claim_for_job",
     "validate_coordinator_plan_result",
     "validate_outcome_for_job",

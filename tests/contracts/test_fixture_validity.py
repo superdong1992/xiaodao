@@ -55,6 +55,14 @@ NEGATIVE_FIXTURES = {
         "workspace-input-manifest.schema.json",
         False,
     ),
+    "model-workspace-archive-path-drift.json": (
+        "workspace-input-manifest.schema.json",
+        False,
+    ),
+    "model-workspace-archive-suffix-mismatch.json": (
+        "workspace-input-manifest.schema.json",
+        False,
+    ),
     "schema-fixture-manifest-traversal.json": (
         "fixture-manifest.schema.json",
         True,

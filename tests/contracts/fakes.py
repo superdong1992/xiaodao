@@ -30,12 +30,18 @@ from problem_locator.contracts.commands import (
     ArtifactListResponse,
     CancelReceipt,
     CaseQueryResponse,
+    ClaimJob,
     ClaimReceipt,
     DispatchReceipt,
     FailureReceipt,
+    GetCase,
+    InterruptPreviousEpoch,
+    ListArtifacts,
+    OpenArtifact,
     OpenArtifactResult,
     OutcomeReceipt,
     RecoveryReceipt,
+    SubmitJobOutcome,
 )
 from problem_locator.contracts.enums import (
     CancellationReason,
@@ -54,6 +60,7 @@ from problem_locator.contracts.limits import MAX_ATTACHMENT_BYTES, MAX_CASE_RESO
 from problem_locator.contracts.models import (
     Artifact,
     ApplicationError,
+    ApplicationErrorDetail,
     AssetAvailabilityReport,
     AttachmentStagedRef,
     CaseAggregate,
@@ -80,6 +87,7 @@ from problem_locator.contracts.models import (
     TreeManifestEntry,
     ValidationReport,
     VersionedRef,
+    WaitSeconds,
     WorkspaceInputManifest,
 )
 from problem_locator.contracts.outcomes import (
@@ -142,17 +150,44 @@ def _raise_or_return(item: Any, *args: Any, **kwargs: Any) -> Any:
     return _clone(item)
 
 
-def _port_error(code: ErrorCode, message: str) -> ApplicationPortError:
+def _port_error(
+    code: ErrorCode,
+    message: str,
+    *,
+    details: Sequence[ApplicationErrorDetail] = (),
+) -> ApplicationPortError:
     """Build the one frozen modeled-failure channel used by public fakes."""
 
     return ApplicationPortError(
         ApplicationError(
             code=code,
             message=message,
-            details=[],
+            details=list(details),
             retryable=ERROR_SPECS[code].application_retryable,
         )
     )
+
+
+def _validate_raw_port_input(
+    method_key: str,
+    model_type: type[BaseModel],
+    payload: Mapping[str, Any],
+) -> BaseModel:
+    """Rebuild a raw Port call before recording or consuming its script."""
+
+    try:
+        return model_type.model_validate(payload, strict=True)
+    except (TypeError, ValueError, ValidationError):
+        raise _port_error(
+            ErrorCode.VALIDATION_ERROR,
+            f"{method_key} received invalid raw input.",
+        ) from None
+
+
+def _rebuild_contract_input(value: Any) -> Any:
+    if isinstance(value, BaseModel):
+        return value.model_dump(mode="python", warnings=False)
+    return value
 
 
 def _validate_scripted_port_error(
@@ -1373,6 +1408,18 @@ class InMemoryResourceStore:
                 raise _port_error(
                     ErrorCode.RESOURCE_LIMIT_EXCEEDED,
                     "The Case resource capacity is exceeded.",
+                    details=(
+                        ApplicationErrorDetail(
+                            field="case_resource_bytes",
+                            resource_type="CASE",
+                            resource_id=case_id,
+                            resource_ref=None,
+                            expected=None,
+                            actual=None,
+                            limit=MAX_CASE_RESOURCE_BYTES,
+                            observed=total_bytes,
+                        ),
+                    ),
                 )
             return usage
 
@@ -1482,6 +1529,9 @@ class InMemoryStateRepository:
         self._state = _clone(state) if state is not None else None
         self.commit_calls: list[tuple[int, int | None, StateMutation]] = []
         self._commit_failures: deque[BaseException] = deque()
+        self._read_failures: defaultdict[str, deque[ApplicationPortError]] = (
+            defaultdict(deque)
+        )
         self.validation_report: ValidationReport | None = None
         self._lock = threading.RLock()
 
@@ -1492,6 +1542,27 @@ class InMemoryStateRepository:
     def fail_next_commit(self, failure: BaseException) -> None:
         self._commit_failures.append(failure)
 
+    def inject_read_failure(
+        self,
+        method_name: str,
+        failure: ApplicationPortError,
+    ) -> None:
+        method_key = f"StateRepository.{method_name}"
+        if method_key not in {
+            "StateRepository.read_case",
+            "StateRepository.read_job",
+            "StateRepository.read_artifact",
+            "StateRepository.read_snapshot",
+        }:
+            raise ValueError(f"unknown StateRepository read method: {method_name}")
+        _validate_scripted_port_error(method_key, failure)
+        self._read_failures[method_name].append(failure)
+
+    def _maybe_fail_read(self, method_name: str) -> None:
+        failures = self._read_failures[method_name]
+        if failures:
+            raise failures.popleft()
+
     def _require_state(self) -> StateFile:
         if self._state is None:
             raise RuntimeError("InMemoryStateRepository has no seeded StateFile")
@@ -1499,6 +1570,7 @@ class InMemoryStateRepository:
 
     def read_case(self, case_id: str) -> CaseAggregate:
         with self._lock:
+            self._maybe_fail_read("read_case")
             aggregate = self._require_state().cases.get(case_id)
             if aggregate is None:
                 raise _port_error(
@@ -1509,6 +1581,7 @@ class InMemoryStateRepository:
 
     def read_job(self, job_id: str) -> Job:
         with self._lock:
+            self._maybe_fail_read("read_job")
             for aggregate in self._require_state().cases.values():
                 job = aggregate.jobs.get(job_id)
                 if job is not None:
@@ -1520,6 +1593,7 @@ class InMemoryStateRepository:
 
     def read_artifact(self, artifact_id: str) -> Artifact:
         with self._lock:
+            self._maybe_fail_read("read_artifact")
             for aggregate in self._require_state().cases.values():
                 artifact = aggregate.artifacts.get(artifact_id)
                 if artifact is not None:
@@ -1531,6 +1605,7 @@ class InMemoryStateRepository:
 
     def read_snapshot(self) -> StateFile:
         with self._lock:
+            self._maybe_fail_read("read_snapshot")
             return _clone(self._require_state())
 
     @staticmethod
@@ -1789,11 +1864,33 @@ class FakeAssetCatalog:
         self._review = {key: _clone(value) for key, value in (review or {}).items()}
         self.check_calls: list[tuple[VersionedRef, ...]] = []
         self.resolve_calls: list[VersionedRef] = []
+        self.route_calls = 0
         self.diagnose_calls: list[VersionedRef] = []
         self.review_calls: list[VersionedRef] = []
+        self._failures: defaultdict[str, deque[ApplicationPortError]] = (
+            defaultdict(deque)
+        )
 
     def add(self, asset: ResolvedAsset) -> None:
         self._assets[_ref_key(asset.ref)] = _clone(asset)
+
+    def inject_failure(
+        self,
+        operation: str,
+        failure: ApplicationPortError,
+    ) -> None:
+        if operation == "check":
+            raise ValueError("check uses its report channel and allows no exception")
+        method_key = f"AssetCatalogPort.{operation}"
+        if method_key not in PORT_ERROR_CODES:
+            raise ValueError(f"unknown AssetCatalog operation: {operation}")
+        _validate_scripted_port_error(method_key, failure)
+        self._failures[operation].append(failure)
+
+    def _maybe_fail(self, operation: str) -> None:
+        failures = self._failures[operation]
+        if failures:
+            raise failures.popleft()
 
     def check(self, refs: Sequence[VersionedRef]) -> AssetAvailabilityReport:
         refs_tuple = tuple(_clone(ref) for ref in refs)
@@ -1802,29 +1899,46 @@ class FakeAssetCatalog:
         return AssetAvailabilityReport(available=not missing, missing_refs=missing)
 
     def resolve(self, ref: VersionedRef) -> ResolvedAsset:
+        self._maybe_fail("resolve")
         self.resolve_calls.append(_clone(ref))
         value = self._assets.get(_ref_key(ref))
         if value is None:
-            raise LookupError(f"asset unavailable: {ref.id}@{ref.version}")
+            raise _port_error(
+                ErrorCode.ASSET_VERSION_UNAVAILABLE,
+                "The requested pinned asset version is unavailable.",
+            )
         return _clone(value)
 
     def route_bindings(self) -> RuntimeBindings:
+        self._maybe_fail("route_bindings")
+        self.route_calls += 1
         if self._route is None:
-            raise AssertionError("route bindings were not configured")
+            raise _port_error(
+                ErrorCode.CONFIG_INVALID,
+                "The built-in route runtime bindings are not configured.",
+            )
         return _clone(self._route)
 
     def diagnose_bindings(self, skill_ref: VersionedRef) -> RuntimeBindings:
+        self._maybe_fail("diagnose_bindings")
         self.diagnose_calls.append(_clone(skill_ref))
         value = self._diagnose.get(_ref_key(skill_ref))
         if value is None:
-            raise LookupError("diagnose bindings unavailable")
+            raise _port_error(
+                ErrorCode.ASSET_VERSION_UNAVAILABLE,
+                "The pinned diagnosis runtime bindings are unavailable.",
+            )
         return _clone(value)
 
     def review_bindings(self, skill_ref: VersionedRef) -> RuntimeBindings:
+        self._maybe_fail("review_bindings")
         self.review_calls.append(_clone(skill_ref))
         value = self._review.get(_ref_key(skill_ref))
         if value is None:
-            raise LookupError("review bindings unavailable")
+            raise _port_error(
+                ErrorCode.ASSET_VERSION_UNAVAILABLE,
+                "The pinned review runtime bindings are unavailable.",
+            )
         return _clone(value)
 
 
@@ -2201,7 +2315,12 @@ class ScriptedRuntime:
         cancellation: CancellationSignal,
     ) -> RuntimeExecutionReceipt:
         self.calls.append((_clone(job), cancellation))
-        return self._script.take("Runtime.execute", job, cancellation)
+        return _take_port_script(
+            "Runtime.execute",
+            self._script,
+            job,
+            cancellation,
+        )
 
 
 class ScriptedCoordinator:
@@ -2261,9 +2380,23 @@ class StubApplicationQuery:
         self,
         case_id: str,
         wait_for_job_id: str | None = None,
-        wait_seconds: int = 0,
+        wait_seconds: WaitSeconds = 0,
     ) -> CaseQueryResponse:
-        args = (case_id, wait_for_job_id, wait_seconds)
+        validated = _validate_raw_port_input(
+            "ApplicationQueryPort.get_case",
+            GetCase,
+            {
+                "case_id": case_id,
+                "wait_for_job_id": wait_for_job_id,
+                "wait_seconds": wait_seconds,
+            },
+        )
+        assert isinstance(validated, GetCase)
+        args = (
+            validated.case_id,
+            validated.wait_for_job_id,
+            validated.wait_seconds,
+        )
         self.calls.append(("get_case", args))
         return _take_port_script(
             "ApplicationQueryPort.get_case",
@@ -2276,7 +2409,13 @@ class StubApplicationQuery:
         case_id: str,
         include_internal: bool = False,
     ) -> ArtifactListResponse:
-        args = (case_id, include_internal)
+        validated = _validate_raw_port_input(
+            "ApplicationQueryPort.list_artifacts",
+            ListArtifacts,
+            {"case_id": case_id, "include_internal": include_internal},
+        )
+        assert isinstance(validated, ListArtifacts)
+        args = (validated.case_id, validated.include_internal)
         self.calls.append(("list_artifacts", args))
         return _take_port_script(
             "ApplicationQueryPort.list_artifacts",
@@ -2289,7 +2428,13 @@ class StubApplicationQuery:
         case_id: str,
         artifact_id: str,
     ) -> OpenArtifactResult:
-        args = (case_id, artifact_id)
+        validated = _validate_raw_port_input(
+            "ApplicationQueryPort.open_artifact",
+            OpenArtifact,
+            {"case_id": case_id, "artifact_id": artifact_id},
+        )
+        assert isinstance(validated, OpenArtifact)
+        args = (validated.case_id, validated.artifact_id)
         self.calls.append(("open_artifact", args))
         return _take_port_script(
             "ApplicationQueryPort.open_artifact",
@@ -2316,7 +2461,13 @@ class StubJobControl:
             script.append(result)
 
     def claim_job(self, job_id: str, runtime_epoch: str) -> ClaimReceipt:
-        args = (job_id, runtime_epoch)
+        validated = _validate_raw_port_input(
+            "JobControlPort.claim_job",
+            ClaimJob,
+            {"job_id": job_id, "runtime_epoch": runtime_epoch},
+        )
+        assert isinstance(validated, ClaimJob)
+        args = (validated.job_id, validated.runtime_epoch)
         self.calls.append(("claim_job", args))
         return _take_port_script(
             "JobControlPort.claim_job",
@@ -2329,13 +2480,22 @@ class StubJobControl:
         job_outcome: JobOutcome,
         outcome_file_ref: ExecutionFileRef,
     ) -> OutcomeReceipt:
-        args = (_clone(job_outcome), _clone(outcome_file_ref))
+        validated = _validate_raw_port_input(
+            "JobControlPort.submit_outcome",
+            SubmitJobOutcome,
+            {
+                "job_outcome": _rebuild_contract_input(job_outcome),
+                "outcome_file_ref": _rebuild_contract_input(outcome_file_ref),
+            },
+        )
+        assert isinstance(validated, SubmitJobOutcome)
+        args = (_clone(validated.job_outcome), _clone(validated.outcome_file_ref))
         self.calls.append(("submit_outcome", args))
         return _take_port_script(
             "JobControlPort.submit_outcome",
             self._scripts["submit_outcome"],
-            job_outcome,
-            outcome_file_ref,
+            validated.job_outcome,
+            validated.outcome_file_ref,
         )
 
     def report_execution_infrastructure_failure(
@@ -2361,7 +2521,16 @@ class StubJobControl:
         current_runtime_epoch: str,
         recovery_id: str,
     ) -> RecoveryReceipt:
-        args = (current_runtime_epoch, recovery_id)
+        validated = _validate_raw_port_input(
+            "JobControlPort.interrupt_previous_epoch",
+            InterruptPreviousEpoch,
+            {
+                "current_runtime_epoch": current_runtime_epoch,
+                "recovery_id": recovery_id,
+            },
+        )
+        assert isinstance(validated, InterruptPreviousEpoch)
+        args = (validated.current_runtime_epoch, validated.recovery_id)
         self.calls.append(("interrupt_previous_epoch", args))
         return _take_port_script(
             "JobControlPort.interrupt_previous_epoch",

@@ -216,11 +216,14 @@ def _first_job_and_manifest() -> tuple[Job, WorkspaceInputManifest]:
             {
                 "input_kind": "ATTACHMENT",
                 "resource_id": LOG_ARCHIVE_ID,
-                "relative_path": f"inputs/attachments/{LOG_ARCHIVE_ID}/payload",
+                "relative_path": (
+                    f"inputs/attachments/{LOG_ARCHIVE_ID}/payload.tar.gz"
+                ),
                 "resource_kind": "FILE",
                 "size": 128,
                 "sha256": LOG_ARCHIVE_SHA256,
                 "content_type": "application/gzip",
+                "filename_suffix": ".tar.gz",
             }
         ],
     )
