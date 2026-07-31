@@ -1,0 +1,1 @@
+{"cases":[{"case_status":"RUNNING","claim_allowed":true,"job_type":"ROUTE"},{"case_status":"RUNNING","claim_allowed":true,"job_type":"DIAGNOSE"},{"case_status":"REVIEWING","claim_allowed":true,"job_type":"REVIEW"},{"case_status":"REVIEWING","claim_allowed":false,"job_type":"DIAGNOSE"},{"case_status":"RUNNING","claim_allowed":false,"job_type":"REVIEW"}]}
