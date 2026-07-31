@@ -1,24 +1,26 @@
 {
   "spec_id": "S00",
-  "title": "Contract Freeze and Public Test Specification R2 Maintenance",
+  "title": "Contract Freeze and Public Test Specification R3 Maintenance",
   "executor": {
     "model": "gpt-5.6-sol",
     "reasoning_effort": "ultra"
   },
-  "contract_revision": "v1-contract-r2",
-  "contract_base_commit": "85670dd223949e232e36b03e06c96672e3558ef3",
+  "contract_revision": "v1-contract-r3",
+  "contract_base_commit": "53ec7b79b4971e50ed7555a97de62eaed81fd351",
   "branch": "codex/v1-s00-contract-freeze",
-  "head_commit": "4ead7c3dd2a2c7ee7e151fc3c1afa7a41d1933db",
+  "head_commit": "187df0b9e975a58af96fc86a842a211450d16877",
   "scope_completed": [
-    "upgraded the frozen contract to v1-contract-r2 with one ApplicationPortError channel, exact per-method ErrorCode sets, and a non-exception Coordinator decision union",
-    "froze stable-target supplement classification, upload content-type binding, broker parse-byte evidence, and typed broker-open asset failure",
-    "froze staged-resource preflight, deterministic resource target planning, recovery receipt persistence, and technical rejected-Outcome audit semantics",
-    "updated all public Fakes, persistence schemas, fixtures, deterministic manifests, and S00 conformance and regression tests"
+    "closed the r3 state-read, application-query, JobControl, Runtime, AssetCatalog, next-job publication, and method-specific retry and park error channels without adding ErrorCode values",
+    "froze trigger-specific Coordinator decisions, deterministic finalized-Outcome semantic rejection, and the single normal versus asset-failure ClaimReceipt split",
+    "froze canonical attachment archive suffix derivation, exact Workspace materialization paths, and early Attachment name/content-type validation",
+    "froze exact capacity-observed error details, broker parse-request claim ordering, and post-commit nullable projection receipts",
+    "updated public Fakes, Schemas, positive and negative fixtures, deterministic manifests, and S00 conformance and regression coverage for CCR-A through CCR-K"
   ],
   "changed_files": [
     "schemas/v1/contract-manifest.json",
     "schemas/v1/handoff.schema.json",
     "schemas/v1/state.schema.json",
+    "schemas/v1/workspace-input-manifest.schema.json",
     "src/problem_locator/contracts/enums.py",
     "src/problem_locator/contracts/errors.py",
     "src/problem_locator/contracts/limits.py",
@@ -26,55 +28,77 @@
     "src/problem_locator/contracts/outcomes.py",
     "src/problem_locator/contracts/ports.py",
     "tests/contracts/fakes.py",
-    "tests/contracts/scenario_fakes.py",
-    "tests/contracts/test_command_hash_and_patch.py",
+    "tests/contracts/test_fixture_validity.py",
     "tests/contracts/test_handoff_manifest.py",
-    "tests/contracts/test_port_conformance.py",
+    "tests/contracts/test_logparse_continuation_scenario.py",
     "tests/contracts/test_r2_port_error_channels.py",
-    "tests/contracts/test_r2_state_recovery_audit.py",
-    "tests/contracts/test_r2_trigger_command_broker.py",
-    "tests/contracts/test_resource_capacity.py",
+    "tests/contracts/test_r3_error_closure.py",
+    "tests/contracts/test_r3_workspace_archive.py",
+    "tests/contracts/test_scalar_and_outcome_invariants.py",
     "tests/contracts/test_schema_snapshots.py",
     "tests/contracts/test_seam_regressions.py",
-    "tests/contracts/test_state_graph_regressions.py",
-    "tests/contracts/test_upload_contract_scenarios.py",
     "tests/fixtures/contracts/fixture-manifest.json",
+    "tests/fixtures/contracts/negative/model-workspace-archive-path-drift.json",
+    "tests/fixtures/contracts/negative/model-workspace-archive-suffix-mismatch.json",
+    "tests/fixtures/contracts/negative/model-workspace-content-type-uppercase.json",
     "tests/fixtures/contracts/negative/schema-handoff-invalid-hash.json",
     "tests/fixtures/contracts/negative/schema-handoff-nested-extra-field.json",
     "tests/fixtures/contracts/positive/handoff.json",
-    "tests/fixtures/contracts/positive/state.json"
+    "tests/fixtures/contracts/positive/state.json",
+    "tests/fixtures/contracts/positive/workspace-input-manifest.json"
   ],
   "fixtures_consumed": [],
   "fixtures_produced": [
     "tests/fixtures/contracts/fixture-manifest.json",
+    "tests/fixtures/contracts/negative/model-workspace-archive-path-drift.json",
+    "tests/fixtures/contracts/negative/model-workspace-archive-suffix-mismatch.json",
+    "tests/fixtures/contracts/negative/model-workspace-content-type-uppercase.json",
     "tests/fixtures/contracts/negative/schema-handoff-invalid-hash.json",
     "tests/fixtures/contracts/negative/schema-handoff-nested-extra-field.json",
     "tests/fixtures/contracts/positive/handoff.json",
-    "tests/fixtures/contracts/positive/state.json"
+    "tests/fixtures/contracts/positive/state.json",
+    "tests/fixtures/contracts/positive/workspace-input-manifest.json"
   ],
   "tests": [
     {
       "command": "PYTHONPATH=src PYTHONPYCACHEPREFIX=/private/tmp/problem-locator-s00-pycache /private/tmp/problem-locator-s00-env/bin/python -m pytest tests/contracts -q -p no:cacheprovider",
       "status": "passed",
-      "summary": "415 passed in 1.28s"
+      "summary": "505 passed in 1.09s"
+    },
+    {
+      "command": "PYTHONPATH=src PYTHONPYCACHEPREFIX=/private/tmp/problem-locator-s00-pycache /private/tmp/problem-locator-s00-env/bin/python -c 'import json; from pathlib import Path; from problem_locator.contracts.serialization import canonical_json_bytes, contract_manifest_bytes, schema_bundle_bytes; from tests.contracts.manifest_helpers import build_fixture_manifest; root=Path(\".\"); bundle=schema_bundle_bytes(); assert len(bundle)==9; assert all((root/\"schemas/v1\"/name).read_bytes()==data for name,data in bundle.items()); assert (root/\"schemas/v1/contract-manifest.json\").read_bytes()==contract_manifest_bytes(root); fixture_root=root/\"tests/fixtures/contracts\"; payload=json.loads((fixture_root/\"fixture-manifest.json\").read_text()); metadata={entry[\"path\"]:{\"purpose\":entry[\"purpose\"],\"schema_ref\":entry[\"schema_ref\"]} for entry in payload[\"files\"]}; generated=build_fixture_manifest(fixture_root,owner_spec=\"S00\",repository_relative_root=\"tests/fixtures/contracts\",metadata_by_path=metadata); assert (fixture_root/\"fixture-manifest.json\").read_bytes()==canonical_json_bytes(generated); print(\"9 schemas, contract manifest, and fixture manifest are deterministic\")'",
+      "status": "passed",
+      "summary": "9 schemas, contract manifest, and fixture manifest are deterministic"
     },
     {
       "command": "/private/tmp/problem-locator-s00-tools/bin/uv lock --check",
       "status": "passed",
-      "summary": "Using CPython 3.12.11; resolved 17 packages in 20ms"
+      "summary": "Resolved 17 packages in 14ms"
+    },
+    {
+      "command": "git diff --check",
+      "status": "passed",
+      "summary": "No whitespace errors"
     }
   ],
   "dependency_requests": [],
   "contract_change_requests": [],
   "known_limitations": [],
-  "risks": [],
+  "risks": [
+    "WorkspaceAttachmentInput.filename_suffix is a new required-nullable r3 field while schema_version remains 1; r2 temporary Workspaces must be discarded and rematerialized rather than reused."
+  ],
   "integration_notes": [
-    "v1-contract-r2 supersedes r1 for downstream integration; v1-contract-freeze-1 remains unchanged at 85670dd223949e232e36b03e06c96672e3558ef3.",
-    "Downstream Port implementations must raise ApplicationPortError only for the method-qualified PORT_ERROR_CODES set; Coordinator.plan returns ApplicationError directly and never raises that exception.",
-    "State migration to r2 must add recovery_processing_records, pair every RuntimeEpochRecord with its immutable RecoveryProcessingRecord, and preserve the first interrupted and pending Job ID lists across replay.",
-    "PrepareAttachment accepts non-negative declared sizes above 2.5 GiB so S03 can return RESOURCE_LIMIT_EXCEEDED; persisted Attachment and actual upload size limits remain unchanged.",
-    "UploadAttachmentContent.expected_content_type and SubmitSupplementTriggerPayload.stable_target_changed are required internal fields; external HTTP and MCP command shapes remain unchanged.",
-    "S01-S07 should use v1-contract-freeze-2 as their new contract base and must not modify S00-owned paths."
+    "v1-contract-r3 supersedes r2 for downstream integration; v1-contract-freeze-1 and v1-contract-freeze-2 remain immutable, and S01-S07 must rebase their contract consumption on v1-contract-freeze-3 without modifying S00-owned paths.",
+    "StateRepository read faults STATE_CORRUPT and STATE_SCHEMA_UNSUPPORTED propagate unchanged before commit; a projection reread failure after durable commit returns the saved receipt with case_view=null and readiness exposes the state fault.",
+    "Coordinator errors are Trigger-specific. Finalized ROUTE, DIAGNOSIS, and REVIEW semantic rejection is normalized to deterministic OUTCOME_INVALID processing; INVALID_CASE_STATE remains the STALE path, and normal claim competition uses ClaimReceipt rather than ApplicationPortError(CLAIM_REJECTED).",
+    "JobControlPort.submit_outcome uses a submission-only retry set for REVISION_CONFLICT, STATE_WRITE_FAILED, RESOURCE_PUBLISH_FAILED, and EXECUTION_RECORD_FAILED. ASSET_VERSION_UNAVAILABLE and CONFIG_INVALID park the finalized receipt until repair and restart; neither rule permits Runtime.execute to run again.",
+    "S04 must derive filename_suffix and the exact Workspace relative_path from immutable Attachment.name and content_type through derive_attachment_filename_suffix and workspace_attachment_relative_path; manifest self-validation cannot recover the source filename.",
+    "S07 must consume only the exact Workspace manifest relative_path. Archive paths are payload.zip, payload.tar, payload.gz, payload.tar.gz, or payload.tgz; non-archive attachments remain payload.",
+    "S05 must treat Runtime.execute ApplicationPortError with STATE_CORRUPT or STATE_SCHEMA_UNSUPPORTED as fatal readiness failure, create no Outcome, and never rerun the Agent; restart recovery owns the old RUNNING Job.",
+    "ResourceStore.validate_case_capacity RESOURCE_LIMIT_EXCEEDED must carry limit=MAX_CASE_RESOURCE_BYTES and observed=the same atomic CaseResourceUsage.total_bytes including formal outbox and orphan bytes.",
+    "ApplicationQueryPort validates all raw GetCase, ListArtifacts, and OpenArtifact inputs before reads or waits. JobControl validates raw ClaimJob, SubmitJobOutcome, and InterruptPreviousEpoch inputs before clocks, IDs, repositories, catalogs, execution records, coordinators, or guards.",
+    "The r3 StateFile contract_revision rejects r2 state on normal reads; any pre-release r2 state requires an explicit offline migration or regeneration before starting an r3 process.",
+    "Affected downstream specifications are S01, S02, S03, S04, S05, S06, and S07; each must adopt the exact r3 Port sets, helpers, receipts, and retry or readiness rules relevant to its boundary."
   ],
   "forbidden_scope_touched": false
 }
