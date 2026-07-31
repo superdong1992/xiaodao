@@ -270,7 +270,11 @@ def test_valid_directory_proposal_builds_the_frozen_tree_manifest(
 ) -> None:
     job, manifest, payload = _route_inputs()
     root_relative = "output/proposals/diagnostic_export/tree"
-    files = {"a.txt": b"alpha", "nested/b.bin": b"beta\x00bytes"}
+    files = {
+        "a.txt": b"alpha",
+        "a/result.bin": b"globally sorted after a.txt",
+        "nested/b.bin": b"beta\x00bytes",
+    }
     entries = [
         TreeManifestEntry(
             path=path,
@@ -303,6 +307,40 @@ def test_valid_directory_proposal_builds_the_frozen_tree_manifest(
     assert resource.size == expected_size
     assert resource.sha256 == expected_hash
     assert resource.tree_manifest == expected_manifest
+
+
+def test_valid_directory_proposal_works_without_directory_fds(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    job, manifest, payload = _route_inputs()
+    root_relative = "output/proposals/diagnostic_export/tree"
+    content = b"fallback tree bytes"
+    expected_manifest = TreeManifest(
+        version=1,
+        entries=[
+            TreeManifestEntry(
+                path="nested/result.bin",
+                size=len(content),
+                sha256=hashlib.sha256(content).hexdigest(),
+            )
+        ],
+    )
+    payload["proposed_artifact_drafts"] = [
+        _diagnostic_draft(
+            relative_path=root_relative,
+            resource_kind="DIRECTORY",
+            declared_size=len(content),
+            declared_sha256=bytes_sha256(canonical_json_bytes(expected_manifest)),
+        )
+    ]
+    _write_outcome(tmp_path, payload)
+    _write_file_proposal(tmp_path, f"{root_relative}/nested/result.bin", content)
+    monkeypatch.setattr(output_reader_module, "_supports_anchored_tree", lambda: False)
+
+    result = read_agent_output(tmp_path, job, manifest)
+
+    assert result.proposal_resources[0].tree_manifest == expected_manifest
 
 
 @pytest.mark.parametrize("field", ["declared_size", "declared_sha256"])
@@ -365,6 +403,44 @@ def test_fifo_proposal_is_rejected_without_blocking(tmp_path: Path) -> None:
         read_agent_output(tmp_path, job, manifest)
 
     _assert_failure(captured, ErrorCode.OUTCOME_INVALID)
+
+
+def test_growing_proposal_read_is_bounded_by_its_frozen_size(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    job, manifest, payload = _route_inputs()
+    content = b"frozen"
+    draft = _diagnostic_draft(
+        declared_size=len(content),
+        declared_sha256=hashlib.sha256(content).hexdigest(),
+    )
+    payload["proposed_artifact_drafts"] = [draft]
+    _write_outcome(tmp_path, payload)
+    proposal = _write_file_proposal(
+        tmp_path,
+        draft["workspace_relative_path"],
+        content,
+    )
+    proposal_inode = proposal.stat().st_ino
+    proposal_reads = 0
+    original_read = os.read
+
+    def simulate_concurrent_append(descriptor: int, count: int) -> bytes:
+        nonlocal proposal_reads
+        if os.fstat(descriptor).st_ino == proposal_inode:
+            proposal_reads += 1
+            if proposal_reads > 1:
+                return b"x"
+        return original_read(descriptor, count)
+
+    monkeypatch.setattr(os, "read", simulate_concurrent_append)
+
+    with pytest.raises(RuntimeExecutionError) as captured:
+        read_agent_output(tmp_path, job, manifest)
+
+    _assert_failure(captured, ErrorCode.OUTCOME_INVALID)
+    assert proposal_reads == 2
 
 
 def test_proposal_parent_swap_between_snapshot_and_open_never_reads_outside(
@@ -552,6 +628,72 @@ def test_tree_child_swap_before_open_never_reads_outside(
     monkeypatch.setattr(os, "open", swap_child_open)
     monkeypatch.setattr(os, "read", observe_read)
     monkeypatch.setattr(output_reader_module, "_supports_anchored_tree", lambda: True)
+
+    with pytest.raises(RuntimeExecutionError) as captured:
+        read_agent_output(tmp_path, job, manifest)
+
+    _assert_failure(captured, ErrorCode.OUTCOME_INVALID)
+    assert swapped is True
+    assert outside_read is False
+
+
+def test_fallback_tree_child_swap_is_rejected_before_file_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    job, manifest, payload = _route_inputs()
+    relative_path = "output/proposals/diagnostic_export/tree"
+    content = b"validated fallback bytes"
+    expected_manifest = TreeManifest(
+        version=1,
+        entries=[
+            TreeManifestEntry(
+                path="nested/result.bin",
+                size=len(content),
+                sha256=hashlib.sha256(content).hexdigest(),
+            )
+        ],
+    )
+    payload["proposed_artifact_drafts"] = [
+        _diagnostic_draft(
+            relative_path=relative_path,
+            resource_kind="DIRECTORY",
+            declared_size=len(content),
+            declared_sha256=bytes_sha256(canonical_json_bytes(expected_manifest)),
+        )
+    ]
+    _write_outcome(tmp_path, payload)
+    tree_root = tmp_path / relative_path
+    nested = tree_root / "nested"
+    nested.mkdir(parents=True)
+    (nested / "result.bin").write_bytes(content)
+    outside_nested = tmp_path / "outside-fallback-nested"
+    outside_nested.mkdir()
+    outside_file = outside_nested / "result.bin"
+    outside_file.write_bytes(b"outside bytes must not be read")
+    outside_inode = outside_file.stat().st_ino
+    outside_read = False
+    swapped = False
+    original_scandir = os.scandir
+    original_read = os.read
+
+    def swap_before_scandir(path: str | bytes | int | os.PathLike[str]):
+        nonlocal swapped
+        if not isinstance(path, int) and Path(path) == nested and not swapped:
+            swapped = True
+            nested.rename(tmp_path / "original-fallback-nested")
+            outside_nested.rename(nested)
+        return original_scandir(path)
+
+    def observe_read(descriptor: int, count: int) -> bytes:
+        nonlocal outside_read
+        if os.fstat(descriptor).st_ino == outside_inode:
+            outside_read = True
+        return original_read(descriptor, count)
+
+    monkeypatch.setattr(output_reader_module, "_supports_anchored_tree", lambda: False)
+    monkeypatch.setattr(os, "scandir", swap_before_scandir)
+    monkeypatch.setattr(os, "read", observe_read)
 
     with pytest.raises(RuntimeExecutionError) as captured:
         read_agent_output(tmp_path, job, manifest)

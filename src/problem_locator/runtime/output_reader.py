@@ -477,6 +477,7 @@ def _read_frozen_relative_file(
     root_identity: tuple[int, int] | None = None,
     output_identity: tuple[int, int] | None = None,
     expected_parent_identities: dict[str, tuple[int, int]] | None = None,
+    max_bytes: int | None = None,
 ) -> tuple[int, str, bytes | None, _SourceSnapshot]:
     snapshot = _snapshot_source(
         root,
@@ -497,11 +498,17 @@ def _read_frozen_relative_file(
                 raise _InvalidOutput
     descriptor = _open_snapshot_path(snapshot, relative_path)
     try:
+        expected_size = os.fstat(descriptor).st_size
+        if max_bytes is not None and expected_size > max_bytes:
+            raise _InvalidOutput
         size, sha256, content = _read_descriptor(
             descriptor,
             patterns=patterns,
             capture=capture,
+            max_bytes=expected_size,
         )
+        if size != expected_size:
+            raise _InvalidOutput
         metadata = os.fstat(descriptor)
         named = _lstat(root / relative_path)
         if (
@@ -616,7 +623,8 @@ def _inspect_tree_descriptor(
     workspace_relative_root: str,
     workspace_device: int,
     patterns: tuple[bytes, ...],
-) -> list[TreeManifestEntry]:
+    max_bytes: int,
+) -> tuple[list[TreeManifestEntry], int]:
     """Inspect one directory without resolving a child through ambient paths."""
 
     try:
@@ -627,6 +635,7 @@ def _inspect_tree_descriptor(
     directory_fingerprint = _fingerprint(directory_metadata)
     names = _scandir_names(directory_descriptor)
     manifest_entries: list[TreeManifestEntry] = []
+    consumed_bytes = 0
     for name in names:
         named_before = _named_metadata(directory_descriptor, name)
         if (
@@ -650,15 +659,16 @@ def _inspect_tree_descriptor(
                 _assert_directory(child_metadata, device=workspace_device)
                 if _fingerprint(child_metadata) != _fingerprint(named_before):
                     raise _InvalidOutput
-                manifest_entries.extend(
-                    _inspect_tree_descriptor(
-                        child_descriptor,
-                        tree_prefix=tree_relative,
-                        workspace_relative_root=workspace_relative_root,
-                        workspace_device=workspace_device,
-                        patterns=patterns,
-                    )
+                child_entries, child_bytes = _inspect_tree_descriptor(
+                    child_descriptor,
+                    tree_prefix=tree_relative,
+                    workspace_relative_root=workspace_relative_root,
+                    workspace_device=workspace_device,
+                    patterns=patterns,
+                    max_bytes=max_bytes - consumed_bytes,
                 )
+                manifest_entries.extend(child_entries)
+                consumed_bytes += child_bytes
                 if _fingerprint(os.fstat(child_descriptor)) != _fingerprint(named_before):
                     raise _InvalidOutput
                 if _fingerprint(
@@ -672,6 +682,8 @@ def _inspect_tree_descriptor(
                     os.close(child_descriptor)
             continue
         if not stat.S_ISREG(named_before.st_mode) or named_before.st_nlink != 1:
+            raise _InvalidOutput
+        if named_before.st_size > max_bytes - consumed_bytes:
             raise _InvalidOutput
         file_descriptor = -1
         try:
@@ -688,7 +700,10 @@ def _inspect_tree_descriptor(
                 file_descriptor,
                 patterns=patterns,
                 capture=False,
+                max_bytes=named_before.st_size,
             )
+            if size != named_before.st_size:
+                raise _InvalidOutput
             if _fingerprint(os.fstat(file_descriptor)) != _fingerprint(named_before):
                 raise _InvalidOutput
             if _fingerprint(
@@ -703,6 +718,7 @@ def _inspect_tree_descriptor(
         manifest_entries.append(
             TreeManifestEntry(path=tree_relative, size=size, sha256=sha256)
         )
+        consumed_bytes += size
     if _scandir_names(directory_descriptor) != names:
         raise _InvalidOutput
     try:
@@ -710,7 +726,7 @@ def _inspect_tree_descriptor(
             raise _InvalidOutput
     except OSError:
         raise _InvalidOutput from None
-    return manifest_entries
+    return manifest_entries, consumed_bytes
 
 
 def _inspect_tree(
@@ -718,6 +734,7 @@ def _inspect_tree(
     *,
     workspace_root: Path,
     patterns: tuple[bytes, ...],
+    max_bytes: int,
     root_identity: tuple[int, int] | None = None,
     output_identity: tuple[int, int] | None = None,
 ) -> tuple[int, str, TreeManifest]:
@@ -744,12 +761,13 @@ def _inspect_tree(
             tree_relative_root,
         )
         try:
-            manifest_entries = _inspect_tree_descriptor(
+            manifest_entries, consumed_bytes = _inspect_tree_descriptor(
                 tree_descriptor,
                 tree_prefix="",
                 workspace_relative_root=tree_relative_root,
                 workspace_device=workspace_device,
                 patterns=patterns,
+                max_bytes=max_bytes,
             )
             if _fingerprint(os.fstat(tree_descriptor)) != tree_snapshot.leaf_fingerprint:
                 raise _InvalidOutput
@@ -770,9 +788,24 @@ def _inspect_tree(
             tree_relative_root: _fingerprint(metadata)
         }
         pending: list[tuple[Path, str]] = [(root, "")]
-        files: list[tuple[str, Path]] = []
+        files: list[tuple[str, Path, int]] = []
         while pending:
             directory, tree_prefix = pending.pop()
+            workspace_relative_directory = (
+                f"{tree_relative_root}/{tree_prefix}"
+                if tree_prefix
+                else tree_relative_root
+            )
+            expected_directory = directory_fingerprints.get(
+                workspace_relative_directory
+            )
+            directory_before = _lstat(directory)
+            _assert_directory(directory_before, device=workspace_device)
+            if (
+                expected_directory is None
+                or _fingerprint(directory_before) != expected_directory
+            ):
+                raise _InvalidOutput
             try:
                 with os.scandir(directory) as iterator:
                     entries = sorted(iterator, key=lambda entry: entry.name)
@@ -805,13 +838,30 @@ def _inspect_tree(
                     )
                     child_directories.append((Path(entry.path), tree_relative))
                 elif stat.S_ISREG(entry_metadata.st_mode) and entry_metadata.st_nlink == 1:
-                    files.append((tree_relative, Path(entry.path)))
+                    files.append((tree_relative, Path(entry.path), entry_metadata.st_size))
                 else:
                     raise _InvalidOutput
+            try:
+                with os.scandir(directory) as iterator:
+                    final_names = tuple(sorted(entry.name for entry in iterator))
+            except OSError:
+                raise _InvalidOutput from None
+            if final_names != tuple(entry.name for entry in entries):
+                raise _InvalidOutput
+            directory_after = _lstat(directory)
+            _assert_directory(directory_after, device=workspace_device)
+            if _fingerprint(directory_after) != expected_directory:
+                raise _InvalidOutput
             pending.extend(reversed(child_directories))
 
         manifest_entries = []
-        for relative_path, path in sorted(files, key=lambda item: item[0]):
+        consumed_bytes = 0
+        for relative_path, path, expected_size in sorted(
+            files,
+            key=lambda item: item[0],
+        ):
+            if expected_size > max_bytes - consumed_bytes:
+                raise _InvalidOutput
             workspace_relative = path.relative_to(workspace_root).as_posix()
             size, sha256, _, _ = _read_frozen_relative_file(
                 workspace_root,
@@ -820,15 +870,20 @@ def _inspect_tree(
                 root_identity=tree_snapshot.root_identity,
                 output_identity=tree_snapshot.output_identity,
                 expected_parent_identities=directory_identities,
+                max_bytes=max_bytes - consumed_bytes,
             )
+            consumed_bytes += size
             manifest_entries.append(
                 TreeManifestEntry(path=relative_path, size=size, sha256=sha256)
             )
         for relative, expected in directory_fingerprints.items():
             if _fingerprint(_lstat(workspace_root / relative)) != expected:
                 raise _InvalidOutput
+    manifest_entries.sort(key=lambda entry: entry.path)
     manifest = TreeManifest(version=1, entries=manifest_entries)
     size = sum(entry.size for entry in manifest.entries)
+    if size != consumed_bytes or size > max_bytes:
+        raise _InvalidOutput
     _assert_snapshot_paths(tree_snapshot)
     named_root = _lstat(root)
     if (
@@ -868,6 +923,7 @@ def _verify_resource_unchanged(resource: ValidatedProposalResource) -> None:
         resource.path,
         workspace_root=snapshot.root,
         patterns=(),
+        max_bytes=resource.size,
         root_identity=snapshot.root_identity,
         output_identity=snapshot.output_identity,
     )
@@ -916,13 +972,16 @@ def _read_validated_output(
         outcome_relative_path,
         missing_outcome=True,
     )
-    _, _, raw_outcome_bytes, _ = _read_frozen_relative_file(
+    remaining_bytes = job.resource_limits.workspace_bytes
+    outcome_size, _, raw_outcome_bytes, _ = _read_frozen_relative_file(
         workspace_root,
         outcome_relative_path,
         capture=True,
         root_identity=root_identity,
         output_identity=output_identity,
+        max_bytes=remaining_bytes,
     )
+    remaining_bytes -= outcome_size
     assert raw_outcome_bytes is not None
     outcome = parse_canonical_json_bytes(
         raw_outcome_bytes,
@@ -968,6 +1027,7 @@ def _read_validated_output(
                 capture=capture,
                 root_identity=root_identity,
                 output_identity=output_identity,
+                max_bytes=remaining_bytes,
             )
             tree_manifest = None
             if capture:
@@ -978,6 +1038,7 @@ def _read_validated_output(
                 path,
                 workspace_root=workspace_root,
                 patterns=patterns,
+                max_bytes=remaining_bytes,
                 root_identity=root_identity,
                 output_identity=output_identity,
             )
@@ -987,6 +1048,7 @@ def _read_validated_output(
                 root_identity=root_identity,
                 output_identity=output_identity,
             )
+        remaining_bytes -= size
         _validate_declared_values(
             draft,
             actual_size=size,
