@@ -20,6 +20,7 @@ from problem_locator.contracts import (
     ApplicationPortError,
     ArtifactKind,
     ArtifactProposal,
+    AttachmentStatus,
     CandidateMutation,
     CandidateMutationAction,
     CandidateStatus,
@@ -31,6 +32,9 @@ from problem_locator.contracts import (
     ErrorCode,
     ERROR_SPECS,
     Evidence,
+    EvidenceBinding,
+    EvidenceProposal,
+    EvidenceSourceBinding,
     EvidenceSourceType,
     ExecutionFileRef,
     FieldUpdateAction,
@@ -40,6 +44,9 @@ from problem_locator.contracts import (
     JobSpec,
     JobStatus,
     JobType,
+    LogparseEvidenceLocator,
+    LogparseParseParameters,
+    LogparseRunMetadata,
     OutcomeDisposition,
     PlannedResourceBinding,
     ResourceKind,
@@ -48,6 +55,7 @@ from problem_locator.contracts import (
     RuntimeBindings,
     SelectedSkillUpdate,
     StateFile,
+    StagedResourceRef,
     TransitionPlan,
     TriggerType,
     UserFactInput,
@@ -79,6 +87,7 @@ CASE_ID = "00000000-0000-0000-0000-000000000001"
 JOB_ID = "00000000-0000-0000-0000-000000000010"
 DIAGNOSE_JOB_ID = "00000000-0000-0000-0000-000000000011"
 EVIDENCE_ID = "00000000-0000-0000-0000-000000000040"
+ATTACHMENT_ID = "00000000-0000-0000-0000-000000000050"
 USER_FACT_ID = "00000000-0000-0000-0000-000000000030"
 USER_FACT_TRIGGER_ID = "00000000-0000-0000-0000-000000000031"
 RUNTIME_EPOCH = "00000000-0000-0000-0000-000000000090"
@@ -216,6 +225,32 @@ def _running_diagnosis_candidate_state() -> StateFile:
         evidence.evidence_id: evidence.model_dump(mode="python")
     }
     payload["generation"] = 2
+    return StateFile.model_validate(payload)
+
+
+def _running_diagnosis_logparse_candidate_state() -> StateFile:
+    payload = _running_diagnosis_candidate_state().model_dump(mode="python")
+    aggregate = payload["cases"][CASE_ID]
+    source = aggregate["jobs"][DIAGNOSE_JOB_ID]
+    source["attachment_refs"] = [ATTACHMENT_ID]
+    aggregate["attachments"] = {
+        ATTACHMENT_ID: {
+            "attachment_id": ATTACHMENT_ID,
+            "case_id": CASE_ID,
+            "status": AttachmentStatus.READY,
+            "name": "runtime.log",
+            "content_type": "text/plain",
+            "declared_size": 128,
+            "declared_sha256": "2" * 64,
+            "size": 128,
+            "sha256": "2" * 64,
+            "storage_key": (
+                f"resources/cases/{CASE_ID}/attachments/{ATTACHMENT_ID}/payload"
+            ),
+            "created_at": "2026-07-31T00:00:45.000Z",
+            "updated_at": "2026-07-31T00:00:45.000Z",
+        }
+    }
     return StateFile.model_validate(payload)
 
 
@@ -514,6 +549,23 @@ def _diagnosis_to_review_plan(snapshot, trigger) -> TransitionPlan:
     )
 
 
+def _diagnosis_to_review_with_logparse_plan(snapshot, trigger) -> TransitionPlan:
+    plan = _diagnosis_to_review_plan(snapshot, trigger)
+    payload = plan.model_dump(mode="python")
+    payload["accepted_evidence_proposal_keys"] = ["parsed_timeout_evidence"]
+    payload["accepted_artifact_proposal_keys"] = [
+        "user_result",
+        "logparse_run",
+    ]
+    payload["next_job_spec"]["evidence_bindings"].append(
+        PlannedResourceBinding(
+            existing_resource_id=None,
+            accepted_proposal_key="parsed_timeout_evidence",
+        ).model_dump(mode="python")
+    )
+    return TransitionPlan.model_validate(payload)
+
+
 def _route_to_diagnose_with_export_plan(snapshot, trigger) -> TransitionPlan:
     plan = _route_to_diagnose_plan(snapshot, trigger)
     payload = plan.model_dump(mode="python")
@@ -551,6 +603,99 @@ def _route_outcome_with_export(
         )
     ]
     return JobOutcome.model_validate(payload), staged
+
+
+def _candidate_outcome_with_logparse_resources(
+    resources: InMemoryResourceStore,
+    root: Path,
+) -> tuple[JobOutcome, tuple[StagedResourceRef, StagedResourceRef], dict[str, bytes]]:
+    source = Job.model_validate(_load("job-diagnose.json"))
+    result_bytes = (FIXTURES / "user-result.json").read_bytes()
+    staged_result = resources.stage_file(
+        source.job_id,
+        "user_result",
+        InMemoryBinaryStream(result_bytes),
+        expected_size=len(result_bytes),
+        expected_sha256=hashlib.sha256(result_bytes).hexdigest(),
+    )
+
+    tree_files = {
+        "parse_manifest.json": b'{"format_id":"logparse-run-v1","schema_version":1}\n',
+        "targets/timeout.log": b"request=payment-42 status=deadline_exceeded\n",
+    }
+    tree_root = root / "logparse-run"
+    for relative_path, body in tree_files.items():
+        target = tree_root / relative_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(body)
+    staged_logparse = resources.stage_tree(
+        source.job_id,
+        "logparse_run",
+        tree_root,
+    )
+    assert source.logparse_tool_ref is not None
+    assert source.logparse_product is not None
+    logparse_artifact = ArtifactProposal(
+        proposal_key="logparse_run",
+        artifact_kind=ArtifactKind.LOGPARSE_RUN,
+        name="logparse-run",
+        content_type="application/vnd.problem-locator.logparse-run+directory",
+        resource_kind=ResourceKind.DIRECTORY,
+        size=staged_logparse.size,
+        sha256=staged_logparse.sha256,
+        staged_resource_ref=staged_logparse,
+        metadata=LogparseRunMetadata(
+            tree_manifest_sha256=staged_logparse.sha256,
+            logparse_version_ref=source.logparse_tool_ref,
+            parse_manifest_relative_path="parse_manifest.json",
+            source_attachment_id=ATTACHMENT_ID,
+            source_attachment_sha256="2" * 64,
+            parse_parameters=LogparseParseParameters(
+                product=source.logparse_product,
+            ),
+        ),
+    )
+    logparse_evidence = EvidenceProposal(
+        proposal_key="parsed_timeout_evidence",
+        source_type=EvidenceSourceType.LOGPARSE,
+        source_binding=EvidenceSourceBinding(
+            existing_source_ref=None,
+            artifact_proposal_key="logparse_run",
+        ),
+        locator=LogparseEvidenceLocator(
+            kind="LOGPARSE",
+            relative_path="targets/timeout.log",
+            start_line=1,
+            end_line=1,
+            start_time=None,
+            end_time=None,
+        ),
+        summary="The parsed request exceeded its downstream deadline.",
+        content_hash=None,
+        staged_resource_ref=None,
+    )
+
+    payload = _outcome("job-outcome-diagnosis.json").model_dump(mode="python")
+    payload["proposed_artifacts"][0]["staged_resource_ref"] = (
+        staged_result.model_dump(mode="python")
+    )
+    payload["proposed_artifacts"].append(
+        logparse_artifact.model_dump(mode="python")
+    )
+    payload["proposed_evidence"] = [
+        logparse_evidence.model_dump(mode="python")
+    ]
+    payload["payload"]["state_delta"]["add_evidence_bindings"] = [
+        EvidenceBinding(
+            existing_evidence_id=None,
+            evidence_proposal_key="parsed_timeout_evidence",
+        ).model_dump(mode="python")
+    ]
+    return (
+        JobOutcome.model_validate(payload),
+        (staged_result, staged_logparse),
+        tree_files,
+    )
 
 
 def _diagnose_catalog(bindings: RuntimeBindings) -> FakeAssetCatalog:
@@ -1500,6 +1645,285 @@ def test_candidate_outcome_formalizes_user_result_and_creates_review_job() -> No
     assert len(coordinator.calls) == 1
 
 
+def test_finalized_candidate_replay_adopts_consumed_file_and_directory(
+    tmp_path: Path,
+) -> None:
+    state = _running_diagnosis_logparse_candidate_state()
+    source = state.cases[CASE_ID].jobs[DIAGNOSE_JOB_ID]
+    guard = InMemoryPublicationCommitGuard()
+    resources = InMemoryResourceStore(publication_guard=guard)
+    outcome, staged_refs, tree_files = _candidate_outcome_with_logparse_resources(
+        resources,
+        tmp_path,
+    )
+    records = InMemoryExecutionRecordStore()
+    file_ref = records.publish_outcome_bytes(
+        outcome.job_id,
+        canonical_json_bytes(outcome),
+    )
+    review_bindings = runtime_bindings_from_job(
+        Job.model_validate(_load("job-review.json"))
+    )
+    assert source.skill_ref is not None
+    catalog_a = FakeAssetCatalog(
+        review={
+            (
+                source.skill_ref.id,
+                source.skill_ref.version,
+                source.skill_ref.content_hash,
+            ): review_bindings
+        }
+    )
+    ids_a = DeterministicIdGenerator(seed="candidate-formal-adoption")
+    coordinator_a = ScriptedCoordinator(
+        [_diagnosis_to_review_with_logparse_plan]
+    )
+    service_a, repository, _, _, dispatcher_a, notifier_a, _ = _service(
+        state,
+        coordinator_a,
+        records,
+        catalog=catalog_a,
+        ids=ids_a,
+        resources=resources,
+        guard=guard,
+    )
+    write_failure = _port_error(
+        ErrorCode.STATE_WRITE_FAILED,
+        "State commit failed after deterministic publication.",
+    )
+    repository.fail_next_commit(write_failure)
+
+    with pytest.raises(ApplicationPortError) as captured:
+        service_a.submit_outcome(outcome, file_ref)
+
+    assert captured.value is write_failure
+    assert repository.read_snapshot() == state
+    assert repository.commit_calls == []
+    assert resources.staged_resource_count == 0
+    assert len(resources.published_storage_keys) == 2
+    assert all(
+        categories == ("ORPHAN",)
+        for categories in resources.formal_resource_categories.values()
+    )
+    assert len(records.publish_job_calls) == 1
+    published_job = records.publish_job_calls[0]
+    published_job_bytes = canonical_json_bytes(published_job)
+    assert published_job.created_at == outcome.produced_at
+    assert records.publish_outcome_calls == [
+        (outcome.job_id, canonical_json_bytes(outcome))
+    ]
+    assert dispatcher_a.submit_calls == []
+    assert notifier_a.notify_calls == []
+    assert guard.acquire_calls == guard.release_calls == 1
+
+    first_plan_target_calls = tuple(resources.plan_target_calls)
+    first_publish_calls = tuple(resources.publish_calls)
+    assert len(first_plan_target_calls) == len(first_publish_calls) == 2
+    first_resource_refs = {
+        staged.proposal_key: ResourceRef(
+            resource_kind=staged.resource_kind,
+            storage_key=final_storage_key,
+            size=staged.size,
+            sha256=staged.sha256,
+        )
+        for staged, final_storage_key in first_publish_calls
+    }
+    result_ref = first_resource_refs["user_result"]
+    result_stream = resources.open_read(result_ref)
+    expected_result_bytes = (FIXTURES / "user-result.json").read_bytes()
+    assert result_stream.read(len(expected_result_bytes) + 1) == expected_result_bytes
+    assert result_stream.read(1) == b""
+    result_stream.close()
+    logparse_ref = first_resource_refs["logparse_run"]
+    first_materialized = tmp_path / "first-formal-logparse"
+    resources.materialize_read_only(logparse_ref, first_materialized)
+    assert {
+        path.relative_to(first_materialized).as_posix(): path.read_bytes()
+        for path in first_materialized.rglob("*")
+        if path.is_file()
+    } == tree_files
+
+    for _ in staged_refs:
+        resources.inject_failure(
+            "validate_staged",
+            _port_error(
+                ErrorCode.RESOURCE_NOT_FOUND,
+                "The consumed stage is absent after restart.",
+            ),
+        )
+    catalog_b = FakeAssetCatalog()
+    ids_b = DeterministicIdGenerator(seed="candidate-formal-adoption")
+    coordinator_b = ScriptedCoordinator(
+        [_diagnosis_to_review_with_logparse_plan]
+    )
+    service_b, _, _, _, dispatcher_b, notifier_b, _ = _service(
+        repository,
+        coordinator_b,
+        records,
+        catalog=catalog_b,
+        ids=ids_b,
+        resources=resources,
+        guard=guard,
+    )
+
+    receipt = service_b.submit_outcome(outcome, file_ref)
+
+    assert receipt.disposition is OutcomeDisposition.APPLIED
+    aggregate = repository.read_snapshot().cases[CASE_ID]
+    processing = aggregate.outcome_processing_records[outcome.outcome_id]
+    assert processing.disposition is OutcomeDisposition.APPLIED
+    assert aggregate.jobs[source.job_id].status is JobStatus.SUCCEEDED
+    assert aggregate.case.status is CaseStatus.REVIEWING
+    assert len(repository.commit_calls) == 1
+    assert processing.created_job_id == published_job.job_id
+    assert aggregate.jobs[published_job.job_id] == published_job
+    assert canonical_json_bytes(aggregate.jobs[published_job.job_id]) == (
+        published_job_bytes
+    )
+    accepted_artifacts = {
+        aggregate.artifacts[artifact_id].kind: aggregate.artifacts[artifact_id]
+        for artifact_id in processing.accepted_artifact_ids
+    }
+    assert set(accepted_artifacts) == {
+        ArtifactKind.LOGPARSE_RUN,
+        ArtifactKind.USER_RESULT,
+    }
+    assert set(processing.accepted_artifact_ids) == {
+        resource_ref.storage_key.split("/")[-2]
+        for resource_ref in first_resource_refs.values()
+    }
+    for artifact in accepted_artifacts.values():
+        assert artifact.created_at == outcome.produced_at
+        expected_ref = first_resource_refs[
+            "user_result"
+            if artifact.kind is ArtifactKind.USER_RESULT
+            else "logparse_run"
+        ]
+        assert ResourceRef(
+            resource_kind=artifact.resource_kind,
+            storage_key=artifact.storage_key,
+            size=artifact.size,
+            sha256=artifact.sha256,
+        ) == expected_ref
+    assert len(processing.accepted_evidence_ids) == 1
+    accepted_evidence = aggregate.evidence[processing.accepted_evidence_ids[0]]
+    assert accepted_evidence.collected_at == outcome.produced_at
+    assert accepted_evidence.source_ref == accepted_artifacts[
+        ArtifactKind.LOGPARSE_RUN
+    ].artifact_id
+    assert accepted_evidence.evidence_id in aggregate.case.diagnosis_state.evidence_refs
+    assert accepted_evidence.evidence_id in published_job.evidence_refs
+    candidate = aggregate.case.diagnosis_state.candidate_conclusion
+    assert candidate is not None
+    assert published_job.review_target is not None
+    assert published_job.review_target.candidate_conclusion_id == (
+        candidate.conclusion_id
+    )
+    assert published_job.review_target.candidate_content_hash == (
+        candidate.content_hash
+    )
+    assert len(resources.published_storage_keys) == 2
+    assert tuple(resources.plan_target_calls[2:]) == first_plan_target_calls
+    assert tuple(resources.publish_calls[2:]) == first_publish_calls
+    assert ids_b.derive_calls == ids_a.derive_calls
+    assert records.publish_job_calls == [published_job]
+    assert records.publish_outcome_calls == [
+        (outcome.job_id, canonical_json_bytes(outcome))
+    ]
+    second_materialized = tmp_path / "second-formal-logparse"
+    resources.materialize_read_only(logparse_ref, second_materialized)
+    assert {
+        path.relative_to(second_materialized).as_posix(): path.read_bytes()
+        for path in second_materialized.rglob("*")
+        if path.is_file()
+    } == tree_files
+    result_stream = resources.open_read(result_ref)
+    assert result_stream.read(len(expected_result_bytes) + 1) == expected_result_bytes
+    assert result_stream.read(1) == b""
+    result_stream.close()
+    assert catalog_b.review_calls == []
+    assert dispatcher_b.submit_calls == [published_job.job_id]
+    assert notifier_b.notify_calls == [(CASE_ID, 3)]
+    assert guard.acquire_calls == guard.release_calls == 2
+
+
+def test_first_candidate_submission_with_a_missing_stage_moves_no_valid_stage(
+    tmp_path: Path,
+) -> None:
+    state = _running_diagnosis_logparse_candidate_state()
+    source = state.cases[CASE_ID].jobs[DIAGNOSE_JOB_ID]
+    guard = InMemoryPublicationCommitGuard()
+    resources = InMemoryResourceStore(publication_guard=guard)
+    outcome, staged_refs, _ = _candidate_outcome_with_logparse_resources(
+        resources,
+        tmp_path,
+    )
+    missing_staged_ref, valid_staged_ref = staged_refs
+    resources.discard(missing_staged_ref)
+    records = InMemoryExecutionRecordStore()
+    file_ref = records.publish_outcome_bytes(
+        outcome.job_id,
+        canonical_json_bytes(outcome),
+    )
+    review_bindings = runtime_bindings_from_job(
+        Job.model_validate(_load("job-review.json"))
+    )
+    assert source.skill_ref is not None
+    catalog = FakeAssetCatalog(
+        review={
+            (
+                source.skill_ref.id,
+                source.skill_ref.version,
+                source.skill_ref.content_hash,
+            ): review_bindings
+        }
+    )
+
+    def failure_plan(snapshot, trigger):
+        assert trigger.trigger_type is TriggerType.EXECUTION_FAILED
+        assert trigger.payload.execution_failure.code is ErrorCode.OUTCOME_INVALID
+        assert guard.held_by_current_thread() is False
+        return _failed_plan(snapshot, trigger, applied=False)
+
+    coordinator = ScriptedCoordinator(
+        [_diagnosis_to_review_with_logparse_plan, failure_plan]
+    )
+    service, repository, _, _, dispatcher, notifier, _ = _service(
+        state,
+        coordinator,
+        records,
+        catalog=catalog,
+        ids=DeterministicIdGenerator(seed="candidate-missing-stage"),
+        resources=resources,
+        guard=guard,
+    )
+
+    receipt = service.submit_outcome(outcome, file_ref)
+
+    assert receipt.disposition is OutcomeDisposition.REJECTED
+    aggregate = repository.read_snapshot().cases[CASE_ID]
+    processing = aggregate.outcome_processing_records[outcome.outcome_id]
+    assert processing.disposition is OutcomeDisposition.REJECTED
+    assert processing.error_code is ErrorCode.OUTCOME_INVALID
+    assert processing.accepted_evidence_ids == []
+    assert processing.accepted_artifact_ids == []
+    assert processing.created_job_id is None
+    assert aggregate.jobs[source.job_id].status is JobStatus.FAILED
+    assert aggregate.case.status is CaseStatus.FAILED
+    assert aggregate.artifacts == {}
+    assert set(aggregate.evidence) == {EVIDENCE_ID}
+    assert records.publish_job_calls == []
+    assert resources.published_storage_keys == ()
+    assert resources.staged_resource_count == 0
+    assert len(resources.publish_calls) == 1
+    assert resources.publish_calls[0][0] == missing_staged_ref
+    assert valid_staged_ref not in [call[0] for call in resources.publish_calls]
+    assert dispatcher.submit_calls == []
+    assert notifier.notify_calls == [(CASE_ID, 3)]
+    assert guard.acquire_calls == guard.release_calls == 2
+    assert len(coordinator.calls) == 2
+
+
 def test_candidate_outcome_rejects_noncanonical_user_result_bytes() -> None:
     state = _running_diagnosis_candidate_state()
     wrong_bytes = b'{}\n'
@@ -1650,6 +2074,123 @@ def test_state_write_retry_reuses_published_next_job_a_not_current_catalog_b() -
     assert len(records.publish_job_calls) == 1
     assert second_dispatcher.submit_calls == [created_job_id]
     assert second_guard.acquire_calls == second_guard.release_calls == 1
+
+
+@pytest.mark.parametrize(
+    ("formal_fault", "expected_error_code"),
+    [
+        ("missing", ErrorCode.OUTCOME_INVALID),
+        ("conflicting_bytes", ErrorCode.RESOURCE_HASH_MISMATCH),
+    ],
+)
+def test_finalized_replay_with_consumed_stage_never_adopts_invalid_formal_target(
+    formal_fault: str,
+    expected_error_code: ErrorCode,
+) -> None:
+    guard = InMemoryPublicationCommitGuard()
+    resources = InMemoryResourceStore(publication_guard=guard)
+    outcome, staged = _route_outcome_with_export(resources)
+    records = InMemoryExecutionRecordStore()
+    file_ref = records.publish_outcome_bytes(
+        outcome.job_id,
+        canonical_json_bytes(outcome),
+    )
+    binding = runtime_bindings_from_job(
+        Job.model_validate(_load("job-diagnose.json"))
+    )
+    ids_a = DeterministicIdGenerator(seed=f"formal-target-{formal_fault}")
+    service_a, repository, _, _, dispatcher_a, _, _ = _service(
+        _running_state(),
+        ScriptedCoordinator([_route_to_diagnose_with_export_plan]),
+        records,
+        catalog=_diagnose_catalog(binding),
+        ids=ids_a,
+        resources=resources,
+        guard=guard,
+    )
+    write_failure = _port_error(
+        ErrorCode.STATE_WRITE_FAILED,
+        "State commit failed after the first formal publication.",
+    )
+    repository.fail_next_commit(write_failure)
+
+    with pytest.raises(ApplicationPortError) as captured:
+        service_a.submit_outcome(outcome, file_ref)
+
+    assert captured.value is write_failure
+    assert resources.staged_resource_count == 0
+    assert len(resources.publish_calls) == 1
+    formal_storage_key = resources.publish_calls[0][1]
+    assert resources.published_storage_keys == (formal_storage_key,)
+    published_job = records.publish_job_calls[0]
+    assert dispatcher_a.submit_calls == []
+    if formal_fault == "missing":
+        assert resources.quarantine_ordinary_orphan(
+            formal_storage_key,
+            "00000000-0000-0000-0000-000000000091",
+        )
+        assert resources.published_storage_keys == ()
+    else:
+        resources.inject_failure(
+            "publish",
+            _port_error(
+                ErrorCode.RESOURCE_HASH_MISMATCH,
+                "The deterministic formal target contains conflicting bytes.",
+            ),
+        )
+    resources.inject_failure(
+        "validate_staged",
+        _port_error(
+            ErrorCode.RESOURCE_NOT_FOUND,
+            "The original stage was consumed by the first publication.",
+        ),
+    )
+
+    def failure_plan(snapshot, trigger):
+        assert trigger.trigger_type is TriggerType.EXECUTION_FAILED
+        assert trigger.payload.execution_failure.code is expected_error_code
+        assert guard.held_by_current_thread() is False
+        return _failed_plan(snapshot, trigger, applied=False)
+
+    coordinator_b = ScriptedCoordinator(
+        [_route_to_diagnose_with_export_plan, failure_plan]
+    )
+    service_b, _, _, _, dispatcher_b, notifier_b, _ = _service(
+        repository,
+        coordinator_b,
+        records,
+        catalog=FakeAssetCatalog(),
+        ids=DeterministicIdGenerator(seed=f"formal-target-{formal_fault}"),
+        resources=resources,
+        guard=guard,
+    )
+
+    receipt = service_b.submit_outcome(outcome, file_ref)
+
+    assert receipt.disposition is OutcomeDisposition.REJECTED
+    aggregate = repository.read_snapshot().cases[CASE_ID]
+    processing = aggregate.outcome_processing_records[outcome.outcome_id]
+    assert processing.disposition is OutcomeDisposition.REJECTED
+    assert processing.error_code is expected_error_code
+    assert processing.accepted_artifact_ids == []
+    assert processing.created_job_id is None
+    assert aggregate.jobs[JOB_ID].status is JobStatus.FAILED
+    assert aggregate.case.status is CaseStatus.FAILED
+    assert aggregate.artifacts == {}
+    assert records.publish_job_calls == [published_job]
+    assert records.publish_outcome_calls == [
+        (outcome.job_id, canonical_json_bytes(outcome))
+    ]
+    assert dispatcher_b.submit_calls == []
+    assert notifier_b.notify_calls == [(CASE_ID, 2)]
+    assert guard.acquire_calls == guard.release_calls == 3
+    assert len(coordinator_b.calls) == 2
+    if formal_fault == "missing":
+        assert resources.published_storage_keys == ()
+        assert len(resources.publish_calls) == 2
+    else:
+        assert resources.published_storage_keys == (formal_storage_key,)
+        assert len(resources.publish_calls) == 1
 
 
 def test_first_next_job_publish_failure_has_no_disposition_and_reuses_durable_job() -> None:

@@ -311,10 +311,12 @@ class OutcomeSubmissionService:
                 control_trigger_id=control_trigger_id,
             )
 
-        technical_rejection = self._validate_active_outcome(
-            snapshot,
-            located,
-            outcome,
+        technical_rejection, missing_staged_proposal_keys = (
+            self._validate_active_outcome(
+                snapshot,
+                located,
+                outcome,
+            )
         )
         if technical_rejection is not None:
             return self._reject(
@@ -489,6 +491,23 @@ class OutcomeSubmissionService:
                 reclassify_stale=True,
             )
 
+        accepted_resource_keys = {
+            *plan.accepted_evidence_proposal_keys,
+            *plan.accepted_artifact_proposal_keys,
+        }
+        if not missing_staged_proposal_keys <= accepted_resource_keys:
+            return self._reject(
+                snapshot,
+                located,
+                outcome,
+                command.outcome_file_ref,
+                trusted_outcome=outcome,
+                rejection=_DeterministicRejection(ErrorCode.OUTCOME_INVALID),
+                processed_at=processed_at,
+                control_trigger_id=control_trigger_id,
+                reclassify_stale=True,
+            )
+
         applied = self._apply_plan(
             snapshot,
             located,
@@ -497,6 +516,7 @@ class OutcomeSubmissionService:
             plan,
             prospective_job_id=prospective_job_id,
             recovered_job=recovered_job,
+            missing_staged_proposal_keys=missing_staged_proposal_keys,
             processed_at=processed_at,
         )
         if isinstance(applied, _DeterministicRejection):
@@ -529,29 +549,44 @@ class OutcomeSubmissionService:
         snapshot: StateFile,
         job: Job,
         outcome: JobOutcome,
-    ) -> _DeterministicRejection | None:
-        aggregate = snapshot.cases[job.case_id]
-        try:
-            # The frozen non-mutating preflight covers both an existing completed
-            # stage and its immutable already-published history.
-            for proposal in outcome.proposed_evidence:
-                if proposal.staged_resource_ref is not None:
-                    self._resource_store.validate_staged(
-                        proposal.staged_resource_ref
+    ) -> tuple[_DeterministicRejection | None, frozenset[str]]:
+        missing_staged_proposal_keys: set[str] = set()
+        proposals = [*outcome.proposed_evidence, *outcome.proposed_artifacts]
+        for proposal in proposals:
+            staged_ref = proposal.staged_resource_ref
+            if staged_ref is None:
+                continue
+            try:
+                self._resource_store.validate_staged(staged_ref)
+            except ApplicationPortError as error:
+                if error.error.code is ErrorCode.RESOURCE_NOT_FOUND:
+                    missing_staged_proposal_keys.add(proposal.proposal_key)
+                    continue
+                if error.error.code is ErrorCode.RESOURCE_HASH_MISMATCH:
+                    return (
+                        _DeterministicRejection(ErrorCode.OUTCOME_INVALID),
+                        frozenset(),
                     )
-            for proposal in outcome.proposed_artifacts:
-                self._resource_store.validate_staged(proposal.staged_resource_ref)
+                raise
+
+        try:
             continuation_for_outcome(snapshot, outcome)
         except ApplicationPortError as error:
             if error.error.code in {
                 ErrorCode.RESOURCE_NOT_FOUND,
                 ErrorCode.RESOURCE_HASH_MISMATCH,
             }:
-                return _DeterministicRejection(ErrorCode.OUTCOME_INVALID)
+                return (
+                    _DeterministicRejection(ErrorCode.OUTCOME_INVALID),
+                    frozenset(),
+                )
             raise
         except (TypeError, ValueError):
-            return _DeterministicRejection(ErrorCode.OUTCOME_INVALID)
-        return None
+            return (
+                _DeterministicRejection(ErrorCode.OUTCOME_INVALID),
+                frozenset(),
+            )
+        return None, frozenset(missing_staged_proposal_keys)
 
     def _bindings_for_outcome(
         self,
@@ -598,6 +633,7 @@ class OutcomeSubmissionService:
         *,
         prospective_job_id: str,
         recovered_job: PublishedJobReceipt | None,
+        missing_staged_proposal_keys: frozenset[str],
         processed_at: str,
     ) -> _AppliedCommit | _DeterministicRejection:
         aggregate = snapshot.cases[job.case_id]
@@ -708,7 +744,14 @@ class OutcomeSubmissionService:
                     else:
                         raise
             if rejection is None:
-                for key, staged, target in target_rows:
+                publication_rows = sorted(
+                    target_rows,
+                    key=lambda row: (
+                        row[0] not in missing_staged_proposal_keys,
+                        row[2].final_storage_key,
+                    ),
+                )
+                for key, staged, target in publication_rows:
                     try:
                         published = self._resource_store.publish(
                             staged,
@@ -724,6 +767,13 @@ class OutcomeSubmissionService:
                         if error.error.code is ErrorCode.RESOURCE_HASH_MISMATCH:
                             rejection = _DeterministicRejection(
                                 ErrorCode.RESOURCE_HASH_MISMATCH
+                            )
+                        elif (
+                            error.error.code is ErrorCode.RESOURCE_NOT_FOUND
+                            and key in missing_staged_proposal_keys
+                        ):
+                            rejection = _DeterministicRejection(
+                                ErrorCode.OUTCOME_INVALID
                             )
                         elif error.error.code in {
                             ErrorCode.RESOURCE_NOT_FOUND,
