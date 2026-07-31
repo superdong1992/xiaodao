@@ -1,0 +1,86 @@
+{
+  "schema_version": 1,
+  "owner_spec": "S03",
+  "contract_revision": "v1-contract-r1",
+  "blockers": [
+    {
+      "id": "error_carrier",
+      "classification": "known_revision"
+    },
+    {
+      "id": "stable_target_changed",
+      "classification": "known_revision"
+    },
+    {
+      "id": "expected_content_type",
+      "classification": "known_revision"
+    },
+    {
+      "id": "staged_preflight",
+      "classification": "new_contract_gap"
+    },
+    {
+      "id": "recovery_receipt_persistence",
+      "classification": "new_contract_gap"
+    },
+    {
+      "id": "rejected_processing_without_valid_outcome",
+      "classification": "new_contract_gap"
+    },
+    {
+      "id": "prepare_size_classification",
+      "classification": "new_contract_gap"
+    },
+    {
+      "id": "resource_target_key_derivation",
+      "classification": "new_contract_gap"
+    }
+  ],
+  "observations": {
+    "public_exception_types": [
+      "RuntimeInfrastructureError"
+    ],
+    "submit_supplement_fields": [
+      "idempotency_key",
+      "case_id",
+      "expected_case_revision",
+      "inputs",
+      "attachment_ids",
+      "wait_seconds"
+    ],
+    "submit_supplement_trigger_payload_fields": [
+      "user_facts",
+      "ready_attachment_ids"
+    ],
+    "upload_attachment_content_fields": [
+      "idempotency_key",
+      "attachment_id",
+      "expected_size",
+      "expected_sha256",
+      "byte_stream"
+    ],
+    "resource_store_staged_ref_consumers": [
+      "discard",
+      "publish"
+    ],
+    "persistent_roots_checked_for_recovery_receipt": [
+      "StateFile",
+      "StateMutation"
+    ],
+    "persistent_roots_referencing_recovery_receipt": [],
+    "runtime_epoch_record_fields": [
+      "runtime_epoch",
+      "started_at",
+      "recovery_id",
+      "recovery_completed_at"
+    ],
+    "recovery_receipt_fields": [
+      "recovery_id",
+      "interrupted_job_ids",
+      "pending_job_ids"
+    ],
+    "case_aggregate_requires_exact_outcome_processing_pair_set": true,
+    "prepare_attachment_declared_size_maximum": 2684354560,
+    "planned_resource_target_returning_port_members": []
+  }
+}
