@@ -1459,6 +1459,8 @@ def _expected_user_result(
     if candidate is None:
         return None
     return UserResultPayload(
+        schema_version=1,
+        format_id="problem-locator-diagnosis-v1",
         problem_statement=job.context_snapshot.problem_spec.statement,
         candidate_statement=candidate.statement,
         supporting_evidence_bindings=candidate.supporting_evidence_bindings,

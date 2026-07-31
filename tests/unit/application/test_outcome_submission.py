@@ -6,14 +6,23 @@ from pathlib import Path
 
 import pytest
 
-from problem_locator.application.outcome_submission import OutcomeSubmissionService
-from problem_locator.application.preparation import runtime_bindings_from_job
+from problem_locator.application.outcome_submission import (
+    OutcomeSubmissionService,
+    _expected_user_result,
+)
+from problem_locator.application.preparation import (
+    make_user_fact,
+    runtime_bindings_from_job,
+)
 from problem_locator.contracts import (
     ApplicationError,
     ApplicationErrorDetail,
     ApplicationPortError,
     ArtifactKind,
     ArtifactProposal,
+    CandidateMutation,
+    CandidateMutationAction,
+    CandidateStatus,
     CaseFailure,
     CaseFailureUpdate,
     CaseStatus,
@@ -21,6 +30,8 @@ from problem_locator.contracts import (
     DiagnosisStateDelta,
     ErrorCode,
     ERROR_SPECS,
+    Evidence,
+    EvidenceSourceType,
     ExecutionFileRef,
     FieldUpdateAction,
     Job,
@@ -30,14 +41,19 @@ from problem_locator.contracts import (
     JobStatus,
     JobType,
     OutcomeDisposition,
+    PlannedResourceBinding,
     ResourceKind,
+    ResourceRef,
+    ReviewTargetBinding,
     RuntimeBindings,
     SelectedSkillUpdate,
     StateFile,
     TransitionPlan,
     TriggerType,
+    UserFactInput,
     VersionedRef,
     canonical_json_bytes,
+    validate_user_result_for_outcome,
 )
 from problem_locator.contracts.limits import MAX_CASE_RESOURCE_BYTES
 from tests.contracts.fakes import (
@@ -61,6 +77,10 @@ FIXTURES = ROOT / "tests/fixtures/contracts/positive"
 
 CASE_ID = "00000000-0000-0000-0000-000000000001"
 JOB_ID = "00000000-0000-0000-0000-000000000010"
+DIAGNOSE_JOB_ID = "00000000-0000-0000-0000-000000000011"
+EVIDENCE_ID = "00000000-0000-0000-0000-000000000040"
+USER_FACT_ID = "00000000-0000-0000-0000-000000000030"
+USER_FACT_TRIGGER_ID = "00000000-0000-0000-0000-000000000031"
 RUNTIME_EPOCH = "00000000-0000-0000-0000-000000000090"
 PROCESSED_AT = "2026-07-31T00:05:00.000Z"
 
@@ -145,6 +165,57 @@ def _running_state() -> StateFile:
         started_at="2026-07-31T00:01:00.000Z",
         runtime_epoch=RUNTIME_EPOCH,
     )
+    return StateFile.model_validate(payload)
+
+
+def _running_diagnosis_candidate_state() -> StateFile:
+    payload = _load("state.json")
+    source_payload = _load("job-diagnose.json")
+    source_payload.update(
+        status=JobStatus.RUNNING,
+        started_at="2026-07-31T00:01:00.000Z",
+        runtime_epoch=RUNTIME_EPOCH,
+        attachment_refs=[],
+        artifact_refs=[],
+        previous_outcome_refs=[],
+    )
+    source = Job.model_validate(source_payload)
+    fact = make_user_fact(
+        UserFactInput(name="request_id", value="payment-42"),
+        item_id=USER_FACT_ID,
+        trigger_id=USER_FACT_TRIGGER_ID,
+        created_revision=2,
+    )
+    evidence = Evidence(
+        evidence_id=EVIDENCE_ID,
+        case_id=CASE_ID,
+        source_type=EvidenceSourceType.USER_FACT,
+        source_ref=USER_FACT_ID,
+        locator={"kind": "USER_FACT", "input_name": "request_id"},
+        summary="The request identifier observed in the diagnosis input.",
+        collected_at="2026-07-31T00:00:30.000Z",
+        content_hash=None,
+        resource_ref=None,
+    )
+    aggregate = payload["cases"][CASE_ID]
+    aggregate["case"].update(
+        case_revision=2,
+        active_job_id=source.job_id,
+        selected_skill_ref=source.skill_ref,
+        updated_at="2026-07-31T00:01:00.000Z",
+    )
+    aggregate["case"]["diagnosis_state"].update(
+        revision=2,
+        user_facts=[fact.model_dump(mode="python")],
+        evidence_refs=[EVIDENCE_ID],
+    )
+    aggregate["jobs"] = {
+        source.job_id: source.model_dump(mode="python")
+    }
+    aggregate["evidence"] = {
+        evidence.evidence_id: evidence.model_dump(mode="python")
+    }
+    payload["generation"] = 2
     return StateFile.model_validate(payload)
 
 
@@ -367,6 +438,79 @@ def _route_to_diagnose_plan(snapshot, trigger) -> TransitionPlan:
         final_result_target=None,
         clear_active_job=True,
         reason="Apply the route and create its fixed DIAGNOSE Job.",
+    )
+
+
+def _diagnosis_to_review_plan(snapshot, trigger) -> TransitionPlan:
+    assert trigger.trigger_type is TriggerType.DIAGNOSIS_OUTCOME
+    source = snapshot.active_job
+    assert source is not None
+    outcome = trigger.payload.job_outcome
+    candidate = outcome.payload.candidate_conclusion_draft
+    assert candidate is not None
+    bindings = trigger.runtime_bindings_by_job_type[JobType.REVIEW]
+    review_template = Job.model_validate(_load("job-review.json"))
+    return TransitionPlan(
+        accepted_state_delta=outcome.payload.state_delta,
+        target_case_status=CaseStatus.REVIEWING,
+        job_updates=[
+            JobLifecycleUpdate(
+                job_id=source.job_id,
+                expected_status=JobStatus.RUNNING,
+                target_status=JobStatus.SUCCEEDED,
+                started_at=None,
+                finished_at=trigger.occurred_at,
+                runtime_epoch=None,
+            )
+        ],
+        outcome_disposition=OutcomeDisposition.APPLIED,
+        accepted_evidence_proposal_keys=[],
+        accepted_artifact_proposal_keys=["user_result"],
+        accepted_candidate_proposal_key=candidate.proposal_key,
+        selected_skill_update=None,
+        case_failure_update=None,
+        candidate_mutation=CandidateMutation(
+            action=CandidateMutationAction.INSTALL,
+            candidate_binding=ReviewTargetBinding(
+                existing_candidate_target=None,
+                accepted_candidate_proposal_key=candidate.proposal_key,
+            ),
+            expected_status=None,
+            target_status=CandidateStatus.REVIEWING,
+            reason=None,
+        ),
+        next_job_spec=JobSpec(
+            job_type=JobType.REVIEW,
+            goal=review_template.goal,
+            target_state_revision=snapshot.case.diagnosis_state.revision + 1,
+            evidence_bindings=[
+                PlannedResourceBinding(
+                    existing_resource_id=evidence_id,
+                    accepted_proposal_key=None,
+                )
+                for evidence_id in source.evidence_refs
+            ],
+            attachment_refs=[],
+            previous_outcome_refs=[outcome.outcome_id],
+            artifact_bindings=[],
+            agent_profile_ref=bindings.agent_profile_ref,
+            available_skill_refs=list(bindings.available_skill_refs),
+            skill_ref=bindings.skill_ref,
+            tool_bundle_ref=bindings.tool_bundle_ref,
+            context_policy_ref=bindings.context_policy_ref,
+            output_contract_ref=bindings.output_contract_ref,
+            logparse_tool_ref=bindings.logparse_tool_ref,
+            logparse_product=bindings.logparse_product,
+            review_target_binding=ReviewTargetBinding(
+                existing_candidate_target=None,
+                accepted_candidate_proposal_key=candidate.proposal_key,
+            ),
+            replacement_for_job_id=None,
+            resource_limits=bindings.resource_limits,
+        ),
+        final_result_target=None,
+        clear_active_job=True,
+        reason="Install the fixed Candidate and create its REVIEW Job.",
     )
 
 
@@ -1242,6 +1386,173 @@ def test_catalog_success_cannot_substitute_a_different_skill_version() -> None:
     assert repository.commit_calls == []
     assert records.publish_job_calls == []
     assert guard.acquire_calls == guard.release_calls == 0
+
+
+def test_expected_user_result_matches_the_frozen_canonical_fixture() -> None:
+    source = Job.model_validate(_load("job-diagnose.json"))
+    outcome = _outcome("job-outcome-diagnosis.json")
+
+    result = _expected_user_result(source, outcome)
+
+    assert result is not None
+    assert result.schema_version == 1
+    assert result.format_id == "problem-locator-diagnosis-v1"
+    result_bytes = canonical_json_bytes(result)
+    assert result_bytes == (FIXTURES / "user-result.json").read_bytes()
+    assert validate_user_result_for_outcome(
+        source,
+        outcome,
+        result_bytes,
+    ) == result
+
+
+def test_candidate_outcome_formalizes_user_result_and_creates_review_job() -> None:
+    state = _running_diagnosis_candidate_state()
+    source = state.cases[CASE_ID].jobs[DIAGNOSE_JOB_ID]
+    result_bytes = (FIXTURES / "user-result.json").read_bytes()
+    guard = InMemoryPublicationCommitGuard()
+    resources = InMemoryResourceStore(publication_guard=guard)
+    staged = resources.stage_file(
+        source.job_id,
+        "user_result",
+        InMemoryBinaryStream(result_bytes),
+        expected_size=len(result_bytes),
+        expected_sha256=hashlib.sha256(result_bytes).hexdigest(),
+    )
+    outcome_payload = _load("job-outcome-diagnosis.json")
+    outcome_payload["proposed_artifacts"][0]["staged_resource_ref"] = (
+        staged.model_dump(mode="python")
+    )
+    outcome = JobOutcome.model_validate(outcome_payload)
+    records = InMemoryExecutionRecordStore()
+    file_ref = records.publish_outcome_bytes(
+        outcome.job_id,
+        canonical_json_bytes(outcome),
+    )
+    review_bindings = runtime_bindings_from_job(
+        Job.model_validate(_load("job-review.json"))
+    )
+    assert source.skill_ref is not None
+    catalog = FakeAssetCatalog(
+        review={
+            (
+                source.skill_ref.id,
+                source.skill_ref.version,
+                source.skill_ref.content_hash,
+            ): review_bindings
+        }
+    )
+    coordinator = ScriptedCoordinator([_diagnosis_to_review_plan])
+    service, repository, resources, guard, dispatcher, notifier, _ = _service(
+        state,
+        coordinator,
+        records,
+        catalog=catalog,
+        resources=resources,
+        guard=guard,
+        ids=DeterministicIdGenerator(seed="candidate-user-result"),
+    )
+
+    receipt = service.submit_outcome(outcome, file_ref)
+
+    assert receipt.disposition is OutcomeDisposition.APPLIED
+    aggregate = repository.read_snapshot().cases[CASE_ID]
+    processing = aggregate.outcome_processing_records[outcome.outcome_id]
+    assert processing.disposition is OutcomeDisposition.APPLIED
+    assert len(processing.accepted_artifact_ids) == 1
+    user_result = aggregate.artifacts[processing.accepted_artifact_ids[0]]
+    assert user_result.kind is ArtifactKind.USER_RESULT
+    assert user_result.metadata.schema_version == 1
+    assert user_result.metadata.format_id == "problem-locator-diagnosis-v1"
+    assert user_result.size == len(result_bytes)
+    assert user_result.sha256 == hashlib.sha256(result_bytes).hexdigest()
+    published = resources.open_read(
+        ResourceRef(
+            resource_kind=user_result.resource_kind,
+            storage_key=user_result.storage_key,
+            size=user_result.size,
+            sha256=user_result.sha256,
+        )
+    )
+    assert published.read(len(result_bytes) + 1) == result_bytes
+    assert published.read(1) == b""
+    published.close()
+    candidate = aggregate.case.diagnosis_state.candidate_conclusion
+    assert candidate is not None
+    assert candidate.status is CandidateStatus.REVIEWING
+    assert candidate.supporting_evidence_refs == [EVIDENCE_ID]
+    assert aggregate.case.status is CaseStatus.REVIEWING
+    assert aggregate.case.diagnosis_state.revision == 3
+    assert aggregate.jobs[source.job_id].status is JobStatus.SUCCEEDED
+    assert processing.created_job_id is not None
+    review_job = aggregate.jobs[processing.created_job_id]
+    assert review_job.job_type is JobType.REVIEW
+    assert review_job.review_target is not None
+    assert review_job.review_target.candidate_conclusion_id == candidate.conclusion_id
+    assert review_job.review_target.candidate_revision == candidate.revision
+    assert review_job.review_target.candidate_content_hash == candidate.content_hash
+    assert review_job.context_snapshot.candidate_conclusion == candidate
+    assert catalog.review_calls == [source.skill_ref]
+    assert [job.job_id for job in records.publish_job_calls] == [review_job.job_id]
+    assert dispatcher.submit_calls == [review_job.job_id]
+    assert guard.acquire_calls == guard.release_calls == 1
+    assert notifier.notify_calls == [(CASE_ID, 3)]
+    assert len(coordinator.calls) == 1
+
+
+def test_candidate_outcome_rejects_noncanonical_user_result_bytes() -> None:
+    state = _running_diagnosis_candidate_state()
+    wrong_bytes = b'{}\n'
+    guard = InMemoryPublicationCommitGuard()
+    resources = InMemoryResourceStore(publication_guard=guard)
+    staged = resources.stage_file(
+        DIAGNOSE_JOB_ID,
+        "user_result",
+        InMemoryBinaryStream(wrong_bytes),
+        expected_size=len(wrong_bytes),
+        expected_sha256=hashlib.sha256(wrong_bytes).hexdigest(),
+    )
+    outcome_payload = _load("job-outcome-diagnosis.json")
+    proposal = outcome_payload["proposed_artifacts"][0]
+    proposal.update(
+        size=staged.size,
+        sha256=staged.sha256,
+        staged_resource_ref=staged.model_dump(mode="python"),
+    )
+    outcome = JobOutcome.model_validate(outcome_payload)
+    records = InMemoryExecutionRecordStore()
+    file_ref = records.publish_outcome_bytes(
+        outcome.job_id,
+        canonical_json_bytes(outcome),
+    )
+    coordinator = ScriptedCoordinator(
+        [lambda snapshot, trigger: _failed_plan(snapshot, trigger, applied=False)]
+    )
+    service, repository, resources, guard, dispatcher, notifier, _ = _service(
+        state,
+        coordinator,
+        records,
+        resources=resources,
+        guard=guard,
+    )
+
+    receipt = service.submit_outcome(outcome, file_ref)
+
+    assert receipt.disposition is OutcomeDisposition.REJECTED
+    aggregate = repository.read_snapshot().cases[CASE_ID]
+    processing = aggregate.outcome_processing_records[outcome.outcome_id]
+    assert processing.error_code is ErrorCode.OUTCOME_INVALID
+    assert processing.accepted_artifact_ids == []
+    assert processing.created_job_id is None
+    assert aggregate.artifacts == {}
+    assert aggregate.case.diagnosis_state.candidate_conclusion is None
+    assert records.publish_job_calls == []
+    assert resources.publish_calls == []
+    assert resources.discard_calls == [staged]
+    assert dispatcher.submit_calls == []
+    assert guard.acquire_calls == guard.release_calls == 1
+    assert notifier.notify_calls == [(CASE_ID, 3)]
+    assert len(coordinator.calls) == 1
 
 
 def test_completed_diagnosis_without_candidate_offers_same_pinned_diagnose_binding() -> None:
