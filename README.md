@@ -262,7 +262,7 @@ session persistence, and every tool except writing the fixed output file:
 
 ```sh
 export S08_REAL_AGENT_GATE=1
-export S08_REAL_AGENT_COMMAND='/absolute/path/to/claude -p --safe-mode --no-chrome --no-session-persistence --dangerously-skip-permissions --tools Write --model haiku --effort low --max-budget-usd 0.05'
+export S08_REAL_AGENT_COMMAND='/absolute/path/to/claude -p --safe-mode --no-chrome --no-session-persistence --dangerously-skip-permissions --tools Write --model haiku --effort low --max-budget-usd 0.10'
 uv run pytest tests/e2e/test_real_agent_backend_gate.py -q -p no:cacheprovider
 ```
 
