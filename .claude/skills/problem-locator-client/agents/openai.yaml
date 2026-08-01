@@ -1,0 +1,4 @@
+interface:
+  display_name: "Problem Locator Client"
+  short_description: "Diagnose cases through MCP and safe HTTP transfers"
+  default_prompt: "Use $problem-locator-client to create or continue a diagnosis case and safely transfer its files."

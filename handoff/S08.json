@@ -1,0 +1,176 @@
+{
+  "spec_id": "S08",
+  "title": "V1 Integration and Release Acceptance",
+  "executor": {
+    "model": "gpt-5.6-sol",
+    "reasoning_effort": "ultra"
+  },
+  "contract_revision": "v1-contract-r3",
+  "contract_base_commit": "99279d082938dce2a0cdd65f99835cf69571ae84",
+  "branch": "codex/v1-s08-integration",
+  "head_commit": "1dc2e4c4982240dc9297ac12becc80bfe263e662",
+  "scope_completed": [
+    "rebuilt the integration branch from the frozen r3 baseline and merged the seven independently accepted module handoff tips in the fixed S01 through S07 order with no-flatten no-fast-forward merges",
+    "assembled the production bootstrap, module entrypoint, shared ports, lifecycle, configuration, MCP, HTTP, CLI, scheduler, Runtime, storage, Catalog, Logparse, validation, and export roots",
+    "validated the complete R01-R14 RPC-timeout journey including canonical USER_RESULT publication, review, restart, download, non-leakage, and exactly one Logparse parse",
+    "validated finalized Outcome replay, method-level retry and parking, deterministic resource and next-Job adoption, Cleaner protection, post-disposition cleanup, upload barriers, and commit-cleaner races",
+    "locked and installed the approved runtime dependencies, built and installed a wheel into a fresh CPython 3.12 environment, and exercised installed imports, CLI administration, HTTP startup, readiness, recovery, and shutdown",
+    "completed all executable macOS, real Agent, real Logparse, contract, unit, integration, end-to-end, compile, lock, manifest, Git topology, blob integrity, and whitelist gates",
+    "documented operation, configuration, backup, recovery, offline r2 migration, platform runner commands, and the explicit Windows and Linux release-readiness limitation"
+  ],
+  "changed_files": [
+    ".env.example",
+    "README.md",
+    "pyproject.toml",
+    "src/problem_locator/__init__.py",
+    "src/problem_locator/__main__.py",
+    "src/problem_locator/bootstrap.py",
+    "tests/e2e/test_installed_distribution_gate.py",
+    "tests/e2e/test_native_startup_gate.py",
+    "tests/e2e/test_real_agent_backend_gate.py",
+    "tests/e2e/test_rpc_timeout.py",
+    "tests/fixtures/failures/failure-matrix.json",
+    "tests/fixtures/failures/fixture-manifest.json",
+    "tests/fixtures/rpc_timeout/expected-parse-counter.json",
+    "tests/fixtures/rpc_timeout/expected-parse-manifest.json",
+    "tests/fixtures/rpc_timeout/expected-target-logs.json",
+    "tests/fixtures/rpc_timeout/expected-user-result.json",
+    "tests/fixtures/rpc_timeout/fake_agent.py",
+    "tests/fixtures/rpc_timeout/fixture-manifest.json",
+    "tests/fixtures/rpc_timeout/payment-inventory-rpc.zip",
+    "tests/integration/test_bootstrap_composition.py",
+    "tests/integration/test_bootstrap_resource_export.py",
+    "tests/integration/test_candidate_outbox_retention_recovery.py",
+    "tests/integration/test_failure_fixture_manifest.py",
+    "tests/integration/test_macos_process_tree_gate.py",
+    "tests/integration/test_release_boundaries.py",
+    "tests/integration/test_retention_recovery_cleanup.py",
+    "tests/integration/test_runtime_dispatch_recovery.py",
+    "tests/integration/test_s01_contract_domain_seam.py",
+    "tests/integration/test_s02_contract_storage_seam.py",
+    "tests/integration/test_s03_application_seams.py",
+    "tests/integration/test_s03_r12_r14_persistence_seam.py",
+    "tests/integration/test_s04_application_runtime_seam.py",
+    "tests/integration/test_s05_dispatch_application_runtime_seam.py",
+    "tests/integration/test_s06_interface_application_seam.py",
+    "tests/integration/test_s07_settings_catalog_runtime_seam.py",
+    "tests/integration/test_upload_concurrency_barriers.py",
+    "uv.lock"
+  ],
+  "fixtures_consumed": [
+    "tests/fixtures/components/application/fixture-manifest.json",
+    "tests/fixtures/components/dispatch-scheduler/fixture-manifest.json",
+    "tests/fixtures/components/domain/fixture-manifest.json",
+    "tests/fixtures/components/logparse/fixture-manifest.json",
+    "tests/fixtures/components/runtime-backend/fixture-manifest.json",
+    "tests/fixtures/components/runtime-catalog/fixture-manifest.json",
+    "tests/fixtures/components/runtime-command/fixture-manifest.json",
+    "tests/fixtures/components/runtime-context/fixture-manifest.json",
+    "tests/fixtures/components/runtime-logparse/fixture-manifest.json",
+    "tests/fixtures/components/runtime-output/fixture-manifest.json",
+    "tests/fixtures/components/storage/fixture-manifest.json",
+    "tests/fixtures/contracts/fixture-manifest.json"
+  ],
+  "fixtures_produced": [
+    "tests/fixtures/failures/fixture-manifest.json",
+    "tests/fixtures/rpc_timeout/fixture-manifest.json"
+  ],
+  "tests": [
+    {
+      "command": "S08_NATIVE_STARTUP_GATE=darwin S08_INSTALLED_DISTRIBUTION_GATE=1 S08_UV_OFFLINE=1 python -m pytest -q -rs -p no:cacheprovider tests/contracts tests/unit tests/integration tests/e2e",
+      "status": "passed",
+      "summary": "1934 passed, 5 skipped, 1 pinned-version deprecation warning in 26.65s; the skips were the separately executed real Logparse and real Agent gates plus the unexecuted Windows Job Object, Windows native startup, and Linux native startup gates"
+    },
+    {
+      "command": "S08_REAL_AGENT_GATE=1 S08_REAL_AGENT_COMMAND='<claude -p safe isolated Write-only haiku low-effort command with --max-budget-usd 0.10>' python -m pytest -q -p no:cacheprovider tests/e2e/test_real_agent_backend_gate.py",
+      "status": "passed",
+      "summary": "1 passed in 10.40s with Claude Code 2.1.201; the production AgentBackend wrote exact canonical AgentJobOutcome bytes and preserved immutable inputs, runtime state, output topology, bounded execution, and process cleanup"
+    },
+    {
+      "command": "LOGPARSE_REPO=<fixed-checkout> LOGPARSE_CONFIG_PATH=<fixed-config> LOGPARSE_PYTHON=<fixed-venv-python> python -m pytest -q -p no:cacheprovider --run-real-logparse tests/unit/integrations/test_logparse_real_e2e.py",
+      "status": "passed",
+      "summary": "1 passed in 1.18s against clean Logparse HEAD a233b500d9c99e6815d1ffd82cb4ca55bbfe657a; the two-Job journey parsed exactly once and reused the formal LOGPARSE_RUN"
+    },
+    {
+      "command": "python -m pytest -q -p no:cacheprovider tests/e2e/test_rpc_timeout.py::test_r01_r14_rpc_timeout_is_one_durable_cross_module_path",
+      "status": "passed",
+      "summary": "1 passed in 2.36s; R01-R14, MCP/HTTP, canonical receipt and state histories, review, restart, download, parse-count-one, and secret/path/archive-byte non-leakage assertions passed"
+    },
+    {
+      "command": "python -m pytest -q -p no:cacheprovider tests/integration/test_candidate_outbox_retention_recovery.py tests/integration/test_retention_recovery_cleanup.py tests/integration/test_failure_fixture_manifest.py",
+      "status": "passed",
+      "summary": "8 passed in 0.45s; cross-instance APPLIED replay reused Candidate, Artifact, Evidence, next Job IDs and bytes, retained produced_at, kept Runtime calls at one, rejected missing or conflicting formal targets, and validated failure fixtures and Cleaner behavior"
+    },
+    {
+      "command": "for iteration in {1..40}; do python -m pytest -q -p no:cacheprovider tests/integration/test_upload_concurrency_barriers.py; done",
+      "status": "passed",
+      "summary": "40 iterations and 120 tests passed; same-attachment serialization, different-attachment parallelism, and near-5-GiB atomic capacity behavior remained deterministic"
+    },
+    {
+      "command": "for iteration in {1..25}; do python -m pytest -q -p no:cacheprovider tests/integration/test_retention_recovery_cleanup.py; done",
+      "status": "passed",
+      "summary": "25 iterations and 25 tests passed; the shared Cleaner/commit lock race consistently revalidated and preserved the newly referenced resource"
+    },
+    {
+      "command": "S08_INSTALLED_DISTRIBUTION_GATE=1 S08_UV_OFFLINE=1 python -m pytest -q -p no:cacheprovider tests/e2e/test_installed_distribution_gate.py",
+      "status": "passed",
+      "summary": "1 passed in 2.52s; built the RC wheel, hash-synced locked runtime dependencies into a fresh CPython 3.12 environment, imported only from site-packages outside the repository, checked exact versions, and passed installed env-file startup, readiness, shutdown, validate-state, and export-state"
+    },
+    {
+      "command": "S08_NATIVE_STARTUP_GATE=darwin python -m pytest -q -p no:cacheprovider tests/e2e/test_native_startup_gate.py::test_native_macos_startup_gate",
+      "status": "passed",
+      "summary": "1 passed in 1.81s on native macOS; env-file startup, /live, all five /ready checks, canonical administration output, bounded SIGINT shutdown, lock release, and second recovery startup passed"
+    },
+    {
+      "command": "python -m pytest -q -p no:cacheprovider tests/integration/test_macos_process_tree_gate.py",
+      "status": "passed",
+      "summary": "1 passed in 0.42s; the macOS timeout killed the real child process tree without rerunning the Agent"
+    },
+    {
+      "command": "python -m pytest -q -p no:cacheprovider tests/integration/test_bootstrap_composition.py tests/integration/test_bootstrap_resource_export.py tests/integration/test_release_boundaries.py",
+      "status": "passed",
+      "summary": "10 passed in 0.56s; real composition ownership, nonempty online/offline canonical StateExport equality, startup and shutdown, settings, package metadata, and release boundaries passed"
+    },
+    {
+      "command": "uv sync --frozen --all-groups && uv lock --check",
+      "status": "passed",
+      "summary": "the complete development environment synchronized from the frozen lock; uv lock --check resolved 39 packages with no drift"
+    },
+    {
+      "command": "python -m compileall -q src tests && git diff --check && git diff --check 99279d082938dce2a0cdd65f99835cf69571ae84..HEAD && git fsck --full --no-dangling",
+      "status": "passed",
+      "summary": "all Python compiled, both working-tree and complete-RC whitespace checks passed, and the repository object graph passed full fsck"
+    },
+    {
+      "command": "S08 object-level topology, three-way diff partition, module blob, handoff blob, handoff history, whitelist, and archived-history non-ancestry audit",
+      "status": "passed",
+      "summary": "298 changed paths partitioned exactly into 37 S08 paths, 254 module paths, and 7 handoffs; every declared module blob and final handoff blob matched its accepted source, every non-merge handoff mutation was handoff-only with no deletion, and all seven invalid old/archive commits were non-ancestors"
+    }
+  ],
+  "dependency_requests": [],
+  "contract_change_requests": [],
+  "known_limitations": [
+    "Native Windows startup and Windows Job Object gates were not executed because no authorized Windows runner was available; this candidate does not establish Windows release readiness.",
+    "Native Linux startup was not executed because no authorized Linux runner was available; this candidate does not establish Linux release readiness.",
+    "Until the documented Windows and Linux commands pass against this exact release-candidate head, the candidate must not be described as cross-platform release-ready.",
+    "The r3 state schema is intentionally incompatible with pre-release r2 data; old data requires an offline migration or rebuild into a fresh r3 root and has no in-place compatibility path.",
+    "V1 remains a single-instance local-filesystem service with no multi-instance failover or online PostgreSQL migration path."
+  ],
+  "risks": [
+    "Windows-specific process, path, signal, lock, and Job Object behavior and Linux-specific startup and shutdown behavior remain unverified until the external native runners report against head 1dc2e4c4982240dc9297ac12becc80bfe263e662.",
+    "The real Agent smoke is externally stochastic and authenticated: repeated USD 0.05 caps were rejected by Claude Code before the final USD 0.10 hard-cap run passed; operators must retain a bounded budget and treat external Agent availability as an operational dependency.",
+    "The approved pinned FastAPI, Starlette, and httpx combination emits one Starlette TestClient deprecation warning; it is retained without an unapproved dependency upgrade because all production and installed-distribution gates pass.",
+    "The real Logparse and generated Skill checks fail closed on checkout, configuration, Python launcher, or product-hash drift; deployment must preserve the pinned external checkout and validated launcher."
+  ],
+  "integration_notes": [
+    "The invalid-history branch was preserved without rewriting at codex/archive-v1-s08-integration-invalid-handoff-history, tip 7fe03516cc583e9aee94336aae2677d724dcc818; it is not an ancestor of this branch.",
+    "The clean module tips are S01 edf9d4be9783bc96e3072a49e34eb5a966a65d5c, S02 d562ebce21075f669763ecded8c4c31daff04c5f, S03 6deb4e0dde41c9542aeefbf22332bb04daabba26, S04 db0013cccba89157c2d7141f475a87801fd2885c, S05 0f52c0ea67959e7162576f5324e4f6d7d3b122b9, S06 2d4cc3c41ae11a3c5696528ce5c7f33478e781e4, and S07 677a99cd65ac7af7c6f116bccc86c75c0e572b7c.",
+    "Old S01 ef3ac95b41e6896564e203e9e37502263617e68b, S05 d53949f691c4ba7c30ad682e883103e1257bb5c7, and S06 12aac88dfda7b593fcf683c1d1547e9e9060683d tips and their invalid handoff-deleting implementations are not ancestors of this release candidate.",
+    "The approved locked runtime versions are mcp 1.29.0, FastAPI 0.139.2, Uvicorn 0.49.0, python-dotenv 1.2.2, httpx 0.28.1, and Starlette 1.3.1; the installed gate also verified problem-locator 1.0.0 and excluded pytest and Hatchling from the runtime environment.",
+    "Real Logparse was clean at HEAD a233b500d9c99e6815d1ffd82cb4ca55bbfe657a and the fresh diagnose-service-takeover product hash was 66ddd0b345df043b99489e26d9c0b7bc9ac9fa4f7ba3322783f956182ed17ba2.",
+    "The canonical USER_RESULT is 622 bytes with SHA-256 37ee245a8ae705561575e2c353fd1cc4e2a57653ed05d095f4d2292c287cdf09, is created in the same accepted R12 Outcome as the Candidate, and is downloadable only after REVIEW PASS.",
+    "Windows and Linux native startup commands, required environment variables, expected assertions, and immutable result-recording instructions are documented in README.md; neither unexecuted gate is included as a passed test.",
+    "This handoff records a macOS-validated release candidate with all locally executable and real integration gates passed, while explicitly withholding cross-platform release-ready status."
+  ],
+  "forbidden_scope_touched": false
+}

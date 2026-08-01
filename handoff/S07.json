@@ -1,0 +1,192 @@
+{
+  "spec_id": "S07",
+  "title": "Diagnosis Skills and logparse Integration",
+  "executor": {
+    "model": "gpt-5.6-sol",
+    "reasoning_effort": "ultra"
+  },
+  "contract_revision": "v1-contract-r3",
+  "contract_base_commit": "99279d082938dce2a0cdd65f99835cf69571ae84",
+  "branch": "codex/v1-s07-skill-logparse",
+  "head_commit": "598933971aa6fb79d41771b85b5eb69d032404e0",
+  "scope_completed": [
+    "copied and audited the upstream wiki-to-diagnosis-skill source, upgraded its deterministic generator and validator to 2.0.0, and recorded the exact source/delivered file inventory",
+    "delivered wiki-to-diagnosis-skill, logparse-diagnose, and the deterministically generated diagnose-service-takeover Skill with the frozen four-result, LOGPARSE_RUN reuse, and USER_RESULT contracts",
+    "implemented the pinned Logparse asset fingerprint, public broker factory/session, job-scoped loopback client, create-new parse claim, exact request audit, cancellation, bounded process execution, and synchronous close lifecycle",
+    "consumed r3 WorkspaceAttachmentInput filename_suffix and exact manifest paths for zip, tar, gzip, tar.gz, and tgz without archive aliases, copies, hardlinks, sniffing, or direct archive processing",
+    "proved with Fake and fixed real Logparse that the first Job parses once with two anchors, persists the public claim before publishing request bytes, and a new Job reuses the formal LOGPARSE_RUN with total parse count equal to one",
+    "validated public ExecutionFailure outcomes, canonical result files, deterministic tree manifests, staged LOGPARSE_RUN and USER_RESULT seams, security boundaries, failure points, and component fixture provenance"
+  ],
+  "changed_files": [
+    ".claude/skills/diagnose-service-takeover/SKILL.md",
+    ".claude/skills/diagnose-service-takeover/diagnosis-skill.json",
+    ".claude/skills/logparse-diagnose/SKILL.md",
+    ".claude/skills/wiki-to-diagnosis-skill/SKILL.md",
+    ".claude/skills/wiki-to-diagnosis-skill/references/generated-skill-contract.md",
+    ".claude/skills/wiki-to-diagnosis-skill/references/wiki-template.md",
+    ".claude/skills/wiki-to-diagnosis-skill/scripts/generate_diagnosis_skill.py",
+    ".claude/skills/wiki-to-diagnosis-skill/scripts/pack_result_zip.py",
+    ".claude/skills/wiki-to-diagnosis-skill/scripts/validate_generated_skill.py",
+    "src/problem_locator/integrations/logparse/__init__.py",
+    "src/problem_locator/integrations/logparse/broker.py",
+    "src/problem_locator/integrations/logparse/claim.py",
+    "src/problem_locator/integrations/logparse/cli.py",
+    "src/problem_locator/integrations/logparse/fingerprint.py",
+    "src/problem_locator/integrations/logparse/outputs.py",
+    "src/problem_locator/integrations/logparse/paths.py",
+    "src/problem_locator/integrations/logparse/process.py",
+    "src/problem_locator/integrations/logparse/requests.py",
+    "src/problem_locator/integrations/logparse/tree.py",
+    "src/problem_locator/integrations/logparse/workspace.py",
+    "tests/fixtures/components/logparse/fake/archive.bin",
+    "tests/fixtures/components/logparse/fake/client.log",
+    "tests/fixtures/components/logparse/fake/expected-parse-counter.json",
+    "tests/fixtures/components/logparse/fake/expected-target-logs.json",
+    "tests/fixtures/components/logparse/fake/repo/cli.py",
+    "tests/fixtures/components/logparse/fake/repo/config.yaml",
+    "tests/fixtures/components/logparse/fake/server.log",
+    "tests/fixtures/components/logparse/fixture-manifest.json",
+    "tests/fixtures/components/logparse/real/compact-package-20260103.zip.b64",
+    "tests/fixtures/components/logparse/real/synthetic-rpc-service-takeover.zip.b64",
+    "tests/fixtures/components/logparse/source-copy.json",
+    "tests/fixtures/components/logparse/supported-formats.json",
+    "tests/fixtures/components/logparse/wiki/service-takeover.md",
+    "tests/unit/integrations/conftest.py",
+    "tests/unit/integrations/test_generator_copy.py",
+    "tests/unit/integrations/test_generator_v2.py",
+    "tests/unit/integrations/test_logparse_claim.py",
+    "tests/unit/integrations/test_logparse_cli.py",
+    "tests/unit/integrations/test_logparse_fake_e2e.py",
+    "tests/unit/integrations/test_logparse_fixture_manifest.py",
+    "tests/unit/integrations/test_logparse_outcome_contract.py",
+    "tests/unit/integrations/test_logparse_outputs.py",
+    "tests/unit/integrations/test_logparse_primitives.py",
+    "tests/unit/integrations/test_logparse_real_e2e.py",
+    "tests/unit/integrations/test_logparse_workspace.py",
+    "tests/unit/integrations/test_no_archive_processing.py",
+    "tests/unit/integrations/test_skill_contract.py"
+  ],
+  "fixtures_consumed": [
+    "tests/fixtures/contracts/positive/job-diagnose.json",
+    "tests/fixtures/contracts/positive/logparse-parse-claim.json",
+    "tests/fixtures/contracts/positive/workspace-input-manifest.json"
+  ],
+  "fixtures_produced": [
+    "tests/fixtures/components/logparse/fake/archive.bin",
+    "tests/fixtures/components/logparse/fake/client.log",
+    "tests/fixtures/components/logparse/fake/expected-parse-counter.json",
+    "tests/fixtures/components/logparse/fake/expected-target-logs.json",
+    "tests/fixtures/components/logparse/fake/repo/cli.py",
+    "tests/fixtures/components/logparse/fake/repo/config.yaml",
+    "tests/fixtures/components/logparse/fake/server.log",
+    "tests/fixtures/components/logparse/fixture-manifest.json",
+    "tests/fixtures/components/logparse/real/compact-package-20260103.zip.b64",
+    "tests/fixtures/components/logparse/real/synthetic-rpc-service-takeover.zip.b64",
+    "tests/fixtures/components/logparse/source-copy.json",
+    "tests/fixtures/components/logparse/supported-formats.json",
+    "tests/fixtures/components/logparse/wiki/service-takeover.md"
+  ],
+  "tests": [
+    {
+      "command": "python -m pytest -q tests/unit/integrations/test_generator_copy.py",
+      "status": "passed",
+      "summary": "2 passed in 0.13s"
+    },
+    {
+      "command": "python -m pytest -q tests/unit/integrations/test_generator_v2.py",
+      "status": "passed",
+      "summary": "17 passed in 0.13s"
+    },
+    {
+      "command": "python -m pytest -q tests/unit/integrations/test_skill_contract.py",
+      "status": "passed",
+      "summary": "7 passed in 0.27s"
+    },
+    {
+      "command": "python -m pytest -q tests/unit/integrations/test_logparse_fake_e2e.py",
+      "status": "passed",
+      "summary": "19 passed in 3.12s; Fake dual-anchor and two-Job parse count gate observed exactly one parse"
+    },
+    {
+      "command": "python -m pytest -q tests/unit/integrations/test_no_archive_processing.py",
+      "status": "passed",
+      "summary": "4 passed in 0.24s"
+    },
+    {
+      "command": "python -m pytest -q tests/unit/integrations",
+      "status": "passed",
+      "summary": "205 passed, 1 skipped in 12.88s; the sole default skip is the separately passed opt-in real Logparse test"
+    },
+    {
+      "command": "python -m pytest -q tests/unit/integrations/test_logparse_real_e2e.py --run-real-logparse",
+      "status": "passed",
+      "summary": "1 passed in 1.30s against fixed Logparse HEAD a233b500d9c99e6815d1ffd82cb4ca55bbfe657a; exact payload.zip, two anchors, continuation reuse, and total parse count one"
+    },
+    {
+      "command": "PYTHONPATH=src python -m pytest -q tests/contracts",
+      "status": "passed",
+      "summary": "505 passed in 1.41s"
+    },
+    {
+      "command": "python <skill-creator>/scripts/quick_validate.py .claude/skills/wiki-to-diagnosis-skill",
+      "status": "passed",
+      "summary": "Skill is valid"
+    },
+    {
+      "command": "python <skill-creator>/scripts/quick_validate.py .claude/skills/logparse-diagnose",
+      "status": "passed",
+      "summary": "Skill is valid"
+    },
+    {
+      "command": "python <skill-creator>/scripts/quick_validate.py .claude/skills/diagnose-service-takeover",
+      "status": "passed",
+      "summary": "Skill is valid"
+    },
+    {
+      "command": "generate_diagnosis_skill.py --wiki tests/fixtures/components/logparse/wiki/service-takeover.md --output-root <fresh-temp> ... && validate_generated_skill.py <fresh-product> && diff -ru .claude/skills/diagnose-service-takeover <fresh-product>",
+      "status": "passed",
+      "summary": "fresh product was byte-identical and validated with product_sha256=66ddd0b345df043b99489e26d9c0b7bc9ac9fa4f7ba3322783f956182ed17ba2"
+    },
+    {
+      "command": "PYTHONPATH=src python -m pytest -q tests/unit/integrations/test_logparse_fixture_manifest.py",
+      "status": "passed",
+      "summary": "1 passed in 0.22s; frozen Schema, DTO, canonical bytes, complete file set, sizes, and SHA-256 values matched"
+    },
+    {
+      "command": "python -m compileall -q src/problem_locator/integrations/logparse .claude/skills/wiki-to-diagnosis-skill .claude/skills/logparse-diagnose .claude/skills/diagnose-service-takeover tests/unit/integrations",
+      "status": "passed",
+      "summary": "completed without errors and wrote no repository cache files"
+    },
+    {
+      "command": "python -m ruff check src/problem_locator/integrations/logparse tests/unit/integrations .claude/skills/wiki-to-diagnosis-skill/scripts",
+      "status": "passed",
+      "summary": "All checks passed"
+    },
+    {
+      "command": "git diff --check 99279d082938dce2a0cdd65f99835cf69571ae84..598933971aa6fb79d41771b85b5eb69d032404e0 && exact whitelist audit",
+      "status": "passed",
+      "summary": "no whitespace errors, exactly 47 declared implementation paths, and no forbidden scope"
+    }
+  ],
+  "dependency_requests": [],
+  "contract_change_requests": [],
+  "known_limitations": [
+    "The specification's fixed sibling source alias ../problem-locator-mcp was absent in this isolated worktree; tests/fixtures/components/logparse/source-copy.json records the repository-and-commit-verified equivalent checkout, exclusions, and exact source-to-delivered inventory."
+  ],
+  "risks": [
+    "S08 must provide the pinned Logparse repository, config, and validated lexical Python environment launcher as one immutable Settings tuple; asset drift is intentionally fail-closed and a launcher resolved past its virtual environment would not carry the required site-packages."
+  ],
+  "integration_notes": [
+    "generator_version=2.0.0; the fresh diagnose-service-takeover product hash is 66ddd0b345df043b99489e26d9c0b7bc9ac9fa4f7ba3322783f956182ed17ba2.",
+    "skill_directory_sha256 wiki-to-diagnosis-skill=d74909d183af4a0571da023550c0ef323a9099495c2d87a7c901ff96009ee4d7.",
+    "skill_directory_sha256 logparse-diagnose=63cc3439829166406854389c8163f5efa4632fc63c06382842ecfdab1fa8d9a3.",
+    "skill_directory_sha256 diagnose-service-takeover=66ddd0b345df043b99489e26d9c0b7bc9ac9fa4f7ba3322783f956182ed17ba2.",
+    "observed_parse_count=1 in both the Fake two-Job chain and the real two-Job gate at fixed Logparse HEAD a233b500d9c99e6815d1ffd82cb4ca55bbfe657a.",
+    "The broker consumes only each WorkspaceAttachmentInput.relative_path. r3 exact archive names payload.zip, payload.tar, payload.gz, payload.tar.gz, and payload.tgz are covered through the public filename-suffix/content-type matrix, with payload.tar.gz selected longest-first.",
+    "The public parse_request_bytes audit remains readable after close and is published only after the create-new LogparseParseClaim is durably written; normal, claim_reserved, claim_written, and close-race semantics preserve the public validator relationship.",
+    "CCR-S07-001 and the claim/request ordering request were resolved by v1-contract-r3 through WorkspaceAttachmentInput.filename_suffix, exact payload<suffix> materialization, and validate_logparse_claim_for_job; no unresolved contract change request remains.",
+    "The broker raises the public LogparseBrokerError carrying ExecutionFailure for asset-open failures, emits canonical public ExecutionFailure result files for valid broker execution failures, and keeps authentication or transport failures out of machine result files.",
+    "The asset hash uses the resolved Python path required by the frozen fingerprint while process argv preserves the validated absolute lexical virtual-environment launcher so its site-packages remain active."
+  ],
+  "forbidden_scope_touched": false
+}

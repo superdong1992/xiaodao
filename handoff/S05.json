@@ -1,0 +1,137 @@
+{
+  "spec_id": "S05",
+  "title": "Scheduler, Worker and Recovery",
+  "executor": {
+    "model": "gpt-5.6-sol",
+    "reasoning_effort": "ultra"
+  },
+  "contract_revision": "v1-contract-r3",
+  "contract_base_commit": "99279d082938dce2a0cdd65f99835cf69571ae84",
+  "branch": "codex/v1-s05-scheduler-recovery",
+  "head_commit": "66f61b224ced4a9a9639c25aeb604bb36ef97428",
+  "scope_completed": [
+    "implemented deterministic FIFO job-ID dispatch, conditional typed ROUTE/DIAGNOSE/REVIEW workers, process-service concurrency one, cancellation propagation, fatal-worker readiness gating, and bounded shutdown",
+    "implemented v1-contract-r3 method-specific Outcome submission retries for the exact public four-code set, including first next-job publication EXECUTION_RECORD_FAILED, with same-object retries, fixed shutdown-aware backoff, and zero Runtime re-execution",
+    "implemented ASSET_VERSION_UNAVAILABLE and CONFIG_INVALID finalized-outbox parking with fail-closed readiness, restart-only replay of the same canonical receipt after repair, and no global expansion of ApplicationError retryability",
+    "implemented Runtime STATE_CORRUPT and STATE_SCHEMA_UNSUPPORTED fatal handling with readiness and claiming disabled, no Outcome or failure report, the Job retained as RUNNING, and repaired startup recovery interruption without rerunning Runtime",
+    "implemented replay-before-interrupt startup recovery with exact Outcome processing verification, nullable post-commit projection handling, persisted RecoveryProcessingRecord and RecoveryReceipt gates, deterministic rejected-outcome audit handling, and same-ID PENDING redispatch",
+    "provided deterministic Fakes, canonical component Fixtures, injectable IDs, waits and failure points, and race, retry, parking, replay, recovery, cancellation, resume, and fail-closed coverage"
+  ],
+  "changed_files": [
+    "src/problem_locator/dispatch/__init__.py",
+    "src/problem_locator/dispatch/backoff.py",
+    "src/problem_locator/dispatch/cancellation.py",
+    "src/problem_locator/dispatch/dispatcher.py",
+    "src/problem_locator/dispatch/execution_lease.py",
+    "src/problem_locator/dispatch/recovery.py",
+    "src/problem_locator/dispatch/runtime_epoch.py",
+    "src/problem_locator/dispatch/service.py",
+    "src/problem_locator/dispatch/shutdown.py",
+    "src/problem_locator/dispatch/worker.py",
+    "tests/fixtures/components/dispatch-scheduler/delivery-error-policy.json",
+    "tests/fixtures/components/dispatch-scheduler/fixture-manifest.json",
+    "tests/fixtures/components/dispatch-scheduler/job-stage-matrix.json",
+    "tests/fixtures/components/dispatch-scheduler/replacement-chain.json",
+    "tests/fixtures/components/dispatch-scheduler/startup-outbox.json",
+    "tests/unit/dispatch/__init__.py",
+    "tests/unit/dispatch/_support.py",
+    "tests/unit/dispatch/fakes.py",
+    "tests/unit/dispatch/test_cancellation_races.py",
+    "tests/unit/dispatch/test_concurrency.py",
+    "tests/unit/dispatch/test_dispatcher.py",
+    "tests/unit/dispatch/test_recovery.py",
+    "tests/unit/dispatch/test_resume.py",
+    "tests/unit/dispatch/test_worker_claim.py"
+  ],
+  "fixtures_consumed": [
+    "tests/fixtures/contracts/fixture-manifest.json",
+    "tests/fixtures/contracts/positive/job-diagnose.json",
+    "tests/fixtures/contracts/positive/job-outcome-diagnosis.json",
+    "tests/fixtures/contracts/positive/job-outcome-review.json",
+    "tests/fixtures/contracts/positive/job-outcome-route.json",
+    "tests/fixtures/contracts/positive/job-review.json",
+    "tests/fixtures/contracts/positive/job-route.json",
+    "tests/fixtures/contracts/positive/state.json"
+  ],
+  "fixtures_produced": [
+    "tests/fixtures/components/dispatch-scheduler/delivery-error-policy.json",
+    "tests/fixtures/components/dispatch-scheduler/fixture-manifest.json",
+    "tests/fixtures/components/dispatch-scheduler/job-stage-matrix.json",
+    "tests/fixtures/components/dispatch-scheduler/replacement-chain.json",
+    "tests/fixtures/components/dispatch-scheduler/startup-outbox.json"
+  ],
+  "tests": [
+    {
+      "command": "PYTHONPATH=src PYTHONDONTWRITEBYTECODE=1 /private/tmp/problem-locator-s05-venv/bin/python -m pytest -q -p no:cacheprovider tests/unit/dispatch",
+      "status": "passed",
+      "summary": "113 passed in 0.40s"
+    },
+    {
+      "command": "PYTHONPATH=src PYTHONDONTWRITEBYTECODE=1 /private/tmp/problem-locator-s05-venv/bin/python -m pytest -q -p no:cacheprovider tests/contracts",
+      "status": "passed",
+      "summary": "505 passed in 1.36s"
+    },
+    {
+      "command": "PYTHONPATH=src PYTHONPYCACHEPREFIX=/private/tmp/problem-locator-s05-clean-rebuild-compile /private/tmp/problem-locator-s05-venv/bin/python -m compileall -q src/problem_locator/dispatch tests/unit/dispatch",
+      "status": "passed",
+      "summary": "dispatch production and unit-test sources compiled successfully"
+    },
+    {
+      "command": "PYTHONPATH=src PYTHONDONTWRITEBYTECODE=1 /private/tmp/problem-locator-s05-venv/bin/python -m pytest -q -p no:cacheprovider tests/unit/dispatch/test_dispatcher.py::test_dispatch_fixture_manifest_matches_every_owned_file",
+      "status": "passed",
+      "summary": "1 passed in 0.14s; exact owned file set, ordering, canonical bytes, SHA-256, and size verified"
+    },
+    {
+      "command": "/private/tmp/problem-locator-s00-tools/bin/uv lock --check",
+      "status": "passed",
+      "summary": "Using CPython 3.12.11; resolved 17 packages in 14ms"
+    },
+    {
+      "command": "git diff --check 99279d082938dce2a0cdd65f99835cf69571ae84..66f61b224ced4a9a9639c25aeb604bb36ef97428",
+      "status": "passed",
+      "summary": "no whitespace errors"
+    },
+    {
+      "command": "git diff --name-only --diff-filter=ACDMRTUXB 99279d082938dce2a0cdd65f99835cf69571ae84..66f61b224ced4a9a9639c25aeb604bb36ef97428",
+      "status": "passed",
+      "summary": "24 exact S05 implementation files; handoff/S05.json absent"
+    },
+    {
+      "command": "git diff --quiet bd811cb9b7b395c0b7de10d6a23ed025ee028fcc 66f61b224ced4a9a9639c25aeb604bb36ef97428 --",
+      "status": "passed",
+      "summary": "the complete implementation tree, including every blob and mode, equals bd811cb9b7b395c0b7de10d6a23ed025ee028fcc"
+    },
+    {
+      "command": "PYTHONPATH=src PYTHONDONTWRITEBYTECODE=1 /private/tmp/problem-locator-s05-venv/bin/python -c 'import json; from pathlib import Path; from jsonschema import Draft202012Validator; from pydantic import TypeAdapter; from problem_locator.contracts import SCHEMA_MODELS; payload=json.loads(Path(\"handoff/S05.json\").read_text()); schema=json.loads(Path(\"schemas/v1/handoff.schema.json\").read_text()); Draft202012Validator(schema).validate(payload); TypeAdapter(SCHEMA_MODELS[\"handoff.schema.json\"]).validate_python(payload)'",
+      "status": "passed",
+      "summary": "handoff JSON Schema and frozen HandoffRecord DTO validation passed"
+    },
+    {
+      "command": "diff -u <(jq -r '.changed_files[]' handoff/S05.json) <(git diff-tree --no-commit-id --name-only -r 99279d082938dce2a0cdd65f99835cf69571ae84 66f61b224ced4a9a9639c25aeb604bb36ef97428)",
+      "status": "passed",
+      "summary": "handoff changed_files exactly equals the implementation diff path set and order"
+    },
+    {
+      "command": "git diff --cached --name-status 66f61b224ced4a9a9639c25aeb604bb36ef97428 --",
+      "status": "passed",
+      "summary": "A handoff/S05.json only"
+    }
+  ],
+  "dependency_requests": [],
+  "contract_change_requests": [],
+  "known_limitations": [],
+  "risks": [],
+  "integration_notes": [
+    "S05 was cleanly rebuilt directly from the immutable v1-contract-r3 base 99279d082938dce2a0cdd65f99835cf69571ae84; implementation commit 66f61b224ced4a9a9639c25aeb604bb36ef97428 has a complete tree, blob set, and file-mode set exactly equivalent to archived implementation reference bd811cb9b7b395c0b7de10d6a23ed025ee028fcc, without incorporating that reference or any invalid archived commit into the new ancestry.",
+    "CCR-S05-001 and the later r3 application-facing state, Coordinator, submission retry, parking, and Runtime error closures are resolved by v1-contract-r3; S05 has no remaining contract change request.",
+    "JobControlPort normal claim competition remains ClaimReceipt(claimed=false); ApplicationPortError is propagated unchanged for the frozen method-level business and state errors and no Coordinator business error enters the transient storage retry set.",
+    "JobControlPort.submit_outcome retries only the exact public method-specific set and always reuses the same finalized RuntimeExecutionReceipt objects in-process; EXECUTION_RECORD_FAILED remains globally non-retryable outside that method-specific first-publication channel.",
+    "ASSET_VERSION_UNAVAILABLE and CONFIG_INVALID preserve the finalized outbox and fail readiness without backoff or Runtime re-execution; restart recovery rehydrates and submits the same canonical receipt after repair.",
+    "Runtime.execute STATE_CORRUPT and STATE_SCHEMA_UNSUPPORTED stop claiming and readiness with Runtime=1, submit=0, report=0, and backoff=0; the RUNNING Job is left for repaired startup recovery to interrupt.",
+    "Fatal worker callbacks complete before idle becomes observable, while cancellation is retired and claiming is disabled before the callback; measured_max_agent_concurrency=1 across ROUTE, DIAGNOSE, REVIEW, and different Cases.",
+    "Nullable post-commit case_view projections are accepted only after exact persisted processing or failure identity gates; a null projection cannot bypass recovery persistence verification.",
+    "S05 constructs no Workspace attachment input, so the r3 filename_suffix addition has no S05 production construction site; r3 state schema faults are consumed only through frozen Ports.",
+    "S05 creates no persistence timestamps, so no Clock is consumed here; runtime epoch IDs use the injected IdGenerator and all waits and failure points are injectable."
+  ],
+  "forbidden_scope_touched": false
+}

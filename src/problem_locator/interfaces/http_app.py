@@ -1,0 +1,397 @@
+"""FastAPI control/file routes sharing the S06 MCP application."""
+
+from __future__ import annotations
+
+import asyncio
+import re
+from collections.abc import Awaitable, Callable
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
+from typing import Any, TypeVar
+
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse, StreamingResponse
+from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
+
+from problem_locator.contracts.commands import (
+    ApplicationResponse,
+    PrepareAttachment,
+    UploadAttachmentContent,
+)
+from problem_locator.contracts.errors import ApplicationPortError
+from problem_locator.contracts.limits import MAX_ATTACHMENT_BYTES
+from problem_locator.contracts.models import (
+    ContentType,
+    NonEmptyText,
+    NonNegativeInt,
+    OpaqueId,
+    PositiveInt,
+    Sha256,
+)
+from problem_locator.contracts.ports import (
+    ApplicationCommandPort,
+    ApplicationQueryPort,
+    StateAdminPort,
+)
+
+from .error_mapping import (
+    error_envelope,
+    http_status_for,
+    success_envelope,
+    validation_error_from,
+)
+from .http_streaming import AsyncRequestBinaryStream, iterate_binary_stream
+from .mcp_server import create_mcp_transport
+from .projections import upload_descriptor
+
+
+_OPAQUE_ID = TypeAdapter(OpaqueId)
+_CONTENT_TYPE = TypeAdapter(ContentType)
+_SHA256 = TypeAdapter(Sha256)
+_DECIMAL_BYTES = re.compile(r"(?:0|[1-9][0-9]*)")
+_T = TypeVar("_T")
+
+
+class _JsonBody(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+
+class PrepareAttachmentBody(_JsonBody):
+    request_id: NonEmptyText
+    expected_case_revision: PositiveInt
+    name: NonEmptyText
+    content_type: ContentType
+    declared_size: NonNegativeInt | None = None
+    declared_sha256: Sha256 | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class UploadHeaders:
+    idempotency_key: str
+    content_type: str
+    content_length: int
+    content_sha256: str
+
+
+def _json(data: dict[str, Any], *, status_code: int = 200) -> JSONResponse:
+    return JSONResponse(content=data, status_code=status_code)
+
+
+def _port_error_response(exc: ApplicationPortError) -> JSONResponse:
+    return _json(
+        error_envelope(exc.error),
+        status_code=http_status_for(exc.error),
+    )
+
+
+def _response_case_identity(response: ApplicationResponse) -> tuple[str, int]:
+    """Use the durable receipt when r3 cannot reread the post-commit CaseView."""
+
+    if response.case_view is not None:
+        return response.case_view.case_id, response.case_view.case_revision
+    receipt = response.business_receipt
+    if receipt.case_id is None or receipt.case_revision is None:
+        raise ValueError("application response contains no persisted case identity")
+    return receipt.case_id, receipt.case_revision
+
+
+async def _settle_worker(task: asyncio.Task[_T]) -> _T:
+    """Wait for an uncancellable worker, tolerating repeated ASGI cancellation."""
+
+    while True:
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            if task.done():
+                return task.result()
+
+
+async def _port_call(
+    function: Callable[..., _T],
+    *args: Any,
+    on_cancel: Callable[[], Awaitable[None]] | None = None,
+    dispose_cancelled_result: Callable[[_T], None] | None = None,
+) -> _T:
+    """Run a synchronous Port without losing results or resources on cancel."""
+
+    worker = asyncio.create_task(asyncio.to_thread(function, *args))
+    try:
+        return await asyncio.shield(worker)
+    except asyncio.CancelledError:
+        if on_cancel is not None:
+            await on_cancel()
+        try:
+            result = await _settle_worker(worker)
+        except BaseException:
+            # Retrieve a worker failure so it is never logged as an unhandled
+            # task exception; the cancelled HTTP request has no response sink.
+            pass
+        else:
+            if dispose_cancelled_result is not None:
+                dispose_cancelled_result(result)
+        raise
+
+
+class _ClosingStreamingResponse(StreamingResponse):
+    """Close the frozen stream even if ASGI fails before iteration begins."""
+
+    def __init__(self, stream: Any, *args: Any, **kwargs: Any) -> None:
+        self._source_stream = stream
+        super().__init__(*args, **kwargs)
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            # BinaryStream.close is deliberately synchronous and idempotent.
+            # Calling it here covers response-start/send failures where the
+            # async body iterator's own finally block is never entered.
+            self._source_stream.close()
+
+
+async def _json_object(request: Request) -> dict[str, Any]:
+    try:
+        value = await request.json()
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise ValueError("request body is not valid JSON") from exc
+    if not isinstance(value, dict):
+        raise ValueError("request JSON must be an object")
+    return value
+
+
+def parse_upload_headers(request: Request, attachment_id: str) -> UploadHeaders:
+    """Validate all four upload headers before exposing the request body."""
+
+    typed_attachment_id = _OPAQUE_ID.validate_python(attachment_id)
+    values: dict[bytes, list[bytes]] = {}
+    for name, value in request.scope.get("headers", []):
+        values.setdefault(name.lower(), []).append(value)
+
+    required = {
+        b"idempotency-key": "Idempotency-Key",
+        b"content-type": "Content-Type",
+        b"content-length": "Content-Length",
+        b"x-content-sha256": "X-Content-SHA256",
+    }
+    decoded: dict[str, str] = {}
+    for raw_name, public_name in required.items():
+        matches = values.get(raw_name, [])
+        if len(matches) != 1:
+            raise ValueError(f"{public_name} must appear exactly once")
+        try:
+            decoded[public_name] = matches[0].decode("ascii")
+        except UnicodeDecodeError as exc:
+            raise ValueError(f"{public_name} must be ASCII") from exc
+
+    if decoded["Idempotency-Key"] != typed_attachment_id:
+        raise ValueError("Idempotency-Key must equal attachment_id")
+    content_type = _CONTENT_TYPE.validate_python(decoded["Content-Type"])
+    raw_length = decoded["Content-Length"]
+    if _DECIMAL_BYTES.fullmatch(raw_length) is None:
+        raise ValueError("Content-Length must be a canonical decimal integer")
+    content_length = int(raw_length)
+    if content_length > MAX_ATTACHMENT_BYTES:
+        raise ValueError("Content-Length exceeds the V1 Attachment limit")
+    content_sha256 = _SHA256.validate_python(decoded["X-Content-SHA256"])
+    return UploadHeaders(
+        idempotency_key=typed_attachment_id,
+        content_type=content_type,
+        content_length=content_length,
+        content_sha256=content_sha256,
+    )
+
+
+def create_http_app(
+    *,
+    command_port: ApplicationCommandPort,
+    query_port: ApplicationQueryPort,
+    state_admin: StateAdminPort,
+    public_base_url: str,
+) -> FastAPI:
+    """Create one ASGI application containing HTTP and stateless MCP routes."""
+
+    mcp = create_mcp_transport(
+        command_port,
+        query_port,
+        public_base_url=public_base_url,
+    )
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        async with mcp.session_manager.run():
+            yield
+
+    app = FastAPI(
+        title="Problem Locator V1",
+        docs_url=None,
+        redoc_url=None,
+        openapi_url=None,
+        lifespan=lifespan,
+    )
+
+    @app.get("/live")
+    async def live() -> JSONResponse:
+        return _json(success_envelope({"status": "live"}))
+
+    @app.get("/ready")
+    async def ready() -> JSONResponse:
+        report = await _port_call(state_admin.readiness)
+        if report.ready:
+            # Readiness check messages are not constrained by S00's safe
+            # ApplicationError detail grammar.  Expose the frozen check names
+            # and booleans, but never forward free-form infrastructure text.
+            return _json(
+                success_envelope(
+                    {
+                        "ready": True,
+                        "checks": [
+                            {
+                                "name": check.name,
+                                "passed": check.passed,
+                                "message": None,
+                            }
+                            for check in report.checks
+                        ],
+                        "error": None,
+                    }
+                )
+            )
+        assert report.error is not None
+        return _json(
+            error_envelope(report.error),
+            status_code=http_status_for(report.error),
+        )
+
+    @app.post("/api/v1/cases/{case_id}/attachments")
+    async def prepare_attachment(case_id: str, request: Request) -> JSONResponse:
+        try:
+            typed_case_id = _OPAQUE_ID.validate_python(case_id)
+            body = PrepareAttachmentBody.model_validate(await _json_object(request))
+            command = PrepareAttachment(
+                idempotency_key=body.request_id,
+                case_id=typed_case_id,
+                expected_case_revision=body.expected_case_revision,
+                name=body.name,
+                content_type=body.content_type,
+                declared_size=body.declared_size,
+                declared_sha256=body.declared_sha256,
+            )
+        except (ValidationError, ValueError, TypeError) as exc:
+            error = validation_error_from(exc)
+            return _json(error_envelope(error), status_code=http_status_for(error))
+        try:
+            response = await _port_call(command_port.execute, command)
+        except ApplicationPortError as exc:
+            return _port_error_response(exc)
+        descriptor = upload_descriptor(
+            response,
+            public_base_url=public_base_url,
+            content_type=body.content_type,
+            declared_size=body.declared_size,
+            declared_sha256=body.declared_sha256,
+        )
+        return _json(
+            success_envelope(
+                {"application_response": response, "upload": descriptor}
+            )
+        )
+
+    @app.put("/api/v1/attachments/{attachment_id}/content")
+    async def upload_attachment(attachment_id: str, request: Request) -> JSONResponse:
+        try:
+            headers = parse_upload_headers(request, attachment_id)
+        except (ValidationError, ValueError, TypeError) as exc:
+            error = validation_error_from(exc)
+            return _json(error_envelope(error), status_code=http_status_for(error))
+
+        stream = AsyncRequestBinaryStream(
+            request.stream(),
+            loop=asyncio.get_running_loop(),
+        )
+        try:
+            try:
+                command = UploadAttachmentContent.model_validate(
+                    {
+                        "idempotency_key": headers.idempotency_key,
+                        "attachment_id": attachment_id,
+                        "expected_content_type": headers.content_type,
+                        "expected_size": headers.content_length,
+                        "expected_sha256": headers.content_sha256,
+                        "byte_stream": stream,
+                    }
+                )
+            except ValidationError as exc:
+                error = validation_error_from(exc)
+                return _json(error_envelope(error), status_code=http_status_for(error))
+            try:
+                response = await _port_call(
+                    command_port.execute,
+                    command,
+                    on_cancel=stream.abort,
+                )
+            except ApplicationPortError as exc:
+                return _port_error_response(exc)
+        finally:
+            await stream.aclose()
+
+        response_case_id, response_case_revision = _response_case_identity(response)
+        return _json(
+            success_envelope(
+                {
+                    "attachment_id": attachment_id,
+                    "case_id": response_case_id,
+                    "status": "READY",
+                    "case_revision": response_case_revision,
+                }
+            )
+        )
+
+    @app.get("/api/v1/artifacts/{artifact_id}/content")
+    async def download_artifact(artifact_id: str, request: Request):
+        try:
+            typed_artifact_id = _OPAQUE_ID.validate_python(artifact_id)
+            query_items = list(request.query_params.multi_items())
+            if len(query_items) != 1 or query_items[0][0] != "case_id":
+                raise ValueError("case_id must be the sole query parameter")
+            case_id = _OPAQUE_ID.validate_python(query_items[0][1])
+        except (ValidationError, ValueError, TypeError) as exc:
+            error = validation_error_from(exc)
+            return _json(error_envelope(error), status_code=http_status_for(error))
+
+        try:
+            result = await _port_call(
+                query_port.open_artifact,
+                case_id,
+                typed_artifact_id,
+                dispose_cancelled_result=lambda item: item.stream.close(),
+            )
+        except ApplicationPortError as exc:
+            return _port_error_response(exc)
+        return _ClosingStreamingResponse(
+            result.stream,
+            iterate_binary_stream(result.stream),
+            media_type=None,
+            headers={
+                "Content-Length": str(result.artifact.size),
+                "Content-Type": result.artifact.content_type,
+                "X-Content-SHA256": result.artifact.sha256,
+            },
+        )
+
+    # Route order matters: keep the raw MCP ASGI endpoint after all FastAPI
+    # routes so no catch-all transport can shadow /live or /api/v1.
+    app.add_route(
+        "/mcp",
+        mcp.asgi_application,
+        methods=["GET", "POST", "DELETE"],
+        name="mcp",
+    )
+    return app
+
+
+__all__ = [
+    "PrepareAttachmentBody",
+    "UploadHeaders",
+    "create_http_app",
+    "parse_upload_headers",
+]

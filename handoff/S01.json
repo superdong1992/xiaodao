@@ -1,0 +1,111 @@
+{
+  "spec_id": "S01",
+  "title": "Domain Model and Coordinator",
+  "executor": {
+    "model": "gpt-5.6-sol",
+    "reasoning_effort": "ultra"
+  },
+  "contract_revision": "v1-contract-r3",
+  "contract_base_commit": "99279d082938dce2a0cdd65f99835cf69571ae84",
+  "branch": "codex/v1-s01-domain-coordinator",
+  "head_commit": "ffc16ddfc16058827c1d9da330901b99881408a1",
+  "scope_completed": [
+    "implemented the deterministic pure DomainCoordinator for every S01 state transition, failure class, interruption, cancellation, supplement, Candidate, and Review branch",
+    "consumed the v1-contract-r3 trigger-specific CoordinatorPlanResult validation channel and stable_target_changed decision without private exceptions, caches, fields, or error codes",
+    "implemented the finalized ROUTE, DIAGNOSIS, and REVIEW semantic-rejection seam as a deterministic OUTCOME_INVALID termination plan on the subsequent EXECUTION_FAILED trigger while leaving STALE and REJECTED persistence to S03",
+    "implemented complete ContextSnapshot projection plus fixed RuntimeBindings, continuation resources, LOGPARSE dependency closure, Candidate binding, and same-stage replacement behavior",
+    "added the complete 9 by 11 status-trigger matrix, exact Coordinator error-set matrix, four finalized semantic-rejection chains, deterministic regression coverage, and content-addressed S01 component fixtures"
+  ],
+  "changed_files": [
+    "src/problem_locator/domain/__init__.py",
+    "src/problem_locator/domain/coordinator.py",
+    "src/problem_locator/domain/projector.py",
+    "tests/fixtures/components/domain/candidate-review-sequence.json",
+    "tests/fixtures/components/domain/control-recovery-sequence.json",
+    "tests/fixtures/components/domain/failure-status-matrix.json",
+    "tests/fixtures/components/domain/finalized-semantic-rejection-sequence.json",
+    "tests/fixtures/components/domain/fixture-manifest.json",
+    "tests/fixtures/components/domain/review-rework-sequence.json",
+    "tests/fixtures/components/domain/routing-supplement-logparse-sequence.json",
+    "tests/unit/domain/__init__.py",
+    "tests/unit/domain/_builders.py",
+    "tests/unit/domain/test_component_fixtures.py",
+    "tests/unit/domain/test_coordinator_control.py",
+    "tests/unit/domain/test_coordinator_diagnosis.py",
+    "tests/unit/domain/test_coordinator_review.py",
+    "tests/unit/domain/test_coordinator_routing.py",
+    "tests/unit/domain/test_coordinator_supplement.py",
+    "tests/unit/domain/test_failure_matrix.py",
+    "tests/unit/domain/test_projector.py",
+    "tests/unit/domain/test_r3_contract_adaptation.py",
+    "tests/unit/domain/test_state_trigger_matrix.py"
+  ],
+  "fixtures_consumed": [
+    "tests/fixtures/contracts/fixture-manifest.json"
+  ],
+  "fixtures_produced": [
+    "tests/fixtures/components/domain/fixture-manifest.json"
+  ],
+  "tests": [
+    {
+      "command": "env PATH=/private/tmp/problem-locator-s00-env/bin:/usr/bin:/bin PYTHONPATH=src PYTHONPYCACHEPREFIX=/private/tmp/problem-locator-s01-clean-rebuild-domain-pycache PYTEST_ADDOPTS='-p no:cacheprovider' python -m pytest tests/unit/domain -q",
+      "status": "passed",
+      "summary": "106 passed in 0.45s"
+    },
+    {
+      "command": "env PATH=/private/tmp/problem-locator-s00-env/bin:/usr/bin:/bin PYTHONPATH=src PYTHONPYCACHEPREFIX=/private/tmp/problem-locator-s01-clean-rebuild-contracts-pycache PYTEST_ADDOPTS='-p no:cacheprovider' python -m pytest tests/contracts -q",
+      "status": "passed",
+      "summary": "505 passed in 1.11s"
+    },
+    {
+      "command": "env PATH=/private/tmp/problem-locator-s00-env/bin:/usr/bin:/bin PYTHONPATH=src PYTHONPYCACHEPREFIX=/private/tmp/problem-locator-s01-clean-rebuild-compileall-pycache python -m compileall -q -f src/problem_locator/domain tests/unit/domain",
+      "status": "passed",
+      "summary": "compileall completed for 15 Python files"
+    },
+    {
+      "command": "git diff --check 99279d082938dce2a0cdd65f99835cf69571ae84..ffc16ddfc16058827c1d9da330901b99881408a1",
+      "status": "passed",
+      "summary": "no whitespace errors"
+    },
+    {
+      "command": "env PATH=/private/tmp/problem-locator-s00-env/bin:/usr/bin:/bin PYTHONPATH=src PYTHONDONTWRITEBYTECODE=1 python -c 'import hashlib; from pathlib import Path; from problem_locator.contracts import FixtureManifest; from problem_locator.contracts.serialization import parse_canonical_json_bytes; root=Path(\"tests/fixtures/components/domain\"); manifest=parse_canonical_json_bytes((root/\"fixture-manifest.json\").read_bytes(), model_type=FixtureManifest); actual=sorted(path.name for path in root.iterdir() if path.is_file() and path.name != \"fixture-manifest.json\"); assert [entry.path for entry in manifest.files] == actual; assert all(entry.size == len((root/entry.path).read_bytes()) and entry.sha256 == hashlib.sha256((root/entry.path).read_bytes()).hexdigest() for entry in manifest.files); print(f\"validated {len(manifest.files)} fixture entries\")'",
+      "status": "passed",
+      "summary": "validated 6 fixture entries"
+    },
+    {
+      "command": "env PATH=/private/tmp/problem-locator-s00-env/bin:/usr/bin:/bin PYTHONPATH=src PYTHONDONTWRITEBYTECODE=1 python -c 'import json; from pathlib import Path; from jsonschema import Draft202012Validator; from pydantic import TypeAdapter; from problem_locator.contracts import SCHEMA_MODELS; payload=json.loads(Path(\"handoff/S01.json\").read_text()); schema=json.loads(Path(\"schemas/v1/handoff.schema.json\").read_text()); Draft202012Validator.check_schema(schema); Draft202012Validator(schema).validate(payload); TypeAdapter(SCHEMA_MODELS[\"handoff.schema.json\"]).validate_python(payload); print(\"handoff schema and model validation passed\")'",
+      "status": "passed",
+      "summary": "handoff schema and model validation passed"
+    },
+    {
+      "command": "env PATH=/private/tmp/problem-locator-s00-env/bin:/usr/bin:/bin PYTHONDONTWRITEBYTECODE=1 python -c 'import json, subprocess; from pathlib import Path; payload=json.loads(Path(\"handoff/S01.json\").read_text()); base=\"99279d082938dce2a0cdd65f99835cf69571ae84\"; head=\"ffc16ddfc16058827c1d9da330901b99881408a1\"; changed=subprocess.check_output([\"git\",\"diff\",\"--name-only\",base+\"..\"+head], text=True).splitlines(); allowed=(\"src/problem_locator/domain/\",\"tests/unit/domain/\",\"tests/fixtures/components/domain/\"); assert payload[\"contract_base_commit\"] == base and payload[\"head_commit\"] == head and payload[\"branch\"] == subprocess.check_output([\"git\",\"branch\",\"--show-current\"], text=True).strip(); assert subprocess.check_output([\"git\",\"rev-parse\",head+\"^\"], text=True).strip() == base; assert changed == sorted(set(changed)) == payload[\"changed_files\"]; assert \"handoff/S01.json\" not in changed and all(path.startswith(allowed) for path in changed); print(f\"validated branch, base, head, and {len(changed)} exact changed files\")'",
+      "status": "passed",
+      "summary": "validated branch, direct base parent, implementation head, and 22 exact changed files"
+    },
+    {
+      "command": "diff -u <(git diff --raw --no-abbrev 99279d082938dce2a0cdd65f99835cf69571ae84 3561b5c57c751de73cfc4eb6b8b7df3364ddc681) <(git diff --raw --no-abbrev 99279d082938dce2a0cdd65f99835cf69571ae84 ffc16ddfc16058827c1d9da330901b99881408a1)",
+      "status": "passed",
+      "summary": "all 22 implementation paths, modes, and blob IDs match archived implementation 3561b5c57c751de73cfc4eb6b8b7df3364ddc681"
+    }
+  ],
+  "dependency_requests": [],
+  "contract_change_requests": [],
+  "known_limitations": [],
+  "risks": [
+    "S01 section 6.4 requires the incoming Review Outcome to be the only previous outcome for non-PASS recovery while section 6.7 says to copy the continuation view; this implementation follows the more specific section 6.4 rule and freezes it in tests and fixtures.",
+    "The finalized semantic-rejection flow requires S03 to persist REJECTED separately after normalizing the first Coordinator error and applying the second EXECUTION_FAILED plan; S08 should retain the seam test that prevents a duplicate disposition or terminal plan."
+  ],
+  "integration_notes": [
+    "The two original S01 contract requests are resolved by v1-contract-r2, and the JobControl error-closure request is resolved by v1-contract-r3; there are no unresolved contract change requests.",
+    "Every DomainCoordinator result is consumed through the public validate_coordinator_plan_result contract and can only expose the trigger-specific non-retryable ApplicationError subset frozen by r3.",
+    "For finalized ROUTE, DIAGNOSIS, and REVIEW semantic rejection, S03 must call coordinator_outcome_error_failure, submit the deterministic OUTCOME_INVALID failure through EXECUTION_FAILED with the original source_outcome_id, and persist Outcome processing REJECTED independently; S01's termination plan deliberately has outcome_disposition null.",
+    "INVALID_CASE_STATE from an Outcome trigger belongs exclusively to S03's STALE path and must not be normalized into OUTCOME_INVALID or create a terminal failure plan.",
+    "Claim competition is outside the S01 domain boundary: S03 must consume claimed=false, job=null, failure_applied=false, failure_code=null as the ordinary negative receipt, reserve failure_applied=true for ASSET_VERSION_UNAVAILABLE, and never introduce a CLAIM_REJECTED exception path.",
+    "S03 supplies stable_target_changed after request classification; true has global decision priority and produces NEW_CASE_REQUIRED without a TransitionPlan or input mutation.",
+    "A repeated CANCEL_CASE for an already CANCELLED Case is replayed by S03 before Coordinator invocation; a fresh CANCEL_CASE against CANCELLED returns INVALID_CASE_STATE.",
+    "CREATE_CASE consumes an S03-built transient NEW snapshot normalized to Case revision 1 and DiagnosisState revision 1; that transient state is not a persisted stable Case.",
+    "PENDING redispatch reuses the same Job outside Coordinator; explicit ResumeInterrupted creates the unique same-stage replacement and preserves the source resource and RuntimeBindings sets.",
+    "S01 was clean-rebuilt directly from v1-contract-r3 base 99279d082938dce2a0cdd65f99835cf69571ae84 without importing any archived S01 commit into the new ancestry; the implementation tree is path-, blob-, and mode-equivalent to archived implementation 3561b5c57c751de73cfc4eb6b8b7df3364ddc681 for all 22 declared changed files, and handoff/S01.json is introduced only by the final handoff-only commit."
+  ],
+  "forbidden_scope_touched": false
+}

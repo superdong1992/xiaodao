@@ -1,0 +1,1 @@
+{"capability":"manual-service-triage","entry_document":"SKILL.md","id":"manual-triage","logparse_product":null,"requires_logparse":false,"schema_version":1,"summary":"Diagnose a service incident from structured facts and existing evidence.","tool_bundle_id":"tool-bundle/diagnose","version":"1.2.0"}

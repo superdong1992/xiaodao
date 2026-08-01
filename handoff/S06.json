@@ -1,0 +1,157 @@
+{
+  "spec_id": "S06",
+  "title": "Remote MCP, HTTP, CLI and Client Access Skill",
+  "executor": {
+    "model": "gpt-5.6-sol",
+    "reasoning_effort": "ultra"
+  },
+  "contract_revision": "v1-contract-r3",
+  "contract_base_commit": "99279d082938dce2a0cdd65f99835cf69571ae84",
+  "branch": "codex/v1-s06-mcp-http-cli",
+  "head_commit": "f6dc657c8ea414bc2a0363d1db8dff9a5a74dc49",
+  "scope_completed": [
+    "implemented the seven frozen Remote MCP tools with the official low-level MCP SDK, strict request and response validation, stateless JSON Streamable HTTP sessions, bounded worker offload, and lossless ApplicationPortError envelopes",
+    "implemented the shared FastAPI application with MCP mounting, liveness and sanitized readiness, Attachment prepare and streaming PUT, and Artifact streaming download through only the frozen Application and Query Ports",
+    "adopted the exact r3 method-qualified Port error closures, including Query VALIDATION_ERROR and both state-read errors, while preserving STATE_CORRUPT and STATE_SCHEMA_UNSUPPORTED as HTTP 503, CLI 3, and nonretryable",
+    "accepted durable r3 post-commit success with case_view null across MCP, HTTP prepare, HTTP PUT, and the client workflow, using BusinessReceipt identity for the PUT success projection without inventing current Case state",
+    "forwarded the raw validated PUT Content-Type as UploadAttachmentContent.expected_content_type, forwarded strict non-negative declared_size values for S03 business classification, and rejected unsafe or Content-Type-mismatched archive names before Port calls",
+    "implemented cancellation-safe upload and Artifact streaming bridges that abort request sources, settle worker threads, and close normal, late, failed, and cancelled BinaryStream results",
+    "implemented immutable environment settings, dotenv process-environment precedence, single-worker CLI hooks, canonical validate-state output, and atomic no-authority export-state behavior",
+    "implemented and validated the problem-locator-client Skill and helper workflow plus S00-Port-conforming application, query, state, stream, MCP, curl, ID, and fault-injection test doubles"
+  ],
+  "changed_files": [
+    ".claude/skills/problem-locator-client/SKILL.md",
+    ".claude/skills/problem-locator-client/agents/openai.yaml",
+    "src/problem_locator/entrypoints/__init__.py",
+    "src/problem_locator/entrypoints/cli.py",
+    "src/problem_locator/entrypoints/env_file.py",
+    "src/problem_locator/entrypoints/settings.py",
+    "src/problem_locator/interfaces/__init__.py",
+    "src/problem_locator/interfaces/client_access.py",
+    "src/problem_locator/interfaces/composition_hooks.py",
+    "src/problem_locator/interfaces/error_mapping.py",
+    "src/problem_locator/interfaces/http_app.py",
+    "src/problem_locator/interfaces/http_streaming.py",
+    "src/problem_locator/interfaces/mcp_server.py",
+    "src/problem_locator/interfaces/projections.py",
+    "tests/unit/interfaces/__init__.py",
+    "tests/unit/interfaces/fakes.py",
+    "tests/unit/interfaces/helpers.py",
+    "tests/unit/interfaces/test_cli.py",
+    "tests/unit/interfaces/test_client_access_skill.py",
+    "tests/unit/interfaces/test_error_mapping.py",
+    "tests/unit/interfaces/test_http_app.py",
+    "tests/unit/interfaces/test_http_streaming.py",
+    "tests/unit/interfaces/test_mcp_server.py",
+    "tests/unit/interfaces/test_settings.py"
+  ],
+  "fixtures_consumed": [],
+  "fixtures_produced": [],
+  "tests": [
+    {
+      "command": "PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/private/tmp/problem-locator-s06-deps:src /Users/shenyidong/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3 -m pytest -q -p no:cacheprovider tests/unit/interfaces",
+      "status": "passed",
+      "summary": "231 passed in 1.39s"
+    },
+    {
+      "command": "PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/private/tmp/problem-locator-s06-deps:src /Users/shenyidong/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3 -m pytest -q -p no:cacheprovider tests/contracts",
+      "status": "passed",
+      "summary": "505 passed in 1.36s"
+    },
+    {
+      "command": "PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/private/tmp/problem-locator-s06-deps:src /Users/shenyidong/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3 -m problem_locator.entrypoints.cli --help",
+      "status": "passed",
+      "summary": "exit 0; displayed serve, validate-state, and export-state"
+    },
+    {
+      "command": "PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/private/tmp/problem-locator-s06-deps:src /Users/shenyidong/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3 -m problem_locator.entrypoints.cli serve --help",
+      "status": "passed",
+      "summary": "exit 0; displayed --env-file"
+    },
+    {
+      "command": "PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/private/tmp/problem-locator-s06-deps:src /Users/shenyidong/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3 -m problem_locator.entrypoints.cli validate-state --help",
+      "status": "passed",
+      "summary": "exit 0; displayed required --data-root"
+    },
+    {
+      "command": "PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/private/tmp/problem-locator-s06-deps:src /Users/shenyidong/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3 -m problem_locator.entrypoints.cli export-state --help",
+      "status": "passed",
+      "summary": "exit 0; displayed required --data-root and --output"
+    },
+    {
+      "command": "PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/private/tmp/problem-locator-s06-deps:src /Users/shenyidong/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3 /Users/shenyidong/.codex/skills/.system/skill-creator/scripts/quick_validate.py .claude/skills/problem-locator-client",
+      "status": "passed",
+      "summary": "Skill is valid!"
+    },
+    {
+      "command": "PYTHONPYCACHEPREFIX=/private/tmp/problem-locator-s06-r3-pycache PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/private/tmp/problem-locator-s06-deps:src /Users/shenyidong/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3 -m compileall -q src/problem_locator/interfaces src/problem_locator/entrypoints",
+      "status": "passed",
+      "summary": "exit 0"
+    },
+    {
+      "command": "git diff --check 99279d082938dce2a0cdd65f99835cf69571ae84..f6dc657c8ea414bc2a0363d1db8dff9a5a74dc49",
+      "status": "passed",
+      "summary": "exit 0; no whitespace errors"
+    },
+    {
+      "command": "git diff --exit-code 56212be19de502cec3907c951edaaeed65cda5d3 f6dc657c8ea414bc2a0363d1db8dff9a5a74dc49",
+      "status": "passed",
+      "summary": "exit 0; the complete implementation tree is blob-for-blob and mode-for-mode equivalent"
+    }
+  ],
+  "dependency_requests": [
+    {
+      "package": "mcp",
+      "version": "1.29.0",
+      "purpose": "runtime official MCP Python SDK for the seven Streamable HTTP tools and in-process client conformance tests",
+      "license_impact": "MIT; permissive approved runtime dependency request for S08 shared dependency and lock integration"
+    },
+    {
+      "package": "fastapi",
+      "version": "0.139.2",
+      "purpose": "runtime ASGI application and JSON and streaming HTTP response implementation",
+      "license_impact": "MIT; permissive approved runtime dependency request for S08 shared dependency and lock integration"
+    },
+    {
+      "package": "uvicorn",
+      "version": "0.49.0",
+      "purpose": "runtime single-worker ASGI server used by the serve command",
+      "license_impact": "BSD-3-Clause; permissive approved runtime dependency request for S08 shared dependency and lock integration"
+    },
+    {
+      "package": "python-dotenv",
+      "version": "1.2.2",
+      "purpose": "runtime UTF-8 dotenv parsing with explicit process-environment precedence",
+      "license_impact": "BSD-3-Clause; permissive approved runtime dependency request for S08 shared dependency and lock integration"
+    },
+    {
+      "package": "httpx",
+      "version": "0.28.1",
+      "purpose": "development dependency for official MCP and in-process ASGI interface tests",
+      "license_impact": "BSD-3-Clause; permissive approved development dependency request for S08 shared dependency and lock integration"
+    },
+    {
+      "package": "starlette",
+      "version": "1.3.1",
+      "purpose": "development dependency directly imported by MCP and HTTP ASGI fixtures",
+      "license_impact": "BSD-3-Clause; permissive approved development dependency request for S08 shared dependency and lock integration"
+    }
+  ],
+  "contract_change_requests": [],
+  "known_limitations": [],
+  "risks": [
+    "The approved S06 dependencies remain absent from the frozen root lock because this slice cannot modify root dependency files; S08 must integrate one compatible shared set before composition.",
+    "Real S02-S05 service implementations and process-level startup remain uncomposed in this slice; S08 must run the required shared-instance, restart, upload-adoption, readiness, and no-leak integration seams."
+  ],
+  "integration_notes": [
+    "The isolated acceptance environment used mcp 1.29.0, FastAPI 0.139.2, Uvicorn 0.49.0, python-dotenv 1.2.2, httpx 0.28.1, and Starlette 1.3.1; no root dependency or lock file was changed.",
+    "CCR-S06-001 and CCR-S06-002 remain resolved by v1-contract-r2 through the unique ApplicationPortError channel and UploadAttachmentContent.expected_content_type; r3 introduced no new S06 contract gap.",
+    "The r3 implementation consumes nullable post-commit CaseView semantics, exact method-qualified Port error sets, strict Query raw-input validation, and canonical archive filename suffix rules without adding private fields, errors, caches, or bypass protocols.",
+    "Normal JobControl claim competition and asset failure receipts remain outside S06; no production interface path contains special CLAIM_REJECTED logic.",
+    "PrepareAttachment declared_size is strict non-negative at the interface and values above 2684354560 are deliberately forwarded to S03 for RESOURCE_LIMIT_EXCEEDED classification; actual PUT expected_size remains frozen at the Attachment limit.",
+    "This clean rebuild starts directly from v1-contract-freeze-3 at 99279d082938dce2a0cdd65f99835cf69571ae84; its implementation tree is byte-for-byte and mode-for-mode equivalent to archived implementation 56212be19de502cec3907c951edaaeed65cda5d3, which was used only as a tree/blob source and is not in this branch's ancestry.",
+    "S08 should use composition_hooks to inject one shared ApplicationCommandPort, ApplicationQueryPort, StateAdminPort, IdGenerator, and public base URL into the MCP and HTTP app, and should wire the root problem_locator __main__ entrypoint owned by S08.",
+    "The Skill layout and metadata were maintained and validated with the repository-external skill-creator tooling; only the S06-owned .claude skill directory was written."
+  ],
+  "forbidden_scope_touched": false
+}

@@ -1,0 +1,32 @@
+{
+  "api_version": 1,
+  "schema_version": 1,
+  "target_logs": [
+    {
+      "board_cycle": "cycle",
+      "caveats": [],
+      "cpu_cycle": null,
+      "label": "client",
+      "log_path": "task-synthetic/mech_modules/COMPACT/slot_1/cycle/checkout-client-101.log",
+      "match_status": "exact",
+      "module_key": "compact",
+      "module_name": "COMPACT",
+      "pid": "101",
+      "process_name": "checkout-client",
+      "slot": "1"
+    },
+    {
+      "board_cycle": "cycle",
+      "caveats": [],
+      "cpu_cycle": null,
+      "label": "server",
+      "log_path": "task-synthetic/mech_modules/COMPACT/slot_2/cycle/inventory-server-202.log",
+      "match_status": "exact",
+      "module_key": "compact",
+      "module_name": "COMPACT",
+      "pid": "202",
+      "process_name": "inventory-server",
+      "slot": "2"
+    }
+  ]
+}

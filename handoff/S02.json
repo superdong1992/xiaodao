@@ -1,0 +1,129 @@
+{
+  "spec_id": "S02",
+  "title": "JSON State and File Resource Storage",
+  "executor": {
+    "model": "gpt-5.6-sol",
+    "reasoning_effort": "ultra"
+  },
+  "contract_revision": "v1-contract-r3",
+  "contract_base_commit": "99279d082938dce2a0cdd65f99835cf69571ae84",
+  "branch": "codex/v1-s02-json-resource-storage",
+  "head_commit": "863ab761d7ed3ade54dc8bfa151b01640f7458d6",
+  "scope_completed": [
+    "implemented the authoritative r3 JSON StateRepository with strict startup validation, deep-copy reads, conditional whole-state mutation, atomic current/previous replacement, fail-stop reload semantics, and exact typed state-read failures",
+    "implemented platform-aware instance locking, shared reentrant publication coordination, attachment upload capabilities, exact-handle durability, path containment, link rejection, and injectable clocks, IDs, replacements, synchronization, and fault points",
+    "implemented content-only staging, staged validation, deterministic target planning, atomic Case capacity accounting including formal orphans and durable-outbox targets, idempotent formal publication, strict reads, and read-only file/tree materialization",
+    "implemented immutable Job and Outcome execution records, bounded append-only log sinks, retention discovery, durable-outbox protection, two-phase quarantine, cleanup retries, and publication-versus-cleanup barriers",
+    "adopted r3 attachment archive workspace suffixes without changing formal payload/tree keys and produced deterministic r3 state, atomic-fault, hash-mismatch, and workspace-path fixtures"
+  ],
+  "changed_files": [
+    "src/problem_locator/storage/atomic.py",
+    "src/problem_locator/storage/coordination.py",
+    "src/problem_locator/storage/execution_records.py",
+    "src/problem_locator/storage/layout.py",
+    "src/problem_locator/storage/paths.py",
+    "src/problem_locator/storage/platform.py",
+    "src/problem_locator/storage/quarantine.py",
+    "src/problem_locator/storage/resource_files.py",
+    "src/problem_locator/storage/resource_store.py",
+    "src/problem_locator/storage/retention.py",
+    "src/problem_locator/storage/retention_cleaner.py",
+    "src/problem_locator/storage/staging.py",
+    "src/problem_locator/storage/state_atomic.py",
+    "src/problem_locator/storage/state_repository.py",
+    "src/problem_locator/storage/streams.py",
+    "src/problem_locator/storage/tree.py",
+    "tests/fixtures/components/storage/fixture-manifest.json",
+    "tests/fixtures/components/storage/scenarios/atomic-write-faults.json",
+    "tests/fixtures/components/storage/scenarios/resource-hash-mismatch.json",
+    "tests/fixtures/components/storage/scenarios/workspace-attachment-materialization-paths.json",
+    "tests/fixtures/components/storage/state/invalid-dangling-active-job.json",
+    "tests/fixtures/components/storage/state/invalid-r2-contract-revision.json",
+    "tests/fixtures/components/storage/state/invalid-truncated.json",
+    "tests/fixtures/components/storage/state/invalid-unknown-schema-version.json",
+    "tests/fixtures/components/storage/state/valid-empty-r3.json",
+    "tests/unit/storage/fakes.py",
+    "tests/unit/storage/test_coordination.py",
+    "tests/unit/storage/test_execution_records.py",
+    "tests/unit/storage/test_fakes.py",
+    "tests/unit/storage/test_fixtures.py",
+    "tests/unit/storage/test_paths_atomic.py",
+    "tests/unit/storage/test_platform.py",
+    "tests/unit/storage/test_quarantine.py",
+    "tests/unit/storage/test_resource_files.py",
+    "tests/unit/storage/test_resource_store.py",
+    "tests/unit/storage/test_retention.py",
+    "tests/unit/storage/test_retention_cleaner.py",
+    "tests/unit/storage/test_staging.py",
+    "tests/unit/storage/test_state_atomic.py",
+    "tests/unit/storage/test_state_repository.py",
+    "tests/unit/storage/test_tree_streams_layout.py"
+  ],
+  "fixtures_consumed": [
+    "tests/fixtures/contracts/fixture-manifest.json"
+  ],
+  "fixtures_produced": [
+    "tests/fixtures/components/storage/fixture-manifest.json",
+    "tests/fixtures/components/storage/scenarios/atomic-write-faults.json",
+    "tests/fixtures/components/storage/scenarios/resource-hash-mismatch.json",
+    "tests/fixtures/components/storage/scenarios/workspace-attachment-materialization-paths.json",
+    "tests/fixtures/components/storage/state/invalid-dangling-active-job.json",
+    "tests/fixtures/components/storage/state/invalid-r2-contract-revision.json",
+    "tests/fixtures/components/storage/state/invalid-truncated.json",
+    "tests/fixtures/components/storage/state/invalid-unknown-schema-version.json",
+    "tests/fixtures/components/storage/state/valid-empty-r3.json"
+  ],
+  "tests": [
+    {
+      "command": "PYTHONPATH=src PYTHONDONTWRITEBYTECODE=1 /private/tmp/problem-locator-s02-venv/bin/python -m pytest -p no:cacheprovider tests/unit/storage -q --tb=short",
+      "status": "passed",
+      "summary": "280 passed in 2.52s on the committed implementation head"
+    },
+    {
+      "command": "PYTHONPATH=src PYTHONDONTWRITEBYTECODE=1 /private/tmp/problem-locator-s02-venv/bin/python -m pytest -p no:cacheprovider tests/contracts -q --tb=short",
+      "status": "passed",
+      "summary": "505 passed in 1.40s on the committed implementation head"
+    },
+    {
+      "command": "PYTHONPATH=src PYTHONDONTWRITEBYTECODE=1 /private/tmp/problem-locator-s02-venv/bin/python -m pytest -p no:cacheprovider tests/unit/storage/test_fixtures.py -q --tb=short",
+      "status": "passed",
+      "summary": "10 passed in 0.45s; manifest coverage, hashes, sizes, Canonical JSON, r3 StateFile rejection, and archive paths verified"
+    },
+    {
+      "command": "PYTHONPATH=src PYTHONPYCACHEPREFIX=/private/tmp/problem-locator-s02-r3-pycache /private/tmp/problem-locator-s02-venv/bin/python -m compileall -q -f src/problem_locator/storage tests/unit/storage",
+      "status": "passed",
+      "summary": "all storage production and unit-test modules compiled successfully"
+    },
+    {
+      "command": "/private/tmp/problem-locator-s00-tools/bin/uv lock --check",
+      "status": "passed",
+      "summary": "Using CPython 3.12.11; resolved 17 packages in 15ms"
+    },
+    {
+      "command": "git diff --check 99279d082938dce2a0cdd65f99835cf69571ae84..863ab761d7ed3ade54dc8bfa151b01640f7458d6",
+      "status": "passed",
+      "summary": "no whitespace errors"
+    },
+    {
+      "command": "git diff --name-only 99279d082938dce2a0cdd65f99835cf69571ae84..863ab761d7ed3ade54dc8bfa151b01640f7458d6 | awk allowlist-check",
+      "status": "passed",
+      "summary": "41 implementation files, all within the S02 write allowlist"
+    }
+  ],
+  "dependency_requests": [],
+  "contract_change_requests": [],
+  "known_limitations": [
+    "No on-read or online StateFile migration is implemented: a pre-release v1-contract-r2 state is rejected and requires explicit offline migration or regeneration before r3 startup."
+  ],
+  "risks": [
+    "S08 composition must inject the same StorageCoordinationLock and the same attachment/stage registries into every S02 adapter and cleaner; duplicate instances would invalidate publication, upload, and cleanup exclusion guarantees."
+  ],
+  "integration_notes": [
+    "The S02-relevant r2 contract gaps are resolved by v1-contract-r3; there are no unresolved or new contract change requests.",
+    "StateRepository read_snapshot, read_case, read_job, and read_artifact preserve STATE_CORRUPT or STATE_SCHEMA_UNSUPPORTED after an unrecoverable reload, while commit closes to STATE_WRITE_FAILED and validate_all remains a ValidationReport channel.",
+    "ResourceStore.validate_case_capacity must execute under the shared publication lease; its RESOURCE_LIMIT_EXCEEDED detail uses limit=MAX_CASE_RESOURCE_BYTES and observed from the same atomic CaseResourceUsage.total_bytes that counts every unique formal key, including orphan and durable-outbox targets.",
+    "Attachment formal storage remains resources/cases/<case_id>/attachments/<attachment_id>/payload. S04 must derive the exact workspace destination from immutable Attachment name/content_type with the frozen r3 helpers; S02 accepts only the frozen payload suffix set and does not inspect archive contents.",
+    "RetentionCleaner must share the coordination lock, attachment registry, stage registry, ResourceStore, ExecutionRecordStore, and StateRepository used by publication; an unconfirmed finalized Outcome protects its staged refs, deterministic formal targets, and next Job until a persisted terminal processing disposition exists."
+  ],
+  "forbidden_scope_touched": false
+}
