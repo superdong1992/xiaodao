@@ -87,14 +87,37 @@ def _sha256_file(path: Path) -> tuple[int, str]:
 
 
 def _git_paths(repo: Path) -> list[str]:
-    environment = os.environ.copy()
+    repo_text = os.fspath(repo)
+    if repo.as_posix().endswith("/*"):
+        raise ValueError("configured logparse repository path is not safe for Git")
+    # Do not let ambient Git control variables redirect discovery, replace the
+    # executable helpers, or append command-scoped configuration.  Keep the
+    # ordinary process environment so the fixed ``git`` executable remains
+    # discoverable on every supported platform.
+    environment = {
+        key: value
+        for key, value in os.environ.items()
+        if not key.casefold().startswith("git_")
+    }
     # Keep the required argv exact while requesting unquoted UTF-8 paths from
-    # Git.  Special/control-character paths remain rejected below.
+    # Git.  The configured repository may be installed read-only by an
+    # administrator and consumed by a less-privileged service account, so
+    # trust this one already-resolved path for this process only.  System and
+    # user Git configuration are disabled, and an empty safe.directory entry
+    # resets any earlier multi-valued entries before the exact path is added.
+    # Never use a wildcard safe.directory entry.  Special/control-character
+    # paths remain rejected below.
     environment.update(
         {
-            "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_CONFIG_COUNT": "3",
             "GIT_CONFIG_KEY_0": "core.quotepath",
             "GIT_CONFIG_VALUE_0": "false",
+            "GIT_CONFIG_KEY_1": "safe.directory",
+            "GIT_CONFIG_VALUE_1": "",
+            "GIT_CONFIG_KEY_2": "safe.directory",
+            "GIT_CONFIG_VALUE_2": repo_text,
             "LC_ALL": "C.UTF-8",
         }
     )
@@ -103,7 +126,7 @@ def _git_paths(repo: Path) -> list[str]:
             [
                 "git",
                 "-C",
-                os.fspath(repo),
+                repo_text,
                 "ls-files",
                 "--cached",
                 "--others",

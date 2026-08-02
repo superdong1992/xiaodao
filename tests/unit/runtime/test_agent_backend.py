@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import shlex
+import stat
 import sys
 import threading
 import time
@@ -315,6 +316,65 @@ def test_success_uses_stdin_fresh_process_and_atomic_final_name(tmp_path: Path) 
     assert result.returncode == 0
     assert (root / "output/job_outcome.json").read_bytes() == b'{"ok":true}'
     assert not (root / "output/.job_outcome.json.part").exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX workspace mode assertion")
+def test_agent_process_starts_with_nonwritable_workspace_root_and_restores_it(
+    tmp_path: Path,
+) -> None:
+    root = _workspace(tmp_path)
+    original_mode = stat.S_IMODE(root.stat().st_mode)
+    observed_mode: int | None = None
+
+    def observing_factory(*args: object, **kwargs: object) -> object:
+        nonlocal observed_mode
+        observed_mode = stat.S_IMODE(root.stat().st_mode)
+        return process_tree_module.spawn_managed_process(*args, **kwargs)
+
+    command = f"{shlex.quote(sys.executable)} {shlex.quote(str(FAKE_CLAUDE))}"
+    backend = AgentBackend(
+        command,
+        parent_environment={
+            "FAKE_CLAUDE_MODE": "success",
+            "FAKE_OUTCOME_JSON": '{"ok":true}',
+        },
+        process_factory=observing_factory,  # type: ignore[arg-type]
+    )
+
+    _execute(backend, root)
+
+    assert observed_mode is not None
+    assert observed_mode & 0o222 == 0
+    assert stat.S_IMODE(root.stat().st_mode) == original_mode
+    assert (root / "output/job_outcome.json").is_file()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX workspace mode assertion")
+def test_workspace_root_mode_is_restored_when_process_start_fails(
+    tmp_path: Path,
+) -> None:
+    root = _workspace(tmp_path)
+    original_mode = stat.S_IMODE(root.stat().st_mode)
+    observed_mode: int | None = None
+
+    def failing_factory(*args: object, **kwargs: object) -> object:
+        nonlocal observed_mode
+        del args, kwargs
+        observed_mode = stat.S_IMODE(root.stat().st_mode)
+        raise process_tree_module.ProcessTreeError("injected process start failure")
+
+    backend = AgentBackend(
+        "fake-agent",
+        parent_environment={},
+        process_factory=failing_factory,  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(RuntimeExecutionError) as caught:
+        _execute(backend, root)
+
+    _assert_failure(caught, ErrorCode.BACKEND_START_FAILED)
+    assert observed_mode is not None and observed_mode & 0o222 == 0
+    assert stat.S_IMODE(root.stat().st_mode) == original_mode
 
 
 def test_nonzero_exit_is_typed_and_does_not_read_business_output(

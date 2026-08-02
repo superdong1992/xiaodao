@@ -80,6 +80,12 @@ class _WorkspaceIdentity:
         return None
 
 
+@dataclass(frozen=True, slots=True)
+class _WorkspaceRootWriteGuard:
+    descriptor: int
+    original_mode: int
+
+
 class _OutputState:
     def __init__(self, limit: int) -> None:
         self.limit = limit
@@ -283,7 +289,6 @@ class AgentBackend:
                 message="Agent Workspace is unavailable.",
                 retryable=True,
             )
-
         secrets = tuple(
             value.encode("utf-8")
             for value in (broker_environment or {}).values()
@@ -297,6 +302,7 @@ class AgentBackend:
         )
         output_state = _OutputState(limits.stdout_stderr_bytes)
         input_state = _InputState()
+        root_write_guard = _protect_workspace_root(root, workspace_identity)
         try:
             managed = self._process_factory(
                 invocation.argv,
@@ -304,12 +310,16 @@ class AgentBackend:
                 environment=invocation.environment,
             )
         except ProcessTreeError as exc:
+            _restore_workspace_root(root_write_guard)
             raise runtime_failure(
                 stage=ExecutionStage.BACKEND_START,
                 code=ErrorCode.BACKEND_START_FAILED,
                 message="Agent process execution group could not be created.",
                 retryable=True,
             ) from exc
+        except BaseException:
+            _restore_workspace_root(root_write_guard)
+            raise
 
         primary_failure: ExecutionFailure | None = None
         started = 0.0
@@ -538,6 +548,11 @@ class AgentBackend:
                     )
                 else:
                     primary_failure = _append_execution_log_detail(primary_failure)
+
+            try:
+                _restore_workspace_root(root_write_guard)
+            except RuntimeExecutionError as exc:
+                primary_failure = primary_failure or exc.failure
 
         if primary_failure is not None:
             raise RuntimeExecutionError(primary_failure)
@@ -937,6 +952,75 @@ def _top_level_from_scandir(
     if set(top_level) != _WORKSPACE_TOP_LEVEL:
         return None
     return top_level
+
+
+def _protect_workspace_root(
+    root: Path,
+    identity: _WorkspaceIdentity,
+) -> _WorkspaceRootWriteGuard | None:
+    """Prevent ordinary Agent writes beside the three fixed workspace roots."""
+
+    if os.name == "nt" or not hasattr(os, "fchmod"):
+        return None
+    descriptor = -1
+    original_mode: int | None = None
+    try:
+        descriptor = os.open(root, _directory_open_flags())
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISDIR(metadata.st_mode)
+            or _metadata_identity(metadata) != identity.root
+        ):
+            raise OSError("workspace root identity changed")
+        original_mode = stat.S_IMODE(metadata.st_mode)
+        protected_mode = original_mode & ~0o222
+        os.fchmod(descriptor, protected_mode)
+        if stat.S_IMODE(os.fstat(descriptor).st_mode) & 0o222:
+            raise OSError("workspace root remained writable")
+        return _WorkspaceRootWriteGuard(
+            descriptor=descriptor,
+            original_mode=original_mode,
+        )
+    except (OSError, TypeError, ValueError) as exc:
+        if descriptor >= 0:
+            if original_mode is not None:
+                try:
+                    os.fchmod(descriptor, original_mode)
+                except OSError:
+                    pass
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        raise runtime_failure(
+            stage=ExecutionStage.BACKEND_START,
+            code=ErrorCode.BACKEND_START_FAILED,
+            message="Agent Workspace protections could not be established.",
+            retryable=True,
+        ) from exc
+
+
+def _restore_workspace_root(
+    guard: _WorkspaceRootWriteGuard | None,
+) -> None:
+    if guard is None:
+        return
+    failure: OSError | None = None
+    try:
+        os.fchmod(guard.descriptor, guard.original_mode)
+    except OSError as exc:
+        failure = exc
+    finally:
+        try:
+            os.close(guard.descriptor)
+        except OSError as exc:
+            failure = failure or exc
+    if failure is not None:
+        raise runtime_failure(
+            stage=ExecutionStage.BACKEND_EXECUTE,
+            code=ErrorCode.WORKSPACE_LIMIT,
+            message="Agent Workspace protections could not be released safely.",
+        ) from failure
 
 
 def _workspace_path_matches_identity(

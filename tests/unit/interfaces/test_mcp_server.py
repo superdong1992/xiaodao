@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 
 import httpx
 import pytest
+from jsonschema import Draft202012Validator
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 from starlette.applications import Starlette
@@ -422,6 +423,24 @@ def test_official_sdk_calls_all_seven_stateless_tools() -> None:
                             tool.inputSchema.get("additionalProperties") is False
                             for tool in listed.tools
                         )
+                        output_validators: dict[str, Draft202012Validator] = {}
+                        for tool in listed.tools:
+                            schema = tool.outputSchema
+                            assert schema is not None
+                            assert schema.get("type") == "object"
+                            assert "$defs" in schema
+                            assert len(schema.get("anyOf", [])) == 2
+                            Draft202012Validator.check_schema(schema)
+                            validator = Draft202012Validator(schema)
+                            assert validator.is_valid([]) is False
+                            assert validator.is_valid("invalid") is False
+                            assert validator.is_valid(
+                                {"ok": False, "data": None}
+                            ) is False
+                            assert validator.is_valid(
+                                {"ok": False, "data": None, "error": None}
+                            ) is False
+                            output_validators[tool.name] = validator
                         assert get_session_id() is None
 
                         create = await session.call_tool(
@@ -433,6 +452,7 @@ def test_official_sdk_calls_all_seven_stateless_tools() -> None:
                                 "wait_seconds": 0,
                             },
                         )
+                        output_validators[TOOL_NAMES[0]].validate(_structured(create))
                         assert _structured(create)["data"]["case_view"]["case_id"] == CASE_ID
 
                         prepare = await session.call_tool(
@@ -447,6 +467,7 @@ def test_official_sdk_calls_all_seven_stateless_tools() -> None:
                                 "declared_sha256": None,
                             },
                         )
+                        output_validators[TOOL_NAMES[1]].validate(_structured(prepare))
                         upload = _structured(prepare)["data"]["upload"]
                         assert upload["attachment_id"] == ATTACHMENT_ID
                         assert upload["required_headers"] == {
@@ -467,12 +488,14 @@ def test_official_sdk_calls_all_seven_stateless_tools() -> None:
                                 "wait_seconds": 30,
                             },
                         )
+                        output_validators[TOOL_NAMES[2]].validate(_structured(submit))
                         assert _structured(submit)["ok"] is True
 
                         get_case = await session.call_tool(
                             TOOL_NAMES[3],
                             {"case_id": CASE_ID, "wait_for_job_id": None, "wait_seconds": 0},
                         )
+                        output_validators[TOOL_NAMES[3]].validate(_structured(get_case))
                         assert _structured(get_case)["data"]["case_view"]["case_revision"] == 3
                         assert _structured(get_case)["data"]["wait_timed_out"] is True
 
@@ -485,6 +508,7 @@ def test_official_sdk_calls_all_seven_stateless_tools() -> None:
                                 "wait_seconds": 0,
                             },
                         )
+                        output_validators[TOOL_NAMES[4]].validate(_structured(resume))
                         assert _structured(resume)["ok"] is True
 
                         cancel = await session.call_tool(
@@ -495,6 +519,7 @@ def test_official_sdk_calls_all_seven_stateless_tools() -> None:
                                 "expected_case_revision": 4,
                             },
                         )
+                        output_validators[TOOL_NAMES[5]].validate(_structured(cancel))
                         assert _structured(cancel)["ok"] is True
                         assert _structured(cancel)["data"]["case_view"] is None
 
@@ -502,6 +527,7 @@ def test_official_sdk_calls_all_seven_stateless_tools() -> None:
                             TOOL_NAMES[6],
                             {"case_id": CASE_ID},
                         )
+                        output_validators[TOOL_NAMES[6]].validate(_structured(artifacts))
                         public_artifact = _structured(artifacts)["data"]["artifacts"][0]
                         assert public_artifact["artifact_id"] == ARTIFACT_ID
                         assert "storage_key" not in public_artifact
@@ -521,6 +547,7 @@ def test_official_sdk_calls_all_seven_stateless_tools() -> None:
                                 "declared_sha256": None,
                             },
                         )
+                        output_validators[TOOL_NAMES[1]].validate(_structured(at_limit))
                         assert _structured(at_limit)["data"]["upload"][
                             "required_headers"
                         ]["Content-Length"] == str(MAX_ATTACHMENT_BYTES)
@@ -537,6 +564,7 @@ def test_official_sdk_calls_all_seven_stateless_tools() -> None:
                                 "declared_sha256": None,
                             },
                         )
+                        output_validators[TOOL_NAMES[1]].validate(_structured(above_limit))
                         assert _structured(above_limit) == {
                             "ok": False,
                             "data": None,
@@ -555,6 +583,7 @@ def test_official_sdk_calls_all_seven_stateless_tools() -> None:
                         )
                         assert invalid.isError is False
                         invalid_body = _structured(invalid)
+                        output_validators[TOOL_NAMES[0]].validate(invalid_body)
                         assert invalid_body["ok"] is False
                         assert invalid_body["error"]["code"] == ErrorCode.VALIDATION_ERROR.value
 

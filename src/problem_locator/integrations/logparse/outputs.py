@@ -18,6 +18,7 @@ from .tree import build_tree_manifest
 _MAX_MACHINE_RESULT_BYTES = 2_000_000
 _TARGET_FIELDS = {
     "label",
+    "module",
     "module_key",
     "module_name",
     "slot",
@@ -247,8 +248,14 @@ def normalize_target_result(
     scalar_fields = ("label", "module_key", "module_name", "slot", "process_name", "match_status")
     if any(not isinstance(target.get(field), str) for field in scalar_fields):
         raise ValueError("logparse target object contains a non-string scalar")
+    if "module" in target and not isinstance(target["module"], str):
+        raise ValueError("logparse target module must be a string when present")
     if (
         target["label"] != anchor.label
+        or (
+            "module" in target
+            and target["module"].casefold() != anchor.module.casefold()
+        )
         or target["process_name"].casefold() != anchor.process_name.casefold()
         or _normalized_slot(target["slot"]) != _normalized_slot(anchor.slot)
         or anchor.module.casefold()

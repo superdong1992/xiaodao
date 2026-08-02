@@ -541,6 +541,8 @@ def test_real_parse_then_parameter_b_continuation_parses_once(
     for key, value in continuation_environment.items():
         monkeypatch.setenv(key, value)
     monkeypatch.chdir(continuation_workspace)
+    workspace_mode = stat.S_IMODE(continuation_workspace.stat().st_mode)
+    continuation_workspace.chmod(workspace_mode & ~0o222)
     try:
         assert run_agent_stub(
             "target-logs",
@@ -549,6 +551,7 @@ def test_real_parse_then_parameter_b_continuation_parses_once(
         ) is None
         assert continuation_session.parse_request_bytes() is None
     finally:
+        continuation_workspace.chmod(workspace_mode)
         continuation_session.close()
     assert continuation_session.parse_request_bytes() is None
     assert not (continuation_workspace / "runtime/tool-state/logparse-parse.claim").exists()

@@ -72,7 +72,7 @@ SKILL_REF = VersionedRef(
     id="diagnosis-skill/diagnose-service-takeover",
     version="2.0.0",
     content_hash=(
-        "66ddd0b345df043b99489e26d9c0b7bc9ac9fa4f7ba3322783f956182ed17ba2"
+        "4ce37124b5fb97233188150e074e3b71d995e27bd3941a51a05aa1d5cd2251e7"
     ),
 )
 PARAMETER_REQUIREMENTS = (
@@ -681,6 +681,9 @@ def _review(
 
 def main() -> int:
     context = Path("runtime/context.txt").read_text(encoding="utf-8")
+    prompt = sys.stdin.read()
+    if prompt != context:
+        raise RuntimeError("stdin prompt does not match the frozen runtime context")
     instruction = json.loads(_section(context, "JOB_INSTRUCTION"))
     snapshot = json.loads(_section(context, "CONTEXT_SNAPSHOT"))
     manifest = _manifest()

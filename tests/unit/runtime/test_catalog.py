@@ -11,13 +11,18 @@ import pytest
 
 from problem_locator.runtime import catalog as catalog_module
 from problem_locator.contracts import (
+    AgentJobOutcome,
     ApplicationPortError,
     AssetCatalogPort,
     AssetKind,
     ErrorCode,
+    DiagnosisOutcome,
+    DiagnosisStateDelta,
     FixtureManifest,
     JobType,
     PORT_ERROR_CODES,
+    ReviewAssessment,
+    RouteDecision,
     ResolvedAsset,
     VersionedRef,
     bytes_sha256,
@@ -171,6 +176,229 @@ def test_builtin_assets_and_port_use_exact_versioned_refs() -> None:
         operation="resolve",
         code=ErrorCode.ASSET_VERSION_UNAVAILABLE,
     )
+
+
+@pytest.mark.parametrize("role", ["route", "diagnose", "review"])
+def test_builtin_output_contract_requires_canonical_agent_bytes(role: str) -> None:
+    contract = (
+        BUILTIN_ASSET_ROOT
+        / "output-contracts"
+        / role
+        / "output-contract.md"
+    ).read_text(encoding="utf-8")
+
+    assert "JSON Schema validity alone is insufficient" in contract
+    assert "V1 Canonical JSON bytes" in contract
+    assert "UTF-8 without a BOM" in contract
+    assert "code-point-sorted object keys" in contract
+    assert "compact separators with no insignificant whitespace" in contract
+    assert "no NaN or Infinity" in contract
+    assert "exactly one trailing LF" in contract
+    assert "Validate the final bytes, not only the parsed value" in contract
+
+
+@pytest.mark.parametrize("role", ["route", "diagnose", "review"])
+def test_builtin_output_contract_pins_safe_atomic_output_path(role: str) -> None:
+    contract = (
+        BUILTIN_ASSET_ROOT
+        / "output-contracts"
+        / role
+        / "output-contract.md"
+    ).read_text(encoding="utf-8")
+
+    assert "Never create a temporary file at workspace root" in contract
+    assert "exactly `inputs`, `runtime`, and `output`" in contract
+    assert 'p = Path("output/job_outcome.json")' in contract
+    assert 'temporary = p.with_name("job_outcome.json.tmp")' in contract
+    assert "os.replace(temporary, p)" in contract
+    assert "assert p.read_bytes() == canonical" in contract
+
+
+@pytest.mark.parametrize("role", ["route", "diagnose", "review"])
+def test_builtin_output_contract_materializes_complete_agent_envelope(role: str) -> None:
+    contract = (
+        BUILTIN_ASSET_ROOT
+        / "output-contracts"
+        / role
+        / "output-contract.md"
+    ).read_text(encoding="utf-8")
+
+    assert "exactly these twelve fields and no others" in contract
+    expected_fields = json.dumps(
+        sorted(AgentJobOutcome.model_fields),
+        separators=(",", ":"),
+    )
+    assert f"`{expected_fields}`" in contract
+    assert "from `JOB_INSTRUCTION`" in contract
+    assert "from `RESOURCE_MANIFEST.case_id`" in contract
+    assert "fresh lowercase UUID" in contract
+    assert "current real UTC timestamp with exactly millisecond precision" in contract
+    assert "never reuse the Job or Case ID as the Outcome ID" in contract
+    assert contract.count("{{S00_AGENT_JOB_OUTCOME_SCHEMA_JSON}}") == 1
+    assert contract.count("<<<BEGIN S00 AGENT JOB OUTCOME SCHEMA>>>") == 1
+    assert contract.count("<<<END S00 AGENT JOB OUTCOME SCHEMA>>>") == 1
+    assert contract.count("{{S00_USER_RESULT_SCHEMA_JSON}}") == (
+        1 if role == "diagnose" else 0
+    )
+
+
+def test_builtin_route_output_contract_materializes_result_type_rules() -> None:
+    contract = (
+        BUILTIN_ASSET_ROOT
+        / "output-contracts"
+        / "route"
+        / "output-contract.md"
+    ).read_text(encoding="utf-8")
+
+    assert "For a `MATCHED` decision, set `result_type` to `COMPLETED`." in contract
+    assert (
+        "For a `NO_CAPABILITY` decision, set `result_type` to `NO_CAPABILITY`."
+        in contract
+    )
+    assert "`REROUTE` is forbidden for ROUTE jobs" in contract
+    assert "exactly a `RouteDecision` object with the four fields" in contract
+    expected_fields = json.dumps(
+        sorted(RouteDecision.model_fields),
+        separators=(",", ":"),
+    )
+    assert f"`{expected_fields}`" in contract
+    assert "`SKILL_INDEX.skills[i].ref`" in contract
+    assert "Copy only that nested `ref` object" in contract
+    assert "never the enclosing skill-index entry" in contract
+    assert "top-level `decision`, `kind`, `skill_ref`" in contract
+
+
+def test_builtin_diagnose_output_contract_materializes_request_rules() -> None:
+    contract = (
+        BUILTIN_ASSET_ROOT
+        / "output-contracts"
+        / "diagnose"
+        / "output-contract.md"
+    ).read_text(encoding="utf-8")
+
+    assert "For `NEED_INPUT`, `requested_input` must be non-empty" in contract
+    assert (
+        "For `NEED_ATTACHMENT`, `requested_attachments` must be non-empty"
+        in contract
+    )
+    assert "For `COMPLETED` and `REROUTE`" in contract
+    assert "Every requested ID must identify a matching OPEN requirement" in contract
+    assert "`state_delta.add_user_facts`" in contract
+    assert "`state_delta.fulfill_requirements`" in contract
+    expected_payload_fields = json.dumps(
+        sorted(DiagnosisOutcome.model_fields),
+        separators=(",", ":"),
+    )
+    expected_delta_fields = json.dumps(
+        sorted(DiagnosisStateDelta.model_fields),
+        separators=(",", ":"),
+    )
+    assert f"`{expected_payload_fields}`" in contract
+    assert f"`{expected_delta_fields}`" in contract
+    assert "every one of these fields is present" in contract
+    assert "Apply this deterministic group-A branch" in contract
+    assert "request only the missing group-A names" in contract
+    assert "existing matching OPEN `INPUT` requirement" in contract
+    assert (
+        'name set `["caller_service","problem_time","rpc_method","server_service"]`'
+        in contract
+    )
+    assert "must not add or request `order_id`, `log_archive`" in contract
+    assert "Only after this branch is inapplicable" in contract
+    assert "Apply this deterministic pre-Logparse branch" in contract
+    assert all(
+        name in contract
+        for name in (
+            "caller_service",
+            "server_service",
+            "rpc_method",
+            "problem_time",
+        )
+    )
+    assert "exactly one OPEN requirement named `log_archive`" in contract
+    assert (
+        'allowed_content_types=["application/gzip","application/zip",'
+        '"application/x-tar"]' in contract
+    )
+    assert "min_count=1" in contract and "max_count=1" in contract
+    assert "`PREVIOUS_OUTCOME` section is a post-staging persisted `JobOutcome`" in contract
+    assert "`proposed_artifact_drafts` and `proposed_evidence_drafts`" in contract
+    assert "A `Write` tool call may append another LF" in contract
+    assert 'value["outcome_id"] = str(uuid.uuid4())' in contract
+    assert 'datetime.now(UTC).isoformat(timespec="milliseconds")' in contract
+    assert 'not canonical.endswith(b"\\n\\n")' in contract
+    assert "os.replace(temporary, p)" in contract
+    assert "assert p.read_bytes() == canonical" in contract
+    assert "This check validates the result; it does not generate or inject an Outcome" in contract
+    assert "AgentJobOutcome.model_validate(value)" in contract
+    assert "UserResultPayload.model_validate(user_result)" in contract
+    assert "user_result_raw == canonical_json_bytes(user_result)" in contract
+    assert 'user_result_artifact["declared_size"] == len(user_result_raw)' in contract
+    assert 'user_result["problem_statement"] == snapshot["problem_spec"]["statement"]' in contract
+    assert 'user_result["candidate_statement"] == candidate["statement"]' in contract
+    assert '== candidate["completion_criteria_mapping"]' in contract
+    assert 'job = section("JOB_INSTRUCTION")' in contract
+    assert 'manifest = section("RESOURCE_MANIFEST")' in contract
+    assert 'added[0]["requested_by_job_id"] == job["job_id"]' in contract
+    assert '"evidence_proposal_key": "logparse-client-evidence"' in contract
+    assert "Apply this deterministic accepted-run branch" in contract
+    assert 'p = Path("output/proposals/logparse-server-evidence/request.json")' in contract
+    assert "TargetLogsRequest.model_validate" in contract
+    assert "canonical_request = canonical_json_bytes(request)" in contract
+    assert "parse_canonical_json_bytes(p.read_bytes(), TargetLogsRequest)" in contract
+    assert 'print("TARGET_LOGS_REQUEST_SELF_CHECK_PASSED")' in contract
+    assert "invoke the client exactly once" in contract
+    assert 'server_key = "logparse-server-evidence"' in contract
+    assert 'value["consumed_evidence_refs"] == [client_id]' in contract
+    assert '"existing_source_ref": run_id' in contract
+    assert 'artifact["metadata"]["tree_manifest_sha256"] == tree_hash' in contract
+    assert 'print("AGENT_OUTPUT_SELF_CHECK_PASSED")' in contract
+
+
+def test_builtin_review_output_contract_materializes_review_binding_rules() -> None:
+    contract = (
+        BUILTIN_ASSET_ROOT
+        / "output-contracts"
+        / "review"
+        / "output-contract.md"
+    ).read_text(encoding="utf-8")
+
+    assert "A non-failed REVIEW outcome always uses `result_type` `COMPLETED`" in contract
+    assert "Copy `candidate_conclusion_id`, `candidate_revision`" in contract
+    assert "set `reviewed_state_revision`" in contract
+    assert "PASS must review every supporting Evidence reference" in contract
+    assert "REVIEW must not propose Evidence or Artifact drafts" in contract
+    expected_fields = json.dumps(
+        sorted(ReviewAssessment.model_fields),
+        separators=(",", ":"),
+    )
+    assert f"`{expected_fields}`" in contract
+
+
+def test_builtin_diagnose_output_contract_self_check_is_valid_python() -> None:
+    contract = (
+        BUILTIN_ASSET_ROOT
+        / "output-contracts"
+        / "diagnose"
+        / "output-contract.md"
+    ).read_text(encoding="utf-8")
+    tail = contract.split("Do not trust a prose summary of the file.", 1)[1]
+    source = tail.split("```python\n", 1)[1].split("\n```", 1)[0]
+
+    compile(source, "diagnose-agent-output-self-check.py", "exec")
+
+
+def test_builtin_specialist_profile_separates_narrative_from_fixed_inputs() -> None:
+    profile = (
+        BUILTIN_ASSET_ROOT / "profiles" / "specialist" / "profile.md"
+    ).read_text(encoding="utf-8")
+
+    assert "never as supplied parameter facts" in profile
+    assert "CONTEXT_SNAPSHOT.user_facts" in profile
+    assert "provenance.input_name" in profile
+    assert "never infer or copy a missing value from narrative text" in profile
+    assert "only when the fixed `RESOURCE_MANIFEST` contains" in profile
+    assert "A narrative mention of a resource never supplies that resource" in profile
 
 
 def test_direct_child_skill_scan_bindings_and_deep_copy_isolation() -> None:

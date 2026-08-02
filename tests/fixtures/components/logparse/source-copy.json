@@ -91,8 +91,8 @@
       "source": "S07 new implementation; no counterpart exists in the frozen upstream source tree.",
       "purpose": "Deterministically build, hash, validate, and atomically publish versioned diagnose-* products from non-sensitive Wiki input under the frozen S00/S07 contracts.",
       "mode": "100644",
-      "size": 38144,
-      "sha256": "e4cf37f97ac519496215f41208662b2013eef0e497bf5ff190a9fbe8d2762fcd"
+      "size": 42277,
+      "sha256": "6fb7aa52daf6d41e1cb604f5285befd034250152643334835fc88f07667d0ab2"
     }
   ],
   "excluded_patterns": [

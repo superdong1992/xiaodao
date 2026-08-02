@@ -304,6 +304,27 @@ def product_sha256(files: Mapping[str, bytes]) -> str:
     return hashlib.sha256(canonical_json_bytes({"version": 1, "entries": entries})).hexdigest()
 
 
+def _prepare_output_root(root: Path) -> None:
+    try:
+        root.mkdir(parents=True)
+    except FileExistsError:
+        if not root.is_dir():
+            raise
+    else:
+        if os.name == "posix":
+            root.chmod(0o755)
+
+
+def _prepare_publish_permissions(root: Path, files: Mapping[str, bytes]) -> None:
+    """Make a POSIX product readable by a service account before atomic publish."""
+
+    if os.name != "posix":
+        return
+    for relative_path in files:
+        (root / relative_path).chmod(0o644)
+    root.chmod(0o755)
+
+
 def generate_diagnosis_skill(
     spec: GenerationSpec,
     output_root: str | Path,
@@ -314,7 +335,7 @@ def generate_diagnosis_skill(
 
     spec.validate()
     output_root = Path(output_root)
-    output_root.mkdir(parents=True, exist_ok=True)
+    _prepare_output_root(output_root)
     target = output_root / spec.skill_id
     desired = render_product(spec)
     desired_hash = product_sha256(desired)
@@ -354,6 +375,7 @@ def generate_diagnosis_skill(
             destination = temp / relative_path
             destination.parent.mkdir(parents=True, exist_ok=True)
             destination.write_bytes(payload)
+        _prepare_publish_permissions(temp, desired)
         if replaced:
             backup = Path(tempfile.mkdtemp(prefix=f".{spec.skill_id}.backup.", dir=output_root))
             backup.rmdir()
@@ -499,10 +521,33 @@ requirement 必须复用原 `requirement_id`，不得重复创建。
    `parse-targets` 字段，禁止携带 `logparse_product` 或任意 argv。
 2. 仅调用一次 `problem-locator-logparse parse-targets --request ... --result ...`。
 3. 读取 broker 生成的 `target_logs.json` 与受控 `parse_manifest.json` 机器结果。
-4. 提出 proposal key=`logparse-run` 的 `LOGPARSE_RUN` 目录 Artifact Draft，以及用同一
-   artifact proposal key 作为 source binding 的 `LOGPARSE` Evidence Draft。
-5. 若仍缺 `order_id`，在同一 `NEED_INPUT` Outcome 中提交中间 StateDelta、Evidence、
-   LOGPARSE_RUN 与新 OPEN INPUT requirement；正常结束 Job。
+4. 提出 proposal key=`logparse-run` 的 `LOGPARSE_RUN` 目录 Artifact Draft，以及固定
+   proposal key=`logparse-client-evidence`、用该 artifact proposal key 作为 source binding
+   的 client `LOGPARSE` Evidence Draft。
+5. 若 `CONTEXT_SNAPSHOT.user_facts` 仍缺 active `order_id`，在同一 `NEED_INPUT` Outcome
+   中提交中间 StateDelta、client Evidence、LOGPARSE_RUN 与新 OPEN INPUT requirement；
+   正常结束 Job。即使机器日志含有看似可用的 order ID，也不得据此满足参数 B、提出 server
+   Evidence、Candidate 或 USER_RESULT；`order_id` 只能来自用户提交的固定事实。
+   `state_delta.add_evidence_bindings` 必须恰好包含
+   `{"existing_evidence_id":null,"evidence_proposal_key":"logparse-client-evidence"}`；只有该
+   StateDelta binding 才会在进入 `WAITING_INPUT` 前正式接受 client Evidence 及其依赖的
+   `LOGPARSE_RUN`，不得只把它们放在 proposal arrays 中。
+
+`LOGPARSE_RUN` Artifact Draft 的固定形状是：`artifact_kind="LOGPARSE_RUN"`、
+`content_type="application/vnd.problem-locator.logparse-run+directory"`、
+`resource_kind="DIRECTORY"`、`workspace_relative_path="output/proposals/logparse-run/tree"`。
+不得使用 `application/octet-stream`、`application/json` 或根据目录内容猜测 Content-Type；
+发布前必须逐字核对这四个字段，并让 declared size/hash 与受控 tree 的实际值一致。
+目录 hash 不是 `parse_manifest.json` 文件的 hash：按相对 POSIX path 排序枚举 tree 中每个普通
+文件，逐个形成 `{"path":path,"sha256":sha256(file_bytes),"size":len(file_bytes)}`，再形成
+`{"entries":entries,"version":1}` 的 S00 Canonical JSON（包括末尾一个 LF），最后对这些完整
+manifest bytes 求 SHA-256。Artifact Draft 的 `declared_sha256` 和 metadata 的
+`tree_manifest_sha256` 必须都等于这个目录清单 hash。
+
+同 Outcome 的 `LOGPARSE` Evidence 使用 `artifact_proposal_key="logparse-run"` 绑定目录，并在
+locator 中引用受控 tree 内的相对日志路径。若没有在其自己的 proposal root 另写独立 Evidence
+文件，则 `workspace_relative_path=null`、`declared_size=null`、`declared_sha256=null`；不得把
+被引用日志文件的 size/hash 填入这三个独立资源声明字段。
 
 ## LOGPARSE_RUN 复用
 
@@ -512,7 +557,17 @@ requirement 必须复用原 `requirement_id`，不得重复创建。
 `inputs/artifacts/<artifact_id>/tree` 根调用 `problem-locator-logparse target-logs`。
 request 只含 S07 `target-logs` 字段且 `artifact_id` 必须来自 manifest。不得修改物化目录，
 不得再次 parse；新 Job 的连续性只来自固定 StateDelta、Evidence、Attachment、
-`LOGPARSE_RUN` 与 `PREVIOUS_OUTCOME`。'''
+`LOGPARSE_RUN` 与 `PREVIOUS_OUTCOME`。
+
+复用分支不得再次提出 `LOGPARSE_RUN` 或 client Evidence。把 manifest 中固定 client
+`LOGPARSE` Evidence 的 `resource_id` 作为唯一 existing client Evidence ID，把固定
+`LOGPARSE_RUN` 的 `resource_id` 作为 server Evidence 的 `existing_source_ref`。本 Job 只提出
+proposal key=`logparse-server-evidence` 的新 server Evidence；其
+`artifact_proposal_key=null`、`workspace_relative_path=null`、`declared_size=null`、
+`declared_sha256=null`。`consumed_evidence_refs` 必须恰好包含 existing client Evidence ID，
+`state_delta.add_evidence_bindings` 必须恰好绑定 `logparse-server-evidence`。Candidate 与
+USER_RESULT 的 supporting/mapping bindings 顺序固定为 existing client Evidence ID 在前、
+server Evidence proposal key 在后。'''
         evidence_source_workflow = '''只把 `target_logs` 返回并解析到受控 output root 内的安全相对 POSIX `log_path` 写入 S00
 `LogparseEvidenceLocator.relative_path`。没有匹配、路径歧义、时间无法关联或证据不足时
 必须明确保留缺口，不得把假设升级为事实。'''
@@ -571,8 +626,15 @@ Problem Locator Job 的固定输入；S00 冻结 DTO、Schema、枚举和错误�
 | --- | --- | --- |
 {roles}
 
-每个 broker anchor 只含 `label`、`module`、`slot`、`process_name`、`pid`；其中
-`module` 固定为 {module_literal}，`pid` 可以为 null，其余值必须来自本 Job 已验证事实。
+每个 broker anchor 只含 `label`、`module`、`slot`、`process_name`、`pid`。`module` 固定为
+{module_literal}；若上方角色说明声明了产品固定的 `slot`、`process_name`、`pid` 映射，必须
+逐字使用该映射，禁止用 `caller_service` 或 `server_service` 替代。未声明的 anchor 值才必须
+来自本 Job 已验证事实，且 `pid` 可以为 null。Canonical JSON 中 `label`、`module`、`slot`、
+`process_name` 以及非 null 的 `pid` 必须全部是 JSON 字符串；即使 `slot` 或 `pid` 只含数字，
+也不得写成 JSON number。调用 broker 前必须重新读取 request bytes 并逐字段确认这些类型。
+确认后非常下一动作必须是一次 Bash 调用：
+`problem-locator-logparse parse-targets --request output/proposals/logparse-run/request.json --result output/proposals/logparse-run/target_logs.json`。
+在写 request 与执行该命令之间不得继续分析、输出文字、重读上下文或调用任何其他工具。
 
 ## 自定义定位参数
 
