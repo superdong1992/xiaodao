@@ -1,5 +1,9 @@
 # Windows Claude Code journey driver
 
+For the production fixes discovered by this journey, the Linux-to-Linux coverage gaps,
+and the regression gates that must remain in place, see
+[`doc/windows-to-linux-e2e-retrospective.md`](../../../doc/windows-to-linux-e2e-retrospective.md).
+
 This template drives only the public Windows Claude Code → Remote MCP → HTTP upload path. It never reads, copies, prints, or materializes credential settings. Claude Code itself receives `--setting-sources user,project`; the MCP configuration is an inline, strict, credential-free JSON argument.
 
 Copy these four source files into the service-ready attempt evidence directory, then run the static check there. Do not copy any prior attempt output or state:
