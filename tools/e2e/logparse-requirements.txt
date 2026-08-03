@@ -1,0 +1,4 @@
+# Frozen from Logparse a233b500d9c99e6815d1ffd82cb4ca55bbfe657a.
+PyYAML==6.0.3
+pydantic==2.13.4
+click==8.4.2

@@ -4,6 +4,8 @@ import ast
 import dataclasses
 import hashlib
 import json
+import os
+import stat
 import sys
 import types
 from pathlib import Path
@@ -34,7 +36,7 @@ CONTENT_TYPES = (
 )
 ASSUMPTIONS = ("只使用合成服务名、合成订单号和非敏感日志。",)
 EXPECTED_PRODUCT_SHA256 = (
-    "66ddd0b345df043b99489e26d9c0b7bc9ac9fa4f7ba3322783f956182ed17ba2"
+    "4ce37124b5fb97233188150e074e3b71d995e27bd3941a51a05aa1d5cd2251e7"
 )
 EXPECTED_MANIFEST = {
     "schema_version": 1,
@@ -88,6 +90,12 @@ def _product_files(root: Path) -> dict[str, bytes]:
     }
 
 
+def _assert_posix_publish_modes(root: Path) -> None:
+    assert stat.S_IMODE(root.stat().st_mode) == 0o755
+    for name in ("SKILL.md", "diagnosis-skill.json"):
+        assert stat.S_IMODE((root / name).stat().st_mode) == 0o644
+
+
 def _canonical_json_bytes(value: Any) -> bytes:
     return (
         json.dumps(
@@ -131,6 +139,27 @@ def test_wiki_fixture_replays_the_static_product_byte_for_byte_and_idempotently(
     assert first.replaced is False
     assert first.product_sha256 == EXPECTED_PRODUCT_SHA256
     assert generator.product_sha256(generated_files) == EXPECTED_PRODUCT_SHA256
+    skill_markdown = generated_files["SKILL.md"].decode("utf-8")
+    assert "slot=`1`、process_name=`checkout-client`、pid=`101`" in skill_markdown
+    assert "slot=`2`、process_name=`inventory-server`、pid=`202`" in skill_markdown
+    assert "即使 `slot` 或 `pid` 只含数字" in skill_markdown
+    assert "也不得写成 JSON number" in skill_markdown
+    assert "在写 request 与执行该命令之间不得继续分析" in skill_markdown
+    assert (
+        '`content_type="application/vnd.problem-locator.logparse-run+directory"`'
+        in skill_markdown
+    )
+    assert "不得使用 `application/octet-stream`" in skill_markdown
+    assert "目录 hash 不是 `parse_manifest.json` 文件的 hash" in skill_markdown
+    assert "`workspace_relative_path=null`、`declared_size=null`" in skill_markdown
+    assert "也不得据此满足参数 B" in skill_markdown
+    assert 'proposal key=`logparse-client-evidence`' in skill_markdown
+    assert '"evidence_proposal_key":"logparse-client-evidence"' in skill_markdown
+    assert "不得只把它们放在 proposal arrays 中" in skill_markdown
+    assert "复用分支不得再次提出 `LOGPARSE_RUN` 或 client Evidence" in skill_markdown
+    assert 'proposal key=`logparse-server-evidence`' in skill_markdown
+    assert "existing client Evidence ID 在前" in skill_markdown
+    assert "禁止用 `caller_service` 或 `server_service` 替代" in skill_markdown
     before = {
         relative_path: hashlib.sha256(payload).hexdigest()
         for relative_path, payload in generated_files.items()
@@ -160,6 +189,34 @@ def test_wiki_fixture_replays_the_static_product_byte_for_byte_and_idempotently(
         assumptions=ASSUMPTIONS,
     )
     assert generator.render_product(normalized_spec) == generated_files
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX publish modes only")
+def test_generator_publishes_stable_posix_modes_under_restrictive_umask(
+    generator: Any,
+    tmp_path: Path,
+) -> None:
+    output_root = tmp_path / "generated"
+    original = _build_takeover_spec(generator)
+    upgraded = dataclasses.replace(original, version="2.0.1")
+    previous_umask = os.umask(0o077)
+    try:
+        first = generator.generate_diagnosis_skill(original, output_root)
+        _assert_posix_publish_modes(first.skill_dir)
+        replacement = generator.generate_diagnosis_skill(
+            upgraded,
+            output_root,
+            replace_different_version=True,
+        )
+        _assert_posix_publish_modes(replacement.skill_dir)
+    finally:
+        os.umask(previous_umask)
+
+    assert stat.S_IMODE(output_root.stat().st_mode) == 0o755
+    assert first.skill_dir == replacement.skill_dir
+    replacement_files = _product_files(replacement.skill_dir)
+    assert replacement_files == generator.render_product(upgraded)
+    assert generator.product_sha256(replacement_files) == replacement.product_sha256
 
 
 def test_generated_manifest_is_exact_canonical_and_version_2_0_0(

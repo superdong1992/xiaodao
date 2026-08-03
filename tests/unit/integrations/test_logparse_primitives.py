@@ -195,6 +195,113 @@ def test_fingerprint_rejects_an_empty_git_file_list(tmp_path: Path) -> None:
         fingerprint_logparse_asset(repo, config, sys.executable)
 
 
+def test_git_inventory_trusts_only_the_exact_configured_repository(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = (tmp_path / "root-owned-logparse").resolve()
+    repo.mkdir()
+    observed: dict[str, object] = {}
+
+    def capture_git(
+        argv: list[str],
+        **kwargs: object,
+    ) -> subprocess.CompletedProcess[bytes]:
+        observed["argv"] = argv
+        observed["environment"] = kwargs["env"]
+        observed["timeout"] = kwargs["timeout"]
+        return subprocess.CompletedProcess(argv, 0, b"cli.py\n", b"")
+
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "99")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", "safe.directory")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", "*")
+    monkeypatch.setenv("GIT_CONFIG_PARAMETERS", "'safe.directory'='*'")
+    monkeypatch.setenv("GIT_DIR", os.fspath(tmp_path / "redirected.git"))
+    monkeypatch.setenv("GIT_EXEC_PATH", os.fspath(tmp_path / "helpers"))
+    monkeypatch.setenv("gIt_Object_Directory", os.fspath(tmp_path / "objects"))
+    monkeypatch.setattr(fingerprint_module.subprocess, "run", capture_git)
+
+    assert fingerprint_module._git_paths(repo) == ["cli.py"]
+    assert observed["argv"] == [
+        "git",
+        "-C",
+        os.fspath(repo),
+        "ls-files",
+        "--cached",
+        "--others",
+        "--exclude-standard",
+    ]
+    assert observed["timeout"] == 10.0
+    environment = observed["environment"]
+    assert isinstance(environment, dict)
+    count = int(environment["GIT_CONFIG_COUNT"])
+    assert count == 3
+    assert [
+        (
+            environment[f"GIT_CONFIG_KEY_{index}"],
+            environment[f"GIT_CONFIG_VALUE_{index}"],
+        )
+        for index in range(count)
+    ] == [
+        ("core.quotepath", "false"),
+        ("safe.directory", ""),
+        ("safe.directory", os.fspath(repo)),
+    ]
+    assert {
+        key: value
+        for key, value in environment.items()
+        if key.upper().startswith("GIT_")
+    } == {
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_CONFIG_COUNT": "3",
+        "GIT_CONFIG_KEY_0": "core.quotepath",
+        "GIT_CONFIG_VALUE_0": "false",
+        "GIT_CONFIG_KEY_1": "safe.directory",
+        "GIT_CONFIG_VALUE_1": "",
+        "GIT_CONFIG_KEY_2": "safe.directory",
+        "GIT_CONFIG_VALUE_2": os.fspath(repo),
+    }
+    assert environment["LC_ALL"] == "C.UTF-8"
+
+
+def test_git_inventory_ignores_ambient_repository_and_config_redirection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target_parent = tmp_path / "target"
+    target_parent.mkdir()
+    target, _target_config = _make_repo(target_parent)
+    decoy_parent = tmp_path / "decoy"
+    decoy_parent.mkdir()
+    decoy, _decoy_config = _make_repo(decoy_parent)
+    _write(decoy / "decoy-only.txt", b"must never be enumerated\n")
+    _git(decoy, "add", "decoy-only.txt")
+    hostile_global = tmp_path / "hostile.gitconfig"
+    hostile_global.write_text("[safe]\n\tdirectory = *\n", encoding="utf-8")
+
+    monkeypatch.setenv("GIT_DIR", os.fspath(decoy / ".git"))
+    monkeypatch.setenv("GIT_WORK_TREE", os.fspath(decoy))
+    monkeypatch.setenv("GIT_INDEX_FILE", os.fspath(decoy / ".git" / "index"))
+    monkeypatch.setenv("GIT_OBJECT_DIRECTORY", os.fspath(decoy / ".git" / "objects"))
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.fspath(hostile_global))
+    monkeypatch.setenv("GIT_CONFIG_PARAMETERS", "malformed inherited config")
+
+    assert sorted(fingerprint_module._git_paths(target.resolve())) == sorted(
+        [
+            ".gitignore",
+            "cli.py",
+            "nested/alpha.txt",
+            "unicode-β.txt",
+        ]
+    )
+
+
+def test_git_inventory_rejects_a_safe_directory_wildcard_path() -> None:
+    with pytest.raises(ValueError, match="path is not safe"):
+        fingerprint_module._git_paths(Path("configured") / "*")
+
+
 def test_fingerprint_rejects_a_symlinked_repo_entry(tmp_path: Path) -> None:
     repo, config = _make_repo(tmp_path)
     external = tmp_path / "external.txt"

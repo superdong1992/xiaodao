@@ -19,19 +19,21 @@ from problem_locator.contracts.enums import (
     ResourceKind,
 )
 from problem_locator.contracts.models import (
+    AgentJobOutcome,
     BoundedContext,
     ContextSection,
     Evidence,
     Job,
     JobInstructionPayload,
     JobOutcome,
+    UserResultPayload,
     WorkspaceEvidenceInput,
     WorkspaceInputManifest,
     WorkspacePreviousOutcomeInput,
     validate_job_instruction_for_job,
     validate_workspace_manifest_for_job,
 )
-from problem_locator.contracts.serialization import canonical_json_bytes
+from problem_locator.contracts.serialization import canonical_json_bytes, schema_bundle_bytes
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,6 +90,54 @@ def _asset_text_bytes(value: str, label: str) -> bytes:
     except UnicodeEncodeError as exc:
         raise ValueError(f"{label} must be valid UTF-8 text") from exc
     return encoded.rstrip(b"\n") + b"\n"
+
+
+_AGENT_OUTCOME_SCHEMA_TOKEN = "{{S00_AGENT_JOB_OUTCOME_SCHEMA_JSON}}"
+_USER_RESULT_SCHEMA_TOKEN = "{{S00_USER_RESULT_SCHEMA_JSON}}"
+_OUTPUT_SCHEMA_TOKENS = {
+    _AGENT_OUTCOME_SCHEMA_TOKEN: "agent-job-outcome.schema.json",
+    _USER_RESULT_SCHEMA_TOKEN: "user-result.schema.json",
+}
+_OUTPUT_SCHEMA_MODELS = {
+    "agent-job-outcome.schema.json": AgentJobOutcome,
+    "user-result.schema.json": UserResultPayload,
+}
+
+
+def _output_contract_bytes(value: str) -> bytes:
+    """Expand exact installed S00 schemas inside a trusted output contract."""
+
+    if not isinstance(value, str):
+        raise TypeError("output_contract must be text")
+    present = {
+        token: value.count(token)
+        for token in _OUTPUT_SCHEMA_TOKENS
+        if token in value
+    }
+    if not present:
+        return _asset_text_bytes(value, "output_contract")
+    if any(count != 1 for count in present.values()):
+        raise ValueError("output_contract schema markers must be unique")
+    if (
+        _USER_RESULT_SCHEMA_TOKEN in present
+        and _AGENT_OUTCOME_SCHEMA_TOKEN not in present
+    ):
+        raise ValueError("the user-result schema requires the Agent Outcome schema")
+
+    bundle = schema_bundle_bytes(
+        {
+            name: _OUTPUT_SCHEMA_MODELS[name]
+            for name in sorted(set(_OUTPUT_SCHEMA_TOKENS[token] for token in present))
+        }
+    )
+    expanded = value
+    for token, name in _OUTPUT_SCHEMA_TOKENS.items():
+        if token in present:
+            expanded = expanded.replace(
+                token,
+                bundle[name].decode("utf-8").removesuffix("\n"),
+            )
+    return _asset_text_bytes(expanded, "output_contract")
 
 
 def _json_section(value: object) -> bytes:
@@ -269,13 +319,11 @@ class ContextBuilder:
                     True,
                 )
             )
-        prefix.append(
-            _SectionDraft(
-                ContextSectionKind.OUTPUT_CONTRACT,
-                _asset_text_bytes(materials.output_contract, "output_contract"),
-                (),
-                True,
-            )
+        output_contract = _SectionDraft(
+            ContextSectionKind.OUTPUT_CONTRACT,
+            _output_contract_bytes(materials.output_contract),
+            (),
+            True,
         )
 
         previous = tuple(
@@ -318,6 +366,7 @@ class ContextBuilder:
             previous,
             evidence_drafts,
             selected,
+            output_contract,
             manifest,
         )
         required_body, _ = _render(required_drafts)
@@ -336,6 +385,7 @@ class ContextBuilder:
                 previous,
                 evidence_drafts,
                 trial,
+                output_contract,
                 manifest,
             )
             trial_body, _ = _render(trial_drafts)
@@ -347,6 +397,7 @@ class ContextBuilder:
             previous,
             evidence_drafts,
             selected,
+            output_contract,
             manifest,
         )
         body_bytes, sections = _render(final_drafts)
@@ -417,6 +468,7 @@ class ContextBuilder:
         previous: tuple[_SectionDraft, ...],
         evidence: tuple[_SectionDraft, ...],
         selected_evidence_ids: set[str],
+        output_contract: _SectionDraft,
         manifest: _SectionDraft,
     ) -> tuple[_SectionDraft, ...]:
         selected = tuple(
@@ -424,7 +476,7 @@ class ContextBuilder:
             for draft in evidence
             if draft.source_refs[0] in selected_evidence_ids
         )
-        return prefix + previous + selected + (manifest,)
+        return prefix + previous + selected + (output_contract, manifest)
 
 
 def build_bounded_context(job: Job, materials: ContextMaterials) -> BoundedContext:

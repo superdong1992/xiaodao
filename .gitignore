@@ -1,0 +1,25 @@
+# Local scratch space, test evidence, downloaded caches, and diagnostics.
+/.tmp/
+
+# Python-generated files and local environments.
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.venv/
+venv/
+
+# Editor, operating-system, and Office lock files.
+.DS_Store
+Thumbs.db
+Desktop.ini
+*.swp
+*.swo
+*~
+~$*
+.~lock.*

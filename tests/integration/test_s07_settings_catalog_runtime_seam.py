@@ -27,7 +27,7 @@ FAKE_LOGPARSE_REPO = ROOT / "tests/fixtures/components/logparse/fake/repo"
 FAKE_LOGPARSE_CONFIG = FAKE_LOGPARSE_REPO / "config.yaml"
 TAKEOVER_SKILL_ID = "diagnosis-skill/diagnose-service-takeover"
 TAKEOVER_PRODUCT_HASH = (
-    "66ddd0b345df043b99489e26d9c0b7bc9ac9fa4f7ba3322783f956182ed17ba2"
+    "4ce37124b5fb97233188150e074e3b71d995e27bd3941a51a05aa1d5cd2251e7"
 )
 
 

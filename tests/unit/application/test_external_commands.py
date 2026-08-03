@@ -1666,6 +1666,116 @@ def test_submit_supplement_rejects_swapped_input_fulfillments_without_commit() -
     assert notifier.notify_calls == []
 
 
+def test_submit_supplement_accepts_canonical_fact_order_for_multiple_inputs() -> None:
+    waiting = _waiting_state()
+    aggregate = waiting.cases[CASE_ID]
+    source = aggregate.jobs[SOURCE_JOB_ID]
+    first_requirement = aggregate.case.diagnosis_state.pending_requirements[0]
+    second_requirement = first_requirement.model_copy(
+        deep=True,
+        update={
+            "requirement_id": SECOND_REQUIREMENT_ID,
+            "name": "caller_service",
+            "prompt": "Provide the calling service.",
+        },
+    )
+    diagnosis_state = aggregate.case.diagnosis_state.model_copy(
+        deep=True,
+        update={
+            "pending_requirements": [first_requirement, second_requirement]
+        },
+    )
+    waiting_case = aggregate.case.model_copy(
+        deep=True,
+        update={"diagnosis_state": diagnosis_state},
+    )
+    waiting = waiting.model_copy(
+        deep=True,
+        update={
+            "cases": {
+                CASE_ID: aggregate.model_copy(
+                    deep=True,
+                    update={"case": waiting_case},
+                )
+            }
+        },
+    )
+
+    def canonical_plan(snapshot, trigger):
+        assert trigger.payload.stable_target_changed is False
+        facts = sorted(trigger.payload.user_facts, key=lambda item: item.item_id)
+        facts_by_name = {
+            fact.provenance.input_name: fact for fact in trigger.payload.user_facts
+        }
+        return _plan(
+            target_status=CaseStatus.RUNNING,
+            delta=_empty_delta(
+                add_user_facts=facts,
+                fulfill_requirements=[
+                    RequirementFulfillment(
+                        requirement_id=REQUIREMENT_ID,
+                        fulfilled_by_refs=[facts_by_name["rpc_method"].item_id],
+                    ),
+                    RequirementFulfillment(
+                        requirement_id=SECOND_REQUIREMENT_ID,
+                        fulfilled_by_refs=[facts_by_name["caller_service"].item_id],
+                    ),
+                ],
+            ),
+            next_job_spec=_job_spec(
+                source,
+                target_revision=3,
+                previous_outcome_refs=[WAIT_OUTCOME_ID],
+            ),
+        )
+
+    selected = aggregate.case.selected_skill_ref
+    assert selected is not None
+    execution_records = InMemoryExecutionRecordStore()
+    handler, repository, guard, _, dispatcher, notifier, _, _ = _handler(
+        waiting,
+        ScriptedCoordinator([canonical_plan]),
+        ids=DeterministicIdGenerator(
+            scripted_ids={
+                "trigger": [TRIGGER_ID],
+                "job": [NEW_JOB_ID],
+                # Input names sort as caller_service, rpc_method. Reverse their IDs so
+                # the Coordinator's canonical item_id ordering is observably different.
+                "diagnosis_item": [SECOND_FACT_ID, FACT_ID],
+            }
+        ),
+        catalog=FakeAssetCatalog(
+            diagnose={
+                (selected.id, selected.version, selected.content_hash): _bindings(source)
+            }
+        ),
+        execution_records=execution_records,
+    )
+    command = SubmitSupplement(
+        idempotency_key="supplement-canonical-multiple-inputs",
+        case_id=CASE_ID,
+        expected_case_revision=2,
+        inputs={
+            "caller_service": "checkout-synthetic",
+            "rpc_method": "ReserveStock",
+        },
+        attachment_ids=[],
+        wait_seconds=0,
+    )
+
+    response = handler.execute(command)
+
+    stored = repository.read_snapshot().cases[CASE_ID]
+    assert response.business_receipt.job_id == NEW_JOB_ID
+    assert stored.case.status is CaseStatus.RUNNING
+    assert [
+        fact.item_id for fact in stored.case.diagnosis_state.user_facts[-2:]
+    ] == [FACT_ID, SECOND_FACT_ID]
+    assert guard.acquire_calls == guard.release_calls == 1
+    assert dispatcher.submit_calls == [NEW_JOB_ID]
+    assert notifier.notify_calls == [(CASE_ID, 3)]
+
+
 def test_submit_supplement_reuses_first_bindings_across_three_commit_attempts() -> None:
     waiting = _waiting_state()
     source = waiting.cases[CASE_ID].jobs[SOURCE_JOB_ID]

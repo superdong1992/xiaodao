@@ -27,7 +27,7 @@ from problem_locator.contracts.models import (
     JobOutcome,
     WorkspaceInputManifest,
 )
-from problem_locator.contracts.serialization import canonical_json_bytes
+from problem_locator.contracts.serialization import canonical_json_bytes, schema_bundle_bytes
 from problem_locator.runtime.context_builder import (
     ContextBuilder,
     ContextLimitExceeded,
@@ -40,6 +40,7 @@ CONTRACT_FIXTURES = REPOSITORY_ROOT / "tests" / "fixtures" / "contracts" / "posi
 CONTEXT_FIXTURES = (
     REPOSITORY_ROOT / "tests" / "fixtures" / "components" / "runtime-context"
 )
+ASSET_ROOT = REPOSITORY_ROOT / "src" / "problem_locator" / "runtime" / "assets"
 FIXED_TIME = "2026-01-02T03:04:05.000Z"
 
 
@@ -322,6 +323,27 @@ def test_three_roles_have_fixed_framing_order_and_required_core(
     assert "\r" not in context.body
 
 
+@pytest.mark.parametrize("job_type", list(JobType))
+def test_output_contract_is_the_final_instruction_before_manifest(
+    job_type: JobType,
+) -> None:
+    job, materials, _, _ = _complete_inputs(job_type)
+    context = ContextBuilder().build(job, materials)
+    kinds = [section.kind for section in context.sections]
+    output_index = kinds.index(ContextSectionKind.OUTPUT_CONTRACT)
+
+    assert output_index == len(kinds) - 2
+    assert kinds[-1] is ContextSectionKind.RESOURCE_MANIFEST
+    assert all(
+        index < output_index
+        for index, kind in enumerate(kinds)
+        if kind in {
+            ContextSectionKind.PREVIOUS_OUTCOME,
+            ContextSectionKind.EVIDENCE,
+        }
+    )
+
+
 def test_job_instruction_goal_and_resource_manifest_are_byte_exact() -> None:
     job, materials, _, _ = _complete_inputs(JobType.DIAGNOSE)
     context = ContextBuilder().build(job, materials)
@@ -349,6 +371,55 @@ def test_job_instruction_goal_and_resource_manifest_are_byte_exact() -> None:
         materials.manifest
     )
     assert context.sections[manifest_index].required
+
+
+@pytest.mark.parametrize("job_type", list(JobType))
+def test_production_output_contract_materializes_exact_installed_s00_schemas(
+    job_type: JobType,
+) -> None:
+    job, materials, _, _ = _complete_inputs(job_type)
+    production_contract = (
+        ASSET_ROOT
+        / "output-contracts"
+        / job_type.value.lower()
+        / "output-contract.md"
+    ).read_text(encoding="utf-8")
+    context = ContextBuilder().build(
+        job,
+        replace(materials, output_contract=production_contract),
+    )
+    output_index = next(
+        index
+        for index, section in enumerate(context.sections)
+        if section.kind is ContextSectionKind.OUTPUT_CONTRACT
+    )
+    content = _section_content(context, output_index)
+    expected = schema_bundle_bytes()
+    markers = {
+        "agent-job-outcome.schema.json": (
+            b"<<<BEGIN S00 AGENT JOB OUTCOME SCHEMA>>>\n",
+            b"<<<END S00 AGENT JOB OUTCOME SCHEMA>>>",
+        ),
+    }
+    if job_type is JobType.DIAGNOSE:
+        markers["user-result.schema.json"] = (
+            b"<<<BEGIN S00 USER RESULT SCHEMA>>>\n",
+            b"<<<END S00 USER RESULT SCHEMA>>>",
+        )
+        assert (
+            b'application/vnd.problem-locator.logparse-run+directory' in content
+        )
+        assert b'not the hash of `parse_manifest.json`' in content
+        assert b'workspace_relative_path=null' in content
+        assert b'active user fact whose provenance `input_name` is exactly `order_id`' in content
+
+    assert b"{{S00_" not in content
+    for schema_name, (begin, end) in markers.items():
+        assert content.count(begin) == 1
+        assert content.count(end) == 1
+        start = content.index(begin) + len(begin)
+        finish = content.index(end, start)
+        assert content[start:finish] == expected[schema_name]
 
 
 def test_previous_outcome_is_full_canonical_dto_and_manifest_hash_is_checked() -> None:

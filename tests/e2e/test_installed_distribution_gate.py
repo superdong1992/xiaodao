@@ -26,7 +26,7 @@ from problem_locator.contracts import (
 ROOT = Path(__file__).resolve().parents[2]
 LOGPARSE_COMMIT = "a233b500d9c99e6815d1ffd82cb4ca55bbfe657a"
 TAKEOVER_PRODUCT_HASH = (
-    "66ddd0b345df043b99489e26d9c0b7bc9ac9fa4f7ba3322783f956182ed17ba2"
+    "4ce37124b5fb97233188150e074e3b71d995e27bd3941a51a05aa1d5cd2251e7"
 )
 OFFICIAL_KEYS = {
     "BIND_HOST",
@@ -49,6 +49,15 @@ EXPECTED_RUNTIME_VERSIONS = {
     "starlette": "1.3.1",
     "uvicorn": "0.49.0",
 }
+EXPECTED_MCP_TOOL_NAMES = [
+    "problem_locator_create_case",
+    "problem_locator_prepare_attachment",
+    "problem_locator_submit_supplement",
+    "problem_locator_get_case",
+    "problem_locator_resume_case",
+    "problem_locator_cancel_case",
+    "problem_locator_list_artifacts",
+]
 
 
 pytestmark = pytest.mark.skipif(
@@ -625,6 +634,56 @@ def test_clean_installed_distribution_import_cli_and_server_gate(
             "RECOVERY",
         ]
         assert all(check.passed and check.message is None for check in report.checks)
+
+        mcp_probe_code = textwrap.dedent(
+            """
+            import asyncio
+            import json
+            import sys
+
+            import httpx
+            from mcp import ClientSession
+            from mcp.client.streamable_http import streamable_http_client
+
+            async def probe():
+                async with httpx.AsyncClient(trust_env=False) as http_client:
+                    async with streamable_http_client(
+                        sys.argv[1],
+                        http_client=http_client,
+                    ) as (read_stream, write_stream, _get_session_id):
+                        async with ClientSession(read_stream, write_stream) as session:
+                            await session.initialize()
+                            listed = await session.list_tools()
+                            return {
+                                "tool_names": [tool.name for tool in listed.tools],
+                                "output_schema_types": [
+                                    None
+                                    if tool.outputSchema is None
+                                    else tool.outputSchema.get("type")
+                                    for tool in listed.tools
+                                ],
+                            }
+
+            print(json.dumps(asyncio.run(probe()), sort_keys=True))
+            """
+        )
+        mcp_probe = _run_checked(
+            [
+                os.fspath(installed_python),
+                "-I",
+                "-c",
+                mcp_probe_code,
+                f"http://127.0.0.1:{port}/mcp",
+            ],
+            cwd=outside_cwd,
+            environ=service_environ,
+            label="installed official MCP initialize/list-tools probe",
+        )
+        mcp_inventory = json.loads(mcp_probe.stdout)
+        assert mcp_inventory["tool_names"] == EXPECTED_MCP_TOOL_NAMES
+        assert mcp_inventory["output_schema_types"] == ["object"] * len(
+            EXPECTED_MCP_TOOL_NAMES
+        )
     finally:
         _stop_service(process)
 

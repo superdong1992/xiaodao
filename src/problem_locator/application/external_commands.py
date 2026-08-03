@@ -1088,7 +1088,8 @@ class ExternalCommandHandler:
         }
         if (
             disallowed_delta
-            or delta.add_user_facts != list(user_facts)
+            or delta.add_user_facts
+            != sorted(user_facts, key=lambda item: item.item_id)
             or plan.job_updates
             or plan.clear_active_job
             or plan.selected_skill_update is not None

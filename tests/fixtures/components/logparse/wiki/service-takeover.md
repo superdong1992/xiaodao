@@ -19,8 +19,8 @@ module_name: COMPACT
 
 | 标签 | 说明 | 是否必需 |
 | --- | --- | --- |
-| client | 发起合成 RPC 的客户端进程 | 是 |
-| server | 接收并处理合成 RPC 的服务端进程 | 是 |
+| client | 发起合成 RPC 的客户端进程；broker anchor 固定为 slot=`1`、process_name=`checkout-client`、pid=`101` | 是 |
+| server | 接收并处理合成 RPC 的服务端进程；broker anchor 固定为 slot=`2`、process_name=`inventory-server`、pid=`202` | 是 |
 
 ## 自定义定位参数候选
 

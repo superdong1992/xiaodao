@@ -160,7 +160,12 @@ def _output_schema(data_type: Any) -> dict[str, Any]:
         (_SuccessEnvelope,),
         {"__annotations__": {"data": data_type}},
     )
-    return TypeAdapter(success | _FailureEnvelope).json_schema(mode="serialization")
+    schema = TypeAdapter(success | _FailureEnvelope).json_schema(mode="serialization")
+    root_type = schema.get("type")
+    if root_type not in (None, "object"):
+        raise RuntimeError("MCP output envelope schema must have an object root.")
+    schema["type"] = "object"
+    return schema
 
 
 _OUTPUT_SCHEMAS = {

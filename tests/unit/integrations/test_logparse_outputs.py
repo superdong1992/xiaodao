@@ -113,6 +113,7 @@ def _target_object(
     anchor = anchor or _anchor()
     target: dict[str, Any] = {
         "label": anchor.label,
+        "module": anchor.module,
         "module_key": "compact",
         "module_name": "COMPACT",
         "slot": "slot_1" if anchor.slot == "1" else anchor.slot,
@@ -366,6 +367,7 @@ def test_normalize_target_result_accepts_real_non_explain_shapes(
     "mutation",
     [
         {"label": "server"},
+        {"module": "ANOTHER"},
         {"module_key": "another", "module_name": "ANOTHER"},
         {"slot": "slot_9"},
         {"process_name": "inventory-server"},
