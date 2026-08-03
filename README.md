@@ -1,74 +1,65 @@
 # Problem Locator V1
 
-Problem Locator is a single-instance diagnosis service. It accepts a structured
-problem, gathers facts and attachments, runs pinned routing/diagnosis/review
-jobs, and publishes a reviewed `USER_RESULT` artifact. V1 uses a durable local
-JSON state file and filesystem resources; all business writes go through the
-application service and its repository ports.
+Problem Locator 是一个单实例故障诊断服务。它接收结构化问题，收集事实与附件，执行固定版本的路由、诊断和复核任务，最终发布经过复核的 `USER_RESULT` 结果文件。
 
-## Requirements and installation
+V1 使用本地 JSON 状态文件和文件系统资源实现持久化；所有业务写操作都通过应用服务及其仓储端口完成。
 
-- CPython 3.12 (the package requires `>=3.12,<3.13`)
-- `uv` and the checked-in `uv.lock`
-- a pinned Logparse checkout, config file, and Python launcher
-- a Claude-compatible command for real Agent jobs
+## 环境要求与安装
 
-Install the exact locked runtime and development dependencies:
+- CPython 3.12（项目要求 `>=3.12,<3.13`）
+- `uv`，并使用仓库中已提交的 `uv.lock`
+- 固定版本的 Logparse Git 工作区、配置文件及 Python 启动器
+- 用于执行真实 Agent 任务、兼容 Claude 的命令行程序
+
+安装锁定版本的运行时依赖和开发依赖：
 
 ```sh
 uv sync --frozen --all-groups
 uv lock --check
 ```
 
-Do not upgrade the locked MCP, HTTP, or storage-facing dependencies as part of
-an operational install.
+在部署或日常安装时，请勿顺带升级已锁定的 MCP、HTTP 或存储相关依赖。
 
-## Configuration
+## 配置
 
-Copy `.env.example` to a private file and replace every placeholder with an
-absolute path. An explicit `--env-file` is parsed as UTF-8 dotenv data. Values
-already present in the process environment take precedence over the file.
+复制 [`.env.example`](.env.example) 到一个不提交至版本库的私有配置文件，并将所有占位值替换为绝对路径。通过 `--env-file` 显式指定的文件会按 UTF-8 dotenv 格式解析；如果进程环境中已经存在同名变量，则进程环境变量优先。
 
-| Variable | Required | Default | Meaning |
-|---|---:|---|---|
-| `DATA_ROOT` | yes | — | Exclusive durable state/resources/jobs root |
-| `PUBLIC_BASE_URL` | yes | — | External HTTP(S) base URL, without query or fragment |
-| `SKILL_DIR` | yes | — | Directory containing pinned diagnosis skills |
-| `LOGPARSE_REPO` | yes | — | Pinned Logparse Git checkout |
-| `LOGPARSE_CONFIG_PATH` | yes | — | Logparse configuration inside that checkout |
-| `BIND_HOST` | no | `127.0.0.1` | Uvicorn bind host |
-| `PORT` | no | `8000` | Uvicorn port |
-| `CLAUDE_COMMAND` | no | `claude` | Agent command parsed as an argv template |
-| `LOGPARSE_PYTHON` | no | current Python | Lexical Python launcher for Logparse |
+| 环境变量 | 必填 | 默认值 | 说明 |
+|---|:---:|---|---|
+| `DATA_ROOT` | 是 | 无 | 独占的持久化状态、资源和任务根目录 |
+| `PUBLIC_BASE_URL` | 是 | 无 | 对外提供服务的 HTTP(S) 根地址，不得包含查询参数或片段 |
+| `SKILL_DIR` | 是 | 无 | 存放固定版本诊断 Skill 的目录 |
+| `LOGPARSE_REPO` | 是 | 无 | 固定版本的 Logparse Git 工作区 |
+| `LOGPARSE_CONFIG_PATH` | 是 | 无 | Logparse 工作区内的配置文件 |
+| `BIND_HOST` | 否 | `127.0.0.1` | Uvicorn 监听地址 |
+| `PORT` | 否 | `8000` | Uvicorn 监听端口 |
+| `CLAUDE_COMMAND` | 否 | `claude` | Agent 命令，会被解析为 argv 参数模板 |
+| `LOGPARSE_PYTHON` | 否 | 当前 Python | Logparse 使用的 Python 启动命令 |
 
-Runtime limits are frozen contract constants, not configuration. V1 rejects
-`JOB_CONCURRENCY` and unknown limit/max/retention overrides so an operator
-cannot believe an ineffective limit was applied. Never configure or persist
-`PROBLEM_LOCATOR_LOGPARSE_ENDPOINT` or `PROBLEM_LOCATOR_LOGPARSE_TOKEN`; those
-capabilities are created per Job and are removed when the broker session ends.
+运行时限制是冻结的契约常量，不属于可配置项。V1 会拒绝 `JOB_CONCURRENCY` 以及未知的 limit、max、retention 覆盖项，避免运维人员误以为某项实际上无效的限制已经生效。
 
-## Run the service
+不要配置或持久化 `PROBLEM_LOCATOR_LOGPARSE_ENDPOINT` 和 `PROBLEM_LOCATOR_LOGPARSE_TOKEN`。这两个值会按任务临时创建，并在代理会话结束时删除。
 
-Validate configuration and start exactly one worker:
+## 启动服务
+
+校验配置并启动唯一的工作线程：
 
 ```sh
 uv run python -m problem_locator serve --env-file /absolute/path/to/service.env
 ```
 
-V1 permits one service process and one Uvicorn worker for a `DATA_ROOT`. A
-second process fails the instance-lock readiness check. Do not place a
-multi-worker process manager in front of the same root.
+对于同一个 `DATA_ROOT`，V1 只允许一个服务进程和一个 Uvicorn worker。第二个进程会因实例锁就绪检查失败而退出。请勿让多 worker 进程管理器共用同一个数据根目录。
 
-Process interfaces:
+服务接口：
 
-- MCP transport: `/mcp`
-- liveness: `GET /live`
-- readiness: `GET /ready`
-- prepare attachment: `POST /api/v1/cases/{case_id}/attachments`
-- upload prepared bytes: `PUT /api/v1/attachments/{attachment_id}/content`
-- download a public artifact: `GET /api/v1/artifacts/{artifact_id}/content`
+- MCP 传输端点：`/mcp`
+- 存活检查：`GET /live`
+- 就绪检查：`GET /ready`
+- 准备附件：`POST /api/v1/cases/{case_id}/attachments`
+- 上传已准备的附件内容：`PUT /api/v1/attachments/{attachment_id}/content`
+- 下载公开产物：`GET /api/v1/artifacts/{artifact_id}/content`
 
-The seven Remote MCP tools are:
+服务提供以下 7 个远程 MCP 工具：
 
 - `problem_locator_create_case`
 - `problem_locator_prepare_attachment`
@@ -78,56 +69,33 @@ The seven Remote MCP tools are:
 - `problem_locator_cancel_case`
 - `problem_locator_list_artifacts`
 
-The bundled `.claude/skills/problem-locator-client` skill documents safe
-request IDs, revision handling, upload headers, and artifact hash checks. File
-bytes travel only over HTTP; they are never embedded in MCP messages.
+仓库内置的 [`.claude/skills/problem-locator-client`](.claude/skills/problem-locator-client) Skill 说明了安全的请求 ID、修订版本处理方式、上传请求头以及产物哈希校验方法。文件内容只通过 HTTP 传输，绝不会嵌入 MCP 消息。
 
-`/live` indicates that the HTTP process is serving. `/ready` additionally
-checks configuration, the instance lock, state validity, data directories, and
-startup recovery. During recovery, or after a fatal state/worker fault,
-liveness can remain true while readiness is false.
+`/live` 表示 HTTP 进程正在提供服务。`/ready` 还会检查配置、实例锁、状态有效性、数据目录和启动恢复过程。在恢复期间，或出现致命状态/worker 故障后，服务可能仍然存活，但尚未就绪。
 
-## Attachment and result behavior
+## 附件与结果处理
 
-Preparing an attachment creates metadata and an upload descriptor. Uploading
-the bytes verifies their exact size and SHA-256 and moves the attachment to
-`READY`; upload alone never advances a Case. The caller must explicitly submit
-the READY attachment as a supplement.
+准备附件时，服务会创建元数据和上传描述信息。上传文件内容时，服务会校验其准确大小与 SHA-256，校验通过后将附件转为 `READY` 状态。仅上传附件不会推进 Case；调用方必须显式将 `READY` 附件作为补充材料提交。
 
-`WorkspaceAttachmentInput.filename_suffix` is required but nullable. Archive
-suffix and content-type validation uses the frozen public contract helpers;
-paths, uppercase aliases, and mismatched suffixes are rejected.
+`WorkspaceAttachmentInput.filename_suffix` 为必填字段，但允许值为 `null`。归档文件后缀及 content-type 的校验使用冻结的公共契约辅助函数；路径形式、包含大写字母的别名以及不匹配的后缀都会被拒绝。
 
-Only downloadable public artifacts are listed by default. A reviewed
-`USER_RESULT` can be downloaded and must match its advertised byte count and
-SHA-256. Internal `LOGPARSE_RUN` directories are durable inputs for later Jobs
-but are never downloadable.
+默认只列出可下载的公开产物。经过复核的 `USER_RESULT` 可以下载，下载内容必须与声明的字节数和 SHA-256 一致。内部 `LOGPARSE_RUN` 目录会作为后续任务的持久化输入，但永远不可下载。
 
-## Startup recovery and retry semantics
+## 启动恢复与重试语义
 
-On each start the scheduler creates a new runtime epoch and completes recovery
-before it accepts new claims:
+每次启动时，调度器都会创建新的运行时 epoch，并在接受新任务之前完成以下恢复流程：
 
-1. Replay every durable, finalized but unconfirmed Job Outcome byte-for-byte.
-2. Only after replay, mark an old `RUNNING` Job with no finalized Outcome as
-   `INTERRUPTED`.
-3. Redispatch already-persisted `PENDING` Jobs.
+1. 逐字节重放所有已持久化、已最终确定但尚未确认的 Job Outcome。
+2. 完成重放后，才会把没有最终 Outcome 的旧 `RUNNING` 任务标记为 `INTERRUPTED`。
+3. 重新调度已经持久化的 `PENDING` 任务。
 
-Outcome submission retries reuse the same finalized receipt and never rerun
-the Agent. Asset/configuration errors and typed state-read errors park the
-worker and fail readiness. Recovered Jobs retain every frozen runtime binding;
-the current Catalog cannot replace them with a newer version. An interrupted
-REVIEW resumes as REVIEW, never as DIAGNOSE.
+重试提交 Outcome 时会复用同一份最终回执，不会再次运行 Agent。资源或配置错误，以及带类型的状态读取错误，会使 worker 停止接单并导致就绪检查失败。恢复后的任务会保留所有冻结的运行时绑定，当前 Catalog 不能用新版本替换这些绑定。被中断的 `REVIEW` 任务会继续执行 `REVIEW`，不会退回 `DIAGNOSE`。
 
-A command whose business mutation committed but whose post-commit Case reread
-failed returns the durable receipt with `case_view=null`. Treat that response
-as persisted success and query the Case again; do not create a second logical
-request.
+如果一条命令的业务变更已经提交，但提交后的 Case 再读取失败，服务会返回持久化回执，并令 `case_view=null`。应将该响应视为持久化成功，随后重新查询 Case；不要创建第二个逻辑请求。
 
-## Validate, export, back up, and restore
+## 校验、导出、备份与恢复
 
-These administration commands acquire the same exclusive instance lock. Run
-them only while the service for that `DATA_ROOT` is stopped:
+以下管理命令会获取与服务相同的独占实例锁，因此只能在对应 `DATA_ROOT` 的服务停止后执行：
 
 ```sh
 uv run python -m problem_locator validate-state \
@@ -138,79 +106,54 @@ uv run python -m problem_locator export-state \
   --output /absolute/path/outside-data-root/state-export.json
 ```
 
-`validate-state` emits a canonical `ValidationReport`. `export-state` writes a
-canonical `StateExport` containing one state generation, complete object
-counts, and a sorted resource size/hash inventory. The output must be outside
-`DATA_ROOT` and is an audit/migration artifact, not a resource backup.
+`validate-state` 输出规范化的 `ValidationReport`。`export-state` 输出规范化的 `StateExport`，其中包含单个状态世代、完整对象数量，以及按顺序排列的资源大小/哈希清单。导出文件必须位于 `DATA_ROOT` 之外；它只用于审计和迁移，不能替代资源备份。
 
-For a recoverable backup:
+创建可恢复备份：
 
-1. Stop the service and wait for shutdown to finish.
-2. Run `validate-state` and `export-state`.
-3. Copy the complete `DATA_ROOT` tree atomically enough to preserve
-   `state.json`, `jobs/**`, and `resources/**` from the same stopped point.
-4. Keep the export beside the backup for count/hash reconciliation.
+1. 停止服务，并等待关闭流程完成。
+2. 执行 `validate-state` 和 `export-state`。
+3. 完整复制 `DATA_ROOT` 目录树，并尽量以原子方式保证 `state.json`、`jobs/**` 和 `resources/**` 来自同一个停机时间点。
+4. 将导出文件与备份放在一起，以便核对对象数量和哈希。
 
-To restore, keep the damaged root read-only, copy a complete known-good backup
-to a new absolute root, run `validate-state`, compare its export counts and
-hashes, then start the service against the new root. Do not hand-edit
-`state.json`, discard a finalized outbox file, or silently fall back to
-`state.json.prev`.
+恢复时，应将损坏的数据根目录保持为只读，把完整且已知可用的备份复制到一个新的绝对路径，执行 `validate-state`，并核对导出文件中的对象数量和哈希，最后使用新的数据根目录启动服务。
 
-The r3 state schema is intentionally incompatible with pre-release r2 data.
-Old data may only be rebuilt or migrated offline into a fresh r3 installation;
-the service contains no in-place r2 compatibility path.
+不要手工编辑 `state.json`，不要丢弃已经最终确定的 outbox 文件，也不要静默回退到 `state.json.prev`。
 
-## PostgreSQL migration boundary
+r3 状态模式与预发布阶段的 r2 数据有意保持不兼容。旧数据只能离线重建，或迁移到全新的 r3 安装中；服务不提供 r2 原地兼容路径。
 
-V1 does not ship PostgreSQL, an ORM, dual writes, or a distributed lock. Start
-an offline PostgreSQL migration design when any of these becomes true:
+## PostgreSQL 迁移边界
 
-- a second service instance or high availability is required;
-- `state.json` approaches 16 MiB;
-- retained history approaches 500 Cases;
-- state write latency is materially affecting operation.
+V1 不包含 PostgreSQL、ORM、双写机制或分布式锁。当满足以下任一条件时，应开始设计离线 PostgreSQL 迁移方案：
 
-The migration must stop writes, export one canonical generation, import
-through equivalent repository/resource records, reconcile every object count
-and resource hash, and keep the original JSON root read-only until acceptance.
-Domain/application/runtime code depends on frozen ports rather than the JSON
-adapter so this remains an offline adapter replacement, not a business-model
-fork.
+- 需要第二个服务实例或高可用能力；
+- `state.json` 接近 16 MiB；
+- 保留的历史记录接近 500 个 Case；
+- 状态写入延迟已经明显影响运行。
 
-## Security and known constraints
+迁移时必须停止写入，导出一个规范化状态世代，通过等价的仓储/资源记录完成导入，核对所有对象数量和资源哈希，并在验收完成前保持原 JSON 数据根目录只读。
 
-- V1 is intended for a controlled network with trusted users, pinned Skills,
-  and a trusted Agent command. It does not implement tenant authorization.
-- The process and Agent are not an operating-system sandbox. Run them under a
-  dedicated OS account with only the required repository/data access.
-- Secrets, raw environment values, server paths, log archive bytes, broker
-  tokens, and internal execution logs must not appear in MCP/HTTP responses.
-- Logparse is fingerprinted at startup. The first eligible diagnosis Job may
-  parse once; continuation Jobs consume the persisted `LOGPARSE_RUN` and must
-  not unpack or parse the original archive again.
-- V1 has fixed concurrency `1`, fixed context/workspace/output limits, local
-  filesystem durability, and no multi-instance failover.
-- Native Windows and Linux startup validation, macOS process-tree/cancellation
-  validation, deterministic fake E2E, and real Logparse smoke are release
-  gates; test or handoff records must state which platform was actually run.
+领域层、应用层和运行时层依赖冻结的端口，而不是 JSON 适配器，因此迁移仍然是一次离线适配器替换，而不是业务模型分叉。
 
-### Native startup gates
+## 安全说明与已知限制
 
-The native gates deliberately remain skipped on any other operating system;
-that skip is an unexecuted release gate, never a pass. Each runner must use the
-same release-candidate Git head, CPython 3.12, locked dependencies, and a clean
-Logparse checkout at
-`a233b500d9c99e6815d1ffd82cb4ca55bbfe657a`.
+- V1 面向可信用户、固定版本 Skill 和可信 Agent 命令所在的受控网络，不提供租户级授权。
+- 服务进程和 Agent 都不是操作系统沙箱。请使用专用操作系统账户运行，并只授予必要的仓库和数据访问权限。
+- MCP/HTTP 响应中不得出现密钥、原始环境变量值、服务器路径、日志归档内容、代理令牌或内部执行日志。
+- Logparse 会在启动时进行指纹校验。首个符合条件的诊断任务可以解析一次日志；后续任务必须使用已持久化的 `LOGPARSE_RUN`，不得再次解包或解析原始归档。
+- V1 的并发数固定为 `1`，上下文、工作区和输出限制均为固定值；持久化依赖本地文件系统，不提供多实例故障转移。
+- 原生 Windows/Linux 启动验证、macOS 进程树/取消验证、确定性模拟端到端测试以及真实 Logparse 冒烟测试都属于发布门禁。测试或交接记录必须明确实际运行的平台。
 
-The current S08 candidate has no native Windows or Linux startup result. It
-therefore must not be described as cross-platform release-ready. Until those
-two native commands pass against the same candidate head, record them as
-unexecuted gates in `handoff/S08.json` under `known_limitations` and `risks`,
-and state the same restriction in `integration_notes`; do not add them to the
-handoff `tests` array as passed results.
+### 原生启动门禁
 
-macOS shell (run on the release-candidate head):
+原生门禁会在其他操作系统上主动跳过；被跳过意味着门禁尚未执行，不能视为通过。每个运行环境都必须使用同一个候选发布 Git HEAD、CPython 3.12、锁定版本的依赖，以及位于以下提交且工作区干净的 Logparse：
+
+```text
+a233b500d9c99e6815d1ffd82cb4ca55bbfe657a
+```
+
+当前 S08 候选版本没有原生 Windows 或 Linux 启动结果，因此不能宣称已经具备跨平台发布条件。在以下两条原生命令针对同一个候选版本 HEAD 通过之前，必须在 `handoff/S08.json` 的 `known_limitations` 和 `risks` 中将其记录为未执行门禁，并在 `integration_notes` 中说明同样的限制；不得将其作为已通过结果加入交接记录的 `tests` 数组。
+
+macOS shell（在候选发布版本 HEAD 上执行）：
 
 ```sh
 uv sync --frozen --all-groups
@@ -223,7 +166,7 @@ export CLAUDE_COMMAND=claude
 uv run pytest tests/e2e/test_native_startup_gate.py::test_native_macos_startup_gate -q -p no:cacheprovider
 ```
 
-Windows PowerShell:
+Windows PowerShell：
 
 ```powershell
 uv sync --frozen --all-groups
@@ -236,7 +179,7 @@ $env:CLAUDE_COMMAND = "claude"
 uv run pytest tests/e2e/test_native_startup_gate.py::test_native_windows_startup_gate -q -p no:cacheprovider
 ```
 
-Linux shell:
+Linux shell：
 
 ```sh
 uv sync --frozen --all-groups
@@ -249,16 +192,11 @@ export CLAUDE_COMMAND=claude
 uv run pytest tests/e2e/test_native_startup_gate.py::test_native_linux_startup_gate -q -p no:cacheprovider
 ```
 
-Each test asserts the native OS, Logparse commit and clean tree, startup from an
-env file, `/live`, all five `/ready` checks, bounded shutdown, canonical
-`validate-state` and `export-state`, instance-lock release, and a second
-recovery startup. A successful result must report the exact release-candidate
-SHA, OS/build, architecture, Python version, command, and pytest count.
+每项测试都会校验原生操作系统、Logparse 提交与干净工作区、从环境文件启动、`/live`、`/ready` 的全部 5 项检查、限时关闭、规范化的 `validate-state` 与 `export-state`、实例锁释放，以及第二次恢复启动。
 
-The real Agent Backend release smoke is separate from the deterministic fake
-Agent E2E. Run it only in an isolated temporary workspace with an authenticated
-Claude Code installation; the command below disables repository customizations,
-session persistence, and every tool except writing the fixed output file:
+成功结果必须记录准确的候选发布 SHA、操作系统/构建版本、架构、Python 版本、执行命令和 pytest 用例数量。
+
+真实 Agent Backend 发布冒烟测试与确定性模拟 Agent 端到端测试相互独立。只能在隔离的临时工作区中，使用已经完成身份验证的 Claude Code 安装执行。以下命令会禁用仓库自定义配置、会话持久化，以及除写入固定输出文件之外的所有工具：
 
 ```sh
 export S08_REAL_AGENT_GATE=1
@@ -266,18 +204,11 @@ export S08_REAL_AGENT_COMMAND='/absolute/path/to/claude -p --safe-mode --no-chro
 uv run pytest tests/e2e/test_real_agent_backend_gate.py -q -p no:cacheprovider
 ```
 
-The gate verifies an actual Claude Code version, stdin delivery through the
-production `AgentBackend`, exact canonical `AgentJobOutcome` bytes, immutable
-input/runtime markers, output topology, bounded execution, and process-tree
-cleanup. A skipped result is not a pass.
+该门禁会验证真实 Claude Code 版本、通过生产 `AgentBackend` 传递标准输入、完全一致的规范化 `AgentJobOutcome` 字节、不可变的输入/运行时标记、输出拓扑、限时执行以及进程树清理。测试被跳过不等于通过。
 
-### Clean installed-distribution gate
+### 干净安装包门禁
 
-This gate builds the release-candidate wheel, exports only runtime dependencies
-from `uv.lock` with hashes, installs both into a new CPython 3.12 environment,
-and runs every installed command from outside the source tree. Set
-`S08_UV_OFFLINE=1` only when the selected uv cache is already complete; leave it
-at `0` on a cold runner.
+该门禁会构建候选发布版本的 wheel，从 `uv.lock` 导出仅包含运行时依赖且带哈希的数据，在全新的 CPython 3.12 环境中安装两者，并从源码目录之外执行每条已安装命令。仅当所选 uv 缓存已经完整时，才设置 `S08_UV_OFFLINE=1`；在冷启动 runner 上应保持为 `0`。
 
 ```sh
 export S08_INSTALLED_DISTRIBUTION_GATE=1
@@ -291,23 +222,13 @@ export CLAUDE_COMMAND=/absolute/path/to/claude
 uv run pytest tests/e2e/test_installed_distribution_gate.py -q -p no:cacheprovider
 ```
 
-Expected result: exactly one passed test. It asserts a wheel-only import from
-the fresh environment's `site-packages`, the locked runtime versions, absence
-of pytest and Hatchling from that runtime environment, the pinned clean
-Logparse commit and Skill product hash, installed env-file startup, `/live`,
-all five `/ready` checks, bounded shutdown, and canonical installed
-`validate-state`/`export-state` commands.
+预期结果为恰好 1 个测试通过。该测试会校验：wheel 只能从新环境的 `site-packages` 导入；运行时依赖版本已锁定；运行环境中不包含 pytest 和 Hatchling；Logparse 位于指定提交且工作区干净；Skill 产品哈希正确；可以通过环境文件启动已安装服务；`/live` 和 `/ready` 的全部 5 项检查通过；服务可以限时关闭；已安装的 `validate-state` 和 `export-state` 命令输出规范化结果。
 
-If a native result is available before the final S08 handoff-only commit, add
-its real command and summary to `handoff/S08.json.tests[]`. If it arrives after
-that immutable tip, do not amend or rewrite the handoff; attach the same fields
-to the downstream release verification record and retain the S08 limitation
-until an approved successor handoff incorporates the evidence.
+如果在最终 S08 仅交接提交之前获得原生测试结果，应将真实命令和摘要加入 `handoff/S08.json.tests[]`。如果结果在该不可变提交之后才产生，不得修改或重写交接记录；应将相同字段附加到下游发布验证记录中，并保留 S08 的限制，直至经过批准的后续交接记录正式纳入该证据。
 
-## Release checks
+## 发布检查
 
-Run the full explicit test roots; a bare historical pytest configuration must
-not be assumed to include every suite:
+请显式运行全部测试根目录；不要假设历史遗留的裸 pytest 配置一定包含每个测试套件：
 
 ```sh
 uv run pytest tests/contracts tests/unit tests/integration tests/e2e
@@ -316,7 +237,4 @@ uv lock --check
 git diff --check
 ```
 
-Real Logparse, process-tree/cancellation, clean-environment installation,
-installed import/CLI/server smoke, fixture manifests, and Git ancestry/blob
-integrity are separate release-candidate gates and must not be reported as
-passed unless actually executed.
+真实 Logparse、进程树/取消行为、干净环境安装、安装后导入/CLI/服务冒烟测试、fixture manifest 以及 Git 祖先/blob 完整性都属于相互独立的候选发布门禁。除非实际执行并通过，否则不得将其报告为通过。
