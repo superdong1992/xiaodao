@@ -349,20 +349,6 @@ def _real_asset_paths(
     assert logparse_config.is_file() and not logparse_config.is_symlink()
     assert logparse_python.is_file() and os.access(logparse_python, os.X_OK)
 
-    status = _run_checked(
-        [
-            "git",
-            "-C",
-            os.fspath(logparse_repo),
-            "status",
-            "--porcelain",
-            "--untracked-files=all",
-        ],
-        cwd=outside_cwd,
-        environ=environ,
-        label="real Logparse cleanliness verification",
-    ).stdout
-    assert status == ""
     return skill_dir, logparse_repo, logparse_config, logparse_python
 
 

@@ -16,12 +16,16 @@ export CLAUDE_COMMAND='/usr/bin/timeout --foreground --signal=TERM --kill-after=
 cd /opt/src/xiaodao
 patch_sha=$(awk 'NR == 1 && $2 == "/evidence/source-input.patch" {print $1}' /evidence/source-input.patch.sha256)
 test -n "$patch_sha"
+logparse_source_kind=$(awk -F= '$1 == "logparse_source_kind" {print $2}' /evidence/source-pins.txt)
+test "$logparse_source_kind" = git || test "$logparse_source_kind" = directory
 case "${1:-}" in
   preclean)
     git -c core.autocrlf=false diff --name-only | LC_ALL=C sort > /tmp/attempt52-patch-files-preclean.txt
     cmp /tmp/attempt52-patch-files-preclean.txt /evidence/source.patch.files.txt
     test -z "$(git ls-files --others --exclude-standard)"
-    test -z "$(git -C /opt/src/logparse status --porcelain --untracked-files=all)"
+    if test "$logparse_source_kind" = git; then
+      test -z "$(git -C /opt/src/logparse status --porcelain --untracked-files=all)"
+    fi
     test -z "$(git -C /opt/src/problem-locator-mcp status --porcelain --untracked-files=all)"
     test -z "$(find /opt/src/xiaodao /opt/src/logparse /opt/src/problem-locator-mcp \
       \( -type d -name __pycache__ -o -type f -name '*.pyc' \) -print -quit)"
@@ -32,7 +36,7 @@ case "${1:-}" in
     {
       printf 'xiaodao_expected_patch_only=true\n'
       printf 'xiaodao_untracked=none\n'
-      printf 'logparse_tree=clean\n'
+      printf 'logparse_source_kind=%s\n' "$logparse_source_kind"
       printf 'problem_locator_mcp_tree=clean\n'
       printf 'source___pycache__=none\n'
       printf 'source_pyc=none\n'
@@ -69,7 +73,9 @@ case "${1:-}" in
     git -c core.autocrlf=false diff --name-only | LC_ALL=C sort > /tmp/attempt52-patch-files.txt
     cmp /tmp/attempt52-patch-files.txt /evidence/source.patch.files.txt
     printf 'post_pytest_sha256=%s\n' "$patch_sha" >> /evidence/patch-rehash-evidence.txt
-    test -z "$(git -C /opt/src/logparse status --porcelain --untracked-files=all)"
+    if test "$logparse_source_kind" = git; then
+      test -z "$(git -C /opt/src/logparse status --porcelain --untracked-files=all)"
+    fi
     test -z "$(git -C /opt/src/problem-locator-mcp status --porcelain --untracked-files=all)"
     test "$(git -C /opt/src/problem-locator-mcp remote get-url origin)" = \
       'https://github.com/superdong1992/problem-locator-mcp.git'
@@ -83,7 +89,7 @@ case "${1:-}" in
       printf 'git_diff_check=pass\n'
       printf 'source_patch_cmp=pass\n'
       printf 'source_patch_sha256=%s\n' "$patch_sha"
-      printf 'logparse_tree=clean\n'
+      printf 'logparse_source_kind=%s\n' "$logparse_source_kind"
       printf 'problem_locator_mcp_tree=clean\n'
       printf 'data_root_still_empty=true\n'
     } > /evidence/pre-gates-post-verification.txt

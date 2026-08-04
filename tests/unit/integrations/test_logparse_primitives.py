@@ -91,6 +91,18 @@ def _make_repo(tmp_path: Path) -> tuple[Path, Path]:
     return repo, config
 
 
+def _make_archive_directory(tmp_path: Path) -> tuple[Path, Path]:
+    repo = tmp_path / "logparse-archive"
+    repo.mkdir()
+    _write(repo / ".gitignore", b"ignored/\n")
+    _write(repo / "cli.py", b"print('parse')\n")
+    _write(repo / "nested" / "alpha.txt", b"alpha\n")
+    _write(repo / "unicode-\u03b2.txt", "beta\n".encode())
+    config = tmp_path / "archive-config.yaml"
+    config.write_bytes(b"products:\n  compact: {}\n")
+    return repo, config
+
+
 def _expected_asset_hash(repo: Path, config: Path) -> str:
     entry_paths = [
         ".gitignore",
@@ -144,6 +156,45 @@ def test_fingerprint_uses_the_canonical_repo_config_and_python_hashes(
     assert asset.ref.content_hash == expected_hash
     assert asset.ref.version == f"sha256-{expected_hash[:16]}"
     assert fingerprint_logparse_asset(repo, config, sys.executable) == asset
+
+
+def test_fingerprint_accepts_an_extracted_source_archive_without_git(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo, config = _make_archive_directory(tmp_path)
+    _write(repo / ".venv" / "cache.bin", b"runtime environment")
+    _write(repo / "__pycache__" / "cli.cpython-312.pyc", b"bytecode")
+    _write(repo / "output" / "result.json", b"{}\n")
+    _write(repo / ".coverage", b"coverage data")
+    _write(repo / "debug.log", b"runtime log")
+    real_run = subprocess.run
+
+    def reject_git(*args: object, **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        argv = args[0]
+        assert isinstance(argv, list)
+        if argv[0] == "git":
+            pytest.fail("archive fingerprinting must not invoke Git")
+        return real_run(*args, **kwargs)  # type: ignore[call-overload]
+
+    monkeypatch.setattr(fingerprint_module.subprocess, "run", reject_git)
+
+    asset = fingerprint_logparse_asset(repo, config, sys.executable)
+
+    assert asset.ref.content_hash == _expected_asset_hash(repo, config)
+    _write(repo / ".venv" / "cache.bin", b"changed runtime environment")
+    _write(repo / "debug.log", b"changed runtime log")
+    assert fingerprint_logparse_asset(repo, config, sys.executable) == asset
+
+
+def test_fingerprint_rejects_an_empty_extracted_source_archive(tmp_path: Path) -> None:
+    repo = tmp_path / "empty-archive"
+    repo.mkdir()
+    config = tmp_path / "config.yaml"
+    config.write_text("products: {}\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="file list is empty"):
+        fingerprint_logparse_asset(repo, config, sys.executable)
 
 
 def test_configuration_preserves_a_validated_python_launcher_symlink(

@@ -32,13 +32,24 @@ cmp /tmp/e2e-after-apply.patch /evidence/source.patch
   printf 'after_apply_sha256=%s\n' "$patch_sha"
 } > /evidence/patch-rehash-evidence.txt
 
-logparse_commit=$(git -C /source/logparse rev-parse HEAD)
-test -n "$logparse_commit"
-git clone --no-hardlinks /source/logparse /opt/src/logparse
-git -C /opt/src/logparse checkout --detach "$logparse_commit"
-git -C /opt/src/logparse config core.autocrlf false
-test "$(git -C /opt/src/logparse rev-parse HEAD)" = "$logparse_commit"
-test -z "$(git -C /opt/src/logparse status --porcelain --untracked-files=all)"
+logparse_commit=
+if test -e /source/logparse/.git && git -C /source/logparse rev-parse HEAD >/dev/null 2>&1; then
+  logparse_source_kind=git
+  logparse_commit=$(git -C /source/logparse rev-parse HEAD)
+  test -n "$logparse_commit"
+  git clone --no-hardlinks /source/logparse /opt/src/logparse
+  git -C /opt/src/logparse checkout --detach "$logparse_commit"
+  git -C /opt/src/logparse config core.autocrlf false
+  test "$(git -C /opt/src/logparse rev-parse HEAD)" = "$logparse_commit"
+  test -z "$(git -C /opt/src/logparse status --porcelain --untracked-files=all)"
+else
+  logparse_source_kind=directory
+  mkdir -p /opt/src/logparse
+  cp -a /source/logparse/. /opt/src/logparse/
+fi
+test -f /opt/src/logparse/cli.py
+test -f /opt/src/logparse/config.yaml
+test -f /opt/src/logparse/requirements.txt
 
 git clone --no-hardlinks /source/problem-locator-mcp /opt/src/problem-locator-mcp
 git -C /opt/src/problem-locator-mcp checkout --detach "$mcp_commit"
@@ -51,12 +62,15 @@ test -z "$(git -C /opt/src/problem-locator-mcp status --porcelain --untracked-fi
 {
   printf 'ubuntu_image=%s\n' 'ubuntu@sha256:3131b4cc82a783df6c9df078f86e01819a13594b865c2cad47bd1bca2b7063bb'
   printf 'xiaodao_base=%s\n' "$xiaodao_base"
-  printf 'logparse=%s\n' "$logparse_commit"
+  printf 'logparse_source_kind=%s\n' "$logparse_source_kind"
+  if test -n "$logparse_commit"; then
+    printf 'logparse=%s\n' "$logparse_commit"
+  fi
   printf 'problem_locator_mcp=%s\n' "$mcp_commit"
   printf 'problem_locator_mcp_origin=%s\n' "$(git -C /opt/src/problem-locator-mcp remote get-url origin)"
   printf 'problem_locator_mcp_tree=clean\n'
   printf 'source_patch_sha256=%s\n' "$patch_sha"
-  printf 'logparse_git_inventory_trust=command-scoped-exact-configured-repository\n'
+  printf 'logparse_inventory=%s\n' "$(if test "$logparse_source_kind" = git; then printf 'command-scoped-git'; else printf 'filesystem'; fi)"
   printf 'system_gitconfig_safe_directory_workaround=false\n'
   printf 'uv=0.11.32\n'
 } > /evidence/source-pins.txt

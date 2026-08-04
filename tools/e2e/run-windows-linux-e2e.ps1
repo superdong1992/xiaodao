@@ -493,9 +493,13 @@ $phase1 = if (Test-Path -LiteralPath (Join-Path $businessRoot 'phase1-state.json
 $audit = if (Test-Path -LiteralPath (Join-Path $businessRoot 'restart\final-state-audit.json')) { [IO.File]::ReadAllText((Join-Path $businessRoot 'restart\final-state-audit.json'), $utf8) | ConvertFrom-Json } else { $null }
 $sourcePinsPath = if ($Profile -ceq 'ReleaseGates') { Join-Path $evidence 'release\deterministic\source-pins.txt' } else { Join-Path $evidence 'source-pins.txt' }
 $logparseCommit = $null
+$logparseSourceKind = $null
 if (Test-Path -LiteralPath $sourcePinsPath -PathType Leaf) {
-    $logparseMatch = [regex]::Match([IO.File]::ReadAllText($sourcePinsPath, $utf8), '(?m)^logparse=([0-9a-f]{40,64})\r?$')
+    $sourcePinsText = [IO.File]::ReadAllText($sourcePinsPath, $utf8)
+    $logparseMatch = [regex]::Match($sourcePinsText, '(?m)^logparse=([0-9a-f]{40,64})\r?$')
     if ($logparseMatch.Success) { $logparseCommit = $logparseMatch.Groups[1].Value }
+    $sourceKindMatch = [regex]::Match($sourcePinsText, '(?m)^logparse_source_kind=(git|directory)\r?$')
+    if ($sourceKindMatch.Success) { $logparseSourceKind = $sourceKindMatch.Groups[1].Value }
 }
 $patchSha = if (Test-Path -LiteralPath (Join-Path $evidence 'source-input.patch')) { (Get-FileHash -LiteralPath (Join-Path $evidence 'source-input.patch') -Algorithm SHA256).Hash.ToLowerInvariant() } else { $null }
 $pytest = Get-PytestTotals $evidence
@@ -508,6 +512,7 @@ $report = [PSCustomObject][ordered]@{
     failure_code = $(if ($script:success) { $null } else { $script:failure.Exception.Message })
     base_commit = 'c31cc03848155d03b9a35776555e413f26b264ad'
     patch_sha256 = $patchSha
+    logparse_source_kind = $logparseSourceKind
     logparse_commit = $logparseCommit
     problem_locator_mcp_commit = '97d0446580f49e7b1add1c5fc6d6a41c97884884'
     ubuntu_digest = 'sha256:3131b4cc82a783df6c9df078f86e01819a13594b865c2cad47bd1bca2b7063bb'

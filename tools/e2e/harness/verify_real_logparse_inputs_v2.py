@@ -52,19 +52,24 @@ version_result = subprocess.run(
 python_version = version_result.stdout.strip() or version_result.stderr.strip()
 assert python_version == EXPECTED_PYTHON_VERSION
 
-commit = subprocess.run(
-    ["git", "-C", os.fspath(repo), "rev-parse", "HEAD"],
-    check=True,
-    capture_output=True,
-    text=True,
-).stdout.strip()
-status = subprocess.run(
-    ["git", "-C", os.fspath(repo), "status", "--porcelain"],
-    check=True,
-    capture_output=True,
-    text=True,
-).stdout
-assert status == ""
+commit: str | None = None
+tree_clean: bool | None = None
+source_kind = "directory"
+if (repo / ".git").exists():
+    source_kind = "git"
+    commit = subprocess.run(
+        ["git", "-C", os.fspath(repo), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    status = subprocess.run(
+        ["git", "-C", os.fspath(repo), "status", "--porcelain"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    tree_clean = status == ""
 
 archive_bytes = archive.read_bytes()
 fixture_bytes = base64.b64decode(b"".join(fixture.read_bytes().split()), validate=True)
@@ -83,7 +88,8 @@ payload = {
     "logparse_python_launcher_symlink": python_launcher.is_symlink(),
     "logparse_python_resolved_under_managed_root": True,
     "logparse_python_version": python_version,
-    "logparse_tree_clean": True,
+    "logparse_source_kind": source_kind,
+    "logparse_tree_clean": tree_clean,
     "schema_version": 1,
 }
 rendered = json.dumps(

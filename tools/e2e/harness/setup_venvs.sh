@@ -45,6 +45,15 @@ uv pip check --python /opt/venvs/logparse/bin/python
 xiaodao_packages=$(uv pip list --python /opt/venvs/xiaodao/bin/python --format freeze | wc -l)
 logparse_packages=$(uv pip list --python /opt/venvs/logparse/bin/python --format freeze | wc -l)
 
+logparse_source_kind=$(awk -F= '$1 == "logparse_source_kind" {print $2}' /evidence/source-pins.txt)
+test "$logparse_source_kind" = git || test "$logparse_source_kind" = directory
+logparse_commit=$(awk -F= '$1 == "logparse" {print $2}' /evidence/source-pins.txt)
+logparse_tree=directory
+if test "$logparse_source_kind" = git; then
+  test -n "$logparse_commit"
+  logparse_tree=clean
+fi
+
 test ! -L /opt/venvs/xiaodao/.lock
 test -f /opt/venvs/xiaodao/.lock
 test "$(stat -c '%u:%g' -- /opt/venvs/xiaodao/.lock)" = '0:0'
@@ -98,8 +107,9 @@ test "$(stat -c %a /opt/uv-python)" = 755
   printf 'logparse_install=uv pip install -r /opt/src/logparse/requirements.txt\n'
   printf 'logparse_package_count=%s\n' "$logparse_packages"
   printf 'logparse_pip_check=pass\n'
-  printf 'logparse_commit=%s\n' "$(git -C /opt/src/logparse rev-parse HEAD)"
-  printf 'logparse_tree=clean\n'
+  printf 'logparse_source_kind=%s\n' "$logparse_source_kind"
+  printf 'logparse_commit=%s\n' "$logparse_commit"
+  printf 'logparse_tree=%s\n' "$logparse_tree"
   printf 'python_install_attempts=%s\n' "$python_attempt"
   printf 'base_cache_hit=%s\n' "$base_cache_hit"
   printf 'managed_python_root=/opt/uv-python\n'

@@ -175,12 +175,6 @@ def _run_native_startup_gate(expected_system: str, tmp_path: Path) -> None:
     logparse_repo = _required_absolute_path("LOGPARSE_REPO")
     logparse_config = _required_absolute_path("LOGPARSE_CONFIG_PATH")
     logparse_python = _required_absolute_path("LOGPARSE_PYTHON")
-    assert subprocess.run(
-        ["git", "-C", os.fspath(logparse_repo), "status", "--porcelain"],
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout == ""
 
     data_root = tmp_path / "data"
     export_path = tmp_path / "state-export.json"

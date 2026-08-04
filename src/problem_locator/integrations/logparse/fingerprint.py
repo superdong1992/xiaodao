@@ -1,4 +1,4 @@
-"""Startup-time fingerprinting for the pinned logparse installation."""
+"""Startup-time fingerprinting for a controlled logparse source directory."""
 
 from __future__ import annotations
 
@@ -19,6 +19,30 @@ from problem_locator.contracts import (
 
 _READ_CHUNK_BYTES = 1024 * 1024
 _COMMAND_TIMEOUT_SECONDS = 10.0
+_FILESYSTEM_IGNORED_DIRECTORY_NAMES = frozenset(
+    {
+        ".codex",
+        ".codex-pydeps",
+        ".git",
+        ".idea",
+        ".mypy_cache",
+        ".pytest_cache",
+        ".pytest_tmp",
+        ".pytest_tmp_codex",
+        ".ruff_cache",
+        ".superpowers",
+        ".venv",
+        ".vscode",
+        "__pycache__",
+        "build",
+        "dist",
+        "htmlcov",
+        "output",
+        "venv",
+    }
+)
+_FILESYSTEM_IGNORED_FILE_NAMES = frozenset({".coverage", ".DS_Store"})
+_FILESYSTEM_IGNORED_FILE_SUFFIXES = (".egg", ".log", ".pyc", ".pyd", ".pyo")
 
 
 def _resolved_file(value: str | os.PathLike[str], *, executable: bool = False) -> Path:
@@ -155,6 +179,73 @@ def _git_paths(repo: Path) -> list[str]:
     return paths
 
 
+def _is_link_like(path: Path) -> bool:
+    is_junction = getattr(path, "is_junction", None)
+    return path.is_symlink() or bool(is_junction is not None and is_junction())
+
+
+def _filesystem_path_is_ignored(name: str, *, directory: bool) -> bool:
+    if directory:
+        return (
+            name in _FILESYSTEM_IGNORED_DIRECTORY_NAMES
+            or name.endswith(".egg-info")
+        )
+    return (
+        name in _FILESYSTEM_IGNORED_FILE_NAMES
+        or name.endswith(_FILESYSTEM_IGNORED_FILE_SUFFIXES)
+    )
+
+
+def _filesystem_paths(repo: Path) -> list[str]:
+    """Enumerate a source archive without requiring Git metadata or a Git binary."""
+
+    paths: list[str] = []
+
+    def enumeration_failed(error: OSError) -> None:
+        raise ValueError("logparse source directory cannot be enumerated") from error
+
+    try:
+        for root_text, directory_names, file_names in os.walk(
+            repo,
+            topdown=True,
+            followlinks=False,
+            onerror=enumeration_failed,
+        ):
+            root = Path(root_text)
+            retained_directories: list[str] = []
+            for name in sorted(directory_names):
+                if _filesystem_path_is_ignored(name, directory=True):
+                    continue
+                directory = root / name
+                metadata = directory.lstat()
+                if _is_link_like(directory) or not stat.S_ISDIR(metadata.st_mode):
+                    raise ValueError(
+                        "logparse source directory entries must be ordinary directories"
+                    )
+                retained_directories.append(name)
+            directory_names[:] = retained_directories
+
+            for name in sorted(file_names):
+                if _filesystem_path_is_ignored(name, directory=False):
+                    continue
+                paths.append((root.relative_to(repo) / name).as_posix())
+    except OSError as exc:
+        raise ValueError("logparse source directory cannot be enumerated") from exc
+
+    if not paths or any(not path for path in paths):
+        raise ValueError("logparse repository file list is empty or ambiguous")
+    if len(paths) != len(set(paths)):
+        raise ValueError("logparse repository file list contains duplicates")
+    return paths
+
+
+def _repository_paths(repo: Path) -> list[str]:
+    git_metadata = repo / ".git"
+    if git_metadata.exists() and not _is_link_like(git_metadata):
+        return _git_paths(repo)
+    return _filesystem_paths(repo)
+
+
 def _safe_repo_file(repo: Path, path_text: str) -> tuple[str, Path]:
     if (
         path_text != path_text.strip()
@@ -208,14 +299,14 @@ def fingerprint_logparse_asset(
     logparse_config_path: str | os.PathLike[str],
     logparse_python: str | os.PathLike[str],
 ) -> ResolvedAsset:
-    """Return the S07 fixed ``LOGPARSE_TOOL`` asset for one installation."""
+    """Return the ``LOGPARSE_TOOL`` asset for one controlled installation."""
 
     repo = _resolved_repo(logparse_repo)
     config = _resolved_file(logparse_config_path)
     python = _resolved_file(logparse_python, executable=True)
 
     entries: list[dict[str, object]] = []
-    for raw_path in _git_paths(repo):
+    for raw_path in _repository_paths(repo):
         canonical_path, resolved_path = _safe_repo_file(repo, raw_path)
         size, digest = _sha256_file(resolved_path)
         entries.append({"path": canonical_path, "size": size, "sha256": digest})

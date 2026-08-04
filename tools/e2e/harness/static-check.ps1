@@ -484,8 +484,14 @@ $boundaryText = [System.IO.File]::ReadAllText($boundaryPath)
 $boundaryRunnerText = [System.IO.File]::ReadAllText((Join-Path $DriverRoot 'verify_nonroot_python_launchers.sh'))
 $sourceSetupText = [System.IO.File]::ReadAllText((Join-Path $DriverRoot 'setup_sources.sh'))
 $preGatesText = [System.IO.File]::ReadAllText((Join-Path $DriverRoot 'run_pre_gates.sh'))
-if (-not $sourceSetupText.Contains('logparse_commit=$(git -C /source/logparse rev-parse HEAD)')) {
-    throw 'setup_sources.sh must use the selected Logparse source HEAD'
+foreach ($literal in @(
+    'logparse_source_kind=directory',
+    'cp -a /source/logparse/. /opt/src/logparse/',
+    "printf 'logparse_source_kind=%s\n'"
+)) {
+    if (-not $sourceSetupText.Contains($literal)) {
+        throw "setup_sources.sh archive-source support marker absent: $literal"
+    }
 }
 if ($sourceSetupText -match '(?m)^logparse_commit=[0-9a-f]{40,64}$') {
     throw 'setup_sources.sh must not pin Logparse to a fixed commit'
