@@ -103,7 +103,7 @@ def test_three_heterogeneous_specs_generate_deterministically(
 
     manifest = _manifest(first.skill_dir)
     assert manifest["schema_version"] == 2
-    assert manifest["version"] == "3.0.4"
+    assert manifest["version"] == "3.0.5"
     assert [item["name"] for item in manifest["requirements"]] == expected_names
     assert all("required" not in item for item in manifest["requirements"])
     if expected_product is None:
@@ -183,6 +183,44 @@ def test_logparse_archive_content_types_are_platform_fixed(generator: Any) -> No
     attachment = next(item for item in value["requirements"] if item["kind"] == "ATTACHMENT")
     attachment["constraints"]["allowed_content_types"] = ["application/octet-stream"]
     with pytest.raises(ValueError, match="platform-fixed"):
+        generator.GenerationSpec.from_mapping(value)
+
+
+def test_logparse_archive_content_types_are_injected_without_mutating_author_input(
+    generator: Any,
+) -> None:
+    value = json.loads(
+        (SPEC_ROOT / "database-deadlock.json").read_text(encoding="utf-8")
+    )
+    attachment = next(item for item in value["requirements"] if item["kind"] == "ATTACHMENT")
+    assert "allowed_content_types" not in attachment["constraints"]
+
+    spec = generator.GenerationSpec.from_mapping(value)
+    normalized = next(item for item in spec.requirements if item.kind == "ATTACHMENT")
+
+    assert "allowed_content_types" not in attachment["constraints"]
+    assert normalized.constraints["allowed_content_types"] == [
+        "application/gzip",
+        "application/zip",
+        "application/x-tar",
+    ]
+
+
+def test_non_logparse_attachment_still_requires_business_content_types(
+    generator: Any,
+) -> None:
+    value = json.loads((SPEC_ROOT / "manual-triage.json").read_text(encoding="utf-8"))
+    value["requirements"].append(
+        {
+            "name": "manual_attachment",
+            "kind": "ATTACHMENT",
+            "stage": "INITIAL",
+            "fulfillment_source": "READY_ATTACHMENT",
+            "prompt": "请上传人工排查附件。",
+            "constraints": {"min_count": 1, "max_count": 1},
+        }
+    )
+    with pytest.raises(ValueError, match="ATTACHMENT constraints"):
         generator.GenerationSpec.from_mapping(value)
 
 

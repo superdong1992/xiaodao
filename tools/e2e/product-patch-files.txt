@@ -1,6 +1,7 @@
 .claude/skills/diagnose-service-takeover/SKILL.md
 .claude/skills/diagnose-service-takeover/diagnosis-skill.json
 .claude/skills/logparse-diagnose/SKILL.md
+.claude/skills/problem-locator-client/SKILL.md
 .claude/skills/wiki-to-diagnosis-skill/SKILL.md
 .claude/skills/wiki-to-diagnosis-skill/references/generated-skill-contract.md
 .claude/skills/wiki-to-diagnosis-skill/references/wiki-template.md
@@ -29,6 +30,7 @@ src/problem_locator/integrations/logparse/outputs.py
 src/problem_locator/integrations/logparse/tree.py
 src/problem_locator/integrations/result_archive.py
 src/problem_locator/interfaces/mcp_server.py
+src/problem_locator/interfaces/client_access.py
 src/problem_locator/runtime/agent_backend.py
 src/problem_locator/runtime/assets/output-contracts/diagnose/asset.json
 src/problem_locator/runtime/assets/output-contracts/diagnose/output-contract.md
@@ -110,6 +112,7 @@ tests/unit/integrations/test_no_archive_processing.py
 tests/unit/integrations/test_result_archive.py
 tests/unit/integrations/test_skill_contract.py
 tests/unit/interfaces/test_mcp_server.py
+tests/unit/interfaces/test_client_access_skill.py
 tests/unit/runtime/test_agent_backend.py
 tests/unit/runtime/test_catalog.py
 tests/unit/runtime/test_context_builder.py

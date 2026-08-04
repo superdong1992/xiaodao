@@ -13,7 +13,7 @@ import tempfile
 from typing import Any, Mapping, Sequence
 
 
-GENERATOR_VERSION = "3.0.4"
+GENERATOR_VERSION = "3.0.5"
 SPEC_SCHEMA_VERSION = 2
 MANIFEST_SCHEMA_VERSION = 2
 PRODUCT_FILES = ("SKILL.md", "diagnosis-skill.json")
@@ -275,6 +275,40 @@ def _logparse_plan(value: Any) -> dict[str, Any] | None:
     }
 
 
+def _normalize_requirement_mappings(
+    value: Any,
+    logparse_plan: dict[str, Any] | None,
+) -> list[Mapping[str, Any]]:
+    """Inject platform-owned constraints without turning them into author inputs."""
+
+    raw_requirements = _sequence(value, "requirements", maximum=64)
+    logparse_attachment = (
+        None
+        if logparse_plan is None
+        else logparse_plan["attachment_requirement"]
+    )
+    normalized: list[Mapping[str, Any]] = []
+    for raw in raw_requirements:
+        if not isinstance(raw, Mapping):
+            raise ValueError("requirement must be an object")
+        requirement = dict(raw)
+        constraints = requirement.get("constraints")
+        if (
+            logparse_attachment is not None
+            and requirement.get("name") == logparse_attachment
+            and requirement.get("kind") == "ATTACHMENT"
+            and isinstance(constraints, Mapping)
+        ):
+            normalized_constraints = dict(constraints)
+            normalized_constraints.setdefault(
+                "allowed_content_types",
+                list(LOG_ARCHIVE_CONTENT_TYPES),
+            )
+            requirement["constraints"] = normalized_constraints
+        normalized.append(requirement)
+    return normalized
+
+
 @dataclass(frozen=True)
 class GenerationSpec:
     skill_id: str
@@ -334,6 +368,7 @@ class GenerationSpec:
         product = value.get("logparse_product")
         if product is not None:
             product = _single_line(product, "logparse_product", maximum=4096)
+        logparse_plan = _logparse_plan(value["logparse_plan"])
         spec = cls(
             skill_id=_single_line(value["id"], "id", maximum=64),
             version=_single_line(value["version"], "version", maximum=64),
@@ -350,9 +385,12 @@ class GenerationSpec:
             ),
             requirements=tuple(
                 Requirement.from_mapping(item)
-                for item in _sequence(value["requirements"], "requirements", maximum=64)
+                for item in _normalize_requirement_mappings(
+                    value["requirements"],
+                    logparse_plan,
+                )
             ),
-            logparse_plan=_logparse_plan(value["logparse_plan"]),
+            logparse_plan=logparse_plan,
             time_characteristics=_text_tuple(
                 value["time_characteristics"], "time_characteristics"
             ),

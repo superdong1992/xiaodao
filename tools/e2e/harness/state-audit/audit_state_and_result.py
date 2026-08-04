@@ -68,9 +68,9 @@ SCHEMA_VERSION = 1
 SERVICE_BASE_URL = "http://127.0.0.1:18000"
 EXPECTED_SKILL = VersionedRef(
     id="diagnosis-skill/diagnose-service-takeover",
-    version="3.0.4",
+    version="3.0.5",
     content_hash=(
-        "08573b8e01e2b5c213c59b0b27b3922566293af1aed963c09c6f735f41abdd95"
+        "ae47a1a63e6cf4849f83b0f9d49db608c1e93ebe1713f21d58c910990b0857a4"
     ),
 )
 EXPECTED_ARCHIVE_NAME = "synthetic-rpc-service-takeover.zip"

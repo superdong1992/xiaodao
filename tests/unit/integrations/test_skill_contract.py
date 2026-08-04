@@ -78,6 +78,17 @@ def test_all_three_skill_frontmatters_have_only_name_and_description() -> None:
 
 def test_diagnosis_manifest_v2_is_exact_canonical_and_spec_owned() -> None:
     spec = _json(SPEC_ROOT / "rpc-service-takeover.json")
+    requirements = json.loads(json.dumps(spec["requirements"]))
+    logparse_attachment = spec["logparse_plan"]["attachment_requirement"]
+    attachment = next(
+        item for item in requirements if item["name"] == logparse_attachment
+    )
+    assert "allowed_content_types" not in attachment["constraints"]
+    attachment["constraints"]["allowed_content_types"] = [
+        "application/gzip",
+        "application/zip",
+        "application/x-tar",
+    ]
     expected = {
         key: spec[key]
         for key in (
@@ -87,7 +98,6 @@ def test_diagnosis_manifest_v2_is_exact_canonical_and_spec_owned() -> None:
             "capability",
             "summary",
             "requires_logparse",
-            "requirements",
             "logparse_plan",
             "logparse_product",
         )
@@ -96,6 +106,7 @@ def test_diagnosis_manifest_v2_is_exact_canonical_and_spec_owned() -> None:
         {
             "entry_document": "SKILL.md",
             "tool_bundle_id": "tool-bundle/diagnose",
+            "requirements": requirements,
         }
     )
 

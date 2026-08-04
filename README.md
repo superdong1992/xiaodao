@@ -2,7 +2,7 @@
 
 ## Diagnosis Skill v3
 
-当前落地版本为 GenerationSpec v2、生成器/生成 Skill `3.0.4`、manifest schema `2`、DIAGNOSE output contract `2.0.3` 和 S00 contract revision `v1-contract-r4`。
+当前落地版本为 GenerationSpec v2、生成器/生成 Skill `3.0.5`、manifest schema `2`、DIAGNOSE output contract `2.0.3` 和 S00 contract revision `v1-contract-r4`。
 
 本仓库将故障定位能力分为三层：
 
@@ -12,7 +12,7 @@
 
 Diagnosis Skill 由 `wiki-to-diagnosis-skill` 根据 GenerationSpec v2 生成。每个 requirement 都必须声明 `name`、`kind`、`stage`、`fulfillment_source`、`prompt` 和 S00 原生 `constraints`。`requires_logparse` 只表示绑定 Logparse 工具，不会自动生成 RPC 参数；`custom_parameters` 为空表示不增加任何自定义参数。
 
-Logparse 产品可以省略。省略时 Runtime 记录有效产品 `default`，Broker 不向上游强制传入 `--product`；只有非默认产品才显式传参。日志归档的 Content-Type 由平台按后缀确定：`.gz/.tar.gz/.tgz` 为 `application/gzip`，`.zip` 为 `application/zip`，`.tar` 为 `application/x-tar`。
+Logparse 产品可以省略。省略时 Runtime 记录有效产品 `default`，Broker 不向上游强制传入 `--product`；只有非默认产品才显式传参。生成定位 Skill 时，作者只声明 Logparse 归档 requirement 的数量约束，不填写 Content-Type；上传时用户也只选择归档文件。平台按文件后缀确定内部 Content-Type：`.gz/.tar.gz/.tgz` 为 `application/gzip`，`.zip` 为 `application/zip`，`.tar` 为 `application/x-tar`。
 
 候选结论必须同时产出：
 
@@ -21,15 +21,11 @@ Logparse 产品可以省略。省略时 Runtime 记录有效产品 `default`，B
 
 两项结果都必须经过 Review PASS 才会公开下载。`LOGPARSE_RUN` 仍是内部持久化输入，不会作为公开产物返回。当前生成器包含 RPC 超时、数据库死锁和无日志人工排查三个异构 Fixture，用于验证参数隔离与有/无 Logparse 的流程差异。完整设计与版本矩阵见 [`design/diagnosis-skill-v3-generalization-plan.md`](design/diagnosis-skill-v3-generalization-plan.md)。
 
-### 2026-08-04 发布验收
+### 发布验收
 
-同一份生产补丁已通过仓库内置的官方分段发布链路：
+使用仓库内置的分段链路验证同一份生产补丁：先运行 `Fast` 完成 Windows 客户端到 Linux 服务的完整业务旅程，再以该成功证据作为 `BusinessEvidenceRoot` 运行 `ReleaseGates`。后者会并行执行目标回归、全量套件、干净安装包、原生 Linux 启动以及真实 Agent/Route/Diagnosis 合同门，并要求低于 480 秒 SLA。
 
-- `Fast` attempt47：从 Windows 原生 Claude Code 客户端调用 Linux 容器内服务，完成 INITIAL 补参、日志上传、一次 Logparse、AFTER_LOGPARSE 补参、Candidate、Review、公开产物下载、服务重启和持久化复核；156 项测试全部通过，最终结果为 `ACCEPTED`，耗时 385.243 秒。
-- `ReleaseGates` attempt48：严格复用 attempt47 的成功业务证据和相同生产补丁身份，并行执行目标回归、1980 项全量套件、干净安装包、原生 Linux 启动、真实 Agent/Route/Diagnosis 合同门；2143 项测试零失败、13 项按平台/条件跳过，耗时 173.875 秒，低于 480 秒 SLA。
-- 两轮最终密钥扫描均通过。重启前后 `diagnosis-result.json` 与 `result.zip` 字节一致；内部 `LOGPARSE_RUN` 通过公开下载接口访问时返回 404。
-
-本地证据分别保存在 `.tmp/pl-e2e-evidence/attempt47-20260804-030256` 和 `.tmp/pl-e2e-evidence/attempt48-20260804-030949`。这些运行时证据不属于发布包，发布结论应以其中的 `verification-report.json`、最终审计 JSON 和 JUnit 文件为准。
+每次运行的本地证据保存在 `.tmp/pl-e2e-evidence/<attempt>`；运行时证据不属于发布包。发布结论以对应目录中的 `verification-report.json`、最终审计 JSON、密钥扫描结果和 JUnit 文件为准。
 
 Problem Locator 是一个单实例故障诊断服务。它接收结构化问题，收集事实与附件，执行固定版本的路由、诊断和复核任务，最终发布经过复核的 `USER_RESULT` 结果文件。
 

@@ -66,7 +66,7 @@ GENERATION_SPEC_ROOT = (
     ROOT / "tests/fixtures/components/diagnosis-generator/specs"
 )
 SKILL_PRODUCT_SHA256 = (
-    "08573b8e01e2b5c213c59b0b27b3922566293af1aed963c09c6f735f41abdd95"
+    "ae47a1a63e6cf4849f83b0f9d49db608c1e93ebe1713f21d58c910990b0857a4"
 )
 PARAMETER_GROUP_A = {
     "caller_service",
@@ -417,7 +417,7 @@ def test_real_first_log_diagnose_agent_produces_valid_continuation(
     assert hash_product_directory(skill_path) == SKILL_PRODUCT_SHA256
     skill_ref = VersionedRef(
         id="diagnose-service-takeover",
-        version="3.0.4",
+        version="3.0.5",
         content_hash=SKILL_PRODUCT_SHA256,
     )
     logparse_asset, broker_factory = build_logparse_runtime(
@@ -608,7 +608,7 @@ def test_real_diagnose_agent_requests_parameter_group_a_from_generated_skill(
     assert hash_product_directory(skill_path) == SKILL_PRODUCT_SHA256
     skill_ref = VersionedRef(
         id="diagnose-service-takeover",
-        version="3.0.4",
+        version="3.0.5",
         content_hash=SKILL_PRODUCT_SHA256,
     )
     job = _initial_diagnose_job(skill_ref)

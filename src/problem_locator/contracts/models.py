@@ -183,6 +183,30 @@ def derive_attachment_filename_suffix(
     return filename_suffix
 
 
+def derive_attachment_content_type(name: str) -> str:
+    """Derive the platform-owned archive media type from a safe filename."""
+
+    _validate_attachment_filename(name)
+    lowercase_name = name.lower()
+    filename_suffix = next(
+        (
+            suffix
+            for suffix in _ATTACHMENT_SUFFIXES_LONGEST_FIRST
+            if lowercase_name.endswith(suffix.value)
+        ),
+        None,
+    )
+    if filename_suffix is None:
+        raise ValueError("content_type cannot be derived from unsupported attachment suffix")
+    if not name.endswith(filename_suffix.value):
+        raise ValueError("attachment filename suffix must use canonical lowercase spelling")
+    return next(
+        content_type
+        for content_type, suffixes in _ATTACHMENT_SUFFIXES_BY_CONTENT_TYPE.items()
+        if filename_suffix in suffixes
+    )
+
+
 def workspace_attachment_relative_path(
     attachment_id: str,
     filename_suffix: AttachmentFilenameSuffix | None,
@@ -3921,6 +3945,7 @@ __all__ = [model.__name__ for model in _CONTRACT_MODEL_TYPES] + [
     "WaitSeconds",
     "WorkspaceInputEntry",
     "default_resource_limits",
+    "derive_attachment_content_type",
     "derive_attachment_filename_suffix",
     "validate_job_instruction_for_job",
     "validate_workspace_manifest_for_job",

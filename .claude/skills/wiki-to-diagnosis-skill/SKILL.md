@@ -6,7 +6,7 @@ description: 将非敏感故障定位 Wiki 转换为通用 Problem Locator Diagn
 # Wiki to Diagnosis Skill v3
 
 本 Skill 负责业务规则生成，不修改全局 DIAGNOSE output contract，也不把某个 Fixture
-的字段提升为通用协议。生成器固定为 `3.0.4`，输入规范为 `GenerationSpec v2`，输出
+的字段提升为通用协议。生成器固定为 `3.0.5`，输入规范为 `GenerationSpec v2`，输出
 Skill 从 `3.0.0` 起，manifest 为 schema v2。
 
 ## 开始前确认
@@ -58,10 +58,12 @@ value binding 只有两种形状：
 ```
 
 INPUT constraints 逐字使用 S00：`value_type=STRING`、`min_utf8_bytes`、
-`max_utf8_bytes`、`pattern`、`allowed_values[]`。ATTACHMENT constraints 使用
-`allowed_content_types[]`、`min_count`、`max_count`；若该附件供 Logparse 使用，
-allowed_content_types 必须按固定顺序等于
-`["application/gzip","application/zip","application/x-tar"]`。
+`max_utf8_bytes`、`pattern`、`allowed_values[]`。普通 ATTACHMENT constraints 使用
+`allowed_content_types[]`、`min_count`、`max_count`。若附件被
+`logparse_plan.attachment_requirement` 引用，作者侧只声明 `min_count` 与 `max_count`；
+不要询问或填写 `allowed_content_types`，生成器会在规范化结果和最终 manifest 中自动注入
+`["application/gzip","application/zip","application/x-tar"]`。为兼容旧规范，显式提供同一
+固定数组仍可接受，其他值必须拒绝。
 
 ## 生成与校验
 

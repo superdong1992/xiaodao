@@ -14,6 +14,7 @@ from problem_locator.contracts import (
     FixtureManifest,
     StateFile,
     canonical_json_bytes,
+    derive_attachment_content_type,
     derive_attachment_filename_suffix,
     parse_canonical_json_bytes,
     workspace_attachment_relative_path,
@@ -191,6 +192,31 @@ def test_workspace_attachment_materialization_scenario_uses_r3_helpers() -> None
         assert (None if suffix is None else suffix.value) == entry["filename_suffix"]
         relative = workspace_attachment_relative_path(ATTACHMENT_ID, suffix)
         assert PurePosixPath(relative).name == entry["workspace_leaf"]
+
+
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [
+        ("logs.gz", "application/gzip"),
+        ("logs.tar.gz", "application/gzip"),
+        ("logs.tgz", "application/gzip"),
+        ("logs.zip", "application/zip"),
+        ("logs.tar", "application/x-tar"),
+    ],
+)
+def test_archive_content_type_is_derived_from_canonical_suffix(
+    name: str,
+    expected: str,
+) -> None:
+    assert derive_attachment_content_type(name) == expected
+
+
+@pytest.mark.parametrize("name", ["logs.ZIP", "logs.rar", "../logs.zip"])
+def test_archive_content_type_derivation_rejects_unsafe_or_unsupported_names(
+    name: str,
+) -> None:
+    with pytest.raises(ValueError):
+        derive_attachment_content_type(name)
 
 
 def test_atomic_write_fault_scenario_freezes_disk_truth_per_boundary() -> None:

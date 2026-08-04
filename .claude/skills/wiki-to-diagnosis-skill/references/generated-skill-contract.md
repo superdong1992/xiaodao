@@ -29,6 +29,11 @@ constraints = S00 InputRequirementConstraints | AttachmentRequirementConstraints
 
 INPUT 只能配 USER_FACT；ATTACHMENT 只能配 READY_ATTACHMENT。所有项天然 required，
 manifest 禁止 `required` 字段。每阶段最多一个 ATTACHMENT，AFTER_LOGPARSE 只允许 INPUT。
+作者侧 GenerationSpec 中，普通 ATTACHMENT 必须声明完整
+`allowed_content_types/min_count/max_count`；被 `logparse_plan.attachment_requirement` 引用的
+Logparse 附件只声明 `min_count/max_count`。生成器规范化时自动补入平台固定的
+`application/gzip`、`application/zip`、`application/x-tar`，因此最终 manifest 仍是完整的
+S00 AttachmentRequirementConstraints。Content-Type 不是生成时的用户输入。
 
 `logparse_plan` 为 null 或对象：
 

@@ -2,9 +2,9 @@
 set -euo pipefail
 
 export PYTHONPYCACHEPREFIX=/tmp/attempt52-pycache
-expected_product=08573b8e01e2b5c213c59b0b27b3922566293af1aed963c09c6f735f41abdd95
-expected_skill_md=cc23a58912bee38262c9e7c7b8f3763581d90f1196a6dde2ce3b6fe535709ab3
-expected_skill_json=54f43e0eb01e253befa1e58855e982cd7f89ef99309cafdcbec39cfd8edec310
+expected_product=ae47a1a63e6cf4849f83b0f9d49db608c1e93ebe1713f21d58c910990b0857a4
+expected_skill_md=d4d1dd2085251a997eb32c325272377698443dced553c2f506b3bd44289630dc
+expected_skill_json=b61a0d978bd4375ad9fc4975b6f197f224a8d328e9ef003c1700a2db536bbd1d
 
 test ! -e /opt/e2e-skills
 /opt/venvs/xiaodao/bin/python -X utf8 \
@@ -13,7 +13,7 @@ test ! -e /opt/e2e-skills
   --output-root /opt/e2e-skills \
   > /evidence/skill-generator-receipt.json
 grep -Fq '"created":true' /evidence/skill-generator-receipt.json
-grep -Fq '"product_sha256":"08573b8e01e2b5c213c59b0b27b3922566293af1aed963c09c6f735f41abdd95"' \
+grep -Fq '"product_sha256":"ae47a1a63e6cf4849f83b0f9d49db608c1e93ebe1713f21d58c910990b0857a4"' \
   /evidence/skill-generator-receipt.json
 test "$(find /opt/e2e-skills/diagnose-service-takeover -type f | wc -l)" -eq 2
 test "$(find /opt/e2e-skills/diagnose-service-takeover -type f -exec stat -c %h '{}' + | sort -u)" = '1'
@@ -51,7 +51,7 @@ test "$(sha256sum /opt/e2e-skills/diagnose-service-takeover/diagnosis-skill.json
 {
   printf 'skill_path=/opt/e2e-skills/diagnose-service-takeover\n'
   printf 'skill_generation_mode=live-generator-from-wiki\n'
-  printf 'skill_generator_version=3.0.4\n'
+  printf 'skill_generator_version=3.0.5\n'
   printf 'skill_capability=service-takeover\n'
   printf 'skill_summary=定位合成服务接管场景中的 RPC 超时\n'
   printf 'skill_logparse_product=compact\n'

@@ -171,6 +171,8 @@ def test_skill_document_names_tools_and_safety_invariants() -> None:
     assert "durable business receipt" in skill
     assert "`case_view` is null" in skill
     assert ".tar.gz" in skill and "uppercase archive suffixes" in skill
+    assert "do not ask for a Logparse archive Content-Type" in skill
+    assert "Derive it from the canonical lowercase filename suffix" in skill
 
 
 def test_create_case_uses_one_stable_generated_request_id() -> None:
@@ -241,7 +243,6 @@ def test_upload_uses_safe_argv_latest_revision_and_explicit_submit(tmp_path: Pat
         expected_case_revision=1,
         requirement_inputs={},
         local_path=local_path,
-        content_type="application/zip",
     )
 
     assert actual == submit_response
@@ -249,6 +250,7 @@ def test_upload_uses_safe_argv_latest_revision_and_explicit_submit(tmp_path: Pat
         "problem_locator_prepare_attachment",
         "problem_locator_submit_supplement",
     ]
+    assert mcp.calls[0][1]["content_type"] == "application/zip"
     submit_arguments = mcp.calls[-1][1]
     assert submit_arguments["request_id"] == REQUEST_2
     assert submit_arguments["expected_case_revision"] == 3
@@ -267,6 +269,23 @@ def test_upload_uses_safe_argv_latest_revision_and_explicit_submit(tmp_path: Pat
     )
     assert argv[-2:] == ["--", descriptor.url]
     assert not any("curl " in argument for argument in argv)
+
+
+def test_unsupported_archive_suffix_stops_before_prepare(tmp_path: Path) -> None:
+    local_path = tmp_path / "logs.rar"
+    local_path.write_bytes(b"archive bytes")
+    mcp = FakeMcpClient([])
+    workflow = ClientAccessWorkflow(mcp, FakeCurl(), FixedIds([]))
+
+    with pytest.raises(ValueError, match="unsupported attachment suffix"):
+        workflow.prepare_upload_and_submit(
+            case_id=CASE_ID,
+            expected_case_revision=1,
+            requirement_inputs={},
+            local_path=local_path,
+        )
+
+    assert mcp.calls == []
 
 
 def test_remote_archive_name_validation_stops_before_upload(tmp_path: Path) -> None:

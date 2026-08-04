@@ -26,7 +26,7 @@ from problem_locator.contracts import (
 ROOT = Path(__file__).resolve().parents[2]
 LOGPARSE_COMMIT = "a233b500d9c99e6815d1ffd82cb4ca55bbfe657a"
 TAKEOVER_PRODUCT_HASH = (
-    "08573b8e01e2b5c213c59b0b27b3922566293af1aed963c09c6f735f41abdd95"
+    "ae47a1a63e6cf4849f83b0f9d49db608c1e93ebe1713f21d58c910990b0857a4"
 )
 OFFICIAL_KEYS = {
     "BIND_HOST",

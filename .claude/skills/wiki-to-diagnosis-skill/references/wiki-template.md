@@ -8,9 +8,9 @@
 ```json
 {
   "schema_version": 2,
-  "generator_version": "3.0.4",
+  "generator_version": "3.0.5",
   "id": "diagnose-manual-triage",
-  "version": "3.0.4",
+  "version": "3.0.5",
   "capability": "manual-triage",
   "summary": "根据用户提供的现象和复现步骤执行人工定位",
   "chinese_title": "人工故障定位",
@@ -43,5 +43,6 @@
 }
 ```
 
-Logparse Skill 可额外提供 `logparse_product`；仅非默认产品填写该字段。完整字段和约束
-见 [generated-skill-contract.md](generated-skill-contract.md)。
+Logparse Skill 可额外提供 `logparse_product`；仅非默认产品填写该字段。其归档 requirement
+只填写 `min_count` 和 `max_count`，归档 Content-Type 由生成器固定注入，不向用户询问。
+完整字段和约束见 [generated-skill-contract.md](generated-skill-contract.md)。

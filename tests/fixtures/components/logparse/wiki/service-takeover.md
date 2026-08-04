@@ -7,9 +7,9 @@
 ```json
 {
   "schema_version": 2,
-  "generator_version": "3.0.4",
+  "generator_version": "3.0.5",
   "id": "diagnose-service-takeover",
-  "version": "3.0.4",
+  "version": "3.0.5",
   "capability": "service-takeover",
   "summary": "定位合成服务接管场景中的 RPC 超时",
   "chinese_title": "服务接管 RPC 超时定位",
@@ -21,7 +21,7 @@
     {"name": "server_service", "kind": "INPUT", "stage": "INITIAL", "fulfillment_source": "USER_FACT", "prompt": "请提供服务方服务名。", "constraints": {"value_type": "STRING", "min_utf8_bytes": 1, "max_utf8_bytes": 256, "pattern": null, "allowed_values": []}},
     {"name": "rpc_method", "kind": "INPUT", "stage": "INITIAL", "fulfillment_source": "USER_FACT", "prompt": "请提供超时的 RPC 方法名。", "constraints": {"value_type": "STRING", "min_utf8_bytes": 1, "max_utf8_bytes": 256, "pattern": null, "allowed_values": []}},
     {"name": "problem_time", "kind": "INPUT", "stage": "INITIAL", "fulfillment_source": "USER_FACT", "prompt": "请提供毫秒精度 UTC 问题时间。", "constraints": {"value_type": "STRING", "min_utf8_bytes": 24, "max_utf8_bytes": 24, "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$", "allowed_values": []}},
-    {"name": "log_archive", "kind": "ATTACHMENT", "stage": "INITIAL", "fulfillment_source": "READY_ATTACHMENT", "prompt": "请上传 Logparse 支持的日志归档。", "constraints": {"allowed_content_types": ["application/gzip", "application/zip", "application/x-tar"], "min_count": 1, "max_count": 1}},
+    {"name": "log_archive", "kind": "ATTACHMENT", "stage": "INITIAL", "fulfillment_source": "READY_ATTACHMENT", "prompt": "请上传 Logparse 支持的日志归档。", "constraints": {"min_count": 1, "max_count": 1}},
     {"name": "order_id", "kind": "INPUT", "stage": "AFTER_LOGPARSE", "fulfillment_source": "USER_FACT", "prompt": "请提供用于两端日志关联的订单号。", "constraints": {"value_type": "STRING", "min_utf8_bytes": 1, "max_utf8_bytes": 256, "pattern": null, "allowed_values": []}}
   ],
   "logparse_plan": {"attachment_requirement": "log_archive", "problem_time_binding": {"source": "USER_FACT", "name": "problem_time"}, "anchors": [{"label": "client", "module": {"source": "SKILL_FIXED", "value": "compact"}, "slot": {"source": "SKILL_FIXED", "value": "slot_1"}, "process_name": {"source": "SKILL_FIXED", "value": "checkout-client"}, "pid": null}, {"label": "server", "module": {"source": "SKILL_FIXED", "value": "compact"}, "slot": {"source": "SKILL_FIXED", "value": "slot_2"}, "process_name": {"source": "SKILL_FIXED", "value": "inventory-server"}, "pid": null}]},

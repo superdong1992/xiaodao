@@ -26,7 +26,12 @@ from problem_locator.contracts.commands import (
     UploadDescriptor,
 )
 from problem_locator.contracts.enums import ErrorCode
-from problem_locator.contracts.models import ApplicationError, OpaqueId, PositiveInt
+from problem_locator.contracts.models import (
+    ApplicationError,
+    OpaqueId,
+    PositiveInt,
+    derive_attachment_content_type,
+)
 from problem_locator.contracts.ports import IdGenerator
 
 
@@ -457,9 +462,14 @@ class ClientAccessWorkflow:
         expected_case_revision: int,
         requirement_inputs: Mapping[str, str],
         local_path: Path,
-        content_type: str,
+        content_type: str | None = None,
         wait_seconds: int = 0,
     ) -> ApplicationResponse:
+        effective_content_type = (
+            derive_attachment_content_type(local_path.name)
+            if content_type is None
+            else content_type
+        )
         prepare_request_id = self._ids.new("request")
         prepare_data = _success_data(
             self._mcp.call_tool(
@@ -469,7 +479,7 @@ class ClientAccessWorkflow:
                     "case_id": case_id,
                     "expected_case_revision": expected_case_revision,
                     "name": local_path.name,
-                    "content_type": content_type,
+                    "content_type": effective_content_type,
                     "declared_size": None,
                     "declared_sha256": None,
                 },
@@ -492,7 +502,7 @@ class ClientAccessWorkflow:
         )
 
         required_headers = dict(descriptor.required_headers)
-        if required_headers["Content-Type"] != content_type:
+        if required_headers["Content-Type"] != effective_content_type:
             raise ClientProtocolError("upload descriptor changed the requested Content-Type")
         size, digest = _file_size_and_sha256(local_path, hash_required=True)
         assert digest is not None

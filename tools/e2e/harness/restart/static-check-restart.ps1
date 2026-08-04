@@ -547,7 +547,7 @@ $requiredLiterals = @(
     'alwaysLoad',
     'deepseek-v4-flash[1m]',
     'diagnosis-skill/diagnose-service-takeover',
-    '5ca6564dc823641b9c6b0f3a6c4178829d57eeb13190e21ae5d19ae3d8300d41',
+    '86fbba38713cfdddcd6a45bd86e6b839cb1706b2f9bfb8bd715d41c10a3afec0',
     'problem_locator_get_case',
     'problem_locator_list_artifacts',
     'FileMode]::CreateNew',
