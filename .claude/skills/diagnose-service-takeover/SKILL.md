@@ -1,208 +1,187 @@
 ---
-name: "diagnose-service-takeover"
-description: "用于定位合成服务接管场景中的 RPC 超时；在 Problem Locator DIAGNOSE Job 中遵守 S00 AgentJobOutcome，缺参或缺日志时正常结束本 Job，日志仅经 logparse-diagnose broker 分析，候选结论等待独立复核。"
+name: diagnose-service-takeover
+description: "定位合成服务接管场景中的 RPC 超时"
 ---
 
 # 服务接管 RPC 超时定位
 
-本产品由 `wiki-to-diagnosis-skill` 生成器 `2.0.0` 生成。只消费当前
-Problem Locator Job 的固定输入；S00 冻结 DTO、Schema、枚举和错误码是唯一机器合同。
-禁止增加私有结果字段、私有错误码或直接修改 Case。Candidate 不是最终结果，必须等待
-独立 REVIEW Job 的 `PASS`。
+由 `wiki-to-diagnosis-skill` generator `3.0.4` 生成。公共 DIAGNOSE output
+contract 只定义通用 Schema、安全、Evidence/Candidate 与原子输出；本文件独占业务
+requirements、阶段、工具映射和判定规则。
 
-## 产品固定信息
+<!-- DIAGNOSIS_SKILL_MANIFEST_V2_BEGIN -->
+```json
+{"capability":"service-takeover","entry_document":"SKILL.md","id":"diagnose-service-takeover","logparse_plan":{"anchors":[{"label":"client","module":{"source":"SKILL_FIXED","value":"compact"},"pid":null,"process_name":{"source":"SKILL_FIXED","value":"checkout-client"},"slot":{"source":"SKILL_FIXED","value":"slot_1"}},{"label":"server","module":{"source":"SKILL_FIXED","value":"compact"},"pid":null,"process_name":{"source":"SKILL_FIXED","value":"inventory-server"},"slot":{"source":"SKILL_FIXED","value":"slot_2"}}],"attachment_requirement":"log_archive","problem_time_binding":{"name":"problem_time","source":"USER_FACT"}},"logparse_product":"compact","requirements":[{"constraints":{"allowed_values":[],"max_utf8_bytes":256,"min_utf8_bytes":1,"pattern":null,"value_type":"STRING"},"fulfillment_source":"USER_FACT","kind":"INPUT","name":"caller_service","prompt":"请提供调用方服务名。","stage":"INITIAL"},{"constraints":{"allowed_values":[],"max_utf8_bytes":256,"min_utf8_bytes":1,"pattern":null,"value_type":"STRING"},"fulfillment_source":"USER_FACT","kind":"INPUT","name":"server_service","prompt":"请提供服务方服务名。","stage":"INITIAL"},{"constraints":{"allowed_values":[],"max_utf8_bytes":256,"min_utf8_bytes":1,"pattern":null,"value_type":"STRING"},"fulfillment_source":"USER_FACT","kind":"INPUT","name":"rpc_method","prompt":"请提供超时的 RPC 方法名。","stage":"INITIAL"},{"constraints":{"allowed_values":[],"max_utf8_bytes":24,"min_utf8_bytes":24,"pattern":"^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$","value_type":"STRING"},"fulfillment_source":"USER_FACT","kind":"INPUT","name":"problem_time","prompt":"请提供毫秒精度 UTC 问题时间。","stage":"INITIAL"},{"constraints":{"allowed_content_types":["application/gzip","application/zip","application/x-tar"],"max_count":1,"min_count":1},"fulfillment_source":"READY_ATTACHMENT","kind":"ATTACHMENT","name":"log_archive","prompt":"请上传 Logparse 支持的日志归档。","stage":"INITIAL"},{"constraints":{"allowed_values":[],"max_utf8_bytes":256,"min_utf8_bytes":1,"pattern":null,"value_type":"STRING"},"fulfillment_source":"USER_FACT","kind":"INPUT","name":"order_id","prompt":"请提供用于两端日志关联的订单号。","stage":"AFTER_LOGPARSE"}],"requires_logparse":true,"schema_version":2,"summary":"定位合成服务接管场景中的 RPC 超时","tool_bundle_id":"tool-bundle/diagnose","version":"3.0.4"}
+```
+<!-- DIAGNOSIS_SKILL_MANIFEST_V2_END -->
 
-- capability：`service-takeover`
-- module：`COMPACT`
-- logparse product：`compact`
-- generator version：`2.0.0`
+## 范围与角色
 
-允许日志 Content-Type（逐字匹配 S00 Canonical ContentType，不做大小写或参数归一化）：
+定位调用方到服务方的 RPC 超时，并用两端目标日志验证服务接管链路。
 
-- `application/gzip`
-- `application/zip`
-- `application/x-tar`
+- `client`：调用方进程
+- `server`：服务方进程
 
-## 问题范围
+## Requirements
 
-定位合成的调用方到服务端 RPC deadline exceeded：区分调用方 3 秒 deadline、服务端
-连接池等待和处理延迟。没有同一合成请求的两端机器证据时，不确认服务端根因。
+所有声明均为必需项；空数组表示不添加任何默认参数。
+INPUT 只能由 `USER_FACT` 满足，ATTACHMENT 只能由 `READY_ATTACHMENT` 满足。
 
-## 运行时输入
+| 名称 | 类型 | 阶段 | 满足来源 | 用户提示 | S00 constraints |
+| --- | --- | --- | --- | --- | --- |
+| `caller_service` | INPUT | INITIAL | USER_FACT | 请提供调用方服务名。 | `{"allowed_values":[],"max_utf8_bytes":256,"min_utf8_bytes":1,"pattern":null,"value_type":"STRING"}` |
+| `server_service` | INPUT | INITIAL | USER_FACT | 请提供服务方服务名。 | `{"allowed_values":[],"max_utf8_bytes":256,"min_utf8_bytes":1,"pattern":null,"value_type":"STRING"}` |
+| `rpc_method` | INPUT | INITIAL | USER_FACT | 请提供超时的 RPC 方法名。 | `{"allowed_values":[],"max_utf8_bytes":256,"min_utf8_bytes":1,"pattern":null,"value_type":"STRING"}` |
+| `problem_time` | INPUT | INITIAL | USER_FACT | 请提供毫秒精度 UTC 问题时间。 | `{"allowed_values":[],"max_utf8_bytes":24,"min_utf8_bytes":24,"pattern":"^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$","value_type":"STRING"}` |
+| `log_archive` | ATTACHMENT | INITIAL | READY_ATTACHMENT | 请上传 Logparse 支持的日志归档。 | `{"allowed_content_types":["application/gzip","application/zip","application/x-tar"],"max_count":1,"min_count":1}` |
+| `order_id` | INPUT | AFTER_LOGPARSE | USER_FACT | 请提供用于两端日志关联的订单号。 | `{"allowed_values":[],"max_utf8_bytes":256,"min_utf8_bytes":1,"pattern":null,"value_type":"STRING"}` |
 
-只读取 Runtime 提供的 `JOB_INSTRUCTION`、`CONTEXT_SNAPSHOT`、`OPEN_REQUIREMENTS`、
-`PREVIOUS_OUTCOME`、`RESOURCE_MANIFEST` 与只读 `inputs/manifest.json`。不得扫描
-`inputs/`、读取 Repository、沿用旧 Session 隐式状态或采用 Job 创建后的输入。
+按声明顺序执行阶段算法：先复用当前快照中有效事实和同名 OPEN requirement；请求当前
+阶段全部缺失 INPUT 并返回 NEED_INPUT；INPUT 齐全后才请求该阶段 ATTACHMENT 并返回
+NEED_ATTACHMENT。
+INITIAL 齐全后才可进入工具/分析；parse 成功后再检查 AFTER_LOGPARSE。缺少后补输入时，
+必须提出必要 LOGPARSE Evidence，并把每个需要跨 Job 保留的 Evidence proposal 写入
+`state_delta.add_evidence_bindings`：`existing_evidence_id=null`，
+`evidence_proposal_key` 等于对应 proposal key。仅写 proposal、Finding 或说明文字不会
+触发接收。每个新 Evidence 还必须用 `artifact_proposal_key` 绑定 broker 返回的同一
+Outcome `LOGPARSE_RUN` proposal，使平台共同接收 Evidence 与运行产物；完成这些绑定后
+才返回 NEED_INPUT。续跑必须复用正式 Evidence 与 LOGPARSE_RUN，并调用 `target-logs`，
+禁止再次 `parse-targets`。工具输出只可形成 Evidence、Finding 或 proposed fact，绝不能
+满足 USER_FACT requirement。
 
-目标角色顺序固定为：
+## Logparse 业务映射
 
-| 标签 | 说明 | 是否必需 |
-| --- | --- | --- |
-| client | 发起合成 RPC 的客户端进程；broker anchor 固定为 slot=`1`、process_name=`checkout-client`、pid=`101` | 是 |
-| server | 接收并处理合成 RPC 的服务端进程；broker anchor 固定为 slot=`2`、process_name=`inventory-server`、pid=`202` | 是 |
+本 Skill 需要 Logparse；有效 product 为 `compact`。产品省略时 Runtime 不向上游传
+`--product`，但运行 metadata 仍记录 `default`。加载 `logparse-diagnose` 并严格执行其
+broker、Canonical request、parse-once、LOGPARSE_RUN 复用及路径安全规则。
 
-每个 broker anchor 只含 `label`、`module`、`slot`、`process_name`、`pid`。`module` 固定为
-`COMPACT`；若上方角色说明声明了产品固定的 `slot`、`process_name`、`pid` 映射，必须
-逐字使用该映射，禁止用 `caller_service` 或 `server_service` 替代。未声明的 anchor 值才必须
-来自本 Job 已验证事实，且 `pid` 可以为 null。Canonical JSON 中 `label`、`module`、`slot`、
-`process_name` 以及非 null 的 `pid` 必须全部是 JSON 字符串；即使 `slot` 或 `pid` 只含数字，
-也不得写成 JSON number。调用 broker 前必须重新读取 request bytes 并逐字段确认这些类型。
-确认后非常下一动作必须是一次 Bash 调用：
-`problem-locator-logparse parse-targets --request output/proposals/logparse-run/request.json --result output/proposals/logparse-run/target_logs.json`。
-在写 request 与执行该命令之间不得继续分析、输出文字、重读上下文或调用任何其他工具。
+形成 LOGPARSE Evidence 时，`workspace_relative_path` 必须为 null；目标日志位置只写在
+`locator.relative_path`，并通过同一 Outcome 的 `artifact_proposal_key` 或已有 Artifact
+ID 绑定 LOGPARSE_RUN。不得把 LOGPARSE_RUN tree 内路径填成 Evidence 自己的 proposal
+路径；任何非 null workspace path 都必须位于该 proposal key 的独立目录下。
+构造 broker anchor 时，`label/module/slot/process_name` 必须保持 JSON string 并逐字复制
+已解析 binding；即使值看起来像数字也禁止改变 JSON 类型。
+新 `LOGPARSE_RUN.metadata` 必须严格且仅含 `tree_manifest_sha256`、
+`logparse_version_ref`、`parse_manifest_relative_path`、`source_attachment_id`、
+`source_attachment_sha256`、`parse_parameters` 六个字段；`parse_parameters` 仅含有效
+`product`。禁止添加 `schema_version`、`format_id`、`description` 或其他通用字段。
+Artifact draft 外壳固定为 `artifact_kind=LOGPARSE_RUN`、
+`content_type=application/vnd.problem-locator.logparse-run+directory`、
+`resource_kind=DIRECTORY`，且 `declared_size`、`declared_sha256` 均为 null；禁止自行猜测
+MIME type 或计算 broker 受控树的 size/hash。
+`parse-targets` 成功后必须把结果中的 `logparse_run_artifact_draft` 对象逐字段原样放入
+`proposed_artifact_drafts`；禁止自行构造、扩展版本字符串或修改任何值。
 
-## 自定义定位参数
+业务映射的机器事实如下，不得改名、猜值或从日志反向满足 USER_FACT requirement：
 
-| 参数名 | 说明 | 是否必需 |
-| --- | --- | --- |
-| order_id | 合成请求的唯一关联标识 | 是 |
+```json
+{
+  "anchors": [
+    {
+      "label": "client",
+      "module": {
+        "source": "SKILL_FIXED",
+        "value": "compact"
+      },
+      "pid": null,
+      "process_name": {
+        "source": "SKILL_FIXED",
+        "value": "checkout-client"
+      },
+      "slot": {
+        "source": "SKILL_FIXED",
+        "value": "slot_1"
+      }
+    },
+    {
+      "label": "server",
+      "module": {
+        "source": "SKILL_FIXED",
+        "value": "compact"
+      },
+      "pid": null,
+      "process_name": {
+        "source": "SKILL_FIXED",
+        "value": "inventory-server"
+      },
+      "slot": {
+        "source": "SKILL_FIXED",
+        "value": "slot_2"
+      }
+    }
+  ],
+  "attachment_requirement": "log_archive",
+  "problem_time_binding": {
+    "name": "problem_time",
+    "source": "USER_FACT"
+  }
+}
+```
 
-参数组 A 的 requirement name 固定为 `caller_service`、`server_service`、`rpc_method`、
-`problem_time`。`problem_time` 必须是毫秒精度 UTC RFC 3339 单值，必须匹配
-`^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$`；不得接受范围、猜测时区或取中点。参数 B 固定为 `order_id`。
+归档附件只接受平台固定后缀映射：`.gz/.tar.gz/.tgz -> application/gzip`、
+`.zip -> application/zip`、`.tar -> application/x-tar`。Content-Type 不是生成参数。
 
-## 四种业务结果
 
-始终按 S00 `agent-job-outcome.schema.json` 生成完整 `AgentJobOutcome`，并在退出前原子
-发布为 `output/job_outcome.json`。只使用以下 DIAGNOSE result type：
+## 分析步骤
 
-- `NEED_INPUT`：缺少参数组 A，或首次解析后的机器证据仍缺 `order_id`。
-- `NEED_ATTACHMENT`：参数组 A 已满足，但尚无本 Job 固定的唯一日志 Attachment。
-- `REROUTE`：问题不属于本 capability；不调用 Router，也不选择另一个 Skill。
-- `COMPLETED`：当前完成条件均有 Evidence binding，可提出 Candidate；不声称 Case 已
-  `RESOLVED`。
-
-业务性缺参不是执行失败。`DiagnosisStateDelta`、requirement、Evidence/Artifact Draft、
-Candidate 和 error 字段全部逐字使用当前 S00 合同；未使用的集合写空数组、无值写 null。
-`add_user_facts` 与 `fulfill_requirements` 由应用服务拥有，Agent 必须写空数组。新事实只写
-`proposed_facts`，并通过 `add_evidence_bindings` 提案引用 Evidence。
-
-## 参数组 A 与一次日志
-
-先复用 `CONTEXT_SNAPSHOT` 中已有且仍有效的事实和 OPEN requirement。缺少参数时返回
-`NEED_INPUT`，只为缺失名称提出当前 S00 定义的 INPUT requirement；已经存在的
-requirement 必须复用原 `requirement_id`，不得重复创建。
-
-参数组 A 齐全但没有可用日志时返回 `NEED_ATTACHMENT`。日志 requirement 的 name 固定
-为 `log_archive`，只接受一个 Attachment，允许 Content-Type 只能来自上面的固定列表。
-上传本身不推进 Case；后续 Job 只能消费 `inputs/manifest.json` 中固定的 READY Attachment。
-
-## 先调用 logparse-diagnose Skill
-
-加载 `logparse-diagnose`，且只调用随服务安装的 `problem-locator-logparse` broker 客户端。
-禁止读取 `LOGPARSE_REPO`、`LOGPARSE_CONFIG_PATH`、`LOGPARSE_PYTHON`，禁止直接启动
-`cli.py`，禁止打开、枚举、解包或扫描原始归档，也禁止用 grep/rg 代替 logparse。
-
-首次日志 Job 在 manifest 不含 `LOGPARSE_RUN` 时：
-
-1. 用 Canonical JSON 写 `output/proposals/logparse-run/request.json`；request 只含 S07
-   `parse-targets` 字段，禁止携带 `logparse_product` 或任意 argv。
-2. 仅调用一次 `problem-locator-logparse parse-targets --request ... --result ...`。
-3. 读取 broker 生成的 `target_logs.json` 与受控 `parse_manifest.json` 机器结果。
-4. 提出 proposal key=`logparse-run` 的 `LOGPARSE_RUN` 目录 Artifact Draft，以及固定
-   proposal key=`logparse-client-evidence`、用该 artifact proposal key 作为 source binding
-   的 client `LOGPARSE` Evidence Draft。
-5. 若 `CONTEXT_SNAPSHOT.user_facts` 仍缺 active `order_id`，在同一 `NEED_INPUT` Outcome
-   中提交中间 StateDelta、client Evidence、LOGPARSE_RUN 与新 OPEN INPUT requirement；
-   正常结束 Job。即使机器日志含有看似可用的 order ID，也不得据此满足参数 B、提出 server
-   Evidence、Candidate 或 USER_RESULT；`order_id` 只能来自用户提交的固定事实。
-   `state_delta.add_evidence_bindings` 必须恰好包含
-   `{"existing_evidence_id":null,"evidence_proposal_key":"logparse-client-evidence"}`；只有该
-   StateDelta binding 才会在进入 `WAITING_INPUT` 前正式接受 client Evidence 及其依赖的
-   `LOGPARSE_RUN`，不得只把它们放在 proposal arrays 中。
-
-`LOGPARSE_RUN` Artifact Draft 的固定形状是：`artifact_kind="LOGPARSE_RUN"`、
-`content_type="application/vnd.problem-locator.logparse-run+directory"`、
-`resource_kind="DIRECTORY"`、`workspace_relative_path="output/proposals/logparse-run/tree"`。
-不得使用 `application/octet-stream`、`application/json` 或根据目录内容猜测 Content-Type；
-发布前必须逐字核对这四个字段，并让 declared size/hash 与受控 tree 的实际值一致。
-目录 hash 不是 `parse_manifest.json` 文件的 hash：按相对 POSIX path 排序枚举 tree 中每个普通
-文件，逐个形成 `{"path":path,"sha256":sha256(file_bytes),"size":len(file_bytes)}`，再形成
-`{"entries":entries,"version":1}` 的 S00 Canonical JSON（包括末尾一个 LF），最后对这些完整
-manifest bytes 求 SHA-256。Artifact Draft 的 `declared_sha256` 和 metadata 的
-`tree_manifest_sha256` 必须都等于这个目录清单 hash。
-
-同 Outcome 的 `LOGPARSE` Evidence 使用 `artifact_proposal_key="logparse-run"` 绑定目录，并在
-locator 中引用受控 tree 内的相对日志路径。若没有在其自己的 proposal root 另写独立 Evidence
-文件，则 `workspace_relative_path=null`、`declared_size=null`、`declared_sha256=null`；不得把
-被引用日志文件的 size/hash 填入这三个独立资源声明字段。
-
-## LOGPARSE_RUN 复用
-
-只要 `inputs/manifest.json` 已含任一 `artifact_kind=LOGPARSE_RUN`，严禁调用
-`parse-targets`。验证 manifest 固定的 Artifact kind、目录 hash、parse manifest 相对路径、
-源 Attachment、`logparse_tool_ref` 与 product 后，使用其只读
-`inputs/artifacts/<artifact_id>/tree` 根调用 `problem-locator-logparse target-logs`。
-request 只含 S07 `target-logs` 字段且 `artifact_id` 必须来自 manifest。不得修改物化目录，
-不得再次 parse；新 Job 的连续性只来自固定 StateDelta、Evidence、Attachment、
-`LOGPARSE_RUN` 与 `PREVIOUS_OUTCOME`。
-
-复用分支不得再次提出 `LOGPARSE_RUN` 或 client Evidence。把 manifest 中固定 client
-`LOGPARSE` Evidence 的 `resource_id` 作为唯一 existing client Evidence ID，把固定
-`LOGPARSE_RUN` 的 `resource_id` 作为 server Evidence 的 `existing_source_ref`。本 Job 只提出
-proposal key=`logparse-server-evidence` 的新 server Evidence；其
-`artifact_proposal_key=null`、`workspace_relative_path=null`、`declared_size=null`、
-`declared_sha256=null`。`consumed_evidence_refs` 必须恰好包含 existing client Evidence ID，
-`state_delta.add_evidence_bindings` 必须恰好绑定 `logparse-server-evidence`。Candidate 与
-USER_RESULT 的 supporting/mapping bindings 顺序固定为 existing client Evidence ID 在前、
-server Evidence proposal key 在后。
-
-## Evidence 与 Candidate
-
-只把 `target_logs` 返回并解析到受控 output root 内的安全相对 POSIX `log_path` 写入 S00
-`LogparseEvidenceLocator.relative_path`。没有匹配、路径歧义、时间无法关联或证据不足时
-必须明确保留缺口，不得把假设升级为事实。
-
-形成 Candidate 时，supporting Evidence bindings 和每个 completion criterion mapping
-必须完整、按 ProblemSpec 顺序、全部 satisfied 且非空。Candidate 所在 Outcome 必须恰好
-同时提出一个 USER_RESULT Draft：
-
-- proposal key：`user-result`
-- kind/name/content type/resource kind：`USER_RESULT` / `diagnosis-result.json` /
-  `application/json` / `FILE`
-- path：`output/proposals/user-result/payload`
-- metadata：`{"schema_version":1,"format_id":"problem-locator-diagnosis-v1","description":"Diagnosis result"}`
-
-payload 只用 S00 `UserResultPayload`：`problem_statement` 逐字等于 Job 固定 ProblemSpec，
-`candidate_statement`、`supporting_evidence_bindings`、`completion_criteria_mapping` 逐字等于
-同一 Candidate Draft。使用 S00 Canonical JSON（UTF-8、排序、紧凑、末尾一个 LF）；禁止
-写入时间、正式 ID 猜测、Workspace 路径、endpoint、token 或 raw logparse 配置。
+- 先验证调用端超时证据。
+- 取得 order_id 后关联服务端接管证据。
 
 ## 时间特征
 
-- 调用方 deadline exceeded 必须位于 problem_time 附近。
-- 服务端较晚记录只有在同一 order_id 或连续因果链下才能关联。
-- 3 秒 deadline 只证明调用方等待边界，不单独证明服务端处理耗时或根因。
+- 以 problem_time 为唯一时间锚点，不推测时区。
 
-## Wiki 定位步骤
+## 判定规则
 
-1. 在 client target log 中定位 problem_time 附近的 deadline exceeded，并记录 RPC 方法。
-2. 首次日志 Job 通过 broker 完成唯一一次 parse，保存 LOGPARSE_RUN 和客户端 Evidence。
-3. 若缺少唯一关联值，提出 order_id requirement 并以 NEED_INPUT 正常结束当前 Job。
-4. 新 Job 只读复用 LOGPARSE_RUN，通过 target-logs 围绕 order_id 定位 server Evidence。
-5. 比较客户端 deadline、服务端连接池等待和处理时间，形成带证据的候选结论。
-
-## 判断规则
-
-- 同一 order_id、RPC 方法和时间因果链同时成立，才能关联两端记录。
-- 仅有客户端 timeout 文案时，只确认调用方 deadline exceeded，不确认服务端根因。
-- 服务端连接池等待或处理延迟必须有对应 target log Evidence。
-- target_logs 缺失、歧义、路径越界或时间无法关联时，明确报告证据不足。
-- 不补充 Wiki 外的经验性根因或排查方向。
+- 两端 Evidence 同时支持接管链路时才形成候选结论。
 
 ## 输出要求
 
-- Candidate statement 区分已确认现象与仍待验证假设。
-- 每个 completion criterion mapping 都逐字回显条件并引用 Evidence binding。
-- Candidate 与唯一 `diagnosis-result.json` USER_RESULT 位于同一 Outcome。
-- 最终结果等待独立 REVIEW PASS；本 Skill 不自行宣称 Case RESOLVED。
+- 说明调用端与服务端证据如何共同支持结论。
 
 ## 假设
 
-- 只使用合成服务名、合成订单号和非敏感日志。
+- 测试归档是非敏感合成数据。
+
+## Candidate 与用户结果
+
+只有每个 completion criterion 均由 Evidence 支持时才提出 Candidate。形成 Candidate
+时，同一 Outcome 必须恰好提出以下两个 FILE Artifact：
+
+`supporting_evidence_bindings` 必须去重并保持当前快照 `evidence_refs` 的相对顺序；同一
+Outcome 新接收的 Evidence 只按 `state_delta.add_evidence_bindings` 顺序追加。禁止按业务
+角色、日志时间或叙述习惯重排。completion mapping 与 USER_RESULT 重复这些 binding 时
+也保持同一顺序；这是 Coordinator 的固定子序列合同。
+
+1. `USER_RESULT`：proposal key `user-result`，name `diagnosis-result.json`，
+   content type `application/json`，path `output/proposals/user-result/payload`，metadata
+   为 `{"schema_version":1,"format_id":"problem-locator-diagnosis-v1","description":"Diagnosis result"}`。
+2. `USER_RESULT_ARCHIVE`：proposal key `user-result-archive`，name `result.zip`，
+   content type `application/zip`，path
+   `output/proposals/user-result-archive/result.zip`，metadata 使用
+   `format_id=problem-locator-result-archive-v1`、
+   `user_result_proposal_key=user-result` 和实际 `target_log_count`。
+
+USER_RESULT 必须是 S00 Canonical `UserResultPayload`，并与同一 Candidate seam 逐字一致。
+先写 Canonical 请求到 `output/proposals/user-result-archive/request.json`，字段恰好为
+`schema_version=1`、`result_text=Candidate statement + 一个 LF` 和
+`target_log_paths[]`。日志路径仅列 Candidate
+实际绑定的 LOGPARSE Evidence 对应完整目标日志，按 binding 首次出现顺序去重；人工
+无日志场景传空数组。构造该数组时，先以 `target-logs` 每项的 `log_path` 建立路径映射，
+再严格遍历 Candidate `supporting_evidence_bindings`，解析每条 Evidence 的
+`locator.relative_path` 并从映射取对应完整路径；禁止直接复制或沿用 `target-logs`
+结果数组的 anchor 顺序，因为它可能与快照 Evidence 顺序不同。然后仅调用一次：
+
+```text
+problem-locator-pack-result --request output/proposals/user-result-archive/request.json --result output/proposals/user-result-archive/result.zip
+```
+
+禁止自行调用 zip/tar、包含原始上传包、无关日志、parse 目录或完整 LOGPARSE_RUN。
+Runtime 会逐字校验 ZIP 中 `result.txt` 与 `target-log-001.log` 等扁平条目。两个结果
+Artifact 和 Candidate 必须共同接受，并等待独立 REVIEW PASS 后才可下载。
 
 ## 原子交付
 
-先写同目录临时文件、flush 并同步，再原子替换 `output/job_outcome.json`；成功退出后 stdout
-和 stderr 只给安全摘要，不能作为业务结果回退。任何 endpoint/token、绝对路径、环境值、
-原始日志正文或敏感 Wiki 内容都不得进入 Outcome、proposal、USER_RESULT 或日志。
+最终 `output/job_outcome.json` 使用公共合同给出的 V1 Canonical JSON 和同目录原子替换。
+退出前重新读取实际字节，校验 S00 Schema、当前 Job/Case、上述 manifest 声明、proposal
+size/hash、结果 Artifact 配对和所有业务阶段规则。stdout/stderr 和部分文件不是业务结果。

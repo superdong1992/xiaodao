@@ -83,11 +83,11 @@ def test_all_complete_storage_json_fixtures_use_canonical_bytes() -> None:
 
 
 def test_valid_empty_r3_state_fixture_is_accepted() -> None:
-    payload = parse_canonical_json_bytes(_fixture_bytes("state/valid-empty-r3.json"))
+    payload = parse_canonical_json_bytes(_fixture_bytes("state/valid-empty-r4.json"))
     _schema_validator(STATE_SCHEMA_PATH).validate(payload)
     state = StateFile.model_validate(payload)
     assert state.schema_version == 1
-    assert state.contract_revision == "v1-contract-r3"
+    assert state.contract_revision == "v1-contract-r4"
     assert state.generation == 1
     assert state.runtime_epochs == []
     assert state.recovery_processing_records == {}

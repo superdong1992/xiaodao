@@ -1,150 +1,105 @@
 ---
 name: wiki-to-diagnosis-skill
-description: Convert a non-sensitive Markdown issue-location wiki into a deterministic repo-local Problem Locator diagnose-* Skill at semantic version 2.x, including exact diagnosis-skill.json metadata and S00-compliant four-result workflow instructions. Use when creating or updating a Diagnosis Skill from a wiki.
+description: 将非敏感故障定位 Wiki 转换为通用 Problem Locator Diagnosis Skill v3；声明业务 requirements、阶段和可选 Logparse 映射，生成并校验 schema v2 diagnosis-skill.json 与 SKILL.md。用于新建或升级 diagnose-* Skill。
 ---
 
-# Wiki To Diagnosis Skill
+# Wiki to Diagnosis Skill v3
 
-Convert one Markdown issue-location wiki into a bounded `diagnose-*` product. This
-generator is version `2.0.0`.
+本 Skill 负责业务规则生成，不修改全局 DIAGNOSE output contract，也不把某个 Fixture
+的字段提升为通用协议。生成器固定为 `3.0.4`，输入规范为 `GenerationSpec v2`，输出
+Skill 从 `3.0.0` 起，manifest 为 schema v2。
 
-Read [the generated product contract](references/generated-skill-contract.md)
-before drafting. Read [the wiki template](references/wiki-template.md) when the
-source does not clearly identify target roles, evidence rules, or analysis steps.
+## 开始前确认
 
-## Required inputs
+先阅读 Wiki，只确认下列会改变生成语义的信息：
 
-Collect these before drafting:
+1. Skill id、capability、标题、摘要、范围和目标版本。
+2. `requirements[]`：每项的 name、`INPUT|ATTACHMENT`、
+   `INITIAL|AFTER_LOGPARSE`、用户提示和 S00 原生 constraints。
+3. 是否使用 Logparse。若使用，确认归档 requirement（可为 null）、problem time 的
+   value binding、按顺序排列的 anchors 及各字段的 `USER_FACT|SKILL_FIXED` binding。
+4. 仅当需要非默认产品时确认 `logparse_product`；默认产品直接省略。
+5. 分析步骤、时间特征、判定规则、输出要求和假设。
 
-- A non-sensitive Markdown wiki path or pasted Markdown.
-- A stable lower-kebab capability and a non-sensitive Router summary.
-- A concrete logparse module and fixed `logparse_product`, when logs are needed.
-- The fixed logparse version's supported ContentType values in declaration order.
-- A target diagnosis Skill semantic version, starting at `2.0.0`.
+不要询问 Content-Type。Logparse 归档格式由平台固定：
+`.gz/.tar.gz/.tgz -> application/gzip`、`.zip -> application/zip`、
+`.tar -> application/x-tar`。
 
-Do not infer a concrete module from a placeholder. Do not copy credentials,
-customer identifiers, production logs, private endpoints, or sensitive wiki prose
-into a generated product or Router summary.
+所有 requirement 都是必需项，不提供 optional 参数。旧 `custom_parameters` 必须显式
+转换成 INPUT requirement 并指定 stage、prompt 和 constraints；空集合表示不添加任何
+自定义或默认参数。禁止根据示例自动补业务字段。
 
-## Confirmation gate
+## 边界
 
-1. Parse and normalize the wiki without changing a `diagnose-*` directory.
-2. Present a draft with the Skill id/version, capability, summary, fixed module,
-   fixed logparse product, problem scope, roles, allowed ContentTypes, custom
-   parameters, assumptions, and analysis rules.
-3. Wait for explicit confirmation of the whole draft.
-4. Revise and reconfirm after any requested semantic change.
-5. Generate only after confirmation.
-6. Validate the result and fix every failure.
+- `requires_logparse` 只控制工具绑定，不等价于 RPC、固定参数组、日志附件或 parse 后补参。
+- `LOGPARSE_RESULT` 不能满足 requirement，只能成为 Evidence、Finding 或 proposed fact。
+- `requires_logparse=false` 时，`logparse_plan=null`，roles 可为空，module 可为 null，
+  且禁止 AFTER_LOGPARSE requirement。
+- 每阶段最多一个 ATTACHMENT；AFTER_LOGPARSE 只允许 INPUT。
+- Logparse product 省略表示上游 `default`。Runtime 记录有效值，但 Broker 不传
+  `--product`；非默认值才显式传入。
+- 存在 AFTER_LOGPARSE 缺参时，生成 Skill 必须用
+  `state_delta.add_evidence_bindings` 接收必要 Evidence；新 LOGPARSE Evidence 通过
+  `artifact_proposal_key` 绑定 broker 返回的 LOGPARSE_RUN，使续跑复用该运行。
+  仅生成 proposal、Finding 或文字说明不构成接收，也不得在续跑时重新 parse。
 
-Silence or an unrelated reply is not confirmation. A change to product semantics
-requires an explicit version increase; never overwrite different bytes under the
-same `{id,version}`.
+## 构造 GenerationSpec v2
 
-## Extract wiki facts
+优先依据 [wiki-template.md](references/wiki-template.md) 在 Wiki 的
+`## GenerationSpec v2` JSON fence 中形成完整对象。也可把同一对象保存为独立 JSON。
+requirements 与 logparse_plan 是唯一机器事实源；`SKILL.md` 和
+`diagnosis-skill.json` 均从它渲染，不维护第二套业务字段。
 
-Extract only supported facts:
+value binding 只有两种形状：
 
-- `chinese_title`
-- `skill_name`: `diagnose-<english-topic-slug>`, lowercase and at most 64 chars
-- `module_name`
-- `problem_scope`
-- ordered target roles: label, Chinese description, required/optional
-- task-level single-line custom parameters
-- time characteristics
-- analysis steps
-- judgement rules
-- output requirements
-- explicit assumptions
-
-Runtime paths, concrete slot/process/PID values, IDs, timestamps, hashes, tokens,
-environment values, and actual log contents are not wiki facts. Never bake them
-into the generated Skill.
-
-## Draft format
-
-Use a compact reviewable draft:
-
-```markdown
-定位 Skill 2.0.0 草案
-- Skill：diagnose-example@2.0.0
-- capability：example
-- module：EXAMPLE
-- logparse product：example-product
-- Router 摘要：用于定位合成示例故障
-
-目标角色
-| 标签 | 说明 | 是否必需 |
-| --- | --- | --- |
-| client | RPC 客户端进程 | 是 |
-| server | RPC 服务端进程 | 是 |
-
-允许 ContentType：application/gzip
-自定义参数：order_id（必需）
+```json
+{"source":"USER_FACT","name":"incident_time"}
+{"source":"SKILL_FIXED","value":"database"}
 ```
 
-## Generate deterministically
+INPUT constraints 逐字使用 S00：`value_type=STRING`、`min_utf8_bytes`、
+`max_utf8_bytes`、`pattern`、`allowed_values[]`。ATTACHMENT constraints 使用
+`allowed_content_types[]`、`min_count`、`max_count`；若该附件供 Logparse 使用，
+allowed_content_types 必须按固定顺序等于
+`["application/gzip","application/zip","application/x-tar"]`。
 
-Prefer the standard-library API in
-`scripts/generate_diagnosis_skill.py`:
+## 生成与校验
 
-```python
-from generate_diagnosis_skill import build_spec_from_wiki, generate_diagnosis_skill
+从独立 spec 生成：
 
-spec = build_spec_from_wiki(
-    wiki_text,
-    capability="service-takeover",
-    summary="定位合成服务接管场景中的 RPC 超时",
-    version="2.0.0",
-    requires_logparse=True,
-    logparse_product="payment-service",
-    allowed_content_types=["application/gzip"],
-)
-generate_diagnosis_skill(spec, ".claude/skills")
+```text
+python scripts/generate_diagnosis_skill.py --spec <generation-spec.json> --output-root <skill-dir-parent>
 ```
 
-Or run the CLI:
+从含规范 fence 的 Wiki 生成：
 
-```bash
-python3.12 -X utf8 \
-  .claude/skills/wiki-to-diagnosis-skill/scripts/generate_diagnosis_skill.py \
-  --wiki path/to/wiki.md \
-  --output-root .claude/skills \
-  --capability service-takeover \
-  --summary '定位合成服务接管场景中的 RPC 超时' \
-  --version 2.0.0 \
-  --logparse-product payment-service \
-  --allowed-content-type application/gzip
+```text
+python scripts/generate_diagnosis_skill.py --wiki <wiki.md> --output-root <skill-dir-parent>
 ```
 
-The CLI emits a deterministic product hash receipt. The generated product
-contains exactly `SKILL.md` and `diagnosis-skill.json`; the latter is Canonical
-JSON with the exact S04 field set. ContentTypes are validated with the S00
-Canonical grammar, without normalization. The generator is idempotent for exact
-bytes and refuses changed bytes under the same id/version.
+只有明确提升目标版本时才使用 `--replace-different-version`。同一 id/version 的内容
+发生变化必须拒绝，不能原地覆盖语义。输出目录只能包含 `SKILL.md` 和
+`diagnosis-skill.json`。
 
-## Validate
+随后运行：
 
-Run:
-
-```bash
-python3.12 -X utf8 \
-  .claude/skills/wiki-to-diagnosis-skill/scripts/validate_generated_skill.py \
-  .claude/skills/<skill-name>
+```text
+python scripts/validate_generated_skill.py <generated-skill-dir>
 ```
 
-Validation uses only the Python standard library. It checks the exact manifest,
-Canonical JSON bytes, version, ContentTypes, required contract phrases, all four
-DIAGNOSE result types, StateDelta boundaries, broker-only logparse use,
-`LOGPARSE_RUN` reuse, and the Candidate plus unique USER_RESULT seam.
+validator 必须确认 Canonical manifest、schema/version、requirements/logparse_plan、
+SKILL 内嵌机器块逐字一致、结果 JSON/ZIP 约束，以及非 RPC Skill 没有 RPC Fixture 字段泄漏。
 
-Report the generated path, Skill id/version, selected capability, confirmed
-parameters, assumptions, product SHA-256, and validation result.
+## 验收
 
-## Contract authority
+至少用三个异构规范做前向测试：
 
-Do not define local public DTOs, result types, error codes, broker errors, or
-compatibility fields. Generated instructions must consume the installed S00
-contract and current JSON Schemas. When S00 cannot express a required behavior,
-stop that behavior and submit a contract change request instead of inventing a
-private bridge.
+- RPC：四个 INITIAL INPUT、一个归档、一个 AFTER_LOGPARSE INPUT、两个 anchors、
+  显式非默认 product。
+- 数据库死锁：不同字段名、一个 anchor、省略 product，验证有效默认值。
+- 无日志人工排查：无 module、roles、attachment、logparse 和后补阶段。
+
+检查每个生成 manifest 的 requirement 集合精确隔离；错误场景字段不得出现在其他 Skill。
+生成 Skill 形成 Candidate 时必须同时生成 `diagnosis-result.json` 和受控
+`USER_RESULT_ARCHIVE/result.zip`，后者由安装的 `problem-locator-pack-result` 创建并由
+Runtime 对 Candidate 实际绑定日志逐字校验。

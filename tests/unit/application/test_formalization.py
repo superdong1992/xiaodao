@@ -605,6 +605,59 @@ def test_builds_pending_job_from_final_state_and_projector() -> None:
     assert job.created_at == OCCURRED_AT
 
 
+def test_build_job_orders_evidence_as_target_snapshot_subsequence() -> None:
+    target = _state().model_copy(
+        update={"revision": 2, "evidence_refs": [EVIDENCE_0, EVIDENCE_1]}
+    )
+    target = DiagnosisState.model_validate(target.model_dump(mode="python"))
+    spec = JobSpec(
+        job_type=JobType.DIAGNOSE,
+        goal="Continue with both accepted evidence records.",
+        target_state_revision=2,
+        evidence_bindings=[
+            PlannedResourceBinding(
+                existing_resource_id=None,
+                accepted_proposal_key="new-evidence",
+            ),
+            PlannedResourceBinding(
+                existing_resource_id=EVIDENCE_0,
+                accepted_proposal_key=None,
+            ),
+        ],
+        attachment_refs=[],
+        previous_outcome_refs=[OUTCOME_ID],
+        artifact_bindings=[],
+        agent_profile_ref=_ref("diagnosis-profile", "a"),
+        available_skill_refs=[],
+        skill_ref=_ref("rpc-timeout", "b"),
+        tool_bundle_ref=_ref("diagnosis-tools", "c"),
+        context_policy_ref=_ref("diagnosis-context", "d"),
+        output_contract_ref=_ref("diagnosis-outcome", "e"),
+        logparse_tool_ref=None,
+        logparse_product=None,
+        review_target_binding=None,
+        replacement_for_job_id=None,
+        resource_limits=default_resource_limits(JobType.DIAGNOSE),
+    )
+
+    job = build_job(
+        spec,
+        job_id=_id(12),
+        case_id=CASE_ID,
+        created_at=OCCURRED_AT,
+        target_diagnosis_state=target,
+        projector=_RecordingProjector(),
+        existing_evidence_ids={EVIDENCE_0},
+        evidence_ids_by_proposal_key={"new-evidence": EVIDENCE_1},
+        existing_artifact_ids=set(),
+        artifact_ids_by_proposal_key={},
+        existing_candidate=None,
+        candidates_by_proposal_key={},
+    )
+
+    assert job.evidence_refs == [EVIDENCE_0, EVIDENCE_1]
+
+
 def test_explicit_field_and_candidate_acceptance_mutations() -> None:
     skill = _ref("rpc-timeout", "b")
     assert apply_selected_skill_update(

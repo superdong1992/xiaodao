@@ -410,8 +410,9 @@ def test_production_output_contract_materializes_exact_installed_s00_schemas(
             b'application/vnd.problem-locator.logparse-run+directory' in content
         )
         assert b'not the hash of `parse_manifest.json`' in content
-        assert b'workspace_relative_path=null' in content
-        assert b'active user fact whose provenance `input_name` is exactly `order_id`' in content
+        assert b'`workspace_relative_path`' in content
+        assert b'`AFTER_LOGPARSE`' in content
+        assert b'order_id' not in content
 
     assert b"{{S00_" not in content
     for schema_name, (begin, end) in markers.items():

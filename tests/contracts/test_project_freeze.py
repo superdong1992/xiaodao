@@ -28,7 +28,8 @@ def test_logparse_console_entry_is_pre_registered() -> None:
     assert isinstance(metadata, dict)
     scripts = metadata["scripts"]
     assert scripts == {
-        "problem-locator-logparse": "problem_locator.integrations.logparse.cli:main"
+        "problem-locator-logparse": "problem_locator.integrations.logparse.cli:main",
+        "problem-locator-pack-result": "problem_locator.integrations.result_archive:main",
     }
 
 

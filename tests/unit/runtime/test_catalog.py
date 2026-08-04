@@ -92,7 +92,7 @@ def _write_skill(
 ) -> dict[str, Any]:
     root.mkdir(parents=True)
     manifest: dict[str, Any] = {
-        "schema_version": 1,
+        "schema_version": 2,
         "id": skill_id,
         "version": version,
         "capability": "test-capability",
@@ -100,8 +100,41 @@ def _write_skill(
         "entry_document": "SKILL.md",
         "tool_bundle_id": "tool-bundle/diagnose",
         "requires_logparse": requires_logparse,
-        "logparse_product": logparse_product,
+        "requirements": [],
+        "logparse_plan": None,
     }
+    if requires_logparse:
+        manifest["requirements"] = [
+            {
+                "name": "problem_time",
+                "kind": "INPUT",
+                "stage": "INITIAL",
+                "fulfillment_source": "USER_FACT",
+                "prompt": "Provide problem time.",
+                "constraints": {
+                    "value_type": "STRING",
+                    "min_utf8_bytes": 1,
+                    "max_utf8_bytes": 256,
+                    "pattern": None,
+                    "allowed_values": [],
+                },
+            }
+        ]
+        manifest["logparse_plan"] = {
+            "attachment_requirement": None,
+            "problem_time_binding": {"source": "USER_FACT", "name": "problem_time"},
+            "anchors": [
+                {
+                    "label": "target",
+                    "module": {"source": "SKILL_FIXED", "value": "module"},
+                    "slot": {"source": "SKILL_FIXED", "value": "slot"},
+                    "process_name": {"source": "SKILL_FIXED", "value": "process"},
+                    "pid": None,
+                }
+            ],
+        }
+        if logparse_product is not None:
+            manifest["logparse_product"] = logparse_product
     if extra:
         manifest.update(extra)
     (root / "diagnosis-skill.json").write_bytes(canonical_json_bytes(manifest))
@@ -151,7 +184,9 @@ def test_builtin_assets_and_port_use_exact_versioned_refs() -> None:
 
     assert set(refs) == expected_builtin_ids
     for ref in refs.values():
-        assert ref.version == "1.0.0"
+        assert ref.version == (
+            "2.0.3" if ref.id == "output-contract/diagnose" else "1.0.0"
+        )
         resolved = catalog.resolve(ref)
         assert resolved.ref == ref
         assert Path(resolved.root_path).is_dir()
@@ -276,83 +311,23 @@ def test_builtin_diagnose_output_contract_materializes_request_rules() -> None:
         / "output-contract.md"
     ).read_text(encoding="utf-8")
 
-    assert "For `NEED_INPUT`, `requested_input` must be non-empty" in contract
-    assert (
-        "For `NEED_ATTACHMENT`, `requested_attachments` must be non-empty"
-        in contract
-    )
-    assert "For `COMPLETED` and `REROUTE`" in contract
-    assert "Every requested ID must identify a matching OPEN requirement" in contract
+    assert "`NEED_INPUT` 仅填写非空 `requested_input`" in contract
+    assert "`NEED_ATTACHMENT` 仅填写非空" in contract
+    assert "`COMPLETED` 和 `REROUTE`" in contract
+    assert "每个 requested ID 必须对应" in contract
     assert "`state_delta.add_user_facts`" in contract
     assert "`state_delta.fulfill_requirements`" in contract
-    expected_payload_fields = json.dumps(
-        sorted(DiagnosisOutcome.model_fields),
-        separators=(",", ":"),
-    )
-    expected_delta_fields = json.dumps(
-        sorted(DiagnosisStateDelta.model_fields),
-        separators=(",", ":"),
-    )
-    assert f"`{expected_payload_fields}`" in contract
-    assert f"`{expected_delta_fields}`" in contract
-    assert "every one of these fields is present" in contract
-    assert "Apply this deterministic group-A branch" in contract
-    assert "request only the missing group-A names" in contract
-    assert "existing matching OPEN `INPUT` requirement" in contract
-    assert (
-        'name set `["caller_service","problem_time","rpc_method","server_service"]`'
-        in contract
-    )
-    assert "must not add or request `order_id`, `log_archive`" in contract
-    assert "Only after this branch is inapplicable" in contract
-    assert "Apply this deterministic pre-Logparse branch" in contract
-    assert all(
-        name in contract
-        for name in (
-            "caller_service",
-            "server_service",
-            "rpc_method",
-            "problem_time",
-        )
-    )
-    assert "exactly one OPEN requirement named `log_archive`" in contract
-    assert (
-        'allowed_content_types=["application/gzip","application/zip",'
-        '"application/x-tar"]' in contract
-    )
-    assert "min_count=1" in contract and "max_count=1" in contract
-    assert "`PREVIOUS_OUTCOME` section is a post-staging persisted `JobOutcome`" in contract
-    assert "`proposed_artifact_drafts` and `proposed_evidence_drafts`" in contract
-    assert "A `Write` tool call may append another LF" in contract
+    assert "当前选中 Skill 的 `requirements` 声明" in contract
+    assert "不得添加 Skill 未声明的 requirement" in contract
+    assert "USER_RESULT_ARCHIVE" in contract
+    assert "problem-locator-pack-result" in contract
+    assert "REVIEW PASS" in contract
+    for rpc_name in ("caller_service", "server_service", "rpc_method", "order_id"):
+        assert rpc_name not in contract
     assert 'value["outcome_id"] = str(uuid.uuid4())' in contract
     assert 'datetime.now(UTC).isoformat(timespec="milliseconds")' in contract
-    assert 'not canonical.endswith(b"\\n\\n")' in contract
     assert "os.replace(temporary, p)" in contract
     assert "assert p.read_bytes() == canonical" in contract
-    assert "This check validates the result; it does not generate or inject an Outcome" in contract
-    assert "AgentJobOutcome.model_validate(value)" in contract
-    assert "UserResultPayload.model_validate(user_result)" in contract
-    assert "user_result_raw == canonical_json_bytes(user_result)" in contract
-    assert 'user_result_artifact["declared_size"] == len(user_result_raw)' in contract
-    assert 'user_result["problem_statement"] == snapshot["problem_spec"]["statement"]' in contract
-    assert 'user_result["candidate_statement"] == candidate["statement"]' in contract
-    assert '== candidate["completion_criteria_mapping"]' in contract
-    assert 'job = section("JOB_INSTRUCTION")' in contract
-    assert 'manifest = section("RESOURCE_MANIFEST")' in contract
-    assert 'added[0]["requested_by_job_id"] == job["job_id"]' in contract
-    assert '"evidence_proposal_key": "logparse-client-evidence"' in contract
-    assert "Apply this deterministic accepted-run branch" in contract
-    assert 'p = Path("output/proposals/logparse-server-evidence/request.json")' in contract
-    assert "TargetLogsRequest.model_validate" in contract
-    assert "canonical_request = canonical_json_bytes(request)" in contract
-    assert "parse_canonical_json_bytes(p.read_bytes(), TargetLogsRequest)" in contract
-    assert 'print("TARGET_LOGS_REQUEST_SELF_CHECK_PASSED")' in contract
-    assert "invoke the client exactly once" in contract
-    assert 'server_key = "logparse-server-evidence"' in contract
-    assert 'value["consumed_evidence_refs"] == [client_id]' in contract
-    assert '"existing_source_ref": run_id' in contract
-    assert 'artifact["metadata"]["tree_manifest_sha256"] == tree_hash' in contract
-    assert 'print("AGENT_OUTPUT_SELF_CHECK_PASSED")' in contract
 
 
 def test_builtin_review_output_contract_materializes_review_binding_rules() -> None:
@@ -375,15 +350,14 @@ def test_builtin_review_output_contract_materializes_review_binding_rules() -> N
     assert f"`{expected_fields}`" in contract
 
 
-def test_builtin_diagnose_output_contract_self_check_is_valid_python() -> None:
+def test_builtin_diagnose_output_contract_atomic_snippet_is_valid_python() -> None:
     contract = (
         BUILTIN_ASSET_ROOT
         / "output-contracts"
         / "diagnose"
         / "output-contract.md"
     ).read_text(encoding="utf-8")
-    tail = contract.split("Do not trust a prose summary of the file.", 1)[1]
-    source = tail.split("```python\n", 1)[1].split("\n```", 1)[0]
+    source = contract.split("```python\n", 1)[1].split("\n```", 1)[0]
 
     compile(source, "diagnose-agent-output-self-check.py", "exec")
 
@@ -476,6 +450,18 @@ def test_required_logparse_skill_rejects_missing_pair(tmp_path: Path) -> None:
     _write_skill(plain_skill_dir / "plain")
     catalog = VersionedAssetCatalog(skill_dir=plain_skill_dir)
     assert catalog.diagnose_bindings(catalog.route_bindings().available_skill_refs[0]).logparse_tool_ref is None
+
+
+def test_logparse_skill_omitted_product_uses_effective_default(tmp_path: Path) -> None:
+    skill_dir = tmp_path / "skills"
+    _write_skill(skill_dir / "default-product", requires_logparse=True)
+    catalog = VersionedAssetCatalog(
+        skill_dir=skill_dir,
+        logparse_tool=_logparse_asset(),
+        logparse_broker_factory=_BrokerFactory(),
+    )
+    ref = catalog.route_bindings().available_skill_refs[0]
+    assert catalog.diagnose_bindings(ref).logparse_product == "default"
 
 
 def test_directory_hash_uses_complete_canonical_file_manifest(tmp_path: Path) -> None:
@@ -722,7 +708,10 @@ def test_product_hash_rejects_non_ordinary_nodes(tmp_path: Path) -> None:
 
 
 def test_product_hash_rejects_non_utf8_paths() -> None:
-    non_utf8_name = os.fsdecode(b"\xff")
+    try:
+        non_utf8_name = os.fsdecode(b"\xff")
+    except UnicodeDecodeError:  # pragma: no cover - UTF-8 Windows filesystem API
+        pytest.skip("the platform cannot represent a non-UTF-8 path")
     with pytest.raises(ValueError, match="valid UTF-8"):
         catalog_module._safe_relative_path(
             non_utf8_name,
@@ -736,11 +725,11 @@ def test_product_hash_rejects_non_utf8_paths() -> None:
         ({"unexpected": "field"}, "fields are invalid"),
         ({"id": "UPPERCASE"}, "frozen pattern"),
         ({"tool_bundle_id": "tool-bundle/review"}, "tool_bundle_id"),
-        ({"requires_logparse": False, "logparse_product": "not-null"}, "null logparse_product"),
-        ({"requires_logparse": True, "logparse_product": None}, "non-empty logparse_product"),
+        ({"requires_logparse": False, "logparse_product": "not-null"}, "omit logparse_product"),
+        ({"requires_logparse": True, "logparse_plan": None}, "logparse_plan object"),
         ({"entry_document": "../escape.md"}, "relative POSIX path"),
         ({"entry_document": "nested//entry.md"}, "relative POSIX path"),
-        ({"schema_version": True}, "integer 1"),
+        ({"schema_version": True}, "integer 2"),
     ],
 )
 def test_skill_manifest_is_strict(

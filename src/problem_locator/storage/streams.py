@@ -67,7 +67,7 @@ class FileBinaryStream:
     def _validate_stable_at_eof(self) -> None:
         descriptor_metadata = os.fstat(self._handle.fileno())
         path_metadata = self._path.lstat()
-        fields = (
+        descriptor_fields = (
             "st_dev",
             "st_ino",
             "st_size",
@@ -75,18 +75,27 @@ class FileBinaryStream:
             "st_ctime_ns",
             "st_nlink",
         )
+        # CPython on Windows can expose a handle ctime that differs from the
+        # by-path ctime for the same stable file.  Keep ctime in the
+        # descriptor-to-descriptor mutation check, but use only fields with
+        # consistent path/handle semantics for the cross-view comparison.
+        path_fields = tuple(
+            field
+            for field in descriptor_fields
+            if not (os.name == "nt" and field == "st_ctime_ns")
+        )
         if (
             not stat.S_ISREG(path_metadata.st_mode)
             or is_reparse_point(path_metadata)
             or any(
                 getattr(descriptor_metadata, field)
                 != getattr(self._initial_metadata, field)
-                for field in fields
+                for field in descriptor_fields
             )
             or any(
                 getattr(path_metadata, field)
                 != getattr(descriptor_metadata, field)
-                for field in fields
+                for field in path_fields
             )
         ):
             raise OSError("binary resource changed while it was read")

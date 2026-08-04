@@ -882,6 +882,14 @@ def _is_link_like(metadata: os.stat_result) -> bool:
     return bool(reparse_point and attributes & reparse_point)
 
 
+def _has_unsafe_file_link_count(metadata: os.stat_result) -> bool:
+    """Reject hard links while tolerating Windows' transient zero count."""
+
+    return metadata.st_nlink != 1 and not (
+        os.name == "nt" and metadata.st_nlink == 0
+    )
+
+
 def _supports_anchored_workspace_scan() -> bool:
     return (
         os.name != "nt"
@@ -941,7 +949,13 @@ def _top_level_from_scandir(
         for entry in iterator:
             if entry.name not in _WORKSPACE_TOP_LEVEL:
                 return None
-            metadata = entry.stat(follow_symlinks=False)
+            # Some Windows providers return zeroed device/inode values from
+            # DirEntry.stat even though a direct stat has a stable identity.
+            metadata = (
+                os.stat(entry.path, follow_symlinks=False)
+                if os.name == "nt"
+                else entry.stat(follow_symlinks=False)
+            )
             if _is_link_like(metadata) or not stat.S_ISDIR(metadata.st_mode):
                 return None
             top_level[entry.name] = _metadata_identity(metadata)
@@ -1126,7 +1140,7 @@ def _measure_anchored_directory(
                 finally:
                     os.close(child_fd)
             elif stat.S_ISREG(metadata.st_mode):
-                if metadata.st_nlink != 1:
+                if _has_unsafe_file_link_count(metadata):
                     raise _workspace_measurement_failure(
                         "Workspace contains a linked output file."
                     )
@@ -1151,7 +1165,7 @@ def _measure_anchored_directory(
                         if allow_transient_changes:
                             continue
                         raise OSError("workspace file identity changed")
-                    if current.st_nlink != 1:
+                    if _has_unsafe_file_link_count(current):
                         raise _workspace_measurement_failure(
                             "Workspace contains a linked output file."
                         )
@@ -1223,25 +1237,28 @@ def _measure_portable_directory(
                 raise OSError("workspace root identity changed")
             entry.name.encode("utf-8", errors="strict")
             try:
-                metadata = entry.stat(follow_symlinks=False)
+                entry_metadata = entry.stat(follow_symlinks=False)
+                metadata = (
+                    os.stat(entry.path, follow_symlinks=False)
+                    if os.name == "nt"
+                    else entry_metadata
+                )
             except FileNotFoundError:
                 if allow_transient_changes:
                     continue
                 raise
+            entry_identity = _metadata_identity(entry_metadata)
+            if (
+                os.name != "nt" or entry_identity != (0, 0)
+            ) and entry_identity != _metadata_identity(metadata):
+                if allow_transient_changes:
+                    continue
+                raise OSError("workspace node identity changed")
             if _is_link_like(metadata):
                 raise _workspace_measurement_failure(
                     "Workspace contains an invalid output node."
                 )
             if stat.S_ISDIR(metadata.st_mode):
-                current = os.stat(entry.path, follow_symlinks=False)
-                if (
-                    _is_link_like(current)
-                    or not stat.S_ISDIR(current.st_mode)
-                    or _metadata_identity(current) != _metadata_identity(metadata)
-                ):
-                    if allow_transient_changes:
-                        continue
-                    raise OSError("workspace directory identity changed")
                 total = _measure_portable_directory(
                     Path(entry.path),
                     root=root,
@@ -1252,7 +1269,7 @@ def _measure_portable_directory(
                     allow_transient_changes=allow_transient_changes,
                 )
             elif stat.S_ISREG(metadata.st_mode):
-                if metadata.st_nlink != 1:
+                if _has_unsafe_file_link_count(metadata):
                     raise _workspace_measurement_failure(
                         "Workspace contains a linked output file."
                     )

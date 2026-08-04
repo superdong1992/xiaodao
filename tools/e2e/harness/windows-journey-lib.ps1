@@ -19,8 +19,8 @@ $script:JourneyZipName = 'synthetic-rpc-service-takeover.zip'
 $script:JourneyZipSize = 2367
 $script:JourneyZipSha256 = '194f69fecd8dc8d40d1aedeb6fc25d2b7b4922b176be2b15be73ffe386cc5064'
 $script:JourneySkillId = 'diagnosis-skill/diagnose-service-takeover'
-$script:JourneySkillVersion = '2.0.0'
-$script:JourneySkillHash = '4ce37124b5fb97233188150e074e3b71d995e27bd3941a51a05aa1d5cd2251e7'
+$script:JourneySkillVersion = '3.0.4'
+$script:JourneySkillHash = '08573b8e01e2b5c213c59b0b27b3922566293af1aed963c09c6f735f41abdd95'
 $script:JourneyClientSkillSha256 = '5ca6564dc823641b9c6b0f3a6c4178829d57eeb13190e21ae5d19ae3d8300d41'
 $script:JourneyMaxAttachmentBytes = 2684354560
 $script:JourneyMaxCurlJsonBytes = 1048576
@@ -400,11 +400,11 @@ function Get-JourneyRequestIds {
 
 function Get-JourneyProblemSpec {
     return [ordered]@{
-        statement = 'A checkout-to-inventory ReserveStock RPC times out.'
+        statement = 'A checkout-to-inventory ReserveStock RPC times out during a service takeover.'
         expected_behavior = 'The checkout operation completes after inventory reservation.'
-        actual_behavior = 'The ReserveStock RPC times out and checkout does not complete.'
-        scope = 'checkout-to-inventory RPC diagnosis'
-        goals = @('Locate the timeout cause using the supplied logs.')
+        actual_behavior = 'During an active service takeover, the ReserveStock RPC times out and checkout does not complete.'
+        scope = 'checkout-to-inventory service-takeover RPC diagnosis'
+        goals = @('Locate the service-takeover timeout cause using the supplied logs.')
         non_goals = @('Modify production systems.')
         constraints = @('Use only evidence persisted in this diagnosis case.')
         completion_criteria = @('Identify the timed-out request and an evidence-backed root cause.')
@@ -1397,9 +1397,15 @@ function Invoke-JourneyPhase3Validation {
     $artifactsValue = Get-JourneyProperty $listData 'artifacts' -Required
     Assert-JourneyJsonArray $artifactsValue 'public artifact list'
     $artifacts = @($artifactsValue)
-    Assert-Journey ($artifacts.Count -eq 1) 'public artifact list must contain exactly one artifact'
-    $artifact = $artifacts[0]
-    Assert-JourneyExactProperties $artifact @('artifact_id', 'name', 'content_type', 'size', 'sha256', 'created_at', 'download_url') 'ArtifactView'
+    Assert-Journey ($artifacts.Count -eq 2) 'public artifact list must contain exactly two artifacts'
+    $resultArtifacts = @($artifacts | Where-Object { (Get-JourneyStringProperty $_ 'name') -ceq 'diagnosis-result.json' })
+    $archiveArtifacts = @($artifacts | Where-Object { (Get-JourneyStringProperty $_ 'name') -ceq 'result.zip' })
+    Assert-Journey ($resultArtifacts.Count -eq 1) 'public artifact list must contain exactly one diagnosis result'
+    Assert-Journey ($archiveArtifacts.Count -eq 1) 'public artifact list must contain exactly one result archive'
+    $artifact = $resultArtifacts[0]
+    $archive = $archiveArtifacts[0]
+    Assert-JourneyExactProperties $artifact @('artifact_id', 'name', 'content_type', 'size', 'sha256', 'created_at', 'download_url') 'USER_RESULT ArtifactView'
+    Assert-JourneyExactProperties $archive @('artifact_id', 'name', 'content_type', 'size', 'sha256', 'created_at', 'download_url') 'USER_RESULT_ARCHIVE ArtifactView'
     $artifactId = Get-JourneyStringProperty $artifact 'artifact_id'
     Assert-JourneyUuid $artifactId 'USER_RESULT artifact_id'
     Assert-Journey ((Get-JourneyStringProperty $artifact 'name') -ceq 'diagnosis-result.json') 'USER_RESULT name'
@@ -1409,12 +1415,26 @@ function Invoke-JourneyPhase3Validation {
     Assert-Journey ($artifactSha -cmatch $script:JourneySha256Pattern) 'USER_RESULT SHA-256'
     $expectedUrl = "$($script:JourneyServiceBaseUrl)/api/v1/artifacts/$artifactId/content?case_id=$caseId"
     Assert-Journey ((Get-JourneyStringProperty $artifact 'download_url') -ceq $expectedUrl) 'USER_RESULT download URL'
+    $archiveId = Get-JourneyStringProperty $archive 'artifact_id'
+    Assert-JourneyUuid $archiveId 'USER_RESULT_ARCHIVE artifact_id'
+    Assert-Journey ($archiveId -cne $artifactId) 'public artifact IDs must be distinct'
+    Assert-Journey ((Get-JourneyStringProperty $archive 'content_type') -ceq 'application/zip') 'USER_RESULT_ARCHIVE content_type'
+    Assert-Journey ((Get-JourneyIntegerProperty $archive 'size') -gt 0) 'USER_RESULT_ARCHIVE size'
+    $archiveSha = Get-JourneyStringProperty $archive 'sha256'
+    Assert-Journey ($archiveSha -cmatch $script:JourneySha256Pattern) 'USER_RESULT_ARCHIVE SHA-256'
+    $expectedArchiveUrl = "$($script:JourneyServiceBaseUrl)/api/v1/artifacts/$archiveId/content?case_id=$caseId"
+    Assert-Journey ((Get-JourneyStringProperty $archive 'download_url') -ceq $expectedArchiveUrl) 'USER_RESULT_ARCHIVE download URL'
 
     $caseArtifactsValue = Get-JourneyProperty $resolvedView 'artifacts' -Required
     Assert-JourneyJsonArray $caseArtifactsValue 'resolved Case artifacts'
     $caseArtifacts = @($caseArtifactsValue)
-    Assert-Journey ($caseArtifacts.Count -eq 1) 'resolved Case must expose exactly one downloadable ArtifactSummary'
-    $summary = $caseArtifacts[0]
+    Assert-Journey ($caseArtifacts.Count -eq 2) 'resolved Case must expose exactly two downloadable ArtifactSummaries'
+    $resultSummaries = @($caseArtifacts | Where-Object { (Get-JourneyStringProperty $_ 'kind') -ceq 'USER_RESULT' })
+    $archiveSummaries = @($caseArtifacts | Where-Object { (Get-JourneyStringProperty $_ 'kind') -ceq 'USER_RESULT_ARCHIVE' })
+    Assert-Journey ($resultSummaries.Count -eq 1) 'resolved Case USER_RESULT summary count'
+    Assert-Journey ($archiveSummaries.Count -eq 1) 'resolved Case USER_RESULT_ARCHIVE summary count'
+    $summary = $resultSummaries[0]
+    $archiveSummary = $archiveSummaries[0]
     Assert-JourneyExactProperties $summary @('artifact_id', 'kind', 'name', 'content_type', 'resource_kind', 'size', 'sha256', 'created_by_job_id', 'created_at', 'downloadable') 'resolved ArtifactSummary'
     Assert-Journey ((Get-JourneyStringProperty $summary 'artifact_id') -ceq $artifactId) 'ArtifactSummary/View artifact_id'
     Assert-Journey ((Get-JourneyStringProperty $summary 'kind') -ceq 'USER_RESULT') 'ArtifactSummary kind'
@@ -1426,6 +1446,17 @@ function Invoke-JourneyPhase3Validation {
     Assert-Journey ((Get-JourneyStringProperty $summary 'sha256') -ceq $artifactSha) 'ArtifactSummary/View sha256'
     Assert-Journey ((Get-JourneyStringProperty $summary 'created_at') -ceq (Get-JourneyStringProperty $artifact 'created_at')) 'ArtifactSummary/View created_at'
     Assert-JourneyUuid (Get-JourneyStringProperty $summary 'created_by_job_id') 'ArtifactSummary created_by_job_id'
+    Assert-JourneyExactProperties $archiveSummary @('artifact_id', 'kind', 'name', 'content_type', 'resource_kind', 'size', 'sha256', 'created_by_job_id', 'created_at', 'downloadable') 'resolved archive ArtifactSummary'
+    Assert-Journey ((Get-JourneyStringProperty $archiveSummary 'artifact_id') -ceq $archiveId) 'archive ArtifactSummary/View artifact_id'
+    Assert-Journey ((Get-JourneyStringProperty $archiveSummary 'kind') -ceq 'USER_RESULT_ARCHIVE') 'archive ArtifactSummary kind'
+    Assert-Journey ((Get-JourneyStringProperty $archiveSummary 'resource_kind') -ceq 'FILE') 'archive ArtifactSummary resource_kind'
+    Assert-Journey (Get-JourneyBooleanProperty $archiveSummary 'downloadable') 'archive ArtifactSummary downloadable'
+    Assert-Journey ((Get-JourneyStringProperty $archiveSummary 'name') -ceq (Get-JourneyStringProperty $archive 'name')) 'archive ArtifactSummary/View name'
+    Assert-Journey ((Get-JourneyStringProperty $archiveSummary 'content_type') -ceq (Get-JourneyStringProperty $archive 'content_type')) 'archive ArtifactSummary/View content_type'
+    Assert-Journey ((Get-JourneyIntegerProperty $archiveSummary 'size') -eq (Get-JourneyIntegerProperty $archive 'size')) 'archive ArtifactSummary/View size'
+    Assert-Journey ((Get-JourneyStringProperty $archiveSummary 'sha256') -ceq $archiveSha) 'archive ArtifactSummary/View sha256'
+    Assert-Journey ((Get-JourneyStringProperty $archiveSummary 'created_at') -ceq (Get-JourneyStringProperty $archive 'created_at')) 'archive ArtifactSummary/View created_at'
+    Assert-JourneyUuid (Get-JourneyStringProperty $archiveSummary 'created_by_job_id') 'archive ArtifactSummary created_by_job_id'
     [void](Assert-JourneyCaseIdentityAndRevisionOrder $records $caseId $uploadRevision)
 
     return [PSCustomObject][ordered]@{
@@ -1439,6 +1470,7 @@ function Invoke-JourneyPhase3Validation {
         final_result = $finalResult
         observed_statuses = @($statusViews | ForEach-Object { $_.status })
         public_artifact = $artifact
+        public_result_archive = $archive
         request_ids = $ids
         phase3_mcp_call_count = $records.Count
     }

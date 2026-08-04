@@ -41,7 +41,11 @@ def _scan_files(
         children = sorted(os.scandir(directory), key=lambda item: item.name)
         for child in children:
             child_path = Path(child.path)
-            child_stat = child.stat(follow_symlinks=False)
+            child_stat = (
+                child_path.stat(follow_symlinks=False)
+                if os.name == "nt"
+                else child.stat(follow_symlinks=False)
+            )
             scanned_metadata[child_path] = child_stat
             if stat.S_ISLNK(child_stat.st_mode) or is_reparse_point(child_stat):
                 raise ValueError("directory resources cannot contain symbolic links")
@@ -79,9 +83,10 @@ def _require_unchanged_metadata(
         "st_mode",
         "st_size",
         "st_mtime_ns",
-        "st_ctime_ns",
         "st_nlink",
     )
+    if os.name != "nt":
+        fields = (*fields, "st_ctime_ns")
     if any(getattr(expected, field) != getattr(observed, field) for field in fields):
         raise ValueError(f"{label} changed while the tree was inspected")
 

@@ -24,6 +24,7 @@ from problem_locator.contracts.serialization import (
     canonical_json_bytes,
     parse_canonical_json_bytes,
 )
+from problem_locator.integrations.result_archive import build_result_archive
 from problem_locator.runtime.failures import RuntimeExecutionError
 from problem_locator.runtime.output_reader import read_agent_output
 from problem_locator.runtime.workspace import PreparedWorkspace
@@ -149,6 +150,147 @@ def test_reads_only_final_canonical_outcome_and_validates_user_result(
     assert resource.size == len(user_result_bytes)
     assert resource.sha256 == hashlib.sha256(user_result_bytes).hexdigest()
     assert resource.tree_manifest is None
+
+
+def _add_manual_result_archive(
+    root: Path,
+    payload: dict[str, Any],
+    *,
+    result_text: str,
+    target_log_paths: list[str] | None = None,
+) -> bytes:
+    target_paths = [] if target_log_paths is None else target_log_paths
+    proposal_key = "user_result_archive"
+    request_path = f"output/proposals/{proposal_key}/request.json"
+    result_path = f"output/proposals/{proposal_key}/result.zip"
+    _write_file_proposal(
+        root,
+        request_path,
+        canonical_json_bytes(
+            {
+                "schema_version": 1,
+                "result_text": result_text,
+                "target_log_paths": target_paths,
+            }
+        ),
+    )
+    archive_path = build_result_archive(root, request_path, result_path)
+    archive_bytes = archive_path.read_bytes()
+    payload["proposed_artifact_drafts"].append(
+        {
+            "proposal_key": proposal_key,
+            "artifact_kind": "USER_RESULT_ARCHIVE",
+            "name": "result.zip",
+            "content_type": "application/zip",
+            "resource_kind": "FILE",
+            "workspace_relative_path": result_path,
+            "declared_size": len(archive_bytes),
+            "declared_sha256": hashlib.sha256(archive_bytes).hexdigest(),
+            "metadata": {
+                "schema_version": 1,
+                "format_id": "problem-locator-result-archive-v1",
+                "description": "Controlled user-facing diagnosis archive.",
+                "user_result_proposal_key": "user_result",
+                "target_log_count": len(target_paths),
+            },
+        }
+    )
+    return archive_bytes
+
+
+def test_manual_candidate_archive_is_bound_to_exact_candidate_statement(
+    tmp_path: Path,
+) -> None:
+    job, manifest, payload, user_result_bytes = _diagnosis_inputs()
+    statement = payload["payload"]["candidate_conclusion_draft"]["statement"]
+    archive_bytes = _add_manual_result_archive(
+        tmp_path,
+        payload,
+        result_text=statement + "\n",
+    )
+    draft = payload["proposed_artifact_drafts"][0]
+    _write_file_proposal(tmp_path, draft["workspace_relative_path"], user_result_bytes)
+    _write_outcome(tmp_path, payload)
+
+    result = read_agent_output(tmp_path, job, manifest)
+
+    assert [resource.proposal_key for resource in result.proposal_resources] == [
+        "user_result",
+        "user_result_archive",
+    ]
+    archive = result.proposal_resources[1]
+    assert archive.size == len(archive_bytes)
+    assert archive.sha256 == hashlib.sha256(archive_bytes).hexdigest()
+
+
+def test_candidate_archive_reads_fixed_target_logs_from_inputs(
+    tmp_path: Path,
+) -> None:
+    job, manifest, payload, user_result_bytes = _diagnosis_inputs()
+    manifest_payload = manifest.model_dump(mode="json")
+    evidence_entry = next(
+        entry
+        for entry in manifest_payload["entries"]
+        if entry["input_kind"] == "EVIDENCE"
+    )
+    artifact_entry = next(
+        entry
+        for entry in manifest_payload["entries"]
+        if entry["input_kind"] == "ARTIFACT"
+    )
+    evidence_entry.update(
+        source_type="LOGPARSE",
+        source_ref=artifact_entry["resource_id"],
+        locator={
+            "kind": "LOGPARSE",
+            "relative_path": "logs/target.log",
+            "start_time": "2026-07-31T00:00:00.000Z",
+            "end_time": "2026-07-31T00:00:01.000Z",
+            "start_line": 1,
+            "end_line": 1,
+        },
+    )
+    manifest = WorkspaceInputManifest.model_validate(manifest_payload)
+    target_path = f'{artifact_entry["relative_path"]}/logs/target.log'
+    _write_file_proposal(tmp_path, target_path, b"fixed target log\n")
+
+    statement = payload["payload"]["candidate_conclusion_draft"]["statement"]
+    archive_bytes = _add_manual_result_archive(
+        tmp_path,
+        payload,
+        result_text=statement + "\n",
+        target_log_paths=[target_path],
+    )
+    draft = payload["proposed_artifact_drafts"][0]
+    _write_file_proposal(tmp_path, draft["workspace_relative_path"], user_result_bytes)
+    _write_outcome(tmp_path, payload)
+
+    result = read_agent_output(tmp_path, job, manifest)
+
+    archive = next(
+        resource
+        for resource in result.proposal_resources
+        if resource.proposal_key == "user_result_archive"
+    )
+    assert archive.size == len(archive_bytes)
+    assert archive.sha256 == hashlib.sha256(archive_bytes).hexdigest()
+
+
+def test_candidate_archive_rejects_unbound_result_text(tmp_path: Path) -> None:
+    job, manifest, payload, user_result_bytes = _diagnosis_inputs()
+    _add_manual_result_archive(
+        tmp_path,
+        payload,
+        result_text="A different diagnosis.\n",
+    )
+    draft = payload["proposed_artifact_drafts"][0]
+    _write_file_proposal(tmp_path, draft["workspace_relative_path"], user_result_bytes)
+    _write_outcome(tmp_path, payload)
+
+    with pytest.raises(RuntimeExecutionError) as captured:
+        read_agent_output(tmp_path, job, manifest)
+
+    _assert_failure(captured, ErrorCode.OUTCOME_INVALID)
 
 
 def test_part_file_without_final_is_outcome_missing(tmp_path: Path) -> None:

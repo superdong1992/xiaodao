@@ -655,8 +655,13 @@ class DomainCoordinator:
                 return _validation(
                     "An accepted Candidate requires exactly one USER_RESULT Artifact."
                 )
+            archive_keys = [
+                proposal.proposal_key
+                for proposal in outcome.proposed_artifacts
+                if proposal.artifact_kind is ArtifactKind.USER_RESULT_ARCHIVE
+            ]
             artifact_keys = _dedupe(
-                [*dependency_artifact_keys, user_result_keys[0]]
+                [*dependency_artifact_keys, user_result_keys[0], *archive_keys]
             )
             review_evidence = [
                 *_existing_bindings(snapshot.case.diagnosis_state.evidence_refs),

@@ -39,7 +39,7 @@ test "$(stat -c '%u:%g:%a' /run/plagent-claude/settings.json)" = 10001:10001:600
 helper_skill=/run/plagent-claude/.claude/skills/logparse-diagnose/SKILL.md
 test -f "$helper_skill"
 test ! -L "$helper_skill"
-test "$(sha256sum "$helper_skill" | awk '{print $1}')" = 490cad64671c040de672583882f470e02e818814dfd2b1a16942aace5f3fc2fb
+test "$(sha256sum "$helper_skill" | awk '{print $1}')" = 8bef0d36a3c73f474d979b53211ee722bbfe37c103a5bb03c7c27150ef9ff03d
 runuser -u plagent -- test -r "$helper_skill"
 test -z "$(runuser -u plagent -- find /run/plagent-claude/.claude/skills/logparse-diagnose -xdev -writable -print -quit)"
 
@@ -86,7 +86,7 @@ runuser -u plagent -- test -r /run/plagent-claude/settings.json
   printf 'base_url_https=true\n'
   printf 'settings_tmpfs=rw,noexec,nosuid,nodev\n'
   printf 'claude_runtime_parents=10001:10001,0700,writable\n'
-  printf 'logparse_diagnose_skill=read-only-bind,sha256:490cad64671c040de672583882f470e02e818814dfd2b1a16942aace5f3fc2fb\n'
+  printf 'logparse_diagnose_skill=read-only-bind,sha256:8bef0d36a3c73f474d979b53211ee722bbfe37c103a5bb03c7c27150ef9ff03d\n'
   printf 'service_tools=Bash,Read,Write,Skill(logparse-diagnose)\n'
   printf 'source_venv_and_managed_python_tree_scan=fail-closed\n'
   printf 'source_venv_and_managed_python_any_user_writable_entry=false\n'

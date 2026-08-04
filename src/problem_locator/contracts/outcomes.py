@@ -721,19 +721,28 @@ def validate_transition_plan_for_outcome(
         for proposal in artifacts
         if proposal.artifact_kind is ArtifactKind.USER_RESULT
     }
+    archive_keys = {
+        proposal.proposal_key
+        for proposal in artifacts
+        if proposal.artifact_kind is ArtifactKind.USER_RESULT_ARCHIVE
+    }
     if plan.accepted_candidate_proposal_key is not None:
         if candidate is None or plan.accepted_candidate_proposal_key != candidate.proposal_key:
             raise ValueError("TransitionPlan accepts an unknown candidate proposal")
         if len(user_result_keys) != 1 or not user_result_keys <= accepted_artifacts:
             raise ValueError("an accepted candidate requires its unique USER_RESULT Artifact")
+        if archive_keys and not archive_keys <= accepted_artifacts:
+            raise ValueError(
+                "an accepted candidate requires its USER_RESULT_ARCHIVE Artifact"
+            )
         for binding in _candidate_evidence_bindings(candidate):
             if (
                 binding.evidence_proposal_key is not None
                 and binding.evidence_proposal_key not in accepted_evidence
             ):
                 raise ValueError("accepted candidate bindings require accepted Evidence proposals")
-    elif user_result_keys & accepted_artifacts:
-        raise ValueError("USER_RESULT cannot be accepted without its candidate")
+    elif (user_result_keys | archive_keys) & accepted_artifacts:
+        raise ValueError("user result Artifacts cannot be accepted without their candidate")
 
     for binding in _delta_evidence_bindings(plan.accepted_state_delta):
         if (

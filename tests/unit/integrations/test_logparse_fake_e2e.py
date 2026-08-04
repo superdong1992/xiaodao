@@ -537,7 +537,35 @@ def test_first_parse_dual_anchor_claim_audit_close_and_fixed_argv(
         result_path = (
             workspace / "output" / "proposals" / "logparse-run" / "target_logs.json"
         )
-        assert result_path.read_bytes() == _expected_target_bytes()
+        result_payload = json.loads(result_path.read_bytes())
+        artifact_draft = result_payload.pop("logparse_run_artifact_draft")
+        assert canonical_json_bytes(result_payload) == _expected_target_bytes()
+        tree = workspace / "output" / "proposals" / "logparse-run" / "tree"
+        controlled_run = inspect_controlled_run(tree, product="compact")
+        assert artifact_draft == {
+            "artifact_kind": "LOGPARSE_RUN",
+            "content_type": (
+                "application/vnd.problem-locator.logparse-run+directory"
+            ),
+            "declared_sha256": None,
+            "declared_size": None,
+            "metadata": {
+                "logparse_version_ref": pinned_asset.ref.model_dump(mode="json"),
+                "parse_manifest_relative_path": (
+                    controlled_run.parse_manifest_relative_path
+                ),
+                "parse_parameters": {"product": "compact"},
+                "source_attachment_id": attachment.resource_id,
+                "source_attachment_sha256": attachment.sha256,
+                "tree_manifest_sha256": controlled_run.sha256,
+            },
+            "name": "logparse-run",
+            "proposal_key": "logparse-run",
+            "resource_kind": "DIRECTORY",
+            "workspace_relative_path": (
+                "output/proposals/logparse-run/tree"
+            ),
+        }
 
         audited = session.parse_request_bytes()
         assert audited == request_bytes
@@ -573,7 +601,6 @@ def test_first_parse_dual_anchor_claim_audit_close_and_fixed_argv(
         with pytest.raises(ValueError, match="request bytes require a parse claim"):
             validate_logparse_claim_for_job(None, job, manifest, audited)
 
-        tree = workspace / "output" / "proposals" / "logparse-run" / "tree"
         record = _record(record_path)
         assert record["parse_count"] == 1
         assert record["target_logs_count"] == 2

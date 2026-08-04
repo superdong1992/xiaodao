@@ -929,6 +929,14 @@ class UserResultMetadata(ContractModel):
     description: DescriptionText
 
 
+class UserResultArchiveMetadata(ContractModel):
+    schema_version: Literal[1]
+    format_id: Literal["problem-locator-result-archive-v1"]
+    description: DescriptionText
+    user_result_proposal_key: NonEmptyText
+    target_log_count: NonNegativeInt
+
+
 class DiagnosticExportMetadata(ContractModel):
     schema_version: Literal[1]
     format_id: Annotated[str, StringConstraints(pattern=FORMAT_ID_PATTERN, strict=True)]
@@ -948,7 +956,12 @@ class LogparseRunMetadata(ContractModel):
     parse_parameters: LogparseParseParameters
 
 
-ArtifactMetadata: TypeAlias = UserResultMetadata | DiagnosticExportMetadata | LogparseRunMetadata
+ArtifactMetadata: TypeAlias = (
+    UserResultMetadata
+    | UserResultArchiveMetadata
+    | DiagnosticExportMetadata
+    | LogparseRunMetadata
+)
 
 
 class Artifact(ContractModel):
@@ -969,6 +982,7 @@ class Artifact(ContractModel):
     def validate_artifact(self) -> Artifact:
         expected_type = {
             ArtifactKind.USER_RESULT: UserResultMetadata,
+            ArtifactKind.USER_RESULT_ARCHIVE: UserResultArchiveMetadata,
             ArtifactKind.DIAGNOSTIC_EXPORT: DiagnosticExportMetadata,
             ArtifactKind.LOGPARSE_RUN: LogparseRunMetadata,
         }[self.kind]
@@ -977,6 +991,12 @@ class Artifact(ContractModel):
         if self.kind is ArtifactKind.USER_RESULT:
             if self.resource_kind is not ResourceKind.FILE or self.content_type != "application/json":
                 raise ValueError("USER_RESULT must be an application/json FILE")
+        if self.kind is ArtifactKind.USER_RESULT_ARCHIVE:
+            if (
+                self.resource_kind is not ResourceKind.FILE
+                or self.content_type != "application/zip"
+            ):
+                raise ValueError("USER_RESULT_ARCHIVE must be an application/zip FILE")
         if self.kind is ArtifactKind.LOGPARSE_RUN:
             if self.resource_kind is not ResourceKind.DIRECTORY:
                 raise ValueError("LOGPARSE_RUN must be a DIRECTORY")
@@ -1648,6 +1668,7 @@ def _validate_artifact_shape(
 ) -> None:
     expected_type = {
         ArtifactKind.USER_RESULT: UserResultMetadata,
+        ArtifactKind.USER_RESULT_ARCHIVE: UserResultArchiveMetadata,
         ArtifactKind.DIAGNOSTIC_EXPORT: DiagnosticExportMetadata,
         ArtifactKind.LOGPARSE_RUN: LogparseRunMetadata,
     }[kind]
@@ -1655,6 +1676,10 @@ def _validate_artifact_shape(
         raise ValueError("artifact kind and metadata type do not match")
     if kind is ArtifactKind.USER_RESULT and (resource_kind is not ResourceKind.FILE or content_type != "application/json"):
         raise ValueError("USER_RESULT must be an application/json FILE")
+    if kind is ArtifactKind.USER_RESULT_ARCHIVE and (
+        resource_kind is not ResourceKind.FILE or content_type != "application/zip"
+    ):
+        raise ValueError("USER_RESULT_ARCHIVE must be an application/zip FILE")
     if kind is ArtifactKind.LOGPARSE_RUN:
         if resource_kind is not ResourceKind.DIRECTORY:
             raise ValueError("LOGPARSE_RUN must be a DIRECTORY")
@@ -1880,10 +1905,22 @@ def _validate_proposal_keys(evidence_keys: list[str], artifact_keys: list[str], 
 def _validate_candidate_user_result_pair(payload: OutcomePayload | None, artifacts: list[Any]) -> None:
     candidate = payload.candidate_conclusion_draft if isinstance(payload, DiagnosisOutcome) else None
     user_results = [artifact for artifact in artifacts if artifact.artifact_kind is ArtifactKind.USER_RESULT]
-    if candidate is None and user_results:
-        raise ValueError("USER_RESULT is forbidden without candidate_conclusion_draft")
+    archives = [
+        artifact
+        for artifact in artifacts
+        if artifact.artifact_kind is ArtifactKind.USER_RESULT_ARCHIVE
+    ]
+    if len(archives) > 1:
+        raise ValueError("an Outcome may propose at most one USER_RESULT_ARCHIVE")
+    if candidate is None and (user_results or archives):
+        raise ValueError("user result Artifacts are forbidden without candidate_conclusion_draft")
     if candidate is not None and len(user_results) != 1:
         raise ValueError("candidate_conclusion_draft requires exactly one USER_RESULT artifact")
+    if archives:
+        metadata = archives[0].metadata
+        assert isinstance(metadata, UserResultArchiveMetadata)
+        if metadata.user_result_proposal_key != user_results[0].proposal_key:
+            raise ValueError("USER_RESULT_ARCHIVE must bind the unique USER_RESULT proposal")
 
 
 def _validate_agent_delta(delta: DiagnosisStateDelta, outcome_id: str, job_id: str) -> None:
@@ -3008,6 +3045,13 @@ class ArtifactSummary(ContractModel):
             or self.content_type != "application/json"
         ):
             raise ValueError("USER_RESULT summary must describe an application/json FILE")
+        if self.kind is ArtifactKind.USER_RESULT_ARCHIVE and (
+            self.resource_kind is not ResourceKind.FILE
+            or self.content_type != "application/zip"
+        ):
+            raise ValueError(
+                "USER_RESULT_ARCHIVE summary must describe an application/zip FILE"
+            )
         if self.kind is ArtifactKind.DIAGNOSTIC_EXPORT and not self.downloadable:
             raise ValueError("DIAGNOSTIC_EXPORT is always downloadable")
         if self.kind is ArtifactKind.LOGPARSE_RUN:
@@ -3809,7 +3853,10 @@ class HandoffRecord(ContractModel):
     spec_id: Literal["S00", "S01", "S02", "S03", "S04", "S05", "S06", "S07", "S08"]
     title: NonEmptyText
     executor: ExecutorSpec
-    contract_revision: Literal[CONTRACT_REVISION]
+    # Historical S00-S08 handoffs are immutable r3 release records. New
+    # contract revisions use a separate amendment/design record instead of
+    # rewriting already signed handoff bytes.
+    contract_revision: Literal["v1-contract-r3"]
     contract_base_commit: Annotated[str, StringConstraints(pattern=GIT_OBJECT_PATTERN, strict=True)]
     branch: Annotated[str, StringConstraints(pattern=r"^codex/.+", strict=True)]
     head_commit: Annotated[str, StringConstraints(pattern=GIT_OBJECT_PATTERN, strict=True)]
@@ -3827,8 +3874,8 @@ class HandoffRecord(ContractModel):
 
     @model_validator(mode="after")
     def validate_handoff(self) -> HandoffRecord:
-        if self.contract_revision != CONTRACT_REVISION:
-            raise ValueError("handoff contract_revision must equal the frozen revision")
+        if self.contract_revision != "v1-contract-r3":
+            raise ValueError("handoff contract_revision must equal v1-contract-r3")
         for name in ("changed_files", "fixtures_consumed", "fixtures_produced"):
             values = getattr(self, name)
             _unique(values, name)

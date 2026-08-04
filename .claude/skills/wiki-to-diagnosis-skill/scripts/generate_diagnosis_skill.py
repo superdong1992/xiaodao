@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 import hashlib
 import json
 import os
@@ -13,71 +13,266 @@ import tempfile
 from typing import Any, Mapping, Sequence
 
 
-GENERATOR_VERSION = "2.0.0"
-SPEC_SCHEMA_VERSION = 1
-MANIFEST_FIELDS = frozenset(
-    {
-        "schema_version",
-        "id",
-        "version",
-        "capability",
-        "summary",
-        "entry_document",
-        "tool_bundle_id",
-        "requires_logparse",
-        "logparse_product",
-    }
-)
+GENERATOR_VERSION = "3.0.4"
+SPEC_SCHEMA_VERSION = 2
+MANIFEST_SCHEMA_VERSION = 2
 PRODUCT_FILES = ("SKILL.md", "diagnosis-skill.json")
+LOG_ARCHIVE_CONTENT_TYPES = (
+    "application/gzip",
+    "application/zip",
+    "application/x-tar",
+)
 SKILL_ID_PATTERN = re.compile(r"^diagnose-[a-z0-9]+(?:-[a-z0-9]+)*$")
 CAPABILITY_PATTERN = re.compile(r"^[a-z][a-z0-9-]{1,63}$")
-SEMVER_PATTERN = re.compile(r"^(?P<major>0|[1-9][0-9]*)\.(?P<minor>0|[1-9][0-9]*)\.(?P<patch>0|[1-9][0-9]*)$")
+SEMVER_PATTERN = re.compile(
+    r"^(?P<major>0|[1-9][0-9]*)\.(?P<minor>0|[1-9][0-9]*)\.(?P<patch>0|[1-9][0-9]*)$"
+)
 NAME_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 ROLE_LABEL_PATTERN = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
-CONTENT_TYPE_PATTERN = re.compile(
-    r"^[a-z0-9][a-z0-9!#$&^_.+\-]{0,62}/[a-z0-9][a-z0-9!#$&^_.+\-]{0,62}$"
-)
-UTC_MILLIS_PATTERN = r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$"
+
+
+def _require_exact_keys(value: Mapping[str, Any], expected: set[str], name: str) -> None:
+    actual = set(value)
+    if actual != expected:
+        raise ValueError(
+            f"{name} fields are invalid; missing={sorted(expected - actual)!r}, "
+            f"extra={sorted(actual - expected)!r}"
+        )
+
+
+def _single_line(value: Any, name: str, *, maximum: int) -> str:
+    if (
+        not isinstance(value, str)
+        or not value
+        or value != value.strip()
+        or "\n" in value
+        or "\r" in value
+        or len(value.encode("utf-8")) > maximum
+    ):
+        raise ValueError(f"{name} must be a non-empty single line")
+    return value
+
+
+def _text(value: Any, name: str) -> str:
+    if not isinstance(value, str) or not value.strip() or len(value.encode("utf-8")) > 65_536:
+        raise ValueError(f"{name} must be non-empty UTF-8 text")
+    return value.replace("\r\n", "\n").replace("\r", "\n").strip()
+
+
+def _sequence(value: Any, name: str, *, maximum: int = 100) -> list[Any]:
+    if not isinstance(value, list) or len(value) > maximum:
+        raise ValueError(f"{name} must be an array with at most {maximum} items")
+    return value
+
+
+def _text_tuple(value: Any, name: str, *, minimum: int = 0) -> tuple[str, ...]:
+    result = tuple(
+        _text(item, f"{name}[]") for item in _sequence(value, name)
+    )
+    if len(result) < minimum or len(result) != len(set(result)):
+        raise ValueError(f"{name} cardinality or uniqueness is invalid")
+    return result
 
 
 @dataclass(frozen=True)
 class Role:
     label: str
     description: str
-    required: bool
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> "Role":
-        _require_exact_keys(value, {"label", "description", "required"}, "role")
+        _require_exact_keys(value, {"label", "description"}, "role")
         label = _single_line(value["label"], "role.label", maximum=64)
-        description = _single_line(value["description"], "role.description", maximum=512)
-        required = value["required"]
         if ROLE_LABEL_PATTERN.fullmatch(label) is None:
-            raise ValueError("role.label must match ^[a-z][a-z0-9_-]{0,63}$")
-        if type(required) is not bool:
-            raise ValueError("role.required must be a boolean")
-        return cls(label=label, description=description, required=required)
+            raise ValueError("role.label is invalid")
+        return cls(
+            label=label,
+            description=_single_line(
+                value["description"], "role.description", maximum=512
+            ),
+        )
 
 
 @dataclass(frozen=True)
-class CustomParameter:
+class Requirement:
     name: str
-    description: str
-    required: bool
+    kind: str
+    stage: str
+    fulfillment_source: str
+    prompt: str
+    constraints: dict[str, Any]
 
     @classmethod
-    def from_mapping(cls, value: Mapping[str, Any]) -> "CustomParameter":
-        _require_exact_keys(value, {"name", "description", "required"}, "custom parameter")
-        name = _single_line(value["name"], "custom_parameter.name", maximum=64)
-        description = _single_line(
-            value["description"], "custom_parameter.description", maximum=512
+    def from_mapping(cls, value: Mapping[str, Any]) -> "Requirement":
+        _require_exact_keys(
+            value,
+            {
+                "name",
+                "kind",
+                "stage",
+                "fulfillment_source",
+                "prompt",
+                "constraints",
+            },
+            "requirement",
         )
-        required = value["required"]
+        name = _single_line(value["name"], "requirement.name", maximum=64)
         if NAME_PATTERN.fullmatch(name) is None:
-            raise ValueError("custom_parameter.name must use S00 lower snake case")
-        if type(required) is not bool:
-            raise ValueError("custom_parameter.required must be a boolean")
-        return cls(name=name, description=description, required=required)
+            raise ValueError("requirement.name must use S00 lower snake case")
+        kind = value["kind"]
+        stage = value["stage"]
+        source = value["fulfillment_source"]
+        if kind not in {"INPUT", "ATTACHMENT"}:
+            raise ValueError("requirement.kind must be INPUT or ATTACHMENT")
+        if stage not in {"INITIAL", "AFTER_LOGPARSE"}:
+            raise ValueError("requirement.stage is invalid")
+        if (kind, source) not in {
+            ("INPUT", "USER_FACT"),
+            ("ATTACHMENT", "READY_ATTACHMENT"),
+        }:
+            raise ValueError("requirement fulfillment source does not match kind")
+        if stage == "AFTER_LOGPARSE" and kind != "INPUT":
+            raise ValueError("AFTER_LOGPARSE supports INPUT requirements only")
+        constraints = value["constraints"]
+        if not isinstance(constraints, dict):
+            raise ValueError("requirement.constraints must be an object")
+        if kind == "INPUT":
+            _require_exact_keys(
+                constraints,
+                {
+                    "value_type",
+                    "min_utf8_bytes",
+                    "max_utf8_bytes",
+                    "pattern",
+                    "allowed_values",
+                },
+                "INPUT constraints",
+            )
+            minimum = constraints["min_utf8_bytes"]
+            maximum = constraints["max_utf8_bytes"]
+            if (
+                constraints["value_type"] != "STRING"
+                or type(minimum) is not int
+                or type(maximum) is not int
+                or not 1 <= minimum <= maximum <= 65_536
+            ):
+                raise ValueError("INPUT byte constraints are invalid")
+            pattern = constraints["pattern"]
+            if pattern is not None:
+                if not isinstance(pattern, str):
+                    raise ValueError("INPUT pattern must be a string or null")
+                try:
+                    re.compile(pattern)
+                except re.error as exc:
+                    raise ValueError("INPUT pattern is invalid") from exc
+            allowed = constraints["allowed_values"]
+            if (
+                not isinstance(allowed, list)
+                or any(not isinstance(item, str) or not item for item in allowed)
+                or len(allowed) != len(set(allowed))
+            ):
+                raise ValueError("INPUT allowed_values are invalid")
+        else:
+            _require_exact_keys(
+                constraints,
+                {"allowed_content_types", "min_count", "max_count"},
+                "ATTACHMENT constraints",
+            )
+            allowed = constraints["allowed_content_types"]
+            minimum = constraints["min_count"]
+            maximum = constraints["max_count"]
+            if (
+                not isinstance(allowed, list)
+                or any(not isinstance(item, str) or not item for item in allowed)
+                or len(allowed) != len(set(allowed))
+                or type(minimum) is not int
+                or type(maximum) is not int
+                or not 1 <= minimum <= maximum
+            ):
+                raise ValueError("ATTACHMENT constraints are invalid")
+        return cls(
+            name=name,
+            kind=kind,
+            stage=stage,
+            fulfillment_source=source,
+            prompt=_single_line(value["prompt"], "requirement.prompt", maximum=4096),
+            constraints=dict(constraints),
+        )
+
+    def to_mapping(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+def _binding(value: Any, name: str) -> dict[str, str]:
+    if not isinstance(value, dict):
+        raise ValueError(f"{name} must be an object")
+    source = value.get("source")
+    if source == "USER_FACT":
+        _require_exact_keys(value, {"source", "name"}, name)
+        bound = _single_line(value["name"], f"{name}.name", maximum=64)
+        if NAME_PATTERN.fullmatch(bound) is None:
+            raise ValueError(f"{name}.name is invalid")
+        return {"source": source, "name": bound}
+    if source == "SKILL_FIXED":
+        _require_exact_keys(value, {"source", "value"}, name)
+        return {
+            "source": source,
+            "value": _single_line(value["value"], f"{name}.value", maximum=4096),
+        }
+    raise ValueError(f"{name}.source must be USER_FACT or SKILL_FIXED")
+
+
+def _logparse_plan(value: Any) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError("logparse_plan must be an object or null")
+    _require_exact_keys(
+        value,
+        {"attachment_requirement", "problem_time_binding", "anchors"},
+        "logparse_plan",
+    )
+    attachment = value["attachment_requirement"]
+    if attachment is not None:
+        attachment = _single_line(
+            attachment, "logparse_plan.attachment_requirement", maximum=64
+        )
+    anchors = []
+    labels: set[str] = set()
+    for index, raw in enumerate(_sequence(value["anchors"], "logparse_plan.anchors", maximum=20)):
+        if not isinstance(raw, dict):
+            raise ValueError("logparse anchor must be an object")
+        _require_exact_keys(
+            raw,
+            {"label", "module", "slot", "process_name", "pid"},
+            "logparse anchor",
+        )
+        label = _single_line(raw["label"], "anchor.label", maximum=64)
+        if label in labels:
+            raise ValueError("anchor labels must be unique")
+        labels.add(label)
+        anchors.append(
+            {
+                "label": label,
+                "module": _binding(raw["module"], f"anchors[{index}].module"),
+                "slot": _binding(raw["slot"], f"anchors[{index}].slot"),
+                "process_name": _binding(
+                    raw["process_name"], f"anchors[{index}].process_name"
+                ),
+                "pid": None
+                if raw["pid"] is None
+                else _binding(raw["pid"], f"anchors[{index}].pid"),
+            }
+        )
+    if not anchors:
+        raise ValueError("logparse_plan requires at least one anchor")
+    return {
+        "attachment_requirement": attachment,
+        "problem_time_binding": _binding(
+            value["problem_time_binding"], "problem_time_binding"
+        ),
+        "anchors": anchors,
+    }
 
 
 @dataclass(frozen=True)
@@ -87,10 +282,11 @@ class GenerationSpec:
     capability: str
     summary: str
     chinese_title: str
-    module_name: str
+    module_name: str | None
     problem_scope: str
     roles: tuple[Role, ...]
-    custom_parameters: tuple[CustomParameter, ...]
+    requirements: tuple[Requirement, ...]
+    logparse_plan: dict[str, Any] | None
     time_characteristics: tuple[str, ...]
     analysis_steps: tuple[str, ...]
     judgement_rules: tuple[str, ...]
@@ -98,11 +294,10 @@ class GenerationSpec:
     assumptions: tuple[str, ...]
     requires_logparse: bool
     logparse_product: str | None
-    allowed_content_types: tuple[str, ...]
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> "GenerationSpec":
-        expected = {
+        required = {
             "schema_version",
             "generator_version",
             "id",
@@ -113,49 +308,54 @@ class GenerationSpec:
             "module_name",
             "problem_scope",
             "roles",
-            "custom_parameters",
+            "requirements",
+            "logparse_plan",
             "time_characteristics",
             "analysis_steps",
             "judgement_rules",
             "output_requirements",
             "assumptions",
             "requires_logparse",
-            "logparse_product",
-            "allowed_content_types",
         }
-        _require_exact_keys(value, expected, "generation spec")
+        optional = {"logparse_product"}
+        actual = set(value)
+        if not required <= actual or actual - required - optional:
+            raise ValueError("generation spec field set is invalid")
         if value["schema_version"] != SPEC_SCHEMA_VERSION:
-            raise ValueError("generation spec schema_version must be 1")
+            raise ValueError("generation spec schema_version must be 2")
         if value["generator_version"] != GENERATOR_VERSION:
             raise ValueError(f"generator_version must be {GENERATOR_VERSION}")
         requires_logparse = value["requires_logparse"]
         if type(requires_logparse) is not bool:
             raise ValueError("requires_logparse must be a boolean")
-        raw_product = value["logparse_product"]
-        logparse_product = (
-            None
-            if raw_product is None
-            else _single_line(raw_product, "logparse_product", maximum=65536)
-        )
+        module_name = value["module_name"]
+        if module_name is not None:
+            module_name = _single_line(module_name, "module_name", maximum=128)
+        product = value.get("logparse_product")
+        if product is not None:
+            product = _single_line(product, "logparse_product", maximum=4096)
         spec = cls(
             skill_id=_single_line(value["id"], "id", maximum=64),
             version=_single_line(value["version"], "version", maximum=64),
             capability=_single_line(value["capability"], "capability", maximum=64),
             summary=_single_line(value["summary"], "summary", maximum=4096),
-            chinese_title=_single_line(value["chinese_title"], "chinese_title", maximum=256),
-            module_name=_single_line(value["module_name"], "module_name", maximum=128),
+            chinese_title=_single_line(
+                value["chinese_title"], "chinese_title", maximum=256
+            ),
+            module_name=module_name,
             problem_scope=_text(value["problem_scope"], "problem_scope"),
             roles=tuple(
                 Role.from_mapping(item)
-                for item in _mapping_list(value["roles"], "roles", minimum=1, maximum=20)
+                for item in _sequence(value["roles"], "roles", maximum=20)
             ),
-            custom_parameters=tuple(
-                CustomParameter.from_mapping(item)
-                for item in _mapping_list(
-                    value["custom_parameters"], "custom_parameters", minimum=0, maximum=32
-                )
+            requirements=tuple(
+                Requirement.from_mapping(item)
+                for item in _sequence(value["requirements"], "requirements", maximum=64)
             ),
-            time_characteristics=_text_tuple(value["time_characteristics"], "time_characteristics"),
+            logparse_plan=_logparse_plan(value["logparse_plan"]),
+            time_characteristics=_text_tuple(
+                value["time_characteristics"], "time_characteristics"
+            ),
             analysis_steps=_text_tuple(
                 value["analysis_steps"], "analysis_steps", minimum=1
             ),
@@ -167,71 +367,67 @@ class GenerationSpec:
             ),
             assumptions=_text_tuple(value["assumptions"], "assumptions"),
             requires_logparse=requires_logparse,
-            logparse_product=logparse_product,
-            allowed_content_types=tuple(
-                _single_line(item, "allowed_content_types[]", maximum=127)
-                for item in _sequence(value["allowed_content_types"], "allowed_content_types")
-            ),
+            logparse_product=product,
         )
         spec.validate()
         return spec
-
-    def to_mapping(self) -> dict[str, Any]:
-        return {
-            "schema_version": SPEC_SCHEMA_VERSION,
-            "generator_version": GENERATOR_VERSION,
-            "id": self.skill_id,
-            "version": self.version,
-            "capability": self.capability,
-            "summary": self.summary,
-            "chinese_title": self.chinese_title,
-            "module_name": self.module_name,
-            "problem_scope": self.problem_scope,
-            "roles": [role.__dict__ for role in self.roles],
-            "custom_parameters": [parameter.__dict__ for parameter in self.custom_parameters],
-            "time_characteristics": list(self.time_characteristics),
-            "analysis_steps": list(self.analysis_steps),
-            "judgement_rules": list(self.judgement_rules),
-            "output_requirements": list(self.output_requirements),
-            "assumptions": list(self.assumptions),
-            "requires_logparse": self.requires_logparse,
-            "logparse_product": self.logparse_product,
-            "allowed_content_types": list(self.allowed_content_types),
-        }
 
     def validate(self) -> None:
         if SKILL_ID_PATTERN.fullmatch(self.skill_id) is None:
             raise ValueError("id must match diagnose-<lower-kebab-capability>")
         match = SEMVER_PATTERN.fullmatch(self.version)
-        if match is None or int(match.group("major")) < 2:
-            raise ValueError("generated Skill version must be semantic version 2.0.0 or later")
+        if match is None or int(match.group("major")) < 3:
+            raise ValueError("generated Skill version must be semantic version 3.0.0 or later")
         if CAPABILITY_PATTERN.fullmatch(self.capability) is None:
-            raise ValueError("capability must be a stable lower-kebab identifier")
-        _unique([role.label for role in self.roles], "role labels")
-        if not any(role.required for role in self.roles):
-            raise ValueError("at least one role must be required")
-        _unique([parameter.name for parameter in self.custom_parameters], "custom parameter names")
-        reserved = {
-            "caller_service",
-            "server_service",
-            "rpc_method",
-            "problem_time",
-            "log_archive",
-        }
-        if reserved.intersection(parameter.name for parameter in self.custom_parameters):
-            raise ValueError("custom parameters must not shadow fixed S07 requirement names")
+            raise ValueError("capability is invalid")
+        names = [item.name for item in self.requirements]
+        if len(names) != len(set(names)):
+            raise ValueError("requirement names must be unique")
+        stages = [item.stage for item in self.requirements]
+        if stages != sorted(stages, key={"INITIAL": 0, "AFTER_LOGPARSE": 1}.get):
+            raise ValueError("requirements must be ordered by stage")
+        for stage in {"INITIAL", "AFTER_LOGPARSE"}:
+            if sum(
+                item.kind == "ATTACHMENT" and item.stage == stage
+                for item in self.requirements
+            ) > 1:
+                raise ValueError("at most one ATTACHMENT is supported per stage")
         if self.requires_logparse:
-            if self.logparse_product is None:
-                raise ValueError("requires_logparse=true requires a non-empty logparse_product")
-            if not self.allowed_content_types:
-                raise ValueError("a logparse Skill requires at least one allowed ContentType")
-        elif self.logparse_product is not None or self.allowed_content_types:
-            raise ValueError(
-                "requires_logparse=false requires logparse_product=null and no allowed ContentTypes"
+            if self.logparse_plan is None:
+                raise ValueError("requires_logparse=true requires logparse_plan")
+            if self.logparse_product == "default":
+                raise ValueError("omit logparse_product to select the upstream default")
+            attachment = self.logparse_plan["attachment_requirement"]
+            if attachment is not None:
+                requirement = next(
+                    (item for item in self.requirements if item.name == attachment),
+                    None,
+                )
+                if requirement is None or requirement.kind != "ATTACHMENT":
+                    raise ValueError("logparse attachment must name an ATTACHMENT requirement")
+                if tuple(requirement.constraints["allowed_content_types"]) != LOG_ARCHIVE_CONTENT_TYPES:
+                    raise ValueError("logparse archive ContentTypes are platform-fixed")
+            input_names = {
+                item.name for item in self.requirements if item.kind == "INPUT"
+            }
+            bindings = [self.logparse_plan["problem_time_binding"]]
+            bindings.extend(
+                anchor[field]
+                for anchor in self.logparse_plan["anchors"]
+                for field in ("module", "slot", "process_name", "pid")
+                if anchor[field] is not None
             )
-        _unique(list(self.allowed_content_types), "allowed ContentTypes")
-        for content_type in self.allowed_content_types:
-            validate_content_type(content_type)
+            if any(
+                binding["source"] == "USER_FACT"
+                and binding["name"] not in input_names
+                for binding in bindings
+            ):
+                raise ValueError("USER_FACT tool bindings must name INPUT requirements")
+        else:
+            if self.logparse_plan is not None or self.logparse_product is not None:
+                raise ValueError("non-logparse Skill forbids logparse plan/product")
+            if any(item.stage == "AFTER_LOGPARSE" for item in self.requirements):
+                raise ValueError("non-logparse Skill forbids AFTER_LOGPARSE requirements")
 
 
 @dataclass(frozen=True)
@@ -243,30 +439,19 @@ class GenerationResult:
 
 
 def canonical_json_bytes(value: Any) -> bytes:
-    return (
-        json.dumps(
-            value,
-            ensure_ascii=False,
-            allow_nan=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-        + b"\n"
-    )
-
-
-def validate_content_type(value: str) -> str:
-    if not isinstance(value, str) or not value.isascii():
-        raise ValueError("ContentType must be ASCII")
-    if not 3 <= len(value) <= 127 or CONTENT_TYPE_PATTERN.fullmatch(value) is None:
-        raise ValueError("ContentType does not satisfy the S00 Canonical grammar")
-    return value
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8") + b"\n"
 
 
 def diagnosis_skill_manifest(spec: GenerationSpec) -> dict[str, Any]:
     spec.validate()
-    manifest = {
-        "schema_version": 1,
+    manifest: dict[str, Any] = {
+        "schema_version": MANIFEST_SCHEMA_VERSION,
         "id": spec.skill_id,
         "version": spec.version,
         "capability": spec.capability,
@@ -274,15 +459,194 @@ def diagnosis_skill_manifest(spec: GenerationSpec) -> dict[str, Any]:
         "entry_document": "SKILL.md",
         "tool_bundle_id": "tool-bundle/diagnose",
         "requires_logparse": spec.requires_logparse,
-        "logparse_product": spec.logparse_product,
+        "requirements": [item.to_mapping() for item in spec.requirements],
+        "logparse_plan": spec.logparse_plan,
     }
-    if set(manifest) != MANIFEST_FIELDS:
-        raise AssertionError("internal diagnosis-skill.json field drift")
+    if spec.logparse_product is not None:
+        manifest["logparse_product"] = spec.logparse_product
     return manifest
 
 
+def _markdown_list(values: Sequence[str], fallback: str) -> str:
+    return "\n".join(f"- {value}" for value in values) if values else f"- {fallback}"
+
+
+def _render_skill_markdown(spec: GenerationSpec) -> str:
+    manifest = diagnosis_skill_manifest(spec)
+    embedded = canonical_json_bytes(manifest).decode("utf-8").strip()
+    rows = "\n".join(
+        f"| `{item.name}` | {item.kind} | {item.stage} | {item.fulfillment_source} | {item.prompt.replace('|', '\\|')} | `{json.dumps(item.constraints, ensure_ascii=False, sort_keys=True, separators=(',', ':'))}` |"
+        for item in spec.requirements
+    ) or "| — | — | — | — | 本 Skill 不请求业务输入或附件 | `{}` |"
+    roles = "\n".join(
+        f"- `{role.label}`：{role.description}" for role in spec.roles
+    ) or "- 未声明业务角色。"
+    initial_workflow = """按声明顺序执行阶段算法：先复用当前快照中有效事实和同名 OPEN requirement；请求当前
+阶段全部缺失 INPUT 并返回 NEED_INPUT；INPUT 齐全后才请求该阶段 ATTACHMENT 并返回
+NEED_ATTACHMENT。"""
+    has_after_logparse = any(
+        item.stage == "AFTER_LOGPARSE" for item in spec.requirements
+    )
+    if has_after_logparse:
+        stage_workflow = initial_workflow + """
+INITIAL 齐全后才可进入工具/分析；parse 成功后再检查 AFTER_LOGPARSE。缺少后补输入时，
+必须提出必要 LOGPARSE Evidence，并把每个需要跨 Job 保留的 Evidence proposal 写入
+`state_delta.add_evidence_bindings`：`existing_evidence_id=null`，
+`evidence_proposal_key` 等于对应 proposal key。仅写 proposal、Finding 或说明文字不会
+触发接收。每个新 Evidence 还必须用 `artifact_proposal_key` 绑定 broker 返回的同一
+Outcome `LOGPARSE_RUN` proposal，使平台共同接收 Evidence 与运行产物；完成这些绑定后
+才返回 NEED_INPUT。续跑必须复用正式 Evidence 与 LOGPARSE_RUN，并调用 `target-logs`，
+禁止再次 `parse-targets`。工具输出只可形成 Evidence、Finding 或 proposed fact，绝不能
+满足 USER_FACT requirement。"""
+    elif spec.requires_logparse:
+        stage_workflow = initial_workflow + """
+INITIAL 齐全后才可进入 Logparse 工具与分析。本 Skill 不声明 parse 后补参；工具输出只可
+形成 Evidence、Finding 或 proposed fact，绝不能满足 USER_FACT requirement。"""
+    else:
+        stage_workflow = initial_workflow + """
+INITIAL 齐全后直接执行人工分析。本 Skill 不存在 Logparse 或 parse 后补参阶段。"""
+    if spec.requires_logparse:
+        product = spec.logparse_product or "default（使用 Logparse 上游默认值）"
+        logparse_section = f"""## Logparse 业务映射
+
+本 Skill 需要 Logparse；有效 product 为 `{product}`。产品省略时 Runtime 不向上游传
+`--product`，但运行 metadata 仍记录 `default`。加载 `logparse-diagnose` 并严格执行其
+broker、Canonical request、parse-once、LOGPARSE_RUN 复用及路径安全规则。
+
+形成 LOGPARSE Evidence 时，`workspace_relative_path` 必须为 null；目标日志位置只写在
+`locator.relative_path`，并通过同一 Outcome 的 `artifact_proposal_key` 或已有 Artifact
+ID 绑定 LOGPARSE_RUN。不得把 LOGPARSE_RUN tree 内路径填成 Evidence 自己的 proposal
+路径；任何非 null workspace path 都必须位于该 proposal key 的独立目录下。
+构造 broker anchor 时，`label/module/slot/process_name` 必须保持 JSON string 并逐字复制
+已解析 binding；即使值看起来像数字也禁止改变 JSON 类型。
+新 `LOGPARSE_RUN.metadata` 必须严格且仅含 `tree_manifest_sha256`、
+`logparse_version_ref`、`parse_manifest_relative_path`、`source_attachment_id`、
+`source_attachment_sha256`、`parse_parameters` 六个字段；`parse_parameters` 仅含有效
+`product`。禁止添加 `schema_version`、`format_id`、`description` 或其他通用字段。
+Artifact draft 外壳固定为 `artifact_kind=LOGPARSE_RUN`、
+`content_type=application/vnd.problem-locator.logparse-run+directory`、
+`resource_kind=DIRECTORY`，且 `declared_size`、`declared_sha256` 均为 null；禁止自行猜测
+MIME type 或计算 broker 受控树的 size/hash。
+`parse-targets` 成功后必须把结果中的 `logparse_run_artifact_draft` 对象逐字段原样放入
+`proposed_artifact_drafts`；禁止自行构造、扩展版本字符串或修改任何值。
+
+业务映射的机器事实如下，不得改名、猜值或从日志反向满足 USER_FACT requirement：
+
+```json
+{json.dumps(spec.logparse_plan, ensure_ascii=False, sort_keys=True, indent=2)}
+```
+
+归档附件只接受平台固定后缀映射：`.gz/.tar.gz/.tgz -> application/gzip`、
+`.zip -> application/zip`、`.tar -> application/x-tar`。Content-Type 不是生成参数。
+"""
+    else:
+        logparse_section = """## 工具边界
+
+本 Skill `requires_logparse=false`：禁止加载 `logparse-diagnose`、调用
+`problem-locator-logparse`、请求日志归档、提出 LOGPARSE_RUN，或读取 raw Logparse 配置。
+"""
+    return f"""---
+name: {spec.skill_id}
+description: {json.dumps(spec.summary, ensure_ascii=False)}
+---
+
+# {spec.chinese_title}
+
+由 `wiki-to-diagnosis-skill` generator `{GENERATOR_VERSION}` 生成。公共 DIAGNOSE output
+contract 只定义通用 Schema、安全、Evidence/Candidate 与原子输出；本文件独占业务
+requirements、阶段、工具映射和判定规则。
+
+<!-- DIAGNOSIS_SKILL_MANIFEST_V2_BEGIN -->
+```json
+{embedded}
+```
+<!-- DIAGNOSIS_SKILL_MANIFEST_V2_END -->
+
+## 范围与角色
+
+{spec.problem_scope}
+
+{roles}
+
+## Requirements
+
+所有声明均为必需项；空数组表示不添加任何默认参数。
+INPUT 只能由 `USER_FACT` 满足，ATTACHMENT 只能由 `READY_ATTACHMENT` 满足。
+
+| 名称 | 类型 | 阶段 | 满足来源 | 用户提示 | S00 constraints |
+| --- | --- | --- | --- | --- | --- |
+{rows}
+
+{stage_workflow}
+
+{logparse_section}
+
+## 分析步骤
+
+{_markdown_list(spec.analysis_steps, '无额外步骤。')}
+
+## 时间特征
+
+{_markdown_list(spec.time_characteristics, '无额外时间特征。')}
+
+## 判定规则
+
+{_markdown_list(spec.judgement_rules, '证据不足时保留缺口。')}
+
+## 输出要求
+
+{_markdown_list(spec.output_requirements, '遵守公共输出合同。')}
+
+## 假设
+
+{_markdown_list(spec.assumptions, '无额外假设。')}
+
+## Candidate 与用户结果
+
+只有每个 completion criterion 均由 Evidence 支持时才提出 Candidate。形成 Candidate
+时，同一 Outcome 必须恰好提出以下两个 FILE Artifact：
+
+`supporting_evidence_bindings` 必须去重并保持当前快照 `evidence_refs` 的相对顺序；同一
+Outcome 新接收的 Evidence 只按 `state_delta.add_evidence_bindings` 顺序追加。禁止按业务
+角色、日志时间或叙述习惯重排。completion mapping 与 USER_RESULT 重复这些 binding 时
+也保持同一顺序；这是 Coordinator 的固定子序列合同。
+
+1. `USER_RESULT`：proposal key `user-result`，name `diagnosis-result.json`，
+   content type `application/json`，path `output/proposals/user-result/payload`，metadata
+   为 `{{"schema_version":1,"format_id":"problem-locator-diagnosis-v1","description":"Diagnosis result"}}`。
+2. `USER_RESULT_ARCHIVE`：proposal key `user-result-archive`，name `result.zip`，
+   content type `application/zip`，path
+   `output/proposals/user-result-archive/result.zip`，metadata 使用
+   `format_id=problem-locator-result-archive-v1`、
+   `user_result_proposal_key=user-result` 和实际 `target_log_count`。
+
+USER_RESULT 必须是 S00 Canonical `UserResultPayload`，并与同一 Candidate seam 逐字一致。
+先写 Canonical 请求到 `output/proposals/user-result-archive/request.json`，字段恰好为
+`schema_version=1`、`result_text=Candidate statement + 一个 LF` 和
+`target_log_paths[]`。日志路径仅列 Candidate
+实际绑定的 LOGPARSE Evidence 对应完整目标日志，按 binding 首次出现顺序去重；人工
+无日志场景传空数组。构造该数组时，先以 `target-logs` 每项的 `log_path` 建立路径映射，
+再严格遍历 Candidate `supporting_evidence_bindings`，解析每条 Evidence 的
+`locator.relative_path` 并从映射取对应完整路径；禁止直接复制或沿用 `target-logs`
+结果数组的 anchor 顺序，因为它可能与快照 Evidence 顺序不同。然后仅调用一次：
+
+```text
+problem-locator-pack-result --request output/proposals/user-result-archive/request.json --result output/proposals/user-result-archive/result.zip
+```
+
+禁止自行调用 zip/tar、包含原始上传包、无关日志、parse 目录或完整 LOGPARSE_RUN。
+Runtime 会逐字校验 ZIP 中 `result.txt` 与 `target-log-001.log` 等扁平条目。两个结果
+Artifact 和 Candidate 必须共同接受，并等待独立 REVIEW PASS 后才可下载。
+
+## 原子交付
+
+最终 `output/job_outcome.json` 使用公共合同给出的 V1 Canonical JSON 和同目录原子替换。
+退出前重新读取实际字节，校验 S00 Schema、当前 Job/Case、上述 manifest 声明、proposal
+size/hash、结果 Artifact 配对和所有业务阶段规则。stdout/stderr 和部分文件不是业务结果。
+"""
+
+
 def render_product(spec: GenerationSpec) -> dict[str, bytes]:
-    spec.validate()
     files = {
         "SKILL.md": _render_skill_markdown(spec).encode("utf-8"),
         "diagnosis-skill.json": canonical_json_bytes(diagnosis_skill_manifest(spec)),
@@ -293,36 +657,43 @@ def render_product(spec: GenerationSpec) -> dict[str, bytes]:
 
 
 def product_sha256(files: Mapping[str, bytes]) -> str:
-    entries = []
-    for path in sorted(files):
-        payload = files[path]
-        if not _safe_relative_posix(path):
-            raise ValueError(f"unsafe product path: {path}")
-        entries.append(
-            {"path": path, "size": len(payload), "sha256": hashlib.sha256(payload).hexdigest()}
-        )
-    return hashlib.sha256(canonical_json_bytes({"version": 1, "entries": entries})).hexdigest()
+    entries = [
+        {
+            "path": path,
+            "size": len(files[path]),
+            "sha256": hashlib.sha256(files[path]).hexdigest(),
+        }
+        for path in sorted(files)
+    ]
+    return hashlib.sha256(
+        canonical_json_bytes({"version": 1, "entries": entries})
+    ).hexdigest()
 
 
-def _prepare_output_root(root: Path) -> None:
-    try:
-        root.mkdir(parents=True)
-    except FileExistsError:
-        if not root.is_dir():
-            raise
-    else:
-        if os.name == "posix":
-            root.chmod(0o755)
+def _write_product(directory: Path, files: Mapping[str, bytes]) -> None:
+    directory.mkdir()
+    for name in PRODUCT_FILES:
+        path = directory / name
+        with path.open("xb") as stream:
+            stream.write(files[name])
+            stream.flush()
+            os.fsync(stream.fileno())
 
 
-def _prepare_publish_permissions(root: Path, files: Mapping[str, bytes]) -> None:
-    """Make a POSIX product readable by a service account before atomic publish."""
-
-    if os.name != "posix":
-        return
-    for relative_path in files:
-        (root / relative_path).chmod(0o644)
-    root.chmod(0o755)
+def _read_existing(directory: Path) -> dict[str, bytes]:
+    if directory.is_symlink() or not directory.is_dir():
+        raise ValueError("existing Skill product must be a real directory")
+    names = sorted(item.name for item in directory.iterdir())
+    if names != sorted(PRODUCT_FILES):
+        raise ValueError("existing Skill product has an unexpected file set")
+    result = {}
+    for name in PRODUCT_FILES:
+        path = directory / name
+        metadata = path.stat(follow_symlinks=False)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+            raise ValueError("existing Skill product contains an unsafe file")
+        result[name] = path.read_bytes()
+    return result
 
 
 def generate_diagnosis_skill(
@@ -331,67 +702,47 @@ def generate_diagnosis_skill(
     *,
     replace_different_version: bool = False,
 ) -> GenerationResult:
-    """Generate one deterministic product without overwriting changed same-version bytes."""
-
-    spec.validate()
-    output_root = Path(output_root)
-    _prepare_output_root(output_root)
-    target = output_root / spec.skill_id
-    desired = render_product(spec)
-    desired_hash = product_sha256(desired)
-    replaced = False
-
-    if target.exists() or target.is_symlink():
-        if target.is_symlink() or not target.is_dir():
-            raise FileExistsError(f"generated Skill target is not a plain directory: {target}")
-        existing = _read_product_tree(target)
-        existing_hash = product_sha256(existing)
-        existing_manifest = _decode_manifest(existing.get("diagnosis-skill.json"))
-        same_identity = (
-            existing_manifest is not None
-            and existing_manifest.get("id") == spec.skill_id
-            and existing_manifest.get("version") == spec.version
-        )
-        if same_identity and existing_hash != desired_hash:
-            raise FileExistsError(
-                "refusing to overwrite the same diagnosis Skill id/version with different "
-                f"product bytes: existing={existing_hash} requested={desired_hash}"
-            )
-        if existing_hash == desired_hash:
+    files = render_product(spec)
+    desired_hash = product_sha256(files)
+    root = Path(output_root)
+    root.mkdir(parents=True, exist_ok=True)
+    if root.is_symlink() or not root.is_dir():
+        raise ValueError("output_root must be a real directory")
+    target = root / spec.skill_id
+    if target.exists():
+        existing = _read_existing(target)
+        if existing == files:
             return GenerationResult(target, desired_hash, created=False, replaced=False)
+        try:
+            old_manifest = json.loads(existing["diagnosis-skill.json"].decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ValueError("existing diagnosis-skill.json is invalid") from exc
+        if old_manifest.get("version") == spec.version:
+            raise ValueError("same Skill version cannot be overwritten with different semantics")
         if not replace_different_version:
-            raise FileExistsError(
-                "target contains a different product version; pass "
-                "--replace-different-version only after explicitly increasing version"
-            )
-        if existing_manifest is None or existing_manifest.get("id") != spec.skill_id:
-            raise FileExistsError("refusing to replace a target owned by another Skill id")
-        replaced = True
+            raise ValueError("different Skill version requires --replace-different-version")
 
-    temp = Path(tempfile.mkdtemp(prefix=f".{spec.skill_id}.", dir=output_root))
+    temporary = Path(tempfile.mkdtemp(prefix=f".{spec.skill_id}.", dir=root))
     backup: Path | None = None
+    replaced = target.exists()
     try:
-        for relative_path, payload in desired.items():
-            destination = temp / relative_path
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            destination.write_bytes(payload)
-        _prepare_publish_permissions(temp, desired)
+        temporary.rmdir()
+        _write_product(temporary, files)
         if replaced:
-            backup = Path(tempfile.mkdtemp(prefix=f".{spec.skill_id}.backup.", dir=output_root))
-            backup.rmdir()
+            backup = root / f".{spec.skill_id}.backup"
+            if backup.exists():
+                raise ValueError("stale replacement backup exists")
             os.replace(target, backup)
-        os.replace(temp, target)
+        os.replace(temporary, target)
         if backup is not None:
             shutil.rmtree(backup)
-    except BaseException:
+    except Exception:
         if backup is not None and backup.exists() and not target.exists():
             os.replace(backup, target)
         raise
     finally:
-        if temp.exists():
-            shutil.rmtree(temp)
-        if backup is not None and backup.exists():
-            shutil.rmtree(backup)
+        if temporary.exists():
+            shutil.rmtree(temporary)
     return GenerationResult(target, desired_hash, created=not replaced, replaced=replaced)
 
 
@@ -402,567 +753,59 @@ def normalize_wiki(text: str) -> str:
     return "\n".join(line.rstrip() for line in text.split("\n")).strip() + "\n"
 
 
-def build_spec_from_wiki(
-    wiki_text: str,
-    *,
-    capability: str,
-    summary: str,
-    version: str = "2.0.0",
-    requires_logparse: bool = True,
-    logparse_product: str | None,
-    allowed_content_types: Sequence[str],
-    assumptions: Sequence[str] = (),
-) -> GenerationSpec:
+def build_spec_from_wiki(wiki_text: str, **overrides: Any) -> GenerationSpec:
+    """Read the single fenced GenerationSpec v2 object from a wiki document."""
+
     wiki = normalize_wiki(wiki_text)
-    sections = _wiki_sections(wiki)
-    basic = _wiki_basic_info(sections.get("基本信息", ""))
-    skill_id = basic.get("skill_name") or f"diagnose-{capability}"
-    raw: dict[str, Any] = {
-        "schema_version": 1,
-        "generator_version": GENERATOR_VERSION,
-        "id": skill_id,
-        "version": version,
-        "capability": capability,
-        "summary": summary,
-        "chinese_title": basic.get("title") or capability,
-        "module_name": basic.get("module_name"),
-        "problem_scope": _section_prose(sections.get("问题范围", "")),
-        "roles": _wiki_roles(sections.get("目标进程角色", "")),
-        "custom_parameters": _wiki_custom_parameters(
-            sections.get("自定义定位参数候选", "")
-        ),
-        "time_characteristics": _section_items(sections.get("时间特征", "")),
-        "analysis_steps": _section_items(sections.get("定位步骤", "")),
-        "judgement_rules": _section_items(sections.get("判断规则", "")),
-        "output_requirements": _section_items(sections.get("输出要求", "")),
-        "assumptions": list(assumptions),
-        "requires_logparse": requires_logparse,
-        "logparse_product": logparse_product,
-        "allowed_content_types": list(allowed_content_types),
-    }
-    return GenerationSpec.from_mapping(raw)
-
-
-def load_generation_spec(path: str | Path) -> GenerationSpec:
-    data = Path(path).read_bytes()
+    matches = re.findall(
+        r"(?ms)^## GenerationSpec v2\s*$.*?^```json\s*$\n(.*?)^```\s*$",
+        wiki,
+    )
+    if len(matches) != 1:
+        raise ValueError("wiki must contain exactly one '## GenerationSpec v2' JSON fence")
     try:
-        value = json.loads(data.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise ValueError("generation spec must be UTF-8 JSON") from exc
+        value = json.loads(matches[0])
+    except json.JSONDecodeError as exc:
+        raise ValueError("wiki GenerationSpec v2 JSON is invalid") from exc
     if not isinstance(value, dict):
-        raise ValueError("generation spec must be a JSON object")
+        raise ValueError("wiki GenerationSpec v2 must be an object")
+    allowed_overrides = {"capability", "summary", "version"}
+    unknown = set(overrides) - allowed_overrides
+    if unknown:
+        raise ValueError(f"unsupported wiki overrides: {sorted(unknown)!r}")
+    key_by_override = {"capability": "capability", "summary": "summary", "version": "version"}
+    for name, override in overrides.items():
+        if override is not None:
+            value[key_by_override[name]] = override
     return GenerationSpec.from_mapping(value)
 
 
-def _render_skill_markdown(spec: GenerationSpec) -> str:
-    if spec.requires_logparse:
-        description = (
-            f"用于{spec.summary}；在 Problem Locator DIAGNOSE Job 中遵守 S00 AgentJobOutcome，"
-            "缺参或缺日志时正常结束本 Job，日志仅经 logparse-diagnose broker 分析，候选结论等待独立复核。"
-        )
-    else:
-        description = (
-            f"用于{spec.summary}；在 Problem Locator DIAGNOSE Job 中遵守 S00 AgentJobOutcome，"
-            "通过固定输入和 Evidence 形成候选结论并等待独立复核，不调用 logparse。"
-        )
-    roles = "\n".join(
-        f"| {_cell(role.label)} | {_cell(role.description)} | {'是' if role.required else '否'} |"
-        for role in spec.roles
-    )
-    custom_parameters = (
-        "本 Skill 不设置额外自定义定位参数。"
-        if not spec.custom_parameters
-        else "\n".join(
-            ["| 参数名 | 说明 | 是否必需 |", "| --- | --- | --- |"]
-            + [
-                f"| {_cell(item.name)} | {_cell(item.description)} | {'是' if item.required else '否'} |"
-                for item in spec.custom_parameters
-            ]
-        )
-    )
-    content_type_contract = (
-        "允许日志 Content-Type（逐字匹配 S00 Canonical ContentType，不做大小写或参数归一化）：\n\n"
-        + "\n".join(f"- `{item}`" for item in spec.allowed_content_types)
-        if spec.requires_logparse
-        else "此产品 `requires_logparse=false`，不声明日志 ContentType，也不调用 logparse。"
-    )
-    time_characteristics = _markdown_list(spec.time_characteristics, fallback="Wiki 未声明额外时间特征。")
-    analysis_steps = _markdown_numbered(spec.analysis_steps)
-    judgement_rules = _markdown_list(spec.judgement_rules)
-    output_requirements = _markdown_list(spec.output_requirements)
-    assumptions = _markdown_list(spec.assumptions, fallback="无额外假设。")
-    module_literal = _code(spec.module_name)
-    product_literal = _code(spec.logparse_product or "null")
-    if spec.requires_logparse:
-        result_type_details = '''- `NEED_INPUT`：缺少参数组 A，或首次解析后的机器证据仍缺 `order_id`。
-- `NEED_ATTACHMENT`：参数组 A 已满足，但尚无本 Job 固定的唯一日志 Attachment。
-- `REROUTE`：问题不属于本 capability；不调用 Router，也不选择另一个 Skill。
-- `COMPLETED`：当前完成条件均有 Evidence binding，可提出 Candidate；不声称 Case 已
-  `RESOLVED`。'''
-        input_and_tool_workflow = '''## 参数组 A 与一次日志
-
-先复用 `CONTEXT_SNAPSHOT` 中已有且仍有效的事实和 OPEN requirement。缺少参数时返回
-`NEED_INPUT`，只为缺失名称提出当前 S00 定义的 INPUT requirement；已经存在的
-requirement 必须复用原 `requirement_id`，不得重复创建。
-
-参数组 A 齐全但没有可用日志时返回 `NEED_ATTACHMENT`。日志 requirement 的 name 固定
-为 `log_archive`，只接受一个 Attachment，允许 Content-Type 只能来自上面的固定列表。
-上传本身不推进 Case；后续 Job 只能消费 `inputs/manifest.json` 中固定的 READY Attachment。
-
-## 先调用 logparse-diagnose Skill
-
-加载 `logparse-diagnose`，且只调用随服务安装的 `problem-locator-logparse` broker 客户端。
-禁止读取 `LOGPARSE_REPO`、`LOGPARSE_CONFIG_PATH`、`LOGPARSE_PYTHON`，禁止直接启动
-`cli.py`，禁止打开、枚举、解包或扫描原始归档，也禁止用 grep/rg 代替 logparse。
-
-首次日志 Job 在 manifest 不含 `LOGPARSE_RUN` 时：
-
-1. 用 Canonical JSON 写 `output/proposals/logparse-run/request.json`；request 只含 S07
-   `parse-targets` 字段，禁止携带 `logparse_product` 或任意 argv。
-2. 仅调用一次 `problem-locator-logparse parse-targets --request ... --result ...`。
-3. 读取 broker 生成的 `target_logs.json` 与受控 `parse_manifest.json` 机器结果。
-4. 提出 proposal key=`logparse-run` 的 `LOGPARSE_RUN` 目录 Artifact Draft，以及固定
-   proposal key=`logparse-client-evidence`、用该 artifact proposal key 作为 source binding
-   的 client `LOGPARSE` Evidence Draft。
-5. 若 `CONTEXT_SNAPSHOT.user_facts` 仍缺 active `order_id`，在同一 `NEED_INPUT` Outcome
-   中提交中间 StateDelta、client Evidence、LOGPARSE_RUN 与新 OPEN INPUT requirement；
-   正常结束 Job。即使机器日志含有看似可用的 order ID，也不得据此满足参数 B、提出 server
-   Evidence、Candidate 或 USER_RESULT；`order_id` 只能来自用户提交的固定事实。
-   `state_delta.add_evidence_bindings` 必须恰好包含
-   `{"existing_evidence_id":null,"evidence_proposal_key":"logparse-client-evidence"}`；只有该
-   StateDelta binding 才会在进入 `WAITING_INPUT` 前正式接受 client Evidence 及其依赖的
-   `LOGPARSE_RUN`，不得只把它们放在 proposal arrays 中。
-
-`LOGPARSE_RUN` Artifact Draft 的固定形状是：`artifact_kind="LOGPARSE_RUN"`、
-`content_type="application/vnd.problem-locator.logparse-run+directory"`、
-`resource_kind="DIRECTORY"`、`workspace_relative_path="output/proposals/logparse-run/tree"`。
-不得使用 `application/octet-stream`、`application/json` 或根据目录内容猜测 Content-Type；
-发布前必须逐字核对这四个字段，并让 declared size/hash 与受控 tree 的实际值一致。
-目录 hash 不是 `parse_manifest.json` 文件的 hash：按相对 POSIX path 排序枚举 tree 中每个普通
-文件，逐个形成 `{"path":path,"sha256":sha256(file_bytes),"size":len(file_bytes)}`，再形成
-`{"entries":entries,"version":1}` 的 S00 Canonical JSON（包括末尾一个 LF），最后对这些完整
-manifest bytes 求 SHA-256。Artifact Draft 的 `declared_sha256` 和 metadata 的
-`tree_manifest_sha256` 必须都等于这个目录清单 hash。
-
-同 Outcome 的 `LOGPARSE` Evidence 使用 `artifact_proposal_key="logparse-run"` 绑定目录，并在
-locator 中引用受控 tree 内的相对日志路径。若没有在其自己的 proposal root 另写独立 Evidence
-文件，则 `workspace_relative_path=null`、`declared_size=null`、`declared_sha256=null`；不得把
-被引用日志文件的 size/hash 填入这三个独立资源声明字段。
-
-## LOGPARSE_RUN 复用
-
-只要 `inputs/manifest.json` 已含任一 `artifact_kind=LOGPARSE_RUN`，严禁调用
-`parse-targets`。验证 manifest 固定的 Artifact kind、目录 hash、parse manifest 相对路径、
-源 Attachment、`logparse_tool_ref` 与 product 后，使用其只读
-`inputs/artifacts/<artifact_id>/tree` 根调用 `problem-locator-logparse target-logs`。
-request 只含 S07 `target-logs` 字段且 `artifact_id` 必须来自 manifest。不得修改物化目录，
-不得再次 parse；新 Job 的连续性只来自固定 StateDelta、Evidence、Attachment、
-`LOGPARSE_RUN` 与 `PREVIOUS_OUTCOME`。
-
-复用分支不得再次提出 `LOGPARSE_RUN` 或 client Evidence。把 manifest 中固定 client
-`LOGPARSE` Evidence 的 `resource_id` 作为唯一 existing client Evidence ID，把固定
-`LOGPARSE_RUN` 的 `resource_id` 作为 server Evidence 的 `existing_source_ref`。本 Job 只提出
-proposal key=`logparse-server-evidence` 的新 server Evidence；其
-`artifact_proposal_key=null`、`workspace_relative_path=null`、`declared_size=null`、
-`declared_sha256=null`。`consumed_evidence_refs` 必须恰好包含 existing client Evidence ID，
-`state_delta.add_evidence_bindings` 必须恰好绑定 `logparse-server-evidence`。Candidate 与
-USER_RESULT 的 supporting/mapping bindings 顺序固定为 existing client Evidence ID 在前、
-server Evidence proposal key 在后。'''
-        evidence_source_workflow = '''只把 `target_logs` 返回并解析到受控 output root 内的安全相对 POSIX `log_path` 写入 S00
-`LogparseEvidenceLocator.relative_path`。没有匹配、路径歧义、时间无法关联或证据不足时
-必须明确保留缺口，不得把假设升级为事实。'''
-    else:
-        result_type_details = '''- `NEED_INPUT`：缺少 Wiki 所需结构化参数。
-- `NEED_ATTACHMENT`：Wiki 明确要求且当前 Job 尚未固定所需非日志附件。
-- `REROUTE`：问题不属于本 capability；不调用 Router，也不选择另一个 Skill。
-- `COMPLETED`：当前完成条件均有 Evidence binding，可提出 Candidate；不声称 Case 已
-  `RESOLVED`。'''
-        input_and_tool_workflow = '''## 输入与工具边界
-
-先复用 `CONTEXT_SNAPSHOT` 中已有且仍有效的事实和 OPEN requirement。缺少参数时返回
-`NEED_INPUT`，只按当前 S00 requirement 合同提出缺失项；已经存在的 requirement 必须
-复用原 `requirement_id`。若 Wiki 明确需要普通附件，可使用 `NEED_ATTACHMENT`，但只能
-消费当前 Job manifest 固定的只读资源。
-
-本产品 `requires_logparse=false`：不得加载 `logparse-diagnose`、调用
-`problem-locator-logparse`、请求 `log_archive`、提出 `LOGPARSE_RUN`，或读取 raw logparse
-环境。所有工具行为只限固定 Tool Bundle 和本 Job 输入。'''
-        evidence_source_workflow = '''只引用当前 Job 固定 Evidence，或在同一 Outcome 中按 S00 提出新的 Evidence Draft。
-没有可定位证据、证据歧义或时间无法关联时必须明确保留缺口，不得把假设升级为事实。'''
-    return f'''---
-name: {json.dumps(spec.skill_id, ensure_ascii=False)}
-description: {json.dumps(description, ensure_ascii=False)}
----
-
-# {spec.chinese_title}
-
-本产品由 `wiki-to-diagnosis-skill` 生成器 `{GENERATOR_VERSION}` 生成。只消费当前
-Problem Locator Job 的固定输入；S00 冻结 DTO、Schema、枚举和错误码是唯一机器合同。
-禁止增加私有结果字段、私有错误码或直接修改 Case。Candidate 不是最终结果，必须等待
-独立 REVIEW Job 的 `PASS`。
-
-## 产品固定信息
-
-- capability：`{spec.capability}`
-- module：{module_literal}
-- logparse product：{product_literal}
-- generator version：`{GENERATOR_VERSION}`
-
-{content_type_contract}
-
-## 问题范围
-
-{spec.problem_scope}
-
-## 运行时输入
-
-只读取 Runtime 提供的 `JOB_INSTRUCTION`、`CONTEXT_SNAPSHOT`、`OPEN_REQUIREMENTS`、
-`PREVIOUS_OUTCOME`、`RESOURCE_MANIFEST` 与只读 `inputs/manifest.json`。不得扫描
-`inputs/`、读取 Repository、沿用旧 Session 隐式状态或采用 Job 创建后的输入。
-
-目标角色顺序固定为：
-
-| 标签 | 说明 | 是否必需 |
-| --- | --- | --- |
-{roles}
-
-每个 broker anchor 只含 `label`、`module`、`slot`、`process_name`、`pid`。`module` 固定为
-{module_literal}；若上方角色说明声明了产品固定的 `slot`、`process_name`、`pid` 映射，必须
-逐字使用该映射，禁止用 `caller_service` 或 `server_service` 替代。未声明的 anchor 值才必须
-来自本 Job 已验证事实，且 `pid` 可以为 null。Canonical JSON 中 `label`、`module`、`slot`、
-`process_name` 以及非 null 的 `pid` 必须全部是 JSON 字符串；即使 `slot` 或 `pid` 只含数字，
-也不得写成 JSON number。调用 broker 前必须重新读取 request bytes 并逐字段确认这些类型。
-确认后非常下一动作必须是一次 Bash 调用：
-`problem-locator-logparse parse-targets --request output/proposals/logparse-run/request.json --result output/proposals/logparse-run/target_logs.json`。
-在写 request 与执行该命令之间不得继续分析、输出文字、重读上下文或调用任何其他工具。
-
-## 自定义定位参数
-
-{custom_parameters}
-
-参数组 A 的 requirement name 固定为 `caller_service`、`server_service`、`rpc_method`、
-`problem_time`。`problem_time` 必须是毫秒精度 UTC RFC 3339 单值，必须匹配
-`{UTC_MILLIS_PATTERN}`；不得接受范围、猜测时区或取中点。参数 B 固定为 `order_id`。
-
-## 四种业务结果
-
-始终按 S00 `agent-job-outcome.schema.json` 生成完整 `AgentJobOutcome`，并在退出前原子
-发布为 `output/job_outcome.json`。只使用以下 DIAGNOSE result type：
-
-{result_type_details}
-
-业务性缺参不是执行失败。`DiagnosisStateDelta`、requirement、Evidence/Artifact Draft、
-Candidate 和 error 字段全部逐字使用当前 S00 合同；未使用的集合写空数组、无值写 null。
-`add_user_facts` 与 `fulfill_requirements` 由应用服务拥有，Agent 必须写空数组。新事实只写
-`proposed_facts`，并通过 `add_evidence_bindings` 提案引用 Evidence。
-
-{input_and_tool_workflow}
-
-## Evidence 与 Candidate
-
-{evidence_source_workflow}
-
-形成 Candidate 时，supporting Evidence bindings 和每个 completion criterion mapping
-必须完整、按 ProblemSpec 顺序、全部 satisfied 且非空。Candidate 所在 Outcome 必须恰好
-同时提出一个 USER_RESULT Draft：
-
-- proposal key：`user-result`
-- kind/name/content type/resource kind：`USER_RESULT` / `diagnosis-result.json` /
-  `application/json` / `FILE`
-- path：`output/proposals/user-result/payload`
-- metadata：`{{"schema_version":1,"format_id":"problem-locator-diagnosis-v1","description":"Diagnosis result"}}`
-
-payload 只用 S00 `UserResultPayload`：`problem_statement` 逐字等于 Job 固定 ProblemSpec，
-`candidate_statement`、`supporting_evidence_bindings`、`completion_criteria_mapping` 逐字等于
-同一 Candidate Draft。使用 S00 Canonical JSON（UTF-8、排序、紧凑、末尾一个 LF）；禁止
-写入时间、正式 ID 猜测、Workspace 路径、endpoint、token 或 raw logparse 配置。
-
-## 时间特征
-
-{time_characteristics}
-
-## Wiki 定位步骤
-
-{analysis_steps}
-
-## 判断规则
-
-{judgement_rules}
-
-## 输出要求
-
-{output_requirements}
-
-## 假设
-
-{assumptions}
-
-## 原子交付
-
-先写同目录临时文件、flush 并同步，再原子替换 `output/job_outcome.json`；成功退出后 stdout
-和 stderr 只给安全摘要，不能作为业务结果回退。任何 endpoint/token、绝对路径、环境值、
-原始日志正文或敏感 Wiki 内容都不得进入 Outcome、proposal、USER_RESULT 或日志。
-'''
-
-
-def _wiki_sections(wiki: str) -> dict[str, str]:
-    result: dict[str, list[str]] = {}
-    current: str | None = None
-    for line in wiki.splitlines():
-        if line.startswith("## "):
-            current = line[3:].strip()
-            result.setdefault(current, [])
-        elif current is not None:
-            result[current].append(line)
-    return {key: "\n".join(lines).strip() for key, lines in result.items()}
-
-
-def _wiki_basic_info(section: str) -> dict[str, str]:
-    values: dict[str, str] = {}
-    inside_fence = False
-    for line in section.splitlines():
-        stripped = line.strip()
-        if stripped.startswith("```"):
-            inside_fence = not inside_fence
-            continue
-        if not inside_fence or ":" not in stripped:
-            continue
-        key, value = stripped.split(":", 1)
-        key = key.strip()
-        value = value.strip()
-        if key in {"title", "skill_name", "module_name"} and value:
-            values[key] = _unquote_simple(value)
-    return values
-
-
-def _wiki_roles(section: str) -> list[dict[str, Any]]:
-    rows = _markdown_table(section, ["标签", "说明", "是否必需"])
-    return [
-        {"label": row[0], "description": row[1], "required": _required_bool(row[2])}
-        for row in rows
-    ]
-
-
-def _wiki_custom_parameters(section: str) -> list[dict[str, Any]]:
-    if not section:
-        return []
-    rows = _markdown_table(section, ["参数名", "说明", "是否必需"])
-    return [
-        {"name": row[0], "description": row[1], "required": _required_bool(row[2])}
-        for row in rows
-    ]
-
-
-def _markdown_table(section: str, expected_header: list[str]) -> list[list[str]]:
-    parsed = []
-    for line in section.splitlines():
-        stripped = line.strip()
-        if stripped.startswith("|") and stripped.endswith("|"):
-            parsed.append([cell.strip() for cell in stripped.strip("|").split("|")])
+def load_generation_spec(path: str | Path) -> GenerationSpec:
     try:
-        index = parsed.index(expected_header)
-    except ValueError as exc:
-        raise ValueError(f"wiki is missing table: {' | '.join(expected_header)}") from exc
-    rows = []
-    for row in parsed[index + 1 :]:
-        if len(row) != len(expected_header):
-            break
-        if all(re.fullmatch(r":?-{3,}:?", cell) for cell in row):
-            continue
-        rows.append(row)
-    if not rows:
-        raise ValueError(f"wiki table has no data rows: {' | '.join(expected_header)}")
-    return rows
-
-
-def _section_prose(section: str) -> str:
-    text = section.strip()
-    if not text:
-        raise ValueError("wiki 问题范围 must not be empty")
-    return text
-
-
-def _section_items(section: str) -> list[str]:
-    items: list[str] = []
-    for line in section.splitlines():
-        stripped = line.strip()
-        if not stripped or stripped.startswith("```"):
-            continue
-        match = re.match(r"^(?:[-*]|[0-9]+[.)])\s+(.*)$", stripped)
-        items.append(match.group(1).strip() if match else stripped)
-    return items
-
-
-def _read_product_tree(root: Path) -> dict[str, bytes]:
-    files: dict[str, bytes] = {}
-    for directory, directory_names, file_names in os.walk(root, followlinks=False):
-        directory_names.sort()
-        file_names.sort()
-        directory_path = Path(directory)
-        for name in list(directory_names):
-            path = directory_path / name
-            if path.is_symlink():
-                raise ValueError(f"generated product contains a symlink: {path}")
-        for name in file_names:
-            path = directory_path / name
-            mode = path.lstat().st_mode
-            if stat.S_ISLNK(mode) or not stat.S_ISREG(mode) or path.stat().st_nlink != 1:
-                raise ValueError(f"generated product contains a non-plain file: {path}")
-            relative = path.relative_to(root).as_posix()
-            if not _safe_relative_posix(relative):
-                raise ValueError(f"generated product contains an unsafe path: {relative}")
-            files[relative] = path.read_bytes()
-    return files
-
-
-def _decode_manifest(payload: bytes | None) -> dict[str, Any] | None:
-    if payload is None:
-        return None
-    try:
-        value = json.loads(payload.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError):
-        return None
-    return value if isinstance(value, dict) else None
-
-
-def _safe_relative_posix(path: str) -> bool:
-    return bool(path) and not path.startswith("/") and "\\" not in path and all(
-        part not in {"", ".", ".."} for part in path.split("/")
-    )
-
-
-def _require_exact_keys(value: Mapping[str, Any], expected: set[str], label: str) -> None:
-    if not isinstance(value, Mapping) or set(value) != expected:
-        missing = sorted(expected - set(value)) if isinstance(value, Mapping) else sorted(expected)
-        extra = sorted(set(value) - expected) if isinstance(value, Mapping) else []
-        raise ValueError(f"{label} fields differ: missing={missing} extra={extra}")
-
-
-def _single_line(value: Any, field: str, *, maximum: int) -> str:
-    if not isinstance(value, str) or not value or len(value.encode("utf-8")) > maximum:
-        raise ValueError(f"{field} must be a non-empty string within {maximum} UTF-8 bytes")
-    if any(character in value for character in "\r\n\x00") or value.strip() != value:
-        raise ValueError(f"{field} must be an exact non-blank single line")
-    return value
-
-
-def _text(value: Any, field: str) -> str:
-    if not isinstance(value, str) or not value.strip() or len(value.encode("utf-8")) > 65536:
-        raise ValueError(f"{field} must be non-empty UTF-8 text")
-    return value
-
-
-def _sequence(value: Any, field: str) -> Sequence[Any]:
-    if not isinstance(value, list):
-        raise ValueError(f"{field} must be an array")
-    return value
-
-
-def _mapping_list(
-    value: Any, field: str, *, minimum: int, maximum: int
-) -> list[Mapping[str, Any]]:
-    items = _sequence(value, field)
-    if not minimum <= len(items) <= maximum or any(not isinstance(item, Mapping) for item in items):
-        raise ValueError(f"{field} must contain {minimum}..{maximum} objects")
-    return list(items)
-
-
-def _text_tuple(value: Any, field: str, *, minimum: int = 0) -> tuple[str, ...]:
-    items = _sequence(value, field)
-    if len(items) < minimum:
-        raise ValueError(f"{field} must contain at least {minimum} entries")
-    result = tuple(_text(item, f"{field}[]") for item in items)
-    _unique(list(result), field)
-    return result
-
-
-def _unique(values: list[str], label: str) -> None:
-    if len(values) != len(set(values)):
-        raise ValueError(f"{label} must be unique and order-preserving")
-
-
-def _required_bool(value: str) -> bool:
-    if value == "是":
-        return True
-    if value == "否":
-        return False
-    raise ValueError("wiki required column must be 是 or 否")
-
-
-def _unquote_simple(value: str) -> str:
-    if value.startswith('"') and value.endswith('"'):
-        decoded = json.loads(value)
-        if isinstance(decoded, str):
-            return decoded
-    if value.startswith("'") and value.endswith("'"):
-        return value[1:-1]
-    return value
-
-
-def _cell(value: str) -> str:
-    return value.replace("|", "\\|").replace("\n", " ")
-
-
-def _code(value: str) -> str:
-    return f"`{value.replace('`', '')}`"
-
-
-def _markdown_list(values: Sequence[str], *, fallback: str | None = None) -> str:
-    if not values:
-        if fallback is None:
-            raise ValueError("required Markdown list is empty")
-        return f"- {fallback}"
-    return "\n".join(f"- {value}" for value in values)
-
-
-def _markdown_numbered(values: Sequence[str]) -> str:
-    return "\n".join(f"{index}. {value}" for index, value in enumerate(values, start=1))
-
-
-def _parse_cli_spec(args: argparse.Namespace) -> GenerationSpec:
-    if args.spec is not None:
-        return load_generation_spec(args.spec)
-    if args.wiki is None:
-        raise ValueError("provide exactly one of --spec or --wiki")
-    required = {
-        "--capability": args.capability,
-        "--summary": args.summary,
-        "--logparse-product": args.logparse_product if not args.no_logparse else "not-required",
-    }
-    missing = [name for name, value in required.items() if value is None]
-    if missing:
-        raise ValueError(f"wiki generation is missing options: {', '.join(missing)}")
-    return build_spec_from_wiki(
-        args.wiki.read_text(encoding="utf-8"),
-        capability=args.capability,
-        summary=args.summary,
-        version=args.version,
-        requires_logparse=not args.no_logparse,
-        logparse_product=None if args.no_logparse else args.logparse_product,
-        allowed_content_types=[] if args.no_logparse else args.allowed_content_type,
-        assumptions=args.assumption,
-    )
+        value = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("generation spec must be UTF-8 JSON") from exc
+    if not isinstance(value, dict):
+        raise ValueError("generation spec must be an object")
+    return GenerationSpec.from_mapping(value)
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Generate one deterministic Problem Locator diagnosis Skill product."
+        description="Generate one deterministic Problem Locator Diagnosis Skill v3."
     )
     source = parser.add_mutually_exclusive_group(required=True)
-    source.add_argument("--spec", type=Path, help="UTF-8 JSON GenerationSpec")
-    source.add_argument("--wiki", type=Path, help="Markdown wiki using references/wiki-template.md")
+    source.add_argument("--spec", type=Path)
+    source.add_argument("--wiki", type=Path)
     parser.add_argument("--output-root", required=True, type=Path)
-    parser.add_argument("--capability")
-    parser.add_argument("--summary")
-    parser.add_argument("--version", default="2.0.0")
-    parser.add_argument("--logparse-product")
-    parser.add_argument("--allowed-content-type", action="append", default=[])
-    parser.add_argument("--assumption", action="append", default=[])
-    parser.add_argument("--no-logparse", action="store_true")
     parser.add_argument("--replace-different-version", action="store_true")
     args = parser.parse_args(argv)
     try:
-        spec = _parse_cli_spec(args)
+        spec = (
+            load_generation_spec(args.spec)
+            if args.spec is not None
+            else build_spec_from_wiki(args.wiki.read_text(encoding="utf-8"))
+        )
         result = generate_diagnosis_skill(
             spec,
             args.output_root,

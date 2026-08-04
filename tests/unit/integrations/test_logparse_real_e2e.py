@@ -474,6 +474,24 @@ def test_real_parse_then_parameter_b_continuation_parses_once(
         product=_PRODUCT,
     )
     _assert_dual_anchor_result(first_result, first_run.root)
+    assert first_result["logparse_run_artifact_draft"] == {
+        "artifact_kind": "LOGPARSE_RUN",
+        "content_type": "application/vnd.problem-locator.logparse-run+directory",
+        "declared_sha256": None,
+        "declared_size": None,
+        "metadata": {
+            "logparse_version_ref": asset.ref.model_dump(mode="json"),
+            "parse_manifest_relative_path": first_run.parse_manifest_relative_path,
+            "parse_parameters": {"product": _PRODUCT},
+            "source_attachment_id": _ATTACHMENT_ID,
+            "source_attachment_sha256": hashlib.sha256(archive_bytes).hexdigest(),
+            "tree_manifest_sha256": first_run.sha256,
+        },
+        "name": "logparse-run",
+        "proposal_key": "logparse-run",
+        "resource_kind": "DIRECTORY",
+        "workspace_relative_path": "output/proposals/logparse-run/tree",
+    }
 
     assert claim.job_id == first_job.job_id
     assert claim.attachment_id == _ATTACHMENT_ID
@@ -562,7 +580,10 @@ def test_real_parse_then_parameter_b_continuation_parses_once(
     continuation_result = parse_canonical_json_bytes(continuation_result_bytes)
     assert isinstance(continuation_result, dict)
     _assert_dual_anchor_result(continuation_result, materialized_run)
-    assert continuation_result_bytes == first_result_bytes
+    assert "logparse_run_artifact_draft" not in continuation_result
+    first_targets_only = dict(first_result)
+    first_targets_only.pop("logparse_run_artifact_draft")
+    assert continuation_result == first_targets_only
 
     real_operations = [argv[2] for argv in invocations]
     assert {argv[0] for argv in invocations} == {

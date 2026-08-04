@@ -11,6 +11,8 @@ test -s /audit-input/journey-authoritative-summary.json
 test -s /audit-input/restart-authoritative-summary.json
 test -s /audit-input/diagnosis-result.before.json
 test -s /audit-input/diagnosis-result.after.json
+test -s /audit-input/result-archive.before.zip
+test -s /audit-input/result-archive.after.zip
 test ! -e /evidence/final-state-audit.json
 test ! -e /evidence/http-artifact-audit.json
 
@@ -31,6 +33,8 @@ for path in (Path("audit_state_and_result.py"), Path("audit_http_capture.py")):
   --restart-summary /audit-input/restart-authoritative-summary.json \
   --before-result /audit-input/diagnosis-result.before.json \
   --after-result /audit-input/diagnosis-result.after.json \
+  --before-archive /audit-input/result-archive.before.zip \
+  --after-archive /audit-input/result-archive.after.zip \
   --user-result-schema /opt/src/xiaodao/schemas/v1/user-result.schema.json \
   --output /evidence/final-state-audit.json
 
@@ -43,6 +47,12 @@ for path in (Path("audit_state_and_result.py"), Path("audit_http_capture.py")):
   --internal-meta /audit-input/internal-logparse.after.meta.json \
   --before-result /audit-input/diagnosis-result.before.json \
   --after-result /audit-input/diagnosis-result.after.json \
+  --before-archive-headers /audit-input/result-archive.before.headers \
+  --after-archive-headers /audit-input/result-archive.after.headers \
+  --before-archive-meta /audit-input/result-archive.before.meta.json \
+  --after-archive-meta /audit-input/result-archive.after.meta.json \
+  --before-archive /audit-input/result-archive.before.zip \
+  --after-archive /audit-input/result-archive.after.zip \
   --internal-body /audit-input/internal-logparse.after.body.json \
   --journey-summary /audit-input/journey-authoritative-summary.json \
   --restart-summary /audit-input/restart-authoritative-summary.json \

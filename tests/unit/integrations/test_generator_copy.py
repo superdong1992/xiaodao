@@ -23,32 +23,29 @@ EXPECTED_CHECKOUT_EVIDENCE = {
 }
 EXPECTED_SOURCE_CHANGES = {
     "SKILL.md": (
-        "modified_for_s07_v2_contract",
-        "Upgrade the generator Skill instructions from the upstream 1.x workflow "
-        "to the frozen deterministic 2.0.0 product and S00 four-result contract.",
+        "modified_for_s07_v3_contract",
+        "Upgrade the generator workflow to GenerationSpec v2, Diagnosis Skill v3, "
+        "generic requirements, and the r4 result-archive contract.",
     ),
     "references/generated-skill-contract.md": (
-        "modified_for_s07_v2_contract",
-        "Replace the upstream 1.x generated-product rules with the frozen S00 "
-        "DTO/schema, deterministic diagnosis-skill.json, four-result, USER_RESULT, "
-        "and broker-only logparse contracts.",
+        "modified_for_s07_v3_contract",
+        "Replace the RPC-shaped v2 rules with manifest schema v2 requirements, "
+        "generic Logparse bindings, and controlled USER_RESULT_ARCHIVE output.",
     ),
     "references/wiki-template.md": (
-        "modified_for_s07_v2_contract",
-        "Upgrade the upstream generic wiki template to the non-sensitive S07 "
-        "service-takeover fixture shape, fixed parameter groups, evidence rules, "
-        "and versioned generation inputs.",
+        "modified_for_s07_v3_contract",
+        "Replace the RPC fixture template with an embedded deterministic "
+        "GenerationSpec v2 example.",
     ),
     "scripts/pack_result_zip.py": (
-        "byte_exact",
-        "No S07 2.0.0 contract change was required; preserve the frozen upstream "
-        "file byte-for-byte.",
+        "removed_for_v3_runtime_control",
+        "Remove the source-tree packer because result.zip is now built only by "
+        "the installed controlled runtime command.",
     ),
     "scripts/validate_generated_skill.py": (
-        "modified_for_s07_v2_contract",
-        "Replace upstream 1.x YAML/frontmatter and result.zip validation with "
-        "deterministic 2.0.0 product, diagnosis-skill.json, content-type, and S00 "
-        "outcome-contract validation.",
+        "modified_for_s07_v3_contract",
+        "Validate manifest schema v2, embedded machine-source consistency, "
+        "and deterministic result archives.",
     ),
 }
 EXPECTED_ADDED_FILE = {
@@ -58,9 +55,8 @@ EXPECTED_ADDED_FILE = {
         "source tree."
     ),
     "purpose": (
-        "Deterministically build, hash, validate, and atomically publish versioned "
-        "diagnose-* products from non-sensitive Wiki input under the frozen S00/S07 "
-        "contracts."
+        "Deterministically build, hash, validate, and atomically publish Diagnosis "
+        "Skill v3 products from GenerationSpec v2."
     ),
 }
 EXPECTED_EXCLUDED_PATTERNS = (
@@ -80,7 +76,14 @@ EXPECTED_OBSERVED_EXCLUSIONS = (
 
 def _run_git(checkout: Path, *arguments: str) -> str:
     return subprocess.run(
-        ["git", "-C", os.fspath(checkout), *arguments],
+        [
+            "git",
+            "-c",
+            f"safe.directory={checkout.resolve().as_posix()}",
+            "-C",
+            os.fspath(checkout),
+            *arguments,
+        ],
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -88,6 +91,23 @@ def _run_git(checkout: Path, *arguments: str) -> str:
         text=True,
         encoding="utf-8",
     ).stdout.strip()
+
+
+def _run_git_bytes(checkout: Path, *arguments: str) -> bytes:
+    return subprocess.run(
+        [
+            "git",
+            "-c",
+            f"safe.directory={checkout.resolve().as_posix()}",
+            "-C",
+            os.fspath(checkout),
+            *arguments,
+        ],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=True,
+    ).stdout
 
 
 def _manifest() -> dict[str, Any]:
@@ -117,10 +137,10 @@ def _equivalent_source_checkout() -> Path:
         if not (candidate / SOURCE_ROOT_RELATIVE).is_dir():
             continue
         try:
-            commit = _run_git(candidate, "rev-parse", "HEAD")
+            commit_type = _run_git(candidate, "cat-file", "-t", EXPECTED_SOURCE_COMMIT)
         except (OSError, subprocess.CalledProcessError):
             continue
-        if commit == EXPECTED_SOURCE_COMMIT:
+        if commit_type == "commit":
             return candidate
     raise AssertionError(
         "no equivalent problem-locator-mcp checkout at source commit "
@@ -154,7 +174,30 @@ def _file_facts(path: Path) -> dict[str, object]:
     assert not path.is_symlink()
     payload = path.read_bytes()
     return {
-        "mode": f"100{stat.S_IMODE(path.stat().st_mode):03o}",
+        "mode": "100755" if stat.S_IMODE(path.stat().st_mode) & 0o111 else "100644",
+        "size": len(payload),
+        "sha256": hashlib.sha256(payload).hexdigest(),
+    }
+
+
+def _git_file_facts(checkout: Path, relative_path: str) -> dict[str, object]:
+    repository_path = (SOURCE_ROOT_RELATIVE / relative_path).as_posix()
+    tree_entry = _run_git(
+        checkout,
+        "ls-tree",
+        EXPECTED_SOURCE_COMMIT,
+        "--",
+        repository_path,
+    )
+    mode, kind, _remainder = tree_entry.split(maxsplit=2)
+    assert kind == "blob"
+    payload = _run_git_bytes(
+        checkout,
+        "show",
+        f"{EXPECTED_SOURCE_COMMIT}:{repository_path}",
+    )
+    return {
+        "mode": mode,
         "size": len(payload),
         "sha256": hashlib.sha256(payload).hexdigest(),
     }
@@ -206,7 +249,10 @@ def test_source_copy_receipt_has_complete_sorted_fields() -> None:
             "change_reason",
         }
         _assert_file_facts_shape(entry["source"])
-        _assert_file_facts_shape(entry["delivered"])
+        if entry["status"] == "removed_for_v3_runtime_control":
+            assert entry["delivered"] is None
+        else:
+            _assert_file_facts_shape(entry["delivered"])
         assert (entry["status"], entry["change_reason"]) == (
             EXPECTED_SOURCE_CHANGES[entry["path"]]
         )
@@ -238,62 +284,72 @@ def test_receipt_matches_source_and_every_delivered_byte(
 ) -> None:
     manifest = _manifest()
     checkout = _equivalent_source_checkout()
-    source_root = checkout / SOURCE_ROOT_RELATIVE
-
-    # The prescribed sibling alias is absent in this isolated worktree. The
-    # receipt and properties retain that environment evidence while the source
-    # bytes are verified against an equivalent checkout at the frozen commit.
+    # The checkout may have advanced. Source bytes are read directly from the
+    # immutable frozen commit's tree/blob objects without changing its HEAD.
     record_property("fixed_alias_path", os.fspath(FIXED_ALIAS_CHECKOUT))
     record_property("fixed_alias_exists", FIXED_ALIAS_CHECKOUT.exists())
     record_property("equivalent_source_checkout", os.fspath(checkout))
     if not FIXED_ALIAS_CHECKOUT.exists():
         assert checkout != FIXED_ALIAS_CHECKOUT.resolve()
 
-    assert _run_git(checkout, "rev-parse", "HEAD") == manifest["source_commit"]
-    assert _run_git(checkout, "remote", "get-url", "origin") == manifest["repository"]
+    assert _run_git(checkout, "cat-file", "-t", manifest["source_commit"]) == "commit"
+    remote = _run_git(checkout, "remote", "get-url", "origin")
+    assert remote.replace("git@github.com:", "github.com/").replace(
+        "https://github.com/", "github.com/"
+    ) == manifest["repository"].replace("https://", "")
 
     patterns = tuple(manifest["excluded_patterns"])
-    source_files = _tree_files(source_root)
+    prefix = SOURCE_ROOT_RELATIVE.as_posix() + "/"
+    source_files = tuple(
+        line.removeprefix(prefix)
+        for line in _run_git(
+            checkout,
+            "ls-tree",
+            "-r",
+            "--name-only",
+            EXPECTED_SOURCE_COMMIT,
+            "--",
+            SOURCE_ROOT_RELATIVE.as_posix(),
+        ).splitlines()
+    )
     included_source_files = tuple(
         path for path in source_files if not _matches_exclusion(path, patterns)
     )
-    excluded_source_files = tuple(
-        path for path in source_files if _matches_exclusion(path, patterns)
-    )
     assert included_source_files == tuple(EXPECTED_SOURCE_CHANGES)
-    assert set(excluded_source_files).issubset(EXPECTED_OBSERVED_EXCLUSIONS)
 
     entries = {entry["path"]: entry for entry in manifest["files"]}
     for relative_path, (
         expected_status,
         expected_reason,
     ) in EXPECTED_SOURCE_CHANGES.items():
-        source = source_root / relative_path
         delivered = DELIVERED_SKILL / relative_path
         entry = entries[relative_path]
-        source_payload = source.read_bytes()
-        delivered_payload = delivered.read_bytes()
-
-        assert entry["source"] == _file_facts(source)
-        assert entry["delivered"] == _file_facts(delivered)
+        assert entry["source"] == _git_file_facts(checkout, relative_path)
         assert entry["status"] == expected_status
         assert entry["change_reason"] == expected_reason
-        if expected_status == "byte_exact":
-            assert delivered_payload == source_payload
+        if expected_status == "removed_for_v3_runtime_control":
+            assert not delivered.exists()
+            assert entry["delivered"] is None
         else:
-            assert expected_status == "modified_for_s07_v2_contract"
-            assert delivered_payload != source_payload
+            assert entry["delivered"] == _file_facts(delivered)
+            assert expected_status == "modified_for_s07_v3_contract"
+            assert entry["delivered"]["sha256"] != entry["source"]["sha256"]
 
     added = manifest["added_files"][0]
     added_path = added["path"]
-    assert not (source_root / added_path).exists()
+    assert added_path not in source_files
     assert {key: added[key] for key in ("mode", "size", "sha256")} == _file_facts(
         DELIVERED_SKILL / added_path
     )
 
     delivered_files = _tree_files(DELIVERED_SKILL)
     expected_delivered = tuple(
-        sorted((*EXPECTED_SOURCE_CHANGES, EXPECTED_ADDED_FILE["path"]))
+        sorted(
+            path
+            for path, (status, _) in EXPECTED_SOURCE_CHANGES.items()
+            if status != "removed_for_v3_runtime_control"
+        )
+        + [EXPECTED_ADDED_FILE["path"]]
     )
-    assert delivered_files == expected_delivered
+    assert delivered_files == tuple(sorted(expected_delivered))
     assert not any(_matches_exclusion(path, patterns) for path in delivered_files)

@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import io
 import json
 import os
 import shlex
+import shutil
+import subprocess
 import sys
 import time
 import zipfile
@@ -68,9 +71,12 @@ EXPECTED_PARSE_COUNTER = FIXTURES / "expected-parse-counter.json"
 FAKE_LOGPARSE_REPO = ROOT / "tests/fixtures/components/logparse/fake/repo"
 FAKE_LOGPARSE_CONFIG = FAKE_LOGPARSE_REPO / "config.yaml"
 SKILL_DIR = ROOT / ".claude/skills"
-EVIDENCE_ID = "00000000-0000-0000-0000-000000000040"
+EVIDENCE_IDS = [
+    "00000000-0000-0000-0000-000000000040",
+    "00000000-0000-0000-0000-000000000041",
+]
 EXPECTED_USER_RESULT_SHA256 = (
-    "37ee245a8ae705561575e2c353fd1cc4e2a57653ed05d095f4d2292c287cdf09"
+    "db119c5aafd87c17e6e15a33f61ee20e1e089f26420146b30cc61a6c62eeed39"
 )
 ARCHIVE_BYTES_MARKER = b"synthetic payment-to-inventory RPC timeout archive"
 RAW_LOGPARSE_ENV = {
@@ -90,13 +96,42 @@ PARAMETER_GROUP_A = {
 }
 
 
+def _materialize_fake_logparse_checkout(parent: Path) -> tuple[Path, Path]:
+    """Give fingerprinting a real top-level Git checkout on every platform."""
+
+    checkout = parent / "fake-logparse-checkout"
+    if not checkout.exists():
+        checkout.mkdir()
+        shutil.copyfile(FAKE_LOGPARSE_REPO / "cli.py", checkout / "cli.py")
+        shutil.copyfile(FAKE_LOGPARSE_CONFIG, checkout / "config.yaml")
+        subprocess.run(
+            ["git", "-C", os.fspath(checkout), "init", "--quiet"],
+            check=True,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        subprocess.run(
+            ["git", "-C", os.fspath(checkout), "add", "cli.py", "config.yaml"],
+            check=True,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+    return checkout, checkout / "config.yaml"
+
+
 class _E2EIds(DeterministicIdGenerator):
     """Keep every ID deterministic and pin the golden Evidence identity."""
 
     def derive(self, kind: str, stable_parts: Sequence[str]) -> str:
-        if kind == "evidence" and tuple(stable_parts)[-1] == "rpc-timeout-evidence":
+        evidence_ids_by_key = {
+            "rpc-timeout-evidence": EVIDENCE_IDS[0],
+            "rpc-timeout-server-evidence": EVIDENCE_IDS[1],
+        }
+        if kind == "evidence" and tuple(stable_parts)[-1] in evidence_ids_by_key:
             self.derive_calls.append((kind, tuple(stable_parts)))
-            return EVIDENCE_ID
+            return evidence_ids_by_key[tuple(stable_parts)[-1]]
         return super().derive(kind, stable_parts)
 
 
@@ -196,9 +231,12 @@ class _Stack:
         self.upload_guard = InProcessAttachmentUploadGuard(
             self.attachment_registry
         )
+        fake_logparse_repo, fake_logparse_config = _materialize_fake_logparse_checkout(
+            data_root.parent
+        )
         logparse_asset, broker_factory = build_logparse_runtime(
-            FAKE_LOGPARSE_REPO,
-            FAKE_LOGPARSE_CONFIG,
+            fake_logparse_repo,
+            fake_logparse_config,
             Path(sys.executable),
         )
         self.broker_factory = _CapturingBrokerFactory(broker_factory)
@@ -471,7 +509,7 @@ def test_r01_r14_rpc_timeout_is_one_durable_cross_module_path(
         ]
         assert ARCHIVE_BYTES_MARKER in fixture_archive.read("archive-marker.txt")
     expected_result = EXPECTED_USER_RESULT.read_bytes()
-    assert len(expected_result) == 622
+    assert len(expected_result) == 808
     assert hashlib.sha256(expected_result).hexdigest() == EXPECTED_USER_RESULT_SHA256
 
     # R01: queue the fixed ROUTE Job while recovery still keeps claiming paused.
@@ -504,7 +542,7 @@ def test_r01_r14_rpc_timeout_is_one_durable_cross_module_path(
     stack.start()
     stack.wait_idle()
     waiting_a = _query(stack.mcp, case_id)
-    assert waiting_a["status"] == CaseStatus.WAITING_INPUT.value
+    assert waiting_a["status"] == CaseStatus.WAITING_INPUT.value, waiting_a
     open_a = [
         item
         for item in waiting_a["pending_requirements"]
@@ -666,10 +704,12 @@ def test_r01_r14_rpc_timeout_is_one_durable_cross_module_path(
     assert len(logparse_runs) == 1
     logparse_run = logparse_runs[0]
     assert logparse_run.created_by_job_id == r08_job_id
-    assert list(r10.evidence) == [EVIDENCE_ID]
-    logparse_evidence = r10.evidence[EVIDENCE_ID]
-    assert logparse_evidence.source_type.value == "LOGPARSE"
-    assert logparse_evidence.source_ref == logparse_run.artifact_id
+    assert list(r10.evidence) == EVIDENCE_IDS
+    assert all(
+        r10.evidence[evidence_id].source_type.value == "LOGPARSE"
+        and r10.evidence[evidence_id].source_ref == logparse_run.artifact_id
+        for evidence_id in EVIDENCE_IDS
+    )
     order_outcome = next(
         outcome
         for outcome in r10.outcomes.values()
@@ -681,7 +721,7 @@ def test_r01_r14_rpc_timeout_is_one_durable_cross_module_path(
     )
     r10_processing = r10.outcome_processing_records[order_outcome.outcome_id]
     assert r10_processing.job_id == r08_job_id
-    assert r10_processing.accepted_evidence_ids == [EVIDENCE_ID]
+    assert r10_processing.accepted_evidence_ids == EVIDENCE_IDS
     assert r10_processing.accepted_artifact_ids == [logparse_run.artifact_id]
 
     # R11/R12: the next immutable Job closes over R10 and reuses the run.
@@ -702,7 +742,7 @@ def test_r01_r14_rpc_timeout_is_one_durable_cross_module_path(
     reviewing_snapshot = stack.repository.read_snapshot()
     reviewing = reviewing_snapshot.cases[case_id]
     candidate_job = reviewing.jobs[candidate_job_id]
-    assert candidate_job.evidence_refs == [EVIDENCE_ID]
+    assert candidate_job.evidence_refs == EVIDENCE_IDS
     assert candidate_job.attachment_refs == [attachment_id]
     assert candidate_job.artifact_refs == [logparse_run.artifact_id]
     assert candidate_job.previous_outcome_refs == [
@@ -720,8 +760,16 @@ def test_r01_r14_rpc_timeout_is_one_durable_cross_module_path(
     assert len(user_results) == 1
     user_result = user_results[0]
     assert user_result.created_by_job_id == candidate_job_id
-    assert user_result.size == 622
+    assert user_result.size == 808
     assert user_result.sha256 == EXPECTED_USER_RESULT_SHA256
+    result_archives = [
+        item
+        for item in reviewing.artifacts.values()
+        if item.kind is ArtifactKind.USER_RESULT_ARCHIVE
+    ]
+    assert len(result_archives) == 1
+    result_archive = result_archives[0]
+    assert result_archive.created_by_job_id == candidate_job_id
     candidate_outcome = next(
         outcome
         for outcome in reviewing.outcomes.values()
@@ -731,7 +779,10 @@ def test_r01_r14_rpc_timeout_is_one_durable_cross_module_path(
         candidate_outcome.outcome_id
     ]
     assert candidate_processing.job_id == candidate_job_id
-    assert candidate_processing.accepted_artifact_ids == [user_result.artifact_id]
+    assert candidate_processing.accepted_artifact_ids == [
+        user_result.artifact_id,
+        result_archive.artifact_id,
+    ]
     assert candidate_processing.created_job_id == reviewing.case.active_job_id
     _assert_logparse_record(
         logparse_record,
@@ -807,11 +858,16 @@ def test_r01_r14_rpc_timeout_is_one_durable_cross_module_path(
         {"case_id": case_id},
     )
     assert [item["artifact_id"] for item in listed["artifacts"]] == [
-        user_result.artifact_id
+        user_result.artifact_id,
+        result_archive.artifact_id,
     ]
     with TestClient(restarted.http_app) as http:
         download = http.get(
             f"/api/v1/artifacts/{user_result.artifact_id}/content",
+            params={"case_id": case_id},
+        )
+        archive_download = http.get(
+            f"/api/v1/artifacts/{result_archive.artifact_id}/content",
             params={"case_id": case_id},
         )
         hidden = http.get(
@@ -820,8 +876,21 @@ def test_r01_r14_rpc_timeout_is_one_durable_cross_module_path(
         )
     assert download.status_code == 200
     assert download.content == expected_result
-    assert download.headers["content-length"] == "622"
+    assert download.headers["content-length"] == "808"
     assert download.headers["x-content-sha256"] == EXPECTED_USER_RESULT_SHA256
+    assert archive_download.status_code == 200
+    assert hashlib.sha256(archive_download.content).hexdigest() == result_archive.sha256
+    with zipfile.ZipFile(io.BytesIO(archive_download.content)) as result_zip:
+        assert result_zip.namelist() == [
+            "result.txt",
+            "target-log-001.log",
+            "target-log-002.log",
+        ]
+        assert result_zip.read("result.txt") == (
+            restarted_view["final_result"]["statement"] + "\n"
+        ).encode("utf-8")
+        assert b"synthetic-order-0001" in result_zip.read("target-log-001.log")
+        assert b"synthetic-order-0001" in result_zip.read("target-log-002.log")
     payload = UserResultPayload.model_validate_json(download.content)
     assert payload.problem_statement == restarted_view["problem_spec"]["statement"]
     assert payload.candidate_statement == restarted_view["final_result"]["statement"]

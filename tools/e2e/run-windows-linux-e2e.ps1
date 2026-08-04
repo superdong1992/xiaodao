@@ -110,6 +110,28 @@ function Copy-EvidenceBundle([string]$Target) {
     }
     Copy-Item -LiteralPath (Join-Path $toolRoot 'bounded-process.ps1') -Destination (Join-Path $Target 'bounded-process.ps1') -Force
     Copy-Item -LiteralPath (Join-Path $toolRoot 'business-patch-identity.ps1') -Destination (Join-Path $Target 'business-patch-identity.ps1') -Force
+
+    # Python compilation may have left local cache files below the harness.
+    # They are not source evidence and cannot be normalized as UTF-8 text.
+    $targetPrefix = [IO.Path]::GetFullPath($Target).TrimEnd('\') + '\'
+    foreach ($cacheDirectory in @(Get-ChildItem -LiteralPath $Target -Recurse -Directory -Force | Where-Object { $_.Name -ceq '__pycache__' })) {
+        $cachePath = [IO.Path]::GetFullPath($cacheDirectory.FullName)
+        Assert-E2E ($cachePath.StartsWith($targetPrefix, [StringComparison]::OrdinalIgnoreCase)) 'EVIDENCE_CACHE_PATH_OUTSIDE_TARGET'
+        Remove-Item -LiteralPath $cachePath -Recurse -Force
+    }
+    foreach ($compiledFile in @(Get-ChildItem -LiteralPath $Target -Recurse -File -Filter '*.pyc' -Force)) {
+        $compiledPath = [IO.Path]::GetFullPath($compiledFile.FullName)
+        Assert-E2E ($compiledPath.StartsWith($targetPrefix, [StringComparison]::OrdinalIgnoreCase)) 'EVIDENCE_COMPILED_PATH_OUTSIDE_TARGET'
+        Remove-Item -LiteralPath $compiledPath -Force
+    }
+    foreach ($scriptFile in @(Get-ChildItem -LiteralPath $Target -Recurse -File)) {
+        $scriptText = [IO.File]::ReadAllText($scriptFile.FullName, $utf8)
+        [IO.File]::WriteAllText(
+            $scriptFile.FullName,
+            $scriptText.Replace("`r`n", "`n").Replace("`r", "`n"),
+            $utf8
+        )
+    }
 }
 
 function Copy-RestartRuntime([string]$MainRoot) {
@@ -130,7 +152,7 @@ function Copy-RestartRuntime([string]$MainRoot) {
 }
 
 function Copy-SourcePatch([string]$SourceRoot, [string]$TargetRoot) {
-    foreach ($name in @('source-input.patch', 'source-input.patch.sha256', 'source-patch-host-freeze.txt')) {
+    foreach ($name in @('source-input.patch', 'source-input.patch.sha256', 'source.patch.new-files.txt', 'source-patch-host-freeze.txt')) {
         Copy-Item -LiteralPath (Join-Path $SourceRoot $name) -Destination (Join-Path $TargetRoot $name) -Force
     }
 }
@@ -148,8 +170,14 @@ function Get-BaseCacheKey {
 }
 
 function Ensure-BaseImage([string]$Image, [string]$BuildLog) {
-    & $docker --config $DockerConfig image inspect $Image 1>$null 2>$null
-    if ($LASTEXITCODE -eq 0) {
+    $savedPreference = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        & $docker --config $DockerConfig image inspect $Image 1>$null 2>$null
+        $inspectExitCode = $LASTEXITCODE
+    }
+    finally { $ErrorActionPreference = $savedPreference }
+    if ($inspectExitCode -eq 0) {
         $script:baseCacheHit = $true
         Write-E2EUtf8 $BuildLog "base_image=$Image`ncache_hit=true`n"
         return

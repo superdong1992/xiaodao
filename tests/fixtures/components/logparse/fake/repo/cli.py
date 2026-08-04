@@ -62,6 +62,7 @@ def _record_invocation(command: str, output: Path, argv: list[str]) -> None:
         json.dumps(record, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
         + "\n",
         encoding="utf-8",
+        newline="\n",
     )
     record_path.with_name("parse_counter.json").write_text(
         json.dumps(
@@ -71,6 +72,7 @@ def _record_invocation(command: str, output: Path, argv: list[str]) -> None:
         )
         + "\n",
         encoding="utf-8",
+        newline="\n",
     )
 
 
@@ -95,8 +97,12 @@ def _parse(argv: list[str]) -> int:
     server_dir = task / "mech_modules" / "COMPACT" / "slot_2" / "cycle"
     client_dir.mkdir(parents=True)
     server_dir.mkdir(parents=True)
-    (client_dir / "checkout-client-101.log").write_text(CLIENT_LOG, encoding="utf-8")
-    (server_dir / "inventory-server-202.log").write_text(SERVER_LOG, encoding="utf-8")
+    (client_dir / "checkout-client-101.log").write_text(
+        CLIENT_LOG, encoding="utf-8", newline="\n"
+    )
+    (server_dir / "inventory-server-202.log").write_text(
+        SERVER_LOG, encoding="utf-8", newline="\n"
+    )
     (task / "result.json").write_text(
         json.dumps(
             {
@@ -154,6 +160,7 @@ def _parse(argv: list[str]) -> int:
         )
         + "\n",
         encoding="utf-8",
+        newline="\n",
     )
     if marker.startswith(b"MANIFEST_DIRECTORY"):
         (task / "parse_manifest.json").mkdir()
@@ -178,6 +185,7 @@ def _parse(argv: list[str]) -> int:
             )
             + "\n",
             encoding="utf-8",
+            newline="\n",
         )
     if marker.startswith(b"SECOND_TASK"):
         (args.output / "unexpected-task").mkdir()

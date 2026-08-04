@@ -21,9 +21,11 @@ printf '%s\n' \
   'retry_count=0' \
   'skill_source=live-wiki-generated-product' \
   'outcome_source=real-agent-synthesis-from-production-diagnose-context' \
-  'agent_execution_count=1' \
+  'agent_execution_count=4' \
   'real_logparse_execution_count=1' \
-  'continuation_previous_outcome=not-required-for-fast-first-log-gate' \
+  'v3_requirement_matrix=rpc-service-takeover,database-deadlock,manual-triage' \
+  'requirement_isolation=exact-generated-initial-input-set' \
+  'continuation_previous_outcome=not-required-for-first-log-gate' \
   'target_outcome_injection=false' \
   'continuation_expected_result=NEED_INPUT(order_id)' \
   > /evidence/real-diagnose-agent-command-template.txt
@@ -49,6 +51,7 @@ runuser -u plagent -- env -i \
   PYTHONNOUSERSITE=1 \
   PYTHONPYCACHEPREFIX=/tmp/attempt52-plagent-real-diagnose-pycache \
   PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
+  S08_REAL_DIAGNOSE_AGENT_V3_MATRIX_GATE=1 \
   S08_REAL_FIRST_LOG_AGENT_GATE=1 \
   "S08_REAL_DIAGNOSE_AGENT_COMMAND=$command" \
   S08_REAL_DIAGNOSE_SKILL_PATH=/opt/e2e-skills/diagnose-service-takeover \
@@ -56,6 +59,7 @@ runuser -u plagent -- env -i \
   LOGPARSE_CONFIG_PATH=/opt/src/logparse/config.yaml \
   LOGPARSE_PYTHON=/opt/venvs/logparse/bin/python \
   /opt/venvs/xiaodao/bin/python -m pytest -q \
+  tests/e2e/test_real_diagnose_agent_contract_gate.py::test_real_agent_v3_requirement_isolation_gate \
   tests/e2e/test_real_diagnose_agent_contract_gate.py::test_real_first_log_diagnose_agent_produces_valid_continuation \
   -p no:cacheprovider \
   --basetemp="$basetemp" \

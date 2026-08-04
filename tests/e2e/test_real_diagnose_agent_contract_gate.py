@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import importlib.util
 import json
 import os
+import sys
 import threading
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -55,8 +58,15 @@ from problem_locator.runtime.output_reader import read_agent_output
 ROOT = Path(__file__).resolve().parents[2]
 DIAGNOSE_JOB = ROOT / "tests/fixtures/contracts/positive/job-diagnose.json"
 ASSET_ROOT = ROOT / "src/problem_locator/runtime/assets"
+GENERATOR_PATH = (
+    ROOT
+    / ".claude/skills/wiki-to-diagnosis-skill/scripts/generate_diagnosis_skill.py"
+)
+GENERATION_SPEC_ROOT = (
+    ROOT / "tests/fixtures/components/diagnosis-generator/specs"
+)
 SKILL_PRODUCT_SHA256 = (
-    "4ce37124b5fb97233188150e074e3b71d995e27bd3941a51a05aa1d5cd2251e7"
+    "08573b8e01e2b5c213c59b0b27b3922566293af1aed963c09c6f735f41abdd95"
 )
 PARAMETER_GROUP_A = {
     "caller_service",
@@ -73,6 +83,19 @@ REAL_ARCHIVE_SHA256 = (
 )
 FIRST_LOG_ATTACHMENT_ID = "00000000-0000-0000-0000-000000000173"
 FIRST_LOG_INPUT_SOURCE_ID = "00000000-0000-0000-0000-000000000175"
+
+
+@pytest.fixture(scope="module")
+def diagnosis_generator() -> Any:
+    module_spec = importlib.util.spec_from_file_location(
+        "_problem_locator_real_agent_generate_v3",
+        GENERATOR_PATH,
+    )
+    assert module_spec is not None and module_spec.loader is not None
+    module = importlib.util.module_from_spec(module_spec)
+    sys.modules[module_spec.name] = module
+    module_spec.loader.exec_module(module)
+    return module
 
 
 class _Signal:
@@ -193,6 +216,179 @@ def _first_log_diagnose_job(
     return Job.model_validate(payload)
 
 
+@pytest.mark.parametrize(
+    "spec_name",
+    [
+        pytest.param("rpc-service-takeover.json", id="rpc-service-takeover"),
+        pytest.param("database-deadlock.json", id="database-deadlock"),
+        pytest.param("manual-triage.json", id="manual-triage"),
+    ],
+)
+def test_real_agent_v3_requirement_isolation_gate(
+    tmp_path: Path,
+    diagnosis_generator: Any,
+    spec_name: str,
+) -> None:
+    """Run one real Agent against each generated v3 requirement contract."""
+
+    if os.environ.get("S08_REAL_DIAGNOSE_AGENT_V3_MATRIX_GATE") != "1":
+        pytest.skip("requires the explicitly configured v3 Agent matrix gate")
+    command = os.environ.get("S08_REAL_DIAGNOSE_AGENT_COMMAND")
+    assert command, "S08_REAL_DIAGNOSE_AGENT_COMMAND is required"
+
+    generation_spec = diagnosis_generator.load_generation_spec(
+        GENERATION_SPEC_ROOT / spec_name
+    )
+    generated = diagnosis_generator.generate_diagnosis_skill(
+        generation_spec,
+        tmp_path / "generated-skills",
+    )
+    skill_path = generated.skill_dir
+    manifest_value = json.loads(
+        (skill_path / "diagnosis-skill.json").read_text(encoding="utf-8")
+    )
+    product_hash = hash_product_directory(skill_path)
+    assert product_hash == generated.product_sha256
+    skill_ref = VersionedRef(
+        id=manifest_value["id"],
+        version=manifest_value["version"],
+        content_hash=product_hash,
+    )
+
+    requires_logparse = manifest_value["requires_logparse"]
+    job_payload = json.loads(DIAGNOSE_JOB.read_bytes())
+    job_payload.update(
+        {
+            "artifact_refs": [],
+            "attachment_refs": [],
+            "evidence_refs": [],
+            "goal": "Request only the generated Skill's missing INITIAL inputs.",
+            "logparse_product": (
+                manifest_value.get("logparse_product", "default")
+                if requires_logparse
+                else None
+            ),
+            "logparse_tool_ref": (
+                job_payload["logparse_tool_ref"] if requires_logparse else None
+            ),
+            "previous_outcome_refs": [],
+            "skill_ref": skill_ref.model_dump(mode="json"),
+        }
+    )
+    job_payload["context_snapshot"].update(
+        {
+            "active_hypotheses": [],
+            "candidate_conclusion": None,
+            "confirmed_facts": [],
+            "evidence_refs": [],
+            "open_questions": [],
+            "pending_requirements": [],
+            "rejected_hypotheses": [],
+            "user_facts": [],
+        }
+    )
+    job = Job.model_validate(job_payload)
+    workspace_manifest = WorkspaceInputManifest(
+        schema_version=1,
+        job_id=job.job_id,
+        case_id=job.case_id,
+        job_type=job.job_type,
+        logparse_tool_ref=job.logparse_tool_ref,
+        logparse_product=job.logparse_product,
+        entries=[],
+    )
+    materials = ContextMaterials(
+        profile=(ASSET_ROOT / "profiles/specialist/profile.md").read_text(
+            encoding="utf-8"
+        ),
+        tool_bundle=(
+            ASSET_ROOT / "tool-bundles/diagnose/tool-bundle.json"
+        ).read_text(encoding="utf-8"),
+        output_contract=(
+            ASSET_ROOT / "output-contracts/diagnose/output-contract.md"
+        ).read_text(encoding="utf-8"),
+        manifest=workspace_manifest,
+        skill=(skill_path / "SKILL.md").read_text(encoding="utf-8"),
+    )
+    context = ContextBuilder().build(job, materials)
+    workspace = tmp_path / "workspace"
+    (workspace / "inputs").mkdir(parents=True)
+    (workspace / "runtime/tool-state").mkdir(parents=True)
+    (workspace / "output/proposals").mkdir(parents=True)
+    (workspace / "inputs/manifest.json").write_bytes(
+        canonical_json_bytes(workspace_manifest)
+    )
+    (workspace / "runtime/context.txt").write_text(
+        context.body,
+        encoding="utf-8",
+        newline="\n",
+    )
+
+    stdout = _Sink()
+    stderr = _Sink()
+    try:
+        execution = AgentBackend(command).execute(
+            prompt=context.body,
+            workspace_root=workspace,
+            cancellation=_Signal(),
+            log_sinks=ExecutionLogSinks(
+                stdout=stdout,
+                stderr=stderr,
+                combined_limit_bytes=JOB_STDOUT_STDERR_BYTES,
+            ),
+            resource_limits=job.resource_limits,
+            test_limits=BackendExecutionLimits(
+                wall_time_seconds=240.0,
+                stdout_stderr_bytes=4 * 1024 * 1024,
+                workspace_bytes=8 * 1024 * 1024,
+                poll_interval_seconds=0.02,
+                termination_grace_seconds=5.0,
+            ),
+        )
+    except RuntimeExecutionError as exc:
+        pytest.fail(
+            f"real v3 matrix Agent failed with {exc.failure.code.value}; "
+            f"stdout_bytes={len(stdout.data)}; stderr_bytes={len(stderr.data)}"
+        )
+
+    assert execution.returncode == 0
+    validated = read_agent_output(workspace, job, workspace_manifest)
+    assert validated.outcome.result_type is OutcomeResultType.NEED_INPUT
+    assert isinstance(validated.outcome.payload, DiagnosisOutcome)
+    diagnosis = validated.outcome.payload
+    expected = [
+        item
+        for item in manifest_value["requirements"]
+        if item["stage"] == "INITIAL" and item["kind"] == "INPUT"
+    ]
+    actual = diagnosis.state_delta.add_pending_requirements
+    assert [item.name for item in actual] == [item["name"] for item in expected]
+    actual_by_name = {item.name: item for item in actual}
+    for declared in expected:
+        requirement = actual_by_name[declared["name"]]
+        assert requirement.kind is RequirementKind.INPUT
+        assert requirement.status is RequirementStatus.OPEN
+        assert requirement.prompt == declared["prompt"]
+        assert requirement.requested_by_job_id == job.job_id
+        assert requirement.fulfilled_by_refs == []
+        assert isinstance(requirement.constraints, InputRequirementConstraints)
+        assert requirement.constraints.model_dump(mode="json") == declared["constraints"]
+    assert set(diagnosis.requested_input) == {
+        requirement.requirement_id for requirement in actual
+    }
+    assert diagnosis.requested_attachments == []
+    assert diagnosis.candidate_conclusion_draft is None
+    assert validated.outcome.proposed_evidence_drafts == []
+    assert validated.outcome.proposed_artifact_drafts == []
+    if manifest_value["capability"] != "service-takeover":
+        rpc_names = PARAMETER_GROUP_A | {"order_id"}
+        assert rpc_names.isdisjoint(actual_by_name)
+        assert not any(
+            name.encode("utf-8") in validated.canonical_bytes for name in rpc_names
+        )
+    assert stdout.closed is True and stderr.closed is True
+
+
 def test_real_first_log_diagnose_agent_produces_valid_continuation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -221,7 +417,7 @@ def test_real_first_log_diagnose_agent_produces_valid_continuation(
     assert hash_product_directory(skill_path) == SKILL_PRODUCT_SHA256
     skill_ref = VersionedRef(
         id="diagnose-service-takeover",
-        version="2.0.0",
+        version="3.0.4",
         content_hash=SKILL_PRODUCT_SHA256,
     )
     logparse_asset, broker_factory = build_logparse_runtime(
@@ -351,7 +547,8 @@ def test_real_first_log_diagnose_agent_produces_valid_continuation(
     accepted_evidence = diagnosis.state_delta.add_evidence_bindings
     assert len(accepted_evidence) == 1
     assert accepted_evidence[0].existing_evidence_id is None
-    assert accepted_evidence[0].evidence_proposal_key == "logparse-client-evidence"
+    evidence_proposal_key = accepted_evidence[0].evidence_proposal_key
+    assert evidence_proposal_key is not None
     added = diagnosis.state_delta.add_pending_requirements
     assert len(added) == 1
     assert added[0].name == "order_id"
@@ -360,27 +557,40 @@ def test_real_first_log_diagnose_agent_produces_valid_continuation(
 
     assert len(validated.outcome.proposed_evidence_drafts) == 1
     evidence = validated.outcome.proposed_evidence_drafts[0]
-    assert evidence.proposal_key == "logparse-client-evidence"
+    assert evidence.proposal_key == evidence_proposal_key
     assert evidence.source_type is EvidenceSourceType.LOGPARSE
-    assert evidence.source_binding.artifact_proposal_key == "logparse-run"
     assert evidence.workspace_relative_path is None
     assert evidence.declared_size is None
     assert evidence.declared_sha256 is None
     assert len(validated.outcome.proposed_artifact_drafts) == 1
     artifact = validated.outcome.proposed_artifact_drafts[0]
-    assert artifact.proposal_key == "logparse-run"
+    artifact_proposal_key = artifact.proposal_key
+    assert evidence.source_binding.artifact_proposal_key == artifact_proposal_key
     assert artifact.artifact_kind is ArtifactKind.LOGPARSE_RUN
     assert artifact.content_type == (
         "application/vnd.problem-locator.logparse-run+directory"
     )
     assert artifact.resource_kind is ResourceKind.DIRECTORY
-    assert artifact.workspace_relative_path == "output/proposals/logparse-run/tree"
-    assert artifact.declared_sha256 == artifact.metadata.tree_manifest_sha256
+    assert artifact.workspace_relative_path == (
+        f"output/proposals/{artifact_proposal_key}/tree"
+    )
+    assert artifact.declared_size is None
+    assert artifact.declared_sha256 is None
+    broker_result = parse_canonical_json_bytes(
+        (
+            workspace
+            / f"output/proposals/{artifact_proposal_key}/target_logs.json"
+        ).read_bytes()
+    )
+    assert isinstance(broker_result, dict)
+    assert artifact.model_dump(mode="json") == broker_result[
+        "logparse_run_artifact_draft"
+    ]
     assert len(validated.proposal_resources) == 1
     resource = validated.proposal_resources[0]
-    assert resource.proposal_key == "logparse-run"
-    assert resource.sha256 == artifact.declared_sha256
-    assert resource.size == artifact.declared_size
+    assert resource.proposal_key == artifact_proposal_key
+    assert resource.sha256 == artifact.metadata.tree_manifest_sha256
+    assert resource.size > 0
     assert stdout.closed is True and stderr.closed is True
 
 
@@ -398,7 +608,7 @@ def test_real_diagnose_agent_requests_parameter_group_a_from_generated_skill(
     assert hash_product_directory(skill_path) == SKILL_PRODUCT_SHA256
     skill_ref = VersionedRef(
         id="diagnose-service-takeover",
-        version="2.0.0",
+        version="3.0.4",
         content_hash=SKILL_PRODUCT_SHA256,
     )
     job = _initial_diagnose_job(skill_ref)

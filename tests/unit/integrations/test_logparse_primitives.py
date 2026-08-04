@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
+import problem_locator.integrations.logparse.broker as broker_module
 import problem_locator.integrations.logparse.fingerprint as fingerprint_module
 from problem_locator.contracts import (
     AssetKind,
@@ -42,6 +43,11 @@ from problem_locator.integrations.logparse.tree import build_tree_manifest
 ATTACHMENT_ID = "00000000-0000-0000-0000-000000000001"
 ARTIFACT_ID = "00000000-0000-0000-0000-000000000002"
 PROBLEM_TIME = "2026-01-03T00:05:00.000Z"
+
+
+def test_effective_default_product_is_metadata_only_not_an_upstream_flag() -> None:
+    assert broker_module._product_argv("default") == []
+    assert broker_module._product_argv("compact") == ["--product", "compact"]
 
 
 def _anchor(**updates: object) -> Anchor:

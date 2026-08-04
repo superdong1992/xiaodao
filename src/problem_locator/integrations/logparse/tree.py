@@ -57,7 +57,14 @@ def build_tree_manifest(root: Path) -> tuple[TreeManifest, int, str]:
                 child_path = Path(child.path)
                 if child.is_symlink():
                     raise _invalid()
-                metadata = child.stat(follow_symlinks=False)
+                # Windows DirEntry metadata can report zeroed identity and
+                # link-count fields.  A direct stat provides the stable
+                # values needed for hard-link rejection and tree hashing.
+                metadata = (
+                    child_path.stat(follow_symlinks=False)
+                    if os.name == "nt"
+                    else child.stat(follow_symlinks=False)
+                )
                 mode = metadata.st_mode
                 if stat.S_ISDIR(mode):
                     pending.append(child_path)

@@ -17,6 +17,7 @@ dependencies = [
 
 [project.scripts]
 problem-locator-logparse = "problem_locator.integrations.logparse.cli:main"
+problem-locator-pack-result = "problem_locator.integrations.result_archive:main"
 
 [dependency-groups]
 dev = [

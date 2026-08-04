@@ -9,6 +9,7 @@ imports application, domain, storage, or dispatch implementations.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -38,7 +39,6 @@ from problem_locator.contracts import (  # noqa: E402
     JobOutcome,
     JobType,
     LogparseEvidenceLocator,
-    LogparseRunMetadata,
     OutcomeResultType,
     PendingRequirement,
     RequirementKind,
@@ -49,8 +49,8 @@ from problem_locator.contracts import (  # noqa: E402
     RouteDecision,
     RouteKind,
     UserResultMetadata,
+    UserResultArchiveMetadata,
     UserResultPayload,
-    VersionedRef,
     WorkspaceInputManifest,
     canonical_json_bytes,
     parse_canonical_json_bytes,
@@ -64,17 +64,11 @@ from problem_locator.integrations.logparse import cli as logparse_cli  # noqa: E
 from problem_locator.integrations.logparse.outputs import (  # noqa: E402
     inspect_controlled_run,
 )
+from problem_locator.integrations.result_archive import build_result_archive  # noqa: E402
 
 
 PRODUCED_AT = "2026-07-31T00:10:00.000Z"
 PROBLEM_TIME = "2026-07-31T00:00:03.000Z"
-SKILL_REF = VersionedRef(
-    id="diagnosis-skill/diagnose-service-takeover",
-    version="2.0.0",
-    content_hash=(
-        "4ce37124b5fb97233188150e074e3b71d995e27bd3941a51a05aa1d5cd2251e7"
-    ),
-)
 PARAMETER_REQUIREMENTS = (
     (
         "00000000-0000-0000-0000-000000000101",
@@ -100,6 +94,10 @@ PARAMETER_REQUIREMENTS = (
 ATTACHMENT_REQUIREMENT_ID = "00000000-0000-0000-0000-000000000105"
 ORDER_REQUIREMENT_ID = "00000000-0000-0000-0000-000000000106"
 ARCHIVE_BYTES_MARKER = b"synthetic payment-to-inventory RPC timeout archive"
+EVIDENCE_IDS = (
+    "00000000-0000-0000-0000-000000000040",
+    "00000000-0000-0000-0000-000000000041",
+)
 RAW_LOGPARSE_SENTINELS = (
     b"s08-raw-logparse-repo-sentinel",
     b"s08-raw-logparse-config-sentinel",
@@ -154,6 +152,26 @@ def _assert_golden_json(path: Path, name: str) -> object:
     if parse_canonical_json_bytes(actual) != parsed:
         raise RuntimeError(f"broker output failed typed JSON comparison: {name}")
     return parsed
+
+
+def _assert_parse_targets_golden(
+    path: Path,
+    name: str,
+) -> tuple[dict[str, object], AgentArtifactProposalDraft]:
+    actual = path.read_bytes()
+    payload = parse_canonical_json_bytes(actual)
+    if canonical_json_bytes(payload) != actual or not isinstance(payload, dict):
+        raise RuntimeError("broker parse-targets output is not canonical JSON")
+    target_payload = dict(payload)
+    artifact_payload = target_payload.pop("logparse_run_artifact_draft", None)
+    expected, parsed = _golden_json(name)
+    if canonical_json_bytes(target_payload) != expected or target_payload != parsed:
+        raise RuntimeError(f"broker output drifted from golden fixture: {name}")
+    try:
+        artifact = AgentArtifactProposalDraft.model_validate(artifact_payload)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("broker returned an invalid LOGPARSE_RUN draft") from exc
+    return target_payload, artifact
 
 
 def _sensitive_needles() -> tuple[bytes, ...]:
@@ -379,13 +397,21 @@ def _validated_previous_outcomes(
     return outcomes
 
 
-def _route(instruction: dict[str, object]) -> AgentJobOutcome:
+def _route(instruction: dict[str, object], context: str) -> AgentJobOutcome:
+    skill_index = json.loads(_section(context, "SKILL_INDEX"))
+    matches = [
+        item["ref"]
+        for item in skill_index["skills"]
+        if item["ref"]["id"] == "diagnosis-skill/diagnose-service-takeover"
+    ]
+    if len(matches) != 1:
+        raise RuntimeError("the RPC diagnosis skill is not uniquely routable")
     return _agent_outcome(
         instruction,
         result_type=OutcomeResultType.COMPLETED,
         payload=RouteDecision(
             kind=RouteKind.MATCHED,
-            skill_ref=SKILL_REF,
+            skill_ref=matches[0],
             reason="The fixed catalog contains the RPC service-takeover skill.",
             confidence=1.0,
         ),
@@ -459,7 +485,7 @@ def _first_log_analysis(
         artifact_proposal_key=proposal_key,
     )
     target_result = _invoke_broker("parse-targets", proposal_key, request)
-    target_payload = _assert_golden_json(
+    target_payload, artifact = _assert_parse_targets_golden(
         target_result,
         "expected-target-logs.json",
     )
@@ -474,60 +500,64 @@ def _first_log_analysis(
     )
     if not isinstance(parse_payload, dict) or parse_payload.get("product") != "compact":
         raise RuntimeError("parse-manifest golden has an invalid typed shape")
-    assert manifest.logparse_tool_ref is not None
-    metadata = LogparseRunMetadata(
-        tree_manifest_sha256=run.sha256,
-        logparse_version_ref=manifest.logparse_tool_ref,
-        parse_manifest_relative_path=run.parse_manifest_relative_path,
-        source_attachment_id=attachment.resource_id,
-        source_attachment_sha256=attachment.sha256,
-        parse_parameters={"product": "compact"},
-    )
-    artifact = AgentArtifactProposalDraft(
-        proposal_key=proposal_key,
-        artifact_kind=ArtifactKind.LOGPARSE_RUN,
-        name="rpc-timeout-logparse-run",
-        content_type="application/vnd.problem-locator.logparse-run+directory",
-        resource_kind=ResourceKind.DIRECTORY,
-        workspace_relative_path=f"output/proposals/{proposal_key}/tree",
-        declared_size=run.size,
-        declared_sha256=run.sha256,
-        metadata=metadata,
-    )
-    evidence_key = "rpc-timeout-evidence"
-    evidence = AgentEvidenceProposalDraft(
-        proposal_key=evidence_key,
-        source_type=EvidenceSourceType.LOGPARSE,
-        source_binding=EvidenceSourceBinding(
-            existing_source_ref=None,
-            artifact_proposal_key=proposal_key,
+    if (
+        artifact.artifact_kind is not ArtifactKind.LOGPARSE_RUN
+        or artifact.proposal_key != proposal_key
+        or artifact.workspace_relative_path
+        != f"output/proposals/{proposal_key}/tree"
+        or artifact.metadata.tree_manifest_sha256 != run.sha256
+        or artifact.metadata.parse_manifest_relative_path
+        != run.parse_manifest_relative_path
+    ):
+        raise RuntimeError("broker LOGPARSE_RUN draft drifted from the controlled run")
+    evidence_specs = (
+        (
+            "rpc-timeout-evidence",
+            target_payload["target_logs"][0]["log_path"],
+            "The payment caller exceeded its inventory RPC deadline.",
         ),
-        locator=LogparseEvidenceLocator(
-            kind="LOGPARSE",
-            relative_path=(
-                "task-synthetic/mech_modules/COMPACT/slot_1/cycle/"
-                "checkout-client-101.log"
+        (
+            "rpc-timeout-server-evidence",
+            target_payload["target_logs"][1]["log_path"],
+            "The inventory server exhausted its RPC connection pool.",
+        ),
+    )
+    evidence = [
+        AgentEvidenceProposalDraft(
+            proposal_key=evidence_key,
+            source_type=EvidenceSourceType.LOGPARSE,
+            source_binding=EvidenceSourceBinding(
+                existing_source_ref=None,
+                artifact_proposal_key=proposal_key,
             ),
-            start_line=1,
-            end_line=1,
-            start_time=None,
-            end_time=None,
-        ),
-        summary="The payment caller exceeded its inventory RPC deadline.",
-        workspace_relative_path=None,
-        declared_size=None,
-        declared_sha256=None,
-    )
+            locator=LogparseEvidenceLocator(
+                kind="LOGPARSE",
+                relative_path=relative_path,
+                start_line=1,
+                end_line=1,
+                start_time=None,
+                end_time=None,
+            ),
+            summary=summary,
+            workspace_relative_path=None,
+            declared_size=None,
+            declared_sha256=None,
+        )
+        for evidence_key, relative_path, summary in evidence_specs
+    ]
     order_requirement = _input_requirement(
         ORDER_REQUIREMENT_ID,
         "order_id",
         "Provide the order identifier that uniquely selects the request.",
         str(instruction["job_id"]),
     )
-    binding = EvidenceBinding(
-        existing_evidence_id=None,
-        evidence_proposal_key=evidence_key,
-    )
+    bindings = [
+        EvidenceBinding(
+            existing_evidence_id=None,
+            evidence_proposal_key=item.proposal_key,
+        )
+        for item in evidence
+    ]
     return _agent_outcome(
         instruction,
         result_type=OutcomeResultType.NEED_INPUT,
@@ -535,14 +565,14 @@ def _first_log_analysis(
             findings=[],
             state_delta=_empty_delta(
                 add_pending_requirements=[order_requirement],
-                add_evidence_bindings=[binding],
+                add_evidence_bindings=bindings,
             ),
             requested_input=[order_requirement.requirement_id],
             requested_attachments=[],
             candidate_conclusion_draft=None,
             recommended_next_step="Provide order_id and reuse the persisted parse run.",
         ),
-        proposed_evidence_drafts=[evidence],
+        proposed_evidence_drafts=evidence,
         proposed_artifact_drafts=[artifact],
     )
 
@@ -574,12 +604,15 @@ def _candidate(
     evidence_ids = [
         entry.resource_id for entry in manifest.entries if entry.input_kind == "EVIDENCE"
     ]
-    if evidence_ids != ["00000000-0000-0000-0000-000000000040"]:
+    if evidence_ids != list(EVIDENCE_IDS):
         raise RuntimeError("the deterministic formal Evidence ID drifted")
-    evidence_binding = EvidenceBinding(
-        existing_evidence_id=evidence_ids[0],
-        evidence_proposal_key=None,
-    )
+    evidence_bindings = [
+        EvidenceBinding(
+            existing_evidence_id=evidence_id,
+            evidence_proposal_key=None,
+        )
+        for evidence_id in evidence_ids
+    ]
     problem_spec = snapshot["problem_spec"]
     assert isinstance(problem_spec, dict)
     criterion = str(problem_spec["completion_criteria"][0])
@@ -587,14 +620,14 @@ def _candidate(
         criterion_index=0,
         criterion=criterion,
         satisfied=True,
-        evidence_bindings=[evidence_binding],
+        evidence_bindings=evidence_bindings,
         explanation="The request identifier appears in the parsed log.",
     )
     candidate = CandidateConclusionDraft(
         proposal_key="candidate",
         existing_conclusion_id=None,
         statement="The inventory RPC exceeded its deadline.",
-        supporting_evidence_bindings=[evidence_binding],
+        supporting_evidence_bindings=evidence_bindings,
         completion_criteria_mapping=[mapping],
     )
     result = UserResultPayload(
@@ -617,11 +650,51 @@ def _candidate(
         resource_kind=ResourceKind.FILE,
         workspace_relative_path="output/proposals/user-result/diagnosis-result.json",
         declared_size=len(result_bytes),
-        declared_sha256=__import__("hashlib").sha256(result_bytes).hexdigest(),
+        declared_sha256=hashlib.sha256(result_bytes).hexdigest(),
         metadata=UserResultMetadata(
             schema_version=1,
             format_id="problem-locator-diagnosis-v1",
             description="Canonical diagnosis result for the proposed candidate.",
+        ),
+    )
+    archive_key = "user-result-archive"
+    archive_request = Path("output/proposals") / archive_key / "request.json"
+    archive_request.parent.mkdir(parents=True, exist_ok=True)
+    target_log_paths = [
+        f"inputs/artifacts/{artifact.resource_id}/tree/{item['log_path']}"
+        for item in target_payload["target_logs"]
+    ]
+    archive_request.write_bytes(
+        canonical_json_bytes(
+            {
+                "schema_version": 1,
+                "result_text": candidate.statement + "\n",
+                "target_log_paths": target_log_paths,
+            }
+        )
+    )
+    archive_relative_path = f"output/proposals/{archive_key}/result.zip"
+    archive_path = build_result_archive(
+        Path.cwd(),
+        archive_request.as_posix(),
+        archive_relative_path,
+    )
+    archive_bytes = archive_path.read_bytes()
+    result_archive = AgentArtifactProposalDraft(
+        proposal_key=archive_key,
+        artifact_kind=ArtifactKind.USER_RESULT_ARCHIVE,
+        name="result.zip",
+        content_type="application/zip",
+        resource_kind=ResourceKind.FILE,
+        workspace_relative_path=archive_relative_path,
+        declared_size=len(archive_bytes),
+        declared_sha256=hashlib.sha256(archive_bytes).hexdigest(),
+        metadata=UserResultArchiveMetadata(
+            schema_version=1,
+            format_id="problem-locator-result-archive-v1",
+            description="Controlled user-facing diagnosis archive.",
+            user_result_proposal_key="user-result",
+            target_log_count=len(target_log_paths),
         ),
     )
     return _agent_outcome(
@@ -636,7 +709,7 @@ def _candidate(
             recommended_next_step="Submit the fixed candidate for independent review.",
         ),
         consumed_evidence_refs=evidence_ids,
-        proposed_artifact_drafts=[user_result],
+        proposed_artifact_drafts=[user_result, result_archive],
     )
 
 
@@ -680,17 +753,13 @@ def _review(
 
 
 def main() -> int:
-    context = Path("runtime/context.txt").read_text(encoding="utf-8")
-    prompt = sys.stdin.read()
-    if prompt != context:
-        raise RuntimeError("stdin prompt does not match the frozen runtime context")
+    context = sys.stdin.read()
     instruction = json.loads(_section(context, "JOB_INSTRUCTION"))
     snapshot = json.loads(_section(context, "CONTEXT_SNAPSHOT"))
     manifest = _manifest()
-    _record_invocation(instruction)
     job_type = JobType(str(instruction["job_type"]))
     if job_type is JobType.ROUTE:
-        outcome = _route(instruction)
+        outcome = _route(instruction, context)
     elif job_type is JobType.REVIEW:
         outcome = _review(instruction, manifest, context)
     else:
@@ -706,6 +775,7 @@ def main() -> int:
             outcome = _request_attachment(instruction)
         else:
             outcome = _request_parameter_group_a(instruction)
+    _record_invocation(instruction)
     _write_outcome(outcome)
     return 0
 

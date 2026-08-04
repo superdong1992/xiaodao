@@ -98,6 +98,7 @@ class RequirementStatus(StrEnum):
 
 class ArtifactKind(StrEnum):
     USER_RESULT = "USER_RESULT"
+    USER_RESULT_ARCHIVE = "USER_RESULT_ARCHIVE"
     DIAGNOSTIC_EXPORT = "DIAGNOSTIC_EXPORT"
     LOGPARSE_RUN = "LOGPARSE_RUN"
 

@@ -8,7 +8,7 @@ from typing import Literal, Mapping
 
 
 SCHEMA_VERSION = 1
-CONTRACT_REVISION = "v1-contract-r3"
+CONTRACT_REVISION = "v1-contract-r4"
 GENERATOR_VERSION = "1"
 
 ROUTER_CONTEXT_BYTES = 131_072

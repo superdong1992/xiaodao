@@ -284,16 +284,21 @@ def normalize_target_result(
     return target
 
 
-def aggregate_target_results(targets: list[dict[str, Any]]) -> bytes:
+def aggregate_target_results(
+    targets: list[dict[str, Any]],
+    *,
+    logparse_run_artifact_draft: dict[str, Any] | None = None,
+) -> bytes:
     """Return one canonical broker result while retaining anchor declaration order."""
 
-    return canonical_json_bytes(
-        {
-            "schema_version": 1,
-            "api_version": 1,
-            "target_logs": targets,
-        }
-    )
+    result: dict[str, Any] = {
+        "schema_version": 1,
+        "api_version": 1,
+        "target_logs": targets,
+    }
+    if logparse_run_artifact_draft is not None:
+        result["logparse_run_artifact_draft"] = logparse_run_artifact_draft
+    return canonical_json_bytes(result)
 
 
 __all__ = [

@@ -1,14 +1,1 @@
-{
-  "schema_version": 1,
-  "owner_spec": "S04",
-  "root": "tests/fixtures/components/runtime-backend",
-  "files": [
-    {
-      "path": "fake_claude.py",
-      "purpose": "Executable Agent fixture covering stdin, atomic output, exit, hang, child tree, log flood, and Workspace flood behavior.",
-      "schema_ref": null,
-      "size": 3418,
-      "sha256": "4a62a94dab283ccb74f88a7939a45d58d108124f6851a53e736574deff68f251"
-    }
-  ]
-}
+{"files":[{"path":"fake_claude.py","purpose":"Executable Agent fixture covering stdin, atomic output, exit, hang, child tree, log flood, and Workspace flood behavior.","schema_ref":null,"sha256":"4a62a94dab283ccb74f88a7939a45d58d108124f6851a53e736574deff68f251","size":3418}],"owner_spec":"S04","root":"tests/fixtures/components/runtime-backend","schema_version":1}

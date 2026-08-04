@@ -183,7 +183,7 @@ def test_empty_directory_initializes_generation_one_canonical_state(
     snapshot = repository.read_snapshot()
     assert isinstance(repository, StateRepository)
     assert snapshot.schema_version == 1
-    assert snapshot.contract_revision == "v1-contract-r3"
+    assert snapshot.contract_revision == "v1-contract-r4"
     assert snapshot.generation == 1
     assert snapshot.created_at == INITIAL_TIME
     assert snapshot.updated_at == INITIAL_TIME
@@ -206,7 +206,7 @@ def test_empty_directory_initializes_generation_one_canonical_state(
             canonical_json_bytes(
                 {
                     "schema_version": 2,
-                    "contract_revision": "v1-contract-r3",
+                    "contract_revision": "v1-contract-r4",
                 }
             ),
             ErrorCode.STATE_SCHEMA_UNSUPPORTED,

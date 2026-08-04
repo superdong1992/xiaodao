@@ -16,22 +16,34 @@ SKILL_DIRS = (
 )
 LOGPARSE_ROOT = SRC_ROOT / "integrations" / "logparse"
 
-# S07 also requires an exact copied-source inventory.  These are the only two
-# build-time 1.x compatibility seams retained from that source; neither is
-# imported by the diagnosis Skill runtime or by the 2.0 generator path.
-LEGACY_ARCHIVE_ALLOWLIST = {
+# Archive APIs remain forbidden for uploaded-input handling. These are the
+# exact user-result builder/validator seams; neither extracts an input archive.
+CONTROLLED_ARCHIVE_ALLOWLIST = {
     (
-        ".claude/skills/wiki-to-diagnosis-skill/scripts/pack_result_zip.py",
+        "src/problem_locator/integrations/result_archive.py",
         "<module>",
     ): frozenset({"import:zipfile"}),
     (
-        ".claude/skills/wiki-to-diagnosis-skill/scripts/pack_result_zip.py",
-        "pack_result_zip",
+        "src/problem_locator/integrations/result_archive.py",
+        "_zip_info",
+    ): frozenset({"call:zipfile.ZipInfo"}),
+    (
+        "src/problem_locator/integrations/result_archive.py",
+        "build_result_archive",
     ): frozenset(
         {
             "call:zipfile.ZipFile",
-            "call:zipfile.ZipInfo",
             "call:archive.writestr",
+        }
+    ),
+    (
+        "src/problem_locator/integrations/result_archive.py",
+        "validate_result_archive_bytes",
+    ): frozenset(
+        {
+            "call:zipfile.ZipFile",
+            "call:archive.infolist",
+            "call:archive.read",
         }
     ),
     (
@@ -45,6 +57,7 @@ LEGACY_ARCHIVE_ALLOWLIST = {
         {
             "call:zipfile.ZipFile",
             "call:archive.infolist",
+            "call:archive.read",
         }
     ),
 }
@@ -195,7 +208,7 @@ def _paragraphs(text: str) -> list[str]:
     return [part.strip() for part in re.split(r"\n\s*\n", text) if part.strip()]
 
 
-def test_archive_apis_are_absent_except_two_exact_build_time_compatibility_seams() -> None:
+def test_archive_apis_are_absent_except_controlled_user_result_seams() -> None:
     actual: dict[tuple[str, str], set[str]] = {}
     uses: list[_Use] = []
     for path in _python_files():
@@ -206,14 +219,14 @@ def test_archive_apis_are_absent_except_two_exact_build_time_compatibility_seams
     unexpected = []
     for use in uses:
         key = (use.path, use.function)
-        allowed = LEGACY_ARCHIVE_ALLOWLIST.get(key, frozenset())
+        allowed = CONTROLLED_ARCHIVE_ALLOWLIST.get(key, frozenset())
         if use.operation not in allowed:
             unexpected.append(use)
         actual.setdefault(key, set()).add(use.operation)
 
     assert unexpected == []
     assert actual == {
-        key: set(operations) for key, operations in LEGACY_ARCHIVE_ALLOWLIST.items()
+        key: set(operations) for key, operations in CONTROLLED_ARCHIVE_ALLOWLIST.items()
     }
 
 
@@ -328,7 +341,8 @@ def test_raw_logparse_argv_is_owned_only_by_the_broker_adapter() -> None:
     combined = set().union(*(constants for _path, _line, constants in owners))
     assert "parse" in combined
     assert "mech-target-logs" in combined
-    assert {"-c", "-o", "--product"} <= combined
+    assert {"-c", "-o"} <= combined
+    assert '"--product"' in broker_path.read_text(encoding="utf-8")
     assert {
         "--output",
         "--problem-time",

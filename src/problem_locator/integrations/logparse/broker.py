@@ -18,6 +18,8 @@ from pathlib import Path
 from typing import Final
 
 from problem_locator.contracts import (
+    AgentArtifactProposalDraft,
+    ArtifactKind,
     CancellationSignal,
     ErrorCode,
     ExecutionFailure,
@@ -27,7 +29,10 @@ from problem_locator.contracts import (
     LogparseBrokerFactory,
     LogparseBrokerSession,
     LogparseParseClaim,
+    LogparseParseParameters,
+    LogparseRunMetadata,
     ResolvedAsset,
+    ResourceKind,
     WorkspaceInputManifest,
     canonical_json_bytes,
     parse_canonical_json_bytes,
@@ -62,6 +67,12 @@ _MAX_ENVELOPE_BYTES: Final = 3_000_000
 _MAX_REQUEST_BYTES: Final = 2_000_000
 _SAFE_CAPABILITY = re.compile(r"^[A-Za-z0-9_-]{8,512}$")
 ExecutorFactory = Callable[..., SubprocessExecutor]
+
+
+def _product_argv(product: str) -> list[str]:
+    """Map the effective product to upstream argv without forcing defaults."""
+
+    return [] if product == "default" else ["--product", product]
 
 
 def _no_fault(_name: str) -> None:
@@ -546,6 +557,7 @@ class PinnedLogparseBrokerSession:
         output_root: Path,
         problem_time: str,
         anchors: list[Anchor],
+        logparse_run_artifact_draft: AgentArtifactProposalDraft | None = None,
     ) -> tuple[bytes | None, ExecutionFailure | None, bool]:
         targets: list[dict[str, object]] = []
         for anchor in anchors:
@@ -578,7 +590,18 @@ class PinnedLogparseBrokerSession:
                     _tool_failure(ErrorCode.LOGPARSE_OUTPUT_INVALID),
                     False,
                 )
-        return aggregate_target_results(targets), None, False
+        return (
+            aggregate_target_results(
+                targets,
+                logparse_run_artifact_draft=(
+                    None
+                    if logparse_run_artifact_draft is None
+                    else logparse_run_artifact_draft.model_dump(mode="json")
+                ),
+            ),
+            None,
+            False,
+        )
 
     def _parse_targets(
         self,
@@ -674,9 +697,8 @@ class PinnedLogparseBrokerSession:
             os.fspath(self._config),
             "-o",
             os.fspath(tree_root),
-            "--product",
-            manifest.logparse_product,
         ]
+        argv.extend(_product_argv(manifest.logparse_product))
         asset_failure = self._current_asset_failure()
         if asset_failure is not None:
             return HTTPStatus.UNPROCESSABLE_ENTITY, canonical_json_bytes(
@@ -700,6 +722,28 @@ class PinnedLogparseBrokerSession:
             output_root=run.root,
             problem_time=request.problem_time,
             anchors=list(request.anchors),
+            logparse_run_artifact_draft=AgentArtifactProposalDraft(
+                proposal_key=request.artifact_proposal_key,
+                artifact_kind=ArtifactKind.LOGPARSE_RUN,
+                name=request.artifact_proposal_key,
+                content_type=(
+                    "application/vnd.problem-locator.logparse-run+directory"
+                ),
+                resource_kind=ResourceKind.DIRECTORY,
+                workspace_relative_path=tree_relative,
+                declared_size=None,
+                declared_sha256=None,
+                metadata=LogparseRunMetadata(
+                    tree_manifest_sha256=run.sha256,
+                    logparse_version_ref=manifest.logparse_tool_ref,
+                    parse_manifest_relative_path=run.parse_manifest_relative_path,
+                    source_attachment_id=attachment.entry.resource_id,
+                    source_attachment_sha256=attachment.entry.sha256,
+                    parse_parameters=LogparseParseParameters(
+                        product=manifest.logparse_product
+                    ),
+                ),
+            ),
         )
         if cancelled:
             return HTTPStatus.SERVICE_UNAVAILABLE, canonical_json_bytes({})

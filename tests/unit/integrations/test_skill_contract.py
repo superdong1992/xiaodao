@@ -17,17 +17,8 @@ SKILL_ROOT = REPO_ROOT / ".claude" / "skills"
 GENERATOR_SKILL = SKILL_ROOT / "wiki-to-diagnosis-skill"
 LOGPARSE_SKILL = SKILL_ROOT / "logparse-diagnose"
 TAKEOVER_SKILL = SKILL_ROOT / "diagnose-service-takeover"
-
-RESULT_TYPES = frozenset(
-    {"NEED_INPUT", "NEED_ATTACHMENT", "REROUTE", "COMPLETED"}
-)
-REQUIREMENT_NAMES = (
-    "caller_service",
-    "server_service",
-    "rpc_method",
-    "problem_time",
-    "log_archive",
-    "order_id",
+SPEC_ROOT = (
+    REPO_ROOT / "tests" / "fixtures" / "components" / "diagnosis-generator" / "specs"
 )
 RAW_LOGPARSE_ENV = (
     "LOGPARSE_REPO",
@@ -40,6 +31,12 @@ def _text(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
+def _json(path: Path) -> dict[str, object]:
+    value = json.loads(path.read_bytes())
+    assert isinstance(value, dict)
+    return value
+
+
 def _frontmatter(path: Path) -> tuple[dict[str, str], str]:
     text = _text(path)
     assert text.startswith("---\n"), f"{path} must start with YAML frontmatter"
@@ -47,12 +44,10 @@ def _frontmatter(path: Path) -> tuple[dict[str, str], str]:
     assert marker >= 0, f"{path} has unterminated YAML frontmatter"
     fields: dict[str, str] = {}
     for line in text[4:marker].splitlines():
-        assert line and not line[0].isspace(), (
-            f"{path} frontmatter must use scalar top-level fields only"
-        )
+        assert line and not line[0].isspace()
         key, separator, value = line.partition(":")
-        assert separator and key and value.strip(), f"invalid frontmatter line: {line!r}"
-        assert key not in fields, f"duplicate frontmatter key: {key}"
+        assert separator and key and value.strip()
+        assert key not in fields
         fields[key] = value.strip().strip('"').strip("'")
     return fields, text[marker + 5 :]
 
@@ -81,60 +76,106 @@ def test_all_three_skill_frontmatters_have_only_name_and_description() -> None:
         assert body.strip()
 
 
-def test_diagnosis_manifest_has_the_exact_fields_and_canonical_bytes() -> None:
-    manifest_path = TAKEOVER_SKILL / "diagnosis-skill.json"
+def test_diagnosis_manifest_v2_is_exact_canonical_and_spec_owned() -> None:
+    spec = _json(SPEC_ROOT / "rpc-service-takeover.json")
     expected = {
-        "schema_version": 1,
-        "id": "diagnose-service-takeover",
-        "version": "2.0.0",
-        "capability": "service-takeover",
-        "summary": "定位合成服务接管场景中的 RPC 超时",
-        "entry_document": "SKILL.md",
-        "tool_bundle_id": "tool-bundle/diagnose",
-        "requires_logparse": True,
-        "logparse_product": "compact",
+        key: spec[key]
+        for key in (
+            "schema_version",
+            "id",
+            "version",
+            "capability",
+            "summary",
+            "requires_logparse",
+            "requirements",
+            "logparse_plan",
+            "logparse_product",
+        )
     }
+    expected.update(
+        {
+            "entry_document": "SKILL.md",
+            "tool_bundle_id": "tool-bundle/diagnose",
+        }
+    )
 
+    manifest_path = TAKEOVER_SKILL / "diagnosis-skill.json"
     payload = manifest_path.read_bytes()
     assert json.loads(payload) == expected
     assert payload == canonical_json_bytes(expected)
 
+    generated = _text(TAKEOVER_SKILL / "SKILL.md")
+    embedded = generated.split(
+        "<!-- DIAGNOSIS_SKILL_MANIFEST_V2_BEGIN -->\n```json\n", 1
+    )[1].split("\n```\n<!-- DIAGNOSIS_SKILL_MANIFEST_V2_END -->", 1)[0]
+    assert embedded.encode("utf-8") + b"\n" == payload
 
-def test_generator_and_generated_skill_freeze_the_four_business_results() -> None:
+
+def test_global_generated_contract_is_generic_and_business_fields_are_isolated() -> None:
     generator_contract = _text(
         GENERATOR_SKILL / "references" / "generated-skill-contract.md"
     )
-    generated_skill = _text(TAKEOVER_SKILL / "SKILL.md")
-
-    for document in (generator_contract, generated_skill):
-        assert RESULT_TYPES == {
-            result_type for result_type in RESULT_TYPES if result_type in document
-        }
-        assert "output/job_outcome.json" in document
-        assert "AgentJobOutcome" in document
-    assert "业务性缺参不是 `FAILED`" in generator_contract
-    assert "业务性缺参不是执行失败" in generated_skill
-
-
-def test_requirement_names_and_current_s00_constraint_seam_are_fixed() -> None:
-    generator_contract = _text(
-        GENERATOR_SKILL / "references" / "generated-skill-contract.md"
+    global_contract = _text(
+        REPO_ROOT
+        / "src/problem_locator/runtime/assets/output-contracts/diagnose/output-contract.md"
     )
+    rpc_names = {
+        "caller_service",
+        "server_service",
+        "rpc_method",
+        "problem_time",
+        "log_archive",
+        "order_id",
+    }
+    for name in rpc_names - {"problem_time", "log_archive"}:
+        assert name not in generator_contract
+        assert name not in global_contract
+    # problem_time is also the generic upstream Logparse request field, so its
+    # mechanical name may appear globally; RPC-only requirement names may not.
+    for document in (generator_contract, global_contract):
+        assert "`log_archive`" not in document
+
+    specs = {
+        path.stem: _json(path)
+        for path in sorted(SPEC_ROOT.glob("*.json"))
+        if path.name != "fixture-manifest.json"
+    }
+    assert set(specs) == {
+        "database-deadlock",
+        "manual-triage",
+        "rpc-service-takeover",
+    }
+    names = {
+        key: {item["name"] for item in value["requirements"]}
+        for key, value in specs.items()
+    }
+    assert rpc_names == names["rpc-service-takeover"]
+    assert names["database-deadlock"] == {
+        "database_instance",
+        "database_process",
+        "incident_time",
+        "database_logs",
+        "victim_transaction_id",
+    }
+    assert names["manual-triage"] == {
+        "affected_component",
+        "observed_symptom",
+        "reproduction_steps",
+    }
+    assert names["manual-triage"].isdisjoint(rpc_names)
+    assert names["database-deadlock"].isdisjoint(rpc_names)
+
+
+def test_requirements_drive_need_outcomes_and_use_public_s00_constraints() -> None:
     generated_skill = _text(TAKEOVER_SKILL / "SKILL.md")
+    normalized_skill = re.sub(r"\s+", " ", generated_skill)
+    manifest = _json(TAKEOVER_SKILL / "diagnosis-skill.json")
+    assert "阶段全部缺失 INPUT 并返回 NEED_INPUT" in normalized_skill
+    assert "ATTACHMENT 并返回 NEED_ATTACHMENT" in normalized_skill
+    for requirement in manifest["requirements"]:
+        assert f"`{requirement['name']}`" in generated_skill
+        assert requirement["prompt"] in generated_skill
 
-    assert (
-        "- 参数组 A：`caller_service`、`server_service`、`rpc_method`、`problem_time`"
-        in generator_contract
-    )
-    assert "- 唯一日志：`log_archive`" in generator_contract
-    assert "- 参数 B：`order_id`" in generator_contract
-    for name in REQUIREMENT_NAMES:
-        assert f"`{name}`" in generator_contract
-        assert f"`{name}`" in generated_skill
-
-    assert "只接受一个 Attachment" in generated_skill
-
-    # S00 owns the DTO shape; S07 only asserts the public fields it consumes.
     assert {
         "allowed_content_types",
         "min_count",
@@ -149,7 +190,24 @@ def test_requirement_names_and_current_s00_constraint_seam_are_fixed() -> None:
     } <= set(PendingRequirement.model_fields)
 
 
-def test_parse_once_and_logparse_run_reuse_are_unambiguous() -> None:
+def test_parse_continuation_and_candidate_evidence_order_are_explicit() -> None:
+    output_contract = _text(
+        REPO_ROOT
+        / "src/problem_locator/runtime/assets/output-contracts/diagnose/output-contract.md"
+    )
+    generated_skill = _text(TAKEOVER_SKILL / "SKILL.md")
+    helper = _text(LOGPARSE_SKILL / "SKILL.md")
+
+    for document in (output_contract, generated_skill, helper):
+        assert "state_delta.add_evidence_bindings" in document
+        assert "evidence_proposal_key" in document
+    for document in (output_contract, generated_skill):
+        assert "evidence_refs" in document
+        assert "固定子序列" in document
+        assert "禁止按业务" in document
+
+
+def test_logparse_default_and_parse_once_rules_have_one_owner() -> None:
     helper = _text(LOGPARSE_SKILL / "SKILL.md")
     generated_skill = _text(TAKEOVER_SKILL / "SKILL.md")
 
@@ -158,46 +216,99 @@ def test_parse_once_and_logparse_run_reuse_are_unambiguous() -> None:
     assert "If the manifest contains any `LOGPARSE_RUN`, `parse-targets` is forbidden" in helper
     assert "Then call only\n`target-logs`" in helper
     assert "Do not alter it and do not parse again" in helper
+    assert "without\n`--product`" in helper
+    assert "metadata" in helper and "`default`" in helper
+    assert "always JSON strings" in helper
+    assert "without converting numeric-looking" in helper
 
-    assert "仅调用一次 `problem-locator-logparse parse-targets" in generated_skill
-    assert "已含任一 `artifact_kind=LOGPARSE_RUN`，严禁调用\n`parse-targets`" in generated_skill
-    assert "不得再次 parse" in generated_skill
-    assert "新 Job" in generated_skill and "PREVIOUS_OUTCOME" in generated_skill
+    assert "加载 `logparse-diagnose` 并严格执行" in generated_skill
+    assert "parse-once" in generated_skill
+    assert "LOGPARSE_RUN 复用" in generated_skill
+    assert "product 为 `compact`" in generated_skill
+    assert '"slot_1"' in generated_skill and '"slot_2"' in generated_skill
 
 
-def test_candidate_requires_one_fixed_user_result_in_the_same_outcome() -> None:
+def test_logparse_evidence_paths_are_locator_owned_not_proposal_owned() -> None:
+    output_contract = _text(
+        REPO_ROOT
+        / "src/problem_locator/runtime/assets/output-contracts/diagnose/output-contract.md"
+    )
+    generator = _text(
+        GENERATOR_SKILL / "scripts" / "generate_diagnosis_skill.py"
+    )
+    helper = _text(LOGPARSE_SKILL / "SKILL.md")
+    for document in (output_contract, generator, helper):
+        assert "workspace_relative_path" in document
+        assert "locator.relative_path" in document
+    assert "`workspace_relative_path` 必须为 `null`" in output_contract
+    assert "`workspace_relative_path` to null" in helper
+
+
+def test_logparse_run_metadata_has_one_strict_field_set() -> None:
+    output_contract = _text(
+        REPO_ROOT
+        / "src/problem_locator/runtime/assets/output-contracts/diagnose/output-contract.md"
+    )
+    generator = _text(
+        GENERATOR_SKILL / "scripts" / "generate_diagnosis_skill.py"
+    )
+    generator_contract = _text(
+        GENERATOR_SKILL / "references" / "generated-skill-contract.md"
+    )
+    helper = _text(LOGPARSE_SKILL / "SKILL.md")
+    required = (
+        "tree_manifest_sha256",
+        "logparse_version_ref",
+        "parse_manifest_relative_path",
+        "source_attachment_id",
+        "source_attachment_sha256",
+        "parse_parameters",
+    )
+    for document in (output_contract, generator, generator_contract, helper):
+        for field in required:
+            assert field in document
+        assert "schema_version" in document
+        assert "format_id" in document
+        assert "description" in document
+    assert "contains exactly these six fields" in helper
+    assert "严格且仅含" in generator
+    assert "恰好包含" in generator_contract
+    for document in (output_contract, generator, generator_contract, helper):
+        assert "application/vnd.problem-locator.logparse-run+directory" in document
+        assert "declared_size" in document
+        assert "declared_sha256" in document
+        assert "logparse_run_artifact_draft" in document
+
+
+def test_candidate_requires_exact_json_and_result_archive_pair() -> None:
     generator_contract = _text(
         GENERATOR_SKILL / "references" / "generated-skill-contract.md"
     )
     generated_skill = _text(TAKEOVER_SKILL / "SKILL.md")
-    fixed_values = (
-        "user-result",
+    generic_values = (
         "USER_RESULT",
-        "diagnosis-result.json",
-        "application/json",
-        "FILE",
-        "output/proposals/user-result/payload",
-        "problem-locator-diagnosis-v1",
-        "Diagnosis result",
-        "problem_statement",
-        "candidate_statement",
-        "supporting_evidence_bindings",
-        "completion_criteria_mapping",
+        "USER_RESULT_ARCHIVE",
+        "result.zip",
+        "result.txt",
+        "target-log-001.log",
     )
-
+    assert "唯一 `USER_RESULT`" in generator_contract
+    assert "唯一\n`USER_RESULT_ARCHIVE`" in generator_contract
+    assert "必须恰好提出以下两个 FILE Artifact" in generated_skill
     for document in (generator_contract, generated_skill):
-        assert "恰好" in document and "一个 USER_RESULT" in document
-        assert "同一" in document and "Outcome" in document
-        for value in fixed_values:
+        assert "REVIEW PASS" in document.upper()
+        for value in generic_values:
             assert value in document
-        assert "REVIEW" in document
-        assert "RESOLVED" in document
-
-    assert "没有 Candidate 时禁止 USER_RESULT" in generator_contract
-    assert (
-        '{"schema_version":1,"format_id":"problem-locator-diagnosis-v1",'
-        '"description":"Diagnosis result"}' in generated_skill
-    )
+    for value in (
+        "diagnosis-result.json",
+        "application/zip",
+        "problem-locator-result-archive-v1",
+    ):
+        assert value in generated_skill
+    assert "problem-locator-pack-result" in generated_skill
+    assert "无日志场景传空数组" in generated_skill
+    assert "禁止直接复制或沿用 `target-logs`" in generated_skill
+    assert "禁止直接沿用 broker anchor 顺序" in generator_contract
 
 
 def test_skills_define_no_private_errors_direct_cli_or_raw_capabilities() -> None:
@@ -226,8 +337,7 @@ def test_skills_define_no_private_errors_direct_cli_or_raw_capabilities() -> Non
     assert "subprocess.run" not in combined
 
     for path in documents:
-        text = _text(path)
-        for paragraph in _paragraphs(text):
+        for paragraph in _paragraphs(_text(path)):
             if not any(name in paragraph for name in RAW_LOGPARSE_ENV):
                 continue
             assert re.search(

@@ -135,9 +135,25 @@ $auditManifestRecords = @([IO.File]::ReadAllLines($auditManifestPath, $utf8) | F
 Assert-E2ETest ($auditManifestRecords.Count -eq 2) 'state audit manifest file count'
 Assert-E2ETest ((@($auditManifestRecords.name | Sort-Object) -join ',') -ceq 'audit_http_capture.py,audit_state_and_result.py') 'state audit manifest filenames'
 foreach ($record in $auditManifestRecords) {
-    $actualAuditHash = (Get-FileHash -LiteralPath (Join-Path $auditRoot $record.name) -Algorithm SHA256).Hash.ToLowerInvariant()
+    $auditText = [IO.File]::ReadAllText((Join-Path $auditRoot $record.name), $utf8)
+    $normalizedAuditBytes = $utf8.GetBytes(
+        $auditText.Replace("`r`n", "`n").Replace("`r", "`n")
+    )
+    $auditHasher = [Security.Cryptography.SHA256]::Create()
+    try {
+        $actualAuditHash = [BitConverter]::ToString(
+            $auditHasher.ComputeHash($normalizedAuditBytes)
+        ).Replace('-', '').ToLowerInvariant()
+    }
+    finally {
+        $auditHasher.Dispose()
+    }
     Assert-E2ETest ($actualAuditHash -ceq $record.sha256) "state audit manifest SHA-256: $($record.name)"
 }
+$stateAuditText = [IO.File]::ReadAllText((Join-Path $auditRoot 'audit_state_and_result.py'), $utf8)
+Assert-E2ETest ($stateAuditText.Contains('expected_candidate_evidence_ids')) 'state audit accepts only derived candidate evidence IDs'
+Assert-E2ETest ($stateAuditText.Contains('expected_parse_evidence_ids | expected_candidate_evidence_ids')) 'state audit final evidence union'
+Assert-E2ETest (-not $stateAuditText.Contains('"CANDIDATE_NEW_EVIDENCE"')) 'state audit stale zero-candidate-evidence assumption'
 
 . (Join-Path $root 'harness\windows-journey-lib.ps1')
 

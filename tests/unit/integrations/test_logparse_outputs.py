@@ -559,3 +559,24 @@ def test_aggregate_target_results_is_canonical_and_preserves_anchor_order(
         "server",
         "caller",
     ]
+
+
+def test_aggregate_target_results_can_include_broker_owned_run_draft() -> None:
+    draft = {
+        "artifact_kind": "LOGPARSE_RUN",
+        "proposal_key": "run",
+    }
+
+    result = aggregate_target_results(
+        [],
+        logparse_run_artifact_draft=draft,
+    )
+
+    assert result == canonical_json_bytes(
+        {
+            "schema_version": 1,
+            "api_version": 1,
+            "target_logs": [],
+            "logparse_run_artifact_draft": draft,
+        }
+    )

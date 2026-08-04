@@ -16,7 +16,12 @@ from tests.contracts._support import enum_values, public_value
 
 
 ENUM_EXPECTATIONS = {
-    "ArtifactKind": ("USER_RESULT", "DIAGNOSTIC_EXPORT", "LOGPARSE_RUN"),
+    "ArtifactKind": (
+        "USER_RESULT",
+        "USER_RESULT_ARCHIVE",
+        "DIAGNOSTIC_EXPORT",
+        "LOGPARSE_RUN",
+    ),
     "AssetKind": (
         "AGENT_PROFILE",
         "DIAGNOSIS_SKILL",

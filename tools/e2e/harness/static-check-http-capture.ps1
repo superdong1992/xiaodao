@@ -84,6 +84,8 @@ $requiredLiterals = @(
     'ARTIFACT_NOT_FOUND',
     'diagnosis-result.before.json',
     'diagnosis-result.after.json',
+    'result-archive.before.zip',
+    'result-archive.after.zip',
     'internal-logparse.after.body.json'
 )
 foreach ($literal in $requiredLiterals) {
@@ -121,8 +123,8 @@ foreach ($pattern in $forbiddenPatterns) {
 }
 
 $outputs = @(Get-HcAllOutputNames)
-if ($outputs.Count -ne 15) {
-    throw 'HTTP capture output inventory must contain exactly 15 files'
+if ($outputs.Count -ne 25) {
+    throw 'HTTP capture output inventory must contain exactly 25 files'
 }
 Assert-HcExactStrings @($outputs | Sort-Object) @((Get-HcBeforeOutputNames) + (Get-HcAfterOutputNames) | Sort-Object) 'static HTTP capture output inventory'
 foreach ($name in $outputs) {

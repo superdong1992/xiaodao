@@ -58,7 +58,7 @@ def create_parse_claim(
     runtime_root = _plain_directory(root / "runtime", create=True)
     state_root = _plain_directory(runtime_root / "tool-state", create=True)
     target = state_root / "logparse-parse.claim"
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
     try:

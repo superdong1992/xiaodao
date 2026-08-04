@@ -17,15 +17,25 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO, Iterator, TypeAlias
 
-from problem_locator.contracts.enums import ArtifactKind, ErrorCode, ExecutionStage, ResourceKind
+from problem_locator.contracts.enums import (
+    ArtifactKind,
+    ErrorCode,
+    EvidenceSourceType,
+    ExecutionStage,
+    ResourceKind,
+)
 from problem_locator.contracts.models import (
     AgentArtifactProposalDraft,
     AgentEvidenceProposalDraft,
     AgentJobOutcome,
     Job,
+    LogparseEvidenceLocator,
     TreeManifest,
     TreeManifestEntry,
+    UserResultArchiveMetadata,
     UserResultPayload,
+    WorkspaceArtifactInput,
+    WorkspaceEvidenceInput,
     WorkspaceInputManifest,
 )
 from problem_locator.contracts.outcomes import (
@@ -37,6 +47,7 @@ from problem_locator.contracts.serialization import (
     canonical_json_bytes,
     parse_canonical_json_bytes,
 )
+from problem_locator.integrations.result_archive import validate_result_archive_bytes
 
 from .failures import runtime_failure
 from .workspace import PreparedWorkspace
@@ -167,15 +178,18 @@ def _identity(metadata: os.stat_result) -> tuple[int, int]:
 
 
 def _fingerprint(metadata: os.stat_result) -> tuple[int, ...]:
-    return (
+    stable = (
         metadata.st_dev,
         metadata.st_ino,
         stat.S_IFMT(metadata.st_mode),
         metadata.st_nlink,
         metadata.st_size,
         metadata.st_mtime_ns,
-        metadata.st_ctime_ns,
     )
+    # Windows exposes creation/change timestamps inconsistently between a
+    # named path and an already-open file handle.  The remaining fields are
+    # stable across both views and are rechecked before and after the read.
+    return stable if os.name == "nt" else stable + (metadata.st_ctime_ns,)
 
 
 def _is_reparse(metadata: os.stat_result) -> bool:
@@ -183,14 +197,18 @@ def _is_reparse(metadata: os.stat_result) -> bool:
     return bool(flag and getattr(metadata, "st_file_attributes", 0) & flag)
 
 
-def _safe_relative_parts(relative_path: str) -> tuple[str, ...]:
+def _safe_relative_parts(
+    relative_path: str,
+    *,
+    top_level: str = "output",
+) -> tuple[str, ...]:
     parts = tuple(relative_path.split("/"))
     if (
         not relative_path
         or relative_path.startswith("/")
         or "\\" in relative_path
         or any(part in {"", ".", ".."} for part in parts)
-        or parts[0] != "output"
+        or parts[0] != top_level
     ):
         raise _InvalidOutput
     return parts
@@ -223,8 +241,9 @@ def _snapshot_source(
     *,
     root_identity: tuple[int, int] | None = None,
     output_identity: tuple[int, int] | None = None,
+    top_level: str = "output",
 ) -> _SourceSnapshot:
-    parts = _safe_relative_parts(relative_path)
+    parts = _safe_relative_parts(relative_path, top_level=top_level)
     root_metadata = _lstat(root)
     _assert_directory(root_metadata, device=root_metadata.st_dev)
     if root_identity is not None and _identity(root_metadata) != root_identity:
@@ -238,7 +257,7 @@ def _snapshot_source(
         _assert_directory(metadata, device=device)
         relative = "/".join(parts[: index + 1])
         parents.append((relative, metadata.st_dev, metadata.st_ino))
-    if not parents or parents[0][0] != "output":
+    if not parents or parents[0][0] != top_level:
         raise _InvalidOutput
     if output_identity is not None and parents[0][1:] != output_identity:
         raise _InvalidOutput
@@ -304,7 +323,12 @@ def _assert_snapshot_paths(snapshot: _SourceSnapshot) -> None:
 
 
 def _open_snapshot_path(snapshot: _SourceSnapshot, relative_path: str) -> int:
-    parts = _safe_relative_parts(relative_path)
+    if not snapshot.parent_identities:
+        raise _InvalidOutput
+    parts = _safe_relative_parts(
+        relative_path,
+        top_level=snapshot.parent_identities[0][0],
+    )
     _assert_snapshot_paths(snapshot)
     descriptor = -1
     directory_descriptors: list[int] = []
@@ -363,7 +387,12 @@ def _open_snapshot_directory(
 
     if not _supports_anchored_tree():
         raise _InvalidOutput
-    parts = _safe_relative_parts(relative_path)
+    if not snapshot.parent_identities:
+        raise _InvalidOutput
+    parts = _safe_relative_parts(
+        relative_path,
+        top_level=snapshot.parent_identities[0][0],
+    )
     _assert_snapshot_paths(snapshot)
     result = -1
     descriptors: list[int] = []
@@ -478,12 +507,14 @@ def _read_frozen_relative_file(
     output_identity: tuple[int, int] | None = None,
     expected_parent_identities: dict[str, tuple[int, int]] | None = None,
     max_bytes: int | None = None,
+    top_level: str = "output",
 ) -> tuple[int, str, bytes | None, _SourceSnapshot]:
     snapshot = _snapshot_source(
         root,
         relative_path,
         root_identity=root_identity,
         output_identity=output_identity,
+        top_level=top_level,
     )
     if expected_parent_identities is not None:
         actual_parents = {
@@ -815,7 +846,7 @@ def _inspect_tree(
             for entry in entries:
                 try:
                     entry.name.encode("utf-8", errors="strict")
-                    entry_metadata = entry.stat(follow_symlinks=False)
+                    entry_metadata = _lstat(Path(entry.path))
                 except (OSError, UnicodeEncodeError):
                     raise _InvalidOutput from None
                 if (
@@ -957,6 +988,142 @@ def _validate_declared_values(
         raise _InvalidOutput
 
 
+def _candidate_evidence_bindings(outcome: AgentJobOutcome) -> tuple[tuple[str, str], ...]:
+    payload = outcome.payload
+    candidate = getattr(payload, "candidate_conclusion_draft", None)
+    if candidate is None:
+        return ()
+    result: list[tuple[str, str]] = []
+    bindings = list(candidate.supporting_evidence_bindings)
+    for mapping in candidate.completion_criteria_mapping:
+        bindings.extend(mapping.evidence_bindings)
+    for binding in bindings:
+        key = (
+            "existing",
+            binding.existing_evidence_id,
+        ) if binding.existing_evidence_id is not None else (
+            "proposal",
+            binding.evidence_proposal_key,
+        )
+        assert key[1] is not None
+        typed_key = (key[0], key[1])
+        if typed_key not in result:
+            result.append(typed_key)
+    return tuple(result)
+
+
+def _archive_target_log_paths(
+    outcome: AgentJobOutcome,
+    workspace_manifest: WorkspaceInputManifest,
+    resources: dict[str, ValidatedProposalResource],
+) -> tuple[str, ...]:
+    proposed_evidence = {
+        draft.proposal_key: draft for draft in outcome.proposed_evidence_drafts
+    }
+    existing_evidence = {
+        entry.resource_id: entry
+        for entry in workspace_manifest.entries
+        if isinstance(entry, WorkspaceEvidenceInput)
+    }
+    existing_artifacts = {
+        entry.resource_id: entry
+        for entry in workspace_manifest.entries
+        if isinstance(entry, WorkspaceArtifactInput)
+    }
+    result: list[str] = []
+    for binding_kind, binding_id in _candidate_evidence_bindings(outcome):
+        if binding_kind == "proposal":
+            evidence = proposed_evidence.get(binding_id)
+            if evidence is None or evidence.source_type is not EvidenceSourceType.LOGPARSE:
+                continue
+            if not isinstance(evidence.locator, LogparseEvidenceLocator):
+                raise _InvalidOutput
+            artifact_key = evidence.source_binding.artifact_proposal_key
+            if artifact_key is not None:
+                resource = resources.get(artifact_key)
+                if (
+                    resource is None
+                    or not isinstance(resource.draft, AgentArtifactProposalDraft)
+                    or resource.draft.artifact_kind is not ArtifactKind.LOGPARSE_RUN
+                    or resource.resource_kind is not ResourceKind.DIRECTORY
+                ):
+                    raise _InvalidOutput
+                root = resource.workspace_relative_path
+            else:
+                artifact_id = evidence.source_binding.existing_source_ref
+                artifact = existing_artifacts.get(artifact_id or "")
+                if artifact is None or artifact.artifact_kind is not ArtifactKind.LOGPARSE_RUN:
+                    raise _InvalidOutput
+                root = artifact.relative_path
+            relative_path = f"{root}/{evidence.locator.relative_path}"
+        else:
+            evidence = existing_evidence.get(binding_id)
+            if evidence is None or evidence.source_type is not EvidenceSourceType.LOGPARSE:
+                continue
+            if not isinstance(evidence.locator, LogparseEvidenceLocator):
+                raise _InvalidOutput
+            artifact = existing_artifacts.get(evidence.source_ref)
+            if artifact is None or artifact.artifact_kind is not ArtifactKind.LOGPARSE_RUN:
+                raise _InvalidOutput
+            relative_path = f"{artifact.relative_path}/{evidence.locator.relative_path}"
+        if relative_path not in result:
+            result.append(relative_path)
+    return tuple(result)
+
+
+def _validate_user_result_archive(
+    workspace_root: Path,
+    outcome: AgentJobOutcome,
+    workspace_manifest: WorkspaceInputManifest,
+    resources: dict[str, ValidatedProposalResource],
+    archive_bytes: bytes,
+    patterns: tuple[bytes, ...],
+    *,
+    root_identity: tuple[int, int],
+    output_identity: tuple[int, int],
+    inputs_identity: tuple[int, int] | None,
+    max_bytes: int,
+) -> None:
+    archives = [
+        draft
+        for draft in outcome.proposed_artifact_drafts
+        if draft.artifact_kind is ArtifactKind.USER_RESULT_ARCHIVE
+    ]
+    if not archives:
+        return
+    if len(archives) != 1 or not isinstance(
+        archives[0].metadata,
+        UserResultArchiveMetadata,
+    ):
+        raise _InvalidOutput
+    paths = _archive_target_log_paths(outcome, workspace_manifest, resources)
+    if archives[0].metadata.target_log_count != len(paths):
+        raise _InvalidOutput
+    target_logs: list[bytes] = []
+    remaining = max_bytes
+    for relative_path in paths:
+        size, _, content, _ = _read_frozen_relative_file(
+            workspace_root,
+            relative_path,
+            patterns=patterns,
+            capture=True,
+            root_identity=root_identity,
+            output_identity=inputs_identity,
+            max_bytes=remaining,
+            top_level="inputs",
+        )
+        remaining -= size
+        assert content is not None
+        target_logs.append(content)
+    result_text = validate_result_archive_bytes(
+        archive_bytes,
+        target_logs=tuple(target_logs),
+    )
+    candidate = outcome.payload.candidate_conclusion_draft
+    if candidate is None or result_text != candidate.statement + "\n":
+        raise _InvalidOutput
+
+
 def _read_validated_output(
     workspace_root: Path,
     job: Job,
@@ -965,6 +1132,7 @@ def _read_validated_output(
     *,
     root_identity: tuple[int, int],
     output_identity: tuple[int, int],
+    inputs_identity: tuple[int, int] | None = None,
 ) -> ValidatedAgentOutput:
     outcome_relative_path = "output/job_outcome.json"
     outcome_path = _validate_parent_directories(
@@ -1002,6 +1170,7 @@ def _read_validated_output(
 
     resources: list[ValidatedProposalResource] = []
     user_result_bytes: bytes | None = None
+    user_result_archive_bytes: bytes | None = None
     for draft in drafts:
         relative_path = draft.workspace_relative_path
         if relative_path is None:
@@ -1014,7 +1183,10 @@ def _read_validated_output(
 
         if isinstance(draft, AgentArtifactProposalDraft):
             resource_kind = draft.resource_kind
-            capture = draft.artifact_kind is ArtifactKind.USER_RESULT
+            capture = draft.artifact_kind in {
+                ArtifactKind.USER_RESULT,
+                ArtifactKind.USER_RESULT_ARCHIVE,
+            }
         else:
             resource_kind = ResourceKind.FILE
             capture = False
@@ -1032,7 +1204,13 @@ def _read_validated_output(
             tree_manifest = None
             if capture:
                 assert content is not None
-                user_result_bytes = content
+                if (
+                    isinstance(draft, AgentArtifactProposalDraft)
+                    and draft.artifact_kind is ArtifactKind.USER_RESULT
+                ):
+                    user_result_bytes = content
+                else:
+                    user_result_archive_bytes = content
         else:
             size, sha256, tree_manifest = _inspect_tree(
                 path,
@@ -1071,6 +1249,19 @@ def _read_validated_output(
     user_result = None
     if user_result_bytes is not None:
         user_result = validate_user_result_for_outcome(job, outcome, user_result_bytes)
+    if user_result_archive_bytes is not None:
+        _validate_user_result_archive(
+            workspace_root,
+            outcome,
+            workspace_manifest,
+            {resource.proposal_key: resource for resource in resources},
+            user_result_archive_bytes,
+            patterns,
+            root_identity=root_identity,
+            output_identity=output_identity,
+            inputs_identity=inputs_identity,
+            max_bytes=job.resource_limits.workspace_bytes,
+        )
     return ValidatedAgentOutput(
         outcome=outcome,
         canonical_bytes=outcome_bytes,
@@ -1102,6 +1293,7 @@ def read_agent_output(
             workspace_root = workspace.root
             root_identity = (workspace.root_device, workspace.root_inode)
             output_identity = (workspace.output_device, workspace.output_inode)
+            inputs_identity = (workspace.inputs_device, workspace.inputs_inode)
             if workspace.manifest != workspace_manifest:
                 raise _InvalidOutput
         else:
@@ -1112,6 +1304,18 @@ def read_agent_output(
             output_metadata = _lstat(workspace_root / "output", missing_outcome=True)
             _assert_directory(output_metadata, device=root_metadata.st_dev)
             output_identity = _identity(output_metadata)
+            inputs_identity = None
+            try:
+                inputs_metadata = (workspace_root / "inputs").stat(
+                    follow_symlinks=False
+                )
+            except FileNotFoundError:
+                pass
+            except OSError:
+                raise _InvalidOutput from None
+            else:
+                _assert_directory(inputs_metadata, device=root_metadata.st_dev)
+                inputs_identity = _identity(inputs_metadata)
         _lstat(
             workspace_root / "output/job_outcome.json",
             missing_outcome=True,
@@ -1129,6 +1333,7 @@ def read_agent_output(
             patterns,
             root_identity=root_identity,
             output_identity=output_identity,
+            inputs_identity=inputs_identity,
         )
         _assert_snapshot_paths(initial)
         final_outcome = _lstat(workspace_root / "output/job_outcome.json")

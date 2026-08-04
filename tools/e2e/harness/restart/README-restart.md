@@ -45,7 +45,7 @@ docker.exe --config C:\Users\admin\.docker exec pl-e2e-fix52-restart-20260802-20
 powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File D:\code\xiaodao\.tmp\pl-e2e-evidence\attempt52-20260802-205054\finalize-attempt52.ps1 -EvidenceRoot D:\code\xiaodao\.tmp\pl-e2e-evidence\attempt52-20260802-205054 -DockerConfig C:\Users\admin\.docker -SettingsPath C:\Users\admin\.claude\settings.json
 ```
 
-This bundle verifies the persisted result after the Linux service is restarted. It is deliberately read-only: Claude Code can load `problem-locator-client` and can call only `problem_locator_get_case` and `problem_locator_list_artifacts`. The dynamic Case ID comes from the already validated `journey-authoritative-summary.json`; it is never supplied as an unverified command-line value.
+This bundle verifies both persisted public results after the Linux service is restarted. It is deliberately read-only: Claude Code can load `problem-locator-client` and can call only `problem_locator_get_case` and `problem_locator_list_artifacts`. The list must contain exactly `diagnosis-result.json` and `result.zip`; the internal `LOGPARSE_RUN` must not be exposed. The dynamic Case ID comes from the already validated `journey-authoritative-summary.json`; it is never supplied as an unverified command-line value.
 
 Copy these five source files into the same clean-attempt evidence directory that contains the original journey driver, `windows-journey-driver-manifest.json`, and `journey-authoritative-summary.json`. Then create the restart manifest without contacting the service or invoking Claude:
 
@@ -61,10 +61,11 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File <attempt-evidence>\run-w
 
 The query validates both driver manifests, the pre-restart authoritative summary, and the exact client Skill hash before reserving output files or starting any process. It uses native Claude Code 2.1.150, `--setting-sources user,project`, the `haiku` alias (which must report the effective model `deepseek-v4-flash[1m]`), an inline strict loopback MCP configuration, and `Skill(problem-locator-client)` as the first tool call. Business state is accepted only from uniquely correlated stream-json `tool_use`/`tool_result` pairs carrying top-level `tool_use_result.structuredContent`.
 
-The optional deterministic download is a separate read-only HTTP step:
+The optional deterministic download is a separate read-only HTTP step that
+downloads and verifies both public artifacts:
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File <attempt-evidence>\download-windows-restart-artifact.ps1
 ```
 
-It derives the loopback URL, expected length, and SHA-256 from the validated restart summary, then uses `curl.exe` with bounded time and size. All runtime evidence names are reserved atomically with `FileMode.CreateNew`; existing evidence is never overwritten. None of these source files reads, copies, prints, or materializes credential settings.
+It derives both loopback URLs, expected lengths, and SHA-256 values from the validated restart summary, then uses `curl.exe` with bounded time and size. It also verifies the archive entry contract. All runtime evidence names are reserved atomically with `FileMode.CreateNew`; existing evidence is never overwritten. None of these source files reads, copies, prints, or materializes credential settings.

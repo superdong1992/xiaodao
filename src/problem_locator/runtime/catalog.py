@@ -35,7 +35,13 @@ from problem_locator.contracts import (
 
 
 BUILTIN_ASSET_ROOT = Path(__file__).with_name("assets")
-_ASSET_VERSION = "1.0.0"
+_DEFAULT_ASSET_VERSION = "1.0.0"
+_DEFAULT_LOGPARSE_PRODUCT = "default"
+_LOG_ARCHIVE_CONTENT_TYPES = (
+    "application/gzip",
+    "application/zip",
+    "application/x-tar",
+)
 _SKILL_ID_PATTERN = re.compile(r"[a-z][a-z0-9-]{1,63}\Z")
 _WINDOWS_DRIVE_PATTERN = re.compile(r"[A-Za-z]:")
 
@@ -65,6 +71,7 @@ class _BuiltinSpec:
     relative_root: str
     asset_kind: AssetKind
     asset_id: str
+    version: str = _DEFAULT_ASSET_VERSION
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,6 +83,8 @@ class _SkillDescriptor:
     tool_bundle_id: str
     requires_logparse: bool
     logparse_product: str | None
+    requirements: tuple[dict[str, Any], ...]
+    logparse_plan: dict[str, Any] | None
 
 
 _BUILTIN_SPECS = (
@@ -117,6 +126,7 @@ _BUILTIN_SPECS = (
         "output-contracts/diagnose",
         AssetKind.OUTPUT_CONTRACT,
         "output-contract/diagnose",
+        "2.0.3",
     ),
     _BuiltinSpec(
         "output-contracts/review",
@@ -179,6 +189,7 @@ def _directory_entries(root: Path) -> tuple[dict[str, Any], ...]:
         raise ValueError(f"asset product root must be a real directory: {root}")
 
     result: list[dict[str, Any]] = []
+    seen_file_ids: set[tuple[int, int]] = set()
 
     def visit(directory: Path, prefix: tuple[str, ...]) -> None:
         try:
@@ -213,7 +224,26 @@ def _directory_entries(root: Path) -> tuple[dict[str, Any], ...]:
                 raise ValueError(
                     f"asset product contains a non-ordinary node: {relative_text}"
                 )
-            if child_stat.st_nlink != 1:
+            # Some Windows providers expose st_ino == 0 for every file.  Use
+            # the native volume/file-index pair there so aliases in the product
+            # are still detected without treating every file as identical.
+            file_id = (
+                _windows_file_identity(Path(child.path))
+                if os.name == "nt"
+                else (child_stat.st_dev, child_stat.st_ino)
+            )
+            if file_id is not None:
+                if file_id in seen_file_ids:
+                    raise ValueError(
+                        f"asset product hard links are forbidden: {relative_text}"
+                    )
+                seen_file_ids.add(file_id)
+            # Codex workspaces on Windows are projected with one infrastructure
+            # link, so an ordinary file reports st_nlink == 2.  A second link
+            # created inside or outside the product still raises the count to 3;
+            # duplicate identities inside the tree are rejected above on every OS.
+            maximum_links = 2 if os.name == "nt" else 1
+            if child_stat.st_nlink > maximum_links:
                 raise ValueError(f"asset product hard links are forbidden: {relative_text}")
             if _is_excluded_product_path(relative):
                 continue
@@ -232,6 +262,66 @@ def _directory_entries(root: Path) -> tuple[dict[str, Any], ...]:
     visit(root, ())
     result.sort(key=lambda entry: entry["path"])
     return tuple(result)
+
+
+def _windows_file_identity(path: Path) -> tuple[int, int] | None:
+    """Return Windows' stable volume/file-index identity for one open file."""
+
+    if os.name != "nt":
+        return None
+    import ctypes
+    from ctypes import wintypes
+
+    class _ByHandleFileInformation(ctypes.Structure):
+        _fields_ = [
+            ("file_attributes", wintypes.DWORD),
+            ("creation_time", wintypes.FILETIME),
+            ("last_access_time", wintypes.FILETIME),
+            ("last_write_time", wintypes.FILETIME),
+            ("volume_serial_number", wintypes.DWORD),
+            ("file_size_high", wintypes.DWORD),
+            ("file_size_low", wintypes.DWORD),
+            ("number_of_links", wintypes.DWORD),
+            ("file_index_high", wintypes.DWORD),
+            ("file_index_low", wintypes.DWORD),
+        ]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    create_file = kernel32.CreateFileW
+    create_file.argtypes = (
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    )
+    create_file.restype = wintypes.HANDLE
+    get_information = kernel32.GetFileInformationByHandle
+    get_information.argtypes = (
+        wintypes.HANDLE,
+        ctypes.POINTER(_ByHandleFileInformation),
+    )
+    get_information.restype = wintypes.BOOL
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = (wintypes.HANDLE,)
+    close_handle.restype = wintypes.BOOL
+
+    handle = create_file(str(path), 0, 0x7, None, 3, 0x80, None)
+    if handle == wintypes.HANDLE(-1).value:
+        raise OSError(ctypes.get_last_error(), f"cannot open asset product file: {path}")
+    try:
+        information = _ByHandleFileInformation()
+        if not get_information(handle, ctypes.byref(information)):
+            raise OSError(
+                ctypes.get_last_error(),
+                f"cannot identify asset product file: {path}",
+            )
+        file_index = (information.file_index_high << 32) | information.file_index_low
+        return information.volume_serial_number, file_index
+    finally:
+        close_handle(handle)
 
 
 def hash_product_directory(root: Path) -> str:
@@ -321,20 +411,221 @@ def _load_builtin(root: Path, expected: _BuiltinSpec) -> ResolvedAsset:
         raise ValueError(f"asset.json asset_kind mismatch for {expected.asset_id}")
     if manifest["id"] != expected.asset_id:
         raise ValueError(f"asset.json id mismatch for {expected.relative_root}")
-    if manifest["version"] != _ASSET_VERSION:
-        raise ValueError(f"built-in asset version must equal {_ASSET_VERSION}")
+    if manifest["version"] != expected.version:
+        raise ValueError(f"built-in asset version must equal {expected.version}")
     if not isinstance(manifest["entry"], str):
         raise ValueError("asset.json entry must be a string")
     _require_product_entry(root, manifest["entry"], manifest_name="asset.json")
     return ResolvedAsset(
         ref=VersionedRef(
             id=expected.asset_id,
-            version=_ASSET_VERSION,
+            version=expected.version,
             content_hash=content_hash,
         ),
         asset_kind=expected.asset_kind,
         root_path=str(root.resolve()),
     )
+
+
+def _require_binding(value: Any, *, field_name: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ValueError(f"{field_name} must be an object")
+    source = value.get("source")
+    if source == "USER_FACT":
+        _require_exact_fields(
+            value,
+            required={"source", "name"},
+            manifest_name=field_name,
+        )
+        if not isinstance(value["name"], str) or not value["name"]:
+            raise ValueError(f"{field_name}.name must be non-empty")
+    elif source == "SKILL_FIXED":
+        _require_exact_fields(
+            value,
+            required={"source", "value"},
+            manifest_name=field_name,
+        )
+        if not isinstance(value["value"], str) or not value["value"]:
+            raise ValueError(f"{field_name}.value must be non-empty")
+    else:
+        raise ValueError(f"{field_name}.source must be USER_FACT or SKILL_FIXED")
+    return value
+
+
+def _require_skill_requirements(value: Any) -> tuple[dict[str, Any], ...]:
+    if not isinstance(value, list):
+        raise ValueError("diagnosis skill requirements must be an array")
+    requirements: list[dict[str, Any]] = []
+    names: set[str] = set()
+    attachment_by_stage: set[str] = set()
+    for index, item in enumerate(value):
+        field_name = f"requirements[{index}]"
+        if not isinstance(item, dict):
+            raise ValueError(f"{field_name} must be an object")
+        _require_exact_fields(
+            item,
+            required={
+                "name",
+                "kind",
+                "stage",
+                "fulfillment_source",
+                "prompt",
+                "constraints",
+            },
+            manifest_name=field_name,
+        )
+        name = item["name"]
+        if not isinstance(name, str) or re.fullmatch(r"[a-z][a-z0-9_]{0,63}", name) is None:
+            raise ValueError(f"{field_name}.name is invalid")
+        if name in names:
+            raise ValueError("diagnosis skill requirement names must be unique")
+        names.add(name)
+        kind = item["kind"]
+        stage = item["stage"]
+        source = item["fulfillment_source"]
+        if stage not in {"INITIAL", "AFTER_LOGPARSE"}:
+            raise ValueError(f"{field_name}.stage is invalid")
+        if not isinstance(item["prompt"], str) or not item["prompt"]:
+            raise ValueError(f"{field_name}.prompt must be non-empty")
+        constraints = item["constraints"]
+        if not isinstance(constraints, dict):
+            raise ValueError(f"{field_name}.constraints must be an object")
+        if kind == "INPUT":
+            if source != "USER_FACT":
+                raise ValueError("INPUT requirements must use USER_FACT fulfillment")
+            _require_exact_fields(
+                constraints,
+                required={
+                    "value_type",
+                    "min_utf8_bytes",
+                    "max_utf8_bytes",
+                    "pattern",
+                    "allowed_values",
+                },
+                manifest_name=f"{field_name}.constraints",
+            )
+            if constraints["value_type"] != "STRING":
+                raise ValueError("INPUT requirement value_type must be STRING")
+            minimum = constraints["min_utf8_bytes"]
+            maximum = constraints["max_utf8_bytes"]
+            if (
+                type(minimum) is not int
+                or type(maximum) is not int
+                or not 1 <= minimum <= maximum <= 65_536
+            ):
+                raise ValueError("INPUT requirement byte limits are invalid")
+            pattern = constraints["pattern"]
+            if pattern is not None:
+                if not isinstance(pattern, str):
+                    raise ValueError("INPUT requirement pattern must be a string or null")
+                try:
+                    re.compile(pattern)
+                except re.error as exc:
+                    raise ValueError("INPUT requirement pattern is invalid") from exc
+            allowed = constraints["allowed_values"]
+            if not isinstance(allowed, list) or any(
+                not isinstance(entry, str) or not entry for entry in allowed
+            ) or len(allowed) != len(set(allowed)):
+                raise ValueError("INPUT requirement allowed_values are invalid")
+        elif kind == "ATTACHMENT":
+            if source != "READY_ATTACHMENT":
+                raise ValueError(
+                    "ATTACHMENT requirements must use READY_ATTACHMENT fulfillment"
+                )
+            if stage == "AFTER_LOGPARSE":
+                raise ValueError("AFTER_LOGPARSE supports INPUT requirements only")
+            if stage in attachment_by_stage:
+                raise ValueError("only one ATTACHMENT requirement is allowed per stage")
+            attachment_by_stage.add(stage)
+            _require_exact_fields(
+                constraints,
+                required={"allowed_content_types", "min_count", "max_count"},
+                manifest_name=f"{field_name}.constraints",
+            )
+            content_types = constraints["allowed_content_types"]
+            if not isinstance(content_types, list) or any(
+                not isinstance(entry, str) or not entry for entry in content_types
+            ) or len(content_types) != len(set(content_types)):
+                raise ValueError("ATTACHMENT allowed_content_types are invalid")
+            minimum = constraints["min_count"]
+            maximum = constraints["max_count"]
+            if (
+                type(minimum) is not int
+                or type(maximum) is not int
+                or not 1 <= minimum <= maximum
+            ):
+                raise ValueError("ATTACHMENT count limits are invalid")
+        else:
+            raise ValueError(f"{field_name}.kind is invalid")
+        requirements.append(item)
+    return tuple(requirements)
+
+
+def _require_logparse_plan(
+    value: Any,
+    *,
+    requirements: tuple[dict[str, Any], ...],
+) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ValueError("requires_logparse skill needs a logparse_plan object")
+    _require_exact_fields(
+        value,
+        required={"attachment_requirement", "problem_time_binding", "anchors"},
+        manifest_name="logparse_plan",
+    )
+    requirement_by_name = {item["name"]: item for item in requirements}
+    attachment = value["attachment_requirement"]
+    if attachment is not None:
+        requirement = requirement_by_name.get(attachment)
+        if requirement is None or requirement["kind"] != "ATTACHMENT":
+            raise ValueError(
+                "logparse_plan attachment_requirement must name an ATTACHMENT requirement"
+            )
+        if tuple(requirement["constraints"]["allowed_content_types"]) != _LOG_ARCHIVE_CONTENT_TYPES:
+            raise ValueError("logparse archive ContentTypes are platform-fixed")
+    _require_binding(value["problem_time_binding"], field_name="problem_time_binding")
+    anchors = value["anchors"]
+    if not isinstance(anchors, list) or not anchors:
+        raise ValueError("logparse_plan anchors must be a non-empty array")
+    labels: set[str] = set()
+    for index, anchor in enumerate(anchors):
+        field_name = f"logparse_plan.anchors[{index}]"
+        if not isinstance(anchor, dict):
+            raise ValueError(f"{field_name} must be an object")
+        _require_exact_fields(
+            anchor,
+            required={"label", "module", "slot", "process_name", "pid"},
+            manifest_name=field_name,
+        )
+        label = anchor["label"]
+        if not isinstance(label, str) or not label or label in labels:
+            raise ValueError("logparse anchor labels must be non-empty and unique")
+        labels.add(label)
+        for binding_name in ("module", "slot", "process_name"):
+            _require_binding(
+                anchor[binding_name],
+                field_name=f"{field_name}.{binding_name}",
+            )
+        if anchor["pid"] is not None:
+            _require_binding(anchor["pid"], field_name=f"{field_name}.pid")
+    user_fact_names = {
+        binding["name"]
+        for binding in [
+            value["problem_time_binding"],
+            *[
+                anchor[field]
+                for anchor in anchors
+                for field in ("module", "slot", "process_name", "pid")
+                if anchor[field] is not None
+            ],
+        ]
+        if binding["source"] == "USER_FACT"
+    }
+    if not user_fact_names <= {
+        item["name"] for item in requirements if item["kind"] == "INPUT"
+    }:
+        raise ValueError("USER_FACT tool bindings must name INPUT requirements")
+    return value
 
 
 def _load_skill(root: Path) -> _SkillDescriptor:
@@ -350,6 +641,8 @@ def _load_skill(root: Path) -> _SkillDescriptor:
         "entry_document",
         "tool_bundle_id",
         "requires_logparse",
+        "requirements",
+        "logparse_plan",
     }
     _require_exact_fields(
         manifest,
@@ -357,8 +650,8 @@ def _load_skill(root: Path) -> _SkillDescriptor:
         optional={"logparse_product"},
         manifest_name="diagnosis-skill.json",
     )
-    if type(manifest["schema_version"]) is not int or manifest["schema_version"] != 1:
-        raise ValueError("diagnosis-skill.json schema_version must equal integer 1")
+    if type(manifest["schema_version"]) is not int or manifest["schema_version"] != 2:
+        raise ValueError("diagnosis-skill.json schema_version must equal integer 2")
     skill_id = manifest["id"]
     if not isinstance(skill_id, str) or _SKILL_ID_PATTERN.fullmatch(skill_id) is None:
         raise ValueError("diagnosis skill id does not match the frozen pattern")
@@ -378,11 +671,29 @@ def _load_skill(root: Path) -> _SkillDescriptor:
     if type(requires_logparse) is not bool:
         raise ValueError("diagnosis skill requires_logparse must be a boolean")
     logparse_product = manifest.get("logparse_product")
+    requirements = _require_skill_requirements(manifest["requirements"])
+    logparse_plan = manifest["logparse_plan"]
     if requires_logparse:
-        if not isinstance(logparse_product, str) or not logparse_product:
-            raise ValueError("requires_logparse skill needs a non-empty logparse_product")
-    elif logparse_product is not None:
-        raise ValueError("non-logparse skill must use a null logparse_product")
+        if logparse_product is not None and (
+            not isinstance(logparse_product, str)
+            or not logparse_product
+            or logparse_product == _DEFAULT_LOGPARSE_PRODUCT
+        ):
+            raise ValueError(
+                "logparse_product must be omitted for default or a non-default string"
+            )
+        logparse_plan = _require_logparse_plan(
+            logparse_plan,
+            requirements=requirements,
+        )
+        logparse_product = logparse_product or _DEFAULT_LOGPARSE_PRODUCT
+    else:
+        if logparse_product is not None:
+            raise ValueError("non-logparse skill must omit logparse_product")
+        if logparse_plan is not None:
+            raise ValueError("non-logparse skill must use logparse_plan=null")
+        if any(item["stage"] == "AFTER_LOGPARSE" for item in requirements):
+            raise ValueError("non-logparse skill forbids AFTER_LOGPARSE requirements")
     entry_document = manifest["entry_document"]
     if not isinstance(entry_document, str):
         raise ValueError("diagnosis skill entry_document must be a string")
@@ -408,6 +719,8 @@ def _load_skill(root: Path) -> _SkillDescriptor:
         tool_bundle_id=tool_bundle_id,
         requires_logparse=requires_logparse,
         logparse_product=logparse_product,
+        requirements=requirements,
+        logparse_plan=logparse_plan,
     )
 
 

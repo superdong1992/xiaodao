@@ -20,10 +20,10 @@ test "$(git -C /opt/src/xiaodao rev-parse HEAD)" = "$xiaodao_base"
 test -z "$(git -C /opt/src/xiaodao status --porcelain --untracked-files=all)"
 git -C /opt/src/xiaodao apply --check /evidence/source.patch
 git -C /opt/src/xiaodao apply /evidence/source.patch
-git -C /opt/src/xiaodao add -N -- \
-  tests/e2e/test_real_diagnose_agent_contract_gate.py \
-  tests/e2e/test_real_route_agent_contract_gate.py
-git -C /opt/src/xiaodao -c core.autocrlf=false diff --binary --no-ext-diff \
+if test -s /evidence/source.patch.new-files.txt; then
+  xargs -r git -C /opt/src/xiaodao add -N -- < /evidence/source.patch.new-files.txt
+fi
+git -C /opt/src/xiaodao -c core.autocrlf=false diff --binary --no-ext-diff --no-renames \
   > /tmp/e2e-after-apply.patch
 test "$(sha256sum /tmp/e2e-after-apply.patch | awk '{print $1}')" = "$patch_sha"
 cmp /tmp/e2e-after-apply.patch /evidence/source.patch

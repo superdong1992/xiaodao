@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import stat
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -110,7 +111,12 @@ def _parse_manifest(path: Path) -> dict[str, Any]:
 
     try:
         metadata = path.stat(follow_symlinks=False)
-        if path.is_symlink() or not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+        maximum_links = 2 if os.name == "nt" else 1
+        if (
+            path.is_symlink()
+            or not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_nlink > maximum_links
+        ):
             raise ValueError("manifest is not an ordinary file")
         value = json.loads(
             path.read_bytes().decode("utf-8"),
@@ -140,7 +146,12 @@ def _safe_entry(root: Path, relative_value: object) -> Path:
         target.resolve(strict=True).relative_to(root.resolve(strict=True))
     except (OSError, ValueError):
         raise _invalid_asset() from None
-    if target.is_symlink() or not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+    maximum_links = 2 if os.name == "nt" else 1
+    if (
+        target.is_symlink()
+        or not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_nlink > maximum_links
+    ):
         raise _invalid_asset() from None
     return target
 
@@ -211,11 +222,13 @@ def _skill_index_entry(
         "entry_document",
         "tool_bundle_id",
         "requires_logparse",
+        "requirements",
+        "logparse_plan",
     }
     if set(manifest) not in (required, required | {"logparse_product"}):
         raise _invalid_asset() from None
     if (
-        manifest.get("schema_version") != 1
+        manifest.get("schema_version") != 2
         or not isinstance(manifest.get("capability"), str)
         or not manifest["capability"]
         or not isinstance(manifest.get("summary"), str)
@@ -227,7 +240,11 @@ def _skill_index_entry(
         "capability": manifest["capability"],
         "summary": manifest["summary"],
         "requires_logparse": manifest.get("requires_logparse"),
-        "logparse_product": manifest.get("logparse_product"),
+        "logparse_product": (
+            manifest.get("logparse_product", "default")
+            if manifest.get("requires_logparse") is True
+            else None
+        ),
     }
 
 

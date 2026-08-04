@@ -277,7 +277,19 @@ def _sync_windows_directory(
 
 
 def _chmod_no_follow(path: Path | str, mode: int) -> None:
-    os.chmod(path, mode, follow_symlinks=False)
+    try:
+        os.chmod(path, mode, follow_symlinks=False)
+    except NotImplementedError:
+        if os.name != "nt":
+            raise
+        # CPython on Windows does not implement follow_symlinks=False for
+        # chmod.  The caller rejects reparse points immediately before this
+        # operation and verifies the same file identity immediately after it.
+        target = Path(path)
+        metadata = os.lstat(target)
+        if stat.S_ISLNK(metadata.st_mode) or is_reparse_point(metadata):
+            raise OSError("chmod target must not be a symbolic link")
+        os.chmod(target, mode)
 
 
 class PlatformFileSync:
@@ -297,6 +309,7 @@ class PlatformFileSync:
         self._close = close_fn
         self._chmod = chmod_fn
         self._directory_sync = directory_sync_fn
+        self._windows_finalized_files: set[tuple[int, int]] = set()
 
     def sync_file(self, path_or_handle: Path | str | int | BinaryIO) -> None:
         if isinstance(path_or_handle, int):
@@ -313,7 +326,15 @@ class PlatformFileSync:
             return
 
         path = Path(path_or_handle)
-        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+        pre_open_stat = os.lstat(path)
+        pre_open_identity = (pre_open_stat.st_dev, pre_open_stat.st_ino)
+        windows_finalized = (
+            os.name == "nt"
+            and pre_open_identity in self._windows_finalized_files
+        )
+        access = os.O_RDONLY if windows_finalized or os.name != "nt" else os.O_RDWR
+        flags = access | getattr(os, "O_CLOEXEC", 0)
+        flags |= getattr(os, "O_BINARY", 0)
         flags |= getattr(os, "O_NOFOLLOW", 0)
         descriptor = self._open(path, flags)
         try:
@@ -331,6 +352,12 @@ class PlatformFileSync:
                 descriptor_stat.st_ino,
             ) != (path_stat.st_dev, path_stat.st_ino):
                 raise OSError("file sync target changed while opening")
+            identity = (descriptor_stat.st_dev, descriptor_stat.st_ino)
+            if windows_finalized and identity in self._windows_finalized_files:
+                # make_read_only already flushed the writable handle after the
+                # Windows read-only attribute was applied.
+                self._windows_finalized_files.remove(identity)
+                return
             self._fsync(descriptor)
         finally:
             self._close(descriptor)
@@ -390,7 +417,34 @@ class PlatformFileSync:
             mode = stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH
         else:
             raise OSError("read-only target must be a regular file or directory")
-        self._chmod(target, mode)
+        descriptor: int | None = None
+        already_read_only = not bool(stat.S_IMODE(target_stat.st_mode) & 0o222)
+        if (
+            os.name == "nt"
+            and stat.S_ISREG(target_stat.st_mode)
+            and not already_read_only
+        ):
+            flags = os.O_RDWR | getattr(os, "O_BINARY", 0)
+            flags |= getattr(os, "O_CLOEXEC", 0)
+            descriptor = self._open(target, flags)
+            opened = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or is_reparse_point(opened)
+                or (opened.st_dev, opened.st_ino)
+                != (target_stat.st_dev, target_stat.st_ino)
+            ):
+                self._close(descriptor)
+                raise OSError("read-only target changed while opening")
+            self._fsync(descriptor)
+        try:
+            if not (os.name == "nt" and already_read_only):
+                self._chmod(target, mode)
+            if descriptor is not None:
+                self._fsync(descriptor)
+        finally:
+            if descriptor is not None:
+                self._close(descriptor)
         final_stat = os.lstat(target)
         if (
             final_stat.st_dev,
@@ -402,6 +456,8 @@ class PlatformFileSync:
             stat.S_IFMT(target_stat.st_mode),
         ):
             raise OSError("read-only target changed while permissions were applied")
+        if os.name == "nt" and stat.S_ISREG(final_stat.st_mode):
+            self._windows_finalized_files.add((final_stat.st_dev, final_stat.st_ino))
 
 
 @runtime_checkable

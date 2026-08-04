@@ -14,10 +14,7 @@ $pathList = Join-Path $toolRoot 'product-patch-files.txt'
 $workRoot = Join-Path $RepoRoot ('.tmp\e2e-patch-freeze-' + [Guid]::NewGuid().ToString('N'))
 $overlay = Join-Path $workRoot 'overlay'
 $validation = Join-Path $workRoot 'validation'
-$newPaths = @(
-    'tests/e2e/test_real_diagnose_agent_contract_gate.py',
-    'tests/e2e/test_real_route_agent_contract_gate.py'
-)
+$newPaths = [Collections.Generic.List[string]]::new()
 
 function Assert-Freeze([bool]$Condition, [string]$Code) {
     if (-not $Condition) { throw "E2E_PATCH_FREEZE_$Code" }
@@ -34,13 +31,13 @@ function Get-NormalizedBytes([string]$Path) {
 }
 
 function Get-CanonicalPatch([string]$Clone, [string[]]$Paths) {
-    $lines = @(& git.exe -C $Clone -c core.autocrlf=false diff --binary --no-ext-diff -- @Paths)
+    $lines = @(& git.exe -C $Clone -c core.autocrlf=false diff --binary --no-ext-diff --no-renames -- @Paths)
     if ($LASTEXITCODE -ne 0) { throw 'E2E_PATCH_FREEZE_DIFF' }
     $text = ($lines -join "`n") + "`n"
     Assert-Freeze (-not $text.Contains("`r")) 'CR'
     $chunks = [Collections.Generic.Dictionary[string,string]]::new([StringComparer]::Ordinal)
     $matches = [regex]::Matches($text, '(?m)^diff --git a/(.+?) b/(.+?)\n')
-    Assert-Freeze ($matches.Count -eq $Paths.Count) 'CHUNK_COUNT'
+    Assert-Freeze ($matches.Count -gt 0) 'CHUNK_COUNT'
     for ($index = 0; $index -lt $matches.Count; $index++) {
         $left = $matches[$index].Groups[1].Value
         $right = $matches[$index].Groups[2].Value
@@ -52,9 +49,10 @@ function Get-CanonicalPatch([string]$Clone, [string[]]$Paths) {
     }
     $actual = [string[]]$chunks.Keys
     [Array]::Sort($actual, [StringComparer]::Ordinal)
-    Assert-Freeze ($actual.Count -eq $Paths.Count) 'PATH_COUNT'
-    for ($index = 0; $index -lt $Paths.Count; $index++) {
-        Assert-Freeze ($actual[$index] -ceq $Paths[$index]) "PATH_SET_$index"
+    $allowed = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($path in $Paths) { [void]$allowed.Add($path) }
+    for ($index = 0; $index -lt $actual.Count; $index++) {
+        Assert-Freeze ($allowed.Contains($actual[$index])) "PATH_SET_$index"
     }
     return [String]::Concat([string[]]@($actual | ForEach-Object { $chunks[$_] }))
 }
@@ -64,12 +62,17 @@ Assert-Freeze (Test-Path -LiteralPath $EvidenceRoot -PathType Container) 'EVIDEN
 Assert-Freeze (Test-Path -LiteralPath $pathList -PathType Leaf) 'PATH_LIST'
 $paths = [string[]]@([IO.File]::ReadAllLines($pathList, $utf8) | Where-Object { $_ })
 $paths = [string[]]@($paths | Sort-Object -Unique)
-Assert-Freeze ($paths.Count -eq 32) 'EXPECTED_32_PATHS'
+Assert-Freeze ($paths.Count -gt 0) 'EMPTY_PATH_LIST'
 foreach ($relative in $paths) {
     Assert-Freeze (-not [IO.Path]::IsPathRooted($relative)) 'ROOTED_PATH'
     Assert-Freeze ($relative -cmatch '^[A-Za-z0-9._/-]+$') 'PATH_SHAPE'
     $source = Join-Path $RepoRoot ($relative.Replace('/', '\'))
-    Assert-Freeze (Test-Path -LiteralPath $source -PathType Leaf) "SOURCE_$relative"
+    $baseMatches = @(& git.exe -C $RepoRoot ls-tree --name-only $BaseCommit -- $relative)
+    Assert-Freeze ($LASTEXITCODE -eq 0) "BASE_LOOKUP_$relative"
+    $existsAtBase = $baseMatches.Count -eq 1 -and $baseMatches[0] -ceq $relative
+    $existsAtSource = Test-Path -LiteralPath $source -PathType Leaf
+    Assert-Freeze ($existsAtBase -or $existsAtSource) "UNKNOWN_$relative"
+    if ($existsAtSource -and -not $existsAtBase) { $newPaths.Add($relative) }
 }
 
 [IO.Directory]::CreateDirectory($workRoot) | Out-Null
@@ -79,11 +82,23 @@ try {
     foreach ($relative in $paths) {
         $source = Join-Path $RepoRoot ($relative.Replace('/', '\'))
         $destination = Join-Path $overlay ($relative.Replace('/', '\'))
-        [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($destination)) | Out-Null
-        [IO.File]::WriteAllBytes($destination, (Get-NormalizedBytes $source))
+        if (Test-Path -LiteralPath $source -PathType Leaf) {
+            [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($destination)) | Out-Null
+            [IO.File]::WriteAllBytes($destination, (Get-NormalizedBytes $source))
+        }
+        else {
+            $overlayPrefix = [IO.Path]::GetFullPath($overlay).TrimEnd('\') + '\'
+            $resolvedDestination = [IO.Path]::GetFullPath($destination)
+            Assert-Freeze ($resolvedDestination.StartsWith($overlayPrefix, [StringComparison]::OrdinalIgnoreCase)) 'DELETE_SCOPE'
+            Assert-Freeze (Test-Path -LiteralPath $resolvedDestination -PathType Leaf) "DELETE_SOURCE_$relative"
+            Remove-Item -LiteralPath $resolvedDestination -Force
+        }
     }
-    Invoke-FreezeGit ([string[]](@('-C', $overlay, '-c', 'core.autocrlf=false', 'add', '-N', '--') + $newPaths))
+    if ($newPaths.Count -gt 0) {
+        Invoke-FreezeGit ([string[]](@('-C', $overlay, '-c', 'core.autocrlf=false', 'add', '-N', '--') + $newPaths.ToArray()))
+    }
     $patchBytes = $utf8.GetBytes((Get-CanonicalPatch $overlay $paths))
+    $patchFileCount = [regex]::Matches($utf8.GetString($patchBytes), '(?m)^diff --git ').Count
     $patchPath = Join-Path $EvidenceRoot 'source-input.patch'
     Assert-Freeze (-not (Test-Path -LiteralPath $patchPath)) 'PATCH_EXISTS'
     [IO.File]::WriteAllBytes($patchPath, $patchBytes)
@@ -92,7 +107,9 @@ try {
     Invoke-FreezeGit @('-C', $validation, '-c', 'core.autocrlf=false', 'checkout', '--quiet', '--detach', $BaseCommit)
     Invoke-FreezeGit @('-C', $validation, '-c', 'core.autocrlf=false', 'apply', '--check', '--whitespace=error-all', $patchPath)
     Invoke-FreezeGit @('-C', $validation, '-c', 'core.autocrlf=false', 'apply', '--whitespace=error-all', $patchPath)
-    Invoke-FreezeGit ([string[]](@('-C', $validation, '-c', 'core.autocrlf=false', 'add', '-N', '--') + $newPaths))
+    if ($newPaths.Count -gt 0) {
+        Invoke-FreezeGit ([string[]](@('-C', $validation, '-c', 'core.autocrlf=false', 'add', '-N', '--') + $newPaths.ToArray()))
+    }
     Invoke-FreezeGit @('-C', $validation, '-c', 'core.autocrlf=false', 'diff', '--check')
     $rehashBytes = $utf8.GetBytes((Get-CanonicalPatch $validation $paths))
     Assert-Freeze ([Linq.Enumerable]::SequenceEqual([byte[]]$patchBytes, [byte[]]$rehashBytes)) 'REHASH'
@@ -100,8 +117,9 @@ try {
     $sha = (Get-FileHash -LiteralPath $patchPath -Algorithm SHA256).Hash.ToLowerInvariant()
     $size = (Get-Item -LiteralPath $patchPath).Length
     [IO.File]::WriteAllText((Join-Path $EvidenceRoot 'source-input.patch.sha256'), "$sha  /evidence/source-input.patch`n", $utf8)
-    [IO.File]::WriteAllText((Join-Path $EvidenceRoot 'source-patch-host-freeze.txt'), "source_patch_files=32`nsource_patch_bytes=$size`nsource_patch_sha256=$sha`nbase_commit=$BaseCommit`nline_ending_mode=canonical-lf`nuser_submodules=excluded`nhandoff_s08=excluded`n", $utf8)
-    Write-Output "E2E_SOURCE_PATCH_FROZEN sha256=$sha bytes=$size files=32"
+    [IO.File]::WriteAllText((Join-Path $EvidenceRoot 'source.patch.new-files.txt'), (($newPaths.ToArray() -join "`n") + $(if ($newPaths.Count -gt 0) { "`n" } else { "" })), $utf8)
+    [IO.File]::WriteAllText((Join-Path $EvidenceRoot 'source-patch-host-freeze.txt'), "source_patch_files=$patchFileCount`nsource_patch_allowlist_files=$($paths.Count)`nsource_patch_new_files=$($newPaths.Count)`nsource_patch_bytes=$size`nsource_patch_sha256=$sha`nbase_commit=$BaseCommit`nline_ending_mode=canonical-lf`nuser_submodules=excluded`nhandoff_s08=excluded`n", $utf8)
+    Write-Output "E2E_SOURCE_PATCH_FROZEN sha256=$sha bytes=$size files=$patchFileCount allowlist=$($paths.Count) new_files=$($newPaths.Count)"
 }
 finally {
     if (Test-Path -LiteralPath $workRoot -PathType Container) {

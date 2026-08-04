@@ -11,10 +11,12 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import io
 import json
 import os
 import sys
 import uuid
+import zipfile
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence, TypeVar
@@ -66,9 +68,9 @@ SCHEMA_VERSION = 1
 SERVICE_BASE_URL = "http://127.0.0.1:18000"
 EXPECTED_SKILL = VersionedRef(
     id="diagnosis-skill/diagnose-service-takeover",
-    version="2.0.0",
+    version="3.0.4",
     content_hash=(
-        "4ce37124b5fb97233188150e074e3b71d995e27bd3941a51a05aa1d5cd2251e7"
+        "08573b8e01e2b5c213c59b0b27b3922566293af1aed963c09c6f735f41abdd95"
     ),
 )
 EXPECTED_ARCHIVE_NAME = "synthetic-rpc-service-takeover.zip"
@@ -78,15 +80,21 @@ EXPECTED_ARCHIVE_SHA256 = (
     "194f69fecd8dc8d40d1aedeb6fc25d2b7b4922b176be2b15be73ffe386cc5064"
 )
 EXPECTED_PROBLEM_SPEC = {
-    "statement": "A checkout-to-inventory ReserveStock RPC times out.",
+    "statement": (
+        "A checkout-to-inventory ReserveStock RPC times out during a service "
+        "takeover."
+    ),
     "expected_behavior": (
         "The checkout operation completes after inventory reservation."
     ),
     "actual_behavior": (
-        "The ReserveStock RPC times out and checkout does not complete."
+        "During an active service takeover, the ReserveStock RPC times out "
+        "and checkout does not complete."
     ),
-    "scope": "checkout-to-inventory RPC diagnosis",
-    "goals": ["Locate the timeout cause using the supplied logs."],
+    "scope": "checkout-to-inventory service-takeover RPC diagnosis",
+    "goals": [
+        "Locate the service-takeover timeout cause using the supplied logs."
+    ],
     "non_goals": ["Modify production systems."],
     "constraints": ["Use only evidence persisted in this diagnosis case."],
     "completion_criteria": [
@@ -228,6 +236,7 @@ class JourneySummary:
     selected_skill_ref: VersionedRef
     final_result: CandidateConclusion
     public_artifact: ArtifactView
+    public_result_archive: ArtifactView
     observed_statuses: tuple[str, ...]
     request_ids: Mapping[str, str] | None
 
@@ -254,6 +263,7 @@ def load_journey_summary(path: Path, *, require_requests: bool, code: str) -> Jo
         selected = VersionedRef.model_validate(payload.get("selected_skill_ref"))
         final = CandidateConclusion.model_validate(payload.get("final_result"))
         public = ArtifactView.model_validate(payload.get("public_artifact"))
+        public_archive = ArtifactView.model_validate(payload.get("public_result_archive"))
     except Exception as exc:
         raise AuditFailure(code) from exc
     statuses_value = payload.get("observed_statuses", [])
@@ -292,6 +302,7 @@ def load_journey_summary(path: Path, *, require_requests: bool, code: str) -> Jo
         selected_skill_ref=selected,
         final_result=final,
         public_artifact=public,
+        public_result_archive=public_archive,
         observed_statuses=tuple(statuses_value),
         request_ids=request_ids,
     )
@@ -431,8 +442,8 @@ def audit_outcome_processing(
         require(outcome.error is None, "OUTCOME_EXECUTION_ERROR")
         require(outcome.result_type is not OutcomeResultType.FAILED, "OUTCOME_FAILED")
 
-        expected_evidence_ids = {
-            expected_proposal_id(
+        evidence_ids_by_key = {
+            proposal.proposal_key: expected_proposal_id(
                 exported,
                 aggregate.case.case_id,
                 outcome.outcome_id,
@@ -441,8 +452,8 @@ def audit_outcome_processing(
             )
             for proposal in outcome.proposed_evidence
         }
-        expected_artifact_ids = {
-            expected_proposal_id(
+        artifact_ids_by_key = {
+            proposal.proposal_key: expected_proposal_id(
                 exported,
                 aggregate.case.case_id,
                 outcome.outcome_id,
@@ -452,29 +463,43 @@ def audit_outcome_processing(
             for proposal in outcome.proposed_artifacts
         }
         require(
-            set(record.accepted_evidence_ids) == expected_evidence_ids,
-            "OUTCOME_EVIDENCE_NOT_EXACTLY_ACCEPTED",
+            set(record.accepted_evidence_ids) <= set(evidence_ids_by_key.values()),
+            "OUTCOME_ACCEPTED_UNKNOWN_EVIDENCE",
         )
         require(
-            set(record.accepted_artifact_ids) == expected_artifact_ids,
-            "OUTCOME_ARTIFACT_NOT_EXACTLY_ACCEPTED",
+            set(record.accepted_artifact_ids) <= set(artifact_ids_by_key.values()),
+            "OUTCOME_ACCEPTED_UNKNOWN_ARTIFACT",
         )
         for proposal in outcome.proposed_evidence:
-            formal_evidence_for_proposal(
-                exported,
-                aggregate,
-                outcome,
-                proposal,
-                "FORMAL_EVIDENCE_MISMATCH",
-            )
+            evidence_id = evidence_ids_by_key[proposal.proposal_key]
+            if evidence_id in record.accepted_evidence_ids:
+                formal_evidence_for_proposal(
+                    exported,
+                    aggregate,
+                    outcome,
+                    proposal,
+                    "FORMAL_EVIDENCE_MISMATCH",
+                )
+            else:
+                require(
+                    evidence_id not in aggregate.evidence,
+                    "UNACCEPTED_EVIDENCE_FORMALIZED",
+                )
         for proposal in outcome.proposed_artifacts:
-            formal_artifact_for_proposal(
-                exported,
-                aggregate,
-                outcome,
-                proposal,
-                "FORMAL_ARTIFACT_MISMATCH",
-            )
+            artifact_id = artifact_ids_by_key[proposal.proposal_key]
+            if artifact_id in record.accepted_artifact_ids:
+                formal_artifact_for_proposal(
+                    exported,
+                    aggregate,
+                    outcome,
+                    proposal,
+                    "FORMAL_ARTIFACT_MISMATCH",
+                )
+            else:
+                require(
+                    artifact_id not in aggregate.artifacts,
+                    "UNACCEPTED_ARTIFACT_FORMALIZED",
+                )
 
 
 @dataclass(frozen=True)
@@ -484,6 +509,7 @@ class ExportFacts:
     attachment_id: str
     logparse_artifact_id: str
     user_result_artifact_id: str
+    user_result_archive_artifact_id: str
     parse_job_id: str
     parse_outcome_id: str
     candidate_job_id: str
@@ -492,6 +518,8 @@ class ExportFacts:
     review_outcome_id: str
     user_result_sha256: str
     user_result_size: int
+    user_result_archive_sha256: str
+    user_result_archive_size: int
 
 
 def _require_job_roles(aggregate: CaseAggregate) -> tuple[Job, list[Job], Job]:
@@ -575,6 +603,7 @@ def audit_export(
     exported: StateExport,
     summary: JourneySummary,
     result_bytes: bytes,
+    archive_bytes: bytes,
     result_schema: Mapping[str, Any],
 ) -> ExportFacts:
     require(exported.export_schema_version == 1, "EXPORT_SCHEMA_VERSION")
@@ -593,7 +622,7 @@ def audit_export(
         "COUNT_EXECUTION_FAILURES",
     )
     require(exported.object_counts.attachments == 1, "COUNT_ATTACHMENTS")
-    require(exported.object_counts.artifacts == 2, "COUNT_ARTIFACTS")
+    require(exported.object_counts.artifacts == 3, "COUNT_ARTIFACTS")
     require(exported.object_counts.idempotency_records == 6, "COUNT_IDEMPOTENCY")
 
     aggregate = exported.state.cases.get(summary.case_id)
@@ -694,6 +723,8 @@ def audit_export(
         (
             outcome
             for outcome in diagnose_outcomes
+            if outcome.result_type is OutcomeResultType.NEED_INPUT
+            and _outcome_requirement_names(outcome) == frozenset({"order_id"})
             if any(
                 proposal.artifact_kind is ArtifactKind.LOGPARSE_RUN
                 for proposal in outcome.proposed_artifacts
@@ -740,13 +771,33 @@ def audit_export(
         ),
         "LOGPARSE_PROPOSAL_COUNT",
     )
-    require(logparse_proposal.proposal_key == "logparse-run", "LOGPARSE_PROPOSAL_KEY")
     logparse_artifact = formal_artifact_for_proposal(
         exported,
         aggregate,
         parse_outcome,
         logparse_proposal,
         "LOGPARSE_FORMAL_ARTIFACT",
+    )
+    parse_processing = aggregate.outcome_processing_records[parse_outcome.outcome_id]
+    require(
+        parse_processing.accepted_artifact_ids == [logparse_artifact.artifact_id],
+        "PARSE_ACCEPTED_ARTIFACT",
+    )
+    expected_parse_evidence_ids = {
+        expected_proposal_id(
+            exported,
+            aggregate.case.case_id,
+            parse_outcome.outcome_id,
+            "evidence",
+            proposal.proposal_key,
+        )
+        for proposal in parse_outcome.proposed_evidence
+    }
+    require(bool(expected_parse_evidence_ids), "PARSE_EVIDENCE_PROPOSALS_EMPTY")
+    require(
+        set(parse_processing.accepted_evidence_ids) == expected_parse_evidence_ids
+        and len(parse_processing.accepted_evidence_ids) == len(expected_parse_evidence_ids),
+        "PARSE_ACCEPTED_EVIDENCE",
     )
     require(
         logparse_artifact.resource_kind is ResourceKind.DIRECTORY,
@@ -769,16 +820,6 @@ def audit_export(
     parse_job = aggregate.jobs[parse_outcome.job_id]
     require(parse_job.attachment_refs == [attachment.attachment_id], "PARSE_JOB_ATTACHMENT")
     require(parse_job.artifact_refs == [], "PARSE_JOB_EXISTING_RUN")
-    require(
-        getattr(metadata, "logparse_version_ref", None) == parse_job.logparse_tool_ref,
-        "LOGPARSE_VERSION_REF",
-    )
-    parse_processing = aggregate.outcome_processing_records[parse_outcome.outcome_id]
-    require(
-        parse_processing.accepted_artifact_ids == [logparse_artifact.artifact_id],
-        "PARSE_ACCEPTED_ARTIFACT",
-    )
-    require(bool(parse_processing.accepted_evidence_ids), "PARSE_EVIDENCE_EMPTY")
     for evidence_id in parse_processing.accepted_evidence_ids:
         evidence = aggregate.evidence.get(evidence_id)
         require(evidence is not None, "PARSE_EVIDENCE_MISSING")
@@ -791,11 +832,12 @@ def audit_export(
     require(candidate_job.attachment_refs == [attachment.attachment_id], "CONTINUATION_ATTACHMENT")
     require(
         candidate_job.artifact_refs == [logparse_artifact.artifact_id],
-        "CONTINUATION_RUN_REUSE",
+        "CONTINUATION_ARTIFACT_INPUT",
     )
     require(
-        candidate_job.evidence_refs == parse_processing.accepted_evidence_ids,
-        "CONTINUATION_EVIDENCE_REUSE",
+        set(candidate_job.evidence_refs) == set(parse_processing.accepted_evidence_ids)
+        and len(candidate_job.evidence_refs) == len(parse_processing.accepted_evidence_ids),
+        "CONTINUATION_EVIDENCE_INPUT",
     )
     require(
         candidate_job.previous_outcome_refs
@@ -808,13 +850,16 @@ def audit_export(
     )
     require(candidate_job.logparse_product == "compact", "CONTINUATION_PRODUCT")
     require(
+        getattr(metadata, "logparse_version_ref", None)
+        == candidate_job.logparse_tool_ref,
+        "LOGPARSE_VERSION_REF",
+    )
+    require(
         all(
             proposal.artifact_kind is not ArtifactKind.LOGPARSE_RUN
-            for outcome in aggregate.outcomes.values()
-            if outcome.outcome_id != parse_outcome.outcome_id
-            for proposal in outcome.proposed_artifacts
+            for proposal in candidate_outcome.proposed_artifacts
         ),
-        "SECOND_LOGPARSE_PROPOSAL",
+        "CONTINUATION_REPARSED_LOGPARSE_RUN",
     )
 
     user_result_proposal = require_one(
@@ -836,20 +881,68 @@ def audit_export(
     require(user_result_artifact.name == "diagnosis-result.json", "USER_RESULT_NAME")
     require(user_result_artifact.content_type == "application/json", "USER_RESULT_CONTENT_TYPE")
     require(user_result_artifact.resource_kind is ResourceKind.FILE, "USER_RESULT_RESOURCE_KIND")
+    archive_proposal = require_one(
+        (
+            proposal
+            for proposal in candidate_outcome.proposed_artifacts
+            if proposal.artifact_kind is ArtifactKind.USER_RESULT_ARCHIVE
+        ),
+        "USER_RESULT_ARCHIVE_PROPOSAL_COUNT",
+    )
+    require(
+        archive_proposal.proposal_key == "user-result-archive",
+        "USER_RESULT_ARCHIVE_PROPOSAL_KEY",
+    )
+    archive_artifact = formal_artifact_for_proposal(
+        exported,
+        aggregate,
+        candidate_outcome,
+        archive_proposal,
+        "USER_RESULT_ARCHIVE_FORMAL_ARTIFACT",
+    )
+    require(archive_artifact.name == "result.zip", "USER_RESULT_ARCHIVE_NAME")
+    require(
+        archive_artifact.content_type == "application/zip",
+        "USER_RESULT_ARCHIVE_CONTENT_TYPE",
+    )
+    require(
+        archive_artifact.resource_kind is ResourceKind.FILE,
+        "USER_RESULT_ARCHIVE_RESOURCE_KIND",
+    )
+    require(
+        archive_artifact.metadata.user_result_proposal_key == user_result_proposal.proposal_key,
+        "USER_RESULT_ARCHIVE_BINDING",
+    )
     candidate_processing = aggregate.outcome_processing_records[candidate_outcome.outcome_id]
     require(
-        candidate_processing.accepted_artifact_ids == [user_result_artifact.artifact_id],
-        "CANDIDATE_ACCEPTED_USER_RESULT",
+        set(candidate_processing.accepted_artifact_ids)
+        == {
+            user_result_artifact.artifact_id,
+            archive_artifact.artifact_id,
+        },
+        "CANDIDATE_ACCEPTED_PUBLIC_ARTIFACTS",
     )
-    require(bool(candidate_processing.accepted_evidence_ids), "CANDIDATE_EVIDENCE_EMPTY")
-    for evidence_id in candidate_processing.accepted_evidence_ids:
-        evidence = aggregate.evidence.get(evidence_id)
-        require(evidence is not None, "CANDIDATE_EVIDENCE_MISSING")
-        require(evidence.source_type is EvidenceSourceType.LOGPARSE, "CANDIDATE_EVIDENCE_TYPE")
-        require(
-            evidence.source_ref == logparse_artifact.artifact_id,
-            "CANDIDATE_EVIDENCE_SOURCE",
+    expected_candidate_evidence_ids = {
+        expected_proposal_id(
+            exported,
+            aggregate.case.case_id,
+            candidate_outcome.outcome_id,
+            "evidence",
+            proposal.proposal_key,
         )
+        for proposal in candidate_outcome.proposed_evidence
+    }
+    require(
+        set(candidate_processing.accepted_evidence_ids)
+        == expected_candidate_evidence_ids
+        and len(candidate_processing.accepted_evidence_ids)
+        == len(expected_candidate_evidence_ids),
+        "CANDIDATE_ACCEPTED_EVIDENCE",
+    )
+    require(
+        expected_candidate_evidence_ids.isdisjoint(expected_parse_evidence_ids),
+        "CANDIDATE_EVIDENCE_ID_COLLISION",
+    )
 
     all_artifact_kinds = [artifact.kind for artifact in aggregate.artifacts.values()]
     require(
@@ -859,6 +952,10 @@ def audit_export(
     require(
         all_artifact_kinds.count(ArtifactKind.USER_RESULT) == 1,
         "FORMAL_USER_RESULT_COUNT",
+    )
+    require(
+        all_artifact_kinds.count(ArtifactKind.USER_RESULT_ARCHIVE) == 1,
+        "FORMAL_USER_RESULT_ARCHIVE_COUNT",
     )
     require(
         ArtifactKind.DIAGNOSTIC_EXPORT not in all_artifact_kinds,
@@ -873,13 +970,12 @@ def audit_export(
             for evidence_id in mapping.evidence_refs
         ),
     ]
-    require(
-        bool(set(used_evidence_ids) & set(parse_processing.accepted_evidence_ids)),
-        "FINAL_MISSING_PARSE_EVIDENCE",
+    expected_final_evidence_ids = (
+        expected_parse_evidence_ids | expected_candidate_evidence_ids
     )
     require(
-        bool(set(used_evidence_ids) & set(candidate_processing.accepted_evidence_ids)),
-        "FINAL_MISSING_CONTINUATION_EVIDENCE",
+        set(used_evidence_ids) == expected_final_evidence_ids,
+        "FINAL_CANDIDATE_EVIDENCE_SET",
     )
     for evidence_id in used_evidence_ids:
         evidence = aggregate.evidence.get(evidence_id)
@@ -945,6 +1041,40 @@ def audit_export(
     require(len(result_bytes) == user_result_artifact.size, "USER_RESULT_SIZE")
     result_sha256 = hashlib.sha256(result_bytes).hexdigest()
     require(result_sha256 == user_result_artifact.sha256, "USER_RESULT_SHA256")
+    require(len(archive_bytes) == archive_artifact.size, "USER_RESULT_ARCHIVE_SIZE")
+    archive_sha256 = hashlib.sha256(archive_bytes).hexdigest()
+    require(
+        archive_sha256 == archive_artifact.sha256,
+        "USER_RESULT_ARCHIVE_SHA256",
+    )
+    try:
+        with zipfile.ZipFile(io.BytesIO(archive_bytes), mode="r") as result_archive:
+            infos = result_archive.infolist()
+            names = [info.filename for info in infos]
+            expected_names = ["result.txt"] + [
+                f"target-log-{index:03d}.log"
+                for index in range(1, archive_artifact.metadata.target_log_count + 1)
+            ]
+            require(names == expected_names, "USER_RESULT_ARCHIVE_NAMES")
+            require(len(names) == len(set(names)), "USER_RESULT_ARCHIVE_DUPLICATE")
+            for info in infos:
+                require(
+                    info.date_time == (1980, 1, 1, 0, 0, 0),
+                    "USER_RESULT_ARCHIVE_TIMESTAMP",
+                )
+                require(
+                    info.compress_type == zipfile.ZIP_DEFLATED,
+                    "USER_RESULT_ARCHIVE_COMPRESSION",
+                )
+            require(
+                result_archive.read("result.txt")
+                == (final_result.statement + "\n").encode("utf-8"),
+                "USER_RESULT_ARCHIVE_RESULT_TEXT",
+            )
+    except AuditFailure:
+        raise
+    except Exception as exc:
+        raise AuditFailure("USER_RESULT_ARCHIVE_INVALID") from exc
 
     public = summary.public_artifact
     require(public.artifact_id == user_result_artifact.artifact_id, "PUBLIC_ARTIFACT_ID")
@@ -959,6 +1089,28 @@ def audit_export(
     )
     require(public.download_url == expected_url, "PUBLIC_ARTIFACT_URL")
     require(public.artifact_id != logparse_artifact.artifact_id, "PUBLIC_INTERNAL_COLLISION")
+    public_archive = summary.public_result_archive
+    require(
+        public_archive.artifact_id == archive_artifact.artifact_id,
+        "PUBLIC_ARCHIVE_ID",
+    )
+    require(public_archive.name == archive_artifact.name, "PUBLIC_ARCHIVE_NAME")
+    require(
+        public_archive.content_type == archive_artifact.content_type,
+        "PUBLIC_ARCHIVE_CONTENT_TYPE",
+    )
+    require(public_archive.size == archive_artifact.size, "PUBLIC_ARCHIVE_SIZE")
+    require(public_archive.sha256 == archive_artifact.sha256, "PUBLIC_ARCHIVE_SHA256")
+    require(
+        public_archive.created_at == archive_artifact.created_at,
+        "PUBLIC_ARCHIVE_CREATED_AT",
+    )
+    expected_archive_url = (
+        f"{SERVICE_BASE_URL}/api/v1/artifacts/{public_archive.artifact_id}/content"
+        f"?case_id={summary.case_id}"
+    )
+    require(public_archive.download_url == expected_archive_url, "PUBLIC_ARCHIVE_URL")
+    require(public_archive.artifact_id != public.artifact_id, "PUBLIC_ARTIFACT_COLLISION")
 
     require(candidate_processing.created_job_id == review_job.job_id, "REVIEW_JOB_CREATION")
     require(review_job.review_target is not None, "REVIEW_TARGET_MISSING")
@@ -1031,6 +1183,7 @@ def audit_export(
         attachment_id=attachment.attachment_id,
         logparse_artifact_id=logparse_artifact.artifact_id,
         user_result_artifact_id=user_result_artifact.artifact_id,
+        user_result_archive_artifact_id=archive_artifact.artifact_id,
         parse_job_id=parse_job.job_id,
         parse_outcome_id=parse_outcome.outcome_id,
         candidate_job_id=candidate_job.job_id,
@@ -1039,6 +1192,8 @@ def audit_export(
         review_outcome_id=review_outcome.outcome_id,
         user_result_sha256=result_sha256,
         user_result_size=len(result_bytes),
+        user_result_archive_sha256=archive_sha256,
+        user_result_archive_size=len(archive_bytes),
     )
 
 
@@ -1056,6 +1211,10 @@ def compare_summaries(before: JourneySummary, after: JourneySummary) -> None:
     require(before.selected_skill_ref == after.selected_skill_ref, "RESTART_SELECTED_SKILL")
     require(before.final_result == after.final_result, "RESTART_FINAL_RESULT")
     require(before.public_artifact == after.public_artifact, "RESTART_PUBLIC_ARTIFACT")
+    require(
+        before.public_result_archive == after.public_result_archive,
+        "RESTART_PUBLIC_ARCHIVE",
+    )
     if before.observed_statuses:
         try:
             reviewing_index = before.observed_statuses.index("REVIEWING")
@@ -1147,6 +1306,15 @@ def compare_exports(before: ExportFacts, after: ExportFacts) -> None:
         before.user_result_sha256 == after.user_result_sha256,
         "RESTART_USER_RESULT_SHA256",
     )
+    require(
+        before.user_result_archive_artifact_id
+        == after.user_result_archive_artifact_id,
+        "RESTART_USER_RESULT_ARCHIVE_ID",
+    )
+    require(
+        before.user_result_archive_sha256 == after.user_result_archive_sha256,
+        "RESTART_USER_RESULT_ARCHIVE_SHA256",
+    )
 
 
 def load_result_schema(path: Path) -> Mapping[str, Any]:
@@ -1173,6 +1341,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--restart-summary", type=Path, required=True)
     parser.add_argument("--before-result", type=Path, required=True)
     parser.add_argument("--after-result", type=Path, required=True)
+    parser.add_argument("--before-archive", type=Path, required=True)
+    parser.add_argument("--after-archive", type=Path, required=True)
     parser.add_argument("--user-result-schema", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     return parser.parse_args(argv)
@@ -1208,12 +1378,21 @@ def perform_audit(arguments: argparse.Namespace) -> Mapping[str, Any]:
     before_result = read_ordinary_file(arguments.before_result, "BEFORE_RESULT_INVALID")
     after_result = read_ordinary_file(arguments.after_result, "AFTER_RESULT_INVALID")
     require(before_result == after_result, "RESTART_RESULT_BYTES")
+    before_archive = read_ordinary_file(arguments.before_archive, "BEFORE_ARCHIVE_INVALID")
+    after_archive = read_ordinary_file(arguments.after_archive, "AFTER_ARCHIVE_INVALID")
+    require(before_archive == after_archive, "RESTART_ARCHIVE_BYTES")
     result_schema = load_result_schema(arguments.user_result_schema)
 
     audit_validation(before_validation, before_export, "BEFORE")
     audit_validation(after_validation, after_export, "AFTER")
     compare_summaries(journey, restart)
-    before_facts = audit_export(before_export, journey, before_result, result_schema)
+    before_facts = audit_export(
+        before_export,
+        journey,
+        before_result,
+        before_archive,
+        result_schema,
+    )
     restart_for_state = replace(
         restart,
         attempt=journey.attempt,
@@ -1223,6 +1402,7 @@ def perform_audit(arguments: argparse.Namespace) -> Mapping[str, Any]:
         after_export,
         restart_for_state,
         after_result,
+        after_archive,
         result_schema,
     )
     compare_exports(before_facts, after_facts)
@@ -1243,8 +1423,13 @@ def perform_audit(arguments: argparse.Namespace) -> Mapping[str, Any]:
         },
         "logparse_run": {
             "artifact_id": before_facts.logparse_artifact_id,
-            "parse_job_id": before_facts.parse_job_id,
-            "parse_outcome_id": before_facts.parse_outcome_id,
+            "producer_job_id": before_facts.parse_job_id,
+            "producer_outcome_id": before_facts.parse_outcome_id,
+        },
+        "post_parse_input": {
+            "job_id": before_facts.parse_job_id,
+            "outcome_id": before_facts.parse_outcome_id,
+            "evidence_and_run_accepted": True,
         },
         "continuation": {
             "job_id": before_facts.candidate_job_id,
@@ -1261,12 +1446,18 @@ def perform_audit(arguments: argparse.Namespace) -> Mapping[str, Any]:
             "size": before_facts.user_result_size,
             "sha256": before_facts.user_result_sha256,
         },
+        "user_result_archive": {
+            "artifact_id": before_facts.user_result_archive_artifact_id,
+            "size": before_facts.user_result_archive_size,
+            "sha256": before_facts.user_result_archive_sha256,
+        },
         "persistence": {
             "before_generation": before_export.source_generation,
             "after_generation": after_export.source_generation,
             "case_aggregate_equal": True,
             "resources_equal": True,
             "result_bytes_equal": True,
+            "archive_bytes_equal": True,
         },
     }
 

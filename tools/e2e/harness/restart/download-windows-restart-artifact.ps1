@@ -15,7 +15,13 @@ Confirm-RestartClientSkill
 $restart = Read-RestartSummaryValidated -EvidenceRoot $EvidenceRoot -PreSummary $pre
 
 New-RestartOutputReservations -EvidenceRoot $EvidenceRoot -Names (Get-RestartDownloadOutputNames)
-$state = Invoke-RestartArtifactDownload -EvidenceRoot $EvidenceRoot -Summary $restart
+$resultState = Invoke-RestartArtifactDownload -EvidenceRoot $EvidenceRoot -Summary $restart -ArtifactProperty 'public_artifact' -Prefix 'restart-download' -BodyName 'restart-diagnosis-result.json' -ExpectedContentType 'application/json' -JsonObject
+$archiveState = Invoke-RestartArtifactDownload -EvidenceRoot $EvidenceRoot -Summary $restart -ArtifactProperty 'public_result_archive' -Prefix 'restart-archive-download' -BodyName 'restart-result.zip' -ExpectedContentType 'application/zip'
+$state = [PSCustomObject][ordered]@{
+    schema_version = 1
+    result = $resultState
+    archive = $archiveState
+}
 Write-RestartJson -Path (Join-Path $EvidenceRoot 'restart-download-verification.json') -Value $state
 
-Write-Output "restart_download=passed case_id=$($state.case_id) artifact_id=$($state.artifact_id) sha256=$($state.sha256)"
+Write-Output "restart_download=passed case_id=$($resultState.case_id) artifact_id=$($resultState.artifact_id) sha256=$($resultState.sha256) archive_artifact_id=$($archiveState.artifact_id) archive_sha256=$($archiveState.sha256)"

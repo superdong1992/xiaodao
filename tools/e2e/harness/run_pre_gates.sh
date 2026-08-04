@@ -25,7 +25,7 @@ case "${1:-}" in
     test -z "$(git -C /opt/src/problem-locator-mcp status --porcelain --untracked-files=all)"
     test -z "$(find /opt/src/xiaodao /opt/src/logparse /opt/src/problem-locator-mcp \
       \( -type d -name __pycache__ -o -type f -name '*.pyc' \) -print -quit)"
-    git -c core.autocrlf=false diff --binary --no-ext-diff > /tmp/attempt52-pre-pytest.patch
+    git -c core.autocrlf=false diff --binary --no-ext-diff --no-renames > /tmp/attempt52-pre-pytest.patch
     test "$(sha256sum /tmp/attempt52-pre-pytest.patch | awk '{print $1}')" = "$patch_sha"
     cmp /tmp/attempt52-pre-pytest.patch /evidence/source.patch
     printf 'pre_pytest_sha256=%s\n' "$patch_sha" >> /evidence/patch-rehash-evidence.txt
@@ -42,7 +42,9 @@ case "${1:-}" in
   target)
     python -m pytest -q \
       tests/unit/application/test_external_commands.py::test_submit_supplement_accepts_canonical_fact_order_for_multiple_inputs \
-      tests/unit/integrations/test_generator_v2.py \
+      tests/unit/integrations/test_generator_v3.py \
+      tests/unit/integrations/test_result_archive.py \
+      tests/unit/integrations/test_skill_contract.py \
       tests/unit/integrations/test_logparse_outputs.py \
       tests/unit/integrations/test_logparse_primitives.py::test_git_inventory_trusts_only_the_exact_configured_repository \
       tests/unit/integrations/test_logparse_primitives.py::test_git_inventory_ignores_ambient_repository_and_config_redirection \
@@ -60,7 +62,7 @@ case "${1:-}" in
     uv pip check --python /opt/venvs/xiaodao/bin/python
     uv pip check --python /opt/venvs/logparse/bin/python
     git -c core.autocrlf=false diff --check
-    git -c core.autocrlf=false diff --binary --no-ext-diff > /tmp/attempt52-current.patch
+    git -c core.autocrlf=false diff --binary --no-ext-diff --no-renames > /tmp/attempt52-current.patch
     test "$(sha256sum /tmp/attempt52-current.patch | awk '{print $1}')" = "$patch_sha"
     cmp /tmp/attempt52-current.patch /evidence/source.patch
     install -m 0644 /tmp/attempt52-current.patch /evidence/host-current.patch

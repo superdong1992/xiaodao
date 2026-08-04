@@ -1,8 +1,9 @@
 # Windows HTTP capture driver
 
-This PowerShell 5.1 bundle captures the public `USER_RESULT` before and after
-the Linux service restart and proves that the internal `LOGPARSE_RUN` remains
-unavailable. It never reads Claude settings, environment variables, or tokens,
+This PowerShell 5.1 bundle captures both public deliverables before and after
+the Linux service restart: `diagnosis-result.json` (`USER_RESULT`) and
+`result.zip` (`USER_RESULT_ARCHIVE`). It also proves that the internal
+`LOGPARSE_RUN` remains unavailable. It never reads Claude settings, environment variables, or tokens,
 and it never invokes Claude. Its only runtime network process is the exact
 `C:\Windows\System32\curl.exe`, restricted to the fixed loopback service URL.
 
@@ -34,8 +35,10 @@ write-out fields are converted to strict JSON metadata containing exactly
 `http_code`, `num_redirects`, `size_download`, and `url_effective`.
 
 The `After` phase reads the canonical `state-export.before.json`, requires one
-resolved Case, exactly one `USER_RESULT`, exactly one `LOGPARSE_RUN`, and no
-execution failures, then requests the internal artifact's exact content URL.
+resolved Case, exactly one `USER_RESULT`, exactly one `USER_RESULT_ARCHIVE`,
+exactly one `LOGPARSE_RUN`, and no execution failures, then requests the
+internal artifact's exact content URL.
 It requires one HTTP response block with status 404 and the exact
-`ARTIFACT_NOT_FOUND` error envelope. It also requires the public result body to
-be byte-identical to the `Before` download.
+`ARTIFACT_NOT_FOUND` error envelope. It also requires both public response
+bodies to be byte-identical to their `Before` downloads and validates the ZIP
+as the flat `result.txt` plus ordered target-log bundle.

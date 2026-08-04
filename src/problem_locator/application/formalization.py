@@ -949,7 +949,7 @@ def build_job(
     if snapshot.diagnosis_state_revision != spec.target_state_revision:
         raise ValueError("projected ContextSnapshot has the wrong revision")
 
-    evidence_refs = [
+    resolved_evidence_refs = [
         resolve_planned_resource_binding(
             binding,
             existing_resource_ids=existing_evidence_ids,
@@ -957,6 +957,16 @@ def build_job(
         )
         for binding in spec.evidence_bindings
     ]
+    if len(resolved_evidence_refs) != len(set(resolved_evidence_refs)):
+        raise ValueError("JobSpec evidence bindings resolve to duplicate Evidence IDs")
+    requested_evidence_refs = set(resolved_evidence_refs)
+    evidence_refs = [
+        evidence_id
+        for evidence_id in snapshot.evidence_refs
+        if evidence_id in requested_evidence_refs
+    ]
+    if len(evidence_refs) != len(requested_evidence_refs):
+        raise ValueError("JobSpec evidence bindings are absent from the target snapshot")
     artifact_refs = [
         resolve_planned_resource_binding(
             binding,

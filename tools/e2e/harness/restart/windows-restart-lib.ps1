@@ -14,8 +14,8 @@ $script:RestartMcpUrl = 'http://127.0.0.1:18000/mcp'
 $script:RestartServiceBaseUrl = 'http://127.0.0.1:18000'
 $script:RestartClientSkillSha256 = '5ca6564dc823641b9c6b0f3a6c4178829d57eeb13190e21ae5d19ae3d8300d41'
 $script:RestartSkillId = 'diagnosis-skill/diagnose-service-takeover'
-$script:RestartSkillVersion = '2.0.0'
-$script:RestartSkillHash = '4ce37124b5fb97233188150e074e3b71d995e27bd3941a51a05aa1d5cd2251e7'
+$script:RestartSkillVersion = '3.0.4'
+$script:RestartSkillHash = '08573b8e01e2b5c213c59b0b27b3922566293af1aed963c09c6f735f41abdd95'
 $script:RestartGetTool = 'problem_locator_get_case'
 $script:RestartListTool = 'problem_locator_list_artifacts'
 $script:RestartFullGetTool = "mcp__problem_locator__$($script:RestartGetTool)"
@@ -207,6 +207,10 @@ function Get-RestartDownloadOutputNames {
         'restart-download.curl.stderr.txt',
         'restart-download.response.headers.txt',
         'restart-diagnosis-result.json',
+        'restart-archive-download.curl.stdout.txt',
+        'restart-archive-download.curl.stderr.txt',
+        'restart-archive-download.response.headers.txt',
+        'restart-result.zip',
         'restart-download-verification.json'
     )
 }
@@ -396,12 +400,18 @@ function Assert-RestartFinalResult {
 }
 
 function Assert-RestartArtifactView {
-    param($Artifact, [Parameter(Mandatory = $true)][string]$CaseId, [Parameter(Mandatory = $true)][string]$Label)
+    param(
+        $Artifact,
+        [Parameter(Mandatory = $true)][string]$CaseId,
+        [Parameter(Mandatory = $true)][string]$ExpectedName,
+        [Parameter(Mandatory = $true)][string]$ExpectedContentType,
+        [Parameter(Mandatory = $true)][string]$Label
+    )
     Assert-RestartExactProperties $Artifact @('artifact_id', 'name', 'content_type', 'size', 'sha256', 'created_at', 'download_url') $Label
     $artifactId = Get-RestartStringProperty $Artifact 'artifact_id'
     Assert-RestartUuid $artifactId "$Label artifact_id"
-    Assert-Restart ((Get-RestartStringProperty $Artifact 'name') -ceq 'diagnosis-result.json') "$Label name"
-    Assert-Restart ((Get-RestartStringProperty $Artifact 'content_type') -ceq 'application/json') "$Label content_type"
+    Assert-Restart ((Get-RestartStringProperty $Artifact 'name') -ceq $ExpectedName) "$Label name"
+    Assert-Restart ((Get-RestartStringProperty $Artifact 'content_type') -ceq $ExpectedContentType) "$Label content_type"
     Assert-Restart ((Get-RestartIntegerProperty $Artifact 'size') -gt 0) "$Label size"
     Assert-RestartSha256 (Get-RestartStringProperty $Artifact 'sha256') "$Label SHA-256"
     Assert-Restart (-not [string]::IsNullOrWhiteSpace((Get-RestartStringProperty $Artifact 'created_at'))) "$Label created_at"
@@ -413,7 +423,7 @@ function Read-PreRestartSummaryValidated {
     param([Parameter(Mandatory = $true)][string]$EvidenceRoot)
     $path = Join-Path $EvidenceRoot 'journey-authoritative-summary.json'
     $summary = Read-RestartJson $path
-    Assert-RestartExactProperties $summary @('schema_version', 'attempt', 'case_id', 'attachment_id', 'resolved_case_revision', 'diagnosis_state_revision', 'selected_skill_ref', 'final_result', 'observed_statuses', 'public_artifact', 'request_ids', 'phase3_mcp_call_count') 'pre-restart authoritative summary'
+    Assert-RestartExactProperties $summary @('schema_version', 'attempt', 'case_id', 'attachment_id', 'resolved_case_revision', 'diagnosis_state_revision', 'selected_skill_ref', 'final_result', 'observed_statuses', 'public_artifact', 'public_result_archive', 'request_ids', 'phase3_mcp_call_count') 'pre-restart authoritative summary'
     Assert-Restart ((Get-RestartIntegerProperty $summary 'schema_version') -eq 1) 'pre-restart summary schema_version'
     Assert-Restart ((Get-RestartStringProperty $summary 'attempt') -ceq (Get-RestartAttemptLabel $EvidenceRoot)) 'pre-restart summary attempt'
     $caseId = Get-RestartStringProperty $summary 'case_id'
@@ -423,7 +433,8 @@ function Read-PreRestartSummaryValidated {
     Assert-Restart ((Get-RestartIntegerProperty $summary 'diagnosis_state_revision') -gt 0) 'pre-restart diagnosis revision'
     Assert-RestartSelectedSkill (Get-RestartProperty $summary 'selected_skill_ref' -Required) 'pre-restart selected Skill'
     Assert-RestartFinalResult (Get-RestartProperty $summary 'final_result' -Required) 'pre-restart final result'
-    Assert-RestartArtifactView (Get-RestartProperty $summary 'public_artifact' -Required) $caseId 'pre-restart public artifact'
+    Assert-RestartArtifactView (Get-RestartProperty $summary 'public_artifact' -Required) $caseId 'diagnosis-result.json' 'application/json' 'pre-restart public result artifact'
+    Assert-RestartArtifactView (Get-RestartProperty $summary 'public_result_archive' -Required) $caseId 'result.zip' 'application/zip' 'pre-restart public archive artifact'
     $statuses = Get-RestartProperty $summary 'observed_statuses' -Required
     Assert-RestartStringArray $statuses 'pre-restart observed statuses'
     $statusArray = @($statuses)
@@ -709,10 +720,10 @@ function Get-RestartSuccessData {
 }
 
 function Assert-RestartArtifactSummary {
-    param($Summary, $Artifact)
+    param($Summary, $Artifact, [Parameter(Mandatory = $true)][string]$ExpectedKind)
     Assert-RestartExactProperties $Summary @('artifact_id', 'kind', 'name', 'content_type', 'resource_kind', 'size', 'sha256', 'created_by_job_id', 'created_at', 'downloadable') 'post-restart ArtifactSummary'
     Assert-Restart ((Get-RestartStringProperty $Summary 'artifact_id') -ceq (Get-RestartStringProperty $Artifact 'artifact_id')) 'ArtifactSummary artifact_id'
-    Assert-Restart ((Get-RestartStringProperty $Summary 'kind') -ceq 'USER_RESULT') 'ArtifactSummary kind'
+    Assert-Restart ((Get-RestartStringProperty $Summary 'kind') -ceq $ExpectedKind) 'ArtifactSummary kind'
     Assert-Restart ((Get-RestartStringProperty $Summary 'name') -ceq (Get-RestartStringProperty $Artifact 'name')) 'ArtifactSummary name'
     Assert-Restart ((Get-RestartStringProperty $Summary 'content_type') -ceq (Get-RestartStringProperty $Artifact 'content_type')) 'ArtifactSummary content_type'
     Assert-Restart ((Get-RestartStringProperty $Summary 'resource_kind') -ceq 'FILE') 'ArtifactSummary resource_kind'
@@ -752,7 +763,7 @@ function Confirm-RestartPersistenceResult {
     Assert-RestartJsonEquivalent $finalResult (Get-RestartProperty $PreSummary 'final_result' -Required) 'persisted final result'
     $caseArtifacts = Get-RestartProperty $view 'artifacts' -Required
     Assert-RestartJsonArray $caseArtifacts 'post-restart Case artifacts'
-    Assert-Restart (@($caseArtifacts).Count -eq 1) 'post-restart Case public artifact count'
+    Assert-Restart (@($caseArtifacts).Count -eq 2) 'post-restart Case public artifact count'
 
     Assert-RestartExactProperties $list.input @('case_id') 'post-restart list_artifacts input'
     Assert-Restart ((Get-RestartStringProperty $list.input 'case_id') -ceq $caseId) 'post-restart list_artifacts case_id'
@@ -760,11 +771,23 @@ function Confirm-RestartPersistenceResult {
     Assert-RestartExactProperties $listData @('artifacts') 'post-restart list_artifacts data'
     $artifacts = Get-RestartProperty $listData 'artifacts' -Required
     Assert-RestartJsonArray $artifacts 'post-restart public artifacts'
-    Assert-Restart (@($artifacts).Count -eq 1) 'post-restart public artifact count'
-    $artifact = @($artifacts)[0]
-    Assert-RestartArtifactView $artifact $caseId 'post-restart public artifact'
+    Assert-Restart (@($artifacts).Count -eq 2) 'post-restart public artifact count'
+    $resultArtifacts = @($artifacts | Where-Object { (Get-RestartStringProperty $_ 'name') -ceq 'diagnosis-result.json' })
+    $archiveArtifacts = @($artifacts | Where-Object { (Get-RestartStringProperty $_ 'name') -ceq 'result.zip' })
+    Assert-Restart ($resultArtifacts.Count -eq 1) 'post-restart result ArtifactView count'
+    Assert-Restart ($archiveArtifacts.Count -eq 1) 'post-restart archive ArtifactView count'
+    $artifact = $resultArtifacts[0]
+    $archive = $archiveArtifacts[0]
+    Assert-RestartArtifactView $artifact $caseId 'diagnosis-result.json' 'application/json' 'post-restart public result artifact'
+    Assert-RestartArtifactView $archive $caseId 'result.zip' 'application/zip' 'post-restart public archive artifact'
     Assert-RestartJsonEquivalent $artifact (Get-RestartProperty $PreSummary 'public_artifact' -Required) 'persisted public artifact'
-    Assert-RestartArtifactSummary @($caseArtifacts)[0] $artifact
+    Assert-RestartJsonEquivalent $archive (Get-RestartProperty $PreSummary 'public_result_archive' -Required) 'persisted public archive'
+    $resultSummaries = @($caseArtifacts | Where-Object { (Get-RestartStringProperty $_ 'kind') -ceq 'USER_RESULT' })
+    $archiveSummaries = @($caseArtifacts | Where-Object { (Get-RestartStringProperty $_ 'kind') -ceq 'USER_RESULT_ARCHIVE' })
+    Assert-Restart ($resultSummaries.Count -eq 1) 'post-restart USER_RESULT ArtifactSummary count'
+    Assert-Restart ($archiveSummaries.Count -eq 1) 'post-restart USER_RESULT_ARCHIVE ArtifactSummary count'
+    Assert-RestartArtifactSummary $resultSummaries[0] $artifact 'USER_RESULT'
+    Assert-RestartArtifactSummary $archiveSummaries[0] $archive 'USER_RESULT_ARCHIVE'
 
     $prePath = Join-Path $EvidenceRoot 'journey-authoritative-summary.json'
     $preHash = (Get-FileHash -LiteralPath $prePath -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -780,6 +803,7 @@ function Confirm-RestartPersistenceResult {
         selected_skill_ref = $selectedSkill
         final_result = $finalResult
         public_artifact = $artifact
+        public_result_archive = $archive
         get_case_wait_timed_out = $false
         mcp_call_order = @($script:RestartGetTool, $script:RestartListTool)
         claude_version = $script:RestartClaudeVersion
@@ -792,7 +816,7 @@ function Confirm-RestartPersistenceResult {
 function Read-RestartSummaryValidated {
     param([Parameter(Mandatory = $true)][string]$EvidenceRoot, $PreSummary)
     $summary = Read-RestartJson (Join-Path $EvidenceRoot 'restart-authoritative-summary.json')
-    Assert-RestartExactProperties $summary @('schema_version', 'attempt', 'pre_restart_summary_sha256', 'case_id', 'attachment_id', 'resolved_case_revision', 'diagnosis_state_revision', 'selected_skill_ref', 'final_result', 'public_artifact', 'get_case_wait_timed_out', 'mcp_call_order', 'claude_version', 'model_alias', 'effective_model', 'persistence_unchanged') 'restart authoritative summary'
+    Assert-RestartExactProperties $summary @('schema_version', 'attempt', 'pre_restart_summary_sha256', 'case_id', 'attachment_id', 'resolved_case_revision', 'diagnosis_state_revision', 'selected_skill_ref', 'final_result', 'public_artifact', 'public_result_archive', 'get_case_wait_timed_out', 'mcp_call_order', 'claude_version', 'model_alias', 'effective_model', 'persistence_unchanged') 'restart authoritative summary'
     Assert-Restart ((Get-RestartIntegerProperty $summary 'schema_version') -eq 1) 'restart summary schema_version'
     Assert-Restart ((Get-RestartStringProperty $summary 'attempt') -ceq (Get-RestartAttemptLabel $EvidenceRoot)) 'restart summary attempt'
     $preHash = (Get-FileHash -LiteralPath (Join-Path $EvidenceRoot 'journey-authoritative-summary.json') -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -805,8 +829,10 @@ function Read-RestartSummaryValidated {
     Assert-RestartJsonEquivalent (Get-RestartProperty $summary 'selected_skill_ref' -Required) (Get-RestartProperty $PreSummary 'selected_skill_ref' -Required) 'restart/pre selected Skill'
     Assert-RestartFinalResult (Get-RestartProperty $summary 'final_result' -Required) 'restart summary final result'
     Assert-RestartJsonEquivalent (Get-RestartProperty $summary 'final_result' -Required) (Get-RestartProperty $PreSummary 'final_result' -Required) 'restart/pre final result'
-    Assert-RestartArtifactView (Get-RestartProperty $summary 'public_artifact' -Required) (Get-RestartStringProperty $summary 'case_id') 'restart summary public artifact'
+    Assert-RestartArtifactView (Get-RestartProperty $summary 'public_artifact' -Required) (Get-RestartStringProperty $summary 'case_id') 'diagnosis-result.json' 'application/json' 'restart summary public result artifact'
+    Assert-RestartArtifactView (Get-RestartProperty $summary 'public_result_archive' -Required) (Get-RestartStringProperty $summary 'case_id') 'result.zip' 'application/zip' 'restart summary public archive artifact'
     Assert-RestartJsonEquivalent (Get-RestartProperty $summary 'public_artifact' -Required) (Get-RestartProperty $PreSummary 'public_artifact' -Required) 'restart/pre public artifact'
+    Assert-RestartJsonEquivalent (Get-RestartProperty $summary 'public_result_archive' -Required) (Get-RestartProperty $PreSummary 'public_result_archive' -Required) 'restart/pre public archive artifact'
     Assert-Restart (-not (Get-RestartBooleanProperty $summary 'get_case_wait_timed_out')) 'restart summary wait timeout'
     $order = Get-RestartProperty $summary 'mcp_call_order' -Required
     Assert-RestartStringArray $order 'restart summary MCP order'
@@ -844,8 +870,16 @@ function Get-RestartResponseHeaders {
 }
 
 function Invoke-RestartArtifactDownload {
-    param([Parameter(Mandatory = $true)][string]$EvidenceRoot, $Summary)
-    $artifact = Get-RestartProperty $Summary 'public_artifact' -Required
+    param(
+        [Parameter(Mandatory = $true)][string]$EvidenceRoot,
+        $Summary,
+        [Parameter(Mandatory = $true)][ValidateSet('public_artifact', 'public_result_archive')][string]$ArtifactProperty,
+        [Parameter(Mandatory = $true)][string]$Prefix,
+        [Parameter(Mandatory = $true)][string]$BodyName,
+        [Parameter(Mandatory = $true)][string]$ExpectedContentType,
+        [switch]$JsonObject
+    )
+    $artifact = Get-RestartProperty $Summary $ArtifactProperty -Required
     $caseId = Get-RestartStringProperty $Summary 'case_id'
     $artifactId = Get-RestartStringProperty $artifact 'artifact_id'
     $size = Get-RestartIntegerProperty $artifact 'size'
@@ -853,10 +887,10 @@ function Invoke-RestartArtifactDownload {
     $url = Get-RestartStringProperty $artifact 'download_url'
     $expectedUrl = "$($script:RestartServiceBaseUrl)/api/v1/artifacts/$artifactId/content?case_id=$caseId"
     Assert-Restart ($url -ceq $expectedUrl) 'download URL must be exact loopback URL'
-    $stdout = Join-Path $EvidenceRoot 'restart-download.curl.stdout.txt'
-    $stderr = Join-Path $EvidenceRoot 'restart-download.curl.stderr.txt'
-    $headers = Join-Path $EvidenceRoot 'restart-download.response.headers.txt'
-    $body = Join-Path $EvidenceRoot 'restart-diagnosis-result.json'
+    $stdout = Join-Path $EvidenceRoot "$Prefix.curl.stdout.txt"
+    $stderr = Join-Path $EvidenceRoot "$Prefix.curl.stderr.txt"
+    $headers = Join-Path $EvidenceRoot "$Prefix.response.headers.txt"
+    $body = Join-Path $EvidenceRoot $BodyName
     Assert-RestartReservedUnused $headers
     Assert-RestartReservedUnused $body
     $arguments = @(
@@ -876,15 +910,17 @@ function Invoke-RestartArtifactDownload {
     Assert-Restart ([System.IO.File]::ReadAllText($stdout, $script:RestartUtf8).Trim() -ceq '200') 'restart artifact curl HTTP code'
     $headerResult = Get-RestartResponseHeaders $headers
     Assert-Restart ($headerResult.headers.ContainsKey('content-type')) 'download Content-Type header absent'
-    Assert-Restart ($headerResult.headers['content-type'] -ceq 'application/json') 'download Content-Type header'
+    Assert-Restart ($headerResult.headers['content-type'] -ceq $ExpectedContentType) 'download Content-Type header'
     Assert-Restart ($headerResult.headers.ContainsKey('content-length')) 'download Content-Length header absent'
     Assert-Restart ($headerResult.headers['content-length'] -ceq [string]$size) 'download Content-Length header'
     $item = Get-Item -LiteralPath $body
     Assert-Restart ($item.Length -eq $size) 'downloaded artifact byte count'
     $actualHash = (Get-FileHash -LiteralPath $body -Algorithm SHA256).Hash.ToLowerInvariant()
     Assert-Restart ($actualHash -ceq $sha256) 'downloaded artifact SHA-256'
-    $payload = Read-RestartJson $body
-    Assert-RestartJsonObject $payload 'downloaded UserResult payload'
+    if ($JsonObject) {
+        $payload = Read-RestartJson $body
+        Assert-RestartJsonObject $payload 'downloaded UserResult payload'
+    }
     return [PSCustomObject][ordered]@{
         schema_version = 1
         attempt = Get-RestartAttemptLabel $EvidenceRoot
@@ -896,7 +932,7 @@ function Invoke-RestartArtifactDownload {
         content_length = $size
         size = $item.Length
         sha256 = $actualHash
-        json_object = $true
+        json_object = [bool]$JsonObject
         curl_connect_timeout_seconds = $script:RestartCurlConnectTimeoutSeconds
         curl_max_time_seconds = $script:RestartCurlMaxTimeSeconds
         curl_max_filesize = $size

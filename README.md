@@ -1,5 +1,36 @@
 # Problem Locator V1
 
+## Diagnosis Skill v3
+
+当前落地版本为 GenerationSpec v2、生成器/生成 Skill `3.0.4`、manifest schema `2`、DIAGNOSE output contract `2.0.3` 和 S00 contract revision `v1-contract-r4`。
+
+本仓库将故障定位能力分为三层：
+
+- 全局 DIAGNOSE output contract 只定义通用 Schema、Canonical JSON、Evidence、Candidate、原子输出和安全约束，不包含 RPC、数据库等业务字段。
+- `logparse-diagnose` 只负责 Logparse broker、一次解析、`LOGPARSE_RUN` 持久化与复用，以及受控路径规则。
+- 每个生成的 Diagnosis Skill 自己声明业务 requirements、阶段、补参提示、约束和 Logparse 字段映射。
+
+Diagnosis Skill 由 `wiki-to-diagnosis-skill` 根据 GenerationSpec v2 生成。每个 requirement 都必须声明 `name`、`kind`、`stage`、`fulfillment_source`、`prompt` 和 S00 原生 `constraints`。`requires_logparse` 只表示绑定 Logparse 工具，不会自动生成 RPC 参数；`custom_parameters` 为空表示不增加任何自定义参数。
+
+Logparse 产品可以省略。省略时 Runtime 记录有效产品 `default`，Broker 不向上游强制传入 `--product`；只有非默认产品才显式传参。日志归档的 Content-Type 由平台按后缀确定：`.gz/.tar.gz/.tgz` 为 `application/gzip`，`.zip` 为 `application/zip`，`.tar` 为 `application/x-tar`。
+
+候选结论必须同时产出：
+
+- `diagnosis-result.json`：规范化 `USER_RESULT`。
+- `result.zip`：可交付的 `USER_RESULT_ARCHIVE`，扁平包含 `result.txt` 和按证据顺序编号的目标日志；无日志场景只包含 `result.txt`。
+
+两项结果都必须经过 Review PASS 才会公开下载。`LOGPARSE_RUN` 仍是内部持久化输入，不会作为公开产物返回。当前生成器包含 RPC 超时、数据库死锁和无日志人工排查三个异构 Fixture，用于验证参数隔离与有/无 Logparse 的流程差异。完整设计与版本矩阵见 [`design/diagnosis-skill-v3-generalization-plan.md`](design/diagnosis-skill-v3-generalization-plan.md)。
+
+### 2026-08-04 发布验收
+
+同一份生产补丁已通过仓库内置的官方分段发布链路：
+
+- `Fast` attempt47：从 Windows 原生 Claude Code 客户端调用 Linux 容器内服务，完成 INITIAL 补参、日志上传、一次 Logparse、AFTER_LOGPARSE 补参、Candidate、Review、公开产物下载、服务重启和持久化复核；156 项测试全部通过，最终结果为 `ACCEPTED`，耗时 385.243 秒。
+- `ReleaseGates` attempt48：严格复用 attempt47 的成功业务证据和相同生产补丁身份，并行执行目标回归、1980 项全量套件、干净安装包、原生 Linux 启动、真实 Agent/Route/Diagnosis 合同门；2143 项测试零失败、13 项按平台/条件跳过，耗时 173.875 秒，低于 480 秒 SLA。
+- 两轮最终密钥扫描均通过。重启前后 `diagnosis-result.json` 与 `result.zip` 字节一致；内部 `LOGPARSE_RUN` 通过公开下载接口访问时返回 404。
+
+本地证据分别保存在 `.tmp/pl-e2e-evidence/attempt47-20260804-030256` 和 `.tmp/pl-e2e-evidence/attempt48-20260804-030949`。这些运行时证据不属于发布包，发布结论应以其中的 `verification-report.json`、最终审计 JSON 和 JUnit 文件为准。
+
 Problem Locator 是一个单实例故障诊断服务。它接收结构化问题，收集事实与附件，执行固定版本的路由、诊断和复核任务，最终发布经过复核的 `USER_RESULT` 结果文件。
 
 V1 使用本地 JSON 状态文件和文件系统资源实现持久化；所有业务写操作都通过应用服务及其仓储端口完成。
@@ -121,6 +152,17 @@ uv run python -m problem_locator export-state \
 
 r3 状态模式与预发布阶段的 r2 数据有意保持不兼容。旧数据只能离线重建，或迁移到全新的 r3 安装中；服务不提供 r2 原地兼容路径。
 
+### 冻结发布边界声明
+
+以下英文短句是发布测试使用的稳定语义标识；中文解释是规范正文：
+
+- r3 state schema is intentionally incompatible：r3 不对 r2 提供原地兼容。
+- Replay every durable, finalized but unconfirmed Job Outcome：启动时先重放所有已最终确定但未确认的 Outcome。
+- 当 `state.json` approaches 16 MiB 时，应启动离线迁移设计。
+- 当 retained history approaches 500 Cases 时，应启动离线迁移设计。
+- 需要 second service instance or high availability 时，必须迁移出单实例 JSON 架构。
+- 恢复或迁移期间必须 keep the original JSON root read-only。
+
 ## PostgreSQL 迁移边界
 
 V1 不包含 PostgreSQL、ORM、双写机制或分布式锁。当满足以下任一条件时，应开始设计离线 PostgreSQL 迁移方案：
@@ -151,7 +193,7 @@ V1 不包含 PostgreSQL、ORM、双写机制或分布式锁。当满足以下任
 a233b500d9c99e6815d1ffd82cb4ca55bbfe657a
 ```
 
-当前 S08 候选版本没有原生 Windows 或 Linux 启动结果，因此不能宣称已经具备跨平台发布条件。在以下两条原生命令针对同一个候选版本 HEAD 通过之前，必须在 `handoff/S08.json` 的 `known_limitations` 和 `risks` 中将其记录为未执行门禁，并在 `integration_notes` 中说明同样的限制；不得将其作为已通过结果加入交接记录的 `tests` 数组。
+当前候选工作区已经完成 Windows 客户端到 Linux 服务的完整发布旅程和原生 Linux 启动门禁；这不等价于原生 Windows 服务启动或 macOS 门禁。后两项仍未在本次验收中执行，不得宣称为通过；需要发布到对应平台时，仍须在同一候选版本上执行下列平台门禁，并在交接记录中准确区分“通过”和“未执行”。
 
 macOS shell（在候选发布版本 HEAD 上执行）：
 

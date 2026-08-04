@@ -289,7 +289,12 @@ function Get-HcBeforeOutputNames {
         'diagnosis-result.before.headers',
         'diagnosis-result.before.meta.json',
         'diagnosis-result.before.curl.stdout.txt',
-        'diagnosis-result.before.curl.stderr.txt'
+        'diagnosis-result.before.curl.stderr.txt',
+        'result-archive.before.zip',
+        'result-archive.before.headers',
+        'result-archive.before.meta.json',
+        'result-archive.before.curl.stdout.txt',
+        'result-archive.before.curl.stderr.txt'
     )
 }
 
@@ -300,6 +305,11 @@ function Get-HcAfterOutputNames {
         'diagnosis-result.after.meta.json',
         'diagnosis-result.after.curl.stdout.txt',
         'diagnosis-result.after.curl.stderr.txt',
+        'result-archive.after.zip',
+        'result-archive.after.headers',
+        'result-archive.after.meta.json',
+        'result-archive.after.curl.stdout.txt',
+        'result-archive.after.curl.stderr.txt',
         'internal-logparse.after.headers',
         'internal-logparse.after.meta.json',
         'internal-logparse.after.body.json',
@@ -458,8 +468,8 @@ function Assert-HcSelectedSkill {
     param($Skill, [Parameter(Mandatory = $true)][string]$Label)
     Assert-HcExactProperties $Skill @('id', 'version', 'content_hash') $Label
     Assert-Hc ((Get-HcStringProperty $Skill 'id') -ceq 'diagnosis-skill/diagnose-service-takeover') "$Label id"
-    Assert-Hc ((Get-HcStringProperty $Skill 'version') -ceq '2.0.0') "$Label version"
-    Assert-Hc ((Get-HcStringProperty $Skill 'content_hash') -ceq '4ce37124b5fb97233188150e074e3b71d995e27bd3941a51a05aa1d5cd2251e7') "$Label content hash"
+    Assert-Hc ((Get-HcStringProperty $Skill 'version') -ceq '3.0.4') "$Label version"
+    Assert-Hc ((Get-HcStringProperty $Skill 'content_hash') -ceq '08573b8e01e2b5c213c59b0b27b3922566293af1aed963c09c6f735f41abdd95') "$Label content hash"
 }
 
 function Assert-HcFinalResult {
@@ -494,12 +504,18 @@ function Assert-HcFinalResult {
 }
 
 function Assert-HcArtifactView {
-    param($Artifact, [Parameter(Mandatory = $true)][string]$CaseId, [Parameter(Mandatory = $true)][string]$Label)
+    param(
+        $Artifact,
+        [Parameter(Mandatory = $true)][string]$CaseId,
+        [Parameter(Mandatory = $true)][string]$ExpectedName,
+        [Parameter(Mandatory = $true)][string]$ExpectedContentType,
+        [Parameter(Mandatory = $true)][string]$Label
+    )
     Assert-HcExactProperties $Artifact @('artifact_id', 'name', 'content_type', 'size', 'sha256', 'created_at', 'download_url') $Label
     $artifactId = Get-HcStringProperty $Artifact 'artifact_id'
     Assert-HcUuid $artifactId "$Label artifact_id"
-    Assert-Hc ((Get-HcStringProperty $Artifact 'name') -ceq 'diagnosis-result.json') "$Label name"
-    Assert-Hc ((Get-HcStringProperty $Artifact 'content_type') -ceq 'application/json') "$Label content type"
+    Assert-Hc ((Get-HcStringProperty $Artifact 'name') -ceq $ExpectedName) "$Label name"
+    Assert-Hc ((Get-HcStringProperty $Artifact 'content_type') -ceq $ExpectedContentType) "$Label content type"
     $size = Get-HcIntegerProperty $Artifact 'size'
     Assert-Hc ($size -gt 0 -and $size -le 16777216) "$Label size must be within the 16 MiB public result bound"
     Assert-HcSha256 (Get-HcStringProperty $Artifact 'sha256') "$Label SHA-256"
@@ -511,7 +527,7 @@ function Assert-HcArtifactView {
 function Read-HcJourneySummary {
     param([Parameter(Mandatory = $true)][string]$EvidenceRoot)
     $summary = Read-HcJson -Path (Join-Path $EvidenceRoot 'journey-authoritative-summary.json') -Label 'journey authoritative summary'
-    Assert-HcExactProperties $summary @('schema_version', 'attempt', 'case_id', 'attachment_id', 'resolved_case_revision', 'diagnosis_state_revision', 'selected_skill_ref', 'final_result', 'observed_statuses', 'public_artifact', 'request_ids', 'phase3_mcp_call_count') 'journey authoritative summary'
+    Assert-HcExactProperties $summary @('schema_version', 'attempt', 'case_id', 'attachment_id', 'resolved_case_revision', 'diagnosis_state_revision', 'selected_skill_ref', 'final_result', 'observed_statuses', 'public_artifact', 'public_result_archive', 'request_ids', 'phase3_mcp_call_count') 'journey authoritative summary'
     Assert-Hc ((Get-HcIntegerProperty $summary 'schema_version') -eq 1) 'journey summary schema_version'
     $attempt = Get-HcAttemptLabel $EvidenceRoot
     Assert-Hc ((Get-HcStringProperty $summary 'attempt') -ceq $attempt) 'journey summary attempt'
@@ -522,7 +538,8 @@ function Read-HcJourneySummary {
     Assert-Hc ((Get-HcIntegerProperty $summary 'diagnosis_state_revision') -gt 0) 'journey diagnosis revision'
     Assert-HcSelectedSkill (Get-HcProperty $summary 'selected_skill_ref' -Required) 'journey selected Skill'
     Assert-HcFinalResult (Get-HcProperty $summary 'final_result' -Required) 'journey final result'
-    Assert-HcArtifactView (Get-HcProperty $summary 'public_artifact' -Required) $caseId 'journey public ArtifactView'
+    Assert-HcArtifactView (Get-HcProperty $summary 'public_artifact' -Required) $caseId 'diagnosis-result.json' 'application/json' 'journey public result ArtifactView'
+    Assert-HcArtifactView (Get-HcProperty $summary 'public_result_archive' -Required) $caseId 'result.zip' 'application/zip' 'journey public archive ArtifactView'
     $statuses = Get-HcProperty $summary 'observed_statuses' -Required
     Assert-HcStringArray $statuses 'journey observed statuses'
     Assert-Hc (@($statuses).Count -ge 2) 'journey status count'
@@ -563,7 +580,9 @@ function Confirm-HcRestartManifest {
     $expectedOutputs = @(
         'windows-restart-claude-version.stdout.txt', 'windows-restart-claude-version.stderr.txt',
         'restart.prompt.txt', 'restart.stream-json.stdout.ndjson', 'restart.stderr.txt', 'restart.authoritative.json', 'restart-authoritative-summary.json',
-        'restart-download.curl.stdout.txt', 'restart-download.curl.stderr.txt', 'restart-download.response.headers.txt', 'restart-diagnosis-result.json', 'restart-download-verification.json'
+        'restart-download.curl.stdout.txt', 'restart-download.curl.stderr.txt', 'restart-download.response.headers.txt', 'restart-diagnosis-result.json',
+        'restart-archive-download.curl.stdout.txt', 'restart-archive-download.curl.stderr.txt', 'restart-archive-download.response.headers.txt', 'restart-result.zip',
+        'restart-download-verification.json'
     )
     $outputs = Get-HcProperty $manifest 'possible_runtime_outputs' -Required
     Assert-HcStringArray $outputs 'restart manifest outputs'
@@ -575,7 +594,7 @@ function Read-HcRestartSummary {
     param([Parameter(Mandatory = $true)][string]$EvidenceRoot, $BeforeSummary)
     $summaryPath = Join-Path $EvidenceRoot 'restart-authoritative-summary.json'
     $summary = Read-HcJson -Path $summaryPath -Label 'restart authoritative summary'
-    Assert-HcExactProperties $summary @('schema_version', 'attempt', 'pre_restart_summary_sha256', 'case_id', 'attachment_id', 'resolved_case_revision', 'diagnosis_state_revision', 'selected_skill_ref', 'final_result', 'public_artifact', 'get_case_wait_timed_out', 'mcp_call_order', 'claude_version', 'model_alias', 'effective_model', 'persistence_unchanged') 'restart authoritative summary'
+    Assert-HcExactProperties $summary @('schema_version', 'attempt', 'pre_restart_summary_sha256', 'case_id', 'attachment_id', 'resolved_case_revision', 'diagnosis_state_revision', 'selected_skill_ref', 'final_result', 'public_artifact', 'public_result_archive', 'get_case_wait_timed_out', 'mcp_call_order', 'claude_version', 'model_alias', 'effective_model', 'persistence_unchanged') 'restart authoritative summary'
     Assert-Hc ((Get-HcIntegerProperty $summary 'schema_version') -eq 1) 'restart summary schema_version'
     Assert-Hc ((Get-HcStringProperty $summary 'attempt') -ceq (Get-HcAttemptLabel $EvidenceRoot)) 'restart summary attempt'
     $beforePath = Join-Path $EvidenceRoot 'journey-authoritative-summary.json'
@@ -588,10 +607,12 @@ function Read-HcRestartSummary {
     Assert-HcSelectedSkill (Get-HcProperty $summary 'selected_skill_ref' -Required) 'restart selected Skill'
     Assert-HcFinalResult (Get-HcProperty $summary 'final_result' -Required) 'restart final result'
     $caseId = Get-HcStringProperty $summary 'case_id'
-    Assert-HcArtifactView (Get-HcProperty $summary 'public_artifact' -Required) $caseId 'restart public ArtifactView'
+    Assert-HcArtifactView (Get-HcProperty $summary 'public_artifact' -Required) $caseId 'diagnosis-result.json' 'application/json' 'restart public result ArtifactView'
+    Assert-HcArtifactView (Get-HcProperty $summary 'public_result_archive' -Required) $caseId 'result.zip' 'application/zip' 'restart public archive ArtifactView'
     Assert-HcJsonEquivalent (Get-HcProperty $summary 'selected_skill_ref' -Required) (Get-HcProperty $BeforeSummary 'selected_skill_ref' -Required) 'restart/pre selected Skill'
     Assert-HcJsonEquivalent (Get-HcProperty $summary 'final_result' -Required) (Get-HcProperty $BeforeSummary 'final_result' -Required) 'restart/pre final result'
     Assert-HcJsonEquivalent (Get-HcProperty $summary 'public_artifact' -Required) (Get-HcProperty $BeforeSummary 'public_artifact' -Required) 'restart/pre public ArtifactView'
+    Assert-HcJsonEquivalent (Get-HcProperty $summary 'public_result_archive' -Required) (Get-HcProperty $BeforeSummary 'public_result_archive' -Required) 'restart/pre public archive ArtifactView'
     Assert-Hc (-not (Get-HcBooleanProperty $summary 'get_case_wait_timed_out')) 'restart wait timeout flag'
     Assert-Hc (Get-HcBooleanProperty $summary 'persistence_unchanged') 'restart persistence flag'
     $order = Get-HcProperty $summary 'mcp_call_order' -Required
@@ -783,17 +804,22 @@ function Assert-HcPublicCapture {
     param(
         [Parameter(Mandatory = $true)][string]$EvidenceRoot,
         [Parameter(Mandatory = $true)][ValidateSet('before', 'after')][string]$Label,
-        $Summary
+        $Summary,
+        [Parameter(Mandatory = $true)][ValidateSet('public_artifact', 'public_result_archive')][string]$ArtifactProperty,
+        [Parameter(Mandatory = $true)][string]$Stem,
+        [Parameter(Mandatory = $true)][string]$BodyExtension,
+        [Parameter(Mandatory = $true)][string]$ExpectedContentType,
+        [switch]$CanonicalJson
     )
-    $artifact = Get-HcProperty $Summary 'public_artifact' -Required
+    $artifact = Get-HcProperty $Summary $ArtifactProperty -Required
     $caseId = Get-HcStringProperty $Summary 'case_id'
     $artifactId = Get-HcStringProperty $artifact 'artifact_id'
     $expectedUrl = "$($script:HcServiceBaseUrl)/api/v1/artifacts/$artifactId/content?case_id=$caseId"
     $expectedSize = Get-HcIntegerProperty $artifact 'size'
     $expectedHash = Get-HcStringProperty $artifact 'sha256'
-    $bodyPath = Join-Path $EvidenceRoot "diagnosis-result.$Label.json"
-    $headersPath = Join-Path $EvidenceRoot "diagnosis-result.$Label.headers"
-    $metaPath = Join-Path $EvidenceRoot "diagnosis-result.$Label.meta.json"
+    $bodyPath = Join-Path $EvidenceRoot "$Stem.$Label.$BodyExtension"
+    $headersPath = Join-Path $EvidenceRoot "$Stem.$Label.headers"
+    $metaPath = Join-Path $EvidenceRoot "$Stem.$Label.meta.json"
     $headers = Read-HcHeaderCapture -Path $headersPath -ExpectedStatus 200 -Label "$Label public response headers"
     $meta = Read-HcJson -Path $metaPath -Label "$Label public curl metadata"
     Assert-HcExactProperties $meta @('http_code', 'num_redirects', 'size_download', 'url_effective') "$Label public curl metadata"
@@ -802,16 +828,16 @@ function Assert-HcPublicCapture {
     Assert-Hc ((Get-HcIntegerProperty $meta 'size_download') -eq $expectedSize) "$Label public downloaded size metadata"
     Assert-HcExactLoopbackUrl -Url (Get-HcStringProperty $meta 'url_effective') -Expected $expectedUrl -Label "$Label public effective URL"
     Assert-Hc ($headers.headers.ContainsKey('content-type')) "$Label public Content-Type absent"
-    Assert-Hc ($headers.headers['content-type'] -ceq 'application/json') "$Label public Content-Type"
+    Assert-Hc ($headers.headers['content-type'] -ceq $ExpectedContentType) "$Label $Stem Content-Type"
     Assert-Hc ($headers.headers.ContainsKey('content-length')) "$Label public Content-Length absent"
     Assert-Hc ($headers.headers['content-length'] -ceq [string]$expectedSize) "$Label public Content-Length"
     Assert-Hc ($headers.headers.ContainsKey('x-content-sha256')) "$Label public X-Content-SHA256 absent"
     Assert-Hc ($headers.headers['x-content-sha256'] -ceq $expectedHash) "$Label public X-Content-SHA256"
-    $body = Read-HcBytes -Path $bodyPath -Label "$Label diagnosis result"
-    Assert-Hc ($body.Length -eq $expectedSize) "$Label diagnosis result size"
+    $body = Read-HcBytes -Path $bodyPath -Label "$Label $Stem"
+    Assert-Hc ($body.Length -eq $expectedSize) "$Label $Stem size"
     $actualHash = (Get-FileHash -LiteralPath $bodyPath -Algorithm SHA256).Hash.ToLowerInvariant()
-    Assert-Hc ($actualHash -ceq $expectedHash) "$Label diagnosis result SHA-256"
-    [void](Read-HcCanonicalJson -Path $bodyPath -Label "$Label diagnosis result")
+    Assert-Hc ($actualHash -ceq $expectedHash) "$Label $Stem SHA-256"
+    if ($CanonicalJson) { [void](Read-HcCanonicalJson -Path $bodyPath -Label "$Label diagnosis result") }
     return [PSCustomObject]@{ body = $body; sha256 = $actualHash; artifact_id = $artifactId; case_id = $caseId }
 }
 
@@ -819,21 +845,26 @@ function Invoke-HcPublicCapture {
     param(
         [Parameter(Mandatory = $true)][string]$EvidenceRoot,
         [Parameter(Mandatory = $true)][ValidateSet('before', 'after')][string]$Label,
-        $Summary
+        $Summary,
+        [Parameter(Mandatory = $true)][ValidateSet('public_artifact', 'public_result_archive')][string]$ArtifactProperty,
+        [Parameter(Mandatory = $true)][string]$Stem,
+        [Parameter(Mandatory = $true)][string]$BodyExtension,
+        [Parameter(Mandatory = $true)][string]$ExpectedContentType,
+        [switch]$CanonicalJson
     )
-    $artifact = Get-HcProperty $Summary 'public_artifact' -Required
+    $artifact = Get-HcProperty $Summary $ArtifactProperty -Required
     $caseId = Get-HcStringProperty $Summary 'case_id'
     $artifactId = Get-HcStringProperty $artifact 'artifact_id'
     $url = Get-HcStringProperty $artifact 'download_url'
     $expected = "$($script:HcServiceBaseUrl)/api/v1/artifacts/$artifactId/content?case_id=$caseId"
     Assert-HcExactLoopbackUrl -Url $url -Expected $expected -Label "$Label public ArtifactView"
-    $bodyPath = Join-Path $EvidenceRoot "diagnosis-result.$Label.json"
-    $headersPath = Join-Path $EvidenceRoot "diagnosis-result.$Label.headers"
-    $metaPath = Join-Path $EvidenceRoot "diagnosis-result.$Label.meta.json"
-    $stdoutPath = Join-Path $EvidenceRoot "diagnosis-result.$Label.curl.stdout.txt"
-    $stderrPath = Join-Path $EvidenceRoot "diagnosis-result.$Label.curl.stderr.txt"
+    $bodyPath = Join-Path $EvidenceRoot "$Stem.$Label.$BodyExtension"
+    $headersPath = Join-Path $EvidenceRoot "$Stem.$Label.headers"
+    $metaPath = Join-Path $EvidenceRoot "$Stem.$Label.meta.json"
+    $stdoutPath = Join-Path $EvidenceRoot "$Stem.$Label.curl.stdout.txt"
+    $stderrPath = Join-Path $EvidenceRoot "$Stem.$Label.curl.stderr.txt"
     [void](Invoke-HcCurlGet -EvidenceRoot $EvidenceRoot -Url $url -MaxFilesize (Get-HcIntegerProperty $artifact 'size') -BodyPath $bodyPath -HeadersPath $headersPath -MetaPath $metaPath -StdoutPath $stdoutPath -StderrPath $stderrPath)
-    return Assert-HcPublicCapture -EvidenceRoot $EvidenceRoot -Label $Label -Summary $Summary
+    return Assert-HcPublicCapture -EvidenceRoot $EvidenceRoot -Label $Label -Summary $Summary -ArtifactProperty $ArtifactProperty -Stem $Stem -BodyExtension $BodyExtension -ExpectedContentType $ExpectedContentType -CanonicalJson:$CanonicalJson
 }
 
 function Read-HcInternalLogparseArtifact {
@@ -848,7 +879,7 @@ function Read-HcInternalLogparseArtifact {
     $counts = Get-HcProperty $export 'object_counts' -Required
     Assert-HcExactProperties $counts @('cases', 'jobs', 'outcomes', 'outcome_processing_records', 'execution_failure_records', 'attachments', 'evidence', 'artifacts', 'idempotency_records', 'runtime_epochs', 'recovery_processing_records') 'StateExport object_counts'
     Assert-Hc ((Get-HcIntegerProperty $counts 'cases') -eq 1) 'StateExport Case count'
-    Assert-Hc ((Get-HcIntegerProperty $counts 'artifacts') -eq 2) 'StateExport Artifact count'
+    Assert-Hc ((Get-HcIntegerProperty $counts 'artifacts') -eq 3) 'StateExport Artifact count'
     Assert-Hc ((Get-HcIntegerProperty $counts 'execution_failure_records') -eq 0) 'StateExport execution failure count'
     $state = Get-HcProperty $export 'state' -Required
     Assert-HcExactProperties $state @('schema_version', 'contract_revision', 'generation', 'installation_id', 'created_at', 'updated_at', 'runtime_epochs', 'recovery_processing_records', 'cases', 'idempotency_records') 'StateFile'
@@ -871,11 +902,13 @@ function Read-HcInternalLogparseArtifact {
     $artifacts = Get-HcProperty $aggregate 'artifacts' -Required
     Assert-HcJsonObject $artifacts 'CaseAggregate artifacts'
     $records = @($artifacts.PSObject.Properties | ForEach-Object { $_.Value })
-    Assert-Hc ($records.Count -eq 2) 'CaseAggregate must contain exactly two artifacts'
+    Assert-Hc ($records.Count -eq 3) 'CaseAggregate must contain exactly three artifacts'
     $logparse = @($records | Where-Object { (Get-HcStringProperty $_ 'kind') -ceq 'LOGPARSE_RUN' })
     $userResults = @($records | Where-Object { (Get-HcStringProperty $_ 'kind') -ceq 'USER_RESULT' })
+    $userResultArchives = @($records | Where-Object { (Get-HcStringProperty $_ 'kind') -ceq 'USER_RESULT_ARCHIVE' })
     Assert-Hc ($logparse.Count -eq 1) 'CaseAggregate must contain exactly one LOGPARSE_RUN'
     Assert-Hc ($userResults.Count -eq 1) 'CaseAggregate must contain exactly one USER_RESULT'
+    Assert-Hc ($userResultArchives.Count -eq 1) 'CaseAggregate must contain exactly one USER_RESULT_ARCHIVE'
     $artifact = $logparse[0]
     Assert-HcExactProperties $artifact @('artifact_id', 'case_id', 'kind', 'name', 'content_type', 'resource_kind', 'size', 'sha256', 'storage_key', 'metadata', 'created_by_job_id', 'created_at') 'LOGPARSE_RUN Artifact'
     $artifactId = Get-HcStringProperty $artifact 'artifact_id'
@@ -951,22 +984,27 @@ function Invoke-HcBeforePhase {
     Confirm-HcJourneyManifest $EvidenceRoot
     $summary = Read-HcJourneySummary $EvidenceRoot
     New-HcOutputReservations -EvidenceRoot $EvidenceRoot -Names (Get-HcBeforeOutputNames)
-    $capture = Invoke-HcPublicCapture -EvidenceRoot $EvidenceRoot -Label 'before' -Summary $summary
-    return [PSCustomObject]@{ phase = 'Before'; case_id = $capture.case_id; artifact_id = $capture.artifact_id; sha256 = $capture.sha256; http_code = 200 }
+    $capture = Invoke-HcPublicCapture -EvidenceRoot $EvidenceRoot -Label 'before' -Summary $summary -ArtifactProperty 'public_artifact' -Stem 'diagnosis-result' -BodyExtension 'json' -ExpectedContentType 'application/json' -CanonicalJson
+    $archiveCapture = Invoke-HcPublicCapture -EvidenceRoot $EvidenceRoot -Label 'before' -Summary $summary -ArtifactProperty 'public_result_archive' -Stem 'result-archive' -BodyExtension 'zip' -ExpectedContentType 'application/zip'
+    return [PSCustomObject]@{ phase = 'Before'; case_id = $capture.case_id; artifact_id = $capture.artifact_id; sha256 = $capture.sha256; archive_artifact_id = $archiveCapture.artifact_id; archive_sha256 = $archiveCapture.sha256; http_code = 200 }
 }
 
 function Invoke-HcAfterPhase {
     param([Parameter(Mandatory = $true)][string]$EvidenceRoot)
     Confirm-HcJourneyManifest $EvidenceRoot
     $beforeSummary = Read-HcJourneySummary $EvidenceRoot
-    $beforeCapture = Assert-HcPublicCapture -EvidenceRoot $EvidenceRoot -Label 'before' -Summary $beforeSummary
+    $beforeCapture = Assert-HcPublicCapture -EvidenceRoot $EvidenceRoot -Label 'before' -Summary $beforeSummary -ArtifactProperty 'public_artifact' -Stem 'diagnosis-result' -BodyExtension 'json' -ExpectedContentType 'application/json' -CanonicalJson
+    $beforeArchiveCapture = Assert-HcPublicCapture -EvidenceRoot $EvidenceRoot -Label 'before' -Summary $beforeSummary -ArtifactProperty 'public_result_archive' -Stem 'result-archive' -BodyExtension 'zip' -ExpectedContentType 'application/zip'
     Confirm-HcRestartManifest $EvidenceRoot
     $restartSummary = Read-HcRestartSummary -EvidenceRoot $EvidenceRoot -BeforeSummary $beforeSummary
     [void](Read-HcInternalLogparseArtifact -EvidenceRoot $EvidenceRoot -ExpectedCaseId (Get-HcStringProperty $beforeSummary 'case_id'))
     New-HcOutputReservations -EvidenceRoot $EvidenceRoot -Names (Get-HcAfterOutputNames)
-    $afterCapture = Invoke-HcPublicCapture -EvidenceRoot $EvidenceRoot -Label 'after' -Summary $restartSummary
+    $afterCapture = Invoke-HcPublicCapture -EvidenceRoot $EvidenceRoot -Label 'after' -Summary $restartSummary -ArtifactProperty 'public_artifact' -Stem 'diagnosis-result' -BodyExtension 'json' -ExpectedContentType 'application/json' -CanonicalJson
+    $afterArchiveCapture = Invoke-HcPublicCapture -EvidenceRoot $EvidenceRoot -Label 'after' -Summary $restartSummary -ArtifactProperty 'public_result_archive' -Stem 'result-archive' -BodyExtension 'zip' -ExpectedContentType 'application/zip'
     Assert-HcBytesEqual -Before $beforeCapture.body -After $afterCapture.body -Label 'public result before/after restart'
     Assert-Hc ($beforeCapture.sha256 -ceq $afterCapture.sha256) 'public result hash before/after restart'
+    Assert-HcBytesEqual -Before $beforeArchiveCapture.body -After $afterArchiveCapture.body -Label 'public archive before/after restart'
+    Assert-Hc ($beforeArchiveCapture.sha256 -ceq $afterArchiveCapture.sha256) 'public archive hash before/after restart'
     $internal = Invoke-HcInternalCapture -EvidenceRoot $EvidenceRoot -BeforeSummary $beforeSummary
-    return [PSCustomObject]@{ phase = 'After'; case_id = $afterCapture.case_id; artifact_id = $afterCapture.artifact_id; sha256 = $afterCapture.sha256; http_code = 200; internal_artifact_id = $internal.artifact_id; internal_http_code = 404 }
+    return [PSCustomObject]@{ phase = 'After'; case_id = $afterCapture.case_id; artifact_id = $afterCapture.artifact_id; sha256 = $afterCapture.sha256; archive_artifact_id = $afterArchiveCapture.artifact_id; archive_sha256 = $afterArchiveCapture.sha256; http_code = 200; internal_artifact_id = $internal.artifact_id; internal_http_code = 404 }
 }
