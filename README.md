@@ -35,7 +35,7 @@ V1 使用本地 JSON 状态文件和文件系统资源实现持久化；所有�
 
 - CPython 3.12（项目要求 `>=3.12,<3.13`）
 - `uv`，并使用仓库中已提交的 `uv.lock`
-- 固定版本的 Logparse Git 工作区、配置文件及 Python 启动器
+- 受控的 Logparse Git 工作区、配置文件及 Python 启动器
 - 用于执行真实 Agent 任务、兼容 Claude 的命令行程序
 
 安装锁定版本的运行时依赖和开发依赖：
@@ -56,7 +56,7 @@ uv lock --check
 | `DATA_ROOT` | 是 | 无 | 独占的持久化状态、资源和任务根目录 |
 | `PUBLIC_BASE_URL` | 是 | 无 | 对外提供服务的 HTTP(S) 根地址，不得包含查询参数或片段 |
 | `SKILL_DIR` | 是 | 无 | 存放固定版本诊断 Skill 的目录 |
-| `LOGPARSE_REPO` | 是 | 无 | 固定版本的 Logparse Git 工作区 |
+| `LOGPARSE_REPO` | 是 | 无 | 受控的 Logparse Git 工作区；启动时按实际内容生成指纹 |
 | `LOGPARSE_CONFIG_PATH` | 是 | 无 | Logparse 工作区内的配置文件 |
 | `BIND_HOST` | 否 | `127.0.0.1` | Uvicorn 监听地址 |
 | `PORT` | 否 | `8000` | Uvicorn 监听端口 |
@@ -183,11 +183,7 @@ V1 不包含 PostgreSQL、ORM、双写机制或分布式锁。当满足以下任
 
 ### 原生启动门禁
 
-原生门禁会在其他操作系统上主动跳过；被跳过意味着门禁尚未执行，不能视为通过。每个运行环境都必须使用同一个候选发布 Git HEAD、CPython 3.12、锁定版本的依赖，以及位于以下提交且工作区干净的 Logparse：
-
-```text
-a233b500d9c99e6815d1ffd82cb4ca55bbfe657a
-```
+原生门禁会在其他操作系统上主动跳过；被跳过意味着门禁尚未执行，不能视为通过。每个运行环境都必须使用同一个候选发布 Git HEAD、CPython 3.12、锁定版本的依赖，以及运行门禁时所选的、工作区干净的 Logparse checkout。门禁会记录实际 Logparse commit 作为证据，但不再限制为某个固定 commit。
 
 当前候选工作区已经完成 Windows 客户端到 Linux 服务的完整发布旅程和原生 Linux 启动门禁；这不等价于原生 Windows 服务启动或 macOS 门禁。后两项仍未在本次验收中执行，不得宣称为通过；需要发布到对应平台时，仍须在同一候选版本上执行下列平台门禁，并在交接记录中准确区分“通过”和“未执行”。
 
@@ -230,7 +226,7 @@ export CLAUDE_COMMAND=claude
 uv run pytest tests/e2e/test_native_startup_gate.py::test_native_linux_startup_gate -q -p no:cacheprovider
 ```
 
-每项测试都会校验原生操作系统、Logparse 提交与干净工作区、从环境文件启动、`/live`、`/ready` 的全部 5 项检查、限时关闭、规范化的 `validate-state` 与 `export-state`、实例锁释放，以及第二次恢复启动。
+每项测试都会校验原生操作系统、Logparse 干净工作区、从环境文件启动、`/live`、`/ready` 的全部 5 项检查、限时关闭、规范化的 `validate-state` 与 `export-state`、实例锁释放，以及第二次恢复启动。
 
 成功结果必须记录准确的候选发布 SHA、操作系统/构建版本、架构、Python 版本、执行命令和 pytest 用例数量。
 
@@ -260,7 +256,7 @@ export CLAUDE_COMMAND=/absolute/path/to/claude
 uv run pytest tests/e2e/test_installed_distribution_gate.py -q -p no:cacheprovider
 ```
 
-预期结果为恰好 1 个测试通过。该测试会校验：wheel 只能从新环境的 `site-packages` 导入；运行时依赖版本已锁定；运行环境中不包含 pytest 和 Hatchling；Logparse 位于指定提交且工作区干净；Skill 产品哈希正确；可以通过环境文件启动已安装服务；`/live` 和 `/ready` 的全部 5 项检查通过；服务可以限时关闭；已安装的 `validate-state` 和 `export-state` 命令输出规范化结果。
+预期结果为恰好 1 个测试通过。该测试会校验：wheel 只能从新环境的 `site-packages` 导入；运行时依赖版本已锁定；运行环境中不包含 pytest 和 Hatchling；Logparse 工作区干净；Skill 产品哈希正确；可以通过环境文件启动已安装服务；`/live` 和 `/ready` 的全部 5 项检查通过；服务可以限时关闭；已安装的 `validate-state` 和 `export-state` 命令输出规范化结果。
 
 如果在最终 S08 仅交接提交之前获得原生测试结果，应将真实命令和摘要加入 `handoff/S08.json.tests[]`。如果结果在该不可变提交之后才产生，不得修改或重写交接记录；应将相同字段附加到下游发布验证记录中，并保留 S08 的限制，直至经过批准的后续交接记录正式纳入该证据。
 

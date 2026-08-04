@@ -9,7 +9,6 @@ import stat
 import subprocess
 
 
-EXPECTED_COMMIT = "a233b500d9c99e6815d1ffd82cb4ca55bbfe657a"
 EXPECTED_ARCHIVE_SHA256 = (
     "194f69fecd8dc8d40d1aedeb6fc25d2b7b4922b176be2b15be73ffe386cc5064"
 )
@@ -59,7 +58,6 @@ commit = subprocess.run(
     capture_output=True,
     text=True,
 ).stdout.strip()
-assert commit == EXPECTED_COMMIT
 status = subprocess.run(
     ["git", "-C", os.fspath(repo), "status", "--porcelain"],
     check=True,

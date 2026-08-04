@@ -2,7 +2,6 @@
 set -euo pipefail
 
 xiaodao_base=c31cc03848155d03b9a35776555e413f26b264ad
-logparse_commit=a233b500d9c99e6815d1ffd82cb4ca55bbfe657a
 mcp_commit=97d0446580f49e7b1add1c5fc6d6a41c97884884
 patch_source=/evidence/source-input.patch
 patch_sha=$(awk 'NR == 1 && $2 == "/evidence/source-input.patch" {print $1}' /evidence/source-input.patch.sha256)
@@ -33,6 +32,8 @@ cmp /tmp/e2e-after-apply.patch /evidence/source.patch
   printf 'after_apply_sha256=%s\n' "$patch_sha"
 } > /evidence/patch-rehash-evidence.txt
 
+logparse_commit=$(git -C /source/logparse rev-parse HEAD)
+test -n "$logparse_commit"
 git clone --no-hardlinks /source/logparse /opt/src/logparse
 git -C /opt/src/logparse checkout --detach "$logparse_commit"
 git -C /opt/src/logparse config core.autocrlf false

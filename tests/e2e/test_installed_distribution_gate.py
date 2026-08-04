@@ -24,7 +24,6 @@ from problem_locator.contracts import (
 
 
 ROOT = Path(__file__).resolve().parents[2]
-LOGPARSE_COMMIT = "a233b500d9c99e6815d1ffd82cb4ca55bbfe657a"
 TAKEOVER_PRODUCT_HASH = (
     "ae47a1a63e6cf4849f83b0f9d49db608c1e93ebe1713f21d58c910990b0857a4"
 )
@@ -350,13 +349,6 @@ def _real_asset_paths(
     assert logparse_config.is_file() and not logparse_config.is_symlink()
     assert logparse_python.is_file() and os.access(logparse_python, os.X_OK)
 
-    head = _run_checked(
-        ["git", "-C", os.fspath(logparse_repo), "rev-parse", "HEAD"],
-        cwd=outside_cwd,
-        environ=environ,
-        label="real Logparse HEAD verification",
-    ).stdout.strip()
-    assert head == LOGPARSE_COMMIT
     status = _run_checked(
         [
             "git",

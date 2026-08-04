@@ -484,6 +484,12 @@ $boundaryText = [System.IO.File]::ReadAllText($boundaryPath)
 $boundaryRunnerText = [System.IO.File]::ReadAllText((Join-Path $DriverRoot 'verify_nonroot_python_launchers.sh'))
 $sourceSetupText = [System.IO.File]::ReadAllText((Join-Path $DriverRoot 'setup_sources.sh'))
 $preGatesText = [System.IO.File]::ReadAllText((Join-Path $DriverRoot 'run_pre_gates.sh'))
+if (-not $sourceSetupText.Contains('logparse_commit=$(git -C /source/logparse rev-parse HEAD)')) {
+    throw 'setup_sources.sh must use the selected Logparse source HEAD'
+}
+if ($sourceSetupText -match '(?m)^logparse_commit=[0-9a-f]{40,64}$') {
+    throw 'setup_sources.sh must not pin Logparse to a fixed commit'
+}
 foreach ($literal in @(
     'from problem_locator.integrations.logparse.broker import build_logparse_runtime',
     'from problem_locator.runtime.catalog import VersionedAssetCatalog',
@@ -836,7 +842,6 @@ foreach ($literal in @(
     'old_attempt51_failed_resources_preserved=PASS',
     'linux_identity_sha256',
     "xiaodao_base = 'c31cc03848155d03b9a35776555e413f26b264ad'",
-    "logparse = 'a233b500d9c99e6815d1ffd82cb4ca55bbfe657a'",
     "problem_locator_mcp = '97d0446580f49e7b1add1c5fc6d6a41c97884884'",
     "'execution-order.txt', 'restart\execution-order.restart.txt', 'real-agent-command-template.txt', 'real-route-agent-command-template.txt', 'real-diagnose-agent-command-template.txt', 'installed-gate-command-template.txt'",
     '07-real-route-agent.xml',

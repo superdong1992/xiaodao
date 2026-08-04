@@ -23,7 +23,6 @@ from problem_locator.contracts import (
 
 
 ROOT = Path(__file__).resolve().parents[2]
-LOGPARSE_COMMIT = "a233b500d9c99e6815d1ffd82cb4ca55bbfe657a"
 OFFICIAL_KEYS = {
     "BIND_HOST",
     "CLAUDE_COMMAND",
@@ -176,13 +175,6 @@ def _run_native_startup_gate(expected_system: str, tmp_path: Path) -> None:
     logparse_repo = _required_absolute_path("LOGPARSE_REPO")
     logparse_config = _required_absolute_path("LOGPARSE_CONFIG_PATH")
     logparse_python = _required_absolute_path("LOGPARSE_PYTHON")
-    observed_commit = subprocess.run(
-        ["git", "-C", os.fspath(logparse_repo), "rev-parse", "HEAD"],
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
-    assert observed_commit == LOGPARSE_COMMIT
     assert subprocess.run(
         ["git", "-C", os.fspath(logparse_repo), "status", "--porcelain"],
         check=True,
