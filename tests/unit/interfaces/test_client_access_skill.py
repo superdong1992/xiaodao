@@ -219,6 +219,9 @@ def test_skill_document_names_tools_and_safety_invariants() -> None:
     assert "object<string,string>" in readme
     assert "完整保留上游权威输入 schema" in readme
     assert "PROBLEM_LOCATOR_CLIENT_SCHEMA_MODE=diagnostic" in readme
+    assert "PROBLEM_LOCATOR_WINDOWS_LINUX_GATE" in readme
+    assert "PROBLEM_LOCATOR_REAL_HOST_DFX_GATE" in readme
+    assert "argument_json_types.problem_spec" in readme
     assert "服务端日志不需要安装额外组件" in readme
     assert "tail -f /var/log/problem-locator/debug.jsonl" in readme
 

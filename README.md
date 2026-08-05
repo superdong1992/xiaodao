@@ -172,6 +172,30 @@ tail -f /var/log/problem-locator/client.jsonl
 
 每次调用的完整参数、完整响应/错误、顶层 `argument_json_types`、`operation_id`、`attempt_id`、递增的 `attempt_number`、schema 模式、包/代理版本和耗时都会写入客户端 JSONL；工具发现事件还包含每个已公布 schema 的 SHA-256。未配置 `PROBLEM_LOCATOR_CLIENT_DFX_LOG_FILE` 时，默认日志位置是客户端项目目录下的 `.problem-locator/client-dfx.jsonl`。
 
+#### Windows 客户端到 Linux 服务端的发布门禁
+
+仓库提供两个默认跳过、必须显式启用的 E2E 门禁。第一个门禁使用已安装的 Windows 客户端代理连接真实 Linux `/mcp`，分别发送对象和 JSON 字符串，并校验服务端验证结果及客户端 DFX。它故意使用空 `request_id`，因此请求只经过参数验证，不会创建 Case 或写入远端业务状态：
+
+```powershell
+$env:PROBLEM_LOCATOR_WINDOWS_LINUX_GATE = "1"
+$env:PROBLEM_LOCATOR_LINUX_MCP_URL = "http://192.168.1.20:8000/mcp"
+$env:PROBLEM_LOCATOR_WINDOWS_PROXY_COMMAND = "C:\absolute\path\problem-locator-client-proxy.exe"
+# 可选鉴权头，值必须是 JSON 字符串 Map：
+# $env:PROBLEM_LOCATOR_LINUX_MCP_HEADERS_JSON = '{"Authorization":"Bearer token"}'
+python -m pytest tests/e2e/test_windows_linux_client_gate.py::test_windows_proxy_to_real_linux_mcp_preserves_compound_json_types -q
+```
+
+第二个门禁用于验证真实 Agent/MCP Host，而不是由测试代码直接构造参数。先在专用测试服务上让 Agent 使用一个已知 `request_id` 调用 `problem_locator_create_case`，再检查该次调用产生的客户端 DFX：
+
+```powershell
+$env:PROBLEM_LOCATOR_REAL_HOST_DFX_GATE = "1"
+$env:PROBLEM_LOCATOR_REAL_HOST_DFX_LOG = "D:\logs\problem-locator\client.jsonl"
+$env:PROBLEM_LOCATOR_REAL_HOST_REQUEST_ID = "10000000-0000-0000-0000-000000000001"
+python -m pytest tests/e2e/test_windows_linux_client_gate.py::test_real_host_dfx_proves_problem_spec_entered_proxy_as_an_object -q
+```
+
+该门禁要求对应 `client.proxy.tools.discovered` 事件为 `schema_mode=strict`、包和代理版本均为当前版本，并要求目标调用的 `argument_json_types.problem_spec` 等于 `object`。因此后续即使问题发生在 Agent/Host 构造参数、旧 schema 缓存或客户端安装版本，而不是 Python MCP 传输层，也会在发布验收中直接失败。
+
 `/live` 表示 HTTP 进程正在提供服务。`/ready` 还会检查配置、实例锁、状态有效性、数据目录和启动恢复过程。在恢复期间，或出现致命状态/worker 故障后，服务可能仍然存活，但尚未就绪。
 
 ### DFX 诊断日志

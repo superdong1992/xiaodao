@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import json
 from pathlib import Path
 from typing import Any
 
@@ -270,6 +271,13 @@ def test_all_problem_locator_call_shapes_are_strict_and_diagnostic() -> None:
                 restored["properties"][property_name].pop("description")
         assert restored == authoritative[name]
         Draft202012Validator.check_schema(strict_schema)
+        wire_tool = json.loads(
+            types.Tool(
+                name=name,
+                inputSchema=strict_schema,
+            ).model_dump_json(by_alias=True, exclude_none=False)
+        )
+        assert wire_tool["inputSchema"] == strict_schema
 
     authoritative_prepare = authoritative["problem_locator_prepare_attachment"]
     authoritative_supplement = authoritative[
