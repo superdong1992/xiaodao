@@ -41,12 +41,14 @@ Use `problem_locator_resume_case` only for a persisted pending or interrupted Ca
 
 Read the open requirements from the latest Case view. Map each answer to its exact requirement `name`, then call `problem_locator_submit_supplement` with a new stable `request_id`, the latest revision, `inputs`, and any READY `attachment_ids`. Preserve values exactly; do not trim, normalize, or invent missing facts.
 
+The call shape is exact: `inputs` is one JSON object whose keys are requirement names and whose values are strings, for example `"inputs": {"order_id": "order-1"}`. It is never a list of name/value records. `attachment_ids` is the separate JSON array. Do not invent aliases for either member.
+
 On `REVISION_CONFLICT`, call `problem_locator_get_case`, review the new state, update `expected_case_revision`, and retry the same logical submission without changing its stable request ID. Do not retry an `IDEMPOTENCY_CONFLICT` as if it were a revision conflict.
 
 ## Upload a selected file
 
 1. Ask the user to identify the local file; do not ask for a Logparse archive Content-Type. Derive it from the canonical lowercase filename suffix: `.zip` maps to `application/zip`, `.tar` maps to `application/x-tar`, and `.tar.gz`, `.tgz`, or `.gz` map to `application/gzip`. Reject path-like attachment names, control characters, uppercase archive suffixes, and unsupported suffixes while still accepting the user's legitimate local path. For a non-Logparse attachment, use the Content-Type declared by its requirement or caller context rather than inventing one.
-2. Call `problem_locator_prepare_attachment` with the current revision and a fresh stable `request_id`.
+2. Call `problem_locator_prepare_attachment` with the current revision and a fresh stable `request_id`. Its exact filename and byte-count members are `name` and `declared_size`; never send `attachment_name` or `declared_byte_count`. The full input has exactly `request_id`, `case_id`, `expected_case_revision`, `name`, `content_type`, `declared_size`, and `declared_sha256`.
 3. Use the returned `UploadDescriptor` verbatim. Require exactly its four headers. Read the complete local file to determine its byte count and lowercase SHA-256, stop if it exceeds `max_bytes`, and verify any non-null declared length/hash. Replace a null `Content-Length` or `X-Content-SHA256` with the measured value. Keep `Idempotency-Key` equal to `attachment_id` and do not reuse the prepare request ID for PUT.
 4. Invoke system `curl` with an argument array, or quote every URL, header value, and local path as an independent argument. Never concatenate an unquoted shell command. Support spaces, Unicode, quotes, and shell metacharacters in the local path.
 5. Read the PUT response's new `case_revision`.

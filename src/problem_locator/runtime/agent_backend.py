@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import stat
 import threading
@@ -23,6 +24,7 @@ from problem_locator.contracts.models import (
     ResourceLimits,
 )
 from problem_locator.contracts.ports import AppendOnlyByteSink, CancellationSignal
+from problem_locator.diagnostics import log_event
 from problem_locator.journey import record_stage_completed, record_stage_started
 
 from .claude_command import ClaudeCommandError, prepare_claude_command
@@ -605,6 +607,18 @@ class AgentBackend:
                 "elapsed_seconds": result.elapsed_seconds,
             },
         )
+        try:
+            log_event(
+                "runtime.agent_backend.completed",
+                level=logging.INFO,
+                returncode=result.returncode,
+                stdout_stderr_bytes=result.stdout_stderr_bytes,
+                workspace_bytes=result.workspace_bytes,
+                elapsed_seconds=result.elapsed_seconds,
+            )
+        except Exception:
+            # Observability must never change successful Agent execution.
+            pass
         return result
 
 

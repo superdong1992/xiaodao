@@ -79,9 +79,20 @@ class PrepareAttachmentRequest(_RequestModel):
     request_id: NonEmptyText
     case_id: OpaqueId
     expected_case_revision: PositiveInt
-    name: NonEmptyText
+    name: NonEmptyText = Field(
+        description=(
+            "Attachment filename. The JSON member is named `name`; "
+            "do not send `attachment_name`."
+        )
+    )
     content_type: ContentType
-    declared_size: NonNegativeInt | None = None
+    declared_size: NonNegativeInt | None = Field(
+        default=None,
+        description=(
+            "Optional byte count. The JSON member is named `declared_size`; "
+            "do not send `declared_byte_count`."
+        ),
+    )
     declared_sha256: Sha256 | None = None
 
 
@@ -89,8 +100,15 @@ class SubmitSupplementRequest(_RequestModel):
     request_id: NonEmptyText
     case_id: OpaqueId
     expected_case_revision: PositiveInt
-    inputs: dict[str, str]
-    attachment_ids: list[OpaqueId]
+    inputs: dict[str, str] = Field(
+        description=(
+            "JSON object mapping each exact requirement name to its string value; "
+            "send an object, never a list."
+        )
+    )
+    attachment_ids: list[OpaqueId] = Field(
+        description="JSON array of READY attachment IDs."
+    )
     wait_seconds: WaitSeconds = 0
 
 
@@ -154,8 +172,15 @@ _REQUESTS: dict[str, type[_RequestModel]] = {
 
 _DESCRIPTIONS = {
     "problem_locator_create_case": "Create a new diagnosis case.",
-    "problem_locator_prepare_attachment": "Prepare an immutable attachment upload.",
-    "problem_locator_submit_supplement": "Submit facts and READY attachments to a waiting case.",
+    "problem_locator_prepare_attachment": (
+        "Prepare an immutable attachment upload. Use the exact input members "
+        "`name` and `declared_size`; `attachment_name` and "
+        "`declared_byte_count` are not aliases."
+    ),
+    "problem_locator_submit_supplement": (
+        "Submit facts and READY attachments to a waiting case. `inputs` is a "
+        "JSON object mapping requirement names to string values, never a list."
+    ),
     "problem_locator_get_case": "Read the current public case view.",
     "problem_locator_resume_case": "Resume a persisted pending or interrupted case.",
     "problem_locator_cancel_case": "Cancel a case using its current revision.",

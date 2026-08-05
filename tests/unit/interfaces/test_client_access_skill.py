@@ -176,6 +176,10 @@ def test_skill_document_names_tools_and_safety_invariants() -> None:
     assert "problem-locator-client-proxy" in skill
     assert "does not read or depend on Claude Code debug logs" in skill
     assert "attempt_number" in skill
+    assert '"inputs": {"order_id": "order-1"}' in skill
+    assert "It is never a list of name/value records" in skill
+    assert "`name` and `declared_size`" in skill
+    assert "`attachment_name` or `declared_byte_count`" in skill
 
     config = (
         Path(__file__).parents[3]

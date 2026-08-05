@@ -9,6 +9,7 @@ cannot accidentally stage a prefix of an otherwise invalid Agent response.
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
 import stat
 from collections.abc import Iterable
@@ -47,6 +48,7 @@ from problem_locator.contracts.serialization import (
     canonical_json_bytes,
     parse_canonical_json_bytes,
 )
+from problem_locator.diagnostics import log_event
 from problem_locator.integrations.result_archive import validate_result_archive_bytes
 
 from .failures import runtime_failure
@@ -63,6 +65,79 @@ class _MissingOutcome(Exception):
 
 class _InvalidOutput(Exception):
     pass
+
+
+class _ClassifiedInvalidOutput(_InvalidOutput):
+    def __init__(self, category: str) -> None:
+        super().__init__(category)
+        self.category = category
+
+
+@contextmanager
+def _classify_invalid_output(category: str) -> Iterator[None]:
+    """Attach a content-free diagnostic category to an unsafe failure."""
+
+    try:
+        yield
+    except _MissingOutcome:
+        raise
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except Exception:
+        raise _ClassifiedInvalidOutput(category) from None
+
+
+def _diagnostic_path_state(path: Path) -> str:
+    """Return only a safe filesystem kind for one fixed protocol path."""
+
+    try:
+        metadata = path.stat(follow_symlinks=False)
+    except FileNotFoundError:
+        return "missing"
+    except OSError:
+        return "unreadable"
+    if stat.S_ISREG(metadata.st_mode):
+        return "regular_file"
+    if stat.S_ISDIR(metadata.st_mode):
+        return "directory"
+    return "other"
+
+
+def _log_output_rejection(
+    workspace_root: Path,
+    job: Job,
+    *,
+    code: ErrorCode,
+    failure_category: str,
+    final_outcome_state: str,
+    final_outcome_bytes: int | None,
+) -> None:
+    """Record protocol facts without logging paths, bytes, or exception text."""
+
+    output = workspace_root / "output"
+    try:
+        log_event(
+            "runtime.agent_output.rejected",
+            level=logging.WARNING,
+            job_id=job.job_id,
+            job_type=job.job_type,
+            code=code,
+            failure_category=failure_category,
+            final_outcome_state=final_outcome_state,
+            final_outcome_bytes=final_outcome_bytes,
+            job_outcome_part_state=_diagnostic_path_state(
+                output / "job_outcome.json.part"
+            ),
+            dot_job_outcome_part_state=_diagnostic_path_state(
+                output / ".job_outcome.json.part"
+            ),
+            job_outcome_tmp_state=_diagnostic_path_state(
+                output / "job_outcome.json.tmp"
+            ),
+        )
+    except Exception:
+        # Observability must never replace the frozen Runtime failure.
+        pass
 
 
 @dataclass(frozen=True, slots=True)
@@ -1135,29 +1210,33 @@ def _read_validated_output(
     inputs_identity: tuple[int, int] | None = None,
 ) -> ValidatedAgentOutput:
     outcome_relative_path = "output/job_outcome.json"
-    outcome_path = _validate_parent_directories(
-        workspace_root,
-        outcome_relative_path,
-        missing_outcome=True,
-    )
-    remaining_bytes = job.resource_limits.workspace_bytes
-    outcome_size, _, raw_outcome_bytes, _ = _read_frozen_relative_file(
-        workspace_root,
-        outcome_relative_path,
-        capture=True,
-        root_identity=root_identity,
-        output_identity=output_identity,
-        max_bytes=remaining_bytes,
-    )
+    with _classify_invalid_output("final_outcome_read"):
+        outcome_path = _validate_parent_directories(
+            workspace_root,
+            outcome_relative_path,
+            missing_outcome=True,
+        )
+        remaining_bytes = job.resource_limits.workspace_bytes
+        outcome_size, _, raw_outcome_bytes, _ = _read_frozen_relative_file(
+            workspace_root,
+            outcome_relative_path,
+            capture=True,
+            root_identity=root_identity,
+            output_identity=output_identity,
+            max_bytes=remaining_bytes,
+        )
     remaining_bytes -= outcome_size
     assert raw_outcome_bytes is not None
-    outcome = parse_canonical_json_bytes(
-        raw_outcome_bytes,
-        model_type=AgentJobOutcome,
-    )
-    validate_outcome_for_job(job, outcome, workspace_manifest)
-    outcome_bytes = canonical_json_bytes(outcome)
-    _scan_bytes(outcome_bytes, patterns)
+    with _classify_invalid_output("outcome_canonical_or_schema"):
+        outcome = parse_canonical_json_bytes(
+            raw_outcome_bytes,
+            model_type=AgentJobOutcome,
+        )
+    with _classify_invalid_output("outcome_job_binding_or_contract"):
+        validate_outcome_for_job(job, outcome, workspace_manifest)
+    with _classify_invalid_output("outcome_security_scan"):
+        outcome_bytes = canonical_json_bytes(outcome)
+        _scan_bytes(outcome_bytes, patterns)
 
     drafts = _proposal_drafts(outcome)
     declared_paths = [
@@ -1285,19 +1364,25 @@ def read_agent_output(
     """
 
     patterns = _normalize_secrets(secrets)
+    workspace_root = (
+        workspace.root
+        if isinstance(workspace, PreparedWorkspace)
+        else Path(workspace)
+    )
     missing = False
     invalid = False
+    failure_category = "workspace_or_proposal_validation"
+    final_outcome_state = "not_checked"
+    final_outcome_bytes: int | None = None
     validated: ValidatedAgentOutput | None = None
     try:
         if isinstance(workspace, PreparedWorkspace):
-            workspace_root = workspace.root
             root_identity = (workspace.root_device, workspace.root_inode)
             output_identity = (workspace.output_device, workspace.output_inode)
             inputs_identity = (workspace.inputs_device, workspace.inputs_inode)
             if workspace.manifest != workspace_manifest:
                 raise _InvalidOutput
         else:
-            workspace_root = Path(workspace)
             root_metadata = _lstat(workspace_root)
             _assert_directory(root_metadata, device=root_metadata.st_dev)
             root_identity = _identity(root_metadata)
@@ -1316,10 +1401,12 @@ def read_agent_output(
             else:
                 _assert_directory(inputs_metadata, device=root_metadata.st_dev)
                 inputs_identity = _identity(inputs_metadata)
-        _lstat(
+        final_metadata = _lstat(
             workspace_root / "output/job_outcome.json",
             missing_outcome=True,
         )
+        final_outcome_state = "present"
+        final_outcome_bytes = final_metadata.st_size
         initial = _snapshot_source(
             workspace_root,
             "output/job_outcome.json",
@@ -1341,6 +1428,11 @@ def read_agent_output(
             raise _InvalidOutput
     except _MissingOutcome:
         missing = True
+        final_outcome_state = "missing"
+        failure_category = "final_outcome_missing"
+    except _ClassifiedInvalidOutput as exc:
+        invalid = True
+        failure_category = exc.category
     except (KeyboardInterrupt, SystemExit):
         raise
     except Exception:
@@ -1349,12 +1441,28 @@ def read_agent_output(
     # Raise outside the handler so an Agent-controlled parser/filesystem
     # exception is not retained as ``__context__`` on the public failure.
     if missing:
+        _log_output_rejection(
+            workspace_root,
+            job,
+            code=ErrorCode.OUTCOME_MISSING,
+            failure_category=failure_category,
+            final_outcome_state=final_outcome_state,
+            final_outcome_bytes=final_outcome_bytes,
+        )
         raise runtime_failure(
             stage=ExecutionStage.OUTCOME_VALIDATE,
             code=ErrorCode.OUTCOME_MISSING,
             message="Agent outcome file is missing.",
         ) from None
     if invalid:
+        _log_output_rejection(
+            workspace_root,
+            job,
+            code=ErrorCode.OUTCOME_INVALID,
+            failure_category=failure_category,
+            final_outcome_state=final_outcome_state,
+            final_outcome_bytes=final_outcome_bytes,
+        )
         raise runtime_failure(
             stage=ExecutionStage.OUTCOME_VALIDATE,
             code=ErrorCode.OUTCOME_INVALID,

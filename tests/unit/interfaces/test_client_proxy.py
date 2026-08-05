@@ -10,7 +10,12 @@ from mcp import types
 from problem_locator.interfaces.client_proxy import (
     SUPPORTED_TOOLS,
     ClientMcpProxy,
+    _permissive_input_schema,
     _settings,
+)
+from problem_locator.interfaces.mcp_server import (
+    PrepareAttachmentRequest,
+    SubmitSupplementRequest,
 )
 
 
@@ -105,6 +110,40 @@ def test_proxy_advertises_permissive_schema_but_logs_the_upstream_schema() -> No
     assert original["required"] == ["request_id"]
     assert original["properties"]["wait_seconds"]["type"] == "integer"
     assert fields["advertised_tools"][0]["inputSchema"] == advertised[0].inputSchema
+
+
+def test_permissive_schema_keeps_exact_problem_locator_call_shapes_visible() -> None:
+    authoritative_prepare = PrepareAttachmentRequest.model_json_schema(
+        mode="validation"
+    )
+    authoritative_supplement = SubmitSupplementRequest.model_json_schema(
+        mode="validation"
+    )
+    assert "name" in authoritative_prepare["properties"]
+    assert "declared_size" in authoritative_prepare["properties"]
+    assert "attachment_name" not in authoritative_prepare["properties"]
+    assert "declared_byte_count" not in authoritative_prepare["properties"]
+    assert authoritative_supplement["properties"]["inputs"]["type"] == "object"
+    assert authoritative_supplement["properties"]["inputs"][
+        "additionalProperties"
+    ]["type"] == "string"
+
+    prepare = _permissive_input_schema(authoritative_prepare)
+    supplement = _permissive_input_schema(authoritative_supplement)
+
+    assert "`name`" in prepare["properties"]["name"]["description"]
+    assert "`attachment_name`" in prepare["properties"]["name"]["description"]
+    assert "`declared_size`" in prepare["properties"]["declared_size"]["description"]
+    assert (
+        "`declared_byte_count`"
+        in prepare["properties"]["declared_size"]["description"]
+    )
+    assert "object" in supplement["properties"]["inputs"]["description"]
+    assert "never a list" in supplement["properties"]["inputs"]["description"]
+
+    # The proxy still lets malformed values reach the authoritative server so
+    # the complete failed call is captured in client/server DFX logs.
+    Draft202012Validator(supplement).validate({"inputs": ["wrong shape"]})
 
 
 def test_proxy_logs_every_retry_with_full_arguments_and_response() -> None:

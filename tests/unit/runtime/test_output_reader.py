@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 from pathlib import Path
 from typing import Any
@@ -293,7 +294,11 @@ def test_candidate_archive_rejects_unbound_result_text(tmp_path: Path) -> None:
     _assert_failure(captured, ErrorCode.OUTCOME_INVALID)
 
 
-def test_part_file_without_final_is_outcome_missing(tmp_path: Path) -> None:
+def test_part_file_without_final_is_outcome_missing(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO, logger="problem_locator.dfx")
     job, manifest, _ = _route_inputs()
     output = tmp_path / "output"
     output.mkdir()
@@ -303,6 +308,22 @@ def test_part_file_without_final_is_outcome_missing(tmp_path: Path) -> None:
         read_agent_output(tmp_path, job, manifest)
 
     _assert_failure(captured, ErrorCode.OUTCOME_MISSING)
+    rejected = next(
+        record
+        for record in caplog.records
+        if getattr(record, "dfx_event", "") == "runtime.agent_output.rejected"
+    )
+    assert rejected.dfx_fields == {
+        "job_id": job.job_id,
+        "job_type": job.job_type,
+        "code": ErrorCode.OUTCOME_MISSING,
+        "failure_category": "final_outcome_missing",
+        "final_outcome_state": "missing",
+        "final_outcome_bytes": None,
+        "job_outcome_part_state": "regular_file",
+        "dot_job_outcome_part_state": "missing",
+        "job_outcome_tmp_state": "missing",
+    }
 
 
 @pytest.mark.parametrize(
@@ -316,7 +337,9 @@ def test_part_file_without_final_is_outcome_missing(tmp_path: Path) -> None:
 def test_invalid_json_canonical_form_or_schema_is_outcome_invalid(
     tmp_path: Path,
     invalid_bytes: bytes,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
+    caplog.set_level(logging.INFO, logger="problem_locator.dfx")
     job, manifest, _ = _route_inputs()
     _write_outcome(tmp_path, invalid_bytes)
 
@@ -324,6 +347,14 @@ def test_invalid_json_canonical_form_or_schema_is_outcome_invalid(
         read_agent_output(tmp_path, job, manifest)
 
     _assert_failure(captured, ErrorCode.OUTCOME_INVALID)
+    rejected = next(
+        record
+        for record in caplog.records
+        if getattr(record, "dfx_event", "") == "runtime.agent_output.rejected"
+    )
+    assert rejected.dfx_fields["failure_category"] == "outcome_canonical_or_schema"
+    assert rejected.dfx_fields["final_outcome_state"] == "present"
+    assert rejected.dfx_fields["final_outcome_bytes"] == len(invalid_bytes)
 
 
 def test_outcome_job_binding_must_match_exactly(tmp_path: Path) -> None:

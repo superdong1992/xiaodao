@@ -3,6 +3,7 @@ from __future__ import annotations
 import ctypes
 import hashlib
 import json
+import logging
 import os
 import shlex
 import stat
@@ -316,6 +317,35 @@ def test_success_uses_stdin_fresh_process_and_atomic_final_name(tmp_path: Path) 
     assert result.returncode == 0
     assert (root / "output/job_outcome.json").read_bytes() == b'{"ok":true}'
     assert not (root / "output/.job_outcome.json.part").exists()
+
+
+def test_success_logs_bounded_agent_completion_metrics(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO, logger="problem_locator.dfx")
+    root = _workspace(tmp_path)
+    result = _execute(
+        _backend(
+            "emit",
+            FAKE_STDOUT_BYTES="7",
+            FAKE_STDERR_BYTES="5",
+            FAKE_OUTCOME_JSON='{"ok":true}',
+        ),
+        root,
+    )
+
+    completed = next(
+        record
+        for record in caplog.records
+        if getattr(record, "dfx_event", "") == "runtime.agent_backend.completed"
+    )
+    assert completed.dfx_fields["returncode"] == 0
+    assert completed.dfx_fields["stdout_stderr_bytes"] == 12
+    assert completed.dfx_fields["workspace_bytes"] == result.workspace_bytes
+    assert completed.dfx_fields["elapsed_seconds"] == result.elapsed_seconds
+    assert "argv" not in completed.dfx_fields
+    assert "environment" not in completed.dfx_fields
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX workspace mode assertion")
