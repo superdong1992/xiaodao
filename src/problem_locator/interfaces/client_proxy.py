@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import copy
+import hashlib
 import json
 import logging
 import os
@@ -14,7 +16,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 import anyio
 import httpx
@@ -24,12 +26,15 @@ from mcp.server.lowlevel import NotificationOptions, Server
 from mcp.server.models import InitializationOptions
 from mcp.server.stdio import stdio_server
 
+from problem_locator import __version__ as PACKAGE_VERSION
 from problem_locator.diagnostics import configure_diagnostics, log_event
 
 
 CLIENT_PROXY_NAME = "problem-locator-client-proxy"
-CLIENT_PROXY_VERSION = "1.0.0"
+CLIENT_PROXY_VERSION = PACKAGE_VERSION
 DEFAULT_CLIENT_DFX_LOG = Path(".problem-locator/client-dfx.jsonl")
+SCHEMA_MODES = ("strict", "diagnostic")
+SchemaMode = Literal["strict", "diagnostic"]
 SUPPORTED_TOOLS = (
     "problem_locator_create_case",
     "problem_locator_prepare_attachment",
@@ -358,6 +363,80 @@ def _permissive_input_schema(original: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _strict_input_schema(original: Mapping[str, Any]) -> dict[str, Any]:
+    """Preserve the authoritative schema while adding Agent-facing shape hints."""
+
+    advertised = copy.deepcopy(dict(original))
+    raw_required = original.get("required")
+    required = (
+        frozenset(
+            str(value)
+            for value in raw_required
+            if isinstance(value, str)
+        )
+        if isinstance(raw_required, list)
+        else frozenset()
+    )
+    original_properties = original.get("properties")
+    advertised_properties = advertised.get("properties")
+    if isinstance(original_properties, Mapping) and isinstance(
+        advertised_properties, dict
+    ):
+        for raw_name, raw_schema in original_properties.items():
+            name = str(raw_name)
+            advertised_schema = advertised_properties.get(name)
+            if not isinstance(raw_schema, Mapping) or not isinstance(
+                advertised_schema, dict
+            ):
+                continue
+            description = raw_schema.get("description")
+            parts = [
+                description.strip()
+                if isinstance(description, str) and description.strip()
+                else "",
+                _shape_hint(name, raw_schema, original, required),
+            ]
+            advertised_schema["description"] = " ".join(
+                part for part in parts if part
+            )
+    return advertised
+
+
+def _schema_sha256(schema: Mapping[str, Any]) -> str:
+    encoded = json.dumps(
+        schema,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _json_type_name(value: Any) -> str:
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, Mapping):
+        return "object"
+    if isinstance(value, list):
+        return "array"
+    if isinstance(value, str):
+        return "string"
+    if isinstance(value, int):
+        return "integer"
+    if isinstance(value, float):
+        return "number"
+    return type(value).__name__
+
+
+def _argument_json_types(arguments: Mapping[str, Any]) -> dict[str, str]:
+    return {
+        str(name): _json_type_name(value)
+        for name, value in arguments.items()
+    }
+
+
 def _operation_id(tool_name: str, arguments: Mapping[str, Any]) -> str:
     request_id = arguments.get("request_id")
     if isinstance(request_id, str) and request_id:
@@ -376,15 +455,19 @@ def _result_is_error(result: types.CallToolResult) -> bool:
 
 
 class ClientMcpProxy:
-    """Expose permissive local tools and forward their raw arguments upstream."""
+    """Expose upstream tools locally and forward their raw arguments unchanged."""
 
     def __init__(
         self,
         upstream: UpstreamMcpSession,
         *,
+        schema_mode: SchemaMode = "strict",
         event_logger: EventLogger = log_event,
     ) -> None:
+        if schema_mode not in SCHEMA_MODES:
+            raise ValueError(f"unsupported client schema mode: {schema_mode}")
         self._upstream = upstream
+        self._schema_mode = schema_mode
         self._event_logger = event_logger
         self._attempt_counts: dict[str, int] = {}
         self._attempt_lock = anyio.Lock()
@@ -401,15 +484,18 @@ class ClientMcpProxy:
 
         by_name = {tool.name: tool for tool in upstream_tools}
         missing = [name for name in SUPPORTED_TOOLS if name not in by_name]
+        schema_builder = (
+            _strict_input_schema
+            if self._schema_mode == "strict"
+            else _permissive_input_schema
+        )
         advertised_tools = (
             []
             if missing
             else [
                 by_name[name].model_copy(
                     update={
-                        "inputSchema": _permissive_input_schema(
-                            by_name[name].inputSchema
-                        ),
+                        "inputSchema": schema_builder(by_name[name].inputSchema),
                         "outputSchema": None,
                     }
                 )
@@ -428,6 +514,13 @@ class ClientMcpProxy:
                 for tool in advertised_tools
             ],
             missing_tools=missing,
+            package_version=PACKAGE_VERSION,
+            client_proxy_version=CLIENT_PROXY_VERSION,
+            schema_mode=self._schema_mode,
+            advertised_schema_sha256={
+                tool.name: _schema_sha256(tool.inputSchema)
+                for tool in advertised_tools
+            },
         )
         if missing:
             raise RuntimeError(
@@ -442,6 +535,7 @@ class ClientMcpProxy:
         arguments: Mapping[str, Any] | None,
     ) -> types.CallToolResult:
         raw_arguments = dict(arguments or {})
+        argument_json_types = _argument_json_types(raw_arguments)
         operation_id = _operation_id(name, raw_arguments)
         attempt_id = str(uuid.uuid4())
         async with self._attempt_lock:
@@ -455,6 +549,10 @@ class ClientMcpProxy:
             attempt_number=attempt_number,
             tool_name=name,
             arguments=raw_arguments,
+            argument_json_types=argument_json_types,
+            package_version=PACKAGE_VERSION,
+            client_proxy_version=CLIENT_PROXY_VERSION,
+            schema_mode=self._schema_mode,
         )
         started = time.perf_counter()
 
@@ -476,6 +574,10 @@ class ClientMcpProxy:
                 attempt_number=attempt_number,
                 tool_name=name,
                 arguments=raw_arguments,
+                argument_json_types=argument_json_types,
+                package_version=PACKAGE_VERSION,
+                client_proxy_version=CLIENT_PROXY_VERSION,
+                schema_mode=self._schema_mode,
                 outcome="error",
                 duration_ms=round((time.perf_counter() - started) * 1000, 3),
                 response=result.model_dump(
@@ -495,6 +597,10 @@ class ClientMcpProxy:
                 attempt_number=attempt_number,
                 tool_name=name,
                 arguments=raw_arguments,
+                argument_json_types=argument_json_types,
+                package_version=PACKAGE_VERSION,
+                client_proxy_version=CLIENT_PROXY_VERSION,
+                schema_mode=self._schema_mode,
                 duration_ms=round((time.perf_counter() - started) * 1000, 3),
                 error=exc,
             )
@@ -509,6 +615,10 @@ class ClientMcpProxy:
             attempt_number=attempt_number,
             tool_name=name,
             arguments=raw_arguments,
+            argument_json_types=argument_json_types,
+            package_version=PACKAGE_VERSION,
+            client_proxy_version=CLIENT_PROXY_VERSION,
+            schema_mode=self._schema_mode,
             outcome=outcome,
             duration_ms=round((time.perf_counter() - started) * 1000, 3),
             response=result.model_dump(mode="json", by_alias=True, exclude_none=False),
@@ -523,6 +633,7 @@ class ClientProxySettings:
     log_level: str
     headers: dict[str, str]
     timeout_seconds: float
+    schema_mode: SchemaMode
 
 
 def _parse_header(value: str) -> tuple[str, str]:
@@ -534,6 +645,11 @@ def _parse_header(value: str) -> tuple[str, str]:
 
 def _settings(argv: Sequence[str] | None) -> ClientProxySettings:
     parser = argparse.ArgumentParser(prog="problem-locator-client-proxy")
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"%(prog)s {CLIENT_PROXY_VERSION}",
+    )
     parser.add_argument(
         "--url",
         default=os.environ.get("PROBLEM_LOCATOR_MCP_URL"),
@@ -555,6 +671,18 @@ def _settings(argv: Sequence[str] | None) -> ClientProxySettings:
         default=[],
     )
     parser.add_argument("--timeout-seconds", type=float, default=60.0)
+    parser.add_argument(
+        "--schema-mode",
+        choices=SCHEMA_MODES,
+        default=os.environ.get(
+            "PROBLEM_LOCATOR_CLIENT_SCHEMA_MODE",
+            "strict",
+        ),
+        help=(
+            "local tool schema mode; strict preserves upstream validation, "
+            "diagnostic advertises descriptions only"
+        ),
+    )
     arguments = parser.parse_args(argv)
 
     if not arguments.url:
@@ -577,6 +705,7 @@ def _settings(argv: Sequence[str] | None) -> ClientProxySettings:
         log_level=str(arguments.log_level).upper(),
         headers=dict(arguments.header),
         timeout_seconds=float(arguments.timeout_seconds),
+        schema_mode=arguments.schema_mode,
     )
 
 
@@ -602,6 +731,9 @@ def _build_server(settings: ClientProxySettings) -> Server[ClientMcpProxy]:
             upstream_url=settings.upstream_url,
             headers=settings.headers,
             timeout_seconds=settings.timeout_seconds,
+            package_version=PACKAGE_VERSION,
+            client_proxy_version=CLIENT_PROXY_VERSION,
+            schema_mode=settings.schema_mode,
         )
         async with _upstream_http_client(settings) as http_client:
             async with streamable_http_client(
@@ -621,8 +753,14 @@ def _build_server(settings: ClientProxySettings) -> Server[ClientMcpProxy]:
                         upstream_url=settings.upstream_url,
                         upstream_session_id=get_session_id(),
                         initialize_result=initialized,
+                        package_version=PACKAGE_VERSION,
+                        client_proxy_version=CLIENT_PROXY_VERSION,
+                        schema_mode=settings.schema_mode,
                     )
-                    yield ClientMcpProxy(session)
+                    yield ClientMcpProxy(
+                        session,
+                        schema_mode=settings.schema_mode,
+                    )
         log_event("client.proxy.upstream.disconnected")
 
     server: Server[ClientMcpProxy] = Server(
@@ -658,6 +796,9 @@ async def _run(settings: ClientProxySettings) -> None:
         upstream_url=settings.upstream_url,
         client_log_file=settings.log_file,
         client_log_level=settings.log_level,
+        package_version=PACKAGE_VERSION,
+        client_proxy_version=CLIENT_PROXY_VERSION,
+        schema_mode=settings.schema_mode,
     )
     try:
         async with stdio_server() as (read_stream, write_stream):
@@ -707,6 +848,7 @@ __all__ = [
     "ClientMcpProxy",
     "ClientProxySettings",
     "DEFAULT_CLIENT_DFX_LOG",
+    "SCHEMA_MODES",
     "SUPPORTED_TOOLS",
     "main",
 ]

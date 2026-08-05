@@ -1,18 +1,22 @@
 from __future__ import annotations
 
+import copy
 from pathlib import Path
 from typing import Any
 
 import anyio
 from jsonschema import Draft202012Validator
 from mcp import types
+import pytest
 
 from problem_locator.interfaces.client_proxy import (
+    CLIENT_PROXY_VERSION,
     SUPPORTED_TOOLS,
     ClientMcpProxy,
     ClientProxySettings,
     _permissive_input_schema,
     _settings,
+    _strict_input_schema,
     _upstream_http_client,
 )
 from problem_locator.interfaces.mcp_server import (
@@ -24,6 +28,7 @@ from problem_locator.interfaces.mcp_server import (
     ResumeCaseRequest,
     SubmitSupplementRequest,
 )
+from tests.unit.interfaces.helpers import problem_spec_input
 
 
 class FakeUpstream:
@@ -88,7 +93,7 @@ class Events:
         self.items.append((event, fields))
 
 
-def test_proxy_advertises_permissive_schema_but_logs_the_upstream_schema() -> None:
+def test_proxy_advertises_strict_schema_and_logs_schema_provenance() -> None:
     async def scenario() -> tuple[list[types.Tool], Events]:
         events = Events()
         proxy = ClientMcpProxy(FakeUpstream(), event_logger=events)
@@ -98,13 +103,15 @@ def test_proxy_advertises_permissive_schema_but_logs_the_upstream_schema() -> No
 
     assert [tool.name for tool in advertised] == list(SUPPORTED_TOOLS)
     for tool in advertised:
-        Draft202012Validator(tool.inputSchema).validate(
+        validator = Draft202012Validator(tool.inputSchema)
+        assert validator.is_valid({"request_id": "request-1"})
+        assert validator.is_valid(
             {
-                "request_id": ["the client must not reject this value"],
+                "request_id": ["the client must reject this value"],
                 "wait_seconds": "also intentionally wrong",
                 "unexpected": {"nested": True},
             }
-        )
+        ) is False
         assert tool.outputSchema is None
         request_description = tool.inputSchema["properties"]["request_id"][
             "description"
@@ -112,9 +119,9 @@ def test_proxy_advertises_permissive_schema_but_logs_the_upstream_schema() -> No
         assert request_description.startswith("Stable logical request ID.")
         assert "Required." in request_description
         assert "Expected JSON shape: string" in request_description
-        assert set(tool.inputSchema["properties"]["request_id"]) == {
-            "description"
-        }
+        assert tool.inputSchema["properties"]["request_id"]["type"] == "string"
+        assert tool.inputSchema["required"] == ["request_id"]
+        assert tool.inputSchema["additionalProperties"] is False
 
     event, fields = events.items[0]
     assert event == "client.proxy.tools.discovered"
@@ -123,9 +130,33 @@ def test_proxy_advertises_permissive_schema_but_logs_the_upstream_schema() -> No
     assert original["required"] == ["request_id"]
     assert original["properties"]["wait_seconds"]["type"] == "integer"
     assert fields["advertised_tools"][0]["inputSchema"] == advertised[0].inputSchema
+    assert fields["schema_mode"] == "strict"
+    assert fields["client_proxy_version"] == CLIENT_PROXY_VERSION
+    assert fields["package_version"] == "1.0.1"
+    assert set(fields["advertised_schema_sha256"]) == set(SUPPORTED_TOOLS)
+    assert all(
+        len(value) == 64
+        for value in fields["advertised_schema_sha256"].values()
+    )
 
 
-def test_permissive_schema_keeps_all_problem_locator_call_shapes_visible() -> None:
+def test_diagnostic_mode_keeps_malformed_arguments_visible() -> None:
+    async def scenario() -> list[types.Tool]:
+        proxy = ClientMcpProxy(FakeUpstream(), schema_mode="diagnostic")
+        return await proxy.list_tools()
+
+    advertised = anyio.run(scenario)
+    for tool in advertised:
+        Draft202012Validator(tool.inputSchema).validate(
+            {
+                "request_id": ["the proxy must not reject this value"],
+                "wait_seconds": "also intentionally wrong",
+                "unexpected": {"nested": True},
+            }
+        )
+
+
+def test_all_problem_locator_call_shapes_are_strict_and_diagnostic() -> None:
     request_types = {
         "problem_locator_create_case": CreateCaseRequest,
         "problem_locator_prepare_attachment": PrepareAttachmentRequest,
@@ -193,11 +224,15 @@ def test_permissive_schema_keeps_all_problem_locator_call_shapes_visible() -> No
         name: request_type.model_json_schema(mode="validation")
         for name, request_type in request_types.items()
     }
-    advertised = {
+    diagnostic = {
         name: _permissive_input_schema(schema)
         for name, schema in authoritative.items()
     }
-    for name, schema in advertised.items():
+    strict = {
+        name: _strict_input_schema(schema)
+        for name, schema in authoritative.items()
+    }
+    for name, schema in diagnostic.items():
         expected_properties, expected_required = expected_contract[name]
         assert set(authoritative[name]["properties"]) == expected_properties
         assert set(authoritative[name].get("required", [])) == expected_required
@@ -214,6 +249,28 @@ def test_permissive_schema_keeps_all_problem_locator_call_shapes_visible() -> No
             {"unexpected": {"nested": True}}
         )
 
+        strict_schema = strict[name]
+        assert strict_schema["required"] == authoritative[name]["required"]
+        assert strict_schema["additionalProperties"] is False
+        assert set(strict_schema["properties"]) == expected_properties
+        for property_name, property_schema in strict_schema["properties"].items():
+            assert property_schema.keys() >= authoritative[name]["properties"][
+                property_name
+            ].keys()
+            assert "Expected JSON shape:" in property_schema["description"]
+        restored = copy.deepcopy(strict_schema)
+        for property_name, original_property in authoritative[name][
+            "properties"
+        ].items():
+            if "description" in original_property:
+                restored["properties"][property_name]["description"] = (
+                    original_property["description"]
+                )
+            else:
+                restored["properties"][property_name].pop("description")
+        assert restored == authoritative[name]
+        Draft202012Validator.check_schema(strict_schema)
+
     authoritative_prepare = authoritative["problem_locator_prepare_attachment"]
     authoritative_supplement = authoritative[
         "problem_locator_submit_supplement"
@@ -227,10 +284,10 @@ def test_permissive_schema_keeps_all_problem_locator_call_shapes_visible() -> No
         "additionalProperties"
     ]["type"] == "string"
 
-    create = advertised["problem_locator_create_case"]
-    prepare = advertised["problem_locator_prepare_attachment"]
-    supplement = advertised["problem_locator_submit_supplement"]
-    get_case = advertised["problem_locator_get_case"]
+    create = diagnostic["problem_locator_create_case"]
+    prepare = diagnostic["problem_locator_prepare_attachment"]
+    supplement = diagnostic["problem_locator_submit_supplement"]
+    get_case = diagnostic["problem_locator_get_case"]
 
     problem_spec_description = create["properties"]["problem_spec"]["description"]
     assert "directly as a JSON object" in problem_spec_description
@@ -282,11 +339,45 @@ def test_permissive_schema_keeps_all_problem_locator_call_shapes_visible() -> No
         "problem_locator_get_case",
         "problem_locator_resume_case",
     ):
-        assert "Default: 0" in advertised[name]["properties"]["wait_seconds"][
+        assert "Default: 0" in diagnostic[name]["properties"]["wait_seconds"][
             "description"
         ]
 
     Draft202012Validator(supplement).validate({"inputs": ["wrong shape"]})
+    strict_create = Draft202012Validator(strict["problem_locator_create_case"])
+    assert strict_create.is_valid(
+        {
+            "request_id": "10000000-0000-0000-0000-000000000001",
+            "problem_spec": problem_spec_input(),
+        }
+    )
+    assert strict_create.is_valid(
+        {
+            "request_id": "10000000-0000-0000-0000-000000000001",
+            "problem_spec": '{"statement":"encoded string"}',
+        }
+    ) is False
+    strict_supplement = Draft202012Validator(
+        strict["problem_locator_submit_supplement"]
+    )
+    assert strict_supplement.is_valid(
+        {
+            "request_id": "10000000-0000-0000-0000-000000000002",
+            "case_id": "00000000-0000-0000-0000-000000000001",
+            "expected_case_revision": 1,
+            "inputs": {"name": "value"},
+            "attachment_ids": [],
+        }
+    )
+    assert strict_supplement.is_valid(
+        {
+            "request_id": "10000000-0000-0000-0000-000000000002",
+            "case_id": "00000000-0000-0000-0000-000000000001",
+            "expected_case_revision": 1,
+            "inputs": ["wrong shape"],
+            "attachment_ids": [],
+        }
+    ) is False
 
 
 def test_permissive_shape_hint_fails_open_for_recursive_or_unknown_schema() -> None:
@@ -349,6 +440,11 @@ def test_proxy_preserves_json_encoded_problem_spec_for_authoritative_rejection()
     assert upstream.calls == [("problem_locator_create_case", arguments)]
     started = next(item for item in events.items if item[0].endswith(".started"))
     assert started[1]["arguments"] == arguments
+    assert started[1]["argument_json_types"] == {
+        "request_id": "string",
+        "problem_spec": "string",
+    }
+    assert started[1]["schema_mode"] == "strict"
 
 
 def test_proxy_logs_every_retry_with_full_arguments_and_response() -> None:
@@ -393,6 +489,18 @@ def test_proxy_logs_every_retry_with_full_arguments_and_response() -> None:
         "request-stable",
     ]
     assert [item[1]["arguments"] for item in started] == [arguments, arguments]
+    assert [item[1]["argument_json_types"] for item in started] == [
+        {
+            "request_id": "string",
+            "problem_spec": "object",
+            "wait_seconds": "integer",
+        },
+        {
+            "request_id": "string",
+            "problem_spec": "object",
+            "wait_seconds": "integer",
+        },
+    ]
     assert [item[1]["outcome"] for item in completed] == ["error", "success"]
     assert completed[0][1]["response"]["structuredContent"]["error"] == {
         "code": "VALIDATION_ERROR",
@@ -424,6 +532,29 @@ def test_proxy_settings_default_log_under_claude_project(
     assert settings.log_file == tmp_path / ".problem-locator/client-dfx.jsonl"
     assert settings.headers == {"X-Debug": "full-value"}
     assert settings.upstream_url == "http://192.168.1.20:8000/mcp"
+    assert settings.schema_mode == "strict"
+
+
+def test_proxy_settings_allow_explicit_diagnostic_schema_mode(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+    monkeypatch.setenv("PROBLEM_LOCATOR_CLIENT_SCHEMA_MODE", "diagnostic")
+
+    settings = _settings(["--url", "http://192.168.1.20:8000/mcp"])
+
+    assert settings.schema_mode == "diagnostic"
+
+
+def test_proxy_version_is_available_without_upstream_configuration(capsys) -> None:
+    with pytest.raises(SystemExit) as exited:
+        _settings(["--version"])
+
+    assert exited.value.code == 0
+    assert capsys.readouterr().out.strip() == (
+        f"problem-locator-client-proxy {CLIENT_PROXY_VERSION}"
+    )
 
 
 def test_upstream_http_client_disables_ambient_proxy_inheritance(
@@ -447,6 +578,7 @@ def test_upstream_http_client_disables_ambient_proxy_inheritance(
         log_level="INFO",
         headers={"X-Debug": "full-value"},
         timeout_seconds=17.0,
+        schema_mode="strict",
     )
 
     actual = _upstream_http_client(settings)

@@ -203,17 +203,22 @@ def test_skill_document_names_tools_and_safety_invariants() -> None:
     assert proxy["command"] == "problem-locator-client-proxy"
     assert proxy["args"] == []
     assert "PROBLEM_LOCATOR_MCP_URL" in proxy["env"]
+    assert proxy["env"]["PROBLEM_LOCATOR_CLIENT_SCHEMA_MODE"].endswith(
+        ":-strict}"
+    )
 
     readme = (Path(__file__).parents[3] / "README.md").read_text(encoding="utf-8")
     assert "客户端本地 MCP 的安装与配置" in readme
-    assert "uv tool install --python 3.12" in readme
+    assert "uv tool install --reinstall --python 3.12" in readme
+    assert "problem-locator-client-proxy --version" in readme
     assert "problem-locator-client-proxy --help" in readme
     assert '替换原来直接连接服务端的 `"type": "http"` 配置' in readme
     assert '"type": "stdio"' in readme
     assert "D:/logs/problem-locator/client.jsonl" in readme
     assert "problem_spec` 必须直接传八成员 JSON 对象" in readme
     assert "object<string,string>" in readme
-    assert "生成不参与校验的 JSON 形状、必填性、默认值和 nullable 说明" in readme
+    assert "完整保留上游权威输入 schema" in readme
+    assert "PROBLEM_LOCATOR_CLIENT_SCHEMA_MODE=diagnostic" in readme
     assert "服务端日志不需要安装额外组件" in readme
     assert "tail -f /var/log/problem-locator/debug.jsonl" in readme
 

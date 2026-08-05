@@ -122,15 +122,17 @@ uv run python -m problem_locator serve --env-file /absolute/path/to/service.env
 
 ```sh
 # 安装发布 wheel；把路径替换为实际交付文件
-uv tool install --python 3.12 /absolute/path/to/problem_locator-1.0.0-py3-none-any.whl
+uv tool install --reinstall --python 3.12 /absolute/path/to/problem_locator-1.0.1-py3-none-any.whl
 
 # 如果客户端拿到的是同一版本源码，也可以直接安装源码目录
-uv tool install --python 3.12 /absolute/path/to/xiaodao
+uv tool install --reinstall --python 3.12 /absolute/path/to/xiaodao
 ```
 
 两个命令二选一，不需要都执行。安装后先验证命令确实可执行：
 
 ```sh
+problem-locator-client-proxy --version
+# 必须输出：problem-locator-client-proxy 1.0.1
 problem-locator-client-proxy --help
 ```
 
@@ -148,14 +150,15 @@ problem-locator-client-proxy --help
       "env": {
         "PROBLEM_LOCATOR_MCP_URL": "http://192.168.1.20:8000/mcp",
         "PROBLEM_LOCATOR_CLIENT_DFX_LOG_FILE": "D:/logs/problem-locator/client.jsonl",
-        "PROBLEM_LOCATOR_CLIENT_DFX_LOG_LEVEL": "INFO"
+        "PROBLEM_LOCATOR_CLIENT_DFX_LOG_LEVEL": "INFO",
+        "PROBLEM_LOCATOR_CLIENT_SCHEMA_MODE": "strict"
       }
     }
   }
 }
 ```
 
-Linux/macOS 客户端可以把日志路径改为 `/var/log/problem-locator/client.jsonl` 或其他可写路径。完整配置模板见 [client-mcp-config.json](.claude/skills/problem-locator-client/references/client-mcp-config.json)。修改后重启 Claude Code，通过 `/mcp` 确认 `problem-locator` 已连接，再调用一次工具并检查日志：
+Linux/macOS 客户端可以把日志路径改为 `/var/log/problem-locator/client.jsonl` 或其他可写路径。完整配置模板见 [client-mcp-config.json](.claude/skills/problem-locator-client/references/client-mcp-config.json)。安装或修改配置后必须完全退出并重新启动 MCP Host（并新建会话），避免继续使用已缓存的旧工具 schema；然后通过 `/mcp` 确认 `problem-locator` 已连接，再调用一次工具并检查日志：
 
 ```powershell
 Get-Content -Wait D:\logs\problem-locator\client.jsonl
@@ -165,7 +168,9 @@ Get-Content -Wait D:\logs\problem-locator\client.jsonl
 tail -f /var/log/problem-locator/client.jsonl
 ```
 
-代理使用宽松的本地工具输入 schema，确保 Claude Code 不会在日志产生前拦截参数；同时会从上游权威 schema 生成不参与校验的 JSON 形状、必填性、默认值和 nullable 说明，帮助 Agent 正确构造调用。上游服务仍执行权威 schema 校验。每次调用的完整参数、完整响应/错误、`operation_id`、`attempt_id`、递增的 `attempt_number` 和耗时都会写入客户端 JSONL，不依赖 Claude Code debug 日志。未配置 `PROBLEM_LOCATOR_CLIENT_DFX_LOG_FILE` 时，默认日志位置是客户端项目目录下的 `.problem-locator/client-dfx.jsonl`。
+代理默认使用 `strict` schema 模式：完整保留上游权威输入 schema 的类型、必填项、嵌套对象/数组、Map、nullable 和额外字段约束，同时附加 JSON 形状说明。这样 `problem_spec` 会以 `object`、`initial_user_facts`/`attachment_ids` 会以 `array`、`inputs` 会以 `object<string,string>` 暴露给 MCP Host。仅在诊断客户端自身的错误调用时，才显式设置 `PROBLEM_LOCATOR_CLIENT_SCHEMA_MODE=diagnostic`；该模式只公布字段说明，不在本地校验，但上游服务仍执行权威校验。代理不会把 JSON 字符串自动反序列化为对象。
+
+每次调用的完整参数、完整响应/错误、顶层 `argument_json_types`、`operation_id`、`attempt_id`、递增的 `attempt_number`、schema 模式、包/代理版本和耗时都会写入客户端 JSONL；工具发现事件还包含每个已公布 schema 的 SHA-256。未配置 `PROBLEM_LOCATOR_CLIENT_DFX_LOG_FILE` 时，默认日志位置是客户端项目目录下的 `.problem-locator/client-dfx.jsonl`。
 
 `/live` 表示 HTTP 进程正在提供服务。`/ready` 还会检查配置、实例锁、状态有效性、数据目录和启动恢复过程。在恢复期间，或出现致命状态/worker 故障后，服务可能仍然存活，但尚未就绪。
 

@@ -42,7 +42,7 @@ EXPECTED_RUNTIME_VERSIONS = {
     "fastapi": "0.139.2",
     "httpx": "0.28.1",
     "mcp": "1.29.0",
-    "problem-locator": "1.0.0",
+    "problem-locator": "1.0.1",
     "pydantic": "2.13.4",
     "python-dotenv": "1.2.2",
     "starlette": "1.3.1",
@@ -477,6 +477,19 @@ def test_clean_installed_distribution_import_cli_and_server_gate(
         environ=uv_environ,
         label="installed runtime dependency verification",
     )
+    proxy_entrypoint = installed_python.parent / (
+        "problem-locator-client-proxy.exe"
+        if os.name == "nt"
+        else "problem-locator-client-proxy"
+    )
+    assert proxy_entrypoint.is_file()
+    proxy_version = _run_checked(
+        [os.fspath(proxy_entrypoint), "--version"],
+        cwd=outside_cwd,
+        environ=_outside_environment(),
+        label="installed client proxy version probe",
+    )
+    assert proxy_version.stdout.strip() == "problem-locator-client-proxy 1.0.1"
 
     probe_code = textwrap.dedent(
         """
