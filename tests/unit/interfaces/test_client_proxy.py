@@ -10,8 +10,10 @@ from mcp import types
 from problem_locator.interfaces.client_proxy import (
     SUPPORTED_TOOLS,
     ClientMcpProxy,
+    ClientProxySettings,
     _permissive_input_schema,
     _settings,
+    _upstream_http_client,
 )
 from problem_locator.interfaces.mcp_server import (
     PrepareAttachmentRequest,
@@ -219,3 +221,37 @@ def test_proxy_settings_default_log_under_claude_project(
     assert settings.log_file == tmp_path / ".problem-locator/client-dfx.jsonl"
     assert settings.headers == {"X-Debug": "full-value"}
     assert settings.upstream_url == "http://192.168.1.20:8000/mcp"
+
+
+def test_upstream_http_client_disables_ambient_proxy_inheritance(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    captured: dict[str, Any] = {}
+    sentinel = object()
+
+    def fake_async_client(**kwargs: Any) -> object:
+        captured.update(kwargs)
+        return sentinel
+
+    monkeypatch.setattr(
+        "problem_locator.interfaces.client_proxy.httpx.AsyncClient",
+        fake_async_client,
+    )
+    settings = ClientProxySettings(
+        upstream_url="http://192.168.1.20:8000/mcp",
+        log_file=tmp_path / "client.jsonl",
+        log_level="INFO",
+        headers={"X-Debug": "full-value"},
+        timeout_seconds=17.0,
+    )
+
+    actual = _upstream_http_client(settings)
+
+    assert actual is sentinel
+    assert captured["headers"] == {"X-Debug": "full-value"}
+    assert captured["follow_redirects"] is True
+    assert captured["trust_env"] is False
+    timeout = captured["timeout"]
+    assert timeout.connect == 17.0
+    assert timeout.read == 17.0

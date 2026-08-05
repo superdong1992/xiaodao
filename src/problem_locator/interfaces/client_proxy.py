@@ -16,8 +16,9 @@ from pathlib import Path
 from typing import Any, Protocol
 
 import anyio
+import httpx
 from mcp import ClientSession, types
-from mcp.client.streamable_http import streamablehttp_client
+from mcp.client.streamable_http import streamable_http_client
 from mcp.server.lowlevel import NotificationOptions, Server
 from mcp.server.models import InitializationOptions
 from mcp.server.stdio import stdio_server
@@ -304,6 +305,20 @@ def _settings(argv: Sequence[str] | None) -> ClientProxySettings:
     )
 
 
+def _upstream_http_client(settings: ClientProxySettings) -> httpx.AsyncClient:
+    """Build a direct client that never inherits ambient proxy settings."""
+
+    return httpx.AsyncClient(
+        headers=settings.headers or None,
+        timeout=httpx.Timeout(
+            settings.timeout_seconds,
+            read=settings.timeout_seconds,
+        ),
+        follow_redirects=True,
+        trust_env=False,
+    )
+
+
 def _build_server(settings: ClientProxySettings) -> Server[ClientMcpProxy]:
     @asynccontextmanager
     async def lifespan(_server: Server[ClientMcpProxy]):
@@ -313,25 +328,26 @@ def _build_server(settings: ClientProxySettings) -> Server[ClientMcpProxy]:
             headers=settings.headers,
             timeout_seconds=settings.timeout_seconds,
         )
-        async with streamablehttp_client(
-            settings.upstream_url,
-            headers=settings.headers or None,
-            timeout=settings.timeout_seconds,
-            sse_read_timeout=settings.timeout_seconds,
-        ) as (read_stream, write_stream, get_session_id):
-            async with ClientSession(
-                read_stream,
-                write_stream,
-                read_timeout_seconds=timedelta(seconds=settings.timeout_seconds),
-            ) as session:
-                initialized = await session.initialize()
-                log_event(
-                    "client.proxy.upstream.connected",
-                    upstream_url=settings.upstream_url,
-                    upstream_session_id=get_session_id(),
-                    initialize_result=initialized,
-                )
-                yield ClientMcpProxy(session)
+        async with _upstream_http_client(settings) as http_client:
+            async with streamable_http_client(
+                settings.upstream_url,
+                http_client=http_client,
+            ) as (read_stream, write_stream, get_session_id):
+                async with ClientSession(
+                    read_stream,
+                    write_stream,
+                    read_timeout_seconds=timedelta(
+                        seconds=settings.timeout_seconds
+                    ),
+                ) as session:
+                    initialized = await session.initialize()
+                    log_event(
+                        "client.proxy.upstream.connected",
+                        upstream_url=settings.upstream_url,
+                        upstream_session_id=get_session_id(),
+                        initialize_result=initialized,
+                    )
+                    yield ClientMcpProxy(session)
         log_event("client.proxy.upstream.disconnected")
 
     server: Server[ClientMcpProxy] = Server(
