@@ -228,7 +228,7 @@ CLI 必须提供 `python -m problem_locator render-journey --case-id <uuid> [--l
 `.claude/skills/problem-locator-client/**` 与本册接口合同由 S06 共同拥有。Skill 必须：
 
 - 通过本地 `problem-locator-client-proxy` stdio MCP 暴露七个工具，再由代理连接局域网 Streamable HTTP `/mcp`；不得让 Claude Code 直接连接上游，以免客户端 schema 拒绝发生在可观测边界之外；
-- 代理对 Claude Code 广告只保留字段名和说明的宽松 object schema，上游原始 schema 仍由服务端权威执行；每次调用转发前后必须把完整参数、完整响应/异常、`operation_id`、`attempt_id`、同操作递增的 `attempt_number` 和耗时追加写入客户端 JSONL；日志实现不得读取或依赖 Claude Code debug 日志；
+- 代理对 Claude Code 广告只保留字段名和说明的宽松 object schema；说明必须从上游权威 schema 确定性派生 JSON 类型、必填/可选、默认值、nullable、数组/Map 元素和有界嵌套对象形状，但不得把这些信息恢复为本地 validation keyword。上游原始 schema 仍由服务端权威执行；每次调用转发前后必须把完整参数、完整响应/异常、`operation_id`、`attempt_id`、同操作递增的 `attempt_number` 和耗时追加写入客户端 JSONL；日志实现不得读取或依赖 Claude Code debug 日志；
 - 客户端日志路径由 `PROBLEM_LOCATOR_CLIENT_DFX_LOG_FILE` 或代理 `--log-file` 配置，默认是客户端项目目录下 `.problem-locator/client-dfx.jsonl`；日志级别由 `PROBLEM_LOCATOR_CLIENT_DFX_LOG_LEVEL` 或 `--log-level` 配置；
 
 - 使用调用方已有的 Remote MCP 客户端调用本册七个固定工具；

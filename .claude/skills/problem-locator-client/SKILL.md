@@ -25,6 +25,107 @@ Call only these Remote MCP tools:
 - `problem_locator_cancel_case`
 - `problem_locator_list_artifacts`
 
+## Use the exact JSON argument shapes
+
+Pass objects and arrays directly to the MCP tool. Never pre-serialize a nested
+object or array into an escaped JSON string. The canonical argument shapes are:
+
+`problem_locator_create_case`:
+
+```json
+{
+  "request_id": "<stable-request-id>",
+  "problem_spec": {
+    "statement": "<problem statement>",
+    "expected_behavior": "<expected behavior>",
+    "actual_behavior": "<actual behavior>",
+    "scope": "<diagnosis scope>",
+    "goals": ["<goal>"],
+    "non_goals": [],
+    "constraints": [],
+    "completion_criteria": ["<criterion>"]
+  },
+  "initial_user_facts": [
+    {"name": "<requirement_name>", "value": "<exact string value>"}
+  ],
+  "wait_seconds": 0
+}
+```
+
+`problem_spec` is the displayed eight-member JSON object itself. A value such
+as `"problem_spec": "{\"statement\":...}"` is invalid. `initial_user_facts`
+is an array of `{name,value}` objects, defaults to `[]`, and is never a map.
+
+`problem_locator_prepare_attachment`:
+
+```json
+{
+  "request_id": "<stable-request-id>",
+  "case_id": "<case-uuid>",
+  "expected_case_revision": 1,
+  "name": "logs.zip",
+  "content_type": "application/zip",
+  "declared_size": null,
+  "declared_sha256": null
+}
+```
+
+`problem_locator_submit_supplement`:
+
+```json
+{
+  "request_id": "<stable-request-id>",
+  "case_id": "<case-uuid>",
+  "expected_case_revision": 2,
+  "inputs": {"order_id": "order-1"},
+  "attachment_ids": ["<ready-attachment-uuid>"],
+  "wait_seconds": 0
+}
+```
+
+`problem_locator_get_case`:
+
+```json
+{
+  "case_id": "<case-uuid>",
+  "wait_for_job_id": null,
+  "wait_seconds": 0
+}
+```
+
+`problem_locator_resume_case`:
+
+```json
+{
+  "request_id": "<stable-request-id>",
+  "case_id": "<case-uuid>",
+  "expected_case_revision": 2,
+  "wait_seconds": 0
+}
+```
+
+`problem_locator_cancel_case`:
+
+```json
+{
+  "request_id": "<stable-request-id>",
+  "case_id": "<case-uuid>",
+  "expected_case_revision": 2
+}
+```
+
+`problem_locator_list_artifacts`:
+
+```json
+{
+  "case_id": "<case-uuid>"
+}
+```
+
+Only `declared_size`, `declared_sha256`, and `wait_for_job_id` accept explicit
+`null`. `initial_user_facts` and each `wait_seconds` are optional with defaults
+`[]` and `0`; all other members shown above are required for their tool.
+
 Generate one stable `request_id` for each logical write operation and reuse it when retrying that same operation. Pass the latest displayed `case_revision` as `expected_case_revision`. Keep `wait_seconds` within `0..30`; a timeout means the same asynchronous Job continues.
 
 After every write response, show the durable business receipt first. When `case_view` is present, also show the user the current Case and diagnosis-state revisions, status, open requirements, active Job, and next required action. When `case_view` is null, report that the write was persisted at the receipt's `case_id` and `case_revision` but the current projection is unavailable; do not turn the success into a failure or invent current Case state. Preserve the receipt's `case_id`, then use `problem_locator_get_case` to refresh when state reads are healthy.

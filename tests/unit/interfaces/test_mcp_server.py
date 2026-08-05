@@ -142,6 +142,28 @@ def test_mcp_validation_failure_returns_details_and_logs_full_arguments(caplog) 
     )
 
 
+def test_mcp_rejects_json_encoded_problem_spec_before_command_execution() -> None:
+    command = FakeApplicationService()
+    adapter = McpAdapter(
+        command,
+        FakeQuery(),
+        public_base_url="http://127.0.0.1:8000",
+    )
+    arguments = {
+        "request_id": REQUEST_IDS[0],
+        "problem_spec": '{"statement":"encoded instead of nested"}',
+        "initial_user_facts": [],
+        "wait_seconds": 0,
+    }
+
+    result = asyncio.run(adapter.call(TOOL_NAMES[0], arguments))
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == ErrorCode.VALIDATION_ERROR.value
+    assert result["error"]["details"][0]["field"] == "problem_spec"
+    assert command.calls == []
+
+
 @pytest.mark.parametrize(
     "code",
     sorted(

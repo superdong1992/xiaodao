@@ -70,8 +70,22 @@ class _RequestModel(BaseModel):
 
 class CreateCaseRequest(_RequestModel):
     request_id: NonEmptyText
-    problem_spec: ProblemSpecInput
-    initial_user_facts: list[UserFactInput] = Field(default_factory=list)
+    problem_spec: ProblemSpecInput = Field(
+        description=(
+            "Complete problem specification passed directly as a JSON object, "
+            "never as a JSON-encoded string. It has exactly eight required "
+            "members: statement, expected_behavior, actual_behavior, scope, "
+            "goals, non_goals, constraints, and completion_criteria."
+        )
+    )
+    initial_user_facts: list[UserFactInput] = Field(
+        default_factory=list,
+        description=(
+            "Optional JSON array, defaulting to an empty array, of objects with "
+            "exact string members `name` and `value`; do not send a map or a "
+            "JSON-encoded string."
+        ),
+    )
     wait_seconds: WaitSeconds = 0
 
 
@@ -171,7 +185,10 @@ _REQUESTS: dict[str, type[_RequestModel]] = {
 }
 
 _DESCRIPTIONS = {
-    "problem_locator_create_case": "Create a new diagnosis case.",
+    "problem_locator_create_case": (
+        "Create a new diagnosis case. Pass `problem_spec` directly as the "
+        "complete eight-member JSON object, never as a JSON-encoded string."
+    ),
     "problem_locator_prepare_attachment": (
         "Prepare an immutable attachment upload. Use the exact input members "
         "`name` and `declared_size`; `attachment_name` and "

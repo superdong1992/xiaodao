@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import sys
@@ -39,6 +40,9 @@ SUPPORTED_TOOLS = (
     "problem_locator_list_artifacts",
 )
 
+_SHAPE_HINT_MAX_DEPTH = 4
+_SHAPE_HINT_MAX_CHARS = 2048
+
 
 class UpstreamMcpSession(Protocol):
     async def list_tools(
@@ -62,10 +66,270 @@ class UpstreamMcpSession(Protocol):
 EventLogger = Callable[..., None]
 
 
+def _json_literal(value: Any) -> str:
+    try:
+        return json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    except (TypeError, ValueError):
+        return "an unspecified value"
+
+
+def _resolve_local_ref(
+    root: Mapping[str, Any],
+    raw_ref: Any,
+) -> Mapping[str, Any] | None:
+    if not isinstance(raw_ref, str) or not raw_ref.startswith("#/"):
+        return None
+    current: Any = root
+    for encoded_part in raw_ref[2:].split("/"):
+        part = encoded_part.replace("~1", "/").replace("~0", "~")
+        if not isinstance(current, Mapping) or part not in current:
+            return None
+        current = current[part]
+    return current if isinstance(current, Mapping) else None
+
+
+def _constraint_text(schema: Mapping[str, Any]) -> str:
+    labels = (
+        ("format", "format"),
+        ("minimum", "minimum"),
+        ("exclusiveMinimum", "exclusiveMinimum"),
+        ("maximum", "maximum"),
+        ("exclusiveMaximum", "exclusiveMaximum"),
+        ("minLength", "minLength"),
+        ("maxLength", "maxLength"),
+        ("minItems", "minItems"),
+        ("maxItems", "maxItems"),
+        ("pattern", "pattern"),
+    )
+    constraints = [
+        f"{label}={_json_literal(schema[key])}"
+        for key, label in labels
+        if key in schema
+    ]
+    enum = schema.get("enum")
+    if isinstance(enum, list):
+        constraints.append(f"enum={_json_literal(enum)}")
+    return f" ({', '.join(constraints)})" if constraints else ""
+
+
+def _shallow_schema_type(schema: Mapping[str, Any]) -> str:
+    raw_type = schema.get("type")
+    if isinstance(raw_type, str):
+        return raw_type
+    if isinstance(raw_type, list):
+        values = [str(value) for value in raw_type]
+        return " | ".join(values) if values else "JSON value"
+    if isinstance(schema.get("properties"), Mapping):
+        return "object"
+    if "items" in schema:
+        return "array"
+    return "JSON value"
+
+
+def _schema_signature(
+    schema: Mapping[str, Any],
+    root: Mapping[str, Any],
+    *,
+    depth: int = 0,
+    seen_nodes: frozenset[int] = frozenset(),
+) -> str:
+    node_id = id(schema)
+    if node_id in seen_nodes:
+        return "JSON value (recursive schema)"
+    if depth > _SHAPE_HINT_MAX_DEPTH:
+        return _shallow_schema_type(schema)
+    next_seen = seen_nodes | {node_id}
+
+    if "$ref" in schema:
+        resolved = _resolve_local_ref(root, schema.get("$ref"))
+        if resolved is None:
+            return "JSON value"
+        siblings = {key: value for key, value in schema.items() if key != "$ref"}
+        if siblings:
+            merged = dict(resolved)
+            merged.update(siblings)
+            return _schema_signature(
+                merged,
+                root,
+                depth=depth + 1,
+                seen_nodes=next_seen | {id(resolved)},
+            )
+        return _schema_signature(
+            resolved,
+            root,
+            depth=depth + 1,
+            seen_nodes=next_seen,
+        )
+
+    for union_key in ("anyOf", "oneOf"):
+        raw_alternatives = schema.get(union_key)
+        if isinstance(raw_alternatives, list):
+            alternatives: list[str] = []
+            for raw_alternative in raw_alternatives:
+                if not isinstance(raw_alternative, Mapping):
+                    continue
+                rendered = _schema_signature(
+                    raw_alternative,
+                    root,
+                    depth=depth + 1,
+                    seen_nodes=next_seen,
+                )
+                if rendered not in alternatives:
+                    alternatives.append(rendered)
+            if alternatives:
+                return " | ".join(alternatives)
+
+    raw_all_of = schema.get("allOf")
+    if isinstance(raw_all_of, list):
+        components = [
+            _schema_signature(
+                component,
+                root,
+                depth=depth + 1,
+                seen_nodes=next_seen,
+            )
+            for component in raw_all_of
+            if isinstance(component, Mapping)
+        ]
+        if components:
+            return " & ".join(components)
+
+    raw_type = schema.get("type")
+    if isinstance(raw_type, list):
+        variants = [
+            _schema_signature(
+                {**schema, "type": variant},
+                root,
+                depth=depth + 1,
+                seen_nodes=next_seen,
+            )
+            for variant in raw_type
+        ]
+        return " | ".join(dict.fromkeys(variants))
+
+    if raw_type == "object" or isinstance(schema.get("properties"), Mapping):
+        raw_properties = schema.get("properties")
+        raw_required = schema.get("required")
+        required = (
+            {
+                str(value)
+                for value in raw_required
+                if isinstance(value, str)
+            }
+            if isinstance(raw_required, list)
+            else set()
+        )
+        members: list[str] = []
+        if isinstance(raw_properties, Mapping):
+            for raw_name, raw_member_schema in raw_properties.items():
+                member_name = str(raw_name)
+                member_shape = (
+                    _schema_signature(
+                        raw_member_schema,
+                        root,
+                        depth=depth + 1,
+                        seen_nodes=next_seen,
+                    )
+                    if isinstance(raw_member_schema, Mapping)
+                    else "JSON value"
+                )
+                presence = "required" if member_name in required else "optional"
+                if (
+                    presence == "optional"
+                    and isinstance(raw_member_schema, Mapping)
+                    and "default" in raw_member_schema
+                ):
+                    presence += f"; default={_json_literal(raw_member_schema['default'])}"
+                members.append(f"{member_name}: {member_shape} [{presence}]")
+        additional = schema.get("additionalProperties")
+        if not members and isinstance(additional, Mapping):
+            value_shape = _schema_signature(
+                additional,
+                root,
+                depth=depth + 1,
+                seen_nodes=next_seen,
+            )
+            return f"object<string, {value_shape}>{_constraint_text(schema)}"
+        if not members and additional is True:
+            return f"object<string, JSON value>{_constraint_text(schema)}"
+        if members and isinstance(additional, Mapping):
+            members.append(
+                "additional values: "
+                + _schema_signature(
+                    additional,
+                    root,
+                    depth=depth + 1,
+                    seen_nodes=next_seen,
+                )
+            )
+        rendered_members = ", ".join(members)
+        return f"object{{{rendered_members}}}{_constraint_text(schema)}"
+
+    if raw_type == "array" or "items" in schema:
+        raw_items = schema.get("items")
+        item_shape = (
+            _schema_signature(
+                raw_items,
+                root,
+                depth=depth + 1,
+                seen_nodes=next_seen,
+            )
+            if isinstance(raw_items, Mapping)
+            else "JSON value"
+        )
+        return f"array<{item_shape}>{_constraint_text(schema)}"
+
+    scalar = raw_type if isinstance(raw_type, str) else "JSON value"
+    return f"{scalar}{_constraint_text(schema)}"
+
+
+def _shape_hint(
+    name: str,
+    schema: Mapping[str, Any],
+    root: Mapping[str, Any],
+    required: frozenset[str],
+) -> str:
+    presence = "Required." if name in required else "Optional."
+    default = (
+        f" Default: {_json_literal(schema['default'])}."
+        if name not in required and "default" in schema
+        else ""
+    )
+    signature = _schema_signature(schema, root)
+    direct = ""
+    if signature.startswith("object"):
+        direct = (
+            " Pass directly as a JSON object; do not pass a JSON-encoded string."
+        )
+    elif signature.startswith("array"):
+        direct = (
+            " Pass directly as a JSON array; do not pass a JSON-encoded string."
+        )
+    hint = f"{presence}{default} Expected JSON shape: {signature}.{direct}"
+    if len(hint) > _SHAPE_HINT_MAX_CHARS:
+        return hint[: _SHAPE_HINT_MAX_CHARS - 1].rstrip() + "…"
+    return hint
+
+
 def _permissive_input_schema(original: Mapping[str, Any]) -> dict[str, Any]:
-    """Keep field names/descriptions while moving validation behind the proxy."""
+    """Advertise non-validating shape guidance and validate only upstream."""
 
     properties: dict[str, dict[str, str]] = {}
+    raw_required = original.get("required")
+    required = (
+        frozenset(
+            str(value)
+            for value in raw_required
+            if isinstance(value, str)
+        )
+        if isinstance(raw_required, list)
+        else frozenset()
+    )
     original_properties = original.get("properties")
     if isinstance(original_properties, Mapping):
         for raw_name, raw_schema in original_properties.items():
@@ -73,8 +337,19 @@ def _permissive_input_schema(original: Mapping[str, Any]) -> dict[str, Any]:
             advertised: dict[str, str] = {}
             if isinstance(raw_schema, Mapping):
                 description = raw_schema.get("description")
-                if isinstance(description, str):
-                    advertised["description"] = description
+                parts = [
+                    description.strip()
+                    if isinstance(description, str) and description.strip()
+                    else "",
+                    _shape_hint(name, raw_schema, original, required),
+                ]
+                advertised["description"] = " ".join(
+                    part for part in parts if part
+                )
+            else:
+                advertised["description"] = (
+                    "Optional. Expected JSON shape: JSON value."
+                )
             properties[name] = advertised
     return {
         "type": "object",

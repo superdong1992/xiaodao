@@ -98,6 +98,20 @@ uv run python -m problem_locator serve --env-file /absolute/path/to/service.env
 - `problem_locator_cancel_case`
 - `problem_locator_list_artifacts`
 
+七个工具的顶层参数形状如下；`req` 表示必填，`opt` 表示可省略：
+
+| 工具 | 参数形状 |
+| --- | --- |
+| `problem_locator_create_case` | `request_id: string` req；`problem_spec: object` req；`initial_user_facts: array<{name,value}>` opt；`wait_seconds: integer` opt |
+| `problem_locator_prepare_attachment` | `request_id/case_id/name/content_type` req；`expected_case_revision: integer` req；`declared_size: integer\|null` opt；`declared_sha256: string\|null` opt |
+| `problem_locator_submit_supplement` | `request_id/case_id` req；`expected_case_revision: integer` req；`inputs: object<string,string>` req；`attachment_ids: array<string>` req；`wait_seconds` opt |
+| `problem_locator_get_case` | `case_id` req；`wait_for_job_id: string\|null` opt；`wait_seconds` opt |
+| `problem_locator_resume_case` | `request_id/case_id/expected_case_revision` req；`wait_seconds` opt |
+| `problem_locator_cancel_case` | `request_id/case_id/expected_case_revision` req |
+| `problem_locator_list_artifacts` | `case_id` req |
+
+`problem_spec` 必须直接传八成员 JSON 对象，不能把该对象再次序列化成带转义符的字符串；复合对象、数组和 Map 的完整规范示例见客户端 Skill。
+
 仓库内置的 [`.claude/skills/problem-locator-client`](.claude/skills/problem-locator-client) Skill 说明了安全的请求 ID、修订版本处理方式、上传请求头以及产物哈希校验方法。文件内容只通过 HTTP 传输，绝不会嵌入 MCP 消息。
 
 ### 客户端本地 MCP 的安装与配置
@@ -151,7 +165,7 @@ Get-Content -Wait D:\logs\problem-locator\client.jsonl
 tail -f /var/log/problem-locator/client.jsonl
 ```
 
-代理使用宽松的本地工具输入 schema，确保 Claude Code 不会在日志产生前拦截参数；上游服务仍执行权威 schema 校验。每次调用的完整参数、完整响应/错误、`operation_id`、`attempt_id`、递增的 `attempt_number` 和耗时都会写入客户端 JSONL，不依赖 Claude Code debug 日志。未配置 `PROBLEM_LOCATOR_CLIENT_DFX_LOG_FILE` 时，默认日志位置是客户端项目目录下的 `.problem-locator/client-dfx.jsonl`。
+代理使用宽松的本地工具输入 schema，确保 Claude Code 不会在日志产生前拦截参数；同时会从上游权威 schema 生成不参与校验的 JSON 形状、必填性、默认值和 nullable 说明，帮助 Agent 正确构造调用。上游服务仍执行权威 schema 校验。每次调用的完整参数、完整响应/错误、`operation_id`、`attempt_id`、递增的 `attempt_number` 和耗时都会写入客户端 JSONL，不依赖 Claude Code debug 日志。未配置 `PROBLEM_LOCATOR_CLIENT_DFX_LOG_FILE` 时，默认日志位置是客户端项目目录下的 `.problem-locator/client-dfx.jsonl`。
 
 `/live` 表示 HTTP 进程正在提供服务。`/ready` 还会检查配置、实例锁、状态有效性、数据目录和启动恢复过程。在恢复期间，或出现致命状态/worker 故障后，服务可能仍然存活，但尚未就绪。
 

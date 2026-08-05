@@ -16,7 +16,12 @@ from problem_locator.interfaces.client_proxy import (
     _upstream_http_client,
 )
 from problem_locator.interfaces.mcp_server import (
+    CancelCaseRequest,
+    CreateCaseRequest,
+    GetCaseRequest,
+    ListArtifactsRequest,
     PrepareAttachmentRequest,
+    ResumeCaseRequest,
     SubmitSupplementRequest,
 )
 
@@ -101,8 +106,14 @@ def test_proxy_advertises_permissive_schema_but_logs_the_upstream_schema() -> No
             }
         )
         assert tool.outputSchema is None
-        assert tool.inputSchema["properties"]["request_id"] == {
-            "description": "Stable logical request ID."
+        request_description = tool.inputSchema["properties"]["request_id"][
+            "description"
+        ]
+        assert request_description.startswith("Stable logical request ID.")
+        assert "Required." in request_description
+        assert "Expected JSON shape: string" in request_description
+        assert set(tool.inputSchema["properties"]["request_id"]) == {
+            "description"
         }
 
     event, fields = events.items[0]
@@ -114,13 +125,99 @@ def test_proxy_advertises_permissive_schema_but_logs_the_upstream_schema() -> No
     assert fields["advertised_tools"][0]["inputSchema"] == advertised[0].inputSchema
 
 
-def test_permissive_schema_keeps_exact_problem_locator_call_shapes_visible() -> None:
-    authoritative_prepare = PrepareAttachmentRequest.model_json_schema(
-        mode="validation"
-    )
-    authoritative_supplement = SubmitSupplementRequest.model_json_schema(
-        mode="validation"
-    )
+def test_permissive_schema_keeps_all_problem_locator_call_shapes_visible() -> None:
+    request_types = {
+        "problem_locator_create_case": CreateCaseRequest,
+        "problem_locator_prepare_attachment": PrepareAttachmentRequest,
+        "problem_locator_submit_supplement": SubmitSupplementRequest,
+        "problem_locator_get_case": GetCaseRequest,
+        "problem_locator_resume_case": ResumeCaseRequest,
+        "problem_locator_cancel_case": CancelCaseRequest,
+        "problem_locator_list_artifacts": ListArtifactsRequest,
+    }
+    expected_contract = {
+        "problem_locator_create_case": (
+            {"request_id", "problem_spec", "initial_user_facts", "wait_seconds"},
+            {"request_id", "problem_spec"},
+        ),
+        "problem_locator_prepare_attachment": (
+            {
+                "request_id",
+                "case_id",
+                "expected_case_revision",
+                "name",
+                "content_type",
+                "declared_size",
+                "declared_sha256",
+            },
+            {
+                "request_id",
+                "case_id",
+                "expected_case_revision",
+                "name",
+                "content_type",
+            },
+        ),
+        "problem_locator_submit_supplement": (
+            {
+                "request_id",
+                "case_id",
+                "expected_case_revision",
+                "inputs",
+                "attachment_ids",
+                "wait_seconds",
+            },
+            {
+                "request_id",
+                "case_id",
+                "expected_case_revision",
+                "inputs",
+                "attachment_ids",
+            },
+        ),
+        "problem_locator_get_case": (
+            {"case_id", "wait_for_job_id", "wait_seconds"},
+            {"case_id"},
+        ),
+        "problem_locator_resume_case": (
+            {"request_id", "case_id", "expected_case_revision", "wait_seconds"},
+            {"request_id", "case_id", "expected_case_revision"},
+        ),
+        "problem_locator_cancel_case": (
+            {"request_id", "case_id", "expected_case_revision"},
+            {"request_id", "case_id", "expected_case_revision"},
+        ),
+        "problem_locator_list_artifacts": ({"case_id"}, {"case_id"}),
+    }
+    authoritative = {
+        name: request_type.model_json_schema(mode="validation")
+        for name, request_type in request_types.items()
+    }
+    advertised = {
+        name: _permissive_input_schema(schema)
+        for name, schema in authoritative.items()
+    }
+    for name, schema in advertised.items():
+        expected_properties, expected_required = expected_contract[name]
+        assert set(authoritative[name]["properties"]) == expected_properties
+        assert set(authoritative[name].get("required", [])) == expected_required
+        assert set(schema["properties"]) == expected_properties
+        assert schema["additionalProperties"] is True
+        assert "required" not in schema
+        for property_schema in schema["properties"].values():
+            assert set(property_schema) == {"description"}
+            assert "Expected JSON shape:" in property_schema["description"]
+
+        # The proxy remains validation-free so malformed calls still cross
+        # the client DFX boundary and reach the authoritative server.
+        Draft202012Validator(schema).validate(
+            {"unexpected": {"nested": True}}
+        )
+
+    authoritative_prepare = authoritative["problem_locator_prepare_attachment"]
+    authoritative_supplement = authoritative[
+        "problem_locator_submit_supplement"
+    ]
     assert "name" in authoritative_prepare["properties"]
     assert "declared_size" in authoritative_prepare["properties"]
     assert "attachment_name" not in authoritative_prepare["properties"]
@@ -130,8 +227,33 @@ def test_permissive_schema_keeps_exact_problem_locator_call_shapes_visible() -> 
         "additionalProperties"
     ]["type"] == "string"
 
-    prepare = _permissive_input_schema(authoritative_prepare)
-    supplement = _permissive_input_schema(authoritative_supplement)
+    create = advertised["problem_locator_create_case"]
+    prepare = advertised["problem_locator_prepare_attachment"]
+    supplement = advertised["problem_locator_submit_supplement"]
+    get_case = advertised["problem_locator_get_case"]
+
+    problem_spec_description = create["properties"]["problem_spec"]["description"]
+    assert "directly as a JSON object" in problem_spec_description
+    assert "do not pass a JSON-encoded string" in problem_spec_description
+    for member in (
+        "statement",
+        "expected_behavior",
+        "actual_behavior",
+        "scope",
+        "goals",
+        "non_goals",
+        "constraints",
+        "completion_criteria",
+    ):
+        assert f"{member}:" in problem_spec_description
+    assert "goals: array<string" in problem_spec_description
+    assert "minItems=1" in problem_spec_description
+
+    facts_description = create["properties"]["initial_user_facts"]["description"]
+    assert "array<object{name: string" in facts_description
+    assert "value: string" in facts_description
+    assert "Pass directly as a JSON array" in facts_description
+    assert "defaulting to an empty array" in facts_description
 
     assert "`name`" in prepare["properties"]["name"]["description"]
     assert "`attachment_name`" in prepare["properties"]["name"]["description"]
@@ -141,11 +263,92 @@ def test_permissive_schema_keeps_exact_problem_locator_call_shapes_visible() -> 
         in prepare["properties"]["declared_size"]["description"]
     )
     assert "object" in supplement["properties"]["inputs"]["description"]
+    assert (
+        "object<string, string>"
+        in supplement["properties"]["inputs"]["description"]
+    )
     assert "never a list" in supplement["properties"]["inputs"]["description"]
+    assert (
+        "array<string"
+        in supplement["properties"]["attachment_ids"]["description"]
+    )
+    assert "Default: null" in prepare["properties"]["declared_size"]["description"]
+    assert "| null" in prepare["properties"]["declared_size"]["description"]
+    assert "Default: null" in get_case["properties"]["wait_for_job_id"]["description"]
+    assert "| null" in get_case["properties"]["wait_for_job_id"]["description"]
+    for name in (
+        "problem_locator_create_case",
+        "problem_locator_submit_supplement",
+        "problem_locator_get_case",
+        "problem_locator_resume_case",
+    ):
+        assert "Default: 0" in advertised[name]["properties"]["wait_seconds"][
+            "description"
+        ]
 
-    # The proxy still lets malformed values reach the authoritative server so
-    # the complete failed call is captured in client/server DFX logs.
     Draft202012Validator(supplement).validate({"inputs": ["wrong shape"]})
+
+
+def test_permissive_shape_hint_fails_open_for_recursive_or_unknown_schema() -> None:
+    recursive = {
+        "type": "object",
+        "properties": {"payload": {"$ref": "#/$defs/Node"}},
+        "required": ["payload"],
+        "$defs": {
+            "Node": {
+                "type": "object",
+                "properties": {"next": {"$ref": "#/$defs/Node"}},
+            }
+        },
+    }
+    advertised = _permissive_input_schema(recursive)
+    description = advertised["properties"]["payload"]["description"]
+
+    assert "recursive schema" in description
+    assert len(description) <= 2048
+    Draft202012Validator(advertised).validate(
+        {"payload": "still intentionally accepted", "extra": True}
+    )
+
+    broken = _permissive_input_schema(
+        {
+            "type": "object",
+            "properties": {"payload": {"$ref": "#/missing"}},
+        }
+    )
+    assert "Expected JSON shape: JSON value" in broken["properties"]["payload"][
+        "description"
+    ]
+
+
+def test_proxy_preserves_json_encoded_problem_spec_for_authoritative_rejection() -> None:
+    result = types.CallToolResult(
+        content=[types.TextContent(type="text", text="VALIDATION_ERROR")],
+        structuredContent={
+            "ok": False,
+            "data": None,
+            "error": {"code": "VALIDATION_ERROR"},
+        },
+        isError=False,
+    )
+    upstream = FakeUpstream([result])
+    events = Events()
+    arguments = {
+        "request_id": "request-stable",
+        "problem_spec": '{"statement":"still a string"}',
+    }
+
+    async def scenario() -> None:
+        await ClientMcpProxy(upstream, event_logger=events).call_tool(
+            "problem_locator_create_case",
+            arguments,
+        )
+
+    anyio.run(scenario)
+
+    assert upstream.calls == [("problem_locator_create_case", arguments)]
+    started = next(item for item in events.items if item[0].endswith(".started"))
+    assert started[1]["arguments"] == arguments
 
 
 def test_proxy_logs_every_retry_with_full_arguments_and_response() -> None:

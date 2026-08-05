@@ -180,6 +180,13 @@ def test_skill_document_names_tools_and_safety_invariants() -> None:
     assert "It is never a list of name/value records" in skill
     assert "`name` and `declared_size`" in skill
     assert "`attachment_name` or `declared_byte_count`" in skill
+    assert '"problem_spec": {' in skill
+    assert '"problem_spec": "{\\"statement\\":...}"' in skill
+    assert "eight-member JSON object" in skill
+    assert '{"name": "<requirement_name>", "value": "<exact string value>"}' in skill
+    assert "Pass objects and arrays directly to the MCP tool" in skill
+    assert '"wait_for_job_id": null' in skill
+    assert "Only `declared_size`, `declared_sha256`, and `wait_for_job_id`" in skill
 
     config = (
         Path(__file__).parents[3]
@@ -204,6 +211,9 @@ def test_skill_document_names_tools_and_safety_invariants() -> None:
     assert '替换原来直接连接服务端的 `"type": "http"` 配置' in readme
     assert '"type": "stdio"' in readme
     assert "D:/logs/problem-locator/client.jsonl" in readme
+    assert "problem_spec` 必须直接传八成员 JSON 对象" in readme
+    assert "object<string,string>" in readme
+    assert "生成不参与校验的 JSON 形状、必填性、默认值和 nullable 说明" in readme
     assert "服务端日志不需要安装额外组件" in readme
     assert "tail -f /var/log/problem-locator/debug.jsonl" in readme
 
