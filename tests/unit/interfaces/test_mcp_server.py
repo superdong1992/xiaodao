@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from contextlib import asynccontextmanager
 
 import httpx
@@ -100,6 +101,45 @@ def test_fake_application_service_replays_same_request_and_rejects_changed_paylo
     assert conflict["ok"] is False
     assert conflict["error"]["code"] == ErrorCode.IDEMPOTENCY_CONFLICT.value
     assert len(service.calls) == 3
+
+
+def test_mcp_validation_failure_returns_details_and_logs_full_arguments(caplog) -> None:
+    caplog.set_level(logging.INFO, logger="problem_locator.dfx")
+    adapter = McpAdapter(
+        FakeApplicationService(),
+        FakeQuery(),
+        public_base_url="http://127.0.0.1:8000",
+    )
+    arguments = {
+        "request_id": REQUEST_IDS[0],
+        "problem_spec": problem_spec_input(),
+        "initial_user_facts": [],
+        "wait_seconds": 0,
+        "unexpected": "forbidden",
+    }
+
+    result = asyncio.run(adapter.call(TOOL_NAMES[0], arguments))
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == ErrorCode.VALIDATION_ERROR.value
+    assert result["error"]["details"][0]["field"] == "unexpected"
+    assert result["error"]["details"][0]["expected"].startswith(
+        "extra_forbidden:"
+    )
+    records = {
+        getattr(record, "dfx_event", ""): record
+        for record in caplog.records
+        if record.name == "problem_locator.dfx"
+    }
+    assert records["mcp.tool.started"].dfx_fields["arguments"] == arguments
+    failure = records["mcp.tool.validation_failed"]
+    assert failure.dfx_fields["arguments"] == arguments
+    assert failure.dfx_fields["validation_errors"][0]["loc"] == (
+        "unexpected",
+    )
+    assert records["mcp.tool.completed"].dfx_fields["error_code"] == (
+        ErrorCode.VALIDATION_ERROR.value
+    )
 
 
 @pytest.mark.parametrize(

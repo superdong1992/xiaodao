@@ -26,6 +26,7 @@ _PATH_KEYS = (
     "LOGPARSE_CONFIG_PATH",
 )
 _FORBIDDEN_LIMIT_KEY = re.compile(r".+_(?:LIMIT|MAX|RETENTION)_.+")
+_DFX_LOG_LEVELS = frozenset({"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"})
 
 
 class SettingsError(ValueError):
@@ -43,6 +44,8 @@ class Settings:
     logparse_repo: Path
     logparse_config_path: Path
     logparse_python: Path
+    dfx_log_level: str
+    dfx_log_file: Path | None
 
     @classmethod
     def load(
@@ -114,6 +117,17 @@ class Settings:
         if not logparse_python.is_absolute():
             raise SettingsError("LOGPARSE_PYTHON must be an absolute path")
 
+        dfx_log_level = values.get("DFX_LOG_LEVEL", "INFO").upper()
+        if dfx_log_level not in _DFX_LOG_LEVELS:
+            raise SettingsError(
+                "DFX_LOG_LEVEL must be DEBUG, INFO, WARNING, ERROR, or CRITICAL"
+            )
+
+        raw_dfx_log_file = values.get("DFX_LOG_FILE")
+        dfx_log_file = Path(raw_dfx_log_file) if raw_dfx_log_file else None
+        if dfx_log_file is not None and not dfx_log_file.is_absolute():
+            raise SettingsError("DFX_LOG_FILE must be an absolute path")
+
         return cls(
             data_root=paths["DATA_ROOT"],
             public_base_url=base_url.rstrip("/"),
@@ -124,6 +138,8 @@ class Settings:
             logparse_repo=paths["LOGPARSE_REPO"],
             logparse_config_path=paths["LOGPARSE_CONFIG_PATH"],
             logparse_python=logparse_python,
+            dfx_log_level=dfx_log_level,
+            dfx_log_file=dfx_log_file,
         )
 
     def __repr__(self) -> str:
@@ -132,7 +148,9 @@ class Settings:
             f"{self.public_base_url!r}, bind_host={self.bind_host!r}, port={self.port}, "
             "claude_command=<configured>, skill_dir=<configured>, "
             "logparse_repo=<redacted>, logparse_config_path=<redacted>, "
-            "logparse_python=<redacted>)"
+            "logparse_python=<redacted>, "
+            f"dfx_log_level={self.dfx_log_level!r}, "
+            f"dfx_log_file={self.dfx_log_file!r})"
         )
 
 

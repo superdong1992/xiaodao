@@ -9,6 +9,7 @@ explicit factory functions is called.
 from __future__ import annotations
 
 import asyncio
+import logging
 import threading
 import time
 import uuid
@@ -44,6 +45,7 @@ from problem_locator.contracts import (
     canonical_json_bytes,
 )
 from problem_locator.dispatch import RecoveryResult, SchedulerService
+from problem_locator.diagnostics import log_event
 from problem_locator.domain import DomainCoordinator, PureContextSnapshotProjector
 from problem_locator.entrypoints.cli import CliHooks, main as cli_main, run_uvicorn
 from problem_locator.entrypoints.settings import Settings
@@ -700,16 +702,36 @@ class RetentionService:
             try:
                 result = self.cleaner.run_once()
             except ApplicationPortError as exc:
+                log_event(
+                    "retention.run.application_error",
+                    level=logging.ERROR,
+                    error_code=exc.error.code,
+                    application_error=exc.error,
+                    error=exc,
+                )
                 with self._lock:
                     self._last_result = None
                     self._last_failure_code = exc.error.code
                     self._last_failure_type = type(exc).__name__
             except Exception as exc:
+                log_event(
+                    "retention.run.unhandled_error",
+                    level=logging.ERROR,
+                    error=exc,
+                )
                 with self._lock:
                     self._last_result = None
                     self._last_failure_code = None
                     self._last_failure_type = type(exc).__name__
             else:
+                log_event(
+                    "retention.run.completed",
+                    deleted_count=len(result.deleted),
+                    quarantined_count=len(result.quarantined),
+                    failed_deletion_count=len(result.failed_deletions),
+                    skipped_count=len(result.skipped),
+                    interrupted=result.interrupted,
+                )
                 with self._lock:
                     self._last_result = result
                     self._last_failure_code = None
@@ -1228,11 +1250,41 @@ def _install_lifespan(app: Any, owner: ServiceComposition | _StartupFailureOwner
     async def lifespan(asgi_app: Any):
         try:
             if isinstance(owner, ServiceComposition):
-                await asyncio.to_thread(owner.start)
+                log_event("service.starting")
+                try:
+                    recovery = await asyncio.to_thread(owner.start)
+                except Exception as exc:
+                    log_event(
+                        "service.startup_failed",
+                        level=logging.ERROR,
+                        error=exc,
+                    )
+                    raise
+                log_event(
+                    "service.started",
+                    recovery_completed=recovery.completed,
+                    runtime_epoch=recovery.runtime_epoch,
+                    replayed_job_ids=recovery.replayed_job_ids,
+                    interrupted_job_ids=recovery.interrupted_job_ids,
+                    pending_job_ids=recovery.pending_job_ids,
+                    recovery_failure_type=recovery.failure_type,
+                    recovery_failure_code=recovery.failure_code,
+                )
             async with original_lifespan(asgi_app):
                 yield
         finally:
-            await asyncio.to_thread(owner.close)
+            log_event("service.shutdown_started")
+            try:
+                await asyncio.to_thread(owner.close)
+            except Exception as exc:
+                log_event(
+                    "service.shutdown_failed",
+                    level=logging.ERROR,
+                    error=exc,
+                )
+                raise
+            else:
+                log_event("service.shutdown_completed")
 
     app.router.lifespan_context = lifespan
 
@@ -1243,6 +1295,13 @@ def create_app(settings: Settings) -> Any:
     try:
         composition = _assemble(settings)
     except _CompositionFailure as exc:
+        log_event(
+            "service.assembly_failed",
+            level=logging.ERROR,
+            application_error=exc.owner.error,
+            error_code=exc.owner.error.code,
+            error=exc,
+        )
         owner = exc.owner
         unavailable = _UnavailableApplication(owner.error)
         app = create_asgi_app(
@@ -1258,6 +1317,8 @@ def create_app(settings: Settings) -> Any:
         app.state.problem_locator_startup_error = owner.error.model_copy(deep=True)
         _install_lifespan(app, owner)
         return app
+
+    log_event("service.assembly_completed")
 
     app = create_asgi_app(
         InterfaceDependencies(

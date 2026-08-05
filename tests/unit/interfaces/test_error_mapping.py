@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pytest
+from pydantic import BaseModel, ConfigDict, ValidationError
 
 from problem_locator.contracts.commands import CaseQueryResponse
 from problem_locator.contracts.enums import ErrorCode
@@ -19,6 +20,7 @@ from problem_locator.interfaces.error_mapping import (
     http_status_for,
     success_envelope,
     validation_error,
+    validation_error_from,
 )
 from tests.unit.interfaces.fakes import FakeQuery
 from tests.unit.interfaces.helpers import CASE_ID, case_view
@@ -110,6 +112,33 @@ def test_validation_error_uses_only_s00_vocabulary() -> None:
     assert error.code is ErrorCode.VALIDATION_ERROR
     assert error.details == []
     assert error.retryable is False
+
+
+def test_validation_error_from_exposes_field_path_type_message_and_input() -> None:
+    class Request(BaseModel):
+        model_config = ConfigDict(extra="forbid", strict=True)
+        count: int
+
+    with pytest.raises(ValidationError) as captured:
+        Request.model_validate({"count": "3", "unexpected": "forbidden"})
+
+    error = validation_error_from(captured.value)
+
+    assert error.code is ErrorCode.VALIDATION_ERROR
+    assert [detail.field for detail in error.details] == ["count", "unexpected"]
+    assert error.details[0].expected.startswith("int_type:")
+    assert error.details[0].actual == "3"
+    assert error.details[1].expected.startswith("extra_forbidden:")
+    assert error.details[1].actual == "forbidden"
+
+
+def test_value_error_is_returned_as_a_root_validation_detail() -> None:
+    error = validation_error_from(ValueError("body must be a JSON object"))
+
+    assert len(error.details) == 1
+    assert error.details[0].field == "$"
+    assert error.details[0].expected == "ValueError: body must be a JSON object"
+    assert error.details[0].actual is None
 
 
 def test_public_port_exception_maps_without_private_error_protocol() -> None:

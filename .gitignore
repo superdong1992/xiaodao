@@ -1,5 +1,6 @@
 # Local scratch space, test evidence, downloaded caches, and diagnostics.
 /.tmp/
+/.problem-locator/
 
 # Python-generated files and local environments.
 __pycache__/

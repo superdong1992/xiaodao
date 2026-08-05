@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
@@ -33,11 +34,13 @@ from problem_locator.contracts.ports import (
     ApplicationQueryPort,
     StateAdminPort,
 )
+from problem_locator.diagnostics import HttpDiagnosticsMiddleware, log_event
 
 from .error_mapping import (
     error_envelope,
     http_status_for,
     success_envelope,
+    validation_diagnostics,
     validation_error_from,
 )
 from .http_streaming import AsyncRequestBinaryStream, iterate_binary_stream
@@ -77,7 +80,36 @@ def _json(data: dict[str, Any], *, status_code: int = 200) -> JSONResponse:
     return JSONResponse(content=data, status_code=status_code)
 
 
-def _port_error_response(exc: ApplicationPortError) -> JSONResponse:
+def _log_http_validation_failure(
+    operation: str,
+    arguments: dict[str, Any],
+    error: ValidationError | ValueError | TypeError,
+) -> None:
+    log_event(
+        "http.operation.validation_failed",
+        level=logging.WARNING,
+        operation=operation,
+        arguments=arguments,
+        validation_errors=validation_diagnostics(error),
+        error=error,
+    )
+
+
+def _port_error_response(
+    exc: ApplicationPortError,
+    *,
+    operation: str,
+    arguments: dict[str, Any],
+) -> JSONResponse:
+    log_event(
+        "http.operation.application_error",
+        level=logging.WARNING,
+        operation=operation,
+        arguments=arguments,
+        error_code=exc.error.code,
+        application_error=exc.error,
+        error=exc,
+    )
     return _json(
         error_envelope(exc.error),
         status_code=http_status_for(exc.error),
@@ -122,10 +154,14 @@ async def _port_call(
             await on_cancel()
         try:
             result = await _settle_worker(worker)
-        except BaseException:
+        except BaseException as exc:
             # Retrieve a worker failure so it is never logged as an unhandled
             # task exception; the cancelled HTTP request has no response sink.
-            pass
+            log_event(
+                "http.cancelled_worker.failed",
+                level=logging.ERROR,
+                error=exc,
+            )
         else:
             if dispose_cancelled_result is not None:
                 dispose_cancelled_result(result)
@@ -228,6 +264,7 @@ def create_http_app(
         openapi_url=None,
         lifespan=lifespan,
     )
+    app.add_middleware(HttpDiagnosticsMiddleware)
 
     @app.get("/live")
     async def live() -> JSONResponse:
@@ -257,6 +294,13 @@ def create_http_app(
                 )
             )
         assert report.error is not None
+        log_event(
+            "service.readiness.failed",
+            level=logging.ERROR,
+            error_code=report.error.code,
+            application_error=report.error,
+            checks=report.checks,
+        )
         return _json(
             error_envelope(report.error),
             status_code=http_status_for(report.error),
@@ -264,9 +308,18 @@ def create_http_app(
 
     @app.post("/api/v1/cases/{case_id}/attachments")
     async def prepare_attachment(case_id: str, request: Request) -> JSONResponse:
+        operation = "prepare_attachment"
+        arguments: dict[str, Any] = {"case_id": case_id}
         try:
             typed_case_id = _OPAQUE_ID.validate_python(case_id)
-            body = PrepareAttachmentBody.model_validate(await _json_object(request))
+            raw_body = await _json_object(request)
+            arguments["body"] = raw_body
+            log_event(
+                "http.operation.parameters",
+                operation=operation,
+                arguments=arguments,
+            )
+            body = PrepareAttachmentBody.model_validate(raw_body)
             command = PrepareAttachment(
                 idempotency_key=body.request_id,
                 case_id=typed_case_id,
@@ -277,12 +330,24 @@ def create_http_app(
                 declared_sha256=body.declared_sha256,
             )
         except (ValidationError, ValueError, TypeError) as exc:
+            if "body" not in arguments:
+                buffered_body = getattr(request, "_body", None)
+                if isinstance(buffered_body, bytes):
+                    arguments["raw_body"] = buffered_body.decode(
+                        "utf-8",
+                        errors="replace",
+                    )
+            _log_http_validation_failure(operation, arguments, exc)
             error = validation_error_from(exc)
             return _json(error_envelope(error), status_code=http_status_for(error))
         try:
             response = await _port_call(command_port.execute, command)
         except ApplicationPortError as exc:
-            return _port_error_response(exc)
+            return _port_error_response(
+                exc,
+                operation=operation,
+                arguments=arguments,
+            )
         descriptor = upload_descriptor(
             response,
             public_base_url=public_base_url,
@@ -298,11 +363,35 @@ def create_http_app(
 
     @app.put("/api/v1/attachments/{attachment_id}/content")
     async def upload_attachment(attachment_id: str, request: Request) -> JSONResponse:
+        operation = "upload_attachment"
+        arguments: dict[str, Any] = {
+            "attachment_id": attachment_id,
+            "headers": [
+                [
+                    bytes(name).decode("latin-1", errors="replace"),
+                    bytes(value).decode("latin-1", errors="replace"),
+                ]
+                for name, value in request.scope.get("headers", [])
+            ],
+        }
         try:
             headers = parse_upload_headers(request, attachment_id)
         except (ValidationError, ValueError, TypeError) as exc:
+            _log_http_validation_failure(operation, arguments, exc)
             error = validation_error_from(exc)
             return _json(error_envelope(error), status_code=http_status_for(error))
+
+        arguments["upload"] = {
+            "idempotency_key": headers.idempotency_key,
+            "content_type": headers.content_type,
+            "content_length": headers.content_length,
+            "content_sha256": headers.content_sha256,
+        }
+        log_event(
+            "http.operation.parameters",
+            operation=operation,
+            arguments=arguments,
+        )
 
         stream = AsyncRequestBinaryStream(
             request.stream(),
@@ -321,6 +410,7 @@ def create_http_app(
                     }
                 )
             except ValidationError as exc:
+                _log_http_validation_failure(operation, arguments, exc)
                 error = validation_error_from(exc)
                 return _json(error_envelope(error), status_code=http_status_for(error))
             try:
@@ -330,7 +420,11 @@ def create_http_app(
                     on_cancel=stream.abort,
                 )
             except ApplicationPortError as exc:
-                return _port_error_response(exc)
+                return _port_error_response(
+                    exc,
+                    operation=operation,
+                    arguments=arguments,
+                )
         finally:
             await stream.aclose()
 
@@ -348,6 +442,16 @@ def create_http_app(
 
     @app.get("/api/v1/artifacts/{artifact_id}/content")
     async def download_artifact(artifact_id: str, request: Request):
+        operation = "download_artifact"
+        arguments: dict[str, Any] = {
+            "artifact_id": artifact_id,
+            "query": list(request.query_params.multi_items()),
+        }
+        log_event(
+            "http.operation.parameters",
+            operation=operation,
+            arguments=arguments,
+        )
         try:
             typed_artifact_id = _OPAQUE_ID.validate_python(artifact_id)
             query_items = list(request.query_params.multi_items())
@@ -355,6 +459,7 @@ def create_http_app(
                 raise ValueError("case_id must be the sole query parameter")
             case_id = _OPAQUE_ID.validate_python(query_items[0][1])
         except (ValidationError, ValueError, TypeError) as exc:
+            _log_http_validation_failure(operation, arguments, exc)
             error = validation_error_from(exc)
             return _json(error_envelope(error), status_code=http_status_for(error))
 
@@ -366,7 +471,11 @@ def create_http_app(
                 dispose_cancelled_result=lambda item: item.stream.close(),
             )
         except ApplicationPortError as exc:
-            return _port_error_response(exc)
+            return _port_error_response(
+                exc,
+                operation=operation,
+                arguments=arguments,
+            )
         return _ClosingStreamingResponse(
             result.stream,
             iterate_binary_stream(result.stream),

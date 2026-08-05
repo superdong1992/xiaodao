@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 import threading
 
 import httpx
@@ -114,6 +115,7 @@ def test_live_stays_up_while_ready_reports_frozen_error(code: ErrorCode) -> None
     assert live.status_code == 200
     assert live.json() == {"ok": True, "data": {"status": "live"}, "error": None}
     assert "access-control-allow-origin" not in live.headers
+    assert live.headers["x-problem-locator-correlation-id"]
     assert ready_response.status_code == 503
     body = ready_response.json()
     assert body["ok"] is False
@@ -261,7 +263,8 @@ def test_prepare_post_preserves_every_frozen_application_command_error(
     assert len(command.calls) == 1
 
 
-def test_prepare_rejects_extra_fields_without_calling_port() -> None:
+def test_prepare_rejects_extra_fields_without_calling_port(caplog) -> None:
+    caplog.set_level(logging.INFO, logger="problem_locator.dfx")
     command = FakeApplicationService()
     app = create_http_app(
         command_port=command,
@@ -286,7 +289,21 @@ def test_prepare_rejects_extra_fields_without_calling_port() -> None:
 
     response = _run(app, operation)
     assert response.status_code == 400
-    assert response.json()["error"]["code"] == ErrorCode.VALIDATION_ERROR.value
+    body = response.json()
+    assert body["error"]["code"] == ErrorCode.VALIDATION_ERROR.value
+    assert body["error"]["details"][0]["field"] == "unexpected"
+    assert body["error"]["details"][0]["actual"] == "forbidden"
+    assert response.headers["x-problem-locator-correlation-id"]
+    failure = next(
+        record
+        for record in caplog.records
+        if getattr(record, "dfx_event", "")
+        == "http.operation.validation_failed"
+    )
+    assert failure.dfx_fields["arguments"]["body"]["unexpected"] == "forbidden"
+    assert failure.dfx_fields["validation_errors"][0]["loc"] == (
+        "unexpected",
+    )
     assert command.calls == []
 
 
@@ -834,7 +851,8 @@ def test_mcp_is_mounted_on_the_same_asgi_app_in_stateless_json_mode() -> None:
     assert session_id is None
 
 
-def test_put_passes_raw_content_type_and_streams_to_application_port() -> None:
+def test_put_passes_raw_content_type_and_streams_to_application_port(caplog) -> None:
+    caplog.set_level(logging.INFO, logger="problem_locator.dfx")
     payload = b"a" * (HTTP_STREAM_CHUNK_BYTES * 2 + 17)
     body = StreamingUploadFixture(
         [payload[:100_000], payload[100_000:]],
@@ -899,6 +917,17 @@ def test_put_passes_raw_content_type_and_streams_to_application_port() -> None:
     assert body.read_calls == 2
     assert len(command.calls) == 1
     assert command.calls[0].byte_stream.closed
+    parameters = next(
+        record.dfx_fields["arguments"]
+        for record in caplog.records
+        if getattr(record, "dfx_event", "") == "http.operation.parameters"
+        and record.dfx_fields["operation"] == "upload_attachment"
+    )
+    assert "body" not in parameters
+    assert parameters["upload"]["content_length"] == len(payload)
+    assert parameters["upload"]["content_sha256"] == hashlib.sha256(
+        payload
+    ).hexdigest()
 
 
 def test_put_maps_prepared_content_type_mismatch_before_reading_body() -> None:

@@ -14,6 +14,8 @@ EXPECTED_ENV_KEYS = {
     "BIND_HOST",
     "CLAUDE_COMMAND",
     "DATA_ROOT",
+    "DFX_LOG_LEVEL",
+    "DFX_LOG_FILE",
     "LOGPARSE_CONFIG_PATH",
     "LOGPARSE_PYTHON",
     "LOGPARSE_REPO",
@@ -79,7 +81,7 @@ def test_release_metadata_keeps_the_offline_database_boundary() -> None:
         assert statement in readme
 
 
-def test_env_example_contains_only_the_nine_public_settings() -> None:
+def test_env_example_contains_only_the_public_settings() -> None:
     assignments = {}
     for line in (ROOT / ".env.example").read_text(encoding="utf-8").splitlines():
         stripped = line.strip()
@@ -113,5 +115,6 @@ def test_env_example_contains_only_the_nine_public_settings() -> None:
             "LOGPARSE_REPO",
             "LOGPARSE_CONFIG_PATH",
             "LOGPARSE_PYTHON",
+            "DFX_LOG_FILE",
         }
     )

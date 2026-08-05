@@ -62,6 +62,8 @@ uv lock --check
 | `PORT` | 否 | `8000` | Uvicorn 监听端口 |
 | `CLAUDE_COMMAND` | 否 | `claude` | Agent 命令，会被解析为 argv 参数模板 |
 | `LOGPARSE_PYTHON` | 否 | 当前 Python | Logparse 使用的 Python 启动命令 |
+| `DFX_LOG_LEVEL` | 否 | `INFO` | 结构化诊断日志级别：`DEBUG`、`INFO`、`WARNING`、`ERROR` 或 `CRITICAL` |
+| `DFX_LOG_FILE` | 否 | stderr | 结构化诊断日志文件的绝对路径；配置后以 UTF-8 追加写入，并自动创建父目录 |
 
 运行时限制是冻结的契约常量，不属于可配置项。V1 会拒绝 `JOB_CONCURRENCY` 以及未知的 limit、max、retention 覆盖项，避免运维人员误以为某项实际上无效的限制已经生效。
 
@@ -98,7 +100,87 @@ uv run python -m problem_locator serve --env-file /absolute/path/to/service.env
 
 仓库内置的 [`.claude/skills/problem-locator-client`](.claude/skills/problem-locator-client) Skill 说明了安全的请求 ID、修订版本处理方式、上传请求头以及产物哈希校验方法。文件内容只通过 HTTP 传输，绝不会嵌入 MCP 消息。
 
+### 客户端本地 MCP 的安装与配置
+
+客户端不得让 Claude Code 直接连接局域网 HTTP MCP。客户端本地 MCP 不是另一个 npm 包，而是 `problem-locator` Python 包内置的 `problem-locator-client-proxy` 命令。客户端必须安装与服务端完全相同版本的包，再让 Claude Code 把它作为本地 stdio MCP 启动；该进程负责连接局域网内服务端的 `/mcp`。
+
+在客户端安装发布 wheel（推荐）或同一版本的源码目录：
+
+```sh
+# 安装发布 wheel；把路径替换为实际交付文件
+uv tool install --python 3.12 /absolute/path/to/problem_locator-1.0.0-py3-none-any.whl
+
+# 如果客户端拿到的是同一版本源码，也可以直接安装源码目录
+uv tool install --python 3.12 /absolute/path/to/xiaodao
+```
+
+两个命令二选一，不需要都执行。安装后先验证命令确实可执行：
+
+```sh
+problem-locator-client-proxy --help
+```
+
+如果 uv 提示可执行文件目录不在 PATH，执行 `uv tool update-shell` 后重新打开 Claude Code；也可以运行 `uv tool dir --bin` 找到目录，并在下方 `.mcp.json` 的 `command` 中填写 `problem-locator-client-proxy` 的绝对路径。使用源码虚拟环境而不是 `uv tool install` 时，Windows 路径是 `D:/absolute/path/to/xiaodao/.venv/Scripts/problem-locator-client-proxy.exe`，Linux/macOS 路径是 `/absolute/path/to/xiaodao/.venv/bin/problem-locator-client-proxy`。
+
+删除或替换原来直接连接服务端的 `"type": "http"` 配置，不要同时保留两个同名 MCP。客户端项目根目录的 `.mcp.json` 应配置为本地 `stdio`；下面示例中的地址和日志路径都要替换为客户端可用的真实值：
+
+```json
+{
+  "mcpServers": {
+    "problem-locator": {
+      "type": "stdio",
+      "command": "problem-locator-client-proxy",
+      "args": [],
+      "env": {
+        "PROBLEM_LOCATOR_MCP_URL": "http://192.168.1.20:8000/mcp",
+        "PROBLEM_LOCATOR_CLIENT_DFX_LOG_FILE": "D:/logs/problem-locator/client.jsonl",
+        "PROBLEM_LOCATOR_CLIENT_DFX_LOG_LEVEL": "INFO"
+      }
+    }
+  }
+}
+```
+
+Linux/macOS 客户端可以把日志路径改为 `/var/log/problem-locator/client.jsonl` 或其他可写路径。完整配置模板见 [client-mcp-config.json](.claude/skills/problem-locator-client/references/client-mcp-config.json)。修改后重启 Claude Code，通过 `/mcp` 确认 `problem-locator` 已连接，再调用一次工具并检查日志：
+
+```powershell
+Get-Content -Wait D:\logs\problem-locator\client.jsonl
+```
+
+```sh
+tail -f /var/log/problem-locator/client.jsonl
+```
+
+代理使用宽松的本地工具输入 schema，确保 Claude Code 不会在日志产生前拦截参数；上游服务仍执行权威 schema 校验。每次调用的完整参数、完整响应/错误、`operation_id`、`attempt_id`、递增的 `attempt_number` 和耗时都会写入客户端 JSONL，不依赖 Claude Code debug 日志。未配置 `PROBLEM_LOCATOR_CLIENT_DFX_LOG_FILE` 时，默认日志位置是客户端项目目录下的 `.problem-locator/client-dfx.jsonl`。
+
 `/live` 表示 HTTP 进程正在提供服务。`/ready` 还会检查配置、实例锁、状态有效性、数据目录和启动恢复过程。在恢复期间，或出现致命状态/worker 故障后，服务可能仍然存活，但尚未就绪。
+
+### DFX 诊断日志
+
+服务把单行 JSON 诊断事件写入 `DFX_LOG_FILE` 指定的文件；未配置时写入标准错误流。文件以 UTF-8 追加打开，父目录不存在时会自动创建，服务重启不会覆盖原日志。每个 HTTP 请求都会返回 `X-Problem-Locator-Correlation-ID`，同一值会出现在对应日志中。MCP/HTTP 参数校验失败会记录完整参数、字段路径、实际输入和异常堆栈；MCP 错误响应也会在 `ApplicationError.details[]` 中返回可操作的字段错误。附件上传只记录请求头、长度和 SHA-256，不记录文件二进制内容。
+
+服务端日志不需要安装额外组件；它随 `problem-locator` 包安装。服务端在发布源码目录执行 `uv sync --frozen` 后，把下面两项写入启动时通过 `--env-file` 指定的配置文件：
+
+直接写入指定文件的配置示例：
+
+```dotenv
+DFX_LOG_LEVEL=DEBUG
+DFX_LOG_FILE=/var/log/problem-locator/service.jsonl
+```
+
+然后按“启动服务”一节运行服务，并确认日志文件已经产生：
+
+```sh
+uv run python -m problem_locator serve --env-file /absolute/path/to/service.env
+tail -f /var/log/problem-locator/service.jsonl
+```
+
+如果不配置 `DFX_LOG_FILE`，仍可由 Docker、systemd 或启动脚本收集和轮转 stderr。直接启动时也可以这样重定向：
+
+```sh
+uv run python -m problem_locator serve --env-file /absolute/path/to/service.env \
+  2>> /absolute/path/to/problem-locator.log
+```
 
 ## 附件与结果处理
 

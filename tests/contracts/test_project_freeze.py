@@ -22,12 +22,13 @@ def test_python_and_dependency_baseline_is_frozen() -> None:
     assert {"jsonschema==4.25.1", "pytest==9.0.2"}.issubset(groups["dev"])
 
 
-def test_logparse_console_entry_is_pre_registered() -> None:
+def test_public_console_entries_are_pre_registered() -> None:
     project = _load_toml("pyproject.toml")
     metadata = project["project"]
     assert isinstance(metadata, dict)
     scripts = metadata["scripts"]
     assert scripts == {
+        "problem-locator-client-proxy": "problem_locator.interfaces.client_proxy:main",
         "problem-locator-logparse": "problem_locator.integrations.logparse.cli:main",
         "problem-locator-pack-result": "problem_locator.integrations.result_archive:main",
     }

@@ -7,6 +7,12 @@ description: Operate a Problem Locator V1 diagnosis case through its seven Remot
 
 Treat the service as the authority for every Case, revision, requirement, Job, and Artifact. Use Remote MCP for structured control and HTTP only for file bytes.
 
+## Require the diagnostic client proxy
+
+Use the seven tools only through the local `problem-locator-client-proxy`; never configure this Skill to call the LAN HTTP MCP endpoint directly. The proxy advertises a permissive local input schema, writes the complete arguments before forwarding, records every response/error and retry attempt, and then forwards the unchanged arguments to the upstream `/mcp` endpoint for authoritative validation. It does not read or depend on Claude Code debug logs.
+
+Install the matching Problem Locator package on the client so `problem-locator-client-proxy` is in PATH, then start from [references/client-mcp-config.json](references/client-mcp-config.json). Set `PROBLEM_LOCATOR_MCP_URL` to the LAN URL ending in `/mcp`. `PROBLEM_LOCATOR_CLIENT_DFX_LOG_FILE` selects the client JSONL file and defaults to `.problem-locator/client-dfx.jsonl` under the Claude project directory. Keep one `request_id` unchanged across validation, transport, and response retries so the proxy's `operation_id` and increasing `attempt_number` group the complete attempt history.
+
 ## Use the fixed tools
 
 Call only these Remote MCP tools:

@@ -209,17 +209,25 @@ SKILL_DIR
 LOGPARSE_REPO
 LOGPARSE_CONFIG_PATH
 LOGPARSE_PYTHON
+DFX_LOG_LEVEL
+DFX_LOG_FILE
 ```
 
 V1 的 Context、Job、附件、Case、并发和保留期限制全部是 S00 编译期合同常量，不是 Settings 或环境变量；S02～S05 直接消费同一常量模块，S08 不注入第二份 effective limits。未知的 `*_LIMIT_*`、`*_MAX_*`、`*_RETENTION_*` 或 `JOB_CONCURRENCY` 配置键按额外配置拒绝并返回 `CONFIG_INVALID`，防止运维人员误以为下调已经生效。固定值为 Router `131072`，Specialist/Reviewer `204800`，Job `1800` 秒，日志 `67108864` 字节，Workspace `1073741824` 字节，并发 `1`，附件 `2684354560` 字节，Case 正式文件 `5368709120` 字节，临时资源 `86400` 秒，orphan `604800` 秒。
 
-配置装载固定为：显式 `--env-file` 使用 UTF-8 dotenv 语法加载且不覆盖启动进程中已有变量；随后读取进程环境并构造不可变 Settings。`DATA_ROOT`、`PUBLIC_BASE_URL`、`SKILL_DIR`、`LOGPARSE_REPO`、`LOGPARSE_CONFIG_PATH` 是必需项；四个路径必须是绝对路径，`PUBLIC_BASE_URL` 必须是不含 userinfo 的绝对 HTTP(S) URL。`CLAUDE_COMMAND` 默认 `claude`，`BIND_HOST` 默认 `127.0.0.1`，`PORT` 默认 `8000`，`LOGPARSE_PYTHON` 默认当前 Python 可执行文件。
+配置装载固定为：显式 `--env-file` 使用 UTF-8 dotenv 语法加载且不覆盖启动进程中已有变量；随后读取进程环境并构造不可变 Settings。`DATA_ROOT`、`PUBLIC_BASE_URL`、`SKILL_DIR`、`LOGPARSE_REPO`、`LOGPARSE_CONFIG_PATH` 是必需项；四个路径必须是绝对路径，`PUBLIC_BASE_URL` 必须是不含 userinfo 的绝对 HTTP(S) URL。`CLAUDE_COMMAND` 默认 `claude`，`BIND_HOST` 默认 `127.0.0.1`，`PORT` 默认 `8000`，`LOGPARSE_PYTHON` 默认当前 Python 可执行文件，`DFX_LOG_LEVEL` 默认 `INFO` 并只接受 Python 标准日志级别 `DEBUG/INFO/WARNING/ERROR/CRITICAL`。`DFX_LOG_FILE` 可选且必须是绝对路径；未配置时日志目标为 stderr。
+
+服务必须把单行 JSON DFX 事件写入 `DFX_LOG_FILE` 指定的文件，未配置时写入 stderr，并统一记录启动、恢复、关闭、MCP/HTTP 调用、应用 Port 错误、worker 致命错误和 retention 失败。指定文件使用 UTF-8 追加模式，自动创建父目录，重启不得截断已有内容；文件无法创建或打开时服务必须返回配置错误而不启动。每个 HTTP 请求生成并返回 `X-Problem-Locator-Correlation-ID`，同一 ID 贯穿该请求触发的 MCP 和线程任务。结构化控制面参数与完整校验错误进入日志；上传文件只记录 header、长度与哈希，不记录 body bytes。文件轮转仍由进程管理器负责。
 
 组合根只能把不可变 Settings 中的 `LOGPARSE_REPO/LOGPARSE_CONFIG_PATH/LOGPARSE_PYTHON` 三个 raw 值交给 S07 的服务侧启动构造器；S06 不生成工具 ref/fingerprint，S04 也不直接读取 Settings。这三个值不得进入 Agent 环境、Workspace、Context、Job、状态、外部响应或日志。S07 返回的 S00 `ResolvedAsset(LOGPARSE_TOOL)` 与 `LogparseBrokerFactory` 必须作为同一构造结果一起交给 S04 Catalog/Runtime，不能分别从不同配置实例创建。
 
 ### 6.5 Client Access Skill
 
 `.claude/skills/problem-locator-client/**` 与本册接口合同由 S06 共同拥有。Skill 必须：
+
+- 通过本地 `problem-locator-client-proxy` stdio MCP 暴露七个工具，再由代理连接局域网 Streamable HTTP `/mcp`；不得让 Claude Code 直接连接上游，以免客户端 schema 拒绝发生在可观测边界之外；
+- 代理对 Claude Code 广告只保留字段名和说明的宽松 object schema，上游原始 schema 仍由服务端权威执行；每次调用转发前后必须把完整参数、完整响应/异常、`operation_id`、`attempt_id`、同操作递增的 `attempt_number` 和耗时追加写入客户端 JSONL；日志实现不得读取或依赖 Claude Code debug 日志；
+- 客户端日志路径由 `PROBLEM_LOCATOR_CLIENT_DFX_LOG_FILE` 或代理 `--log-file` 配置，默认是客户端项目目录下 `.problem-locator/client-dfx.jsonl`；日志级别由 `PROBLEM_LOCATOR_CLIENT_DFX_LOG_LEVEL` 或 `--log-level` 配置；
 
 - 使用调用方已有的 Remote MCP 客户端调用本册七个固定工具；
 - 使用系统 `curl` 按 UploadDescriptor 上传用户明确选择的本地文件，并按 ArtifactView.download_url 下载用户可见 Artifact；
@@ -235,6 +243,8 @@ Skill 只描述跨平台语义，不拼装服务端返回之外的 URL。上传�
 ## 7. 行为与错误码
 
 所有错误码、HTTP 状态、MCP 错误 Envelope、是否可重试和业务状态影响只引用 S00。S06 只做无损协议映射，不重新分类。
+
+Adapter 产生的 `VALIDATION_ERROR` 必须在现有 `ApplicationError.details[]` 中返回每个失败字段：`field` 使用点号/数组下标路径，`expected` 使用 `<error type>: <message>`，`actual` 保留标量或规范 JSON 字符串；根级错误使用 `$`。同一诊断的完整参数、原始 Pydantic 错误和 traceback 同时写入 DFX 日志。
 
 必须映射的 S00 行为包括：
 

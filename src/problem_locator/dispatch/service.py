@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import threading
 
 from problem_locator.contracts import (
@@ -15,6 +16,7 @@ from problem_locator.contracts import (
     Runtime,
     StateRepository,
 )
+from problem_locator.diagnostics import log_event
 
 from .backoff import InterruptibleSubmissionBackoff, SubmissionBackoff
 from .dispatcher import InProcessDispatcher
@@ -119,7 +121,20 @@ class SchedulerService:
     def wait_until_idle(self, timeout_seconds: float) -> bool:
         return self._dispatcher.wait_until_idle(timeout_seconds)
 
-    def _record_fatal_worker_error(self, _job_id: str, error: Exception) -> None:
+    def _record_fatal_worker_error(self, job_id: str, error: Exception) -> None:
+        application_error = (
+            error.error if isinstance(error, ApplicationPortError) else None
+        )
+        log_event(
+            "worker.job.fatal_error",
+            level=logging.ERROR,
+            job_id=job_id,
+            error_code=(
+                application_error.code if application_error is not None else None
+            ),
+            application_error=application_error,
+            error=error,
+        )
         with self._lock:
             self._fatal_worker_error_type = type(error).__name__
             self._fatal_worker_error_code = (

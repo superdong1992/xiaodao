@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+import time
 from dataclasses import dataclass
-from functools import wraps
 from typing import Any, Literal
 
 from mcp import types as mcp_types
@@ -37,22 +38,30 @@ from problem_locator.contracts.models import (
     WaitSeconds,
 )
 from problem_locator.contracts.ports import ApplicationCommandPort, ApplicationQueryPort
+from problem_locator.diagnostics import bind_diagnostics, log_event
 
-from .error_mapping import error_envelope, success_envelope, validation_error_from
+from .error_mapping import (
+    error_envelope,
+    success_envelope,
+    validation_diagnostics,
+    validation_error_from,
+)
 from .projections import artifact_view, upload_descriptor
 
 
-def _map_application_port_errors(function):
-    """Convert the sole frozen Port failure into the S06 business envelope."""
-
-    @wraps(function)
-    async def mapped(*args: Any, **kwargs: Any) -> dict[str, Any]:
-        try:
-            return await function(*args, **kwargs)
-        except ApplicationPortError as exc:
-            return error_envelope(exc.error)
-
-    return mapped
+def _log_validation_failure(
+    name: str,
+    arguments: dict[str, Any],
+    error: ValidationError | ValueError | TypeError,
+) -> None:
+    log_event(
+        "mcp.tool.validation_failed",
+        level=logging.WARNING,
+        tool=name,
+        arguments=arguments,
+        validation_errors=validation_diagnostics(error),
+        error=error,
+    )
 
 
 class _RequestModel(BaseModel):
@@ -208,14 +217,58 @@ class McpAdapter:
         self._query_port = query_port
         self._public_base_url = public_base_url
 
-    @_map_application_port_errors
     async def call(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        started = time.perf_counter()
+        request_id = arguments.get("request_id")
+        with bind_diagnostics(
+            transport="mcp",
+            tool=name,
+            request_id=request_id if isinstance(request_id, str) else None,
+        ):
+            log_event("mcp.tool.started", arguments=arguments)
+            try:
+                result = await self._call(name, arguments)
+            except ApplicationPortError as exc:
+                log_event(
+                    "mcp.tool.application_error",
+                    level=logging.WARNING,
+                    arguments=arguments,
+                    application_error=exc.error,
+                    error_code=exc.error.code,
+                    error=exc,
+                )
+                result = error_envelope(exc.error)
+            except Exception as exc:
+                log_event(
+                    "mcp.tool.unhandled_error",
+                    level=logging.ERROR,
+                    arguments=arguments,
+                    error=exc,
+                )
+                raise
+
+            public_error = result.get("error") if result.get("ok") is False else None
+            log_event(
+                "mcp.tool.completed",
+                level=logging.WARNING if public_error is not None else logging.INFO,
+                ok=result.get("ok"),
+                error_code=(
+                    public_error.get("code")
+                    if isinstance(public_error, dict)
+                    else None
+                ),
+                duration_ms=round((time.perf_counter() - started) * 1000, 3),
+            )
+            return result
+
+    async def _call(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         request_type = _REQUESTS.get(name)
         if request_type is None:
             raise ValueError("Unknown MCP tool.")
         try:
             request = request_type.model_validate(arguments)
         except ValidationError as exc:
+            _log_validation_failure(name, arguments, exc)
             return error_envelope(validation_error_from(exc))
 
         if isinstance(request, CreateCaseRequest):
@@ -227,6 +280,7 @@ class McpAdapter:
                     wait_seconds=request.wait_seconds,
                 )
             except ValidationError as exc:
+                _log_validation_failure(name, arguments, exc)
                 return error_envelope(validation_error_from(exc))
             response = await asyncio.to_thread(self._command_port.execute, command)
             return success_envelope(response)
@@ -243,6 +297,7 @@ class McpAdapter:
                     declared_sha256=request.declared_sha256,
                 )
             except ValidationError as exc:
+                _log_validation_failure(name, arguments, exc)
                 return error_envelope(validation_error_from(exc))
             response = await asyncio.to_thread(self._command_port.execute, command)
             descriptor = upload_descriptor(
@@ -267,6 +322,7 @@ class McpAdapter:
                     wait_seconds=request.wait_seconds,
                 )
             except ValidationError as exc:
+                _log_validation_failure(name, arguments, exc)
                 return error_envelope(validation_error_from(exc))
             response = await asyncio.to_thread(self._command_port.execute, command)
             return success_envelope(response)

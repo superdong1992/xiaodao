@@ -173,6 +173,35 @@ def test_skill_document_names_tools_and_safety_invariants() -> None:
     assert ".tar.gz" in skill and "uppercase archive suffixes" in skill
     assert "do not ask for a Logparse archive Content-Type" in skill
     assert "Derive it from the canonical lowercase filename suffix" in skill
+    assert "problem-locator-client-proxy" in skill
+    assert "does not read or depend on Claude Code debug logs" in skill
+    assert "attempt_number" in skill
+
+    config = (
+        Path(__file__).parents[3]
+        / ".claude"
+        / "skills"
+        / "problem-locator-client"
+        / "references"
+        / "client-mcp-config.json"
+    )
+    assert config.is_file()
+    parsed_config = json.loads(config.read_text(encoding="utf-8"))
+    proxy = parsed_config["mcpServers"]["problem-locator"]
+    assert proxy["type"] == "stdio"
+    assert proxy["command"] == "problem-locator-client-proxy"
+    assert proxy["args"] == []
+    assert "PROBLEM_LOCATOR_MCP_URL" in proxy["env"]
+
+    readme = (Path(__file__).parents[3] / "README.md").read_text(encoding="utf-8")
+    assert "客户端本地 MCP 的安装与配置" in readme
+    assert "uv tool install --python 3.12" in readme
+    assert "problem-locator-client-proxy --help" in readme
+    assert '替换原来直接连接服务端的 `"type": "http"` 配置' in readme
+    assert '"type": "stdio"' in readme
+    assert "D:/logs/problem-locator/client.jsonl" in readme
+    assert "服务端日志不需要安装额外组件" in readme
+    assert "tail -f /var/log/problem-locator/service.jsonl" in readme
 
 
 def test_create_case_uses_one_stable_generated_request_id() -> None:

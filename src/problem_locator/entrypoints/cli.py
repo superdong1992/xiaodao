@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 import sys
 import tempfile
@@ -21,6 +22,7 @@ from problem_locator.contracts.errors import (
 from problem_locator.contracts.models import ApplicationError
 from problem_locator.contracts.ports import StateAdminPort
 from problem_locator.contracts.serialization import canonical_json_bytes
+from problem_locator.diagnostics import configure_diagnostics, log_event
 
 from problem_locator.interfaces.error_mapping import cli_exit_for, validation_error
 
@@ -63,7 +65,14 @@ def run_uvicorn(app: Any, host: str, port: int, workers: int) -> None:
         import uvicorn
     except ImportError as exc:  # pragma: no cover - dependency gate
         raise SettingsError("Uvicorn is not installed") from exc
-    uvicorn.run(app, host=host, port=port, workers=1)
+    uvicorn.run(
+        app,
+        host=host,
+        port=port,
+        workers=1,
+        log_config=None,
+        access_log=False,
+    )
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -159,11 +168,36 @@ def main(
         return CLI_EXIT_CONFIG_OR_STATE_CORRUPT
 
     if arguments.command == "serve":
+        configure_diagnostics("INFO")
         try:
             settings = Settings.load(env_file=arguments.env_file)
+            try:
+                configure_diagnostics(
+                    settings.dfx_log_level,
+                    log_file=settings.dfx_log_file,
+                )
+            except (OSError, ValueError) as exc:
+                raise SettingsError("DFX log file could not be opened") from exc
+            log_event(
+                "service.configuration.loaded",
+                bind_host=settings.bind_host,
+                port=settings.port,
+                public_base_url=settings.public_base_url,
+                dfx_log_level=settings.dfx_log_level,
+                dfx_log_file=(
+                    str(settings.dfx_log_file)
+                    if settings.dfx_log_file is not None
+                    else None
+                ),
+            )
             app = active_hooks.app_factory(settings)
             active_hooks.server_runner(app, settings.bind_host, settings.port, 1)
-        except SettingsError:
+        except SettingsError as exc:
+            log_event(
+                "service.configuration.invalid",
+                level=logging.ERROR,
+                error=exc,
+            )
             _write_error(errors, _config_error())
             return CLI_EXIT_CONFIG_OR_STATE_CORRUPT
         return CLI_EXIT_SUCCESS

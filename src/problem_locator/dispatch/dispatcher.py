@@ -13,6 +13,7 @@ from problem_locator.contracts import (
     CancellationReason,
     DispatchReceipt,
 )
+from problem_locator.diagnostics import log_event
 
 from .cancellation import CancellationController
 from .worker import JobWorker
@@ -152,11 +153,22 @@ class InProcessDispatcher:
                 self._running_cancellation = cancellation
 
             fatal_error: Exception | None = None
+            started = time.perf_counter()
+            log_event("worker.job.started", job_id=job_id)
             try:
                 self._worker.execute_one(job_id, cancellation)
             except Exception as exc:  # fail closed; never retry Runtime implicitly
                 fatal_error = exc
             finally:
+                if fatal_error is None:
+                    log_event(
+                        "worker.job.completed",
+                        job_id=job_id,
+                        duration_ms=round(
+                            (time.perf_counter() - started) * 1000,
+                            3,
+                        ),
+                    )
                 if fatal_error is not None:
                     with self._condition:
                         self._running_cancellation = None
