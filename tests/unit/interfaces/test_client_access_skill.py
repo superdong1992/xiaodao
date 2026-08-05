@@ -201,7 +201,7 @@ def test_skill_document_names_tools_and_safety_invariants() -> None:
     assert '"type": "stdio"' in readme
     assert "D:/logs/problem-locator/client.jsonl" in readme
     assert "服务端日志不需要安装额外组件" in readme
-    assert "tail -f /var/log/problem-locator/service.jsonl" in readme
+    assert "tail -f /var/log/problem-locator/debug.jsonl" in readme
 
 
 def test_create_case_uses_one_stable_generated_request_id() -> None:

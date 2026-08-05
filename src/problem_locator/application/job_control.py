@@ -13,6 +13,7 @@ covered by a short injected publication lease.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterable
 
 from problem_locator.contracts import (
@@ -58,6 +59,7 @@ from problem_locator.contracts import (
     canonical_json_sha256,
     validate_coordinator_plan_result,
 )
+from problem_locator.journey import record_journey_event
 
 from .formalization import apply_diagnosis_state_delta
 from .mutations import apply_transition_plan_to_case, build_state_mutation
@@ -332,10 +334,24 @@ class JobControlService:
                     if _is_revision_conflict(error) and attempt + 1 < self._max_commit_attempts:
                         continue
                     raise
+                running_job = _running_job(job, lifecycle)
+                record_journey_event(
+                    "job.claimed",
+                    timestamp=occurred_at,
+                    case_id=case_id,
+                    job_id=job.job_id,
+                    job_type=job.job_type,
+                    data={
+                        "runtime_epoch": runtime_epoch,
+                        "generation": receipt.generation,
+                        "job": running_job,
+                        "case_revision": updated_case.case_revision,
+                    },
+                )
                 self._notify(case_id, receipt.generation)
                 return ClaimReceipt(
                     claimed=True,
-                    job=_running_job(job, lifecycle),
+                    job=running_job,
                     failure_applied=False,
                     failure_code=None,
                 )
@@ -404,6 +420,40 @@ class JobControlService:
                 if _is_revision_conflict(error) and attempt + 1 < self._max_commit_attempts:
                     continue
                 raise
+            record_journey_event(
+                "job.claim.failed",
+                level=logging.ERROR,
+                timestamp=occurred_at,
+                case_id=case_id,
+                job_id=job.job_id,
+                job_type=job.job_type,
+                data={
+                    "code": ErrorCode.ASSET_VERSION_UNAVAILABLE.value,
+                    "missing_refs": availability.missing_refs,
+                    "generation": receipt.generation,
+                    "from_case": aggregate.case,
+                    "to_case": updated_case,
+                },
+            )
+            if aggregate.case.status is not updated_case.status:
+                record_journey_event(
+                    "case.status.changed",
+                    timestamp=occurred_at,
+                    case_id=case_id,
+                    job_id=job.job_id,
+                    job_type=job.job_type,
+                    data={
+                        "source_event": "job.claim.failed",
+                        "from_status": aggregate.case.status.value,
+                        "to_status": updated_case.status.value,
+                        "from_case_revision": aggregate.case.case_revision,
+                        "to_case_revision": updated_case.case_revision,
+                        "diagnosis_state_revision": updated_case.diagnosis_state.revision,
+                        "active_job_id": updated_case.active_job_id,
+                        "failure": updated_case.failure,
+                        "generation": receipt.generation,
+                    },
+                )
             self._notify(case_id, receipt.generation)
             return ClaimReceipt(
                 claimed=False,
@@ -587,6 +637,42 @@ class JobControlService:
                 if _is_revision_conflict(error) and attempt + 1 < self._max_commit_attempts:
                     continue
                 raise
+            record_journey_event(
+                "job.execution.failure_applied",
+                level=logging.ERROR,
+                timestamp=occurred_at,
+                case_id=case_id,
+                job_id=job.job_id,
+                job_type=job.job_type,
+                data={
+                    "failure_id": command.failure_id,
+                    "runtime_epoch": command.runtime_epoch,
+                    "failure": command.execution_failure,
+                    "disposition": FailureReportDisposition.APPLIED.value,
+                    "plan_reason": plan.reason,
+                    "generation": receipt.generation,
+                    "case_view": target_case_view,
+                },
+            )
+            if aggregate.case.status is not updated_case.status:
+                record_journey_event(
+                    "case.status.changed",
+                    timestamp=occurred_at,
+                    case_id=case_id,
+                    job_id=job.job_id,
+                    job_type=job.job_type,
+                    data={
+                        "source_event": "job.execution.failure_applied",
+                        "from_status": aggregate.case.status.value,
+                        "to_status": updated_case.status.value,
+                        "from_case_revision": aggregate.case.case_revision,
+                        "to_case_revision": updated_case.case_revision,
+                        "diagnosis_state_revision": updated_case.diagnosis_state.revision,
+                        "active_job_id": updated_case.active_job_id,
+                        "failure": updated_case.failure,
+                        "generation": receipt.generation,
+                    },
+                )
             self._notify(case_id, receipt.generation)
             return FailureReceipt(
                 failure_id=command.failure_id,

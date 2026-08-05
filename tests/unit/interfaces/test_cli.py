@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import json
 from pathlib import Path
 
 import pytest
@@ -17,10 +18,40 @@ from problem_locator.contracts.enums import ErrorCode
 from problem_locator.contracts.limits import CONTRACT_REVISION
 from problem_locator.contracts.models import ApplicationError
 from problem_locator.contracts.serialization import canonical_json_bytes
+from problem_locator.diagnostics import configure_diagnostics
 from problem_locator.entrypoints.cli import CliHooks, main, run_uvicorn
 from problem_locator.interfaces.error_mapping import cli_exit_for
+from problem_locator.journey import JourneyEvent, configure_journey
 from tests.unit.interfaces.fakes import FakeStateAdmin
 from tests.unit.interfaces.helpers import invalid_report, readiness, valid_report
+
+
+_JOURNEY_CASE_ID = "00000000-0000-4000-8000-000000000901"
+
+
+def _journey_event_bytes() -> bytes:
+    event = JourneyEvent.model_validate(
+        {
+            "schema_version": 1,
+            "sequence": 1,
+            "timestamp": "2026-08-05T08:00:00.000Z",
+            "level": "INFO",
+            "event": "case.created",
+            "correlation_id": None,
+            "request_id": "request-1",
+            "case_id": _JOURNEY_CASE_ID,
+            "job_id": None,
+            "job_type": None,
+            "outcome_id": None,
+            "duration_ms": None,
+            "data": {
+                "problem_spec": {"statement": "A request timed out."},
+                "case": {"status": "RUNNING"},
+            },
+        },
+        strict=True,
+    )
+    return canonical_json_bytes(event)
 
 
 def hooks_for(
@@ -204,6 +235,122 @@ def test_export_maps_every_frozen_application_port_error_and_exit_code(
     assert not output.exists()
 
 
+def test_render_journey_uses_explicit_log_dir_without_composition(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.delenv("DFX_LOG_FILE", raising=False)
+    monkeypatch.delenv("DFX_LOG_DIR", raising=False)
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    (log_dir / "journey.jsonl").write_bytes(_journey_event_bytes())
+    stdout = io.BytesIO()
+    stderr = io.BytesIO()
+
+    exit_code = main(
+        [
+            "render-journey",
+            "--log-dir",
+            str(log_dir),
+            "--case-id",
+            _JOURNEY_CASE_ID,
+        ],
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+    assert exit_code == CLI_EXIT_SUCCESS
+    receipt = json.loads(stdout.getvalue())
+    assert receipt["case_id"] == _JOURNEY_CASE_ID
+    assert receipt["case_status"] == "RUNNING"
+    assert receipt["terminal"] is False
+    assert Path(receipt["detailed_log"]).is_file()
+    assert Path(receipt["brief_log"]).is_file()
+    assert stderr.getvalue() == b""
+
+
+def test_render_journey_uses_dfx_log_dir_environment(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.delenv("DFX_LOG_FILE", raising=False)
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    (log_dir / "journey.jsonl").write_bytes(_journey_event_bytes())
+    monkeypatch.setenv("DFX_LOG_DIR", str(log_dir))
+
+    assert main(
+        ["render-journey", "--case-id", _JOURNEY_CASE_ID],
+        stdout=io.BytesIO(),
+        stderr=io.BytesIO(),
+    ) == CLI_EXIT_SUCCESS
+
+
+@pytest.mark.parametrize("legacy_value", ["", "D:/legacy/service.jsonl"])
+def test_render_journey_rejects_legacy_service_log_key(
+    monkeypatch,
+    tmp_path: Path,
+    legacy_value: str,
+) -> None:
+    monkeypatch.setenv("DFX_LOG_FILE", legacy_value)
+    stderr = io.BytesIO()
+
+    exit_code = main(
+        [
+            "render-journey",
+            "--log-dir",
+            str(tmp_path),
+            "--case-id",
+            _JOURNEY_CASE_ID,
+        ],
+        stdout=io.BytesIO(),
+        stderr=stderr,
+    )
+
+    assert exit_code == CLI_EXIT_CONFIG_OR_STATE_CORRUPT
+    assert b"DFX_LOG_DIR" in stderr.getvalue()
+
+
+def test_render_journey_maps_bad_source_and_missing_case(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.delenv("DFX_LOG_FILE", raising=False)
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    source = log_dir / "journey.jsonl"
+    source.write_bytes(b"{bad}\n")
+    stderr = io.BytesIO()
+
+    assert main(
+        [
+            "render-journey",
+            "--log-dir",
+            str(log_dir),
+            "--case-id",
+            _JOURNEY_CASE_ID,
+        ],
+        stdout=io.BytesIO(),
+        stderr=stderr,
+    ) == CLI_EXIT_CONFIG_OR_STATE_CORRUPT
+    assert b"journey.jsonl:1" in stderr.getvalue()
+
+    source.write_bytes(_journey_event_bytes())
+    stderr = io.BytesIO()
+    assert main(
+        [
+            "render-journey",
+            "--log-dir",
+            str(log_dir),
+            "--case-id",
+            "00000000-0000-4000-8000-000000000999",
+        ],
+        stdout=io.BytesIO(),
+        stderr=stderr,
+    ) == CLI_EXIT_REQUEST_OR_STATE_CONFLICT
+    assert b"not present" in stderr.getvalue()
+
+
 def test_serve_uses_exactly_one_worker(monkeypatch, tmp_path: Path) -> None:
     values = {
         "DATA_ROOT": str(tmp_path / "data"),
@@ -227,6 +374,35 @@ def test_serve_uses_exactly_one_worker(monkeypatch, tmp_path: Path) -> None:
 
     assert exit_code == CLI_EXIT_SUCCESS
     assert calls[-1] == ("serve", "asgi-app", "127.0.0.1", 8123, 1)
+
+
+def test_serve_routes_debug_and_journey_to_configured_directory(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    values = {
+        "DATA_ROOT": str(tmp_path / "data"),
+        "PUBLIC_BASE_URL": "http://127.0.0.1:8123",
+        "SKILL_DIR": str(tmp_path / "skills"),
+        "LOGPARSE_REPO": str(tmp_path / "logparse"),
+        "LOGPARSE_CONFIG_PATH": str(tmp_path / "logparse.toml"),
+        "DFX_LOG_DIR": str(tmp_path / "logs"),
+    }
+    monkeypatch.delenv("DFX_LOG_FILE", raising=False)
+    for key, value in values.items():
+        monkeypatch.setenv(key, value)
+
+    assert main(
+        ["serve"],
+        hooks=hooks_for(FakeStateAdmin(readiness=readiness())),
+        stdout=io.BytesIO(),
+        stderr=io.BytesIO(),
+    ) == CLI_EXIT_SUCCESS
+
+    assert (tmp_path / "logs" / "debug.jsonl").is_file()
+    assert (tmp_path / "logs" / "journey.jsonl").is_file()
+    configure_journey()
+    configure_diagnostics("INFO")
 
 
 def test_uvicorn_runner_rejects_multiple_workers_before_startup() -> None:

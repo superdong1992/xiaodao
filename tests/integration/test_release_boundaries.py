@@ -15,7 +15,7 @@ EXPECTED_ENV_KEYS = {
     "CLAUDE_COMMAND",
     "DATA_ROOT",
     "DFX_LOG_LEVEL",
-    "DFX_LOG_FILE",
+    "DFX_LOG_DIR",
     "LOGPARSE_CONFIG_PATH",
     "LOGPARSE_PYTHON",
     "LOGPARSE_REPO",
@@ -115,6 +115,6 @@ def test_env_example_contains_only_the_public_settings() -> None:
             "LOGPARSE_REPO",
             "LOGPARSE_CONFIG_PATH",
             "LOGPARSE_PYTHON",
-            "DFX_LOG_FILE",
+            "DFX_LOG_DIR",
         }
     )

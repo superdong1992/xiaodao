@@ -210,14 +210,16 @@ LOGPARSE_REPO
 LOGPARSE_CONFIG_PATH
 LOGPARSE_PYTHON
 DFX_LOG_LEVEL
-DFX_LOG_FILE
+DFX_LOG_DIR
 ```
 
 V1 的 Context、Job、附件、Case、并发和保留期限制全部是 S00 编译期合同常量，不是 Settings 或环境变量；S02～S05 直接消费同一常量模块，S08 不注入第二份 effective limits。未知的 `*_LIMIT_*`、`*_MAX_*`、`*_RETENTION_*` 或 `JOB_CONCURRENCY` 配置键按额外配置拒绝并返回 `CONFIG_INVALID`，防止运维人员误以为下调已经生效。固定值为 Router `131072`，Specialist/Reviewer `204800`，Job `1800` 秒，日志 `67108864` 字节，Workspace `1073741824` 字节，并发 `1`，附件 `2684354560` 字节，Case 正式文件 `5368709120` 字节，临时资源 `86400` 秒，orphan `604800` 秒。
 
-配置装载固定为：显式 `--env-file` 使用 UTF-8 dotenv 语法加载且不覆盖启动进程中已有变量；随后读取进程环境并构造不可变 Settings。`DATA_ROOT`、`PUBLIC_BASE_URL`、`SKILL_DIR`、`LOGPARSE_REPO`、`LOGPARSE_CONFIG_PATH` 是必需项；四个路径必须是绝对路径，`PUBLIC_BASE_URL` 必须是不含 userinfo 的绝对 HTTP(S) URL。`CLAUDE_COMMAND` 默认 `claude`，`BIND_HOST` 默认 `127.0.0.1`，`PORT` 默认 `8000`，`LOGPARSE_PYTHON` 默认当前 Python 可执行文件，`DFX_LOG_LEVEL` 默认 `INFO` 并只接受 Python 标准日志级别 `DEBUG/INFO/WARNING/ERROR/CRITICAL`。`DFX_LOG_FILE` 可选且必须是绝对路径；未配置时日志目标为 stderr。
+配置装载固定为：显式 `--env-file` 使用 UTF-8 dotenv 语法加载且不覆盖启动进程中已有变量；随后读取进程环境并构造不可变 Settings。`DATA_ROOT`、`PUBLIC_BASE_URL`、`SKILL_DIR`、`LOGPARSE_REPO`、`LOGPARSE_CONFIG_PATH` 是必需项；四个路径必须是绝对路径，`PUBLIC_BASE_URL` 必须是不含 userinfo 的绝对 HTTP(S) URL。`CLAUDE_COMMAND` 默认 `claude`，`BIND_HOST` 默认 `127.0.0.1`，`PORT` 默认 `8000`，`LOGPARSE_PYTHON` 默认当前 Python 可执行文件，`DFX_LOG_LEVEL` 默认 `INFO` 并只接受 Python 标准日志级别 `DEBUG/INFO/WARNING/ERROR/CRITICAL`。`DFX_LOG_DIR` 可选且必须是绝对路径；旧键 `DFX_LOG_FILE` 即使为空也必须拒绝。未配置目录时 debug 日志目标为 stderr，Journey 日志关闭。
 
-服务必须把单行 JSON DFX 事件写入 `DFX_LOG_FILE` 指定的文件，未配置时写入 stderr，并统一记录启动、恢复、关闭、MCP/HTTP 调用、应用 Port 错误、worker 致命错误和 retention 失败。指定文件使用 UTF-8 追加模式，自动创建父目录，重启不得截断已有内容；文件无法创建或打开时服务必须返回配置错误而不启动。每个 HTTP 请求生成并返回 `X-Problem-Locator-Correlation-ID`，同一 ID 贯穿该请求触发的 MCP 和线程任务。结构化控制面参数与完整校验错误进入日志；上传文件只记录 header、长度与哈希，不记录 body bytes。文件轮转仍由进程管理器负责。
+配置 `DFX_LOG_DIR` 后，服务必须把原有单行 JSON DFX 事件写入 `<dir>/debug.jsonl`，并把固定 `schema_version=1` 的语义事件写入 `<dir>/journey.jsonl`。Journey 固定字段为 `schema_version/sequence/timestamp/level/event/correlation_id/request_id/case_id/job_id/job_type/outcome_id/duration_ms/data`，进程内 `sequence` 严格递增；本迭代不保证跨重启连续性，不提供轮转、脱敏、分布式追踪或额外可靠性。运行时写入失败必须 fail-open，不得中断业务流程。每个 HTTP 请求生成并返回 `X-Problem-Locator-Correlation-ID`，同一值贯穿该请求触发的 MCP 和线程任务。
+
+CLI 必须提供 `python -m problem_locator render-journey --case-id <uuid> [--log-dir <absolute-dir>]`。目录未显式传入时读取 `DFX_LOG_DIR`。渲染前必须严格校验完整 Journey 文件，包括 UTF-8、逐行完整性、schema 和连续 sequence；任何错误都不得覆盖既有产物。成功时确定性覆盖 `<dir>/cases/<case_id>/detailed.log` 与 `brief.log`：详细版展示全部语义事件和原始行引用，简略版展示 Case 状态、里程碑、结论、阻塞项和失败点；非终态必须标记为当前快照。退出码固定为成功 `0`、输入错误 `2`、配置或源文件错误 `3`、输出错误 `4`。
 
 组合根只能把不可变 Settings 中的 `LOGPARSE_REPO/LOGPARSE_CONFIG_PATH/LOGPARSE_PYTHON` 三个 raw 值交给 S07 的服务侧启动构造器；S06 不生成工具 ref/fingerprint，S04 也不直接读取 Settings。这三个值不得进入 Agent 环境、Workspace、Context、Job、状态、外部响应或日志。S07 返回的 S00 `ResolvedAsset(LOGPARSE_TOOL)` 与 `LogparseBrokerFactory` 必须作为同一构造结果一起交给 S04 Catalog/Runtime，不能分别从不同配置实例创建。
 

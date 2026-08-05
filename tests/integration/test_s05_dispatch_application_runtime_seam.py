@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import io
 import json
+from collections.abc import Iterator
 from pathlib import Path
+
+import pytest
 
 from problem_locator.application import build_application_service
 from problem_locator.contracts import (
@@ -14,6 +18,7 @@ from problem_locator.contracts import (
 )
 from problem_locator.dispatch import CancellationController, JobWorker, RuntimeEpochContext
 from problem_locator.domain import DomainCoordinator, PureContextSnapshotProjector
+from problem_locator.journey import configure_journey
 from problem_locator.runtime.outcome_publisher import OutcomePublisher
 from tests.contracts.fakes import (
     DeterministicIdGenerator,
@@ -36,6 +41,14 @@ CASE_ID = "00000000-0000-0000-0000-000000000001"
 ROUTE_JOB_ID = "00000000-0000-0000-0000-000000000010"
 RUNTIME_EPOCH = "00000000-0000-0000-0000-000000000805"
 FIXED_TIME = "2026-07-31T08:05:00.000Z"
+
+
+@pytest.fixture
+def journey_stream() -> Iterator[io.StringIO]:
+    stream = io.StringIO()
+    configure_journey(stream=stream)
+    yield stream
+    configure_journey()
 
 
 class _PublishingRuntime:
@@ -70,7 +83,9 @@ def _route_outcome() -> JobOutcome:
     return JobOutcome.model_validate(payload)
 
 
-def test_worker_claims_executes_once_and_commits_the_finalized_outcome() -> None:
+def test_worker_claims_executes_once_and_commits_the_finalized_outcome(
+    journey_stream: io.StringIO,
+) -> None:
     state = _state()
     route_job = state.cases[CASE_ID].jobs[ROUTE_JOB_ID]
     diagnose_template = Job.model_validate_json(
@@ -118,6 +133,21 @@ def test_worker_claims_executes_once_and_commits_the_finalized_outcome() -> None
     worker = JobWorker(application, runtime, epoch)
 
     result = worker.execute_one(ROUTE_JOB_ID, CancellationController())
+
+    journey_events = [
+        json.loads(line) for line in journey_stream.getvalue().splitlines()
+    ]
+    assert [event["event"] for event in journey_events] == [
+        "job.claimed",
+        "job.outcome.applied",
+        "job.pending_persisted",
+        "job.queued",
+    ]
+    assert all(event["case_id"] == CASE_ID for event in journey_events)
+    assert journey_events[0]["job_id"] == ROUTE_JOB_ID
+    assert journey_events[1]["outcome_id"] == runtime.outcome.outcome_id
+    assert journey_events[2]["job_id"] == journey_events[3]["job_id"]
+    assert journey_events[2]["job_type"] == "DIAGNOSE"
 
     assert result.claimed is True
     assert result.runtime_called is True

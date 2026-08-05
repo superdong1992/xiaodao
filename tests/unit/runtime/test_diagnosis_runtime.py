@@ -6,6 +6,7 @@ import json
 import os
 import threading
 import shutil
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -47,6 +48,8 @@ from problem_locator.contracts import (
     canonical_json_bytes,
     parse_canonical_json_bytes,
 )
+from problem_locator.diagnostics import bind_diagnostics
+from problem_locator.journey import configure_journey
 from tests.contracts.fakes import (
     FakeAssetCatalog,
     FakeLogparseBrokerFactory,
@@ -73,6 +76,14 @@ from problem_locator.runtime.workspace import (
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
+
+
+@pytest.fixture
+def journey_stream() -> Iterator[io.StringIO]:
+    stream = io.StringIO()
+    configure_journey(stream=stream)
+    yield stream
+    configure_journey()
 CONTRACT_FIXTURES = REPOSITORY_ROOT / "tests/fixtures/contracts/positive"
 CATALOG_FIXTURES = REPOSITORY_ROOT / "tests/fixtures/components/runtime-catalog"
 LOGPARSE_ROOT = CATALOG_FIXTURES / "logparse-tool"
@@ -662,10 +673,41 @@ def test_public_asset_fake_typed_resolve_failure_preserves_details_as_outcome(
 
 def test_runtime_executes_one_frozen_route_and_publishes_canonical_receipt(
     tmp_path: Path,
+    journey_stream: io.StringIO,
 ) -> None:
     runtime, job, state, backend, records = _runtime_fixture(tmp_path)
 
-    receipt = runtime.execute(job, InMemoryCancellationSignal())
+    with bind_diagnostics(
+        case_id=job.case_id,
+        job_id=job.job_id,
+        job_type=job.job_type.value,
+    ):
+        receipt = runtime.execute(job, InMemoryCancellationSignal())
+
+    journey_events = [
+        json.loads(line) for line in journey_stream.getvalue().splitlines()
+    ]
+    stage_events = [
+        event for event in journey_events if event["event"].startswith("job.stage.")
+    ]
+    assert [event["data"]["stage"] for event in stage_events] == [
+        "ASSET_RESOLUTION",
+        "ASSET_RESOLUTION",
+        "WORKSPACE_PREPARE",
+        "WORKSPACE_PREPARE",
+        "CONTEXT_BUILD",
+        "CONTEXT_BUILD",
+        "OUTCOME_VALIDATE",
+        "OUTCOME_VALIDATE",
+        "RESOURCE_STAGE",
+        "RESOURCE_STAGE",
+        "EXECUTION_RECORD",
+        "EXECUTION_RECORD",
+    ]
+    assert all(event["case_id"] == job.case_id for event in journey_events)
+    assert all(event["job_id"] == job.job_id for event in journey_events)
+    assert journey_events[-1]["event"] == "job.outcome.produced"
+    assert journey_events[-1]["outcome_id"] == receipt.job_outcome.outcome_id
 
     assert receipt.job_outcome.result_type is OutcomeResultType.COMPLETED
     assert receipt.job_outcome.outcome_id == _route_agent_outcome(job).outcome_id

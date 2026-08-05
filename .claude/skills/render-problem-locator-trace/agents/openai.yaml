@@ -1,0 +1,4 @@
+interface:
+  display_name: "Render Problem Locator Trace"
+  short_description: "Render server-side Case journey logs"
+  default_prompt: "Use $render-problem-locator-trace to reconstruct and explain one server-side Problem Locator Case journey."

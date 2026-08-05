@@ -45,7 +45,7 @@ class Settings:
     logparse_config_path: Path
     logparse_python: Path
     dfx_log_level: str
-    dfx_log_file: Path | None
+    dfx_log_dir: Path | None
 
     @classmethod
     def load(
@@ -66,6 +66,11 @@ class Settings:
         )
         if forbidden:
             raise SettingsError("runtime limit overrides are not supported")
+
+        if "DFX_LOG_FILE" in values:
+            raise SettingsError(
+                "DFX_LOG_FILE is no longer supported; use DFX_LOG_DIR"
+            )
 
         missing = [key for key in _REQUIRED if not values.get(key)]
         if missing:
@@ -123,10 +128,10 @@ class Settings:
                 "DFX_LOG_LEVEL must be DEBUG, INFO, WARNING, ERROR, or CRITICAL"
             )
 
-        raw_dfx_log_file = values.get("DFX_LOG_FILE")
-        dfx_log_file = Path(raw_dfx_log_file) if raw_dfx_log_file else None
-        if dfx_log_file is not None and not dfx_log_file.is_absolute():
-            raise SettingsError("DFX_LOG_FILE must be an absolute path")
+        raw_dfx_log_dir = values.get("DFX_LOG_DIR")
+        dfx_log_dir = Path(raw_dfx_log_dir) if raw_dfx_log_dir else None
+        if dfx_log_dir is not None and not dfx_log_dir.is_absolute():
+            raise SettingsError("DFX_LOG_DIR must be an absolute path")
 
         return cls(
             data_root=paths["DATA_ROOT"],
@@ -139,7 +144,7 @@ class Settings:
             logparse_config_path=paths["LOGPARSE_CONFIG_PATH"],
             logparse_python=logparse_python,
             dfx_log_level=dfx_log_level,
-            dfx_log_file=dfx_log_file,
+            dfx_log_dir=dfx_log_dir,
         )
 
     def __repr__(self) -> str:
@@ -150,7 +155,7 @@ class Settings:
             "logparse_repo=<redacted>, logparse_config_path=<redacted>, "
             "logparse_python=<redacted>, "
             f"dfx_log_level={self.dfx_log_level!r}, "
-            f"dfx_log_file={self.dfx_log_file!r})"
+            f"dfx_log_dir={self.dfx_log_dir!r})"
         )
 
 

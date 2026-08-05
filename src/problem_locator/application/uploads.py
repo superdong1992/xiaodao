@@ -34,6 +34,7 @@ from problem_locator.contracts import (
     StateRepository,
     UploadAttachmentContent,
 )
+from problem_locator.journey import record_journey_event
 
 from .idempotency import (
     IdempotencyDisposition,
@@ -306,6 +307,10 @@ class AttachmentUploadService:
             committed_generation: int | None = None
             committed_case_id: str | None = None
             committed_receipt: BusinessReceipt | None = None
+            committed_attachment: Attachment | None = None
+            committed_resource_ref: ResourceRef | None = None
+            committed_previous_case: Case | None = None
+            committed_case: Case | None = None
 
             for attempt in range(_MAX_POST_STAGE_ATTEMPTS):
                 publication_lease = self.publication_guard.acquire()
@@ -410,6 +415,10 @@ class AttachmentUploadService:
                                 committed_generation = commit.generation
                                 committed_case_id = fresh_attachment.case_id
                                 committed_receipt = receipt
+                                committed_attachment = updated_attachment
+                                committed_resource_ref = resource_ref
+                                committed_previous_case = fresh_aggregate.case
+                                committed_case = updated_case
                 finally:
                     publication_lease.release()
 
@@ -428,6 +437,26 @@ class AttachmentUploadService:
             assert committed_case_id is not None
             assert committed_generation is not None
             assert committed_receipt is not None
+            assert committed_attachment is not None
+            assert committed_resource_ref is not None
+            assert committed_previous_case is not None
+            assert committed_case is not None
+            record_journey_event(
+                "attachment.uploaded",
+                timestamp=occurred_at,
+                request_id=command.idempotency_key,
+                case_id=committed_case_id,
+                data={
+                    "operation": committed_receipt.operation,
+                    "attachment": committed_attachment,
+                    "resource_ref": committed_resource_ref,
+                    "actual_size": staged_ref.size,
+                    "actual_sha256": staged_ref.sha256,
+                    "from_case_revision": committed_previous_case.case_revision,
+                    "to_case_revision": committed_case.case_revision,
+                    "generation": committed_generation,
+                },
+            )
             # Notification is a best-effort hint and always occurs outside the
             # publication lease.  Its failure cannot roll back the committed
             # business state.

@@ -23,6 +23,7 @@ from problem_locator.contracts.models import (
     ResourceLimits,
 )
 from problem_locator.contracts.ports import AppendOnlyByteSink, CancellationSignal
+from problem_locator.journey import record_stage_completed, record_stage_started
 
 from .claude_command import ClaudeCommandError, prepare_claude_command
 from .failures import RuntimeExecutionError, runtime_failure
@@ -265,6 +266,10 @@ class AgentBackend:
         limits = test_limits or BackendExecutionLimits.from_resource_limits(
             resource_limits
         )
+        backend_start_observed = record_stage_started(
+            ExecutionStage.BACKEND_START,
+            data={"workspace_root": workspace_root},
+        )
         if cancellation.is_cancelled():
             raise RuntimeExecutionError(_cancelled_failure(cancellation.reason))
         try:
@@ -323,6 +328,7 @@ class AgentBackend:
 
         primary_failure: ExecutionFailure | None = None
         started = 0.0
+        backend_execution_observed: float | None = None
         workspace_bytes = 0
         tree_released = False
         readers: tuple[threading.Thread, ...] = ()
@@ -379,6 +385,18 @@ class AgentBackend:
                 started = self._monotonic()
                 for thread in lifecycle_threads:
                     thread.start()
+                record_stage_completed(
+                    ExecutionStage.BACKEND_START,
+                    backend_start_observed,
+                    data={
+                        "argv": invocation.argv,
+                        "process_id": getattr(managed.process, "pid", None),
+                    },
+                )
+                backend_execution_observed = record_stage_started(
+                    ExecutionStage.BACKEND_EXECUTE,
+                    data={"process_id": getattr(managed.process, "pid", None)},
+                )
 
             while primary_failure is None and managed.process.poll() is None:
                 if cancellation.is_cancelled():
@@ -570,12 +588,24 @@ class AgentBackend:
                 code=ErrorCode.WORKSPACE_LIMIT,
                 message="Agent Workspace exceeded the fixed byte limit.",
             )
-        return BackendExecution(
+        result = BackendExecution(
             returncode=managed.process.returncode or 0,
             stdout_stderr_bytes=output_state.total,
             workspace_bytes=workspace_bytes,
             elapsed_seconds=max(0.0, self._monotonic() - started),
         )
+        assert backend_execution_observed is not None
+        record_stage_completed(
+            ExecutionStage.BACKEND_EXECUTE,
+            backend_execution_observed,
+            data={
+                "returncode": result.returncode,
+                "stdout_stderr_bytes": result.stdout_stderr_bytes,
+                "workspace_bytes": result.workspace_bytes,
+                "elapsed_seconds": result.elapsed_seconds,
+            },
+        )
+        return result
 
 
 def _join_threads(threads: tuple[threading.Thread, ...], timeout: float) -> None:

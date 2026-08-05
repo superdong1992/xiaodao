@@ -8,10 +8,12 @@ locking and retry boundary.
 
 from __future__ import annotations
 
+import logging
 import re
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from typing import Any
 
 from problem_locator.contracts import (
     ApplicationError,
@@ -68,6 +70,7 @@ from problem_locator.contracts import (
     VersionedRef,
     validate_coordinator_plan_result,
 )
+from problem_locator.journey import record_journey_event
 
 from .formalization import apply_diagnosis_state_delta, build_job
 from .errors import raise_port_error as _raise_shared_port_error
@@ -112,8 +115,15 @@ _TERMINAL_CASE_STATUSES = {
 class _CommittedCommand:
     receipt: BusinessReceipt
     generation: int
-    submit_job_id: str | None = None
-    cancel_job_id: str | None = None
+    occurred_at: str
+    event: str
+    request_id: str
+    committed_case: Case
+    data: dict[str, Any]
+    previous_case: Case | None = None
+    created_job: Job | None = None
+    submit_job: Job | None = None
+    cancel_job: Job | None = None
 
 
 def _detail(
@@ -396,7 +406,23 @@ class ExternalCommandHandler:
                     continue
                 raise
             return self._after_commit(
-                _CommittedCommand(receipt, commit.generation, submit_job_id=job_id),
+                _CommittedCommand(
+                    receipt=receipt,
+                    generation=commit.generation,
+                    occurred_at=occurred_at,
+                    event="case.created",
+                    request_id=command.idempotency_key,
+                    committed_case=created_case,
+                    data={
+                        "operation": receipt.operation,
+                        "problem_spec": command.problem_spec,
+                        "initial_user_facts": command.initial_user_facts,
+                        "case": created_case,
+                        "created_job": created_job,
+                    },
+                    created_job=created_job,
+                    submit_job=created_job,
+                ),
                 wait_seconds=command.wait_seconds,
             )
         raise AssertionError("three-attempt retry loop exhausted unexpectedly")
@@ -511,7 +537,22 @@ class ExternalCommandHandler:
             finally:
                 lease.release()
             return self._after_commit(
-                _CommittedCommand(receipt, commit.generation),
+                _CommittedCommand(
+                    receipt=receipt,
+                    generation=commit.generation,
+                    occurred_at=occurred_at,
+                    event="attachment.prepared",
+                    request_id=command.idempotency_key,
+                    committed_case=target_case,
+                    previous_case=aggregate.case,
+                    data={
+                        "operation": receipt.operation,
+                        "attachment": attachment,
+                        "declared_size": command.declared_size,
+                        "declared_sha256": command.declared_sha256,
+                        "case_revision": target_case.case_revision,
+                    },
+                ),
                 wait_seconds=0,
             )
         raise AssertionError("three-attempt retry loop exhausted unexpectedly")
@@ -703,12 +744,20 @@ class ExternalCommandHandler:
                     raise
                 return self._after_commit(
                     _CommittedCommand(
-                        receipt,
-                        commit.generation,
-                        submit_job_id=(
-                            active.job_id
-                            if active.status is JobStatus.PENDING
-                            else None
+                        receipt=receipt,
+                        generation=commit.generation,
+                        occurred_at=occurred_at,
+                        event="case.resumed",
+                        request_id=command.idempotency_key,
+                        committed_case=aggregate.case,
+                        previous_case=aggregate.case,
+                        data={
+                            "operation": receipt.operation,
+                            "active_job": active,
+                            "resignalled": active.status is JobStatus.PENDING,
+                        },
+                        submit_job=(
+                            active if active.status is JobStatus.PENDING else None
                         ),
                     ),
                     wait_seconds=command.wait_seconds,
@@ -952,11 +1001,33 @@ class ExternalCommandHandler:
             mutation,
             publish_job=created_job,
         )
+        event = {
+            SubmitSupplement: "case.supplement.applied",
+            ResumeCase: "case.resumed",
+            CancelCase: "case.cancelled",
+        }[type(command)]
         return _CommittedCommand(
-            receipt,
-            commit.generation,
-            submit_job_id=(None if created_job is None else created_job.job_id),
-            cancel_job_id=cancel_job_id,
+            receipt=receipt,
+            generation=commit.generation,
+            occurred_at=occurred_at,
+            event=event,
+            request_id=command.idempotency_key,
+            committed_case=target_case,
+            previous_case=aggregate.case,
+            created_job=created_job,
+            submit_job=created_job,
+            cancel_job=(
+                None if cancel_job_id is None else aggregate.jobs[cancel_job_id]
+            ),
+            data={
+                "operation": receipt.operation,
+                "command": command,
+                "plan_reason": plan.reason,
+                "from_case": aggregate.case,
+                "to_case": target_case,
+                "created_job": created_job,
+                "cancelled_job_id": cancel_job_id,
+            },
         )
 
     def _commit(
@@ -1518,6 +1589,57 @@ class ExternalCommandHandler:
     ) -> ApplicationResponse:
         case_id = committed.receipt.case_id
         assert case_id is not None
+        related_job = (
+            committed.created_job or committed.submit_job or committed.cancel_job
+        )
+        record_journey_event(
+            committed.event,
+            timestamp=committed.occurred_at,
+            request_id=committed.request_id,
+            case_id=case_id,
+            job_id=None if related_job is None else related_job.job_id,
+            job_type=None if related_job is None else related_job.job_type,
+            data={"generation": committed.generation, **committed.data},
+        )
+        previous = committed.previous_case
+        current = committed.committed_case
+        if previous is not None and previous.status is not current.status:
+            record_journey_event(
+                "case.status.changed",
+                timestamp=committed.occurred_at,
+                request_id=committed.request_id,
+                case_id=case_id,
+                job_id=None if related_job is None else related_job.job_id,
+                job_type=None if related_job is None else related_job.job_type,
+                data={
+                    "source_event": committed.event,
+                    "from_status": previous.status.value,
+                    "to_status": current.status.value,
+                    "from_case_revision": previous.case_revision,
+                    "to_case_revision": current.case_revision,
+                    "diagnosis_state_revision": current.diagnosis_state.revision,
+                    "active_job_id": current.active_job_id,
+                    "pending_requirements": current.diagnosis_state.pending_requirements,
+                    "selected_skill_ref": current.selected_skill_ref,
+                    "failure": current.failure,
+                    "generation": committed.generation,
+                },
+            )
+        if committed.created_job is not None:
+            created = committed.created_job
+            record_journey_event(
+                "job.pending_persisted",
+                timestamp=committed.occurred_at,
+                request_id=committed.request_id,
+                case_id=created.case_id,
+                job_id=created.job_id,
+                job_type=created.job_type,
+                data={
+                    "cause_event": committed.event,
+                    "job": created,
+                    "generation": committed.generation,
+                },
+            )
         try:
             self._notifier.notify(case_id, committed.generation)
         except Exception:
@@ -1525,17 +1647,59 @@ class ExternalCommandHandler:
             pass
 
         dispatch_pending = False
-        if committed.submit_job_id is not None:
+        if committed.submit_job is not None:
+            submit_job = committed.submit_job
             try:
-                dispatch = self._dispatcher.submit(committed.submit_job_id)
+                dispatch = self._dispatcher.submit(submit_job.job_id)
                 dispatch_pending = not (dispatch.accepted or dispatch.duplicate)
-            except Exception:
+                record_journey_event(
+                    "job.queued" if dispatch.accepted else "job.queue.duplicate",
+                    timestamp=committed.occurred_at,
+                    request_id=committed.request_id,
+                    case_id=submit_job.case_id,
+                    job_id=submit_job.job_id,
+                    job_type=submit_job.job_type,
+                    data={
+                        "accepted": dispatch.accepted,
+                        "duplicate": dispatch.duplicate,
+                    },
+                )
+            except Exception as exc:
                 dispatch_pending = True
-        if committed.cancel_job_id is not None:
+                record_journey_event(
+                    "job.queue.failed",
+                    level=logging.WARNING,
+                    timestamp=committed.occurred_at,
+                    request_id=committed.request_id,
+                    case_id=submit_job.case_id,
+                    job_id=submit_job.job_id,
+                    job_type=submit_job.job_type,
+                    data={"exception_type": type(exc).__name__},
+                )
+        if committed.cancel_job is not None:
+            cancel_job = committed.cancel_job
             try:
-                self._dispatcher.cancel(committed.cancel_job_id)
-            except Exception:
-                pass
+                cancel = self._dispatcher.cancel(cancel_job.job_id)
+                record_journey_event(
+                    "job.cancel.signalled",
+                    timestamp=committed.occurred_at,
+                    request_id=committed.request_id,
+                    case_id=cancel_job.case_id,
+                    job_id=cancel_job.job_id,
+                    job_type=cancel_job.job_type,
+                    data={"signalled": cancel.signalled},
+                )
+            except Exception as exc:
+                record_journey_event(
+                    "job.cancel.signal_failed",
+                    level=logging.WARNING,
+                    timestamp=committed.occurred_at,
+                    request_id=committed.request_id,
+                    case_id=cancel_job.case_id,
+                    job_id=cancel_job.job_id,
+                    job_type=cancel_job.job_type,
+                    data={"exception_type": type(exc).__name__},
+                )
         try:
             state = self._repository.read_snapshot()
             return self._response_from_state(

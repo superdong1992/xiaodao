@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Any
 
@@ -71,6 +72,7 @@ from problem_locator.contracts.ports import (
     StateChangeNotifier,
     StateRepository,
 )
+from problem_locator.journey import record_journey_event
 
 from .errors import raise_port_error
 from .formalization import (
@@ -115,8 +117,15 @@ class _DeterministicRejection:
 class _AppliedCommit:
     case_id: str
     generation: int
-    created_job_id: str | None
+    occurred_at: str
+    event: str
+    source_job: Job
+    outcome: JobOutcome
+    previous_case: Case
+    committed_case: Case
+    created_job: Job | None
     case_view: CaseView
+    data: dict[str, Any]
 
 
 class OutcomeSubmissionService:
@@ -971,8 +980,25 @@ class OutcomeSubmissionService:
                 committed = _AppliedCommit(
                     case_id=job.case_id,
                     generation=receipt.generation,
-                    created_job_id=None if created_job is None else created_job.job_id,
+                    occurred_at=processed_at,
+                    event="job.outcome.applied",
+                    source_job=job,
+                    outcome=outcome,
+                    previous_case=aggregate.case,
+                    committed_case=new_case,
+                    created_job=created_job,
                     case_view=target_case_view,
+                    data={
+                        "disposition": OutcomeDisposition.APPLIED.value,
+                        "outcome": outcome,
+                        "outcome_file_ref": outcome_file_ref,
+                        "processing": processing,
+                        "plan_reason": plan.reason,
+                        "accepted_evidence": list(formal_evidence.values()),
+                        "accepted_artifacts": list(formal_artifacts.values()),
+                        "created_job": created_job,
+                        "case_view": target_case_view,
+                    },
                 )
         finally:
             lease.release()
@@ -1125,10 +1151,24 @@ class OutcomeSubmissionService:
         if trusted_outcome is not None:
             self._discard_proposals(trusted_outcome)
         applied = _AppliedCommit(
-            job.case_id,
-            receipt.generation,
-            None,
-            target_case_view,
+            case_id=job.case_id,
+            generation=receipt.generation,
+            occurred_at=processed_at,
+            event="job.outcome.rejected",
+            source_job=job,
+            outcome=claimed_outcome,
+            previous_case=aggregate.case,
+            committed_case=new_case,
+            created_job=None,
+            case_view=target_case_view,
+            data={
+                "disposition": OutcomeDisposition.REJECTED.value,
+                "rejection_code": rejection.code.value,
+                "trusted_outcome": trusted_outcome,
+                "outcome_file_ref": outcome_file_ref,
+                "processing": processing,
+                "case_view": target_case_view,
+            },
         )
         self._after_commit(applied)
         return OutcomeReceipt(
@@ -1231,10 +1271,23 @@ class OutcomeSubmissionService:
             lease.release()
         self._discard_proposals(outcome)
         applied = _AppliedCommit(
-            job.case_id,
-            receipt.generation,
-            None,
-            target_case_view,
+            case_id=job.case_id,
+            generation=receipt.generation,
+            occurred_at=processed_at,
+            event="job.outcome.stale",
+            source_job=job,
+            outcome=outcome,
+            previous_case=aggregate.case,
+            committed_case=new_case,
+            created_job=None,
+            case_view=target_case_view,
+            data={
+                "disposition": OutcomeDisposition.STALE.value,
+                "outcome": outcome,
+                "outcome_file_ref": outcome_file_ref,
+                "processing": processing,
+                "case_view": target_case_view,
+            },
         )
         self._after_commit(applied)
         return OutcomeReceipt(
@@ -1243,18 +1296,92 @@ class OutcomeSubmissionService:
         )
 
     def _after_commit(self, committed: _AppliedCommit) -> None:
+        job = committed.source_job
+        outcome = committed.outcome
+        record_journey_event(
+            committed.event,
+            timestamp=committed.occurred_at,
+            case_id=committed.case_id,
+            job_id=job.job_id,
+            job_type=job.job_type,
+            outcome_id=outcome.outcome_id,
+            data={"generation": committed.generation, **committed.data},
+        )
+        if committed.previous_case.status is not committed.committed_case.status:
+            current = committed.committed_case
+            record_journey_event(
+                "case.status.changed",
+                timestamp=committed.occurred_at,
+                case_id=committed.case_id,
+                job_id=job.job_id,
+                job_type=job.job_type,
+                outcome_id=outcome.outcome_id,
+                data={
+                    "source_event": committed.event,
+                    "from_status": committed.previous_case.status.value,
+                    "to_status": current.status.value,
+                    "from_case_revision": committed.previous_case.case_revision,
+                    "to_case_revision": current.case_revision,
+                    "diagnosis_state_revision": current.diagnosis_state.revision,
+                    "active_job_id": current.active_job_id,
+                    "pending_requirements": current.diagnosis_state.pending_requirements,
+                    "selected_skill_ref": current.selected_skill_ref,
+                    "final_result": committed.case_view.final_result,
+                    "failure": current.failure,
+                    "generation": committed.generation,
+                },
+            )
+        if committed.created_job is not None:
+            created = committed.created_job
+            record_journey_event(
+                "job.pending_persisted",
+                timestamp=committed.occurred_at,
+                case_id=created.case_id,
+                job_id=created.job_id,
+                job_type=created.job_type,
+                outcome_id=outcome.outcome_id,
+                data={
+                    "cause_event": committed.event,
+                    "parent_job_id": job.job_id,
+                    "parent_outcome_id": outcome.outcome_id,
+                    "job": created,
+                    "generation": committed.generation,
+                },
+            )
         try:
             self._notifier.notify(committed.case_id, committed.generation)
         except Exception:
             # Notifications are hints and never roll back the durable result.
             pass
-        if committed.created_job_id is not None:
+        if committed.created_job is not None:
+            created = committed.created_job
             try:
-                self._dispatcher.submit(committed.created_job_id)
-            except Exception:
+                dispatch = self._dispatcher.submit(created.job_id)
+                record_journey_event(
+                    "job.queued" if dispatch.accepted else "job.queue.duplicate",
+                    timestamp=committed.occurred_at,
+                    case_id=created.case_id,
+                    job_id=created.job_id,
+                    job_type=created.job_type,
+                    outcome_id=outcome.outcome_id,
+                    data={
+                        "accepted": dispatch.accepted,
+                        "duplicate": dispatch.duplicate,
+                    },
+                )
+            except Exception as exc:
                 # Dispatch is an idempotent post-commit signal.  S05 and a
                 # duplicate delivery will re-submit the durable PENDING Job.
-                pass
+                record_journey_event(
+                    "job.queue.failed",
+                    level=logging.WARNING,
+                    timestamp=committed.occurred_at,
+                    case_id=created.case_id,
+                    job_id=created.job_id,
+                    job_type=created.job_type,
+                    outcome_id=outcome.outcome_id,
+                    data={"exception_type": type(exc).__name__},
+                )
 
     def _discard_proposals(
         self,

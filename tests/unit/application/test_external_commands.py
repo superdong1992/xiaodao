@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import io
 import json
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -47,6 +49,7 @@ from problem_locator.contracts import (
     canonical_json_bytes,
     canonical_json_sha256,
 )
+from problem_locator.journey import configure_journey
 from tests.contracts.fakes import (
     DeterministicIdGenerator,
     FakeAssetCatalog,
@@ -78,6 +81,14 @@ WAIT_OUTCOME_ID = "00000000-0000-0000-0000-000000000121"
 REQUIREMENT_ID = "00000000-0000-0000-0000-000000000131"
 SECOND_REQUIREMENT_ID = "00000000-0000-0000-0000-000000000132"
 NOW = "2026-07-31T01:02:03.000Z"
+
+
+@pytest.fixture
+def journey_stream() -> Iterator[io.StringIO]:
+    stream = io.StringIO()
+    configure_journey(stream=stream)
+    yield stream
+    configure_journey()
 
 
 def _state() -> StateFile:
@@ -354,7 +365,9 @@ def _expect_port_error(callback, code: ErrorCode) -> ApplicationPortError:
     raise AssertionError(f"expected ApplicationPortError({code.value})")
 
 
-def test_create_case_commits_then_notifies_dispatches_and_replays() -> None:
+def test_create_case_commits_then_notifies_dispatches_and_replays(
+    journey_stream: io.StringIO,
+) -> None:
     route = _job("job-route.json")
 
     def create_plan(snapshot, trigger):
@@ -386,6 +399,19 @@ def test_create_case_commits_then_notifies_dispatches_and_replays() -> None:
 
     first = handler.execute(_create_command())
     second = handler.execute(_create_command(wait_seconds=0))
+
+    journey_events = [
+        json.loads(line) for line in journey_stream.getvalue().splitlines()
+    ]
+    assert [event["event"] for event in journey_events] == [
+        "case.created",
+        "job.pending_persisted",
+        "job.queued",
+    ]
+    assert all(event["case_id"] == NEW_CASE_ID for event in journey_events)
+    assert all(event["job_id"] == NEW_JOB_ID for event in journey_events)
+    assert all(event["job_type"] == "ROUTE" for event in journey_events)
+    assert journey_events[0]["data"]["problem_spec"]["statement"] == "RPC timeout"
 
     stored = repository.read_snapshot()
     aggregate = stored.cases[NEW_CASE_ID]

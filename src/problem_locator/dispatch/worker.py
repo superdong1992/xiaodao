@@ -22,6 +22,7 @@ from problem_locator.contracts import (
     RuntimeExecutionReceipt,
     RuntimeInfrastructureError,
 )
+from problem_locator.diagnostics import bind_diagnostics
 
 from .backoff import (
     InterruptibleSubmissionBackoff,
@@ -176,7 +177,12 @@ class JobWorker:
 
         infrastructure_error: RuntimeInfrastructureError | None = None
         try:
-            receipt = self._typed_workers[job.job_type].execute(job, cancellation)
+            with bind_diagnostics(
+                case_id=job.case_id,
+                job_id=job.job_id,
+                job_type=job.job_type.value,
+            ):
+                receipt = self._typed_workers[job.job_type].execute(job, cancellation)
         except RuntimeInfrastructureError as exc:
             infrastructure_error = exc
         finally:

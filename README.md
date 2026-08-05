@@ -63,7 +63,7 @@ uv lock --check
 | `CLAUDE_COMMAND` | 否 | `claude` | Agent 命令，会被解析为 argv 参数模板 |
 | `LOGPARSE_PYTHON` | 否 | 当前 Python | Logparse 使用的 Python 启动命令 |
 | `DFX_LOG_LEVEL` | 否 | `INFO` | 结构化诊断日志级别：`DEBUG`、`INFO`、`WARNING`、`ERROR` 或 `CRITICAL` |
-| `DFX_LOG_FILE` | 否 | stderr | 结构化诊断日志文件的绝对路径；配置后以 UTF-8 追加写入，并自动创建父目录 |
+| `DFX_LOG_DIR` | 否 | 无 | 服务端可观测日志目录的绝对路径；配置后生成 `debug.jsonl`、`journey.jsonl` 和按 Case 渲染的人类可读日志 |
 
 运行时限制是冻结的契约常量，不属于可配置项。V1 会拒绝 `JOB_CONCURRENCY` 以及未知的 limit、max、retention 覆盖项，避免运维人员误以为某项实际上无效的限制已经生效。
 
@@ -157,25 +157,35 @@ tail -f /var/log/problem-locator/client.jsonl
 
 ### DFX 诊断日志
 
-服务把单行 JSON 诊断事件写入 `DFX_LOG_FILE` 指定的文件；未配置时写入标准错误流。文件以 UTF-8 追加打开，父目录不存在时会自动创建，服务重启不会覆盖原日志。每个 HTTP 请求都会返回 `X-Problem-Locator-Correlation-ID`，同一值会出现在对应日志中。MCP/HTTP 参数校验失败会记录完整参数、字段路径、实际输入和异常堆栈；MCP 错误响应也会在 `ApplicationError.details[]` 中返回可操作的字段错误。附件上传只记录请求头、长度和 SHA-256，不记录文件二进制内容。
+配置 `DFX_LOG_DIR` 后，服务把原有单行 JSON 诊断事件追加写入 `<dir>/debug.jsonl`，同时把可重放的端到端语义事件追加写入 `<dir>/journey.jsonl`。Journey 事件通过 `correlation_id`、`request_id`、`case_id`、`job_id` 和 `outcome_id` 关联一次问题定位的各个阶段。每个 HTTP 请求仍会返回 `X-Problem-Locator-Correlation-ID`，同一值会出现在对应日志中。MCP/HTTP 参数校验失败会记录完整参数、字段路径、实际输入和异常堆栈；MCP 错误响应也会在 `ApplicationError.details[]` 中返回可操作的字段错误。
 
 服务端日志不需要安装额外组件；它随 `problem-locator` 包安装。服务端在发布源码目录执行 `uv sync --frozen` 后，把下面两项写入启动时通过 `--env-file` 指定的配置文件：
 
-直接写入指定文件的配置示例：
+写入指定目录的配置示例：
 
 ```dotenv
 DFX_LOG_LEVEL=DEBUG
-DFX_LOG_FILE=/var/log/problem-locator/service.jsonl
+DFX_LOG_DIR=/var/log/problem-locator
 ```
 
 然后按“启动服务”一节运行服务，并确认日志文件已经产生：
 
 ```sh
 uv run python -m problem_locator serve --env-file /absolute/path/to/service.env
-tail -f /var/log/problem-locator/service.jsonl
+tail -f /var/log/problem-locator/debug.jsonl
 ```
 
-如果不配置 `DFX_LOG_FILE`，仍可由 Docker、systemd 或启动脚本收集和轮转 stderr。直接启动时也可以这样重定向：
+需要查看某个 Case 的完整链路时，运行确定性渲染命令。它会严格校验完整 `journey.jsonl`，并覆盖生成 `<dir>/cases/<case_id>/detailed.log` 和 `brief.log`：
+
+```sh
+uv run python -m problem_locator render-journey \
+  --case-id 00000000-0000-0000-0000-000000000000 \
+  --log-dir /var/log/problem-locator
+```
+
+`detailed.log` 保留全部语义事件及 `journey.jsonl:<line>` 来源，适合逐步定位；`brief.log` 只保留 Case 状态、关键里程碑、当前结论、阻塞项和失败点。运行中的 Case 会明确标记为“当前快照”，不会伪装成最终结论。仓库内置的 [`.claude/skills/render-problem-locator-trace`](.claude/skills/render-problem-locator-trace) Skill 只调用该命令，不自行解析 Journey，也不回退到 debug 日志。
+
+如果不配置 `DFX_LOG_DIR`，Journey 日志关闭，原有 debug 日志仍写入 stderr，可由 Docker、systemd 或启动脚本收集和轮转。直接启动时也可以这样重定向：
 
 ```sh
 uv run python -m problem_locator serve --env-file /absolute/path/to/service.env \

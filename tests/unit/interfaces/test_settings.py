@@ -73,16 +73,29 @@ def test_all_fixed_configuration_defaults_are_exact(tmp_path: Path) -> None:
     assert settings.logparse_config_path == Path(values["LOGPARSE_CONFIG_PATH"])
     assert settings.logparse_python == Path(sys.executable)
     assert settings.dfx_log_level == "INFO"
-    assert settings.dfx_log_file is None
+    assert settings.dfx_log_dir is None
 
 
-def test_dfx_log_file_accepts_an_absolute_path(tmp_path: Path) -> None:
+def test_dfx_log_dir_accepts_an_absolute_path(tmp_path: Path) -> None:
     values = environment(tmp_path)
-    values["DFX_LOG_FILE"] = str(tmp_path / "logs" / "service.jsonl")
+    values["DFX_LOG_DIR"] = str(tmp_path / "logs")
 
     settings = Settings.load(environ=values)
 
-    assert settings.dfx_log_file == tmp_path / "logs" / "service.jsonl"
+    assert settings.dfx_log_dir == tmp_path / "logs"
+
+
+@pytest.mark.parametrize("value", ["", "D:/legacy/service.jsonl"])
+def test_legacy_dfx_log_file_is_always_rejected(
+    tmp_path: Path,
+    value: str,
+) -> None:
+    values = environment(tmp_path)
+    values["DFX_LOG_FILE"] = value
+    values["DFX_LOG_DIR"] = str(tmp_path / "logs")
+
+    with pytest.raises(SettingsError, match="DFX_LOG_DIR"):
+        Settings.load(environ=values)
 
 
 @pytest.mark.parametrize(
@@ -104,7 +117,7 @@ def test_dfx_log_file_accepts_an_absolute_path(tmp_path: Path) -> None:
         ("FILE_RETENTION_SECONDS", "1"),
         ("RPC_LIMIT_BYTES", "1"),
         ("DFX_LOG_LEVEL", "VERBOSE"),
-        ("DFX_LOG_FILE", "relative/service.jsonl"),
+        ("DFX_LOG_DIR", "relative/logs"),
     ],
 )
 def test_invalid_or_fake_runtime_configuration_is_rejected(

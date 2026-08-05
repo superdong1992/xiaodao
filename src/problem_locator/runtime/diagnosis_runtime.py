@@ -29,6 +29,12 @@ from problem_locator.contracts import (
     StateRepository,
     validate_logparse_claim_for_job,
 )
+from problem_locator.journey import (
+    record_journey_event,
+    record_stage_completed,
+    record_stage_failed,
+    record_stage_started,
+)
 
 from .agent_backend import AgentBackend, BackendExecutionLimits
 from .context_builder import ContextBuilder, ContextLimitExceeded, ContextMaterials
@@ -157,7 +163,8 @@ class DiagnosisRuntime:
         failure: ExecutionFailure | None = None
         try:
             return self._execute(job, cancellation)
-        except RuntimeInfrastructureError:
+        except RuntimeInfrastructureError as exc:
+            record_stage_failed(exc.execution_failure)
             raise
         except ApplicationPortError as exc:
             if exc.error.code in {
@@ -173,22 +180,55 @@ class DiagnosisRuntime:
         except Exception:
             failure = _unexpected_failure().failure
         assert failure is not None
+        record_stage_failed(failure)
         # Publish outside the handler so the public infrastructure exception
         # cannot retain an unsafe parser, OS, or adapter exception as context.
-        return self._publisher.publish_failure(job, failure)
+        publishing = record_stage_started(
+            ExecutionStage.EXECUTION_RECORD,
+            data={"operation": "publish_failure"},
+        )
+        try:
+            receipt = self._publisher.publish_failure(job, failure)
+        except RuntimeInfrastructureError as exc:
+            record_stage_failed(exc.execution_failure)
+            raise
+        record_stage_completed(
+            ExecutionStage.EXECUTION_RECORD,
+            publishing,
+            data={
+                "operation": "publish_failure",
+                "outcome_file_ref": receipt.outcome_file_ref,
+            },
+        )
+        self._record_produced_outcome(receipt)
+        return receipt
 
     def _execute(
         self,
         job: Job,
         cancellation: CancellationSignal,
     ) -> RuntimeExecutionReceipt:
+        resolving = record_stage_started(ExecutionStage.ASSET_RESOLUTION)
         assets = self._resolve_assets(job)
+        record_stage_completed(
+            ExecutionStage.ASSET_RESOLUTION,
+            resolving,
+            data={
+                "agent_profile_ref": job.agent_profile_ref,
+                "diagnosis_skill_ref": job.skill_ref,
+                "tool_bundle_ref": job.tool_bundle_ref,
+                "context_policy_ref": job.context_policy_ref,
+                "output_contract_ref": job.output_contract_ref,
+                "logparse_tool_ref": job.logparse_tool_ref,
+            },
+        )
         if job.status is not JobStatus.RUNNING:
             raise runtime_failure(
                 stage=ExecutionStage.OUTCOME_VALIDATE,
                 code=ErrorCode.OUTCOME_INVALID,
                 message="Runtime requires an already-claimed RUNNING Job.",
-            )
+        )
+        preparing = record_stage_started(ExecutionStage.WORKSPACE_PREPARE)
         aggregate = self._read_case(job)
         workspace = self._workspace_manager.prepare(
             job,
@@ -196,8 +236,32 @@ class DiagnosisRuntime:
             self._resource_store,
         )
         resolved = assets.bind_workspace(workspace)
+        record_stage_completed(
+            ExecutionStage.WORKSPACE_PREPARE,
+            preparing,
+            data={
+                "workspace_root": workspace.root,
+                "manifest_bytes": len(workspace.manifest_bytes),
+                "attachment_count": len(workspace.attachments),
+                "evidence_count": len(workspace.evidence),
+                "artifact_count": len(workspace.artifacts),
+                "previous_outcome_count": len(workspace.previous_outcomes),
+            },
+        )
+        context_building = record_stage_started(ExecutionStage.CONTEXT_BUILD)
         context = self._build_context(job, resolved.materials)
         self._workspace_manager.write_context(workspace, context.body)
+        record_stage_completed(
+            ExecutionStage.CONTEXT_BUILD,
+            context_building,
+            data={
+                "context_path": workspace.context_path,
+                "utf8_bytes": context.utf8_bytes,
+                "limit_bytes": context.limit_bytes,
+                "body_sha256": context.body_sha256,
+                "sections": context.sections,
+            },
+        )
 
         secrets, parse_request_bytes, claim = self._execute_backend(
             job,
@@ -205,6 +269,7 @@ class DiagnosisRuntime:
             cancellation,
             context.body,
         )
+        validating = record_stage_started(ExecutionStage.OUTCOME_VALIDATE)
         try:
             validated = read_agent_output(
                 workspace,
@@ -216,7 +281,19 @@ class DiagnosisRuntime:
             if secrets:
                 self._workspace_manager.purge_agent_output(workspace)
             raise
+        record_stage_completed(
+            ExecutionStage.OUTCOME_VALIDATE,
+            validating,
+            data={
+                "result_type": validated.outcome.result_type,
+                "proposal_resource_count": len(validated.proposal_resources),
+                "canonical_bytes": len(validated.canonical_bytes),
+                "has_user_result": validated.user_result is not None,
+                "workspace_outcome_path": workspace.outcome_path,
+            },
+        )
 
+        staging = record_stage_started(ExecutionStage.RESOURCE_STAGE)
         staged = stage_validated_output(
             job=job,
             workspace_manifest=workspace.manifest,
@@ -224,6 +301,20 @@ class DiagnosisRuntime:
             resource_store=self._resource_store,
             claim=claim,
             parse_request_bytes=parse_request_bytes,
+        )
+        record_stage_completed(
+            ExecutionStage.RESOURCE_STAGE,
+            staging,
+            data={
+                "staged_refs": staged.staged_refs,
+                "outcome_id": staged.outcome.outcome_id,
+                "proposed_evidence_count": len(staged.outcome.proposed_evidence),
+                "proposed_artifact_count": len(staged.outcome.proposed_artifacts),
+            },
+        )
+        publishing = record_stage_started(
+            ExecutionStage.EXECUTION_RECORD,
+            data={"operation": "publish_success"},
         )
         try:
             receipt = self._publisher.publish_success(
@@ -238,6 +329,15 @@ class DiagnosisRuntime:
             # cleanup is intentionally forbidden.
             discard_staged(self._resource_store, staged.staged_refs)
             raise _unexpected_failure() from None
+        record_stage_completed(
+            ExecutionStage.EXECUTION_RECORD,
+            publishing,
+            data={
+                "operation": "publish_success",
+                "outcome_file_ref": receipt.outcome_file_ref,
+            },
+        )
+        self._record_produced_outcome(receipt)
         if receipt.job_outcome != staged.outcome:
             _discard_unreferenced_staged(
                 self._resource_store,
@@ -245,6 +345,25 @@ class DiagnosisRuntime:
                 receipt,
             )
         return receipt
+
+    @staticmethod
+    def _record_produced_outcome(receipt: RuntimeExecutionReceipt) -> None:
+        outcome = receipt.job_outcome
+        record_journey_event(
+            "job.outcome.produced",
+            timestamp=outcome.produced_at,
+            case_id=outcome.case_id,
+            job_id=outcome.job_id,
+            job_type=outcome.job_type,
+            outcome_id=outcome.outcome_id,
+            data={
+                "state_applied": False,
+                "outcome": outcome,
+                "outcome_file_ref": receipt.outcome_file_ref,
+                "stdout_ref": f"jobs/{outcome.job_id}/stdout.log",
+                "stderr_ref": f"jobs/{outcome.job_id}/stderr.log",
+            },
+        )
 
     def _resolve_assets(self, job: Job) -> ResolvedJobAssets:
         try:
@@ -388,6 +507,10 @@ class DiagnosisRuntime:
                 code=ErrorCode.ASSET_VERSION_UNAVAILABLE,
                 message="The fixed logparse broker asset is unavailable.",
             )
+        tool_started = record_stage_started(
+            ExecutionStage.TOOL_EXECUTE,
+            data={"tool": "logparse"},
+        )
         try:
             session = self._logparse_broker_factory.open(
                 job,
@@ -458,6 +581,15 @@ class DiagnosisRuntime:
             if secrets:
                 self._workspace_manager.purge_agent_output(workspace)
             raise RuntimeExecutionError(primary)
+        record_stage_completed(
+            ExecutionStage.TOOL_EXECUTE,
+            tool_started,
+            data={
+                "tool": "logparse",
+                "claim": claim,
+                "request_bytes": None if request_bytes is None else len(request_bytes),
+            },
+        )
         return secrets, request_bytes, claim
 
     @staticmethod

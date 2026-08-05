@@ -12,17 +12,27 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, BinaryIO
 
+from pydantic import TypeAdapter, ValidationError
+
 from problem_locator.contracts.enums import ErrorCode
 from problem_locator.contracts.errors import (
     ApplicationPortError,
     CLI_EXIT_CONFIG_OR_STATE_CORRUPT,
     CLI_EXIT_REQUEST_OR_STATE_CONFLICT,
+    CLI_EXIT_RUNTIME_FAILURE,
     CLI_EXIT_SUCCESS,
 )
-from problem_locator.contracts.models import ApplicationError
+from problem_locator.contracts.models import ApplicationError, OpaqueId
 from problem_locator.contracts.ports import StateAdminPort
 from problem_locator.contracts.serialization import canonical_json_bytes
 from problem_locator.diagnostics import configure_diagnostics, log_event
+from problem_locator.journey import configure_journey
+from problem_locator.journey_renderer import (
+    JourneyCaseNotFound,
+    JourneyOutputError,
+    JourneySourceError,
+    render_journey,
+)
 
 from problem_locator.interfaces.error_mapping import cli_exit_for, validation_error
 
@@ -94,6 +104,13 @@ def _parser() -> argparse.ArgumentParser:
     )
     export.add_argument("--data-root", type=Path, required=True)
     export.add_argument("--output", type=Path, required=True)
+
+    render = subcommands.add_parser(
+        "render-journey",
+        help="render detailed and brief logs for one Case",
+    )
+    render.add_argument("--case-id", required=True)
+    render.add_argument("--log-dir", type=Path)
     return parser
 
 
@@ -109,6 +126,72 @@ def _config_error(message: str = "Configuration is invalid.") -> ApplicationErro
         details=[],
         retryable=False,
     )
+
+
+def _request_error(message: str) -> ApplicationError:
+    return ApplicationError(
+        code=ErrorCode.VALIDATION_ERROR,
+        message=message,
+        details=[],
+        retryable=False,
+    )
+
+
+def _runtime_error(message: str) -> ApplicationError:
+    return ApplicationError(
+        code=ErrorCode.RESOURCE_PUBLISH_FAILED,
+        message=message,
+        details=[],
+        retryable=False,
+    )
+
+
+def _render_journey_command(
+    arguments: argparse.Namespace,
+    *,
+    output: BinaryIO,
+    errors: BinaryIO,
+) -> int:
+    if "DFX_LOG_FILE" in os.environ:
+        _write_error(
+            errors,
+            _config_error("DFX_LOG_FILE is no longer supported; use DFX_LOG_DIR."),
+        )
+        return CLI_EXIT_CONFIG_OR_STATE_CORRUPT
+    raw_log_dir = arguments.log_dir or os.environ.get("DFX_LOG_DIR")
+    if raw_log_dir is None or str(raw_log_dir) == "":
+        _write_error(errors, _config_error("DFX_LOG_DIR is required."))
+        return CLI_EXIT_CONFIG_OR_STATE_CORRUPT
+    log_dir = Path(raw_log_dir)
+    if not log_dir.is_absolute():
+        _write_error(errors, _config_error("DFX_LOG_DIR must be an absolute path."))
+        return CLI_EXIT_CONFIG_OR_STATE_CORRUPT
+    try:
+        case_id = TypeAdapter(OpaqueId).validate_python(
+            arguments.case_id,
+            strict=True,
+        )
+    except (TypeError, ValueError, ValidationError):
+        _write_error(errors, _request_error("case_id must be a canonical lowercase UUID."))
+        return CLI_EXIT_REQUEST_OR_STATE_CONFLICT
+
+    try:
+        receipt = render_journey(log_dir, case_id)
+    except JourneyCaseNotFound as exc:
+        _write_error(errors, _request_error(str(exc)))
+        return CLI_EXIT_REQUEST_OR_STATE_CONFLICT
+    except JourneySourceError as exc:
+        _write_error(errors, _config_error(str(exc)))
+        return CLI_EXIT_CONFIG_OR_STATE_CORRUPT
+    except JourneyOutputError as exc:
+        _write_error(errors, _runtime_error(str(exc)))
+        return CLI_EXIT_RUNTIME_FAILURE
+    except Exception:
+        _write_error(errors, _runtime_error("Journey rendering failed unexpectedly."))
+        return CLI_EXIT_RUNTIME_FAILURE
+    output.write(canonical_json_bytes(receipt))
+    output.flush()
+    return CLI_EXIT_SUCCESS
 
 
 def _atomic_write(output: Path, data: bytes) -> None:
@@ -162,6 +245,9 @@ def main(
         _write_error(errors, validation_error("Command-line arguments are invalid."))
         return CLI_EXIT_REQUEST_OR_STATE_CONFLICT
 
+    if arguments.command == "render-journey":
+        return _render_journey_command(arguments, output=output, errors=errors)
+
     active_hooks = hooks or _DEFAULT_HOOKS
     if active_hooks is None:
         _write_error(errors, _config_error("CLI composition is not configured."))
@@ -169,24 +255,32 @@ def main(
 
     if arguments.command == "serve":
         configure_diagnostics("INFO")
+        configure_journey()
         try:
             settings = Settings.load(env_file=arguments.env_file)
             try:
-                configure_diagnostics(
-                    settings.dfx_log_level,
-                    log_file=settings.dfx_log_file,
-                )
+                if settings.dfx_log_dir is None:
+                    configure_diagnostics(settings.dfx_log_level)
+                    configure_journey()
+                else:
+                    configure_diagnostics(
+                        settings.dfx_log_level,
+                        log_file=settings.dfx_log_dir / "debug.jsonl",
+                    )
+                    configure_journey(
+                        log_file=settings.dfx_log_dir / "journey.jsonl"
+                    )
             except (OSError, ValueError) as exc:
-                raise SettingsError("DFX log file could not be opened") from exc
+                raise SettingsError("DFX log directory could not be opened") from exc
             log_event(
                 "service.configuration.loaded",
                 bind_host=settings.bind_host,
                 port=settings.port,
                 public_base_url=settings.public_base_url,
                 dfx_log_level=settings.dfx_log_level,
-                dfx_log_file=(
-                    str(settings.dfx_log_file)
-                    if settings.dfx_log_file is not None
+                dfx_log_dir=(
+                    str(settings.dfx_log_dir)
+                    if settings.dfx_log_dir is not None
                     else None
                 ),
             )
