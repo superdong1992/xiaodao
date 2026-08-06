@@ -6,7 +6,7 @@ const evidenceRoot = path.resolve(process.argv[2]);
 const apiLog = path.join(evidenceRoot, "api-requests.jsonl");
 const mcpLog = path.join(evidenceRoot, "mcp-requests.jsonl");
 const readyFile = path.join(evidenceRoot, "servers-ready.json");
-const requestId = "10000000-0000-0000-0000-000000000104";
+const requestId = "10000000-0000-0000-0000-000000000105";
 
 function append(file, value) {
   fs.appendFileSync(file, `${JSON.stringify(value)}\n`, "utf8");
@@ -49,7 +49,7 @@ function sse(response, events) {
   response.end();
 }
 
-const problemSpec = {
+const problemFields = {
   statement: "连接失败",
   expected_behavior: "请求成功",
   actual_behavior: "请求超时",
@@ -59,47 +59,46 @@ const problemSpec = {
   constraints: ["只使用现有证据"],
   completion_criteria: ["确认参数类型"],
 };
-const initialFacts = [{ name: "主机", value: "节点一" }];
-const problemProperties = {
-  statement: { type: "string" },
-  expected_behavior: { type: "string" },
-  actual_behavior: { type: "string" },
-  scope: { type: "string" },
-  goals: { type: "array", items: { type: "string" } },
-  non_goals: { type: "array", items: { type: "string" } },
-  constraints: { type: "array", items: { type: "string" } },
-  completion_criteria: { type: "array", items: { type: "string" } },
-};
 const tool = {
   name: "problem_locator_create_case",
-  description: "Create a probe case.",
+  description: "Create a probe case with flat inputs.",
   inputSchema: {
     type: "object",
     properties: {
       request_id: { type: "string" },
-      problem_spec: { $ref: "#/$defs/ProblemSpecInput" },
-      initial_user_facts: {
+      statement: { type: "string" },
+      expected_behavior: { type: "string" },
+      actual_behavior: { type: "string" },
+      scope: { type: "string" },
+      goals: { type: "array", items: { type: "string" } },
+      non_goals: { type: "array", items: { type: "string" } },
+      constraints: { type: "array", items: { type: "string" } },
+      completion_criteria: { type: "array", items: { type: "string" } },
+      initial_user_fact_names: {
         type: "array",
-        items: { $ref: "#/$defs/UserFactInput" },
+        items: { type: "string" },
+        maxItems: 64,
+        uniqueItems: true,
+      },
+      initial_user_fact_values: {
+        type: "array",
+        items: { type: "string" },
+        maxItems: 64,
       },
       wait_seconds: { type: "integer" },
     },
-    required: ["request_id", "problem_spec"],
+    required: [
+      "request_id",
+      "statement",
+      "expected_behavior",
+      "actual_behavior",
+      "scope",
+      "goals",
+      "non_goals",
+      "constraints",
+      "completion_criteria",
+    ],
     additionalProperties: false,
-    $defs: {
-      ProblemSpecInput: {
-        type: "object",
-        properties: problemProperties,
-        required: Object.keys(problemProperties),
-        additionalProperties: false,
-      },
-      UserFactInput: {
-        type: "object",
-        properties: { name: { type: "string" }, value: { type: "string" } },
-        required: ["name", "value"],
-        additionalProperties: false,
-      },
-    },
   },
 };
 
@@ -112,7 +111,7 @@ function messageStart(id) {
         id,
         type: "message",
         role: "assistant",
-        model: "claude-hook-probe",
+        model: "claude-flat-probe",
         content: [],
         stop_reason: null,
         stop_sequence: null,
@@ -125,12 +124,13 @@ function messageStart(id) {
 function toolEvents(toolName) {
   const input = {
     request_id: requestId,
-    problem_spec: JSON.stringify(problemSpec),
-    initial_user_facts: JSON.stringify(initialFacts),
+    ...problemFields,
+    initial_user_fact_names: ["host"],
+    initial_user_fact_values: ["节点一"],
     wait_seconds: 0,
   };
   return [
-    messageStart("msg_hook_probe"),
+    messageStart("msg_flat_probe"),
     [
       "content_block_start",
       {
@@ -138,7 +138,7 @@ function toolEvents(toolName) {
         index: 0,
         content_block: {
           type: "tool_use",
-          id: "toolu_hook_probe",
+          id: "toolu_flat_probe",
           name: toolName,
           input: {},
         },
@@ -229,10 +229,15 @@ const apiServer = http.createServer(async (request, response) => {
 });
 
 function toolResult(argumentsValue) {
-  const valid = argumentsValue?.problem_spec !== null
-    && typeof argumentsValue?.problem_spec === "object"
-    && !Array.isArray(argumentsValue.problem_spec)
-    && Array.isArray(argumentsValue?.initial_user_facts);
+  const valid = argumentsValue
+    && !Object.hasOwn(argumentsValue, "problem_spec")
+    && !Object.hasOwn(argumentsValue, "initial_user_facts")
+    && typeof argumentsValue.statement === "string"
+    && Array.isArray(argumentsValue.goals)
+    && Array.isArray(argumentsValue.initial_user_fact_names)
+    && Array.isArray(argumentsValue.initial_user_fact_values)
+    && argumentsValue.initial_user_fact_names.length
+      === argumentsValue.initial_user_fact_values.length;
   const structuredContent = valid
     ? { ok: true, data: { request_id: argumentsValue.request_id }, error: null }
     : {
@@ -240,7 +245,7 @@ function toolResult(argumentsValue) {
       data: null,
       error: {
         code: "VALIDATION_ERROR",
-        details: [{ field: "problem_spec", expected: "object", actual: "string" }],
+        details: [{ field: "problem_spec", expected: "forbidden" }],
       },
     };
   return {
@@ -259,7 +264,7 @@ function handleMcp(message) {
       result: {
         protocolVersion: params?.protocolVersion ?? "2025-03-26",
         capabilities: { tools: {} },
-        serverInfo: { name: "problem-locator", version: "1.0.4" },
+        serverInfo: { name: "problem-locator", version: "1.0.5" },
       },
     };
   }

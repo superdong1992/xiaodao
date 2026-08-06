@@ -13,7 +13,7 @@ $script:RestartModelAlias = 'haiku'
 $script:RestartEffectiveModel = 'deepseek-v4-flash[1m]'
 $script:RestartMcpUrl = 'http://127.0.0.1:18000/mcp'
 $script:RestartServiceBaseUrl = 'http://127.0.0.1:18000'
-$script:RestartClientSkillSha256 = 'da0895357b00502feb7d3e41a516dcc8c67c73c115691fcec8d58e0a2e86a039'
+$script:RestartClientSkillSha256 = 'c444f6c4bcb24fe9f44be24da77aa5b14cd420d73e5b7959a913584cfd82f4e3'
 $script:RestartSkillId = 'diagnosis-skill/diagnose-service-takeover'
 $script:RestartSkillVersion = '3.0.5'
 $script:RestartSkillHash = 'ae47a1a63e6cf4849f83b0f9d49db608c1e93ebe1713f21d58c910990b0857a4'
@@ -344,10 +344,9 @@ function Confirm-PreRestartJourneyManifest {
     Assert-Restart (Get-RestartBooleanProperty $manifest 'mixed_or_multiple_tool_result_fail_closed') 'journey mixed/multiple tool_result fail closed'
     $expectedOutputs = @(
         'windows-claude-version.stdout.txt', 'windows-claude-version.stderr.txt',
-        'phase1.prompt.txt', 'phase1.stream-json.stdout.ndjson', 'phase1.stderr.txt', 'phase1.client-dfx.jsonl', 'phase1.authoritative.json', 'phase1-state.json',
+        'phase1.prompt.txt', 'phase1.stream-json.stdout.ndjson', 'phase1.stderr.txt', 'phase1.authoritative.json', 'phase1-state.json',
         'upload.curl.stdout.txt', 'upload.curl.stderr.txt', 'upload.response.json', 'upload.response.headers.txt', 'upload-state.json',
-        'hook-failure.prompt.txt', 'hook-failure.stream-json.stdout.ndjson', 'hook-failure.stderr.txt', 'hook-failure.claude-debug.log', 'hook-failure.authoritative.json',
-        'phase3.prompt.txt', 'phase3.stream-json.stdout.ndjson', 'phase3.stderr.txt', 'phase3.client-dfx.jsonl', 'phase3.authoritative.json', 'journey-authoritative-summary.json'
+        'phase3.prompt.txt', 'phase3.stream-json.stdout.ndjson', 'phase3.stderr.txt', 'phase3.authoritative.json', 'journey-authoritative-summary.json'
     )
     $outputs = Get-RestartProperty $manifest 'possible_runtime_outputs' -Required
     Assert-RestartStringArray $outputs 'journey manifest outputs'
@@ -360,6 +359,13 @@ function Confirm-RestartClientSkill {
     Assert-Restart (Test-Path -LiteralPath $path -PathType Leaf) 'problem-locator-client Skill is absent'
     $actual = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
     Assert-Restart ($actual -ceq $script:RestartClientSkillSha256) 'problem-locator-client Skill SHA-256'
+    foreach ($relative in @(
+        '.claude\skills\problem-locator-client\references\client-hooks-settings.json',
+        '.claude\skills\problem-locator-client\scripts\problem-locator-client-compat.ps1',
+        '.claude\skills\problem-locator-client\scripts\problem-locator-client-dfx.ps1'
+    )) {
+        Assert-Restart (-not (Test-Path -LiteralPath (Join-Path $script:RestartRepoRoot $relative))) "removed Problem Locator Hook asset must remain absent: $relative"
+    }
 }
 
 function Assert-RestartSelectedSkill {

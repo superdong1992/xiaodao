@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
-import re
 from typing import BinaryIO
 
 import pytest
@@ -175,27 +174,17 @@ def test_skill_document_names_tools_and_safety_invariants() -> None:
     assert ".tar.gz" in skill and "uppercase archive suffixes" in skill
     assert "do not ask for a Logparse archive Content-Type" in skill
     assert "Derive it from the canonical lowercase filename suffix" in skill
-    assert "does not run a local MCP server or forwarding proxy" in skill
+    assert "run a local MCP server or proxy" in skill
     assert "does not install the `problem-locator` package" in skill
-    assert '`--debug "mcp,hooks" --debug-file <path>`' in skill
-    assert "mcp__problem-locator__problem_locator_*" in skill
-    assert "problem_locator_problem_locator_*" in skill
-    assert "loaded Hook is not proof that its matcher ran" in skill
-    assert "Never compensate" in skill
-    assert "Claude Code 2.1.89" in skill
-    assert "one complete `command` string" in skill
-    assert "scripts/problem-locator-client-compat.ps1" in skill
-    assert "returns the full `updatedInput`" in skill
-    assert "historical debt" in skill
-    assert '"inputs": {"order_id": "order-1"}' in skill
-    assert "It is never a list of name/value records" in skill
+    assert "Version 1.0.5 exposes only flat MCP input schemas" in skill
+    assert '"input_names": ["order_id"]' in skill
+    assert '"input_values": ["order-1"]' in skill
     assert "`name` and `declared_size`" in skill
     assert "`attachment_name` or `declared_byte_count`" in skill
-    assert '"problem_spec": {' in skill
-    assert '"problem_spec": "{\\"statement\\":...}"' in skill
-    assert "eight-member JSON object" in skill
-    assert '{"name": "<requirement_name>", "value": "<exact string value>"}' in skill
-    assert "Pass objects and arrays directly to the MCP tool" in skill
+    assert '"statement": "<problem statement>"' in skill
+    assert '"initial_user_fact_names": ["<requirement_name>"]' in skill
+    assert '"initial_user_fact_values": ["<exact string value>"]' in skill
+    assert '"problem_spec": {' not in skill
     assert '"wait_for_job_id": null' in skill
     assert "Only `declared_size`, `declared_sha256`, and `wait_for_job_id`" in skill
 
@@ -213,65 +202,25 @@ def test_skill_document_names_tools_and_safety_invariants() -> None:
     assert remote == {"type": "http", "url": "${PROBLEM_LOCATOR_MCP_URL}"}
 
     hooks_path = config.with_name("client-hooks-settings.json")
-    hooks = json.loads(hooks_path.read_text(encoding="utf-8"))["hooks"]
-    assert set(hooks) == {"PreToolUse", "PostToolUse", "PostToolUseFailure"}
-    expected_full_names = {
-        *(f"mcp__problem-locator__{tool}" for tool in tool_names),
-        *(f"problem_locator_{tool}" for tool in tool_names),
-    }
-    invalid_full_names = {
-        "mcp__problem-locator__unexpected_tool",
-        "problem_locator_unexpected_tool",
-        "problem_locator_problem_locator_create_case_extra",
-        "mcp__problem_locator__problem_locator_create_case",
-    }
-    for handlers in hooks.values():
-        assert len(handlers) == 1
-        matcher = handlers[0]["matcher"]
-        assert all(re.fullmatch(matcher, name) for name in expected_full_names)
-        assert not any(re.fullmatch(matcher, name) for name in invalid_full_names)
-        commands = handlers[0]["hooks"]
-        expected_count = 2 if handlers is hooks["PreToolUse"] else 1
-        assert len(commands) == expected_count
-        for command in commands:
-            assert command["type"] == "command"
-            assert command["timeout"] == 5
-            assert command["command"].startswith(
-                "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File"
-            )
-            assert "${CLAUDE_PROJECT_DIR}" in command["command"]
-            assert "args" not in command
-            assert "async" not in command
-    pretool_commands = hooks["PreToolUse"][0]["hooks"]
-    assert "problem-locator-client-compat.ps1" in pretool_commands[0]["command"]
-    assert "problem-locator-client-dfx.ps1" in pretool_commands[1]["command"]
-    assert all(
-        "problem-locator-client-compat.ps1" not in command["command"]
-        for event in ("PostToolUse", "PostToolUseFailure")
-        for command in hooks[event][0]["hooks"]
-    )
+    assert not hooks_path.exists()
+    scripts = config.parent.parent / "scripts"
+    assert not list(scripts.glob("problem-locator-client-*.ps1"))
 
     readme = (Path(__file__).parents[3] / "README.md").read_text(encoding="utf-8")
-    assert "客户端远端 MCP 与 Windows DFX 配置" in readme
+    assert "客户端远端 MCP 配置" in readme
     assert "客户端不安装 `problem-locator`" in readme
     assert '"type": "http"' in readme
     assert '"url": "${PROBLEM_LOCATOR_MCP_URL}"' in readme
     assert "NO_PROXY" in readme
-    assert "D:/logs/problem-locator/client.jsonl" in readme
-    assert "problem_spec` 必须直接传八成员 JSON 对象" in readme
-    assert "object<string,string>" in readme
-    assert "服务端公布的原始 input schema" in readme
-    assert "client.hook.tool.started" in readme
+    assert "七个公开 MCP input schema 全部扁平化" in readme
+    assert "initial_user_fact_names/initial_user_fact_values" in readme
+    assert "input_names/input_values" in readme
     assert "PROBLEM_LOCATOR_WINDOWS_LINUX_GATE" in readme
-    assert "PROBLEM_LOCATOR_REAL_HOST_HOOK_GATE" in readme
-    assert "PROBLEM_LOCATOR_LEGACY_HOST_HOOK_GATE" in readme
-    assert "problem_locator_problem_locator_*" in readme
-    assert "Hook 显示为已加载不代表 matcher 已命中" in readme
-    assert "argument_json_types.problem_spec" in readme
+    assert "PROBLEM_LOCATOR_REAL_HOST_FLAT_GATE" in readme
     assert "官方 npm Claude Code 2.1.89" in readme
-    assert "problem-locator-client-compat.ps1" in readme
-    assert "PreToolUse.updatedInput" in readme
     assert "不得新增 `$ref/$defs`" in readme
+    assert "PROBLEM_LOCATOR_CLIENT_DFX_LOG_FILE" not in readme
+    assert "client.hook.tool.started" not in readme
     assert "服务端日志不需要安装额外组件" in readme
     assert "tail -f /var/log/problem-locator/debug.jsonl" in readme
 
@@ -281,7 +230,14 @@ def test_create_case_uses_one_stable_generated_request_id() -> None:
     mcp = FakeMcpClient([envelope(response)])
     workflow = ClientAccessWorkflow(mcp, FakeCurl(), FixedIds([REQUEST_1]))
 
-    actual = workflow.create_case(problem_spec=problem_spec_input(), wait_seconds=30)
+    actual = workflow.create_case(
+        problem_spec=problem_spec_input(),
+        initial_user_facts=(
+            {"name": "host", "value": "node-1"},
+            {"name": "region", "value": "华北"},
+        ),
+        wait_seconds=30,
+    )
 
     assert actual == response
     assert actual.case_view is None
@@ -291,8 +247,9 @@ def test_create_case_uses_one_stable_generated_request_id() -> None:
             "problem_locator_create_case",
             {
                 "request_id": REQUEST_1,
-                "problem_spec": problem_spec_input(),
-                "initial_user_facts": [],
+                **problem_spec_input(),
+                "initial_user_fact_names": ["host", "region"],
+                "initial_user_fact_values": ["node-1", "华北"],
                 "wait_seconds": 30,
             },
         )
@@ -536,7 +493,7 @@ def test_submit_structured_facts_uses_one_stable_write_request() -> None:
     actual = workflow.submit_supplement(
         case_id=CASE_ID,
         expected_case_revision=2,
-        inputs={"order_id": "order-1"},
+        inputs={"order_id": "order-1", "region": "华北"},
         wait_seconds=30,
     )
 
@@ -548,7 +505,8 @@ def test_submit_structured_facts_uses_one_stable_write_request() -> None:
                 "request_id": REQUEST_1,
                 "case_id": CASE_ID,
                 "expected_case_revision": 2,
-                "inputs": {"order_id": "order-1"},
+                "input_names": ["order_id", "region"],
+                "input_values": ["order-1", "华北"],
                 "attachment_ids": [],
                 "wait_seconds": 30,
             },

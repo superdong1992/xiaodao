@@ -9,17 +9,11 @@ Treat the service as the authority for every Case, revision, requirement, Job, a
 
 ## Connect directly to the remote MCP server
 
-Configure Claude Code from [references/client-mcp-config.json](references/client-mcp-config.json) so it connects directly to the controlled-network HTTP endpoint ending in `/mcp`. The Windows client does not install the `problem-locator` package and does not run a local MCP server or forwarding proxy. Keep the configured server key exactly `problem-locator` so the diagnostic Hook matcher remains stable. If the machine has `HTTP_PROXY` or `HTTPS_PROXY`, add only the remote MCP host or IP to `NO_PROXY`; do not disable the corporate proxy globally.
+Configure Claude Code from [references/client-mcp-config.json](references/client-mcp-config.json) so it connects directly to the controlled-network HTTP endpoint ending in `/mcp`. The Windows client does not install the `problem-locator` package, run a local MCP server or proxy, or install Problem Locator Hooks. Keep the configured server key exactly `problem-locator`. If the machine has `HTTP_PROXY` or `HTTPS_PROXY`, add only the remote MCP host or IP to `NO_PROXY`; do not disable the corporate proxy globally.
 
-For Windows diagnostics, merge [references/client-hooks-settings.json](references/client-hooks-settings.json) into the Claude project settings. Claude Code 2.1.89 requires each command Hook to use one complete `command` string; do not add an `args` member. The bundled [scripts/problem-locator-client-compat.ps1](scripts/problem-locator-client-compat.ps1) repairs only the three historical compound inputs during `PreToolUse`. The separate [scripts/problem-locator-client-dfx.ps1](scripts/problem-locator-client-dfx.ps1) observes the three tool events and appends the original Host-visible arguments and response or error to JSONL. The DFX Hook never returns a permission decision, modifies an input, replaces an output, or forwards an MCP request. `PROBLEM_LOCATOR_CLIENT_DFX_LOG_FILE` selects an absolute log path and otherwise defaults to `.problem-locator/client-dfx.jsonl` under the Claude project directory. Correlate events by `session_id` and `tool_use_id`, and keep each write operation's stable `request_id` for correlation with the service DFX.
+Version 1.0.5 exposes only flat MCP input schemas. Every root property is a scalar, nullable scalar, or scalar array. Do not send the removed `problem_spec`, `initial_user_facts`, or `inputs` members, and never encode an object as a JSON string. The Linux service remains the validation and diagnostic authority.
 
-The Hook accepts both the official `mcp__problem-locator__problem_locator_*` Host names and the observed legacy/custom `problem_locator_problem_locator_*` names, then normalizes them through the same seven-tool allowlist while retaining the raw `tool_name`. In the legacy form, the first `problem_locator` is the normalized server key and the second begins the server-published tool name; it does not mean the server registered a duplicate tool. A loaded Hook is not proof that its matcher ran. If no default `.problem-locator/client-dfx.jsonl` exists, inspect the exact Host tool name before diagnosing argument serialization.
-
-Hooks run only after Claude Code accepts a tool call for execution. If a call has no Hook entry and no service-side request, reproduce it with Claude Code `--debug "mcp,hooks" --debug-file <path>` to inspect Host-side schema, configuration, or connection rejection. After changing MCP or Hook configuration, remove stale same-name stdio definitions from every Claude configuration scope, fully restart Claude Code, start a new session, and verify both `/mcp` and `/hooks`.
-
-The compatibility Hook parses at most once and only for `create_case.problem_spec`, `create_case.initial_user_facts` (including string members), and `submit_supplement.inputs`. On success it returns the full `updatedInput` without a permission decision or context. Correct types, invalid JSON, wrong root types, and strings that still decode to strings are left unchanged. Never compensate on the service: compare the DFX Hook's original `argument_json_types` with the effective server event carrying the same `request_id`, and keep strict server validation as the authority.
-
-These three compound fields are historical debt, not a design precedent. New or changed MCP inputs must be flat root properties containing only scalars, nullable scalars, or scalar arrays; do not add nested objects, dynamic maps, object arrays, `$ref`, or `$defs`.
+When migrating, remove the old Problem Locator Hook groups from `.claude/settings.json`, delete any copied compatibility or DFX scripts, remove stale same-name stdio MCP definitions from every Claude configuration scope, fully restart Claude Code, and start a new session. Use `/mcp` to verify that `problem-locator` is the connected remote HTTP server. No Problem Locator client DFX file is produced.
 
 ## Use the fixed tools
 
@@ -35,34 +29,29 @@ Call only these Remote MCP tools:
 
 ## Use the exact JSON argument shapes
 
-Pass objects and arrays directly to the MCP tool. Never pre-serialize a nested
-object or array into an escaped JSON string. The canonical argument shapes are:
+Use only the following flat argument shapes:
 
 `problem_locator_create_case`:
 
 ```json
 {
   "request_id": "<stable-request-id>",
-  "problem_spec": {
-    "statement": "<problem statement>",
-    "expected_behavior": "<expected behavior>",
-    "actual_behavior": "<actual behavior>",
-    "scope": "<diagnosis scope>",
-    "goals": ["<goal>"],
-    "non_goals": [],
-    "constraints": [],
-    "completion_criteria": ["<criterion>"]
-  },
-  "initial_user_facts": [
-    {"name": "<requirement_name>", "value": "<exact string value>"}
-  ],
+  "statement": "<problem statement>",
+  "expected_behavior": "<expected behavior>",
+  "actual_behavior": "<actual behavior>",
+  "scope": "<diagnosis scope>",
+  "goals": ["<goal>"],
+  "non_goals": [],
+  "constraints": [],
+  "completion_criteria": ["<criterion>"],
+  "initial_user_fact_names": ["<requirement_name>"],
+  "initial_user_fact_values": ["<exact string value>"],
   "wait_seconds": 0
 }
 ```
 
-`problem_spec` is the displayed eight-member JSON object itself. A value such
-as `"problem_spec": "{\"statement\":...}"` is invalid. `initial_user_facts`
-is an array of `{name,value}` objects, defaults to `[]`, and is never a map.
+The two initial fact arrays default to `[]`, must have equal lengths, and are
+paired by index. Fact names must be unique.
 
 `problem_locator_prepare_attachment`:
 
@@ -85,7 +74,8 @@ is an array of `{name,value}` objects, defaults to `[]`, and is never a map.
   "request_id": "<stable-request-id>",
   "case_id": "<case-uuid>",
   "expected_case_revision": 2,
-  "inputs": {"order_id": "order-1"},
+  "input_names": ["order_id"],
+  "input_values": ["order-1"],
   "attachment_ids": ["<ready-attachment-uuid>"],
   "wait_seconds": 0
 }
@@ -131,8 +121,8 @@ is an array of `{name,value}` objects, defaults to `[]`, and is never a map.
 ```
 
 Only `declared_size`, `declared_sha256`, and `wait_for_job_id` accept explicit
-`null`. `initial_user_facts` and each `wait_seconds` are optional with defaults
-`[]` and `0`; all other members shown above are required for their tool.
+`null`. The two initial fact arrays and each `wait_seconds` are optional with
+defaults `[]` and `0`; all other members shown above are required for their tool.
 
 Generate one stable `request_id` for each logical write operation and reuse it when retrying that same operation. Pass the latest displayed `case_revision` as `expected_case_revision`. Keep `wait_seconds` within `0..30`; a timeout means the same asynchronous Job continues.
 
@@ -140,7 +130,7 @@ After every write response, show the durable business receipt first. When `case_
 
 ## Create or inspect a Case
 
-1. Build the complete `problem_spec` without a revision and preserve the user's text exactly.
+1. Build all eight flat problem fields without a revision and preserve the user's text exactly.
 2. Call `problem_locator_create_case` with a fresh stable `request_id`.
 3. Poll or finitely wait with `problem_locator_get_case`; never create a replacement Case merely because waiting timed out.
 
@@ -148,9 +138,7 @@ Use `problem_locator_resume_case` only for a persisted pending or interrupted Ca
 
 ## Submit requested facts
 
-Read the open requirements from the latest Case view. Map each answer to its exact requirement `name`, then call `problem_locator_submit_supplement` with a new stable `request_id`, the latest revision, `inputs`, and any READY `attachment_ids`. Preserve values exactly; do not trim, normalize, or invent missing facts.
-
-The call shape is exact: `inputs` is one JSON object whose keys are requirement names and whose values are strings, for example `"inputs": {"order_id": "order-1"}`. It is never a list of name/value records. `attachment_ids` is the separate JSON array. Do not invent aliases for either member.
+Read the open requirements from the latest Case view. Put each exact requirement name in `input_names` and its answer at the same index in `input_values`, then call `problem_locator_submit_supplement` with a new stable `request_id`, the latest revision, and any READY `attachment_ids`. The arrays must have equal lengths and unique names. Preserve values exactly; do not trim, normalize, or invent missing facts.
 
 On `REVISION_CONFLICT`, call `problem_locator_get_case`, review the new state, update `expected_case_revision`, and retry the same logical submission without changing its stable request ID. Do not retry an `IDEMPOTENCY_CONFLICT` as if it were a revision conflict.
 

@@ -12,15 +12,7 @@ import pytest
 
 
 ROOT = Path(__file__).resolve().parents[2]
-FIXTURE = ROOT / "tests" / "e2e" / "fixtures" / "claude_2_1_89_hook_probe.mjs"
-HOOKS = (
-    ROOT
-    / ".claude"
-    / "skills"
-    / "problem-locator-client"
-    / "references"
-    / "client-hooks-settings.json"
-)
+FIXTURE = ROOT / "tests" / "e2e" / "fixtures" / "claude_2_1_89_flat_probe.mjs"
 RELEASE_REQUIRED = "PROBLEM_LOCATOR_RELEASE_GATES_REQUIRED"
 EXPECTED_VERSION = "2.1.89 (Claude Code)"
 
@@ -56,8 +48,8 @@ def _wait_for_json(path: Path, process: subprocess.Popen[str]) -> dict[str, obje
     raise AssertionError("probe server did not become ready")
 
 
-@pytest.mark.skipif(os.name != "nt", reason="the compatibility Hook is Windows-only")
-def test_official_npm_claude_2_1_89_repairs_model_string_before_mcp(
+@pytest.mark.skipif(os.name != "nt", reason="the real Claude Host gate is Windows-only")
+def test_official_npm_claude_2_1_89_sends_flat_inputs_without_hooks(
     tmp_path: Path,
 ) -> None:
     discovered = _npm_cli()
@@ -90,18 +82,8 @@ def test_official_npm_claude_2_1_89_repairs_model_string_before_mcp(
         mcp_port = int(ready["mcp"])
         request_id = str(ready["request_id"])
 
-        settings = json.loads(HOOKS.read_text(encoding="utf-8"))
-        project_text = os.fspath(ROOT).replace("\\", "/")
-        for groups in settings["hooks"].values():
-            for group in groups:
-                for hook in group["hooks"]:
-                    hook["command"] = hook["command"].replace(
-                        "${CLAUDE_PROJECT_DIR}", project_text
-                    )
         settings_path = tmp_path / "settings.json"
-        settings_path.write_text(
-            json.dumps(settings, ensure_ascii=False), encoding="utf-8"
-        )
+        settings_path.write_text("{}\n", encoding="utf-8")
         mcp_path = tmp_path / "mcp.json"
         mcp_path.write_text(
             json.dumps(
@@ -118,15 +100,13 @@ def test_official_npm_claude_2_1_89_repairs_model_string_before_mcp(
         )
         config_dir = tmp_path / "claude-config"
         config_dir.mkdir()
-        dfx_log = evidence / "client-dfx.jsonl"
         environment = dict(os.environ)
         environment.update(
             {
-                "ANTHROPIC_AUTH_TOKEN": "hook-probe-token",
+                "ANTHROPIC_AUTH_TOKEN": "flat-probe-token",
                 "ANTHROPIC_BASE_URL": f"http://127.0.0.1:{api_port}",
                 "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
                 "CLAUDE_CONFIG_DIR": os.fspath(config_dir),
-                "PROBLEM_LOCATOR_CLIENT_DFX_LOG_FILE": os.fspath(dfx_log),
             }
         )
         for name in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
@@ -162,17 +142,22 @@ def test_official_npm_claude_2_1_89_repairs_model_string_before_mcp(
             timeout=90,
         )
         assert claude.returncode == 0, claude.stderr[-4000:]
+        assert "DONE" in claude.stdout
 
-        hook_events = _json_lines(dfx_log)
-        started = [
-            event
-            for event in hook_events
-            if event.get("event") == "client.hook.tool.started"
-            and event.get("operation_id") == request_id
+        api_events = _json_lines(evidence / "api-requests.jsonl")
+        advertised = [
+            tool
+            for event in api_events
+            if isinstance(event.get("body"), dict)
+            for tool in event["body"].get("tools", [])
+            if isinstance(tool, dict)
+            and str(tool.get("name", "")).endswith("problem_locator_create_case")
         ]
-        assert started
-        assert started[-1]["argument_json_types"]["problem_spec"] == "string"
-        assert started[-1]["argument_json_types"]["initial_user_facts"] == "string"
+        assert advertised
+        input_schema = advertised[-1]["input_schema"]
+        assert "$defs" not in input_schema
+        assert "problem_spec" not in input_schema["properties"]
+        assert input_schema["properties"]["goals"]["items"]["type"] == "string"
 
         mcp_events = _json_lines(evidence / "mcp-requests.jsonl")
         calls = [
@@ -187,10 +172,13 @@ def test_official_npm_claude_2_1_89_repairs_model_string_before_mcp(
         ]
         assert calls
         arguments = calls[-1]["params"]["arguments"]
-        assert isinstance(arguments["problem_spec"], dict)
-        assert isinstance(arguments["initial_user_facts"], list)
-        assert arguments["problem_spec"]["statement"] == "连接失败"
-        assert arguments["initial_user_facts"] == [{"name": "主机", "value": "节点一"}]
+        assert "problem_spec" not in arguments
+        assert "initial_user_facts" not in arguments
+        assert arguments["statement"] == "连接失败"
+        assert arguments["initial_user_fact_names"] == ["host"]
+        assert arguments["initial_user_fact_values"] == ["节点一"]
+        assert not (tmp_path / ".problem-locator" / "client-dfx.jsonl").exists()
+        assert not (evidence / "client-dfx.jsonl").exists()
 
         bypass = {
             "jsonrpc": "2.0",
@@ -199,9 +187,12 @@ def test_official_npm_claude_2_1_89_repairs_model_string_before_mcp(
             "params": {
                 "name": "problem_locator_create_case",
                 "arguments": {
-                    "request_id": "bypass-string",
-                    "problem_spec": '{"statement":"still a string"}',
-                    "initial_user_facts": [],
+                    "request_id": "bypass-composite",
+                    "statement": "still flat otherwise",
+                    "goals": ["reject removed field"],
+                    "initial_user_fact_names": [],
+                    "initial_user_fact_values": [],
+                    "problem_spec": {"statement": "removed"},
                 },
             },
         }

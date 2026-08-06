@@ -106,15 +106,15 @@ problem_locator_list_artifacts
 
 | 工具 | 必需输入 | 可选输入 |
 |---|---|---|
-| `problem_locator_create_case` | `request_id`、`problem_spec` | `initial_user_facts[]`、`wait_seconds` |
+| `problem_locator_create_case` | `request_id`、`statement`、`expected_behavior`、`actual_behavior`、`scope`、`goals[]`、`non_goals[]`、`constraints[]`、`completion_criteria[]` | `initial_user_fact_names[]`、`initial_user_fact_values[]`、`wait_seconds` |
 | `problem_locator_prepare_attachment` | `request_id`、`case_id`、`expected_case_revision`、`name`、`content_type` | `declared_size`、`declared_sha256` |
-| `problem_locator_submit_supplement` | `request_id`、`case_id`、`expected_case_revision`、`inputs`、`attachment_ids` | `wait_seconds` |
+| `problem_locator_submit_supplement` | `request_id`、`case_id`、`expected_case_revision`、`input_names[]`、`input_values[]`、`attachment_ids[]` | `wait_seconds` |
 | `problem_locator_get_case` | `case_id` | `wait_for_job_id`、`wait_seconds` |
 | `problem_locator_resume_case` | `request_id`、`case_id`、`expected_case_revision` | `wait_seconds` |
 | `problem_locator_cancel_case` | `request_id`、`case_id`、`expected_case_revision` | 无 |
 | `problem_locator_list_artifacts` | `case_id` | 无 |
 
-`problem_spec` 的 JSON 形状严格为 S00 `ProblemSpecInput`：`{statement,expected_behavior,actual_behavior,scope,goals,non_goals,constraints,completion_criteria}`，不得由客户端传 revision。`initial_user_facts[]` 每项严格为 `{name,value}`。`inputs` 是 requirement name 到字符串值的 JSON object，`attachment_ids` 是去重 UUID 数组；两者不能同时为空。name、文本大小、constraints、额外字段拒绝和规范化 hash 规则全部复用 S00，Adapter 不 trim 或改写用户文本。
+公开 MCP 输入必须完全扁平：根 object 的属性只能是标量、nullable 标量或标量数组，不得包含 `$ref/$defs`、嵌套 object、动态 Map 或对象数组。CreateCase 的八个问题字段由 Adapter 重建为 S00 `ProblemSpecInput`；`initial_user_fact_names[]` 与 `initial_user_fact_values[]` 默认均为空，必须等长、最多 64 项且 name 唯一，Adapter 按相同下标重建 `UserFactInput[]`。SubmitSupplement 的 `input_names[]` 与 `input_values[]` 必须等长且 name 唯一，Adapter 按相同下标重建 requirement 输入字典；`attachment_ids[]` 是去重 UUID 数组，输入对和附件不能同时为空。旧字段 `problem_spec`、`initial_user_facts`、`inputs`、数组类型错误、长度不一致、重复 name、JSON 字符串和其他额外字段都必须以 `VALIDATION_ERROR` 严格拒绝；Adapter 不 trim、自动解析或改写用户文本。
 
 所有响应 envelope 固定为 `{ok,data,error}`：成功时 `data` 非空且 `error=null`，失败时 `data=null` 且 `error` 是完整 S00 `ApplicationError={code,message,details[],retryable}`；Adapter 不重算 retryable。七个工具的成功 `data` 逐项固定为：
 
@@ -229,14 +229,10 @@ CLI 必须提供 `python -m problem_locator render-journey --case-id <uuid> [--l
 
 - 让 Claude Code 作为 MCP Host/Client 直接连接局域网 Streamable HTTP `/mcp`；Windows 客户端不得安装 `problem-locator` 包、运行本地 MCP Server 或转发代理，服务端公布的七工具 schema 是唯一权威 schema；
 - 客户端 MCP server key 固定为 `problem-locator`，URL 从 `PROBLEM_LOCATOR_MCP_URL` 展开且必须以 `/mcp` 结尾。存在环境代理时，启动 Claude Code 前必须让 `NO_PROXY` 精确包含服务端主机/IP，不得用 `NO_PROXY=*`；
-- Windows 客户端可配置项目级 `PreToolUse/PostToolUse/PostToolUseFailure` command Hook。面向 Claude Code 2.1.89 的所有处理器必须使用单一完整 `command` 字符串，不得使用 `args`。matcher 与脚本必须精确识别官方 `mcp__problem-locator__problem_locator_*` 与已确认旧式 `problem_locator_problem_locator_*` 两套名称，归一化后仍只允许七个完整工具名并保留原始 `tool_name`；旧式名称的重复前缀来自规范化 server key 与服务端工具名的拼接，不是重复注册；
-- `PreToolUse` 兼容 Hook 与 DFX Hook 必须分离。兼容 Hook 只允许把 `create_case.problem_spec` 的 JSON string 一次转换为 object、把 `create_case.initial_user_facts` 的 JSON string 转为 array 或把数组内 JSON string 转为 object、把 `submit_supplement.inputs` 的 JSON string 转为 object。转换成功仅返回完整 `hookSpecificOutput.updatedInput` 和 `hookEventName=PreToolUse`，不得返回 permission decision、additional context 或其他控制字段；正确类型、无效 JSON、错误根类型和重复字符串化不得转换；
-- DFX Hook 把 `schema_version/timestamp/hook_version/session_id/tool_use_id/tool_name/logical_tool/operation_id/arguments/argument_json_types` 追加到客户端 JSONL；成功事件原样保存 `tool_response`，失败事件保存 `error/is_interrupt/duration_ms`。它与兼容 Hook 并行并记录原始 Host 输入，且不得返回 permission decision、updated input/output 或 additional context。默认路径为客户端项目目录下 `.problem-locator/client-dfx.jsonl`，`PROBLEM_LOCATOR_CLIENT_DFX_LOG_FILE` 仅接受绝对覆盖路径；并行进程必须通过 Windows Named Mutex 保证每条 UTF-8 JSONL 完整写入；
-- 兼容 Hook 与 DFX Hook 成功时分别只输出更新 JSON或无输出；失败只允许非阻塞退出 `1` 和一行 stderr，绝不使用阻塞退出 `2`。Hook 只覆盖进入 Host 执行阶段的调用；无 Hook、无服务请求的失败必须改用 Claude Code 原生 `--debug "mcp,hooks" --debug-file <path>` 定位；
-- `/hooks` 显示配置已加载不等于 matcher 已命中。无客户端日志时必须先核对默认路径与 Host 的完整工具名，再用 Hook 与同一 `request_id` 的服务端事件判断参数类型；服务端不得把 JSON 字符串自动解析成合同要求的对象；
-- Windows→Linux 发布旅程必须用真实 Claude Code 把 Hook 指向不可写目标，并以成功的 MCP `tool_result` 证明 exit `1` 的 DFX 故障没有阻断请求；
-- 真实 Host 门禁固定使用官方 npm Claude Code `2.1.89`，不得以 `2.1.150` 或 Python 模拟 Host 代替。门禁必须让模型产生字符串化历史字段，并用同一 `request_id` 证明 DFX 为原始 string、服务端入口为 object/array；绕过 Hook 的字符串仍必须得到严格验证错误；
-- 三个历史复合字段是 v2 待清理债务。任何新增或修改的 MCP 输入参数必须是根 object 下的标量、nullable 标量或标量数组，不得增加 `$ref/$defs`、嵌套 object、动态 Map 或对象数组；schema lint 只允许三个精确历史路径，扩大白名单必须获得用户明确批准；
+- Windows 客户端不得安装 Problem Locator Hook 或客户端 DFX；升级时必须从 `.claude/settings.json` 删除旧 Problem Locator Hook 组、删除已复制的兼容/DFX 脚本、清理各 scope 的旧同名 stdio MCP 配置、完整重启 Claude Code并新建会话。已有客户端日志属于用户数据，不自动删除；
+- 服务端 `mcp.tools.listed`、参数校验事件和请求 DFX 是唯一线上诊断证据；服务端不得自动解析 JSON 字符串，也不得保留旧复合字段的隐藏兼容入口；
+- 真实 Host 门禁固定使用官方 npm Claude Code `2.1.89`，不得以 `2.1.150` 或 Python 模拟 Host 代替。门禁必须在不加载 Problem Locator Hook 的情况下取得纯扁平 schema，发送标量和标量数组，并由 Linux MCP 服务记录相同类型和成功结果；门禁还必须反向确认不会生成客户端 DFX；
+- 七个工具的 input schema 必须通过零白名单 lint；任何新增或修改的 MCP 输入参数仍只能是根 object 下的标量、nullable 标量或标量数组。重新引入 Hook、`$ref/$defs`、嵌套 object、动态 Map 或对象数组必须先获得用户明确批准；
 
 - 使用调用方已有的 Remote MCP 客户端调用本册七个固定工具；
 - 使用系统 `curl` 按 UploadDescriptor 上传用户明确选择的本地文件，并按 ArtifactView.download_url 下载用户可见 Artifact；

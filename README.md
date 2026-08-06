@@ -102,19 +102,19 @@ uv run python -m problem_locator serve --env-file /absolute/path/to/service.env
 
 | 工具 | 参数形状 |
 | --- | --- |
-| `problem_locator_create_case` | `request_id: string` req；`problem_spec: object` req；`initial_user_facts: array<{name,value}>` opt；`wait_seconds: integer` opt |
+| `problem_locator_create_case` | `request_id/statement/expected_behavior/actual_behavior/scope: string` req；`goals/non_goals/constraints/completion_criteria: array<string>` req；`initial_user_fact_names/initial_user_fact_values: array<string>` opt；`wait_seconds: integer` opt |
 | `problem_locator_prepare_attachment` | `request_id/case_id/name/content_type` req；`expected_case_revision: integer` req；`declared_size: integer\|null` opt；`declared_sha256: string\|null` opt |
-| `problem_locator_submit_supplement` | `request_id/case_id` req；`expected_case_revision: integer` req；`inputs: object<string,string>` req；`attachment_ids: array<string>` req；`wait_seconds` opt |
+| `problem_locator_submit_supplement` | `request_id/case_id` req；`expected_case_revision: integer` req；`input_names/input_values: array<string>` req；`attachment_ids: array<string>` req；`wait_seconds` opt |
 | `problem_locator_get_case` | `case_id` req；`wait_for_job_id: string\|null` opt；`wait_seconds` opt |
 | `problem_locator_resume_case` | `request_id/case_id/expected_case_revision` req；`wait_seconds` opt |
 | `problem_locator_cancel_case` | `request_id/case_id/expected_case_revision` req |
 | `problem_locator_list_artifacts` | `case_id` req |
 
-`problem_spec` 必须直接传八成员 JSON 对象，不能把该对象再次序列化成带转义符的字符串；复合对象、数组和 Map 的完整规范示例见客户端 Skill。
+从 1.0.5 起，七个公开 MCP input schema 全部扁平化，根属性只能是标量、nullable 标量或标量数组。`create_case` 的八个问题字段直接位于根层；两组 name/value 数组必须等长并按索引配对。完整规范示例见客户端 Skill。
 
 仓库内置的 [`.claude/skills/problem-locator-client`](.claude/skills/problem-locator-client) Skill 说明了安全的请求 ID、修订版本处理方式、上传请求头以及产物哈希校验方法。文件内容只通过 HTTP 传输，绝不会嵌入 MCP 消息。
 
-### 客户端远端 MCP 与 Windows DFX 配置
+### 客户端远端 MCP 配置
 
 Windows 客户端不安装 `problem-locator` Python 包，也不启动本地 MCP Server 或转发代理。Claude Code 自身作为 MCP Host/Client，直接连接 Linux 服务端的 Streamable HTTP `/mcp`。客户端项目根目录的 `.mcp.json` 使用固定 server key `problem-locator`：
 
@@ -138,32 +138,13 @@ $env:NO_PROXY = "localhost,127.0.0.1,192.168.1.20"
 
 从 1.0.1 迁移时，先删除 local/project/user 各 scope 中所有指向 `problem-locator-client-proxy` 的同名 stdio 配置；确认该 Windows 机器不承担 Linux 服务后，可以卸载旧客户端 `uv tool`。必须完全退出全部 Claude Code 进程并新建会话，避免旧进程和缓存 schema 遮蔽新的 HTTP 配置。启动后用 `/mcp` 确认 `problem-locator` 的传输类型和连接状态。
 
-Windows 客户端使用两个彼此独立的 Claude Code command Hook： [problem-locator-client-compat.ps1](.claude/skills/problem-locator-client/scripts/problem-locator-client-compat.ps1) 只在 `PreToolUse` 修复三个历史复合字段，[problem-locator-client-dfx.ps1](.claude/skills/problem-locator-client/scripts/problem-locator-client-dfx.ps1) 只旁路记录 Host 原始输入和结果。两者都不是 MCP，也不转发请求。把 [client-hooks-settings.json](.claude/skills/problem-locator-client/references/client-hooks-settings.json) 的 `hooks` 合并到客户端项目 `.claude/settings.json`。v1.0.4 面向 Claude Code 2.1.89，所有处理器都把可执行文件和参数写在单一 `command` 字符串中，不使用该版本不支持的 `args` 字段；事件、matcher 和退出码语义以 [Claude Code Hooks 说明](https://code.claude.com/docs/en/hooks) 为准。如需覆盖默认日志位置，在启动 Claude Code 前设置绝对路径：
+1.0.5 不安装 Problem Locator Hook，也不生成客户端 DFX。升级时从 `.claude/settings.json` 删除所有旧 Problem Locator Hook 组，删除曾复制到客户端项目的兼容/DFX PowerShell 脚本；已有日志属于用户数据，不会自动删除。完成清理后完全退出 Claude Code、重新启动并新建会话，只通过 `/mcp` 验证远端服务和新 schema。
 
-1.0.4 的两个 Hook 都同时识别官方 Claude Code 使用的 `mcp__problem-locator__problem_locator_*` 和已确认旧版/改版 Host 使用的 `problem_locator_problem_locator_*`，然后归一化为同一个七工具白名单。旧式名称中第一个 `problem_locator` 是 server key `problem-locator` 的规范化结果，第二个来自服务端工具名本身，不表示服务端重复注册。原始 `tool_name` 会保留在 DFX 中。
-
-```powershell
-$env:PROBLEM_LOCATOR_CLIENT_DFX_LOG_FILE = "D:/logs/problem-locator/client.jsonl"
-Get-Content -Wait D:\logs\problem-locator\client.jsonl
-```
-
-未配置时 DFX 默认写入项目目录 `.problem-locator/client-dfx.jsonl`。`PreToolUse`、`PostToolUse`、`PostToolUseFailure` 分别记录为 `client.hook.tool.started`、`client.hook.tool.returned`、`client.hook.tool.failed`；以 `(session_id, tool_use_id)` 配对。日志 Hook 与兼容 Hook 并行运行，因此日志保留 Host 原始参数和 `argument_json_types`；成功返回事件原样保留 Claude 的 `tool_response`，失败事件记录 `error`、`is_interrupt` 和耗时。DFX Hook 本身永远不修改、批准或阻止调用。
-
-兼容 Hook 只对白名单历史字段做一次转换：`create_case.problem_spec` 的 JSON string 转为 object，`create_case.initial_user_facts` 的 JSON string 转为 array、数组内 JSON string 转为 object，`submit_supplement.inputs` 的 JSON string 转为 object。已经是正确类型时无输出；无效 JSON、错误根类型或重复字符串化后仍为 string 时不转换。转换成功只返回完整 `PreToolUse.updatedInput`，不返回 `permissionDecision`、上下文或其他控制字段。服务端公布的原始 input schema 和 Pydantic 校验没有放宽，绕过 Hook 的字符串仍得到 `VALIDATION_ERROR`。
-
-Hook 只会在 Claude Code 已通过本地校验、准备执行工具时触发。若一次失败既没有 Hook 记录，也没有服务端请求，使用 Claude Code 原生调试文件定位 Host 层 schema、配置或连接问题：
-
-```powershell
-claude --debug "mcp,hooks" --debug-file D:\logs\problem-locator\claude-debug.log
-```
-
-通过 `/hooks` 确认三个 matcher 均已加载。Hook 写日志失败使用非阻塞退出码 `1`，绝不使用会阻止 `PreToolUse` 的退出码 `2`；业务正确性不能依赖客户端日志。
-
-Hook 显示为已加载不代表 matcher 已命中。若没有日志，先确认查看的是当前 Claude 项目下 `.problem-locator/client-dfx.jsonl`，再从 Host debug 文件核对完整 `tool_name`；未设置 `PROBLEM_LOCATOR_CLIENT_DFX_LOG_FILE` 时仍会使用默认路径。恢复 DFX 后，以 `argument_json_types` 和同一 `request_id` 的服务端事件判定字符串化边界，不得在服务端把 JSON 字符串自动解析成对象。
+服务端继续严格拒绝旧字段 `problem_spec`、`initial_user_facts`、`inputs`，也不会自动解析 JSON 字符串。线上 schema、实际参数和验证错误以 Linux 服务端的 `mcp.tools.listed`、`mcp.tool.started` 和验证事件为准。
 
 #### Windows 客户端到 Linux 服务端的发布门禁
 
-直接 HTTP schema 探针会分别发送对象和 JSON 字符串，确认服务端接受对象、严格拒绝字符串。它不代替真实 Host 门禁：
+直接 HTTP schema 探针确认七个工具只公布扁平输入，并验证旧复合字段和错误数组类型得到严格拒绝。它不代替真实 Host 门禁：
 
 ```powershell
 $env:PROBLEM_LOCATOR_WINDOWS_LINUX_GATE = "1"
@@ -173,36 +154,23 @@ $env:HTTPS_PROXY = "http://127.0.0.1:9"
 $env:NO_PROXY = "192.168.1.20"
 # 可选鉴权头，值必须是 JSON 字符串 Map：
 # $env:PROBLEM_LOCATOR_LINUX_MCP_HEADERS_JSON = '{"Authorization":"Bearer token"}'
-python -m pytest tests/e2e/test_windows_linux_client_gate.py::test_windows_direct_http_to_real_linux_mcp_preserves_compound_json_types -q
+python -m pytest tests/e2e/test_windows_linux_client_gate.py::test_windows_direct_http_to_real_linux_mcp_uses_only_flat_inputs -q
 ```
 
-发布前还必须使用官方 npm Claude Code 2.1.89、真实 Skill 和真实 Hook 完成 Windows→Linux 调用；不再运行 2.1.150。直接 HTTP schema 探针同时把 `HTTP_PROXY/HTTPS_PROXY` 指向不可用地址，用它证明 MCP 主机通过 `NO_PROXY` 绕过代理。模型驱动的真实 Claude Host 门禁则清除子进程的大小写 `HTTP_PROXY/HTTPS_PROXY`，并让 `NO_PROXY` 包含 Linux MCP 主机以及模型 API 主机的 host、host:port 和域后缀形式。两项必须分开。随后检查真实调用的 Hook JSONL：
+发布前还必须使用官方 npm Claude Code 2.1.89、真实 Skill 且不加载任何 Problem Locator Hook 完成 Windows→Linux 调用；不再运行 2.1.150。直接 HTTP schema 探针同时把 `HTTP_PROXY/HTTPS_PROXY` 指向不可用地址，用它证明 MCP 主机通过 `NO_PROXY` 绕过代理。真实 Host 门禁通过 Claude stream-json 和 Linux 服务端 DFX 验证扁平参数，并反向确认不会生成 `.problem-locator/client-dfx.jsonl`。
 
 ```powershell
-$env:PROBLEM_LOCATOR_REAL_HOST_HOOK_GATE = "1"
-$env:PROBLEM_LOCATOR_REAL_HOST_HOOK_LOG = "D:\logs\problem-locator\client.jsonl"
+$env:PROBLEM_LOCATOR_REAL_HOST_FLAT_GATE = "1"
 $env:PROBLEM_LOCATOR_REAL_HOST_SERVER_DFX_LOG = "D:\logs\problem-locator\server-debug.jsonl"
 $env:PROBLEM_LOCATOR_REAL_HOST_REQUEST_ID = "10000000-0000-0000-0000-000000000001"
 $env:PROBLEM_LOCATOR_REAL_HOST_CLAUDE_VERSION = "2.1.89 (Claude Code)"
 $env:PROBLEM_LOCATOR_RELEASE_GATES_REQUIRED = "1"
-python -m pytest tests/e2e/test_windows_linux_client_gate.py::test_real_host_hook_repairs_string_before_the_linux_service -q
+python -m pytest tests/e2e/test_windows_linux_client_gate.py::test_real_host_sends_flat_inputs_to_the_linux_service -q
 ```
 
-对于使用 `problem_locator_problem_locator_*` 的旧版/改版黑盒客户端，另行保存客户端 Hook 与服务端 DFX，并运行独立门禁：
+设置 `PROBLEM_LOCATOR_RELEASE_GATES_REQUIRED=1` 后，官方门禁缺少 Windows、官方 npm Claude Code 2.1.89、服务端地址或服务端 DFX 时必须失败，不得以 skipped 计为发布通过。局域网改版客户端仍需部署后通过 `/mcp`、真实 `create_case`/`submit_supplement` 成功结果和 Linux 服务端日志关闭实际故障。
 
-```powershell
-$env:PROBLEM_LOCATOR_LEGACY_HOST_HOOK_GATE = "1"
-$env:PROBLEM_LOCATOR_LEGACY_HOST_HOOK_LOG = "D:\logs\problem-locator\legacy-client.jsonl"
-$env:PROBLEM_LOCATOR_LEGACY_HOST_SERVER_DFX_LOG = "D:\logs\problem-locator\server-debug.jsonl"
-$env:PROBLEM_LOCATOR_LEGACY_HOST_REQUEST_ID = "10000000-0000-0000-0000-000000000103"
-$env:PROBLEM_LOCATOR_LEGACY_HOST_CLAUDE_IDENTITY = "<旧版或改版客户端的版本/构建标识>"
-$env:PROBLEM_LOCATOR_RELEASE_GATES_REQUIRED = "1"
-python -m pytest tests/e2e/test_windows_linux_client_gate.py::test_legacy_host_hook_repairs_string_before_the_linux_service -q
-```
-
-设置 `PROBLEM_LOCATOR_RELEASE_GATES_REQUIRED=1` 后，官方门禁缺少 Windows、官方 npm Claude Code 2.1.89、Hook 日志或服务端地址时必须失败，不得以 skipped 计为发布通过。验收要求同一 `request_id` 在客户端 DFX 中的 `argument_json_types.problem_spec` 等于 `string`，而服务端 `mcp.tool.started.arguments.problem_spec` 为 object，并由 `mcp.tools.listed` 确认实际公共 schema 未被放宽。生产旅程还会把 Hook 日志目标故意指向不可写节点，要求真实 Claude Code 仍收到成功的 MCP `tool_result`，从而证明旁路 DFX 失败不会阻断请求。官方 2.1.89 门禁通过只证明兼容边界可用；局域网改版客户端仍需部署后取得相同 `request_id` 的客户端 string 与服务端 object 证据，才能关闭实际故障。
-
-现有 `problem_spec`、`initial_user_facts` 和 `inputs` 是计划在 v2 扁平化的历史合同债务。新增或修改 MCP 输入参数必须保持扁平：根 object 属性只能是标量、nullable 标量或标量数组，不得新增 `$ref/$defs`、嵌套 object、动态 Map 或对象数组；合同测试只对白名单中的上述三个精确路径放行。
+所有新增或修改的 MCP 输入必须继续保持扁平：根 object 属性只能是标量、nullable 标量或标量数组，不得新增 `$ref/$defs`、嵌套 object、动态 Map 或对象数组；合同测试不设白名单。
 
 `/live` 表示 HTTP 进程正在提供服务。`/ready` 还会检查配置、实例锁、状态有效性、数据目录和启动恢复过程。在恢复期间，或出现致命状态/worker 故障后，服务可能仍然存活，但尚未就绪。
 

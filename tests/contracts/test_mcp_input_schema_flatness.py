@@ -5,11 +5,6 @@ from typing import Any
 from problem_locator.interfaces.mcp_server import _REQUESTS
 
 
-LEGACY_COMPOSITE_INPUTS = {
-    ("problem_locator_create_case", "problem_spec"),
-    ("problem_locator_create_case", "initial_user_facts"),
-    ("problem_locator_submit_supplement", "inputs"),
-}
 SCALAR_TYPES = {"boolean", "integer", "number", "string"}
 
 
@@ -48,35 +43,17 @@ def _is_flat_property(schema: dict[str, Any]) -> bool:
     return isinstance(items, dict) and _is_nullable_scalar(items)
 
 
-def test_only_the_three_approved_historical_inputs_are_nonflat() -> None:
-    detected: set[tuple[str, str]] = set()
-
+def test_all_public_mcp_inputs_are_flat_without_exceptions() -> None:
     for tool_name, request_type in _REQUESTS.items():
         schema = request_type.model_json_schema(mode="validation")
         assert schema.get("type") == "object"
+        assert "$defs" not in schema, tool_name
         properties = schema.get("properties")
         assert isinstance(properties, dict)
         for property_name, property_schema in properties.items():
             assert isinstance(property_schema, dict)
-            path = (tool_name, property_name)
-            if not _is_flat_property(property_schema):
-                detected.add(path)
-
-    assert detected == LEGACY_COMPOSITE_INPUTS
-
-
-def test_legacy_allowlist_paths_still_have_the_expected_composite_shapes() -> None:
-    schemas = {
-        tool_name: request_type.model_json_schema(mode="validation")
-        for tool_name, request_type in _REQUESTS.items()
-    }
-
-    create = schemas["problem_locator_create_case"]
-    assert "$ref" in create["properties"]["problem_spec"]
-    assert create["properties"]["initial_user_facts"]["type"] == "array"
-    assert "$ref" in create["properties"]["initial_user_facts"]["items"]
-
-    submit = schemas["problem_locator_submit_supplement"]
-    inputs = submit["properties"]["inputs"]
-    assert inputs["type"] == "object"
-    assert inputs["additionalProperties"]["type"] == "string"
+            assert _is_flat_property(property_schema), (
+                tool_name,
+                property_name,
+                property_schema,
+            )

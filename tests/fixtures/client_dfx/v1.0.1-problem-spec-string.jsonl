@@ -1,1 +1,0 @@
-{"event":"client.mcp.attempt.started","client_proxy_version":"1.0.1","tool_name":"problem_locator_create_case","argument_json_types":{"problem_spec":"string"},"arguments":{"problem_spec":"{\"statement\":\"...\"}"}}

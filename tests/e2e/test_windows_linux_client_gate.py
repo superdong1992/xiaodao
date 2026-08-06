@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import platform
+from typing import Any
 from urllib.parse import urlsplit
 
 import anyio
@@ -23,19 +24,12 @@ REMOTE_GATE = "PROBLEM_LOCATOR_WINDOWS_LINUX_GATE"
 REMOTE_URL = "PROBLEM_LOCATOR_LINUX_MCP_URL"
 REMOTE_HEADERS = "PROBLEM_LOCATOR_LINUX_MCP_HEADERS_JSON"
 RELEASE_REQUIRED = "PROBLEM_LOCATOR_RELEASE_GATES_REQUIRED"
-REAL_HOST_GATE = "PROBLEM_LOCATOR_REAL_HOST_HOOK_GATE"
-REAL_HOST_LOG = "PROBLEM_LOCATOR_REAL_HOST_HOOK_LOG"
+REAL_HOST_GATE = "PROBLEM_LOCATOR_REAL_HOST_FLAT_GATE"
 REAL_HOST_SERVER_LOG = "PROBLEM_LOCATOR_REAL_HOST_SERVER_DFX_LOG"
 REAL_HOST_REQUEST_ID = "PROBLEM_LOCATOR_REAL_HOST_REQUEST_ID"
 REAL_HOST_CLAUDE_VERSION = "PROBLEM_LOCATOR_REAL_HOST_CLAUDE_VERSION"
-LEGACY_HOST_GATE = "PROBLEM_LOCATOR_LEGACY_HOST_HOOK_GATE"
-LEGACY_HOST_LOG = "PROBLEM_LOCATOR_LEGACY_HOST_HOOK_LOG"
-LEGACY_HOST_SERVER_LOG = "PROBLEM_LOCATOR_LEGACY_HOST_SERVER_DFX_LOG"
-LEGACY_HOST_REQUEST_ID = "PROBLEM_LOCATOR_LEGACY_HOST_REQUEST_ID"
-LEGACY_HOST_CLAUDE_IDENTITY = "PROBLEM_LOCATOR_LEGACY_HOST_CLAUDE_IDENTITY"
-OFFICIAL_CREATE_CASE = f"mcp__problem-locator__{CREATE_CASE}"
-LEGACY_CREATE_CASE = f"problem_locator_{CREATE_CASE}"
 UNUSABLE_PROXY_URL = "http://127.0.0.1:9"
+SCALAR_TYPES = {"boolean", "integer", "number", "string"}
 
 
 def _skip_unless_windows_gate(name: str, reason: str) -> None:
@@ -78,7 +72,7 @@ def _validation_fields(result: object) -> set[str]:
 
 
 def _read_events(path: Path) -> list[dict[str, object]]:
-    assert path.is_file(), f"DFX log does not exist: {path}"
+    assert path.is_file(), f"server DFX log does not exist: {path}"
     return [
         json.loads(line)
         for line in path.read_text(encoding="utf-8").splitlines()
@@ -105,70 +99,44 @@ def _assert_unusable_proxies_are_configured() -> None:
     assert os.environ.get("HTTPS_PROXY") == UNUSABLE_PROXY_URL
 
 
-def _assert_real_host_evidence(
-    *,
-    hook_log_environment: str,
-    server_log_environment: str,
-    request_id_environment: str,
-    expected_full_tool_name: str,
-) -> None:
-    request_id = _required_environment(request_id_environment)
-    hook_events = _read_events(Path(_required_environment(hook_log_environment)))
-    started = [
-        event
-        for event in hook_events
-        if event.get("event") == "client.hook.tool.started"
-        and event.get("logical_tool") == CREATE_CASE
-        and event.get("operation_id") == request_id
-    ]
-    assert started, f"no real Host create_case Hook event for {request_id}"
-    latest = started[-1]
-    assert latest["source"] == "claude_code_hook"
-    assert latest["hook_version"] == __version__
-    assert latest["tool_name"] == expected_full_tool_name
-    # The DFX Hook runs alongside the compatibility Hook and therefore records
-    # the unmodified Host boundary. The server event below must prove that the
-    # same request was repaired before transport.
-    assert latest["argument_json_types"]["problem_spec"] == "string"
-    assert isinstance(latest["arguments"]["problem_spec"], str)
-
-    terminal = [
-        event
-        for event in hook_events
-        if event.get("event") in {
-            "client.hook.tool.returned",
-            "client.hook.tool.failed",
-        }
-        and event.get("session_id") == latest["session_id"]
-        and event.get("tool_use_id") == latest["tool_use_id"]
-    ]
-    assert terminal, "real Host Hook evidence has no terminal tool event"
-
-    server_log = os.environ.get(server_log_environment)
-    if os.environ.get(RELEASE_REQUIRED) == "1":
-        assert server_log, f"{server_log_environment} is required for release"
-    if not server_log:
-        return
-
-    server_events = _read_events(Path(server_log))
-    listed = [
-        event for event in server_events if event.get("event") == "mcp.tools.listed"
-    ]
-    assert listed and listed[-1]["server_version"] == __version__
-    server_started = [
-        event
-        for event in server_events
-        if event.get("event") == "mcp.tool.started"
-        and event.get("request_id") == request_id
-        and event.get("tool") == CREATE_CASE
-    ]
-    assert server_started, f"no server-side create_case event for {request_id}"
-    assert isinstance(server_started[-1]["arguments"]["problem_spec"], dict)
+def _is_nullable_scalar(schema: dict[str, Any]) -> bool:
+    if schema.get("type") in SCALAR_TYPES:
+        return True
+    variants = schema.get("anyOf")
+    if not isinstance(variants, list) or not variants:
+        return False
+    types = {
+        item.get("type") for item in variants if isinstance(item, dict)
+    }
+    return "null" in types and types - {"null"} <= SCALAR_TYPES
 
 
-def test_windows_direct_http_to_real_linux_mcp_preserves_compound_json_types() -> None:
-    """Probe the authoritative remote schema without a local MCP process."""
+def _assert_flat_schema(schema: dict[str, Any]) -> None:
+    assert schema.get("type") == "object"
+    assert "$defs" not in schema
+    properties = schema.get("properties")
+    assert isinstance(properties, dict)
+    for name, value in properties.items():
+        assert isinstance(value, dict), name
+        assert "$ref" not in value, name
+        if _is_nullable_scalar(value):
+            continue
+        assert value.get("type") == "array", name
+        items = value.get("items")
+        assert isinstance(items, dict) and _is_nullable_scalar(items), name
 
+
+def _flat_create_arguments(request_id: str) -> dict[str, object]:
+    return {
+        "request_id": request_id,
+        **problem_spec_input(),
+        "initial_user_fact_names": [],
+        "initial_user_fact_values": [],
+        "wait_seconds": 0,
+    }
+
+
+def test_windows_direct_http_to_real_linux_mcp_uses_only_flat_inputs() -> None:
     _skip_unless_windows_gate(
         REMOTE_GATE,
         "requires the explicit Windows-to-Linux HTTP release gate",
@@ -190,75 +158,84 @@ def test_windows_direct_http_to_real_linux_mcp_preserves_compound_json_types() -
                     initialized = await session.initialize()
                     assert initialized.serverInfo.version == __version__
                     listed = await session.list_tools()
+                    assert len(listed.tools) == 7
+                    for tool in listed.tools:
+                        _assert_flat_schema(tool.inputSchema)
+
                     create = next(
                         tool for tool in listed.tools if tool.name == CREATE_CASE
                     )
                     validator = Draft202012Validator(create.inputSchema)
-                    base = {
-                        # Empty request_id forces validation before persistence.
-                        "request_id": "",
-                        "problem_spec": problem_spec_input(),
-                    }
-                    assert validator.is_valid(base) is False
+                    flat = _flat_create_arguments("")
+                    assert validator.is_valid(flat) is False
                     assert validator.is_valid(
-                        {**base, "problem_spec": json.dumps(problem_spec_input())}
+                        {**flat, "problem_spec": problem_spec_input()}
                     ) is False
 
-                    object_result = await session.call_tool(CREATE_CASE, base)
-                    object_errors = _validation_fields(object_result)
-                    assert "request_id" in object_errors
-                    assert "problem_spec" not in object_errors
+                    flat_result = await session.call_tool(CREATE_CASE, flat)
+                    flat_errors = _validation_fields(flat_result)
+                    assert "request_id" in flat_errors
+                    assert "statement" not in flat_errors
 
-                    string_result = await session.call_tool(
+                    legacy_result = await session.call_tool(
                         CREATE_CASE,
-                        {
-                            **base,
-                            "problem_spec": json.dumps(problem_spec_input()),
-                        },
+                        {**flat, "problem_spec": problem_spec_input()},
                     )
-                    string_errors = _validation_fields(string_result)
-                    assert "request_id" in string_errors
-                    assert "problem_spec" in string_errors
+                    legacy_errors = _validation_fields(legacy_result)
+                    assert {"request_id", "problem_spec"}.issubset(legacy_errors)
 
     anyio.run(scenario)
 
 
-def test_real_host_hook_repairs_string_before_the_linux_service() -> None:
-    """Validate the real npm Claude Code 2.1.89 compatibility boundary."""
-
+def test_real_host_sends_flat_inputs_to_the_linux_service() -> None:
     _skip_unless_windows_gate(
         REAL_HOST_GATE,
-        "requires real Claude Code, Skill, Hook, and Linux service evidence",
+        "requires real Claude Code, Skill, and Linux service evidence",
     )
-    _assert_real_host_evidence(
-        hook_log_environment=REAL_HOST_LOG,
-        server_log_environment=REAL_HOST_SERVER_LOG,
-        request_id_environment=REAL_HOST_REQUEST_ID,
-        expected_full_tool_name=OFFICIAL_CREATE_CASE,
-    )
+    request_id = _required_environment(REAL_HOST_REQUEST_ID)
+    events = _read_events(Path(_required_environment(REAL_HOST_SERVER_LOG)))
+
+    listed = [event for event in events if event.get("event") == "mcp.tools.listed"]
+    assert listed and listed[-1]["server_version"] == __version__
+    advertised = listed[-1]["tools"]
+    assert isinstance(advertised, list)
+    for tool in advertised:
+        assert isinstance(tool, dict)
+        _assert_flat_schema(tool["input_schema"])
+
+    started = [
+        event
+        for event in events
+        if event.get("event") == "mcp.tool.started"
+        and event.get("request_id") == request_id
+        and event.get("tool") == CREATE_CASE
+    ]
+    assert started, f"no server-side flat create_case event for {request_id}"
+    arguments = started[-1]["arguments"]
+    assert isinstance(arguments, dict)
+    assert "problem_spec" not in arguments
+    assert "initial_user_facts" not in arguments
+    assert isinstance(arguments.get("statement"), str)
+    for name in (
+        "goals",
+        "non_goals",
+        "constraints",
+        "completion_criteria",
+        "initial_user_fact_names",
+        "initial_user_fact_values",
+    ):
+        assert isinstance(arguments.get(name), list), name
+
+    completed = [
+        event
+        for event in events
+        if event.get("event") == "mcp.tool.completed"
+        and event.get("request_id") == request_id
+        and event.get("tool") == CREATE_CASE
+    ]
+    assert completed and completed[-1].get("ok") is True
 
     version = _required_environment(REAL_HOST_CLAUDE_VERSION)
     assert version == "2.1.89 (Claude Code)"
     if os.environ.get(RELEASE_REQUIRED) == "1":
-        _assert_no_proxy_covers_remote(_required_environment(REMOTE_URL))
-
-
-
-def test_legacy_host_hook_repairs_string_before_the_linux_service() -> None:
-    """Require correlated deployment evidence from the legacy/custom Host."""
-
-    _skip_unless_windows_gate(
-        LEGACY_HOST_GATE,
-        "requires legacy/custom Claude Code Hook and Linux service evidence",
-    )
-    _assert_real_host_evidence(
-        hook_log_environment=LEGACY_HOST_LOG,
-        server_log_environment=LEGACY_HOST_SERVER_LOG,
-        request_id_environment=LEGACY_HOST_REQUEST_ID,
-        expected_full_tool_name=LEGACY_CREATE_CASE,
-    )
-
-    if os.environ.get(RELEASE_REQUIRED) == "1":
-        identity = _required_environment(LEGACY_HOST_CLAUDE_IDENTITY)
-        assert identity.strip(), "legacy/custom Claude Code identity must be nonempty"
         _assert_no_proxy_covers_remote(_required_environment(REMOTE_URL))

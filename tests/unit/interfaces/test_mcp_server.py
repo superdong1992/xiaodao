@@ -21,7 +21,7 @@ from problem_locator.contracts.errors import (
     PORT_ERROR_CODES,
     ApplicationPortError,
 )
-from problem_locator.contracts.limits import MAX_ATTACHMENT_BYTES
+from problem_locator.contracts.limits import MAX_ATTACHMENT_BYTES, MAX_INITIAL_USER_FACTS
 from problem_locator.contracts.models import ApplicationError, ApplicationErrorDetail
 from problem_locator.contracts.ports import (
     ApplicationCommandPort,
@@ -57,6 +57,21 @@ REQUEST_IDS = [
 ]
 
 
+def _create_case_arguments(
+    request_id: str = REQUEST_IDS[0],
+    *,
+    fact_names: list[str] | None = None,
+    fact_values: list[str] | None = None,
+) -> dict[str, object]:
+    return {
+        "request_id": request_id,
+        **problem_spec_input(),
+        "initial_user_fact_names": fact_names or [],
+        "initial_user_fact_values": fact_values or [],
+        "wait_seconds": 0,
+    }
+
+
 def _structured(result):
     return result.structuredContent
 
@@ -77,12 +92,7 @@ def test_fake_application_service_replays_same_request_and_rejects_changed_paylo
         FakeQuery(),
         public_base_url="http://127.0.0.1:8000",
     )
-    arguments = {
-        "request_id": REQUEST_IDS[0],
-        "problem_spec": problem_spec_input(),
-        "initial_user_facts": [],
-        "wait_seconds": 0,
-    }
+    arguments = _create_case_arguments()
 
     first = asyncio.run(adapter.call(TOOL_NAMES[0], arguments))
     replay = asyncio.run(adapter.call(TOOL_NAMES[0], arguments))
@@ -91,10 +101,7 @@ def test_fake_application_service_replays_same_request_and_rejects_changed_paylo
             TOOL_NAMES[0],
             {
                 **arguments,
-                "problem_spec": {
-                    **problem_spec_input(),
-                    "statement": "A different problem statement.",
-                },
+                "statement": "A different problem statement.",
             },
         )
     )
@@ -112,13 +119,7 @@ def test_mcp_validation_failure_returns_details_and_logs_full_arguments(caplog) 
         FakeQuery(),
         public_base_url="http://127.0.0.1:8000",
     )
-    arguments = {
-        "request_id": REQUEST_IDS[0],
-        "problem_spec": problem_spec_input(),
-        "initial_user_facts": [],
-        "wait_seconds": 0,
-        "unexpected": "forbidden",
-    }
+    arguments = {**_create_case_arguments(), "unexpected": "forbidden"}
 
     result = asyncio.run(adapter.call(TOOL_NAMES[0], arguments))
 
@@ -144,7 +145,7 @@ def test_mcp_validation_failure_returns_details_and_logs_full_arguments(caplog) 
     )
 
 
-def test_mcp_rejects_json_encoded_problem_spec_before_command_execution() -> None:
+def test_mcp_rejects_removed_composite_problem_fields_before_command_execution() -> None:
     command = FakeApplicationService()
     adapter = McpAdapter(
         command,
@@ -152,21 +153,21 @@ def test_mcp_rejects_json_encoded_problem_spec_before_command_execution() -> Non
         public_base_url="http://127.0.0.1:8000",
     )
     arguments = {
-        "request_id": REQUEST_IDS[0],
+        **_create_case_arguments(),
         "problem_spec": '{"statement":"encoded instead of nested"}',
         "initial_user_facts": [],
-        "wait_seconds": 0,
     }
 
     result = asyncio.run(adapter.call(TOOL_NAMES[0], arguments))
 
     assert result["ok"] is False
     assert result["error"]["code"] == ErrorCode.VALIDATION_ERROR.value
-    assert result["error"]["details"][0]["field"] == "problem_spec"
+    fields = {detail["field"] for detail in result["error"]["details"]}
+    assert {"problem_spec", "initial_user_facts"}.issubset(fields)
     assert command.calls == []
 
 
-def test_mcp_rejects_list_encoded_supplement_inputs_before_command_execution() -> None:
+def test_mcp_rejects_removed_composite_supplement_inputs_before_command_execution() -> None:
     command = FakeApplicationService()
     adapter = McpAdapter(
         command,
@@ -181,7 +182,9 @@ def test_mcp_rejects_list_encoded_supplement_inputs_before_command_execution() -
                 "request_id": REQUEST_IDS[0],
                 "case_id": CASE_ID,
                 "expected_case_revision": 1,
-                "inputs": [{"name": "order_id", "value": "order-1"}],
+                "input_names": ["order_id"],
+                "input_values": ["order-1"],
+                "inputs": {"order_id": "order-1"},
                 "attachment_ids": [],
                 "wait_seconds": 0,
             },
@@ -190,7 +193,162 @@ def test_mcp_rejects_list_encoded_supplement_inputs_before_command_execution() -
 
     assert result["ok"] is False
     assert result["error"]["code"] == ErrorCode.VALIDATION_ERROR.value
-    assert result["error"]["details"][0]["field"] == "inputs"
+    assert "inputs" in {
+        detail["field"] for detail in result["error"]["details"]
+    }
+    assert command.calls == []
+
+
+def test_mcp_rebuilds_flat_create_case_inputs_without_data_loss() -> None:
+    command = FakeApplicationService(
+        [application_response(operation="CreateCase", revision=1)]
+    )
+    adapter = McpAdapter(
+        command,
+        FakeQuery(),
+        public_base_url="http://127.0.0.1:8000",
+    )
+
+    result = asyncio.run(
+        adapter.call(
+            TOOL_NAMES[0],
+            _create_case_arguments(
+                fact_names=["host", "region"],
+                fact_values=["node-1", "华北"],
+            ),
+        )
+    )
+
+    assert result["ok"] is True
+    created = command.calls[0]
+    assert created.problem_spec.model_dump(mode="json") == problem_spec_input()
+    assert [fact.model_dump(mode="json") for fact in created.initial_user_facts] == [
+        {"name": "host", "value": "node-1"},
+        {"name": "region", "value": "华北"},
+    ]
+
+
+def test_mcp_accepts_exactly_64_flat_initial_fact_pairs() -> None:
+    command = FakeApplicationService(
+        [application_response(operation="CreateCase", revision=1)]
+    )
+    names = [f"fact_{index}" for index in range(MAX_INITIAL_USER_FACTS)]
+    values = [f"value-{index}" for index in range(MAX_INITIAL_USER_FACTS)]
+
+    result = asyncio.run(
+        McpAdapter(
+            command,
+            FakeQuery(),
+            public_base_url="http://127.0.0.1:8000",
+        ).call(
+            TOOL_NAMES[0],
+            _create_case_arguments(fact_names=names, fact_values=values),
+        )
+    )
+
+    assert result["ok"] is True
+    assert [fact.name for fact in command.calls[0].initial_user_facts] == names
+    assert [fact.value for fact in command.calls[0].initial_user_facts] == values
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        _create_case_arguments(fact_names=["host"], fact_values=[]),
+        _create_case_arguments(
+            fact_names=["host", "host"],
+            fact_values=["node-1", "node-2"],
+        ),
+        _create_case_arguments(
+            fact_names=[f"fact_{index}" for index in range(MAX_INITIAL_USER_FACTS + 1)],
+            fact_values=["value"] * (MAX_INITIAL_USER_FACTS + 1),
+        ),
+        {
+            **_create_case_arguments(),
+            "initial_user_fact_names": '["host"]',
+            "initial_user_fact_values": '["node-1"]',
+        },
+    ],
+)
+def test_mcp_rejects_invalid_flat_initial_fact_arrays(
+    arguments: dict[str, object],
+) -> None:
+    command = FakeApplicationService()
+    result = asyncio.run(
+        McpAdapter(
+            command,
+            FakeQuery(),
+            public_base_url="http://127.0.0.1:8000",
+        ).call(TOOL_NAMES[0], arguments)
+    )
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == ErrorCode.VALIDATION_ERROR.value
+    assert command.calls == []
+
+
+def test_mcp_rebuilds_flat_supplement_inputs_without_data_loss() -> None:
+    command = FakeApplicationService(
+        [application_response(operation="SubmitSupplement", revision=2)]
+    )
+    arguments = {
+        "request_id": REQUEST_IDS[0],
+        "case_id": CASE_ID,
+        "expected_case_revision": 1,
+        "input_names": ["order_id", "region"],
+        "input_values": ["order-1", "华北"],
+        "attachment_ids": [],
+        "wait_seconds": 0,
+    }
+
+    result = asyncio.run(
+        McpAdapter(
+            command,
+            FakeQuery(),
+            public_base_url="http://127.0.0.1:8000",
+        ).call(TOOL_NAMES[2], arguments)
+    )
+
+    assert result["ok"] is True
+    assert command.calls[0].inputs == {"order_id": "order-1", "region": "华北"}
+
+
+@pytest.mark.parametrize(
+    ("input_names", "input_values", "attachment_ids"),
+    [
+        (["order_id"], [], []),
+        (["order_id", "order_id"], ["one", "two"], []),
+        ('["order_id"]', '["order-1"]', []),
+        ([], [], []),
+    ],
+)
+def test_mcp_rejects_invalid_flat_supplement_arrays(
+    input_names: object,
+    input_values: object,
+    attachment_ids: list[str],
+) -> None:
+    command = FakeApplicationService()
+    result = asyncio.run(
+        McpAdapter(
+            command,
+            FakeQuery(),
+            public_base_url="http://127.0.0.1:8000",
+        ).call(
+            TOOL_NAMES[2],
+            {
+                "request_id": REQUEST_IDS[0],
+                "case_id": CASE_ID,
+                "expected_case_revision": 1,
+                "input_names": input_names,
+                "input_values": input_values,
+                "attachment_ids": attachment_ids,
+                "wait_seconds": 0,
+            },
+        )
+    )
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == ErrorCode.VALIDATION_ERROR.value
     assert command.calls == []
 
 
@@ -247,12 +405,7 @@ def test_mcp_preserves_every_frozen_application_command_error(code: ErrorCode) -
     result = asyncio.run(
         adapter.call(
             TOOL_NAMES[0],
-            {
-                "request_id": REQUEST_IDS[0],
-                "problem_spec": problem_spec_input(),
-                "initial_user_facts": [],
-                "wait_seconds": 0,
-            },
+            _create_case_arguments(),
         )
     )
 
@@ -368,12 +521,7 @@ def test_mcp_preserves_every_frozen_application_query_error(
     [
         (
             "problem_locator_create_case",
-            {
-                "request_id": REQUEST_IDS[0],
-                "problem_spec": problem_spec_input(),
-                "initial_user_facts": [],
-                "wait_seconds": 0,
-            },
+            _create_case_arguments(),
             "CreateCase",
             CASE_ID,
         ),
@@ -397,7 +545,8 @@ def test_mcp_preserves_every_frozen_application_query_error(
                 "request_id": REQUEST_IDS[2],
                 "case_id": CASE_ID,
                 "expected_case_revision": 1,
-                "inputs": {"order_id": "order-1"},
+                "input_names": ["order_id"],
+                "input_values": ["order-1"],
                 "attachment_ids": [],
                 "wait_seconds": 0,
             },
@@ -545,8 +694,31 @@ def test_official_sdk_calls_all_seven_stateless_tools(caplog) -> None:
                         assert [tool.name for tool in listed.tools] == TOOL_NAMES
                         expected_inputs = {
                             TOOL_NAMES[0]: (
-                                {"request_id", "problem_spec", "initial_user_facts", "wait_seconds"},
-                                {"request_id", "problem_spec"},
+                                {
+                                    "request_id",
+                                    "statement",
+                                    "expected_behavior",
+                                    "actual_behavior",
+                                    "scope",
+                                    "goals",
+                                    "non_goals",
+                                    "constraints",
+                                    "completion_criteria",
+                                    "initial_user_fact_names",
+                                    "initial_user_fact_values",
+                                    "wait_seconds",
+                                },
+                                {
+                                    "request_id",
+                                    "statement",
+                                    "expected_behavior",
+                                    "actual_behavior",
+                                    "scope",
+                                    "goals",
+                                    "non_goals",
+                                    "constraints",
+                                    "completion_criteria",
+                                },
                             ),
                             TOOL_NAMES[1]: (
                                 {
@@ -571,7 +743,8 @@ def test_official_sdk_calls_all_seven_stateless_tools(caplog) -> None:
                                     "request_id",
                                     "case_id",
                                     "expected_case_revision",
-                                    "inputs",
+                                    "input_names",
+                                    "input_values",
                                     "attachment_ids",
                                     "wait_seconds",
                                 },
@@ -579,7 +752,8 @@ def test_official_sdk_calls_all_seven_stateless_tools(caplog) -> None:
                                     "request_id",
                                     "case_id",
                                     "expected_case_revision",
-                                    "inputs",
+                                    "input_names",
+                                    "input_values",
                                     "attachment_ids",
                                 },
                             ),
@@ -613,10 +787,29 @@ def test_official_sdk_calls_all_seven_stateless_tools(caplog) -> None:
                             tool.inputSchema.get("additionalProperties") is False
                             for tool in listed.tools
                         )
-                        create_contract = {
-                            "request_id": REQUEST_IDS[0],
-                            "problem_spec": problem_spec_input(),
-                        }
+                        create_schema = next(
+                            tool.inputSchema
+                            for tool in listed.tools
+                            if tool.name == TOOL_NAMES[0]
+                        )
+                        assert create_schema["properties"][
+                            "initial_user_fact_names"
+                        ]["uniqueItems"] is True
+                        assert create_schema["properties"][
+                            "initial_user_fact_names"
+                        ]["maxItems"] == MAX_INITIAL_USER_FACTS
+                        assert create_schema["properties"][
+                            "initial_user_fact_values"
+                        ]["maxItems"] == MAX_INITIAL_USER_FACTS
+                        submit_schema = next(
+                            tool.inputSchema
+                            for tool in listed.tools
+                            if tool.name == TOOL_NAMES[2]
+                        )
+                        assert submit_schema["properties"]["input_names"][
+                            "uniqueItems"
+                        ] is True
+                        create_contract = _create_case_arguments()
                         assert input_validators[TOOL_NAMES[0]].is_valid(create_contract)
                         assert not input_validators[TOOL_NAMES[0]].is_valid(
                             {
@@ -624,18 +817,33 @@ def test_official_sdk_calls_all_seven_stateless_tools(caplog) -> None:
                                 "problem_spec": json.dumps(problem_spec_input()),
                             }
                         )
+                        assert not input_validators[TOOL_NAMES[0]].is_valid(
+                            {
+                                **create_contract,
+                                "initial_user_fact_names": ["host", "host"],
+                                "initial_user_fact_values": ["one", "two"],
+                            }
+                        )
                         submit_contract = {
                             "request_id": REQUEST_IDS[0],
                             "case_id": CASE_ID,
                             "expected_case_revision": 1,
-                            "inputs": {"order_id": "order-1"},
+                            "input_names": ["order_id"],
+                            "input_values": ["order-1"],
                             "attachment_ids": [],
                         }
                         assert input_validators[TOOL_NAMES[2]].is_valid(submit_contract)
                         assert not input_validators[TOOL_NAMES[2]].is_valid(
                             {
                                 **submit_contract,
-                                "inputs": [{"name": "order_id", "value": "order-1"}],
+                                "input_names": ["order_id", "order_id"],
+                                "input_values": ["one", "two"],
+                            }
+                        )
+                        assert not input_validators[TOOL_NAMES[2]].is_valid(
+                            {
+                                **submit_contract,
+                                "inputs": {"order_id": "order-1"},
                             }
                         )
                         assert not input_validators[TOOL_NAMES[1]].is_valid(
@@ -670,12 +878,7 @@ def test_official_sdk_calls_all_seven_stateless_tools(caplog) -> None:
 
                         create = await session.call_tool(
                             TOOL_NAMES[0],
-                            {
-                                "request_id": REQUEST_IDS[0],
-                                "problem_spec": problem_spec_input(),
-                                "initial_user_facts": [],
-                                "wait_seconds": 0,
-                            },
+                            _create_case_arguments(),
                         )
                         output_validators[TOOL_NAMES[0]].validate(_structured(create))
                         assert _structured(create)["data"]["case_view"]["case_id"] == CASE_ID
@@ -708,7 +911,8 @@ def test_official_sdk_calls_all_seven_stateless_tools(caplog) -> None:
                                 "request_id": REQUEST_IDS[2],
                                 "case_id": CASE_ID,
                                 "expected_case_revision": 2,
-                                "inputs": {"order_id": "order-1"},
+                                "input_names": ["order_id"],
+                                "input_values": ["order-1"],
                                 "attachment_ids": [],
                                 "wait_seconds": 30,
                             },
@@ -798,13 +1002,7 @@ def test_official_sdk_calls_all_seven_stateless_tools(caplog) -> None:
 
                         invalid = await session.call_tool(
                             TOOL_NAMES[0],
-                            {
-                                "request_id": REQUEST_IDS[0],
-                                "problem_spec": problem_spec_input(),
-                                "initial_user_facts": [],
-                                "wait_seconds": 0,
-                                "unexpected": "forbidden",
-                            },
+                            {**_create_case_arguments(), "unexpected": "forbidden"},
                         )
                         assert invalid.isError is False
                         invalid_body = _structured(invalid)
@@ -838,6 +1036,6 @@ def test_official_sdk_calls_all_seven_stateless_tools(caplog) -> None:
     assert [tool["name"] for tool in advertised] == TOOL_NAMES
     assert all(len(tool["input_schema_sha256"]) == 64 for tool in advertised)
     create_schema = advertised[0]["input_schema"]
-    assert create_schema["properties"]["problem_spec"]["$ref"].endswith(
-        "/ProblemSpecInput"
-    )
+    assert "$defs" not in create_schema
+    assert create_schema["properties"]["statement"]["type"] == "string"
+    assert create_schema["properties"]["goals"]["items"]["type"] == "string"

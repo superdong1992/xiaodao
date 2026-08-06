@@ -4,10 +4,7 @@ AGENTS.md
 .claude/skills/diagnose-service-takeover/diagnosis-skill.json
 .claude/skills/logparse-diagnose/SKILL.md
 .claude/skills/problem-locator-client/SKILL.md
-.claude/skills/problem-locator-client/references/client-hooks-settings.json
 .claude/skills/problem-locator-client/references/client-mcp-config.json
-.claude/skills/problem-locator-client/scripts/problem-locator-client-dfx.ps1
-.claude/skills/problem-locator-client/scripts/problem-locator-client-compat.ps1
 .claude/skills/wiki-to-diagnosis-skill/SKILL.md
 .claude/skills/wiki-to-diagnosis-skill/references/generated-skill-contract.md
 .claude/skills/wiki-to-diagnosis-skill/references/wiki-template.md
@@ -15,6 +12,7 @@ AGENTS.md
 .claude/skills/wiki-to-diagnosis-skill/scripts/pack_result_zip.py
 .claude/skills/wiki-to-diagnosis-skill/scripts/validate_generated_skill.py
 README.md
+design/v1-baseline-design.md
 design/v1-specs/S06-mcp-http-cli.md
 pyproject.toml
 uv.lock
@@ -55,15 +53,16 @@ src/problem_locator/storage/platform.py
 src/problem_locator/storage/streams.py
 src/problem_locator/storage/tree.py
 tests/contracts/test_enums_errors_limits.py
+tests/contracts/test_mcp_input_schema_flatness.py
 tests/contracts/test_project_freeze.py
 tests/contracts/test_schema_snapshots.py
+tests/e2e/fixtures/claude_2_1_89_flat_probe.mjs
+tests/e2e/test_claude_2_1_89_flat_gate.py
 tests/e2e/test_installed_distribution_gate.py
 tests/e2e/test_real_diagnose_agent_contract_gate.py
 tests/e2e/test_real_route_agent_contract_gate.py
 tests/e2e/test_rpc_timeout.py
 tests/e2e/test_windows_linux_client_gate.py
-tests/fixtures/client_dfx/v1.0.1-problem-spec-string.jsonl
-tests/fixtures/client_dfx/v1.0.2-user-reported-legacy-pretooluse.json
 tests/fixtures/components/application/contract-blockers.json
 tests/fixtures/components/application/fixture-manifest.json
 tests/fixtures/components/application/scenario-matrix.json
@@ -107,6 +106,7 @@ tests/fixtures/rpc_timeout/expected-user-result.json
 tests/fixtures/rpc_timeout/fake_agent.py
 tests/fixtures/rpc_timeout/fixture-manifest.json
 tests/integration/test_failure_fixture_manifest.py
+tests/integration/test_s06_interface_application_seam.py
 tests/integration/test_s02_contract_storage_seam.py
 tests/integration/test_s07_settings_catalog_runtime_seam.py
 tests/unit/application/test_contract_readiness.py
@@ -125,7 +125,6 @@ tests/unit/integrations/test_result_archive.py
 tests/unit/integrations/test_skill_contract.py
 tests/unit/interfaces/test_mcp_server.py
 tests/unit/interfaces/test_client_access_skill.py
-tests/unit/interfaces/test_client_dfx_hook.py
 tests/unit/runtime/test_agent_backend.py
 tests/unit/runtime/test_catalog.py
 tests/unit/runtime/test_context_builder.py

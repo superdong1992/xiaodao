@@ -17,17 +17,13 @@ $script:JourneyEffectiveModel = 'deepseek-v4-flash[1m]'
 $script:JourneyMcpUrl = 'http://127.0.0.1:18000/mcp'
 $script:JourneyServiceBaseUrl = 'http://127.0.0.1:18000'
 $script:JourneyUnusableProxyUrl = 'http://127.0.0.1:9'
-$script:JourneyHookSettingsPath = Join-Path $script:JourneyRepoRoot '.claude\skills\problem-locator-client\references\client-hooks-settings.json'
 $script:JourneyZipName = 'synthetic-rpc-service-takeover.zip'
 $script:JourneyZipSize = 2367
 $script:JourneyZipSha256 = '194f69fecd8dc8d40d1aedeb6fc25d2b7b4922b176be2b15be73ffe386cc5064'
 $script:JourneySkillId = 'diagnosis-skill/diagnose-service-takeover'
 $script:JourneySkillVersion = '3.0.5'
 $script:JourneySkillHash = 'ae47a1a63e6cf4849f83b0f9d49db608c1e93ebe1713f21d58c910990b0857a4'
-$script:JourneyClientSkillSha256 = 'da0895357b00502feb7d3e41a516dcc8c67c73c115691fcec8d58e0a2e86a039'
-$script:JourneyClientDfxHookSha256 = '68c44f5ba5bd984fd486f9120201dad88597e55febc6daa8f7cf3b54f76055d4'
-$script:JourneyClientCompatHookSha256 = 'ff874093bea9443b58d751d73282b1a8b85360d40f827fc8577f3923a568ee6a'
-$script:JourneyClientHookSettingsSha256 = '173bf412df2abbc2b77831fb65618ada3f19ba384c7050b92463e477842a2dc8'
+$script:JourneyClientSkillSha256 = 'c444f6c4bcb24fe9f44be24da77aa5b14cd420d73e5b7959a913584cfd82f4e3'
 $script:JourneyMaxAttachmentBytes = 2684354560
 $script:JourneyMaxCurlJsonBytes = 1048576
 $script:JourneyCurlConnectTimeoutSeconds = 10
@@ -161,7 +157,6 @@ function Get-JourneyAllOutputNames {
         'phase1.prompt.txt',
         'phase1.stream-json.stdout.ndjson',
         'phase1.stderr.txt',
-        'phase1.client-dfx.jsonl',
         'phase1.authoritative.json',
         'phase1-state.json',
         'upload.curl.stdout.txt',
@@ -172,13 +167,7 @@ function Get-JourneyAllOutputNames {
         'phase3.prompt.txt',
         'phase3.stream-json.stdout.ndjson',
         'phase3.stderr.txt',
-        'phase3.client-dfx.jsonl',
         'phase3.authoritative.json',
-        'hook-failure.prompt.txt',
-        'hook-failure.stream-json.stdout.ndjson',
-        'hook-failure.stderr.txt',
-        'hook-failure.claude-debug.log',
-        'hook-failure.authoritative.json',
         'journey-authoritative-summary.json'
     )
 }
@@ -189,9 +178,9 @@ function Get-JourneyPlannedOutputNames {
         [bool]$IncludeVersion = $true
     )
     $version = if ($IncludeVersion) { @('windows-claude-version.stdout.txt', 'windows-claude-version.stderr.txt') } else { @() }
-    $phase1 = @('phase1.prompt.txt', 'phase1.stream-json.stdout.ndjson', 'phase1.stderr.txt', 'phase1.client-dfx.jsonl', 'phase1.authoritative.json', 'phase1-state.json')
+    $phase1 = @('phase1.prompt.txt', 'phase1.stream-json.stdout.ndjson', 'phase1.stderr.txt', 'phase1.authoritative.json', 'phase1-state.json')
     $upload = @('upload.curl.stdout.txt', 'upload.curl.stderr.txt', 'upload.response.json', 'upload.response.headers.txt', 'upload-state.json')
-    $phase3 = @('hook-failure.prompt.txt', 'hook-failure.stream-json.stdout.ndjson', 'hook-failure.stderr.txt', 'hook-failure.claude-debug.log', 'hook-failure.authoritative.json', 'phase3.prompt.txt', 'phase3.stream-json.stdout.ndjson', 'phase3.stderr.txt', 'phase3.client-dfx.jsonl', 'phase3.authoritative.json', 'journey-authoritative-summary.json')
+    $phase3 = @('phase3.prompt.txt', 'phase3.stream-json.stdout.ndjson', 'phase3.stderr.txt', 'phase3.authoritative.json', 'journey-authoritative-summary.json')
     switch ($Mode) {
         'Phase1' { return @($version + $phase1) }
         'Upload' { return @($upload) }
@@ -341,32 +330,22 @@ function Confirm-JourneyDriverManifest {
 }
 
 function Confirm-JourneyClientSkill {
-    $assets = @(
-        @{
-            Label = 'problem-locator-client Skill'
-            Path = Join-Path $script:JourneyRepoRoot '.claude\skills\problem-locator-client\SKILL.md'
-            Sha256 = $script:JourneyClientSkillSha256
-        },
-        @{
-            Label = 'problem-locator-client DFX Hook'
-            Path = Join-Path $script:JourneyRepoRoot '.claude\skills\problem-locator-client\scripts\problem-locator-client-dfx.ps1'
-            Sha256 = $script:JourneyClientDfxHookSha256
-        },
-        @{
-            Label = 'problem-locator-client compatibility Hook'
-            Path = Join-Path $script:JourneyRepoRoot '.claude\skills\problem-locator-client\scripts\problem-locator-client-compat.ps1'
-            Sha256 = $script:JourneyClientCompatHookSha256
-        },
-        @{
-            Label = 'problem-locator-client Hook settings'
-            Path = $script:JourneyHookSettingsPath
-            Sha256 = $script:JourneyClientHookSettingsSha256
-        }
-    )
+    $assets = @(@{
+        Label = 'problem-locator-client Skill'
+        Path = Join-Path $script:JourneyRepoRoot '.claude\skills\problem-locator-client\SKILL.md'
+        Sha256 = $script:JourneyClientSkillSha256
+    })
     foreach ($asset in $assets) {
         Assert-Journey (Test-Path -LiteralPath $asset.Path -PathType Leaf) "$($asset.Label) is absent"
         $actual = (Get-FileHash -LiteralPath $asset.Path -Algorithm SHA256).Hash.ToLowerInvariant()
         Assert-Journey ($actual -ceq $asset.Sha256) "$($asset.Label) SHA-256"
+    }
+    foreach ($relative in @(
+        '.claude\skills\problem-locator-client\references\client-hooks-settings.json',
+        '.claude\skills\problem-locator-client\scripts\problem-locator-client-compat.ps1',
+        '.claude\skills\problem-locator-client\scripts\problem-locator-client-dfx.ps1'
+    )) {
+        Assert-Journey (-not (Test-Path -LiteralPath (Join-Path $script:JourneyRepoRoot $relative))) "removed Problem Locator Hook asset must remain absent: $relative"
     }
 }
 
@@ -568,7 +547,6 @@ function Get-JourneyClaudeArguments {
         '--model', $script:JourneyModelAlias,
         '--max-turns', $maxTurns,
         '--setting-sources', 'user,project',
-        '--settings', $script:JourneyHookSettingsPath,
         '--mcp-config', (Get-JourneyMcpConfigJson),
         '--strict-mcp-config',
         '--tools=Skill',
@@ -576,9 +554,7 @@ function Get-JourneyClaudeArguments {
         'Skill(problem-locator-client)'
     )
     $arguments += $script:JourneyFullMcpTools
-    if (-not [string]::IsNullOrWhiteSpace($DebugFile)) {
-        $arguments += @('--debug', 'hooks', '--debug-file', $DebugFile)
-    }
+    Assert-Journey ([string]::IsNullOrWhiteSpace($DebugFile)) 'Problem Locator client debug files are disabled'
     $arguments += @(
         '--permission-mode', 'dontAsk',
         '--no-chrome',
@@ -641,76 +617,6 @@ function Get-JourneyToolName {
         return $FullName.Substring($prefix.Length)
     }
     return $FullName
-}
-
-function Read-JourneyHookEvents {
-    param([Parameter(Mandatory = $true)][string]$Path)
-
-    Assert-Journey (Test-Path -LiteralPath $Path -PathType Leaf) 'client Hook DFX log is absent'
-    $events = @()
-    $lineNumber = 0
-    foreach ($line in [IO.File]::ReadLines($Path, $script:JourneyUtf8)) {
-        $lineNumber++
-        Assert-Journey (-not [string]::IsNullOrWhiteSpace($line)) "client Hook DFX line $lineNumber is empty"
-        try {
-            $event = $line | ConvertFrom-Json
-        }
-        catch {
-            throw "journey assertion failed: invalid client Hook DFX line $lineNumber"
-        }
-        Assert-JourneyJsonObject $event "client Hook DFX line $lineNumber"
-        $events += $event
-    }
-    Assert-Journey ($events.Count -gt 0) 'client Hook DFX log is empty'
-    return $events
-}
-
-function Assert-JourneyHookEvidence {
-    param(
-        [Parameter(Mandatory = $true)][string]$Path,
-        [Parameter(Mandatory = $true)]$Audit
-    )
-
-    $events = @(Read-JourneyHookEvents $Path)
-    foreach ($record in @($Audit.mcp_records)) {
-        $started = @($events | Where-Object {
-            (Get-JourneyStringProperty $_ 'event') -ceq 'client.hook.tool.started' -and
-            (Get-JourneyStringProperty $_ 'tool_use_id') -ceq $record.tool_use_id
-        })
-        Assert-Journey ($started.Count -eq 1) "Hook started event for $($record.tool_use_id)"
-        $startedEvent = $started[0]
-        Assert-Journey ((Get-JourneyStringProperty $startedEvent 'source') -ceq 'claude_code_hook') 'Hook source'
-        Assert-Journey ((Get-JourneyStringProperty $startedEvent 'hook_version') -ceq '1.0.4') 'Hook version'
-        Assert-Journey ((Get-JourneyStringProperty $startedEvent 'tool_name') -ceq $record.full_name) 'Hook full tool name'
-        Assert-Journey ((Get-JourneyStringProperty $startedEvent 'logical_tool') -ceq $record.tool_name) 'Hook logical tool name'
-        $arguments = Get-JourneyProperty $startedEvent 'arguments' -Required
-        Assert-JourneyJsonObject $arguments 'Hook arguments'
-        Assert-Journey (
-            (($arguments | ConvertTo-Json -Depth 100 -Compress) -ceq ($record.input | ConvertTo-Json -Depth 100 -Compress))
-        ) "Hook arguments differ from stream-json for $($record.tool_use_id)"
-        $types = Get-JourneyProperty $startedEvent 'argument_json_types' -Required
-        Assert-JourneyJsonObject $types 'Hook argument_json_types'
-        if (Test-JourneyProperty $record.input 'problem_spec') {
-            Assert-Journey ((Get-JourneyStringProperty $types 'problem_spec') -ceq 'object') 'problem_spec Hook JSON type'
-        }
-        if (Test-JourneyProperty $record.input 'inputs') {
-            Assert-Journey ((Get-JourneyStringProperty $types 'inputs') -ceq 'object') 'inputs Hook JSON type'
-        }
-        if (Test-JourneyProperty $record.input 'attachment_ids') {
-            Assert-Journey ((Get-JourneyStringProperty $types 'attachment_ids') -ceq 'array') 'attachment_ids Hook JSON type'
-        }
-        if ($record.tool_name -ceq 'problem_locator_prepare_attachment') {
-            Assert-Journey (Test-JourneyProperty $arguments 'name') 'prepare Hook arguments require name'
-            Assert-Journey (Test-JourneyProperty $arguments 'declared_size') 'prepare Hook arguments require declared_size'
-            Assert-Journey (-not (Test-JourneyProperty $arguments 'attachment_name')) 'prepare Hook arguments forbid attachment_name'
-            Assert-Journey (-not (Test-JourneyProperty $arguments 'declared_byte_count')) 'prepare Hook arguments forbid declared_byte_count'
-        }
-        $returned = @($events | Where-Object {
-            (Get-JourneyStringProperty $_ 'event') -ceq 'client.hook.tool.returned' -and
-            (Get-JourneyStringProperty $_ 'tool_use_id') -ceq $record.tool_use_id
-        })
-        Assert-Journey ($returned.Count -eq 1) "Hook returned event for $($record.tool_use_id)"
-    }
 }
 
 function Get-JourneyUserContentDisposition {
@@ -1052,15 +958,15 @@ function Assert-JourneySkillRef {
 
 function Assert-JourneyProblemSpecInput {
     param($Actual)
-    Assert-JourneyJsonObject $Actual 'problem_spec input'
+    Assert-JourneyJsonObject $Actual 'flat create_case input'
     $expected = Get-JourneyProblemSpec
     foreach ($name in @('statement', 'expected_behavior', 'actual_behavior', 'scope')) {
-        Assert-Journey ((Get-JourneyStringProperty $Actual $name) -ceq [string]$expected[$name]) "problem_spec.$name"
+        Assert-Journey ((Get-JourneyStringProperty $Actual $name) -ceq [string]$expected[$name]) "create_case.$name"
     }
     foreach ($name in @('goals', 'non_goals', 'constraints', 'completion_criteria')) {
         $arrayValue = Get-JourneyProperty $Actual $name -Required
-        Assert-JourneyStringArray $arrayValue "problem_spec.$name"
-        Assert-JourneyExactStrings -Actual $arrayValue -Expected @($expected[$name]) -Label "problem_spec.$name"
+        Assert-JourneyStringArray $arrayValue "create_case.$name"
+        Assert-JourneyExactStrings -Actual $arrayValue -Expected @($expected[$name]) -Label "create_case.$name"
     }
 }
 
@@ -1340,12 +1246,15 @@ function Invoke-JourneyPhase1Validation {
     $create = $creates[0]
     Assert-Journey ($records[0].tool_name -ceq 'problem_locator_create_case') 'create_case must be the first phase1 MCP call'
     $createInput = $create.input
-    Assert-JourneyExactProperties $createInput @('request_id', 'problem_spec', 'initial_user_facts', 'wait_seconds') 'create_case input'
+    Assert-JourneyExactProperties $createInput @('request_id', 'statement', 'expected_behavior', 'actual_behavior', 'scope', 'goals', 'non_goals', 'constraints', 'completion_criteria', 'initial_user_fact_names', 'initial_user_fact_values', 'wait_seconds') 'create_case input'
     Assert-Journey ((Get-JourneyStringProperty $createInput 'request_id') -ceq $ids.create) 'create request_id'
-    Assert-JourneyProblemSpecInput (Get-JourneyProperty $createInput 'problem_spec' -Required)
-    $initialFacts = Get-JourneyProperty $createInput 'initial_user_facts' -Required
-    Assert-JourneyJsonArray $initialFacts 'create initial_user_facts'
-    Assert-Journey (@($initialFacts).Count -eq 0) 'create initial_user_facts must be empty'
+    Assert-JourneyProblemSpecInput $createInput
+    $initialFactNames = Get-JourneyProperty $createInput 'initial_user_fact_names' -Required
+    $initialFactValues = Get-JourneyProperty $createInput 'initial_user_fact_values' -Required
+    Assert-JourneyStringArray $initialFactNames 'create initial_user_fact_names'
+    Assert-JourneyStringArray $initialFactValues 'create initial_user_fact_values'
+    Assert-Journey (@($initialFactNames).Count -eq 0) 'create initial_user_fact_names must be empty'
+    Assert-Journey (@($initialFactValues).Count -eq 0) 'create initial_user_fact_values must be empty'
     Assert-Journey ((Get-JourneyIntegerProperty $createInput 'wait_seconds') -eq 0) 'create wait_seconds must be zero'
     $createData = Get-JourneySuccessData $create
     Assert-JourneyApplicationResponseShape $createData 'create_case'
@@ -1371,23 +1280,31 @@ function Invoke-JourneyPhase1Validation {
     $submit = $submits[0]
     Assert-Journey ($submit.ordinal -gt $groupRecord[0].ordinal) 'group A submission must follow its authoritative Case view'
     $submitInput = $submit.input
-    Assert-JourneyExactProperties $submitInput @('request_id', 'case_id', 'expected_case_revision', 'inputs', 'attachment_ids', 'wait_seconds') 'group A submit input'
+    Assert-JourneyExactProperties $submitInput @('request_id', 'case_id', 'expected_case_revision', 'input_names', 'input_values', 'attachment_ids', 'wait_seconds') 'group A submit input'
     Assert-Journey ((Get-JourneyStringProperty $submitInput 'request_id') -ceq $ids.submit_a) 'group A request_id'
     Assert-Journey ((Get-JourneyStringProperty $submitInput 'case_id') -ceq $caseId) 'group A case_id'
     Assert-Journey ((Get-JourneyIntegerProperty $submitInput 'expected_case_revision') -eq (Get-JourneyIntegerProperty $groupView 'case_revision')) 'group A uses latest Case revision'
-    $inputs = Get-JourneyProperty $submitInput 'inputs' -Required
-    Assert-JourneyJsonObject $inputs 'group A inputs'
+    $inputNames = Get-JourneyProperty $submitInput 'input_names' -Required
+    $inputValues = Get-JourneyProperty $submitInput 'input_values' -Required
+    Assert-JourneyStringArray $inputNames 'group A input_names'
+    Assert-JourneyStringArray $inputValues 'group A input_values'
+    Assert-Journey (@($inputNames).Count -eq @($inputValues).Count) 'group A input arrays must have equal lengths'
     $expectedInputs = [ordered]@{
         caller_service = 'checkout-synthetic'
         server_service = 'inventory-synthetic'
         rpc_method = 'ReserveStock'
         problem_time = '2026-07-31T00:00:03.000Z'
     }
-    $actualInputNames = @($inputs.PSObject.Properties.Name | Sort-Object)
+    $actualInputs = @{}
+    for ($index = 0; $index -lt @($inputNames).Count; $index++) {
+        Assert-Journey (-not $actualInputs.ContainsKey([string]$inputNames[$index])) 'group A input names must be unique'
+        $actualInputs[[string]$inputNames[$index]] = [string]$inputValues[$index]
+    }
+    $actualInputNames = @($actualInputs.Keys | Sort-Object)
     $expectedInputNames = @($expectedInputs.Keys | Sort-Object)
     Assert-JourneyExactStrings $actualInputNames $expectedInputNames 'group A input keys'
     foreach ($name in $expectedInputs.Keys) {
-        Assert-Journey ((Get-JourneyStringProperty $inputs $name) -ceq $expectedInputs[$name]) "group A input $name"
+        Assert-Journey ($actualInputs[$name] -ceq $expectedInputs[$name]) "group A input $name"
     }
     $groupAttachmentIds = Get-JourneyProperty $submitInput 'attachment_ids' -Required
     Assert-JourneyStringArray $groupAttachmentIds 'group A attachment_ids'
@@ -1587,14 +1504,16 @@ function Invoke-JourneyPhase3Validation {
 
     $attachmentSubmit = $submits[0]
     $attachInput = $attachmentSubmit.input
-    Assert-JourneyExactProperties $attachInput @('request_id', 'case_id', 'expected_case_revision', 'inputs', 'attachment_ids', 'wait_seconds') 'attachment submit input'
+    Assert-JourneyExactProperties $attachInput @('request_id', 'case_id', 'expected_case_revision', 'input_names', 'input_values', 'attachment_ids', 'wait_seconds') 'attachment submit input'
     Assert-Journey ((Get-JourneyStringProperty $attachInput 'request_id') -ceq $ids.submit_attachment) 'attachment submit request_id'
     Assert-Journey ((Get-JourneyStringProperty $attachInput 'case_id') -ceq $caseId) 'attachment submit case_id'
     Assert-Journey ((Get-JourneyIntegerProperty $attachInput 'expected_case_revision') -eq $uploadRevision) 'attachment submit upload revision'
-    $attachmentInputs = Get-JourneyProperty $attachInput 'inputs' -Required
-    Assert-JourneyJsonObject $attachmentInputs 'attachment submit inputs'
-    $attachmentInputProperties = @($attachmentInputs.PSObject.Properties)
-    Assert-Journey ($attachmentInputProperties.Count -eq 0) 'attachment submit inputs must be empty'
+    $attachmentInputNames = Get-JourneyProperty $attachInput 'input_names' -Required
+    $attachmentInputValues = Get-JourneyProperty $attachInput 'input_values' -Required
+    Assert-JourneyStringArray $attachmentInputNames 'attachment submit input_names'
+    Assert-JourneyStringArray $attachmentInputValues 'attachment submit input_values'
+    Assert-Journey (@($attachmentInputNames).Count -eq 0) 'attachment submit input_names must be empty'
+    Assert-Journey (@($attachmentInputValues).Count -eq 0) 'attachment submit input_values must be empty'
     $submittedAttachmentIds = Get-JourneyProperty $attachInput 'attachment_ids' -Required
     Assert-JourneyStringArray $submittedAttachmentIds 'attachment submit IDs'
     Assert-JourneyExactStrings $submittedAttachmentIds @($attachmentId) 'attachment submit IDs'
@@ -1614,13 +1533,16 @@ function Invoke-JourneyPhase3Validation {
     $orderSubmit = $submits[1]
     Assert-Journey ($orderSubmit.ordinal -gt $orderRecord[0].ordinal) 'order submission must follow authoritative requirement'
     $orderInput = $orderSubmit.input
-    Assert-JourneyExactProperties $orderInput @('request_id', 'case_id', 'expected_case_revision', 'inputs', 'attachment_ids', 'wait_seconds') 'order submit input'
+    Assert-JourneyExactProperties $orderInput @('request_id', 'case_id', 'expected_case_revision', 'input_names', 'input_values', 'attachment_ids', 'wait_seconds') 'order submit input'
     Assert-Journey ((Get-JourneyStringProperty $orderInput 'request_id') -ceq $ids.submit_order) 'order submit request_id'
     Assert-Journey ((Get-JourneyStringProperty $orderInput 'case_id') -ceq $caseId) 'order submit case_id'
     Assert-Journey ((Get-JourneyIntegerProperty $orderInput 'expected_case_revision') -eq (Get-JourneyIntegerProperty $orderView 'case_revision')) 'order submit latest revision'
-    $orderInputs = Get-JourneyProperty $orderInput 'inputs' -Required
-    Assert-JourneyExactProperties $orderInputs @('order_id') 'order inputs'
-    Assert-Journey ((Get-JourneyStringProperty $orderInputs 'order_id') -ceq 'synthetic-order-0001') 'order_id value'
+    $orderInputNames = Get-JourneyProperty $orderInput 'input_names' -Required
+    $orderInputValues = Get-JourneyProperty $orderInput 'input_values' -Required
+    Assert-JourneyStringArray $orderInputNames 'order input_names'
+    Assert-JourneyStringArray $orderInputValues 'order input_values'
+    Assert-JourneyExactStrings $orderInputNames @('order_id') 'order input_names'
+    Assert-JourneyExactStrings $orderInputValues @('synthetic-order-0001') 'order input_values'
     $orderAttachmentIds = Get-JourneyProperty $orderInput 'attachment_ids' -Required
     Assert-JourneyStringArray $orderAttachmentIds 'order submit attachment_ids'
     Assert-Journey (@($orderAttachmentIds).Count -eq 0) 'order submit attachment_ids'
@@ -1764,12 +1686,10 @@ function Invoke-JourneyClaudePhase {
     $promptPath = Join-Path $EvidenceRoot "$Phase.prompt.txt"
     $stdoutPath = Join-Path $EvidenceRoot "$Phase.stream-json.stdout.ndjson"
     $stderrPath = Join-Path $EvidenceRoot "$Phase.stderr.txt"
-    $hookPath = Join-Path $EvidenceRoot "$Phase.client-dfx.jsonl"
     $auditPath = Join-Path $EvidenceRoot "$Phase.authoritative.json"
     Assert-JourneyReservedUnused $promptPath
     Assert-JourneyReservedUnused $stdoutPath
     Assert-JourneyReservedUnused $stderrPath
-    Assert-JourneyReservedUnused $hookPath
     Assert-JourneyReservedUnused $auditPath
     Write-JourneyUtf8 -Path $promptPath -Text ($Prompt + "`n")
     $arguments = Get-JourneyClaudeArguments -Prompt $Prompt -Phase $Phase
@@ -1779,8 +1699,6 @@ function Invoke-JourneyClaudePhase {
     else {
         $script:JourneyClaudePhase3TimeoutSeconds
     }
-    $hadLogPath = Test-Path Env:PROBLEM_LOCATOR_CLIENT_DFX_LOG_FILE
-    $previousLogPath = $env:PROBLEM_LOCATOR_CLIENT_DFX_LOG_FILE
     $hadNoProxy = Test-Path Env:NO_PROXY
     $previousNoProxy = $env:NO_PROXY
     $hadLowerNoProxy = Test-Path Env:no_proxy
@@ -1794,7 +1712,6 @@ function Invoke-JourneyClaudePhase {
     $hadLowerHttpsProxy = Test-Path Env:https_proxy
     $previousLowerHttpsProxy = $env:https_proxy
     try {
-        $env:PROBLEM_LOCATOR_CLIENT_DFX_LOG_FILE = $hookPath
         $noProxyParts = @(Get-JourneyNoProxyParts -PreviousNoProxy $previousNoProxy -PreviousLowerNoProxy $previousLowerNoProxy)
         $env:NO_PROXY = $noProxyParts -join ','
         $env:no_proxy = $env:NO_PROXY
@@ -1805,7 +1722,6 @@ function Invoke-JourneyClaudePhase {
         $exitCode = Invoke-JourneyCapturedProcess -FilePath $script:JourneyClaudeExe -Arguments (@($script:JourneyClaudeEntryPoint) + $arguments) -WorkingDirectory $script:JourneyRepoRoot -StdoutPath $stdoutPath -StderrPath $stderrPath -TimeoutSeconds $timeoutSeconds
     }
     finally {
-        if ($hadLogPath) { $env:PROBLEM_LOCATOR_CLIENT_DFX_LOG_FILE = $previousLogPath } else { Remove-Item Env:PROBLEM_LOCATOR_CLIENT_DFX_LOG_FILE -ErrorAction SilentlyContinue }
         if ($hadNoProxy) { $env:NO_PROXY = $previousNoProxy } else { Remove-Item Env:NO_PROXY -ErrorAction SilentlyContinue }
         if ($hadLowerNoProxy) { $env:no_proxy = $previousLowerNoProxy } else { Remove-Item Env:no_proxy -ErrorAction SilentlyContinue }
         if ($hadHttpProxy) { $env:HTTP_PROXY = $previousHttpProxy } else { Remove-Item Env:HTTP_PROXY -ErrorAction SilentlyContinue }
@@ -1815,89 +1731,7 @@ function Invoke-JourneyClaudePhase {
     }
     Assert-Journey ($exitCode -eq 0) "$Phase Claude exit code"
     $audit = Read-JourneyClaudeAudit $stdoutPath
-    Assert-JourneyHookEvidence -Path $hookPath -Audit $audit
-    Complete-JourneyExternalOutput $hookPath
+    Assert-Journey (-not (Test-Path -LiteralPath (Join-Path $EvidenceRoot "$Phase.client-dfx.jsonl"))) 'client DFX must not be generated'
     Write-JourneyJson -Path $auditPath -Value $audit
-    return $audit
-}
-
-function Invoke-JourneyHookFailureProbe {
-    param(
-        [Parameter(Mandatory = $true)][string]$EvidenceRoot,
-        [Parameter(Mandatory = $true)][string]$CaseId
-    )
-    Confirm-JourneyClaudeVersion $EvidenceRoot
-    $promptPath = Join-Path $EvidenceRoot 'hook-failure.prompt.txt'
-    $stdoutPath = Join-Path $EvidenceRoot 'hook-failure.stream-json.stdout.ndjson'
-    $stderrPath = Join-Path $EvidenceRoot 'hook-failure.stderr.txt'
-    $debugPath = Join-Path $EvidenceRoot 'hook-failure.claude-debug.log'
-    $auditPath = Join-Path $EvidenceRoot 'hook-failure.authoritative.json'
-    Assert-JourneyReservedUnused $promptPath
-    Assert-JourneyReservedUnused $stdoutPath
-    Assert-JourneyReservedUnused $stderrPath
-    Assert-JourneyReservedUnused $debugPath
-    Assert-JourneyReservedUnused $auditPath
-    $prompt = @"
-Perform the fail-open logging probe for Problem Locator. Use only the Skill tool and the seven problem_locator Remote MCP tools.
-
-0. Your first action MUST call the Skill tool with skill=problem-locator-client (exact input {"skill":"problem-locator-client"}).
-1. Call problem_locator_get_case exactly once with case_id "$CaseId", wait_for_job_id null, and wait_seconds 0.
-2. Stop immediately after its successful structured tool_result. Do not call any other business tool and do not modify the Case.
-"@
-    Write-JourneyUtf8 -Path $promptPath -Text ($prompt + "`n")
-    $arguments = Get-JourneyClaudeArguments -Prompt $prompt -Phase phase3 -DebugFile $debugPath
-    $hadLogPath = Test-Path Env:PROBLEM_LOCATOR_CLIENT_DFX_LOG_FILE
-    $previousLogPath = $env:PROBLEM_LOCATOR_CLIENT_DFX_LOG_FILE
-    $hadNoProxy = Test-Path Env:NO_PROXY
-    $previousNoProxy = $env:NO_PROXY
-    $hadLowerNoProxy = Test-Path Env:no_proxy
-    $previousLowerNoProxy = $env:no_proxy
-    $hadHttpProxy = Test-Path Env:HTTP_PROXY
-    $previousHttpProxy = $env:HTTP_PROXY
-    $hadHttpsProxy = Test-Path Env:HTTPS_PROXY
-    $previousHttpsProxy = $env:HTTPS_PROXY
-    $hadLowerHttpProxy = Test-Path Env:http_proxy
-    $previousLowerHttpProxy = $env:http_proxy
-    $hadLowerHttpsProxy = Test-Path Env:https_proxy
-    $previousLowerHttpsProxy = $env:https_proxy
-    try {
-        # A directory is an absolute but unwritable JSONL target. Both matching
-        # Hook invocations must fail with exit 1 while Claude continues the MCP call.
-        $env:PROBLEM_LOCATOR_CLIENT_DFX_LOG_FILE = $EvidenceRoot
-        $noProxyParts = @(Get-JourneyNoProxyParts -PreviousNoProxy $previousNoProxy -PreviousLowerNoProxy $previousLowerNoProxy)
-        $env:NO_PROXY = $noProxyParts -join ','
-        $env:no_proxy = $env:NO_PROXY
-        Remove-Item Env:HTTP_PROXY -ErrorAction SilentlyContinue
-        Remove-Item Env:http_proxy -ErrorAction SilentlyContinue
-        Remove-Item Env:HTTPS_PROXY -ErrorAction SilentlyContinue
-        Remove-Item Env:https_proxy -ErrorAction SilentlyContinue
-        $exitCode = Invoke-JourneyCapturedProcess -FilePath $script:JourneyClaudeExe -Arguments (@($script:JourneyClaudeEntryPoint) + $arguments) -WorkingDirectory $script:JourneyRepoRoot -StdoutPath $stdoutPath -StderrPath $stderrPath -TimeoutSeconds $script:JourneyClaudePhase1TimeoutSeconds
-    }
-    finally {
-        if ($hadLogPath) { $env:PROBLEM_LOCATOR_CLIENT_DFX_LOG_FILE = $previousLogPath } else { Remove-Item Env:PROBLEM_LOCATOR_CLIENT_DFX_LOG_FILE -ErrorAction SilentlyContinue }
-        if ($hadNoProxy) { $env:NO_PROXY = $previousNoProxy } else { Remove-Item Env:NO_PROXY -ErrorAction SilentlyContinue }
-        if ($hadLowerNoProxy) { $env:no_proxy = $previousLowerNoProxy } else { Remove-Item Env:no_proxy -ErrorAction SilentlyContinue }
-        if ($hadHttpProxy) { $env:HTTP_PROXY = $previousHttpProxy } else { Remove-Item Env:HTTP_PROXY -ErrorAction SilentlyContinue }
-        if ($hadHttpsProxy) { $env:HTTPS_PROXY = $previousHttpsProxy } else { Remove-Item Env:HTTPS_PROXY -ErrorAction SilentlyContinue }
-        if ($hadLowerHttpProxy) { $env:http_proxy = $previousLowerHttpProxy } else { Remove-Item Env:http_proxy -ErrorAction SilentlyContinue }
-        if ($hadLowerHttpsProxy) { $env:https_proxy = $previousLowerHttpsProxy } else { Remove-Item Env:https_proxy -ErrorAction SilentlyContinue }
-    }
-    Assert-Journey ($exitCode -eq 0) 'Hook write failure must not block Claude or MCP'
-    Protect-JourneySensitiveOutput $debugPath
-    Complete-JourneyExternalOutput $debugPath
-    $hookFailureText = [System.IO.File]::ReadAllText($debugPath, $script:JourneyUtf8)
-    Assert-Journey ($hookFailureText.Contains('problem-locator client DFX logging failed:')) 'real Claude output must expose the expected Hook logging failure'
-    $audit = Read-JourneyClaudeAudit $stdoutPath
-    $records = @($audit.mcp_records)
-    Assert-Journey ($records.Count -eq 1) 'Hook failure probe must make exactly one MCP call'
-    Assert-Journey ($records[0].tool_name -ceq 'problem_locator_get_case') 'Hook failure probe tool'
-    Assert-Journey ((Get-JourneyStringProperty $records[0].input 'case_id') -ceq $CaseId) 'Hook failure probe case_id'
-    [void](Get-JourneySuccessData $records[0])
-    Write-JourneyJson -Path $auditPath -Value ([PSCustomObject][ordered]@{
-        schema_version = 1
-        hook_logging_failure_observed = $true
-        mcp_request_completed = $true
-        audit = $audit
-    })
     return $audit
 }

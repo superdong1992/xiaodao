@@ -9,6 +9,7 @@ import subprocess
 import sys
 import textwrap
 import time
+import zipfile
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import urlopen
@@ -42,7 +43,7 @@ EXPECTED_RUNTIME_VERSIONS = {
     "fastapi": "0.139.2",
     "httpx": "0.28.1",
     "mcp": "1.29.0",
-    "problem-locator": "1.0.4",
+    "problem-locator": "1.0.5",
     "pydantic": "2.13.4",
     "python-dotenv": "1.2.2",
     "starlette": "1.3.1",
@@ -393,6 +394,16 @@ def test_clean_installed_distribution_import_cli_and_server_gate(
     wheels = sorted(wheelhouse.glob("problem_locator-*.whl"))
     assert len(wheels) == 1, f"expected one Problem Locator wheel, got {wheels!r}"
     wheel = wheels[0]
+    with zipfile.ZipFile(wheel) as distribution:
+        archive_names = distribution.namelist()
+        assert all(not name.endswith(".ps1") for name in archive_names)
+        assert all("client-hooks-settings" not in name for name in archive_names)
+        assert all("client-dfx" not in name for name in archive_names)
+        assert all(
+            b"PROBLEM_LOCATOR_CLIENT_DFX_LOG_FILE" not in distribution.read(name)
+            for name in archive_names
+            if not name.endswith("/")
+        )
 
     requirements = tmp_path / "runtime-requirements.lock"
     _run_checked(

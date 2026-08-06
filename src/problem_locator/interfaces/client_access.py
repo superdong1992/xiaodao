@@ -326,15 +326,20 @@ class ClientAccessWorkflow:
         initial_user_facts: Sequence[Mapping[str, Any]] = (),
         wait_seconds: int = 0,
     ) -> ApplicationResponse:
+        arguments = dict(problem_spec)
+        facts = [dict(item) for item in initial_user_facts]
+        arguments.update(
+            {
+                "request_id": self._ids.new("request"),
+                "initial_user_fact_names": [item.get("name") for item in facts],
+                "initial_user_fact_values": [item.get("value") for item in facts],
+                "wait_seconds": wait_seconds,
+            }
+        )
         data = _success_data(
             self._mcp.call_tool(
                 "problem_locator_create_case",
-                {
-                    "request_id": self._ids.new("request"),
-                    "problem_spec": dict(problem_spec),
-                    "initial_user_facts": [dict(item) for item in initial_user_facts],
-                    "wait_seconds": wait_seconds,
-                },
+                arguments,
             )
         )
         return _validate_model(
@@ -423,11 +428,13 @@ class ClientAccessWorkflow:
         """Submit facts/READY attachments, refreshing one stale revision once."""
 
         request_id = self._ids.new("request")
+        input_names = list(inputs)
         arguments = {
             "request_id": request_id,
             "case_id": case_id,
             "expected_case_revision": expected_case_revision,
-            "inputs": dict(inputs),
+            "input_names": input_names,
+            "input_values": [inputs[name] for name in input_names],
             "attachment_ids": list(attachment_ids),
             "wait_seconds": wait_seconds,
         }

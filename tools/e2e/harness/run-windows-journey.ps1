@@ -51,10 +51,10 @@ function New-Phase1Prompt {
 Perform phase 1 of the controlled Problem Locator acceptance journey. Use only the Skill tool and the seven problem_locator Remote MCP tools. Treat MCP tool_result structured payloads as authoritative; do not infer state from prose.
 
 0. Your first action MUST call the Skill tool with skill=problem-locator-client (exact input {"skill":"problem-locator-client"}). Until that Skill tool_result is received successfully, do not call any problem_locator MCP tool and do not continue the workflow.
-1. Call problem_locator_create_case exactly once with request_id "$($requestIds.create)", this exact problem_spec JSON, initial_user_facts [], and wait_seconds 0:
+1. Call problem_locator_create_case exactly once with request_id "$($requestIds.create)". Put the following eight members directly at the tool input root, do not send a problem_spec member, set initial_user_fact_names [] and initial_user_fact_values [], and set wait_seconds 0:
 $problemSpec
 2. Poll problem_locator_get_case with a non-empty object containing case_id from the authoritative create_case result, wait_for_job_id null or the authoritative active job_id, and wait_seconds no greater than 30 until the authoritative Case view is WAITING_INPUT and exactly contains this set of four OPEN INPUT requirements, comparing by name and ignoring array order: caller_service, server_service, rpc_method, problem_time. Before every poll, silently verify that case_id is present; never call this tool with {}, null, or omitted input.
-3. In one problem_locator_submit_supplement call, use request_id "$($requestIds.submit_a)", the latest displayed case_revision, attachment_ids [], wait_seconds 0, and exactly these inputs without normalization: caller_service=checkout-synthetic, server_service=inventory-synthetic, rpc_method=ReserveStock, problem_time=2026-07-31T00:00:03.000Z.
+3. In one problem_locator_submit_supplement call, use request_id "$($requestIds.submit_a)", the latest displayed case_revision, input_names ["caller_service","server_service","rpc_method","problem_time"], input_values ["checkout-synthetic","inventory-synthetic","ReserveStock","2026-07-31T00:00:03.000Z"], attachment_ids [], and wait_seconds 0.
 4. Poll problem_locator_get_case with the same non-empty input rules until the authoritative view is WAITING_ATTACHMENT with exactly one OPEN ATTACHMENT requirement named log_archive.
 5. Call problem_locator_prepare_attachment exactly once using request_id "$($requestIds.prepare)", the latest displayed revision, name "$($script:JourneyZipName)", content_type "application/zip", declared_size $($script:JourneyZipSize), and declared_sha256 "$($script:JourneyZipSha256)". Immediately before emitting that tool call, silently verify that its input JSON is non-empty and has exactly these seven properties: request_id, case_id, expected_case_revision, name, content_type, declared_size, declared_sha256. Never invoke problem_locator_prepare_attachment with {}, null, or omitted input, and do not narrate between this verification and the tool call. If an empty-input VALIDATION_ERROR nevertheless occurs, the immediately following retry must contain all seven properties; a second empty invocation is forbidden and you must stop instead of retrying it.
 6. Stop immediately after the successful prepare tool_result. Do not upload bytes, submit the attachment, submit order_id, list artifacts, resume, cancel, create another Case, or use any non-allowed tool.
@@ -70,9 +70,9 @@ function New-Phase3Prompt {
 Perform phase 3 of the same controlled Problem Locator acceptance journey. Use only the Skill tool and the seven problem_locator Remote MCP tools. Treat MCP tool_result structured payloads as authoritative; do not infer state from prose. The outer PowerShell upload validator has authoritatively established Case $caseId, READY attachment $attachmentId, and current case_revision $caseRevision.
 
 0. Your first action MUST call the Skill tool with skill=problem-locator-client (exact input {"skill":"problem-locator-client"}). Until that Skill tool_result is received successfully, do not call any problem_locator MCP tool and do not continue the workflow.
-1. First call problem_locator_submit_supplement exactly once with request_id "$($requestIds.submit_attachment)", case_id "$caseId", expected_case_revision $caseRevision, inputs {}, attachment_ids ["$attachmentId"], and wait_seconds 0.
+1. First call problem_locator_submit_supplement exactly once with request_id "$($requestIds.submit_attachment)", case_id "$caseId", expected_case_revision $caseRevision, input_names [], input_values [], attachment_ids ["$attachmentId"], and wait_seconds 0.
 2. Poll problem_locator_get_case using a non-empty object with case_id "$caseId", wait_for_job_id null or the authoritative active job_id, and wait_seconds no greater than 30 until the authoritative Case view is WAITING_INPUT with exactly one OPEN INPUT requirement named order_id. Before every poll, silently verify that case_id is present; never call this tool with {}, null, or omitted input.
-3. Call problem_locator_submit_supplement exactly once with request_id "$($requestIds.submit_order)", the latest displayed revision, inputs {"order_id":"synthetic-order-0001"}, attachment_ids [], and wait_seconds 0.
+3. Call problem_locator_submit_supplement exactly once with request_id "$($requestIds.submit_order)", the latest displayed revision, input_names ["order_id"], input_values ["synthetic-order-0001"], attachment_ids [], and wait_seconds 0.
 4. Poll promptly with problem_locator_get_case using the same non-empty input rules. First observe REVIEWING in an authoritative result, then continue polling with wait_for_job_id set to the authoritative active review job_id until an authoritative result is RESOLVED with final_result.status ACCEPTED. Do not skip the REVIEWING observation.
 5. After RESOLVED, call problem_locator_list_artifacts exactly once for this Case and stop. Do not download, resume, cancel, create another Case, or use any non-allowed tool.
 "@
@@ -91,8 +91,6 @@ function Run-Upload {
 }
 
 function Run-Phase3 {
-    $uploadState = Read-JourneyUploadStateValidated $EvidenceRoot
-    [void](Invoke-JourneyHookFailureProbe -EvidenceRoot $EvidenceRoot -CaseId (Get-JourneyStringProperty $uploadState 'case_id'))
     $audit = Invoke-JourneyClaudePhase -Phase phase3 -EvidenceRoot $EvidenceRoot -Prompt (New-Phase3Prompt)
     $state = Invoke-JourneyPhase3Validation -Audit $audit -EvidenceRoot $EvidenceRoot
     Write-JourneyJson -Path (Join-Path $EvidenceRoot 'journey-authoritative-summary.json') -Value $state

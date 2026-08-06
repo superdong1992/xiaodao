@@ -13,7 +13,14 @@ from typing import Any, Literal
 from mcp import types as mcp_types
 from mcp.server.lowlevel import Server
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    TypeAdapter,
+    ValidationError,
+    model_validator,
+)
 
 from problem_locator import __version__
 from problem_locator.contracts.commands import (
@@ -28,8 +35,10 @@ from problem_locator.contracts.commands import (
     UploadDescriptor,
 )
 from problem_locator.contracts.errors import ApplicationPortError
+from problem_locator.contracts.limits import MAX_INITIAL_USER_FACTS
 from problem_locator.contracts.models import (
     ApplicationError,
+    ContractName,
     ContentType,
     NonEmptyText,
     NonNegativeInt,
@@ -73,23 +82,64 @@ class _RequestModel(BaseModel):
 
 class CreateCaseRequest(_RequestModel):
     request_id: NonEmptyText
-    problem_spec: ProblemSpecInput = Field(
+    statement: NonEmptyText = Field(
+        description="Concise statement of the problem to diagnose."
+    )
+    expected_behavior: NonEmptyText = Field(
+        description="Expected behavior when the system is healthy."
+    )
+    actual_behavior: NonEmptyText = Field(
+        description="Observed behavior that differs from the expectation."
+    )
+    scope: NonEmptyText = Field(
+        description="System, component, request, or incident scope."
+    )
+    goals: list[NonEmptyText] = Field(
+        min_length=1,
+        description="Non-empty array of diagnosis goals.",
+    )
+    non_goals: list[NonEmptyText] = Field(
+        description="Array of work explicitly outside the diagnosis scope."
+    )
+    constraints: list[NonEmptyText] = Field(
+        description="Array of constraints that the diagnosis must respect."
+    )
+    completion_criteria: list[NonEmptyText] = Field(
+        min_length=1,
         description=(
-            "Complete problem specification passed directly as a JSON object, "
-            "never as a JSON-encoded string. It has exactly eight required "
-            "members: statement, expected_behavior, actual_behavior, scope, "
-            "goals, non_goals, constraints, and completion_criteria."
+            "Non-empty array of observable criteria that define completion."
         )
     )
-    initial_user_facts: list[UserFactInput] = Field(
+    initial_user_fact_names: list[ContractName] = Field(
         default_factory=list,
+        max_length=MAX_INITIAL_USER_FACTS,
+        json_schema_extra={"uniqueItems": True},
         description=(
-            "Optional JSON array, defaulting to an empty array, of objects with "
-            "exact string members `name` and `value`; do not send a map or a "
-            "JSON-encoded string."
+            "Optional fact names. Pair by index with initial_user_fact_values; "
+            "names must be unique."
+        ),
+    )
+    initial_user_fact_values: list[NonEmptyText] = Field(
+        default_factory=list,
+        max_length=MAX_INITIAL_USER_FACTS,
+        description=(
+            "Optional fact values. Pair by index with initial_user_fact_names."
         ),
     )
     wait_seconds: WaitSeconds = 0
+
+    @model_validator(mode="after")
+    def validate_initial_user_fact_pairs(self) -> CreateCaseRequest:
+        if len(self.initial_user_fact_names) != len(self.initial_user_fact_values):
+            raise ValueError(
+                "initial_user_fact_names and initial_user_fact_values must have "
+                "equal lengths"
+            )
+        if len(set(self.initial_user_fact_names)) != len(
+            self.initial_user_fact_names
+        ):
+            raise ValueError("initial user fact names must be unique")
+        return self
 
 
 class PrepareAttachmentRequest(_RequestModel):
@@ -117,16 +167,28 @@ class SubmitSupplementRequest(_RequestModel):
     request_id: NonEmptyText
     case_id: OpaqueId
     expected_case_revision: PositiveInt
-    inputs: dict[str, str] = Field(
+    input_names: list[ContractName] = Field(
+        json_schema_extra={"uniqueItems": True},
         description=(
-            "JSON object mapping each exact requirement name to its string value; "
-            "send an object, never a list."
+            "Requirement names. Pair by index with input_values; names must be "
+            "unique."
         )
+    )
+    input_values: list[NonEmptyText] = Field(
+        description="Requirement values paired by index with input_names."
     )
     attachment_ids: list[OpaqueId] = Field(
         description="JSON array of READY attachment IDs."
     )
     wait_seconds: WaitSeconds = 0
+
+    @model_validator(mode="after")
+    def validate_input_pairs(self) -> SubmitSupplementRequest:
+        if len(self.input_names) != len(self.input_values):
+            raise ValueError("input_names and input_values must have equal lengths")
+        if len(set(self.input_names)) != len(self.input_names):
+            raise ValueError("input names must be unique")
+        return self
 
 
 class GetCaseRequest(_RequestModel):
@@ -189,8 +251,9 @@ _REQUESTS: dict[str, type[_RequestModel]] = {
 
 _DESCRIPTIONS = {
     "problem_locator_create_case": (
-        "Create a new diagnosis case. Pass `problem_spec` directly as the "
-        "complete eight-member JSON object, never as a JSON-encoded string."
+        "Create a new diagnosis case. Supply the eight problem specification "
+        "members as flat root fields. Pair optional initial fact names and values "
+        "by array index."
     ),
     "problem_locator_prepare_attachment": (
         "Prepare an immutable attachment upload. Use the exact input members "
@@ -198,8 +261,8 @@ _DESCRIPTIONS = {
         "`declared_byte_count` are not aliases."
     ),
     "problem_locator_submit_supplement": (
-        "Submit facts and READY attachments to a waiting case. `inputs` is a "
-        "JSON object mapping requirement names to string values, never a list."
+        "Submit facts and READY attachments to a waiting case. Pair input_names "
+        "and input_values by array index."
     ),
     "problem_locator_get_case": "Read the current public case view.",
     "problem_locator_resume_case": "Resume a persisted pending or interrupted case.",
@@ -329,10 +392,28 @@ class McpAdapter:
 
         if isinstance(request, CreateCaseRequest):
             try:
+                problem_spec = ProblemSpecInput(
+                    statement=request.statement,
+                    expected_behavior=request.expected_behavior,
+                    actual_behavior=request.actual_behavior,
+                    scope=request.scope,
+                    goals=request.goals,
+                    non_goals=request.non_goals,
+                    constraints=request.constraints,
+                    completion_criteria=request.completion_criteria,
+                )
+                initial_user_facts = [
+                    UserFactInput(name=name, value=value)
+                    for name, value in zip(
+                        request.initial_user_fact_names,
+                        request.initial_user_fact_values,
+                        strict=True,
+                    )
+                ]
                 command = CreateCase(
                     idempotency_key=request.request_id,
-                    problem_spec=request.problem_spec,
-                    initial_user_facts=request.initial_user_facts,
+                    problem_spec=problem_spec,
+                    initial_user_facts=initial_user_facts,
                     wait_seconds=request.wait_seconds,
                 )
             except ValidationError as exc:
@@ -373,7 +454,9 @@ class McpAdapter:
                     idempotency_key=request.request_id,
                     case_id=request.case_id,
                     expected_case_revision=request.expected_case_revision,
-                    inputs=request.inputs,
+                    inputs=dict(
+                        zip(request.input_names, request.input_values, strict=True)
+                    ),
                     attachment_ids=request.attachment_ids,
                     wait_seconds=request.wait_seconds,
                 )

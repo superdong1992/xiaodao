@@ -411,7 +411,7 @@ DiagnosisState
 └── candidate_conclusion?
 ```
 
-`problem_spec` 自身带版本，至少包含问题陈述、期望行为、实际行为、范围、约束和完成条件。外部创建请求使用不带 revision 的 `ProblemSpecInput`，由服务端验证后生成 revision 1；初始事实使用 `{name,value}`，补充参数使用 requirement name 到字符串值的对象。字段形状、name 规则、文本边界和 provenance 以 S00 为唯一权威。实质改变诊断目标时创建新 Case；同一目标下的澄清和补充递增 `DiagnosisState.revision`。
+`problem_spec` 自身带版本，至少包含问题陈述、期望行为、实际行为、范围、约束和完成条件。公开 MCP 创建输入按 S06 扁平传递八个问题字段，以及相互配对的初始事实 name/value 标量数组；补充输入同样使用相互配对的 requirement name/value 标量数组。Remote MCP Adapter 严格验证并重建 S00 的 `ProblemSpecInput`、`UserFactInput[]` 与输入字典，服务端再生成 revision 1 和 provenance；内部领域模型、状态文件及输出结构保持嵌套。字段形状、name 规则、文本边界和 provenance 以 S00 与 S06 为权威。实质改变诊断目标时创建新 Case；同一目标下的澄清和补充递增 `DiagnosisState.revision`。
 
 最小条目结构：
 

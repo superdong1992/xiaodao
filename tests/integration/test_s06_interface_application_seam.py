@@ -86,17 +86,16 @@ def _application():
 def _create_arguments(statement: str = "Payment RPC timeout") -> dict[str, object]:
     return {
         "request_id": "s08-mcp-create",
-        "problem_spec": {
-            "statement": statement,
-            "expected_behavior": "Inventory responds before the deadline",
-            "actual_behavior": "Payment observes an RPC timeout",
-            "scope": "payment-service to inventory-service",
-            "goals": ["Locate the cause"],
-            "non_goals": [],
-            "constraints": ["Use supplied evidence"],
-            "completion_criteria": ["Produce an evidenced diagnosis"],
-        },
-        "initial_user_facts": [],
+        "statement": statement,
+        "expected_behavior": "Inventory responds before the deadline",
+        "actual_behavior": "Payment observes an RPC timeout",
+        "scope": "payment-service to inventory-service",
+        "goals": ["Locate the cause"],
+        "non_goals": [],
+        "constraints": ["Use supplied evidence"],
+        "completion_criteria": ["Produce an evidenced diagnosis"],
+        "initial_user_fact_names": [],
+        "initial_user_fact_values": [],
         "wait_seconds": 0,
     }
 
