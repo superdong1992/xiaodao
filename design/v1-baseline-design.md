@@ -1239,7 +1239,7 @@ HTTP 完成 Attachment 发布后只改变文件对象状态，不自动创建诊
 
 - Case 和 DiagnosisState；
 - Job 和 Typed JobOutcome；
-- finalized `job.json`、`job_outcome.json` 执行记录及其业务投递确认；
+- finalized `job.json`、`job_outcome.json` 执行记录、可选的原始 rejected Agent Outcome 归档及规范 Outcome 的业务投递确认；
 - RouteDecision、DiagnosisOutcome 和 ReviewAssessment；
 - Evidence；
 - Attachment 和 Artifact 元数据；

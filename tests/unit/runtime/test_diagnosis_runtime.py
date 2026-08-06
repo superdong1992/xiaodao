@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import logging
 import os
 import threading
 import shutil
@@ -1253,9 +1254,11 @@ def test_open_log_sinks_typed_failure_is_replayable_execution_failure(
 def test_successful_backend_with_missing_final_file_publishes_outcome_missing(
     tmp_path: Path,
 ) -> None:
+    records = InMemoryExecutionRecordStore()
     runtime, job, _, _, _ = _runtime_fixture(
         tmp_path,
         backend=_RuntimeBackend(None),
+        records=records,
     )
 
     receipt = runtime.execute(job, InMemoryCancellationSignal())
@@ -1263,6 +1266,7 @@ def test_successful_backend_with_missing_final_file_publishes_outcome_missing(
     assert receipt.job_outcome.error is not None
     assert receipt.job_outcome.error.stage is ExecutionStage.OUTCOME_VALIDATE
     assert receipt.job_outcome.error.code is ErrorCode.OUTCOME_MISSING
+    assert records.publish_rejected_agent_output_calls == []
 
 
 class _RuntimeBrokerSession:
@@ -1611,6 +1615,104 @@ def _public_fake_claiming_runtime(
     return runtime, job, factory, backend, resources
 
 
+class _NonCanonicalClaimingBackend(_PublicFakeClaimingBackend):
+    rejected_bytes: bytes | None = None
+
+    def execute(self, **kwargs: Any) -> BackendExecution:
+        execution = super().execute(**kwargs)
+        outcome_path = Path(kwargs["workspace_root"]) / "output/job_outcome.json"
+        value = json.loads(outcome_path.read_bytes())
+        self.rejected_bytes = (
+            json.dumps(value, ensure_ascii=False, indent=2).encode("utf-8") + b"\n"
+        )
+        outcome_path.write_bytes(self.rejected_bytes)
+        return execution
+
+
+def _noncanonical_claiming_runtime(
+    tmp_path: Path,
+    records: InMemoryExecutionRecordStore,
+) -> tuple[DiagnosisRuntime, Job, _NonCanonicalClaimingBackend]:
+    factory = FakeLogparseBrokerFactory()
+    catalog = _logparse_catalog(tmp_path, factory)
+    job, aggregate, resources = _claimed_logparse_job_state_and_resources(catalog)
+    backend = _NonCanonicalClaimingBackend(factory, job, "failed")
+    runtime = DiagnosisRuntime(
+        state_repository=_StateView(aggregate),
+        resource_store=resources,
+        asset_catalog=catalog,
+        logparse_broker_factory=factory,
+        execution_records=records,
+        clock=_Clock(),
+        id_generator=_Ids(),
+        workspace_manager=WorkspaceManager(tmp_path / "noncanonical-logparse-data"),
+        backend=backend,  # type: ignore[arg-type]
+    )
+    return runtime, job, backend
+
+
+def test_noncanonical_outcome_is_preserved_and_archived_exactly(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO, logger="problem_locator.dfx")
+    records = InMemoryExecutionRecordStore()
+    runtime, job, backend = _noncanonical_claiming_runtime(tmp_path, records)
+
+    receipt = runtime.execute(job, InMemoryCancellationSignal())
+
+    assert receipt.job_outcome.error is not None
+    assert receipt.job_outcome.error.code is ErrorCode.OUTCOME_INVALID
+    assert backend.rejected_bytes is not None
+    workspace_root = Path(backend.calls[0]["workspace_root"])
+    assert (workspace_root / "output/job_outcome.json").read_bytes() == (
+        backend.rejected_bytes
+    )
+    assert records.publish_rejected_agent_output_calls == [
+        (job.job_id, backend.rejected_bytes)
+    ]
+    archived = next(
+        record
+        for record in caplog.records
+        if getattr(record, "dfx_event", "") == "runtime.agent_output.archived"
+    )
+    assert archived.dfx_fields["failure_category"] == "outcome_non_canonical"
+    assert archived.dfx_fields["archive_file_ref"] == (
+        f"jobs/{job.job_id}/agent_job_outcome.rejected.json"
+    )
+    assert archived.dfx_fields["archive_size"] == len(backend.rejected_bytes)
+    assert archived.dfx_fields["archive_sha256"] == hashlib.sha256(
+        backend.rejected_bytes
+    ).hexdigest()
+
+
+def test_rejected_output_archive_failure_preserves_primary_and_workspace(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO, logger="problem_locator.dfx")
+    records = InMemoryExecutionRecordStore()
+    records.inject_failure(
+        "publish_rejected_agent_output_bytes",
+        _application_port_error(ErrorCode.EXECUTION_RECORD_FAILED),
+    )
+    runtime, job, backend = _noncanonical_claiming_runtime(tmp_path, records)
+
+    receipt = runtime.execute(job, InMemoryCancellationSignal())
+
+    assert receipt.job_outcome.error is not None
+    assert receipt.job_outcome.error.code is ErrorCode.OUTCOME_INVALID
+    workspace_root = Path(backend.calls[0]["workspace_root"])
+    assert backend.rejected_bytes is not None
+    assert (workspace_root / "output/job_outcome.json").read_bytes() == (
+        backend.rejected_bytes
+    )
+    assert any(
+        getattr(record, "dfx_event", "") == "runtime.agent_output.archive_failed"
+        for record in caplog.records
+    )
+
+
 @pytest.mark.parametrize(
     ("accept_request", "expected_code"),
     [
@@ -1701,6 +1803,9 @@ def test_public_broker_fake_closes_claimed_success_and_stages_one_run(
     assert session.closed is True  # type: ignore[attr-defined]
     assert session.close_calls == 1  # type: ignore[attr-defined]
     assert session.parse_request_bytes() == backend.request_bytes
+    records = runtime._execution_records
+    assert isinstance(records, InMemoryExecutionRecordStore)
+    assert records.publish_rejected_agent_output_calls == []
 
 
 def test_runtime_closes_logparse_then_audits_request_bytes_before_finalize(
@@ -1783,7 +1888,7 @@ def test_logparse_broker_error_is_preserved_as_asset_failure(
     assert records.log_sinks == {}
 
 
-def test_broker_secret_in_agent_outcome_is_purged_and_never_published(
+def test_broker_secret_in_agent_outcome_is_preserved_but_never_published(
     tmp_path: Path,
 ) -> None:
     factory = _RuntimeBrokerFactory()
@@ -1817,11 +1922,14 @@ def test_broker_secret_in_agent_outcome_is_purged_and_never_published(
     assert b"runtime-test-token" not in published
     assert b"inmemory://runtime-test" not in published
     workspace_root = factory.calls[0][1]
-    assert not (workspace_root / "output").exists()
+    assert (workspace_root / "output/job_outcome.json").is_file()
+    assert b"runtime-test-token" in (
+        workspace_root / "output/job_outcome.json"
+    ).read_bytes()
     assert factory.session.events == ["close", "parse_request_bytes"]
 
 
-def test_broker_close_failure_purges_possible_secret_output(
+def test_broker_close_failure_preserves_possible_secret_output(
     tmp_path: Path,
 ) -> None:
     factory = _RuntimeBrokerFactory(close_fails=True)
@@ -1851,7 +1959,7 @@ def test_broker_close_failure_purges_possible_secret_output(
     assert receipt.job_outcome.error.code is ErrorCode.LOGPARSE_FAILED
     assert factory.session.events == ["close", "parse_request_bytes"]
     workspace_root = factory.calls[0][1]
-    assert not (workspace_root / "output").exists()
+    assert (workspace_root / "output/job_outcome.json").is_file()
     assert b"runtime-test-token" not in records.publish_outcome_calls[0][1]
 
 

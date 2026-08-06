@@ -304,6 +304,12 @@ class ExecutionRecordStore(Protocol):
         canonical_bytes: bytes,
     ) -> ExecutionFileRef: ...
 
+    def publish_rejected_agent_output_bytes(
+        self,
+        job_id: OpaqueId,
+        raw_bytes: bytes,
+    ) -> ExecutionFileRef: ...
+
     def read_published_job(self, job_id: OpaqueId) -> PublishedJobReceipt | None: ...
 
     def read_published_outcome(

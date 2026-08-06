@@ -57,6 +57,7 @@ DATA_ROOT/
 ├─ jobs/<job_id>/
 │  ├─ job.json
 │  ├─ job_outcome.json
+│  ├─ agent_job_outcome.rejected.json（可选）
 │  ├─ stdout.log
 │  └─ stderr.log
 └─ tmp/
@@ -67,7 +68,7 @@ DATA_ROOT/
    └─ state/
 ```
 
-`state.json` 是当前结构化业务状态唯一权威入口。`job.json` 是从已提交 Job 生成的不可变执行清单；`jobs/<job_id>/job_outcome.json` 是 Runtime 将 AgentJobOutcome 校验、暂存并规范化后发布的 JobOutcome，Agent 原始文件只存在于临时 Workspace；stdout/stderr 是执行日志。后三者用于执行、诊断和审计，不能覆盖 `state.json` 中的 Job 生命周期或 Outcome 处理 disposition。
+`state.json` 是当前结构化业务状态唯一权威入口。`job.json` 是从已提交 Job 生成的不可变执行清单；`jobs/<job_id>/job_outcome.json` 是 Runtime 将 AgentJobOutcome 校验、暂存并规范化后发布的 JobOutcome；被 Runtime 实际读取但拒绝的原始字节原样归档为可选的 `agent_job_outcome.rejected.json`，同时继续保留在临时 Workspace 直至普通 Workspace retention 清理；stdout/stderr 是执行日志。这些执行记录用于执行、诊断和审计，不能覆盖 `state.json` 中的 Job 生命周期或 Outcome 处理 disposition。
 
 `resources/**` 保存大文件字节或目录树，`state.json` 只保存结构化对象、相对 `storage_key`、大小和 SHA-256。绝对路径不得进入状态、外部响应或 Agent 结果。
 
@@ -218,7 +219,7 @@ FileResourceStore 只接收已经由 logparse 产生的解析目录；它验证�
 
 在 state commit 引用新 Job 前，S03 提供完整 Job DTO，S02 先原子发布 `jobs/<job_id>/job.json`。Outcome 产生的 next Job ID 已按 S00 确定性派生；同路径既有 job.json 的 Canonical bytes 完全相同时视为幂等采用，不同则返回 `IDEMPOTENCY_CONFLICT`。首次发布和相同 bytes 采用都必须执行“完整普通文件/Schema/ID/Canonical bytes 校验→只读权限→文件同步→父目录同步”的 finalize；replace 成功但 chmod/fsync 失败不能返回 receipt，下次采用必须幂等补完。其内容创建后不可改；生命周期仍只在 `state.json` 中更新。
 
-Agent 在 `tmp/workspaces/<job_id>/output/job_outcome.json` 临时产生 AgentJobOutcome；S04 验证并把 draft proposal 写入持久化暂存区后，通过 `ExecutionRecordStore.publish_outcome_bytes` 将规范 JobOutcome 原子发布为 `jobs/<job_id>/job_outcome.json`。该 publish 的成功返回是 Runtime 已永久结束的 durable-outbox 线性化点；之后只能重投同一 Outcome，禁止再执行 Agent。同路径相同 Canonical bytes 采用也必须幂等重施普通文件/Schema/ID 校验、只读和文件/父目录同步；不同返回 `IDEMPOTENCY_CONFLICT`。S03 保存 Outcome processing record 时同时保存该文件 hash。
+Agent 在 `tmp/workspaces/<job_id>/output/job_outcome.json` 临时产生 AgentJobOutcome；S04 验证并把 draft proposal 写入持久化暂存区后，通过 `ExecutionRecordStore.publish_outcome_bytes` 将规范 JobOutcome 原子发布为 `jobs/<job_id>/job_outcome.json`。若 Runtime 已安全读取该文件但拒绝其 JSON、Canonical、Schema、binding 或 proposal 语义，则通过 `publish_rejected_agent_output_bytes` 把参与校验的原始字节幂等归档为 `jobs/<job_id>/agent_job_outcome.rejected.json`；归档字节不重新编码、不要求自身是合法 JSON，相同字节采用，不同字节返回 `IDEMPOTENCY_CONFLICT`，归档失败不覆盖原始 Runtime failure。规范 Outcome publish 的成功返回仍是 Runtime 已永久结束的 durable-outbox 线性化点；之后只能重投同一 Outcome，禁止再执行 Agent。S03 保存 Outcome processing record 时同时保存规范 Outcome 文件 hash，rejected 归档不进入业务状态。
 
 `ExecutionRecordStore.read_published_job/read_published_outcome` 只读取上述最终文件，临时 `.tmp/.part` 等同不存在。最终文件存在时重新验证普通文件、路径 ID、S00 Schema、Canonical JSON bytes 和实际 size/hash，再返回 `PublishedJobReceipt` 或 `RuntimeExecutionReceipt`；损坏、链接、不可读或 ID 不符返回 `EXECUTION_RECORD_FAILED`，不得读取 `.prev`、日志或当前 Catalog 补造。S05 启动恢复和 S03 Outcome 技术校验只能通过这两个 Port 读取，不能直接拼接 `jobs/` 路径。
 

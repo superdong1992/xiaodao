@@ -542,49 +542,6 @@ def test_read_claim_is_bounded_and_rejects_a_concurrent_change(
     )
 
 
-@pytest.mark.skipif(not SAFE_DIR_FDS, reason="safe dirfd primitives unavailable")
-def test_purge_does_not_follow_replaced_output_or_ancestor(tmp_path: Path) -> None:
-    workspace = _prepared(tmp_path)
-    outside = tmp_path / "outside-output"
-    outside.mkdir()
-    sentinel = outside / "keep.txt"
-    sentinel.write_bytes(b"keep")
-    original_output = workspace.root / "output"
-    moved_output = workspace.root / "moved-output"
-    original_output.rename(moved_output)
-    original_output.symlink_to(outside, target_is_directory=True)
-
-    WorkspaceManager.purge_agent_output(workspace)
-
-    assert sentinel.read_bytes() == b"keep"
-    assert (moved_output / "proposals").is_dir()
-
-    parent = workspace.root.parent
-    detached_parent = tmp_path / "detached-data"
-    parent.rename(detached_parent)
-    outside_parent = tmp_path / "outside-parent"
-    (outside_parent / "workspace" / "output").mkdir(parents=True)
-    outside_sentinel = outside_parent / "workspace" / "output" / "keep.txt"
-    outside_sentinel.write_bytes(b"outside")
-    parent.symlink_to(outside_parent, target_is_directory=True)
-
-    WorkspaceManager.purge_agent_output(workspace)
-
-    assert outside_sentinel.read_bytes() == b"outside"
-
-
-@pytest.mark.skipif(not SAFE_DIR_FDS, reason="safe dirfd primitives unavailable")
-def test_purge_removes_only_the_frozen_output_tree(tmp_path: Path) -> None:
-    workspace = _prepared(tmp_path)
-    (workspace.root / "output" / "proposals" / "secret.json").write_bytes(b"secret")
-    (workspace.root / "inputs" / "keep.txt").write_bytes(b"input")
-
-    WorkspaceManager.purge_agent_output(workspace)
-
-    assert not (workspace.root / "output").exists()
-    assert (workspace.root / "inputs" / "keep.txt").read_bytes() == b"input"
-
-
 def test_platform_without_safe_dirfds_uses_conservative_fallback(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -608,23 +565,7 @@ def test_platform_without_safe_dirfds_uses_conservative_fallback(
         len(b"context\n") + claim_path.stat().st_size + len(b"secret")
     )
     assert WorkspaceManager.read_claim(workspace) == _claim()
-    outside = tmp_path / "outside-secret"
-    outside.write_bytes(b"keep")
-    outside_link = workspace.root / "output" / "proposals" / "outside-link"
-    link_created = False
-    try:
-        outside_link.symlink_to(outside)
-        link_created = True
-    except (NotImplementedError, OSError):
-        pass
-
-    WorkspaceManager.purge_agent_output(workspace)
-
-    assert outside.read_bytes() == b"keep"
-    if os.name == "nt" and link_created:
-        assert secret.read_bytes() == b"secret"
-    else:
-        assert not (workspace.root / "output").exists()
+    assert secret.read_bytes() == b"secret"
 
 
 def test_fallback_rejects_links_hardlinks_fifo_and_root_swap(
@@ -701,29 +642,3 @@ def test_fallback_rejects_links_hardlinks_fifo_and_root_swap(
             stage=ExecutionStage.BACKEND_EXECUTE,
             code=ErrorCode.WORKSPACE_LIMIT,
         )
-
-
-def test_fallback_purge_does_not_follow_an_ancestor_swap(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    workspace = _prepared(tmp_path)
-    parent = workspace.root.parent
-    parent.rename(tmp_path / "detached-data")
-    outside_parent = tmp_path / "outside-parent"
-    (outside_parent / "workspace" / "output").mkdir(parents=True)
-    sentinel = outside_parent / "workspace" / "output" / "keep.txt"
-    sentinel.write_bytes(b"keep")
-    try:
-        parent.symlink_to(outside_parent, target_is_directory=True)
-    except (NotImplementedError, OSError):
-        pytest.skip("directory symbolic links are unavailable")
-    monkeypatch.setattr(
-        workspace_module,
-        "_safe_dir_fd_operations_supported",
-        lambda: False,
-    )
-
-    WorkspaceManager.purge_agent_output(workspace)
-
-    assert sentinel.read_bytes() == b"keep"

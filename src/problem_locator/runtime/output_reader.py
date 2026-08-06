@@ -12,11 +12,13 @@ import hashlib
 import logging
 import os
 import stat
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import BinaryIO, Iterator, TypeAlias
+from typing import Any, BinaryIO, Iterator, TypeAlias
+
+from pydantic import ValidationError
 
 from problem_locator.contracts.enums import (
     ArtifactKind,
@@ -29,6 +31,7 @@ from problem_locator.contracts.models import (
     AgentArtifactProposalDraft,
     AgentEvidenceProposalDraft,
     AgentJobOutcome,
+    ExecutionFailure,
     Job,
     LogparseEvidenceLocator,
     TreeManifest,
@@ -45,6 +48,8 @@ from problem_locator.contracts.outcomes import (
     validate_user_result_for_outcome,
 )
 from problem_locator.contracts.serialization import (
+    InvalidJsonBytesError,
+    NonCanonicalJsonError,
     bytes_sha256,
     canonical_json_bytes,
     parse_canonical_json_bytes,
@@ -52,7 +57,7 @@ from problem_locator.contracts.serialization import (
 from problem_locator.diagnostics import log_event
 from problem_locator.integrations.result_archive import validate_result_archive_bytes
 
-from .failures import runtime_failure
+from .failures import RuntimeExecutionError, runtime_failure
 from .workspace import PreparedWorkspace
 
 
@@ -69,9 +74,32 @@ class _InvalidOutput(Exception):
 
 
 class _ClassifiedInvalidOutput(_InvalidOutput):
-    def __init__(self, category: str) -> None:
+    def __init__(
+        self,
+        category: str,
+        *,
+        diagnostic_reason: str | None = None,
+        schema_errors: tuple[dict[str, Any], ...] = (),
+    ) -> None:
         super().__init__(category)
         self.category = category
+        self.diagnostic_reason = diagnostic_reason
+        self.schema_errors = schema_errors
+
+
+class RejectedAgentOutputError(RuntimeExecutionError):
+    """Carry the exact rejected outcome bytes to the Runtime archive boundary."""
+
+    def __init__(
+        self,
+        failure: ExecutionFailure,
+        *,
+        failure_category: str,
+        raw_outcome_bytes: bytes | None,
+    ) -> None:
+        self.failure_category = failure_category
+        self.raw_outcome_bytes = raw_outcome_bytes
+        super().__init__(failure)
 
 
 @contextmanager
@@ -112,29 +140,38 @@ def _log_output_rejection(
     failure_category: str,
     final_outcome_state: str,
     final_outcome_bytes: int | None,
+    diagnostic_reason: str | None = None,
+    schema_errors: tuple[dict[str, Any], ...] = (),
 ) -> None:
-    """Record protocol facts without logging paths, bytes, or exception text."""
+    """Record protocol facts and validation diagnostics without raw bytes."""
 
     output = workspace_root / "output"
     try:
+        fields: dict[str, Any] = {
+            "job_id": job.job_id,
+            "job_type": job.job_type,
+            "code": code,
+            "failure_category": failure_category,
+            "final_outcome_state": final_outcome_state,
+            "final_outcome_bytes": final_outcome_bytes,
+            "job_outcome_part_state": _diagnostic_path_state(
+                output / "job_outcome.json.part"
+            ),
+            "dot_job_outcome_part_state": _diagnostic_path_state(
+                output / ".job_outcome.json.part"
+            ),
+            "job_outcome_tmp_state": _diagnostic_path_state(
+                output / "job_outcome.json.tmp"
+            ),
+        }
+        if diagnostic_reason is not None:
+            fields["diagnostic_reason"] = diagnostic_reason
+        if schema_errors:
+            fields["schema_errors"] = schema_errors
         log_event(
             "runtime.agent_output.rejected",
             level=logging.WARNING,
-            job_id=job.job_id,
-            job_type=job.job_type,
-            code=code,
-            failure_category=failure_category,
-            final_outcome_state=final_outcome_state,
-            final_outcome_bytes=final_outcome_bytes,
-            job_outcome_part_state=_diagnostic_path_state(
-                output / "job_outcome.json.part"
-            ),
-            dot_job_outcome_part_state=_diagnostic_path_state(
-                output / ".job_outcome.json.part"
-            ),
-            job_outcome_tmp_state=_diagnostic_path_state(
-                output / "job_outcome.json.tmp"
-            ),
+            **fields,
         )
     except Exception:
         # Observability must never replace the frozen Runtime failure.
@@ -1209,6 +1246,7 @@ def _read_validated_output(
     root_identity: tuple[int, int],
     output_identity: tuple[int, int],
     inputs_identity: tuple[int, int] | None = None,
+    capture_outcome_bytes: Callable[[bytes], None] | None = None,
 ) -> ValidatedAgentOutput:
     outcome_relative_path = "output/job_outcome.json"
     with _classify_invalid_output("final_outcome_read"):
@@ -1228,11 +1266,46 @@ def _read_validated_output(
         )
     remaining_bytes -= outcome_size
     assert raw_outcome_bytes is not None
-    with _classify_invalid_output("outcome_canonical_or_schema"):
-        outcome = parse_canonical_json_bytes(
-            raw_outcome_bytes,
-            model_type=AgentJobOutcome,
+    if capture_outcome_bytes is not None:
+        capture_outcome_bytes(raw_outcome_bytes)
+    try:
+        parsed_outcome = parse_canonical_json_bytes(raw_outcome_bytes)
+    except InvalidJsonBytesError as exc:
+        raise _ClassifiedInvalidOutput(
+            "outcome_json_invalid",
+            diagnostic_reason=str(exc),
+        ) from None
+    except NonCanonicalJsonError as exc:
+        raise _ClassifiedInvalidOutput(
+            "outcome_non_canonical",
+            diagnostic_reason=str(exc),
+        ) from None
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except Exception as exc:
+        raise _ClassifiedInvalidOutput(
+            "outcome_json_invalid",
+            diagnostic_reason=str(exc),
+        ) from None
+    try:
+        outcome = AgentJobOutcome.model_validate(parsed_outcome)
+    except ValidationError as exc:
+        schema_errors = tuple(
+            {
+                "location": [str(part) for part in error["loc"]],
+                "type": error["type"],
+                "message": error["msg"],
+            }
+            for error in exc.errors(include_input=False, include_url=False)
         )
+        raise _ClassifiedInvalidOutput(
+            "outcome_schema",
+            diagnostic_reason=(
+                "AgentJobOutcome validation produced "
+                f"{len(schema_errors)} error(s)"
+            ),
+            schema_errors=schema_errors,
+        ) from None
     with _classify_invalid_output("outcome_job_binding_or_contract"):
         validate_outcome_for_job(job, outcome, workspace_manifest)
     with _classify_invalid_output("outcome_security_scan"):
@@ -1391,9 +1464,17 @@ def read_agent_output(
     missing = False
     invalid = False
     failure_category = "workspace_or_proposal_validation"
+    diagnostic_reason: str | None = None
+    schema_errors: tuple[dict[str, Any], ...] = ()
     final_outcome_state = "not_checked"
     final_outcome_bytes: int | None = None
+    raw_outcome_bytes: bytes | None = None
     validated: ValidatedAgentOutput | None = None
+
+    def capture_outcome_bytes(value: bytes) -> None:
+        nonlocal raw_outcome_bytes
+        raw_outcome_bytes = value
+
     try:
         if isinstance(workspace, PreparedWorkspace):
             root_identity = (workspace.root_device, workspace.root_inode)
@@ -1440,6 +1521,7 @@ def read_agent_output(
             root_identity=root_identity,
             output_identity=output_identity,
             inputs_identity=inputs_identity,
+            capture_outcome_bytes=capture_outcome_bytes,
         )
         with _classify_invalid_output("final_outcome_stability"):
             _assert_snapshot_paths(initial)
@@ -1453,6 +1535,8 @@ def read_agent_output(
     except _ClassifiedInvalidOutput as exc:
         invalid = True
         failure_category = exc.category
+        diagnostic_reason = exc.diagnostic_reason
+        schema_errors = exc.schema_errors
     except (KeyboardInterrupt, SystemExit):
         raise
     except Exception:
@@ -1482,11 +1566,18 @@ def read_agent_output(
             failure_category=failure_category,
             final_outcome_state=final_outcome_state,
             final_outcome_bytes=final_outcome_bytes,
+            diagnostic_reason=diagnostic_reason,
+            schema_errors=schema_errors,
         )
-        raise runtime_failure(
+        failure = runtime_failure(
             stage=ExecutionStage.OUTCOME_VALIDATE,
             code=ErrorCode.OUTCOME_INVALID,
             message="Agent outcome validation failed.",
+        ).failure
+        raise RejectedAgentOutputError(
+            failure,
+            failure_category=failure_category,
+            raw_outcome_bytes=raw_outcome_bytes,
         ) from None
     assert validated is not None
     return validated
@@ -1495,5 +1586,6 @@ def read_agent_output(
 __all__ = [
     "ValidatedAgentOutput",
     "ValidatedProposalResource",
+    "RejectedAgentOutputError",
     "read_agent_output",
 ]

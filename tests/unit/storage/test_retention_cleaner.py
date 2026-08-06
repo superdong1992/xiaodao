@@ -584,8 +584,19 @@ def test_state_references_and_nonterminal_workspaces_are_retained(
     )
     pending_workspace = harness.layout.workspaces / next(iter(aggregate.jobs))
     terminal_workspace = harness.layout.workspaces / TERMINAL_JOB_ID
+    rejected_archive = (
+        harness.layout.jobs
+        / TERMINAL_JOB_ID
+        / "agent_job_outcome.rejected.json"
+    )
+    rejected_archive.parent.mkdir()
+    rejected_archive.write_bytes(b'{"invalid":"agent output"}\n')
     pending_workspace.mkdir()
     terminal_workspace.mkdir()
+    _set_age(
+        rejected_archive.parent,
+        ORPHAN_RESOURCE_RETENTION_SECONDS + 1,
+    )
     _set_age(pending_workspace, WORKSPACE_RETENTION_SECONDS + 1)
     _set_age(terminal_workspace, WORKSPACE_RETENTION_SECONDS + 1)
 
@@ -594,6 +605,7 @@ def test_state_references_and_nonterminal_workspaces_are_retained(
     assert formal.exists()
     assert pending_workspace.exists()
     assert not terminal_workspace.exists()
+    assert rejected_archive.read_bytes() == b'{"invalid":"agent output"}\n'
 
 
 def test_commit_that_wins_shared_lock_prevents_orphan_quarantine(

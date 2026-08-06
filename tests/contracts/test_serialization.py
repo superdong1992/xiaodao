@@ -8,6 +8,8 @@ from pydantic import ValidationError
 
 from problem_locator.contracts import SCHEMA_MODELS
 from problem_locator.contracts.serialization import (
+    InvalidJsonBytesError,
+    NonCanonicalJsonError,
     canonical_json_bytes,
     canonical_json_sha256,
     is_canonical_json_bytes,
@@ -52,6 +54,15 @@ def test_parse_rejects_noncanonical_or_ambiguous_bytes(data: bytes) -> None:
     assert not is_canonical_json_bytes(data)
     with pytest.raises((TypeError, ValueError, ValidationError)):
         parse_canonical_json_bytes(data)
+
+
+def test_parse_exposes_invalid_and_noncanonical_failure_kinds() -> None:
+    with pytest.raises(InvalidJsonBytesError, match="line 1 column 1"):
+        parse_canonical_json_bytes(b"not-json\n")
+    with pytest.raises(NonCanonicalJsonError, match="first difference at byte"):
+        parse_canonical_json_bytes(b'{"a": 1}\n')
+    with pytest.raises(NonCanonicalJsonError, match="trailing LF is missing"):
+        parse_canonical_json_bytes(b'{"a":1}')
 
 
 def test_parse_can_validate_and_return_a_public_model() -> None:

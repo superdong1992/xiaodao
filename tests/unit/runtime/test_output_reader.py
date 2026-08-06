@@ -27,7 +27,10 @@ from problem_locator.contracts.serialization import (
 )
 from problem_locator.integrations.result_archive import build_result_archive
 from problem_locator.runtime.failures import RuntimeExecutionError
-from problem_locator.runtime.output_reader import read_agent_output
+from problem_locator.runtime.output_reader import (
+    RejectedAgentOutputError,
+    read_agent_output,
+)
 from problem_locator.runtime.workspace import PreparedWorkspace
 
 
@@ -339,16 +342,17 @@ def test_part_file_without_final_is_outcome_missing(
 
 
 @pytest.mark.parametrize(
-    "invalid_bytes",
+    ("invalid_bytes", "expected_category"),
     [
-        b"not-json\n",
-        b' {"valid":"json but not canonical"}\n',
-        b'{"unexpected":true}\n',
+        (b"not-json\n", "outcome_json_invalid"),
+        (b' {"valid":"json but not canonical"}\n', "outcome_non_canonical"),
+        (b'{"unexpected":true}\n', "outcome_schema"),
     ],
 )
-def test_invalid_json_canonical_form_or_schema_is_outcome_invalid(
+def test_invalid_json_canonical_form_and_schema_are_distinguished(
     tmp_path: Path,
     invalid_bytes: bytes,
+    expected_category: str,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     caplog.set_level(logging.INFO, logger="problem_locator.dfx")
@@ -359,14 +363,26 @@ def test_invalid_json_canonical_form_or_schema_is_outcome_invalid(
         read_agent_output(tmp_path, job, manifest)
 
     _assert_failure(captured, ErrorCode.OUTCOME_INVALID)
+    assert isinstance(captured.value, RejectedAgentOutputError)
+    assert captured.value.raw_outcome_bytes == invalid_bytes
+    assert captured.value.failure_category == expected_category
     rejected = next(
         record
         for record in caplog.records
         if getattr(record, "dfx_event", "") == "runtime.agent_output.rejected"
     )
-    assert rejected.dfx_fields["failure_category"] == "outcome_canonical_or_schema"
+    assert rejected.dfx_fields["failure_category"] == expected_category
     assert rejected.dfx_fields["final_outcome_state"] == "present"
     assert rejected.dfx_fields["final_outcome_bytes"] == len(invalid_bytes)
+    assert rejected.dfx_fields["diagnostic_reason"]
+    if expected_category == "outcome_schema":
+        assert rejected.dfx_fields["schema_errors"]
+        assert all(
+            {"location", "type", "message"} == set(error)
+            for error in rejected.dfx_fields["schema_errors"]
+        )
+    else:
+        assert "schema_errors" not in rejected.dfx_fields
 
 
 def test_outcome_job_binding_must_match_exactly(tmp_path: Path) -> None:

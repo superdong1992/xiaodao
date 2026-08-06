@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import inspect
 import os
 import stat
@@ -249,6 +250,7 @@ def test_public_methods_match_frozen_execution_record_port_signatures() -> None:
     expected_parameters = {
         "publish_job": ["self", "job"],
         "publish_outcome_bytes": ["self", "job_id", "canonical_bytes"],
+        "publish_rejected_agent_output_bytes": ["self", "job_id", "raw_bytes"],
         "read_published_job": ["self", "job_id"],
         "read_published_outcome": ["self", "job_id"],
         "open_log_sinks": ["self", "job_id", "combined_limit_bytes"],
@@ -558,6 +560,52 @@ def test_same_outcome_is_adopted_but_different_valid_outcome_conflicts(
     with _raises_port_error(ErrorCode.IDEMPOTENCY_CONFLICT):
         store.publish_outcome_bytes(ROUTE_JOB_ID, conflicting_bytes)
     assert final_path.read_bytes() == canonical_bytes
+
+
+def test_rejected_agent_output_is_archived_exactly_and_idempotently(
+    tmp_path: Path,
+    coordination: CoordinationLock,
+) -> None:
+    replacer = RecordingReplacer()
+    store = _store(
+        tmp_path,
+        coordination,
+        replacer=replacer,
+    )
+    raw_bytes = b'{\n  "not": "canonical"\n}\n'
+
+    first = store.publish_rejected_agent_output_bytes(ROUTE_JOB_ID, raw_bytes)
+    final_path = (
+        tmp_path / "jobs" / ROUTE_JOB_ID / "agent_job_outcome.rejected.json"
+    )
+    assert final_path.read_bytes() == raw_bytes
+    assert stat.S_IMODE(final_path.stat().st_mode) & 0o222 == 0
+    assert first.relative_key == (
+        f"jobs/{ROUTE_JOB_ID}/agent_job_outcome.rejected.json"
+    )
+    assert first.size == len(raw_bytes)
+    assert first.sha256 == hashlib.sha256(raw_bytes).hexdigest()
+
+    adopted = store.publish_rejected_agent_output_bytes(ROUTE_JOB_ID, raw_bytes)
+    assert adopted == first
+    assert len(replacer.calls) == 1
+
+    with _raises_port_error(ErrorCode.IDEMPOTENCY_CONFLICT):
+        store.publish_rejected_agent_output_bytes(ROUTE_JOB_ID, b"different")
+    assert final_path.read_bytes() == raw_bytes
+
+
+def test_rejected_agent_output_replace_failure_leaves_no_partial_file(
+    tmp_path: Path,
+    coordination: CoordinationLock,
+) -> None:
+    store = _store(tmp_path, coordination, replacer=FailingReplacer())
+
+    with _raises_port_error(ErrorCode.EXECUTION_RECORD_FAILED):
+        store.publish_rejected_agent_output_bytes(ROUTE_JOB_ID, b"invalid")
+
+    job_directory = tmp_path / "jobs" / ROUTE_JOB_ID
+    assert list(job_directory.iterdir()) == []
 
 
 @pytest.mark.parametrize(

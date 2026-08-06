@@ -29,6 +29,7 @@ from problem_locator.contracts import (
     StateRepository,
     validate_logparse_claim_for_job,
 )
+from problem_locator.diagnostics import log_event
 from problem_locator.journey import (
     record_journey_event,
     record_stage_completed,
@@ -41,7 +42,7 @@ from .context_builder import ContextBuilder, ContextLimitExceeded, ContextMateri
 from .context_policy import ResolvedJobAssets, RuntimeAssetResolver
 from .failures import RuntimeExecutionError, runtime_failure
 from .outcome_publisher import OutcomePublisher
-from .output_reader import read_agent_output
+from .output_reader import RejectedAgentOutputError, read_agent_output
 from .proposal_stager import discard_staged, stage_validated_output
 from .workspace import PreparedWorkspace, WorkspaceManager
 
@@ -277,9 +278,8 @@ class DiagnosisRuntime:
                 workspace.manifest,
                 secrets=secrets,
             )
-        except RuntimeExecutionError as exc:
-            if secrets:
-                self._workspace_manager.purge_agent_output(workspace)
+        except RejectedAgentOutputError as exc:
+            self._archive_rejected_agent_output(job, exc)
             raise
         record_stage_completed(
             ExecutionStage.OUTCOME_VALIDATE,
@@ -345,6 +345,47 @@ class DiagnosisRuntime:
                 receipt,
             )
         return receipt
+
+    def _archive_rejected_agent_output(
+        self,
+        job: Job,
+        rejection: RejectedAgentOutputError,
+    ) -> None:
+        raw_bytes = rejection.raw_outcome_bytes
+        if raw_bytes is None:
+            return
+        try:
+            file_ref = self._execution_records.publish_rejected_agent_output_bytes(
+                job.job_id,
+                raw_bytes,
+            )
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except Exception as exc:
+            try:
+                log_event(
+                    "runtime.agent_output.archive_failed",
+                    job_id=job.job_id,
+                    job_type=job.job_type,
+                    failure_category=rejection.failure_category,
+                    raw_bytes=len(raw_bytes),
+                    error=exc,
+                )
+            except Exception:
+                pass
+            return
+        try:
+            log_event(
+                "runtime.agent_output.archived",
+                job_id=job.job_id,
+                job_type=job.job_type,
+                failure_category=rejection.failure_category,
+                archive_file_ref=file_ref.relative_key,
+                archive_size=file_ref.size,
+                archive_sha256=file_ref.sha256,
+            )
+        except Exception:
+            pass
 
     @staticmethod
     def _record_produced_outcome(receipt: RuntimeExecutionReceipt) -> None:
@@ -578,8 +619,6 @@ class DiagnosisRuntime:
                     actual="audit_failed",
                 )
         if primary is not None:
-            if secrets:
-                self._workspace_manager.purge_agent_output(workspace)
             raise RuntimeExecutionError(primary)
         record_stage_completed(
             ExecutionStage.TOOL_EXECUTE,

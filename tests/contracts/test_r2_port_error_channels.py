@@ -166,6 +166,7 @@ EXPECTED_SUCCESS_RETURNS: dict[str, Any] = {
     "ResourceStore.discard": NoneType,
     "ExecutionRecordStore.publish_job": models.ExecutionFileRef,
     "ExecutionRecordStore.publish_outcome_bytes": models.ExecutionFileRef,
+    "ExecutionRecordStore.publish_rejected_agent_output_bytes": models.ExecutionFileRef,
     "ExecutionRecordStore.read_published_job": models.PublishedJobReceipt | None,
     "ExecutionRecordStore.read_published_outcome": models.RuntimeExecutionReceipt | None,
     "ExecutionRecordStore.open_log_sinks": models.ExecutionLogSinks,

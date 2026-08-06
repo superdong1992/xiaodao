@@ -20,6 +20,14 @@ from .limits import CONTRACT_REVISION, GENERATOR_VERSION, SCHEMA_VERSION
 _T = TypeVar("_T")
 
 
+class InvalidJsonBytesError(ValueError):
+    """Raised when bytes cannot represent an unambiguous JSON value."""
+
+
+class NonCanonicalJsonError(ValueError):
+    """Raised when valid JSON bytes do not use the V1 canonical spelling."""
+
+
 def _reject_non_finite(value: str) -> None:
     raise ValueError(f"non-finite JSON number is forbidden: {value}")
 
@@ -31,6 +39,27 @@ def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
             raise ValueError(f"duplicate JSON object key is forbidden: {key!r}")
         result[key] = value
     return result
+
+
+def _noncanonical_reason(actual: bytes, expected: bytes) -> str:
+    if expected.endswith(b"\n") and actual == expected[:-1]:
+        return "required trailing LF is missing"
+    if actual.endswith(b"\r\n") and actual[:-2] + b"\n" == expected:
+        return "CRLF is forbidden; the canonical terminator is LF"
+    first_difference = next(
+        (
+            index
+            for index, (actual_byte, expected_byte) in enumerate(
+                zip(actual, expected)
+            )
+            if actual_byte != expected_byte
+        ),
+        min(len(actual), len(expected)),
+    )
+    return (
+        f"first difference at byte {first_difference}; "
+        f"actual size {len(actual)}, canonical size {len(expected)}"
+    )
 
 
 def _json_compatible(value: Any) -> Any:
@@ -129,17 +158,37 @@ def parse_canonical_json_bytes(
     if not isinstance(data, bytes):
         raise TypeError("data must be bytes")
     if data.startswith(b"\xef\xbb\xbf"):
-        raise ValueError("a UTF-8 BOM is forbidden")
+        raise InvalidJsonBytesError("a UTF-8 BOM is forbidden")
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise InvalidJsonBytesError(
+            "invalid UTF-8 JSON bytes: "
+            f"decode failed at byte {exc.start}: {exc.reason}"
+        ) from exc
     try:
         parsed = json.loads(
-            data.decode("utf-8"),
+            text,
             object_pairs_hook=_unique_object,
             parse_constant=_reject_non_finite,
         )
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise ValueError("invalid UTF-8 JSON bytes") from exc
-    if canonical_json_bytes(parsed) != data:
-        raise ValueError("JSON bytes are not canonical")
+    except json.JSONDecodeError as exc:
+        raise InvalidJsonBytesError(
+            "invalid UTF-8 JSON bytes: "
+            f"JSON syntax error at line {exc.lineno} column {exc.colno}: "
+            f"{exc.msg}"
+        ) from exc
+    except ValueError as exc:
+        raise InvalidJsonBytesError(str(exc)) from exc
+    try:
+        expected_bytes = canonical_json_bytes(parsed)
+    except (TypeError, ValueError) as exc:
+        raise InvalidJsonBytesError("JSON value cannot be canonically encoded") from exc
+    if expected_bytes != data:
+        raise NonCanonicalJsonError(
+            "JSON bytes are not canonical: "
+            + _noncanonical_reason(data, expected_bytes)
+        )
     if model_type is None:
         return parsed
     return TypeAdapter(model_type).validate_python(parsed)
@@ -222,6 +271,8 @@ def contract_manifest_bytes(repo_root: Path) -> bytes:
 __all__ = [
     "CONTRACT_REVISION",
     "GENERATOR_VERSION",
+    "InvalidJsonBytesError",
+    "NonCanonicalJsonError",
     "SCHEMA_VERSION",
     "bytes_sha256",
     "business_request_preimage",

@@ -2158,9 +2158,11 @@ class InMemoryExecutionRecordStore:
     def __init__(self) -> None:
         self._job_bytes: dict[str, bytes] = {}
         self._outcome_bytes: dict[str, bytes] = {}
+        self._rejected_agent_output_bytes: dict[str, bytes] = {}
         self.log_sinks: dict[str, ExecutionLogSinks] = {}
         self.publish_job_calls: list[Job] = []
         self.publish_outcome_calls: list[tuple[str, bytes]] = []
+        self.publish_rejected_agent_output_calls: list[tuple[str, bytes]] = []
         self._failures: defaultdict[str, deque[BaseException]] = defaultdict(deque)
         self._lock = threading.RLock()
 
@@ -2235,6 +2237,31 @@ class InMemoryExecutionRecordStore:
             return self._file_ref(
                 f"jobs/{job_id}/job_outcome.json",
                 canonical_bytes,
+            )
+
+    def publish_rejected_agent_output_bytes(
+        self,
+        job_id: str,
+        raw_bytes: bytes,
+    ) -> ExecutionFileRef:
+        self._maybe_fail("publish_rejected_agent_output_bytes")
+        if type(raw_bytes) is not bytes:
+            raise _port_error(
+                ErrorCode.EXECUTION_RECORD_FAILED,
+                "The rejected Agent output is not exact bytes.",
+            )
+        with self._lock:
+            self.publish_rejected_agent_output_calls.append((job_id, raw_bytes))
+            existing = self._rejected_agent_output_bytes.get(job_id)
+            if existing is not None and existing != raw_bytes:
+                raise _port_error(
+                    ErrorCode.IDEMPOTENCY_CONFLICT,
+                    "The rejected Agent output conflicts with existing bytes.",
+                )
+            self._rejected_agent_output_bytes[job_id] = raw_bytes
+            return self._file_ref(
+                f"jobs/{job_id}/agent_job_outcome.rejected.json",
+                raw_bytes,
             )
 
     def read_published_job(self, job_id: str) -> PublishedJobReceipt | None:

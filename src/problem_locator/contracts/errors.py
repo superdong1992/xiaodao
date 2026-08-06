@@ -410,6 +410,9 @@ PORT_ERROR_CODES: Mapping[str, frozenset[ErrorCode]] = MappingProxyType(
         "ExecutionRecordStore.publish_outcome_bytes": frozenset(
             {ErrorCode.IDEMPOTENCY_CONFLICT, ErrorCode.EXECUTION_RECORD_FAILED}
         ),
+        "ExecutionRecordStore.publish_rejected_agent_output_bytes": frozenset(
+            {ErrorCode.IDEMPOTENCY_CONFLICT, ErrorCode.EXECUTION_RECORD_FAILED}
+        ),
         "ExecutionRecordStore.read_published_job": frozenset(
             {ErrorCode.EXECUTION_RECORD_FAILED}
         ),

@@ -913,6 +913,7 @@ StateChangeNotifier.wait_for_change(case_id, after_generation, timeout_seconds)
   -> changed: bool
 ExecutionRecordStore.publish_job(job) -> ExecutionFileRef
 ExecutionRecordStore.publish_outcome_bytes(job_id, canonical_bytes) -> ExecutionFileRef
+ExecutionRecordStore.publish_rejected_agent_output_bytes(job_id, raw_bytes) -> ExecutionFileRef
 ExecutionRecordStore.read_published_job(job_id) -> PublishedJobReceipt?
 ExecutionRecordStore.read_published_outcome(job_id) -> RuntimeExecutionReceipt?
 ExecutionRecordStore.open_log_sinks(job_id, combined_limit_bytes) -> ExecutionLogSinks

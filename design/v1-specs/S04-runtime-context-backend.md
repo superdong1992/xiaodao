@@ -180,13 +180,13 @@ Runtime 接收一个已由 S05 成功认领、且仍保持固定输入的 Job，
 6. 若 Job 固定 logparse，调用 `LogparseBrokerFactory.open(job, workspace_root, workspace_manifest, cancellation)`；只把 session 的 endpoint/token 注入已净化 Agent 环境，无 logparse 时不启动 broker；
 7. 通过 stdin 向 Backend 提交 Prompt；
 8. 等待子进程成功退出；
-9. 读取并按 S00 `AgentJobOutcome` Schema 校验 `output/job_outcome.json`；
-10. 校验 draft proposal path、声明值、Job 绑定和相对路径安全性；若存在 broker session，还要对 AgentJobOutcome Canonical bytes、全部 proposal 相对路径 UTF-8 bytes，以及每个待保留普通文件/目录树文件内容做与日志相同的跨分块精确 secret 扫描；任一 endpoint/token 命中都产生安全 `OUTCOME_INVALID`，不 stage proposal、不发布原 AgentJobOutcome，并在 close session 后 best-effort 删除 Workspace 的 offending output/proposal；随后按第 6.4 节正常系统失败路径构造并 finalize 一个 message/details/Canonical bytes 均不含 secret 的规范 Failure JobOutcome，返回可重放 receipt，只有该 finalize 自身失败才抛 RuntimeInfrastructureError；
+9. 读取并按 S00 `AgentJobOutcome` Schema 校验 `output/job_outcome.json`；解析诊断严格区分 `outcome_json_invalid`（UTF-8、JSON 语法、重复键或非有限数字）、`outcome_non_canonical`（字节拼写不规范）和 `outcome_schema`（字段校验失败），前两类记录具体原因，Schema 类逐项记录字段路径、错误类型和消息，但都不记录整份原始内容；
+10. 校验 draft proposal path、声明值、Job 绑定和相对路径安全性；若存在 broker session，还要对 AgentJobOutcome Canonical bytes、全部 proposal 相对路径 UTF-8 bytes，以及每个待保留普通文件/目录树文件内容做与日志相同的跨分块精确 secret 扫描；任一 endpoint/token 命中都产生 `OUTCOME_INVALID`，不 stage proposal、不发布原 AgentJobOutcome；Runtime 不即时删除 Agent output，而是保留 Workspace 原文件，并把已经安全读取、实际参与校验的 `job_outcome.json` 原始字节 best-effort 幂等归档到 Job 执行记录；随后按第 6.4 节正常系统失败路径构造并 finalize 规范 Failure JobOutcome，归档失败只记诊断且不覆盖原失败；
 11. 若有 CandidateConclusionDraft，定位唯一 USER_RESULT draft，在暂存前完整读取其 payload，要求逐字是 S00 `UserResultPayload` 的 Canonical JSON bytes，且 problem、candidate statement、supporting bindings 和完整 completion mapping 分别匹配 Job 与同一 AgentJobOutcome；任一不符产生 `OUTCOME_INVALID`，没有 candidate 时不得读取或接受 USER_RESULT；
 12. 对每个有文件内容的 draft 调用 S00 ResourceStore Port，以 `{job_id,proposal_key}` 所有权写入持久化暂存区并取得 `StagedResourceRef`；
 13. 用实际 size/hash、暂存引用和原语义字段构造不含 Workspace 路径的规范 `JobOutcome`；对 `LOGPARSE_RUN`，`tree_manifest_sha256`、工具 VersionedRef、`parse_parameters.product` 和源 Attachment ID/hash 必须由 Runtime 从实际暂存结果与 Job 固定引用重建；`parse_manifest_relative_path` 必须从受控输出中唯一直接 task 目录推导，并在 staged TreeManifest 中验证目标为存在的普通文件，不能信任 Agent 自报值；
 14. 重新执行规范 JobOutcome Schema、binding 和 proposal 唯一性校验；
-15. 通过 `ExecutionRecordStore.publish_outcome_bytes` 发布规范 Outcome；Agent 的原始文件只留在临时 Workspace；
+15. 通过 `ExecutionRecordStore.publish_outcome_bytes` 发布规范 Outcome；合法 Agent 原始文件留在临时 Workspace，被拒绝的原始 Outcome 还会归档为 `jobs/<job_id>/agent_job_outcome.rejected.json`；
 16. 向 S05 返回 `RuntimeExecutionReceipt(job_outcome,outcome_file_ref)`，不直接提交业务状态。
 
 从第 6 步成功开始，无论 Backend、proposal、Outcome 发布、取消或超时如何结束，都必须在 `finally` 调用 broker session.close；关闭失败不覆盖更早的主失败，但必须进入安全诊断。Broker 启动的真实 logparse 子进程也必须绑定同一 CancellationSignal 和 S04 可终止进程树。

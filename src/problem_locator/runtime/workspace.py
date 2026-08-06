@@ -345,50 +345,6 @@ def _measure_untrusted_directory(
     return total
 
 
-def _purge_directory_contents(
-    descriptor: int,
-    *,
-    workspace_device: int,
-) -> None:
-    for name in _listed_names(descriptor):
-        metadata = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
-        if metadata.st_dev != workspace_device:
-            raise _UnsafeWorkspaceError("workspace node crossed a filesystem")
-        if stat.S_ISDIR(metadata.st_mode):
-            child_descriptor = os.open(
-                name,
-                _directory_flags(),
-                dir_fd=descriptor,
-            )
-            try:
-                opened_metadata = os.fstat(child_descriptor)
-                if (
-                    not stat.S_ISDIR(opened_metadata.st_mode)
-                    or _identity(opened_metadata) != _identity(metadata)
-                    or opened_metadata.st_dev != workspace_device
-                ):
-                    raise _UnsafeWorkspaceError("workspace directory changed")
-                _purge_directory_contents(
-                    child_descriptor,
-                    workspace_device=workspace_device,
-                )
-            finally:
-                os.close(child_descriptor)
-            final_metadata = os.stat(
-                name,
-                dir_fd=descriptor,
-                follow_symlinks=False,
-            )
-            if (
-                not stat.S_ISDIR(final_metadata.st_mode)
-                or _identity(final_metadata) != _identity(metadata)
-            ):
-                raise _UnsafeWorkspaceError("workspace directory changed")
-            os.rmdir(name, dir_fd=descriptor)
-        else:
-            os.unlink(name, dir_fd=descriptor)
-
-
 def _is_link_or_reparse(metadata: os.stat_result) -> bool:
     attributes = getattr(metadata, "st_file_attributes", 0)
     reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
@@ -766,77 +722,6 @@ def _fallback_read_claim(workspace: PreparedWorkspace) -> LogparseParseClaim | N
         raise _UnsafeWorkspaceError("parse claim changed during inspection")
     _fallback_assert_beneath(claim_path, _fallback_root(workspace))
     return parse_canonical_json_bytes(bytes(data), model_type=LogparseParseClaim)
-
-
-def _fallback_purge_contents(
-    workspace: PreparedWorkspace,
-    path: Path,
-    *,
-    root_resolved: Path,
-) -> None:
-    directory_metadata = path.stat(follow_symlinks=False)
-    if (
-        _is_link_or_reparse(directory_metadata)
-        or not stat.S_ISDIR(directory_metadata.st_mode)
-        or directory_metadata.st_dev != workspace.root_device
-    ):
-        raise _UnsafeWorkspaceError("purge directory is unsafe")
-    _fallback_assert_beneath(path, root_resolved)
-    for name in _fallback_names(path):
-        _fallback_root(workspace)
-        current_metadata = path.stat(follow_symlinks=False)
-        if (
-            _is_link_or_reparse(current_metadata)
-            or _identity(current_metadata) != _identity(directory_metadata)
-        ):
-            raise _UnsafeWorkspaceError("purge directory changed")
-        candidate = path / name
-        metadata = candidate.stat(follow_symlinks=False)
-        if metadata.st_dev != workspace.root_device:
-            raise _UnsafeWorkspaceError("purge node crossed a filesystem")
-        if _is_link_or_reparse(metadata):
-            if os.name == "nt":
-                raise _UnsafeWorkspaceError("purge reparse node is unsafe")
-            candidate.unlink()
-        elif stat.S_ISDIR(metadata.st_mode):
-            _fallback_purge_contents(
-                workspace,
-                candidate,
-                root_resolved=root_resolved,
-            )
-            final_metadata = candidate.stat(follow_symlinks=False)
-            if (
-                _is_link_or_reparse(final_metadata)
-                or _identity(final_metadata) != _identity(metadata)
-            ):
-                raise _UnsafeWorkspaceError("purge directory changed")
-            candidate.rmdir()
-        else:
-            candidate.unlink()
-
-
-def _fallback_purge_agent_output(workspace: PreparedWorkspace) -> None:
-    root_resolved = _fallback_root(workspace)
-    output_path, output_metadata = _fallback_expected_directory(
-        workspace,
-        ("output",),
-        ((workspace.output_device, workspace.output_inode),),
-    )
-    _fallback_purge_contents(
-        workspace,
-        output_path,
-        root_resolved=root_resolved,
-    )
-    final_output_metadata = output_path.stat(follow_symlinks=False)
-    if (
-        _is_link_or_reparse(final_output_metadata)
-        or _identity(final_output_metadata) != _identity(output_metadata)
-        or _fallback_names(output_path)
-    ):
-        raise _UnsafeWorkspaceError("output directory changed during purge")
-    _fallback_root(workspace)
-    output_path.rmdir()
-    _fallback_root(workspace)
 
 
 def _safe_destination(root: Path, relative_path: str) -> Path:
@@ -1645,49 +1530,6 @@ class WorkspaceManager:
                 os.close(runtime_descriptor)
             if root_descriptor >= 0:
                 os.close(root_descriptor)
-
-    @staticmethod
-    def purge_agent_output(workspace: PreparedWorkspace) -> None:
-        """Best-effort removal of untrusted Agent output without following links."""
-
-        if not _safe_dir_fd_operations_supported():
-            try:
-                _fallback_purge_agent_output(workspace)
-            except (OSError, UnicodeEncodeError, ValueError, _UnsafeWorkspaceError):
-                pass
-            return
-        root_descriptor = -1
-        output_descriptor = -1
-        try:
-            root_descriptor = _open_workspace_root(workspace)
-            output_descriptor = _open_expected_directory(
-                root_descriptor,
-                "output",
-                (workspace.output_device, workspace.output_inode),
-            )
-            _purge_directory_contents(
-                output_descriptor,
-                workspace_device=workspace.root_device,
-            )
-            _assert_expected_directory(
-                root_descriptor,
-                "output",
-                output_descriptor,
-                (workspace.output_device, workspace.output_inode),
-            )
-            _assert_workspace_root_path(workspace, root_descriptor)
-            os.close(output_descriptor)
-            output_descriptor = -1
-            os.rmdir("output", dir_fd=root_descriptor)
-            _assert_workspace_root_path(workspace, root_descriptor)
-        except (OSError, UnicodeEncodeError, ValueError, _UnsafeWorkspaceError):
-            pass
-        finally:
-            if output_descriptor >= 0:
-                os.close(output_descriptor)
-            if root_descriptor >= 0:
-                os.close(root_descriptor)
-
 
 __all__ = [
     "PreparedWorkspace",

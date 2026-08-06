@@ -254,6 +254,11 @@ def test_execution_record_store_round_trips_canonical_job_and_outcome() -> None:
     job_ref = store.publish_job(job)
     outcome_bytes = canonical_json_bytes(outcome)
     outcome_ref = store.publish_outcome_bytes(job.job_id, outcome_bytes)
+    rejected_bytes = b'{"not": "canonical"}\n'
+    rejected_ref = store.publish_rejected_agent_output_bytes(
+        job.job_id,
+        rejected_bytes,
+    )
 
     published_job = store.read_published_job(job.job_id)
     published_outcome = store.read_published_outcome(job.job_id)
@@ -261,6 +266,12 @@ def test_execution_record_store_round_trips_canonical_job_and_outcome() -> None:
     assert published_job.job_file_ref == job_ref
     assert published_outcome is not None and published_outcome.job_outcome == outcome
     assert published_outcome.outcome_file_ref == outcome_ref
+    assert rejected_ref.relative_key == (
+        f"jobs/{job.job_id}/agent_job_outcome.rejected.json"
+    )
+    assert store.publish_rejected_agent_output_calls == [
+        (job.job_id, rejected_bytes)
+    ]
 
 
 def test_pure_context_projector_copies_the_complete_semantic_projection() -> None:

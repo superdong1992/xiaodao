@@ -446,6 +446,47 @@ class FileExecutionRecordStore:
                 stored_bytes,
             )
 
+    def publish_rejected_agent_output_bytes(
+        self,
+        job_id: OpaqueId,
+        raw_bytes: bytes,
+    ) -> ExecutionFileRef:
+        try:
+            return self._publish_rejected_agent_output_bytes(job_id, raw_bytes)
+        except ApplicationPortError:
+            raise
+        except _RecordConflict:
+            raise _port_error(
+                ErrorCode.IDEMPOTENCY_CONFLICT,
+                "The rejected Agent output conflicts with existing bytes.",
+            ) from None
+        except Exception:
+            raise _port_error(
+                ErrorCode.EXECUTION_RECORD_FAILED,
+                "The rejected Agent output could not be archived.",
+            ) from None
+
+    def _publish_rejected_agent_output_bytes(
+        self,
+        job_id: OpaqueId,
+        raw_bytes: bytes,
+    ) -> ExecutionFileRef:
+        validated_job_id = _validated_job_id(job_id)
+        if type(raw_bytes) is not bytes:
+            raise TypeError("raw_bytes must be exact bytes")
+
+        with self._coordination_lock:
+            job_directory = self._ensure_job_directory(validated_job_id)
+            stored_bytes = self._publish_raw_record(
+                job_directory / "agent_job_outcome.rejected.json",
+                raw_bytes,
+            )
+            return self._file_ref(
+                validated_job_id,
+                "agent_job_outcome.rejected.json",
+                stored_bytes,
+            )
+
     def read_published_job(self, job_id: OpaqueId) -> PublishedJobReceipt | None:
         try:
             return self._read_published_job(job_id)
@@ -721,6 +762,51 @@ class FileExecutionRecordStore:
             raise OSError("execution record changed while it was finalized")
         return finalized_model, finalized_bytes
 
+    def _publish_raw_record(self, final_path: Path, expected_bytes: bytes) -> bytes:
+        if _regular_path_if_present(final_path) is not None:
+            stored_bytes = _read_regular_bytes(final_path)
+            if stored_bytes != expected_bytes:
+                raise _RecordConflict(
+                    f"different raw bytes already exist at {final_path}"
+                )
+            self._finalize_record(final_path)
+            finalized_bytes = _read_regular_bytes(final_path)
+            if finalized_bytes != expected_bytes:
+                raise OSError("raw execution record changed while it was finalized")
+            return finalized_bytes
+
+        temp_path = self._new_temp_path(final_path.parent, final_path.name)
+        try:
+            _write_new_file(temp_path, expected_bytes, self._file_sync)
+            if _regular_path_if_present(final_path) is not None:
+                stored_bytes = _read_regular_bytes(final_path)
+                if stored_bytes != expected_bytes:
+                    raise _RecordConflict(
+                        f"different raw bytes already exist at {final_path}"
+                    )
+                self._finalize_record(final_path)
+                finalized_bytes = _read_regular_bytes(final_path)
+                if finalized_bytes != expected_bytes:
+                    raise OSError(
+                        "raw execution record changed while it was finalized"
+                    )
+                return finalized_bytes
+            self._replacer.replace(temp_path, final_path)
+        finally:
+            try:
+                temp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+        stored_bytes = _read_regular_bytes(final_path)
+        if stored_bytes != expected_bytes:
+            raise OSError("atomic replacer published different raw execution bytes")
+        self._finalize_record(final_path)
+        finalized_bytes = _read_regular_bytes(final_path)
+        if finalized_bytes != expected_bytes:
+            raise OSError("raw execution record changed while it was finalized")
+        return finalized_bytes
+
     def _validated_final_record(
         self,
         final_path: Path,
@@ -748,11 +834,11 @@ class FileExecutionRecordStore:
         self._file_sync.sync_directory(final_path.parent)
 
     @staticmethod
-    def _file_ref(job_id: str, filename: str, canonical_bytes: bytes) -> ExecutionFileRef:
+    def _file_ref(job_id: str, filename: str, data: bytes) -> ExecutionFileRef:
         return ExecutionFileRef(
             relative_key=f"jobs/{job_id}/{filename}",
-            size=len(canonical_bytes),
-            sha256=bytes_sha256(canonical_bytes),
+            size=len(data),
+            sha256=bytes_sha256(data),
         )
 
     def _ensure_empty_log_pair(self, stdout_path: Path, stderr_path: Path) -> None:
