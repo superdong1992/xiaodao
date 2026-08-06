@@ -126,8 +126,11 @@ def _assert_real_host_evidence(
     assert latest["source"] == "claude_code_hook"
     assert latest["hook_version"] == __version__
     assert latest["tool_name"] == expected_full_tool_name
-    assert latest["argument_json_types"]["problem_spec"] == "object"
-    assert isinstance(latest["arguments"]["problem_spec"], dict)
+    # The DFX Hook runs alongside the compatibility Hook and therefore records
+    # the unmodified Host boundary. The server event below must prove that the
+    # same request was repaired before transport.
+    assert latest["argument_json_types"]["problem_spec"] == "string"
+    assert isinstance(latest["arguments"]["problem_spec"], str)
 
     terminal = [
         event
@@ -220,8 +223,8 @@ def test_windows_direct_http_to_real_linux_mcp_preserves_compound_json_types() -
     anyio.run(scenario)
 
 
-def test_real_host_hook_proves_problem_spec_is_an_object() -> None:
-    """Validate evidence produced by the real Windows Claude Code MCP Host."""
+def test_real_host_hook_repairs_string_before_the_linux_service() -> None:
+    """Validate the real npm Claude Code 2.1.89 compatibility boundary."""
 
     _skip_unless_windows_gate(
         REAL_HOST_GATE,
@@ -234,15 +237,15 @@ def test_real_host_hook_proves_problem_spec_is_an_object() -> None:
         expected_full_tool_name=OFFICIAL_CREATE_CASE,
     )
 
-    version = os.environ.get(REAL_HOST_CLAUDE_VERSION)
+    version = _required_environment(REAL_HOST_CLAUDE_VERSION)
+    assert version == "2.1.89 (Claude Code)"
     if os.environ.get(RELEASE_REQUIRED) == "1":
-        assert version == "2.1.150 (Claude Code)"
         _assert_no_proxy_covers_remote(_required_environment(REMOTE_URL))
 
 
 
-def test_legacy_host_hook_and_server_prove_problem_spec_is_an_object() -> None:
-    """Require correlated evidence from the supported legacy/custom Host."""
+def test_legacy_host_hook_repairs_string_before_the_linux_service() -> None:
+    """Require correlated deployment evidence from the legacy/custom Host."""
 
     _skip_unless_windows_gate(
         LEGACY_HOST_GATE,

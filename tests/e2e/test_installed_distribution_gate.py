@@ -42,7 +42,7 @@ EXPECTED_RUNTIME_VERSIONS = {
     "fastapi": "0.139.2",
     "httpx": "0.28.1",
     "mcp": "1.29.0",
-    "problem-locator": "1.0.3",
+    "problem-locator": "1.0.4",
     "pydantic": "2.13.4",
     "python-dotenv": "1.2.2",
     "starlette": "1.3.1",

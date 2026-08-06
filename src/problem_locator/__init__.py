@@ -4,6 +4,6 @@ Importing the package is deliberately inert.  Use :mod:`problem_locator.bootstra
 or ``python -m problem_locator`` to build an installation explicitly.
 """
 
-__version__ = "1.0.3"
+__version__ = "1.0.4"
 
 __all__ = ["__version__"]

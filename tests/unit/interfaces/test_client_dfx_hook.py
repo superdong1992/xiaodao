@@ -139,7 +139,7 @@ def test_hook_preserves_object_and_string_types_from_regression_fixture(
     assert result.stderr == ""
     event = _events(tmp_path / ".problem-locator" / "client-dfx.jsonl")[0]
     assert event["event"] == "client.hook.tool.started"
-    assert event["hook_version"] == "1.0.3"
+    assert event["hook_version"] == "1.0.4"
     assert event["tool_name"] == full_tool
     assert event["logical_tool"] == "problem_locator_create_case"
     assert event["operation_id"] == "10000000-0000-0000-0000-000000000001"

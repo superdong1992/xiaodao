@@ -2,16 +2,17 @@ import hashlib
 import json
 from pathlib import Path
 
-manifest = json.loads(
-    Path("/evidence/claude-2.1.150-manifest.json").read_text(encoding="utf-8")
-)
-if manifest.get("version") not in (None, "2.1.150"):
-    raise SystemExit("unexpected manifest version")
-expected = manifest["platforms"]["linux-x64"]["checksum"]
-actual = hashlib.sha256(Path("/cache/claude-2.1.150").read_bytes()).hexdigest()
-frozen = "6c086a0f5fbf684d4148bb69629268b4f5109498c1a7be757acf18c51fd04f4b"
-if expected != frozen or actual != expected:
-    raise SystemExit("Claude checksum mismatch")
-print("manifest_checksum=" + expected)
-print("cache_checksum=" + actual)
-print("checksum_validation=pass")
+
+package_root = Path("/opt/claude-code")
+metadata = json.loads((package_root / "package.json").read_text(encoding="utf-8"))
+if metadata.get("name") != "@anthropic-ai/claude-code":
+    raise SystemExit("unexpected Claude npm package name")
+if metadata.get("version") != "2.1.89":
+    raise SystemExit("unexpected Claude npm package version")
+actual = hashlib.sha256((package_root / "cli.js").read_bytes()).hexdigest()
+expected = "a9950ef6407fdc750bddb673852485500387e524a99d42385cb81e7d17128e01"
+if actual != expected:
+    raise SystemExit("Claude npm CLI does not match the frozen hash")
+print("package=@anthropic-ai/claude-code")
+print("version=2.1.89")
+print(f"cli_sha256={actual}")

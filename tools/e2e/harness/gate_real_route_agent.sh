@@ -10,7 +10,7 @@ stderr_tmp="$scan_root/pytest.stderr.txt"
 command='/usr/local/bin/claude -p --no-chrome --no-session-persistence --dangerously-skip-permissions --tools Bash,Read,Write --setting-sources user --settings /run/plagent-claude/settings.json --model haiku --effort low --max-budget-usd 1.00'
 
 printf '%s\n' \
-  'claude_version=2.1.150' \
+  'claude_version=2.1.89' \
   'effective_model=deepseek-v4-flash[1m]' \
   'execution_user=plagent' \
   'execution_uid=10001' \

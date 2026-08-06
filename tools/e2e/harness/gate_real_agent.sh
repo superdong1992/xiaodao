@@ -10,7 +10,7 @@ stderr_tmp="$scan_root/pytest.stderr.txt"
 command='/usr/local/bin/claude -p --no-chrome --no-session-persistence --dangerously-skip-permissions --tools Write --setting-sources user --settings /run/plagent-claude/settings.json --model haiku --effort low --max-budget-usd 0.10'
 
 printf '%s\n' \
-  'claude_version=2.1.150' \
+  'claude_version=2.1.89' \
   'execution_user=plagent' \
   'execution_uid=10001' \
   'home=/run/plagent-claude' \

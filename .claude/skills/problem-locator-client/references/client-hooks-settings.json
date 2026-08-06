@@ -6,15 +6,12 @@
         "hooks": [
           {
             "type": "command",
-            "command": "powershell.exe",
-            "args": [
-              "-NoProfile",
-              "-NonInteractive",
-              "-ExecutionPolicy",
-              "Bypass",
-              "-File",
-              "${CLAUDE_PROJECT_DIR}/.claude/skills/problem-locator-client/scripts/problem-locator-client-dfx.ps1"
-            ],
+            "command": "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"${CLAUDE_PROJECT_DIR}/.claude/skills/problem-locator-client/scripts/problem-locator-client-compat.ps1\"",
+            "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"${CLAUDE_PROJECT_DIR}/.claude/skills/problem-locator-client/scripts/problem-locator-client-dfx.ps1\"",
             "timeout": 5
           }
         ]
@@ -26,15 +23,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "powershell.exe",
-            "args": [
-              "-NoProfile",
-              "-NonInteractive",
-              "-ExecutionPolicy",
-              "Bypass",
-              "-File",
-              "${CLAUDE_PROJECT_DIR}/.claude/skills/problem-locator-client/scripts/problem-locator-client-dfx.ps1"
-            ],
+            "command": "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"${CLAUDE_PROJECT_DIR}/.claude/skills/problem-locator-client/scripts/problem-locator-client-dfx.ps1\"",
             "timeout": 5
           }
         ]
@@ -46,15 +35,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "powershell.exe",
-            "args": [
-              "-NoProfile",
-              "-NonInteractive",
-              "-ExecutionPolicy",
-              "Bypass",
-              "-File",
-              "${CLAUDE_PROJECT_DIR}/.claude/skills/problem-locator-client/scripts/problem-locator-client-dfx.ps1"
-            ],
+            "command": "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"${CLAUDE_PROJECT_DIR}/.claude/skills/problem-locator-client/scripts/problem-locator-client-dfx.ps1\"",
             "timeout": 5
           }
         ]

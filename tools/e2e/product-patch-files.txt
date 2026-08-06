@@ -7,6 +7,7 @@ AGENTS.md
 .claude/skills/problem-locator-client/references/client-hooks-settings.json
 .claude/skills/problem-locator-client/references/client-mcp-config.json
 .claude/skills/problem-locator-client/scripts/problem-locator-client-dfx.ps1
+.claude/skills/problem-locator-client/scripts/problem-locator-client-compat.ps1
 .claude/skills/wiki-to-diagnosis-skill/SKILL.md
 .claude/skills/wiki-to-diagnosis-skill/references/generated-skill-contract.md
 .claude/skills/wiki-to-diagnosis-skill/references/wiki-template.md

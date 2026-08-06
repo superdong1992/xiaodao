@@ -35,7 +35,7 @@ $summaryPath = Join-Path $EvidenceRoot 'restart-authoritative-summary.json'
 
 Write-RestartUtf8 -Path $promptPath -Text ($prompt + "`n")
 $arguments = Get-RestartClaudeArguments -Prompt $prompt
-$exitCode = Invoke-RestartCapturedProcess -FilePath $script:RestartClaudeExe -Arguments $arguments -WorkingDirectory $script:RestartRepoRoot -StdoutPath $stdoutPath -StderrPath $stderrPath -TimeoutSeconds $script:RestartClaudeQueryTimeoutSeconds
+$exitCode = Invoke-RestartCapturedProcess -FilePath $script:RestartClaudeExe -Arguments (@($script:RestartClaudeEntryPoint) + $arguments) -WorkingDirectory $script:RestartRepoRoot -StdoutPath $stdoutPath -StderrPath $stderrPath -TimeoutSeconds $script:RestartClaudeQueryTimeoutSeconds
 Assert-Restart ($exitCode -eq 0) 'restart Claude exit code'
 
 $audit = Read-RestartClaudeAudit $stdoutPath

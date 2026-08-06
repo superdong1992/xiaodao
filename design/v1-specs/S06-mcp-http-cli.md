@@ -229,11 +229,14 @@ CLI 必须提供 `python -m problem_locator render-journey --case-id <uuid> [--l
 
 - 让 Claude Code 作为 MCP Host/Client 直接连接局域网 Streamable HTTP `/mcp`；Windows 客户端不得安装 `problem-locator` 包、运行本地 MCP Server 或转发代理，服务端公布的七工具 schema 是唯一权威 schema；
 - 客户端 MCP server key 固定为 `problem-locator`，URL 从 `PROBLEM_LOCATOR_MCP_URL` 展开且必须以 `/mcp` 结尾。存在环境代理时，启动 Claude Code 前必须让 `NO_PROXY` 精确包含服务端主机/IP，不得用 `NO_PROXY=*`；
-- Windows 客户端可配置项目级 `PreToolUse/PostToolUse/PostToolUseFailure` command Hook。Hook 必须精确观察官方 `mcp__problem-locator__problem_locator_*` 与已确认旧式 `problem_locator_problem_locator_*` 两套名称，归一化后仍只允许七个完整工具名并保留原始 `tool_name`；旧式名称的重复前缀来自规范化 server key 与服务端工具名的拼接，不是重复注册。Hook 不得返回 permission decision、updated input/output 或 additional context，不得参与 schema、传输、重试或业务判断；
-- Hook 把 `schema_version/timestamp/hook_version/session_id/tool_use_id/tool_name/logical_tool/operation_id/arguments/argument_json_types` 追加到客户端 JSONL；成功事件原样保存 `tool_response`，失败事件保存 `error/is_interrupt/duration_ms`。默认路径为客户端项目目录下 `.problem-locator/client-dfx.jsonl`，`PROBLEM_LOCATOR_CLIENT_DFX_LOG_FILE` 仅接受绝对覆盖路径；并行进程必须通过 Windows Named Mutex 保证每条 UTF-8 JSONL 完整写入；
-- Hook 成功时退出 `0` 且无输出；写入失败只允许非阻塞退出 `1` 和一行 stderr，绝不使用阻塞退出 `2`。Hook 只覆盖已通过 Host 校验的执行调用；无 Hook、无服务请求的失败必须改用 Claude Code 原生 `--debug "mcp,hooks" --debug-file <path>` 定位；
+- Windows 客户端可配置项目级 `PreToolUse/PostToolUse/PostToolUseFailure` command Hook。面向 Claude Code 2.1.89 的所有处理器必须使用单一完整 `command` 字符串，不得使用 `args`。matcher 与脚本必须精确识别官方 `mcp__problem-locator__problem_locator_*` 与已确认旧式 `problem_locator_problem_locator_*` 两套名称，归一化后仍只允许七个完整工具名并保留原始 `tool_name`；旧式名称的重复前缀来自规范化 server key 与服务端工具名的拼接，不是重复注册；
+- `PreToolUse` 兼容 Hook 与 DFX Hook 必须分离。兼容 Hook 只允许把 `create_case.problem_spec` 的 JSON string 一次转换为 object、把 `create_case.initial_user_facts` 的 JSON string 转为 array 或把数组内 JSON string 转为 object、把 `submit_supplement.inputs` 的 JSON string 转为 object。转换成功仅返回完整 `hookSpecificOutput.updatedInput` 和 `hookEventName=PreToolUse`，不得返回 permission decision、additional context 或其他控制字段；正确类型、无效 JSON、错误根类型和重复字符串化不得转换；
+- DFX Hook 把 `schema_version/timestamp/hook_version/session_id/tool_use_id/tool_name/logical_tool/operation_id/arguments/argument_json_types` 追加到客户端 JSONL；成功事件原样保存 `tool_response`，失败事件保存 `error/is_interrupt/duration_ms`。它与兼容 Hook 并行并记录原始 Host 输入，且不得返回 permission decision、updated input/output 或 additional context。默认路径为客户端项目目录下 `.problem-locator/client-dfx.jsonl`，`PROBLEM_LOCATOR_CLIENT_DFX_LOG_FILE` 仅接受绝对覆盖路径；并行进程必须通过 Windows Named Mutex 保证每条 UTF-8 JSONL 完整写入；
+- 兼容 Hook 与 DFX Hook 成功时分别只输出更新 JSON或无输出；失败只允许非阻塞退出 `1` 和一行 stderr，绝不使用阻塞退出 `2`。Hook 只覆盖进入 Host 执行阶段的调用；无 Hook、无服务请求的失败必须改用 Claude Code 原生 `--debug "mcp,hooks" --debug-file <path>` 定位；
 - `/hooks` 显示配置已加载不等于 matcher 已命中。无客户端日志时必须先核对默认路径与 Host 的完整工具名，再用 Hook 与同一 `request_id` 的服务端事件判断参数类型；服务端不得把 JSON 字符串自动解析成合同要求的对象；
 - Windows→Linux 发布旅程必须用真实 Claude Code 把 Hook 指向不可写目标，并以成功的 MCP `tool_result` 证明 exit `1` 的 DFX 故障没有阻断请求；
+- 真实 Host 门禁固定使用官方 npm Claude Code `2.1.89`，不得以 `2.1.150` 或 Python 模拟 Host 代替。门禁必须让模型产生字符串化历史字段，并用同一 `request_id` 证明 DFX 为原始 string、服务端入口为 object/array；绕过 Hook 的字符串仍必须得到严格验证错误；
+- 三个历史复合字段是 v2 待清理债务。任何新增或修改的 MCP 输入参数必须是根 object 下的标量、nullable 标量或标量数组，不得增加 `$ref/$defs`、嵌套 object、动态 Map 或对象数组；schema lint 只允许三个精确历史路径，扩大白名单必须获得用户明确批准；
 
 - 使用调用方已有的 Remote MCP 客户端调用本册七个固定工具；
 - 使用系统 `curl` 按 UploadDescriptor 上传用户明确选择的本地文件，并按 ArtifactView.download_url 下载用户可见 Artifact；

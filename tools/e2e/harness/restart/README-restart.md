@@ -59,7 +59,7 @@ After the parent harness has restarted the service with the same persistent data
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File <attempt-evidence>\run-windows-restart-verify.ps1
 ```
 
-The query validates both driver manifests, the pre-restart authoritative summary, and the exact client Skill hash before reserving output files or starting any process. It uses native Claude Code 2.1.150, `--setting-sources user,project`, the `haiku` alias (which must report the effective model `deepseek-v4-flash[1m]`), an inline strict loopback MCP configuration, and `Skill(problem-locator-client)` as the first tool call. Business state is accepted only from uniquely correlated stream-json `tool_use`/`tool_result` pairs carrying top-level `tool_use_result.structuredContent`.
+The query validates both driver manifests, the pre-restart authoritative summary, and the exact client Skill hash before reserving output files or starting any process. It uses official npm Claude Code 2.1.89 through its `cli.js` entry point, `--setting-sources user,project`, the `haiku` alias (which must report the effective model `deepseek-v4-flash[1m]`), an inline strict loopback MCP configuration, and `Skill(problem-locator-client)` as the first tool call. Business state is accepted only from uniquely correlated stream-json `tool_use`/`tool_result` pairs carrying top-level `tool_use_result.structuredContent`.
 
 The optional deterministic download is a separate read-only HTTP step that
 downloads and verifies both public artifacts:

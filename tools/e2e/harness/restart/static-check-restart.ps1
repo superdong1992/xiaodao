@@ -166,7 +166,7 @@ foreach ($literal in @(
     '-SettingsPath C:\Users\admin\.claude\settings.json',
     '-UvPath D:\code\xiaodao\.tmp\pl-e2e-cache\uv-0.11.32\uv',
     '-UvxPath D:\code\xiaodao\.tmp\pl-e2e-cache\uv-0.11.32\uvx',
-    '-ClaudePath D:\code\xiaodao\.tmp\pl-e2e-cache\claude-2.1.150\claude'
+    '-ClaudePath D:\code\xiaodao\.tmp\pl-e2e-cache\claude-npm-2.1.89\package\cli.js'
 )) {
     if (-not $restartStep03[0].Contains($literal)) { throw "restart step03 frozen creator literal absent: $literal" }
 }
@@ -182,7 +182,7 @@ foreach ($literal in @(
     '-SettingsPath C:\Users\admin\.claude\settings.json',
     '-UvPath D:\code\xiaodao\.tmp\pl-e2e-cache\uv-0.11.32\uv',
     '-UvxPath D:\code\xiaodao\.tmp\pl-e2e-cache\uv-0.11.32\uvx',
-    '-ClaudePath D:\code\xiaodao\.tmp\pl-e2e-cache\claude-2.1.150\claude'
+    '-ClaudePath D:\code\xiaodao\.tmp\pl-e2e-cache\claude-npm-2.1.89\package\cli.js'
 )) {
     if (-not $restartStep05[0].Contains($literal)) { throw "restart step05 frozen metadata verifier literal absent: $literal" }
 }
@@ -531,7 +531,8 @@ $restartDriverSourceText = ((@(
     'download-windows-restart-artifact.ps1'
 ) | ForEach-Object { [System.IO.File]::ReadAllText((Join-Path $DriverRoot $_)) }) -join "`n")
 $requiredLiterals = @(
-    'C:\Users\admin\AppData\Roaming\npm\node_modules\@anthropic-ai\claude-code\bin\claude.exe',
+    'C:\Program Files\nodejs\node.exe',
+    'C:\Users\admin\AppData\Roaming\npm\node_modules\@anthropic-ai\claude-code\cli.js',
     '--setting-sources',
     "'user,project'",
     '--model',

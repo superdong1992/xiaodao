@@ -25,7 +25,9 @@ $harnessRoot = Join-Path $toolRoot 'harness'
 $evidenceBase = Join-Path $RepoRoot '.tmp\pl-e2e-evidence'
 $cacheRoot = Join-Path $RepoRoot '.tmp\pl-e2e-cache'
 $uvContext = Join-Path $cacheRoot 'uv-0.11.32'
-$claudeContext = Join-Path $cacheRoot 'claude-2.1.150'
+$claudeContext = Join-Path $cacheRoot 'claude-npm-2.1.89'
+$claudePackageSource = 'C:\Users\admin\AppData\Roaming\npm\node_modules\@anthropic-ai\claude-code'
+$claudeCliSha256 = 'a9950ef6407fdc750bddb673852485500387e524a99d42385cb81e7d17128e01'
 $docker = (Get-Command docker.exe -ErrorAction Stop).Source
 $powershell = (Get-Command powershell.exe -ErrorAction Stop).Source
 $script:stage = 'host-preflight'
@@ -140,8 +142,8 @@ function Copy-EvidenceBundle([string]$Target) {
 function Copy-RestartRuntime([string]$MainRoot) {
     $restartRoot = Join-Path $MainRoot 'restart'
     $names = @(
-        'capture_state_before_restart.sh', 'decode_openpgp_public_key.py',
-        'gate_service_preflight.sh', 'offline-inputs', 'prepare_claude_settings.py',
+        'capture_state_before_restart.sh',
+        'gate_service_preflight.sh', 'prepare_claude_settings.py',
         'prepare_nonroot_settings.py', 'prepare_real_zip.py', 'restart_nonroot_runtime_init.sh',
         'scan_service_log_secrets.py', 'service_preflight.py', 'setup_claude.sh',
         'setup_fixtures.sh', 'setup_sources.sh', 'setup_venvs.sh', 'snapshot_data_root.py',
@@ -164,7 +166,8 @@ function Get-BaseCacheKey {
     $paths = @(
         (Join-Path $toolRoot 'Dockerfile'), (Join-Path $toolRoot 'logparse-requirements.txt'),
         (Join-Path $RepoRoot 'pyproject.toml'), (Join-Path $RepoRoot 'uv.lock'),
-        (Join-Path $uvContext 'uv'), (Join-Path $uvContext 'uvx'), (Join-Path $claudeContext 'claude')
+        (Join-Path $uvContext 'uv'), (Join-Path $uvContext 'uvx'),
+        (Join-Path $claudeContext 'package\package.json'), (Join-Path $claudeContext 'package\cli.js')
     )
     $text = ($paths | ForEach-Object { (Get-FileHash -LiteralPath $_ -Algorithm SHA256).Hash.ToLowerInvariant() }) -join "`n"
     $hash = [Security.Cryptography.SHA256]::Create()
@@ -232,7 +235,7 @@ function New-E2EContainer(
         '--mount', "type=bind,src=$McpSource,dst=/source/problem-locator-mcp,readonly",
         '--mount', "type=bind,src=$SettingsPath,dst=/run/host-claude-settings.json,readonly",
         '--mount', "type=bind,src=$Evidence\client-assets\logparse-diagnose,dst=/run/plagent-claude/.claude/skills/logparse-diagnose,readonly",
-        '--mount', "type=bind,src=$claudeContext\claude,dst=/cache/claude-2.1.150,readonly",
+        '--mount', "type=bind,src=$claudeContext\package,dst=/cache/claude-npm-2.1.89,readonly",
         '--mount', "type=bind,src=$Evidence,dst=/evidence",
         '--mount', "type=volume,src=$Volume,dst=/var/lib/problem-locator"
     )
@@ -307,11 +310,21 @@ function Get-PytestTotals([string]$Root) {
     return [PSCustomObject][ordered]@{ tests = $tests; failures = $failures; errors = $errors; skipped = $skipped }
 }
 
+if (-not (Test-Path -LiteralPath $claudeContext -PathType Container)) {
+    Assert-E2E (Test-Path -LiteralPath $claudePackageSource -PathType Container) 'CLAUDE_NPM_SOURCE'
+    [IO.Directory]::CreateDirectory($claudeContext) | Out-Null
+    Copy-Item -LiteralPath $claudePackageSource -Destination (Join-Path $claudeContext 'package') -Recurse
+}
+$claudePackage = [IO.File]::ReadAllText((Join-Path $claudeContext 'package\package.json'), $utf8) | ConvertFrom-Json
+Assert-E2E ([string]$claudePackage.name -ceq '@anthropic-ai/claude-code') 'CLAUDE_NPM_PACKAGE_NAME'
+Assert-E2E ([string]$claudePackage.version -ceq '2.1.89') 'CLAUDE_NPM_PACKAGE_VERSION'
+Assert-E2E ((Get-FileHash -LiteralPath (Join-Path $claudeContext 'package\cli.js') -Algorithm SHA256).Hash.ToLowerInvariant() -ceq $claudeCliSha256) 'CLAUDE_NPM_CLI_SHA256'
+
 foreach ($path in @($RepoRoot, $LogparseSource, $McpSource, $DockerConfig, $harnessRoot, $uvContext, $claudeContext)) {
     Assert-E2E (Test-Path -LiteralPath $path -PathType Container) "PATH_$path"
 }
 Assert-E2E (Test-Path -LiteralPath $SettingsPath -PathType Leaf) 'SETTINGS_PATH'
-foreach ($path in @((Join-Path $uvContext 'uv'), (Join-Path $uvContext 'uvx'), (Join-Path $claudeContext 'claude'))) {
+foreach ($path in @((Join-Path $uvContext 'uv'), (Join-Path $uvContext 'uvx'), (Join-Path $claudeContext 'package\package.json'), (Join-Path $claudeContext 'package\cli.js'))) {
     Assert-E2E (Test-Path -LiteralPath $path -PathType Leaf) "CACHE_$path"
 }
 [IO.Directory]::CreateDirectory($evidenceBase) | Out-Null
@@ -523,7 +536,7 @@ $report = [PSCustomObject][ordered]@{
     base_image_cache_hit = $script:baseCacheHit
     python_version = '3.12.13'
     uv_version = '0.11.32'
-    claude_version = '2.1.150'
+    claude_version = '2.1.89'
     model = 'deepseek-v4-flash[1m]'
     no_mock_business_journey = $true
     business_evidence_attempt = $(if ($null -ne $businessReport) { [string]$businessReport.attempt } else { $label })

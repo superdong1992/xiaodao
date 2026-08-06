@@ -66,10 +66,10 @@ foreach ($literal in @(
     'FileMode]::CreateNew',
     'DOCKER_RESOURCE_OFFLINE_REGRESSION_PASSED',
     '.tmp\pl-e2e-cache\uv-0.11.32\uv',
-    '.tmp\pl-e2e-cache\claude-2.1.150\claude',
+    '.tmp\pl-e2e-cache\claude-npm-2.1.89\package\cli.js',
     'da15297d6879b2cfbe5ea3cb03725c1613d51ba72892cc996468d871f0a532fb',
     '31e409e837c16cbe9bdfd6534a1e2f6a774d937988027a4f0736ab52c7b6864d',
-    '6c086a0f5fbf684d4148bb69629268b4f5109498c1a7be757acf18c51fd04f4b'
+    'a9950ef6407fdc750bddb673852485500387e524a99d42385cb81e7d17128e01'
 )) {
     if (-not (($creatorText + "`n" + $creatorTestText).Contains($literal))) {
         throw "initial Docker creator literal absent: $literal"
@@ -136,7 +136,7 @@ $step03 = [regex]::Match($executionText, '(?m)^03=(.+)$')
 $step04 = [regex]::Match($executionText, '(?m)^04=(.+)$')
 $step05 = [regex]::Match($executionText, '(?m)^05=(.+)$')
 if (-not $step03.Success -or -not $step04.Success -or -not $step05.Success) { throw 'Docker execution steps absent' }
-foreach ($literal in @('create-docker-resources.ps1', '-ContainerName', '-VolumeName', '-EvidenceRoot', '-DockerConfig', '-SettingsPath', '-XiaodaoSource', '-LogparseSource', '-McpSource', '-UvPath', '-UvxPath', '-ClaudePath', '.tmp\pl-e2e-cache\uv-0.11.32\uv', '.tmp\pl-e2e-cache\uv-0.11.32\uvx', '.tmp\pl-e2e-cache\claude-2.1.150\claude')) {
+foreach ($literal in @('create-docker-resources.ps1', '-ContainerName', '-VolumeName', '-EvidenceRoot', '-DockerConfig', '-SettingsPath', '-XiaodaoSource', '-LogparseSource', '-McpSource', '-UvPath', '-UvxPath', '-ClaudePath', '.tmp\pl-e2e-cache\uv-0.11.32\uv', '.tmp\pl-e2e-cache\uv-0.11.32\uvx', '.tmp\pl-e2e-cache\claude-npm-2.1.89\package\cli.js')) {
     if (-not $step03.Groups[1].Value.Contains($literal)) { throw "step03 frozen creator argument absent: $literal" }
 }
 if ($step03.Groups[1].Value -match '(?i)(?:-Command|Invoke-Expression|docker\.exe|node\.exe|javascript)') {
@@ -677,7 +677,8 @@ if (-not $envBlock.Success -or [regex]::Matches($envBlock.Groups[1].Value, '(?m)
 
 $driverText = [System.IO.File]::ReadAllText((Join-Path $DriverRoot 'windows-journey-lib.ps1')) + "`n" + [System.IO.File]::ReadAllText((Join-Path $DriverRoot 'run-windows-journey.ps1'))
 $requiredLiterals = @(
-    'C:\Users\admin\AppData\Roaming\npm\node_modules\@anthropic-ai\claude-code\bin\claude.exe',
+    'C:\Program Files\nodejs\node.exe',
+    'C:\Users\admin\AppData\Roaming\npm\node_modules\@anthropic-ai\claude-code\cli.js',
     '--setting-sources',
     "'user,project'",
     '--strict-mcp-config',

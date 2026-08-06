@@ -8,7 +8,7 @@ $script:Utf8 = [Text.UTF8Encoding]::new($false)
 [Console]::OutputEncoding = $script:Utf8
 
 $script:SchemaVersion = 1
-$script:HookVersion = '1.0.3'
+$script:HookVersion = '1.0.4'
 $script:ToolPrefixes = @(
     'mcp__problem-locator__',
     'problem_locator_'

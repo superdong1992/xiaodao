@@ -6,13 +6,14 @@ if (-not (Get-Command Invoke-E2EBoundedProcess -ErrorAction SilentlyContinue)) {
 }
 
 $script:RestartRepoRoot = 'D:\code\xiaodao'
-$script:RestartClaudeExe = 'C:\Users\admin\AppData\Roaming\npm\node_modules\@anthropic-ai\claude-code\bin\claude.exe'
-$script:RestartClaudeVersion = '2.1.150'
+$script:RestartClaudeExe = 'C:\Program Files\nodejs\node.exe'
+$script:RestartClaudeEntryPoint = 'C:\Users\admin\AppData\Roaming\npm\node_modules\@anthropic-ai\claude-code\cli.js'
+$script:RestartClaudeVersion = '2.1.89'
 $script:RestartModelAlias = 'haiku'
 $script:RestartEffectiveModel = 'deepseek-v4-flash[1m]'
 $script:RestartMcpUrl = 'http://127.0.0.1:18000/mcp'
 $script:RestartServiceBaseUrl = 'http://127.0.0.1:18000'
-$script:RestartClientSkillSha256 = '6caca2c58e3678b3857d39f728e40d765a121ef0ea152381852687d5e3e3583f'
+$script:RestartClientSkillSha256 = 'da0895357b00502feb7d3e41a516dcc8c67c73c115691fcec8d58e0a2e86a039'
 $script:RestartSkillId = 'diagnosis-skill/diagnose-service-takeover'
 $script:RestartSkillVersion = '3.0.5'
 $script:RestartSkillHash = 'ae47a1a63e6cf4849f83b0f9d49db608c1e93ebe1713f21d58c910990b0857a4'
@@ -536,10 +537,11 @@ function Confirm-RestartClaudeVersion {
     param([Parameter(Mandatory = $true)][string]$EvidenceRoot)
     $stdout = Join-Path $EvidenceRoot 'windows-restart-claude-version.stdout.txt'
     $stderr = Join-Path $EvidenceRoot 'windows-restart-claude-version.stderr.txt'
-    $exitCode = Invoke-RestartCapturedProcess -FilePath $script:RestartClaudeExe -Arguments @('--version') -WorkingDirectory $script:RestartRepoRoot -StdoutPath $stdout -StderrPath $stderr -TimeoutSeconds $script:RestartClaudeVersionTimeoutSeconds
+    Assert-Restart (Test-Path -LiteralPath $script:RestartClaudeEntryPoint -PathType Leaf) 'official npm Claude entry point is absent'
+    $exitCode = Invoke-RestartCapturedProcess -FilePath $script:RestartClaudeExe -Arguments @($script:RestartClaudeEntryPoint, '--version') -WorkingDirectory $script:RestartRepoRoot -StdoutPath $stdout -StderrPath $stderr -TimeoutSeconds $script:RestartClaudeVersionTimeoutSeconds
     Assert-Restart ($exitCode -eq 0) 'Windows Claude --version exit code'
     $versionText = [System.IO.File]::ReadAllText($stdout, $script:RestartUtf8).Trim()
-    Assert-Restart ($versionText -ceq "$($script:RestartClaudeVersion) (Claude Code)") 'Windows Claude must be exactly 2.1.150'
+    Assert-Restart ($versionText -ceq "$($script:RestartClaudeVersion) (Claude Code)") 'Windows Claude must be official npm 2.1.89'
 }
 
 function Get-RestartToolResultPayload {

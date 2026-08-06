@@ -619,7 +619,7 @@ function Read-HcRestartSummary {
     $order = Get-HcProperty $summary 'mcp_call_order' -Required
     Assert-HcStringArray $order 'restart MCP call order'
     Assert-HcExactStrings $order @('problem_locator_get_case', 'problem_locator_list_artifacts') 'restart MCP call order'
-    Assert-Hc ((Get-HcStringProperty $summary 'claude_version') -ceq '2.1.150') 'restart Claude version'
+    Assert-Hc ((Get-HcStringProperty $summary 'claude_version') -ceq '2.1.89') 'restart Claude version'
     Assert-Hc ((Get-HcStringProperty $summary 'model_alias') -ceq 'haiku') 'restart model alias'
     Assert-Hc ((Get-HcStringProperty $summary 'effective_model') -ceq 'deepseek-v4-flash[1m]') 'restart effective model'
     return $summary

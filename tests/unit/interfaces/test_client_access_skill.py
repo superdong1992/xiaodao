@@ -182,6 +182,11 @@ def test_skill_document_names_tools_and_safety_invariants() -> None:
     assert "problem_locator_problem_locator_*" in skill
     assert "loaded Hook is not proof that its matcher ran" in skill
     assert "Never compensate" in skill
+    assert "Claude Code 2.1.89" in skill
+    assert "one complete `command` string" in skill
+    assert "scripts/problem-locator-client-compat.ps1" in skill
+    assert "returns the full `updatedInput`" in skill
+    assert "historical debt" in skill
     assert '"inputs": {"order_id": "order-1"}' in skill
     assert "It is never a list of name/value records" in skill
     assert "`name` and `declared_size`" in skill
@@ -225,19 +230,26 @@ def test_skill_document_names_tools_and_safety_invariants() -> None:
         matcher = handlers[0]["matcher"]
         assert all(re.fullmatch(matcher, name) for name in expected_full_names)
         assert not any(re.fullmatch(matcher, name) for name in invalid_full_names)
-        command = handlers[0]["hooks"][0]
-        assert command["type"] == "command"
-        assert command["timeout"] == 5
-        assert command["command"] == "powershell.exe"
-        assert command["args"] == [
-            "-NoProfile",
-            "-NonInteractive",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-File",
-            "${CLAUDE_PROJECT_DIR}/.claude/skills/problem-locator-client/scripts/problem-locator-client-dfx.ps1",
-        ]
-        assert "async" not in command
+        commands = handlers[0]["hooks"]
+        expected_count = 2 if handlers is hooks["PreToolUse"] else 1
+        assert len(commands) == expected_count
+        for command in commands:
+            assert command["type"] == "command"
+            assert command["timeout"] == 5
+            assert command["command"].startswith(
+                "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File"
+            )
+            assert "${CLAUDE_PROJECT_DIR}" in command["command"]
+            assert "args" not in command
+            assert "async" not in command
+    pretool_commands = hooks["PreToolUse"][0]["hooks"]
+    assert "problem-locator-client-compat.ps1" in pretool_commands[0]["command"]
+    assert "problem-locator-client-dfx.ps1" in pretool_commands[1]["command"]
+    assert all(
+        "problem-locator-client-compat.ps1" not in command["command"]
+        for event in ("PostToolUse", "PostToolUseFailure")
+        for command in hooks[event][0]["hooks"]
+    )
 
     readme = (Path(__file__).parents[3] / "README.md").read_text(encoding="utf-8")
     assert "客户端远端 MCP 与 Windows DFX 配置" in readme
@@ -256,6 +268,10 @@ def test_skill_document_names_tools_and_safety_invariants() -> None:
     assert "problem_locator_problem_locator_*" in readme
     assert "Hook 显示为已加载不代表 matcher 已命中" in readme
     assert "argument_json_types.problem_spec" in readme
+    assert "官方 npm Claude Code 2.1.89" in readme
+    assert "problem-locator-client-compat.ps1" in readme
+    assert "PreToolUse.updatedInput" in readme
+    assert "不得新增 `$ref/$defs`" in readme
     assert "服务端日志不需要安装额外组件" in readme
     assert "tail -f /var/log/problem-locator/debug.jsonl" in readme
 
