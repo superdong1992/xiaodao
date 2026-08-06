@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
+import re
 from typing import BinaryIO
 
 import pytest
@@ -154,7 +155,7 @@ def test_skill_document_names_tools_and_safety_invariants() -> None:
         / "problem-locator-client"
         / "SKILL.md"
     ).read_text(encoding="utf-8")
-    for tool in (
+    tool_names = (
         "problem_locator_create_case",
         "problem_locator_prepare_attachment",
         "problem_locator_submit_supplement",
@@ -162,7 +163,8 @@ def test_skill_document_names_tools_and_safety_invariants() -> None:
         "problem_locator_resume_case",
         "problem_locator_cancel_case",
         "problem_locator_list_artifacts",
-    ):
+    )
+    for tool in tool_names:
         assert skill.count(f"`{tool}`") >= 1
     assert "READY" in skill and 'not “adopted' in skill
     assert "Never overwrite automatically" in skill
@@ -176,6 +178,10 @@ def test_skill_document_names_tools_and_safety_invariants() -> None:
     assert "does not run a local MCP server or forwarding proxy" in skill
     assert "does not install the `problem-locator` package" in skill
     assert '`--debug "mcp,hooks" --debug-file <path>`' in skill
+    assert "mcp__problem-locator__problem_locator_*" in skill
+    assert "problem_locator_problem_locator_*" in skill
+    assert "loaded Hook is not proof that its matcher ran" in skill
+    assert "Never compensate" in skill
     assert '"inputs": {"order_id": "order-1"}' in skill
     assert "It is never a list of name/value records" in skill
     assert "`name` and `declared_size`" in skill
@@ -204,9 +210,21 @@ def test_skill_document_names_tools_and_safety_invariants() -> None:
     hooks_path = config.with_name("client-hooks-settings.json")
     hooks = json.loads(hooks_path.read_text(encoding="utf-8"))["hooks"]
     assert set(hooks) == {"PreToolUse", "PostToolUse", "PostToolUseFailure"}
+    expected_full_names = {
+        *(f"mcp__problem-locator__{tool}" for tool in tool_names),
+        *(f"problem_locator_{tool}" for tool in tool_names),
+    }
+    invalid_full_names = {
+        "mcp__problem-locator__unexpected_tool",
+        "problem_locator_unexpected_tool",
+        "problem_locator_problem_locator_create_case_extra",
+        "mcp__problem_locator__problem_locator_create_case",
+    }
     for handlers in hooks.values():
         assert len(handlers) == 1
-        assert handlers[0]["matcher"] == "^mcp__problem-locator__.*$"
+        matcher = handlers[0]["matcher"]
+        assert all(re.fullmatch(matcher, name) for name in expected_full_names)
+        assert not any(re.fullmatch(matcher, name) for name in invalid_full_names)
         command = handlers[0]["hooks"][0]
         assert command["type"] == "command"
         assert command["timeout"] == 5
@@ -234,6 +252,9 @@ def test_skill_document_names_tools_and_safety_invariants() -> None:
     assert "client.hook.tool.started" in readme
     assert "PROBLEM_LOCATOR_WINDOWS_LINUX_GATE" in readme
     assert "PROBLEM_LOCATOR_REAL_HOST_HOOK_GATE" in readme
+    assert "PROBLEM_LOCATOR_LEGACY_HOST_HOOK_GATE" in readme
+    assert "problem_locator_problem_locator_*" in readme
+    assert "Hook 显示为已加载不代表 matcher 已命中" in readme
     assert "argument_json_types.problem_spec" in readme
     assert "服务端日志不需要安装额外组件" in readme
     assert "tail -f /var/log/problem-locator/debug.jsonl" in readme

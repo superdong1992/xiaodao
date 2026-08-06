@@ -26,8 +26,17 @@ FIXTURE = (
     / "client_dfx"
     / "v1.0.1-problem-spec-string.jsonl"
 )
+LEGACY_REPORTED_FIXTURE = (
+    ROOT
+    / "tests"
+    / "fixtures"
+    / "client_dfx"
+    / "v1.0.2-user-reported-legacy-pretooluse.json"
+)
 POWERSHELL = shutil.which("powershell.exe") or shutil.which("pwsh.exe")
-FULL_TOOL = "mcp__problem-locator__problem_locator_create_case"
+OFFICIAL_FULL_TOOL = "mcp__problem-locator__problem_locator_create_case"
+LEGACY_FULL_TOOL = "problem_locator_problem_locator_create_case"
+FULL_TOOLS = (OFFICIAL_FULL_TOOL, LEGACY_FULL_TOOL)
 
 pytestmark = pytest.mark.skipif(
     os.name != "nt" or POWERSHELL is None,
@@ -35,12 +44,17 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def _payload(event: str, *, problem_spec: object) -> dict[str, object]:
+def _payload(
+    event: str,
+    *,
+    problem_spec: object,
+    tool_name: str = OFFICIAL_FULL_TOOL,
+) -> dict[str, object]:
     payload: dict[str, object] = {
         "session_id": "session-1",
         "permission_mode": "dontAsk",
         "hook_event_name": event,
-        "tool_name": FULL_TOOL,
+        "tool_name": tool_name,
         "tool_use_id": "toolu_01",
         "tool_input": {
             "request_id": "10000000-0000-0000-0000-000000000001",
@@ -86,7 +100,7 @@ def _run_hook(
             os.fspath(SCRIPT),
         ],
         input=raw,
-        text=True,
+        encoding="utf-8",
         capture_output=True,
         check=False,
         env=environment,
@@ -102,8 +116,10 @@ def _events(path: Path) -> list[dict[str, object]]:
     ]
 
 
+@pytest.mark.parametrize("full_tool", FULL_TOOLS, ids=("official", "legacy"))
 def test_hook_preserves_object_and_string_types_from_regression_fixture(
     tmp_path: Path,
+    full_tool: str,
 ) -> None:
     old_event = json.loads(FIXTURE.read_text(encoding="utf-8"))
     assert old_event["argument_json_types"]["problem_spec"] == "string"
@@ -113,14 +129,19 @@ def test_hook_preserves_object_and_string_types_from_regression_fixture(
         "goals": ["定位根因"],
         "nested": {"enabled": True, "value": None},
     }
-    result = _run_hook(_payload("PreToolUse", problem_spec=nested), project=tmp_path)
+    result = _run_hook(
+        _payload("PreToolUse", problem_spec=nested, tool_name=full_tool),
+        project=tmp_path,
+    )
 
     assert result.returncode == 0
     assert result.stdout == ""
     assert result.stderr == ""
     event = _events(tmp_path / ".problem-locator" / "client-dfx.jsonl")[0]
     assert event["event"] == "client.hook.tool.started"
-    assert event["hook_version"] == "1.0.2"
+    assert event["hook_version"] == "1.0.3"
+    assert event["tool_name"] == full_tool
+    assert event["logical_tool"] == "problem_locator_create_case"
     assert event["operation_id"] == "10000000-0000-0000-0000-000000000001"
     assert event["argument_json_types"] == {
         "request_id": "string",
@@ -131,17 +152,42 @@ def test_hook_preserves_object_and_string_types_from_regression_fixture(
     assert event["arguments"]["problem_spec"] == nested
 
 
+def test_hook_normalizes_user_reported_legacy_name_without_coercing_string(
+    tmp_path: Path,
+) -> None:
+    payload = json.loads(LEGACY_REPORTED_FIXTURE.read_text(encoding="utf-8"))
+    result = _run_hook(payload, project=tmp_path)
+
+    assert result.returncode == 0
+    assert result.stdout == result.stderr == ""
+    event = _events(tmp_path / ".problem-locator" / "client-dfx.jsonl")[0]
+    assert event["tool_name"] == LEGACY_FULL_TOOL
+    assert event["logical_tool"] == "problem_locator_create_case"
+    assert event["argument_json_types"]["problem_spec"] == "string"
+    assert isinstance(event["arguments"]["problem_spec"], str)
+
+
+@pytest.mark.parametrize("full_tool", FULL_TOOLS, ids=("official", "legacy"))
 def test_hook_records_returned_and_failed_without_claiming_success(
     tmp_path: Path,
+    full_tool: str,
 ) -> None:
     log_file = tmp_path / "client.jsonl"
     returned = _run_hook(
-        _payload("PostToolUse", problem_spec={"statement": "x"}),
+        _payload(
+            "PostToolUse",
+            problem_spec={"statement": "x"},
+            tool_name=full_tool,
+        ),
         project=tmp_path,
         log_file=log_file,
     )
     failed = _run_hook(
-        _payload("PostToolUseFailure", problem_spec={"statement": "x"}),
+        _payload(
+            "PostToolUseFailure",
+            problem_spec={"statement": "x"},
+            tool_name=full_tool,
+        ),
         project=tmp_path,
         log_file=log_file,
     )
@@ -152,6 +198,10 @@ def test_hook_records_returned_and_failed_without_claiming_success(
         "client.hook.tool.returned",
         "client.hook.tool.failed",
     ]
+    assert all(event["tool_name"] == full_tool for event in events)
+    assert all(
+        event["logical_tool"] == "problem_locator_create_case" for event in events
+    )
     assert events[0]["tool_response"]["structuredContent"]["ok"] is False
     assert events[0]["duration_ms"] == 12
     assert not {
@@ -168,13 +218,28 @@ def test_hook_records_returned_and_failed_without_claiming_success(
 
 def test_hook_ignores_malformed_events_and_unlisted_tools(tmp_path: Path) -> None:
     malformed = _run_hook("{not-json", project=tmp_path)
-    payload = _payload("PreToolUse", problem_spec={"statement": "x"})
-    payload["tool_name"] = "mcp__problem-locator__unexpected_tool"
-    unlisted = _run_hook(payload, project=tmp_path)
+    invalid_names = (
+        "mcp__problem-locator__unexpected_tool",
+        "problem_locator_unexpected_tool",
+        "problem_locator_problem_locator_create_case_extra",
+        "mcp__problem_locator__problem_locator_create_case",
+    )
+    unlisted = [
+        _run_hook(
+            _payload(
+                "PreToolUse",
+                problem_spec={"statement": "x"},
+                tool_name=name,
+            ),
+            project=tmp_path,
+        )
+        for name in invalid_names
+    ]
 
-    assert malformed.returncode == unlisted.returncode == 0
+    assert malformed.returncode == 0
+    assert all(result.returncode == 0 for result in unlisted)
     assert malformed.stdout == malformed.stderr == ""
-    assert unlisted.stdout == unlisted.stderr == ""
+    assert all(result.stdout == result.stderr == "" for result in unlisted)
     assert not (tmp_path / ".problem-locator" / "client-dfx.jsonl").exists()
 
 
@@ -215,7 +280,11 @@ def test_hook_serializes_32_parallel_processes_as_complete_json_lines(
     log_file = tmp_path / "parallel.jsonl"
 
     def invoke(index: int) -> subprocess.CompletedProcess[str]:
-        payload = _payload("PreToolUse", problem_spec={"statement": str(index)})
+        payload = _payload(
+            "PreToolUse",
+            problem_spec={"statement": str(index)},
+            tool_name=FULL_TOOLS[index % len(FULL_TOOLS)],
+        )
         payload["tool_use_id"] = f"toolu_{index:02d}"
         payload["tool_input"]["request_id"] = (
             f"10000000-0000-0000-0000-{index + 1:012d}"

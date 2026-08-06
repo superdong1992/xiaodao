@@ -229,9 +229,10 @@ CLI 必须提供 `python -m problem_locator render-journey --case-id <uuid> [--l
 
 - 让 Claude Code 作为 MCP Host/Client 直接连接局域网 Streamable HTTP `/mcp`；Windows 客户端不得安装 `problem-locator` 包、运行本地 MCP Server 或转发代理，服务端公布的七工具 schema 是唯一权威 schema；
 - 客户端 MCP server key 固定为 `problem-locator`，URL 从 `PROBLEM_LOCATOR_MCP_URL` 展开且必须以 `/mcp` 结尾。存在环境代理时，启动 Claude Code 前必须让 `NO_PROXY` 精确包含服务端主机/IP，不得用 `NO_PROXY=*`；
-- Windows 客户端可配置项目级 `PreToolUse/PostToolUse/PostToolUseFailure` command Hook。Hook 仅观察 `mcp__problem-locator__.*`，脚本还必须白名单七个完整工具名；不得返回 permission decision、updated input/output 或 additional context，不得参与 schema、传输、重试或业务判断；
+- Windows 客户端可配置项目级 `PreToolUse/PostToolUse/PostToolUseFailure` command Hook。Hook 必须精确观察官方 `mcp__problem-locator__problem_locator_*` 与已确认旧式 `problem_locator_problem_locator_*` 两套名称，归一化后仍只允许七个完整工具名并保留原始 `tool_name`；旧式名称的重复前缀来自规范化 server key 与服务端工具名的拼接，不是重复注册。Hook 不得返回 permission decision、updated input/output 或 additional context，不得参与 schema、传输、重试或业务判断；
 - Hook 把 `schema_version/timestamp/hook_version/session_id/tool_use_id/tool_name/logical_tool/operation_id/arguments/argument_json_types` 追加到客户端 JSONL；成功事件原样保存 `tool_response`，失败事件保存 `error/is_interrupt/duration_ms`。默认路径为客户端项目目录下 `.problem-locator/client-dfx.jsonl`，`PROBLEM_LOCATOR_CLIENT_DFX_LOG_FILE` 仅接受绝对覆盖路径；并行进程必须通过 Windows Named Mutex 保证每条 UTF-8 JSONL 完整写入；
 - Hook 成功时退出 `0` 且无输出；写入失败只允许非阻塞退出 `1` 和一行 stderr，绝不使用阻塞退出 `2`。Hook 只覆盖已通过 Host 校验的执行调用；无 Hook、无服务请求的失败必须改用 Claude Code 原生 `--debug "mcp,hooks" --debug-file <path>` 定位；
+- `/hooks` 显示配置已加载不等于 matcher 已命中。无客户端日志时必须先核对默认路径与 Host 的完整工具名，再用 Hook 与同一 `request_id` 的服务端事件判断参数类型；服务端不得把 JSON 字符串自动解析成合同要求的对象；
 - Windows→Linux 发布旅程必须用真实 Claude Code 把 Hook 指向不可写目标，并以成功的 MCP `tool_result` 证明 exit `1` 的 DFX 故障没有阻断请求；
 
 - 使用调用方已有的 Remote MCP 客户端调用本册七个固定工具；

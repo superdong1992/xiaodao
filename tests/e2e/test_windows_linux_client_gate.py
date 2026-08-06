@@ -28,6 +28,13 @@ REAL_HOST_LOG = "PROBLEM_LOCATOR_REAL_HOST_HOOK_LOG"
 REAL_HOST_SERVER_LOG = "PROBLEM_LOCATOR_REAL_HOST_SERVER_DFX_LOG"
 REAL_HOST_REQUEST_ID = "PROBLEM_LOCATOR_REAL_HOST_REQUEST_ID"
 REAL_HOST_CLAUDE_VERSION = "PROBLEM_LOCATOR_REAL_HOST_CLAUDE_VERSION"
+LEGACY_HOST_GATE = "PROBLEM_LOCATOR_LEGACY_HOST_HOOK_GATE"
+LEGACY_HOST_LOG = "PROBLEM_LOCATOR_LEGACY_HOST_HOOK_LOG"
+LEGACY_HOST_SERVER_LOG = "PROBLEM_LOCATOR_LEGACY_HOST_SERVER_DFX_LOG"
+LEGACY_HOST_REQUEST_ID = "PROBLEM_LOCATOR_LEGACY_HOST_REQUEST_ID"
+LEGACY_HOST_CLAUDE_IDENTITY = "PROBLEM_LOCATOR_LEGACY_HOST_CLAUDE_IDENTITY"
+OFFICIAL_CREATE_CASE = f"mcp__problem-locator__{CREATE_CASE}"
+LEGACY_CREATE_CASE = f"problem_locator_{CREATE_CASE}"
 UNUSABLE_PROXY_URL = "http://127.0.0.1:9"
 
 
@@ -98,6 +105,64 @@ def _assert_unusable_proxies_are_configured() -> None:
     assert os.environ.get("HTTPS_PROXY") == UNUSABLE_PROXY_URL
 
 
+def _assert_real_host_evidence(
+    *,
+    hook_log_environment: str,
+    server_log_environment: str,
+    request_id_environment: str,
+    expected_full_tool_name: str,
+) -> None:
+    request_id = _required_environment(request_id_environment)
+    hook_events = _read_events(Path(_required_environment(hook_log_environment)))
+    started = [
+        event
+        for event in hook_events
+        if event.get("event") == "client.hook.tool.started"
+        and event.get("logical_tool") == CREATE_CASE
+        and event.get("operation_id") == request_id
+    ]
+    assert started, f"no real Host create_case Hook event for {request_id}"
+    latest = started[-1]
+    assert latest["source"] == "claude_code_hook"
+    assert latest["hook_version"] == __version__
+    assert latest["tool_name"] == expected_full_tool_name
+    assert latest["argument_json_types"]["problem_spec"] == "object"
+    assert isinstance(latest["arguments"]["problem_spec"], dict)
+
+    terminal = [
+        event
+        for event in hook_events
+        if event.get("event") in {
+            "client.hook.tool.returned",
+            "client.hook.tool.failed",
+        }
+        and event.get("session_id") == latest["session_id"]
+        and event.get("tool_use_id") == latest["tool_use_id"]
+    ]
+    assert terminal, "real Host Hook evidence has no terminal tool event"
+
+    server_log = os.environ.get(server_log_environment)
+    if os.environ.get(RELEASE_REQUIRED) == "1":
+        assert server_log, f"{server_log_environment} is required for release"
+    if not server_log:
+        return
+
+    server_events = _read_events(Path(server_log))
+    listed = [
+        event for event in server_events if event.get("event") == "mcp.tools.listed"
+    ]
+    assert listed and listed[-1]["server_version"] == __version__
+    server_started = [
+        event
+        for event in server_events
+        if event.get("event") == "mcp.tool.started"
+        and event.get("request_id") == request_id
+        and event.get("tool") == CREATE_CASE
+    ]
+    assert server_started, f"no server-side create_case event for {request_id}"
+    assert isinstance(server_started[-1]["arguments"]["problem_spec"], dict)
+
+
 def test_windows_direct_http_to_real_linux_mcp_preserves_compound_json_types() -> None:
     """Probe the authoritative remote schema without a local MCP process."""
 
@@ -162,56 +227,35 @@ def test_real_host_hook_proves_problem_spec_is_an_object() -> None:
         REAL_HOST_GATE,
         "requires real Claude Code, Skill, Hook, and Linux service evidence",
     )
-    request_id = _required_environment(REAL_HOST_REQUEST_ID)
-    hook_events = _read_events(Path(_required_environment(REAL_HOST_LOG)))
-    started = [
-        event
-        for event in hook_events
-        if event.get("event") == "client.hook.tool.started"
-        and event.get("logical_tool") == CREATE_CASE
-        and event.get("operation_id") == request_id
-    ]
-    assert started, f"no real Host create_case Hook event for {request_id}"
-    latest = started[-1]
-    assert latest["source"] == "claude_code_hook"
-    assert latest["hook_version"] == __version__
-    assert latest["argument_json_types"]["problem_spec"] == "object"
-    assert isinstance(latest["arguments"]["problem_spec"], dict)
-
-    terminal = [
-        event
-        for event in hook_events
-        if event.get("event") in {
-            "client.hook.tool.returned",
-            "client.hook.tool.failed",
-        }
-        and event.get("session_id") == latest["session_id"]
-        and event.get("tool_use_id") == latest["tool_use_id"]
-    ]
-    assert terminal, "real Host Hook evidence has no terminal tool event"
+    _assert_real_host_evidence(
+        hook_log_environment=REAL_HOST_LOG,
+        server_log_environment=REAL_HOST_SERVER_LOG,
+        request_id_environment=REAL_HOST_REQUEST_ID,
+        expected_full_tool_name=OFFICIAL_CREATE_CASE,
+    )
 
     version = os.environ.get(REAL_HOST_CLAUDE_VERSION)
     if os.environ.get(RELEASE_REQUIRED) == "1":
         assert version == "2.1.150 (Claude Code)"
         _assert_no_proxy_covers_remote(_required_environment(REMOTE_URL))
 
-    server_log = os.environ.get(REAL_HOST_SERVER_LOG)
+
+
+def test_legacy_host_hook_and_server_prove_problem_spec_is_an_object() -> None:
+    """Require correlated evidence from the supported legacy/custom Host."""
+
+    _skip_unless_windows_gate(
+        LEGACY_HOST_GATE,
+        "requires legacy/custom Claude Code Hook and Linux service evidence",
+    )
+    _assert_real_host_evidence(
+        hook_log_environment=LEGACY_HOST_LOG,
+        server_log_environment=LEGACY_HOST_SERVER_LOG,
+        request_id_environment=LEGACY_HOST_REQUEST_ID,
+        expected_full_tool_name=LEGACY_CREATE_CASE,
+    )
+
     if os.environ.get(RELEASE_REQUIRED) == "1":
-        assert server_log, f"{REAL_HOST_SERVER_LOG} is required for release"
-    if server_log:
-        server_events = _read_events(Path(server_log))
-        listed = [
-            event
-            for event in server_events
-            if event.get("event") == "mcp.tools.listed"
-        ]
-        assert listed and listed[-1]["server_version"] == __version__
-        server_started = [
-            event
-            for event in server_events
-            if event.get("event") == "mcp.tool.started"
-            and event.get("request_id") == request_id
-            and event.get("tool") == CREATE_CASE
-        ]
-        assert server_started, f"no server-side create_case event for {request_id}"
-        assert isinstance(server_started[-1]["arguments"]["problem_spec"], dict)
+        identity = _required_environment(LEGACY_HOST_CLAUDE_IDENTITY)
+        assert identity.strip(), "legacy/custom Claude Code identity must be nonempty"
+        _assert_no_proxy_covers_remote(_required_environment(REMOTE_URL))

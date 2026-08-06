@@ -23,9 +23,9 @@ $script:JourneyZipSha256 = '194f69fecd8dc8d40d1aedeb6fc25d2b7b4922b176be2b15be73
 $script:JourneySkillId = 'diagnosis-skill/diagnose-service-takeover'
 $script:JourneySkillVersion = '3.0.5'
 $script:JourneySkillHash = 'ae47a1a63e6cf4849f83b0f9d49db608c1e93ebe1713f21d58c910990b0857a4'
-$script:JourneyClientSkillSha256 = '7d52c7fca807eaf70c05ac9653a5a41a722507eaf4b06ed8daf960ed54834f89'
-$script:JourneyClientHookSha256 = 'ab1304fb7d2b719db5da5cf0030187711457e121c08649a62c49a340ad532a4e'
-$script:JourneyClientHookSettingsSha256 = '90aa9c6df2af457df3d616159b8db2001e16c6cd0270f957df318c660f60e76e'
+$script:JourneyClientSkillSha256 = '6caca2c58e3678b3857d39f728e40d765a121ef0ea152381852687d5e3e3583f'
+$script:JourneyClientHookSha256 = 'c8f16d4203a35181b688662813939b9b5312ae98ffb02cf86766cc3495d9bd26'
+$script:JourneyClientHookSettingsSha256 = '93dc9033f10ced86e51c15ed4744817979ef04d4664065c41208f5a1c47f4b1f'
 $script:JourneyMaxAttachmentBytes = 2684354560
 $script:JourneyMaxCurlJsonBytes = 1048576
 $script:JourneyCurlConnectTimeoutSeconds = 10
@@ -672,7 +672,7 @@ function Assert-JourneyHookEvidence {
         Assert-Journey ($started.Count -eq 1) "Hook started event for $($record.tool_use_id)"
         $startedEvent = $started[0]
         Assert-Journey ((Get-JourneyStringProperty $startedEvent 'source') -ceq 'claude_code_hook') 'Hook source'
-        Assert-Journey ((Get-JourneyStringProperty $startedEvent 'hook_version') -ceq '1.0.2') 'Hook version'
+        Assert-Journey ((Get-JourneyStringProperty $startedEvent 'hook_version') -ceq '1.0.3') 'Hook version'
         Assert-Journey ((Get-JourneyStringProperty $startedEvent 'tool_name') -ceq $record.full_name) 'Hook full tool name'
         Assert-Journey ((Get-JourneyStringProperty $startedEvent 'logical_tool') -ceq $record.tool_name) 'Hook logical tool name'
         $arguments = Get-JourneyProperty $startedEvent 'arguments' -Required

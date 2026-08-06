@@ -13,7 +13,11 @@ Configure Claude Code from [references/client-mcp-config.json](references/client
 
 For Windows diagnostics, merge [references/client-hooks-settings.json](references/client-hooks-settings.json) into the Claude project settings. The bundled [scripts/problem-locator-client-dfx.ps1](scripts/problem-locator-client-dfx.ps1) observes the three Claude Code tool events and appends the Host-visible arguments and response or error to JSONL. It never returns a permission decision, modifies an input, replaces an output, or forwards an MCP request. `PROBLEM_LOCATOR_CLIENT_DFX_LOG_FILE` selects an absolute log path and otherwise defaults to `.problem-locator/client-dfx.jsonl` under the Claude project directory. Correlate events by `session_id` and `tool_use_id`, and keep each write operation's stable `request_id` for correlation with the service DFX.
 
+The Hook accepts both the official `mcp__problem-locator__problem_locator_*` Host names and the observed legacy/custom `problem_locator_problem_locator_*` names, then normalizes them through the same seven-tool allowlist while retaining the raw `tool_name`. In the legacy form, the first `problem_locator` is the normalized server key and the second begins the server-published tool name; it does not mean the server registered a duplicate tool. A loaded Hook is not proof that its matcher ran. If no default `.problem-locator/client-dfx.jsonl` exists, inspect the exact Host tool name before diagnosing argument serialization.
+
 Hooks run only after Claude Code accepts a tool call for execution. If a call has no Hook entry and no service-side request, reproduce it with Claude Code `--debug "mcp,hooks" --debug-file <path>` to inspect Host-side schema, configuration, or connection rejection. After changing MCP or Hook configuration, remove stale same-name stdio definitions from every Claude configuration scope, fully restart Claude Code, start a new session, and verify both `/mcp` and `/hooks`.
+
+Never compensate for a Host that turns an object into a JSON string by parsing that string on the service. First compare `argument_json_types` from the Hook with the server event carrying the same `request_id`; keep the service's strict object validation as the authority.
 
 ## Use the fixed tools
 

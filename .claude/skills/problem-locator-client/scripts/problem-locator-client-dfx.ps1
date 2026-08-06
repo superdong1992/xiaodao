@@ -8,8 +8,11 @@ $script:Utf8 = [Text.UTF8Encoding]::new($false)
 [Console]::OutputEncoding = $script:Utf8
 
 $script:SchemaVersion = 1
-$script:HookVersion = '1.0.2'
-$script:ToolPrefix = 'mcp__problem-locator__'
+$script:HookVersion = '1.0.3'
+$script:ToolPrefixes = @(
+    'mcp__problem-locator__',
+    'problem_locator_'
+)
 $script:AllowedTools = [Collections.Generic.HashSet[string]]::new(
     [StringComparer]::Ordinal
 )
@@ -71,6 +74,17 @@ function Get-ArgumentTypes {
         $types[$property.Name] = Get-JsonType $property.Value
     }
     return $types
+}
+
+function Get-LogicalToolName {
+    param([Parameter(Mandatory = $true)][string]$FullToolName)
+
+    foreach ($prefix in $script:ToolPrefixes) {
+        if ($FullToolName.StartsWith($prefix, [StringComparison]::Ordinal)) {
+            return $FullToolName.Substring($prefix.Length)
+        }
+    }
+    return $null
 }
 
 function Resolve-LogPath {
@@ -184,13 +198,13 @@ if ($null -eq $eventName) {
 }
 
 $fullToolName = Get-OptionalValue $hookInput 'tool_name'
-if (
-    $fullToolName -isnot [string] -or
-    -not $fullToolName.StartsWith($script:ToolPrefix, [StringComparison]::Ordinal)
-) {
+if ($fullToolName -isnot [string]) {
     exit 0
 }
-$logicalTool = $fullToolName.Substring($script:ToolPrefix.Length)
+$logicalTool = Get-LogicalToolName $fullToolName
+if ($null -eq $logicalTool) {
+    exit 0
+}
 if (-not $script:AllowedTools.Contains($logicalTool)) {
     exit 0
 }

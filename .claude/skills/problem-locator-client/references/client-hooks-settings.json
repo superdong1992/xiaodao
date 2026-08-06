@@ -2,7 +2,7 @@
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "^mcp__problem-locator__.*$",
+        "matcher": "^(mcp__problem-locator__|problem_locator_)problem_locator_(create_case|prepare_attachment|submit_supplement|get_case|resume_case|cancel_case|list_artifacts)$",
         "hooks": [
           {
             "type": "command",
@@ -22,7 +22,7 @@
     ],
     "PostToolUse": [
       {
-        "matcher": "^mcp__problem-locator__.*$",
+        "matcher": "^(mcp__problem-locator__|problem_locator_)problem_locator_(create_case|prepare_attachment|submit_supplement|get_case|resume_case|cancel_case|list_artifacts)$",
         "hooks": [
           {
             "type": "command",
@@ -42,7 +42,7 @@
     ],
     "PostToolUseFailure": [
       {
-        "matcher": "^mcp__problem-locator__.*$",
+        "matcher": "^(mcp__problem-locator__|problem_locator_)problem_locator_(create_case|prepare_attachment|submit_supplement|get_case|resume_case|cancel_case|list_artifacts)$",
         "hooks": [
           {
             "type": "command",

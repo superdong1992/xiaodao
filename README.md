@@ -140,6 +140,8 @@ $env:NO_PROXY = "localhost,127.0.0.1,192.168.1.20"
 
 Windows 客户端 DFX 使用 Claude Code 原生 command Hook，不是 MCP，也不转发请求。把 [client-hooks-settings.json](.claude/skills/problem-locator-client/references/client-hooks-settings.json) 的 `hooks` 合并到客户端项目 `.claude/settings.json`；脚本已经包含在 [problem-locator-client-dfx.ps1](.claude/skills/problem-locator-client/scripts/problem-locator-client-dfx.ps1)，事件、matcher、退出码和 Windows exec-form 参数的语义以 [Claude Code Hooks 说明](https://code.claude.com/docs/en/hooks) 为准。如需覆盖默认日志位置，在启动 Claude Code 前设置绝对路径：
 
+1.0.3 的 Hook 同时识别官方 Claude Code 使用的 `mcp__problem-locator__problem_locator_*` 和已确认旧版/改版 Host 使用的 `problem_locator_problem_locator_*`，然后归一化为同一个七工具白名单。旧式名称中第一个 `problem_locator` 是 server key `problem-locator` 的规范化结果，第二个来自服务端工具名本身，不表示服务端重复注册。原始 `tool_name` 会保留在 DFX 中。
+
 ```powershell
 $env:PROBLEM_LOCATOR_CLIENT_DFX_LOG_FILE = "D:/logs/problem-locator/client.jsonl"
 Get-Content -Wait D:\logs\problem-locator\client.jsonl
@@ -154,6 +156,8 @@ claude --debug "mcp,hooks" --debug-file D:\logs\problem-locator\claude-debug.log
 ```
 
 通过 `/hooks` 确认三个 matcher 均已加载。Hook 写日志失败使用非阻塞退出码 `1`，绝不使用会阻止 `PreToolUse` 的退出码 `2`；业务正确性不能依赖客户端日志。
+
+Hook 显示为已加载不代表 matcher 已命中。若没有日志，先确认查看的是当前 Claude 项目下 `.problem-locator/client-dfx.jsonl`，再从 Host debug 文件核对完整 `tool_name`；未设置 `PROBLEM_LOCATOR_CLIENT_DFX_LOG_FILE` 时仍会使用默认路径。恢复 DFX 后，以 `argument_json_types` 和同一 `request_id` 的服务端事件判定字符串化边界，不得在服务端把 JSON 字符串自动解析成对象。
 
 #### Windows 客户端到 Linux 服务端的发布门禁
 
@@ -182,7 +186,19 @@ $env:PROBLEM_LOCATOR_RELEASE_GATES_REQUIRED = "1"
 python -m pytest tests/e2e/test_windows_linux_client_gate.py::test_real_host_hook_proves_problem_spec_is_an_object -q
 ```
 
-设置 `PROBLEM_LOCATOR_RELEASE_GATES_REQUIRED=1` 后，上述真实门禁缺少 Windows、Claude Code、Hook 日志或服务端地址时必须失败，不得以 skipped 计为发布通过。验收要求同一 `request_id` 的 `argument_json_types.problem_spec` 等于 `object`，并由服务端 `mcp.tools.listed` 与 `mcp.tool.started` 事件确认实际公布 schema 和实际收到的参数。生产旅程还会把 Hook 日志目标故意指向不可写节点，要求真实 Claude Code 仍收到成功的 MCP `tool_result`，从而证明旁路 DFX 失败不会阻断请求。
+对于使用 `problem_locator_problem_locator_*` 的旧版/改版黑盒客户端，另行保存客户端 Hook 与服务端 DFX，并运行独立门禁：
+
+```powershell
+$env:PROBLEM_LOCATOR_LEGACY_HOST_HOOK_GATE = "1"
+$env:PROBLEM_LOCATOR_LEGACY_HOST_HOOK_LOG = "D:\logs\problem-locator\legacy-client.jsonl"
+$env:PROBLEM_LOCATOR_LEGACY_HOST_SERVER_DFX_LOG = "D:\logs\problem-locator\server-debug.jsonl"
+$env:PROBLEM_LOCATOR_LEGACY_HOST_REQUEST_ID = "10000000-0000-0000-0000-000000000103"
+$env:PROBLEM_LOCATOR_LEGACY_HOST_CLAUDE_IDENTITY = "<旧版或改版客户端的版本/构建标识>"
+$env:PROBLEM_LOCATOR_RELEASE_GATES_REQUIRED = "1"
+python -m pytest tests/e2e/test_windows_linux_client_gate.py::test_legacy_host_hook_and_server_prove_problem_spec_is_an_object -q
+```
+
+设置 `PROBLEM_LOCATOR_RELEASE_GATES_REQUIRED=1` 后，上述真实门禁缺少 Windows、对应 Claude Code、Hook 日志或服务端地址时必须失败，不得以 skipped 计为发布通过。1.0.3 发布时官方 Host 和旧式 Host 两项门禁都必须运行。验收要求同一 `request_id` 的 `argument_json_types.problem_spec` 等于 `object`，并由服务端 `mcp.tools.listed` 与 `mcp.tool.started` 事件确认实际公布 schema 和实际收到的参数。生产旅程还会把 Hook 日志目标故意指向不可写节点，要求真实 Claude Code 仍收到成功的 MCP `tool_result`，从而证明旁路 DFX 失败不会阻断请求。
 
 `/live` 表示 HTTP 进程正在提供服务。`/ready` 还会检查配置、实例锁、状态有效性、数据目录和启动恢复过程。在恢复期间，或出现致命状态/worker 故障后，服务可能仍然存活，但尚未就绪。
 
