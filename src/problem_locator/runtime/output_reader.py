@@ -40,6 +40,7 @@ from problem_locator.contracts.models import (
     WorkspaceInputManifest,
 )
 from problem_locator.contracts.outcomes import (
+    UserResultValidationError,
     validate_outcome_for_job,
     validate_user_result_for_outcome,
 )
@@ -1238,14 +1239,15 @@ def _read_validated_output(
         outcome_bytes = canonical_json_bytes(outcome)
         _scan_bytes(outcome_bytes, patterns)
 
-    drafts = _proposal_drafts(outcome)
-    declared_paths = [
-        draft.workspace_relative_path
-        for draft in drafts
-        if draft.workspace_relative_path is not None
-    ]
-    if len(declared_paths) != len(set(declared_paths)):
-        raise _InvalidOutput
+    with _classify_invalid_output("proposal_manifest"):
+        drafts = _proposal_drafts(outcome)
+        declared_paths = [
+            draft.workspace_relative_path
+            for draft in drafts
+            if draft.workspace_relative_path is not None
+        ]
+        if len(declared_paths) != len(set(declared_paths)):
+            raise _InvalidOutput
 
     resources: list[ValidatedProposalResource] = []
     user_result_bytes: bytes | None = None
@@ -1254,11 +1256,12 @@ def _read_validated_output(
         relative_path = draft.workspace_relative_path
         if relative_path is None:
             continue
-        required_prefix = f"output/proposals/{draft.proposal_key}/"
-        if not relative_path.startswith(required_prefix):
-            raise _InvalidOutput
-        _scan_relative_path(relative_path, patterns)
-        path = _validate_parent_directories(workspace_root, relative_path)
+        with _classify_invalid_output("proposal_path_validation"):
+            required_prefix = f"output/proposals/{draft.proposal_key}/"
+            if not relative_path.startswith(required_prefix):
+                raise _InvalidOutput
+            _scan_relative_path(relative_path, patterns)
+            path = _validate_parent_directories(workspace_root, relative_path)
 
         if isinstance(draft, AgentArtifactProposalDraft):
             resource_kind = draft.resource_kind
@@ -1270,47 +1273,49 @@ def _read_validated_output(
             resource_kind = ResourceKind.FILE
             capture = False
 
-        if resource_kind is ResourceKind.FILE:
-            size, sha256, content, source_snapshot = _read_frozen_relative_file(
-                workspace_root,
-                relative_path,
-                patterns=patterns,
-                capture=capture,
-                root_identity=root_identity,
-                output_identity=output_identity,
-                max_bytes=remaining_bytes,
+        with _classify_invalid_output("proposal_resource_read"):
+            if resource_kind is ResourceKind.FILE:
+                size, sha256, content, source_snapshot = _read_frozen_relative_file(
+                    workspace_root,
+                    relative_path,
+                    patterns=patterns,
+                    capture=capture,
+                    root_identity=root_identity,
+                    output_identity=output_identity,
+                    max_bytes=remaining_bytes,
+                )
+                tree_manifest = None
+                if capture:
+                    assert content is not None
+                    if (
+                        isinstance(draft, AgentArtifactProposalDraft)
+                        and draft.artifact_kind is ArtifactKind.USER_RESULT
+                    ):
+                        user_result_bytes = content
+                    else:
+                        user_result_archive_bytes = content
+            else:
+                size, sha256, tree_manifest = _inspect_tree(
+                    path,
+                    workspace_root=workspace_root,
+                    patterns=patterns,
+                    max_bytes=remaining_bytes,
+                    root_identity=root_identity,
+                    output_identity=output_identity,
+                )
+                source_snapshot = _snapshot_source(
+                    workspace_root,
+                    relative_path,
+                    root_identity=root_identity,
+                    output_identity=output_identity,
+                )
+            remaining_bytes -= size
+        with _classify_invalid_output("proposal_declared_values"):
+            _validate_declared_values(
+                draft,
+                actual_size=size,
+                actual_sha256=sha256,
             )
-            tree_manifest = None
-            if capture:
-                assert content is not None
-                if (
-                    isinstance(draft, AgentArtifactProposalDraft)
-                    and draft.artifact_kind is ArtifactKind.USER_RESULT
-                ):
-                    user_result_bytes = content
-                else:
-                    user_result_archive_bytes = content
-        else:
-            size, sha256, tree_manifest = _inspect_tree(
-                path,
-                workspace_root=workspace_root,
-                patterns=patterns,
-                max_bytes=remaining_bytes,
-                root_identity=root_identity,
-                output_identity=output_identity,
-            )
-            source_snapshot = _snapshot_source(
-                workspace_root,
-                relative_path,
-                root_identity=root_identity,
-                output_identity=output_identity,
-            )
-        remaining_bytes -= size
-        _validate_declared_values(
-            draft,
-            actual_size=size,
-            actual_sha256=sha256,
-        )
         resources.append(
             ValidatedProposalResource(
                 draft=draft,
@@ -1327,20 +1332,34 @@ def _read_validated_output(
 
     user_result = None
     if user_result_bytes is not None:
-        user_result = validate_user_result_for_outcome(job, outcome, user_result_bytes)
+        try:
+            user_result = validate_user_result_for_outcome(
+                job,
+                outcome,
+                user_result_bytes,
+            )
+        except UserResultValidationError as exc:
+            raise _ClassifiedInvalidOutput(
+                f"user_result_{exc.category}"
+            ) from None
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except Exception:
+            raise _ClassifiedInvalidOutput("user_result_unclassified") from None
     if user_result_archive_bytes is not None:
-        _validate_user_result_archive(
-            workspace_root,
-            outcome,
-            workspace_manifest,
-            {resource.proposal_key: resource for resource in resources},
-            user_result_archive_bytes,
-            patterns,
-            root_identity=root_identity,
-            output_identity=output_identity,
-            inputs_identity=inputs_identity,
-            max_bytes=job.resource_limits.workspace_bytes,
-        )
+        with _classify_invalid_output("user_result_archive_validation"):
+            _validate_user_result_archive(
+                workspace_root,
+                outcome,
+                workspace_manifest,
+                {resource.proposal_key: resource for resource in resources},
+                user_result_archive_bytes,
+                patterns,
+                root_identity=root_identity,
+                output_identity=output_identity,
+                inputs_identity=inputs_identity,
+                max_bytes=job.resource_limits.workspace_bytes,
+            )
     return ValidatedAgentOutput(
         outcome=outcome,
         canonical_bytes=outcome_bytes,
@@ -1422,10 +1441,11 @@ def read_agent_output(
             output_identity=output_identity,
             inputs_identity=inputs_identity,
         )
-        _assert_snapshot_paths(initial)
-        final_outcome = _lstat(workspace_root / "output/job_outcome.json")
-        if _fingerprint(final_outcome) != initial.leaf_fingerprint:
-            raise _InvalidOutput
+        with _classify_invalid_output("final_outcome_stability"):
+            _assert_snapshot_paths(initial)
+            final_outcome = _lstat(workspace_root / "output/job_outcome.json")
+            if _fingerprint(final_outcome) != initial.leaf_fingerprint:
+                raise _InvalidOutput
     except _MissingOutcome:
         missing = True
         final_outcome_state = "missing"

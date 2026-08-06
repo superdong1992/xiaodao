@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
 import time
 from dataclasses import dataclass
@@ -13,6 +15,7 @@ from mcp.server.lowlevel import Server
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 
+from problem_locator import __version__
 from problem_locator.contracts.commands import (
     ApplicationResponse,
     ArtifactView,
@@ -230,6 +233,17 @@ _OUTPUT_SCHEMAS = {
 }
 
 
+def _schema_sha256(schema: dict[str, Any]) -> str:
+    canonical = json.dumps(
+        schema,
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
 @dataclass(frozen=True, slots=True)
 class McpTransport:
     server: Server
@@ -427,11 +441,11 @@ def create_mcp_transport(
         query_port,
         public_base_url=public_base_url,
     )
-    server = Server("problem-locator")
+    server = Server("problem-locator", version=__version__)
 
     @server.list_tools()
     async def list_tools() -> list[mcp_types.Tool]:
-        return [
+        tools = [
             mcp_types.Tool(
                 name=name,
                 description=_DESCRIPTIONS[name],
@@ -440,6 +454,19 @@ def create_mcp_transport(
             )
             for name, request_type in _REQUESTS.items()
         ]
+        log_event(
+            "mcp.tools.listed",
+            server_version=__version__,
+            tools=[
+                {
+                    "name": tool.name,
+                    "input_schema": tool.inputSchema,
+                    "input_schema_sha256": _schema_sha256(tool.inputSchema),
+                }
+                for tool in tools
+            ],
+        )
+        return tools
 
     @server.call_tool(validate_input=False)
     async def call_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:

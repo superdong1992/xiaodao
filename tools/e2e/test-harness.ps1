@@ -77,7 +77,7 @@ foreach ($toolName in @(
     'problem_locator_list_artifacts', 'problem_locator_prepare_attachment',
     'problem_locator_resume_case', 'problem_locator_submit_supplement'
 )) {
-    Assert-E2ETest ($restartDriverText.Contains("mcp__problem_locator__$toolName")) "restart discovery inventory missing $toolName"
+    Assert-E2ETest ($restartDriverText.Contains("mcp__problem-locator__$toolName")) "restart discovery inventory missing $toolName"
 }
 Assert-E2ETest ($restartDriverText.Contains("@('Skill', `$script:RestartFullGetTool, `$script:RestartFullListTool) -ccontains `$name")) 'restart execution remains restricted to Skill/get/list'
 Assert-E2ETest ($restartDriverText.Contains('-TimeoutSeconds ($script:RestartCurlMaxTimeSeconds + 15)')) 'restart curl has an explicit bounded outer timeout'

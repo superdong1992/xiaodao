@@ -110,6 +110,9 @@ function Copy-EvidenceBundle([string]$Target) {
     }
     Copy-Item -LiteralPath (Join-Path $toolRoot 'bounded-process.ps1') -Destination (Join-Path $Target 'bounded-process.ps1') -Force
     Copy-Item -LiteralPath (Join-Path $toolRoot 'business-patch-identity.ps1') -Destination (Join-Path $Target 'business-patch-identity.ps1') -Force
+    $clientAssets = Join-Path $Target 'client-assets'
+    [IO.Directory]::CreateDirectory($clientAssets) | Out-Null
+    Copy-Item -LiteralPath (Join-Path $RepoRoot '.claude\skills\logparse-diagnose') -Destination $clientAssets -Recurse -Force
 
     # Python compilation may have left local cache files below the harness.
     # They are not source evidence and cannot be normalized as UTF-8 text.
@@ -143,7 +146,7 @@ function Copy-RestartRuntime([string]$MainRoot) {
         'scan_service_log_secrets.py', 'service_preflight.py', 'setup_claude.sh',
         'setup_fixtures.sh', 'setup_sources.sh', 'setup_venvs.sh', 'snapshot_data_root.py',
         'start_service_supervisor.sh', 'stop_service.sh', 'verify_claude_manifest.py',
-        'verify_nonroot_logparse_catalog.py', 'verify_restart_nonempty_runtime.sh',
+        'verify_nonroot_logparse_catalog.py', 'verify_restart_nonempty_runtime.sh', 'client-assets',
         'verify_service_process.py', 'windows-service-preflight.ps1'
     )
     foreach ($name in $names) {
@@ -228,7 +231,7 @@ function New-E2EContainer(
         '--mount', "type=bind,src=$LogparseSource,dst=/source/logparse,readonly",
         '--mount', "type=bind,src=$McpSource,dst=/source/problem-locator-mcp,readonly",
         '--mount', "type=bind,src=$SettingsPath,dst=/run/host-claude-settings.json,readonly",
-        '--mount', "type=bind,src=$RepoRoot\.claude\skills\logparse-diagnose,dst=/run/plagent-claude/.claude/skills/logparse-diagnose,readonly",
+        '--mount', "type=bind,src=$Evidence\client-assets\logparse-diagnose,dst=/run/plagent-claude/.claude/skills/logparse-diagnose,readonly",
         '--mount', "type=bind,src=$claudeContext\claude,dst=/cache/claude-2.1.150,readonly",
         '--mount', "type=bind,src=$Evidence,dst=/evidence",
         '--mount', "type=volume,src=$Volume,dst=/var/lib/problem-locator"
@@ -532,7 +535,10 @@ $report = [PSCustomObject][ordered]@{
     artifact_id = $(if ($null -ne $journey) { $journey.public_artifact.artifact_id } else { $null })
     result_sha256 = $(if ($null -ne $journey) { $journey.public_artifact.sha256 } else { $null })
     final_result = $(if ($null -ne $journey) { $journey.final_result.status } else { $null })
-    validation_correction_count = $(if ($null -ne $phase1 -and $null -ne $phase1.validation_corrections) { @($phase1.validation_corrections).Count } else { 0 })
+    validation_correction_count = $(
+        $(if ($null -ne $phase1 -and $null -ne $phase1.validation_corrections) { @($phase1.validation_corrections).Count } else { 0 }) +
+        $(if ($null -ne $journey -and $null -ne $journey.validation_corrections) { @($journey.validation_corrections).Count } else { 0 })
+    )
     state_audit = $(if ($null -ne $audit) { $audit.status } else { $null })
     resources_preserved_on_failure = (-not $script:success)
     timings = [object[]]$script:timings.ToArray()

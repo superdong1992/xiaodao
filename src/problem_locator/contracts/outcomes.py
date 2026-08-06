@@ -93,6 +93,14 @@ PROBLEM_SPEC_PATCH_FIELDS = (
 )
 
 
+class UserResultValidationError(ValueError):
+    """Content-free USER_RESULT invariant category for runtime DFX."""
+
+    def __init__(self, category: str, message: str) -> None:
+        super().__init__(message)
+        self.category = category
+
+
 def apply_problem_spec_patch(
     current: ProblemSpec,
     patch: ProblemSpecPatch,
@@ -510,7 +518,24 @@ def validate_user_result_for_outcome(
 ) -> UserResultPayload:
     """Validate the canonical USER_RESULT as the exact candidate representation."""
 
-    result = parse_canonical_json_bytes(result_bytes, model_type=UserResultPayload)
+    try:
+        parsed_result = parse_canonical_json_bytes(result_bytes)
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except Exception:
+        raise UserResultValidationError(
+            "canonical",
+            "USER_RESULT bytes are not canonical",
+        ) from None
+    try:
+        result = UserResultPayload.model_validate(parsed_result)
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except Exception:
+        raise UserResultValidationError(
+            "schema",
+            "USER_RESULT does not satisfy its schema",
+        ) from None
     payload = outcome.payload
     candidate = (
         payload.candidate_conclusion_draft
@@ -518,7 +543,10 @@ def validate_user_result_for_outcome(
         else None
     )
     if candidate is None:
-        raise ValueError("USER_RESULT requires a CandidateConclusionDraft")
+        raise UserResultValidationError(
+            "candidate_missing",
+            "USER_RESULT requires a CandidateConclusionDraft",
+        )
     expected = {
         "problem_statement": job.context_snapshot.problem_spec.statement,
         "candidate_statement": candidate.statement,
@@ -527,7 +555,10 @@ def validate_user_result_for_outcome(
     }
     for field_name, value in expected.items():
         if getattr(result, field_name) != value:
-            raise ValueError(f"USER_RESULT {field_name} must exactly match the candidate seam")
+            raise UserResultValidationError(
+                f"{field_name}_mismatch",
+                f"USER_RESULT {field_name} must exactly match the candidate seam",
+            )
     artifacts = (
         outcome.proposed_artifact_drafts
         if isinstance(outcome, AgentJobOutcome)
@@ -539,20 +570,32 @@ def validate_user_result_for_outcome(
         if artifact.artifact_kind is ArtifactKind.USER_RESULT
     ]
     if len(user_results) != 1:
-        raise ValueError("candidate Outcome requires exactly one USER_RESULT Artifact")
+        raise UserResultValidationError(
+            "artifact_count",
+            "candidate Outcome requires exactly one USER_RESULT Artifact",
+        )
     artifact = user_results[0]
     actual_size = len(result_bytes)
     actual_sha256 = hashlib.sha256(result_bytes).hexdigest()
     if isinstance(outcome, AgentJobOutcome):
         if artifact.declared_size is not None and artifact.declared_size != actual_size:
-            raise ValueError("USER_RESULT declared_size does not match canonical bytes")
+            raise UserResultValidationError(
+                "declared_size_mismatch",
+                "USER_RESULT declared_size does not match canonical bytes",
+            )
         if (
             artifact.declared_sha256 is not None
             and artifact.declared_sha256 != actual_sha256
         ):
-            raise ValueError("USER_RESULT declared_sha256 does not match canonical bytes")
+            raise UserResultValidationError(
+                "declared_sha256_mismatch",
+                "USER_RESULT declared_sha256 does not match canonical bytes",
+            )
     elif artifact.size != actual_size or artifact.sha256 != actual_sha256:
-        raise ValueError("USER_RESULT ArtifactProposal must match canonical bytes")
+        raise UserResultValidationError(
+            "published_artifact_mismatch",
+            "USER_RESULT ArtifactProposal must match canonical bytes",
+        )
     return result
 
 

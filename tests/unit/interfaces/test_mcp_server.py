@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from contextlib import asynccontextmanager
 
@@ -12,6 +13,7 @@ from mcp.client.streamable_http import streamable_http_client
 from starlette.applications import Starlette
 from starlette.routing import Route
 
+from problem_locator import __version__
 from problem_locator.contracts.commands import ArtifactListResponse, CaseQueryResponse
 from problem_locator.contracts.enums import ErrorCode
 from problem_locator.contracts.errors import (
@@ -161,6 +163,64 @@ def test_mcp_rejects_json_encoded_problem_spec_before_command_execution() -> Non
     assert result["ok"] is False
     assert result["error"]["code"] == ErrorCode.VALIDATION_ERROR.value
     assert result["error"]["details"][0]["field"] == "problem_spec"
+    assert command.calls == []
+
+
+def test_mcp_rejects_list_encoded_supplement_inputs_before_command_execution() -> None:
+    command = FakeApplicationService()
+    adapter = McpAdapter(
+        command,
+        FakeQuery(),
+        public_base_url="http://127.0.0.1:8000",
+    )
+
+    result = asyncio.run(
+        adapter.call(
+            TOOL_NAMES[2],
+            {
+                "request_id": REQUEST_IDS[0],
+                "case_id": CASE_ID,
+                "expected_case_revision": 1,
+                "inputs": [{"name": "order_id", "value": "order-1"}],
+                "attachment_ids": [],
+                "wait_seconds": 0,
+            },
+        )
+    )
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == ErrorCode.VALIDATION_ERROR.value
+    assert result["error"]["details"][0]["field"] == "inputs"
+    assert command.calls == []
+
+
+def test_mcp_rejects_legacy_attachment_field_aliases_before_command_execution() -> None:
+    command = FakeApplicationService()
+    adapter = McpAdapter(
+        command,
+        FakeQuery(),
+        public_base_url="http://127.0.0.1:8000",
+    )
+
+    result = asyncio.run(
+        adapter.call(
+            TOOL_NAMES[1],
+            {
+                "request_id": REQUEST_IDS[0],
+                "case_id": CASE_ID,
+                "expected_case_revision": 1,
+                "attachment_name": "logs.zip",
+                "content_type": "application/zip",
+                "declared_byte_count": 10,
+                "declared_sha256": None,
+            },
+        )
+    )
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == ErrorCode.VALIDATION_ERROR.value
+    fields = {detail["field"] for detail in result["error"]["details"]}
+    assert {"name", "attachment_name", "declared_byte_count"}.issubset(fields)
     assert command.calls == []
 
 
@@ -395,7 +455,8 @@ def test_mcp_serializes_r3_postcommit_success_without_case_view(
     assert data["business_receipt"]["case_revision"] == 2
 
 
-def test_official_sdk_calls_all_seven_stateless_tools() -> None:
+def test_official_sdk_calls_all_seven_stateless_tools(caplog) -> None:
+    caplog.set_level(logging.INFO, logger="problem_locator.dfx")
     resource_limit_error = ApplicationError(
         code=ErrorCode.RESOURCE_LIMIT_EXCEEDED,
         message="Attachment size exceeds the V1 limit.",
@@ -478,12 +539,114 @@ def test_official_sdk_calls_all_seven_stateless_tools() -> None:
                     http_client=http_client,
                 ) as (read_stream, write_stream, get_session_id):
                     async with ClientSession(read_stream, write_stream) as session:
-                        await session.initialize()
+                        initialized = await session.initialize()
+                        assert initialized.serverInfo.version == __version__
                         listed = await session.list_tools()
                         assert [tool.name for tool in listed.tools] == TOOL_NAMES
+                        expected_inputs = {
+                            TOOL_NAMES[0]: (
+                                {"request_id", "problem_spec", "initial_user_facts", "wait_seconds"},
+                                {"request_id", "problem_spec"},
+                            ),
+                            TOOL_NAMES[1]: (
+                                {
+                                    "request_id",
+                                    "case_id",
+                                    "expected_case_revision",
+                                    "name",
+                                    "content_type",
+                                    "declared_size",
+                                    "declared_sha256",
+                                },
+                                {
+                                    "request_id",
+                                    "case_id",
+                                    "expected_case_revision",
+                                    "name",
+                                    "content_type",
+                                },
+                            ),
+                            TOOL_NAMES[2]: (
+                                {
+                                    "request_id",
+                                    "case_id",
+                                    "expected_case_revision",
+                                    "inputs",
+                                    "attachment_ids",
+                                    "wait_seconds",
+                                },
+                                {
+                                    "request_id",
+                                    "case_id",
+                                    "expected_case_revision",
+                                    "inputs",
+                                    "attachment_ids",
+                                },
+                            ),
+                            TOOL_NAMES[3]: (
+                                {"case_id", "wait_for_job_id", "wait_seconds"},
+                                {"case_id"},
+                            ),
+                            TOOL_NAMES[4]: (
+                                {
+                                    "request_id",
+                                    "case_id",
+                                    "expected_case_revision",
+                                    "wait_seconds",
+                                },
+                                {"request_id", "case_id", "expected_case_revision"},
+                            ),
+                            TOOL_NAMES[5]: (
+                                {"request_id", "case_id", "expected_case_revision"},
+                                {"request_id", "case_id", "expected_case_revision"},
+                            ),
+                            TOOL_NAMES[6]: ({"case_id"}, {"case_id"}),
+                        }
+                        input_validators: dict[str, Draft202012Validator] = {}
+                        for tool in listed.tools:
+                            schema = tool.inputSchema
+                            Draft202012Validator.check_schema(schema)
+                            assert set(schema["properties"]) == expected_inputs[tool.name][0]
+                            assert set(schema["required"]) == expected_inputs[tool.name][1]
+                            input_validators[tool.name] = Draft202012Validator(schema)
                         assert all(
                             tool.inputSchema.get("additionalProperties") is False
                             for tool in listed.tools
+                        )
+                        create_contract = {
+                            "request_id": REQUEST_IDS[0],
+                            "problem_spec": problem_spec_input(),
+                        }
+                        assert input_validators[TOOL_NAMES[0]].is_valid(create_contract)
+                        assert not input_validators[TOOL_NAMES[0]].is_valid(
+                            {
+                                **create_contract,
+                                "problem_spec": json.dumps(problem_spec_input()),
+                            }
+                        )
+                        submit_contract = {
+                            "request_id": REQUEST_IDS[0],
+                            "case_id": CASE_ID,
+                            "expected_case_revision": 1,
+                            "inputs": {"order_id": "order-1"},
+                            "attachment_ids": [],
+                        }
+                        assert input_validators[TOOL_NAMES[2]].is_valid(submit_contract)
+                        assert not input_validators[TOOL_NAMES[2]].is_valid(
+                            {
+                                **submit_contract,
+                                "inputs": [{"name": "order_id", "value": "order-1"}],
+                            }
+                        )
+                        assert not input_validators[TOOL_NAMES[1]].is_valid(
+                            {
+                                "request_id": REQUEST_IDS[0],
+                                "case_id": CASE_ID,
+                                "expected_case_revision": 1,
+                                "attachment_name": "logs.zip",
+                                "content_type": "application/zip",
+                                "declared_byte_count": 10,
+                            }
                         )
                         output_validators: dict[str, Draft202012Validator] = {}
                         for tool in listed.tools:
@@ -665,3 +828,16 @@ def test_official_sdk_calls_all_seven_stateless_tools() -> None:
         ("get_case", (CASE_ID, None, 0)),
         ("list_artifacts", (CASE_ID, False)),
     ]
+    listed_record = next(
+        record
+        for record in caplog.records
+        if getattr(record, "dfx_event", "") == "mcp.tools.listed"
+    )
+    assert listed_record.dfx_fields["server_version"] == __version__
+    advertised = listed_record.dfx_fields["tools"]
+    assert [tool["name"] for tool in advertised] == TOOL_NAMES
+    assert all(len(tool["input_schema_sha256"]) == 64 for tool in advertised)
+    create_schema = advertised[0]["input_schema"]
+    assert create_schema["properties"]["problem_spec"]["$ref"].endswith(
+        "/ProblemSpecInput"
+    )

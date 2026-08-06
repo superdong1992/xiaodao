@@ -145,26 +145,7 @@ service_reaped=true
 trap - EXIT HUP INT TERM
 
 /opt/venvs/xiaodao/bin/python -I /evidence/scan_service_log_secrets.py
-awk -v pid="$service_pid" '
-  BEGIN {
-    started = "INFO:     Started server process [" pid "]"
-    startup = "INFO:     Application startup complete."
-    shutting = "INFO:     Shutting down"
-    shutdown = "INFO:     Application shutdown complete."
-    finished = "INFO:     Finished server process [" pid "]"
-  }
-  $0 == started { started_count += 1; started_line = NR }
-  $0 == startup { startup_count += 1; startup_line = NR }
-  $0 == shutting { shutting_count += 1; shutting_line = NR }
-  $0 == shutdown { shutdown_count += 1; shutdown_line = NR }
-  $0 == finished { finished_count += 1; finished_line = NR }
-  END {
-    if (started_count != 1 || startup_count != 1 || shutting_count != 1 ||
-        shutdown_count != 1 || finished_count != 1) exit 1
-    if (!(started_line < startup_line && startup_line < shutting_line &&
-          shutting_line < shutdown_line && shutdown_line < finished_line)) exit 1
-  }
-' "$log"
+/opt/venvs/xiaodao/bin/python -I /evidence/verify_service_process.py lifecycle
 test "$service_status" -eq 143
 /opt/venvs/xiaodao/bin/python -I /evidence/verify_service_process.py archive-log
 /opt/venvs/xiaodao/bin/python -I /evidence/verify_service_process.py exit "$service_status"

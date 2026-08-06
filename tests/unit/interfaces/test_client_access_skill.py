@@ -173,9 +173,9 @@ def test_skill_document_names_tools_and_safety_invariants() -> None:
     assert ".tar.gz" in skill and "uppercase archive suffixes" in skill
     assert "do not ask for a Logparse archive Content-Type" in skill
     assert "Derive it from the canonical lowercase filename suffix" in skill
-    assert "problem-locator-client-proxy" in skill
-    assert "does not read or depend on Claude Code debug logs" in skill
-    assert "attempt_number" in skill
+    assert "does not run a local MCP server or forwarding proxy" in skill
+    assert "does not install the `problem-locator` package" in skill
+    assert '`--debug "mcp,hooks" --debug-file <path>`' in skill
     assert '"inputs": {"order_id": "order-1"}' in skill
     assert "It is never a list of name/value records" in skill
     assert "`name` and `declared_size`" in skill
@@ -198,29 +198,42 @@ def test_skill_document_names_tools_and_safety_invariants() -> None:
     )
     assert config.is_file()
     parsed_config = json.loads(config.read_text(encoding="utf-8"))
-    proxy = parsed_config["mcpServers"]["problem-locator"]
-    assert proxy["type"] == "stdio"
-    assert proxy["command"] == "problem-locator-client-proxy"
-    assert proxy["args"] == []
-    assert "PROBLEM_LOCATOR_MCP_URL" in proxy["env"]
-    assert proxy["env"]["PROBLEM_LOCATOR_CLIENT_SCHEMA_MODE"].endswith(
-        ":-strict}"
-    )
+    remote = parsed_config["mcpServers"]["problem-locator"]
+    assert remote == {"type": "http", "url": "${PROBLEM_LOCATOR_MCP_URL}"}
+
+    hooks_path = config.with_name("client-hooks-settings.json")
+    hooks = json.loads(hooks_path.read_text(encoding="utf-8"))["hooks"]
+    assert set(hooks) == {"PreToolUse", "PostToolUse", "PostToolUseFailure"}
+    for handlers in hooks.values():
+        assert len(handlers) == 1
+        assert handlers[0]["matcher"] == "^mcp__problem-locator__.*$"
+        command = handlers[0]["hooks"][0]
+        assert command["type"] == "command"
+        assert command["timeout"] == 5
+        assert command["command"] == "powershell.exe"
+        assert command["args"] == [
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            "${CLAUDE_PROJECT_DIR}/.claude/skills/problem-locator-client/scripts/problem-locator-client-dfx.ps1",
+        ]
+        assert "async" not in command
 
     readme = (Path(__file__).parents[3] / "README.md").read_text(encoding="utf-8")
-    assert "客户端本地 MCP 的安装与配置" in readme
-    assert "uv tool install --reinstall --python 3.12" in readme
-    assert "problem-locator-client-proxy --version" in readme
-    assert "problem-locator-client-proxy --help" in readme
-    assert '替换原来直接连接服务端的 `"type": "http"` 配置' in readme
-    assert '"type": "stdio"' in readme
+    assert "客户端远端 MCP 与 Windows DFX 配置" in readme
+    assert "客户端不安装 `problem-locator`" in readme
+    assert '"type": "http"' in readme
+    assert '"url": "${PROBLEM_LOCATOR_MCP_URL}"' in readme
+    assert "NO_PROXY" in readme
     assert "D:/logs/problem-locator/client.jsonl" in readme
     assert "problem_spec` 必须直接传八成员 JSON 对象" in readme
     assert "object<string,string>" in readme
-    assert "完整保留上游权威输入 schema" in readme
-    assert "PROBLEM_LOCATOR_CLIENT_SCHEMA_MODE=diagnostic" in readme
+    assert "服务端公布的原始 input schema" in readme
+    assert "client.hook.tool.started" in readme
     assert "PROBLEM_LOCATOR_WINDOWS_LINUX_GATE" in readme
-    assert "PROBLEM_LOCATOR_REAL_HOST_DFX_GATE" in readme
+    assert "PROBLEM_LOCATOR_REAL_HOST_HOOK_GATE" in readme
     assert "argument_json_types.problem_spec" in readme
     assert "服务端日志不需要安装额外组件" in readme
     assert "tail -f /var/log/problem-locator/debug.jsonl" in readme

@@ -454,9 +454,10 @@ function Confirm-HcJourneyManifest {
     Assert-Hc (Get-HcBooleanProperty $manifest 'mixed_or_multiple_tool_result_fail_closed') 'journey mixed/multiple tool_result fail closed'
     $expectedOutputs = @(
         'windows-claude-version.stdout.txt', 'windows-claude-version.stderr.txt',
-        'phase1.prompt.txt', 'phase1.stream-json.stdout.ndjson', 'phase1.stderr.txt', 'phase1.authoritative.json', 'phase1-state.json',
+        'phase1.prompt.txt', 'phase1.stream-json.stdout.ndjson', 'phase1.stderr.txt', 'phase1.client-dfx.jsonl', 'phase1.authoritative.json', 'phase1-state.json',
         'upload.curl.stdout.txt', 'upload.curl.stderr.txt', 'upload.response.json', 'upload.response.headers.txt', 'upload-state.json',
-        'phase3.prompt.txt', 'phase3.stream-json.stdout.ndjson', 'phase3.stderr.txt', 'phase3.authoritative.json', 'journey-authoritative-summary.json'
+        'hook-failure.prompt.txt', 'hook-failure.stream-json.stdout.ndjson', 'hook-failure.stderr.txt', 'hook-failure.claude-debug.log', 'hook-failure.authoritative.json',
+        'phase3.prompt.txt', 'phase3.stream-json.stdout.ndjson', 'phase3.stderr.txt', 'phase3.client-dfx.jsonl', 'phase3.authoritative.json', 'journey-authoritative-summary.json'
     )
     $outputs = Get-HcProperty $manifest 'possible_runtime_outputs' -Required
     Assert-HcStringArray $outputs 'journey manifest outputs'
@@ -527,7 +528,7 @@ function Assert-HcArtifactView {
 function Read-HcJourneySummary {
     param([Parameter(Mandatory = $true)][string]$EvidenceRoot)
     $summary = Read-HcJson -Path (Join-Path $EvidenceRoot 'journey-authoritative-summary.json') -Label 'journey authoritative summary'
-    Assert-HcExactProperties $summary @('schema_version', 'attempt', 'case_id', 'attachment_id', 'resolved_case_revision', 'diagnosis_state_revision', 'selected_skill_ref', 'final_result', 'observed_statuses', 'public_artifact', 'public_result_archive', 'request_ids', 'phase3_mcp_call_count') 'journey authoritative summary'
+    Assert-HcExactProperties $summary @('schema_version', 'attempt', 'case_id', 'attachment_id', 'resolved_case_revision', 'diagnosis_state_revision', 'selected_skill_ref', 'final_result', 'observed_statuses', 'public_artifact', 'public_result_archive', 'request_ids', 'phase3_mcp_call_count', 'validation_corrections') 'journey authoritative summary'
     Assert-Hc ((Get-HcIntegerProperty $summary 'schema_version') -eq 1) 'journey summary schema_version'
     $attempt = Get-HcAttemptLabel $EvidenceRoot
     Assert-Hc ((Get-HcStringProperty $summary 'attempt') -ceq $attempt) 'journey summary attempt'

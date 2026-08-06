@@ -12,23 +12,23 @@ $script:RestartModelAlias = 'haiku'
 $script:RestartEffectiveModel = 'deepseek-v4-flash[1m]'
 $script:RestartMcpUrl = 'http://127.0.0.1:18000/mcp'
 $script:RestartServiceBaseUrl = 'http://127.0.0.1:18000'
-$script:RestartClientSkillSha256 = '86fbba38713cfdddcd6a45bd86e6b839cb1706b2f9bfb8bd715d41c10a3afec0'
+$script:RestartClientSkillSha256 = '7d52c7fca807eaf70c05ac9653a5a41a722507eaf4b06ed8daf960ed54834f89'
 $script:RestartSkillId = 'diagnosis-skill/diagnose-service-takeover'
 $script:RestartSkillVersion = '3.0.5'
 $script:RestartSkillHash = 'ae47a1a63e6cf4849f83b0f9d49db608c1e93ebe1713f21d58c910990b0857a4'
 $script:RestartGetTool = 'problem_locator_get_case'
 $script:RestartListTool = 'problem_locator_list_artifacts'
-$script:RestartFullGetTool = "mcp__problem_locator__$($script:RestartGetTool)"
-$script:RestartFullListTool = "mcp__problem_locator__$($script:RestartListTool)"
+$script:RestartFullGetTool = "mcp__problem-locator__$($script:RestartGetTool)"
+$script:RestartFullListTool = "mcp__problem-locator__$($script:RestartListTool)"
 $script:RestartExpectedDiscoveredTools = @(
     'Skill',
-    'mcp__problem_locator__problem_locator_cancel_case',
-    'mcp__problem_locator__problem_locator_create_case',
-    'mcp__problem_locator__problem_locator_get_case',
-    'mcp__problem_locator__problem_locator_list_artifacts',
-    'mcp__problem_locator__problem_locator_prepare_attachment',
-    'mcp__problem_locator__problem_locator_resume_case',
-    'mcp__problem_locator__problem_locator_submit_supplement'
+    'mcp__problem-locator__problem_locator_cancel_case',
+    'mcp__problem-locator__problem_locator_create_case',
+    'mcp__problem-locator__problem_locator_get_case',
+    'mcp__problem-locator__problem_locator_list_artifacts',
+    'mcp__problem-locator__problem_locator_prepare_attachment',
+    'mcp__problem-locator__problem_locator_resume_case',
+    'mcp__problem-locator__problem_locator_submit_supplement'
 )
 $script:RestartUuidPattern = '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
 $script:RestartSha256Pattern = '^[0-9a-f]{64}$'
@@ -343,9 +343,10 @@ function Confirm-PreRestartJourneyManifest {
     Assert-Restart (Get-RestartBooleanProperty $manifest 'mixed_or_multiple_tool_result_fail_closed') 'journey mixed/multiple tool_result fail closed'
     $expectedOutputs = @(
         'windows-claude-version.stdout.txt', 'windows-claude-version.stderr.txt',
-        'phase1.prompt.txt', 'phase1.stream-json.stdout.ndjson', 'phase1.stderr.txt', 'phase1.authoritative.json', 'phase1-state.json',
+        'phase1.prompt.txt', 'phase1.stream-json.stdout.ndjson', 'phase1.stderr.txt', 'phase1.client-dfx.jsonl', 'phase1.authoritative.json', 'phase1-state.json',
         'upload.curl.stdout.txt', 'upload.curl.stderr.txt', 'upload.response.json', 'upload.response.headers.txt', 'upload-state.json',
-        'phase3.prompt.txt', 'phase3.stream-json.stdout.ndjson', 'phase3.stderr.txt', 'phase3.authoritative.json', 'journey-authoritative-summary.json'
+        'hook-failure.prompt.txt', 'hook-failure.stream-json.stdout.ndjson', 'hook-failure.stderr.txt', 'hook-failure.claude-debug.log', 'hook-failure.authoritative.json',
+        'phase3.prompt.txt', 'phase3.stream-json.stdout.ndjson', 'phase3.stderr.txt', 'phase3.client-dfx.jsonl', 'phase3.authoritative.json', 'journey-authoritative-summary.json'
     )
     $outputs = Get-RestartProperty $manifest 'possible_runtime_outputs' -Required
     Assert-RestartStringArray $outputs 'journey manifest outputs'
@@ -423,7 +424,7 @@ function Read-PreRestartSummaryValidated {
     param([Parameter(Mandatory = $true)][string]$EvidenceRoot)
     $path = Join-Path $EvidenceRoot 'journey-authoritative-summary.json'
     $summary = Read-RestartJson $path
-    Assert-RestartExactProperties $summary @('schema_version', 'attempt', 'case_id', 'attachment_id', 'resolved_case_revision', 'diagnosis_state_revision', 'selected_skill_ref', 'final_result', 'observed_statuses', 'public_artifact', 'public_result_archive', 'request_ids', 'phase3_mcp_call_count') 'pre-restart authoritative summary'
+    Assert-RestartExactProperties $summary @('schema_version', 'attempt', 'case_id', 'attachment_id', 'resolved_case_revision', 'diagnosis_state_revision', 'selected_skill_ref', 'final_result', 'observed_statuses', 'public_artifact', 'public_result_archive', 'request_ids', 'phase3_mcp_call_count', 'validation_corrections') 'pre-restart authoritative summary'
     Assert-Restart ((Get-RestartIntegerProperty $summary 'schema_version') -eq 1) 'pre-restart summary schema_version'
     Assert-Restart ((Get-RestartStringProperty $summary 'attempt') -ceq (Get-RestartAttemptLabel $EvidenceRoot)) 'pre-restart summary attempt'
     $caseId = Get-RestartStringProperty $summary 'case_id'
@@ -497,7 +498,7 @@ function Invoke-RestartCapturedProcess {
 function Get-RestartMcpConfigJson {
     $config = [ordered]@{
         mcpServers = [ordered]@{
-            problem_locator = [ordered]@{
+            'problem-locator' = [ordered]@{
                 type = 'http'
                 url = $script:RestartMcpUrl
                 alwaysLoad = $true
@@ -677,7 +678,7 @@ function Read-RestartClaudeAudit {
     $server = @($servers)[0]
     Assert-RestartJsonObject $server 'system/init MCP server'
     $serverName = if (Test-RestartProperty $server 'name') { Get-RestartStringProperty $server 'name' } else { Get-RestartStringProperty $server 'serverName' }
-    Assert-Restart ($serverName -ceq 'problem_locator') 'strict MCP server name'
+    Assert-Restart ($serverName -ceq 'problem-locator') 'strict MCP server name'
     if (Test-RestartProperty $server 'status') { Assert-Restart ((Get-RestartStringProperty $server 'status') -ceq 'connected') 'strict MCP server status' }
     foreach ($record in $toolUses) { Assert-Restart ($null -ne $record.result) "missing tool_result for $($record.full_name)" }
     Assert-Restart ($toolUses.Count -eq 3) 'restart Claude must invoke exactly three tools'
@@ -700,7 +701,7 @@ function Read-RestartClaudeAudit {
             effective_model = $script:RestartEffectiveModel
             permission_mode = 'dontAsk'
             tools = [object[]]@($reportedTools)
-            mcp_servers = @([PSCustomObject]@{ name = 'problem_locator'; url = $script:RestartMcpUrl; always_load = $true })
+            mcp_servers = @([PSCustomObject]@{ name = 'problem-locator'; url = $script:RestartMcpUrl; always_load = $true })
         }
         mcp_records = @($toolUses[1], $toolUses[2])
         skill_invocation_count = 1
@@ -741,9 +742,18 @@ function Confirm-RestartPersistenceResult {
     $caseId = Get-RestartStringProperty $PreSummary 'case_id'
     $get = $records[0]
     $list = $records[1]
-    Assert-RestartExactProperties $get.input @('case_id', 'wait_seconds') 'post-restart get_case input'
+    Assert-RestartJsonObject $get.input 'post-restart get_case input'
+    $getInputNames = @($get.input.PSObject.Properties.Name)
+    Assert-Restart ($getInputNames -ccontains 'case_id') 'post-restart get_case input requires case_id'
+    Assert-Restart ($getInputNames -ccontains 'wait_seconds') 'post-restart get_case input requires wait_seconds'
+    foreach ($name in $getInputNames) {
+        Assert-Restart (@('case_id', 'wait_for_job_id', 'wait_seconds') -ccontains $name) "post-restart get_case input has unexpected property $name"
+    }
     Assert-Restart ((Get-RestartStringProperty $get.input 'case_id') -ceq $caseId) 'post-restart get_case case_id'
     Assert-Restart ((Get-RestartIntegerProperty $get.input 'wait_seconds') -eq 0) 'post-restart get_case wait_seconds'
+    if (Test-RestartProperty $get.input 'wait_for_job_id') {
+        Assert-Restart ($null -eq (Get-RestartProperty $get.input 'wait_for_job_id' -Required)) 'post-restart get_case wait_for_job_id'
+    }
     $getData = Get-RestartSuccessData $get
     Assert-RestartExactProperties $getData @('case_view', 'wait_timed_out') 'post-restart get_case data'
     Assert-Restart (-not (Get-RestartBooleanProperty $getData 'wait_timed_out')) 'post-restart get_case must not time out'

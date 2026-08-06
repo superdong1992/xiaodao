@@ -363,6 +363,44 @@ def terminate_service() -> None:
         os.close(pidfd)
 
 
+def verify_structured_lifecycle() -> None:
+    pid_text, _ = read_process_receipts()
+    expected_pid = int(pid_text)
+    require(SERVICE_LOG_FILE.is_file(), "SERVICE_LOG_ABSENT")
+    raw = SERVICE_LOG_FILE.read_bytes()
+    require(0 < len(raw) <= MAX_SERVICE_LOG_BYTES, "SERVICE_LOG_SIZE")
+    expected_messages = [
+        f"Started server process [{expected_pid}]",
+        "Application startup complete.",
+        "Shutting down",
+        "Application shutdown complete.",
+        f"Finished server process [{expected_pid}]",
+    ]
+    observed: list[tuple[int, str]] = []
+    for line_number, line in enumerate(raw.splitlines(), start=1):
+        try:
+            record = json.loads(line.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        if not isinstance(record, dict) or record.get("logger") != "uvicorn.error":
+            continue
+        message = record.get("message")
+        if message not in expected_messages:
+            continue
+        require(record.get("event") == "uvicorn.error", "SERVICE_LIFECYCLE_EVENT")
+        require(record.get("level") == "INFO", "SERVICE_LIFECYCLE_LEVEL")
+        require(record.get("process_id") == expected_pid, "SERVICE_LIFECYCLE_PID")
+        observed.append((line_number, message))
+    require(
+        [message for _, message in observed] == expected_messages,
+        "SERVICE_LIFECYCLE_EXACT_ORDER",
+    )
+    require(
+        all(observed[index][0] < observed[index + 1][0] for index in range(4)),
+        "SERVICE_LIFECYCLE_LINE_ORDER",
+    )
+
+
 def record_process_evidence(payload: dict[str, object]) -> None:
     create_root_evidence(PROCESS_EVIDENCE_FILE, canonical_bytes(payload))
 
@@ -447,6 +485,8 @@ def main() -> None:
         verify_with_retry()
     elif mode == "terminate" and len(args) == 1:
         terminate_service()
+    elif mode == "lifecycle" and len(args) == 1:
+        verify_structured_lifecycle()
     elif mode == "exit" and len(args) == 2:
         record_exit_evidence(args[1])
     elif mode == "stop" and len(args) == 1:

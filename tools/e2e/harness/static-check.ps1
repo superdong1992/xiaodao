@@ -186,9 +186,9 @@ $expectedInitialRuntime = @(
     '21.1=docker.exe --config C:\Users\admin\.docker exec --detach pl-e2e-fix52-20260802-205054 sh /evidence/start_service_supervisor.sh ; require service-supervisor-launch.txt',
     '21.2=docker.exe --config C:\Users\admin\.docker exec pl-e2e-fix52-20260802-205054 sh /evidence/gate_service_preflight.sh ; require service-process-isolation.json and service-preflight.json with PASS',
     '21.3=powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File D:\code\xiaodao\.tmp\pl-e2e-evidence\attempt52-20260802-205054\windows-service-preflight.ps1 -EvidenceRoot D:\code\xiaodao\.tmp\pl-e2e-evidence\attempt52-20260802-205054 ; require windows-live-ready-preflight.json with five passing readiness checks',
-    '21.4=powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File D:\code\xiaodao\.tmp\pl-e2e-evidence\attempt52-20260802-205054\run-windows-journey.ps1 -Mode Phase1 -EvidenceRoot D:\code\xiaodao\.tmp\pl-e2e-evidence\attempt52-20260802-205054 ; require windows-claude-version.stdout.txt, windows-claude-version.stderr.txt, phase1.prompt.txt, phase1.stream-json.stdout.ndjson, phase1.stderr.txt, phase1.authoritative.json, and phase1-state.json',
+    '21.4=powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File D:\code\xiaodao\.tmp\pl-e2e-evidence\attempt52-20260802-205054\run-windows-journey.ps1 -Mode Phase1 -EvidenceRoot D:\code\xiaodao\.tmp\pl-e2e-evidence\attempt52-20260802-205054 ; require windows-claude-version.stdout.txt, windows-claude-version.stderr.txt, phase1.prompt.txt, phase1.stream-json.stdout.ndjson, phase1.stderr.txt, phase1.client-dfx.jsonl, phase1.authoritative.json, and phase1-state.json',
     '21.5=powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File D:\code\xiaodao\.tmp\pl-e2e-evidence\attempt52-20260802-205054\run-windows-journey.ps1 -Mode Upload -EvidenceRoot D:\code\xiaodao\.tmp\pl-e2e-evidence\attempt52-20260802-205054 ; require upload.curl.stdout.txt, upload.curl.stderr.txt, upload.response.json, upload.response.headers.txt, and upload-state.json',
-    '21.6=powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File D:\code\xiaodao\.tmp\pl-e2e-evidence\attempt52-20260802-205054\run-windows-journey.ps1 -Mode Phase3 -EvidenceRoot D:\code\xiaodao\.tmp\pl-e2e-evidence\attempt52-20260802-205054 ; require phase3.prompt.txt, phase3.stream-json.stdout.ndjson, phase3.stderr.txt, phase3.authoritative.json, and journey-authoritative-summary.json',
+    '21.6=powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File D:\code\xiaodao\.tmp\pl-e2e-evidence\attempt52-20260802-205054\run-windows-journey.ps1 -Mode Phase3 -EvidenceRoot D:\code\xiaodao\.tmp\pl-e2e-evidence\attempt52-20260802-205054 ; require hook-failure.prompt.txt, hook-failure.stream-json.stdout.ndjson, hook-failure.stderr.txt, hook-failure.claude-debug.log, hook-failure.authoritative.json, phase3.prompt.txt, phase3.stream-json.stdout.ndjson, phase3.stderr.txt, phase3.client-dfx.jsonl, phase3.authoritative.json, and journey-authoritative-summary.json',
     '21.7=powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File D:\code\xiaodao\.tmp\pl-e2e-evidence\attempt52-20260802-205054\run-windows-http-capture.ps1 -EvidenceRoot D:\code\xiaodao\.tmp\pl-e2e-evidence\attempt52-20260802-205054 -Phase Before ; require diagnosis-result.before.json, diagnosis-result.before.headers, diagnosis-result.before.meta.json, diagnosis-result.before.curl.stdout.txt, and diagnosis-result.before.curl.stderr.txt',
     '21.8=docker.exe --config C:\Users\admin\.docker exec pl-e2e-fix52-20260802-205054 sh /evidence/stop_service.sh ; require service-exit-status.txt with exit 143, service-log-secret-scan.json with zero hits, service.log, and service-stop-verification.txt',
     '21.9=docker.exe --config C:\Users\admin\.docker exec pl-e2e-fix52-20260802-205054 sh /evidence/capture_state_before_restart.sh ; require validate-state.before.json, state-export.before.json, and state-admin-before-restart.txt, then preserve the initial container until the frozen restart resource creator performs its bounded stop'
@@ -690,8 +690,11 @@ $requiredLiterals = @(
     'http://127.0.0.1:18000/mcp',
     'alwaysLoad',
     'deepseek-v4-flash[1m]',
+    'http://127.0.0.1:9',
     'diagnosis-skill/diagnose-service-takeover',
-    '86fbba38713cfdddcd6a45bd86e6b839cb1706b2f9bfb8bd715d41c10a3afec0',
+    '7d52c7fca807eaf70c05ac9653a5a41a722507eaf4b06ed8daf960ed54834f89',
+    'ab1304fb7d2b719db5da5cf0030187711457e121c08649a62c49a340ad532a4e',
+    '90aa9c6df2af457df3d616159b8db2001e16c6cd0270f957df318c660f60e76e',
     '2684354560',
     '--max-filesize',
     '--connect-timeout',
@@ -764,8 +767,8 @@ if ($driverText.Contains('requirements in this order')) {
 
 $possibleOutputs = @(Get-JourneyAllOutputNames)
 $plannedAll = @(Get-JourneyPlannedOutputNames -Mode All -IncludeVersion $true)
-if ($possibleOutputs.Count -ne 17) {
-    throw 'static output inventory must contain exactly 17 runtime files'
+if ($possibleOutputs.Count -ne 24) {
+    throw 'static output inventory must contain exactly 24 runtime files'
 }
 $possibleSorted = @($possibleOutputs | Sort-Object)
 $plannedSorted = @($plannedAll | Sort-Object)

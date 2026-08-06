@@ -1,0 +1,64 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "^mcp__problem-locator__.*$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "powershell.exe",
+            "args": [
+              "-NoProfile",
+              "-NonInteractive",
+              "-ExecutionPolicy",
+              "Bypass",
+              "-File",
+              "${CLAUDE_PROJECT_DIR}/.claude/skills/problem-locator-client/scripts/problem-locator-client-dfx.ps1"
+            ],
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "^mcp__problem-locator__.*$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "powershell.exe",
+            "args": [
+              "-NoProfile",
+              "-NonInteractive",
+              "-ExecutionPolicy",
+              "Bypass",
+              "-File",
+              "${CLAUDE_PROJECT_DIR}/.claude/skills/problem-locator-client/scripts/problem-locator-client-dfx.ps1"
+            ],
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "matcher": "^mcp__problem-locator__.*$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "powershell.exe",
+            "args": [
+              "-NoProfile",
+              "-NonInteractive",
+              "-ExecutionPolicy",
+              "Bypass",
+              "-File",
+              "${CLAUDE_PROJECT_DIR}/.claude/skills/problem-locator-client/scripts/problem-locator-client-dfx.ps1"
+            ],
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}

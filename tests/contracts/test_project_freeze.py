@@ -28,7 +28,6 @@ def test_public_console_entries_are_pre_registered() -> None:
     assert isinstance(metadata, dict)
     scripts = metadata["scripts"]
     assert scripts == {
-        "problem-locator-client-proxy": "problem_locator.interfaces.client_proxy:main",
         "problem-locator-logparse": "problem_locator.integrations.logparse.cli:main",
         "problem-locator-pack-result": "problem_locator.integrations.result_archive:main",
     }

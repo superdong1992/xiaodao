@@ -51,12 +51,11 @@ S00 必须在冻结的 `pyproject.toml` 工程骨架中预注册 console script�
 
 ```toml
 [project.scripts]
-problem-locator-client-proxy = "problem_locator.interfaces.client_proxy:main"
 problem-locator-logparse = "problem_locator.integrations.logparse.cli:main"
 problem-locator-pack-result = "problem_locator.integrations.result_archive:main"
 ```
 
-这些声明只冻结安装入口；客户端诊断代理实现归 S06，Logparse 与结果打包实现归 S07，S00 不创建对应业务代码。Diagnosis Skill 只能调用随服务安装的受控入口，不得自行拼接 `LOGPARSE_REPO` 绝对路径。
+这些声明只冻结服务侧安装入口；客户端不安装本包，也不注册本地 MCP 入口。Logparse 与结果打包实现归 S07，S00 不创建对应业务代码。Diagnosis Skill 只能调用随服务安装的受控入口，不得自行拼接 `LOGPARSE_REPO` 绝对路径。
 
 ## 3. 独立文件责任区
 

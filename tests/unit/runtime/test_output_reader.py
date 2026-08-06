@@ -277,7 +277,11 @@ def test_candidate_archive_reads_fixed_target_logs_from_inputs(
     assert archive.sha256 == hashlib.sha256(archive_bytes).hexdigest()
 
 
-def test_candidate_archive_rejects_unbound_result_text(tmp_path: Path) -> None:
+def test_candidate_archive_rejects_unbound_result_text(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO, logger="problem_locator.dfx")
     job, manifest, payload, user_result_bytes = _diagnosis_inputs()
     _add_manual_result_archive(
         tmp_path,
@@ -292,6 +296,14 @@ def test_candidate_archive_rejects_unbound_result_text(tmp_path: Path) -> None:
         read_agent_output(tmp_path, job, manifest)
 
     _assert_failure(captured, ErrorCode.OUTCOME_INVALID)
+    rejected = next(
+        record
+        for record in caplog.records
+        if getattr(record, "dfx_event", "") == "runtime.agent_output.rejected"
+    )
+    assert rejected.dfx_fields["failure_category"] == (
+        "user_result_archive_validation"
+    )
 
 
 def test_part_file_without_final_is_outcome_missing(
@@ -895,7 +907,11 @@ def test_proposal_parent_symlink_cannot_escape_workspace(tmp_path: Path) -> None
     _assert_failure(captured, ErrorCode.OUTCOME_INVALID)
 
 
-def test_user_result_must_be_canonical_and_semantically_exact(tmp_path: Path) -> None:
+def test_user_result_must_be_canonical_and_semantically_exact(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO, logger="problem_locator.dfx")
     job, manifest, payload, canonical_result = _diagnosis_inputs()
     result_payload = json.loads(canonical_result)
     result_payload["candidate_statement"] = "A different conclusion."
@@ -909,7 +925,16 @@ def test_user_result_must_be_canonical_and_semantically_exact(tmp_path: Path) ->
     with pytest.raises(RuntimeExecutionError) as semantic:
         read_agent_output(tmp_path, job, manifest)
     _assert_failure(semantic, ErrorCode.OUTCOME_INVALID)
+    rejected = next(
+        record
+        for record in caplog.records
+        if getattr(record, "dfx_event", "") == "runtime.agent_output.rejected"
+    )
+    assert rejected.dfx_fields["failure_category"] == (
+        "user_result_candidate_statement_mismatch"
+    )
 
+    caplog.clear()
     noncanonical = json.dumps(result_payload, indent=2).encode("utf-8") + b"\n"
     draft["declared_size"] = len(noncanonical)
     draft["declared_sha256"] = hashlib.sha256(noncanonical).hexdigest()
@@ -918,6 +943,30 @@ def test_user_result_must_be_canonical_and_semantically_exact(tmp_path: Path) ->
     with pytest.raises(RuntimeExecutionError) as spelling:
         read_agent_output(tmp_path, job, manifest)
     _assert_failure(spelling, ErrorCode.OUTCOME_INVALID)
+    rejected = next(
+        record
+        for record in caplog.records
+        if getattr(record, "dfx_event", "") == "runtime.agent_output.rejected"
+    )
+    assert rejected.dfx_fields["failure_category"] == "user_result_canonical"
+
+    caplog.clear()
+    schema_invalid_payload = dict(result_payload)
+    del schema_invalid_payload["candidate_statement"]
+    schema_invalid = canonical_json_bytes(schema_invalid_payload)
+    draft["declared_size"] = len(schema_invalid)
+    draft["declared_sha256"] = hashlib.sha256(schema_invalid).hexdigest()
+    _write_outcome(tmp_path, payload)
+    _write_file_proposal(tmp_path, draft["workspace_relative_path"], schema_invalid)
+    with pytest.raises(RuntimeExecutionError) as schema:
+        read_agent_output(tmp_path, job, manifest)
+    _assert_failure(schema, ErrorCode.OUTCOME_INVALID)
+    rejected = next(
+        record
+        for record in caplog.records
+        if getattr(record, "dfx_event", "") == "runtime.agent_output.rejected"
+    )
+    assert rejected.dfx_fields["failure_category"] == "user_result_schema"
 
 
 def test_duplicate_proposal_key_is_rejected_before_any_resource_is_returned(

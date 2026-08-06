@@ -22,7 +22,7 @@ Perform the read-only post-restart persistence verification for existing Case $c
 
 0. Your first action MUST call the Skill tool with skill=problem-locator-client (exact input {"skill":"problem-locator-client"}). Until that Skill tool_result is received successfully, do not call any problem_locator MCP tool and do not continue the workflow.
 1. The successfully completed first action above is the only problem-locator-client Skill invocation.
-2. Call problem_locator_get_case exactly once with case_id "$caseId" and wait_seconds 0.
+2. Call problem_locator_get_case exactly once with case_id "$caseId", wait_for_job_id null, and wait_seconds 0.
 3. Call problem_locator_list_artifacts exactly once with case_id "$caseId".
 4. Stop immediately. Do not create, prepare, submit, resume, cancel, upload, download, or call any other tool.
 "@
