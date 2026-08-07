@@ -518,6 +518,28 @@ def test_first_parse_dual_anchor_claim_audit_close_and_fixed_argv(
     )
     request = _parse_request("logparse-run")
     request_bytes = _write_request(workspace, "logparse-run", request)
+    draft_value = request.model_dump(mode="json")
+
+    def reverse_objects(value: object) -> object:
+        if isinstance(value, dict):
+            return {
+                key: reverse_objects(child)
+                for key, child in reversed(list(value.items()))
+            }
+        if isinstance(value, list):
+            return [reverse_objects(child) for child in value]
+        return value
+
+    request_path = (
+        workspace / "output/proposals/logparse-run/request.json"
+    )
+    request_path.write_bytes(
+        json.dumps(
+            reverse_objects(draft_value),
+            ensure_ascii=False,
+            indent=2,
+        ).encode("utf-8")
+    )
 
     try:
         assert session.parse_request_bytes() is None
@@ -567,8 +589,9 @@ def test_first_parse_dual_anchor_claim_audit_close_and_fixed_argv(
             ),
         }
 
-        audited = session.parse_request_bytes()
-        assert audited == request_bytes
+            audited = session.parse_request_bytes()
+            assert audited == request_bytes
+            assert request_path.read_bytes() == request_bytes
         assert type(audited) is bytes
         assert memoryview(audited).readonly
 

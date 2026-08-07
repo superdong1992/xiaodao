@@ -183,10 +183,16 @@ def test_builtin_assets_and_port_use_exact_versioned_refs() -> None:
             refs[ref.id] = ref
 
     assert set(refs) == expected_builtin_ids
+    upgraded_versions = {
+        "tool-bundle/router": "1.0.1",
+        "tool-bundle/diagnose": "1.0.1",
+        "tool-bundle/review": "1.0.1",
+        "output-contract/route": "1.0.1",
+        "output-contract/diagnose": "2.0.4",
+        "output-contract/review": "1.0.1",
+    }
     for ref in refs.values():
-        assert ref.version == (
-            "2.0.3" if ref.id == "output-contract/diagnose" else "1.0.0"
-        )
+        assert ref.version == upgraded_versions.get(ref.id, "1.0.0")
         resolved = catalog.resolve(ref)
         assert resolved.ref == ref
         assert Path(resolved.root_path).is_dir()
@@ -222,18 +228,18 @@ def test_builtin_output_contract_requires_canonical_agent_bytes(role: str) -> No
         / "output-contract.md"
     ).read_text(encoding="utf-8")
 
-    assert "JSON Schema validity alone is insufficient" in contract
-    assert "V1 Canonical JSON bytes" in contract
-    assert "UTF-8 without a BOM" in contract
-    assert "code-point-sorted object keys" in contract
-    assert "compact separators with no insignificant whitespace" in contract
-    assert "no NaN or Infinity" in contract
-    assert "exactly one trailing LF" in contract
-    assert "Validate the final bytes, not only the parsed value" in contract
+    assert "V1 Canonical JSON" in contract
+    assert "recursively sorts every nested object key" in contract or (
+        "递归排序所有嵌套对象键" in contract
+    )
+    assert "problem-locator-finalize-outcome" in contract
+    assert "finalization marker" in contract
 
 
 @pytest.mark.parametrize("role", ["route", "diagnose", "review"])
-def test_builtin_output_contract_pins_safe_atomic_output_path(role: str) -> None:
+def test_builtin_output_contract_pins_server_finalization_as_last_write(
+    role: str,
+) -> None:
     contract = (
         BUILTIN_ASSET_ROOT
         / "output-contracts"
@@ -243,10 +249,12 @@ def test_builtin_output_contract_pins_safe_atomic_output_path(role: str) -> None
 
     assert "Never create a temporary file at workspace root" in contract
     assert "exactly `inputs`, `runtime`, and `output`" in contract
-    assert 'p = Path("output/job_outcome.json")' in contract
-    assert 'temporary = p.with_name("job_outcome.json.tmp")' in contract
-    assert "os.replace(temporary, p)" in contract
-    assert "assert p.read_bytes() == canonical" in contract
+    assert "`Write`" in contract
+    assert "draft" in contract
+    assert "problem-locator-finalize-outcome" in contract
+    assert "Do not write or edit `output/job_outcome.json` after" in contract or (
+        "命令成功后不得再增删改" in contract
+    )
 
 
 @pytest.mark.parametrize("role", ["route", "diagnose", "review"])
@@ -324,10 +332,9 @@ def test_builtin_diagnose_output_contract_materializes_request_rules() -> None:
     assert "REVIEW PASS" in contract
     for rpc_name in ("caller_service", "server_service", "rpc_method", "order_id"):
         assert rpc_name not in contract
-    assert 'value["outcome_id"] = str(uuid.uuid4())' in contract
-    assert 'datetime.now(UTC).isoformat(timespec="milliseconds")' in contract
-    assert "os.replace(temporary, p)" in contract
-    assert "assert p.read_bytes() == canonical" in contract
+    assert "problem-locator-finalize-outcome" in contract
+    assert "重算其声明 size/hash" in contract
+    assert "递归排序所有嵌套对象键" in contract
 
 
 def test_builtin_review_output_contract_materializes_review_binding_rules() -> None:
@@ -350,16 +357,17 @@ def test_builtin_review_output_contract_materializes_review_binding_rules() -> N
     assert f"`{expected_fields}`" in contract
 
 
-def test_builtin_diagnose_output_contract_atomic_snippet_is_valid_python() -> None:
-    contract = (
-        BUILTIN_ASSET_ROOT
-        / "output-contracts"
-        / "diagnose"
-        / "output-contract.md"
-    ).read_text(encoding="utf-8")
-    source = contract.split("```python\n", 1)[1].split("\n```", 1)[0]
-
-    compile(source, "diagnose-agent-output-self-check.py", "exec")
+def test_builtin_tool_bundles_all_declare_the_installed_finalizer() -> None:
+    for role in ("router", "diagnose", "review"):
+        bundle = json.loads(
+            (
+                BUILTIN_ASSET_ROOT
+                / "tool-bundles"
+                / role
+                / "tool-bundle.json"
+            ).read_bytes()
+        )
+        assert "problem-locator-finalize-outcome" in bundle["tools"]
 
 
 def test_builtin_specialist_profile_separates_narrative_from_fixed_inputs() -> None:

@@ -69,6 +69,10 @@ from problem_locator.runtime.diagnosis_runtime import (
 )
 from problem_locator.runtime.failures import RuntimeExecutionError, runtime_failure
 from problem_locator.runtime.outcome_publisher import OutcomePublisher
+from problem_locator.runtime.outcome_finalizer import (
+    FINALIZATION_MARKER_RELATIVE_PATH,
+    FinalizedAgentOutcomeMarker,
+)
 from problem_locator.runtime.workspace import (
     WorkspaceManager,
     _verify_materialized,
@@ -77,6 +81,20 @@ from problem_locator.runtime.workspace import (
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
+
+
+def _write_finalization_marker(workspace_root: Path, outcome_bytes: bytes) -> None:
+    marker_path = workspace_root / FINALIZATION_MARKER_RELATIVE_PATH
+    marker_path.write_bytes(
+        canonical_json_bytes(
+            FinalizedAgentOutcomeMarker(
+                schema_version=1,
+                relative_path="output/job_outcome.json",
+                size=len(outcome_bytes),
+                sha256=hashlib.sha256(outcome_bytes).hexdigest(),
+            )
+        )
+    )
 
 
 @pytest.fixture
@@ -529,6 +547,7 @@ class _RuntimeBackend:
             temporary = workspace_root / "output" / ".job_outcome.json.part"
             temporary.write_bytes(self.outcome_bytes)
             os.replace(temporary, workspace_root / "output" / "job_outcome.json")
+            _write_finalization_marker(workspace_root, self.outcome_bytes)
         sinks: ExecutionLogSinks = kwargs["log_sinks"]
         unique = {id(sinks.stdout): sinks.stdout, id(sinks.stderr): sinks.stderr}
         for sink in unique.values():
@@ -1543,9 +1562,11 @@ class _PublicFakeClaimingBackend:
         else:
             raise AssertionError("unknown claiming backend result")
 
+        outcome_bytes = canonical_json_bytes(outcome)
         temporary = workspace_root / "output/.job_outcome.json.part"
-        temporary.write_bytes(canonical_json_bytes(outcome))
+        temporary.write_bytes(outcome_bytes)
         os.replace(temporary, workspace_root / "output/job_outcome.json")
+        _write_finalization_marker(workspace_root, outcome_bytes)
         self._close_sinks(kwargs)
         return BackendExecution(
             returncode=0,
@@ -1626,6 +1647,18 @@ class _NonCanonicalClaimingBackend(_PublicFakeClaimingBackend):
             json.dumps(value, ensure_ascii=False, indent=2).encode("utf-8") + b"\n"
         )
         outcome_path.write_bytes(self.rejected_bytes)
+        return execution
+
+
+class _MissingMarkerClaimingBackend(_PublicFakeClaimingBackend):
+    rejected_bytes: bytes | None = None
+
+    def execute(self, **kwargs: Any) -> BackendExecution:
+        execution = super().execute(**kwargs)
+        workspace_root = Path(kwargs["workspace_root"])
+        outcome_path = workspace_root / "output/job_outcome.json"
+        self.rejected_bytes = outcome_path.read_bytes()
+        (workspace_root / FINALIZATION_MARKER_RELATIVE_PATH).unlink()
         return execution
 
 
@@ -1710,6 +1743,46 @@ def test_rejected_output_archive_failure_preserves_primary_and_workspace(
     assert any(
         getattr(record, "dfx_event", "") == "runtime.agent_output.archive_failed"
         for record in caplog.records
+    )
+
+
+def test_missing_finalizer_marker_archives_the_exact_rejected_outcome(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO, logger="problem_locator.dfx")
+    factory = FakeLogparseBrokerFactory()
+    catalog = _logparse_catalog(tmp_path, factory)
+    job, aggregate, resources = _claimed_logparse_job_state_and_resources(catalog)
+    backend = _MissingMarkerClaimingBackend(factory, job, "failed")
+    records = InMemoryExecutionRecordStore()
+    runtime = DiagnosisRuntime(
+        state_repository=_StateView(aggregate),
+        resource_store=resources,
+        asset_catalog=catalog,
+        logparse_broker_factory=factory,
+        execution_records=records,
+        clock=_Clock(),
+        id_generator=_Ids(),
+        workspace_manager=WorkspaceManager(tmp_path / "missing-marker-data"),
+        backend=backend,  # type: ignore[arg-type]
+    )
+
+    receipt = runtime.execute(job, InMemoryCancellationSignal())
+
+    assert receipt.job_outcome.error is not None
+    assert receipt.job_outcome.error.code is ErrorCode.OUTCOME_INVALID
+    assert backend.rejected_bytes is not None
+    assert records.publish_rejected_agent_output_calls == [
+        (job.job_id, backend.rejected_bytes)
+    ]
+    archived = next(
+        record
+        for record in caplog.records
+        if getattr(record, "dfx_event", "") == "runtime.agent_output.archived"
+    )
+    assert archived.dfx_fields["failure_category"] == (
+        "outcome_finalizer_marker_missing"
     )
 
 

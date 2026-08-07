@@ -20,6 +20,10 @@ from problem_locator.contracts import (
     canonical_json_bytes,
     parse_canonical_json_bytes,
 )
+from problem_locator.integrations.agent_json import (
+    AgentJsonSurface,
+    normalize_agent_json_file,
+)
 
 from .paths import resolve_workspace_path, validate_proposal_io_paths
 from .requests import BrokerEnvelope, ParseTargetsRequest, TargetLogsRequest
@@ -89,10 +93,14 @@ def _read_request(
         or metadata.st_size > _MAX_REQUEST_BYTES
     ):
         raise ValueError("broker request file is invalid")
-    request_bytes = request_file.read_bytes()
     model = ParseTargetsRequest if operation == "parse-targets" else TargetLogsRequest
-    parse_canonical_json_bytes(request_bytes, model)
-    return request_bytes
+    document = normalize_agent_json_file(
+        request_file,
+        surface=AgentJsonSurface.LOGPARSE_REQUEST,
+        max_bytes=_MAX_REQUEST_BYTES,
+        validate=model.model_validate,
+    )
+    return document.canonical_bytes
 
 
 def _invoke_broker(

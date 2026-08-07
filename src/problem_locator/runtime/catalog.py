@@ -95,13 +95,24 @@ _BUILTIN_SPECS = (
         "agent-profile/specialist",
     ),
     _BuiltinSpec("profiles/reviewer", AssetKind.AGENT_PROFILE, "agent-profile/reviewer"),
-    _BuiltinSpec("tool-bundles/router", AssetKind.TOOL_BUNDLE, "tool-bundle/router"),
+    _BuiltinSpec(
+        "tool-bundles/router",
+        AssetKind.TOOL_BUNDLE,
+        "tool-bundle/router",
+        "1.0.1",
+    ),
     _BuiltinSpec(
         "tool-bundles/diagnose",
         AssetKind.TOOL_BUNDLE,
         "tool-bundle/diagnose",
+        "1.0.1",
     ),
-    _BuiltinSpec("tool-bundles/review", AssetKind.TOOL_BUNDLE, "tool-bundle/review"),
+    _BuiltinSpec(
+        "tool-bundles/review",
+        AssetKind.TOOL_BUNDLE,
+        "tool-bundle/review",
+        "1.0.1",
+    ),
     _BuiltinSpec(
         "context-policies/route",
         AssetKind.CONTEXT_POLICY,
@@ -121,17 +132,19 @@ _BUILTIN_SPECS = (
         "output-contracts/route",
         AssetKind.OUTPUT_CONTRACT,
         "output-contract/route",
+        "1.0.1",
     ),
     _BuiltinSpec(
         "output-contracts/diagnose",
         AssetKind.OUTPUT_CONTRACT,
         "output-contract/diagnose",
-        "2.0.3",
+        "2.0.4",
     ),
     _BuiltinSpec(
         "output-contracts/review",
         AssetKind.OUTPUT_CONTRACT,
         "output-contract/review",
+        "1.0.1",
     ),
 )
 _BUILTIN_SPECS_BY_ID = {item.asset_id: item for item in _BUILTIN_SPECS}

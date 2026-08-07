@@ -49,19 +49,26 @@ from problem_locator.contracts.outcomes import (
 )
 from problem_locator.contracts.serialization import (
     InvalidJsonBytesError,
-    NonCanonicalJsonError,
     bytes_sha256,
     canonical_json_bytes,
-    parse_canonical_json_bytes,
 )
 from problem_locator.diagnostics import log_event
+from problem_locator.integrations.agent_json import (
+    parse_agent_json_bytes,
+    read_agent_json_file,
+)
 from problem_locator.integrations.result_archive import validate_result_archive_bytes
 
 from .failures import RuntimeExecutionError, runtime_failure
+from .outcome_finalizer import (
+    FINALIZATION_MARKER_NAME,
+    FinalizedAgentOutcomeMarker,
+)
 from .workspace import PreparedWorkspace
 
 
 _READ_CHUNK_BYTES = 64 * 1024
+_MAX_FINALIZATION_MARKER_BYTES = 4096
 _Draft: TypeAlias = AgentEvidenceProposalDraft | AgentArtifactProposalDraft
 
 
@@ -130,6 +137,95 @@ def _diagnostic_path_state(path: Path) -> str:
     if stat.S_ISDIR(metadata.st_mode):
         return "directory"
     return "other"
+
+
+def _validate_finalization_marker(
+    workspace: PreparedWorkspace | Path,
+    raw_outcome_bytes: bytes,
+) -> None:
+    """Require a canonical marker matching the exact Outcome bytes just read."""
+
+    workspace_root = (
+        workspace.root
+        if isinstance(workspace, PreparedWorkspace)
+        else Path(workspace)
+    )
+    tool_state_root = workspace_root / "runtime" / "tool-state"
+    try:
+        tool_state_metadata = tool_state_root.stat(follow_symlinks=False)
+    except FileNotFoundError:
+        raise _ClassifiedInvalidOutput(
+            "outcome_finalizer_marker_missing",
+            diagnostic_reason="Agent outcome finalization marker is missing",
+        ) from None
+    except OSError as exc:
+        raise _ClassifiedInvalidOutput(
+            "outcome_finalizer_marker_invalid",
+            diagnostic_reason=str(exc),
+        ) from None
+    expected_identity: tuple[int, int] | None = None
+    if isinstance(workspace, PreparedWorkspace):
+        expected_identity = (workspace.tool_state_device, workspace.tool_state_inode)
+    if (
+        not stat.S_ISDIR(tool_state_metadata.st_mode)
+        or (
+            expected_identity is not None
+            and _identity(tool_state_metadata) != expected_identity
+        )
+    ):
+        raise _ClassifiedInvalidOutput(
+            "outcome_finalizer_marker_invalid",
+            diagnostic_reason="Agent tool-state directory identity is invalid",
+        )
+    try:
+        names = sorted(node.name for node in tool_state_root.iterdir())
+    except OSError as exc:
+        raise _ClassifiedInvalidOutput(
+            "outcome_finalizer_marker_invalid",
+            diagnostic_reason=str(exc),
+        ) from None
+    allowed = {FINALIZATION_MARKER_NAME, "logparse-parse.claim"}
+    if any(name not in allowed for name in names):
+        raise _ClassifiedInvalidOutput(
+            "outcome_finalizer_marker_invalid",
+            diagnostic_reason="Agent tool-state contains an unexpected node",
+        )
+    if FINALIZATION_MARKER_NAME not in names:
+        raise _ClassifiedInvalidOutput(
+            "outcome_finalizer_marker_missing",
+            diagnostic_reason="Agent outcome finalization marker is missing",
+        )
+    marker_path = tool_state_root / FINALIZATION_MARKER_NAME
+    try:
+        raw_marker, marker_document = read_agent_json_file(
+            marker_path,
+            max_bytes=_MAX_FINALIZATION_MARKER_BYTES,
+        )
+        if raw_marker != marker_document.canonical_bytes:
+            raise ValueError("Agent outcome finalization marker is not canonical")
+        marker = FinalizedAgentOutcomeMarker.model_validate(marker_document.value)
+        final_tool_state_metadata = tool_state_root.stat(follow_symlinks=False)
+        final_names = sorted(node.name for node in tool_state_root.iterdir())
+        if (
+            _identity(final_tool_state_metadata) != _identity(tool_state_metadata)
+            or final_names != names
+        ):
+            raise ValueError("Agent tool-state changed during marker validation")
+    except (OSError, TypeError, ValueError) as exc:
+        raise _ClassifiedInvalidOutput(
+            "outcome_finalizer_marker_invalid",
+            diagnostic_reason=str(exc),
+        ) from None
+    if (
+        marker.size != len(raw_outcome_bytes)
+        or marker.sha256 != bytes_sha256(raw_outcome_bytes)
+    ):
+        raise _ClassifiedInvalidOutput(
+            "outcome_finalizer_marker_mismatch",
+            diagnostic_reason=(
+                "Agent outcome bytes do not match the finalization marker"
+            ),
+        )
 
 
 def _log_output_rejection(
@@ -1238,6 +1334,7 @@ def _validate_user_result_archive(
 
 
 def _read_validated_output(
+    workspace: PreparedWorkspace | Path,
     workspace_root: Path,
     job: Job,
     workspace_manifest: WorkspaceInputManifest,
@@ -1269,15 +1366,10 @@ def _read_validated_output(
     if capture_outcome_bytes is not None:
         capture_outcome_bytes(raw_outcome_bytes)
     try:
-        parsed_outcome = parse_canonical_json_bytes(raw_outcome_bytes)
+        outcome_document = parse_agent_json_bytes(raw_outcome_bytes)
     except InvalidJsonBytesError as exc:
         raise _ClassifiedInvalidOutput(
             "outcome_json_invalid",
-            diagnostic_reason=str(exc),
-        ) from None
-    except NonCanonicalJsonError as exc:
-        raise _ClassifiedInvalidOutput(
-            "outcome_non_canonical",
             diagnostic_reason=str(exc),
         ) from None
     except (KeyboardInterrupt, SystemExit):
@@ -1287,6 +1379,12 @@ def _read_validated_output(
             "outcome_json_invalid",
             diagnostic_reason=str(exc),
         ) from None
+    if raw_outcome_bytes != outcome_document.canonical_bytes:
+        raise _ClassifiedInvalidOutput(
+            "outcome_non_canonical",
+            diagnostic_reason="Agent outcome bytes are not Canonical JSON",
+        )
+    parsed_outcome = outcome_document.value
     try:
         outcome = AgentJobOutcome.model_validate(parsed_outcome)
     except ValidationError as exc:
@@ -1306,6 +1404,7 @@ def _read_validated_output(
             ),
             schema_errors=schema_errors,
         ) from None
+    _validate_finalization_marker(workspace, raw_outcome_bytes)
     with _classify_invalid_output("outcome_job_binding_or_contract"):
         validate_outcome_for_job(job, outcome, workspace_manifest)
     with _classify_invalid_output("outcome_security_scan"):
@@ -1514,6 +1613,7 @@ def read_agent_output(
             output_identity=output_identity,
         )
         validated = _read_validated_output(
+            workspace,
             workspace_root,
             job,
             workspace_manifest,

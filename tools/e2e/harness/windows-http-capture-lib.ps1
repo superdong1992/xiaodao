@@ -468,7 +468,7 @@ function Assert-HcSelectedSkill {
     param($Skill, [Parameter(Mandatory = $true)][string]$Label)
     Assert-HcExactProperties $Skill @('id', 'version', 'content_hash') $Label
     Assert-Hc ((Get-HcStringProperty $Skill 'id') -ceq 'diagnosis-skill/diagnose-service-takeover') "$Label id"
-    Assert-Hc ((Get-HcStringProperty $Skill 'version') -ceq '3.0.5') "$Label version"
+    Assert-Hc ((Get-HcStringProperty $Skill 'version') -ceq '3.0.6') "$Label version"
     Assert-Hc ((Get-HcStringProperty $Skill 'content_hash') -ceq 'ae47a1a63e6cf4849f83b0f9d49db608c1e93ebe1713f21d58c910990b0857a4') "$Label content hash"
 }
 

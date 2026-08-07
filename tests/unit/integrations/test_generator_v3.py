@@ -103,7 +103,7 @@ def test_three_heterogeneous_specs_generate_deterministically(
 
     manifest = _manifest(first.skill_dir)
     assert manifest["schema_version"] == 2
-    assert manifest["version"] == "3.0.5"
+    assert manifest["version"] == "3.0.6"
     assert [item["name"] for item in manifest["requirements"]] == expected_names
     assert all("required" not in item for item in manifest["requirements"])
     if expected_product is None:

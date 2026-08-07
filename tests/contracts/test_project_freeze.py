@@ -30,6 +30,9 @@ def test_public_console_entries_are_pre_registered() -> None:
     assert scripts == {
         "problem-locator-logparse": "problem_locator.integrations.logparse.cli:main",
         "problem-locator-pack-result": "problem_locator.integrations.result_archive:main",
+        "problem-locator-finalize-outcome": (
+            "problem_locator.runtime.outcome_finalizer:main"
+        ),
     }
 
 

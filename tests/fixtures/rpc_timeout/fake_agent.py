@@ -65,6 +65,9 @@ from problem_locator.integrations.logparse.outputs import (  # noqa: E402
     inspect_controlled_run,
 )
 from problem_locator.integrations.result_archive import build_result_archive  # noqa: E402
+from problem_locator.runtime.outcome_finalizer import (  # noqa: E402
+    finalize_agent_outcome,
+)
 
 
 PRODUCED_AT = "2026-07-31T00:10:00.000Z"
@@ -301,6 +304,7 @@ def _write_outcome(outcome: AgentJobOutcome) -> None:
     payload = canonical_json_bytes(outcome)
     _assert_no_sensitive_output(payload)
     Path("output/job_outcome.json").write_bytes(payload)
+    finalize_agent_outcome(Path.cwd())
 
 
 def _record_invocation(instruction: dict[str, object]) -> None:

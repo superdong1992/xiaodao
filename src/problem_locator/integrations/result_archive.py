@@ -12,7 +12,10 @@ import zipfile
 from pathlib import Path
 from typing import Any
 
-from problem_locator.contracts import canonical_json_bytes, parse_canonical_json_bytes
+from problem_locator.integrations.agent_json import (
+    AgentJsonSurface,
+    normalize_agent_json_file,
+)
 from problem_locator.integrations.logparse.paths import (
     resolve_workspace_path,
     validate_relative_path,
@@ -154,11 +157,13 @@ def build_result_archive(
         or request_metadata.st_size > _MAX_REQUEST_BYTES
     ):
         raise ValueError("archive request file is invalid")
-    raw_request = request_file.read_bytes()
-    value = parse_canonical_json_bytes(raw_request)
-    result_text, target_log_paths = _exact_request(value)
-    if canonical_json_bytes(value) != raw_request:
-        raise ValueError("archive request must be canonical JSON")
+    request_document = normalize_agent_json_file(
+        request_file,
+        surface=AgentJsonSurface.RESULT_ARCHIVE_REQUEST,
+        max_bytes=_MAX_REQUEST_BYTES,
+        validate=_exact_request,
+    )
+    result_text, target_log_paths = _exact_request(request_document.value)
 
     target = resolve_workspace_path(workspace_root, result_path, must_exist=False)
     parent = target.parent

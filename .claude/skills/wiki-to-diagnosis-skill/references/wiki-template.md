@@ -8,9 +8,9 @@
 ```json
 {
   "schema_version": 2,
-  "generator_version": "3.0.5",
+  "generator_version": "3.0.6",
   "id": "diagnose-manual-triage",
-  "version": "3.0.5",
+  "version": "3.0.6",
   "capability": "manual-triage",
   "summary": "根据用户提供的现象和复现步骤执行人工定位",
   "chinese_title": "人工故障定位",

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import zipfile
 from pathlib import Path
 
@@ -62,6 +63,83 @@ def test_controlled_result_archive_is_flat_and_deterministic(tmp_path: Path) -> 
             "target-log-001.log",
             "target-log-002.log",
         ]
+
+
+def test_packer_normalizes_nested_noncanonical_request_before_building(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "workspace"
+    proposal, first_log, second_log = _workspace(root, "archive")
+    request_path = proposal / "request.json"
+    value = json.loads(request_path.read_bytes())
+    value["metadata"] = {
+        "zeta": {"zulu": 1, "alpha": 2},
+        "alpha": {"zulu": 3, "alpha": 4},
+    }
+    invalid = json.dumps(value, ensure_ascii=False, indent=2).encode("utf-8")
+    request_path.write_bytes(invalid)
+
+    with pytest.raises(ValueError, match="fields are invalid"):
+        build_result_archive(
+            root,
+            "output/proposals/archive/request.json",
+            "output/proposals/archive/result.zip",
+        )
+    assert request_path.read_bytes() == invalid
+
+    del value["metadata"]
+    request_path.write_bytes(
+        json.dumps(value, ensure_ascii=False, indent=2).encode("utf-8")
+    )
+    data = build_result_archive(
+        root,
+        "output/proposals/archive/request.json",
+        "output/proposals/archive/result.zip",
+    ).read_bytes()
+    baseline_root = tmp_path / "baseline"
+    _workspace(baseline_root, "archive")
+    baseline = build_result_archive(
+        baseline_root,
+        "output/proposals/archive/request.json",
+        "output/proposals/archive/result.zip",
+    ).read_bytes()
+
+    assert request_path.read_bytes() == canonical_json_bytes(value)
+    assert data == baseline
+    assert validate_result_archive_bytes(
+        data,
+        target_logs=(first_log, second_log),
+    ) == "Diagnosis result\n"
+
+
+@pytest.mark.parametrize(
+    "invalid_request",
+    [
+        b'\xef\xbb\xbf{"schema_version":1}',
+        b'{"schema_version":1,"schema_version":1}',
+        b'{"schema_version":NaN}',
+        b'{"schema_version":',
+        canonical_json_bytes({"schema_version": 1}),
+    ],
+)
+def test_packer_rejects_invalid_or_schema_wrong_request_without_archive(
+    tmp_path: Path,
+    invalid_request: bytes,
+) -> None:
+    root = tmp_path / "workspace"
+    proposal, _first, _second = _workspace(root, "archive")
+    request_path = proposal / "request.json"
+    request_path.write_bytes(invalid_request)
+
+    with pytest.raises(ValueError):
+        build_result_archive(
+            root,
+            "output/proposals/archive/request.json",
+            "output/proposals/archive/result.zip",
+        )
+
+    assert request_path.read_bytes() == invalid_request
+    assert not (proposal / "result.zip").exists()
 
 
 def test_manual_result_archive_contains_only_result_text(tmp_path: Path) -> None:

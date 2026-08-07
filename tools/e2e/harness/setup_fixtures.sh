@@ -51,7 +51,7 @@ test "$(sha256sum /opt/e2e-skills/diagnose-service-takeover/diagnosis-skill.json
 {
   printf 'skill_path=/opt/e2e-skills/diagnose-service-takeover\n'
   printf 'skill_generation_mode=live-generator-from-wiki\n'
-  printf 'skill_generator_version=3.0.5\n'
+  printf 'skill_generator_version=3.0.6\n'
   printf 'skill_capability=service-takeover\n'
   printf 'skill_summary=定位合成服务接管场景中的 RPC 超时\n'
   printf 'skill_logparse_product=compact\n'

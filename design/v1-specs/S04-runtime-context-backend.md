@@ -180,7 +180,7 @@ Runtime 接收一个已由 S05 成功认领、且仍保持固定输入的 Job，
 6. 若 Job 固定 logparse，调用 `LogparseBrokerFactory.open(job, workspace_root, workspace_manifest, cancellation)`；只把 session 的 endpoint/token 注入已净化 Agent 环境，无 logparse 时不启动 broker；
 7. 通过 stdin 向 Backend 提交 Prompt；
 8. 等待子进程成功退出；
-9. 读取并按 S00 `AgentJobOutcome` Schema 校验 `output/job_outcome.json`；解析诊断严格区分 `outcome_json_invalid`（UTF-8、JSON 语法、重复键或非有限数字）、`outcome_non_canonical`（字节拼写不规范）和 `outcome_schema`（字段校验失败），前两类记录具体原因，Schema 类逐项记录字段路径、错误类型和消息，但都不记录整份原始内容；
+9. 读取并按 S00 `AgentJobOutcome` Schema 校验 `output/job_outcome.json`；解析诊断严格区分 `outcome_json_invalid`（UTF-8、JSON 语法、重复键或非有限数字）、`outcome_non_canonical`（字节拼写不规范）和 `outcome_schema`（字段校验失败），前两类记录具体原因，Schema 类逐项记录字段路径、错误类型和消息；Schema 通过后还必须读取 `runtime/tool-state/agent-job-outcome.finalized`，按 Canonical 私有 marker 校验最终 Outcome 的 size/SHA-256，缺失、格式非法和不匹配分别记录 `outcome_finalizer_marker_missing`、`outcome_finalizer_marker_invalid`、`outcome_finalizer_marker_mismatch`，所有诊断均不记录整份原始内容；
 10. 校验 draft proposal path、声明值、Job 绑定和相对路径安全性；若存在 broker session，还要对 AgentJobOutcome Canonical bytes、全部 proposal 相对路径 UTF-8 bytes，以及每个待保留普通文件/目录树文件内容做与日志相同的跨分块精确 secret 扫描；任一 endpoint/token 命中都产生 `OUTCOME_INVALID`，不 stage proposal、不发布原 AgentJobOutcome；Runtime 不即时删除 Agent output，而是保留 Workspace 原文件，并把已经安全读取、实际参与校验的 `job_outcome.json` 原始字节 best-effort 幂等归档到 Job 执行记录；随后按第 6.4 节正常系统失败路径构造并 finalize 规范 Failure JobOutcome，归档失败只记诊断且不覆盖原失败；
 11. 若有 CandidateConclusionDraft，定位唯一 USER_RESULT draft，在暂存前完整读取其 payload，要求逐字是 S00 `UserResultPayload` 的 Canonical JSON bytes，且 problem、candidate statement、supporting bindings 和完整 completion mapping 分别匹配 Job 与同一 AgentJobOutcome；任一不符产生 `OUTCOME_INVALID`，没有 candidate 时不得读取或接受 USER_RESULT；
 12. 对每个有文件内容的 draft 调用 S00 ResourceStore Port，以 `{job_id,proposal_key}` 所有权写入持久化暂存区并取得 `StagedResourceRef`；
@@ -210,7 +210,7 @@ output/
 └─ proposals/<proposal_key>/...
 ```
 
-`inputs/` 在 Backend 启动前整体设为只读；`manifest.json` 必须由 S04 作为唯一生产者按 S00 `WorkspaceInputManifest` 和 `workspace-input-manifest.schema.json` 生成，逐项记录 Job 的全部固定引用以及 Job 固定的 `logparse_tool_ref/logparse_product`，字段、判别分支、顺序、相对路径、大小与 SHA-256 均不得由 S04 私自扩展。`RESOURCE_MANIFEST` section 逐字使用同一文件。`runtime/context.txt` 必须逐字等于 `BoundedContext.body`。`runtime/tool-state/` 只允许服务侧 logparse broker 创建 S00 `LogparseParseClaim` 的唯一固定文件；Agent 侧 stub 和 Backend 输出合同禁止直接增删改该目录，Runtime 在进程退出后按 `logparse-parse-claim.schema.json`、启动 manifest 和 Outcome 逐项执行 S00 矩阵校验。子进程当前目录固定为 Workspace 根，因此 Prompt 和 Skill 只使用上述相对路径。stdout/stderr 分块写入 S02 实现的 `ExecutionRecordStore` 日志 sink，不放入业务输出。
+`inputs/` 在 Backend 启动前整体设为只读；`manifest.json` 必须由 S04 作为唯一生产者按 S00 `WorkspaceInputManifest` 和 `workspace-input-manifest.schema.json` 生成，逐项记录 Job 的全部固定引用以及 Job 固定的 `logparse_tool_ref/logparse_product`，字段、判别分支、顺序、相对路径、大小与 SHA-256 均不得由 S04 私自扩展。`RESOURCE_MANIFEST` section 逐字使用同一文件。`runtime/context.txt` 必须逐字等于 `BoundedContext.body`。`runtime/tool-state/` 只允许服务侧 logparse broker 创建 `logparse-parse.claim`，以及安装的 `problem-locator-finalize-outcome` 创建 `agent-job-outcome.finalized`；两者可共存，任何其他节点均拒绝。Agent 不得直接增删改该目录，Runtime 在进程退出后分别校验 claim 与 finalization marker。子进程当前目录固定为 Workspace 根，因此 Prompt 和 Skill 只使用上述相对路径。stdout/stderr 分块写入 S02 实现的 `ExecutionRecordStore` 日志 sink，不放入业务输出。
 
 固定 logparse Job 的 stdout/stderr 在进入持久 sink 前必须经过二进制流式 secret redactor：对当前 session endpoint/token 的 UTF-8 byte sequence 做精确匹配，跨分块保留最长 secret byte length 减 1 的尾窗，命中后用与命中字节数完全相等的 ASCII `*` 覆盖，close 时再安全 flush；因此写入 sink 的字节数逐字等于原始字节数，S02 的 64 MiB 计数无需第二个旁路计数器。原始 chunk、secret 和尾窗不得写日志、异常或临时文件。无 logparse Job 不创建该 secret 集合。此规则不承诺通用敏感数据检测，仍以 V1 可信 Agent/Skill 边界为前提。
 
@@ -244,7 +244,7 @@ Broker session 不属于 Agent 可控制的业务输出，但其真实 logparse 
 
 取消 signal 携带 `USER_CANCEL` 或 `SERVICE_SHUTDOWN` 原因：两者都产生 `BACKEND_CANCELLED`，前者通常因 CancelCase 已提交而成为 STALE，后者以 `retryable=true` 让仍活跃 Job 进入 INTERRUPTED。进程非零退出时不读取业务结果；只有成功退出后才读取结果文件。结果文件缺失、JSON 非法、Schema 非法或 Job 绑定不一致均直接形成 S00 ExecutionFailure；V1 不调用模型修复非法输出，也不自动重跑 Agent。
 
-Agent 必须以“临时文件写完后同目录原子替换”的方式发布 `output/job_outcome.json`，内容是 S00 `AgentJobOutcome`。Runtime 只读取最终文件名，不读取 `.part` 文件。
+Agent 的 Write 只能生成语法有效的 JSON draft。安装的 Logparse/结果归档工具负责在消费各自 request 前严格校验、递归 Canonical 化并原子回写；`problem-locator-finalize-outcome` 负责规范化 USER_RESULT、刷新其派生 size/hash、校验并原子发布 `output/job_outcome.json`，随后写入匹配 marker。该 finalizer 必须是最后一个修改 Workspace 的命令。Runtime 只读取最终文件名，不读取 `.part` 文件，也不替 Agent 自动修复缺少 marker 的 Outcome。
 
 若执行在有效 Agent 结果产生前失败，Runtime 自己构造绑定当前 Job 的规范 `ExecutionFailure` JobOutcome，并用 `ExecutionRecordStore.publish_outcome_bytes` 原子发布；`outcome_id` 必须来自注入的 `IdGenerator.new("job_outcome")`，`produced_at` 必须来自注入的 `Clock.now()`。系统失败结果不伪装成 AgentJobOutcome，也不覆盖 Agent 的原始文件。它不得把 stdout/stderr 或残缺 Agent JSON伪装成业务载荷。
 

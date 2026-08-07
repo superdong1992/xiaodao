@@ -13,7 +13,7 @@ import tempfile
 from typing import Any, Mapping, Sequence
 
 
-GENERATOR_VERSION = "3.0.5"
+GENERATOR_VERSION = "3.0.6"
 SPEC_SCHEMA_VERSION = 2
 MANIFEST_SCHEMA_VERSION = 2
 PRODUCT_FILES = ("SKILL.md", "diagnosis-skill.json")
@@ -658,8 +658,10 @@ Outcome 新接收的 Evidence 只按 `state_delta.add_evidence_bindings` 顺序�
    `format_id=problem-locator-result-archive-v1`、
    `user_result_proposal_key=user-result` 和实际 `target_log_count`。
 
-USER_RESULT 必须是 S00 Canonical `UserResultPayload`，并与同一 Candidate seam 逐字一致。
-先写 Canonical 请求到 `output/proposals/user-result-archive/request.json`，字段恰好为
+USER_RESULT 必须是有效 `UserResultPayload`，并与同一 Candidate seam 逐字一致；
+`problem-locator-finalize-outcome` 会在最终发布时递归 Canonical 化该文件并重算
+Outcome 中的 size/hash。先写有效 JSON 请求到
+`output/proposals/user-result-archive/request.json`，字段恰好为
 `schema_version=1`、`result_text=Candidate statement + 一个 LF` 和
 `target_log_paths[]`。日志路径仅列 Candidate
 实际绑定的 LOGPARSE Evidence 对应完整目标日志，按 binding 首次出现顺序去重；人工
@@ -678,8 +680,9 @@ Artifact 和 Candidate 必须共同接受，并等待独立 REVIEW PASS 后才�
 
 ## 原子交付
 
-最终 `output/job_outcome.json` 使用公共合同给出的 V1 Canonical JSON 和同目录原子替换。
-退出前重新读取实际字节，校验 S00 Schema、当前 Job/Case、上述 manifest 声明、proposal
+最终先写 `output/job_outcome.json` draft，再把
+`problem-locator-finalize-outcome` 作为最后一个修改 Workspace 的命令；成功后不得继续
+写入 `output/`。Runtime 校验 S00 Schema、当前 Job/Case、上述 manifest 声明、proposal
 size/hash、结果 Artifact 配对和所有业务阶段规则。stdout/stderr 和部分文件不是业务结果。
 """
 

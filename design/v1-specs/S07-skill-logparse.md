@@ -140,7 +140,7 @@ metadata = {
 }
 ```
 
-payload 必须逐字使用 S00 `UserResultPayload` / `user-result.schema.json` 和 Canonical JSON，不在 S07 定义私有结果格式；其字段为 `{schema_version:1,format_id:"problem-locator-diagnosis-v1",problem_statement,candidate_statement,supporting_evidence_bindings[],completion_criteria_mapping[]}`。后四项逐字来自本 Job 固定 ProblemSpec 与同一 Outcome 的 CandidateConclusionDraft，不写时间、Workspace 路径或正式 ID 猜测。相同 candidate 必须生成相同字节。Runtime 在 stage 前校验实际 payload，S03 重算 size/hash 并验证 binding 正式化映射；S01/S03 负责与 candidate 同批接受和发布，Skill 不自行判定 downloadable。
+payload 语义必须逐字使用 S00 `UserResultPayload` / `user-result.schema.json`，不在 S07 定义私有结果格式；其字段为 `{schema_version:1,format_id:"problem-locator-diagnosis-v1",problem_statement,candidate_statement,supporting_evidence_bindings[],completion_criteria_mapping[]}`。后四项逐字来自本 Job 固定 ProblemSpec 与同一 Outcome 的 CandidateConclusionDraft，不写时间、Workspace 路径或正式 ID 猜测。Agent 可先写语法有效的 JSON draft，`problem-locator-finalize-outcome` 在最终发布时严格校验、递归 Canonical 化并把实际 size/hash 回填 Outcome；Runtime 在 stage 前再次校验实际 payload，S03 重算 size/hash 并验证 binding 正式化映射；S01/S03 负责与 candidate 同批接受和发布，Skill 不自行判定 downloadable。
 
 生成器输出必须通过 S00 AgentJobOutcome Schema 校验和目录哈希稳定性测试；Runtime 规范化 Fixture 还必须通过 JobOutcome Schema。同一规范化 Wiki 和相同生成参数必须产生字节稳定的产品文件；时间戳不得进入产品内容哈希。
 
@@ -178,7 +178,7 @@ problem-locator-logparse target-logs
   --result output/proposals/<proposal_key>/target_logs.json
 ```
 
-两个路径都必须是当前 Workspace 内的相对 POSIX 路径。request 使用 Canonical JSON，公共字段为 `schema_version=1`、`problem_time` 和 `anchors[]`；problem_time 逐字复制已校验的参数 A 单值，不接受 range，也不做取中点或时区猜测；每个 anchor 只含 `label,module,slot,process_name,pid?`。`parse-targets` 另外只含 `attachment_id,artifact_proposal_key`，`target-logs` 另外只含 `artifact_id`；两个 request 都禁止 `logparse_product`。Agent stub 只把两个相对路径和 request bytes 发给当前 broker。Broker 按 S00 `workspace-input-manifest.schema.json` 读取只读 `inputs/manifest.json`：通过对应 discriminated entry 把 ID 映射到 relative_path，并逐字取得 Job 固定 `logparse_tool_ref` 与 `logparse_product`；它不得扫描 inputs、补猜文件名、信任 Agent 自报 product 或读取 Repository。endpoint/token 必须绑定本 Job、一次 session 和 Workspace，关闭后失效。Broker 拒绝绝对路径、仓库路径、配置路径、解释器路径或任意 CLI 选项。result 是单个 `target_logs` JSON object；stdout/stderr 只有安全摘要，Agent 必须读取 result 文件。
+两个路径都必须是当前 Workspace 内的相对 POSIX 路径。Agent 可先写语法有效、无重复键/非有限数字的 request draft；安装的 stub 按操作模型验证后递归 Canonical 化、同目录原子回写，再把同一 Canonical bytes 发给 broker。公共字段为 `schema_version=1`、`problem_time` 和 `anchors[]`；problem_time 逐字复制已校验的参数 A 单值，不接受 range，也不做取中点或时区猜测；每个 anchor 只含 `label,module,slot,process_name,pid?`。`parse-targets` 另外只含 `attachment_id,artifact_proposal_key`，`target-logs` 另外只含 `artifact_id`；两个 request 都禁止 `logparse_product`。Broker 按 S00 `workspace-input-manifest.schema.json` 读取只读 `inputs/manifest.json`：通过对应 discriminated entry 把 ID 映射到 relative_path，并逐字取得 Job 固定 `logparse_tool_ref` 与 `logparse_product`；它不得扫描 inputs、补猜文件名、信任 Agent 自报 product 或读取 Repository。endpoint/token 必须绑定本 Job、一次 session 和 Workspace，关闭后失效。Broker 拒绝绝对路径、仓库路径、配置路径、解释器路径或任意 CLI 选项。result 是单个 `target_logs` JSON object；stdout/stderr 只有安全摘要，Agent 必须读取 result 文件。
 
 `parse-targets` 的 parse-once 门禁由服务侧 broker 强制，不依赖 Skill 或 Agent stub 自律：
 

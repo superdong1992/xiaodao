@@ -2,7 +2,7 @@
 
 ## Diagnosis Skill v3
 
-当前落地版本为 GenerationSpec v2、生成器/生成 Skill `3.0.5`、manifest schema `2`、DIAGNOSE output contract `2.0.3` 和 S00 contract revision `v1-contract-r4`。
+当前落地版本为 GenerationSpec v2、生成器/生成 Skill `3.0.6`、manifest schema `2`、DIAGNOSE output contract `2.0.4` 和 S00 contract revision `v1-contract-r4`。
 
 本仓库将故障定位能力分为三层：
 

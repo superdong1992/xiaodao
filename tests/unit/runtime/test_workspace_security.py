@@ -449,6 +449,20 @@ def test_read_claim_rejects_parent_symlink_and_extra_nodes(tmp_path: Path) -> No
     )
 
 
+def test_read_claim_allows_finalizer_marker_alone_or_beside_claim(
+    tmp_path: Path,
+) -> None:
+    workspace = _prepared(tmp_path)
+    marker = workspace.tool_state_root / "agent-job-outcome.finalized"
+    marker.write_bytes(b"marker validated by output reader")
+
+    assert WorkspaceManager.read_claim(workspace) is None
+
+    claim_path = workspace.tool_state_root / "logparse-parse.claim"
+    claim_path.write_bytes(canonical_json_bytes(_claim()))
+    assert WorkspaceManager.read_claim(workspace) == _claim()
+
+
 @pytest.mark.skipif(not SAFE_DIR_FDS, reason="safe dirfd primitives unavailable")
 def test_read_claim_rejects_workspace_ancestor_swap(tmp_path: Path) -> None:
     workspace = _prepared(tmp_path)

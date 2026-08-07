@@ -7,9 +7,9 @@
 ```json
 {
   "schema_version": 2,
-  "generator_version": "3.0.5",
+  "generator_version": "3.0.6",
   "id": "diagnose-service-takeover",
-  "version": "3.0.5",
+  "version": "3.0.6",
   "capability": "service-takeover",
   "summary": "定位合成服务接管场景中的 RPC 超时",
   "chinese_title": "服务接管 RPC 超时定位",

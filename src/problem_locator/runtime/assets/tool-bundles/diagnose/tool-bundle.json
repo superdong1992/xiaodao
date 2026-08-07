@@ -1,1 +1,1 @@
-{"schema_version":1,"tools":["workspace-file-read","workspace-proposal-write","problem-locator-logparse","problem-locator-pack-result"]}
+{"schema_version":1,"tools":["workspace-file-read","workspace-proposal-write","problem-locator-logparse","problem-locator-pack-result","problem-locator-finalize-outcome"]}

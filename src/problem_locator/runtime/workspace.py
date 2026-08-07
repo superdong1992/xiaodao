@@ -45,6 +45,7 @@ from problem_locator.contracts.serialization import (
 )
 
 from .failures import RuntimeExecutionError, runtime_failure
+from .outcome_finalizer import FINALIZATION_MARKER_NAME
 
 
 _READ_CHUNK_BYTES = 1024 * 1024
@@ -631,7 +632,7 @@ def _fallback_read_claim(workspace: PreparedWorkspace) -> LogparseParseClaim | N
         ),
     )
     names = _fallback_names(tool_state_path)
-    if not names:
+    if not names or names == [FINALIZATION_MARKER_NAME]:
         final_tool_state_path, final_tool_state_metadata = (
             _fallback_expected_directory(
                 workspace,
@@ -645,12 +646,15 @@ def _fallback_read_claim(workspace: PreparedWorkspace) -> LogparseParseClaim | N
         if (
             final_tool_state_path != tool_state_path
             or _identity(final_tool_state_metadata) != _identity(tool_state_metadata)
-            or _fallback_names(final_tool_state_path)
+            or _fallback_names(final_tool_state_path) != names
         ):
             raise _UnsafeWorkspaceError("tool state changed during inspection")
         _fallback_root(workspace)
         return None
-    if names != ["logparse-parse.claim"]:
+    if set(names) not in (
+        {"logparse-parse.claim"},
+        {"logparse-parse.claim", FINALIZATION_MARKER_NAME},
+    ):
         raise _UnsafeWorkspaceError("tool state contains an unexpected node")
     claim_path = tool_state_path / "logparse-parse.claim"
     try:
@@ -1433,7 +1437,7 @@ class WorkspaceManager:
                 (workspace.tool_state_device, workspace.tool_state_inode),
             )
             nodes = _listed_names(tool_state_descriptor)
-            if not nodes:
+            if not nodes or nodes == [FINALIZATION_MARKER_NAME]:
                 _assert_expected_directory(
                     runtime_descriptor,
                     "tool-state",
@@ -1448,7 +1452,10 @@ class WorkspaceManager:
                 )
                 _assert_workspace_root_path(workspace, root_descriptor)
                 return None
-            if nodes != ["logparse-parse.claim"]:
+            if set(nodes) not in (
+                {"logparse-parse.claim"},
+                {"logparse-parse.claim", FINALIZATION_MARKER_NAME},
+            ):
                 raise _UnsafeWorkspaceError("tool state contains an unexpected node")
             named_metadata = os.stat(
                 "logparse-parse.claim",

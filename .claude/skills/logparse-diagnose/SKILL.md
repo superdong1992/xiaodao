@@ -58,8 +58,10 @@ proposal key. No other flags or positional arguments are allowed.
 
 ## Request bytes
 
-Write request files as S00 Canonical JSON: UTF-8, sorted object keys, compact
-separators, no NaN/Infinity, and one trailing LF. Common request fields are
+Write each request as valid, unambiguous UTF-8 JSON. The installed
+`problem-locator-logparse` client validates the operation-specific model,
+recursively canonicalizes the same request file, and atomically replaces it
+before contacting the broker. Common request fields are
 `schema_version=1`, a single millisecond UTC RFC 3339 `problem_time`, and ordered
 `anchors[]`. Every anchor contains only `label,module,slot,process_name,pid`; pid
 may be null. `label`, `module`, `slot`, and `process_name` are always JSON strings;

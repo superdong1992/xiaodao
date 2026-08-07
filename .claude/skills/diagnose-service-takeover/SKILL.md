@@ -5,13 +5,13 @@ description: "定位合成服务接管场景中的 RPC 超时"
 
 # 服务接管 RPC 超时定位
 
-由 `wiki-to-diagnosis-skill` generator `3.0.5` 生成。公共 DIAGNOSE output
+由 `wiki-to-diagnosis-skill` generator `3.0.6` 生成。公共 DIAGNOSE output
 contract 只定义通用 Schema、安全、Evidence/Candidate 与原子输出；本文件独占业务
 requirements、阶段、工具映射和判定规则。
 
 <!-- DIAGNOSIS_SKILL_MANIFEST_V2_BEGIN -->
 ```json
-{"capability":"service-takeover","entry_document":"SKILL.md","id":"diagnose-service-takeover","logparse_plan":{"anchors":[{"label":"client","module":{"source":"SKILL_FIXED","value":"compact"},"pid":null,"process_name":{"source":"SKILL_FIXED","value":"checkout-client"},"slot":{"source":"SKILL_FIXED","value":"slot_1"}},{"label":"server","module":{"source":"SKILL_FIXED","value":"compact"},"pid":null,"process_name":{"source":"SKILL_FIXED","value":"inventory-server"},"slot":{"source":"SKILL_FIXED","value":"slot_2"}}],"attachment_requirement":"log_archive","problem_time_binding":{"name":"problem_time","source":"USER_FACT"}},"logparse_product":"compact","requirements":[{"constraints":{"allowed_values":[],"max_utf8_bytes":256,"min_utf8_bytes":1,"pattern":null,"value_type":"STRING"},"fulfillment_source":"USER_FACT","kind":"INPUT","name":"caller_service","prompt":"请提供调用方服务名。","stage":"INITIAL"},{"constraints":{"allowed_values":[],"max_utf8_bytes":256,"min_utf8_bytes":1,"pattern":null,"value_type":"STRING"},"fulfillment_source":"USER_FACT","kind":"INPUT","name":"server_service","prompt":"请提供服务方服务名。","stage":"INITIAL"},{"constraints":{"allowed_values":[],"max_utf8_bytes":256,"min_utf8_bytes":1,"pattern":null,"value_type":"STRING"},"fulfillment_source":"USER_FACT","kind":"INPUT","name":"rpc_method","prompt":"请提供超时的 RPC 方法名。","stage":"INITIAL"},{"constraints":{"allowed_values":[],"max_utf8_bytes":24,"min_utf8_bytes":24,"pattern":"^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$","value_type":"STRING"},"fulfillment_source":"USER_FACT","kind":"INPUT","name":"problem_time","prompt":"请提供毫秒精度 UTC 问题时间。","stage":"INITIAL"},{"constraints":{"allowed_content_types":["application/gzip","application/zip","application/x-tar"],"max_count":1,"min_count":1},"fulfillment_source":"READY_ATTACHMENT","kind":"ATTACHMENT","name":"log_archive","prompt":"请上传 Logparse 支持的日志归档。","stage":"INITIAL"},{"constraints":{"allowed_values":[],"max_utf8_bytes":256,"min_utf8_bytes":1,"pattern":null,"value_type":"STRING"},"fulfillment_source":"USER_FACT","kind":"INPUT","name":"order_id","prompt":"请提供用于两端日志关联的订单号。","stage":"AFTER_LOGPARSE"}],"requires_logparse":true,"schema_version":2,"summary":"定位合成服务接管场景中的 RPC 超时","tool_bundle_id":"tool-bundle/diagnose","version":"3.0.5"}
+{"capability":"service-takeover","entry_document":"SKILL.md","id":"diagnose-service-takeover","logparse_plan":{"anchors":[{"label":"client","module":{"source":"SKILL_FIXED","value":"compact"},"pid":null,"process_name":{"source":"SKILL_FIXED","value":"checkout-client"},"slot":{"source":"SKILL_FIXED","value":"slot_1"}},{"label":"server","module":{"source":"SKILL_FIXED","value":"compact"},"pid":null,"process_name":{"source":"SKILL_FIXED","value":"inventory-server"},"slot":{"source":"SKILL_FIXED","value":"slot_2"}}],"attachment_requirement":"log_archive","problem_time_binding":{"name":"problem_time","source":"USER_FACT"}},"logparse_product":"compact","requirements":[{"constraints":{"allowed_values":[],"max_utf8_bytes":256,"min_utf8_bytes":1,"pattern":null,"value_type":"STRING"},"fulfillment_source":"USER_FACT","kind":"INPUT","name":"caller_service","prompt":"请提供调用方服务名。","stage":"INITIAL"},{"constraints":{"allowed_values":[],"max_utf8_bytes":256,"min_utf8_bytes":1,"pattern":null,"value_type":"STRING"},"fulfillment_source":"USER_FACT","kind":"INPUT","name":"server_service","prompt":"请提供服务方服务名。","stage":"INITIAL"},{"constraints":{"allowed_values":[],"max_utf8_bytes":256,"min_utf8_bytes":1,"pattern":null,"value_type":"STRING"},"fulfillment_source":"USER_FACT","kind":"INPUT","name":"rpc_method","prompt":"请提供超时的 RPC 方法名。","stage":"INITIAL"},{"constraints":{"allowed_values":[],"max_utf8_bytes":24,"min_utf8_bytes":24,"pattern":"^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$","value_type":"STRING"},"fulfillment_source":"USER_FACT","kind":"INPUT","name":"problem_time","prompt":"请提供毫秒精度 UTC 问题时间。","stage":"INITIAL"},{"constraints":{"allowed_content_types":["application/gzip","application/zip","application/x-tar"],"max_count":1,"min_count":1},"fulfillment_source":"READY_ATTACHMENT","kind":"ATTACHMENT","name":"log_archive","prompt":"请上传 Logparse 支持的日志归档。","stage":"INITIAL"},{"constraints":{"allowed_values":[],"max_utf8_bytes":256,"min_utf8_bytes":1,"pattern":null,"value_type":"STRING"},"fulfillment_source":"USER_FACT","kind":"INPUT","name":"order_id","prompt":"请提供用于两端日志关联的订单号。","stage":"AFTER_LOGPARSE"}],"requires_logparse":true,"schema_version":2,"summary":"定位合成服务接管场景中的 RPC 超时","tool_bundle_id":"tool-bundle/diagnose","version":"3.0.6"}
 ```
 <!-- DIAGNOSIS_SKILL_MANIFEST_V2_END -->
 
@@ -162,8 +162,10 @@ Outcome 新接收的 Evidence 只按 `state_delta.add_evidence_bindings` 顺序�
    `format_id=problem-locator-result-archive-v1`、
    `user_result_proposal_key=user-result` 和实际 `target_log_count`。
 
-USER_RESULT 必须是 S00 Canonical `UserResultPayload`，并与同一 Candidate seam 逐字一致。
-先写 Canonical 请求到 `output/proposals/user-result-archive/request.json`，字段恰好为
+USER_RESULT 必须是有效 `UserResultPayload`，并与同一 Candidate seam 逐字一致；
+`problem-locator-finalize-outcome` 会在最终发布时递归 Canonical 化该文件并重算
+Outcome 中的 size/hash。先写有效 JSON 请求到
+`output/proposals/user-result-archive/request.json`，字段恰好为
 `schema_version=1`、`result_text=Candidate statement + 一个 LF` 和
 `target_log_paths[]`。日志路径仅列 Candidate
 实际绑定的 LOGPARSE Evidence 对应完整目标日志，按 binding 首次出现顺序去重；人工
@@ -182,6 +184,7 @@ Artifact 和 Candidate 必须共同接受，并等待独立 REVIEW PASS 后才�
 
 ## 原子交付
 
-最终 `output/job_outcome.json` 使用公共合同给出的 V1 Canonical JSON 和同目录原子替换。
-退出前重新读取实际字节，校验 S00 Schema、当前 Job/Case、上述 manifest 声明、proposal
+最终先写 `output/job_outcome.json` draft，再把
+`problem-locator-finalize-outcome` 作为最后一个修改 Workspace 的命令；成功后不得继续
+写入 `output/`。Runtime 校验 S00 Schema、当前 Job/Case、上述 manifest 声明、proposal
 size/hash、结果 Artifact 配对和所有业务阶段规则。stdout/stderr 和部分文件不是业务结果。

@@ -3,7 +3,7 @@
 ## 执行状态
 
 - 状态：已完成（2026-08-04）。
-- 实际版本：GenerationSpec v2、generator/生成 Skill `3.0.5`、manifest schema `2`、DIAGNOSE output contract `2.0.3`、S00 contract revision `v1-contract-r4`。
+- 实际版本：GenerationSpec v2、generator/生成 Skill `3.0.6`、manifest schema `2`、DIAGNOSE output contract `2.0.4`、S00 contract revision `v1-contract-r4`。
 - 生产实现已完成三层边界拆分、声明式 requirements、可选 `logparse_product`、归档后缀派生 Content-Type、parse-once 续跑以及 `diagnosis-result.json` + `result.zip` 双公开产物。
 - RPC、数据库死锁、无日志人工排查三个异构 Fixture 已完成参数隔离和确定性全生命周期覆盖；真实 Agent 合同门覆盖三类 requirements 生成与首次日志解析续跑。
 - 最终冻结补丁 SHA-256 为 `ab6e0094c0060f3e0d01e9884dc2554f4e41e95dd50595ef8107d61e689508a2`。官方 Windows→Linux 分段发布验收已通过：Fast attempt52 为 156 项零失败、耗时 363.565 秒；ReleaseGates attempt53 为 2143 项零失败、13 项按平台/条件跳过、耗时 159.609 秒。两轮均通过最终密钥扫描，业务结果为 `ACCEPTED`，状态/HTTP/重启审计为 `PASS`。
@@ -19,7 +19,7 @@
 
 ## 接口与合同变更
 
-- `GenerationSpec.schema_version` 升为 `2`，生成器升为 `3.0.5`，生成 Skill 升为 `3.0.5`。
+- `GenerationSpec.schema_version` 为 `2`，生成器和生成 Skill 当前版本为 `3.0.6`。
 - `diagnosis-skill.json.schema_version` 升为 `2`，新增：
   - `requirements[]`：`name`、`kind`、`stage`、`fulfillment_source`、`prompt`、S00 原生 `constraints`。
   - `logparse_plan`：归档 requirement、问题时间绑定、按角色声明的 anchor bindings；无日志 Skill 为 `null`。
@@ -34,7 +34,7 @@
   - `.gz/.tar.gz/.tgz -> application/gzip`
   - `.zip -> application/zip`
   - `.tar -> application/x-tar`
-- DIAGNOSE output contract 升为 `2.0.3`；Catalog 改为按内置资产分别声明版本，避免连带升级 Router/Reviewer 资产。
+- DIAGNOSE output contract 升为 `2.0.4`；Catalog 按内置资产分别声明版本，并由服务端 finalizer 统一发布 Canonical Agent 输出。
 
 ## 实现变更
 
@@ -84,7 +84,7 @@
 
 ## 版本、迁移与工作量
 
-- 版本矩阵：`GenerationSpec v2`、generator `3.0.5`、manifest schema `2`、生成 Skill `3.0.5`、DIAGNOSE output contract `2.0.3`、S00 contract revision `v1-contract-r4`。
+- 版本矩阵：`GenerationSpec v2`、generator `3.0.6`、manifest schema `2`、生成 Skill `3.0.6`、DIAGNOSE output contract `2.0.4`、S00 contract revision `v1-contract-r4`。
 - 不做运行时按需迁移；旧 Skill 必须显式重新生成。预发布环境默认使用新数据根，需要保留数据时执行独立离线迁移。
 - 历史 handoff 保持不变，通过新的合同修订和实施记录描述本次破坏性修正。
 - 原评估总工作量约 `26-40 人日`；本计划范围已经完成。数据库和人工场景已具备确定性全生命周期与真实 Agent requirements 合同覆盖，但未扩展为各自独立的 Windows/Linux 发布旅程。

@@ -213,14 +213,30 @@ def test_cli_rejects_every_other_subcommand(
     assert "invalid choice" in capsys.readouterr().err
 
 
-def test_cli_rejects_noncanonical_request_bytes_without_contacting_the_broker(
+def test_cli_normalizes_noncanonical_request_before_contacting_the_broker(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     broker_server: _Server,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     decoded = json.loads(_request_bytes("parse-targets"))
-    noncanonical = json.dumps(decoded, indent=2).encode("utf-8")
+
+    def reverse_objects(value: object) -> object:
+        if isinstance(value, dict):
+            return {
+                key: reverse_objects(child)
+                for key, child in reversed(list(value.items()))
+            }
+        if isinstance(value, list):
+            return [reverse_objects(child) for child in value]
+        return value
+
+    noncanonical = json.dumps(
+        reverse_objects(decoded),
+        ensure_ascii=False,
+        indent=2,
+    ).replace("\n", "\r\n").encode("utf-8")
+    expected = _request_bytes("parse-targets")
     workspace, _payload = _prepare_workspace(
         tmp_path,
         "parse-targets",
@@ -229,14 +245,47 @@ def test_cli_rejects_noncanonical_request_bytes_without_contacting_the_broker(
     monkeypatch.chdir(workspace)
     _set_capability(monkeypatch, broker_server)
 
+    assert _main("parse-targets") == 0
+
+    assert (workspace / REQUEST_PATH).read_bytes() == expected
+    assert len(broker_server.records) == 1
+    envelope = json.loads(broker_server.records[0].body)
+    assert base64.b64decode(envelope["request_base64"], validate=True) == expected
+    assert (workspace / RESULT_PATH).read_bytes() == broker_server.response_body
+    captured = capsys.readouterr()
+    assert captured.out == "problem-locator-logparse: broker request completed\n"
+    assert captured.err == ""
+
+
+@pytest.mark.parametrize(
+    "invalid_request",
+    [
+        b'\xef\xbb\xbf{"schema_version":1}',
+        b'{"schema_version":1,"schema_version":1}',
+        b'{"schema_version":NaN}',
+        b'{"schema_version":',
+        canonical_json_bytes({"schema_version": 1}),
+    ],
+)
+def test_cli_rejects_invalid_or_schema_wrong_request_before_broker_use(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    broker_server: _Server,
+    invalid_request: bytes,
+) -> None:
+    workspace, _payload = _prepare_workspace(
+        tmp_path,
+        "parse-targets",
+        request_bytes=invalid_request,
+    )
+    monkeypatch.chdir(workspace)
+    _set_capability(monkeypatch, broker_server)
+
     assert _main("parse-targets") == 2
 
     assert broker_server.records == []
     assert not (workspace / RESULT_PATH).exists()
-    captured = capsys.readouterr()
-    assert captured.out == ""
-    assert captured.err == "problem-locator-logparse: broker request failed\n"
-    assert ATTACHMENT_ID not in captured.err
+    assert (workspace / REQUEST_PATH).read_bytes() == invalid_request
 
 
 @pytest.mark.parametrize(

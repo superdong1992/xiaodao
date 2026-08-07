@@ -137,36 +137,21 @@ requirement 到 `problem_time`、anchor 字段的绑定；broker 请求规范、
 
 ## Canonical JSON 与原子发布
 
-所有正式 JSON 都使用 V1 Canonical JSON：UTF-8 无 BOM、对象键按码点排序、紧凑
-分隔符、禁止 NaN/Infinity，并且恰好一个结尾 LF。proposal 内容只能位于其声明的
+`Write` 只能生成语法有效的 JSON draft，不能作为正式发布动作。Logparse 和结果归档
+请求由各自安装的服务端工具在消费前校验、递归 Canonical 化并原子回写；
+`USER_RESULT` 由 Outcome finalizer 校验和规范化。proposal 内容只能位于其声明的
 `output/proposals/<proposal_key>/` 下。
 
-完成完整对象后，使用安装的 Python 执行同目录原子替换：
+完成全部 proposal 和 `output/job_outcome.json` draft 后，最后一个会修改 Workspace 的
+命令必须恰好是：
 
-```python
-import json, os, uuid
-from datetime import UTC, datetime
-from pathlib import Path
-
-p = Path("output/job_outcome.json")
-value = json.loads(p.read_text(encoding="utf-8"))
-value["outcome_id"] = str(uuid.uuid4())
-value["produced_at"] = datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
-canonical = json.dumps(value, ensure_ascii=False, allow_nan=False, sort_keys=True, separators=(",", ":")).encode("utf-8") + b"\n"
-temporary = p.with_name("job_outcome.json.tmp")
-with temporary.open("wb") as stream:
-    stream.write(canonical)
-    stream.flush()
-    os.fsync(stream.fileno())
-os.replace(temporary, p)
-assert p.read_bytes() == canonical
+```text
+problem-locator-finalize-outcome
 ```
 
-原子替换后，最终工具动作必须重新读取实际字节，并至少验证：Canonical JSON、
-`AgentJobOutcome` model、当前 Job/Case 绑定、selected Skill 的 requirement/阶段规则、
-所有 proposal 路径与声明 size/hash，以及 Candidate 与结果 Artifact 的成对约束。
-验证失败必须修复后重新验证，不能把 prose、stdout、stderr 或半成品当作业务输出。
-
-JSON Schema validity alone is insufficient. Validate the final bytes, not only the parsed value.
-They must be V1 Canonical JSON bytes: UTF-8 without a BOM, code-point-sorted object keys,
-compact separators with no insignificant whitespace, no NaN or Infinity, and exactly one trailing LF.
+该工具刷新 `outcome_id`/`produced_at`，规范化 `USER_RESULT`，重算其声明 size/hash，
+验证 `AgentJobOutcome`，递归排序所有嵌套对象键，原子发布 V1 Canonical JSON，并写入
+size/SHA-256 finalization marker。非零退出必须修复后重试；命令成功后不得再增删改
+`output/`。Runtime 仍会校验当前 Job/Case 绑定、selected Skill 阶段规则、proposal
+路径与实际 size/hash，以及 Candidate/结果 Artifact 配对。不能把 prose、stdout、stderr
+或半成品当作业务输出。

@@ -43,7 +43,7 @@ EXPECTED_RUNTIME_VERSIONS = {
     "fastapi": "0.139.2",
     "httpx": "0.28.1",
     "mcp": "1.29.0",
-    "problem-locator": "1.0.5",
+    "problem-locator": "1.0.6",
     "pydantic": "2.13.4",
     "python-dotenv": "1.2.2",
     "starlette": "1.3.1",
@@ -494,6 +494,12 @@ def test_clean_installed_distribution_import_cli_and_server_gate(
         else "problem-locator-client-proxy"
     )
     assert not proxy_entrypoint.exists()
+    finalizer_entrypoint = installed_python.parent / (
+        "problem-locator-finalize-outcome.exe"
+        if os.name == "nt"
+        else "problem-locator-finalize-outcome"
+    )
+    assert finalizer_entrypoint.is_file()
 
     probe_code = textwrap.dedent(
         """

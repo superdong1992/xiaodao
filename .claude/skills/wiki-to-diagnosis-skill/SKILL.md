@@ -6,7 +6,7 @@ description: 将非敏感故障定位 Wiki 转换为通用 Problem Locator Diagn
 # Wiki to Diagnosis Skill v3
 
 本 Skill 负责业务规则生成，不修改全局 DIAGNOSE output contract，也不把某个 Fixture
-的字段提升为通用协议。生成器固定为 `3.0.5`，输入规范为 `GenerationSpec v2`，输出
+的字段提升为通用协议。生成器固定为 `3.0.6`，输入规范为 `GenerationSpec v2`，输出
 Skill 从 `3.0.0` 起，manifest 为 schema v2。
 
 ## 开始前确认

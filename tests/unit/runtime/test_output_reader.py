@@ -31,6 +31,10 @@ from problem_locator.runtime.output_reader import (
     RejectedAgentOutputError,
     read_agent_output,
 )
+from problem_locator.runtime.outcome_finalizer import (
+    FINALIZATION_MARKER_NAME,
+    FinalizedAgentOutcomeMarker,
+)
 from problem_locator.runtime.workspace import PreparedWorkspace
 
 
@@ -83,6 +87,17 @@ def _write_outcome(root: Path, payload: dict[str, Any] | bytes) -> Path:
     data = payload if isinstance(payload, bytes) else canonical_json_bytes(payload)
     path = output / "job_outcome.json"
     path.write_bytes(data)
+    tool_state = root / "runtime" / "tool-state"
+    tool_state.mkdir(parents=True, exist_ok=True)
+    marker = FinalizedAgentOutcomeMarker(
+        schema_version=1,
+        relative_path="output/job_outcome.json",
+        size=len(data),
+        sha256=hashlib.sha256(data).hexdigest(),
+    )
+    (tool_state / FINALIZATION_MARKER_NAME).write_bytes(
+        canonical_json_bytes(marker)
+    )
     return path
 
 
@@ -383,6 +398,46 @@ def test_invalid_json_canonical_form_and_schema_are_distinguished(
         )
     else:
         assert "schema_errors" not in rejected.dfx_fields
+
+
+@pytest.mark.parametrize(
+    ("marker_state", "expected_category"),
+    [
+        ("missing", "outcome_finalizer_marker_missing"),
+        ("invalid", "outcome_finalizer_marker_invalid"),
+        ("mismatch", "outcome_finalizer_marker_mismatch"),
+    ],
+)
+def test_finalizer_marker_failures_are_distinguished_after_outcome_validation(
+    tmp_path: Path,
+    marker_state: str,
+    expected_category: str,
+) -> None:
+    job, manifest, payload = _route_inputs()
+    outcome_path = _write_outcome(tmp_path, payload)
+    marker_path = tmp_path / "runtime/tool-state" / FINALIZATION_MARKER_NAME
+    if marker_state == "missing":
+        marker_path.unlink()
+    elif marker_state == "invalid":
+        marker_path.write_bytes(b'{"schema_version":1}')
+    else:
+        marker_path.write_bytes(
+            canonical_json_bytes(
+                FinalizedAgentOutcomeMarker(
+                    schema_version=1,
+                    relative_path="output/job_outcome.json",
+                    size=0,
+                    sha256="0" * 64,
+                )
+            )
+        )
+
+    with pytest.raises(RejectedAgentOutputError) as captured:
+        read_agent_output(tmp_path, job, manifest)
+
+    assert captured.value.failure_category == expected_category
+    assert captured.value.raw_outcome_bytes == outcome_path.read_bytes()
+    _assert_failure(captured, ErrorCode.OUTCOME_INVALID)
 
 
 def test_outcome_job_binding_must_match_exactly(tmp_path: Path) -> None:

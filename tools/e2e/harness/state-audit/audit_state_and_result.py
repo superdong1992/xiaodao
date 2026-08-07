@@ -68,7 +68,7 @@ SCHEMA_VERSION = 1
 SERVICE_BASE_URL = "http://127.0.0.1:18000"
 EXPECTED_SKILL = VersionedRef(
     id="diagnosis-skill/diagnose-service-takeover",
-    version="3.0.5",
+    version="3.0.6",
     content_hash=(
         "ae47a1a63e6cf4849f83b0f9d49db608c1e93ebe1713f21d58c910990b0857a4"
     ),
