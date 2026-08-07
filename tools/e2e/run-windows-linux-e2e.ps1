@@ -352,6 +352,7 @@ $attempt = Get-NextAttemptNumber
 $timestamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $label = "attempt$attempt-$timestamp"
 $evidence = Join-Path $evidenceBase $label
+$sameJobEvidence = Join-Path (Join-Path $evidence 'same-job') $label
 $initialContainer = "pl-e2e-fast$attempt-$timestamp"
 $restartContainer = "pl-e2e-fast$attempt-restart-$timestamp"
 $dataVolume = "pl-e2e-fast$attempt-data-$timestamp"
@@ -424,6 +425,31 @@ try {
         & $powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $evidence 'run-windows-journey.ps1') -Mode Phase3 -EvidenceRoot $evidence
         if ($LASTEXITCODE -ne 0) { throw 'E2E_WINDOWS_PHASE3' }
     }
+    Invoke-Step 'fast-same-job-evidence-root' {
+        [IO.Directory]::CreateDirectory($sameJobEvidence) | Out-Null
+        foreach ($name in @(
+            'README.md', 'run-windows-journey.ps1', 'static-check.ps1',
+            'windows-journey-lib.ps1', 'windows-journey-driver-manifest.json',
+            'synthetic-rpc-service-takeover.zip'
+        )) {
+            Copy-Item -LiteralPath (Join-Path $evidence $name) -Destination (Join-Path $sameJobEvidence $name) -Force
+        }
+    }
+    Invoke-Step 'fast-same-job-windows-claude-phase1' {
+        & $powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $evidence 'run-windows-journey.ps1') -Mode Phase1 -Scenario SameJob -EvidenceRoot $sameJobEvidence
+        if ($LASTEXITCODE -ne 0) { throw 'E2E_SAME_JOB_WINDOWS_PHASE1' }
+    }
+    Invoke-Step 'fast-same-job-real-upload' {
+        & $powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $evidence 'run-windows-journey.ps1') -Mode Upload -Scenario SameJob -EvidenceRoot $sameJobEvidence
+        if ($LASTEXITCODE -ne 0) { throw 'E2E_SAME_JOB_WINDOWS_UPLOAD' }
+    }
+    Invoke-Step 'fast-same-job-windows-claude-phase3' {
+        & $powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $evidence 'run-windows-journey.ps1') -Mode Phase3 -Scenario SameJob -EvidenceRoot $sameJobEvidence
+        if ($LASTEXITCODE -ne 0) { throw 'E2E_SAME_JOB_WINDOWS_PHASE3' }
+    }
+    Invoke-Step 'fast-same-job-output-archive-audit' {
+        Invoke-ContainerScript $initialContainer '/opt/venvs/xiaodao/bin/python' 'audit_same_job_output_archive.py'
+    }
     Invoke-Step 'fast-before-restart-audit' {
         & $powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $evidence 'run-windows-http-capture.ps1') -EvidenceRoot $evidence -Phase Before
         if ($LASTEXITCODE -ne 0) { throw 'E2E_HTTP_BEFORE' }
@@ -450,6 +476,10 @@ try {
         if ($LASTEXITCODE -ne 0) { throw 'E2E_RESTART_QUERY' }
         & $powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $restartEvidence 'download-windows-restart-artifact.ps1') -EvidenceRoot $evidence
         if ($LASTEXITCODE -ne 0) { throw 'E2E_RESTART_DOWNLOAD' }
+        & $powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $restartEvidence 'run-windows-restart-verify.ps1') -EvidenceRoot $sameJobEvidence
+        if ($LASTEXITCODE -ne 0) { throw 'E2E_SAME_JOB_RESTART_QUERY' }
+        & $powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $restartEvidence 'download-windows-restart-artifact.ps1') -EvidenceRoot $sameJobEvidence
+        if ($LASTEXITCODE -ne 0) { throw 'E2E_SAME_JOB_RESTART_DOWNLOAD' }
         & $powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $evidence 'run-windows-http-capture.ps1') -EvidenceRoot $evidence -Phase After
         if ($LASTEXITCODE -ne 0) { throw 'E2E_HTTP_AFTER' }
         Invoke-ContainerScript $restartContainer 'sh' 'stop_service.sh'
@@ -489,7 +519,7 @@ try {
     }
     $warm.Stop()
     $script:warmSeconds = [Math]::Round($warm.Elapsed.TotalSeconds, 3)
-    if ($Profile -in @('Release', 'ReleaseGates')) { Assert-E2E ($warm.Elapsed.TotalSeconds -le 480) 'RELEASE_SLA_EXCEEDED' }
+    if ($Profile -in @('Release', 'ReleaseGates')) { Assert-E2E ($warm.Elapsed.TotalSeconds -le 1200) 'RELEASE_SLA_EXCEEDED' }
     $script:success = $true
 }
 catch {
@@ -505,6 +535,9 @@ if (-not $script:success) {
 $summaryPath = Join-Path $evidence 'verification-report.json'
 $businessRoot = if ($Profile -ceq 'ReleaseGates') { $BusinessEvidenceRoot } else { $evidence }
 $journey = if (Test-Path -LiteralPath (Join-Path $businessRoot 'journey-authoritative-summary.json')) { [IO.File]::ReadAllText((Join-Path $businessRoot 'journey-authoritative-summary.json'), $utf8) | ConvertFrom-Json } else { $null }
+$sameJobRoot = if ($Profile -ceq 'ReleaseGates') { Join-Path (Join-Path $BusinessEvidenceRoot 'same-job') ([IO.Path]::GetFileName($BusinessEvidenceRoot)) } else { $sameJobEvidence }
+$sameJobJourney = if (Test-Path -LiteralPath (Join-Path $sameJobRoot 'journey-authoritative-summary.json')) { [IO.File]::ReadAllText((Join-Path $sameJobRoot 'journey-authoritative-summary.json'), $utf8) | ConvertFrom-Json } else { $null }
+$sameJobArchiveAudit = if (Test-Path -LiteralPath (Join-Path $sameJobRoot 'same-job-output-archive-audit.json')) { [IO.File]::ReadAllText((Join-Path $sameJobRoot 'same-job-output-archive-audit.json'), $utf8) | ConvertFrom-Json } else { $null }
 $phase1 = if (Test-Path -LiteralPath (Join-Path $businessRoot 'phase1-state.json')) { [IO.File]::ReadAllText((Join-Path $businessRoot 'phase1-state.json'), $utf8) | ConvertFrom-Json } else { $null }
 $audit = if (Test-Path -LiteralPath (Join-Path $businessRoot 'restart\final-state-audit.json')) { [IO.File]::ReadAllText((Join-Path $businessRoot 'restart\final-state-audit.json'), $utf8) | ConvertFrom-Json } else { $null }
 $sourcePinsPath = if ($Profile -ceq 'ReleaseGates') { Join-Path $evidence 'release\deterministic\source-pins.txt' } else { Join-Path $evidence 'source-pins.txt' }
@@ -541,13 +574,16 @@ $report = [PSCustomObject][ordered]@{
     no_mock_business_journey = $true
     business_evidence_attempt = $(if ($null -ne $businessReport) { [string]$businessReport.attempt } else { $label })
     business_elapsed_seconds = $(if ($null -ne $businessReport) { [double]$businessReport.warm_elapsed_seconds } else { $script:warmSeconds })
-    warm_release_sla_seconds = 480
+    warm_release_sla_seconds = 1200
     warm_elapsed_seconds = $script:warmSeconds
     pytest = $pytest
     case_id = $(if ($null -ne $journey) { $journey.case_id } else { $null })
     artifact_id = $(if ($null -ne $journey) { $journey.public_artifact.artifact_id } else { $null })
     result_sha256 = $(if ($null -ne $journey) { $journey.public_artifact.sha256 } else { $null })
     final_result = $(if ($null -ne $journey) { $journey.final_result.status } else { $null })
+    same_job_case_id = $(if ($null -ne $sameJobJourney) { $sameJobJourney.case_id } else { $null })
+    same_job_final_result = $(if ($null -ne $sameJobJourney) { $sameJobJourney.final_result.status } else { $null })
+    same_job_archive_audit = $(if ($null -ne $sameJobArchiveAudit) { $sameJobArchiveAudit.status } else { $null })
     validation_correction_count = $(
         $(if ($null -ne $phase1 -and $null -ne $phase1.validation_corrections) { @($phase1.validation_corrections).Count } else { 0 }) +
         $(if ($null -ne $journey -and $null -ne $journey.validation_corrections) { @($journey.validation_corrections).Count } else { 0 })
@@ -557,6 +593,23 @@ $report = [PSCustomObject][ordered]@{
     timings = [object[]]$script:timings.ToArray()
 }
 
+if ($script:success) {
+    try {
+        Assert-E2E ($null -ne $sameJobJourney -and [string]$sameJobJourney.scenario -ceq 'SameJob') 'SAME_JOB_SUMMARY'
+        Assert-E2E ([string]$sameJobJourney.final_result.status -ceq 'ACCEPTED') 'SAME_JOB_RESULT'
+        Assert-E2E ($null -ne $sameJobArchiveAudit -and [string]$sameJobArchiveAudit.status -ceq 'PASS') 'SAME_JOB_ARCHIVE_AUDIT'
+        Assert-E2E (Test-Path -LiteralPath (Join-Path $sameJobRoot 'restart-download-verification.json') -PathType Leaf) 'SAME_JOB_RESTART_DOWNLOAD'
+    }
+    catch {
+        $script:stage = 'same-job-final-evidence'
+        $script:failure = $_
+        $script:success = $false
+        $report.status = 'FAIL'
+        $report.failed_stage = $script:stage
+        $report.failure_code = $script:failure.Exception.Message
+        $report.resources_preserved_on_failure = $true
+    }
+}
 if ($script:success) {
     Invoke-Step 'cleanup-current-run' { Remove-CurrentResources }
     Write-E2EJson (Join-Path $evidence 'cleanup-receipt.json') ([PSCustomObject][ordered]@{

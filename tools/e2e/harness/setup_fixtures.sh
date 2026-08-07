@@ -2,9 +2,9 @@
 set -euo pipefail
 
 export PYTHONPYCACHEPREFIX=/tmp/attempt52-pycache
-expected_product=ae47a1a63e6cf4849f83b0f9d49db608c1e93ebe1713f21d58c910990b0857a4
-expected_skill_md=d4d1dd2085251a997eb32c325272377698443dced553c2f506b3bd44289630dc
-expected_skill_json=b61a0d978bd4375ad9fc4975b6f197f224a8d328e9ef003c1700a2db536bbd1d
+expected_product=671a591bb7c7857bc5d1e49fab433129668ea1d98cfc05b41ef2afb77f6f0764
+expected_skill_md=4b0a4fe41172c67b2858cc43707418fcd57b1aa9638f033acd073bf45d283b8c
+expected_skill_json=f91abf8cf25aa5e05f4c8b3f450d4a6fbcbd1b628499a8096f9005baafab59dd
 
 test ! -e /opt/e2e-skills
 /opt/venvs/xiaodao/bin/python -X utf8 \
@@ -13,7 +13,7 @@ test ! -e /opt/e2e-skills
   --output-root /opt/e2e-skills \
   > /evidence/skill-generator-receipt.json
 grep -Fq '"created":true' /evidence/skill-generator-receipt.json
-grep -Fq '"product_sha256":"ae47a1a63e6cf4849f83b0f9d49db608c1e93ebe1713f21d58c910990b0857a4"' \
+grep -Fq '"product_sha256":"671a591bb7c7857bc5d1e49fab433129668ea1d98cfc05b41ef2afb77f6f0764"' \
   /evidence/skill-generator-receipt.json
 test "$(find /opt/e2e-skills/diagnose-service-takeover -type f | wc -l)" -eq 2
 test "$(find /opt/e2e-skills/diagnose-service-takeover -type f -exec stat -c %h '{}' + | sort -u)" = '1'

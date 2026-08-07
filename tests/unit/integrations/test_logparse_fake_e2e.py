@@ -589,9 +589,9 @@ def test_first_parse_dual_anchor_claim_audit_close_and_fixed_argv(
             ),
         }
 
-            audited = session.parse_request_bytes()
-            assert audited == request_bytes
-            assert request_path.read_bytes() == request_bytes
+        audited = session.parse_request_bytes()
+        assert audited == request_bytes
+        assert request_path.read_bytes() == request_bytes
         assert type(audited) is bytes
         assert memoryview(audited).readonly
 

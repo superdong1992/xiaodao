@@ -429,7 +429,7 @@ function Confirm-HcDriverManifest {
     Assert-Hc ((Get-HcStringProperty $manifest 'service_base_url') -ceq $script:HcServiceBaseUrl) 'HTTP capture service base URL'
     Assert-Hc (Get-HcBooleanProperty $manifest 'all_runtime_outputs_create_new') 'HTTP capture CreateNew declaration'
     Assert-Hc ((Get-HcStringProperty $manifest 'source_of_public_artifact') -ceq 'validated authoritative journey summaries') 'HTTP capture public source declaration'
-    Assert-Hc ((Get-HcStringProperty $manifest 'source_of_internal_artifact') -ceq 'unique LOGPARSE_RUN in canonical state-export.before.json') 'HTTP capture internal source declaration'
+    Assert-Hc ((Get-HcStringProperty $manifest 'source_of_internal_artifact') -ceq 'unique LOGPARSE_RUN in the primary CaseAggregate from canonical state-export.before.json') 'HTTP capture internal source declaration'
     $phases = Get-HcProperty $manifest 'phases' -Required
     Assert-HcStringArray $phases 'HTTP capture phases'
     Assert-HcExactStrings $phases @('Before', 'After') 'HTTP capture phases'
@@ -469,7 +469,7 @@ function Assert-HcSelectedSkill {
     Assert-HcExactProperties $Skill @('id', 'version', 'content_hash') $Label
     Assert-Hc ((Get-HcStringProperty $Skill 'id') -ceq 'diagnosis-skill/diagnose-service-takeover') "$Label id"
     Assert-Hc ((Get-HcStringProperty $Skill 'version') -ceq '3.0.6') "$Label version"
-    Assert-Hc ((Get-HcStringProperty $Skill 'content_hash') -ceq 'ae47a1a63e6cf4849f83b0f9d49db608c1e93ebe1713f21d58c910990b0857a4') "$Label content hash"
+    Assert-Hc ((Get-HcStringProperty $Skill 'content_hash') -ceq '671a591bb7c7857bc5d1e49fab433129668ea1d98cfc05b41ef2afb77f6f0764') "$Label content hash"
 }
 
 function Assert-HcFinalResult {
@@ -527,13 +527,15 @@ function Assert-HcArtifactView {
 function Read-HcJourneySummary {
     param([Parameter(Mandatory = $true)][string]$EvidenceRoot)
     $summary = Read-HcJson -Path (Join-Path $EvidenceRoot 'journey-authoritative-summary.json') -Label 'journey authoritative summary'
-    Assert-HcExactProperties $summary @('schema_version', 'attempt', 'case_id', 'attachment_id', 'resolved_case_revision', 'diagnosis_state_revision', 'selected_skill_ref', 'final_result', 'observed_statuses', 'public_artifact', 'public_result_archive', 'request_ids', 'phase3_mcp_call_count', 'validation_corrections') 'journey authoritative summary'
+    Assert-HcExactProperties $summary @('schema_version', 'scenario', 'attempt', 'case_id', 'attachment_id', 'diagnosis_job_id', 'resolved_case_revision', 'diagnosis_state_revision', 'selected_skill_ref', 'final_result', 'observed_statuses', 'public_artifact', 'public_result_archive', 'request_ids', 'phase3_mcp_call_count', 'validation_corrections') 'journey authoritative summary'
     Assert-Hc ((Get-HcIntegerProperty $summary 'schema_version') -eq 1) 'journey summary schema_version'
+    Assert-Hc ((Get-HcStringProperty $summary 'scenario') -ceq 'CrossJob') 'primary journey scenario'
     $attempt = Get-HcAttemptLabel $EvidenceRoot
     Assert-Hc ((Get-HcStringProperty $summary 'attempt') -ceq $attempt) 'journey summary attempt'
     $caseId = Get-HcStringProperty $summary 'case_id'
     Assert-HcUuid $caseId 'journey case_id'
     Assert-HcUuid (Get-HcStringProperty $summary 'attachment_id') 'journey attachment_id'
+    Assert-HcUuid (Get-HcStringProperty $summary 'diagnosis_job_id') 'journey diagnosis_job_id'
     Assert-Hc ((Get-HcIntegerProperty $summary 'resolved_case_revision') -gt 0) 'journey resolved revision'
     Assert-Hc ((Get-HcIntegerProperty $summary 'diagnosis_state_revision') -gt 0) 'journey diagnosis revision'
     Assert-HcSelectedSkill (Get-HcProperty $summary 'selected_skill_ref' -Required) 'journey selected Skill'
@@ -878,8 +880,8 @@ function Read-HcInternalLogparseArtifact {
     Assert-HcUuid (Get-HcStringProperty $export 'installation_id') 'StateExport installation_id'
     $counts = Get-HcProperty $export 'object_counts' -Required
     Assert-HcExactProperties $counts @('cases', 'jobs', 'outcomes', 'outcome_processing_records', 'execution_failure_records', 'attachments', 'evidence', 'artifacts', 'idempotency_records', 'runtime_epochs', 'recovery_processing_records') 'StateExport object_counts'
-    Assert-Hc ((Get-HcIntegerProperty $counts 'cases') -eq 1) 'StateExport Case count'
-    Assert-Hc ((Get-HcIntegerProperty $counts 'artifacts') -eq 3) 'StateExport Artifact count'
+    Assert-Hc ((Get-HcIntegerProperty $counts 'cases') -eq 2) 'StateExport Case count'
+    Assert-Hc ((Get-HcIntegerProperty $counts 'artifacts') -eq 6) 'StateExport Artifact count'
     Assert-Hc ((Get-HcIntegerProperty $counts 'execution_failure_records') -eq 0) 'StateExport execution failure count'
     $state = Get-HcProperty $export 'state' -Required
     Assert-HcExactProperties $state @('schema_version', 'contract_revision', 'generation', 'installation_id', 'created_at', 'updated_at', 'runtime_epochs', 'recovery_processing_records', 'cases', 'idempotency_records') 'StateFile'
@@ -889,7 +891,7 @@ function Read-HcInternalLogparseArtifact {
     Assert-Hc ((Get-HcStringProperty $state 'installation_id') -ceq (Get-HcStringProperty $export 'installation_id')) 'StateFile installation ID'
     $cases = Get-HcProperty $state 'cases' -Required
     Assert-HcJsonObject $cases 'StateFile cases'
-    Assert-HcExactStrings @($cases.PSObject.Properties.Name) @($ExpectedCaseId) 'StateFile Case keys'
+    Assert-Hc ($null -ne $cases.PSObject.Properties[$ExpectedCaseId]) 'primary Case must exist in StateFile'
     $aggregate = $cases.PSObject.Properties[$ExpectedCaseId].Value
     Assert-HcExactProperties $aggregate @('case', 'jobs', 'outcomes', 'outcome_processing_records', 'execution_failure_records', 'attachments', 'evidence', 'artifacts') 'CaseAggregate'
     $case = Get-HcProperty $aggregate 'case' -Required

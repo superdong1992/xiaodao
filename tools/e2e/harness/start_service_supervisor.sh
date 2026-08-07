@@ -84,7 +84,7 @@ on_supervisor_signal() {
 /opt/venvs/xiaodao/bin/python -I /evidence/verify_service_process.py launch
 
 cd /opt/src/xiaodao
-service_claude_command='/usr/bin/timeout --foreground --signal=TERM --kill-after=5s 240s /usr/local/bin/claude -p --no-chrome --no-session-persistence --dangerously-skip-permissions --tools Bash,Read,Write,Skill --allowedTools Skill(logparse-diagnose) --setting-sources user --settings /run/plagent-claude/settings.json --model haiku --effort low --max-budget-usd 3.00'
+service_claude_command='/usr/bin/timeout --foreground --signal=TERM --kill-after=5s 600s /usr/local/bin/claude -p --no-chrome --no-session-persistence --dangerously-skip-permissions --tools Bash,Read,Write,Skill --allowedTools Skill(logparse-diagnose) --setting-sources user --settings /run/plagent-claude/settings.json --model haiku --effort low --max-budget-usd 3.00'
 /usr/bin/setpriv \
   --reuid=10001 \
   --regid=10001 \

@@ -217,6 +217,118 @@ def _add_manual_result_archive(
     return archive_bytes
 
 
+def _add_proposed_logparse_target(
+    root: Path,
+    job: Job,
+    manifest: WorkspaceInputManifest,
+    payload: dict[str, Any],
+    *,
+    artifact_key: str = "logparse-run",
+    evidence_key: str = "proposed-target",
+    locator_path: str = "logs/target.log",
+    target_bytes: bytes = b"fixed proposed target log\n",
+) -> tuple[dict[str, Any], str]:
+    tree_relative_path = f"output/proposals/{artifact_key}/tree"
+    tree_root = root / tree_relative_path
+    target = tree_root / locator_path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(target_bytes)
+    parse_manifest_bytes = canonical_json_bytes({"schema_version": 1})
+    (tree_root / "parse_manifest.json").write_bytes(parse_manifest_bytes)
+    tree_manifest = TreeManifest(
+        version=1,
+        entries=sorted(
+            [
+                TreeManifestEntry(
+                    path=locator_path,
+                    size=len(target_bytes),
+                    sha256=hashlib.sha256(target_bytes).hexdigest(),
+                ),
+                TreeManifestEntry(
+                    path="parse_manifest.json",
+                    size=len(parse_manifest_bytes),
+                    sha256=hashlib.sha256(parse_manifest_bytes).hexdigest(),
+                ),
+            ],
+            key=lambda entry: entry.path,
+        ),
+    )
+    tree_sha256 = bytes_sha256(canonical_json_bytes(tree_manifest))
+    attachment = next(
+        entry for entry in manifest.entries if entry.input_kind == "ATTACHMENT"
+    )
+    assert job.logparse_tool_ref is not None
+    assert job.logparse_product is not None
+    payload["proposed_artifact_drafts"].append(
+        {
+            "proposal_key": artifact_key,
+            "artifact_kind": "LOGPARSE_RUN",
+            "name": "logparse-run",
+            "content_type": "application/vnd.problem-locator.logparse-run+directory",
+            "resource_kind": "DIRECTORY",
+            "workspace_relative_path": tree_relative_path,
+            "declared_size": sum(entry.size for entry in tree_manifest.entries),
+            "declared_sha256": tree_sha256,
+            "metadata": {
+                "tree_manifest_sha256": tree_sha256,
+                "logparse_version_ref": job.logparse_tool_ref.model_dump(mode="json"),
+                "parse_manifest_relative_path": "parse_manifest.json",
+                "source_attachment_id": attachment.resource_id,
+                "source_attachment_sha256": attachment.sha256,
+                "parse_parameters": {"product": job.logparse_product},
+            },
+        }
+    )
+    payload["proposed_evidence_drafts"].append(
+        {
+            "proposal_key": evidence_key,
+            "source_type": "LOGPARSE",
+            "source_binding": {
+                "existing_source_ref": None,
+                "artifact_proposal_key": artifact_key,
+            },
+            "locator": {
+                "kind": "LOGPARSE",
+                "relative_path": locator_path,
+                "start_line": 1,
+                "end_line": 1,
+                "start_time": None,
+                "end_time": None,
+            },
+            "summary": "The proposed target log supports the candidate.",
+            "workspace_relative_path": None,
+            "declared_size": None,
+            "declared_sha256": None,
+        }
+    )
+    return (
+        {
+            "existing_evidence_id": None,
+            "evidence_proposal_key": evidence_key,
+        },
+        f"{tree_relative_path}/{locator_path}",
+    )
+
+
+def _write_bound_user_result(
+    root: Path,
+    payload: dict[str, Any],
+    bindings: list[dict[str, Any]],
+) -> bytes:
+    candidate = payload["payload"]["candidate_conclusion_draft"]
+    candidate["supporting_evidence_bindings"] = bindings
+    candidate["completion_criteria_mapping"][0]["evidence_bindings"] = bindings
+    user_result = _fixture_payload("user-result.json")
+    user_result["supporting_evidence_bindings"] = bindings
+    user_result["completion_criteria_mapping"][0]["evidence_bindings"] = bindings
+    user_result_bytes = canonical_json_bytes(user_result)
+    draft = payload["proposed_artifact_drafts"][0]
+    draft["declared_size"] = len(user_result_bytes)
+    draft["declared_sha256"] = hashlib.sha256(user_result_bytes).hexdigest()
+    _write_file_proposal(root, draft["workspace_relative_path"], user_result_bytes)
+    return user_result_bytes
+
+
 def test_manual_candidate_archive_is_bound_to_exact_candidate_statement(
     tmp_path: Path,
 ) -> None:
@@ -293,6 +405,197 @@ def test_candidate_archive_reads_fixed_target_logs_from_inputs(
     )
     assert archive.size == len(archive_bytes)
     assert archive.sha256 == hashlib.sha256(archive_bytes).hexdigest()
+
+
+def test_candidate_archive_reads_target_logs_from_same_job_output(
+    tmp_path: Path,
+) -> None:
+    job, manifest, payload, _ = _diagnosis_inputs()
+    binding, target_path = _add_proposed_logparse_target(
+        tmp_path,
+        job,
+        manifest,
+        payload,
+    )
+    payload["consumed_evidence_refs"] = []
+    _write_bound_user_result(tmp_path, payload, [binding])
+    statement = payload["payload"]["candidate_conclusion_draft"]["statement"]
+    archive_bytes = _add_manual_result_archive(
+        tmp_path,
+        payload,
+        result_text=statement + "\n",
+        target_log_paths=[target_path],
+    )
+    _write_outcome(tmp_path, payload)
+
+    result = read_agent_output(tmp_path, job, manifest)
+
+    archive = next(
+        resource
+        for resource in result.proposal_resources
+        if resource.proposal_key == "user_result_archive"
+    )
+    logparse_run = next(
+        resource
+        for resource in result.proposal_resources
+        if resource.proposal_key == "logparse-run"
+    )
+    assert archive.size == len(archive_bytes)
+    assert archive.sha256 == hashlib.sha256(archive_bytes).hexdigest()
+    assert logparse_run.tree_manifest is not None
+    assert any(
+        entry.path == "logs/target.log"
+        for entry in logparse_run.tree_manifest.entries
+    )
+
+
+def test_candidate_archive_preserves_mixed_output_and_input_binding_order(
+    tmp_path: Path,
+) -> None:
+    job, manifest, payload, _ = _diagnosis_inputs()
+    manifest_payload = manifest.model_dump(mode="json")
+    evidence_entry = next(
+        entry
+        for entry in manifest_payload["entries"]
+        if entry["input_kind"] == "EVIDENCE"
+    )
+    artifact_entry = next(
+        entry
+        for entry in manifest_payload["entries"]
+        if entry["input_kind"] == "ARTIFACT"
+    )
+    evidence_entry.update(
+        source_type="LOGPARSE",
+        source_ref=artifact_entry["resource_id"],
+        locator={
+            "kind": "LOGPARSE",
+            "relative_path": "logs/existing.log",
+            "start_time": None,
+            "end_time": None,
+            "start_line": 1,
+            "end_line": 1,
+        },
+    )
+    manifest = WorkspaceInputManifest.model_validate(manifest_payload)
+    existing_path = f'{artifact_entry["relative_path"]}/logs/existing.log'
+    _write_file_proposal(tmp_path, existing_path, b"fixed existing target log\n")
+    proposed_binding, proposed_path = _add_proposed_logparse_target(
+        tmp_path,
+        job,
+        manifest,
+        payload,
+    )
+    existing_binding = {
+        "existing_evidence_id": evidence_entry["resource_id"],
+        "evidence_proposal_key": None,
+    }
+    bindings = [proposed_binding, existing_binding]
+    _write_bound_user_result(tmp_path, payload, bindings)
+    statement = payload["payload"]["candidate_conclusion_draft"]["statement"]
+    archive_bytes = _add_manual_result_archive(
+        tmp_path,
+        payload,
+        result_text=statement + "\n",
+        target_log_paths=[proposed_path, existing_path],
+    )
+    _write_outcome(tmp_path, payload)
+
+    result = read_agent_output(tmp_path, job, manifest)
+
+    archive = next(
+        resource
+        for resource in result.proposal_resources
+        if resource.proposal_key == "user_result_archive"
+    )
+    assert archive.size == len(archive_bytes)
+    assert archive.sha256 == hashlib.sha256(archive_bytes).hexdigest()
+
+
+def test_frozen_binary_read_does_not_stop_at_ctrl_z(tmp_path: Path) -> None:
+    payload = b"before\x1aafter"
+    path = _write_file_proposal(
+        tmp_path,
+        "output/proposals/binary/payload.bin",
+        payload,
+    )
+
+    size, sha256, content, _ = output_reader_module._read_frozen_relative_file(
+        tmp_path,
+        path.relative_to(tmp_path).as_posix(),
+        capture=True,
+    )
+
+    assert size == len(payload)
+    assert sha256 == hashlib.sha256(payload).hexdigest()
+    assert content == payload
+
+
+def test_output_archive_target_must_match_validated_tree_manifest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    job, manifest, payload, _ = _diagnosis_inputs()
+    binding, target_path = _add_proposed_logparse_target(
+        tmp_path,
+        job,
+        manifest,
+        payload,
+    )
+    payload["consumed_evidence_refs"] = []
+    _write_bound_user_result(tmp_path, payload, [binding])
+    statement = payload["payload"]["candidate_conclusion_draft"]["statement"]
+    _add_manual_result_archive(
+        tmp_path,
+        payload,
+        result_text=statement + "\n",
+        target_log_paths=[target_path],
+    )
+    _write_outcome(tmp_path, payload)
+    original_read = output_reader_module._read_frozen_relative_file
+
+    def drift_archive_target(*args, **kwargs):
+        result = original_read(*args, **kwargs)
+        relative_path = args[1]
+        if relative_path == target_path and kwargs.get("capture") is True:
+            size, _, content, snapshot = result
+            return size, "0" * 64, content, snapshot
+        return result
+
+    monkeypatch.setattr(
+        output_reader_module,
+        "_read_frozen_relative_file",
+        drift_archive_target,
+    )
+
+    with pytest.raises(RejectedAgentOutputError) as captured:
+        read_agent_output(tmp_path, job, manifest)
+
+    _assert_failure(captured, ErrorCode.OUTCOME_INVALID)
+    assert captured.value.failure_category == "user_result_archive_validation"
+
+
+def test_frozen_read_boundary_rejects_wrong_top_level_identity(
+    tmp_path: Path,
+) -> None:
+    inputs = tmp_path / "inputs"
+    inputs.mkdir()
+    target = _write_file_proposal(
+        tmp_path,
+        "output/proposals/binary/payload.bin",
+        b"payload",
+    )
+    inputs_metadata = inputs.stat(follow_symlinks=False)
+    wrong_boundary = output_reader_module._FrozenReadBoundary(
+        top_level=output_reader_module._WorkspaceTopLevel.OUTPUT,
+        identity=(inputs_metadata.st_dev, inputs_metadata.st_ino),
+    )
+
+    with pytest.raises(output_reader_module._InvalidOutput):
+        output_reader_module._read_frozen_relative_file(
+            tmp_path,
+            target.relative_to(tmp_path).as_posix(),
+            boundary=wrong_boundary,
+        )
 
 
 def test_candidate_archive_rejects_unbound_result_text(

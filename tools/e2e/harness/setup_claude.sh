@@ -85,7 +85,7 @@ done
   printf 'safe_mode_probe=omitted_as_unsupported\n'
   printf 'safe_mode_note=real print and service commands omit the undocumented flag\n'
   printf '%s\n' 'real_agent_template=-p --no-chrome --no-session-persistence --dangerously-skip-permissions --tools Write --setting-sources user --settings /run/plagent-claude/settings.json --model haiku --effort low --max-budget-usd 0.10'
-  printf '%s\n' 'service_template=/usr/bin/timeout --foreground --signal=TERM --kill-after=5s 240s /usr/local/bin/claude -p --no-chrome --no-session-persistence --dangerously-skip-permissions --tools Bash,Read,Write,Skill --allowedTools Skill(logparse-diagnose) --setting-sources user --settings /run/plagent-claude/settings.json --model haiku --effort low --max-budget-usd 3.00'
+  printf '%s\n' 'service_template=/usr/bin/timeout --foreground --signal=TERM --kill-after=5s 600s /usr/local/bin/claude -p --no-chrome --no-session-persistence --dangerously-skip-permissions --tools Bash,Read,Write,Skill --allowedTools Skill(logparse-diagnose) --setting-sources user --settings /run/plagent-claude/settings.json --model haiku --effort low --max-budget-usd 3.00'
 } > /evidence/claude-cli-compatibility.txt
 
 {

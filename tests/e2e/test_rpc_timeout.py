@@ -782,10 +782,9 @@ def test_r01_r14_rpc_timeout_is_one_durable_cross_module_path(
         candidate_outcome.outcome_id
     ]
     assert candidate_processing.job_id == candidate_job_id
-    assert candidate_processing.accepted_artifact_ids == [
-        user_result.artifact_id,
-        result_archive.artifact_id,
-    ]
+    assert candidate_processing.accepted_artifact_ids == sorted(
+        [user_result.artifact_id, result_archive.artifact_id]
+    )
     assert candidate_processing.created_job_id == reviewing.case.active_job_id
     _assert_logparse_record(
         logparse_record,
@@ -860,10 +859,9 @@ def test_r01_r14_rpc_timeout_is_one_durable_cross_module_path(
         "problem_locator_list_artifacts",
         {"case_id": case_id},
     )
-    assert [item["artifact_id"] for item in listed["artifacts"]] == [
-        user_result.artifact_id,
-        result_archive.artifact_id,
-    ]
+    assert [item["artifact_id"] for item in listed["artifacts"]] == sorted(
+        [user_result.artifact_id, result_archive.artifact_id]
+    )
     with TestClient(restarted.http_app) as http:
         download = http.get(
             f"/api/v1/artifacts/{user_result.artifact_id}/content",

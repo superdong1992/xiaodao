@@ -16,7 +16,7 @@ $script:RestartServiceBaseUrl = 'http://127.0.0.1:18000'
 $script:RestartClientSkillSha256 = 'c444f6c4bcb24fe9f44be24da77aa5b14cd420d73e5b7959a913584cfd82f4e3'
 $script:RestartSkillId = 'diagnosis-skill/diagnose-service-takeover'
 $script:RestartSkillVersion = '3.0.6'
-$script:RestartSkillHash = 'ae47a1a63e6cf4849f83b0f9d49db608c1e93ebe1713f21d58c910990b0857a4'
+$script:RestartSkillHash = '671a591bb7c7857bc5d1e49fab433129668ea1d98cfc05b41ef2afb77f6f0764'
 $script:RestartGetTool = 'problem_locator_get_case'
 $script:RestartListTool = 'problem_locator_list_artifacts'
 $script:RestartFullGetTool = "mcp__problem-locator__$($script:RestartGetTool)"
@@ -431,12 +431,13 @@ function Read-PreRestartSummaryValidated {
     param([Parameter(Mandatory = $true)][string]$EvidenceRoot)
     $path = Join-Path $EvidenceRoot 'journey-authoritative-summary.json'
     $summary = Read-RestartJson $path
-    Assert-RestartExactProperties $summary @('schema_version', 'attempt', 'case_id', 'attachment_id', 'resolved_case_revision', 'diagnosis_state_revision', 'selected_skill_ref', 'final_result', 'observed_statuses', 'public_artifact', 'public_result_archive', 'request_ids', 'phase3_mcp_call_count', 'validation_corrections') 'pre-restart authoritative summary'
+    Assert-RestartExactProperties $summary @('schema_version', 'scenario', 'attempt', 'case_id', 'attachment_id', 'diagnosis_job_id', 'resolved_case_revision', 'diagnosis_state_revision', 'selected_skill_ref', 'final_result', 'observed_statuses', 'public_artifact', 'public_result_archive', 'request_ids', 'phase3_mcp_call_count', 'validation_corrections') 'pre-restart authoritative summary'
     Assert-Restart ((Get-RestartIntegerProperty $summary 'schema_version') -eq 1) 'pre-restart summary schema_version'
     Assert-Restart ((Get-RestartStringProperty $summary 'attempt') -ceq (Get-RestartAttemptLabel $EvidenceRoot)) 'pre-restart summary attempt'
     $caseId = Get-RestartStringProperty $summary 'case_id'
     Assert-RestartUuid $caseId 'pre-restart case_id'
     Assert-RestartUuid (Get-RestartStringProperty $summary 'attachment_id') 'pre-restart attachment_id'
+    Assert-RestartUuid (Get-RestartStringProperty $summary 'diagnosis_job_id') 'pre-restart diagnosis_job_id'
     Assert-Restart ((Get-RestartIntegerProperty $summary 'resolved_case_revision') -gt 0) 'pre-restart case revision'
     Assert-Restart ((Get-RestartIntegerProperty $summary 'diagnosis_state_revision') -gt 0) 'pre-restart diagnosis revision'
     Assert-RestartSelectedSkill (Get-RestartProperty $summary 'selected_skill_ref' -Required) 'pre-restart selected Skill'
@@ -452,11 +453,14 @@ function Read-PreRestartSummaryValidated {
     $ids = Get-RestartProperty $summary 'request_ids' -Required
     Assert-RestartExactProperties $ids @('create', 'submit_a', 'prepare', 'submit_attachment', 'submit_order') 'pre-restart request IDs'
     $label = Get-RestartAttemptLabel $EvidenceRoot
-    Assert-Restart ((Get-RestartStringProperty $ids 'create') -ceq "$label-windows-create-v1") 'pre-restart create request ID'
-    Assert-Restart ((Get-RestartStringProperty $ids 'submit_a') -ceq "$label-windows-submit-a-v1") 'pre-restart submit A request ID'
-    Assert-Restart ((Get-RestartStringProperty $ids 'prepare') -ceq "$label-windows-prepare-log-v1") 'pre-restart prepare request ID'
-    Assert-Restart ((Get-RestartStringProperty $ids 'submit_attachment') -ceq "$label-windows-submit-attachment-v1") 'pre-restart attachment request ID'
-    Assert-Restart ((Get-RestartStringProperty $ids 'submit_order') -ceq "$label-windows-submit-order-v1") 'pre-restart order request ID'
+    $scenario = Get-RestartStringProperty $summary 'scenario'
+    Assert-Restart (@('CrossJob', 'SameJob') -ccontains $scenario) 'pre-restart scenario'
+    $namespace = if ($scenario -ceq 'SameJob') { 'windows-same-job' } else { 'windows' }
+    Assert-Restart ((Get-RestartStringProperty $ids 'create') -ceq "$label-$namespace-create-v1") 'pre-restart create request ID'
+    Assert-Restart ((Get-RestartStringProperty $ids 'submit_a') -ceq "$label-$namespace-submit-a-v1") 'pre-restart submit A request ID'
+    Assert-Restart ((Get-RestartStringProperty $ids 'prepare') -ceq "$label-$namespace-prepare-log-v1") 'pre-restart prepare request ID'
+    Assert-Restart ((Get-RestartStringProperty $ids 'submit_attachment') -ceq "$label-$namespace-submit-attachment-v1") 'pre-restart attachment request ID'
+    Assert-Restart ((Get-RestartStringProperty $ids 'submit_order') -ceq "$label-$namespace-submit-order-v1") 'pre-restart order request ID'
     Assert-Restart ((Get-RestartIntegerProperty $summary 'phase3_mcp_call_count') -gt 0) 'pre-restart phase3 MCP count'
     return $summary
 }

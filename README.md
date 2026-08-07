@@ -23,7 +23,7 @@ Logparse 产品可以省略。省略时 Runtime 记录有效产品 `default`，B
 
 ### 发布验收
 
-使用仓库内置的分段链路验证同一份生产补丁：先运行 `Fast` 完成 Windows 客户端到 Linux 服务的完整业务旅程，再以该成功证据作为 `BusinessEvidenceRoot` 运行 `ReleaseGates`。后者会并行执行目标回归、全量套件、干净安装包、原生 Linux 启动以及真实 Agent/Route/Diagnosis 合同门，并要求低于 480 秒 SLA。
+使用仓库内置的分段链路验证同一份生产补丁：先运行 `Fast` 完成 Windows 客户端到 Linux 服务的跨 Job 与同 Job 两条完整业务旅程，再以该成功证据作为 `BusinessEvidenceRoot` 运行 `ReleaseGates`。后者会并行执行目标回归、全量套件、干净安装包、原生 Linux 启动以及真实 Agent/Route/Diagnosis 合同门；包含双 Case 业务旅程及合法 Review 修正链的完整 `Release` 要求低于 1200 秒 SLA。
 
 每次运行的本地证据保存在 `.tmp/pl-e2e-evidence/<attempt>`；运行时证据不属于发布包。发布结论以对应目录中的 `verification-report.json`、最终审计 JSON、密钥扫描结果和 JUnit 文件为准。
 

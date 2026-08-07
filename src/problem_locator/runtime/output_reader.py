@@ -15,6 +15,7 @@ import stat
 from collections.abc import Callable, Iterable
 from contextlib import contextmanager
 from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
 from typing import Any, BinaryIO, Iterator, TypeAlias
 
@@ -274,14 +275,32 @@ def _log_output_rejection(
         pass
 
 
+class _WorkspaceTopLevel(StrEnum):
+    INPUTS = "inputs"
+    OUTPUT = "output"
+
+
+@dataclass(frozen=True, slots=True)
+class _FrozenReadBoundary:
+    top_level: _WorkspaceTopLevel
+    identity: tuple[int, int] | None
+
+
 @dataclass(frozen=True, slots=True)
 class _SourceSnapshot:
     root: Path
     root_identity: tuple[int, int]
-    output_identity: tuple[int, int]
+    boundary: _FrozenReadBoundary
     parent_identities: tuple[tuple[str, int, int], ...]
     leaf_identity: tuple[int, int]
     leaf_fingerprint: tuple[int, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _ArchiveTargetLog:
+    relative_path: str
+    source: _WorkspaceTopLevel
+    expected_tree_entry: TreeManifestEntry | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -449,9 +468,13 @@ def _snapshot_source(
     relative_path: str,
     *,
     root_identity: tuple[int, int] | None = None,
-    output_identity: tuple[int, int] | None = None,
-    top_level: str = "output",
+    boundary: _FrozenReadBoundary | None = None,
 ) -> _SourceSnapshot:
+    selected_boundary = boundary or _FrozenReadBoundary(
+        top_level=_WorkspaceTopLevel.OUTPUT,
+        identity=None,
+    )
+    top_level = selected_boundary.top_level.value
     parts = _safe_relative_parts(relative_path, top_level=top_level)
     root_metadata = _lstat(root)
     _assert_directory(root_metadata, device=root_metadata.st_dev)
@@ -468,7 +491,10 @@ def _snapshot_source(
         parents.append((relative, metadata.st_dev, metadata.st_ino))
     if not parents or parents[0][0] != top_level:
         raise _InvalidOutput
-    if output_identity is not None and parents[0][1:] != output_identity:
+    if (
+        selected_boundary.identity is not None
+        and parents[0][1:] != selected_boundary.identity
+    ):
         raise _InvalidOutput
     leaf = root.joinpath(*parts)
     leaf_metadata = _lstat(leaf)
@@ -479,7 +505,10 @@ def _snapshot_source(
     return _SourceSnapshot(
         root=root,
         root_identity=_identity(root_metadata),
-        output_identity=parents[0][1:],
+        boundary=_FrozenReadBoundary(
+            top_level=selected_boundary.top_level,
+            identity=parents[0][1:],
+        ),
         parent_identities=tuple(parents),
         leaf_identity=_identity(leaf_metadata),
         leaf_fingerprint=_fingerprint(leaf_metadata),
@@ -504,6 +533,7 @@ def _supports_anchored_tree() -> bool:
 def _file_open_flags() -> int:
     return (
         os.O_RDONLY
+        | getattr(os, "O_BINARY", 0)
         | getattr(os, "O_CLOEXEC", 0)
         | getattr(os, "O_NOFOLLOW", 0)
         | getattr(os, "O_NONBLOCK", 0)
@@ -713,17 +743,15 @@ def _read_frozen_relative_file(
     patterns: tuple[bytes, ...] = (),
     capture: bool = False,
     root_identity: tuple[int, int] | None = None,
-    output_identity: tuple[int, int] | None = None,
+    boundary: _FrozenReadBoundary | None = None,
     expected_parent_identities: dict[str, tuple[int, int]] | None = None,
     max_bytes: int | None = None,
-    top_level: str = "output",
 ) -> tuple[int, str, bytes | None, _SourceSnapshot]:
     snapshot = _snapshot_source(
         root,
         relative_path,
         root_identity=root_identity,
-        output_identity=output_identity,
-        top_level=top_level,
+        boundary=boundary,
     )
     if expected_parent_identities is not None:
         actual_parents = {
@@ -976,7 +1004,7 @@ def _inspect_tree(
     patterns: tuple[bytes, ...],
     max_bytes: int,
     root_identity: tuple[int, int] | None = None,
-    output_identity: tuple[int, int] | None = None,
+    boundary: _FrozenReadBoundary | None = None,
 ) -> tuple[int, str, TreeManifest]:
     workspace_metadata = _lstat(workspace_root)
     workspace_device = workspace_metadata.st_dev
@@ -985,7 +1013,7 @@ def _inspect_tree(
         workspace_root,
         tree_relative_root,
         root_identity=root_identity,
-        output_identity=output_identity,
+        boundary=boundary,
     )
     metadata = _lstat(root)
     _assert_directory(metadata, device=workspace_device)
@@ -1108,7 +1136,7 @@ def _inspect_tree(
                 workspace_relative,
                 patterns=patterns,
                 root_identity=tree_snapshot.root_identity,
-                output_identity=tree_snapshot.output_identity,
+                boundary=tree_snapshot.boundary,
                 expected_parent_identities=directory_identities,
                 max_bytes=max_bytes - consumed_bytes,
             )
@@ -1165,7 +1193,7 @@ def _verify_resource_unchanged(resource: ValidatedProposalResource) -> None:
         patterns=(),
         max_bytes=resource.size,
         root_identity=snapshot.root_identity,
-        output_identity=snapshot.output_identity,
+        boundary=snapshot.boundary,
     )
     if (
         size != resource.size
@@ -1221,11 +1249,11 @@ def _candidate_evidence_bindings(outcome: AgentJobOutcome) -> tuple[tuple[str, s
     return tuple(result)
 
 
-def _archive_target_log_paths(
+def _archive_target_logs(
     outcome: AgentJobOutcome,
     workspace_manifest: WorkspaceInputManifest,
     resources: dict[str, ValidatedProposalResource],
-) -> tuple[str, ...]:
+) -> tuple[_ArchiveTargetLog, ...]:
     proposed_evidence = {
         draft.proposal_key: draft for draft in outcome.proposed_evidence_drafts
     }
@@ -1239,8 +1267,11 @@ def _archive_target_log_paths(
         for entry in workspace_manifest.entries
         if isinstance(entry, WorkspaceArtifactInput)
     }
-    result: list[str] = []
+    result: list[_ArchiveTargetLog] = []
+    seen_paths: set[str] = set()
     for binding_kind, binding_id in _candidate_evidence_bindings(outcome):
+        source = _WorkspaceTopLevel.INPUTS
+        expected_tree_entry = None
         if binding_kind == "proposal":
             evidence = proposed_evidence.get(binding_id)
             if evidence is None or evidence.source_type is not EvidenceSourceType.LOGPARSE:
@@ -1258,6 +1289,18 @@ def _archive_target_log_paths(
                 ):
                     raise _InvalidOutput
                 root = resource.workspace_relative_path
+                manifest = resource.tree_manifest
+                if manifest is None:
+                    raise _InvalidOutput
+                matching_entries = [
+                    entry
+                    for entry in manifest.entries
+                    if entry.path == evidence.locator.relative_path
+                ]
+                if len(matching_entries) != 1:
+                    raise _InvalidOutput
+                source = _WorkspaceTopLevel.OUTPUT
+                expected_tree_entry = matching_entries[0]
             else:
                 artifact_id = evidence.source_binding.existing_source_ref
                 artifact = existing_artifacts.get(artifact_id or "")
@@ -1275,8 +1318,15 @@ def _archive_target_log_paths(
             if artifact is None or artifact.artifact_kind is not ArtifactKind.LOGPARSE_RUN:
                 raise _InvalidOutput
             relative_path = f"{artifact.relative_path}/{evidence.locator.relative_path}"
-        if relative_path not in result:
-            result.append(relative_path)
+        if relative_path not in seen_paths:
+            seen_paths.add(relative_path)
+            result.append(
+                _ArchiveTargetLog(
+                    relative_path=relative_path,
+                    source=source,
+                    expected_tree_entry=expected_tree_entry,
+                )
+            )
     return tuple(result)
 
 
@@ -1289,8 +1339,8 @@ def _validate_user_result_archive(
     patterns: tuple[bytes, ...],
     *,
     root_identity: tuple[int, int],
-    output_identity: tuple[int, int],
-    inputs_identity: tuple[int, int] | None,
+    output_boundary: _FrozenReadBoundary,
+    inputs_boundary: _FrozenReadBoundary,
     max_bytes: int,
 ) -> None:
     archives = [
@@ -1305,22 +1355,30 @@ def _validate_user_result_archive(
         UserResultArchiveMetadata,
     ):
         raise _InvalidOutput
-    paths = _archive_target_log_paths(outcome, workspace_manifest, resources)
-    if archives[0].metadata.target_log_count != len(paths):
+    targets = _archive_target_logs(outcome, workspace_manifest, resources)
+    if archives[0].metadata.target_log_count != len(targets):
         raise _InvalidOutput
     target_logs: list[bytes] = []
     remaining = max_bytes
-    for relative_path in paths:
-        size, _, content, _ = _read_frozen_relative_file(
+    boundaries = {
+        _WorkspaceTopLevel.INPUTS: inputs_boundary,
+        _WorkspaceTopLevel.OUTPUT: output_boundary,
+    }
+    for target in targets:
+        size, sha256, content, _ = _read_frozen_relative_file(
             workspace_root,
-            relative_path,
+            target.relative_path,
             patterns=patterns,
             capture=True,
             root_identity=root_identity,
-            output_identity=inputs_identity,
+            boundary=boundaries[target.source],
             max_bytes=remaining,
-            top_level="inputs",
         )
+        if target.expected_tree_entry is not None and (
+            size != target.expected_tree_entry.size
+            or sha256 != target.expected_tree_entry.sha256
+        ):
+            raise _InvalidOutput
         remaining -= size
         assert content is not None
         target_logs.append(content)
@@ -1341,8 +1399,8 @@ def _read_validated_output(
     patterns: tuple[bytes, ...],
     *,
     root_identity: tuple[int, int],
-    output_identity: tuple[int, int],
-    inputs_identity: tuple[int, int] | None = None,
+    output_boundary: _FrozenReadBoundary,
+    inputs_boundary: _FrozenReadBoundary,
     capture_outcome_bytes: Callable[[bytes], None] | None = None,
 ) -> ValidatedAgentOutput:
     outcome_relative_path = "output/job_outcome.json"
@@ -1358,7 +1416,7 @@ def _read_validated_output(
             outcome_relative_path,
             capture=True,
             root_identity=root_identity,
-            output_identity=output_identity,
+            boundary=output_boundary,
             max_bytes=remaining_bytes,
         )
     remaining_bytes -= outcome_size
@@ -1453,7 +1511,7 @@ def _read_validated_output(
                     patterns=patterns,
                     capture=capture,
                     root_identity=root_identity,
-                    output_identity=output_identity,
+                    boundary=output_boundary,
                     max_bytes=remaining_bytes,
                 )
                 tree_manifest = None
@@ -1473,13 +1531,13 @@ def _read_validated_output(
                     patterns=patterns,
                     max_bytes=remaining_bytes,
                     root_identity=root_identity,
-                    output_identity=output_identity,
+                    boundary=output_boundary,
                 )
                 source_snapshot = _snapshot_source(
                     workspace_root,
                     relative_path,
                     root_identity=root_identity,
-                    output_identity=output_identity,
+                    boundary=output_boundary,
                 )
             remaining_bytes -= size
         with _classify_invalid_output("proposal_declared_values"):
@@ -1528,8 +1586,8 @@ def _read_validated_output(
                 user_result_archive_bytes,
                 patterns,
                 root_identity=root_identity,
-                output_identity=output_identity,
-                inputs_identity=inputs_identity,
+                output_boundary=output_boundary,
+                inputs_boundary=inputs_boundary,
                 max_bytes=job.resource_limits.workspace_bytes,
             )
     return ValidatedAgentOutput(
@@ -1600,6 +1658,14 @@ def read_agent_output(
             else:
                 _assert_directory(inputs_metadata, device=root_metadata.st_dev)
                 inputs_identity = _identity(inputs_metadata)
+        output_boundary = _FrozenReadBoundary(
+            top_level=_WorkspaceTopLevel.OUTPUT,
+            identity=output_identity,
+        )
+        inputs_boundary = _FrozenReadBoundary(
+            top_level=_WorkspaceTopLevel.INPUTS,
+            identity=inputs_identity,
+        )
         final_metadata = _lstat(
             workspace_root / "output/job_outcome.json",
             missing_outcome=True,
@@ -1610,7 +1676,7 @@ def read_agent_output(
             workspace_root,
             "output/job_outcome.json",
             root_identity=root_identity,
-            output_identity=output_identity,
+            boundary=output_boundary,
         )
         validated = _read_validated_output(
             workspace,
@@ -1619,8 +1685,8 @@ def read_agent_output(
             workspace_manifest,
             patterns,
             root_identity=root_identity,
-            output_identity=output_identity,
-            inputs_identity=inputs_identity,
+            output_boundary=output_boundary,
+            inputs_boundary=inputs_boundary,
             capture_outcome_bytes=capture_outcome_bytes,
         )
         with _classify_invalid_output("final_outcome_stability"):

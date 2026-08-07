@@ -22,7 +22,7 @@ $script:JourneyZipSize = 2367
 $script:JourneyZipSha256 = '194f69fecd8dc8d40d1aedeb6fc25d2b7b4922b176be2b15be73ffe386cc5064'
 $script:JourneySkillId = 'diagnosis-skill/diagnose-service-takeover'
 $script:JourneySkillVersion = '3.0.6'
-$script:JourneySkillHash = 'ae47a1a63e6cf4849f83b0f9d49db608c1e93ebe1713f21d58c910990b0857a4'
+$script:JourneySkillHash = '671a591bb7c7857bc5d1e49fab433129668ea1d98cfc05b41ef2afb77f6f0764'
 $script:JourneyClientSkillSha256 = 'c444f6c4bcb24fe9f44be24da77aa5b14cd420d73e5b7959a913584cfd82f4e3'
 $script:JourneyMaxAttachmentBytes = 2684354560
 $script:JourneyMaxCurlJsonBytes = 1048576
@@ -49,6 +49,16 @@ $script:JourneySha256Pattern = '^[0-9a-f]{64}$'
 $script:JourneyUtf8 = New-Object System.Text.UTF8Encoding($false)
 $script:JourneyReservedOutputs = @{}
 $script:JourneyCompletedOutputs = @{}
+$script:JourneyScenario = 'CrossJob'
+
+function Set-JourneyScenario {
+    param([Parameter(Mandatory = $true)][ValidateSet('CrossJob', 'SameJob')][string]$Scenario)
+    $script:JourneyScenario = $Scenario
+}
+
+function Test-JourneySameJobScenario {
+    return $script:JourneyScenario -ceq 'SameJob'
+}
 
 function Assert-Journey {
     param(
@@ -498,12 +508,13 @@ function Get-JourneyAttemptLabel {
 function Get-JourneyRequestIds {
     param([Parameter(Mandatory = $true)][string]$EvidenceRoot)
     $label = Get-JourneyAttemptLabel $EvidenceRoot
+    $namespace = if (Test-JourneySameJobScenario) { 'windows-same-job' } else { 'windows' }
     return [ordered]@{
-        create = "$label-windows-create-v1"
-        submit_a = "$label-windows-submit-a-v1"
-        prepare = "$label-windows-prepare-log-v1"
-        submit_attachment = "$label-windows-submit-attachment-v1"
-        submit_order = "$label-windows-submit-order-v1"
+        create = "$label-$namespace-create-v1"
+        submit_a = "$label-$namespace-submit-a-v1"
+        prepare = "$label-$namespace-prepare-log-v1"
+        submit_attachment = "$label-$namespace-submit-attachment-v1"
+        submit_order = "$label-$namespace-submit-order-v1"
     }
 }
 
@@ -1253,8 +1264,14 @@ function Invoke-JourneyPhase1Validation {
     $initialFactValues = Get-JourneyProperty $createInput 'initial_user_fact_values' -Required
     Assert-JourneyStringArray $initialFactNames 'create initial_user_fact_names'
     Assert-JourneyStringArray $initialFactValues 'create initial_user_fact_values'
-    Assert-Journey (@($initialFactNames).Count -eq 0) 'create initial_user_fact_names must be empty'
-    Assert-Journey (@($initialFactValues).Count -eq 0) 'create initial_user_fact_values must be empty'
+    if (Test-JourneySameJobScenario) {
+        Assert-JourneyExactStrings $initialFactNames @('order_id') 'create initial_user_fact_names'
+        Assert-JourneyExactStrings $initialFactValues @('synthetic-order-0001') 'create initial_user_fact_values'
+    }
+    else {
+        Assert-Journey (@($initialFactNames).Count -eq 0) 'create initial_user_fact_names must be empty'
+        Assert-Journey (@($initialFactValues).Count -eq 0) 'create initial_user_fact_values must be empty'
+    }
     Assert-Journey ((Get-JourneyIntegerProperty $createInput 'wait_seconds') -eq 0) 'create wait_seconds must be zero'
     $createData = Get-JourneySuccessData $create
     Assert-JourneyApplicationResponseShape $createData 'create_case'
@@ -1323,7 +1340,13 @@ function Invoke-JourneyPhase1Validation {
     $userFacts = Get-JourneyProperty $logView 'user_facts' -Required
     Assert-JourneyJsonArray $userFacts 'persisted user_facts'
     $factNames = @($userFacts | ForEach-Object { Get-JourneyStringProperty (Get-JourneyProperty $_ 'provenance' -Required) 'input_name' } | Sort-Object)
-    Assert-JourneyExactStrings $factNames $expectedInputNames 'persisted group A fact names'
+    $expectedPersistedFactNames = if (Test-JourneySameJobScenario) {
+        @(($expectedInputNames + 'order_id') | Sort-Object)
+    }
+    else {
+        $expectedInputNames
+    }
+    Assert-JourneyExactStrings $factNames $expectedPersistedFactNames 'persisted user fact names'
 
     $prepare = $prepares[0]
     Assert-Journey ($prepare.ordinal -gt $logRecord[0].ordinal) 'prepare must follow log_archive requirement'
@@ -1496,8 +1519,14 @@ function Invoke-JourneyPhase3Validation {
     $submits = @($successfulRecords | Where-Object { $_.tool_name -ceq 'problem_locator_submit_supplement' })
     $gets = @($successfulRecords | Where-Object { $_.tool_name -ceq 'problem_locator_get_case' })
     $lists = @($successfulRecords | Where-Object { $_.tool_name -ceq 'problem_locator_list_artifacts' })
-    Assert-Journey ($submits.Count -eq 2) 'phase3 requires exactly two supplements'
-    Assert-Journey ($gets.Count -ge 3) 'phase3 requires explicit order, REVIEWING, and RESOLVED polls'
+    if (Test-JourneySameJobScenario) {
+        Assert-Journey ($submits.Count -eq 1) 'same-Job phase3 requires exactly one attachment supplement'
+        Assert-Journey ($gets.Count -ge 2) 'same-Job phase3 requires explicit REVIEWING and RESOLVED polls'
+    }
+    else {
+        Assert-Journey ($submits.Count -eq 2) 'phase3 requires exactly two supplements'
+        Assert-Journey ($gets.Count -ge 3) 'phase3 requires explicit order, REVIEWING, and RESOLVED polls'
+    }
     Assert-Journey ($lists.Count -eq 1) 'phase3 requires exactly one public artifact list'
     Assert-Journey ($records[0].tool_name -ceq 'problem_locator_submit_supplement') 'READY attachment submission must be phase3 first MCP call'
     Assert-Journey ($records[-1].tool_name -ceq 'problem_locator_list_artifacts') 'artifact list must be the final phase3 MCP call'
@@ -1525,33 +1554,41 @@ function Invoke-JourneyPhase3Validation {
     foreach ($record in $gets) {
         Assert-JourneyGetArguments $record $caseId
     }
-    $orderRecord = @($gets | Where-Object { $_.ordinal -gt $attachmentSubmit.ordinal -and (Test-JourneyCaseWithOpenNames $_ 'WAITING_INPUT' @('order_id') @('INPUT')) } | Select-Object -First 1)
-    Assert-Journey ($orderRecord.Count -eq 1) 'phase3 never observed the unique order_id requirement'
-    $orderView = Get-JourneyProperty (Get-JourneySuccessData $orderRecord[0]) 'case_view' -Required
-    Assert-JourneySkillRef $orderView
+    $statusStartOrdinal = $attachmentSubmit.ordinal
+    if (Test-JourneySameJobScenario) {
+        $unexpectedOrder = @($gets | Where-Object { $_.ordinal -gt $attachmentSubmit.ordinal -and (Test-JourneyCaseWithOpenNames $_ 'WAITING_INPUT' @('order_id') @('INPUT')) })
+        Assert-Journey ($unexpectedOrder.Count -eq 0) 'same-Job phase3 must not request order_id again'
+    }
+    else {
+        $orderRecord = @($gets | Where-Object { $_.ordinal -gt $attachmentSubmit.ordinal -and (Test-JourneyCaseWithOpenNames $_ 'WAITING_INPUT' @('order_id') @('INPUT')) } | Select-Object -First 1)
+        Assert-Journey ($orderRecord.Count -eq 1) 'phase3 never observed the unique order_id requirement'
+        $orderView = Get-JourneyProperty (Get-JourneySuccessData $orderRecord[0]) 'case_view' -Required
+        Assert-JourneySkillRef $orderView
 
-    $orderSubmit = $submits[1]
-    Assert-Journey ($orderSubmit.ordinal -gt $orderRecord[0].ordinal) 'order submission must follow authoritative requirement'
-    $orderInput = $orderSubmit.input
-    Assert-JourneyExactProperties $orderInput @('request_id', 'case_id', 'expected_case_revision', 'input_names', 'input_values', 'attachment_ids', 'wait_seconds') 'order submit input'
-    Assert-Journey ((Get-JourneyStringProperty $orderInput 'request_id') -ceq $ids.submit_order) 'order submit request_id'
-    Assert-Journey ((Get-JourneyStringProperty $orderInput 'case_id') -ceq $caseId) 'order submit case_id'
-    Assert-Journey ((Get-JourneyIntegerProperty $orderInput 'expected_case_revision') -eq (Get-JourneyIntegerProperty $orderView 'case_revision')) 'order submit latest revision'
-    $orderInputNames = Get-JourneyProperty $orderInput 'input_names' -Required
-    $orderInputValues = Get-JourneyProperty $orderInput 'input_values' -Required
-    Assert-JourneyStringArray $orderInputNames 'order input_names'
-    Assert-JourneyStringArray $orderInputValues 'order input_values'
-    Assert-JourneyExactStrings $orderInputNames @('order_id') 'order input_names'
-    Assert-JourneyExactStrings $orderInputValues @('synthetic-order-0001') 'order input_values'
-    $orderAttachmentIds = Get-JourneyProperty $orderInput 'attachment_ids' -Required
-    Assert-JourneyStringArray $orderAttachmentIds 'order submit attachment_ids'
-    Assert-Journey (@($orderAttachmentIds).Count -eq 0) 'order submit attachment_ids'
-    Assert-Journey ((Get-JourneyIntegerProperty $orderInput 'wait_seconds') -eq 0) 'order submit wait_seconds'
-    $orderResponse = Get-JourneyRecordApplicationResponse $orderSubmit
-    $orderSubmitRevision = Assert-JourneyReceipt $orderResponse 'SubmitSupplement' 'RUNNING' $caseId $caseId $true 'order submit'
-    Assert-Journey ($orderSubmitRevision -gt (Get-JourneyIntegerProperty $orderInput 'expected_case_revision')) 'order submit must strictly advance Case revision'
+        $orderSubmit = $submits[1]
+        Assert-Journey ($orderSubmit.ordinal -gt $orderRecord[0].ordinal) 'order submission must follow authoritative requirement'
+        $orderInput = $orderSubmit.input
+        Assert-JourneyExactProperties $orderInput @('request_id', 'case_id', 'expected_case_revision', 'input_names', 'input_values', 'attachment_ids', 'wait_seconds') 'order submit input'
+        Assert-Journey ((Get-JourneyStringProperty $orderInput 'request_id') -ceq $ids.submit_order) 'order submit request_id'
+        Assert-Journey ((Get-JourneyStringProperty $orderInput 'case_id') -ceq $caseId) 'order submit case_id'
+        Assert-Journey ((Get-JourneyIntegerProperty $orderInput 'expected_case_revision') -eq (Get-JourneyIntegerProperty $orderView 'case_revision')) 'order submit latest revision'
+        $orderInputNames = Get-JourneyProperty $orderInput 'input_names' -Required
+        $orderInputValues = Get-JourneyProperty $orderInput 'input_values' -Required
+        Assert-JourneyStringArray $orderInputNames 'order input_names'
+        Assert-JourneyStringArray $orderInputValues 'order input_values'
+        Assert-JourneyExactStrings $orderInputNames @('order_id') 'order input_names'
+        Assert-JourneyExactStrings $orderInputValues @('synthetic-order-0001') 'order input_values'
+        $orderAttachmentIds = Get-JourneyProperty $orderInput 'attachment_ids' -Required
+        Assert-JourneyStringArray $orderAttachmentIds 'order submit attachment_ids'
+        Assert-Journey (@($orderAttachmentIds).Count -eq 0) 'order submit attachment_ids'
+        Assert-Journey ((Get-JourneyIntegerProperty $orderInput 'wait_seconds') -eq 0) 'order submit wait_seconds'
+        $orderResponse = Get-JourneyRecordApplicationResponse $orderSubmit
+        $orderSubmitRevision = Assert-JourneyReceipt $orderResponse 'SubmitSupplement' 'RUNNING' $caseId $caseId $true 'order submit'
+        Assert-Journey ($orderSubmitRevision -gt (Get-JourneyIntegerProperty $orderInput 'expected_case_revision')) 'order submit must strictly advance Case revision'
+        $statusStartOrdinal = $orderSubmit.ordinal
+    }
 
-    $postOrderGets = @($gets | Where-Object { $_.ordinal -gt $orderSubmit.ordinal })
+    $postOrderGets = @($gets | Where-Object { $_.ordinal -gt $statusStartOrdinal })
     $statusViews = @()
     foreach ($record in $postOrderGets) {
         $view = Get-JourneyProperty (Get-JourneySuccessData $record) 'case_view' -Required
@@ -1656,13 +1693,17 @@ function Invoke-JourneyPhase3Validation {
     Assert-Journey ((Get-JourneyStringProperty $archiveSummary 'sha256') -ceq $archiveSha) 'archive ArtifactSummary/View sha256'
     Assert-Journey ((Get-JourneyStringProperty $archiveSummary 'created_at') -ceq (Get-JourneyStringProperty $archive 'created_at')) 'archive ArtifactSummary/View created_at'
     Assert-JourneyUuid (Get-JourneyStringProperty $archiveSummary 'created_by_job_id') 'archive ArtifactSummary created_by_job_id'
+    $diagnosisJobId = Get-JourneyStringProperty $summary 'created_by_job_id'
+    Assert-Journey ((Get-JourneyStringProperty $archiveSummary 'created_by_job_id') -ceq $diagnosisJobId) 'result and archive must come from the same diagnosis Job'
     [void](Assert-JourneyCaseIdentityAndRevisionOrder $successfulRecords $caseId $uploadRevision)
 
     return [PSCustomObject][ordered]@{
         schema_version = 1
+        scenario = $script:JourneyScenario
         attempt = Get-JourneyAttemptLabel $EvidenceRoot
         case_id = $caseId
         attachment_id = $attachmentId
+        diagnosis_job_id = $diagnosisJobId
         resolved_case_revision = Get-JourneyIntegerProperty $resolvedView 'case_revision'
         diagnosis_state_revision = Get-JourneyIntegerProperty $resolvedView 'diagnosis_state_revision'
         selected_skill_ref = Get-JourneyProperty $resolvedView 'selected_skill_ref' -Required

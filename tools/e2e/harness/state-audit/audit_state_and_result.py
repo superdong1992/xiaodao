@@ -70,7 +70,7 @@ EXPECTED_SKILL = VersionedRef(
     id="diagnosis-skill/diagnose-service-takeover",
     version="3.0.6",
     content_hash=(
-        "ae47a1a63e6cf4849f83b0f9d49db608c1e93ebe1713f21d58c910990b0857a4"
+        "671a591bb7c7857bc5d1e49fab433129668ea1d98cfc05b41ef2afb77f6f0764"
     ),
 )
 EXPECTED_ARCHIVE_NAME = "synthetic-rpc-service-takeover.zip"
@@ -609,21 +609,50 @@ def audit_export(
     require(exported.export_schema_version == 1, "EXPORT_SCHEMA_VERSION")
     require(exported.source_generation == exported.state.generation, "EXPORT_GENERATION")
     require(exported.installation_id == exported.state.installation_id, "EXPORT_INSTALLATION")
-    require(len(exported.state.cases) == 1, "CASE_COUNT")
-    require(exported.object_counts.cases == 1, "COUNT_CASES")
-    require(exported.object_counts.jobs == 6, "COUNT_JOBS")
-    require(exported.object_counts.outcomes == 6, "COUNT_OUTCOMES")
+    require(len(exported.state.cases) == 2, "CASE_COUNT")
+    require(exported.object_counts.cases == len(exported.state.cases), "COUNT_CASES")
     require(
-        exported.object_counts.outcome_processing_records == 6,
+        exported.object_counts.jobs
+        == sum(len(item.jobs) for item in exported.state.cases.values()),
+        "COUNT_JOBS",
+    )
+    require(
+        exported.object_counts.outcomes
+        == sum(len(item.outcomes) for item in exported.state.cases.values()),
+        "COUNT_OUTCOMES",
+    )
+    require(
+        exported.object_counts.outcome_processing_records
+        == sum(
+            len(item.outcome_processing_records)
+            for item in exported.state.cases.values()
+        ),
         "COUNT_OUTCOME_PROCESSING",
     )
     require(
-        exported.object_counts.execution_failure_records == 0,
+        exported.object_counts.execution_failure_records
+        == sum(
+            len(item.execution_failure_records)
+            for item in exported.state.cases.values()
+        )
+        == 0,
         "COUNT_EXECUTION_FAILURES",
     )
-    require(exported.object_counts.attachments == 1, "COUNT_ATTACHMENTS")
-    require(exported.object_counts.artifacts == 3, "COUNT_ARTIFACTS")
-    require(exported.object_counts.idempotency_records == 6, "COUNT_IDEMPOTENCY")
+    require(
+        exported.object_counts.attachments
+        == sum(len(item.attachments) for item in exported.state.cases.values()),
+        "COUNT_ATTACHMENTS",
+    )
+    require(
+        exported.object_counts.artifacts
+        == sum(len(item.artifacts) for item in exported.state.cases.values()),
+        "COUNT_ARTIFACTS",
+    )
+    require(
+        exported.object_counts.idempotency_records
+        == len(exported.state.idempotency_records),
+        "COUNT_IDEMPOTENCY",
+    )
 
     aggregate = exported.state.cases.get(summary.case_id)
     require(aggregate is not None, "SUMMARY_CASE_NOT_FOUND")
@@ -1172,6 +1201,110 @@ def audit_export(
         f"SubmitSupplement:{request_ids['submit_attachment']}",
         f"SubmitSupplement:{request_ids['submit_order']}",
     }
+    secondary = require_one(
+        (
+            item
+            for case_id, item in exported.state.cases.items()
+            if case_id != summary.case_id
+        ),
+        "SAME_JOB_CASE_COUNT",
+    )
+    require(secondary.case.status is CaseStatus.RESOLVED, "SAME_JOB_STATUS")
+    require(secondary.case.failure is None, "SAME_JOB_FAILURE")
+    require(secondary.case.active_job_id is None, "SAME_JOB_ACTIVE_JOB")
+    require(
+        secondary.case.selected_skill_ref == EXPECTED_SKILL,
+        "SAME_JOB_SELECTED_SKILL",
+    )
+    secondary_job_count = len(secondary.jobs)
+    require(
+        5 <= secondary_job_count <= 9 and (secondary_job_count - 5) % 2 == 0,
+        "SAME_JOB_JOB_COUNT",
+    )
+    require(
+        len(secondary.outcomes) == secondary_job_count,
+        "SAME_JOB_OUTCOME_COUNT",
+    )
+    require(
+        len(secondary.outcome_processing_records) == secondary_job_count,
+        "SAME_JOB_PROCESSING_COUNT",
+    )
+    require(
+        len(secondary.execution_failure_records) == 0,
+        "SAME_JOB_EXECUTION_FAILURES",
+    )
+    require(
+        all(job.status is JobStatus.SUCCEEDED for job in secondary.jobs.values()),
+        "SAME_JOB_JOB_NOT_SUCCEEDED",
+    )
+    secondary_attachment = require_one(
+        secondary.attachments.values(), "SAME_JOB_ATTACHMENT_COUNT"
+    )
+    require(
+        secondary_attachment.status is AttachmentStatus.READY,
+        "SAME_JOB_ATTACHMENT_STATUS",
+    )
+    secondary_final = secondary.case.final_result
+    require(secondary_final is not None, "SAME_JOB_FINAL_RESULT_MISSING")
+    require(
+        secondary_final.status is CandidateStatus.ACCEPTED,
+        "SAME_JOB_FINAL_RESULT_STATUS",
+    )
+    secondary_candidate_job_id = secondary_final.proposed_by_job_id
+    require(
+        secondary_candidate_job_id in secondary.jobs,
+        "SAME_JOB_CANDIDATE_JOB",
+    )
+    require(len(secondary.artifacts) == 3, "SAME_JOB_ARTIFACT_COUNT")
+    require(
+        {artifact.kind for artifact in secondary.artifacts.values()}
+        == {
+            ArtifactKind.LOGPARSE_RUN,
+            ArtifactKind.USER_RESULT,
+            ArtifactKind.USER_RESULT_ARCHIVE,
+        },
+        "SAME_JOB_ARTIFACT_KINDS",
+    )
+    secondary_logparse_artifact = require_one(
+        (
+            artifact
+            for artifact in secondary.artifacts.values()
+            if artifact.kind is ArtifactKind.LOGPARSE_RUN
+        ),
+        "SAME_JOB_LOGPARSE_ARTIFACT_COUNT",
+    )
+    initial_diagnosis_job_id = secondary_logparse_artifact.created_by_job_id
+    require(
+        initial_diagnosis_job_id in secondary.jobs
+        and secondary.jobs[initial_diagnosis_job_id].job_type is JobType.DIAGNOSE,
+        "SAME_JOB_LOGPARSE_PRODUCER",
+    )
+    require(
+        all(
+            artifact.created_by_job_id == secondary_candidate_job_id
+            for artifact in secondary.artifacts.values()
+            if artifact.kind
+            in {ArtifactKind.USER_RESULT, ArtifactKind.USER_RESULT_ARCHIVE}
+        ),
+        "SAME_JOB_PUBLIC_ARTIFACT_PRODUCER",
+    )
+    order_facts = [
+        fact.statement
+        for fact in secondary.case.diagnosis_state.user_facts
+        if fact.provenance.input_name == "order_id"
+    ]
+    require(order_facts == ["synthetic-order-0001"], "SAME_JOB_ORDER_FACT")
+    require(summary.attempt is not None, "SAME_JOB_ATTEMPT_MISSING")
+    same_namespace = f"{summary.attempt}-windows-same-job"
+    expected_idempotency_keys.update(
+        {
+            f"CreateCase:{same_namespace}-create-v1",
+            f"SubmitSupplement:{same_namespace}-submit-a-v1",
+            f"PrepareAttachment:{same_namespace}-prepare-log-v1",
+            f"UploadAttachmentContent:{secondary_attachment.attachment_id}",
+            f"SubmitSupplement:{same_namespace}-submit-attachment-v1",
+        }
+    )
     require(
         set(exported.state.idempotency_records) == expected_idempotency_keys,
         "IDEMPOTENCY_RECORD_KEYS",
@@ -1237,6 +1370,7 @@ def compare_exports(before: ExportFacts, after: ExportFacts) -> None:
         "CLEAN_BEFORE_RECOVERY_COUNT",
     )
     require(before.aggregate == after.aggregate, "RESTART_CASE_AGGREGATE")
+    require(pre.state.cases == post.state.cases, "RESTART_ALL_CASE_AGGREGATES")
     require(pre.state.idempotency_records == post.state.idempotency_records, "RESTART_IDEMPOTENCY")
     require(pre.resources == post.resources, "RESTART_RESOURCES")
     require(pre.state.created_at == post.state.created_at, "RESTART_STATE_CREATED_AT")

@@ -26,7 +26,7 @@ from problem_locator.contracts import (
 
 ROOT = Path(__file__).resolve().parents[2]
 TAKEOVER_PRODUCT_HASH = (
-    "ae47a1a63e6cf4849f83b0f9d49db608c1e93ebe1713f21d58c910990b0857a4"
+    "671a591bb7c7857bc5d1e49fab433129668ea1d98cfc05b41ef2afb77f6f0764"
 )
 OFFICIAL_KEYS = {
     "BIND_HOST",
@@ -43,7 +43,7 @@ EXPECTED_RUNTIME_VERSIONS = {
     "fastapi": "0.139.2",
     "httpx": "0.28.1",
     "mcp": "1.29.0",
-    "problem-locator": "1.0.6",
+    "problem-locator": "1.0.7",
     "pydantic": "2.13.4",
     "python-dotenv": "1.2.2",
     "starlette": "1.3.1",

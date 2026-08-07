@@ -15,7 +15,7 @@ export SKILL_DIR=/opt/e2e-skills
 export LOGPARSE_REPO=/opt/src/logparse
 export LOGPARSE_CONFIG_PATH=/opt/src/logparse/config.yaml
 export LOGPARSE_PYTHON=/opt/venvs/logparse/bin/python
-export CLAUDE_COMMAND='/usr/bin/timeout --foreground --signal=TERM --kill-after=5s 240s /usr/local/bin/claude -p --no-chrome --no-session-persistence --dangerously-skip-permissions --tools Bash,Read,Write,Skill --allowedTools Skill(logparse-diagnose) --setting-sources user --settings /run/plagent-claude/settings.json --model haiku --effort low --max-budget-usd 3.00'
+export CLAUDE_COMMAND='/usr/bin/timeout --foreground --signal=TERM --kill-after=5s 600s /usr/local/bin/claude -p --no-chrome --no-session-persistence --dangerously-skip-permissions --tools Bash,Read,Write,Skill --allowedTools Skill(logparse-diagnose) --setting-sources user --settings /run/plagent-claude/settings.json --model haiku --effort low --max-budget-usd 3.00'
 
 {
   printf 'cwd=/opt/src/xiaodao\n'

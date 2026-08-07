@@ -3,7 +3,10 @@ param(
     [ValidateSet('Phase1', 'Upload', 'Phase3', 'All')]
     [string]$Mode,
 
-    [string]$EvidenceRoot
+    [string]$EvidenceRoot,
+
+    [ValidateSet('CrossJob', 'SameJob')]
+    [string]$Scenario = 'CrossJob'
 )
 
 Set-StrictMode -Version Latest
@@ -11,6 +14,7 @@ $ErrorActionPreference = 'Stop'
 $evidenceRootExplicitlyBound = $PSBoundParameters.ContainsKey('EvidenceRoot')
 $runtimeScriptRoot = $PSScriptRoot
 . (Join-Path $runtimeScriptRoot 'windows-journey-lib.ps1')
+Set-JourneyScenario $Scenario
 
 $EvidenceRoot = Resolve-JourneyEvidenceRoot -EvidenceRoot $EvidenceRoot -EvidenceRootExplicitlyBound $evidenceRootExplicitlyBound -RuntimeScriptRoot $runtimeScriptRoot
 Assert-Journey (Test-Path -LiteralPath $EvidenceRoot -PathType Container) 'evidence directory is absent'
@@ -47,12 +51,19 @@ New-JourneyOutputReservations -EvidenceRoot $EvidenceRoot -Names $plannedOutputN
 
 function New-Phase1Prompt {
     $problemSpec = Get-JourneyProblemSpec | ConvertTo-Json -Compress -Depth 20
+    $initialFactInstruction = if (Test-JourneySameJobScenario) {
+        'set initial_user_fact_names ["order_id"] and initial_user_fact_values ["synthetic-order-0001"]'
+    }
+    else {
+        'set initial_user_fact_names [] and initial_user_fact_values []'
+    }
     return @"
 Perform phase 1 of the controlled Problem Locator acceptance journey. Use only the Skill tool and the seven problem_locator Remote MCP tools. Treat MCP tool_result structured payloads as authoritative; do not infer state from prose.
 
 0. Your first action MUST call the Skill tool with skill=problem-locator-client (exact input {"skill":"problem-locator-client"}). Until that Skill tool_result is received successfully, do not call any problem_locator MCP tool and do not continue the workflow.
-1. Call problem_locator_create_case exactly once with request_id "$($requestIds.create)". Put the following eight members directly at the tool input root, do not send a problem_spec member, set initial_user_fact_names [] and initial_user_fact_values [], and set wait_seconds 0:
+1. Call problem_locator_create_case exactly once with request_id "$($requestIds.create)". Put the following eight members directly at the tool input root, do not send a problem_spec member, $initialFactInstruction, and set wait_seconds 0:
 $problemSpec
+Immediately before that tool call, silently verify that goals, non_goals, constraints, and completion_criteria each contain exactly the one string shown above. In particular, non_goals must be ["Modify production systems."] and must not be empty. If any value differs, correct the pending tool input before calling the tool.
 2. Poll problem_locator_get_case with a non-empty object containing case_id from the authoritative create_case result, wait_for_job_id null or the authoritative active job_id, and wait_seconds no greater than 30 until the authoritative Case view is WAITING_INPUT and exactly contains this set of four OPEN INPUT requirements, comparing by name and ignoring array order: caller_service, server_service, rpc_method, problem_time. Before every poll, silently verify that case_id is present; never call this tool with {}, null, or omitted input.
 3. In one problem_locator_submit_supplement call, use request_id "$($requestIds.submit_a)", the latest displayed case_revision, input_names ["caller_service","server_service","rpc_method","problem_time"], input_values ["checkout-synthetic","inventory-synthetic","ReserveStock","2026-07-31T00:00:03.000Z"], attachment_ids [], and wait_seconds 0.
 4. Poll problem_locator_get_case with the same non-empty input rules until the authoritative view is WAITING_ATTACHMENT with exactly one OPEN ATTACHMENT requirement named log_archive.
@@ -66,6 +77,16 @@ function New-Phase3Prompt {
     $caseId = Get-JourneyStringProperty $uploadState 'case_id'
     $attachmentId = Get-JourneyStringProperty $uploadState 'attachment_id'
     $caseRevision = Get-JourneyIntegerProperty $uploadState 'case_revision'
+    if (Test-JourneySameJobScenario) {
+        return @"
+Perform phase 3 of the controlled same-Job Problem Locator acceptance journey. Use only the Skill tool and the seven problem_locator Remote MCP tools. Treat MCP tool_result structured payloads as authoritative; do not infer state from prose. The outer PowerShell upload validator has authoritatively established Case $caseId, READY attachment $attachmentId, and current case_revision $caseRevision. This Case already has user fact order_id=synthetic-order-0001 from create_case.
+
+0. Your first action MUST call the Skill tool with skill=problem-locator-client (exact input {"skill":"problem-locator-client"}). Until that Skill tool_result is received successfully, do not call any problem_locator MCP tool and do not continue the workflow.
+1. First call problem_locator_submit_supplement exactly once with request_id "$($requestIds.submit_attachment)", case_id "$caseId", expected_case_revision $caseRevision, input_names [], input_values [], attachment_ids ["$attachmentId"], and wait_seconds 0.
+2. Poll promptly with problem_locator_get_case using a non-empty object with case_id "$caseId", wait_for_job_id null or the authoritative active job_id, and wait_seconds no greater than 30. First observe REVIEWING in an authoritative result, then continue polling with wait_for_job_id set to the authoritative active review job_id until an authoritative result is RESOLVED with final_result.status ACCEPTED. Do not skip the REVIEWING observation. The diagnosis must not request or submit order_id again.
+3. After RESOLVED, call problem_locator_list_artifacts exactly once for this Case and stop. Do not submit another supplement, download, resume, cancel, create another Case, or use any non-allowed tool.
+"@
+    }
     return @"
 Perform phase 3 of the same controlled Problem Locator acceptance journey. Use only the Skill tool and the seven problem_locator Remote MCP tools. Treat MCP tool_result structured payloads as authoritative; do not infer state from prose. The outer PowerShell upload validator has authoritatively established Case $caseId, READY attachment $attachmentId, and current case_revision $caseRevision.
 

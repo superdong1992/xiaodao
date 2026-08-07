@@ -58,7 +58,7 @@ $http = [PSCustomObject][ordered]@{
     phases = [object[]]@('Before', 'After')
     all_runtime_outputs_create_new = $true
     source_of_public_artifact = 'validated authoritative journey summaries'
-    source_of_internal_artifact = 'unique LOGPARSE_RUN in canonical state-export.before.json'
+    source_of_internal_artifact = 'unique LOGPARSE_RUN in the primary CaseAggregate from canonical state-export.before.json'
     possible_runtime_outputs = [object[]]@(Get-HcAllOutputNames)
     files = Get-FileRecords $EvidenceRoot $httpFiles
 }
