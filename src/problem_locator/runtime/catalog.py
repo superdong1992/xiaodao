@@ -37,6 +37,7 @@ from problem_locator.contracts import (
 BUILTIN_ASSET_ROOT = Path(__file__).with_name("assets")
 _DEFAULT_ASSET_VERSION = "1.0.0"
 _DEFAULT_LOGPARSE_PRODUCT = "default"
+_DEPLOYMENT_SCOPES = frozenset({"PRODUCTION", "TEST_ONLY"})
 _LOG_ARCHIVE_CONTENT_TYPES = (
     "application/gzip",
     "application/zip",
@@ -78,6 +79,7 @@ class _BuiltinSpec:
 class _SkillDescriptor:
     resolved_asset: ResolvedAsset
     capability: str
+    deployment_scope: str
     summary: str
     entry_document: str
     tool_bundle_id: str
@@ -112,7 +114,7 @@ _BUILTIN_SPECS = (
         "tool-bundles/diagnose",
         AssetKind.TOOL_BUNDLE,
         "tool-bundle/diagnose",
-        "2.0.0",
+        "3.0.0",
     ),
     _BuiltinSpec(
         "tool-bundles/review",
@@ -145,7 +147,7 @@ _BUILTIN_SPECS = (
         "output-contracts/diagnose",
         AssetKind.OUTPUT_CONTRACT,
         "output-contract/diagnose",
-        "3.0.0",
+        "4.0.0",
     ),
     _BuiltinSpec(
         "output-contracts/review",
@@ -985,6 +987,7 @@ def _load_skill(root: Path) -> _SkillDescriptor:
         "id",
         "version",
         "capability",
+        "deployment_scope",
         "summary",
         "entry_document",
         "tool_bundle_id",
@@ -999,8 +1002,8 @@ def _load_skill(root: Path) -> _SkillDescriptor:
         optional={"logparse_product"},
         manifest_name="diagnosis-skill.json",
     )
-    if type(manifest["schema_version"]) is not int or manifest["schema_version"] != 3:
-        raise ValueError("diagnosis-skill.json schema_version must equal integer 3")
+    if type(manifest["schema_version"]) is not int or manifest["schema_version"] != 4:
+        raise ValueError("diagnosis-skill.json schema_version must equal integer 4")
     skill_id = manifest["id"]
     if not isinstance(skill_id, str) or _SKILL_ID_PATTERN.fullmatch(skill_id) is None:
         raise ValueError("diagnosis skill id does not match the frozen pattern")
@@ -1008,9 +1011,14 @@ def _load_skill(root: Path) -> _SkillDescriptor:
     if not isinstance(version, str) or not version:
         raise ValueError("diagnosis skill version must be a non-empty string")
     capability = manifest["capability"]
+    deployment_scope = manifest["deployment_scope"]
     summary = manifest["summary"]
     if not isinstance(capability, str) or not capability:
         raise ValueError("diagnosis skill capability must be a non-empty string")
+    if deployment_scope not in _DEPLOYMENT_SCOPES:
+        raise ValueError(
+            "diagnosis skill deployment_scope must be PRODUCTION or TEST_ONLY"
+        )
     if not isinstance(summary, str) or not summary:
         raise ValueError("diagnosis skill summary must be a non-empty string")
     tool_bundle_id = manifest["tool_bundle_id"]
@@ -1069,6 +1077,7 @@ def _load_skill(root: Path) -> _SkillDescriptor:
     return _SkillDescriptor(
         resolved_asset=resolved,
         capability=capability,
+        deployment_scope=deployment_scope,
         summary=summary,
         entry_document=entry_document,
         tool_bundle_id=tool_bundle_id,
@@ -1090,7 +1099,10 @@ class VersionedAssetCatalog:
         assets_root: Path = BUILTIN_ASSET_ROOT,
         logparse_tool: ResolvedAsset | None = None,
         logparse_broker_factory: LogparseBrokerFactory | None = None,
+        allow_test_skills: bool = False,
     ) -> None:
+        if type(allow_test_skills) is not bool:
+            raise TypeError("allow_test_skills must be a boolean")
         if (logparse_tool is None) != (logparse_broker_factory is None):
             raise ValueError(
                 "logparse ResolvedAsset and LogparseBrokerFactory must be supplied together"
@@ -1120,7 +1132,26 @@ class VersionedAssetCatalog:
             self._register(resolved)
             self._builtin_refs[expected.asset_id] = _clone_model(resolved.ref)
 
-        for descriptor in self._scan_skills(Path(skill_dir)):
+        skill_descriptors = self._scan_skills(Path(skill_dir))
+        test_only_ids = sorted(
+            descriptor.resolved_asset.ref.id
+            for descriptor in skill_descriptors
+            if descriptor.deployment_scope == "TEST_ONLY"
+        )
+        if test_only_ids and not allow_test_skills:
+            raise ValueError(
+                "TEST_ONLY diagnosis skills are forbidden in the production catalog: "
+                + ", ".join(test_only_ids)
+            )
+        if not allow_test_skills and not any(
+            descriptor.deployment_scope == "PRODUCTION"
+            for descriptor in skill_descriptors
+        ):
+            raise ValueError(
+                "the production catalog requires at least one PRODUCTION diagnosis skill"
+            )
+
+        for descriptor in skill_descriptors:
             self._register(descriptor.resolved_asset)
             key = _ref_key(descriptor.resolved_asset.ref)
             self._skills[key] = descriptor

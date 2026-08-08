@@ -13,10 +13,11 @@ import tempfile
 from typing import Any, Mapping, Sequence
 
 
-GENERATOR_VERSION = "3.1.1"
-SPEC_SCHEMA_VERSION = 3
-MANIFEST_SCHEMA_VERSION = 3
+GENERATOR_VERSION = "4.0.0"
+SPEC_SCHEMA_VERSION = 4
+MANIFEST_SCHEMA_VERSION = 4
 PRODUCT_FILES = ("SKILL.md", "diagnosis-skill.json")
+DEPLOYMENT_SCOPES = frozenset({"PRODUCTION", "TEST_ONLY"})
 LOG_ARCHIVE_CONTENT_TYPES = (
     "application/gzip",
     "application/zip",
@@ -623,6 +624,7 @@ class GenerationSpec:
     skill_id: str
     version: str
     capability: str
+    deployment_scope: str
     summary: str
     chinese_title: str
     module_name: str | None
@@ -647,6 +649,7 @@ class GenerationSpec:
             "id",
             "version",
             "capability",
+            "deployment_scope",
             "summary",
             "chinese_title",
             "module_name",
@@ -667,7 +670,7 @@ class GenerationSpec:
         if not required <= actual or actual - required - optional:
             raise ValueError("generation spec field set is invalid")
         if value["schema_version"] != SPEC_SCHEMA_VERSION:
-            raise ValueError("generation spec schema_version must be 3")
+            raise ValueError("generation spec schema_version must be 4")
         if value["generator_version"] != GENERATOR_VERSION:
             raise ValueError(f"generator_version must be {GENERATOR_VERSION}")
         requires_logparse = value["requires_logparse"]
@@ -691,6 +694,9 @@ class GenerationSpec:
             skill_id=_single_line(value["id"], "id", maximum=64),
             version=_single_line(value["version"], "version", maximum=64),
             capability=_single_line(value["capability"], "capability", maximum=64),
+            deployment_scope=_single_line(
+                value["deployment_scope"], "deployment_scope", maximum=32
+            ),
             summary=_single_line(value["summary"], "summary", maximum=4096),
             chinese_title=_single_line(
                 value["chinese_title"], "chinese_title", maximum=256
@@ -729,10 +735,12 @@ class GenerationSpec:
         if SKILL_ID_PATTERN.fullmatch(self.skill_id) is None:
             raise ValueError("id must match diagnose-<lower-kebab-capability>")
         match = SEMVER_PATTERN.fullmatch(self.version)
-        if match is None or int(match.group("major")) < 3:
-            raise ValueError("generated Skill version must be semantic version 3.0.0 or later")
+        if match is None or int(match.group("major")) < 4:
+            raise ValueError("generated Skill version must be semantic version 4.0.0 or later")
         if CAPABILITY_PATTERN.fullmatch(self.capability) is None:
             raise ValueError("capability is invalid")
+        if self.deployment_scope not in DEPLOYMENT_SCOPES:
+            raise ValueError("deployment_scope must be PRODUCTION or TEST_ONLY")
         names = [item.name for item in self.requirements]
         if len(names) != len(set(names)):
             raise ValueError("requirement names must be unique")
@@ -899,6 +907,7 @@ def diagnosis_skill_manifest(spec: GenerationSpec) -> dict[str, Any]:
         "id": spec.skill_id,
         "version": spec.version,
         "capability": spec.capability,
+        "deployment_scope": spec.deployment_scope,
         "summary": spec.summary,
         "entry_document": "SKILL.md",
         "tool_bundle_id": "tool-bundle/diagnose",
@@ -1001,11 +1010,11 @@ description: {json.dumps(spec.summary, ensure_ascii=False)}
 contract 只定义通用 Schema、安全、Evidence/Candidate 与原子输出；本文件独占业务
 requirements、阶段、工具映射和判定规则。
 
-<!-- DIAGNOSIS_SKILL_MANIFEST_V3_BEGIN -->
+<!-- DIAGNOSIS_SKILL_MANIFEST_V4_BEGIN -->
 ```json
 {embedded}
 ```
-<!-- DIAGNOSIS_SKILL_MANIFEST_V3_END -->
+<!-- DIAGNOSIS_SKILL_MANIFEST_V4_END -->
 
 ## 范围与角色
 
@@ -1054,44 +1063,21 @@ INPUT 只能由 `USER_FACT` 满足，ATTACHMENT 只能由 `READY_ATTACHMENT` 满
 
 {_markdown_list(spec.assumptions, '无额外假设。')}
 
-## Candidate 与用户结果
+## Candidate 与服务端用户结果
 
-只有每个 completion criterion 均由 Evidence 支持时才提出 Candidate。形成 Candidate
-时，同一 Outcome 必须恰好提出以下两个 FILE Artifact：
+只有每个 completion criterion 均由 Evidence 支持时才提出 Candidate。
 
 `supporting_evidence_bindings` 必须去重并保持当前快照 `evidence_refs` 的相对顺序；同一
 Outcome 新接收的 Evidence 只按 `state_delta.add_evidence_bindings` 顺序追加。禁止按业务
-角色、日志时间或叙述习惯重排。completion mapping 与 USER_RESULT 重复这些 binding 时
-也保持同一顺序；这是 Coordinator 的固定子序列合同。
+角色、日志时间或叙述习惯重排。completion mapping 重复这些 binding 时也保持同一顺序；
+这是 Coordinator 的固定子序列合同。
 
-1. `USER_RESULT`：proposal key `user-result`，name `diagnosis-result.json`，
-   content type `application/json`，path `output/proposals/user-result/payload`，metadata
-   为 `{{"schema_version":1,"format_id":"problem-locator-diagnosis-v1","description":"Diagnosis result"}}`。
-2. `USER_RESULT_ARCHIVE`：proposal key `user-result-archive`，name `result.zip`，
-   content type `application/zip`，path
-   `output/proposals/user-result-archive/result.zip`，metadata 使用
-   `format_id=problem-locator-result-archive-v1`、
-   `user_result_proposal_key=user-result` 和实际 `target_log_count`。
-
-USER_RESULT 必须是有效 `UserResultPayload`，并与同一 Candidate seam 逐字一致；
-`problem-locator-seal-outcome-draft` 会在封存 Agent draft 时递归 Canonical 化该文件并重算
-draft 中的 size/hash。先写有效 JSON 请求到
-`output/proposals/user-result-archive/request.json`，字段恰好为
-`schema_version=1`、`result_text=Candidate statement + 一个 LF` 和
-`target_log_paths[]`。日志路径仅列 Candidate
-实际绑定的 LOGPARSE Evidence 对应完整目标日志，按 binding 首次出现顺序去重；人工
-无日志场景传空数组。构造该数组时，先以 `target-logs` 每项的 `log_path` 建立路径映射，
-再严格遍历 Candidate `supporting_evidence_bindings`，解析每条 Evidence 的
-`locator.relative_path` 并从映射取对应完整路径；禁止直接复制或沿用 `target-logs`
-结果数组的 anchor 顺序，因为它可能与快照 Evidence 顺序不同。然后仅调用一次：
-
-```text
-problem-locator-pack-result --request output/proposals/user-result-archive/request.json --result output/proposals/user-result-archive/result.zip
-```
-
-禁止自行调用 zip/tar、包含原始上传包、无关日志、parse 目录或完整 LOGPARSE_RUN。
-Runtime 会逐字校验 ZIP 中 `result.txt` 与 `target-log-001.log` 等扁平条目。两个结果
-Artifact 和 Candidate 必须共同接受，并等待独立 REVIEW PASS 后才可下载。
+Agent 禁止提出或写入 `USER_RESULT`、`USER_RESULT_ARCHIVE`、`diagnosis-result.json`、
+`result.zip` 或任何归档请求，也禁止自行调用 zip/tar。Agent draft 只提交 Candidate、
+Evidence、rule claims 与合同允许的内部 Artifact proposal。Agent 进程退出后，Runtime
+重读权威证据并完成机器验证；DIAGNOSE 草稿通过服务端验证后，服务端立即从已验证的
+权威结果生成并持久化用户产物，但仅在独立 Review PASS 后开放公开下载。Agent 不得预先
+构造、摘要或替代这些服务端产物。
 
 ## 原子交付
 
@@ -1211,21 +1197,21 @@ def normalize_wiki(text: str) -> str:
 
 
 def build_spec_from_wiki(wiki_text: str, **overrides: Any) -> GenerationSpec:
-    """Read the single fenced GenerationSpec v3 object from a wiki document."""
+    """Read the single fenced GenerationSpec v4 object from a wiki document."""
 
     wiki = normalize_wiki(wiki_text)
     matches = re.findall(
-        r"(?ms)^## GenerationSpec v3\s*$.*?^```json\s*$\n(.*?)^```\s*$",
+        r"(?ms)^## GenerationSpec v4\s*$.*?^```json\s*$\n(.*?)^```\s*$",
         wiki,
     )
     if len(matches) != 1:
-        raise ValueError("wiki must contain exactly one '## GenerationSpec v3' JSON fence")
+        raise ValueError("wiki must contain exactly one '## GenerationSpec v4' JSON fence")
     try:
         value = json.loads(matches[0])
     except json.JSONDecodeError as exc:
-        raise ValueError("wiki GenerationSpec v3 JSON is invalid") from exc
+        raise ValueError("wiki GenerationSpec v4 JSON is invalid") from exc
     if not isinstance(value, dict):
-        raise ValueError("wiki GenerationSpec v3 must be an object")
+        raise ValueError("wiki GenerationSpec v4 must be an object")
     allowed_overrides = {"capability", "summary", "version"}
     unknown = set(overrides) - allowed_overrides
     if unknown:
@@ -1249,7 +1235,7 @@ def load_generation_spec(path: str | Path) -> GenerationSpec:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Generate one deterministic Problem Locator Diagnosis Skill v3."
+        description="Generate one deterministic Problem Locator Diagnosis Skill v4."
     )
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument("--spec", type=Path)

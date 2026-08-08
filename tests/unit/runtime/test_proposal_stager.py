@@ -504,7 +504,7 @@ def test_user_result_is_canonically_revalidated_after_staging(
         _fixture_payload("workspace-input-manifest.json")
     )
     user_result_payload = _fixture_payload("user-result.json")
-    user_result_payload["candidate_statement"] = "A different diagnosis."
+    user_result_payload["root_cause"] = "A different diagnosis."
     user_result = UserResultPayload.model_validate(user_result_payload)
     result_bytes = canonical_json_bytes(user_result)
     path = tmp_path / "output/proposals/user_result/diagnosis-result.json"

@@ -33,10 +33,17 @@ from problem_locator.contracts import (
     TriggerType,
     UnresolvedReasonCode,
     UnresolvedResult,
+    UserResultMetadata,
 )
 from problem_locator.domain import DomainCoordinator
 
-from ._builders import continuation, rebuild, snapshot_with_active, trigger
+from ._builders import (
+    continuation,
+    rebuild,
+    snapshot_with_active,
+    trigger,
+    unresolved_user_result_proposal,
+)
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -140,6 +147,10 @@ def _review_outcome(job: Job, verdict: ReviewVerdict) -> JobOutcome:
         claim="FAIL" if verdict is not ReviewVerdict.PASS else "PASS",
         server_status="SEMANTIC_ONLY",
     )
+    if verdict is not ReviewVerdict.PASS:
+        payload["proposed_artifacts"] = [
+            unresolved_user_result_proposal(job).model_dump(mode="python")
+        ]
     return JobOutcome.model_validate(payload)
 
 
@@ -150,7 +161,9 @@ def test_diagnosis_inconclusive_terminates_unresolved_without_candidate() -> Non
     assert isinstance(diagnosis, dict)
     diagnosis["candidate_conclusion_draft"] = None
     diagnosis["recommended_next_step"] = "Check the supplied time and create a new Case."
-    payload["proposed_artifacts"] = []
+    payload["proposed_artifacts"] = [
+        unresolved_user_result_proposal(job).model_dump(mode="python")
+    ]
     payload["result_type"] = OutcomeResultType.INCONCLUSIVE.value
     payload["decision_audit"] = _decision_audit(
         job,
@@ -176,6 +189,8 @@ def test_diagnosis_inconclusive_terminates_unresolved_without_candidate() -> Non
     assert plan.next_job_spec is None
     assert plan.accepted_candidate_proposal_key is None
     assert plan.unresolved_result_draft is not None
+    assert plan.unresolved_result_draft.user_result_proposal_key == "user_result"
+    assert plan.accepted_artifact_proposal_keys == ["user_result"]
     assert (
         plan.unresolved_result_draft.reason_code
         is UnresolvedReasonCode.MECHANICAL_VERIFICATION_FAILED
@@ -250,6 +265,9 @@ def test_review_need_more_waits_only_for_one_missing_only_requirement() -> None:
         claim="UNKNOWN",
         server_status="SEMANTIC_ONLY",
     )
+    payload["proposed_artifacts"] = [
+        unresolved_user_result_proposal(job).model_dump(mode="python")
+    ]
     outcome = JobOutcome.model_validate(payload)
     snapshot = snapshot_with_active(job)
     request = trigger(
@@ -269,6 +287,7 @@ def test_review_need_more_waits_only_for_one_missing_only_requirement() -> None:
     assert plan.next_job_spec is None
     assert plan.candidate_mutation is not None
     assert plan.candidate_mutation.target_status is CandidateStatus.REJECTED
+    assert plan.accepted_artifact_proposal_keys == []
 
 
 def test_generic_review_need_more_terminates_unresolved() -> None:
@@ -287,6 +306,9 @@ def test_generic_review_need_more_terminates_unresolved() -> None:
         claim="UNKNOWN",
         server_status="SEMANTIC_ONLY",
     )
+    payload["proposed_artifacts"] = [
+        unresolved_user_result_proposal(job).model_dump(mode="python")
+    ]
     outcome = JobOutcome.model_validate(payload)
     snapshot = snapshot_with_active(job)
     request = trigger(
@@ -305,6 +327,8 @@ def test_generic_review_need_more_terminates_unresolved() -> None:
     assert plan.target_case_status is CaseStatus.UNRESOLVED
     assert plan.next_job_spec is None
     assert plan.unresolved_result_draft is not None
+    assert plan.unresolved_result_draft.user_result_proposal_key == "user_result"
+    assert plan.accepted_artifact_proposal_keys == ["user_result"]
     assert (
         plan.unresolved_result_draft.reason_code
         is UnresolvedReasonCode.INVALID_NEED_MORE_REQUEST
@@ -336,7 +360,7 @@ def test_one_user_fact_per_input_name_is_a_state_invariant() -> None:
         rebuild(state, user_facts=[fact, duplicate])
 
 
-def test_only_matching_unresolved_audit_bundle_is_downloadable() -> None:
+def test_only_matching_unresolved_result_artifacts_are_downloadable() -> None:
     job = _job("job-review.json")
     state = _state(job)
     candidate = state.candidate_conclusion
@@ -344,6 +368,7 @@ def test_only_matching_unresolved_audit_bundle_is_downloadable() -> None:
     rejected = rebuild(candidate, status=CandidateStatus.REJECTED)
     state = rebuild(state, candidate_conclusion=rejected)
     audit_id = "00000000-0000-0000-0000-000000000097"
+    user_result_id = "00000000-0000-0000-0000-000000000095"
     case = Case(
         case_id=job.case_id,
         status=CaseStatus.UNRESOLVED,
@@ -359,6 +384,7 @@ def test_only_matching_unresolved_audit_bundle_is_downloadable() -> None:
             summary="Independent review did not confirm the candidate.",
             blocking_rule_ids=["causal_chain"],
             evidence_refs=job.evidence_refs,
+            user_result_artifact_id=user_result_id,
             recommended_next_step="Create a new Case after correcting the inputs.",
             occurred_at="2026-07-31T00:02:30.000Z",
             audit_artifact_id=audit_id,
@@ -390,8 +416,29 @@ def test_only_matching_unresolved_audit_bundle_is_downloadable() -> None:
         created_by_job_id=job.job_id,
         created_at=case.updated_at,
     )
+    user_result = Artifact(
+        artifact_id=user_result_id,
+        case_id=case.case_id,
+        kind=ArtifactKind.USER_RESULT,
+        name="diagnosis-result.json",
+        content_type="application/json",
+        resource_kind="FILE",
+        size=1604,
+        sha256="5" * 64,
+        storage_key=(
+            f"resources/cases/{case.case_id}/artifacts/{user_result_id}/payload"
+        ),
+        metadata=UserResultMetadata(
+            schema_version=2,
+            format_id="problem-locator-diagnosis-v2",
+            description="Canonical unresolved diagnosis result.",
+        ),
+        created_by_job_id=job.job_id,
+        created_at=case.updated_at,
+    )
 
     assert is_artifact_downloadable(case, audit) is True
+    assert is_artifact_downloadable(case, user_result) is True
     assert is_artifact_downloadable(
         case,
         rebuild(
@@ -400,6 +447,17 @@ def test_only_matching_unresolved_audit_bundle_is_downloadable() -> None:
             storage_key=(
                 "resources/cases/00000000-0000-0000-0000-000000000001/"
                 "artifacts/00000000-0000-0000-0000-000000000096/payload"
+            ),
+        ),
+    ) is False
+    assert is_artifact_downloadable(
+        case,
+        rebuild(
+            user_result,
+            artifact_id="00000000-0000-0000-0000-000000000094",
+            storage_key=(
+                "resources/cases/00000000-0000-0000-0000-000000000001/"
+                "artifacts/00000000-0000-0000-0000-000000000094/payload"
             ),
         ),
     ) is False

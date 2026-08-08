@@ -46,6 +46,8 @@ from problem_locator.contracts import (
     canonical_json_bytes,
 )
 
+from .authoritative_targets import resolve_authoritative_targets
+
 
 _RFC3339_MILLIS_UTC = "%Y-%m-%dT%H:%M:%S.%fZ"
 _RFC3339_MILLIS_UTC_PATTERN = re.compile(
@@ -136,8 +138,8 @@ def _load_contract(skill_root: Path) -> tuple[dict[str, Any], list[dict[str, Any
             ValueError(f"non-finite manifest value: {value}")
         ),
     )
-    if not isinstance(value, dict) or value.get("schema_version") != 3:
-        raise ValueError("server verifier requires a pinned Skill manifest v3")
+    if not isinstance(value, dict) or value.get("schema_version") != 4:
+        raise ValueError("server verifier requires a pinned Skill manifest v4")
     contract = value.get("verification_contract")
     if not isinstance(contract, dict) or contract.get("schema_version") != 1:
         raise ValueError("server verifier requires verification_contract v1")
@@ -185,7 +187,7 @@ def _requirement_is_missing(
             item.provenance.input_name != requirement.name
             for item in job.context_snapshot.user_facts
         )
-    # Catalog V3 permits only one INITIAL attachment requirement.  A fixed
+    # Catalog V4 permits only one INITIAL attachment requirement.  A fixed
     # attachment or an already-resolved Logparse source therefore proves it
     # has been fulfilled for this Job.
     plan = manifest.resolved_logparse_plan
@@ -325,70 +327,27 @@ def _target_anchor_paths(
     plan = manifest.resolved_logparse_plan
     if plan is None:
         return {}, set()
-    allowed_sources = (
-        {_artifact_source_key(plan.artifact_id)}
-        if plan.artifact_id is not None
-        else set()
-    )
     if broker_audit_bytes is None:
-        return {}, allowed_sources
-    value = json.loads(broker_audit_bytes.decode("utf-8"))
-    if (
-        not isinstance(value, dict)
-        or value.get("schema_version") != 1
-        or value.get("job_id") != job.job_id
-    ):
-        raise ValueError("broker audit is invalid")
+        raise ValueError("resolved Logparse plan requires its broker audit")
+    if job.job_id != manifest.job_id:
+        raise ValueError("Job and Workspace manifest identities differ")
+    target_set = resolve_authoritative_targets(manifest, broker_audit_bytes)
     result: dict[tuple[str, str], str] = {}
-    operations = value.get("operations")
-    if not isinstance(operations, list):
-        raise ValueError("broker audit operations are invalid")
-    for operation in operations:
-        if not isinstance(operation, dict) or operation.get("http_status") != 200:
+    allowed_sources: set[str] = set()
+    for target in target_set.targets:
+        source_key = (
+            _artifact_source_key(target.source_ref)
+            if target.source_kind == "INPUT_ARTIFACT"
+            else _proposal_source_key(target.source_ref)
+        )
+        allowed_sources.add(source_key)
+        if not target.deliverable:
             continue
-        request = operation.get("request")
-        if not isinstance(request, dict):
-            raise ValueError("broker audit request is invalid")
-        payload = operation.get("result")
-        if not isinstance(payload, dict):
-            raise ValueError("broker audit result is invalid")
-        if plan.artifact_id is not None:
-            if (
-                operation.get("operation") != "target-logs"
-                or request.get("artifact_id") != plan.artifact_id
-            ):
-                raise ValueError("broker audit source differs from the resolved plan")
-            source_key = _artifact_source_key(plan.artifact_id)
-        else:
-            proposal_key = request.get("artifact_proposal_key")
-            artifact_draft = payload.get("logparse_run_artifact_draft")
-            if (
-                operation.get("operation") != "parse-targets"
-                or request.get("attachment_id") != plan.attachment_id
-                or not isinstance(proposal_key, str)
-                or not proposal_key
-                or not isinstance(artifact_draft, dict)
-                or artifact_draft.get("proposal_key") != proposal_key
-            ):
-                raise ValueError("broker audit source differs from the resolved plan")
-            source_key = _proposal_source_key(proposal_key)
-            allowed_sources.add(source_key)
-        targets = payload.get("target_logs") if isinstance(payload, dict) else None
-        if not isinstance(targets, list):
-            continue
-        for target in targets:
-            if not isinstance(target, dict):
-                raise ValueError("broker target audit is invalid")
-            label = target.get("label")
-            path = target.get("log_path")
-            if not isinstance(label, str) or not isinstance(path, str):
-                continue
-            normalized = PurePosixPath(path).as_posix()
-            key = (source_key, normalized)
-            existing = result.get(key)
-            if existing is not None and existing != label:
-                raise ValueError("one target log is bound to multiple anchors")
-            result[key] = label
+        assert target.log_path is not None
+        key = (source_key, target.log_path)
+        if key in result:
+            raise ValueError("one target log is bound to multiple anchors")
+        result[key] = target.label
     return result, allowed_sources
 
 
@@ -1161,7 +1120,7 @@ def _diagnosis_decision_gate(
     required_keys = [_binding_key(item) for item in required_bindings]
     return (
         bool(required_keys)
-        and candidate_keys == required_keys
+        and set(candidate_keys) == set(required_keys)
         and all(item is RuleClaimResult.PASS for item in alignments)
     )
 

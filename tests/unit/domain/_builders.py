@@ -6,6 +6,8 @@ from typing import TypeVar
 from pydantic import BaseModel
 
 from problem_locator.contracts import (
+    ArtifactKind,
+    ArtifactProposal,
     Case,
     CaseFailure,
     CaseSnapshot,
@@ -16,7 +18,10 @@ from problem_locator.contracts import (
     JobOutcome,
     JobStatus,
     JobType,
+    ResourceKind,
     RuntimeBindings,
+    StagedResourceRef,
+    UserResultMetadata,
     ValidatedTrigger,
     VersionedRef,
 )
@@ -71,6 +76,35 @@ def diagnosis_outcome() -> JobOutcome:
 
 def review_outcome() -> JobOutcome:
     return fixture(JobOutcome, "job-outcome-review.json")
+
+
+def unresolved_user_result_proposal(job: Job) -> ArtifactProposal:
+    """Build the server-final USER_RESULT required by an unresolved branch."""
+
+    staged = StagedResourceRef(
+        staging_id="00000000-0000-0000-0000-000000000069",
+        owner_job_id=job.job_id,
+        proposal_key="user_result",
+        resource_kind=ResourceKind.FILE,
+        size=321,
+        sha256="9" * 64,
+        tree_manifest=None,
+    )
+    return ArtifactProposal(
+        proposal_key=staged.proposal_key,
+        artifact_kind=ArtifactKind.USER_RESULT,
+        name="diagnosis-result.json",
+        content_type="application/json",
+        resource_kind=staged.resource_kind,
+        size=staged.size,
+        sha256=staged.sha256,
+        staged_resource_ref=staged,
+        metadata=UserResultMetadata(
+            schema_version=2,
+            format_id="problem-locator-diagnosis-v2",
+            description="Canonical unresolved diagnosis result.",
+        ),
+    )
 
 
 def failure_outcome() -> JobOutcome:

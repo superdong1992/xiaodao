@@ -68,9 +68,9 @@ SCHEMA_VERSION = 1
 SERVICE_BASE_URL = "http://127.0.0.1:18000"
 EXPECTED_SKILL = VersionedRef(
     id="diagnosis-skill/diagnose-service-takeover",
-    version="3.1.0",
+    version="4.0.0",
     content_hash=(
-        "671a591bb7c7857bc5d1e49fab433129668ea1d98cfc05b41ef2afb77f6f0764"
+        "eaa059e98e2fde9b923e0bce3e860422b2944aeabe939b57920793f70337b618"
     ),
 )
 EXPECTED_ARCHIVE_NAME = "synthetic-rpc-service-takeover.zip"
@@ -606,7 +606,7 @@ def audit_export(
     archive_bytes: bytes,
     result_schema: Mapping[str, Any],
 ) -> ExportFacts:
-    require(exported.export_schema_version == 1, "EXPORT_SCHEMA_VERSION")
+    require(exported.export_schema_version == 3, "EXPORT_SCHEMA_VERSION")
     require(exported.source_generation == exported.state.generation, "EXPORT_GENERATION")
     require(exported.installation_id == exported.state.installation_id, "EXPORT_INSTALLATION")
     require(len(exported.state.cases) == 2, "CASE_COUNT")
@@ -899,7 +899,10 @@ def audit_export(
         ),
         "USER_RESULT_PROPOSAL_COUNT",
     )
-    require(user_result_proposal.proposal_key == "user-result", "USER_RESULT_PROPOSAL_KEY")
+    require(
+        user_result_proposal.proposal_key == "server-user-result",
+        "USER_RESULT_PROPOSAL_KEY",
+    )
     user_result_artifact = formal_artifact_for_proposal(
         exported,
         aggregate,
@@ -919,7 +922,7 @@ def audit_export(
         "USER_RESULT_ARCHIVE_PROPOSAL_COUNT",
     )
     require(
-        archive_proposal.proposal_key == "user-result-archive",
+        archive_proposal.proposal_key == "server-user-result-archive",
         "USER_RESULT_ARCHIVE_PROPOSAL_KEY",
     )
     archive_artifact = formal_artifact_for_proposal(
@@ -1064,9 +1067,31 @@ def audit_export(
         "USER_RESULT_PROBLEM_STATEMENT",
     )
     require(
-        result_payload.candidate_statement == final_result.statement,
+        result_payload.root_cause == final_result.statement,
         "USER_RESULT_CANDIDATE_STATEMENT",
     )
+    require(result_payload.schema_version == 2, "USER_RESULT_SCHEMA_VERSION")
+    require(
+        result_payload.format_id == "problem-locator-diagnosis-v2",
+        "USER_RESULT_FORMAT",
+    )
+    require(result_payload.status == "COMPLETED", "USER_RESULT_STATUS")
+    require(
+        result_payload.source_job_type is JobType.DIAGNOSE,
+        "USER_RESULT_SOURCE_JOB_TYPE",
+    )
+    candidate_decision_audit = candidate_outcome.decision_audit
+    require(candidate_decision_audit is not None, "CANDIDATE_DECISION_AUDIT")
+    require(
+        [rule.rule_id for rule in result_payload.verification_rules]
+        == candidate_decision_audit.required_rule_ids,
+        "USER_RESULT_VERIFICATION_RULES",
+    )
+    require(
+        result_payload.time_relevance.problem_time == EXPECTED_FACTS["problem_time"],
+        "USER_RESULT_PROBLEM_TIME",
+    )
+    require(bool(result_payload.recommendations), "USER_RESULT_RECOMMENDATIONS")
     require(len(result_bytes) == user_result_artifact.size, "USER_RESULT_SIZE")
     result_sha256 = hashlib.sha256(result_bytes).hexdigest()
     require(result_sha256 == user_result_artifact.sha256, "USER_RESULT_SHA256")
@@ -1080,12 +1105,62 @@ def audit_export(
         with zipfile.ZipFile(io.BytesIO(archive_bytes), mode="r") as result_archive:
             infos = result_archive.infolist()
             names = [info.filename for info in infos]
-            expected_names = ["result.txt"] + [
-                f"target-log-{index:03d}.log"
-                for index in range(1, archive_artifact.metadata.target_log_count + 1)
+            manifest_bytes = result_archive.read("archive-manifest.json")
+            archive_manifest = parse_canonical_json_bytes(manifest_bytes)
+            require(
+                canonical_json_bytes(archive_manifest) == manifest_bytes,
+                "USER_RESULT_ARCHIVE_MANIFEST_CANONICAL",
+            )
+            require(isinstance(archive_manifest, dict), "USER_RESULT_ARCHIVE_MANIFEST")
+            require(
+                set(archive_manifest)
+                == {
+                    "schema_version",
+                    "format_id",
+                    "problem_time",
+                    "diagnosis_result_sha256",
+                    "result_txt_sha256",
+                    "target_log_count",
+                    "target_logs",
+                },
+                "USER_RESULT_ARCHIVE_MANIFEST_FIELDS",
+            )
+            require(
+                archive_manifest.get("schema_version") == 2
+                and archive_manifest.get("format_id")
+                == "problem-locator-result-archive-v2",
+                "USER_RESULT_ARCHIVE_MANIFEST_VERSION",
+            )
+            require(
+                archive_manifest.get("problem_time") == EXPECTED_FACTS["problem_time"]
+                and archive_manifest.get("diagnosis_result_sha256") == result_sha256,
+                "USER_RESULT_ARCHIVE_MANIFEST_BINDING",
+            )
+            target_entries = archive_manifest.get("target_logs")
+            require(
+                isinstance(target_entries, list)
+                and len(target_entries) == archive_artifact.metadata.target_log_count
+                and archive_manifest.get("target_log_count") == len(target_entries),
+                "USER_RESULT_ARCHIVE_TARGET_COUNT",
+            )
+            target_names = [
+                item.get("archive_name")
+                for item in target_entries
+                if isinstance(item, dict)
             ]
+            require(
+                len(target_names) == len(target_entries)
+                and all(isinstance(name, str) and name.endswith(".log") for name in target_names)
+                and not any(name.startswith("target-log-") for name in target_names),
+                "USER_RESULT_ARCHIVE_SEMANTIC_NAMES",
+            )
+            expected_names = ["result.txt", "archive-manifest.json", *target_names]
             require(names == expected_names, "USER_RESULT_ARCHIVE_NAMES")
-            require(len(names) == len(set(names)), "USER_RESULT_ARCHIVE_DUPLICATE")
+            require(
+                len(names) == len(set(name.casefold() for name in names)),
+                "USER_RESULT_ARCHIVE_DUPLICATE",
+            )
+            require(result_archive.comment == b"", "USER_RESULT_ARCHIVE_COMMENT")
             for info in infos:
                 require(
                     info.date_time == (1980, 1, 1, 0, 0, 0),
@@ -1095,11 +1170,85 @@ def audit_export(
                     info.compress_type == zipfile.ZIP_DEFLATED,
                     "USER_RESULT_ARCHIVE_COMPRESSION",
                 )
+                require(info.flag_bits == 0, "USER_RESULT_ARCHIVE_FLAGS")
+                require(info.create_system == 3, "USER_RESULT_ARCHIVE_CREATE_SYSTEM")
+                require(
+                    info.external_attr == (0o100644 << 16),
+                    "USER_RESULT_ARCHIVE_MODE",
+                )
+                require(info.extra == b"" and info.comment == b"", "USER_RESULT_ARCHIVE_EXTRA")
+            result_text_bytes = result_archive.read("result.txt")
             require(
-                result_archive.read("result.txt")
-                == (final_result.statement + "\n").encode("utf-8"),
+                archive_manifest.get("result_txt_sha256")
+                == hashlib.sha256(result_text_bytes).hexdigest(),
+                "USER_RESULT_ARCHIVE_RESULT_HASH",
+            )
+            result_text = result_text_bytes.decode("utf-8")
+            section_offsets = [
+                result_text.index(f"{index}. ") for index in range(1, 10)
+            ]
+            require(
+                section_offsets == sorted(section_offsets)
+                and result_payload.root_cause in result_text
+                and result_payload.problem_statement in result_text
+                and all(
+                    rule.rule_id in result_text
+                    for rule in result_payload.verification_rules
+                )
+                and all(name in result_text for name in target_names),
                 "USER_RESULT_ARCHIVE_RESULT_TEXT",
             )
+            logs_by_name: dict[str, bytes] = {}
+            for ordinal, (entry, name) in enumerate(
+                zip(target_entries, target_names, strict=True),
+                start=1,
+            ):
+                assert isinstance(entry, dict) and isinstance(name, str)
+                content = result_archive.read(name)
+                require(
+                    entry.get("ordinal") == ordinal
+                    and entry.get("size") == len(content)
+                    and entry.get("sha256") == hashlib.sha256(content).hexdigest(),
+                    "USER_RESULT_ARCHIVE_TARGET_BINDING",
+                )
+                logs_by_name[name] = content
+            citations = [
+                *(citation for finding in result_payload.findings for citation in finding.citations),
+                *(
+                    citation
+                    for rule in result_payload.verification_rules
+                    for citation in rule.citations
+                ),
+                *result_payload.time_relevance.citations,
+            ]
+            for citation in citations:
+                if citation.archive_name is None:
+                    require(
+                        citation.raw_bytes_sha256 is None,
+                        "USER_RESULT_ARCHIVE_GENERIC_CITATION",
+                    )
+                    continue
+                content = logs_by_name.get(citation.archive_name)
+                require(content is not None, "USER_RESULT_ARCHIVE_CITATION_NAME")
+                require(
+                    citation.line_start is not None and citation.line_end is not None,
+                    "USER_RESULT_ARCHIVE_CITATION_RANGE",
+                )
+                physical = content.splitlines(keepends=True)
+                require(
+                    1 <= citation.line_start <= citation.line_end <= len(physical),
+                    "USER_RESULT_ARCHIVE_CITATION_BOUNDS",
+                )
+                raw_range = b"".join(
+                    physical[citation.line_start - 1 : citation.line_end]
+                )
+                require(
+                    hashlib.sha256(raw_range).hexdigest()
+                    == citation.raw_bytes_sha256
+                    and raw_range.rstrip(b"\r\n").decode("utf-8")
+                    == citation.excerpt,
+                    "USER_RESULT_ARCHIVE_CITATION_BYTES",
+                )
     except AuditFailure:
         raise
     except Exception as exc:

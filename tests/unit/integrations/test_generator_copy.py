@@ -23,29 +23,29 @@ EXPECTED_CHECKOUT_EVIDENCE = {
 }
 EXPECTED_SOURCE_CHANGES = {
     "SKILL.md": (
-        "modified_for_s07_v3_contract",
-        "Upgrade the generator workflow to GenerationSpec v3, manifest schema v3, "
-        "and declarative verification contracts.",
+        "modified_for_v4_deployment_contract",
+        "Upgrade the generator workflow to GenerationSpec v4, manifest schema v4, "
+        "explicit deployment scope, and server-owned public results.",
     ),
     "references/generated-skill-contract.md": (
-        "modified_for_s07_v3_contract",
-        "Document manifest schema v3 requirements, generic Logparse bindings, "
-        "and declarative verification rules.",
+        "modified_for_v4_deployment_contract",
+        "Document manifest schema v4, deployment scope, generic Logparse bindings, "
+        "declarative verification rules, and server-owned public results.",
     ),
     "references/wiki-template.md": (
-        "modified_for_s07_v3_contract",
+        "modified_for_v4_deployment_contract",
         "Replace the RPC fixture template with an embedded deterministic "
-        "GenerationSpec v3 example.",
+        "GenerationSpec v4 example with explicit deployment scope.",
     ),
     "scripts/pack_result_zip.py": (
-        "removed_for_v3_runtime_control",
-        "Remove the source-tree packer because result.zip is now built only by "
-        "the installed controlled runtime command.",
+        "removed_for_v4_service_ownership",
+        "Remove the source-tree packer because Agents cannot create public result "
+        "artifacts; only the validated service finalizer owns them.",
     ),
     "scripts/validate_generated_skill.py": (
-        "modified_for_s07_v3_contract",
-        "Validate manifest schema v3, verification contracts, embedded "
-        "machine-source consistency, and deterministic result archives.",
+        "modified_for_v4_deployment_contract",
+        "Validate manifest schema v4, deployment scope, verification contracts, "
+        "embedded machine-source consistency, and Agent artifact prohibitions.",
     ),
 }
 EXPECTED_ADDED_FILE = {
@@ -56,7 +56,7 @@ EXPECTED_ADDED_FILE = {
     ),
     "purpose": (
         "Deterministically build, hash, validate, and atomically publish Diagnosis "
-        "Skill products from GenerationSpec v3."
+        "Skill products from GenerationSpec v4."
     ),
 }
 EXPECTED_EXCLUDED_PATTERNS = (
@@ -249,7 +249,7 @@ def test_source_copy_receipt_has_complete_sorted_fields() -> None:
             "change_reason",
         }
         _assert_file_facts_shape(entry["source"])
-        if entry["status"] == "removed_for_v3_runtime_control":
+        if entry["status"] == "removed_for_v4_service_ownership":
             assert entry["delivered"] is None
         else:
             _assert_file_facts_shape(entry["delivered"])
@@ -327,12 +327,12 @@ def test_receipt_matches_source_and_every_delivered_byte(
         assert entry["source"] == _git_file_facts(checkout, relative_path)
         assert entry["status"] == expected_status
         assert entry["change_reason"] == expected_reason
-        if expected_status == "removed_for_v3_runtime_control":
+        if expected_status == "removed_for_v4_service_ownership":
             assert not delivered.exists()
             assert entry["delivered"] is None
         else:
             assert entry["delivered"] == _file_facts(delivered)
-            assert expected_status == "modified_for_s07_v3_contract"
+            assert expected_status == "modified_for_v4_deployment_contract"
             assert entry["delivered"]["sha256"] != entry["source"]["sha256"]
 
     added = manifest["added_files"][0]
@@ -347,7 +347,7 @@ def test_receipt_matches_source_and_every_delivered_byte(
         sorted(
             path
             for path, (status, _) in EXPECTED_SOURCE_CHANGES.items()
-            if status != "removed_for_v3_runtime_control"
+            if status != "removed_for_v4_service_ownership"
         )
         + [EXPECTED_ADDED_FILE["path"]]
     )

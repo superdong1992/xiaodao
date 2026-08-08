@@ -294,9 +294,13 @@ def _outcome(number: int, job: Job, result_type: OutcomeResultType) -> JobOutcom
     if result_type is OutcomeResultType.NEED_INPUT:
         payload["payload"]["requested_input"] = [_uuid(901)]
         payload["payload"]["requested_attachments"] = []
+        payload["payload"]["candidate_conclusion_draft"] = None
+        payload["proposed_artifacts"] = []
     elif result_type is OutcomeResultType.NEED_ATTACHMENT:
         payload["payload"]["requested_input"] = []
         payload["payload"]["requested_attachments"] = [_uuid(902)]
+        payload["payload"]["candidate_conclusion_draft"] = None
+        payload["proposed_artifacts"] = []
     else:
         payload["payload"]["requested_input"] = []
         payload["payload"]["requested_attachments"] = []
@@ -384,8 +388,8 @@ def test_user_result_is_downloadable_only_for_the_accepted_candidate_job() -> No
         sha256="a" * 64,
         storage_key=f"resources/cases/{CASE_ID}/artifacts/{_uuid(70)}/payload",
         metadata={
-            "schema_version": 1,
-            "format_id": "problem-locator-diagnosis-v1",
+            "schema_version": 2,
+            "format_id": "problem-locator-diagnosis-v2",
             "description": "Accepted result.",
         },
         created_by_job_id=candidate.proposed_by_job_id,

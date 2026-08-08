@@ -212,7 +212,19 @@ def _resolved_case_view_payload() -> dict:
                 "created_by_job_id": candidate["proposed_by_job_id"],
                 "created_at": LATER,
                 "downloadable": True,
-            }
+            },
+            {
+                "artifact_id": "00000000-0000-0000-0000-000000000071",
+                "kind": ArtifactKind.USER_RESULT_ARCHIVE,
+                "name": "result.zip",
+                "content_type": "application/zip",
+                "resource_kind": ResourceKind.FILE,
+                "size": 1024,
+                "sha256": "8" * 64,
+                "created_by_job_id": candidate["proposed_by_job_id"],
+                "created_at": LATER,
+                "downloadable": True,
+            },
         ],
         "created_at": NOW,
         "updated_at": LATER,
@@ -264,7 +276,7 @@ def _state_export_payload() -> dict:
         for attachment in attachments
     ]
     return {
-        "export_schema_version": 2,
+        "export_schema_version": SCHEMA_VERSION,
         "schema_version": SCHEMA_VERSION,
         "contract_revision": CONTRACT_REVISION,
         "source_generation": state_payload["generation"],

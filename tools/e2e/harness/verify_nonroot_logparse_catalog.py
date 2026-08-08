@@ -81,6 +81,7 @@ def main() -> None:
         skill_dir=SKILL_DIR,
         logparse_tool=asset,
         logparse_broker_factory=broker_factory,
+        allow_test_skills=True,
     )
     route = catalog.route_bindings()
     selected = next(

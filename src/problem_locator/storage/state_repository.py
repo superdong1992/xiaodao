@@ -45,7 +45,7 @@ from problem_locator.contracts import (
 from .atomic import FileSync, Replacer, read_stable_file_bytes
 from .coordination import StorageCoordinationLock
 from .execution_records import FileExecutionRecordStore
-from .layout import StorageLayout
+from .layout import StorageLayout, UnsupportedDataFormatError
 from .paths import parse_storage_key
 from .platform import PlatformFileSync, PlatformReplaceOperation
 from .resource_files import validate_formal_resource
@@ -135,7 +135,12 @@ class JsonFileStateRepository:
         self._state_failure: ApplicationError | None = None
 
         try:
-            self._layout.ensure_directories(self._file_sync)
+            self._layout.initialize_v2_data_root(self._file_sync)
+        except UnsupportedDataFormatError as exc:
+            raise _port_error(
+                ErrorCode.STATE_SCHEMA_UNSUPPORTED,
+                "The DATA_ROOT data format is unsupported; configure a fresh DATA_ROOT.",
+            ) from exc
         except (OSError, ValueError) as exc:
             raise _port_error(
                 ErrorCode.STATE_CORRUPT,
@@ -174,6 +179,13 @@ class JsonFileStateRepository:
         return self._layout
 
     def _open_or_initialize(self) -> StateFile:
+        try:
+            self._layout.validate_v2_data_format()
+        except UnsupportedDataFormatError as exc:
+            raise _port_error(
+                ErrorCode.STATE_SCHEMA_UNSUPPORTED,
+                "The DATA_ROOT data format is unsupported; configure a fresh DATA_ROOT.",
+            ) from exc
         try:
             state_bytes = self._read_file(self._layout.state)
         except FileNotFoundError:

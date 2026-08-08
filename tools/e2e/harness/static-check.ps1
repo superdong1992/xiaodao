@@ -326,7 +326,12 @@ $wrongKindRequirements = @($shuffledRequirements | ForEach-Object {
 Assert-StaticRequirementFailure $wrongKindRequirements 'wrong requirement kind'
 
 $restartRoot = Join-Path $DriverRoot 'restart'
-$coreNames = @('verify_service_process.py', 'start_service_supervisor.sh', 'stop_service.sh')
+$coreNames = @(
+    'verify_service_process.py',
+    'start_service_supervisor.sh',
+    'stop_service.sh',
+    'test_service_launcher.py'
+)
 foreach ($name in $coreNames) {
     $mainPath = Join-Path $DriverRoot $name
     $restartPath = Join-Path $restartRoot $name
@@ -344,7 +349,8 @@ foreach ($name in $coreNames) {
 $verifierText = [System.IO.File]::ReadAllText((Join-Path $DriverRoot 'verify_service_process.py'))
 $supervisorText = [System.IO.File]::ReadAllText((Join-Path $DriverRoot 'start_service_supervisor.sh'))
 $stopText = [System.IO.File]::ReadAllText((Join-Path $DriverRoot 'stop_service.sh'))
-$coreText = $verifierText + "`n" + $supervisorText + "`n" + $stopText
+$launcherText = [System.IO.File]::ReadAllText((Join-Path $DriverRoot 'test_service_launcher.py'))
+$coreText = $verifierText + "`n" + $supervisorText + "`n" + $stopText + "`n" + $launcherText
 $verifierRequired = @(
     'os.fork()',
     'os.setgroups([])',
@@ -374,6 +380,8 @@ $verifierRequired = @(
     'signal.pidfd_send_signal(pidfd, signal.SIGTERM, None, 0)',
     'select.select([pidfd], [], [], TERMINATE_TIMEOUT_SECONDS)',
     'ARCHIVED_SERVICE_LOG_FILE = Path("/evidence/service.log")',
+    '"-I"',
+    '"/evidence/test_service_launcher.py"',
     'def archive_service_log() -> None:',
     'elif mode == "archive-log" and len(args) == 1:',
     'raise SystemExit("SERVICE_PROCESS_VERIFICATION_FAILED")'
@@ -410,6 +418,7 @@ $supervisorRequired = @(
     "trap 'on_supervisor_signal 130' INT",
     "trap 'on_supervisor_signal 143' TERM",
     'trap - EXIT HUP INT TERM',
+    '/evidence/test_service_launcher.py serve',
     'test "$service_status" -eq 143',
     'verify_service_process.py archive-log',
     'verify_service_process.py exit "$service_status"'
@@ -493,6 +502,16 @@ foreach ($literal in @(
         throw "setup_sources.sh archive-source support marker absent: $literal"
     }
 }
+foreach ($literal in @(
+    'from problem_locator.bootstrap import _create_test_app, cli_hooks',
+    'from problem_locator.entrypoints.cli import CliHooks, main as cli_main',
+    '_create_test_app(settings)',
+    'return cli_main(argv, hooks=_test_cli_hooks())'
+)) {
+    if (-not $launcherText.Contains($literal)) {
+        throw "test-only service launcher literal absent: $literal"
+    }
+}
 if ($sourceSetupText -match '(?m)^logparse_commit=[0-9a-f]{40,64}$') {
     throw 'setup_sources.sh must not pin Logparse to a fixed commit'
 }
@@ -560,7 +579,7 @@ if ((Get-FileHash -LiteralPath (Join-Path $DriverRoot 'source.patch') -Algorithm
 }
 $patchFiles = @([System.IO.File]::ReadAllLines((Join-Path $DriverRoot 'source.patch.files.txt')))
 $expectedPatchFiles = [string[]]@(
-    '.claude/skills/diagnose-service-takeover/SKILL.md',
+    'tests/fixtures/components/diagnosis-generator/diagnose-service-takeover/SKILL.md',
     '.claude/skills/wiki-to-diagnosis-skill/scripts/generate_diagnosis_skill.py',
     'src/problem_locator/application/external_commands.py',
     'src/problem_locator/integrations/logparse/fingerprint.py',
@@ -676,6 +695,9 @@ if (-not $envBlock.Success -or [regex]::Matches($envBlock.Groups[1].Value, '(?m)
 }
 
 $driverText = [System.IO.File]::ReadAllText((Join-Path $DriverRoot 'windows-journey-lib.ps1')) + "`n" + [System.IO.File]::ReadAllText((Join-Path $DriverRoot 'run-windows-journey.ps1'))
+if ($driverText -notmatch '(?m)^\$script:JourneyClaudePhase1TimeoutSeconds = 300$') {
+    throw 'Phase1 timeout must allow the real DIAGNOSE requirement draft to finalize'
+}
 $requiredLiterals = @(
     'C:\Program Files\nodejs\node.exe',
     'C:\Users\admin\AppData\Roaming\npm\node_modules\@anthropic-ai\claude-code\cli.js',

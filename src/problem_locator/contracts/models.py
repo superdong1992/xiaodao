@@ -1,4 +1,4 @@
-"""Pydantic models for the frozen Problem Locator V2 public contract.
+"""Pydantic models for the frozen Problem Locator V3 public contract.
 
 The module deliberately keeps all wire/persistence DTO definitions in one place;
 ``commands``, ``outcomes`` and ``errors`` provide responsibility-oriented exports.
@@ -729,6 +729,7 @@ class UnresolvedResultDraft(ContractModel):
     summary: NonEmptyText
     blocking_rule_ids: list[NonEmptyText]
     evidence_bindings: list[EvidenceBinding]
+    user_result_proposal_key: NonEmptyText
     recommended_next_step: NonEmptyText
     occurred_at: UtcTimestamp
 
@@ -758,6 +759,7 @@ class UnresolvedResult(ContractModel):
     summary: NonEmptyText
     blocking_rule_ids: list[NonEmptyText]
     evidence_refs: list[OpaqueId]
+    user_result_artifact_id: OpaqueId
     recommended_next_step: NonEmptyText
     occurred_at: UtcTimestamp
     audit_artifact_id: OpaqueId
@@ -1052,18 +1054,24 @@ class Evidence(ContractModel):
         return self
 
 
-class UserResultMetadata(ContractModel):
-    schema_version: Literal[1]
-    format_id: Literal["problem-locator-diagnosis-v1"]
+class UserResultMetadataV2(ContractModel):
+    schema_version: Literal[2]
+    format_id: Literal["problem-locator-diagnosis-v2"]
     description: DescriptionText
 
 
-class UserResultArchiveMetadata(ContractModel):
-    schema_version: Literal[1]
-    format_id: Literal["problem-locator-result-archive-v1"]
+class UserResultArchiveMetadataV2(ContractModel):
+    schema_version: Literal[2]
+    format_id: Literal["problem-locator-result-archive-v2"]
     description: DescriptionText
     user_result_proposal_key: NonEmptyText
     target_log_count: NonNegativeInt
+
+
+# Transitional Python names keep internal imports source-compatible while the
+# accepted wire contract is a hard v2 cut (the aliased classes reject v1).
+UserResultMetadata = UserResultMetadataV2
+UserResultArchiveMetadata = UserResultArchiveMetadataV2
 
 
 class DiagnosticExportMetadata(ContractModel):
@@ -1095,8 +1103,8 @@ class LogparseRunMetadata(ContractModel):
 
 
 ArtifactMetadata: TypeAlias = (
-    UserResultMetadata
-    | UserResultArchiveMetadata
+    UserResultMetadataV2
+    | UserResultArchiveMetadataV2
     | DiagnosticExportMetadata
     | LogparseRunMetadata
     | AuditBundleMetadata
@@ -1120,8 +1128,8 @@ class Artifact(ContractModel):
     @model_validator(mode="after")
     def validate_artifact(self) -> Artifact:
         expected_type = {
-            ArtifactKind.USER_RESULT: UserResultMetadata,
-            ArtifactKind.USER_RESULT_ARCHIVE: UserResultArchiveMetadata,
+            ArtifactKind.USER_RESULT: UserResultMetadataV2,
+            ArtifactKind.USER_RESULT_ARCHIVE: UserResultArchiveMetadataV2,
             ArtifactKind.DIAGNOSTIC_EXPORT: DiagnosticExportMetadata,
             ArtifactKind.LOGPARSE_RUN: LogparseRunMetadata,
             ArtifactKind.AUDIT_BUNDLE: AuditBundleMetadata,
@@ -1523,17 +1531,10 @@ class ReviewSubjectV2(ContractModel):
             raise ValueError(
                 "mechanical facts must bind required rules and Evidence"
             )
-        candidate_evidence = {
-            *self.candidate.supporting_evidence_refs,
-            *(
-                ref
-                for mapping in self.candidate.completion_criteria_mapping
-                for ref in mapping.evidence_refs
-            ),
-        }
-        if not candidate_evidence <= evidence_set:
+        candidate_evidence = set(review_required_evidence_refs(self.candidate))
+        if candidate_evidence != evidence_set:
             raise ValueError(
-                "ReviewSubjectV2 must include supporting and completion Evidence"
+                "ReviewSubjectV2 Evidence must exactly cover the Candidate required union"
             )
         preimage = self.model_dump(mode="json", exclude={"subject_hash"})
         expected = hashlib.sha256(_canonical_json_bytes(preimage)).hexdigest()
@@ -1629,14 +1630,13 @@ def validate_workspace_manifest_for_job(
             or subject.candidate.content_hash != target.candidate_content_hash
         ):
             raise ValueError("Workspace review_subject must match its REVIEW Job")
-        candidate_required = list(review_required_evidence_refs(subject.candidate))
-        if subject.required_evidence_refs != candidate_required:
+        candidate_required = set(review_required_evidence_refs(subject.candidate))
+        if set(subject.required_evidence_refs) != candidate_required:
             raise ValueError(
                 "Workspace review_subject Evidence must equal the Candidate required union"
             )
-        required_set = set(candidate_required)
-        if candidate_required != [
-            ref for ref in job.evidence_refs if ref in required_set
+        if subject.required_evidence_refs != [
+            ref for ref in job.evidence_refs if ref in candidate_required
         ]:
             raise ValueError(
                 "Workspace review_subject Evidence must be a stable Job Evidence subsequence"
@@ -1785,18 +1785,228 @@ class CandidateConclusionDraft(ContractModel):
         return self
 
 
-class UserResultPayload(ContractModel):
-    schema_version: Literal[1]
-    format_id: Literal["problem-locator-diagnosis-v1"]
+class UserResultCitationV2(ContractModel):
+    evidence_binding: EvidenceBinding
+    archive_name: Annotated[str, AfterValidator(_validate_attachment_filename)] | None
+    line_start: PositiveInt | None
+    line_end: PositiveInt | None
+    raw_bytes_sha256: Sha256 | None
+    excerpt: NonEmptyText | None
+
+    @model_validator(mode="after")
+    def validate_location(self) -> UserResultCitationV2:
+        location = (
+            self.archive_name,
+            self.line_start,
+            self.line_end,
+            self.raw_bytes_sha256,
+            self.excerpt,
+        )
+        if not (all(value is None for value in location) or all(value is not None for value in location)):
+            raise ValueError(
+                "citation location fields must be either all null or all non-null"
+            )
+        if self.line_start is not None:
+            assert self.line_end is not None
+            if self.line_start > self.line_end:
+                raise ValueError("citation line_start must not exceed line_end")
+        return self
+
+
+class UserResultFindingV2(ContractModel):
+    statement: NonEmptyText
+    confidence: Confidence
+    evidence_bindings: list[EvidenceBinding]
+    citations: list[UserResultCitationV2]
+
+    @model_validator(mode="after")
+    def validate_citations(self) -> UserResultFindingV2:
+        binding_keys = [
+            item.existing_evidence_id
+            or f"proposal:{item.evidence_proposal_key}"
+            for item in self.evidence_bindings
+        ]
+        _unique(binding_keys, "UserResultFindingV2.evidence_bindings")
+        _unique(
+            [
+                (
+                    item.evidence_binding.existing_evidence_id,
+                    item.evidence_binding.evidence_proposal_key,
+                    item.archive_name,
+                    item.line_start,
+                    item.line_end,
+                    item.raw_bytes_sha256,
+                )
+                for item in self.citations
+            ],
+            "UserResultFindingV2.citations",
+        )
+        citation_binding_keys: list[str] = []
+        for citation in self.citations:
+            key = (
+                citation.evidence_binding.existing_evidence_id
+                or f"proposal:{citation.evidence_binding.evidence_proposal_key}"
+            )
+            if key not in citation_binding_keys:
+                citation_binding_keys.append(key)
+        if citation_binding_keys != binding_keys:
+            raise ValueError(
+                "finding citations must cover evidence_bindings in their declared order"
+            )
+        return self
+
+
+class UserResultVerificationRuleV2(ContractModel):
+    rule_id: NonEmptyText
+    rule_kind: NonEmptyText
+    status: ServerRuleStatus
+    explanation: NonEmptyText
+    evidence_bindings: list[EvidenceBinding]
+    citations: list[UserResultCitationV2]
+    observed_times: list[UtcTimestamp]
+    issues: list[NonEmptyText]
+
+    @model_validator(mode="after")
+    def validate_rule(self) -> UserResultVerificationRuleV2:
+        _unique(self.observed_times, "UserResultVerificationRuleV2.observed_times")
+        _unique(self.issues, "UserResultVerificationRuleV2.issues")
+        _unique(
+            [
+                (
+                    item.evidence_binding.existing_evidence_id,
+                    item.evidence_binding.evidence_proposal_key,
+                    item.archive_name,
+                    item.line_start,
+                    item.line_end,
+                    item.raw_bytes_sha256,
+                )
+                for item in self.citations
+            ],
+            "UserResultVerificationRuleV2.citations",
+        )
+        binding_keys = [
+            item.existing_evidence_id
+            or f"proposal:{item.evidence_proposal_key}"
+            for item in self.evidence_bindings
+        ]
+        _unique(binding_keys, "UserResultVerificationRuleV2.evidence_bindings")
+        citation_binding_keys: list[str] = []
+        for citation in self.citations:
+            key = (
+                citation.evidence_binding.existing_evidence_id
+                or f"proposal:{citation.evidence_binding.evidence_proposal_key}"
+            )
+            if key not in citation_binding_keys:
+                citation_binding_keys.append(key)
+        if citation_binding_keys != binding_keys:
+            raise ValueError(
+                "verification rule citations must cover evidence_bindings in their declared order"
+            )
+        if self.status in {
+            ServerRuleStatus.VERIFIED_FAIL,
+            ServerRuleStatus.UNVERIFIABLE,
+        } and not self.issues:
+            raise ValueError("failed or unverifiable verification rules require issues")
+        if self.status is ServerRuleStatus.VERIFIED_PASS and self.issues:
+            raise ValueError("VERIFIED_PASS verification rules forbid issues")
+        return self
+
+
+class UserResultTimeObservationV2(ContractModel):
+    rule_id: NonEmptyText
+    event_time: UtcTimestamp
+    offset_ms: Annotated[int, Field(strict=True)]
+
+
+class UserResultTimeRelevanceV2(ContractModel):
+    assessment: Literal["RELEVANT", "NOT_RELEVANT", "UNKNOWN"]
+    problem_time: UtcTimestamp | None
+    derived_anchor_time: UtcTimestamp | None
+    observations: list[UserResultTimeObservationV2]
+    explanation: NonEmptyText
+    citations: list[UserResultCitationV2]
+
+    @model_validator(mode="after")
+    def validate_times(self) -> UserResultTimeRelevanceV2:
+        _unique(
+            [
+                (item.rule_id, item.event_time, item.offset_ms)
+                for item in self.observations
+            ],
+            "UserResultTimeRelevanceV2.observations",
+        )
+        if self.problem_time is None and self.observations:
+            raise ValueError("time observations require problem_time")
+        if self.problem_time is not None:
+            problem_time = datetime.strptime(
+                self.problem_time, "%Y-%m-%dT%H:%M:%S.%fZ"
+            )
+            for observation in self.observations:
+                event_time = datetime.strptime(
+                    observation.event_time, "%Y-%m-%dT%H:%M:%S.%fZ"
+                )
+                expected_offset = int(
+                    (event_time - problem_time).total_seconds() * 1_000
+                )
+                if observation.offset_ms != expected_offset:
+                    raise ValueError(
+                        "time observation offset_ms must be relative to problem_time"
+                    )
+        _unique(
+            [
+                (
+                    item.evidence_binding.existing_evidence_id,
+                    item.evidence_binding.evidence_proposal_key,
+                    item.archive_name,
+                    item.line_start,
+                    item.line_end,
+                    item.raw_bytes_sha256,
+                )
+                for item in self.citations
+            ],
+            "UserResultTimeRelevanceV2.citations",
+        )
+        return self
+
+
+class UserResultPayloadV2(ContractModel):
+    model_config = ConfigDict(
+        json_schema_extra={
+            "allOf": [
+                {
+                    "if": {
+                        "properties": {"status": {"const": "INCONCLUSIVE"}},
+                        "required": ["status"],
+                    },
+                    "then": {
+                        "properties": {"evidence_gaps": {"minItems": 1}},
+                        "required": ["evidence_gaps"],
+                    },
+                }
+            ]
+        }
+    )
+    schema_version: Literal[2]
+    format_id: Literal["problem-locator-diagnosis-v2"]
+    status: Literal["COMPLETED", "INCONCLUSIVE"]
+    source_job_type: JobType
     problem_statement: NonEmptyText
-    candidate_statement: NonEmptyText
+    root_cause: NonEmptyText | None
+    findings: list[UserResultFindingV2]
     supporting_evidence_bindings: list[EvidenceBinding]
     completion_criteria_mapping: Annotated[
         list[CompletionCriterionDraftMapping], Field(min_length=1)
     ]
+    verification_rules: list[UserResultVerificationRuleV2]
+    time_relevance: UserResultTimeRelevanceV2
+    evidence_gaps: list[NonEmptyText]
+    limitations: list[NonEmptyText]
+    recommendations: Annotated[list[NonEmptyText], Field(min_length=1)]
 
     @model_validator(mode="after")
-    def validate_payload(self) -> UserResultPayload:
+    def validate_payload(self) -> UserResultPayloadV2:
+        if self.source_job_type is JobType.ROUTE:
+            raise ValueError("USER_RESULT source_job_type must be DIAGNOSE or REVIEW")
         keys = [
             binding.existing_evidence_id or f"proposal:{binding.evidence_proposal_key}"
             for binding in self.supporting_evidence_bindings
@@ -1805,9 +2015,42 @@ class UserResultPayload(ContractModel):
         indices = [entry.criterion_index for entry in self.completion_criteria_mapping]
         if indices != list(range(len(indices))):
             raise ValueError("user-result criterion mappings must be contiguous and sorted from index zero")
-        if any(not entry.satisfied or not entry.evidence_bindings for entry in self.completion_criteria_mapping):
-            raise ValueError("every user-result criterion must be satisfied and evidence-backed")
+        _unique(
+            [entry.rule_id for entry in self.verification_rules],
+            "UserResultPayloadV2.verification_rules.rule_id",
+        )
+        for field_name in ("evidence_gaps", "limitations", "recommendations"):
+            _unique(getattr(self, field_name), f"UserResultPayloadV2.{field_name}")
+        if self.status == "COMPLETED":
+            if self.root_cause is None:
+                raise ValueError("COMPLETED USER_RESULT requires root_cause")
+            if any(
+                not finding.evidence_bindings or not finding.citations
+                for finding in self.findings
+            ):
+                raise ValueError(
+                    "every COMPLETED finding must have Evidence bindings and citations"
+                )
+            if any(
+                not entry.satisfied or not entry.evidence_bindings
+                for entry in self.completion_criteria_mapping
+            ):
+                raise ValueError(
+                    "COMPLETED USER_RESULT requires every criterion to be satisfied and evidence-backed"
+                )
+        else:
+            if self.root_cause is not None:
+                raise ValueError("INCONCLUSIVE USER_RESULT requires root_cause=null")
+            if not self.evidence_gaps:
+                raise ValueError(
+                    "INCONCLUSIVE USER_RESULT requires at least one evidence gap"
+                )
         return self
+
+
+# Internal callers may migrate independently, but both names validate only the
+# v2 schema/format pair.  There is intentionally no v1 union branch.
+UserResultPayload = UserResultPayloadV2
 
 
 class Finding(ContractModel):
@@ -1994,8 +2237,8 @@ def _validate_artifact_shape(
     tree_manifest: TreeManifest | None = None,
 ) -> None:
     expected_type = {
-        ArtifactKind.USER_RESULT: UserResultMetadata,
-        ArtifactKind.USER_RESULT_ARCHIVE: UserResultArchiveMetadata,
+        ArtifactKind.USER_RESULT: UserResultMetadataV2,
+        ArtifactKind.USER_RESULT_ARCHIVE: UserResultArchiveMetadataV2,
         ArtifactKind.DIAGNOSTIC_EXPORT: DiagnosticExportMetadata,
         ArtifactKind.LOGPARSE_RUN: LogparseRunMetadata,
         ArtifactKind.AUDIT_BUNDLE: AuditBundleMetadata,
@@ -2279,9 +2522,7 @@ class AgentJobOutcomeDraftV2(ContractModel):
             [draft.proposal_key for draft in self.proposed_artifact_drafts],
             self.payload,
         )
-        _validate_candidate_user_result_pair(
-            self.payload, self.proposed_artifact_drafts
-        )
+        _validate_agent_draft_user_results(self.proposed_artifact_drafts)
         if isinstance(self.payload, DiagnosisOutcome):
             _validate_diagnosis_result_requests(self.result_type, self.payload)
             _validate_agent_delta(self.payload.state_delta, self.job_id, self.job_id)
@@ -2323,7 +2564,12 @@ class AgentJobOutcome(ContractModel):
             [draft.proposal_key for draft in self.proposed_artifact_drafts],
             self.payload,
         )
-        _validate_candidate_user_result_pair(self.payload, self.proposed_artifact_drafts)
+        _validate_server_final_user_results(
+            self.job_type,
+            self.result_type,
+            self.payload,
+            self.proposed_artifact_drafts,
+        )
         if isinstance(self.payload, DiagnosisOutcome):
             _validate_diagnosis_result_requests(self.result_type, self.payload)
             _validate_agent_delta(self.payload.state_delta, self.outcome_id, self.job_id)
@@ -2372,7 +2618,12 @@ class JobOutcome(ContractModel):
             [proposal.proposal_key for proposal in self.proposed_artifacts],
             self.payload,
         )
-        _validate_candidate_user_result_pair(self.payload, self.proposed_artifacts)
+        _validate_server_final_user_results(
+            self.job_type,
+            self.result_type,
+            self.payload,
+            self.proposed_artifacts,
+        )
         for proposal in self.proposed_evidence:
             if proposal.staged_resource_ref is not None and proposal.staged_resource_ref.owner_job_id != self.job_id:
                 raise ValueError("evidence staged resources must belong to the outcome job")
@@ -2446,6 +2697,14 @@ def _validate_outcome_shape(
         and (not isinstance(payload, RouteDecision) or payload.kind is not RouteKind.MATCHED)
     ):
         raise ValueError("a completed ROUTE outcome requires a MATCHED route decision")
+    if (
+        job_type is JobType.DIAGNOSE
+        and result_type is OutcomeResultType.COMPLETED
+        and isinstance(payload, DiagnosisOutcome)
+        and payload.candidate_conclusion_draft is not None
+        and any(not finding.evidence_bindings for finding in payload.findings)
+    ):
+        raise ValueError("every completed diagnosis finding must be evidence-backed")
 
 
 def _validate_decision_audit_binding(
@@ -2507,11 +2766,9 @@ def _validate_inconclusive_effective_outcome(
                 "INCONCLUSIVE diagnosis must discard semantic findings, state, and Candidate"
             )
     if any(
-        item.artifact_kind
-        in {ArtifactKind.USER_RESULT, ArtifactKind.USER_RESULT_ARCHIVE}
-        for item in artifacts
+        item.artifact_kind is ArtifactKind.USER_RESULT_ARCHIVE for item in artifacts
     ):
-        raise ValueError("INCONCLUSIVE outcomes cannot retain user-result proposals")
+        raise ValueError("INCONCLUSIVE outcomes forbid USER_RESULT_ARCHIVE")
 
 
 def _validate_effective_resolution_gate(
@@ -2564,13 +2821,18 @@ def _validate_effective_resolution_gate(
 def finalize_unresolved_result(
     draft: UnresolvedResultDraft,
     audit_artifact_id: str,
+    user_result_artifact_id: str,
     evidence_refs: Sequence[str],
 ) -> UnresolvedResult:
     """Bind the Coordinator draft to the server-generated audit bundle identity."""
 
-    payload = draft.model_dump(mode="python", exclude={"evidence_bindings"})
+    payload = draft.model_dump(
+        mode="python",
+        exclude={"evidence_bindings", "user_result_proposal_key"},
+    )
     payload.update(
         audit_artifact_id=audit_artifact_id,
+        user_result_artifact_id=user_result_artifact_id,
         evidence_refs=list(evidence_refs),
     )
     return UnresolvedResult.model_validate(payload)
@@ -2594,23 +2856,62 @@ def _validate_proposal_keys(evidence_keys: list[str], artifact_keys: list[str], 
     _unique(evidence_keys + artifact_keys + candidate_keys, "outcome proposal_key")
 
 
-def _validate_candidate_user_result_pair(payload: OutcomePayload | None, artifacts: list[Any]) -> None:
-    candidate = payload.candidate_conclusion_draft if isinstance(payload, DiagnosisOutcome) else None
+def _user_result_artifacts(artifacts: list[Any]) -> tuple[list[Any], list[Any]]:
     user_results = [artifact for artifact in artifacts if artifact.artifact_kind is ArtifactKind.USER_RESULT]
     archives = [
         artifact
         for artifact in artifacts
         if artifact.artifact_kind is ArtifactKind.USER_RESULT_ARCHIVE
     ]
-    if len(archives) > 1:
-        raise ValueError("an Outcome may propose at most one USER_RESULT_ARCHIVE")
-    if candidate is None and (user_results or archives):
-        raise ValueError("user result Artifacts are forbidden without candidate_conclusion_draft")
-    if candidate is not None and len(user_results) != 1:
-        raise ValueError("candidate_conclusion_draft requires exactly one USER_RESULT artifact")
+    return user_results, archives
+
+
+def _validate_agent_draft_user_results(artifacts: list[Any]) -> None:
+    user_results, archives = _user_result_artifacts(artifacts)
+    if user_results or archives:
+        raise ValueError(
+            "AgentJobOutcomeDraftV2 forbids server-generated USER_RESULT artifacts"
+        )
+
+
+def _validate_server_final_user_results(
+    job_type: JobType,
+    result_type: OutcomeResultType,
+    payload: OutcomePayload | None,
+    artifacts: list[Any],
+) -> None:
+    user_results, archives = _user_result_artifacts(artifacts)
+    if len(user_results) > 1 or len(archives) > 1:
+        raise ValueError("a server-final Outcome may carry at most one user result pair")
+
+    completed_candidate = (
+        job_type is JobType.DIAGNOSE
+        and result_type is OutcomeResultType.COMPLETED
+        and isinstance(payload, DiagnosisOutcome)
+        and payload.candidate_conclusion_draft is not None
+    )
+    unresolved_result = result_type is OutcomeResultType.INCONCLUSIVE or (
+        job_type is JobType.REVIEW
+        and result_type is OutcomeResultType.COMPLETED
+        and isinstance(payload, ReviewAssessment)
+        and payload.verdict is not ReviewVerdict.PASS
+    )
+    if completed_candidate:
+        if len(user_results) != 1 or len(archives) != 1:
+            raise ValueError(
+                "a completed Candidate Outcome requires exactly one USER_RESULT and one USER_RESULT_ARCHIVE"
+            )
+    elif unresolved_result:
+        if len(user_results) != 1 or archives:
+            raise ValueError(
+                "an unresolved server-final Outcome requires exactly one USER_RESULT and forbids USER_RESULT_ARCHIVE"
+            )
+    elif user_results or archives:
+        raise ValueError("this Outcome branch forbids user result Artifacts")
+
     if archives:
         metadata = archives[0].metadata
-        assert isinstance(metadata, UserResultArchiveMetadata)
+        assert isinstance(metadata, UserResultArchiveMetadataV2)
         if metadata.user_result_proposal_key != user_results[0].proposal_key:
             raise ValueError("USER_RESULT_ARCHIVE must bind the unique USER_RESULT proposal")
 
@@ -3572,6 +3873,11 @@ class CaseAggregate(ContractModel):
 
         if self.case.status is CaseStatus.RESOLVED:
             assert self.case.final_result is not None
+            producing_job = self.jobs.get(
+                self.case.final_result.proposed_by_job_id
+            )
+            if producing_job is None or producing_job.job_type is not JobType.DIAGNOSE:
+                raise ValueError("RESOLVED Case requires a DIAGNOSE result Job")
             user_results = [
                 artifact
                 for artifact in self.artifacts.values()
@@ -3580,13 +3886,51 @@ class CaseAggregate(ContractModel):
             ]
             if len(user_results) != 1:
                 raise ValueError("RESOLVED Case requires its accepted candidate USER_RESULT")
+            result_archives = [
+                artifact
+                for artifact in self.artifacts.values()
+                if artifact.kind is ArtifactKind.USER_RESULT_ARCHIVE
+                and artifact.created_by_job_id
+                == self.case.final_result.proposed_by_job_id
+            ]
+            if len(result_archives) != 1:
+                raise ValueError(
+                    "RESOLVED Case requires its accepted candidate USER_RESULT_ARCHIVE"
+                )
         if self.case.status is CaseStatus.UNRESOLVED:
             assert self.case.unresolved_result is not None
             unresolved = self.case.unresolved_result
             artifact = self.artifacts.get(unresolved.audit_artifact_id)
+            user_result_artifact = self.artifacts.get(
+                unresolved.user_result_artifact_id
+            )
             if artifact is None or artifact.kind is not ArtifactKind.AUDIT_BUNDLE:
                 raise ValueError(
                     "UNRESOLVED Case requires its matching AUDIT_BUNDLE Artifact"
+                )
+            if (
+                user_result_artifact is None
+                or user_result_artifact.kind is not ArtifactKind.USER_RESULT
+                or user_result_artifact.created_by_job_id != unresolved.source_job_id
+            ):
+                raise ValueError(
+                    "UNRESOLVED Case requires its bound USER_RESULT Artifact"
+                )
+            source_user_results = [
+                item.artifact_id
+                for item in self.artifacts.values()
+                if item.kind is ArtifactKind.USER_RESULT
+                and item.created_by_job_id == unresolved.source_job_id
+            ]
+            source_archives = [
+                item
+                for item in self.artifacts.values()
+                if item.kind is ArtifactKind.USER_RESULT_ARCHIVE
+                and item.created_by_job_id == unresolved.source_job_id
+            ]
+            if source_user_results != [unresolved.user_result_artifact_id] or source_archives:
+                raise ValueError(
+                    "UNRESOLVED Case must bind its unique USER_RESULT and forbid an archive"
                 )
             metadata = artifact.metadata
             assert isinstance(metadata, AuditBundleMetadata)
@@ -3602,7 +3946,7 @@ class CaseAggregate(ContractModel):
 
 
 class StateFile(ContractModel):
-    schema_version: Literal[2]
+    schema_version: Literal[3]
     contract_revision: Literal[CONTRACT_REVISION]
     generation: NonNegativeInt
     installation_id: OpaqueId
@@ -3936,6 +4280,11 @@ class CaseView(ContractModel):
         user_results = [
             artifact for artifact in self.artifacts if artifact.kind is ArtifactKind.USER_RESULT
         ]
+        result_archives = [
+            artifact
+            for artifact in self.artifacts
+            if artifact.kind is ArtifactKind.USER_RESULT_ARCHIVE
+        ]
         if self.status is CaseStatus.RESOLVED:
             assert self.final_result is not None
             if len(user_results) != 1 or (
@@ -3944,8 +4293,26 @@ class CaseView(ContractModel):
                 raise ValueError(
                     "RESOLVED CaseView requires the accepted candidate's USER_RESULT"
                 )
-        elif user_results:
-            raise ValueError("non-RESOLVED CaseView cannot expose USER_RESULT")
+            if len(result_archives) != 1 or (
+                result_archives[0].created_by_job_id
+                != self.final_result.proposed_by_job_id
+            ):
+                raise ValueError(
+                    "RESOLVED CaseView requires the accepted candidate's USER_RESULT_ARCHIVE"
+                )
+        elif self.status is CaseStatus.UNRESOLVED:
+            assert self.unresolved_result is not None
+            if (
+                len(user_results) != 1
+                or user_results[0].artifact_id
+                != self.unresolved_result.user_result_artifact_id
+                or result_archives
+            ):
+                raise ValueError(
+                    "UNRESOLVED CaseView requires exactly its bound USER_RESULT and no archive"
+                )
+        elif user_results or result_archives:
+            raise ValueError("non-terminal CaseView cannot expose user result Artifacts")
         audit_bundles = [
             artifact
             for artifact in self.artifacts
@@ -4508,8 +4875,8 @@ class StateExportResource(ContractModel):
 
 
 class StateExport(ContractModel):
-    export_schema_version: Literal[2]
-    schema_version: Literal[2]
+    export_schema_version: Literal[3]
+    schema_version: Literal[3]
     contract_revision: Literal[CONTRACT_REVISION]
     source_generation: NonNegativeInt
     installation_id: OpaqueId
@@ -4578,7 +4945,7 @@ class ContractManifestEntry(ContractModel):
 
 
 class ContractManifest(ContractModel):
-    schema_version: Literal[2]
+    schema_version: Literal[3]
     contract_revision: Literal[CONTRACT_REVISION]
     generator_version: NonEmptyText
     files: list[ContractManifestEntry]
@@ -4716,6 +5083,9 @@ __all__ = [model.__name__ for model in _CONTRACT_MODEL_TYPES] + [
     "TriggerPayload",
     "UNTRUSTED_OUTCOME_REJECTION_CODES",
     "UtcTimestamp",
+    "UserResultArchiveMetadata",
+    "UserResultMetadata",
+    "UserResultPayload",
     "WaitSeconds",
     "WorkspaceInputEntry",
     "default_resource_limits",

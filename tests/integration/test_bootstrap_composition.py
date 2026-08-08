@@ -32,7 +32,7 @@ from problem_locator.storage.platform import FileInstanceLock
 
 
 ROOT = Path(__file__).resolve().parents[2]
-SKILL_DIR = ROOT / ".claude/skills"
+SKILL_DIR = ROOT / "tests/fixtures/components/runtime-catalog/skill-dir"
 FAKE_LOGPARSE_REPO = ROOT / "tests/fixtures/components/logparse/fake/repo"
 FAKE_LOGPARSE_CONFIG = FAKE_LOGPARSE_REPO / "config.yaml"
 CASE_ID = "00000000-0000-0000-0000-000000000801"
@@ -50,6 +50,16 @@ def _settings(data_root: Path) -> Settings:
             "CLAUDE_COMMAND": "claude",
         }
     )
+
+
+def test_public_create_app_does_not_expose_the_test_skill_override(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(TypeError, match="allow_test_skills"):
+        create_app(  # type: ignore[call-arg]
+            _settings(tmp_path / "data"),
+            allow_test_skills=True,
+        )
 
 
 def test_production_clock_ids_and_notifier_follow_frozen_shapes() -> None:
@@ -246,22 +256,24 @@ def test_standalone_admin_is_lock_scoped_and_exports_one_canonical_generation(
         lock.release()
 
 
-def test_r2_state_is_reported_without_rebuild_and_degraded_app_never_starts_worker(
+def test_unmarked_legacy_state_is_rejected_without_any_data_root_mutation(
     tmp_path: Path,
 ) -> None:
     data_root = tmp_path / "data"
+    data_root.mkdir()
     layout = StorageLayout.at(data_root)
-    layout.ensure_directories()
     r2_bytes = canonical_json_bytes(
         {"contract_revision": "v1-contract-r2", "schema_version": 1}
     )
     layout.state.write_bytes(r2_bytes)
+    original_entries = tuple(data_root.iterdir())
 
     admin = StandaloneStateAdmin(data_root)
     report = admin.validate_state()
     assert report.valid is False
     assert report.errors[0].code == ErrorCode.STATE_SCHEMA_UNSUPPORTED.value
     assert layout.state.read_bytes() == r2_bytes
+    assert tuple(data_root.iterdir()) == original_entries == (layout.state,)
 
     stdout = io.BytesIO()
     stderr = io.BytesIO()
@@ -273,13 +285,13 @@ def test_r2_state_is_reported_without_rebuild_and_degraded_app_never_starts_work
     assert parse_canonical_json_bytes(stdout.getvalue(), type(report)) == report
     assert stderr.getvalue() == b""
     assert layout.state.read_bytes() == r2_bytes
+    assert tuple(data_root.iterdir()) == original_entries
 
     app = create_app(_settings(data_root))
     owner = app.state.problem_locator_owner
     assert app.state.problem_locator_composition is None
     assert owner.error.code is ErrorCode.STATE_SCHEMA_UNSUPPORTED
-    assert owner.instance_lock is not None
-    assert owner.instance_lock.is_acquired() is True
+    assert owner.instance_lock is None
     with TestClient(app) as client:
         assert client.get("/live").status_code == 200
         readiness = client.get("/ready")
@@ -287,5 +299,5 @@ def test_r2_state_is_reported_without_rebuild_and_degraded_app_never_starts_work
         assert readiness.json()["error"]["code"] == (
             ErrorCode.STATE_SCHEMA_UNSUPPORTED.value
         )
-    assert owner.instance_lock.is_acquired() is False
     assert layout.state.read_bytes() == r2_bytes
+    assert tuple(data_root.iterdir()) == original_entries

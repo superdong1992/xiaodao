@@ -109,7 +109,7 @@ service_claude_command='/usr/bin/timeout --foreground --signal=TERM --kill-after
     LOGPARSE_CONFIG_PATH=/opt/src/logparse/config.yaml \
     LOGPARSE_PYTHON=/opt/venvs/logparse/bin/python \
     "CLAUDE_COMMAND=$service_claude_command" \
-    /opt/venvs/xiaodao/bin/python -m problem_locator serve \
+    /opt/venvs/xiaodao/bin/python -I /evidence/test_service_launcher.py serve \
     >>"$log" 2>&1 &
 service_pid=$!
 service_started=true

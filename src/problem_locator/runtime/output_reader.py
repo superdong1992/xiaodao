@@ -9,6 +9,7 @@ cannot accidentally stage a prefix of an otherwise invalid Agent response.
 from __future__ import annotations
 
 import hashlib
+import io
 import logging
 import os
 import stat
@@ -26,6 +27,7 @@ from problem_locator.contracts.enums import (
     ErrorCode,
     EvidenceSourceType,
     ExecutionStage,
+    OutcomeResultType,
     ResourceKind,
 )
 from problem_locator.contracts.models import (
@@ -33,12 +35,13 @@ from problem_locator.contracts.models import (
     AgentEvidenceProposalDraft,
     AgentJobOutcome,
     AgentJobOutcomeDraftV2,
+    EvidenceBinding,
     ExecutionFailure,
     Job,
+    LogparseRunMetadata,
     LogparseEvidenceLocator,
     TreeManifest,
     TreeManifestEntry,
-    UserResultArchiveMetadata,
     UserResultPayload,
     WorkspaceArtifactInput,
     WorkspaceEvidenceInput,
@@ -54,13 +57,17 @@ from problem_locator.integrations.agent_json import (
     parse_agent_json_bytes,
     read_agent_json_file,
 )
-from problem_locator.integrations.result_archive import validate_result_archive_bytes
-
+from .authoritative_targets import (
+    AuthoritativeTargetLog,
+    AuthoritativeTargetSet,
+    resolve_authoritative_targets,
+)
 from .failures import RuntimeExecutionError, runtime_failure
 from .outcome_finalizer import (
     DRAFT_FINALIZATION_MARKER_NAME,
     SealedAgentOutcomeDraftMarker,
 )
+from .result_types import CapturedTargetLog
 from .workspace import PreparedWorkspace
 
 
@@ -302,13 +309,6 @@ class _SourceSnapshot:
 
 
 @dataclass(frozen=True, slots=True)
-class _ArchiveTargetLog:
-    relative_path: str
-    source: _WorkspaceTopLevel
-    expected_tree_entry: TreeManifestEntry | None
-
-
-@dataclass(frozen=True, slots=True)
 class ValidatedProposalResource:
     """One fully inspected proposal resource, ready for persistent staging."""
 
@@ -321,6 +321,19 @@ class ValidatedProposalResource:
     sha256: str
     tree_manifest: TreeManifest | None
     source_snapshot: _SourceSnapshot | None = None
+    inline_bytes: bytes | None = None
+
+    def __post_init__(self) -> None:
+        if self.inline_bytes is None:
+            return
+        if (
+            self.resource_kind is not ResourceKind.FILE
+            or self.source_snapshot is not None
+            or self.tree_manifest is not None
+            or len(self.inline_bytes) != self.size
+            or bytes_sha256(self.inline_bytes) != self.sha256
+        ):
+            raise ValueError("server-generated proposal bytes are inconsistent")
 
     def verify_unchanged(self) -> None:
         """Re-audit the frozen Agent path immediately around synchronous staging."""
@@ -333,6 +346,15 @@ class ValidatedProposalResource:
 
         if self.resource_kind is not ResourceKind.FILE:
             raise _InvalidOutput
+        if self.inline_bytes is not None:
+            if (
+                len(self.inline_bytes) != self.size
+                or bytes_sha256(self.inline_bytes) != self.sha256
+            ):
+                raise _InvalidOutput
+            with io.BytesIO(self.inline_bytes) as stream:
+                yield stream
+            return
         descriptor = _open_snapshot_file(self)
         stream_descriptor = -1
         try:
@@ -372,7 +394,8 @@ class ValidatedAgentDraft:
     draft: AgentJobOutcomeDraftV2
     canonical_bytes: bytes
     proposal_resources: tuple[ValidatedProposalResource, ...]
-    user_result_bytes: bytes | None
+    authoritative_targets: AuthoritativeTargetSet | None
+    target_logs: tuple[CapturedTargetLog, ...]
 
 
 class _ExactSecretScanner:
@@ -1178,6 +1201,14 @@ def _inspect_tree(
 
 
 def _verify_resource_unchanged(resource: ValidatedProposalResource) -> None:
+    if resource.inline_bytes is not None:
+        if (
+            resource.resource_kind is not ResourceKind.FILE
+            or len(resource.inline_bytes) != resource.size
+            or bytes_sha256(resource.inline_bytes) != resource.sha256
+        ):
+            raise _InvalidOutput
+        return
     snapshot = resource.source_snapshot
     if snapshot is None:
         raise _InvalidOutput
@@ -1242,172 +1273,231 @@ def _validate_declared_values(
         raise _InvalidOutput
 
 
-def _candidate_evidence_bindings(
-    outcome: AgentJobOutcome | AgentJobOutcomeDraftV2,
-) -> tuple[tuple[str, str], ...]:
-    payload = outcome.payload
-    candidate = getattr(payload, "candidate_conclusion_draft", None)
-    if candidate is None:
-        return ()
-    result: list[tuple[str, str]] = []
-    bindings = list(candidate.supporting_evidence_bindings)
-    for mapping in candidate.completion_criteria_mapping:
-        bindings.extend(mapping.evidence_bindings)
-    for binding in bindings:
-        key = (
-            "existing",
-            binding.existing_evidence_id,
-        ) if binding.existing_evidence_id is not None else (
-            "proposal",
-            binding.evidence_proposal_key,
-        )
-        assert key[1] is not None
-        typed_key = (key[0], key[1])
-        if typed_key not in result:
-            result.append(typed_key)
-    return tuple(result)
+def _evidence_binding_key(binding: EvidenceBinding) -> tuple[str, str]:
+    if binding.existing_evidence_id is not None:
+        return "existing", binding.existing_evidence_id
+    assert binding.evidence_proposal_key is not None
+    return "proposal", binding.evidence_proposal_key
 
 
-def _archive_target_logs(
-    outcome: AgentJobOutcome | AgentJobOutcomeDraftV2,
+def _target_evidence_bindings(
+    outcome: AgentJobOutcomeDraftV2,
     workspace_manifest: WorkspaceInputManifest,
-    resources: dict[str, ValidatedProposalResource],
-) -> tuple[_ArchiveTargetLog, ...]:
-    proposed_evidence = {
-        draft.proposal_key: draft for draft in outcome.proposed_evidence_drafts
-    }
-    existing_evidence = {
-        entry.resource_id: entry
-        for entry in workspace_manifest.entries
-        if isinstance(entry, WorkspaceEvidenceInput)
-    }
-    existing_artifacts = {
-        entry.resource_id: entry
-        for entry in workspace_manifest.entries
-        if isinstance(entry, WorkspaceArtifactInput)
-    }
-    result: list[_ArchiveTargetLog] = []
-    seen_paths: set[str] = set()
-    for binding_kind, binding_id in _candidate_evidence_bindings(outcome):
-        source = _WorkspaceTopLevel.INPUTS
-        expected_tree_entry = None
-        if binding_kind == "proposal":
-            evidence = proposed_evidence.get(binding_id)
-            if evidence is None or evidence.source_type is not EvidenceSourceType.LOGPARSE:
-                continue
-            if not isinstance(evidence.locator, LogparseEvidenceLocator):
-                raise _InvalidOutput
-            artifact_key = evidence.source_binding.artifact_proposal_key
-            if artifact_key is not None:
-                resource = resources.get(artifact_key)
-                if (
-                    resource is None
-                    or not isinstance(resource.draft, AgentArtifactProposalDraft)
-                    or resource.draft.artifact_kind is not ArtifactKind.LOGPARSE_RUN
-                    or resource.resource_kind is not ResourceKind.DIRECTORY
-                ):
-                    raise _InvalidOutput
-                root = resource.workspace_relative_path
-                manifest = resource.tree_manifest
-                if manifest is None:
-                    raise _InvalidOutput
-                matching_entries = [
-                    entry
-                    for entry in manifest.entries
-                    if entry.path == evidence.locator.relative_path
-                ]
-                if len(matching_entries) != 1:
-                    raise _InvalidOutput
-                source = _WorkspaceTopLevel.OUTPUT
-                expected_tree_entry = matching_entries[0]
-            else:
-                artifact_id = evidence.source_binding.existing_source_ref
-                artifact = existing_artifacts.get(artifact_id or "")
-                if artifact is None or artifact.artifact_kind is not ArtifactKind.LOGPARSE_RUN:
-                    raise _InvalidOutput
-                root = artifact.relative_path
-            relative_path = f"{root}/{evidence.locator.relative_path}"
+    target: AuthoritativeTargetLog,
+) -> tuple[EvidenceBinding, ...]:
+    """Return every typed Evidence object that names this authoritative path.
+
+    These bindings annotate the archive manifest.  They never select, remove,
+    or reorder a target: that authority belongs exclusively to the resolved
+    plan and broker audit.
+    """
+
+    if target.log_path is None:
+        return ()
+    values: list[EvidenceBinding] = []
+    if target.source_kind == "INPUT_ARTIFACT":
+        for entry in workspace_manifest.entries:
+            if (
+                isinstance(entry, WorkspaceEvidenceInput)
+                and entry.source_type is EvidenceSourceType.LOGPARSE
+                and entry.source_ref == target.source_ref
+                and isinstance(entry.locator, LogparseEvidenceLocator)
+                and entry.locator.relative_path == target.log_path
+            ):
+                values.append(
+                    EvidenceBinding(
+                        existing_evidence_id=entry.resource_id,
+                        evidence_proposal_key=None,
+                    )
+                )
+    for proposal in outcome.proposed_evidence_drafts:
+        if (
+            proposal.source_type is not EvidenceSourceType.LOGPARSE
+            or not isinstance(proposal.locator, LogparseEvidenceLocator)
+            or proposal.locator.relative_path != target.log_path
+        ):
+            continue
+        source = proposal.source_binding
+        if target.source_kind == "OUTPUT_PROPOSAL":
+            matches = source.artifact_proposal_key == target.source_ref
         else:
-            evidence = existing_evidence.get(binding_id)
-            if evidence is None or evidence.source_type is not EvidenceSourceType.LOGPARSE:
-                continue
-            if not isinstance(evidence.locator, LogparseEvidenceLocator):
-                raise _InvalidOutput
-            artifact = existing_artifacts.get(evidence.source_ref)
-            if artifact is None or artifact.artifact_kind is not ArtifactKind.LOGPARSE_RUN:
-                raise _InvalidOutput
-            relative_path = f"{artifact.relative_path}/{evidence.locator.relative_path}"
-        if relative_path not in seen_paths:
-            seen_paths.add(relative_path)
-            result.append(
-                _ArchiveTargetLog(
-                    relative_path=relative_path,
-                    source=source,
-                    expected_tree_entry=expected_tree_entry,
+            matches = source.existing_source_ref == target.source_ref
+        if matches:
+            values.append(
+                EvidenceBinding(
+                    existing_evidence_id=None,
+                    evidence_proposal_key=proposal.proposal_key,
                 )
             )
+    result: list[EvidenceBinding] = []
+    seen: set[tuple[str, str]] = set()
+    for value in values:
+        key = _evidence_binding_key(value)
+        if key not in seen:
+            seen.add(key)
+            result.append(value)
     return tuple(result)
 
 
-def _validate_user_result_archive(
+def _tree_manifest_for_authoritative_source(
+    *,
     workspace_root: Path,
-    outcome: AgentJobOutcome | AgentJobOutcomeDraftV2,
+    target_set: AuthoritativeTargetSet,
     workspace_manifest: WorkspaceInputManifest,
     resources: dict[str, ValidatedProposalResource],
-    archive_bytes: bytes,
     patterns: tuple[bytes, ...],
-    *,
     root_identity: tuple[int, int],
     output_boundary: _FrozenReadBoundary,
     inputs_boundary: _FrozenReadBoundary,
-    max_bytes: int,
-) -> None:
-    archives = [
-        draft
-        for draft in outcome.proposed_artifact_drafts
-        if draft.artifact_kind is ArtifactKind.USER_RESULT_ARCHIVE
-    ]
-    if not archives:
-        return
-    if len(archives) != 1 or not isinstance(
-        archives[0].metadata,
-        UserResultArchiveMetadata,
+) -> tuple[TreeManifest, _FrozenReadBoundary]:
+    if not target_set.targets:
+        raise _InvalidOutput
+    first = target_set.targets[0]
+    if any(
+        (target.source_kind, target.source_ref, target.source_root)
+        != (first.source_kind, first.source_ref, first.source_root)
+        for target in target_set.targets
     ):
         raise _InvalidOutput
-    targets = _archive_target_logs(outcome, workspace_manifest, resources)
-    if archives[0].metadata.target_log_count != len(targets):
+    if first.source_kind == "OUTPUT_PROPOSAL":
+        resource = resources.get(first.source_ref)
+        if (
+            resource is None
+            or not isinstance(resource.draft, AgentArtifactProposalDraft)
+            or resource.draft.artifact_kind is not ArtifactKind.LOGPARSE_RUN
+            or resource.resource_kind is not ResourceKind.DIRECTORY
+            or resource.workspace_relative_path != first.source_root
+            or resource.tree_manifest is None
+            or not isinstance(resource.draft.metadata, LogparseRunMetadata)
+            or resource.draft.metadata.tree_manifest_sha256 != resource.sha256
+            or target_set.source_size is not None
+            or target_set.source_sha256 != resource.sha256
+        ):
+            raise _InvalidOutput
+        return resource.tree_manifest, output_boundary
+
+    matches = [
+        entry
+        for entry in workspace_manifest.entries
+        if isinstance(entry, WorkspaceArtifactInput)
+        and entry.resource_id == first.source_ref
+    ]
+    if len(matches) != 1:
         raise _InvalidOutput
-    target_logs: list[bytes] = []
-    remaining = max_bytes
-    boundaries = {
-        _WorkspaceTopLevel.INPUTS: inputs_boundary,
-        _WorkspaceTopLevel.OUTPUT: output_boundary,
-    }
-    for target in targets:
+    artifact = matches[0]
+    if (
+        artifact.artifact_kind is not ArtifactKind.LOGPARSE_RUN
+        or artifact.resource_kind is not ResourceKind.DIRECTORY
+        or artifact.relative_path != first.source_root
+        or not isinstance(artifact.metadata, LogparseRunMetadata)
+        or artifact.metadata.tree_manifest_sha256 != artifact.sha256
+        or target_set.source_size != artifact.size
+        or target_set.source_sha256 != artifact.sha256
+    ):
+        raise _InvalidOutput
+    size, sha256, tree_manifest = _inspect_tree(
+        workspace_root / first.source_root,
+        workspace_root=workspace_root,
+        patterns=patterns,
+        max_bytes=artifact.size,
+        root_identity=root_identity,
+        boundary=inputs_boundary,
+    )
+    if size != artifact.size or sha256 != artifact.sha256:
+        raise _InvalidOutput
+    return tree_manifest, inputs_boundary
+
+
+def _capture_authoritative_target_logs(
+    *,
+    workspace_root: Path,
+    outcome: AgentJobOutcomeDraftV2,
+    workspace_manifest: WorkspaceInputManifest,
+    resources: dict[str, ValidatedProposalResource],
+    broker_audit_bytes: bytes | None,
+    patterns: tuple[bytes, ...],
+    root_identity: tuple[int, int],
+    output_boundary: _FrozenReadBoundary,
+    inputs_boundary: _FrozenReadBoundary,
+) -> tuple[AuthoritativeTargetSet | None, tuple[CapturedTargetLog, ...]]:
+    if outcome.result_type is OutcomeResultType.FAILED:
+        return None, ()
+    if workspace_manifest.resolved_logparse_plan is None:
+        return None, ()
+    if broker_audit_bytes is None:
+        raise _InvalidOutput
+    target_set = resolve_authoritative_targets(
+        workspace_manifest,
+        broker_audit_bytes,
+    )
+    tree_manifest, boundary = _tree_manifest_for_authoritative_source(
+        workspace_root=workspace_root,
+        target_set=target_set,
+        workspace_manifest=workspace_manifest,
+        resources=resources,
+        patterns=patterns,
+        root_identity=root_identity,
+        output_boundary=output_boundary,
+        inputs_boundary=inputs_boundary,
+    )
+    entries = {entry.path: entry for entry in tree_manifest.entries}
+    captured: list[CapturedTargetLog] = []
+    for target in target_set.targets:
+        if not target.deliverable:
+            continue
+        if target.log_path is None or target.workspace_relative_path is None:
+            raise _InvalidOutput
+        expected = entries.get(target.log_path)
+        if expected is None:
+            raise _InvalidOutput
         size, sha256, content, _ = _read_frozen_relative_file(
             workspace_root,
-            target.relative_path,
+            target.workspace_relative_path,
             patterns=patterns,
             capture=True,
             root_identity=root_identity,
-            boundary=boundaries[target.source],
-            max_bytes=remaining,
+            boundary=boundary,
+            max_bytes=expected.size,
         )
-        if target.expected_tree_entry is not None and (
-            size != target.expected_tree_entry.size
-            or sha256 != target.expected_tree_entry.sha256
+        if size != expected.size or sha256 != expected.sha256 or content is None:
+            raise _InvalidOutput
+        captured.append(
+            CapturedTargetLog(
+                target=target,
+                content=content,
+                evidence_bindings=_target_evidence_bindings(
+                    outcome,
+                    workspace_manifest,
+                    target,
+                ),
+            )
+        )
+    # Existing artifacts are outside ``proposal_resources`` and therefore do
+    # not get its later stability recheck.  Re-hash their complete tree after
+    # target capture so the stored TreeManifest remains an end-to-end boundary.
+    if target_set.targets[0].source_kind == "INPUT_ARTIFACT":
+        first = target_set.targets[0]
+        artifact = next(
+            entry
+            for entry in workspace_manifest.entries
+            if isinstance(entry, WorkspaceArtifactInput)
+            and entry.resource_id == first.source_ref
+        )
+        size, sha256, final_manifest = _inspect_tree(
+            workspace_root / first.source_root,
+            workspace_root=workspace_root,
+            patterns=patterns,
+            max_bytes=artifact.size,
+            root_identity=root_identity,
+            boundary=inputs_boundary,
+        )
+        if (
+            size != artifact.size
+            or sha256 != artifact.sha256
+            or final_manifest != tree_manifest
         ):
             raise _InvalidOutput
-        remaining -= size
-        assert content is not None
-        target_logs.append(content)
-    result_text = validate_result_archive_bytes(
-        archive_bytes,
-        target_logs=tuple(target_logs),
-    )
-    candidate = outcome.payload.candidate_conclusion_draft
-    if candidate is None or result_text != candidate.statement + "\n":
-        raise _InvalidOutput
+    return target_set, tuple(captured)
 
 
 def _read_validated_output(
@@ -1420,6 +1510,7 @@ def _read_validated_output(
     root_identity: tuple[int, int],
     output_boundary: _FrozenReadBoundary,
     inputs_boundary: _FrozenReadBoundary,
+    broker_audit_bytes: bytes | None,
     capture_outcome_bytes: Callable[[bytes], None] | None = None,
 ) -> ValidatedAgentDraft:
     outcome_relative_path = "output/job_outcome.draft.json"
@@ -1509,8 +1600,6 @@ def _read_validated_output(
             raise _InvalidOutput
 
     resources: list[ValidatedProposalResource] = []
-    user_result_bytes: bytes | None = None
-    user_result_archive_bytes: bytes | None = None
     for draft in drafts:
         relative_path = draft.workspace_relative_path
         if relative_path is None:
@@ -1522,15 +1611,11 @@ def _read_validated_output(
             _scan_relative_path(relative_path, patterns)
             path = _validate_parent_directories(workspace_root, relative_path)
 
-        if isinstance(draft, AgentArtifactProposalDraft):
-            resource_kind = draft.resource_kind
-            capture = draft.artifact_kind in {
-                ArtifactKind.USER_RESULT,
-                ArtifactKind.USER_RESULT_ARCHIVE,
-            }
-        else:
-            resource_kind = ResourceKind.FILE
-            capture = False
+        resource_kind = (
+            draft.resource_kind
+            if isinstance(draft, AgentArtifactProposalDraft)
+            else ResourceKind.FILE
+        )
 
         with _classify_invalid_output("proposal_resource_read"):
             if resource_kind is ResourceKind.FILE:
@@ -1538,21 +1623,13 @@ def _read_validated_output(
                     workspace_root,
                     relative_path,
                     patterns=patterns,
-                    capture=capture,
+                    capture=False,
                     root_identity=root_identity,
                     boundary=output_boundary,
                     max_bytes=remaining_bytes,
                 )
                 tree_manifest = None
-                if capture:
-                    assert content is not None
-                    if (
-                        isinstance(draft, AgentArtifactProposalDraft)
-                        and draft.artifact_kind is ArtifactKind.USER_RESULT
-                    ):
-                        user_result_bytes = content
-                    else:
-                        user_result_archive_bytes = content
+                assert content is None
             else:
                 size, sha256, tree_manifest = _inspect_tree(
                     path,
@@ -1589,25 +1666,24 @@ def _read_validated_output(
             )
         )
 
-    if user_result_archive_bytes is not None:
-        with _classify_invalid_output("user_result_archive_validation"):
-            _validate_user_result_archive(
-                workspace_root,
-                outcome,
-                workspace_manifest,
-                {resource.proposal_key: resource for resource in resources},
-                user_result_archive_bytes,
-                patterns,
-                root_identity=root_identity,
-                output_boundary=output_boundary,
-                inputs_boundary=inputs_boundary,
-                max_bytes=job.resource_limits.workspace_bytes,
-            )
+    with _classify_invalid_output("authoritative_target_capture"):
+        authoritative_targets, target_logs = _capture_authoritative_target_logs(
+            workspace_root=workspace_root,
+            outcome=outcome,
+            workspace_manifest=workspace_manifest,
+            resources={resource.proposal_key: resource for resource in resources},
+            broker_audit_bytes=broker_audit_bytes,
+            patterns=patterns,
+            root_identity=root_identity,
+            output_boundary=output_boundary,
+            inputs_boundary=inputs_boundary,
+        )
     return ValidatedAgentDraft(
         draft=outcome,
         canonical_bytes=outcome_bytes,
         proposal_resources=tuple(resources),
-        user_result_bytes=user_result_bytes,
+        authoritative_targets=authoritative_targets,
+        target_logs=target_logs,
     )
 
 
@@ -1617,6 +1693,7 @@ def read_agent_output(
     workspace_manifest: WorkspaceInputManifest,
     *,
     secrets: Iterable[bytes | str] = (),
+    broker_audit_bytes: bytes | None = None,
 ) -> ValidatedAgentDraft:
     """Read the sealed V2 Agent draft and freeze every proposal resource.
 
@@ -1700,6 +1777,7 @@ def read_agent_output(
             root_identity=root_identity,
             output_boundary=output_boundary,
             inputs_boundary=inputs_boundary,
+            broker_audit_bytes=broker_audit_bytes,
             capture_outcome_bytes=capture_outcome_bytes,
         )
         with _classify_invalid_output("sealed_draft_stability"):

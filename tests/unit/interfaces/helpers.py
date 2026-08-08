@@ -12,7 +12,7 @@ from problem_locator.contracts.enums import (
     ErrorCode,
     ResourceKind,
 )
-from problem_locator.contracts.limits import CONTRACT_REVISION
+from problem_locator.contracts.limits import CONTRACT_REVISION, SCHEMA_VERSION
 from problem_locator.contracts.models import (
     ProblemSpec,
     ReadinessCheck,
@@ -121,7 +121,7 @@ def object_counts() -> StateExportObjectCounts:
 def valid_report() -> ValidationReport:
     return ValidationReport(
         valid=True,
-        schema_version=2,
+        schema_version=SCHEMA_VERSION,
         contract_revision=CONTRACT_REVISION,
         generation=0,
         object_counts=object_counts(),

@@ -52,18 +52,17 @@ def blind_review_subject(
     if job.skill_ref is None or job.context_snapshot.candidate_conclusion is None:
         raise ValueError("a REVIEW test Job requires a pinned Skill and Candidate")
     candidate = job.context_snapshot.candidate_conclusion
-    required_evidence_refs = list(
-        dict.fromkeys(
-            [
-                *candidate.supporting_evidence_refs,
-                *(
-                    ref
-                    for mapping in candidate.completion_criteria_mapping
-                    for ref in mapping.evidence_refs
-                ),
-            ]
-        )
-    )
+    candidate_evidence = {
+        *candidate.supporting_evidence_refs,
+        *(
+            ref
+            for mapping in candidate.completion_criteria_mapping
+            for ref in mapping.evidence_refs
+        ),
+    }
+    required_evidence_refs = [
+        ref for ref in job.evidence_refs if ref in candidate_evidence
+    ]
     required_rule_ids = list(rule_ids)
     preimage = {
         "schema_version": 2,

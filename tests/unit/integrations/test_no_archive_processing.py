@@ -12,7 +12,12 @@ SKILL_ROOT = REPO_ROOT / ".claude" / "skills"
 SKILL_DIRS = (
     SKILL_ROOT / "wiki-to-diagnosis-skill",
     SKILL_ROOT / "logparse-diagnose",
-    SKILL_ROOT / "diagnose-service-takeover",
+    REPO_ROOT
+    / "tests"
+    / "fixtures"
+    / "components"
+    / "diagnosis-generator"
+    / "diagnose-service-takeover",
 )
 LOGPARSE_ROOT = SRC_ROOT / "integrations" / "logparse"
 
@@ -54,20 +59,6 @@ CONTROLLED_ARCHIVE_ALLOWLIST = {
     (
         "src/problem_locator/integrations/result_archive.py",
         "validate_result_archive_bytes",
-    ): frozenset(
-        {
-            "call:zipfile.ZipFile",
-            "call:archive.infolist",
-            "call:archive.read",
-        }
-    ),
-    (
-        ".claude/skills/wiki-to-diagnosis-skill/scripts/validate_generated_skill.py",
-        "<module>",
-    ): frozenset({"import:zipfile"}),
-    (
-        ".claude/skills/wiki-to-diagnosis-skill/scripts/validate_generated_skill.py",
-        "validate_result_zip",
     ): frozenset(
         {
             "call:zipfile.ZipFile",

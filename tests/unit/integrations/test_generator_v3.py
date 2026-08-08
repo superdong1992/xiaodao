@@ -46,12 +46,12 @@ def _load(path: Path, name: str) -> Any:
 
 @pytest.fixture(scope="module")
 def generator() -> Any:
-    return _load(GENERATOR_PATH, "_problem_locator_generate_v3")
+    return _load(GENERATOR_PATH, "_problem_locator_generate_v4")
 
 
 @pytest.fixture(scope="module")
 def validator() -> Any:
-    return _load(VALIDATOR_PATH, "_problem_locator_validate_v3")
+    return _load(VALIDATOR_PATH, "_problem_locator_validate_v4")
 
 
 def _manifest(skill_dir: Path) -> dict[str, Any]:
@@ -111,8 +111,9 @@ def test_three_heterogeneous_specs_generate_deterministically(
     assert validator.validate_skill_directory(first.skill_dir).ok
 
     manifest = _manifest(first.skill_dir)
-    assert manifest["schema_version"] == 3
-    assert manifest["version"] == "3.1.1"
+    assert manifest["schema_version"] == 4
+    assert manifest["version"] == "4.0.0"
+    assert manifest["deployment_scope"] == "TEST_ONLY"
     assert [item["name"] for item in manifest["requirements"]] == expected_names
     assert all("required" not in item for item in manifest["requirements"])
     assert all(
@@ -126,6 +127,10 @@ def test_three_heterogeneous_specs_generate_deterministically(
         assert manifest["logparse_product"] == expected_product
 
     markdown = (first.skill_dir / "SKILL.md").read_text(encoding="utf-8")
+    assert "Agent 禁止提出或写入 `USER_RESULT`" in markdown
+    assert "problem-locator-pack-result" not in markdown
+    assert "服务端立即从已验证的" in markdown
+    assert "独立 Review PASS 后开放公开下载" in markdown
     has_after_logparse = any(
         item["stage"] == "AFTER_LOGPARSE" for item in manifest["requirements"]
     )
@@ -184,8 +189,16 @@ def test_rpc_verification_extractors_match_real_synthetic_lines_and_window(
     archive_bytes = base64.b64decode(RPC_ARCHIVE_B64.read_text(encoding="ascii"))
     with zipfile.ZipFile(io.BytesIO(archive_bytes)) as archive:
         logs = {
-            "client": archive.read("boards/slot_1/debug_20260731.log").decode("utf-8"),
-            "server": archive.read("boards/slot_2/debug_20260731.log").decode("utf-8"),
+            anchor: "\n".join(
+                f"[{ordinal:04d}] [diagnostic|{path}] {line}"
+                for ordinal, line in enumerate(
+                    archive.read(path).decode("utf-8").splitlines(), start=1
+                )
+            )
+            for anchor, path in {
+                "client": "boards/slot_1/debug_20260731.log",
+                "server": "boards/slot_2/debug_20260731.log",
+            }.items()
         }
 
     observed: dict[str, datetime] = {}
@@ -258,6 +271,22 @@ def test_optional_requirement_is_rejected(generator: Any) -> None:
     value = json.loads((SPEC_ROOT / "manual-triage.json").read_text(encoding="utf-8"))
     value["requirements"][0]["required"] = False
     with pytest.raises(ValueError, match="requirement fields"):
+        generator.GenerationSpec.from_mapping(value)
+
+
+@pytest.mark.parametrize("deployment_scope", [None, "DEVELOPMENT", 1])
+def test_deployment_scope_is_required_and_exact(
+    generator: Any,
+    deployment_scope: Any,
+) -> None:
+    value = json.loads((SPEC_ROOT / "manual-triage.json").read_text(encoding="utf-8"))
+    if deployment_scope is None:
+        del value["deployment_scope"]
+        expected = "field set"
+    else:
+        value["deployment_scope"] = deployment_scope
+        expected = "deployment_scope"
+    with pytest.raises((TypeError, ValueError), match=expected):
         generator.GenerationSpec.from_mapping(value)
 
 

@@ -1,19 +1,20 @@
 ---
 name: wiki-to-diagnosis-skill
-description: 将非敏感故障定位 Wiki 转换为通用 Problem Locator Diagnosis Skill；声明业务 requirements、Logparse 映射、事件提取器和机器验证规则，生成并校验 schema v3 diagnosis-skill.json 与 SKILL.md。用于新建或升级 diagnose-* Skill。
+description: 将非敏感故障定位 Wiki 转换为通用 Problem Locator Diagnosis Skill；声明部署范围、业务 requirements、Logparse 映射、事件提取器和机器验证规则，生成并校验 schema v4 diagnosis-skill.json 与 SKILL.md。用于新建或升级 diagnose-* Skill。
 ---
 
-# Wiki to Diagnosis Skill v3
+# Wiki to Diagnosis Skill v4
 
 本 Skill 负责业务规则生成，不修改全局 DIAGNOSE output contract，也不把某个 Fixture
-的字段提升为通用协议。生成器固定为 `3.1.1`，输入规范为 `GenerationSpec v3`，输出
-Skill 从 `3.0.0` 起，manifest 为 schema v3。
+的字段提升为通用协议。生成器固定为 `4.0.0`，输入规范为 `GenerationSpec v4`，输出
+Skill 从 `4.0.0` 起，manifest 为 schema v4。
 
 ## 开始前确认
 
 先阅读 Wiki，只确认下列会改变生成语义的信息：
 
-1. Skill id、capability、标题、摘要、范围和目标版本。
+1. Skill id、capability、标题、摘要、范围、目标版本，以及明确的
+   `deployment_scope=PRODUCTION|TEST_ONLY`。
 2. `requirements[]`：每项的 name、`INPUT|ATTACHMENT`、
    `INITIAL|AFTER_LOGPARSE`、用户提示、S00 原生 constraints 和
    `supplement_policy=NONE|MISSING_ONLY`。
@@ -46,10 +47,10 @@ Skill 从 `3.0.0` 起，manifest 为 schema v3。
   `artifact_proposal_key` 绑定 broker 返回的 LOGPARSE_RUN，使续跑复用该运行。
   仅生成 proposal、Finding 或文字说明不构成接收，也不得在续跑时重新 parse。
 
-## 构造 GenerationSpec v3
+## 构造 GenerationSpec v4
 
 优先依据 [wiki-template.md](references/wiki-template.md) 在 Wiki 的
-`## GenerationSpec v3` JSON fence 中形成完整对象。也可把同一对象保存为独立 JSON。
+`## GenerationSpec v4` JSON fence 中形成完整对象。也可把同一对象保存为独立 JSON。
 requirements、logparse_plan 与 verification_contract 是唯一机器事实源；`SKILL.md` 和
 `diagnosis-skill.json` 均从它渲染，不维护第二套业务字段。
 
@@ -99,9 +100,9 @@ python scripts/generate_diagnosis_skill.py --wiki <wiki.md> --output-root <skill
 python scripts/validate_generated_skill.py <generated-skill-dir>
 ```
 
-validator 必须确认 Canonical manifest、schema/version、requirements/logparse_plan、
-verification_contract、
-SKILL 内嵌机器块逐字一致、结果 JSON/ZIP 约束，以及非 RPC Skill 没有 RPC Fixture 字段泄漏。
+validator 必须确认 Canonical manifest、schema/version/deployment scope、
+requirements/logparse_plan、verification_contract、SKILL 内嵌机器块逐字一致、Agent 不生成
+公开用户产物，以及非 RPC Skill 没有 RPC Fixture 字段泄漏。
 
 ## 验收
 
@@ -113,9 +114,12 @@ SKILL 内嵌机器块逐字一致、结果 JSON/ZIP 约束，以及非 RPC Skill
 - 无日志人工排查：无 module、roles、attachment、logparse 和后补阶段。
 
 检查每个生成 manifest 的 requirement 集合精确隔离；错误场景字段不得出现在其他 Skill。
-生成 Skill 形成 Candidate 时必须同时生成 `diagnosis-result.json` 和受控
-`USER_RESULT_ARCHIVE/result.zip`，后者由安装的 `problem-locator-pack-result` 创建并由
-Runtime 对 Candidate 实际绑定日志逐字校验。
+生产发布目录必须至少包含一个 `PRODUCTION` Skill，并不得包含 `TEST_ONLY` Skill；测试
+harness 只能通过显式内部开关加载 `TEST_ONLY` fixture。
+
+生成 Skill 形成 Candidate 时，Agent 禁止提出或写入 `USER_RESULT`、
+`USER_RESULT_ARCHIVE`、`diagnosis-result.json`、`result.zip` 或归档请求。Runtime 在 Agent
+退出后重新验证权威证据；DIAGNOSE 草稿通过验证后由服务端立即生成并持久化用户产物，仅在独立 Review PASS 后开放公开下载。
 
 生成的 Skill 必须要求 Agent 写 `output/job_outcome.draft.json` 并以
 `problem-locator-seal-outcome-draft` 封存；正式 Outcome 只能由 Agent 退出后的服务端验证器

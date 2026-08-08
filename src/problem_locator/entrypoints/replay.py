@@ -65,7 +65,7 @@ from problem_locator.storage.atomic import (
     require_ordinary_file,
     require_real_directory,
 )
-from problem_locator.storage.layout import StorageLayout
+from problem_locator.storage.layout import StorageLayout, UnsupportedDataFormatError
 from problem_locator.storage.paths import resource_path
 from problem_locator.storage.platform import FileInstanceLock, PlatformFileSync
 from problem_locator.storage.resource_files import validate_formal_resource
@@ -107,7 +107,7 @@ class ReplayManifest(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
     schema_version: Literal[1]
-    state_schema_version: Literal[2]
+    state_schema_version: Literal[3]
     contract_revision: str
     replay_id: str
     mode: ReplayMode
@@ -272,6 +272,15 @@ def _error(code: ErrorCode, message: str) -> ApplicationError:
 
 def _fail(code: ErrorCode, message: str, stop_reason: str) -> ReplayError:
     return ReplayError(_error(code, message), stop_reason=stop_reason)
+
+
+def _initialize_replay_data_root(output_data_root: Path) -> StorageLayout:
+    """Create and mark an empty replay DATA_ROOT before copying business bytes."""
+
+    layout = StorageLayout.at(output_data_root)
+    sync = PlatformFileSync()
+    layout.initialize_v2_data_root(sync)
+    return layout
 
 
 def _write_new(path: Path, payload: bytes, *, read_only: bool = False) -> None:
@@ -474,7 +483,7 @@ def _decode_source_state(raw_bytes: bytes) -> StateFile:
     ):
         raise _fail(
             ErrorCode.STATE_SCHEMA_UNSUPPORTED,
-            "Replay accepts only the current State V2 contract.",
+            "Replay accepts only the current State V3 contract.",
             "SOURCE_STATE_SCHEMA_UNSUPPORTED",
         )
     try:
@@ -482,7 +491,7 @@ def _decode_source_state(raw_bytes: bytes) -> StateFile:
     except (TypeError, ValueError, ValidationError) as exc:
         raise _fail(
             ErrorCode.STATE_CORRUPT,
-            "Source State V2 violates its canonical contract.",
+            "Source State V3 violates its canonical contract.",
             "SOURCE_STATE_CORRUPT",
         ) from exc
 
@@ -938,7 +947,7 @@ def _source_target_outcome(
     if expected is not None and published != expected:
         raise _fail(
             ErrorCode.STATE_CORRUPT,
-            "The source target Outcome does not match State V2.",
+            "The source target Outcome does not match State V3.",
             "SOURCE_EXECUTION_RECORD_INVALID",
         )
     if (
@@ -978,7 +987,7 @@ def _build_projected_state(
     )
     now = _utc_now()
     return StateFile(
-        schema_version=2,
+        schema_version=SCHEMA_VERSION,
         contract_revision=CONTRACT_REVISION,
         generation=1,
         installation_id=replay_installation_id,
@@ -998,6 +1007,20 @@ def _prepare_projection(
     output_data_root: Path,
 ) -> tuple[StateFile, Job, ReplayManifest]:
     source_layout = StorageLayout.at(request.source_data_root)
+    try:
+        source_layout.validate_v2_data_format()
+    except UnsupportedDataFormatError as exc:
+        raise _fail(
+            ErrorCode.STATE_SCHEMA_UNSUPPORTED,
+            "The source DATA_ROOT data format is unsupported.",
+            "SOURCE_STATE_SCHEMA_UNSUPPORTED",
+        ) from exc
+    except (OSError, ValueError) as exc:
+        raise _fail(
+            ErrorCode.STATE_CORRUPT,
+            "The source DATA_ROOT data-format marker is invalid.",
+            "SOURCE_LAYOUT_INVALID",
+        ) from exc
     try:
         for directory in (
             source_layout.data_root,
@@ -1118,8 +1141,7 @@ def _prepare_projection(
         )
         configure_journey(log_file=request.output_dir / "journey.jsonl")
 
-        layout = StorageLayout.at(output_data_root)
-        layout.ensure_directories()
+        layout = _initialize_replay_data_root(output_data_root)
         for reference in resources:
             _copy_resource(request.source_data_root, output_data_root, reference)
         _copy_execution_records(
@@ -1138,7 +1160,7 @@ def _prepare_projection(
 
         manifest = ReplayManifest(
             schema_version=1,
-            state_schema_version=2,
+            state_schema_version=SCHEMA_VERSION,
             contract_revision=CONTRACT_REVISION,
             replay_id=progress.replay_id,
             mode=request.mode,

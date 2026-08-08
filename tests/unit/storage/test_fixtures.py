@@ -9,6 +9,8 @@ from jsonschema import Draft202012Validator
 from pydantic import ValidationError
 
 from problem_locator.contracts import (
+    CONTRACT_REVISION,
+    SCHEMA_VERSION,
     AttachmentFilenameSuffix,
     ErrorCode,
     FixtureManifest,
@@ -87,8 +89,8 @@ def test_valid_empty_v2_state_fixture_is_accepted() -> None:
     payload = parse_canonical_json_bytes(_fixture_bytes("state/valid-empty-v2.json"))
     _schema_validator(STATE_SCHEMA_PATH).validate(payload)
     state = StateFile.model_validate(payload)
-    assert state.schema_version == 2
-    assert state.contract_revision == "v2-contract-r1"
+    assert state.schema_version == SCHEMA_VERSION == 3
+    assert state.contract_revision == CONTRACT_REVISION == "v3-contract-r1"
     assert state.generation == 1
     assert state.runtime_epochs == []
     assert state.recovery_processing_records == {}

@@ -47,6 +47,23 @@ time window against the fixed
 event ordering, and every causal edge. Temporal proximity or a plausible narrative
 is not causal proof.
 
+For every `EVENT_TIME_WINDOW`, calculate the lower bound as
+`problem_time - before_ms` and the upper bound as `problem_time + after_ms`; never
+swap the two parameter names or add `before_ms`. For example,
+`problem_time=2026-07-31T00:00:03.000Z`, `before_ms=3500`, and `after_ms=500`
+produce `[2026-07-30T23:59:59.500Z, 2026-07-31T00:00:03.500Z]`. Therefore an
+event at `2026-07-31T00:00:00.100Z` is 2900ms before the problem time and is
+inside that example window.
+
+`fact_refs` must also follow the Skill rule kind exactly because the service compares
+them with its independently derived inputs: a `FACT_FIELD_EQUALS` rule lists only
+the one matched user-fact item ID; an `EVENT_TIME_WINDOW` rule lists only its
+`USER_FACT` reference item ID (or is empty for `SKILL_FIXED`); every other rule kind,
+including `EVENT_PRESENT`, `ROLE_COVERAGE`, `CROSS_ROLE_CORRELATION`, `EVENT_ORDER`,
+and `SEMANTIC_CAUSALITY`, has `fact_refs=[]`. A semantic explanation may mention
+values already established by prerequisite rules, but must not attach those fact IDs
+to the semantic claim.
+
 `PASS` is allowed only when every rule is independently supported and all four
 problem arrays are empty. Missing required Evidence, a time/fact/role/correlation/order
 mismatch, conflicting Evidence, an unsupported causal edge, or any UNKNOWN claim

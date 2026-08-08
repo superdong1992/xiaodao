@@ -44,6 +44,7 @@ from problem_locator.contracts import (
     canonical_json_bytes,
 )
 from problem_locator.domain import DomainCoordinator, PureContextSnapshotProjector
+from problem_locator.integrations.result_archive import build_result_archive
 from problem_locator.storage.coordination import (
     AttachmentUploadRegistry,
     InProcessAttachmentUploadGuard,
@@ -74,7 +75,7 @@ USER_FACT_TRIGGER_ID = "00000000-0000-0000-0000-000000000031"
 DIAGNOSE_EPOCH = "00000000-0000-0000-0000-000000000090"
 REVIEW_EPOCH = "00000000-0000-0000-0000-000000000091"
 USER_RESULT_SHA256 = (
-    "37ee245a8ae705561575e2c353fd1cc4e2a57653ed05d095f4d2292c287cdf09"
+    "f007959ca610e60f2b57cf30c3b91f740a87b7ea3a05b5fb103f302d3a0e9a22"
 )
 
 
@@ -196,9 +197,9 @@ def _candidate_outcome_with_real_resources(
     source: Job,
     attachment: Attachment,
     tmp_path: Path,
-) -> tuple[JobOutcome, bytes]:
+) -> tuple[JobOutcome, dict[ArtifactKind, bytes]]:
     result_bytes = (FIXTURES / "user-result.json").read_bytes()
-    assert len(result_bytes) == 622
+    assert len(result_bytes) == 1604
     assert hashlib.sha256(result_bytes).hexdigest() == USER_RESULT_SHA256
     user_result = resources.stage_file(
         source.job_id,
@@ -206,6 +207,18 @@ def _candidate_outcome_with_real_resources(
         InMemoryBinaryStream(result_bytes),
         expected_size=len(result_bytes),
         expected_sha256=USER_RESULT_SHA256,
+    )
+    archive_bytes = build_result_archive(
+        UserResultPayload.model_validate_json(result_bytes),
+        problem_time=None,
+        target_logs=(),
+    )
+    user_result_archive = resources.stage_file(
+        source.job_id,
+        "user_result_archive",
+        InMemoryBinaryStream(archive_bytes),
+        expected_size=len(archive_bytes),
+        expected_sha256=hashlib.sha256(archive_bytes).hexdigest(),
     )
 
     logparse_tree = tmp_path / "logparse-result"
@@ -262,9 +275,17 @@ def _candidate_outcome_with_real_resources(
     )
 
     payload = _fixture("job-outcome-diagnosis.json")
-    payload["proposed_artifacts"][0]["staged_resource_ref"] = (
-        user_result.model_dump(mode="python")
-    )
+    staged_results = {
+        user_result.proposal_key: user_result,
+        user_result_archive.proposal_key: user_result_archive,
+    }
+    for proposal in payload["proposed_artifacts"]:
+        staged = staged_results[proposal["proposal_key"]]
+        proposal.update(
+            size=staged.size,
+            sha256=staged.sha256,
+            staged_resource_ref=staged.model_dump(mode="python"),
+        )
     payload["proposed_artifacts"].append(
         logparse_proposal.model_dump(mode="python")
     )
@@ -277,7 +298,10 @@ def _candidate_outcome_with_real_resources(
             evidence_proposal_key=logparse_evidence.proposal_key,
         ).model_dump(mode="python")
     )
-    return JobOutcome.model_validate(payload), result_bytes
+    return JobOutcome.model_validate(payload), {
+        ArtifactKind.USER_RESULT: result_bytes,
+        ArtifactKind.USER_RESULT_ARCHIVE: archive_bytes,
+    }
 
 
 def _review_pass_outcome(review_job: Job) -> JobOutcome:
@@ -311,7 +335,7 @@ def test_r12_r14_candidate_review_download_and_restart_are_one_durable_path(
 ) -> None:
     data_root = tmp_path / "data"
     layout = StorageLayout.at(data_root)
-    layout.ensure_directories()
+    layout.initialize_v2_data_root()
     coordination_lock = StorageCoordinationLock()
     attachment_registry = AttachmentUploadRegistry()
     publication_guard = InProcessPublicationCommitGuard(coordination_lock)
@@ -368,7 +392,7 @@ def test_r12_r14_candidate_review_download_and_restart_are_one_durable_path(
     claim = service.claim_job(source.job_id, DIAGNOSE_EPOCH)
     assert claim.claimed is True
     assert claim.job is not None and claim.job.status is JobStatus.RUNNING
-    outcome, expected_result_bytes = _candidate_outcome_with_real_resources(
+    outcome, expected_result_bodies = _candidate_outcome_with_real_resources(
         resources,
         claim.job,
         attachment,
@@ -395,13 +419,27 @@ def test_r12_r14_candidate_review_download_and_restart_are_one_durable_path(
     ]
     assert len(user_results) == 1
     user_result = user_results[0]
+    result_archives = [
+        artifact
+        for artifact in candidate_state.artifacts.values()
+        if artifact.kind is ArtifactKind.USER_RESULT_ARCHIVE
+    ]
+    assert len(result_archives) == 1
+    result_archive = result_archives[0]
     assert user_result.created_by_job_id == candidate.proposed_by_job_id
-    assert user_result.size == 622
+    assert result_archive.created_by_job_id == candidate.proposed_by_job_id
+    assert user_result.size == len(expected_result_bodies[ArtifactKind.USER_RESULT])
     assert user_result.sha256 == USER_RESULT_SHA256
-    assert user_result.metadata.schema_version == 1
-    assert user_result.metadata.format_id == "problem-locator-diagnosis-v1"
+    assert user_result.metadata.schema_version == 2
+    assert user_result.metadata.format_id == "problem-locator-diagnosis-v2"
+    assert result_archive.size == len(
+        expected_result_bodies[ArtifactKind.USER_RESULT_ARCHIVE]
+    )
+    assert result_archive.metadata.schema_version == 2
+    assert result_archive.metadata.format_id == "problem-locator-result-archive-v2"
     processing = candidate_state.outcome_processing_records[outcome.outcome_id]
     assert processing.accepted_artifact_ids.count(user_result.artifact_id) == 1
+    assert processing.accepted_artifact_ids.count(result_archive.artifact_id) == 1
     logparse_runs = [
         artifact
         for artifact in candidate_state.artifacts.values()
@@ -412,6 +450,7 @@ def test_r12_r14_candidate_review_download_and_restart_are_one_durable_path(
     internal = service.list_artifacts(CASE_ID, include_internal=True).artifacts
     assert {item.artifact_id for item in internal} == {
         user_result.artifact_id,
+        result_archive.artifact_id,
         logparse_runs[0].artifact_id,
     }
     with pytest.raises(ApplicationPortError) as hidden:
@@ -447,9 +486,9 @@ def test_r12_r14_candidate_review_download_and_restart_are_one_durable_path(
     assert resolved.final_result is not None
     assert resolved.final_result.status is CandidateStatus.ACCEPTED
     assert resolved.final_result.conclusion_id == candidate.conclusion_id
-    assert [
+    assert {
         item.artifact_id for item in service.list_artifacts(CASE_ID).artifacts
-    ] == [user_result.artifact_id]
+    } == {user_result.artifact_id, result_archive.artifact_id}
 
     restart_lock = StorageCoordinationLock()
     restarted_records = FileExecutionRecordStore(data_root, restart_lock)
@@ -490,16 +529,16 @@ def test_r12_r14_candidate_review_download_and_restart_are_one_durable_path(
     assert restarted_snapshot.case.final_result.status is CandidateStatus.ACCEPTED
     opened = restarted_service.open_artifact(CASE_ID, user_result.artifact_id)
     try:
-        downloaded = opened.stream.read(623)
+        downloaded = opened.stream.read(user_result.size + 1)
         assert opened.stream.read(1) == b""
     finally:
         opened.stream.close()
-    assert downloaded == expected_result_bytes
-    assert len(downloaded) == 622
+    assert downloaded == expected_result_bodies[ArtifactKind.USER_RESULT]
+    assert len(downloaded) == 1604
     assert hashlib.sha256(downloaded).hexdigest() == USER_RESULT_SHA256
     payload = UserResultPayload.model_validate_json(downloaded)
     assert payload.problem_statement == restarted_view.problem_spec.statement
-    assert payload.candidate_statement == restarted_view.final_result.statement
+    assert payload.root_cause == restarted_view.final_result.statement
     assert [
         binding.existing_evidence_id
         for binding in payload.supporting_evidence_bindings
@@ -514,4 +553,16 @@ def test_r12_r14_candidate_review_download_and_restart_are_one_durable_path(
     ] == [
         item.evidence_refs
         for item in restarted_view.final_result.completion_criteria_mapping
+    ]
+    opened_archive = restarted_service.open_artifact(
+        CASE_ID,
+        result_archive.artifact_id,
+    )
+    try:
+        downloaded_archive = opened_archive.stream.read(result_archive.size + 1)
+        assert opened_archive.stream.read(1) == b""
+    finally:
+        opened_archive.stream.close()
+    assert downloaded_archive == expected_result_bodies[
+        ArtifactKind.USER_RESULT_ARCHIVE
     ]

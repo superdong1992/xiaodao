@@ -31,16 +31,12 @@ class AgentJsonSurface(StrEnum):
 
     JOB_OUTCOME = "job_outcome"
     LOGPARSE_REQUEST = "logparse_request"
-    RESULT_ARCHIVE_REQUEST = "result_archive_request"
-    USER_RESULT = "user_result"
 
 
 AGENT_JSON_SURFACE_OWNERS: Mapping[AgentJsonSurface, str] = MappingProxyType(
     {
         AgentJsonSurface.JOB_OUTCOME: "problem-locator-seal-outcome-draft",
         AgentJsonSurface.LOGPARSE_REQUEST: "problem-locator-logparse",
-        AgentJsonSurface.RESULT_ARCHIVE_REQUEST: "problem-locator-pack-result",
-        AgentJsonSurface.USER_RESULT: "problem-locator-seal-outcome-draft",
     }
 )
 

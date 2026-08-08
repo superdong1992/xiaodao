@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from problem_locator.contracts.serialization import canonical_json_bytes
-from problem_locator.storage.layout import StorageLayout
+from problem_locator.storage.layout import DATA_FORMAT_MARKER_BYTES, StorageLayout
 from problem_locator.storage.streams import FileBinaryStream, copy_binary_stream, hash_file
 from problem_locator.storage.tree import inspect_tree, verify_tree
 from tests.unit.storage.fakes import FakeFileSync
@@ -299,6 +299,26 @@ def test_layout_directory_parent_sync_failure_is_reapplied_on_retry(
         tmp_path,
         tmp_path,
     ]
+
+
+def test_data_format_marker_sync_failure_retries_before_layout_creation(
+    tmp_path: Path,
+) -> None:
+    data_root = tmp_path / "data"
+    data_root.mkdir()
+    layout = StorageLayout.at(data_root)
+    sync = FakeFileSync()
+    sync.fail_next("sync_directory", OSError("marker parent sync failed"))
+
+    with pytest.raises(OSError, match="marker parent sync failed"):
+        layout.initialize_v2_data_root(sync)
+
+    assert layout.data_format_marker.read_bytes() == DATA_FORMAT_MARKER_BYTES
+    assert not layout.resources.exists()
+
+    layout.initialize_v2_data_root(sync)
+    assert layout.resources.is_dir()
+    assert layout.data_format_marker.read_bytes() == DATA_FORMAT_MARKER_BYTES
 
 
 def test_layout_detects_job_or_previous_state_and_rejects_symlink_nodes(

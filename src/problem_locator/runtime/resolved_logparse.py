@@ -26,8 +26,8 @@ def _manifest(assets: ResolvedJobAssets) -> dict[str, Any]:
         raise ValueError("logparse Job requires a pinned diagnosis Skill")
     path = Path(assets.skill.root_path) / "diagnosis-skill.json"
     value = json.loads(path.read_bytes().decode("utf-8"))
-    if not isinstance(value, dict) or value.get("schema_version") != 3:
-        raise ValueError("diagnosis Skill manifest v3 is required")
+    if not isinstance(value, dict) or value.get("schema_version") != 4:
+        raise ValueError("diagnosis Skill manifest v4 is required")
     return value
 
 

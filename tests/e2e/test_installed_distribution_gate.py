@@ -26,7 +26,7 @@ from problem_locator.contracts import (
 
 ROOT = Path(__file__).resolve().parents[2]
 TAKEOVER_PRODUCT_HASH = (
-    "671a591bb7c7857bc5d1e49fab433129668ea1d98cfc05b41ef2afb77f6f0764"
+    "eaa059e98e2fde9b923e0bce3e860422b2944aeabe939b57920793f70337b618"
 )
 OFFICIAL_KEYS = {
     "BIND_HOST",
@@ -43,7 +43,7 @@ EXPECTED_RUNTIME_VERSIONS = {
     "fastapi": "0.139.2",
     "httpx": "0.28.1",
     "mcp": "1.29.0",
-    "problem-locator": "1.0.7",
+    "problem-locator": "2.0.0",
     "pydantic": "2.13.4",
     "python-dotenv": "1.2.2",
     "starlette": "1.3.1",
@@ -593,12 +593,15 @@ def test_clean_installed_distribution_import_cli_and_server_gate(
     creationflags = 0
     if os.name == "nt":
         creationflags = subprocess.CREATE_NEW_PROCESS_GROUP
+    launcher = Path("/evidence/test_service_launcher.py")
+    if not launcher.is_file():
+        launcher = ROOT / "tools/e2e/harness/test_service_launcher.py"
+    assert launcher.is_file()
     process = subprocess.Popen(
         [
             os.fspath(installed_python),
             "-I",
-            "-m",
-            "problem_locator",
+            os.fspath(launcher),
             "serve",
             "--env-file",
             os.fspath(env_file),

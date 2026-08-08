@@ -16,7 +16,14 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 SKILL_ROOT = REPO_ROOT / ".claude" / "skills"
 GENERATOR_SKILL = SKILL_ROOT / "wiki-to-diagnosis-skill"
 LOGPARSE_SKILL = SKILL_ROOT / "logparse-diagnose"
-TAKEOVER_SKILL = SKILL_ROOT / "diagnose-service-takeover"
+TAKEOVER_SKILL = (
+    REPO_ROOT
+    / "tests"
+    / "fixtures"
+    / "components"
+    / "diagnosis-generator"
+    / "diagnose-service-takeover"
+)
 SPEC_ROOT = (
     REPO_ROOT / "tests" / "fixtures" / "components" / "diagnosis-generator" / "specs"
 )
@@ -76,7 +83,7 @@ def test_all_three_skill_frontmatters_have_only_name_and_description() -> None:
         assert body.strip()
 
 
-def test_diagnosis_manifest_v3_is_exact_canonical_and_spec_owned() -> None:
+def test_diagnosis_manifest_v4_is_exact_canonical_and_spec_owned() -> None:
     spec = _json(SPEC_ROOT / "rpc-service-takeover.json")
     requirements = json.loads(json.dumps(spec["requirements"]))
     logparse_attachment = spec["logparse_plan"]["attachment_requirement"]
@@ -96,6 +103,7 @@ def test_diagnosis_manifest_v3_is_exact_canonical_and_spec_owned() -> None:
             "id",
             "version",
             "capability",
+            "deployment_scope",
             "summary",
             "requires_logparse",
             "logparse_plan",
@@ -118,8 +126,8 @@ def test_diagnosis_manifest_v3_is_exact_canonical_and_spec_owned() -> None:
 
     generated = _text(TAKEOVER_SKILL / "SKILL.md")
     embedded = generated.split(
-        "<!-- DIAGNOSIS_SKILL_MANIFEST_V3_BEGIN -->\n```json\n", 1
-    )[1].split("\n```\n<!-- DIAGNOSIS_SKILL_MANIFEST_V3_END -->", 1)[0]
+        "<!-- DIAGNOSIS_SKILL_MANIFEST_V4_BEGIN -->\n```json\n", 1
+    )[1].split("\n```\n<!-- DIAGNOSIS_SKILL_MANIFEST_V4_END -->", 1)[0]
     assert embedded.encode("utf-8") + b"\n" == payload
 
 
@@ -293,35 +301,21 @@ def test_logparse_run_metadata_has_one_strict_field_set() -> None:
         assert "logparse_run_artifact_draft" in document
 
 
-def test_candidate_requires_exact_json_and_result_archive_pair() -> None:
+def test_agent_candidate_forbids_public_result_artifacts() -> None:
     generator_contract = _text(
         GENERATOR_SKILL / "references" / "generated-skill-contract.md"
     )
     generated_skill = _text(TAKEOVER_SKILL / "SKILL.md")
-    generic_values = (
-        "USER_RESULT",
-        "USER_RESULT_ARCHIVE",
-        "result.zip",
-        "result.txt",
-        "target-log-001.log",
-    )
-    assert "唯一 `USER_RESULT`" in generator_contract
-    assert "唯一\n`USER_RESULT_ARCHIVE`" in generator_contract
-    assert "必须恰好提出以下两个 FILE Artifact" in generated_skill
+    generic_values = ("USER_RESULT", "USER_RESULT_ARCHIVE", "result.zip")
     for document in (generator_contract, generated_skill):
-        assert "REVIEW PASS" in document.upper()
+        assert "Agent 禁止提出或写入" in document
+        assert "独立 Review PASS 后开放公开下载" in document
+        assert "problem-locator-pack-result" not in document
         for value in generic_values:
             assert value in document
-    for value in (
-        "diagnosis-result.json",
-        "application/zip",
-        "problem-locator-result-archive-v1",
-    ):
-        assert value in generated_skill
-    assert "problem-locator-pack-result" in generated_skill
-    assert "无日志场景传空数组" in generated_skill
-    assert "禁止直接复制或沿用 `target-logs`" in generated_skill
-    assert "禁止直接沿用 broker anchor 顺序" in generator_contract
+    assert "服务端立即从已验证的" in generated_skill
+    assert "diagnosis-result.json" in generated_skill
+    assert "只提交 Candidate" in generated_skill
 
 
 def test_skills_define_no_private_errors_direct_cli_or_raw_capabilities() -> None:

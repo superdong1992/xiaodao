@@ -2,9 +2,9 @@
 set -euo pipefail
 
 export PYTHONPYCACHEPREFIX=/tmp/attempt52-pycache
-expected_product=671a591bb7c7857bc5d1e49fab433129668ea1d98cfc05b41ef2afb77f6f0764
-expected_skill_md=4b0a4fe41172c67b2858cc43707418fcd57b1aa9638f033acd073bf45d283b8c
-expected_skill_json=f91abf8cf25aa5e05f4c8b3f450d4a6fbcbd1b628499a8096f9005baafab59dd
+expected_product=eaa059e98e2fde9b923e0bce3e860422b2944aeabe939b57920793f70337b618
+expected_skill_md=3242e391567fa25510d1bd51899a9b76bda16214b8dd8e2bca0b86e67e7cd264
+expected_skill_json=edf89f6d2a04ae53a666b79c229914a2d7bc86eec3a1dce7918df88aa7f48282
 
 test ! -e /opt/e2e-skills
 /opt/venvs/xiaodao/bin/python -X utf8 \
@@ -13,7 +13,7 @@ test ! -e /opt/e2e-skills
   --output-root /opt/e2e-skills \
   > /evidence/skill-generator-receipt.json
 grep -Fq '"created":true' /evidence/skill-generator-receipt.json
-grep -Fq '"product_sha256":"671a591bb7c7857bc5d1e49fab433129668ea1d98cfc05b41ef2afb77f6f0764"' \
+grep -Fq '"product_sha256":"eaa059e98e2fde9b923e0bce3e860422b2944aeabe939b57920793f70337b618"' \
   /evidence/skill-generator-receipt.json
 test "$(find /opt/e2e-skills/diagnose-service-takeover -type f | wc -l)" -eq 2
 test "$(find /opt/e2e-skills/diagnose-service-takeover -type f -exec stat -c %h '{}' + | sort -u)" = '1'
@@ -21,10 +21,10 @@ test "$(sha256sum /opt/e2e-skills/diagnose-service-takeover/SKILL.md | awk '{pri
 test "$(sha256sum /opt/e2e-skills/diagnose-service-takeover/diagnosis-skill.json | awk '{print $1}')" = "$expected_skill_json"
 cmp \
   /opt/e2e-skills/diagnose-service-takeover/SKILL.md \
-  /opt/src/xiaodao/.claude/skills/diagnose-service-takeover/SKILL.md
+  /opt/src/xiaodao/tests/fixtures/components/diagnosis-generator/diagnose-service-takeover/SKILL.md
 cmp \
   /opt/e2e-skills/diagnose-service-takeover/diagnosis-skill.json \
-  /opt/src/xiaodao/.claude/skills/diagnose-service-takeover/diagnosis-skill.json
+  /opt/src/xiaodao/tests/fixtures/components/diagnosis-generator/diagnose-service-takeover/diagnosis-skill.json
 /opt/venvs/xiaodao/bin/python \
   /opt/src/xiaodao/.claude/skills/wiki-to-diagnosis-skill/scripts/validate_generated_skill.py \
   /opt/e2e-skills/diagnose-service-takeover \
@@ -51,7 +51,8 @@ test "$(sha256sum /opt/e2e-skills/diagnose-service-takeover/diagnosis-skill.json
 {
   printf 'skill_path=/opt/e2e-skills/diagnose-service-takeover\n'
   printf 'skill_generation_mode=live-generator-from-wiki\n'
-  printf 'skill_generator_version=3.1.0\n'
+  printf 'skill_generator_version=4.0.0\n'
+  printf 'skill_deployment_scope=TEST_ONLY\n'
   printf 'skill_capability=service-takeover\n'
   printf 'skill_summary=定位合成服务接管场景中的 RPC 超时\n'
   printf 'skill_logparse_product=compact\n'

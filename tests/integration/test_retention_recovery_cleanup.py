@@ -150,7 +150,7 @@ def test_applied_candidate_stages_expire_without_deleting_formal_state(
 ) -> None:
     data_root = tmp_path / "data"
     layout = StorageLayout.at(data_root)
-    layout.ensure_directories()
+    layout.initialize_v2_data_root()
     lock = StorageCoordinationLock()
     publication_guard = InProcessPublicationCommitGuard(lock)
     attachment_registry = AttachmentUploadRegistry()
@@ -220,7 +220,7 @@ def test_applied_candidate_stages_expire_without_deleting_formal_state(
         "00000000-0000-0000-0000-000000000890",
     )
     assert claim.claimed is True and claim.job is not None
-    outcome, user_result_bytes = _candidate_outcome_with_real_resources(
+    outcome, result_bytes = _candidate_outcome_with_real_resources(
         resources,
         claim.job,
         attachment,
@@ -250,11 +250,15 @@ def test_applied_candidate_stages_expire_without_deleting_formal_state(
             proposal.size,
             proposal.sha256,
         )
-        if proposal.artifact_kind is ArtifactKind.USER_RESULT:
+        if proposal.artifact_kind in {
+            ArtifactKind.USER_RESULT,
+            ArtifactKind.USER_RESULT_ARCHIVE,
+        }:
+            result_payload = result_bytes[proposal.artifact_kind]
             prepublished_stage = resources.stage_file(
                 source.job_id,
                 f"prepublish_{proposal.proposal_key}",
-                InMemoryBinaryStream(user_result_bytes),
+                InMemoryBinaryStream(result_payload),
                 expected_size=proposal.size,
                 expected_sha256=proposal.sha256,
             )

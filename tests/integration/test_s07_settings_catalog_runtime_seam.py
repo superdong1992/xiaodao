@@ -22,12 +22,12 @@ from tests.contracts.fakes import (
 
 
 ROOT = Path(__file__).resolve().parents[2]
-SKILL_DIR = ROOT / ".claude/skills"
+SKILL_DIR = ROOT / "tests/fixtures/components/diagnosis-generator"
 FAKE_LOGPARSE_REPO = ROOT / "tests/fixtures/components/logparse/fake/repo"
 FAKE_LOGPARSE_CONFIG = FAKE_LOGPARSE_REPO / "config.yaml"
 TAKEOVER_SKILL_ID = "diagnosis-skill/diagnose-service-takeover"
 TAKEOVER_PRODUCT_HASH = (
-    "f2eec9d3a874c8c0aaff013103424058f6a3d985f738edc71c2b40be2fd01768"
+    "eaa059e98e2fde9b923e0bce3e860422b2944aeabe939b57920793f70337b618"
 )
 
 
@@ -67,6 +67,7 @@ def test_settings_pin_one_s07_pair_into_s04_catalog_and_runtime(tmp_path: Path) 
         skill_dir=settings.skill_dir,
         logparse_tool=logparse_asset,
         logparse_broker_factory=broker_factory,
+        allow_test_skills=True,
     )
     route_bindings = catalog.route_bindings()
     takeover_ref = next(
@@ -74,7 +75,7 @@ def test_settings_pin_one_s07_pair_into_s04_catalog_and_runtime(tmp_path: Path) 
         for ref in route_bindings.available_skill_refs
         if ref.id == TAKEOVER_SKILL_ID
     )
-    assert takeover_ref.version == "3.1.1"
+    assert takeover_ref.version == "4.0.0"
     assert (
         hash_product_directory(settings.skill_dir / "diagnose-service-takeover")
         == TAKEOVER_PRODUCT_HASH

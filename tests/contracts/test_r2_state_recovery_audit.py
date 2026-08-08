@@ -320,7 +320,7 @@ def test_state_export_counts_recovery_processing_records() -> None:
         _state_payload({RECOVERY_ID: record.model_dump(mode="python")})
     )
     payload = {
-        "export_schema_version": 2,
+        "export_schema_version": SCHEMA_VERSION,
         "schema_version": SCHEMA_VERSION,
         "contract_revision": CONTRACT_REVISION,
         "source_generation": state.generation,

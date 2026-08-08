@@ -59,6 +59,12 @@ def is_artifact_downloadable(case: Case, artifact: Artifact) -> bool:
         ArtifactKind.USER_RESULT_ARCHIVE,
     }:
         raise ValueError("Artifact has an unsupported kind")
+    if (
+        artifact.kind is ArtifactKind.USER_RESULT
+        and case.status is CaseStatus.UNRESOLVED
+        and case.unresolved_result is not None
+    ):
+        return artifact.artifact_id == case.unresolved_result.user_result_artifact_id
     return (
         case.status is CaseStatus.RESOLVED
         and case.final_result is not None

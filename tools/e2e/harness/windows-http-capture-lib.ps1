@@ -468,8 +468,8 @@ function Assert-HcSelectedSkill {
     param($Skill, [Parameter(Mandatory = $true)][string]$Label)
     Assert-HcExactProperties $Skill @('id', 'version', 'content_hash') $Label
     Assert-Hc ((Get-HcStringProperty $Skill 'id') -ceq 'diagnosis-skill/diagnose-service-takeover') "$Label id"
-    Assert-Hc ((Get-HcStringProperty $Skill 'version') -ceq '3.1.0') "$Label version"
-    Assert-Hc ((Get-HcStringProperty $Skill 'content_hash') -ceq '671a591bb7c7857bc5d1e49fab433129668ea1d98cfc05b41ef2afb77f6f0764') "$Label content hash"
+    Assert-Hc ((Get-HcStringProperty $Skill 'version') -ceq '4.0.0') "$Label version"
+    Assert-Hc ((Get-HcStringProperty $Skill 'content_hash') -ceq 'eaa059e98e2fde9b923e0bce3e860422b2944aeabe939b57920793f70337b618') "$Label content hash"
 }
 
 function Assert-HcFinalResult {
@@ -511,9 +511,11 @@ function Assert-HcArtifactView {
         [Parameter(Mandatory = $true)][string]$ExpectedContentType,
         [Parameter(Mandatory = $true)][string]$Label
     )
-    Assert-HcExactProperties $Artifact @('artifact_id', 'name', 'content_type', 'size', 'sha256', 'created_at', 'download_url') $Label
+    Assert-HcExactProperties $Artifact @('artifact_id', 'kind', 'name', 'content_type', 'size', 'sha256', 'created_at', 'download_url') $Label
     $artifactId = Get-HcStringProperty $Artifact 'artifact_id'
     Assert-HcUuid $artifactId "$Label artifact_id"
+    $expectedKind = if ($ExpectedName -ceq 'diagnosis-result.json') { 'USER_RESULT' } else { 'USER_RESULT_ARCHIVE' }
+    Assert-Hc ((Get-HcStringProperty $Artifact 'kind') -ceq $expectedKind) "$Label kind"
     Assert-Hc ((Get-HcStringProperty $Artifact 'name') -ceq $ExpectedName) "$Label name"
     Assert-Hc ((Get-HcStringProperty $Artifact 'content_type') -ceq $ExpectedContentType) "$Label content type"
     $size = Get-HcIntegerProperty $Artifact 'size'
@@ -873,8 +875,8 @@ function Read-HcInternalLogparseArtifact {
     param([Parameter(Mandatory = $true)][string]$EvidenceRoot, [Parameter(Mandatory = $true)][string]$ExpectedCaseId)
     $export = Read-HcCanonicalJson -Path (Join-Path $EvidenceRoot 'state-export.before.json') -Label 'before StateExport'
     Assert-HcExactProperties $export @('export_schema_version', 'schema_version', 'contract_revision', 'source_generation', 'installation_id', 'object_counts', 'state', 'resources') 'StateExport'
-    Assert-Hc ((Get-HcIntegerProperty $export 'export_schema_version') -eq 1) 'StateExport export_schema_version'
-    Assert-Hc ((Get-HcIntegerProperty $export 'schema_version') -eq 1) 'StateExport schema_version'
+    Assert-Hc ((Get-HcIntegerProperty $export 'export_schema_version') -eq 3) 'StateExport export_schema_version'
+    Assert-Hc ((Get-HcIntegerProperty $export 'schema_version') -eq 3) 'StateExport schema_version'
     Assert-Hc (-not [string]::IsNullOrWhiteSpace((Get-HcStringProperty $export 'contract_revision'))) 'StateExport contract_revision'
     Assert-Hc ((Get-HcIntegerProperty $export 'source_generation') -gt 0) 'StateExport source_generation'
     Assert-HcUuid (Get-HcStringProperty $export 'installation_id') 'StateExport installation_id'
@@ -885,7 +887,7 @@ function Read-HcInternalLogparseArtifact {
     Assert-Hc ((Get-HcIntegerProperty $counts 'execution_failure_records') -eq 0) 'StateExport execution failure count'
     $state = Get-HcProperty $export 'state' -Required
     Assert-HcExactProperties $state @('schema_version', 'contract_revision', 'generation', 'installation_id', 'created_at', 'updated_at', 'runtime_epochs', 'recovery_processing_records', 'cases', 'idempotency_records') 'StateFile'
-    Assert-Hc ((Get-HcIntegerProperty $state 'schema_version') -eq 1) 'StateFile schema_version'
+    Assert-Hc ((Get-HcIntegerProperty $state 'schema_version') -eq 3) 'StateFile schema_version'
     Assert-Hc ((Get-HcStringProperty $state 'contract_revision') -ceq (Get-HcStringProperty $export 'contract_revision')) 'StateFile contract revision'
     Assert-Hc ((Get-HcIntegerProperty $state 'generation') -eq (Get-HcIntegerProperty $export 'source_generation')) 'StateFile generation'
     Assert-Hc ((Get-HcStringProperty $state 'installation_id') -ceq (Get-HcStringProperty $export 'installation_id')) 'StateFile installation ID'

@@ -1,14 +1,15 @@
 {
   "capability": "manual-service-triage",
+  "deployment_scope": "PRODUCTION",
   "entry_document": "SKILL.md",
   "id": "manual-triage",
   "logparse_plan": null,
   "requirements": [],
   "requires_logparse": false,
-  "schema_version": 3,
+  "schema_version": 4,
   "summary": "Diagnose a service incident from structured facts and existing evidence.",
   "tool_bundle_id": "tool-bundle/diagnose",
-  "version": "3.0.0",
+  "version": "4.0.0",
   "verification_contract": {
     "schema_version": 1,
     "event_extractors": [],

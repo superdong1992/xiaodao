@@ -19,6 +19,7 @@ from fastapi.testclient import TestClient
 
 from problem_locator.application import build_application_service
 from problem_locator.contracts import (
+    AgentJobOutcomeDraftV2,
     ArtifactKind,
     AttachmentStatus,
     CandidateStatus,
@@ -40,6 +41,7 @@ from problem_locator.interfaces.http_app import create_http_app
 from problem_locator.interfaces.mcp_server import McpAdapter
 from problem_locator.runtime.agent_backend import AgentBackend, BackendExecutionLimits
 from problem_locator.runtime.catalog import VersionedAssetCatalog
+from problem_locator.runtime.context_policy import RuntimeAssetResolver
 from problem_locator.runtime.diagnosis_runtime import DiagnosisRuntime
 from problem_locator.runtime.workspace import WorkspaceManager
 from problem_locator.storage.coordination import (
@@ -50,6 +52,7 @@ from problem_locator.storage.coordination import (
 )
 from problem_locator.storage.execution_records import FileExecutionRecordStore
 from problem_locator.storage.layout import StorageLayout
+from problem_locator.storage.platform import PlatformFileSync
 from problem_locator.storage.resource_store import FileResourceStore
 from problem_locator.storage.state_repository import JsonFileStateRepository
 from tests.contracts.fakes import (
@@ -65,20 +68,17 @@ ROOT = Path(__file__).resolve().parents[2]
 FIXTURES = ROOT / "tests/fixtures/rpc_timeout"
 FAKE_AGENT = FIXTURES / "fake_agent.py"
 ARCHIVE = FIXTURES / "payment-inventory-rpc.zip"
-EXPECTED_USER_RESULT = FIXTURES / "expected-user-result.json"
 EXPECTED_PARSE_MANIFEST = FIXTURES / "expected-parse-manifest.json"
 EXPECTED_TARGET_LOGS = FIXTURES / "expected-target-logs.json"
 EXPECTED_PARSE_COUNTER = FIXTURES / "expected-parse-counter.json"
+CROSS_PROJECT_EXPERIENCE = FIXTURES / "cross-project-result-experience.json"
 FAKE_LOGPARSE_REPO = ROOT / "tests/fixtures/components/logparse/fake/repo"
 FAKE_LOGPARSE_CONFIG = FAKE_LOGPARSE_REPO / "config.yaml"
-SKILL_DIR = ROOT / ".claude/skills"
+SKILL_DIR = ROOT / "tests/fixtures/components/diagnosis-generator"
 EVIDENCE_IDS = [
     "00000000-0000-0000-0000-000000000040",
     "00000000-0000-0000-0000-000000000041",
 ]
-EXPECTED_USER_RESULT_SHA256 = (
-    "db119c5aafd87c17e6e15a33f61ee20e1e089f26420146b30cc61a6c62eeed39"
-)
 ARCHIVE_BYTES_MARKER = b"synthetic payment-to-inventory RPC timeout archive"
 RAW_LOGPARSE_ENV = {
     "LOGPARSE_REPO": "s08-raw-logparse-repo-sentinel",
@@ -95,13 +95,13 @@ PARAMETER_GROUP_A = {
     "rpc_method": "ReserveStock",
     "problem_time": "2026-07-31T00:00:03.000Z",
 }
-RPC_CLIENT_LOG = (
+RAW_RPC_CLIENT_LOG = (
     "2026-07-31T00:00:03.000Z COMPACT payment-service "
     "proc=checkout-client-101 slot 1 cpu 0 |No[1] rpc deadline exceeded "
     "after 3000ms server=inventory-service method=ReserveStock "
     "order_id=synthetic-order-0001\n"
 )
-RPC_SERVER_LOG = (
+RAW_RPC_SERVER_LOG = (
     "2026-07-31T00:00:00.100Z COMPACT inventory-service "
     "proc=inventory-server-202 slot 2 cpu 0 |No[2] service takeover active; "
     "rpc request accepted method=ReserveStock order_id=synthetic-order-0001\n"
@@ -109,6 +109,50 @@ RPC_SERVER_LOG = (
     "proc=inventory-server-202 slot 2 cpu 0 |No[3] connection pool wait "
     "2800ms complete order_id=synthetic-order-0001\n"
 )
+RPC_CLIENT_LOG = "[0001] [diagnostic|payment.log] " + RAW_RPC_CLIENT_LOG
+RPC_SERVER_LOG = (
+    "[0001] [diagnostic|inventory.log] "
+    + RAW_RPC_SERVER_LOG.splitlines(keepends=True)[0]
+    + "[0002] [diagnostic|inventory.log] "
+    + RAW_RPC_SERVER_LOG.splitlines(keepends=True)[1]
+)
+
+
+def _cross_project_result_experience() -> dict[str, Any]:
+    value = parse_canonical_json_bytes(CROSS_PROJECT_EXPERIENCE.read_bytes())
+    assert isinstance(value, dict)
+    assert canonical_json_bytes(value) == CROSS_PROJECT_EXPERIENCE.read_bytes()
+    assert value["schema_version"] == 1
+    assert value["format_id"] == "cross-project-result-experience-v1"
+    return value
+
+
+def _golden_target_archive_names() -> tuple[list[dict[str, Any]], list[str]]:
+    """Derive the legacy semantic names from the frozen broker response."""
+
+    value = parse_canonical_json_bytes(EXPECTED_TARGET_LOGS.read_bytes())
+    assert isinstance(value, dict)
+    targets = value["target_logs"]
+    assert isinstance(targets, list)
+    names: list[str] = []
+    for target in targets:
+        assert isinstance(target, dict)
+        slot = str(target["slot"])
+        if slot.casefold().startswith("slot_"):
+            slot = slot[5:]
+        process = str(target["process_name"])
+        if target.get("pid") is not None:
+            process = f"{process}-{target['pid']}"
+        parts = [
+            str(target["label"]),
+            str(target["module_name"]),
+            f"slot_{slot}",
+        ]
+        if target.get("cpu_id") is not None:
+            parts.append(f"cpu_{target['cpu_id']}")
+        parts.append(process)
+        names.append("__".join(parts) + ".log")
+    return targets, names
 
 
 def _materialize_fake_logparse_checkout(parent: Path) -> tuple[Path, Path]:
@@ -250,7 +294,7 @@ class _Stack:
         self.coordination_lock = StorageCoordinationLock()
         self.attachment_registry = AttachmentUploadRegistry()
         self.layout = StorageLayout.at(data_root)
-        self.layout.ensure_directories()
+        self.layout.initialize_v2_data_root(PlatformFileSync())
         self.records = FileExecutionRecordStore(
             data_root,
             self.coordination_lock,
@@ -287,6 +331,7 @@ class _Stack:
             skill_dir=SKILL_DIR,
             logparse_tool=logparse_asset,
             logparse_broker_factory=self.broker_factory,
+            allow_test_skills=True,
         )
         environment = dict(os.environ)
         environment.update(
@@ -390,6 +435,53 @@ def _wait_for_file(path: Path, timeout_seconds: float = 10.0) -> None:
         if time.monotonic() >= deadline:
             raise AssertionError(f"timed out waiting for {path.name}")
         time.sleep(0.02)
+
+
+def _wait_for_review_marker(
+    stack: _Stack,
+    case_id: str,
+    path: Path,
+    timeout_seconds: float = 10.0,
+) -> None:
+    deadline = time.monotonic() + timeout_seconds
+    last_view: dict[str, Any] | None = None
+    while not path.is_file():
+        last_view = _query(stack.mcp, case_id)
+        if last_view["status"] in {
+            CaseStatus.FAILED.value,
+            CaseStatus.RESOLVED.value,
+            CaseStatus.UNRESOLVED.value,
+        }:
+            aggregate = stack.repository.read_snapshot().cases[case_id]
+            source_outcome_id = (
+                None
+                if aggregate.case.failure is None
+                else aggregate.case.failure.source_outcome_id
+            )
+            source_outcome = (
+                None
+                if source_outcome_id is None
+                else aggregate.outcomes.get(source_outcome_id)
+            )
+            raise AssertionError(
+                json.dumps(
+                    {
+                        "case_view": last_view,
+                        "source_outcome": (
+                            None
+                            if source_outcome is None
+                            else source_outcome.model_dump(mode="json")
+                        ),
+                    },
+                    sort_keys=True,
+                )
+            )
+        if time.monotonic() >= deadline:
+            raise AssertionError(
+                f"timed out waiting for {path.name}: "
+                f"{json.dumps(last_view, sort_keys=True)}"
+            )
+        time.sleep(0.05)
 
 
 def _record(path: Path) -> dict[str, Any]:
@@ -520,14 +612,52 @@ def test_rpc_timeout_fixture_manifest_is_schema_valid_and_exhaustive() -> None:
             assert canonical_json_bytes(parse_canonical_json_bytes(payload)) == payload
 
 
+def test_cross_project_result_experience_baseline_is_self_contained() -> None:
+    baseline = _cross_project_result_experience()
+    assert "no synthetic archive" in baseline["provenance_note"]
+    sources = baseline["sources"]
+    assert {source["repository"] for source in sources} == {
+        "issue-locator",
+        "problem-locator-mcp",
+    }
+    assert {
+        source["repository_commit"] for source in sources
+    } == {
+        "8994c254f37be93d7d605cea73137af6058992d6",
+        "994e479976273a989f3716c850e372752fb4b764",
+    }
+    for source in sources:
+        assert source["tracked_result_zip_paths"] == []
+        assert source["capture_checkout"].startswith("D:/code/")
+        assert source["repository_path"]
+        snapshot = FIXTURES / source["snapshot_path"]
+        assert snapshot.is_relative_to(FIXTURES)
+        payload = snapshot.read_bytes()
+        assert len(payload) == source["size"]
+        assert hashlib.sha256(payload).hexdigest() == source["sha256"]
+        text = payload.decode("utf-8")
+        assert all(phrase in text for phrase in source["required_phrases"])
+
+    archive = baseline["archive_expectations"]
+    assert archive["flat_entries_only"] is True
+    assert archive["all_resolved_plan_targets_required"] is True
+    assert archive["target_bytes_must_equal_logparse_sources"] is True
+    assert archive["legacy_semantic_log_name_patterns"] == [
+        "<label>__<module_name>__slot_<slot>__<process_name>[-<pid>].log",
+        "<label>__<module_name>__slot_<slot>__cpu_<cpu_id>__<process_name>[-<pid>].log",
+    ]
+
+
 def test_r01_r14_rpc_timeout_is_one_durable_cross_module_path(
     tmp_path: Path,
     monkeypatch,
     request,
 ) -> None:
     # Keep the staged LOGPARSE_RUN below the legacy Windows MAX_PATH boundary.
-    data_root = ROOT / ".s08"
-    logparse_checkout = ROOT / ".s08lp"
+    # On POSIX, use pytest's native temporary filesystem so a Docker Desktop
+    # bind mount cannot destabilize inode-based workspace safety checks.
+    data_root = ROOT / ".s08" if os.name == "nt" else tmp_path / ".s08"
+    logparse_checkout = data_root.parent / ".s08lp"
     _remove_test_data_root(data_root)
     _remove_test_data_root(logparse_checkout)
     request.addfinalizer(lambda: _remove_test_data_root(data_root))
@@ -557,13 +687,9 @@ def test_r01_r14_rpc_timeout_is_one_durable_cross_module_path(
             "inventory.log",
             "archive-marker.txt",
         ]
-        assert fixture_archive.read("payment.log") == RPC_CLIENT_LOG.encode("utf-8")
-        assert fixture_archive.read("inventory.log") == RPC_SERVER_LOG.encode("utf-8")
+        assert fixture_archive.read("payment.log") == RAW_RPC_CLIENT_LOG.encode("utf-8")
+        assert fixture_archive.read("inventory.log") == RAW_RPC_SERVER_LOG.encode("utf-8")
         assert ARCHIVE_BYTES_MARKER in fixture_archive.read("archive-marker.txt")
-    expected_result = EXPECTED_USER_RESULT.read_bytes()
-    assert len(expected_result) == 808
-    assert hashlib.sha256(expected_result).hexdigest() == EXPECTED_USER_RESULT_SHA256
-
     # R01: queue the fixed ROUTE Job while recovery still keeps claiming paused.
     created = _mcp(
         stack.mcp,
@@ -588,12 +714,26 @@ def test_r01_r14_rpc_timeout_is_one_durable_cross_module_path(
     assert created["case_view"]["status"] == CaseStatus.RUNNING.value
     assert created["case_view"]["active_job"]["job_type"] == JobType.ROUTE.value
     assert created["case_view"]["active_job"]["job_id"] == route_job_id
+    queued_route = stack.repository.read_snapshot().cases[case_id].jobs[route_job_id]
+    queued_route_refs = [
+        queued_route.agent_profile_ref,
+        queued_route.tool_bundle_ref,
+        queued_route.context_policy_ref,
+        queued_route.output_contract_ref,
+        *queued_route.available_skill_refs,
+    ]
+    queued_route_assets = stack.catalog.check(queued_route_refs)
+    assert queued_route_assets.available, queued_route_assets.model_dump(mode="json")
+    RuntimeAssetResolver(stack.catalog).resolve_job(queued_route)
 
     # R02/R03: real scheduler + Runtime accept MATCHED, then persist group A.
     stack.start()
     stack.wait_idle()
     waiting_a = _query(stack.mcp, case_id)
-    assert waiting_a["status"] == CaseStatus.WAITING_INPUT.value, waiting_a
+    assert waiting_a["status"] == CaseStatus.WAITING_INPUT.value, json.dumps(
+        waiting_a,
+        sort_keys=True,
+    )
     open_a = [
         item
         for item in waiting_a["pending_requirements"]
@@ -666,7 +806,10 @@ def test_r01_r14_rpc_timeout_is_one_durable_cross_module_path(
     assert completed_a["business_receipt"]["job_id"] is not None
     stack.wait_idle()
     waiting_attachment = _query(stack.mcp, case_id)
-    assert waiting_attachment["status"] == CaseStatus.WAITING_ATTACHMENT.value
+    assert waiting_attachment["status"] == CaseStatus.WAITING_ATTACHMENT.value, json.dumps(
+        waiting_attachment,
+        sort_keys=True,
+    )
     assert len(stack.repository.read_snapshot().cases[case_id].jobs) == (
         job_count_after_partial + 1
     )
@@ -793,7 +936,7 @@ def test_r01_r14_rpc_timeout_is_one_durable_cross_module_path(
         },
     )
     candidate_job_id = submitted_order["business_receipt"]["job_id"]
-    _wait_for_file(review_entered)
+    _wait_for_review_marker(stack, case_id, review_entered)
     reviewing_snapshot = stack.repository.read_snapshot()
     reviewing = reviewing_snapshot.cases[case_id]
     candidate_job = reviewing.jobs[candidate_job_id]
@@ -809,14 +952,57 @@ def test_r01_r14_rpc_timeout_is_one_durable_cross_module_path(
     assert candidate is not None
     assert candidate.status is CandidateStatus.REVIEWING
     assert candidate.proposed_by_job_id == candidate_job_id
+    assert candidate.supporting_evidence_refs == list(reversed(EVIDENCE_IDS))
+    assert candidate.completion_criteria_mapping[0].evidence_refs == EVIDENCE_IDS
+    initial_target_result = (
+        data_root
+        / "tmp"
+        / "workspaces"
+        / r08_job_id
+        / "output"
+        / "proposals"
+        / "logparse-run"
+        / "target_logs.json"
+    ).read_bytes()
+    continuation_target_result = (
+        data_root
+        / "tmp"
+        / "workspaces"
+        / candidate_job_id
+        / "output"
+        / "proposals"
+        / "reuse-logparse-run"
+        / "target_logs.json"
+    ).read_bytes()
+    initial_target_payload = parse_canonical_json_bytes(initial_target_result)
+    continuation_target_payload = parse_canonical_json_bytes(
+        continuation_target_result
+    )
+    assert set(initial_target_payload) == {
+        "api_version",
+        "logparse_run_artifact_draft",
+        "schema_version",
+        "target_logs",
+    }
+    assert set(continuation_target_payload) == {
+        "api_version",
+        "schema_version",
+        "target_logs",
+    }
+    initial_target_projection = {
+        name: initial_target_payload[name]
+        for name in ("api_version", "schema_version", "target_logs")
+    }
+    assert canonical_json_bytes(initial_target_projection) == continuation_target_result
+    assert continuation_target_result == EXPECTED_TARGET_LOGS.read_bytes()
     user_results = [
         item for item in reviewing.artifacts.values() if item.kind is ArtifactKind.USER_RESULT
     ]
     assert len(user_results) == 1
     user_result = user_results[0]
     assert user_result.created_by_job_id == candidate_job_id
-    assert user_result.size == 808
-    assert user_result.sha256 == EXPECTED_USER_RESULT_SHA256
+    assert user_result.metadata.schema_version == 2
+    assert user_result.metadata.format_id == "problem-locator-diagnosis-v2"
     result_archives = [
         item
         for item in reviewing.artifacts.values()
@@ -825,11 +1011,37 @@ def test_r01_r14_rpc_timeout_is_one_durable_cross_module_path(
     assert len(result_archives) == 1
     result_archive = result_archives[0]
     assert result_archive.created_by_job_id == candidate_job_id
+    assert result_archive.metadata.schema_version == 2
+    assert result_archive.metadata.format_id == "problem-locator-result-archive-v2"
+    assert result_archive.metadata.user_result_proposal_key == "server-user-result"
+    assert result_archive.metadata.target_log_count == 2
     candidate_outcome = next(
         outcome
         for outcome in reviewing.outcomes.values()
         if outcome.job_id == candidate_job_id
     )
+    assert {
+        proposal.proposal_key: proposal.artifact_kind
+        for proposal in candidate_outcome.proposed_artifacts
+        if proposal.artifact_kind
+        in {ArtifactKind.USER_RESULT, ArtifactKind.USER_RESULT_ARCHIVE}
+    } == {
+        "server-user-result": ArtifactKind.USER_RESULT,
+        "server-user-result-archive": ArtifactKind.USER_RESULT_ARCHIVE,
+    }
+    agent_draft_path = (
+        data_root
+        / "tmp"
+        / "workspaces"
+        / candidate_job_id
+        / "output"
+        / "job_outcome.draft.json"
+    )
+    agent_draft = parse_canonical_json_bytes(
+        agent_draft_path.read_bytes(),
+        model_type=AgentJobOutcomeDraftV2,
+    )
+    assert agent_draft.proposed_artifact_drafts == []
     candidate_processing = reviewing.outcome_processing_records[
         candidate_outcome.outcome_id
     ]
@@ -852,7 +1064,15 @@ def test_r01_r14_rpc_timeout_is_one_durable_cross_module_path(
     assert review_job.review_target.candidate_conclusion_id == candidate.conclusion_id
     assert review_job.review_target.candidate_revision == candidate.revision
     assert review_job.review_target.candidate_content_hash == candidate.content_hash
-    assert review_job.evidence_refs == candidate.supporting_evidence_refs
+    assert review_job.evidence_refs == EVIDENCE_IDS
+    assert set(review_job.evidence_refs) == {
+        *candidate.supporting_evidence_refs,
+        *(
+            evidence_ref
+            for mapping in candidate.completion_criteria_mapping
+            for evidence_ref in mapping.evidence_refs
+        ),
+    }
     review_release.write_text("pass\n", encoding="utf-8")
     stack.wait_idle()
     resolved_view = _query(stack.mcp, case_id)
@@ -928,25 +1148,147 @@ def test_r01_r14_rpc_timeout_is_one_durable_cross_module_path(
             params={"case_id": case_id},
         )
     assert download.status_code == 200
-    assert download.content == expected_result
-    assert download.headers["content-length"] == "808"
-    assert download.headers["x-content-sha256"] == EXPECTED_USER_RESULT_SHA256
+    assert len(download.content) == user_result.size
+    assert hashlib.sha256(download.content).hexdigest() == user_result.sha256
+    assert download.headers["content-length"] == str(user_result.size)
+    assert download.headers["x-content-sha256"] == user_result.sha256
     assert archive_download.status_code == 200
     assert hashlib.sha256(archive_download.content).hexdigest() == result_archive.sha256
-    with zipfile.ZipFile(io.BytesIO(archive_download.content)) as result_zip:
-        assert result_zip.namelist() == [
-            "result.txt",
-            "target-log-001.log",
-            "target-log-002.log",
-        ]
-        assert result_zip.read("result.txt") == (
-            restarted_view["final_result"]["statement"] + "\n"
-        ).encode("utf-8")
-        assert b"synthetic-order-0001" in result_zip.read("target-log-001.log")
-        assert b"synthetic-order-0001" in result_zip.read("target-log-002.log")
+    experience = _cross_project_result_experience()
     payload = UserResultPayload.model_validate_json(download.content)
+    assert canonical_json_bytes(payload) == download.content
+    assert payload.schema_version == 2
+    assert payload.format_id == experience["result_json_expectations"]["format_id"]
+    assert set(experience["result_json_expectations"]["required_fields"]) <= set(
+        payload.model_dump(mode="json")
+    )
+    assert payload.status == "COMPLETED"
+    assert payload.source_job_type is JobType.DIAGNOSE
     assert payload.problem_statement == restarted_view["problem_spec"]["statement"]
-    assert payload.candidate_statement == restarted_view["final_result"]["statement"]
+    assert payload.root_cause == restarted_view["final_result"]["statement"]
+    assert payload.findings == []
+    assert len(payload.verification_rules) == 20
+    assert all(not item.issues for item in payload.verification_rules)
+    assert payload.time_relevance.problem_time == PARAMETER_GROUP_A["problem_time"]
+    assert payload.time_relevance.assessment == "RELEVANT"
+    assert payload.evidence_gaps == []
+    assert payload.limitations == []
+    assert payload.recommendations == [
+        "Submit the fixed candidate for independent review."
+    ]
+    golden_targets, golden_target_names = _golden_target_archive_names()
+    archive_expectations = experience["archive_expectations"]
+    assert golden_target_names == archive_expectations["entry_order"][2:]
+    with zipfile.ZipFile(io.BytesIO(archive_download.content)) as result_zip:
+        names = result_zip.namelist()
+        assert names == archive_expectations["entry_order"]
+        assert archive_expectations["flat_entries_only"] is True
+        assert all("/" not in name and "\\" not in name for name in names)
+        archive_manifest_bytes = result_zip.read("archive-manifest.json")
+        archive_manifest = parse_canonical_json_bytes(archive_manifest_bytes)
+        assert canonical_json_bytes(archive_manifest) == archive_manifest_bytes
+        assert archive_manifest["schema_version"] == 2
+        assert archive_manifest["format_id"] == "problem-locator-result-archive-v2"
+        assert archive_manifest["problem_time"] == PARAMETER_GROUP_A["problem_time"]
+        assert archive_manifest["diagnosis_result_sha256"] == user_result.sha256
+        assert archive_manifest["target_log_count"] == len(golden_targets)
+        assert [
+            item["archive_name"] for item in archive_manifest["target_logs"]
+        ] == result_zip.namelist()[2:]
+        assert [
+            (
+                item["label"],
+                item["module_name"],
+                item["slot"],
+                item["process_name"],
+                item["pid"],
+            )
+            for item in archive_manifest["target_logs"]
+        ] == [
+            (
+                item["label"],
+                item["module_name"],
+                item["slot"],
+                item["process_name"],
+                item.get("pid"),
+            )
+            for item in golden_targets
+        ]
+        result_text_bytes = result_zip.read("result.txt")
+        assert archive_manifest["result_txt_sha256"] == hashlib.sha256(
+            result_text_bytes
+        ).hexdigest()
+        result_text = result_text_bytes.decode("utf-8")
+        report_expectations = experience["report_expectations"]
+        sections = report_expectations["section_order"]
+        section_offsets = [
+            result_text.index(section) for section in sections
+        ]
+        assert section_offsets == sorted(section_offsets)
+        section_ends = [*section_offsets[1:], len(result_text)]
+        assert all(
+            result_text[offset + len(section) : end].strip()
+            for section, offset, end in zip(
+                sections,
+                section_offsets,
+                section_ends,
+                strict=True,
+            )
+        )
+        assert report_expectations["required_information"] == [
+            "problem_statement",
+            "root_cause",
+            "verified_evidence_with_original_log_lines",
+            "completion_criteria_mapping",
+            "time_relevance",
+            "evidence_gaps_and_limitations",
+            "recommendations",
+            "target_log_inventory",
+        ]
+        assert payload.root_cause in result_text
+        assert payload.problem_statement in result_text
+        assert all(
+            rule.rule_id in result_text and rule.explanation in result_text
+            for rule in payload.verification_rules
+        )
+        citations = [
+            citation
+            for rule in payload.verification_rules
+            for citation in rule.citations
+        ]
+        assert citations
+        assert all(
+            citation.archive_name in names
+            and citation.excerpt
+            and citation.excerpt in result_text
+            for citation in citations
+        )
+        assert all(
+            item.criterion in result_text and item.explanation in result_text
+            for item in payload.completion_criteria_mapping
+        )
+        assert payload.time_relevance.problem_time in result_text
+        assert payload.time_relevance.assessment in result_text
+        assert payload.time_relevance.explanation in result_text
+        assert all(
+            observation.rule_id in result_text
+            and observation.event_time in result_text
+            and f"{observation.offset_ms} ms" in result_text
+            for observation in payload.time_relevance.observations
+        )
+        assert "证据缺口：" in result_text
+        assert "限制：" in result_text
+        assert all(item in result_text for item in payload.recommendations)
+        assert all(
+            item["archive_name"] in result_text
+            for item in archive_manifest["target_logs"]
+        )
+        client_log = result_zip.read(result_zip.namelist()[2])
+        server_log = result_zip.read(result_zip.namelist()[3])
+        assert client_log == RPC_CLIENT_LOG.encode("utf-8")
+        assert server_log == RPC_SERVER_LOG.encode("utf-8")
+        assert b"synthetic-order-0001" in client_log
+        assert b"synthetic-order-0001" in server_log
     assert [
         item.existing_evidence_id for item in payload.supporting_evidence_bindings
     ] == restarted_view["final_result"]["supporting_evidence_refs"]

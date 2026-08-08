@@ -45,8 +45,8 @@ def _walk_json(value: Any) -> Iterator[Any]:
 
 def test_schema_registry_is_the_exact_frozen_public_set() -> None:
     assert set(SCHEMA_MODELS) == EXPECTED_SCHEMA_NAMES
-    assert SCHEMA_VERSION == 2
-    assert CONTRACT_REVISION == "v2-contract-r1"
+    assert SCHEMA_VERSION == 3
+    assert CONTRACT_REVISION == "v3-contract-r1"
     assert isinstance(GENERATOR_VERSION, str)
     assert GENERATOR_VERSION.strip()
 
@@ -70,7 +70,11 @@ def test_public_model_objects_reject_undeclared_fields() -> None:
     for name in EXPECTED_SCHEMA_NAMES:
         schema = load_json(SCHEMA_ROOT / name)
         for node in _walk_json(schema):
-            if isinstance(node, dict) and "properties" in node:
+            if (
+                isinstance(node, dict)
+                and node.get("type") == "object"
+                and "properties" in node
+            ):
                 assert node.get("additionalProperties") is False, (
                     f"{name} contains an extensible public object: {node.get('title')}"
                 )
@@ -88,7 +92,7 @@ def test_contract_manifest_covers_the_exact_frozen_inputs() -> None:
         "generator_version",
         "schema_version",
     }
-    assert manifest["schema_version"] == 2
+    assert manifest["schema_version"] == 3
     assert manifest["contract_revision"] == CONTRACT_REVISION
     assert manifest["generator_version"] == GENERATOR_VERSION
 

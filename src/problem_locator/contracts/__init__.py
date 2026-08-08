@@ -1,4 +1,4 @@
-"""Frozen Problem Locator V2 public contract package.
+"""Frozen Problem Locator V3 public contract package.
 
 All later implementation slices import public vocabulary from this package.
 The schema registry is the single source used to generate the ten frozen
@@ -21,7 +21,7 @@ from .models import (
     JobOutcome,
     LogparseParseClaim,
     StateFile,
-    UserResultPayload,
+    UserResultPayloadV2,
     WorkspaceInputManifest,
 )
 
@@ -36,7 +36,7 @@ SCHEMA_MODELS: Final[Mapping[str, Any]] = MappingProxyType(
         "job.schema.json": Job,
         "logparse-parse-claim.schema.json": LogparseParseClaim,
         "state.schema.json": StateFile,
-        "user-result.schema.json": UserResultPayload,
+        "user-result.schema.json": UserResultPayloadV2,
         "workspace-input-manifest.schema.json": WorkspaceInputManifest,
     }
 )

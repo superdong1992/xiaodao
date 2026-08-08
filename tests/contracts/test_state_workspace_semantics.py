@@ -19,13 +19,16 @@ from problem_locator.contracts.models import (
     DiagnosisItem,
     DiagnosisProvenance,
     Job,
+    ReviewSubjectV2,
     ValidatedTrigger,
     WorkspaceInputManifest,
+    review_required_evidence_refs,
     validate_workspace_manifest_for_job,
 )
 from problem_locator.contracts.serialization import canonical_json_sha256
 
 from tests.contracts._support import FIXTURE_ROOT, load_json
+from tests.v2_helpers import blind_review_subject
 
 
 TRIGGER_ID = "00000000-0000-0000-0000-000000000090"
@@ -151,6 +154,93 @@ def test_public_workspace_job_seam_requires_exact_arrays_and_headers() -> None:
 
     drifted = manifest.model_copy(update={"case_id": TRIGGER_ID})
     with pytest.raises(ValueError, match="case_id"):
+        validate_workspace_manifest_for_job(drifted, job)
+
+
+def _reordered_review_job_and_manifest() -> tuple[Job, WorkspaceInputManifest]:
+    job_payload = _review_job_payload()
+    first_ref = "00000000-0000-0000-0000-000000000040"
+    second_ref = "00000000-0000-0000-0000-000000000041"
+    candidate = job_payload["context_snapshot"]["candidate_conclusion"]
+    candidate["supporting_evidence_refs"] = [second_ref, first_ref]
+    candidate["completion_criteria_mapping"][0]["evidence_refs"] = [
+        first_ref,
+        second_ref,
+    ]
+    _rehash_candidate(candidate)
+    job_payload["context_snapshot"]["evidence_refs"] = [first_ref, second_ref]
+    job_payload["evidence_refs"] = [first_ref, second_ref]
+    job_payload["review_target"]["candidate_content_hash"] = candidate[
+        "content_hash"
+    ]
+    job = Job.model_validate(job_payload)
+
+    manifest_payload = load_json(
+        FIXTURE_ROOT / "positive" / "workspace-input-manifest-review.json"
+    )
+    second_entry = copy.deepcopy(manifest_payload["entries"][0])
+    second_entry["resource_id"] = second_ref
+    second_entry["source_ref"] = "00000000-0000-0000-0000-000000000071"
+    manifest_payload["entries"].append(second_entry)
+    manifest_payload["review_subject"] = blind_review_subject(job).model_dump(
+        mode="json"
+    )
+    return job, WorkspaceInputManifest.model_validate(manifest_payload)
+
+
+def test_review_subject_uses_job_order_for_reordered_candidate_evidence() -> None:
+    job, manifest = _reordered_review_job_and_manifest()
+    candidate = job.context_snapshot.candidate_conclusion
+    assert candidate is not None
+    assert review_required_evidence_refs(candidate) == (
+        "00000000-0000-0000-0000-000000000041",
+        "00000000-0000-0000-0000-000000000040",
+    )
+    assert manifest.review_subject is not None
+    assert manifest.review_subject.required_evidence_refs == list(job.evidence_refs)
+    assert validate_workspace_manifest_for_job(manifest, job) is manifest
+
+
+@pytest.mark.parametrize(
+    "required_refs",
+    [
+        ["00000000-0000-0000-0000-000000000040"],
+        [
+            "00000000-0000-0000-0000-000000000040",
+            "00000000-0000-0000-0000-000000000041",
+            "00000000-0000-0000-0000-000000000042",
+        ],
+        [
+            "00000000-0000-0000-0000-000000000040",
+            "00000000-0000-0000-0000-000000000040",
+        ],
+    ],
+)
+def test_review_subject_rejects_missing_extra_or_duplicate_candidate_evidence(
+    required_refs: list[str],
+) -> None:
+    job, manifest = _reordered_review_job_and_manifest()
+    assert manifest.review_subject is not None
+    payload = manifest.review_subject.model_dump(mode="json")
+    payload["required_evidence_refs"] = required_refs
+    payload["subject_hash"] = canonical_json_sha256(
+        {key: value for key, value in payload.items() if key != "subject_hash"}
+    )
+    with pytest.raises(ValidationError):
+        ReviewSubjectV2.model_validate(payload)
+
+
+def test_workspace_rejects_review_subject_candidate_order_instead_of_job_order() -> None:
+    job, manifest = _reordered_review_job_and_manifest()
+    assert manifest.review_subject is not None
+    payload = manifest.review_subject.model_dump(mode="json")
+    payload["required_evidence_refs"] = list(reversed(job.evidence_refs))
+    payload["subject_hash"] = canonical_json_sha256(
+        {key: value for key, value in payload.items() if key != "subject_hash"}
+    )
+    reordered_subject = ReviewSubjectV2.model_validate(payload)
+    drifted = manifest.model_copy(update={"review_subject": reordered_subject})
+    with pytest.raises(ValueError, match="stable Job Evidence subsequence"):
         validate_workspace_manifest_for_job(drifted, job)
 
 

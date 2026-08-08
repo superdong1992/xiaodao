@@ -281,7 +281,7 @@ def test_failures_fixture_manifest_is_strict_canonical_and_exhaustive() -> None:
 def test_failure_matrix_has_the_complete_s08_negative_category_partition() -> None:
     payload = _matrix()
     assert set(payload) == {"contract_revision", "scenarios", "schema_version"}
-    assert payload["contract_revision"] == "v2-contract-r1"
+    assert payload["contract_revision"] == "v3-contract-r1"
     assert payload["schema_version"] == 1
 
     scenarios = payload["scenarios"]

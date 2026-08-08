@@ -30,6 +30,13 @@ function Get-NormalizedBytes([string]$Path) {
     return $utf8.GetBytes($text.Replace("`r`n", "`n").Replace("`r", "`n"))
 }
 
+function Get-FrozenBytes([string]$Path, [string]$RelativePath) {
+    if ($RelativePath.EndsWith('.zip', [StringComparison]::OrdinalIgnoreCase)) {
+        return [IO.File]::ReadAllBytes($Path)
+    }
+    return Get-NormalizedBytes $Path
+}
+
 function Get-CanonicalPatch([string]$Clone, [string[]]$Paths) {
     $lines = @(& git.exe -C $Clone -c core.autocrlf=false diff --binary --no-ext-diff --no-renames -- @Paths)
     if ($LASTEXITCODE -ne 0) { throw 'E2E_PATCH_FREEZE_DIFF' }
@@ -63,6 +70,52 @@ Assert-Freeze (Test-Path -LiteralPath $pathList -PathType Leaf) 'PATH_LIST'
 $paths = [string[]]@([IO.File]::ReadAllLines($pathList, $utf8) | Where-Object { $_ })
 $paths = [string[]]@($paths | Sort-Object -Unique)
 Assert-Freeze ($paths.Count -gt 0) 'EMPTY_PATH_LIST'
+$allowedProductPaths = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+foreach ($path in $paths) { [void]$allowedProductPaths.Add($path) }
+$productScopes = [string[]]@('schemas/v2', 'src/problem_locator')
+$trackedProductPaths = @(
+    & git.exe -C $RepoRoot diff --name-only $BaseCommit -- @productScopes
+)
+Assert-Freeze ($LASTEXITCODE -eq 0) 'PRODUCT_TRACKED_DIFF'
+$untrackedProductPaths = @(
+    & git.exe -C $RepoRoot ls-files --others --exclude-standard -- @productScopes
+)
+Assert-Freeze ($LASTEXITCODE -eq 0) 'PRODUCT_UNTRACKED_DIFF'
+$requiredProductPathSet = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+foreach ($relative in @($trackedProductPaths) + @($untrackedProductPaths)) {
+    if (-not $relative) { continue }
+    Assert-Freeze ($relative -cmatch '^[A-Za-z0-9._/-]+$') 'PRODUCT_PATH_SHAPE'
+    [void]$requiredProductPathSet.Add($relative)
+}
+$requiredProductPaths = [string[]]@($requiredProductPathSet)
+[Array]::Sort($requiredProductPaths, [StringComparer]::Ordinal)
+for ($index = 0; $index -lt $requiredProductPaths.Count; $index++) {
+    Assert-Freeze (
+        $allowedProductPaths.Contains($requiredProductPaths[$index])
+    ) "PRODUCT_PATH_SET_$index`:$($requiredProductPaths[$index])"
+}
+$testScopes = [string[]]@('tests')
+$trackedTestPaths = @(
+    & git.exe -C $RepoRoot diff --name-only $BaseCommit -- @testScopes
+)
+Assert-Freeze ($LASTEXITCODE -eq 0) 'TEST_TRACKED_DIFF'
+$untrackedTestPaths = @(
+    & git.exe -C $RepoRoot ls-files --others --exclude-standard -- @testScopes
+)
+Assert-Freeze ($LASTEXITCODE -eq 0) 'TEST_UNTRACKED_DIFF'
+$requiredTestPathSet = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+foreach ($relative in @($trackedTestPaths) + @($untrackedTestPaths)) {
+    if (-not $relative) { continue }
+    Assert-Freeze ($relative -cmatch '^[A-Za-z0-9._/-]+$') 'TEST_PATH_SHAPE'
+    [void]$requiredTestPathSet.Add($relative)
+}
+$requiredTestPaths = [string[]]@($requiredTestPathSet)
+[Array]::Sort($requiredTestPaths, [StringComparer]::Ordinal)
+for ($index = 0; $index -lt $requiredTestPaths.Count; $index++) {
+    Assert-Freeze (
+        $allowedProductPaths.Contains($requiredTestPaths[$index])
+    ) "TEST_PATH_SET_$index`:$($requiredTestPaths[$index])"
+}
 foreach ($relative in $paths) {
     Assert-Freeze (-not [IO.Path]::IsPathRooted($relative)) 'ROOTED_PATH'
     Assert-Freeze ($relative -cmatch '^[A-Za-z0-9._/-]+$') 'PATH_SHAPE'
@@ -84,7 +137,7 @@ try {
         $destination = Join-Path $overlay ($relative.Replace('/', '\'))
         if (Test-Path -LiteralPath $source -PathType Leaf) {
             [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($destination)) | Out-Null
-            [IO.File]::WriteAllBytes($destination, (Get-NormalizedBytes $source))
+            [IO.File]::WriteAllBytes($destination, (Get-FrozenBytes $source $relative))
         }
         else {
             $overlayPrefix = [IO.Path]::GetFullPath($overlay).TrimEnd('\') + '\'
@@ -118,7 +171,7 @@ try {
     $size = (Get-Item -LiteralPath $patchPath).Length
     [IO.File]::WriteAllText((Join-Path $EvidenceRoot 'source-input.patch.sha256'), "$sha  /evidence/source-input.patch`n", $utf8)
     [IO.File]::WriteAllText((Join-Path $EvidenceRoot 'source.patch.new-files.txt'), (($newPaths.ToArray() -join "`n") + $(if ($newPaths.Count -gt 0) { "`n" } else { "" })), $utf8)
-    [IO.File]::WriteAllText((Join-Path $EvidenceRoot 'source-patch-host-freeze.txt'), "source_patch_files=$patchFileCount`nsource_patch_allowlist_files=$($paths.Count)`nsource_patch_new_files=$($newPaths.Count)`nsource_patch_bytes=$size`nsource_patch_sha256=$sha`nbase_commit=$BaseCommit`nline_ending_mode=canonical-lf`nuser_submodules=excluded`nhandoff_s08=excluded`n", $utf8)
+    [IO.File]::WriteAllText((Join-Path $EvidenceRoot 'source-patch-host-freeze.txt'), "source_patch_files=$patchFileCount`nsource_patch_allowlist_files=$($paths.Count)`nsource_patch_new_files=$($newPaths.Count)`nsource_patch_bytes=$size`nsource_patch_sha256=$sha`nbase_commit=$BaseCommit`nline_ending_mode=text-canonical-lf,binary-zip-exact`nproduction_path_completeness=tracked-plus-untracked`nproduction_path_count=$($requiredProductPaths.Count)`nproduction_path_scopes=schemas/v2,src/problem_locator`ntest_path_completeness=tracked-plus-untracked`ntest_path_count=$($requiredTestPaths.Count)`ntest_path_scope=tests`nuser_submodules=excluded`nhandoff_s08=excluded`n", $utf8)
     Write-Output "E2E_SOURCE_PATCH_FROZEN sha256=$sha bytes=$size files=$patchFileCount allowlist=$($paths.Count) new_files=$($newPaths.Count)"
 }
 finally {

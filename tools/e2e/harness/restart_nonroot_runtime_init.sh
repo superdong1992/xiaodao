@@ -51,7 +51,7 @@ chown 10001:10001 /run/plagent-claude/settings.json
 helper_skill=/run/plagent-claude/.claude/skills/logparse-diagnose/SKILL.md
 test -f "$helper_skill"
 test ! -L "$helper_skill"
-test "$(sha256sum "$helper_skill" | awk '{print $1}')" = 73b1d84458f0baf86c848f1e3a49aab21eafd2f67a3a6746971e7ae893bad3ad
+test "$(sha256sum "$helper_skill" | awk '{print $1}')" = 85ba87dbf3b5c808e5762154c19ed272066834008046fe97cad275637e2c0940
 runuser -u plagent -- test -r "$helper_skill"
 test -z "$(runuser -u plagent -- find /run/plagent-claude/.claude/skills/logparse-diagnose -xdev -writable -print -quit)"
 

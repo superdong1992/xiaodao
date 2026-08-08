@@ -35,6 +35,7 @@ from problem_locator.contracts import (
     ReadinessReport,
     ResolvedAsset,
     ResourceKind,
+    SCHEMA_VERSION,
     StateExport,
     StateExportObjectCounts,
     StateExportResource,
@@ -71,7 +72,7 @@ from problem_locator.storage.coordination import (
     StorageCoordinationLock,
 )
 from problem_locator.storage.execution_records import FileExecutionRecordStore
-from problem_locator.storage.layout import StorageLayout
+from problem_locator.storage.layout import StorageLayout, UnsupportedDataFormatError
 from problem_locator.storage.platform import (
     FileInstanceLock,
     PlatformFileSync,
@@ -376,7 +377,7 @@ def _export_state(
             )
         try:
             exported = StateExport(
-                export_schema_version=2,
+                export_schema_version=SCHEMA_VERSION,
                 schema_version=state.schema_version,
                 contract_revision=state.contract_revision,
                 source_generation=state.generation,
@@ -495,9 +496,15 @@ class StandaloneStateAdmin:
     ) -> Iterator[tuple[JsonFileStateRepository, StorageCoordinationLock]]:
         try:
             layout = StorageLayout.at(self._data_root)
+            layout.validate_v2_data_format()
             for directory in _layout_directories(layout):
                 require_real_directory(directory)
             require_ordinary_file(layout.state)
+        except UnsupportedDataFormatError as exc:
+            raise _port_error(
+                ErrorCode.STATE_SCHEMA_UNSUPPORTED,
+                "The DATA_ROOT data format is unsupported; configure a fresh DATA_ROOT.",
+            ) from exc
         except (OSError, TypeError, ValueError) as exc:
             raise _port_error(
                 ErrorCode.STATE_CORRUPT,
@@ -1011,9 +1018,15 @@ def _failure_owner(
     )
 
 
-def _assemble(settings: Settings) -> ServiceComposition:
+def _assemble(
+    settings: Settings,
+    *,
+    allow_test_skills: bool = False,
+) -> ServiceComposition:
     if not isinstance(settings, Settings):
         raise TypeError("settings must be immutable Settings")
+    if type(allow_test_skills) is not bool:
+        raise TypeError("allow_test_skills must be a boolean")
 
     try:
         logparse_asset, broker_factory = build_logparse_runtime(
@@ -1025,6 +1038,7 @@ def _assemble(settings: Settings) -> ServiceComposition:
             skill_dir=settings.skill_dir,
             logparse_tool=logparse_asset,
             logparse_broker_factory=broker_factory,
+            allow_test_skills=allow_test_skills,
         )
     except (OSError, TypeError, ValueError) as exc:
         raise _CompositionFailure(
@@ -1037,7 +1051,22 @@ def _assemble(settings: Settings) -> ServiceComposition:
 
     try:
         layout = StorageLayout.at(settings.data_root)
-        layout.ensure_directories()
+        file_sync = PlatformFileSync()
+        layout.initialize_v2_data_root(file_sync)
+    except UnsupportedDataFormatError as exc:
+        raise _CompositionFailure(
+            _failure_owner(
+                ErrorCode.STATE_SCHEMA_UNSUPPORTED,
+                "The DATA_ROOT data format is unsupported; configure a fresh DATA_ROOT.",
+                checks_passed={
+                    "CONFIG": True,
+                    "INSTANCE_LOCK": False,
+                    "STATE": False,
+                    "DATA_DIRECTORIES": False,
+                    "RECOVERY": False,
+                },
+            )
+        ) from exc
     except (OSError, TypeError, ValueError) as exc:
         raise _CompositionFailure(
             _failure_owner(
@@ -1078,7 +1107,6 @@ def _assemble(settings: Settings) -> ServiceComposition:
     publication_guard = InProcessPublicationCommitGuard(coordination_lock)
     attachment_registry = AttachmentUploadRegistry()
     upload_guard = InProcessAttachmentUploadGuard(attachment_registry)
-    file_sync = PlatformFileSync()
     replacer = PlatformReplaceOperation()
 
     try:
@@ -1294,11 +1322,11 @@ def _install_lifespan(app: Any, owner: ServiceComposition | _StartupFailureOwner
     app.router.lifespan_context = lifespan
 
 
-def create_app(settings: Settings) -> Any:
-    """Create the real ASGI application without starting recovery on import."""
+def _create_app(settings: Settings, *, allow_test_skills: bool) -> Any:
+    """Internal ASGI composition seam with an explicit Skill policy."""
 
     try:
-        composition = _assemble(settings)
+        composition = _assemble(settings, allow_test_skills=allow_test_skills)
     except _CompositionFailure as exc:
         log_event(
             "service.assembly_failed",
@@ -1338,6 +1366,18 @@ def create_app(settings: Settings) -> Any:
     app.state.problem_locator_startup_error = None
     _install_lifespan(app, composition)
     return app
+
+
+def create_app(settings: Settings) -> Any:
+    """Create the production ASGI application with TEST_ONLY Skills forbidden."""
+
+    return _create_app(settings, allow_test_skills=False)
+
+
+def _create_test_app(settings: Settings) -> Any:
+    """Create the E2E harness application with TEST_ONLY Skills enabled."""
+
+    return _create_app(settings, allow_test_skills=True)
 
 
 def create_state_admin(data_root: Path) -> StandaloneStateAdmin:

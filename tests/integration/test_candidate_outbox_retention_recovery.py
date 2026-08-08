@@ -106,7 +106,7 @@ class _ParkedCandidateGraph:
     durable: RuntimeExecutionReceipt
     attempted_mutation: StateMutation
     runtime: Any
-    result_bytes: bytes
+    result_bytes: dict[ArtifactKind, bytes]
     next_job_id: str
     next_job_bytes: bytes
     artifact_ids_by_key: dict[str, str]
@@ -231,7 +231,7 @@ def _park_candidate_after_resource_and_job_publish(
 ) -> _ParkedCandidateGraph:
     data_root = tmp_path / "data"
     layout = StorageLayout.at(data_root)
-    layout.ensure_directories()
+    layout.initialize_v2_data_root()
     lock = StorageCoordinationLock()
     publication_guard = InProcessPublicationCommitGuard(lock)
     registry = AttachmentUploadRegistry()
@@ -589,11 +589,10 @@ def _assert_recovery_reuses_parked_bytes(
     ]
     assert len(user_results) == 1
     user_result_path = graph.data_root / user_results[0].storage_key
-    assert user_result_path.read_bytes() == graph.result_bytes
-    assert len(graph.result_bytes) == 622
-    assert sha256(graph.result_bytes).hexdigest() == (
-        "37ee245a8ae705561575e2c353fd1cc4e2a57653ed05d095f4d2292c287cdf09"
-    )
+    user_result_bytes = graph.result_bytes[ArtifactKind.USER_RESULT]
+    assert user_result_path.read_bytes() == user_result_bytes
+    assert len(user_result_bytes) == 1604
+    assert sha256(user_result_bytes).hexdigest() == user_results[0].sha256
 
 
 def test_candidate_outbox_restart_reuses_resources_job_and_produced_at_without_runtime(

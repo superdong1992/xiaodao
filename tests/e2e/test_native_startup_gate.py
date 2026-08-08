@@ -23,6 +23,7 @@ from problem_locator.contracts import (
 
 
 ROOT = Path(__file__).resolve().parents[2]
+PRODUCTION_SKILL_FIXTURE = ROOT / "tests/fixtures/components/runtime-catalog/skill-dir"
 OFFICIAL_KEYS = {
     "BIND_HOST",
     "CLAUDE_COMMAND",
@@ -122,11 +123,15 @@ def _start_service(env_file: Path, child_env: dict[str, str], expected_system: s
     creationflags = 0
     if expected_system == "Windows":
         creationflags = subprocess.CREATE_NEW_PROCESS_GROUP
+    launcher = Path("/evidence/test_service_launcher.py")
+    if not launcher.is_file():
+        launcher = ROOT / "tools/e2e/harness/test_service_launcher.py"
+    assert launcher.is_file()
     return subprocess.Popen(
         [
             sys.executable,
-            "-m",
-            "problem_locator",
+            "-I",
+            os.fspath(launcher),
             "serve",
             "--env-file",
             os.fspath(env_file),
@@ -170,7 +175,7 @@ def _run_native_startup_gate(expected_system: str, tmp_path: Path) -> None:
     assert platform.system() == expected_system
     assert os.environ.get("S08_NATIVE_STARTUP_GATE") == expected_system.lower()
 
-    skill_dir = Path(os.environ.get("SKILL_DIR", ROOT / ".claude/skills"))
+    skill_dir = Path(os.environ.get("SKILL_DIR", PRODUCTION_SKILL_FIXTURE))
     assert skill_dir.is_absolute()
     logparse_repo = _required_absolute_path("LOGPARSE_REPO")
     logparse_config = _required_absolute_path("LOGPARSE_CONFIG_PATH")

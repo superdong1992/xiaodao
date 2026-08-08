@@ -26,8 +26,8 @@ def _verification_contract(assets: ResolvedJobAssets) -> dict[str, Any]:
         raise ValueError("REVIEW requires a pinned diagnosis Skill")
     path = Path(assets.skill.root_path) / "diagnosis-skill.json"
     value = json.loads(path.read_bytes().decode("utf-8"))
-    if not isinstance(value, dict) or value.get("schema_version") != 3:
-        raise ValueError("REVIEW requires a diagnosis Skill manifest v3")
+    if not isinstance(value, dict) or value.get("schema_version") != 4:
+        raise ValueError("REVIEW requires a diagnosis Skill manifest v4")
     contract = value.get("verification_contract")
     if not isinstance(contract, dict) or contract.get("schema_version") != 1:
         raise ValueError("REVIEW Skill has no verification contract")
@@ -89,19 +89,19 @@ def _formal_evidence_by_binding(diagnosis, candidate) -> dict[str, str]:
     return result
 
 
-def _required_candidate_evidence(candidate) -> list[str]:
-    required: list[str] = []
-    for evidence_ref in (
+def _required_candidate_evidence(candidate, job: Job) -> list[str]:
+    required = {
         *candidate.supporting_evidence_refs,
         *(
             evidence_ref
             for mapping in candidate.completion_criteria_mapping
             for evidence_ref in mapping.evidence_refs
         ),
-    ):
-        if evidence_ref not in required:
-            required.append(evidence_ref)
-    return required
+    }
+    ordered = [evidence_ref for evidence_ref in job.evidence_refs if evidence_ref in required]
+    if set(ordered) != required:
+        raise ValueError("REVIEW Job omits required Candidate Evidence")
+    return ordered
 
 
 def compile_review_subject(
@@ -152,7 +152,7 @@ def compile_review_subject(
     audit = diagnosis.decision_audit
     assert audit is not None
     formal_by_binding = _formal_evidence_by_binding(diagnosis, candidate)
-    required_candidate_evidence = _required_candidate_evidence(candidate)
+    required_candidate_evidence = _required_candidate_evidence(candidate, job)
 
     audit_rules = {item.rule_id: item for item in audit.rules}
     mapped_required_evidence: list[str] = []

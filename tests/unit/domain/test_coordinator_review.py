@@ -22,6 +22,7 @@ from ._builders import (
     review_outcome,
     snapshot_with_active,
     trigger,
+    unresolved_user_result_proposal,
 )
 
 
@@ -80,7 +81,11 @@ def test_non_pass_review_rejects_candidate_and_terminates_unresolved(
     )
     values.update(issues)
     changed = ReviewAssessment.model_validate(values)
-    outcome = rebuild(base, payload=changed)
+    outcome = rebuild(
+        base,
+        payload=changed,
+        proposed_artifacts=[unresolved_user_result_proposal(source)],
+    )
     snapshot = snapshot_with_active(source)
     resources = continuation(
         incoming_outcome_id=outcome.outcome_id,
@@ -103,6 +108,8 @@ def test_non_pass_review_rejects_candidate_and_terminates_unresolved(
     assert plan.candidate_mutation.reason == changed.recommendation
     assert plan.next_job_spec is None
     assert plan.unresolved_result_draft is not None
+    assert plan.unresolved_result_draft.user_result_proposal_key == "user_result"
+    assert plan.accepted_artifact_proposal_keys == ["user_result"]
     expected_reason = (
         UnresolvedReasonCode.INVALID_NEED_MORE_REQUEST
         if verdict is ReviewVerdict.NEED_MORE_EVIDENCE

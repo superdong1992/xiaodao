@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 
 import pytest
+from pydantic import ValidationError
 
 from problem_locator.contracts.enums import (
     ArtifactKind,
@@ -91,18 +92,19 @@ def _candidate_plan(outcome: JobOutcome) -> TransitionPlan:
     assert outcome.payload is not None
     candidate = outcome.payload.candidate_conclusion_draft
     assert candidate is not None
-    user_result_key = next(
+    user_result_keys = [
         artifact.proposal_key
         for artifact in outcome.proposed_artifacts
-        if artifact.artifact_kind is ArtifactKind.USER_RESULT
-    )
+        if artifact.artifact_kind
+        in {ArtifactKind.USER_RESULT, ArtifactKind.USER_RESULT_ARCHIVE}
+    ]
     return TransitionPlan(
         accepted_state_delta=outcome.payload.state_delta,
         target_case_status=CaseStatus.REVIEWING,
         job_updates=[],
         outcome_disposition=OutcomeDisposition.APPLIED,
         accepted_evidence_proposal_keys=[],
-        accepted_artifact_proposal_keys=[user_result_key],
+        accepted_artifact_proposal_keys=user_result_keys,
         accepted_candidate_proposal_key=candidate.proposal_key,
         selected_skill_update=None,
         case_failure_update=None,
@@ -173,6 +175,103 @@ def _review_job_with_completion_mapping_only_evidence() -> Job:
     payload["evidence_refs"].append(completion_only_ref)
     payload["review_target"]["candidate_content_hash"] = candidate["content_hash"]
     return Job.model_validate(payload)
+
+
+def _review_job_with_reordered_candidate(*, include_extra: bool = False) -> Job:
+    payload = load_json(FIXTURE_ROOT / "positive" / "job-review.json")
+    first_ref = "00000000-0000-0000-0000-000000000040"
+    second_ref = "00000000-0000-0000-0000-000000000041"
+    candidate = payload["context_snapshot"]["candidate_conclusion"]
+    assert candidate is not None
+    candidate["supporting_evidence_refs"] = [second_ref, first_ref]
+    candidate["completion_criteria_mapping"][0]["evidence_refs"] = [
+        first_ref,
+        second_ref,
+    ]
+    candidate["content_hash"] = canonical_json_sha256(
+        {
+            "statement": candidate["statement"],
+            "supporting_evidence_refs": candidate["supporting_evidence_refs"],
+            "completion_criteria_mapping": candidate["completion_criteria_mapping"],
+        }
+    )
+    payload["context_snapshot"]["evidence_refs"] = [first_ref, second_ref]
+    payload["evidence_refs"] = [first_ref, second_ref]
+    if include_extra:
+        extra_ref = "00000000-0000-0000-0000-000000000042"
+        payload["context_snapshot"]["evidence_refs"].append(extra_ref)
+        payload["evidence_refs"].append(extra_ref)
+    payload["review_target"]["candidate_content_hash"] = candidate["content_hash"]
+    return Job.model_validate(payload)
+
+
+def _review_outcome_for_job(
+    job: Job,
+    *,
+    audit_evidence_refs: list[str],
+) -> JobOutcome:
+    payload = load_json(FIXTURE_ROOT / "positive" / "job-outcome-review.json")
+    assert job.review_target is not None
+    payload["payload"]["candidate_content_hash"] = (
+        job.review_target.candidate_content_hash
+    )
+    payload["decision_audit"]["candidate_target"]["candidate_content_hash"] = (
+        job.review_target.candidate_content_hash
+    )
+    payload["decision_audit"]["required_evidence_bindings"] = [
+        {"existing_evidence_id": ref, "evidence_proposal_key": None}
+        for ref in audit_evidence_refs
+    ]
+    payload["consumed_evidence_refs"] = list(job.evidence_refs)
+    payload["payload"]["reviewed_evidence_refs"] = list(job.evidence_refs)
+    return JobOutcome.model_validate(payload)
+
+
+def test_review_audit_uses_job_order_for_reordered_candidate_evidence() -> None:
+    job = _review_job_with_reordered_candidate()
+    candidate = job.context_snapshot.candidate_conclusion
+    assert candidate is not None
+    assert review_required_evidence_refs(candidate) == (
+        "00000000-0000-0000-0000-000000000041",
+        "00000000-0000-0000-0000-000000000040",
+    )
+    outcome = _review_outcome_for_job(
+        job,
+        audit_evidence_refs=list(job.evidence_refs),
+    )
+    assert validate_outcome_for_job(job, outcome) is outcome
+
+
+@pytest.mark.parametrize("coverage", ["missing", "extra"])
+def test_review_audit_rejects_inexact_candidate_evidence_coverage(
+    coverage: str,
+) -> None:
+    job = _review_job_with_reordered_candidate(include_extra=coverage == "extra")
+    audit_refs = list(job.evidence_refs)
+    if coverage == "missing":
+        audit_refs.pop()
+    outcome = _review_outcome_for_job(job, audit_evidence_refs=audit_refs)
+    with pytest.raises(ValueError, match="cover required Candidate Evidence"):
+        validate_outcome_for_job(job, outcome)
+
+
+def test_review_audit_rejects_duplicate_evidence_bindings() -> None:
+    job = _review_job_with_reordered_candidate()
+    payload = load_json(FIXTURE_ROOT / "positive" / "job-outcome-review.json")
+    assert job.review_target is not None
+    payload["payload"]["candidate_content_hash"] = (
+        job.review_target.candidate_content_hash
+    )
+    payload["decision_audit"]["candidate_target"]["candidate_content_hash"] = (
+        job.review_target.candidate_content_hash
+    )
+    binding = {
+        "existing_evidence_id": job.evidence_refs[0],
+        "evidence_proposal_key": None,
+    }
+    payload["decision_audit"]["required_evidence_bindings"] = [binding, binding]
+    with pytest.raises(ValidationError):
+        JobOutcome.model_validate(payload)
 
 
 def test_review_pass_covers_supporting_and_completion_mapping_evidence() -> None:

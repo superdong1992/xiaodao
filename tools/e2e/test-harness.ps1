@@ -21,7 +21,7 @@ function Assert-E2EThrows {
     throw "E2E_HARNESS_TEST_FAILED:expected error $ExpectedMessage"
 }
 
-foreach ($relative in @('bounded-process.ps1', 'run-windows-linux-e2e.ps1', 'harness/windows-journey-lib.ps1', 'harness/windows-http-capture-lib.ps1', 'harness/restart/windows-restart-lib.ps1')) {
+foreach ($relative in @('bounded-process.ps1', 'freeze-source-patch.ps1', 'run-windows-linux-e2e.ps1', 'harness/windows-journey-lib.ps1', 'harness/windows-http-capture-lib.ps1', 'harness/restart/windows-restart-lib.ps1')) {
     $path = Join-Path $root $relative
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
         if ($relative -ceq 'run-windows-linux-e2e.ps1') { continue }

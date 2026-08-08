@@ -49,7 +49,6 @@ from problem_locator.contracts import (
     SubmitJobOutcome,
     TransitionPlan,
     TriggerType,
-    UserResultPayload,
     ValidatedTrigger,
     VersionedRef,
     canonical_json_bytes,
@@ -61,8 +60,6 @@ from problem_locator.contracts.outcomes import (
     validate_coordinator_plan_result,
     validate_outcome_for_job,
     validate_transition_plan_for_outcome,
-    validate_user_result_for_outcome,
-    validate_user_result_resolution,
 )
 from problem_locator.contracts.ports import (
     AssetCatalogPort,
@@ -287,7 +284,6 @@ class OutcomeSubmissionService:
         # Candidate would otherwise make the old Job stale.
         try:
             validate_outcome_for_job(located, outcome, aggregate)
-            _validate_user_result_bytes(located, outcome)
         except (TypeError, ValueError):
             return self._reject(
                 snapshot,
@@ -1008,17 +1004,6 @@ class OutcomeSubmissionService:
                             else plan.next_job_spec.target_state_revision
                         ),
                     )
-                    if formal_candidate is not None:
-                        result = _expected_user_result(job, outcome)
-                        if result is None:
-                            raise ValueError(
-                                "formal Candidate has no USER_RESULT payload"
-                            )
-                        validate_user_result_resolution(
-                            result,
-                            formal_candidate,
-                            evidence_ids,
-                        )
                     created_job = (
                         None
                         if plan.next_job_spec is None
@@ -1045,6 +1030,9 @@ class OutcomeSubmissionService:
                         else finalize_unresolved_result(
                             plan.unresolved_result_draft,
                             generated_audit_artifact_id,
+                            artifact_ids[
+                                plan.unresolved_result_draft.user_result_proposal_key
+                            ],
                             unresolved_evidence_refs,
                         )
                     )
@@ -1785,32 +1773,6 @@ def _stale_trigger(
         ),
         runtime_bindings_by_job_type={},
         occurred_at=processed_at,
-    )
-
-
-def _validate_user_result_bytes(job: Job, outcome: JobOutcome) -> None:
-    result = _expected_user_result(job, outcome)
-    if result is not None:
-        validate_user_result_for_outcome(job, outcome, canonical_json_bytes(result))
-
-
-def _expected_user_result(
-    job: Job,
-    outcome: JobOutcome,
-) -> UserResultPayload | None:
-    payload = outcome.payload
-    if not isinstance(payload, DiagnosisOutcome):
-        return None
-    candidate = payload.candidate_conclusion_draft
-    if candidate is None:
-        return None
-    return UserResultPayload(
-        schema_version=1,
-        format_id="problem-locator-diagnosis-v1",
-        problem_statement=job.context_snapshot.problem_spec.statement,
-        candidate_statement=candidate.statement,
-        supporting_evidence_bindings=candidate.supporting_evidence_bindings,
-        completion_criteria_mapping=candidate.completion_criteria_mapping,
     )
 
 

@@ -448,7 +448,9 @@ def _validate_user_result_semantics(
     candidate = outcome_payload["payload"]["candidate_conclusion_draft"]
     expected = {
         "problem_statement": job.context_snapshot.problem_spec.statement,
-        "candidate_statement": candidate["statement"],
+        "root_cause": candidate["statement"],
+        "status": "COMPLETED",
+        "source_job_type": outcome_payload["job_type"],
         "supporting_evidence_bindings": candidate["supporting_evidence_bindings"],
         "completion_criteria_mapping": candidate["completion_criteria_mapping"],
     }
@@ -473,7 +475,7 @@ def test_user_result_fixture_is_canonical_and_matches_its_candidate() -> None:
     ("field", "replacement"),
     [
         ("problem_statement", "A different problem statement."),
-        ("candidate_statement", "A different candidate statement."),
+        ("root_cause", "A different candidate statement."),
         (
             "supporting_evidence_bindings",
             [

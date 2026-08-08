@@ -29,7 +29,7 @@ def _load(name: str) -> dict[str, object]:
     payload = json.loads(raw)
     assert canonical_json_bytes(payload) == raw
     assert payload["schema_version"] == 1
-    assert payload["contract_revision"] == "v2-contract-r1"
+    assert payload["contract_revision"] == "v3-contract-r1"
     return payload
 
 
@@ -84,6 +84,10 @@ def test_candidate_and_review_fixtures_freeze_the_resolution_gate() -> None:
         "REVIEW_PASS",
     ]
     assert candidate_steps[0]["user_result_is_reviewer_input"] is False
+    assert candidate_steps[0]["accepted_artifact_proposal_keys"] == [
+        "user_result",
+        "user_result_archive",
+    ]
     assert candidate_steps[1]["to"] == "RESOLVED"
     assert {item["step"] for item in rework["transitions"]} == {
         "NEED_MORE_EVIDENCE",

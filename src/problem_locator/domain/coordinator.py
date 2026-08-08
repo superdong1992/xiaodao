@@ -241,6 +241,15 @@ def _dedupe(values: Iterable[str]) -> list[str]:
     return result
 
 
+def _user_result_proposal_key(outcome: JobOutcome) -> str | None:
+    keys = [
+        proposal.proposal_key
+        for proposal in outcome.proposed_artifacts
+        if proposal.artifact_kind is ArtifactKind.USER_RESULT
+    ]
+    return keys[0] if len(keys) == 1 else None
+
+
 def _dedupe_evidence_bindings(
     values: Iterable[EvidenceBinding],
 ) -> list[EvidenceBinding]:
@@ -252,14 +261,6 @@ def _dedupe_evidence_bindings(
             seen.add(key)
             result.append(value)
     return result
-
-
-def _is_subsequence(needle: Sequence[str], haystack: Sequence[str]) -> bool:
-    position = 0
-    for item in haystack:
-        if position < len(needle) and needle[position] == item:
-            position += 1
-    return position == len(needle)
 
 
 def _runtime_from_job(job: Job) -> RuntimeBindings:
@@ -619,6 +620,11 @@ class DomainCoordinator:
             semantic_change or candidate is not None
         )
         if outcome.result_type is OutcomeResultType.INCONCLUSIVE:
+            user_result_key = _user_result_proposal_key(outcome)
+            if user_result_key is None:
+                return _validation(
+                    "An unresolved diagnosis requires its server-generated USER_RESULT."
+                )
             return TransitionPlan(
                 accepted_state_delta=accepted_delta,
                 target_case_status=CaseStatus.UNRESOLVED,
@@ -627,7 +633,9 @@ class DomainCoordinator:
                 ],
                 outcome_disposition=OutcomeDisposition.APPLIED,
                 accepted_evidence_proposal_keys=evidence_keys,
-                accepted_artifact_proposal_keys=dependency_artifact_keys,
+                accepted_artifact_proposal_keys=_dedupe(
+                    [*dependency_artifact_keys, user_result_key]
+                ),
                 accepted_candidate_proposal_key=None,
                 selected_skill_update=None,
                 case_failure_update=None,
@@ -645,6 +653,7 @@ class DomainCoordinator:
                     blocking_rule_ids=_blocking_rule_ids(outcome),
                     evidence_bindings=_audit_evidence_bindings(outcome),
                     recommended_next_step=diagnosis.recommended_next_step,
+                    user_result_proposal_key=user_result_key,
                     occurred_at=trigger.occurred_at,
                 ),
                 clear_active_job=True,
@@ -857,8 +866,13 @@ class DomainCoordinator:
         if outcome_error is not None:
             return outcome_error
         outcome = payload.job_outcome
-        if outcome.proposed_evidence or outcome.proposed_artifacts:
-            return _validation("REVIEW Outcomes cannot propose Evidence or Artifacts.")
+        if outcome.proposed_evidence or any(
+            proposal.artifact_kind is not ArtifactKind.USER_RESULT
+            for proposal in outcome.proposed_artifacts
+        ):
+            return _validation(
+                "REVIEW Outcomes may contain only the server-generated USER_RESULT."
+            )
         if outcome.result_type is OutcomeResultType.FAILED:
             assert outcome.error is not None
             return self._failure_plan(
@@ -870,6 +884,15 @@ class DomainCoordinator:
             )
         assessment = outcome.payload
         assert isinstance(assessment, ReviewAssessment)
+        user_result_key = _user_result_proposal_key(outcome)
+        unresolved_review = (
+            outcome.result_type is OutcomeResultType.INCONCLUSIVE
+            or assessment.verdict is not ReviewVerdict.PASS
+        )
+        if unresolved_review != (user_result_key is not None):
+            return _validation(
+                "Only an unresolved REVIEW may carry its server-generated USER_RESULT."
+            )
         target = _candidate_target(active)
         if target is None:
             return _validation("A REVIEW Job must have a fixed CandidateTarget.")
@@ -1007,13 +1030,18 @@ class DomainCoordinator:
         reason_code: UnresolvedReasonCode,
         summary: str,
     ) -> TransitionPlan:
+        user_result_key = _user_result_proposal_key(outcome)
+        if user_result_key is None:
+            raise ValueError(
+                "unresolved REVIEW has no server-generated USER_RESULT"
+            )
         return TransitionPlan(
             accepted_state_delta=_empty_delta(),
             target_case_status=CaseStatus.UNRESOLVED,
             job_updates=[update],
             outcome_disposition=OutcomeDisposition.APPLIED,
             accepted_evidence_proposal_keys=[],
-            accepted_artifact_proposal_keys=[],
+            accepted_artifact_proposal_keys=[user_result_key],
             accepted_candidate_proposal_key=None,
             selected_skill_update=None,
             case_failure_update=None,
@@ -1037,6 +1065,7 @@ class DomainCoordinator:
                 blocking_rule_ids=_blocking_rule_ids(outcome),
                 evidence_bindings=_audit_evidence_bindings(outcome),
                 recommended_next_step=assessment.recommendation,
+                user_result_proposal_key=user_result_key,
                 occurred_at=trigger.occurred_at,
             ),
             clear_active_job=True,
@@ -2201,9 +2230,9 @@ class DomainCoordinator:
             _evidence_binding_key(binding)
             for binding in candidate.supporting_evidence_bindings
         ]
-        if not _is_subsequence(supporting_order, target_order):
+        if not set(supporting_order) <= set(target_order):
             return _validation(
-                "Candidate supporting Evidence must be a fixed subsequence of target Evidence."
+                "Candidate supporting Evidence must be drawn from target Evidence."
             )
         if candidate.existing_conclusion_id is not None:
             current = state.candidate_conclusion

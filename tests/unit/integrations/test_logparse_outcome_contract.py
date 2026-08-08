@@ -39,6 +39,7 @@ from problem_locator.contracts import (
     RequirementStatus,
     ResourceKind,
     StagedResourceRef,
+    UserResultArchiveMetadataV2,
     UserResultMetadata,
     UserResultPayload,
     WorkspaceAttachmentInput,
@@ -60,6 +61,7 @@ FIXTURE_ROOT = Path(__file__).resolve().parents[2] / "fixtures" / "contracts"
 LOGPARSE_RUN_KEY = "logparse-run"
 LOGPARSE_EVIDENCE_KEY = "logparse-evidence"
 USER_RESULT_KEY = "user-result"
+USER_RESULT_ARCHIVE_KEY = "user-result-archive"
 ORDER_REQUIREMENT_ID = "00000000-0000-0000-0000-000000000081"
 ATTACHMENT_REQUIREMENT_ID = "00000000-0000-0000-0000-000000000082"
 OTHER_EVIDENCE_ID = "00000000-0000-0000-0000-000000000099"
@@ -564,12 +566,63 @@ def _completed_outcome(
         completion_criteria_mapping=mappings,
     )
     result = UserResultPayload(
-        schema_version=1,
-        format_id="problem-locator-diagnosis-v1",
+        schema_version=2,
+        format_id="problem-locator-diagnosis-v2",
+        status="COMPLETED",
+        source_job_type=job.job_type,
         problem_statement=job.context_snapshot.problem_spec.statement,
-        candidate_statement=candidate.statement,
+        root_cause=candidate.statement,
+        findings=[
+            {
+                "statement": candidate.statement,
+                "confidence": 0.95,
+                "evidence_bindings": [binding],
+                "citations": [
+                    {
+                        "evidence_binding": binding,
+                        "archive_name": None,
+                        "line_start": None,
+                        "line_end": None,
+                        "raw_bytes_sha256": None,
+                        "excerpt": None,
+                    }
+                ],
+            }
+        ],
         supporting_evidence_bindings=candidate.supporting_evidence_bindings,
         completion_criteria_mapping=candidate.completion_criteria_mapping,
+        verification_rules=[
+            {
+                "rule_id": "causal_chain",
+                "rule_kind": "SEMANTIC_CAUSALITY",
+                "status": "SEMANTIC_ONLY",
+                "explanation": "The fixture explicitly assesses causality.",
+                "evidence_bindings": [binding],
+                "citations": [
+                    {
+                        "evidence_binding": binding,
+                        "archive_name": None,
+                        "line_start": None,
+                        "line_end": None,
+                        "raw_bytes_sha256": None,
+                        "excerpt": None,
+                    }
+                ],
+                "observed_times": [],
+                "issues": [],
+            }
+        ],
+        time_relevance={
+            "assessment": "UNKNOWN",
+            "problem_time": None,
+            "derived_anchor_time": None,
+            "observations": [],
+            "explanation": "No verified event timestamp was available.",
+            "citations": [],
+        },
+        evidence_gaps=[],
+        limitations=["No verified event timestamp was available."],
+        recommendations=["Submit the candidate to independent review."],
     )
     result_bytes = canonical_json_bytes(result)
     artifact = AgentArtifactProposalDraft(
@@ -582,9 +635,28 @@ def _completed_outcome(
         declared_size=len(result_bytes),
         declared_sha256=bytes_sha256(result_bytes),
         metadata=UserResultMetadata(
-            schema_version=1,
-            format_id="problem-locator-diagnosis-v1",
+            schema_version=2,
+            format_id="problem-locator-diagnosis-v2",
             description="Diagnosis result",
+        ),
+    )
+    archive = AgentArtifactProposalDraft(
+        proposal_key=USER_RESULT_ARCHIVE_KEY,
+        artifact_kind=ArtifactKind.USER_RESULT_ARCHIVE,
+        name="result.zip",
+        content_type="application/zip",
+        resource_kind=ResourceKind.FILE,
+        workspace_relative_path=(
+            f"output/proposals/{USER_RESULT_ARCHIVE_KEY}/result.zip"
+        ),
+        declared_size=1,
+        declared_sha256=bytes_sha256(b"x"),
+        metadata=UserResultArchiveMetadataV2(
+            schema_version=2,
+            format_id="problem-locator-result-archive-v2",
+            description="Readable diagnosis result and target logs.",
+            user_result_proposal_key=USER_RESULT_KEY,
+            target_log_count=0,
         ),
     )
     outcome = _agent_outcome(
@@ -606,7 +678,7 @@ def _completed_outcome(
             recommended_next_step="Submit the candidate to independent review.",
         ),
         evidence=[evidence],
-        artifacts=[artifact],
+        artifacts=[artifact, archive],
     )
     return outcome, result, result_bytes
 
@@ -717,8 +789,8 @@ def test_candidate_and_unique_user_result_have_exact_canonical_bytes(
     assert len(user_results) == 1
     assert user_results[0].proposal_key == USER_RESULT_KEY
     assert user_results[0].metadata == UserResultMetadata(
-        schema_version=1,
-        format_id="problem-locator-diagnosis-v1",
+        schema_version=2,
+        format_id="problem-locator-diagnosis-v2",
         description="Diagnosis result",
     )
     assert user_results[0].declared_size == len(result_bytes)
@@ -731,8 +803,20 @@ def test_candidate_and_unique_user_result_have_exact_canonical_bytes(
         expected_size=len(result_bytes),
         expected_sha256=bytes_sha256(result_bytes),
     )
+    archive_bytes = b"x"
+    staged_archive = InMemoryResourceStore().stage_file(
+        job.job_id,
+        USER_RESULT_ARCHIVE_KEY,
+        InMemoryBinaryStream(archive_bytes),
+        expected_size=len(archive_bytes),
+        expected_sha256=bytes_sha256(archive_bytes),
+    )
     evidence_draft = outcome.proposed_evidence_drafts[0]
-    artifact_draft = user_results[0]
+    artifact_drafts = outcome.proposed_artifact_drafts
+    staged_by_key = {
+        USER_RESULT_KEY: staged,
+        USER_RESULT_ARCHIVE_KEY: staged_archive,
+    }
     normalized = JobOutcome(
         outcome_id=outcome.outcome_id,
         job_id=outcome.job_id,
@@ -760,11 +844,12 @@ def test_candidate_and_unique_user_result_have_exact_canonical_bytes(
                 name=artifact_draft.name,
                 content_type=artifact_draft.content_type,
                 resource_kind=artifact_draft.resource_kind,
-                size=staged.size,
-                sha256=staged.sha256,
-                staged_resource_ref=staged,
+                size=staged_by_key[artifact_draft.proposal_key].size,
+                sha256=staged_by_key[artifact_draft.proposal_key].sha256,
+                staged_resource_ref=staged_by_key[artifact_draft.proposal_key],
                 metadata=artifact_draft.metadata,
             )
+            for artifact_draft in artifact_drafts
         ],
         error=None,
         produced_at=outcome.produced_at,
@@ -804,7 +889,7 @@ def test_user_result_is_rejected_when_candidate_is_absent_missing_or_duplicated(
     ("field_name", "replacement"),
     [
         ("problem_statement", "A different fixed problem statement."),
-        ("candidate_statement", "A different candidate statement."),
+        ("root_cause", "A different root cause."),
         (
             "supporting_evidence_bindings",
             [

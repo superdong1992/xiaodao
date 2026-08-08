@@ -270,18 +270,113 @@ def audit_result_archive(body: bytes, result: UserResultPayload, code: str) -> N
         with zipfile.ZipFile(io.BytesIO(body), mode="r") as archive:
             infos = archive.infolist()
             names = [info.filename for info in infos]
-            require(bool(names) and names[0] == "result.txt", code)
-            require(len(names) == len(set(names)), code)
-            require(names[1:] == [f"target-log-{index:03d}.log" for index in range(1, len(names))], code)
+            manifest_bytes = archive.read("archive-manifest.json")
+            manifest = parse_canonical_json_bytes(manifest_bytes)
+            require(
+                isinstance(manifest, dict)
+                and canonical_json_bytes(manifest) == manifest_bytes,
+                code,
+            )
+            target_logs = manifest.get("target_logs")
+            require(isinstance(target_logs, list), code)
+            target_names = [
+                item.get("archive_name")
+                for item in target_logs
+                if isinstance(item, dict)
+            ]
+            require(
+                manifest.get("schema_version") == 2
+                and manifest.get("format_id")
+                == "problem-locator-result-archive-v2"
+                and manifest.get("problem_time") == result.time_relevance.problem_time
+                and manifest.get("diagnosis_result_sha256")
+                == hashlib.sha256(canonical_json_bytes(result)).hexdigest()
+                and manifest.get("target_log_count") == len(target_logs)
+                and len(target_names) == len(target_logs),
+                code,
+            )
+            require(
+                all(
+                    isinstance(name, str)
+                    and name.endswith(".log")
+                    and not name.startswith("target-log-")
+                    for name in target_names
+                ),
+                code,
+            )
+            require(names == ["result.txt", "archive-manifest.json", *target_names], code)
+            require(len(names) == len(set(name.casefold() for name in names)), code)
+            require(archive.comment == b"", code)
             for info in infos:
                 require("/" not in info.filename and "\\" not in info.filename, code)
                 require(info.date_time == (1980, 1, 1, 0, 0, 0), code)
                 require(info.compress_type == zipfile.ZIP_DEFLATED, code)
+                require(info.flag_bits == 0 and info.create_system == 3, code)
+                require(info.external_attr == (0o100644 << 16), code)
+                require(info.extra == b"" and info.comment == b"", code)
+            result_text_bytes = archive.read("result.txt")
+            result_text = result_text_bytes.decode("utf-8")
             require(
-                archive.read("result.txt")
-                == (result.candidate_statement + "\n").encode("utf-8"),
+                manifest.get("result_txt_sha256")
+                == hashlib.sha256(result_text_bytes).hexdigest()
+                and result.root_cause is not None
+                and result.root_cause in result_text
+                and result.problem_statement in result_text
+                and all(rule.rule_id in result_text for rule in result.verification_rules)
+                and all(name in result_text for name in target_names)
+                and [result_text.index(f"{index}. ") for index in range(1, 10)]
+                == sorted(result_text.index(f"{index}. ") for index in range(1, 10)),
                 code,
             )
+            logs_by_name: dict[str, bytes] = {}
+            for ordinal, (entry, name) in enumerate(
+                zip(target_logs, target_names, strict=True),
+                start=1,
+            ):
+                require(isinstance(entry, dict) and isinstance(name, str), code)
+                content = archive.read(name)
+                require(
+                    entry.get("ordinal") == ordinal
+                    and entry.get("size") == len(content)
+                    and entry.get("sha256") == hashlib.sha256(content).hexdigest(),
+                    code,
+                )
+                logs_by_name[name] = content
+            citations = [
+                *(citation for finding in result.findings for citation in finding.citations),
+                *(
+                    citation
+                    for rule in result.verification_rules
+                    for citation in rule.citations
+                ),
+                *result.time_relevance.citations,
+            ]
+            for citation in citations:
+                if citation.archive_name is None:
+                    require(citation.raw_bytes_sha256 is None, code)
+                    continue
+                content = logs_by_name.get(citation.archive_name)
+                require(
+                    content is not None
+                    and citation.line_start is not None
+                    and citation.line_end is not None,
+                    code,
+                )
+                physical = content.splitlines(keepends=True)
+                require(
+                    1 <= citation.line_start <= citation.line_end <= len(physical),
+                    code,
+                )
+                raw_range = b"".join(
+                    physical[citation.line_start - 1 : citation.line_end]
+                )
+                require(
+                    hashlib.sha256(raw_range).hexdigest()
+                    == citation.raw_bytes_sha256
+                    and raw_range.rstrip(b"\r\n").decode("utf-8")
+                    == citation.excerpt,
+                    code,
+                )
     except AuditFailure:
         raise
     except Exception as exc:

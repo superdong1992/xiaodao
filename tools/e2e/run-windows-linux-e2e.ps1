@@ -147,7 +147,8 @@ function Copy-RestartRuntime([string]$MainRoot) {
         'prepare_nonroot_settings.py', 'prepare_real_zip.py', 'restart_nonroot_runtime_init.sh',
         'scan_service_log_secrets.py', 'service_preflight.py', 'setup_claude.sh',
         'setup_fixtures.sh', 'setup_sources.sh', 'setup_venvs.sh', 'snapshot_data_root.py',
-        'start_service_supervisor.sh', 'stop_service.sh', 'verify_claude_manifest.py',
+        'start_service_supervisor.sh', 'stop_service.sh', 'test_service_launcher.py',
+        'verify_claude_manifest.py',
         'verify_nonroot_logparse_catalog.py', 'verify_restart_nonempty_runtime.sh', 'client-assets',
         'verify_service_process.py', 'windows-service-preflight.ps1'
     )

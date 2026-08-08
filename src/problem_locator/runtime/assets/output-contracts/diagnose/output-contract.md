@@ -13,10 +13,6 @@
 {{S00_AGENT_JOB_OUTCOME_DRAFT_SCHEMA_JSON}}
 <<<END S00 AGENT JOB OUTCOME DRAFT SCHEMA>>>
 
-<<<BEGIN S00 USER RESULT SCHEMA>>>
-{{S00_USER_RESULT_SCHEMA_JSON}}
-<<<END S00 USER RESULT SCHEMA>>>
-
 The top-level object has exactly these twelve fields and no others:
 `["base_state_revision","case_id","consumed_evidence_refs","error","job_id","job_type","payload","proposed_artifact_drafts","proposed_evidence_drafts","result_type","rule_claims","schema_version"]`。
 
@@ -36,9 +32,28 @@ method、order 或其他 USER_FACT 是当前 Case 的冻结输入，禁止请求
 错误或与日志不匹配，本 Case 不得形成 Candidate，服务端会以 `INCONCLUSIVE` 终止，用户
 应使用正确事实创建新 Case。
 
+构造 `state_delta.add_pending_requirements` 时，必须把当前 Skill 对应 requirement 的
+`kind/name/prompt/constraints/supplement_policy` 逐字段原样复制到 PendingRequirement；
+每一项都必须显式写出 `supplement_policy`，禁止省略后依赖 Schema 的 `NONE` 默认值，也
+禁止把 Skill 声明的 `MISSING_ONLY` 改成 `NONE`。服务端会逐字段复验，不一致即拒绝整个
+Outcome。
+
 有 `resolved_logparse_plan` 时，所有 Logparse 请求的附件、`problem_time` 和有序 anchors
 必须与它逐字段完全相同。不得改写时间、删改 anchor 或另选附件来寻找更像结论的日志。
 `missing`、`ambiguous` 或远离 Skill 时间窗口的目标不能作为事故证据。
+
+每个带 `resolved_logparse_plan` 的当前 DIAGNOSE Job 都必须通过 broker 重新建立权威目标
+边界：首次附件解析只调用一次 `parse-targets`；续跑并复用已有 `LOGPARSE_RUN` 时只调用
+一次 `target-logs`。即使当前快照已经含有旧 Evidence、locator、excerpt 或日志路径，也
+禁止跳过本 Job 的 `target-logs` 后直接读取、引用或形成 Candidate。封存 draft 前必须确认
+本 Job 的 broker audit 恰好含有对应的一次成功操作；空 audit、重复成功操作或错误操作
+类型都会使整个 Outcome 无效。
+
+调用 `parse-targets` 时先选定唯一 proposal key `K`，然后必须在所有位置逐字复用同一个
+`K`：request path=`output/proposals/K/request.json`、result path=
+`output/proposals/K/target_logs.json`、request 的 `artifact_proposal_key=K`，以及成功返回的
+`logparse_run_artifact_draft.proposal_key=K`。不得把目录命名为 `parse-1` 却把
+`artifact_proposal_key` 命名为 `parse-1-run`；broker 会在运行 Logparse 前拒绝这种请求。
 
 首次解析产生的 `LOGPARSE_RUN` Artifact metadata 必须保持严格字段集：
 `tree_manifest_sha256`、`logparse_version_ref`、
@@ -77,7 +92,20 @@ binding 写入 `state_delta.add_evidence_bindings`，其中新 Evidence 使用
 本版本不实现日志抑制、限流或采样窗口扩展；不得自行推导此类容差。后续由 Skill 合同
 显式声明后再扩展服务端验证。
 
-## Evidence、Candidate 与用户结果
+`fact_refs` 必须严格服从 Skill 的规则种类，因为服务端会把它与独立推导的输入逐项比较：
+`FACT_FIELD_EQUALS` 只列出唯一匹配的 user-fact item ID；`EVENT_TIME_WINDOW` 只列出
+它的 `USER_FACT` reference item ID（`SKILL_FIXED` 时为空）；every other rule kind，
+包括 `EVENT_PRESENT`、`ROLE_COVERAGE`、`CROSS_ROLE_CORRELATION`、`EVENT_ORDER` 和
+`SEMANTIC_CAUSALITY`, has `fact_refs=[]`。语义说明可以引用已由前置规则验证的值，
+但不得把这些 fact ID 附加到跨角色、顺序或语义 claim。
+
+每条 `EVENT_TIME_WINDOW` 的下界必须计算为 `problem_time - before_ms`，上界必须计算为
+`problem_time + after_ms`；不得交换参数，也不得把 `before_ms` 加到问题时间上。例如
+`problem_time=2026-07-31T00:00:03.000Z`、`before_ms=3500`、`after_ms=500` 时，窗口是
+`[2026-07-30T23:59:59.500Z, 2026-07-31T00:00:03.500Z]`，因此
+`2026-07-31T00:00:00.100Z` 位于窗口内。
+
+## Evidence、Candidate 与服务端用户结果
 
 Evidence 只能来自当前 Job 固定输入或同一 draft 的合法 proposal。新 LOGPARSE Evidence
 必须绑定 broker 返回的同一 `LOGPARSE_RUN`。Candidate supporting bindings 与每个
@@ -85,10 +113,12 @@ completion mapping 必须覆盖全部所需 Evidence，保持当前快照和新�
 并同时列入 `consumed_evidence_refs`。正式 `evidence_refs` 必须保持当前 Job Evidence 的
 固定子序列；禁止按业务角色、日志时间或叙述顺序重新排序。
 
-形成 Candidate 时必须恰好提出一个 `USER_RESULT` FILE；若 Skill 要求归档，还要恰好提出
-一个由 `problem-locator-pack-result` 生成的 `USER_RESULT_ARCHIVE`。USER_RESULT 必须符合
-上方 Schema，并与 Candidate statement、ProblemSpec、supporting bindings 和 completion
-mappings 逐字一致。被 Review 拒绝或服务端验证失败的结果不会成为可下载用户结果。
+Agent 禁止提出或写入 `USER_RESULT`、`USER_RESULT_ARCHIVE`、`diagnosis-result.json`、
+`result.zip` 或任何归档请求，也禁止自行调用 zip/tar。Agent draft 只提交 Candidate、
+Evidence、rule claims 与合同允许的内部 Artifact proposal。Agent 进程退出后，服务端重读
+权威证据并执行机器验证；DIAGNOSE 草稿通过服务端验证后，服务端立即从已验证的权威结果
+生成并持久化用户产物，仅在独立 Review PASS 后开放公开下载。Agent 不得预先构造、摘要
+或替代这些服务端产物。
 
 `state_delta.add_user_facts` 与 `state_delta.fulfill_requirements` 由应用层拥有，Agent 保持
 为空。缺参、附件、COMPLETED/REROUTE 的 payload 组合及所有 proposal 形状以嵌入 Schema
@@ -103,8 +133,8 @@ mappings 逐字一致。被 Review 拒绝或服务端验证失败的结果不会
 problem-locator-seal-outcome-draft
 ```
 
-sealer 只校验和 Canonical-JSON 规范化 Agent draft/USER_RESULT，并记录 draft 的
-size/SHA-256；它不生成 Outcome ID、时间或验证结论。成功后不得继续修改 `output/`。
+sealer 只校验和 Canonical-JSON 规范化 Agent draft，并记录 draft 的 size/SHA-256；它不生成
+Outcome ID、时间、验证结论或公开用户产物。成功后不得继续修改 `output/`。
 Agent 进程退出后，服务端重新读取原始证据、重算机械规则并生成唯一权威的
 `output/job_outcome.json`、`decision_audit.json` 和可观察的证据行记录。stdout、stderr、
 隐藏思维过程或半成品都不是业务输出。

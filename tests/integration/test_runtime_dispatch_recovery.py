@@ -16,6 +16,7 @@ from problem_locator.contracts import (
     APPLICATION_ERROR_RETRYABLE_CODES,
     ApplicationError,
     ApplicationPortError,
+    ArtifactKind,
     CancelCase,
     ErrorCode,
     Job,
@@ -64,6 +65,7 @@ from tests.contracts.scenario_fakes import assets_for_bindings, bindings_from_jo
 from tests.integration.test_s03_r12_r14_persistence_seam import (
     _candidate_outcome_with_real_resources,
     _publish_attachment,
+    _review_pass_outcome,
     _seed_diagnosis_state,
 )
 from tests.unit.dispatch.fakes import (
@@ -134,14 +136,16 @@ class _ReadCaseFaultRepository(JsonFileStateRepository):
 
 class _FaultingResourceStore(FileResourceStore):
     def __init__(self, *args: object, **kwargs: object) -> None:
-        self.publish_faults: collections.deque[ErrorCode] = collections.deque()
+        self.publish_faults: collections.deque[ErrorCode | None] = collections.deque()
         self.publish_attempts: list[tuple[object, str]] = []
         super().__init__(*args, **kwargs)
 
     def publish(self, staged_ref, final_storage_key):
         self.publish_attempts.append((staged_ref, final_storage_key))
         if self.publish_faults:
-            raise _port_error(self.publish_faults.popleft())
+            failure = self.publish_faults.popleft()
+            if failure is not None:
+                raise _port_error(failure)
         return super().publish(staged_ref, final_storage_key)
 
 
@@ -295,7 +299,7 @@ def _seed_route_files(
     guard: InProcessPublicationCommitGuard,
 ) -> tuple[FileExecutionRecordStore, StateFile, Job]:
     layout = StorageLayout.at(data_root)
-    layout.ensure_directories()
+    layout.initialize_v2_data_root()
     state = StateFile.model_validate(_json("state.json"))
     route = state.cases[CASE_ID].jobs[ROUTE_JOB_ID]
     records = FileExecutionRecordStore(data_root, lock)
@@ -420,12 +424,17 @@ def test_finalized_outcome_retries_only_submission_with_real_file_records(
     ).read_bytes()
 
 
-def test_resource_publish_failure_retries_same_candidate_receipt_and_bytes(
+@pytest.mark.parametrize(
+    "retry_path",
+    ["same-process", "restart-recovery"],
+)
+def test_partial_result_publish_is_api_atomic_and_retry_adopts_first_file(
     tmp_path: Path,
+    retry_path: str,
 ) -> None:
     data_root = tmp_path / "data"
     layout = StorageLayout.at(data_root)
-    layout.ensure_directories()
+    layout.initialize_v2_data_root()
     lock = StorageCoordinationLock()
     guard = InProcessPublicationCommitGuard(lock)
     registry = AttachmentUploadRegistry()
@@ -479,16 +488,61 @@ def test_resource_publish_failure_retries_same_candidate_receipt_and_bytes(
         attachment,
         tmp_path,
     )
-    resources.publish_faults.append(ErrorCode.RESOURCE_PUBLISH_FAILED)
+    resources.publish_faults.extend(
+        [None, ErrorCode.RESOURCE_PUBLISH_FAILED]
+    )
     observed = _RecordingJobControl(application)
-    runtime = _PublishingRuntime(
+
+    class _SnapshotPublishingRuntime(_PublishingRuntime):
+        before_submission_snapshot: StateFile | None = None
+
+        def execute(self, job, cancellation) -> RuntimeExecutionReceipt:
+            receipt = super().execute(job, cancellation)
+            self.before_submission_snapshot = repository.read_snapshot()
+            return receipt
+
+    runtime = _SnapshotPublishingRuntime(
         records,
         outcome,
         repository,
     )
     epoch = RuntimeEpochContext()
     epoch.install(EPOCH)
-    backoff = ManualSubmissionBackoff()
+
+    result_targets: dict[str, str] = {}
+
+    class _ApiAtomicityObservingBackoff(ManualSubmissionBackoff):
+        def wait(self, delay_seconds: float) -> bool:
+            assert runtime.before_submission_snapshot is not None
+            assert repository.read_snapshot() == runtime.before_submission_snapshot
+            attempted_results = [
+                (staged.proposal_key, target)
+                for staged, target in resources.publish_attempts
+                if getattr(staged, "proposal_key", None)
+                in {"user_result", "user_result_archive"}
+            ]
+            assert [proposal_key for proposal_key, _ in attempted_results] == [
+                "user_result",
+                "user_result_archive",
+            ]
+            result_targets.update(attempted_results)
+            first_path = data_root / result_targets["user_result"]
+            assert first_path.read_bytes() == result_bytes[ArtifactKind.USER_RESULT]
+            assert not (data_root / result_targets["user_result_archive"]).exists()
+
+            case_view = application.get_case(CASE_ID).case_view
+            assert case_view.artifacts == []
+            assert case_view.final_result is None
+            assert application.list_artifacts(CASE_ID).artifacts == []
+            for target in result_targets.values():
+                artifact_id = target.split("/")[-2]
+                with pytest.raises(ApplicationPortError) as hidden:
+                    application.open_artifact(CASE_ID, artifact_id)
+                assert hidden.value.error.code is ErrorCode.ARTIFACT_NOT_FOUND
+            return super().wait(delay_seconds)
+
+    backoff = _ApiAtomicityObservingBackoff()
+    backoff.shutdown = retry_path == "restart-recovery"
 
     result = JobWorker(
         observed,
@@ -497,27 +551,169 @@ def test_resource_publish_failure_retries_same_candidate_receipt_and_bytes(
         submission_backoff=backoff,
     ).execute_one(source.job_id, CancellationController())
 
-    assert result.delivery_completed is True
-    assert result.outcome_disposition is OutcomeDisposition.APPLIED
     assert len(runtime.calls) == 1
-    assert len(observed.submit_calls) == 2
-    first_outcome, first_ref = observed.submit_calls[0]
-    assert all(
-        retried_outcome is first_outcome and retried_ref is first_ref
-        for retried_outcome, retried_ref in observed.submit_calls
-    )
     assert backoff.delays == [0.1]
-    assert len(resources.publish_attempts) >= 3  # attachment + failure + adoption
+    assert result_targets.keys() == {"user_result", "user_result_archive"}
+    initial_publish_attempts = list(resources.publish_attempts)
+
+    if retry_path == "same-process":
+        assert result.delivery_completed is True
+        assert result.outcome_disposition is OutcomeDisposition.APPLIED
+        assert len(observed.submit_calls) == 2
+        first_outcome, first_ref = observed.submit_calls[0]
+        assert all(
+            retried_outcome is first_outcome and retried_ref is first_ref
+            for retried_outcome, retried_ref in observed.submit_calls
+        )
+        replay_publish_attempts = resources.publish_attempts
+    else:
+        assert result.delivery_completed is False
+        assert result.outcome_disposition is None
+        assert len(observed.submit_calls) == 1
+
+        restart_lock = StorageCoordinationLock()
+        restart_guard = InProcessPublicationCommitGuard(restart_lock)
+        restart_registry = AttachmentUploadRegistry()
+        restart_records = FileExecutionRecordStore(data_root, restart_lock)
+        restart_repository = JsonFileStateRepository(
+            data_root,
+            restart_lock,
+            FakeClock(FIXED_TIME),
+            DeterministicIdGenerator(seed="s08-resource-retry-state"),
+            execution_record_store=restart_records,
+        )
+        restart_resources = _FaultingResourceStore(
+            StorageLayout.at(data_root),
+            restart_lock,
+            restart_registry,
+            DeterministicIdGenerator(seed="s08-resource-retry"),
+        )
+        recovery_dispatcher = RecoveryDispatcher()
+        restart_application = _route_application(
+            data_root,
+            restart_repository,
+            restart_records,
+            restart_resources,
+            restart_guard,
+            InProcessAttachmentUploadGuard(restart_registry),
+            catalog,
+            dispatcher=recovery_dispatcher,
+        )
+        restart_view = restart_application.get_case(CASE_ID).case_view
+        assert restart_view.artifacts == []
+        assert restart_application.list_artifacts(CASE_ID).artifacts == []
+        for target in result_targets.values():
+            artifact_id = target.split("/")[-2]
+            with pytest.raises(ApplicationPortError) as hidden:
+                restart_application.open_artifact(CASE_ID, artifact_id)
+            assert hidden.value.error.code is ErrorCode.ARTIFACT_NOT_FOUND
+
+        restarted_control = _RecordingJobControl(restart_application)
+        recovered = RecoveryCoordinator(
+            restart_repository,
+            restart_records,
+            restarted_control,
+            recovery_dispatcher,  # type: ignore[arg-type]
+            RuntimeEpochFactory(
+                DeterministicIdGenerator(seed="s08-resource-retry-epoch")
+            ),
+            RuntimeEpochContext(),
+            submission_backoff=ManualSubmissionBackoff(),
+        ).recover()
+
+        assert recovered.completed is True
+        assert recovered.replayed_job_ids == (source.job_id,)
+        assert len(restarted_control.submit_calls) == 1
+        repository = restart_repository
+        resources = restart_resources
+        records = restart_records
+        application = restart_application
+        replay_publish_attempts = [
+            *initial_publish_attempts,
+            *restart_resources.publish_attempts,
+        ]
+
+    result_attempts = [
+        (staged.proposal_key, target)
+        for staged, target in replay_publish_attempts
+        if getattr(staged, "proposal_key", None)
+        in {"user_result", "user_result_archive"}
+    ]
+    assert result_attempts == [
+        ("user_result", result_targets["user_result"]),
+        ("user_result_archive", result_targets["user_result_archive"]),
+        ("user_result", result_targets["user_result"]),
+        ("user_result_archive", result_targets["user_result_archive"]),
+    ]
     durable = records.read_published_outcome(source.job_id)
     assert durable is not None
     assert durable.outcome_file_ref == runtime.receipts[0].outcome_file_ref
     assert canonical_json_bytes(durable.job_outcome) == canonical_json_bytes(outcome)
     aggregate = repository.read_snapshot().cases[CASE_ID]
-    artifact = next(iter(aggregate.artifacts.values()))
-    assert artifact.size == len(result_bytes) == 622
-    assert artifact.sha256 == hashlib.sha256(result_bytes).hexdigest()
+    accepted = {
+        item.kind: item
+        for item in aggregate.artifacts.values()
+        if item.kind in {ArtifactKind.USER_RESULT, ArtifactKind.USER_RESULT_ARCHIVE}
+    }
+    assert set(accepted) == {
+        ArtifactKind.USER_RESULT,
+        ArtifactKind.USER_RESULT_ARCHIVE,
+    }
+    artifact = accepted[ArtifactKind.USER_RESULT]
+    user_result_bytes = result_bytes[ArtifactKind.USER_RESULT]
+    assert artifact.size == len(user_result_bytes) == 1604
+    assert artifact.sha256 == hashlib.sha256(user_result_bytes).hexdigest()
+    assert artifact.storage_key == result_targets["user_result"]
+    assert accepted[ArtifactKind.USER_RESULT_ARCHIVE].storage_key == result_targets[
+        "user_result_archive"
+    ]
     assert aggregate.case.active_job_id is not None
-    assert aggregate.jobs[aggregate.case.active_job_id].job_type.value == "REVIEW"
+    review_job_id = aggregate.case.active_job_id
+    assert aggregate.jobs[review_job_id].job_type.value == "REVIEW"
+
+    reviewing_view = application.get_case(CASE_ID).case_view
+    assert reviewing_view.artifacts == []
+    assert reviewing_view.final_result is None
+    assert application.list_artifacts(CASE_ID).artifacts == []
+    for artifact_id in (
+        artifact.artifact_id,
+        accepted[ArtifactKind.USER_RESULT_ARCHIVE].artifact_id,
+    ):
+        with pytest.raises(ApplicationPortError) as hidden:
+            application.open_artifact(CASE_ID, artifact_id)
+        assert hidden.value.error.code is ErrorCode.ARTIFACT_NOT_FOUND
+
+    review_claim = application.claim_job(review_job_id, EPOCH)
+    assert review_claim.claimed is True
+    assert review_claim.job is not None
+    review_outcome = _review_pass_outcome(review_claim.job)
+    review_outcome_ref = records.publish_outcome_bytes(
+        review_job_id,
+        canonical_json_bytes(review_outcome),
+    )
+    review_receipt = application.submit_outcome(review_outcome, review_outcome_ref)
+
+    assert review_receipt.disposition is OutcomeDisposition.APPLIED
+    public_view = application.get_case(CASE_ID).case_view
+    assert {item.artifact_id for item in public_view.artifacts} == {
+        artifact.artifact_id,
+        accepted[ArtifactKind.USER_RESULT_ARCHIVE].artifact_id,
+    }
+    assert {
+        item.artifact_id for item in application.list_artifacts(CASE_ID).artifacts
+    } == {
+        artifact.artifact_id,
+        accepted[ArtifactKind.USER_RESULT_ARCHIVE].artifact_id,
+    }
+    for kind in (ArtifactKind.USER_RESULT, ArtifactKind.USER_RESULT_ARCHIVE):
+        published_artifact = accepted[kind]
+        opened = application.open_artifact(CASE_ID, published_artifact.artifact_id)
+        try:
+            downloaded = opened.stream.read(published_artifact.size + 1)
+            assert opened.stream.read(1) == b""
+        finally:
+            opened.stream.close()
+        assert downloaded == result_bytes[kind]
 
 
 def test_asset_error_parks_scheduler_then_recovery_replays_before_interrupt(
@@ -830,7 +1026,7 @@ def test_real_runtime_state_fault_fails_scheduler_and_next_start_only_interrupts
     state, route = _state_with_catalog_route_job(catalog)
     data_root = tmp_path / "data"
     layout = StorageLayout.at(data_root)
-    layout.ensure_directories()
+    layout.initialize_v2_data_root()
     first_lock = StorageCoordinationLock()
     first_guard = InProcessPublicationCommitGuard(first_lock)
     first_registry = AttachmentUploadRegistry()
@@ -1042,7 +1238,7 @@ def test_interrupted_review_resume_creates_only_review_replacement(
 ) -> None:
     data_root = tmp_path / "data"
     layout = StorageLayout.at(data_root)
-    layout.ensure_directories()
+    layout.initialize_v2_data_root()
     first_lock = StorageCoordinationLock()
     first_guard = InProcessPublicationCommitGuard(first_lock)
     first_registry = AttachmentUploadRegistry()

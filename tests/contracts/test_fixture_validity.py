@@ -79,6 +79,10 @@ NEGATIVE_FIXTURES = {
         True,
     ),
     "schema-user-result-extra-field.json": ("user-result.schema.json", True),
+    "schema-user-result-inconclusive-empty-gaps.json": (
+        "user-result.schema.json",
+        True,
+    ),
 }
 
 

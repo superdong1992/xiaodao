@@ -8,7 +8,6 @@ import pytest
 
 from problem_locator.contracts import (
     AgentJobOutcomeDraftV2,
-    UserResultPayload,
     canonical_json_bytes,
     parse_canonical_json_bytes,
 )
@@ -60,7 +59,7 @@ def _pretty_reversed(value: object) -> bytes:
 
 def _workspace(tmp_path: Path) -> Path:
     root = tmp_path / "workspace"
-    (root / "output/proposals/user_result").mkdir(parents=True)
+    (root / "output").mkdir(parents=True)
     (root / "runtime/tool-state").mkdir(parents=True)
     return root
 
@@ -87,33 +86,6 @@ def test_sealer_canonicalizes_v2_draft_without_minting_server_fields(
         marker_bytes,
         SealedAgentOutcomeDraftMarker,
     ) == marker
-
-
-def test_sealer_normalizes_user_result_and_recomputes_declaration(
-    tmp_path: Path,
-) -> None:
-    root = _workspace(tmp_path)
-    draft = _v2_draft("agent-job-outcome-diagnosis.json")
-    user_result = _fixture("user-result.json")
-    proposal = draft["proposed_artifact_drafts"][0]  # type: ignore[index]
-    proposal["declared_size"] = 1  # type: ignore[index]
-    proposal["declared_sha256"] = "0" * 64  # type: ignore[index]
-    draft_path = root / DRAFT_OUTCOME_RELATIVE_PATH
-    result_path = root / "output/proposals/user_result/diagnosis-result.json"
-    draft_path.write_bytes(_pretty_reversed(draft))
-    result_path.write_bytes(_pretty_reversed(user_result))
-
-    seal_agent_outcome_draft(root)
-
-    result_bytes = result_path.read_bytes()
-    assert parse_canonical_json_bytes(result_bytes, UserResultPayload)
-    sealed = parse_canonical_json_bytes(
-        draft_path.read_bytes(),
-        AgentJobOutcomeDraftV2,
-    )
-    proposal = sealed.proposed_artifact_drafts[0]
-    assert proposal.declared_size == len(result_bytes)
-    assert proposal.declared_sha256 == hashlib.sha256(result_bytes).hexdigest()
 
 
 def test_sealer_rejects_agent_owned_final_outcome_path(tmp_path: Path) -> None:

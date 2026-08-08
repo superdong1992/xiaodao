@@ -15,8 +15,8 @@ $script:RestartMcpUrl = 'http://127.0.0.1:18000/mcp'
 $script:RestartServiceBaseUrl = 'http://127.0.0.1:18000'
 $script:RestartClientSkillSha256 = 'c444f6c4bcb24fe9f44be24da77aa5b14cd420d73e5b7959a913584cfd82f4e3'
 $script:RestartSkillId = 'diagnosis-skill/diagnose-service-takeover'
-$script:RestartSkillVersion = '3.1.0'
-$script:RestartSkillHash = '671a591bb7c7857bc5d1e49fab433129668ea1d98cfc05b41ef2afb77f6f0764'
+$script:RestartSkillVersion = '4.0.0'
+$script:RestartSkillHash = 'eaa059e98e2fde9b923e0bce3e860422b2944aeabe939b57920793f70337b618'
 $script:RestartGetTool = 'problem_locator_get_case'
 $script:RestartListTool = 'problem_locator_list_artifacts'
 $script:RestartFullGetTool = "mcp__problem-locator__$($script:RestartGetTool)"
@@ -415,9 +415,11 @@ function Assert-RestartArtifactView {
         [Parameter(Mandatory = $true)][string]$ExpectedContentType,
         [Parameter(Mandatory = $true)][string]$Label
     )
-    Assert-RestartExactProperties $Artifact @('artifact_id', 'name', 'content_type', 'size', 'sha256', 'created_at', 'download_url') $Label
+    Assert-RestartExactProperties $Artifact @('artifact_id', 'kind', 'name', 'content_type', 'size', 'sha256', 'created_at', 'download_url') $Label
     $artifactId = Get-RestartStringProperty $Artifact 'artifact_id'
     Assert-RestartUuid $artifactId "$Label artifact_id"
+    $expectedKind = if ($ExpectedName -ceq 'diagnosis-result.json') { 'USER_RESULT' } else { 'USER_RESULT_ARCHIVE' }
+    Assert-Restart ((Get-RestartStringProperty $Artifact 'kind') -ceq $expectedKind) "$Label kind"
     Assert-Restart ((Get-RestartStringProperty $Artifact 'name') -ceq $ExpectedName) "$Label name"
     Assert-Restart ((Get-RestartStringProperty $Artifact 'content_type') -ceq $ExpectedContentType) "$Label content_type"
     Assert-Restart ((Get-RestartIntegerProperty $Artifact 'size') -gt 0) "$Label size"
@@ -770,12 +772,13 @@ function Confirm-RestartPersistenceResult {
     Assert-RestartExactProperties $getData @('case_view', 'wait_timed_out') 'post-restart get_case data'
     Assert-Restart (-not (Get-RestartBooleanProperty $getData 'wait_timed_out')) 'post-restart get_case must not time out'
     $view = Get-RestartProperty $getData 'case_view' -Required
-    Assert-RestartExactProperties $view @('case_id', 'status', 'case_revision', 'diagnosis_state_revision', 'problem_spec', 'user_facts', 'confirmed_facts', 'open_questions', 'pending_requirements', 'active_job', 'selected_skill_ref', 'final_result', 'failure', 'artifacts', 'created_at', 'updated_at') 'post-restart CaseView'
+    Assert-RestartExactProperties $view @('case_id', 'status', 'case_revision', 'diagnosis_state_revision', 'problem_spec', 'user_facts', 'confirmed_facts', 'open_questions', 'pending_requirements', 'active_job', 'selected_skill_ref', 'final_result', 'unresolved_result', 'failure', 'artifacts', 'created_at', 'updated_at') 'post-restart CaseView'
     Assert-Restart ((Get-RestartStringProperty $view 'case_id') -ceq $caseId) 'post-restart CaseView case_id'
     Assert-Restart ((Get-RestartStringProperty $view 'status') -ceq 'RESOLVED') 'post-restart Case status'
     Assert-Restart ((Get-RestartIntegerProperty $view 'case_revision') -eq (Get-RestartIntegerProperty $PreSummary 'resolved_case_revision')) 'persisted Case revision'
     Assert-Restart ((Get-RestartIntegerProperty $view 'diagnosis_state_revision') -eq (Get-RestartIntegerProperty $PreSummary 'diagnosis_state_revision')) 'persisted diagnosis revision'
     Assert-Restart ($null -eq (Get-RestartProperty $view 'active_job' -Required)) 'resolved Case active_job must be null'
+    Assert-Restart ($null -eq (Get-RestartProperty $view 'unresolved_result' -Required)) 'resolved Case unresolved_result must be null'
     Assert-Restart ($null -eq (Get-RestartProperty $view 'failure' -Required)) 'resolved Case failure must be null'
     $selectedSkill = Get-RestartProperty $view 'selected_skill_ref' -Required
     Assert-RestartSelectedSkill $selectedSkill 'post-restart selected Skill'

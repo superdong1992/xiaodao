@@ -8,6 +8,8 @@ from pathlib import Path
 import pytest
 
 from problem_locator.contracts import (
+    CONTRACT_REVISION,
+    SCHEMA_VERSION,
     ApplicationPortError,
     Attachment,
     AttachmentStatus,
@@ -26,7 +28,7 @@ from problem_locator.contracts import (
 )
 from problem_locator.storage.atomic import read_stable_file_bytes
 from problem_locator.storage.coordination import StorageCoordinationLock
-from problem_locator.storage.layout import StorageLayout
+from problem_locator.storage.layout import DATA_FORMAT_MARKER_BYTES, StorageLayout
 from problem_locator.storage.state_repository import JsonFileStateRepository
 from tests.contracts.fakes import InMemoryExecutionRecordStore
 from tests.unit.storage.fakes import (
@@ -162,6 +164,8 @@ def _repository(
 
 
 def _write_state(layout: StorageLayout, state: StateFile | dict) -> None:
+    if not layout.data_format_marker.exists():
+        layout.data_format_marker.write_bytes(DATA_FORMAT_MARKER_BYTES)
     layout.state.write_bytes(canonical_json_bytes(state))
 
 
@@ -182,8 +186,8 @@ def test_empty_directory_initializes_generation_one_canonical_state(
 
     snapshot = repository.read_snapshot()
     assert isinstance(repository, StateRepository)
-    assert snapshot.schema_version == 2
-    assert snapshot.contract_revision == "v2-contract-r1"
+    assert snapshot.schema_version == SCHEMA_VERSION == 3
+    assert snapshot.contract_revision == CONTRACT_REVISION == "v3-contract-r1"
     assert snapshot.generation == 1
     assert snapshot.created_at == INITIAL_TIME
     assert snapshot.updated_at == INITIAL_TIME
@@ -191,8 +195,9 @@ def test_empty_directory_initializes_generation_one_canonical_state(
     assert snapshot.recovery_processing_records == {}
     assert repository.export_snapshot() == repository.layout.state.read_bytes()
     assert repository.layout.previous_state.exists() is False
+    assert repository.layout.data_format_marker.read_bytes() == DATA_FORMAT_MARKER_BYTES
     assert clock.calls == 1
-    assert sync.count("sync_file") == 1
+    assert sync.count("sync_file") == 2
     assert [event.destination for event in replacer.events] == [
         repository.layout.state
     ]
@@ -205,7 +210,7 @@ def test_empty_directory_initializes_generation_one_canonical_state(
         (
             canonical_json_bytes(
                 {
-                    "schema_version": 3,
+                    "schema_version": 4,
                     "contract_revision": "v2-contract-r1",
                 }
             ),
@@ -229,6 +234,7 @@ def test_startup_rejects_corrupt_or_unsupported_state_without_prev_fallback(
 ) -> None:
     layout = StorageLayout.at(tmp_path)
     layout.ensure_directories()
+    layout.data_format_marker.write_bytes(DATA_FORMAT_MARKER_BYTES)
     layout.state.write_bytes(payload)
     layout.previous_state.write_bytes(canonical_json_bytes(_positive_state()))
 
@@ -250,6 +256,7 @@ def test_missing_state_with_previous_or_business_content_is_corrupt(
 ) -> None:
     layout = StorageLayout.at(tmp_path)
     layout.ensure_directories()
+    layout.data_format_marker.write_bytes(DATA_FORMAT_MARKER_BYTES)
     layout.previous_state.write_bytes(b"administrator recovery candidate\n")
 
     _assert_port_error(
@@ -262,6 +269,58 @@ def test_missing_state_with_previous_or_business_content_is_corrupt(
             execution_record_store=InMemoryExecutionRecordStore(),
         ),
     )
+    assert not layout.state.exists()
+
+
+def test_unmarked_pre_v2_state_is_rejected_without_adoption_or_rewrite(
+    tmp_path: Path,
+) -> None:
+    data_root = tmp_path / "legacy-data"
+    data_root.mkdir()
+    layout = StorageLayout.at(data_root)
+    legacy = canonical_json_bytes(
+        {"contract_revision": "v2-contract-r1", "schema_version": 2}
+    )
+    layout.state.write_bytes(legacy)
+    original_entries = tuple(data_root.iterdir())
+
+    error = _assert_port_error(
+        ErrorCode.STATE_SCHEMA_UNSUPPORTED,
+        lambda: JsonFileStateRepository(
+            data_root,
+            StorageCoordinationLock(),
+            FixedClock(INITIAL_TIME),
+            DeterministicIdGenerator(seed="unmarked-pre-v2"),
+            execution_record_store=InMemoryExecutionRecordStore(),
+        ),
+    )
+
+    assert "fresh DATA_ROOT" in error.error.message
+    assert layout.state.read_bytes() == legacy
+    assert tuple(data_root.iterdir()) == original_entries == (layout.state,)
+    assert not layout.data_format_marker.exists()
+
+
+def test_mismatched_data_format_marker_is_corrupt_and_never_rewritten(
+    tmp_path: Path,
+) -> None:
+    layout = StorageLayout.at(tmp_path)
+    layout.ensure_directories()
+    legacy_marker = b'{"format_id":"problem-locator-data-v2","schema_version":2}\n'
+    layout.data_format_marker.write_bytes(legacy_marker)
+
+    _assert_port_error(
+        ErrorCode.STATE_CORRUPT,
+        lambda: JsonFileStateRepository(
+            tmp_path,
+            StorageCoordinationLock(),
+            FixedClock(INITIAL_TIME),
+            DeterministicIdGenerator(seed="mismatched-marker"),
+            execution_record_store=InMemoryExecutionRecordStore(),
+        ),
+    )
+
+    assert layout.data_format_marker.read_bytes() == legacy_marker
     assert not layout.state.exists()
 
 

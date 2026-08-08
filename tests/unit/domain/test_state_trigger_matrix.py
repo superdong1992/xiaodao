@@ -112,6 +112,9 @@ def _case_without_active(status: CaseStatus) -> CaseSnapshot:
                 summary="Independent review did not establish the conclusion.",
                 blocking_rule_ids=["causal_chain"],
                 evidence_refs=[],
+                user_result_artifact_id=(
+                    "00000000-0000-0000-0000-000000000091"
+                ),
                 recommended_next_step="Create a new Case with corrected inputs.",
                 occurred_at="2026-07-31T00:03:00.000Z",
                 audit_artifact_id="00000000-0000-0000-0000-000000000090",

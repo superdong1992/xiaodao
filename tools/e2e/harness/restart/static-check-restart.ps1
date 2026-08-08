@@ -312,7 +312,12 @@ Assert-RestartUserDispositionFails -Blocks @($ordinaryText) -IncludeTopLevelResu
 Assert-RestartUserDispositionFails -Blocks @($toolResultOne) -IncludeTopLevelResult $false -Label 'content tool_result without top-level result must fail closed'
 
 $mainRoot = [System.IO.Path]::GetFullPath((Join-Path $DriverRoot '..'))
-$coreNames = @('verify_service_process.py', 'start_service_supervisor.sh', 'stop_service.sh')
+$coreNames = @(
+    'verify_service_process.py',
+    'start_service_supervisor.sh',
+    'stop_service.sh',
+    'test_service_launcher.py'
+)
 foreach ($name in $coreNames) {
     $mainPath = Join-Path $mainRoot $name
     $restartPath = Join-Path $DriverRoot $name
@@ -325,7 +330,8 @@ foreach ($name in $coreNames) {
 $verifierText = [System.IO.File]::ReadAllText((Join-Path $DriverRoot 'verify_service_process.py'))
 $supervisorText = [System.IO.File]::ReadAllText((Join-Path $DriverRoot 'start_service_supervisor.sh'))
 $stopText = [System.IO.File]::ReadAllText((Join-Path $DriverRoot 'stop_service.sh'))
-$coreText = $verifierText + "`n" + $supervisorText + "`n" + $stopText
+$launcherText = [System.IO.File]::ReadAllText((Join-Path $DriverRoot 'test_service_launcher.py'))
+$coreText = $verifierText + "`n" + $supervisorText + "`n" + $stopText + "`n" + $launcherText
 foreach ($literal in @(
     'os.fork()', 'os.setgroups([])', 'os.setgid(SERVICE_GID)', 'os.setuid(SERVICE_UID)',
     'os.getresuid()', 'os.getresgid()', 'os.getgroups() == []', 'MAX_PIPE_BYTES = 8192',
@@ -339,6 +345,7 @@ foreach ($literal in @(
     'signal.pidfd_send_signal(pidfd, signal.SIGTERM, None, 0)',
     'select.select([pidfd], [], [], TERMINATE_TIMEOUT_SECONDS)',
     'ARCHIVED_SERVICE_LOG_FILE = Path("/evidence/service.log")',
+    '"-I"', '"/evidence/test_service_launcher.py"',
     'def archive_service_log() -> None:', 'elif mode == "archive-log" and len(args) == 1:'
 )) {
     if (-not $verifierText.Contains($literal)) {
@@ -360,11 +367,22 @@ foreach ($literal in @(
     'cleanup_probe" -lt 300', 'cleanup_state" = Z', 'kill -KILL "$service_pid"',
     "trap 'on_supervisor_exit `$?' EXIT", "trap 'on_supervisor_signal 129' HUP",
     "trap 'on_supervisor_signal 130' INT", "trap 'on_supervisor_signal 143' TERM",
-    'trap - EXIT HUP INT TERM', 'test "$service_status" -eq 143',
+    'trap - EXIT HUP INT TERM', '/evidence/test_service_launcher.py serve',
+    'test "$service_status" -eq 143',
     'verify_service_process.py archive-log', 'verify_service_process.py exit "$service_status"'
 )) {
     if (-not $supervisorText.Contains($literal)) {
         throw "restart service supervisor self-check literal absent: $literal"
+    }
+}
+foreach ($literal in @(
+    'from problem_locator.bootstrap import _create_test_app, cli_hooks',
+    'from problem_locator.entrypoints.cli import CliHooks, main as cli_main',
+    '_create_test_app(settings)',
+    'return cli_main(argv, hooks=_test_cli_hooks())'
+)) {
+    if (-not $launcherText.Contains($literal)) {
+        throw "restart test-only service launcher literal absent: $literal"
     }
 }
 $scanIndex = $supervisorText.IndexOf('scan_service_log_secrets.py', [System.StringComparison]::Ordinal)

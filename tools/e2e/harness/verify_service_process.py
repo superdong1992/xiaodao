@@ -28,8 +28,8 @@ VERIFY_TIMEOUT_SECONDS = 10.0
 TERMINATE_TIMEOUT_SECONDS = 30.0
 EXPECTED_COMMAND = [
     "/opt/venvs/xiaodao/bin/python",
-    "-m",
-    "problem_locator",
+    "-I",
+    "/evidence/test_service_launcher.py",
     "serve",
 ]
 EXPECTED_ENV = {

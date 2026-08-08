@@ -13,15 +13,11 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from problem_locator.contracts import (
     AgentJobOutcomeDraftV2,
-    ArtifactKind,
     JOB_WORKSPACE_BYTES,
-    UserResultPayload,
     canonical_json_bytes,
 )
 from problem_locator.integrations.agent_json import (
-    AgentJsonSurface,
     atomic_replace_agent_json,
-    normalize_agent_json_file,
     read_agent_json_file,
 )
 from problem_locator.integrations.logparse.paths import resolve_workspace_path
@@ -44,14 +40,6 @@ class SealedAgentOutcomeDraftMarker(BaseModel):
     relative_path: Literal["output/job_outcome.draft.json"]
     size: Annotated[int, Field(ge=0)]
     sha256: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
-
-
-def _user_result_indexes(outcome: AgentJobOutcomeDraftV2) -> list[int]:
-    return [
-        index
-        for index, draft in enumerate(outcome.proposed_artifact_drafts)
-        if draft.artifact_kind is ArtifactKind.USER_RESULT
-    ]
 
 
 def _require_server_output_absent(root: Path) -> None:
@@ -88,33 +76,6 @@ def seal_agent_outcome_draft(workspace_root: Path) -> SealedAgentOutcomeDraftMar
         raise ValueError("Agent outcome draft must be one JSON object")
     draft_value = dict(draft_document.value)
     draft = AgentJobOutcomeDraftV2.model_validate(draft_value)
-
-    user_result_indexes = _user_result_indexes(draft)
-    if len(user_result_indexes) > 1:
-        raise ValueError("Agent outcome may declare at most one USER_RESULT")
-    if user_result_indexes:
-        index = user_result_indexes[0]
-        proposal = draft.proposed_artifact_drafts[index]
-        result_path = resolve_workspace_path(
-            root,
-            proposal.workspace_relative_path,
-            must_exist=True,
-        )
-        result_document = normalize_agent_json_file(
-            result_path,
-            surface=AgentJsonSurface.USER_RESULT,
-            max_bytes=JOB_WORKSPACE_BYTES,
-            validate=UserResultPayload.model_validate,
-        )
-        raw_proposals = draft_value.get("proposed_artifact_drafts")
-        if not isinstance(raw_proposals, list) or index >= len(raw_proposals):
-            raise ValueError("Agent outcome proposal list changed during sealing")
-        raw_proposal = raw_proposals[index]
-        if not isinstance(raw_proposal, dict):
-            raise ValueError("USER_RESULT proposal must be one JSON object")
-        raw_proposal["declared_size"] = result_document.size
-        raw_proposal["declared_sha256"] = result_document.sha256
-        draft = AgentJobOutcomeDraftV2.model_validate(draft_value)
 
     draft_bytes = canonical_json_bytes(draft)
     atomic_replace_agent_json(draft_path, draft_bytes)

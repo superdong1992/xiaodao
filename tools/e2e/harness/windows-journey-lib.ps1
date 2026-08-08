@@ -21,15 +21,15 @@ $script:JourneyZipName = 'synthetic-rpc-service-takeover.zip'
 $script:JourneyZipSize = 2367
 $script:JourneyZipSha256 = '194f69fecd8dc8d40d1aedeb6fc25d2b7b4922b176be2b15be73ffe386cc5064'
 $script:JourneySkillId = 'diagnosis-skill/diagnose-service-takeover'
-$script:JourneySkillVersion = '3.1.0'
-$script:JourneySkillHash = '671a591bb7c7857bc5d1e49fab433129668ea1d98cfc05b41ef2afb77f6f0764'
+$script:JourneySkillVersion = '4.0.0'
+$script:JourneySkillHash = 'eaa059e98e2fde9b923e0bce3e860422b2944aeabe939b57920793f70337b618'
 $script:JourneyClientSkillSha256 = 'c444f6c4bcb24fe9f44be24da77aa5b14cd420d73e5b7959a913584cfd82f4e3'
 $script:JourneyMaxAttachmentBytes = 2684354560
 $script:JourneyMaxCurlJsonBytes = 1048576
 $script:JourneyCurlConnectTimeoutSeconds = 10
 $script:JourneyCurlMaxTimeSeconds = 120
 $script:JourneyClaudeVersionTimeoutSeconds = 20
-$script:JourneyClaudePhase1TimeoutSeconds = 180
+$script:JourneyClaudePhase1TimeoutSeconds = 300
 $script:JourneyClaudePhase3TimeoutSeconds = 480
 $script:JourneyCurlProcessTimeoutSeconds = 135
 $script:JourneyMcpTools = @(
@@ -1640,10 +1640,11 @@ function Invoke-JourneyPhase3Validation {
     Assert-Journey ($archiveArtifacts.Count -eq 1) 'public artifact list must contain exactly one result archive'
     $artifact = $resultArtifacts[0]
     $archive = $archiveArtifacts[0]
-    Assert-JourneyExactProperties $artifact @('artifact_id', 'name', 'content_type', 'size', 'sha256', 'created_at', 'download_url') 'USER_RESULT ArtifactView'
-    Assert-JourneyExactProperties $archive @('artifact_id', 'name', 'content_type', 'size', 'sha256', 'created_at', 'download_url') 'USER_RESULT_ARCHIVE ArtifactView'
+    Assert-JourneyExactProperties $artifact @('artifact_id', 'kind', 'name', 'content_type', 'size', 'sha256', 'created_at', 'download_url') 'USER_RESULT ArtifactView'
+    Assert-JourneyExactProperties $archive @('artifact_id', 'kind', 'name', 'content_type', 'size', 'sha256', 'created_at', 'download_url') 'USER_RESULT_ARCHIVE ArtifactView'
     $artifactId = Get-JourneyStringProperty $artifact 'artifact_id'
     Assert-JourneyUuid $artifactId 'USER_RESULT artifact_id'
+    Assert-Journey ((Get-JourneyStringProperty $artifact 'kind') -ceq 'USER_RESULT') 'USER_RESULT kind'
     Assert-Journey ((Get-JourneyStringProperty $artifact 'name') -ceq 'diagnosis-result.json') 'USER_RESULT name'
     Assert-Journey ((Get-JourneyStringProperty $artifact 'content_type') -ceq 'application/json') 'USER_RESULT content_type'
     Assert-Journey ((Get-JourneyIntegerProperty $artifact 'size') -gt 0) 'USER_RESULT size'
@@ -1654,6 +1655,7 @@ function Invoke-JourneyPhase3Validation {
     $archiveId = Get-JourneyStringProperty $archive 'artifact_id'
     Assert-JourneyUuid $archiveId 'USER_RESULT_ARCHIVE artifact_id'
     Assert-Journey ($archiveId -cne $artifactId) 'public artifact IDs must be distinct'
+    Assert-Journey ((Get-JourneyStringProperty $archive 'kind') -ceq 'USER_RESULT_ARCHIVE') 'USER_RESULT_ARCHIVE kind'
     Assert-Journey ((Get-JourneyStringProperty $archive 'content_type') -ceq 'application/zip') 'USER_RESULT_ARCHIVE content_type'
     Assert-Journey ((Get-JourneyIntegerProperty $archive 'size') -gt 0) 'USER_RESULT_ARCHIVE size'
     $archiveSha = Get-JourneyStringProperty $archive 'sha256'

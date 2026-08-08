@@ -64,7 +64,9 @@ def _assert_user_result_matches_candidate(
     assert user_result["problem_statement"] == job["context_snapshot"]["problem_spec"][
         "statement"
     ]
-    assert user_result["candidate_statement"] == candidate["statement"]
+    assert user_result["status"] == "COMPLETED"
+    assert user_result["source_job_type"] == agent_outcome["job_type"]
+    assert user_result["root_cause"] == candidate["statement"]
     assert user_result["supporting_evidence_bindings"] == candidate[
         "supporting_evidence_bindings"
     ]
@@ -83,6 +85,13 @@ def _assert_user_result_matches_candidate(
     assert proposal["content_type"] == "application/json"
     assert proposal["declared_size"] == len(user_result_bytes)
     assert proposal["declared_sha256"] == hashlib.sha256(user_result_bytes).hexdigest()
+    archives = [
+        proposal
+        for proposal in agent_outcome["proposed_artifact_drafts"]
+        if proposal["artifact_kind"] == "USER_RESULT_ARCHIVE"
+    ]
+    assert len(archives) == 1
+    assert archives[0]["metadata"]["user_result_proposal_key"] == proposal["proposal_key"]
 
 
 def test_user_result_is_the_exact_candidate_representation() -> None:
@@ -100,7 +109,7 @@ def test_user_result_is_the_exact_candidate_representation() -> None:
     "field",
     [
         "problem_statement",
-        "candidate_statement",
+        "root_cause",
         "supporting_evidence_bindings",
         "completion_criteria_mapping",
     ],

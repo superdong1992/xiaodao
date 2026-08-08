@@ -124,7 +124,7 @@ def test_macos_timeout_kills_the_real_child_tree_without_rerunning_agent(
 ) -> None:
     data_root = tmp_path / "data"
     layout = StorageLayout.at(data_root)
-    layout.ensure_directories()
+    layout.initialize_v2_data_root()
     coordination_lock = StorageCoordinationLock()
     publication_guard = InProcessPublicationCommitGuard(coordination_lock)
     attachment_registry = AttachmentUploadRegistry()

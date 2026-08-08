@@ -1,12 +1,13 @@
-# Generated Diagnosis Skill v3 contract
+# Generated Diagnosis Skill v4 contract
 
 生成产品恰好包含 `SKILL.md` 和 Canonical `diagnosis-skill.json`。
 
-manifest schema v3 必填字段：
+manifest schema v4 必填字段：
 
 ```text
-schema_version=3
-id, version>=3.0.0, capability, summary
+schema_version=4
+id, version>=4.0.0, capability, summary
+deployment_scope = PRODUCTION | TEST_ONLY
 entry_document=SKILL.md
 tool_bundle_id=tool-bundle/diagnose
 requires_logparse
@@ -71,7 +72,10 @@ field_groups[], match_cardinality=EXACTLY_ONE
 ```
 
 `line_pattern` 是 `^...$` UTF-8 单行 Python 正则，命名捕获组集合必须恰好等于时间组和
-field_groups；缺失或多次匹配都不能通过。规则恰好声明
+field_groups；缺失或多次匹配都不能通过。Logparse 目标进程聚合日志保留
+`[序号] [diagnostic|原始相对路径] ` 或 `[序号] [journal|原始相对路径] ` 行前缀，
+extractor 必须针对实际交付的完整行显式匹配所需来源前缀，禁止假设服务端会剥离前缀。
+规则恰好声明
 `id/kind/description/depends_on/remediation_requirements/parameters`，dependency 只能引用前置
 rule。`remediation_requirements` 只能引用 `MISSING_ONLY` requirement，不能替换已有事实。
 
@@ -104,13 +108,15 @@ LOGPARSE Evidence proposal 必须同时出现在 `state_delta.add_evidence_bindi
 `artifact_proposal_key` 绑定新 LOGPARSE_RUN，使平台共同接收两者。proposal、Finding 或
 prose 本身不驱动接收。续跑只能对正式 LOGPARSE_RUN 调用 `target-logs`，禁止重新 parse。
 
-形成 Candidate 时，生成 Skill 必须同批提出唯一 `USER_RESULT` 和唯一
-`USER_RESULT_ARCHIVE`（name 固定为 `result.zip`）。ZIP 为确定性扁平包：`result.txt` 加 Candidate 实际绑定的完整
-目标日志，按首次 binding 顺序命名 `target-log-001.log` 等；无日志时只有 result.txt。
-生成 `target_log_paths` 时必须先以 broker `target-logs[].log_path` 建映射，再按 Candidate
-`supporting_evidence_bindings` 逐条解析 Evidence locator；禁止直接沿用 broker anchor 顺序。
 Candidate supporting bindings 必须去重并保持当前快照 `evidence_refs` 的相对顺序；新接收
 Evidence 只按 `state_delta.add_evidence_bindings` 顺序追加，禁止按角色、时间或叙述重排。
-`result.txt` 字节恰好为 Candidate statement 的 UTF-8 加一个 LF。
-禁止原始上传包、无关日志、parse 输出和完整 LOGPARSE_RUN。Review PASS 前两种结果均
-不可见、不可下载。
+
+形成 Candidate 时，Agent 禁止提出或写入 `USER_RESULT`、`USER_RESULT_ARCHIVE`、
+`diagnosis-result.json`、`result.zip` 或任何归档请求，也禁止自行调用 zip/tar。Agent draft
+只提交 Candidate、Evidence、rule claims 与合同允许的内部 Artifact proposal。Agent 退出后，
+Runtime 重读权威证据并完成机器验证；DIAGNOSE 草稿通过服务端验证后，服务端立即从已
+验证的权威结果生成并持久化用户产物，仅在独立 Review PASS 后开放公开下载。
+
+生产 catalog 默认拒绝任何 `TEST_ONLY` manifest，并要求至少一个 `PRODUCTION` Diagnosis
+Skill。只有测试 harness 可以通过内部显式开关加载 `TEST_ONLY` fixture；生产 Settings、
+环境变量和 CLI 不提供绕过入口。

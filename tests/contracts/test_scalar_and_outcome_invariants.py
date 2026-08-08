@@ -118,6 +118,16 @@ def test_review_verdict_matrix_accepts_each_legal_branch() -> None:
         assessment["evidence_conflicts"] = conflicts
         assessment["missing_evidence"] = missing
         assessment["stale_references"] = stale
+        if verdict != "PASS":
+            payload["proposed_artifact_drafts"] = [
+                copy.deepcopy(
+                    load_json(
+                        FIXTURE_ROOT
+                        / "positive"
+                        / "agent-job-outcome-diagnosis.json"
+                    )["proposed_artifact_drafts"][0]
+                )
+            ]
         _validate("agent-job-outcome.schema.json", payload)
 
 

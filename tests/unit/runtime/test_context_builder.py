@@ -435,10 +435,9 @@ def test_production_output_contract_materializes_exact_installed_s00_schemas(
         ),
     }
     if job_type is JobType.DIAGNOSE:
-        markers["user-result.schema.json"] = (
-            b"<<<BEGIN S00 USER RESULT SCHEMA>>>\n",
-            b"<<<END S00 USER RESULT SCHEMA>>>",
-        )
+        assert b"<<<BEGIN S00 USER RESULT SCHEMA>>>" not in content
+        assert b"<<<END S00 USER RESULT SCHEMA>>>" not in content
+        assert b"{{S00_USER_RESULT_SCHEMA_JSON}}" not in content
         assert (
             b'application/vnd.problem-locator.logparse-run+directory' in content
         )

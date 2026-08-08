@@ -150,7 +150,7 @@ def test_domain_plan_is_fully_committed_through_real_file_adapters(
 ) -> None:
     data_root = tmp_path / "data"
     layout = StorageLayout.at(data_root)
-    layout.ensure_directories()
+    layout.initialize_v2_data_root()
     coordination_lock = StorageCoordinationLock()
     publication_guard = InProcessPublicationCommitGuard(coordination_lock)
     attachment_registry = AttachmentUploadRegistry()

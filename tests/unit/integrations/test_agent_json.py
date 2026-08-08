@@ -72,13 +72,11 @@ def test_agent_json_boundary_rejects_ambiguous_or_invalid_json(
         parse_agent_json_bytes(invalid_bytes)
 
 
-def test_all_four_agent_json_surfaces_have_one_server_side_owner() -> None:
+def test_all_agent_json_surfaces_have_one_server_side_owner() -> None:
     assert set(AGENT_JSON_SURFACE_OWNERS) == set(AgentJsonSurface)
     assert AGENT_JSON_SURFACE_OWNERS == {
         AgentJsonSurface.JOB_OUTCOME: "problem-locator-seal-outcome-draft",
         AgentJsonSurface.LOGPARSE_REQUEST: "problem-locator-logparse",
-        AgentJsonSurface.RESULT_ARCHIVE_REQUEST: "problem-locator-pack-result",
-        AgentJsonSurface.USER_RESULT: "problem-locator-seal-outcome-draft",
     }
 
 
@@ -88,7 +86,6 @@ def test_all_four_agent_json_surfaces_have_one_server_side_owner() -> None:
         "src/problem_locator/runtime/output_reader.py",
         "src/problem_locator/runtime/outcome_finalizer.py",
         "src/problem_locator/integrations/logparse/cli.py",
-        "src/problem_locator/integrations/result_archive.py",
     ],
 )
 def test_agent_json_consumers_do_not_bypass_the_shared_parser(

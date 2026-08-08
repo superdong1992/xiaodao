@@ -32,8 +32,11 @@ from problem_locator.contracts import (
 from problem_locator.integrations.agent_json import atomic_replace_agent_json
 from problem_locator.integrations.logparse.paths import resolve_workspace_path
 
+from .authoritative_targets import AuthoritativeTargetSet
 from .outcome_finalizer import SERVER_OUTCOME_RELATIVE_PATH
+from .result_types import CapturedTargetLog, ServerGeneratedResultFile
 from .server_verifier import VerificationResult
+from .user_results import build_server_result_bundle
 
 
 SERVER_FINALIZATION_MARKER_NAME = "server-job-outcome.finalized"
@@ -67,6 +70,7 @@ class ServerFinalizationResult:
     decision_audit_bytes: bytes | None
     decision_evidence_bytes: bytes
     user_result: UserResultPayload | None
+    generated_result_files: tuple[ServerGeneratedResultFile, ...]
     marker: ServerFinalizedOutcomeMarker
 
 
@@ -163,7 +167,8 @@ def finalize_server_outcome(
     outcome_id: str,
     produced_at: str,
     verification: VerificationResult | None,
-    user_result_bytes: bytes | None,
+    authoritative_targets: AuthoritativeTargetSet | None,
+    target_logs: tuple[CapturedTargetLog, ...],
 ) -> ServerFinalizationResult:
     """Validate, possibly downgrade, then atomically publish one final Outcome."""
 
@@ -181,21 +186,30 @@ def finalize_server_outcome(
     result_type = draft.result_type
     payload = draft.payload
     artifact_drafts = list(draft.proposed_artifact_drafts)
-    if (
+    verification_requires_inconclusive = (
         verification is not None
         and draft.result_type is OutcomeResultType.COMPLETED
         and not verification.positive_gate_passed
-    ):
+    )
+    targets_require_inconclusive = (
+        verification is not None
+        and authoritative_targets is not None
+        and bool(authoritative_targets.unresolved)
+        and draft.result_type is not OutcomeResultType.INCONCLUSIVE
+    )
+    if verification_requires_inconclusive or targets_require_inconclusive:
         assert isinstance(payload, (DiagnosisOutcome, ReviewAssessment))
         result_type = OutcomeResultType.INCONCLUSIVE
         payload = _normalized_inconclusive_payload(payload)
+        # The sealed Agent draft is already forbidden from supplying either
+        # result kind.  Keep this fail-closed filter as a defense at the
+        # server-final seam, then append only freshly generated v2 resources.
         artifact_drafts = [
             item
             for item in artifact_drafts
             if item.artifact_kind
             not in {ArtifactKind.USER_RESULT, ArtifactKind.USER_RESULT_ARCHIVE}
         ]
-        user_result_bytes = None
 
     if isinstance(payload, DiagnosisOutcome):
         payload = _rewrite_diagnosis_provenance(
@@ -203,6 +217,37 @@ def finalize_server_outcome(
             job_id=job.job_id,
             outcome_id=outcome_id,
         )
+
+    generated_result_files: tuple[ServerGeneratedResultFile, ...] = ()
+    user_result = None
+    publishes_completed_result = (
+        job.job_type is JobType.DIAGNOSE
+        and result_type is OutcomeResultType.COMPLETED
+        and isinstance(payload, DiagnosisOutcome)
+        and payload.candidate_conclusion_draft is not None
+    )
+    publishes_unresolved_result = result_type is OutcomeResultType.INCONCLUSIVE or (
+        job.job_type is JobType.REVIEW
+        and result_type is OutcomeResultType.COMPLETED
+        and isinstance(payload, ReviewAssessment)
+        and payload.verdict is not ReviewVerdict.PASS
+    )
+    if publishes_completed_result or publishes_unresolved_result:
+        if verification is None or not isinstance(
+            payload, (DiagnosisOutcome, ReviewAssessment)
+        ):
+            raise ValueError("a public Result v2 requires a verified diagnosis payload")
+        bundle = build_server_result_bundle(
+            job=job,
+            result_type=result_type,
+            payload=payload,
+            verification=verification,
+            authoritative_targets=authoritative_targets,
+            captured_logs=target_logs,
+        )
+        user_result = bundle.report
+        generated_result_files = bundle.files
+        artifact_drafts.extend(item.draft for item in generated_result_files)
 
     outcome = AgentJobOutcome(
         outcome_id=outcome_id,
@@ -221,12 +266,11 @@ def finalize_server_outcome(
     )
     validate_outcome_for_job(job, outcome, manifest)
 
-    user_result = None
-    if user_result_bytes is not None:
-        user_result = validate_user_result_for_outcome(
+    if user_result is not None:
+        validate_user_result_for_outcome(
             job,
             outcome,
-            user_result_bytes,
+            canonical_json_bytes(user_result),
         )
 
     outcome_bytes = canonical_json_bytes(outcome)
@@ -265,6 +309,7 @@ def finalize_server_outcome(
         decision_audit_bytes=audit_bytes,
         decision_evidence_bytes=evidence_bytes,
         user_result=user_result,
+        generated_result_files=generated_result_files,
         marker=marker,
     )
 

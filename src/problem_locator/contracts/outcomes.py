@@ -71,7 +71,7 @@ from .models import (
     SubmitSupplementTriggerPayload,
     TransitionPlan,
     TriggerPayload,
-    UserResultPayload,
+    UserResultPayloadV2,
     UserFactEvidenceLocator,
     ValidatedTrigger,
     WorkspaceArtifactInput,
@@ -317,17 +317,16 @@ def validate_outcome_for_job(
             candidate = job.context_snapshot.candidate_conclusion
             if candidate is None:
                 raise ValueError("REVIEW Job requires its Candidate snapshot")
-            candidate_required = list(review_required_evidence_refs(candidate))
-            if required_existing != candidate_required:
+            candidate_required = set(review_required_evidence_refs(candidate))
+            if set(required_existing) != candidate_required:
                 raise ValueError(
                     "REVIEW decision audit must cover required Candidate Evidence"
                 )
-            required_set = set(candidate_required)
-            if candidate_required != [
-                ref for ref in job.evidence_refs if ref in required_set
+            if required_existing != [
+                ref for ref in job.evidence_refs if ref in candidate_required
             ]:
                 raise ValueError(
-                    "REVIEW Candidate Evidence must preserve the fixed Job order"
+                    "REVIEW decision audit Evidence must preserve the fixed Job order"
                 )
 
     payload = outcome.payload
@@ -575,8 +574,8 @@ def validate_user_result_for_outcome(
     job: Job,
     outcome: AgentJobOutcome | JobOutcome,
     result_bytes: bytes,
-) -> UserResultPayload:
-    """Validate the canonical USER_RESULT as the exact candidate representation."""
+) -> UserResultPayloadV2:
+    """Validate the canonical server-final USER_RESULT v2 representation."""
 
     try:
         parsed_result = parse_canonical_json_bytes(result_bytes)
@@ -588,7 +587,7 @@ def validate_user_result_for_outcome(
             "USER_RESULT bytes are not canonical",
         ) from None
     try:
-        result = UserResultPayload.model_validate(parsed_result)
+        result = UserResultPayloadV2.model_validate(parsed_result)
     except (KeyboardInterrupt, SystemExit):
         raise
     except Exception:
@@ -597,28 +596,99 @@ def validate_user_result_for_outcome(
             "USER_RESULT does not satisfy its schema",
         ) from None
     payload = outcome.payload
-    candidate = (
-        payload.candidate_conclusion_draft
-        if isinstance(payload, DiagnosisOutcome)
-        else None
+    candidate = payload.candidate_conclusion_draft if isinstance(payload, DiagnosisOutcome) else None
+    completed_candidate = (
+        outcome.job_type is JobType.DIAGNOSE
+        and outcome.result_type is OutcomeResultType.COMPLETED
+        and candidate is not None
     )
-    if candidate is None:
+    unresolved_result = outcome.result_type is OutcomeResultType.INCONCLUSIVE or (
+        outcome.job_type is JobType.REVIEW
+        and outcome.result_type is OutcomeResultType.COMPLETED
+        and isinstance(payload, ReviewAssessment)
+        and payload.verdict is not ReviewVerdict.PASS
+    )
+    if not completed_candidate and not unresolved_result:
         raise UserResultValidationError(
-            "candidate_missing",
-            "USER_RESULT requires a CandidateConclusionDraft",
+            "outcome_branch",
+            "this Outcome branch cannot publish USER_RESULT",
         )
     expected = {
+        "source_job_type": outcome.job_type,
         "problem_statement": job.context_snapshot.problem_spec.statement,
-        "candidate_statement": candidate.statement,
-        "supporting_evidence_bindings": candidate.supporting_evidence_bindings,
-        "completion_criteria_mapping": candidate.completion_criteria_mapping,
+        "status": "COMPLETED" if completed_candidate else "INCONCLUSIVE",
+        "recommendations": [
+            payload.recommended_next_step
+            if isinstance(payload, DiagnosisOutcome)
+            else payload.recommendation
+        ],
     }
+    if completed_candidate:
+        assert candidate is not None
+        expected.update(
+            root_cause=candidate.statement,
+            supporting_evidence_bindings=candidate.supporting_evidence_bindings,
+            completion_criteria_mapping=candidate.completion_criteria_mapping,
+        )
+    elif result.root_cause is not None:
+        raise UserResultValidationError(
+            "root_cause_mismatch",
+            "an unresolved USER_RESULT must have root_cause=null",
+        )
     for field_name, value in expected.items():
         if getattr(result, field_name) != value:
             raise UserResultValidationError(
                 f"{field_name}_mismatch",
-                f"USER_RESULT {field_name} must exactly match the candidate seam",
+                f"USER_RESULT {field_name} must exactly match the server-final Outcome seam",
             )
+    if completed_candidate:
+        assert isinstance(payload, DiagnosisOutcome)
+        expected_findings = [
+            (item.statement, item.confidence, item.evidence_bindings)
+            for item in payload.findings
+        ]
+        actual_findings = [
+            (item.statement, item.confidence, item.evidence_bindings)
+            for item in result.findings
+        ]
+        if actual_findings != expected_findings:
+            raise UserResultValidationError(
+                "findings_mismatch",
+                "USER_RESULT findings must exactly reflect the Diagnosis Outcome",
+            )
+    audit = outcome.decision_audit
+    if audit is None:
+        raise UserResultValidationError(
+            "decision_audit_missing",
+            "USER_RESULT requires the server-final decision audit",
+        )
+    expected_rules = [
+        (
+            item.rule_id,
+            item.server_evaluation.rule_kind,
+            item.server_evaluation.status,
+            item.server_evaluation.evidence_bindings,
+            item.server_evaluation.observed_times,
+            item.server_evaluation.issues,
+        )
+        for item in audit.rules
+    ]
+    actual_rules = [
+        (
+            item.rule_id,
+            item.rule_kind,
+            item.status,
+            item.evidence_bindings,
+            item.observed_times,
+            item.issues,
+        )
+        for item in result.verification_rules
+    ]
+    if actual_rules != expected_rules:
+        raise UserResultValidationError(
+            "verification_rules_mismatch",
+            "USER_RESULT verification_rules must exactly reflect the server decision audit",
+        )
     artifacts = (
         outcome.proposed_artifact_drafts
         if isinstance(outcome, AgentJobOutcome)
@@ -660,11 +730,14 @@ def validate_user_result_for_outcome(
 
 
 def validate_user_result_resolution(
-    result: UserResultPayload,
+    result: UserResultPayloadV2,
     final_candidate: CandidateConclusion,
     evidence_ids_by_proposal: Mapping[str, str],
 ) -> CandidateConclusion:
-    """Validate draft Evidence bindings after S03 resolves proposal keys to IDs."""
+    """Validate completed v2 bindings after S03 resolves proposal keys to IDs."""
+
+    if result.status != "COMPLETED" or result.root_cause is None:
+        raise ValueError("only a COMPLETED USER_RESULT can resolve a Candidate")
 
     def resolve(binding: EvidenceBinding) -> str:
         if binding.existing_evidence_id is not None:
@@ -679,7 +752,7 @@ def validate_user_result_resolution(
         resolve(binding) for binding in result.supporting_evidence_bindings
     ]
     if (
-        result.candidate_statement != final_candidate.statement
+        result.root_cause != final_candidate.statement
         or resolved_supporting != final_candidate.supporting_evidence_refs
         or len(result.completion_criteria_mapping)
         != len(final_candidate.completion_criteria_mapping)
@@ -834,7 +907,7 @@ def validate_transition_plan_for_outcome(
             raise ValueError("TransitionPlan accepts an unknown candidate proposal")
         if len(user_result_keys) != 1 or not user_result_keys <= accepted_artifacts:
             raise ValueError("an accepted candidate requires its unique USER_RESULT Artifact")
-        if archive_keys and not archive_keys <= accepted_artifacts:
+        if len(archive_keys) != 1 or not archive_keys <= accepted_artifacts:
             raise ValueError(
                 "an accepted candidate requires its USER_RESULT_ARCHIVE Artifact"
             )
@@ -844,8 +917,20 @@ def validate_transition_plan_for_outcome(
                 and binding.evidence_proposal_key not in accepted_evidence
             ):
                 raise ValueError("accepted candidate bindings require accepted Evidence proposals")
+    elif plan.unresolved_result_draft is not None:
+        user_result_key = plan.unresolved_result_draft.user_result_proposal_key
+        if (
+            user_result_keys != {user_result_key}
+            or user_result_key not in accepted_artifacts
+            or archive_keys
+        ):
+            raise ValueError(
+                "an unresolved result must accept its unique USER_RESULT and forbid an archive"
+            )
     elif (user_result_keys | archive_keys) & accepted_artifacts:
-        raise ValueError("user result Artifacts cannot be accepted without their candidate")
+        raise ValueError(
+            "user result Artifacts cannot be accepted without a Candidate or unresolved result"
+        )
 
     for binding in _delta_evidence_bindings(plan.accepted_state_delta):
         if (
@@ -969,7 +1054,7 @@ __all__ = [
     "SubmitSupplementTriggerPayload",
     "TransitionPlan",
     "TriggerPayload",
-    "UserResultPayload",
+    "UserResultPayloadV2",
     "ValidatedTrigger",
     "apply_problem_spec_patch",
     "coordinator_outcome_error_failure",

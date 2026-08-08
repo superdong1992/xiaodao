@@ -33,6 +33,7 @@ from problem_locator.contracts import (
     ResolvedLogparsePlanInput,
     StagedResourceRef,
     StateRepository,
+    bytes_sha256,
     canonical_json_bytes,
     parse_canonical_json_bytes,
     validate_logparse_claim_for_job,
@@ -53,6 +54,7 @@ from .outcome_publisher import OutcomePublisher
 from .output_reader import (
     RejectedAgentOutputError,
     ValidatedAgentOutput,
+    ValidatedProposalResource,
     read_agent_output,
 )
 from .proposal_stager import discard_staged, stage_validated_output
@@ -355,6 +357,7 @@ class DiagnosisRuntime:
                 job,
                 workspace.manifest,
                 secrets=secrets,
+                broker_audit_bytes=broker_audit_bytes,
             )
         except RejectedAgentOutputError as exc:
             self._archive_rejected_agent_output(job, exc)
@@ -413,7 +416,8 @@ class DiagnosisRuntime:
             outcome_id=self._id_generator.new("job_outcome"),
             produced_at=self._clock.now(),
             verification=verification,
-            user_result_bytes=validated_draft.user_result_bytes,
+            authoritative_targets=validated_draft.authoritative_targets,
+            target_logs=validated_draft.target_logs,
         )
         self._publish_audit_bytes(
             job,
@@ -425,10 +429,28 @@ class DiagnosisRuntime:
             "finalization_manifest.json",
             canonical_json_bytes(finalized.marker),
         )
+        server_resources = tuple(
+            ValidatedProposalResource(
+                draft=item.draft,
+                proposal_key=item.draft.proposal_key,
+                workspace_relative_path=item.draft.workspace_relative_path,
+                path=workspace.root / item.draft.workspace_relative_path,
+                resource_kind=item.draft.resource_kind,
+                size=len(item.content),
+                sha256=bytes_sha256(item.content),
+                tree_manifest=None,
+                source_snapshot=None,
+                inline_bytes=item.content,
+            )
+            for item in finalized.generated_result_files
+        )
         validated = ValidatedAgentOutput(
             outcome=finalized.outcome,
             canonical_bytes=finalized.canonical_bytes,
-            proposal_resources=validated_draft.proposal_resources,
+            proposal_resources=(
+                *validated_draft.proposal_resources,
+                *server_resources,
+            ),
             user_result=finalized.user_result,
         )
         record_stage_completed(

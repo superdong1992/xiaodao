@@ -1,17 +1,18 @@
 # Diagnosis Wiki 模板
 
 普通 Wiki 章节可自由组织；机器生成只读取且要求恰好一个
-`## GenerationSpec v3` JSON fence。下列是无日志人工排查的最小完整示例。
+`## GenerationSpec v4` JSON fence。下列是无日志人工排查的最小完整示例。
 
-## GenerationSpec v3
+## GenerationSpec v4
 
 ```json
 {
-  "schema_version": 3,
-  "generator_version": "3.1.1",
+  "schema_version": 4,
+  "generator_version": "4.0.0",
   "id": "diagnose-manual-triage",
-  "version": "3.1.1",
+  "version": "4.0.0",
   "capability": "manual-triage",
+  "deployment_scope": "PRODUCTION",
   "summary": "根据用户提供的现象和复现步骤执行人工定位",
   "chinese_title": "人工故障定位",
   "module_name": null,

@@ -83,17 +83,19 @@ def _write_skill(
     root: Path,
     *,
     skill_id: str = "test-skill",
-    version: str = "1.0.0",
+    version: str = "4.0.0",
+    deployment_scope: str = "PRODUCTION",
     requires_logparse: bool = False,
     logparse_product: str | None = None,
     extra: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     root.mkdir(parents=True)
     manifest: dict[str, Any] = {
-        "schema_version": 3,
+        "schema_version": 4,
         "id": skill_id,
         "version": version,
         "capability": "test-capability",
+        "deployment_scope": deployment_scope,
         "summary": "A deterministic test skill.",
         "entry_document": "SKILL.md",
         "tool_bundle_id": "tool-bundle/diagnose",
@@ -256,10 +258,10 @@ def test_builtin_assets_and_port_use_exact_versioned_refs() -> None:
         "agent-profile/specialist": "1.0.1",
         "agent-profile/reviewer": "1.0.1",
         "tool-bundle/router": "2.0.0",
-        "tool-bundle/diagnose": "2.0.0",
+        "tool-bundle/diagnose": "3.0.0",
         "tool-bundle/review": "2.0.0",
         "output-contract/route": "2.0.0",
-        "output-contract/diagnose": "3.0.0",
+        "output-contract/diagnose": "4.0.0",
         "output-contract/review": "2.0.0",
     }
     for ref in refs.values():
@@ -338,9 +340,7 @@ def test_builtin_output_contract_materializes_complete_v2_draft_envelope(role: s
     assert contract.count("{{S00_AGENT_JOB_OUTCOME_DRAFT_SCHEMA_JSON}}") == 1
     assert contract.count("<<<BEGIN S00 AGENT JOB OUTCOME DRAFT SCHEMA>>>") == 1
     assert contract.count("<<<END S00 AGENT JOB OUTCOME DRAFT SCHEMA>>>") == 1
-    assert contract.count("{{S00_USER_RESULT_SCHEMA_JSON}}") == (
-        1 if role == "diagnose" else 0
-    )
+    assert contract.count("{{S00_USER_RESULT_SCHEMA_JSON}}") == 0
 
 
 def test_builtin_route_output_contract_materializes_result_type_rules() -> None:
@@ -373,8 +373,11 @@ def test_builtin_diagnose_output_contract_materializes_request_rules() -> None:
     assert "INCONCLUSIVE" in contract
     assert "`state_delta.add_user_facts`" in contract
     assert "`state_delta.fulfill_requirements`" in contract
+    assert "Agent 禁止提出或写入 `USER_RESULT`" in contract
     assert "USER_RESULT_ARCHIVE" in contract
-    assert "problem-locator-pack-result" in contract
+    assert "服务端立即从已验证的权威结果" in contract
+    assert "独立 Review PASS 后开放公开下载" in contract
+    assert "problem-locator-pack-result" not in contract
     for rpc_name in ("caller_service", "server_service", "rpc_method", "order_id"):
         assert rpc_name not in contract
     assert "problem-locator-seal-outcome-draft" in contract
@@ -409,6 +412,8 @@ def test_builtin_tool_bundles_all_declare_the_installed_draft_sealer() -> None:
         )
         assert "problem-locator-seal-outcome-draft" in bundle["tools"]
         assert "problem-locator-finalize-outcome" not in bundle["tools"]
+        if role == "diagnose":
+            assert "problem-locator-pack-result" not in bundle["tools"]
 
 
 def test_builtin_specialist_profile_separates_narrative_from_fixed_inputs() -> None:
@@ -485,6 +490,49 @@ def test_logparse_asset_and_factory_must_be_paired() -> None:
         )
 
 
+def test_production_catalog_rejects_test_only_and_requires_production(
+    tmp_path: Path,
+) -> None:
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    with pytest.raises(ValueError, match="at least one PRODUCTION"):
+        VersionedAssetCatalog(skill_dir=empty)
+
+    test_only = tmp_path / "test-only"
+    _write_skill(
+        test_only / "fixture",
+        skill_id="fixture-skill",
+        deployment_scope="TEST_ONLY",
+    )
+    with pytest.raises(ValueError, match="TEST_ONLY diagnosis skills are forbidden"):
+        VersionedAssetCatalog(skill_dir=test_only)
+
+    catalog = VersionedAssetCatalog(
+        skill_dir=test_only,
+        allow_test_skills=True,
+    )
+    assert [ref.id for ref in catalog.route_bindings().available_skill_refs] == [
+        "diagnosis-skill/fixture-skill"
+    ]
+
+    mixed = tmp_path / "mixed"
+    _write_skill(mixed / "production", skill_id="production-skill")
+    _write_skill(
+        mixed / "fixture",
+        skill_id="mixed-fixture-skill",
+        deployment_scope="TEST_ONLY",
+    )
+    with pytest.raises(ValueError, match="TEST_ONLY diagnosis skills are forbidden"):
+        VersionedAssetCatalog(skill_dir=mixed)
+
+
+def test_test_skill_allowance_is_an_explicit_boolean(tmp_path: Path) -> None:
+    skill_dir = tmp_path / "skills"
+    _write_skill(skill_dir / "production")
+    with pytest.raises(TypeError, match="allow_test_skills must be a boolean"):
+        VersionedAssetCatalog(skill_dir=skill_dir, allow_test_skills=1)  # type: ignore[arg-type]
+
+
 def test_required_logparse_skill_rejects_missing_pair(tmp_path: Path) -> None:
     skill_dir = tmp_path / "skills"
     _write_skill(
@@ -556,12 +604,20 @@ def test_hash_drift_never_resolves_the_previous_ref(tmp_path: Path) -> None:
     shutil.copytree(BUILTIN_ASSET_ROOT, assets_root)
     skill_dir = tmp_path / "skills"
     skill_dir.mkdir()
-    first = VersionedAssetCatalog(skill_dir=skill_dir, assets_root=assets_root)
+    first = VersionedAssetCatalog(
+        skill_dir=skill_dir,
+        assets_root=assets_root,
+        allow_test_skills=True,
+    )
     old_ref = first.route_bindings().agent_profile_ref
 
     with (assets_root / "profiles/router/profile.md").open("ab") as stream:
         stream.write(b"\nconfiguration drift\n")
-    second = VersionedAssetCatalog(skill_dir=skill_dir, assets_root=assets_root)
+    second = VersionedAssetCatalog(
+        skill_dir=skill_dir,
+        assets_root=assets_root,
+        allow_test_skills=True,
+    )
     new_ref = second.route_bindings().agent_profile_ref
     assert new_ref.id == old_ref.id
     assert new_ref.version == old_ref.version
@@ -778,7 +834,8 @@ def test_product_hash_rejects_non_utf8_paths() -> None:
         ({"requires_logparse": True, "logparse_plan": None}, "logparse_plan object"),
         ({"entry_document": "../escape.md"}, "relative POSIX path"),
         ({"entry_document": "nested//entry.md"}, "relative POSIX path"),
-        ({"schema_version": True}, "integer 3"),
+        ({"schema_version": True}, "integer 4"),
+        ({"deployment_scope": "DEVELOPMENT"}, "deployment_scope"),
     ],
 )
 def test_skill_manifest_is_strict(

@@ -6,7 +6,6 @@ import json
 from pathlib import Path
 import re
 import sys
-import zipfile
 
 
 PRODUCT_FILES = {"SKILL.md", "diagnosis-skill.json"}
@@ -15,6 +14,7 @@ MANIFEST_REQUIRED = {
     "id",
     "version",
     "capability",
+    "deployment_scope",
     "summary",
     "entry_document",
     "tool_bundle_id",
@@ -47,11 +47,11 @@ def _canonical_json_bytes(value: object) -> bytes:
 
 def _embedded_manifest(markdown: str) -> object:
     matches = re.findall(
-        r"(?ms)<!-- DIAGNOSIS_SKILL_MANIFEST_V3_BEGIN -->\s*```json\s*(.*?)\s*```\s*<!-- DIAGNOSIS_SKILL_MANIFEST_V3_END -->",
+        r"(?ms)<!-- DIAGNOSIS_SKILL_MANIFEST_V4_BEGIN -->\s*```json\s*(.*?)\s*```\s*<!-- DIAGNOSIS_SKILL_MANIFEST_V4_END -->",
         markdown,
     )
     if len(matches) != 1:
-        raise ValueError("SKILL.md must embed exactly one manifest v3 block")
+        raise ValueError("SKILL.md must embed exactly one manifest v4 block")
     return json.loads(matches[0])
 
 
@@ -279,16 +279,18 @@ def validate_skill_directory(skill_dir: str | Path) -> ValidationResult:
     actual_fields = set(manifest)
     if not MANIFEST_REQUIRED <= actual_fields or actual_fields - MANIFEST_REQUIRED - MANIFEST_OPTIONAL:
         errors.append("diagnosis-skill.json field set is invalid")
-    if manifest.get("schema_version") != 3:
-        errors.append("manifest schema_version must be 3")
+    if manifest.get("schema_version") != 4:
+        errors.append("manifest schema_version must be 4")
+    if manifest.get("deployment_scope") not in {"PRODUCTION", "TEST_ONLY"}:
+        errors.append("deployment_scope must be PRODUCTION or TEST_ONLY")
     if manifest.get("entry_document") != "SKILL.md":
         errors.append("entry_document must be SKILL.md")
     if manifest.get("tool_bundle_id") != "tool-bundle/diagnose":
         errors.append("tool_bundle_id must be tool-bundle/diagnose")
     version = manifest.get("version")
     match = re.fullmatch(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", version or "")
-    if match is None or int(match.group(1)) < 3:
-        errors.append("manifest version must be 3.0.0 or later")
+    if match is None or int(match.group(1)) < 4:
+        errors.append("manifest version must be 4.0.0 or later")
     requirements = manifest.get("requirements")
     if not isinstance(requirements, list):
         errors.append("requirements must be an array")
@@ -341,15 +343,20 @@ def validate_skill_directory(skill_dir: str | Path) -> ValidationResult:
     except (ValueError, json.JSONDecodeError) as exc:
         errors.append(str(exc))
     for required_phrase in (
+        "Agent 禁止提出或写入",
+        "USER_RESULT",
         "USER_RESULT_ARCHIVE",
-        "problem-locator-pack-result",
         "result.zip",
+        "服务端立即",
+        "Review PASS 后开放公开下载",
         "固定子序列",
         "USER_FACT",
         "READY_ATTACHMENT",
     ):
         if required_phrase not in markdown:
             errors.append(f"SKILL.md is missing {required_phrase}")
+    if "problem-locator-pack-result" in markdown:
+        errors.append("SKILL.md must not expose problem-locator-pack-result")
     if any(
         item.get("stage") == "AFTER_LOGPARSE"
         for item in requirements
@@ -366,38 +373,11 @@ def validate_skill_directory(skill_dir: str | Path) -> ValidationResult:
     return ValidationResult(tuple(errors))
 
 
-def validate_result_zip(zip_path: str | Path) -> ValidationResult:
-    path = Path(zip_path)
-    if not path.is_file():
-        return ValidationResult((f"missing result.zip: {path}",))
-    errors: list[str] = []
-    try:
-        with zipfile.ZipFile(path) as archive:
-            infos = archive.infolist()
-            names = [item.filename for item in infos]
-            expected = ["result.txt"] + [
-                f"target-log-{index:03d}.log"
-                for index in range(1, len(names))
-            ]
-            if names != expected or len(names) != len(set(names)):
-                errors.append("result.zip entries are not the deterministic flat sequence")
-            if any(item.date_time != (1980, 1, 1, 0, 0, 0) for item in infos):
-                errors.append("result.zip timestamps are not deterministic")
-            if infos and not archive.read("result.txt").decode("utf-8").strip():
-                errors.append("result.txt must be non-empty UTF-8")
-    except (OSError, UnicodeDecodeError, zipfile.BadZipFile, KeyError):
-        errors.append("result.zip is unreadable or invalid")
-    return ValidationResult(tuple(errors))
-
-
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Validate a generated Diagnosis Skill v3.")
+    parser = argparse.ArgumentParser(description="Validate a generated Diagnosis Skill v4.")
     parser.add_argument("skill_dir", type=Path)
-    parser.add_argument("--result-zip", type=Path)
     args = parser.parse_args(argv)
     results = [("skill", validate_skill_directory(args.skill_dir))]
-    if args.result_zip is not None:
-        results.append(("result.zip", validate_result_zip(args.result_zip)))
     for label, result in results:
         if result.ok:
             print(f"{label}: OK")

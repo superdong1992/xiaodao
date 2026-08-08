@@ -5,8 +5,9 @@
   ],
   "assumptions": [],
   "capability": "manual-triage",
+  "deployment_scope": "TEST_ONLY",
   "chinese_title": "无日志人工排查",
-  "generator_version": "3.1.1",
+  "generator_version": "4.0.0",
   "id": "diagnose-manual-triage",
   "judgement_rules": [
     "只有现有 Evidence 支持时才形成候选结论。"
@@ -66,10 +67,10 @@
   ],
   "requires_logparse": false,
   "roles": [],
-  "schema_version": 3,
+  "schema_version": 4,
   "summary": "根据结构化现象和复现步骤执行无日志人工排查",
   "time_characteristics": [],
-  "version": "3.1.1",
+  "version": "4.0.0",
   "verification_contract": {
     "schema_version": 1,
     "event_extractors": [],

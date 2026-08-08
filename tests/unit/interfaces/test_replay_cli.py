@@ -13,6 +13,7 @@ import pytest
 
 from problem_locator.contracts import (
     CONTRACT_REVISION,
+    SCHEMA_VERSION,
     Case,
     CaseAggregate,
     CaseStatus,
@@ -23,6 +24,7 @@ from problem_locator.contracts import (
     OutcomeDisposition,
     OutcomeReceipt,
     RuntimeExecutionReceipt,
+    StateFile,
     canonical_json_bytes,
     parse_canonical_json_bytes,
 )
@@ -40,15 +42,18 @@ from problem_locator.entrypoints.replay import (
     ReplayRequest,
     ReplayResult,
     _asset_diff,
+    _build_projected_state,
     _copy_execution_records,
     _decode_source_state,
     _find_unique_review,
+    _initialize_replay_data_root,
     _publish_new,
     _read_source_execution_records,
     run_replay_job,
     validate_replay_paths,
 )
 from problem_locator.entrypoints.settings import Settings
+from problem_locator.storage.layout import DATA_FORMAT_MARKER_BYTES
 from problem_locator.storage.platform import PlatformFileSync
 
 
@@ -311,8 +316,33 @@ def test_replay_document_parent_sync_failure_rolls_back_complete_link(
     assert list(tmp_path.glob(f".{destination.name}.*.tmp")) == []
 
 
-def test_v2_revision_constant_is_the_replay_hard_cut() -> None:
-    assert CONTRACT_REVISION.startswith("v2-")
+def test_v3_state_contract_is_the_replay_hard_cut() -> None:
+    assert SCHEMA_VERSION == 3
+    assert CONTRACT_REVISION == "v3-contract-r1"
+
+
+def test_replay_projection_and_output_root_share_the_current_state_boundary(
+    tmp_path: Path,
+) -> None:
+    layout = _initialize_replay_data_root(tmp_path / "replay-data")
+    marker = json.loads(layout.data_format_marker.read_bytes())
+    source = StateFile.model_validate_json(
+        Path("tests/fixtures/contracts/positive/state.json").read_bytes()
+    )
+    aggregate = next(iter(source.cases.values()))
+    source_job = next(iter(aggregate.jobs.values()))
+    projected = _build_projected_state(
+        aggregate,
+        source_job,
+        source_job,
+        "00000000-0000-4000-8000-000000000992",
+    )
+
+    assert layout.data_format_marker.read_bytes() == DATA_FORMAT_MARKER_BYTES
+    assert marker["state_schema_version"] == projected.schema_version == SCHEMA_VERSION
+    assert marker["contract_revision"] == projected.contract_revision == CONTRACT_REVISION
+    assert not layout.state.exists()
+    assert not layout.has_business_content_without_state()
 
 
 @pytest.mark.parametrize(
@@ -416,7 +446,7 @@ def test_through_review_fails_closed_on_diagnosis_receipt_and_no_review_state(
         job_bytes = canonical_json_bytes(job)
         manifest = ReplayManifest(
             schema_version=1,
-            state_schema_version=2,
+            state_schema_version=SCHEMA_VERSION,
             contract_revision=CONTRACT_REVISION,
             replay_id=progress.replay_id,
             mode=request.mode,
@@ -562,7 +592,7 @@ def test_through_review_fails_closed_on_review_receipt_and_failed_case(
         job_bytes = canonical_json_bytes(diagnosis_job)
         manifest = ReplayManifest(
             schema_version=1,
-            state_schema_version=2,
+            state_schema_version=SCHEMA_VERSION,
             contract_revision=CONTRACT_REVISION,
             replay_id=progress.replay_id,
             mode=request.mode,

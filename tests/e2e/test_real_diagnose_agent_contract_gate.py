@@ -66,7 +66,7 @@ GENERATION_SPEC_ROOT = (
     ROOT / "tests/fixtures/components/diagnosis-generator/specs"
 )
 SKILL_PRODUCT_SHA256 = (
-    "671a591bb7c7857bc5d1e49fab433129668ea1d98cfc05b41ef2afb77f6f0764"
+    "eaa059e98e2fde9b923e0bce3e860422b2944aeabe939b57920793f70337b618"
 )
 PARAMETER_GROUP_A = {
     "caller_service",
@@ -371,6 +371,7 @@ def test_real_agent_v3_requirement_isolation_gate(
         assert requirement.prompt == declared["prompt"]
         assert requirement.requested_by_job_id == job.job_id
         assert requirement.fulfilled_by_refs == []
+        assert requirement.supplement_policy.value == declared["supplement_policy"]
         assert isinstance(requirement.constraints, InputRequirementConstraints)
         assert requirement.constraints.model_dump(mode="json") == declared["constraints"]
     assert set(diagnosis.requested_input) == {
@@ -417,7 +418,7 @@ def test_real_first_log_diagnose_agent_produces_valid_continuation(
     assert hash_product_directory(skill_path) == SKILL_PRODUCT_SHA256
     skill_ref = VersionedRef(
         id="diagnose-service-takeover",
-        version="3.1.1",
+        version="4.0.0",
         content_hash=SKILL_PRODUCT_SHA256,
     )
     logparse_asset, broker_factory = build_logparse_runtime(
@@ -608,7 +609,7 @@ def test_real_diagnose_agent_requests_parameter_group_a_from_generated_skill(
     assert hash_product_directory(skill_path) == SKILL_PRODUCT_SHA256
     skill_ref = VersionedRef(
         id="diagnose-service-takeover",
-        version="3.1.1",
+        version="4.0.0",
         content_hash=SKILL_PRODUCT_SHA256,
     )
     job = _initial_diagnose_job(skill_ref)
@@ -707,6 +708,7 @@ def test_real_diagnose_agent_requests_parameter_group_a_from_generated_skill(
     assert all(item.status is RequirementStatus.OPEN for item in requirements)
     assert all(item.requested_by_job_id == job.job_id for item in requirements)
     assert all(item.fulfilled_by_refs == [] for item in requirements)
+    assert all(item.supplement_policy.value == "MISSING_ONLY" for item in requirements)
     assert all(
         isinstance(item.constraints, InputRequirementConstraints)
         and item.constraints.value_type == "STRING"

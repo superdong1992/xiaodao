@@ -9,7 +9,6 @@ imports application, domain, storage, or dispatch implementations.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import re
@@ -41,15 +40,11 @@ from problem_locator.contracts import (  # noqa: E402
     OutcomeResultType,
     PendingRequirement,
     RequirementStatus,
-    ResourceKind,
     ReviewAssessment,
     ReviewVerdict,
     RuleClaimResult,
     RouteDecision,
     RouteKind,
-    UserResultMetadata,
-    UserResultArchiveMetadata,
-    UserResultPayload,
     WorkspaceInputManifest,
     canonical_json_bytes,
     parse_canonical_json_bytes,
@@ -63,7 +58,6 @@ from problem_locator.integrations.logparse import cli as logparse_cli  # noqa: E
 from problem_locator.integrations.logparse.outputs import (  # noqa: E402
     inspect_controlled_run,
 )
-from problem_locator.integrations.result_archive import build_result_archive  # noqa: E402
 from problem_locator.runtime.outcome_finalizer import (  # noqa: E402
     seal_agent_outcome_draft,
 )
@@ -233,17 +227,17 @@ def _empty_delta(**updates: object) -> DiagnosisStateDelta:
 def _skill_manifest(context: str) -> dict[str, object]:
     skill = _section(context, "SKILL")
     match = re.search(
-        r"<!-- DIAGNOSIS_SKILL_MANIFEST_V3_BEGIN -->\s*"
+        r"<!-- DIAGNOSIS_SKILL_MANIFEST_V4_BEGIN -->\s*"
         r"```json\s*(\{.*?\})\s*```\s*"
-        r"<!-- DIAGNOSIS_SKILL_MANIFEST_V3_END -->",
+        r"<!-- DIAGNOSIS_SKILL_MANIFEST_V4_END -->",
         skill,
         flags=re.DOTALL,
     )
     if match is None:
-        raise RuntimeError("the pinned Skill manifest v3 is absent")
+        raise RuntimeError("the pinned Skill manifest v4 is absent")
     value = json.loads(match.group(1))
-    if not isinstance(value, dict) or value.get("schema_version") != 3:
-        raise RuntimeError("the pinned Skill manifest is not v3")
+    if not isinstance(value, dict) or value.get("schema_version") != 4:
+        raise RuntimeError("the pinned Skill manifest is not v4")
     return value
 
 
@@ -772,7 +766,7 @@ def _candidate(
     plan = manifest.resolved_logparse_plan
     if plan is None or plan.artifact_id is None or plan.attachment_id is not None:
         raise RuntimeError("the follow-up Job lacks its resolved artifact plan")
-    artifact = next(
+    next(
         entry
         for entry in manifest.entries
         if entry.input_kind == "ARTIFACT" and entry.resource_id == plan.artifact_id
@@ -819,75 +813,10 @@ def _candidate(
         proposal_key="candidate",
         existing_conclusion_id=None,
         statement="The inventory RPC exceeded its deadline.",
-        supporting_evidence_bindings=evidence_bindings,
+        # Deliberately reverse Candidate order.  Public archive scope/order is
+        # owned by the resolved Logparse plan, never by Evidence traversal.
+        supporting_evidence_bindings=list(reversed(evidence_bindings)),
         completion_criteria_mapping=[mapping],
-    )
-    result = UserResultPayload(
-        schema_version=1,
-        format_id="problem-locator-diagnosis-v1",
-        problem_statement=str(problem_spec["statement"]),
-        candidate_statement=candidate.statement,
-        supporting_evidence_bindings=candidate.supporting_evidence_bindings,
-        completion_criteria_mapping=candidate.completion_criteria_mapping,
-    )
-    result_bytes = canonical_json_bytes(result)
-    proposal = Path("output/proposals/user-result")
-    proposal.mkdir(parents=True, exist_ok=True)
-    (proposal / "payload").write_bytes(result_bytes)
-    user_result = AgentArtifactProposalDraft(
-        proposal_key="user-result",
-        artifact_kind=ArtifactKind.USER_RESULT,
-        name="diagnosis-result.json",
-        content_type="application/json",
-        resource_kind=ResourceKind.FILE,
-        workspace_relative_path="output/proposals/user-result/payload",
-        declared_size=len(result_bytes),
-        declared_sha256=hashlib.sha256(result_bytes).hexdigest(),
-        metadata=UserResultMetadata(
-            schema_version=1,
-            format_id="problem-locator-diagnosis-v1",
-            description="Diagnosis result",
-        ),
-    )
-    archive_key = "user-result-archive"
-    archive_request = Path("output/proposals") / archive_key / "request.json"
-    archive_request.parent.mkdir(parents=True, exist_ok=True)
-    target_log_paths = [
-        f"inputs/artifacts/{artifact.resource_id}/tree/{item['log_path']}"
-        for item in target_payload["target_logs"]
-    ]
-    archive_request.write_bytes(
-        canonical_json_bytes(
-            {
-                "schema_version": 1,
-                "result_text": candidate.statement + "\n",
-                "target_log_paths": target_log_paths,
-            }
-        )
-    )
-    archive_relative_path = f"output/proposals/{archive_key}/result.zip"
-    archive_path = build_result_archive(
-        Path.cwd(),
-        archive_request.as_posix(),
-        archive_relative_path,
-    )
-    archive_bytes = archive_path.read_bytes()
-    result_archive = AgentArtifactProposalDraft(
-        proposal_key=archive_key,
-        artifact_kind=ArtifactKind.USER_RESULT_ARCHIVE,
-        name="result.zip",
-        content_type="application/zip",
-        resource_kind=ResourceKind.FILE,
-        workspace_relative_path=archive_relative_path,
-        declared_size=len(archive_bytes),
-        declared_sha256=hashlib.sha256(archive_bytes).hexdigest(),
-        metadata=UserResultArchiveMetadata(
-            schema_version=1,
-            format_id="problem-locator-result-archive-v1",
-            description="Controlled user-facing diagnosis archive.",
-            user_result_proposal_key="user-result",
-            target_log_count=len(target_log_paths),
-        ),
     )
     return _agent_outcome(
         instruction,
@@ -901,7 +830,7 @@ def _candidate(
             recommended_next_step="Submit the fixed candidate for independent review.",
         ),
         consumed_evidence_refs=evidence_ids,
-        proposed_artifact_drafts=[user_result, result_archive],
+        proposed_artifact_drafts=[],
         rule_claims=_rule_claims(
             skill_manifest=skill_manifest,
             snapshot=snapshot,

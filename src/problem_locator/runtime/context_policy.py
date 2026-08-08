@@ -219,6 +219,7 @@ def _skill_index_entry(
     manifest = _parse_manifest(root / "diagnosis-skill.json")
     required = {
         "schema_version",
+        "deployment_scope",
         "id",
         "version",
         "capability",
@@ -233,7 +234,8 @@ def _skill_index_entry(
     if set(manifest) not in (required, required | {"logparse_product"}):
         raise _invalid_asset() from None
     if (
-        manifest.get("schema_version") != 3
+        manifest.get("schema_version") != 4
+        or manifest.get("deployment_scope") not in {"PRODUCTION", "TEST_ONLY"}
         or not isinstance(manifest.get("capability"), str)
         or not manifest["capability"]
         or not isinstance(manifest.get("summary"), str)

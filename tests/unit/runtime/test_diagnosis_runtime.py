@@ -1534,8 +1534,8 @@ class _PublicFakeClaimingBackend:
             content_type="application/vnd.problem-locator.logparse-run+directory",
             resource_kind=ResourceKind.DIRECTORY,
             workspace_relative_path="output/proposals/logparse_run/tree",
-            declared_size=size,
-            declared_sha256=tree_sha256,
+            declared_size=None,
+            declared_sha256=None,
             metadata={
                 "tree_manifest_sha256": tree_sha256,
                 "logparse_version_ref": job.logparse_tool_ref,
@@ -1563,14 +1563,69 @@ class _PublicFakeClaimingBackend:
         # the server deterministically seals it as INCONCLUSIVE and retains the run.
         payload["rule_claims"] = [
             {
-                "rule_id": "timeout_causality",
+                "rule_id": rule_id,
                 "claimed_result": "UNKNOWN",
                 "fact_refs": [],
                 "citations": [],
                 "explanation": "This test does not claim a positive diagnosis.",
             }
+            for rule_id in (
+                "client_timeout_present",
+                "client_timeout_in_window",
+                "caller_matches",
+                "timeout_causality",
+            )
         ]
         return AgentJobOutcomeDraftV2.model_validate(payload)
+
+    @staticmethod
+    def _successful_audit_bytes(
+        job_id: str,
+        request_bytes: bytes,
+        outcome: AgentJobOutcomeDraftV2,
+        *,
+        match_status: str = "exact",
+    ) -> bytes:
+        request = parse_canonical_json_bytes(request_bytes)
+        proposal = outcome.proposed_artifact_drafts[0]
+        target_log = {
+            "label": "client",
+            "module": "compact",
+            "module_key": "compact",
+            "module_name": "compact",
+            "slot": "client",
+            "process_name": "checkout-service",
+            "match_status": match_status,
+            "caveats": [],
+        }
+        if match_status in {"exact", "nearest"}:
+            target_log["log_path"] = "task-0001/targets/request.log"
+        else:
+            target_log["caveats"] = [f"Synthetic {match_status} target."]
+        result = {
+            "schema_version": 1,
+            "api_version": 1,
+            "target_logs": [target_log],
+            "logparse_run_artifact_draft": proposal.model_dump(mode="json"),
+        }
+        return canonical_json_bytes(
+            {
+                "schema_version": 1,
+                "job_id": job_id,
+                "operations": [
+                    {
+                        "operation": "parse-targets",
+                        "request_sha256": hashlib.sha256(request_bytes).hexdigest(),
+                        "request": request,
+                        "http_status": 200,
+                        "result_sha256": hashlib.sha256(
+                            canonical_json_bytes(result)
+                        ).hexdigest(),
+                        "result": result,
+                    }
+                ],
+            }
+        )
 
     def execute(self, **kwargs: Any) -> BackendExecution:
         self.calls.append(kwargs)
@@ -1627,13 +1682,28 @@ class _PublicFakeClaimingBackend:
             raise _failure()
         if self.result == "failed":
             outcome = _failed_logparse_agent_outcome(self.job)
-        elif self.result == "completed":
+        elif self.result in {"completed", "reroute_missing"}:
             assert self.claim is not None
             outcome = self._completed_outcome(
                 self.job,
                 workspace_root,
                 self.claim,
             )
+            if self.result == "reroute_missing":
+                outcome = outcome.model_copy(
+                    update={"result_type": OutcomeResultType.REROUTE}
+                )
+            assert self.request_bytes is not None
+            session = self.factory.sessions[-1]
+            audit_bytes = self._successful_audit_bytes(
+                self.job.job_id,
+                self.request_bytes,
+                outcome,
+                match_status=(
+                    "missing" if self.result == "reroute_missing" else "exact"
+                ),
+            )
+            setattr(session, "audit_bytes", lambda: audit_bytes)
         else:
             raise AssertionError("unknown claiming backend result")
 
@@ -2019,8 +2089,18 @@ def test_public_broker_fake_closes_claimed_parse_and_stages_one_run(
     assert receipt.job_outcome.error is None
     assert backend.claim is not None
     assert backend.request_bytes is not None
-    assert len(receipt.job_outcome.proposed_artifacts) == 1
-    proposal = receipt.job_outcome.proposed_artifacts[0]
+    assert {
+        proposal.proposal_key: proposal.artifact_kind
+        for proposal in receipt.job_outcome.proposed_artifacts
+    } == {
+        backend.claim.artifact_proposal_key: ArtifactKind.LOGPARSE_RUN,
+        "server-user-result": ArtifactKind.USER_RESULT,
+    }
+    proposal = next(
+        item
+        for item in receipt.job_outcome.proposed_artifacts
+        if item.artifact_kind is ArtifactKind.LOGPARSE_RUN
+    )
     assert proposal.artifact_kind is ArtifactKind.LOGPARSE_RUN
     assert proposal.proposal_key == backend.claim.artifact_proposal_key
     assert proposal.metadata.logparse_version_ref == backend.claim.logparse_tool_ref
@@ -2033,6 +2113,35 @@ def test_public_broker_fake_closes_claimed_parse_and_stages_one_run(
     records = runtime._execution_records
     assert isinstance(records, InMemoryExecutionRecordStore)
     assert records.publish_rejected_agent_output_calls == []
+
+
+def test_missing_authoritative_target_overrides_reroute_and_stages_json_only_result(
+    tmp_path: Path,
+) -> None:
+    runtime, job, _, backend, resources = _public_fake_claiming_runtime(
+        tmp_path,
+        "reroute_missing",
+    )
+
+    receipt = runtime.execute(job, InMemoryCancellationSignal())
+
+    assert receipt.job_outcome.result_type is OutcomeResultType.INCONCLUSIVE
+    assert receipt.job_outcome.error is None
+    by_kind = {
+        proposal.artifact_kind: proposal
+        for proposal in receipt.job_outcome.proposed_artifacts
+    }
+    assert set(by_kind) == {
+        ArtifactKind.LOGPARSE_RUN,
+        ArtifactKind.USER_RESULT,
+    }
+    assert ArtifactKind.USER_RESULT_ARCHIVE not in by_kind
+    assert resources.stage_file_calls[-1][1] == "server-user-result"
+    assert all(
+        call[1] != "server-user-result-archive"
+        for call in resources.stage_file_calls
+    )
+    assert backend.claim is not None
 
 
 def test_runtime_closes_logparse_then_audits_request_bytes_before_finalize(

@@ -835,7 +835,10 @@ def test_candidate_and_user_result_are_accepted_before_review() -> None:
     assert plan.candidate_mutation is not None
     assert plan.candidate_mutation.action is CandidateMutationAction.INSTALL
     assert plan.candidate_mutation.target_status is CandidateStatus.REVIEWING
-    assert len(plan.accepted_artifact_proposal_keys) == 1
+    assert plan.accepted_artifact_proposal_keys == [
+        "user_result",
+        "user_result_archive",
+    ]
     assert plan.next_job_spec is not None
     assert plan.next_job_spec.job_type is JobType.REVIEW
     assert plan.next_job_spec.previous_outcome_refs == [outcome.outcome_id]
@@ -845,6 +848,59 @@ def test_candidate_and_user_result_are_accepted_before_review() -> None:
         == candidate.proposal_key
     )
     assert validate_transition_plan_for_outcome(plan, outcome) is plan
+
+
+@pytest.mark.parametrize(
+    ("binding_mode", "accepted"),
+    [
+        ("reversed_subset", True),
+        ("exact_reversed", True),
+        ("unknown", False),
+    ],
+)
+def test_candidate_supporting_evidence_is_an_order_insensitive_target_subset(
+    binding_mode: str,
+    accepted: bool,
+) -> None:
+    base = diagnosis_outcome()
+    diagnosis = base.payload
+    assert isinstance(diagnosis, DiagnosisOutcome)
+    candidate = diagnosis.candidate_conclusion_draft
+    assert candidate is not None
+    state = state_from_job(diagnose_job())
+    first_id = state.evidence_refs[0]
+    second_id = "00000000-0000-0000-0000-000000000041"
+    extra_id = "00000000-0000-0000-0000-000000000042"
+    state = rebuild(state, evidence_refs=[first_id, second_id])
+    binding_ids = {
+        "reversed_subset": [second_id],
+        "exact_reversed": [second_id, first_id],
+        "unknown": [second_id, extra_id],
+    }[binding_mode]
+    candidate = rebuild(
+        candidate,
+        supporting_evidence_bindings=[
+            EvidenceBinding(existing_evidence_id=item, evidence_proposal_key=None)
+            for item in binding_ids
+        ],
+    )
+    outcome = rebuild(
+        base,
+        payload=rebuild(diagnosis, candidate_conclusion_draft=candidate),
+    )
+
+    error = DomainCoordinator()._validate_candidate(
+        state,
+        _empty_delta(),
+        candidate,
+        outcome,
+    )
+
+    if accepted:
+        assert error is None
+    else:
+        assert isinstance(error, ApplicationError)
+        assert "drawn from target Evidence" in error.message
 
 
 def test_new_evidence_candidate_is_fixed_for_review_but_user_result_is_not_input() -> None:

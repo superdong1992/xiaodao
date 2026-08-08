@@ -1,5 +1,6 @@
 {
   "capability": "rpc-timeout-log-analysis",
+  "deployment_scope": "PRODUCTION",
   "entry_document": "SKILL.md",
   "id": "rpc-log-analysis",
   "logparse_plan": {
@@ -78,10 +79,10 @@
     }
   ],
   "requires_logparse": true,
-  "schema_version": 3,
+  "schema_version": 4,
   "summary": "Correlate a payment-service RPC timeout with its parsed target logs.",
   "tool_bundle_id": "tool-bundle/diagnose",
-  "version": "3.0.0",
+  "version": "4.0.0",
   "verification_contract": {
     "schema_version": 1,
     "event_extractors": [

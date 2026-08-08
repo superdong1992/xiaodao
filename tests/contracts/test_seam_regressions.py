@@ -266,18 +266,19 @@ def _candidate_plan(outcome: JobOutcome) -> TransitionPlan:
     assert outcome.payload is not None
     candidate = outcome.payload.candidate_conclusion_draft
     assert candidate is not None
-    user_result_key = next(
+    user_result_keys = [
         proposal.proposal_key
         for proposal in outcome.proposed_artifacts
-        if proposal.artifact_kind is ArtifactKind.USER_RESULT
-    )
+        if proposal.artifact_kind
+        in {ArtifactKind.USER_RESULT, ArtifactKind.USER_RESULT_ARCHIVE}
+    ]
     return TransitionPlan(
         accepted_state_delta=outcome.payload.state_delta,
         target_case_status=CaseStatus.REVIEWING,
         job_updates=[],
         outcome_disposition=OutcomeDisposition.APPLIED,
         accepted_evidence_proposal_keys=[],
-        accepted_artifact_proposal_keys=[user_result_key],
+        accepted_artifact_proposal_keys=user_result_keys,
         accepted_candidate_proposal_key=candidate.proposal_key,
         selected_skill_update=None,
         case_failure_update=None,
@@ -399,11 +400,15 @@ def test_logparse_evidence_and_artifact_acceptance_is_atomic_both_ways(
         update={
             "accepted_evidence_proposal_keys": [evidence.proposal_key],
             "accepted_artifact_proposal_keys": [
-                next(
+                *[
                     proposal.proposal_key
                     for proposal in outcome.proposed_artifacts
-                    if proposal.artifact_kind is ArtifactKind.USER_RESULT
-                ),
+                    if proposal.artifact_kind
+                    in {
+                        ArtifactKind.USER_RESULT,
+                        ArtifactKind.USER_RESULT_ARCHIVE,
+                    }
+                ],
                 artifact.proposal_key,
             ],
         }
@@ -557,6 +562,106 @@ def test_user_result_rejects_noncanonical_bytes_before_candidate_acceptance() ->
 
     with pytest.raises(ValueError, match="not canonical"):
         validate_user_result_for_outcome(job, outcome, b" " + canonical)
+
+
+@pytest.mark.parametrize(
+    ("drift", "message"),
+    [
+        ("findings", "findings must exactly reflect"),
+        ("rule_evidence", "verification_rules must exactly reflect"),
+        ("rule_observed_times", "verification_rules must exactly reflect"),
+        ("rule_issues", "verification_rules must exactly reflect"),
+        ("recommendations", "recommendations must exactly match"),
+    ],
+)
+def test_user_result_rejects_public_semantic_field_drift(
+    drift: str,
+    message: str,
+) -> None:
+    job = _model("job-diagnose.json", Job)
+    outcome = _model("job-outcome-diagnosis.json", JobOutcome)
+    result = load_json(FIXTURE_ROOT / "positive" / "user-result.json")
+    if drift == "findings":
+        binding = result["supporting_evidence_bindings"][0]
+        result["findings"] = [
+            {
+                "statement": "A renderer-invented finding.",
+                "confidence": 0.9,
+                "evidence_bindings": [binding],
+                "citations": [
+                    {
+                        "evidence_binding": binding,
+                        "archive_name": None,
+                        "line_start": None,
+                        "line_end": None,
+                        "raw_bytes_sha256": None,
+                        "excerpt": None,
+                    }
+                ],
+            }
+        ]
+    elif drift == "rule_evidence":
+        result["verification_rules"][0]["evidence_bindings"] = []
+        result["verification_rules"][0]["citations"] = []
+    elif drift == "rule_observed_times":
+        result["verification_rules"][0]["observed_times"] = [
+            "2026-07-31T00:00:00.000Z"
+        ]
+    elif drift == "rule_issues":
+        result["verification_rules"][0]["issues"] = ["Invented limitation."]
+    else:
+        result["recommendations"] = ["A renderer-invented recommendation."]
+
+    with pytest.raises(ValueError, match=message):
+        validate_user_result_for_outcome(
+            job,
+            outcome,
+            canonical_json_bytes(result),
+        )
+
+
+def test_review_user_result_recommendation_is_bound_to_review_assessment() -> None:
+    job = _model("job-review.json", Job)
+    outcome_value = load_json(FIXTURE_ROOT / "positive" / "job-outcome-review.json")
+    outcome_value["payload"].update(
+        verdict="REJECT",
+        unsupported_findings=["The causal claim is unsupported."],
+        recommendation="Collect stronger causal evidence.",
+    )
+    artifact = copy.deepcopy(
+        load_json(FIXTURE_ROOT / "positive" / "job-outcome-diagnosis.json")[
+            "proposed_artifacts"
+        ][0]
+    )
+    artifact["proposal_key"] = "review_user_result"
+    artifact["staged_resource_ref"]["proposal_key"] = "review_user_result"
+    artifact["staged_resource_ref"]["owner_job_id"] = outcome_value["job_id"]
+    outcome_value["proposed_artifacts"] = [artifact]
+
+    result = load_json(FIXTURE_ROOT / "positive" / "user-result.json")
+    result.update(
+        status="INCONCLUSIVE",
+        source_job_type="REVIEW",
+        root_cause=None,
+        findings=[],
+        evidence_gaps=["The causal claim is unsupported."],
+        recommendations=[outcome_value["payload"]["recommendation"]],
+    )
+    result_bytes = canonical_json_bytes(result)
+    artifact["size"] = len(result_bytes)
+    artifact["sha256"] = hashlib.sha256(result_bytes).hexdigest()
+    artifact["staged_resource_ref"]["size"] = len(result_bytes)
+    artifact["staged_resource_ref"]["sha256"] = artifact["sha256"]
+    outcome = JobOutcome.model_validate(outcome_value)
+    assert validate_user_result_for_outcome(job, outcome, result_bytes)
+
+    result["recommendations"] = ["A renderer-invented recommendation."]
+    with pytest.raises(ValueError, match="recommendations must exactly match"):
+        validate_user_result_for_outcome(
+            job,
+            outcome,
+            canonical_json_bytes(result),
+        )
 
 
 @pytest.mark.parametrize(

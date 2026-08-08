@@ -2,15 +2,16 @@
 
 本 Wiki 是 RPC 专属 E2E Fixture；其中业务字段不得进入通用 output contract 或生成模板。
 
-## GenerationSpec v3
+## GenerationSpec v4
 
 ```json
 {
-  "schema_version": 3,
-  "generator_version": "3.1.1",
+  "schema_version": 4,
+  "generator_version": "4.0.0",
   "id": "diagnose-service-takeover",
-  "version": "3.1.1",
+  "version": "4.0.0",
   "capability": "service-takeover",
+  "deployment_scope": "TEST_ONLY",
   "summary": "定位合成服务接管场景中的 RPC 超时",
   "chinese_title": "服务接管 RPC 超时定位",
   "module_name": "compact",
@@ -41,7 +42,7 @@
       {
         "id": "client_timeout",
         "anchor": "client",
-        "line_pattern": "^(?P<event_time>\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z) COMPACT (?P<caller_service>\\S+) proc=checkout-client-\\d+ slot 1 cpu \\d+ \\|No\\[\\d+\\] rpc deadline exceeded after \\d+ms server=(?P<server_service>\\S+) method=(?P<rpc_method>\\S+) order_id=(?P<order_id>\\S+)$",
+        "line_pattern": "^\\[\\d{4}\\] \\[diagnostic\\|[A-Za-z0-9._/-]+\\] (?P<event_time>\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z) COMPACT (?P<caller_service>\\S+) proc=checkout-client-\\d+ slot 1 cpu \\d+ \\|No\\[\\d+\\] rpc deadline exceeded after \\d+ms server=(?P<server_service>\\S+) method=(?P<rpc_method>\\S+) order_id=(?P<order_id>\\S+)$",
         "timestamp_group": "event_time",
         "timestamp_format": "RFC3339_MILLIS_UTC",
         "field_groups": ["caller_service", "server_service", "rpc_method", "order_id"],
@@ -50,7 +51,7 @@
       {
         "id": "server_takeover_accepted",
         "anchor": "server",
-        "line_pattern": "^(?P<event_time>\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z) COMPACT (?P<server_service>\\S+) proc=inventory-server-\\d+ slot 2 cpu \\d+ \\|No\\[\\d+\\] service takeover active; rpc request accepted method=(?P<rpc_method>\\S+) order_id=(?P<order_id>\\S+)$",
+        "line_pattern": "^\\[\\d{4}\\] \\[diagnostic\\|[A-Za-z0-9._/-]+\\] (?P<event_time>\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z) COMPACT (?P<server_service>\\S+) proc=inventory-server-\\d+ slot 2 cpu \\d+ \\|No\\[\\d+\\] service takeover active; rpc request accepted method=(?P<rpc_method>\\S+) order_id=(?P<order_id>\\S+)$",
         "timestamp_group": "event_time",
         "timestamp_format": "RFC3339_MILLIS_UTC",
         "field_groups": ["server_service", "rpc_method", "order_id"],
@@ -59,7 +60,7 @@
       {
         "id": "server_pool_wait_complete",
         "anchor": "server",
-        "line_pattern": "^(?P<event_time>\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z) COMPACT (?P<server_service>\\S+) proc=inventory-server-\\d+ slot 2 cpu \\d+ \\|No\\[\\d+\\] connection pool wait \\d+ms complete order_id=(?P<order_id>\\S+)$",
+        "line_pattern": "^\\[\\d{4}\\] \\[diagnostic\\|[A-Za-z0-9._/-]+\\] (?P<event_time>\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z) COMPACT (?P<server_service>\\S+) proc=inventory-server-\\d+ slot 2 cpu \\d+ \\|No\\[\\d+\\] connection pool wait \\d+ms complete order_id=(?P<order_id>\\S+)$",
         "timestamp_group": "event_time",
         "timestamp_format": "RFC3339_MILLIS_UTC",
         "field_groups": ["server_service", "order_id"],

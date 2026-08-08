@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import shutil
+import zipfile
+from dataclasses import replace
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -11,6 +15,7 @@ import pytest
 from problem_locator.contracts import (
     AgentJobOutcomeDraftV2,
     DecisionAuditV2,
+    EvidenceBinding,
     Job,
     OutcomeResultType,
     ReviewSubjectV2,
@@ -19,6 +24,12 @@ from problem_locator.contracts import (
     canonical_json_bytes,
     validate_workspace_manifest_for_job,
 )
+from problem_locator.runtime.authoritative_targets import (
+    AuthoritativeTargetLog,
+    AuthoritativeTargetSet,
+    semantic_archive_name,
+)
+from problem_locator.runtime.result_types import CapturedTargetLog
 from problem_locator.runtime.server_outcome_finalizer import (
     finalize_server_outcome,
 )
@@ -45,22 +56,68 @@ def _json(path: Path) -> dict[str, object]:
     return json.loads(path.read_bytes())
 
 
-def _broker_audit(job: Job) -> bytes:
+def _broker_audit(
+    manifest: WorkspaceInputManifest,
+    *,
+    first_match_status: str = "exact",
+) -> bytes:
+    plan = manifest.resolved_logparse_plan
+    assert plan is not None and plan.artifact_id is not None
+    request = {
+        "schema_version": 1,
+        "problem_time": plan.problem_time,
+        "anchors": [item.model_dump(mode="json") for item in plan.anchors],
+        "artifact_id": plan.artifact_id,
+    }
+    result = {
+        "schema_version": 1,
+        "api_version": 1,
+        "target_logs": [
+            {
+                "label": "client",
+                "module": "compact",
+                "module_key": "compact",
+                "module_name": "compact",
+                "slot": "slot_1",
+                "process_name": "checkout-client",
+                "match_status": "exact",
+                "caveats": [],
+                "log_path": "client.log",
+            },
+            {
+                "label": "server",
+                "module": "compact",
+                "module_key": "compact",
+                "module_name": "compact",
+                "slot": "slot_2",
+                "process_name": "inventory-server",
+                "match_status": "exact",
+                "caveats": [],
+                "log_path": "server.log",
+            },
+        ],
+    }
+    if first_match_status != "exact":
+        first = result["target_logs"][0]
+        first["match_status"] = first_match_status
+        first["caveats"] = [f"Synthetic {first_match_status} target."]
+        del first["log_path"]
     return canonical_json_bytes(
         {
             "schema_version": 1,
-            "job_id": job.job_id,
+            "job_id": manifest.job_id,
             "operations": [
                 {
                     "operation": "target-logs",
-                    "request": {"artifact_id": ARTIFACT_ID},
+                    "request_sha256": hashlib.sha256(
+                        canonical_json_bytes(request)
+                    ).hexdigest(),
+                    "request": request,
                     "http_status": 200,
-                    "result": {
-                        "target_logs": [
-                            {"label": "client", "log_path": "client.log"},
-                            {"label": "server", "log_path": "server.log"},
-                        ]
-                    },
+                    "result_sha256": hashlib.sha256(
+                        canonical_json_bytes(result)
+                    ).hexdigest(),
+                    "result": result,
                 }
             ],
         }
@@ -224,21 +281,25 @@ def _build(
     artifact_root = tmp_path / artifact["relative_path"]
     artifact_root.mkdir(parents=True)
     client_line = (
-        f"{client_time} COMPACT checkout "
+        f"[0001] [diagnostic|slot_1/debug_20260103.log] {client_time} "
+        "COMPACT checkout "
         "proc=checkout-client-101 slot 1 cpu 0 |No[1] rpc deadline "
         "exceeded after 1000ms server=inventory "
         f"method={client_rpc_method} order_id={client_order_id}\n"
     )
+    duplicate_client_line = client_line.replace("[0001]", "[0002]", 1)
     (artifact_root / "client.log").write_text(
-        client_line + (client_line if hidden_duplicate_client_event else ""),
+        client_line + (duplicate_client_line if hidden_duplicate_client_event else ""),
         encoding="utf-8",
     )
     (artifact_root / "server.log").write_text(
-        f"{takeover_time} COMPACT inventory "
+        f"[0001] [diagnostic|slot_2/debug_20260103.log] {takeover_time} "
+        "COMPACT inventory "
         "proc=inventory-server-202 slot 2 cpu 0 |No[2] service takeover "
         f"active; rpc request accepted method={server_rpc_method} "
         f"order_id={server_order_id}\n"
-        f"{pool_wait_time} COMPACT inventory "
+        f"[0002] [diagnostic|slot_2/debug_20260103.log] {pool_wait_time} "
+        "COMPACT inventory "
         "proc=inventory-server-202 slot 2 cpu 0 |No[3] connection pool "
         f"wait 1500ms complete order_id={server_order_id}\n",
         encoding="utf-8",
@@ -291,6 +352,7 @@ def _build(
     draft_value["schema_version"] = 2
     draft_value["rule_claims"] = claims
     draft_value["consumed_evidence_refs"] = evidence_ids
+    draft_value["proposed_artifact_drafts"] = []
     candidate = draft_value["payload"]["candidate_conclusion_draft"]
     client_binding = {
         "existing_evidence_id": CLIENT_EVIDENCE,
@@ -314,10 +376,92 @@ def _build(
         draft_bytes=draft_bytes,
         proposal_resources=(),
         skill_root=skill_root,
-        broker_audit_bytes=_broker_audit(job),
+        broker_audit_bytes=_broker_audit(manifest),
         diagnosis_audit=None,
     )
     return job, manifest, draft, draft_bytes, verification
+
+
+def _captured_result_targets(
+    tmp_path: Path,
+    *,
+    problem_time: str,
+) -> tuple[AuthoritativeTargetSet, tuple[CapturedTargetLog, ...]]:
+    source_root = f"inputs/artifacts/{ARTIFACT_ID}/tree"
+
+    def target(
+        *,
+        ordinal: int,
+        label: str,
+        slot: str,
+        process_name: str,
+        pid: str,
+        log_path: str,
+    ) -> AuthoritativeTargetLog:
+        value = AuthoritativeTargetLog(
+            ordinal=ordinal,
+            label=label,
+            requested_module="compact",
+            requested_slot=f"slot_{slot}",
+            requested_process_name=process_name,
+            requested_pid=None,
+            module_key="ctrl",
+            module_name="COMPACT",
+            slot=slot,
+            process_name=process_name,
+            pid=pid,
+            match_status="exact",
+            board_cycle=None,
+            cpu_id=None,
+            cpu_cycle=None,
+            caveats=(),
+            source_kind="INPUT_ARTIFACT",
+            source_ref=ARTIFACT_ID,
+            source_root=source_root,
+            log_path=log_path,
+            archive_name=None,
+        )
+        return replace(value, archive_name=semantic_archive_name(value))
+
+    client = target(
+        ordinal=1,
+        label="client",
+        slot="1",
+        process_name="checkout-client",
+        pid="101",
+        log_path="client.log",
+    )
+    server = target(
+        ordinal=2,
+        label="server",
+        slot="2",
+        process_name="inventory-server",
+        pid="202",
+        log_path="server.log",
+    )
+    targets = AuthoritativeTargetSet(
+        problem_time=problem_time,
+        targets=(client, server),
+        source_size=None,
+        source_sha256=None,
+    )
+    captured = tuple(
+        CapturedTargetLog(
+            target=item,
+            content=(tmp_path / source_root / item.log_path).read_bytes(),
+            evidence_bindings=(
+                EvidenceBinding(
+                    existing_evidence_id=(
+                        CLIENT_EVIDENCE if item.label == "client" else SERVER_EVIDENCE
+                    ),
+                    evidence_proposal_key=None,
+                ),
+            ),
+        )
+        for item in targets.targets
+        if item.log_path is not None
+    )
+    return targets, captured
 
 
 def _review_inputs(
@@ -688,7 +832,7 @@ def test_logparse_evidence_cannot_switch_to_same_path_in_another_run(
             draft_bytes=canonical_json_bytes(draft),
             proposal_resources=(),
             skill_root=tmp_path / "skill",
-            broker_audit_bytes=_broker_audit(switched_job),
+            broker_audit_bytes=_broker_audit(switched_manifest),
             diagnosis_audit=None,
         )
 
@@ -805,6 +949,49 @@ def test_initial_parse_evidence_is_locked_to_broker_artifact_proposal(
     for claim in draft_value["rule_claims"]:
         claim["citations"] = citations
     initial_draft = AgentJobOutcomeDraftV2.model_validate(draft_value)
+    artifact_draft = next(
+        item
+        for item in initial_draft.proposed_artifact_drafts
+        if item.proposal_key == artifact_key
+    )
+    plan = initial_manifest.resolved_logparse_plan
+    assert plan is not None
+    request = {
+        "schema_version": 1,
+        "problem_time": plan.problem_time,
+        "anchors": [item.model_dump(mode="json") for item in plan.anchors],
+        "attachment_id": attachment_id,
+        "artifact_proposal_key": artifact_key,
+    }
+    result = {
+        "schema_version": 1,
+        "api_version": 1,
+        "logparse_run_artifact_draft": artifact_draft.model_dump(mode="json"),
+        "target_logs": [
+            {
+                "label": "client",
+                "module": "compact",
+                "module_key": "compact",
+                "module_name": "compact",
+                "slot": "slot_1",
+                "process_name": "checkout-client",
+                "match_status": "exact",
+                "caveats": [],
+                "log_path": "client.log",
+            },
+            {
+                "label": "server",
+                "module": "compact",
+                "module_key": "compact",
+                "module_name": "compact",
+                "slot": "slot_2",
+                "process_name": "inventory-server",
+                "match_status": "exact",
+                "caveats": [],
+                "log_path": "server.log",
+            },
+        ],
+    }
     broker_audit = canonical_json_bytes(
         {
             "schema_version": 1,
@@ -812,28 +999,18 @@ def test_initial_parse_evidence_is_locked_to_broker_artifact_proposal(
             "operations": [
                 {
                     "operation": "parse-targets",
-                    "request": {
-                        "attachment_id": attachment_id,
-                        "artifact_proposal_key": artifact_key,
-                    },
+                    "request_sha256": hashlib.sha256(
+                        canonical_json_bytes(request)
+                    ).hexdigest(),
+                    "request": request,
                     "http_status": 200,
-                    "result": {
-                        "logparse_run_artifact_draft": {
-                            "proposal_key": artifact_key
-                        },
-                        "target_logs": [
-                            {"label": "client", "log_path": "client.log"},
-                            {"label": "server", "log_path": "server.log"},
-                        ],
-                    },
+                    "result_sha256": hashlib.sha256(
+                        canonical_json_bytes(result)
+                    ).hexdigest(),
+                    "result": result,
                 }
             ],
         }
-    )
-    artifact_draft = next(
-        item
-        for item in initial_draft.proposed_artifact_drafts
-        if item.proposal_key == artifact_key
     )
     resource = SimpleNamespace(
         proposal_key=artifact_key,
@@ -916,7 +1093,7 @@ def test_diagnosis_candidate_must_close_over_every_audited_evidence_binding(
         draft_bytes=canonical_json_bytes(incomplete),
         proposal_resources=(),
         skill_root=tmp_path / "skill",
-        broker_audit_bytes=_broker_audit(job),
+        broker_audit_bytes=_broker_audit(manifest),
         diagnosis_audit=None,
     )
 
@@ -925,6 +1102,49 @@ def test_diagnosis_candidate_must_close_over_every_audited_evidence_binding(
         item.existing_evidence_id
         for item in verification.audit.required_evidence_bindings
     ] == [CLIENT_EVIDENCE, SERVER_EVIDENCE]
+
+
+def test_diagnosis_candidate_evidence_coverage_is_order_independent(
+    tmp_path: Path,
+) -> None:
+    job, manifest, draft, _, _ = _build(
+        tmp_path,
+        problem_time="2026-01-03T00:00:03.000Z",
+    )
+    value = draft.model_dump(mode="json")
+    client_binding = {
+        "existing_evidence_id": CLIENT_EVIDENCE,
+        "evidence_proposal_key": None,
+    }
+    server_binding = {
+        "existing_evidence_id": SERVER_EVIDENCE,
+        "evidence_proposal_key": None,
+    }
+    candidate = value["payload"]["candidate_conclusion_draft"]
+    candidate["supporting_evidence_bindings"] = [server_binding, client_binding]
+    candidate["completion_criteria_mapping"][0]["evidence_bindings"] = [
+        client_binding,
+        server_binding,
+    ]
+    reordered = AgentJobOutcomeDraftV2.model_validate(value)
+
+    verification = verify_agent_draft(
+        workspace_root=tmp_path,
+        job=job,
+        manifest=manifest,
+        draft=reordered,
+        draft_bytes=canonical_json_bytes(reordered),
+        proposal_resources=(),
+        skill_root=tmp_path / "skill",
+        broker_audit_bytes=_broker_audit(manifest),
+        diagnosis_audit=None,
+    )
+
+    assert verification.positive_gate_passed is True
+    assert {
+        item.existing_evidence_id
+        for item in verification.audit.required_evidence_bindings
+    } == {CLIENT_EVIDENCE, SERVER_EVIDENCE}
 
 
 def test_no_log_semantic_skill_preserves_candidate_evidence_through_review(
@@ -1024,6 +1244,35 @@ def test_no_log_semantic_skill_preserves_candidate_evidence_through_review(
         item.existing_evidence_id
         for item in diagnosis.audit.required_evidence_bindings
     ] == [CLIENT_EVIDENCE]
+
+    (tmp_path / "runtime").mkdir()
+    (tmp_path / "output").mkdir()
+    finalized_diagnosis = finalize_server_outcome(
+        workspace_root=tmp_path,
+        job=diagnosis_job,
+        manifest=diagnosis_manifest,
+        draft=diagnosis_draft,
+        draft_bytes=canonical_json_bytes(diagnosis_draft),
+        outcome_id="00000000-0000-0000-0000-000000000094",
+        produced_at="2026-08-08T00:00:00.000Z",
+        verification=diagnosis,
+        authoritative_targets=None,
+        target_logs=(),
+    )
+    assert finalized_diagnosis.outcome.result_type is OutcomeResultType.COMPLETED
+    assert finalized_diagnosis.user_result is not None
+    generated_by_kind = {
+        item.draft.artifact_kind.value: item
+        for item in finalized_diagnosis.generated_result_files
+    }
+    assert set(generated_by_kind) == {"USER_RESULT", "USER_RESULT_ARCHIVE"}
+    archive = generated_by_kind["USER_RESULT_ARCHIVE"]
+    assert archive.draft.metadata.target_log_count == 0
+    with zipfile.ZipFile(io.BytesIO(archive.content)) as result_zip:
+        assert result_zip.namelist() == ["result.txt", "archive-manifest.json"]
+        archive_manifest = json.loads(result_zip.read("archive-manifest.json"))
+        assert archive_manifest["target_log_count"] == 0
+        assert archive_manifest["target_logs"] == []
 
     criterion = diagnosis_candidate["completion_criteria_mapping"][0]
     candidate_preimage = {
@@ -1373,7 +1622,7 @@ def test_agent_cannot_invent_or_mutate_pinned_missing_only_requirement(
             draft_bytes=canonical_json_bytes(wait_draft),
             proposal_resources=(),
             skill_root=tmp_path / "skill",
-            broker_audit_bytes=_broker_audit(job),
+            broker_audit_bytes=_broker_audit(manifest),
             diagnosis_audit=None,
         )
 
@@ -1396,7 +1645,7 @@ def test_missing_only_requirement_cannot_request_an_existing_user_fact(
             draft_bytes=canonical_json_bytes(wait_draft),
             proposal_resources=(),
             skill_root=tmp_path / "skill",
-            broker_audit_bytes=_broker_audit(job),
+            broker_audit_bytes=_broker_audit(manifest),
             diagnosis_audit=None,
         )
 
@@ -1419,11 +1668,14 @@ def test_valid_missing_only_wait_is_preserved_when_fact_is_absent(
         draft_bytes=wait_bytes,
         proposal_resources=(),
         skill_root=tmp_path / "skill",
-        broker_audit_bytes=_broker_audit(job),
+        broker_audit_bytes=_broker_audit(manifest),
         diagnosis_audit=None,
     )
     assert verification.positive_gate_passed is False
-
+    authoritative_targets, target_logs = _captured_result_targets(
+        tmp_path,
+        problem_time="2026-01-03T00:00:03.000Z",
+    )
     (tmp_path / "runtime").mkdir()
     (tmp_path / "output").mkdir()
     finalized = finalize_server_outcome(
@@ -1435,7 +1687,8 @@ def test_valid_missing_only_wait_is_preserved_when_fact_is_absent(
         outcome_id="00000000-0000-0000-0000-000000000095",
         produced_at="2026-08-08T00:00:00.000Z",
         verification=verification,
-        user_result_bytes=None,
+        authoritative_targets=authoritative_targets,
+        target_logs=target_logs,
     )
     assert finalized.outcome.result_type is OutcomeResultType.NEED_INPUT
     assert finalized.outcome.payload.requested_input == [
@@ -1444,6 +1697,75 @@ def test_valid_missing_only_wait_is_preserved_when_fact_is_absent(
     assert finalized.marker.decision_evidence_sha256 == hashlib.sha256(
         verification.decision_evidence_bytes
     ).hexdigest()
+
+
+@pytest.mark.parametrize("match_status", ["missing", "ambiguous"])
+def test_unresolved_authoritative_target_overrides_need_input_with_json_only_result(
+    tmp_path: Path,
+    match_status: str,
+) -> None:
+    job, manifest, draft, _, _ = _build(
+        tmp_path,
+        problem_time="2026-01-03T00:00:03.000Z",
+        include_order_fact=False,
+    )
+    wait_draft = _need_order_id_draft(job, draft)
+    wait_bytes = canonical_json_bytes(wait_draft)
+    verification = verify_agent_draft(
+        workspace_root=tmp_path,
+        job=job,
+        manifest=manifest,
+        draft=wait_draft,
+        draft_bytes=wait_bytes,
+        proposal_resources=(),
+        skill_root=tmp_path / "skill",
+        broker_audit_bytes=_broker_audit(
+            manifest,
+            first_match_status=match_status,
+        ),
+        diagnosis_audit=None,
+    )
+    authoritative_targets, target_logs = _captured_result_targets(
+        tmp_path,
+        problem_time="2026-01-03T00:00:03.000Z",
+    )
+    unresolved = replace(
+        authoritative_targets.targets[0],
+        match_status=match_status,
+        log_path=None,
+        archive_name=None,
+    )
+    target_set = replace(
+        authoritative_targets,
+        targets=(unresolved, authoritative_targets.targets[1]),
+    )
+    remaining_logs = tuple(
+        item for item in target_logs if item.target.ordinal != unresolved.ordinal
+    )
+    (tmp_path / "runtime").mkdir()
+    (tmp_path / "output").mkdir()
+
+    finalized = finalize_server_outcome(
+        workspace_root=tmp_path,
+        job=job,
+        manifest=manifest,
+        draft=wait_draft,
+        draft_bytes=wait_bytes,
+        outcome_id="00000000-0000-0000-0000-000000000098",
+        produced_at="2026-08-08T00:00:00.000Z",
+        verification=verification,
+        authoritative_targets=target_set,
+        target_logs=remaining_logs,
+    )
+
+    assert finalized.outcome.result_type is OutcomeResultType.INCONCLUSIVE
+    assert finalized.user_result is not None
+    assert finalized.user_result.status == "INCONCLUSIVE"
+    assert len(finalized.generated_result_files) == 1
+    assert finalized.generated_result_files[0].draft.artifact_kind.value == "USER_RESULT"
+    assert {
+        item.draft.artifact_kind.value for item in finalized.generated_result_files
+    } == {"USER_RESULT"}
 
 
 @pytest.mark.parametrize(
@@ -1500,7 +1822,6 @@ def test_review_pass_is_inconclusive_when_inherited_audit_is_not_positive(
         diagnosis_audit=inherited_audit,
     )
     assert verification.positive_gate_passed is False
-
     (tmp_path / "runtime").mkdir()
     (tmp_path / "output").mkdir()
     finalized = finalize_server_outcome(
@@ -1512,7 +1833,8 @@ def test_review_pass_is_inconclusive_when_inherited_audit_is_not_positive(
         outcome_id="00000000-0000-0000-0000-000000000097",
         produced_at="2026-08-08T00:00:00.000Z",
         verification=verification,
-        user_result_bytes=None,
+        authoritative_targets=None,
+        target_logs=(),
     )
     assert finalized.outcome.result_type is OutcomeResultType.INCONCLUSIVE
     assert finalized.outcome.payload.verdict.value == "REJECT"
@@ -1609,7 +1931,8 @@ def test_review_reject_requires_one_server_aligned_fail_claim(
         outcome_id="00000000-0000-0000-0000-000000000097",
         produced_at="2026-08-08T00:00:00.000Z",
         verification=verification,
-        user_result_bytes=None,
+        authoritative_targets=None,
+        target_logs=(),
     )
     assert finalized.outcome.result_type is (
         OutcomeResultType.COMPLETED
@@ -1617,6 +1940,28 @@ def test_review_reject_requires_one_server_aligned_fail_claim(
         else OutcomeResultType.INCONCLUSIVE
     )
     assert finalized.outcome.payload.verdict.value == "REJECT"
+    assert finalized.user_result is not None
+    relevance = finalized.user_result.time_relevance
+    derived_times = {
+        item.server_evaluation.derived_anchor_time
+        for item in verification.audit.rules
+        if item.server_evaluation.derived_anchor_time is not None
+    }
+    assert len(derived_times) == 1
+    assert relevance.problem_time == derived_times.pop()
+    assert relevance.observations
+    problem_time = datetime.strptime(
+        relevance.problem_time,
+        "%Y-%m-%dT%H:%M:%S.%fZ",
+    )
+    for observation in relevance.observations:
+        event_time = datetime.strptime(
+            observation.event_time,
+            "%Y-%m-%dT%H:%M:%S.%fZ",
+        )
+        assert observation.offset_ms == int(
+            (event_time - problem_time).total_seconds() * 1_000
+        )
 
 
 @pytest.mark.parametrize(
@@ -1666,6 +2011,10 @@ def test_review_need_more_requires_unknown_and_one_legal_missing_requirement(
         diagnosis_audit=diagnosis.audit,
     )
     assert verification.positive_gate_passed is expected_gate
+    authoritative_targets, target_logs = _captured_result_targets(
+        tmp_path,
+        problem_time="2026-01-03T00:00:03.000Z",
+    )
 
     (tmp_path / "runtime").mkdir()
     (tmp_path / "output").mkdir()
@@ -1678,7 +2027,8 @@ def test_review_need_more_requires_unknown_and_one_legal_missing_requirement(
         outcome_id="00000000-0000-0000-0000-000000000099",
         produced_at="2026-08-08T00:00:00.000Z",
         verification=verification,
-        user_result_bytes=None,
+        authoritative_targets=authoritative_targets,
+        target_logs=target_logs,
     )
     assert finalized.outcome.result_type is (
         OutcomeResultType.COMPLETED
@@ -1707,6 +2057,10 @@ def test_wrong_problem_time_downgrades_candidate_to_inconclusive(
         item.server_evaluation.status is ServerRuleStatus.VERIFIED_FAIL
         for item in time_rules
     )
+    authoritative_targets, target_logs = _captured_result_targets(
+        tmp_path,
+        problem_time="2026-01-03T01:00:03.000Z",
+    )
     (tmp_path / "runtime").mkdir()
     (tmp_path / "output").mkdir()
 
@@ -1719,18 +2073,134 @@ def test_wrong_problem_time_downgrades_candidate_to_inconclusive(
         outcome_id="00000000-0000-0000-0000-000000000099",
         produced_at="2026-08-08T00:00:00.000Z",
         verification=verification,
-        user_result_bytes=None,
+        authoritative_targets=authoritative_targets,
+        target_logs=target_logs,
     )
 
     assert finalized.outcome.result_type is OutcomeResultType.INCONCLUSIVE
     assert finalized.outcome.payload.candidate_conclusion_draft is None
-    assert all(
-        item.artifact_kind.value != "USER_RESULT"
-        for item in finalized.outcome.proposed_artifact_drafts
-    )
+    assert finalized.user_result is not None
+    assert finalized.user_result.status == "INCONCLUSIVE"
+    assert len(finalized.generated_result_files) == 1
+    assert {
+        item.draft.artifact_kind.value for item in finalized.generated_result_files
+    } == {"USER_RESULT"}
+    assert {
+        item.artifact_kind.value for item in finalized.outcome.proposed_artifact_drafts
+    } == {"USER_RESULT"}
     assert (tmp_path / "output/job_outcome.json").read_bytes() == (
         finalized.canonical_bytes
     )
+
+
+def test_completed_candidate_generates_json_and_target_log_archive(
+    tmp_path: Path,
+) -> None:
+    job, manifest, draft, draft_bytes, verification = _build(
+        tmp_path,
+        problem_time="2026-01-03T00:00:03.000Z",
+    )
+    assert verification.positive_gate_passed is True
+    authoritative_targets, target_logs = _captured_result_targets(
+        tmp_path,
+        problem_time="2026-01-03T00:00:03.000Z",
+    )
+    (tmp_path / "runtime").mkdir()
+    (tmp_path / "output").mkdir()
+
+    finalized = finalize_server_outcome(
+        workspace_root=tmp_path,
+        job=job,
+        manifest=manifest,
+        draft=draft,
+        draft_bytes=draft_bytes,
+        outcome_id="00000000-0000-0000-0000-000000000096",
+        produced_at="2026-08-08T00:00:00.000Z",
+        verification=verification,
+        authoritative_targets=authoritative_targets,
+        target_logs=target_logs,
+    )
+
+    assert finalized.outcome.result_type is OutcomeResultType.COMPLETED
+    assert finalized.user_result is not None
+    assert finalized.user_result.status == "COMPLETED"
+    assert finalized.user_result.root_cause is not None
+    assert len(finalized.generated_result_files) == 2
+    generated_by_kind = {
+        item.draft.artifact_kind.value: item
+        for item in finalized.generated_result_files
+    }
+    assert set(generated_by_kind) == {"USER_RESULT", "USER_RESULT_ARCHIVE"}
+    archive = generated_by_kind["USER_RESULT_ARCHIVE"]
+    assert archive.draft.metadata.target_log_count == 2
+    with zipfile.ZipFile(io.BytesIO(archive.content)) as result_zip:
+        assert set(result_zip.namelist()) == {
+            "archive-manifest.json",
+            "client__COMPACT__slot_1__checkout-client-101.log",
+            "result.txt",
+            "server__COMPACT__slot_2__inventory-server-202.log",
+        }
+
+
+def test_nearest_target_caveats_survive_server_final_json_zip_and_text(
+    tmp_path: Path,
+) -> None:
+    job, manifest, draft, draft_bytes, verification = _build(
+        tmp_path,
+        problem_time="2026-01-03T00:00:03.000Z",
+    )
+    authoritative_targets, target_logs = _captured_result_targets(
+        tmp_path,
+        problem_time="2026-01-03T00:00:03.000Z",
+    )
+    caveat = "The exact cycle was unavailable; the nearest cycle was selected."
+    nearest_server = replace(
+        authoritative_targets.targets[1],
+        match_status="nearest",
+        caveats=(caveat,),
+    )
+    authoritative_targets = replace(
+        authoritative_targets,
+        targets=(authoritative_targets.targets[0], nearest_server),
+    )
+    target_logs = (
+        target_logs[0],
+        replace(target_logs[1], target=nearest_server),
+    )
+    (tmp_path / "runtime").mkdir()
+    (tmp_path / "output").mkdir()
+
+    finalized = finalize_server_outcome(
+        workspace_root=tmp_path,
+        job=job,
+        manifest=manifest,
+        draft=draft,
+        draft_bytes=draft_bytes,
+        outcome_id="00000000-0000-0000-0000-000000000093",
+        produced_at="2026-08-08T00:00:00.000Z",
+        verification=verification,
+        authoritative_targets=authoritative_targets,
+        target_logs=target_logs,
+    )
+
+    assert finalized.outcome.result_type is OutcomeResultType.COMPLETED
+    assert finalized.user_result is not None
+    assert any(caveat in item for item in finalized.user_result.limitations)
+    archive = next(
+        item
+        for item in finalized.generated_result_files
+        if item.draft.artifact_kind.value == "USER_RESULT_ARCHIVE"
+    )
+    with zipfile.ZipFile(io.BytesIO(archive.content)) as result_zip:
+        archive_manifest = json.loads(result_zip.read("archive-manifest.json"))
+        server_target = next(
+            item
+            for item in archive_manifest["target_logs"]
+            if item["label"] == "server"
+        )
+        assert server_target["match_status"] == "nearest"
+        assert server_target["caveats"] == [caveat]
+        assert caveat in result_zip.read("result.txt").decode("utf-8")
 
 
 def test_any_completed_diagnosis_is_inconclusive_when_gate_fails(
@@ -1748,6 +2218,10 @@ def test_any_completed_diagnosis_is_inconclusive_when_gate_fails(
         update={"payload": payload_without_candidate}
     )
     draft_without_candidate_bytes = canonical_json_bytes(draft_without_candidate)
+    authoritative_targets, target_logs = _captured_result_targets(
+        tmp_path,
+        problem_time="2026-01-03T01:00:03.000Z",
+    )
     (tmp_path / "runtime").mkdir()
     (tmp_path / "output").mkdir()
 
@@ -1760,7 +2234,8 @@ def test_any_completed_diagnosis_is_inconclusive_when_gate_fails(
         outcome_id="00000000-0000-0000-0000-000000000098",
         produced_at="2026-08-08T00:00:00.000Z",
         verification=verification,
-        user_result_bytes=None,
+        authoritative_targets=authoritative_targets,
+        target_logs=target_logs,
     )
 
     assert finalized.outcome.result_type is OutcomeResultType.INCONCLUSIVE
