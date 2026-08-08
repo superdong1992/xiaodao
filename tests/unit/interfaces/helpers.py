@@ -121,7 +121,7 @@ def object_counts() -> StateExportObjectCounts:
 def valid_report() -> ValidationReport:
     return ValidationReport(
         valid=True,
-        schema_version=1,
+        schema_version=2,
         contract_revision=CONTRACT_REVISION,
         generation=0,
         object_counts=object_counts(),

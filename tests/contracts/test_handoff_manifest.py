@@ -136,7 +136,7 @@ def test_fixture_manifest_is_complete_sorted_and_self_excluding() -> None:
     assert "fixture-manifest.json" not in paths
     assert all(
         entry["schema_ref"] is None
-        or entry["schema_ref"].startswith("schemas/v1/")
+        or entry["schema_ref"].startswith("schemas/v2/")
         for entry in payload["files"]
     )
 

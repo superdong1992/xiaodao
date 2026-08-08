@@ -13,9 +13,9 @@ import tempfile
 from typing import Any, Mapping, Sequence
 
 
-GENERATOR_VERSION = "3.0.6"
-SPEC_SCHEMA_VERSION = 2
-MANIFEST_SCHEMA_VERSION = 2
+GENERATOR_VERSION = "3.1.1"
+SPEC_SCHEMA_VERSION = 3
+MANIFEST_SCHEMA_VERSION = 3
 PRODUCT_FILES = ("SKILL.md", "diagnosis-skill.json")
 LOG_ARCHIVE_CONTENT_TYPES = (
     "application/gzip",
@@ -29,6 +29,17 @@ SEMVER_PATTERN = re.compile(
 )
 NAME_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 ROLE_LABEL_PATTERN = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
+RULE_KINDS = frozenset(
+    {
+        "EVENT_PRESENT",
+        "EVENT_TIME_WINDOW",
+        "FACT_FIELD_EQUALS",
+        "ROLE_COVERAGE",
+        "CROSS_ROLE_CORRELATION",
+        "EVENT_ORDER",
+        "SEMANTIC_CAUSALITY",
+    }
+)
 
 
 def _require_exact_keys(value: Mapping[str, Any], expected: set[str], name: str) -> None:
@@ -101,6 +112,7 @@ class Requirement:
     fulfillment_source: str
     prompt: str
     constraints: dict[str, Any]
+    supplement_policy: str
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> "Requirement":
@@ -113,6 +125,7 @@ class Requirement:
                 "fulfillment_source",
                 "prompt",
                 "constraints",
+                "supplement_policy",
             },
             "requirement",
         )
@@ -190,6 +203,11 @@ class Requirement:
                 or not 1 <= minimum <= maximum
             ):
                 raise ValueError("ATTACHMENT constraints are invalid")
+        supplement_policy = value["supplement_policy"]
+        if supplement_policy not in {"NONE", "MISSING_ONLY"}:
+            raise ValueError(
+                "requirement.supplement_policy must be NONE or MISSING_ONLY"
+            )
         return cls(
             name=name,
             kind=kind,
@@ -197,6 +215,7 @@ class Requirement:
             fulfillment_source=source,
             prompt=_single_line(value["prompt"], "requirement.prompt", maximum=4096),
             constraints=dict(constraints),
+            supplement_policy=supplement_policy,
         )
 
     def to_mapping(self) -> dict[str, Any]:
@@ -309,6 +328,296 @@ def _normalize_requirement_mappings(
     return normalized
 
 
+def _name_sequence(value: Any, name: str, *, minimum: int = 0) -> list[str]:
+    result = [
+        _single_line(item, f"{name}[]", maximum=64)
+        for item in _sequence(value, name, maximum=100)
+    ]
+    if len(result) < minimum or len(result) != len(set(result)):
+        raise ValueError(f"{name} cardinality or uniqueness is invalid")
+    if any(NAME_PATTERN.fullmatch(item) is None for item in result):
+        raise ValueError(f"{name} entries must use lower snake case")
+    return result
+
+
+def _event_field(value: Any, name: str) -> dict[str, str]:
+    if not isinstance(value, dict):
+        raise ValueError(f"{name} must be an object")
+    _require_exact_keys(value, {"event", "field"}, name)
+    return {
+        "event": _single_line(value["event"], f"{name}.event", maximum=64),
+        "field": _single_line(value["field"], f"{name}.field", maximum=64),
+    }
+
+
+def _verification_contract(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ValueError("verification_contract must be an object")
+    _require_exact_keys(
+        value,
+        {"schema_version", "event_extractors", "rules"},
+        "verification_contract",
+    )
+    if type(value["schema_version"]) is not int or value["schema_version"] != 1:
+        raise ValueError("verification_contract.schema_version must equal integer 1")
+
+    extractors: list[dict[str, Any]] = []
+    extractor_ids: set[str] = set()
+    for index, raw in enumerate(
+        _sequence(
+            value["event_extractors"],
+            "verification_contract.event_extractors",
+            maximum=100,
+        )
+    ):
+        name = f"verification_contract.event_extractors[{index}]"
+        if not isinstance(raw, dict):
+            raise ValueError(f"{name} must be an object")
+        _require_exact_keys(
+            raw,
+            {
+                "id",
+                "anchor",
+                "line_pattern",
+                "timestamp_group",
+                "timestamp_format",
+                "field_groups",
+                "match_cardinality",
+            },
+            name,
+        )
+        extractor_id = _single_line(raw["id"], f"{name}.id", maximum=64)
+        if NAME_PATTERN.fullmatch(extractor_id) is None or extractor_id in extractor_ids:
+            raise ValueError("event extractor ids must be unique lower snake case")
+        extractor_ids.add(extractor_id)
+        anchor = _single_line(raw["anchor"], f"{name}.anchor", maximum=64)
+        line_pattern = _single_line(
+            raw["line_pattern"], f"{name}.line_pattern", maximum=8192
+        )
+        if not line_pattern.startswith("^") or not line_pattern.endswith("$"):
+            raise ValueError("event extractor line_pattern must be full-line anchored")
+        try:
+            compiled = re.compile(line_pattern)
+        except re.error as exc:
+            raise ValueError("event extractor line_pattern is invalid") from exc
+        timestamp_group = _single_line(
+            raw["timestamp_group"], f"{name}.timestamp_group", maximum=64
+        )
+        field_groups = _name_sequence(raw["field_groups"], f"{name}.field_groups")
+        if timestamp_group in field_groups:
+            raise ValueError("timestamp_group must not also be a field_group")
+        if set(compiled.groupindex) != {timestamp_group, *field_groups}:
+            raise ValueError(
+                "event extractor named groups must equal timestamp_group plus field_groups"
+            )
+        if raw["timestamp_format"] != "RFC3339_MILLIS_UTC":
+            raise ValueError("event extractor timestamp_format is invalid")
+        if raw["match_cardinality"] != "EXACTLY_ONE":
+            raise ValueError("event extractor match_cardinality must be EXACTLY_ONE")
+        extractors.append(
+            {
+                "id": extractor_id,
+                "anchor": anchor,
+                "line_pattern": line_pattern,
+                "timestamp_group": timestamp_group,
+                "timestamp_format": "RFC3339_MILLIS_UTC",
+                "field_groups": field_groups,
+                "match_cardinality": "EXACTLY_ONE",
+            }
+        )
+
+    rules: list[dict[str, Any]] = []
+    rule_ids: set[str] = set()
+    for index, raw in enumerate(
+        _sequence(value["rules"], "verification_contract.rules", maximum=200)
+    ):
+        name = f"verification_contract.rules[{index}]"
+        if not isinstance(raw, dict):
+            raise ValueError(f"{name} must be an object")
+        _require_exact_keys(
+            raw,
+            {
+                "id",
+                "kind",
+                "description",
+                "depends_on",
+                "remediation_requirements",
+                "parameters",
+            },
+            name,
+        )
+        rule_id = _single_line(raw["id"], f"{name}.id", maximum=64)
+        if NAME_PATTERN.fullmatch(rule_id) is None or rule_id in rule_ids:
+            raise ValueError("verification rule ids must be unique lower snake case")
+        kind = raw["kind"]
+        if kind not in RULE_KINDS:
+            raise ValueError(f"{name}.kind is invalid")
+        depends_on = _name_sequence(raw["depends_on"], f"{name}.depends_on")
+        if not set(depends_on) <= rule_ids:
+            raise ValueError("verification rule dependencies must name preceding rules")
+        remediation = _name_sequence(
+            raw["remediation_requirements"],
+            f"{name}.remediation_requirements",
+        )
+        parameters = raw["parameters"]
+        if not isinstance(parameters, dict):
+            raise ValueError(f"{name}.parameters must be an object")
+
+        if kind == "EVENT_PRESENT":
+            _require_exact_keys(parameters, {"event"}, f"{name}.parameters")
+            normalized_parameters = {
+                "event": _single_line(
+                    parameters["event"], f"{name}.parameters.event", maximum=64
+                )
+            }
+        elif kind == "EVENT_TIME_WINDOW":
+            _require_exact_keys(
+                parameters,
+                {
+                    "event",
+                    "reference",
+                    "before_ms",
+                    "after_ms",
+                    "lower_bound",
+                    "upper_bound",
+                },
+                f"{name}.parameters",
+            )
+            before_ms = parameters["before_ms"]
+            after_ms = parameters["after_ms"]
+            if (
+                type(before_ms) is not int
+                or type(after_ms) is not int
+                or not 0 <= before_ms <= 86_400_000
+                or not 0 <= after_ms <= 86_400_000
+            ):
+                raise ValueError("event time window bounds must be explicit milliseconds")
+            if parameters["lower_bound"] not in {"INCLUSIVE", "EXCLUSIVE"} or parameters[
+                "upper_bound"
+            ] not in {"INCLUSIVE", "EXCLUSIVE"}:
+                raise ValueError("event time window boundary semantics are invalid")
+            normalized_parameters = {
+                "event": _single_line(
+                    parameters["event"], f"{name}.parameters.event", maximum=64
+                ),
+                "reference": _binding(
+                    parameters["reference"], f"{name}.parameters.reference"
+                ),
+                "before_ms": before_ms,
+                "after_ms": after_ms,
+                "lower_bound": parameters["lower_bound"],
+                "upper_bound": parameters["upper_bound"],
+            }
+        elif kind == "FACT_FIELD_EQUALS":
+            _require_exact_keys(
+                parameters,
+                {"event", "field", "fact_name"},
+                f"{name}.parameters",
+            )
+            normalized_parameters = {
+                **_event_field(
+                    {"event": parameters["event"], "field": parameters["field"]},
+                    f"{name}.parameters.event_field",
+                ),
+                "fact_name": _single_line(
+                    parameters["fact_name"],
+                    f"{name}.parameters.fact_name",
+                    maximum=64,
+                ),
+            }
+        elif kind == "ROLE_COVERAGE":
+            _require_exact_keys(parameters, {"coverage"}, f"{name}.parameters")
+            coverage: list[dict[str, str]] = []
+            roles: set[str] = set()
+            for coverage_index, item in enumerate(
+                _sequence(parameters["coverage"], f"{name}.parameters.coverage", maximum=20)
+            ):
+                item_name = f"{name}.parameters.coverage[{coverage_index}]"
+                if not isinstance(item, dict):
+                    raise ValueError(f"{item_name} must be an object")
+                _require_exact_keys(item, {"role", "event"}, item_name)
+                role = _single_line(item["role"], f"{item_name}.role", maximum=64)
+                if role in roles:
+                    raise ValueError("ROLE_COVERAGE roles must be unique")
+                roles.add(role)
+                coverage.append(
+                    {
+                        "role": role,
+                        "event": _single_line(
+                            item["event"], f"{item_name}.event", maximum=64
+                        ),
+                    }
+                )
+            if not coverage:
+                raise ValueError("ROLE_COVERAGE requires non-empty coverage")
+            normalized_parameters = {"coverage": coverage}
+        elif kind == "CROSS_ROLE_CORRELATION":
+            _require_exact_keys(parameters, {"members"}, f"{name}.parameters")
+            members = [
+                _event_field(item, f"{name}.parameters.members[{member_index}]")
+                for member_index, item in enumerate(
+                    _sequence(
+                        parameters["members"], f"{name}.parameters.members", maximum=20
+                    )
+                )
+            ]
+            if len(members) < 2 or len({(item["event"], item["field"]) for item in members}) != len(members):
+                raise ValueError("CROSS_ROLE_CORRELATION requires unique members")
+            normalized_parameters = {"members": members}
+        elif kind == "EVENT_ORDER":
+            _require_exact_keys(
+                parameters,
+                {"before_event", "after_event", "allow_equal"},
+                f"{name}.parameters",
+            )
+            if type(parameters["allow_equal"]) is not bool:
+                raise ValueError("EVENT_ORDER allow_equal must be boolean")
+            normalized_parameters = {
+                "before_event": _single_line(
+                    parameters["before_event"],
+                    f"{name}.parameters.before_event",
+                    maximum=64,
+                ),
+                "after_event": _single_line(
+                    parameters["after_event"],
+                    f"{name}.parameters.after_event",
+                    maximum=64,
+                ),
+                "allow_equal": parameters["allow_equal"],
+            }
+        else:
+            _require_exact_keys(
+                parameters,
+                {"assertion", "evidence_events"},
+                f"{name}.parameters",
+            )
+            normalized_parameters = {
+                "assertion": _single_line(
+                    parameters["assertion"],
+                    f"{name}.parameters.assertion",
+                    maximum=4096,
+                ),
+                "evidence_events": _name_sequence(
+                    parameters["evidence_events"],
+                    f"{name}.parameters.evidence_events",
+                ),
+            }
+        rule_ids.add(rule_id)
+        rules.append(
+            {
+                "id": rule_id,
+                "kind": kind,
+                "description": _single_line(
+                    raw["description"], f"{name}.description", maximum=4096
+                ),
+                "depends_on": depends_on,
+                "remediation_requirements": remediation,
+                "parameters": normalized_parameters,
+            }
+        )
+    return {"schema_version": 1, "event_extractors": extractors, "rules": rules}
+
+
 @dataclass(frozen=True)
 class GenerationSpec:
     skill_id: str
@@ -321,6 +630,7 @@ class GenerationSpec:
     roles: tuple[Role, ...]
     requirements: tuple[Requirement, ...]
     logparse_plan: dict[str, Any] | None
+    verification_contract: dict[str, Any]
     time_characteristics: tuple[str, ...]
     analysis_steps: tuple[str, ...]
     judgement_rules: tuple[str, ...]
@@ -344,6 +654,7 @@ class GenerationSpec:
             "roles",
             "requirements",
             "logparse_plan",
+            "verification_contract",
             "time_characteristics",
             "analysis_steps",
             "judgement_rules",
@@ -356,7 +667,7 @@ class GenerationSpec:
         if not required <= actual or actual - required - optional:
             raise ValueError("generation spec field set is invalid")
         if value["schema_version"] != SPEC_SCHEMA_VERSION:
-            raise ValueError("generation spec schema_version must be 2")
+            raise ValueError("generation spec schema_version must be 3")
         if value["generator_version"] != GENERATOR_VERSION:
             raise ValueError(f"generator_version must be {GENERATOR_VERSION}")
         requires_logparse = value["requires_logparse"]
@@ -369,6 +680,13 @@ class GenerationSpec:
         if product is not None:
             product = _single_line(product, "logparse_product", maximum=4096)
         logparse_plan = _logparse_plan(value["logparse_plan"])
+        requirements = tuple(
+            Requirement.from_mapping(item)
+            for item in _normalize_requirement_mappings(
+                value["requirements"],
+                logparse_plan,
+            )
+        )
         spec = cls(
             skill_id=_single_line(value["id"], "id", maximum=64),
             version=_single_line(value["version"], "version", maximum=64),
@@ -383,14 +701,11 @@ class GenerationSpec:
                 Role.from_mapping(item)
                 for item in _sequence(value["roles"], "roles", maximum=20)
             ),
-            requirements=tuple(
-                Requirement.from_mapping(item)
-                for item in _normalize_requirement_mappings(
-                    value["requirements"],
-                    logparse_plan,
-                )
-            ),
+            requirements=requirements,
             logparse_plan=logparse_plan,
+            verification_contract=_verification_contract(
+                value["verification_contract"]
+            ),
             time_characteristics=_text_tuple(
                 value["time_characteristics"], "time_characteristics"
             ),
@@ -466,6 +781,97 @@ class GenerationSpec:
                 raise ValueError("non-logparse Skill forbids logparse plan/product")
             if any(item.stage == "AFTER_LOGPARSE" for item in self.requirements):
                 raise ValueError("non-logparse Skill forbids AFTER_LOGPARSE requirements")
+        self._validate_verification_contract()
+
+    def _validate_verification_contract(self) -> None:
+        requirement_by_name = {item.name: item for item in self.requirements}
+        input_names = {
+            item.name for item in self.requirements if item.kind == "INPUT"
+        }
+        anchor_labels = (
+            set()
+            if self.logparse_plan is None
+            else {item["label"] for item in self.logparse_plan["anchors"]}
+        )
+        role_labels = {item.label for item in self.roles}
+        extractors = self.verification_contract["event_extractors"]
+        extractor_by_id = {item["id"]: item for item in extractors}
+        if self.requires_logparse and not extractors:
+            raise ValueError("logparse Skill requires event extractors")
+        if not self.requires_logparse and extractors:
+            raise ValueError("non-logparse Skill forbids event extractors")
+        for extractor in extractors:
+            if extractor["anchor"] not in anchor_labels:
+                raise ValueError("event extractor anchor must name a logparse anchor")
+
+        rules = self.verification_contract["rules"]
+        if not rules:
+            raise ValueError("verification_contract requires at least one rule")
+        if not any(item["kind"] == "SEMANTIC_CAUSALITY" for item in rules):
+            raise ValueError("verification_contract requires SEMANTIC_CAUSALITY")
+        for rule in rules:
+            for requirement_name in rule["remediation_requirements"]:
+                requirement = requirement_by_name.get(requirement_name)
+                if (
+                    requirement is None
+                    or requirement.supplement_policy != "MISSING_ONLY"
+                ):
+                    raise ValueError(
+                        "rule remediation must name a MISSING_ONLY requirement"
+                    )
+            kind = rule["kind"]
+            parameters = rule["parameters"]
+            event_fields: list[tuple[str, str | None]] = []
+            if kind in {"EVENT_PRESENT", "EVENT_TIME_WINDOW"}:
+                event_fields.append((parameters["event"], None))
+            elif kind == "FACT_FIELD_EQUALS":
+                event_fields.append((parameters["event"], parameters["field"]))
+                if parameters["fact_name"] not in input_names:
+                    raise ValueError("FACT_FIELD_EQUALS fact_name must name INPUT")
+            elif kind == "ROLE_COVERAGE":
+                for coverage in parameters["coverage"]:
+                    event_fields.append((coverage["event"], None))
+                    if coverage["role"] not in role_labels:
+                        raise ValueError("ROLE_COVERAGE role is not declared")
+            elif kind == "CROSS_ROLE_CORRELATION":
+                event_fields.extend(
+                    (member["event"], member["field"])
+                    for member in parameters["members"]
+                )
+            elif kind == "EVENT_ORDER":
+                event_fields.extend(
+                    (
+                        (parameters["before_event"], None),
+                        (parameters["after_event"], None),
+                    )
+                )
+            elif kind == "SEMANTIC_CAUSALITY":
+                event_fields.extend(
+                    (event_id, None)
+                    for event_id in parameters["evidence_events"]
+                )
+            if kind == "EVENT_TIME_WINDOW":
+                reference = parameters["reference"]
+                if (
+                    reference["source"] == "USER_FACT"
+                    and reference["name"] not in input_names
+                ):
+                    raise ValueError("time window reference must name INPUT")
+            member_anchors: set[str] = set()
+            for event_id, field in event_fields:
+                extractor = extractor_by_id.get(event_id)
+                if extractor is None:
+                    raise ValueError("verification rule names an unknown event")
+                member_anchors.add(extractor["anchor"])
+                if field is not None and field not in extractor["field_groups"]:
+                    raise ValueError("verification rule names an unknown event field")
+            if kind == "ROLE_COVERAGE" and any(
+                extractor_by_id[item["event"]]["anchor"] != item["role"]
+                for item in parameters["coverage"]
+            ):
+                raise ValueError("ROLE_COVERAGE role must match event anchor")
+            if kind == "CROSS_ROLE_CORRELATION" and len(member_anchors) < 2:
+                raise ValueError("CROSS_ROLE_CORRELATION must span multiple anchors")
 
 
 @dataclass(frozen=True)
@@ -499,6 +905,7 @@ def diagnosis_skill_manifest(spec: GenerationSpec) -> dict[str, Any]:
         "requires_logparse": spec.requires_logparse,
         "requirements": [item.to_mapping() for item in spec.requirements],
         "logparse_plan": spec.logparse_plan,
+        "verification_contract": spec.verification_contract,
     }
     if spec.logparse_product is not None:
         manifest["logparse_product"] = spec.logparse_product
@@ -513,7 +920,7 @@ def _render_skill_markdown(spec: GenerationSpec) -> str:
     manifest = diagnosis_skill_manifest(spec)
     embedded = canonical_json_bytes(manifest).decode("utf-8").strip()
     rows = "\n".join(
-        f"| `{item.name}` | {item.kind} | {item.stage} | {item.fulfillment_source} | {item.prompt.replace('|', '\\|')} | `{json.dumps(item.constraints, ensure_ascii=False, sort_keys=True, separators=(',', ':'))}` |"
+        f"| `{item.name}` | {item.kind} | {item.stage} | {item.fulfillment_source} | {item.supplement_policy} | {item.prompt.replace('|', '\\|')} | `{json.dumps(item.constraints, ensure_ascii=False, sort_keys=True, separators=(',', ':'))}` |"
         for item in spec.requirements
     ) or "| — | — | — | — | 本 Skill 不请求业务输入或附件 | `{}` |"
     roles = "\n".join(
@@ -594,11 +1001,11 @@ description: {json.dumps(spec.summary, ensure_ascii=False)}
 contract 只定义通用 Schema、安全、Evidence/Candidate 与原子输出；本文件独占业务
 requirements、阶段、工具映射和判定规则。
 
-<!-- DIAGNOSIS_SKILL_MANIFEST_V2_BEGIN -->
+<!-- DIAGNOSIS_SKILL_MANIFEST_V3_BEGIN -->
 ```json
 {embedded}
 ```
-<!-- DIAGNOSIS_SKILL_MANIFEST_V2_END -->
+<!-- DIAGNOSIS_SKILL_MANIFEST_V3_END -->
 
 ## 范围与角色
 
@@ -611,13 +1018,21 @@ requirements、阶段、工具映射和判定规则。
 所有声明均为必需项；空数组表示不添加任何默认参数。
 INPUT 只能由 `USER_FACT` 满足，ATTACHMENT 只能由 `READY_ATTACHMENT` 满足。
 
-| 名称 | 类型 | 阶段 | 满足来源 | 用户提示 | S00 constraints |
-| --- | --- | --- | --- | --- | --- |
+| 名称 | 类型 | 阶段 | 满足来源 | 补充策略 | 用户提示 | S00 constraints |
+| --- | --- | --- | --- | --- | --- | --- |
 {rows}
 
 {stage_workflow}
 
 {logparse_section}
+
+## 机器验证合同
+
+以下 `verification_contract` 是候选结论的机器门禁，不得用叙述、摘要或 Agent 自报结论替代。逐条提交同一 rule ID 的证据声明；事件必须由服务端在对应 anchor 的 UTF-8 原始日志中按整行正则重算。时间窗的毫秒范围和开闭边界均以合同明示值为准，不存在默认窗口。本合同不包含日志抑制、限流或采样语义。
+
+```json
+{json.dumps(spec.verification_contract, ensure_ascii=False, sort_keys=True, indent=2)}
+```
 
 ## 分析步骤
 
@@ -659,8 +1074,8 @@ Outcome 新接收的 Evidence 只按 `state_delta.add_evidence_bindings` 顺序�
    `user_result_proposal_key=user-result` 和实际 `target_log_count`。
 
 USER_RESULT 必须是有效 `UserResultPayload`，并与同一 Candidate seam 逐字一致；
-`problem-locator-finalize-outcome` 会在最终发布时递归 Canonical 化该文件并重算
-Outcome 中的 size/hash。先写有效 JSON 请求到
+`problem-locator-seal-outcome-draft` 会在封存 Agent draft 时递归 Canonical 化该文件并重算
+draft 中的 size/hash。先写有效 JSON 请求到
 `output/proposals/user-result-archive/request.json`，字段恰好为
 `schema_version=1`、`result_text=Candidate statement + 一个 LF` 和
 `target_log_paths[]`。日志路径仅列 Candidate
@@ -680,10 +1095,11 @@ Artifact 和 Candidate 必须共同接受，并等待独立 REVIEW PASS 后才�
 
 ## 原子交付
 
-最终先写 `output/job_outcome.json` draft，再把
-`problem-locator-finalize-outcome` 作为最后一个修改 Workspace 的命令；成功后不得继续
-写入 `output/`。Runtime 校验 S00 Schema、当前 Job/Case、上述 manifest 声明、proposal
-size/hash、结果 Artifact 配对和所有业务阶段规则。stdout/stderr 和部分文件不是业务结果。
+最终先写 `output/job_outcome.draft.json`，再把
+`problem-locator-seal-outcome-draft` 作为最后一个修改 Workspace 的命令；成功后不得继续
+写入 `output/`。sealer 只封存 Agent draft，不生成正式 Outcome、ID、时间或服务端验证结果。
+Agent 进程退出后，Runtime 重新读取原始证据并按 manifest 重算机械规则，再生成唯一权威的
+`output/job_outcome.json`。stdout/stderr、隐藏思维过程和部分文件不是业务结果。
 """
 
 
@@ -795,21 +1211,21 @@ def normalize_wiki(text: str) -> str:
 
 
 def build_spec_from_wiki(wiki_text: str, **overrides: Any) -> GenerationSpec:
-    """Read the single fenced GenerationSpec v2 object from a wiki document."""
+    """Read the single fenced GenerationSpec v3 object from a wiki document."""
 
     wiki = normalize_wiki(wiki_text)
     matches = re.findall(
-        r"(?ms)^## GenerationSpec v2\s*$.*?^```json\s*$\n(.*?)^```\s*$",
+        r"(?ms)^## GenerationSpec v3\s*$.*?^```json\s*$\n(.*?)^```\s*$",
         wiki,
     )
     if len(matches) != 1:
-        raise ValueError("wiki must contain exactly one '## GenerationSpec v2' JSON fence")
+        raise ValueError("wiki must contain exactly one '## GenerationSpec v3' JSON fence")
     try:
         value = json.loads(matches[0])
     except json.JSONDecodeError as exc:
-        raise ValueError("wiki GenerationSpec v2 JSON is invalid") from exc
+        raise ValueError("wiki GenerationSpec v3 JSON is invalid") from exc
     if not isinstance(value, dict):
-        raise ValueError("wiki GenerationSpec v2 must be an object")
+        raise ValueError("wiki GenerationSpec v3 must be an object")
     allowed_overrides = {"capability", "summary", "version"}
     unknown = set(overrides) - allowed_overrides
     if unknown:

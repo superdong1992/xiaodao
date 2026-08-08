@@ -102,6 +102,7 @@ def test_outcome_replay_distinguishes_duplicate_and_conflict() -> None:
         error_code=None,
         accepted_evidence_ids=[],
         accepted_artifact_ids=[],
+        generated_artifact_ids=[],
         created_job_id=None,
         reason="late finalized record",
     )
@@ -186,6 +187,7 @@ def test_processing_record_uses_finalized_hash_and_stable_business_time_split() 
         error_code=ErrorCode.OUTCOME_INVALID,
         accepted_evidence_ids=[],
         accepted_artifact_ids=[],
+        generated_artifact_ids=[],
         created_job_id=None,
         reason="invalid binding",
     )

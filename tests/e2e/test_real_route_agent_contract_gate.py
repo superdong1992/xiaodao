@@ -73,13 +73,15 @@ def test_real_route_agent_synthesizes_valid_outcome_from_production_contract(
     assert len(job.available_skill_refs) == 1
     skill_ref = job.available_skill_refs[0]
     manifest = WorkspaceInputManifest(
-        schema_version=1,
+        schema_version=2,
         job_id=job.job_id,
         case_id=job.case_id,
         job_type=job.job_type,
         logparse_tool_ref=None,
         logparse_product=None,
         entries=[],
+        resolved_logparse_plan=None,
+        review_subject=None,
     )
     skill_index = canonical_json_bytes(
         {
@@ -149,14 +151,16 @@ def test_real_route_agent_synthesizes_valid_outcome_from_production_contract(
 
     assert execution.returncode == 0
     validated = read_agent_output(workspace, job, manifest)
-    assert validated.canonical_bytes == (output / "job_outcome.json").read_bytes()
-    assert validated.outcome.result_type is OutcomeResultType.COMPLETED
-    assert isinstance(validated.outcome.payload, RouteDecision)
-    assert validated.outcome.payload.kind is RouteKind.MATCHED
-    assert validated.outcome.payload.skill_ref == skill_ref
-    assert validated.outcome.consumed_evidence_refs == []
-    assert validated.outcome.proposed_evidence_drafts == []
-    assert validated.outcome.proposed_artifact_drafts == []
+    assert validated.canonical_bytes == (
+        output / "job_outcome.draft.json"
+    ).read_bytes()
+    assert validated.draft.result_type is OutcomeResultType.COMPLETED
+    assert isinstance(validated.draft.payload, RouteDecision)
+    assert validated.draft.payload.kind is RouteKind.MATCHED
+    assert validated.draft.payload.skill_ref == skill_ref
+    assert validated.draft.consumed_evidence_refs == []
+    assert validated.draft.proposed_evidence_drafts == []
+    assert validated.draft.proposed_artifact_drafts == []
     assert (inputs / "manifest.json").read_bytes() == manifest_bytes
     assert (runtime / "context.txt").read_text(encoding="utf-8") == context.body
     assert sorted(path.name for path in workspace.iterdir()) == [

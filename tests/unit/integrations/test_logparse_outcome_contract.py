@@ -18,6 +18,7 @@ from problem_locator.contracts import (
     AttachmentRequirementConstraints,
     CandidateConclusionDraft,
     CompletionCriterionDraftMapping,
+    DecisionAuditV2,
     DiagnosisOutcome,
     DiagnosisStateDelta,
     EvidenceBinding,
@@ -96,6 +97,14 @@ def _job_and_manifest(
             if entry["input_kind"] != "ATTACHMENT"
         ]
 
+    if not include_logparse_run:
+        if include_attachment:
+            plan = manifest_payload["resolved_logparse_plan"]
+            plan["attachment_id"] = job_payload["attachment_refs"][0]
+            plan["artifact_id"] = None
+        else:
+            manifest_payload["resolved_logparse_plan"] = None
+
     job = Job.model_validate(job_payload)
     manifest = WorkspaceInputManifest.model_validate(manifest_payload)
     assert validate_workspace_manifest_for_job(manifest, job) is manifest
@@ -129,6 +138,9 @@ def _agent_outcome(
     evidence: list[AgentEvidenceProposalDraft] | None = None,
     artifacts: list[AgentArtifactProposalDraft] | None = None,
 ) -> AgentJobOutcome:
+    evidence_drafts = evidence or []
+    artifact_drafts = artifacts or []
+    audit = _decision_audit(job, evidence_drafts)
     return AgentJobOutcome(
         outcome_id=outcome_id,
         job_id=job.job_id,
@@ -138,10 +150,71 @@ def _agent_outcome(
         result_type=result_type,
         payload=payload,
         consumed_evidence_refs=[],
-        proposed_evidence_drafts=evidence or [],
-        proposed_artifact_drafts=artifacts or [],
+        proposed_evidence_drafts=evidence_drafts,
+        proposed_artifact_drafts=artifact_drafts,
         error=None,
         produced_at=PRODUCED_AT,
+        decision_audit=audit,
+    )
+
+
+def _decision_audit(
+    job: Job,
+    evidence: list[AgentEvidenceProposalDraft],
+) -> DecisionAuditV2:
+    """Represent the authoritative V2 audit boundary used by these fixtures."""
+
+    assert job.skill_ref is not None
+    bindings = [
+        EvidenceBinding(
+            existing_evidence_id=None,
+            evidence_proposal_key=item.proposal_key,
+        )
+        for item in evidence
+    ]
+    rule_id = "causal_chain"
+    return DecisionAuditV2.model_validate(
+        {
+            "schema_version": 2,
+            "job_id": job.job_id,
+            "case_id": job.case_id,
+            "job_type": job.job_type.value,
+            "skill_ref": job.skill_ref.model_dump(mode="json"),
+            "source_draft_sha256": "1" * 64,
+            "subject_hash": "2" * 64,
+            "candidate_target": None,
+            "diagnosis_audit_hash": None,
+            "required_rule_ids": [rule_id],
+            "required_evidence_bindings": [
+                item.model_dump(mode="json") for item in bindings
+            ],
+            "rules": [
+                {
+                    "rule_id": rule_id,
+                    "agent_claim": {
+                        "rule_id": rule_id,
+                        "claimed_result": "PASS",
+                        "fact_refs": [],
+                        "citations": [],
+                        "explanation": "The fixture explicitly assesses causality.",
+                    },
+                    "server_evaluation": {
+                        "rule_id": rule_id,
+                        "rule_kind": "SEMANTIC_CAUSALITY",
+                        "status": "SEMANTIC_ONLY",
+                        "fact_refs": [],
+                        "evidence_bindings": [
+                            item.model_dump(mode="json") for item in bindings
+                        ],
+                        "anchor_id": None,
+                        "derived_anchor_time": None,
+                        "observed_times": [],
+                        "line_ranges": [],
+                        "issues": [],
+                    },
+                }
+            ],
+        }
     )
 
 
@@ -407,6 +480,7 @@ def _normalized_first_outcome(
         ],
         error=None,
         produced_at=outcome.produced_at,
+        decision_audit=outcome.decision_audit,
     )
 
 
@@ -694,6 +768,7 @@ def test_candidate_and_unique_user_result_have_exact_canonical_bytes(
         ],
         error=None,
         produced_at=outcome.produced_at,
+        decision_audit=outcome.decision_audit,
     )
     assert validate_outcome_for_job(job, normalized, manifest) is normalized
     assert validate_user_result_for_outcome(job, normalized, result_bytes) == result

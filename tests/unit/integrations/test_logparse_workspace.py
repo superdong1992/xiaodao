@@ -17,6 +17,8 @@ from problem_locator.contracts import (
     LogparseParseParameters,
     LogparseRunMetadata,
     ResourceKind,
+    ResolvedLogparseAnchor,
+    ResolvedLogparsePlanInput,
     UserResultMetadata,
     VersionedRef,
     WorkspaceArtifactInput,
@@ -91,14 +93,44 @@ def _manifest(
     tool_ref: VersionedRef = TOOL_REF,
     product: str = "compact",
 ) -> WorkspaceInputManifest:
+    run_entry = next(
+        (
+            entry
+            for entry in entries
+            if isinstance(entry, WorkspaceArtifactInput)
+            and entry.artifact_kind is ArtifactKind.LOGPARSE_RUN
+        ),
+        None,
+    )
+    attachment_entry = next(
+        entry for entry in entries if isinstance(entry, WorkspaceAttachmentInput)
+    )
     return WorkspaceInputManifest(
-        schema_version=1,
+        schema_version=2,
         job_id=JOB_ID,
         case_id=CASE_ID,
         job_type=JobType.DIAGNOSE,
         logparse_tool_ref=tool_ref,
         logparse_product=product,
         entries=entries,
+        resolved_logparse_plan=ResolvedLogparsePlanInput(
+            schema_version=2,
+            attachment_id=(
+                attachment_entry.resource_id if run_entry is None else None
+            ),
+            artifact_id=(run_entry.resource_id if run_entry is not None else None),
+            problem_time="2026-07-31T00:00:03.000Z",
+            anchors=[
+                ResolvedLogparseAnchor(
+                    label="client",
+                    module="COMPACT",
+                    slot="1",
+                    process_name="checkout-client",
+                    pid="101",
+                )
+            ],
+        ),
+        review_subject=None,
     )
 
 
@@ -417,11 +449,19 @@ def test_bind_attachment_rejects_mutable_symlinked_or_drifted_materialization(
         path.chmod(0o644)
     elif fault == "symlink":
         external = _write_read_only(tmp_path / "external.bin", SOURCE_BYTES)
+        if os.name == "nt":
+            path.chmod(0o644)
         path.unlink()
         try:
             path.symlink_to(external)
-        except (NotImplementedError, OSError):
-            pytest.skip("symbolic links are unavailable on this platform")
+        except NotImplementedError as exc:
+            pytest.skip(f"symbolic link creation is unavailable: {exc}")
+        except OSError as exc:
+            if os.name == "nt" and getattr(exc, "winerror", None) == 1314:
+                pytest.skip(
+                    "symbolic link creation requires Windows developer mode"
+                )
+            raise
     elif fault == "drift":
         path.chmod(0o644)
         path.write_bytes(b"different bytes after the manifest was frozen\n")
@@ -570,6 +610,8 @@ def test_continuation_revalidates_complete_tree_size_and_hash(
             log_path.write_bytes(b"changed controlled output bytes\n")
             log_path.chmod(0o444)
         else:
+            if os.name == "nt":
+                log_path.chmod(0o644)
             log_path.unlink()
         log_path.parent.chmod(0o555)
     else:  # pragma: no cover - the parametrization is exhaustive

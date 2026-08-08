@@ -36,6 +36,7 @@ from problem_locator.journey_renderer import (
 
 from problem_locator.interfaces.error_mapping import cli_exit_for, validation_error
 
+from .replay import ReplayError, ReplayMode, ReplayRequest, ReplayResult
 from .settings import Settings, SettingsError
 
 
@@ -54,6 +55,7 @@ class CliHooks:
     app_factory: Callable[[Settings], Any]
     server_runner: Callable[[Any, str, int, int], None]
     atomic_writer: Callable[[Path, bytes], None] | None = None
+    replay_runner: Callable[[ReplayRequest, Settings], ReplayResult] | None = None
 
 
 _DEFAULT_HOOKS: CliHooks | None = None
@@ -111,6 +113,21 @@ def _parser() -> argparse.ArgumentParser:
     )
     render.add_argument("--case-id", required=True)
     render.add_argument("--log-dir", type=Path)
+
+    replay = subcommands.add_parser(
+        "replay-job",
+        help="replay one State V2 Job in a new isolated installation",
+    )
+    replay.add_argument("--source-data-root", type=Path, required=True)
+    replay.add_argument("--job-id", required=True)
+    replay.add_argument(
+        "--mode",
+        choices=[item.value for item in ReplayMode],
+        required=True,
+    )
+    replay.add_argument("--output-dir", type=Path, required=True)
+    replay.add_argument("--env-file", type=Path)
+    replay.add_argument("--skill-dir", type=Path)
     return parser
 
 
@@ -194,6 +211,64 @@ def _render_journey_command(
     return CLI_EXIT_SUCCESS
 
 
+def _replay_job_command(
+    arguments: argparse.Namespace,
+    hooks: CliHooks,
+    *,
+    output: BinaryIO,
+    errors: BinaryIO,
+) -> int:
+    if hooks.replay_runner is None:
+        _write_error(errors, _config_error("Replay composition is not configured."))
+        return CLI_EXIT_CONFIG_OR_STATE_CORRUPT
+    try:
+        job_id = TypeAdapter(OpaqueId).validate_python(arguments.job_id, strict=True)
+        source_data_root = Path(arguments.source_data_root)
+        output_dir = Path(arguments.output_dir)
+        if not source_data_root.is_absolute() or not output_dir.is_absolute():
+            raise ValueError("replay roots must be absolute")
+        environment = dict(os.environ)
+        # Explicit replay paths own these two settings; an env file need not
+        # repeat DATA_ROOT and --skill-dir is an intentional one-run override.
+        environment["DATA_ROOT"] = str(source_data_root)
+        if arguments.skill_dir is not None:
+            skill_dir = Path(arguments.skill_dir)
+            if not skill_dir.is_absolute():
+                raise ValueError("skill-dir must be absolute")
+            environment["SKILL_DIR"] = str(skill_dir)
+        settings = Settings.load(
+            env_file=arguments.env_file,
+            environ=environment,
+        )
+        request = ReplayRequest(
+            source_data_root=source_data_root,
+            job_id=job_id,
+            mode=ReplayMode(arguments.mode),
+            output_dir=output_dir,
+        )
+        result = hooks.replay_runner(request, settings)
+    except SettingsError:
+        _write_error(errors, _config_error("Replay configuration is invalid."))
+        return CLI_EXIT_CONFIG_OR_STATE_CORRUPT
+    except ReplayError as exc:
+        _write_error(errors, exc.error)
+        return cli_exit_for(exc.error)
+    except ApplicationPortError as exc:
+        _write_error(errors, exc.error)
+        return cli_exit_for(exc.error)
+    except (OSError, TypeError, ValueError, ValidationError):
+        _write_error(errors, _request_error("Replay request is invalid."))
+        return CLI_EXIT_REQUEST_OR_STATE_CONFLICT
+    except Exception:
+        error = _runtime_error("Replay failed unexpectedly.")
+        _write_error(errors, error)
+        return CLI_EXIT_RUNTIME_FAILURE
+
+    output.write(canonical_json_bytes(result))
+    output.flush()
+    return CLI_EXIT_SUCCESS if result.success else CLI_EXIT_RUNTIME_FAILURE
+
+
 def _atomic_write(output: Path, data: bytes) -> None:
     parent = output.parent
     descriptor, temporary_name = tempfile.mkstemp(
@@ -252,6 +327,14 @@ def main(
     if active_hooks is None:
         _write_error(errors, _config_error("CLI composition is not configured."))
         return CLI_EXIT_CONFIG_OR_STATE_CORRUPT
+
+    if arguments.command == "replay-job":
+        return _replay_job_command(
+            arguments,
+            active_hooks,
+            output=output,
+            errors=errors,
+        )
 
     if arguments.command == "serve":
         configure_diagnostics("INFO")

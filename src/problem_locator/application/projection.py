@@ -48,6 +48,12 @@ def is_artifact_downloadable(case: Case, artifact: Artifact) -> bool:
         return True
     if artifact.kind is ArtifactKind.LOGPARSE_RUN:
         return False
+    if artifact.kind is ArtifactKind.AUDIT_BUNDLE:
+        return (
+            case.status is CaseStatus.UNRESOLVED
+            and case.unresolved_result is not None
+            and case.unresolved_result.audit_artifact_id == artifact.artifact_id
+        )
     if artifact.kind not in {
         ArtifactKind.USER_RESULT,
         ArtifactKind.USER_RESULT_ARCHIVE,
@@ -130,6 +136,7 @@ def project_case_components(
         active_job=None if active_job is None else _job_summary(active_job),
         selected_skill_ref=case.selected_skill_ref,
         final_result=case.final_result,
+        unresolved_result=case.unresolved_result,
         failure=case.failure,
         artifacts=project_artifact_summaries(case, artifacts),
         created_at=case.created_at,

@@ -1,8 +1,8 @@
-"""Frozen Problem Locator V1 public contract package.
+"""Frozen Problem Locator V2 public contract package.
 
 All later implementation slices import public vocabulary from this package.
-The schema registry is the single source used to generate the nine frozen
-``schemas/v1/*.schema.json`` documents.
+The schema registry is the single source used to generate the ten frozen
+``schemas/v2/*.schema.json`` documents.
 """
 
 from __future__ import annotations
@@ -14,6 +14,7 @@ from . import commands, enums, errors, limits, models, outcomes, ports, serializ
 from .limits import CONTRACT_REVISION, GENERATOR_VERSION, SCHEMA_VERSION
 from .models import (
     AgentJobOutcome,
+    AgentJobOutcomeDraftV2,
     FixtureManifest,
     HandoffRecord,
     Job,
@@ -28,6 +29,7 @@ from .models import (
 SCHEMA_MODELS: Final[Mapping[str, Any]] = MappingProxyType(
     {
         "agent-job-outcome.schema.json": AgentJobOutcome,
+        "agent-job-outcome-draft.schema.json": AgentJobOutcomeDraftV2,
         "fixture-manifest.schema.json": FixtureManifest,
         "handoff.schema.json": HandoffRecord,
         "job-outcome.schema.json": JobOutcome,

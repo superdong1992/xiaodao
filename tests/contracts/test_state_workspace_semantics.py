@@ -65,6 +65,21 @@ def test_snapshot_candidate_can_only_cite_current_state_evidence() -> None:
         Job.model_validate(payload)
 
 
+def test_review_job_must_include_completion_mapping_only_evidence() -> None:
+    payload = _review_job_payload()
+    completion_only_ref = "00000000-0000-0000-0000-000000000041"
+    candidate = payload["context_snapshot"]["candidate_conclusion"]
+    candidate["completion_criteria_mapping"][0]["evidence_refs"] = [
+        completion_only_ref
+    ]
+    _rehash_candidate(candidate)
+    payload["review_target"]["candidate_content_hash"] = candidate["content_hash"]
+    payload["context_snapshot"]["evidence_refs"].append(completion_only_ref)
+
+    with pytest.raises(ValidationError, match="required candidate Evidence"):
+        Job.model_validate(payload)
+
+
 def test_resolved_case_final_result_is_the_complete_current_candidate() -> None:
     review_job = Job.model_validate(_review_job_payload())
     candidate = review_job.context_snapshot.candidate_conclusion

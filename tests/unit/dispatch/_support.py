@@ -122,6 +122,15 @@ def clone_outcome(
         staged = proposal.get("staged_resource_ref")
         if staged is not None:
             staged["owner_job_id"] = job.job_id
+    audit = payload.get("decision_audit")
+    if audit is not None:
+        assert job.skill_ref is not None
+        audit.update(
+            job_id=job.job_id,
+            case_id=job.case_id,
+            job_type=job.job_type.value,
+            skill_ref=job.skill_ref.model_dump(mode="json"),
+        )
     if payload["payload"] is not None and job.job_type.value == "REVIEW":
         target = job.review_target
         assert target is not None
@@ -132,6 +141,8 @@ def clone_outcome(
             reviewed_state_revision=job.base_state_revision,
             reviewed_evidence_refs=job.evidence_refs,
         )
+        assert audit is not None
+        audit["candidate_target"] = target.model_dump(mode="json")
     return JobOutcome.model_validate(payload)
 
 

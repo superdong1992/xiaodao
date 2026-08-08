@@ -70,7 +70,7 @@ def test_release_metadata_keeps_the_offline_database_boundary() -> None:
 
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     required_release_boundaries = (
-        "r3 state schema is intentionally incompatible",
+        "State V2 is a hard cut",
         "Replay every durable, finalized but unconfirmed Job Outcome",
         "`state.json` approaches 16 MiB",
         "retained history approaches 500 Cases",

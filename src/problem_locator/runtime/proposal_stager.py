@@ -339,6 +339,7 @@ def stage_validated_output(
             proposed_artifacts=proposed_artifacts,
             error=agent.error,
             produced_at=agent.produced_at,
+            decision_audit=agent.decision_audit,
         )
         validate_outcome_for_job(job, outcome, workspace_manifest)
         validate_logparse_claim_for_job(

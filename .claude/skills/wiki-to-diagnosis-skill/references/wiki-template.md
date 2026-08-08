@@ -1,16 +1,16 @@
 # Diagnosis Wiki 模板
 
 普通 Wiki 章节可自由组织；机器生成只读取且要求恰好一个
-`## GenerationSpec v2` JSON fence。下列是无日志人工排查的最小完整示例。
+`## GenerationSpec v3` JSON fence。下列是无日志人工排查的最小完整示例。
 
-## GenerationSpec v2
+## GenerationSpec v3
 
 ```json
 {
-  "schema_version": 2,
-  "generator_version": "3.0.6",
+  "schema_version": 3,
+  "generator_version": "3.1.1",
   "id": "diagnose-manual-triage",
-  "version": "3.0.6",
+  "version": "3.1.1",
   "capability": "manual-triage",
   "summary": "根据用户提供的现象和复现步骤执行人工定位",
   "chinese_title": "人工故障定位",
@@ -30,10 +30,28 @@
         "max_utf8_bytes": 256,
         "pattern": null,
         "allowed_values": []
-      }
+      },
+      "supplement_policy": "MISSING_ONLY"
     }
   ],
   "logparse_plan": null,
+  "verification_contract": {
+    "schema_version": 1,
+    "event_extractors": [],
+    "rules": [
+      {
+        "id": "manual_causal_assessment",
+        "kind": "SEMANTIC_CAUSALITY",
+        "description": "Specialist 和 Reviewer 必须独立判断证据是否支持根因。",
+        "depends_on": [],
+        "remediation_requirements": [],
+        "parameters": {
+          "assertion": "现有事实和 Evidence 足以支持候选根因。",
+          "evidence_events": []
+        }
+      }
+    ]
+  },
   "time_characteristics": [],
   "analysis_steps": ["复核现象与范围。"],
   "judgement_rules": ["证据不足时明确保留缺口。"],

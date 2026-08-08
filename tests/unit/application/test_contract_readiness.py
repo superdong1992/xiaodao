@@ -81,7 +81,7 @@ def test_fixture_records_every_s03_contract_gap_as_resolved_by_r3() -> None:
 
     assert fixture["schema_version"] == 1
     assert fixture["owner_spec"] == "S03"
-    assert fixture["contract_revision"] == CONTRACT_REVISION == "v1-contract-r4"
+    assert fixture["contract_revision"] == CONTRACT_REVISION == "v2-contract-r1"
     expected_resolutions = {
         "application_port_error": "v1-contract-r2",
         "coordinator_plan_result": "v1-contract-r2",

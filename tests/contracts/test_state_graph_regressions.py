@@ -264,7 +264,7 @@ def _state_export_payload() -> dict:
         for attachment in attachments
     ]
     return {
-        "export_schema_version": 1,
+        "export_schema_version": 2,
         "schema_version": SCHEMA_VERSION,
         "contract_revision": CONTRACT_REVISION,
         "source_generation": state_payload["generation"],

@@ -158,6 +158,7 @@ def test_logparse_session_has_one_typed_parse_request_accessor() -> None:
     }
     assert public_methods == {
         "agent_environment",
+        "audit_bytes",
         "close",
         "parse_request_bytes",
     }

@@ -17,8 +17,23 @@ SKILL_DIRS = (
 LOGPARSE_ROOT = SRC_ROOT / "integrations" / "logparse"
 
 # Archive APIs remain forbidden for uploaded-input handling. These are the
-# exact user-result builder/validator seams; neither extracts an input archive.
+# exact user-result and server-owned audit-bundle seams; none extracts an input
+# archive.
 CONTROLLED_ARCHIVE_ALLOWLIST = {
+    (
+        "src/problem_locator/application/audit_bundle.py",
+        "<module>",
+    ): frozenset({"import:zipfile"}),
+    (
+        "src/problem_locator/application/audit_bundle.py",
+        "_zip_bytes",
+    ): frozenset(
+        {
+            "call:zipfile.ZipFile",
+            "call:zipfile.ZipInfo",
+            "call:archive.writestr",
+        }
+    ),
     (
         "src/problem_locator/integrations/result_archive.py",
         "<module>",

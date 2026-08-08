@@ -24,18 +24,18 @@ EXPECTED_CHECKOUT_EVIDENCE = {
 EXPECTED_SOURCE_CHANGES = {
     "SKILL.md": (
         "modified_for_s07_v3_contract",
-        "Upgrade the generator workflow to GenerationSpec v2, Diagnosis Skill v3, "
-        "generic requirements, and the r4 result-archive contract.",
+        "Upgrade the generator workflow to GenerationSpec v3, manifest schema v3, "
+        "and declarative verification contracts.",
     ),
     "references/generated-skill-contract.md": (
         "modified_for_s07_v3_contract",
-        "Replace the RPC-shaped v2 rules with manifest schema v2 requirements, "
-        "generic Logparse bindings, and controlled USER_RESULT_ARCHIVE output.",
+        "Document manifest schema v3 requirements, generic Logparse bindings, "
+        "and declarative verification rules.",
     ),
     "references/wiki-template.md": (
         "modified_for_s07_v3_contract",
         "Replace the RPC fixture template with an embedded deterministic "
-        "GenerationSpec v2 example.",
+        "GenerationSpec v3 example.",
     ),
     "scripts/pack_result_zip.py": (
         "removed_for_v3_runtime_control",
@@ -44,8 +44,8 @@ EXPECTED_SOURCE_CHANGES = {
     ),
     "scripts/validate_generated_skill.py": (
         "modified_for_s07_v3_contract",
-        "Validate manifest schema v2, embedded machine-source consistency, "
-        "and deterministic result archives.",
+        "Validate manifest schema v3, verification contracts, embedded "
+        "machine-source consistency, and deterministic result archives.",
     ),
 }
 EXPECTED_ADDED_FILE = {
@@ -56,7 +56,7 @@ EXPECTED_ADDED_FILE = {
     ),
     "purpose": (
         "Deterministically build, hash, validate, and atomically publish Diagnosis "
-        "Skill v3 products from GenerationSpec v2."
+        "Skill products from GenerationSpec v3."
     ),
 }
 EXPECTED_EXCLUDED_PATTERNS = (

@@ -71,6 +71,24 @@ _OPAQUE_ID_ADAPTER = TypeAdapter(OpaqueId)
 _TEMP_TOKEN_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 _MODEL = TypeVar("_MODEL", Job, JobOutcome)
 _BINARY_FLAG = getattr(os, "O_BINARY", 0)
+_AUDIT_FILENAMES = frozenset(
+    {
+        "context.txt",
+        "agent_job_outcome.draft.json",
+        "agent_job_outcome.json",
+        "decision_audit.json",
+        "decision_evidence.jsonl",
+        "broker_audit.json",
+        "review_subject.json",
+        "finalization_manifest.json",
+    }
+)
+_AUDIT_READ_FILENAMES = _AUDIT_FILENAMES | {
+    "job.json",
+    "job_outcome.json",
+    "stdout.log",
+    "stderr.log",
+}
 
 
 class _RecordConflict(Exception):
@@ -464,6 +482,72 @@ class FileExecutionRecordStore:
             raise _port_error(
                 ErrorCode.EXECUTION_RECORD_FAILED,
                 "The rejected Agent output could not be archived.",
+            ) from None
+
+    def publish_audit_bytes(
+        self,
+        job_id: OpaqueId,
+        filename: str,
+        raw_bytes: bytes,
+    ) -> ExecutionFileRef:
+        """Publish one fixed-name, immutable observable execution record.
+
+        These files contain prompts, tool/broker observations, and structured
+        claims.  They are deliberately named and bounded by their producer;
+        this is not a generic filesystem write surface.
+        """
+
+        try:
+            validated_job_id = _validated_job_id(job_id)
+            if filename not in _AUDIT_FILENAMES:
+                raise ValueError("unsupported execution audit filename")
+            if type(raw_bytes) is not bytes:
+                raise TypeError("raw_bytes must be exact bytes")
+            with self._coordination_lock:
+                job_directory = self._ensure_job_directory(validated_job_id)
+                stored_bytes = self._publish_raw_record(
+                    job_directory / filename,
+                    raw_bytes,
+                )
+                return self._file_ref(validated_job_id, filename, stored_bytes)
+        except ApplicationPortError:
+            raise
+        except _RecordConflict:
+            raise _port_error(
+                ErrorCode.IDEMPOTENCY_CONFLICT,
+                "The execution audit record conflicts with existing bytes.",
+            ) from None
+        except Exception:
+            raise _port_error(
+                ErrorCode.EXECUTION_RECORD_FAILED,
+                "The execution audit record could not be published.",
+            ) from None
+
+    def read_audit_bytes(
+        self,
+        job_id: OpaqueId,
+        filename: str,
+    ) -> bytes | None:
+        """Read one immutable observable execution record by fixed name."""
+
+        try:
+            validated_job_id = _validated_job_id(job_id)
+            if filename not in _AUDIT_READ_FILENAMES:
+                raise ValueError("unsupported execution audit filename")
+            with self._coordination_lock:
+                job_directory = self._find_job_directory(validated_job_id)
+                if job_directory is None:
+                    return None
+                path = job_directory / filename
+                if _regular_path_if_present(path) is None:
+                    return None
+                return _read_regular_bytes(path)
+        except ApplicationPortError:
+            raise
+        except Exception:
+            raise _port_error(
+                ErrorCode.EXECUTION_RECORD_FAILED,
+                "The execution audit record could not be read.",
             ) from None
 
     def _publish_rejected_agent_output_bytes(

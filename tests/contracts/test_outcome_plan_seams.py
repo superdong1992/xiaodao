@@ -33,6 +33,7 @@ from problem_locator.contracts.models import (
     TreeManifestEntry,
     VersionedRef,
     WorkspaceInputManifest,
+    review_required_evidence_refs,
 )
 from problem_locator.contracts.outcomes import (
     validate_outcome_for_job,
@@ -146,9 +147,90 @@ def test_review_assessment_echoes_target_and_only_reviews_fixed_evidence() -> No
 
     payload = outcome.model_dump(mode="python")
     payload["payload"]["candidate_revision"] += 1
+    payload["decision_audit"]["candidate_target"]["candidate_revision"] += 1
     drifted = JobOutcome.model_validate(payload)
     with pytest.raises(ValueError, match="review_target"):
         validate_outcome_for_job(job, drifted)
+
+
+def _review_job_with_completion_mapping_only_evidence() -> Job:
+    job = _model("job-review.json", Job)
+    payload = job.model_dump(mode="json")
+    completion_only_ref = "00000000-0000-0000-0000-000000000041"
+    candidate = payload["context_snapshot"]["candidate_conclusion"]
+    assert candidate is not None
+    candidate["completion_criteria_mapping"][0]["evidence_refs"] = [
+        completion_only_ref
+    ]
+    candidate["content_hash"] = canonical_json_sha256(
+        {
+            "statement": candidate["statement"],
+            "supporting_evidence_refs": candidate["supporting_evidence_refs"],
+            "completion_criteria_mapping": candidate["completion_criteria_mapping"],
+        }
+    )
+    payload["context_snapshot"]["evidence_refs"].append(completion_only_ref)
+    payload["evidence_refs"].append(completion_only_ref)
+    payload["review_target"]["candidate_content_hash"] = candidate["content_hash"]
+    return Job.model_validate(payload)
+
+
+def test_review_pass_covers_supporting_and_completion_mapping_evidence() -> None:
+    job = _review_job_with_completion_mapping_only_evidence()
+    outcome = _model("job-outcome-review.json", JobOutcome)
+    payload = outcome.model_dump(mode="json")
+    payload["payload"]["candidate_content_hash"] = (
+        job.review_target.candidate_content_hash
+    )
+    payload["decision_audit"]["candidate_target"]["candidate_content_hash"] = (
+        job.review_target.candidate_content_hash
+    )
+    payload["decision_audit"]["required_evidence_bindings"] = [
+        {"existing_evidence_id": ref, "evidence_proposal_key": None}
+        for ref in review_required_evidence_refs(
+            job.context_snapshot.candidate_conclusion
+        )
+    ]
+
+    missing_mapping = JobOutcome.model_validate(payload)
+    with pytest.raises(ValueError, match="every required candidate Evidence"):
+        validate_outcome_for_job(job, missing_mapping)
+
+    required_refs = list(job.evidence_refs)
+    payload["consumed_evidence_refs"] = required_refs
+    payload["payload"]["reviewed_evidence_refs"] = required_refs
+    complete = JobOutcome.model_validate(payload)
+    assert validate_outcome_for_job(job, complete) is complete
+
+
+def test_reviewed_evidence_must_equal_consumed_evidence_in_job_order() -> None:
+    job = _review_job_with_completion_mapping_only_evidence()
+    outcome = _model("job-outcome-review.json", JobOutcome)
+    payload = outcome.model_dump(mode="json")
+    payload["payload"]["candidate_content_hash"] = (
+        job.review_target.candidate_content_hash
+    )
+    payload["decision_audit"]["candidate_target"]["candidate_content_hash"] = (
+        job.review_target.candidate_content_hash
+    )
+    payload["decision_audit"]["required_evidence_bindings"] = [
+        {"existing_evidence_id": ref, "evidence_proposal_key": None}
+        for ref in review_required_evidence_refs(
+            job.context_snapshot.candidate_conclusion
+        )
+    ]
+    payload["payload"]["reviewed_evidence_refs"] = list(job.evidence_refs)
+
+    mismatched = JobOutcome.model_validate(payload)
+    with pytest.raises(ValueError, match="exactly equal consumed_evidence_refs"):
+        validate_outcome_for_job(job, mismatched)
+
+    reversed_refs = list(reversed(job.evidence_refs))
+    payload["consumed_evidence_refs"] = reversed_refs
+    payload["payload"]["reviewed_evidence_refs"] = reversed_refs
+    reordered = JobOutcome.model_validate(payload)
+    with pytest.raises(ValueError, match="fixed Job order"):
+        validate_outcome_for_job(job, reordered)
 
 
 def test_candidate_plan_must_accept_the_unique_user_result() -> None:

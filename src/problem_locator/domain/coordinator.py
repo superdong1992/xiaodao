@@ -58,15 +58,20 @@ from problem_locator.contracts import (
     ReviewOutcomeTriggerPayload,
     ReviewTargetBinding,
     ReviewVerdict,
+    RuleClaimResult,
     RouteDecision,
     RouteKind,
     RouteOutcomeTriggerPayload,
     RuntimeBindings,
+    ServerRuleStatus,
     SelectedSkillUpdate,
     StaleActiveOutcomeTriggerPayload,
     SubmitSupplementTriggerPayload,
+    SupplementPolicy,
     TransitionPlan,
     TriggerType,
+    UnresolvedReasonCode,
+    UnresolvedResultDraft,
     ValidatedTrigger,
     VersionedRef,
     apply_problem_spec_patch,
@@ -288,6 +293,53 @@ def _job_update(
 
 def _candidate_target(job: Job) -> CandidateTarget | None:
     return job.review_target
+
+
+def _blocking_rule_ids(outcome: JobOutcome) -> list[str]:
+    audit = outcome.decision_audit
+    if audit is None:
+        return []
+    blocked = [
+        item.rule_id
+        for item in audit.rules
+        if item.server_evaluation.status
+        in {ServerRuleStatus.VERIFIED_FAIL, ServerRuleStatus.UNVERIFIABLE}
+        or (
+            item.agent_claim is not None
+            and item.agent_claim.claimed_result
+            in {RuleClaimResult.FAIL, RuleClaimResult.UNKNOWN}
+        )
+    ]
+    if blocked:
+        return _dedupe(blocked)
+    # An INCONCLUSIVE semantic-only rule is still a named blocker even though
+    # the service intentionally does not pretend to machine-prove causality.
+    semantic = [
+        item.rule_id
+        for item in audit.rules
+        if item.server_evaluation.status is ServerRuleStatus.SEMANTIC_ONLY
+    ]
+    return semantic or list(audit.required_rule_ids)
+
+
+def _audit_evidence_bindings(outcome: JobOutcome) -> list[EvidenceBinding]:
+    audit = outcome.decision_audit
+    if audit is None:
+        return []
+    bindings = list(audit.required_evidence_bindings)
+    for item in audit.rules:
+        bindings.extend(item.server_evaluation.evidence_bindings)
+    return _dedupe_evidence_bindings(bindings)
+
+
+def _inconclusive_reason(outcome: JobOutcome) -> UnresolvedReasonCode:
+    audit = outcome.decision_audit
+    if audit is not None and any(
+        item.server_evaluation.status is ServerRuleStatus.VERIFIED_FAIL
+        for item in audit.rules
+    ):
+        return UnresolvedReasonCode.MECHANICAL_VERIFICATION_FAILED
+    return UnresolvedReasonCode.INSUFFICIENT_EVIDENCE
 
 
 class DomainCoordinator:
@@ -550,6 +602,8 @@ class DomainCoordinator:
             return _validation("REROUTE cannot carry a Candidate.")
 
         candidate_bindings = self._candidate_bindings(candidate)
+        if outcome.result_type is OutcomeResultType.INCONCLUSIVE:
+            candidate_bindings = _audit_evidence_bindings(outcome)
         normalized = self._normalize_delta(
             snapshot.case.diagnosis_state,
             active,
@@ -564,6 +618,41 @@ class DomainCoordinator:
         target_revision = snapshot.case.diagnosis_state.revision + int(
             semantic_change or candidate is not None
         )
+        if outcome.result_type is OutcomeResultType.INCONCLUSIVE:
+            return TransitionPlan(
+                accepted_state_delta=accepted_delta,
+                target_case_status=CaseStatus.UNRESOLVED,
+                job_updates=[
+                    _job_update(active, JobStatus.SUCCEEDED, trigger.occurred_at)
+                ],
+                outcome_disposition=OutcomeDisposition.APPLIED,
+                accepted_evidence_proposal_keys=evidence_keys,
+                accepted_artifact_proposal_keys=dependency_artifact_keys,
+                accepted_candidate_proposal_key=None,
+                selected_skill_update=None,
+                case_failure_update=None,
+                candidate_mutation=None,
+                next_job_spec=None,
+                final_result_target=None,
+                unresolved_result_draft=UnresolvedResultDraft(
+                    source_job_id=active.job_id,
+                    source_outcome_id=outcome.outcome_id,
+                    reason_code=_inconclusive_reason(outcome),
+                    summary=(
+                        "The available facts and logs do not establish a "
+                        "complete, verifiable diagnosis."
+                    ),
+                    blocking_rule_ids=_blocking_rule_ids(outcome),
+                    evidence_bindings=_audit_evidence_bindings(outcome),
+                    recommended_next_step=diagnosis.recommended_next_step,
+                    occurred_at=trigger.occurred_at,
+                ),
+                clear_active_job=True,
+                reason=(
+                    "Close the Case without a final result because the "
+                    "server verification gate did not establish a diagnosis."
+                ),
+            )
         if outcome.result_type is OutcomeResultType.NEED_INPUT:
             request_error = self._validate_requested_requirements(
                 snapshot.case.diagnosis_state,
@@ -794,6 +883,20 @@ class DomainCoordinator:
         ):
             return _validation("The current REVIEWING Candidate does not match the Job target.")
         update = _job_update(active, JobStatus.SUCCEEDED, trigger.occurred_at)
+        if outcome.result_type is OutcomeResultType.INCONCLUSIVE:
+            return self._review_unresolved_plan(
+                active,
+                outcome,
+                assessment,
+                target,
+                update,
+                trigger,
+                reason_code=_inconclusive_reason(outcome),
+                summary=(
+                    "The available evidence did not pass the server verification "
+                    "gate for this reviewed candidate."
+                ),
+            )
         if assessment.verdict is ReviewVerdict.PASS:
             mutation = CandidateMutation(
                 action=CandidateMutationAction.SET_STATUS,
@@ -821,27 +924,92 @@ class DomainCoordinator:
                 clear_active_job=True,
                 reason="Accept the fixed Candidate after an independent PASS review.",
             )
+        if assessment.verdict is ReviewVerdict.NEED_MORE_EVIDENCE:
+            requested = assessment.requested_requirement_ids
+            requirements = snapshot.case.diagnosis_state.pending_requirements
+            by_id = {item.requirement_id: item for item in requirements}
+            requirement = by_id.get(requested[0]) if len(requested) == 1 else None
+            if (
+                requirement is not None
+                and requirement.status is RequirementStatus.OPEN
+                and requirement.supplement_policy is SupplementPolicy.MISSING_ONLY
+            ):
+                target_status = (
+                    CaseStatus.WAITING_INPUT
+                    if requirement.kind is RequirementKind.INPUT
+                    else CaseStatus.WAITING_ATTACHMENT
+                )
+                return TransitionPlan(
+                    accepted_state_delta=_empty_delta(),
+                    target_case_status=target_status,
+                    job_updates=[update],
+                    outcome_disposition=OutcomeDisposition.APPLIED,
+                    accepted_evidence_proposal_keys=[],
+                    accepted_artifact_proposal_keys=[],
+                    accepted_candidate_proposal_key=None,
+                    selected_skill_update=None,
+                    case_failure_update=None,
+                    candidate_mutation=CandidateMutation(
+                        action=CandidateMutationAction.SET_STATUS,
+                        candidate_binding=ReviewTargetBinding(
+                            existing_candidate_target=target,
+                            accepted_candidate_proposal_key=None,
+                        ),
+                        expected_status=CandidateStatus.REVIEWING,
+                        target_status=CandidateStatus.REJECTED,
+                        reason=assessment.recommendation,
+                    ),
+                    next_job_spec=None,
+                    final_result_target=None,
+                    clear_active_job=True,
+                    reason=(
+                        "Reject the Candidate and wait only for the explicitly "
+                        "declared missing supplement."
+                    ),
+                )
+            return self._review_unresolved_plan(
+                active,
+                outcome,
+                assessment,
+                target,
+                update,
+                trigger,
+                reason_code=UnresolvedReasonCode.INVALID_NEED_MORE_REQUEST,
+                summary=(
+                    "The review requested more information without a single "
+                    "eligible Skill-declared missing requirement."
+                ),
+            )
 
-        next_job = self._job_spec(
+        return self._review_unresolved_plan(
+            active,
+            outcome,
+            assessment,
+            target,
+            update,
             trigger,
-            JobType.DIAGNOSE,
-            target_state_revision=snapshot.case.diagnosis_state.revision + 1,
-            goal=assessment.recommendation,
-            evidence_bindings=_existing_bindings(
-                trigger.continuation_resources.evidence_refs
+            reason_code=UnresolvedReasonCode.SEMANTIC_REVIEW_REJECTED,
+            summary=(
+                "Independent review did not confirm the proposed diagnosis "
+                "under the current facts and evidence."
             ),
-            attachment_refs=trigger.continuation_resources.attachment_refs,
-            previous_outcome_refs=[outcome.outcome_id],
-            artifact_bindings=_existing_bindings(
-                trigger.continuation_resources.artifact_refs
-            ),
-            selected_skill_ref=snapshot.case.selected_skill_ref,
         )
-        if isinstance(next_job, ApplicationError):
-            return next_job
+
+    def _review_unresolved_plan(
+        self,
+        active: Job,
+        outcome: JobOutcome,
+        assessment: ReviewAssessment,
+        target: CandidateTarget,
+        update: JobLifecycleUpdate,
+        trigger: ValidatedTrigger,
+        *,
+        reason_code: UnresolvedReasonCode,
+        summary: str,
+    ) -> TransitionPlan:
         return TransitionPlan(
             accepted_state_delta=_empty_delta(),
-            target_case_status=CaseStatus.RUNNING,
+            target_case_status=CaseStatus.UNRESOLVED,
             job_updates=[update],
             outcome_disposition=OutcomeDisposition.APPLIED,
             accepted_evidence_proposal_keys=[],
@@ -859,10 +1027,23 @@ class DomainCoordinator:
                 target_status=CandidateStatus.REJECTED,
                 reason=assessment.recommendation,
             ),
-            next_job_spec=next_job,
+            next_job_spec=None,
             final_result_target=None,
+            unresolved_result_draft=UnresolvedResultDraft(
+                source_job_id=active.job_id,
+                source_outcome_id=outcome.outcome_id,
+                reason_code=reason_code,
+                summary=summary,
+                blocking_rule_ids=_blocking_rule_ids(outcome),
+                evidence_bindings=_audit_evidence_bindings(outcome),
+                recommended_next_step=assessment.recommendation,
+                occurred_at=trigger.occurred_at,
+            ),
             clear_active_job=True,
-            reason="Reject the reviewed Candidate and return the recommendation to diagnosis.",
+            reason=(
+                "Reject the reviewed Candidate and close the Case without "
+                "automatically starting another diagnosis."
+            ),
         )
 
     def _submit_supplement(
@@ -904,6 +1085,30 @@ class DomainCoordinator:
                 + state.open_questions
             )
         }
+        fixed_input_names = {
+            item.provenance.input_name for item in state.user_facts
+        }
+        for fact in payload.user_facts:
+            name = fact.provenance.input_name
+            if name in fixed_input_names:
+                return _error(
+                    ErrorCode.NEW_CASE_REQUIRED,
+                    "A user fact already fixed in this Case cannot be corrected.",
+                    [
+                        _detail(
+                            field="user_facts.provenance.input_name",
+                            expected="a previously missing input name",
+                            actual=name,
+                        )
+                    ],
+                )
+        if any(
+            requirement.supplement_policy is not SupplementPolicy.MISSING_ONLY
+            for requirement in open_requirements.values()
+        ):
+            return _validation(
+                "A waiting Case may accept only Skill-declared MISSING_ONLY requirements."
+            )
         fulfillments: list[RequirementFulfillment] = []
         accepted_facts: list[DiagnosisItem] = []
         fulfilled_ids: set[str] = set()
@@ -1092,7 +1297,12 @@ class DomainCoordinator:
         case = snapshot.case
         if case.status is CaseStatus.CANCELLED:
             return _invalid_state(case.status, trigger.trigger_type)
-        if case.status in {CaseStatus.NEW, CaseStatus.RESOLVED, CaseStatus.FAILED}:
+        if case.status in {
+            CaseStatus.NEW,
+            CaseStatus.RESOLVED,
+            CaseStatus.UNRESOLVED,
+            CaseStatus.FAILED,
+        }:
             return _invalid_state(case.status, trigger.trigger_type)
         payload = trigger.payload
         assert isinstance(payload, CancelCaseTriggerPayload)
@@ -1837,10 +2047,21 @@ class DomainCoordinator:
             for item in state.pending_requirements
             if item.status is RequirementStatus.OPEN
         }
+        fixed_input_names = {
+            item.provenance.input_name for item in state.user_facts
+        }
         if any(item.requirement_id in existing_ids for item in requirements):
             return _validation("New requirement IDs must not already exist.")
         if any(item.name in open_names for item in requirements):
             return _validation("New requirement names must not duplicate OPEN requirements.")
+        if any(
+            item.kind is RequirementKind.INPUT and item.name in fixed_input_names
+            for item in requirements
+        ):
+            return _error(
+                ErrorCode.NEW_CASE_REQUIRED,
+                "An existing Case input cannot be requested again or corrected.",
+            )
         if any(
             item.requested_by_job_id != active.job_id
             or item.status is not RequirementStatus.OPEN
@@ -1902,6 +2123,13 @@ class DomainCoordinator:
             for requirement in target_requirements.values()
             if requirement.status is RequirementStatus.OPEN
         ]
+        if any(
+            requirement.supplement_policy is not SupplementPolicy.MISSING_ONLY
+            for requirement in open_requirements
+        ):
+            return _validation(
+                "Waiting transitions require Skill-declared MISSING_ONLY requirements."
+            )
         if any(
             requirement.requested_by_job_id != active.job_id
             for requirement in open_requirements

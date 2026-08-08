@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "problem-locator"
 version = "1.0.7"
-description = "Problem Locator V1"
+description = "Problem Locator V2"
 requires-python = ">=3.12,<3.13"
 dependencies = [
   "pydantic==2.13.4",
@@ -18,7 +18,7 @@ dependencies = [
 [project.scripts]
 problem-locator-logparse = "problem_locator.integrations.logparse.cli:main"
 problem-locator-pack-result = "problem_locator.integrations.result_archive:main"
-problem-locator-finalize-outcome = "problem_locator.runtime.outcome_finalizer:main"
+problem-locator-seal-outcome-draft = "problem_locator.runtime.outcome_finalizer:main"
 
 [dependency-groups]
 dev = [

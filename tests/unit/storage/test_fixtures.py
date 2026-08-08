@@ -24,9 +24,9 @@ from problem_locator.contracts import (
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 FIXTURE_ROOT = REPOSITORY_ROOT / "tests" / "fixtures" / "components" / "storage"
 MANIFEST_PATH = FIXTURE_ROOT / "fixture-manifest.json"
-STATE_SCHEMA_PATH = REPOSITORY_ROOT / "schemas" / "v1" / "state.schema.json"
+STATE_SCHEMA_PATH = REPOSITORY_ROOT / "schemas" / "v2" / "state.schema.json"
 FIXTURE_MANIFEST_SCHEMA_PATH = (
-    REPOSITORY_ROOT / "schemas" / "v1" / "fixture-manifest.schema.json"
+    REPOSITORY_ROOT / "schemas" / "v2" / "fixture-manifest.schema.json"
 )
 ATTACHMENT_ID = "00000000-0000-0000-0000-000000000050"
 
@@ -83,12 +83,12 @@ def test_all_complete_storage_json_fixtures_use_canonical_bytes() -> None:
         assert canonical_json_bytes(json.loads(raw.decode("utf-8"))) == raw
 
 
-def test_valid_empty_r3_state_fixture_is_accepted() -> None:
-    payload = parse_canonical_json_bytes(_fixture_bytes("state/valid-empty-r4.json"))
+def test_valid_empty_v2_state_fixture_is_accepted() -> None:
+    payload = parse_canonical_json_bytes(_fixture_bytes("state/valid-empty-v2.json"))
     _schema_validator(STATE_SCHEMA_PATH).validate(payload)
     state = StateFile.model_validate(payload)
-    assert state.schema_version == 1
-    assert state.contract_revision == "v1-contract-r4"
+    assert state.schema_version == 2
+    assert state.contract_revision == "v2-contract-r1"
     assert state.generation == 1
     assert state.runtime_epochs == []
     assert state.recovery_processing_records == {}

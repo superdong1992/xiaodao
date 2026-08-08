@@ -7,7 +7,7 @@ description: Use inside a Problem Locator DIAGNOSE Job when a selected diagnosis
 
 Act only as the broker-facing helper for the selected `diagnose-*` Skill. Do not
 route, diagnose the business cause, create a Candidate, or write
-`output/job_outcome.json`. Return the broker's machine result to the calling Skill.
+`output/job_outcome.draft.json`. Return the broker's machine result to the calling Skill.
 
 ## Authority and inputs
 

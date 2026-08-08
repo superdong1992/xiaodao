@@ -32,6 +32,7 @@ from problem_locator.contracts.models import (
     AgentArtifactProposalDraft,
     AgentEvidenceProposalDraft,
     AgentJobOutcome,
+    AgentJobOutcomeDraftV2,
     ExecutionFailure,
     Job,
     LogparseEvidenceLocator,
@@ -42,11 +43,6 @@ from problem_locator.contracts.models import (
     WorkspaceArtifactInput,
     WorkspaceEvidenceInput,
     WorkspaceInputManifest,
-)
-from problem_locator.contracts.outcomes import (
-    UserResultValidationError,
-    validate_outcome_for_job,
-    validate_user_result_for_outcome,
 )
 from problem_locator.contracts.serialization import (
     InvalidJsonBytesError,
@@ -62,8 +58,8 @@ from problem_locator.integrations.result_archive import validate_result_archive_
 
 from .failures import RuntimeExecutionError, runtime_failure
 from .outcome_finalizer import (
-    FINALIZATION_MARKER_NAME,
-    FinalizedAgentOutcomeMarker,
+    DRAFT_FINALIZATION_MARKER_NAME,
+    SealedAgentOutcomeDraftMarker,
 )
 from .workspace import PreparedWorkspace
 
@@ -185,18 +181,27 @@ def _validate_finalization_marker(
             "outcome_finalizer_marker_invalid",
             diagnostic_reason=str(exc),
         ) from None
-    allowed = {FINALIZATION_MARKER_NAME, "logparse-parse.claim"}
+    allowed = {DRAFT_FINALIZATION_MARKER_NAME}
+    # A parse claim is meaningful only when this exact Workspace was given a
+    # server-resolved Logparse plan.  In particular, an initial DIAGNOSE that
+    # is still missing problem_time or its attachment must not be able to
+    # smuggle broker state into an otherwise ordinary Agent execution.
+    if (
+        not isinstance(workspace, PreparedWorkspace)
+        or workspace.manifest.resolved_logparse_plan is not None
+    ):
+        allowed.add("logparse-parse.claim")
     if any(name not in allowed for name in names):
         raise _ClassifiedInvalidOutput(
             "outcome_finalizer_marker_invalid",
             diagnostic_reason="Agent tool-state contains an unexpected node",
         )
-    if FINALIZATION_MARKER_NAME not in names:
+    if DRAFT_FINALIZATION_MARKER_NAME not in names:
         raise _ClassifiedInvalidOutput(
             "outcome_finalizer_marker_missing",
             diagnostic_reason="Agent outcome finalization marker is missing",
         )
-    marker_path = tool_state_root / FINALIZATION_MARKER_NAME
+    marker_path = tool_state_root / DRAFT_FINALIZATION_MARKER_NAME
     try:
         raw_marker, marker_document = read_agent_json_file(
             marker_path,
@@ -204,7 +209,7 @@ def _validate_finalization_marker(
         )
         if raw_marker != marker_document.canonical_bytes:
             raise ValueError("Agent outcome finalization marker is not canonical")
-        marker = FinalizedAgentOutcomeMarker.model_validate(marker_document.value)
+        marker = SealedAgentOutcomeDraftMarker.model_validate(marker_document.value)
         final_tool_state_metadata = tool_state_root.stat(follow_symlinks=False)
         final_names = sorted(node.name for node in tool_state_root.iterdir())
         if (
@@ -252,13 +257,13 @@ def _log_output_rejection(
             "final_outcome_state": final_outcome_state,
             "final_outcome_bytes": final_outcome_bytes,
             "job_outcome_part_state": _diagnostic_path_state(
-                output / "job_outcome.json.part"
+                output / "job_outcome.draft.json.part"
             ),
             "dot_job_outcome_part_state": _diagnostic_path_state(
-                output / ".job_outcome.json.part"
+                output / ".job_outcome.draft.json.part"
             ),
             "job_outcome_tmp_state": _diagnostic_path_state(
-                output / "job_outcome.json.tmp"
+                output / "job_outcome.draft.json.tmp"
             ),
         }
         if diagnostic_reason is not None:
@@ -358,6 +363,16 @@ class ValidatedAgentOutput:
     canonical_bytes: bytes
     proposal_resources: tuple[ValidatedProposalResource, ...]
     user_result: UserResultPayload | None
+
+
+@dataclass(frozen=True, slots=True)
+class ValidatedAgentDraft:
+    """Frozen, sealed Agent draft and all proposal bytes, before server decision."""
+
+    draft: AgentJobOutcomeDraftV2
+    canonical_bytes: bytes
+    proposal_resources: tuple[ValidatedProposalResource, ...]
+    user_result_bytes: bytes | None
 
 
 class _ExactSecretScanner:
@@ -1207,7 +1222,9 @@ def _verify_resource_unchanged(resource: ValidatedProposalResource) -> None:
         raise _InvalidOutput
 
 
-def _proposal_drafts(outcome: AgentJobOutcome) -> tuple[_Draft, ...]:
+def _proposal_drafts(
+    outcome: AgentJobOutcome | AgentJobOutcomeDraftV2,
+) -> tuple[_Draft, ...]:
     return tuple(outcome.proposed_evidence_drafts) + tuple(
         outcome.proposed_artifact_drafts
     )
@@ -1225,7 +1242,9 @@ def _validate_declared_values(
         raise _InvalidOutput
 
 
-def _candidate_evidence_bindings(outcome: AgentJobOutcome) -> tuple[tuple[str, str], ...]:
+def _candidate_evidence_bindings(
+    outcome: AgentJobOutcome | AgentJobOutcomeDraftV2,
+) -> tuple[tuple[str, str], ...]:
     payload = outcome.payload
     candidate = getattr(payload, "candidate_conclusion_draft", None)
     if candidate is None:
@@ -1250,7 +1269,7 @@ def _candidate_evidence_bindings(outcome: AgentJobOutcome) -> tuple[tuple[str, s
 
 
 def _archive_target_logs(
-    outcome: AgentJobOutcome,
+    outcome: AgentJobOutcome | AgentJobOutcomeDraftV2,
     workspace_manifest: WorkspaceInputManifest,
     resources: dict[str, ValidatedProposalResource],
 ) -> tuple[_ArchiveTargetLog, ...]:
@@ -1332,7 +1351,7 @@ def _archive_target_logs(
 
 def _validate_user_result_archive(
     workspace_root: Path,
-    outcome: AgentJobOutcome,
+    outcome: AgentJobOutcome | AgentJobOutcomeDraftV2,
     workspace_manifest: WorkspaceInputManifest,
     resources: dict[str, ValidatedProposalResource],
     archive_bytes: bytes,
@@ -1402,9 +1421,9 @@ def _read_validated_output(
     output_boundary: _FrozenReadBoundary,
     inputs_boundary: _FrozenReadBoundary,
     capture_outcome_bytes: Callable[[bytes], None] | None = None,
-) -> ValidatedAgentOutput:
-    outcome_relative_path = "output/job_outcome.json"
-    with _classify_invalid_output("final_outcome_read"):
+) -> ValidatedAgentDraft:
+    outcome_relative_path = "output/job_outcome.draft.json"
+    with _classify_invalid_output("sealed_draft_read"):
         outcome_path = _validate_parent_directories(
             workspace_root,
             outcome_relative_path,
@@ -1444,7 +1463,7 @@ def _read_validated_output(
         )
     parsed_outcome = outcome_document.value
     try:
-        outcome = AgentJobOutcome.model_validate(parsed_outcome)
+        outcome = AgentJobOutcomeDraftV2.model_validate(parsed_outcome)
     except ValidationError as exc:
         schema_errors = tuple(
             {
@@ -1457,14 +1476,24 @@ def _read_validated_output(
         raise _ClassifiedInvalidOutput(
             "outcome_schema",
             diagnostic_reason=(
-                "AgentJobOutcome validation produced "
+                "AgentJobOutcomeDraftV2 validation produced "
                 f"{len(schema_errors)} error(s)"
             ),
             schema_errors=schema_errors,
         ) from None
     _validate_finalization_marker(workspace, raw_outcome_bytes)
-    with _classify_invalid_output("outcome_job_binding_or_contract"):
-        validate_outcome_for_job(job, outcome, workspace_manifest)
+    with _classify_invalid_output("draft_job_binding"):
+        if (
+            outcome.job_id != job.job_id
+            or outcome.case_id != job.case_id
+            or outcome.job_type is not job.job_type
+            or outcome.base_state_revision != job.base_state_revision
+            or any(
+                item not in set(job.evidence_refs)
+                for item in outcome.consumed_evidence_refs
+            )
+        ):
+            raise _InvalidOutput
     with _classify_invalid_output("outcome_security_scan"):
         outcome_bytes = canonical_json_bytes(outcome)
         _scan_bytes(outcome_bytes, patterns)
@@ -1560,22 +1589,6 @@ def _read_validated_output(
             )
         )
 
-    user_result = None
-    if user_result_bytes is not None:
-        try:
-            user_result = validate_user_result_for_outcome(
-                job,
-                outcome,
-                user_result_bytes,
-            )
-        except UserResultValidationError as exc:
-            raise _ClassifiedInvalidOutput(
-                f"user_result_{exc.category}"
-            ) from None
-        except (KeyboardInterrupt, SystemExit):
-            raise
-        except Exception:
-            raise _ClassifiedInvalidOutput("user_result_unclassified") from None
     if user_result_archive_bytes is not None:
         with _classify_invalid_output("user_result_archive_validation"):
             _validate_user_result_archive(
@@ -1590,11 +1603,11 @@ def _read_validated_output(
                 inputs_boundary=inputs_boundary,
                 max_bytes=job.resource_limits.workspace_bytes,
             )
-    return ValidatedAgentOutput(
-        outcome=outcome,
+    return ValidatedAgentDraft(
+        draft=outcome,
         canonical_bytes=outcome_bytes,
         proposal_resources=tuple(resources),
-        user_result=user_result,
+        user_result_bytes=user_result_bytes,
     )
 
 
@@ -1604,8 +1617,8 @@ def read_agent_output(
     workspace_manifest: WorkspaceInputManifest,
     *,
     secrets: Iterable[bytes | str] = (),
-) -> ValidatedAgentOutput:
-    """Read and validate ``output/job_outcome.json`` and all proposal content.
+) -> ValidatedAgentDraft:
+    """Read the sealed V2 Agent draft and freeze every proposal resource.
 
     ``.part`` files are never considered.  Any Agent-controlled invalidity is
     collapsed to the frozen OUTCOME_INVALID failure without retaining an
@@ -1626,7 +1639,7 @@ def read_agent_output(
     final_outcome_state = "not_checked"
     final_outcome_bytes: int | None = None
     raw_outcome_bytes: bytes | None = None
-    validated: ValidatedAgentOutput | None = None
+    validated: ValidatedAgentDraft | None = None
 
     def capture_outcome_bytes(value: bytes) -> None:
         nonlocal raw_outcome_bytes
@@ -1667,14 +1680,14 @@ def read_agent_output(
             identity=inputs_identity,
         )
         final_metadata = _lstat(
-            workspace_root / "output/job_outcome.json",
+            workspace_root / "output/job_outcome.draft.json",
             missing_outcome=True,
         )
         final_outcome_state = "present"
         final_outcome_bytes = final_metadata.st_size
         initial = _snapshot_source(
             workspace_root,
-            "output/job_outcome.json",
+            "output/job_outcome.draft.json",
             root_identity=root_identity,
             boundary=output_boundary,
         )
@@ -1689,9 +1702,11 @@ def read_agent_output(
             inputs_boundary=inputs_boundary,
             capture_outcome_bytes=capture_outcome_bytes,
         )
-        with _classify_invalid_output("final_outcome_stability"):
+        with _classify_invalid_output("sealed_draft_stability"):
             _assert_snapshot_paths(initial)
-            final_outcome = _lstat(workspace_root / "output/job_outcome.json")
+            final_outcome = _lstat(
+                workspace_root / "output/job_outcome.draft.json"
+            )
             if _fingerprint(final_outcome) != initial.leaf_fingerprint:
                 raise _InvalidOutput
     except _MissingOutcome:
@@ -1750,6 +1765,7 @@ def read_agent_output(
 
 
 __all__ = [
+    "ValidatedAgentDraft",
     "ValidatedAgentOutput",
     "ValidatedProposalResource",
     "RejectedAgentOutputError",

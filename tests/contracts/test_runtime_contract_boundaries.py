@@ -59,6 +59,10 @@ def _claim_compatible_inputs() -> tuple[dict[str, Any], dict[str, Any], dict[str
         for entry in manifest["entries"]
         if entry["input_kind"] != "ARTIFACT"
     ]
+    manifest["resolved_logparse_plan"].update(
+        attachment_id=job["attachment_refs"][0],
+        artifact_id=None,
+    )
     return job, manifest, claim
 
 
@@ -272,15 +276,19 @@ def _job_and_manifest_for_exact_required_bytes(
     job_payload["artifact_refs"] = []
     job_payload["previous_outcome_refs"] = []
     job_payload["evidence_refs"] = evidence_ids
+    job_payload["logparse_tool_ref"] = None
+    job_payload["logparse_product"] = None
     job_payload["context_snapshot"]["evidence_refs"] = evidence_ids
     manifest_payload = {
-        "schema_version": 1,
+        "schema_version": 2,
         "job_id": job_payload["job_id"],
         "case_id": job_payload["case_id"],
         "job_type": job_payload["job_type"],
         "logparse_tool_ref": job_payload["logparse_tool_ref"],
         "logparse_product": job_payload["logparse_product"],
         "entries": entries,
+        "resolved_logparse_plan": None,
+        "review_subject": None,
     }
 
     remaining = target_manifest_bytes - len(canonical_json_bytes(manifest_payload))

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import stat
 import threading
 from dataclasses import dataclass
 from datetime import datetime
@@ -33,6 +34,7 @@ from problem_locator.contracts.limits import (
     UPLOAD_TEMP_RETENTION_SECONDS,
     WORKSPACE_RETENTION_SECONDS,
 )
+from problem_locator.storage.atomic import is_reparse_point
 from problem_locator.storage.coordination import (
     AttachmentUploadRegistry,
     StorageCoordinationLock,
@@ -70,6 +72,38 @@ CLEANUP_ID = "00000000-0000-0000-0000-000000000076"
 PROCESSED_AT = "2026-08-01T00:00:00.000Z"
 
 
+@pytest.fixture(autouse=True)
+def _adapt_no_follow_chmod_for_plain_windows_fixtures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    if os.name != "nt" or os.chmod in os.supports_follow_symlinks:
+        return
+
+    real_chmod = os.chmod
+
+    def chmod_fixture_node(
+        path: os.PathLike[str] | str,
+        mode: int,
+        *,
+        dir_fd: int | None = None,
+        follow_symlinks: bool = True,
+    ) -> None:
+        if follow_symlinks is False:
+            assert dir_fd is None
+            metadata = Path(path).lstat()
+            assert not stat.S_ISLNK(metadata.st_mode)
+            assert not is_reparse_point(metadata)
+            real_chmod(path, mode)
+            return
+        assert dir_fd is None
+        real_chmod(path, mode)
+
+    # The Linux server path keeps exercising the real no-follow syscall.  On
+    # Windows the test tree is controlled and proven free of links/reparse
+    # points before adapting to the only chmod call shape the platform offers.
+    monkeypatch.setattr(os, "chmod", chmod_fixture_node)
+
+
 def _load_model(name: str, model: type[StateFile] | type[Job] | type[JobOutcome]):
     payload = json.loads((FIXTURES / name).read_text(encoding="utf-8"))
     return model.model_validate(payload)
@@ -89,7 +123,15 @@ def _diagnose_job() -> Job:
 
 def _set_age(path: Path, age_seconds: int) -> None:
     timestamp_ns = int((NOW_SECONDS - age_seconds) * 1_000_000_000)
-    os.utime(path, ns=(timestamp_ns, timestamp_ns), follow_symlinks=False)
+    timestamps = (timestamp_ns, timestamp_ns)
+    if os.utime in os.supports_follow_symlinks:
+        os.utime(path, ns=timestamps, follow_symlinks=False)
+        return
+    # Windows does not implement follow_symlinks for utime.  These fixtures
+    # intentionally age plain nodes, so prove that before using its supported
+    # call shape instead of weakening the production retention code.
+    assert not path.is_symlink()
+    os.utime(path, ns=timestamps)
 
 
 class SnapshotRepository:

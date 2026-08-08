@@ -8,6 +8,7 @@ from problem_locator.contracts import (
     Artifact,
     Attachment,
     Case,
+    CaseStatus,
     DiagnosisState,
     Evidence,
     ExecutionFailureRecord,
@@ -20,6 +21,7 @@ from problem_locator.contracts import (
     RuntimeEpochRecord,
     StateMutation,
     TransitionPlan,
+    UnresolvedResult,
 )
 
 from .formalization import (
@@ -73,11 +75,18 @@ def apply_transition_plan_to_case(
     *,
     created_job: Job | None,
     processed_at: str,
+    unresolved_result: UnresolvedResult | None = None,
 ) -> Case:
     """Apply only explicit plan fields after DiagnosisState formalization."""
 
     if (plan.next_job_spec is None) != (created_job is None):
         raise ValueError("created_job must exist exactly when next_job_spec exists")
+    if (plan.target_case_status is CaseStatus.UNRESOLVED) != (
+        unresolved_result is not None
+    ):
+        raise ValueError(
+            "unresolved_result must exist exactly for an UNRESOLVED plan"
+        )
     if created_job is not None:
         if (
             created_job.case_id != current.case_id
@@ -102,6 +111,7 @@ def apply_transition_plan_to_case(
             plan.selected_skill_update,
         ),
         final_result=resolve_final_result(candidate, plan.final_result_target),
+        unresolved_result=unresolved_result,
         failure=apply_case_failure_update(
             current.failure,
             plan.case_failure_update,

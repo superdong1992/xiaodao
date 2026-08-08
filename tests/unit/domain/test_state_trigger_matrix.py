@@ -30,6 +30,8 @@ from problem_locator.contracts import (
     SubmitSupplementTriggerPayload,
     TransitionPlan,
     TriggerType,
+    UnresolvedReasonCode,
+    UnresolvedResult,
     VersionedRef,
     canonical_json_bytes,
     validate_coordinator_plan_result,
@@ -94,6 +96,36 @@ def _case_without_active(status: CaseStatus) -> CaseSnapshot:
         return interrupted_snapshot(route_job())
     if status in {CaseStatus.WAITING_INPUT, CaseStatus.WAITING_ATTACHMENT}:
         return waiting_snapshot(state, status)
+    if status is CaseStatus.UNRESOLVED:
+        case = Case(
+            case_id=CASE_ID,
+            status=status,
+            case_revision=7,
+            diagnosis_state=state,
+            active_job_id=None,
+            selected_skill_ref=None,
+            final_result=None,
+            unresolved_result=UnresolvedResult(
+                source_job_id="00000000-0000-0000-0000-000000000010",
+                source_outcome_id="00000000-0000-0000-0000-000000000020",
+                reason_code=UnresolvedReasonCode.SEMANTIC_REVIEW_REJECTED,
+                summary="Independent review did not establish the conclusion.",
+                blocking_rule_ids=["causal_chain"],
+                evidence_refs=[],
+                recommended_next_step="Create a new Case with corrected inputs.",
+                occurred_at="2026-07-31T00:03:00.000Z",
+                audit_artifact_id="00000000-0000-0000-0000-000000000090",
+            ),
+            failure=None,
+            created_at="2026-07-31T00:00:00.000Z",
+            updated_at="2026-07-31T00:03:00.000Z",
+        )
+        return CaseSnapshot(
+            case=case,
+            active_job=None,
+            resume_source_job=None,
+            replacement_job_ids_by_source={},
+        )
     if status is CaseStatus.RESOLVED:
         review = review_job()
         review_state = state_from_job(review)
@@ -264,7 +296,7 @@ def test_status_trigger_partition_covers_the_complete_cartesian_product() -> Non
     all_pairs = set(product(CaseStatus, TriggerType))
     illegal_pairs = all_pairs - LEGAL_STATUS_TRIGGER_PAIRS
 
-    assert len(all_pairs) == len(CaseStatus) * len(TriggerType) == 99
+    assert len(all_pairs) == len(CaseStatus) * len(TriggerType) == 110
     assert LEGAL_STATUS_TRIGGER_PAIRS.isdisjoint(illegal_pairs)
     assert set(LEGAL_STATUS_TRIGGER_PAIRS) | illegal_pairs == all_pairs
 

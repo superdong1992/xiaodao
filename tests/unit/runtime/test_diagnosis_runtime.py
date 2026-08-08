@@ -15,7 +15,7 @@ import pytest
 
 from problem_locator.contracts import (
     AgentArtifactProposalDraft,
-    AgentJobOutcome,
+    AgentJobOutcomeDraftV2,
     ApplicationError,
     ApplicationErrorDetail,
     ApplicationPortError,
@@ -50,6 +50,7 @@ from problem_locator.contracts import (
     parse_canonical_json_bytes,
 )
 from problem_locator.diagnostics import bind_diagnostics
+from problem_locator.integrations.logparse import Anchor, ParseTargetsRequest
 from problem_locator.journey import configure_journey
 from tests.contracts.fakes import (
     FakeAssetCatalog,
@@ -70,8 +71,8 @@ from problem_locator.runtime.diagnosis_runtime import (
 from problem_locator.runtime.failures import RuntimeExecutionError, runtime_failure
 from problem_locator.runtime.outcome_publisher import OutcomePublisher
 from problem_locator.runtime.outcome_finalizer import (
-    FINALIZATION_MARKER_RELATIVE_PATH,
-    FinalizedAgentOutcomeMarker,
+    DRAFT_FINALIZATION_MARKER_RELATIVE_PATH,
+    SealedAgentOutcomeDraftMarker,
 )
 from problem_locator.runtime.workspace import (
     WorkspaceManager,
@@ -84,12 +85,12 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 
 
 def _write_finalization_marker(workspace_root: Path, outcome_bytes: bytes) -> None:
-    marker_path = workspace_root / FINALIZATION_MARKER_RELATIVE_PATH
+    marker_path = workspace_root / DRAFT_FINALIZATION_MARKER_RELATIVE_PATH
     marker_path.write_bytes(
         canonical_json_bytes(
-            FinalizedAgentOutcomeMarker(
-                schema_version=1,
-                relative_path="output/job_outcome.json",
+            SealedAgentOutcomeDraftMarker(
+                schema_version=2,
+                relative_path="output/job_outcome.draft.json",
                 size=len(outcome_bytes),
                 sha256=hashlib.sha256(outcome_bytes).hexdigest(),
             )
@@ -479,8 +480,8 @@ def _running_route_job(catalog: VersionedAssetCatalog) -> Job:
     return Job.model_validate(payload)
 
 
-def _route_agent_outcome(job: Job) -> AgentJobOutcome:
-    payload = _json("agent-job-outcome-route.json")
+def _route_agent_outcome(job: Job) -> AgentJobOutcomeDraftV2:
+    payload = _json("agent-job-outcome-draft-route.json")
     payload.update(
         {
             "job_id": job.job_id,
@@ -492,7 +493,7 @@ def _route_agent_outcome(job: Job) -> AgentJobOutcome:
     payload["payload"]["skill_ref"] = job.available_skill_refs[0].model_dump(
         mode="json"
     )
-    return AgentJobOutcome.model_validate(payload)
+    return AgentJobOutcomeDraftV2.model_validate(payload)
 
 
 class _StateView:
@@ -544,9 +545,12 @@ class _RuntimeBackend:
             proposal_path.parent.mkdir(parents=True, exist_ok=True)
             proposal_path.write_bytes(payload)
         if self.outcome_bytes is not None:
-            temporary = workspace_root / "output" / ".job_outcome.json.part"
+            temporary = workspace_root / "output" / ".job_outcome.draft.json.part"
             temporary.write_bytes(self.outcome_bytes)
-            os.replace(temporary, workspace_root / "output" / "job_outcome.json")
+            os.replace(
+                temporary,
+                workspace_root / "output" / "job_outcome.draft.json",
+            )
             _write_finalization_marker(workspace_root, self.outcome_bytes)
         sinks: ExecutionLogSinks = kwargs["log_sinks"]
         unique = {id(sinks.stdout): sinks.stdout, id(sinks.stderr): sinks.stderr}
@@ -730,7 +734,9 @@ def test_runtime_executes_one_frozen_route_and_publishes_canonical_receipt(
     assert journey_events[-1]["outcome_id"] == receipt.job_outcome.outcome_id
 
     assert receipt.job_outcome.result_type is OutcomeResultType.COMPLETED
-    assert receipt.job_outcome.outcome_id == _route_agent_outcome(job).outcome_id
+    assert receipt.job_outcome.outcome_id == (
+        "00000000-0000-4000-8000-000000000401"
+    )
     assert state.calls == [job.case_id]
     assert len(backend.calls) == 1  # type: ignore[union-attr]
     backend_call = backend.calls[0]  # type: ignore[union-attr]
@@ -884,7 +890,7 @@ def test_ambiguous_success_keeps_staged_refs_for_durable_outbox_replay(
     )
     outcome_payload = _route_agent_outcome(job).model_dump(mode="json")
     outcome_payload["proposed_artifact_drafts"] = [draft.model_dump(mode="json")]
-    agent_outcome = AgentJobOutcome.model_validate(outcome_payload)
+    agent_outcome = AgentJobOutcomeDraftV2.model_validate(outcome_payload)
     backend = _RuntimeBackend(
         canonical_json_bytes(agent_outcome),
         proposal_files={relative_path: payload},
@@ -941,7 +947,7 @@ def test_explicit_prepublish_validation_failure_discards_staged_resource(
     outcome_payload = _route_agent_outcome(job).model_dump(mode="json")
     outcome_payload["proposed_artifact_drafts"] = [draft.model_dump(mode="json")]
     backend = _RuntimeBackend(
-        canonical_json_bytes(AgentJobOutcome.model_validate(outcome_payload)),
+        canonical_json_bytes(AgentJobOutcomeDraftV2.model_validate(outcome_payload)),
         proposal_files={relative_path: payload},
     )
     records = InMemoryExecutionRecordStore()
@@ -1312,6 +1318,17 @@ class _RuntimeBrokerSession:
         self.events.append("parse_request_bytes")
         return None
 
+    def audit_bytes(self) -> bytes:
+        assert self.closed
+        self.events.append("audit_bytes")
+        return canonical_json_bytes(
+            {
+                "schema_version": 1,
+                "job_id": "00000000-0000-0000-0000-000000000011",
+                "operations": [],
+            }
+        )
+
 
 class _RuntimeBrokerFactory:
     def __init__(
@@ -1382,6 +1399,34 @@ def _running_logparse_job(catalog: VersionedAssetCatalog) -> Job:
 
 
 _LOGPARSE_ATTACHMENT_ID = "00000000-0000-4000-8000-000000000450"
+_LOGPARSE_USER_FACTS = [
+    {
+        "item_id": "00000000-0000-4000-8000-000000000451",
+        "statement": "checkout-service",
+        "status": "ACTIVE",
+        "provenance": {
+            "source_type": "USER_INPUT",
+            "source_ref": "00000000-0000-4000-8000-000000000001",
+            "input_name": "caller_service",
+        },
+        "evidence_refs": [],
+        "created_revision": 1,
+        "supersedes": [],
+    },
+    {
+        "item_id": "00000000-0000-4000-8000-000000000452",
+        "statement": "2026-07-31T00:00:00.000Z",
+        "status": "ACTIVE",
+        "provenance": {
+            "source_type": "USER_INPUT",
+            "source_ref": "00000000-0000-4000-8000-000000000001",
+            "input_name": "problem_time",
+        },
+        "evidence_refs": [],
+        "created_revision": 1,
+        "supersedes": [],
+    },
+]
 
 
 def _claimed_logparse_job_state_and_resources(
@@ -1391,6 +1436,7 @@ def _claimed_logparse_job_state_and_resources(
     attachment_sha256 = hashlib.sha256(attachment_bytes).hexdigest()
     job_payload = _running_logparse_job(catalog).model_dump(mode="json")
     job_payload["attachment_refs"] = [_LOGPARSE_ATTACHMENT_ID]
+    job_payload["context_snapshot"]["user_facts"] = _LOGPARSE_USER_FACTS
     job = Job.model_validate(job_payload)
     storage_key = (
         f"resources/cases/{job.case_id}/attachments/"
@@ -1413,6 +1459,9 @@ def _claimed_logparse_job_state_and_resources(
     state = StateFile.model_validate(_json("state.json"))
     aggregate_payload = next(iter(state.cases.values())).model_dump(mode="json")
     aggregate_payload["jobs"] = {job.job_id: job.model_dump(mode="json")}
+    aggregate_payload["case"]["diagnosis_state"]["user_facts"] = (
+        _LOGPARSE_USER_FACTS
+    )
     aggregate_payload["attachments"] = {
         attachment.attachment_id: attachment.model_dump(mode="json")
     }
@@ -1463,7 +1512,7 @@ class _PublicFakeClaimingBackend:
         job: Job,
         workspace_root: Path,
         claim: LogparseParseClaim,
-    ) -> AgentJobOutcome:
+    ) -> AgentJobOutcomeDraftV2:
         proposal_root = workspace_root / "output/proposals/logparse_run/tree"
         task_root = proposal_root / "task-0001"
         (task_root / "targets").mkdir(parents=True)
@@ -1496,7 +1545,7 @@ class _PublicFakeClaimingBackend:
                 "parse_parameters": {"product": job.logparse_product},
             },
         )
-        payload = _json("agent-job-outcome-diagnosis.json")
+        payload = _json("agent-job-outcome-draft-diagnosis.json")
         payload.update(
             {
                 "job_id": job.job_id,
@@ -1509,7 +1558,19 @@ class _PublicFakeClaimingBackend:
         payload["consumed_evidence_refs"] = []
         payload["proposed_evidence_drafts"] = []
         payload["proposed_artifact_drafts"] = [draft.model_dump(mode="json")]
-        return AgentJobOutcome.model_validate(payload)
+        # This seam proves the Logparse run publication, not a positive diagnosis.
+        # An explicit UNKNOWN claim keeps the draft structurally complete while
+        # the server deterministically seals it as INCONCLUSIVE and retains the run.
+        payload["rule_claims"] = [
+            {
+                "rule_id": "timeout_causality",
+                "claimed_result": "UNKNOWN",
+                "fact_refs": [],
+                "citations": [],
+                "explanation": "This test does not claim a positive diagnosis.",
+            }
+        ]
+        return AgentJobOutcomeDraftV2.model_validate(payload)
 
     def execute(self, **kwargs: Any) -> BackendExecution:
         self.calls.append(kwargs)
@@ -1521,11 +1582,25 @@ class _PublicFakeClaimingBackend:
         attachment = next(
             entry for entry in manifest.entries if entry.input_kind == "ATTACHMENT"
         )
+        plan = manifest.resolved_logparse_plan
+        assert plan is not None and plan.attachment_id == attachment.resource_id
         request_bytes = canonical_json_bytes(
-            {
-                "attachment_id": attachment.resource_id,
-                "product": manifest.logparse_product,
-            }
+            ParseTargetsRequest(
+                schema_version=1,
+                problem_time=plan.problem_time,
+                anchors=[
+                    Anchor(
+                        label=item.label,
+                        module=item.module,
+                        slot=item.slot,
+                        process_name=item.process_name,
+                        pid=item.pid,
+                    )
+                    for item in plan.anchors
+                ],
+                attachment_id=attachment.resource_id,
+                artifact_proposal_key="logparse_run",
+            )
         )
         if self.accept_request:
             session = self.factory.sessions[-1]
@@ -1563,9 +1638,9 @@ class _PublicFakeClaimingBackend:
             raise AssertionError("unknown claiming backend result")
 
         outcome_bytes = canonical_json_bytes(outcome)
-        temporary = workspace_root / "output/.job_outcome.json.part"
+        temporary = workspace_root / "output/.job_outcome.draft.json.part"
         temporary.write_bytes(outcome_bytes)
-        os.replace(temporary, workspace_root / "output/job_outcome.json")
+        os.replace(temporary, workspace_root / "output/job_outcome.draft.json")
         _write_finalization_marker(workspace_root, outcome_bytes)
         self._close_sinks(kwargs)
         return BackendExecution(
@@ -1576,9 +1651,9 @@ class _PublicFakeClaimingBackend:
         )
 
 
-def _failed_logparse_agent_outcome(job: Job) -> AgentJobOutcome:
-    return AgentJobOutcome(
-        outcome_id="00000000-0000-4000-8000-000000000497",
+def _failed_logparse_agent_outcome(job: Job) -> AgentJobOutcomeDraftV2:
+    return AgentJobOutcomeDraftV2(
+        schema_version=2,
         job_id=job.job_id,
         case_id=job.case_id,
         job_type=job.job_type,
@@ -1595,7 +1670,7 @@ def _failed_logparse_agent_outcome(job: Job) -> AgentJobOutcome:
             retryable=False,
             details=[],
         ),
-        produced_at="2026-07-31T00:00:30.000Z",
+        rule_claims=[],
     )
 
 
@@ -1636,12 +1711,91 @@ def _public_fake_claiming_runtime(
     return runtime, job, factory, backend, resources
 
 
+@pytest.mark.parametrize("missing_binding", ("user_facts", "attachment"))
+def test_logparse_job_with_missing_fixed_binding_skips_broker(
+    missing_binding: str,
+    tmp_path: Path,
+) -> None:
+    factory = _RuntimeBrokerFactory()
+    catalog = _logparse_catalog(tmp_path, factory)
+    job, aggregate, resources = _claimed_logparse_job_state_and_resources(catalog)
+    job_payload = job.model_dump(mode="json")
+    aggregate_payload = aggregate.model_dump(mode="json")
+    if missing_binding == "user_facts":
+        job_payload["context_snapshot"]["user_facts"] = []
+        aggregate_payload["case"]["diagnosis_state"]["user_facts"] = []
+    else:
+        job_payload["attachment_refs"] = []
+        aggregate_payload["attachments"] = {}
+        resources = InMemoryResourceStore()
+    job = Job.model_validate(job_payload)
+    aggregate_payload["jobs"] = {job.job_id: job.model_dump(mode="json")}
+    aggregate = CaseAggregate.model_validate(aggregate_payload)
+    backend = _RuntimeBackend(canonical_json_bytes(_failed_logparse_agent_outcome(job)))
+    runtime = DiagnosisRuntime(
+        state_repository=_StateView(aggregate),
+        resource_store=resources,
+        asset_catalog=catalog,
+        logparse_broker_factory=factory,
+        execution_records=InMemoryExecutionRecordStore(),
+        clock=_Clock(),
+        id_generator=_Ids(),
+        workspace_manager=WorkspaceManager(tmp_path / f"missing-{missing_binding}-data"),
+        backend=backend,  # type: ignore[arg-type]
+    )
+
+    receipt = runtime.execute(job, InMemoryCancellationSignal())
+
+    assert receipt.job_outcome.result_type is OutcomeResultType.FAILED
+    assert factory.calls == []
+    assert len(backend.calls) == 1
+    assert "broker_environment" not in backend.calls[0]
+    manifest = parse_canonical_json_bytes(
+        Path(backend.calls[0]["workspace_root"], "inputs/manifest.json").read_bytes(),
+        WorkspaceInputManifest,
+    )
+    assert manifest.resolved_logparse_plan is None
+
+
+def test_ready_logparse_job_rejects_untyped_compiler_omission(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    factory = _RuntimeBrokerFactory()
+    catalog = _logparse_catalog(tmp_path, factory)
+    job, aggregate, resources = _claimed_logparse_job_state_and_resources(catalog)
+    monkeypatch.setattr(
+        "problem_locator.runtime.diagnosis_runtime.compile_resolved_logparse_plan",
+        lambda *args: None,
+    )
+    runtime = DiagnosisRuntime(
+        state_repository=_StateView(aggregate),
+        resource_store=resources,
+        asset_catalog=catalog,
+        logparse_broker_factory=factory,
+        execution_records=InMemoryExecutionRecordStore(),
+        clock=_Clock(),
+        id_generator=_Ids(),
+        workspace_manager=WorkspaceManager(tmp_path / "omitted-plan-data"),
+        backend=_NeverBackend(),  # type: ignore[arg-type]
+    )
+
+    receipt = runtime.execute(job, InMemoryCancellationSignal())
+
+    assert receipt.job_outcome.error is not None
+    assert receipt.job_outcome.error.stage is ExecutionStage.ASSET_RESOLUTION
+    assert receipt.job_outcome.error.code is ErrorCode.ASSET_VERSION_UNAVAILABLE
+    assert factory.calls == []
+
+
 class _NonCanonicalClaimingBackend(_PublicFakeClaimingBackend):
     rejected_bytes: bytes | None = None
 
     def execute(self, **kwargs: Any) -> BackendExecution:
         execution = super().execute(**kwargs)
-        outcome_path = Path(kwargs["workspace_root"]) / "output/job_outcome.json"
+        outcome_path = (
+            Path(kwargs["workspace_root"]) / "output/job_outcome.draft.json"
+        )
         value = json.loads(outcome_path.read_bytes())
         self.rejected_bytes = (
             json.dumps(value, ensure_ascii=False, indent=2).encode("utf-8") + b"\n"
@@ -1656,9 +1810,9 @@ class _MissingMarkerClaimingBackend(_PublicFakeClaimingBackend):
     def execute(self, **kwargs: Any) -> BackendExecution:
         execution = super().execute(**kwargs)
         workspace_root = Path(kwargs["workspace_root"])
-        outcome_path = workspace_root / "output/job_outcome.json"
+        outcome_path = workspace_root / "output/job_outcome.draft.json"
         self.rejected_bytes = outcome_path.read_bytes()
-        (workspace_root / FINALIZATION_MARKER_RELATIVE_PATH).unlink()
+        (workspace_root / DRAFT_FINALIZATION_MARKER_RELATIVE_PATH).unlink()
         return execution
 
 
@@ -1698,7 +1852,7 @@ def test_noncanonical_outcome_is_preserved_and_archived_exactly(
     assert receipt.job_outcome.error.code is ErrorCode.OUTCOME_INVALID
     assert backend.rejected_bytes is not None
     workspace_root = Path(backend.calls[0]["workspace_root"])
-    assert (workspace_root / "output/job_outcome.json").read_bytes() == (
+    assert (workspace_root / "output/job_outcome.draft.json").read_bytes() == (
         backend.rejected_bytes
     )
     assert records.publish_rejected_agent_output_calls == [
@@ -1737,7 +1891,7 @@ def test_rejected_output_archive_failure_preserves_primary_and_workspace(
     assert receipt.job_outcome.error.code is ErrorCode.OUTCOME_INVALID
     workspace_root = Path(backend.calls[0]["workspace_root"])
     assert backend.rejected_bytes is not None
-    assert (workspace_root / "output/job_outcome.json").read_bytes() == (
+    assert (workspace_root / "output/job_outcome.draft.json").read_bytes() == (
         backend.rejected_bytes
     )
     assert any(
@@ -1851,7 +2005,7 @@ def test_public_broker_fake_closes_claimed_timeout_and_failed_executions(
         )
 
 
-def test_public_broker_fake_closes_claimed_success_and_stages_one_run(
+def test_public_broker_fake_closes_claimed_parse_and_stages_one_run(
     tmp_path: Path,
 ) -> None:
     runtime, job, factory, backend, resources = _public_fake_claiming_runtime(
@@ -1861,7 +2015,7 @@ def test_public_broker_fake_closes_claimed_success_and_stages_one_run(
 
     receipt = runtime.execute(job, InMemoryCancellationSignal())
 
-    assert receipt.job_outcome.result_type is OutcomeResultType.COMPLETED
+    assert receipt.job_outcome.result_type is OutcomeResultType.INCONCLUSIVE
     assert receipt.job_outcome.error is None
     assert backend.claim is not None
     assert backend.request_bytes is not None
@@ -1886,12 +2040,12 @@ def test_runtime_closes_logparse_then_audits_request_bytes_before_finalize(
 ) -> None:
     factory = _RuntimeBrokerFactory()
     catalog = _logparse_catalog(tmp_path, factory)
-    job = _running_logparse_job(catalog)
+    job, aggregate, resources = _claimed_logparse_job_state_and_resources(catalog)
     backend = _RuntimeBackend(canonical_json_bytes(_failed_logparse_agent_outcome(job)))
     records = InMemoryExecutionRecordStore()
     runtime = DiagnosisRuntime(
-        state_repository=_StateView(_route_aggregate(job)),
-        resource_store=_UnusedResourceStore(),
+        state_repository=_StateView(aggregate),
+        resource_store=resources,
         asset_catalog=catalog,
         logparse_broker_factory=factory,
         execution_records=records,
@@ -1904,7 +2058,7 @@ def test_runtime_closes_logparse_then_audits_request_bytes_before_finalize(
     cancellation = InMemoryCancellationSignal()
     receipt = runtime.execute(job, cancellation)
 
-    assert receipt.job_outcome.outcome_id == _failed_logparse_agent_outcome(job).outcome_id
+    assert receipt.job_outcome.outcome_id == "00000000-0000-4000-8000-000000000401"
     assert receipt.job_outcome.result_type is OutcomeResultType.FAILED
     assert receipt.job_outcome.error == _failed_logparse_agent_outcome(job).error
     assert receipt.job_outcome.proposed_evidence == []
@@ -1920,7 +2074,7 @@ def test_runtime_closes_logparse_then_audits_request_bytes_before_finalize(
     assert opened_manifest.logparse_tool_ref == job.logparse_tool_ref
     assert opened_manifest.logparse_product == job.logparse_product
     assert opened_cancellation is cancellation
-    assert factory.session.events == ["close", "parse_request_bytes"]
+    assert factory.session.events == ["close", "parse_request_bytes", "audit_bytes"]
     assert factory.session.closed is True
     assert backend.calls[0]["broker_environment"] == {
         "PROBLEM_LOCATOR_LOGPARSE_ENDPOINT": "inmemory://runtime-test",
@@ -1940,11 +2094,11 @@ def test_logparse_broker_error_is_preserved_as_asset_failure(
     )
     factory = _RuntimeBrokerFactory(failure=LogparseBrokerError(failure))
     catalog = _logparse_catalog(tmp_path, factory)
-    job = _running_logparse_job(catalog)
+    job, aggregate, resources = _claimed_logparse_job_state_and_resources(catalog)
     records = InMemoryExecutionRecordStore()
     runtime = DiagnosisRuntime(
-        state_repository=_StateView(_route_aggregate(job)),
-        resource_store=_UnusedResourceStore(),
+        state_repository=_StateView(aggregate),
+        resource_store=resources,
         asset_catalog=catalog,
         logparse_broker_factory=factory,
         execution_records=records,
@@ -1966,17 +2120,18 @@ def test_broker_secret_in_agent_outcome_is_preserved_but_never_published(
 ) -> None:
     factory = _RuntimeBrokerFactory()
     catalog = _logparse_catalog(tmp_path, factory)
-    job = _running_logparse_job(catalog)
+    job, aggregate, seeded_resources = _claimed_logparse_job_state_and_resources(
+        catalog
+    )
     unsafe = _failed_logparse_agent_outcome(job).model_dump(mode="json")
     unsafe["error"]["message"] = "runtime-test-token"
     backend = _RuntimeBackend(
-        canonical_json_bytes(AgentJobOutcome.model_validate(unsafe))
+        canonical_json_bytes(AgentJobOutcomeDraftV2.model_validate(unsafe))
     )
     records = InMemoryExecutionRecordStore()
-    resources = _UnusedResourceStore()
     runtime = DiagnosisRuntime(
-        state_repository=_StateView(_route_aggregate(job)),
-        resource_store=resources,
+        state_repository=_StateView(aggregate),
+        resource_store=seeded_resources,
         asset_catalog=catalog,
         logparse_broker_factory=factory,
         execution_records=records,
@@ -1995,11 +2150,11 @@ def test_broker_secret_in_agent_outcome_is_preserved_but_never_published(
     assert b"runtime-test-token" not in published
     assert b"inmemory://runtime-test" not in published
     workspace_root = factory.calls[0][1]
-    assert (workspace_root / "output/job_outcome.json").is_file()
+    assert (workspace_root / "output/job_outcome.draft.json").is_file()
     assert b"runtime-test-token" in (
-        workspace_root / "output/job_outcome.json"
+        workspace_root / "output/job_outcome.draft.json"
     ).read_bytes()
-    assert factory.session.events == ["close", "parse_request_bytes"]
+    assert factory.session.events == ["close", "parse_request_bytes", "audit_bytes"]
 
 
 def test_broker_close_failure_preserves_possible_secret_output(
@@ -2007,16 +2162,16 @@ def test_broker_close_failure_preserves_possible_secret_output(
 ) -> None:
     factory = _RuntimeBrokerFactory(close_fails=True)
     catalog = _logparse_catalog(tmp_path, factory)
-    job = _running_logparse_job(catalog)
+    job, aggregate, resources = _claimed_logparse_job_state_and_resources(catalog)
     unsafe = _failed_logparse_agent_outcome(job).model_dump(mode="json")
     unsafe["error"]["message"] = "runtime-test-token"
     backend = _RuntimeBackend(
-        canonical_json_bytes(AgentJobOutcome.model_validate(unsafe))
+        canonical_json_bytes(AgentJobOutcomeDraftV2.model_validate(unsafe))
     )
     records = InMemoryExecutionRecordStore()
     runtime = DiagnosisRuntime(
-        state_repository=_StateView(_route_aggregate(job)),
-        resource_store=_UnusedResourceStore(),
+        state_repository=_StateView(aggregate),
+        resource_store=resources,
         asset_catalog=catalog,
         logparse_broker_factory=factory,
         execution_records=records,
@@ -2030,9 +2185,9 @@ def test_broker_close_failure_preserves_possible_secret_output(
 
     assert receipt.job_outcome.error is not None
     assert receipt.job_outcome.error.code is ErrorCode.LOGPARSE_FAILED
-    assert factory.session.events == ["close", "parse_request_bytes"]
+    assert factory.session.events == ["close", "parse_request_bytes", "audit_bytes"]
     workspace_root = factory.calls[0][1]
-    assert (workspace_root / "output/job_outcome.json").is_file()
+    assert (workspace_root / "output/job_outcome.draft.json").is_file()
     assert b"runtime-test-token" not in records.publish_outcome_calls[0][1]
 
 
@@ -2047,11 +2202,11 @@ def test_backend_timeout_preserves_primary_when_claim_audit_fails(
 
     factory = _RuntimeBrokerFactory()
     catalog = _logparse_catalog(tmp_path, factory)
-    job = _running_logparse_job(catalog)
+    job, aggregate, resources = _claimed_logparse_job_state_and_resources(catalog)
     records = InMemoryExecutionRecordStore()
     runtime = DiagnosisRuntime(
-        state_repository=_StateView(_route_aggregate(job)),
-        resource_store=_UnusedResourceStore(),
+        state_repository=_StateView(aggregate),
+        resource_store=resources,
         asset_catalog=catalog,
         logparse_broker_factory=factory,
         execution_records=records,
@@ -2070,7 +2225,7 @@ def test_backend_timeout_preserves_primary_when_claim_audit_fails(
         detail.field == "logparse_claim" and detail.actual == "audit_failed"
         for detail in receipt.job_outcome.error.details
     )
-    assert factory.session.events == ["close", "parse_request_bytes"]
+    assert factory.session.events == ["close", "parse_request_bytes", "audit_bytes"]
     assert cancellation.is_cancelled() is False
 
 
@@ -2079,14 +2234,14 @@ def test_successful_backend_audits_claim_before_reporting_missing_outcome(
 ) -> None:
     factory = _RuntimeBrokerFactory()
     catalog = _logparse_catalog(tmp_path, factory)
-    job = _running_logparse_job(catalog)
+    job, aggregate, resources = _claimed_logparse_job_state_and_resources(catalog)
     backend = _RuntimeBackend(
         None,
         tool_state_files={"unexpected-node": b"not a claim"},
     )
     runtime = DiagnosisRuntime(
-        state_repository=_StateView(_route_aggregate(job)),
-        resource_store=_UnusedResourceStore(),
+        state_repository=_StateView(aggregate),
+        resource_store=resources,
         asset_catalog=catalog,
         logparse_broker_factory=factory,
         execution_records=InMemoryExecutionRecordStore(),
@@ -2100,7 +2255,7 @@ def test_successful_backend_audits_claim_before_reporting_missing_outcome(
 
     assert receipt.job_outcome.error is not None
     assert receipt.job_outcome.error.code is ErrorCode.LOGPARSE_OUTPUT_INVALID
-    assert factory.session.events == ["close", "parse_request_bytes"]
+    assert factory.session.events == ["close", "parse_request_bytes", "audit_bytes"]
 
 
 class _PostCloseAuditSession:
@@ -2123,18 +2278,30 @@ class _PostCloseAuditSession:
         self.events.append("parse_request_bytes")
         return b"{}"
 
+    def audit_bytes(self) -> bytes:
+        assert self.closed
+        self.events.append("audit_bytes")
+        return canonical_json_bytes(
+            {
+                "schema_version": 1,
+                "job_id": "00000000-0000-0000-0000-000000000011",
+                "operations": [],
+            }
+        )
+
 
 def test_broker_request_bytes_are_audited_only_after_close() -> None:
     session = _PostCloseAuditSession()
 
-    failure, request_bytes = DiagnosisRuntime._close_and_audit_broker(
+    failure, request_bytes, audit_bytes = DiagnosisRuntime._close_and_audit_broker(
         session,  # type: ignore[arg-type]
         None,
     )
 
     assert failure is None
     assert request_bytes == b"{}"
-    assert session.events == ["close", "parse_request_bytes"]
+    assert audit_bytes is not None
+    assert session.events == ["close", "parse_request_bytes", "audit_bytes"]
 
 
 def test_broker_close_failure_does_not_replace_backend_timeout() -> None:
@@ -2147,7 +2314,7 @@ def test_broker_close_failure_does_not_replace_backend_timeout() -> None:
         details=[],
     )
 
-    failure, request_bytes = DiagnosisRuntime._close_and_audit_broker(
+    failure, request_bytes, audit_bytes = DiagnosisRuntime._close_and_audit_broker(
         session,  # type: ignore[arg-type]
         timeout,
     )

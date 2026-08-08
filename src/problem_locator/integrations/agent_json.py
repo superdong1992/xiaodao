@@ -1,8 +1,8 @@
 """Shared boundary for JSON authored by an Agent inside one Workspace.
 
 Agent-facing tools accept unambiguous JSON drafts, validate the surface-specific
-schema, and replace those drafts with the exact V1 Canonical JSON bytes before
-another component consumes or hashes them.  This keeps formatting correctness
+schema, and replace those drafts with exact Canonical JSON bytes before another
+component consumes or hashes them.  This keeps formatting correctness
 out of model behaviour while retaining strict rejection of ambiguous JSON.
 """
 
@@ -37,10 +37,10 @@ class AgentJsonSurface(StrEnum):
 
 AGENT_JSON_SURFACE_OWNERS: Mapping[AgentJsonSurface, str] = MappingProxyType(
     {
-        AgentJsonSurface.JOB_OUTCOME: "problem-locator-finalize-outcome",
+        AgentJsonSurface.JOB_OUTCOME: "problem-locator-seal-outcome-draft",
         AgentJsonSurface.LOGPARSE_REQUEST: "problem-locator-logparse",
         AgentJsonSurface.RESULT_ARCHIVE_REQUEST: "problem-locator-pack-result",
-        AgentJsonSurface.USER_RESULT: "problem-locator-finalize-outcome",
+        AgentJsonSurface.USER_RESULT: "problem-locator-seal-outcome-draft",
     }
 )
 

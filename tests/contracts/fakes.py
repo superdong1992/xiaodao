@@ -967,6 +967,64 @@ class InMemoryResourceStore:
             self._published_stage_history.pop(key, None)
         return staged_ref
 
+    def stage_generated_file(
+        self,
+        owner_job_id: str,
+        proposal_key: str,
+        staging_id: str,
+        stream: BinaryStream,
+        expected_size: int,
+        expected_sha256: str,
+    ) -> StagedResourceRef:
+        self._maybe_fail("stage_generated_file")
+        key = ("proposal", staging_id)
+        with self._lock:
+            existing_ref = self._staged_refs.get(key)
+            existing = self._staged.get(key)
+            if existing_ref is not None or existing is not None:
+                if (
+                    not isinstance(existing_ref, StagedResourceRef)
+                    or existing is None
+                    or existing_ref.owner_job_id != owner_job_id
+                    or existing_ref.proposal_key != proposal_key
+                    or existing_ref.resource_kind is not ResourceKind.FILE
+                    or existing_ref.size != expected_size
+                    or existing_ref.sha256 != expected_sha256
+                    or existing.size != expected_size
+                    or existing.sha256 != expected_sha256
+                ):
+                    raise _port_error(
+                        ErrorCode.RESOURCE_HASH_MISMATCH,
+                        "The generated staged resource conflicts with its retry.",
+                    )
+                return _clone(existing_ref)
+        payload, size, sha256 = self._read_stream(
+            stream,
+            byte_limit=MAX_CASE_RESOURCE_BYTES,
+        )
+        self._check_expected(size, sha256, expected_size, expected_sha256)
+        staged_ref = StagedResourceRef(
+            staging_id=staging_id,
+            owner_job_id=owner_job_id,
+            proposal_key=proposal_key,
+            resource_kind=ResourceKind.FILE,
+            size=size,
+            sha256=sha256,
+            tree_manifest=None,
+        )
+        with self._lock:
+            self.stage_file_calls.append((owner_job_id, proposal_key))
+            self._staged[key] = _StoredResource(
+                ResourceKind.FILE,
+                size,
+                sha256,
+                payload=payload,
+            )
+            self._staged_refs[key] = _clone(staged_ref)
+            self._staged_completion_markers.add(key)
+            self._published_stage_history.pop(key, None)
+        return staged_ref
+
     def stage_tree(
         self,
         owner_job_id: str,
@@ -1943,11 +2001,12 @@ class FakeAssetCatalog:
 
 
 class _FakeLogparseBrokerSession:
-    def __init__(self, endpoint: str, token: str) -> None:
+    def __init__(self, endpoint: str, token: str, job_id: str) -> None:
         if not endpoint or not token:
             raise ValueError("broker endpoint and token must be non-empty")
         self.endpoint = endpoint
         self.token = token
+        self.job_id = job_id
         self.closed = False
         self.token_valid = True
         self.close_calls = 0
@@ -1967,6 +2026,16 @@ class _FakeLogparseBrokerSession:
     def parse_request_bytes(self) -> bytes | None:
         with self._lock:
             return self._accepted_parse_request_bytes
+
+    def audit_bytes(self) -> bytes:
+        with self._lock:
+            return canonical_json_bytes(
+                {
+                    "schema_version": 1,
+                    "job_id": self.job_id,
+                    "operations": [],
+                }
+            )
 
     def _record_parse_request(self, request_bytes: bytes) -> None:
         """Fake-only hook recording the broker's one accepted parse request."""
@@ -2028,6 +2097,7 @@ class FakeLogparseBrokerFactory:
             session = _FakeLogparseBrokerSession(
                 f"inmemory://problem-locator/logparse/{job.job_id}/{ordinal}",
                 f"contract-test-token-{ordinal}",
+                job.job_id,
             )
         self.sessions.append(session)
         return session
@@ -2159,6 +2229,7 @@ class InMemoryExecutionRecordStore:
         self._job_bytes: dict[str, bytes] = {}
         self._outcome_bytes: dict[str, bytes] = {}
         self._rejected_agent_output_bytes: dict[str, bytes] = {}
+        self._audit_bytes: dict[tuple[str, str], bytes] = {}
         self.log_sinks: dict[str, ExecutionLogSinks] = {}
         self.publish_job_calls: list[Job] = []
         self.publish_outcome_calls: list[tuple[str, bytes]] = []
@@ -2263,6 +2334,38 @@ class InMemoryExecutionRecordStore:
                 f"jobs/{job_id}/agent_job_outcome.rejected.json",
                 raw_bytes,
             )
+
+    def publish_audit_bytes(
+        self,
+        job_id: str,
+        filename: str,
+        raw_bytes: bytes,
+    ) -> ExecutionFileRef:
+        self._maybe_fail("publish_audit_bytes")
+        if type(raw_bytes) is not bytes or not filename:
+            raise _port_error(
+                ErrorCode.EXECUTION_RECORD_FAILED,
+                "The audit execution record is invalid.",
+            )
+        key = (job_id, filename)
+        with self._lock:
+            existing = self._audit_bytes.get(key)
+            if existing is not None and existing != raw_bytes:
+                raise _port_error(
+                    ErrorCode.IDEMPOTENCY_CONFLICT,
+                    "The audit execution record conflicts with existing bytes.",
+                )
+            self._audit_bytes[key] = raw_bytes
+        return self._file_ref(f"jobs/{job_id}/{filename}", raw_bytes)
+
+    def read_audit_bytes(self, job_id: str, filename: str) -> bytes | None:
+        self._maybe_fail("read_audit_bytes")
+        with self._lock:
+            if filename == "job.json":
+                return self._job_bytes.get(job_id)
+            if filename == "job_outcome.json":
+                return self._outcome_bytes.get(job_id)
+            return self._audit_bytes.get((job_id, filename))
 
     def read_published_job(self, job_id: str) -> PublishedJobReceipt | None:
         self._maybe_fail("read_published_job")

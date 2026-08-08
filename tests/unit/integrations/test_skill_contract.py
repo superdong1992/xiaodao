@@ -76,7 +76,7 @@ def test_all_three_skill_frontmatters_have_only_name_and_description() -> None:
         assert body.strip()
 
 
-def test_diagnosis_manifest_v2_is_exact_canonical_and_spec_owned() -> None:
+def test_diagnosis_manifest_v3_is_exact_canonical_and_spec_owned() -> None:
     spec = _json(SPEC_ROOT / "rpc-service-takeover.json")
     requirements = json.loads(json.dumps(spec["requirements"]))
     logparse_attachment = spec["logparse_plan"]["attachment_requirement"]
@@ -100,6 +100,7 @@ def test_diagnosis_manifest_v2_is_exact_canonical_and_spec_owned() -> None:
             "requires_logparse",
             "logparse_plan",
             "logparse_product",
+            "verification_contract",
         )
     }
     expected.update(
@@ -117,8 +118,8 @@ def test_diagnosis_manifest_v2_is_exact_canonical_and_spec_owned() -> None:
 
     generated = _text(TAKEOVER_SKILL / "SKILL.md")
     embedded = generated.split(
-        "<!-- DIAGNOSIS_SKILL_MANIFEST_V2_BEGIN -->\n```json\n", 1
-    )[1].split("\n```\n<!-- DIAGNOSIS_SKILL_MANIFEST_V2_END -->", 1)[0]
+        "<!-- DIAGNOSIS_SKILL_MANIFEST_V3_BEGIN -->\n```json\n", 1
+    )[1].split("\n```\n<!-- DIAGNOSIS_SKILL_MANIFEST_V3_END -->", 1)[0]
     assert embedded.encode("utf-8") + b"\n" == payload
 
 
@@ -186,6 +187,7 @@ def test_requirements_drive_need_outcomes_and_use_public_s00_constraints() -> No
     for requirement in manifest["requirements"]:
         assert f"`{requirement['name']}`" in generated_skill
         assert requirement["prompt"] in generated_skill
+        assert requirement["supplement_policy"] in {"NONE", "MISSING_ONLY"}
 
     assert {
         "allowed_content_types",

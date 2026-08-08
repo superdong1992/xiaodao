@@ -75,10 +75,10 @@ def test_agent_json_boundary_rejects_ambiguous_or_invalid_json(
 def test_all_four_agent_json_surfaces_have_one_server_side_owner() -> None:
     assert set(AGENT_JSON_SURFACE_OWNERS) == set(AgentJsonSurface)
     assert AGENT_JSON_SURFACE_OWNERS == {
-        AgentJsonSurface.JOB_OUTCOME: "problem-locator-finalize-outcome",
+        AgentJsonSurface.JOB_OUTCOME: "problem-locator-seal-outcome-draft",
         AgentJsonSurface.LOGPARSE_REQUEST: "problem-locator-logparse",
         AgentJsonSurface.RESULT_ARCHIVE_REQUEST: "problem-locator-pack-result",
-        AgentJsonSurface.USER_RESULT: "problem-locator-finalize-outcome",
+        AgentJsonSurface.USER_RESULT: "problem-locator-seal-outcome-draft",
     }
 
 

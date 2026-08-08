@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import stat
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -25,6 +26,34 @@ CONTRACT_FIXTURE = (
 CLAIM_RELATIVE_PATH = Path("runtime/tool-state/logparse-parse.claim")
 
 
+def _assert_claim_creation_mode(metadata: os.stat_result) -> None:
+    mode = stat.S_IMODE(metadata.st_mode)
+    if os.name == "nt":
+        # The Windows CRT maps the DOS read-only attribute onto every rw class;
+        # per-principal access is enforced by the inherited workspace ACL, not
+        # represented by st_mode.  A newly-created writable file is therefore
+        # reported as 0666 even though os.open received 0600.
+        assert mode == 0o666
+    else:
+        assert mode == 0o600
+
+
+def _symlink_or_skip(
+    link: Path,
+    target: Path,
+    *,
+    target_is_directory: bool = False,
+) -> None:
+    try:
+        link.symlink_to(target, target_is_directory=target_is_directory)
+    except NotImplementedError as exc:
+        pytest.skip(f"symbolic link creation is unavailable: {exc}")
+    except OSError as exc:
+        if os.name == "nt" and getattr(exc, "winerror", None) == 1314:
+            pytest.skip("symbolic link creation requires Windows developer mode")
+        raise
+
+
 def _claim(**updates: Any) -> LogparseParseClaim:
     payload = json.loads(CONTRACT_FIXTURE.read_text(encoding="utf-8"))
     payload.update(updates)
@@ -45,7 +74,7 @@ def test_create_parse_claim_writes_the_exact_s00_bytes_at_the_reserved_path(
     metadata = target.lstat()
     assert stat.S_ISREG(metadata.st_mode)
     assert metadata.st_nlink == 1
-    assert stat.S_IMODE(metadata.st_mode) == 0o600
+    _assert_claim_creation_mode(metadata)
     assert (workspace / "runtime").is_dir()
     assert (workspace / "runtime/tool-state").is_dir()
 
@@ -81,7 +110,7 @@ def test_create_parse_claim_rejects_every_second_parse_without_touching_the_firs
     assert after.st_ino == before.st_ino
     assert after.st_mtime_ns == before.st_mtime_ns
     assert after.st_size == before.st_size
-    assert stat.S_IMODE(after.st_mode) == 0o600
+    _assert_claim_creation_mode(after)
 
 
 @pytest.mark.parametrize("node_kind", ["file", "directory", "symlink"])
@@ -102,9 +131,15 @@ def test_create_parse_claim_rejects_every_preexisting_target_node(
         target.mkdir()
     else:
         external.write_bytes(sentinel)
-        target.symlink_to(external)
+        _symlink_or_skip(target, external)
 
-    with pytest.raises(FileExistsError, match="already exists"):
+    expected_error = (
+        ValueError if os.name == "nt" and node_kind == "directory" else FileExistsError
+    )
+    expected_message = (
+        "cannot be reserved" if expected_error is ValueError else "already exists"
+    )
+    with pytest.raises(expected_error, match=expected_message):
         create_parse_claim(workspace, _claim())
 
     if node_kind == "file":
@@ -130,15 +165,21 @@ def test_create_parse_claim_rejects_symlinks_in_the_workspace_path(
         actual_workspace = tmp_path / "actual-workspace"
         actual_workspace.mkdir()
         workspace = tmp_path / "workspace"
-        workspace.symlink_to(actual_workspace, target_is_directory=True)
+        _symlink_or_skip(
+            workspace,
+            actual_workspace,
+            target_is_directory=True,
+        )
         escaped_claim = actual_workspace / CLAIM_RELATIVE_PATH
     elif symlink_position == "runtime":
         workspace = tmp_path / "workspace"
         workspace.mkdir()
         external_runtime = tmp_path / "external-runtime"
         external_runtime.mkdir()
-        (workspace / "runtime").symlink_to(
-            external_runtime, target_is_directory=True
+        _symlink_or_skip(
+            workspace / "runtime",
+            external_runtime,
+            target_is_directory=True,
         )
         escaped_claim = external_runtime / "tool-state/logparse-parse.claim"
     elif symlink_position == "tool-state":
@@ -146,8 +187,10 @@ def test_create_parse_claim_rejects_symlinks_in_the_workspace_path(
         (workspace / "runtime").mkdir(parents=True)
         external_state = tmp_path / "external-state"
         external_state.mkdir()
-        (workspace / "runtime/tool-state").symlink_to(
-            external_state, target_is_directory=True
+        _symlink_or_skip(
+            workspace / "runtime/tool-state",
+            external_state,
+            target_is_directory=True,
         )
         escaped_claim = external_state / "logparse-parse.claim"
     else:
@@ -156,7 +199,11 @@ def test_create_parse_claim_rejects_symlinks_in_the_workspace_path(
         actual_workspace = actual_parent / "workspace"
         actual_workspace.mkdir()
         linked_parent = tmp_path / "linked-parent"
-        linked_parent.symlink_to(actual_parent, target_is_directory=True)
+        _symlink_or_skip(
+            linked_parent,
+            actual_parent,
+            target_is_directory=True,
+        )
         workspace = linked_parent / "workspace"
         escaped_claim = actual_workspace / CLAIM_RELATIVE_PATH
 

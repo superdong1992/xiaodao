@@ -68,6 +68,7 @@ from .tree import verify_tree
 
 _StageClaimPurpose = Literal["stage", "cleanup"]
 _SHA256_ADAPTER = TypeAdapter(Sha256)
+_OPAQUE_ID_ADAPTER = TypeAdapter(OpaqueId)
 
 
 def _port_error(
@@ -469,6 +470,89 @@ class FileResourceStore:
             raise _port_error(
                 ErrorCode.RESOURCE_STAGE_FAILED,
                 "The proposed file could not be staged.",
+            ) from None
+
+    def stage_generated_file(
+        self,
+        owner_job_id: OpaqueId,
+        proposal_key: str,
+        staging_id: OpaqueId,
+        stream: BinaryStream,
+        expected_size: int,
+        expected_sha256: str,
+    ) -> StagedResourceRef:
+        """Idempotently stage one deterministic server-generated file."""
+
+        self._validate_expected_metadata(expected_size, expected_sha256)
+        try:
+            canonical_staging_id = _OPAQUE_ID_ADAPTER.validate_python(
+                staging_id, strict=True
+            )
+            directory = proposal_stage_path(
+                self.layout.data_root,
+                owner_job_id,
+                proposal_key,
+            )
+        except (TypeError, ValueError, ValidationError):
+            raise _port_error(
+                ErrorCode.PATH_VIOLATION,
+                "The generated staging identity is invalid.",
+            ) from None
+        try:
+            with self.stage_registry.acquire_stage(directory):
+                marker = self._writer.read_marker(directory)
+                if marker is not None:
+                    staged_ref = parse_canonical_json_bytes(
+                        marker, StagedResourceRef
+                    )
+                    if (
+                        staged_ref.staging_id != canonical_staging_id
+                        or staged_ref.owner_job_id != owner_job_id
+                        or staged_ref.proposal_key != proposal_key
+                        or staged_ref.resource_kind is not ResourceKind.FILE
+                        or staged_ref.size != expected_size
+                        or staged_ref.sha256 != expected_sha256
+                        or staged_ref.tree_manifest is not None
+                    ):
+                        raise _port_error(
+                            ErrorCode.RESOURCE_HASH_MISMATCH,
+                            "The generated staged marker differs from deterministic input.",
+                        )
+                    self._validate_staged_content(staged_ref)
+                    return staged_ref
+                observation = self._writer.stage_file_content(
+                    directory,
+                    stream,
+                    byte_limit=MAX_CASE_RESOURCE_BYTES,
+                    expected_size=expected_size,
+                    expected_sha256=expected_sha256,
+                )
+                staged_ref = StagedResourceRef(
+                    staging_id=canonical_staging_id,
+                    owner_job_id=owner_job_id,
+                    proposal_key=proposal_key,
+                    resource_kind=ResourceKind.FILE,
+                    size=observation.size,
+                    sha256=observation.sha256,
+                    tree_manifest=None,
+                )
+                self._writer.publish_marker(
+                    directory,
+                    self._expected_marker_bytes(staged_ref),
+                )
+                return staged_ref
+        except ApplicationPortError:
+            raise
+        except ValueError as error:
+            code = self._stage_value_error_code(error)
+            raise _port_error(
+                code,
+                "The generated audit file could not be staged.",
+            ) from None
+        except (FileExistsError, OSError, TypeError, ValidationError, RuntimeError):
+            raise _port_error(
+                ErrorCode.RESOURCE_STAGE_FAILED,
+                "The generated audit file could not be staged.",
             ) from None
 
     def stage_tree(

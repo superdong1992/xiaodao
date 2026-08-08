@@ -30,6 +30,7 @@ from tests.contracts.fakes import (
     InMemoryStateRepository,
     RecordingDispatcher,
 )
+from tests.v2_helpers import resolved_logparse_plan
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -101,7 +102,7 @@ def _manifest(job: Job, outcome: JobOutcome) -> WorkspaceInputManifest:
     encoded = canonical_json_bytes(outcome)
     return WorkspaceInputManifest.model_validate(
         {
-            "schema_version": 1,
+            "schema_version": 2,
             "job_id": job.job_id,
             "case_id": job.case_id,
             "job_type": job.job_type.value,
@@ -125,6 +126,27 @@ def _manifest(job: Job, outcome: JobOutcome) -> WorkspaceInputManifest:
                     "result_type": outcome.result_type.value,
                 }
             ],
+            "resolved_logparse_plan": (
+                None
+                if (
+                    job.logparse_tool_ref is None
+                    or not (job.attachment_refs or job.artifact_refs)
+                )
+                else resolved_logparse_plan(
+                    job,
+                    problem_time="2026-07-31T00:00:00.000Z",
+                    anchors=[
+                        {
+                            "label": "request",
+                            "module": "payment",
+                            "slot": "caller",
+                            "process_name": "payment-service",
+                            "pid": None,
+                        }
+                    ],
+                ).model_dump(mode="json")
+            ),
+            "review_subject": None,
         }
     )
 

@@ -51,13 +51,15 @@ def _fixture_payload(name: str) -> dict[str, Any]:
 def _route_inputs() -> tuple[Job, WorkspaceInputManifest]:
     job = Job.model_validate(_fixture_payload("job-route.json"))
     manifest = WorkspaceInputManifest(
-        schema_version=1,
+        schema_version=2,
         job_id=job.job_id,
         case_id=job.case_id,
         job_type=job.job_type,
         logparse_tool_ref=None,
         logparse_product=None,
         entries=[],
+        resolved_logparse_plan=None,
+        review_subject=None,
     )
     return job, manifest
 
@@ -576,6 +578,15 @@ def _logparse_inputs(
         for entry in manifest_payload["entries"]
         if entry["input_kind"] != "ARTIFACT"
     ]
+    attachment_id = next(
+        entry["resource_id"]
+        for entry in manifest_payload["entries"]
+        if entry["input_kind"] == "ATTACHMENT"
+    )
+    manifest_payload["resolved_logparse_plan"].update(
+        attachment_id=attachment_id,
+        artifact_id=None,
+    )
     manifest = WorkspaceInputManifest.model_validate(manifest_payload)
 
     root = tmp_path / "output/proposals/logparse_run/tree"

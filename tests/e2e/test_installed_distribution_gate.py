@@ -495,9 +495,9 @@ def test_clean_installed_distribution_import_cli_and_server_gate(
     )
     assert not proxy_entrypoint.exists()
     finalizer_entrypoint = installed_python.parent / (
-        "problem-locator-finalize-outcome.exe"
+        "problem-locator-seal-outcome-draft.exe"
         if os.name == "nt"
-        else "problem-locator-finalize-outcome"
+        else "problem-locator-seal-outcome-draft"
     )
     assert finalizer_entrypoint.is_file()
 

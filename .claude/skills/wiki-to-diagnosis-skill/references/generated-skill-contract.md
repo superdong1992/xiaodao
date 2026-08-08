@@ -2,16 +2,17 @@
 
 生成产品恰好包含 `SKILL.md` 和 Canonical `diagnosis-skill.json`。
 
-manifest schema v2 必填字段：
+manifest schema v3 必填字段：
 
 ```text
-schema_version=2
+schema_version=3
 id, version>=3.0.0, capability, summary
 entry_document=SKILL.md
 tool_bundle_id=tool-bundle/diagnose
 requires_logparse
 requirements[]
 logparse_plan
+verification_contract
 ```
 
 `logparse_product` 是唯一可选字段：省略表示有效值 `default`；仅非默认产品出现。
@@ -25,6 +26,7 @@ stage = INITIAL | AFTER_LOGPARSE
 fulfillment_source = USER_FACT | READY_ATTACHMENT
 prompt
 constraints = S00 InputRequirementConstraints | AttachmentRequirementConstraints
+supplement_policy = NONE | MISSING_ONLY
 ```
 
 INPUT 只能配 USER_FACT；ATTACHMENT 只能配 READY_ATTACHMENT。所有项天然 required，
@@ -56,6 +58,30 @@ S00 AttachmentRequirementConstraints。Content-Type 不是生成时的用户输�
 每个 ValueBinding 只能是 `USER_FACT{name}` 或 `SKILL_FIXED{value}`；USER_FACT name 必须
 引用 INPUT requirement。`requires_logparse=false` 强制 plan=null、无 AFTER_LOGPARSE、
 且省略 product。`requires_logparse=true` 要求显式 plan，但不会自动产生任何字段。
+
+`verification_contract` 字段恰好为 `schema_version=1`、`event_extractors[]` 和
+`rules[]`。Logparse Skill 至少声明一个 extractor；无 Logparse Skill 必须使用空数组。
+Runtime 以它为服务端验证输入；Agent 的自然语言解释不是机器判定结果。
+extractor 恰好声明：
+
+```text
+id, anchor, line_pattern
+timestamp_group, timestamp_format=RFC3339_MILLIS_UTC
+field_groups[], match_cardinality=EXACTLY_ONE
+```
+
+`line_pattern` 是 `^...$` UTF-8 单行 Python 正则，命名捕获组集合必须恰好等于时间组和
+field_groups；缺失或多次匹配都不能通过。规则恰好声明
+`id/kind/description/depends_on/remediation_requirements/parameters`，dependency 只能引用前置
+rule。`remediation_requirements` 只能引用 `MISSING_ONLY` requirement，不能替换已有事实。
+
+生成的 `SKILL.md` 使用 V2 两阶段交付：Agent 写
+`output/job_outcome.draft.json` 并调用 `problem-locator-seal-outcome-draft`；只有 Agent
+进程退出后的服务端验证器可以生成权威 `output/job_outcome.json` 与 decision audit。
+kind 固定为 `EVENT_PRESENT | EVENT_TIME_WINDOW | FACT_FIELD_EQUALS | ROLE_COVERAGE |
+CROSS_ROLE_CORRELATION | EVENT_ORDER | SEMANTIC_CAUSALITY`。普通时间窗必须显式声明
+`before_ms/after_ms/lower_bound/upper_bound`，无默认窗口。本版本不支持 suppression、
+rate-limit 或日志采样语义。
 
 LOGPARSE Evidence 不复制或重声明目标日志文件：`workspace_relative_path` 固定为 null，
 `locator.relative_path` 相对于绑定的 LOGPARSE_RUN tree root；新运行使用

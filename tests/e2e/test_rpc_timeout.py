@@ -7,6 +7,7 @@ import json
 import os
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -94,15 +95,46 @@ PARAMETER_GROUP_A = {
     "rpc_method": "ReserveStock",
     "problem_time": "2026-07-31T00:00:03.000Z",
 }
+RPC_CLIENT_LOG = (
+    "2026-07-31T00:00:03.000Z COMPACT payment-service "
+    "proc=checkout-client-101 slot 1 cpu 0 |No[1] rpc deadline exceeded "
+    "after 3000ms server=inventory-service method=ReserveStock "
+    "order_id=synthetic-order-0001\n"
+)
+RPC_SERVER_LOG = (
+    "2026-07-31T00:00:00.100Z COMPACT inventory-service "
+    "proc=inventory-server-202 slot 2 cpu 0 |No[2] service takeover active; "
+    "rpc request accepted method=ReserveStock order_id=synthetic-order-0001\n"
+    "2026-07-31T00:00:02.900Z COMPACT inventory-service "
+    "proc=inventory-server-202 slot 2 cpu 0 |No[3] connection pool wait "
+    "2800ms complete order_id=synthetic-order-0001\n"
+)
 
 
 def _materialize_fake_logparse_checkout(parent: Path) -> tuple[Path, Path]:
     """Give fingerprinting a real top-level Git checkout on every platform."""
 
-    checkout = parent / "fake-logparse-checkout"
+    checkout = parent / ".s08lp"
     if not checkout.exists():
         checkout.mkdir()
-        shutil.copyfile(FAKE_LOGPARSE_REPO / "cli.py", checkout / "cli.py")
+        source = (FAKE_LOGPARSE_REPO / "cli.py").read_text(encoding="utf-8")
+        prefix, found, remainder = source.partition("CLIENT_LOG = (")
+        _, function_marker, body = remainder.partition(
+            "\ndef _reserved_environment_present"
+        )
+        assert found and function_marker
+        customized = (
+            prefix
+            + f"CLIENT_LOG = {RPC_CLIENT_LOG!r}\n"
+            + f"SERVER_LOG = {RPC_SERVER_LOG!r}\n\n"
+            + function_marker
+            + body
+        )
+        (checkout / "cli.py").write_text(
+            customized,
+            encoding="utf-8",
+            newline="\n",
+        )
         shutil.copyfile(FAKE_LOGPARSE_CONFIG, checkout / "config.yaml")
         subprocess.run(
             ["git", "-C", os.fspath(checkout), "init", "--quiet"],
@@ -119,6 +151,17 @@ def _materialize_fake_logparse_checkout(parent: Path) -> tuple[Path, Path]:
             stderr=subprocess.PIPE,
         )
     return checkout, checkout / "config.yaml"
+
+
+def _remove_test_data_root(root: Path) -> None:
+    if not root.exists():
+        return
+
+    def remove_readonly(function, path, _error) -> None:
+        os.chmod(path, stat.S_IWRITE)
+        function(path)
+
+    shutil.rmtree(root, onexc=remove_readonly)
 
 
 class _E2EIds(DeterministicIdGenerator):
@@ -480,8 +523,15 @@ def test_rpc_timeout_fixture_manifest_is_schema_valid_and_exhaustive() -> None:
 def test_r01_r14_rpc_timeout_is_one_durable_cross_module_path(
     tmp_path: Path,
     monkeypatch,
+    request,
 ) -> None:
-    data_root = tmp_path / "data"
+    # Keep the staged LOGPARSE_RUN below the legacy Windows MAX_PATH boundary.
+    data_root = ROOT / ".s08"
+    logparse_checkout = ROOT / ".s08lp"
+    _remove_test_data_root(data_root)
+    _remove_test_data_root(logparse_checkout)
+    request.addfinalizer(lambda: _remove_test_data_root(data_root))
+    request.addfinalizer(lambda: _remove_test_data_root(logparse_checkout))
     logparse_record = tmp_path / "logparse-invocations.json"
     agent_record = tmp_path / "agent-sessions.jsonl"
     review_entered = tmp_path / "review-entered"
@@ -507,6 +557,8 @@ def test_r01_r14_rpc_timeout_is_one_durable_cross_module_path(
             "inventory.log",
             "archive-marker.txt",
         ]
+        assert fixture_archive.read("payment.log") == RPC_CLIENT_LOG.encode("utf-8")
+        assert fixture_archive.read("inventory.log") == RPC_SERVER_LOG.encode("utf-8")
         assert ARCHIVE_BYTES_MARKER in fixture_archive.read("archive-marker.txt")
     expected_result = EXPECTED_USER_RESULT.read_bytes()
     assert len(expected_result) == 808
@@ -918,7 +970,20 @@ def test_r01_r14_rpc_timeout_is_one_durable_cross_module_path(
             canonical_json_bytes(dict(hidden.headers)),
         ]
     )
-    assert len(stack.broker_factory.capabilities) == 4
+    capabilities = stack.broker_factory.capabilities
+    assert len(capabilities) == 2
+    assert len(
+        {
+            item["PROBLEM_LOCATOR_LOGPARSE_ENDPOINT"]
+            for item in capabilities
+        }
+    ) == 2
+    assert len(
+        {
+            item["PROBLEM_LOCATOR_LOGPARSE_TOKEN"]
+            for item in capabilities
+        }
+    ) == 2
     assert len(restarted.broker_factory.capabilities) == 0
     attachment_path = data_root / ready_attachment.storage_key
     assert attachment_path.read_bytes() == archive

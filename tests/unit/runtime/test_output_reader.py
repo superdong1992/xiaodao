@@ -13,7 +13,8 @@ import problem_locator.runtime.output_reader as output_reader_module
 
 from problem_locator.contracts.enums import ErrorCode, ExecutionStage, ResourceKind
 from problem_locator.contracts.models import (
-    AgentJobOutcome,
+    AgentJobOutcomeDraftV2,
+    DecisionAuditV2,
     FixtureManifest,
     Job,
     TreeManifest,
@@ -31,9 +32,13 @@ from problem_locator.runtime.output_reader import (
     RejectedAgentOutputError,
     read_agent_output,
 )
+from problem_locator.runtime.server_outcome_finalizer import (
+    finalize_server_outcome,
+)
+from problem_locator.runtime.server_verifier import VerificationResult
 from problem_locator.runtime.outcome_finalizer import (
-    FINALIZATION_MARKER_NAME,
-    FinalizedAgentOutcomeMarker,
+    DRAFT_FINALIZATION_MARKER_NAME,
+    SealedAgentOutcomeDraftMarker,
 )
 from problem_locator.runtime.workspace import PreparedWorkspace
 
@@ -59,7 +64,7 @@ def _diagnosis_inputs() -> tuple[Job, WorkspaceInputManifest, dict[str, Any], by
     return (
         job,
         manifest,
-        _fixture_payload("agent-job-outcome-diagnosis.json"),
+        _fixture_payload("agent-job-outcome-draft-diagnosis.json"),
         (CONTRACT_FIXTURES / "user-result.json").read_bytes(),
     )
 
@@ -70,32 +75,34 @@ def _route_inputs() -> tuple[Job, WorkspaceInputManifest, dict[str, Any]]:
         model_type=Job,
     )
     manifest = WorkspaceInputManifest(
-        schema_version=1,
+        schema_version=2,
         job_id=job.job_id,
         case_id=job.case_id,
         job_type=job.job_type,
         logparse_tool_ref=None,
         logparse_product=None,
         entries=[],
+        resolved_logparse_plan=None,
+        review_subject=None,
     )
-    return job, manifest, _fixture_payload("agent-job-outcome-route.json")
+    return job, manifest, _fixture_payload("agent-job-outcome-draft-route.json")
 
 
 def _write_outcome(root: Path, payload: dict[str, Any] | bytes) -> Path:
     output = root / "output"
     output.mkdir(parents=True, exist_ok=True)
     data = payload if isinstance(payload, bytes) else canonical_json_bytes(payload)
-    path = output / "job_outcome.json"
+    path = output / "job_outcome.draft.json"
     path.write_bytes(data)
     tool_state = root / "runtime" / "tool-state"
     tool_state.mkdir(parents=True, exist_ok=True)
-    marker = FinalizedAgentOutcomeMarker(
-        schema_version=1,
-        relative_path="output/job_outcome.json",
+    marker = SealedAgentOutcomeDraftMarker(
+        schema_version=2,
+        relative_path="output/job_outcome.draft.json",
         size=len(data),
         sha256=hashlib.sha256(data).hexdigest(),
     )
-    (tool_state / FINALIZATION_MARKER_NAME).write_bytes(
+    (tool_state / DRAFT_FINALIZATION_MARKER_NAME).write_bytes(
         canonical_json_bytes(marker)
     )
     return path
@@ -149,19 +156,16 @@ def test_reads_only_final_canonical_outcome_and_validates_user_result(
 ) -> None:
     job, manifest, payload, user_result_bytes = _diagnosis_inputs()
     outcome_path = _write_outcome(tmp_path, payload)
-    (outcome_path.parent / "job_outcome.json.part").write_bytes(b"not JSON")
+    (outcome_path.parent / "job_outcome.draft.json.part").write_bytes(b"not JSON")
     draft = payload["proposed_artifact_drafts"][0]
     _write_file_proposal(tmp_path, draft["workspace_relative_path"], user_result_bytes)
 
     result = read_agent_output(tmp_path, job, manifest)
 
-    expected_outcome = AgentJobOutcome.model_validate(payload)
-    assert result.outcome == expected_outcome
+    expected_outcome = AgentJobOutcomeDraftV2.model_validate(payload)
+    assert result.draft == expected_outcome
     assert result.canonical_bytes == canonical_json_bytes(expected_outcome)
-    assert result.user_result is not None
-    assert result.user_result.candidate_statement == (
-        "The inventory RPC exceeded its deadline."
-    )
+    assert result.user_result_bytes == user_result_bytes
     assert len(result.proposal_resources) == 1
     resource = result.proposal_resources[0]
     assert resource.proposal_key == "user_result"
@@ -635,7 +639,9 @@ def test_part_file_without_final_is_outcome_missing(
     job, manifest, _ = _route_inputs()
     output = tmp_path / "output"
     output.mkdir()
-    (output / "job_outcome.json.part").write_bytes(b"complete-looking bytes")
+    (output / "job_outcome.draft.json.part").write_bytes(
+        b"complete-looking bytes"
+    )
 
     with pytest.raises(RuntimeExecutionError) as captured:
         read_agent_output(tmp_path, job, manifest)
@@ -718,7 +724,9 @@ def test_finalizer_marker_failures_are_distinguished_after_outcome_validation(
 ) -> None:
     job, manifest, payload = _route_inputs()
     outcome_path = _write_outcome(tmp_path, payload)
-    marker_path = tmp_path / "runtime/tool-state" / FINALIZATION_MARKER_NAME
+    marker_path = (
+        tmp_path / "runtime/tool-state" / DRAFT_FINALIZATION_MARKER_NAME
+    )
     if marker_state == "missing":
         marker_path.unlink()
     elif marker_state == "invalid":
@@ -726,9 +734,9 @@ def test_finalizer_marker_failures_are_distinguished_after_outcome_validation(
     else:
         marker_path.write_bytes(
             canonical_json_bytes(
-                FinalizedAgentOutcomeMarker(
-                    schema_version=1,
-                    relative_path="output/job_outcome.json",
+                SealedAgentOutcomeDraftMarker(
+                    schema_version=2,
+                    relative_path="output/job_outcome.draft.json",
                     size=0,
                     sha256="0" * 64,
                 )
@@ -760,7 +768,7 @@ def test_outcome_must_be_an_ordinary_single_link_file(tmp_path: Path) -> None:
     output.mkdir()
     source = tmp_path / "source.json"
     source.write_bytes(canonical_json_bytes(payload))
-    os.link(source, output / "job_outcome.json")
+    os.link(source, output / "job_outcome.draft.json")
 
     with pytest.raises(RuntimeExecutionError) as captured:
         read_agent_output(tmp_path, job, manifest)
@@ -775,7 +783,7 @@ def test_outcome_symlink_is_not_followed(tmp_path: Path) -> None:
     target = tmp_path / "target.json"
     target.write_bytes(canonical_json_bytes(payload))
     try:
-        (output / "job_outcome.json").symlink_to(target)
+        (output / "job_outcome.draft.json").symlink_to(target)
     except (NotImplementedError, OSError):
         pytest.skip("symbolic links are unavailable on this platform")
 
@@ -785,18 +793,16 @@ def test_outcome_symlink_is_not_followed(tmp_path: Path) -> None:
     _assert_failure(captured, ErrorCode.OUTCOME_INVALID)
 
 
-def test_prepared_workspace_root_replacement_is_rejected(tmp_path: Path) -> None:
-    job, manifest, payload = _route_inputs()
-    root = tmp_path / "workspace"
-    for relative in ("inputs", "runtime/tool-state", "output"):
-        (root / relative).mkdir(parents=True, exist_ok=True)
-    _write_outcome(root, payload)
+def _prepared_workspace(
+    root: Path,
+    manifest: WorkspaceInputManifest,
+) -> PreparedWorkspace:
     root_stat = root.stat(follow_symlinks=False)
     inputs_stat = (root / "inputs").stat(follow_symlinks=False)
     runtime_stat = (root / "runtime").stat(follow_symlinks=False)
     tool_state_stat = (root / "runtime/tool-state").stat(follow_symlinks=False)
     output_stat = (root / "output").stat(follow_symlinks=False)
-    prepared = PreparedWorkspace(
+    return PreparedWorkspace(
         root=root,
         root_device=root_stat.st_dev,
         root_inode=root_stat.st_ino,
@@ -815,6 +821,34 @@ def test_prepared_workspace_root_replacement_is_rejected(tmp_path: Path) -> None
         artifacts=(),
         previous_outcomes=(),
     )
+
+
+def test_prepared_workspace_without_plan_rejects_forged_logparse_claim(
+    tmp_path: Path,
+) -> None:
+    job, manifest, payload = _route_inputs()
+    root = tmp_path / "workspace"
+    for relative in ("inputs", "runtime/tool-state", "output"):
+        (root / relative).mkdir(parents=True, exist_ok=True)
+    _write_outcome(root, payload)
+    (root / "runtime/tool-state/logparse-parse.claim").write_bytes(
+        (CONTRACT_FIXTURES / "logparse-parse-claim.json").read_bytes()
+    )
+    prepared = _prepared_workspace(root, manifest)
+
+    with pytest.raises(RuntimeExecutionError) as captured:
+        read_agent_output(prepared, job, manifest)
+
+    _assert_failure(captured, ErrorCode.OUTCOME_INVALID)
+
+
+def test_prepared_workspace_root_replacement_is_rejected(tmp_path: Path) -> None:
+    job, manifest, payload = _route_inputs()
+    root = tmp_path / "workspace"
+    for relative in ("inputs", "runtime/tool-state", "output"):
+        (root / relative).mkdir(parents=True, exist_ok=True)
+    _write_outcome(root, payload)
+    prepared = _prepared_workspace(root, manifest)
     root.rename(tmp_path / "original-workspace")
     _write_outcome(root, payload)
 
@@ -859,7 +893,7 @@ def test_valid_directory_proposal_builds_the_frozen_tree_manifest(
 
     result = read_agent_output(tmp_path, job, manifest)
 
-    assert result.user_result is None
+    assert result.user_result_bytes is None
     assert len(result.proposal_resources) == 1
     resource = result.proposal_resources[0]
     assert resource.resource_kind is ResourceKind.DIRECTORY
@@ -1281,66 +1315,54 @@ def test_proposal_parent_symlink_cannot_escape_workspace(tmp_path: Path) -> None
     _assert_failure(captured, ErrorCode.OUTCOME_INVALID)
 
 
-def test_user_result_must_be_canonical_and_semantically_exact(
+def test_user_result_semantics_are_deferred_to_server_finalization(
     tmp_path: Path,
-    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    caplog.set_level(logging.INFO, logger="problem_locator.dfx")
-    job, manifest, payload, canonical_result = _diagnosis_inputs()
-    result_payload = json.loads(canonical_result)
-    result_payload["candidate_statement"] = "A different conclusion."
-    wrong_result = canonical_json_bytes(result_payload)
-    draft = payload["proposed_artifact_drafts"][0]
-    draft["declared_size"] = len(wrong_result)
-    draft["declared_sha256"] = hashlib.sha256(wrong_result).hexdigest()
-    _write_outcome(tmp_path, payload)
-    _write_file_proposal(tmp_path, draft["workspace_relative_path"], wrong_result)
-
-    with pytest.raises(RuntimeExecutionError) as semantic:
-        read_agent_output(tmp_path, job, manifest)
-    _assert_failure(semantic, ErrorCode.OUTCOME_INVALID)
-    rejected = next(
-        record
-        for record in caplog.records
-        if getattr(record, "dfx_event", "") == "runtime.agent_output.rejected"
-    )
-    assert rejected.dfx_fields["failure_category"] == (
-        "user_result_candidate_statement_mismatch"
+    _, _, _, canonical_result = _diagnosis_inputs()
+    semantic_payload = json.loads(canonical_result)
+    semantic_payload["candidate_statement"] = "A different conclusion."
+    schema_payload = dict(semantic_payload)
+    del schema_payload["candidate_statement"]
+    cases = [
+        canonical_json_bytes(semantic_payload),
+        json.dumps(semantic_payload, indent=2).encode("utf-8") + b"\n",
+        canonical_json_bytes(schema_payload),
+    ]
+    final_fixture = _fixture_payload("agent-job-outcome-diagnosis.json")
+    audit = DecisionAuditV2.model_validate(final_fixture["decision_audit"])
+    verification = VerificationResult(
+        audit=audit,
+        positive_gate_passed=True,
+        decision_evidence_bytes=b"",
     )
 
-    caplog.clear()
-    noncanonical = json.dumps(result_payload, indent=2).encode("utf-8") + b"\n"
-    draft["declared_size"] = len(noncanonical)
-    draft["declared_sha256"] = hashlib.sha256(noncanonical).hexdigest()
-    _write_outcome(tmp_path, payload)
-    _write_file_proposal(tmp_path, draft["workspace_relative_path"], noncanonical)
-    with pytest.raises(RuntimeExecutionError) as spelling:
-        read_agent_output(tmp_path, job, manifest)
-    _assert_failure(spelling, ErrorCode.OUTCOME_INVALID)
-    rejected = next(
-        record
-        for record in caplog.records
-        if getattr(record, "dfx_event", "") == "runtime.agent_output.rejected"
-    )
-    assert rejected.dfx_fields["failure_category"] == "user_result_canonical"
+    for index, result_bytes in enumerate(cases):
+        root = tmp_path / f"case-{index}"
+        job, manifest, payload, _ = _diagnosis_inputs()
+        proposal = payload["proposed_artifact_drafts"][0]
+        proposal["declared_size"] = len(result_bytes)
+        proposal["declared_sha256"] = hashlib.sha256(result_bytes).hexdigest()
+        _write_outcome(root, payload)
+        _write_file_proposal(
+            root,
+            proposal["workspace_relative_path"],
+            result_bytes,
+        )
 
-    caplog.clear()
-    schema_invalid_payload = dict(result_payload)
-    del schema_invalid_payload["candidate_statement"]
-    schema_invalid = canonical_json_bytes(schema_invalid_payload)
-    draft["declared_size"] = len(schema_invalid)
-    draft["declared_sha256"] = hashlib.sha256(schema_invalid).hexdigest()
-    _write_outcome(tmp_path, payload)
-    _write_file_proposal(tmp_path, draft["workspace_relative_path"], schema_invalid)
-    with pytest.raises(RuntimeExecutionError) as schema:
-        read_agent_output(tmp_path, job, manifest)
-    _assert_failure(schema, ErrorCode.OUTCOME_INVALID)
-    rejected = next(
-        record
-        for record in caplog.records
-        if getattr(record, "dfx_event", "") == "runtime.agent_output.rejected"
-    )
-    assert rejected.dfx_fields["failure_category"] == "user_result_schema"
+        validated = read_agent_output(root, job, manifest)
+        assert validated.user_result_bytes == result_bytes
+        with pytest.raises(ValueError):
+            finalize_server_outcome(
+                workspace_root=root,
+                job=job,
+                manifest=manifest,
+                draft=validated.draft,
+                draft_bytes=validated.canonical_bytes,
+                outcome_id=f"00000000-0000-0000-0000-{90 + index:012d}",
+                produced_at="2026-08-08T00:00:00.000Z",
+                verification=verification,
+                user_result_bytes=validated.user_result_bytes,
+            )
 
 
 def test_duplicate_proposal_key_is_rejected_before_any_resource_is_returned(

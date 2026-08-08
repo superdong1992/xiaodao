@@ -177,6 +177,7 @@ def make_outcome_processing_record(
     error_code: ErrorCode | None,
     accepted_evidence_ids: list[str],
     accepted_artifact_ids: list[str],
+    generated_artifact_ids: list[str],
     created_job_id: str | None,
     reason: str,
 ) -> OutcomeProcessingRecord:
@@ -192,6 +193,7 @@ def make_outcome_processing_record(
         error_code=error_code,
         accepted_evidence_ids=accepted_evidence_ids,
         accepted_artifact_ids=accepted_artifact_ids,
+        generated_artifact_ids=generated_artifact_ids,
         created_job_id=created_job_id,
         reason=reason,
     )

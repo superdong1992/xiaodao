@@ -296,6 +296,13 @@ def _review_pass_outcome(review_job: Job) -> JobOutcome:
         reviewed_state_revision=review_job.base_state_revision,
         reviewed_evidence_refs=list(review_job.evidence_refs),
     )
+    payload["decision_audit"].update(
+        job_id=review_job.job_id,
+        case_id=review_job.case_id,
+        job_type=review_job.job_type.value,
+        skill_ref=review_job.skill_ref.model_dump(mode="json"),
+        candidate_target=review_job.review_target.model_dump(mode="json"),
+    )
     return JobOutcome.model_validate(payload)
 
 

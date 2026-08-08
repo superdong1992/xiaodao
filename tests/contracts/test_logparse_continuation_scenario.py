@@ -206,12 +206,28 @@ def _first_job_and_manifest() -> tuple[Job, WorkspaceInputManifest]:
     job = Job.model_validate(job_payload)
 
     manifest = WorkspaceInputManifest(
-        schema_version=1,
+        schema_version=2,
         job_id=job.job_id,
         case_id=job.case_id,
         job_type=job.job_type,
         logparse_tool_ref=job.logparse_tool_ref,
         logparse_product=job.logparse_product,
+        resolved_logparse_plan={
+            "schema_version": 2,
+            "attachment_id": LOG_ARCHIVE_ID,
+            "artifact_id": None,
+            "problem_time": PARAMETERS_A["problem_time"],
+            "anchors": [
+                {
+                    "label": "caller",
+                    "module": PARAMETERS_A["caller_service"],
+                    "slot": "1",
+                    "process_name": PARAMETERS_A["caller_service"],
+                    "pid": None,
+                }
+            ],
+        },
+        review_subject=None,
         entries=[
             {
                 "input_kind": "ATTACHMENT",
@@ -392,12 +408,28 @@ def _continuation_manifest(
     previous_bytes = canonical_json_bytes(outcome)
     attachment_entry = first_manifest.entries[0].model_dump(mode="json")
     return WorkspaceInputManifest(
-        schema_version=1,
+        schema_version=2,
         job_id=job.job_id,
         case_id=job.case_id,
         job_type=job.job_type,
         logparse_tool_ref=job.logparse_tool_ref,
         logparse_product=job.logparse_product,
+        resolved_logparse_plan={
+            "schema_version": 2,
+            "attachment_id": None,
+            "artifact_id": LOGPARSE_ARTIFACT_ID,
+            "problem_time": PARAMETERS_A["problem_time"],
+            "anchors": [
+                {
+                    "label": "caller",
+                    "module": PARAMETERS_A["caller_service"],
+                    "slot": "1",
+                    "process_name": PARAMETERS_A["caller_service"],
+                    "pid": None,
+                }
+            ],
+        },
+        review_subject=None,
         entries=[
             attachment_entry,
             {

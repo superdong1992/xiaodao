@@ -85,6 +85,7 @@ class _SkillDescriptor:
     logparse_product: str | None
     requirements: tuple[dict[str, Any], ...]
     logparse_plan: dict[str, Any] | None
+    verification_contract: dict[str, Any]
 
 
 _BUILTIN_SPECS = (
@@ -93,25 +94,31 @@ _BUILTIN_SPECS = (
         "profiles/specialist",
         AssetKind.AGENT_PROFILE,
         "agent-profile/specialist",
+        "1.0.1",
     ),
-    _BuiltinSpec("profiles/reviewer", AssetKind.AGENT_PROFILE, "agent-profile/reviewer"),
+    _BuiltinSpec(
+        "profiles/reviewer",
+        AssetKind.AGENT_PROFILE,
+        "agent-profile/reviewer",
+        "1.0.1",
+    ),
     _BuiltinSpec(
         "tool-bundles/router",
         AssetKind.TOOL_BUNDLE,
         "tool-bundle/router",
-        "1.0.1",
+        "2.0.0",
     ),
     _BuiltinSpec(
         "tool-bundles/diagnose",
         AssetKind.TOOL_BUNDLE,
         "tool-bundle/diagnose",
-        "1.0.1",
+        "2.0.0",
     ),
     _BuiltinSpec(
         "tool-bundles/review",
         AssetKind.TOOL_BUNDLE,
         "tool-bundle/review",
-        "1.0.1",
+        "2.0.0",
     ),
     _BuiltinSpec(
         "context-policies/route",
@@ -132,19 +139,19 @@ _BUILTIN_SPECS = (
         "output-contracts/route",
         AssetKind.OUTPUT_CONTRACT,
         "output-contract/route",
-        "1.0.1",
+        "2.0.0",
     ),
     _BuiltinSpec(
         "output-contracts/diagnose",
         AssetKind.OUTPUT_CONTRACT,
         "output-contract/diagnose",
-        "2.0.4",
+        "3.0.0",
     ),
     _BuiltinSpec(
         "output-contracts/review",
         AssetKind.OUTPUT_CONTRACT,
         "output-contract/review",
-        "1.0.1",
+        "2.0.0",
     ),
 )
 _BUILTIN_SPECS_BY_ID = {item.asset_id: item for item in _BUILTIN_SPECS}
@@ -484,6 +491,7 @@ def _require_skill_requirements(value: Any) -> tuple[dict[str, Any], ...]:
                 "fulfillment_source",
                 "prompt",
                 "constraints",
+                "supplement_policy",
             },
             manifest_name=field_name,
         )
@@ -496,6 +504,8 @@ def _require_skill_requirements(value: Any) -> tuple[dict[str, Any], ...]:
         kind = item["kind"]
         stage = item["stage"]
         source = item["fulfillment_source"]
+        if item["supplement_policy"] not in {"NONE", "MISSING_ONLY"}:
+            raise ValueError(f"{field_name}.supplement_policy is invalid")
         if stage not in {"INITIAL", "AFTER_LOGPARSE"}:
             raise ValueError(f"{field_name}.stage is invalid")
         if not isinstance(item["prompt"], str) or not item["prompt"]:
@@ -641,6 +651,331 @@ def _require_logparse_plan(
     return value
 
 
+_VERIFICATION_RULE_KINDS = frozenset(
+    {
+        "EVENT_PRESENT",
+        "EVENT_TIME_WINDOW",
+        "FACT_FIELD_EQUALS",
+        "ROLE_COVERAGE",
+        "CROSS_ROLE_CORRELATION",
+        "EVENT_ORDER",
+        "SEMANTIC_CAUSALITY",
+    }
+)
+_LOWER_SNAKE_PATTERN = re.compile(r"[a-z][a-z0-9_]{0,63}\Z")
+
+
+def _require_name_list(
+    value: Any,
+    *,
+    field_name: str,
+    minimum: int = 0,
+) -> list[str]:
+    if (
+        not isinstance(value, list)
+        or len(value) < minimum
+        or len(value) > 100
+        or any(
+            not isinstance(item, str)
+            or _LOWER_SNAKE_PATTERN.fullmatch(item) is None
+            for item in value
+        )
+        or len(value) != len(set(value))
+    ):
+        raise ValueError(f"{field_name} must contain unique lower-snake names")
+    return value
+
+
+def _require_event_field(
+    value: Any,
+    *,
+    field_name: str,
+) -> tuple[str, str]:
+    if not isinstance(value, dict):
+        raise ValueError(f"{field_name} must be an object")
+    _require_exact_fields(
+        value,
+        required={"event", "field"},
+        manifest_name=field_name,
+    )
+    event = value["event"]
+    field = value["field"]
+    if (
+        not isinstance(event, str)
+        or _LOWER_SNAKE_PATTERN.fullmatch(event) is None
+        or not isinstance(field, str)
+        or _LOWER_SNAKE_PATTERN.fullmatch(field) is None
+    ):
+        raise ValueError(f"{field_name} names are invalid")
+    return event, field
+
+
+def _require_verification_contract(
+    value: Any,
+    *,
+    requirements: tuple[dict[str, Any], ...],
+    logparse_plan: dict[str, Any] | None,
+    requires_logparse: bool,
+) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ValueError("verification_contract must be an object")
+    _require_exact_fields(
+        value,
+        required={"schema_version", "event_extractors", "rules"},
+        manifest_name="verification_contract",
+    )
+    if type(value["schema_version"]) is not int or value["schema_version"] != 1:
+        raise ValueError("verification_contract schema_version must equal integer 1")
+    anchor_labels = (
+        set()
+        if logparse_plan is None
+        else {item["label"] for item in logparse_plan["anchors"]}
+    )
+    extractors = value["event_extractors"]
+    if not isinstance(extractors, list) or len(extractors) > 100:
+        raise ValueError("verification_contract event_extractors must be an array")
+    if requires_logparse != bool(extractors):
+        raise ValueError("logparse Skills require extractors; non-logparse Skills forbid them")
+    extractor_by_id: dict[str, dict[str, Any]] = {}
+    for index, extractor in enumerate(extractors):
+        field_name = f"verification_contract.event_extractors[{index}]"
+        if not isinstance(extractor, dict):
+            raise ValueError(f"{field_name} must be an object")
+        _require_exact_fields(
+            extractor,
+            required={
+                "id",
+                "anchor",
+                "line_pattern",
+                "timestamp_group",
+                "timestamp_format",
+                "field_groups",
+                "match_cardinality",
+            },
+            manifest_name=field_name,
+        )
+        extractor_id = extractor["id"]
+        anchor = extractor["anchor"]
+        pattern = extractor["line_pattern"]
+        timestamp_group = extractor["timestamp_group"]
+        if (
+            not isinstance(extractor_id, str)
+            or _LOWER_SNAKE_PATTERN.fullmatch(extractor_id) is None
+            or extractor_id in extractor_by_id
+        ):
+            raise ValueError("event extractor ids must be unique lower-snake names")
+        if not isinstance(anchor, str) or anchor not in anchor_labels:
+            raise ValueError("event extractor anchor must name a logparse anchor")
+        if (
+            not isinstance(pattern, str)
+            or not pattern
+            or len(pattern.encode("utf-8")) > 8192
+            or "\n" in pattern
+            or "\r" in pattern
+            or not pattern.startswith("^")
+            or not pattern.endswith("$")
+        ):
+            raise ValueError("event extractor line_pattern must be UTF-8 single-line anchored")
+        try:
+            compiled = re.compile(pattern)
+        except re.error as exc:
+            raise ValueError("event extractor line_pattern is invalid") from exc
+        fields = _require_name_list(
+            extractor["field_groups"],
+            field_name=f"{field_name}.field_groups",
+        )
+        if (
+            not isinstance(timestamp_group, str)
+            or _LOWER_SNAKE_PATTERN.fullmatch(timestamp_group) is None
+            or timestamp_group in fields
+            or set(compiled.groupindex) != {timestamp_group, *fields}
+        ):
+            raise ValueError("event extractor named capture groups are invalid")
+        if extractor["timestamp_format"] != "RFC3339_MILLIS_UTC":
+            raise ValueError("event extractor timestamp_format is invalid")
+        if extractor["match_cardinality"] != "EXACTLY_ONE":
+            raise ValueError("event extractor match_cardinality is invalid")
+        extractor_by_id[extractor_id] = extractor
+
+    rules = value["rules"]
+    if not isinstance(rules, list) or not rules or len(rules) > 200:
+        raise ValueError("verification_contract rules must be a non-empty array")
+    requirement_by_name = {item["name"]: item for item in requirements}
+    input_names = {
+        item["name"] for item in requirements if item["kind"] == "INPUT"
+    }
+    seen_rule_ids: set[str] = set()
+    has_semantic_rule = False
+    for index, rule in enumerate(rules):
+        field_name = f"verification_contract.rules[{index}]"
+        if not isinstance(rule, dict):
+            raise ValueError(f"{field_name} must be an object")
+        _require_exact_fields(
+            rule,
+            required={
+                "id",
+                "kind",
+                "description",
+                "depends_on",
+                "remediation_requirements",
+                "parameters",
+            },
+            manifest_name=field_name,
+        )
+        rule_id = rule["id"]
+        kind = rule["kind"]
+        if (
+            not isinstance(rule_id, str)
+            or _LOWER_SNAKE_PATTERN.fullmatch(rule_id) is None
+            or rule_id in seen_rule_ids
+            or kind not in _VERIFICATION_RULE_KINDS
+            or not isinstance(rule["description"], str)
+            or not rule["description"]
+            or "\n" in rule["description"]
+            or "\r" in rule["description"]
+        ):
+            raise ValueError(f"{field_name} identity is invalid")
+        dependencies = _require_name_list(
+            rule["depends_on"], field_name=f"{field_name}.depends_on"
+        )
+        if not set(dependencies) <= seen_rule_ids:
+            raise ValueError("verification rule dependencies must name preceding rules")
+        remediation = _require_name_list(
+            rule["remediation_requirements"],
+            field_name=f"{field_name}.remediation_requirements",
+        )
+        if any(
+            name not in requirement_by_name
+            or requirement_by_name[name]["supplement_policy"] != "MISSING_ONLY"
+            for name in remediation
+        ):
+            raise ValueError("rule remediation must name MISSING_ONLY requirements")
+        parameters = rule["parameters"]
+        if not isinstance(parameters, dict):
+            raise ValueError(f"{field_name}.parameters must be an object")
+        event_fields: list[tuple[str, str | None]] = []
+        if kind == "EVENT_PRESENT":
+            _require_exact_fields(parameters, required={"event"}, manifest_name=field_name)
+            event_fields.append((parameters["event"], None))
+        elif kind == "EVENT_TIME_WINDOW":
+            _require_exact_fields(
+                parameters,
+                required={
+                    "event",
+                    "reference",
+                    "before_ms",
+                    "after_ms",
+                    "lower_bound",
+                    "upper_bound",
+                },
+                manifest_name=field_name,
+            )
+            before_ms = parameters["before_ms"]
+            after_ms = parameters["after_ms"]
+            if (
+                type(before_ms) is not int
+                or type(after_ms) is not int
+                or not 0 <= before_ms <= 86_400_000
+                or not 0 <= after_ms <= 86_400_000
+                or parameters["lower_bound"] not in {"INCLUSIVE", "EXCLUSIVE"}
+                or parameters["upper_bound"] not in {"INCLUSIVE", "EXCLUSIVE"}
+            ):
+                raise ValueError("event time window must declare valid bounds")
+            reference = _require_binding(
+                parameters["reference"], field_name=f"{field_name}.reference"
+            )
+            if reference["source"] == "USER_FACT" and reference["name"] not in input_names:
+                raise ValueError("event time reference must name an INPUT requirement")
+            event_fields.append((parameters["event"], None))
+        elif kind == "FACT_FIELD_EQUALS":
+            _require_exact_fields(
+                parameters,
+                required={"event", "field", "fact_name"},
+                manifest_name=field_name,
+            )
+            event_fields.append(
+                _require_event_field(
+                    {"event": parameters["event"], "field": parameters["field"]},
+                    field_name=f"{field_name}.parameters",
+                )
+            )
+            if parameters["fact_name"] not in input_names:
+                raise ValueError("FACT_FIELD_EQUALS fact_name must name INPUT")
+        elif kind == "ROLE_COVERAGE":
+            _require_exact_fields(parameters, required={"coverage"}, manifest_name=field_name)
+            coverage = parameters["coverage"]
+            if not isinstance(coverage, list) or not coverage or len(coverage) > 20:
+                raise ValueError("ROLE_COVERAGE coverage is invalid")
+            roles: set[str] = set()
+            for item in coverage:
+                if not isinstance(item, dict):
+                    raise ValueError("ROLE_COVERAGE item must be an object")
+                _require_exact_fields(
+                    item, required={"role", "event"}, manifest_name=field_name
+                )
+                if not isinstance(item["role"], str) or item["role"] in roles:
+                    raise ValueError("ROLE_COVERAGE roles must be unique")
+                roles.add(item["role"])
+                event_fields.append((item["event"], None))
+        elif kind == "CROSS_ROLE_CORRELATION":
+            _require_exact_fields(parameters, required={"members"}, manifest_name=field_name)
+            members = parameters["members"]
+            if not isinstance(members, list) or not 2 <= len(members) <= 20:
+                raise ValueError("CROSS_ROLE_CORRELATION members are invalid")
+            event_fields.extend(
+                _require_event_field(item, field_name=f"{field_name}.member")
+                for item in members
+            )
+            if len(event_fields) != len(set(event_fields)):
+                raise ValueError("CROSS_ROLE_CORRELATION members must be unique")
+        elif kind == "EVENT_ORDER":
+            _require_exact_fields(
+                parameters,
+                required={"before_event", "after_event", "allow_equal"},
+                manifest_name=field_name,
+            )
+            if type(parameters["allow_equal"]) is not bool:
+                raise ValueError("EVENT_ORDER allow_equal must be boolean")
+            event_fields.extend(
+                ((parameters["before_event"], None), (parameters["after_event"], None))
+            )
+        else:
+            has_semantic_rule = True
+            _require_exact_fields(
+                parameters,
+                required={"assertion", "evidence_events"},
+                manifest_name=field_name,
+            )
+            if not isinstance(parameters["assertion"], str) or not parameters["assertion"]:
+                raise ValueError("SEMANTIC_CAUSALITY assertion must be non-empty")
+            event_fields.extend(
+                (event_id, None)
+                for event_id in _require_name_list(
+                    parameters["evidence_events"],
+                    field_name=f"{field_name}.evidence_events",
+                )
+            )
+        anchors: set[str] = set()
+        for event_id, event_field in event_fields:
+            extractor = extractor_by_id.get(event_id)
+            if extractor is None:
+                raise ValueError("verification rule names an unknown event")
+            anchors.add(extractor["anchor"])
+            if event_field is not None and event_field not in extractor["field_groups"]:
+                raise ValueError("verification rule names an unknown event field")
+        if kind == "ROLE_COVERAGE" and any(
+            extractor_by_id[item["event"]]["anchor"] != item["role"]
+            for item in parameters["coverage"]
+        ):
+            raise ValueError("ROLE_COVERAGE role must equal event anchor")
+        if kind == "CROSS_ROLE_CORRELATION" and len(anchors) < 2:
+            raise ValueError("CROSS_ROLE_CORRELATION must span multiple anchors")
+        seen_rule_ids.add(rule_id)
+    if not has_semantic_rule:
+        raise ValueError("verification_contract requires SEMANTIC_CAUSALITY")
+    return value
+
+
 def _load_skill(root: Path) -> _SkillDescriptor:
     content_hash = hash_product_directory(root)
     manifest_path = root / "diagnosis-skill.json"
@@ -656,6 +991,7 @@ def _load_skill(root: Path) -> _SkillDescriptor:
         "requires_logparse",
         "requirements",
         "logparse_plan",
+        "verification_contract",
     }
     _require_exact_fields(
         manifest,
@@ -663,8 +999,8 @@ def _load_skill(root: Path) -> _SkillDescriptor:
         optional={"logparse_product"},
         manifest_name="diagnosis-skill.json",
     )
-    if type(manifest["schema_version"]) is not int or manifest["schema_version"] != 2:
-        raise ValueError("diagnosis-skill.json schema_version must equal integer 2")
+    if type(manifest["schema_version"]) is not int or manifest["schema_version"] != 3:
+        raise ValueError("diagnosis-skill.json schema_version must equal integer 3")
     skill_id = manifest["id"]
     if not isinstance(skill_id, str) or _SKILL_ID_PATTERN.fullmatch(skill_id) is None:
         raise ValueError("diagnosis skill id does not match the frozen pattern")
@@ -707,6 +1043,12 @@ def _load_skill(root: Path) -> _SkillDescriptor:
             raise ValueError("non-logparse skill must use logparse_plan=null")
         if any(item["stage"] == "AFTER_LOGPARSE" for item in requirements):
             raise ValueError("non-logparse skill forbids AFTER_LOGPARSE requirements")
+    verification_contract = _require_verification_contract(
+        manifest["verification_contract"],
+        requirements=requirements,
+        logparse_plan=logparse_plan,
+        requires_logparse=requires_logparse,
+    )
     entry_document = manifest["entry_document"]
     if not isinstance(entry_document, str):
         raise ValueError("diagnosis skill entry_document must be a string")
@@ -734,6 +1076,7 @@ def _load_skill(root: Path) -> _SkillDescriptor:
         logparse_product=logparse_product,
         requirements=requirements,
         logparse_plan=logparse_plan,
+        verification_contract=verification_contract,
     )
 
 

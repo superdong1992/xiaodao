@@ -43,7 +43,9 @@ _KNOWN_EVENTS = frozenset(
         "job.execution.failure_applied",
     }
 )
-_TERMINAL_STATUSES = frozenset({"RESOLVED", "FAILED", "CANCELLED"})
+_TERMINAL_STATUSES = frozenset(
+    {"RESOLVED", "UNRESOLVED", "FAILED", "CANCELLED"}
+)
 _EVENT_TITLES = {
     "case.created": "创建 Case",
     "case.supplement.applied": "应用补充信息",

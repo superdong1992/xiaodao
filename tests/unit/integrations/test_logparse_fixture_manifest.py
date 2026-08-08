@@ -11,7 +11,7 @@ from problem_locator.contracts.serialization import is_canonical_json_bytes
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 FIXTURE_ROOT = REPOSITORY_ROOT / "tests/fixtures/components/logparse"
 MANIFEST_PATH = FIXTURE_ROOT / "fixture-manifest.json"
-SCHEMA_PATH = REPOSITORY_ROOT / "schemas/v1/fixture-manifest.schema.json"
+SCHEMA_PATH = REPOSITORY_ROOT / "schemas/v2/fixture-manifest.schema.json"
 
 
 def _ordinary_fixture_files() -> dict[str, Path]:

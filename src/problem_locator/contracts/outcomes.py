@@ -12,6 +12,7 @@ from .enums import (
     ErrorCode,
     EvidenceSourceType,
     FieldUpdateAction,
+    JobType,
     OutcomeDisposition,
     OutcomeResultType,
     RequirementKind,
@@ -76,6 +77,7 @@ from .models import (
     WorkspaceArtifactInput,
     WorkspaceAttachmentInput,
     WorkspaceInputManifest,
+    review_required_evidence_refs,
     validate_workspace_manifest_for_job,
 )
 from .serialization import parse_canonical_json_bytes
@@ -284,6 +286,50 @@ def validate_outcome_for_job(
     if any(ref not in job_evidence for ref in outcome.consumed_evidence_refs):
         raise ValueError("consumed_evidence_refs must be fixed by the Job")
 
+    audit = outcome.decision_audit
+    if audit is not None:
+        if audit.skill_ref != job.skill_ref:
+            raise ValueError("decision audit Skill must equal the pinned Job Skill")
+        proposal_keys = {
+            item.proposal_key
+            for item in (
+                outcome.proposed_evidence_drafts
+                if isinstance(outcome, AgentJobOutcome)
+                else outcome.proposed_evidence
+            )
+        }
+        for binding in audit.required_evidence_bindings:
+            if (
+                binding.existing_evidence_id is not None
+                and binding.existing_evidence_id not in job_evidence
+            ) or (
+                binding.evidence_proposal_key is not None
+                and binding.evidence_proposal_key not in proposal_keys
+            ):
+                raise ValueError(
+                    "decision audit Evidence must be fixed by the Job or Outcome"
+                )
+        if job.job_type is JobType.REVIEW:
+            required_existing = [
+                item.existing_evidence_id
+                for item in audit.required_evidence_bindings
+            ]
+            candidate = job.context_snapshot.candidate_conclusion
+            if candidate is None:
+                raise ValueError("REVIEW Job requires its Candidate snapshot")
+            candidate_required = list(review_required_evidence_refs(candidate))
+            if required_existing != candidate_required:
+                raise ValueError(
+                    "REVIEW decision audit must cover required Candidate Evidence"
+                )
+            required_set = set(candidate_required)
+            if candidate_required != [
+                ref for ref in job.evidence_refs if ref in required_set
+            ]:
+                raise ValueError(
+                    "REVIEW Candidate Evidence must preserve the fixed Job order"
+                )
+
     payload = outcome.payload
     if isinstance(payload, RouteDecision):
         if payload.kind is RouteKind.MATCHED and payload.skill_ref not in job.available_skill_refs:
@@ -301,13 +347,27 @@ def validate_outcome_for_job(
             raise ValueError("reviewed_state_revision must equal the Job base revision")
         if any(ref not in job_evidence for ref in payload.reviewed_evidence_refs):
             raise ValueError("reviewed_evidence_refs must be fixed by the REVIEW Job")
+        if payload.reviewed_evidence_refs != outcome.consumed_evidence_refs:
+            raise ValueError(
+                "REVIEW reviewed_evidence_refs must exactly equal consumed_evidence_refs"
+            )
+        reviewed_set = set(payload.reviewed_evidence_refs)
+        if payload.reviewed_evidence_refs != [
+            ref for ref in job.evidence_refs if ref in reviewed_set
+        ]:
+            raise ValueError(
+                "REVIEW Evidence references must preserve the fixed Job order"
+            )
         candidate = job.context_snapshot.candidate_conclusion
         if (
             payload.verdict is ReviewVerdict.PASS
             and candidate is not None
-            and any(ref not in payload.reviewed_evidence_refs for ref in candidate.supporting_evidence_refs)
+            and any(
+                ref not in reviewed_set
+                for ref in review_required_evidence_refs(candidate)
+            )
         ):
-            raise ValueError("PASS must review every candidate supporting Evidence")
+            raise ValueError("PASS must review every required candidate Evidence")
 
     if isinstance(payload, DiagnosisOutcome):
         requirements = {
@@ -793,6 +853,15 @@ def validate_transition_plan_for_outcome(
             and binding.evidence_proposal_key not in accepted_evidence
         ):
             raise ValueError("accepted state delta requires accepted Evidence proposals")
+    if plan.unresolved_result_draft is not None:
+        for binding in plan.unresolved_result_draft.evidence_bindings:
+            if (
+                binding.evidence_proposal_key is not None
+                and binding.evidence_proposal_key not in accepted_evidence
+            ):
+                raise ValueError(
+                    "unresolved audit bindings require accepted Evidence proposals"
+                )
 
     if (
         plan.outcome_disposition is OutcomeDisposition.APPLIED
@@ -815,6 +884,7 @@ def validate_transition_plan_for_outcome(
             raise ValueError("REROUTE plan must CLEAR the selected skill")
     if (
         plan.outcome_disposition is OutcomeDisposition.APPLIED
+        and outcome.result_type is OutcomeResultType.COMPLETED
         and isinstance(payload, ReviewAssessment)
         and payload.verdict is ReviewVerdict.PASS
     ):

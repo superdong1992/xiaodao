@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from problem_locator.contracts import (
     ApplicationErrorDetail,
     ApplicationPortError,
@@ -18,6 +20,8 @@ from problem_locator.contracts import (
     IdGenerator,
     Job,
     JobStatus,
+    JobType,
+    OutcomeResultType,
     LogparseBrokerError,
     LogparseBrokerFactory,
     LogparseBrokerSession,
@@ -25,8 +29,12 @@ from problem_locator.contracts import (
     ResourceStore,
     RuntimeExecutionReceipt,
     RuntimeInfrastructureError,
+    ResolvedLogparseAnchor,
+    ResolvedLogparsePlanInput,
     StagedResourceRef,
     StateRepository,
+    canonical_json_bytes,
+    parse_canonical_json_bytes,
     validate_logparse_claim_for_job,
 )
 from problem_locator.diagnostics import log_event
@@ -42,8 +50,19 @@ from .context_builder import ContextBuilder, ContextLimitExceeded, ContextMateri
 from .context_policy import ResolvedJobAssets, RuntimeAssetResolver
 from .failures import RuntimeExecutionError, runtime_failure
 from .outcome_publisher import OutcomePublisher
-from .output_reader import RejectedAgentOutputError, read_agent_output
+from .output_reader import (
+    RejectedAgentOutputError,
+    ValidatedAgentOutput,
+    read_agent_output,
+)
 from .proposal_stager import discard_staged, stage_validated_output
+from .resolved_logparse import (
+    ResolvedLogparsePlanNotReady,
+    compile_resolved_logparse_plan,
+)
+from .review_subject import compile_review_subject
+from .server_outcome_finalizer import finalize_server_outcome
+from .server_verifier import verify_agent_draft
 from .workspace import PreparedWorkspace, WorkspaceManager
 
 
@@ -154,6 +173,8 @@ class DiagnosisRuntime:
         self._backend = backend
         self._context_builder = context_builder or ContextBuilder()
         self._backend_test_limits = backend_test_limits
+        self._clock = clock
+        self._id_generator = id_generator
         self._publisher = OutcomePublisher(execution_records, clock, id_generator)
 
     def execute(
@@ -231,11 +252,61 @@ class DiagnosisRuntime:
         )
         preparing = record_stage_started(ExecutionStage.WORKSPACE_PREPARE)
         aggregate = self._read_case(job)
+        try:
+            plan_not_ready = False
+            try:
+                broker_plan = compile_resolved_logparse_plan(job, aggregate, assets)
+            except ResolvedLogparsePlanNotReady:
+                broker_plan = None
+                plan_not_ready = True
+            if (
+                job.logparse_tool_ref is not None
+                and broker_plan is None
+                and not plan_not_ready
+            ):
+                raise ValueError(
+                    "logparse compiler omitted a plan without a missing binding"
+                )
+            resolved_logparse_plan = (
+                None
+                if broker_plan is None
+                else ResolvedLogparsePlanInput(
+                    schema_version=2,
+                    attachment_id=broker_plan.attachment_id,
+                    artifact_id=broker_plan.artifact_id,
+                    problem_time=broker_plan.problem_time,
+                    anchors=[
+                        ResolvedLogparseAnchor(
+                            label=item.label,
+                            module=item.module,
+                            slot=item.slot,
+                            process_name=item.process_name,
+                            pid=item.pid,
+                        )
+                        for item in broker_plan.anchors
+                    ],
+                )
+            )
+            review_subject = compile_review_subject(job, aggregate, assets)
+        except (OSError, TypeError, ValueError):
+            raise runtime_failure(
+                stage=ExecutionStage.ASSET_RESOLUTION,
+                code=ErrorCode.ASSET_VERSION_UNAVAILABLE,
+                message="The pinned Skill could not produce immutable verification bindings.",
+            ) from None
         workspace = self._workspace_manager.prepare(
             job,
             aggregate,
             self._resource_store,
+            resolved_logparse_plan=resolved_logparse_plan,
+            review_subject=review_subject,
         )
+        if review_subject is not None:
+            self._publish_audit_bytes(
+                job,
+                "review_subject.json",
+                canonical_json_bytes(review_subject),
+            )
         resolved = assets.bind_workspace(workspace)
         record_stage_completed(
             ExecutionStage.WORKSPACE_PREPARE,
@@ -252,6 +323,11 @@ class DiagnosisRuntime:
         context_building = record_stage_started(ExecutionStage.CONTEXT_BUILD)
         context = self._build_context(job, resolved.materials)
         self._workspace_manager.write_context(workspace, context.body)
+        self._publish_audit_bytes(
+            job,
+            "context.txt",
+            context.body.encode("utf-8"),
+        )
         record_stage_completed(
             ExecutionStage.CONTEXT_BUILD,
             context_building,
@@ -264,15 +340,17 @@ class DiagnosisRuntime:
             },
         )
 
-        secrets, parse_request_bytes, claim = self._execute_backend(
+        secrets, parse_request_bytes, claim, broker_audit_bytes = self._execute_backend(
             job,
             workspace,
             cancellation,
             context.body,
         )
+        if broker_audit_bytes is not None:
+            self._publish_audit_bytes(job, "broker_audit.json", broker_audit_bytes)
         validating = record_stage_started(ExecutionStage.OUTCOME_VALIDATE)
         try:
-            validated = read_agent_output(
+            validated_draft = read_agent_output(
                 workspace,
                 job,
                 workspace.manifest,
@@ -281,6 +359,78 @@ class DiagnosisRuntime:
         except RejectedAgentOutputError as exc:
             self._archive_rejected_agent_output(job, exc)
             raise
+        self._publish_audit_bytes(
+            job,
+            "agent_job_outcome.draft.json",
+            validated_draft.canonical_bytes,
+        )
+        diagnosis_audit = self._diagnosis_audit_for_review(job, aggregate)
+        verification = None
+        if (
+            job.job_type is not JobType.ROUTE
+            and validated_draft.draft.result_type is not OutcomeResultType.FAILED
+        ):
+            if assets.skill is None:
+                raise _unexpected_failure()
+            for resource in validated_draft.proposal_resources:
+                resource.verify_unchanged()
+            try:
+                verification = verify_agent_draft(
+                    workspace_root=workspace.root,
+                    job=job,
+                    manifest=workspace.manifest,
+                    draft=validated_draft.draft,
+                    draft_bytes=validated_draft.canonical_bytes,
+                    proposal_resources=validated_draft.proposal_resources,
+                    skill_root=Path(assets.skill.root_path),
+                    broker_audit_bytes=broker_audit_bytes,
+                    diagnosis_audit=diagnosis_audit,
+                )
+            except ValueError:
+                raise runtime_failure(
+                    stage=ExecutionStage.OUTCOME_VALIDATE,
+                    code=ErrorCode.OUTCOME_INVALID,
+                    message="Agent outcome violates the pinned verification contract.",
+                ) from None
+            for resource in validated_draft.proposal_resources:
+                resource.verify_unchanged()
+            self._publish_audit_bytes(
+                job,
+                "decision_audit.json",
+                canonical_json_bytes(verification.audit),
+            )
+            self._publish_audit_bytes(
+                job,
+                "decision_evidence.jsonl",
+                verification.decision_evidence_bytes,
+            )
+        finalized = finalize_server_outcome(
+            workspace_root=workspace.root,
+            job=job,
+            manifest=workspace.manifest,
+            draft=validated_draft.draft,
+            draft_bytes=validated_draft.canonical_bytes,
+            outcome_id=self._id_generator.new("job_outcome"),
+            produced_at=self._clock.now(),
+            verification=verification,
+            user_result_bytes=validated_draft.user_result_bytes,
+        )
+        self._publish_audit_bytes(
+            job,
+            "agent_job_outcome.json",
+            finalized.canonical_bytes,
+        )
+        self._publish_audit_bytes(
+            job,
+            "finalization_manifest.json",
+            canonical_json_bytes(finalized.marker),
+        )
+        validated = ValidatedAgentOutput(
+            outcome=finalized.outcome,
+            canonical_bytes=finalized.canonical_bytes,
+            proposal_resources=validated_draft.proposal_resources,
+            user_result=finalized.user_result,
+        )
         record_stage_completed(
             ExecutionStage.OUTCOME_VALIDATE,
             validating,
@@ -345,6 +495,56 @@ class DiagnosisRuntime:
                 receipt,
             )
         return receipt
+
+    @staticmethod
+    def _diagnosis_audit_for_review(
+        job: Job,
+        aggregate: CaseAggregate,
+    ):
+        if job.job_type is not JobType.REVIEW:
+            return None
+        matches = [
+            aggregate.outcomes[outcome_id].decision_audit
+            for outcome_id in job.previous_outcome_refs
+            if outcome_id in aggregate.outcomes
+            and aggregate.outcomes[outcome_id].job_type is JobType.DIAGNOSE
+            and aggregate.outcomes[outcome_id].decision_audit is not None
+        ]
+        if len(matches) != 1:
+            raise ValueError(
+                "REVIEW requires exactly one private diagnosis DecisionAudit"
+            )
+        return matches[0]
+
+    def _publish_audit_bytes(
+        self,
+        job: Job,
+        filename: str,
+        payload: bytes,
+    ) -> None:
+        """Persist one observable runtime input without exposing workspace paths."""
+
+        try:
+            self._execution_records.publish_audit_bytes(
+                job.job_id,
+                filename,
+                payload,
+            )
+        except ApplicationPortError as exc:
+            raise runtime_failure(
+                stage=ExecutionStage.EXECUTION_RECORD,
+                code=ErrorCode.EXECUTION_RECORD_FAILED,
+                message="Execution audit material could not be published.",
+                retryable=True,
+                details=exc.error.details,
+            ) from None
+        except Exception as exc:
+            raise runtime_failure(
+                stage=ExecutionStage.EXECUTION_RECORD,
+                code=ErrorCode.EXECUTION_RECORD_FAILED,
+                message="Execution audit material could not be published.",
+                retryable=True,
+            ) from exc
 
     def _archive_rejected_agent_output(
         self,
@@ -530,8 +730,13 @@ class DiagnosisRuntime:
         workspace: PreparedWorkspace,
         cancellation: CancellationSignal,
         prompt: str,
-    ) -> tuple[tuple[str, ...], bytes | None, LogparseParseClaim | None]:
-        if job.logparse_tool_ref is None:
+    ) -> tuple[
+        tuple[str, ...],
+        bytes | None,
+        LogparseParseClaim | None,
+        bytes | None,
+    ]:
+        if workspace.manifest.resolved_logparse_plan is None:
             self._backend.execute(
                 prompt=prompt,
                 workspace_root=workspace.root,
@@ -540,7 +745,7 @@ class DiagnosisRuntime:
                 resource_limits=job.resource_limits,
                 test_limits=self._backend_test_limits,
             )
-            return (), None, None
+            return (), None, None, None
 
         if self._logparse_broker_factory is None:
             raise runtime_failure(
@@ -567,6 +772,7 @@ class DiagnosisRuntime:
         primary: ExecutionFailure | None = None
         secrets: tuple[str, ...] = ()
         request_bytes: bytes | None = None
+        audit_bytes: bytes | None = None
         try:
             broker_environment = session.agent_environment()
             secrets = tuple(broker_environment.values())
@@ -584,7 +790,7 @@ class DiagnosisRuntime:
         except Exception:
             primary = _broker_failure()
         finally:
-            primary, request_bytes = self._close_and_audit_broker(
+            primary, request_bytes, audit_bytes = self._close_and_audit_broker(
                 session,
                 primary,
             )
@@ -629,16 +835,17 @@ class DiagnosisRuntime:
                 "request_bytes": None if request_bytes is None else len(request_bytes),
             },
         )
-        return secrets, request_bytes, claim
+        return secrets, request_bytes, claim, audit_bytes
 
     @staticmethod
     def _close_and_audit_broker(
         session: LogparseBrokerSession,
         primary: ExecutionFailure | None,
-    ) -> tuple[ExecutionFailure | None, bytes | None]:
+    ) -> tuple[ExecutionFailure | None, bytes | None, bytes | None]:
         close_failed = False
         request_failed = False
         request_bytes: bytes | None = None
+        audit_bytes: bytes | None = None
         try:
             session.close()
         except Exception:
@@ -648,6 +855,18 @@ class DiagnosisRuntime:
             if captured is not None and type(captured) is not bytes:
                 raise TypeError("parse_request_bytes must return exact bytes")
             request_bytes = captured
+        except Exception:
+            request_failed = True
+        try:
+            captured_audit = session.audit_bytes()
+            if type(captured_audit) is not bytes:
+                raise TypeError("audit_bytes must return exact bytes")
+            # Parse once at the trust boundary; the immutable ExecutionRecord
+            # stores these exact canonical bytes for verification and replay.
+            audit_value = parse_canonical_json_bytes(captured_audit)
+            if not isinstance(audit_value, dict):
+                raise TypeError("broker audit must be one JSON object")
+            audit_bytes = captured_audit
         except Exception:
             request_failed = True
 
@@ -673,7 +892,7 @@ class DiagnosisRuntime:
                 field="parse_request_bytes",
                 actual="audit_failed",
             )
-        return primary, request_bytes
+        return primary, request_bytes, audit_bytes
 
 
 __all__ = ["DiagnosisRuntime"]

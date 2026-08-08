@@ -9,7 +9,7 @@ from jsonschema import Draft202012Validator, FormatChecker
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
-SCHEMA_ROOT = REPOSITORY_ROOT / "schemas" / "v1"
+SCHEMA_ROOT = REPOSITORY_ROOT / "schemas" / "v2"
 FIXTURE_ROOT = REPOSITORY_ROOT / "tests" / "fixtures" / "contracts"
 
 

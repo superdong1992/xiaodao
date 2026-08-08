@@ -48,6 +48,11 @@ from problem_locator.dispatch import RecoveryResult, SchedulerService
 from problem_locator.diagnostics import log_event
 from problem_locator.domain import DomainCoordinator, PureContextSnapshotProjector
 from problem_locator.entrypoints.cli import CliHooks, main as cli_main, run_uvicorn
+from problem_locator.entrypoints.replay import (
+    ReplayRequest,
+    ReplayResult,
+    run_replay_job as execute_replay_job,
+)
 from problem_locator.entrypoints.settings import Settings
 from problem_locator.integrations.logparse import build_logparse_runtime
 from problem_locator.interfaces.composition_hooks import (
@@ -371,7 +376,7 @@ def _export_state(
             )
         try:
             exported = StateExport(
-                export_schema_version=1,
+                export_schema_version=2,
                 schema_version=state.schema_version,
                 contract_revision=state.contract_revision,
                 source_generation=state.generation,
@@ -1341,6 +1346,16 @@ def create_state_admin(data_root: Path) -> StandaloneStateAdmin:
     return StandaloneStateAdmin(data_root)
 
 
+def run_replay_job(request: ReplayRequest, settings: Settings) -> ReplayResult:
+    """Build and run the isolated replay graph without service lifecycle start."""
+
+    return execute_replay_job(
+        request,
+        settings,
+        service_factory=build_service,
+    )
+
+
 def _server_runner(app: Any, host: str, port: int, workers: int) -> None:
     try:
         run_uvicorn(app, host, port, workers)
@@ -1357,6 +1372,7 @@ def cli_hooks() -> CliHooks:
         state_admin_factory=create_state_admin,
         app_factory=create_app,
         server_runner=_server_runner,
+        replay_runner=run_replay_job,
     )
 
 
@@ -1390,4 +1406,5 @@ __all__ = [
     "create_app",
     "create_state_admin",
     "main",
+    "run_replay_job",
 ]

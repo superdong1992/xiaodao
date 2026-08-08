@@ -626,6 +626,10 @@ def _first_parse_seam() -> tuple[
         for entry in manifest_payload["entries"]
         if entry["input_kind"] != "ARTIFACT"
     ]
+    manifest_payload["resolved_logparse_plan"].update(
+        attachment_id=job_payload["attachment_refs"][0],
+        artifact_id=None,
+    )
     request_bytes = canonical_json_bytes(
         {
             "product": job_payload["logparse_product"],

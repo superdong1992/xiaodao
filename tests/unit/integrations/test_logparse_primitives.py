@@ -35,6 +35,7 @@ from problem_locator.integrations.logparse.requests import (
     Anchor,
     BrokerEnvelope,
     ParseTargetsRequest,
+    ResolvedLogparsePlan,
     TargetLogsRequest,
 )
 from problem_locator.integrations.logparse.tree import build_tree_manifest
@@ -449,6 +450,50 @@ def test_requests_accept_only_the_fixed_wire_fields() -> None:
             **parse_request.model_dump(),
             logparse_product="compact",
         )
+
+
+def test_resolved_plan_rejects_valid_but_wrong_agent_business_fields() -> None:
+    anchor = _anchor()
+    plan = ResolvedLogparsePlan(
+        schema_version=1,
+        problem_time=PROBLEM_TIME,
+        anchors=[anchor],
+        attachment_id=ATTACHMENT_ID,
+        artifact_id=None,
+    )
+    exact = ParseTargetsRequest(
+        schema_version=1,
+        problem_time=PROBLEM_TIME,
+        anchors=[anchor],
+        attachment_id=ATTACHMENT_ID,
+        artifact_proposal_key="logparse-run_1",
+    )
+    plan.validate_request(exact)
+
+    wrong_time = exact.model_copy(
+        update={"problem_time": "2026-01-03T02:05:00.000Z"}
+    )
+    with pytest.raises(ValueError, match="server-resolved plan"):
+        plan.validate_request(wrong_time)
+
+    wrong_anchor = exact.model_copy(
+        update={"anchors": [_anchor(process_name="unrelated-service")]}
+    )
+    with pytest.raises(ValueError, match="server-resolved plan"):
+        plan.validate_request(wrong_anchor)
+
+    wrong_attachment = exact.model_copy(update={"attachment_id": ARTIFACT_ID})
+    with pytest.raises(ValueError, match="attachment differs"):
+        plan.validate_request(wrong_attachment)
+
+    target_request = TargetLogsRequest(
+        schema_version=1,
+        problem_time=PROBLEM_TIME,
+        anchors=[anchor],
+        artifact_id=ARTIFACT_ID,
+    )
+    with pytest.raises(ValueError, match="artifact differs"):
+        plan.validate_request(target_request)
 
 
 @pytest.mark.parametrize(

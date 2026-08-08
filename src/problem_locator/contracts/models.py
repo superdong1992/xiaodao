@@ -1,4 +1,4 @@
-"""Pydantic models for the frozen Problem Locator V1 public contract.
+"""Pydantic models for the frozen Problem Locator V2 public contract.
 
 The module deliberately keeps all wire/persistence DTO definitions in one place;
 ``commands``, ``outcomes`` and ``errors`` provide responsibility-oriented exports.
@@ -10,6 +10,7 @@ import hashlib
 import json
 import re
 import unicodedata
+from collections.abc import Sequence
 from datetime import datetime
 from typing import Annotated, Any, Literal, TypeAlias
 
@@ -50,7 +51,11 @@ from .enums import (
     ResourceType,
     ReviewVerdict,
     RouteKind,
+    RuleClaimResult,
+    ServerRuleStatus,
+    SupplementPolicy,
     TriggerType,
+    UnresolvedReasonCode,
 )
 from .limits import (
     CONTRACT_REVISION,
@@ -291,7 +296,7 @@ CanonicalJsonBytes: TypeAlias = bytes
 
 
 class ContractModel(BaseModel):
-    """Strict base for every serializable V1 contract DTO."""
+    """Strict base for every serializable V2 contract DTO."""
 
     model_config = ConfigDict(
         extra="forbid",
@@ -481,6 +486,7 @@ class PendingRequirement(ContractModel):
     status: RequirementStatus
     requested_by_job_id: OpaqueId
     fulfilled_by_refs: list[OpaqueId]
+    supplement_policy: SupplementPolicy = SupplementPolicy.NONE
 
     @model_validator(mode="after")
     def validate_kind(self) -> PendingRequirement:
@@ -557,6 +563,26 @@ class CandidateConclusion(ContractModel):
         return self
 
 
+def review_required_evidence_refs(
+    candidate: CandidateConclusion,
+) -> tuple[OpaqueId, ...]:
+    """Return the ordered Evidence closure that an independent review must cover."""
+
+    ordered: list[OpaqueId] = []
+    seen: set[OpaqueId] = set()
+    refs = list(candidate.supporting_evidence_refs)
+    refs.extend(
+        ref
+        for mapping in candidate.completion_criteria_mapping
+        for ref in mapping.evidence_refs
+    )
+    for ref in refs:
+        if ref not in seen:
+            seen.add(ref)
+            ordered.append(ref)
+    return tuple(ordered)
+
+
 class DiagnosisState(ContractModel):
     revision: PositiveInt
     problem_spec: ProblemSpec
@@ -588,6 +614,12 @@ class DiagnosisState(ContractModel):
             for item in self.user_facts
         ):
             raise ValueError("user_facts require USER_INPUT provenance")
+        user_fact_names = [
+            item.provenance.input_name for item in self.user_facts
+        ]
+        if any(name is None for name in user_fact_names):
+            raise ValueError("user_facts require an input_name")
+        _unique(user_fact_names, "active user fact input_name")
         if any(
             item.provenance.source_type is not DiagnosisProvenanceType.AGENT_OUTCOME
             for item in (
@@ -608,6 +640,13 @@ class DiagnosisState(ContractModel):
             raise ValueError("open_questions may only contain ACTIVE items")
         open_requirements = [item for item in self.pending_requirements if item.status is RequirementStatus.OPEN]
         _unique([item.name for item in open_requirements], "OPEN requirement names")
+        if any(
+            item.kind is RequirementKind.INPUT and item.name in user_fact_names
+            for item in open_requirements
+        ):
+            raise ValueError(
+                "an OPEN INPUT requirement cannot request a user fact already fixed in this Case"
+            )
         if sum(item.kind is RequirementKind.ATTACHMENT for item in open_requirements) > 1:
             raise ValueError("at most one OPEN ATTACHMENT requirement is allowed")
         _unique(
@@ -683,6 +722,58 @@ class CaseFailure(ContractModel):
     occurred_at: UtcTimestamp
 
 
+class UnresolvedResultDraft(ContractModel):
+    source_job_id: OpaqueId
+    source_outcome_id: OpaqueId
+    reason_code: UnresolvedReasonCode
+    summary: NonEmptyText
+    blocking_rule_ids: list[NonEmptyText]
+    evidence_bindings: list[EvidenceBinding]
+    recommended_next_step: NonEmptyText
+    occurred_at: UtcTimestamp
+
+    @model_validator(mode="after")
+    def validate_refs(self) -> UnresolvedResultDraft:
+        _unique(self.blocking_rule_ids, "blocking_rule_ids")
+        _unique(
+            [
+                item.existing_evidence_id
+                or f"proposal:{item.evidence_proposal_key}"
+                for item in self.evidence_bindings
+            ],
+            "unresolved evidence_bindings",
+        )
+        if self.reason_code in {
+            UnresolvedReasonCode.MECHANICAL_VERIFICATION_FAILED,
+            UnresolvedReasonCode.INSUFFICIENT_EVIDENCE,
+        } and not self.blocking_rule_ids:
+            raise ValueError("mechanical/insufficient unresolved results require blocking rules")
+        return self
+
+
+class UnresolvedResult(ContractModel):
+    source_job_id: OpaqueId
+    source_outcome_id: OpaqueId
+    reason_code: UnresolvedReasonCode
+    summary: NonEmptyText
+    blocking_rule_ids: list[NonEmptyText]
+    evidence_refs: list[OpaqueId]
+    recommended_next_step: NonEmptyText
+    occurred_at: UtcTimestamp
+    audit_artifact_id: OpaqueId
+
+    @model_validator(mode="after")
+    def validate_refs(self) -> UnresolvedResult:
+        _unique(self.blocking_rule_ids, "blocking_rule_ids")
+        _unique(self.evidence_refs, "unresolved evidence_refs")
+        if self.reason_code in {
+            UnresolvedReasonCode.MECHANICAL_VERIFICATION_FAILED,
+            UnresolvedReasonCode.INSUFFICIENT_EVIDENCE,
+        } and not self.blocking_rule_ids:
+            raise ValueError("mechanical/insufficient unresolved results require blocking rules")
+        return self
+
+
 class Case(ContractModel):
     case_id: OpaqueId
     status: CaseStatus
@@ -691,6 +782,7 @@ class Case(ContractModel):
     active_job_id: OpaqueId | None
     selected_skill_ref: VersionedRef | None
     final_result: CandidateConclusion | None
+    unresolved_result: UnresolvedResult | None = None
     failure: CaseFailure | None
     created_at: UtcTimestamp
     updated_at: UtcTimestamp
@@ -708,6 +800,13 @@ class Case(ContractModel):
                 )
         elif self.final_result is not None:
             raise ValueError("non-RESOLVED cases must have final_result=null")
+        if self.status is CaseStatus.UNRESOLVED:
+            if self.unresolved_result is None:
+                raise ValueError("UNRESOLVED cases require unresolved_result")
+            if self.failure is not None:
+                raise ValueError("UNRESOLVED cases forbid failure")
+        elif self.unresolved_result is not None:
+            raise ValueError("only UNRESOLVED cases may carry unresolved_result")
         if self.status is CaseStatus.REVIEWING:
             candidate = self.diagnosis_state.candidate_conclusion
             if candidate is None or candidate.status is not CandidateStatus.REVIEWING:
@@ -718,6 +817,7 @@ class Case(ContractModel):
             CaseStatus.WAITING_INPUT,
             CaseStatus.WAITING_ATTACHMENT,
             CaseStatus.RESOLVED,
+            CaseStatus.UNRESOLVED,
             CaseStatus.FAILED,
             CaseStatus.CANCELLED,
             CaseStatus.INTERRUPTED,
@@ -788,8 +888,13 @@ class Job(ContractModel):
                 or candidate.content_hash != self.review_target.candidate_content_hash
             ):
                 raise ValueError("review_target must match the snapshot candidate")
-            if any(ref not in self.evidence_refs for ref in candidate.supporting_evidence_refs):
-                raise ValueError("REVIEW jobs must include every candidate supporting evidence reference")
+            if any(
+                ref not in self.evidence_refs
+                for ref in review_required_evidence_refs(candidate)
+            ):
+                raise ValueError(
+                    "REVIEW jobs must include every required candidate Evidence reference"
+                )
         _validate_role_bindings(
             self.job_type,
             available_skill_refs=self.available_skill_refs,
@@ -967,6 +1072,15 @@ class DiagnosticExportMetadata(ContractModel):
     description: DescriptionText
 
 
+class AuditBundleMetadata(ContractModel):
+    schema_version: Literal[1]
+    format_id: Literal["problem-locator-audit-bundle-v1"]
+    description: DescriptionText
+    case_id: OpaqueId
+    source_job_id: OpaqueId
+    source_outcome_id: OpaqueId
+
+
 class LogparseParseParameters(ContractModel):
     product: NonEmptyText
 
@@ -985,6 +1099,7 @@ ArtifactMetadata: TypeAlias = (
     | UserResultArchiveMetadata
     | DiagnosticExportMetadata
     | LogparseRunMetadata
+    | AuditBundleMetadata
 )
 
 
@@ -1009,6 +1124,7 @@ class Artifact(ContractModel):
             ArtifactKind.USER_RESULT_ARCHIVE: UserResultArchiveMetadata,
             ArtifactKind.DIAGNOSTIC_EXPORT: DiagnosticExportMetadata,
             ArtifactKind.LOGPARSE_RUN: LogparseRunMetadata,
+            ArtifactKind.AUDIT_BUNDLE: AuditBundleMetadata,
         }[self.kind]
         if not isinstance(self.metadata, expected_type):
             raise ValueError("artifact kind and metadata type do not match")
@@ -1021,6 +1137,11 @@ class Artifact(ContractModel):
                 or self.content_type != "application/zip"
             ):
                 raise ValueError("USER_RESULT_ARCHIVE must be an application/zip FILE")
+        if self.kind is ArtifactKind.AUDIT_BUNDLE and (
+            self.resource_kind is not ResourceKind.FILE
+            or self.content_type != "application/zip"
+        ):
+            raise ValueError("AUDIT_BUNDLE must be an application/zip FILE")
         if self.kind is ArtifactKind.LOGPARSE_RUN:
             if self.resource_kind is not ResourceKind.DIRECTORY:
                 raise ValueError("LOGPARSE_RUN must be a DIRECTORY")
@@ -1292,14 +1413,145 @@ WorkspaceInputEntry: TypeAlias = Annotated[
 ]
 
 
+class ResolvedLogparseAnchor(ContractModel):
+    label: NonEmptyText
+    module: NonEmptyText
+    slot: NonEmptyText
+    process_name: NonEmptyText
+    pid: NonEmptyText | None
+
+    @model_validator(mode="after")
+    def validate_canonical_ascii(self) -> ResolvedLogparseAnchor:
+        for value in (self.label, self.module, self.slot, self.process_name, self.pid):
+            if value is not None and (
+                not value.isascii()
+                or value != value.strip()
+                or any(character in value for character in "\r\n\x00")
+            ):
+                raise ValueError(
+                    "resolved logparse anchors require canonical single-line ASCII"
+                )
+        return self
+
+
+class ResolvedLogparsePlanInput(ContractModel):
+    schema_version: Literal[2]
+    attachment_id: OpaqueId | None
+    artifact_id: OpaqueId | None
+    problem_time: UtcTimestamp
+    anchors: Annotated[list[ResolvedLogparseAnchor], Field(min_length=1, max_length=32)]
+
+    @model_validator(mode="after")
+    def validate_plan(self) -> ResolvedLogparsePlanInput:
+        if (self.attachment_id is None) == (self.artifact_id is None):
+            raise ValueError(
+                "resolved logparse plan requires exactly one attachment or artifact"
+            )
+        _unique(
+            [
+                (item.label, item.module, item.slot, item.process_name, item.pid)
+                for item in self.anchors
+            ],
+            "resolved logparse anchors",
+        )
+        return self
+
+
+class ReviewCausalAssertion(ContractModel):
+    rule_id: NonEmptyText
+    statement: NonEmptyText
+
+
+class MechanicalFact(ContractModel):
+    fact_id: NonEmptyText
+    name: ContractName
+    value: str | int | bool | None
+    source_rule_id: NonEmptyText
+    evidence_refs: list[OpaqueId]
+
+    @model_validator(mode="after")
+    def validate_fact(self) -> MechanicalFact:
+        _unique(self.evidence_refs, "MechanicalFact.evidence_refs")
+        if isinstance(self.value, str):
+            _utf8_nonblank(self.value)
+        return self
+
+
+class ReviewSubjectV2(ContractModel):
+    schema_version: Literal[2]
+    review_job_id: OpaqueId
+    case_id: OpaqueId
+    reviewed_state_revision: PositiveInt
+    skill_ref: VersionedRef
+    candidate: CandidateConclusion
+    causal_assertions: list[ReviewCausalAssertion]
+    required_rule_ids: Annotated[list[NonEmptyText], Field(min_length=1)]
+    required_evidence_refs: Annotated[list[OpaqueId], Field(min_length=1)]
+    mechanical_facts: list[MechanicalFact]
+    subject_hash: Sha256
+
+    @model_validator(mode="after")
+    def validate_subject(self) -> ReviewSubjectV2:
+        if self.candidate.status is not CandidateStatus.REVIEWING:
+            raise ValueError("ReviewSubjectV2 requires a REVIEWING candidate")
+        _unique(self.required_rule_ids, "ReviewSubjectV2.required_rule_ids")
+        _unique(
+            self.required_evidence_refs,
+            "ReviewSubjectV2.required_evidence_refs",
+        )
+        assertion_ids = [item.rule_id for item in self.causal_assertions]
+        _unique(assertion_ids, "ReviewSubjectV2.causal_assertions.rule_id")
+        required_positions = {
+            rule_id: index for index, rule_id in enumerate(self.required_rule_ids)
+        }
+        if any(rule_id not in required_positions for rule_id in assertion_ids) or [
+            required_positions[rule_id] for rule_id in assertion_ids
+        ] != sorted(required_positions[rule_id] for rule_id in assertion_ids):
+            raise ValueError(
+                "causal assertions must be an ordered subset of required_rule_ids"
+            )
+        _unique(
+            [item.fact_id for item in self.mechanical_facts],
+            "ReviewSubjectV2.mechanical_facts.fact_id",
+        )
+        evidence_set = set(self.required_evidence_refs)
+        if any(
+            item.source_rule_id not in required_positions
+            or any(ref not in evidence_set for ref in item.evidence_refs)
+            for item in self.mechanical_facts
+        ):
+            raise ValueError(
+                "mechanical facts must bind required rules and Evidence"
+            )
+        candidate_evidence = {
+            *self.candidate.supporting_evidence_refs,
+            *(
+                ref
+                for mapping in self.candidate.completion_criteria_mapping
+                for ref in mapping.evidence_refs
+            ),
+        }
+        if not candidate_evidence <= evidence_set:
+            raise ValueError(
+                "ReviewSubjectV2 must include supporting and completion Evidence"
+            )
+        preimage = self.model_dump(mode="json", exclude={"subject_hash"})
+        expected = hashlib.sha256(_canonical_json_bytes(preimage)).hexdigest()
+        if self.subject_hash != expected:
+            raise ValueError("ReviewSubjectV2 subject_hash does not match its content")
+        return self
+
+
 class WorkspaceInputManifest(ContractModel):
-    schema_version: Literal[1]
+    schema_version: Literal[2]
     job_id: OpaqueId
     case_id: OpaqueId
     job_type: JobType
     logparse_tool_ref: VersionedRef | None
     logparse_product: NonEmptyText | None
     entries: list[WorkspaceInputEntry]
+    resolved_logparse_plan: ResolvedLogparsePlanInput | None = None
+    review_subject: ReviewSubjectV2 | None = None
 
     @model_validator(mode="after")
     def validate_manifest(self) -> WorkspaceInputManifest:
@@ -1307,6 +1559,20 @@ class WorkspaceInputManifest(ContractModel):
             raise ValueError("logparse_tool_ref and logparse_product must be both null or both non-null")
         if self.logparse_tool_ref is not None and self.job_type is not JobType.DIAGNOSE:
             raise ValueError("only DIAGNOSE manifests may carry logparse bindings")
+        if (
+            self.resolved_logparse_plan is not None
+            and self.logparse_tool_ref is None
+        ):
+            raise ValueError(
+                "resolved_logparse_plan requires logparse bindings"
+            )
+        if (self.job_type is JobType.REVIEW) != (self.review_subject is not None):
+            raise ValueError("REVIEW manifests require exactly one review_subject")
+        if self.review_subject is not None and (
+            self.review_subject.review_job_id != self.job_id
+            or self.review_subject.case_id != self.case_id
+        ):
+            raise ValueError("review_subject identity must match the Workspace manifest")
         order = {"ATTACHMENT": 0, "EVIDENCE": 1, "ARTIFACT": 2, "PREVIOUS_OUTCOME": 3}
         kinds = [order[entry.input_kind] for entry in self.entries]
         if kinds != sorted(kinds):
@@ -1339,7 +1605,11 @@ def validate_workspace_manifest_for_job(
         "ATTACHMENT": job.attachment_refs,
         "EVIDENCE": job.evidence_refs,
         "ARTIFACT": job.artifact_refs,
-        "PREVIOUS_OUTCOME": job.previous_outcome_refs,
+        # REVIEW keeps the diagnosis Outcome private to the service so the
+        # independent Reviewer cannot inspect the Specialist verdict.
+        "PREVIOUS_OUTCOME": (
+            [] if job.job_type is JobType.REVIEW else job.previous_outcome_refs
+        ),
     }
     actual_by_kind = {
         kind: [entry.resource_id for entry in manifest.entries if entry.input_kind == kind]
@@ -1348,6 +1618,35 @@ def validate_workspace_manifest_for_job(
     for kind, expected in expected_by_kind.items():
         if actual_by_kind[kind] != expected:
             raise ValueError(f"Workspace manifest {kind} order must match its Job")
+    if manifest.review_subject is not None:
+        subject = manifest.review_subject
+        target = job.review_target
+        if target is None or (
+            subject.reviewed_state_revision != job.base_state_revision
+            or subject.skill_ref != job.skill_ref
+            or subject.candidate.conclusion_id != target.candidate_conclusion_id
+            or subject.candidate.revision != target.candidate_revision
+            or subject.candidate.content_hash != target.candidate_content_hash
+        ):
+            raise ValueError("Workspace review_subject must match its REVIEW Job")
+        candidate_required = list(review_required_evidence_refs(subject.candidate))
+        if subject.required_evidence_refs != candidate_required:
+            raise ValueError(
+                "Workspace review_subject Evidence must equal the Candidate required union"
+            )
+        required_set = set(candidate_required)
+        if candidate_required != [
+            ref for ref in job.evidence_refs if ref in required_set
+        ]:
+            raise ValueError(
+                "Workspace review_subject Evidence must be a stable Job Evidence subsequence"
+            )
+    if manifest.resolved_logparse_plan is not None:
+        plan = manifest.resolved_logparse_plan
+        if plan.attachment_id is not None and plan.attachment_id not in job.attachment_refs:
+            raise ValueError("resolved logparse attachment must belong to its Job")
+        if plan.artifact_id is not None and plan.artifact_id not in job.artifact_refs:
+            raise ValueError("resolved logparse artifact must belong to its Job")
     return manifest
 
 
@@ -1615,6 +1914,8 @@ class AgentArtifactProposalDraft(ContractModel):
 
     @model_validator(mode="after")
     def validate_draft(self) -> AgentArtifactProposalDraft:
+        if self.artifact_kind is ArtifactKind.AUDIT_BUNDLE:
+            raise ValueError("AUDIT_BUNDLE is server-generated and cannot be proposed")
         if not self.workspace_relative_path.startswith(f"output/proposals/{self.proposal_key}/"):
             raise ValueError("proposal workspace paths must be rooted below output/proposals/<proposal_key>/")
         _validate_artifact_shape(
@@ -1663,6 +1964,8 @@ class ArtifactProposal(ContractModel):
 
     @model_validator(mode="after")
     def validate_proposal(self) -> ArtifactProposal:
+        if self.artifact_kind is ArtifactKind.AUDIT_BUNDLE:
+            raise ValueError("AUDIT_BUNDLE is server-generated and cannot be proposed")
         if self.staged_resource_ref.proposal_key != self.proposal_key:
             raise ValueError("staged resource proposal_key mismatch")
         if (
@@ -1695,6 +1998,7 @@ def _validate_artifact_shape(
         ArtifactKind.USER_RESULT_ARCHIVE: UserResultArchiveMetadata,
         ArtifactKind.DIAGNOSTIC_EXPORT: DiagnosticExportMetadata,
         ArtifactKind.LOGPARSE_RUN: LogparseRunMetadata,
+        ArtifactKind.AUDIT_BUNDLE: AuditBundleMetadata,
     }[kind]
     if not isinstance(metadata, expected_type):
         raise ValueError("artifact kind and metadata type do not match")
@@ -1704,6 +2008,10 @@ def _validate_artifact_shape(
         resource_kind is not ResourceKind.FILE or content_type != "application/zip"
     ):
         raise ValueError("USER_RESULT_ARCHIVE must be an application/zip FILE")
+    if kind is ArtifactKind.AUDIT_BUNDLE and (
+        resource_kind is not ResourceKind.FILE or content_type != "application/zip"
+    ):
+        raise ValueError("AUDIT_BUNDLE must be an application/zip FILE")
     if kind is ArtifactKind.LOGPARSE_RUN:
         if resource_kind is not ResourceKind.DIRECTORY:
             raise ValueError("LOGPARSE_RUN must be a DIRECTORY")
@@ -1759,11 +2067,13 @@ class ReviewAssessment(ContractModel):
     evidence_conflicts: list[NonEmptyText]
     missing_evidence: list[NonEmptyText]
     stale_references: list[NonEmptyText]
+    requested_requirement_ids: list[OpaqueId] = []
     recommendation: NonEmptyText
 
     @model_validator(mode="after")
     def validate_verdict(self) -> ReviewAssessment:
         _unique(self.reviewed_evidence_refs, "reviewed_evidence_refs")
+        _unique(self.requested_requirement_ids, "requested_requirement_ids")
         problems = (
             self.unsupported_findings,
             self.evidence_conflicts,
@@ -1776,6 +2086,13 @@ class ReviewAssessment(ContractModel):
             self.missing_evidence or self.unsupported_findings
         ):
             raise ValueError("NEED_MORE_EVIDENCE requires missing or unsupported findings")
+        if (
+            self.verdict is not ReviewVerdict.NEED_MORE_EVIDENCE
+            and self.requested_requirement_ids
+        ):
+            raise ValueError(
+                "only NEED_MORE_EVIDENCE may request requirement IDs"
+            )
         if self.verdict is ReviewVerdict.REJECT and not (
             self.unsupported_findings or self.evidence_conflicts or self.stale_references
         ):
@@ -1784,6 +2101,202 @@ class ReviewAssessment(ContractModel):
 
 
 OutcomePayload: TypeAlias = RouteDecision | DiagnosisOutcome | ReviewAssessment
+
+
+class AgentEvidenceCitation(ContractModel):
+    evidence_binding: EvidenceBinding
+    line_start: PositiveInt
+    line_end: PositiveInt
+
+    @model_validator(mode="after")
+    def validate_range(self) -> AgentEvidenceCitation:
+        if self.line_start > self.line_end:
+            raise ValueError("citation line_start must not exceed line_end")
+        return self
+
+
+class AgentRuleClaim(ContractModel):
+    rule_id: NonEmptyText
+    claimed_result: RuleClaimResult
+    fact_refs: list[OpaqueId]
+    citations: list[AgentEvidenceCitation]
+    explanation: NonEmptyText
+
+    @model_validator(mode="after")
+    def validate_claim(self) -> AgentRuleClaim:
+        _unique(self.fact_refs, "AgentRuleClaim.fact_refs")
+        citation_keys = [
+            (
+                citation.evidence_binding.existing_evidence_id,
+                citation.evidence_binding.evidence_proposal_key,
+                citation.line_start,
+                citation.line_end,
+            )
+            for citation in self.citations
+        ]
+        _unique(citation_keys, "AgentRuleClaim.citations")
+        return self
+
+
+class VerifiedLogLineRange(ContractModel):
+    path: RelativePosixPath
+    line_start: PositiveInt
+    line_end: PositiveInt
+    raw_bytes_sha256: Sha256
+
+    @model_validator(mode="after")
+    def validate_range(self) -> VerifiedLogLineRange:
+        if self.line_start > self.line_end:
+            raise ValueError("verified line_start must not exceed line_end")
+        return self
+
+
+class ServerRuleEvaluation(ContractModel):
+    rule_id: NonEmptyText
+    rule_kind: NonEmptyText
+    status: ServerRuleStatus
+    fact_refs: list[OpaqueId]
+    evidence_bindings: list[EvidenceBinding]
+    anchor_id: NonEmptyText | None
+    derived_anchor_time: UtcTimestamp | None
+    observed_times: list[UtcTimestamp]
+    line_ranges: list[VerifiedLogLineRange]
+    issues: list[NonEmptyText]
+
+    @model_validator(mode="after")
+    def validate_evaluation(self) -> ServerRuleEvaluation:
+        _unique(self.fact_refs, "ServerRuleEvaluation.fact_refs")
+        _unique(
+            [
+                item.existing_evidence_id
+                or f"proposal:{item.evidence_proposal_key}"
+                for item in self.evidence_bindings
+            ],
+            "ServerRuleEvaluation.evidence_bindings",
+        )
+        _unique(self.observed_times, "ServerRuleEvaluation.observed_times")
+        _unique(
+            [
+                (item.path, item.line_start, item.line_end, item.raw_bytes_sha256)
+                for item in self.line_ranges
+            ],
+            "ServerRuleEvaluation.line_ranges",
+        )
+        if self.status in {
+            ServerRuleStatus.VERIFIED_FAIL,
+            ServerRuleStatus.UNVERIFIABLE,
+        } and not self.issues:
+            raise ValueError("failed or unverifiable rules require issues")
+        if self.status is ServerRuleStatus.VERIFIED_PASS and self.issues:
+            raise ValueError("VERIFIED_PASS forbids issues")
+        return self
+
+
+class DecisionRuleAudit(ContractModel):
+    rule_id: NonEmptyText
+    agent_claim: AgentRuleClaim | None
+    server_evaluation: ServerRuleEvaluation
+
+    @model_validator(mode="after")
+    def validate_rule_id(self) -> DecisionRuleAudit:
+        if self.server_evaluation.rule_id != self.rule_id:
+            raise ValueError("server evaluation rule_id must match audit rule_id")
+        if self.agent_claim is not None and self.agent_claim.rule_id != self.rule_id:
+            raise ValueError("agent claim rule_id must match audit rule_id")
+        return self
+
+
+class DecisionAuditV2(ContractModel):
+    schema_version: Literal[2]
+    job_id: OpaqueId
+    case_id: OpaqueId
+    job_type: JobType
+    skill_ref: VersionedRef
+    source_draft_sha256: Sha256
+    subject_hash: Sha256
+    candidate_target: CandidateTarget | None
+    diagnosis_audit_hash: Sha256 | None
+    required_rule_ids: Annotated[list[NonEmptyText], Field(min_length=1)]
+    required_evidence_bindings: list[EvidenceBinding]
+    rules: Annotated[list[DecisionRuleAudit], Field(min_length=1)]
+
+    @model_validator(mode="after")
+    def validate_audit(self) -> DecisionAuditV2:
+        if self.job_type is JobType.ROUTE:
+            raise ValueError("ROUTE outcomes do not have a decision audit")
+        _unique(self.required_rule_ids, "DecisionAuditV2.required_rule_ids")
+        _unique(
+            [
+                item.existing_evidence_id
+                or f"proposal:{item.evidence_proposal_key}"
+                for item in self.required_evidence_bindings
+            ],
+            "DecisionAuditV2.required_evidence_bindings",
+        )
+        if [item.rule_id for item in self.rules] != self.required_rule_ids:
+            raise ValueError("decision audit rules must exactly follow required_rule_ids")
+        if self.job_type is JobType.REVIEW:
+            if self.candidate_target is None or self.diagnosis_audit_hash is None:
+                raise ValueError(
+                    "REVIEW decision audits require candidate and diagnosis audit bindings"
+                )
+        elif self.diagnosis_audit_hash is not None:
+            raise ValueError("DIAGNOSE decision audits forbid diagnosis_audit_hash")
+        return self
+
+
+class AgentJobOutcomeDraftV2(ContractModel):
+    schema_version: Literal[2]
+    job_id: OpaqueId
+    case_id: OpaqueId
+    job_type: JobType
+    base_state_revision: PositiveInt
+    result_type: OutcomeResultType
+    payload: OutcomePayload | None
+    consumed_evidence_refs: list[OpaqueId]
+    proposed_evidence_drafts: list[AgentEvidenceProposalDraft]
+    proposed_artifact_drafts: list[AgentArtifactProposalDraft]
+    error: ExecutionFailure | None
+    rule_claims: list[AgentRuleClaim]
+
+    @model_validator(mode="after")
+    def validate_draft(self) -> AgentJobOutcomeDraftV2:
+        _validate_outcome_shape(
+            self.job_type, self.result_type, self.payload, self.error
+        )
+        _unique(self.consumed_evidence_refs, "consumed_evidence_refs")
+        _unique([claim.rule_id for claim in self.rule_claims], "rule_claims.rule_id")
+        if self.job_type is JobType.ROUTE and self.rule_claims:
+            raise ValueError("ROUTE drafts forbid rule claims")
+        if (
+            self.job_type in {JobType.DIAGNOSE, JobType.REVIEW}
+            and self.result_type is not OutcomeResultType.FAILED
+            and not self.rule_claims
+        ):
+            raise ValueError("non-failed DIAGNOSE/REVIEW drafts require rule claims")
+        _validate_proposal_keys(
+            [draft.proposal_key for draft in self.proposed_evidence_drafts],
+            [draft.proposal_key for draft in self.proposed_artifact_drafts],
+            self.payload,
+        )
+        _validate_candidate_user_result_pair(
+            self.payload, self.proposed_artifact_drafts
+        )
+        if isinstance(self.payload, DiagnosisOutcome):
+            _validate_diagnosis_result_requests(self.result_type, self.payload)
+            _validate_agent_delta(self.payload.state_delta, self.job_id, self.job_id)
+            _validate_payload_evidence_bindings(
+                self.payload,
+                {item.proposal_key for item in self.proposed_evidence_drafts},
+            )
+        _validate_source_bindings(
+            self.proposed_evidence_drafts,
+            {
+                item.proposal_key: item.artifact_kind
+                for item in self.proposed_artifact_drafts
+            },
+        )
+        return self
 
 
 class AgentJobOutcome(ContractModel):
@@ -1799,6 +2312,7 @@ class AgentJobOutcome(ContractModel):
     proposed_artifact_drafts: list[AgentArtifactProposalDraft]
     error: ExecutionFailure | None
     produced_at: UtcTimestamp
+    decision_audit: DecisionAuditV2 | None = None
 
     @model_validator(mode="after")
     def validate_outcome(self) -> AgentJobOutcome:
@@ -1821,6 +2335,16 @@ class AgentJobOutcome(ContractModel):
             self.proposed_evidence_drafts,
             {proposal.proposal_key: proposal.artifact_kind for proposal in self.proposed_artifact_drafts},
         )
+        _validate_decision_audit_binding(self, self.decision_audit)
+        _validate_inconclusive_effective_outcome(
+            self.result_type,
+            self.payload,
+            self.proposed_evidence_drafts,
+            self.proposed_artifact_drafts,
+        )
+        _validate_effective_resolution_gate(
+            self.result_type, self.payload, self.decision_audit
+        )
         return self
 
 
@@ -1837,6 +2361,7 @@ class JobOutcome(ContractModel):
     proposed_artifacts: list[ArtifactProposal]
     error: ExecutionFailure | None
     produced_at: UtcTimestamp
+    decision_audit: DecisionAuditV2 | None = None
 
     @model_validator(mode="after")
     def validate_outcome(self) -> JobOutcome:
@@ -1865,6 +2390,16 @@ class JobOutcome(ContractModel):
             self.proposed_evidence,
             {proposal.proposal_key: proposal.artifact_kind for proposal in self.proposed_artifacts},
         )
+        _validate_decision_audit_binding(self, self.decision_audit)
+        _validate_inconclusive_effective_outcome(
+            self.result_type,
+            self.payload,
+            self.proposed_evidence,
+            self.proposed_artifacts,
+        )
+        _validate_effective_resolution_gate(
+            self.result_type, self.payload, self.decision_audit
+        )
         return self
 
 
@@ -1881,9 +2416,14 @@ def _validate_outcome_shape(
             OutcomeResultType.NEED_INPUT,
             OutcomeResultType.NEED_ATTACHMENT,
             OutcomeResultType.REROUTE,
+            OutcomeResultType.INCONCLUSIVE,
             OutcomeResultType.FAILED,
         },
-        JobType.REVIEW: {OutcomeResultType.COMPLETED, OutcomeResultType.FAILED},
+        JobType.REVIEW: {
+            OutcomeResultType.COMPLETED,
+            OutcomeResultType.INCONCLUSIVE,
+            OutcomeResultType.FAILED,
+        },
     }
     if result_type not in allowed[job_type]:
         raise ValueError("result_type is not allowed for the job type")
@@ -1906,6 +2446,134 @@ def _validate_outcome_shape(
         and (not isinstance(payload, RouteDecision) or payload.kind is not RouteKind.MATCHED)
     ):
         raise ValueError("a completed ROUTE outcome requires a MATCHED route decision")
+
+
+def _validate_decision_audit_binding(
+    outcome: AgentJobOutcome | JobOutcome,
+    audit: DecisionAuditV2 | None,
+) -> None:
+    requires_audit = (
+        outcome.job_type in {JobType.DIAGNOSE, JobType.REVIEW}
+        and outcome.result_type is not OutcomeResultType.FAILED
+    )
+    if requires_audit != (audit is not None):
+        raise ValueError(
+            "non-failed DIAGNOSE/REVIEW outcomes require exactly one decision audit"
+        )
+    if audit is None:
+        return
+    if (
+        audit.job_id != outcome.job_id
+        or audit.case_id != outcome.case_id
+        or audit.job_type is not outcome.job_type
+    ):
+        raise ValueError("decision audit identity must match its Outcome")
+    payload = outcome.payload
+    if isinstance(payload, ReviewAssessment):
+        target = audit.candidate_target
+        if target is None or (
+            target.candidate_conclusion_id != payload.candidate_conclusion_id
+            or target.candidate_revision != payload.candidate_revision
+            or target.candidate_content_hash != payload.candidate_content_hash
+        ):
+            raise ValueError("REVIEW decision audit target must match its assessment")
+
+
+def _validate_inconclusive_effective_outcome(
+    result_type: OutcomeResultType,
+    payload: OutcomePayload | None,
+    evidence: list[Any],
+    artifacts: list[Any],
+) -> None:
+    if result_type is not OutcomeResultType.INCONCLUSIVE:
+        return
+    if isinstance(payload, DiagnosisOutcome):
+        delta = payload.state_delta
+        if (
+            payload.findings
+            or payload.candidate_conclusion_draft is not None
+            or delta.problem_spec_patch is not None
+            or delta.add_user_facts
+            or delta.proposed_facts
+            or delta.add_active_hypotheses
+            or delta.update_hypotheses
+            or delta.reject_hypotheses
+            or delta.add_open_questions
+            or delta.resolve_questions
+            or delta.add_pending_requirements
+            or delta.fulfill_requirements
+        ):
+            raise ValueError(
+                "INCONCLUSIVE diagnosis must discard semantic findings, state, and Candidate"
+            )
+    if any(
+        item.artifact_kind
+        in {ArtifactKind.USER_RESULT, ArtifactKind.USER_RESULT_ARCHIVE}
+        for item in artifacts
+    ):
+        raise ValueError("INCONCLUSIVE outcomes cannot retain user-result proposals")
+
+
+def _validate_effective_resolution_gate(
+    result_type: OutcomeResultType,
+    payload: OutcomePayload | None,
+    audit: DecisionAuditV2 | None,
+) -> None:
+    resolves_candidate = (
+        result_type is OutcomeResultType.COMPLETED
+        and (
+            (
+                isinstance(payload, DiagnosisOutcome)
+                and payload.candidate_conclusion_draft is not None
+            )
+            or (
+                isinstance(payload, ReviewAssessment)
+                and payload.verdict is ReviewVerdict.PASS
+            )
+        )
+    )
+    if not resolves_candidate:
+        return
+    assert audit is not None
+    if any(
+        item.agent_claim is None
+        or item.agent_claim.claimed_result is not RuleClaimResult.PASS
+        for item in audit.rules
+    ):
+        raise ValueError(
+            "a Candidate/PASS Outcome requires an Agent PASS claim for every rule"
+        )
+    if any(item.server_evaluation.issues for item in audit.rules):
+        raise ValueError(
+            "a Candidate/PASS Outcome requires issue-free server evaluations"
+        )
+    if any(
+        (
+            item.server_evaluation.status is not ServerRuleStatus.SEMANTIC_ONLY
+            if item.server_evaluation.rule_kind == "SEMANTIC_CAUSALITY"
+            else item.server_evaluation.status is not ServerRuleStatus.VERIFIED_PASS
+        )
+        for item in audit.rules
+    ):
+        raise ValueError(
+            "a Candidate/PASS Outcome requires VERIFIED_PASS mechanical rules "
+            "and SEMANTIC_ONLY semantic rules"
+        )
+
+
+def finalize_unresolved_result(
+    draft: UnresolvedResultDraft,
+    audit_artifact_id: str,
+    evidence_refs: Sequence[str],
+) -> UnresolvedResult:
+    """Bind the Coordinator draft to the server-generated audit bundle identity."""
+
+    payload = draft.model_dump(mode="python", exclude={"evidence_bindings"})
+    payload.update(
+        audit_artifact_id=audit_artifact_id,
+        evidence_refs=list(evidence_refs),
+    )
+    return UnresolvedResult.model_validate(payload)
 
 
 def _validate_diagnosis_result_requests(result_type: OutcomeResultType, payload: DiagnosisOutcome) -> None:
@@ -2420,6 +3088,7 @@ class TransitionPlan(ContractModel):
     candidate_mutation: CandidateMutation | None
     next_job_spec: JobSpec | None
     final_result_target: CandidateTarget | None
+    unresolved_result_draft: UnresolvedResultDraft | None = None
     clear_active_job: bool
     reason: NonEmptyText
 
@@ -2435,6 +3104,19 @@ class TransitionPlan(ContractModel):
                 raise ValueError("FAILED plans must SET case failure")
         elif self.case_failure_update is not None and self.case_failure_update.action is FieldUpdateAction.SET:
             raise ValueError("non-FAILED plans cannot SET case failure")
+        if self.target_case_status is CaseStatus.UNRESOLVED:
+            if self.unresolved_result_draft is None:
+                raise ValueError(
+                    "UNRESOLVED plans require an unresolved_result_draft"
+                )
+            if self.next_job_spec is not None or not self.clear_active_job:
+                raise ValueError(
+                    "UNRESOLVED plans must clear the active Job and cannot create another"
+                )
+        elif self.unresolved_result_draft is not None:
+            raise ValueError(
+                "only UNRESOLVED plans may carry unresolved_result_draft"
+            )
         if self.accepted_candidate_proposal_key is not None:
             if (
                 self.candidate_mutation is None
@@ -2531,6 +3213,7 @@ class OutcomeProcessingRecord(ContractModel):
     error_code: ErrorCode | None
     accepted_evidence_ids: list[OpaqueId]
     accepted_artifact_ids: list[OpaqueId]
+    generated_artifact_ids: list[OpaqueId] = []
     created_job_id: OpaqueId | None
     reason: NonEmptyText
 
@@ -2538,6 +3221,11 @@ class OutcomeProcessingRecord(ContractModel):
     def validate_processing(self) -> OutcomeProcessingRecord:
         _unique(self.accepted_evidence_ids, "accepted_evidence_ids")
         _unique(self.accepted_artifact_ids, "accepted_artifact_ids")
+        _unique(self.generated_artifact_ids, "generated_artifact_ids")
+        if set(self.accepted_artifact_ids) & set(self.generated_artifact_ids):
+            raise ValueError(
+                "accepted and server-generated artifact IDs must be disjoint"
+            )
         if self.outcome_hash != self.outcome_file_ref.sha256:
             raise ValueError("outcome_hash must equal outcome_file_ref.sha256")
         if self.outcome_file_ref.relative_key != f"jobs/{self.job_id}/job_outcome.json":
@@ -2548,7 +3236,12 @@ class OutcomeProcessingRecord(ContractModel):
             if self.error_code is not None:
                 raise ValueError("APPLIED processing records forbid error_code")
         else:
-            if self.accepted_evidence_ids or self.accepted_artifact_ids or self.created_job_id is not None:
+            if (
+                self.accepted_evidence_ids
+                or self.accepted_artifact_ids
+                or self.generated_artifact_ids
+                or self.created_job_id is not None
+            ):
                 raise ValueError("non-APPLIED processing records cannot accept or create objects")
             if (self.disposition is OutcomeDisposition.REJECTED) != (self.error_code is not None):
                 raise ValueError("error_code must be present exactly for REJECTED processing")
@@ -2787,6 +3480,16 @@ class CaseAggregate(ContractModel):
             producing_job = self.jobs.get(artifact.created_by_job_id)
             if producing_job is None:
                 raise ValueError("Artifact.created_by_job_id must resolve")
+            if artifact.kind is ArtifactKind.AUDIT_BUNDLE:
+                assert isinstance(artifact.metadata, AuditBundleMetadata)
+                if (
+                    artifact.metadata.case_id != self.case.case_id
+                    or artifact.metadata.source_job_id != artifact.created_by_job_id
+                    or artifact.metadata.source_outcome_id not in self.outcomes
+                ):
+                    raise ValueError(
+                        "AUDIT_BUNDLE metadata must resolve its Case, Job, and Outcome"
+                    )
             if artifact.kind is ArtifactKind.LOGPARSE_RUN:
                 assert isinstance(artifact.metadata, LogparseRunMetadata)
                 attachment = self.attachments.get(artifact.metadata.source_attachment_id)
@@ -2831,12 +3534,32 @@ class CaseAggregate(ContractModel):
                 validate_outcome_for_job(job, outcome, self)
                 accepted_evidence = [self.evidence.get(ref) for ref in record.accepted_evidence_ids]
                 accepted_artifacts = [self.artifacts.get(ref) for ref in record.accepted_artifact_ids]
-                if any(item is None for item in accepted_evidence + accepted_artifacts):
+                generated_artifacts = [
+                    self.artifacts.get(ref) for ref in record.generated_artifact_ids
+                ]
+                if any(
+                    item is None
+                    for item in accepted_evidence
+                    + accepted_artifacts
+                    + generated_artifacts
+                ):
                     raise ValueError("APPLIED processing IDs must resolve formal resources")
                 if any(item.collected_at != outcome.produced_at for item in accepted_evidence if item is not None):
                     raise ValueError("accepted Evidence must use Outcome.produced_at")
                 if any(item.created_at != outcome.produced_at for item in accepted_artifacts if item is not None):
                     raise ValueError("accepted Artifact must use Outcome.produced_at")
+                if any(
+                    item is not None
+                    and (
+                        item.kind is not ArtifactKind.AUDIT_BUNDLE
+                        or item.created_at != record.processed_at
+                        or item.created_by_job_id != job.job_id
+                    )
+                    for item in generated_artifacts
+                ):
+                    raise ValueError(
+                        "generated Artifacts must be audit bundles created during processing"
+                    )
                 if record.created_job_id is not None:
                     created_job = self.jobs.get(record.created_job_id)
                     if created_job is None or created_job.created_at != outcome.produced_at:
@@ -2857,11 +3580,29 @@ class CaseAggregate(ContractModel):
             ]
             if len(user_results) != 1:
                 raise ValueError("RESOLVED Case requires its accepted candidate USER_RESULT")
+        if self.case.status is CaseStatus.UNRESOLVED:
+            assert self.case.unresolved_result is not None
+            unresolved = self.case.unresolved_result
+            artifact = self.artifacts.get(unresolved.audit_artifact_id)
+            if artifact is None or artifact.kind is not ArtifactKind.AUDIT_BUNDLE:
+                raise ValueError(
+                    "UNRESOLVED Case requires its matching AUDIT_BUNDLE Artifact"
+                )
+            metadata = artifact.metadata
+            assert isinstance(metadata, AuditBundleMetadata)
+            if (
+                unresolved.source_job_id != metadata.source_job_id
+                or unresolved.source_outcome_id != metadata.source_outcome_id
+                or any(ref not in self.evidence for ref in unresolved.evidence_refs)
+            ):
+                raise ValueError(
+                    "UNRESOLVED result must match its audit metadata and Evidence"
+                )
         return self
 
 
 class StateFile(ContractModel):
-    schema_version: Literal[1]
+    schema_version: Literal[2]
     contract_revision: Literal[CONTRACT_REVISION]
     generation: NonNegativeInt
     installation_id: OpaqueId
@@ -3087,11 +3828,19 @@ class ArtifactSummary(ContractModel):
                 != "application/vnd.problem-locator.logparse-run+directory"
             ):
                 raise ValueError("LOGPARSE_RUN summary must use its fixed directory shape")
+        if self.kind is ArtifactKind.AUDIT_BUNDLE and (
+            self.resource_kind is not ResourceKind.FILE
+            or self.content_type != "application/zip"
+        ):
+            raise ValueError(
+                "AUDIT_BUNDLE summary must describe an application/zip FILE"
+            )
         return self
 
 
 class ArtifactView(ContractModel):
     artifact_id: OpaqueId
+    kind: ArtifactKind
     name: NonEmptyText
     content_type: ContentType
     size: NonNegativeInt
@@ -3113,6 +3862,7 @@ class CaseView(ContractModel):
     active_job: JobSummary | None
     selected_skill_ref: VersionedRef | None
     final_result: CandidateConclusion | None
+    unresolved_result: UnresolvedResult | None = None
     failure: CaseFailure | None
     artifacts: list[ArtifactSummary]
     created_at: UtcTimestamp
@@ -3127,6 +3877,11 @@ class CaseView(ContractModel):
                 raise ValueError("RESOLVED case views require an ACCEPTED final result")
         elif self.final_result is not None:
             raise ValueError("non-RESOLVED case views must have final_result=null")
+        if self.status is CaseStatus.UNRESOLVED:
+            if self.unresolved_result is None:
+                raise ValueError("UNRESOLVED case views require unresolved_result")
+        elif self.unresolved_result is not None:
+            raise ValueError("only UNRESOLVED case views may carry unresolved_result")
         if self.status in {CaseStatus.RUNNING, CaseStatus.REVIEWING}:
             if self.active_job is None:
                 raise ValueError("RUNNING and REVIEWING CaseView require active_job")
@@ -3191,6 +3946,25 @@ class CaseView(ContractModel):
                 )
         elif user_results:
             raise ValueError("non-RESOLVED CaseView cannot expose USER_RESULT")
+        audit_bundles = [
+            artifact
+            for artifact in self.artifacts
+            if artifact.kind is ArtifactKind.AUDIT_BUNDLE
+        ]
+        if self.status is CaseStatus.UNRESOLVED:
+            assert self.unresolved_result is not None
+            if (
+                len(audit_bundles) != 1
+                or audit_bundles[0].artifact_id
+                != self.unresolved_result.audit_artifact_id
+            ):
+                raise ValueError(
+                    "UNRESOLVED CaseView requires exactly its matching audit bundle"
+                )
+        elif audit_bundles:
+            raise ValueError(
+                "non-UNRESOLVED CaseView cannot expose an AUDIT_BUNDLE"
+            )
         return self
 
 
@@ -3734,8 +4508,8 @@ class StateExportResource(ContractModel):
 
 
 class StateExport(ContractModel):
-    export_schema_version: Literal[1]
-    schema_version: Literal[1]
+    export_schema_version: Literal[2]
+    schema_version: Literal[2]
     contract_revision: Literal[CONTRACT_REVISION]
     source_generation: NonNegativeInt
     installation_id: OpaqueId
@@ -3804,7 +4578,7 @@ class ContractManifestEntry(ContractModel):
 
 
 class ContractManifest(ContractModel):
-    schema_version: Literal[1]
+    schema_version: Literal[2]
     contract_revision: Literal[CONTRACT_REVISION]
     generator_version: NonEmptyText
     files: list[ContractManifestEntry]
@@ -3814,7 +4588,7 @@ class ContractManifest(ContractModel):
         paths = [entry.path for entry in self.files]
         if paths != sorted(paths) or len(paths) != len(set(paths)):
             raise ValueError("contract manifest paths must be unique and ascending")
-        if any(path == "schemas/v1/contract-manifest.json" for path in paths):
+        if any(path == "schemas/v2/contract-manifest.json" for path in paths):
             raise ValueError("contract manifest cannot hash itself")
         return self
 
@@ -3947,7 +4721,9 @@ __all__ = [model.__name__ for model in _CONTRACT_MODEL_TYPES] + [
     "default_resource_limits",
     "derive_attachment_content_type",
     "derive_attachment_filename_suffix",
+    "finalize_unresolved_result",
     "validate_job_instruction_for_job",
+    "review_required_evidence_refs",
     "validate_workspace_manifest_for_job",
     "workspace_attachment_relative_path",
 ]

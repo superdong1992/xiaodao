@@ -351,6 +351,15 @@ PORT_ERROR_CODES: Mapping[str, frozenset[ErrorCode]] = MappingProxyType(
                 ErrorCode.RESOURCE_STAGE_FAILED,
             }
         ),
+        "ResourceStore.stage_generated_file": frozenset(
+            {
+                ErrorCode.RESOURCE_SIZE_MISMATCH,
+                ErrorCode.RESOURCE_HASH_MISMATCH,
+                ErrorCode.RESOURCE_LIMIT_EXCEEDED,
+                ErrorCode.PATH_VIOLATION,
+                ErrorCode.RESOURCE_STAGE_FAILED,
+            }
+        ),
         "ResourceStore.stage_tree": frozenset(
             {
                 ErrorCode.RESOURCE_HASH_MISMATCH,
@@ -413,10 +422,16 @@ PORT_ERROR_CODES: Mapping[str, frozenset[ErrorCode]] = MappingProxyType(
         "ExecutionRecordStore.publish_rejected_agent_output_bytes": frozenset(
             {ErrorCode.IDEMPOTENCY_CONFLICT, ErrorCode.EXECUTION_RECORD_FAILED}
         ),
+        "ExecutionRecordStore.publish_audit_bytes": frozenset(
+            {ErrorCode.IDEMPOTENCY_CONFLICT, ErrorCode.EXECUTION_RECORD_FAILED}
+        ),
         "ExecutionRecordStore.read_published_job": frozenset(
             {ErrorCode.EXECUTION_RECORD_FAILED}
         ),
         "ExecutionRecordStore.read_published_outcome": frozenset(
+            {ErrorCode.EXECUTION_RECORD_FAILED}
+        ),
+        "ExecutionRecordStore.read_audit_bytes": frozenset(
             {ErrorCode.EXECUTION_RECORD_FAILED}
         ),
         "ExecutionRecordStore.open_log_sinks": frozenset(

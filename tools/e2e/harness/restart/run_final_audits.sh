@@ -35,7 +35,7 @@ for path in (Path("audit_state_and_result.py"), Path("audit_http_capture.py")):
   --after-result /audit-input/diagnosis-result.after.json \
   --before-archive /audit-input/result-archive.before.zip \
   --after-archive /audit-input/result-archive.after.zip \
-  --user-result-schema /opt/src/xiaodao/schemas/v1/user-result.schema.json \
+  --user-result-schema /opt/src/xiaodao/schemas/v2/user-result.schema.json \
   --output /evidence/final-state-audit.json
 
 "$python" -I audit_http_capture.py \

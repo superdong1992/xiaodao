@@ -12,7 +12,7 @@ from problem_locator.contracts.commands import (
     CaseQueryResponse,
     UploadDescriptor,
 )
-from problem_locator.contracts.enums import ErrorCode
+from problem_locator.contracts.enums import ArtifactKind, ErrorCode
 from problem_locator.contracts.limits import MAX_ATTACHMENT_BYTES
 from problem_locator.contracts.models import ApplicationError
 from problem_locator.interfaces import client_access
@@ -625,6 +625,7 @@ def test_download_uses_only_listed_url_and_verifies_bytes(tmp_path: Path) -> Non
     payload = b"result\n"
     view = ArtifactView(
         artifact_id=ARTIFACT_ID,
+        kind=ArtifactKind.USER_RESULT,
         name="diagnosis.json",
         content_type="application/json",
         size=len(payload),
@@ -660,6 +661,7 @@ def test_download_hash_failure_leaves_no_destination_or_temporary_file(
 ) -> None:
     view = ArtifactView(
         artifact_id=ARTIFACT_ID,
+        kind=ArtifactKind.USER_RESULT,
         name="diagnosis.json",
         content_type="application/json",
         size=4,
@@ -690,6 +692,7 @@ def test_download_hash_failure_leaves_no_destination_or_temporary_file(
 def test_download_rejects_non_http_service_url_before_curl(tmp_path: Path) -> None:
     view = ArtifactView(
         artifact_id=ARTIFACT_ID,
+        kind=ArtifactKind.USER_RESULT,
         name="diagnosis.json",
         content_type="application/json",
         size=0,
@@ -720,6 +723,7 @@ def test_download_publication_does_not_clobber_concurrent_destination(
     payload = b"result"
     view = ArtifactView(
         artifact_id=ARTIFACT_ID,
+        kind=ArtifactKind.USER_RESULT,
         name="diagnosis.json",
         content_type="application/json",
         size=len(payload),
@@ -909,6 +913,7 @@ def test_system_curl_download_stops_before_writing_past_declared_size(
 def test_download_aborts_when_fake_service_exceeds_listed_size(tmp_path: Path) -> None:
     view = ArtifactView(
         artifact_id=ARTIFACT_ID,
+        kind=ArtifactKind.USER_RESULT,
         name="diagnosis.json",
         content_type="application/json",
         size=4,

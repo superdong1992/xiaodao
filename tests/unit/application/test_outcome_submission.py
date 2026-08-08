@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -15,6 +17,7 @@ from problem_locator.application.preparation import (
     runtime_bindings_from_job,
 )
 from problem_locator.contracts import (
+    AgentJobOutcome,
     ApplicationError,
     ApplicationErrorDetail,
     ApplicationPortError,
@@ -48,6 +51,7 @@ from problem_locator.contracts import (
     LogparseParseParameters,
     LogparseRunMetadata,
     OutcomeDisposition,
+    OutcomeResultType,
     PlannedResourceBinding,
     ResourceKind,
     ResourceRef,
@@ -58,11 +62,14 @@ from problem_locator.contracts import (
     StagedResourceRef,
     TransitionPlan,
     TriggerType,
+    UnresolvedReasonCode,
     UserFactInput,
+    UserResultPayload,
     VersionedRef,
     canonical_json_bytes,
     validate_user_result_for_outcome,
 )
+from problem_locator.domain import DomainCoordinator
 from problem_locator.contracts.limits import MAX_CASE_RESOURCE_BYTES
 from tests.contracts.fakes import (
     DeterministicIdGenerator,
@@ -92,6 +99,7 @@ USER_FACT_ID = "00000000-0000-0000-0000-000000000030"
 USER_FACT_TRIGGER_ID = "00000000-0000-0000-0000-000000000031"
 RUNTIME_EPOCH = "00000000-0000-0000-0000-000000000090"
 PROCESSED_AT = "2026-07-31T00:05:00.000Z"
+_AUDIT_DRAFT_BYTES = b'{"observable":"agent draft"}'
 
 
 class _CountingRepository(InMemoryStateRepository):
@@ -696,6 +704,99 @@ def _candidate_outcome_with_logparse_resources(
         (staged_result, staged_logparse),
         tree_files,
     )
+
+
+def _inconclusive_diagnosis_outcome() -> JobOutcome:
+    payload = _load("job-outcome-diagnosis.json")
+    diagnosis = payload["payload"]
+    diagnosis["candidate_conclusion_draft"] = None
+    diagnosis["recommended_next_step"] = (
+        "Correct the fixed problem time and create a new Case."
+    )
+    payload["result_type"] = OutcomeResultType.INCONCLUSIVE
+    payload["proposed_artifacts"] = []
+    payload["decision_audit"]["source_draft_sha256"] = hashlib.sha256(
+        _AUDIT_DRAFT_BYTES
+    ).hexdigest()
+    evaluation = payload["decision_audit"]["rules"][0]["server_evaluation"]
+    evaluation["status"] = "VERIFIED_FAIL"
+    evaluation["issues"] = ["The required event is outside the declared window."]
+    return JobOutcome.model_validate(payload)
+
+
+def _publish_required_diagnosis_audit(
+    records: InMemoryExecutionRecordStore,
+    outcome: JobOutcome,
+    *,
+    omit: frozenset[str] = frozenset(),
+    corrupt_finalization: bool = False,
+    decision_evidence_bytes: bytes = b"",
+    legacy_finalization: bool = False,
+) -> None:
+    if "context.txt" not in omit:
+        records.publish_audit_bytes(outcome.job_id, "context.txt", b"fixed context\n")
+    if "agent_job_outcome.draft.json" not in omit:
+        records.publish_audit_bytes(
+            outcome.job_id,
+            "agent_job_outcome.draft.json",
+            _AUDIT_DRAFT_BYTES,
+        )
+    assert outcome.decision_audit is not None
+    agent_outcome_value = outcome.model_dump(mode="json")
+    agent_outcome_value["proposed_evidence_drafts"] = agent_outcome_value.pop(
+        "proposed_evidence"
+    )
+    agent_outcome_value["proposed_artifact_drafts"] = agent_outcome_value.pop(
+        "proposed_artifacts"
+    )
+    agent_outcome = AgentJobOutcome.model_validate(agent_outcome_value)
+    agent_outcome_bytes = canonical_json_bytes(agent_outcome)
+    if "agent_job_outcome.json" not in omit:
+        records.publish_audit_bytes(
+            outcome.job_id,
+            "agent_job_outcome.json",
+            agent_outcome_bytes,
+        )
+    if "decision_audit.json" not in omit:
+        records.publish_audit_bytes(
+            outcome.job_id,
+            "decision_audit.json",
+            canonical_json_bytes(outcome.decision_audit),
+        )
+    if "decision_evidence.jsonl" not in omit:
+        records.publish_audit_bytes(
+            outcome.job_id,
+            "decision_evidence.jsonl",
+            decision_evidence_bytes,
+        )
+    if "finalization_manifest.json" not in omit:
+        decision_audit_bytes = canonical_json_bytes(outcome.decision_audit)
+        finalization = {
+            "schema_version": 2,
+            "relative_path": "output/job_outcome.json",
+            "source_draft_sha256": hashlib.sha256(
+                _AUDIT_DRAFT_BYTES
+            ).hexdigest(),
+            "outcome_size": len(agent_outcome_bytes),
+            "outcome_sha256": (
+                "0" * 64
+                if corrupt_finalization
+                else hashlib.sha256(agent_outcome_bytes).hexdigest()
+            ),
+            "decision_audit_sha256": hashlib.sha256(
+                decision_audit_bytes
+            ).hexdigest(),
+            "decision_evidence_sha256": hashlib.sha256(
+                decision_evidence_bytes
+            ).hexdigest(),
+        }
+        if legacy_finalization:
+            del finalization["decision_evidence_sha256"]
+        records.publish_audit_bytes(
+            outcome.job_id,
+            "finalization_manifest.json",
+            canonical_json_bytes(finalization),
+        )
 
 
 def _diagnose_catalog(bindings: RuntimeBindings) -> FakeAssetCatalog:
@@ -2776,3 +2877,224 @@ def test_dispatch_failure_after_applied_commit_does_not_hide_outcome_receipt() -
     assert aggregate.jobs[aggregate.case.active_job_id].status is JobStatus.PENDING
     assert dispatcher.submit_calls == [aggregate.case.active_job_id]
     assert guard.acquire_calls == guard.release_calls == 1
+
+
+def test_unresolved_submission_atomically_binds_downloadable_audit_and_replays() -> None:
+    outcome = _inconclusive_diagnosis_outcome()
+    records = InMemoryExecutionRecordStore()
+    file_ref = records.publish_outcome_bytes(
+        outcome.job_id,
+        canonical_json_bytes(outcome),
+    )
+    _publish_required_diagnosis_audit(records, outcome)
+    forbidden_payloads = {
+        "user_result.json": b"REJECTED-USER-RESULT-SECRET",
+        "full-upload.zip": b"FULL-UPLOAD-SECRET",
+        "logparse-tree.tar": b"FULL-LOGPARSE-SECRET",
+    }
+    for filename, payload in forbidden_payloads.items():
+        records.publish_audit_bytes(outcome.job_id, filename, payload)
+    full_value = _load("user-result.json")
+    full_value["candidate_statement"] = (
+        "REJECTED_USER_RESULT_FULL_4f7d9cc6d7274fcdb11bd5d0c398da43"
+    )
+    full_user_result = canonical_json_bytes(
+        UserResultPayload.model_validate(full_value)
+    )
+    fragmented_value = _load("user-result.json")
+    fragmented_value["candidate_statement"] = (
+        "REJECTED_USER_RESULT_FRAGMENT_"
+        "a16f80e29b4e4c21b91b89531a0ab911"
+    )
+    fragmented_user_result = canonical_json_bytes(
+        UserResultPayload.model_validate(fragmented_value)
+    )
+    fragment_boundary = len(fragmented_user_result) // 2
+    stdout_bytes = b"agent-prefix:" + full_user_result + b":" + (
+        fragmented_user_result[:fragment_boundary]
+    )
+    stderr_bytes = fragmented_user_result[fragment_boundary:] + b":agent-suffix"
+    records.publish_audit_bytes(outcome.job_id, "stdout.log", stdout_bytes)
+    records.publish_audit_bytes(outcome.job_id, "stderr.log", stderr_bytes)
+
+    service, repository, resources, guard, dispatcher, _, _ = _service(
+        _running_diagnosis_candidate_state(),
+        DomainCoordinator(),
+        records,
+    )
+
+    receipt = service.submit_outcome(outcome, file_ref)
+
+    assert receipt.disposition is OutcomeDisposition.APPLIED
+    aggregate = repository.read_snapshot().cases[CASE_ID]
+    assert aggregate.case.status is CaseStatus.UNRESOLVED
+    assert aggregate.case.active_job_id is None
+    unresolved = aggregate.case.unresolved_result
+    assert unresolved is not None
+    assert unresolved.reason_code is UnresolvedReasonCode.MECHANICAL_VERIFICATION_FAILED
+    audit = aggregate.artifacts[unresolved.audit_artifact_id]
+    assert audit.kind is ArtifactKind.AUDIT_BUNDLE
+    assert receipt.case_view.artifacts[0].artifact_id == audit.artifact_id
+    assert receipt.case_view.artifacts[0].downloadable is True
+    processing = aggregate.outcome_processing_records[outcome.outcome_id]
+    assert processing.generated_artifact_ids == [audit.artifact_id]
+    assert processing.accepted_artifact_ids == []
+    assert aggregate.jobs[outcome.job_id].status is JobStatus.SUCCEEDED
+    assert dispatcher.submit_calls == []
+
+    stream = resources.open_read(
+        ResourceRef(
+            resource_kind=audit.resource_kind,
+            storage_key=audit.storage_key,
+            size=audit.size,
+            sha256=audit.sha256,
+        )
+    )
+    bundle_bytes = stream.read(audit.size + 1)
+    with zipfile.ZipFile(io.BytesIO(bundle_bytes)) as archive:
+        names = archive.namelist()
+        assert names[0] == "manifest.json"
+        assert any(name.endswith("/decision_audit.json") for name in names)
+        assert any(name.endswith("/decision_evidence.jsonl") for name in names)
+        assert all("user_result" not in name.lower() for name in names)
+        assert all("upload" not in name.lower() for name in names)
+        assert all("logparse-tree" not in name.lower() for name in names)
+        assert all(not name.endswith("/stdout.log") for name in names)
+        assert all(not name.endswith("/stderr.log") for name in names)
+        stdio_name = next(
+            name for name in names if name.endswith("/stdio-metadata.json")
+        )
+        stdio = json.loads(archive.read(stdio_name))
+        assert stdio == {
+            "schema_version": 1,
+            "streams": {
+                "stderr": {
+                    "available": True,
+                    "sha256": hashlib.sha256(stderr_bytes).hexdigest(),
+                    "size": len(stderr_bytes),
+                },
+                "stdout": {
+                    "available": True,
+                    "sha256": hashlib.sha256(stdout_bytes).hexdigest(),
+                    "size": len(stdout_bytes),
+                },
+            },
+        }
+        joined = b"\n".join(archive.read(name) for name in names)
+    for forbidden in forbidden_payloads.values():
+        assert forbidden not in joined
+    assert full_user_result not in joined
+    assert fragmented_user_result[:fragment_boundary] not in joined
+    assert fragmented_user_result[fragment_boundary:] not in joined
+    # Download policy does not mutate or erase the local execution record.
+    assert records.read_audit_bytes(outcome.job_id, "stdout.log") == stdout_bytes
+    assert records.read_audit_bytes(outcome.job_id, "stderr.log") == stderr_bytes
+
+    duplicate = service.submit_outcome(outcome, file_ref)
+    assert duplicate.disposition is OutcomeDisposition.DUPLICATE
+    replayed = repository.read_snapshot().cases[CASE_ID]
+    assert replayed.case.unresolved_result == unresolved
+    assert list(replayed.artifacts) == [audit.artifact_id]
+    assert len(repository.commit_calls) == 1
+    assert guard.acquire_calls == guard.release_calls == 1
+
+
+def test_unresolved_submission_retry_reuses_the_same_generated_audit_identity() -> None:
+    outcome = _inconclusive_diagnosis_outcome()
+    records = InMemoryExecutionRecordStore()
+    file_ref = records.publish_outcome_bytes(
+        outcome.job_id,
+        canonical_json_bytes(outcome),
+    )
+    _publish_required_diagnosis_audit(records, outcome)
+    repository = InMemoryStateRepository(_running_diagnosis_candidate_state())
+    repository.fail_next_commit(
+        _port_error(ErrorCode.REVISION_CONFLICT, "injected revision conflict")
+    )
+    service, _, resources, guard, _, _, _ = _service(
+        repository,
+        DomainCoordinator(),
+        records,
+    )
+
+    receipt = service.submit_outcome(outcome, file_ref)
+
+    assert receipt.disposition is OutcomeDisposition.APPLIED
+    aggregate = repository.read_snapshot().cases[CASE_ID]
+    unresolved = aggregate.case.unresolved_result
+    assert unresolved is not None
+    processing = aggregate.outcome_processing_records[outcome.outcome_id]
+    assert processing.generated_artifact_ids == [unresolved.audit_artifact_id]
+    assert list(aggregate.artifacts) == [unresolved.audit_artifact_id]
+    assert len(resources.publish_calls) == 2
+    assert resources.publish_calls[0][1] == resources.publish_calls[1][1]
+    assert guard.acquire_calls == guard.release_calls == 2
+
+
+@pytest.mark.parametrize(
+    "audit_fault",
+    [
+        "missing",
+        "inconsistent",
+        "legacy_finalization",
+        "decision_evidence_tampered",
+        "decision_evidence_malformed",
+    ],
+)
+def test_unresolved_submission_fails_closed_on_execution_audit_fault(
+    audit_fault: str,
+) -> None:
+    outcome = _inconclusive_diagnosis_outcome()
+    records = InMemoryExecutionRecordStore()
+    file_ref = records.publish_outcome_bytes(
+        outcome.job_id,
+        canonical_json_bytes(outcome),
+    )
+    decision_evidence_bytes = b""
+    if audit_fault == "decision_evidence_tampered":
+        decision_evidence_bytes = canonical_json_bytes(
+            {
+                "schema_version": 1,
+                "evidence_ref": EVIDENCE_ID,
+                "anchor": None,
+                "relative_path": "targets/forged.log",
+                "line_number": 1,
+                "raw_line": "forged decision evidence",
+                "raw_line_sha256": "f" * 64,
+            }
+        )
+    elif audit_fault == "decision_evidence_malformed":
+        decision_evidence_bytes = (
+            b'{"schema_version":1,"schema_version":1}\n'
+        )
+    _publish_required_diagnosis_audit(
+        records,
+        outcome,
+        omit=(
+            frozenset({"finalization_manifest.json"})
+            if audit_fault == "missing"
+            else frozenset()
+        ),
+        corrupt_finalization=audit_fault == "inconsistent",
+        decision_evidence_bytes=decision_evidence_bytes,
+        legacy_finalization=audit_fault == "legacy_finalization",
+    )
+    service, repository, resources, guard, dispatcher, _, _ = _service(
+        _running_diagnosis_candidate_state(),
+        DomainCoordinator(),
+        records,
+    )
+
+    with pytest.raises(ApplicationPortError) as captured:
+        service.submit_outcome(outcome, file_ref)
+
+    assert captured.value.error.code is ErrorCode.EXECUTION_RECORD_FAILED
+    aggregate = repository.read_snapshot().cases[CASE_ID]
+    assert aggregate.case.status is CaseStatus.RUNNING
+    assert aggregate.case.unresolved_result is None
+    assert aggregate.artifacts == {}
+    assert aggregate.outcome_processing_records == {}
+    assert resources.publish_calls == []
+    assert resources.staged_resource_count == 0
+    assert dispatcher.submit_calls == []
+    assert guard.acquire_calls == guard.release_calls == 0

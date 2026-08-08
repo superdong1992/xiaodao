@@ -50,6 +50,7 @@ OTHER_RESOURCE_ID = "00000000-0000-0000-0000-000000000203"
 FIRST_BATCH_RESOURCE_ID = "00000000-0000-0000-0000-000000000204"
 SECOND_BATCH_RESOURCE_ID = "00000000-0000-0000-0000-000000000205"
 JOB_ID = "00000000-0000-0000-0000-000000000301"
+GENERATED_STAGE_ID = "00000000-0000-0000-0000-000000000302"
 
 
 class DurableRecordingFileSync(FakeFileSync):
@@ -215,6 +216,47 @@ def test_stage_file_reads_one_stream_and_publishes_exact_marker_last(
     assert stream.requests == [1024 * 1024, 1024 * 1024]
     assert harness.store.validate_staged(staged) is None
     assert harness.store.validate_staged(staged) is None
+
+
+def test_generated_file_stage_is_deterministic_and_idempotent(
+    harness: Harness,
+) -> None:
+    payload = b"server-owned-audit-bundle"
+    first = harness.store.stage_generated_file(
+        JOB_ID,
+        "server-audit-bundle",
+        GENERATED_STAGE_ID,
+        InMemoryBinaryStream(payload),
+        len(payload),
+        _sha(payload),
+    )
+    retry_stream = RecordingStream(payload)
+    retried = harness.store.stage_generated_file(
+        JOB_ID,
+        "server-audit-bundle",
+        GENERATED_STAGE_ID,
+        retry_stream,
+        len(payload),
+        _sha(payload),
+    )
+
+    assert retried == first
+    assert retry_stream.requests == []
+    assert harness.store.validate_staged(retried) is None
+
+    assert (
+        _error_code(
+            lambda: harness.store.stage_generated_file(
+                JOB_ID,
+                "server-audit-bundle",
+                GENERATED_STAGE_ID,
+                InMemoryBinaryStream(b"wrong"),
+                5,
+                _sha(b"wrong"),
+            )
+        )
+        is ErrorCode.RESOURCE_HASH_MISMATCH
+    )
 
 
 @pytest.mark.parametrize(

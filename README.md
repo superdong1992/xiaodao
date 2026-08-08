@@ -1,8 +1,22 @@
-# Problem Locator V1
+# Problem Locator V2
 
 ## Diagnosis Skill v3
 
-当前落地版本为 GenerationSpec v2、生成器/生成 Skill `3.0.6`、manifest schema `2`、DIAGNOSE output contract `2.0.4` 和 S00 contract revision `v1-contract-r4`。
+当前冻结版本如下；这些版本共同定义本次 V2 行为，不应只按其中某一个版本判断兼容性：
+
+| 合同或资产 | 当前版本 |
+| --- | --- |
+| Problem Locator package | `1.0.7` |
+| State / Job / Outcome schema | `2` |
+| S00 contract revision | `v2-contract-r1` |
+| GenerationSpec | `v3` |
+| Diagnosis Skill generator / 生成 Skill | `3.1.1` |
+| Diagnosis Skill manifest | `3`（`verification_contract.schema_version=1`） |
+| ROUTE / DIAGNOSE / REVIEW output contract | `2.0.0` / `3.0.0` / `2.0.0` |
+| Specialist / Reviewer profile | `1.0.1` / `1.0.1` |
+| Router / Diagnose / Review tool bundle | `2.0.0` / `2.0.0` / `2.0.0` |
+
+State、Job 和权威 Outcome 已硬切到 V2。服务不会读取、迁移或恢复 V1 State、V1 Job 或 V1 Outcome；升级部署必须使用新的 `DATA_ROOT`，需要保留的旧数据只能作为只读历史材料另行处理。
 
 本仓库将故障定位能力分为三层：
 
@@ -10,16 +24,20 @@
 - `logparse-diagnose` 只负责 Logparse broker、一次解析、`LOGPARSE_RUN` 持久化与复用，以及受控路径规则。
 - 每个生成的 Diagnosis Skill 自己声明业务 requirements、阶段、补参提示、约束和 Logparse 字段映射。
 
-Diagnosis Skill 由 `wiki-to-diagnosis-skill` 根据 GenerationSpec v2 生成。每个 requirement 都必须声明 `name`、`kind`、`stage`、`fulfillment_source`、`prompt` 和 S00 原生 `constraints`。`requires_logparse` 只表示绑定 Logparse 工具，不会自动生成 RPC 参数；`custom_parameters` 为空表示不增加任何自定义参数。
+Diagnosis Skill 由 `wiki-to-diagnosis-skill` 根据 GenerationSpec v3 生成。每个 requirement 都必须声明 `name`、`kind`、`stage`、`fulfillment_source`、`supplement_policy`、`prompt` 和 S00 原生 `constraints`。manifest v3 还必须声明 `verification_contract`：整行事件提取器、显式时间窗及边界、事实字段、角色覆盖、跨角色关联、事件顺序和语义因果规则。`requires_logparse` 只表示绑定 Logparse 工具，不会自动生成 RPC 参数；`custom_parameters` 为空表示不增加任何自定义参数。
 
 Logparse 产品可以省略。省略时 Runtime 记录有效产品 `default`，Broker 不向上游强制传入 `--product`；只有非默认产品才显式传参。生成定位 Skill 时，作者只声明 Logparse 归档 requirement 的数量约束，不填写 Content-Type；上传时用户也只选择归档文件。平台按文件后缀确定内部 Content-Type：`.gz/.tar.gz/.tgz` 为 `application/gzip`，`.zip` 为 `application/zip`，`.tar` 为 `application/x-tar`。
 
-候选结论必须同时产出：
+Agent 不再直接产生权威 Outcome。DIAGNOSE 或 REVIEW Agent 只写入 `output/job_outcome.draft.json` 并调用 `problem-locator-seal-outcome-draft` 封存草稿；sealer 只做 Schema、Canonical JSON 和哈希校验。Agent 退出后，服务端按固定 Skill 重新打开原始证据、独立执行 `verification_contract`，再生成带 `outcome_id`、时间和 `decision_audit` 的唯一权威 `output/job_outcome.json`。
+
+通过服务端验证的候选结论必须同时产出：
 
 - `diagnosis-result.json`：规范化 `USER_RESULT`。
 - `result.zip`：可交付的 `USER_RESULT_ARCHIVE`，扁平包含 `result.txt` 和按证据顺序编号的目标日志；无日志场景只包含 `result.txt`。
 
-两项结果都必须经过 Review PASS 才会公开下载。`LOGPARSE_RUN` 仍是内部持久化输入，不会作为公开产物返回。当前生成器包含 RPC 超时、数据库死锁和无日志人工排查三个异构 Fixture，用于验证参数隔离与有/无 Logparse 的流程差异。完整设计与版本矩阵见 [`design/diagnosis-skill-v3-generalization-plan.md`](design/diagnosis-skill-v3-generalization-plan.md)。
+两项结果都必须经过独立 Review PASS 和服务端复验才会公开下载。Reviewer 使用盲审上下文：只接收固定 Candidate、固定用户事实、Skill 规则和 Candidate 实际绑定的原始 Evidence，不接收 Specialist 的结论、解释或先前判词作为证明。
+
+时间、必选参数、角色、跨角色关联或事件顺序任一不符合 Skill，或因果链不能由原始证据支持时，DIAGNOSE Candidate 或 REVIEW PASS 会被服务端降级为 `INCONCLUSIVE`；Reviewer 基于证据给出的合法 `REJECT` 则保留为负向判决。两者都会使 Case 终止为 `UNRESOLVED`，被拒绝的 Candidate 仅以 `REJECTED` 保留在内部，`USER_RESULT` 不公开。服务同时生成可下载的 `AUDIT_BUNDLE`，供局域网内复盘和重放。`LOGPARSE_RUN` 仍是内部持久化输入，不会作为公开产物返回。当前生成器包含 RPC 超时、数据库死锁和无日志人工排查三个异构 Fixture，用于验证参数隔离与有/无 Logparse 的流程差异。完整设计与版本矩阵见 [`design/diagnosis-skill-v3-generalization-plan.md`](design/diagnosis-skill-v3-generalization-plan.md)。
 
 ### 发布验收
 
@@ -27,9 +45,9 @@ Logparse 产品可以省略。省略时 Runtime 记录有效产品 `default`，B
 
 每次运行的本地证据保存在 `.tmp/pl-e2e-evidence/<attempt>`；运行时证据不属于发布包。发布结论以对应目录中的 `verification-report.json`、最终审计 JSON、密钥扫描结果和 JUnit 文件为准。
 
-Problem Locator 是一个单实例故障诊断服务。它接收结构化问题，收集事实与附件，执行固定版本的路由、诊断和复核任务，最终发布经过复核的 `USER_RESULT` 结果文件。
+Problem Locator 是一个单实例故障诊断服务。它接收结构化问题，收集事实与附件，执行固定版本的路由、诊断和盲审任务，最终发布经过机器验证和独立复核的 `USER_RESULT`，或发布说明无法可靠定论的 `UNRESOLVED` 审计包。
 
-V1 使用本地 JSON 状态文件和文件系统资源实现持久化；所有业务写操作都通过应用服务及其仓储端口完成。
+V2 使用本地 JSON 状态文件和文件系统资源实现持久化；所有业务写操作都通过应用服务及其仓储端口完成。
 
 ## 环境要求与安装
 
@@ -65,7 +83,7 @@ uv lock --check
 | `DFX_LOG_LEVEL` | 否 | `INFO` | 结构化诊断日志级别：`DEBUG`、`INFO`、`WARNING`、`ERROR` 或 `CRITICAL` |
 | `DFX_LOG_DIR` | 否 | 无 | 服务端可观测日志目录的绝对路径；配置后生成 `debug.jsonl`、`journey.jsonl` 和按 Case 渲染的人类可读日志 |
 
-运行时限制是冻结的契约常量，不属于可配置项。V1 会拒绝 `JOB_CONCURRENCY` 以及未知的 limit、max、retention 覆盖项，避免运维人员误以为某项实际上无效的限制已经生效。
+运行时限制是冻结的契约常量，不属于可配置项。V2 会拒绝 `JOB_CONCURRENCY` 以及未知的 limit、max、retention 覆盖项，避免运维人员误以为某项实际上无效的限制已经生效。
 
 不要配置或持久化 `PROBLEM_LOCATOR_LOGPARSE_ENDPOINT` 和 `PROBLEM_LOCATOR_LOGPARSE_TOKEN`。这两个值会按任务临时创建，并在代理会话结束时删除。
 
@@ -77,7 +95,7 @@ uv lock --check
 uv run python -m problem_locator serve --env-file /absolute/path/to/service.env
 ```
 
-对于同一个 `DATA_ROOT`，V1 只允许一个服务进程和一个 Uvicorn worker。第二个进程会因实例锁就绪检查失败而退出。请勿让多 worker 进程管理器共用同一个数据根目录。
+对于同一个 `DATA_ROOT`，V2 只允许一个服务进程和一个 Uvicorn worker。第二个进程会因实例锁就绪检查失败而退出。请勿让多 worker 进程管理器共用同一个数据根目录。
 
 服务接口：
 
@@ -211,6 +229,45 @@ uv run python -m problem_locator serve --env-file /absolute/path/to/service.env 
   2>> /absolute/path/to/problem-locator.log
 ```
 
+## V2 机器校验、盲审与审计包
+
+DIAGNOSE 和 REVIEW 都执行同一条服务端可信边界：
+
+1. Agent 按固定 Workspace 输入、Skill 和 output contract 写 `AgentJobOutcomeDraftV2`。
+2. `problem-locator-seal-outcome-draft` 只封存并哈希草稿，不给出业务结论。
+3. Agent 进程退出后，服务端按 manifest v3 的 `verification_contract` 重新扫描 Evidence locator 指向的原始日志范围，独立校验事件基数、时间窗口及开闭边界、用户事实字段、角色、关联和顺序，并为每条规则记录 `VERIFIED_PASS`、`VERIFIED_FAIL`、`UNVERIFIABLE` 或 `SEMANTIC_ONLY`；Agent 自报的 PASS/FAIL/UNKNOWN 只是并列保留的 claim。
+4. 服务端生成 `decision_audit.json`、所用原始证据行记录和唯一权威 Outcome。Agent 自述、Evidence summary、文件名或“看起来合理”的因果故事都不能代替规则通过。
+
+Reviewer 是盲审任务。它不会获得 Specialist 的隐藏会话或判词，只读取 `REVIEW_SUBJECT` 固定的 Candidate、用户事实、规则及 Candidate supporting/completion Evidence 的去重并集，并独立执行同一组规则。只有全部必需规则通过且 Review 问题数组为空时才允许 PASS。
+
+Case 中已有的 `problem_time` 和其他 USER_FACT 是冻结输入，不能在同一 Case 中请求替换。只有 Skill 明确声明为 OPEN 且 `supplement_policy=MISSING_ONLY` 的缺失 requirement 才能补充。若时间、参数、角色、关联、顺序或因果证据不匹配，服务端会拒绝 DIAGNOSE Candidate/REVIEW PASS；不一致的正向结果归一化为 `INCONCLUSIVE`，合法的 Reviewer `REJECT` 保留为负向判决，随后 Case 终止为 `UNRESOLVED`。需要用修正后的事实重新创建 Case。
+
+每个 `UNRESOLVED` Case 都发布一个可下载 `AUDIT_BUNDLE`。包内只收集允许公开的可观察记录，包括 Case/Job、实际 Agent context、Agent draft、服务端 decision audit、服务端从完整扫描范围中匹配并用于判定的原始证据行、finalization manifest、盲审 subject，以及存在时的 broker audit。Agent stdout/stderr 的原始内容只保留在本地 execution record 和隔离 replay 目录；下载包只记录它们是否存在、字节数和 SHA-256，避免被拒绝的 `USER_RESULT` 经进程输出旁路进入审计包。原始上传包和完整 Logparse 树同样不会进入审计包。
+
+这些记录用于检查“Agent 看到了什么、声明了什么、服务端按哪条规则接受或拒绝，以及实际进程输出了什么”。它们不是、也不会包含模型的隐藏思维链；增加日志同样不能使隐藏推理过程可见。
+
+## 隔离重放指定 Job
+
+`replay-job` 是普通本地 CLI，不引入管理员角色、管理 API、认证或权限模型。它只接受当前 V2 State/Job/Outcome 闭包，并在新的隔离安装中按当前固定资产执行指定阶段：
+
+- `diagnose-only`：源 Job 必须是 DIAGNOSE；执行服务端终结，但不向隔离 State 提交诊断 Outcome。
+- `review-only`：源 Job 必须是 REVIEW；执行服务端终结，但不向隔离 State 提交 Review Outcome。
+- `through-review`：源 Job 必须是 DIAGNOSE；提交诊断 Outcome，并在确实产生唯一 Review Job 时继续执行和提交 Review。诊断直接进入 `UNRESOLVED`、等待补参或改路由而没有 Review Job，也是一个有记录的正常停止结果。
+
+示例：
+
+```sh
+uv run python -m problem_locator replay-job \
+  --source-data-root /absolute/path/to/stopped-source-data \
+  --job-id 00000000-0000-0000-0000-000000000000 \
+  --mode through-review \
+  --output-dir /absolute/path/to/new-replay-output \
+  --env-file /absolute/path/to/service.env \
+  --skill-dir /absolute/path/to/current-skills
+```
+
+重放前必须停止使用源 `DATA_ROOT` 的服务；CLI 会获取同一把独占实例锁，锁被占用时拒绝运行。`--output-dir` 必须是绝对路径、尚不存在，并且不能与源数据、Skill、Logparse 或 DFX 路径重叠。CLI 在其中创建隔离的 `data/`、`replay-manifest.json`、`replay-result.json`、DFX/Journey 和执行记录，不修改源安装。manifest 同时记录源/重放固定资产引用、差异和输入输出哈希，便于比较修复前后的同一阶段。
+
 ## 附件与结果处理
 
 准备附件时，服务会创建元数据和上传描述信息。上传文件内容时，服务会校验其准确大小与 SHA-256，校验通过后将附件转为 `READY` 状态。仅上传附件不会推进 Case；调用方必须显式将 `READY` 附件作为补充材料提交。
@@ -221,10 +278,12 @@ uv run python -m problem_locator serve --env-file /absolute/path/to/service.env 
 
 ## 启动恢复与重试语义
 
-每次启动时，调度器都会创建新的运行时 epoch，并在接受新任务之前完成以下恢复流程：
+启动恢复只适用于同一 `schema_version=2`、`contract_revision=v2-contract-r1` 的数据。读取 `state.json` 时会先严格校验 V2 envelope 和全部引用；任何 V1 State、V1 Job、V1 Outcome 或混合版本闭包都会以 `STATE_SCHEMA_UNSUPPORTED`/状态损坏拒绝，调度器不会尝试兼容、迁移或运行其中的旧 Job。
+
+对于已经由当前 V2 服务创建的数据，每次启动时调度器都会创建新的运行时 epoch，并在接受新任务之前完成以下恢复流程：
 
 1. 逐字节重放所有已持久化、已最终确定但尚未确认的 Job Outcome。
-2. 完成重放后，才会把没有最终 Outcome 的旧 `RUNNING` 任务标记为 `INTERRUPTED`。
+2. 完成重放后，才会把没有最终 Outcome 的同合同 `RUNNING` 任务标记为 `INTERRUPTED`。
 3. 重新调度已经持久化的 `PENDING` 任务。
 
 重试提交 Outcome 时会复用同一份最终回执，不会再次运行 Agent。资源或配置错误，以及带类型的状态读取错误，会使 worker 停止接单并导致就绪检查失败。恢复后的任务会保留所有冻结的运行时绑定，当前 Catalog 不能用新版本替换这些绑定。被中断的 `REVIEW` 任务会继续执行 `REVIEW`，不会退回 `DIAGNOSE`。
@@ -244,7 +303,7 @@ uv run python -m problem_locator export-state \
   --output /absolute/path/outside-data-root/state-export.json
 ```
 
-`validate-state` 输出规范化的 `ValidationReport`。`export-state` 输出规范化的 `StateExport`，其中包含单个状态世代、完整对象数量，以及按顺序排列的资源大小/哈希清单。导出文件必须位于 `DATA_ROOT` 之外；它只用于审计和迁移，不能替代资源备份。
+`validate-state` 输出规范化的 `ValidationReport`。`export-state` 输出规范化的 `StateExport`，其中包含单个状态世代、完整对象数量，以及按顺序排列的资源大小/哈希清单。导出文件必须位于 `DATA_ROOT` 之外；它只用于审计和同合同备份核对，不能替代资源备份，也不能把 V1 数据转换为 V2。
 
 创建可恢复备份：
 
@@ -253,17 +312,17 @@ uv run python -m problem_locator export-state \
 3. 完整复制 `DATA_ROOT` 目录树，并尽量以原子方式保证 `state.json`、`jobs/**` 和 `resources/**` 来自同一个停机时间点。
 4. 将导出文件与备份放在一起，以便核对对象数量和哈希。
 
-恢复时，应将损坏的数据根目录保持为只读，把完整且已知可用的备份复制到一个新的绝对路径，执行 `validate-state`，并核对导出文件中的对象数量和哈希，最后使用新的数据根目录启动服务。
+恢复时，应将损坏的数据根目录保持为只读，把完整且已知可用的 V2 备份复制到一个新的绝对路径，执行 `validate-state`，并核对导出文件中的对象数量和哈希，最后使用新的数据根目录启动服务。
 
 不要手工编辑 `state.json`，不要丢弃已经最终确定的 outbox 文件，也不要静默回退到 `state.json.prev`。
 
-r3 状态模式与预发布阶段的 r2 数据有意保持不兼容。旧数据只能离线重建，或迁移到全新的 r3 安装中；服务不提供 r2 原地兼容路径。
+V2 与所有 V1 数据有意不兼容。服务不提供 V1 原地迁移、V1 Job 恢复、隐藏旧字段或按需转换路径；部署 V2 时使用新的数据根目录。
 
 ### 冻结发布边界声明
 
 以下英文短句是发布测试使用的稳定语义标识；中文解释是规范正文：
 
-- r3 state schema is intentionally incompatible：r3 不对 r2 提供原地兼容。
+- State V2 is a hard cut：服务不迁移或恢复 V1 State、Job、Outcome。
 - Replay every durable, finalized but unconfirmed Job Outcome：启动时先重放所有已最终确定但未确认的 Outcome。
 - 当 `state.json` approaches 16 MiB 时，应启动离线迁移设计。
 - 当 retained history approaches 500 Cases 时，应启动离线迁移设计。
@@ -272,7 +331,7 @@ r3 状态模式与预发布阶段的 r2 数据有意保持不兼容。旧数据�
 
 ## PostgreSQL 迁移边界
 
-V1 不包含 PostgreSQL、ORM、双写机制或分布式锁。当满足以下任一条件时，应开始设计离线 PostgreSQL 迁移方案：
+V2 不包含 PostgreSQL、ORM、双写机制或分布式锁。当满足以下任一条件时，应开始设计离线 PostgreSQL 迁移方案：
 
 - 需要第二个服务实例或高可用能力；
 - `state.json` 接近 16 MiB；
@@ -285,18 +344,18 @@ V1 不包含 PostgreSQL、ORM、双写机制或分布式锁。当满足以下任
 
 ## 安全说明与已知限制
 
-- V1 面向可信用户、固定版本 Skill 和可信 Agent 命令所在的受控网络，不提供租户级授权。
+- V2 面向可信用户、固定版本 Skill 和可信 Agent 命令所在的受控网络，不提供租户级授权；本次重放能力也没有引入管理员、管理端或额外权限模型。
 - 服务进程和 Agent 都不是操作系统沙箱。请使用专用操作系统账户运行，并只授予必要的仓库和数据访问权限。
-- MCP/HTTP 响应中不得出现密钥、原始环境变量值、服务器路径、日志归档内容、代理令牌或内部执行日志。
+- 普通 MCP/HTTP 元数据和错误响应中不得出现密钥、原始环境变量值、服务器路径、日志归档内容、代理令牌或内部执行日志。只有用户显式下载 `UNRESOLVED` 的 `AUDIT_BUNDLE` 时，才会返回前述 allowlist 中经过固定边界处理的 context、decision evidence 和 stdout/stderr 元数据；原始 stdout/stderr 内容仍只存在于本地 execution record 或隔离 replay 目录，原始上传归档、完整 Logparse 树和隐藏思维链仍不公开。
 - Logparse 会在启动时进行指纹校验。首个符合条件的诊断任务可以解析一次日志；后续任务必须使用已持久化的 `LOGPARSE_RUN`，不得再次解包或解析原始归档。
-- V1 的并发数固定为 `1`，上下文、工作区和输出限制均为固定值；持久化依赖本地文件系统，不提供多实例故障转移。
+- V2 的并发数固定为 `1`，上下文、工作区和输出限制均为固定值；持久化依赖本地文件系统，不提供多实例故障转移。
 - 原生 Windows/Linux 启动验证、macOS 进程树/取消验证、确定性模拟端到端测试以及真实 Logparse 冒烟测试都属于发布门禁。测试或交接记录必须明确实际运行的平台。
 
 ### 原生启动门禁
 
 原生门禁会在其他操作系统上主动跳过；被跳过意味着门禁尚未执行，不能视为通过。每个运行环境都必须使用同一个候选发布 Git HEAD、CPython 3.12、锁定版本的依赖，以及运行门禁时所选的 Logparse 源码目录。该目录可以来自 Git checkout 或源码压缩包解压；仅在 Git 元数据存在时记录实际 Logparse commit，且不限制为某个固定 commit。
 
-当前候选工作区已经完成 Windows 客户端到 Linux 服务的完整发布旅程和原生 Linux 启动门禁；这不等价于原生 Windows 服务启动或 macOS 门禁。后两项仍未在本次验收中执行，不得宣称为通过；需要发布到对应平台时，仍须在同一候选版本上执行下列平台门禁，并在交接记录中准确区分“通过”和“未执行”。
+旧合同版本的 Windows→Linux 旅程或原生启动结果不能作为本次 V2 候选的发布证据。V2 候选必须在同一 Git HEAD 上重新执行相应平台门禁；未在当前候选上实际执行的 Windows、Linux 或 macOS 门禁都不得宣称为通过，并须在交接记录中准确区分“通过”和“未执行”。
 
 macOS shell（在候选发布版本 HEAD 上执行）：
 
@@ -349,7 +408,7 @@ export S08_REAL_AGENT_COMMAND='/absolute/path/to/claude -p --safe-mode --no-chro
 uv run pytest tests/e2e/test_real_agent_backend_gate.py -q -p no:cacheprovider
 ```
 
-该门禁会验证真实 Claude Code 版本、通过生产 `AgentBackend` 传递标准输入、完全一致的规范化 `AgentJobOutcome` 字节、不可变的输入/运行时标记、输出拓扑、限时执行以及进程树清理。测试被跳过不等于通过。
+该门禁会验证真实 Claude Code 版本、通过生产 `AgentBackend` 传递标准输入、规范化 `AgentJobOutcomeDraftV2`、服务端生成的权威 Outcome 与 DecisionAudit、不可变的输入/运行时标记、输出拓扑、限时执行以及进程树清理。测试被跳过不等于通过。
 
 ### 干净安装包门禁
 

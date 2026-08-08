@@ -71,7 +71,11 @@ class ResolvedJobAssets:
             tool_bundle=self.tool_bundle_text,
             output_contract=self.output_contract_text,
             manifest=workspace.manifest,
-            previous_outcomes=workspace.previous_outcomes,
+            previous_outcomes=(
+                ()
+                if workspace.manifest.job_type is JobType.REVIEW
+                else workspace.previous_outcomes
+            ),
             evidence=workspace.evidence,
         )
         return ResolvedContextAssets(
@@ -224,11 +228,12 @@ def _skill_index_entry(
         "requires_logparse",
         "requirements",
         "logparse_plan",
+        "verification_contract",
     }
     if set(manifest) not in (required, required | {"logparse_product"}):
         raise _invalid_asset() from None
     if (
-        manifest.get("schema_version") != 2
+        manifest.get("schema_version") != 3
         or not isinstance(manifest.get("capability"), str)
         or not manifest["capability"]
         or not isinstance(manifest.get("summary"), str)

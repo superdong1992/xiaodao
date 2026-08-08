@@ -16,6 +16,7 @@ from problem_locator.contracts import (
     RequirementKind,
     RequirementStatus,
     SubmitSupplementTriggerPayload,
+    SupplementPolicy,
     TriggerType,
     canonical_json_bytes,
     validate_coordinator_plan_result,
@@ -59,6 +60,7 @@ def _requirement(requirement_id: str, name: str) -> PendingRequirement:
         status=RequirementStatus.OPEN,
         requested_by_job_id=diagnose_job().job_id,
         fulfilled_by_refs=[],
+        supplement_policy=SupplementPolicy.MISSING_ONLY,
     )
 
 
@@ -77,6 +79,7 @@ def _attachment_requirement() -> PendingRequirement:
         status=RequirementStatus.OPEN,
         requested_by_job_id=diagnose_job().job_id,
         fulfilled_by_refs=[],
+        supplement_policy=SupplementPolicy.MISSING_ONLY,
     )
 
 
@@ -232,6 +235,100 @@ def test_ready_attachment_completes_wait_and_creates_one_diagnosis_job() -> None
     assert plan.accepted_state_delta.fulfill_requirements[0].fulfilled_by_refs == [
         attachment_id
     ]
+
+
+@pytest.mark.parametrize(
+    "status",
+    [CaseStatus.WAITING_INPUT, CaseStatus.WAITING_ATTACHMENT],
+)
+def test_supplement_rejects_policy_none_requirements(
+    status: CaseStatus,
+) -> None:
+    source = diagnose_job()
+    requirement = rebuild(
+        (
+            _requirement(REQ_A, "caller_service")
+            if status is CaseStatus.WAITING_INPUT
+            else _attachment_requirement()
+        ),
+        supplement_policy=SupplementPolicy.NONE,
+    )
+    state = rebuild(
+        state_from_job(source),
+        pending_requirements=[requirement],
+    )
+    snapshot = waiting_snapshot(state, status=status)
+    request = trigger(
+        snapshot,
+        trigger_type=TriggerType.SUBMIT_SUPPLEMENT,
+        payload=SubmitSupplementTriggerPayload(
+            user_facts=(
+                [
+                    _fact(
+                        FACT_A,
+                        "caller_service",
+                        "payment-service",
+                        state.revision + 1,
+                    )
+                ]
+                if status is CaseStatus.WAITING_INPUT
+                else []
+            ),
+            ready_attachment_ids=(
+                []
+                if status is CaseStatus.WAITING_INPUT
+                else [source.attachment_refs[0]]
+            ),
+            stable_target_changed=False,
+        ),
+    )
+
+    result = DomainCoordinator().plan(snapshot, request)
+
+    assert isinstance(result, ApplicationError)
+    assert result.code.value == "VALIDATION_ERROR"
+    assert "MISSING_ONLY" in result.message
+
+
+def test_existing_fixed_fact_still_requires_a_new_case_before_policy_gate() -> None:
+    source = diagnose_job()
+    base_state = state_from_job(source)
+    existing = _fact(
+        FACT_A,
+        "caller_service",
+        "payment-service",
+        base_state.revision,
+    )
+    requirement = rebuild(
+        _requirement(REQ_A, "rpc_method"),
+        supplement_policy=SupplementPolicy.NONE,
+    )
+    state = rebuild(
+        base_state,
+        user_facts=[existing],
+        pending_requirements=[requirement],
+    )
+    snapshot = waiting_snapshot(state, status=CaseStatus.WAITING_INPUT)
+    correction = _fact(
+        FACT_B,
+        "caller_service",
+        "different-service",
+        state.revision + 1,
+    )
+    request = trigger(
+        snapshot,
+        trigger_type=TriggerType.SUBMIT_SUPPLEMENT,
+        payload=SubmitSupplementTriggerPayload(
+            user_facts=[correction],
+            ready_attachment_ids=[],
+            stable_target_changed=False,
+        ),
+    )
+
+    result = DomainCoordinator().plan(snapshot, request)
+
+    assert isinstance(result, ApplicationError)
+    assert result.code.value == "NEW_CASE_REQUIRED"
 
 
 @pytest.mark.parametrize(

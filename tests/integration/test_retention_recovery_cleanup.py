@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import os
+import stat
 import threading
 from datetime import datetime
 from pathlib import Path
+
+import pytest
 
 from problem_locator.application import build_application_service
 from problem_locator.application.mutations import build_state_mutation
@@ -32,6 +35,7 @@ from problem_locator.storage.coordination import (
     InProcessPublicationCommitGuard,
     StorageCoordinationLock,
 )
+from problem_locator.storage.atomic import is_reparse_point
 from problem_locator.storage.execution_records import FileExecutionRecordStore
 from problem_locator.storage.layout import StorageLayout
 from problem_locator.storage.paths import proposal_stage_path
@@ -64,6 +68,35 @@ CLEANUP_NOW = "2026-08-10T12:00:00.000Z"
 RACE_EVIDENCE_ID = "00000000-0000-0000-0000-000000000891"
 
 
+@pytest.fixture(autouse=True)
+def _adapt_no_follow_chmod_for_plain_windows_fixtures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    if os.name != "nt" or os.chmod in os.supports_follow_symlinks:
+        return
+
+    real_chmod = os.chmod
+
+    def chmod_fixture_node(
+        path: os.PathLike[str] | str,
+        mode: int,
+        *,
+        dir_fd: int | None = None,
+        follow_symlinks: bool = True,
+    ) -> None:
+        if follow_symlinks is False:
+            assert dir_fd is None
+            metadata = Path(path).lstat()
+            assert not stat.S_ISLNK(metadata.st_mode)
+            assert not is_reparse_point(metadata)
+            real_chmod(path, mode)
+            return
+        assert dir_fd is None
+        real_chmod(path, mode)
+
+    monkeypatch.setattr(os, "chmod", chmod_fixture_node)
+
+
 class _MoveBarrier:
     """Pause one candidate immediately before the real mover takes the lock."""
 
@@ -92,7 +125,14 @@ def _set_expired(path: Path, retention_seconds: int) -> None:
         CLEANUP_NOW.replace("Z", "+00:00")
     ).timestamp()
     timestamp_ns = int((now_seconds - retention_seconds - 1) * 1_000_000_000)
-    os.utime(path, ns=(timestamp_ns, timestamp_ns), follow_symlinks=False)
+    timestamps = (timestamp_ns, timestamp_ns)
+    if os.utime in os.supports_follow_symlinks:
+        os.utime(path, ns=timestamps, follow_symlinks=False)
+        return
+    # Windows does not expose no-follow utime. These fixtures age plain nodes,
+    # so prove that precondition before using the supported call shape.
+    assert not path.is_symlink()
+    os.utime(path, ns=timestamps)
 
 
 def _path_bytes(path: Path) -> dict[str, bytes]:
@@ -311,6 +351,7 @@ def test_applied_candidate_stages_expire_without_deleting_formal_state(
     for job_id in (source.job_id, next_job_id):
         _set_expired(layout.jobs / job_id, ORPHAN_RESOURCE_RETENTION_SECONDS)
 
+    delete_failures: list[tuple[Path, BaseException]] = []
     cleaner = StorageRetentionCleaner(
         layout,
         lock,
@@ -322,11 +363,12 @@ def test_applied_candidate_stages_expire_without_deleting_formal_state(
         QuarantineMover(layout, lock, file_sync, replacer),
         resources.stage_registry,
         attachment_registry,
+        on_delete_failure=lambda path, error: delete_failures.append((path, error)),
     )
     result = cleaner.run_once()
 
     assert result.interrupted is False
-    assert result.failed_deletions == ()
+    assert result.failed_deletions == (), delete_failures
     assert len(result.quarantined) >= len(all_stage_paths)
     assert len(result.deleted) >= len(all_stage_paths)
     assert all(not path.exists() for path in all_stage_paths)

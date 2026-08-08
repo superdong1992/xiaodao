@@ -22,6 +22,7 @@ from problem_locator.contracts import (
     AssetKind,
     DiagnosisOutcome,
     DiagnosisStateDelta,
+    DecisionAuditV2,
     ErrorCode,
     ExecutionFailure,
     ExecutionStage,
@@ -42,6 +43,7 @@ from problem_locator.contracts import (
     ResourceKind,
     ResolvedAsset,
     StagedResourceRef,
+    SupplementPolicy,
     VersionedRef,
     WorkspaceArtifactInput,
     WorkspaceAttachmentInput,
@@ -65,6 +67,7 @@ from problem_locator.integrations.logparse.outputs import (
     inspect_controlled_run,
 )
 from tests.contracts.fakes import InMemoryCancellationSignal, InMemoryResourceStore
+from tests.v2_helpers import resolved_logparse_plan
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
@@ -161,15 +164,27 @@ def _attachment(payload: bytes) -> WorkspaceAttachmentInput:
 def _manifest(
     job: Job,
     entries: list[WorkspaceAttachmentInput | WorkspaceArtifactInput],
+    *,
+    plan_request: ParseTargetsRequest | TargetLogsRequest | None = None,
 ) -> WorkspaceInputManifest:
+    request = plan_request or _parse_request("manifest-plan")
     return WorkspaceInputManifest(
-        schema_version=1,
+        schema_version=2,
         job_id=job.job_id,
         case_id=job.case_id,
         job_type=JobType.DIAGNOSE,
         logparse_tool_ref=job.logparse_tool_ref,
         logparse_product=job.logparse_product,
         entries=entries,
+        resolved_logparse_plan=resolved_logparse_plan(
+            job,
+            problem_time=request.problem_time,
+            anchors=[
+                anchor.model_dump(mode="json")
+                for anchor in request.anchors
+            ],
+        ),
+        review_subject=None,
     )
 
 
@@ -186,6 +201,7 @@ def _materialize_workspace(
     *,
     artifact: WorkspaceArtifactInput | None = None,
     artifact_source: Path | None = None,
+    plan_request: ParseTargetsRequest | TargetLogsRequest | None = None,
 ) -> tuple[WorkspaceInputManifest, WorkspaceAttachmentInput]:
     root.mkdir()
     attachment = _attachment(payload)
@@ -198,7 +214,7 @@ def _materialize_workspace(
         shutil.copytree(artifact_source, destination)
         _make_tree_read_only(destination)
         entries.append(artifact)
-    manifest = _manifest(job, entries)
+    manifest = _manifest(job, entries, plan_request=plan_request)
     _write_read_only(root / "inputs" / "manifest.json", canonical_json_bytes(manifest))
     return manifest, attachment
 
@@ -273,6 +289,16 @@ def _make_tree_read_only(root: Path) -> None:
     root.chmod(0o555)
 
 
+def _assert_claim_creation_mode(path: Path) -> None:
+    mode = stat.S_IMODE(path.stat().st_mode)
+    if os.name == "nt":
+        # Windows exposes only the DOS read-only attribute through st_mode;
+        # the inherited workspace ACL carries per-principal access control.
+        assert mode == 0o666
+    else:
+        assert mode == 0o600
+
+
 def _artifact(
     run: ControlledRun, asset: ResolvedAsset, source: bytes
 ) -> WorkspaceArtifactInput:
@@ -319,6 +345,7 @@ def _need_input_outcomes(
         status=RequirementStatus.OPEN,
         requested_by_job_id=job.job_id,
         fulfilled_by_refs=[],
+        supplement_policy=SupplementPolicy.MISSING_ONLY,
     )
     payload = DiagnosisOutcome(
         findings=[],
@@ -351,6 +378,45 @@ def _need_input_outcomes(
         declared_sha256=artifact.sha256,
         metadata=artifact.metadata,
     )
+    decision_audit = DecisionAuditV2.model_validate(
+        {
+            "schema_version": 2,
+            "job_id": job.job_id,
+            "case_id": job.case_id,
+            "job_type": job.job_type.value,
+            "skill_ref": job.skill_ref.model_dump(mode="json"),
+            "source_draft_sha256": "1" * 64,
+            "subject_hash": "2" * 64,
+            "candidate_target": None,
+            "diagnosis_audit_hash": None,
+            "required_rule_ids": ["causal_chain"],
+            "required_evidence_bindings": [],
+            "rules": [
+                {
+                    "rule_id": "causal_chain",
+                    "agent_claim": {
+                        "rule_id": "causal_chain",
+                        "claimed_result": "UNKNOWN",
+                        "fact_refs": [],
+                        "citations": [],
+                        "explanation": "No diagnosis is claimed before supplement.",
+                    },
+                    "server_evaluation": {
+                        "rule_id": "causal_chain",
+                        "rule_kind": "SEMANTIC_CAUSALITY",
+                        "status": "SEMANTIC_ONLY",
+                        "fact_refs": [],
+                        "evidence_bindings": [],
+                        "anchor_id": None,
+                        "derived_anchor_time": None,
+                        "observed_times": [],
+                        "line_ranges": [],
+                        "issues": [],
+                    },
+                }
+            ],
+        }
+    )
     agent = AgentJobOutcome(
         outcome_id=FIRST_OUTCOME_ID,
         job_id=job.job_id,
@@ -364,6 +430,7 @@ def _need_input_outcomes(
         proposed_artifact_drafts=[draft],
         error=None,
         produced_at=PRODUCED_AT,
+        decision_audit=decision_audit,
     )
     proposal = ArtifactProposal(
         proposal_key=draft.proposal_key,
@@ -389,6 +456,7 @@ def _need_input_outcomes(
         proposed_artifacts=[proposal],
         error=None,
         produced_at=agent.produced_at,
+        decision_audit=decision_audit,
     )
     return agent, normalized
 
@@ -611,7 +679,7 @@ def test_first_parse_dual_anchor_claim_audit_close_and_fixed_argv(
             parse_canonical_json_bytes(claim_bytes, LogparseParseClaim)
             == expected_claim
         )
-        assert stat.S_IMODE(claim_path.stat().st_mode) == 0o600
+        _assert_claim_creation_mode(claim_path)
         assert (
             validate_logparse_claim_for_job(
                 expected_claim,
@@ -1039,20 +1107,26 @@ def test_capabilities_are_session_and_workspace_bound_then_invalid_after_close(
 ) -> None:
     first_job = _job(pinned_asset.ref)
     first_workspace = tmp_path / "job-a"
+    first_plan_request = _parse_request("bound", anchors=[_client_anchor()])
     first_manifest, _entry = _materialize_workspace(
-        first_workspace, first_job, b"workspace-a"
+        first_workspace,
+        first_job,
+        b"workspace-a",
+        plan_request=first_plan_request,
     )
     second_job = _job(pinned_asset.ref, job_id=SECOND_JOB_ID)
     second_workspace = tmp_path / "job-b"
+    second_plan_request = _parse_request("bound", anchors=[_server_anchor()])
     second_manifest, _second_entry = _materialize_workspace(
-        second_workspace, second_job, b"workspace-b"
+        second_workspace,
+        second_job,
+        b"workspace-b",
+        plan_request=second_plan_request,
     )
     first_request = _write_request(
-        first_workspace, "bound", _parse_request("bound", anchors=[_client_anchor()])
+        first_workspace, "bound", first_plan_request
     )
-    _write_request(
-        second_workspace, "bound", _parse_request("bound", anchors=[_server_anchor()])
-    )
+    _write_request(second_workspace, "bound", second_plan_request)
     tokens = iter(("session-token-alpha", "session-token-bravo"))
     session_ids = iter(("session-alpha", "session-bravo"))
     factory = _factory(
@@ -1189,7 +1263,13 @@ def test_execution_failures_keep_the_frozen_error_classification(
 ) -> None:
     job = _job(pinned_asset.ref)
     workspace = tmp_path / "workspace"
-    manifest, attachment = _materialize_workspace(workspace, job, source)
+    plan_request = _parse_request("failure", anchors=[anchor])
+    manifest, attachment = _materialize_workspace(
+        workspace,
+        job,
+        source,
+        plan_request=plan_request,
+    )
     record_path = tmp_path / "fake-invocations.json"
     monkeypatch.setenv("S07_FAKE_LOGPARSE_RECORD", os.fspath(record_path))
     session = _factory(pinned_asset).open(
@@ -1198,7 +1278,7 @@ def test_execution_failures_keep_the_frozen_error_classification(
     request_bytes = _write_request(
         workspace,
         "failure",
-        _parse_request("failure", anchors=[anchor]),
+        plan_request,
     )
     observed: list[ExecutionFailure | None] = []
     real_run = cli.run

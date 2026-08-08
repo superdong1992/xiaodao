@@ -47,7 +47,12 @@ from .preparation import finalize_attachment
 
 _MAX_POST_STAGE_ATTEMPTS = 3
 _TERMINAL_CASE_STATUSES = frozenset(
-    {CaseStatus.RESOLVED, CaseStatus.FAILED, CaseStatus.CANCELLED}
+    {
+        CaseStatus.RESOLVED,
+        CaseStatus.UNRESOLVED,
+        CaseStatus.FAILED,
+        CaseStatus.CANCELLED,
+    }
 )
 
 

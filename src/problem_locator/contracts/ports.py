@@ -117,6 +117,8 @@ class LogparseBrokerSession(Protocol):
 
     def parse_request_bytes(self) -> bytes | None: ...
 
+    def audit_bytes(self) -> bytes: ...
+
     def close(self) -> None: ...
 
 
@@ -194,6 +196,16 @@ class ResourceStore(Protocol):
         stream: BinaryStream,
         expected_size: int | None = None,
         expected_sha256: str | None = None,
+    ) -> StagedResourceRef: ...
+
+    def stage_generated_file(
+        self,
+        owner_job_id: OpaqueId,
+        proposal_key: str,
+        staging_id: OpaqueId,
+        stream: BinaryStream,
+        expected_size: int,
+        expected_sha256: str,
     ) -> StagedResourceRef: ...
 
     def stage_tree(
@@ -309,6 +321,19 @@ class ExecutionRecordStore(Protocol):
         job_id: OpaqueId,
         raw_bytes: bytes,
     ) -> ExecutionFileRef: ...
+
+    def publish_audit_bytes(
+        self,
+        job_id: OpaqueId,
+        filename: str,
+        raw_bytes: bytes,
+    ) -> ExecutionFileRef: ...
+
+    def read_audit_bytes(
+        self,
+        job_id: OpaqueId,
+        filename: str,
+    ) -> bytes | None: ...
 
     def read_published_job(self, job_id: OpaqueId) -> PublishedJobReceipt | None: ...
 

@@ -11,7 +11,7 @@ import pytest
 
 from problem_locator.runtime import catalog as catalog_module
 from problem_locator.contracts import (
-    AgentJobOutcome,
+    AgentJobOutcomeDraftV2,
     ApplicationPortError,
     AssetCatalogPort,
     AssetKind,
@@ -21,8 +21,6 @@ from problem_locator.contracts import (
     FixtureManifest,
     JobType,
     PORT_ERROR_CODES,
-    ReviewAssessment,
-    RouteDecision,
     ResolvedAsset,
     VersionedRef,
     bytes_sha256,
@@ -92,7 +90,7 @@ def _write_skill(
 ) -> dict[str, Any]:
     root.mkdir(parents=True)
     manifest: dict[str, Any] = {
-        "schema_version": 2,
+        "schema_version": 3,
         "id": skill_id,
         "version": version,
         "capability": "test-capability",
@@ -102,6 +100,23 @@ def _write_skill(
         "requires_logparse": requires_logparse,
         "requirements": [],
         "logparse_plan": None,
+        "verification_contract": {
+            "schema_version": 1,
+            "event_extractors": [],
+            "rules": [
+                {
+                    "id": "manual_causality",
+                    "kind": "SEMANTIC_CAUSALITY",
+                    "description": "Independently assess the causal claim.",
+                    "depends_on": [],
+                    "remediation_requirements": [],
+                    "parameters": {
+                        "assertion": "The evidence supports the candidate.",
+                        "evidence_events": [],
+                    },
+                }
+            ],
+        },
     }
     if requires_logparse:
         manifest["requirements"] = [
@@ -111,6 +126,7 @@ def _write_skill(
                 "stage": "INITIAL",
                 "fulfillment_source": "USER_FACT",
                 "prompt": "Provide problem time.",
+                "supplement_policy": "MISSING_ONLY",
                 "constraints": {
                     "value_type": "STRING",
                     "min_utf8_bytes": 1,
@@ -131,6 +147,59 @@ def _write_skill(
                     "process_name": {"source": "SKILL_FIXED", "value": "process"},
                     "pid": None,
                 }
+            ],
+        }
+        manifest["verification_contract"] = {
+            "schema_version": 1,
+            "event_extractors": [
+                {
+                    "id": "target_event",
+                    "anchor": "target",
+                    "line_pattern": (
+                        r"^(?P<event_time>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:"
+                        r"\d{2}\.\d{3}Z) event=(?P<value>\S+)$"
+                    ),
+                    "timestamp_group": "event_time",
+                    "timestamp_format": "RFC3339_MILLIS_UTC",
+                    "field_groups": ["value"],
+                    "match_cardinality": "EXACTLY_ONE",
+                }
+            ],
+            "rules": [
+                {
+                    "id": "target_present",
+                    "kind": "EVENT_PRESENT",
+                    "description": "The target event must exist.",
+                    "depends_on": [],
+                    "remediation_requirements": [],
+                    "parameters": {"event": "target_event"},
+                },
+                {
+                    "id": "target_in_window",
+                    "kind": "EVENT_TIME_WINDOW",
+                    "description": "The target event must be in the explicit window.",
+                    "depends_on": ["target_present"],
+                    "remediation_requirements": [],
+                    "parameters": {
+                        "event": "target_event",
+                        "reference": {"source": "USER_FACT", "name": "problem_time"},
+                        "before_ms": 1000,
+                        "after_ms": 1000,
+                        "lower_bound": "INCLUSIVE",
+                        "upper_bound": "INCLUSIVE",
+                    },
+                },
+                {
+                    "id": "target_causality",
+                    "kind": "SEMANTIC_CAUSALITY",
+                    "description": "Independently assess the target event.",
+                    "depends_on": ["target_in_window"],
+                    "remediation_requirements": [],
+                    "parameters": {
+                        "assertion": "The target event caused the incident.",
+                        "evidence_events": ["target_event"],
+                    },
+                },
             ],
         }
         if logparse_product is not None:
@@ -184,12 +253,14 @@ def test_builtin_assets_and_port_use_exact_versioned_refs() -> None:
 
     assert set(refs) == expected_builtin_ids
     upgraded_versions = {
-        "tool-bundle/router": "1.0.1",
-        "tool-bundle/diagnose": "1.0.1",
-        "tool-bundle/review": "1.0.1",
-        "output-contract/route": "1.0.1",
-        "output-contract/diagnose": "2.0.4",
-        "output-contract/review": "1.0.1",
+        "agent-profile/specialist": "1.0.1",
+        "agent-profile/reviewer": "1.0.1",
+        "tool-bundle/router": "2.0.0",
+        "tool-bundle/diagnose": "2.0.0",
+        "tool-bundle/review": "2.0.0",
+        "output-contract/route": "2.0.0",
+        "output-contract/diagnose": "3.0.0",
+        "output-contract/review": "2.0.0",
     }
     for ref in refs.values():
         assert ref.version == upgraded_versions.get(ref.id, "1.0.0")
@@ -220,7 +291,7 @@ def test_builtin_assets_and_port_use_exact_versioned_refs() -> None:
 
 
 @pytest.mark.parametrize("role", ["route", "diagnose", "review"])
-def test_builtin_output_contract_requires_canonical_agent_bytes(role: str) -> None:
+def test_builtin_output_contract_requires_canonical_v2_agent_draft(role: str) -> None:
     contract = (
         BUILTIN_ASSET_ROOT
         / "output-contracts"
@@ -228,16 +299,14 @@ def test_builtin_output_contract_requires_canonical_agent_bytes(role: str) -> No
         / "output-contract.md"
     ).read_text(encoding="utf-8")
 
-    assert "V1 Canonical JSON" in contract
-    assert "recursively sorts every nested object key" in contract or (
-        "递归排序所有嵌套对象键" in contract
-    )
-    assert "problem-locator-finalize-outcome" in contract
-    assert "finalization marker" in contract
+    assert "AgentJobOutcomeDraftV2" in contract
+    assert "schemas/v2/agent-job-outcome-draft.schema.json" in contract
+    assert "Canonical-JSON" in contract
+    assert "problem-locator-seal-outcome-draft" in contract
 
 
 @pytest.mark.parametrize("role", ["route", "diagnose", "review"])
-def test_builtin_output_contract_pins_server_finalization_as_last_write(
+def test_builtin_output_contract_pins_draft_seal_as_last_write(
     role: str,
 ) -> None:
     contract = (
@@ -247,18 +316,14 @@ def test_builtin_output_contract_pins_server_finalization_as_last_write(
         / "output-contract.md"
     ).read_text(encoding="utf-8")
 
-    assert "Never create a temporary file at workspace root" in contract
-    assert "exactly `inputs`, `runtime`, and `output`" in contract
-    assert "`Write`" in contract
     assert "draft" in contract
-    assert "problem-locator-finalize-outcome" in contract
-    assert "Do not write or edit `output/job_outcome.json` after" in contract or (
-        "命令成功后不得再增删改" in contract
-    )
+    assert "output/job_outcome.draft.json" in contract
+    assert "problem-locator-seal-outcome-draft" in contract
+    assert "output/job_outcome.json" in contract
 
 
 @pytest.mark.parametrize("role", ["route", "diagnose", "review"])
-def test_builtin_output_contract_materializes_complete_agent_envelope(role: str) -> None:
+def test_builtin_output_contract_materializes_complete_v2_draft_envelope(role: str) -> None:
     contract = (
         BUILTIN_ASSET_ROOT
         / "output-contracts"
@@ -266,20 +331,13 @@ def test_builtin_output_contract_materializes_complete_agent_envelope(role: str)
         / "output-contract.md"
     ).read_text(encoding="utf-8")
 
-    assert "exactly these twelve fields and no others" in contract
-    expected_fields = json.dumps(
-        sorted(AgentJobOutcome.model_fields),
-        separators=(",", ":"),
-    )
-    assert f"`{expected_fields}`" in contract
-    assert "from `JOB_INSTRUCTION`" in contract
-    assert "from `RESOURCE_MANIFEST.case_id`" in contract
-    assert "fresh lowercase UUID" in contract
-    assert "current real UTC timestamp with exactly millisecond precision" in contract
-    assert "never reuse the Job or Case ID as the Outcome ID" in contract
-    assert contract.count("{{S00_AGENT_JOB_OUTCOME_SCHEMA_JSON}}") == 1
-    assert contract.count("<<<BEGIN S00 AGENT JOB OUTCOME SCHEMA>>>") == 1
-    assert contract.count("<<<END S00 AGENT JOB OUTCOME SCHEMA>>>") == 1
+    for field in AgentJobOutcomeDraftV2.model_fields:
+        assert f'"{field}"' in contract
+    assert "outcome_id" in contract and "produced_at" in contract
+    assert "never contains" in contract or "不得包含" in contract
+    assert contract.count("{{S00_AGENT_JOB_OUTCOME_DRAFT_SCHEMA_JSON}}") == 1
+    assert contract.count("<<<BEGIN S00 AGENT JOB OUTCOME DRAFT SCHEMA>>>") == 1
+    assert contract.count("<<<END S00 AGENT JOB OUTCOME DRAFT SCHEMA>>>") == 1
     assert contract.count("{{S00_USER_RESULT_SCHEMA_JSON}}") == (
         1 if role == "diagnose" else 0
     )
@@ -293,22 +351,12 @@ def test_builtin_route_output_contract_materializes_result_type_rules() -> None:
         / "output-contract.md"
     ).read_text(encoding="utf-8")
 
-    assert "For a `MATCHED` decision, set `result_type` to `COMPLETED`." in contract
-    assert (
-        "For a `NO_CAPABILITY` decision, set `result_type` to `NO_CAPABILITY`."
-        in contract
-    )
-    assert "`REROUTE` is forbidden for ROUTE jobs" in contract
-    assert "exactly a `RouteDecision` object with the four fields" in contract
-    expected_fields = json.dumps(
-        sorted(RouteDecision.model_fields),
-        separators=(",", ":"),
-    )
-    assert f"`{expected_fields}`" in contract
-    assert "`SKILL_INDEX.skills[i].ref`" in contract
-    assert "Copy only that nested `ref` object" in contract
-    assert "never the enclosing skill-index entry" in contract
-    assert "top-level `decision`, `kind`, `skill_ref`" in contract
+    assert "`MATCHED` route" in contract
+    assert "`result_type=COMPLETED`" in contract
+    assert "`result_type=NO_CAPABILITY`" in contract
+    assert "ROUTE forbids `REROUTE`" in contract
+    assert "`skill_ref` exactly from `SKILL_INDEX`" in contract
+    assert "`rule_claims` are empty" in contract
 
 
 def test_builtin_diagnose_output_contract_materializes_request_rules() -> None:
@@ -319,22 +367,17 @@ def test_builtin_diagnose_output_contract_materializes_request_rules() -> None:
         / "output-contract.md"
     ).read_text(encoding="utf-8")
 
-    assert "`NEED_INPUT` 仅填写非空 `requested_input`" in contract
-    assert "`NEED_ATTACHMENT` 仅填写非空" in contract
-    assert "`COMPLETED` 和 `REROUTE`" in contract
-    assert "每个 requested ID 必须对应" in contract
+    assert "MISSING_ONLY" in contract
+    assert "resolved_logparse_plan" in contract
+    assert "rule_claims" in contract
+    assert "INCONCLUSIVE" in contract
     assert "`state_delta.add_user_facts`" in contract
     assert "`state_delta.fulfill_requirements`" in contract
-    assert "当前选中 Skill 的 `requirements` 声明" in contract
-    assert "不得添加 Skill 未声明的 requirement" in contract
     assert "USER_RESULT_ARCHIVE" in contract
     assert "problem-locator-pack-result" in contract
-    assert "REVIEW PASS" in contract
     for rpc_name in ("caller_service", "server_service", "rpc_method", "order_id"):
         assert rpc_name not in contract
-    assert "problem-locator-finalize-outcome" in contract
-    assert "重算其声明 size/hash" in contract
-    assert "递归排序所有嵌套对象键" in contract
+    assert "problem-locator-seal-outcome-draft" in contract
 
 
 def test_builtin_review_output_contract_materializes_review_binding_rules() -> None:
@@ -345,19 +388,16 @@ def test_builtin_review_output_contract_materializes_review_binding_rules() -> N
         / "output-contract.md"
     ).read_text(encoding="utf-8")
 
-    assert "A non-failed REVIEW outcome always uses `result_type` `COMPLETED`" in contract
-    assert "Copy `candidate_conclusion_id`, `candidate_revision`" in contract
-    assert "set `reviewed_state_revision`" in contract
-    assert "PASS must review every supporting Evidence reference" in contract
-    assert "REVIEW must not propose Evidence or Artifact drafts" in contract
-    expected_fields = json.dumps(
-        sorted(ReviewAssessment.model_fields),
-        separators=(",", ":"),
-    )
-    assert f"`{expected_fields}`" in contract
+    assert "A non-failed REVIEW draft uses `result_type=COMPLETED`" in contract
+    assert "`reviewed_state_revision`" in contract
+    assert "REVIEW_SUBJECT.required_rule_ids" in contract
+    assert "Do not use or reconstruct a prior Specialist verdict" in contract
+    assert "Emit exactly one `rule_claims` entry per required rule" in contract
+    assert "MISSING_ONLY" in contract
+    assert "REVIEW proposes no Evidence or Artifact" in contract
 
 
-def test_builtin_tool_bundles_all_declare_the_installed_finalizer() -> None:
+def test_builtin_tool_bundles_all_declare_the_installed_draft_sealer() -> None:
     for role in ("router", "diagnose", "review"):
         bundle = json.loads(
             (
@@ -367,7 +407,8 @@ def test_builtin_tool_bundles_all_declare_the_installed_finalizer() -> None:
                 / "tool-bundle.json"
             ).read_bytes()
         )
-        assert "problem-locator-finalize-outcome" in bundle["tools"]
+        assert "problem-locator-seal-outcome-draft" in bundle["tools"]
+        assert "problem-locator-finalize-outcome" not in bundle["tools"]
 
 
 def test_builtin_specialist_profile_separates_narrative_from_fixed_inputs() -> None:
@@ -737,7 +778,7 @@ def test_product_hash_rejects_non_utf8_paths() -> None:
         ({"requires_logparse": True, "logparse_plan": None}, "logparse_plan object"),
         ({"entry_document": "../escape.md"}, "relative POSIX path"),
         ({"entry_document": "nested//entry.md"}, "relative POSIX path"),
-        ({"schema_version": True}, "integer 2"),
+        ({"schema_version": True}, "integer 3"),
     ],
 )
 def test_skill_manifest_is_strict(
@@ -749,6 +790,49 @@ def test_skill_manifest_is_strict(
     _write_skill(skill_dir / "candidate", extra=extra)
     with pytest.raises(ValueError, match=message):
         VersionedAssetCatalog(skill_dir=skill_dir)
+
+
+def test_skill_verification_contract_rejects_missing_bounds_and_suppression(
+    tmp_path: Path,
+) -> None:
+    skills = tmp_path / "skills"
+    skill_dir = skills / "candidate"
+    manifest = _write_skill(skill_dir, requires_logparse=True)
+    time_rule = next(
+        item
+        for item in manifest["verification_contract"]["rules"]
+        if item["kind"] == "EVENT_TIME_WINDOW"
+    )
+    del time_rule["parameters"]["upper_bound"]
+    (skill_dir / "diagnosis-skill.json").write_bytes(canonical_json_bytes(manifest))
+    with pytest.raises(ValueError, match="fields are invalid"):
+        VersionedAssetCatalog(skill_dir=skills)
+
+    manifest = _write_skill(
+        tmp_path / "other-skills/candidate",
+        requires_logparse=True,
+    )
+    manifest["verification_contract"]["suppression_seconds"] = 75
+    (tmp_path / "other-skills/candidate/diagnosis-skill.json").write_bytes(
+        canonical_json_bytes(manifest)
+    )
+    with pytest.raises(ValueError, match="fields are invalid"):
+        VersionedAssetCatalog(skill_dir=tmp_path / "other-skills")
+
+
+def test_skill_rule_remediation_only_names_missing_only_requirements(
+    tmp_path: Path,
+) -> None:
+    skills = tmp_path / "skills"
+    skill_dir = skills / "candidate"
+    manifest = _write_skill(skill_dir, requires_logparse=True)
+    manifest["requirements"][0]["supplement_policy"] = "NONE"
+    manifest["verification_contract"]["rules"][0][
+        "remediation_requirements"
+    ] = ["problem_time"]
+    (skill_dir / "diagnosis-skill.json").write_bytes(canonical_json_bytes(manifest))
+    with pytest.raises(ValueError, match="MISSING_ONLY"):
+        VersionedAssetCatalog(skill_dir=skills)
 
 
 def test_skill_manifest_rejects_duplicate_json_keys_and_missing_entry(tmp_path: Path) -> None:

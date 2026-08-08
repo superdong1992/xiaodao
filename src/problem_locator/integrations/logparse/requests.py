@@ -80,6 +80,39 @@ class TargetLogsRequest(_BaseRequest):
     artifact_id: OpaqueId
 
 
+class ResolvedLogparsePlan(_BaseRequest):
+    """Server-owned request bindings compiled from a pinned Skill and Job.
+
+    The Agent may still materialize the transport request file, but it has no
+    authority to choose these values.  The broker compares every business
+    field against this immutable plan before invoking upstream Logparse.
+    """
+
+    schema_version: Literal[1]
+    attachment_id: OpaqueId | None
+    artifact_id: OpaqueId | None
+
+    @model_validator(mode="after")
+    def validate_source(self) -> ResolvedLogparsePlan:
+        if (self.attachment_id is None) == (self.artifact_id is None):
+            raise ValueError(
+                "resolved logparse plan requires exactly one attachment or artifact"
+            )
+        return self
+
+    def validate_request(
+        self,
+        request: ParseTargetsRequest | TargetLogsRequest,
+    ) -> None:
+        if request.problem_time != self.problem_time or request.anchors != self.anchors:
+            raise ValueError("logparse request differs from the server-resolved plan")
+        if isinstance(request, ParseTargetsRequest):
+            if self.attachment_id is None or request.attachment_id != self.attachment_id:
+                raise ValueError("parse request attachment differs from the resolved plan")
+        elif self.artifact_id is None or request.artifact_id != self.artifact_id:
+            raise ValueError("target request artifact differs from the resolved plan")
+
+
 class BrokerEnvelope(_PrivateWireModel):
     schema_version: Literal[1]
     operation: Literal["parse-targets", "target-logs"]
@@ -98,5 +131,6 @@ __all__ = [
     "Anchor",
     "BrokerEnvelope",
     "ParseTargetsRequest",
+    "ResolvedLogparsePlan",
     "TargetLogsRequest",
 ]

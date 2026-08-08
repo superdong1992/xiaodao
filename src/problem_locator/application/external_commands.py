@@ -106,6 +106,7 @@ ExternalNonUploadCommand = (
 
 _TERMINAL_CASE_STATUSES = {
     CaseStatus.RESOLVED,
+    CaseStatus.UNRESOLVED,
     CaseStatus.FAILED,
     CaseStatus.CANCELLED,
 }
@@ -1844,6 +1845,7 @@ class ExternalCommandHandler:
             CaseStatus.WAITING_INPUT,
             CaseStatus.WAITING_ATTACHMENT,
             CaseStatus.RESOLVED,
+            CaseStatus.UNRESOLVED,
             CaseStatus.FAILED,
             CaseStatus.CANCELLED,
             CaseStatus.INTERRUPTED,

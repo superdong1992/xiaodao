@@ -19,6 +19,7 @@ from problem_locator.contracts.enums import (
     ResourceKind,
 )
 from problem_locator.contracts.models import (
+    AgentJobOutcomeDraftV2,
     AgentJobOutcome,
     BoundedContext,
     ContextSection,
@@ -30,6 +31,7 @@ from problem_locator.contracts.models import (
     WorkspaceEvidenceInput,
     WorkspaceInputManifest,
     WorkspacePreviousOutcomeInput,
+    review_required_evidence_refs,
     validate_job_instruction_for_job,
     validate_workspace_manifest_for_job,
 )
@@ -93,12 +95,17 @@ def _asset_text_bytes(value: str, label: str) -> bytes:
 
 
 _AGENT_OUTCOME_SCHEMA_TOKEN = "{{S00_AGENT_JOB_OUTCOME_SCHEMA_JSON}}"
+_AGENT_OUTCOME_DRAFT_SCHEMA_TOKEN = (
+    "{{S00_AGENT_JOB_OUTCOME_DRAFT_SCHEMA_JSON}}"
+)
 _USER_RESULT_SCHEMA_TOKEN = "{{S00_USER_RESULT_SCHEMA_JSON}}"
 _OUTPUT_SCHEMA_TOKENS = {
+    _AGENT_OUTCOME_DRAFT_SCHEMA_TOKEN: "agent-job-outcome-draft.schema.json",
     _AGENT_OUTCOME_SCHEMA_TOKEN: "agent-job-outcome.schema.json",
     _USER_RESULT_SCHEMA_TOKEN: "user-result.schema.json",
 }
 _OUTPUT_SCHEMA_MODELS = {
+    "agent-job-outcome-draft.schema.json": AgentJobOutcomeDraftV2,
     "agent-job-outcome.schema.json": AgentJobOutcome,
     "user-result.schema.json": UserResultPayload,
 }
@@ -121,6 +128,7 @@ def _output_contract_bytes(value: str) -> bytes:
     if (
         _USER_RESULT_SCHEMA_TOKEN in present
         and _AGENT_OUTCOME_SCHEMA_TOKEN not in present
+        and _AGENT_OUTCOME_DRAFT_SCHEMA_TOKEN not in present
     ):
         raise ValueError("the user-result schema requires the Agent Outcome schema")
 
@@ -276,6 +284,21 @@ class ContextBuilder:
             if requirement.status is RequirementStatus.OPEN
         ]
 
+        context_snapshot = job.context_snapshot
+        if job.job_type is JobType.REVIEW:
+            # Independent review receives the immutable user facts and fixed
+            # Candidate, but not the Specialist's intermediate narrative or
+            # hypotheses.  Verified mechanical facts arrive separately in the
+            # server-built ReviewSubject below.
+            context_snapshot = context_snapshot.model_copy(
+                update={
+                    "confirmed_facts": [],
+                    "active_hypotheses": [],
+                    "rejected_hypotheses": [],
+                    "open_questions": [],
+                }
+            )
+
         prefix = [
             _SectionDraft(
                 ContextSectionKind.PROFILE,
@@ -298,7 +321,7 @@ class ContextBuilder:
             ),
             _SectionDraft(
                 ContextSectionKind.CONTEXT_SNAPSHOT,
-                _json_section(job.context_snapshot),
+                _json_section(context_snapshot),
                 (job.job_id,),
                 True,
             ),
@@ -310,12 +333,14 @@ class ContextBuilder:
             ),
         ]
         if job.job_type is JobType.REVIEW:
-            assert job.review_target is not None
+            review_subject = materials.manifest.review_subject
+            if review_subject is None:
+                raise ValueError("REVIEW context requires its server-built subject")
             prefix.append(
                 _SectionDraft(
                     ContextSectionKind.REVIEW_TARGET,
-                    _json_section(job.review_target),
-                    (job.review_target.candidate_conclusion_id,),
+                    _json_section(review_subject),
+                    (review_subject.candidate.conclusion_id,),
                     True,
                 )
             )
@@ -422,10 +447,13 @@ class ContextBuilder:
 
     @staticmethod
     def _validate_order_and_ownership(job: Job, materials: ContextMaterials) -> None:
-        if tuple(outcome.outcome_id for outcome in materials.previous_outcomes) != tuple(
+        expected_previous = () if job.job_type is JobType.REVIEW else tuple(
             job.previous_outcome_refs
-        ):
-            raise ValueError("previous outcomes must follow Job.previous_outcome_refs")
+        )
+        if tuple(outcome.outcome_id for outcome in materials.previous_outcomes) != expected_previous:
+            raise ValueError(
+                "previous outcomes must follow the role-specific frozen exposure"
+            )
         if any(outcome.case_id != job.case_id for outcome in materials.previous_outcomes):
             raise ValueError("previous outcomes must belong to the Job Case")
         if tuple(item.evidence_id for item in materials.evidence) != tuple(
@@ -460,7 +488,7 @@ class ContextBuilder:
         candidate = job.context_snapshot.candidate_conclusion
         if candidate is None:
             raise ValueError("REVIEW context requires its fixed candidate")
-        return frozenset(candidate.supporting_evidence_refs)
+        return frozenset(review_required_evidence_refs(candidate))
 
     @staticmethod
     def _ordered_drafts(

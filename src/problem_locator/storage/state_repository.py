@@ -108,7 +108,7 @@ def _object_counts(state: StateFile) -> StateExportObjectCounts:
 
 
 class JsonFileStateRepository:
-    """One-process repository for the authoritative V1 ``state.json`` file."""
+    """One-process repository for the authoritative V2 ``state.json`` file."""
 
     def __init__(
         self,

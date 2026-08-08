@@ -29,7 +29,7 @@ def _load(name: str) -> dict[str, object]:
     payload = json.loads(raw)
     assert canonical_json_bytes(payload) == raw
     assert payload["schema_version"] == 1
-    assert payload["contract_revision"] == "v1-contract-r4"
+    assert payload["contract_revision"] == "v2-contract-r1"
     return payload
 
 
@@ -87,12 +87,18 @@ def test_candidate_and_review_fixtures_freeze_the_resolution_gate() -> None:
     assert candidate_steps[1]["to"] == "RESOLVED"
     assert {item["step"] for item in rework["transitions"]} == {
         "NEED_MORE_EVIDENCE",
+        "NEED_MORE_EVIDENCE_MISSING_ONLY",
         "REJECT",
     }
     assert all(
-        item["previous_outcome_mode"] == "INCOMING_ONLY"
+        item["previous_outcome_mode"] == "PRIVATE_NOT_MATERIALIZED"
         for item in rework["transitions"]
     )
+    by_step = {item["step"]: item for item in rework["transitions"]}
+    assert by_step["NEED_MORE_EVIDENCE"]["to"] == "UNRESOLVED"
+    assert by_step["NEED_MORE_EVIDENCE_MISSING_ONLY"]["to"] == "WAITING_INPUT"
+    assert by_step["REJECT"]["to"] == "UNRESOLVED"
+    assert all(item["next_job"] is None for item in rework["transitions"])
 
 
 def test_control_recovery_fixture_covers_non_outcome_recovery_paths() -> None:

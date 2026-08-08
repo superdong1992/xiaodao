@@ -417,7 +417,7 @@ def test_real_first_log_diagnose_agent_produces_valid_continuation(
     assert hash_product_directory(skill_path) == SKILL_PRODUCT_SHA256
     skill_ref = VersionedRef(
         id="diagnose-service-takeover",
-        version="3.0.6",
+        version="3.1.1",
         content_hash=SKILL_PRODUCT_SHA256,
     )
     logparse_asset, broker_factory = build_logparse_runtime(
@@ -608,7 +608,7 @@ def test_real_diagnose_agent_requests_parameter_group_a_from_generated_skill(
     assert hash_product_directory(skill_path) == SKILL_PRODUCT_SHA256
     skill_ref = VersionedRef(
         id="diagnose-service-takeover",
-        version="3.0.6",
+        version="3.1.1",
         content_hash=SKILL_PRODUCT_SHA256,
     )
     job = _initial_diagnose_job(skill_ref)

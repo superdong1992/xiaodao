@@ -32,7 +32,7 @@ def test_real_json_repository_round_trips_the_frozen_r3_state(tmp_path) -> None:
 
     assert report.valid is True
     assert report.generation == snapshot.generation == 1
-    assert snapshot.contract_revision == "v1-contract-r4"
+    assert snapshot.contract_revision == "v2-contract-r1"
     assert repository.export_snapshot() == canonical_json_bytes(snapshot)
     assert repository.export_snapshot() == repository.layout.state.read_bytes()
 

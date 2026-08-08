@@ -22,6 +22,10 @@ from tests.contracts.manifest_helpers import (
 
 
 POSITIVE_FIXTURES = {
+    "agent-job-outcome-draft-diagnosis.json": "agent-job-outcome-draft.schema.json",
+    "agent-job-outcome-draft-failure.json": "agent-job-outcome-draft.schema.json",
+    "agent-job-outcome-draft-review.json": "agent-job-outcome-draft.schema.json",
+    "agent-job-outcome-draft-route.json": "agent-job-outcome-draft.schema.json",
     "agent-job-outcome-diagnosis.json": "agent-job-outcome.schema.json",
     "agent-job-outcome-failure.json": "agent-job-outcome.schema.json",
     "agent-job-outcome-review.json": "agent-job-outcome.schema.json",
@@ -38,6 +42,7 @@ POSITIVE_FIXTURES = {
     "state.json": "state.schema.json",
     "user-result.json": "user-result.schema.json",
     "workspace-input-manifest.json": "workspace-input-manifest.schema.json",
+    "workspace-input-manifest-review.json": "workspace-input-manifest.schema.json",
 }
 UNTYPED_POSITIVE_FIXTURES = {"rpc-timeout-continuation.json"}
 
@@ -143,6 +148,40 @@ def test_negative_fixture_is_rejected(
     model_type = SCHEMA_MODELS[schema_name]
     with pytest.raises((TypeError, ValueError, ValidationError)):
         TypeAdapter(model_type).validate_python(payload)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "missing_agent_claim",
+        "non_pass_agent_claim",
+        "server_issues",
+        "semantic_marked_mechanical_pass",
+        "mechanical_marked_semantic_only",
+    ),
+)
+def test_effective_resolution_requires_a_complete_fail_closed_audit(
+    mutation: str,
+) -> None:
+    payload = load_json(
+        FIXTURE_ROOT / "positive" / "job-outcome-diagnosis.json"
+    )
+    rule = payload["decision_audit"]["rules"][0]
+    if mutation == "missing_agent_claim":
+        rule["agent_claim"] = None
+    elif mutation == "non_pass_agent_claim":
+        rule["agent_claim"]["claimed_result"] = "UNKNOWN"
+    elif mutation == "server_issues":
+        rule["server_evaluation"]["issues"] = ["unresolved server issue"]
+    elif mutation == "semantic_marked_mechanical_pass":
+        rule["server_evaluation"]["status"] = "VERIFIED_PASS"
+    else:
+        rule["server_evaluation"]["rule_kind"] = "EVENT_PRESENT"
+
+    with pytest.raises((TypeError, ValueError, ValidationError)):
+        TypeAdapter(SCHEMA_MODELS["job-outcome.schema.json"]).validate_python(
+            payload
+        )
 
 
 def test_handoff_contract_accepts_every_spec_id() -> None:

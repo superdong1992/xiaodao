@@ -1,1 +1,29 @@
-{"capability":"manual-service-triage","entry_document":"SKILL.md","id":"manual-triage","logparse_plan":null,"requirements":[],"requires_logparse":false,"schema_version":2,"summary":"Diagnose a service incident from structured facts and existing evidence.","tool_bundle_id":"tool-bundle/diagnose","version":"3.0.0"}
+{
+  "capability": "manual-service-triage",
+  "entry_document": "SKILL.md",
+  "id": "manual-triage",
+  "logparse_plan": null,
+  "requirements": [],
+  "requires_logparse": false,
+  "schema_version": 3,
+  "summary": "Diagnose a service incident from structured facts and existing evidence.",
+  "tool_bundle_id": "tool-bundle/diagnose",
+  "version": "3.0.0",
+  "verification_contract": {
+    "schema_version": 1,
+    "event_extractors": [],
+    "rules": [
+      {
+        "id": "manual_causality",
+        "kind": "SEMANTIC_CAUSALITY",
+        "description": "Independently assess manual causality.",
+        "depends_on": [],
+        "remediation_requirements": [],
+        "parameters": {
+          "assertion": "The existing evidence supports the candidate.",
+          "evidence_events": []
+        }
+      }
+    ]
+  }
+}

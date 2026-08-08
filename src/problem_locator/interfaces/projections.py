@@ -70,6 +70,7 @@ def artifact_view(
     query = f"case_id={quote(case_id, safe='')}"
     return ArtifactView(
         artifact_id=summary.artifact_id,
+        kind=summary.kind,
         name=summary.name,
         content_type=summary.content_type,
         size=summary.size,

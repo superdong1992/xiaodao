@@ -20,6 +20,7 @@ from tests.contracts._support import REPOSITORY_ROOT, SCHEMA_ROOT, load_json
 
 
 EXPECTED_SCHEMA_NAMES = {
+    "agent-job-outcome-draft.schema.json",
     "agent-job-outcome.schema.json",
     "fixture-manifest.schema.json",
     "handoff.schema.json",
@@ -44,8 +45,8 @@ def _walk_json(value: Any) -> Iterator[Any]:
 
 def test_schema_registry_is_the_exact_frozen_public_set() -> None:
     assert set(SCHEMA_MODELS) == EXPECTED_SCHEMA_NAMES
-    assert SCHEMA_VERSION == 1
-    assert CONTRACT_REVISION == "v1-contract-r4"
+    assert SCHEMA_VERSION == 2
+    assert CONTRACT_REVISION == "v2-contract-r1"
     assert isinstance(GENERATOR_VERSION, str)
     assert GENERATOR_VERSION.strip()
 
@@ -87,7 +88,7 @@ def test_contract_manifest_covers_the_exact_frozen_inputs() -> None:
         "generator_version",
         "schema_version",
     }
-    assert manifest["schema_version"] == 1
+    assert manifest["schema_version"] == 2
     assert manifest["contract_revision"] == CONTRACT_REVISION
     assert manifest["generator_version"] == GENERATOR_VERSION
 
@@ -119,7 +120,7 @@ def test_contract_manifest_excludes_self_and_post_freeze_inputs() -> None:
         entry["path"]
         for entry in load_json(SCHEMA_ROOT / "contract-manifest.json")["files"]
     }
-    assert "schemas/v1/contract-manifest.json" not in paths
+    assert "schemas/v2/contract-manifest.json" not in paths
     assert "pyproject.toml" not in paths
     assert "uv.lock" not in paths
     assert not any(path.startswith("tests/") for path in paths)

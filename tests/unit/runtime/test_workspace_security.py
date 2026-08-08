@@ -453,7 +453,10 @@ def test_read_claim_allows_finalizer_marker_alone_or_beside_claim(
     tmp_path: Path,
 ) -> None:
     workspace = _prepared(tmp_path)
-    marker = workspace.tool_state_root / "agent-job-outcome.finalized"
+    marker = (
+        workspace.tool_state_root
+        / workspace_module.DRAFT_FINALIZATION_MARKER_NAME
+    )
     marker.write_bytes(b"marker validated by output reader")
 
     assert WorkspaceManager.read_claim(workspace) is None

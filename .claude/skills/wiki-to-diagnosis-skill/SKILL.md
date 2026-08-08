@@ -1,13 +1,13 @@
 ---
 name: wiki-to-diagnosis-skill
-description: 将非敏感故障定位 Wiki 转换为通用 Problem Locator Diagnosis Skill v3；声明业务 requirements、阶段和可选 Logparse 映射，生成并校验 schema v2 diagnosis-skill.json 与 SKILL.md。用于新建或升级 diagnose-* Skill。
+description: 将非敏感故障定位 Wiki 转换为通用 Problem Locator Diagnosis Skill；声明业务 requirements、Logparse 映射、事件提取器和机器验证规则，生成并校验 schema v3 diagnosis-skill.json 与 SKILL.md。用于新建或升级 diagnose-* Skill。
 ---
 
 # Wiki to Diagnosis Skill v3
 
 本 Skill 负责业务规则生成，不修改全局 DIAGNOSE output contract，也不把某个 Fixture
-的字段提升为通用协议。生成器固定为 `3.0.6`，输入规范为 `GenerationSpec v2`，输出
-Skill 从 `3.0.0` 起，manifest 为 schema v2。
+的字段提升为通用协议。生成器固定为 `3.1.1`，输入规范为 `GenerationSpec v3`，输出
+Skill 从 `3.0.0` 起，manifest 为 schema v3。
 
 ## 开始前确认
 
@@ -15,11 +15,14 @@ Skill 从 `3.0.0` 起，manifest 为 schema v2。
 
 1. Skill id、capability、标题、摘要、范围和目标版本。
 2. `requirements[]`：每项的 name、`INPUT|ATTACHMENT`、
-   `INITIAL|AFTER_LOGPARSE`、用户提示和 S00 原生 constraints。
+   `INITIAL|AFTER_LOGPARSE`、用户提示、S00 原生 constraints 和
+   `supplement_policy=NONE|MISSING_ONLY`。
 3. 是否使用 Logparse。若使用，确认归档 requirement（可为 null）、problem time 的
    value binding、按顺序排列的 anchors 及各字段的 `USER_FACT|SKILL_FIXED` binding。
 4. 仅当需要非默认产品时确认 `logparse_product`；默认产品直接省略。
-5. 分析步骤、时间特征、判定规则、输出要求和假设。
+5. `verification_contract`：UTF-8 整行事件提取器、无默认值的普通时间窗、事实/角色/
+   关联/顺序机器规则，以及由 Specialist 和 Reviewer 独立判断的语义因果规则。
+6. 分析步骤、时间特征、判定规则、输出要求和假设。
 
 不要询问 Content-Type。Logparse 归档格式由平台固定：
 `.gz/.tar.gz/.tgz -> application/gzip`、`.zip -> application/zip`、
@@ -43,11 +46,11 @@ Skill 从 `3.0.0` 起，manifest 为 schema v2。
   `artifact_proposal_key` 绑定 broker 返回的 LOGPARSE_RUN，使续跑复用该运行。
   仅生成 proposal、Finding 或文字说明不构成接收，也不得在续跑时重新 parse。
 
-## 构造 GenerationSpec v2
+## 构造 GenerationSpec v3
 
 优先依据 [wiki-template.md](references/wiki-template.md) 在 Wiki 的
-`## GenerationSpec v2` JSON fence 中形成完整对象。也可把同一对象保存为独立 JSON。
-requirements 与 logparse_plan 是唯一机器事实源；`SKILL.md` 和
+`## GenerationSpec v3` JSON fence 中形成完整对象。也可把同一对象保存为独立 JSON。
+requirements、logparse_plan 与 verification_contract 是唯一机器事实源；`SKILL.md` 和
 `diagnosis-skill.json` 均从它渲染，不维护第二套业务字段。
 
 value binding 只有两种形状：
@@ -64,6 +67,13 @@ INPUT constraints 逐字使用 S00：`value_type=STRING`、`min_utf8_bytes`、
 不要询问或填写 `allowed_content_types`，生成器会在规范化结果和最终 manifest 中自动注入
 `["application/gzip","application/zip","application/x-tar"]`。为兼容旧规范，显式提供同一
 固定数组仍可接受，其他值必须拒绝。
+
+每个事件提取器必须声明唯一 lower-snake id、Logparse anchor、`^...$` UTF-8 单行正则、
+RFC3339 毫秒 UTC 时间命名组、业务字段命名组和 `EXACTLY_ONE` 基数。规则按声明顺序组成
+DAG，kind 只能是 `EVENT_PRESENT`、`EVENT_TIME_WINDOW`、`FACT_FIELD_EQUALS`、
+`ROLE_COVERAGE`、`CROSS_ROLE_CORRELATION`、`EVENT_ORDER` 或
+`SEMANTIC_CAUSALITY`。时间窗必须逐条声明 before/after 毫秒及上下边界开闭语义；不提供
+默认窗口。本版本禁止 suppression、rate-limit 或采样字段，将其保留为后续扩展。
 
 ## 生成与校验
 
@@ -90,6 +100,7 @@ python scripts/validate_generated_skill.py <generated-skill-dir>
 ```
 
 validator 必须确认 Canonical manifest、schema/version、requirements/logparse_plan、
+verification_contract、
 SKILL 内嵌机器块逐字一致、结果 JSON/ZIP 约束，以及非 RPC Skill 没有 RPC Fixture 字段泄漏。
 
 ## 验收
@@ -105,3 +116,7 @@ SKILL 内嵌机器块逐字一致、结果 JSON/ZIP 约束，以及非 RPC Skill
 生成 Skill 形成 Candidate 时必须同时生成 `diagnosis-result.json` 和受控
 `USER_RESULT_ARCHIVE/result.zip`，后者由安装的 `problem-locator-pack-result` 创建并由
 Runtime 对 Candidate 实际绑定日志逐字校验。
+
+生成的 Skill 必须要求 Agent 写 `output/job_outcome.draft.json` 并以
+`problem-locator-seal-outcome-draft` 封存；正式 Outcome 只能由 Agent 退出后的服务端验证器
+生成。禁止让 Skill 把 Agent 自报结论描述成服务端已验证事实。

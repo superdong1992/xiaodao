@@ -32,6 +32,7 @@ from problem_locator.contracts import (
     RequirementStatus,
     ResourceKind,
     StagedResourceRef,
+    SupplementPolicy,
     TreeManifest,
     TreeManifestEntry,
     TriggerType,
@@ -185,6 +186,7 @@ def test_need_input_accepts_requirement_and_ends_the_job() -> None:
         status=RequirementStatus.OPEN,
         requested_by_job_id=source.job_id,
         fulfilled_by_refs=[],
+        supplement_policy=SupplementPolicy.MISSING_ONLY,
     )
     outcome = _diagnosis_job_outcome(
         OutcomeResultType.NEED_INPUT,
@@ -236,6 +238,7 @@ def test_need_attachment_accepts_the_unique_attachment_requirement() -> None:
         status=RequirementStatus.OPEN,
         requested_by_job_id=source.job_id,
         fulfilled_by_refs=[],
+        supplement_policy=SupplementPolicy.MISSING_ONLY,
     )
     outcome = _diagnosis_job_outcome(
         OutcomeResultType.NEED_ATTACHMENT,
@@ -269,6 +272,83 @@ def test_need_attachment_accepts_the_unique_attachment_requirement() -> None:
     assert validate_transition_plan_for_outcome(plan, outcome) is plan
 
 
+@pytest.mark.parametrize(
+    ("kind", "result_type"),
+    [
+        (RequirementKind.INPUT, OutcomeResultType.NEED_INPUT),
+        (RequirementKind.ATTACHMENT, OutcomeResultType.NEED_ATTACHMENT),
+    ],
+)
+def test_waiting_outcome_rejects_non_supplementable_requirement(
+    kind: RequirementKind,
+    result_type: OutcomeResultType,
+) -> None:
+    source = diagnose_job()
+    snapshot = snapshot_with_active(source)
+    is_input = kind is RequirementKind.INPUT
+    requirement = PendingRequirement(
+        requirement_id=(
+            REQUIREMENT_ID if is_input else ATTACHMENT_REQUIREMENT_ID
+        ),
+        kind=kind,
+        name="order_id" if is_input else "log_archive",
+        prompt=(
+            "Provide the order ID."
+            if is_input
+            else "Attach the fixed log archive."
+        ),
+        required=True,
+        constraints=(
+            InputRequirementConstraints(
+                value_type="STRING",
+                min_utf8_bytes=1,
+                max_utf8_bytes=64,
+                pattern=None,
+                allowed_values=[],
+            )
+            if is_input
+            else AttachmentRequirementConstraints(
+                allowed_content_types=["application/gzip"],
+                min_count=1,
+                max_count=1,
+            )
+        ),
+        status=RequirementStatus.OPEN,
+        requested_by_job_id=source.job_id,
+        fulfilled_by_refs=[],
+        supplement_policy=SupplementPolicy.NONE,
+    )
+    outcome = _diagnosis_job_outcome(
+        result_type,
+        DiagnosisOutcome(
+            findings=[],
+            state_delta=_empty_delta(add_pending_requirements=[requirement]),
+            requested_input=[requirement.requirement_id] if is_input else [],
+            requested_attachments=(
+                [] if is_input else [requirement.requirement_id]
+            ),
+            candidate_conclusion_draft=None,
+            recommended_next_step="Wait for an input the Skill does not supplement.",
+        ),
+    )
+    request = trigger(
+        snapshot,
+        trigger_type=TriggerType.DIAGNOSIS_OUTCOME,
+        payload=DiagnosisOutcomeTriggerPayload(job_outcome=outcome),
+        continuation_resources=continuation(
+            incoming_outcome_id=outcome.outcome_id,
+            job=source,
+        ),
+        occurred_at=outcome.produced_at,
+    )
+
+    result = DomainCoordinator().plan(snapshot, request)
+
+    assert isinstance(result, ApplicationError)
+    assert result.code.value == "VALIDATION_ERROR"
+    assert "MISSING_ONLY" in result.message
+
+
 def test_logparse_evidence_and_run_are_accepted_atomically_before_waiting() -> None:
     source = diagnose_job()
     snapshot = snapshot_with_active(source)
@@ -294,6 +374,7 @@ def test_logparse_evidence_and_run_are_accepted_atomically_before_waiting() -> N
         status=RequirementStatus.OPEN,
         requested_by_job_id=source.job_id,
         fulfilled_by_refs=[],
+        supplement_policy=SupplementPolicy.MISSING_ONLY,
     )
     draft = DiagnosisItemDraft(
         item_id=LOGPARSE_FACT_ID,

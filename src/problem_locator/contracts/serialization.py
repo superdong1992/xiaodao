@@ -25,7 +25,7 @@ class InvalidJsonBytesError(ValueError):
 
 
 class NonCanonicalJsonError(ValueError):
-    """Raised when valid JSON bytes do not use the V1 canonical spelling."""
+    """Raised when valid JSON bytes do not use the canonical spelling."""
 
 
 def _reject_non_finite(value: str) -> None:
@@ -79,7 +79,7 @@ def _json_compatible(value: Any) -> Any:
 
 
 def canonical_json_bytes(value: Any) -> bytes:
-    """Encode *value* using the V1 Canonical JSON profile.
+    """Encode *value* using the canonical JSON profile.
 
     The result is UTF-8 without a BOM, uses code-point-sorted object keys and
     compact separators, rejects NaN/Infinity, and ends in exactly one LF.
@@ -195,7 +195,7 @@ def parse_canonical_json_bytes(
 
 
 def is_canonical_json_bytes(data: bytes) -> bool:
-    """Return whether *data* is valid V1 Canonical JSON."""
+    """Return whether *data* is valid canonical JSON."""
 
     try:
         parse_canonical_json_bytes(data)
@@ -237,7 +237,7 @@ def contract_manifest(repo_root: Path) -> dict[str, Any]:
 
     root = repo_root.resolve()
     contracts_root = root / "src" / "problem_locator" / "contracts"
-    schemas_root = root / "schemas" / "v1"
+    schemas_root = root / "schemas" / "v2"
     paths = [
         path
         for path in contracts_root.rglob("*.py")
@@ -263,7 +263,7 @@ def contract_manifest(repo_root: Path) -> dict[str, Any]:
 
 
 def contract_manifest_bytes(repo_root: Path) -> bytes:
-    """Return stable bytes for ``schemas/v1/contract-manifest.json``."""
+    """Return stable bytes for ``schemas/v2/contract-manifest.json``."""
 
     return canonical_json_bytes(contract_manifest(repo_root))
 

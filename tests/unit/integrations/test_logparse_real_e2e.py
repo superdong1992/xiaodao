@@ -47,6 +47,7 @@ from problem_locator.integrations.logparse import (
 from problem_locator.integrations.logparse.cli import run as run_agent_stub
 from problem_locator.integrations.logparse.outputs import inspect_controlled_run
 from tests.contracts.fakes import InMemoryCancellationSignal
+from tests.v2_helpers import resolved_logparse_plan
 
 
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
@@ -83,6 +84,22 @@ _PARAMETERS_A = {
 }
 _PARAMETER_B = {"order_id": "synthetic-order-0001"}
 _ARCHIVE_SHA256 = "194f69fecd8dc8d40d1aedeb6fc25d2b7b4922b176be2b15be73ffe386cc5064"
+_RESOLVED_ANCHORS = [
+    {
+        "label": "client",
+        "module": "COMPACT",
+        "slot": "1",
+        "process_name": "checkout-client",
+        "pid": "101",
+    },
+    {
+        "label": "server",
+        "module": "COMPACT",
+        "slot": "2",
+        "process_name": "inventory-server",
+        "pid": "202",
+    },
+]
 
 
 def _configured_real_logparse(pytestconfig: pytest.Config) -> tuple[Path, Path, Path]:
@@ -219,13 +236,19 @@ def _attachment_entry(archive_bytes: bytes) -> WorkspaceAttachmentInput:
 
 def _first_manifest(job: Job, archive_bytes: bytes) -> WorkspaceInputManifest:
     return WorkspaceInputManifest(
-        schema_version=1,
+        schema_version=2,
         job_id=job.job_id,
         case_id=job.case_id,
         job_type=job.job_type,
         logparse_tool_ref=job.logparse_tool_ref,
         logparse_product=job.logparse_product,
         entries=[_attachment_entry(archive_bytes)],
+        resolved_logparse_plan=resolved_logparse_plan(
+            job,
+            problem_time=_PROBLEM_TIME,
+            anchors=_RESOLVED_ANCHORS,
+        ),
+        review_subject=None,
     )
 
 
@@ -259,13 +282,19 @@ def _continuation_manifest(
         metadata=metadata,
     )
     return WorkspaceInputManifest(
-        schema_version=1,
+        schema_version=2,
         job_id=job.job_id,
         case_id=job.case_id,
         job_type=job.job_type,
         logparse_tool_ref=job.logparse_tool_ref,
         logparse_product=job.logparse_product,
         entries=[_attachment_entry(archive_bytes), artifact],
+        resolved_logparse_plan=resolved_logparse_plan(
+            job,
+            problem_time=_PROBLEM_TIME,
+            anchors=_RESOLVED_ANCHORS,
+        ),
+        review_subject=None,
     )
 
 

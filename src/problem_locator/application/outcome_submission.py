@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import logging
 from dataclasses import dataclass
 from typing import Any
@@ -12,6 +13,9 @@ from problem_locator.contracts import (
     ApplicationError,
     ApplicationErrorDetail,
     ApplicationPortError,
+    Artifact,
+    ArtifactKind,
+    AuditBundleMetadata,
     Case,
     CaseStatus,
     CaseView,
@@ -33,9 +37,9 @@ from problem_locator.contracts import (
     PlannedResourceTarget,
     PublishedJobReceipt,
     ResourceRef,
+    ResourceKind,
     ResourceType,
     ReviewOutcomeTriggerPayload,
-    ReviewVerdict,
     RouteKind,
     RouteOutcomeTriggerPayload,
     RuntimeBindings,
@@ -49,6 +53,7 @@ from problem_locator.contracts import (
     ValidatedTrigger,
     VersionedRef,
     canonical_json_bytes,
+    finalize_unresolved_result,
 )
 from problem_locator.contracts.errors import deterministic_outcome_failure
 from problem_locator.contracts.outcomes import (
@@ -81,7 +86,10 @@ from .formalization import (
     formalize_accepted_artifacts,
     formalize_accepted_candidate,
     formalize_accepted_evidence,
+    resolve_evidence_binding,
 )
+from .audit_bundle import AUDIT_BUNDLE_FORMAT_ID
+from .audit_bundle_assembler import assemble_unresolved_audit_bundle
 from .mutations import apply_transition_plan_to_case, build_state_mutation
 from .job_control import _validate_control_plan
 from .outcome_processing import (
@@ -105,6 +113,7 @@ from .runtime_bindings import (
 
 
 _MAX_COMMIT_ATTEMPTS = 3
+_SERVER_AUDIT_PROPOSAL_KEY = "server-audit-bundle"
 
 
 @dataclass(frozen=True, slots=True)
@@ -662,6 +671,98 @@ class OutcomeSubmissionService:
             )
             for key in plan.accepted_artifact_proposal_keys
         }
+        generated_audit_artifact_id: str | None = None
+        generated_audit_staged: StagedResourceRef | None = None
+        generated_audit_target: PlannedResourceTarget | None = None
+        unresolved_evidence_refs: list[str] = []
+        if plan.unresolved_result_draft is not None:
+            try:
+                for binding in plan.unresolved_result_draft.evidence_bindings:
+                    evidence_ref = resolve_evidence_binding(
+                        binding,
+                        existing_evidence_ids=aggregate.evidence,
+                        evidence_ids_by_proposal_key=evidence_ids,
+                    )
+                    if evidence_ref not in unresolved_evidence_refs:
+                        unresolved_evidence_refs.append(evidence_ref)
+            except (KeyError, TypeError, ValueError, ValidationError):
+                raise_port_error(
+                    ErrorCode.OUTCOME_INVALID,
+                    "The unresolved result cites Evidence outside its accepted closure.",
+                )
+            generated_audit_artifact_id = self._ids.derive(
+                "artifact",
+                [
+                    snapshot.installation_id,
+                    job.case_id,
+                    outcome.outcome_id,
+                    "audit-bundle",
+                ],
+            )
+            generated_staging_id = self._ids.derive(
+                "resource_staging",
+                [
+                    snapshot.installation_id,
+                    job.case_id,
+                    outcome.outcome_id,
+                    "audit-bundle",
+                ],
+            )
+            try:
+                built_audit = assemble_unresolved_audit_bundle(
+                    aggregate=aggregate,
+                    source_job=job,
+                    source_outcome=outcome,
+                    unresolved=plan.unresolved_result_draft,
+                    resolved_evidence_refs=unresolved_evidence_refs,
+                    execution_records=self._execution_records,
+                )
+            except ApplicationPortError:
+                raise_port_error(
+                    ErrorCode.EXECUTION_RECORD_FAILED,
+                    "The required V2 audit record could not be read.",
+                )
+            except (KeyError, OSError, TypeError, ValueError, ValidationError):
+                raise_port_error(
+                    ErrorCode.EXECUTION_RECORD_FAILED,
+                    "The required V2 audit record is incomplete.",
+                )
+            try:
+                generated_audit_staged = self._resource_store.stage_generated_file(
+                    job.job_id,
+                    _SERVER_AUDIT_PROPOSAL_KEY,
+                    generated_staging_id,
+                    io.BytesIO(built_audit.payload),
+                    expected_size=len(built_audit.payload),
+                    expected_sha256=built_audit.sha256,
+                )
+                generated_audit_target = self._resource_store.plan_target(
+                    job.case_id,
+                    ResourceType.ARTIFACT,
+                    generated_audit_artifact_id,
+                    ResourceKind.FILE,
+                    generated_audit_staged.size,
+                    generated_audit_staged.sha256,
+                )
+            except ApplicationPortError as error:
+                if error.error.code in {
+                    ErrorCode.RESOURCE_STAGE_FAILED,
+                    ErrorCode.RESOURCE_HASH_MISMATCH,
+                    ErrorCode.RESOURCE_SIZE_MISMATCH,
+                    ErrorCode.RESOURCE_LIMIT_EXCEEDED,
+                    ErrorCode.PATH_VIOLATION,
+                    ErrorCode.VALIDATION_ERROR,
+                }:
+                    raise_port_error(
+                        ErrorCode.RESOURCE_PUBLISH_FAILED,
+                        "The server audit bundle could not be staged safely.",
+                    )
+                raise
+            except (OSError, TypeError, ValueError, ValidationError):
+                raise_port_error(
+                    ErrorCode.RESOURCE_PUBLISH_FAILED,
+                    "The server audit bundle could not be staged safely.",
+                )
         candidate_ids: dict[str, str] = {}
         draft = (
             outcome.payload.candidate_conclusion_draft
@@ -682,6 +783,14 @@ class OutcomeSubmissionService:
         target_rows: list[
             tuple[str, StagedResourceRef, PlannedResourceTarget]
         ] = []
+        if generated_audit_staged is not None and generated_audit_target is not None:
+            target_rows.append(
+                (
+                    _SERVER_AUDIT_PROPOSAL_KEY,
+                    generated_audit_staged,
+                    generated_audit_target,
+                )
+            )
         try:
             for key in plan.accepted_evidence_proposal_keys:
                 proposal = evidence_by_key[key]
@@ -722,6 +831,7 @@ class OutcomeSubmissionService:
         rejection: _DeterministicRejection | None = None
         committed: _AppliedCommit | None = None
         formal_artifacts = {}
+        formal_generated_artifacts: dict[str, Artifact] = {}
         formal_evidence = {}
         created_job: Job | None = None
         target_case_view: CaseView | None = None
@@ -827,6 +937,48 @@ class OutcomeSubmissionService:
                         published_resources_by_proposal_key=published_resources,
                         occurred_at=outcome.produced_at,
                     )
+                    if generated_audit_artifact_id is not None:
+                        target = planned_targets.get(_SERVER_AUDIT_PROPOSAL_KEY)
+                        published = published_resources.get(
+                            _SERVER_AUDIT_PROPOSAL_KEY
+                        )
+                        if (
+                            target is None
+                            or published is None
+                            or published.storage_key != target.final_storage_key
+                            or published.resource_kind is not ResourceKind.FILE
+                            or published.size != target.size
+                            or published.sha256 != target.sha256
+                        ):
+                            raise ValueError(
+                                "server-generated audit resource did not match its target"
+                            )
+                        formal_generated_artifacts[
+                            generated_audit_artifact_id
+                        ] = Artifact(
+                            artifact_id=generated_audit_artifact_id,
+                            case_id=job.case_id,
+                            kind=ArtifactKind.AUDIT_BUNDLE,
+                            name="problem-locator-audit-bundle.zip",
+                            content_type="application/zip",
+                            resource_kind=ResourceKind.FILE,
+                            size=published.size,
+                            sha256=published.sha256,
+                            storage_key=published.storage_key,
+                            metadata=AuditBundleMetadata(
+                                schema_version=1,
+                                format_id=AUDIT_BUNDLE_FORMAT_ID,
+                                description=(
+                                    "Server-generated observable diagnosis and "
+                                    "review audit bundle."
+                                ),
+                                case_id=job.case_id,
+                                source_job_id=job.job_id,
+                                source_outcome_id=outcome.outcome_id,
+                            ),
+                            created_by_job_id=job.job_id,
+                            created_at=processed_at,
+                        )
                     formal_candidate = formalize_accepted_candidate(
                         draft,
                         plan.accepted_candidate_proposal_key,
@@ -887,12 +1039,22 @@ class OutcomeSubmissionService:
                             candidates_by_proposal_key=candidates,
                         )
                     )
+                    unresolved_result = (
+                        None
+                        if plan.unresolved_result_draft is None
+                        else finalize_unresolved_result(
+                            plan.unresolved_result_draft,
+                            generated_audit_artifact_id,
+                            unresolved_evidence_refs,
+                        )
+                    )
                     new_case = apply_transition_plan_to_case(
                         aggregate.case,
                         plan,
                         target_state,
                         created_job=created_job,
                         processed_at=processed_at,
+                        unresolved_result=unresolved_result,
                     )
                     active_job = (
                         None
@@ -912,7 +1074,11 @@ class OutcomeSubmissionService:
                     target_case_view = project_case_components(
                         new_case,
                         active_job,
-                        [*aggregate.artifacts.values(), *formal_artifacts.values()],
+                        [
+                            *aggregate.artifacts.values(),
+                            *formal_artifacts.values(),
+                            *formal_generated_artifacts.values(),
+                        ],
                     )
                 except (KeyError, TypeError, ValueError):
                     rejection = _DeterministicRejection(ErrorCode.OUTCOME_INVALID)
@@ -961,6 +1127,7 @@ class OutcomeSubmissionService:
                     accepted_artifact_ids=sorted(
                         item.artifact_id for item in formal_artifacts.values()
                     ),
+                    generated_artifact_ids=sorted(formal_generated_artifacts),
                     created_job_id=None if created_job is None else created_job.job_id,
                     reason=plan.reason,
                 )
@@ -974,7 +1141,10 @@ class OutcomeSubmissionService:
                         insert_outcomes=[outcome],
                         insert_outcome_processing_records=[processing],
                         insert_evidence=formal_evidence.values(),
-                        insert_artifacts=formal_artifacts.values(),
+                        insert_artifacts=[
+                            *formal_artifacts.values(),
+                            *formal_generated_artifacts.values(),
+                        ],
                     ),
                 )
                 committed = _AppliedCommit(
@@ -996,6 +1166,9 @@ class OutcomeSubmissionService:
                         "plan_reason": plan.reason,
                         "accepted_evidence": list(formal_evidence.values()),
                         "accepted_artifacts": list(formal_artifacts.values()),
+                        "generated_artifacts": list(
+                            formal_generated_artifacts.values()
+                        ),
                         "created_job": created_job,
                         "case_view": target_case_view,
                     },
@@ -1242,6 +1415,7 @@ class OutcomeSubmissionService:
             error_code=None,
             accepted_evidence_ids=[],
             accepted_artifact_ids=[],
+            generated_artifact_ids=[],
             created_job_id=None,
             reason="The finalized Outcome is stale.",
         )
@@ -1461,14 +1635,9 @@ def _expected_next_job_type(
                 else JobType.REVIEW
             )
         return None
-    if (
-        job.job_type is JobType.REVIEW
-        and outcome.result_type is OutcomeResultType.COMPLETED
-        and getattr(payload, "verdict", None) is not None
-        and payload.verdict is not ReviewVerdict.PASS
-        and job.skill_ref is not None
-    ):
-        return JobType.DIAGNOSE
+    # REVIEW never starts another diagnosis automatically in V2.  PASS
+    # resolves; semantic rejection and invalid NEED_MORE terminate unresolved;
+    # an eligible MISSING_ONLY request waits without a Job.
     return None
 
 

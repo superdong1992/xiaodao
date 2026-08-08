@@ -1,4 +1,4 @@
-"""Frozen public enumerations for the Problem Locator V1 contract."""
+"""Frozen public enumerations for the Problem Locator V2 contract."""
 
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ class CaseStatus(StrEnum):
     WAITING_ATTACHMENT = "WAITING_ATTACHMENT"
     REVIEWING = "REVIEWING"
     RESOLVED = "RESOLVED"
+    UNRESOLVED = "UNRESOLVED"
     FAILED = "FAILED"
     CANCELLED = "CANCELLED"
     INTERRUPTED = "INTERRUPTED"
@@ -52,6 +53,7 @@ class OutcomeResultType(StrEnum):
     REROUTE = "REROUTE"
     NO_CAPABILITY = "NO_CAPABILITY"
     FAILED = "FAILED"
+    INCONCLUSIVE = "INCONCLUSIVE"
 
 
 class AttachmentStatus(StrEnum):
@@ -101,6 +103,32 @@ class ArtifactKind(StrEnum):
     USER_RESULT_ARCHIVE = "USER_RESULT_ARCHIVE"
     DIAGNOSTIC_EXPORT = "DIAGNOSTIC_EXPORT"
     LOGPARSE_RUN = "LOGPARSE_RUN"
+    AUDIT_BUNDLE = "AUDIT_BUNDLE"
+
+
+class SupplementPolicy(StrEnum):
+    NONE = "NONE"
+    MISSING_ONLY = "MISSING_ONLY"
+
+
+class RuleClaimResult(StrEnum):
+    PASS = "PASS"
+    FAIL = "FAIL"
+    UNKNOWN = "UNKNOWN"
+
+
+class ServerRuleStatus(StrEnum):
+    VERIFIED_PASS = "VERIFIED_PASS"
+    VERIFIED_FAIL = "VERIFIED_FAIL"
+    UNVERIFIABLE = "UNVERIFIABLE"
+    SEMANTIC_ONLY = "SEMANTIC_ONLY"
+
+
+class UnresolvedReasonCode(StrEnum):
+    MECHANICAL_VERIFICATION_FAILED = "MECHANICAL_VERIFICATION_FAILED"
+    INSUFFICIENT_EVIDENCE = "INSUFFICIENT_EVIDENCE"
+    SEMANTIC_REVIEW_REJECTED = "SEMANTIC_REVIEW_REJECTED"
+    INVALID_NEED_MORE_REQUEST = "INVALID_NEED_MORE_REQUEST"
 
 
 class ResourceKind(StrEnum):
@@ -183,6 +211,8 @@ class ContextSectionKind(StrEnum):
     PREVIOUS_OUTCOME = "PREVIOUS_OUTCOME"
     EVIDENCE = "EVIDENCE"
     RESOURCE_MANIFEST = "RESOURCE_MANIFEST"
+    REVIEW_SUBJECT = "REVIEW_SUBJECT"
+    RESOLVED_LOGPARSE_PLAN = "RESOLVED_LOGPARSE_PLAN"
 
 
 class WorkspaceInputKind(StrEnum):

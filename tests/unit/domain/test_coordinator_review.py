@@ -6,22 +6,20 @@ from problem_locator.contracts import (
     ApplicationError,
     CandidateMutationAction,
     CandidateStatus,
-    JobType,
     ReviewAssessment,
     ReviewOutcomeTriggerPayload,
     ReviewVerdict,
     TriggerType,
+    UnresolvedReasonCode,
     validate_transition_plan_for_outcome,
 )
 from problem_locator.domain import DomainCoordinator
 
 from ._builders import (
     continuation,
-    diagnose_job,
     rebuild,
     review_job,
     review_outcome,
-    runtime_bindings,
     snapshot_with_active,
     trigger,
 )
@@ -61,7 +59,7 @@ def test_review_pass_is_the_only_resolution_gate() -> None:
         (ReviewVerdict.REJECT, {"evidence_conflicts": ["The timestamps conflict."]}),
     ],
 )
-def test_non_pass_review_rejects_candidate_and_returns_to_diagnosis(
+def test_non_pass_review_rejects_candidate_and_terminates_unresolved(
     verdict: ReviewVerdict,
     issues: dict[str, list[str]],
 ) -> None:
@@ -84,7 +82,6 @@ def test_non_pass_review_rejects_candidate_and_returns_to_diagnosis(
     changed = ReviewAssessment.model_validate(values)
     outcome = rebuild(base, payload=changed)
     snapshot = snapshot_with_active(source)
-    next_diagnosis = diagnose_job()
     resources = continuation(
         incoming_outcome_id=outcome.outcome_id,
         job=source,
@@ -93,7 +90,6 @@ def test_non_pass_review_rejects_candidate_and_returns_to_diagnosis(
         snapshot,
         trigger_type=TriggerType.REVIEW_OUTCOME,
         payload=ReviewOutcomeTriggerPayload(job_outcome=outcome),
-        bindings={JobType.DIAGNOSE: runtime_bindings(next_diagnosis)},
         continuation_resources=resources,
         occurred_at=outcome.produced_at,
     )
@@ -101,12 +97,16 @@ def test_non_pass_review_rejects_candidate_and_returns_to_diagnosis(
     plan = DomainCoordinator().plan(snapshot, request)
 
     assert not isinstance(plan, ApplicationError)
-    assert plan.target_case_status.value == "RUNNING"
+    assert plan.target_case_status.value == "UNRESOLVED"
     assert plan.candidate_mutation is not None
     assert plan.candidate_mutation.target_status is CandidateStatus.REJECTED
     assert plan.candidate_mutation.reason == changed.recommendation
-    assert plan.next_job_spec is not None
-    assert plan.next_job_spec.job_type is JobType.DIAGNOSE
-    assert plan.next_job_spec.target_state_revision == snapshot.case.diagnosis_state.revision + 1
-    assert plan.next_job_spec.previous_outcome_refs == [outcome.outcome_id]
+    assert plan.next_job_spec is None
+    assert plan.unresolved_result_draft is not None
+    expected_reason = (
+        UnresolvedReasonCode.INVALID_NEED_MORE_REQUEST
+        if verdict is ReviewVerdict.NEED_MORE_EVIDENCE
+        else UnresolvedReasonCode.SEMANTIC_REVIEW_REJECTED
+    )
+    assert plan.unresolved_result_draft.reason_code is expected_reason
     assert validate_transition_plan_for_outcome(plan, outcome) is plan

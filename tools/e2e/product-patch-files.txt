@@ -21,11 +21,12 @@ design/v1-specs/S06-mcp-http-cli.md
 design/v1-specs/S07-skill-logparse.md
 pyproject.toml
 uv.lock
-schemas/v1/agent-job-outcome.schema.json
-schemas/v1/contract-manifest.json
-schemas/v1/job-outcome.schema.json
-schemas/v1/state.schema.json
-schemas/v1/workspace-input-manifest.schema.json
+schemas/v2/agent-job-outcome-draft.schema.json
+schemas/v2/agent-job-outcome.schema.json
+schemas/v2/contract-manifest.json
+schemas/v2/job-outcome.schema.json
+schemas/v2/state.schema.json
+schemas/v2/workspace-input-manifest.schema.json
 src/problem_locator/application/external_commands.py
 src/problem_locator/application/formalization.py
 src/problem_locator/application/projection.py
@@ -120,8 +121,7 @@ tests/fixtures/components/storage/fixture-manifest.json
 tests/fixtures/components/storage/state/invalid-dangling-active-job.json
 tests/fixtures/components/storage/state/invalid-truncated.json
 tests/fixtures/components/storage/state/invalid-unknown-schema-version.json
-tests/fixtures/components/storage/state/valid-empty-r3.json
-tests/fixtures/components/storage/state/valid-empty-r4.json
+tests/fixtures/components/storage/state/valid-empty-v2.json
 tests/fixtures/contracts/fixture-manifest.json
 tests/fixtures/contracts/positive/state.json
 tests/fixtures/failures/failure-matrix.json

@@ -13,6 +13,7 @@ from problem_locator.contracts.enums import (
     AttachmentStatus,
     ErrorCode,
     ExecutionStage,
+    JobType,
     ResourceKind,
 )
 from problem_locator.contracts.limits import MAX_USER_TEXT_UTF8_BYTES
@@ -25,7 +26,9 @@ from problem_locator.contracts.models import (
     JobOutcome,
     LogparseParseClaim,
     MaterializedPath,
+    ResolvedLogparsePlanInput,
     ResourceRef,
+    ReviewSubjectV2,
     TreeManifest,
     TreeManifestEntry,
     WorkspaceArtifactInput,
@@ -45,7 +48,7 @@ from problem_locator.contracts.serialization import (
 )
 
 from .failures import RuntimeExecutionError, runtime_failure
-from .outcome_finalizer import FINALIZATION_MARKER_NAME
+from .outcome_finalizer import DRAFT_FINALIZATION_MARKER_NAME
 
 
 _READ_CHUNK_BYTES = 1024 * 1024
@@ -88,6 +91,10 @@ class PreparedWorkspace:
     @property
     def outcome_path(self) -> Path:
         return self.root / "output" / "job_outcome.json"
+
+    @property
+    def outcome_draft_path(self) -> Path:
+        return self.root / "output" / "job_outcome.draft.json"
 
     @property
     def tool_state_root(self) -> Path:
@@ -241,15 +248,22 @@ def _listed_names(descriptor: int) -> list[str]:
 
 
 def _metadata_fingerprint(metadata: os.stat_result) -> tuple[int, ...]:
-    return (
+    stable = (
         metadata.st_dev,
         metadata.st_ino,
         stat.S_IFMT(metadata.st_mode),
         metadata.st_nlink,
         metadata.st_size,
         metadata.st_mtime_ns,
-        metadata.st_ctime_ns,
     )
+    # On Windows, fstat() on a newly flushed handle and stat() through its
+    # pathname can transiently report different creation-time/ctime values for
+    # the same file ID.  Keep the identity, type, link, size, and modification
+    # checks that establish the frozen node, but do not turn that NTFS metadata
+    # propagation lag into a random workspace rejection.
+    if os.name == "nt":
+        return stable
+    return (*stable, metadata.st_ctime_ns)
 
 
 def _measure_untrusted_directory(
@@ -632,7 +646,7 @@ def _fallback_read_claim(workspace: PreparedWorkspace) -> LogparseParseClaim | N
         ),
     )
     names = _fallback_names(tool_state_path)
-    if not names or names == [FINALIZATION_MARKER_NAME]:
+    if not names or names == [DRAFT_FINALIZATION_MARKER_NAME]:
         final_tool_state_path, final_tool_state_metadata = (
             _fallback_expected_directory(
                 workspace,
@@ -653,7 +667,7 @@ def _fallback_read_claim(workspace: PreparedWorkspace) -> LogparseParseClaim | N
         return None
     if set(names) not in (
         {"logparse-parse.claim"},
-        {"logparse-parse.claim", FINALIZATION_MARKER_NAME},
+        {"logparse-parse.claim", DRAFT_FINALIZATION_MARKER_NAME},
     ):
         raise _UnsafeWorkspaceError("tool state contains an unexpected node")
     claim_path = tool_state_path / "logparse-parse.claim"
@@ -1009,6 +1023,9 @@ class WorkspaceManager:
         job: Job,
         aggregate: CaseAggregate,
         resource_store: ResourceStore,
+        *,
+        resolved_logparse_plan: ResolvedLogparsePlanInput | None = None,
+        review_subject: ReviewSubjectV2 | None = None,
     ) -> PreparedWorkspace:
         if aggregate.case.case_id != job.case_id or aggregate.jobs.get(job.job_id) != job:
             raise runtime_failure(
@@ -1131,7 +1148,8 @@ class WorkspaceManager:
                     metadata=artifact.metadata,
                 )
             )
-        for outcome in outcomes:
+        materialized_outcomes = [] if job.job_type is JobType.REVIEW else outcomes
+        for outcome in materialized_outcomes:
             data = canonical_json_bytes(outcome)
             relative = f"inputs/outcomes/{outcome.outcome_id}/job_outcome.json"
             path = _safe_destination(root, relative)
@@ -1158,13 +1176,15 @@ class WorkspaceManager:
             )
 
         manifest = WorkspaceInputManifest(
-            schema_version=1,
+            schema_version=2,
             job_id=job.job_id,
             case_id=job.case_id,
             job_type=job.job_type,
             logparse_tool_ref=job.logparse_tool_ref,
             logparse_product=job.logparse_product,
             entries=entries,
+            resolved_logparse_plan=resolved_logparse_plan,
+            review_subject=review_subject,
         )
         validate_workspace_manifest_for_job(manifest, job)
         manifest_bytes = canonical_json_bytes(manifest)
@@ -1210,7 +1230,7 @@ class WorkspaceManager:
             attachments=tuple(attachments),
             evidence=tuple(evidence),
             artifacts=tuple(artifacts),
-            previous_outcomes=tuple(outcomes),
+            previous_outcomes=tuple(materialized_outcomes),
         )
 
     @staticmethod
@@ -1437,7 +1457,7 @@ class WorkspaceManager:
                 (workspace.tool_state_device, workspace.tool_state_inode),
             )
             nodes = _listed_names(tool_state_descriptor)
-            if not nodes or nodes == [FINALIZATION_MARKER_NAME]:
+            if not nodes or nodes == [DRAFT_FINALIZATION_MARKER_NAME]:
                 _assert_expected_directory(
                     runtime_descriptor,
                     "tool-state",
@@ -1454,7 +1474,7 @@ class WorkspaceManager:
                 return None
             if set(nodes) not in (
                 {"logparse-parse.claim"},
-                {"logparse-parse.claim", FINALIZATION_MARKER_NAME},
+                {"logparse-parse.claim", DRAFT_FINALIZATION_MARKER_NAME},
             ):
                 raise _UnsafeWorkspaceError("tool state contains an unexpected node")
             named_metadata = os.stat(

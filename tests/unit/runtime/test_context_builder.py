@@ -27,12 +27,17 @@ from problem_locator.contracts.models import (
     JobOutcome,
     WorkspaceInputManifest,
 )
-from problem_locator.contracts.serialization import canonical_json_bytes, schema_bundle_bytes
+from problem_locator.contracts.serialization import (
+    canonical_json_bytes,
+    canonical_json_sha256,
+    schema_bundle_bytes,
+)
 from problem_locator.runtime.context_builder import (
     ContextBuilder,
     ContextLimitExceeded,
     ContextMaterials,
 )
+from tests.v2_helpers import blind_review_subject, resolved_logparse_plan
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
@@ -141,6 +146,9 @@ def _manifest(
     evidence: tuple[Evidence, ...],
     previous_outcomes: tuple[JobOutcome, ...],
 ) -> WorkspaceInputManifest:
+    exposed_previous_outcomes = (
+        () if job.job_type is JobType.REVIEW else previous_outcomes
+    )
     entries: list[dict[str, Any]] = []
     attachment_sha = "2" * 64
     for attachment_id in job.attachment_refs:
@@ -198,7 +206,7 @@ def _manifest(
                 },
             }
         )
-    for outcome in previous_outcomes:
+    for outcome in exposed_previous_outcomes:
         encoded = canonical_json_bytes(outcome)
         entries.append(
             {
@@ -216,7 +224,7 @@ def _manifest(
         )
     return WorkspaceInputManifest.model_validate(
         {
-            "schema_version": 1,
+            "schema_version": 2,
             "job_id": job.job_id,
             "case_id": job.case_id,
             "job_type": job.job_type.value,
@@ -227,6 +235,28 @@ def _manifest(
             ),
             "logparse_product": job.logparse_product,
             "entries": entries,
+            "resolved_logparse_plan": (
+                None
+                if job.logparse_tool_ref is None
+                else resolved_logparse_plan(
+                    job,
+                    problem_time="2026-01-02T03:04:05.000Z",
+                    anchors=[
+                        {
+                            "label": "request",
+                            "module": "payment",
+                            "slot": "caller",
+                            "process_name": "payment-service",
+                            "pid": None,
+                        }
+                    ],
+                ).model_dump(mode="json")
+            ),
+            "review_subject": (
+                blind_review_subject(job).model_dump(mode="json")
+                if job.job_type is JobType.REVIEW
+                else None
+            ),
         }
     )
 
@@ -238,6 +268,9 @@ def _materials(
     previous_outcomes: tuple[JobOutcome, ...] = (),
     profile: str | None = None,
 ) -> ContextMaterials:
+    exposed_previous_outcomes = (
+        () if job.job_type is JobType.REVIEW else previous_outcomes
+    )
     fixture = MATERIAL_TEXT[job.job_type.value.lower()]
     role_values = {
         "skill": fixture.get("skill"),
@@ -248,7 +281,7 @@ def _materials(
         tool_bundle=fixture["tool_bundle"],
         output_contract=fixture["output_contract"],
         manifest=_manifest(job, evidence, previous_outcomes),
-        previous_outcomes=previous_outcomes,
+        previous_outcomes=exposed_previous_outcomes,
         evidence=evidence,
         **role_values,
     )
@@ -396,9 +429,9 @@ def test_production_output_contract_materializes_exact_installed_s00_schemas(
     content = _section_content(context, output_index)
     expected = schema_bundle_bytes()
     markers = {
-        "agent-job-outcome.schema.json": (
-            b"<<<BEGIN S00 AGENT JOB OUTCOME SCHEMA>>>\n",
-            b"<<<END S00 AGENT JOB OUTCOME SCHEMA>>>",
+        "agent-job-outcome-draft.schema.json": (
+            b"<<<BEGIN S00 AGENT JOB OUTCOME DRAFT SCHEMA>>>\n",
+            b"<<<END S00 AGENT JOB OUTCOME DRAFT SCHEMA>>>",
         ),
     }
     if job_type is JobType.DIAGNOSE:
@@ -541,14 +574,34 @@ def test_manifest_is_reserved_before_optional_evidence_and_scan_is_job_ordered()
     )
 
 
-def test_reviewer_supporting_evidence_is_required_even_when_optional_is_skipped() -> None:
-    optional_id = "00000000-0000-0000-0000-000000000041"
-    job = _job_with_evidence(
-        _base_job(JobType.REVIEW),
-        ["00000000-0000-0000-0000-000000000040", optional_id],
+def test_reviewer_candidate_evidence_union_is_required_when_optional_is_skipped() -> None:
+    supporting_id = "00000000-0000-0000-0000-000000000040"
+    completion_only_id = "00000000-0000-0000-0000-000000000041"
+    optional_id = "00000000-0000-0000-0000-000000000042"
+    payload = _base_job(JobType.REVIEW).model_dump(mode="json")
+    candidate = payload["context_snapshot"]["candidate_conclusion"]
+    assert candidate is not None
+    candidate["completion_criteria_mapping"][0]["evidence_refs"] = [
+        completion_only_id
+    ]
+    candidate["content_hash"] = canonical_json_sha256(
+        {
+            "statement": candidate["statement"],
+            "supporting_evidence_refs": candidate["supporting_evidence_refs"],
+            "completion_criteria_mapping": candidate["completion_criteria_mapping"],
+        }
     )
+    payload["review_target"]["candidate_content_hash"] = candidate["content_hash"]
+    payload["evidence_refs"] = [supporting_id, completion_only_id, optional_id]
+    payload["context_snapshot"]["evidence_refs"] = [
+        supporting_id,
+        completion_only_id,
+        optional_id,
+    ]
+    job = Job.model_validate(payload)
     evidence = (
-        _evidence(job, job.evidence_refs[0], "supporting Evidence"),
+        _evidence(job, supporting_id, "supporting Evidence"),
+        _evidence(job, completion_only_id, "completion-only Evidence"),
         _evidence(job, optional_id, "z" * 65_000),
     )
     previous = _previous_outcome(job)
@@ -569,9 +622,10 @@ def test_reviewer_supporting_evidence_is_required_even_when_optional_is_skipped(
     ]
 
     assert [section.source_refs[0] for section in evidence_sections] == [
-        job.evidence_refs[0]
+        supporting_id,
+        completion_only_id,
     ]
-    assert evidence_sections[0].required
+    assert all(section.required for section in evidence_sections)
 
 
 def test_context_fixture_manifest_covers_every_owned_byte() -> None:

@@ -51,7 +51,13 @@ from .outputs import (
 )
 from .paths import resolve_workspace_path, validate_proposal_io_paths
 from .process import ProcessResult, SubprocessExecutor, terminate_process_tree
-from .requests import Anchor, BrokerEnvelope, ParseTargetsRequest, TargetLogsRequest
+from .requests import (
+    Anchor,
+    BrokerEnvelope,
+    ParseTargetsRequest,
+    ResolvedLogparsePlan,
+    TargetLogsRequest,
+)
 from .workspace import (
     bind_attachment,
     bind_logparse_run,
@@ -130,6 +136,32 @@ def _plain_workspace_root(value: Path) -> Path:
     if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
         raise ValueError("Job Workspace must be a plain directory")
     return root
+
+
+def _resolved_plan_from_manifest(
+    manifest: WorkspaceInputManifest,
+) -> ResolvedLogparsePlan:
+    """Convert the frozen public Workspace value into the broker-private plan."""
+
+    plan = manifest.resolved_logparse_plan
+    if plan is None:
+        raise ValueError("logparse Workspace is missing its resolved plan")
+    return ResolvedLogparsePlan(
+        schema_version=1,
+        attachment_id=plan.attachment_id,
+        artifact_id=plan.artifact_id,
+        problem_time=plan.problem_time,
+        anchors=[
+            Anchor(
+                label=item.label,
+                module=item.module,
+                slot=item.slot,
+                process_name=item.process_name,
+                pid=item.pid,
+            )
+            for item in plan.anchors
+        ],
+    )
 
 
 def _read_exact_request(workspace_root: Path, relative_path: str) -> bytes:
@@ -320,6 +352,7 @@ class PinnedLogparseBrokerSession:
         self._job = job
         self._workspace_root = Path(workspace_root)
         self._workspace_manifest = workspace_manifest
+        self._resolved_plan = _resolved_plan_from_manifest(workspace_manifest)
         self._cancellation = cancellation
         self._resolved_asset = resolved_asset
         self._repo = Path(logparse_repo)
@@ -338,6 +371,7 @@ class PinnedLogparseBrokerSession:
         self._closed = False
         self._token_valid = True
         self._accepted_parse_request_bytes: bytes | None = None
+        self._operation_audit: list[dict[str, object]] = []
         self._server: _BrokerHttpServer | None = None
         self._server_thread: threading.Thread | None = None
         self._executor = executor_factory(
@@ -388,6 +422,44 @@ class PinnedLogparseBrokerSession:
     def parse_request_bytes(self) -> bytes | None:
         with self._state_lock:
             return self._accepted_parse_request_bytes
+
+    def audit_bytes(self) -> bytes:
+        """Return the bounded canonical transcript of accepted broker operations."""
+
+        with self._state_lock:
+            operations = [dict(item) for item in self._operation_audit]
+        return canonical_json_bytes(
+            {
+                "schema_version": 1,
+                "job_id": self._job.job_id,
+                "operations": operations,
+            }
+        )
+
+    def _record_operation(
+        self,
+        operation: str,
+        request_bytes: bytes,
+        status: int,
+        result_bytes: bytes,
+    ) -> None:
+        try:
+            request_value = parse_canonical_json_bytes(request_bytes)
+            result_value = parse_canonical_json_bytes(result_bytes)
+        except ValueError:
+            return
+        record: dict[str, object] = {
+            "operation": operation,
+            "request_sha256": hashlib.sha256(request_bytes).hexdigest(),
+            "request": request_value,
+            "http_status": int(status),
+            "result_sha256": hashlib.sha256(result_bytes).hexdigest(),
+            "result": result_value,
+        }
+        with self._state_lock:
+            if len(self._operation_audit) >= 8:
+                raise RuntimeError("logparse operation audit limit exceeded")
+            self._operation_audit.append(record)
 
     def _register_child(self, process: subprocess.Popen[bytes]) -> None:
         terminate_now = False
@@ -489,20 +561,36 @@ class PinnedLogparseBrokerSession:
         if envelope.operation == "parse-targets":
             try:
                 request = parse_canonical_json_bytes(request_bytes, ParseTargetsRequest)
+                self._resolved_plan.validate_request(request)
             except ValueError:
                 failure = _tool_failure(ErrorCode.LOGPARSE_FAILED)
                 return HTTPStatus.UNPROCESSABLE_ENTITY, canonical_json_bytes(failure)
             if proposal_key != request.artifact_proposal_key:
                 failure = _tool_failure(ErrorCode.LOGPARSE_FAILED)
                 return HTTPStatus.UNPROCESSABLE_ENTITY, canonical_json_bytes(failure)
-            return self._parse_targets(request, request_bytes, manifest)
+            status, result = self._parse_targets(request, request_bytes, manifest)
+            self._record_operation(
+                envelope.operation,
+                request_bytes,
+                status,
+                result,
+            )
+            return status, result
 
         try:
             request = parse_canonical_json_bytes(request_bytes, TargetLogsRequest)
+            self._resolved_plan.validate_request(request)
         except ValueError:
             failure = _tool_failure(ErrorCode.LOGPARSE_FAILED)
             return HTTPStatus.UNPROCESSABLE_ENTITY, canonical_json_bytes(failure)
-        return self._target_logs(request, manifest)
+        status, result = self._target_logs(request, manifest)
+        self._record_operation(
+            envelope.operation,
+            request_bytes,
+            status,
+            result,
+        )
+        return status, result
 
     def _run_process(self, argv: list[str]) -> tuple[ProcessResult, ExecutionFailure | None]:
         self._fault_point("before_process")

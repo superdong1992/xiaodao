@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+import base64
+from datetime import datetime, timedelta, timezone
 import importlib.util
 import hashlib
+import io
 import json
 from pathlib import Path
+import re
 import sys
 from typing import Any
+import zipfile
 
 import pytest
 
@@ -23,6 +28,10 @@ SPEC_ROOT = REPOSITORY_ROOT / "tests/fixtures/components/diagnosis-generator/spe
 RPC_WIKI = (
     REPOSITORY_ROOT
     / "tests/fixtures/components/logparse/wiki/service-takeover.md"
+)
+RPC_ARCHIVE_B64 = (
+    REPOSITORY_ROOT
+    / "tests/fixtures/components/logparse/real/synthetic-rpc-service-takeover.zip.b64"
 )
 
 
@@ -102,10 +111,15 @@ def test_three_heterogeneous_specs_generate_deterministically(
     assert validator.validate_skill_directory(first.skill_dir).ok
 
     manifest = _manifest(first.skill_dir)
-    assert manifest["schema_version"] == 2
-    assert manifest["version"] == "3.0.6"
+    assert manifest["schema_version"] == 3
+    assert manifest["version"] == "3.1.1"
     assert [item["name"] for item in manifest["requirements"]] == expected_names
     assert all("required" not in item for item in manifest["requirements"])
+    assert all(
+        item["supplement_policy"] in {"NONE", "MISSING_ONLY"}
+        for item in manifest["requirements"]
+    )
+    assert manifest["verification_contract"]["schema_version"] == 1
     if expected_product is None:
         assert "logparse_product" not in manifest
     else:
@@ -162,6 +176,84 @@ def test_wiki_fence_is_the_same_rpc_machine_source(generator: Any) -> None:
     )
 
 
+def test_rpc_verification_extractors_match_real_synthetic_lines_and_window(
+    generator: Any,
+) -> None:
+    spec = generator.load_generation_spec(SPEC_ROOT / "rpc-service-takeover.json")
+    contract = spec.verification_contract
+    archive_bytes = base64.b64decode(RPC_ARCHIVE_B64.read_text(encoding="ascii"))
+    with zipfile.ZipFile(io.BytesIO(archive_bytes)) as archive:
+        logs = {
+            "client": archive.read("boards/slot_1/debug_20260731.log").decode("utf-8"),
+            "server": archive.read("boards/slot_2/debug_20260731.log").decode("utf-8"),
+        }
+
+    observed: dict[str, datetime] = {}
+    for extractor in contract["event_extractors"]:
+        matches = [
+            re.fullmatch(extractor["line_pattern"], line)
+            for line in logs[extractor["anchor"]].splitlines()
+        ]
+        matches = [match for match in matches if match is not None]
+        assert len(matches) == 1
+        assert set(matches[0].groupdict()) == {
+            extractor["timestamp_group"],
+            *extractor["field_groups"],
+        }
+        observed[extractor["id"]] = datetime.strptime(
+            matches[0].group(extractor["timestamp_group"]),
+            "%Y-%m-%dT%H:%M:%S.%fZ",
+        ).replace(tzinfo=timezone.utc)
+
+    problem_time = datetime(2026, 7, 31, 0, 0, 3, tzinfo=timezone.utc)
+    windows = [
+        rule["parameters"]
+        for rule in contract["rules"]
+        if rule["kind"] == "EVENT_TIME_WINDOW"
+    ]
+    assert len(windows) == len(observed)
+    for window in windows:
+        assert window["before_ms"] == 3500
+        assert window["after_ms"] == 500
+        assert window["lower_bound"] == window["upper_bound"] == "INCLUSIVE"
+        event_time = observed[window["event"]]
+        assert problem_time - timedelta(milliseconds=3500) <= event_time
+        assert event_time <= problem_time + timedelta(milliseconds=500)
+        wrong_time = datetime(2099, 1, 1, tzinfo=timezone.utc)
+        assert not (
+            wrong_time - timedelta(milliseconds=3500)
+            <= event_time
+            <= wrong_time + timedelta(milliseconds=500)
+        )
+
+
+def test_verification_contract_rejects_defaults_suppression_and_bad_remediation(
+    generator: Any,
+) -> None:
+    value = json.loads((SPEC_ROOT / "rpc-service-takeover.json").read_text("utf-8"))
+    time_rule = next(
+        item
+        for item in value["verification_contract"]["rules"]
+        if item["kind"] == "EVENT_TIME_WINDOW"
+    )
+    del time_rule["parameters"]["upper_bound"]
+    with pytest.raises(ValueError, match="fields are invalid"):
+        generator.GenerationSpec.from_mapping(value)
+
+    value = json.loads((SPEC_ROOT / "rpc-service-takeover.json").read_text("utf-8"))
+    value["verification_contract"]["suppression_seconds"] = 75
+    with pytest.raises(ValueError, match="verification_contract fields"):
+        generator.GenerationSpec.from_mapping(value)
+
+    value = json.loads((SPEC_ROOT / "manual-triage.json").read_text("utf-8"))
+    value["requirements"][0]["supplement_policy"] = "NONE"
+    value["verification_contract"]["rules"][0]["remediation_requirements"] = [
+        "affected_component"
+    ]
+    with pytest.raises(ValueError, match="MISSING_ONLY"):
+        generator.GenerationSpec.from_mapping(value)
+
+
 def test_optional_requirement_is_rejected(generator: Any) -> None:
     value = json.loads((SPEC_ROOT / "manual-triage.json").read_text(encoding="utf-8"))
     value["requirements"][0]["required"] = False
@@ -215,10 +307,11 @@ def test_non_logparse_attachment_still_requires_business_content_types(
             "name": "manual_attachment",
             "kind": "ATTACHMENT",
             "stage": "INITIAL",
-            "fulfillment_source": "READY_ATTACHMENT",
-            "prompt": "请上传人工排查附件。",
-            "constraints": {"min_count": 1, "max_count": 1},
-        }
+                "fulfillment_source": "READY_ATTACHMENT",
+                "prompt": "请上传人工排查附件。",
+                "constraints": {"min_count": 1, "max_count": 1},
+                "supplement_policy": "MISSING_ONLY",
+            }
     )
     with pytest.raises(ValueError, match="ATTACHMENT constraints"):
         generator.GenerationSpec.from_mapping(value)
