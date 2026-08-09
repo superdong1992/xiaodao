@@ -64,6 +64,7 @@ function fixture() {
     tree_manifest: null,
   };
   const state = {
+    canonical_float_probe: 1,
     cases: {
       [CASE_ID]: {
         jobs: { [JOB_ID]: { job_id: JOB_ID, status: "SUCCEEDED" } },
@@ -102,6 +103,11 @@ function fixture() {
     },
   };
   writeCanonical(path.join(root, "state.json"), state);
+  fs.writeFileSync(
+    path.join(root, "state.json"),
+    fs.readFileSync(path.join(root, "state.json"), "utf8").replace('"canonical_float_probe":1', '"canonical_float_probe":1.0'),
+    { encoding: "utf8", mode: 0o600 },
+  );
   const job = path.join(root, "jobs", JOB_ID);
   fs.mkdirSync(job);
   writeCanonical(path.join(job, "job_outcome.json"), { outcome_id: OUTCOME_ID, job_id: JOB_ID });

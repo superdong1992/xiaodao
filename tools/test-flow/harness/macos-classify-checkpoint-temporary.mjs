@@ -80,6 +80,16 @@ function readCanonicalObject(filePath, code) {
   return value;
 }
 
+function readValidatedState(filePath) {
+  let value;
+  try {
+    value = JSON.parse(fs.readFileSync(ordinaryFile(filePath, "CHECKPOINT_STATE_SHAPE_INVALID"), "utf8"));
+  } catch {
+    throw new CheckpointTemporaryError("CHECKPOINT_STATE_SHAPE_INVALID");
+  }
+  return objectMap(value, "CHECKPOINT_STATE_SHAPE_INVALID");
+}
+
 function scanDiscardedTree(root, code) {
   const pending = [realDirectory(root, code)];
   while (pending.length > 0) {
@@ -272,7 +282,11 @@ export function classifyCheckpointTemporary(dataRoot) {
   }
   const temporary = path.join(root, "tmp");
   exactEntries(temporary, TEMPORARY_ENTRIES, TEMPORARY_ENTRIES, "CHECKPOINT_TEMP_ROOT_LAYOUT_INVALID");
-  const state = readCanonicalObject(path.join(root, "state.json"), "CHECKPOINT_STATE_SHAPE_INVALID");
+  // The product's immediately preceding validate-state command is the
+  // authority for StateFile schema and Python canonical JSON.  Do not
+  // reserialize the whole StateFile with JavaScript: JSON.parse/stringify
+  // cannot preserve Python's canonical distinction between 1.0 and 1.
+  const state = readValidatedState(path.join(root, "state.json"));
   const facts = stateFacts(state);
   verifyOutboxClear(root, facts);
   const uploads = verifyUploads(root, facts);
