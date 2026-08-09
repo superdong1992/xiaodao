@@ -63,7 +63,7 @@ node tools/test-flow/prepare-release-cache.mjs \
   --docker-context colima
 ```
 
-然后用完全相同的输入先规划、再执行：
+然后把 `PROFILE_VERSION` 替换为该配置中的 `claude.version`，用完全相同的输入先规划、再执行：
 
 ```sh
 ./tools/test-flow/run.sh \
@@ -73,7 +73,7 @@ node tools/test-flow/prepare-release-cache.mjs \
   --resume fresh \
   --logparse-source /absolute/path/to/logparse \
   --mcp-source /absolute/path/to/problem-locator-mcp \
-  --claude-entry /absolute/path/to/test-flow-cache/claude/package/cli.js \
+  --claude-entry /absolute/path/to/test-flow-cache/claude/PROFILE_VERSION/package/cli.js \
   --claude-settings /absolute/path/to/claude/settings.json \
   --docker-context colima \
   --cache-root /absolute/path/to/test-flow-cache \
@@ -86,7 +86,7 @@ node tools/test-flow/prepare-release-cache.mjs \
   --resume fresh \
   --logparse-source /absolute/path/to/logparse \
   --mcp-source /absolute/path/to/problem-locator-mcp \
-  --claude-entry /absolute/path/to/test-flow-cache/claude/package/cli.js \
+  --claude-entry /absolute/path/to/test-flow-cache/claude/PROFILE_VERSION/package/cli.js \
   --claude-settings /absolute/path/to/claude/settings.json \
   --docker-context colima \
   --cache-root /absolute/path/to/test-flow-cache
