@@ -148,12 +148,15 @@ test("macOS checkpoints export stable business state without retained workspaces
   const exporter = fs.readFileSync(path.join(TOOL_ROOT, "harness", "macos-export-checkpoint.sh"), "utf8");
   assert.match(adapter, /extractCheckpointSourceArchive\(\{ archivePath: archiveHostPath, targetRoot: stateRoot \}\)/);
   assert.match(adapter, /macos-export-checkpoint\.sh/);
+  assert.match(adapter, /checkpoint-temporary-classification\.json/);
+  assert.match(adapter, /classification\.outbox_clear === true/);
   assert.match(adapter, /excluded_terminal_workspaces: workspaceIds\.length/);
   assert.match(adapter, /temporary_workspaces: 0/);
   assert.match(adapter, /"exec", state\.active_container, "ps", "-ww", "-eo", "args"/);
   assert.doesNotMatch(adapter, /\["top", state\.active_container, "-eo", "args"\]/);
   assert.doesNotMatch(adapter, /state\.active_container}:\/var\/lib\/problem-locator\/\./);
   assert.match(exporter, /for required in data-format\.json state\.json resources jobs/);
+  assert.match(exporter, /macos-classify-checkpoint-temporary\.mjs/);
   assert.match(exporter, /tmp\/workspaces/);
   assert.match(exporter, /-type l -print -quit/);
   assert.match(exporter, /-type f -links \+1 -print -quit/);

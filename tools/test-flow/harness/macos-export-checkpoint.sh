@@ -3,8 +3,13 @@ set -eu
 umask 077
 
 archive=${1:?checkpoint archive path required}
+receipt=${2:?temporary classification receipt path required}
 case "$archive" in
   /tmp/test-flow-stable-state-*.tar) ;;
+  *) exit 64 ;;
+esac
+case "$receipt" in
+  /tmp/test-flow-stable-state-*.json) ;;
   *) exit 64 ;;
 esac
 
@@ -13,6 +18,7 @@ data_root=/var/lib/problem-locator
 staging="${archive}.root"
 test ! -e "$archive"
 test ! -e "$staging"
+test ! -e "$receipt"
 
 published=0
 cleanup() {
@@ -22,6 +28,9 @@ cleanup() {
 trap cleanup EXIT HUP INT TERM
 
 install -d -m 0700 "$staging"
+node /harness/macos-classify-checkpoint-temporary.mjs \
+  --data-root "$data_root" \
+  --output "$receipt"
 for required in data-format.json state.json resources jobs; do
   test -e "$data_root/$required"
   cp -a "$data_root/$required" "$staging/"
@@ -29,15 +38,10 @@ done
 if [ -f "$data_root/state.json.prev" ]; then
   cp -a "$data_root/state.json.prev" "$staging/"
 fi
-for temporary in uploads proposals quarantine state; do
-  test -d "$data_root/tmp/$temporary"
-  test -z "$(find "$data_root/tmp/$temporary" -mindepth 1 -print -quit)"
-done
-
 # Checkpoints contain durable business state only.  The live instance lock and
-# retained per-Job workspaces are deliberately excluded.  A restore starts
-# with the fixed, empty temporary layout and lets the current service rebuild
-# any disposable workspace it needs.
+# retained, independently proven-discardable temporary stages are deliberately
+# excluded.  A restore starts with the fixed, empty temporary layout and lets
+# the current service rebuild any disposable workspace it needs.
 install -d -m 0700 \
   "$staging/tmp" \
   "$staging/tmp/uploads" \

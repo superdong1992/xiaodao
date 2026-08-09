@@ -873,8 +873,23 @@ async function createCheckpointSource(configuration, state, continuation) {
   const stateRoot = path.join(scratchRoot, configuration.stage);
   const archiveHostPath = path.join(scratchRoot, `${configuration.stage}.stable-state.tar`);
   const archiveContainerPath = `/tmp/test-flow-stable-state-${configuration.stage.replaceAll(".", "-")}.tar`;
+  const classificationContainerPath = `/tmp/test-flow-stable-state-${configuration.stage.replaceAll(".", "-")}-classification.json`;
+  const classificationHostPath = path.join(stageRoot, "checkpoint-temporary-classification.json");
   requireCondition(!fs.existsSync(stateRoot) && !fs.existsSync(archiveHostPath), "CHECKPOINT_STAGING_EXISTS");
-  await docker(configuration.dockerContext, ["exec", state.active_container, "sh", "/harness/macos-export-checkpoint.sh", archiveContainerPath], { forward: false });
+  const exportResult = await run("docker", dockerArgs(configuration.dockerContext, [
+    "exec", state.active_container, "sh", "/harness/macos-export-checkpoint.sh", archiveContainerPath, classificationContainerPath,
+  ]), { forward: false });
+  const classificationCopy = await run("docker", dockerArgs(configuration.dockerContext, [
+    "cp", `${state.active_container}:${classificationContainerPath}`, classificationHostPath,
+  ]), { forward: false });
+  const classification = classificationCopy.status === 0 ? readJson(classificationHostPath) : null;
+  if (exportResult.status !== 0) {
+    const code = classification?.status === "FAIL" && /^CHECKPOINT_[A-Z0-9_]+$/.test(classification.code)
+      ? classification.code
+      : "CHECKPOINT_STABLE_EXPORT_FAILED";
+    throw new StageError(code, "ERROR", "HARNESS");
+  }
+  requireCondition(classification?.schema_version === 1 && classification.status === "PASS" && classification.code === null && classification.outbox_clear === true, "CHECKPOINT_TEMPORARY_CLASSIFICATION_RECEIPT_INVALID");
   try {
     await docker(configuration.dockerContext, ["cp", `${state.active_container}:${archiveContainerPath}`, archiveHostPath], { forward: false });
     const extraction = extractCheckpointSourceArchive({ archivePath: archiveHostPath, targetRoot: stateRoot });
@@ -887,10 +902,13 @@ async function createCheckpointSource(configuration, state, continuation) {
       portable_digest: extraction.portable_digest,
       excluded_instance_lock: true,
       excluded_terminal_workspaces: workspaceIds.length,
+      excluded_completed_uploads: classification.excluded_completed_uploads,
+      excluded_processed_proposal_stages: classification.excluded_processed_proposal_stages,
+      outbox_clear: true,
       temporary_layout_empty: true,
     });
   } finally {
-    try { await docker(configuration.dockerContext, ["exec", state.active_container, "rm", "-f", archiveContainerPath], { forward: false }); } catch {}
+    try { await docker(configuration.dockerContext, ["exec", state.active_container, "rm", "-f", archiveContainerPath, classificationContainerPath], { forward: false }); } catch {}
     try { fs.rmSync(archiveHostPath, { force: true }); } catch {}
   }
   writeNew(checkpointPath, {

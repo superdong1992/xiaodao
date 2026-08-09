@@ -99,6 +99,8 @@ The adapter is an executable invoked once per external Stage. It receives scalar
 
 Every created container or volume must be appended to the registry with the exact run label before use. A checkpoint source is written only after the service is stopped and state is quiescent. Its JSON contains `schema_version: 1`, an absolute `state_root`, a typed scalar/array-only `continuation`, and a quiescence receipt proving zero running/queued jobs, zero active workers/workspaces, and a passing state validation.
 
+Checkpoint export separately classifies retained temporary state before omitting it. A completed upload stage is discardable only when its canonical marker matches a `READY` Attachment. A proposal stage is discardable only when its marker matches a saved Outcome, its owner Job is terminal, and that Outcome already has an authoritative processing record. Any unprocessed durable outbox, incomplete or unknown stage, non-empty quarantine or state-temporary area, filesystem link, or unexpected layout rejects the checkpoint. The classifier writes a sanitized receipt so this failure is distinguishable from Docker or archive-copy failures.
+
 Route→Upload, Upload→Diagnose, automatic Diagnose+Review→Publish/Restart, and Publish/Restart→end are the only checkpoint boundaries. Diagnose and its automatically dispatched Review are one indivisible reuse segment. Restore always verifies and rescans the old seal, extracts into a unique empty root, then requires the adapter to import it into a new empty server volume. Release ignores all business checkpoints and starts from GENESIS.
 
 ## Events and timeouts
