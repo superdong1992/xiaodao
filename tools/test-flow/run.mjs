@@ -33,6 +33,10 @@ Environment/dependency inputs:
   --base <git-commit>
   --logparse-source <absolute-path>
   --mcp-source <absolute-path>
+  --claude-entry <absolute-cli.js> Release/real required; never falls back to global claude
+  --claude-settings <absolute-path> Source for env-only temporary settings; Hooks are never copied
+  --docker-context colima          Required for macOS Release
+  --cache-root <absolute-path>     Default: <repo>/.tmp/test-flow-cache
   --cross-job-adapter <absolute-executable>
   --rollout-parity-spec <absolute-json>
 
@@ -59,6 +63,10 @@ function parseArguments(argv) {
     ["--base", "base"],
     ["--logparse-source", "logparseSource"],
     ["--mcp-source", "mcpSource"],
+    ["--claude-entry", "claudeEntry"],
+    ["--claude-settings", "claudeSettings"],
+    ["--docker-context", "dockerContext"],
+    ["--cache-root", "cacheRoot"],
     ["--cross-job-adapter", "crossJobAdapter"],
     ["--rollout-parity-spec", "rolloutParitySpec"],
   ]);
@@ -86,10 +94,11 @@ async function main() {
   }
   const repoRoot = path.resolve(options.repoRoot ?? DEFAULT_REPO_ROOT);
   delete options.repoRoot;
-  if (options.logparseSource) options.logparseSource = path.resolve(options.logparseSource);
-  if (options.mcpSource) options.mcpSource = path.resolve(options.mcpSource);
-  if (options.crossJobAdapter) options.crossJobAdapter = path.resolve(options.crossJobAdapter);
-  if (options.rolloutParitySpec) options.rolloutParitySpec = path.resolve(options.rolloutParitySpec);
+  for (const name of ["logparseSource", "mcpSource", "claudeEntry", "claudeSettings", "cacheRoot", "crossJobAdapter", "rolloutParitySpec"]) {
+    if (!options[name]) continue;
+    if (!path.isAbsolute(options[name])) throw new Error(`ARGUMENT_ABSOLUTE_REQUIRED:${name}`);
+    options[name] = path.resolve(options[name]);
+  }
   const result = await runFlow(repoRoot, options);
   if (options.planOnly) {
     process.stdout.write(`${JSON.stringify(result.plan, null, 2)}\n`);
@@ -100,6 +109,7 @@ async function main() {
       functional_status: result.verdict.functional_status,
       performance_status: result.verdict.performance_status,
       operation_status: result.verdict.operation_status,
+      verification_status: result.verdict.verification_status,
       exit_code: result.verdict.exit_code,
       attempt_root: result.attemptRoot,
     }, null, 2)}\n`);

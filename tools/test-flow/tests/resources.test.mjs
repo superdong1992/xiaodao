@@ -98,3 +98,51 @@ test("delete policy proves every exact registered resource absent", async () => 
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("delete policy removes containers before a volume even when the volume was registered first", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "test-flow-resources-"));
+  try {
+    const runId = "run-resource-volume-first";
+    const docker = fakeDocker(runId);
+    const calls = [];
+    const original = docker.runCommand;
+    docker.runCommand = (command, args) => {
+      calls.push([...args]);
+      return original(command, args);
+    };
+    const value = new ResourceRegistry(root, runId, { commandAvailable: () => true, runCommand: docker.runCommand });
+    const label = `problem-locator.test-flow.run=${runId}`;
+    value.register("volume", "flow-volume", label);
+    value.register("container", "flow-container", label);
+    const receipt = await value.apply({ preserve: false });
+    assert.equal(receipt.status, "PASS");
+    const containerRemove = calls.findIndex((args) => args[0] === "container" && args[1] === "rm");
+    const volumeRemove = calls.findIndex((args) => args[0] === "volume" && args[1] === "rm");
+    assert.ok(containerRemove >= 0 && volumeRemove > containerRemove);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("every Docker resource operation is bound to the configured context", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "test-flow-resources-"));
+  try {
+    const runId = "run-resource-context";
+    const calls = [];
+    const value = new ResourceRegistry(root, runId, {
+      commandAvailable: () => true,
+      dockerContext: "colima",
+      runCommand: (_command, args) => {
+        calls.push([...args]);
+        return { status: 1, stdout: "", stderr: "absent" };
+      },
+    });
+    value.register("container", "flow-container", `problem-locator.test-flow.run=${runId}`);
+    const receipt = await value.apply({ preserve: true });
+    assert.equal(receipt.status, "PASS");
+    assert.ok(calls.length > 0);
+    assert.ok(calls.every((args) => args[0] === "--context" && args[1] === "colima"));
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

@@ -11,6 +11,7 @@ export class ResourceRegistry {
     {
       commandAvailable = commandExists,
       runCommand = runSync,
+      dockerContext = null,
     } = {},
   ) {
     this.attemptRoot = attemptRoot;
@@ -19,6 +20,14 @@ export class ResourceRegistry {
     this.resources = [];
     this.commandAvailable = commandAvailable;
     this.runCommand = runCommand;
+    this.dockerContext = dockerContext;
+  }
+
+  docker(args) {
+    return this.runCommand("docker", [
+      ...(this.dockerContext ? ["--context", this.dockerContext] : []),
+      ...args,
+    ]);
   }
 
   register(kind, name, label) {
@@ -51,9 +60,13 @@ export class ResourceRegistry {
     const inspected = [];
     const remaining = [];
     let failed = false;
-    for (const resource of this.resources) {
+    const orderedResources = [
+      ...this.resources.filter((resource) => resource.kind === "container"),
+      ...this.resources.filter((resource) => resource.kind === "volume"),
+    ];
+    for (const resource of orderedResources) {
       const kindCommand = resource.kind === "container" ? "container" : "volume";
-      const inspect = this.runCommand("docker", [kindCommand, "inspect", resource.name]);
+      const inspect = this.docker([kindCommand, "inspect", resource.name]);
       if (inspect.status !== 0) {
         inspected.push({ kind: resource.kind, name: resource.name, before: "ABSENT", action: "NONE", after: "ABSENT" });
         continue;
@@ -70,20 +83,21 @@ export class ResourceRegistry {
       }
       let action = "NONE";
       if (resource.kind === "container") {
-        this.runCommand("docker", ["container", "stop", "--time", "10", resource.name]);
+        const stop = this.docker(["container", "stop", "--time", "10", resource.name]);
+        if (stop.status !== 0) failed = true;
         action = preserve ? "STOP" : "STOP_DELETE";
         if (!preserve) {
-          const remove = this.runCommand("docker", ["container", "rm", resource.name]);
+          const remove = this.docker(["container", "rm", resource.name]);
           if (remove.status !== 0) failed = true;
         }
       } else if (!preserve) {
         action = "DELETE";
-        const remove = this.runCommand("docker", ["volume", "rm", resource.name]);
+        const remove = this.docker(["volume", "rm", resource.name]);
         if (remove.status !== 0) failed = true;
       } else {
         action = "PRESERVE";
       }
-      const after = this.runCommand("docker", [kindCommand, "inspect", resource.name]);
+      const after = this.docker([kindCommand, "inspect", resource.name]);
       const afterStatus = after.status === 0 ? "PRESENT" : "ABSENT";
       let afterState = null;
       if (afterStatus === "PRESENT") {

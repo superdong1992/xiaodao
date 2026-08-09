@@ -249,7 +249,6 @@ def test_real_host_sends_flat_inputs_to_the_linux_service() -> None:
     assert completed and completed[-1].get("ok") is True
 
     version = _required_environment(REAL_HOST_CLAUDE_VERSION)
-    parts = version.removesuffix(" (Claude Code)").split(".")
-    assert len(parts) == 3 and all(part.isdigit() for part in parts)
+    assert version == "2.1.89 (Claude Code)"
     if os.environ.get(RELEASE_REQUIRED) == "1":
         _assert_no_proxy_covers_remote(_required_environment(REMOTE_URL))

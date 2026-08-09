@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -36,12 +38,32 @@ test("Dev real proof fails admission without explicit opt-in and reason", () => 
   assert.ok(codes.includes("DEV_REAL_REASON_REQUIRED"));
 });
 
-test("Release plan is blocked by dirty source before any resource or model call", () => {
+test("Release plan blocks missing explicit formal inputs before any resource or model call", () => {
   const built = buildRunPlan(REPO_ROOT, { track: "release", planOnly: true });
   assert.equal(built.plan.admission.status, "BLOCKED");
-  assert.ok(built.plan.admission.blockers.some((blocker) => blocker.code === "RELEASE_SOURCE_DIRTY"));
+  const codes = built.plan.admission.blockers.map((blocker) => blocker.code);
+  assert.ok(codes.includes("CLAUDE_ENTRY_REQUIRED"));
+  assert.ok(codes.includes("CLAUDE_SETTINGS_REQUIRED"));
   assert.equal(built.plan.resume, "fresh");
   assert.ok(built.plan.stages.some((stage) => stage.id === "journey.cross-job.publish-restart"));
+  if (built.plan.client === "macos") {
+    assert.equal(built.plan.budget_advisory.estimated_tokens, 35000);
+    assert.equal(built.plan.budget_advisory.estimated_cost_usd, 18);
+  }
+});
+
+test("Release never treats a global-style Claude 2.1.201 executable as cli.js", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "test-flow-global-claude-"));
+  try {
+    const globalClaude = path.join(root, "claude");
+    fs.writeFileSync(globalClaude, "#!/bin/sh\nprintf '%s\\n' '2.1.201 (Claude Code)'\n", { encoding: "utf8", mode: 0o700 });
+    const built = buildRunPlan(REPO_ROOT, { track: "release", client: "macos", claudeEntry: globalClaude, planOnly: true });
+    const codes = built.plan.admission.blockers.map((blocker) => blocker.code);
+    assert.ok(codes.includes("CLAUDE_DISTRIBUTION_INVALID"));
+    assert.equal(built.plan.release_inputs.claude.status, "INVALID");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("rollout parity cannot silently pass without an executable pair specification", () => {

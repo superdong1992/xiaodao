@@ -1,50 +1,99 @@
 import fs from "node:fs";
 import path from "node:path";
-import { commandExists, runExecutableSync, runSync } from "../lib/util.mjs";
+import {
+  RELEASE_CLAUDE_VERSION_OUTPUT,
+  RELEASE_DOCKER_ARCH,
+  RELEASE_DOCKER_CONTEXT,
+  RELEASE_DOCKER_OS,
+} from "../lib/release-inputs.mjs";
+import { runSync } from "../lib/util.mjs";
 
 function argument(name) {
   const index = process.argv.indexOf(name);
   return index === -1 ? null : process.argv[index + 1];
 }
 
-const outputRoot = path.resolve(argument("--output-root") ?? ".");
-fs.mkdirSync(outputRoot, { recursive: true, mode: 0o700 });
+function blocked(code, message) {
+  process.stderr.write(`${code}: ${message}\n`);
+  process.exit(2);
+}
 
-if (!commandExists("docker")) {
-  process.stderr.write("SERVER_CAPABILITY_BLOCKED: Docker is unavailable\n");
-  process.exit(2);
-}
-const server = runSync("docker", ["version", "--format", "{{json .Server}}"]);
-if (server.status !== 0) {
-  process.stderr.write(`SERVER_CAPABILITY_BLOCKED: Docker server is unavailable: ${server.stderr}\n`);
-  process.exit(2);
-}
-let metadata;
-try { metadata = JSON.parse(server.stdout); } catch {
-  process.stderr.write("SERVER_CAPABILITY_ERROR: Docker returned invalid server metadata\n");
+function failed(code, message) {
+  process.stderr.write(`${code}: ${message}\n`);
   process.exit(3);
 }
-if (String(metadata.Os ?? metadata.OsType ?? "").toLowerCase() !== "linux") {
-  process.stderr.write("SERVER_CAPABILITY_BLOCKED: the only supported server platform is Linux\n");
-  process.exit(2);
+
+function docker(context, args) {
+  return runSync("docker", ["--context", context, ...args]);
 }
 
-// The cheap capability command is deliberately a fixed adapter path, never a
-// shell string. A deployment can provide the executable through the manifest
-// after freezing it into the server identity.
-const probe = process.env.TEST_FLOW_SERVER_MODEL_PROBE;
-if (!probe) {
-  process.stderr.write("SERVER_CAPABILITY_BLOCKED: TEST_FLOW_SERVER_MODEL_PROBE is required for the fresh Linux model probe\n");
-  process.exit(2);
+const outputRoot = path.resolve(argument("--output-root") ?? ".");
+const context = argument("--docker-context");
+const image = argument("--image");
+const containerName = argument("--container-name");
+const resourceLabel = argument("--resource-label");
+fs.mkdirSync(outputRoot, { recursive: true, mode: 0o700 });
+
+if (context !== RELEASE_DOCKER_CONTEXT) blocked("SERVER_CAPABILITY_CONTEXT", "the macOS Release server is bound to Docker context colima");
+if (!image || !containerName || !/^problem-locator\.test-flow\.run=run-[A-Za-z0-9-]+$/.test(resourceLabel ?? "")) {
+  failed("SERVER_CAPABILITY_ARGUMENTS", "image, registered container name, and exact run label are required");
 }
-const absoluteProbe = path.resolve(probe);
-if (!fs.existsSync(absoluteProbe) || !fs.statSync(absoluteProbe).isFile()) {
-  process.stderr.write("SERVER_CAPABILITY_BLOCKED: configured Linux model probe is not a file\n");
-  process.exit(2);
+
+const server = docker(context, ["version", "--format", "{{json .Server}}"]);
+if (server.status !== 0) blocked("SERVER_CAPABILITY_DOCKER", "Docker server is unavailable");
+let metadata;
+try { metadata = JSON.parse(server.stdout); } catch { failed("SERVER_CAPABILITY_METADATA", "Docker returned invalid server metadata"); }
+const serverOs = String(metadata.Os ?? metadata.OsType ?? "").toLowerCase();
+const serverArch = String(metadata.Arch ?? metadata.Architecture ?? "").toLowerCase();
+if (serverOs !== RELEASE_DOCKER_OS) blocked("SERVER_CAPABILITY_OS", "the only supported server platform is Linux");
+if (!["amd64", "x86_64"].includes(serverArch)) blocked("SERVER_CAPABILITY_ARCH", "the Release server must be x86_64/amd64");
+
+const imageInspect = docker(context, ["image", "inspect", image]);
+if (imageInspect.status !== 0) blocked("SERVER_CAPABILITY_IMAGE", "the explicitly prepared offline Release image is absent");
+let imageMetadata;
+try { imageMetadata = JSON.parse(imageInspect.stdout)[0]; } catch { failed("SERVER_CAPABILITY_IMAGE_METADATA", "invalid image metadata"); }
+if (imageMetadata.Os !== RELEASE_DOCKER_OS || imageMetadata.Architecture !== RELEASE_DOCKER_ARCH) {
+  blocked("SERVER_CAPABILITY_IMAGE_PLATFORM", "the cached Release image is not linux/amd64");
 }
-const result = runExecutableSync(absoluteProbe, ["--output-root", outputRoot]);
-process.stdout.write(result.stdout);
-process.stderr.write(result.stderr);
-if (result.status !== 0) process.exit(result.status ?? 3);
-fs.writeFileSync(path.join(outputRoot, "server-linux-capability-result.json"), `${JSON.stringify({ schema_version: 1, status: "PASS", os: "linux", docker_version: metadata.Version ?? null, model_probe: "PASS" })}\n`, { encoding: "utf8", mode: 0o600, flag: "wx" });
+
+const run = docker(context, [
+  "run",
+  "--name", containerName,
+  "--label", resourceLabel,
+  "--pull", "never",
+  "--network", "none",
+  "--platform", "linux/amd64",
+  image,
+  "sh", "-eu", "-c", "claude --version; node -p process.arch",
+]);
+process.stdout.write(run.stdout);
+process.stderr.write(run.stderr);
+if (run.status !== 0) blocked("SERVER_CAPABILITY_RUNTIME", "the offline Linux CLI probe failed");
+const lines = run.stdout.split(/\r?\n/).filter(Boolean);
+if (lines[0] !== RELEASE_CLAUDE_VERSION_OUTPUT || lines[1] !== "x64") {
+  blocked("SERVER_CAPABILITY_CLAUDE", "Linux Agent CLI must be official npm 2.1.89 on x64 Node");
+}
+const created = docker(context, ["container", "inspect", containerName]);
+if (created.status !== 0) failed("SERVER_CAPABILITY_CONTAINER_RECEIPT", "registered probe container is not inspectable");
+let createdMetadata;
+try { createdMetadata = JSON.parse(created.stdout)[0]; } catch { failed("SERVER_CAPABILITY_CONTAINER_METADATA", "invalid probe container metadata"); }
+const [labelName, labelValue] = resourceLabel.split("=", 2);
+if (createdMetadata.Config?.Labels?.[labelName] !== labelValue || createdMetadata.State?.Running !== false) {
+  failed("SERVER_CAPABILITY_CONTAINER_IDENTITY", "probe container label or stopped state differs from the registry");
+}
+
+fs.writeFileSync(path.join(outputRoot, "server-linux-capability-result.json"), `${JSON.stringify({
+  schema_version: 1,
+  status: "PASS",
+  docker_context: context,
+  os: RELEASE_DOCKER_OS,
+  architecture: "x86_64",
+  docker_version: metadata.Version ?? null,
+  image,
+  image_id: imageMetadata.Id,
+  claude_version: RELEASE_CLAUDE_VERSION_OUTPUT,
+  node_architecture: "x64",
+  network: "none",
+  pull_policy: "never",
+})}\n`, { encoding: "utf8", mode: 0o600, flag: "wx" });
 process.stdout.write("TEST_FLOW_PROGRESS request.completed\n");

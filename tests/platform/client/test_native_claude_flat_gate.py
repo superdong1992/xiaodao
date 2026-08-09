@@ -12,6 +12,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[3]
 RELEASE_REQUIRED = "PROBLEM_LOCATOR_RELEASE_GATES_REQUIRED"
+RELEASE_CLAUDE_ENTRY = "PROBLEM_LOCATOR_RELEASE_CLAUDE_ENTRY"
 
 
 @pytest.mark.skipif(
@@ -22,11 +23,12 @@ def test_native_claude_host_sends_flat_inputs_without_hooks(
     tmp_path: Path,
 ) -> None:
     node = shutil.which("node.exe") or shutil.which("node")
-    claude = shutil.which("claude.exe") or shutil.which("claude")
-    if not node or not claude:
+    claude_value = os.environ.get(RELEASE_CLAUDE_ENTRY)
+    claude = Path(claude_value) if claude_value else None
+    if not node or claude is None or not claude.is_absolute() or not claude.is_file():
         if os.environ.get(RELEASE_REQUIRED) == "1":
-            pytest.fail("the native Claude Code Host and Node.js are required")
-        pytest.skip("the native Claude Code Host is unavailable")
+            pytest.fail("the explicit official npm Claude 2.1.89 cli.js and Node.js are required")
+        pytest.skip("the explicit official npm Claude 2.1.89 cli.js is unavailable")
 
     output = tmp_path / "host-capability"
     completed = subprocess.run(
@@ -37,6 +39,8 @@ def test_native_claude_host_sends_flat_inputs_without_hooks(
             os.fspath(ROOT),
             "--output-root",
             os.fspath(output),
+            "--claude-entry",
+            os.fspath(claude),
         ],
         cwd=ROOT,
         check=False,
@@ -53,3 +57,4 @@ def test_native_claude_host_sends_flat_inputs_without_hooks(
     assert result["flat_schema"] is True
     assert result["flat_call"] is True
     assert result["client_dfx_absent"] is True
+    assert result["claude_version"] == "2.1.89 (Claude Code)"

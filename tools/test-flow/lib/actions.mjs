@@ -3,12 +3,15 @@ import path from "node:path";
 import {
   ensureDirectory,
   removeTreeWritable,
-  resolveCommand,
   resolvePythonTestRuntime,
   runSync,
   writeJsonSync,
 } from "./util.mjs";
 import { runProcess } from "./process.mjs";
+import {
+  RELEASE_BASE_IMAGE,
+  materializeClaudeSettings,
+} from "./release-inputs.mjs";
 
 function pythonRuntime(repoRoot) {
   return resolvePythonTestRuntime(repoRoot);
@@ -158,12 +161,35 @@ async function pytestAction(context, stage, selectors, { extra = [], env = {}, r
   return { ...result, failure_domain: null };
 }
 
-function agentCommand() {
-  if (process.env.TEST_FLOW_AGENT_COMMAND) return process.env.TEST_FLOW_AGENT_COMMAND;
-  const executable = resolveCommand("claude") ?? resolveCommand("claude.exe");
-  if (!executable) return null;
-  const quoted = /\s/.test(executable) ? `"${executable.replaceAll('"', '\\"')}"` : executable;
-  return `${quoted} -p --no-session-persistence --dangerously-skip-permissions --tools Read,Write`;
+function quoteShell(value) {
+  return `'${String(value).replaceAll("'", `'"'"'`)}'`;
+}
+
+function preparedClaudeRuntime(context) {
+  const entry = context.options.claudeEntry;
+  const sourceSettings = context.options.claudeSettings;
+  if (!entry || !path.isAbsolute(entry) || !fs.existsSync(entry)) return null;
+  if (!sourceSettings || !path.isAbsolute(sourceSettings) || !fs.existsSync(sourceSettings)) return null;
+  const root = path.join(context.attemptRoot, "scratch", "claude-runtime");
+  const settings = path.join(root, "settings.json");
+  const config = path.join(root, "config");
+  ensureDirectory(config);
+  if (!fs.existsSync(settings)) materializeClaudeSettings(sourceSettings, settings);
+  return {
+    entry,
+    settings,
+    config,
+    environment: {
+      CLAUDE_CONFIG_DIR: config,
+      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
+    },
+  };
+}
+
+function agentCommand(context) {
+  const runtime = preparedClaudeRuntime(context);
+  if (!runtime) return null;
+  return `${quoteShell(process.execPath)} ${quoteShell(runtime.entry)} -p --no-session-persistence --dangerously-skip-permissions --setting-sources user --settings ${quoteShell(runtime.settings)} --tools Read,Write`;
 }
 
 async function hostCapability(context, stage) {
@@ -174,7 +200,12 @@ async function hostCapability(context, stage) {
     attemptRoot: context.attemptRoot,
     stage,
     command: process.execPath,
-    args: [path.join(context.repoRoot, "tools", "test-flow", "adapters", "host-capability.mjs"), "--repo-root", context.repoRoot, "--output-root", outputRoot],
+    args: [
+      path.join(context.repoRoot, "tools", "test-flow", "adapters", "host-capability.mjs"),
+      "--repo-root", context.repoRoot,
+      "--output-root", outputRoot,
+      "--claude-entry", context.options.claudeEntry,
+    ],
     cwd: context.repoRoot,
     hardTimeoutSeconds: stage.timeout_seconds,
     noProgressSeconds: null,
@@ -189,12 +220,23 @@ async function hostCapability(context, stage) {
 async function serverLinuxCapability(context, stage) {
   const outputRoot = path.join(context.attemptRoot, "payload", "stages", stage.id);
   ensureDirectory(outputRoot);
+  const runId = path.basename(context.attemptRoot);
+  const containerName = `pltf-cap-${runId.slice(-17)}`.replace(/[^a-zA-Z0-9_.-]/g, "-");
+  const resourceLabel = `problem-locator.test-flow.run=${runId}`;
+  context.resources.register("container", containerName, resourceLabel);
   const result = await runProcess({
     repoRoot: context.repoRoot,
     attemptRoot: context.attemptRoot,
     stage,
     command: process.execPath,
-    args: [path.join(context.repoRoot, "tools", "test-flow", "adapters", "server-linux-capability.mjs"), "--output-root", outputRoot],
+    args: [
+      path.join(context.repoRoot, "tools", "test-flow", "adapters", "server-linux-capability.mjs"),
+      "--output-root", outputRoot,
+      "--docker-context", context.options.dockerContext,
+      "--image", RELEASE_BASE_IMAGE,
+      "--container-name", containerName,
+      "--resource-label", resourceLabel,
+    ],
     cwd: context.repoRoot,
     hardTimeoutSeconds: stage.timeout_seconds,
     noProgressSeconds: context.policies.real_no_progress_seconds,
@@ -208,17 +250,19 @@ async function serverLinuxCapability(context, stage) {
 }
 
 async function isolatedAgent(context, stage, selector, switchName) {
-  const command = agentCommand();
+  const command = agentCommand(context);
   if (!command) return { status: "BLOCKED", failure_domain: "INFRA", code: "CLAUDE_COMMAND_MISSING", elapsed_seconds: 0 };
+  const runtime = preparedClaudeRuntime(context);
   return pytestAction(context, stage, [selector], {
     real: true,
-    env: { [switchName]: "1", S08_REAL_AGENT_COMMAND: command, S08_REAL_ROUTE_AGENT_COMMAND: command, S08_REAL_DIAGNOSE_AGENT_COMMAND: command, S08_REAL_REVIEW_AGENT_COMMAND: command },
+    env: { ...runtime.environment, [switchName]: "1", S08_REAL_AGENT_COMMAND: command, S08_REAL_ROUTE_AGENT_COMMAND: command, S08_REAL_DIAGNOSE_AGENT_COMMAND: command, S08_REAL_REVIEW_AGENT_COMMAND: command },
   });
 }
 
 async function realDiagnose(context, stage) {
-  const command = agentCommand();
+  const command = agentCommand(context);
   if (!command) return { status: "BLOCKED", failure_domain: "INFRA", code: "CLAUDE_COMMAND_MISSING", elapsed_seconds: 0 };
+  const runtime = preparedClaudeRuntime(context);
   const skillPath = path.join(context.repoRoot, ".claude", "skills", "diagnose-service-takeover");
   if (!fs.existsSync(skillPath)) return { status: "BLOCKED", failure_domain: "INFRA", code: "DIAGNOSE_SKILL_MISSING", elapsed_seconds: 0 };
   return pytestAction(context, stage, [
@@ -227,6 +271,7 @@ async function realDiagnose(context, stage) {
   ], {
     real: true,
     env: {
+      ...runtime.environment,
       S08_REAL_DIAGNOSE_AGENT_V3_MATRIX_GATE: "1",
       S08_REAL_FIRST_LOG_AGENT_GATE: "1",
       S08_REAL_DIAGNOSE_AGENT_COMMAND: command,
@@ -255,8 +300,18 @@ async function crossJob(context, stage) {
   if (!path.isAbsolute(adapter) || !fs.existsSync(adapter)) return { status: "BLOCKED", failure_domain: "INFRA", code: "CROSS_JOB_ADAPTER_INVALID", elapsed_seconds: 0 };
   const adapterArguments = [
     "--stage", stage.id,
+    "--repo-root", context.repoRoot,
     "--attempt-root", context.attemptRoot,
     "--client", context.client,
+    "--track", context.track,
+    "--source-commit", context.sourceHead,
+    "--claude-entry", context.options.claudeEntry,
+    "--claude-settings", context.options.claudeSettings,
+    "--docker-context", context.options.dockerContext,
+    "--cache-root", context.options.cacheRoot ?? path.join(context.repoRoot, ".tmp", "test-flow-cache"),
+    "--logparse-source", context.options.logparseSource,
+    "--mcp-source", context.options.mcpSource,
+    "--base-image", RELEASE_BASE_IMAGE,
     "--resource-registry", context.resources.filePath,
     "--resource-label", `problem-locator.test-flow.run=${path.basename(context.attemptRoot)}`,
   ];
@@ -275,22 +330,63 @@ async function crossJob(context, stage) {
       path.join(context.attemptRoot, "payload", "stages", checkpointStage, "checkpoint-source.json"),
     );
   }
+  const nodeAdapter = adapter.endsWith(".mjs");
   const result = await runProcess({
     repoRoot: context.repoRoot,
     attemptRoot: context.attemptRoot,
     stage,
-    command: adapter,
-    args: adapterArguments,
+    command: nodeAdapter ? process.execPath : adapter,
+    args: nodeAdapter ? [adapter, ...adapterArguments] : adapterArguments,
     cwd: context.repoRoot,
     hardTimeoutSeconds: stage.timeout_seconds,
     noProgressSeconds: context.policies.real_no_progress_seconds,
     rawLogLimitBytes: context.policies.raw_log_file_limit_bytes,
     eventWriter: context.eventWriter,
   });
+  const receiptPath = path.join(context.attemptRoot, "payload", "stages", stage.id, "adapter-result.json");
+  if (!fs.existsSync(receiptPath)) {
+    if (result.status === "ERROR") return { ...result, failure_domain: "HARNESS", code: result.termination?.trigger ?? "CROSS_JOB_EVIDENCE_ERROR" };
+    if (result.status === "INCONCLUSIVE") return { ...result, failure_domain: "EXTERNAL", code: result.termination?.trigger ?? "EXTERNAL_INCONCLUSIVE" };
+    return { ...result, status: "ERROR", failure_domain: "HARNESS", code: "CROSS_JOB_RECEIPT_MISSING" };
+  }
+  let receipt;
+  try { receipt = JSON.parse(fs.readFileSync(receiptPath, "utf8")); } catch {
+    return { ...result, status: "ERROR", failure_domain: "HARNESS", code: "CROSS_JOB_RECEIPT_INVALID" };
+  }
+  const receiptStatuses = new Set(["PASS", "FAIL", "INCONCLUSIVE", "BLOCKED", "ERROR"]);
+  if (receipt.schema_version !== 1 || !receiptStatuses.has(receipt.status) || receipt.stage_id !== stage.id) {
+    return { ...result, status: "ERROR", failure_domain: "HARNESS", code: "CROSS_JOB_RECEIPT_INVALID" };
+  }
   if (result.status === "ERROR") return { ...result, failure_domain: "HARNESS", code: result.termination?.trigger ?? "CROSS_JOB_EVIDENCE_ERROR" };
   if (result.status === "INCONCLUSIVE") return { ...result, failure_domain: "EXTERNAL", code: result.termination?.trigger ?? "EXTERNAL_INCONCLUSIVE" };
-  if (result.status !== "PASS") return { ...result, failure_domain: "PRODUCT", code: "CROSS_JOB_STAGE_FAILED" };
-  return result;
+  if (receipt.status !== "PASS") {
+    return {
+      ...result,
+      status: receipt.status,
+      failure_domain: receipt.failure_domain ?? "HARNESS",
+      code: receipt.code ?? "CROSS_JOB_STAGE_FAILED",
+      usage: receipt.usage ?? result.usage,
+      adapter_receipt: {
+        stage_id: receipt.stage_id,
+        client_tool_calls: receipt.client_tool_calls ?? 0,
+        server_tool_calls: receipt.server_tool_calls ?? 0,
+        checkpoint_ready: receipt.checkpoint_ready ?? false,
+      },
+    };
+  }
+  if (result.status !== "PASS") return { ...result, status: "ERROR", failure_domain: "HARNESS", code: "CROSS_JOB_PROCESS_RECEIPT_MISMATCH" };
+  return {
+    ...result,
+    usage: receipt.usage ?? result.usage,
+    fresh_admission: receipt.fresh_admission ?? null,
+    adapter_receipt: {
+      stage_id: receipt.stage_id,
+      client_tool_calls: receipt.client_tool_calls ?? 0,
+      server_tool_calls: receipt.server_tool_calls ?? 0,
+      checkpoint_ready: receipt.checkpoint_ready ?? false,
+      restart_verified: receipt.restart_verified ?? false,
+    },
+  };
 }
 
 async function rolloutParity(context, stage) {

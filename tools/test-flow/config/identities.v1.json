@@ -12,17 +12,18 @@
       "include_environment": true
     },
     "client": {
-      "paths": [".claude/skills", "tools/test-flow/harness/windows-journey-lib.ps1", "tools/test-flow/harness/run-windows-journey.ps1"],
-      "proof_paths": ["tests/platform/client", "tools/test-flow/adapters/host-capability.mjs"],
+      "paths": [".claude/skills/problem-locator-client", "tools/test-flow/lib/release-inputs.mjs"],
+      "proof_paths": ["tests/platform/client", "tools/test-flow/adapters/host-capability.mjs", "tools/test-flow/lib/release-inputs.mjs"],
       "include_client_binary": true,
-      "include_model_context": true
+      "include_model_context": true,
+      "include_release_runtime": true
     },
     "server": {
-      "paths": ["src", "tools/test-flow/Dockerfile", "tools/test-flow/harness/start_service_supervisor.sh", "tools/test-flow/harness/relay_service_journey.py"],
+      "paths": ["src", "tools/test-flow/Dockerfile", "tools/test-flow/harness/start_service_supervisor.sh", "tools/test-flow/harness/relay_service_journey.py", "tools/test-flow/harness/macos-service-supervisor.sh", "tools/test-flow/harness/macos-initialize-container.sh"],
       "proof_paths": ["tests/platform/server_linux", "tools/test-flow/adapters/server-linux-capability.mjs"],
-      "external_trees": ["server_model_probe"],
       "include_model_context": true,
-      "include_environment": true
+      "include_environment": true,
+      "include_release_runtime": true
     },
     "logparse": {
       "paths": ["src/problem_locator/integrations/logparse", "tools/test-flow/harness/gate_real_logparse.sh"],
@@ -51,11 +52,12 @@
       "include_model_context": true
     },
     "journey": {
-      "paths": ["src", "tests/fixtures", "tools/test-flow/harness", ".claude/skills"],
+      "paths": ["src", "tests/fixtures", "tools/test-flow/harness", "tools/test-flow/adapters/macos-linux-release.mjs", ".claude/skills"],
       "external_trees": ["logparse", "mcp", "cross_job_adapter"],
       "include_client_binary": true,
       "include_model_context": true,
-      "include_environment": true
+      "include_environment": true,
+      "include_release_runtime": true
     },
     "proof": {
       "paths": ["tools/test-flow", "tests"],

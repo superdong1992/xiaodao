@@ -3,7 +3,12 @@ import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { resolveCommand, runExecutableSync } from "../lib/util.mjs";
+import {
+  RELEASE_CLAUDE_CLI_SHA256,
+  RELEASE_CLAUDE_VERSION,
+  RELEASE_CLAUDE_VERSION_OUTPUT,
+} from "../lib/release-inputs.mjs";
+import { runSync, sha256File } from "../lib/util.mjs";
 
 const ADAPTER_ROOT = path.dirname(fileURLToPath(import.meta.url));
 
@@ -31,23 +36,21 @@ async function waitFor(filePath, child, timeoutMs) {
   throw new Error("probe server readiness timeout");
 }
 
-function spawnClaude(executable, args, options) {
-  if (process.platform === "win32" && /\.(?:cmd|bat)$/i.test(executable)) {
-    return spawn(process.env.ComSpec || "cmd.exe", ["/d", "/s", "/c", executable, ...args], options);
-  }
-  return spawn(executable, args, options);
-}
-
 async function main() {
   const repoRoot = path.resolve(argument("--repo-root") ?? path.join(ADAPTER_ROOT, "..", "..", ".."));
   const outputRoot = path.resolve(argument("--output-root") ?? fs.mkdtempSync(path.join(os.tmpdir(), "test-flow-host-probe-")));
   fs.mkdirSync(outputRoot, { recursive: true, mode: 0o700 });
-  const claude = process.platform === "win32"
-    ? resolveCommand("claude.exe") ?? resolveCommand("claude")
-    : resolveCommand("claude") ?? resolveCommand("claude.exe");
-  if (!claude) throw new Error("Claude Code executable is unavailable");
-  const version = runExecutableSync(claude, ["--version"]);
-  if (version.status !== 0 || !/^\d+\.\d+\.\d+(?:\s+\(Claude Code\))?/.test(version.stdout.trim())) {
+  const claude = argument("--claude-entry");
+  if (!claude || !path.isAbsolute(claude) || path.basename(claude) !== "cli.js" || !fs.existsSync(claude) || !fs.statSync(claude).isFile()) {
+    throw new Error("--claude-entry must identify an existing absolute official npm cli.js");
+  }
+  if (sha256File(claude) !== RELEASE_CLAUDE_CLI_SHA256) throw new Error("Claude cli.js SHA-256 is not the frozen 2.1.89 baseline");
+  const packageManifest = JSON.parse(fs.readFileSync(path.join(path.dirname(claude), "package.json"), "utf8"));
+  if (packageManifest.name !== "@anthropic-ai/claude-code" || packageManifest.version !== RELEASE_CLAUDE_VERSION) {
+    throw new Error("Claude npm package identity is not @anthropic-ai/claude-code@2.1.89");
+  }
+  const version = runSync(process.execPath, [claude, "--version"]);
+  if (version.status !== 0 || version.stdout.trim() !== RELEASE_CLAUDE_VERSION_OUTPUT) {
     throw new Error(`unsupported Claude Code version output: ${version.stdout.trim()}`);
   }
 
@@ -68,7 +71,7 @@ async function main() {
     environment.ANTHROPIC_BASE_URL = `http://127.0.0.1:${ready.api}`;
     environment.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "1";
     environment.CLAUDE_CONFIG_DIR = configRoot;
-    for (const name of ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"]) delete environment[name];
+    for (const name of ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"]) delete environment[name];
     environment.NO_PROXY = "127.0.0.1,localhost";
     environment.no_proxy = environment.NO_PROXY;
     const args = [
@@ -83,7 +86,7 @@ async function main() {
       "--setting-sources", "user",
       "Call the Problem Locator create_case tool exactly once.",
     ];
-    const child = spawnClaude(claude, args, { cwd: outputRoot, env: environment, stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(process.execPath, [claude, ...args], { cwd: outputRoot, env: environment, stdio: ["ignore", "pipe", "pipe"] });
     const stdout = [];
     const stderr = [];
     child.stdout.on("data", (chunk) => { stdout.push(chunk); process.stdout.write(chunk); });
@@ -121,7 +124,7 @@ async function main() {
     });
     const rejected = await bypass.json();
     if (rejected.result?.structuredContent?.error?.code !== "VALIDATION_ERROR") throw new Error("server did not reject a removed composite field");
-    fs.writeFileSync(path.join(outputRoot, "host-capability-result.json"), `${JSON.stringify({ schema_version: 1, status: "PASS", client: process.platform === "darwin" ? "macos" : process.platform === "win32" ? "windows" : "linux", claude_version: version.stdout.trim(), flat_schema: true, flat_call: true, client_dfx_absent: true })}\n`, { encoding: "utf8", mode: 0o600, flag: "wx" });
+    fs.writeFileSync(path.join(outputRoot, "host-capability-result.json"), `${JSON.stringify({ schema_version: 1, status: "PASS", client: process.platform === "darwin" ? "macos" : process.platform === "win32" ? "windows" : "linux", claude_version: version.stdout.trim(), claude_cli_sha256: RELEASE_CLAUDE_CLI_SHA256, distribution: "official-npm", flat_schema: true, flat_call: true, client_dfx_absent: true })}\n`, { encoding: "utf8", mode: 0o600, flag: "wx" });
     process.stdout.write("TEST_FLOW_PROGRESS request.completed\n");
   } finally {
     server.kill("SIGTERM");

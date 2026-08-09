@@ -26,6 +26,7 @@ def _arguments() -> argparse.Namespace:
         choices=("journey", "diagnostics"),
         default="journey",
     )
+    parser.add_argument("--allow-empty", action="store_true")
     return parser.parse_args()
 
 
@@ -182,6 +183,9 @@ def main() -> int:
                     )
                     return 1
                 if source_sequence == 0:
+                    if arguments.allow_empty:
+                        _receipt(arguments, status="PASS", code=None, count=0)
+                        return 0
                     _receipt(
                         arguments,
                         status="FAIL",

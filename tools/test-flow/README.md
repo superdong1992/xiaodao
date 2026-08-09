@@ -47,16 +47,32 @@ Remove `--plan-only` only after the selected Stage, identity inputs, reuse decis
 Release is a fresh proof, not a continuation of Dev state:
 
 ```sh
+node ./tools/test-flow/prepare-release-cache.mjs --docker-context colima
+node ./tools/test-flow/prepare-release-settings.mjs \
+  --output /private/tmp/problem-locator-release-settings.json
+
 ./tools/test-flow/run.sh \
   --track release \
   --goal release.full \
+  --claude-entry /absolute/xiaodao/.tmp/test-flow-cache/claude/2.1.89/package/cli.js \
+  --claude-settings /private/tmp/problem-locator-release-settings.json \
+  --docker-context colima \
   --logparse-source /absolute/logparse \
   --mcp-source /absolute/problem-locator-mcp \
-  --cross-job-adapter /absolute/cross-job-adapter \
   --plan-only
 ```
 
-Release admission requires a clean commit, the native Client identity, a frozen `TEST_FLOW_SERVER_MODEL_PROBE`, Docker with a Linux server, exact external trees, and a CrossJob adapter. Windows and macOS select their native Client by default. A Linux Client must be selected explicitly with `--client linux`. The Server is always Linux.
+The macOS adapter validates the supplied settings file, materializes only the seven
+allowlisted environment values into the attempt-scoped scratch directory, and bind
+mounts that staged copy into Colima. This keeps an absolute source such as
+`/private/tmp/...` from being passed directly to the Linux Docker daemon; scratch is
+removed before the evidence payload is sealed.
+
+Cache preparation is the only step allowed to download the official Claude npm tarball, uv archive, base image, Python runtime, or locked dependencies. It verifies the frozen artifact hashes and builds the `linux/amd64` image. Release itself uses `--pull never` and offline installs only. The separate settings preparation command reads only the existing auth token and HTTPS endpoint from the process environment; it writes a mode-`0600` seven-key allowlist, pins all three model aliases to `deepseek-v4-flash[1m]`, and never changes global Claude settings.
+
+On macOS, Release admission requires a clean commit, the explicit cached official npm `cli.js`, exact output `2.1.89 (Claude Code)`, the package manifest and complete package tree, Node identity, env-only settings/model fingerprint, Docker context `colima`, a Linux `x86_64` Server, the prepared image, and the two exact clean external source commits. Global Claude Code is deliberately ignored, so an installed `2.1.201` can remain the normal global version. The repository-owned macOS CrossJob adapter is selected automatically; `--cross-job-adapter` is not required on macOS.
+
+The source settings file may contain other top-level Claude settings, but the runner materializes only the exact seven-key `env` allowlist into an attempt-scoped mode-`0600` file. Hooks, permissions, local MCP definitions, proxies, and client DFX are not copied or installed. The native macOS Client connects by strict HTTP MCP directly to the fresh Linux container. Client phases carry hard USD caps of 3/5/1; each automatically dispatched Linux agent already carries its own USD 3 cap. The plan therefore reports the complete conservative client+server cost envelope instead of charging environment or upload-only Stages for nonexistent model calls. Release lineage is always `GENESIS`, the named DATA_ROOT volume must be observed empty before container initialization, and no checkpoint is ever admitted as Release input.
 
 ## Proof layout
 

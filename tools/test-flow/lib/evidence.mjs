@@ -101,8 +101,12 @@ export function createAttempt({ evidenceRoot, runId }) {
 
 export function requiredEventFiles(stages = []) {
   const required = ["orchestrator.ndjson"];
-  if (stages.some((stage) => stage.id?.startsWith("journey.cross-job.") && stage.status === "PASS" && stage.result_source !== "REUSED")) {
-    required.push("service-linux.journey.ndjson", "service-linux.diagnostics.ndjson");
+  const completedJourneyStages = stages.filter((stage) => stage.id?.startsWith("journey.cross-job.") && stage.status === "PASS" && stage.result_source !== "REUSED");
+  if (completedJourneyStages.some((stage) => stage.id !== "journey.cross-job.environment")) {
+    required.push("service-linux.journey.ndjson");
+  }
+  if (completedJourneyStages.length > 0) {
+    required.push("service-linux.diagnostics.ndjson");
   }
   return required;
 }
@@ -125,6 +129,43 @@ export function validateEvidenceStreams(attemptRoot, { requiredFiles = ["orchest
   const missing = requiredFiles.filter((name) => !present.has(name));
   if (missing.length > 0) status = "FAIL";
   return { status, required_files: requiredFiles, missing_files: missing, streams: results };
+}
+
+export function recoverStageAuditProgress({ attemptRoot, stageRoot, stageId }) {
+  const progress = {
+    client_tool_calls: 0,
+    server_tool_calls: 0,
+    usage: { input_tokens: 0, output_tokens: 0, cost_usd: 0 },
+  };
+  const resolvedAttempt = path.resolve(attemptRoot);
+  const resolvedStage = path.resolve(stageRoot);
+  if (!resolvedStage.startsWith(`${resolvedAttempt}${path.sep}`) || !fs.existsSync(resolvedStage)) return progress;
+  for (const name of fs.readdirSync(resolvedStage).filter((entry) => entry.endsWith(".authoritative.json")).sort()) {
+    try {
+      const audit = readJson(path.join(resolvedStage, name));
+      if (!Array.isArray(audit.records)) continue;
+      progress.client_tool_calls += audit.records.length;
+      progress.usage.input_tokens += Number(audit.usage?.input_tokens ?? 0);
+      progress.usage.output_tokens += Number(audit.usage?.output_tokens ?? 0);
+      progress.usage.cost_usd = Math.round((progress.usage.cost_usd + Number(audit.usage?.cost_usd ?? 0)) * 1_000_000) / 1_000_000;
+    } catch {}
+  }
+  const instance = new Map([
+    ["journey.cross-job.route", "route"],
+    ["journey.cross-job.upload", "upload"],
+    ["journey.cross-job.diagnose", "diagnose"],
+    ["journey.cross-job.publish-restart", "restart"],
+  ]).get(stageId);
+  if (!instance) return progress;
+  try {
+    const supervisor = readJson(path.join(resolvedAttempt, "payload", `service-${instance}-supervisor.json`));
+    if (supervisor.status !== "PASS") return progress;
+    const eventsPath = path.join(resolvedAttempt, "payload", "events", "parts", `service-linux.${instance}.diagnostics.ndjson`);
+    validateEventFile(eventsPath);
+    const events = fs.readFileSync(eventsPath, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line));
+    progress.server_tool_calls = events.filter((event) => event.event_type === "mcp.tool.completed").length;
+  } catch {}
+  return progress;
 }
 
 export async function finalizeAttempt({
@@ -151,7 +192,11 @@ export async function finalizeAttempt({
   }
   writeJsonSync(path.join(attemptRoot, "finalization", "secret-scan.json"), scan);
 
-  const preserve = candidate.functional_status !== "PASS" || scan.status !== "PASS" || payloadSeal.status !== "PASS";
+  const preserve = candidate.functional_status !== "PASS"
+    || candidate.operation_status !== "PASS"
+    || streams.status !== "PASS"
+    || scan.status !== "PASS"
+    || payloadSeal.status !== "PASS";
   let resourceReceipt;
   try {
     resourceReceipt = await resourcePolicy({ preserve, runId: candidate.run_id });
@@ -181,6 +226,12 @@ export async function finalizeAttempt({
     operationStatus = "ERROR";
     failureDomain = "SECURITY";
   }
+  const verificationStatus = scan.status === "PASS"
+    && metaScan.status === "PASS"
+    && payloadSeal.status === "PASS"
+    && streams.status === "PASS"
+    ? "PASS"
+    : "FAIL";
   const overall = operationStatus === "ERROR"
     ? "ERROR"
     : candidate.functional_status === "FAIL"
@@ -189,7 +240,9 @@ export async function finalizeAttempt({
         ? "BLOCKED"
         : candidate.performance_status === "FAIL"
           ? "FAIL"
-          : candidate.performance_status === "SLOW" || candidate.performance_status === "NOT_CALIBRATED"
+          : candidate.performance_status === "SLOW" && candidate.track === "release"
+            ? "FAIL"
+            : candidate.performance_status === "SLOW" || candidate.performance_status === "NOT_CALIBRATED"
             ? "PASS_WITH_WARNINGS"
             : "PASS";
   const exitCode = overall === "ERROR" ? 3 : overall === "FAIL" ? 1 : overall === "BLOCKED" ? 2 : 0;
@@ -202,6 +255,7 @@ export async function finalizeAttempt({
     functional_status: candidate.functional_status,
     performance_status: candidate.performance_status,
     operation_status: operationStatus,
+    verification_status: verificationStatus,
     overall,
     exit_code: exitCode,
     failure_domain: failureDomain,
@@ -209,6 +263,16 @@ export async function finalizeAttempt({
     evidence_reusable: scan.status === "PASS" && metaScan.status === "PASS" && payloadSeal.status === "PASS" && streams.status === "PASS",
     stages: candidate.stages,
     source: candidate.source,
+    lineage: candidate.lineage ?? null,
+    secret_scan: {
+      status: scan.status,
+      sensitive_value_occurrences: scan.sensitive_value_occurrences,
+    },
+    usage: {
+      input_tokens: Number.isSafeInteger(candidate.usage?.input_tokens) && candidate.usage.input_tokens >= 0 ? candidate.usage.input_tokens : 0,
+      output_tokens: Number.isSafeInteger(candidate.usage?.output_tokens) && candidate.usage.output_tokens >= 0 ? candidate.usage.output_tokens : 0,
+      cost_usd: Number.isFinite(candidate.usage?.cost_usd) && candidate.usage.cost_usd >= 0 ? candidate.usage.cost_usd : 0,
+    },
     payload_seal_digest: payloadSeal.root_digest,
     secret_scan_digest: scan.scanned_root_digest,
     resource_receipt_digest: sha256Bytes(canonicalJson(resourceReceipt)),
@@ -221,6 +285,8 @@ export async function finalizeAttempt({
       authority: "verdict.json",
       status: overall,
       functional_status: candidate.functional_status,
+      operation_status: operationStatus,
+      verification_status: verificationStatus,
       run_id: candidate.run_id,
     });
   }

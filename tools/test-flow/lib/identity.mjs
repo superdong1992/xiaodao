@@ -5,13 +5,15 @@ import path from "node:path";
 import {
   canonicalJson,
   normalizeRepoPath,
-  resolveCommand,
   resolvePythonTestRuntime,
-  runExecutableSync,
   runSync,
   sha256Bytes,
   sha256File,
 } from "./util.mjs";
+import {
+  claudeSettingsIdentity,
+  validateClaudeDistribution,
+} from "./release-inputs.mjs";
 
 const IGNORED_NAMES = new Set([".git", ".tmp", ".pytest_cache", "__pycache__", "node_modules", ".venv"]);
 
@@ -152,7 +154,17 @@ function safeEndpointContext(raw) {
   }
 }
 
-export function modelContextFingerprint(environment = process.env) {
+export function modelContextFingerprint(environment = process.env, settingsPath = null) {
+  if (settingsPath) {
+    const identity = claudeSettingsIdentity(settingsPath);
+    return {
+      status: identity.status,
+      fingerprint: identity.fingerprint,
+      endpoint: identity.endpoint,
+      model: identity.model,
+      settings_policy: identity.status === "PRESENT" ? "env-allowlist-only-no-hooks-v1" : identity.code,
+    };
+  }
   const secret = environment.ANTHROPIC_AUTH_TOKEN || environment.ANTHROPIC_API_KEY || null;
   const explicit = environment.TEST_FLOW_PROVIDER_CONTEXT_FINGERPRINT || null;
   const message = canonicalJson({
@@ -173,18 +185,23 @@ export function modelContextFingerprint(environment = process.env) {
   };
 }
 
-export function clientIdentity() {
-  const executable = process.platform === "win32"
-    ? resolveCommand("claude.exe") ?? resolveCommand("claude")
-    : resolveCommand("claude") ?? resolveCommand("claude.exe");
-  if (!executable) return { status: "MISSING", executable: null, sha256: null, version: null };
-  const version = runExecutableSync(executable, ["--version"]);
-  return {
-    status: version.status === 0 ? "PRESENT" : "INVALID",
-    executable,
-    sha256: fs.existsSync(executable) && fs.statSync(executable).isFile() ? sha256File(executable) : null,
-    version: version.status === 0 ? version.stdout.trim() : null,
-  };
+export function clientIdentity(claudeEntry = null) {
+  if (!claudeEntry) {
+    return {
+      status: "MISSING",
+      entry: null,
+      version: null,
+      cli_sha256: null,
+      package_manifest_sha256: null,
+      package_tree_digest: null,
+      tarball_sha256: null,
+      package_name: null,
+      package_version: null,
+      node: null,
+      code: "CLAUDE_ENTRY_REQUIRED",
+    };
+  }
+  return validateClaudeDistribution(claudeEntry);
 }
 
 export function pythonImportPathIdentity(repoRoot, pythonDetails) {
@@ -243,10 +260,18 @@ export function environmentIdentity(repoRoot, environment = process.env) {
   };
 }
 
-export function computeIdentityGroups({ repoRoot, identityConfig, externalTrees = {}, environment = process.env }) {
+export function computeIdentityGroups({
+  repoRoot,
+  identityConfig,
+  externalTrees = {},
+  environment = process.env,
+  claudeEntry = null,
+  claudeSettings = null,
+  releaseRuntime = null,
+}) {
   const result = {};
-  const sharedClient = clientIdentity();
-  const sharedModel = modelContextFingerprint(environment);
+  const sharedClient = clientIdentity(claudeEntry);
+  const sharedModel = modelContextFingerprint(environment, claudeSettings);
   const sharedEnvironment = environmentIdentity(repoRoot, environment);
   for (const [name, definition] of Object.entries(identityConfig.groups)) {
     const paths = hashConfiguredPaths(repoRoot, definition.paths ?? []);
@@ -267,6 +292,7 @@ export function computeIdentityGroups({ repoRoot, identityConfig, externalTrees 
       client: definition.include_client_binary ? sharedClient : null,
       model_context: definition.include_model_context ? sharedModel : null,
       environment: definition.include_environment ? sharedEnvironment : null,
+      release_runtime: definition.include_release_runtime ? releaseRuntime : null,
     };
     const proof = {
       producer_digest: sha256Bytes(canonicalJson(producer)),

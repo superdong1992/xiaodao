@@ -113,3 +113,20 @@ export function validateEventFile(filePath, { allowPartialTail = false } = {}) {
   assertFlow(expected > 1, "EVENT_STREAM_EMPTY", `${filePath} is empty`);
   return { status: "PASS", event_count: expected - 1, producer_id: producerId, producer_type: producerType, run_id: runId };
 }
+
+export function readServerMcpCorrespondence(attemptRoot, clientToolNames) {
+  assertFlow(Array.isArray(clientToolNames) && clientToolNames.every((name) => typeof name === "string" && name.length > 0), "CLIENT_TOOL_SEQUENCE_INVALID", "Client tool sequence is invalid");
+  const eventsPath = path.join(attemptRoot, "payload", "events", "service-linux.diagnostics.ndjson");
+  validateEventFile(eventsPath);
+  const events = fs.readFileSync(eventsPath, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line));
+  const startedToolNames = events.filter((event) => event.event_type === "mcp.tool.started" && typeof event.data?.tool === "string").map((event) => event.data.tool);
+  const completedToolNames = events.filter((event) => event.event_type === "mcp.tool.completed" && typeof event.data?.tool === "string").map((event) => event.data.tool);
+  const exact = (actual) => actual.length === clientToolNames.length && actual.every((name, index) => name === clientToolNames[index]);
+  return {
+    client_tool_names: [...clientToolNames],
+    started_tool_names: startedToolNames,
+    completed_tool_names: completedToolNames,
+    started_exact: exact(startedToolNames),
+    completed_exact: exact(completedToolNames),
+  };
+}

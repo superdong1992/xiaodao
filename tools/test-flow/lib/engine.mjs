@@ -172,12 +172,13 @@ export async function runFlow(repoRoot, options) {
     producerType: "orchestrator",
     limitBytes: plan.policies.event_file_limit_bytes,
   });
-  const resources = new ResourceRegistry(attemptRoot, runId);
+  const resources = new ResourceRegistry(attemptRoot, runId, { dockerContext: built.options.dockerContext ?? null });
   const stageResults = [];
   let operationStatus = "PASS";
   let stopped = false;
   let parentCheckpointId = "GENESIS";
   let pendingCheckpoint = null;
+  let preFinalizationResourceReceipt = null;
 
   try {
     eventWriter.write("run.created", { data: { track: plan.track, goal: plan.goal } });
@@ -246,8 +247,9 @@ export async function runFlow(repoRoot, options) {
         actionResult = await executeAction({
           repoRoot,
           attemptRoot,
-          options,
+          options: built.options,
           client: built.client,
+          track: plan.track,
           policies: plan.policies,
           changedFiles: built.changedFiles,
           identityGroups: built.identityGroups,
@@ -304,6 +306,30 @@ export async function runFlow(repoRoot, options) {
     });
     try { eventWriter.write("run.failed", { data: { code: "ORCHESTRATOR_EXCEPTION" } }); } catch {}
   } finally {
+    try {
+      preFinalizationResourceReceipt = await resources.apply({ preserve: true });
+      if (preFinalizationResourceReceipt.status !== "PASS") operationStatus = "ERROR";
+      try {
+        eventWriter.write("resources.quiesced", {
+          data: {
+            status: preFinalizationResourceReceipt.status,
+            inspected_count: preFinalizationResourceReceipt.inspected?.length ?? 0,
+            remaining_count: preFinalizationResourceReceipt.remaining?.length ?? 0,
+          },
+        });
+      } catch {}
+    } catch (error) {
+      operationStatus = "ERROR";
+      preFinalizationResourceReceipt = {
+        schema_version: 1,
+        status: "ERROR",
+        policy: "PRESERVE",
+        code: "PRE_FINALIZATION_RESOURCE_QUIESCENCE_FAILED",
+        error: redactError(error),
+        inspected: [],
+        remaining: [],
+      };
+    }
     try { eventWriter.close(); } catch (error) {
       operationStatus = "ERROR";
       stageResults.push({
@@ -348,7 +374,12 @@ export async function runFlow(repoRoot, options) {
     failure_fingerprint: failure ? failureFingerprint({ stageId: failure.id, identity: failure, failureDomain: failure.failure_domain, code: failure.code }) : null,
     stages: stageResults,
     source: { head: plan.source.head, clean: plan.source.clean, baseline: plan.source.baseline },
+    lineage: {
+      ...plan.lineage,
+      fresh_admission: stageResults.find((stage) => stage.id === "journey.cross-job.environment")?.fresh_admission ?? null,
+    },
     admission: plan.admission,
+    pre_finalization_resource_receipt: preFinalizationResourceReceipt,
     usage: stageResults.reduce((usage, stage) => ({
       input_tokens: usage.input_tokens + (stage.usage?.input_tokens ?? 0),
       output_tokens: usage.output_tokens + (stage.usage?.output_tokens ?? 0),

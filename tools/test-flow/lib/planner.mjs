@@ -4,6 +4,18 @@ import { canonicalJson, commandExists, runSync, sha256Bytes } from "./util.mjs";
 import { changedIdentityGroups, loadConfiguration, stagesForGoal } from "./config.mjs";
 import { changedFiles, computeIdentityGroups, gitState, resolveChangeBaseline, stageIdentity } from "./identity.mjs";
 import { findReusableStages, lastSuccessfulDevCommit, loadHistory } from "./history.mjs";
+import {
+  RELEASE_DOCKER_CONTEXT,
+  RELEASE_LOGPARSE_COMMIT,
+  RELEASE_MCP_COMMIT,
+  claudeSettingsIdentity,
+  dockerServerIdentity,
+  externalGitIdentity,
+  releaseCachePaths,
+  validateClaudeDistribution,
+  validateReleaseImage,
+  validateUvCache,
+} from "./release-inputs.mjs";
 
 const FRESH_RELEASE_STAGES = new Set([
   "framework.self-test",
@@ -43,7 +55,7 @@ function performanceIdentity(stage, group) {
     source_digest: producer.source_digest,
     external_trees: producer.external_trees,
     client_version: producer.client?.version ?? null,
-    client_hash: producer.client?.sha256 ?? null,
+    client_hash: producer.client?.cli_sha256 ?? null,
     model_context: producer.model_context?.fingerprint ?? null,
     environment: producer.environment ?? null,
   }));
@@ -75,6 +87,44 @@ export function buildRunPlan(repoRoot, options) {
   const trackConfig = config.flow.tracks[track];
   if (!trackConfig) throw new Error(`TRACK_UNKNOWN:${track}`);
   const goal = options.goal ?? trackConfig.default_goal;
+  const client = resolveClient(options.client);
+  const builtInMacAdapter = path.join(repoRoot, "tools", "test-flow", "adapters", "macos-linux-release.mjs");
+  const effectiveOptions = {
+    ...options,
+    crossJobAdapter: options.crossJobAdapter ?? (client === "macos" ? builtInMacAdapter : null),
+  };
+  const cachePaths = releaseCachePaths(repoRoot, effectiveOptions.cacheRoot);
+  const formalRuntime = track === "release" || goal === "dev.real";
+  const clientDistribution = formalRuntime
+    ? validateClaudeDistribution(effectiveOptions.claudeEntry)
+    : { status: effectiveOptions.claudeEntry ? validateClaudeDistribution(effectiveOptions.claudeEntry).status : "NOT_REQUIRED" };
+  const settingsIdentity = formalRuntime
+    ? claudeSettingsIdentity(effectiveOptions.claudeSettings)
+    : { status: effectiveOptions.claudeSettings ? claudeSettingsIdentity(effectiveOptions.claudeSettings).status : "NOT_REQUIRED" };
+  const dockerIdentity = client === "macos" && formalRuntime
+    ? dockerServerIdentity(effectiveOptions.dockerContext)
+    : { status: "NOT_REQUIRED", context: effectiveOptions.dockerContext ?? null };
+  const uvIdentity = client === "macos" && formalRuntime
+    ? validateUvCache(cachePaths)
+    : { status: "NOT_REQUIRED" };
+  const imageIdentity = client === "macos" && formalRuntime
+    ? validateReleaseImage(cachePaths, dockerIdentity)
+    : { status: "NOT_REQUIRED", image: cachePaths.baseImage };
+  const logparseIdentity = formalRuntime
+    ? externalGitIdentity(effectiveOptions.logparseSource, RELEASE_LOGPARSE_COMMIT)
+    : { status: "NOT_REQUIRED", root: effectiveOptions.logparseSource ?? null };
+  const mcpIdentity = formalRuntime
+    ? externalGitIdentity(effectiveOptions.mcpSource, RELEASE_MCP_COMMIT)
+    : { status: "NOT_REQUIRED", root: effectiveOptions.mcpSource ?? null };
+  const releaseRuntime = {
+    schema_version: 1,
+    client_distribution: clientDistribution,
+    settings: settingsIdentity,
+    docker: dockerIdentity,
+    uv_cache: uvIdentity,
+    image: imageIdentity,
+    network_policy: "release-offline-pull-never",
+  };
   const evidenceRoot = path.resolve(repoRoot, options.evidenceRoot ?? defaults.evidence_root);
   const history = loadHistory(evidenceRoot);
   const source = gitState(repoRoot);
@@ -89,9 +139,11 @@ export function buildRunPlan(repoRoot, options) {
     externalTrees: {
       logparse: options.logparseSource,
       mcp: options.mcpSource,
-      cross_job_adapter: options.crossJobAdapter,
-      server_model_probe: process.env.TEST_FLOW_SERVER_MODEL_PROBE,
+      cross_job_adapter: effectiveOptions.crossJobAdapter,
     },
+    claudeEntry: effectiveOptions.claudeEntry,
+    claudeSettings: effectiveOptions.claudeSettings,
+    releaseRuntime,
   });
   const policies = {
     parent_checkpoint: track === "release" ? "GENESIS" : options.resume === "fresh" ? "GENESIS" : "AUTO",
@@ -151,16 +203,25 @@ export function buildRunPlan(repoRoot, options) {
     }
     journeyParent = checkpoint.checkpoint_id;
   }
-  const selected = stagesForGoal(config, {
+  let selected = stagesForGoal(config, {
     goalId: goal,
     track,
     requestedStage: options.stage,
     changedGroups,
     reusableStages: new Set(reusable.keys()),
   });
-  const client = resolveClient(options.client);
+  const macIsolatedStagesOmitted = track === "release" && client === "macos" && selected.some((stage) => stage.kind === "isolated-real");
+  if (track === "release" && client === "macos") {
+    selected = selected.filter((stage) => stage.kind !== "isolated-real");
+  }
   const blockers = [];
   const warnings = [];
+  if (macIsolatedStagesOmitted) {
+    warnings.push({
+      code: "MACOS_ISOLATED_SERVER_GATES_COVERED_BY_CROSS_JOB",
+      detail: "macOS runs the native macOS Client to the Linux Server; Linux agent and Logparse proofs run inside that fresh CrossJob journey.",
+    });
+  }
   const containsReal = selected.some((stage) => ["isolated-real", "real-journey", "capability", "rollout"].includes(stage.kind));
   if (!source.available) blockers.push({ code: "GIT_REQUIRED", detail: "A Git worktree is required for input identity." });
   if (trackConfig.requires_clean_commit && !source.clean) blockers.push({ code: "RELEASE_SOURCE_DIRTY", detail: "Release requires a clean committed source tree." });
@@ -170,19 +231,47 @@ export function buildRunPlan(repoRoot, options) {
   if (track === "dev" && containsReal && !options.reason) blockers.push({ code: "DEV_REAL_REASON_REQUIRED", detail: "Dev real proofs require --reason." });
   if (track === "release" && options.resume && options.resume !== "fresh" && options.resume !== "auto") blockers.push({ code: "RELEASE_RESUME_FORBIDDEN", detail: "Release must start from GENESIS and an empty DATA_ROOT." });
   if (track === "release" && options.resume === "auto") warnings.push({ code: "RELEASE_RESUME_FORCED_FRESH", detail: "Release ignores checkpoint auto-resume and starts fresh." });
-  if (selected.some((stage) => stage.id.startsWith("journey.cross-job.")) && !options.crossJobAdapter) {
+  if (formalRuntime && !effectiveOptions.claudeEntry) {
+    blockers.push({ code: "CLAUDE_ENTRY_REQUIRED", detail: "Formal real-model proofs require --claude-entry pointing at the isolated official npm cli.js; global claude is never a fallback." });
+  } else if (formalRuntime && clientDistribution.status !== "PRESENT") {
+    blockers.push({ code: "CLAUDE_DISTRIBUTION_INVALID", detail: `The Claude distribution is not exact official npm 2.1.89: ${clientDistribution.code ?? "invalid"}.` });
+  }
+  if (client === "macos" && formalRuntime && effectiveOptions.claudeEntry && path.resolve(effectiveOptions.claudeEntry) !== path.resolve(cachePaths.claudeEntry)) {
+    blockers.push({ code: "CLAUDE_ENTRY_CACHE_MISMATCH", detail: "macOS Release must use cli.js from the explicitly prepared frozen cache root." });
+  }
+  if (formalRuntime && !effectiveOptions.claudeSettings) {
+    blockers.push({ code: "CLAUDE_SETTINGS_REQUIRED", detail: "Formal real-model proofs require --claude-settings; only the seven allowlisted env values are materialized and Hooks are not copied." });
+  } else if (formalRuntime && settingsIdentity.status !== "PRESENT") {
+    blockers.push({ code: "CLAUDE_SETTINGS_INVALID", detail: `Claude settings failed the env-only materialization policy: ${settingsIdentity.code ?? "invalid"}.` });
+  }
+  const crossJobSelected = selected.some((stage) => stage.id.startsWith("journey.cross-job."));
+  if (crossJobSelected && !effectiveOptions.crossJobAdapter) {
     blockers.push({ code: "CROSS_JOB_ADAPTER_REQUIRED", detail: "CrossJob stages require --cross-job-adapter before any model call can start." });
   }
-  if (options.crossJobAdapter && (!path.isAbsolute(options.crossJobAdapter) || !fs.existsSync(options.crossJobAdapter) || !fs.statSync(options.crossJobAdapter).isFile())) {
+  if (effectiveOptions.crossJobAdapter && (!path.isAbsolute(effectiveOptions.crossJobAdapter) || !fs.existsSync(effectiveOptions.crossJobAdapter) || !fs.statSync(effectiveOptions.crossJobAdapter).isFile())) {
     blockers.push({ code: "CROSS_JOB_ADAPTER_INVALID", detail: "The CrossJob adapter must be an existing absolute file." });
   }
-  if (selected.some((stage) => stage.id === "platform.server-linux-capability")) {
-    const probe = process.env.TEST_FLOW_SERVER_MODEL_PROBE;
-    if (!probe || !path.isAbsolute(probe) || !fs.existsSync(probe) || !fs.statSync(probe).isFile()) {
-      blockers.push({ code: "SERVER_MODEL_PROBE_REQUIRED", detail: "A frozen absolute TEST_FLOW_SERVER_MODEL_PROBE is required for the Linux server capability." });
+  if (client === "macos" && crossJobSelected && effectiveOptions.crossJobAdapter !== builtInMacAdapter && !options.crossJobAdapter) {
+    blockers.push({ code: "MACOS_BUILTIN_ADAPTER_INVALID", detail: "The repository-owned macOS CrossJob adapter could not be resolved." });
+  }
+  if (crossJobSelected || selected.some((stage) => stage.id === "platform.server-linux-capability")) {
+    if (logparseIdentity.status !== "PRESENT") {
+      blockers.push({ code: "LOGPARSE_SOURCE_INVALID", detail: `Logparse must be clean at ${RELEASE_LOGPARSE_COMMIT}: ${logparseIdentity.code ?? "invalid"}.` });
     }
-    if (!commandExists("docker")) blockers.push({ code: "DOCKER_REQUIRED", detail: "A Docker client and Linux server are required." });
-    else {
+    if (mcpIdentity.status !== "PRESENT") {
+      blockers.push({ code: "MCP_SOURCE_INVALID", detail: `problem-locator-mcp must be clean at ${RELEASE_MCP_COMMIT}: ${mcpIdentity.code ?? "invalid"}.` });
+    }
+  }
+  if (selected.some((stage) => stage.id === "platform.server-linux-capability")) {
+    if (client === "macos") {
+      if (!effectiveOptions.dockerContext) blockers.push({ code: "DOCKER_CONTEXT_REQUIRED", detail: "macOS Release requires --docker-context colima." });
+      else if (effectiveOptions.dockerContext !== RELEASE_DOCKER_CONTEXT) blockers.push({ code: "DOCKER_CONTEXT_MISMATCH", detail: "macOS Release is bound to the colima Docker context." });
+      if (dockerIdentity.status !== "PRESENT") blockers.push({ code: "DOCKER_SERVER_IDENTITY_INVALID", detail: `Docker/Colima must report a Linux amd64 Server: ${dockerIdentity.code ?? "invalid"}.` });
+      if (uvIdentity.status !== "PRESENT") blockers.push({ code: "UV_RELEASE_CACHE_INVALID", detail: `The explicit uv 0.11.32 Linux x64 cache is invalid: ${uvIdentity.code ?? "invalid"}.` });
+      if (imageIdentity.status !== "PRESENT") blockers.push({ code: "RELEASE_BASE_IMAGE_INVALID", detail: `The offline linux/amd64 Release image is invalid: ${imageIdentity.code ?? "invalid"}.` });
+    } else if (!commandExists("docker")) {
+      blockers.push({ code: "DOCKER_REQUIRED", detail: "A Docker client and Linux server are required." });
+    } else {
       const docker = runSync("docker", ["version", "--format", "{{json .Server}}"]);
       if (docker.status !== 0) blockers.push({ code: "DOCKER_SERVER_UNAVAILABLE", detail: "The Docker server is unavailable." });
     }
@@ -227,6 +316,11 @@ export function buildRunPlan(repoRoot, options) {
   const stagePlan = selected.map((stage) => {
     const reuse = reusable.get(stage.id);
     const decision = reuse ? "REUSE" : "RUN";
+    const modelCallingStage = stage.kind === "isolated-real" || [
+      "journey.cross-job.route",
+      "journey.cross-job.diagnose",
+      "journey.cross-job.publish-restart",
+    ].includes(stage.id);
     return {
       id: stage.id,
       kind: stage.kind,
@@ -240,8 +334,8 @@ export function buildRunPlan(repoRoot, options) {
       reuse: reuse ? { run_id: reuse.run_id, committed_at_utc: reuse.committed_at_utc, attempt_root: reuse.attempt_root, current_reaudit: reuse.current_reaudit } : null,
       timeout_seconds: stage.timeout_seconds,
       no_progress_seconds: ["isolated-real", "real-journey", "capability"].includes(stage.kind) ? defaults.real_no_progress_seconds : null,
-      estimated_tokens: stage.estimated_tokens ?? (["isolated-real", "real-journey", "capability"].includes(stage.kind) ? 5000 : 0),
-      estimated_cost_usd: stage.estimated_cost_usd ?? (["isolated-real", "real-journey", "capability"].includes(stage.kind) ? 3 : 0),
+      estimated_tokens: stage.estimated_tokens ?? (modelCallingStage ? 5000 : 0),
+      estimated_cost_usd: stage.estimated_cost_usd ?? (modelCallingStage ? 3 : 0),
     };
   });
   const planCore = {
@@ -257,6 +351,50 @@ export function buildRunPlan(repoRoot, options) {
       clean: source.clean,
       baseline,
       changed_files: files,
+    },
+    release_inputs: formalRuntime ? {
+      claude: {
+        status: clientDistribution.status,
+        version: clientDistribution.version ?? null,
+        cli_sha256: clientDistribution.cli_sha256 ?? null,
+        package_name: clientDistribution.package_name ?? null,
+        package_version: clientDistribution.package_version ?? null,
+        package_manifest_sha256: clientDistribution.package_manifest_sha256 ?? null,
+        package_tree_digest: clientDistribution.package_tree_digest ?? null,
+        tarball_sha256: clientDistribution.tarball_sha256 ?? null,
+        node_version: clientDistribution.node?.version ?? null,
+        node_sha256: clientDistribution.node?.sha256 ?? null,
+      },
+      settings: {
+        status: settingsIdentity.status,
+        endpoint: settingsIdentity.endpoint ?? null,
+        model: settingsIdentity.model ?? null,
+        fingerprint: settingsIdentity.fingerprint ?? null,
+        policy: "env-allowlist-only-no-hooks-v1",
+      },
+      docker: {
+        status: dockerIdentity.status,
+        context: dockerIdentity.context ?? null,
+        os: dockerIdentity.os ?? null,
+        architecture: dockerIdentity.architecture ?? null,
+        version: dockerIdentity.version ?? null,
+        context_fingerprint: dockerIdentity.context_fingerprint ?? null,
+        colima_version: dockerIdentity.colima_version ?? null,
+        colima_status_fingerprint: dockerIdentity.colima_status_fingerprint ?? null,
+      },
+      image: imageIdentity,
+      uv_cache: uvIdentity,
+      external_sources: {
+        logparse: { status: logparseIdentity.status, root: logparseIdentity.root, head: logparseIdentity.head, clean: logparseIdentity.clean },
+        problem_locator_mcp: { status: mcpIdentity.status, root: mcpIdentity.root, head: mcpIdentity.head, clean: mcpIdentity.clean },
+      },
+      cross_job_adapter: effectiveOptions.crossJobAdapter,
+      release_network_policy: "offline-pull-never",
+    } : null,
+    lineage: {
+      root: track === "release" ? "GENESIS" : policies.parent_checkpoint,
+      initial_data_root: track === "release" ? "EMPTY_REQUIRED" : "TRACK_POLICY",
+      checkpoint_reuse: track === "release" ? "FORBIDDEN" : "IDENTITY_GATED",
     },
     changed_identity_groups: [...changedGroups].sort(),
     stages: stagePlan,
@@ -293,5 +431,6 @@ export function buildRunPlan(repoRoot, options) {
     changedFiles: files,
     evidenceRoot,
     client,
+    options: effectiveOptions,
   };
 }
