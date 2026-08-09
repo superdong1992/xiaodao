@@ -308,13 +308,14 @@ function assertFlatInput(input) {
   }
 }
 
-function parseClaudeStream(text, expectedCwd) {
+function parseClaudeStream(text, expectedCwd, { allowErrorTerminal = false } = {}) {
   const events = text.split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
   const initEvents = events.filter((event) => event.type === "system" && event.subtype === "init");
   const results = events.filter((event) => event.type === "result");
   requireCondition(initEvents.length === 1 && results.length === 1 && events.at(-1)?.type === "result", "CLIENT_STREAM_TERMINAL_INVALID");
   const terminal = results[0];
-  requireCondition(terminal.subtype === "success" && terminal.is_error === false, "CLIENT_RESULT_NOT_SUCCESS", "INCONCLUSIVE", "EXTERNAL");
+  const terminalSucceeded = terminal.subtype === "success" && terminal.is_error === false;
+  requireCondition(terminalSucceeded || (allowErrorTerminal && terminal.is_error === true), "CLIENT_RESULT_NOT_SUCCESS", "INCONCLUSIVE", "EXTERNAL");
   const init = initEvents[0];
   requireCondition(path.resolve(init.cwd) === path.resolve(expectedCwd), "CLIENT_CWD_MISMATCH");
   requireCondition(init.model === RELEASE_MODEL, "CLIENT_EFFECTIVE_MODEL_MISMATCH", "BLOCKED", "INFRA");
@@ -431,8 +432,7 @@ async function runClaude(configuration, state, stageRoot, phase, prompt, maxTurn
   fs.fsyncSync(stderrDescriptor);
   fs.closeSync(stdoutDescriptor);
   fs.closeSync(stderrDescriptor);
-  if (exit.code !== 0) throw new StageError(`CLAUDE_${phase.toUpperCase()}_EXIT_${exit.code ?? exit.signal}`, "INCONCLUSIVE", "EXTERNAL");
-  const audit = parseClaudeStream(Buffer.concat(chunks).toString("utf8"), configuration.repoRoot);
+  const audit = parseClaudeStream(Buffer.concat(chunks).toString("utf8"), configuration.repoRoot, { allowErrorTerminal: exit.code !== 0 });
   writeNew(auditPath, audit);
   const forbidden = [
     path.join(runtime.runtimeRoot, "client-dfx.jsonl"),
@@ -440,6 +440,7 @@ async function runClaude(configuration, state, stageRoot, phase, prompt, maxTurn
     path.join(stageRoot, `${phase}.client-dfx.jsonl`),
   ];
   requireCondition(forbidden.every((filePath) => !fs.existsSync(filePath)), "CLIENT_DFX_FORBIDDEN");
+  if (exit.code !== 0) throw new StageError(`CLAUDE_${phase.toUpperCase()}_EXIT_${exit.code ?? exit.signal}`, "INCONCLUSIVE", "EXTERNAL");
   return audit;
 }
 
@@ -467,9 +468,9 @@ function phaseOnePrompt(requestIds) {
 
 0. Your first action MUST call the Skill tool with skill=problem-locator-client (exact input {"skill":"problem-locator-client"}). Until that Skill tool_result is received successfully, do not call any problem_locator MCP tool.
 1. Call problem_locator_create_case exactly once with request_id "${requestIds.create}". Put statement "A checkout-to-inventory ReserveStock RPC times out during a service takeover.", expected_behavior "The checkout operation completes after inventory reservation.", actual_behavior "During an active service takeover, the ReserveStock RPC times out and checkout does not complete.", scope "checkout-to-inventory service-takeover RPC diagnosis", goals ["Locate the service-takeover timeout cause using the supplied logs."], non_goals ["Modify production systems."], constraints ["Use only evidence persisted in this diagnosis case."], completion_criteria ["Identify the timed-out request and an evidence-backed root cause."] directly at the root. Do not send problem_spec. Set initial_user_fact_names [], initial_user_fact_values [], and wait_seconds 0.
-2. Poll problem_locator_get_case with non-empty case_id input until WAITING_INPUT has exactly OPEN INPUT requirements caller_service, server_service, rpc_method, problem_time.
+2. Poll problem_locator_get_case with non-empty case_id input and wait_seconds 30 until WAITING_INPUT has exactly OPEN INPUT requirements caller_service, server_service, rpc_method, problem_time. Use wait_seconds 30 on every poll; do not rapid-poll.
 3. Call problem_locator_submit_supplement once with request_id "${requestIds.submit_a}", the latest case_revision, input_names ["caller_service","server_service","rpc_method","problem_time"], input_values ["checkout-synthetic","inventory-synthetic","ReserveStock","2026-07-31T00:00:03.000Z"], attachment_ids [], wait_seconds 0.
-4. Poll with non-empty case_id input until WAITING_ATTACHMENT has the OPEN ATTACHMENT requirement log_archive.
+4. Poll with non-empty case_id input and wait_seconds 30 until WAITING_ATTACHMENT has the OPEN ATTACHMENT requirement log_archive. Use wait_seconds 30 on every poll; do not rapid-poll.
 5. Call problem_locator_prepare_attachment exactly once with request_id "${requestIds.prepare}", the latest revision, name "${ZIP_NAME}", content_type "application/zip", declared_size ${ZIP_SIZE}, and declared_sha256 "${ZIP_SHA256}". The call must contain exactly those seven required root properties and must never send nested input.
 6. Stop immediately after the successful prepare result. Do not upload, submit the attachment, or call another tool.`;
 }
@@ -533,9 +534,9 @@ function phaseThreePrompt(state) {
 
 0. First call Skill with exact input {"skill":"problem-locator-client"}; do not call MCP before it succeeds.
 1. Call problem_locator_submit_supplement exactly once with request_id "${state.request_ids.submit_attachment}", case_id "${state.case_id}", expected_case_revision ${state.case_revision}, input_names [], input_values [], attachment_ids ["${state.attachment_id}"], wait_seconds 0.
-2. Poll problem_locator_get_case with non-empty case_id until WAITING_INPUT has exactly one OPEN INPUT requirement order_id.
+2. Poll problem_locator_get_case with non-empty case_id and wait_seconds 30 until WAITING_INPUT has exactly one OPEN INPUT requirement order_id. Use wait_seconds 30 on every poll; do not rapid-poll.
 3. Call problem_locator_submit_supplement exactly once with request_id "${state.request_ids.submit_order}", latest revision, input_names ["order_id"], input_values ["synthetic-order-0001"], attachment_ids [], wait_seconds 0.
-4. Poll promptly. Observe REVIEWING, then continue with the authoritative active review job id until RESOLVED with final_result.status ACCEPTED. Do not skip REVIEWING.
+4. Poll with wait_seconds 30. Observe REVIEWING, then continue with the authoritative active review job id until RESOLVED with final_result.status ACCEPTED. Use wait_seconds 30 on every poll, do not rapid-poll, and do not skip REVIEWING.
 5. Call problem_locator_list_artifacts exactly once for this Case and stop. Do not call another tool.`;
 }
 
@@ -686,6 +687,18 @@ async function stopService(configuration, state) {
   mergeEventParts(configuration.attemptRoot, state.run_id, "journey");
   mergeEventParts(configuration.attemptRoot, state.run_id, "diagnostics");
   return verifyCorrespondence(state, configuration.attemptRoot);
+}
+
+async function archiveFailureServiceEvidence(configuration) {
+  if (!configuration.statePath || !fs.existsSync(configuration.statePath)) return;
+  const state = readJson(configuration.statePath);
+  if (state.schema_version !== 1 || state.run_id !== path.basename(configuration.attemptRoot)) return;
+  if (typeof state.current_instance === "string") {
+    try { await quiesceService(configuration, state); } catch {}
+  }
+  for (const mode of ["journey", "diagnostics"]) {
+    try { mergeEventParts(configuration.attemptRoot, state.run_id, mode); } catch {}
+  }
 }
 
 async function initializeContainer(configuration, state, containerName, mode, stageId) {
@@ -894,7 +907,7 @@ async function execute(configuration) {
   requireCondition(canonicalJson(state.runtime_identity) === canonicalJson(runtimeIdentity), "RELEASE_RUNTIME_IDENTITY_DRIFT", "BLOCKED", "INFRA");
 
   if (configuration.stage === "journey.cross-job.route") {
-    const audit = await runClaude(configuration, state, configuration.stageRoot, "phase1", phaseOnePrompt(state.request_ids), 20, 3);
+    const audit = await runClaude(configuration, state, configuration.stageRoot, "phase1", phaseOnePrompt(state.request_ids), 50, 3);
     const summary = validatePhaseOne(audit, state.request_ids, state.public_base_url);
     Object.assign(state, summary);
     state.client_calls.push(...audit.records.map((record, index) => ({ phase: "phase1", ordinal: state.client_calls.length + index, tool_name: record.tool_name, input: record.input })));
@@ -930,7 +943,7 @@ async function execute(configuration) {
   }
 
   if (configuration.stage === "journey.cross-job.diagnose") {
-    const audit = await runClaude(configuration, state, configuration.stageRoot, "phase3", phaseThreePrompt(state), 30, 5);
+    const audit = await runClaude(configuration, state, configuration.stageRoot, "phase3", phaseThreePrompt(state), 50, 5);
     const summary = validatePhaseThree(audit, state);
     Object.assign(state, summary);
     state.client_calls.push(...audit.records.map((record, index) => ({ phase: "phase3", ordinal: state.client_calls.length + index, tool_name: record.tool_name, input: record.input })));
@@ -1014,6 +1027,7 @@ try {
   process.stdout.write("TEST_FLOW_PROGRESS stage.completed\n");
 } catch (error) {
   const failure = error instanceof StageError ? error : new StageError(`ADAPTER_UNEXPECTED:${String(error?.message ?? error)}`);
+  try { await archiveFailureServiceEvidence(configuration); } catch {}
   try {
     if (configuration.stageRoot) {
       ensureDirectory(configuration.stageRoot);

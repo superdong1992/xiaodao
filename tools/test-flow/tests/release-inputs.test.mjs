@@ -119,6 +119,24 @@ test("macOS adapter permits only the environment diagnostic outside Release", ()
   assert.doesNotMatch(adapter, /configuration\.track === "dev" \|\| configuration\.track === "release"/);
 });
 
+test("macOS adapter bounds long polls without discarding failure evidence", () => {
+  const adapter = fs.readFileSync(path.join(TOOL_ROOT, "adapters", "macos-linux-release.mjs"), "utf8");
+  assert.match(adapter, /function parseClaudeStream\(text, expectedCwd, \{ allowErrorTerminal = false \} = \{\}\)/);
+  assert.match(adapter, /allowErrorTerminal: exit\.code !== 0/);
+  const auditWrite = adapter.indexOf("writeNew(auditPath, audit);");
+  const exitFailure = adapter.indexOf("if (exit.code !== 0) throw new StageError");
+  assert.equal(auditWrite >= 0 && exitFailure > auditWrite, true);
+  assert.match(adapter, /wait_seconds 30 on every poll; do not rapid-poll/);
+  assert.match(adapter, /phaseOnePrompt\(state\.request_ids\), 50, 3/);
+  assert.match(adapter, /phaseThreePrompt\(state\), 50, 5/);
+  assert.match(adapter, /async function archiveFailureServiceEvidence\(configuration\)/);
+  assert.match(adapter, /try \{ await quiesceService\(configuration, state\); \} catch \{\}/);
+  assert.match(adapter, /for \(const mode of \["journey", "diagnostics"\]\)/);
+  const archiveFailure = adapter.indexOf("await archiveFailureServiceEvidence(configuration)");
+  const recoverProgress = adapter.indexOf("const progress = recoverStageAuditProgress");
+  assert.equal(archiveFailure >= 0 && recoverProgress > archiveFailure, true);
+});
+
 test("offline container installation uses the build backend sealed into the v2 image", () => {
   const dockerfile = fs.readFileSync(path.join(TOOL_ROOT, "Dockerfile"), "utf8");
   const initializer = fs.readFileSync(path.join(TOOL_ROOT, "harness", "macos-initialize-container.sh"), "utf8");
