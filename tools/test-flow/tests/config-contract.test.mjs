@@ -95,6 +95,22 @@ test("every public platform has a repository-owned adapter and no harness identi
   assert.equal(fs.existsSync(path.join(REPO_ROOT, "tools", "test-flow", "harness")), false);
 });
 
+test("every repository identity path exists and the two diagnosis skills are distinct", () => {
+  const config = loadConfiguration(REPO_ROOT);
+  for (const [componentId, component] of Object.entries(config.identities.components)) {
+    if (component.kind !== "paths") continue;
+    for (const relative of component.paths) {
+      assert.equal(fs.existsSync(path.join(REPO_ROOT, relative)), true, `${componentId} is missing ${relative}`);
+    }
+  }
+  assert.deepEqual(config.identities.components["skill.diagnose"].paths, [
+    "tests/fixtures/components/diagnosis-generator/diagnose-service-takeover",
+  ]);
+  assert.deepEqual(config.identities.components["skill.logparse"].paths, [
+    ".claude/skills/logparse-diagnose",
+  ]);
+});
+
 test("unsupported policy versions and dead fields fail closed", () => {
   assert.throws(() => withConfigMutation("policy.v2.json", (value) => {
     value.process.progress_allowlist_version = "test-flow-progress-v1";

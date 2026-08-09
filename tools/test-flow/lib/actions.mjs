@@ -667,7 +667,14 @@ function realEnvironment(context, profile) {
   if (profile === "real-route") return { env: { ...common, S08_REAL_ROUTE_AGENT_GATE: "1" } };
   if (profile === "real-review") return { env: { ...common, S08_REAL_REVIEW_AGENT_GATE: "1" } };
   if (profile === "real-diagnose") {
-    const skillPath = path.join(context.repoRoot, ".claude", "skills", "diagnose-service-takeover");
+    const skillPath = path.join(
+      context.repoRoot,
+      "tests",
+      "fixtures",
+      "components",
+      "diagnosis-generator",
+      "diagnose-service-takeover",
+    );
     if (!fs.existsSync(skillPath)) return { error: "DIAGNOSE_SKILL_MISSING" };
     return {
       env: {

@@ -14,7 +14,8 @@
     "adapter.server": {"kind": "paths", "paths": ["tools/test-flow/adapters/server-linux-capability.mjs"]},
     "adapter.cross-job": {"kind": "paths", "paths": ["tools/test-flow/adapters/cross-job-core.mjs", "tools/test-flow/adapters/macos-linux-release.mjs", "tools/test-flow/adapters/windows-linux-release.mjs", "tools/test-flow/adapters/linux-linux-release.mjs"]},
     "skill.client": {"kind": "paths", "paths": [".claude/skills/problem-locator-client"]},
-    "skill.diagnose": {"kind": "paths", "paths": [".claude/skills/diagnose-service-takeover"]},
+    "skill.diagnose": {"kind": "paths", "paths": ["tests/fixtures/components/diagnosis-generator/diagnose-service-takeover"]},
+    "skill.logparse": {"kind": "paths", "paths": [".claude/skills/logparse-diagnose"]},
     "source.agent": {"kind": "paths", "paths": ["src/problem_locator/runtime/agent_backend.py", "src/problem_locator/runtime/claude_command.py", "src/problem_locator/runtime/process_tree.py"]},
     "source.route": {"kind": "paths", "paths": ["src/problem_locator/domain", "src/problem_locator/runtime"]},
     "source.logparse": {"kind": "paths", "paths": ["src/problem_locator/integrations/logparse"]},
@@ -61,7 +62,7 @@
       "proof": ["proof.real", "framework.runner"]
     },
     "real-diagnose": {
-      "producer": ["source.agent", "source.diagnose", "source.logparse", "skill.diagnose", "external.logparse", "runtime.claude", "runtime.settings", "runtime.release", "runtime.environment"],
+      "producer": ["source.agent", "source.diagnose", "source.logparse", "skill.diagnose", "skill.logparse", "external.logparse", "runtime.claude", "runtime.settings", "runtime.release", "runtime.environment"],
       "proof": ["proof.real", "framework.runner"]
     },
     "real-review": {
@@ -69,7 +70,7 @@
       "proof": ["proof.real", "framework.runner"]
     },
     "cross-job": {
-      "producer": ["product.source", "product.fixtures", "skill.client", "skill.diagnose", "runtime.support", "adapter.cross-job", "external.logparse", "external.mcp", "runtime.claude", "runtime.settings", "runtime.release", "runtime.environment"],
+      "producer": ["product.source", "product.fixtures", "skill.client", "skill.diagnose", "skill.logparse", "runtime.support", "adapter.cross-job", "external.logparse", "external.mcp", "runtime.claude", "runtime.settings", "runtime.release", "runtime.environment"],
       "proof": ["proof.platform", "proof.real", "framework.runner"]
     },
     "cross-job-route": {
@@ -77,11 +78,11 @@
       "proof": ["proof.real", "framework.runner"]
     },
     "cross-job-logparse": {
-      "producer": ["product.source", "product.fixtures", "source.logparse", "runtime.support", "adapter.cross-job", "external.logparse", "external.mcp", "runtime.release"],
+      "producer": ["product.source", "product.fixtures", "source.logparse", "skill.logparse", "runtime.support", "adapter.cross-job", "external.logparse", "external.mcp", "runtime.release"],
       "proof": ["proof.real", "framework.runner"]
     },
     "cross-job-diagnose": {
-      "producer": ["product.source", "product.fixtures", "source.agent", "source.diagnose", "source.logparse", "skill.diagnose", "runtime.support", "adapter.cross-job", "external.logparse", "external.mcp", "runtime.claude", "runtime.settings", "runtime.release"],
+      "producer": ["product.source", "product.fixtures", "source.agent", "source.diagnose", "source.logparse", "skill.diagnose", "skill.logparse", "runtime.support", "adapter.cross-job", "external.logparse", "external.mcp", "runtime.claude", "runtime.settings", "runtime.release"],
       "proof": ["proof.real", "framework.runner"]
     },
     "cross-job-review": {
