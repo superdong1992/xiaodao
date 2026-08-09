@@ -293,18 +293,9 @@ powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass `
 
 所有外部 Claude 进程都必须通过 `tools/e2e/bounded-process.ps1` 执行。超时是明确失败，不得用无限重试掩盖外部鉴权、额度、网络或模型行为问题。
 
-### TODO：分段无 Mock E2E
+## 后续工作迁移
 
-- 将真实旅程拆成六段：环境与服务、ROUTE 与需求、上传/Logparse/目标日志、DIAGNOSE 与复验、REVIEW、发布/ZIP/重启恢复。
-- 每段成功后冻结 `DATA_ROOT`、资源、State、阶段清单及相关版本/哈希；调试时克隆最近的有效检查点到新的临时 `DATA_ROOT`，不得复用失败或已进入 `UNRESOLVED` 终态的 Case。
-- 检查点从最早受影响阶段起失效：Skill/Logparse/目标解析从第 3 段，Verifier/Result 从第 4 段，Review 合同从第 5 段，ZIP/发布/存储从第 6 段；State schema、核心合同或 bootstrap 变更时全部失效。
-- 发布前仍必须从全新 `DATA_ROOT` 完整执行一次无 Mock `Release` journey。
-
-### TODO：局域网链路提效与效率 DFX
-
-- 先在真实 Windows → Linux 局域网链路建立耗时基线；在现有服务端 DFX 和 E2E 步骤计时上，补齐 Host 等待、网络传输、排队、ROUTE、Logparse、DIAGNOSE、服务端复验、REVIEW、发布与下载的统一耗时瀑布，并用 `correlation_id`、`request_id`、`case_id` 和 `job_id` 串联。
-- 自动汇总各阶段耗时、重试/超时和传输字节，定位主要瓶颈；据此设定阶段预算和回归门禁，再针对最大耗时项优化。
-- DFX 必须脱敏且有大小/轮转上限；保持 Windows 客户端 HTTP 直连，不引入本地 MCP、代理或 Hook。若确需客户端专用 DFX，须单独明确采集、脱敏和部署方案后再实施。
+本复盘原有的后续事项已统一迁移至仓库根目录的 [`TODO.md`](../TODO.md)，此处不再维护重复清单。其中“分段无 Mock E2E”已经由 `tools/test-flow` 落地并关闭；链路效率 DFX 与性能基线仍作为活跃待办跟踪。
 
 ## 已通过的历史验收记录
 

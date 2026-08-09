@@ -6,7 +6,7 @@
 - State、Job、Agent draft 和权威 Outcome 使用 V2 合同；V2 是硬切版本，不读取、迁移或恢复 V1 State、V1 Job、V1 Outcome。
 - Diagnosis Skill 生成器和正式生成 Skill 为 `3.1.1`，GenerationSpec 为 `v3`，manifest schema 为 `3`。
 - 本次把“Agent 按 Skill 分析”升级为“Agent 声明 + 服务端按 Skill 机器复验”，并把 Reviewer 改为盲审。
-- 本次不实现日志抑制、限流、采样或 75 秒规则；相关能力保留为后续 TODO。
+- 本次不实现日志抑制、限流、采样或 75 秒规则；相关后续工作统一记录在仓库根目录的 [`TODO.md`](../TODO.md)。
 
 ## 冻结版本矩阵
 
@@ -143,11 +143,6 @@ Coordinator 将 `INCONCLUSIVE` 和合法的 REVIEW `REJECT` 终止为 `UNRESOLVE
 - 旧 Diagnosis Skill 必须显式按 GenerationSpec v3 重新生成；Runtime 不按需猜测或迁移旧 manifest。
 - 本次不改变 Windows Claude Code 通过 HTTP 直连 Linux MCP Server 的部署边界，也不增加客户端 Hook、代理或专用 DFX。
 
-## 后续 TODO
+## 后续工作
 
-- Diagnosis Skill 必须支持条件性可选参数：参数未命中其声明的诊断分支时不得成为 OPEN requirement，也不得阻塞路由、诊断、Review 或结果交付；只有进入指定分支且该分支确实依赖该参数时，Runtime 才向用户索要。
-- 分支激活条件必须由 Skill 显式声明、可机读并写入审计与 replay 输入；不得由 Agent 临时发明分支、用空字符串或隐藏默认值冒充未提供参数，也不得依赖客户端 Hook 修正语义。
-- 条件参数若已作为初始 USER_FACT 提供，应直接固定并复用，不得重复询问；若未提供，分支激活后才创建一次可补充的 OPEN requirement。生成器、manifest/合同、Catalog、Coordinator、服务端验证器和正反向测试必须共同覆盖“命中分支才询问、未命中分支不询问且不阻塞”。
-- 本版只支持普通事件时间窗，不声明或推断日志抑制、限流或采样语义。
-- 后续若业务 Skill 需要 75 秒或其他抑制机制，应新增显式、可机读的规则类型，并由 Skill 自己声明允许窗口方向、开闭边界、抑制键、最大间隔以及无日志时的可验证行为。
-- 框架不得硬编码 75 秒，也不得在 Skill 未声明时自行放宽时间窗口。
+本设计中的活跃待办已统一迁移至仓库根目录的 [`TODO.md`](../TODO.md)，此处不再维护重复清单。
