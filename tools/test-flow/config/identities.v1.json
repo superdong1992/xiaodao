@@ -1,0 +1,77 @@
+{
+  "schema_version": 1,
+  "groups": {
+    "framework": {
+      "paths": ["tools/test-flow"],
+      "include_runner": true,
+      "include_scanner": true
+    },
+    "product": {
+      "paths": ["src", "schemas", "pyproject.toml", "uv.lock", "tests/deterministic", "tests/fixtures"],
+      "proof_paths": ["tests/deterministic"],
+      "include_environment": true
+    },
+    "client": {
+      "paths": [".claude/skills", "tools/test-flow/harness/windows-journey-lib.ps1", "tools/test-flow/harness/run-windows-journey.ps1"],
+      "proof_paths": ["tests/platform/client", "tools/test-flow/adapters/host-capability.mjs"],
+      "include_client_binary": true,
+      "include_model_context": true
+    },
+    "server": {
+      "paths": ["src", "tools/test-flow/Dockerfile", "tools/test-flow/harness/start_service_supervisor.sh", "tools/test-flow/harness/relay_service_journey.py"],
+      "proof_paths": ["tests/platform/server_linux", "tools/test-flow/adapters/server-linux-capability.mjs"],
+      "external_trees": ["server_model_probe"],
+      "include_model_context": true,
+      "include_environment": true
+    },
+    "logparse": {
+      "paths": ["src/problem_locator/integrations/logparse", "tools/test-flow/harness/gate_real_logparse.sh"],
+      "proof_paths": ["tests/real/logparse"],
+      "external_trees": ["logparse"],
+      "include_model_context": true
+    },
+    "agent": {
+      "paths": ["src/problem_locator/integrations/agent_backend.py", "src/problem_locator/runtime"],
+      "proof_paths": ["tests/real/agent/test_real_agent_backend_gate.py"],
+      "include_model_context": true
+    },
+    "route": {
+      "paths": ["src/problem_locator/domain", "src/problem_locator/runtime"],
+      "proof_paths": ["tests/real/agent/test_real_route_agent_contract_gate.py"],
+      "include_model_context": true
+    },
+    "diagnose": {
+      "paths": ["src/problem_locator/runtime", "src/problem_locator/integrations"],
+      "proof_paths": ["tests/real/agent/test_real_diagnose_agent_contract_gate.py"],
+      "include_model_context": true
+    },
+    "review": {
+      "paths": ["src/problem_locator/runtime", "src/problem_locator/domain"],
+      "proof_paths": ["tests/real/agent/test_real_review_agent_contract_gate.py"],
+      "include_model_context": true
+    },
+    "journey": {
+      "paths": ["src", "tests/fixtures", "tools/test-flow/harness", ".claude/skills"],
+      "external_trees": ["logparse", "mcp", "cross_job_adapter"],
+      "include_client_binary": true,
+      "include_model_context": true,
+      "include_environment": true
+    },
+    "proof": {
+      "paths": ["tools/test-flow", "tests"],
+      "include_runner": true,
+      "include_scanner": true
+    }
+  },
+  "change_rules": [
+    {"pattern": "^tools/test-flow/", "groups": ["framework", "proof", "journey"]},
+    {"pattern": "^tests/deterministic/|^src/", "groups": ["product"]},
+    {"pattern": "logparse", "groups": ["logparse", "journey"]},
+    {"pattern": "route|routing", "groups": ["route", "journey"]},
+    {"pattern": "diagnos", "groups": ["diagnose", "journey"]},
+    {"pattern": "review", "groups": ["review", "journey"]},
+    {"pattern": "agent", "groups": ["agent", "journey"]},
+    {"pattern": "^\\.claude/|^tests/platform/client/", "groups": ["client", "journey"]},
+    {"pattern": "Dockerfile|server_linux|start_service", "groups": ["server", "journey"]}
+  ]
+}

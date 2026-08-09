@@ -839,6 +839,70 @@ def _candidate(
     )
 
 
+def _same_job_candidate(
+    instruction: dict[str, object],
+    manifest: WorkspaceInputManifest,
+    skill_manifest: dict[str, object],
+    snapshot: dict[str, object],
+) -> AgentJobOutcomeDraftV2:
+    """Parse the first attachment and conclude when order_id is already known.
+
+    This is the deterministic counterpart of the production SameJob path.  It
+    deliberately binds the candidate to evidence proposals from this Outcome;
+    no synthetic continuation Job or persisted-artifact round trip is allowed.
+    """
+
+    parsed = _first_log_analysis(
+        instruction,
+        manifest,
+        skill_manifest,
+        snapshot,
+    )
+    evidence_bindings = [
+        EvidenceBinding(
+            existing_evidence_id=None,
+            evidence_proposal_key=item.proposal_key,
+        )
+        for item in parsed.proposed_evidence_drafts
+    ]
+    if len(evidence_bindings) != 2:
+        raise RuntimeError("the SameJob fixture requires exactly two Evidence proposals")
+    problem_spec = snapshot["problem_spec"]
+    if not isinstance(problem_spec, dict):
+        raise RuntimeError("the SameJob problem specification is invalid")
+    criterion = str(problem_spec["completion_criteria"][0])
+    candidate = CandidateConclusionDraft(
+        proposal_key="candidate",
+        existing_conclusion_id=None,
+        statement="The inventory RPC exceeded its deadline.",
+        supporting_evidence_bindings=list(reversed(evidence_bindings)),
+        completion_criteria_mapping=[
+            CompletionCriterionDraftMapping(
+                criterion_index=0,
+                criterion=criterion,
+                satisfied=True,
+                evidence_bindings=evidence_bindings,
+                explanation="The request identifier appears in the parsed log.",
+            )
+        ],
+    )
+    return _agent_outcome(
+        instruction,
+        result_type=OutcomeResultType.COMPLETED,
+        payload=DiagnosisOutcome(
+            findings=[],
+            state_delta=_empty_delta(add_evidence_bindings=evidence_bindings),
+            requested_input=[],
+            requested_attachments=[],
+            candidate_conclusion_draft=candidate,
+            recommended_next_step="Submit the fixed candidate for independent review.",
+        ),
+        proposed_evidence_drafts=list(parsed.proposed_evidence_drafts),
+        proposed_artifact_drafts=list(parsed.proposed_artifact_drafts),
+        rule_claims=list(parsed.rule_claims),
+    )
+
+
 def _review(
     instruction: dict[str, object],
     manifest: WorkspaceInputManifest,
@@ -922,12 +986,20 @@ def main() -> int:
                 skill_manifest,
             )
         elif "ATTACHMENT" in entries:
-            outcome = _first_log_analysis(
-                instruction,
-                manifest,
-                skill_manifest,
-                snapshot,
-            )
+            if "order_id" in user_fact_names:
+                outcome = _same_job_candidate(
+                    instruction,
+                    manifest,
+                    skill_manifest,
+                    snapshot,
+                )
+            else:
+                outcome = _first_log_analysis(
+                    instruction,
+                    manifest,
+                    skill_manifest,
+                    snapshot,
+                )
         elif {name for _, name, _ in PARAMETER_REQUIREMENTS} <= user_fact_names:
             outcome = _request_attachment(
                 instruction,

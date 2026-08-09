@@ -1,8 +1,0 @@
-**
-!pyproject.toml
-!uv.lock
-!tools/
-tools/**
-!tools/e2e/
-tools/e2e/**
-!tools/e2e/logparse-requirements.txt

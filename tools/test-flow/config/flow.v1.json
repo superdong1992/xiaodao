@@ -1,0 +1,178 @@
+{
+  "schema_version": 1,
+  "defaults": {
+    "track": "dev",
+    "goal": "dev.default",
+    "client": "auto",
+    "resume": "auto",
+    "evidence_root": ".tmp/test-flow-evidence",
+    "history_limit": 10,
+    "performance_min_samples": 5,
+    "performance_consecutive_failures": 2,
+    "real_no_progress_seconds": 360,
+    "real_hard_timeout_seconds": 1200,
+    "event_visibility_seconds": 5,
+    "event_file_limit_bytes": 67108864,
+    "raw_log_file_limit_bytes": 134217728
+  },
+  "tracks": {
+    "dev": {
+      "default_goal": "dev.default",
+      "requires_clean_commit": false,
+      "performance_policy": "warn"
+    },
+    "release": {
+      "default_goal": "release.full",
+      "requires_clean_commit": true,
+      "performance_policy": "gate"
+    }
+  },
+  "stages": [
+    {
+      "id": "framework.self-test",
+      "kind": "deterministic",
+      "depends_on": [],
+      "action": "framework_self_test",
+      "timeout_seconds": 60,
+      "identity_group": "framework"
+    },
+    {
+      "id": "deterministic.affected",
+      "kind": "deterministic",
+      "depends_on": ["framework.self-test"],
+      "action": "deterministic_affected",
+      "timeout_seconds": 60,
+      "identity_group": "product"
+    },
+    {
+      "id": "deterministic.full",
+      "kind": "deterministic",
+      "depends_on": ["deterministic.affected"],
+      "action": "deterministic_full",
+      "timeout_seconds": 300,
+      "identity_group": "product"
+    },
+    {
+      "id": "platform.host-capability",
+      "kind": "capability",
+      "depends_on": ["deterministic.full"],
+      "action": "host_capability",
+      "timeout_seconds": 60,
+      "identity_group": "client"
+    },
+    {
+      "id": "platform.server-linux-capability",
+      "kind": "capability",
+      "depends_on": ["deterministic.full"],
+      "action": "server_linux_capability",
+      "timeout_seconds": 120,
+      "identity_group": "server"
+    },
+    {
+      "id": "real.logparse",
+      "kind": "isolated-real",
+      "depends_on": ["deterministic.full"],
+      "action": "real_logparse",
+      "timeout_seconds": 1200,
+      "identity_group": "logparse"
+    },
+    {
+      "id": "real.agent-backend",
+      "kind": "isolated-real",
+      "depends_on": ["deterministic.full"],
+      "action": "real_agent_backend",
+      "timeout_seconds": 1200,
+      "identity_group": "agent"
+    },
+    {
+      "id": "real.route",
+      "kind": "isolated-real",
+      "depends_on": ["real.agent-backend"],
+      "action": "real_route",
+      "timeout_seconds": 1200,
+      "identity_group": "route"
+    },
+    {
+      "id": "real.diagnose",
+      "kind": "isolated-real",
+      "depends_on": ["real.agent-backend"],
+      "action": "real_diagnose",
+      "timeout_seconds": 1200,
+      "identity_group": "diagnose"
+    },
+    {
+      "id": "real.review",
+      "kind": "isolated-real",
+      "depends_on": ["real.agent-backend"],
+      "action": "real_review",
+      "timeout_seconds": 1200,
+      "identity_group": "review"
+    },
+    {
+      "id": "journey.cross-job.environment",
+      "kind": "real-journey",
+      "depends_on": ["platform.host-capability", "platform.server-linux-capability"],
+      "action": "journey_environment",
+      "timeout_seconds": 1200,
+      "identity_group": "journey"
+    },
+    {
+      "id": "journey.cross-job.route",
+      "kind": "real-journey",
+      "depends_on": ["journey.cross-job.environment"],
+      "action": "journey_route",
+      "timeout_seconds": 1200,
+      "identity_group": "route"
+    },
+    {
+      "id": "journey.cross-job.upload",
+      "kind": "real-journey",
+      "depends_on": ["journey.cross-job.route"],
+      "action": "journey_upload",
+      "timeout_seconds": 1200,
+      "identity_group": "logparse"
+    },
+    {
+      "id": "journey.cross-job.diagnose",
+      "kind": "real-journey",
+      "depends_on": ["journey.cross-job.upload"],
+      "action": "journey_diagnose",
+      "timeout_seconds": 1200,
+      "identity_group": "diagnose"
+    },
+    {
+      "id": "journey.cross-job.review",
+      "kind": "observation",
+      "depends_on": ["journey.cross-job.diagnose"],
+      "action": "journey_review_audit",
+      "timeout_seconds": 120,
+      "identity_group": "review"
+    },
+    {
+      "id": "journey.cross-job.publish-restart",
+      "kind": "real-journey",
+      "depends_on": ["journey.cross-job.review"],
+      "action": "journey_publish_restart",
+      "timeout_seconds": 1200,
+      "identity_group": "journey"
+    },
+    {
+      "id": "rollout.parity",
+      "kind": "rollout",
+      "depends_on": ["deterministic.full"],
+      "action": "rollout_parity_once",
+      "timeout_seconds": 7200,
+      "estimated_tokens": 100000,
+      "estimated_cost_usd": 60,
+      "identity_group": "journey"
+    },
+    {
+      "id": "evidence.finalize",
+      "kind": "finalizer",
+      "depends_on": [],
+      "action": "finalize",
+      "timeout_seconds": 120,
+      "identity_group": "proof"
+    }
+  ]
+}

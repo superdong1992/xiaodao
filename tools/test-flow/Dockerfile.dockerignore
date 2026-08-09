@@ -1,0 +1,8 @@
+**
+!pyproject.toml
+!uv.lock
+!tools/
+tools/**
+!tools/test-flow/
+tools/test-flow/**
+!tools/test-flow/logparse-requirements.txt

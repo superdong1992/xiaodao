@@ -1,0 +1,60 @@
+{
+  "schema_version": 1,
+  "goals": {
+    "dev.default": {
+      "description": "Affected deterministic feedback followed by the complete deterministic suite.",
+      "tracks": ["dev"],
+      "proofs": ["proof.framework", "proof.affected", "proof.deterministic-full"]
+    },
+    "dev.real": {
+      "description": "An explicitly requested real-model proof after deterministic admission.",
+      "tracks": ["dev"],
+      "requires_real_opt_in": true,
+      "proofs": ["proof.framework", "proof.affected", "proof.deterministic-full", "proof.real-selected"]
+    },
+    "release.full": {
+      "description": "All deterministic proofs, fresh capabilities, identity-relevant isolated gates and one fresh CrossJob journey.",
+      "tracks": ["release"],
+      "proofs": [
+        "proof.framework",
+        "proof.affected",
+        "proof.deterministic-full",
+        "proof.host-capability",
+        "proof.server-linux-capability",
+        "proof.real-isolated-relevant",
+        "proof.cross-job-fresh",
+        "proof.evidence"
+      ]
+    },
+    "release.rollout-parity": {
+      "description": "One bounded old/new full Release parity pair after cheap validation.",
+      "tracks": ["release"],
+      "proofs": ["proof.release-parity"]
+    }
+  },
+  "proofs": {
+    "proof.framework": {"stages": ["framework.self-test"]},
+    "proof.affected": {"stages": ["deterministic.affected"]},
+    "proof.deterministic-full": {"stages": ["deterministic.full"]},
+    "proof.host-capability": {"stages": ["platform.host-capability"]},
+    "proof.server-linux-capability": {"stages": ["platform.server-linux-capability"]},
+    "proof.real-selected": {"selector": "requested-real-stage"},
+    "proof.real-isolated-relevant": {
+      "selector": "identity-changed",
+      "candidates": ["real.logparse", "real.agent-backend", "real.route", "real.diagnose", "real.review"]
+    },
+    "proof.cross-job-fresh": {
+      "fresh": true,
+      "stages": [
+        "journey.cross-job.environment",
+        "journey.cross-job.route",
+        "journey.cross-job.upload",
+        "journey.cross-job.diagnose",
+        "journey.cross-job.review",
+        "journey.cross-job.publish-restart"
+      ]
+    },
+    "proof.evidence": {"stages": ["evidence.finalize"]},
+    "proof.release-parity": {"stages": ["rollout.parity"]}
+  }
+}

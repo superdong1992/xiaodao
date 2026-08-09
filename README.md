@@ -43,9 +43,9 @@ Agent 无权预先构造、摘要或替代这两项结果。Reviewer 使用盲�
 
 ### 发布验收
 
-使用仓库内置的分段链路验证同一份生产补丁：先运行 `Fast` 完成 Windows 客户端到 Linux 服务的跨 Job 与同 Job 两条完整业务旅程，再以该成功证据作为 `BusinessEvidenceRoot` 运行 `ReleaseGates`。后者会并行执行目标回归、全量套件、干净安装包、原生 Linux 启动以及真实 Agent/Route/Diagnosis 合同门；包含双 Case 业务旅程及合法 Review 修正链的完整 `Release` 要求低于 1200 秒 SLA。
+仓库测试统一从 [`tools/test-flow`](tools/test-flow/README.md) 进入。Dev 默认只跑受影响确定性测试和完整确定性套件，不调用真实模型；SameJob 已纳入确定性 Journey。Release 要求 clean commit、fresh Client/Server 能力探针、身份相关的隔离真实门，以及从 GENESIS 和全新空 `DATA_ROOT` 开始的一条 no-mock CrossJob 旅程。
 
-每次运行的本地证据保存在 `.tmp/pl-e2e-evidence/<attempt>`；运行时证据不属于发布包。发布结论以对应目录中的 `verification-report.json`、最终审计 JSON、密钥扫描结果和 JUnit 文件为准。
+每次运行的本地证据保存在 `.tmp/test-flow-evidence/<run-id>`。`verdict.json` 是唯一权威结论；兼容生成的 `verification-report.json` 只指向它，不能单独作为 PASS。证据在复用前会按当前密钥扫描器和事件合同重新审计，且不会自动删除。
 
 Problem Locator 是一个单实例故障诊断服务。它接收结构化问题，收集事实与附件，执行固定版本的路由、诊断和盲审任务，最终发布经过机器验证和独立复核的完成态 `USER_RESULT`，或发布说明无法可靠定论的 `INCONCLUSIVE` `USER_RESULT` JSON 与 `UNRESOLVED` 审计包。
 
@@ -136,7 +136,7 @@ uv run python -m problem_locator serve --env-file /absolute/path/to/service.env
 
 ### 客户端远端 MCP 配置
 
-Windows 客户端不安装 `problem-locator` Python 包，也不启动本地 MCP Server 或转发代理。Claude Code 自身作为 MCP Host/Client，直接连接 Linux 服务端的 Streamable HTTP `/mcp`。客户端项目根目录的 `.mcp.json` 使用固定 server key `problem-locator`：
+Windows 和 macOS 默认使用本机 Claude Code；Linux Client 只在显式选择时使用。客户端不安装 `problem-locator` Python 包，也不启动本地 MCP Server 或转发代理。Claude Code 自身作为 MCP Host/Client，直接连接唯一受支持的 Linux 服务端 Streamable HTTP `/mcp`。客户端项目根目录的 `.mcp.json` 使用固定 server key `problem-locator`：
 
 ```json
 {
@@ -156,39 +156,39 @@ $env:PROBLEM_LOCATOR_MCP_URL = "http://192.168.1.20:8000/mcp"
 $env:NO_PROXY = "localhost,127.0.0.1,192.168.1.20"
 ```
 
-从 1.0.1 迁移时，先删除 local/project/user 各 scope 中所有指向 `problem-locator-client-proxy` 的同名 stdio 配置；确认该 Windows 机器不承担 Linux 服务后，可以卸载旧客户端 `uv tool`。必须完全退出全部 Claude Code 进程并新建会话，避免旧进程和缓存 schema 遮蔽新的 HTTP 配置。启动后用 `/mcp` 确认 `problem-locator` 的传输类型和连接状态。
+从 1.0.1 迁移时，先删除 local/project/user 各 scope 中所有指向 `problem-locator-client-proxy` 的同名 stdio 配置；客户端机器不承担 Linux Server，可以卸载旧客户端 `uv tool`。必须完全退出全部 Claude Code 进程并新建会话，避免旧进程和缓存 schema 遮蔽新的 HTTP 配置。启动后用 `/mcp` 确认 `problem-locator` 的传输类型和连接状态。
 
 1.0.5 不安装 Problem Locator Hook，也不生成客户端 DFX。升级时从 `.claude/settings.json` 删除所有旧 Problem Locator Hook 组，删除曾复制到客户端项目的兼容/DFX PowerShell 脚本；已有日志属于用户数据，不会自动删除。完成清理后完全退出 Claude Code、重新启动并新建会话，只通过 `/mcp` 验证远端服务和新 schema。
 
 服务端继续严格拒绝旧字段 `problem_spec`、`initial_user_facts`、`inputs`，也不会自动解析 JSON 字符串。线上 schema、实际参数和验证错误以 Linux 服务端的 `mcp.tools.listed`、`mcp.tool.started` 和验证事件为准。
 
-#### Windows 客户端到 Linux 服务端的发布门禁
+#### 原生客户端到 Linux 服务端的发布门禁
 
-直接 HTTP schema 探针确认七个工具只公布扁平输入，并验证旧复合字段和错误数组类型得到严格拒绝。它不代替真实 Host 门禁：
+Windows/macOS 默认跟随当前 Host；Linux Client 必须显式启用。直接 HTTP schema 探针确认七个工具只公布扁平输入，并验证旧复合字段和错误数组类型得到严格拒绝。它不代替真实 Host 门禁：
 
 ```powershell
-$env:PROBLEM_LOCATOR_WINDOWS_LINUX_GATE = "1"
+$env:PROBLEM_LOCATOR_NATIVE_CLIENT_LINUX_GATE = "1"
 $env:PROBLEM_LOCATOR_LINUX_MCP_URL = "http://192.168.1.20:8000/mcp"
 $env:HTTP_PROXY = "http://127.0.0.1:9"
 $env:HTTPS_PROXY = "http://127.0.0.1:9"
 $env:NO_PROXY = "192.168.1.20"
 # 可选鉴权头，值必须是 JSON 字符串 Map：
 # $env:PROBLEM_LOCATOR_LINUX_MCP_HEADERS_JSON = '{"Authorization":"Bearer token"}'
-python -m pytest tests/e2e/test_windows_linux_client_gate.py::test_windows_direct_http_to_real_linux_mcp_uses_only_flat_inputs -q
+python -m pytest tests/platform/client/test_native_client_linux_server_gate.py::test_native_client_direct_http_to_real_linux_mcp_uses_only_flat_inputs -q
 ```
 
-发布前还必须使用官方 npm Claude Code 2.1.89、真实 Skill 且不加载任何 Problem Locator Hook 完成 Windows→Linux 调用；不再运行 2.1.150。直接 HTTP schema 探针同时把 `HTTP_PROXY/HTTPS_PROXY` 指向不可用地址，用它证明 MCP 主机通过 `NO_PROXY` 绕过代理。真实 Host 门禁通过 Claude stream-json 和 Linux 服务端 DFX 验证扁平参数，并反向确认不会生成 `.problem-locator/client-dfx.jsonl`。
+发布前还必须使用本次身份中冻结的 Claude Code、真实 Skill 且不加载任何 Problem Locator Hook 完成本机 Client→Linux 调用。版本不在文档中写死，而是以 executable hash 和 `--version` 输出纳入证据。直接 HTTP schema 探针同时把 `HTTP_PROXY/HTTPS_PROXY` 指向不可用地址，用它证明 MCP 主机通过 `NO_PROXY` 绕过代理。真实 Host 门禁通过 Claude stream-json 和 Linux 服务端 DFX 验证扁平参数，并反向确认不会生成客户端 DFX。
 
 ```powershell
 $env:PROBLEM_LOCATOR_REAL_HOST_FLAT_GATE = "1"
 $env:PROBLEM_LOCATOR_REAL_HOST_SERVER_DFX_LOG = "D:\logs\problem-locator\server-debug.jsonl"
 $env:PROBLEM_LOCATOR_REAL_HOST_REQUEST_ID = "10000000-0000-0000-0000-000000000001"
-$env:PROBLEM_LOCATOR_REAL_HOST_CLAUDE_VERSION = "2.1.89 (Claude Code)"
+$env:PROBLEM_LOCATOR_REAL_HOST_CLAUDE_VERSION = "<current exact version>"
 $env:PROBLEM_LOCATOR_RELEASE_GATES_REQUIRED = "1"
-python -m pytest tests/e2e/test_windows_linux_client_gate.py::test_real_host_sends_flat_inputs_to_the_linux_service -q
+python -m pytest tests/platform/client/test_native_client_linux_server_gate.py::test_real_host_sends_flat_inputs_to_the_linux_service -q
 ```
 
-设置 `PROBLEM_LOCATOR_RELEASE_GATES_REQUIRED=1` 后，官方门禁缺少 Windows、官方 npm Claude Code 2.1.89、服务端地址或服务端 DFX 时必须失败，不得以 skipped 计为发布通过。局域网改版客户端仍需部署后通过 `/mcp`、真实 `create_case`/`submit_supplement` 成功结果和 Linux 服务端日志关闭实际故障。
+设置 `PROBLEM_LOCATOR_RELEASE_GATES_REQUIRED=1` 后，当前平台的原生 Client、Linux 服务地址或服务端 DFX 缺失时必须失败，不得以 skipped 计为发布通过。局域网改版客户端仍需部署后通过 `/mcp`、真实 `create_case`/`submit_supplement` 成功结果和 Linux 服务端日志关闭实际故障。
 
 所有新增或修改的 MCP 输入必须继续保持扁平：根 object 属性只能是标量、nullable 标量或标量数组，不得新增 `$ref/$defs`、嵌套 object、动态 Map 或对象数组；合同测试不设白名单。
 
@@ -351,41 +351,13 @@ V2 不包含 PostgreSQL、ORM、双写机制或分布式锁。当满足以下任
 - 普通 MCP/HTTP 元数据和错误响应中不得出现密钥、原始环境变量值、服务器路径、日志归档内容、代理令牌或内部执行日志。只有用户显式下载 `UNRESOLVED` 的 `AUDIT_BUNDLE` 时，才会返回前述 allowlist 中经过固定边界处理的 context、decision evidence 和 stdout/stderr 元数据；原始 stdout/stderr 内容仍只存在于本地 execution record 或隔离 replay 目录，原始上传归档、完整 Logparse 树和隐藏思维链仍不公开。
 - Logparse 会在启动时进行指纹校验。首个符合条件的诊断任务可以解析一次日志；后续任务必须使用已持久化的 `LOGPARSE_RUN`，不得再次解包或解析原始归档。
 - V2 的并发数固定为 `1`，上下文、工作区和输出限制均为固定值；持久化依赖本地文件系统，不提供多实例故障转移。
-- 原生 Windows/Linux 启动验证、macOS 进程树/取消验证、确定性模拟端到端测试以及真实 Logparse 冒烟测试都属于发布门禁。测试或交接记录必须明确实际运行的平台。
+- Linux Server 启动验证、Windows/macOS 默认 Client 能力、显式 Linux Client、平台进程树/取消验证、确定性 Journey 和真实 Logparse 冒烟测试属于不同证明。测试或交接记录必须明确实际运行的平台和 Stage。
 
 ### 原生启动门禁
 
-原生门禁会在其他操作系统上主动跳过；被跳过意味着门禁尚未执行，不能视为通过。每个运行环境都必须使用同一个候选发布 Git HEAD、CPython 3.12、锁定版本的依赖，以及运行门禁时所选的 Logparse 源码目录。该目录可以来自 Git checkout 或源码压缩包解压；仅在 Git 元数据存在时记录实际 Logparse commit，且不限制为某个固定 commit。
+Server 原生启动门只在 Linux 执行；Windows 和 macOS 只执行本机 Client/Host 能力门。跳过表示未执行，不能视为通过。所有门必须绑定同一个候选 Git HEAD、CPython 3.12、锁定依赖和实际 Logparse 内容身份。
 
-旧合同版本的 Windows→Linux 旅程或原生启动结果不能作为本次 V2 候选的发布证据。V2 候选必须在同一 Git HEAD 上重新执行相应平台门禁；未在当前候选上实际执行的 Windows、Linux 或 macOS 门禁都不得宣称为通过，并须在交接记录中准确区分“通过”和“未执行”。
-
-macOS shell（在候选发布版本 HEAD 上执行）：
-
-```sh
-uv sync --frozen --all-groups
-export S08_NATIVE_STARTUP_GATE=darwin
-export SKILL_DIR=/absolute/path/to/production-diagnosis-skills
-export LOGPARSE_REPO=/absolute/path/to/logparse
-export LOGPARSE_CONFIG_PATH=/absolute/path/to/logparse/config.yaml
-export LOGPARSE_PYTHON=/absolute/path/to/logparse/.venv/bin/python
-export CLAUDE_COMMAND=claude
-uv run pytest tests/e2e/test_native_startup_gate.py::test_native_macos_startup_gate -q -p no:cacheprovider
-```
-
-Windows PowerShell：
-
-```powershell
-uv sync --frozen --all-groups
-$env:S08_NATIVE_STARTUP_GATE = "windows"
-$env:SKILL_DIR = "C:\absolute\path\to\production-diagnosis-skills"
-$env:LOGPARSE_REPO = "C:\absolute\path\to\logparse"
-$env:LOGPARSE_CONFIG_PATH = "C:\absolute\path\to\logparse\config.yaml"
-$env:LOGPARSE_PYTHON = "C:\absolute\path\to\logparse\.venv\Scripts\python.exe"
-$env:CLAUDE_COMMAND = "claude"
-uv run pytest tests/e2e/test_native_startup_gate.py::test_native_windows_startup_gate -q -p no:cacheprovider
-```
-
-Linux shell：
+Linux Server 门的底层选择器如下；日常和发布活动仍应由 `test-flow` 编排：
 
 ```sh
 uv sync --frozen --all-groups
@@ -395,10 +367,10 @@ export LOGPARSE_REPO=/absolute/path/to/logparse
 export LOGPARSE_CONFIG_PATH=/absolute/path/to/logparse/config.yaml
 export LOGPARSE_PYTHON=/absolute/path/to/logparse/.venv/bin/python
 export CLAUDE_COMMAND=claude
-uv run pytest tests/e2e/test_native_startup_gate.py::test_native_linux_startup_gate -q -p no:cacheprovider
+uv run pytest tests/platform/server_linux/test_native_startup_gate.py::test_native_linux_startup_gate -q -p no:cacheprovider
 ```
 
-每项测试都会校验原生操作系统、Logparse 源码目录及内容指纹、从环境文件启动、`/live`、`/ready` 的全部 5 项检查、限时关闭、规范化的 `validate-state` 与 `export-state`、实例锁释放，以及第二次恢复启动。
+该测试校验 Linux、Logparse 内容指纹、从环境文件启动、`/live`、`/ready` 的全部 5 项检查、限时关闭、规范化的 `validate-state` 与 `export-state`、实例锁释放，以及第二次恢复启动。
 
 成功结果必须记录准确的候选发布 SHA、操作系统/构建版本、架构、Python 版本、执行命令和 pytest 用例数量。
 
@@ -407,7 +379,7 @@ uv run pytest tests/e2e/test_native_startup_gate.py::test_native_linux_startup_g
 ```sh
 export S08_REAL_AGENT_GATE=1
 export S08_REAL_AGENT_COMMAND='/absolute/path/to/claude -p --safe-mode --no-chrome --no-session-persistence --dangerously-skip-permissions --tools Write --model haiku --effort low --max-budget-usd 0.10'
-uv run pytest tests/e2e/test_real_agent_backend_gate.py -q -p no:cacheprovider
+uv run pytest tests/real/agent/test_real_agent_backend_gate.py -q -p no:cacheprovider
 ```
 
 该门禁会验证真实 Claude Code 版本、通过生产 `AgentBackend` 传递标准输入、规范化 `AgentJobOutcomeDraftV2`、服务端生成的权威 Outcome 与 DecisionAudit、不可变的输入/运行时标记、输出拓扑、限时执行以及进程树清理。测试被跳过不等于通过。
@@ -425,7 +397,7 @@ export LOGPARSE_REPO=/absolute/path/to/logparse
 export LOGPARSE_CONFIG_PATH=/absolute/path/to/logparse/config.yaml
 export LOGPARSE_PYTHON=/absolute/path/to/logparse/.venv/bin/python
 export CLAUDE_COMMAND=/absolute/path/to/claude
-uv run pytest tests/e2e/test_installed_distribution_gate.py -q -p no:cacheprovider
+uv run pytest tests/platform/distribution/test_installed_distribution_gate.py -q -p no:cacheprovider
 ```
 
 预期结果为恰好 1 个测试通过。该测试会校验：wheel 只能从新环境的 `site-packages` 导入；运行时依赖版本已锁定；运行环境中不包含 pytest 和 Hatchling；Logparse 源码目录可以生成稳定内容指纹；Skill 产品哈希正确；可以通过环境文件启动已安装服务；`/live` 和 `/ready` 的全部 5 项检查通过；服务可以限时关闭；已安装的 `validate-state` 和 `export-state` 命令输出规范化结果。
@@ -434,10 +406,14 @@ uv run pytest tests/e2e/test_installed_distribution_gate.py -q -p no:cacheprovid
 
 ## 发布检查
 
-请显式运行全部测试根目录；不要假设历史遗留的裸 pytest 配置一定包含每个测试套件：
+先查看 Release 计划，再通过唯一入口运行；不要把若干直接 pytest 命令拼成发布结论：
 
 ```sh
-uv run pytest tests/contracts tests/unit tests/integration tests/e2e
+./tools/test-flow/run.sh --track release --goal release.full \
+  --logparse-source /absolute/path/to/logparse \
+  --mcp-source /absolute/path/to/problem-locator-mcp \
+  --cross-job-adapter /absolute/path/to/cross-job-adapter \
+  --plan-only
 uv run python -m compileall -q src tests
 uv lock --check
 git diff --check

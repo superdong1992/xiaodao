@@ -82,6 +82,7 @@ def main() -> int:
         target.write_bytes(b"w" * _integer("FAKE_WORKSPACE_BYTES"))
         _sleep_forever()
     if mode == "root-flood":
+        os.chmod(".", 0o700)
         Path("bypass.bin").write_bytes(b"r" * _integer("FAKE_WORKSPACE_BYTES"))
         _sleep_forever()
     if mode == "part-only":
