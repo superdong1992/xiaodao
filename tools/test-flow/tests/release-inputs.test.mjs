@@ -150,6 +150,8 @@ test("macOS checkpoints export stable business state without retained workspaces
   assert.match(adapter, /macos-export-checkpoint\.sh/);
   assert.match(adapter, /excluded_terminal_workspaces: workspaceIds\.length/);
   assert.match(adapter, /temporary_workspaces: 0/);
+  assert.match(adapter, /"exec", state\.active_container, "ps", "-ww", "-eo", "args"/);
+  assert.doesNotMatch(adapter, /\["top", state\.active_container, "-eo", "args"\]/);
   assert.doesNotMatch(adapter, /state\.active_container}:\/var\/lib\/problem-locator\/\./);
   assert.match(exporter, /for required in data-format\.json state\.json resources jobs/);
   assert.match(exporter, /tmp\/workspaces/);

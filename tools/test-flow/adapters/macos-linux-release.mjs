@@ -854,8 +854,8 @@ async function createCheckpointSource(configuration, state, continuation) {
     .filter((job) => ["SUCCEEDED", "FAILED", "CANCELLED", "INTERRUPTED"].includes(job.status))
     .map((job) => job.job_id));
   const retainedWorkspacesAreTerminal = workspaceEntries.every((entry) => entry.kind === "d" && terminalJobs.has(entry.job_id));
-  const top = await docker(configuration.dockerContext, ["top", state.active_container, "-eo", "args"], { forward: false });
-  const activeWorkers = top.stdout.split(/\r?\n/).filter((line) => /test_service_launcher\.py|\/usr\/local\/bin\/claude|macos-service-supervisor/.test(line)).length;
+  const processes = await docker(configuration.dockerContext, ["exec", state.active_container, "ps", "-ww", "-eo", "args"], { forward: false });
+  const activeWorkers = processes.stdout.split(/\r?\n/).filter((line) => /test_service_launcher\.py|\/usr\/local\/bin\/claude|macos-service-supervisor/.test(line)).length;
   const receipt = {
     schema_version: 1,
     status: counts.running === 0 && counts.queued === 0 && activeWorkers === 0 && retainedWorkspacesAreTerminal ? "PASS" : "FAIL",
