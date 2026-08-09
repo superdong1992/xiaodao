@@ -157,4 +157,3 @@ def test_real_review_agent_independently_validates_the_production_contract(
     assert validated.draft.consumed_evidence_refs == [EVIDENCE_ID]
     assert stdout.closed is True and stderr.closed is True
     assert (inputs / "manifest.json").read_bytes() == manifest_bytes
-

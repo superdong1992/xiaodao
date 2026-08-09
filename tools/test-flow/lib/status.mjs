@@ -64,4 +64,3 @@ export function assessPerformance(elapsedSeconds, samples, options = {}) {
     elapsed_seconds: elapsedSeconds,
   };
 }
-

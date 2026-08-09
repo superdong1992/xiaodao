@@ -9,6 +9,15 @@ import { buildRunPlan, resolveClient } from "../lib/planner.mjs";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 
+function buildIsolatedRunPlan(options) {
+  const evidenceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "test-flow-planner-evidence-"));
+  try {
+    return buildRunPlan(REPO_ROOT, { ...options, evidenceRoot });
+  } finally {
+    fs.rmSync(evidenceRoot, { recursive: true, force: true });
+  }
+}
+
 test("declarative flow validates and every public stage action is trusted", () => {
   const config = loadConfiguration(REPO_ROOT);
   assert.equal(config.flow.schema_version, 1);
@@ -19,7 +28,7 @@ test("declarative flow validates and every public stage action is trusted", () =
 });
 
 test("Dev default selects only cheap deterministic stages and no real model", () => {
-  const built = buildRunPlan(REPO_ROOT, { track: "dev", planOnly: true });
+  const built = buildIsolatedRunPlan({ track: "dev", planOnly: true });
   assert.equal(built.plan.admission.status, "ADMITTED");
   assert.deepEqual(built.plan.stages.map((stage) => stage.id), [
     "framework.self-test",
@@ -31,7 +40,7 @@ test("Dev default selects only cheap deterministic stages and no real model", ()
 });
 
 test("Dev real proof fails admission without explicit opt-in and reason", () => {
-  const built = buildRunPlan(REPO_ROOT, { track: "dev", goal: "dev.real", stage: "real.route", planOnly: true });
+  const built = buildIsolatedRunPlan({ track: "dev", goal: "dev.real", stage: "real.route", planOnly: true });
   assert.equal(built.plan.admission.status, "BLOCKED");
   const codes = built.plan.admission.blockers.map((blocker) => blocker.code);
   assert.ok(codes.includes("DEV_REAL_OPT_IN_REQUIRED"));
@@ -39,7 +48,7 @@ test("Dev real proof fails admission without explicit opt-in and reason", () => 
 });
 
 test("Release plan blocks missing explicit formal inputs before any resource or model call", () => {
-  const built = buildRunPlan(REPO_ROOT, { track: "release", planOnly: true });
+  const built = buildIsolatedRunPlan({ track: "release", planOnly: true });
   assert.equal(built.plan.admission.status, "BLOCKED");
   const codes = built.plan.admission.blockers.map((blocker) => blocker.code);
   assert.ok(codes.includes("CLAUDE_ENTRY_REQUIRED"));
@@ -57,7 +66,7 @@ test("Release never treats a global-style Claude 2.1.201 executable as cli.js", 
   try {
     const globalClaude = path.join(root, "claude");
     fs.writeFileSync(globalClaude, "#!/bin/sh\nprintf '%s\\n' '2.1.201 (Claude Code)'\n", { encoding: "utf8", mode: 0o700 });
-    const built = buildRunPlan(REPO_ROOT, { track: "release", client: "macos", claudeEntry: globalClaude, planOnly: true });
+    const built = buildIsolatedRunPlan({ track: "release", client: "macos", claudeEntry: globalClaude, planOnly: true });
     const codes = built.plan.admission.blockers.map((blocker) => blocker.code);
     assert.ok(codes.includes("CLAUDE_DISTRIBUTION_INVALID"));
     assert.equal(built.plan.release_inputs.claude.status, "INVALID");
@@ -67,7 +76,7 @@ test("Release never treats a global-style Claude 2.1.201 executable as cli.js", 
 });
 
 test("rollout parity cannot silently pass without an executable pair specification", () => {
-  const built = buildRunPlan(REPO_ROOT, { track: "release", goal: "release.rollout-parity", planOnly: true });
+  const built = buildIsolatedRunPlan({ track: "release", goal: "release.rollout-parity", planOnly: true });
   assert.ok(built.plan.stages.some((stage) => stage.id === "rollout.parity"));
   assert.ok(built.plan.admission.blockers.some((blocker) => blocker.code === "ROLLOUT_PARITY_SPEC_REQUIRED"));
 });
