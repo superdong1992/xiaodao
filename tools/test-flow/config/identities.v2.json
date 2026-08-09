@@ -10,7 +10,7 @@
     "framework.tests": {"kind": "paths", "paths": ["tools/test-flow/tests"]},
     "framework.docs": {"kind": "paths", "paths": ["README.md", "tools/test-flow/README.md", "design/README.md", "design/test-flow-architecture.md", "AGENTS.md", "TODO.md"]},
     "runtime.support": {"kind": "paths", "paths": ["tools/test-flow/runtime-support", "tools/test-flow/Dockerfile", "tools/test-flow/logparse-requirements.txt"]},
-    "adapter.host": {"kind": "paths", "paths": ["tools/test-flow/adapters/host-capability.mjs"]},
+    "adapter.host": {"kind": "paths", "paths": ["tools/test-flow/adapters/host-capability.mjs", "tools/test-flow/adapters/fixtures/claude-flat-probe.mjs"]},
     "adapter.server": {"kind": "paths", "paths": ["tools/test-flow/adapters/server-linux-capability.mjs"]},
     "adapter.cross-job": {"kind": "paths", "paths": ["tools/test-flow/adapters/cross-job-core.mjs", "tools/test-flow/adapters/macos-linux-release.mjs", "tools/test-flow/adapters/windows-linux-release.mjs", "tools/test-flow/adapters/linux-linux-release.mjs"]},
     "skill.client": {"kind": "paths", "paths": [".claude/skills/problem-locator-client"]},

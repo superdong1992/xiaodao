@@ -82,14 +82,6 @@
       "runtime_profile": "release",
       "evidence": ["host-capability-result.json"]
     },
-    "platform.client-contract": {
-      "kind": "pytest",
-      "selectors": ["tests/platform/client"],
-      "min_passed": 1,
-      "skip_policy": "allow-explicit",
-      "runtime_profile": "python-test",
-      "evidence": ["pytest.xml", "pytest-summary.json"]
-    },
     "platform.compat-contract": {
       "kind": "pytest",
       "selectors": ["tests/platform/compat"],

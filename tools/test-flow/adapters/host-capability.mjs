@@ -56,7 +56,7 @@ async function main() {
     throw new Error(`unsupported Claude Code version output: ${version.stdout.trim()}`);
   }
 
-  const fixture = path.join(repoRoot, "tests", "platform", "client", "fixtures", "claude_flat_probe.mjs");
+  const fixture = path.join(repoRoot, "tools", "test-flow", "adapters", "fixtures", "claude-flat-probe.mjs");
   const server = spawn(process.execPath, [fixture, outputRoot], { stdio: ["ignore", "pipe", "pipe"], detached: false });
   const serverStderr = [];
   server.stderr.on("data", (chunk) => serverStderr.push(chunk));

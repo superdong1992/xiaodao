@@ -49,7 +49,7 @@
       "id": "platform.host-capability",
       "kind": "capability",
       "depends_on": ["deterministic.full"],
-      "gates": ["platform.host-adapter", "platform.client-contract", "platform.compat-contract"],
+      "gates": ["platform.host-adapter", "platform.compat-contract"],
       "identity_set": "host-client",
       "timeout_seconds": 300,
       "progress_class": "external",

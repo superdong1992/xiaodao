@@ -83,6 +83,19 @@ test("finalization and rollout migration scaffolding are not schedulable Stages"
   assert.equal(Object.hasOwn(config.proofs.goals, "release.rollout-parity"), false);
 });
 
+test("host capability has one executable adapter path and no legacy environment-gated pytest", () => {
+  const config = loadConfiguration(REPO_ROOT);
+  const stage = config.stages.stages.find((candidate) => candidate.id === "platform.host-capability");
+  assert.deepEqual(stage.gates, ["platform.host-adapter", "platform.compat-contract"]);
+  assert.equal(Object.hasOwn(config.gates.gates, "platform.client-contract"), false);
+  assert.equal(fs.existsSync(path.join(REPO_ROOT, "tests", "platform", "client")), false);
+  assert.equal(fs.existsSync(path.join(REPO_ROOT, "tools", "test-flow", "adapters", "fixtures", "claude-flat-probe.mjs")), true);
+  assert.deepEqual(config.identities.components["adapter.host"].paths, [
+    "tools/test-flow/adapters/host-capability.mjs",
+    "tools/test-flow/adapters/fixtures/claude-flat-probe.mjs",
+  ]);
+});
+
 test("every public platform has a repository-owned adapter and no harness identity input", () => {
   const config = loadConfiguration(REPO_ROOT);
   for (const client of ["windows", "macos", "linux"]) {

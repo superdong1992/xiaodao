@@ -1,3 +1,4 @@
+// Repository-owned mock Host/MCP pair used only by the host capability adapter.
 import fs from "node:fs";
 import http from "node:http";
 import path from "node:path";
