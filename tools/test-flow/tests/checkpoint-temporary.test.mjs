@@ -10,10 +10,10 @@ import { fileURLToPath } from "node:url";
 import {
   CheckpointTemporaryError,
   classifyCheckpointTemporary,
-} from "../harness/macos-classify-checkpoint-temporary.mjs";
+} from "../runtime-support/checkpoint-temporary.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-const CLASSIFIER = path.resolve(HERE, "..", "harness", "macos-classify-checkpoint-temporary.mjs");
+const CLASSIFIER = path.resolve(HERE, "..", "runtime-support", "checkpoint-temporary.mjs");
 const CASE_ID = "00000000-0000-0000-0000-000000000001";
 const JOB_ID = "00000000-0000-0000-0000-000000000002";
 const OUTCOME_ID = "00000000-0000-0000-0000-000000000003";

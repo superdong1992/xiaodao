@@ -1,0 +1,57 @@
+{
+  "schema_version": 2,
+  "profiles": {
+    "python-test": {
+      "kind": "python",
+      "version": "3.12",
+      "environment_allowlist": ["PYTHONNOUSERSITE", "PYTHONPYCACHEPREFIX"]
+    },
+    "release": {
+      "kind": "formal-release",
+      "claude": {
+        "package": "@anthropic-ai/claude-code",
+        "version": "2.1.89",
+        "version_output": "2.1.89 (Claude Code)",
+        "tarball_sha256": "680e35001b24b604f58958e3a324bb758be3c069c0a3f89585156256f17a9c87",
+        "cli_sha256": "a9950ef6407fdc750bddb673852485500387e524a99d42385cb81e7d17128e01",
+        "model": "deepseek-v4-flash[1m]"
+      },
+      "uv": {
+        "version": "0.11.32",
+        "archive_sha256": "aab924fd522efd06f1c5f3b93a243864fc453132c94b2dc49f1371b528a4b967",
+        "uv_sha256": "da15297d6879b2cfbe5ea3cb03725c1613d51ba72892cc996468d871f0a532fb",
+        "uvx_sha256": "31e409e837c16cbe9bdfd6534a1e2f6a774d937988027a4f0736ab52c7b6864d"
+      },
+      "python": "3.12.13",
+      "hatchling": "1.28.0",
+      "base_image": {
+        "name": "problem-locator-test-flow-base:claude-2.1.89-uv-0.11.32-amd64-v2",
+        "source": "ubuntu@sha256:3131b4cc82a783df6c9df078f86e01819a13594b865c2cad47bd1bca2b7063bb",
+        "os": "linux",
+        "architecture": "amd64",
+        "macos_docker_context": "colima"
+      },
+      "external_sources": {
+        "logparse": "a233b500d9c99e6815d1ffd82cb4ca55bbfe657a",
+        "mcp": "97d0446580f49e7b1add1c5fc6d6a41c97884884"
+      },
+      "settings_environment_allowlist": [
+        "ANTHROPIC_AUTH_TOKEN",
+        "ANTHROPIC_BASE_URL",
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+        "ANTHROPIC_DEFAULT_OPUS_MODEL",
+        "ANTHROPIC_DEFAULT_SONNET_MODEL",
+        "API_TIMEOUT_MS",
+        "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"
+      ],
+      "real_caps": {
+        "isolated": {"max_turns": 12, "max_total_tokens": 200000, "max_budget_usd": 3, "hard_timeout_seconds": 1200},
+        "service_agent": {"max_turns": 50, "max_total_tokens": 400000, "max_budget_usd": 3, "hard_timeout_seconds": 600},
+        "journey.route": {"max_turns": 50, "max_total_tokens": 400000, "max_budget_usd": 3, "hard_timeout_seconds": 1200},
+        "journey.diagnose": {"max_turns": 50, "max_total_tokens": 600000, "max_budget_usd": 5, "hard_timeout_seconds": 1200},
+        "journey.publish-restart": {"max_turns": 10, "max_total_tokens": 100000, "max_budget_usd": 1, "hard_timeout_seconds": 1200}
+      },
+      "network_policy": "release-offline-pull-never"
+    }
+  }
+}

@@ -1,0 +1,67 @@
+{
+  "schema_version": 2,
+  "defaults": {
+    "track": "dev",
+    "goal": "dev.default",
+    "client": "auto",
+    "resume": "auto",
+    "evidence_root": ".tmp/test-flow-evidence",
+    "runtime_profile": "release"
+  },
+  "tracks": {
+    "dev": {
+      "default_goal": "dev.default",
+      "requires_clean_commit": false,
+      "real_requires_opt_in": true,
+      "real_requires_intent": true,
+      "performance_effect": "warn"
+    },
+    "release": {
+      "default_goal": "release.full",
+      "requires_clean_commit": true,
+      "real_requires_opt_in": false,
+      "real_requires_intent": false,
+      "performance_effect": "gate"
+    }
+  },
+  "process": {
+    "real_no_progress_seconds": 360,
+    "real_hard_timeout_seconds": 1200,
+    "poll_milliseconds": 250,
+    "progress_allowlist_version": "test-flow-progress-v2"
+  },
+  "evidence": {
+    "event_visibility_seconds": 5,
+    "event_file_limit_bytes": 67108864,
+    "raw_log_file_limit_bytes": 134217728,
+    "scanner_version": "test-flow-secret-scan-v2",
+    "event_contract_version": "server-dfx-v2",
+    "verdict_schema_version": 2
+  },
+  "performance": {
+    "policy_version": "robust-mad-v2",
+    "window": 10,
+    "min_samples": 5,
+    "consecutive_release_failures": 2,
+    "mad_multiplier": 6,
+    "relative_floor": 1.25,
+    "local_absolute_floor_seconds": 5,
+    "external_absolute_floor_seconds": 30,
+    "stages": {
+      "deterministic.affected": {"mode": "gate", "hard_cap_seconds": 60},
+      "deterministic.full": {"mode": "gate", "hard_cap_seconds": 300},
+      "*": {"mode": "gate", "hard_cap_seconds": null}
+    }
+  },
+  "retry": {
+    "same_identity_requires": ["reason", "hypothesis", "expected_evidence"],
+    "automatic_blind_retry": false
+  },
+  "status": {
+    "pass": 0,
+    "pass_with_warnings": 0,
+    "fail": 1,
+    "blocked": 2,
+    "error": 3
+  }
+}

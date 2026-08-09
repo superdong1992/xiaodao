@@ -10,32 +10,32 @@ import {
   sha256File,
 } from "./util.mjs";
 
-export const RELEASE_CLAUDE_VERSION = "2.1.89";
-export const RELEASE_CLAUDE_VERSION_OUTPUT = "2.1.89 (Claude Code)";
-export const RELEASE_CLAUDE_TARBALL_SHA256 = "680e35001b24b604f58958e3a324bb758be3c069c0a3f89585156256f17a9c87";
-export const RELEASE_CLAUDE_CLI_SHA256 = "a9950ef6407fdc750bddb673852485500387e524a99d42385cb81e7d17128e01";
-export const RELEASE_UV_VERSION = "0.11.32";
-export const RELEASE_UV_ARCHIVE_SHA256 = "aab924fd522efd06f1c5f3b93a243864fc453132c94b2dc49f1371b528a4b967";
-export const RELEASE_UV_SHA256 = "da15297d6879b2cfbe5ea3cb03725c1613d51ba72892cc996468d871f0a532fb";
-export const RELEASE_UVX_SHA256 = "31e409e837c16cbe9bdfd6534a1e2f6a774d937988027a4f0736ab52c7b6864d";
-export const RELEASE_HATCHLING_VERSION = "1.28.0";
-export const RELEASE_BASE_IMAGE = "problem-locator-test-flow-base:claude-2.1.89-uv-0.11.32-amd64-v2";
-export const RELEASE_DOCKER_CONTEXT = "colima";
-export const RELEASE_DOCKER_OS = "linux";
-export const RELEASE_DOCKER_ARCH = "amd64";
-export const RELEASE_MODEL = "deepseek-v4-flash[1m]";
-export const RELEASE_LOGPARSE_COMMIT = "a233b500d9c99e6815d1ffd82cb4ca55bbfe657a";
-export const RELEASE_MCP_COMMIT = "97d0446580f49e7b1add1c5fc6d6a41c97884884";
+const RUNTIME_PROFILES_PATH = new URL("../config/runtime-profiles.v2.json", import.meta.url);
+const RUNTIME_PROFILES = JSON.parse(fs.readFileSync(RUNTIME_PROFILES_PATH, "utf8"));
+if (RUNTIME_PROFILES.schema_version !== 2 || RUNTIME_PROFILES.profiles?.release?.kind !== "formal-release") {
+  throw new Error("RELEASE_RUNTIME_PROFILE_INVALID");
+}
+export const RELEASE_RUNTIME_PROFILE = Object.freeze(RUNTIME_PROFILES.profiles.release);
+export const RELEASE_CLAUDE_VERSION = RELEASE_RUNTIME_PROFILE.claude.version;
+export const RELEASE_CLAUDE_VERSION_OUTPUT = RELEASE_RUNTIME_PROFILE.claude.version_output;
+export const RELEASE_CLAUDE_TARBALL_SHA256 = RELEASE_RUNTIME_PROFILE.claude.tarball_sha256;
+export const RELEASE_CLAUDE_CLI_SHA256 = RELEASE_RUNTIME_PROFILE.claude.cli_sha256;
+export const RELEASE_UV_VERSION = RELEASE_RUNTIME_PROFILE.uv.version;
+export const RELEASE_UV_ARCHIVE_SHA256 = RELEASE_RUNTIME_PROFILE.uv.archive_sha256;
+export const RELEASE_UV_SHA256 = RELEASE_RUNTIME_PROFILE.uv.uv_sha256;
+export const RELEASE_UVX_SHA256 = RELEASE_RUNTIME_PROFILE.uv.uvx_sha256;
+export const RELEASE_HATCHLING_VERSION = RELEASE_RUNTIME_PROFILE.hatchling;
+export const RELEASE_PYTHON_VERSION = RELEASE_RUNTIME_PROFILE.python;
+export const RELEASE_BASE_IMAGE = RELEASE_RUNTIME_PROFILE.base_image.name;
+export const RELEASE_BASE_IMAGE_SOURCE = RELEASE_RUNTIME_PROFILE.base_image.source;
+export const RELEASE_DOCKER_CONTEXT = RELEASE_RUNTIME_PROFILE.base_image.macos_docker_context;
+export const RELEASE_DOCKER_OS = RELEASE_RUNTIME_PROFILE.base_image.os;
+export const RELEASE_DOCKER_ARCH = RELEASE_RUNTIME_PROFILE.base_image.architecture;
+export const RELEASE_MODEL = RELEASE_RUNTIME_PROFILE.claude.model;
+export const RELEASE_LOGPARSE_COMMIT = RELEASE_RUNTIME_PROFILE.external_sources.logparse;
+export const RELEASE_MCP_COMMIT = RELEASE_RUNTIME_PROFILE.external_sources.mcp;
 
-export const CLAUDE_SETTINGS_ENV_KEYS = Object.freeze([
-  "ANTHROPIC_AUTH_TOKEN",
-  "ANTHROPIC_BASE_URL",
-  "ANTHROPIC_DEFAULT_HAIKU_MODEL",
-  "ANTHROPIC_DEFAULT_OPUS_MODEL",
-  "ANTHROPIC_DEFAULT_SONNET_MODEL",
-  "API_TIMEOUT_MS",
-  "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
-]);
+export const CLAUDE_SETTINGS_ENV_KEYS = Object.freeze([...RELEASE_RUNTIME_PROFILE.settings_environment_allowlist]);
 
 const MODEL_KEYS = Object.freeze([
   "ANTHROPIC_DEFAULT_HAIKU_MODEL",
@@ -375,7 +375,7 @@ export function validateReleaseImage(paths, dockerIdentity) {
     const metadata = JSON.parse(inspect.stdout)[0];
     const labels = metadata.Config?.Labels ?? {};
     if (metadata.Os !== RELEASE_DOCKER_OS || metadata.Architecture !== RELEASE_DOCKER_ARCH) throw new Error("RELEASE_BASE_IMAGE_PLATFORM_MISMATCH");
-    if (labels["problem-locator.e2e.claude"] !== "npm-2.1.89"
+    if (labels["problem-locator.e2e.claude"] !== `npm-${RELEASE_CLAUDE_VERSION}`
       || labels["problem-locator.e2e.uv"] !== RELEASE_UV_VERSION
       || labels["problem-locator.e2e.hatchling"] !== RELEASE_HATCHLING_VERSION) {
       throw new Error("RELEASE_BASE_IMAGE_LABEL_MISMATCH");

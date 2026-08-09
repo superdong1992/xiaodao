@@ -595,7 +595,7 @@ def test_clean_installed_distribution_import_cli_and_server_gate(
         creationflags = subprocess.CREATE_NEW_PROCESS_GROUP
     launcher = Path("/evidence/test_service_launcher.py")
     if not launcher.is_file():
-        launcher = ROOT / "tools/test-flow/harness/test_service_launcher.py"
+        launcher = ROOT / "tools/test-flow/runtime-support/test_service_launcher.py"
     assert launcher.is_file()
     process = subprocess.Popen(
         [

@@ -437,6 +437,42 @@ def _query(adapter: McpAdapter, case_id: str) -> dict[str, Any]:
     )["case_view"]
 
 
+def _case_failure_diagnostics(stack: _Stack, case_id: str) -> str:
+    aggregate = stack.repository.read_snapshot().cases[case_id]
+    execution_logs: dict[str, dict[str, str]] = {}
+    for job in aggregate.jobs.values():
+        job_root = stack.data_root / "jobs" / job.job_id
+        job_logs: dict[str, str] = {}
+        for filename in (
+            "stdout.log",
+            "stderr.log",
+            "broker_audit.json",
+            "agent_job_outcome.draft.json",
+        ):
+            log_path = job_root / filename
+            if log_path.is_file():
+                job_logs[filename] = log_path.read_text(
+                    encoding="utf-8",
+                    errors="replace",
+                )[-4096:]
+        if job_logs:
+            execution_logs[job.job_id] = job_logs
+    return json.dumps(
+        {
+            "case": aggregate.case.model_dump(mode="json"),
+            "jobs": [job.model_dump(mode="json") for job in aggregate.jobs.values()],
+            "outcomes": [
+                outcome.model_dump(mode="json")
+                for outcome in aggregate.outcomes.values()
+            ],
+            "execution_logs": execution_logs,
+            "broker_open_errors": stack.broker_factory.open_errors,
+            "fatal_worker_error_type": stack.scheduler.fatal_worker_error_type,
+        },
+        sort_keys=True,
+    )
+
+
 def _wait_for_file(path: Path, timeout_seconds: float = 10.0) -> None:
     deadline = time.monotonic() + timeout_seconds
     while not path.is_file():
@@ -931,7 +967,9 @@ def test_r01_r14_rpc_timeout_is_one_durable_cross_module_path(
     r08_job = stack.repository.read_snapshot().cases[case_id].jobs[r08_job_id]
     assert r08_job.attachment_refs == [attachment_id]
     waiting_order = _query(stack.mcp, case_id)
-    assert waiting_order["status"] == CaseStatus.WAITING_INPUT.value
+    assert waiting_order["status"] == CaseStatus.WAITING_INPUT.value, (
+        _case_failure_diagnostics(stack, case_id)
+    )
     assert [
         item["name"]
         for item in waiting_order["pending_requirements"]

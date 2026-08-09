@@ -260,7 +260,7 @@ export function environmentIdentity(repoRoot, environment = process.env) {
   };
 }
 
-export function computeIdentityGroups({
+export function computeIdentitySets({
   repoRoot,
   identityConfig,
   externalTrees = {},
@@ -269,63 +269,86 @@ export function computeIdentityGroups({
   claudeSettings = null,
   releaseRuntime = null,
 }) {
-  const result = {};
+  const components = {};
   const sharedClient = clientIdentity(claudeEntry);
   const sharedModel = modelContextFingerprint(environment, claudeSettings);
   const sharedEnvironment = environmentIdentity(repoRoot, environment);
-  for (const [name, definition] of Object.entries(identityConfig.groups)) {
-    const paths = hashConfiguredPaths(repoRoot, definition.paths ?? []);
-    const proofPaths = hashConfiguredPaths(repoRoot, definition.proof_paths ?? definition.paths ?? []);
-    const external = {};
-    for (const treeName of definition.external_trees ?? []) {
-      external[treeName] = externalTrees[treeName]
-        ? hashTree(externalTrees[treeName])
-        : { status: "MISSING", digest: null };
+  for (const [componentId, definition] of Object.entries(identityConfig.components)) {
+    let value;
+    if (definition.kind === "paths") {
+      const tree = hashConfiguredPaths(repoRoot, definition.paths);
+      value = { kind: definition.kind, status: tree.records.some((record) => record.kind === "missing" || record.kind === "unsupported") ? "MISSING" : "PRESENT", digest: tree.digest, records: tree.records };
+    } else if (definition.kind === "external-tree") {
+      const tree = externalTrees[definition.name]
+        ? hashTree(externalTrees[definition.name])
+        : { status: "MISSING", root: null, digest: null, records: [] };
+      value = { kind: definition.kind, name: definition.name, status: tree.status, root: tree.root ?? null, digest: tree.digest };
+    } else if (definition.kind === "client-distribution") {
+      value = { kind: definition.kind, ...sharedClient };
+    } else if (definition.kind === "claude-settings") {
+      value = { kind: definition.kind, ...sharedModel };
+    } else if (definition.kind === "release-runtime") {
+      value = { kind: definition.kind, value: releaseRuntime };
+    } else if (definition.kind === "environment") {
+      value = { kind: definition.kind, value: sharedEnvironment };
+    } else {
+      throw new Error(`IDENTITY_COMPONENT_KIND_UNSUPPORTED:${componentId}`);
     }
-    const producer = {
-      schema_version: 1,
-      group: name,
-      source_digest: paths.digest,
-      external_trees: Object.fromEntries(
-        Object.entries(external).map(([key, value]) => [key, { status: value.status, digest: value.digest }]),
-      ),
-      client: definition.include_client_binary ? sharedClient : null,
-      model_context: definition.include_model_context ? sharedModel : null,
-      environment: definition.include_environment ? sharedEnvironment : null,
-      release_runtime: definition.include_release_runtime ? releaseRuntime : null,
-    };
-    const proof = {
-      producer_digest: sha256Bytes(canonicalJson(producer)),
-      proof_source_digest: proofPaths.digest,
-      runner_digest: definition.include_runner ? proofPaths.digest : null,
-      scanner_policy: definition.include_scanner ? "test-flow-secret-scan-v1" : null,
-    };
-    result[name] = {
-      producer,
-      producer_digest: proof.producer_digest,
-      proof_digest: sha256Bytes(canonicalJson(proof)),
-      missing_inputs: Object.entries(external).filter(([, value]) => value.status !== "PRESENT").map(([key]) => key),
+    components[componentId] = {
+      value,
+      digest: sha256Bytes(canonicalJson(value)),
+      missing: value.status && value.status !== "PRESENT" ? value.status : null,
     };
   }
-  return result;
+  const sets = {};
+  for (const [setId, definition] of Object.entries(identityConfig.sets)) {
+    const producerComponents = Object.fromEntries(definition.producer.map((componentId) => [componentId, components[componentId].digest]));
+    const proofComponents = Object.fromEntries(definition.proof.map((componentId) => [componentId, components[componentId].digest]));
+    const producer = { schema_version: 2, identity_set: setId, components: producerComponents };
+    const proof = { schema_version: 2, identity_set: setId, producer_digest: sha256Bytes(canonicalJson(producer)), components: proofComponents };
+    const all = [...new Set([...definition.producer, ...definition.proof])];
+    sets[setId] = {
+      producer,
+      proof,
+      producer_digest: proof.producer_digest,
+      proof_digest: sha256Bytes(canonicalJson(proof)),
+      missing_inputs: all.filter((componentId) => components[componentId].missing).map((componentId) => ({ component_id: componentId, status: components[componentId].missing })),
+    };
+  }
+  return { components, sets };
 }
 
-export function stageIdentity(stage, identityGroups, policies) {
-  const group = identityGroups[stage.identity_group];
+export function stageIdentity(stage, identitySets, policies) {
+  const identitySet = identitySets[stage.identity_set];
+  if (!identitySet) throw new Error(`IDENTITY_SET_UNKNOWN:${stage.identity_set}`);
   const stateful = stage.id.startsWith("journey.cross-job.");
   const producerIdentity = sha256Bytes(canonicalJson({
-    group: stage.identity_group,
-    group_digest: group.producer_digest,
+    schema_version: 2,
+    identity_set: stage.identity_set,
+    set_digest: identitySet.producer_digest,
     parent_checkpoint: stateful ? policies.parent_checkpoint ?? "GENESIS" : "GENESIS",
     scenario: stateful ? policies.scenario ?? "CrossJob" : null,
   }));
   const proofIdentity = sha256Bytes(canonicalJson({
+    schema_version: 2,
     producer_identity: producerIdentity,
-    group_proof_digest: group.proof_digest,
-    action: stage.action,
-    timeout_seconds: stage.timeout_seconds,
-    no_progress_seconds: policies.no_progress_seconds,
+    set_proof_digest: identitySet.proof_digest,
+    stage_definition_digest: policies.stage_definition_digest,
+    dependency_proof_identities: [...(policies.dependency_proof_identities ?? [])].sort(),
+    config_bundle_digest: policies.config_bundle_digest,
+    evidence_contract_version: policies.evidence_contract_version,
     selection: stage.id,
   }));
   return { producer_identity: producerIdentity, proof_identity: proofIdentity };
+}
+
+export function performanceIdentity(stage, producerIdentity, performancePolicy) {
+  return sha256Bytes(canonicalJson({
+    schema_version: 2,
+    stage_id: stage.id,
+    producer_identity: producerIdentity,
+    policy_version: performancePolicy.policy_version,
+    progress_class: stage.progress_class,
+    stage_policy: performancePolicy.stages[stage.id] ?? performancePolicy.stages["*"],
+  }));
 }

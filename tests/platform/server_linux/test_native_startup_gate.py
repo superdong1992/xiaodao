@@ -125,7 +125,7 @@ def _start_service(env_file: Path, child_env: dict[str, str], expected_system: s
         creationflags = subprocess.CREATE_NEW_PROCESS_GROUP
     launcher = Path("/evidence/test_service_launcher.py")
     if not launcher.is_file():
-        launcher = ROOT / "tools/test-flow/harness/test_service_launcher.py"
+        launcher = ROOT / "tools/test-flow/runtime-support/test_service_launcher.py"
     assert launcher.is_file()
     return subprocess.Popen(
         [

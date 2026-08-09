@@ -39,13 +39,13 @@ DIAGNOSE 草稿通过服务端验证后，服务端立即生成并持久化以�
 
 Agent 无权预先构造、摘要或替代这两项结果。Reviewer 使用盲审上下文：只接收固定 Candidate、固定用户事实、Skill 规则和 Candidate 实际绑定的原始 Evidence，不接收 Specialist 的结论、解释或先前判词作为证明。
 
-时间、必选参数、角色、跨角色关联或事件顺序任一不符合 Skill，或因果链不能由原始证据支持时，DIAGNOSE Candidate 或 REVIEW PASS 会被服务端降级为 `INCONCLUSIVE`；Reviewer 基于证据给出的合法 `REJECT` 则保留为负向判决。两者都会使 Case 终止为 `UNRESOLVED`，被拒绝的 Candidate 仅以 `REJECTED` 保留在内部；服务端会公开一份 `status=INCONCLUSIVE` 的 `USER_RESULT` JSON，明确列出验证结果、证据缺口、限制和建议，但禁止生成 `USER_RESULT_ARCHIVE`/`result.zip`。服务同时生成可下载的 `AUDIT_BUNDLE`，供局域网内复盘和重放。`LOGPARSE_RUN` 仍是内部持久化输入，不会作为公开产物返回。当前生成器包含 RPC 超时、数据库死锁和无日志人工排查三个异构测试 Fixture，用于验证参数隔离与有/无 Logparse 的流程差异；历史 v3 设计背景见 [`design/diagnosis-skill-v3-generalization-plan.md`](design/diagnosis-skill-v3-generalization-plan.md)，当前行为以 v4 generator、manifest 与 runtime assets 为准。
+时间、必选参数、角色、跨角色关联或事件顺序任一不符合 Skill，或因果链不能由原始证据支持时，DIAGNOSE Candidate 或 REVIEW PASS 会被服务端降级为 `INCONCLUSIVE`；Reviewer 基于证据给出的合法 `REJECT` 则保留为负向判决。两者都会使 Case 终止为 `UNRESOLVED`，被拒绝的 Candidate 仅以 `REJECTED` 保留在内部；服务端会公开一份 `status=INCONCLUSIVE` 的 `USER_RESULT` JSON，明确列出验证结果、证据缺口、限制和建议，但禁止生成 `USER_RESULT_ARCHIVE`/`result.zip`。服务同时生成可下载的 `AUDIT_BUNDLE`，供局域网内复盘和重放。`LOGPARSE_RUN` 仍是内部持久化输入，不会作为公开产物返回。当前生成器包含 RPC 超时、数据库死锁和无日志人工排查三个异构测试 Fixture，用于验证参数隔离与有/无 Logparse 的流程差异；当前行为以 v4 generator、manifest、生成资产与 runtime contracts 为准。
 
 ### 发布验收
 
-仓库测试统一从 [`tools/test-flow`](tools/test-flow/README.md) 进入。Dev 默认只跑受影响确定性测试和完整确定性套件，不调用真实模型；SameJob 已纳入确定性 Journey。Release 要求 clean commit、fresh Client/Server 能力探针、身份相关的隔离真实门，以及从 GENESIS 和全新空 `DATA_ROOT` 开始的一条 no-mock CrossJob 旅程。
+仓库测试统一从 [`tools/test-flow/README.md`](tools/test-flow/README.md) 进入；终态结构见 [`design/test-flow-architecture.md`](design/test-flow-architecture.md)。Dev 默认只跑受影响确定性测试和完整确定性套件，不调用真实模型；SameJob 已纳入确定性 Journey。Release 要求 clean commit、当前平台的 built-in Client→Linux adapter、完整确定性/平台证明，以及从 GENESIS 和全新空 `DATA_ROOT` 开始的一条 no-mock CrossJob 旅程。
 
-每次运行的本地证据保存在 `.tmp/test-flow-evidence/<run-id>`。`verdict.json` 是唯一权威结论；兼容生成的 `verification-report.json` 只指向它，不能单独作为 PASS。证据在复用前会按当前密钥扫描器和事件合同重新审计，且不会自动删除。
+每次运行的本地证据保存在 `.tmp/test-flow-evidence/<run-id>`。`verdict.json` 是唯一权威结论；缺失就是 `UNFINALIZED`。证据在复用前会按当前配置、密钥扫描器和事件合同重新审计，且不会自动删除。
 
 Problem Locator 是一个单实例故障诊断服务。它接收结构化问题，收集事实与附件，执行固定版本的路由、诊断和盲审任务，最终发布经过机器验证和独立复核的完成态 `USER_RESULT`，或发布说明无法可靠定论的 `INCONCLUSIVE` `USER_RESULT` JSON 与 `UNRESOLVED` 审计包。
 
@@ -130,7 +130,7 @@ uv run python -m problem_locator serve --env-file /absolute/path/to/service.env
 | `problem_locator_cancel_case` | `request_id/case_id/expected_case_revision` req |
 | `problem_locator_list_artifacts` | `case_id` req |
 
-从 1.0.5 起，七个公开 MCP input schema 全部扁平化，根属性只能是标量、nullable 标量或标量数组。`create_case` 的八个问题字段直接位于根层；两组 name/value 数组必须等长并按索引配对。完整规范示例见客户端 Skill。
+七个公开 MCP input schema 全部扁平化，根属性只能是标量、nullable 标量或标量数组。`create_case` 的八个问题字段直接位于根层；两组 name/value 数组必须等长并按索引配对。完整规范示例见客户端 Skill。
 
 仓库内置的 [`.claude/skills/problem-locator-client`](.claude/skills/problem-locator-client) Skill 说明了安全的请求 ID、修订版本处理方式、上传请求头以及产物哈希校验方法。文件内容只通过 HTTP 传输，绝不会嵌入 MCP 消息。
 
@@ -156,39 +156,11 @@ $env:PROBLEM_LOCATOR_MCP_URL = "http://192.168.1.20:8000/mcp"
 $env:NO_PROXY = "localhost,127.0.0.1,192.168.1.20"
 ```
 
-从 1.0.1 迁移时，先删除 local/project/user 各 scope 中所有指向 `problem-locator-client-proxy` 的同名 stdio 配置；客户端机器不承担 Linux Server，可以卸载旧客户端 `uv tool`。必须完全退出全部 Claude Code 进程并新建会话，避免旧进程和缓存 schema 遮蔽新的 HTTP 配置。启动后用 `/mcp` 确认 `problem-locator` 的传输类型和连接状态。
+客户端不安装 `problem-locator`，不安装 Problem Locator Hook，不运行本地 MCP 或转发代理，也不生成 Problem Locator 专用 DFX。启动后用 `/mcp` 确认 `problem-locator` 的传输类型和连接状态。服务端严格拒绝字段 `problem_spec`、`initial_user_facts`、`inputs`，也不会自动解析 JSON 字符串。
 
-1.0.5 不安装 Problem Locator Hook，也不生成客户端 DFX。升级时从 `.claude/settings.json` 删除所有旧 Problem Locator Hook 组，删除曾复制到客户端项目的兼容/DFX PowerShell 脚本；已有日志属于用户数据，不会自动删除。完成清理后完全退出 Claude Code、重新启动并新建会话，只通过 `/mcp` 验证远端服务和新 schema。
+Windows/macOS 默认跟随当前 Host；Linux Client 必须显式启用。当前平台的真实发布证明由 Test Flow 的 built-in adapter 执行：直接 HTTP negative probe 验证错误复合字段和错误数组类型被拒绝，真实 Host 调用则用 Claude stream-json 与 Linux 服务端 DFX 验证扁平参数、七工具 correspondence，并反向确认客户端没有专用 DFX。版本不在文档中写死，而是以 executable hash、`--version`、runtime profile 和 settings allowlist 纳入身份与 verdict。
 
-服务端继续严格拒绝旧字段 `problem_spec`、`initial_user_facts`、`inputs`，也不会自动解析 JSON 字符串。线上 schema、实际参数和验证错误以 Linux 服务端的 `mcp.tools.listed`、`mcp.tool.started` 和验证事件为准。
-
-#### 原生客户端到 Linux 服务端的发布门禁
-
-Windows/macOS 默认跟随当前 Host；Linux Client 必须显式启用。直接 HTTP schema 探针确认七个工具只公布扁平输入，并验证旧复合字段和错误数组类型得到严格拒绝。它不代替真实 Host 门禁：
-
-```powershell
-$env:PROBLEM_LOCATOR_NATIVE_CLIENT_LINUX_GATE = "1"
-$env:PROBLEM_LOCATOR_LINUX_MCP_URL = "http://192.168.1.20:8000/mcp"
-$env:HTTP_PROXY = "http://127.0.0.1:9"
-$env:HTTPS_PROXY = "http://127.0.0.1:9"
-$env:NO_PROXY = "192.168.1.20"
-# 可选鉴权头，值必须是 JSON 字符串 Map：
-# $env:PROBLEM_LOCATOR_LINUX_MCP_HEADERS_JSON = '{"Authorization":"Bearer token"}'
-python -m pytest tests/platform/client/test_native_client_linux_server_gate.py::test_native_client_direct_http_to_real_linux_mcp_uses_only_flat_inputs -q
-```
-
-发布前还必须使用本次身份中冻结的 Claude Code、真实 Skill 且不加载任何 Problem Locator Hook 完成本机 Client→Linux 调用。版本不在文档中写死，而是以 executable hash 和 `--version` 输出纳入证据。直接 HTTP schema 探针同时把 `HTTP_PROXY/HTTPS_PROXY` 指向不可用地址，用它证明 MCP 主机通过 `NO_PROXY` 绕过代理。真实 Host 门禁通过 Claude stream-json 和 Linux 服务端 DFX 验证扁平参数，并反向确认不会生成客户端 DFX。
-
-```powershell
-$env:PROBLEM_LOCATOR_REAL_HOST_FLAT_GATE = "1"
-$env:PROBLEM_LOCATOR_REAL_HOST_SERVER_DFX_LOG = "D:\logs\problem-locator\server-debug.jsonl"
-$env:PROBLEM_LOCATOR_REAL_HOST_REQUEST_ID = "10000000-0000-0000-0000-000000000001"
-$env:PROBLEM_LOCATOR_REAL_HOST_CLAUDE_VERSION = "<current exact version>"
-$env:PROBLEM_LOCATOR_RELEASE_GATES_REQUIRED = "1"
-python -m pytest tests/platform/client/test_native_client_linux_server_gate.py::test_real_host_sends_flat_inputs_to_the_linux_service -q
-```
-
-设置 `PROBLEM_LOCATOR_RELEASE_GATES_REQUIRED=1` 后，当前平台的原生 Client、Linux 服务地址或服务端 DFX 缺失时必须失败，不得以 skipped 计为发布通过。局域网改版客户端仍需部署后通过 `/mcp`、真实 `create_case`/`submit_supplement` 成功结果和 Linux 服务端日志关闭实际故障。
+线上 schema、实际参数和验证错误以 Linux 服务端的 `mcp.tools.listed`、`mcp.tool.started`、`mcp.tool.completed` 和验证事件为准。Test Flow 是这些发布证明的唯一入口；skip、零执行用例或缺少服务端 DFX 都不能作为通过。局域网改版客户端仍需在实际部署后用 `/mcp` 以及真实 `create_case`/`submit_supplement` 关闭环境故障，不能从其他 Client 平台的 verdict 外推。
 
 所有新增或修改的 MCP 输入必须继续保持扁平：根 object 属性只能是标量、nullable 标量或标量数组，不得新增 `$ref/$defs`、嵌套 object、动态 Map 或对象数组；合同测试不设白名单。
 
@@ -353,70 +325,8 @@ V2 不包含 PostgreSQL、ORM、双写机制或分布式锁。当满足以下任
 - V2 的并发数固定为 `1`，上下文、工作区和输出限制均为固定值；持久化依赖本地文件系统，不提供多实例故障转移。
 - Linux Server 启动验证、Windows/macOS 默认 Client 能力、显式 Linux Client、平台进程树/取消验证、确定性 Journey 和真实 Logparse 冒烟测试属于不同证明。测试或交接记录必须明确实际运行的平台和 Stage。
 
-### 原生启动门禁
+## 测试与发布
 
-Server 原生启动门只在 Linux 执行；Windows 和 macOS 只执行本机 Client/Host 能力门。跳过表示未执行，不能视为通过。所有门必须绑定同一个候选 Git HEAD、CPython 3.12、锁定依赖和实际 Logparse 内容身份。
+测试计划、Dev 运行、真实模型重试合同、Release 缓存准备、三平台 built-in adapter、证据管理和退出码统一见 [`tools/test-flow/README.md`](tools/test-flow/README.md)。不要直接运行底层 selector 后自行组合发布结论。
 
-Linux Server 门的底层选择器如下；日常和发布活动仍应由 `test-flow` 编排：
-
-```sh
-uv sync --frozen --all-groups
-export S08_NATIVE_STARTUP_GATE=linux
-export SKILL_DIR=/absolute/path/to/production-diagnosis-skills
-export LOGPARSE_REPO=/absolute/path/to/logparse
-export LOGPARSE_CONFIG_PATH=/absolute/path/to/logparse/config.yaml
-export LOGPARSE_PYTHON=/absolute/path/to/logparse/.venv/bin/python
-export CLAUDE_COMMAND=claude
-uv run pytest tests/platform/server_linux/test_native_startup_gate.py::test_native_linux_startup_gate -q -p no:cacheprovider
-```
-
-该测试校验 Linux、Logparse 内容指纹、从环境文件启动、`/live`、`/ready` 的全部 5 项检查、限时关闭、规范化的 `validate-state` 与 `export-state`、实例锁释放，以及第二次恢复启动。
-
-成功结果必须记录准确的候选发布 SHA、操作系统/构建版本、架构、Python 版本、执行命令和 pytest 用例数量。
-
-真实 Agent Backend 发布冒烟测试与确定性模拟 Agent 端到端测试相互独立。只能在隔离的临时工作区中，使用已经完成身份验证的 Claude Code 安装执行。以下命令会禁用仓库自定义配置、会话持久化，以及除写入固定输出文件之外的所有工具：
-
-```sh
-export S08_REAL_AGENT_GATE=1
-export S08_REAL_AGENT_COMMAND='/absolute/path/to/claude -p --safe-mode --no-chrome --no-session-persistence --dangerously-skip-permissions --tools Write --model haiku --effort low --max-budget-usd 0.10'
-uv run pytest tests/real/agent/test_real_agent_backend_gate.py -q -p no:cacheprovider
-```
-
-该门禁会验证真实 Claude Code 版本、通过生产 `AgentBackend` 传递标准输入、规范化 `AgentJobOutcomeDraftV2`、服务端生成的权威 Outcome 与 DecisionAudit、不可变的输入/运行时标记、输出拓扑、限时执行以及进程树清理。测试被跳过不等于通过。
-
-### 干净安装包门禁
-
-该门禁会构建候选发布版本的 wheel，从 `uv.lock` 导出仅包含运行时依赖且带哈希的数据，在全新的 CPython 3.12 环境中安装两者，并从源码目录之外执行每条已安装命令。仅当所选 uv 缓存已经完整时，才设置 `S08_UV_OFFLINE=1`；在冷启动 runner 上应保持为 `0`。
-
-```sh
-export S08_INSTALLED_DISTRIBUTION_GATE=1
-export S08_UV="$(command -v uv)"
-export S08_UV_OFFLINE=0
-export SKILL_DIR=/absolute/path/to/production-diagnosis-skills
-export LOGPARSE_REPO=/absolute/path/to/logparse
-export LOGPARSE_CONFIG_PATH=/absolute/path/to/logparse/config.yaml
-export LOGPARSE_PYTHON=/absolute/path/to/logparse/.venv/bin/python
-export CLAUDE_COMMAND=/absolute/path/to/claude
-uv run pytest tests/platform/distribution/test_installed_distribution_gate.py -q -p no:cacheprovider
-```
-
-预期结果为恰好 1 个测试通过。该测试会校验：wheel 只能从新环境的 `site-packages` 导入；运行时依赖版本已锁定；运行环境中不包含 pytest 和 Hatchling；Logparse 源码目录可以生成稳定内容指纹；Skill 产品哈希正确；可以通过环境文件启动已安装服务；`/live` 和 `/ready` 的全部 5 项检查通过；服务可以限时关闭；已安装的 `validate-state` 和 `export-state` 命令输出规范化结果。
-
-如果在最终 S08 仅交接提交之前获得原生测试结果，应将真实命令和摘要加入 `handoff/S08.json.tests[]`。如果结果在该不可变提交之后才产生，不得修改或重写交接记录；应将相同字段附加到下游发布验证记录中，并保留 S08 的限制，直至经过批准的后续交接记录正式纳入该证据。
-
-## 发布检查
-
-先查看 Release 计划，再通过唯一入口运行；不要把若干直接 pytest 命令拼成发布结论：
-
-```sh
-./tools/test-flow/run.sh --track release --goal release.full \
-  --logparse-source /absolute/path/to/logparse \
-  --mcp-source /absolute/path/to/problem-locator-mcp \
-  --cross-job-adapter /absolute/path/to/cross-job-adapter \
-  --plan-only
-uv run python -m compileall -q src tests
-uv lock --check
-git diff --check
-```
-
-真实 Logparse、进程树/取消行为、干净环境安装、安装后导入/CLI/服务冒烟测试、fixture manifest 以及 Git 祖先/blob 完整性都属于相互独立的候选发布门禁。除非实际执行并通过，否则不得将其报告为通过。
+Release closure 会分别验证 Linux Server 原生启动与安装分发、本机 Client/Host、进程树与取消、完整 deterministic/SameJob、真实 Logparse、真实 Agent 以及 fresh CrossJob。skip 不等于通过；每个 Gate 的 JUnit 执行/跳过计数、平台、候选 Git SHA、runtime profile、外部源码和 executable identity 都写入 receipt。只有 exact clean commit 上最后生成且可重新验证的 `verdict.json` 能证明该次发布。

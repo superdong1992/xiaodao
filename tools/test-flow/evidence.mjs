@@ -88,7 +88,7 @@ function report(evidenceRoot, keepLast = 10) {
           : "MANUAL_REVIEW",
   }));
   return {
-    schema_version: 1,
+    schema_version: 2,
     evidence_root: evidenceRoot,
     automatic_deletion: false,
     attempt_count: rows.length,
@@ -111,16 +111,33 @@ function exactAttempt(evidenceRoot, runId) {
 
 function prune(evidenceRoot, options) {
   const inventory = report(evidenceRoot, options.keepLast ?? 10);
+  const fullInventory = evidenceInventory(evidenceRoot);
   const selected = options.runIds.length > 0
     ? options.runIds
     : inventory.attempts.filter((item) => item.retention === "MANUAL_REVIEW").map((item) => item.run_id);
-  const targets = selected.map((runId) => ({ run_id: runId, path: exactAttempt(evidenceRoot, runId) }));
-  if (!options.execute) {
-    return { schema_version: 1, mode: "DRY_RUN", automatic_deletion: false, targets };
+  const selectedSet = new Set(selected);
+  const dependentRuns = new Map();
+  for (const item of fullInventory) {
+    for (const stage of item.verdict?.stages ?? []) {
+      const source = stage.reused_from?.run_id;
+      if (!source) continue;
+      const values = dependentRuns.get(source) ?? [];
+      values.push(item.run_id);
+      dependentRuns.set(source, values);
+    }
   }
+  const targets = selected.map((runId) => {
+    const dependents = [...new Set(dependentRuns.get(runId) ?? [])].filter((dependent) => !selectedSet.has(dependent)).sort();
+    return { run_id: runId, path: exactAttempt(evidenceRoot, runId), dependents, blocked: dependents.length > 0 };
+  });
+  if (!options.execute) {
+    return { schema_version: 2, mode: "DRY_RUN", automatic_deletion: false, targets };
+  }
+  const blocked = targets.filter((target) => target.blocked);
+  if (blocked.length > 0) throw new Error(`PRUNE_REFERENCED_SOURCE:${blocked.map((target) => `${target.run_id}->${target.dependents.join(",")}`).join(";")}`);
   for (const target of targets) fs.rmSync(target.path, { recursive: true, force: false });
   return {
-    schema_version: 1,
+    schema_version: 2,
     mode: "EXECUTED",
     automatic_deletion: false,
     recovery: "NONE",

@@ -37,8 +37,6 @@ Environment/dependency inputs:
   --claude-settings <absolute-path> Source for env-only temporary settings; Hooks are never copied
   --docker-context colima          Required for macOS Release
   --cache-root <absolute-path>     Default: <repo>/.tmp/test-flow-cache
-  --cross-job-adapter <absolute-executable>
-  --rollout-parity-spec <absolute-json>
 
 Exit codes:
   0 PASS or PASS_WITH_WARNINGS
@@ -67,8 +65,6 @@ function parseArguments(argv) {
     ["--claude-settings", "claudeSettings"],
     ["--docker-context", "dockerContext"],
     ["--cache-root", "cacheRoot"],
-    ["--cross-job-adapter", "crossJobAdapter"],
-    ["--rollout-parity-spec", "rolloutParitySpec"],
   ]);
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
@@ -94,7 +90,7 @@ async function main() {
   }
   const repoRoot = path.resolve(options.repoRoot ?? DEFAULT_REPO_ROOT);
   delete options.repoRoot;
-  for (const name of ["logparseSource", "mcpSource", "claudeEntry", "claudeSettings", "cacheRoot", "crossJobAdapter", "rolloutParitySpec"]) {
+  for (const name of ["logparseSource", "mcpSource", "claudeEntry", "claudeSettings", "cacheRoot"]) {
     if (!options[name]) continue;
     if (!path.isAbsolute(options[name])) throw new Error(`ARGUMENT_ABSOLUTE_REQUIRED:${name}`);
     options[name] = path.resolve(options[name]);

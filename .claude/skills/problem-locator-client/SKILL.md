@@ -1,6 +1,6 @@
 ---
 name: problem-locator-client
-description: Operate a Problem Locator V1 diagnosis case through its seven Remote MCP tools and transfer selected attachments or downloadable artifacts with system curl. Use when creating, inspecting, continuing, resuming, or cancelling a diagnosis case, supplying requested facts or local files, or downloading a reviewed diagnosis result.
+description: Operate a current Problem Locator 2.0 diagnosis case through its seven Remote MCP tools and transfer selected attachments or downloadable artifacts with system curl. Use when creating, inspecting, continuing, resuming, or cancelling a diagnosis case, supplying requested facts or local files, or downloading a reviewed diagnosis result.
 ---
 
 # Problem Locator Client
@@ -9,11 +9,11 @@ Treat the service as the authority for every Case, revision, requirement, Job, a
 
 ## Connect directly to the remote MCP server
 
-Configure Claude Code from [references/client-mcp-config.json](references/client-mcp-config.json) so it connects directly to the controlled-network HTTP endpoint ending in `/mcp`. The Windows client does not install the `problem-locator` package, run a local MCP server or proxy, or install Problem Locator Hooks. Keep the configured server key exactly `problem-locator`. If the machine has `HTTP_PROXY` or `HTTPS_PROXY`, add only the remote MCP host or IP to `NO_PROXY`; do not disable the corporate proxy globally.
+Configure Claude Code from [references/client-mcp-config.json](references/client-mcp-config.json) so it connects directly to the controlled-network HTTP endpoint ending in `/mcp`. Windows and macOS use their native Claude Code by default; a Linux Client is used only when explicitly selected. A client does not install the `problem-locator` package, run a local MCP server or proxy, or install Problem Locator Hooks. Keep the configured server key exactly `problem-locator`. If the machine has `HTTP_PROXY` or `HTTPS_PROXY`, add only the remote MCP host or IP to `NO_PROXY`; do not disable the corporate proxy globally.
 
-Version 1.0.5 exposes only flat MCP input schemas. Every root property is a scalar, nullable scalar, or scalar array. Do not send the removed `problem_spec`, `initial_user_facts`, or `inputs` members, and never encode an object as a JSON string. The Linux service remains the validation and diagnostic authority.
+Current Problem Locator exposes only flat MCP input schemas. Every root property is a scalar, nullable scalar, or scalar array. Do not send `problem_spec`, `initial_user_facts`, or `inputs`, and never encode an object as a JSON string. The Linux service remains the validation and diagnostic authority.
 
-When migrating, remove the old Problem Locator Hook groups from `.claude/settings.json`, delete any copied compatibility or DFX scripts, remove stale same-name stdio MCP definitions from every Claude configuration scope, fully restart Claude Code, and start a new session. Use `/mcp` to verify that `problem-locator` is the connected remote HTTP server. No Problem Locator client DFX file is produced.
+Use `/mcp` to verify that `problem-locator` is the connected remote HTTP server. No Problem Locator client DFX file is produced; schema, arguments and validation errors are observed from the Linux service.
 
 ## Use the fixed tools
 

@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
-import { ensureDirectory, readJson } from "./util.mjs";
+import { ensureDirectory, FlowError, readJson } from "./util.mjs";
 
 const SEMANTIC_TYPES = new Set([
   "tool_result",
@@ -25,6 +25,7 @@ const SEMANTIC_TYPES = new Set([
   "job.outcome.rejected",
   "job.outcome.stale",
 ]);
+const PROGRESS_ALLOWLIST_VERSION = "test-flow-progress-v2";
 
 function semanticEvent(line) {
   if (line.startsWith("TEST_FLOW_PROGRESS ")) {
@@ -156,12 +157,22 @@ export function runProcess({
   noProgressSeconds = null,
   rawLogLimitBytes = 128 * 1024 * 1024,
   eventWriter,
+  executionId = stage.id,
+  pollMilliseconds = 250,
+  progressAllowlistVersion = PROGRESS_ALLOWLIST_VERSION,
 }) {
+  if (progressAllowlistVersion !== PROGRESS_ALLOWLIST_VERSION) {
+    return Promise.reject(new FlowError(
+      "PROCESS_PROGRESS_VERSION",
+      `Unsupported progress allowlist version ${progressAllowlistVersion}`,
+    ));
+  }
   return new Promise((resolve, reject) => {
     const logsRoot = path.join(attemptRoot, "payload", "logs");
     ensureDirectory(logsRoot);
-    const stdoutPath = path.join(logsRoot, `${stage.id}.stdout.log`);
-    const stderrPath = path.join(logsRoot, `${stage.id}.stderr.log`);
+    const safeExecutionId = String(executionId).replace(/[^A-Za-z0-9_.-]/g, "-");
+    const stdoutPath = path.join(logsRoot, `${safeExecutionId}.stdout.log`);
+    const stderrPath = path.join(logsRoot, `${safeExecutionId}.stderr.log`);
     const environment = { ...process.env, ...env };
     let invocation = { command, args, temporaryRoot: null, statusPath: null, childWritesLogs: false };
     let stdoutLog = null;
@@ -247,7 +258,7 @@ export function runProcess({
       const progressExpired = noProgressSeconds !== null && silent >= noProgressSeconds;
       if (!hardExpired && !progressExpired) return;
       requestTermination(hardExpired ? "HARD_TIMEOUT" : "NO_PROGRESS");
-    }, 250);
+    }, pollMilliseconds);
 
     child.once("error", (error) => {
       clearInterval(monitor);

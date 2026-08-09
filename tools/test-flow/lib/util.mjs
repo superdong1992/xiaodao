@@ -203,6 +203,16 @@ export function resolvePythonTestRuntime(repoRoot, environment = process.env) {
       : { ...resolved, interpreterPrefix: [], prefix: ["-m", "pytest"], kind: "python" };
   }
 
+  const repositoryPython = process.platform === "win32"
+    ? path.join(repoRoot, ".venv", "Scripts", "python.exe")
+    : path.join(repoRoot, ".venv", "bin", "python");
+  if (fs.existsSync(repositoryPython)) {
+    const resolved = pythonProbe(repositoryPython, [], repoRoot, environment);
+    if (resolved !== null) {
+      return { ...resolved, interpreterPrefix: [], prefix: ["-m", "pytest"], kind: "repository-venv" };
+    }
+  }
+
   const configuredUv = environment.UV;
   const uv = configuredUv
     ? (path.isAbsolute(configuredUv) ? configuredUv : resolveCommand(configuredUv))

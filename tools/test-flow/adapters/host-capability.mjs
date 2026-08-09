@@ -41,6 +41,8 @@ async function main() {
   const outputRoot = path.resolve(argument("--output-root") ?? fs.mkdtempSync(path.join(os.tmpdir(), "test-flow-host-probe-")));
   fs.mkdirSync(outputRoot, { recursive: true, mode: 0o700 });
   const claude = argument("--claude-entry");
+  const runtimeProfileDigest = argument("--runtime-profile-digest");
+  if (!runtimeProfileDigest || !/^[a-f0-9]{64}$/.test(runtimeProfileDigest)) throw new Error("--runtime-profile-digest is required");
   if (!claude || !path.isAbsolute(claude) || path.basename(claude) !== "cli.js" || !fs.existsSync(claude) || !fs.statSync(claude).isFile()) {
     throw new Error("--claude-entry must identify an existing absolute official npm cli.js");
   }
@@ -124,7 +126,7 @@ async function main() {
     });
     const rejected = await bypass.json();
     if (rejected.result?.structuredContent?.error?.code !== "VALIDATION_ERROR") throw new Error("server did not reject a removed composite field");
-    fs.writeFileSync(path.join(outputRoot, "host-capability-result.json"), `${JSON.stringify({ schema_version: 1, status: "PASS", client: process.platform === "darwin" ? "macos" : process.platform === "win32" ? "windows" : "linux", claude_version: version.stdout.trim(), claude_cli_sha256: RELEASE_CLAUDE_CLI_SHA256, distribution: "official-npm", flat_schema: true, flat_call: true, client_dfx_absent: true })}\n`, { encoding: "utf8", mode: 0o600, flag: "wx" });
+    fs.writeFileSync(path.join(outputRoot, "host-capability-result.json"), `${JSON.stringify({ schema_version: 2, status: "PASS", runtime_profile_digest: runtimeProfileDigest, client: process.platform === "darwin" ? "macos" : process.platform === "win32" ? "windows" : "linux", claude_version: version.stdout.trim(), claude_cli_sha256: RELEASE_CLAUDE_CLI_SHA256, distribution: "official-npm", flat_schema: true, flat_call: true, client_dfx_absent: true })}\n`, { encoding: "utf8", mode: 0o600, flag: "wx" });
     process.stdout.write("TEST_FLOW_PROGRESS request.completed\n");
   } finally {
     server.kill("SIGTERM");
