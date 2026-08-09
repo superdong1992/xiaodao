@@ -114,6 +114,52 @@ export function validateEventFile(filePath, { allowPartialTail = false } = {}) {
   return { status: "PASS", event_count: expected - 1, producer_id: producerId, producer_type: producerType, run_id: runId };
 }
 
+export function readRelayedEventPart({
+  filePath,
+  receiptPath,
+  expectedProducerId,
+  expectedRunId,
+  allowEmpty = false,
+}) {
+  assertFlow(fs.existsSync(filePath), "EVENT_RELAY_PART_MISSING", `${filePath} is missing`);
+  assertFlow(fs.existsSync(receiptPath), "EVENT_RELAY_RECEIPT_MISSING", `${receiptPath} is missing`);
+
+  let receipt;
+  try {
+    receipt = JSON.parse(fs.readFileSync(receiptPath, "utf8"));
+  } catch {
+    assertFlow(false, "EVENT_RELAY_RECEIPT_INVALID", `${receiptPath} is not valid JSON`);
+  }
+  assertFlow(
+    receipt?.schema_version === 1
+      && receipt.status === "PASS"
+      && receipt.code === null
+      && Number.isInteger(receipt.source_event_count)
+      && receipt.source_event_count >= 0
+      && receipt.producer_id === expectedProducerId,
+    "EVENT_RELAY_RECEIPT_INVALID",
+    `${receiptPath} does not authorize this event part`,
+  );
+
+  const raw = fs.readFileSync(filePath, "utf8");
+  if (raw.length === 0) {
+    assertFlow(receipt.source_event_count === 0, "EVENT_RELAY_COUNT_MISMATCH", `${filePath} is empty but its receipt is not`);
+    assertFlow(allowEmpty, "EVENT_RELAY_EMPTY_FORBIDDEN", `${filePath} is empty without an explicit policy`);
+    return { status: "PASS", event_count: 0, events: [], receipt };
+  }
+
+  const validation = validateEventFile(filePath);
+  assertFlow(validation.event_count === receipt.source_event_count, "EVENT_RELAY_COUNT_MISMATCH", `${filePath} disagrees with its relay receipt`);
+  assertFlow(validation.producer_id === expectedProducerId, "EVENT_RELAY_PRODUCER_MISMATCH", `${filePath} has the wrong producer`);
+  assertFlow(validation.run_id === expectedRunId, "EVENT_RELAY_RUN_MISMATCH", `${filePath} has the wrong run id`);
+  return {
+    status: "PASS",
+    event_count: validation.event_count,
+    events: raw.split("\n").filter(Boolean).map((line) => JSON.parse(line)),
+    receipt,
+  };
+}
+
 export function readServerMcpCorrespondence(attemptRoot, clientToolNames) {
   assertFlow(Array.isArray(clientToolNames) && clientToolNames.every((name) => typeof name === "string" && name.length > 0), "CLIENT_TOOL_SEQUENCE_INVALID", "Client tool sequence is invalid");
   const eventsPath = path.join(attemptRoot, "payload", "events", "service-linux.diagnostics.ndjson");

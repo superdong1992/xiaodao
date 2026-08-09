@@ -16,7 +16,7 @@ import {
   validateClaudeDistribution,
 } from "../lib/release-inputs.mjs";
 import { extractCheckpointSourceArchive } from "../lib/checkpoint.mjs";
-import { readServerMcpCorrespondence } from "../lib/events.mjs";
+import { readRelayedEventPart, readServerMcpCorrespondence } from "../lib/events.mjs";
 import { recoverStageAuditProgress } from "../lib/evidence.mjs";
 import { canonicalJson, ensureDirectory, sha256Bytes, sha256File } from "../lib/util.mjs";
 
@@ -622,11 +622,24 @@ function mergeEventParts(attemptRoot, runId, mode) {
   let sequence = 0;
   for (const instance of INSTANCE_ORDER) {
     const part = path.join(partsRoot, `service-linux.${instance}.${suffix}`);
-    if (!fs.existsSync(part)) continue;
-    const source = fs.readFileSync(part, "utf8");
-    requireCondition(source.endsWith("\n"), "SERVICE_EVENT_PARTIAL_TAIL");
-    for (const line of source.split("\n").filter(Boolean)) {
-      const event = JSON.parse(line);
+    const receipt = path.join(attemptRoot, "payload", `service-${instance}-${mode}-relay.json`);
+    if (!fs.existsSync(part) && !fs.existsSync(receipt)) continue;
+    let relayed;
+    try {
+      relayed = readRelayedEventPart({
+        filePath: part,
+        receiptPath: receipt,
+        expectedProducerId: mode === "journey" ? `service-linux-${instance}` : `service-linux-diagnostics-${instance}`,
+        expectedRunId: runId,
+        allowEmpty: mode === "journey" && instance === "restart",
+      });
+    } catch (error) {
+      const code = typeof error?.code === "string" && /^[A-Z0-9_]+$/.test(error.code)
+        ? error.code
+        : "EVENT_PART_INVALID";
+      throw new StageError(`SERVICE_${code}`, "ERROR", "HARNESS");
+    }
+    for (const event of relayed.events) {
       sequence += 1;
       lines.push(JSON.stringify({
         ...event,

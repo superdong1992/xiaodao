@@ -214,6 +214,8 @@ test("service logs stream directly into attempt evidence on every failure path",
   assert.match(adapter, /exec sh \/harness\/macos-service-supervisor\.sh "\$1" "\$2" >"\$3" 2>&1/);
   assert.match(adapter, /allowEmptyJourney: configuration\.track === "dev"/);
   assert.match(adapter, /startService\(configuration, state, "restart", \{ allowEmptyJourney: true \}\)/);
+  assert.match(adapter, /readRelayedEventPart\(\{/);
+  assert.match(adapter, /allowEmpty: mode === "journey" && instance === "restart"/);
   assert.match(adapter, /service-\$\{instance\}-\$\{relayKind\}-relay\.json/);
   assert.match(adapter, /SERVICE_\$\{instance\.toUpperCase\(\)\}_\$\{supervisor\.code\}\$\{relayCode\}/);
   assert.match(supervisor, /allow-empty\) journey_empty_arg=--allow-empty/);
@@ -233,7 +235,7 @@ test("macOS adapter delegates client-server MCP correspondence to the evidence r
   assert.notEqual(start, -1);
   assert.notEqual(end, -1);
   const body = adapter.slice(start, end);
-  assert.match(adapter, /import \{ readServerMcpCorrespondence \} from "\.\.\/lib\/events\.mjs"/);
+  assert.match(adapter, /import \{ readRelayedEventPart, readServerMcpCorrespondence \} from "\.\.\/lib\/events\.mjs"/);
   assert.match(body, /readServerMcpCorrespondence\(attemptRoot, client\)/);
   assert.match(body, /correspondence\.started_exact/);
   assert.match(body, /correspondence\.completed_exact/);

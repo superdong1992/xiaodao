@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { EventWriter, readServerMcpCorrespondence, validateEventFile } from "../lib/events.mjs";
+import { EventWriter, readRelayedEventPart, readServerMcpCorrespondence, validateEventFile } from "../lib/events.mjs";
 import { classifyRun, performanceThreshold } from "../lib/status.mjs";
 
 test("NDJSON event stream is flushed, sequenced and rejects a partial terminal line", () => {
@@ -34,6 +34,71 @@ test("event envelope refuses sensitive keys but permits ordinary values containi
     writer.write("stage.progress", { data: { message_code: "token_count_updated" } });
     assert.throws(() => writer.write("stage.progress", { data: { auth_token: "redacted" } }), /Sensitive event data key/);
     writer.close();
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("an explicitly authorized zero-event relay part is complete, not a partial tail", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "test-flow-empty-relay-"));
+  try {
+    const part = path.join(root, "restart.journey.ndjson");
+    const receipt = path.join(root, "restart.journey.receipt.json");
+    fs.writeFileSync(part, "", { encoding: "utf8", mode: 0o600 });
+    fs.writeFileSync(receipt, JSON.stringify({
+      schema_version: 1,
+      status: "PASS",
+      code: null,
+      source_event_count: 0,
+      producer_id: "service-linux-restart",
+    }), { encoding: "utf8", mode: 0o600 });
+
+    const result = readRelayedEventPart({
+      filePath: part,
+      receiptPath: receipt,
+      expectedProducerId: "service-linux-restart",
+      expectedRunId: "run-empty-relay",
+      allowEmpty: true,
+    });
+    assert.equal(result.event_count, 0);
+    assert.deepEqual(result.events, []);
+    assert.throws(() => readRelayedEventPart({
+      filePath: part,
+      receiptPath: receipt,
+      expectedProducerId: "service-linux-restart",
+      expectedRunId: "run-empty-relay",
+    }), (error) => error.code === "EVENT_RELAY_EMPTY_FORBIDDEN");
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("a relayed event part must match its sealed receipt and retain its terminal LF", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "test-flow-relay-receipt-"));
+  try {
+    const attemptRoot = path.join(root, "attempt");
+    const writer = new EventWriter({ attemptRoot, runId: "run-relay", producerId: "service-linux-diagnostics-restart", producerType: "service" });
+    writer.write("mcp.tool.started", { data: { tool: "problem_locator_get_case" } });
+    writer.close();
+    const receipt = path.join(root, "relay.json");
+    fs.writeFileSync(receipt, JSON.stringify({
+      schema_version: 1,
+      status: "PASS",
+      code: null,
+      source_event_count: 1,
+      producer_id: "service-linux-diagnostics-restart",
+    }), { encoding: "utf8", mode: 0o600 });
+
+    assert.equal(readRelayedEventPart({
+      filePath: writer.filePath,
+      receiptPath: receipt,
+      expectedProducerId: "service-linux-diagnostics-restart",
+      expectedRunId: "run-relay",
+    }).event_count, 1);
+
+    fs.truncateSync(writer.filePath, fs.statSync(writer.filePath).size - 1);
+    assert.throws(() => readRelayedEventPart({
+      filePath: writer.filePath,
+      receiptPath: receipt,
+      expectedProducerId: "service-linux-diagnostics-restart",
+      expectedRunId: "run-relay",
+    }), (error) => error.code === "EVENT_PARTIAL_TAIL");
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
