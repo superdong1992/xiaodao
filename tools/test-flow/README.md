@@ -74,6 +74,11 @@ On macOS, Release admission requires a clean commit, the explicit cached officia
 
 The source settings file may contain other top-level Claude settings, but the runner materializes only the exact seven-key `env` allowlist into an attempt-scoped mode-`0600` file. Hooks, permissions, local MCP definitions, proxies, and client DFX are not copied or installed. The native macOS Client connects by strict HTTP MCP directly to the fresh Linux container. Client phases carry hard USD caps of 3/5/1; each automatically dispatched Linux agent already carries its own USD 3 cap. The plan therefore reports the complete conservative client+server cost envelope instead of charging environment or upload-only Stages for nonexistent model calls. Release lineage is always `GENESIS`, the named DATA_ROOT volume must be observed empty before container initialization, and no checkpoint is ever admitted as Release input.
 
+The post-restart phase is strictly read-only (`get_case` and `list_artifacts`). Its
+per-instance business Journey stream may therefore be empty, but the diagnostics
+stream remains mandatory and must prove exact Client-to-Server MCP correspondence,
+successful artifact downloads, and a clean service shutdown.
+
 ## Proof layout
 
 ```text

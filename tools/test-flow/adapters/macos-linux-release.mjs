@@ -670,10 +670,36 @@ async function startService(configuration, state, instance, { allowEmptyJourney 
   }
 }
 
+function relayFailureFromServiceReceipt(configuration, instance) {
+  const payloadRoot = path.join(configuration.attemptRoot, "payload");
+  const supervisorPath = path.join(payloadRoot, `service-${instance}-supervisor.json`);
+  if (!fs.existsSync(supervisorPath)) return null;
+  try {
+    const supervisor = readJson(supervisorPath);
+    if (supervisor?.schema_version !== 1 || supervisor.instance !== instance || supervisor.status !== "FAIL") return null;
+    const relayKind = supervisor.code === "JOURNEY_RELAY"
+      ? "journey"
+      : supervisor.code === "DIAGNOSTIC_RELAY" ? "diagnostics" : null;
+    if (!relayKind) return null;
+    const relayPath = path.join(payloadRoot, `service-${instance}-${relayKind}-relay.json`);
+    const relay = fs.existsSync(relayPath) ? readJson(relayPath) : null;
+    const relayCode = relay?.status === "FAIL" && /^[A-Z0-9_]+$/.test(relay.code ?? "")
+      ? `_${relay.code}`
+      : "";
+    return new StageError(`SERVICE_${instance.toUpperCase()}_${supervisor.code}${relayCode}`, "ERROR", "HARNESS");
+  } catch {
+    return null;
+  }
+}
+
 async function quiesceService(configuration, state) {
   requireCondition(typeof state.current_instance === "string", "SERVICE_NOT_RUNNING");
   const instance = state.current_instance;
-  await docker(configuration.dockerContext, ["exec", state.active_container, "sh", "/harness/macos-stop-service.sh", instance]);
+  try {
+    await docker(configuration.dockerContext, ["exec", state.active_container, "sh", "/harness/macos-stop-service.sh", instance]);
+  } catch (error) {
+    throw relayFailureFromServiceReceipt(configuration, instance) ?? error;
+  }
   state.current_instance = null;
   atomicState(configuration.statePath, state);
 }
@@ -1021,7 +1047,10 @@ async function execute(configuration) {
     await docker(configuration.dockerContext, ["container", "stop", "--time", "10", state.initial_container]);
     await createContainer(configuration, state, state.restart_container, "restart", configuration.stage, true);
     await initializeContainer(configuration, state, state.restart_container, "restart", configuration.stage);
-    await startService(configuration, state, "restart");
+    // This phase is deliberately read-only (get_case + list_artifacts), so the
+    // business Journey writer has no state transition to emit. Diagnostics
+    // remain mandatory and are still used for exact MCP correspondence.
+    await startService(configuration, state, "restart", { allowEmptyJourney: true });
     const audit = await runClaude(configuration, state, configuration.stageRoot, "restart", restartPrompt(state), 10, 1);
     validateRestart(audit, state);
     state.client_calls.push(...audit.records.map((record, index) => ({ phase: "restart", ordinal: state.client_calls.length + index, tool_name: record.tool_name, input: record.input })));

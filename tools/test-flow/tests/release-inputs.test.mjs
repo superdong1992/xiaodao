@@ -213,6 +213,9 @@ test("service logs stream directly into attempt evidence on every failure path",
   assert.match(adapter, /bootstrapLog = `\/evidence\/stages\/\$\{configuration\.stage\}\/supervisor-\$\{instance\}\.log`/);
   assert.match(adapter, /exec sh \/harness\/macos-service-supervisor\.sh "\$1" "\$2" >"\$3" 2>&1/);
   assert.match(adapter, /allowEmptyJourney: configuration\.track === "dev"/);
+  assert.match(adapter, /startService\(configuration, state, "restart", \{ allowEmptyJourney: true \}\)/);
+  assert.match(adapter, /service-\$\{instance\}-\$\{relayKind\}-relay\.json/);
+  assert.match(adapter, /SERVICE_\$\{instance\.toUpperCase\(\)\}_\$\{supervisor\.code\}\$\{relayCode\}/);
   assert.match(supervisor, /allow-empty\) journey_empty_arg=--allow-empty/);
   assert.match(relay, /parser\.add_argument\("--allow-empty", action="store_true"\)/);
   assert.match(relay, /if arguments\.allow_empty:\n\s+_receipt\(arguments, status="PASS", code=None, count=0\)/);
