@@ -15,6 +15,7 @@ import {
   packageTreeIdentity,
   validateClaudeDistribution,
 } from "../lib/release-inputs.mjs";
+import { extractCheckpointSourceArchive } from "../lib/checkpoint.mjs";
 import { readServerMcpCorrespondence } from "../lib/events.mjs";
 import { recoverStageAuditProgress } from "../lib/evidence.mjs";
 import { canonicalJson, ensureDirectory, sha256Bytes, sha256File } from "../lib/util.mjs";
@@ -551,7 +552,7 @@ function validatePhaseThree(audit, state) {
   exactKeys(submits[0].input, ["request_id", "case_id", "expected_case_revision", "input_names", "input_values", "attachment_ids", "wait_seconds"], "PHASE3_ATTACHMENT_INPUT_SHAPE");
   requireCondition(submits[0].input.request_id === state.request_ids.submit_attachment && submits[0].input.case_id === state.case_id && submits[0].input.expected_case_revision === state.case_revision && canonicalJson(submits[0].input.attachment_ids) === canonicalJson([state.attachment_id]), "PHASE3_ATTACHMENT_INPUT", "FAIL", "CONTRACT");
   const views = gets.map((record) => ({ ordinal: record.ordinal, view: caseView(record) })).filter((entry) => entry.view?.case_id === state.case_id);
-  const orderView = views.find((entry) => entry.view.status === "WAITING_INPUT" && entry.view.requirements?.filter((item) => item.status === "OPEN").map((item) => item.name).includes("order_id"));
+  const orderView = views.find((entry) => entry.view.status === "WAITING_INPUT" && entry.view.pending_requirements?.filter((item) => item.status === "OPEN").map((item) => item.name).includes("order_id"));
   requireCondition(orderView, "PHASE3_ORDER_REQUIREMENT_NOT_OBSERVED", "FAIL", "CONTRACT");
   exactKeys(submits[1].input, ["request_id", "case_id", "expected_case_revision", "input_names", "input_values", "attachment_ids", "wait_seconds"], "PHASE3_ORDER_INPUT_SHAPE");
   requireCondition(submits[1].input.request_id === state.request_ids.submit_order && submits[1].input.case_id === state.case_id && submits[1].input.expected_case_revision === orderView.view.case_revision && canonicalJson(submits[1].input.input_names) === canonicalJson(["order_id"]) && canonicalJson(submits[1].input.input_values) === canonicalJson(["synthetic-order-0001"]), "PHASE3_ORDER_INPUT", "FAIL", "CONTRACT");
@@ -801,8 +802,12 @@ async function createFreshEnvironment(configuration, stageRoot, runtimeIdentity)
   return { state, freshAdmission };
 }
 
+function exportedJobs(exported) {
+  return Object.values(exported?.state?.cases ?? {}).flatMap((aggregate) => Object.values(aggregate.jobs ?? {}));
+}
+
 function jobCounts(exported) {
-  const jobs = Object.values(exported?.state?.cases ?? {}).flatMap((aggregate) => Object.values(aggregate.jobs ?? {}));
+  const jobs = exportedJobs(exported);
   return {
     running: jobs.filter((job) => job.status === "RUNNING").length,
     queued: jobs.filter((job) => job.status === "PENDING").length,
@@ -838,25 +843,56 @@ async function createCheckpointSource(configuration, state, continuation) {
   await docker(configuration.dockerContext, ["exec", state.active_container, "rm", "-f", exportContainerPath], { forward: false });
   const exported = readJson(exportHostPath);
   const counts = jobCounts(exported);
-  const stateRoot = path.join(configuration.attemptRoot, "scratch", "checkpoint-sources", configuration.stage);
-  ensureDirectory(path.dirname(stateRoot));
-  fs.mkdirSync(stateRoot, { recursive: false, mode: 0o700 });
-  await docker(configuration.dockerContext, ["cp", `${state.active_container}:/var/lib/problem-locator/.`, stateRoot], { forward: false });
-  const workspaces = path.join(stateRoot, "tmp", "workspaces");
-  const temporaryWorkspaces = fs.existsSync(workspaces) ? fs.readdirSync(workspaces).length : 0;
+  const workspaceProbe = await docker(configuration.dockerContext, [
+    "exec", state.active_container,
+    "find", "/var/lib/problem-locator/tmp/workspaces", "-mindepth", "1", "-maxdepth", "1", "-printf", "%y %f\\n",
+  ], { forward: false });
+  const workspaceEntries = workspaceProbe.stdout.split(/\r?\n/).filter(Boolean)
+    .map((line) => ({ kind: line.slice(0, 1), job_id: line.slice(2) }));
+  const workspaceIds = workspaceEntries.map((entry) => entry.job_id).sort();
+  const terminalJobs = new Set(exportedJobs(exported)
+    .filter((job) => ["SUCCEEDED", "FAILED", "CANCELLED", "INTERRUPTED"].includes(job.status))
+    .map((job) => job.job_id));
+  const retainedWorkspacesAreTerminal = workspaceEntries.every((entry) => entry.kind === "d" && terminalJobs.has(entry.job_id));
   const top = await docker(configuration.dockerContext, ["top", state.active_container, "-eo", "args"], { forward: false });
   const activeWorkers = top.stdout.split(/\r?\n/).filter((line) => /test_service_launcher\.py|\/usr\/local\/bin\/claude|macos-service-supervisor/.test(line)).length;
   const receipt = {
     schema_version: 1,
-    status: counts.running === 0 && counts.queued === 0 && activeWorkers === 0 && temporaryWorkspaces === 0 ? "PASS" : "FAIL",
+    status: counts.running === 0 && counts.queued === 0 && activeWorkers === 0 && retainedWorkspacesAreTerminal ? "PASS" : "FAIL",
     service_stopped: true,
     running_jobs: counts.running,
     queued_jobs: counts.queued,
     active_workers: activeWorkers,
-    temporary_workspaces: temporaryWorkspaces,
+    temporary_workspaces: 0,
+    excluded_terminal_workspaces: workspaceIds.length,
     state_validation: "PASS",
   };
   requireCondition(receipt.status === "PASS", "CHECKPOINT_NOT_QUIESCENT", "ERROR", "HARNESS");
+  const scratchRoot = path.join(configuration.attemptRoot, "scratch", "checkpoint-sources");
+  ensureDirectory(scratchRoot);
+  const stateRoot = path.join(scratchRoot, configuration.stage);
+  const archiveHostPath = path.join(scratchRoot, `${configuration.stage}.stable-state.tar`);
+  const archiveContainerPath = `/tmp/test-flow-stable-state-${configuration.stage.replaceAll(".", "-")}.tar`;
+  requireCondition(!fs.existsSync(stateRoot) && !fs.existsSync(archiveHostPath), "CHECKPOINT_STAGING_EXISTS");
+  await docker(configuration.dockerContext, ["exec", state.active_container, "sh", "/harness/macos-export-checkpoint.sh", archiveContainerPath], { forward: false });
+  try {
+    await docker(configuration.dockerContext, ["cp", `${state.active_container}:${archiveContainerPath}`, archiveHostPath], { forward: false });
+    const extraction = extractCheckpointSourceArchive({ archivePath: archiveHostPath, targetRoot: stateRoot });
+    const workspaces = path.join(stateRoot, "tmp", "workspaces");
+    requireCondition(fs.existsSync(workspaces) && fs.readdirSync(workspaces).length === 0 && !fs.existsSync(path.join(stateRoot, ".instance.lock")), "CHECKPOINT_STABLE_LAYOUT_INVALID");
+    writeNew(path.join(stageRoot, "checkpoint-stable-export.json"), {
+      schema_version: 1,
+      status: extraction.status,
+      entry_count: extraction.entry_count,
+      portable_digest: extraction.portable_digest,
+      excluded_instance_lock: true,
+      excluded_terminal_workspaces: workspaceIds.length,
+      temporary_layout_empty: true,
+    });
+  } finally {
+    try { await docker(configuration.dockerContext, ["exec", state.active_container, "rm", "-f", archiveContainerPath], { forward: false }); } catch {}
+    try { fs.rmSync(archiveHostPath, { force: true }); } catch {}
+  }
   writeNew(checkpointPath, {
     schema_version: 1,
     state_root: stateRoot,

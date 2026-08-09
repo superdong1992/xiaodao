@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { createCheckpoint, restoreCheckpoint, verifyCheckpoint } from "../lib/checkpoint.mjs";
+import { createCheckpoint, extractCheckpointSourceArchive, restoreCheckpoint, verifyCheckpoint } from "../lib/checkpoint.mjs";
 
 const QUIESCENT = {
   status: "PASS",
@@ -50,6 +50,35 @@ test("sealed checkpoint restores into a new empty root with the same portable di
   } finally { writableTree(root); fs.rmSync(root, { recursive: true, force: true }); }
 });
 
+test("container-produced checkpoint source archives extract only into an empty target", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "test-flow-checkpoint-source-"));
+  try {
+    const state = path.join(root, "state");
+    fs.mkdirSync(path.join(state, "tmp", "workspaces"), { recursive: true });
+    fs.writeFileSync(path.join(state, "state.json"), "{\"schema_version\":2}\n");
+    const checkpoint = createCheckpoint({
+      stateRoot: state,
+      checkpointsRoot: path.join(root, "checkpoints"),
+      stageId: "journey.cross-job.route",
+      continuation: {},
+      identity: {},
+      quiescenceReceipt: QUIESCENT,
+    });
+    const target = path.join(root, "extracted");
+    const result = extractCheckpointSourceArchive({
+      archivePath: path.join(checkpoint.path, "data-root.tar"),
+      targetRoot: target,
+    });
+    assert.equal(result.status, "PASS");
+    assert.equal(result.portable_digest, checkpoint.portable_digest);
+    assert.equal(fs.readdirSync(path.join(target, "tmp", "workspaces")).length, 0);
+    assert.throws(() => extractCheckpointSourceArchive({
+      archivePath: path.join(checkpoint.path, "data-root.tar"),
+      targetRoot: target,
+    }), /CHECKPOINT_SOURCE_TARGET_NOT_EMPTY/);
+  } finally { writableTree(root); fs.rmSync(root, { recursive: true, force: true }); }
+});
+
 test("checkpoint creation rejects a non-quiescent boundary", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "test-flow-checkpoint-running-"));
   try {
@@ -80,4 +109,3 @@ test("tampering with archive or seal is rejected before restore", () => {
     assert.throws(() => restoreCheckpoint({ checkpointRoot: checkpoint.path, targetRoot: path.join(root, "target"), currentIdentity: {} }), /CHECKPOINT_FILE_HASH_MISMATCH/);
   } finally { writableTree(root); fs.rmSync(root, { recursive: true, force: true }); }
 });
-

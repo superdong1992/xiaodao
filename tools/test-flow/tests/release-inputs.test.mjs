@@ -137,6 +137,29 @@ test("macOS adapter bounds long polls without discarding failure evidence", () =
   assert.equal(archiveFailure >= 0 && recoverProgress > archiveFailure, true);
 });
 
+test("macOS phase 3 validates the current CaseView pending requirement field", () => {
+  const adapter = fs.readFileSync(path.join(TOOL_ROOT, "adapters", "macos-linux-release.mjs"), "utf8");
+  assert.match(adapter, /entry\.view\.pending_requirements\?\.filter/);
+  assert.doesNotMatch(adapter, /entry\.view\.requirements\?\.filter/);
+});
+
+test("macOS checkpoints export stable business state without retained workspaces", () => {
+  const adapter = fs.readFileSync(path.join(TOOL_ROOT, "adapters", "macos-linux-release.mjs"), "utf8");
+  const exporter = fs.readFileSync(path.join(TOOL_ROOT, "harness", "macos-export-checkpoint.sh"), "utf8");
+  assert.match(adapter, /extractCheckpointSourceArchive\(\{ archivePath: archiveHostPath, targetRoot: stateRoot \}\)/);
+  assert.match(adapter, /macos-export-checkpoint\.sh/);
+  assert.match(adapter, /excluded_terminal_workspaces: workspaceIds\.length/);
+  assert.match(adapter, /temporary_workspaces: 0/);
+  assert.doesNotMatch(adapter, /state\.active_container}:\/var\/lib\/problem-locator\/\./);
+  assert.match(exporter, /for required in data-format\.json state\.json resources jobs/);
+  assert.match(exporter, /tmp\/workspaces/);
+  assert.match(exporter, /-type l -print -quit/);
+  assert.match(exporter, /-type f -links \+1 -print -quit/);
+  assert.match(exporter, /tar --format=ustar --sort=name --mtime=@0 --numeric-owner/);
+  assert.doesNotMatch(exporter, /\.instance\.lock/);
+  assert.doesNotMatch(exporter, /cp -a[^\n]*tmp\/workspaces/);
+});
+
 test("offline container installation uses the build backend sealed into the v2 image", () => {
   const dockerfile = fs.readFileSync(path.join(TOOL_ROOT, "Dockerfile"), "utf8");
   const initializer = fs.readFileSync(path.join(TOOL_ROOT, "harness", "macos-initialize-container.sh"), "utf8");

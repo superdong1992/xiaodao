@@ -260,10 +260,11 @@ function parseTarHeader(header) {
   if (storedChecksum !== actualChecksum) throw new Error("CHECKPOINT_TAR_CHECKSUM");
   const name = header.subarray(0, 100).toString("utf8").replace(/\0.*$/, "");
   const prefix = header.subarray(345, 500).toString("utf8").replace(/\0.*$/, "");
-  const relative = prefix ? `${prefix}/${name}` : name;
-  if (!safeRelative(relative)) throw new Error(`CHECKPOINT_TAR_UNSAFE_PATH:${relative}`);
   const type = header.subarray(156, 157).toString("ascii") || "0";
   if (!['0', '5', '\0'].includes(type)) throw new Error(`CHECKPOINT_TAR_TYPE:${type}`);
+  const rawRelative = prefix ? `${prefix}/${name}` : name;
+  const relative = type === "5" && rawRelative.endsWith("/") ? rawRelative.slice(0, -1) : rawRelative;
+  if (!safeRelative(relative)) throw new Error(`CHECKPOINT_TAR_UNSAFE_PATH:${rawRelative}`);
   return {
     path: relative,
     kind: type === "5" ? "directory" : "file",
@@ -322,6 +323,33 @@ function extractTar(archivePath, targetRoot) {
     }
   } finally {
     fs.closeSync(archive);
+  }
+}
+
+export function extractCheckpointSourceArchive({ archivePath, targetRoot }) {
+  if (!path.isAbsolute(archivePath) || !path.isAbsolute(targetRoot)) {
+    throw new Error("CHECKPOINT_SOURCE_PATH_NOT_ABSOLUTE");
+  }
+  if (fs.existsSync(targetRoot)) {
+    if (!fs.statSync(targetRoot).isDirectory() || fs.readdirSync(targetRoot).length !== 0) {
+      throw new Error("CHECKPOINT_SOURCE_TARGET_NOT_EMPTY");
+    }
+  } else {
+    fs.mkdirSync(targetRoot, { recursive: false, mode: 0o700 });
+  }
+  try {
+    extractTar(archivePath, targetRoot);
+    const records = collectStateEntries(targetRoot);
+    return {
+      status: "PASS",
+      entry_count: records.length,
+      portable_digest: sha256Bytes(canonicalJson(records)),
+    };
+  } catch (error) {
+    for (const entry of fs.readdirSync(targetRoot)) {
+      fs.rmSync(path.join(targetRoot, entry), { recursive: true, force: true });
+    }
+    throw error;
   }
 }
 
