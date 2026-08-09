@@ -61,21 +61,25 @@ function performanceIdentity(stage, group) {
   }));
 }
 
-function retryRequirement(history, stageIdentities) {
+export function retryRequirement(history, stageIdentities) {
+  const unresolvedStageIds = new Set(Object.keys(stageIdentities));
   for (const entry of [...history].reverse()) {
-    const failed = (entry.verdict.stages ?? []).find((stage) => !["PASS", "NOT_REQUIRED"].includes(stage.status));
-    if (!failed) continue;
-    const desired = stageIdentities[failed.id];
-    if (desired && desired.producer_identity === failed.producer_identity && desired.proof_identity === failed.proof_identity) {
+    for (const stage of entry.verdict.stages ?? []) {
+      if (!unresolvedStageIds.has(stage.id)) continue;
+      const desired = stageIdentities[stage.id];
+      if (desired.producer_identity !== stage.producer_identity || desired.proof_identity !== stage.proof_identity) continue;
+      if (stage.status === "NOT_RUN" && stage.code === "PRIOR_STAGE_NOT_PASSING") continue;
+      unresolvedStageIds.delete(stage.id);
+      if (["PASS", "NOT_REQUIRED"].includes(stage.status)) continue;
       return {
         recommendation: "STOP",
         reason: "UNCHANGED_FAILED_IDENTITY",
         previous_run_id: entry.verdict.run_id,
-        stage_id: failed.id,
-        previous_code: failed.code ?? null,
+        stage_id: stage.id,
+        previous_code: stage.code ?? null,
       };
     }
-    break;
+    if (unresolvedStageIds.size === 0) break;
   }
   return { recommendation: "RUN", reason: null, previous_run_id: null, stage_id: null, previous_code: null };
 }
@@ -306,7 +310,8 @@ export function buildRunPlan(repoRoot, options) {
     blockers.push({ code: "IDENTITY_INPUT_MISSING", detail: `Required exact identity input is missing: ${missing}.` });
   }
 
-  const retry = retryRequirement(history, stageIdentities);
+  const selectedStageIdentities = Object.fromEntries(selected.map((stage) => [stage.id, stageIdentities[stage.id]]));
+  const retry = retryRequirement(history, selectedStageIdentities);
   if (retry.recommendation === "STOP") {
     const structured = options.reason && options.hypothesis && options.expectedEvidence;
     if (!structured) blockers.push({ code: "UNCHANGED_RETRY_INTENT_REQUIRED", detail: "The same failed identity may run again only with --reason, --hypothesis, and --expected-evidence.", retry });
