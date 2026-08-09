@@ -277,6 +277,7 @@ function parseTarHeader(header) {
 
 function extractTar(archivePath, targetRoot) {
   const archive = fs.openSync(archivePath, "r");
+  const pendingDirectories = [];
   let offset = 0;
   try {
     for (;;) {
@@ -292,7 +293,14 @@ function extractTar(archivePath, targetRoot) {
       const prefix = `${path.resolve(targetRoot)}${path.sep}`;
       if (!resolved.startsWith(prefix)) throw new Error(`CHECKPOINT_TAR_ESCAPE:${record.path}`);
       if (record.kind === "directory") {
-        fs.mkdirSync(destination, { recursive: false, mode: record.mode });
+        // A durable artifact tree may intentionally be read-only (for example,
+        // 0555 directories containing 0444 Logparse output).  Keep directories
+        // private and writable while their children are extracted, then restore
+        // archived ownership/modes from the leaves upward after the archive is
+        // complete.  Applying the archived mode here would make a read-only
+        // parent reject its next child with EACCES.
+        fs.mkdirSync(destination, { recursive: false, mode: 0o700 });
+        pendingDirectories.push({ destination, record });
       } else {
         fs.mkdirSync(path.dirname(destination), { recursive: true, mode: 0o700 });
         const output = fs.openSync(destination, "wx", record.mode);
@@ -313,7 +321,15 @@ function extractTar(archivePath, targetRoot) {
         }
         const padding = (BLOCK - (record.size % BLOCK)) % BLOCK;
         offset += padding;
+        try {
+          fs.chownSync(destination, record.uid, record.gid);
+        } catch (error) {
+          if (typeof process.getuid === "function" && process.getuid() === 0) throw error;
+        }
+        fs.chmodSync(destination, record.mode);
       }
+    }
+    for (const { destination, record } of pendingDirectories.reverse()) {
       try {
         fs.chownSync(destination, record.uid, record.gid);
       } catch (error) {

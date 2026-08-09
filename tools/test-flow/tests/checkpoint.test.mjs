@@ -79,6 +79,42 @@ test("container-produced checkpoint source archives extract only into an empty t
   } finally { writableTree(root); fs.rmSync(root, { recursive: true, force: true }); }
 });
 
+test("checkpoint extraction populates nested read-only artifact directories before restoring modes", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "test-flow-checkpoint-read-only-"));
+  try {
+    const state = path.join(root, "state");
+    const tree = path.join(state, "resources", "cases", "case-1", "artifacts", "artifact-1", "tree");
+    const payload = path.join(tree, "payload");
+    fs.mkdirSync(payload, { recursive: true });
+    const result = path.join(payload, "result.json");
+    fs.writeFileSync(result, "{\"status\":\"PASS\"}\n");
+    fs.chmodSync(result, 0o444);
+    fs.chmodSync(payload, 0o555);
+    fs.chmodSync(tree, 0o555);
+
+    const checkpoint = createCheckpoint({
+      stateRoot: state,
+      checkpointsRoot: path.join(root, "checkpoints"),
+      stageId: "journey.cross-job.diagnose",
+      continuation: {},
+      identity: {},
+      quiescenceReceipt: QUIESCENT,
+    });
+    const target = path.join(root, "extracted");
+    const extracted = extractCheckpointSourceArchive({
+      archivePath: path.join(checkpoint.path, "data-root.tar"),
+      targetRoot: target,
+    });
+
+    assert.equal(extracted.status, "PASS");
+    assert.equal(extracted.portable_digest, checkpoint.portable_digest);
+    assert.equal(fs.statSync(path.join(target, path.relative(state, tree))).mode & 0o777, 0o555);
+    assert.equal(fs.statSync(path.join(target, path.relative(state, payload))).mode & 0o777, 0o555);
+    assert.equal(fs.statSync(path.join(target, path.relative(state, result))).mode & 0o777, 0o444);
+    assert.equal(fs.readFileSync(path.join(target, path.relative(state, result)), "utf8"), "{\"status\":\"PASS\"}\n");
+  } finally { writableTree(root); fs.rmSync(root, { recursive: true, force: true }); }
+});
+
 test("checkpoint creation rejects a non-quiescent boundary", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "test-flow-checkpoint-running-"));
   try {
