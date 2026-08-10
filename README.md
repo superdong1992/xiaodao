@@ -43,7 +43,7 @@ Agent 无权预先构造、摘要或替代这两项结果。Reviewer 使用盲�
 
 ### 发布验收
 
-仓库测试统一从 [`tools/test-flow/README.md`](tools/test-flow/README.md) 进入；终态结构见 [`design/test-flow-architecture.md`](design/test-flow-architecture.md)。Dev 默认只跑受影响确定性测试和完整确定性套件，不调用真实模型；SameJob 已纳入确定性 Journey。Release 要求 clean commit、当前平台的 built-in Client→Linux adapter、完整确定性/平台证明，以及从 GENESIS 和全新空 `DATA_ROOT` 开始的一条 no-mock CrossJob 旅程。
+仓库测试统一从 [`tools/test-flow/README.md`](tools/test-flow/README.md) 进入；终态结构见 [`design/test-flow-architecture.md`](design/test-flow-architecture.md)。Dev 默认只跑受影响确定性测试和完整确定性套件，不调用真实模型；SameJob 已纳入确定性 Journey。Release 在 planning 时冻结 Git 可见工作树的不可变源码快照，不要求预先提交；它还要求当前平台的 built-in Client→Linux adapter、完整确定性/平台证明，以及从 GENESIS 和全新空 `DATA_ROOT` 开始的一条 no-mock CrossJob 旅程。
 
 每次运行的本地证据保存在 `.tmp/test-flow-evidence/<run-id>`。`verdict.json` 是唯一权威结论；缺失就是 `UNFINALIZED`。证据在复用前会按当前配置、密钥扫描器和事件合同重新审计，且不会自动删除。
 
@@ -329,4 +329,4 @@ V2 不包含 PostgreSQL、ORM、双写机制或分布式锁。当满足以下任
 
 测试计划、Dev 运行、真实模型重试合同、Release 缓存准备、三平台 built-in adapter、证据管理和退出码统一见 [`tools/test-flow/README.md`](tools/test-flow/README.md)。不要直接运行底层 selector 后自行组合发布结论。
 
-Release closure 会分别验证 Linux Server 原生启动与安装分发、本机 Client/Host、进程树与取消、完整 deterministic/SameJob、真实 Logparse、真实 Agent 以及 fresh CrossJob。skip 不等于通过；每个 Gate 的 JUnit 执行/跳过计数、平台、候选 Git SHA、runtime profile、外部源码和 executable identity 都写入 receipt。只有 exact clean commit 上最后生成且可重新验证的 `verdict.json` 能证明该次发布。
+Release closure 会分别验证 Linux Server 原生启动与安装分发、本机 Client/Host、进程树与取消、完整 deterministic/SameJob、真实 Logparse、真实 Agent 以及 fresh CrossJob。skip 不等于通过；每个 Gate 的 JUnit 执行/跳过计数、平台、源码快照 digest、base Git SHA、runtime profile、外部源码和 executable identity 都写入 receipt。只有绑定该不可变快照、最后生成且可重新验证的 `verdict.json` 能证明该次发布；测试通过后可以把完全相同的字节提交到 Git，任何源码变化都必须重新 Release。

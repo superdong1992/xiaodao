@@ -73,9 +73,13 @@ Release 对真实旅程一律 `reuse=never`，忽略业务 checkpoint，从 GENE
 
 Linux 是唯一 Server 平台。Windows 与 macOS 默认使用本机 Client，Linux Client 仅在显式选择时启用；三者都通过 HTTP 直连 Linux Server，且都有仓库拥有的 built-in adapter。三个薄 wrapper 共享相同 Gate receipt、checkpoint、DFX、预算和 evidence 合同，不接受调用方提供任意 adapter 命令。
 
-平台“受支持”与“已在某次发布真实通过”是两件事。一个 verdict 只证明其中记录的 Client 平台、Server、clean commit、运行时 profile 和外部输入；不得把 macOS 的真实 PASS 外推到 Windows 或 Linux Client。每个平台的真实认证必须由该平台自己的 `release.full` verdict 给出。
+平台“受支持”与“已在某次发布真实通过”是两件事。一个 verdict 只证明其中记录的 Client 平台、Server、不可变源码快照、运行时 profile 和外部输入；不得把 macOS 的真实 PASS 外推到 Windows 或 Linux Client。每个平台的真实认证必须由该平台自己的 `release.full` verdict 给出。
 
 ## 6. 身份模型
+
+Release planning 会枚举 Git 可见工作树：使用 tracked 文件的当前工作树字节，并纳入所有未被 ignore 的 untracked 文件；忽略文件和 `.git` 元数据不属于发布源码。排序后的 path、类型、可执行位、大小和内容 SHA-256 形成 source snapshot manifest 与唯一 digest。base commit、branch 和当时是否 dirty 只作为溯源元数据，不参与“是否允许执行”的判断。
+
+执行前把该快照物化到新的 attempt scratch；正式 Host/Linux/CrossJob adapter 只读取物化副本，直接读取工作树的 Gate 在执行前后复验同一清单。Linux 容器复制源码后再次按密封 manifest 验证完整 path set、模式和内容。planning 到 verdict 期间任何 Git 可见源码漂移都使本次运行 ERROR；因此不可变性由内容合同保证，不依赖提前提交。
 
 身份分三层：
 
@@ -117,7 +121,7 @@ Server Gate evidence contract 要求：
 
 每个服务实例/relay 保留自己的 producer、原始 NDJSON、sequence 和 monotonic clock domain。聚合器不得把多个实例伪装成一个 producer，也不能直接相减不同 monotonic clock；跨 Host/Linux 的区间只使用明确关联边界与记录的 UTC/clock-offset。waterfall 是由原始流和 receipt 摘出的索引，原始流仍是权威证据。
 
-finalizer 按 Gate evidence contract 验证事件，不按 Stage 名猜测文件。raw→receipt hash、sequence、单 producer monotonic 非递减、大小上限、密钥扫描和必需事件缺一不可。
+每个 CrossJob Gate 在 `gates.v2.json` 的结构化 evidence contract 中直接声明 event instance、PASS 时必需的 stream、允许为空的 stream 和失败证据空流策略。finalizer 只解释该合同，不按 Gate 或 Stage 名猜测文件；同一 stream 若同时被另一个 PASS Gate 要求非空，非空要求优先。raw→receipt hash、sequence、单 producer monotonic 非递减、大小上限、密钥扫描和必需事件缺一不可。
 
 ## 10. Evidence、复用与防篡改
 
@@ -131,13 +135,14 @@ finalizer 按 Gate evidence contract 验证事件，不按 Stage 名猜测文件
 
 ## 11. 完成与发布定义
 
-框架代码“存在”、deterministic PASS 和某个历史发布都不能证明新的 HEAD。终态变更完成需要：
+框架代码“存在”、deterministic PASS 和某个历史发布都不能证明新的源码快照。终态变更完成需要：
 
 1. 六配置与全部 schema/cross-validation、自测和确定性产品测试通过；
 2. 文档只有本架构和操作说明两处当前 Test Flow 权威，且职责不重复；
 3. 旧迁移 runner、静态 bundle、重复摘要和一次性实施文档从当前树移除；
-4. 变更形成 clean commit；
-5. 对该 exact commit、实际平台和冻结 runtime/external inputs 执行 fresh `release.full`；
-6. 最后生成且可重新验证的 verdict 满足全部 Proof。
+4. planning 冻结当前 Git 可见工作树的 exact source snapshot；
+5. 对该快照、实际平台和冻结 runtime/external inputs 执行 fresh `release.full`；
+6. 最后生成且可重新验证的 verdict 满足全部 Proof；
+7. 如需 Git 持久化，在测试完成后提交完全相同的 path/字节；提交前后 snapshot digest 必须一致，提交动作本身不构成新的测试证明。
 
 原分阶段优化在这里收敛为一套架构：cheap deterministic 先行、六个逻辑 Stage/四个 checkpoint boundary、producer/proof/performance identity 分离、语义心跳与双时限、真实模型最小抽样，以及版本化瀑布/性能策略。样本积累或 policy mode 变化是同一框架的运行状态，不再保留第二套 runner 或过渡语义。

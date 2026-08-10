@@ -23,6 +23,17 @@ EXPECTED_TOOLS = [
     "problem_locator_cancel_case",
     "problem_locator_list_artifacts",
 ]
+EXPECTED_VALIDATION_FIELDS = {
+    "actual_behavior",
+    "completion_criteria",
+    "constraints",
+    "expected_behavior",
+    "goals",
+    "non_goals",
+    "problem_spec",
+    "scope",
+    "statement",
+}
 SCALAR_TYPES = {"boolean", "integer", "number", "string"}
 
 
@@ -95,9 +106,20 @@ def _validation_fields(result: object) -> list[str]:
             if isinstance(detail, dict) and "field" in detail
         }
     )
-    if not {"request_id", "problem_spec"}.issubset(fields):
+    if set(fields) != EXPECTED_VALIDATION_FIELDS:
         raise RuntimeError("VALIDATION_PROBE_FIELDS")
     return fields
+
+
+def _leaf_error_messages(error: BaseException) -> list[str]:
+    if isinstance(error, BaseExceptionGroup):
+        return [
+            message
+            for nested in error.exceptions
+            for message in _leaf_error_messages(nested)
+        ]
+    message = str(error).strip()
+    return [message or type(error).__name__]
 
 
 async def _run(request_id: str) -> dict[str, Any]:
@@ -158,4 +180,5 @@ def main() -> None:
 try:
     main()
 except Exception as error:
-    raise SystemExit(f"SERVER_DFX_PROBE_FAILED:{error}") from None
+    leaves = sorted(set(_leaf_error_messages(error)))
+    raise SystemExit(f"SERVER_DFX_PROBE_FAILED:{'|'.join(leaves)}") from None

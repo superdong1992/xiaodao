@@ -10,7 +10,7 @@ import {
   resolveChangeBaseline,
   stageIdentity,
 } from "./identity.mjs";
-import { findReusableStages, lastSuccessfulDevCommit, loadHistory } from "./history.mjs";
+import { findReusableStages, lastSuccessfulDevBaseCommit, loadHistory } from "./history.mjs";
 import {
   RELEASE_DOCKER_CONTEXT,
   claudeSettingsIdentity,
@@ -21,6 +21,7 @@ import {
   validateReleaseImage,
   validateUvCache,
 } from "./release-inputs.mjs";
+import { captureSourceSnapshot, publicSourceSnapshot } from "./source-snapshot.mjs";
 
 const BUILT_IN_ADAPTERS = Object.freeze({
   macos: "macos-linux-release.mjs",
@@ -143,11 +144,11 @@ function invocationCapsForStage(stage, profile) {
   }
   if (stage.id === "journey.cross-job.route") return [
     { class: "host-client", min_count: 1, max_count: 1, caps: cap },
-    { class: "server-agent", min_count: 1, max_count: 1, caps: profile.real_caps.service_agent },
+    { class: "server-agent", min_count: 3, max_count: 3, caps: profile.real_caps.service_agent },
   ];
   if (stage.id === "journey.cross-job.diagnose") return [
     { class: "host-client", min_count: 1, max_count: 1, caps: cap },
-    { class: "server-agent", min_count: 2, max_count: 2, caps: profile.real_caps.service_agent },
+    { class: "server-agent", min_count: 3, max_count: 3, caps: profile.real_caps.service_agent },
   ];
   if (stage.id === "journey.cross-job.publish-restart") return [{ class: "host-client", min_count: 1, max_count: 1, caps: cap }];
   return [];
@@ -198,9 +199,15 @@ export function buildRunPlan(repoRoot, options = {}) {
     knownSecrets: [process.env.ANTHROPIC_AUTH_TOKEN, process.env.ANTHROPIC_API_KEY, process.env.PROBLEM_LOCATOR_LOGPARSE_TOKEN].filter(Boolean),
   });
   const source = gitState(repoRoot);
+  let sourceSnapshot;
+  try {
+    sourceSnapshot = captureSourceSnapshot(repoRoot);
+  } catch (error) {
+    sourceSnapshot = { schema_version: 1, algorithm: "git-visible-worktree-v1", digest: null, file_count: 0, records: [], code: error?.code ?? "SOURCE_SNAPSHOT_UNAVAILABLE" };
+  }
   const baseline = options.base
     ? { source: "explicit", commit: options.base }
-    : resolveChangeBaseline(repoRoot, lastSuccessfulDevCommit(history));
+    : resolveChangeBaseline(repoRoot, lastSuccessfulDevBaseCommit(history));
   const files = changedFiles(repoRoot, baseline, source);
   const identities = computeIdentitySets({
     repoRoot,
@@ -241,8 +248,8 @@ export function buildRunPlan(repoRoot, options = {}) {
   const blockers = [];
   const warnings = [];
   const containsReal = closure.stages.some((stage) => ["isolated-real", "real-journey"].includes(stage.kind));
-  if (!source.available) blockers.push({ code: "GIT_REQUIRED", detail: "A Git worktree is required for input identity." });
-  if (trackConfig.requires_clean_commit && !source.clean) blockers.push({ code: "RELEASE_SOURCE_DIRTY", detail: "Release requires a clean committed source tree." });
+  if (!source.available) blockers.push({ code: "GIT_REQUIRED", detail: "A Git worktree is required to enumerate the source snapshot." });
+  if (trackConfig.requires_source_snapshot && !sourceSnapshot.digest) blockers.push({ code: "SOURCE_SNAPSHOT_REQUIRED", detail: "The Git-visible worktree could not be frozen into an exact source snapshot." });
   if (track === "release" && !client) blockers.push({ code: "RELEASE_CLIENT_UNRESOLVED", detail: "Linux hosts require an explicit --client linux; Windows/macOS follow the host." });
   if (client && !Object.hasOwn(BUILT_IN_ADAPTERS, client)) blockers.push({ code: "CLIENT_UNKNOWN", detail: `Unsupported client ${client}.` });
   if (track === "dev" && containsReal && trackConfig.real_requires_opt_in && !options.allowRealModel) blockers.push({ code: "DEV_REAL_OPT_IN_REQUIRED", detail: "Dev real proofs require --allow-real-model." });
@@ -359,7 +366,15 @@ export function buildRunPlan(repoRoot, options = {}) {
     config_digests: config.digests,
     config_bundle_digest: config.bundle_digest,
     resume: track === "release" ? "fresh" : options.resume ?? defaults.resume,
-    source: { available: source.available, head: source.head, branch: source.branch, clean: source.clean, baseline, changed_files: files },
+    source: {
+      available: source.available,
+      base_commit: source.head,
+      branch: source.branch,
+      worktree_clean: source.clean,
+      snapshot: publicSourceSnapshot(sourceSnapshot),
+      baseline,
+      changed_files: files,
+    },
     release_inputs: formalRuntime ? {
       claude: {
         status: clientDistribution.status,
@@ -424,5 +439,6 @@ export function buildRunPlan(repoRoot, options = {}) {
     evidenceRoot,
     client,
     options: effectiveOptions,
+    sourceSnapshot,
   };
 }

@@ -314,12 +314,12 @@ async function repositoryCheck(context, stage, gate) {
     return { status: "ERROR", failure_domain: "HARNESS", code: "REPOSITORY_CHECK_UNSUPPORTED", elapsed_seconds: 0 };
   }
   const result = await runProcess({
-    repoRoot: context.repoRoot,
+    repoRoot: gate.check === "git-diff-check" ? context.sourceRepoRoot : context.repoRoot,
     attemptRoot: context.attemptRoot,
     stage,
     command,
     args,
-    cwd: context.repoRoot,
+    cwd: gate.check === "git-diff-check" ? context.sourceRepoRoot : context.repoRoot,
     env: {
       PYTHONNOUSERSITE: "1",
       PYTHONPYCACHEPREFIX: path.join(scratch, "pycache"),
@@ -402,8 +402,8 @@ async function hostCapability(context, stage) {
     stage,
     command: process.execPath,
     args: [
-      path.join(context.repoRoot, "tools", "test-flow", "adapters", "host-capability.mjs"),
-      "--repo-root", context.repoRoot,
+      path.join(context.sourceSnapshotRoot, "tools", "test-flow", "adapters", "host-capability.mjs"),
+      "--repo-root", context.sourceSnapshotRoot,
       "--output-root", outputRoot,
       "--claude-entry", context.options.claudeEntry,
       "--runtime-profile-digest", context.plan.runtime_profile_digest,
@@ -442,11 +442,11 @@ async function serverLinuxCapability(context, stage, gate) {
     stage,
     command: process.execPath,
     args: [
-      path.join(context.repoRoot, "tools", "test-flow", "adapters", "server-linux-capability.mjs"),
+      path.join(context.sourceSnapshotRoot, "tools", "test-flow", "adapters", "server-linux-capability.mjs"),
       "--output-root", outputRoot,
       "--docker-context", context.options.dockerContext ?? "default",
       "--image", RELEASE_BASE_IMAGE,
-      "--repo-root", context.repoRoot,
+      "--repo-root", context.sourceSnapshotRoot,
       "--logparse-source", context.options.logparseSource,
       "--runtime-profile-digest", context.plan.runtime_profile_digest,
       "--model", context.runtimeProfile.claude.model,
@@ -493,11 +493,12 @@ async function crossJob(context, stage) {
     if (value !== undefined && value !== null && value !== "") adapterArguments.push(name, String(value));
   };
   add("--stage", stage.id);
-  add("--repo-root", context.repoRoot);
+  add("--repo-root", context.sourceSnapshotRoot);
   add("--attempt-root", context.attemptRoot);
   add("--client", context.client);
   add("--track", context.track);
-  add("--source-commit", context.sourceHead);
+  add("--source-snapshot-digest", context.sourceSnapshotDigest);
+  add("--source-snapshot-manifest", context.sourceSnapshotManifestPath);
   add("--claude-entry", context.options.claudeEntry);
   add("--claude-settings", context.options.claudeSettings);
   add("--docker-context", context.options.dockerContext ?? "default");

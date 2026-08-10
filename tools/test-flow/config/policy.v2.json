@@ -11,14 +11,14 @@
   "tracks": {
     "dev": {
       "default_goal": "dev.default",
-      "requires_clean_commit": false,
+      "requires_source_snapshot": true,
       "real_requires_opt_in": true,
       "real_requires_intent": true,
       "performance_effect": "warn"
     },
     "release": {
       "default_goal": "release.full",
-      "requires_clean_commit": true,
+      "requires_source_snapshot": true,
       "real_requires_opt_in": false,
       "real_requires_intent": false,
       "performance_effect": "gate"

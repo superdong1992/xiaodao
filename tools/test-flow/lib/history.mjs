@@ -21,11 +21,12 @@ export function loadHistory(evidenceRoot, { knownSecrets = [] } = {}) {
   return history;
 }
 
-export function lastSuccessfulDevCommit(history) {
+export function lastSuccessfulDevBaseCommit(history) {
   for (const entry of [...history].reverse()) {
     const verdict = entry.verdict;
-    if (verdict.track === "dev" && ["PASS", "PASS_WITH_WARNINGS"].includes(verdict.overall) && verdict.source?.head) {
-      return verdict.source.head;
+    const baseCommit = verdict.source?.base_commit ?? verdict.source?.head ?? null;
+    if (verdict.track === "dev" && ["PASS", "PASS_WITH_WARNINGS"].includes(verdict.overall) && baseCommit) {
+      return baseCommit;
     }
   }
   return null;

@@ -6,7 +6,7 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { createAttempt, finalizeAttempt, recoverStageAuditProgress, requiredEventFiles, verifyVerdict } from "../lib/evidence.mjs";
+import { allowedEmptyEventFiles, createAttempt, finalizeAttempt, recoverStageAuditProgress, requiredEventFiles, verifyVerdict } from "../lib/evidence.mjs";
 import { EventWriter } from "../lib/events.mjs";
 import { canonicalJson, removeTreeWritable, sha256Bytes, sha256File, writeJsonSync } from "../lib/util.mjs";
 
@@ -33,6 +33,7 @@ function writeExecutedStage(attemptRoot) {
     gate_kind: "pytest",
     gate_identity: "gate-identity-a",
     definition_digest: "gate-definition-a",
+    evidence_contract: null,
     runtime_profile: "python-test",
     runtime_profile_digest: "runtime-python-a",
     result_source: "EXECUTED",
@@ -56,14 +57,19 @@ function writeExecutedStage(attemptRoot) {
     code: null,
     failure_domain: null,
     gate_identity: "gate-identity-a",
+    definition_digest: "gate-definition-a",
+    evidence_contract: null,
     runtime_profile: "python-test",
     runtime_profile_digest: "runtime-python-a",
     receipt_path: path.relative(attemptRoot, receiptPath).split(path.sep).join("/"),
     receipt_digest: sha256File(receiptPath),
     elapsed_seconds: 1,
     usage: ZERO_USAGE,
+    usage_complete: true,
+    effective_caps: null,
     model_invocations: [],
     fresh_admission: null,
+    evidence: [],
   };
   const stageReceipt = {
     schema_version: 2,
@@ -139,6 +145,26 @@ function writePlanAndCandidate(attemptRoot, runId, stage) {
     proofs: "config-proofs", stages: "config-stages", gates: "config-gates",
     identities: "config-identities", policy: "config-policy", runtimeProfiles: "config-runtime",
   };
+  const sourceManifest = {
+    schema_version: 1,
+    algorithm: "git-visible-worktree-v1",
+    digest: sha256Bytes(canonicalJson([])),
+    file_count: 0,
+    records: [],
+  };
+  const sourceSnapshot = {
+    schema_version: 1,
+    algorithm: sourceManifest.algorithm,
+    status: "PRESENT",
+    digest: sourceManifest.digest,
+    file_count: 0,
+  };
+  const sourceVerification = {
+    schema_version: 1,
+    status: "PASS",
+    worktree: { status: "PASS", expected_digest: sourceManifest.digest, observed_digest: sourceManifest.digest },
+    materialized: { status: "PASS", expected_digest: sourceManifest.digest, observed_digest: sourceManifest.digest },
+  };
   const planCore = {
     schema_version: 2,
     track: "dev",
@@ -149,7 +175,7 @@ function writePlanAndCandidate(attemptRoot, runId, stage) {
     config_digests: configDigests,
     config_bundle_digest: "config-bundle-a",
     resume: "auto",
-    source: { available: true, head: "a".repeat(40), branch: "codex/test", clean: true, baseline: { source: "explicit", commit: "b".repeat(40) }, changed_files: [] },
+    source: { available: true, base_commit: "a".repeat(40), branch: "codex/test", worktree_clean: false, snapshot: sourceSnapshot, baseline: { source: "explicit", commit: "b".repeat(40) }, changed_files: [] },
     release_inputs: null,
     lineage: { root: "AUTO", initial_data_root: "TRACK_POLICY", checkpoint_reuse: "CONFIGURED_PER_STAGE" },
     proofs: [{ id: proof.id, acceptance: proof.acceptance, stages: [stage.id], proof_definition_digest: proof.proof_definition_digest }],
@@ -159,7 +185,7 @@ function writePlanAndCandidate(attemptRoot, runId, stage) {
       proof_identity: stage.proof_identity,
       performance_identity: stage.performance_identity,
       decision: stage.result_source === "REUSED" ? "REUSE" : "RUN",
-      gates: [{ id: "det.unit" }],
+      gates: [{ id: "det.unit", gate_identity: "gate-identity-a", definition_digest: "gate-definition-a", evidence_contract: null, required_evidence: [], runtime_profile: "python-test", runtime_profile_digest: "runtime-python-a" }],
     }],
     admission,
     retry: { recommendation: "RUN", reason: null, previous_run_id: null, stage_id: null, previous_code: null },
@@ -174,6 +200,8 @@ function writePlanAndCandidate(attemptRoot, runId, stage) {
     run_id: runId,
     created_at_utc: "2026-08-10T00:00:00.000Z",
   });
+  writeJsonSync(path.join(attemptRoot, "payload", "source", "source-snapshot.json"), sourceManifest);
+  writeJsonSync(path.join(attemptRoot, "payload", "source", "source-snapshot-verification.json"), sourceVerification);
   const gates = stage.gates.map((gate) => ({ stage_id: stage.id, ...gate }));
   const candidate = {
     schema_version: 2,
@@ -188,7 +216,7 @@ function writePlanAndCandidate(attemptRoot, runId, stage) {
     proofs: [proof],
     stages: [stage],
     gates,
-    source: { head: "a".repeat(40), clean: true, baseline: { source: "explicit", commit: "b".repeat(40) } },
+    source: { base_commit: "a".repeat(40), branch: "codex/test", worktree_clean_at_start: false, snapshot: sourceSnapshot, baseline: { source: "explicit", commit: "b".repeat(40) }, verification: sourceVerification },
     config_digests: configDigests,
     config_bundle_digest: "config-bundle-a",
     runtime_profile: "release",
@@ -294,7 +322,7 @@ test("payload and verdict-only tampering are both detected", async () => {
       (value) => { value.overall = "FAIL"; },
       (value) => { value.evidence_reusable = false; },
       (value) => { value.stages[0].producer_identity = "tampered"; },
-      (value) => { value.source.head = "f".repeat(40); },
+      (value) => { value.source.snapshot.digest = "f".repeat(64); },
     ].entries()) {
       const item = await createFinalized(root, `run-20260810T00000${4 + index}Z-${String(index + 1).repeat(8)}`);
       const verdictPath = path.join(item.attemptRoot, "verdict.json");
@@ -360,13 +388,41 @@ test("prune refuses to delete a source run that a valid derived verdict referenc
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
+test("evidence report filters exact run ids and never labels an invalid verdict reusable", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "test-flow-report-validity-"));
+  try {
+    await createFinalized(root, "run-20260810T000017Z-1111aaaa");
+    const invalid = await createFinalized(root, "run-20260810T000018Z-2222bbbb");
+    const verdictPath = path.join(invalid.attemptRoot, "verdict.json");
+    const verdict = JSON.parse(fs.readFileSync(verdictPath, "utf8"));
+    verdict.overall = "FAIL";
+    fs.writeFileSync(verdictPath, canonicalJson(verdict), "utf8");
+
+    const command = spawnSync(process.execPath, [path.join(TOOL_ROOT, "evidence.mjs"), "report", "--evidence-root", root, "--run-id", verdict.run_id], { encoding: "utf8" });
+    assert.equal(command.status, 0, command.stderr);
+    const report = JSON.parse(command.stdout);
+    assert.equal(report.attempt_count, 1);
+    assert.deepEqual(report.attempts.map((item) => item.run_id), [verdict.run_id]);
+    assert.equal(report.attempts[0].verification_status, "INVALID");
+    assert.equal(report.attempts[0].evidence_reusable, false);
+    assert.equal(report.attempts[0].retention, "MANUAL_REVIEW");
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
 test("event requirements are derived from executed Gate evidence contracts", () => {
   assert.deepEqual(requiredEventFiles([{ id: "det.unit", status: "PASS", result_source: "EXECUTED" }]), ["orchestrator.ndjson"]);
-  assert.deepEqual(requiredEventFiles([{ id: "journey.route", status: "PASS", result_source: "EXECUTED" }]), [
+  const routeContract = { id: "cross-job-tool-call-v2", event_stream: { instance: "route", pass_requires: ["diagnostics", "journey"], pass_allows_empty: [], failure_allows_empty: ["journey"] } };
+  const routeGate = { stage_id: "journey.cross-job.route", id: "journey.route", evidence_contract: routeContract, status: "PASS", result_source: "EXECUTED" };
+  assert.deepEqual(requiredEventFiles([routeGate]), [
     "orchestrator.ndjson",
     "parts/service-linux.route.diagnostics.ndjson",
     "parts/service-linux.route.journey.ndjson",
   ]);
+  assert.deepEqual(allowedEmptyEventFiles([{ ...routeGate, status: "FAIL" }]), ["parts/service-linux.route.journey.ndjson"]);
+  assert.deepEqual(requiredEventFiles([{ ...routeGate, status: "FAIL" }]), ["orchestrator.ndjson"]);
+  const environmentGate = { stage_id: "journey.cross-job.environment", id: "journey.environment", evidence_contract: { id: "cross-job-environment-v2", event_stream: { ...routeContract.event_stream, pass_allows_empty: ["journey"] } }, status: "PASS", result_source: "EXECUTED" };
+  assert.deepEqual(allowedEmptyEventFiles([environmentGate]), ["parts/service-linux.route.journey.ndjson"]);
+  assert.deepEqual(allowedEmptyEventFiles([environmentGate, routeGate]), []);
 });
 
 test("failed adapter progress recovers completed calls and authoritative usage", () => {

@@ -150,28 +150,60 @@
       "kind": "cross-job-adapter",
       "phase": "environment",
       "runtime_profile": "release",
-      "evidence_contract": "cross-job-environment-v2",
+      "evidence_contract": {
+        "id": "cross-job-environment-v2",
+        "event_stream": {
+          "instance": "route",
+          "pass_requires": ["diagnostics", "journey"],
+          "pass_allows_empty": ["journey"],
+          "failure_allows_empty": ["journey"]
+        }
+      },
       "evidence": ["adapter-result.json"]
     },
     "journey.route": {
       "kind": "cross-job-adapter",
       "phase": "route",
       "runtime_profile": "release",
-      "evidence_contract": "cross-job-tool-call-v2",
+      "evidence_contract": {
+        "id": "cross-job-tool-call-v2",
+        "event_stream": {
+          "instance": "route",
+          "pass_requires": ["diagnostics", "journey"],
+          "pass_allows_empty": [],
+          "failure_allows_empty": ["journey"]
+        }
+      },
       "evidence": ["adapter-result.json"]
     },
     "journey.upload": {
       "kind": "cross-job-adapter",
       "phase": "upload",
       "runtime_profile": "release",
-      "evidence_contract": "cross-job-tool-call-v2",
+      "evidence_contract": {
+        "id": "cross-job-tool-call-v2",
+        "event_stream": {
+          "instance": "upload",
+          "pass_requires": ["diagnostics", "journey"],
+          "pass_allows_empty": [],
+          "failure_allows_empty": ["journey"]
+        }
+      },
       "evidence": ["adapter-result.json"]
     },
     "journey.diagnose": {
       "kind": "cross-job-adapter",
       "phase": "diagnose",
       "runtime_profile": "release",
-      "evidence_contract": "cross-job-diagnose-review-v2",
+      "evidence_contract": {
+        "id": "cross-job-diagnose-review-v2",
+        "event_stream": {
+          "instance": "diagnose",
+          "pass_requires": ["diagnostics", "journey"],
+          "pass_allows_empty": [],
+          "failure_allows_empty": ["journey"]
+        }
+      },
       "evidence": ["adapter-result.json"]
     },
     "journey.review-observation": {
@@ -184,7 +216,15 @@
       "kind": "cross-job-adapter",
       "phase": "publish-restart",
       "runtime_profile": "release",
-      "evidence_contract": "cross-job-publish-restart-v2",
+      "evidence_contract": {
+        "id": "cross-job-publish-restart-v2",
+        "event_stream": {
+          "instance": "restart",
+          "pass_requires": ["diagnostics", "journey"],
+          "pass_allows_empty": ["journey"],
+          "failure_allows_empty": ["journey"]
+        }
+      },
       "evidence": ["adapter-result.json"]
     }
   }

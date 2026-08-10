@@ -157,12 +157,33 @@ test("the first-party adapter matrix is thin, platform-bound and shares one core
   assert.match(core, /configuration\.client === configuration\.expectedClient/);
 });
 
+test("Linux capability installs the immutable source snapshot from the sealed offline cache before testing", () => {
+  const adapter = fs.readFileSync(path.join(TOOL_ROOT, "adapters", "server-linux-capability.mjs"), "utf8");
+  const platformTests = [
+    fs.readFileSync(path.join(TOOL_ROOT, "..", "..", "tests", "platform", "server_linux", "test_native_startup_gate.py"), "utf8"),
+    fs.readFileSync(path.join(TOOL_ROOT, "..", "..", "tests", "platform", "distribution", "test_installed_distribution_gate.py"), "utf8"),
+  ].join("\n");
+  assert.match(adapter, /UV_CACHE_DIR=\/root\/\.cache\/uv/);
+  assert.match(adapter, /UV_LINK_MODE=copy/);
+  assert.doesNotMatch(adapter, /\/tmp\/uv-cache/);
+  assert.match(adapter, /uv pip install --offline --no-deps --no-build-isolation --reinstall/);
+  assert.match(adapter, /problem_locator\/runtime\/assets -xdev -type f -links \+1/);
+  assert.ok(adapter.indexOf("uv pip install --offline") < adapter.indexOf("python -m pytest"));
+  assert.match(adapter, /SERVER_CAPABILITY_OFFLINE_INSTALL/);
+  assert.match(adapter, /SERVER_CAPABILITY_CONTRACT/);
+  assert.match(platformTests, /environ\["UV_LINK_MODE"\] = "copy"/);
+  assert.match(platformTests, /shutil\.copytree\(sealed_runtime, venv, symlinks=True\)/);
+  assert.doesNotMatch(platformTests, /"venv",\s*"--no-project"/);
+  assert.doesNotMatch(`${adapter}\n${platformTests}`, /S08_/);
+});
+
 test("active runtime support is explicit and the historical harness closure is gone", () => {
   const expected = [
     "audit_service_agent_usage.py", "checkpoint-temporary.mjs", "export-checkpoint.sh",
     "initialize-container.sh", "isolated-agent-wrapper.mjs", "prepare_claude_settings.py",
     "prepare_nonroot_settings.py", "prepare_real_zip.py", "relay_service_journey.py",
     "server_dfx_probe.py", "service-supervisor.sh", "stop-service.sh", "test_service_launcher.py",
+    "verify-source-snapshot.mjs",
   ];
   assert.deepEqual(fs.readdirSync(SUPPORT_ROOT).sort(), expected.sort());
   assert.equal(fs.existsSync(path.join(TOOL_ROOT, "harness")), false);
@@ -174,12 +195,16 @@ test("active runtime support is explicit and the historical harness closure is g
   assert.match(activeText, /\/test-flow-runtime\//);
 });
 
-test("container initialization is offline, copies assets and trusts only exact source repositories", () => {
+test("container initialization verifies the exact product snapshot and external source commits", () => {
   const initializer = fs.readFileSync(path.join(SUPPORT_ROOT, "initialize-container.sh"), "utf8");
-  for (const source of ["/source/xiaodao/.git", "/source/logparse/.git", "/source/problem-locator-mcp/.git"]) {
+  for (const source of ["/source/logparse/.git", "/source/problem-locator-mcp/.git"]) {
     assert.equal(initializer.includes(`git config --file "$source_git_config" --add safe.directory ${source}`), true);
     assert.equal(initializer.includes(`GIT_CONFIG_GLOBAL="$source_git_config" git -c core.autocrlf=false clone --no-hardlinks ${source.slice(0, -5)} `), true);
   }
+  assert.doesNotMatch(initializer, /\/source\/xiaodao\/\.git/);
+  assert.match(initializer, /cp -a \/source\/xiaodao\/\. \/opt\/src\/xiaodao\//);
+  assert.match(initializer, /verify-source-snapshot\.mjs/);
+  assert.match(initializer, /xiaodao_snapshot_digest/);
   assert.doesNotMatch(initializer, /safe\.directory\s+['"]?\*['"]?/);
   assert.match(initializer, /UV_LINK_MODE=copy UV_NO_PROGRESS=1 uv pip install/);
   assert.match(initializer, /--offline --no-deps --no-build-isolation --reinstall/);
@@ -197,6 +222,7 @@ test("CrossJob runtime uses pull-never, empty labeled storage and authoritative 
   assert.match(core, /readServerMcpCorrespondence\(attemptRoot, state\.client_calls/);
   assert.match(core, /correspondence\.tools_listed_exact/);
   assert.match(core, /correspondence\.validation_probe_exact/);
+  assert.match(core, /canonicalJson\(receipt\.validation_fields\) === canonicalJson\(NEGATIVE_PROBE_VALIDATION_FIELDS\)/);
   assert.match(core, /client_dfx_absent: true/);
   assert.match(core, /CLIENT_DFX_FORBIDDEN/);
 });
@@ -211,6 +237,8 @@ test("model invocations require exact model, hard caps, terminal success and com
   assert.match(core, /terminal: audit\.terminal/);
   assert.match(core, /usage_complete: true/);
   assert.match(core, /total_tokens: "terminal-usage-postcondition"/);
+  assert.match(core, /canonicalJson\(jobTypes\) === canonicalJson\(\["DIAGNOSE", "DIAGNOSE", "ROUTE"\]\)/);
+  assert.match(core, /canonicalJson\(jobTypes\) === canonicalJson\(\["DIAGNOSE", "DIAGNOSE", "REVIEW"\]\)/);
   assert.match(isolated, /WRAPPER_MODEL_CAP_EXCEEDED/);
   assert.match(isolated, /final\.subtype !== "success" \|\| final\.is_error !== false/);
   assert.match(serviceAudit, /MODEL_TERMINAL_INVALID/);
@@ -239,9 +267,13 @@ test("service evidence streams directly to attempt logs and restart emptiness is
   assert.match(supervisor, /service_log="\$logs\/service-\$instance\.log"/);
   assert.match(supervisor, /PYTHONUNBUFFERED=1/);
   assert.match(supervisor, /allow-empty\) journey_empty_arg=--allow-empty/);
+  assert.match(core, /\{ allowEmptyJourney = true \}/);
   assert.match(relay, /parser\.add_argument\("--allow-empty", action="store_true"\)/);
+  assert.match(relay, /_validation_error_facts/);
+  assert.doesNotMatch(relay, /"validation_errors": event\.get\("validation_errors"\)/);
+  assert.match(core, /startService\(configuration, state, "route", \{ allowEmptyJourney: true \}\)/);
   assert.match(core, /startService\(configuration, state, "restart", \{ allowEmptyJourney: true \}\)/);
-  assert.match(core, /allowEmpty: mode === "journey" && instance === "restart"/);
+  assert.match(core, /allowEmpty: mode === "journey" && \["route", "restart"\]\.includes\(instance\)/);
   assert.match(core, /service-\$\{instance\}-\$\{relayKind\}-relay\.json/);
 });
 

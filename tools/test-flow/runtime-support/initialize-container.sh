@@ -4,7 +4,7 @@ set -eu
 umask 077
 
 mode=${1:?fresh or restart mode required}
-expected_xiaodao=${2:?xiaodao commit required}
+expected_xiaodao_snapshot=${2:?xiaodao source snapshot digest required}
 expected_logparse=${3:?logparse commit required}
 expected_mcp=${4:?mcp commit required}
 receipt=${5:?absolute receipt path required}
@@ -29,19 +29,20 @@ install -d -m 0755 -o 0 -g 0 /opt/src
 source_git_config=/tmp/test-flow-source-gitconfig
 test ! -e "$source_git_config"
 git config --file "$source_git_config" --add safe.directory ''
-git config --file "$source_git_config" --add safe.directory /source/xiaodao/.git
 git config --file "$source_git_config" --add safe.directory /source/logparse/.git
 git config --file "$source_git_config" --add safe.directory /source/problem-locator-mcp/.git
 chmod 0600 "$source_git_config"
 test "$(GIT_CONFIG_GLOBAL="$source_git_config" git config --global --get-all safe.directory)" = "
-/source/xiaodao/.git
 /source/logparse/.git
 /source/problem-locator-mcp/.git"
 
-GIT_CONFIG_GLOBAL="$source_git_config" git -c core.autocrlf=false clone --no-hardlinks /source/xiaodao /opt/src/xiaodao >/dev/null
-git -C /opt/src/xiaodao checkout --detach "$expected_xiaodao" >/dev/null
-test "$(git -C /opt/src/xiaodao rev-parse HEAD)" = "$expected_xiaodao"
-test -z "$(git -C /opt/src/xiaodao status --porcelain --untracked-files=all)"
+test -d /source/xiaodao
+install -d -m 0755 /opt/src/xiaodao
+cp -a /source/xiaodao/. /opt/src/xiaodao/
+node /test-flow-runtime/verify-source-snapshot.mjs \
+  --root /opt/src/xiaodao \
+  --manifest /evidence/source/source-snapshot.json \
+  --expected-digest "$expected_xiaodao_snapshot" >/dev/null
 
 GIT_CONFIG_GLOBAL="$source_git_config" git -c core.autocrlf=false clone --no-hardlinks /source/logparse /opt/src/logparse >/dev/null
 git -C /opt/src/logparse checkout --detach "$expected_logparse" >/dev/null
@@ -114,6 +115,6 @@ runuser -u plagent -- test -r /run/plagent-claude/settings.json
 mkdir -p "$(dirname "$receipt")"
 test ! -e "$receipt"
 cat > "$receipt" <<EOF
-{"schema_version":1,"status":"PASS","mode":"$mode","xiaodao_commit":"$expected_xiaodao","logparse_commit":"$expected_logparse","mcp_commit":"$expected_mcp","claude_version":"2.1.89 (Claude Code)","service_uid":10001,"service_gid":10001,"settings_policy":"env-allowlist-only-no-hooks-v1","network_install":false,"uv_link_mode":"copy","installed_asset_hardlinks":0}
+{"schema_version":1,"status":"PASS","mode":"$mode","xiaodao_snapshot_digest":"$expected_xiaodao_snapshot","logparse_commit":"$expected_logparse","mcp_commit":"$expected_mcp","claude_version":"2.1.89 (Claude Code)","service_uid":10001,"service_gid":10001,"settings_policy":"env-allowlist-only-no-hooks-v1","network_install":false,"uv_link_mode":"copy","installed_asset_hardlinks":0}
 EOF
 chmod 0600 "$receipt"

@@ -8,6 +8,11 @@ import { EventWriter } from "./events.mjs";
 import { failureFingerprint, performanceSamples } from "./history.mjs";
 import { buildRunPlan } from "./planner.mjs";
 import { ResourceRegistry } from "./resources.mjs";
+import {
+  materializeSourceSnapshot,
+  verifyMaterializedSourceSnapshot,
+  verifySourceSnapshot,
+} from "./source-snapshot.mjs";
 import { adjudicateStagePerformance } from "./status.mjs";
 import {
   canonicalJson,
@@ -188,6 +193,7 @@ function writeGateReceipt({ attemptRoot, stage, gatePlan, actionResult, evidence
     gate_kind: gatePlan.kind,
     gate_identity: gatePlan.gate_identity,
     definition_digest: gatePlan.definition_digest,
+    evidence_contract: gatePlan.evidence_contract,
     runtime_profile: gatePlan.runtime_profile,
     runtime_profile_digest: gatePlan.runtime_profile_digest,
     result_source: "EXECUTED",
@@ -328,6 +334,22 @@ export async function runFlow(repoRoot, options) {
   const attemptRoot = createAttempt({ evidenceRoot: built.evidenceRoot, runId });
   const plan = { ...built.plan, run_id: runId, created_at_utc: new Date().toISOString() };
   writeJsonSync(path.join(attemptRoot, "payload", "run-plan.json"), plan);
+  const sourceManifestPath = path.join(attemptRoot, "payload", "source", "source-snapshot.json");
+  const sourceSnapshotRoot = path.join(attemptRoot, "scratch", "source-snapshot", "repository");
+  writeJsonSync(sourceManifestPath, built.sourceSnapshot);
+  let sourceSnapshotSetupError = null;
+  try {
+    materializeSourceSnapshot(repoRoot, sourceSnapshotRoot, built.sourceSnapshot);
+  } catch (error) {
+    sourceSnapshotSetupError = redactError(error);
+  }
+  const executionOptions = { ...built.options };
+  if (executionOptions.crossJobAdapter && sourceSnapshotSetupError === null) {
+    const relativeAdapter = path.relative(repoRoot, executionOptions.crossJobAdapter);
+    if (relativeAdapter !== ".." && !relativeAdapter.startsWith(`..${path.sep}`) && !path.isAbsolute(relativeAdapter)) {
+      executionOptions.crossJobAdapter = path.join(sourceSnapshotRoot, relativeAdapter);
+    }
+  }
   const policies = { ...plan.policies.process, ...plan.policies.evidence };
   const eventWriter = new EventWriter({
     attemptRoot,
@@ -343,10 +365,27 @@ export async function runFlow(repoRoot, options) {
   let parentCheckpointId = "GENESIS";
   let pendingCheckpoint = null;
   let preFinalizationResourceReceipt = null;
+  let sourceSnapshotVerification = null;
 
   try {
     eventWriter.write("run.created", { data: { track: plan.track, goal: plan.goal } });
-    if (plan.admission.status !== "ADMITTED") {
+    if (sourceSnapshotSetupError) {
+      eventWriter.write("run.failed", { data: { code: "SOURCE_SNAPSHOT_MATERIALIZATION_FAILED" } });
+      stageResults.push({
+        schema_version: 2,
+        id: "source.snapshot",
+        kind: "framework",
+        status: "ERROR",
+        code: "SOURCE_SNAPSHOT_MATERIALIZATION_FAILED",
+        failure_domain: "HARNESS",
+        error: sourceSnapshotSetupError,
+        elapsed_seconds: 0,
+        performance_status: "NOT_MEASURED",
+        gates: [],
+      });
+      operationStatus = "ERROR";
+      stopped = true;
+    } else if (plan.admission.status !== "ADMITTED") {
       eventWriter.write("run.blocked", { data: { blocker_count: plan.admission.blockers.length } });
       stopped = true;
     } else {
@@ -415,10 +454,17 @@ export async function runFlow(repoRoot, options) {
           : null;
         let actionResult;
         try {
-          actionResult = await executeGate({
+          const before = verifySourceSnapshot(repoRoot, built.sourceSnapshot);
+          if (before.status !== "PASS") {
+            actionResult = { status: "ERROR", failure_domain: "HARNESS", code: "SOURCE_SNAPSHOT_DRIFT", elapsed_seconds: 0, source_snapshot_verification: before };
+          } else actionResult = await executeGate({
             repoRoot,
+            sourceRepoRoot: repoRoot,
+            sourceSnapshotRoot,
+            sourceSnapshotManifestPath: sourceManifestPath,
+            sourceSnapshotDigest: built.sourceSnapshot.digest,
             attemptRoot,
-            options: built.options,
+            options: executionOptions,
             client: built.client,
             track: plan.track,
             policies,
@@ -426,12 +472,13 @@ export async function runFlow(repoRoot, options) {
             identities: built.identities,
             eventWriter,
             resources,
-            sourceHead: plan.source.head,
             plan,
             planStage,
             runtimeProfile: gateRuntimeProfile,
             restoredCheckpoint,
           }, stage, gatePlan.id, gate);
+          const after = verifySourceSnapshot(repoRoot, built.sourceSnapshot);
+          if (after.status !== "PASS") actionResult = { ...actionResult, status: "ERROR", failure_domain: "HARNESS", code: "SOURCE_SNAPSHOT_DRIFT", source_snapshot_verification: after };
         } catch (error) {
           actionResult = { status: "ERROR", failure_domain: "HARNESS", code: "GATE_EXCEPTION", elapsed_seconds: 0, error: redactError(error) };
         }
@@ -500,14 +547,19 @@ export async function runFlow(repoRoot, options) {
           code: gate.code,
           failure_domain: gate.failure_domain,
           gate_identity: gate.gate_identity,
+          definition_digest: gate.definition_digest,
+          evidence_contract: gate.evidence_contract,
           runtime_profile: gate.runtime_profile,
           runtime_profile_digest: gate.runtime_profile_digest,
           receipt_path: gate.receipt_path,
           receipt_digest: gate.receipt_digest,
           elapsed_seconds: gate.elapsed_seconds,
           usage: gate.usage,
+          usage_complete: gate.usage_complete,
+          effective_caps: gate.effective_caps,
           model_invocations: gate.model_invocations,
           fresh_admission: gate.fresh_admission,
+          evidence: gate.evidence,
         })),
         checkpoint,
         restored_checkpoint: restoredCheckpoint ? {
@@ -553,6 +605,18 @@ export async function runFlow(repoRoot, options) {
       operationStatus = "ERROR";
       stageResults.push({ schema_version: 2, id: "evidence.events", kind: "framework", status: "ERROR", code: "EVENT_STREAM_CLOSE_FAILED", failure_domain: "HARNESS", error: redactError(error), elapsed_seconds: 0, performance_status: "NOT_MEASURED", gates: [] });
     }
+    const worktreeVerification = verifySourceSnapshot(repoRoot, built.sourceSnapshot);
+    const materializedVerification = sourceSnapshotSetupError
+      ? { schema_version: 1, status: "ERROR", expected_digest: built.sourceSnapshot.digest, observed_digest: null, code: "SOURCE_SNAPSHOT_MATERIALIZATION_FAILED" }
+      : verifyMaterializedSourceSnapshot(sourceSnapshotRoot, built.sourceSnapshot);
+    sourceSnapshotVerification = {
+      schema_version: 1,
+      status: worktreeVerification.status === "PASS" && materializedVerification.status === "PASS" ? "PASS" : "FAIL",
+      worktree: worktreeVerification,
+      materialized: materializedVerification,
+    };
+    writeJsonSync(path.join(attemptRoot, "payload", "source", "source-snapshot-verification.json"), sourceSnapshotVerification);
+    if (sourceSnapshotVerification.status !== "PASS") operationStatus = "ERROR";
     const scratch = path.join(attemptRoot, "scratch");
     try { removeTreeWritable(scratch, attemptRoot); } catch (error) {
       operationStatus = "ERROR";
@@ -577,7 +641,14 @@ export async function runFlow(repoRoot, options) {
     proofs,
     stages: stageResults,
     gates: stageResults.flatMap((stage) => (stage.gates ?? []).map((gate) => ({ stage_id: stage.id, ...gate }))),
-    source: { head: plan.source.head, clean: plan.source.clean, baseline: plan.source.baseline },
+    source: {
+      base_commit: plan.source.base_commit,
+      branch: plan.source.branch,
+      worktree_clean_at_start: plan.source.worktree_clean,
+      snapshot: plan.source.snapshot,
+      baseline: plan.source.baseline,
+      verification: sourceSnapshotVerification,
+    },
     config_digests: plan.config_digests,
     config_bundle_digest: plan.config_bundle_digest,
     runtime_profile: plan.runtime_profile,

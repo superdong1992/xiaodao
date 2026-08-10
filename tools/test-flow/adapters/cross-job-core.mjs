@@ -17,8 +17,13 @@ import {
   validateClaudeDistribution,
 } from "../lib/release-inputs.mjs";
 import { extractCheckpointSourceArchive } from "../lib/checkpoint.mjs";
-import { readRelayedEventPart, readServerMcpCorrespondence } from "../lib/events.mjs";
+import {
+  NEGATIVE_PROBE_VALIDATION_FIELDS,
+  readRelayedEventPart,
+  readServerMcpCorrespondence,
+} from "../lib/events.mjs";
 import { recoverStageAuditProgress } from "../lib/evidence.mjs";
+import { verifyMaterializedSourceSnapshot } from "../lib/source-snapshot.mjs";
 import { canonicalJson, ensureDirectory, sha256Bytes, sha256File } from "../lib/util.mjs";
 
 const ZIP_NAME = "synthetic-rpc-service-takeover.zip";
@@ -132,10 +137,12 @@ function currentReleaseRuntimeIdentity(configuration) {
 }
 
 async function verifyRepositoryIdentity(configuration) {
-  const head = await run("git", ["-C", configuration.repoRoot, "rev-parse", "HEAD"], { forward: false });
-  const status = await run("git", ["-C", configuration.repoRoot, "status", "--porcelain=v1", "--untracked-files=all"], { forward: false });
-  requireCondition(head.status === 0 && head.stdout.trim() === configuration.sourceCommit, "RELEASE_SOURCE_COMMIT_DRIFT", "BLOCKED", "INFRA");
-  requireCondition(status.status === 0 && status.stdout.length === 0, "RELEASE_SOURCE_TREE_DRIFT", "BLOCKED", "INFRA");
+  requireCondition(configuration.repoRoot.startsWith(`${configuration.attemptRoot}${path.sep}`), "RELEASE_SOURCE_SNAPSHOT_OUTSIDE_ATTEMPT", "BLOCKED", "INFRA");
+  requireCondition(configuration.sourceSnapshotManifest.startsWith(`${configuration.attemptRoot}${path.sep}`), "RELEASE_SOURCE_MANIFEST_OUTSIDE_ATTEMPT", "BLOCKED", "INFRA");
+  const sourceManifest = readJson(configuration.sourceSnapshotManifest);
+  requireCondition(sourceManifest?.digest === configuration.sourceSnapshotDigest, "RELEASE_SOURCE_SNAPSHOT_MANIFEST_DRIFT", "BLOCKED", "INFRA");
+  const verification = verifyMaterializedSourceSnapshot(configuration.repoRoot, sourceManifest);
+  requireCondition(verification.status === "PASS", "RELEASE_SOURCE_SNAPSHOT_DRIFT", "BLOCKED", "INFRA");
 }
 
 async function run(command, args, { cwd = undefined, env = process.env, forward = true, maximumBytes = 64 * 1024 * 1024 } = {}) {
@@ -688,7 +695,7 @@ function indexEventParts(configuration, state, mode, indexLabel = null) {
         receiptPath: receipt,
         expectedProducerId: mode === "journey" ? `service-linux-${instance}` : `service-linux-diagnostics-${instance}`,
         expectedRunId: runId,
-        allowEmpty: mode === "journey" && instance === "restart",
+        allowEmpty: mode === "journey" && ["route", "restart"].includes(instance),
       });
     } catch (error) {
       const code = typeof error?.code === "string" && /^[A-Z0-9_]+$/.test(error.code)
@@ -709,7 +716,7 @@ function indexEventParts(configuration, state, mode, indexLabel = null) {
       receipt_path: path.relative(attemptRoot, receipt).split(path.sep).join("/"),
     });
   }
-  requireCondition(eventCount > 0 || (mode === "journey" && streams.some((stream) => stream.instance === "restart")), `SERVICE_${mode.toUpperCase()}_EVENTS_EMPTY`);
+  requireCondition(eventCount > 0 || (mode === "journey" && streams.some((stream) => ["route", "restart"].includes(stream.instance))), `SERVICE_${mode.toUpperCase()}_EVENTS_EMPTY`);
   const index = { schema_version: 2, authority: "producer-streams", aggregate_is_authoritative: false, mode, event_count: eventCount, streams };
   const suffixName = indexLabel ? `-${indexLabel}` : "";
   writeNew(path.join(configuration.stageRoot, `${mode}-event-index${suffixName}.json`), index);
@@ -746,9 +753,7 @@ async function runServerDfxProbe(configuration, state) {
       && receipt.flat_schema === true
       && receipt.tool_count === 7
       && canonicalJson(receipt.tool_names) === canonicalJson(TOOL_NAMES)
-      && Array.isArray(receipt.validation_fields)
-      && receipt.validation_fields.includes("request_id")
-      && receipt.validation_fields.includes("problem_spec"),
+      && canonicalJson(receipt.validation_fields) === canonicalJson(NEGATIVE_PROBE_VALIDATION_FIELDS),
     "SERVER_DFX_PROBE_RECEIPT_INVALID",
     "FAIL",
     "CONTRACT",
@@ -758,7 +763,7 @@ async function runServerDfxProbe(configuration, state) {
   return receipt;
 }
 
-async function startService(configuration, state, instance, { allowEmptyJourney = false } = {}) {
+async function startService(configuration, state, instance, { allowEmptyJourney = true } = {}) {
   requireCondition(!state.current_instance, "SERVICE_ALREADY_RUNNING");
   const bootstrapLog = `/evidence/stages/${configuration.stage}/supervisor-${instance}.log`;
   const journeyPolicy = allowEmptyJourney ? "allow-empty" : "require-events";
@@ -846,13 +851,17 @@ async function initializeContainer(configuration, state, containerName, mode, st
     "exec", containerName,
     "sh", "/test-flow-runtime/initialize-container.sh",
     mode,
-    configuration.sourceCommit,
+    configuration.sourceSnapshotDigest,
     RELEASE_LOGPARSE_COMMIT,
     RELEASE_MCP_COMMIT,
     receipt,
   ]);
   const hostReceipt = path.join(configuration.attemptRoot, "payload", "stages", stageId, "container-init.json");
-  requireCondition(readJson(hostReceipt).status === "PASS", "CONTAINER_INIT_RECEIPT_INVALID");
+  const initialization = readJson(hostReceipt);
+  requireCondition(
+    initialization.status === "PASS" && initialization.xiaodao_snapshot_digest === configuration.sourceSnapshotDigest,
+    "CONTAINER_INIT_RECEIPT_INVALID",
+  );
 }
 
 async function createContainer(configuration, state, containerName, mode, stageId, register = true) {
@@ -942,7 +951,7 @@ async function createFreshEnvironment(configuration, stageRoot, runtimeIdentity)
   await initializeContainer(configuration, state, state.initial_container, "fresh", configuration.stage);
   ensureClientRuntime(configuration, state);
   atomicState(configuration.statePath, state);
-  await startService(configuration, state, "route", { allowEmptyJourney: configuration.track === "dev" });
+  await startService(configuration, state, "route", { allowEmptyJourney: true });
   const dfxProbe = await runServerDfxProbe(configuration, state);
   return { state, freshAdmission, dfxProbe };
 }
@@ -1276,7 +1285,7 @@ async function execute(configuration) {
   requireCondition(process.platform === configuration.expectedHostPlatform && configuration.client === configuration.expectedClient, "CROSS_JOB_ADAPTER_HOST_REQUIRED", "BLOCKED", "INFRA");
   requireCondition(["release", "dev"].includes(configuration.track), "CROSS_JOB_ADAPTER_TRACK_UNSUPPORTED", "BLOCKED", "INFRA");
   if (configuration.expectedDockerContext !== "default") requireCondition(configuration.dockerContext === configuration.expectedDockerContext, "CROSS_JOB_ADAPTER_DOCKER_CONTEXT", "BLOCKED", "INFRA");
-  requireCondition(configuration.sourceCommit && configuration.logparseSource && configuration.mcpSource && configuration.claudeEntry && configuration.claudeSettings, "CROSS_JOB_ADAPTER_INPUT_MISSING", "BLOCKED", "INFRA");
+  requireCondition(configuration.sourceSnapshotDigest && configuration.sourceSnapshotManifest && configuration.logparseSource && configuration.mcpSource && configuration.claudeEntry && configuration.claudeSettings, "CROSS_JOB_ADAPTER_INPUT_MISSING", "BLOCKED", "INFRA");
   if (configuration.track === "release") requireCondition(!configuration.restoredDataRoot && !configuration.restoredCheckpointId, "RELEASE_CHECKPOINT_RESTORE_FORBIDDEN", "BLOCKED", "INFRA");
   await verifyRepositoryIdentity(configuration);
   const runtimeIdentity = currentReleaseRuntimeIdentity(configuration);
@@ -1314,7 +1323,8 @@ async function execute(configuration) {
     addUsage(state, audit.usage);
     atomicState(configuration.statePath, state);
     const correspondence = await stopService(configuration, state);
-    requireCondition(correspondence.service_invocations.length === 1 && correspondence.service_invocations[0].job_type === "ROUTE", "ROUTE_SERVICE_AGENT_INVOCATIONS", "FAIL", "CONTRACT");
+    const jobTypes = correspondence.service_invocations.map((invocation) => invocation.job_type).sort();
+    requireCondition(canonicalJson(jobTypes) === canonicalJson(["DIAGNOSE", "DIAGNOSE", "ROUTE"]), "ROUTE_SERVICE_AGENT_INVOCATIONS", "FAIL", "CONTRACT");
     const checkpoint = await createCheckpointSource(configuration, state, {
       case_id: state.case_id,
       attachment_id: state.attachment_id,
@@ -1355,7 +1365,7 @@ async function execute(configuration) {
     atomicState(configuration.statePath, state);
     const correspondence = await stopService(configuration, state);
     const jobTypes = correspondence.service_invocations.map((invocation) => invocation.job_type).sort();
-    requireCondition(canonicalJson(jobTypes) === canonicalJson(["DIAGNOSE", "REVIEW"]), "DIAGNOSE_SERVICE_AGENT_INVOCATIONS", "FAIL", "CONTRACT");
+    requireCondition(canonicalJson(jobTypes) === canonicalJson(["DIAGNOSE", "DIAGNOSE", "REVIEW"]), "DIAGNOSE_SERVICE_AGENT_INVOCATIONS", "FAIL", "CONTRACT");
     const checkpoint = await createCheckpointSource(configuration, state, {
       case_id: state.case_id,
       attachment_id: state.attachment_id,
@@ -1410,7 +1420,8 @@ const configuration = {
   attemptRoot: values.attempt_root && path.resolve(values.attempt_root),
   client: values.client,
   track: values.track,
-  sourceCommit: values.source_commit,
+  sourceSnapshotDigest: values.source_snapshot_digest,
+  sourceSnapshotManifest: values.source_snapshot_manifest && path.resolve(values.source_snapshot_manifest),
   claudeEntry: values.claude_entry && path.resolve(values.claude_entry),
   claudeSettings: values.claude_settings && path.resolve(values.claude_settings),
   dockerContext: values.docker_context,
@@ -1449,7 +1460,7 @@ configuration.stageRoot = configuration.attemptRoot && configuration.stage && pa
 
 let receiptWritten = false;
 try {
-  for (const [name, value] of Object.entries({ stage: configuration.stage, gateId: configuration.gateId, runtimeProfileDigest: configuration.runtimeProfileDigest, expectedClient: configuration.expectedClient, expectedHostPlatform: configuration.expectedHostPlatform, repoRoot: configuration.repoRoot, attemptRoot: configuration.attemptRoot, resourceRegistry: configuration.resourceRegistry, resourceLabel: configuration.resourceLabel, baseImage: configuration.baseImage })) {
+  for (const [name, value] of Object.entries({ stage: configuration.stage, gateId: configuration.gateId, runtimeProfileDigest: configuration.runtimeProfileDigest, expectedClient: configuration.expectedClient, expectedHostPlatform: configuration.expectedHostPlatform, repoRoot: configuration.repoRoot, attemptRoot: configuration.attemptRoot, sourceSnapshotDigest: configuration.sourceSnapshotDigest, sourceSnapshotManifest: configuration.sourceSnapshotManifest, resourceRegistry: configuration.resourceRegistry, resourceLabel: configuration.resourceLabel, baseImage: configuration.baseImage })) {
     requireCondition(Boolean(value), `ADAPTER_REQUIRED_${name.toUpperCase()}`);
   }
   if (configuration.hardCaps) {

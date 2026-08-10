@@ -54,6 +54,29 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _validation_error_facts(value: object) -> list[dict[str, str]] | None:
+    if not isinstance(value, list):
+        return None
+    facts: set[tuple[str, str]] = set()
+    for entry in value:
+        if not isinstance(entry, dict):
+            continue
+        location = entry.get("field", entry.get("loc", entry.get("location")))
+        if isinstance(location, list):
+            field = ".".join(str(part) for part in location)
+        elif isinstance(location, str):
+            field = location
+        else:
+            continue
+        error_type = entry.get("type")
+        if field and isinstance(error_type, str) and error_type:
+            facts.add((field, error_type))
+    return [
+        {"field": field, "type": error_type}
+        for field, error_type in sorted(facts)
+    ]
+
+
 def _receipt(arguments: argparse.Namespace, *, status: str, code: str | None, count: int) -> None:
     _write_json_new(
         arguments.receipt,
@@ -64,6 +87,7 @@ def _receipt(arguments: argparse.Namespace, *, status: str, code: str | None, co
             "source_event_count": count,
             "producer_id": arguments.producer_id,
             "clock_domain": arguments.producer_id,
+            "allow_empty": arguments.allow_empty,
             "raw_sha256": _sha256(arguments.raw),
             "events_sha256": _sha256(arguments.events),
         },
@@ -209,7 +233,9 @@ def main() -> int:
                             ),
                             "transport": event.get("transport"),
                             "server_version": event.get("server_version"),
-                            "validation_errors": event.get("validation_errors"),
+                            "validation_errors": _validation_error_facts(
+                                event.get("validation_errors")
+                            ),
                         },
                     }
                     encoded = (

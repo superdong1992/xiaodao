@@ -25,6 +25,8 @@ test("the v2 bundle resolves Goal to Proof to Stage to Gate in DAG order", () =>
   assert.equal(config.stages.schema_version, 2);
   assert.equal(config.gates.schema_version, 2);
   assert.ok(Object.hasOwn(config.gates.gates, "det.journey.same-job"));
+  assert.equal(config.policy.tracks.dev.requires_source_snapshot, true);
+  assert.equal(config.policy.tracks.release.requires_source_snapshot, true);
   const ordered = topologicalStages(config.stages.stages, ["journey.cross-job.publish-restart"]);
   assert.deepEqual(ordered.slice(-2).map((stage) => stage.id), [
     "journey.cross-job.review",
@@ -60,17 +62,21 @@ test("Dev real requires one selected proof, explicit opt-in and a reason", () =>
   assert.equal(built.plan.stages.filter((stage) => stage.kind === "isolated-real").length, 2);
 });
 
-test("Release is fresh, binds the built-in adapter and exposes exact per-invocation caps", () => {
+test("Release is fresh, binds an immutable source snapshot and exposes exact per-invocation caps", () => {
   const built = buildIsolatedRunPlan({ track: "release", client: "macos", planOnly: true });
   assert.equal(built.plan.admission.status, "BLOCKED");
   const codes = built.plan.admission.blockers.map((blocker) => blocker.code);
   assert.ok(codes.includes("CLAUDE_ENTRY_REQUIRED"));
   assert.ok(codes.includes("CLAUDE_SETTINGS_REQUIRED"));
+  assert.equal(codes.includes("RELEASE_SOURCE_DIRTY"), false);
+  assert.match(built.plan.source.snapshot.digest, /^[a-f0-9]{64}$/);
+  assert.equal(built.plan.source.snapshot.status, "PRESENT");
+  assert.equal(typeof built.plan.source.worktree_clean, "boolean");
   assert.equal(built.plan.resume, "fresh");
   assert.equal(built.options.crossJobAdapter, path.join(REPO_ROOT, "tools", "test-flow", "adapters", "macos-linux-release.mjs"));
   assert.deepEqual(built.plan.budget, {
-    estimated_tokens: 260000,
-    sum_of_per_invocation_caps_usd: 18,
+    estimated_tokens: 410000,
+    sum_of_per_invocation_caps_usd: 27,
     cumulative_spending_cap: null,
     per_invocation_hard_enforced: true,
   });
@@ -80,11 +86,11 @@ test("Release is fresh, binds the built-in adapter and exposes exact per-invocat
   const publish = built.plan.stages.find((stage) => stage.id === "journey.cross-job.publish-restart");
   assert.deepEqual(route.invocation_caps.map((entry) => [entry.class, entry.min_count, entry.max_count, entry.caps.max_budget_usd]), [
     ["host-client", 1, 1, 3],
-    ["server-agent", 1, 1, 3],
+    ["server-agent", 3, 3, 3],
   ]);
   assert.deepEqual(diagnose.invocation_caps.map((entry) => [entry.class, entry.min_count, entry.max_count, entry.caps.max_budget_usd]), [
     ["host-client", 1, 1, 5],
-    ["server-agent", 2, 2, 3],
+    ["server-agent", 3, 3, 3],
   ]);
   assert.deepEqual(publish.invocation_caps.map((entry) => [entry.class, entry.min_count, entry.max_count, entry.caps.max_budget_usd]), [
     ["host-client", 1, 1, 1],

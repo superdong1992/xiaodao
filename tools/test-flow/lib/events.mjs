@@ -3,6 +3,17 @@ import path from "node:path";
 import { assertFlow, canonicalJson, ensureDirectory, sha256Bytes, sha256File } from "./util.mjs";
 
 const SAFE_EVENT_TYPES = /^[a-z][a-z0-9_.-]{1,80}$/;
+export const NEGATIVE_PROBE_VALIDATION_FIELDS = Object.freeze([
+  "actual_behavior",
+  "completion_criteria",
+  "constraints",
+  "expected_behavior",
+  "goals",
+  "non_goals",
+  "problem_spec",
+  "scope",
+  "statement",
+]);
 const EVENT_FIELDS = Object.freeze([
   "schema_version", "seq", "timestamp_utc", "source_timestamp_utc", "run_id",
   "producer_id", "producer_type", "clock_domain", "event_type", "stage_id",
@@ -153,6 +164,7 @@ export function readRelayedEventPart({
       && receipt.source_event_count >= 0
       && receipt.producer_id === expectedProducerId
       && receipt.clock_domain === expectedProducerId
+      && typeof receipt.allow_empty === "boolean"
       && /^[a-f0-9]{64}$/.test(receipt.raw_sha256 ?? "")
       && /^[a-f0-9]{64}$/.test(receipt.events_sha256 ?? ""),
     "EVENT_RELAY_RECEIPT_INVALID",
@@ -165,7 +177,7 @@ export function readRelayedEventPart({
   assertFlow(fs.existsSync(rawPath) && sha256File(rawPath) === receipt.raw_sha256, "EVENT_RELAY_RAW_DIGEST_MISMATCH", `${rawPath} differs from its relay receipt`);
   if (raw.length === 0) {
     assertFlow(receipt.source_event_count === 0, "EVENT_RELAY_COUNT_MISMATCH", `${filePath} is empty but its receipt is not`);
-    assertFlow(allowEmpty, "EVENT_RELAY_EMPTY_FORBIDDEN", `${filePath} is empty without an explicit policy`);
+    assertFlow(allowEmpty && receipt.allow_empty, "EVENT_RELAY_EMPTY_FORBIDDEN", `${filePath} is empty without an explicit policy`);
     return { status: "PASS", event_count: 0, events: [], receipt };
   }
 
@@ -267,10 +279,14 @@ function validationFieldSet(rawEvent) {
   const values = Array.isArray(rawEvent?.validation_errors) ? rawEvent.validation_errors : [];
   return new Set(values.flatMap((entry) => {
     const field = entry?.field ?? entry?.loc ?? entry?.location;
-    if (Array.isArray(field)) return field.map(String);
+    if (Array.isArray(field)) return [field.map(String).join(".")];
     if (typeof field === "string") return field.split(".");
     return [];
   }));
+}
+
+function exactStringSet(actual, expected) {
+  return actual.size === expected.length && expected.every((value) => actual.has(value));
 }
 
 export function readServerMcpCorrespondence(attemptRoot, clientCalls, { validationProbeRequestId = null } = {}) {
@@ -310,18 +326,26 @@ export function readServerMcpCorrespondence(attemptRoot, clientCalls, { validati
   const probeStarts = allStarts.filter((event) => event.request_id === validationProbeRequestId);
   const probeCompletions = allCompletions.filter((event) => event.request_id === validationProbeRequestId);
   const probeFailures = rawEvents.filter(({ event }) => event?.event === "mcp.tool.validation_failed" && event.request_id === validationProbeRequestId);
+  const rawProbeStarts = rawEvents.filter(({ event }) => event?.event === "mcp.tool.started" && event.request_id === validationProbeRequestId);
   const validationFields = probeFailures.length === 1 ? validationFieldSet(probeFailures[0].event) : new Set();
+  const probeCorrelation = probeStarts[0]?.correlation_id;
   const validationProbeExact = typeof validationProbeRequestId === "string"
     && probeStarts.length === 1
     && probeCompletions.length === 1
     && probeFailures.length === 1
+    && rawProbeStarts.length === 1
     && probeStarts[0].data.tool === "problem_locator_create_case"
+    && canonicalJson(probeStarts[0].data.argument_names) === canonicalJson(["problem_spec", "request_id"])
+    && canonicalJson(Object.keys(rawProbeStarts[0].event.arguments ?? {}).sort()) === canonicalJson(["problem_spec", "request_id"])
     && probeCompletions[0].data.tool === "problem_locator_create_case"
     && probeCompletions[0].data.ok === false
     && probeCompletions[0].data.error_code === "VALIDATION_ERROR"
-    && probeStarts[0].correlation_id === probeCompletions[0].correlation_id
-    && validationFields.has("request_id")
-    && validationFields.has("problem_spec");
+    && typeof probeCorrelation === "string"
+    && probeCorrelation.length > 0
+    && probeCorrelation === probeCompletions[0].correlation_id
+    && probeCorrelation === probeFailures[0].event.correlation_id
+    && probeCorrelation === probeFailures[0].relay_event.correlation_id
+    && exactStringSet(validationFields, NEGATIVE_PROBE_VALIDATION_FIELDS);
   return {
     streams,
     client_tool_names: expectedNames,

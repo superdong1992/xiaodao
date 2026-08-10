@@ -13,7 +13,7 @@
 - 公开 MCP 合同：生成的 `schemas/`、运行时 `src/` 合同和 `.claude/skills/problem-locator-client/`
 - Diagnosis Skill 合同：GenerationSpec、生成 manifest、output contracts 和生成资产
 
-发生冲突时，机器可校验的 schema、生成资产和运行时代码高于叙述性摘要；叙述文档必须随同一变更同步修正。测试发布结论只来自与对应 clean commit 绑定的 Test Flow verdict，不能用文档、历史记录或代码存在性替代。
+发生冲突时，机器可校验的 schema、生成资产和运行时代码高于叙述性摘要；叙述文档必须随同一变更同步修正。测试发布结论只来自与对应不可变源码快照绑定的 Test Flow verdict，不能用文档、历史记录、Git 提交本身或代码存在性替代。
 
 ## 当前架构基线
 

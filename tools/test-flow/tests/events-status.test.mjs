@@ -24,6 +24,10 @@ const PUBLIC_TOOLS = [
   "problem_locator_cancel_case",
   "problem_locator_list_artifacts",
 ];
+const VALIDATION_FIELDS = [
+  "actual_behavior", "completion_criteria", "constraints", "expected_behavior",
+  "goals", "non_goals", "problem_spec", "scope", "statement",
+];
 
 function writeRelay({ attemptRoot, runId, instance, mode, rawEvents, relayEvents, allowEmpty = false }) {
   const parts = path.join(attemptRoot, "payload", "events", "parts");
@@ -82,16 +86,16 @@ function writeDiagnosticContract(attemptRoot, runId) {
     { event: "mcp.tools.listed", tools },
     { event: "mcp.tool.started", request_id: requestId, correlation_id: "correlation-normal", tool: "problem_locator_create_case" },
     { event: "mcp.tool.completed", request_id: requestId, correlation_id: "correlation-normal", tool: "problem_locator_create_case", ok: true },
-    { event: "mcp.tool.started", request_id: probeId, correlation_id: "correlation-probe", tool: "problem_locator_create_case" },
-    { event: "mcp.tool.validation_failed", request_id: probeId, validation_errors: [{ field: "request_id" }, { field: "problem_spec" }] },
+    { event: "mcp.tool.started", request_id: probeId, correlation_id: "correlation-probe", tool: "problem_locator_create_case", arguments: { problem_spec: { statement: "removed composite field" }, request_id: probeId } },
+    { event: "mcp.tool.validation_failed", request_id: probeId, correlation_id: "correlation-probe", validation_errors: VALIDATION_FIELDS.map((field) => ({ loc: [field], type: field === "problem_spec" ? "extra_forbidden" : "missing" })) },
     { event: "mcp.tool.completed", request_id: probeId, correlation_id: "correlation-probe", tool: "problem_locator_create_case", ok: false, error_code: "VALIDATION_ERROR" },
   ];
   const relayEvents = [
     envelope({ runId, producerId, seq: 1, eventType: "mcp.tools.listed", data: { tool_count: 7, tool_names: PUBLIC_TOOLS, tool_schema_sha256: Array(7).fill(schemaHash) } }),
     envelope({ runId, producerId, seq: 2, eventType: "mcp.tool.started", requestId, correlationId: "correlation-normal", data: { tool: "problem_locator_create_case" } }),
     envelope({ runId, producerId, seq: 3, eventType: "mcp.tool.completed", requestId, correlationId: "correlation-normal", data: { tool: "problem_locator_create_case", ok: true } }),
-    envelope({ runId, producerId, seq: 4, eventType: "mcp.tool.started", requestId: probeId, correlationId: "correlation-probe", data: { tool: "problem_locator_create_case" } }),
-    envelope({ runId, producerId, seq: 5, eventType: "mcp.tool.validation_failed", requestId: probeId, data: { validation_errors: [{ field: "request_id" }, { field: "problem_spec" }] } }),
+    envelope({ runId, producerId, seq: 4, eventType: "mcp.tool.started", requestId: probeId, correlationId: "correlation-probe", data: { tool: "problem_locator_create_case", argument_names: ["problem_spec", "request_id"] } }),
+    envelope({ runId, producerId, seq: 5, eventType: "mcp.tool.validation_failed", requestId: probeId, correlationId: "correlation-probe", data: { validation_errors: VALIDATION_FIELDS.map((field) => ({ field, type: field === "problem_spec" ? "extra_forbidden" : "missing" })) } }),
     envelope({ runId, producerId, seq: 6, eventType: "mcp.tool.completed", requestId: probeId, correlationId: "correlation-probe", data: { tool: "problem_locator_create_case", ok: false, error_code: "VALIDATION_ERROR" } }),
   ];
   return { ...writeRelay({ attemptRoot, runId, instance: "route", mode: "diagnostics", rawEvents, relayEvents }), requestId, probeId };
@@ -161,7 +165,7 @@ test("server DFX proves exact seven flat schemas, request pairs and the negative
     assert.equal(result.request_exact, true);
     assert.equal(result.pair_exact, true);
     assert.equal(result.validation_probe_exact, true);
-    assert.deepEqual(result.validation_fields, ["problem_spec", "request_id"]);
+    assert.deepEqual(result.validation_fields, VALIDATION_FIELDS);
 
     fs.appendFileSync(contract.rawPath, "{}\n");
     assert.throws(() => readServerMcpCorrespondence(attemptRoot, []), (error) => error.code === "EVENT_RELAY_RAW_DIGEST_MISMATCH");

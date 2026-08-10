@@ -133,6 +133,15 @@ const GATE_FIELDS = {
   observation: ["kind", "observation", "evidence_contract", "evidence"],
 };
 
+const EVENT_STREAM_MODES = new Set(["diagnostics", "journey"]);
+const EVENT_INSTANCE_BY_CROSS_JOB_PHASE = Object.freeze({
+  environment: "route",
+  route: "route",
+  upload: "upload",
+  diagnose: "diagnose",
+  "publish-restart": "restart",
+});
+
 function validateGates(gates) {
   exactKeys(gates, ["schema_version", "gates"], "CONFIG_GATES_FIELDS", "gate config");
   assertFlow(gates.schema_version === 2, "CONFIG_GATES_VERSION", "Unsupported gate schema version");
@@ -185,7 +194,20 @@ function validateGates(gates) {
     } else if (gate.kind === "cross-job-adapter") {
       assertFlow(CROSS_JOB_PHASES.has(gate.phase), "CONFIG_CROSS_JOB_PHASE", `${gateId} has invalid phase`);
       identifier(gate.runtime_profile, "CONFIG_GATE_RUNTIME", `${gateId} runtime profile`);
-      identifier(gate.evidence_contract, "CONFIG_EVIDENCE_CONTRACT", `${gateId} evidence contract`);
+      object(gate.evidence_contract, "CONFIG_EVIDENCE_CONTRACT", `${gateId} evidence contract`);
+      exactKeys(gate.evidence_contract, ["id", "event_stream"], "CONFIG_EVIDENCE_CONTRACT_FIELDS", `${gateId} evidence contract`);
+      identifier(gate.evidence_contract.id, "CONFIG_EVIDENCE_CONTRACT", `${gateId} evidence contract id`);
+      assertFlow(gate.evidence_contract.id.startsWith("cross-job-"), "CONFIG_EVIDENCE_CONTRACT", `${gateId} evidence contract id must be cross-job scoped`);
+      const stream = gate.evidence_contract.event_stream;
+      object(stream, "CONFIG_EVENT_STREAM_CONTRACT", `${gateId} event stream contract`);
+      exactKeys(stream, ["instance", "pass_requires", "pass_allows_empty", "failure_allows_empty"], "CONFIG_EVENT_STREAM_FIELDS", `${gateId} event stream contract`);
+      identifier(stream.instance, "CONFIG_EVENT_STREAM_INSTANCE", `${gateId} event stream instance`);
+      assertFlow(stream.instance === EVENT_INSTANCE_BY_CROSS_JOB_PHASE[gate.phase], "CONFIG_EVENT_STREAM_PHASE", `${gateId} event stream does not match its phase`);
+      for (const field of ["pass_requires", "pass_allows_empty", "failure_allows_empty"]) {
+        stringArray(stream[field], "CONFIG_EVENT_STREAM_MODES", `${gateId}.${field}`);
+        assertFlow(new Set(stream[field]).size === stream[field].length && stream[field].every((mode) => EVENT_STREAM_MODES.has(mode)), "CONFIG_EVENT_STREAM_MODES", `${gateId}.${field} has invalid modes`);
+      }
+      assertFlow(stream.pass_requires.length > 0 && [...stream.pass_allows_empty, ...stream.failure_allows_empty].every((mode) => stream.pass_requires.includes(mode)), "CONFIG_EVENT_STREAM_POLICY", `${gateId} has an invalid stream policy`);
     } else if (gate.kind === "observation") {
       assertFlow(OBSERVATIONS.has(gate.observation), "CONFIG_OBSERVATION", `${gateId} has untrusted observation`);
       identifier(gate.evidence_contract, "CONFIG_EVIDENCE_CONTRACT", `${gateId} evidence contract`);
@@ -230,9 +252,9 @@ function validatePolicy(policy) {
   identifier(policy.defaults.runtime_profile, "CONFIG_DEFAULT_RUNTIME", "default runtime profile");
   exactKeys(policy.tracks, ["dev", "release"], "CONFIG_TRACKS_FIELDS", "tracks");
   for (const [trackId, track] of Object.entries(policy.tracks)) {
-    exactKeys(track, ["default_goal", "requires_clean_commit", "real_requires_opt_in", "real_requires_intent", "performance_effect"], "CONFIG_TRACK_FIELDS", `track ${trackId}`);
+    exactKeys(track, ["default_goal", "requires_source_snapshot", "real_requires_opt_in", "real_requires_intent", "performance_effect"], "CONFIG_TRACK_FIELDS", `track ${trackId}`);
     identifier(track.default_goal, "CONFIG_TRACK_GOAL", `${trackId} default goal`);
-    assertFlow(typeof track.requires_clean_commit === "boolean" && typeof track.real_requires_opt_in === "boolean" && typeof track.real_requires_intent === "boolean", "CONFIG_TRACK_BOOLEAN", `${trackId} has invalid boolean policy`);
+    assertFlow(typeof track.requires_source_snapshot === "boolean" && typeof track.real_requires_opt_in === "boolean" && typeof track.real_requires_intent === "boolean", "CONFIG_TRACK_BOOLEAN", `${trackId} has invalid boolean policy`);
     assertFlow(["warn", "gate"].includes(track.performance_effect), "CONFIG_TRACK_PERFORMANCE", `${trackId} has invalid performance effect`);
   }
   exactKeys(policy.process, ["real_no_progress_seconds", "real_hard_timeout_seconds", "poll_milliseconds", "progress_allowlist_version"], "CONFIG_PROCESS_FIELDS", "process policy");

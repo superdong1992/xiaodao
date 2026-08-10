@@ -22,6 +22,7 @@ function parse(argv) {
     else throw new Error(`ARGUMENT_UNKNOWN:${argument}`);
   }
   if (!["report", "prune"].includes(command)) throw new Error(`COMMAND_UNKNOWN:${command}`);
+  if (command === "report" && (options.execute || options.dryRun)) throw new Error("REPORT_MODE_INVALID");
   if (options.execute && options.dryRun) throw new Error("PRUNE_MODE_CONFLICT");
   if (options.execute && options.runIds.length === 0) throw new Error("PRUNE_EXPLICIT_RUN_ID_REQUIRED");
   if (!Number.isInteger(options.keepLast ?? 10) || (options.keepLast ?? 10) < 0) throw new Error("KEEP_LAST_INVALID");
@@ -52,7 +53,7 @@ function evidenceInventory(evidenceRoot) {
       verification_status: verification.status,
       overall: verification.verdict?.overall ?? null,
       functional_status: verification.verdict?.functional_status ?? null,
-      evidence_reusable: verification.verdict?.evidence_reusable === true,
+      evidence_reusable: verification.status === "PASS" && verification.verdict?.evidence_reusable === true,
       committed_at_utc: verification.verdict?.committed_at_utc ?? null,
       size_bytes: directorySize(attemptRoot),
       verdict: verification.verdict,
@@ -65,6 +66,7 @@ function evidenceInventory(evidenceRoot) {
 function referencedRuns(inventory) {
   const result = new Set();
   for (const item of inventory) {
+    if (item.verification_status !== "PASS") continue;
     for (const stage of item.verdict?.stages ?? []) {
       const source = stage.reused_from?.run_id ?? stage.reused_from?.reuse?.run_id;
       if (source) result.add(source);
@@ -73,13 +75,18 @@ function referencedRuns(inventory) {
   return result;
 }
 
-function report(evidenceRoot, keepLast = 10) {
+function report(evidenceRoot, keepLast = 10, runIds = []) {
   const attempts = evidenceInventory(evidenceRoot);
   const protectedRuns = referencedRuns(attempts);
   const newest = new Set(attempts.slice(-keepLast).map((item) => item.run_id));
-  const rows = attempts.map(({ verdict: _verdict, ...item }) => ({
+  const selected = runIds.length > 0
+    ? new Set([...new Set(runIds)].map((runId) => path.basename(exactAttempt(evidenceRoot, runId))))
+    : null;
+  const rows = attempts.filter((item) => !selected || selected.has(item.run_id)).map(({ verdict: _verdict, ...item }) => ({
     ...item,
-    retention: protectedRuns.has(item.run_id)
+    retention: item.verification_status !== "PASS"
+      ? "MANUAL_REVIEW"
+      : protectedRuns.has(item.run_id)
       ? "KEEP_REFERENCED"
       : newest.has(item.run_id)
         ? "KEEP_RECENT"
@@ -118,6 +125,7 @@ function prune(evidenceRoot, options) {
   const selectedSet = new Set(selected);
   const dependentRuns = new Map();
   for (const item of fullInventory) {
+    if (item.verification_status !== "PASS") continue;
     for (const stage of item.verdict?.stages ?? []) {
       const source = stage.reused_from?.run_id;
       if (!source) continue;
@@ -148,7 +156,7 @@ function prune(evidenceRoot, options) {
 function main() {
   const { command, options } = parse(process.argv.slice(2));
   const evidenceRoot = path.resolve(options.evidenceRoot ?? path.join(DEFAULT_REPO_ROOT, ".tmp", "test-flow-evidence"));
-  const value = command === "report" ? report(evidenceRoot, options.keepLast ?? 10) : prune(evidenceRoot, options);
+  const value = command === "report" ? report(evidenceRoot, options.keepLast ?? 10, options.runIds) : prune(evidenceRoot, options);
   process.stdout.write(canonicalJson(value));
 }
 

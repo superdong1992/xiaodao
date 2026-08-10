@@ -108,32 +108,46 @@ function passedExecutedGate(gate) {
   return gate.status === "PASS" && gate.result_source !== "REUSED";
 }
 
+function crossJobGate(gate) {
+  const contract = gate.evidence_contract;
+  return contract !== null
+    && typeof contract === "object"
+    && !Array.isArray(contract)
+    && typeof contract.id === "string"
+    && contract.id.startsWith("cross-job-")
+    && contract.event_stream !== null
+    && typeof contract.event_stream === "object";
+}
+
+function eventFile(contract, mode) {
+  return `parts/service-linux.${contract.event_stream.instance}.${mode}.ndjson`;
+}
+
 export function requiredEventFiles(gatesOrStages = []) {
   const gates = gatesOrStages.flatMap((entry) => entry.gates ? entry.gates.map((gate) => ({ stage_id: entry.id, ...gate })) : [entry]);
   const required = new Set(["orchestrator.ndjson"]);
-  const executedJourney = gates.filter((gate) => passedExecutedGate(gate) && String(gate.id ?? gate.gate_id ?? "").startsWith("journey."));
-  const phaseForGate = new Map([
-    ["journey.environment", "route"],
-    ["journey.route", "route"],
-    ["journey.upload", "upload"],
-    ["journey.diagnose", "diagnose"],
-    ["journey.publish-restart", "restart"],
-  ]);
-  for (const gate of executedJourney) {
-    const phase = phaseForGate.get(gate.id ?? gate.gate_id);
-    if (!phase) continue;
-    required.add(`parts/service-linux.${phase}.diagnostics.ndjson`);
-    required.add(`parts/service-linux.${phase}.journey.ndjson`);
+  const passedJourney = gates.filter((gate) => passedExecutedGate(gate) && crossJobGate(gate));
+  for (const gate of passedJourney) {
+    for (const mode of gate.evidence_contract.event_stream.pass_requires) required.add(eventFile(gate.evidence_contract, mode));
   }
   return [...required].sort();
 }
 
 export function allowedEmptyEventFiles(gatesOrStages = []) {
   const gates = gatesOrStages.flatMap((entry) => entry.gates ? entry.gates.map((gate) => ({ stage_id: entry.id, ...gate })) : [entry]);
-  const executed = new Set(gates.filter(passedExecutedGate).map((gate) => gate.id ?? gate.gate_id));
   const allowed = new Set();
-  if (executed.has("journey.environment") && !executed.has("journey.route")) allowed.add("parts/service-linux.route.journey.ndjson");
-  if (executed.has("journey.publish-restart")) allowed.add("parts/service-linux.restart.journey.ndjson");
+  const requiredNonempty = new Set();
+  const attemptedCrossJob = gates.filter((gate) => crossJobGate(gate) && gate.result_source !== "REUSED");
+  for (const gate of attemptedCrossJob) {
+    const stream = gate.evidence_contract.event_stream;
+    if (passedExecutedGate(gate)) {
+      for (const mode of stream.pass_allows_empty) allowed.add(eventFile(gate.evidence_contract, mode));
+      for (const mode of stream.pass_requires.filter((candidate) => !stream.pass_allows_empty.includes(candidate))) requiredNonempty.add(eventFile(gate.evidence_contract, mode));
+    } else {
+      for (const mode of stream.failure_allows_empty) allowed.add(eventFile(gate.evidence_contract, mode));
+    }
+  }
+  for (const name of requiredNonempty) allowed.delete(name);
   return [...allowed].sort();
 }
 
@@ -238,14 +252,19 @@ function comparableGate(gate) {
     code: gate.code,
     failure_domain: gate.failure_domain,
     gate_identity: gate.gate_identity,
+    definition_digest: gate.definition_digest,
+    evidence_contract: gate.evidence_contract,
     runtime_profile: gate.runtime_profile,
     runtime_profile_digest: gate.runtime_profile_digest,
     receipt_path: gate.receipt_path,
     receipt_digest: gate.receipt_digest,
     elapsed_seconds: gate.elapsed_seconds,
     usage: gate.usage,
+    usage_complete: gate.usage_complete,
+    effective_caps: gate.effective_caps,
     model_invocations: gate.model_invocations,
     fresh_admission: gate.fresh_admission,
+    evidence: gate.evidence,
   };
 }
 
@@ -256,6 +275,83 @@ const CANDIDATE_FIELDS = Object.freeze([
   "runtime_profile_digest", "plan_fingerprint", "policy_digest", "status_policy", "lineage",
   "admission", "pre_finalization_resource_receipt", "usage", "candidate_input_digest",
 ]);
+
+function normalizedUsage(value) {
+  return {
+    input_tokens: Number(value?.input_tokens ?? 0),
+    output_tokens: Number(value?.output_tokens ?? 0),
+    cost_usd: Math.round(Number(value?.cost_usd ?? 0) * 1_000_000) / 1_000_000,
+  };
+}
+
+function sumUsage(values) {
+  return values.reduce((total, value) => {
+    const usage = normalizedUsage(value);
+    return {
+      input_tokens: total.input_tokens + usage.input_tokens,
+      output_tokens: total.output_tokens + usage.output_tokens,
+      cost_usd: Math.round((total.cost_usd + usage.cost_usd) * 1_000_000) / 1_000_000,
+    };
+  }, { input_tokens: 0, output_tokens: 0, cost_usd: 0 });
+}
+
+function validUsage(value) {
+  const usage = normalizedUsage(value);
+  return Number.isSafeInteger(usage.input_tokens) && usage.input_tokens >= 0
+    && Number.isSafeInteger(usage.output_tokens) && usage.output_tokens >= 0
+    && Number.isFinite(usage.cost_usd) && usage.cost_usd >= 0;
+}
+
+function auditExecutedStageUsage(plan, planned, stage, failures) {
+  const gates = stage.gates ?? [];
+  if (!validUsage(stage.usage) || gates.some((gate) => !validUsage(gate.usage))) {
+    failures.push({ code: "MODEL_USAGE_INVALID", stage_id: stage.id });
+    return;
+  }
+  if (canonicalJson(normalizedUsage(stage.usage)) !== canonicalJson(sumUsage(gates.map((gate) => gate.usage)))) {
+    failures.push({ code: "STAGE_GATE_USAGE_MISMATCH", stage_id: stage.id });
+  }
+  const declarations = planned.invocation_caps ?? [];
+  const invocations = gates.flatMap((gate) => gate.model_invocations ?? []);
+  for (const gate of gates) {
+    if ((gate.model_invocations ?? []).length > 0 && canonicalJson(normalizedUsage(gate.usage)) !== canonicalJson(sumUsage(gate.model_invocations.map((invocation) => invocation.usage)))) {
+      failures.push({ code: "GATE_MODEL_USAGE_MISMATCH", stage_id: stage.id, gate_id: gate.id });
+    }
+  }
+  if (declarations.length === 0) {
+    if (invocations.length > 0) failures.push({ code: "MODEL_INVOCATION_UNPLANNED", stage_id: stage.id });
+    return;
+  }
+  if (stage.status !== "PASS") return;
+  if (gates.some((gate) => gate.usage_complete !== true)) failures.push({ code: "MODEL_USAGE_INCOMPLETE", stage_id: stage.id });
+  const ids = invocations.map((invocation) => invocation?.invocation_id);
+  if (ids.some((id) => typeof id !== "string" || id.length === 0) || new Set(ids).size !== ids.length) {
+    failures.push({ code: "MODEL_INVOCATION_ID_INVALID", stage_id: stage.id });
+    return;
+  }
+  const declaredClasses = new Set(declarations.map((declaration) => declaration.class));
+  if (invocations.some((invocation) => !declaredClasses.has(invocation?.class))) failures.push({ code: "MODEL_INVOCATION_CLASS_UNEXPECTED", stage_id: stage.id });
+  for (const declaration of declarations) {
+    const members = invocations.filter((invocation) => invocation?.class === declaration.class);
+    if (members.length < declaration.min_count || members.length > declaration.max_count) {
+      failures.push({ code: "MODEL_INVOCATION_COUNT_MISMATCH", stage_id: stage.id, class: declaration.class });
+      continue;
+    }
+    for (const invocation of members) {
+      const usage = normalizedUsage(invocation.usage);
+      const capsMatch = canonicalJson(invocation.effective_caps) === canonicalJson(declaration.caps);
+      const terminalSuccess = invocation.terminal?.subtype === "success" && invocation.terminal?.is_error === false;
+      const modelMatches = typeof plan.release_inputs?.settings?.model === "string" && invocation.effective_model === plan.release_inputs.settings.model;
+      const withinCaps = Number.isSafeInteger(invocation.turns) && invocation.turns > 0 && invocation.turns <= declaration.caps.max_turns
+        && validUsage(usage)
+        && usage.cost_usd <= declaration.caps.max_budget_usd
+        && usage.input_tokens + usage.output_tokens <= declaration.caps.max_total_tokens;
+      if (invocation.usage_complete !== true || !capsMatch || !terminalSuccess || !modelMatches || !withinCaps) {
+        failures.push({ code: "MODEL_HARD_CAP_RECEIPT_MISMATCH", stage_id: stage.id, invocation_id: invocation.invocation_id ?? null });
+      }
+    }
+  }
+}
 
 function auditCandidateAgainstPlan(attemptRoot, candidate, failures) {
   const planPath = path.join(attemptRoot, "payload", "run-plan.json");
@@ -283,6 +379,44 @@ function auditCandidateAgainstPlan(attemptRoot, candidate, failures) {
     || canonicalJson(plan.policies?.status) !== canonicalJson(candidate.status_policy)
     || canonicalJson(plan.admission) !== canonicalJson(candidate.admission)
   ) failures.push({ code: "CANDIDATE_PLAN_HEADER_MISMATCH" });
+  const expectedCandidateSource = {
+    base_commit: plan.source?.base_commit ?? null,
+    branch: plan.source?.branch ?? null,
+    worktree_clean_at_start: plan.source?.worktree_clean ?? false,
+    snapshot: plan.source?.snapshot ?? null,
+    baseline: plan.source?.baseline ?? null,
+    verification: candidate.source?.verification ?? null,
+  };
+  if (canonicalJson(candidate.source) !== canonicalJson(expectedCandidateSource)) failures.push({ code: "CANDIDATE_PLAN_SOURCE_MISMATCH" });
+  const sourceManifestPath = path.join(attemptRoot, "payload", "source", "source-snapshot.json");
+  const sourceVerificationPath = path.join(attemptRoot, "payload", "source", "source-snapshot-verification.json");
+  if (!fs.existsSync(sourceManifestPath) || !fs.existsSync(sourceVerificationPath)) {
+    failures.push({ code: "SOURCE_SNAPSHOT_EVIDENCE_MISSING" });
+  } else {
+    try {
+      const sourceManifest = readJson(sourceManifestPath);
+      const sourceVerification = readJson(sourceVerificationPath);
+      const manifestDigest = Array.isArray(sourceManifest.records) ? sha256Bytes(canonicalJson([...sourceManifest.records].sort((left, right) => left.path < right.path ? -1 : left.path > right.path ? 1 : 0))) : null;
+      const publicManifest = {
+        schema_version: sourceManifest.schema_version,
+        algorithm: sourceManifest.algorithm,
+        status: sourceManifest.digest ? "PRESENT" : "MISSING",
+        digest: sourceManifest.digest,
+        file_count: sourceManifest.file_count,
+      };
+      if (
+        sourceManifest.schema_version !== 1
+        || sourceManifest.algorithm !== "git-visible-worktree-v1"
+        || manifestDigest !== sourceManifest.digest
+        || sourceManifest.file_count !== sourceManifest.records.length
+        || canonicalJson(publicManifest) !== canonicalJson(plan.source?.snapshot)
+        || canonicalJson(sourceVerification) !== canonicalJson(candidate.source?.verification)
+      ) failures.push({ code: "SOURCE_SNAPSHOT_EVIDENCE_INVALID" });
+      if (sourceVerification.status !== "PASS" && candidate.operation_status !== "ERROR") failures.push({ code: "SOURCE_SNAPSHOT_DRIFT_NOT_FATAL" });
+    } catch {
+      failures.push({ code: "SOURCE_SNAPSHOT_EVIDENCE_INVALID" });
+    }
+  }
   const planProofs = (plan.proofs ?? []).map((proof) => ({
     id: proof.id,
     acceptance: proof.acceptance,
@@ -307,10 +441,24 @@ function auditCandidateAgainstPlan(attemptRoot, candidate, failures) {
       || planned.performance_identity !== stage.performance_identity
       || (planned.decision === "REUSE") !== (stage.result_source === "REUSED")
     ) failures.push({ code: "CANDIDATE_PLAN_STAGE_IDENTITY_MISMATCH", stage_id: stage.id });
-    if (stage.result_source === "EXECUTED" && canonicalJson(planned.gates.map((gate) => gate.id)) !== canonicalJson((stage.gates ?? []).map((gate) => gate.id))) {
-      failures.push({ code: "CANDIDATE_PLAN_GATE_MISMATCH", stage_id: stage.id });
+    if (stage.result_source === "EXECUTED") {
+      const summaries = stage.gates ?? [];
+      if (canonicalJson(planned.gates.map((gate) => gate.id)) !== canonicalJson(summaries.map((gate) => gate.id))) {
+        failures.push({ code: "CANDIDATE_PLAN_GATE_MISMATCH", stage_id: stage.id });
+      }
+      for (const summary of summaries) {
+        const plannedGate = planned.gates.find((gate) => gate.id === summary.id);
+        if (!plannedGate || plannedGate.gate_identity !== summary.gate_identity || plannedGate.definition_digest !== summary.definition_digest || canonicalJson(plannedGate.evidence_contract) !== canonicalJson(summary.evidence_contract) || plannedGate.runtime_profile !== summary.runtime_profile || plannedGate.runtime_profile_digest !== summary.runtime_profile_digest) {
+          failures.push({ code: "CANDIDATE_PLAN_GATE_IDENTITY_MISMATCH", stage_id: stage.id, gate_id: summary.id });
+          continue;
+        }
+        const evidenceNames = Array.isArray(summary.evidence) ? summary.evidence.map((record) => path.basename(record.path)).sort() : [];
+        if (summary.status === "PASS" && canonicalJson(evidenceNames) !== canonicalJson([...plannedGate.required_evidence].sort())) failures.push({ code: "CANDIDATE_PLAN_GATE_EVIDENCE_MISMATCH", stage_id: stage.id, gate_id: summary.id });
+      }
+      auditExecutedStageUsage(plan, planned, stage, failures);
     }
   }
+  if (!validUsage(candidate.usage) || canonicalJson(normalizedUsage(candidate.usage)) !== canonicalJson(sumUsage((candidate.stages ?? []).map((stage) => stage.usage)))) failures.push({ code: "CANDIDATE_STAGE_USAGE_MISMATCH" });
   const expectedInputDigest = sha256Bytes(canonicalJson({
     run_id: candidate.run_id,
     plan_fingerprint: candidate.plan_fingerprint,
@@ -342,13 +490,32 @@ function auditCandidateReceipts(attemptRoot, candidate) {
     if (canonicalJson(receipt) !== canonicalJson(comparableStage(stage))) failures.push({ code: "STAGE_RECEIPT_CONTENT_MISMATCH", stage_id: stage.id });
     stageById.set(stage.id, stage);
     for (const gateSummary of stage.gates ?? []) {
+      const expectedReceiptPath = `payload/stages/${stage.id}/gates/${gateSummary.id}/gate-receipt.json`;
+      if (gateSummary.receipt_path !== expectedReceiptPath) {
+        failures.push({ code: "GATE_RECEIPT_PATH_INVALID", stage_id: stage.id, gate_id: gateSummary.id });
+        continue;
+      }
       const gatePath = path.resolve(attemptRoot, gateSummary.receipt_path ?? "");
       if (!gatePath.startsWith(`${path.resolve(attemptRoot)}${path.sep}`) || !fs.existsSync(gatePath) || sha256File(gatePath) !== gateSummary.receipt_digest) {
         failures.push({ code: "GATE_RECEIPT_DIGEST_INVALID", stage_id: stage.id, gate_id: gateSummary.id });
         continue;
       }
-      const receiptGate = { ...readJson(gatePath), id: gateSummary.id, receipt_path: gateSummary.receipt_path, receipt_digest: gateSummary.receipt_digest };
+      const rawGate = readJson(gatePath);
+      if (rawGate.schema_version !== 2 || rawGate.stage_id !== stage.id || rawGate.gate_id !== gateSummary.id || rawGate.result_source !== "EXECUTED") failures.push({ code: "GATE_RECEIPT_SHAPE_INVALID", stage_id: stage.id, gate_id: gateSummary.id });
+      const receiptGate = { ...rawGate, id: gateSummary.id, receipt_path: gateSummary.receipt_path, receipt_digest: gateSummary.receipt_digest };
       if (canonicalJson(comparableGate(receiptGate)) !== canonicalJson(gateSummary)) failures.push({ code: "GATE_RECEIPT_CONTENT_MISMATCH", stage_id: stage.id, gate_id: gateSummary.id });
+      const evidencePaths = new Set();
+      for (const record of gateSummary.evidence ?? []) {
+        const evidencePath = path.resolve(attemptRoot, record.path ?? "");
+        const stageEvidenceRoot = path.resolve(attemptRoot, "payload", "stages", stage.id);
+        const recordShapeValid = canonicalJson(Object.keys(record ?? {}).sort()) === canonicalJson(["path", "sha256", "size"])
+          && typeof record.path === "string" && !evidencePaths.has(record.path)
+          && Number.isSafeInteger(record.size) && record.size >= 0 && /^[a-f0-9]{64}$/.test(record.sha256 ?? "");
+        evidencePaths.add(record.path);
+        if (!recordShapeValid || !evidencePath.startsWith(`${stageEvidenceRoot}${path.sep}`) || !fs.existsSync(evidencePath) || !fs.statSync(evidencePath).isFile() || fs.statSync(evidencePath).size !== record.size || sha256File(evidencePath) !== record.sha256) {
+          failures.push({ code: "GATE_EVIDENCE_DIGEST_INVALID", stage_id: stage.id, gate_id: gateSummary.id, path: record.path ?? null });
+        }
+      }
     }
   }
   for (const proof of candidate.proofs ?? []) {
