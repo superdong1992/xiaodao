@@ -11,16 +11,21 @@ def _load_toml(name: str) -> dict[str, object]:
 
 
 def test_test_flow_identity_closure_replaces_the_manual_patch_allowlist() -> None:
-    identity_path = REPOSITORY_ROOT / "tools/test-flow/config/identities.v1.json"
+    identity_path = REPOSITORY_ROOT / "tools/test-flow/config/identities.v2.json"
     identities = json.loads(identity_path.read_text(encoding="utf-8"))
-    groups = identities["groups"]
-    product_paths = set(groups["product"]["paths"])
-    proof_paths = set(groups["proof"]["paths"])
+    components = identities["components"]
+    identity_sets = identities["sets"]
+    product_paths = set(components["product.source"]["paths"])
+    deterministic_paths = set(components["proof.deterministic"]["paths"])
+    framework_paths = set(components["framework.runner"]["paths"])
 
     assert {"src", "schemas", "pyproject.toml", "uv.lock"} <= product_paths
-    assert "tests/deterministic" in product_paths
-    assert "tools/test-flow" in proof_paths
-    assert "tests" in proof_paths
+    assert "tests/deterministic" not in product_paths
+    assert deterministic_paths == {"tests/deterministic"}
+    assert "tools/test-flow/lib" in framework_paths
+    assert "product.source" in identity_sets["deterministic"]["producer"]
+    assert "proof.deterministic" in identity_sets["deterministic"]["proof"]
+    assert "framework.runner" in identity_sets["deterministic"]["proof"]
     assert not (REPOSITORY_ROOT / "tools/test-flow/product-patch-files.txt").exists()
 
 

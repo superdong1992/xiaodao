@@ -1,0 +1,93 @@
+{
+  "schema_version": 2,
+  "components": {
+    "product.source": {"kind": "paths", "paths": ["src", "schemas", "pyproject.toml", "uv.lock"]},
+    "product.fixtures": {"kind": "paths", "paths": ["tests/fixtures"]},
+    "proof.deterministic": {"kind": "paths", "paths": ["tests/deterministic"]},
+    "proof.platform": {"kind": "paths", "paths": ["tests/platform"]},
+    "proof.real": {"kind": "paths", "paths": ["tests/real"]},
+    "framework.runner": {"kind": "paths", "paths": ["tools/test-flow/run.mjs", "tools/test-flow/run.sh", "tools/test-flow/run.ps1", "tools/test-flow/lib", "tools/test-flow/config", "tools/test-flow/adapters/windows-process.ps1"]},
+    "framework.tests": {"kind": "paths", "paths": ["tools/test-flow/tests"]},
+    "framework.docs": {"kind": "paths", "paths": ["README.md", "tools/test-flow/README.md", "design/README.md", "design/test-flow-architecture.md", "AGENTS.md", "TODO.md"]},
+    "runtime.support": {"kind": "paths", "paths": ["tools/test-flow/runtime-support", "tools/test-flow/Dockerfile", "tools/test-flow/logparse-requirements.txt"]},
+    "adapter.host": {"kind": "paths", "paths": ["tools/test-flow/adapters/host-capability.mjs", "tools/test-flow/adapters/fixtures/claude-flat-probe.mjs"]},
+    "adapter.server": {"kind": "paths", "paths": ["tools/test-flow/adapters/server-linux-capability.mjs"]},
+    "adapter.cross-job": {"kind": "paths", "paths": ["tools/test-flow/adapters/cross-job-core.mjs", "tools/test-flow/adapters/macos-linux-release.mjs", "tools/test-flow/adapters/windows-linux-release.mjs", "tools/test-flow/adapters/linux-linux-release.mjs"]},
+    "skill.client": {"kind": "paths", "paths": [".claude/skills/problem-locator-client"]},
+    "skill.diagnose": {"kind": "paths", "paths": ["tests/fixtures/components/diagnosis-generator/diagnose-service-takeover"]},
+    "skill.logparse": {"kind": "paths", "paths": [".claude/skills/logparse-diagnose"]},
+    "source.agent": {"kind": "paths", "paths": ["src/problem_locator/runtime/agent_backend.py", "src/problem_locator/runtime/claude_command.py", "src/problem_locator/runtime/process_tree.py"]},
+    "source.route": {"kind": "paths", "paths": ["src/problem_locator/domain", "src/problem_locator/runtime"]},
+    "source.logparse": {"kind": "paths", "paths": ["src/problem_locator/integrations/logparse"]},
+    "source.diagnose": {"kind": "paths", "paths": ["src/problem_locator/runtime", "src/problem_locator/integrations"]},
+    "source.review": {"kind": "paths", "paths": ["src/problem_locator/runtime", "src/problem_locator/domain"]},
+    "external.logparse": {"kind": "external-tree", "name": "logparse"},
+    "external.mcp": {"kind": "external-tree", "name": "mcp"},
+    "runtime.claude": {"kind": "client-distribution"},
+    "runtime.settings": {"kind": "claude-settings"},
+    "runtime.release": {"kind": "release-runtime"},
+    "runtime.environment": {"kind": "environment"}
+  },
+  "sets": {
+    "framework": {
+      "producer": ["framework.runner"],
+      "proof": ["framework.tests", "framework.docs"]
+    },
+    "repository": {
+      "producer": ["product.source"],
+      "proof": ["framework.runner"]
+    },
+    "deterministic": {
+      "producer": ["product.source", "product.fixtures", "runtime.environment"],
+      "proof": ["proof.deterministic", "framework.runner"]
+    },
+    "host-client": {
+      "producer": ["skill.client", "runtime.claude", "runtime.settings", "runtime.release"],
+      "proof": ["proof.platform", "adapter.host", "framework.runner"]
+    },
+    "linux-server": {
+      "producer": ["product.source", "runtime.support", "runtime.claude", "runtime.settings", "runtime.release", "external.logparse", "external.mcp"],
+      "proof": ["proof.platform", "adapter.server", "framework.runner"]
+    },
+    "real-logparse": {
+      "producer": ["source.logparse", "external.logparse", "runtime.release", "runtime.environment"],
+      "proof": ["proof.real", "framework.runner"]
+    },
+    "real-agent": {
+      "producer": ["source.agent", "runtime.claude", "runtime.settings", "runtime.release"],
+      "proof": ["proof.real", "framework.runner"]
+    },
+    "real-route": {
+      "producer": ["source.agent", "source.route", "runtime.claude", "runtime.settings", "runtime.release"],
+      "proof": ["proof.real", "framework.runner"]
+    },
+    "real-diagnose": {
+      "producer": ["source.agent", "source.diagnose", "source.logparse", "skill.diagnose", "skill.logparse", "external.logparse", "runtime.claude", "runtime.settings", "runtime.release", "runtime.environment"],
+      "proof": ["proof.real", "framework.runner"]
+    },
+    "real-review": {
+      "producer": ["source.agent", "source.review", "runtime.claude", "runtime.settings", "runtime.release"],
+      "proof": ["proof.real", "framework.runner"]
+    },
+    "cross-job": {
+      "producer": ["product.source", "product.fixtures", "skill.client", "skill.diagnose", "skill.logparse", "runtime.support", "adapter.cross-job", "external.logparse", "external.mcp", "runtime.claude", "runtime.settings", "runtime.release", "runtime.environment"],
+      "proof": ["proof.platform", "proof.real", "framework.runner"]
+    },
+    "cross-job-route": {
+      "producer": ["product.source", "product.fixtures", "source.agent", "source.route", "skill.client", "runtime.support", "adapter.cross-job", "external.mcp", "runtime.claude", "runtime.settings", "runtime.release"],
+      "proof": ["proof.real", "framework.runner"]
+    },
+    "cross-job-logparse": {
+      "producer": ["product.source", "product.fixtures", "source.logparse", "skill.logparse", "runtime.support", "adapter.cross-job", "external.logparse", "external.mcp", "runtime.release"],
+      "proof": ["proof.real", "framework.runner"]
+    },
+    "cross-job-diagnose": {
+      "producer": ["product.source", "product.fixtures", "source.agent", "source.diagnose", "source.logparse", "skill.diagnose", "skill.logparse", "runtime.support", "adapter.cross-job", "external.logparse", "external.mcp", "runtime.claude", "runtime.settings", "runtime.release"],
+      "proof": ["proof.real", "framework.runner"]
+    },
+    "cross-job-review": {
+      "producer": ["product.source", "source.review", "runtime.support", "adapter.cross-job", "runtime.release"],
+      "proof": ["proof.real", "framework.runner"]
+    }
+  }
+}

@@ -1,0 +1,176 @@
+{
+  "schema_version": 2,
+  "goals": {
+    "dev.default": {
+      "description": "Complete deterministic feedback with no real-model activity.",
+      "tracks": ["dev"],
+      "required_proofs": [
+        "proof.framework",
+        "proof.repository-static",
+        "proof.deterministic-affected",
+        "proof.deterministic-full"
+      ],
+      "selectable_proofs": []
+    },
+    "dev.real": {
+      "description": "The deterministic closure plus exactly one explicitly selected real proof.",
+      "tracks": ["dev"],
+      "required_proofs": [
+        "proof.framework",
+        "proof.repository-static",
+        "proof.deterministic-affected",
+        "proof.deterministic-full"
+      ],
+      "selectable_proofs": [
+        "proof.real-logparse",
+        "proof.real-agent-backend",
+        "proof.real-route",
+        "proof.real-diagnose",
+        "proof.real-review",
+        "proof.dev-cross-job-environment",
+        "proof.dev-cross-job-route",
+        "proof.dev-cross-job-upload",
+        "proof.dev-cross-job-diagnose-review",
+        "proof.dev-cross-job-publish-restart"
+      ]
+    },
+    "release.full": {
+      "description": "A clean-source, fresh CrossJob Release closure with all deterministic and platform claims.",
+      "tracks": ["release"],
+      "required_proofs": [
+        "proof.framework",
+        "proof.repository-static",
+        "proof.deterministic-full",
+        "proof.host-client-capability",
+        "proof.linux-server-capability",
+        "proof.cross-job-fresh",
+        "proof.server-dfx",
+        "proof.real-agent-cross-job",
+        "proof.real-logparse-cross-job"
+      ],
+      "selectable_proofs": []
+    }
+  },
+  "proofs": {
+    "proof.framework": {
+      "description": "Configuration, runner and framework self-tests are internally consistent.",
+      "acceptance": "all",
+      "stages": ["framework.self-test"]
+    },
+    "proof.repository-static": {
+      "description": "The Python tree compiles, the lock is current, and Git whitespace is valid.",
+      "acceptance": "all",
+      "stages": ["repository.static"]
+    },
+    "proof.deterministic-affected": {
+      "description": "The changed deterministic scope is checked or explicitly subsumed by the full suite.",
+      "acceptance": "all",
+      "stages": ["deterministic.affected"]
+    },
+    "proof.deterministic-full": {
+      "description": "Contracts, unit, integration and SameJob deterministic journeys all pass.",
+      "acceptance": "all",
+      "stages": ["deterministic.full"]
+    },
+    "proof.host-client-capability": {
+      "description": "The native Client exposes and calls only the flat seven-tool HTTP contract without client DFX.",
+      "acceptance": "all",
+      "stages": ["platform.host-capability"]
+    },
+    "proof.linux-server-capability": {
+      "description": "The Linux Server runtime, installed distribution and platform contracts are executable.",
+      "acceptance": "all",
+      "stages": ["platform.server-linux-capability"]
+    },
+    "proof.real-logparse": {
+      "description": "The isolated real Logparse contract passes.",
+      "acceptance": "all",
+      "stages": ["real.logparse"]
+    },
+    "proof.real-agent-backend": {
+      "description": "The isolated real Agent backend contract passes.",
+      "acceptance": "all",
+      "stages": ["real.agent-backend"]
+    },
+    "proof.real-route": {
+      "description": "The isolated real ROUTE Agent contract passes.",
+      "acceptance": "all",
+      "stages": ["real.route"]
+    },
+    "proof.real-diagnose": {
+      "description": "The isolated real DIAGNOSE Agent contract passes.",
+      "acceptance": "all",
+      "stages": ["real.diagnose"]
+    },
+    "proof.real-review": {
+      "description": "The isolated real REVIEW Agent contract passes.",
+      "acceptance": "all",
+      "stages": ["real.review"]
+    },
+    "proof.dev-cross-job-environment": {
+      "description": "The Dev CrossJob environment is admitted from a fresh data root.",
+      "acceptance": "all",
+      "stages": ["journey.cross-job.environment"]
+    },
+    "proof.dev-cross-job-route": {
+      "description": "The Dev CrossJob route segment completes and seals its continuation boundary.",
+      "acceptance": "all",
+      "stages": ["journey.cross-job.route"]
+    },
+    "proof.dev-cross-job-upload": {
+      "description": "The Dev CrossJob upload segment completes and seals its continuation boundary.",
+      "acceptance": "all",
+      "stages": ["journey.cross-job.upload"]
+    },
+    "proof.dev-cross-job-diagnose-review": {
+      "description": "DIAGNOSE plus automatic REVIEW completes as one indivisible Dev reuse segment.",
+      "acceptance": "all",
+      "stages": ["journey.cross-job.diagnose", "journey.cross-job.review"]
+    },
+    "proof.dev-cross-job-publish-restart": {
+      "description": "The Dev CrossJob publish and restart segment completes.",
+      "acceptance": "all",
+      "stages": ["journey.cross-job.publish-restart"]
+    },
+    "proof.cross-job-fresh": {
+      "description": "One GENESIS CrossJob journey reaches publish and survives restart from an empty DATA_ROOT.",
+      "acceptance": "all",
+      "stages": [
+        "journey.cross-job.environment",
+        "journey.cross-job.route",
+        "journey.cross-job.upload",
+        "journey.cross-job.diagnose",
+        "journey.cross-job.review",
+        "journey.cross-job.publish-restart"
+      ]
+    },
+    "proof.server-dfx": {
+      "description": "Authoritative Linux Server DFX proves tool listing, validation and exact call correspondence.",
+      "acceptance": "all",
+      "stages": [
+        "journey.cross-job.environment",
+        "journey.cross-job.route",
+        "journey.cross-job.upload",
+        "journey.cross-job.diagnose",
+        "journey.cross-job.publish-restart"
+      ]
+    },
+    "proof.real-agent-cross-job": {
+      "description": "The fresh CrossJob journey supplies the Release real Agent, ROUTE, DIAGNOSE and REVIEW claims.",
+      "acceptance": "all",
+      "stages": [
+        "journey.cross-job.route",
+        "journey.cross-job.diagnose",
+        "journey.cross-job.review"
+      ]
+    },
+    "proof.real-logparse-cross-job": {
+      "description": "The fresh CrossJob upload and diagnosis path supplies the Release real Logparse claim.",
+      "acceptance": "all",
+      "stages": [
+        "journey.cross-job.upload",
+        "journey.cross-job.diagnose"
+      ]
+    }
+  }
+}

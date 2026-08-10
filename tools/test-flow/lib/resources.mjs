@@ -35,7 +35,7 @@ export class ResourceRegistry {
     if (!SAFE_NAME.test(name)) throw new Error(`RESOURCE_NAME:${name}`);
     if (label !== `problem-locator.test-flow.run=${this.runId}`) throw new Error("RESOURCE_LABEL_MISMATCH");
     if (this.resources.some((entry) => entry.kind === kind && entry.name === name)) throw new Error(`RESOURCE_DUPLICATE:${kind}:${name}`);
-    const record = { schema_version: 1, kind, name, label };
+    const record = { schema_version: 2, kind, name, label };
     ensureDirectory(path.dirname(this.filePath));
     fs.appendFileSync(this.filePath, `${JSON.stringify(record)}\n`, { encoding: "utf8", mode: 0o600 });
     this.resources.push(record);
@@ -46,7 +46,7 @@ export class ResourceRegistry {
     for (const line of fs.readFileSync(this.filePath, "utf8").split(/\r?\n/).filter(Boolean)) {
       const record = JSON.parse(line);
       if (this.resources.some((entry) => entry.kind === record.kind && entry.name === record.name)) continue;
-      if (!["container", "volume"].includes(record.kind) || !SAFE_NAME.test(record.name) || record.label !== `problem-locator.test-flow.run=${this.runId}`) {
+      if (record.schema_version !== 2 || !["container", "volume"].includes(record.kind) || !SAFE_NAME.test(record.name) || record.label !== `problem-locator.test-flow.run=${this.runId}`) {
         throw new Error("RESOURCE_EXTERNAL_RECORD_INVALID");
       }
       this.resources.push(record);
@@ -55,8 +55,8 @@ export class ResourceRegistry {
 
   async apply({ preserve }) {
     this.loadExternalRecords();
-    if (this.resources.length === 0) return { schema_version: 1, status: "PASS", policy: preserve ? "PRESERVE" : "DELETE", inspected: [], remaining: [] };
-    if (!this.commandAvailable("docker")) return { schema_version: 1, status: "ERROR", policy: preserve ? "PRESERVE" : "DELETE", code: "DOCKER_MISSING", inspected: [], remaining: this.resources };
+    if (this.resources.length === 0) return { schema_version: 2, status: "PASS", policy: preserve ? "PRESERVE" : "DELETE", inspected: [], remaining: [] };
+    if (!this.commandAvailable("docker")) return { schema_version: 2, status: "ERROR", policy: preserve ? "PRESERVE" : "DELETE", code: "DOCKER_MISSING", inspected: [], remaining: this.resources };
     const inspected = [];
     const remaining = [];
     let failed = false;
@@ -124,7 +124,7 @@ export class ResourceRegistry {
       ) failed = true;
     }
     return {
-      schema_version: 1,
+      schema_version: 2,
       status: failed ? "ERROR" : "PASS",
       policy: preserve ? "PRESERVE" : "DELETE",
       inspected,

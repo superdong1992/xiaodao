@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { pythonImportPathIdentity } from "../lib/identity.mjs";
+import { hashConfiguredPaths, performanceIdentity, pythonImportPathIdentity, stageIdentity } from "../lib/identity.mjs";
 
 test("Python import identity changes when external PYTHONPATH content changes", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "test-flow-python-path-"));
@@ -15,15 +15,51 @@ test("Python import identity changes when external PYTHONPATH content changes", 
     fs.mkdirSync(external);
     const module = path.join(external, "dependency.py");
     fs.writeFileSync(module, "VALUE = 1\n");
-
     const first = pythonImportPathIdentity(repository, { sys_path: [repository, external] });
     assert.deepEqual(first[0], { index: 0, kind: "repository", path: "." });
-    assert.equal(first[1].status, "PRESENT");
-
     fs.writeFileSync(module, "VALUE = 2\n");
     const second = pythonImportPathIdentity(repository, { sys_path: [repository, external] });
     assert.notEqual(first[1].digest, second[1].digest);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("configured identity paths fail visibly when an input is absent", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "test-flow-identity-missing-"));
+  try {
+    const identity = hashConfiguredPaths(root, ["present.txt", "missing.txt"]);
+    assert.equal(identity.records.find((record) => record.path === "missing.txt").kind, "missing");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("producer and proof identity are separate but proof remains producer-bound", () => {
+  const stage = { id: "deterministic.full", identity_set: "deterministic" };
+  const policy = {
+    parent_checkpoint: "GENESIS",
+    scenario: "CrossJob",
+    stage_definition_digest: "stage-v1",
+    dependency_proof_identities: ["dependency-a"],
+    config_bundle_digest: "bundle-a",
+    evidence_contract_version: "events-v2",
+  };
+  const base = stageIdentity(stage, { deterministic: { producer_digest: "product-a", proof_digest: "tests-a" } }, policy);
+  const proofOnly = stageIdentity(stage, { deterministic: { producer_digest: "product-a", proof_digest: "tests-b" } }, policy);
+  assert.equal(base.producer_identity, proofOnly.producer_identity);
+  assert.notEqual(base.proof_identity, proofOnly.proof_identity);
+
+  const productChanged = stageIdentity(stage, { deterministic: { producer_digest: "product-b", proof_digest: "tests-a" } }, policy);
+  assert.notEqual(base.producer_identity, productChanged.producer_identity);
+  assert.notEqual(base.proof_identity, productChanged.proof_identity);
+});
+
+test("performance identity changes with producer, policy version or stage policy", () => {
+  const stage = { id: "deterministic.full", progress_class: "local" };
+  const policy = { policy_version: "robust-mad-v2", stages: { "deterministic.full": { mode: "gate", hard_cap_seconds: 300 }, "*": { mode: "warn", hard_cap_seconds: null } } };
+  const baseline = performanceIdentity(stage, "producer-a", policy);
+  assert.notEqual(baseline, performanceIdentity(stage, "producer-b", policy));
+  assert.notEqual(baseline, performanceIdentity(stage, "producer-a", { ...policy, policy_version: "robust-mad-v3" }));
+  assert.notEqual(baseline, performanceIdentity(stage, "producer-a", { ...policy, stages: { ...policy.stages, "deterministic.full": { mode: "gate", hard_cap_seconds: 301 } } }));
 });

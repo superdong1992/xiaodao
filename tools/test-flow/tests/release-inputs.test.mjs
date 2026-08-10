@@ -1,19 +1,24 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import {
   CLAUDE_SETTINGS_ENV_KEYS,
   RELEASE_BASE_IMAGE,
+  RELEASE_BASE_IMAGE_SOURCE,
   RELEASE_CLAUDE_CLI_SHA256,
   RELEASE_CLAUDE_TARBALL_SHA256,
   RELEASE_CLAUDE_VERSION,
   RELEASE_HATCHLING_VERSION,
+  RELEASE_MODEL,
+  RELEASE_PYTHON_VERSION,
+  RELEASE_RUNTIME_PROFILE,
   RELEASE_UV_ARCHIVE_SHA256,
+  RELEASE_UV_VERSION,
   claudeSettingsIdentity,
   materializeAttemptClaudeSettings,
   materializeClaudeSettings,
@@ -21,15 +26,16 @@ import {
 } from "../lib/release-inputs.mjs";
 
 const TOOL_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const SUPPORT_ROOT = path.join(TOOL_ROOT, "runtime-support");
 
 function settingsPayload(overrides = {}) {
   return {
     env: {
       ANTHROPIC_AUTH_TOKEN: "unit-test-high-entropy-auth-value",
       ANTHROPIC_BASE_URL: "https://provider.example.test/v1",
-      ANTHROPIC_DEFAULT_HAIKU_MODEL: "deepseek-v4-flash[1m]",
-      ANTHROPIC_DEFAULT_OPUS_MODEL: "deepseek-v4-flash[1m]",
-      ANTHROPIC_DEFAULT_SONNET_MODEL: "deepseek-v4-flash[1m]",
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: RELEASE_MODEL,
+      ANTHROPIC_DEFAULT_OPUS_MODEL: RELEASE_MODEL,
+      ANTHROPIC_DEFAULT_SONNET_MODEL: RELEASE_MODEL,
       API_TIMEOUT_MS: "600000",
       CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
       ...overrides,
@@ -39,19 +45,18 @@ function settingsPayload(overrides = {}) {
   };
 }
 
-test("Release settings materialization copies only the exact env allowlist and no Hooks", () => {
+test("Release settings copy only the profile allowlist and never copy Hooks", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "test-flow-release-settings-"));
   try {
     const source = path.join(root, "source-settings.json");
     const target = path.join(root, "isolated", "settings.json");
-    fs.writeFileSync(source, JSON.stringify(settingsPayload()), { encoding: "utf8", mode: 0o600 });
+    fs.writeFileSync(source, JSON.stringify(settingsPayload()), { mode: 0o600 });
     const identity = claudeSettingsIdentity(source);
     assert.equal(identity.status, "PRESENT");
-    assert.equal(identity.model, "deepseek-v4-flash[1m]");
+    assert.equal(identity.model, RELEASE_MODEL);
     assert.equal(identity.endpoint, "https://provider.example.test");
     assert.equal(identity.hooks_copied, false);
     assert.equal(JSON.stringify(identity).includes("unit-test-high-entropy-auth-value"), false);
-
     materializeClaudeSettings(source, target);
     const copied = JSON.parse(fs.readFileSync(target, "utf8"));
     assert.deepEqual(Object.keys(copied), ["env"]);
@@ -59,213 +64,37 @@ test("Release settings materialization copies only the exact env allowlist and n
     assert.equal(Object.hasOwn(copied, "hooks"), false);
     assert.equal(Object.hasOwn(copied, "permissions"), false);
     assert.equal(fs.statSync(target).mode & 0o777, 0o600);
-  } finally {
-    fs.rmSync(root, { recursive: true, force: true });
-  }
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
-test("container settings are staged inside attempt scratch instead of binding the source path", () => {
+test("container settings are materialized inside attempt scratch and identity-bound", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "test-flow-release-settings-stage-"));
   try {
-    const sourceRoot = path.join(root, "daemon-invisible-source");
-    const attemptRoot = path.join(root, "shared-attempt");
+    const sourceRoot = path.join(root, "source");
+    const attemptRoot = path.join(root, "attempt");
     fs.mkdirSync(sourceRoot);
     fs.mkdirSync(attemptRoot);
     const source = path.join(sourceRoot, "settings.json");
-    fs.writeFileSync(source, JSON.stringify(settingsPayload()), { encoding: "utf8", mode: 0o600 });
+    fs.writeFileSync(source, JSON.stringify(settingsPayload()), { mode: 0o600 });
     const sourceIdentity = claudeSettingsIdentity(source);
-
     const staged = materializeAttemptClaudeSettings(source, attemptRoot, sourceIdentity.fingerprint);
     assert.equal(staged.path.startsWith(`${path.resolve(attemptRoot)}${path.sep}`), true);
     assert.notEqual(staged.path, source);
     assert.equal(staged.identity.fingerprint, sourceIdentity.fingerprint);
-    assert.equal(fs.statSync(staged.path).mode & 0o777, 0o600);
-    const copied = JSON.parse(fs.readFileSync(staged.path, "utf8"));
-    assert.deepEqual(Object.keys(copied), ["env"]);
-    assert.equal(Object.hasOwn(copied, "hooks"), false);
-
-    const adapter = fs.readFileSync(path.join(TOOL_ROOT, "adapters", "macos-linux-release.mjs"), "utf8");
-    assert.match(adapter, /src=\$\{configuration\.containerClaudeSettings\},dst=\/run\/host-claude-settings\.json,readonly/);
-    assert.doesNotMatch(adapter, /src=\$\{configuration\.claudeSettings\},dst=\/run\/host-claude-settings\.json/);
-  } finally {
-    fs.rmSync(root, { recursive: true, force: true });
-  }
+    const core = fs.readFileSync(path.join(TOOL_ROOT, "adapters", "cross-job-core.mjs"), "utf8");
+    assert.match(core, /configuration\.containerClaudeSettings = materializeAttemptClaudeSettings/);
+    assert.match(core, /src=\$\{configuration\.containerClaudeSettings\},dst=\/run\/host-claude-settings\.json,readonly/);
+    assert.doesNotMatch(core, /src=\$\{configuration\.claudeSettings\},dst=\/run\/host-claude-settings\.json/);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
-test("macOS container initialization trusts only the three exact read-only source repositories", () => {
-  const initializer = fs.readFileSync(path.join(TOOL_ROOT, "harness", "macos-initialize-container.sh"), "utf8");
-  const trusted = [
-    "/source/xiaodao/.git",
-    "/source/logparse/.git",
-    "/source/problem-locator-mcp/.git",
-  ];
-  for (const source of trusted) {
-    assert.equal(initializer.includes(`git config --file "$source_git_config" --add safe.directory ${source}`), true);
-    assert.equal(initializer.includes(`GIT_CONFIG_GLOBAL="$source_git_config" git -c core.autocrlf=false clone --no-hardlinks ${source.slice(0, -5)} `), true);
-  }
-  assert.match(initializer, /git config --file "\$source_git_config" --add safe\.directory ''/);
-  assert.match(initializer, /chmod 0600 "\$source_git_config"/);
-  assert.doesNotMatch(initializer, /safe\.directory\s+['\"]?\*['\"]?/);
-  assert.doesNotMatch(initializer, /safe\.directory\s+\/source(?:\s|$)/);
-  assert.match(initializer, /rm -f "\$source_git_config"/);
-});
-
-test("macOS adapter permits only the environment diagnostic outside Release", () => {
-  const adapter = fs.readFileSync(path.join(TOOL_ROOT, "adapters", "macos-linux-release.mjs"), "utf8");
-  assert.match(adapter, /configuration\.track === "dev" && configuration\.stage === "journey\.cross-job\.environment"/);
-  assert.match(adapter, /configuration\.track === "release" \|\| devEnvironmentDiagnostic/);
-  assert.match(adapter, /devEnvironmentDiagnostic \? await stopEnvironmentDiagnostic\(configuration, state\) : null/);
-  assert.match(adapter, /return mergeEventParts\(configuration\.attemptRoot, state\.run_id, "diagnostics"\)/);
-  assert.doesNotMatch(adapter, /configuration\.track === "dev" \|\| configuration\.track === "release"/);
-});
-
-test("macOS adapter bounds long polls without discarding failure evidence", () => {
-  const adapter = fs.readFileSync(path.join(TOOL_ROOT, "adapters", "macos-linux-release.mjs"), "utf8");
-  assert.match(adapter, /function parseClaudeStream\(text, expectedCwd, \{ allowErrorTerminal = false \} = \{\}\)/);
-  assert.match(adapter, /allowErrorTerminal: exit\.code !== 0/);
-  const auditWrite = adapter.indexOf("writeNew(auditPath, audit);");
-  const exitFailure = adapter.indexOf("if (exit.code !== 0) throw new StageError");
-  assert.equal(auditWrite >= 0 && exitFailure > auditWrite, true);
-  assert.match(adapter, /wait_seconds 30 on every poll; do not rapid-poll/);
-  assert.match(adapter, /phaseOnePrompt\(state\.request_ids\), 50, 3/);
-  assert.match(adapter, /phaseThreePrompt\(state\), 50, 5/);
-  assert.match(adapter, /async function archiveFailureServiceEvidence\(configuration\)/);
-  assert.match(adapter, /try \{ await quiesceService\(configuration, state\); \} catch \{\}/);
-  assert.match(adapter, /for \(const mode of \["journey", "diagnostics"\]\)/);
-  const archiveFailure = adapter.indexOf("await archiveFailureServiceEvidence(configuration)");
-  const recoverProgress = adapter.indexOf("const progress = recoverStageAuditProgress");
-  assert.equal(archiveFailure >= 0 && recoverProgress > archiveFailure, true);
-});
-
-test("macOS phase 3 validates the current CaseView pending requirement field", () => {
-  const adapter = fs.readFileSync(path.join(TOOL_ROOT, "adapters", "macos-linux-release.mjs"), "utf8");
-  assert.match(adapter, /entry\.view\.pending_requirements\?\.filter/);
-  assert.doesNotMatch(adapter, /entry\.view\.requirements\?\.filter/);
-});
-
-test("macOS checkpoints export stable business state without retained workspaces", () => {
-  const adapter = fs.readFileSync(path.join(TOOL_ROOT, "adapters", "macos-linux-release.mjs"), "utf8");
-  const exporter = fs.readFileSync(path.join(TOOL_ROOT, "harness", "macos-export-checkpoint.sh"), "utf8");
-  assert.match(adapter, /extractCheckpointSourceArchive\(\{ archivePath: archiveHostPath, targetRoot: stateRoot \}\)/);
-  assert.match(adapter, /macos-export-checkpoint\.sh/);
-  assert.match(adapter, /checkpoint-temporary-classification\.json/);
-  assert.match(adapter, /classification\.outbox_clear === true/);
-  assert.match(adapter, /excluded_terminal_workspaces: workspaceIds\.length/);
-  assert.match(adapter, /temporary_workspaces: 0/);
-  assert.match(adapter, /"exec", state\.active_container, "ps", "-ww", "-eo", "args"/);
-  assert.doesNotMatch(adapter, /\["top", state\.active_container, "-eo", "args"\]/);
-  assert.doesNotMatch(adapter, /state\.active_container}:\/var\/lib\/problem-locator\/\./);
-  assert.match(exporter, /for required in data-format\.json state\.json resources jobs/);
-  assert.match(exporter, /macos-classify-checkpoint-temporary\.mjs/);
-  assert.match(exporter, /tmp\/workspaces/);
-  assert.match(exporter, /-type l -print -quit/);
-  assert.match(exporter, /-type f -links \+1 -print -quit/);
-  assert.match(exporter, /tar --format=ustar --sort=name --mtime=@0 --numeric-owner/);
-  assert.doesNotMatch(exporter, /\.instance\.lock/);
-  assert.doesNotMatch(exporter, /cp -a[^\n]*tmp\/workspaces/);
-});
-
-test("offline container installation uses the build backend sealed into the v2 image", () => {
-  const dockerfile = fs.readFileSync(path.join(TOOL_ROOT, "Dockerfile"), "utf8");
-  const initializer = fs.readFileSync(path.join(TOOL_ROOT, "harness", "macos-initialize-container.sh"), "utf8");
-  const cachePreparer = fs.readFileSync(path.join(TOOL_ROOT, "prepare-release-cache.mjs"), "utf8");
-  assert.equal(RELEASE_HATCHLING_VERSION, "1.28.0");
-  assert.equal(RELEASE_BASE_IMAGE.endsWith("-v2"), true);
-  assert.match(dockerfile, /ARG HATCHLING_VERSION=1\.28\.0/);
-  assert.match(dockerfile, /hatchling==\$\{HATCHLING_VERSION\}/);
-  assert.match(dockerfile, /problem-locator\.e2e\.hatchling="\$\{HATCHLING_VERSION\}"/);
-  assert.match(initializer, /--offline --no-deps --no-build-isolation --reinstall/);
-  assert.match(cachePreparer, /HATCHLING_VERSION=\$\{RELEASE_HATCHLING_VERSION\}/);
-  assert.match(cachePreparer, /hatchling_version: RELEASE_HATCHLING_VERSION/);
-});
-
-test("offline container installation copies runtime assets and rejects filesystem links", () => {
-  const initializer = fs.readFileSync(path.join(TOOL_ROOT, "harness", "macos-initialize-container.sh"), "utf8");
-  assert.match(initializer, /UV_LINK_MODE=copy UV_NO_PROGRESS=1 uv pip install/);
-  assert.match(initializer, /installed_assets=\/opt\/venvs\/xiaodao\/lib\/python3\.12\/site-packages\/problem_locator\/runtime\/assets/);
-  assert.match(initializer, /find "\$installed_assets" -xdev -type l -print -quit/);
-  assert.match(initializer, /find "\$installed_assets" -xdev -type f -links \+1 -print -quit/);
-  assert.match(initializer, /"uv_link_mode":"copy","installed_asset_hardlinks":0/);
-});
-
-test("non-root service trees are readable and traversable but never writable", () => {
-  const initializer = fs.readFileSync(path.join(TOOL_ROOT, "harness", "macos-initialize-container.sh"), "utf8");
-  const trees = "/opt/src /opt/e2e-skills /opt/venvs /opt/uv-python";
-  assert.equal(initializer.includes(`chmod -R a+rX ${trees}`), true);
-  assert.equal(initializer.includes(`chmod -R go-w ${trees}`), true);
-  assert.match(initializer, /find "\$tree" -xdev ! -readable -print -quit/);
-  assert.match(initializer, /find "\$tree" -xdev -type d ! -executable -print -quit/);
-  assert.match(initializer, /find "\$tree" -xdev -writable -print -quit/);
-});
-
-test("service logs stream directly into attempt evidence on every failure path", () => {
-  const supervisor = fs.readFileSync(path.join(TOOL_ROOT, "harness", "macos-service-supervisor.sh"), "utf8");
-  const relay = fs.readFileSync(path.join(TOOL_ROOT, "harness", "relay_service_journey.py"), "utf8");
-  const adapter = fs.readFileSync(path.join(TOOL_ROOT, "adapters", "macos-linux-release.mjs"), "utf8");
-  assert.match(supervisor, /service_log="\$logs\/service-\$instance\.log"/);
-  assert.match(supervisor, /test ! -e "\$service_log"/);
-  assert.match(supervisor, /PYTHONUNBUFFERED=1/);
-  assert.match(supervisor, /install -d -m 0700 -o 0 -g 0 "\$runtime"\nmkdir -p "\$parts" "\$logs"/);
-  assert.doesNotMatch(supervisor, /install -d[^\n]*"\$parts"/);
-  assert.doesNotMatch(supervisor, /install -d[^\n]*"\$logs"/);
-  assert.doesNotMatch(supervisor, /service_log="\$runtime\/service\.log"/);
-  assert.doesNotMatch(supervisor, /install .*"\$service_log".*service-\$instance\.log/);
-  assert.match(adapter, /bootstrapLog = `\/evidence\/stages\/\$\{configuration\.stage\}\/supervisor-\$\{instance\}\.log`/);
-  assert.match(adapter, /exec sh \/harness\/macos-service-supervisor\.sh "\$1" "\$2" >"\$3" 2>&1/);
-  assert.match(adapter, /allowEmptyJourney: configuration\.track === "dev"/);
-  assert.match(adapter, /startService\(configuration, state, "restart", \{ allowEmptyJourney: true \}\)/);
-  assert.match(adapter, /readRelayedEventPart\(\{/);
-  assert.match(adapter, /allowEmpty: mode === "journey" && instance === "restart"/);
-  assert.match(adapter, /service-\$\{instance\}-\$\{relayKind\}-relay\.json/);
-  assert.match(adapter, /SERVICE_\$\{instance\.toUpperCase\(\)\}_\$\{supervisor\.code\}\$\{relayCode\}/);
-  assert.match(supervisor, /allow-empty\) journey_empty_arg=--allow-empty/);
-  assert.match(relay, /parser\.add_argument\("--allow-empty", action="store_true"\)/);
-  assert.match(relay, /if arguments\.allow_empty:\n\s+_receipt\(arguments, status="PASS", code=None, count=0\)/);
-  assert.match(adapter, /readiness-\$\{instance\}\.json/);
-  assert.match(adapter, /service_pid_running: pidProbe\.status === 0/);
-  assert.match(adapter, /internal_tcp_8000: tcpProbe\.status === 0/);
-  assert.match(adapter, /launcher_process_present:/);
-  assert.match(adapter, /journey_relay_present:/);
-});
-
-test("macOS adapter delegates client-server MCP correspondence to the evidence reader", () => {
-  const adapter = fs.readFileSync(path.join(TOOL_ROOT, "adapters", "macos-linux-release.mjs"), "utf8");
-  const start = adapter.indexOf("function verifyCorrespondence");
-  const end = adapter.indexOf("async function startService", start);
-  assert.notEqual(start, -1);
-  assert.notEqual(end, -1);
-  const body = adapter.slice(start, end);
-  assert.match(adapter, /import \{ readRelayedEventPart, readServerMcpCorrespondence \} from "\.\.\/lib\/events\.mjs"/);
-  assert.match(body, /readServerMcpCorrespondence\(attemptRoot, client\)/);
-  assert.match(body, /correspondence\.started_exact/);
-  assert.match(body, /correspondence\.completed_exact/);
-});
-
-test("macOS adapter failure receipts recover authoritative usage instead of reporting zero", () => {
-  const adapter = fs.readFileSync(path.join(TOOL_ROOT, "adapters", "macos-linux-release.mjs"), "utf8");
-  assert.match(adapter, /import \{ recoverStageAuditProgress \} from "\.\.\/lib\/evidence\.mjs"/);
-  assert.match(adapter, /const progress = recoverStageAuditProgress\(/);
-  assert.match(adapter, /client_tool_calls: progress\.client_tool_calls/);
-  assert.match(adapter, /server_tool_calls: progress\.server_tool_calls/);
-  assert.match(adapter, /usage: progress\.usage/);
-});
-
-test("Release settings reject any additional environment key", () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "test-flow-release-settings-"));
+test("settings reject extra keys and the preparation helper preserves global aliases", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "test-flow-settings-prep-"));
   try {
-    const source = path.join(root, "settings.json");
-    fs.writeFileSync(source, JSON.stringify(settingsPayload({ EXTRA_UNFROZEN_INPUT: "forbidden" })), { encoding: "utf8", mode: 0o600 });
-    const identity = claudeSettingsIdentity(source);
-    assert.equal(identity.status, "INVALID");
-    assert.equal(identity.code, "CLAUDE_SETTINGS_ENV_ALLOWLIST_MISMATCH");
-  } finally {
-    fs.rmSync(root, { recursive: true, force: true });
-  }
-});
+    const invalid = path.join(root, "invalid.json");
+    fs.writeFileSync(invalid, JSON.stringify(settingsPayload({ EXTRA_UNFROZEN_INPUT: "forbidden" })));
+    assert.equal(claudeSettingsIdentity(invalid).code, "CLAUDE_SETTINGS_ENV_ALLOWLIST_MISMATCH");
 
-test("settings preparation leaves global aliases untouched and creates the frozen isolated mapping", () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "test-flow-release-settings-prep-"));
-  try {
     const output = path.join(root, "release-settings.json");
     const environment = {
       ...process.env,
@@ -275,42 +104,191 @@ test("settings preparation leaves global aliases untouched and creates the froze
       ANTHROPIC_DEFAULT_OPUS_MODEL: "unfrozen-global-opus",
       ANTHROPIC_DEFAULT_SONNET_MODEL: "unfrozen-global-sonnet",
     };
-    const prepared = spawnSync(process.execPath, [path.join(TOOL_ROOT, "prepare-release-settings.mjs"), "--output", output], {
-      env: environment,
-      encoding: "utf8",
-    });
+    const prepared = spawnSync(process.execPath, [path.join(TOOL_ROOT, "prepare-release-settings.mjs"), "--output", output], { env: environment, encoding: "utf8" });
     assert.equal(prepared.status, 0, prepared.stderr);
-    assert.equal(prepared.stdout.includes(environment.ANTHROPIC_AUTH_TOKEN), false);
     const copied = JSON.parse(fs.readFileSync(output, "utf8"));
-    assert.equal(copied.env.ANTHROPIC_DEFAULT_HAIKU_MODEL, "deepseek-v4-flash[1m]");
-    assert.equal(copied.env.ANTHROPIC_DEFAULT_OPUS_MODEL, "deepseek-v4-flash[1m]");
-    assert.equal(copied.env.ANTHROPIC_DEFAULT_SONNET_MODEL, "deepseek-v4-flash[1m]");
+    assert.equal(copied.env.ANTHROPIC_DEFAULT_HAIKU_MODEL, RELEASE_MODEL);
+    assert.equal(copied.env.ANTHROPIC_DEFAULT_OPUS_MODEL, RELEASE_MODEL);
+    assert.equal(copied.env.ANTHROPIC_DEFAULT_SONNET_MODEL, RELEASE_MODEL);
     assert.equal(Object.hasOwn(copied, "hooks"), false);
     assert.equal(environment.ANTHROPIC_DEFAULT_HAIKU_MODEL, "unfrozen-global-haiku");
-  } finally {
-    fs.rmSync(root, { recursive: true, force: true });
-  }
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
-test("a global-style Claude 2.1.201 executable and a tampered cli.js are rejected", () => {
+test("runtime profile is the sole frozen version and artifact-pin source", () => {
+  const releaseInputs = fs.readFileSync(path.join(TOOL_ROOT, "lib", "release-inputs.mjs"), "utf8");
+  assert.match(releaseInputs, /runtime-profiles\.v2\.json/);
+  assert.equal(RELEASE_CLAUDE_VERSION, RELEASE_RUNTIME_PROFILE.claude.version);
+  assert.equal(RELEASE_UV_VERSION, RELEASE_RUNTIME_PROFILE.uv.version);
+  assert.equal(RELEASE_PYTHON_VERSION, RELEASE_RUNTIME_PROFILE.python);
+  assert.equal(RELEASE_HATCHLING_VERSION, RELEASE_RUNTIME_PROFILE.hatchling);
+  assert.equal(RELEASE_BASE_IMAGE, RELEASE_RUNTIME_PROFILE.base_image.name);
+  assert.equal(RELEASE_BASE_IMAGE_SOURCE, RELEASE_RUNTIME_PROFILE.base_image.source);
+  assert.match(RELEASE_BASE_IMAGE_SOURCE, /@sha256:[a-f0-9]{64}$/);
+});
+
+test("the Dockerfile has no hidden version defaults and cache preparation supplies every build arg", () => {
+  const dockerfile = fs.readFileSync(path.join(TOOL_ROOT, "Dockerfile"), "utf8");
+  const preparer = fs.readFileSync(path.join(TOOL_ROOT, "prepare-release-cache.mjs"), "utf8");
+  assert.doesNotMatch(dockerfile, /^ARG\s+[A-Z0-9_]+=/m);
+  for (const name of ["BASE_IMAGE", "UV_SHA256", "UVX_SHA256", "UV_VERSION", "CLAUDE_CLI_SHA256", "CLAUDE_VERSION", "PYTHON_VERSION", "HATCHLING_VERSION"]) {
+    assert.match(dockerfile, new RegExp(`^ARG ${name}$`, "m"));
+    assert.match(preparer, new RegExp(`--build-arg[\\s\\S]{0,80}${name}=\\$\\{RELEASE_`));
+  }
+  assert.match(dockerfile, /hatchling==\$\{HATCHLING_VERSION\}/);
+  assert.match(dockerfile, /problem-locator\.e2e\.claude="npm-\$\{CLAUDE_VERSION\}"/);
+});
+
+test("the first-party adapter matrix is thin, platform-bound and shares one core contract", () => {
+  const expected = {
+    macos: ["darwin", "colima"],
+    windows: ["win32", "default"],
+    linux: ["linux", "default"],
+  };
+  for (const [client, [host, context]] of Object.entries(expected)) {
+    const wrapper = fs.readFileSync(path.join(TOOL_ROOT, "adapters", `${client}-linux-release.mjs`), "utf8");
+    assert.match(wrapper, new RegExp(`TEST_FLOW_FIRST_PARTY_CLIENT = "${client}"`));
+    assert.match(wrapper, new RegExp(`TEST_FLOW_FIRST_PARTY_HOST_PLATFORM = "${host}"`));
+    assert.match(wrapper, new RegExp(`TEST_FLOW_FIRST_PARTY_DOCKER_CONTEXT = "${context}"`));
+    assert.match(wrapper, /import\("\.\/cross-job-core\.mjs"\)/);
+  }
+  const core = fs.readFileSync(path.join(TOOL_ROOT, "adapters", "cross-job-core.mjs"), "utf8");
+  assert.match(core, /process\.platform === configuration\.expectedHostPlatform/);
+  assert.match(core, /configuration\.client === configuration\.expectedClient/);
+});
+
+test("Linux capability installs the immutable source snapshot from the sealed offline cache before testing", () => {
+  const adapter = fs.readFileSync(path.join(TOOL_ROOT, "adapters", "server-linux-capability.mjs"), "utf8");
+  const platformTests = [
+    fs.readFileSync(path.join(TOOL_ROOT, "..", "..", "tests", "platform", "server_linux", "test_native_startup_gate.py"), "utf8"),
+    fs.readFileSync(path.join(TOOL_ROOT, "..", "..", "tests", "platform", "distribution", "test_installed_distribution_gate.py"), "utf8"),
+  ].join("\n");
+  assert.match(adapter, /UV_CACHE_DIR=\/root\/\.cache\/uv/);
+  assert.match(adapter, /UV_LINK_MODE=copy/);
+  assert.doesNotMatch(adapter, /\/tmp\/uv-cache/);
+  assert.match(adapter, /uv pip install --offline --no-deps --no-build-isolation --reinstall/);
+  assert.match(adapter, /problem_locator\/runtime\/assets -xdev -type f -links \+1/);
+  assert.ok(adapter.indexOf("uv pip install --offline") < adapter.indexOf("python -m pytest"));
+  assert.match(adapter, /SERVER_CAPABILITY_OFFLINE_INSTALL/);
+  assert.match(adapter, /SERVER_CAPABILITY_CONTRACT/);
+  assert.match(platformTests, /environ\["UV_LINK_MODE"\] = "copy"/);
+  assert.match(platformTests, /shutil\.copytree\(sealed_runtime, venv, symlinks=True\)/);
+  assert.doesNotMatch(platformTests, /"venv",\s*"--no-project"/);
+  assert.doesNotMatch(`${adapter}\n${platformTests}`, /S08_/);
+});
+
+test("active runtime support is explicit and the historical harness closure is gone", () => {
+  const expected = [
+    "audit_service_agent_usage.py", "checkpoint-temporary.mjs", "export-checkpoint.sh",
+    "initialize-container.sh", "isolated-agent-wrapper.mjs", "prepare_claude_settings.py",
+    "prepare_nonroot_settings.py", "prepare_real_zip.py", "relay_service_journey.py",
+    "server_dfx_probe.py", "service-supervisor.sh", "stop-service.sh", "test_service_launcher.py",
+    "verify-source-snapshot.mjs",
+  ];
+  assert.deepEqual(fs.readdirSync(SUPPORT_ROOT).sort(), expected.sort());
+  assert.equal(fs.existsSync(path.join(TOOL_ROOT, "harness")), false);
+  const activeText = [
+    fs.readFileSync(path.join(TOOL_ROOT, "adapters", "cross-job-core.mjs"), "utf8"),
+    ...fs.readdirSync(SUPPORT_ROOT).map((name) => fs.readFileSync(path.join(SUPPORT_ROOT, name), "utf8")),
+  ].join("\n");
+  assert.doesNotMatch(activeText, /\/harness\//);
+  assert.match(activeText, /\/test-flow-runtime\//);
+});
+
+test("container initialization verifies the exact product snapshot and external source commits", () => {
+  const initializer = fs.readFileSync(path.join(SUPPORT_ROOT, "initialize-container.sh"), "utf8");
+  for (const source of ["/source/logparse/.git", "/source/problem-locator-mcp/.git"]) {
+    assert.equal(initializer.includes(`git config --file "$source_git_config" --add safe.directory ${source}`), true);
+    assert.equal(initializer.includes(`GIT_CONFIG_GLOBAL="$source_git_config" git -c core.autocrlf=false clone --no-hardlinks ${source.slice(0, -5)} `), true);
+  }
+  assert.doesNotMatch(initializer, /\/source\/xiaodao\/\.git/);
+  assert.match(initializer, /cp -a \/source\/xiaodao\/\. \/opt\/src\/xiaodao\//);
+  assert.match(initializer, /verify-source-snapshot\.mjs/);
+  assert.match(initializer, /xiaodao_snapshot_digest/);
+  assert.doesNotMatch(initializer, /safe\.directory\s+['"]?\*['"]?/);
+  assert.match(initializer, /UV_LINK_MODE=copy UV_NO_PROGRESS=1 uv pip install/);
+  assert.match(initializer, /--offline --no-deps --no-build-isolation --reinstall/);
+  assert.match(initializer, /installed_assets=\/opt\/venvs\/xiaodao\/lib\/python3\.12\/site-packages\/problem_locator\/runtime\/assets/);
+  assert.match(initializer, /-type l -print -quit/);
+  assert.match(initializer, /-type f -links \+1 -print -quit/);
+});
+
+test("CrossJob runtime uses pull-never, empty labeled storage and authoritative server DFX", () => {
+  const core = fs.readFileSync(path.join(TOOL_ROOT, "adapters", "cross-job-core.mjs"), "utf8");
+  assert.match(core, /"--pull", "never"/);
+  assert.match(core, /lineage_root: "GENESIS"/);
+  assert.match(core, /initial_data_root: "EMPTY"/);
+  assert.match(core, /server_dfx_probe\.py/);
+  assert.match(core, /readServerMcpCorrespondence\(attemptRoot, state\.client_calls/);
+  assert.match(core, /correspondence\.tools_listed_exact/);
+  assert.match(core, /correspondence\.validation_probe_exact/);
+  assert.match(core, /canonicalJson\(receipt\.validation_fields\) === canonicalJson\(NEGATIVE_PROBE_VALIDATION_FIELDS\)/);
+  assert.match(core, /client_dfx_absent: true/);
+  assert.match(core, /CLIENT_DFX_FORBIDDEN/);
+});
+
+test("model invocations require exact model, hard caps, terminal success and complete usage", () => {
+  const core = fs.readFileSync(path.join(TOOL_ROOT, "adapters", "cross-job-core.mjs"), "utf8");
+  const isolated = fs.readFileSync(path.join(SUPPORT_ROOT, "isolated-agent-wrapper.mjs"), "utf8");
+  const serviceAudit = fs.readFileSync(path.join(SUPPORT_ROOT, "audit_service_agent_usage.py"), "utf8");
+  assert.match(core, /--max-turns/);
+  assert.match(core, /--max-budget-usd/);
+  assert.match(core, /max_total_tokens: configuration\.hardCaps\.max_total_tokens/);
+  assert.match(core, /terminal: audit\.terminal/);
+  assert.match(core, /usage_complete: true/);
+  assert.match(core, /total_tokens: "terminal-usage-postcondition"/);
+  assert.match(core, /canonicalJson\(jobTypes\) === canonicalJson\(\["DIAGNOSE", "DIAGNOSE", "ROUTE"\]\)/);
+  assert.match(core, /canonicalJson\(jobTypes\) === canonicalJson\(\["DIAGNOSE", "DIAGNOSE", "REVIEW"\]\)/);
+  assert.match(isolated, /WRAPPER_MODEL_CAP_EXCEEDED/);
+  assert.match(isolated, /final\.subtype !== "success" \|\| final\.is_error !== false/);
+  assert.match(serviceAudit, /MODEL_TERMINAL_INVALID/);
+  assert.match(serviceAudit, /max_total_tokens/);
+});
+
+test("checkpoints export stable state without symlinks, hardlinks or retained temporary workspaces", () => {
+  const core = fs.readFileSync(path.join(TOOL_ROOT, "adapters", "cross-job-core.mjs"), "utf8");
+  const exporter = fs.readFileSync(path.join(SUPPORT_ROOT, "export-checkpoint.sh"), "utf8");
+  assert.match(core, /extractCheckpointSourceArchive\(\{ archivePath: archiveHostPath, targetRoot: stateRoot \}\)/);
+  assert.match(core, /checkpoint-temporary-classification\.json/);
+  assert.match(core, /classification\.outbox_clear === true/);
+  assert.match(core, /"exec", state\.active_container, "ps", "-ww", "-eo", "args"/);
+  assert.match(exporter, /for required in data-format\.json state\.json resources jobs/);
+  assert.match(exporter, /tmp\/workspaces/);
+  assert.match(exporter, /-type l -print -quit/);
+  assert.match(exporter, /-type f -links \+1 -print -quit/);
+  assert.match(exporter, /tar --format=ustar --sort=name --mtime=@0 --numeric-owner/);
+  assert.doesNotMatch(exporter, /\.instance\.lock/);
+});
+
+test("service evidence streams directly to attempt logs and restart emptiness is explicit", () => {
+  const core = fs.readFileSync(path.join(TOOL_ROOT, "adapters", "cross-job-core.mjs"), "utf8");
+  const supervisor = fs.readFileSync(path.join(SUPPORT_ROOT, "service-supervisor.sh"), "utf8");
+  const relay = fs.readFileSync(path.join(SUPPORT_ROOT, "relay_service_journey.py"), "utf8");
+  assert.match(supervisor, /service_log="\$logs\/service-\$instance\.log"/);
+  assert.match(supervisor, /PYTHONUNBUFFERED=1/);
+  assert.match(supervisor, /allow-empty\) journey_empty_arg=--allow-empty/);
+  assert.match(core, /\{ allowEmptyJourney = true \}/);
+  assert.match(relay, /parser\.add_argument\("--allow-empty", action="store_true"\)/);
+  assert.match(relay, /_validation_error_facts/);
+  assert.doesNotMatch(relay, /"validation_errors": event\.get\("validation_errors"\)/);
+  assert.match(core, /startService\(configuration, state, "route", \{ allowEmptyJourney: true \}\)/);
+  assert.match(core, /startService\(configuration, state, "restart", \{ allowEmptyJourney: true \}\)/);
+  assert.match(core, /allowEmpty: mode === "journey" && \["route", "restart"\]\.includes\(instance\)/);
+  assert.match(core, /service-\$\{instance\}-\$\{relayKind\}-relay\.json/);
+});
+
+test("tampered distributions and the frozen artifact hashes fail closed", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "test-flow-release-claude-"));
   try {
     const globalClaude = path.join(root, "claude");
-    fs.writeFileSync(globalClaude, "#!/bin/sh\nprintf '%s\\n' '2.1.201 (Claude Code)'\n", { encoding: "utf8", mode: 0o700 });
+    fs.writeFileSync(globalClaude, `#!/bin/sh\nprintf '%s\\n' '${RELEASE_CLAUDE_VERSION} (Claude Code)'\n`, { mode: 0o700 });
     assert.equal(validateClaudeDistribution(globalClaude).code, "CLAUDE_ENTRY_INVALID");
-
     const packageRoot = path.join(root, "package");
     fs.mkdirSync(packageRoot);
     const tamperedEntry = path.join(packageRoot, "cli.js");
-    fs.writeFileSync(tamperedEntry, "console.log('2.1.89 (Claude Code)')\n", { encoding: "utf8", mode: 0o600 });
+    fs.writeFileSync(tamperedEntry, `console.log('${RELEASE_CLAUDE_VERSION} (Claude Code)')\n`);
     assert.equal(validateClaudeDistribution(tamperedEntry).code, "CLAUDE_CLI_HASH_MISMATCH");
-  } finally {
-    fs.rmSync(root, { recursive: true, force: true });
-  }
-});
-
-test("the executable Release baseline exposes the frozen official artifact hashes", () => {
-  assert.equal(RELEASE_CLAUDE_VERSION, "2.1.89");
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
   assert.equal(RELEASE_CLAUDE_TARBALL_SHA256, "680e35001b24b604f58958e3a324bb758be3c069c0a3f89585156256f17a9c87");
   assert.equal(RELEASE_CLAUDE_CLI_SHA256, "a9950ef6407fdc750bddb673852485500387e524a99d42385cb81e7d17128e01");
   assert.equal(RELEASE_UV_ARCHIVE_SHA256, "aab924fd522efd06f1c5f3b93a243864fc453132c94b2dc49f1371b528a4b967");

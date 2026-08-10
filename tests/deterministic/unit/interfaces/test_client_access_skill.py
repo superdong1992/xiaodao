@@ -176,7 +176,7 @@ def test_skill_document_names_tools_and_safety_invariants() -> None:
     assert "Derive it from the canonical lowercase filename suffix" in skill
     assert "run a local MCP server or proxy" in skill
     assert "does not install the `problem-locator` package" in skill
-    assert "Version 1.0.5 exposes only flat MCP input schemas" in skill
+    assert "Current Problem Locator exposes only flat MCP input schemas" in skill
     assert '"input_names": ["order_id"]' in skill
     assert '"input_values": ["order-1"]' in skill
     assert "`name` and `declared_size`" in skill
@@ -215,8 +215,8 @@ def test_skill_document_names_tools_and_safety_invariants() -> None:
     assert "七个公开 MCP input schema 全部扁平化" in readme
     assert "initial_user_fact_names/initial_user_fact_values" in readme
     assert "input_names/input_values" in readme
-    assert "PROBLEM_LOCATOR_NATIVE_CLIENT_LINUX_GATE" in readme
-    assert "PROBLEM_LOCATOR_REAL_HOST_FLAT_GATE" in readme
+    assert "Test Flow 的 built-in adapter" in readme
+    assert "Linux 服务端 DFX" in readme
     assert "executable hash" in readme
     assert "版本不在文档中写死" in readme
     assert "不得新增 `$ref/$defs`" in readme

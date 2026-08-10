@@ -125,7 +125,7 @@ def _start_service(env_file: Path, child_env: dict[str, str], expected_system: s
         creationflags = subprocess.CREATE_NEW_PROCESS_GROUP
     launcher = Path("/evidence/test_service_launcher.py")
     if not launcher.is_file():
-        launcher = ROOT / "tools/test-flow/harness/test_service_launcher.py"
+        launcher = ROOT / "tools/test-flow/runtime-support/test_service_launcher.py"
     assert launcher.is_file()
     return subprocess.Popen(
         [
@@ -146,7 +146,11 @@ def _start_service(env_file: Path, child_env: dict[str, str], expected_system: s
     )
 
 
-def _assert_service_ready(process: subprocess.Popen[str], port: int) -> None:
+def _assert_service_ready(
+    process: subprocess.Popen[str],
+    port: int,
+    expected_system: str,
+) -> None:
     live_status, live = _wait_for_json(
         process,
         f"http://127.0.0.1:{port}/live",
@@ -158,7 +162,14 @@ def _assert_service_ready(process: subprocess.Popen[str], port: int) -> None:
         process,
         f"http://127.0.0.1:{port}/ready",
     )
-    assert ready_status == 200
+    if ready_status != 200:
+        _stop_service(process, expected_system)
+        stdout, stderr = process.communicate(timeout=1)
+        raise AssertionError(
+            "service readiness failed; "
+            f"status={ready_status}; body={ready!r}; "
+            f"stdout={stdout[-4000:]!r}; stderr={stderr[-12000:]!r}"
+        )
     assert ready["ok"] is True and ready["error"] is None
     report = ReadinessReport.model_validate(ready["data"])
     assert report.ready is True
@@ -173,7 +184,7 @@ def _assert_service_ready(process: subprocess.Popen[str], port: int) -> None:
 
 def _run_native_startup_gate(expected_system: str, tmp_path: Path) -> None:
     assert platform.system() == expected_system
-    assert os.environ.get("S08_NATIVE_STARTUP_GATE") == expected_system.lower()
+    assert os.environ.get("TEST_FLOW_NATIVE_STARTUP_GATE") == expected_system.lower()
 
     skill_dir = Path(os.environ.get("SKILL_DIR", PRODUCTION_SKILL_FIXTURE))
     assert skill_dir.is_absolute()
@@ -203,7 +214,7 @@ def _run_native_startup_gate(expected_system: str, tmp_path: Path) -> None:
 
     first = _start_service(env_file, child_env, expected_system)
     try:
-        _assert_service_ready(first, port)
+        _assert_service_ready(first, port, expected_system)
     finally:
         _stop_service(first, expected_system)
 
@@ -249,7 +260,7 @@ def _run_native_startup_gate(expected_system: str, tmp_path: Path) -> None:
 
     second = _start_service(env_file, child_env, expected_system)
     try:
-        _assert_service_ready(second, port)
+        _assert_service_ready(second, port, expected_system)
     finally:
         _stop_service(second, expected_system)
 

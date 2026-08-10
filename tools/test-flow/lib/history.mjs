@@ -1,16 +1,16 @@
 import fs from "node:fs";
 import path from "node:path";
 import { readJson } from "./util.mjs";
-import { requiredEventFiles, scanPayload, validateEvidenceStreams, verifyVerdict } from "./evidence.mjs";
+import { allowedEmptyEventFiles, requiredEventFiles, scanPayload, validateEvidenceStreams, verifyVerdict } from "./evidence.mjs";
 
-export function loadHistory(evidenceRoot) {
+export function loadHistory(evidenceRoot, { knownSecrets = [] } = {}) {
   if (!fs.existsSync(evidenceRoot)) return [];
   const history = [];
   for (const entry of fs.readdirSync(evidenceRoot, { withFileTypes: true })) {
     if (!entry.isDirectory()) continue;
     const attemptRoot = path.join(evidenceRoot, entry.name);
     try {
-      const verification = verifyVerdict(attemptRoot);
+      const verification = verifyVerdict(attemptRoot, { knownSecrets });
       if (verification.status !== "PASS") continue;
       history.push({ attempt_root: attemptRoot, verdict: verification.verdict });
     } catch {
@@ -21,11 +21,12 @@ export function loadHistory(evidenceRoot) {
   return history;
 }
 
-export function lastSuccessfulDevCommit(history) {
+export function lastSuccessfulDevBaseCommit(history) {
   for (const entry of [...history].reverse()) {
     const verdict = entry.verdict;
-    if (verdict.track === "dev" && ["PASS", "PASS_WITH_WARNINGS"].includes(verdict.overall) && verdict.source?.head) {
-      return verdict.source.head;
+    const baseCommit = verdict.source?.base_commit ?? verdict.source?.head ?? null;
+    if (verdict.track === "dev" && ["PASS", "PASS_WITH_WARNINGS"].includes(verdict.overall) && baseCommit) {
+      return baseCommit;
     }
   }
   return null;
@@ -38,7 +39,7 @@ export function findReusableStages(history, desiredStageIdentities, { track, fre
     if (freshStageIds.has(stageId)) continue;
     for (const entry of [...history].reverse()) {
       const stage = (entry.verdict.stages ?? []).find((candidate) => candidate.id === stageId);
-      if (!stage || stage.status !== "PASS") continue;
+      if (!stage || stage.status !== "PASS" || stage.result_source !== "EXECUTED") continue;
       if (entry.verdict.evidence_reusable !== true) continue;
       if (stage.producer_identity !== desired.producer_identity || stage.proof_identity !== desired.proof_identity) continue;
       if (track === "release" && stage.kind === "real-journey") continue;
@@ -46,7 +47,7 @@ export function findReusableStages(history, desiredStageIdentities, { track, fre
       if (!audit) {
         try {
           const scan = scanPayload(path.join(entry.attempt_root, "payload"), { knownSecrets });
-          const streams = validateEvidenceStreams(entry.attempt_root, { requiredFiles: requiredEventFiles(entry.verdict.stages) });
+          const streams = validateEvidenceStreams(entry.attempt_root, { requiredFiles: requiredEventFiles(entry.verdict.gates), allowedEmptyFiles: allowedEmptyEventFiles(entry.verdict.gates) });
           audit = { status: scan.status === "PASS" && streams.status === "PASS" ? "PASS" : "FAIL", scan_digest: scan.scanned_root_digest };
         } catch {
           audit = { status: "FAIL", scan_digest: null };
@@ -93,19 +94,20 @@ export function repeatedFailureAdvice(history, fingerprint) {
   return { recommendation: "RUN", reason: null, previous_run_id: null };
 }
 
-export function performanceSamples(history, stageId, performanceIdentity) {
+export function performanceSamples(history, stageId, performanceIdentity, window = 10) {
   const samples = [];
   for (const entry of history) {
     const stage = (entry.verdict.stages ?? []).find((candidate) => candidate.id === stageId);
     if (
       stage?.status === "PASS"
+      && stage.result_source === "EXECUTED"
       && stage.performance_identity === performanceIdentity
       && Number.isFinite(stage.elapsed_seconds)
     ) {
       samples.push(stage.elapsed_seconds);
     }
   }
-  return samples.slice(-10);
+  return samples.slice(-window);
 }
 
 export function loadRunPlan(attemptRoot) {

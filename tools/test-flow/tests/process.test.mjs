@@ -83,3 +83,21 @@ test("raw log cap terminates the process and cannot produce PASS", async () => {
     assert.equal(fs.statSync(path.join(attempt, "payload", "logs", "cap.stdout.log")).size, 1024);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
+
+test("an unknown progress allowlist version fails before child execution", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "test-flow-process-version-"));
+  try {
+    const attempt = createAttempt({ evidenceRoot: root, runId: "run-version" });
+    await assert.rejects(() => runProcess({
+      repoRoot: root,
+      attemptRoot: attempt,
+      stage: stage("version"),
+      command: process.execPath,
+      args: ["-e", "process.exit(0)"],
+      cwd: root,
+      hardTimeoutSeconds: 2,
+      noProgressSeconds: null,
+      progressAllowlistVersion: "unknown-v1",
+    }), (error) => error.code === "PROCESS_PROGRESS_VERSION");
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});

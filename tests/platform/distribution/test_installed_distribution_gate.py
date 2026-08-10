@@ -28,6 +28,14 @@ ROOT = Path(__file__).resolve().parents[3]
 TAKEOVER_PRODUCT_HASH = (
     "eaa059e98e2fde9b923e0bce3e860422b2944aeabe939b57920793f70337b618"
 )
+TAKEOVER_SKILL = (
+    ROOT
+    / "tests"
+    / "fixtures"
+    / "components"
+    / "diagnosis-generator"
+    / "diagnose-service-takeover"
+)
 OFFICIAL_KEYS = {
     "BIND_HOST",
     "CLAUDE_COMMAND",
@@ -61,8 +69,8 @@ EXPECTED_MCP_TOOL_NAMES = [
 
 
 pytestmark = pytest.mark.skipif(
-    os.environ.get("S08_INSTALLED_DISTRIBUTION_GATE") != "1",
-    reason="requires explicit S08_INSTALLED_DISTRIBUTION_GATE=1 opt-in",
+    os.environ.get("TEST_FLOW_INSTALLED_DISTRIBUTION_GATE") != "1",
+    reason="requires explicit TEST_FLOW_INSTALLED_DISTRIBUTION_GATE=1 opt-in",
 )
 
 
@@ -164,11 +172,11 @@ def _required_executable(value: str, label: str) -> Path:
 
 
 def _discover_uv() -> Path:
-    configured = os.environ.get("S08_UV")
+    configured = os.environ.get("TEST_FLOW_UV")
     if configured:
-        return _required_executable(configured, "S08_UV")
+        return _required_executable(configured, "TEST_FLOW_UV")
     discovered = shutil.which("uv")
-    assert discovered is not None, "set S08_UV or put uv on PATH"
+    assert discovered is not None, "set TEST_FLOW_UV or put uv on PATH"
     return _required_executable(os.path.abspath(discovered), "uv")
 
 
@@ -177,9 +185,9 @@ def _discover_cpython312(
     outside_cwd: Path,
     environ: dict[str, str],
 ) -> Path:
-    configured = os.environ.get("S08_PYTHON_312")
+    configured = os.environ.get("TEST_FLOW_PYTHON_312")
     if configured:
-        candidate = _required_executable(configured, "S08_PYTHON_312")
+        candidate = _required_executable(configured, "TEST_FLOW_PYTHON_312")
     elif sys.version_info[:2] == (3, 12) and sys.implementation.name == "cpython":
         candidate = _required_executable(sys.executable, "current CPython")
     else:
@@ -218,18 +226,19 @@ def _discover_cpython312(
 
 def _uv_environment() -> dict[str, str]:
     environ = _outside_environment()
-    offline = os.environ.get("S08_UV_OFFLINE", "0")
-    assert offline in {"0", "1"}, "S08_UV_OFFLINE must be 0 or 1"
+    offline = os.environ.get("TEST_FLOW_UV_OFFLINE", "0")
+    assert offline in {"0", "1"}, "TEST_FLOW_UV_OFFLINE must be 0 or 1"
     if offline == "1":
         environ["UV_OFFLINE"] = "1"
     else:
         environ.pop("UV_OFFLINE", None)
     environ["UV_NO_PROGRESS"] = "1"
     environ["UV_PYTHON_DOWNLOADS"] = "never"
-    cache = os.environ.get("S08_UV_CACHE_DIR")
+    environ["UV_LINK_MODE"] = "copy"
+    cache = os.environ.get("TEST_FLOW_UV_CACHE_DIR")
     if cache:
         cache_path = Path(cache)
-        assert cache_path.is_absolute(), "S08_UV_CACHE_DIR must be absolute"
+        assert cache_path.is_absolute(), "TEST_FLOW_UV_CACHE_DIR must be absolute"
         environ["UV_CACHE_DIR"] = os.fspath(cache_path)
     return environ
 
@@ -374,6 +383,7 @@ def test_clean_installed_distribution_import_cli_and_server_gate(
     skill_dir, logparse_repo, logparse_config, logparse_python = (
         _real_asset_paths(outside_cwd, _outside_environment())
     )
+    assert TAKEOVER_SKILL.is_dir() and not TAKEOVER_SKILL.is_symlink()
 
     wheelhouse = tmp_path / "wheelhouse"
     _run_checked(
@@ -381,6 +391,7 @@ def test_clean_installed_distribution_import_cli_and_server_gate(
             os.fspath(uv),
             "build",
             "--wheel",
+            "--no-build-isolation",
             "--python",
             os.fspath(python312),
             "--out-dir",
@@ -430,20 +441,14 @@ def test_clean_installed_distribution_import_cli_and_server_gate(
     assert b"pytest==" not in requirement_bytes
     assert b"hatchling==" not in requirement_bytes
 
+    # Formal Release installs the product into the sealed image runtime; it
+    # does not reconstruct all third-party dependencies from an incidental uv
+    # cache. Clone that runtime, then exact-sync the exported production lock
+    # so this probe is isolated and contains no build or test dependencies.
+    sealed_runtime = python312.parent.parent
+    assert (sealed_runtime / "pyvenv.cfg").is_file()
     venv = tmp_path / "installed-venv"
-    _run_checked(
-        [
-            os.fspath(uv),
-            "venv",
-            "--no-project",
-            "--python",
-            os.fspath(python312),
-            os.fspath(venv),
-        ],
-        cwd=outside_cwd,
-        environ=uv_environ,
-        label="fresh CPython 3.12 virtual environment creation",
-    )
+    shutil.copytree(sealed_runtime, venv, symlinks=True)
     installed_python = _venv_python(venv)
     assert installed_python.is_file()
     _run_checked(
@@ -459,7 +464,7 @@ def test_clean_installed_distribution_import_cli_and_server_gate(
         ],
         cwd=outside_cwd,
         environ=uv_environ,
-        label="strict locked runtime dependency installation",
+        label="strict sealed-runtime production dependency sync",
     )
     _run_checked(
         [
@@ -548,7 +553,7 @@ def test_clean_installed_distribution_import_cli_and_server_gate(
             "-I",
             "-c",
             probe_code,
-            os.fspath(skill_dir / "diagnose-service-takeover"),
+            os.fspath(TAKEOVER_SKILL),
         ],
         cwd=outside_cwd,
         environ=installed_environ,
@@ -595,7 +600,7 @@ def test_clean_installed_distribution_import_cli_and_server_gate(
         creationflags = subprocess.CREATE_NEW_PROCESS_GROUP
     launcher = Path("/evidence/test_service_launcher.py")
     if not launcher.is_file():
-        launcher = ROOT / "tools/test-flow/harness/test_service_launcher.py"
+        launcher = ROOT / "tools/test-flow/runtime-support/test_service_launcher.py"
     assert launcher.is_file()
     process = subprocess.Popen(
         [
@@ -626,7 +631,7 @@ def test_clean_installed_distribution_import_cli_and_server_gate(
             process,
             f"http://127.0.0.1:{port}/ready",
         )
-        assert ready_status == 200
+        assert ready_status == 200, ready
         assert ready["ok"] is True and ready["error"] is None
         report = ReadinessReport.model_validate(ready["data"])
         assert report.ready is True and report.error is None

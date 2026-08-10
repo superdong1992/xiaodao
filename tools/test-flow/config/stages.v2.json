@@ -1,0 +1,197 @@
+{
+  "schema_version": 2,
+  "stages": [
+    {
+      "id": "framework.self-test",
+      "kind": "deterministic",
+      "depends_on": [],
+      "gates": ["framework.config", "framework.node-tests", "docs.current"],
+      "identity_set": "framework",
+      "timeout_seconds": 120,
+      "progress_class": "local",
+      "reuse": {"dev": "identity", "release": "never"},
+      "platforms": ["windows", "macos", "linux"]
+    },
+    {
+      "id": "repository.static",
+      "kind": "deterministic",
+      "depends_on": ["framework.self-test"],
+      "gates": ["repo.compileall", "repo.uv-lock", "repo.git-diff-check"],
+      "identity_set": "repository",
+      "timeout_seconds": 180,
+      "progress_class": "local",
+      "reuse": {"dev": "identity", "release": "identity"},
+      "platforms": ["windows", "macos", "linux"]
+    },
+    {
+      "id": "deterministic.affected",
+      "kind": "deterministic",
+      "depends_on": ["repository.static"],
+      "gates": ["det.affected"],
+      "identity_set": "deterministic",
+      "timeout_seconds": 120,
+      "progress_class": "local",
+      "reuse": {"dev": "never", "release": "never"},
+      "platforms": ["windows", "macos", "linux"]
+    },
+    {
+      "id": "deterministic.full",
+      "kind": "deterministic",
+      "depends_on": ["deterministic.affected"],
+      "gates": ["det.contracts", "det.unit", "det.integration", "det.journey.same-job"],
+      "identity_set": "deterministic",
+      "timeout_seconds": 600,
+      "progress_class": "local",
+      "reuse": {"dev": "identity", "release": "identity"},
+      "platforms": ["windows", "macos", "linux"]
+    },
+    {
+      "id": "platform.host-capability",
+      "kind": "capability",
+      "depends_on": ["deterministic.full"],
+      "gates": ["platform.host-adapter", "platform.compat-contract"],
+      "identity_set": "host-client",
+      "timeout_seconds": 300,
+      "progress_class": "external",
+      "reuse": {"dev": "identity", "release": "never"},
+      "platforms": ["windows", "macos", "linux"]
+    },
+    {
+      "id": "platform.server-linux-capability",
+      "kind": "capability",
+      "depends_on": ["deterministic.full"],
+      "gates": ["platform.server-linux-adapter"],
+      "identity_set": "linux-server",
+      "timeout_seconds": 600,
+      "progress_class": "external",
+      "reuse": {"dev": "identity", "release": "never"},
+      "platforms": ["windows", "macos", "linux"]
+    },
+    {
+      "id": "real.logparse",
+      "kind": "isolated-real",
+      "depends_on": ["deterministic.full"],
+      "gates": ["real.logparse"],
+      "identity_set": "real-logparse",
+      "timeout_seconds": 1200,
+      "progress_class": "real",
+      "reuse": {"dev": "identity", "release": "never"},
+      "platforms": ["windows", "macos", "linux"]
+    },
+    {
+      "id": "real.agent-backend",
+      "kind": "isolated-real",
+      "depends_on": ["deterministic.full"],
+      "gates": ["real.agent-backend"],
+      "identity_set": "real-agent",
+      "timeout_seconds": 1200,
+      "progress_class": "real",
+      "reuse": {"dev": "identity", "release": "never"},
+      "platforms": ["windows", "macos", "linux"]
+    },
+    {
+      "id": "real.route",
+      "kind": "isolated-real",
+      "depends_on": ["real.agent-backend"],
+      "gates": ["real.agent.route"],
+      "identity_set": "real-route",
+      "timeout_seconds": 1200,
+      "progress_class": "real",
+      "reuse": {"dev": "identity", "release": "never"},
+      "platforms": ["windows", "macos", "linux"]
+    },
+    {
+      "id": "real.diagnose",
+      "kind": "isolated-real",
+      "depends_on": ["real.agent-backend"],
+      "gates": ["real.agent.diagnose"],
+      "identity_set": "real-diagnose",
+      "timeout_seconds": 1200,
+      "progress_class": "real",
+      "reuse": {"dev": "identity", "release": "never"},
+      "platforms": ["windows", "macos", "linux"]
+    },
+    {
+      "id": "real.review",
+      "kind": "isolated-real",
+      "depends_on": ["real.agent-backend"],
+      "gates": ["real.agent.review"],
+      "identity_set": "real-review",
+      "timeout_seconds": 1200,
+      "progress_class": "real",
+      "reuse": {"dev": "identity", "release": "never"},
+      "platforms": ["windows", "macos", "linux"]
+    },
+    {
+      "id": "journey.cross-job.environment",
+      "kind": "real-journey",
+      "depends_on": ["platform.host-capability", "platform.server-linux-capability"],
+      "gates": ["journey.environment"],
+      "identity_set": "cross-job",
+      "timeout_seconds": 1200,
+      "progress_class": "real",
+      "reuse": {"dev": "never", "release": "never"},
+      "platforms": ["windows", "macos", "linux"]
+    },
+    {
+      "id": "journey.cross-job.route",
+      "kind": "real-journey",
+      "depends_on": ["journey.cross-job.environment"],
+      "gates": ["journey.route"],
+      "identity_set": "cross-job-route",
+      "timeout_seconds": 1200,
+      "progress_class": "real",
+      "reuse": {"dev": "checkpoint-chain", "release": "never"},
+      "checkpoint": {"next_stage": "journey.cross-job.upload"},
+      "platforms": ["windows", "macos", "linux"]
+    },
+    {
+      "id": "journey.cross-job.upload",
+      "kind": "real-journey",
+      "depends_on": ["journey.cross-job.route"],
+      "gates": ["journey.upload"],
+      "identity_set": "cross-job-logparse",
+      "timeout_seconds": 1200,
+      "progress_class": "real",
+      "reuse": {"dev": "checkpoint-chain", "release": "never"},
+      "checkpoint": {"next_stage": "journey.cross-job.diagnose"},
+      "platforms": ["windows", "macos", "linux"]
+    },
+    {
+      "id": "journey.cross-job.diagnose",
+      "kind": "real-journey",
+      "depends_on": ["journey.cross-job.upload"],
+      "gates": ["journey.diagnose"],
+      "identity_set": "cross-job-diagnose",
+      "timeout_seconds": 1200,
+      "progress_class": "real",
+      "reuse": {"dev": "checkpoint-chain", "release": "never"},
+      "checkpoint": null,
+      "platforms": ["windows", "macos", "linux"]
+    },
+    {
+      "id": "journey.cross-job.review",
+      "kind": "observation",
+      "depends_on": ["journey.cross-job.diagnose"],
+      "gates": ["journey.review-observation"],
+      "identity_set": "cross-job-review",
+      "timeout_seconds": 180,
+      "progress_class": "local",
+      "reuse": {"dev": "checkpoint-chain", "release": "never"},
+      "checkpoint": {"next_stage": "journey.cross-job.publish-restart"},
+      "platforms": ["windows", "macos", "linux"]
+    },
+    {
+      "id": "journey.cross-job.publish-restart",
+      "kind": "real-journey",
+      "depends_on": ["journey.cross-job.review"],
+      "gates": ["journey.publish-restart"],
+      "identity_set": "cross-job",
+      "timeout_seconds": 1200,
+      "progress_class": "real",
+      "reuse": {"dev": "checkpoint-chain", "release": "never"},
+      "checkpoint": {"next_stage": null},
+      "platforms": ["windows", "macos", "linux"]
+    }
+  ]
+}

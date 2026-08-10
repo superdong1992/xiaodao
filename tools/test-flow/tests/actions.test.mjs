@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { planAffectedSelection, probeLoopbackCapability } from "../lib/actions.mjs";
+import { evaluatePytestSummary, parseJUnitSummary, planAffectedSelection, probeLoopbackCapability } from "../lib/actions.mjs";
 
 function writeTest(file) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -56,4 +56,47 @@ test("loopback denial is classified as infrastructure BLOCKED before pytest", ()
     error_code: null,
     failure_code: "LOOPBACK_BIND_PERMISSION_DENIED",
   });
+});
+
+test("pytest cannot pass with zero executed tests or an all-skipped result", () => {
+  assert.deepEqual(evaluatePytestSummary({ executed: 0, passed: 0, skipped: 0 }), {
+    status: "FAIL",
+    failure_domain: "CONTRACT",
+    code: "PYTEST_NO_EXECUTED_TESTS",
+  });
+  assert.equal(evaluatePytestSummary({ executed: 0, passed: 0, skipped: 7 }).code, "PYTEST_NO_EXECUTED_TESTS");
+});
+
+test("pytest skip and minimum-pass policies are enforced from parsed JUnit", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "test-flow-junit-"));
+  try {
+    const junit = path.join(root, "pytest.xml");
+    fs.writeFileSync(junit, '<testsuites tests="4" failures="0" errors="0" skipped="1"></testsuites>\n');
+    const summary = parseJUnitSummary(junit);
+    assert.deepEqual(summary, { schema_version: 2, tests: 4, passed: 3, failures: 0, errors: 0, skipped: 1, executed: 3 });
+    assert.equal(evaluatePytestSummary(summary, { minPassed: 4, skipPolicy: "allow-explicit" }).code, "PYTEST_MIN_PASSED_NOT_MET");
+    assert.equal(evaluatePytestSummary(summary, { minPassed: 3, skipPolicy: "forbid" }).code, "PYTEST_SKIP_FORBIDDEN");
+    assert.equal(evaluatePytestSummary(summary, { minPassed: 3, skipPolicy: "allow-explicit" }).status, "PASS");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("pytest's testsuites wrapper aggregates inner suite counters", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "test-flow-junit-wrapper-"));
+  try {
+    const junit = path.join(root, "pytest.xml");
+    fs.writeFileSync(junit, '<testsuites name="pytest tests"><testsuite name="unit" tests="2" failures="0" errors="0" skipped="0"></testsuite><testsuite name="journey" tests="3" failures="0" errors="0" skipped="1"></testsuite></testsuites>\n');
+    assert.deepEqual(parseJUnitSummary(junit), {
+      schema_version: 2,
+      tests: 5,
+      passed: 4,
+      failures: 0,
+      errors: 0,
+      skipped: 1,
+      executed: 4,
+    });
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });

@@ -3,6 +3,7 @@ import path from "node:path";
 import {
   ensureDirectory,
   removeTreeWritable,
+  resolveCommand,
   resolvePythonTestRuntime,
   runSync,
   writeJsonSync,
@@ -15,6 +16,51 @@ import {
 
 function pythonRuntime(repoRoot) {
   return resolvePythonTestRuntime(repoRoot);
+}
+
+function gateExecutionId(stage, gateId) {
+  return `${stage.id}--${gateId}`;
+}
+
+function gateRoot(context, stage) {
+  return context.gateRoot ?? path.join(context.attemptRoot, "payload", "stages", stage.id);
+}
+
+function xmlInteger(attributes, name) {
+  const match = new RegExp(`(?:^|\\s)${name}="(\\d+)"`).exec(attributes);
+  return match ? Number(match[1]) : 0;
+}
+
+export function parseJUnitSummary(filePath) {
+  if (!fs.existsSync(filePath)) throw new Error("JUNIT_MISSING");
+  const text = fs.readFileSync(filePath, "utf8");
+  const aggregateRoot = /<testsuites\b([^>]*)>/.exec(text);
+  const suites = [...text.matchAll(/<testsuite\b([^>]*)>/g)].map((match) => match[1]);
+  const attributes = aggregateRoot && /(?:^|\s)tests="\d+"/.test(aggregateRoot[1])
+    ? [aggregateRoot[1]]
+    : suites;
+  if (attributes.length === 0) throw new Error("JUNIT_ROOT_INVALID");
+  const tests = attributes.reduce((total, value) => total + xmlInteger(value, "tests"), 0);
+  const failures = attributes.reduce((total, value) => total + xmlInteger(value, "failures"), 0);
+  const errors = attributes.reduce((total, value) => total + xmlInteger(value, "errors"), 0);
+  const skipped = attributes.reduce((total, value) => total + xmlInteger(value, "skipped"), 0);
+  if (![tests, failures, errors, skipped].every(Number.isSafeInteger) || failures + errors + skipped > tests) throw new Error("JUNIT_COUNTS_INVALID");
+  return {
+    schema_version: 2,
+    tests,
+    passed: tests - failures - errors - skipped,
+    failures,
+    errors,
+    skipped,
+    executed: tests - skipped,
+  };
+}
+
+export function evaluatePytestSummary(summary, { minPassed = 1, skipPolicy = "forbid-all-skipped" } = {}) {
+  if (summary.executed === 0) return { status: "FAIL", failure_domain: "CONTRACT", code: "PYTEST_NO_EXECUTED_TESTS" };
+  if (summary.passed < minPassed) return { status: "FAIL", failure_domain: "CONTRACT", code: "PYTEST_MIN_PASSED_NOT_MET" };
+  if (skipPolicy === "forbid" && summary.skipped > 0) return { status: "FAIL", failure_domain: "CONTRACT", code: "PYTEST_SKIP_FORBIDDEN" };
+  return { status: "PASS", failure_domain: null, code: null };
 }
 
 function listTestFiles(root) {
@@ -106,16 +152,31 @@ export function probeLoopbackCapability(runtime, repoRoot, environment = process
   };
 }
 
-async function pytestAction(context, stage, selectors, { extra = [], env = {}, real = false } = {}) {
+async function pytestAction(context, stage, selectors, {
+  extra = [],
+  env = {},
+  real = false,
+  minPassed = 1,
+  skipPolicy = "forbid-all-skipped",
+  selection = null,
+} = {}) {
   const runtime = pythonRuntime(context.repoRoot);
   if (!runtime) {
     return { status: "BLOCKED", failure_domain: "INFRA", code: "PYTHON_312_TEST_RUNTIME_MISSING", elapsed_seconds: 0 };
   }
-  if (selectors.length === 0) return { status: "NOT_REQUIRED", failure_domain: null, elapsed_seconds: 0 };
-  const scratch = path.join(context.attemptRoot, "scratch", stage.id);
-  const stageEvidence = path.join(context.attemptRoot, "payload", "stages", stage.id);
-  ensureDirectory(scratch);
+  const expectedPython = context.runtimeProfile?.version ?? context.runtimeProfile?.python ?? null;
+  if (typeof expectedPython !== "string" || !runtime.details.python_version.startsWith(`${expectedPython.split(".").slice(0, 2).join(".")}.`)) {
+    return { status: "BLOCKED", failure_domain: "INFRA", code: "PYTHON_RUNTIME_PROFILE_MISMATCH", elapsed_seconds: 0 };
+  }
+  const stageEvidence = gateRoot(context, stage);
   ensureDirectory(stageEvidence);
+  if (selectors.length === 0) {
+    const summary = { schema_version: 2, tests: 0, passed: 0, failures: 0, errors: 0, skipped: 0, executed: 0, not_required: true };
+    writeJsonSync(path.join(stageEvidence, "pytest-summary.json"), summary);
+    return { status: "NOT_REQUIRED", failure_domain: null, code: "AFFECTED_SCOPE_EMPTY", elapsed_seconds: 0, pytest: summary, selection };
+  }
+  const scratch = path.join(context.attemptRoot, "scratch", gateExecutionId(stage, context.gateId ?? stage.id));
+  ensureDirectory(scratch);
   const loopback = probeLoopbackCapability(runtime, context.repoRoot);
   writeJsonSync(path.join(stageEvidence, "loopback-capability.json"), loopback);
   if (loopback.status !== "PASS") {
@@ -153,16 +214,137 @@ async function pytestAction(context, stage, selectors, { extra = [], env = {}, r
     noProgressSeconds: real ? context.policies.real_no_progress_seconds : null,
     rawLogLimitBytes: context.policies.raw_log_file_limit_bytes,
     eventWriter: context.eventWriter,
+    executionId: gateExecutionId(stage, context.gateId ?? stage.id),
+    pollMilliseconds: context.policies.poll_milliseconds,
+    progressAllowlistVersion: context.policies.progress_allowlist_version,
   });
   removeTreeWritable(scratch, context.attemptRoot);
   if (result.status === "ERROR") return { ...result, failure_domain: "HARNESS", code: result.termination?.trigger ?? "PROCESS_EVIDENCE_ERROR" };
   if (result.status === "INCONCLUSIVE") return { ...result, failure_domain: "EXTERNAL", code: result.termination.trigger };
   if (result.status !== "PASS") return { ...result, failure_domain: real ? "CONTRACT" : "PRODUCT", code: "PYTEST_FAILED" };
-  return { ...result, failure_domain: null };
+  let summary;
+  try {
+    summary = parseJUnitSummary(path.join(stageEvidence, "pytest.xml"));
+    writeJsonSync(path.join(stageEvidence, "pytest-summary.json"), summary);
+  } catch (error) {
+    return { ...result, status: "ERROR", failure_domain: "HARNESS", code: error.message, pytest: null };
+  }
+  const evaluation = evaluatePytestSummary(summary, { minPassed, skipPolicy });
+  return { ...result, ...evaluation, pytest: summary, selection };
 }
 
 function quoteShell(value) {
   return `'${String(value).replaceAll("'", `'"'"'`)}'`;
+}
+
+function nodeTestFiles(repoRoot, gate) {
+  if (gate.test_files) return gate.test_files.map((entry) => path.join(repoRoot, entry));
+  const directory = path.join(repoRoot, path.dirname(gate.test_glob));
+  const excluded = new Set((gate.exclude ?? []).map((entry) => path.resolve(repoRoot, entry)));
+  return fs.readdirSync(directory)
+    .filter((name) => name.endsWith(".test.mjs"))
+    .map((name) => path.join(directory, name))
+    .filter((filePath) => !excluded.has(path.resolve(filePath)))
+    .sort();
+}
+
+function parseTapSummary(filePath) {
+  const text = fs.readFileSync(filePath, "utf8");
+  const number = (label) => {
+    const match = new RegExp(`^# ${label} (\\d+)$`, "m").exec(text);
+    return match ? Number(match[1]) : null;
+  };
+  const tests = number("tests");
+  const passed = number("pass");
+  const failed = number("fail");
+  const skipped = number("skipped") ?? 0;
+  if (![tests, passed, failed, skipped].every(Number.isSafeInteger)) throw new Error("NODE_TEST_TAP_SUMMARY_INVALID");
+  return { schema_version: 2, tests, passed, failed, skipped };
+}
+
+async function nodeTestAction(context, stage, gate) {
+  const files = nodeTestFiles(context.repoRoot, gate);
+  if (files.length === 0) return { status: "ERROR", failure_domain: "HARNESS", code: "NODE_TEST_SELECTION_EMPTY", elapsed_seconds: 0 };
+  const result = await runProcess({
+    repoRoot: context.repoRoot,
+    attemptRoot: context.attemptRoot,
+    stage,
+    command: process.execPath,
+    args: ["--test", "--test-reporter=tap", ...files],
+    cwd: context.repoRoot,
+    hardTimeoutSeconds: stage.timeout_seconds,
+    noProgressSeconds: null,
+    rawLogLimitBytes: context.policies.raw_log_file_limit_bytes,
+    eventWriter: context.eventWriter,
+    executionId: gateExecutionId(stage, context.gateId),
+    pollMilliseconds: context.policies.poll_milliseconds,
+    progressAllowlistVersion: context.policies.progress_allowlist_version,
+  });
+  const outputPath = path.join(context.attemptRoot, result.stdout_path);
+  const tapPath = path.join(gateRoot(context, stage), "node-test.tap");
+  if (fs.existsSync(outputPath)) fs.copyFileSync(outputPath, tapPath, fs.constants.COPYFILE_EXCL);
+  if (result.status !== "PASS") return { ...result, failure_domain: "HARNESS", code: "NODE_TEST_FAILED" };
+  let summary;
+  try { summary = parseTapSummary(tapPath); } catch (error) {
+    return { ...result, status: "ERROR", failure_domain: "HARNESS", code: error.message };
+  }
+  if (summary.passed < gate.min_passed || summary.failed > 0) return { ...result, status: "FAIL", failure_domain: "HARNESS", code: "NODE_TEST_MIN_PASSED_NOT_MET", node_test: summary };
+  return { ...result, failure_domain: null, node_test: summary };
+}
+
+async function repositoryCheck(context, stage, gate) {
+  let command;
+  let args;
+  const scratch = path.join(context.attemptRoot, "scratch", gateExecutionId(stage, context.gateId));
+  ensureDirectory(scratch);
+  if (gate.check === "python-compileall") {
+    const runtime = pythonRuntime(context.repoRoot);
+    if (!runtime) return { status: "BLOCKED", failure_domain: "INFRA", code: "PYTHON_312_TEST_RUNTIME_MISSING", elapsed_seconds: 0 };
+    command = runtime.command;
+    args = [...runtime.interpreterPrefix, "-m", "compileall", "-q", ...gate.paths];
+  } else if (gate.check === "uv-lock") {
+    command = resolveCommand(process.env.UV ?? "uv");
+    if (!command) return { status: "BLOCKED", failure_domain: "INFRA", code: "UV_REQUIRED", elapsed_seconds: 0 };
+    args = ["lock", "--check", "--offline"];
+  } else if (gate.check === "git-diff-check") {
+    command = resolveCommand("git");
+    if (!command) return { status: "BLOCKED", failure_domain: "INFRA", code: "GIT_REQUIRED", elapsed_seconds: 0 };
+    args = ["diff", "--check", "HEAD"];
+  } else {
+    return { status: "ERROR", failure_domain: "HARNESS", code: "REPOSITORY_CHECK_UNSUPPORTED", elapsed_seconds: 0 };
+  }
+  const result = await runProcess({
+    repoRoot: gate.check === "git-diff-check" ? context.sourceRepoRoot : context.repoRoot,
+    attemptRoot: context.attemptRoot,
+    stage,
+    command,
+    args,
+    cwd: gate.check === "git-diff-check" ? context.sourceRepoRoot : context.repoRoot,
+    env: {
+      PYTHONNOUSERSITE: "1",
+      PYTHONPYCACHEPREFIX: path.join(scratch, "pycache"),
+    },
+    hardTimeoutSeconds: stage.timeout_seconds,
+    noProgressSeconds: null,
+    rawLogLimitBytes: context.policies.raw_log_file_limit_bytes,
+    eventWriter: context.eventWriter,
+    executionId: gateExecutionId(stage, context.gateId),
+    pollMilliseconds: context.policies.poll_milliseconds,
+    progressAllowlistVersion: context.policies.progress_allowlist_version,
+  });
+  removeTreeWritable(scratch, context.attemptRoot);
+  const receipt = {
+    schema_version: 2,
+    check: gate.check,
+    status: result.status,
+    exit_code: result.exit_code,
+    elapsed_seconds: result.elapsed_seconds,
+    stdout_path: result.stdout_path,
+    stderr_path: result.stderr_path,
+  };
+  writeJsonSync(path.join(gateRoot(context, stage), "repository-check.json"), receipt);
+  if (result.status !== "PASS") return { ...result, failure_domain: gate.check === "git-diff-check" ? "CONTRACT" : "PRODUCT", code: `REPOSITORY_${gate.check.toUpperCase().replaceAll("-", "_")}_FAILED` };
+  return { ...result, failure_domain: null, repository_check: receipt };
 }
 
 function preparedClaudeRuntime(context) {
@@ -189,11 +371,30 @@ function preparedClaudeRuntime(context) {
 function agentCommand(context) {
   const runtime = preparedClaudeRuntime(context);
   if (!runtime) return null;
-  return `${quoteShell(process.execPath)} ${quoteShell(runtime.entry)} -p --no-session-persistence --dangerously-skip-permissions --setting-sources user --settings ${quoteShell(runtime.settings)} --tools Read,Write`;
+  const caps = context.planStage.hard_caps;
+  if (!caps?.max_turns || !caps?.max_budget_usd || !caps?.hard_timeout_seconds) return null;
+  const usageRoot = path.join(context.gateRoot, "model-usage");
+  ensureDirectory(usageRoot);
+  return `${quoteShell(process.execPath)} ${quoteShell(path.join(context.repoRoot, "tools", "test-flow", "runtime-support", "isolated-agent-wrapper.mjs"))} --claude-entry ${quoteShell(runtime.entry)} --settings ${quoteShell(runtime.settings)} --model ${quoteShell(context.runtimeProfile.claude.model)} --usage-root ${quoteShell(usageRoot)} --max-turns ${caps.max_turns} --max-total-tokens ${caps.max_total_tokens} --max-budget-usd ${caps.max_budget_usd} --hard-timeout-seconds ${caps.hard_timeout_seconds}`;
+}
+
+function collectIsolatedModelUsage(context) {
+  const usageRoot = path.join(context.gateRoot, "model-usage");
+  const files = fs.existsSync(usageRoot) ? fs.readdirSync(usageRoot).filter((name) => name.endsWith(".json")).sort() : [];
+  const invocations = files.map((name) => JSON.parse(fs.readFileSync(path.join(usageRoot, name), "utf8")));
+  if (invocations.some((invocation) => invocation?.schema_version !== 2 || invocation.class !== "isolated-agent" || invocation.usage_complete !== true)) throw new Error("ISOLATED_MODEL_USAGE_RECEIPT_INVALID");
+  const usage = invocations.reduce((total, invocation) => ({
+    input_tokens: total.input_tokens + Number(invocation.usage.input_tokens),
+    output_tokens: total.output_tokens + Number(invocation.usage.output_tokens),
+    cost_usd: Math.round((total.cost_usd + Number(invocation.usage.cost_usd)) * 1_000_000) / 1_000_000,
+  }), { input_tokens: 0, output_tokens: 0, cost_usd: 0 });
+  const summary = { schema_version: 2, status: "PASS", invocations, usage };
+  writeJsonSync(path.join(context.gateRoot, "model-usage.json"), summary);
+  return summary;
 }
 
 async function hostCapability(context, stage) {
-  const outputRoot = path.join(context.attemptRoot, "payload", "stages", stage.id);
+  const outputRoot = gateRoot(context, stage);
   ensureDirectory(outputRoot);
   const result = await runProcess({
     repoRoot: context.repoRoot,
@@ -201,24 +402,35 @@ async function hostCapability(context, stage) {
     stage,
     command: process.execPath,
     args: [
-      path.join(context.repoRoot, "tools", "test-flow", "adapters", "host-capability.mjs"),
-      "--repo-root", context.repoRoot,
+      path.join(context.sourceSnapshotRoot, "tools", "test-flow", "adapters", "host-capability.mjs"),
+      "--repo-root", context.sourceSnapshotRoot,
       "--output-root", outputRoot,
       "--claude-entry", context.options.claudeEntry,
+      "--runtime-profile-digest", context.plan.runtime_profile_digest,
     ],
     cwd: context.repoRoot,
     hardTimeoutSeconds: stage.timeout_seconds,
     noProgressSeconds: null,
     rawLogLimitBytes: context.policies.raw_log_file_limit_bytes,
     eventWriter: context.eventWriter,
+    executionId: gateExecutionId(stage, context.gateId),
+    pollMilliseconds: context.policies.poll_milliseconds,
+    progressAllowlistVersion: context.policies.progress_allowlist_version,
   });
   if (result.status === "ERROR") return { ...result, failure_domain: "HARNESS", code: result.termination?.trigger ?? "HOST_EVIDENCE_ERROR" };
   if (result.status !== "PASS") return { ...result, status: result.status === "INCONCLUSIVE" ? "INCONCLUSIVE" : "BLOCKED", failure_domain: "EXTERNAL", code: "HOST_CAPABILITY_FAILED" };
-  return result;
+  let receipt;
+  try { receipt = JSON.parse(fs.readFileSync(path.join(outputRoot, "host-capability-result.json"), "utf8")); } catch {
+    return { ...result, status: "ERROR", failure_domain: "HARNESS", code: "HOST_CAPABILITY_RECEIPT_INVALID" };
+  }
+  if (receipt?.schema_version !== 2 || receipt.status !== "PASS" || receipt.runtime_profile_digest !== context.plan.runtime_profile_digest || receipt.client !== context.client || receipt.flat_schema !== true || receipt.flat_call !== true || receipt.client_dfx_absent !== true) {
+    return { ...result, status: "ERROR", failure_domain: "HARNESS", code: "HOST_CAPABILITY_RECEIPT_INVALID" };
+  }
+  return { ...result, adapter_receipt: receipt };
 }
 
-async function serverLinuxCapability(context, stage) {
-  const outputRoot = path.join(context.attemptRoot, "payload", "stages", stage.id);
+async function serverLinuxCapability(context, stage, gate) {
+  const outputRoot = gateRoot(context, stage);
   ensureDirectory(outputRoot);
   const runId = path.basename(context.attemptRoot);
   const containerName = `pltf-cap-${runId.slice(-17)}`.replace(/[^a-zA-Z0-9_.-]/g, "-");
@@ -230,10 +442,18 @@ async function serverLinuxCapability(context, stage) {
     stage,
     command: process.execPath,
     args: [
-      path.join(context.repoRoot, "tools", "test-flow", "adapters", "server-linux-capability.mjs"),
+      path.join(context.sourceSnapshotRoot, "tools", "test-flow", "adapters", "server-linux-capability.mjs"),
       "--output-root", outputRoot,
-      "--docker-context", context.options.dockerContext,
+      "--docker-context", context.options.dockerContext ?? "default",
       "--image", RELEASE_BASE_IMAGE,
+      "--repo-root", context.sourceSnapshotRoot,
+      "--logparse-source", context.options.logparseSource,
+      "--runtime-profile-digest", context.plan.runtime_profile_digest,
+      "--model", context.runtimeProfile.claude.model,
+      "--service-agent-max-turns", context.runtimeProfile.real_caps.service_agent.max_turns,
+      "--service-agent-max-total-tokens", context.runtimeProfile.real_caps.service_agent.max_total_tokens,
+      "--service-agent-max-budget-usd", context.runtimeProfile.real_caps.service_agent.max_budget_usd,
+      "--service-agent-hard-timeout-seconds", context.runtimeProfile.real_caps.service_agent.hard_timeout_seconds,
       "--container-name", containerName,
       "--resource-label", resourceLabel,
     ],
@@ -242,79 +462,65 @@ async function serverLinuxCapability(context, stage) {
     noProgressSeconds: context.policies.real_no_progress_seconds,
     rawLogLimitBytes: context.policies.raw_log_file_limit_bytes,
     eventWriter: context.eventWriter,
+    executionId: gateExecutionId(stage, context.gateId),
+    pollMilliseconds: context.policies.poll_milliseconds,
+    progressAllowlistVersion: context.policies.progress_allowlist_version,
   });
   if (result.status === "ERROR") return { ...result, failure_domain: "HARNESS", code: result.termination?.trigger ?? "SERVER_EVIDENCE_ERROR" };
   if (result.exit_code === 2) return { ...result, status: "BLOCKED", failure_domain: "INFRA", code: "SERVER_MODEL_CAPABILITY_UNAVAILABLE" };
   if (result.status !== "PASS") return { ...result, failure_domain: "EXTERNAL", code: "SERVER_MODEL_CAPABILITY_FAILED" };
-  return result;
-}
-
-async function isolatedAgent(context, stage, selector, switchName) {
-  const command = agentCommand(context);
-  if (!command) return { status: "BLOCKED", failure_domain: "INFRA", code: "CLAUDE_COMMAND_MISSING", elapsed_seconds: 0 };
-  const runtime = preparedClaudeRuntime(context);
-  return pytestAction(context, stage, [selector], {
-    real: true,
-    env: { ...runtime.environment, [switchName]: "1", S08_REAL_AGENT_COMMAND: command, S08_REAL_ROUTE_AGENT_COMMAND: command, S08_REAL_DIAGNOSE_AGENT_COMMAND: command, S08_REAL_REVIEW_AGENT_COMMAND: command },
-  });
-}
-
-async function realDiagnose(context, stage) {
-  const command = agentCommand(context);
-  if (!command) return { status: "BLOCKED", failure_domain: "INFRA", code: "CLAUDE_COMMAND_MISSING", elapsed_seconds: 0 };
-  const runtime = preparedClaudeRuntime(context);
-  const skillPath = path.join(context.repoRoot, ".claude", "skills", "diagnose-service-takeover");
-  if (!fs.existsSync(skillPath)) return { status: "BLOCKED", failure_domain: "INFRA", code: "DIAGNOSE_SKILL_MISSING", elapsed_seconds: 0 };
-  return pytestAction(context, stage, [
-    "tests/real/agent/test_real_diagnose_agent_contract_gate.py::test_real_agent_v3_requirement_isolation_gate",
-    "tests/real/agent/test_real_diagnose_agent_contract_gate.py::test_real_first_log_diagnose_agent_produces_valid_continuation",
-  ], {
-    real: true,
-    env: {
-      ...runtime.environment,
-      S08_REAL_DIAGNOSE_AGENT_V3_MATRIX_GATE: "1",
-      S08_REAL_FIRST_LOG_AGENT_GATE: "1",
-      S08_REAL_DIAGNOSE_AGENT_COMMAND: command,
-      S08_REAL_DIAGNOSE_SKILL_PATH: skillPath,
-      LOGPARSE_REPO: context.options.logparseSource ?? "",
-      LOGPARSE_CONFIG_PATH: process.env.TEST_FLOW_LOGPARSE_CONFIG ?? "",
-      LOGPARSE_PYTHON: process.env.TEST_FLOW_LOGPARSE_PYTHON ?? "",
-    },
-  });
-}
-
-async function realLogparse(context, stage) {
-  const source = context.options.logparseSource;
-  const python = process.env.TEST_FLOW_LOGPARSE_PYTHON;
-  if (!source || !python) return { status: "BLOCKED", failure_domain: "INFRA", code: "LOGPARSE_RUNTIME_MISSING", elapsed_seconds: 0 };
-  return pytestAction(context, stage, ["tests/real/logparse/test_logparse_real_e2e.py"], {
-    real: true,
-    extra: ["--run-real-logparse"],
-    env: { LOGPARSE_REPO: source, LOGPARSE_CONFIG_PATH: process.env.TEST_FLOW_LOGPARSE_CONFIG ?? path.join(source, "config.yaml"), LOGPARSE_PYTHON: python },
-  });
+  let receipt;
+  let junit;
+  try {
+    receipt = JSON.parse(fs.readFileSync(path.join(outputRoot, "server-linux-capability-result.json"), "utf8"));
+    junit = parseJUnitSummary(path.join(outputRoot, "platform-server.xml"));
+  } catch {
+    return { ...result, status: "ERROR", failure_domain: "HARNESS", code: "SERVER_CAPABILITY_RECEIPT_INVALID" };
+  }
+  const claims = gate.required_claims ?? [];
+  if (receipt?.schema_version !== 2 || receipt.status !== "PASS" || receipt.runtime_profile_digest !== context.plan.runtime_profile_digest || claims.some((claim) => receipt.claims?.[claim] !== "PASS") || Object.keys(receipt.claims ?? {}).some((claim) => !claims.includes(claim)) || junit.executed !== 2 || junit.passed !== 2 || junit.skipped !== 0) {
+    return { ...result, status: "ERROR", failure_domain: "HARNESS", code: "SERVER_CAPABILITY_RECEIPT_INVALID" };
+  }
+  return { ...result, adapter_receipt: receipt, pytest: junit };
 }
 
 async function crossJob(context, stage) {
   const adapter = context.options.crossJobAdapter;
   if (!adapter) return { status: "BLOCKED", failure_domain: "INFRA", code: "CROSS_JOB_ADAPTER_MISSING", elapsed_seconds: 0 };
   if (!path.isAbsolute(adapter) || !fs.existsSync(adapter)) return { status: "BLOCKED", failure_domain: "INFRA", code: "CROSS_JOB_ADAPTER_INVALID", elapsed_seconds: 0 };
-  const adapterArguments = [
-    "--stage", stage.id,
-    "--repo-root", context.repoRoot,
-    "--attempt-root", context.attemptRoot,
-    "--client", context.client,
-    "--track", context.track,
-    "--source-commit", context.sourceHead,
-    "--claude-entry", context.options.claudeEntry,
-    "--claude-settings", context.options.claudeSettings,
-    "--docker-context", context.options.dockerContext,
-    "--cache-root", context.options.cacheRoot ?? path.join(context.repoRoot, ".tmp", "test-flow-cache"),
-    "--logparse-source", context.options.logparseSource,
-    "--mcp-source", context.options.mcpSource,
-    "--base-image", RELEASE_BASE_IMAGE,
-    "--resource-registry", context.resources.filePath,
-    "--resource-label", `problem-locator.test-flow.run=${path.basename(context.attemptRoot)}`,
-  ];
+  const adapterArguments = [];
+  const add = (name, value) => {
+    if (value !== undefined && value !== null && value !== "") adapterArguments.push(name, String(value));
+  };
+  add("--stage", stage.id);
+  add("--repo-root", context.sourceSnapshotRoot);
+  add("--attempt-root", context.attemptRoot);
+  add("--client", context.client);
+  add("--track", context.track);
+  add("--source-snapshot-digest", context.sourceSnapshotDigest);
+  add("--source-snapshot-manifest", context.sourceSnapshotManifestPath);
+  add("--claude-entry", context.options.claudeEntry);
+  add("--claude-settings", context.options.claudeSettings);
+  add("--docker-context", context.options.dockerContext ?? "default");
+  add("--cache-root", context.options.cacheRoot ?? path.join(context.repoRoot, ".tmp", "test-flow-cache"));
+  add("--logparse-source", context.options.logparseSource);
+  add("--mcp-source", context.options.mcpSource);
+  add("--base-image", RELEASE_BASE_IMAGE);
+  add("--runtime-profile-digest", context.plan.runtime_profile_digest);
+  add("--gate-id", context.gateId);
+  add("--resource-registry", context.resources.filePath);
+  add("--resource-label", `problem-locator.test-flow.run=${path.basename(context.attemptRoot)}`);
+  if (context.planStage.hard_caps) {
+    add("--max-turns", context.planStage.hard_caps.max_turns);
+    add("--max-total-tokens", context.planStage.hard_caps.max_total_tokens);
+    add("--max-budget-usd", context.planStage.hard_caps.max_budget_usd);
+    add("--hard-timeout-seconds", context.planStage.hard_caps.hard_timeout_seconds);
+  }
+  const serviceCaps = context.runtimeProfile.real_caps.service_agent;
+  add("--service-agent-max-turns", serviceCaps.max_turns);
+  add("--service-agent-max-total-tokens", serviceCaps.max_total_tokens);
+  add("--service-agent-max-budget-usd", serviceCaps.max_budget_usd);
+  add("--service-agent-hard-timeout-seconds", serviceCaps.hard_timeout_seconds);
   if (stage.id === "journey.cross-job.environment") adapterArguments.push("--fresh-data-root");
   if (context.restoredCheckpoint) {
     adapterArguments.push(
@@ -323,6 +529,10 @@ async function crossJob(context, stage) {
       "--restored-checkpoint-id", context.restoredCheckpoint.checkpoint_id,
     );
   }
+  const stageIndex = context.plan.stages.findIndex((candidate) => candidate.id === stage.id);
+  const laterExecutedJourney = context.plan.stages.slice(stageIndex + 1).some((candidate) =>
+    candidate.decision === "RUN" && candidate.id.startsWith("journey.cross-job."));
+  if (!laterExecutedJourney) adapterArguments.push("--terminal-after-stage");
   const checkpointStage = stage.id === "journey.cross-job.diagnose" ? "journey.cross-job.review" : stage.id;
   if (["journey.cross-job.route", "journey.cross-job.upload", "journey.cross-job.review", "journey.cross-job.publish-restart"].includes(checkpointStage)) {
     adapterArguments.push(
@@ -342,6 +552,9 @@ async function crossJob(context, stage) {
     noProgressSeconds: context.policies.real_no_progress_seconds,
     rawLogLimitBytes: context.policies.raw_log_file_limit_bytes,
     eventWriter: context.eventWriter,
+    executionId: gateExecutionId(stage, context.gateId),
+    pollMilliseconds: context.policies.poll_milliseconds,
+    progressAllowlistVersion: context.policies.progress_allowlist_version,
   });
   const receiptPath = path.join(context.attemptRoot, "payload", "stages", stage.id, "adapter-result.json");
   if (!fs.existsSync(receiptPath)) {
@@ -354,7 +567,7 @@ async function crossJob(context, stage) {
     return { ...result, status: "ERROR", failure_domain: "HARNESS", code: "CROSS_JOB_RECEIPT_INVALID" };
   }
   const receiptStatuses = new Set(["PASS", "FAIL", "INCONCLUSIVE", "BLOCKED", "ERROR"]);
-  if (receipt.schema_version !== 1 || !receiptStatuses.has(receipt.status) || receipt.stage_id !== stage.id) {
+  if (receipt.schema_version !== 2 || !receiptStatuses.has(receipt.status) || receipt.stage_id !== stage.id || receipt.gate_id !== context.gateId || receipt.runtime_profile_digest !== context.plan.runtime_profile_digest) {
     return { ...result, status: "ERROR", failure_domain: "HARNESS", code: "CROSS_JOB_RECEIPT_INVALID" };
   }
   if (result.status === "ERROR") return { ...result, failure_domain: "HARNESS", code: result.termination?.trigger ?? "CROSS_JOB_EVIDENCE_ERROR" };
@@ -366,6 +579,9 @@ async function crossJob(context, stage) {
       failure_domain: receipt.failure_domain ?? "HARNESS",
       code: receipt.code ?? "CROSS_JOB_STAGE_FAILED",
       usage: receipt.usage ?? result.usage,
+      usage_complete: receipt.usage_complete === true,
+      effective_caps: receipt.effective_caps ?? null,
+      invocations: receipt.invocations ?? [],
       adapter_receipt: {
         stage_id: receipt.stage_id,
         client_tool_calls: receipt.client_tool_calls ?? 0,
@@ -378,6 +594,9 @@ async function crossJob(context, stage) {
   return {
     ...result,
     usage: receipt.usage ?? result.usage,
+    usage_complete: receipt.usage_complete === true,
+    effective_caps: receipt.effective_caps ?? null,
+    invocations: receipt.invocations ?? [],
     fresh_admission: receipt.fresh_admission ?? null,
     adapter_receipt: {
       stage_id: receipt.stage_id,
@@ -389,127 +608,139 @@ async function crossJob(context, stage) {
   };
 }
 
-async function rolloutParity(context, stage) {
-  const spec = context.options.rolloutParitySpec;
-  if (!spec) return { status: "BLOCKED", failure_domain: "INFRA", code: "ROLLOUT_PARITY_SPEC_REQUIRED", elapsed_seconds: 0 };
-  if (!path.isAbsolute(spec) || !fs.existsSync(spec)) {
-    return { status: "BLOCKED", failure_domain: "INFRA", code: "ROLLOUT_PARITY_SPEC_INVALID", elapsed_seconds: 0 };
-  }
-  const outputRoot = path.join(context.attemptRoot, "payload", "stages", stage.id);
-  ensureDirectory(outputRoot);
-  const result = await runProcess({
-    repoRoot: context.repoRoot,
-    attemptRoot: context.attemptRoot,
-    stage,
-    command: process.execPath,
-    args: [
-      path.join(context.repoRoot, "tools", "test-flow", "adapters", "rollout-parity.mjs"),
-      "--repo-root", context.repoRoot,
-      "--attempt-root", context.attemptRoot,
-      "--output-root", outputRoot,
-      "--spec", spec,
-      "--expected-source-commit", context.sourceHead,
-      "--expected-producer-identity", context.planStage.producer_identity,
-    ],
-    cwd: context.repoRoot,
-    hardTimeoutSeconds: stage.timeout_seconds,
-    // Each child release owns its semantic 360-second no-progress guard.  The
-    // outer migration pair must not invent heartbeat progress on their behalf.
-    noProgressSeconds: null,
-    rawLogLimitBytes: context.policies.raw_log_file_limit_bytes,
-    eventWriter: context.eventWriter,
-  });
-  const receiptPath = path.join(outputRoot, "rollout-parity-receipt.json");
-  if (!fs.existsSync(receiptPath)) {
-    return { ...result, status: "ERROR", failure_domain: "HARNESS", code: "ROLLOUT_PARITY_RECEIPT_MISSING" };
-  }
-  let receipt;
-  try { receipt = JSON.parse(fs.readFileSync(receiptPath, "utf8")); } catch {
-    return { ...result, status: "ERROR", failure_domain: "HARNESS", code: "ROLLOUT_PARITY_RECEIPT_INVALID" };
-  }
-  const valid = receipt.schema_version === 1
-    && receipt.source_commit === context.sourceHead
-    && receipt.producer_identity === context.planStage.producer_identity
-    && Array.isArray(receipt.runs)
-    && receipt.runs.length === 2
-    && receipt.runs[0]?.label === "legacy"
-    && receipt.runs[1]?.label === "candidate";
-  if (!valid) return { ...result, status: "ERROR", failure_domain: "HARNESS", code: "ROLLOUT_PARITY_RECEIPT_INVALID" };
-  if (result.status !== "PASS" || receipt.status !== "PASS" || receipt.runs.some((run) => run.exit_code !== 0)) {
-    return { ...result, status: "FAIL", failure_domain: "CONTRACT", code: "ROLLOUT_PARITY_FAILED", parity_receipt: receipt };
-  }
-  return { ...result, parity_receipt: receipt };
-}
-
 function reviewObservation(context) {
-  const stream = path.join(context.attemptRoot, "payload", "events", "service-linux.journey.ndjson");
-  if (!fs.existsSync(stream)) return { status: "ERROR", failure_domain: "HARNESS", code: "REVIEW_EVENT_STREAM_MISSING", elapsed_seconds: 0 };
-  const events = fs.readFileSync(stream, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line));
+  const partsRoot = path.join(context.attemptRoot, "payload", "events", "parts");
+  const streams = fs.existsSync(partsRoot)
+    ? fs.readdirSync(partsRoot).filter((name) => name.endsWith(".journey.ndjson")).sort()
+    : [];
+  if (streams.length === 0) return { status: "ERROR", failure_domain: "HARNESS", code: "REVIEW_EVENT_STREAM_MISSING", elapsed_seconds: 0 };
+  const events = streams.flatMap((name) => fs.readFileSync(path.join(partsRoot, name), "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line)));
   const reviewEvents = events.filter((event) => event?.data?.job_type === "REVIEW" && typeof event.job_id === "string");
   const jobIds = [...new Set(reviewEvents.map((event) => event.job_id))];
   if (jobIds.length !== 1) return { status: "FAIL", failure_domain: "CONTRACT", code: "REVIEW_JOB_IDENTITY_AMBIGUOUS", elapsed_seconds: 0 };
   const reviewJob = reviewEvents.filter((event) => event.job_id === jobIds[0]);
   const required = ["job.pending_persisted", "job.claimed", "job.outcome.produced", "job.outcome.applied"];
+  const producerIds = [...new Set(reviewJob.map((event) => event.producer_id))];
   const ordinals = required.map((type) => reviewJob.find((event) => event.event_type === type)?.seq ?? null);
   const failure = reviewJob.some((event) => ["job.claim.failed", "job.outcome.rejected", "job.outcome.stale"].includes(event.event_type));
   const queued = reviewJob.some((event) => ["job.queued", "job.queue.duplicate"].includes(event.event_type));
-  const ordered = ordinals.every(Number.isInteger) && ordinals.every((value, index) => index === 0 || value > ordinals[index - 1]);
-  if (!queued || !ordered || failure) return { status: "FAIL", failure_domain: "CONTRACT", code: "REVIEW_OBSERVATION_INCOMPLETE", elapsed_seconds: 0 };
+  const ordered = producerIds.length === 1 && ordinals.every(Number.isInteger) && ordinals.every((value, index) => index === 0 || value > ordinals[index - 1]);
+  const receipt = {
+    schema_version: 2,
+    status: queued && ordered && !failure ? "PASS" : "FAIL",
+    review_job_id: jobIds[0],
+    observed_review_events: reviewJob.length,
+    producer_id: producerIds.length === 1 ? producerIds[0] : null,
+    queued,
+    ordered,
+    failure_observed: failure,
+  };
+  writeJsonSync(path.join(gateRoot(context, { id: "journey.cross-job.review" }), "review-observation.json"), receipt);
+  if (receipt.status !== "PASS") return { status: "FAIL", failure_domain: "CONTRACT", code: "REVIEW_OBSERVATION_INCOMPLETE", elapsed_seconds: 0 };
   return { status: "PASS", failure_domain: null, code: null, elapsed_seconds: 0, review_job_id: jobIds[0], observed_review_events: reviewJob.length };
 }
 
-export async function executeAction(context, stage) {
-  switch (stage.action) {
-    case "framework_self_test": {
-      const testRoot = path.join(context.repoRoot, "tools", "test-flow", "tests");
-      const tests = fs.readdirSync(testRoot).filter((name) => name.endsWith(".test.mjs")).sort().map((name) => path.join(testRoot, name));
-      return runProcess({ repoRoot: context.repoRoot, attemptRoot: context.attemptRoot, stage, command: process.execPath, args: ["--test", ...tests], cwd: context.repoRoot, hardTimeoutSeconds: stage.timeout_seconds, noProgressSeconds: null, rawLogLimitBytes: context.policies.raw_log_file_limit_bytes, eventWriter: context.eventWriter });
-    }
-    case "deterministic_affected": {
-      const selection = planAffectedSelection(context.repoRoot, context.changedFiles);
-      if (selection.defer_to_full) {
-        return {
-          status: "NOT_REQUIRED",
-          failure_domain: null,
-          code: "AFFECTED_SCOPE_DEFERRED_TO_FULL",
-          elapsed_seconds: 0,
-          selection,
-        };
-      }
-      const result = await pytestAction(context, stage, selection.selectors);
-      return { ...result, selection };
-    }
-    case "deterministic_full":
-      return pytestAction(context, stage, ["tests/deterministic"]);
-    case "host_capability":
-      return hostCapability(context, stage);
-    case "server_linux_capability":
-      return serverLinuxCapability(context, stage);
-    case "real_logparse":
-      return realLogparse(context, stage);
-    case "real_agent_backend":
-      return isolatedAgent(context, stage, "tests/real/agent/test_real_agent_backend_gate.py", "S08_REAL_AGENT_GATE");
-    case "real_route":
-      return isolatedAgent(context, stage, "tests/real/agent/test_real_route_agent_contract_gate.py", "S08_REAL_ROUTE_AGENT_GATE");
-    case "real_diagnose":
-      return realDiagnose(context, stage);
-    case "real_review":
-      return isolatedAgent(context, stage, "tests/real/agent/test_real_review_agent_contract_gate.py", "S08_REAL_REVIEW_AGENT_GATE");
-    case "journey_environment":
-    case "journey_route":
-    case "journey_upload":
-    case "journey_diagnose":
-    case "journey_publish_restart":
-      return crossJob(context, stage);
-    case "journey_review_audit":
-      return reviewObservation(context);
-    case "rollout_parity_once":
-      return rolloutParity(context, stage);
-    case "finalize":
-      return { status: "PASS", elapsed_seconds: 0, failure_domain: null };
-    default:
-      return { status: "ERROR", failure_domain: "HARNESS", code: "ACTION_NOT_IMPLEMENTED", elapsed_seconds: 0 };
+function realEnvironment(context, profile) {
+  if (profile === "real-logparse") {
+    const source = context.options.logparseSource;
+    const python = process.env.TEST_FLOW_LOGPARSE_PYTHON;
+    if (!source || !python) return { error: "LOGPARSE_RUNTIME_MISSING" };
+    return {
+      env: {
+        LOGPARSE_REPO: source,
+        LOGPARSE_CONFIG_PATH: process.env.TEST_FLOW_LOGPARSE_CONFIG ?? path.join(source, "config.yaml"),
+        LOGPARSE_PYTHON: python,
+      },
+    };
   }
+  const command = agentCommand(context);
+  if (!command) return { error: "CLAUDE_COMMAND_OR_HARD_CAP_MISSING" };
+  const runtime = preparedClaudeRuntime(context);
+  if (!runtime) return { error: "CLAUDE_RUNTIME_MISSING" };
+  const common = {
+    ...runtime.environment,
+    S08_REAL_AGENT_COMMAND: command,
+    S08_REAL_ROUTE_AGENT_COMMAND: command,
+    S08_REAL_DIAGNOSE_AGENT_COMMAND: command,
+    S08_REAL_REVIEW_AGENT_COMMAND: command,
+  };
+  if (profile === "real-agent-backend") return { env: { ...common, S08_REAL_AGENT_GATE: "1" } };
+  if (profile === "real-route") return { env: { ...common, S08_REAL_ROUTE_AGENT_GATE: "1" } };
+  if (profile === "real-review") return { env: { ...common, S08_REAL_REVIEW_AGENT_GATE: "1" } };
+  if (profile === "real-diagnose") {
+    const skillPath = path.join(
+      context.repoRoot,
+      "tests",
+      "fixtures",
+      "components",
+      "diagnosis-generator",
+      "diagnose-service-takeover",
+    );
+    if (!fs.existsSync(skillPath)) return { error: "DIAGNOSE_SKILL_MISSING" };
+    return {
+      env: {
+        ...common,
+        S08_REAL_DIAGNOSE_AGENT_V3_MATRIX_GATE: "1",
+        S08_REAL_FIRST_LOG_AGENT_GATE: "1",
+        S08_REAL_DIAGNOSE_SKILL_PATH: skillPath,
+        LOGPARSE_REPO: context.options.logparseSource ?? "",
+        LOGPARSE_CONFIG_PATH: process.env.TEST_FLOW_LOGPARSE_CONFIG ?? "",
+        LOGPARSE_PYTHON: process.env.TEST_FLOW_LOGPARSE_PYTHON ?? "",
+      },
+    };
+  }
+  return { error: "REAL_ENVIRONMENT_PROFILE_UNSUPPORTED" };
+}
+
+export async function executeGate(context, stage, gateId, gate) {
+  const root = path.join(context.attemptRoot, "payload", "stages", stage.id, "gates", gateId);
+  ensureDirectory(root);
+  const scoped = { ...context, gateId, gateRoot: root };
+  if (gate.kind === "node-test") return nodeTestAction(scoped, stage, gate);
+  if (gate.kind === "repository-check") return repositoryCheck(scoped, stage, gate);
+  if (gate.kind === "pytest") {
+    let selectors = gate.selectors ?? [];
+    let selection = null;
+    if (gate.selector_mode === "affected") {
+      selection = planAffectedSelection(context.repoRoot, context.changedFiles);
+      if (selection.defer_to_full) {
+        const summary = { schema_version: 2, tests: 0, passed: 0, failures: 0, errors: 0, skipped: 0, executed: 0, not_required: true };
+        writeJsonSync(path.join(root, "pytest-summary.json"), summary);
+        return { status: "NOT_REQUIRED", failure_domain: null, code: "AFFECTED_SCOPE_DEFERRED_TO_FULL", elapsed_seconds: 0, selection, pytest: summary };
+      }
+      selectors = selection.selectors;
+    }
+    let environment = {};
+    if (gate.environment_profile) {
+      const prepared = realEnvironment(scoped, gate.environment_profile);
+      if (prepared.error) return { status: "BLOCKED", failure_domain: "INFRA", code: prepared.error, elapsed_seconds: 0 };
+      environment = prepared.env;
+    }
+    const result = await pytestAction(scoped, stage, selectors, {
+      extra: gate.pytest_args ?? [],
+      env: environment,
+      real: Boolean(gate.environment_profile),
+      minPassed: gate.min_passed,
+      skipPolicy: gate.skip_policy,
+      selection,
+    });
+    if (result.status === "PASS" && gate.environment_profile && gate.environment_profile !== "real-logparse") {
+      try {
+        const modelUsage = collectIsolatedModelUsage(scoped);
+        return { ...result, invocations: modelUsage.invocations, usage: modelUsage.usage, usage_complete: true };
+      } catch {
+        return { ...result, status: "ERROR", failure_domain: "HARNESS", code: "ISOLATED_MODEL_USAGE_RECEIPT_INVALID" };
+      }
+    }
+    return { ...result, invocations: [] };
+  }
+  if (gate.kind === "capability-adapter") {
+    if (gate.adapter === "host-capability") return hostCapability(scoped, stage);
+    if (gate.adapter === "server-linux-capability") return serverLinuxCapability(scoped, stage, gate);
+  }
+  if (gate.kind === "cross-job-adapter") return crossJob(scoped, stage);
+  if (gate.kind === "observation" && gate.observation === "review-state-transition") return reviewObservation(scoped);
+  return { status: "ERROR", failure_domain: "HARNESS", code: "GATE_EXECUTOR_NOT_IMPLEMENTED", elapsed_seconds: 0 };
 }
 
 export { affectedSelectors, pythonRuntime };

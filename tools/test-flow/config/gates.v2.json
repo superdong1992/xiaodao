@@ -1,0 +1,231 @@
+{
+  "schema_version": 2,
+  "gates": {
+    "framework.config": {
+      "kind": "node-test",
+      "test_files": ["tools/test-flow/tests/config-contract.test.mjs"],
+      "min_passed": 1,
+      "evidence": ["node-test.tap"]
+    },
+    "framework.node-tests": {
+      "kind": "node-test",
+      "test_glob": "tools/test-flow/tests/*.test.mjs",
+      "exclude": ["tools/test-flow/tests/config-contract.test.mjs", "tools/test-flow/tests/docs-drift.test.mjs"],
+      "min_passed": 1,
+      "evidence": ["node-test.tap"]
+    },
+    "docs.current": {
+      "kind": "node-test",
+      "test_files": ["tools/test-flow/tests/docs-drift.test.mjs"],
+      "min_passed": 1,
+      "evidence": ["node-test.tap"]
+    },
+    "repo.compileall": {
+      "kind": "repository-check",
+      "check": "python-compileall",
+      "paths": ["src", "tests"],
+      "evidence": ["repository-check.json"]
+    },
+    "repo.uv-lock": {
+      "kind": "repository-check",
+      "check": "uv-lock",
+      "evidence": ["repository-check.json"]
+    },
+    "repo.git-diff-check": {
+      "kind": "repository-check",
+      "check": "git-diff-check",
+      "evidence": ["repository-check.json"]
+    },
+    "det.affected": {
+      "kind": "pytest",
+      "selector_mode": "affected",
+      "min_passed": 1,
+      "skip_policy": "forbid-all-skipped",
+      "runtime_profile": "python-test",
+      "evidence": ["pytest.xml", "pytest-summary.json"]
+    },
+    "det.contracts": {
+      "kind": "pytest",
+      "selectors": ["tests/deterministic/contracts"],
+      "min_passed": 1,
+      "skip_policy": "forbid",
+      "runtime_profile": "python-test",
+      "evidence": ["pytest.xml", "pytest-summary.json"]
+    },
+    "det.unit": {
+      "kind": "pytest",
+      "selectors": ["tests/deterministic/unit"],
+      "min_passed": 1,
+      "skip_policy": "allow-explicit",
+      "runtime_profile": "python-test",
+      "evidence": ["pytest.xml", "pytest-summary.json"]
+    },
+    "det.integration": {
+      "kind": "pytest",
+      "selectors": ["tests/deterministic/integration"],
+      "min_passed": 1,
+      "skip_policy": "forbid",
+      "runtime_profile": "python-test",
+      "evidence": ["pytest.xml", "pytest-summary.json"]
+    },
+    "det.journey.same-job": {
+      "kind": "pytest",
+      "selectors": ["tests/deterministic/journey"],
+      "min_passed": 1,
+      "skip_policy": "forbid",
+      "runtime_profile": "python-test",
+      "evidence": ["pytest.xml", "pytest-summary.json"]
+    },
+    "platform.host-adapter": {
+      "kind": "capability-adapter",
+      "adapter": "host-capability",
+      "runtime_profile": "release",
+      "evidence": ["host-capability-result.json"]
+    },
+    "platform.compat-contract": {
+      "kind": "pytest",
+      "selectors": ["tests/platform/compat"],
+      "min_passed": 1,
+      "skip_policy": "allow-explicit",
+      "runtime_profile": "python-test",
+      "evidence": ["pytest.xml", "pytest-summary.json"]
+    },
+    "platform.server-linux-adapter": {
+      "kind": "capability-adapter",
+      "adapter": "server-linux-capability",
+      "runtime_profile": "release",
+      "required_claims": ["linux-runtime", "installed-distribution", "native-startup"],
+      "evidence": ["server-linux-capability-result.json", "platform-server.xml"]
+    },
+    "real.logparse": {
+      "kind": "pytest",
+      "selectors": ["tests/real/logparse/test_logparse_real_e2e.py"],
+      "pytest_args": ["--run-real-logparse"],
+      "environment_profile": "real-logparse",
+      "min_passed": 1,
+      "skip_policy": "forbid",
+      "runtime_profile": "release",
+      "evidence": ["pytest.xml", "pytest-summary.json"]
+    },
+    "real.agent-backend": {
+      "kind": "pytest",
+      "selectors": ["tests/real/agent/test_real_agent_backend_gate.py"],
+      "environment_profile": "real-agent-backend",
+      "min_passed": 1,
+      "skip_policy": "forbid",
+      "runtime_profile": "release",
+      "evidence": ["pytest.xml", "pytest-summary.json", "model-usage.json"]
+    },
+    "real.agent.route": {
+      "kind": "pytest",
+      "selectors": ["tests/real/agent/test_real_route_agent_contract_gate.py"],
+      "environment_profile": "real-route",
+      "min_passed": 1,
+      "skip_policy": "forbid",
+      "runtime_profile": "release",
+      "evidence": ["pytest.xml", "pytest-summary.json", "model-usage.json"]
+    },
+    "real.agent.diagnose": {
+      "kind": "pytest",
+      "selectors": [
+        "tests/real/agent/test_real_diagnose_agent_contract_gate.py::test_real_agent_v3_requirement_isolation_gate",
+        "tests/real/agent/test_real_diagnose_agent_contract_gate.py::test_real_first_log_diagnose_agent_produces_valid_continuation"
+      ],
+      "environment_profile": "real-diagnose",
+      "min_passed": 2,
+      "skip_policy": "forbid",
+      "runtime_profile": "release",
+      "evidence": ["pytest.xml", "pytest-summary.json", "model-usage.json"]
+    },
+    "real.agent.review": {
+      "kind": "pytest",
+      "selectors": ["tests/real/agent/test_real_review_agent_contract_gate.py"],
+      "environment_profile": "real-review",
+      "min_passed": 1,
+      "skip_policy": "forbid",
+      "runtime_profile": "release",
+      "evidence": ["pytest.xml", "pytest-summary.json", "model-usage.json"]
+    },
+    "journey.environment": {
+      "kind": "cross-job-adapter",
+      "phase": "environment",
+      "runtime_profile": "release",
+      "evidence_contract": {
+        "id": "cross-job-environment-v2",
+        "event_stream": {
+          "instance": "route",
+          "pass_requires": ["diagnostics", "journey"],
+          "pass_allows_empty": ["journey"],
+          "failure_allows_empty": ["journey"]
+        }
+      },
+      "evidence": ["adapter-result.json"]
+    },
+    "journey.route": {
+      "kind": "cross-job-adapter",
+      "phase": "route",
+      "runtime_profile": "release",
+      "evidence_contract": {
+        "id": "cross-job-tool-call-v2",
+        "event_stream": {
+          "instance": "route",
+          "pass_requires": ["diagnostics", "journey"],
+          "pass_allows_empty": [],
+          "failure_allows_empty": ["journey"]
+        }
+      },
+      "evidence": ["adapter-result.json"]
+    },
+    "journey.upload": {
+      "kind": "cross-job-adapter",
+      "phase": "upload",
+      "runtime_profile": "release",
+      "evidence_contract": {
+        "id": "cross-job-tool-call-v2",
+        "event_stream": {
+          "instance": "upload",
+          "pass_requires": ["diagnostics", "journey"],
+          "pass_allows_empty": [],
+          "failure_allows_empty": ["journey"]
+        }
+      },
+      "evidence": ["adapter-result.json"]
+    },
+    "journey.diagnose": {
+      "kind": "cross-job-adapter",
+      "phase": "diagnose",
+      "runtime_profile": "release",
+      "evidence_contract": {
+        "id": "cross-job-diagnose-review-v2",
+        "event_stream": {
+          "instance": "diagnose",
+          "pass_requires": ["diagnostics", "journey"],
+          "pass_allows_empty": [],
+          "failure_allows_empty": ["journey"]
+        }
+      },
+      "evidence": ["adapter-result.json"]
+    },
+    "journey.review-observation": {
+      "kind": "observation",
+      "observation": "review-state-transition",
+      "evidence_contract": "review-observation-v2",
+      "evidence": ["review-observation.json"]
+    },
+    "journey.publish-restart": {
+      "kind": "cross-job-adapter",
+      "phase": "publish-restart",
+      "runtime_profile": "release",
+      "evidence_contract": {
+        "id": "cross-job-publish-restart-v2",
+        "event_stream": {
+          "instance": "restart",
+          "pass_requires": ["diagnostics", "journey"],
+          "pass_allows_empty": ["journey"],
+          "failure_allows_empty": ["journey"]
+        }
+      },
+      "evidence": ["adapter-result.json"]
+    }
+  }
+}
