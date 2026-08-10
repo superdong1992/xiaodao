@@ -1,5 +1,16 @@
 # 项目协作约束
 
+## 设计到 Goal 流程
+
+- 凡涉及仓库设计、规划、架构、接口/schema、公开行为或 Test Flow 流程变更，必须先使用仓级 Skill `$design-to-goal`（`.agents/skills/design-to-goal/SKILL.md`），不得依据临时会话直接进入实现。
+- 收到实现请求时，如果不存在当前变更对应的、已按 SHA-256 明确批准的 `work-items/YYYYMMDD-<kebab-name>/design.md`，以及与之匹配的活动 Codex 执行 Goal，必须先回到 `$design-to-goal`。匹配要求 Goal objective 含规范 work-item 路径以及冻结的 conversation/design/goal 三个 SHA-256；已经在匹配 Goal 内执行时不得递归启动新的设计流程。
+- 设计必须在普通/default 模式进行；处于系统 Plan 模式时必须停止并要求切换。在匹配 Goal 成功创建并确认 active 前，只允许写入唯一且固定的当前 work-item 目录；设计批准、Goal 启动请求或 Goal 创建失败均不解除该边界，源码、当前设计/运维文档、测试、AGENTS、Skill、Git 元数据与外部系统保持只读。
+- 设计必须核对适用仓级要求、`design/README.md` 导航出的当前权威设计、相关代码/schema/config 与测试事实。所有冲突必须记录来源、影响、有效选项和用户裁决；存在未解决冲突时不得批准设计、生成 `goal.md` 或创建 Codex Goal。
+- 对 `tools/test-flow/**`、Test Flow 架构/操作文档或本文件测试活动规则的任何变更，必须在设计中列明具体影响并获得独立、明确授权；普通设计批准不得隐含该授权。
+- 设计批准必须绑定冻结的 `design.md` SHA-256；批准设计与启动 Codex Goal 必须是两条独立用户指令。启动前后都必须调用当前 Goal 检查能力并 fail closed：不得自动替换或清除未完成 Goal，新 Goal 必须绑定规范 work-item 路径以及冻结的 conversation/design/goal 摘要，确认匹配后才允许写入实现范围。只有创建明确失败且检查明确确认无未完成 Goal 时才能让候选摘要失效并继续 work-item 内归档；结果不明时文件保持冻结且只能只读复查。
+- Codex 执行 Goal 统一覆盖批准范围内的实现、普通测试、当前权威文档同步和既有 Test Flow 验证，并只以与结果源码绑定且验证成功的 `verdict.json` 收口。Goal 创建前必须冻结三个 work-item 文件，执行与 Test Flow planning 后不得再修改它们。执行中发现新设计决策或未授权 Test Flow 影响时，必须停止实现并要求用户取消/清除当前 Goal；确认无未完成 Goal 后必须保留旧 work-item 不变并创建带前驱摘要的 `-r2` 后继，重新批准后再以新的独立指令启动新 Goal。全部实现、文档、计划身份和 verdict 条件逐项满足后才允许将 Goal 标记为 complete。
+- 纯只读解释或调查不要求创建 work-item；但一旦转为修改请求，必须进入上述流程。
+
 ## 修复前必须验证问题
 
 - 在修改代码、合同、Skill、文档或测试来“修复”用户描述的问题之前，必须先在当前工作区和当前版本中确认问题确实存在。

@@ -1,0 +1,7 @@
+interface:
+  display_name: "Design to Goal"
+  short_description: "Archive design decisions and gate execution Goals"
+  default_prompt: "Use $design-to-goal to archive this repository change, check conflicts, and prepare an approval-ready design before any Goal starts."
+
+policy:
+  allow_implicit_invocation: true
