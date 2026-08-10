@@ -3,22 +3,36 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 import { createAttempt } from "../lib/evidence.mjs";
 import { EventWriter } from "../lib/events.mjs";
 import { runProcess } from "../lib/process.mjs";
 
+const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
+
 function stage(id) { return { id, kind: "isolated-real" }; }
+
+async function waitForText(filePath, expression, timeoutMilliseconds = 1500) {
+  const deadline = Date.now() + timeoutMilliseconds;
+  while (Date.now() < deadline) {
+    if (fs.existsSync(filePath) && expression.test(fs.readFileSync(filePath, "utf8"))) return true;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  return false;
+}
 
 test("stdout is visible while the child is still running", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "test-flow-process-stream-"));
   try {
     const attempt = createAttempt({ evidenceRoot: root, runId: "run-stream" });
     const writer = new EventWriter({ attemptRoot: attempt, runId: "run-stream", producerId: "orchestrator", producerType: "orchestrator" });
-    const running = runProcess({ repoRoot: root, attemptRoot: attempt, stage: stage("stream"), command: process.execPath, args: ["-e", "console.log('first'); setTimeout(() => process.exit(0), 500)"], cwd: root, hardTimeoutSeconds: 2, noProgressSeconds: null, eventWriter: writer });
-    await new Promise((resolve) => setTimeout(resolve, 150));
+    const running = runProcess({ repoRoot: REPO_ROOT, attemptRoot: attempt, stage: stage("stream"), command: process.execPath, args: ["-e", "console.log('first'); setTimeout(() => process.exit(0), 2000)"], cwd: root, hardTimeoutSeconds: 5, noProgressSeconds: null, eventWriter: writer });
     const log = path.join(attempt, "payload", "logs", "stream.stdout.log");
+    assert.equal(await waitForText(log, /first/), true);
     assert.match(fs.readFileSync(log, "utf8"), /first/);
-    assert.equal((await running).status, "PASS");
+    const completed = await running;
+    assert.equal(completed.status, "PASS");
+    if (process.platform === "win32") assert.deepEqual(completed.windows_job?.assigned, true);
     writer.close();
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
@@ -28,14 +42,14 @@ test("semantic progress extends no-progress window", async () => {
   try {
     const attempt = createAttempt({ evidenceRoot: root, runId: "run-progress" });
     const result = await runProcess({
-      repoRoot: root,
+      repoRoot: REPO_ROOT,
       attemptRoot: attempt,
       stage: stage("progress"),
       command: process.execPath,
-      args: ["-e", "let n=0; const t=setInterval(()=>{console.log('TEST_FLOW_PROGRESS stage.progress'); if(++n===5){clearInterval(t);process.exit(0)}},100)"],
+      args: ["-e", "let n=0; const t=setInterval(()=>{console.log('TEST_FLOW_PROGRESS stage.progress'); if(++n===5){clearInterval(t);process.exit(0)}},400)"],
       cwd: root,
-      hardTimeoutSeconds: 2,
-      noProgressSeconds: 0.25,
+      hardTimeoutSeconds: 5,
+      noProgressSeconds: 1.25,
     });
     assert.equal(result.status, "PASS");
     assert.equal(result.termination, null);
@@ -47,18 +61,18 @@ test("raw byte noise does not reset semantic no-progress timeout", async () => {
   try {
     const attempt = createAttempt({ evidenceRoot: root, runId: "run-noise" });
     const result = await runProcess({
-      repoRoot: root,
+      repoRoot: REPO_ROOT,
       attemptRoot: attempt,
       stage: stage("noise"),
       command: process.execPath,
       args: ["-e", "setInterval(()=>console.log('ordinary noisy bytes'),25)"],
       cwd: root,
-      hardTimeoutSeconds: 2,
-      noProgressSeconds: 0.2,
+      hardTimeoutSeconds: 5,
+      noProgressSeconds: 1.25,
     });
     assert.equal(result.status, "INCONCLUSIVE");
     assert.equal(result.termination.trigger, "NO_PROGRESS");
-    assert.ok(result.termination.silence_seconds >= 0.2);
+    assert.ok(result.termination.silence_seconds >= 1.25);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -67,7 +81,7 @@ test("raw log cap terminates the process and cannot produce PASS", async () => {
   try {
     const attempt = createAttempt({ evidenceRoot: root, runId: "run-cap" });
     const result = await runProcess({
-      repoRoot: root,
+      repoRoot: REPO_ROOT,
       attemptRoot: attempt,
       stage: stage("cap"),
       command: process.execPath,
@@ -89,7 +103,7 @@ test("an unknown progress allowlist version fails before child execution", async
   try {
     const attempt = createAttempt({ evidenceRoot: root, runId: "run-version" });
     await assert.rejects(() => runProcess({
-      repoRoot: root,
+      repoRoot: REPO_ROOT,
       attemptRoot: attempt,
       stage: stage("version"),
       command: process.execPath,

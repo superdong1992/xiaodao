@@ -3,8 +3,9 @@ import path from "node:path";
 import {
   RELEASE_CLAUDE_VERSION_OUTPUT,
   RELEASE_DOCKER_ARCH,
-  RELEASE_DOCKER_CONTEXT,
   RELEASE_DOCKER_OS,
+  releaseClientForHost,
+  releaseDockerContextForClient,
 } from "../lib/release-inputs.mjs";
 import { runSync } from "../lib/util.mjs";
 
@@ -42,7 +43,8 @@ const serviceMaxBudgetUsd = argument("--service-agent-max-budget-usd");
 const serviceHardTimeoutSeconds = argument("--service-agent-hard-timeout-seconds");
 fs.mkdirSync(outputRoot, { recursive: true, mode: 0o700 });
 
-if (process.platform === "darwin" && context !== RELEASE_DOCKER_CONTEXT) blocked("SERVER_CAPABILITY_CONTEXT", "the macOS Release server is bound to Docker context colima");
+const expectedContext = releaseDockerContextForClient(releaseClientForHost());
+if (context !== expectedContext) blocked("SERVER_CAPABILITY_CONTEXT", `the current Client is bound to logical Docker context ${expectedContext}`);
 if (!image || !runtimeProfileDigest || !model || !serviceMaxTurns || !serviceMaxTotalTokens || !serviceMaxBudgetUsd || !serviceHardTimeoutSeconds || !fs.existsSync(path.join(repoRoot, "pyproject.toml")) || !fs.existsSync(path.join(logparseSource, "config.yaml")) || !containerName || !/^problem-locator\.test-flow\.run=run-[A-Za-z0-9-]+$/.test(resourceLabel ?? "")) {
   failed("SERVER_CAPABILITY_ARGUMENTS", "image, registered container name, and exact run label are required");
 }

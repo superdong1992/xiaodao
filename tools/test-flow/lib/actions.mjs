@@ -1,7 +1,10 @@
 import fs from "node:fs";
 import path from "node:path";
 import {
+  compactScratchPath,
+  createScratchBinding,
   ensureDirectory,
+  removeScratchBinding,
   removeTreeWritable,
   resolveCommand,
   resolvePythonTestRuntime,
@@ -175,12 +178,10 @@ async function pytestAction(context, stage, selectors, {
     writeJsonSync(path.join(stageEvidence, "pytest-summary.json"), summary);
     return { status: "NOT_REQUIRED", failure_domain: null, code: "AFFECTED_SCOPE_EMPTY", elapsed_seconds: 0, pytest: summary, selection };
   }
-  const scratch = path.join(context.attemptRoot, "scratch", gateExecutionId(stage, context.gateId ?? stage.id));
-  ensureDirectory(scratch);
+  const executionId = gateExecutionId(stage, context.gateId ?? stage.id);
   const loopback = probeLoopbackCapability(runtime, context.repoRoot);
   writeJsonSync(path.join(stageEvidence, "loopback-capability.json"), loopback);
   if (loopback.status !== "PASS") {
-    removeTreeWritable(scratch, context.attemptRoot);
     return {
       status: "BLOCKED",
       failure_domain: "INFRA",
@@ -189,36 +190,47 @@ async function pytestAction(context, stage, selectors, {
       capability_receipt: "loopback-capability.json",
     };
   }
+  const scratchBinding = createScratchBinding(
+    context.repoRoot,
+    context.attemptRoot,
+    executionId,
+  );
+  const pytestScratch = path.join(scratchBinding.path, "t");
+  const pythonCache = path.join(scratchBinding.path, "c");
   const args = [
     ...runtime.prefix,
     ...selectors,
     "-q",
     "-p", "no:cacheprovider",
-    `--basetemp=${path.join(scratch, "pytest")}`,
+    `--basetemp=${pytestScratch}`,
     `--junitxml=${path.join(stageEvidence, "pytest.xml")}`,
     ...extra,
   ];
-  const result = await runProcess({
-    repoRoot: context.repoRoot,
-    attemptRoot: context.attemptRoot,
-    stage,
-    command: runtime.command,
-    args,
-    cwd: context.repoRoot,
-    env: {
-      PYTHONNOUSERSITE: "1",
-      PYTHONPYCACHEPREFIX: path.join(scratch, "pycache"),
-      ...env,
-    },
-    hardTimeoutSeconds: stage.timeout_seconds,
-    noProgressSeconds: real ? context.policies.real_no_progress_seconds : null,
-    rawLogLimitBytes: context.policies.raw_log_file_limit_bytes,
-    eventWriter: context.eventWriter,
-    executionId: gateExecutionId(stage, context.gateId ?? stage.id),
-    pollMilliseconds: context.policies.poll_milliseconds,
-    progressAllowlistVersion: context.policies.progress_allowlist_version,
-  });
-  removeTreeWritable(scratch, context.attemptRoot);
+  let result;
+  try {
+    result = await runProcess({
+      repoRoot: context.repoRoot,
+      attemptRoot: context.attemptRoot,
+      stage,
+      command: runtime.command,
+      args,
+      cwd: context.repoRoot,
+      env: {
+        PYTHONNOUSERSITE: "1",
+        PYTHONPYCACHEPREFIX: pythonCache,
+        ...env,
+      },
+      hardTimeoutSeconds: stage.timeout_seconds,
+      noProgressSeconds: real ? context.policies.real_no_progress_seconds : null,
+      rawLogLimitBytes: context.policies.raw_log_file_limit_bytes,
+      eventWriter: context.eventWriter,
+      executionId,
+      pollMilliseconds: context.policies.poll_milliseconds,
+      progressAllowlistVersion: context.policies.progress_allowlist_version,
+    });
+  } finally {
+    removeScratchBinding(scratchBinding);
+  }
   if (result.status === "ERROR") return { ...result, failure_domain: "HARNESS", code: result.termination?.trigger ?? "PROCESS_EVIDENCE_ERROR" };
   if (result.status === "INCONCLUSIVE") return { ...result, failure_domain: "EXTERNAL", code: result.termination.trigger };
   if (result.status !== "PASS") return { ...result, failure_domain: real ? "CONTRACT" : "PRODUCT", code: "PYTEST_FAILED" };
@@ -295,7 +307,7 @@ async function nodeTestAction(context, stage, gate) {
 async function repositoryCheck(context, stage, gate) {
   let command;
   let args;
-  const scratch = path.join(context.attemptRoot, "scratch", gateExecutionId(stage, context.gateId));
+  const scratch = compactScratchPath(context.attemptRoot, gateExecutionId(stage, context.gateId));
   ensureDirectory(scratch);
   if (gate.check === "python-compileall") {
     const runtime = pythonRuntime(context.repoRoot);

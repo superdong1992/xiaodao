@@ -10,7 +10,6 @@ import {
   RELEASE_CLAUDE_TARBALL_SHA256,
   RELEASE_CLAUDE_VERSION,
   RELEASE_DOCKER_ARCH,
-  RELEASE_DOCKER_CONTEXT,
   RELEASE_DOCKER_OS,
   RELEASE_HATCHLING_VERSION,
   RELEASE_PYTHON_VERSION,
@@ -18,8 +17,13 @@ import {
   RELEASE_UV_SHA256,
   RELEASE_UV_VERSION,
   RELEASE_UVX_SHA256,
+  dockerCommandArguments,
+  dockerServerIdentity,
   packageTreeIdentity,
+  releaseArtifactDownloadInvocation,
+  releaseClientForHost,
   releaseCachePaths,
+  releaseDockerContextForClient,
   validateClaudeDistribution,
   validateUvCache,
 } from "./lib/release-inputs.mjs";
@@ -49,13 +53,12 @@ function execute(command, args, { cwd = undefined, maxBuffer = 128 * 1024 * 1024
 }
 
 function download(url, destination) {
-  execute("curl", [
-    "--fail", "--location", "--silent", "--show-error",
-    "--retry", "3", "--retry-all-errors",
-    "--connect-timeout", "20", "--max-time", "900",
-    "--output", destination,
-    "--", url,
-  ]);
+  const invocation = releaseArtifactDownloadInvocation(
+    process.platform,
+    url,
+    destination,
+  );
+  execute(invocation.command, invocation.args);
 }
 
 function publishDirectory(staging, destination) {
@@ -143,10 +146,11 @@ function prepareUv(paths, stagingRoot) {
   process.stdout.write(`uv_cache=PASS version=${RELEASE_UV_VERSION} archive_sha256=${validated.archive_sha256}\n`);
 }
 
-function prepareImage(repoRoot, paths, dockerContext) {
+function prepareImage(repoRoot, paths, dockerContext, client) {
+  const dockerIdentity = dockerServerIdentity(dockerContext, client);
+  if (dockerIdentity.status !== "PRESENT") throw new Error(`DOCKER_IDENTITY_INVALID:${dockerIdentity.code}`);
   const logPath = path.join(paths.cacheRoot, "base-image-build.log");
-  const build = runSync("docker", [
-    "--context", dockerContext,
+  const build = runSync("docker", dockerCommandArguments(dockerContext, [
     "buildx", "build",
     "--platform", "linux/amd64",
     "--provenance=false",
@@ -166,10 +170,10 @@ function prepareImage(repoRoot, paths, dockerContext) {
     "--tag", RELEASE_BASE_IMAGE,
     "--file", path.join(repoRoot, "tools", "test-flow", "Dockerfile"),
     repoRoot,
-  ], { cwd: repoRoot, maxBuffer: 256 * 1024 * 1024 });
+  ]), { cwd: repoRoot, maxBuffer: 256 * 1024 * 1024 });
   fs.writeFileSync(logPath, `${build.stdout}${build.stderr}`, { encoding: "utf8", mode: 0o600 });
   if (build.status !== 0) throw new Error(`BASE_IMAGE_BUILD_FAILED:${build.status}:${build.stderr.slice(-4000)}`);
-  const inspect = execute("docker", ["--context", dockerContext, "image", "inspect", RELEASE_BASE_IMAGE]);
+  const inspect = execute("docker", dockerCommandArguments(dockerContext, ["image", "inspect", RELEASE_BASE_IMAGE]));
   const metadata = JSON.parse(inspect.stdout)[0];
   if (metadata.Os !== RELEASE_DOCKER_OS || metadata.Architecture !== RELEASE_DOCKER_ARCH) throw new Error("BASE_IMAGE_PLATFORM_MISMATCH");
   const sealPath = paths.releaseSeal;
@@ -180,11 +184,15 @@ function prepareImage(repoRoot, paths, dockerContext) {
   }
   writeExclusive(sealPath, {
     schema_version: 1,
-    kind: "macos-linux-release-cache",
+    kind: "linux-server-release-cache",
     image: RELEASE_BASE_IMAGE,
     image_id: metadata.Id,
     platform: "linux/amd64",
+    base_image_source: RELEASE_BASE_IMAGE_SOURCE,
+    python_version: RELEASE_PYTHON_VERSION,
     docker_context: dockerContext,
+    docker_effective_context: dockerIdentity.effective_context,
+    docker_context_fingerprint: dockerIdentity.context_fingerprint,
     claude_tarball_sha256: RELEASE_CLAUDE_TARBALL_SHA256,
     claude_cli_sha256: RELEASE_CLAUDE_CLI_SHA256,
     uv_archive_sha256: RELEASE_UV_ARCHIVE_SHA256,
@@ -200,8 +208,12 @@ function main() {
   const repoRoot = path.resolve(argument("--repo-root") ?? DEFAULT_REPO_ROOT);
   const configuredCache = argument("--cache-root");
   if (configuredCache && !path.isAbsolute(configuredCache)) throw new Error("CACHE_ROOT_MUST_BE_ABSOLUTE");
-  const dockerContext = argument("--docker-context") ?? RELEASE_DOCKER_CONTEXT;
-  if (dockerContext !== RELEASE_DOCKER_CONTEXT) throw new Error("DOCKER_CONTEXT_MUST_BE_COLIMA");
+  const hostClient = releaseClientForHost();
+  const client = argument("--client") ?? hostClient;
+  if (client !== hostClient) throw new Error(`CACHE_CLIENT_HOST_MISMATCH:${client}:${hostClient}`);
+  const expectedDockerContext = releaseDockerContextForClient(client);
+  const dockerContext = argument("--docker-context") ?? expectedDockerContext;
+  if (dockerContext !== expectedDockerContext) throw new Error(`DOCKER_CONTEXT_MISMATCH:${client}:${expectedDockerContext}`);
   const paths = releaseCachePaths(repoRoot, configuredCache);
   ensureDirectory(paths.cacheRoot);
   const stagingRoot = path.join(paths.cacheRoot, `.prepare-${process.pid}-${crypto.randomUUID()}`);
@@ -209,7 +221,7 @@ function main() {
   try {
     prepareClaude(paths, stagingRoot);
     prepareUv(paths, stagingRoot);
-    if (!has("--skip-image")) prepareImage(repoRoot, paths, dockerContext);
+    if (!has("--skip-image")) prepareImage(repoRoot, paths, dockerContext, client);
   } finally {
     fs.rmSync(stagingRoot, { recursive: true, force: true });
   }

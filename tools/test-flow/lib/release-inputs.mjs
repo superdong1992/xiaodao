@@ -28,7 +28,7 @@ export const RELEASE_HATCHLING_VERSION = RELEASE_RUNTIME_PROFILE.hatchling;
 export const RELEASE_PYTHON_VERSION = RELEASE_RUNTIME_PROFILE.python;
 export const RELEASE_BASE_IMAGE = RELEASE_RUNTIME_PROFILE.base_image.name;
 export const RELEASE_BASE_IMAGE_SOURCE = RELEASE_RUNTIME_PROFILE.base_image.source;
-export const RELEASE_DOCKER_CONTEXT = RELEASE_RUNTIME_PROFILE.base_image.macos_docker_context;
+export const RELEASE_DOCKER_CONTEXTS = Object.freeze({ ...RELEASE_RUNTIME_PROFILE.base_image.docker_contexts });
 export const RELEASE_DOCKER_OS = RELEASE_RUNTIME_PROFILE.base_image.os;
 export const RELEASE_DOCKER_ARCH = RELEASE_RUNTIME_PROFILE.base_image.architecture;
 export const RELEASE_MODEL = RELEASE_RUNTIME_PROFILE.claude.model;
@@ -42,6 +42,68 @@ const MODEL_KEYS = Object.freeze([
   "ANTHROPIC_DEFAULT_OPUS_MODEL",
   "ANTHROPIC_DEFAULT_SONNET_MODEL",
 ]);
+
+export function releaseClientForHost(platform = process.platform) {
+  if (platform === "win32") return "windows";
+  if (platform === "darwin") return "macos";
+  if (platform === "linux") return "linux";
+  throw new Error(`RELEASE_HOST_PLATFORM_UNSUPPORTED:${platform}`);
+}
+
+export function releaseDockerContextForClient(client) {
+  const context = RELEASE_DOCKER_CONTEXTS[client];
+  if (!context) throw new Error(`RELEASE_CLIENT_UNSUPPORTED:${client}`);
+  return context;
+}
+
+export function dockerCommandArguments(contextName, args) {
+  return contextName && contextName !== "default" ? ["--context", contextName, ...args] : [...args];
+}
+
+export function releaseArtifactDownloadInvocation(platform, sourceUrl, destination) {
+  let source;
+  try {
+    source = new URL(sourceUrl);
+  } catch {
+    throw new Error("RELEASE_DOWNLOAD_URL_INVALID");
+  }
+  if (source.protocol !== "https:" || source.username || source.password) {
+    throw new Error("RELEASE_DOWNLOAD_URL_INVALID");
+  }
+  if (!path.isAbsolute(destination)) throw new Error("RELEASE_DOWNLOAD_DESTINATION_INVALID");
+
+  if (platform === "win32") {
+    const script = [
+      "& { param([string]$Source, [string]$Destination)",
+      "$ErrorActionPreference = 'Stop';",
+      "$ProgressPreference = 'SilentlyContinue';",
+      "Invoke-WebRequest -Uri $Source -OutFile $Destination",
+      "-MaximumRedirection 10 -TimeoutSec 900 -UseBasicParsing",
+      "}",
+    ].join(" ");
+    return {
+      command: "powershell.exe",
+      args: [
+        "-NoLogo", "-NoProfile", "-NonInteractive",
+        "-ExecutionPolicy", "Bypass", "-Command", script,
+        source.href, destination,
+      ],
+    };
+  }
+  if (platform === "darwin" || platform === "linux") {
+    return {
+      command: "curl",
+      args: [
+        "--fail", "--location", "--silent", "--show-error",
+        "--retry", "3", "--retry-all-errors",
+        "--connect-timeout", "20", "--max-time", "900",
+        "--output", destination,
+        "--", source.href,
+      ],
+    };
+  }
+  throw new Error(`RELEASE_HOST_PLATFORM_UNSUPPORTED:${platform}`);
+}
 
 function ordinaryFile(filePath) {
   if (!filePath || !path.isAbsolute(filePath) || !fs.existsSync(filePath)) return false;
@@ -296,15 +358,35 @@ export function validateUvCache(paths) {
 }
 
 export function externalGitIdentity(sourceRoot, expectedCommit) {
-  const result = { status: "INVALID", root: sourceRoot && path.isAbsolute(sourceRoot) ? path.resolve(sourceRoot) : null, head: null, clean: false, code: null };
+  const result = {
+    status: "INVALID",
+    root: sourceRoot && path.isAbsolute(sourceRoot) ? path.resolve(sourceRoot) : null,
+    head: null,
+    clean: false,
+    pinned_commit: expectedCommit ?? null,
+    tree_oid: null,
+    tree_manifest_sha256: null,
+    code: null,
+  };
   try {
     if (!sourceRoot || !path.isAbsolute(sourceRoot) || !fs.existsSync(sourceRoot) || !fs.statSync(sourceRoot).isDirectory()) throw new Error("SOURCE_ROOT_INVALID");
-    const head = runSync("git", ["-C", sourceRoot, "rev-parse", "HEAD"]);
-    const status = runSync("git", ["-C", sourceRoot, "status", "--porcelain=v1", "--untracked-files=all"]);
+    if (!/^[a-f0-9]{40}$/.test(expectedCommit ?? "")) throw new Error("SOURCE_PIN_INVALID");
+    const safe = `safe.directory=${path.resolve(sourceRoot).split(path.sep).join("/")}`;
+    const git = (args, options = {}) => runSync("git", ["-c", safe, "-C", sourceRoot, ...args], options);
+    const head = git(["rev-parse", "HEAD"]);
+    const status = git(["status", "--porcelain=v1", "--untracked-files=all"]);
     result.head = head.status === 0 ? head.stdout.trim() : null;
     result.clean = status.status === 0 && status.stdout.length === 0;
-    if (result.head !== expectedCommit) throw new Error("SOURCE_COMMIT_MISMATCH");
+    if (head.status !== 0 || status.status !== 0) throw new Error("SOURCE_GIT_UNAVAILABLE");
     if (!result.clean) throw new Error("SOURCE_TREE_DIRTY");
+    const commit = git(["rev-parse", "--verify", `${expectedCommit}^{commit}`]);
+    if (commit.status !== 0 || commit.stdout.trim() !== expectedCommit) throw new Error("SOURCE_PIN_MISSING");
+    const tree = git(["rev-parse", `${expectedCommit}^{tree}`]);
+    if (tree.status !== 0 || !/^[a-f0-9]{40,64}$/.test(tree.stdout.trim())) throw new Error("SOURCE_PIN_TREE_INVALID");
+    const manifest = git(["ls-tree", "-r", "-z", "--full-tree", expectedCommit], { maxBuffer: 128 * 1024 * 1024 });
+    if (manifest.status !== 0 || manifest.stdout.length === 0) throw new Error("SOURCE_PIN_MANIFEST_INVALID");
+    result.tree_oid = tree.stdout.trim();
+    result.tree_manifest_sha256 = sha256Bytes(manifest.stdout);
     result.status = "PRESENT";
     return result;
   } catch (error) {
@@ -313,10 +395,11 @@ export function externalGitIdentity(sourceRoot, expectedCommit) {
   }
 }
 
-export function dockerServerIdentity(contextName) {
+export function dockerServerIdentity(contextName, client = releaseClientForHost(), dependencies = {}) {
   const result = {
     status: "INVALID",
     context: contextName ?? null,
+    effective_context: null,
     os: null,
     architecture: null,
     version: null,
@@ -329,13 +412,18 @@ export function dockerServerIdentity(contextName) {
     code: null,
   };
   try {
-    if (contextName !== RELEASE_DOCKER_CONTEXT) throw new Error("DOCKER_CONTEXT_MISMATCH");
-    const dockerCommand = resolveCommand("docker");
+    const expectedContext = releaseDockerContextForClient(client);
+    const logicalContext = contextName ?? expectedContext;
+    result.context = logicalContext;
+    if (logicalContext !== expectedContext) throw new Error("DOCKER_CONTEXT_MISMATCH");
+    const runner = dependencies.runSync ?? runSync;
+    const dockerCommand = dependencies.dockerCommand ?? resolveCommand("docker");
     const docker = resolvedOrdinaryFile(dockerCommand);
     if (!docker) throw new Error("DOCKER_CLIENT_MISSING");
     result.docker_cli = docker;
     result.docker_cli_sha256 = sha256File(result.docker_cli);
-    const server = runSync(docker, ["--context", contextName, "version", "--format", "{{json .Server}}"]);
+    const invokeDocker = (args) => runner(docker, dockerCommandArguments(logicalContext, args));
+    const server = invokeDocker(["version", "--format", "{{json .Server}}"]);
     if (server.status !== 0) throw new Error("DOCKER_SERVER_UNAVAILABLE");
     const metadata = JSON.parse(server.stdout);
     result.os = String(metadata.Os ?? metadata.OsType ?? "").toLowerCase();
@@ -345,18 +433,27 @@ export function dockerServerIdentity(contextName) {
     if (result.os !== RELEASE_DOCKER_OS) throw new Error("DOCKER_SERVER_OS_MISMATCH");
     if (!["amd64", "x86_64"].includes(result.architecture)) throw new Error("DOCKER_SERVER_ARCH_MISMATCH");
     result.architecture = RELEASE_DOCKER_ARCH;
-    const inspected = runSync(docker, ["context", "inspect", contextName]);
+    if (logicalContext === "default") {
+      const current = runner(docker, ["context", "show"]);
+      if (current.status !== 0 || !current.stdout.trim()) throw new Error("DOCKER_CONTEXT_CURRENT_FAILED");
+      result.effective_context = current.stdout.trim();
+    } else {
+      result.effective_context = logicalContext;
+    }
+    const inspected = runner(docker, ["context", "inspect", result.effective_context]);
     if (inspected.status !== 0) throw new Error("DOCKER_CONTEXT_INSPECT_FAILED");
     result.context_fingerprint = sha256Bytes(inspected.stdout);
-    const colimaCommand = resolveCommand("colima");
-    const colima = resolvedOrdinaryFile(colimaCommand);
-    if (!colima) throw new Error("COLIMA_CLIENT_MISSING");
-    const colimaVersion = runSync(colima, ["version"]);
-    if (colimaVersion.status !== 0) throw new Error("COLIMA_VERSION_FAILED");
-    result.colima_version = colimaVersion.stdout.trim().split(/\r?\n/, 1)[0];
-    const colimaStatus = runSync(colima, ["status", "--json"]);
-    if (colimaStatus.status !== 0) throw new Error("COLIMA_STATUS_FAILED");
-    result.colima_status_fingerprint = sha256Bytes(colimaStatus.stdout);
+    if (client === "macos") {
+      const colimaCommand = dependencies.colimaCommand ?? resolveCommand("colima");
+      const colima = resolvedOrdinaryFile(colimaCommand);
+      if (!colima) throw new Error("COLIMA_CLIENT_MISSING");
+      const colimaVersion = runner(colima, ["version"]);
+      if (colimaVersion.status !== 0) throw new Error("COLIMA_VERSION_FAILED");
+      result.colima_version = colimaVersion.stdout.trim().split(/\r?\n/, 1)[0];
+      const colimaStatus = runner(colima, ["status", "--json"]);
+      if (colimaStatus.status !== 0) throw new Error("COLIMA_STATUS_FAILED");
+      result.colima_status_fingerprint = sha256Bytes(colimaStatus.stdout);
+    }
     result.status = "PRESENT";
     return result;
   } catch (error) {
@@ -365,26 +462,33 @@ export function dockerServerIdentity(contextName) {
   }
 }
 
-export function validateReleaseImage(paths, dockerIdentity) {
+export function validateReleaseImage(paths, dockerIdentity, runner = runSync) {
   try {
     if (dockerIdentity?.status !== "PRESENT") throw new Error("DOCKER_IDENTITY_INVALID");
     if (!ordinaryFile(paths.releaseSeal)) throw new Error("RELEASE_CACHE_SEAL_MISSING");
     const seal = JSON.parse(fs.readFileSync(paths.releaseSeal, "utf8"));
-    const inspect = runSync(dockerIdentity.docker_cli, ["--context", dockerIdentity.context, "image", "inspect", paths.baseImage]);
+    const inspect = runner(dockerIdentity.docker_cli, dockerCommandArguments(dockerIdentity.context, ["image", "inspect", paths.baseImage]));
     if (inspect.status !== 0) throw new Error("RELEASE_BASE_IMAGE_MISSING");
     const metadata = JSON.parse(inspect.stdout)[0];
     const labels = metadata.Config?.Labels ?? {};
     if (metadata.Os !== RELEASE_DOCKER_OS || metadata.Architecture !== RELEASE_DOCKER_ARCH) throw new Error("RELEASE_BASE_IMAGE_PLATFORM_MISMATCH");
-    if (labels["problem-locator.e2e.claude"] !== `npm-${RELEASE_CLAUDE_VERSION}`
+    if (labels["problem-locator.e2e.base-digest"] !== RELEASE_BASE_IMAGE_SOURCE
+      || labels["problem-locator.e2e.python"] !== RELEASE_PYTHON_VERSION
+      || labels["problem-locator.e2e.claude"] !== `npm-${RELEASE_CLAUDE_VERSION}`
       || labels["problem-locator.e2e.uv"] !== RELEASE_UV_VERSION
       || labels["problem-locator.e2e.hatchling"] !== RELEASE_HATCHLING_VERSION) {
       throw new Error("RELEASE_BASE_IMAGE_LABEL_MISMATCH");
     }
     const valid = seal.schema_version === 1
-      && seal.kind === "macos-linux-release-cache"
+      && seal.kind === "linux-server-release-cache"
       && seal.image === paths.baseImage
       && seal.image_id === metadata.Id
       && seal.platform === "linux/amd64"
+      && seal.base_image_source === RELEASE_BASE_IMAGE_SOURCE
+      && seal.python_version === RELEASE_PYTHON_VERSION
+      && seal.docker_context === dockerIdentity.context
+      && seal.docker_effective_context === dockerIdentity.effective_context
+      && seal.docker_context_fingerprint === dockerIdentity.context_fingerprint
       && seal.claude_tarball_sha256 === RELEASE_CLAUDE_TARBALL_SHA256
       && seal.claude_cli_sha256 === RELEASE_CLAUDE_CLI_SHA256
       && seal.uv_archive_sha256 === RELEASE_UV_ARCHIVE_SHA256

@@ -447,12 +447,20 @@ def test_cancellation_while_descendant_holds_exited_parent_pipes_wins(
 ) -> None:
     root = _workspace(tmp_path)
     cancellation = _Signal()
-    timer = threading.Timer(
-        0.1,
-        cancellation.cancel,
-        args=(CancellationReason.USER_CANCEL,),
-    )
-    timer.start()
+    child_marker = root / "output/proposals/child/child.pid"
+    marker_observed = threading.Event()
+
+    def cancel_after_descendant_starts() -> None:
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            if child_marker.is_file():
+                marker_observed.set()
+                break
+            time.sleep(0.01)
+        cancellation.cancel(CancellationReason.USER_CANCEL)
+
+    canceller = threading.Thread(target=cancel_after_descendant_starts)
+    canceller.start()
     try:
         with pytest.raises(RuntimeExecutionError) as caught:
             _execute(
@@ -461,10 +469,11 @@ def test_cancellation_while_descendant_holds_exited_parent_pipes_wins(
                 cancellation=cancellation,
             )
     finally:
-        timer.cancel()
+        canceller.join(3.0)
 
     _assert_failure(caught, ErrorCode.BACKEND_CANCELLED)
-    child_pid = int((root / "output/proposals/child/child.pid").read_text())
+    assert marker_observed.is_set()
+    child_pid = int(child_marker.read_text())
     deadline = time.monotonic() + 2.0
     while time.monotonic() < deadline and _pid_exists(child_pid):
         time.sleep(0.02)

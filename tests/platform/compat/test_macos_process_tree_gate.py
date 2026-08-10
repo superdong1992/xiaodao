@@ -118,8 +118,8 @@ class _BackendTimeoutRuntime:
         raise AssertionError("child-hang backend unexpectedly returned success")
 
 
-@pytest.mark.skipif(sys.platform != "darwin", reason="native macOS process gate")
-def test_macos_timeout_kills_the_real_child_tree_without_rerunning_agent(
+@pytest.mark.skipif(os.name == "nt", reason="native POSIX process gate")
+def test_posix_timeout_kills_the_real_child_tree_without_rerunning_agent(
     tmp_path: Path,
 ) -> None:
     data_root = tmp_path / "data"

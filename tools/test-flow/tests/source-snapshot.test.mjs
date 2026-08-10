@@ -4,6 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
 import {
   captureSourceSnapshot,
@@ -11,6 +12,8 @@ import {
   verifyMaterializedSourceSnapshot,
   verifySourceSnapshot,
 } from "../lib/source-snapshot.mjs";
+
+const RUNTIME_VERIFIER = fileURLToPath(new URL("../runtime-support/verify-source-snapshot.mjs", import.meta.url));
 
 function git(root, ...args) {
   const result = spawnSync("git", ["-C", root, ...args], { encoding: "utf8" });
@@ -74,5 +77,48 @@ test("source snapshots preserve relocatable internal symlinks and reject externa
     fs.rmSync(root, { recursive: true, force: true });
     fs.rmSync(materializedParent, { recursive: true, force: true });
     fs.rmSync(externalRoot, { recursive: true, force: true });
+  }
+});
+
+test("container verification restores only manifest-declared file modes before hashing", { skip: process.platform === "win32" }, () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "test-flow-source-mode-"));
+  const materializedParent = fs.mkdtempSync(path.join(os.tmpdir(), "test-flow-source-mode-materialized-"));
+  try {
+    git(root, "init", "--quiet");
+    const executable = path.join(root, "runner.sh");
+    fs.writeFileSync(executable, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    git(root, "add", "runner.sh");
+    const snapshot = captureSourceSnapshot(root);
+    assert.equal(snapshot.records[0].mode, "100755");
+    const materialized = path.join(materializedParent, "repository");
+    materializeSourceSnapshot(root, materialized, snapshot);
+    fs.chmodSync(path.join(materialized, "runner.sh"), 0o644);
+    assert.notEqual(verifyMaterializedSourceSnapshot(materialized, snapshot).status, "PASS");
+    const manifest = path.join(materializedParent, "source-snapshot.json");
+    fs.writeFileSync(manifest, JSON.stringify(snapshot));
+
+    const rejected = spawnSync(process.execPath, [
+      RUNTIME_VERIFIER,
+      "--root", materialized,
+      "--manifest", manifest,
+      "--expected-digest", snapshot.digest,
+    ], { encoding: "utf8" });
+    assert.notEqual(rejected.status, 0);
+    assert.match(rejected.stderr, /SOURCE_SNAPSHOT_CONTENT_DRIFT/);
+
+    const normalized = spawnSync(process.execPath, [
+      RUNTIME_VERIFIER,
+      "--root", materialized,
+      "--manifest", manifest,
+      "--expected-digest", snapshot.digest,
+      "--normalize-modes-from-manifest",
+    ], { encoding: "utf8" });
+    assert.equal(normalized.status, 0, normalized.stderr);
+    assert.equal(JSON.parse(normalized.stdout).normalized_modes, true);
+    assert.equal(fs.statSync(path.join(materialized, "runner.sh")).mode & 0o111, 0o111);
+    assert.equal(verifyMaterializedSourceSnapshot(materialized, snapshot).status, "PASS");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(materializedParent, { recursive: true, force: true });
   }
 });

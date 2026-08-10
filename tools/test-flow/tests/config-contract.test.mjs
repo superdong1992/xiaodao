@@ -132,3 +132,15 @@ test("unsupported policy versions and dead fields fail closed", () => {
     value.proofs["proof.framework"].fresh = true;
   }, (root) => loadConfiguration(REPO_ROOT, root)), (error) => error.code === "CONFIG_PROOF_FIELDS");
 });
+
+test("the formal runtime profile freezes one logical Docker context per supported Client", () => {
+  const config = loadConfiguration(REPO_ROOT);
+  assert.deepEqual(config.runtimeProfiles.profiles.release.base_image.docker_contexts, {
+    windows: "default",
+    macos: "colima",
+    linux: "default",
+  });
+  assert.throws(() => withConfigMutation("runtime-profiles.v2.json", (value) => {
+    value.profiles.release.base_image.docker_contexts.windows = "colima";
+  }, (root) => loadConfiguration(REPO_ROOT, root)), (error) => error.code === "CONFIG_RUNTIME_DOCKER_CONTEXTS");
+});

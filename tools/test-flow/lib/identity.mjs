@@ -279,10 +279,23 @@ export function computeIdentitySets({
       const tree = hashConfiguredPaths(repoRoot, definition.paths);
       value = { kind: definition.kind, status: tree.records.some((record) => record.kind === "missing" || record.kind === "unsupported") ? "MISSING" : "PRESENT", digest: tree.digest, records: tree.records };
     } else if (definition.kind === "external-tree") {
-      const tree = externalTrees[definition.name]
-        ? hashTree(externalTrees[definition.name])
-        : { status: "MISSING", root: null, digest: null, records: [] };
-      value = { kind: definition.kind, name: definition.name, status: tree.status, root: tree.root ?? null, digest: tree.digest };
+      const source = externalTrees[definition.name];
+      if (source && typeof source === "object") {
+        value = {
+          kind: definition.kind,
+          name: definition.name,
+          status: source.status,
+          root: source.root ?? null,
+          pinned_commit: source.pinned_commit ?? null,
+          tree_oid: source.tree_oid ?? null,
+          tree_manifest_sha256: source.tree_manifest_sha256 ?? null,
+        };
+      } else {
+        const tree = source
+          ? hashTree(source)
+          : { status: "MISSING", root: null, digest: null, records: [] };
+        value = { kind: definition.kind, name: definition.name, status: tree.status, root: tree.root ?? null, digest: tree.digest };
+      }
     } else if (definition.kind === "client-distribution") {
       value = { kind: definition.kind, ...sharedClient };
     } else if (definition.kind === "claude-settings") {

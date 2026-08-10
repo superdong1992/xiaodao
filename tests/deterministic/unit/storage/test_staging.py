@@ -14,6 +14,7 @@ from problem_locator.storage.paths import (
 )
 from problem_locator.storage.staging import StagedObjectWriter
 from problem_locator.storage.tree import inspect_tree
+from tests.deterministic.fs_capabilities import symlink_or_skip
 from tests.deterministic.unit.storage.fakes import (
     CountingBinaryStream,
     DeterministicIdGenerator,
@@ -376,10 +377,11 @@ def test_staging_path_symlinks_are_rejected_before_stream_is_read(
     outside.mkdir()
     if stage_kind == "upload":
         directory = _upload_directory(harness)
-        directory.symlink_to(outside, target_is_directory=True)
+        symlink_or_skip(directory, outside, target_is_directory=True)
     else:
         directory = _proposal_directory(harness)
-        (harness.layout.proposals / JOB_ID).symlink_to(
+        symlink_or_skip(
+            harness.layout.proposals / JOB_ID,
             outside,
             target_is_directory=True,
         )
@@ -505,7 +507,7 @@ def test_tree_stage_rejects_linked_source_without_publishing(
     first = source / "first"
     first.write_bytes(b"shared")
     if link_kind == "symlink":
-        (source / "linked").symlink_to(first)
+        symlink_or_skip(source / "linked", first)
         expected_message = "symbolic"
     else:
         os.link(first, source / "linked")

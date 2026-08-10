@@ -22,7 +22,7 @@ Windows、macOS 和显式 Linux Client 都有仓库内置 adapter。`--client au
 ./tools/test-flow/run.sh --track dev --goal dev.default
 ```
 
-PowerShell 使用同参数的 `tools/test-flow/run.ps1`。计划会列出 Goal、Proof、Stage、Gate、依赖、身份、复用决定、性能身份、预计资源和 admission blocker。
+PowerShell 使用同参数的 `tools/test-flow/run.ps1`。若系统策略禁止脚本，先在同一会话执行 `Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force`；它不修改机器或用户级策略。计划会列出 Goal、Proof、Stage、Gate、依赖、身份、复用决定、性能身份、预计资源和 admission blocker。
 
 ## Dev 真实测试
 
@@ -54,45 +54,56 @@ PowerShell 使用同参数的 `tools/test-flow/run.ps1`。计划会列出 Goal�
 ## Release
 
 Release planning 会冻结当前 Git 可见工作树的 exact source snapshot；工作树可以尚未提交。tracked 文件使用当前字节，未忽略的 untracked 文件也会进入清单，ignored 文件不会进入。运行期间任何源码漂移都会使 verdict 成为 `ERROR`。先准备由
-[`config/runtime-profiles.v2.json`](config/runtime-profiles.v2.json) 冻结的 Claude、uv 和 Linux base image 缓存；准备阶段可以联网，正式 Release 使用已封存缓存且不拉取镜像：
+[`config/runtime-profiles.v2.json`](config/runtime-profiles.v2.json) 冻结的 Claude、uv 和 Linux base image 缓存；准备阶段可以联网，正式 Release 使用同一 sealed cache 且不拉取镜像。Windows 和 Linux 的 logical Docker context 是 `default`，表示不向 Docker CLI 传 `--context`，使用 `docker context show` 当前选中的 Linux engine；macOS 的 logical context 是显式 `colima`。cache seal 同时绑定 logical/effective context、Linux amd64 Server、image ID 和冻结 labels。
 
-```sh
-node tools/test-flow/prepare-release-cache.mjs \
-  --repo-root /absolute/path/to/problem-locator \
-  --cache-root /absolute/path/to/test-flow-cache \
-  --docker-context colima
-```
+原生 Windows + PowerShell 的准备和 Release 命令如下；Docker Desktop 必须处于 Linux containers 模式，且当前选中 context 必须能返回 Linux/amd64 Server：
 
-然后把 `PROFILE_VERSION` 替换为该配置中的 `claude.version`，用完全相同的输入先规划、再执行：
+仓库文本由根目录 `.gitattributes` 固定为 LF；不要用 Windows checkout 的 CRLF 字节覆盖 canonical fixture/manifest。Dev 的 pytest Gate 会自动使用 ignored 的 `.tmp\s\<digest>` 短 scratch，以兼容未启用 long paths 的标准 Windows；该目录由编排器创建并在 Gate 结束时清理，无需手工配置或保留。
 
-```sh
-./tools/test-flow/run.sh \
-  --track release \
-  --goal release.full \
-  --client macos \
-  --resume fresh \
-  --logparse-source /absolute/path/to/logparse \
-  --mcp-source /absolute/path/to/problem-locator-mcp \
-  --claude-entry /absolute/path/to/test-flow-cache/claude/PROFILE_VERSION/package/cli.js \
-  --claude-settings /absolute/path/to/claude/settings.json \
-  --docker-context colima \
-  --cache-root /absolute/path/to/test-flow-cache \
+cache preparer 始终下载 runtime profile 冻结的 HTTPS URL，并在发布前校验固定 SHA-256。Windows 使用 PowerShell 的系统代理栈下载，macOS/Linux 使用 curl；这只是同一 preparer 的主机传输实现，URL、hash、cache seal 与 image validation 合同完全相同。
+
+Docker Desktop 的 Windows bind mount 可能把普通文件显示为 `0777`。CrossJob 容器复制 source snapshot 后会在已验证的 manifest/path set 约束内恢复 manifest 声明的执行位，再校验全部 size/hash/mode；这一步不放宽 source digest，也不要求 Windows 开启 POSIX mode 支持。
+
+```powershell
+$REPO_ROOT = (Resolve-Path .).Path
+$LOGPARSE_SOURCE = 'C:\absolute\path\to\logparse'
+$MCP_SOURCE = 'C:\absolute\path\to\problem-locator-mcp'
+$CLAUDE_SETTINGS = 'C:\absolute\path\to\claude-settings.json'
+$CACHE_ROOT = 'C:\absolute\path\to\test-flow-cache'
+
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
+docker context show
+docker version --format '{{json .Server}}'
+node tools/test-flow/prepare-release-cache.mjs `
+  --repo-root $REPO_ROOT `
+  --cache-root $CACHE_ROOT `
+  --client windows
+
+.\tools\test-flow\run.ps1 `
+  --track release `
+  --goal release.full `
+  --client windows `
+  --resume fresh `
+  --logparse-source $LOGPARSE_SOURCE `
+  --mcp-source $MCP_SOURCE `
+  --claude-entry "$CACHE_ROOT\claude\2.1.89\package\cli.js" `
+  --claude-settings $CLAUDE_SETTINGS `
+  --cache-root $CACHE_ROOT `
   --plan-only
 
-./tools/test-flow/run.sh \
-  --track release \
-  --goal release.full \
-  --client macos \
-  --resume fresh \
-  --logparse-source /absolute/path/to/logparse \
-  --mcp-source /absolute/path/to/problem-locator-mcp \
-  --claude-entry /absolute/path/to/test-flow-cache/claude/PROFILE_VERSION/package/cli.js \
-  --claude-settings /absolute/path/to/claude/settings.json \
-  --docker-context colima \
-  --cache-root /absolute/path/to/test-flow-cache
+.\tools\test-flow\run.ps1 `
+  --track release `
+  --goal release.full `
+  --client windows `
+  --resume fresh `
+  --logparse-source $LOGPARSE_SOURCE `
+  --mcp-source $MCP_SOURCE `
+  --claude-entry "$CACHE_ROOT\claude\2.1.89\package\cli.js" `
+  --claude-settings $CLAUDE_SETTINGS `
+  --cache-root $CACHE_ROOT
 ```
 
-Windows 使用 `--client windows`，显式 Linux Client 使用 `--client linux`；两者不接受 macOS 的 Docker context。仓库拥有三种 adapter 的相同 Gate receipt 合同，但一次 Release 只证明 verdict 中记录的实际平台、source snapshot digest 和全部输入身份，不能外推成未执行平台的真实 PASS。
+macOS cache preparation and Release 都必须显式传 `--docker-context colima`；显式 Linux Client 使用 `--client linux` 且和 Windows 一样不传 `--docker-context`。三个 Client 使用同一 preparer、Linux image/cache validator、Gate receipt、identity、DFX 和 evidence 合同；一次 Release 只证明 verdict 中记录的实际平台、source snapshot digest 和全部输入身份，不能外推成未执行平台的真实 PASS。
 
 `verdict.json` 会同时记录 snapshot digest、base Git SHA、branch 和 planning 时的 dirty 状态。Git 提交不是 Release admission 条件；推荐在全部 Proof 通过后再提交完全相同的快照。提交若改变任何 Git 可见 path 或字节，原 verdict 不再证明新内容，必须重新运行 Release。
 
@@ -101,6 +112,8 @@ Release 从 GENESIS 和新的空 `DATA_ROOT` 开始，不复用业务 checkpoint
 ## 预算、超时与性能
 
 真实 Gate 的计划列出模型、turn/token/USD/time 上限和预计成本。turn、USD 与进程时限由执行器或 provider 强制；token 上限还会由终端 receipt 复核，usage 缺失或超限不能 PASS。
+
+服务端一个 Job 只产生一条 Agent 调用收据；同一 Claude session 因后台任务通知追加的多个 `init → result` 续段会逐段校验并汇总 turn/token，费用采用单调的最终累计值。跨 session、未闭合续段或累计超限都不能 PASS。
 
 只有 allowlist 中的语义事件能刷新无进展计时。硬时限始终生效。性能使用同一版本化策略累计样本：样本不足是 `NOT_CALIBRATED`；Dev 回归告警；Release 同一性能身份第一次显著变慢为 warning，连续第二次才失败。复用 Stage 不产生性能样本。
 

@@ -29,7 +29,11 @@
         "source": "ubuntu@sha256:3131b4cc82a783df6c9df078f86e01819a13594b865c2cad47bd1bca2b7063bb",
         "os": "linux",
         "architecture": "amd64",
-        "macos_docker_context": "colima"
+        "docker_contexts": {
+          "windows": "default",
+          "macos": "colima",
+          "linux": "default"
+        }
       },
       "external_sources": {
         "logparse": "a233b500d9c99e6815d1ffd82cb4ca55bbfe657a",

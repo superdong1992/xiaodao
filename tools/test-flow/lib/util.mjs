@@ -127,17 +127,55 @@ export function runExecutableSync(executable, args, options = {}) {
 }
 
 export function commandExists(command) {
-  const probe = process.platform === "win32"
-    ? runSync("where.exe", [command])
-    : runSync("sh", ["-c", "command -v -- \"$1\"", "test-flow", command]);
-  return probe.status === 0 && probe.stdout.trim().length > 0;
+  return resolveCommand(command) !== null;
 }
 
 export function resolveCommand(command) {
+  const explicitPath = path.isAbsolute(command) || /[\\/]/.test(command);
+  if (explicitPath) {
+    const candidate = path.resolve(command);
+    try {
+      return fs.statSync(candidate).isFile() ? fs.realpathSync(candidate) : null;
+    } catch {
+      return null;
+    }
+  }
   const probe = process.platform === "win32"
     ? runSync("where.exe", [command])
     : runSync("sh", ["-c", "command -v -- \"$1\"", "test-flow", command]);
   return probe.status === 0 ? probe.stdout.trim().split(/\r?\n/, 1)[0] : null;
+}
+
+export function compactScratchPath(attemptRoot, scope) {
+  return path.join(attemptRoot, "scratch", sha256Bytes(scope).slice(0, 12));
+}
+
+export function createScratchBinding(repoRoot, attemptRoot, scope, platform = process.platform) {
+  const externalRoot = platform === "win32" ? path.resolve(repoRoot, ".tmp", "s") : null;
+  const allowedRoot = externalRoot ?? path.resolve(attemptRoot);
+  const scratchPath = externalRoot === null
+    ? compactScratchPath(attemptRoot, scope)
+    : path.join(externalRoot, sha256Bytes(`${path.resolve(attemptRoot)}\0${scope}`).slice(0, 12));
+  ensureDirectory(path.dirname(scratchPath));
+  try {
+    fs.mkdirSync(scratchPath, { mode: 0o700 });
+  } catch (error) {
+    if (error?.code === "EEXIST") {
+      throw new FlowError("SCRATCH_PATH_EXISTS", `Scratch path already exists: ${scratchPath}`);
+    }
+    throw error;
+  }
+  return { path: scratchPath, allowed_root: allowedRoot, external_root: externalRoot };
+}
+
+export function removeScratchBinding(binding) {
+  removeTreeWritable(binding.path, binding.allowed_root);
+  if (binding.external_root === null) return;
+  try {
+    fs.rmdirSync(binding.external_root);
+  } catch (error) {
+    if (!["ENOENT", "ENOTEMPTY", "EEXIST"].includes(error?.code)) throw error;
+  }
 }
 
 function pythonProbe(command, prefix, repoRoot, environment) {

@@ -73,6 +73,12 @@ Release 对真实旅程一律 `reuse=never`，忽略业务 checkpoint，从 GENE
 
 Linux 是唯一 Server 平台。Windows 与 macOS 默认使用本机 Client，Linux Client 仅在显式选择时启用；三者都通过 HTTP 直连 Linux Server，且都有仓库拥有的 built-in adapter。三个薄 wrapper 共享相同 Gate receipt、checkpoint、DFX、预算和 evidence 合同，不接受调用方提供任意 adapter 命令。
 
+runtime profile 为每个 Client 冻结 logical Docker context。Windows/Linux 的 `default` 表示不覆盖 Docker CLI 当前 context，planning 必须记录 `docker context show` 得到的 effective context；macOS 使用显式 `colima`。三者共用同一个 cache preparer、Linux amd64 image validator 和通用 cache seal；seal 必须绑定 logical/effective context、context fingerprint、image ID、base digest 与全部冻结 runtime labels。
+
+仓库通过根目录 `.gitattributes` 把文本工作树字节固定为 LF，避免 Windows `core.autocrlf` 改写 canonical JSON、fixture、manifest 或 source snapshot。Windows deterministic Gate 不假定系统已启用 long paths；编排器在仓库 ignored 的 `.tmp/s/<digest>` 下创建有界短 scratch，仍按同一 Gate receipt/evidence 合同执行，并在 Gate 的 `finally` 中精确清理该 scratch。该路径只是公共 runner 的平台适配，不是第二套 runner，也不得容纳发布源码或持久证据。
+
+Release artifact download 由同一 cache preparer 按 host transport 执行：Windows 使用系统代理感知的 PowerShell，macOS/Linux 使用 curl。所有 transport 只接受无凭据 HTTPS URL，参数与脚本分离，并在发布 cache 前执行 runtime profile 的固定 SHA-256、package identity 和 seal 校验；transport 选择不得改变来源或身份。
+
 平台“受支持”与“已在某次发布真实通过”是两件事。一个 verdict 只证明其中记录的 Client 平台、Server、不可变源码快照、运行时 profile 和外部输入；不得把 macOS 的真实 PASS 外推到 Windows 或 Linux Client。每个平台的真实认证必须由该平台自己的 `release.full` verdict 给出。
 
 ## 6. 身份模型
@@ -81,17 +87,23 @@ Release planning 会枚举 Git 可见工作树：使用 tracked 文件的当前�
 
 执行前把该快照物化到新的 attempt scratch；正式 Host/Linux/CrossJob adapter 只读取物化副本，直接读取工作树的 Gate 在执行前后复验同一清单。Linux 容器复制源码后再次按密封 manifest 验证完整 path set、模式和内容。planning 到 verdict 期间任何 Git 可见源码漂移都使本次运行 ERROR；因此不可变性由内容合同保证，不依赖提前提交。
 
+Docker Desktop 可能把 Windows bind mount 的普通文件统一呈现为可执行模式。容器复制完成后，验证器只能在 manifest digest 与完整 path set 已验证的前提下，幂等恢复 manifest 声明的 `100644/100755` 文件模式，然后继续复验类型、size、SHA-256 和最终 digest；不得忽略 mode，也不得从 bind mount 的合成权限推导发布身份。
+
 身份分三层：
 
 - producer identity：产品源码、schema/生成资产、Client、Server、Skill、Logparse/MCP 外部源码、Claude/settings、模型和 runtime profile；
 - proof identity：producer identity 加 canonical Stage/Gate 定义、依赖 proof identity、runner、扫描器、事件/status policy；
 - performance identity：Stage、producer identity、metric contract 与 performance policy version。
 
+外部 Git source 的生产输入是 runtime profile 冻结并由容器实际 checkout 的 commit/tree，而不是 source checkout 当时所在的分支 HEAD。planning 必须验证 source repository 干净、冻结 commit 可达，并记录 commit、tree object 与其规范 tree manifest 的 SHA-256；producer identity 使用这些实际消费值。HEAD 只保留为溯源元数据，不得替代或污染冻结输入身份。
+
 产品输入和测试实现分开建模：测试/文档变化会使 framework proof 失效，但不应无意义地改变业务 producer identity。真实 Agent 的 Claude entry、settings allowlist、Skill、Logparse 配置/Python和外部提交都必须入身份。任何定义或依赖变化都必须使预期 closure 精确失效。
 
 ## 7. 真实模型预算
 
 runtime profile 为每个真实 Gate 声明 model、turn、token、USD 与 time 上限。plan 同时显示 estimate 和 hard caps。turn、USD 与时间由执行器/provider 强制；token 上限由终端 usage receipt 再次校验。命令没有生效上限、receipt 缺 model/cap/terminal usage，或实际 usage 超限，都不能 PASS。
+
+一个服务端 Job 对应一个 Agent 进程和一条用量收据。Claude 因后台任务完成通知而在同一 session 中追加 `init → result` 续段时，收据必须逐段验证相同 model/session 和成功终态，累计 turn 与 token，并以单调的最终 `total_cost_usd` 计费；缺段、跨 session、费用回退或任一累计上限超限均失败关闭。
 
 同一失败身份不允许盲重试。下一次运行必须记录新的 `reason`、`hypothesis` 和 `expected_evidence`；这三个字段进入 plan 和证据。
 

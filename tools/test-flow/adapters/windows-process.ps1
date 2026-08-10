@@ -10,7 +10,10 @@ $utf8 = New-Object Text.UTF8Encoding($false, $true)
 if (-not ('ProblemLocator.TestFlow.NativeJob' -as [type])) {
     Add-Type -TypeDefinition @'
 using System;
+using System.IO;
 using System.Runtime.InteropServices;
+using System.Threading;
+using System.Threading.Tasks;
 namespace ProblemLocator.TestFlow {
     [StructLayout(LayoutKind.Sequential)] public struct IO_COUNTERS {
         public UInt64 ReadOperationCount, WriteOperationCount, OtherOperationCount;
@@ -34,7 +37,34 @@ namespace ProblemLocator.TestFlow {
         [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] public static extern IntPtr CreateJobObject(IntPtr attributes, string name);
         [DllImport("kernel32.dll", SetLastError=true)] [return: MarshalAs(UnmanagedType.Bool)] public static extern bool SetInformationJobObject(IntPtr job, Int32 kind, IntPtr value, UInt32 length);
         [DllImport("kernel32.dll", SetLastError=true)] [return: MarshalAs(UnmanagedType.Bool)] public static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
+        [DllImport("kernel32.dll", SetLastError=true)] [return: MarshalAs(UnmanagedType.Bool)] public static extern bool TerminateJobObject(IntPtr job, UInt32 exitCode);
         [DllImport("kernel32.dll", SetLastError=true)] [return: MarshalAs(UnmanagedType.Bool)] public static extern bool CloseHandle(IntPtr handle);
+
+        public sealed class PumpState {
+            public Int32 Exceeded;
+        }
+
+        public static async Task<Int64> PumpAsync(Stream input, Stream output, Int64 limit, PumpState state) {
+            byte[] buffer = new byte[8192];
+            Int64 total = 0;
+            for (;;) {
+                Int32 count = await input.ReadAsync(buffer, 0, buffer.Length).ConfigureAwait(false);
+                if (count == 0) break;
+                Int64 room = limit - total;
+                Int32 accepted = room > 0 ? (Int32)Math.Min((Int64)count, room) : 0;
+                if (accepted > 0) {
+                    await output.WriteAsync(buffer, 0, accepted).ConfigureAwait(false);
+                    await output.FlushAsync().ConfigureAwait(false);
+                    total += accepted;
+                }
+                if (accepted != count) {
+                    Interlocked.Exchange(ref state.Exceeded, 1);
+                    break;
+                }
+            }
+            await output.FlushAsync().ConfigureAwait(false);
+            return total;
+        }
     }
 }
 '@
@@ -80,19 +110,18 @@ function New-KillOnCloseJob {
 }
 
 $spec = [IO.File]::ReadAllText([IO.Path]::GetFullPath($SpecPath), $utf8) | ConvertFrom-Json
-$stdoutWriter = $null
-$stderrWriter = $null
+$stdoutStream = $null
+$stderrStream = $null
+$stdoutPump = $null
+$stderrPump = $null
 $process = $null
 $job = [IntPtr]::Zero
 $started = [DateTime]::UtcNow
 $streamLimit = [int64]$spec.raw_log_limit_bytes
 if ($streamLimit -le 0) { throw 'TEST_FLOW_RAW_LOG_LIMIT' }
-$streamState = [hashtable]::Synchronized(@{
-    stdout_bytes = [int64]0
-    stderr_bytes = [int64]0
-    exceeded = $false
-})
-$newlineBytes = [int64]$utf8.GetByteCount([Environment]::NewLine)
+$cancelPath = [IO.Path]::GetFullPath([string]$spec.cancel_path)
+$pumpState = New-Object 'ProblemLocator.TestFlow.NativeJob+PumpState'
+$controllerTermination = $false
 try {
     $start = New-Object Diagnostics.ProcessStartInfo
     $start.FileName = [string]$spec.executable
@@ -108,10 +137,8 @@ try {
         $start.EnvironmentVariables[[string]$property.Name] = [string]$property.Value
     }
 
-    $stdoutWriter = New-Object IO.StreamWriter([string]$spec.stdout_path, $false, $utf8)
-    $stderrWriter = New-Object IO.StreamWriter([string]$spec.stderr_path, $false, $utf8)
-    $stdoutWriter.AutoFlush = $true
-    $stderrWriter.AutoFlush = $true
+    $stdoutStream = [IO.File]::Open([string]$spec.stdout_path, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::Read)
+    $stderrStream = [IO.File]::Open([string]$spec.stderr_path, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::Read)
     $process = New-Object Diagnostics.Process
     $process.StartInfo = $start
     $job = New-KillOnCloseJob
@@ -119,53 +146,36 @@ try {
     if (-not [ProblemLocator.TestFlow.NativeJob]::AssignProcessToJobObject($job, $process.Handle)) {
         throw "TEST_FLOW_JOB_ASSIGN:$([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
     }
-    $process.add_OutputDataReceived([Diagnostics.DataReceivedEventHandler]{
-        param($sender, $event)
-        if ($null -ne $event.Data) {
-            $count = [int64]$utf8.GetByteCount($event.Data) + $newlineBytes
-            [Threading.Monitor]::Enter($streamState.SyncRoot)
-            try {
-                if (($streamState.stdout_bytes + $count) -le $streamLimit) {
-                    $stdoutWriter.WriteLine($event.Data)
-                    $streamState.stdout_bytes += $count
-                }
-                else { $streamState.exceeded = $true }
-            }
-            finally { [Threading.Monitor]::Exit($streamState.SyncRoot) }
-        }
-    })
-    $process.add_ErrorDataReceived([Diagnostics.DataReceivedEventHandler]{
-        param($sender, $event)
-        if ($null -ne $event.Data) {
-            $count = [int64]$utf8.GetByteCount($event.Data) + $newlineBytes
-            [Threading.Monitor]::Enter($streamState.SyncRoot)
-            try {
-                if (($streamState.stderr_bytes + $count) -le $streamLimit) {
-                    $stderrWriter.WriteLine($event.Data)
-                    $streamState.stderr_bytes += $count
-                }
-                else { $streamState.exceeded = $true }
-            }
-            finally { [Threading.Monitor]::Exit($streamState.SyncRoot) }
-        }
-    })
-    $process.BeginOutputReadLine()
-    $process.BeginErrorReadLine()
+    $stdoutPump = [ProblemLocator.TestFlow.NativeJob]::PumpAsync($process.StandardOutput.BaseStream, $stdoutStream, $streamLimit, $pumpState)
+    $stderrPump = [ProblemLocator.TestFlow.NativeJob]::PumpAsync($process.StandardError.BaseStream, $stderrStream, $streamLimit, $pumpState)
     while (-not $process.WaitForExit(100)) {
-        if ([bool]$streamState.exceeded) {
-            [void][ProblemLocator.TestFlow.NativeJob]::CloseHandle($job)
-            $job = [IntPtr]::Zero
+        if ($pumpState.Exceeded -ne 0 -or [IO.File]::Exists($cancelPath)) {
+            $controllerTermination = [IO.File]::Exists($cancelPath)
+            if (-not [ProblemLocator.TestFlow.NativeJob]::TerminateJobObject($job, 1)) {
+                throw "TEST_FLOW_JOB_TERMINATE:$([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
+            }
             break
         }
     }
-    $process.WaitForExit()
+    if (-not $process.WaitForExit(5000)) {
+        $process.Kill()
+        if (-not $process.WaitForExit(5000)) { throw 'TEST_FLOW_PROCESS_TERMINATE_TIMEOUT' }
+    }
+    [Threading.Tasks.Task]::WaitAll([Threading.Tasks.Task[]]@($stdoutPump, $stderrPump))
+    $stdoutStream.Flush($true)
+    $stderrStream.Flush($true)
+    $stdoutStream.Dispose()
+    $stdoutStream = $null
+    $stderrStream.Dispose()
+    $stderrStream = $null
     $status = [ordered]@{
         schema_version = 1
         status = 'EXITED'
         exit_code = $process.ExitCode
         process_id = $process.Id
         job_assigned = $true
-        raw_log_limit_exceeded = [bool]$streamState.exceeded
+        raw_log_limit_exceeded = ($pumpState.Exceeded -ne 0)
+        controller_termination = $controllerTermination
         elapsed_milliseconds = [int64](([DateTime]::UtcNow - $started).TotalMilliseconds)
     }
     $stream = [IO.File]::Open([IO.Path]::GetFullPath($StatusPath), [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
@@ -178,8 +188,8 @@ try {
     exit $process.ExitCode
 }
 finally {
-    if ($null -ne $stdoutWriter) { $stdoutWriter.Dispose() }
-    if ($null -ne $stderrWriter) { $stderrWriter.Dispose() }
+    if ($null -ne $stdoutStream) { $stdoutStream.Dispose() }
+    if ($null -ne $stderrStream) { $stderrStream.Dispose() }
     if ($job -ne [IntPtr]::Zero) { [void][ProblemLocator.TestFlow.NativeJob]::CloseHandle($job) }
     if ($null -ne $process) { $process.Dispose() }
 }

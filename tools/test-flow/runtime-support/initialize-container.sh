@@ -42,7 +42,8 @@ cp -a /source/xiaodao/. /opt/src/xiaodao/
 node /test-flow-runtime/verify-source-snapshot.mjs \
   --root /opt/src/xiaodao \
   --manifest /evidence/source/source-snapshot.json \
-  --expected-digest "$expected_xiaodao_snapshot" >/dev/null
+  --expected-digest "$expected_xiaodao_snapshot" \
+  --normalize-modes-from-manifest >/dev/null
 
 GIT_CONFIG_GLOBAL="$source_git_config" git -c core.autocrlf=false clone --no-hardlinks /source/logparse /opt/src/logparse >/dev/null
 git -C /opt/src/logparse checkout --detach "$expected_logparse" >/dev/null

@@ -39,6 +39,7 @@ from problem_locator.storage.resource_store import (
     StagePathRegistry,
 )
 from tests.deterministic.contracts.fakes import DeterministicIdGenerator, InMemoryBinaryStream
+from tests.deterministic.fs_capabilities import symlink_or_skip
 from tests.deterministic.unit.storage.fakes import FakeFileSync, FaultInjectingReplace
 
 
@@ -350,7 +351,7 @@ def test_stage_tree_rejects_links_as_path_violation(
     source.mkdir()
     outside = tmp_path / "outside"
     outside.write_bytes(b"outside")
-    (source / "link").symlink_to(outside)
+    symlink_or_skip(source / "link", outside)
 
     assert _error_code(lambda: harness.store.stage_tree(JOB_ID, "tree", source)) is (
         ErrorCode.PATH_VIOLATION
@@ -902,7 +903,7 @@ def test_discard_rejects_linked_stage_content_without_touching_target(
     outside = tmp_path / "outside-sentinel"
     outside.write_bytes(b"must survive")
     (directory / "payload").unlink()
-    (directory / "payload").symlink_to(outside)
+    symlink_or_skip(directory / "payload", outside)
 
     with pytest.raises(ValueError, match="ordinary"):
         harness.store.discard(proposal)

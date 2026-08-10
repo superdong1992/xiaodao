@@ -127,6 +127,17 @@ def _cross_project_result_experience() -> dict[str, Any]:
     return value
 
 
+def _journey_data_root(tmp_path: Path, scope: str) -> Path:
+    """Return an isolated root that preserves legacy Windows path headroom."""
+
+    if os.name != "nt":
+        return tmp_path / ".s08"
+    token = hashlib.sha256(scope.encode("utf-8")).hexdigest()[:2]
+    name = f".s{token}"
+    assert len(name) == 4
+    return ROOT / name
+
+
 def _golden_target_archive_names() -> tuple[list[dict[str, Any]], list[str]]:
     """Derive the legacy semantic names from the frozen broker response."""
 
@@ -740,7 +751,7 @@ def test_r01_r14_rpc_timeout_is_one_durable_cross_module_path(
     # Keep the staged LOGPARSE_RUN below the legacy Windows MAX_PATH boundary.
     # On POSIX, use pytest's native temporary filesystem so a Docker Desktop
     # bind mount cannot destabilize inode-based workspace safety checks.
-    data_root = ROOT / ".s08" if os.name == "nt" else tmp_path / ".s08"
+    data_root = _journey_data_root(tmp_path, "rpc-timeout")
     logparse_checkout = data_root.parent / ".s08lp"
     _remove_test_data_root(data_root)
     _remove_test_data_root(logparse_checkout)
@@ -1438,7 +1449,7 @@ def test_same_job_uses_initial_order_fact_and_survives_restart(
 ) -> None:
     """Prove the cheap SameJob path without spending a real-model call."""
 
-    data_root = ROOT / ".s08-same-job" if os.name == "nt" else tmp_path / ".s08"
+    data_root = _journey_data_root(tmp_path, "same-job")
     logparse_checkout = data_root.parent / ".s08lp"
     _remove_test_data_root(data_root)
     _remove_test_data_root(logparse_checkout)

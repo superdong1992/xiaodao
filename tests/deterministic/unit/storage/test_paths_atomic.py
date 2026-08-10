@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -24,6 +25,7 @@ from problem_locator.storage.paths import (
     resource_path,
     validate_data_root,
 )
+from tests.deterministic.fs_capabilities import symlink_or_skip
 from tests.deterministic.unit.storage.fakes import FakeFileSync, FaultInjectingReplace
 
 
@@ -96,7 +98,7 @@ def test_symlink_ancestor_and_final_symlink_are_rejected(tmp_path: Path) -> None
     outside = tmp_path / "outside"
     root.mkdir()
     outside.mkdir()
-    (root / "linked").symlink_to(outside, target_is_directory=True)
+    symlink_or_skip(root / "linked", outside, target_is_directory=True)
 
     with pytest.raises(ValueError):
         ensure_no_symlink_ancestors(root, root / "linked" / "payload")
@@ -104,12 +106,12 @@ def test_symlink_ancestor_and_final_symlink_are_rejected(tmp_path: Path) -> None
     real_file = root / "real"
     real_file.write_bytes(b"data")
     final_link = root / "final"
-    final_link.symlink_to(real_file)
+    symlink_or_skip(final_link, real_file)
     with pytest.raises(ValueError, match="symbolic"):
         ensure_no_symlink_ancestors(root, final_link)
 
     linked_root = tmp_path / "linked-root"
-    linked_root.symlink_to(root, target_is_directory=True)
+    symlink_or_skip(linked_root, root, target_is_directory=True)
     with pytest.raises(ValueError, match="links or reparse"):
         ensure_no_symlink_ancestors(linked_root, linked_root / "candidate")
 
@@ -131,7 +133,7 @@ def test_resource_path_rejects_kind_mismatch_and_symlinked_case_root(tmp_path: P
 
     outside = tmp_path / "outside-case"
     outside.mkdir()
-    (cases / CASE_ID).symlink_to(outside, target_is_directory=True)
+    symlink_or_skip(cases / CASE_ID, outside, target_is_directory=True)
     valid_ref = ResourceRef(
         resource_kind=ResourceKind.FILE,
         storage_key=formal_storage_key(CASE_ID, "evidence", RESOURCE_ID, ResourceKind.FILE),
@@ -228,11 +230,18 @@ def test_write_synced_file_rejects_path_exchange_during_handle_sync(
             synced_path.rename(displaced)
             synced_path.write_bytes(b"replacement inode")
 
-    with pytest.raises(OSError, match="changed before its sync completed"):
+    with pytest.raises(
+        OSError,
+        match=r"changed before its sync completed|\[WinError 32\]",
+    ):
         write_synced_file(path, b"original bytes", PathSwappingSync())
 
-    assert displaced.read_bytes() == b"original bytes"
-    assert path.read_bytes() == b"replacement inode"
+    if os.name == "nt":
+        assert not displaced.exists()
+        assert path.read_bytes() == b"original bytes"
+    else:
+        assert displaced.read_bytes() == b"original bytes"
+        assert path.read_bytes() == b"replacement inode"
 
 
 def test_atomic_write_replace_failure_keeps_synced_temp_and_old_destination(
@@ -293,7 +302,7 @@ def test_write_synced_file_is_create_only_and_node_guards_reject_links(
     directory.mkdir()
     assert require_real_directory(directory)
     link = tmp_path / "link"
-    link.symlink_to(path)
+    symlink_or_skip(link, path)
     with pytest.raises(ValueError, match="ordinary"):
         require_ordinary_file(link)
     with pytest.raises(ValueError, match="directory"):

@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { canonicalJson, commandExists, runSync, sha256Bytes } from "./util.mjs";
+import { canonicalJson, sha256Bytes } from "./util.mjs";
 import { canonicalStageDefinition, loadConfiguration, resolveGoalClosure } from "./config.mjs";
 import {
   changedFiles,
@@ -12,10 +12,10 @@ import {
 } from "./identity.mjs";
 import { findReusableStages, lastSuccessfulDevBaseCommit, loadHistory } from "./history.mjs";
 import {
-  RELEASE_DOCKER_CONTEXT,
   claudeSettingsIdentity,
   dockerServerIdentity,
   externalGitIdentity,
+  releaseDockerContextForClient,
   releaseCachePaths,
   validateClaudeDistribution,
   validateReleaseImage,
@@ -171,6 +171,9 @@ export function buildRunPlan(repoRoot, options = {}) {
   const runtimeProfile = config.runtimeProfiles.profiles[runtimeProfileId];
   if (!runtimeProfile) throw new Error(`RUNTIME_PROFILE_UNKNOWN:${runtimeProfileId}`);
   const formalRuntime = formalRuntimeRequired(closure.stages);
+  const requiresLinuxServer = closure.stages.some((stage) => stage.id === "platform.server-linux-capability" || stage.id.startsWith("journey.cross-job."));
+  const expectedDockerContext = client ? releaseDockerContextForClient(client) : null;
+  if (requiresLinuxServer && expectedDockerContext && !effectiveOptions.dockerContext) effectiveOptions.dockerContext = expectedDockerContext;
   const cachePaths = releaseCachePaths(repoRoot, effectiveOptions.cacheRoot);
   const clientDistribution = formalRuntime
     ? validateClaudeDistribution(effectiveOptions.claudeEntry)
@@ -178,11 +181,11 @@ export function buildRunPlan(repoRoot, options = {}) {
   const settingsIdentity = formalRuntime
     ? claudeSettingsIdentity(effectiveOptions.claudeSettings)
     : { status: effectiveOptions.claudeSettings ? claudeSettingsIdentity(effectiveOptions.claudeSettings).status : "NOT_REQUIRED" };
-  const dockerIdentity = client === "macos" && formalRuntime
-    ? dockerServerIdentity(effectiveOptions.dockerContext)
+  const dockerIdentity = requiresLinuxServer && client
+    ? dockerServerIdentity(effectiveOptions.dockerContext, client)
     : { status: "NOT_REQUIRED", context: effectiveOptions.dockerContext ?? null };
-  const uvIdentity = client === "macos" && formalRuntime ? validateUvCache(cachePaths) : { status: "NOT_REQUIRED" };
-  const imageIdentity = client === "macos" && formalRuntime
+  const uvIdentity = requiresLinuxServer ? validateUvCache(cachePaths) : { status: "NOT_REQUIRED" };
+  const imageIdentity = requiresLinuxServer
     ? validateReleaseImage(cachePaths, dockerIdentity)
     : { status: "NOT_REQUIRED", image: cachePaths.baseImage };
   const logparseIdentity = formalRuntime
@@ -212,7 +215,7 @@ export function buildRunPlan(repoRoot, options = {}) {
   const identities = computeIdentitySets({
     repoRoot,
     identityConfig: config.identities,
-    externalTrees: { logparse: effectiveOptions.logparseSource, mcp: effectiveOptions.mcpSource },
+    externalTrees: { logparse: logparseIdentity, mcp: mcpIdentity },
     claudeEntry: effectiveOptions.claudeEntry,
     claudeSettings: effectiveOptions.claudeSettings,
     releaseRuntime,
@@ -259,7 +262,7 @@ export function buildRunPlan(repoRoot, options = {}) {
 
   if (formalRuntime && !effectiveOptions.claudeEntry) blockers.push({ code: "CLAUDE_ENTRY_REQUIRED", detail: "Formal proofs require the runtime-profile-bound official npm cli.js." });
   else if (formalRuntime && clientDistribution.status !== "PRESENT") blockers.push({ code: "CLAUDE_DISTRIBUTION_INVALID", detail: `Claude distribution does not match runtime profile ${runtimeProfileId}: ${clientDistribution.code ?? "invalid"}.` });
-  if (client === "macos" && formalRuntime && effectiveOptions.claudeEntry && path.resolve(effectiveOptions.claudeEntry) !== path.resolve(cachePaths.claudeEntry)) blockers.push({ code: "CLAUDE_ENTRY_CACHE_MISMATCH", detail: "macOS formal proofs must use cli.js from the explicit frozen cache root." });
+  if (track === "release" && formalRuntime && effectiveOptions.claudeEntry && path.resolve(effectiveOptions.claudeEntry) !== path.resolve(cachePaths.claudeEntry)) blockers.push({ code: "CLAUDE_ENTRY_CACHE_MISMATCH", detail: "Release proofs must use cli.js from the explicit frozen cache root." });
   if (formalRuntime && !effectiveOptions.claudeSettings) blockers.push({ code: "CLAUDE_SETTINGS_REQUIRED", detail: "Formal proofs require an env-only Claude settings source." });
   else if (formalRuntime && settingsIdentity.status !== "PRESENT") blockers.push({ code: "CLAUDE_SETTINGS_INVALID", detail: `Claude settings violate the runtime profile: ${settingsIdentity.code ?? "invalid"}.` });
 
@@ -267,24 +270,16 @@ export function buildRunPlan(repoRoot, options = {}) {
   if (effectiveAdapter && (!path.isAbsolute(effectiveAdapter) || !fs.existsSync(effectiveAdapter) || !fs.statSync(effectiveAdapter).isFile())) blockers.push({ code: "CROSS_JOB_ADAPTER_INVALID", detail: "The selected CrossJob adapter is not an existing repository-owned or explicit file." });
   if (crossJobSelected && client && effectiveAdapter !== builtInAdapter(repoRoot, client)) blockers.push({ code: "BUILTIN_ADAPTER_IDENTITY_INVALID", detail: `The ${client} first-party adapter did not resolve exactly.` });
 
-  const requiresLinuxInputs = closure.stages.some((stage) => stage.id === "platform.server-linux-capability" || stage.id.startsWith("journey.cross-job."));
-  if (requiresLinuxInputs) {
-    if (logparseIdentity.status !== "PRESENT") blockers.push({ code: "LOGPARSE_SOURCE_INVALID", detail: `Logparse must be clean at ${runtimeProfile.external_sources.logparse}: ${logparseIdentity.code ?? "invalid"}.` });
-    if (mcpIdentity.status !== "PRESENT") blockers.push({ code: "MCP_SOURCE_INVALID", detail: `problem-locator-mcp must be clean at ${runtimeProfile.external_sources.mcp}: ${mcpIdentity.code ?? "invalid"}.` });
+  if (requiresLinuxServer) {
+    if (logparseIdentity.status !== "PRESENT") blockers.push({ code: "LOGPARSE_SOURCE_INVALID", detail: `Logparse must be a clean repository containing frozen commit ${runtimeProfile.external_sources.logparse}: ${logparseIdentity.code ?? "invalid"}.` });
+    if (mcpIdentity.status !== "PRESENT") blockers.push({ code: "MCP_SOURCE_INVALID", detail: `problem-locator-mcp must be a clean repository containing frozen commit ${runtimeProfile.external_sources.mcp}: ${mcpIdentity.code ?? "invalid"}.` });
   }
   if (closure.stages.some((stage) => stage.id === "platform.server-linux-capability")) {
-    if (client === "macos") {
-      if (!effectiveOptions.dockerContext) blockers.push({ code: "DOCKER_CONTEXT_REQUIRED", detail: "macOS Release requires --docker-context colima." });
-      else if (effectiveOptions.dockerContext !== RELEASE_DOCKER_CONTEXT) blockers.push({ code: "DOCKER_CONTEXT_MISMATCH", detail: "The frozen macOS runtime profile is bound to Docker context colima." });
-      if (dockerIdentity.status !== "PRESENT") blockers.push({ code: "DOCKER_SERVER_IDENTITY_INVALID", detail: `Docker/Colima must report a Linux amd64 Server: ${dockerIdentity.code ?? "invalid"}.` });
-      if (uvIdentity.status !== "PRESENT") blockers.push({ code: "UV_RELEASE_CACHE_INVALID", detail: `The explicit uv cache is invalid: ${uvIdentity.code ?? "invalid"}.` });
-      if (imageIdentity.status !== "PRESENT") blockers.push({ code: "RELEASE_BASE_IMAGE_INVALID", detail: `The offline Release image is invalid: ${imageIdentity.code ?? "invalid"}.` });
-    } else if (!commandExists("docker")) {
-      blockers.push({ code: "DOCKER_REQUIRED", detail: "A Docker client connected to a Linux server is required." });
-    } else {
-      const docker = runSync("docker", ["version", "--format", "{{json .Server}}"]);
-      if (docker.status !== 0) blockers.push({ code: "DOCKER_SERVER_UNAVAILABLE", detail: "The Docker server is unavailable." });
-    }
+    if (expectedDockerContext !== "default" && !options.dockerContext) blockers.push({ code: "DOCKER_CONTEXT_REQUIRED", detail: `${client} Release requires --docker-context ${expectedDockerContext}.` });
+    if (options.dockerContext && options.dockerContext !== expectedDockerContext) blockers.push({ code: "DOCKER_CONTEXT_MISMATCH", detail: `The frozen ${client} runtime profile is bound to logical Docker context ${expectedDockerContext}.` });
+    if (dockerIdentity.status !== "PRESENT") blockers.push({ code: "DOCKER_SERVER_IDENTITY_INVALID", detail: `Docker must report the profile-bound Linux amd64 Server: ${dockerIdentity.code ?? "invalid"}.` });
+    if (uvIdentity.status !== "PRESENT") blockers.push({ code: "UV_RELEASE_CACHE_INVALID", detail: `The explicit uv cache is invalid: ${uvIdentity.code ?? "invalid"}.` });
+    if (imageIdentity.status !== "PRESENT") blockers.push({ code: "RELEASE_BASE_IMAGE_INVALID", detail: `The offline Release image is invalid: ${imageIdentity.code ?? "invalid"}.` });
   }
 
   for (const stage of closure.stages) {
@@ -399,8 +394,8 @@ export function buildRunPlan(repoRoot, options = {}) {
       image: imageIdentity,
       uv_cache: uvIdentity,
       external_sources: {
-        logparse: { status: logparseIdentity.status, root: logparseIdentity.root, head: logparseIdentity.head, clean: logparseIdentity.clean },
-        problem_locator_mcp: { status: mcpIdentity.status, root: mcpIdentity.root, head: mcpIdentity.head, clean: mcpIdentity.clean },
+        logparse: { status: logparseIdentity.status, root: logparseIdentity.root, head: logparseIdentity.head, clean: logparseIdentity.clean, pinned_commit: logparseIdentity.pinned_commit, tree_oid: logparseIdentity.tree_oid, tree_manifest_sha256: logparseIdentity.tree_manifest_sha256 },
+        problem_locator_mcp: { status: mcpIdentity.status, root: mcpIdentity.root, head: mcpIdentity.head, clean: mcpIdentity.clean, pinned_commit: mcpIdentity.pinned_commit, tree_oid: mcpIdentity.tree_oid, tree_manifest_sha256: mcpIdentity.tree_manifest_sha256 },
       },
       cross_job_adapter: effectiveAdapter,
       network_policy: runtimeProfile.network_policy,

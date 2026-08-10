@@ -1284,7 +1284,7 @@ async function applyRestoredCheckpoint(configuration, state) {
 async function execute(configuration) {
   requireCondition(process.platform === configuration.expectedHostPlatform && configuration.client === configuration.expectedClient, "CROSS_JOB_ADAPTER_HOST_REQUIRED", "BLOCKED", "INFRA");
   requireCondition(["release", "dev"].includes(configuration.track), "CROSS_JOB_ADAPTER_TRACK_UNSUPPORTED", "BLOCKED", "INFRA");
-  if (configuration.expectedDockerContext !== "default") requireCondition(configuration.dockerContext === configuration.expectedDockerContext, "CROSS_JOB_ADAPTER_DOCKER_CONTEXT", "BLOCKED", "INFRA");
+  requireCondition(configuration.dockerContext === configuration.expectedDockerContext, "CROSS_JOB_ADAPTER_DOCKER_CONTEXT", "BLOCKED", "INFRA");
   requireCondition(configuration.sourceSnapshotDigest && configuration.sourceSnapshotManifest && configuration.logparseSource && configuration.mcpSource && configuration.claudeEntry && configuration.claudeSettings, "CROSS_JOB_ADAPTER_INPUT_MISSING", "BLOCKED", "INFRA");
   if (configuration.track === "release") requireCondition(!configuration.restoredDataRoot && !configuration.restoredCheckpointId, "RELEASE_CHECKPOINT_RESTORE_FORBIDDEN", "BLOCKED", "INFRA");
   await verifyRepositoryIdentity(configuration);

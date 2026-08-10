@@ -27,6 +27,14 @@ def _sleep_forever() -> None:
         time.sleep(60)
 
 
+def _publish_child_pid(proposals: Path, child_pid: int) -> None:
+    marker = proposals / "child" / "child.pid"
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    temporary = marker.with_name(f".{marker.name}.part")
+    temporary.write_text(str(child_pid), encoding="ascii")
+    os.replace(temporary, marker)
+
+
 def main() -> int:
     if sys.argv[1:] == ["--child"]:
         _sleep_forever()
@@ -50,15 +58,11 @@ def main() -> int:
         _sleep_forever()
     if mode == "child-hang":
         child = subprocess.Popen([sys.executable, __file__, "--child"])
-        marker = proposals / "child" / "child.pid"
-        marker.parent.mkdir(parents=True, exist_ok=True)
-        marker.write_text(str(child.pid), encoding="ascii")
+        _publish_child_pid(proposals, child.pid)
         _sleep_forever()
     if mode == "child-after-parent-exit":
         child = subprocess.Popen([sys.executable, __file__, "--child"])
-        marker = proposals / "child" / "child.pid"
-        marker.parent.mkdir(parents=True, exist_ok=True)
-        marker.write_text(str(child.pid), encoding="ascii")
+        _publish_child_pid(proposals, child.pid)
         return 0
     if mode == "emit":
         _write_repeated(sys.stdout.buffer, b"o", _integer("FAKE_STDOUT_BYTES"))

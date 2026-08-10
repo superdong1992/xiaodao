@@ -25,7 +25,7 @@ export class ResourceRegistry {
 
   docker(args) {
     return this.runCommand("docker", [
-      ...(this.dockerContext ? ["--context", this.dockerContext] : []),
+      ...(this.dockerContext && this.dockerContext !== "default" ? ["--context", this.dockerContext] : []),
       ...args,
     ]);
   }

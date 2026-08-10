@@ -31,6 +31,7 @@ from problem_locator.storage.resource_files import (
     scan_case_resources,
 )
 from problem_locator.storage.tree import TreeInspection, inspect_tree
+from tests.deterministic.fs_capabilities import symlink_or_skip
 from tests.deterministic.unit.storage.fakes import FakeFileSync, FaultInjectingReplace
 
 
@@ -233,7 +234,7 @@ def test_strict_scan_rejects_links_and_hardlinked_tree_entries(tmp_path: Path) -
     outside.mkdir()
     case_root = symlink_layout.cases_resources / CASE_ID
     case_root.mkdir()
-    (case_root / "evidence").symlink_to(outside, target_is_directory=True)
+    symlink_or_skip(case_root / "evidence", outside, target_is_directory=True)
     with pytest.raises(ValueError):
         scan_case_resources(symlink_layout, CASE_ID)
 
@@ -802,7 +803,7 @@ def test_reader_materializes_read_only_tree_and_rejects_linked_trees(
     linked_source.mkdir(parents=True)
     target = tmp_path / "external-target"
     target.write_bytes(b"outside")
-    (linked_source / "link").symlink_to(target)
+    symlink_or_skip(linked_source / "link", target)
     linked_ref = ResourceRef(
         resource_kind=ResourceKind.DIRECTORY,
         storage_key=linked_key,

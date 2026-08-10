@@ -303,7 +303,8 @@ function validateRuntimeProfiles(runtimeProfiles) {
     exactKeys(profile, ["kind", "claude", "uv", "python", "hatchling", "base_image", "external_sources", "settings_environment_allowlist", "real_caps", "network_policy"], "CONFIG_RUNTIME_PROFILE_FIELDS", `runtime profile ${profileId}`);
     exactKeys(profile.claude, ["package", "version", "version_output", "tarball_sha256", "cli_sha256", "model"], "CONFIG_RUNTIME_CLAUDE_FIELDS", `${profileId}.claude`);
     exactKeys(profile.uv, ["version", "archive_sha256", "uv_sha256", "uvx_sha256"], "CONFIG_RUNTIME_UV_FIELDS", `${profileId}.uv`);
-    exactKeys(profile.base_image, ["name", "source", "os", "architecture", "macos_docker_context"], "CONFIG_RUNTIME_IMAGE_FIELDS", `${profileId}.base_image`);
+    exactKeys(profile.base_image, ["name", "source", "os", "architecture", "docker_contexts"], "CONFIG_RUNTIME_IMAGE_FIELDS", `${profileId}.base_image`);
+    exactKeys(profile.base_image.docker_contexts, ["windows", "macos", "linux"], "CONFIG_RUNTIME_DOCKER_CONTEXT_FIELDS", `${profileId}.base_image.docker_contexts`);
     exactKeys(profile.external_sources, ["logparse", "mcp"], "CONFIG_RUNTIME_EXTERNAL_FIELDS", `${profileId}.external_sources`);
     assertFlow(profile.claude.package === "@anthropic-ai/claude-code", "CONFIG_RUNTIME_CLAUDE_PACKAGE", `${profileId} must use the official Claude Code package`);
     nonEmptyString(profile.claude.version, "CONFIG_RUNTIME_CLAUDE_VERSION", `${profileId}.claude.version`);
@@ -317,7 +318,12 @@ function validateRuntimeProfiles(runtimeProfiles) {
     nonEmptyString(profile.hatchling, "CONFIG_RUNTIME_HATCHLING", `${profileId}.hatchling`);
     assertFlow(/^[a-z0-9][a-z0-9_.:/@-]+$/.test(profile.base_image.name), "CONFIG_RUNTIME_IMAGE_NAME", `${profileId}.base_image.name is invalid`);
     assertFlow(/^.+@sha256:[a-f0-9]{64}$/.test(profile.base_image.source), "CONFIG_RUNTIME_IMAGE_SOURCE", `${profileId}.base_image.source must be digest-pinned`);
-    assertFlow(profile.base_image.os === "linux" && profile.base_image.architecture === "amd64" && profile.base_image.macos_docker_context === "colima", "CONFIG_RUNTIME_IMAGE_PLATFORM", `${profileId}.base_image has an unsupported platform`);
+    assertFlow(profile.base_image.os === "linux" && profile.base_image.architecture === "amd64", "CONFIG_RUNTIME_IMAGE_PLATFORM", `${profileId}.base_image has an unsupported platform`);
+    assertFlow(
+      canonicalJson(profile.base_image.docker_contexts) === canonicalJson({ windows: "default", macos: "colima", linux: "default" }),
+      "CONFIG_RUNTIME_DOCKER_CONTEXTS",
+      `${profileId}.base_image has unsupported Client Docker contexts`,
+    );
     for (const [name, commit] of Object.entries(profile.external_sources)) assertFlow(/^[a-f0-9]{40}$/.test(commit), "CONFIG_RUNTIME_EXTERNAL_COMMIT", `${profileId}.external_sources.${name} must be a commit SHA`);
     stringArray(profile.settings_environment_allowlist, "CONFIG_RUNTIME_SETTINGS_ENV", `${profileId}.settings_environment_allowlist`, { nonEmpty: true });
     assertFlow(canonicalJson([...profile.settings_environment_allowlist].sort()) === canonicalJson([...RELEASE_SETTINGS_ENVIRONMENT].sort()), "CONFIG_RUNTIME_SETTINGS_ENV", `${profileId} has an unsupported settings environment allowlist`);

@@ -99,6 +99,20 @@ function record(root, expected) {
   };
 }
 
+function normalizeFileMode(root, expected) {
+  const absolute = path.resolve(root, ...expected.path.split("/"));
+  if (!absolute.startsWith(`${root}${path.sep}`)) throw new Error(`SOURCE_SNAPSHOT_PATH_INVALID:${expected.path}`);
+  const metadata = fs.lstatSync(absolute);
+  if (expected.kind === "symlink") {
+    if (!metadata.isSymbolicLink()) throw new Error(`SOURCE_SNAPSHOT_ENTRY_INVALID:${expected.path}`);
+    return;
+  }
+  if (!metadata.isFile()) throw new Error(`SOURCE_SNAPSHOT_ENTRY_INVALID:${expected.path}`);
+  if (expected.mode === "100644") fs.chmodSync(absolute, 0o644);
+  else if (expected.mode === "100755") fs.chmodSync(absolute, 0o755);
+  else throw new Error(`SOURCE_SNAPSHOT_MODE_INVALID:${expected.path}`);
+}
+
 const root = path.resolve(argument("--root"));
 const manifestPath = path.resolve(argument("--manifest"));
 const expectedDigest = argument("--expected-digest");
@@ -114,6 +128,8 @@ if (manifest.digest !== expectedDigest || manifestDigest !== expectedDigest || m
 if (canonicalJson(leafPaths(root)) !== canonicalJson(records.map((item) => item.path))) {
   throw new Error("SOURCE_SNAPSHOT_PATH_SET_DRIFT");
 }
+const normalizedModes = process.argv.includes("--normalize-modes-from-manifest");
+if (normalizedModes) records.forEach((item) => normalizeFileMode(root, item));
 const observed = records.map((item) => record(root, item));
 if (digest(canonicalJson(observed)) !== expectedDigest) throw new Error("SOURCE_SNAPSHOT_CONTENT_DRIFT");
-process.stdout.write(`${JSON.stringify({ schema_version: 1, status: "PASS", digest: expectedDigest, file_count: records.length })}\n`);
+process.stdout.write(`${JSON.stringify({ schema_version: 1, status: "PASS", digest: expectedDigest, file_count: records.length, normalized_modes: normalizedModes })}\n`);

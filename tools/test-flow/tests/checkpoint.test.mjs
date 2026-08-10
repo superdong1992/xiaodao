@@ -91,6 +91,12 @@ test("checkpoint extraction populates nested read-only artifact directories befo
     fs.chmodSync(result, 0o444);
     fs.chmodSync(payload, 0o555);
     fs.chmodSync(tree, 0o555);
+    const sourceModes = {
+      tree: fs.statSync(tree).mode & 0o777,
+      payload: fs.statSync(payload).mode & 0o777,
+      result: fs.statSync(result).mode & 0o777,
+    };
+    if (process.platform !== "win32") assert.deepEqual(sourceModes, { tree: 0o555, payload: 0o555, result: 0o444 });
 
     const checkpoint = createCheckpoint({
       stateRoot: state,
@@ -108,9 +114,9 @@ test("checkpoint extraction populates nested read-only artifact directories befo
 
     assert.equal(extracted.status, "PASS");
     assert.equal(extracted.portable_digest, checkpoint.portable_digest);
-    assert.equal(fs.statSync(path.join(target, path.relative(state, tree))).mode & 0o777, 0o555);
-    assert.equal(fs.statSync(path.join(target, path.relative(state, payload))).mode & 0o777, 0o555);
-    assert.equal(fs.statSync(path.join(target, path.relative(state, result))).mode & 0o777, 0o444);
+    assert.equal(fs.statSync(path.join(target, path.relative(state, tree))).mode & 0o777, sourceModes.tree);
+    assert.equal(fs.statSync(path.join(target, path.relative(state, payload))).mode & 0o777, sourceModes.payload);
+    assert.equal(fs.statSync(path.join(target, path.relative(state, result))).mode & 0o777, sourceModes.result);
     assert.equal(fs.readFileSync(path.join(target, path.relative(state, result)), "utf8"), "{\"status\":\"PASS\"}\n");
   } finally { writableTree(root); fs.rmSync(root, { recursive: true, force: true }); }
 });

@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { ensureDirectory, FlowError, readJson } from "./util.mjs";
 
 const SEMANTIC_TYPES = new Set([
@@ -88,11 +88,28 @@ class CappedLog {
   }
 }
 
-function killTree(child) {
+function killTree(child, invocation) {
   if (!child.pid) return Promise.resolve({ requested: false, forced: false });
   if (process.platform === "win32") {
-    const result = spawnSync("taskkill.exe", ["/PID", String(child.pid), "/T", "/F"], { windowsHide: true, encoding: "utf8" });
-    return Promise.resolve({ requested: true, forced: true, taskkill_exit_code: result.status });
+    try {
+      fs.writeFileSync(invocation.cancelPath, "terminate\n", { encoding: "utf8", mode: 0o600, flag: "wx" });
+    } catch {
+      let forced = false;
+      try { forced = child.kill(); } catch {}
+      return Promise.resolve({ requested: true, forced, mechanism: "wrapper-job-close-fallback" });
+    }
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        let forced = false;
+        try { forced = child.kill(); } catch {}
+        resolve({ requested: true, forced, mechanism: "wrapper-control-timeout" });
+      }, 5000);
+      timer.unref();
+      child.once("exit", () => {
+        clearTimeout(timer);
+        resolve({ requested: true, forced: false, mechanism: "wrapper-control" });
+      });
+    });
   }
   let signalled = false;
   try { process.kill(-child.pid, "SIGTERM"); signalled = true; } catch {}
@@ -111,6 +128,7 @@ function windowsInvocation({ repoRoot, command, args, cwd, environment, stdoutPa
   const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "test-flow-process-"));
   const specPath = path.join(temporaryRoot, "spec.json");
   const statusPath = path.join(temporaryRoot, "status.json");
+  const cancelPath = path.join(temporaryRoot, "cancel");
   fs.writeFileSync(specPath, JSON.stringify({
     executable: command,
     arguments: args,
@@ -119,12 +137,14 @@ function windowsInvocation({ repoRoot, command, args, cwd, environment, stdoutPa
     stdout_path: stdoutPath,
     stderr_path: stderrPath,
     raw_log_limit_bytes: rawLogLimitBytes,
+    cancel_path: cancelPath,
   }), { encoding: "utf8", mode: 0o600, flag: "wx" });
   return {
     command: "powershell.exe",
     args: ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", path.join(repoRoot, "tools", "test-flow", "adapters", "windows-process.ps1"), "-SpecPath", specPath, "-StatusPath", statusPath],
     temporaryRoot,
     statusPath,
+    cancelPath,
     childWritesLogs: true,
   };
 }
@@ -211,7 +231,7 @@ export function runProcess({
         last_progress_type: lastProgressType,
         kill: null,
       };
-      killPromise = killTree(child).then((kill) => { termination.kill = kill; return kill; });
+      killPromise = killTree(child, invocation).then((kill) => { termination.kill = kill; return kill; });
     };
     const onLine = (line) => {
       addUsage(usage, line);
@@ -310,7 +330,11 @@ export function runProcess({
         stderr_path: path.relative(attemptRoot, stderrPath).split(path.sep).join("/"),
         stdout_truncated: stdoutTruncated,
         stderr_truncated: stderrTruncated,
-        windows_job: windowsStatus ? { assigned: windowsStatus.job_assigned, process_id: windowsStatus.process_id } : null,
+        windows_job: windowsStatus ? {
+          assigned: windowsStatus.job_assigned,
+          process_id: windowsStatus.process_id,
+          controller_termination: windowsStatus.controller_termination === true,
+        } : null,
       };
       eventWriter?.write(result.status === "PASS" ? "stage.completed" : "stage.failed", {
         stageId: stage.id,

@@ -11,11 +11,19 @@ import { buildRunPlan, resolveClient, retryRequirement } from "../lib/planner.mj
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 
 function buildIsolatedRunPlan(options) {
-  const evidenceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "test-flow-planner-evidence-"));
+  const isolatedRoot = fs.mkdtempSync(path.join(os.tmpdir(), "test-flow-planner-"));
+  const evidenceRoot = path.join(isolatedRoot, "evidence");
+  const cacheRoot = path.join(isolatedRoot, "cache");
+  fs.mkdirSync(evidenceRoot);
+  fs.mkdirSync(cacheRoot);
   try {
-    return buildRunPlan(REPO_ROOT, { ...options, evidenceRoot });
+    return buildRunPlan(REPO_ROOT, {
+      ...options,
+      evidenceRoot,
+      cacheRoot: options.cacheRoot ?? cacheRoot,
+    });
   } finally {
-    fs.rmSync(evidenceRoot, { recursive: true, force: true });
+    fs.rmSync(isolatedRoot, { recursive: true, force: true });
   }
 }
 
@@ -107,6 +115,16 @@ test("all supported Clients resolve to repository-owned first-party adapters", (
     assert.equal(built.plan.stages.filter((stage) => stage.kind === "isolated-real").length, 0);
     assert.ok(built.plan.stages.filter((stage) => stage.id.startsWith("journey.cross-job.")).every((stage) => stage.decision === "RUN"));
   }
+});
+
+test("Windows Release normalizes logical default context and requires the same sealed Linux cache contract as macOS", () => {
+  const built = buildIsolatedRunPlan({ track: "release", client: "windows", planOnly: true });
+  const codes = built.plan.admission.blockers.map((blocker) => blocker.code);
+  assert.equal(built.options.dockerContext, "default");
+  assert.equal(built.plan.release_inputs.docker.context, "default");
+  assert.equal(codes.includes("DOCKER_CONTEXT_REQUIRED"), false);
+  assert.ok(codes.includes("UV_RELEASE_CACHE_INVALID"));
+  assert.ok(codes.includes("RELEASE_BASE_IMAGE_INVALID"));
 });
 
 test("retired rollout goals and caller-supplied adapters cannot become an execution path", () => {

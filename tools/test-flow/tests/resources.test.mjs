@@ -146,3 +146,25 @@ test("every Docker resource operation is bound to the configured context", async
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("logical default resource cleanup follows the selected Docker Desktop context without naming the legacy default context", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "test-flow-resources-"));
+  try {
+    const runId = "run-resource-logical-default";
+    const calls = [];
+    const value = new ResourceRegistry(root, runId, {
+      commandAvailable: () => true,
+      dockerContext: "default",
+      runCommand: (_command, args) => {
+        calls.push([...args]);
+        return { status: 1, stdout: "", stderr: "absent" };
+      },
+    });
+    value.register("container", "flow-container", `problem-locator.test-flow.run=${runId}`);
+    assert.equal((await value.apply({ preserve: true })).status, "PASS");
+    assert.ok(calls.length > 0);
+    assert.ok(calls.every((args) => args[0] !== "--context"));
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

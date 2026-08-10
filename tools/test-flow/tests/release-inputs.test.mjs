@@ -13,6 +13,7 @@ import {
   RELEASE_CLAUDE_CLI_SHA256,
   RELEASE_CLAUDE_TARBALL_SHA256,
   RELEASE_CLAUDE_VERSION,
+  RELEASE_DOCKER_CONTEXTS,
   RELEASE_HATCHLING_VERSION,
   RELEASE_MODEL,
   RELEASE_PYTHON_VERSION,
@@ -20,13 +21,46 @@ import {
   RELEASE_UV_ARCHIVE_SHA256,
   RELEASE_UV_VERSION,
   claudeSettingsIdentity,
+  dockerCommandArguments,
+  dockerServerIdentity,
+  externalGitIdentity,
   materializeAttemptClaudeSettings,
   materializeClaudeSettings,
+  releaseArtifactDownloadInvocation,
+  releaseCachePaths,
+  releaseDockerContextForClient,
   validateClaudeDistribution,
+  validateReleaseImage,
 } from "../lib/release-inputs.mjs";
 
 const TOOL_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const SUPPORT_ROOT = path.join(TOOL_ROOT, "runtime-support");
+
+test("release artifact downloads use the host trust path without changing the frozen URL", () => {
+  const source = "https://downloads.example.test/release/archive.tgz";
+  const destination = path.resolve("cache", "archive.tgz");
+  const windows = releaseArtifactDownloadInvocation("win32", source, destination);
+  assert.equal(windows.command, "powershell.exe");
+  assert.match(windows.args.join(" "), /Invoke-WebRequest/);
+  assert.equal(windows.args.at(-2), source);
+  assert.equal(windows.args.at(-1), destination);
+  assert.equal(windows.args.at(-3).includes(source), false);
+
+  for (const platform of ["darwin", "linux"]) {
+    const invocation = releaseArtifactDownloadInvocation(platform, source, destination);
+    assert.equal(invocation.command, "curl");
+    assert.deepEqual(invocation.args.slice(-2), ["--", source]);
+    assert.equal(invocation.args[invocation.args.indexOf("--output") + 1], destination);
+  }
+  assert.throws(
+    () => releaseArtifactDownloadInvocation("win32", "http://downloads.example.test/archive", destination),
+    /RELEASE_DOWNLOAD_URL_INVALID/,
+  );
+  assert.throws(
+    () => releaseArtifactDownloadInvocation("win32", source, "relative.tgz"),
+    /RELEASE_DOWNLOAD_DESTINATION_INVALID/,
+  );
+});
 
 function settingsPayload(overrides = {}) {
   return {
@@ -63,7 +97,9 @@ test("Release settings copy only the profile allowlist and never copy Hooks", ()
     assert.deepEqual(Object.keys(copied.env).sort(), [...CLAUDE_SETTINGS_ENV_KEYS].sort());
     assert.equal(Object.hasOwn(copied, "hooks"), false);
     assert.equal(Object.hasOwn(copied, "permissions"), false);
-    assert.equal(fs.statSync(target).mode & 0o777, 0o600);
+    const targetMetadata = fs.lstatSync(target);
+    assert.equal(targetMetadata.isFile() && !targetMetadata.isSymbolicLink() && targetMetadata.nlink === 1, true);
+    if (process.platform !== "win32") assert.equal(targetMetadata.mode & 0o777, 0o600);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -124,7 +160,103 @@ test("runtime profile is the sole frozen version and artifact-pin source", () =>
   assert.equal(RELEASE_HATCHLING_VERSION, RELEASE_RUNTIME_PROFILE.hatchling);
   assert.equal(RELEASE_BASE_IMAGE, RELEASE_RUNTIME_PROFILE.base_image.name);
   assert.equal(RELEASE_BASE_IMAGE_SOURCE, RELEASE_RUNTIME_PROFILE.base_image.source);
+  assert.deepEqual(RELEASE_DOCKER_CONTEXTS, { windows: "default", macos: "colima", linux: "default" });
   assert.match(RELEASE_BASE_IMAGE_SOURCE, /@sha256:[a-f0-9]{64}$/);
+});
+
+test("logical default Docker context uses the selected Docker Desktop Linux engine without a literal --context default", () => {
+  assert.deepEqual(dockerCommandArguments("default", ["version"]), ["version"]);
+  assert.deepEqual(dockerCommandArguments("colima", ["version"]), ["--context", "colima", "version"]);
+  assert.equal(releaseDockerContextForClient("windows"), "default");
+  assert.equal(releaseDockerContextForClient("linux"), "default");
+  assert.equal(releaseDockerContextForClient("macos"), "colima");
+
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "test-flow-docker-identity-"));
+  try {
+    const docker = path.join(root, "docker.exe");
+    fs.writeFileSync(docker, "test docker identity\n");
+    const calls = [];
+    const identity = dockerServerIdentity("default", "windows", {
+      dockerCommand: docker,
+      runSync(_command, args) {
+        calls.push([...args]);
+        if (args[0] === "version") return { status: 0, stdout: JSON.stringify({ Os: "linux", Arch: "amd64", Version: "test", ID: "engine" }), stderr: "" };
+        if (args[0] === "context" && args[1] === "show") return { status: 0, stdout: "desktop-linux\n", stderr: "" };
+        if (args[0] === "context" && args[1] === "inspect") return { status: 0, stdout: "[{\"Name\":\"desktop-linux\"}]\n", stderr: "" };
+        return { status: 1, stdout: "", stderr: "unexpected" };
+      },
+    });
+    assert.equal(identity.status, "PRESENT");
+    assert.equal(identity.context, "default");
+    assert.equal(identity.effective_context, "desktop-linux");
+    assert.equal(identity.colima_version, null);
+    assert.ok(calls.every((args) => !(args[0] === "--context" && args[1] === "default")));
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("the generic Linux Server cache seal binds Docker context, image identity and all frozen image labels", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "test-flow-image-seal-"));
+  try {
+    const paths = releaseCachePaths(root, root);
+    fs.mkdirSync(path.dirname(paths.releaseSeal), { recursive: true });
+    const contextFingerprint = "a".repeat(64);
+    fs.writeFileSync(paths.releaseSeal, JSON.stringify({
+      schema_version: 1,
+      kind: "linux-server-release-cache",
+      image: RELEASE_BASE_IMAGE,
+      image_id: "sha256:image",
+      platform: "linux/amd64",
+      base_image_source: RELEASE_BASE_IMAGE_SOURCE,
+      python_version: RELEASE_PYTHON_VERSION,
+      docker_context: "default",
+      docker_effective_context: "desktop-linux",
+      docker_context_fingerprint: contextFingerprint,
+      claude_tarball_sha256: RELEASE_CLAUDE_TARBALL_SHA256,
+      claude_cli_sha256: RELEASE_CLAUDE_CLI_SHA256,
+      uv_archive_sha256: RELEASE_UV_ARCHIVE_SHA256,
+      uv_sha256: RELEASE_RUNTIME_PROFILE.uv.uv_sha256,
+      uvx_sha256: RELEASE_RUNTIME_PROFILE.uv.uvx_sha256,
+      hatchling_version: RELEASE_HATCHLING_VERSION,
+    }));
+    const dockerIdentity = { status: "PRESENT", docker_cli: "docker", context: "default", effective_context: "desktop-linux", context_fingerprint: contextFingerprint };
+    const image = {
+      Id: "sha256:image",
+      Os: "linux",
+      Architecture: "amd64",
+      Config: { Labels: {
+        "problem-locator.e2e.base-digest": RELEASE_BASE_IMAGE_SOURCE,
+        "problem-locator.e2e.python": RELEASE_PYTHON_VERSION,
+        "problem-locator.e2e.claude": `npm-${RELEASE_CLAUDE_VERSION}`,
+        "problem-locator.e2e.uv": RELEASE_UV_VERSION,
+        "problem-locator.e2e.hatchling": RELEASE_HATCHLING_VERSION,
+      } },
+    };
+    const runner = (_command, args) => ({ status: 0, stdout: JSON.stringify([image]), stderr: "", args });
+    assert.equal(validateReleaseImage(paths, dockerIdentity, runner).status, "PRESENT");
+    image.Config.Labels["problem-locator.e2e.python"] = "3.12.0";
+    assert.equal(validateReleaseImage(paths, dockerIdentity, runner).code, "RELEASE_BASE_IMAGE_LABEL_MISMATCH");
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("external source identity binds the frozen commit tree even when a clean checkout HEAD has advanced", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "test-flow-external-pin-"));
+  try {
+    const git = (...args) => spawnSync("git", ["-C", root, ...args], { encoding: "utf8" });
+    assert.equal(git("init").status, 0);
+    assert.equal(git("config", "user.email", "test-flow@example.invalid").status, 0);
+    assert.equal(git("config", "user.name", "Test Flow").status, 0);
+    fs.writeFileSync(path.join(root, "source.txt"), "pinned\n");
+    assert.equal(git("add", "source.txt").status, 0);
+    assert.equal(git("commit", "-m", "pinned").status, 0);
+    const pinned = git("rev-parse", "HEAD").stdout.trim();
+    fs.writeFileSync(path.join(root, "source.txt"), "new head\n");
+    assert.equal(git("commit", "-am", "advance").status, 0);
+    const identity = externalGitIdentity(root, pinned);
+    assert.equal(identity.status, "PRESENT");
+    assert.equal(identity.pinned_commit, pinned);
+    assert.notEqual(identity.head, pinned);
+    assert.match(identity.tree_manifest_sha256, /^[a-f0-9]{64}$/);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
 test("the Dockerfile has no hidden version defaults and cache preparation supplies every build arg", () => {
@@ -204,6 +336,7 @@ test("container initialization verifies the exact product snapshot and external 
   assert.doesNotMatch(initializer, /\/source\/xiaodao\/\.git/);
   assert.match(initializer, /cp -a \/source\/xiaodao\/\. \/opt\/src\/xiaodao\//);
   assert.match(initializer, /verify-source-snapshot\.mjs/);
+  assert.match(initializer, /--normalize-modes-from-manifest/);
   assert.match(initializer, /xiaodao_snapshot_digest/);
   assert.doesNotMatch(initializer, /safe\.directory\s+['"]?\*['"]?/);
   assert.match(initializer, /UV_LINK_MODE=copy UV_NO_PROGRESS=1 uv pip install/);
@@ -242,6 +375,8 @@ test("model invocations require exact model, hard caps, terminal success and com
   assert.match(isolated, /WRAPPER_MODEL_CAP_EXCEEDED/);
   assert.match(isolated, /final\.subtype !== "success" \|\| final\.is_error !== false/);
   assert.match(serviceAudit, /MODEL_TERMINAL_INVALID/);
+  assert.match(serviceAudit, /stream_segments/);
+  assert.match(serviceAudit, /claude-cli-plus-aggregate-terminal-postcondition/);
   assert.match(serviceAudit, /max_total_tokens/);
 });
 

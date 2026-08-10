@@ -35,7 +35,7 @@ Environment/dependency inputs:
   --mcp-source <absolute-path>
   --claude-entry <absolute-cli.js> Release/real required; never falls back to global claude
   --claude-settings <absolute-path> Source for env-only temporary settings; Hooks are never copied
-  --docker-context colima          Required for macOS Release
+  --docker-context colima          Required only when the Client profile uses a non-default context (macOS)
   --cache-root <absolute-path>     Default: <repo>/.tmp/test-flow-cache
 
 Exit codes:

@@ -11,6 +11,7 @@ from problem_locator.contracts.serialization import canonical_json_bytes
 from problem_locator.storage.layout import DATA_FORMAT_MARKER_BYTES, StorageLayout
 from problem_locator.storage.streams import FileBinaryStream, copy_binary_stream, hash_file
 from problem_locator.storage.tree import inspect_tree, verify_tree
+from tests.deterministic.fs_capabilities import mkfifo_or_skip, symlink_or_skip
 from tests.deterministic.unit.storage.fakes import FakeFileSync
 
 
@@ -60,7 +61,7 @@ def test_tree_rejects_symlinks_hardlinks_fifo_and_nested_empty_directory(
 
     symlink_tree = tmp_path / "symlink-tree"
     symlink_tree.mkdir()
-    (symlink_tree / "link").symlink_to(target)
+    symlink_or_skip(symlink_tree / "link", target)
     with pytest.raises(ValueError, match="symbolic"):
         inspect_tree(symlink_tree)
 
@@ -74,7 +75,7 @@ def test_tree_rejects_symlinks_hardlinks_fifo_and_nested_empty_directory(
 
     fifo_tree = tmp_path / "fifo-tree"
     fifo_tree.mkdir()
-    os.mkfifo(fifo_tree / "pipe")
+    mkfifo_or_skip(fifo_tree / "pipe")
     with pytest.raises(ValueError, match="regular files and directories"):
         inspect_tree(fifo_tree)
 
@@ -250,7 +251,7 @@ def test_file_binary_stream_rejects_directory_and_final_symlink(tmp_path: Path) 
     target = tmp_path / "target"
     target.write_bytes(b"value")
     link = tmp_path / "link"
-    link.symlink_to(target)
+    symlink_or_skip(link, target)
     with pytest.raises((ValueError, OSError)):
         FileBinaryStream(link)
 
@@ -338,6 +339,6 @@ def test_layout_detects_job_or_previous_state_and_rejects_symlink_nodes(
     bad_layout.data_root.mkdir()
     external = tmp_path / "external"
     external.mkdir()
-    bad_layout.resources.symlink_to(external, target_is_directory=True)
+    symlink_or_skip(bad_layout.resources, external, target_is_directory=True)
     with pytest.raises(ValueError, match="real directories"):
         bad_layout.ensure_directories()
