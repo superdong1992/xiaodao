@@ -22,6 +22,7 @@ from problem_locator.contracts import (
     EvidenceBinding,
     EvidenceProposal,
     EvidenceSourceType,
+    ErrorCode,
     InputRequirementConstraints,
     JobOutcome,
     JobStatus,

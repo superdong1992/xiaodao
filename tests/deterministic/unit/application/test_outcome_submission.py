@@ -2322,6 +2322,7 @@ def test_reroute_binding_uses_exact_frozen_user_fact_names() -> None:
         proposed_artifacts=[],
         error=None,
         produced_at=PROCESSED_AT,
+        decision_audit=_outcome("job-outcome-diagnosis.json").decision_audit,
     )
 
     offered = service._bindings_for_outcome(source_job, outcome)
