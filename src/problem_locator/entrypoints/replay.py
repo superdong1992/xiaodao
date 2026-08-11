@@ -107,7 +107,7 @@ class ReplayManifest(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
     schema_version: Literal[1]
-    state_schema_version: Literal[4]
+    state_schema_version: Literal[5]
     contract_revision: str
     replay_id: str
     mode: ReplayMode
@@ -483,7 +483,7 @@ def _decode_source_state(raw_bytes: bytes) -> StateFile:
     ):
         raise _fail(
             ErrorCode.STATE_SCHEMA_UNSUPPORTED,
-            "Replay accepts only the current State V4 contract.",
+            "Replay accepts only the current State V5 contract.",
             "SOURCE_STATE_SCHEMA_UNSUPPORTED",
         )
     try:
@@ -491,7 +491,7 @@ def _decode_source_state(raw_bytes: bytes) -> StateFile:
     except (TypeError, ValueError, ValidationError) as exc:
         raise _fail(
             ErrorCode.STATE_CORRUPT,
-            "Source State V4 violates its canonical contract.",
+            "Source State V5 violates its canonical contract.",
             "SOURCE_STATE_CORRUPT",
         ) from exc
 
@@ -949,7 +949,7 @@ def _source_target_outcome(
     if expected is not None and published != expected:
         raise _fail(
             ErrorCode.STATE_CORRUPT,
-            "The source target Outcome does not match State V4.",
+            "The source target Outcome does not match State V5.",
             "SOURCE_EXECUTION_RECORD_INVALID",
         )
     if (
@@ -1270,6 +1270,7 @@ _VALID_REVIEW_COMPLETION_STATUSES = frozenset(
         CaseStatus.WAITING_INPUT,
         CaseStatus.WAITING_ATTACHMENT,
         CaseStatus.RESOLVED,
+        CaseStatus.PARTIALLY_RESOLVED,
         CaseStatus.UNRESOLVED,
     }
 )

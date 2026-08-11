@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "case_id": "rpc-timeout-anonymized",
+  "input_wiki": "input/wiki.md",
+  "clarifications": "input/clarifications.md",
+  "generation_spec": "input/generation-spec.json",
+  "approved_skill_dir": "approved-skill/diagnose-anonymized-rpc-timeout",
+  "semantic_oracle": "oracle.json",
+  "journey_scenario": "complete",
+  "scenarios": [
+    {
+      "scenario_id": "complete",
+      "driver": "scenarios/complete/driver.json",
+      "oracle": "scenarios/complete/oracle.json"
+    },
+    {
+      "scenario_id": "partial",
+      "driver": "scenarios/partial/driver.json",
+      "oracle": "scenarios/partial/oracle.json"
+    }
+  ],
+  "allowed_actions": ["skill_generation", "specialized_diagnosis"]
+}

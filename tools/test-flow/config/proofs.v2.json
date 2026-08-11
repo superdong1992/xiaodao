@@ -25,6 +25,7 @@
         "proof.real-logparse",
         "proof.real-agent-backend",
         "proof.real-generic-locator",
+        "proof.real-skill-generation",
         "proof.real-route",
         "proof.real-diagnose",
         "proof.real-review",
@@ -44,6 +45,7 @@
         "proof.deterministic-full",
         "proof.host-client-capability",
         "proof.linux-server-capability",
+        "proof.real-skill-generation",
         "proof.cross-job-fresh",
         "proof.server-dfx",
         "proof.real-agent-cross-job",
@@ -97,6 +99,11 @@
       "description": "The isolated real Agent loads the preinstalled generic locator Skill, preserves its exact Unicode input, and writes the strict result file.",
       "acceptance": "all",
       "stages": ["real.generic-locator"]
+    },
+    "proof.real-skill-generation": {
+      "description": "A real conversion Agent turns only the reviewed human Wiki and clarifications into the exact approved Diagnosis Skill without leaking author notes or oracle data.",
+      "acceptance": "all",
+      "stages": ["real.skill-generation"]
     },
     "proof.real-route": {
       "description": "The isolated real ROUTE Agent contract passes.",

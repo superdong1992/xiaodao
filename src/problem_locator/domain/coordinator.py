@@ -28,6 +28,7 @@ from problem_locator.contracts import (
     DiagnosisItemChange,
     DiagnosisItemDraft,
     DiagnosisMode,
+    DiagnosisResolutionStatus,
     DiagnosisOutcome,
     DiagnosisOutcomeTriggerPayload,
     DiagnosisState,
@@ -986,6 +987,12 @@ class DomainCoordinator:
                 ),
             )
         if assessment.verdict is ReviewVerdict.PASS:
+            target_case_status = (
+                CaseStatus.RESOLVED
+                if candidate.resolution_status
+                is DiagnosisResolutionStatus.COMPLETE
+                else CaseStatus.PARTIALLY_RESOLVED
+            )
             mutation = CandidateMutation(
                 action=CandidateMutationAction.SET_STATUS,
                 candidate_binding=ReviewTargetBinding(
@@ -998,7 +1005,7 @@ class DomainCoordinator:
             )
             return TransitionPlan(
                 accepted_state_delta=_empty_delta(),
-                target_case_status=CaseStatus.RESOLVED,
+                target_case_status=target_case_status,
                 job_updates=[update],
                 outcome_disposition=OutcomeDisposition.APPLIED,
                 accepted_evidence_proposal_keys=[],
@@ -1010,7 +1017,10 @@ class DomainCoordinator:
                 next_job_spec=None,
                 final_result_target=target,
                 clear_active_job=True,
-                reason="Accept the fixed Candidate after an independent PASS review.",
+                reason=(
+                    "Accept the fixed Candidate at its declared resolution status "
+                    "after an independent PASS review."
+                ),
             )
         if assessment.verdict is ReviewVerdict.NEED_MORE_EVIDENCE:
             requested = assessment.requested_requirement_ids
@@ -1394,6 +1404,7 @@ class DomainCoordinator:
         if case.status in {
             CaseStatus.NEW,
             CaseStatus.RESOLVED,
+            CaseStatus.PARTIALLY_RESOLVED,
             CaseStatus.UNRESOLVED,
             CaseStatus.FAILED,
         }:
@@ -2277,6 +2288,12 @@ class DomainCoordinator:
         bindings = list(candidate.supporting_evidence_bindings)
         for mapping in candidate.completion_criteria_mapping:
             bindings.extend(mapping.evidence_bindings)
+        for factor in (
+            candidate.causal_factors
+            + candidate.candidate_factors
+            + candidate.excluded_factors
+        ):
+            bindings.extend(factor.evidence_bindings)
         return bindings
 
     def _validate_candidate(
@@ -2294,15 +2311,13 @@ class DomainCoordinator:
             or any(
                 mapping.criterion_index != index
                 or mapping.criterion != criterion
-                or not mapping.satisfied
-                or not mapping.evidence_bindings
                 for index, (mapping, criterion) in enumerate(
                     zip(mappings, criteria, strict=True)
                 )
             )
         ):
             return _validation(
-                "Candidate completion mappings must exactly cover and satisfy the ProblemSpec."
+                "Candidate completion mappings must exactly cover the ProblemSpec."
             )
         target_order = [f"existing:{item}" for item in state.evidence_refs]
         target_order.extend(

@@ -36,6 +36,7 @@ from problem_locator.contracts.models import (
     CandidateTarget,
     CaseFailure,
     CaseFailureUpdate,
+    CausalFactor,
     CompletionCriterionMapping,
     ContextSnapshot,
     DiagnosisItem,
@@ -445,7 +446,7 @@ def formalize_accepted_candidate(
             CompletionCriterionMapping(
                 criterion_index=entry.criterion_index,
                 criterion=entry.criterion,
-                satisfied=entry.satisfied,
+                status=entry.status,
                 evidence_refs=_resolve_evidence_bindings(
                     entry.evidence_bindings,
                     existing_evidence_ids=existing_evidence_ids,
@@ -455,8 +456,33 @@ def formalize_accepted_candidate(
             )
         )
 
+    def resolve_factors(values):
+        return [
+            CausalFactor(
+                factor_id=item.factor_id,
+                role=item.role,
+                statement=item.statement,
+                evidence_refs=_resolve_evidence_bindings(
+                    item.evidence_bindings,
+                    existing_evidence_ids=existing_evidence_ids,
+                    evidence_ids_by_proposal_key=evidence_ids_by_proposal_key,
+                ),
+                required_rule_ids=item.required_rule_ids,
+            )
+            for item in values
+        ]
+
+    causal_factors = resolve_factors(draft.causal_factors)
+    candidate_factors = resolve_factors(draft.candidate_factors)
+    excluded_factors = resolve_factors(draft.excluded_factors)
+
     preimage = {
+        "resolution_status": draft.resolution_status,
+        "terminal_path_id": draft.terminal_path_id,
         "statement": draft.statement,
+        "causal_factors": [item.model_dump(mode="json") for item in causal_factors],
+        "candidate_factors": [item.model_dump(mode="json") for item in candidate_factors],
+        "excluded_factors": [item.model_dump(mode="json") for item in excluded_factors],
         "supporting_evidence_refs": supporting_evidence_refs,
         "completion_criteria_mapping": [
             mapping.model_dump(mode="json") for mapping in mappings
@@ -466,7 +492,12 @@ def formalize_accepted_candidate(
         conclusion_id=conclusion_id,
         revision=revision,
         content_hash=canonical_json_sha256(preimage),
+        resolution_status=draft.resolution_status,
+        terminal_path_id=draft.terminal_path_id,
         statement=draft.statement,
+        causal_factors=causal_factors,
+        candidate_factors=candidate_factors,
+        excluded_factors=excluded_factors,
         supporting_evidence_refs=supporting_evidence_refs,
         completion_criteria_mapping=mappings,
         proposed_by_job_id=proposed_by_job_id,

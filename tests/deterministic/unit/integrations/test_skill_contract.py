@@ -83,7 +83,7 @@ def test_all_three_skill_frontmatters_have_only_name_and_description() -> None:
         assert body.strip()
 
 
-def test_diagnosis_manifest_v4_is_exact_canonical_and_spec_owned() -> None:
+def test_diagnosis_manifest_v5_is_exact_canonical_and_spec_owned() -> None:
     spec = _json(SPEC_ROOT / "rpc-service-takeover.json")
     requirements = json.loads(json.dumps(spec["requirements"]))
     logparse_attachment = spec["logparse_plan"]["attachment_requirement"]
@@ -126,8 +126,8 @@ def test_diagnosis_manifest_v4_is_exact_canonical_and_spec_owned() -> None:
 
     generated = _text(TAKEOVER_SKILL / "SKILL.md")
     embedded = generated.split(
-        "<!-- DIAGNOSIS_SKILL_MANIFEST_V4_BEGIN -->\n```json\n", 1
-    )[1].split("\n```\n<!-- DIAGNOSIS_SKILL_MANIFEST_V4_END -->", 1)[0]
+        "<!-- DIAGNOSIS_SKILL_MANIFEST_V5_BEGIN -->\n```json\n", 1
+    )[1].split("\n```\n<!-- DIAGNOSIS_SKILL_MANIFEST_V5_END -->", 1)[0]
     assert embedded.encode("utf-8") + b"\n" == payload
 
 

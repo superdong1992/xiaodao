@@ -368,14 +368,14 @@ function preparedClaudeRuntime(context) {
   };
 }
 
-function agentCommand(context) {
+function agentCommand(context, workflow = "job") {
   const runtime = preparedClaudeRuntime(context);
   if (!runtime) return null;
   const caps = context.planStage.hard_caps;
   if (!caps?.max_turns || !caps?.max_budget_usd || !caps?.hard_timeout_seconds) return null;
   const usageRoot = path.join(context.gateRoot, "model-usage");
   ensureDirectory(usageRoot);
-  return `${quoteShell(process.execPath)} ${quoteShell(path.join(context.repoRoot, "tools", "test-flow", "runtime-support", "isolated-agent-wrapper.mjs"))} --claude-entry ${quoteShell(runtime.entry)} --settings ${quoteShell(runtime.settings)} --model ${quoteShell(context.runtimeProfile.claude.model)} --usage-root ${quoteShell(usageRoot)} --max-turns ${caps.max_turns} --max-total-tokens ${caps.max_total_tokens} --max-budget-usd ${caps.max_budget_usd} --hard-timeout-seconds ${caps.hard_timeout_seconds}`;
+  return `${quoteShell(process.execPath)} ${quoteShell(path.join(context.repoRoot, "tools", "test-flow", "runtime-support", "isolated-agent-wrapper.mjs"))} --claude-entry ${quoteShell(runtime.entry)} --settings ${quoteShell(runtime.settings)} --model ${quoteShell(context.runtimeProfile.claude.model)} --usage-root ${quoteShell(usageRoot)} --max-turns ${caps.max_turns} --max-total-tokens ${caps.max_total_tokens} --max-budget-usd ${caps.max_budget_usd} --hard-timeout-seconds ${caps.hard_timeout_seconds} --workflow ${quoteShell(workflow)}`;
 }
 
 function collectIsolatedModelUsage(context) {
@@ -653,7 +653,10 @@ function realEnvironment(context, profile) {
       },
     };
   }
-  const command = agentCommand(context);
+  const command = agentCommand(
+    context,
+    profile === "real-skill-generation" ? "skill-generation" : "job",
+  );
   if (!command) return { error: "CLAUDE_COMMAND_OR_HARD_CAP_MISSING" };
   const runtime = preparedClaudeRuntime(context);
   if (!runtime) return { error: "CLAUDE_RUNTIME_MISSING" };
@@ -661,6 +664,7 @@ function realEnvironment(context, profile) {
     ...runtime.environment,
     S08_REAL_AGENT_COMMAND: command,
     S08_REAL_GENERIC_LOCATOR_AGENT_COMMAND: command,
+    S08_REAL_SKILL_GENERATION_AGENT_COMMAND: command,
     S08_REAL_ROUTE_AGENT_COMMAND: command,
     S08_REAL_DIAGNOSE_AGENT_COMMAND: command,
     S08_REAL_REVIEW_AGENT_COMMAND: command,
@@ -681,6 +685,22 @@ function realEnvironment(context, profile) {
     ensureDirectory(skillRoot);
     if (!fs.existsSync(installed)) fs.cpSync(skillPath, installed, { recursive: true, errorOnExist: true, force: false });
     return { env: { ...common, S08_REAL_GENERIC_LOCATOR_GATE: "1" } };
+  }
+  if (profile === "real-skill-generation") {
+    const skillName = "wiki-to-diagnosis-skill";
+    const skillPath = path.join(context.repoRoot, ".claude", "skills", skillName);
+    if (!fs.existsSync(path.join(skillPath, "SKILL.md"))) return { error: "WIKI_SKILL_GENERATOR_MISSING" };
+    const skillRoot = path.join(runtime.config, "skills");
+    const installed = path.join(skillRoot, skillName);
+    ensureDirectory(skillRoot);
+    if (!fs.existsSync(installed)) fs.cpSync(skillPath, installed, { recursive: true, errorOnExist: true, force: false });
+    return {
+      env: {
+        ...common,
+        S08_REAL_SKILL_GENERATION_GATE: "1",
+        S08_RELEASE_CASES_ROOT: path.join(context.repoRoot, "tests", "cases", "release"),
+      },
+    };
   }
   if (profile === "real-route") return { env: { ...common, S08_REAL_ROUTE_AGENT_GATE: "1" } };
   if (profile === "real-review") return { env: { ...common, S08_REAL_REVIEW_AGENT_GATE: "1" } };

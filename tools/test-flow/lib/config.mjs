@@ -13,7 +13,7 @@ const REPOSITORY_CHECKS = new Set(["python-compileall", "uv-lock", "git-diff-che
 const CAPABILITY_ADAPTERS = new Set(["host-capability", "server-linux-capability"]);
 const CROSS_JOB_PHASES = new Set(["environment", "route", "upload", "diagnose", "publish-restart"]);
 const OBSERVATIONS = new Set(["review-state-transition"]);
-const ENVIRONMENT_PROFILES = new Set(["real-logparse", "real-agent-backend", "real-generic-locator", "real-route", "real-diagnose", "real-review"]);
+const ENVIRONMENT_PROFILES = new Set(["real-logparse", "real-agent-backend", "real-generic-locator", "real-skill-generation", "real-route", "real-diagnose", "real-review"]);
 const RELEASE_SETTINGS_ENVIRONMENT = Object.freeze([
   "ANTHROPIC_AUTH_TOKEN",
   "ANTHROPIC_BASE_URL",
@@ -220,15 +220,19 @@ function validateIdentities(identities) {
   assertFlow(identities.schema_version === 2, "CONFIG_IDENTITIES_VERSION", "Unsupported identity schema version");
   object(identities.components, "CONFIG_IDENTITY_COMPONENTS", "identity components");
   object(identities.sets, "CONFIG_IDENTITY_SETS", "identity sets");
-  const kinds = new Set(["paths", "external-tree", "client-distribution", "claude-settings", "release-runtime", "environment"]);
+  const kinds = new Set(["paths", "release-case", "external-tree", "client-distribution", "claude-settings", "release-runtime", "environment"]);
   for (const [componentId, component] of Object.entries(identities.components)) {
     identifier(componentId, "CONFIG_IDENTITY_COMPONENT_ID", "identity component id");
     object(component, "CONFIG_IDENTITY_COMPONENT", `identity component ${componentId}`);
     assertFlow(kinds.has(component.kind), "CONFIG_IDENTITY_COMPONENT_KIND", `${componentId} has invalid kind`);
-    exactKeys(component, component.kind === "paths" ? ["kind", "paths"] : component.kind === "external-tree" ? ["kind", "name"] : ["kind"], "CONFIG_IDENTITY_COMPONENT_FIELDS", `identity component ${componentId}`);
+    exactKeys(component, component.kind === "paths" ? ["kind", "paths"] : component.kind === "release-case" ? ["kind", "root", "partition"] : component.kind === "external-tree" ? ["kind", "name"] : ["kind"], "CONFIG_IDENTITY_COMPONENT_FIELDS", `identity component ${componentId}`);
     if (component.kind === "paths") {
       stringArray(component.paths, "CONFIG_IDENTITY_PATHS", `${componentId}.paths`, { nonEmpty: true });
       component.paths.forEach((entry) => relativePath(entry, "CONFIG_IDENTITY_PATH", `${componentId} path`));
+    }
+    if (component.kind === "release-case") {
+      relativePath(component.root, "CONFIG_IDENTITY_RELEASE_CASE_ROOT", `${componentId} release case root`);
+      assertFlow(["wiki", "approved", "journey", "oracle"].includes(component.partition), "CONFIG_IDENTITY_RELEASE_CASE_PARTITION", `${componentId} has an invalid Release case partition`);
     }
     if (component.kind === "external-tree") identifier(component.name, "CONFIG_IDENTITY_EXTERNAL", `${componentId} external name`);
   }
@@ -410,7 +414,10 @@ function crossValidate(config) {
   const releaseStages = new Set(release.required_proofs.flatMap((proofId) => config.proofs.proofs[proofId].stages));
   const journey = config.stages.stages.filter((stage) => stage.id.startsWith("journey.cross-job."));
   assertFlow(journey.every((stage) => releaseStages.has(stage.id)), "CONFIG_RELEASE_JOURNEY_CLOSURE", "release.full does not close every CrossJob stage");
-  assertFlow(![...releaseStages].some((stageId) => config.stages.stages.find((stage) => stage.id === stageId)?.kind === "isolated-real"), "CONFIG_RELEASE_DUPLICATE_REAL", "release.full must not duplicate isolated real-model gates");
+  assertFlow(![...releaseStages].some((stageId) => {
+    const stage = config.stages.stages.find((item) => item.id === stageId);
+    return stage?.kind === "isolated-real" && stage.id !== "real.skill-generation";
+  }), "CONFIG_RELEASE_DUPLICATE_REAL", "release.full may include only the non-journey real Skill-generation gate");
   assertFlow(journey.every((stage) => stage.platforms.length === 3 && [...PLATFORMS].every((platform) => stage.platforms.includes(platform))), "CONFIG_PLATFORM_CLOSURE", "Every CrossJob stage must define Windows/macOS/Linux applicability");
 }
 

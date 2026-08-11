@@ -5,15 +5,15 @@ description: "定位合成服务接管场景中的 RPC 超时"
 
 # 服务接管 RPC 超时定位
 
-由 `wiki-to-diagnosis-skill` generator `4.0.0` 生成。公共 DIAGNOSE output
+由 `wiki-to-diagnosis-skill` generator `5.0.0` 生成。公共 DIAGNOSE output
 contract 只定义通用 Schema、安全、Evidence/Candidate 与原子输出；本文件独占业务
 requirements、阶段、工具映射和判定规则。
 
-<!-- DIAGNOSIS_SKILL_MANIFEST_V4_BEGIN -->
+<!-- DIAGNOSIS_SKILL_MANIFEST_V5_BEGIN -->
 ```json
-{"capability":"service-takeover","deployment_scope":"TEST_ONLY","entry_document":"SKILL.md","id":"diagnose-service-takeover","logparse_plan":{"anchors":[{"label":"client","module":{"source":"SKILL_FIXED","value":"compact"},"pid":null,"process_name":{"source":"SKILL_FIXED","value":"checkout-client"},"slot":{"source":"SKILL_FIXED","value":"slot_1"}},{"label":"server","module":{"source":"SKILL_FIXED","value":"compact"},"pid":null,"process_name":{"source":"SKILL_FIXED","value":"inventory-server"},"slot":{"source":"SKILL_FIXED","value":"slot_2"}}],"attachment_requirement":"log_archive","problem_time_binding":{"name":"problem_time","source":"USER_FACT"}},"logparse_product":"compact","requirements":[{"constraints":{"allowed_values":[],"max_utf8_bytes":256,"min_utf8_bytes":1,"pattern":null,"value_type":"STRING"},"fulfillment_source":"USER_FACT","kind":"INPUT","name":"caller_service","prompt":"请提供调用方服务名。","stage":"INITIAL","supplement_policy":"MISSING_ONLY"},{"constraints":{"allowed_values":[],"max_utf8_bytes":256,"min_utf8_bytes":1,"pattern":null,"value_type":"STRING"},"fulfillment_source":"USER_FACT","kind":"INPUT","name":"server_service","prompt":"请提供服务方服务名。","stage":"INITIAL","supplement_policy":"MISSING_ONLY"},{"constraints":{"allowed_values":[],"max_utf8_bytes":256,"min_utf8_bytes":1,"pattern":null,"value_type":"STRING"},"fulfillment_source":"USER_FACT","kind":"INPUT","name":"rpc_method","prompt":"请提供超时的 RPC 方法名。","stage":"INITIAL","supplement_policy":"MISSING_ONLY"},{"constraints":{"allowed_values":[],"max_utf8_bytes":24,"min_utf8_bytes":24,"pattern":"^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$","value_type":"STRING"},"fulfillment_source":"USER_FACT","kind":"INPUT","name":"problem_time","prompt":"请提供毫秒精度 UTC 问题时间。","stage":"INITIAL","supplement_policy":"MISSING_ONLY"},{"constraints":{"allowed_content_types":["application/gzip","application/zip","application/x-tar"],"max_count":1,"min_count":1},"fulfillment_source":"READY_ATTACHMENT","kind":"ATTACHMENT","name":"log_archive","prompt":"请上传 Logparse 支持的日志归档。","stage":"INITIAL","supplement_policy":"MISSING_ONLY"},{"constraints":{"allowed_values":[],"max_utf8_bytes":256,"min_utf8_bytes":1,"pattern":null,"value_type":"STRING"},"fulfillment_source":"USER_FACT","kind":"INPUT","name":"order_id","prompt":"请提供用于两端日志关联的订单号。","stage":"AFTER_LOGPARSE","supplement_policy":"MISSING_ONLY"}],"requires_logparse":true,"schema_version":4,"summary":"定位合成服务接管场景中的 RPC 超时","tool_bundle_id":"tool-bundle/diagnose","verification_contract":{"event_extractors":[{"anchor":"client","field_groups":["caller_service","server_service","rpc_method","order_id"],"id":"client_timeout","line_pattern":"^\\[\\d{4}\\] \\[diagnostic\\|[A-Za-z0-9._/-]+\\] (?P<event_time>\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z) COMPACT (?P<caller_service>\\S+) proc=checkout-client-\\d+ slot 1 cpu \\d+ \\|No\\[\\d+\\] rpc deadline exceeded after \\d+ms server=(?P<server_service>\\S+) method=(?P<rpc_method>\\S+) order_id=(?P<order_id>\\S+)$","match_cardinality":"EXACTLY_ONE","timestamp_format":"RFC3339_MILLIS_UTC","timestamp_group":"event_time"},{"anchor":"server","field_groups":["server_service","rpc_method","order_id"],"id":"server_takeover_accepted","line_pattern":"^\\[\\d{4}\\] \\[diagnostic\\|[A-Za-z0-9._/-]+\\] (?P<event_time>\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z) COMPACT (?P<server_service>\\S+) proc=inventory-server-\\d+ slot 2 cpu \\d+ \\|No\\[\\d+\\] service takeover active; rpc request accepted method=(?P<rpc_method>\\S+) order_id=(?P<order_id>\\S+)$","match_cardinality":"EXACTLY_ONE","timestamp_format":"RFC3339_MILLIS_UTC","timestamp_group":"event_time"},{"anchor":"server","field_groups":["server_service","order_id"],"id":"server_pool_wait_complete","line_pattern":"^\\[\\d{4}\\] \\[diagnostic\\|[A-Za-z0-9._/-]+\\] (?P<event_time>\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z) COMPACT (?P<server_service>\\S+) proc=inventory-server-\\d+ slot 2 cpu \\d+ \\|No\\[\\d+\\] connection pool wait \\d+ms complete order_id=(?P<order_id>\\S+)$","match_cardinality":"EXACTLY_ONE","timestamp_format":"RFC3339_MILLIS_UTC","timestamp_group":"event_time"}],"rules":[{"depends_on":[],"description":"调用端必须出现唯一的 RPC deadline 事件。","id":"client_timeout_present","kind":"EVENT_PRESENT","parameters":{"event":"client_timeout"},"remediation_requirements":[]},{"depends_on":[],"description":"服务端必须出现唯一的接管接受事件。","id":"server_takeover_present","kind":"EVENT_PRESENT","parameters":{"event":"server_takeover_accepted"},"remediation_requirements":[]},{"depends_on":[],"description":"服务端必须出现唯一的连接池等待完成事件。","id":"server_pool_wait_present","kind":"EVENT_PRESENT","parameters":{"event":"server_pool_wait_complete"},"remediation_requirements":[]},{"depends_on":["client_timeout_present"],"description":"调用端超时事件必须落在合成事故窗口内。","id":"client_timeout_in_window","kind":"EVENT_TIME_WINDOW","parameters":{"after_ms":500,"before_ms":3500,"event":"client_timeout","lower_bound":"INCLUSIVE","reference":{"name":"problem_time","source":"USER_FACT"},"upper_bound":"INCLUSIVE"},"remediation_requirements":[]},{"depends_on":["server_takeover_present"],"description":"服务端接管事件必须落在合成事故窗口内。","id":"server_takeover_in_window","kind":"EVENT_TIME_WINDOW","parameters":{"after_ms":500,"before_ms":3500,"event":"server_takeover_accepted","lower_bound":"INCLUSIVE","reference":{"name":"problem_time","source":"USER_FACT"},"upper_bound":"INCLUSIVE"},"remediation_requirements":[]},{"depends_on":["server_pool_wait_present"],"description":"服务端连接池等待事件必须落在合成事故窗口内。","id":"server_pool_wait_in_window","kind":"EVENT_TIME_WINDOW","parameters":{"after_ms":500,"before_ms":3500,"event":"server_pool_wait_complete","lower_bound":"INCLUSIVE","reference":{"name":"problem_time","source":"USER_FACT"},"upper_bound":"INCLUSIVE"},"remediation_requirements":[]},{"depends_on":["client_timeout_present"],"description":"调用端日志服务名必须等于用户事实。","id":"caller_service_matches","kind":"FACT_FIELD_EQUALS","parameters":{"event":"client_timeout","fact_name":"caller_service","field":"caller_service"},"remediation_requirements":[]},{"depends_on":["client_timeout_present"],"description":"调用端日志目标服务名必须等于用户事实。","id":"client_server_service_matches","kind":"FACT_FIELD_EQUALS","parameters":{"event":"client_timeout","fact_name":"server_service","field":"server_service"},"remediation_requirements":[]},{"depends_on":["server_takeover_present"],"description":"服务端日志服务名必须等于用户事实。","id":"server_service_matches","kind":"FACT_FIELD_EQUALS","parameters":{"event":"server_takeover_accepted","fact_name":"server_service","field":"server_service"},"remediation_requirements":[]},{"depends_on":["client_timeout_present"],"description":"调用端 RPC 方法必须等于用户事实。","id":"client_method_matches","kind":"FACT_FIELD_EQUALS","parameters":{"event":"client_timeout","fact_name":"rpc_method","field":"rpc_method"},"remediation_requirements":[]},{"depends_on":["server_takeover_present"],"description":"服务端 RPC 方法必须等于用户事实。","id":"server_method_matches","kind":"FACT_FIELD_EQUALS","parameters":{"event":"server_takeover_accepted","fact_name":"rpc_method","field":"rpc_method"},"remediation_requirements":[]},{"depends_on":["client_timeout_present"],"description":"调用端订单号必须等于用户事实。","id":"client_order_matches","kind":"FACT_FIELD_EQUALS","parameters":{"event":"client_timeout","fact_name":"order_id","field":"order_id"},"remediation_requirements":[]},{"depends_on":["server_takeover_present"],"description":"服务端订单号必须等于用户事实。","id":"server_order_matches","kind":"FACT_FIELD_EQUALS","parameters":{"event":"server_takeover_accepted","fact_name":"order_id","field":"order_id"},"remediation_requirements":[]},{"depends_on":["client_timeout_present","server_takeover_present"],"description":"调用端与服务端都必须有原始事件证据。","id":"required_roles_covered","kind":"ROLE_COVERAGE","parameters":{"coverage":[{"event":"client_timeout","role":"client"},{"event":"server_takeover_accepted","role":"server"}]},"remediation_requirements":[]},{"depends_on":["client_order_matches","server_order_matches","server_pool_wait_present"],"description":"调用端与服务端事件必须属于同一订单。","id":"order_correlates_across_roles","kind":"CROSS_ROLE_CORRELATION","parameters":{"members":[{"event":"client_timeout","field":"order_id"},{"event":"server_takeover_accepted","field":"order_id"},{"event":"server_pool_wait_complete","field":"order_id"}]},"remediation_requirements":[]},{"depends_on":["client_method_matches","server_method_matches"],"description":"调用端与服务端事件必须属于同一 RPC 方法。","id":"method_correlates_across_roles","kind":"CROSS_ROLE_CORRELATION","parameters":{"members":[{"event":"client_timeout","field":"rpc_method"},{"event":"server_takeover_accepted","field":"rpc_method"}]},"remediation_requirements":[]},{"depends_on":["client_server_service_matches","server_service_matches"],"description":"调用端目标服务与服务端身份必须一致。","id":"server_correlates_across_roles","kind":"CROSS_ROLE_CORRELATION","parameters":{"members":[{"event":"client_timeout","field":"server_service"},{"event":"server_takeover_accepted","field":"server_service"}]},"remediation_requirements":[]},{"depends_on":["server_takeover_in_window","server_pool_wait_in_window"],"description":"服务接管接受必须早于连接池等待完成。","id":"takeover_precedes_pool_wait","kind":"EVENT_ORDER","parameters":{"after_event":"server_pool_wait_complete","allow_equal":false,"before_event":"server_takeover_accepted"},"remediation_requirements":[]},{"depends_on":["server_pool_wait_in_window","client_timeout_in_window"],"description":"连接池等待完成不得晚于调用端 deadline。","id":"pool_wait_precedes_timeout","kind":"EVENT_ORDER","parameters":{"after_event":"client_timeout","allow_equal":true,"before_event":"server_pool_wait_complete"},"remediation_requirements":[]},{"depends_on":["required_roles_covered","order_correlates_across_roles","method_correlates_across_roles","server_correlates_across_roles","takeover_precedes_pool_wait","pool_wait_precedes_timeout"],"description":"两名 Agent 必须独立判断接管期间的连接池等待是否导致本次 RPC 超时。","id":"takeover_pool_wait_caused_timeout","kind":"SEMANTIC_CAUSALITY","parameters":{"assertion":"同一服务、RPC 方法和订单的服务接管连接池等待导致调用端在本次事故窗口内超时。","evidence_events":["client_timeout","server_takeover_accepted","server_pool_wait_complete"]},"remediation_requirements":[]}],"schema_version":1},"version":"4.0.0"}
+{"capability":"service-takeover","deployment_scope":"TEST_ONLY","entry_document":"SKILL.md","id":"diagnose-service-takeover","logparse_plan":{"anchors":[{"label":"client","module":{"source":"SKILL_FIXED","value":"compact"},"pid":null,"process_name":{"source":"SKILL_FIXED","value":"checkout-client"},"slot":{"source":"SKILL_FIXED","value":"slot_1"}},{"label":"server","module":{"source":"SKILL_FIXED","value":"compact"},"pid":null,"process_name":{"source":"SKILL_FIXED","value":"inventory-server"},"slot":{"source":"SKILL_FIXED","value":"slot_2"}}],"attachment_requirement":"log_archive","problem_time_binding":{"name":"problem_time","source":"USER_FACT"}},"logparse_product":"compact","requirements":[{"constraints":{"allowed_values":[],"max_utf8_bytes":256,"min_utf8_bytes":1,"pattern":null,"value_type":"STRING"},"fulfillment_source":"USER_FACT","kind":"INPUT","name":"caller_service","prompt":"请提供调用方服务名。","stage":"INITIAL","supplement_policy":"MISSING_ONLY"},{"constraints":{"allowed_values":[],"max_utf8_bytes":256,"min_utf8_bytes":1,"pattern":null,"value_type":"STRING"},"fulfillment_source":"USER_FACT","kind":"INPUT","name":"server_service","prompt":"请提供服务方服务名。","stage":"INITIAL","supplement_policy":"MISSING_ONLY"},{"constraints":{"allowed_values":[],"max_utf8_bytes":256,"min_utf8_bytes":1,"pattern":null,"value_type":"STRING"},"fulfillment_source":"USER_FACT","kind":"INPUT","name":"rpc_method","prompt":"请提供超时的 RPC 方法名。","stage":"INITIAL","supplement_policy":"MISSING_ONLY"},{"constraints":{"allowed_values":[],"max_utf8_bytes":24,"min_utf8_bytes":24,"pattern":"^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$","value_type":"STRING"},"fulfillment_source":"USER_FACT","kind":"INPUT","name":"problem_time","prompt":"请提供毫秒精度 UTC 问题时间。","stage":"INITIAL","supplement_policy":"MISSING_ONLY"},{"constraints":{"allowed_content_types":["application/gzip","application/zip","application/x-tar"],"max_count":1,"min_count":1},"fulfillment_source":"READY_ATTACHMENT","kind":"ATTACHMENT","name":"log_archive","prompt":"请上传 Logparse 支持的日志归档。","stage":"INITIAL","supplement_policy":"MISSING_ONLY"},{"constraints":{"allowed_values":[],"max_utf8_bytes":256,"min_utf8_bytes":1,"pattern":null,"value_type":"STRING"},"fulfillment_source":"USER_FACT","kind":"INPUT","name":"order_id","prompt":"请提供用于两端日志关联的订单号。","stage":"AFTER_LOGPARSE","supplement_policy":"MISSING_ONLY"}],"requires_logparse":true,"schema_version":5,"summary":"定位合成服务接管场景中的 RPC 超时","tool_bundle_id":"tool-bundle/diagnose","verification_contract":{"event_extractors":[{"anchor":"client","fields":[{"clock_domain":"client_clock","name":"event_time","type":"TIMESTAMP","unit":null},{"clock_domain":null,"name":"caller_service","type":"STRING","unit":null},{"clock_domain":null,"name":"server_service","type":"STRING","unit":null},{"clock_domain":null,"name":"rpc_method","type":"STRING","unit":null},{"clock_domain":null,"name":"order_id","type":"STRING","unit":null}],"group_by":[],"id":"client_timeout","max_gap_lines":0,"max_matches":1,"members":[{"line_pattern":"^\\[\\d{4}\\] \\[diagnostic\\|[A-Za-z0-9._/-]+\\] (?P<event_time>\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z) COMPACT (?P<caller_service>\\S+) proc=checkout-client-\\d+ slot 1 cpu \\d+ \\|No\\[\\d+\\] rpc deadline exceeded after \\d+ms server=(?P<server_service>\\S+) method=(?P<rpc_method>\\S+) order_id=(?P<order_id>\\S+)$","match_mode":"FULL_LINE"}],"min_matches":1,"observation_policy_ids":[],"selectors":[],"timestamp_field":"event_time"},{"anchor":"server","fields":[{"clock_domain":"server_clock","name":"event_time","type":"TIMESTAMP","unit":null},{"clock_domain":null,"name":"server_service","type":"STRING","unit":null},{"clock_domain":null,"name":"rpc_method","type":"STRING","unit":null},{"clock_domain":null,"name":"order_id","type":"STRING","unit":null}],"group_by":[],"id":"server_takeover_accepted","max_gap_lines":0,"max_matches":1,"members":[{"line_pattern":"^\\[\\d{4}\\] \\[diagnostic\\|[A-Za-z0-9._/-]+\\] (?P<event_time>\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z) COMPACT (?P<server_service>\\S+) proc=inventory-server-\\d+ slot 2 cpu \\d+ \\|No\\[\\d+\\] service takeover active; rpc request accepted method=(?P<rpc_method>\\S+) order_id=(?P<order_id>\\S+)$","match_mode":"FULL_LINE"}],"min_matches":1,"observation_policy_ids":[],"selectors":[],"timestamp_field":"event_time"},{"anchor":"server","fields":[{"clock_domain":"server_clock","name":"event_time","type":"TIMESTAMP","unit":null},{"clock_domain":null,"name":"server_service","type":"STRING","unit":null},{"clock_domain":null,"name":"order_id","type":"STRING","unit":null}],"group_by":[],"id":"server_pool_wait_complete","max_gap_lines":0,"max_matches":1,"members":[{"line_pattern":"^\\[\\d{4}\\] \\[diagnostic\\|[A-Za-z0-9._/-]+\\] (?P<event_time>\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z) COMPACT (?P<server_service>\\S+) proc=inventory-server-\\d+ slot 2 cpu \\d+ \\|No\\[\\d+\\] connection pool wait \\d+ms complete order_id=(?P<order_id>\\S+)$","match_mode":"FULL_LINE"}],"min_matches":1,"observation_policy_ids":[],"selectors":[],"timestamp_field":"event_time"}],"observation_policies":[],"rules":[{"depends_on":[],"description":"调用端必须出现唯一的 RPC deadline 事件。","id":"client_timeout_present","kind":"EVENT_PRESENT","parameters":{"event":"client_timeout"},"remediation_requirements":[]},{"depends_on":[],"description":"服务端必须出现唯一的接管接受事件。","id":"server_takeover_present","kind":"EVENT_PRESENT","parameters":{"event":"server_takeover_accepted"},"remediation_requirements":[]},{"depends_on":[],"description":"服务端必须出现唯一的连接池等待完成事件。","id":"server_pool_wait_present","kind":"EVENT_PRESENT","parameters":{"event":"server_pool_wait_complete"},"remediation_requirements":[]},{"depends_on":["client_timeout_present"],"description":"调用端超时事件必须落在合成事故窗口内。","id":"client_timeout_in_window","kind":"EVENT_TIME_WINDOW","parameters":{"after_ms":500,"before_ms":3500,"clock_tolerance_ms":0,"event":"client_timeout","lower_bound":"INCLUSIVE","quantifier":"ANY","reference":{"name":"problem_time","source":"USER_FACT"},"upper_bound":"INCLUSIVE"},"remediation_requirements":[]},{"depends_on":["server_takeover_present"],"description":"服务端接管事件必须落在合成事故窗口内。","id":"server_takeover_in_window","kind":"EVENT_TIME_WINDOW","parameters":{"after_ms":500,"before_ms":3500,"clock_tolerance_ms":0,"event":"server_takeover_accepted","lower_bound":"INCLUSIVE","quantifier":"ANY","reference":{"name":"problem_time","source":"USER_FACT"},"upper_bound":"INCLUSIVE"},"remediation_requirements":[]},{"depends_on":["server_pool_wait_present"],"description":"服务端连接池等待事件必须落在合成事故窗口内。","id":"server_pool_wait_in_window","kind":"EVENT_TIME_WINDOW","parameters":{"after_ms":500,"before_ms":3500,"clock_tolerance_ms":0,"event":"server_pool_wait_complete","lower_bound":"INCLUSIVE","quantifier":"ANY","reference":{"name":"problem_time","source":"USER_FACT"},"upper_bound":"INCLUSIVE"},"remediation_requirements":[]},{"depends_on":["client_timeout_present"],"description":"调用端日志服务名必须等于用户事实。","id":"caller_service_matches","kind":"FACT_FIELD_EQUALS","parameters":{"event":"client_timeout","fact_name":"caller_service","field":"caller_service","quantifier":"ANY"},"remediation_requirements":[]},{"depends_on":["client_timeout_present"],"description":"调用端日志目标服务名必须等于用户事实。","id":"client_server_service_matches","kind":"FACT_FIELD_EQUALS","parameters":{"event":"client_timeout","fact_name":"server_service","field":"server_service","quantifier":"ANY"},"remediation_requirements":[]},{"depends_on":["server_takeover_present"],"description":"服务端日志服务名必须等于用户事实。","id":"server_service_matches","kind":"FACT_FIELD_EQUALS","parameters":{"event":"server_takeover_accepted","fact_name":"server_service","field":"server_service","quantifier":"ANY"},"remediation_requirements":[]},{"depends_on":["client_timeout_present"],"description":"调用端 RPC 方法必须等于用户事实。","id":"client_method_matches","kind":"FACT_FIELD_EQUALS","parameters":{"event":"client_timeout","fact_name":"rpc_method","field":"rpc_method","quantifier":"ANY"},"remediation_requirements":[]},{"depends_on":["server_takeover_present"],"description":"服务端 RPC 方法必须等于用户事实。","id":"server_method_matches","kind":"FACT_FIELD_EQUALS","parameters":{"event":"server_takeover_accepted","fact_name":"rpc_method","field":"rpc_method","quantifier":"ANY"},"remediation_requirements":[]},{"depends_on":["client_timeout_present"],"description":"调用端订单号必须等于用户事实。","id":"client_order_matches","kind":"FACT_FIELD_EQUALS","parameters":{"event":"client_timeout","fact_name":"order_id","field":"order_id","quantifier":"ANY"},"remediation_requirements":[]},{"depends_on":["server_takeover_present"],"description":"服务端订单号必须等于用户事实。","id":"server_order_matches","kind":"FACT_FIELD_EQUALS","parameters":{"event":"server_takeover_accepted","fact_name":"order_id","field":"order_id","quantifier":"ANY"},"remediation_requirements":[]},{"depends_on":["client_timeout_present","server_takeover_present"],"description":"调用端与服务端都必须有原始事件证据。","id":"required_roles_covered","kind":"ROLE_COVERAGE","parameters":{"coverage":[{"event":"client_timeout","role":"client"},{"event":"server_takeover_accepted","role":"server"}]},"remediation_requirements":[]},{"depends_on":["client_order_matches","server_order_matches","server_pool_wait_present"],"description":"调用端与服务端事件必须属于同一订单。","id":"order_correlates_across_roles","kind":"CROSS_ROLE_CORRELATION","parameters":{"members":[{"event":"client_timeout","field":"order_id"},{"event":"server_takeover_accepted","field":"order_id"},{"event":"server_pool_wait_complete","field":"order_id"}]},"remediation_requirements":[]},{"depends_on":["client_method_matches","server_method_matches"],"description":"调用端与服务端事件必须属于同一 RPC 方法。","id":"method_correlates_across_roles","kind":"CROSS_ROLE_CORRELATION","parameters":{"members":[{"event":"client_timeout","field":"rpc_method"},{"event":"server_takeover_accepted","field":"rpc_method"}]},"remediation_requirements":[]},{"depends_on":["client_server_service_matches","server_service_matches"],"description":"调用端目标服务与服务端身份必须一致。","id":"server_correlates_across_roles","kind":"CROSS_ROLE_CORRELATION","parameters":{"members":[{"event":"client_timeout","field":"server_service"},{"event":"server_takeover_accepted","field":"server_service"}]},"remediation_requirements":[]},{"depends_on":["server_takeover_in_window","server_pool_wait_in_window"],"description":"服务接管接受必须早于连接池等待完成。","id":"takeover_precedes_pool_wait","kind":"EVENT_ORDER","parameters":{"after_event":"server_pool_wait_complete","allow_equal":false,"before_event":"server_takeover_accepted","clock_tolerance_ms":0,"joins":[],"quantifier":"EXISTS"},"remediation_requirements":[]},{"depends_on":["server_pool_wait_in_window","client_timeout_in_window"],"description":"连接池等待完成不得晚于调用端 deadline。","id":"pool_wait_precedes_timeout","kind":"EVENT_ORDER","parameters":{"after_event":"client_timeout","allow_equal":true,"before_event":"server_pool_wait_complete","clock_tolerance_ms":0,"joins":[],"quantifier":"EXISTS"},"remediation_requirements":[]},{"depends_on":["required_roles_covered","order_correlates_across_roles","method_correlates_across_roles","server_correlates_across_roles","takeover_precedes_pool_wait","pool_wait_precedes_timeout"],"description":"两名 Agent 必须独立判断接管期间的连接池等待是否导致本次 RPC 超时。","id":"takeover_pool_wait_caused_timeout","kind":"SEMANTIC_CAUSALITY","parameters":{"assertion":"同一服务、RPC 方法和订单的服务接管连接池等待导致调用端在本次事故窗口内超时。","evidence_events":["client_timeout","server_takeover_accepted","server_pool_wait_complete"]},"remediation_requirements":[]}],"schema_version":2,"terminal_paths":[{"condition":{"any_of":[{"all_of":[{"result":"PASS","rule_id":"takeover_pool_wait_caused_timeout"}]}]},"id":"complete","resolution_status":"COMPLETE"},{"condition":{"any_of":[{"all_of":[]}]},"id":"none","resolution_status":"NONE"}]},"version":"5.0.0"}
 ```
-<!-- DIAGNOSIS_SKILL_MANIFEST_V4_END -->
+<!-- DIAGNOSIS_SKILL_MANIFEST_V5_END -->
 
 ## 范围与角色
 
@@ -124,51 +124,146 @@ MIME type 或计算 broker 受控树的 size/hash。
 
 ## 机器验证合同
 
-以下 `verification_contract` 是候选结论的机器门禁，不得用叙述、摘要或 Agent 自报结论替代。逐条提交同一 rule ID 的证据声明；事件必须由服务端在对应 anchor 的 UTF-8 原始日志中按整行正则重算。时间窗的毫秒范围和开闭边界均以合同明示值为准，不存在默认窗口。本合同不包含日志抑制、限流或采样语义。
+以下 `verification_contract` 是候选结论的机器门禁，不得用叙述、摘要或 Agent 自报结论替代。
+逐条提交同一 rule ID 的证据声明；事件由服务端在对应 anchor 的 UTF-8 原始日志中重新组装、
+筛选和计数。单行/多行成员、字段类型、单位、clock domain、选择器、基数、关联、时间窗、
+数值表达式及终态路径均以合同明示值为准，不存在默认容差。`observation_policies` 声明的
+抑制或限流可以让缺失/上界判断成为 UNKNOWN，但不能削弱已观测到的正向证据。
 
 ```json
 {
   "event_extractors": [
     {
       "anchor": "client",
-      "field_groups": [
-        "caller_service",
-        "server_service",
-        "rpc_method",
-        "order_id"
+      "fields": [
+        {
+          "clock_domain": "client_clock",
+          "name": "event_time",
+          "type": "TIMESTAMP",
+          "unit": null
+        },
+        {
+          "clock_domain": null,
+          "name": "caller_service",
+          "type": "STRING",
+          "unit": null
+        },
+        {
+          "clock_domain": null,
+          "name": "server_service",
+          "type": "STRING",
+          "unit": null
+        },
+        {
+          "clock_domain": null,
+          "name": "rpc_method",
+          "type": "STRING",
+          "unit": null
+        },
+        {
+          "clock_domain": null,
+          "name": "order_id",
+          "type": "STRING",
+          "unit": null
+        }
       ],
+      "group_by": [],
       "id": "client_timeout",
-      "line_pattern": "^\\[\\d{4}\\] \\[diagnostic\\|[A-Za-z0-9._/-]+\\] (?P<event_time>\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z) COMPACT (?P<caller_service>\\S+) proc=checkout-client-\\d+ slot 1 cpu \\d+ \\|No\\[\\d+\\] rpc deadline exceeded after \\d+ms server=(?P<server_service>\\S+) method=(?P<rpc_method>\\S+) order_id=(?P<order_id>\\S+)$",
-      "match_cardinality": "EXACTLY_ONE",
-      "timestamp_format": "RFC3339_MILLIS_UTC",
-      "timestamp_group": "event_time"
+      "max_gap_lines": 0,
+      "max_matches": 1,
+      "members": [
+        {
+          "line_pattern": "^\\[\\d{4}\\] \\[diagnostic\\|[A-Za-z0-9._/-]+\\] (?P<event_time>\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z) COMPACT (?P<caller_service>\\S+) proc=checkout-client-\\d+ slot 1 cpu \\d+ \\|No\\[\\d+\\] rpc deadline exceeded after \\d+ms server=(?P<server_service>\\S+) method=(?P<rpc_method>\\S+) order_id=(?P<order_id>\\S+)$",
+          "match_mode": "FULL_LINE"
+        }
+      ],
+      "min_matches": 1,
+      "observation_policy_ids": [],
+      "selectors": [],
+      "timestamp_field": "event_time"
     },
     {
       "anchor": "server",
-      "field_groups": [
-        "server_service",
-        "rpc_method",
-        "order_id"
+      "fields": [
+        {
+          "clock_domain": "server_clock",
+          "name": "event_time",
+          "type": "TIMESTAMP",
+          "unit": null
+        },
+        {
+          "clock_domain": null,
+          "name": "server_service",
+          "type": "STRING",
+          "unit": null
+        },
+        {
+          "clock_domain": null,
+          "name": "rpc_method",
+          "type": "STRING",
+          "unit": null
+        },
+        {
+          "clock_domain": null,
+          "name": "order_id",
+          "type": "STRING",
+          "unit": null
+        }
       ],
+      "group_by": [],
       "id": "server_takeover_accepted",
-      "line_pattern": "^\\[\\d{4}\\] \\[diagnostic\\|[A-Za-z0-9._/-]+\\] (?P<event_time>\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z) COMPACT (?P<server_service>\\S+) proc=inventory-server-\\d+ slot 2 cpu \\d+ \\|No\\[\\d+\\] service takeover active; rpc request accepted method=(?P<rpc_method>\\S+) order_id=(?P<order_id>\\S+)$",
-      "match_cardinality": "EXACTLY_ONE",
-      "timestamp_format": "RFC3339_MILLIS_UTC",
-      "timestamp_group": "event_time"
+      "max_gap_lines": 0,
+      "max_matches": 1,
+      "members": [
+        {
+          "line_pattern": "^\\[\\d{4}\\] \\[diagnostic\\|[A-Za-z0-9._/-]+\\] (?P<event_time>\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z) COMPACT (?P<server_service>\\S+) proc=inventory-server-\\d+ slot 2 cpu \\d+ \\|No\\[\\d+\\] service takeover active; rpc request accepted method=(?P<rpc_method>\\S+) order_id=(?P<order_id>\\S+)$",
+          "match_mode": "FULL_LINE"
+        }
+      ],
+      "min_matches": 1,
+      "observation_policy_ids": [],
+      "selectors": [],
+      "timestamp_field": "event_time"
     },
     {
       "anchor": "server",
-      "field_groups": [
-        "server_service",
-        "order_id"
+      "fields": [
+        {
+          "clock_domain": "server_clock",
+          "name": "event_time",
+          "type": "TIMESTAMP",
+          "unit": null
+        },
+        {
+          "clock_domain": null,
+          "name": "server_service",
+          "type": "STRING",
+          "unit": null
+        },
+        {
+          "clock_domain": null,
+          "name": "order_id",
+          "type": "STRING",
+          "unit": null
+        }
       ],
+      "group_by": [],
       "id": "server_pool_wait_complete",
-      "line_pattern": "^\\[\\d{4}\\] \\[diagnostic\\|[A-Za-z0-9._/-]+\\] (?P<event_time>\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z) COMPACT (?P<server_service>\\S+) proc=inventory-server-\\d+ slot 2 cpu \\d+ \\|No\\[\\d+\\] connection pool wait \\d+ms complete order_id=(?P<order_id>\\S+)$",
-      "match_cardinality": "EXACTLY_ONE",
-      "timestamp_format": "RFC3339_MILLIS_UTC",
-      "timestamp_group": "event_time"
+      "max_gap_lines": 0,
+      "max_matches": 1,
+      "members": [
+        {
+          "line_pattern": "^\\[\\d{4}\\] \\[diagnostic\\|[A-Za-z0-9._/-]+\\] (?P<event_time>\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z) COMPACT (?P<server_service>\\S+) proc=inventory-server-\\d+ slot 2 cpu \\d+ \\|No\\[\\d+\\] connection pool wait \\d+ms complete order_id=(?P<order_id>\\S+)$",
+          "match_mode": "FULL_LINE"
+        }
+      ],
+      "min_matches": 1,
+      "observation_policy_ids": [],
+      "selectors": [],
+      "timestamp_field": "event_time"
     }
   ],
+  "observation_policies": [],
   "rules": [
     {
       "depends_on": [],
@@ -210,8 +305,10 @@ MIME type 或计算 broker 受控树的 size/hash。
       "parameters": {
         "after_ms": 500,
         "before_ms": 3500,
+        "clock_tolerance_ms": 0,
         "event": "client_timeout",
         "lower_bound": "INCLUSIVE",
+        "quantifier": "ANY",
         "reference": {
           "name": "problem_time",
           "source": "USER_FACT"
@@ -230,8 +327,10 @@ MIME type 或计算 broker 受控树的 size/hash。
       "parameters": {
         "after_ms": 500,
         "before_ms": 3500,
+        "clock_tolerance_ms": 0,
         "event": "server_takeover_accepted",
         "lower_bound": "INCLUSIVE",
+        "quantifier": "ANY",
         "reference": {
           "name": "problem_time",
           "source": "USER_FACT"
@@ -250,8 +349,10 @@ MIME type 或计算 broker 受控树的 size/hash。
       "parameters": {
         "after_ms": 500,
         "before_ms": 3500,
+        "clock_tolerance_ms": 0,
         "event": "server_pool_wait_complete",
         "lower_bound": "INCLUSIVE",
+        "quantifier": "ANY",
         "reference": {
           "name": "problem_time",
           "source": "USER_FACT"
@@ -270,7 +371,8 @@ MIME type 或计算 broker 受控树的 size/hash。
       "parameters": {
         "event": "client_timeout",
         "fact_name": "caller_service",
-        "field": "caller_service"
+        "field": "caller_service",
+        "quantifier": "ANY"
       },
       "remediation_requirements": []
     },
@@ -284,7 +386,8 @@ MIME type 或计算 broker 受控树的 size/hash。
       "parameters": {
         "event": "client_timeout",
         "fact_name": "server_service",
-        "field": "server_service"
+        "field": "server_service",
+        "quantifier": "ANY"
       },
       "remediation_requirements": []
     },
@@ -298,7 +401,8 @@ MIME type 或计算 broker 受控树的 size/hash。
       "parameters": {
         "event": "server_takeover_accepted",
         "fact_name": "server_service",
-        "field": "server_service"
+        "field": "server_service",
+        "quantifier": "ANY"
       },
       "remediation_requirements": []
     },
@@ -312,7 +416,8 @@ MIME type 或计算 broker 受控树的 size/hash。
       "parameters": {
         "event": "client_timeout",
         "fact_name": "rpc_method",
-        "field": "rpc_method"
+        "field": "rpc_method",
+        "quantifier": "ANY"
       },
       "remediation_requirements": []
     },
@@ -326,7 +431,8 @@ MIME type 或计算 broker 受控树的 size/hash。
       "parameters": {
         "event": "server_takeover_accepted",
         "fact_name": "rpc_method",
-        "field": "rpc_method"
+        "field": "rpc_method",
+        "quantifier": "ANY"
       },
       "remediation_requirements": []
     },
@@ -340,7 +446,8 @@ MIME type 或计算 broker 受控树的 size/hash。
       "parameters": {
         "event": "client_timeout",
         "fact_name": "order_id",
-        "field": "order_id"
+        "field": "order_id",
+        "quantifier": "ANY"
       },
       "remediation_requirements": []
     },
@@ -354,7 +461,8 @@ MIME type 或计算 broker 受控树的 size/hash。
       "parameters": {
         "event": "server_takeover_accepted",
         "fact_name": "order_id",
-        "field": "order_id"
+        "field": "order_id",
+        "quantifier": "ANY"
       },
       "remediation_requirements": []
     },
@@ -462,7 +570,10 @@ MIME type 或计算 broker 受控树的 size/hash。
       "parameters": {
         "after_event": "server_pool_wait_complete",
         "allow_equal": false,
-        "before_event": "server_takeover_accepted"
+        "before_event": "server_takeover_accepted",
+        "clock_tolerance_ms": 0,
+        "joins": [],
+        "quantifier": "EXISTS"
       },
       "remediation_requirements": []
     },
@@ -477,7 +588,10 @@ MIME type 或计算 broker 受控树的 size/hash。
       "parameters": {
         "after_event": "client_timeout",
         "allow_equal": true,
-        "before_event": "server_pool_wait_complete"
+        "before_event": "server_pool_wait_complete",
+        "clock_tolerance_ms": 0,
+        "joins": [],
+        "quantifier": "EXISTS"
       },
       "remediation_requirements": []
     },
@@ -504,7 +618,36 @@ MIME type 或计算 broker 受控树的 size/hash。
       "remediation_requirements": []
     }
   ],
-  "schema_version": 1
+  "schema_version": 2,
+  "terminal_paths": [
+    {
+      "condition": {
+        "any_of": [
+          {
+            "all_of": [
+              {
+                "result": "PASS",
+                "rule_id": "takeover_pool_wait_caused_timeout"
+              }
+            ]
+          }
+        ]
+      },
+      "id": "complete",
+      "resolution_status": "COMPLETE"
+    },
+    {
+      "condition": {
+        "any_of": [
+          {
+            "all_of": []
+          }
+        ]
+      },
+      "id": "none",
+      "resolution_status": "NONE"
+    }
+  ]
 }
 ```
 
@@ -531,7 +674,15 @@ MIME type 或计算 broker 受控树的 size/hash。
 
 ## Candidate 与服务端用户结果
 
-只有每个 completion criterion 均由 Evidence 支持时才提出 Candidate。
+先按声明顺序重算全部规则，再选择第一条匹配的 `terminal_paths`。`COMPLETE` 或 `PARTIAL`
+路径可以提出 Candidate，且 `resolution_status` 与 `terminal_path_id` 必须逐字绑定该路径；
+`NONE` 路径禁止提出 Candidate。COMPLETE 的每个 completion criterion 都必须为
+`SATISFIED`；PARTIAL 必须保留已证实进展，并把未完成 criterion 标成
+`PARTIALLY_SATISFIED|UNSATISFIED|UNKNOWN`，不得伪装成完整结论。
+
+Candidate 用 `causal_factors`、`candidate_factors` 和 `excluded_factors` 分别表达已证实因素、
+仍待区分因素和已排除因素。每个 factor 必须绑定原始 Evidence 及实际支持它的 rule IDs；
+允许多个共同贡献因素，不得为了给出单一根因而丢弃并发贡献或 UNKNOWN。
 
 `supporting_evidence_bindings` 必须去重并保持当前快照 `evidence_refs` 的相对顺序；同一
 Outcome 新接收的 Evidence 只按 `state_delta.add_evidence_bindings` 顺序追加。禁止按业务

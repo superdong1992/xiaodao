@@ -40,6 +40,7 @@ _WAIT_STOP_CASE_STATUSES = frozenset(
         CaseStatus.WAITING_INPUT,
         CaseStatus.WAITING_ATTACHMENT,
         CaseStatus.RESOLVED,
+        CaseStatus.PARTIALLY_RESOLVED,
         CaseStatus.UNRESOLVED,
         CaseStatus.FAILED,
         CaseStatus.CANCELLED,

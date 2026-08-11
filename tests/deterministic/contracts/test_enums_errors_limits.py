@@ -35,6 +35,7 @@ ENUM_EXPECTATIONS = {
     "CancellationReason": ("USER_CANCEL", "SERVICE_SHUTDOWN"),
     "CandidateMutationAction": ("INSTALL", "SET_STATUS"),
     "CandidateStatus": ("PROPOSED", "REVIEWING", "REJECTED", "ACCEPTED"),
+    "CausalFactorRole": ("CAUSE", "CONTRIBUTOR", "CONDITION"),
     "CaseStatus": (
         "NEW",
         "RUNNING",
@@ -42,6 +43,7 @@ ENUM_EXPECTATIONS = {
         "WAITING_ATTACHMENT",
         "REVIEWING",
         "RESOLVED",
+        "PARTIALLY_RESOLVED",
         "UNRESOLVED",
         "FAILED",
         "CANCELLED",
@@ -65,7 +67,14 @@ ENUM_EXPECTATIONS = {
     ),
     "DiagnosisItemStatus": ("ACTIVE", "RESOLVED", "REJECTED", "SUPERSEDED"),
     "DiagnosisMode": ("SPECIALIZED", "GENERIC"),
+    "DiagnosisResolutionStatus": ("COMPLETE", "PARTIAL"),
     "DiagnosisProvenanceType": ("USER_INPUT", "AGENT_OUTCOME"),
+    "CompletionCriterionStatus": (
+        "SATISFIED",
+        "PARTIALLY_SATISFIED",
+        "UNSATISFIED",
+        "UNKNOWN",
+    ),
     "EvidenceSourceType": (
         "USER_FACT",
         "ATTACHMENT",
@@ -117,6 +126,7 @@ ENUM_EXPECTATIONS = {
         "VERIFIED_FAIL",
         "UNVERIFIABLE",
         "SEMANTIC_ONLY",
+        "NOT_APPLICABLE",
     ),
     "SupplementPolicy": ("NONE", "MISSING_ONLY"),
     "TriggerType": (

@@ -10,6 +10,7 @@ from problem_locator.contracts import (
     Case,
     CaseSnapshot,
     CaseStatus,
+    CompletionCriterionStatus,
     CoordinatorPlanResult,
     CreateCaseTriggerPayload,
     DiagnosisItem,
@@ -34,6 +35,7 @@ from problem_locator.contracts import (
     UnresolvedResult,
     VersionedRef,
     canonical_json_bytes,
+    canonical_json_sha256,
     validate_coordinator_plan_result,
 )
 from problem_locator.domain import DomainCoordinator
@@ -130,11 +132,42 @@ def _case_without_active(status: CaseStatus) -> CaseSnapshot:
             resume_source_job=None,
             replacement_job_ids_by_source={},
         )
-    if status is CaseStatus.RESOLVED:
+    if status in {CaseStatus.RESOLVED, CaseStatus.PARTIALLY_RESOLVED}:
         review = review_job()
         review_state = state_from_job(review)
         candidate = review_state.candidate_conclusion
         assert candidate is not None
+        if status is CaseStatus.PARTIALLY_RESOLVED:
+            mappings = list(candidate.completion_criteria_mapping)
+            mappings[0] = rebuild(
+                mappings[0],
+                status=CompletionCriterionStatus.PARTIALLY_SATISFIED,
+            )
+            candidate_value = candidate.model_dump(mode="json")
+            candidate_value.update(
+                resolution_status="PARTIAL",
+                terminal_path_id="partial",
+                completion_criteria_mapping=[
+                    item.model_dump(mode="json") for item in mappings
+                ],
+            )
+            candidate_value["content_hash"] = canonical_json_sha256(
+                {
+                    "resolution_status": candidate_value["resolution_status"],
+                    "terminal_path_id": candidate_value["terminal_path_id"],
+                    "statement": candidate_value["statement"],
+                    "causal_factors": candidate_value["causal_factors"],
+                    "candidate_factors": candidate_value["candidate_factors"],
+                    "excluded_factors": candidate_value["excluded_factors"],
+                    "supporting_evidence_refs": candidate_value[
+                        "supporting_evidence_refs"
+                    ],
+                    "completion_criteria_mapping": candidate_value[
+                        "completion_criteria_mapping"
+                    ],
+                }
+            )
+            candidate = type(candidate).model_validate(candidate_value)
         accepted = rebuild(candidate, status="ACCEPTED")
         resolved_state = rebuild(review_state, candidate_conclusion=accepted)
         case = Case(
@@ -303,7 +336,7 @@ def test_status_trigger_partition_covers_the_complete_cartesian_product() -> Non
     all_pairs = set(product(CaseStatus, TriggerType))
     illegal_pairs = all_pairs - LEGAL_STATUS_TRIGGER_PAIRS
 
-    assert len(all_pairs) == len(CaseStatus) * len(TriggerType) == 110
+    assert len(all_pairs) == len(CaseStatus) * len(TriggerType) == 121
     assert LEGAL_STATUS_TRIGGER_PAIRS.isdisjoint(illegal_pairs)
     assert set(LEGAL_STATUS_TRIGGER_PAIRS) | illegal_pairs == all_pairs
 

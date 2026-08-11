@@ -1,4 +1,4 @@
-"""Build the public Result v2 payload and server-owned proposal files.
+"""Build the public Result v3 payload and server-owned proposal files.
 
 This module is intentionally downstream of the server verifier.  Agent prose is
 published only through an Outcome field that crossed the frozen contract seam;
@@ -17,6 +17,8 @@ from problem_locator.contracts import (
     AgentArtifactProposalDraft,
     ArtifactKind,
     CompletionCriterionDraftMapping,
+    CompletionCriterionStatus,
+    DiagnosisResolutionStatus,
     DiagnosisOutcome,
     EvidenceBinding,
     Job,
@@ -25,11 +27,12 @@ from problem_locator.contracts import (
     ResourceKind,
     ReviewAssessment,
     ServerRuleStatus,
-    UserResultArchiveMetadataV2,
+    UserResultArchiveMetadataV3,
     UserResultCitationV2,
     UserResultFindingV2,
-    UserResultMetadataV2,
-    UserResultPayloadV2,
+    UserResultFactorV3,
+    UserResultMetadataV3,
+    UserResultPayloadV3,
     UserResultTimeObservationV2,
     UserResultTimeRelevanceV2,
     UserResultVerificationRuleV2,
@@ -57,7 +60,7 @@ _TIMESTAMP_FORMAT = "%Y-%m-%dT%H:%M:%S.%fZ"
 class ServerResultBundle:
     """Canonical public report plus its one or two server-owned files."""
 
-    report: UserResultPayloadV2
+    report: UserResultPayloadV3
     files: tuple[ServerGeneratedResultFile, ...]
 
 
@@ -274,6 +277,8 @@ def _verification_rules(
                     decision_evidence,
                 ),
                 observed_times=list(evaluation.observed_times),
+                event_observations=list(evaluation.event_observations),
+                derived_values=list(evaluation.derived_values),
                 issues=issues,
             )
         )
@@ -356,7 +361,7 @@ def _completion_mappings(
             CompletionCriterionDraftMapping(
                 criterion_index=item.criterion_index,
                 criterion=item.criterion,
-                satisfied=item.satisfied,
+                status=item.status,
                 evidence_bindings=[
                     EvidenceBinding(
                         existing_evidence_id=evidence_id,
@@ -372,7 +377,7 @@ def _completion_mappings(
         CompletionCriterionDraftMapping(
             criterion_index=index,
             criterion=criterion,
-            satisfied=False,
+            status=CompletionCriterionStatus.UNKNOWN,
             evidence_bindings=[],
             explanation="服务端验证未形成可发布的完成结论。",
         )
@@ -507,6 +512,7 @@ def _gaps(
         if evaluation.status in {
             ServerRuleStatus.VERIFIED_FAIL,
             ServerRuleStatus.UNVERIFIABLE,
+            ServerRuleStatus.NOT_APPLICABLE,
         }:
             values.append(
                 f"服务端规则 {rule.rule_id} 未通过：{evaluation.status.value}。"
@@ -542,9 +548,45 @@ def _limitations(
     return _unique_text(result)
 
 
+def _result_factors(
+    payload: DiagnosisOutcome | ReviewAssessment,
+    *,
+    candidate_result: bool,
+    rules: list[UserResultVerificationRuleV2],
+) -> tuple[list[UserResultFactorV3], list[UserResultFactorV3], list[UserResultFactorV3]]:
+    if not candidate_result or not isinstance(payload, DiagnosisOutcome):
+        return [], [], []
+    candidate = payload.candidate_conclusion_draft
+    assert candidate is not None
+
+    def convert(values) -> list[UserResultFactorV3]:
+        result: list[UserResultFactorV3] = []
+        for factor in values:
+            citations: list[UserResultCitationV2] = []
+            for binding in factor.evidence_bindings:
+                citations.extend(_finding_citations(binding, rules))
+            result.append(
+                UserResultFactorV3(
+                    factor_id=factor.factor_id,
+                    role=factor.role,
+                    statement=factor.statement,
+                    evidence_bindings=list(factor.evidence_bindings),
+                    required_rule_ids=list(factor.required_rule_ids),
+                    citations=citations,
+                )
+            )
+        return result
+
+    return (
+        convert(candidate.causal_factors),
+        convert(candidate.candidate_factors),
+        convert(candidate.excluded_factors),
+    )
+
+
 def _result_archive_logs(
     captured_logs: tuple[CapturedTargetLog, ...],
-    report: UserResultPayloadV2,
+    report: UserResultPayloadV3,
 ) -> tuple[ResultArchiveLog, ...]:
     public_bindings = _unique_bindings(
         [
@@ -558,6 +600,15 @@ def _result_archive_logs(
                 binding
                 for finding in report.findings
                 for binding in finding.evidence_bindings
+            ),
+            *(
+                binding
+                for factor in (
+                    report.causal_factors
+                    + report.candidate_factors
+                    + report.excluded_factors
+                )
+                for binding in factor.evidence_bindings
             ),
             *(
                 binding
@@ -592,17 +643,17 @@ def build_server_result_bundle(
     authoritative_targets: AuthoritativeTargetSet | None,
     captured_logs: tuple[CapturedTargetLog, ...],
 ) -> ServerResultBundle:
-    """Build canonical diagnosis JSON and, for a complete result, its ZIP."""
+    """Build canonical diagnosis JSON and a ZIP for reviewed candidate results."""
 
-    completed = (
+    candidate_result = (
         job.job_type is JobType.DIAGNOSE
         and result_type is OutcomeResultType.COMPLETED
         and isinstance(payload, DiagnosisOutcome)
         and payload.candidate_conclusion_draft is not None
     )
-    if completed:
+    if candidate_result:
         if not verification.positive_gate_passed:
-            raise ValueError("a completed public result requires the positive gate")
+            raise ValueError("a candidate public result requires the selected path gate")
         if authoritative_targets is not None:
             authoritative_targets.require_deliverable()
             if tuple(item.target for item in captured_logs) != authoritative_targets.targets:
@@ -611,33 +662,55 @@ def build_server_result_bundle(
             raise ValueError("target logs require a server-authoritative target set")
 
     rules = _verification_rules(verification, captured_logs)
-    report = UserResultPayloadV2(
-        schema_version=2,
-        format_id="problem-locator-diagnosis-v2",
-        status="COMPLETED" if completed else "INCONCLUSIVE",
+    candidate = (
+        payload.candidate_conclusion_draft
+        if candidate_result and isinstance(payload, DiagnosisOutcome)
+        else None
+    )
+    if candidate is not None:
+        report_status = (
+            "COMPLETED"
+            if candidate.resolution_status is DiagnosisResolutionStatus.COMPLETE
+            else "PARTIAL"
+        )
+    else:
+        report_status = "INCONCLUSIVE"
+    causal_factors, candidate_factors, excluded_factors = _result_factors(
+        payload,
+        candidate_result=candidate_result,
+        rules=rules,
+    )
+    report = UserResultPayloadV3(
+        schema_version=3,
+        format_id="problem-locator-diagnosis-v3",
+        status=report_status,
         source_job_type=job.job_type,
         problem_statement=job.context_snapshot.problem_spec.statement,
         root_cause=(
-            payload.candidate_conclusion_draft.statement
-            if completed and isinstance(payload, DiagnosisOutcome)
+            candidate.statement
+            if candidate is not None
+            and candidate.resolution_status is DiagnosisResolutionStatus.COMPLETE
             else None
         ),
         findings=_findings(
             payload,
-            completed=completed,
+            completed=candidate_result,
             verification=verification,
             rules=rules,
         ),
+        causal_factors=causal_factors,
+        candidate_factors=candidate_factors,
+        excluded_factors=excluded_factors,
         supporting_evidence_bindings=_supporting_bindings(
             job,
             payload,
             verification,
-            completed=completed,
+            completed=candidate_result,
         ),
         completion_criteria_mapping=_completion_mappings(
             job,
             payload,
-            completed=completed,
+            completed=candidate_result,
         ),
         verification_rules=rules,
         time_relevance=_time_relevance(
@@ -649,13 +722,16 @@ def build_server_result_bundle(
             payload,
             verification,
             authoritative_targets,
-            completed=completed,
+            completed=(report_status == "COMPLETED"),
         ),
         limitations=_limitations(authoritative_targets),
         recommendations=[
             payload.recommended_next_step
             if isinstance(payload, DiagnosisOutcome)
             else payload.recommendation
+        ],
+        safety_notes=[
+            "本结果只覆盖固定 Diagnosis Skill 声明的诊断范围；未列出的原因未被自动排除。"
         ],
     )
     report_bytes = canonical_json_bytes(report)
@@ -670,14 +746,14 @@ def build_server_result_bundle(
         ),
         declared_size=len(report_bytes),
         declared_sha256=bytes_sha256(report_bytes),
-        metadata=UserResultMetadataV2(
-            schema_version=2,
-            format_id="problem-locator-diagnosis-v2",
-            description="服务端验证后生成的诊断结果 v2。",
+        metadata=UserResultMetadataV3(
+            schema_version=3,
+            format_id="problem-locator-diagnosis-v3",
+            description="服务端验证后生成的诊断结果 v3。",
         ),
     )
     files = [ServerGeneratedResultFile(draft=result_draft, content=report_bytes)]
-    if completed:
+    if candidate_result:
         archive_logs = _result_archive_logs(captured_logs, report)
         problem_time = (
             None if authoritative_targets is None else authoritative_targets.problem_time
@@ -702,10 +778,10 @@ def build_server_result_bundle(
             workspace_relative_path=f"output/proposals/{_ARCHIVE_KEY}/result.zip",
             declared_size=len(archive_bytes),
             declared_sha256=bytes_sha256(archive_bytes),
-            metadata=UserResultArchiveMetadataV2(
-                schema_version=2,
-                format_id="problem-locator-result-archive-v2",
-                description="服务端验证后生成的诊断结果归档 v2。",
+            metadata=UserResultArchiveMetadataV3(
+                schema_version=3,
+                format_id="problem-locator-result-archive-v3",
+                description="服务端验证后生成的诊断结果归档 v3。",
                 user_result_proposal_key=_RESULT_KEY,
                 target_log_count=len(archive_logs),
             ),

@@ -24,18 +24,18 @@ EXPECTED_CHECKOUT_EVIDENCE = {
 EXPECTED_SOURCE_CHANGES = {
     "SKILL.md": (
         "modified_for_v4_deployment_contract",
-        "Upgrade the generator workflow to GenerationSpec v4, manifest schema v4, "
+        "Upgrade the generator workflow to GenerationSpec v5, manifest schema v5, "
         "explicit deployment scope, and server-owned public results.",
     ),
     "references/generated-skill-contract.md": (
         "modified_for_v4_deployment_contract",
-        "Document manifest schema v4, deployment scope, generic Logparse bindings, "
+        "Document manifest schema v5, deployment scope, generic Logparse bindings, "
         "declarative verification rules, and server-owned public results.",
     ),
     "references/wiki-template.md": (
         "modified_for_v4_deployment_contract",
         "Replace the RPC fixture template with an embedded deterministic "
-        "GenerationSpec v4 example with explicit deployment scope.",
+        "GenerationSpec v5 example with explicit deployment scope.",
     ),
     "scripts/pack_result_zip.py": (
         "removed_for_v4_service_ownership",
@@ -44,7 +44,7 @@ EXPECTED_SOURCE_CHANGES = {
     ),
     "scripts/validate_generated_skill.py": (
         "modified_for_v4_deployment_contract",
-        "Validate manifest schema v4, deployment scope, verification contracts, "
+        "Validate manifest schema v5, deployment scope, verification contracts, "
         "embedded machine-source consistency, and Agent artifact prohibitions.",
     ),
 }
@@ -56,7 +56,7 @@ EXPECTED_ADDED_FILE = {
     ),
     "purpose": (
         "Deterministically build, hash, validate, and atomically publish Diagnosis "
-        "Skill products from GenerationSpec v4."
+        "Skill products from GenerationSpec v5."
     ),
 }
 EXPECTED_EXCLUDED_PATTERNS = (

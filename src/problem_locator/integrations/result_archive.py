@@ -1,4 +1,4 @@
-"""Server-owned deterministic Result Archive v2 builder and verifier."""
+"""Server-owned deterministic Result Archive v3 builder and verifier."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from typing import Iterable
 
 from problem_locator.contracts import (
     EvidenceBinding,
-    UserResultPayloadV2,
+    UserResultPayloadV3,
     canonical_json_bytes,
 )
 from problem_locator.integrations.logparse.paths import validate_relative_path
@@ -20,7 +20,7 @@ from problem_locator.runtime.authoritative_targets import (
 )
 
 
-_FORMAT_ID = "problem-locator-result-archive-v2"
+_FORMAT_ID = "problem-locator-result-archive-v3"
 _MAX_RESULT_TEXT_BYTES = 1_048_576
 _MAX_TARGET_LOGS = 32
 _ZIP_TIMESTAMP = (1980, 1, 1, 0, 0, 0)
@@ -117,13 +117,22 @@ def _target_log_rows(target_logs: tuple[ResultArchiveLog, ...]) -> list[str]:
 
 
 def _validate_citation_log_bindings(
-    report: UserResultPayloadV2,
+    report: UserResultPayloadV3,
     target_logs: tuple[ResultArchiveLog, ...],
 ) -> None:
     logs_by_name = {item.target.archive_name: item.content for item in target_logs}
     citations: list[object] = []
     citations.extend(
         citation for finding in report.findings for citation in finding.citations
+    )
+    citations.extend(
+        citation
+        for factor in (
+            report.causal_factors
+            + report.candidate_factors
+            + report.excluded_factors
+        )
+        for citation in factor.citations
     )
     citations.extend(
         citation
@@ -160,16 +169,16 @@ def _validate_citation_log_bindings(
 
 
 def render_result_text(
-    report: UserResultPayloadV2,
+    report: UserResultPayloadV3,
     *,
     target_logs: tuple[ResultArchiveLog, ...],
 ) -> str:
     """Render the fixed nine-section Chinese ``result.txt`` contract."""
 
-    if not isinstance(report, UserResultPayloadV2):
-        raise TypeError("report must be a UserResultPayloadV2")
-    if report.status != "COMPLETED" or report.root_cause is None:
-        raise ValueError("only a COMPLETED user result may produce result.zip")
+    if not isinstance(report, UserResultPayloadV3):
+        raise TypeError("report must be a UserResultPayloadV3")
+    if report.status not in {"COMPLETED", "PARTIAL"}:
+        raise ValueError("only a completed or partial user result may produce result.zip")
     _validate_citation_log_bindings(report, target_logs)
 
     supporting = "；".join(
@@ -182,8 +191,25 @@ def render_result_text(
             f"{_text(finding.statement)}（置信度={finding.confidence:.3f}；"
             f"证据={citations or '无'}）"
         )
+    factor_lines = [
+        *(
+            f"已确认[{_text(item.factor_id)}][{_enum_text(item.role)}] "
+            f"{_text(item.statement)}"
+            for item in report.causal_factors
+        ),
+        *(
+            f"候选[{_text(item.factor_id)}][{_enum_text(item.role)}] "
+            f"{_text(item.statement)}"
+            for item in report.candidate_factors
+        ),
+        *(
+            f"已排除[{_text(item.factor_id)}][{_enum_text(item.role)}] "
+            f"{_text(item.statement)}"
+            for item in report.excluded_factors
+        ),
+    ]
     criteria = [
-        f"[{('已满足' if item.satisfied else '未满足')}] {_text(item.criterion)}；"
+        f"[{_enum_text(item.status)}] {_text(item.criterion)}；"
         f"说明={_text(item.explanation)}；证据="
         + "；".join(_binding_text(binding) for binding in item.evidence_bindings)
         for item in report.completion_criteria_mapping
@@ -196,6 +222,24 @@ def render_result_text(
         ]
         if rule.observed_times:
             details.append("观测时间=" + "、".join(rule.observed_times))
+        if rule.event_observations:
+            details.append(
+                "事件计数="
+                + "、".join(
+                    f"{item.event_id}:{item.observed_count}"
+                    + ("(下界)" if item.count_is_lower_bound else "")
+                    for item in rule.event_observations
+                )
+            )
+        if rule.derived_values:
+            details.append(
+                "派生值="
+                + "、".join(
+                    f"{item.name}={item.value} {item.unit or ''}"
+                    f"[{item.lower_bound},{item.upper_bound}]"
+                    for item in rule.derived_values
+                )
+            )
         if rule.citations:
             details.append(
                 "日志原文=" + "；".join(_citation_text(item) for item in rule.citations)
@@ -225,7 +269,8 @@ def render_result_text(
 
     lines = [
         "1. 定位结论",
-        _text(report.root_cause),
+        _text(report.root_cause or "已形成部分定位，但尚无可发布的完整根因。"),
+        f"结果完整度：{_text(report.status)}",
         f"支持证据：{supporting}",
         "",
         "2. 问题描述",
@@ -234,6 +279,8 @@ def render_result_text(
         "",
         "3. 关键分析依据",
         *_numbered(findings),
+        "因素状态：",
+        *_numbered(factor_lines),
         "",
         "4. 完成条件核对",
         *_numbered(criteria),
@@ -252,6 +299,8 @@ def render_result_text(
         "",
         "8. 处置建议",
         *_numbered((_text(item) for item in report.recommendations)),
+        "安全说明：",
+        *_numbered((_text(item) for item in report.safety_notes)),
         "",
         "9. 目标日志清单",
         *_target_log_rows(target_logs),
@@ -330,7 +379,7 @@ def _validated_logs(
 
 
 def _archive_manifest(
-    report: UserResultPayloadV2,
+    report: UserResultPayloadV3,
     *,
     problem_time: str | None,
     result_bytes: bytes,
@@ -364,7 +413,7 @@ def _archive_manifest(
         )
     return canonical_json_bytes(
         {
-            "schema_version": 2,
+            "schema_version": 3,
             "format_id": _FORMAT_ID,
             "problem_time": problem_time,
             "diagnosis_result_sha256": hashlib.sha256(
@@ -378,12 +427,12 @@ def _archive_manifest(
 
 
 def build_result_archive(
-    report: UserResultPayloadV2,
+    report: UserResultPayloadV3,
     *,
     problem_time: str | None,
     target_logs: tuple[ResultArchiveLog, ...],
 ) -> bytes:
-    """Build canonical v2 bytes in result/manifest/plan-log order."""
+    """Build canonical v3 bytes in result/manifest/plan-log order."""
 
     logs = _validated_logs(target_logs)
     if logs and not problem_time:
@@ -415,11 +464,11 @@ def build_result_archive(
 def validate_result_archive_bytes(
     archive_bytes: bytes,
     *,
-    report: UserResultPayloadV2,
+    report: UserResultPayloadV3,
     problem_time: str | None,
     target_logs: tuple[ResultArchiveLog, ...],
 ) -> str:
-    """Recompute and validate every v2 entry, byte, order, and ZIP attribute."""
+    """Recompute and validate every v3 entry, byte, order, and ZIP attribute."""
 
     if not isinstance(archive_bytes, bytes):
         raise TypeError("archive_bytes must be bytes")

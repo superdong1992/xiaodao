@@ -66,7 +66,7 @@ def is_artifact_downloadable(case: Case, artifact: Artifact) -> bool:
     ):
         return artifact.artifact_id == case.unresolved_result.user_result_artifact_id
     return (
-        case.status is CaseStatus.RESOLVED
+        case.status in {CaseStatus.RESOLVED, CaseStatus.PARTIALLY_RESOLVED}
         and case.final_result is not None
         and artifact.created_by_job_id == case.final_result.proposed_by_job_id
     )

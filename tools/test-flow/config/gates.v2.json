@@ -125,6 +125,15 @@
       "runtime_profile": "release",
       "evidence": ["pytest.xml", "pytest-summary.json", "model-usage.json"]
     },
+    "real.agent.skill-generation": {
+      "kind": "pytest",
+      "selectors": ["tests/real/agent/test_real_wiki_skill_generation_gate.py"],
+      "environment_profile": "real-skill-generation",
+      "min_passed": 1,
+      "skip_policy": "forbid",
+      "runtime_profile": "release",
+      "evidence": ["pytest.xml", "pytest-summary.json", "model-usage.json"]
+    },
     "real.agent.route": {
       "kind": "pytest",
       "selectors": ["tests/real/agent/test_real_route_agent_contract_gate.py"],

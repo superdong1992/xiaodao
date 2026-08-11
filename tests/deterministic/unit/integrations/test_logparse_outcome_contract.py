@@ -39,7 +39,7 @@ from problem_locator.contracts import (
     RequirementStatus,
     ResourceKind,
     StagedResourceRef,
-    UserResultArchiveMetadataV2,
+    UserResultArchiveMetadataV3,
     UserResultMetadata,
     UserResultPayload,
     WorkspaceAttachmentInput,
@@ -142,7 +142,7 @@ def _agent_outcome(
 ) -> AgentJobOutcome:
     evidence_drafts = evidence or []
     artifact_drafts = artifacts or []
-    audit = _decision_audit(job, evidence_drafts)
+    audit = _decision_audit(job, evidence_drafts, payload)
     return AgentJobOutcome(
         outcome_id=outcome_id,
         job_id=job.job_id,
@@ -163,6 +163,7 @@ def _agent_outcome(
 def _decision_audit(
     job: Job,
     evidence: list[AgentEvidenceProposalDraft],
+    payload: DiagnosisOutcome,
 ) -> DecisionAuditV2:
     """Represent the authoritative V2 audit boundary used by these fixtures."""
 
@@ -175,6 +176,14 @@ def _decision_audit(
         for item in evidence
     ]
     rule_id = "causal_chain"
+    candidate = payload.candidate_conclusion_draft
+    terminal_path_id = (
+        candidate.terminal_path_id if candidate is not None else "none"
+    )
+    terminal_resolution_status = (
+        candidate.resolution_status.value if candidate is not None else "NONE"
+    )
+    claim_result = "PASS" if candidate is not None else "UNKNOWN"
     return DecisionAuditV2.model_validate(
         {
             "schema_version": 2,
@@ -186,6 +195,8 @@ def _decision_audit(
             "subject_hash": "2" * 64,
             "candidate_target": None,
             "diagnosis_audit_hash": None,
+            "selected_terminal_path_id": terminal_path_id,
+            "terminal_resolution_status": terminal_resolution_status,
             "required_rule_ids": [rule_id],
             "required_evidence_bindings": [
                 item.model_dump(mode="json") for item in bindings
@@ -195,7 +206,7 @@ def _decision_audit(
                     "rule_id": rule_id,
                     "agent_claim": {
                         "rule_id": rule_id,
-                        "claimed_result": "PASS",
+                        "claimed_result": claim_result,
                         "fact_refs": [],
                         "citations": [],
                         "explanation": "The fixture explicitly assesses causality.",
@@ -212,6 +223,8 @@ def _decision_audit(
                         "derived_anchor_time": None,
                         "observed_times": [],
                         "line_ranges": [],
+                        "event_observations": [],
+                        "derived_values": [],
                         "issues": [],
                     },
                 }
@@ -550,7 +563,7 @@ def _completed_outcome(
         CompletionCriterionDraftMapping(
             criterion_index=index,
             criterion=criterion,
-            satisfied=True,
+            status="SATISFIED",
             evidence_bindings=[binding],
             explanation="The reused parsed run identifies the timed-out request.",
         )
@@ -561,13 +574,26 @@ def _completed_outcome(
     candidate = CandidateConclusionDraft(
         proposal_key="candidate",
         existing_conclusion_id=None,
+        resolution_status="COMPLETE",
+        terminal_path_id="complete",
         statement="The inventory RPC exceeded its deadline while waiting for a connection.",
+        causal_factors=[
+            {
+                "factor_id": "primary_cause",
+                "role": "CAUSE",
+                "statement": "The inventory RPC exceeded its deadline while waiting for a connection.",
+                "evidence_bindings": [binding],
+                "required_rule_ids": ["causal_chain"],
+            }
+        ],
+        candidate_factors=[],
+        excluded_factors=[],
         supporting_evidence_bindings=[binding],
         completion_criteria_mapping=mappings,
     )
     result = UserResultPayload(
-        schema_version=2,
-        format_id="problem-locator-diagnosis-v2",
+        schema_version=3,
+        format_id="problem-locator-diagnosis-v3",
         status="COMPLETED",
         source_job_type=job.job_type,
         problem_statement=job.context_snapshot.problem_spec.statement,
@@ -589,6 +615,27 @@ def _completed_outcome(
                 ],
             }
         ],
+        causal_factors=[
+            {
+                "factor_id": "primary_cause",
+                "role": "CAUSE",
+                "statement": candidate.statement,
+                "evidence_bindings": [binding],
+                "required_rule_ids": ["causal_chain"],
+                "citations": [
+                    {
+                        "evidence_binding": binding,
+                        "archive_name": None,
+                        "line_start": None,
+                        "line_end": None,
+                        "raw_bytes_sha256": None,
+                        "excerpt": None,
+                    }
+                ],
+            }
+        ],
+        candidate_factors=[],
+        excluded_factors=[],
         supporting_evidence_bindings=candidate.supporting_evidence_bindings,
         completion_criteria_mapping=candidate.completion_criteria_mapping,
         verification_rules=[
@@ -609,6 +656,8 @@ def _completed_outcome(
                     }
                 ],
                 "observed_times": [],
+                "event_observations": [],
+                "derived_values": [],
                 "issues": [],
             }
         ],
@@ -623,6 +672,9 @@ def _completed_outcome(
         evidence_gaps=[],
         limitations=["No verified event timestamp was available."],
         recommendations=["Submit the candidate to independent review."],
+        safety_notes=[
+            "This result covers only the fixed Diagnosis Skill scope."
+        ],
     )
     result_bytes = canonical_json_bytes(result)
     artifact = AgentArtifactProposalDraft(
@@ -635,8 +687,8 @@ def _completed_outcome(
         declared_size=len(result_bytes),
         declared_sha256=bytes_sha256(result_bytes),
         metadata=UserResultMetadata(
-            schema_version=2,
-            format_id="problem-locator-diagnosis-v2",
+            schema_version=3,
+            format_id="problem-locator-diagnosis-v3",
             description="Diagnosis result",
         ),
     )
@@ -651,9 +703,9 @@ def _completed_outcome(
         ),
         declared_size=1,
         declared_sha256=bytes_sha256(b"x"),
-        metadata=UserResultArchiveMetadataV2(
-            schema_version=2,
-            format_id="problem-locator-result-archive-v2",
+        metadata=UserResultArchiveMetadataV3(
+            schema_version=3,
+            format_id="problem-locator-result-archive-v3",
             description="Readable diagnosis result and target logs.",
             user_result_proposal_key=USER_RESULT_KEY,
             target_log_count=0,
@@ -789,8 +841,8 @@ def test_candidate_and_unique_user_result_have_exact_canonical_bytes(
     assert len(user_results) == 1
     assert user_results[0].proposal_key == USER_RESULT_KEY
     assert user_results[0].metadata == UserResultMetadata(
-        schema_version=2,
-        format_id="problem-locator-diagnosis-v2",
+        schema_version=3,
+        format_id="problem-locator-diagnosis-v3",
         description="Diagnosis result",
     )
     assert user_results[0].declared_size == len(result_bytes)
@@ -905,7 +957,7 @@ def test_user_result_is_rejected_when_candidate_is_absent_missing_or_duplicated(
                 {
                     "criterion_index": 0,
                     "criterion": "Identify the timed-out request.",
-                    "satisfied": True,
+                    "status": "SATISFIED",
                     "evidence_bindings": [
                         {
                             "existing_evidence_id": OTHER_EVIDENCE_ID,

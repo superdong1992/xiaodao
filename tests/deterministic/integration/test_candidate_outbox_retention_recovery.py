@@ -591,7 +591,7 @@ def _assert_recovery_reuses_parked_bytes(
     user_result_path = graph.data_root / user_results[0].storage_key
     user_result_bytes = graph.result_bytes[ArtifactKind.USER_RESULT]
     assert user_result_path.read_bytes() == user_result_bytes
-    assert len(user_result_bytes) == 1604
+    assert len(user_result_bytes) == 2299
     assert sha256(user_result_bytes).hexdigest() == user_results[0].sha256
 
 

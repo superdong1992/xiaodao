@@ -23,12 +23,15 @@ import {
   readServerMcpCorrespondence,
 } from "../lib/events.mjs";
 import { recoverStageAuditProgress } from "../lib/evidence.mjs";
+import {
+  discoverReleaseCaseRoot,
+  loadReleaseCaseInputs,
+  loadReleaseCaseOracle,
+  releaseCaseDigests,
+} from "../lib/release-case.mjs";
 import { verifyMaterializedSourceSnapshot } from "../lib/source-snapshot.mjs";
 import { canonicalJson, ensureDirectory, sha256Bytes, sha256File } from "../lib/util.mjs";
 
-const ZIP_NAME = "synthetic-rpc-service-takeover.zip";
-const ZIP_SIZE = 2367;
-const ZIP_SHA256 = "194f69fecd8dc8d40d1aedeb6fc25d2b7b4922b176be2b15be73ffe386cc5064";
 const MAX_ATTACHMENT_BYTES = 2684354560;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const SHA256 = /^[a-f0-9]{64}$/;
@@ -103,6 +106,51 @@ function atomicState(filePath, value) {
 
 function readJson(filePath) {
   return JSON.parse(fs.readFileSync(filePath, "utf8"));
+}
+
+function selectedReleaseCase(repoRoot) {
+  const root = discoverReleaseCaseRoot(path.join(repoRoot, "tests", "cases", "release"));
+  const inputs = loadReleaseCaseInputs(root);
+  const gateOracle = loadReleaseCaseOracle(root);
+  const digests = releaseCaseDigests(root);
+  const scenario = inputs.scenarios.find((item) => item.scenario_id === inputs.journey_scenario);
+  const scenarioOracle = gateOracle.scenarios.find((item) => item.scenario_id === inputs.journey_scenario);
+  requireCondition(scenario && scenarioOracle, "RELEASE_CASE_JOURNEY_SCENARIO_MISSING");
+  const skillManifest = readJson(path.join(inputs.approved_skill_dir, "diagnosis-skill.json"));
+  const initialInputs = skillManifest.requirements.filter((item) => item.kind === "INPUT" && item.stage === "INITIAL").map((item) => item.name);
+  const afterInputs = skillManifest.requirements.filter((item) => item.kind === "INPUT" && item.stage === "AFTER_LOGPARSE").map((item) => item.name);
+  const attachments = skillManifest.requirements.filter((item) => item.kind === "ATTACHMENT" && item.stage === "INITIAL");
+  requireCondition(canonicalJson(initialInputs) === canonicalJson(scenario.driver.initial_user_fact_names), "RELEASE_CASE_INITIAL_INPUT_DRIFT", "FAIL", "CONTRACT");
+  requireCondition(canonicalJson(afterInputs) === canonicalJson(scenario.driver.supplement_input_names), "RELEASE_CASE_SUPPLEMENT_INPUT_DRIFT", "FAIL", "CONTRACT");
+  requireCondition(attachments.length === 1, "RELEASE_CASE_ATTACHMENT_REQUIREMENT", "FAIL", "CONTRACT");
+  requireCondition(canonicalJson(skillManifest.logparse_plan.anchors.map((item) => item.label)) === canonicalJson(scenario.driver.attachment_anchor_names), "RELEASE_CASE_ANCHOR_DRIFT", "FAIL", "CONTRACT");
+  const approvedProductRecords = fs.readdirSync(inputs.approved_skill_dir, { withFileTypes: true })
+    .sort((left, right) => left.name.localeCompare(right.name, "en"))
+    .map((entry) => {
+      requireCondition(entry.isFile() && !entry.isSymbolicLink(), "RELEASE_CASE_APPROVED_SKILL_NODE", "FAIL", "CONTRACT");
+      const absolute = path.join(inputs.approved_skill_dir, entry.name);
+      const metadata = fs.statSync(absolute);
+      requireCondition(metadata.nlink === 1, "RELEASE_CASE_APPROVED_SKILL_LINK", "FAIL", "CONTRACT");
+      return { path: entry.name, size: metadata.size, sha256: sha256File(absolute) };
+    });
+  requireCondition(canonicalJson(approvedProductRecords.map((item) => item.path)) === canonicalJson(["SKILL.md", "diagnosis-skill.json"]), "RELEASE_CASE_APPROVED_SKILL_FILES", "FAIL", "CONTRACT");
+  return {
+    root,
+    case_id: inputs.case_id,
+    scenario_id: scenario.scenario_id,
+    driver: scenario.driver,
+    oracle: scenarioOracle.oracle,
+    semantic_oracle: gateOracle.semantic_oracle,
+    skill: {
+      id: skillManifest.id,
+      version: skillManifest.version,
+      content_hash: packageTreeIdentity(inputs.approved_skill_dir).digest,
+      product_digest: sha256Bytes(canonicalJson(approvedProductRecords)),
+      attachment_requirement: attachments[0].name,
+    },
+    input_digest: digests.input_digest,
+    oracle_digest: digests.oracle_digest,
+  };
 }
 
 function safeName(prefix, runId, suffix = "") {
@@ -498,42 +546,58 @@ function exactKeys(value, expected, code) {
   requireCondition(canonicalJson(Object.keys(value).sort()) === canonicalJson([...expected].sort()), code, "FAIL", "CONTRACT");
 }
 
-function phaseOnePrompt(requestIds) {
+function openRequirementNames(view, kind) {
+  return (view?.pending_requirements ?? [])
+    .filter((item) => item.status === "OPEN" && item.kind === kind)
+    .map((item) => item.name);
+}
+
+function expectedCreateInput(releaseCase, requestIds) {
+  return {
+    request_id: requestIds.create,
+    ...releaseCase.driver.problem,
+    initial_user_fact_names: releaseCase.driver.initial_user_fact_names,
+    initial_user_fact_values: releaseCase.driver.initial_user_fact_values,
+    wait_seconds: 0,
+  };
+}
+
+function phaseOnePrompt(releaseCase, requestIds, archive) {
+  const createInput = canonicalJson(expectedCreateInput(releaseCase, requestIds)).trimEnd();
   return `Perform phase 1 of the controlled Problem Locator acceptance journey. Use only the Skill tool and the seven problem_locator Remote MCP tools. Treat MCP tool_result structured payloads as authoritative; do not infer state from prose.
 
 0. Your first action MUST call the Skill tool with skill=problem-locator-client (exact input {"skill":"problem-locator-client"}). Until that Skill tool_result is received successfully, do not call any problem_locator MCP tool.
-1. Call problem_locator_create_case exactly once with request_id "${requestIds.create}". Put statement "A checkout-to-inventory ReserveStock RPC times out during a service takeover.", expected_behavior "The checkout operation completes after inventory reservation.", actual_behavior "During an active service takeover, the ReserveStock RPC times out and checkout does not complete.", scope "checkout-to-inventory service-takeover RPC diagnosis", goals ["Locate the service-takeover timeout cause using the supplied logs."], non_goals ["Modify production systems."], constraints ["Use only evidence persisted in this diagnosis case."], completion_criteria ["Identify the timed-out request and an evidence-backed root cause."] directly at the root. Do not send problem_spec. Set initial_user_fact_names [], initial_user_fact_values [], and wait_seconds 0.
-2. Poll problem_locator_get_case with non-empty case_id input and wait_seconds 30 until WAITING_INPUT has exactly OPEN INPUT requirements caller_service, server_service, rpc_method, problem_time. Use wait_seconds 30 on every poll; do not rapid-poll.
-3. Call problem_locator_submit_supplement once with request_id "${requestIds.submit_a}", the latest case_revision, input_names ["caller_service","server_service","rpc_method","problem_time"], input_values ["checkout-synthetic","inventory-synthetic","ReserveStock","2026-07-31T00:00:03.000Z"], attachment_ids [], wait_seconds 0.
-4. Poll with non-empty case_id input and wait_seconds 30 until WAITING_ATTACHMENT has the OPEN ATTACHMENT requirement log_archive. Use wait_seconds 30 on every poll; do not rapid-poll.
-5. Call problem_locator_prepare_attachment exactly once with request_id "${requestIds.prepare}", the latest revision, name "${ZIP_NAME}", content_type "application/zip", declared_size ${ZIP_SIZE}, and declared_sha256 "${ZIP_SHA256}". The call must contain exactly those seven required root properties and must never send nested input.
-6. Stop immediately after the successful prepare result. Do not upload, submit the attachment, or call another tool.`;
+1. Call problem_locator_create_case exactly once with this exact flat root input (do not send problem_spec or any nested object): ${createInput}
+2. Poll problem_locator_get_case with non-empty case_id input and wait_seconds 30 until status WAITING_ATTACHMENT has exactly the OPEN ATTACHMENT requirement ${JSON.stringify(releaseCase.skill.attachment_requirement)}. Use wait_seconds 30 on every poll; do not rapid-poll. The initial facts were already supplied to create_case, so do not resubmit them and do not accept WAITING_INPUT as the target state.
+3. Call problem_locator_prepare_attachment exactly once with request_id "${requestIds.prepare}", the latest revision, name ${JSON.stringify(archive.name)}, content_type ${JSON.stringify(archive.content_type)}, declared_size ${archive.size}, and declared_sha256 "${archive.sha256}". The call must contain exactly those seven required root properties and must never send nested input.
+4. Stop immediately after the successful prepare result. Do not upload, submit the attachment, or call another tool.`;
 }
 
-function validatePhaseOne(audit, requestIds, publicBaseUrl) {
+function validatePhaseOne(audit, releaseCase, requestIds, archive, publicBaseUrl) {
   const records = audit.records;
   const successful = records.filter((record) => record.result?.ok === true);
   const create = successful.filter((record) => record.tool_name === "problem_locator_create_case");
   const submit = successful.filter((record) => record.tool_name === "problem_locator_submit_supplement");
   const prepare = successful.filter((record) => record.tool_name === "problem_locator_prepare_attachment");
-  requireCondition(create.length === 1 && submit.length === 1 && prepare.length === 1, "PHASE1_CALL_CARDINALITY", "FAIL", "CONTRACT");
+  requireCondition(create.length === 1 && submit.length === 0 && prepare.length === 1, "PHASE1_CALL_CARDINALITY", "FAIL", "CONTRACT");
   requireCondition(records.at(-1) === prepare[0], "PHASE1_PREPARE_NOT_TERMINAL", "FAIL", "CONTRACT");
-  exactKeys(create[0].input, ["request_id", "statement", "expected_behavior", "actual_behavior", "scope", "goals", "non_goals", "constraints", "completion_criteria", "initial_user_fact_names", "initial_user_fact_values", "wait_seconds"], "PHASE1_CREATE_INPUT_SHAPE");
-  requireCondition(create[0].input.request_id === requestIds.create && create[0].input.non_goals?.[0] === "Modify production systems." && !Object.hasOwn(create[0].input, "problem_spec"), "PHASE1_CREATE_INPUT", "FAIL", "CONTRACT");
-  exactKeys(submit[0].input, ["request_id", "case_id", "expected_case_revision", "input_names", "input_values", "attachment_ids", "wait_seconds"], "PHASE1_SUBMIT_INPUT_SHAPE");
-  requireCondition(submit[0].input.request_id === requestIds.submit_a && canonicalJson(submit[0].input.input_names) === canonicalJson(["caller_service", "server_service", "rpc_method", "problem_time"]), "PHASE1_SUBMIT_INPUT", "FAIL", "CONTRACT");
+  const createInput = expectedCreateInput(releaseCase, requestIds);
+  exactKeys(create[0].input, Object.keys(createInput), "PHASE1_CREATE_INPUT_SHAPE");
+  requireCondition(canonicalJson(create[0].input) === canonicalJson(createInput) && !Object.hasOwn(create[0].input, "problem_spec"), "PHASE1_CREATE_INPUT", "FAIL", "CONTRACT");
   exactKeys(prepare[0].input, ["request_id", "case_id", "expected_case_revision", "name", "content_type", "declared_size", "declared_sha256"], "PHASE1_PREPARE_INPUT_SHAPE");
-  requireCondition(prepare[0].input.request_id === requestIds.prepare && prepare[0].input.name === ZIP_NAME && prepare[0].input.declared_size === ZIP_SIZE && prepare[0].input.declared_sha256 === ZIP_SHA256, "PHASE1_PREPARE_INPUT", "FAIL", "CONTRACT");
+  requireCondition(prepare[0].input.request_id === requestIds.prepare && prepare[0].input.name === archive.name && prepare[0].input.content_type === archive.content_type && prepare[0].input.declared_size === archive.size && prepare[0].input.declared_sha256 === archive.sha256, "PHASE1_PREPARE_INPUT", "FAIL", "CONTRACT");
   const prepareData = successData(prepare[0]);
   const response = prepareData.application_response;
   const view = response?.case_view;
   const descriptor = prepareData.upload;
   requireCondition(view?.status === "WAITING_ATTACHMENT" && UUID.test(view.case_id) && Number.isInteger(view.case_revision), "PHASE1_CASE_VIEW", "FAIL", "CONTRACT");
+  requireCondition(canonicalJson(openRequirementNames(view, "ATTACHMENT")) === canonicalJson([releaseCase.skill.attachment_requirement]), "PHASE1_ATTACHMENT_REQUIREMENT", "FAIL", "CONTRACT");
+  requireCondition(view.selected_skill_ref?.id === releaseCase.skill.id && view.selected_skill_ref?.version === releaseCase.skill.version, "PHASE1_SELECTED_SKILL", "FAIL", "CONTRACT");
   exactKeys(descriptor, ["attachment_id", "method", "url", "required_headers", "max_bytes", "expires_at"], "PHASE1_UPLOAD_DESCRIPTOR_SHAPE");
   requireCondition(UUID.test(descriptor.attachment_id) && descriptor.method === "PUT" && descriptor.url === `${publicBaseUrl}/api/v1/attachments/${descriptor.attachment_id}/content` && descriptor.max_bytes === MAX_ATTACHMENT_BYTES && descriptor.expires_at === null, "PHASE1_UPLOAD_DESCRIPTOR", "FAIL", "CONTRACT");
   exactKeys(descriptor.required_headers, ["Content-Length", "Content-Type", "Idempotency-Key", "X-Content-SHA256"], "PHASE1_UPLOAD_HEADERS_SHAPE");
-  requireCondition(descriptor.required_headers["Content-Length"] === String(ZIP_SIZE) && descriptor.required_headers["Content-Type"] === "application/zip" && descriptor.required_headers["Idempotency-Key"] === descriptor.attachment_id && descriptor.required_headers["X-Content-SHA256"] === ZIP_SHA256, "PHASE1_UPLOAD_HEADERS", "FAIL", "CONTRACT");
-  requireCondition(successful.filter((record) => record.tool_name === "problem_locator_get_case").some((record) => caseView(record)?.status === "WAITING_INPUT"), "PHASE1_WAITING_INPUT_NOT_OBSERVED", "FAIL", "CONTRACT");
+  requireCondition(descriptor.required_headers["Content-Length"] === String(archive.size) && descriptor.required_headers["Content-Type"] === archive.content_type && descriptor.required_headers["Idempotency-Key"] === descriptor.attachment_id && descriptor.required_headers["X-Content-SHA256"] === archive.sha256, "PHASE1_UPLOAD_HEADERS", "FAIL", "CONTRACT");
+  requireCondition(!successful.some((record) => caseView(record)?.status === "WAITING_INPUT"), "PHASE1_INITIAL_FACT_REGRESSION", "FAIL", "CONTRACT");
   return {
     case_id: view.case_id,
     attachment_id: descriptor.attachment_id,
@@ -545,8 +609,8 @@ function validatePhaseOne(audit, requestIds, publicBaseUrl) {
 
 async function uploadAttachment(configuration, state, stageRoot) {
   const descriptor = state.upload_descriptor;
-  const archive = path.join(configuration.attemptRoot, "payload", ZIP_NAME);
-  requireCondition(fs.existsSync(archive) && fs.statSync(archive).size === ZIP_SIZE && sha256File(archive) === ZIP_SHA256, "UPLOAD_FIXTURE_INVALID");
+  const archive = path.join(configuration.attemptRoot, "payload", state.archive.name);
+  requireCondition(fs.existsSync(archive) && fs.statSync(archive).size === state.archive.size && sha256File(archive) === state.archive.sha256, "UPLOAD_FIXTURE_INVALID");
   requireCondition(descriptor.url === `${state.public_base_url}/api/v1/attachments/${state.attachment_id}/content`, "UPLOAD_URL_INVALID");
   const startedAtUtc = new Date().toISOString();
   const started = process.hrtime.bigint();
@@ -579,35 +643,43 @@ async function uploadAttachment(configuration, state, stageRoot) {
   return { status: "READY", case_revision: data.case_revision };
 }
 
-function phaseThreePrompt(state) {
+function phaseThreePrompt(state, releaseCase) {
+  const supplement = releaseCase.driver.supplement_input_names.length > 0
+    ? `2. Poll problem_locator_get_case with non-empty case_id and wait_seconds 30 until WAITING_INPUT has exactly these OPEN INPUT requirements: ${canonicalJson(releaseCase.driver.supplement_input_names).trimEnd()}. Use wait_seconds 30 on every poll; do not rapid-poll.\n3. Call problem_locator_submit_supplement exactly once with request_id "${state.request_ids.submit_inputs}", the latest revision, input_names ${canonicalJson(releaseCase.driver.supplement_input_names).trimEnd()}, input_values ${canonicalJson(releaseCase.driver.supplement_input_values).trimEnd()}, attachment_ids [], wait_seconds 0.\n4.`
+    : "2. Do not submit any ordinary inputs because this scenario declares none.\n3.";
   return `Perform phase 3 of the controlled Problem Locator journey. Use only the Skill tool and the seven problem_locator Remote MCP tools. Treat structured MCP results as authoritative. Case ${state.case_id}, attachment ${state.attachment_id}, and case_revision ${state.case_revision} are authoritative.
 
 0. First call Skill with exact input {"skill":"problem-locator-client"}; do not call MCP before it succeeds.
 1. Call problem_locator_submit_supplement exactly once with request_id "${state.request_ids.submit_attachment}", case_id "${state.case_id}", expected_case_revision ${state.case_revision}, input_names [], input_values [], attachment_ids ["${state.attachment_id}"], wait_seconds 0.
-2. Poll problem_locator_get_case with non-empty case_id and wait_seconds 30 until WAITING_INPUT has exactly one OPEN INPUT requirement order_id. Use wait_seconds 30 on every poll; do not rapid-poll.
-3. Call problem_locator_submit_supplement exactly once with request_id "${state.request_ids.submit_order}", latest revision, input_names ["order_id"], input_values ["synthetic-order-0001"], attachment_ids [], wait_seconds 0.
-4. Poll with wait_seconds 30. Observe REVIEWING, then continue with the authoritative active review job id until RESOLVED with final_result.status ACCEPTED. Use wait_seconds 30 on every poll, do not rapid-poll, and do not skip REVIEWING.
+${supplement} Poll with wait_seconds 30. Observe REVIEWING, then continue with the authoritative active review job id until a terminal case status with final_result.status ACCEPTED. Use wait_seconds 30 on every poll, do not rapid-poll, and do not skip REVIEWING.
 5. Call problem_locator_list_artifacts exactly once for this Case and stop. Do not call another tool.`;
 }
 
-function validatePhaseThree(audit, state) {
+function validatePhaseThree(audit, state, releaseCase) {
   const records = audit.records;
   const successful = records.filter((record) => record.result?.ok === true);
   const submits = successful.filter((record) => record.tool_name === "problem_locator_submit_supplement");
   const gets = successful.filter((record) => record.tool_name === "problem_locator_get_case");
   const lists = successful.filter((record) => record.tool_name === "problem_locator_list_artifacts");
-  requireCondition(submits.length === 2 && gets.length >= 3 && lists.length === 1, "PHASE3_CALL_CARDINALITY", "FAIL", "CONTRACT");
+  const hasSupplement = releaseCase.driver.supplement_input_names.length > 0;
+  requireCondition(submits.length === (hasSupplement ? 2 : 1) && gets.length >= (hasSupplement ? 3 : 2) && lists.length === 1, "PHASE3_CALL_CARDINALITY", "FAIL", "CONTRACT");
   requireCondition(records[0] === submits[0] && records.at(-1) === lists[0], "PHASE3_CALL_ORDER", "FAIL", "CONTRACT");
   exactKeys(submits[0].input, ["request_id", "case_id", "expected_case_revision", "input_names", "input_values", "attachment_ids", "wait_seconds"], "PHASE3_ATTACHMENT_INPUT_SHAPE");
   requireCondition(submits[0].input.request_id === state.request_ids.submit_attachment && submits[0].input.case_id === state.case_id && submits[0].input.expected_case_revision === state.case_revision && canonicalJson(submits[0].input.attachment_ids) === canonicalJson([state.attachment_id]), "PHASE3_ATTACHMENT_INPUT", "FAIL", "CONTRACT");
   const views = gets.map((record) => ({ ordinal: record.ordinal, view: caseView(record) })).filter((entry) => entry.view?.case_id === state.case_id);
-  const orderView = views.find((entry) => entry.view.status === "WAITING_INPUT" && entry.view.pending_requirements?.filter((item) => item.status === "OPEN").map((item) => item.name).includes("order_id"));
-  requireCondition(orderView, "PHASE3_ORDER_REQUIREMENT_NOT_OBSERVED", "FAIL", "CONTRACT");
-  exactKeys(submits[1].input, ["request_id", "case_id", "expected_case_revision", "input_names", "input_values", "attachment_ids", "wait_seconds"], "PHASE3_ORDER_INPUT_SHAPE");
-  requireCondition(submits[1].input.request_id === state.request_ids.submit_order && submits[1].input.case_id === state.case_id && submits[1].input.expected_case_revision === orderView.view.case_revision && canonicalJson(submits[1].input.input_names) === canonicalJson(["order_id"]) && canonicalJson(submits[1].input.input_values) === canonicalJson(["synthetic-order-0001"]), "PHASE3_ORDER_INPUT", "FAIL", "CONTRACT");
-  const reviewing = views.find((entry) => entry.ordinal > submits[1].ordinal && entry.view.status === "REVIEWING");
-  const resolved = [...views].reverse().find((entry) => entry.ordinal > (reviewing?.ordinal ?? Infinity) && entry.view.status === "RESOLVED");
+  let terminalPredecessor = submits[0];
+  if (hasSupplement) {
+    const inputView = views.find((entry) => entry.view.status === "WAITING_INPUT" && canonicalJson(openRequirementNames(entry.view, "INPUT")) === canonicalJson(releaseCase.driver.supplement_input_names));
+    requireCondition(inputView, "PHASE3_INPUT_REQUIREMENT_NOT_OBSERVED", "FAIL", "CONTRACT");
+    exactKeys(submits[1].input, ["request_id", "case_id", "expected_case_revision", "input_names", "input_values", "attachment_ids", "wait_seconds"], "PHASE3_INPUT_SHAPE");
+    requireCondition(submits[1].input.request_id === state.request_ids.submit_inputs && submits[1].input.case_id === state.case_id && submits[1].input.expected_case_revision === inputView.view.case_revision && canonicalJson(submits[1].input.input_names) === canonicalJson(releaseCase.driver.supplement_input_names) && canonicalJson(submits[1].input.input_values) === canonicalJson(releaseCase.driver.supplement_input_values) && canonicalJson(submits[1].input.attachment_ids) === canonicalJson([]), "PHASE3_INPUT", "FAIL", "CONTRACT");
+    terminalPredecessor = submits[1];
+  }
+  const reviewing = views.find((entry) => entry.ordinal > terminalPredecessor.ordinal && entry.view.status === "REVIEWING");
+  const resolved = [...views].reverse().find((entry) => entry.ordinal > (reviewing?.ordinal ?? Infinity) && entry.view.status === releaseCase.oracle.case_status);
   requireCondition(reviewing && resolved && resolved.view.final_result?.status === "ACCEPTED", "PHASE3_REVIEW_RESOLUTION", "FAIL", "CONTRACT");
+  requireCondition(resolved.view.final_result?.resolution_status === releaseCase.oracle.resolution_status, "PHASE3_RESOLUTION_STATUS", "FAIL", "CONTRACT");
+  requireCondition(resolved.view.selected_skill_ref?.id === releaseCase.skill.id && resolved.view.selected_skill_ref?.version === releaseCase.skill.version, "PHASE3_SELECTED_SKILL", "FAIL", "CONTRACT");
   const listData = successData(lists[0]);
   const artifacts = listData.artifacts;
   requireCondition(Array.isArray(artifacts) && artifacts.length === 2, "PHASE3_ARTIFACT_COUNT", "FAIL", "CONTRACT");
@@ -637,12 +709,13 @@ function restartPrompt(state) {
 3. Stop. Do not create, prepare, submit, resume, cancel, upload, or call another tool.`;
 }
 
-function validateRestart(audit, state) {
+function validateRestart(audit, state, releaseCase) {
   const records = audit.records;
   requireCondition(records.length === 2 && records[0].tool_name === "problem_locator_get_case" && records[1].tool_name === "problem_locator_list_artifacts", "RESTART_CALL_SEQUENCE", "FAIL", "CONTRACT");
   const view = caseView(records[0]);
   const artifacts = successData(records[1]).artifacts;
-  requireCondition(view?.case_id === state.case_id && view.status === "RESOLVED" && view.case_revision === state.resolved_case_revision && view.final_result?.status === "ACCEPTED", "RESTART_CASE_MISMATCH", "FAIL", "CONTRACT");
+  requireCondition(view?.case_id === state.case_id && view.status === releaseCase.oracle.case_status && view.case_revision === state.resolved_case_revision && view.final_result?.status === "ACCEPTED" && view.final_result?.resolution_status === releaseCase.oracle.resolution_status, "RESTART_CASE_MISMATCH", "FAIL", "CONTRACT");
+  requireCondition(view.selected_skill_ref?.id === releaseCase.skill.id && view.selected_skill_ref?.version === releaseCase.skill.version, "RESTART_SELECTED_SKILL", "FAIL", "CONTRACT");
   requireCondition(Array.isArray(artifacts) && artifacts.length === 2, "RESTART_ARTIFACT_COUNT", "FAIL", "CONTRACT");
   for (const expected of [state.public_artifact, state.public_result_archive]) {
     const actual = artifacts.find((artifact) => artifact.artifact_id === expected.artifact_id);
@@ -670,7 +743,21 @@ async function downloadArtifacts(configuration, state, stageRoot) {
       timed_out: false,
     });
     requireCondition(response.status === 200 && bytes.length === artifact.size && sha256Bytes(bytes) === artifact.sha256, `RESTART_DOWNLOAD_${label.toUpperCase().replaceAll("-", "_")}`, "FAIL", "PRODUCT");
-    if (artifact.content_type === "application/json") JSON.parse(bytes.toString("utf8"));
+    if (artifact.content_type === "application/json") {
+      const report = JSON.parse(bytes.toString("utf8"));
+      const expectedStatus = configuration.releaseCase.oracle.resolution_status === "COMPLETE" ? "COMPLETED" : "PARTIAL";
+      requireCondition(report?.schema_version === 3 && report.status === expectedStatus, "RESTART_RESULT_STATUS", "FAIL", "CONTRACT");
+      for (const [field, expected] of [
+        ["causal_factors", configuration.releaseCase.oracle.causal_factor_ids],
+        ["candidate_factors", configuration.releaseCase.oracle.candidate_factor_ids],
+        ["excluded_factors", configuration.releaseCase.oracle.excluded_factor_ids],
+      ]) {
+        requireCondition(canonicalJson((report[field] ?? []).map((item) => item.factor_id)) === canonicalJson(expected), `RESTART_RESULT_${field.toUpperCase()}`, "FAIL", "CONTRACT");
+      }
+      requireCondition(canonicalJson((report.completion_criteria_mapping ?? []).map((item) => item.status)) === canonicalJson(configuration.releaseCase.oracle.criterion_statuses), "RESTART_RESULT_CRITERIA", "FAIL", "CONTRACT");
+      const serialized = canonicalJson(report);
+      requireCondition(configuration.releaseCase.oracle.required_safety_phrases.every((phrase) => serialized.includes(phrase)), "RESTART_RESULT_SAFETY_NOTES", "FAIL", "CONTRACT");
+    }
     if (artifact.content_type === "application/zip") requireCondition(bytes.subarray(0, 2).toString("binary") === "PK", "RESTART_ARCHIVE_FORMAT", "FAIL", "CONTRACT");
     fs.writeFileSync(path.join(stageRoot, `restart-${label}.${artifact.content_type === "application/json" ? "json" : "zip"}`), bytes, { flag: "wx", mode: 0o600 });
     process.stdout.write("TEST_FLOW_PROGRESS request.completed\n");
@@ -858,10 +945,42 @@ async function initializeContainer(configuration, state, containerName, mode, st
   ]);
   const hostReceipt = path.join(configuration.attemptRoot, "payload", "stages", stageId, "container-init.json");
   const initialization = readJson(hostReceipt);
+  const caseReceipt = readJson(
+    path.join(configuration.attemptRoot, "payload", "stages", stageId, "release-case.json"),
+  );
   requireCondition(
-    initialization.status === "PASS" && initialization.xiaodao_snapshot_digest === configuration.sourceSnapshotDigest,
+    initialization.status === "PASS" && initialization.xiaodao_snapshot_digest === configuration.sourceSnapshotDigest && initialization.case_source_redacted === true,
     "CONTAINER_INIT_RECEIPT_INVALID",
   );
+  requireCondition(
+    caseReceipt?.schema_version === 1
+      && caseReceipt.status === "PASS"
+      && caseReceipt.case_id === configuration.releaseCase.case_id
+      && caseReceipt.scenario_id === configuration.releaseCase.scenario_id
+      && caseReceipt.skill_id === configuration.releaseCase.skill.id
+      && caseReceipt.skill_product_digest === configuration.releaseCase.skill.product_digest
+      && typeof caseReceipt.archive_name === "string"
+      && Number.isSafeInteger(caseReceipt.archive_size)
+      && caseReceipt.archive_size > 0
+      && SHA256.test(caseReceipt.archive_sha256),
+    "RELEASE_CASE_RECEIPT_INVALID",
+  );
+  state.release_case = {
+    case_id: configuration.releaseCase.case_id,
+    scenario_id: configuration.releaseCase.scenario_id,
+    input_digest: configuration.releaseCase.input_digest,
+    oracle_digest: configuration.releaseCase.oracle_digest,
+    skill_id: configuration.releaseCase.skill.id,
+  };
+  state.archive = {
+    name: caseReceipt.archive_name,
+    content_type: caseReceipt.archive_content_type,
+    size: caseReceipt.archive_size,
+    sha256: caseReceipt.archive_sha256,
+    member_count: caseReceipt.archive_member_count,
+  };
+  atomicState(configuration.statePath, state);
+  return { initialization, caseReceipt };
 }
 
 async function createContainer(configuration, state, containerName, mode, stageId, register = true) {
@@ -920,10 +1039,9 @@ async function createFreshEnvironment(configuration, stageRoot, runtimeIdentity)
     runtime_identity: runtimeIdentity,
     request_ids: {
       create: `${configuration.client}-${sha256Bytes(runId).slice(0, 12)}-create-v1`,
-      submit_a: `${configuration.client}-${sha256Bytes(runId).slice(0, 12)}-submit-a-v1`,
       prepare: `${configuration.client}-${sha256Bytes(runId).slice(0, 12)}-prepare-v1`,
       submit_attachment: `${configuration.client}-${sha256Bytes(runId).slice(0, 12)}-submit-attachment-v1`,
-      submit_order: `${configuration.client}-${sha256Bytes(runId).slice(0, 12)}-submit-order-v1`,
+      submit_inputs: `${configuration.client}-${sha256Bytes(runId).slice(0, 12)}-submit-inputs-v1`,
     },
     client_calls: [],
     audited_service_job_ids: [],
@@ -1066,7 +1184,10 @@ async function createCheckpointSource(configuration, state, continuation) {
     try { fs.rmSync(archiveHostPath, { force: true }); } catch {}
   }
   const adapterContinuation = {
-    adapter_state_schema_version: 2,
+    adapter_state_schema_version: 3,
+    adapter_case_input_digest: state.release_case?.input_digest ?? null,
+    adapter_case_scenario_id: state.release_case?.scenario_id ?? null,
+    adapter_case_skill_id: state.release_case?.skill_id ?? null,
     adapter_case_id: state.case_id ?? null,
     adapter_attachment_id: state.attachment_id ?? null,
     adapter_prepared_case_revision: state.prepared_case_revision ?? null,
@@ -1076,10 +1197,9 @@ async function createCheckpointSource(configuration, state, continuation) {
     adapter_observed_statuses: state.observed_statuses ?? [],
     adapter_audited_service_job_ids: state.audited_service_job_ids ?? [],
     adapter_request_create: state.request_ids?.create ?? null,
-    adapter_request_submit_a: state.request_ids?.submit_a ?? null,
     adapter_request_prepare: state.request_ids?.prepare ?? null,
     adapter_request_submit_attachment: state.request_ids?.submit_attachment ?? null,
-    adapter_request_submit_order: state.request_ids?.submit_order ?? null,
+    adapter_request_submit_inputs: state.request_ids?.submit_inputs ?? null,
     adapter_upload_method: state.upload_descriptor?.method ?? null,
     adapter_upload_max_bytes: state.upload_descriptor?.max_bytes ?? null,
     adapter_upload_expires_at: state.upload_descriptor?.expires_at ?? null,
@@ -1206,7 +1326,10 @@ async function applyRestoredCheckpoint(configuration, state) {
     continuation?.schema_version === 1
       && continuation.release_eligible === false
       && continuation.next_stage === configuration.stage
-      && continuation.adapter_state_schema_version === 2,
+      && continuation.adapter_state_schema_version === 3
+      && continuation.adapter_case_input_digest === configuration.releaseCase.input_digest
+      && continuation.adapter_case_scenario_id === configuration.releaseCase.scenario_id
+      && continuation.adapter_case_skill_id === configuration.releaseCase.skill.id,
     "CHECKPOINT_CONTINUATION_INVALID",
   );
   if (state.current_instance) {
@@ -1243,10 +1366,9 @@ async function applyRestoredCheckpoint(configuration, state) {
     audited_service_job_ids: continuation.adapter_audited_service_job_ids,
     request_ids: {
       create: continuation.adapter_request_create,
-      submit_a: continuation.adapter_request_submit_a,
       prepare: continuation.adapter_request_prepare,
       submit_attachment: continuation.adapter_request_submit_attachment,
-      submit_order: continuation.adapter_request_submit_order,
+      submit_inputs: continuation.adapter_request_submit_inputs,
     },
     client_calls: [],
     usage: { input_tokens: 0, output_tokens: 0, cost_usd: 0 },
@@ -1316,15 +1438,15 @@ async function execute(configuration) {
 
   if (configuration.stage === "journey.cross-job.route") {
     requireCondition(configuration.hardCaps !== null, "ROUTE_HARD_CAPS_MISSING", "BLOCKED", "INFRA");
-    const audit = await runClaude(configuration, state, configuration.stageRoot, "phase1", phaseOnePrompt(state.request_ids), configuration.hardCaps.max_turns, configuration.hardCaps.max_budget_usd);
-    const summary = validatePhaseOne(audit, state.request_ids, state.public_base_url);
+    const audit = await runClaude(configuration, state, configuration.stageRoot, "phase1", phaseOnePrompt(configuration.releaseCase, state.request_ids, state.archive), configuration.hardCaps.max_turns, configuration.hardCaps.max_budget_usd);
+    const summary = validatePhaseOne(audit, configuration.releaseCase, state.request_ids, state.archive, state.public_base_url);
     Object.assign(state, summary);
     state.client_calls.push(...audit.records.map((record, index) => ({ phase: "phase1", ordinal: state.client_calls.length + index, tool_name: record.tool_name, input: record.input })));
     addUsage(state, audit.usage);
     atomicState(configuration.statePath, state);
     const correspondence = await stopService(configuration, state);
     const jobTypes = correspondence.service_invocations.map((invocation) => invocation.job_type).sort();
-    requireCondition(canonicalJson(jobTypes) === canonicalJson(["DIAGNOSE", "DIAGNOSE", "ROUTE"]), "ROUTE_SERVICE_AGENT_INVOCATIONS", "FAIL", "CONTRACT");
+    requireCondition(jobTypes.filter((item) => item === "ROUTE").length === 1 && jobTypes.includes("DIAGNOSE") && jobTypes.every((item) => ["DIAGNOSE", "ROUTE"].includes(item)), "ROUTE_SERVICE_AGENT_INVOCATIONS", "FAIL", "CONTRACT");
     const checkpoint = await createCheckpointSource(configuration, state, {
       case_id: state.case_id,
       attachment_id: state.attachment_id,
@@ -1357,15 +1479,15 @@ async function execute(configuration) {
 
   if (configuration.stage === "journey.cross-job.diagnose") {
     requireCondition(configuration.hardCaps !== null, "DIAGNOSE_HARD_CAPS_MISSING", "BLOCKED", "INFRA");
-    const audit = await runClaude(configuration, state, configuration.stageRoot, "phase3", phaseThreePrompt(state), configuration.hardCaps.max_turns, configuration.hardCaps.max_budget_usd);
-    const summary = validatePhaseThree(audit, state);
+    const audit = await runClaude(configuration, state, configuration.stageRoot, "phase3", phaseThreePrompt(state, configuration.releaseCase), configuration.hardCaps.max_turns, configuration.hardCaps.max_budget_usd);
+    const summary = validatePhaseThree(audit, state, configuration.releaseCase);
     Object.assign(state, summary);
     state.client_calls.push(...audit.records.map((record, index) => ({ phase: "phase3", ordinal: state.client_calls.length + index, tool_name: record.tool_name, input: record.input })));
     addUsage(state, audit.usage);
     atomicState(configuration.statePath, state);
     const correspondence = await stopService(configuration, state);
     const jobTypes = correspondence.service_invocations.map((invocation) => invocation.job_type).sort();
-    requireCondition(canonicalJson(jobTypes) === canonicalJson(["DIAGNOSE", "DIAGNOSE", "REVIEW"]), "DIAGNOSE_SERVICE_AGENT_INVOCATIONS", "FAIL", "CONTRACT");
+    requireCondition(jobTypes.includes("DIAGNOSE") && jobTypes.includes("REVIEW") && jobTypes.every((item) => ["DIAGNOSE", "REVIEW"].includes(item)), "DIAGNOSE_SERVICE_AGENT_INVOCATIONS", "FAIL", "CONTRACT");
     const checkpoint = await createCheckpointSource(configuration, state, {
       case_id: state.case_id,
       attachment_id: state.attachment_id,
@@ -1390,7 +1512,7 @@ async function execute(configuration) {
     await startService(configuration, state, "restart", { allowEmptyJourney: true });
     requireCondition(configuration.hardCaps !== null, "PUBLISH_RESTART_HARD_CAPS_MISSING", "BLOCKED", "INFRA");
     const audit = await runClaude(configuration, state, configuration.stageRoot, "restart", restartPrompt(state), configuration.hardCaps.max_turns, configuration.hardCaps.max_budget_usd);
-    validateRestart(audit, state);
+    validateRestart(audit, state, configuration.releaseCase);
     state.client_calls.push(...audit.records.map((record, index) => ({ phase: "restart", ordinal: state.client_calls.length + index, tool_name: record.tool_name, input: record.input })));
     addUsage(state, audit.usage);
     atomicState(configuration.statePath, state);
@@ -1473,6 +1595,7 @@ try {
   requireCondition(Number.isSafeInteger(configuration.serviceAgentCaps.max_total_tokens) && configuration.serviceAgentCaps.max_total_tokens > 0, "ADAPTER_SERVICE_MAX_TOKENS_INVALID");
   requireCondition(Number.isFinite(configuration.serviceAgentCaps.max_budget_usd) && configuration.serviceAgentCaps.max_budget_usd > 0, "ADAPTER_SERVICE_MAX_BUDGET_INVALID");
   requireCondition(Number.isSafeInteger(configuration.serviceAgentCaps.hard_timeout_seconds) && configuration.serviceAgentCaps.hard_timeout_seconds > 0, "ADAPTER_SERVICE_HARD_TIMEOUT_INVALID");
+  configuration.releaseCase = selectedReleaseCase(configuration.repoRoot);
   ensureDirectory(configuration.stageRoot);
   await execute(configuration);
   receiptWritten = true;

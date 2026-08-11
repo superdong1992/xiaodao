@@ -491,7 +491,7 @@ def test_user_result_fixture_is_canonical_and_matches_its_candidate() -> None:
                 {
                     "criterion_index": 0,
                     "criterion": "Identify the timed-out request.",
-                    "satisfied": True,
+                    "status": "SATISFIED",
                     "evidence_bindings": [
                         {
                             "existing_evidence_id": "00000000-0000-0000-0000-000000000040",
@@ -521,7 +521,12 @@ def test_user_result_rejects_each_semantic_mismatch(
 
 def _candidate_preimage(candidate: dict[str, Any]) -> dict[str, Any]:
     return {
+        "resolution_status": candidate["resolution_status"],
+        "terminal_path_id": candidate["terminal_path_id"],
         "statement": candidate["statement"],
+        "causal_factors": candidate["causal_factors"],
+        "candidate_factors": candidate["candidate_factors"],
+        "excluded_factors": candidate["excluded_factors"],
         "supporting_evidence_refs": candidate["supporting_evidence_refs"],
         "completion_criteria_mapping": candidate["completion_criteria_mapping"],
     }

@@ -7,7 +7,7 @@
   "capability": "manual-triage",
   "deployment_scope": "TEST_ONLY",
   "chinese_title": "无日志人工排查",
-  "generator_version": "4.0.0",
+  "generator_version": "5.0.0",
   "id": "diagnose-manual-triage",
   "judgement_rules": [
     "只有现有 Evidence 支持时才形成候选结论。"
@@ -67,12 +67,13 @@
   ],
   "requires_logparse": false,
   "roles": [],
-  "schema_version": 4,
+  "schema_version": 5,
   "summary": "根据结构化现象和复现步骤执行无日志人工排查",
   "time_characteristics": [],
-  "version": "4.0.0",
+  "version": "5.0.0",
   "verification_contract": {
-    "schema_version": 1,
+    "schema_version": 2,
+    "observation_policies": [],
     "event_extractors": [],
     "rules": [
       {
@@ -84,6 +85,35 @@
         "parameters": {
           "assertion": "现有结构化事实和 Evidence 足以支持候选根因。",
           "evidence_events": []
+        }
+      }
+    ],
+    "terminal_paths": [
+      {
+        "id": "complete",
+        "resolution_status": "COMPLETE",
+        "condition": {
+          "any_of": [
+            {
+              "all_of": [
+                {
+                  "rule_id": "manual_causal_assessment",
+                  "result": "PASS"
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "id": "none",
+        "resolution_status": "NONE",
+        "condition": {
+          "any_of": [
+            {
+              "all_of": []
+            }
+          ]
         }
       }
     ]

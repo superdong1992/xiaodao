@@ -89,6 +89,12 @@ def _decision_audit(
 ) -> dict[str, object]:
     evidence_binding = _binding(job.evidence_refs[0])
     is_review = job.job_type.value == "REVIEW"
+    terminal_is_complete = claim == "PASS"
+    rule_kind = (
+        "SEMANTIC_CAUSALITY"
+        if server_status == "SEMANTIC_ONLY"
+        else "EVENT_PRESENT"
+    )
     return {
         "schema_version": 2,
         "job_id": job.job_id,
@@ -101,6 +107,12 @@ def _decision_audit(
             job.review_target.model_dump(mode="json") if is_review else None
         ),
         "diagnosis_audit_hash": "3" * 64 if is_review else None,
+        "selected_terminal_path_id": (
+            "complete" if terminal_is_complete else "none"
+        ),
+        "terminal_resolution_status": (
+            "COMPLETE" if terminal_is_complete else "NONE"
+        ),
         "required_rule_ids": ["causal_chain"],
         "required_evidence_bindings": [evidence_binding],
         "rules": [
@@ -115,7 +127,7 @@ def _decision_audit(
                 },
                 "server_evaluation": {
                     "rule_id": "causal_chain",
-                    "rule_kind": "SEMANTIC_CAUSALITY",
+                    "rule_kind": rule_kind,
                     "status": server_status,
                     "fact_refs": [],
                     "evidence_bindings": [evidence_binding],
@@ -123,6 +135,8 @@ def _decision_audit(
                     "derived_anchor_time": None,
                     "observed_times": [],
                     "line_ranges": [],
+                    "event_observations": [],
+                    "derived_values": [],
                     "issues": (
                         ["The required event is outside the declared window."]
                         if server_status in {"VERIFIED_FAIL", "UNVERIFIABLE"}
@@ -167,7 +181,7 @@ def test_diagnosis_inconclusive_terminates_unresolved_without_candidate() -> Non
     payload["result_type"] = OutcomeResultType.INCONCLUSIVE.value
     payload["decision_audit"] = _decision_audit(
         job,
-        claim="PASS",
+        claim="FAIL",
         server_status="VERIFIED_FAIL",
     )
     outcome = JobOutcome.model_validate(payload)
@@ -424,14 +438,14 @@ def test_only_matching_unresolved_result_artifacts_are_downloadable() -> None:
         name="diagnosis-result.json",
         content_type="application/json",
         resource_kind="FILE",
-        size=1604,
+        size=2299,
         sha256="5" * 64,
         storage_key=(
             f"resources/cases/{case.case_id}/artifacts/{user_result_id}/payload"
         ),
         metadata=UserResultMetadata(
-            schema_version=2,
-            format_id="problem-locator-diagnosis-v2",
+            schema_version=3,
+            format_id="problem-locator-diagnosis-v3",
             description="Canonical unresolved diagnosis result.",
         ),
         created_by_job_id=job.job_id,

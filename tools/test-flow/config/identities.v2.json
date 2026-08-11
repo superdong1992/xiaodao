@@ -14,7 +14,12 @@
     "adapter.server": {"kind": "paths", "paths": ["tools/test-flow/adapters/server-linux-capability.mjs"]},
     "adapter.cross-job": {"kind": "paths", "paths": ["tools/test-flow/adapters/cross-job-core.mjs", "tools/test-flow/adapters/macos-linux-release.mjs", "tools/test-flow/adapters/windows-linux-release.mjs", "tools/test-flow/adapters/linux-linux-release.mjs"]},
     "skill.client": {"kind": "paths", "paths": [".claude/skills/problem-locator-client"]},
-    "skill.diagnose": {"kind": "paths", "paths": ["tests/fixtures/components/diagnosis-generator/diagnose-service-takeover"]},
+    "case.wiki": {"kind": "release-case", "root": "tests/cases/release", "partition": "wiki"},
+    "case.journey": {"kind": "release-case", "root": "tests/cases/release", "partition": "journey"},
+    "case.oracle": {"kind": "release-case", "root": "tests/cases/release", "partition": "oracle"},
+    "skill.generator": {"kind": "paths", "paths": [".claude/skills/wiki-to-diagnosis-skill", "src/problem_locator/runtime/verification_contract.py"]},
+    "skill.diagnose": {"kind": "release-case", "root": "tests/cases/release", "partition": "approved"},
+    "skill.legacy-diagnose": {"kind": "paths", "paths": ["tests/fixtures/components/diagnosis-generator/diagnose-service-takeover"]},
     "skill.generic-smoke": {"kind": "paths", "paths": ["tests/fixtures/components/generic-problem-locator-smoke"]},
     "skill.logparse": {"kind": "paths", "paths": [".claude/skills/logparse-diagnose"]},
     "source.agent": {"kind": "paths", "paths": ["src/problem_locator/runtime/agent_backend.py", "src/problem_locator/runtime/claude_command.py", "src/problem_locator/runtime/process_tree.py"]},
@@ -39,8 +44,8 @@
       "proof": ["framework.runner"]
     },
     "deterministic": {
-      "producer": ["product.source", "product.fixtures", "runtime.environment"],
-      "proof": ["proof.deterministic", "framework.runner"]
+      "producer": ["product.source", "product.fixtures", "case.journey", "runtime.environment"],
+      "proof": ["proof.deterministic", "case.oracle", "framework.runner"]
     },
     "host-client": {
       "producer": ["skill.client", "runtime.claude", "runtime.settings", "runtime.release"],
@@ -67,32 +72,36 @@
       "proof": ["proof.real", "framework.runner"]
     },
     "real-diagnose": {
-      "producer": ["source.agent", "source.diagnose", "source.logparse", "skill.diagnose", "skill.logparse", "external.logparse", "runtime.claude", "runtime.settings", "runtime.release", "runtime.environment"],
+      "producer": ["source.agent", "source.diagnose", "source.logparse", "skill.legacy-diagnose", "skill.logparse", "external.logparse", "runtime.claude", "runtime.settings", "runtime.release", "runtime.environment"],
       "proof": ["proof.real", "framework.runner"]
     },
     "real-review": {
       "producer": ["source.agent", "source.review", "runtime.claude", "runtime.settings", "runtime.release"],
       "proof": ["proof.real", "framework.runner"]
     },
+    "real-skill-generation": {
+      "producer": ["case.wiki", "skill.generator", "source.agent", "runtime.claude", "runtime.settings", "runtime.release"],
+      "proof": ["skill.diagnose", "case.oracle", "proof.real", "framework.runner"]
+    },
     "cross-job": {
-      "producer": ["product.source", "product.fixtures", "skill.client", "skill.diagnose", "skill.logparse", "runtime.support", "adapter.cross-job", "external.logparse", "external.mcp", "runtime.claude", "runtime.settings", "runtime.release", "runtime.environment"],
-      "proof": ["proof.platform", "proof.real", "framework.runner"]
+      "producer": ["product.source", "product.fixtures", "case.journey", "skill.client", "skill.diagnose", "skill.logparse", "runtime.support", "adapter.cross-job", "external.logparse", "external.mcp", "runtime.claude", "runtime.settings", "runtime.release", "runtime.environment"],
+      "proof": ["case.oracle", "proof.platform", "proof.real", "framework.runner"]
     },
     "cross-job-route": {
-      "producer": ["product.source", "product.fixtures", "source.agent", "source.route", "skill.client", "runtime.support", "adapter.cross-job", "external.mcp", "runtime.claude", "runtime.settings", "runtime.release"],
-      "proof": ["proof.real", "framework.runner"]
+      "producer": ["product.source", "product.fixtures", "case.journey", "source.agent", "source.route", "skill.client", "runtime.support", "adapter.cross-job", "external.mcp", "runtime.claude", "runtime.settings", "runtime.release"],
+      "proof": ["case.oracle", "proof.real", "framework.runner"]
     },
     "cross-job-logparse": {
-      "producer": ["product.source", "product.fixtures", "source.logparse", "skill.logparse", "runtime.support", "adapter.cross-job", "external.logparse", "external.mcp", "runtime.release"],
-      "proof": ["proof.real", "framework.runner"]
+      "producer": ["product.source", "product.fixtures", "case.journey", "source.logparse", "skill.logparse", "runtime.support", "adapter.cross-job", "external.logparse", "external.mcp", "runtime.release"],
+      "proof": ["case.oracle", "proof.real", "framework.runner"]
     },
     "cross-job-diagnose": {
-      "producer": ["product.source", "product.fixtures", "source.agent", "source.diagnose", "source.logparse", "skill.diagnose", "skill.logparse", "runtime.support", "adapter.cross-job", "external.logparse", "external.mcp", "runtime.claude", "runtime.settings", "runtime.release"],
-      "proof": ["proof.real", "framework.runner"]
+      "producer": ["product.source", "product.fixtures", "case.journey", "source.agent", "source.diagnose", "source.logparse", "skill.diagnose", "skill.logparse", "runtime.support", "adapter.cross-job", "external.logparse", "external.mcp", "runtime.claude", "runtime.settings", "runtime.release"],
+      "proof": ["case.oracle", "proof.real", "framework.runner"]
     },
     "cross-job-review": {
-      "producer": ["product.source", "source.review", "runtime.support", "adapter.cross-job", "runtime.release"],
-      "proof": ["proof.real", "framework.runner"]
+      "producer": ["product.source", "case.journey", "source.review", "skill.diagnose", "runtime.support", "adapter.cross-job", "runtime.release"],
+      "proof": ["case.oracle", "proof.real", "framework.runner"]
     }
   }
 }

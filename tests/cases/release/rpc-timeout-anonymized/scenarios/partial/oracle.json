@@ -1,0 +1,17 @@
+{
+  "resolution_status": "PARTIAL",
+  "terminal_path_id": "partial_cross_clock_ambiguity",
+  "case_status": "PARTIALLY_RESOLVED",
+  "causal_factor_ids": [],
+  "candidate_factor_ids": ["server_receive_queue", "client_receive_queue"],
+  "excluded_factor_ids": ["direct_api_overrun"],
+  "criterion_statuses": ["SATISFIED", "PARTIALLY_SATISFIED", "SATISFIED"],
+  "required_rule_results": {
+    "api_duration_exceeds_timeout": "FAIL",
+    "server_queue_positive": "UNKNOWN",
+    "client_queue_positive": "UNKNOWN",
+    "response_after_deadline": "PASS",
+    "partial_snapshot_supported": "PASS"
+  },
+  "required_safety_phrases": ["超时不等于取消", "固定 Diagnosis Skill"]
+}

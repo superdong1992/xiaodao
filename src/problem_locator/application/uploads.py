@@ -49,6 +49,7 @@ _MAX_POST_STAGE_ATTEMPTS = 3
 _TERMINAL_CASE_STATUSES = frozenset(
     {
         CaseStatus.RESOLVED,
+        CaseStatus.PARTIALLY_RESOLVED,
         CaseStatus.UNRESOLVED,
         CaseStatus.FAILED,
         CaseStatus.CANCELLED,

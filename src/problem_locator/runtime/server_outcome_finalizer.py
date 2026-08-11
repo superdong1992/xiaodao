@@ -203,7 +203,7 @@ def finalize_server_outcome(
         payload = _normalized_inconclusive_payload(payload)
         # The sealed Agent draft is already forbidden from supplying either
         # result kind.  Keep this fail-closed filter as a defense at the
-        # server-final seam, then append only freshly generated v2 resources.
+        # server-final seam, then append only freshly generated v3 resources.
         artifact_drafts = [
             item
             for item in artifact_drafts
@@ -236,7 +236,7 @@ def finalize_server_outcome(
         if verification is None or not isinstance(
             payload, (DiagnosisOutcome, ReviewAssessment)
         ):
-            raise ValueError("a public Result v2 requires a verified diagnosis payload")
+            raise ValueError("a public Result v3 requires a verified diagnosis payload")
         bundle = build_server_result_bundle(
             job=job,
             result_type=result_type,

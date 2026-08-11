@@ -79,23 +79,44 @@
     }
   ],
   "requires_logparse": true,
-  "schema_version": 4,
+  "schema_version": 5,
   "summary": "Correlate a payment-service RPC timeout with its parsed target logs.",
   "tool_bundle_id": "tool-bundle/diagnose",
-  "version": "4.0.0",
+  "version": "5.0.0",
   "verification_contract": {
-    "schema_version": 1,
+    "schema_version": 2,
+    "observation_policies": [],
     "event_extractors": [
       {
         "id": "client_timeout",
         "anchor": "client",
-        "line_pattern": "^(?P<event_time>\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z) timeout caller=(?P<caller_service>\\S+)$",
-        "timestamp_group": "event_time",
-        "timestamp_format": "RFC3339_MILLIS_UTC",
-        "field_groups": [
-          "caller_service"
+        "members": [
+          {
+            "line_pattern": "^(?P<event_time>\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z) timeout caller=(?P<caller_service>\\S+)$",
+            "match_mode": "FULL_LINE"
+          }
         ],
-        "match_cardinality": "EXACTLY_ONE"
+        "fields": [
+          {
+            "name": "event_time",
+            "type": "TIMESTAMP",
+            "unit": null,
+            "clock_domain": "client_clock"
+          },
+          {
+            "name": "caller_service",
+            "type": "STRING",
+            "unit": null,
+            "clock_domain": null
+          }
+        ],
+        "timestamp_field": "event_time",
+        "group_by": [],
+        "selectors": [],
+        "max_gap_lines": 0,
+        "min_matches": 1,
+        "max_matches": 1,
+        "observation_policy_ids": []
       }
     ],
     "rules": [
@@ -126,7 +147,9 @@
           "before_ms": 1000,
           "after_ms": 1000,
           "lower_bound": "INCLUSIVE",
-          "upper_bound": "INCLUSIVE"
+          "upper_bound": "INCLUSIVE",
+          "quantifier": "ANY",
+          "clock_tolerance_ms": 0
         }
       },
       {
@@ -140,7 +163,8 @@
         "parameters": {
           "event": "client_timeout",
           "field": "caller_service",
-          "fact_name": "caller_service"
+          "fact_name": "caller_service",
+          "quantifier": "ANY"
         }
       },
       {
@@ -156,6 +180,35 @@
           "assertion": "The client timeout caused the incident.",
           "evidence_events": [
             "client_timeout"
+          ]
+        }
+      }
+    ],
+    "terminal_paths": [
+      {
+        "id": "complete",
+        "resolution_status": "COMPLETE",
+        "condition": {
+          "any_of": [
+            {
+              "all_of": [
+                {
+                  "rule_id": "timeout_causality",
+                  "result": "PASS"
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "id": "none",
+        "resolution_status": "NONE",
+        "condition": {
+          "any_of": [
+            {
+              "all_of": []
+            }
           ]
         }
       }

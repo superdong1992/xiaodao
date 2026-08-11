@@ -716,6 +716,9 @@ def _server_result_bodies(*, inconclusive: bool = False) -> dict[str, bytes]:
             status="INCONCLUSIVE",
             root_cause=None,
             findings=[],
+            causal_factors=[],
+            candidate_factors=[],
+            excluded_factors=[],
             supporting_evidence_bindings=[],
             evidence_gaps=["Server verification did not establish the root cause."],
         )
@@ -893,7 +896,12 @@ def _inconclusive_diagnosis_outcome(
     payload["decision_audit"]["source_draft_sha256"] = hashlib.sha256(
         _AUDIT_DRAFT_BYTES
     ).hexdigest()
+    payload["decision_audit"]["selected_terminal_path_id"] = "none"
+    payload["decision_audit"]["terminal_resolution_status"] = "NONE"
+    claim = payload["decision_audit"]["rules"][0]["agent_claim"]
+    claim["claimed_result"] = "FAIL"
     evaluation = payload["decision_audit"]["rules"][0]["server_evaluation"]
+    evaluation["rule_kind"] = "EVENT_TIME_WINDOW"
     evaluation["status"] = "VERIFIED_FAIL"
     evaluation["issues"] = ["The required event is outside the declared window."]
     return JobOutcome.model_validate(payload)
@@ -1881,8 +1889,8 @@ def test_candidate_outcome_formalizes_user_result_and_creates_review_job() -> No
     }
     user_result = accepted[ArtifactKind.USER_RESULT]
     assert user_result.kind is ArtifactKind.USER_RESULT
-    assert user_result.metadata.schema_version == 2
-    assert user_result.metadata.format_id == "problem-locator-diagnosis-v2"
+    assert user_result.metadata.schema_version == 3
+    assert user_result.metadata.format_id == "problem-locator-diagnosis-v3"
     assert user_result.size == len(result_bodies["user_result"])
     assert user_result.sha256 == hashlib.sha256(
         result_bodies["user_result"]

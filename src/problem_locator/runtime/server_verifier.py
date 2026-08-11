@@ -1,4 +1,4 @@
-"""Deterministic, server-owned verification of V2 Agent rule claims.
+"""Deterministic, server-owned verification of Agent rule claims.
 
 The verifier intentionally records only contract inputs, cited raw lines, and
 mechanical results.  It never records or attempts to reconstruct model chain of
@@ -11,6 +11,8 @@ import json
 import os
 import re
 import stat
+from fractions import Fraction
+from itertools import product
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
@@ -21,9 +23,11 @@ from problem_locator.contracts import (
     AgentRuleClaim,
     DecisionAuditV2,
     DecisionRuleAudit,
+    DerivedValueAudit,
     DiagnosisOutcome,
     EvidenceBinding,
     EvidenceSourceType,
+    EventObservationAudit,
     Job,
     JobType,
     LogparseEvidenceLocator,
@@ -47,6 +51,7 @@ from problem_locator.contracts import (
 )
 
 from .authoritative_targets import resolve_authoritative_targets
+from .verification_contract import terminal_path_matches
 
 
 _RFC3339_MILLIS_UTC = "%Y-%m-%dT%H:%M:%S.%fZ"
@@ -87,9 +92,16 @@ class _ResolvedLine:
 class _EventMatch:
     event_id: str
     anchor: str
-    event_time: str
+    event_time: str | None
+    timestamp_field: str | None
     fields: Mapping[str, str]
-    line: _ResolvedLine
+    field_specs: Mapping[str, Mapping[str, Any]]
+    lines: tuple[_ResolvedLine, ...]
+    observation_policy_ids: tuple[str, ...]
+
+    @property
+    def line(self) -> _ResolvedLine:
+        return self.lines[0]
 
 
 def _binding_key(binding: EvidenceBinding) -> str:
@@ -138,14 +150,23 @@ def _load_contract(skill_root: Path) -> tuple[dict[str, Any], list[dict[str, Any
             ValueError(f"non-finite manifest value: {value}")
         ),
     )
-    if not isinstance(value, dict) or value.get("schema_version") != 4:
-        raise ValueError("server verifier requires a pinned Skill manifest v4")
+    if not isinstance(value, dict) or value.get("schema_version") != 5:
+        raise ValueError("server verifier requires a pinned Skill manifest v5")
     contract = value.get("verification_contract")
-    if not isinstance(contract, dict) or contract.get("schema_version") != 1:
-        raise ValueError("server verifier requires verification_contract v1")
+    if not isinstance(contract, dict) or contract.get("schema_version") != 2:
+        raise ValueError("server verifier requires verification_contract v2")
     extractors = contract.get("event_extractors")
     rules = contract.get("rules")
-    if not isinstance(extractors, list) or not isinstance(rules, list) or not rules:
+    paths = contract.get("terminal_paths")
+    policies = contract.get("observation_policies")
+    if (
+        not isinstance(extractors, list)
+        or not isinstance(rules, list)
+        or not rules
+        or not isinstance(paths, list)
+        or not paths
+        or not isinstance(policies, list)
+    ):
         raise ValueError("verification contract is incomplete")
     requirements = value.get("requirements")
     if not isinstance(requirements, list):
@@ -187,7 +208,7 @@ def _requirement_is_missing(
             item.provenance.input_name != requirement.name
             for item in job.context_snapshot.user_facts
         )
-    # Catalog V4 permits only one INITIAL attachment requirement.  A fixed
+    # The catalog permits only one INITIAL attachment requirement.  A fixed
     # attachment or an already-resolved Logparse source therefore proves it
     # has been fulfilled for this Job.
     plan = manifest.resolved_logparse_plan
@@ -483,6 +504,12 @@ def _draft_evidence_bindings(
             values.extend(candidate.supporting_evidence_bindings)
             for mapping in candidate.completion_criteria_mapping:
                 values.extend(mapping.evidence_bindings)
+            for factor in (
+                candidate.causal_factors
+                + candidate.candidate_factors
+                + candidate.excluded_factors
+            ):
+                values.extend(factor.evidence_bindings)
     if manifest.review_subject is not None:
         values.extend(
             EvidenceBinding(
@@ -656,6 +683,10 @@ def _resolve_evidence_lines(
         physical = physical_lines(source)
         if end > len(physical):
             raise ValueError("Evidence locator exceeds the raw log")
+        if start != 1 or end != len(physical):
+            # Positive matches remain usable, but an Agent-bounded excerpt is
+            # not a server-owned absence/count universe for the whole file.
+            incomplete_anchors.add(source.anchor or "*")
         for line_number in range(start, end + 1):
             scan_lines.append(resolved_line(source, line_number))
 
@@ -694,51 +725,164 @@ def _extract_events(
     extractors: list[dict[str, Any]],
     lines: list[_ResolvedLine],
     incomplete_anchors: set[str],
+    facts: Mapping[str, list[Any]],
 ) -> tuple[dict[str, list[_EventMatch]], dict[str, bool]]:
     matches: dict[str, list[_EventMatch]] = {}
-    anchor_has_lines: dict[str, bool] = {}
+    event_scan_complete: dict[str, bool] = {}
     for extractor in extractors:
         event_id = extractor["id"]
         anchor = extractor["anchor"]
-        pattern = re.compile(extractor["line_pattern"])
-        anchor_lines = [line for line in lines if line.anchor == anchor]
-        anchor_has_lines[anchor] = (
+        members = [
+            (re.compile(item["line_pattern"]), item["match_mode"])
+            for item in extractor["members"]
+        ]
+        anchor_lines_by_key = {
+            (line.source_key, line.line_number): line
+            for line in lines
+            if line.anchor == anchor
+        }
+        anchor_lines = sorted(
+            anchor_lines_by_key.values(),
+            key=lambda item: (item.source_key, item.line_number),
+        )
+        selector_values: dict[str, str] = {}
+        selectors_complete = True
+        for selector in extractor["selectors"]:
+            binding = selector["value"]
+            if binding["source"] == "SKILL_FIXED":
+                selector_values[selector["field"]] = binding["value"]
+                continue
+            candidates = facts.get(binding["name"], [])
+            if len(candidates) != 1:
+                selectors_complete = False
+                continue
+            selector_values[selector["field"]] = candidates[0].statement
+        event_scan_complete[event_id] = (
             bool(anchor_lines)
             and "*" not in incomplete_anchors
             and anchor not in incomplete_anchors
+            and selectors_complete
         )
         current: list[_EventMatch] = []
-        seen_occurrences: set[tuple[str, int]] = set()
-        for line in anchor_lines:
-            match = pattern.fullmatch(line.text)
-            if match is None:
-                continue
-            occurrence = (line.source_key, line.line_number)
-            if occurrence in seen_occurrences:
-                continue
-            seen_occurrences.add(occurrence)
-            values = match.groupdict()
-            event_time = values[extractor["timestamp_group"]]
-            if event_time is None:
-                continue
-            try:
-                _parse_millisecond_utc(event_time)
-            except ValueError:
-                continue
-            if any(values[name] is None for name in extractor["field_groups"]):
-                continue
-            fields = {name: values[name] for name in extractor["field_groups"]}
-            current.append(
-                _EventMatch(
-                    event_id=event_id,
-                    anchor=anchor,
-                    event_time=event_time,
-                    fields=fields,
-                    line=line,
-                )
+        if not selectors_complete:
+            matches[event_id] = current
+            continue
+        field_specs = {item["name"]: item for item in extractor["fields"]}
+        seen_occurrences: set[tuple[tuple[str, int], ...]] = set()
+
+        def match_member(index: int, line: _ResolvedLine):
+            pattern, mode = members[index]
+            return (
+                pattern.fullmatch(line.text)
+                if mode == "FULL_LINE"
+                else pattern.search(line.text)
             )
+
+        for first_index, first_line in enumerate(anchor_lines):
+            first_match = match_member(0, first_line)
+            if first_match is None:
+                continue
+            states: list[tuple[list[_ResolvedLine], dict[str, str]]] = [
+                ([first_line], {
+                    key: value
+                    for key, value in first_match.groupdict().items()
+                    if value is not None
+                })
+            ]
+            for member_index in range(1, len(members)):
+                next_states: list[tuple[list[_ResolvedLine], dict[str, str]]] = []
+                for selected_lines, captured in states:
+                    previous = selected_lines[-1]
+                    for candidate in anchor_lines[first_index + 1 :]:
+                        if candidate.source_key != previous.source_key:
+                            continue
+                        if candidate.line_number <= previous.line_number:
+                            continue
+                        if (
+                            candidate.line_number - previous.line_number - 1
+                            > extractor["max_gap_lines"]
+                        ):
+                            break
+                        found = match_member(member_index, candidate)
+                        if found is None:
+                            continue
+                        additions = {
+                            key: value
+                            for key, value in found.groupdict().items()
+                            if value is not None
+                        }
+                        if any(
+                            key in captured and captured[key] != value
+                            for key, value in additions.items()
+                        ):
+                            continue
+                        next_states.append(
+                            (
+                                [*selected_lines, candidate],
+                                {**captured, **additions},
+                            )
+                        )
+                        if len(next_states) > 100_000:
+                            raise ValueError("multi-line event assembly exceeds the safety limit")
+                states = next_states
+                if not states:
+                    break
+            for selected_lines, values in states:
+                if set(values) != set(field_specs):
+                    continue
+                valid = True
+                for field_name, spec in field_specs.items():
+                    raw_value = values[field_name]
+                    if spec["type"] == "INTEGER":
+                        try:
+                            int(raw_value)
+                        except ValueError:
+                            valid = False
+                            break
+                    elif spec["type"] == "TIMESTAMP":
+                        try:
+                            _parse_millisecond_utc(raw_value)
+                        except ValueError:
+                            valid = False
+                            break
+                if not valid or any(
+                    values.get(field) != expected
+                    for field, expected in selector_values.items()
+                ):
+                    continue
+                occurrence = tuple(
+                    (line.source_key, line.line_number) for line in selected_lines
+                )
+                if occurrence in seen_occurrences:
+                    continue
+                seen_occurrences.add(occurrence)
+                timestamp_field = extractor["timestamp_field"]
+                current.append(
+                    _EventMatch(
+                        event_id=event_id,
+                        anchor=anchor,
+                        event_time=(
+                            None
+                            if timestamp_field is None
+                            else values[timestamp_field]
+                        ),
+                        timestamp_field=timestamp_field,
+                        fields=values,
+                        field_specs=field_specs,
+                        lines=tuple(selected_lines),
+                        observation_policy_ids=tuple(
+                            extractor["observation_policy_ids"]
+                        ),
+                    )
+                )
+        if extractor["group_by"]:
+            grouped: dict[tuple[str, ...], _EventMatch] = {}
+            for item in current:
+                key = tuple(item.fields[name] for name in extractor["group_by"])
+                grouped.setdefault(key, item)
+            current = list(grouped.values())
         matches[event_id] = current
-    return matches, anchor_has_lines
+    return matches, event_scan_complete
 
 
 def _event_material(
@@ -747,24 +891,30 @@ def _event_material(
 ) -> tuple[list[EvidenceBinding], list[str], list[VerifiedLogLineRange], list[str]]:
     selected = [match for event_id in event_ids for match in events.get(event_id, [])]
     bindings = _unique_bindings(match.line.binding for match in selected)
-    observed = _unique_strings(match.event_time for match in selected)
+    observed = _unique_strings(
+        match.event_time
+        for match in selected
+        if match.event_time is not None
+        and _RFC3339_MILLIS_UTC_PATTERN.fullmatch(match.event_time) is not None
+    )
     line_ranges: list[VerifiedLogLineRange] = []
     seen_lines: set[tuple[str, int, str]] = set()
     anchors: list[str] = []
     for match in selected:
         anchors.append(match.anchor)
-        key = (match.line.relative_path, match.line.line_number, bytes_sha256(match.line.raw_line))
-        if key in seen_lines:
-            continue
-        seen_lines.add(key)
-        line_ranges.append(
-            VerifiedLogLineRange(
-                path=match.line.relative_path,
-                line_start=match.line.line_number,
-                line_end=match.line.line_number,
-                raw_bytes_sha256=key[2],
+        for line in match.lines:
+            key = (line.relative_path, line.line_number, bytes_sha256(line.raw_line))
+            if key in seen_lines:
+                continue
+            seen_lines.add(key)
+            line_ranges.append(
+                VerifiedLogLineRange(
+                    path=line.relative_path,
+                    line_start=line.line_number,
+                    line_end=line.line_number,
+                    raw_bytes_sha256=key[2],
+                )
             )
-        )
     return bindings, observed, line_ranges, _unique_strings(anchors)
 
 
@@ -780,14 +930,61 @@ def _facts(job: Job) -> dict[str, list[Any]]:
 def _rule_events(rule: Mapping[str, Any]) -> list[str]:
     parameters = rule["parameters"]
     kind = rule["kind"]
-    if kind in {"EVENT_PRESENT", "EVENT_TIME_WINDOW", "FACT_FIELD_EQUALS"}:
+    if kind in {
+        "EVENT_COUNT",
+        "EVENT_PRESENT",
+        "EVENT_TIME_WINDOW",
+        "FACT_FIELD_EQUALS",
+    }:
         return [parameters["event"]]
     if kind == "ROLE_COVERAGE":
         return [item["event"] for item in parameters["coverage"]]
     if kind == "CROSS_ROLE_CORRELATION":
         return [item["event"] for item in parameters["members"]]
+    if kind == "FIELDS_EQUAL":
+        return _unique_strings(
+            item["event"]
+            for equality in parameters["equalities"]
+            for item in equality["members"]
+        )
     if kind == "EVENT_ORDER":
-        return [parameters["before_event"], parameters["after_event"]]
+        return _unique_strings(
+            [
+                parameters["before_event"],
+                parameters["after_event"],
+                *(
+                    item["event"]
+                    for equality in parameters["joins"]
+                    for item in equality["members"]
+                ),
+            ]
+        )
+    if kind == "NUMERIC_COMPARE":
+        def expression_events(expression: Mapping[str, Any]) -> list[str]:
+            expression_kind = expression["kind"]
+            if expression_kind == "FIELD":
+                return [expression["event"]]
+            if expression_kind in {"ADD", "SUBTRACT"}:
+                return [
+                    *expression_events(expression["left"]),
+                    *expression_events(expression["right"]),
+                ]
+            if expression_kind in {"MULTIPLY_CONST", "CONVERT"}:
+                return expression_events(expression["operand"])
+            return []
+        return _unique_strings(
+            [
+                *expression_events(parameters["left"]),
+                *expression_events(parameters["right"]),
+                *(
+                    item["event"]
+                    for equality in parameters["joins"]
+                    for item in equality["members"]
+                ),
+            ]
+        )
+    if kind == "FACT_IN":
+        return []
     if kind == "SEMANTIC_CAUSALITY":
         return list(parameters["evidence_events"])
     raise ValueError("unsupported verification rule kind")
@@ -800,6 +997,8 @@ def _evaluation(
     events: Mapping[str, list[_EventMatch]],
     fact_refs: Iterable[str] = (),
     derived_anchor_time: str | None = None,
+    count_lower_bound_events: Iterable[str] = (),
+    derived_values: Iterable[DerivedValueAudit] = (),
     issues: Iterable[str] = (),
 ) -> ServerRuleEvaluation:
     event_ids = _rule_events(rule)
@@ -813,16 +1012,243 @@ def _evaluation(
         anchor_id=anchors[0] if len(anchors) == 1 else None,
         derived_anchor_time=derived_anchor_time,
         observed_times=observed,
+        event_observations=[
+            EventObservationAudit(
+                event_id=event_id,
+                observed_count=len(events.get(event_id, [])),
+                count_is_lower_bound=event_id in set(count_lower_bound_events),
+            )
+            for event_id in event_ids
+        ],
+        derived_values=list(derived_values),
         line_ranges=line_ranges,
         issues=list(issues),
     )
+
+
+_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
+_TIME_FACTORS = {
+    "NANOSECOND": Fraction(1, 1000),
+    "MICROSECOND": Fraction(1),
+    "MILLISECOND": Fraction(1000),
+    "SECOND": Fraction(1_000_000),
+    "MINUTE": Fraction(60_000_000),
+}
+
+
+@dataclass(frozen=True, slots=True)
+class _NumericValue:
+    value: Fraction
+    dimension: str
+    clock_domains: frozenset[str]
+
+
+def _timestamp_microseconds(value: str) -> Fraction:
+    parsed = _parse_millisecond_utc(value)
+    delta = parsed - _EPOCH
+    return Fraction(
+        delta.days * 86_400_000_000
+        + delta.seconds * 1_000_000
+        + delta.microseconds
+    )
+
+
+def _event_time_value(event: _EventMatch) -> Fraction:
+    if event.event_time is None or event.timestamp_field is None:
+        raise ValueError("event has no timestamp field")
+    spec = event.field_specs[event.timestamp_field]
+    if spec["type"] == "TIMESTAMP":
+        return _timestamp_microseconds(event.event_time)
+    return _integer_value(
+        event.event_time,
+        spec["unit"],
+        spec["clock_domain"],
+    ).value
+
+
+def _integer_value(value: str | int, unit: str, clock: str | None) -> _NumericValue:
+    raw = int(value)
+    if unit in _TIME_FACTORS:
+        return _NumericValue(
+            Fraction(raw) * _TIME_FACTORS[unit],
+            "TIME",
+            frozenset(() if clock is None else (clock,)),
+        )
+    return _NumericValue(Fraction(raw), unit, frozenset())
+
+
+def _expression_value(
+    expression: Mapping[str, Any],
+    *,
+    occurrence: Mapping[str, _EventMatch],
+    facts: Mapping[str, list[Any]],
+    fact_refs: list[str],
+) -> _NumericValue:
+    kind = expression["kind"]
+    if kind == "FIELD":
+        event = occurrence[expression["event"]]
+        field = expression["field"]
+        spec = event.field_specs[field]
+        raw = event.fields[field]
+        if spec["type"] == "TIMESTAMP":
+            return _NumericValue(
+                _timestamp_microseconds(raw),
+                "TIME",
+                frozenset((spec["clock_domain"],)),
+            )
+        return _integer_value(raw, spec["unit"], spec["clock_domain"])
+    if kind == "FACT":
+        values = facts.get(expression["name"], [])
+        if len(values) != 1:
+            raise ValueError("numeric user fact is missing or ambiguous")
+        fact = values[0]
+        if fact.item_id not in fact_refs:
+            fact_refs.append(fact.item_id)
+        if expression["value_type"] == "TIMESTAMP":
+            return _NumericValue(
+                _timestamp_microseconds(fact.statement),
+                "TIME",
+                frozenset((expression["clock_domain"],)),
+            )
+        return _integer_value(
+            fact.statement,
+            expression["unit"],
+            expression["clock_domain"],
+        )
+    if kind == "CONST":
+        return _integer_value(expression["value"], expression["unit"], None)
+    if kind in {"ADD", "SUBTRACT"}:
+        left = _expression_value(
+            expression["left"], occurrence=occurrence, facts=facts, fact_refs=fact_refs
+        )
+        right = _expression_value(
+            expression["right"], occurrence=occurrence, facts=facts, fact_refs=fact_refs
+        )
+        if left.dimension != right.dimension:
+            raise ValueError("numeric expression combines incompatible units")
+        value = left.value + right.value if kind == "ADD" else left.value - right.value
+        return _NumericValue(
+            value,
+            left.dimension,
+            left.clock_domains | right.clock_domains,
+        )
+    if kind == "MULTIPLY_CONST":
+        operand = _expression_value(
+            expression["operand"], occurrence=occurrence, facts=facts, fact_refs=fact_refs
+        )
+        return _NumericValue(
+            operand.value * expression["multiplier"],
+            operand.dimension,
+            operand.clock_domains,
+        )
+    if kind == "CONVERT":
+        operand = _expression_value(
+            expression["operand"], occurrence=occurrence, facts=facts, fact_refs=fact_refs
+        )
+        target = expression["unit"]
+        target_dimension = "TIME" if target in _TIME_FACTORS else target
+        if operand.dimension != target_dimension:
+            raise ValueError("numeric conversion changes dimensions")
+        return operand
+    raise ValueError("unsupported numeric expression")
+
+
+def _event_combinations(
+    event_ids: Iterable[str],
+    events: Mapping[str, list[_EventMatch]],
+) -> list[dict[str, _EventMatch]]:
+    ordered = _unique_strings(event_ids)
+    if not ordered:
+        return [{}]
+    if any(not events[event_id] for event_id in ordered):
+        return []
+    combinations = 1
+    for event_id in ordered:
+        combinations *= len(events[event_id])
+        if combinations > 100_000:
+            raise ValueError("event occurrence join exceeds the safety limit")
+    return [
+        dict(zip(ordered, values, strict=True))
+        for values in product(*(events[event_id] for event_id in ordered))
+    ]
+
+
+def _equalities_match(
+    occurrence: Mapping[str, _EventMatch],
+    equalities: Iterable[Mapping[str, Any]],
+) -> bool:
+    return all(
+        len(
+            {
+                occurrence[item["event"]].fields[item["field"]]
+                for item in equality["members"]
+            }
+        )
+        == 1
+        for equality in equalities
+    )
+
+
+def _aggregate_results(
+    values: list[RuleClaimResult],
+    *,
+    quantifier: str,
+) -> RuleClaimResult:
+    if not values:
+        return RuleClaimResult.UNKNOWN
+    if quantifier in {"ANY", "EXISTS"}:
+        if RuleClaimResult.PASS in values:
+            return RuleClaimResult.PASS
+        if all(item is RuleClaimResult.FAIL for item in values):
+            return RuleClaimResult.FAIL
+        return RuleClaimResult.UNKNOWN
+    if all(item is RuleClaimResult.PASS for item in values):
+        return RuleClaimResult.PASS
+    if RuleClaimResult.FAIL in values:
+        return RuleClaimResult.FAIL
+    return RuleClaimResult.UNKNOWN
+
+
+def _server_status(value: RuleClaimResult) -> ServerRuleStatus:
+    return {
+        RuleClaimResult.PASS: ServerRuleStatus.VERIFIED_PASS,
+        RuleClaimResult.FAIL: ServerRuleStatus.VERIFIED_FAIL,
+        RuleClaimResult.UNKNOWN: ServerRuleStatus.UNVERIFIABLE,
+    }[value]
+
+
+def _comparison_result(
+    delta: Fraction,
+    *,
+    operator: str,
+    uncertainty: Fraction,
+) -> RuleClaimResult:
+    lower = delta - uncertainty
+    upper = delta + uncertainty
+    if operator == "GT":
+        return RuleClaimResult.PASS if lower > 0 else RuleClaimResult.FAIL if upper <= 0 else RuleClaimResult.UNKNOWN
+    if operator == "GTE":
+        return RuleClaimResult.PASS if lower >= 0 else RuleClaimResult.FAIL if upper < 0 else RuleClaimResult.UNKNOWN
+    if operator == "LT":
+        return RuleClaimResult.PASS if upper < 0 else RuleClaimResult.FAIL if lower >= 0 else RuleClaimResult.UNKNOWN
+    if operator == "LTE":
+        return RuleClaimResult.PASS if upper <= 0 else RuleClaimResult.FAIL if lower > 0 else RuleClaimResult.UNKNOWN
+    if lower == upper == 0:
+        return RuleClaimResult.PASS
+    if upper < 0 or lower > 0:
+        return RuleClaimResult.FAIL
+    return RuleClaimResult.UNKNOWN
+
+
+def _audit_scalar(value: Fraction) -> int | str:
+    return value.numerator if value.denominator == 1 else f"{value.numerator}/{value.denominator}"
 
 
 def _evaluate_rule(
     rule: Mapping[str, Any],
     *,
     events: Mapping[str, list[_EventMatch]],
-    anchor_has_lines: Mapping[str, bool],
+    event_scan_complete: Mapping[str, bool],
     extractor_by_id: Mapping[str, Mapping[str, Any]],
     facts: Mapping[str, list[Any]],
     prior: Mapping[str, ServerRuleEvaluation],
@@ -831,165 +1257,415 @@ def _evaluate_rule(
     kind = rule["kind"]
     parameters = rule["parameters"]
     event_ids = _rule_events(rule)
-    if kind != "SEMANTIC_CAUSALITY":
+    selector_fact_refs: list[str] = []
+    for event_id in event_ids:
+        for selector in extractor_by_id[event_id]["selectors"]:
+            binding = selector["value"]
+            if binding["source"] != "USER_FACT":
+                continue
+            values = facts.get(binding["name"], [])
+            if len(values) == 1 and values[0].item_id not in selector_fact_refs:
+                selector_fact_refs.append(values[0].item_id)
+
+    def evaluation(**kwargs: Any) -> ServerRuleEvaluation:
+        explicit = list(kwargs.pop("fact_refs", ()))
+        return _evaluation(
+            **kwargs,
+            fact_refs=_unique_strings([*selector_fact_refs, *explicit]),
+        )
+
+    lower_bound_events = {
+        event_id
+        for event_id in event_ids
+        if not event_scan_complete.get(event_id, False)
+        or bool(extractor_by_id[event_id]["observation_policy_ids"])
+    }
+
+    if kind != "SEMANTIC_CAUSALITY" and any(
+        item.status not in {
+            ServerRuleStatus.VERIFIED_PASS,
+            ServerRuleStatus.SEMANTIC_ONLY,
+        }
+        or item.issues
+        for item in dependencies
+    ):
+        return evaluation(
+            rule=rule,
+            status=ServerRuleStatus.NOT_APPLICABLE,
+            events=events,
+            count_lower_bound_events=lower_bound_events,
+            issues=[],
+        )
+
+    if kind not in {"FACT_IN", "SEMANTIC_CAUSALITY"}:
         for event_id in event_ids:
-            matches = events[event_id]
-            anchor = extractor_by_id[event_id]["anchor"]
-            if not anchor_has_lines.get(anchor, False):
-                return _evaluation(
+            extractor = extractor_by_id[event_id]
+            count = len(events[event_id])
+            minimum = extractor["min_matches"]
+            maximum = extractor["max_matches"]
+            if count < minimum:
+                uncertain = event_id in lower_bound_events
+                return evaluation(
                     rule=rule,
-                    status=ServerRuleStatus.UNVERIFIABLE,
+                    status=(ServerRuleStatus.UNVERIFIABLE if uncertain else ServerRuleStatus.VERIFIED_FAIL),
                     events=events,
-                    issues=[
-                        "The full bounded Evidence locator range is unavailable."
-                    ],
+                    count_lower_bound_events=lower_bound_events,
+                    issues=["The selected event set does not meet its declared minimum cardinality."],
                 )
-            if len(matches) != 1:
-                return _evaluation(
+            if maximum is not None and count > maximum:
+                return evaluation(
                     rule=rule,
                     status=ServerRuleStatus.VERIFIED_FAIL,
                     events=events,
-                    issues=[
-                        "The cited raw log does not contain exactly one required event."
-                    ],
+                    count_lower_bound_events=lower_bound_events,
+                    issues=["The selected event set exceeds its declared maximum cardinality."],
                 )
+            # A lossy policy prevents proving an upper cardinality bound, but
+            # must not discard an observed positive event for presence,
+            # equality, ordering, arithmetic, or semantic rules. EVENT_COUNT
+            # applies the upper-bound uncertainty below when it is material.
 
-    if kind == "EVENT_PRESENT":
-        return _evaluation(rule=rule, status=ServerRuleStatus.VERIFIED_PASS, events=events)
+    if kind in {"EVENT_COUNT", "EVENT_PRESENT"}:
+        event_id = parameters["event"]
+        count = len(events[event_id])
+        minimum = 1 if kind == "EVENT_PRESENT" else parameters["min_count"]
+        maximum = None if kind == "EVENT_PRESENT" else parameters["max_count"]
+        if count < minimum:
+            result = (
+                RuleClaimResult.UNKNOWN
+                if event_id in lower_bound_events
+                else RuleClaimResult.FAIL
+            )
+        elif maximum is not None and count > maximum:
+            result = RuleClaimResult.FAIL
+        elif maximum is not None and event_id in lower_bound_events:
+            result = RuleClaimResult.UNKNOWN
+        else:
+            result = RuleClaimResult.PASS
+        return evaluation(
+            rule=rule,
+            status=_server_status(result),
+            events=events,
+            count_lower_bound_events=lower_bound_events,
+            derived_values=[
+                DerivedValueAudit(
+                    name="observed_count",
+                    value=count,
+                    unit="COUNT",
+                    lower_bound=count,
+                    upper_bound=None if event_id in lower_bound_events else count,
+                )
+            ],
+            issues=[] if result is RuleClaimResult.PASS else [
+                "The observed event cardinality cannot satisfy the declared count with current observability."
+            ],
+        )
 
     if kind == "EVENT_TIME_WINDOW":
         reference = parameters["reference"]
         fact_refs: list[str] = []
         if reference["source"] == "USER_FACT":
-            fact_values = facts.get(reference["name"], [])
-            if len(fact_values) != 1:
-                return _evaluation(
+            values = facts.get(reference["name"], [])
+            if len(values) != 1:
+                return evaluation(
                     rule=rule,
                     status=ServerRuleStatus.UNVERIFIABLE,
                     events=events,
+                    count_lower_bound_events=lower_bound_events,
                     issues=["The reference user fact is missing or ambiguous."],
                 )
-            fact = fact_values[0]
+            fact = values[0]
             reference_value = fact.statement
             fact_refs = [fact.item_id]
-        elif reference["source"] == "SKILL_FIXED":
-            reference_value = reference["value"]
         else:
-            return _evaluation(
-                rule=rule,
-                status=ServerRuleStatus.UNVERIFIABLE,
-                events=events,
-                issues=["The time reference binding is unsupported."],
-            )
+            reference_value = reference["value"]
         try:
-            anchor_time = _parse_millisecond_utc(reference_value)
+            anchor_us = _timestamp_microseconds(reference_value)
         except ValueError:
-            return _evaluation(
+            return evaluation(
                 rule=rule,
                 status=ServerRuleStatus.VERIFIED_FAIL,
                 events=events,
                 fact_refs=fact_refs,
+                count_lower_bound_events=lower_bound_events,
                 issues=["The time reference is not an RFC3339 millisecond UTC timestamp."],
             )
-        observed = _parse_millisecond_utc(
-            events[parameters["event"]][0].event_time
-        )
-        lower = anchor_time - timedelta(milliseconds=parameters["before_ms"])
-        upper = anchor_time + timedelta(milliseconds=parameters["after_ms"])
-        lower_ok = observed >= lower if parameters["lower_bound"] == "INCLUSIVE" else observed > lower
-        upper_ok = observed <= upper if parameters["upper_bound"] == "INCLUSIVE" else observed < upper
-        return _evaluation(
+        lower = anchor_us - parameters["before_ms"] * 1000
+        upper = anchor_us + parameters["after_ms"] * 1000
+        tolerance = Fraction(parameters["clock_tolerance_ms"] * 1000)
+        results: list[RuleClaimResult] = []
+        for event in events[parameters["event"]]:
+            if event.event_time is None:
+                results.append(RuleClaimResult.UNKNOWN)
+                continue
+            try:
+                observed = _event_time_value(event)
+            except (TypeError, ValueError):
+                results.append(RuleClaimResult.UNKNOWN)
+                continue
+            observed_lower = observed - tolerance
+            observed_upper = observed + tolerance
+            lower_pass = observed_lower >= lower if parameters["lower_bound"] == "INCLUSIVE" else observed_lower > lower
+            upper_pass = observed_upper <= upper if parameters["upper_bound"] == "INCLUSIVE" else observed_upper < upper
+            wholly_outside = (
+                observed_upper < lower
+                if parameters["lower_bound"] == "INCLUSIVE"
+                else observed_upper <= lower
+            ) or (
+                observed_lower > upper
+                if parameters["upper_bound"] == "INCLUSIVE"
+                else observed_lower >= upper
+            )
+            results.append(
+                RuleClaimResult.PASS
+                if lower_pass and upper_pass
+                else RuleClaimResult.FAIL
+                if wholly_outside
+                else RuleClaimResult.UNKNOWN
+            )
+        result = _aggregate_results(results, quantifier=parameters["quantifier"])
+        if not results and parameters["event"] not in lower_bound_events:
+            result = RuleClaimResult.FAIL
+        return evaluation(
             rule=rule,
-            status=(
-                ServerRuleStatus.VERIFIED_PASS
-                if lower_ok and upper_ok
-                else ServerRuleStatus.VERIFIED_FAIL
-            ),
+            status=_server_status(result),
             events=events,
             fact_refs=fact_refs,
             derived_anchor_time=reference_value,
-            issues=([] if lower_ok and upper_ok else ["The event is outside the explicit incident window."]),
+            count_lower_bound_events=lower_bound_events,
+            issues=[] if result is RuleClaimResult.PASS else [
+                "The event time is outside or overlaps the explicit incident-window uncertainty boundary."
+            ],
         )
 
     if kind == "FACT_FIELD_EQUALS":
         fact_values = facts.get(parameters["fact_name"], [])
         if len(fact_values) != 1:
-            return _evaluation(
+            return evaluation(
+                rule=rule,
+                status=ServerRuleStatus.UNVERIFIABLE,
+                events=events,
+                count_lower_bound_events=lower_bound_events,
+                issues=["The required user fact is missing or ambiguous."],
+            )
+        fact = fact_values[0]
+        values = [
+            RuleClaimResult.PASS
+            if item.fields[parameters["field"]] == fact.statement
+            else RuleClaimResult.FAIL
+            for item in events[parameters["event"]]
+        ]
+        result = _aggregate_results(values, quantifier=parameters["quantifier"])
+        if not values and parameters["event"] not in lower_bound_events:
+            result = RuleClaimResult.FAIL
+        return evaluation(
+            rule=rule,
+            status=_server_status(result),
+            events=events,
+            fact_refs=[fact.item_id],
+            count_lower_bound_events=lower_bound_events,
+            issues=[] if result is RuleClaimResult.PASS else [
+                "The selected event fields do not conclusively equal the fixed user fact."
+            ],
+        )
+
+    if kind == "FACT_IN":
+        fact_values = facts.get(parameters["fact_name"], [])
+        if len(fact_values) != 1:
+            return evaluation(
                 rule=rule,
                 status=ServerRuleStatus.UNVERIFIABLE,
                 events=events,
                 issues=["The required user fact is missing or ambiguous."],
             )
         fact = fact_values[0]
-        actual = events[parameters["event"]][0].fields[parameters["field"]]
-        passed = actual == fact.statement
-        return _evaluation(
+        passed = fact.statement in parameters["allowed_values"]
+        return evaluation(
             rule=rule,
-            status=(ServerRuleStatus.VERIFIED_PASS if passed else ServerRuleStatus.VERIFIED_FAIL),
+            status=ServerRuleStatus.VERIFIED_PASS if passed else ServerRuleStatus.VERIFIED_FAIL,
             events=events,
             fact_refs=[fact.item_id],
-            issues=([] if passed else ["The raw event field does not equal the fixed user fact."]),
+            issues=[] if passed else ["The fixed user fact is outside the declared values."],
         )
 
     if kind == "ROLE_COVERAGE":
         passed = all(
-            events[item["event"]][0].anchor == item["role"]
+            events[item["event"]]
+            and all(event.anchor == item["role"] for event in events[item["event"]])
             for item in parameters["coverage"]
         )
-        return _evaluation(
+        result = RuleClaimResult.PASS if passed else (
+            RuleClaimResult.UNKNOWN if lower_bound_events else RuleClaimResult.FAIL
+        )
+        return evaluation(
             rule=rule,
-            status=(ServerRuleStatus.VERIFIED_PASS if passed else ServerRuleStatus.VERIFIED_FAIL),
+            status=_server_status(result),
             events=events,
-            issues=([] if passed else ["The cited events do not cover the required roles."]),
+            count_lower_bound_events=lower_bound_events,
+            issues=[] if result is RuleClaimResult.PASS else ["The required role event coverage is incomplete."],
         )
 
-    if kind == "CROSS_ROLE_CORRELATION":
-        values = [events[item["event"]][0].fields[item["field"]] for item in parameters["members"]]
-        passed = len(set(values)) == 1
-        return _evaluation(
+    if kind in {"FIELDS_EQUAL", "CROSS_ROLE_CORRELATION"}:
+        equalities = (
+            parameters["equalities"]
+            if kind == "FIELDS_EQUAL"
+            else [{"members": parameters["members"]}]
+        )
+        combinations = _event_combinations(event_ids, events)
+        passed = any(_equalities_match(item, equalities) for item in combinations)
+        result = RuleClaimResult.PASS if passed else (
+            RuleClaimResult.UNKNOWN if lower_bound_events else RuleClaimResult.FAIL
+        )
+        return evaluation(
             rule=rule,
-            status=(ServerRuleStatus.VERIFIED_PASS if passed else ServerRuleStatus.VERIFIED_FAIL),
+            status=_server_status(result),
             events=events,
-            issues=([] if passed else ["The cited cross-role fields do not correlate."]),
+            count_lower_bound_events=lower_bound_events,
+            issues=[] if result is RuleClaimResult.PASS else [
+                "No single occurrence tuple satisfies all declared field equalities."
+            ],
         )
 
     if kind == "EVENT_ORDER":
-        before = _parse_millisecond_utc(
-            events[parameters["before_event"]][0].event_time
-        )
-        after = _parse_millisecond_utc(
-            events[parameters["after_event"]][0].event_time
-        )
-        passed = before <= after if parameters["allow_equal"] else before < after
-        return _evaluation(
+        combinations = [
+            item
+            for item in _event_combinations(event_ids, events)
+            if _equalities_match(item, parameters["joins"])
+        ]
+        tolerance = Fraction(parameters["clock_tolerance_ms"] * 1000)
+        values: list[RuleClaimResult] = []
+        first_delta: Fraction | None = None
+        for item in combinations:
+            before = item[parameters["before_event"]]
+            after = item[parameters["after_event"]]
+            if before.event_time is None or after.event_time is None:
+                values.append(RuleClaimResult.UNKNOWN)
+                continue
+            try:
+                before_us = _event_time_value(before)
+                after_us = _event_time_value(after)
+            except ValueError:
+                values.append(RuleClaimResult.UNKNOWN)
+                continue
+            delta = after_us - before_us
+            first_delta = delta if first_delta is None else first_delta
+            values.append(
+                _comparison_result(
+                    delta,
+                    operator="GTE" if parameters["allow_equal"] else "GT",
+                    uncertainty=tolerance,
+                )
+            )
+        result = _aggregate_results(values, quantifier="EXISTS")
+        if not values and not lower_bound_events:
+            result = RuleClaimResult.FAIL
+        derived = [] if first_delta is None else [
+            DerivedValueAudit(
+                name="event_delta",
+                value=_audit_scalar(first_delta),
+                unit="MICROSECOND",
+                lower_bound=_audit_scalar(first_delta - tolerance),
+                upper_bound=_audit_scalar(first_delta + tolerance),
+            )
+        ]
+        return evaluation(
             rule=rule,
-            status=(ServerRuleStatus.VERIFIED_PASS if passed else ServerRuleStatus.VERIFIED_FAIL),
+            status=_server_status(result),
             events=events,
-            issues=([] if passed else ["The cited events violate the required order."]),
+            count_lower_bound_events=lower_bound_events,
+            derived_values=derived,
+            issues=[] if result is RuleClaimResult.PASS else [
+                "Event order fails or overlaps the explicit cross-clock tolerance."
+            ],
+        )
+
+    if kind == "NUMERIC_COMPARE":
+        combinations = [
+            item
+            for item in _event_combinations(event_ids, events)
+            if _equalities_match(item, parameters["joins"])
+        ]
+        results: list[RuleClaimResult] = []
+        fact_refs: list[str] = []
+        first_value: tuple[_NumericValue, Fraction] | None = None
+        evaluation_error: str | None = None
+        for item in combinations:
+            try:
+                left = _expression_value(parameters["left"], occurrence=item, facts=facts, fact_refs=fact_refs)
+                right = _expression_value(parameters["right"], occurrence=item, facts=facts, fact_refs=fact_refs)
+                if left.dimension != right.dimension:
+                    raise ValueError("numeric comparison uses incompatible dimensions")
+                tolerance_ms = parameters["clock_tolerance_ms"]
+                if left.dimension != "TIME" and tolerance_ms:
+                    raise ValueError("clock tolerance applies only to time values")
+                uncertainty = Fraction(tolerance_ms * 1000)
+                delta = left.value - right.value
+                first_value = first_value or (left, delta)
+                results.append(
+                    _comparison_result(
+                        delta,
+                        operator=parameters["operator"],
+                        uncertainty=uncertainty,
+                    )
+                )
+            except (KeyError, TypeError, ValueError) as exc:
+                evaluation_error = str(exc)
+                results.append(RuleClaimResult.UNKNOWN)
+        result = _aggregate_results(results, quantifier=parameters["quantifier"])
+        if not results and not lower_bound_events:
+            result = RuleClaimResult.FAIL
+        derived: list[DerivedValueAudit] = []
+        if first_value is not None:
+            left, delta = first_value
+            uncertainty = (
+                Fraction(parameters["clock_tolerance_ms"] * 1000)
+                if left.dimension == "TIME"
+                else Fraction(0)
+            )
+            derived.append(
+                DerivedValueAudit(
+                    name="comparison_delta",
+                    value=_audit_scalar(delta),
+                    unit="MICROSECOND" if left.dimension == "TIME" else left.dimension,
+                    lower_bound=_audit_scalar(delta - uncertainty),
+                    upper_bound=_audit_scalar(delta + uncertainty),
+                )
+            )
+        return evaluation(
+            rule=rule,
+            status=_server_status(result),
+            events=events,
+            fact_refs=fact_refs,
+            count_lower_bound_events=lower_bound_events,
+            derived_values=derived,
+            issues=[] if result is RuleClaimResult.PASS else [
+                evaluation_error
+                or "The numeric comparison fails or overlaps its explicit uncertainty interval."
+            ],
         )
 
     if kind == "SEMANTIC_CAUSALITY":
         missing = [
             event_id
             for event_id in event_ids
-            if len(events[event_id]) != 1
-            or not anchor_has_lines.get(extractor_by_id[event_id]["anchor"], False)
+            if not events[event_id]
         ]
-        return _evaluation(
+        prerequisites_ready = all(
+            item.status in {
+                ServerRuleStatus.VERIFIED_PASS,
+                ServerRuleStatus.SEMANTIC_ONLY,
+            }
+            and not item.issues
+            for item in dependencies
+        )
+        return evaluation(
             rule=rule,
             status=ServerRuleStatus.SEMANTIC_ONLY,
             events=events,
-            issues=(
-                []
-                if not missing
-                and all(
-                    item.status is ServerRuleStatus.VERIFIED_PASS
-                    for item in dependencies
-                )
-                else [
-                    "Semantic review lacks verified mechanical prerequisites."
-                ]
-            ),
+            count_lower_bound_events=lower_bound_events,
+            issues=[] if not missing and prerequisites_ready else [
+                "Semantic review lacks verified positive evidence or mechanical prerequisites."
+            ],
         )
     raise ValueError("unsupported verification rule kind")
 
@@ -999,6 +1675,7 @@ def _diagnosis_audit_review_gates(
     *,
     job: Job,
     rules: list[dict[str, Any]],
+    terminal_paths: list[dict[str, Any]],
     review_subject: ReviewSubjectV2,
 ) -> tuple[bool, bool]:
     """Return inherited-audit integrity and positive-resolution gates.
@@ -1031,23 +1708,66 @@ def _diagnosis_audit_review_gates(
         <= set(integrity.evidence_refs)
     ):
         return False, False
+    alignments: list[RuleClaimResult | None] = []
+    evaluations: dict[str, ServerRuleEvaluation] = {}
     positive = True
     for rule, item in zip(rules, audit.rules, strict=True):
         evaluation = item.server_evaluation
-        expected_status = (
-            ServerRuleStatus.SEMANTIC_ONLY
-            if rule["kind"] == "SEMANTIC_CAUSALITY"
-            else ServerRuleStatus.VERIFIED_PASS
-        )
+        evaluations[rule["id"]] = evaluation
         if (
             evaluation.rule_kind != rule["kind"]
-            or evaluation.status is not expected_status
-            or evaluation.issues
             or item.agent_claim is None
-            or item.agent_claim.claimed_result is not RuleClaimResult.PASS
         ):
+            alignments.append(None)
             positive = False
+            continue
+        result = _claim_alignment_from_audit(item)
+        alignments.append(result)
+        if result is None:
+            positive = False
+    try:
+        selected = _select_terminal_path(
+            terminal_paths,
+            rules=rules,
+            evaluations=evaluations,
+            alignments=alignments,
+        )
+    except (KeyError, ValueError):
+        selected = None
+    candidate = review_subject.candidate
+    if (
+        selected is None
+        or selected["id"] != audit.selected_terminal_path_id
+        or selected["resolution_status"] != audit.terminal_resolution_status
+        or selected["resolution_status"] == "NONE"
+        or candidate.terminal_path_id != selected["id"]
+        or candidate.resolution_status.value != selected["resolution_status"]
+    ):
+        positive = False
     return True, positive
+
+
+def _claim_alignment_from_audit(
+    item: DecisionRuleAudit,
+) -> RuleClaimResult | None:
+    claim = item.agent_claim
+    evaluation = item.server_evaluation
+    if claim is None:
+        return None
+    if evaluation.status is ServerRuleStatus.VERIFIED_PASS:
+        expected = RuleClaimResult.PASS
+    elif evaluation.status is ServerRuleStatus.VERIFIED_FAIL:
+        expected = RuleClaimResult.FAIL
+    elif evaluation.status in {
+        ServerRuleStatus.UNVERIFIABLE,
+        ServerRuleStatus.NOT_APPLICABLE,
+    }:
+        expected = RuleClaimResult.UNKNOWN
+    elif evaluation.status is ServerRuleStatus.SEMANTIC_ONLY:
+        expected = RuleClaimResult.UNKNOWN if evaluation.issues else claim.claimed_result
+    else:  # pragma: no cover
+        return None
+    return claim.claimed_result if claim.claimed_result is expected else None
 
 
 def _claim_alignment(
@@ -1079,6 +1799,8 @@ def _claim_alignment(
         expected = RuleClaimResult.FAIL
     elif evaluation.status is ServerRuleStatus.UNVERIFIABLE:
         expected = RuleClaimResult.UNKNOWN
+    elif evaluation.status is ServerRuleStatus.NOT_APPLICABLE:
+        expected = RuleClaimResult.UNKNOWN
     elif evaluation.status is ServerRuleStatus.SEMANTIC_ONLY:
         if evaluation.issues:
             expected = RuleClaimResult.UNKNOWN
@@ -1109,6 +1831,15 @@ def _candidate_bindings(payload: DiagnosisOutcome) -> list[EvidenceBinding]:
                 for mapping in candidate.completion_criteria_mapping
                 for binding in mapping.evidence_bindings
             ),
+            *(
+                binding
+                for factor in (
+                    candidate.causal_factors
+                    + candidate.candidate_factors
+                    + candidate.excluded_factors
+                )
+                for binding in factor.evidence_bindings
+            ),
         ]
     )
 
@@ -1117,21 +1848,85 @@ def _diagnosis_decision_gate(
     *,
     draft: AgentJobOutcomeDraftV2,
     alignments: list[RuleClaimResult | None],
+    selected_path: Mapping[str, Any],
+    rules: list[dict[str, Any]],
+    evaluations: Mapping[str, ServerRuleEvaluation],
     required_bindings: list[EvidenceBinding],
 ) -> bool:
     if (
         draft.result_type is not OutcomeResultType.COMPLETED
         or not isinstance(draft.payload, DiagnosisOutcome)
+        or draft.payload.candidate_conclusion_draft is None
     ):
         return False
     candidate_keys = [
         _binding_key(item) for item in _candidate_bindings(draft.payload)
     ]
     required_keys = [_binding_key(item) for item in required_bindings]
+    candidate = draft.payload.candidate_conclusion_draft
+    assert candidate is not None
+    rule_ids = {item["id"] for item in rules}
+    alignment_by_rule = {
+        rule["id"]: alignment
+        for rule, alignment in zip(rules, alignments, strict=True)
+    }
+    factors = (
+        candidate.causal_factors
+        + candidate.candidate_factors
+        + candidate.excluded_factors
+    )
+    factor_bindings_valid = True
+    for factor in factors:
+        if not set(factor.required_rule_ids) <= rule_ids:
+            factor_bindings_valid = False
+            break
+        rule_evidence = {
+            _binding_key(binding)
+            for rule_id in factor.required_rule_ids
+            for binding in evaluations[rule_id].evidence_bindings
+        }
+        if rule_evidence and not rule_evidence <= {
+            _binding_key(binding) for binding in factor.evidence_bindings
+        }:
+            factor_bindings_valid = False
+            break
+    confirmed_rules_valid = all(
+        all(
+            alignment_by_rule[rule_id] is RuleClaimResult.PASS
+            for rule_id in factor.required_rule_ids
+        )
+        for factor in candidate.causal_factors
+    )
+    excluded_rules_valid = all(
+        any(
+            alignment_by_rule[rule_id] is RuleClaimResult.FAIL
+            for rule_id in factor.required_rule_ids
+        )
+        for factor in candidate.excluded_factors
+    )
+    candidate_rules_valid = all(
+        all(
+            alignment_by_rule[rule_id] is not RuleClaimResult.FAIL
+            for rule_id in factor.required_rule_ids
+        )
+        and any(
+            alignment_by_rule[rule_id] is RuleClaimResult.UNKNOWN
+            for rule_id in factor.required_rule_ids
+        )
+        for factor in candidate.candidate_factors
+    )
     return (
         bool(required_keys)
         and set(candidate_keys) == set(required_keys)
-        and all(item is RuleClaimResult.PASS for item in alignments)
+        and all(item is not None for item in alignments)
+        and selected_path["resolution_status"] in {"COMPLETE", "PARTIAL"}
+        and candidate.terminal_path_id == selected_path["id"]
+        and candidate.resolution_status.value
+        == selected_path["resolution_status"]
+        and factor_bindings_valid
+        and confirmed_rules_valid
+        and excluded_rules_valid
+        and candidate_rules_valid
     )
 
 
@@ -1139,6 +1934,8 @@ def _review_decision_gate(
     *,
     draft: AgentJobOutcomeDraftV2,
     alignments: list[RuleClaimResult | None],
+    selected_path: Mapping[str, Any],
+    candidate,
     inherited_integrity: bool,
     inherited_positive: bool,
 ) -> bool:
@@ -1150,8 +1947,12 @@ def _review_decision_gate(
         return False
     verdict = draft.payload.verdict
     if verdict is ReviewVerdict.PASS:
-        return inherited_positive and all(
-            item is RuleClaimResult.PASS for item in alignments
+        return (
+            inherited_positive
+            and selected_path["resolution_status"] in {"COMPLETE", "PARTIAL"}
+            and candidate.terminal_path_id == selected_path["id"]
+            and candidate.resolution_status.value
+            == selected_path["resolution_status"]
         )
     if verdict is ReviewVerdict.REJECT:
         return inherited_integrity and any(
@@ -1239,6 +2040,38 @@ def _diagnosis_subject_hash(
     )
 
 
+def _select_terminal_path(
+    terminal_paths: list[dict[str, Any]],
+    *,
+    rules: list[dict[str, Any]],
+    evaluations: Mapping[str, ServerRuleEvaluation],
+    alignments: list[RuleClaimResult | None],
+) -> dict[str, Any]:
+    results: dict[str, str] = {}
+    for rule, alignment in zip(rules, alignments, strict=True):
+        evaluation = evaluations[rule["id"]]
+        if evaluation.rule_kind == "SEMANTIC_CAUSALITY":
+            result = alignment or RuleClaimResult.UNKNOWN
+        elif evaluation.status is ServerRuleStatus.VERIFIED_PASS:
+            result = RuleClaimResult.PASS
+        elif evaluation.status is ServerRuleStatus.VERIFIED_FAIL:
+            result = RuleClaimResult.FAIL
+        else:
+            result = RuleClaimResult.UNKNOWN
+        results[rule["id"]] = result.value
+    selected = next(
+        (
+            path
+            for path in terminal_paths
+            if terminal_path_matches(path, results)
+        ),
+        None,
+    )
+    if selected is None:
+        raise ValueError("verification contract has no matching terminal path")
+    return selected
+
+
 def verify_agent_draft(
     *,
     workspace_root: Path,
@@ -1264,6 +2097,7 @@ def verify_agent_draft(
     )
     extractors = list(contract["event_extractors"])
     rules = list(contract["rules"])
+    terminal_paths = list(contract["terminal_paths"])
     required_rule_ids = [item["id"] for item in rules]
     claims = {item.rule_id: item for item in draft.rule_claims}
     unknown_claims = [item for item in claims if item not in set(required_rule_ids)]
@@ -1303,13 +2137,14 @@ def verify_agent_draft(
             allowed_logparse_sources if enforce_logparse_source_lock else None
         ),
     )
-    events, anchor_has_lines = _extract_events(
+    fact_values = _facts(job)
+    events, event_scan_complete = _extract_events(
         extractors,
         lines,
         incomplete_anchors,
+        fact_values,
     )
     extractor_by_id = {item["id"]: item for item in extractors}
-    fact_values = _facts(job)
     evaluated: dict[str, ServerRuleEvaluation] = {}
     audit_rules: list[DecisionRuleAudit] = []
     alignments: list[RuleClaimResult | None] = []
@@ -1317,7 +2152,7 @@ def verify_agent_draft(
         evaluation = _evaluate_rule(
             rule,
             events=events,
-            anchor_has_lines=anchor_has_lines,
+            event_scan_complete=event_scan_complete,
             extractor_by_id=extractor_by_id,
             facts=fact_values,
             prior=evaluated,
@@ -1326,12 +2161,13 @@ def verify_agent_draft(
         claim = claims.get(rule["id"])
         required_line_keys = {
             (
-                match.line.binding_key,
-                match.line.relative_path,
-                match.line.line_number,
+                line.binding_key,
+                line.relative_path,
+                line.line_number,
             )
             for event_id in _rule_events(rule)
             for match in events[event_id]
+            for line in match.lines
         }
         alignments.append(
             _claim_alignment(
@@ -1350,6 +2186,12 @@ def verify_agent_draft(
             )
         )
 
+    selected_path = _select_terminal_path(
+        terminal_paths,
+        rules=rules,
+        evaluations=evaluated,
+        alignments=alignments,
+    )
     review_subject = manifest.review_subject
     if job.job_type is JobType.REVIEW:
         if review_subject is None or diagnosis_audit is None:
@@ -1366,6 +2208,7 @@ def verify_agent_draft(
                 diagnosis_audit,
                 job=job,
                 rules=rules,
+                terminal_paths=terminal_paths,
                 review_subject=review_subject,
             )
         )
@@ -1379,6 +2222,8 @@ def verify_agent_draft(
         decision_gate_passed = _review_decision_gate(
             draft=draft,
             alignments=alignments,
+            selected_path=selected_path,
+            candidate=review_subject.candidate,
             inherited_integrity=inherited_integrity,
             inherited_positive=inherited_positive,
         )
@@ -1397,6 +2242,9 @@ def verify_agent_draft(
         decision_gate_passed = _diagnosis_decision_gate(
             draft=draft,
             alignments=alignments,
+            selected_path=selected_path,
+            rules=rules,
+            evaluations=evaluated,
             required_bindings=required_bindings,
         )
 
@@ -1410,6 +2258,8 @@ def verify_agent_draft(
         subject_hash=subject_hash,
         candidate_target=candidate_target,
         diagnosis_audit_hash=diagnosis_hash,
+        selected_terminal_path_id=selected_path["id"],
+        terminal_resolution_status=selected_path["resolution_status"],
         required_rule_ids=required_rule_ids,
         required_evidence_bindings=required_bindings,
         rules=audit_rules,
@@ -1419,11 +2269,12 @@ def verify_agent_draft(
         positive_gate_passed=decision_gate_passed,
         decision_evidence_bytes=_decision_evidence(
             [
-                match.line
+                line
                 for event_id in _unique_strings(
                     event_id for rule in rules for event_id in _rule_events(rule)
                 )
                 for match in events[event_id]
+                for line in match.lines
             ],
             maximum_bytes=min(
                 job.resource_limits.context_bytes,

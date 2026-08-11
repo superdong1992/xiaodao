@@ -14,6 +14,10 @@ import {
   claudeSettingsIdentity,
   validateClaudeDistribution,
 } from "./release-inputs.mjs";
+import {
+  discoverReleaseCaseRoot,
+  releaseCasePartition,
+} from "./release-case.mjs";
 
 const IGNORED_NAMES = new Set([".git", ".tmp", ".pytest_cache", "__pycache__", "node_modules", ".venv"]);
 
@@ -278,6 +282,23 @@ export function computeIdentitySets({
     if (definition.kind === "paths") {
       const tree = hashConfiguredPaths(repoRoot, definition.paths);
       value = { kind: definition.kind, status: tree.records.some((record) => record.kind === "missing" || record.kind === "unsupported") ? "MISSING" : "PRESENT", digest: tree.digest, records: tree.records };
+    } else if (definition.kind === "release-case") {
+      const configured = normalizeRepoPath(repoRoot, definition.root);
+      if (!fs.existsSync(configured.absolute)) {
+        value = { kind: definition.kind, partition: definition.partition, status: "MISSING", root: configured.relative, case_id: null, digest: null, records: [] };
+      } else {
+        const caseRoot = discoverReleaseCaseRoot(configured.absolute);
+        const selected = releaseCasePartition(caseRoot, definition.partition);
+        value = {
+          kind: definition.kind,
+          partition: definition.partition,
+          status: "PRESENT",
+          root: path.relative(repoRoot, caseRoot).split(path.sep).join("/"),
+          case_id: selected.case_id,
+          digest: selected.digest,
+          records: selected.records,
+        };
+      }
     } else if (definition.kind === "external-tree") {
       const tree = externalTrees[definition.name]
         ? hashTree(externalTrees[definition.name])

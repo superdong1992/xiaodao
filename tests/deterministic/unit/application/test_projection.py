@@ -389,8 +389,8 @@ def test_user_result_is_downloadable_only_for_the_accepted_candidate_job() -> No
         sha256="a" * 64,
         storage_key=f"resources/cases/{CASE_ID}/artifacts/{_uuid(70)}/payload",
         metadata={
-            "schema_version": 2,
-            "format_id": "problem-locator-diagnosis-v2",
+            "schema_version": 3,
+            "format_id": "problem-locator-diagnosis-v3",
             "description": "Accepted result.",
         },
         created_by_job_id=candidate.proposed_by_job_id,

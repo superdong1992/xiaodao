@@ -13,6 +13,7 @@ from problem_locator.contracts import (
     UnresolvedReasonCode,
     validate_transition_plan_for_outcome,
 )
+from problem_locator.contracts.serialization import canonical_json_sha256
 from problem_locator.domain import DomainCoordinator
 
 from ._builders import (
@@ -47,6 +48,78 @@ def test_review_pass_is_the_only_resolution_gate() -> None:
     assert plan.target_case_status.value == "RESOLVED"
     assert plan.candidate_mutation is not None
     assert plan.candidate_mutation.action is CandidateMutationAction.SET_STATUS
+    assert plan.candidate_mutation.target_status is CandidateStatus.ACCEPTED
+    assert plan.final_result_target == source.review_target
+    assert plan.next_job_spec is None
+    assert validate_transition_plan_for_outcome(plan, outcome) is plan
+
+
+def test_review_pass_preserves_a_formal_partial_resolution_terminal_state() -> None:
+    source = review_job()
+    candidate = source.context_snapshot.candidate_conclusion
+    assert candidate is not None
+    candidate_value = candidate.model_dump(mode="python")
+    candidate_value["resolution_status"] = "PARTIAL"
+    candidate_value["terminal_path_id"] = "partial"
+    candidate_value["completion_criteria_mapping"][0]["status"] = (
+        "PARTIALLY_SATISFIED"
+    )
+    preimage = {
+        "resolution_status": candidate_value["resolution_status"],
+        "terminal_path_id": candidate_value["terminal_path_id"],
+        "statement": candidate_value["statement"],
+        "causal_factors": candidate_value["causal_factors"],
+        "candidate_factors": candidate_value["candidate_factors"],
+        "excluded_factors": candidate_value["excluded_factors"],
+        "supporting_evidence_refs": candidate_value["supporting_evidence_refs"],
+        "completion_criteria_mapping": candidate_value[
+            "completion_criteria_mapping"
+        ],
+    }
+    candidate_value["content_hash"] = canonical_json_sha256(preimage)
+    partial = type(candidate).model_validate(candidate_value)
+    source = rebuild(
+        source,
+        context_snapshot=rebuild(
+            source.context_snapshot,
+            candidate_conclusion=partial,
+        ),
+        review_target={
+            "candidate_conclusion_id": partial.conclusion_id,
+            "candidate_revision": partial.revision,
+            "candidate_content_hash": partial.content_hash,
+        },
+    )
+
+    base = review_outcome()
+    payload = rebuild(
+        base.payload,
+        candidate_content_hash=partial.content_hash,
+    )
+    audit = rebuild(
+        base.decision_audit,
+        candidate_target=source.review_target,
+        selected_terminal_path_id="partial",
+        terminal_resolution_status="PARTIAL",
+    )
+    outcome = rebuild(base, payload=payload, decision_audit=audit)
+    snapshot = snapshot_with_active(source)
+    request = trigger(
+        snapshot,
+        trigger_type=TriggerType.REVIEW_OUTCOME,
+        payload=ReviewOutcomeTriggerPayload(job_outcome=outcome),
+        continuation_resources=continuation(
+            incoming_outcome_id=outcome.outcome_id,
+            job=source,
+        ),
+        occurred_at=outcome.produced_at,
+    )
+
+    plan = DomainCoordinator().plan(snapshot, request)
+
+    assert not isinstance(plan, ApplicationError)
+    assert plan.target_case_status.value == "PARTIALLY_RESOLVED"
+    assert plan.candidate_mutation is not None
     assert plan.candidate_mutation.target_status is CandidateStatus.ACCEPTED
     assert plan.final_result_target == source.review_target
     assert plan.next_job_spec is None

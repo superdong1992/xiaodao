@@ -1,22 +1,22 @@
-# Diagnosis Wiki 模板
+# Diagnosis Wiki / GenerationSpec v5 模板
 
-普通 Wiki 章节可自由组织；机器生成只读取且要求恰好一个
-`## GenerationSpec v4` JSON fence。下列是无日志人工排查的最小完整示例。
+Wiki 作者可以自由写普通 Markdown，并用 `(# ... #)` 或 `（# ... #）` 给转换 Agent 写不进入
+产物的旁注。下面 JSON 是转换 Agent 的中间产物最小示例，不是要求 Wiki 作者填写的正文格式。
 
-## GenerationSpec v4
+## GenerationSpec v5
 
 ```json
 {
-  "schema_version": 4,
-  "generator_version": "4.0.0",
+  "schema_version": 5,
+  "generator_version": "5.0.0",
   "id": "diagnose-manual-triage",
-  "version": "4.0.0",
+  "version": "5.0.0",
   "capability": "manual-triage",
   "deployment_scope": "PRODUCTION",
-  "summary": "根据用户提供的现象和复现步骤执行人工定位",
+  "summary": "根据用户证据执行人工定位",
   "chinese_title": "人工故障定位",
   "module_name": null,
-  "problem_scope": "不依赖日志解析，根据结构化事实和既有 Evidence 缩小故障范围。",
+  "problem_scope": "不依赖 Logparse，依据固定事实和 Evidence 缩小范围。",
   "roles": [],
   "requirements": [
     {
@@ -37,31 +37,47 @@
   ],
   "logparse_plan": null,
   "verification_contract": {
-    "schema_version": 1,
+    "schema_version": 2,
+    "observation_policies": [],
     "event_extractors": [],
     "rules": [
       {
         "id": "manual_causal_assessment",
         "kind": "SEMANTIC_CAUSALITY",
-        "description": "Specialist 和 Reviewer 必须独立判断证据是否支持根因。",
+        "description": "Specialist 与 Reviewer 独立判断固定 Evidence 是否支持结论。",
         "depends_on": [],
         "remediation_requirements": [],
         "parameters": {
-          "assertion": "现有事实和 Evidence 足以支持候选根因。",
+          "assertion": "固定 Evidence 足以支持候选结论。",
           "evidence_events": []
         }
+      }
+    ],
+    "terminal_paths": [
+      {
+        "id": "complete",
+        "resolution_status": "COMPLETE",
+        "condition": {
+          "any_of": [
+            {"all_of": [{"rule_id": "manual_causal_assessment", "result": "PASS"}]}
+          ]
+        }
+      },
+      {
+        "id": "none",
+        "resolution_status": "NONE",
+        "condition": {"any_of": [{"all_of": []}]}
       }
     ]
   },
   "time_characteristics": [],
-  "analysis_steps": ["复核现象与范围。"],
-  "judgement_rules": ["证据不足时明确保留缺口。"],
-  "output_requirements": ["给出可由 Evidence 支持的候选结论。"],
+  "analysis_steps": ["复核现象与固定 Evidence。"],
+  "judgement_rules": ["证据不足时选择 NONE，不虚构结论。"],
+  "output_requirements": ["给出 Evidence 支持的结构化结论。"],
   "assumptions": [],
   "requires_logparse": false
 }
 ```
 
-Logparse Skill 可额外提供 `logparse_product`；仅非默认产品填写该字段。其归档 requirement
-只填写 `min_count` 和 `max_count`，归档 Content-Type 由生成器固定注入，不向用户询问。
-完整字段和约束见 [generated-skill-contract.md](generated-skill-contract.md)。
+Logparse Skill 可额外提供非默认 `logparse_product`。完整字段约束见
+[generated-skill-contract.md](generated-skill-contract.md)。

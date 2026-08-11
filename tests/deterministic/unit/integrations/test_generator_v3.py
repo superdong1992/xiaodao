@@ -33,6 +33,7 @@ RPC_ARCHIVE_B64 = (
     REPOSITORY_ROOT
     / "tests/fixtures/components/logparse/real/synthetic-rpc-service-takeover.zip.b64"
 )
+RELEASE_CASE_ROOT = REPOSITORY_ROOT / "tests/cases/release"
 
 
 def _load(path: Path, name: str) -> Any:
@@ -46,12 +47,12 @@ def _load(path: Path, name: str) -> Any:
 
 @pytest.fixture(scope="module")
 def generator() -> Any:
-    return _load(GENERATOR_PATH, "_problem_locator_generate_v4")
+    return _load(GENERATOR_PATH, "_problem_locator_generate_v5")
 
 
 @pytest.fixture(scope="module")
 def validator() -> Any:
-    return _load(VALIDATOR_PATH, "_problem_locator_validate_v4")
+    return _load(VALIDATOR_PATH, "_problem_locator_validate_v5")
 
 
 def _manifest(skill_dir: Path) -> dict[str, Any]:
@@ -111,8 +112,8 @@ def test_three_heterogeneous_specs_generate_deterministically(
     assert validator.validate_skill_directory(first.skill_dir).ok
 
     manifest = _manifest(first.skill_dir)
-    assert manifest["schema_version"] == 4
-    assert manifest["version"] == "4.0.0"
+    assert manifest["schema_version"] == 5
+    assert manifest["version"] == "5.0.0"
     assert manifest["deployment_scope"] == "TEST_ONLY"
     assert [item["name"] for item in manifest["requirements"]] == expected_names
     assert all("required" not in item for item in manifest["requirements"])
@@ -120,7 +121,7 @@ def test_three_heterogeneous_specs_generate_deterministically(
         item["supplement_policy"] in {"NONE", "MISSING_ONLY"}
         for item in manifest["requirements"]
     )
-    assert manifest["verification_contract"]["schema_version"] == 1
+    assert manifest["verification_contract"]["schema_version"] == 2
     if expected_product is None:
         assert "logparse_product" not in manifest
     else:
@@ -181,6 +182,42 @@ def test_wiki_fence_is_the_same_rpc_machine_source(generator: Any) -> None:
     )
 
 
+def test_both_author_note_forms_are_conversion_only(generator: Any) -> None:
+    wiki = "# title\n正文 A（#全角旁注#）\n正文 B(#ASCII note#)\n"
+    stripped = generator.strip_author_notes(wiki)
+    assert "正文 A" in stripped and "正文 B" in stripped
+    assert "全角旁注" not in stripped and "ASCII note" not in stripped
+    assert "(#" not in stripped and "（#" not in stripped
+
+    with pytest.raises(ValueError, match="unterminated author note"):
+        generator.strip_author_notes("正文(#未闭合")
+
+
+@pytest.mark.parametrize(
+    "case_root",
+    sorted(path.parent for path in RELEASE_CASE_ROOT.glob("*/case.json")),
+    ids=lambda path: path.name,
+)
+def test_release_case_approved_skill_is_the_deterministic_spec_product(
+    generator: Any,
+    validator: Any,
+    case_root: Path,
+) -> None:
+    descriptor = json.loads((case_root / "case.json").read_text(encoding="utf-8"))
+    spec = generator.load_generation_spec(case_root / descriptor["generation_spec"])
+    approved = case_root / descriptor["approved_skill_dir"]
+    rendered = generator.render_product(spec)
+    assert {
+        name: (approved / name).read_bytes()
+        for name in sorted(rendered)
+    } == rendered
+    assert validator.validate_skill_directory(approved).ok
+    stripped = generator.strip_author_notes(
+        (case_root / descriptor["input_wiki"]).read_text(encoding="utf-8")
+    )
+    assert "(#" not in stripped and "（#" not in stripped
+
+
 def test_rpc_verification_extractors_match_real_synthetic_lines_and_window(
     generator: Any,
 ) -> None:
@@ -203,18 +240,21 @@ def test_rpc_verification_extractors_match_real_synthetic_lines_and_window(
 
     observed: dict[str, datetime] = {}
     for extractor in contract["event_extractors"]:
+        assert len(extractor["members"]) == 1
+        member = extractor["members"][0]
+        assert member["match_mode"] == "FULL_LINE"
         matches = [
-            re.fullmatch(extractor["line_pattern"], line)
+            re.fullmatch(member["line_pattern"], line)
             for line in logs[extractor["anchor"]].splitlines()
         ]
         matches = [match for match in matches if match is not None]
         assert len(matches) == 1
         assert set(matches[0].groupdict()) == {
-            extractor["timestamp_group"],
-            *extractor["field_groups"],
+            item["name"] for item in extractor["fields"]
         }
+        assert extractor["timestamp_field"] is not None
         observed[extractor["id"]] = datetime.strptime(
-            matches[0].group(extractor["timestamp_group"]),
+            matches[0].group(extractor["timestamp_field"]),
             "%Y-%m-%dT%H:%M:%S.%fZ",
         ).replace(tzinfo=timezone.utc)
 
@@ -240,7 +280,7 @@ def test_rpc_verification_extractors_match_real_synthetic_lines_and_window(
         )
 
 
-def test_verification_contract_rejects_defaults_suppression_and_bad_remediation(
+def test_verification_contract_rejects_defaults_legacy_suppression_and_bad_remediation(
     generator: Any,
 ) -> None:
     value = json.loads((SPEC_ROOT / "rpc-service-takeover.json").read_text("utf-8"))

@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "expected_skill": {
+    "id": "diagnose-anonymized-rpc-timeout",
+    "version": "5.0.0",
+    "capability": "anonymized-rpc-timeout",
+    "deployment_scope": "TEST_ONLY",
+    "requirement_names": [
+      "service_name",
+      "api_name",
+      "target_version",
+      "transport_protocol",
+      "problem_time",
+      "client_process",
+      "server_process",
+      "log_archive",
+      "request_id"
+    ],
+    "observation_policy_kinds": ["SUPPRESSION", "RATE_LIMIT"],
+    "terminal_paths": [
+      "complete_queue_and_upstream",
+      "partial_cross_clock_ambiguity",
+      "none"
+    ],
+    "requires_multiline_event": true,
+    "requires_numeric_compare": true,
+    "requires_cross_clock_tolerance_ms": 100
+  },
+  "author_note_markers_forbidden_in_product": ["(#", "（#", "#)", "#）"],
+  "business_canaries": [
+    "CCCC_ERRNO_REQUEST_TIMEOUT_FAIL",
+    "cccc_dbgex",
+    "svc_alpha",
+    "partial_cross_clock_ambiguity"
+  ],
+  "oracle_visibility": "GATE_ONLY"
+}

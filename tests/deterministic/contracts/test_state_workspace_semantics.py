@@ -42,7 +42,12 @@ def _review_job_payload() -> dict:
 def _rehash_candidate(candidate: dict) -> None:
     candidate["content_hash"] = canonical_json_sha256(
         {
+            "resolution_status": candidate["resolution_status"],
+            "terminal_path_id": candidate["terminal_path_id"],
             "statement": candidate["statement"],
+            "causal_factors": candidate["causal_factors"],
+            "candidate_factors": candidate["candidate_factors"],
+            "excluded_factors": candidate["excluded_factors"],
             "supporting_evidence_refs": candidate["supporting_evidence_refs"],
             "completion_criteria_mapping": candidate["completion_criteria_mapping"],
         }

@@ -7,6 +7,11 @@ from pathlib import Path
 import re
 import sys
 
+from problem_locator.runtime.verification_contract import (
+    MANIFEST_SCHEMA_VERSION,
+    validate_verification_contract,
+)
+
 
 PRODUCT_FILES = {"SKILL.md", "diagnosis-skill.json"}
 MANIFEST_REQUIRED = {
@@ -47,15 +52,15 @@ def _canonical_json_bytes(value: object) -> bytes:
 
 def _embedded_manifest(markdown: str) -> object:
     matches = re.findall(
-        r"(?ms)<!-- DIAGNOSIS_SKILL_MANIFEST_V4_BEGIN -->\s*```json\s*(.*?)\s*```\s*<!-- DIAGNOSIS_SKILL_MANIFEST_V4_END -->",
+        r"(?ms)<!-- DIAGNOSIS_SKILL_MANIFEST_V5_BEGIN -->\s*```json\s*(.*?)\s*```\s*<!-- DIAGNOSIS_SKILL_MANIFEST_V5_END -->",
         markdown,
     )
     if len(matches) != 1:
-        raise ValueError("SKILL.md must embed exactly one manifest v4 block")
+        raise ValueError("SKILL.md must embed exactly one manifest v5 block")
     return json.loads(matches[0])
 
 
-def _validate_verification_contract(
+def _validate_verification_contract_v1(
     value: object,
     requirements: list[object],
     logparse_plan: object,
@@ -256,6 +261,32 @@ def _validate_verification_contract(
     return errors
 
 
+def _validate_verification_contract(
+    value: object,
+    requirements: list[object],
+    logparse_plan: object,
+    requires_logparse: object,
+) -> list[str]:
+    anchors = {
+        item.get("label")
+        for item in logparse_plan.get("anchors", [])
+        if isinstance(item, dict) and isinstance(item.get("label"), str)
+    } if isinstance(logparse_plan, dict) else set()
+    try:
+        normalized = validate_verification_contract(
+            value,
+            requirements=tuple(
+                item for item in requirements if isinstance(item, dict)
+            ),
+            anchor_labels=anchors,
+            role_labels=anchors,
+            requires_logparse=requires_logparse is True,
+        )
+    except (TypeError, ValueError) as exc:
+        return [str(exc)]
+    return [] if normalized == value else ["verification_contract is not canonical"]
+
+
 def validate_skill_directory(skill_dir: str | Path) -> ValidationResult:
     root = Path(skill_dir)
     errors: list[str] = []
@@ -279,8 +310,8 @@ def validate_skill_directory(skill_dir: str | Path) -> ValidationResult:
     actual_fields = set(manifest)
     if not MANIFEST_REQUIRED <= actual_fields or actual_fields - MANIFEST_REQUIRED - MANIFEST_OPTIONAL:
         errors.append("diagnosis-skill.json field set is invalid")
-    if manifest.get("schema_version") != 4:
-        errors.append("manifest schema_version must be 4")
+    if manifest.get("schema_version") != MANIFEST_SCHEMA_VERSION:
+        errors.append("manifest schema_version must be 5")
     if manifest.get("deployment_scope") not in {"PRODUCTION", "TEST_ONLY"}:
         errors.append("deployment_scope must be PRODUCTION or TEST_ONLY")
     if manifest.get("entry_document") != "SKILL.md":
@@ -289,8 +320,8 @@ def validate_skill_directory(skill_dir: str | Path) -> ValidationResult:
         errors.append("tool_bundle_id must be tool-bundle/diagnose")
     version = manifest.get("version")
     match = re.fullmatch(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", version or "")
-    if match is None or int(match.group(1)) < 4:
-        errors.append("manifest version must be 4.0.0 or later")
+    if match is None or int(match.group(1)) < 5:
+        errors.append("manifest version must be 5.0.0 or later")
     requirements = manifest.get("requirements")
     if not isinstance(requirements, list):
         errors.append("requirements must be an array")
@@ -342,6 +373,8 @@ def validate_skill_directory(skill_dir: str | Path) -> ValidationResult:
             errors.append("SKILL.md embedded manifest must equal diagnosis-skill.json")
     except (ValueError, json.JSONDecodeError) as exc:
         errors.append(str(exc))
+    if any(marker in markdown or marker in raw_manifest.decode("utf-8") for marker in ("(#", "（#", "#)", "#）")):
+        errors.append("author notes must not enter generated products")
     for required_phrase in (
         "Agent 禁止提出或写入",
         "USER_RESULT",
@@ -374,7 +407,7 @@ def validate_skill_directory(skill_dir: str | Path) -> ValidationResult:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Validate a generated Diagnosis Skill v4.")
+    parser = argparse.ArgumentParser(description="Validate a generated Diagnosis Skill v5.")
     parser.add_argument("skill_dir", type=Path)
     args = parser.parse_args(argv)
     results = [("skill", validate_skill_directory(args.skill_dir))]

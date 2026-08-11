@@ -181,7 +181,7 @@ test("active runtime support is explicit and the historical harness closure is g
   const expected = [
     "audit_service_agent_usage.py", "checkpoint-temporary.mjs", "export-checkpoint.sh",
     "initialize-container.sh", "isolated-agent-wrapper.mjs", "prepare_claude_settings.py",
-    "prepare_nonroot_settings.py", "prepare_real_zip.py", "relay_service_journey.py",
+    "prepare_nonroot_settings.py", "prepare_release_case.py", "relay_service_journey.py",
     "server_dfx_probe.py", "service-supervisor.sh", "stop-service.sh", "test_service_launcher.py",
     "verify-source-snapshot.mjs",
   ];
@@ -237,8 +237,10 @@ test("model invocations require exact model, hard caps, terminal success and com
   assert.match(core, /terminal: audit\.terminal/);
   assert.match(core, /usage_complete: true/);
   assert.match(core, /total_tokens: "terminal-usage-postcondition"/);
-  assert.match(core, /canonicalJson\(jobTypes\) === canonicalJson\(\["DIAGNOSE", "DIAGNOSE", "ROUTE"\]\)/);
-  assert.match(core, /canonicalJson\(jobTypes\) === canonicalJson\(\["DIAGNOSE", "DIAGNOSE", "REVIEW"\]\)/);
+  assert.match(core, /jobTypes\.filter\(\(item\) => item === "ROUTE"\)\.length === 1/);
+  assert.match(core, /jobTypes\.includes\("DIAGNOSE"\) && jobTypes\.every\(\(item\) => \["DIAGNOSE", "ROUTE"\]\.includes\(item\)\)/);
+  assert.match(core, /jobTypes\.includes\("DIAGNOSE"\) && jobTypes\.includes\("REVIEW"\)/);
+  assert.match(core, /jobTypes\.every\(\(item\) => \["DIAGNOSE", "REVIEW"\]\.includes\(item\)\)/);
   assert.match(isolated, /WRAPPER_MODEL_CAP_EXCEEDED/);
   assert.match(isolated, /final\.subtype !== "success" \|\| final\.is_error !== false/);
   assert.match(serviceAudit, /MODEL_TERMINAL_INVALID/);

@@ -91,7 +91,7 @@ def _write_skill(
     root: Path,
     *,
     skill_id: str = "test-skill",
-    version: str = "4.0.0",
+    version: str = "5.0.0",
     deployment_scope: str = "PRODUCTION",
     requires_logparse: bool = False,
     logparse_product: str | None = None,
@@ -99,7 +99,7 @@ def _write_skill(
 ) -> dict[str, Any]:
     root.mkdir(parents=True)
     manifest: dict[str, Any] = {
-        "schema_version": 4,
+        "schema_version": 5,
         "id": skill_id,
         "version": version,
         "capability": "test-capability",
@@ -111,7 +111,8 @@ def _write_skill(
         "requirements": [],
         "logparse_plan": None,
         "verification_contract": {
-            "schema_version": 1,
+            "schema_version": 2,
+            "observation_policies": [],
             "event_extractors": [],
             "rules": [
                 {
@@ -125,6 +126,29 @@ def _write_skill(
                         "evidence_events": [],
                     },
                 }
+            ],
+            "terminal_paths": [
+                {
+                    "id": "complete",
+                    "resolution_status": "COMPLETE",
+                    "condition": {
+                        "any_of": [
+                            {
+                                "all_of": [
+                                    {
+                                        "rule_id": "manual_causality",
+                                        "result": "PASS",
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                },
+                {
+                    "id": "none",
+                    "resolution_status": "NONE",
+                    "condition": {"any_of": [{"all_of": []}]},
+                },
             ],
         },
     }
@@ -160,19 +184,42 @@ def _write_skill(
             ],
         }
         manifest["verification_contract"] = {
-            "schema_version": 1,
+            "schema_version": 2,
+            "observation_policies": [],
             "event_extractors": [
                 {
                     "id": "target_event",
                     "anchor": "target",
-                    "line_pattern": (
-                        r"^(?P<event_time>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:"
-                        r"\d{2}\.\d{3}Z) event=(?P<value>\S+)$"
-                    ),
-                    "timestamp_group": "event_time",
-                    "timestamp_format": "RFC3339_MILLIS_UTC",
-                    "field_groups": ["value"],
-                    "match_cardinality": "EXACTLY_ONE",
+                    "members": [
+                        {
+                            "line_pattern": (
+                                r"^(?P<event_time>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:"
+                                r"\d{2}\.\d{3}Z) event=(?P<value>\S+)$"
+                            ),
+                            "match_mode": "FULL_LINE",
+                        }
+                    ],
+                    "fields": [
+                        {
+                            "name": "event_time",
+                            "type": "TIMESTAMP",
+                            "unit": None,
+                            "clock_domain": "target_clock",
+                        },
+                        {
+                            "name": "value",
+                            "type": "STRING",
+                            "unit": None,
+                            "clock_domain": None,
+                        },
+                    ],
+                    "timestamp_field": "event_time",
+                    "group_by": [],
+                    "selectors": [],
+                    "max_gap_lines": 0,
+                    "min_matches": 1,
+                    "max_matches": 1,
+                    "observation_policy_ids": [],
                 }
             ],
             "rules": [
@@ -197,6 +244,8 @@ def _write_skill(
                         "after_ms": 1000,
                         "lower_bound": "INCLUSIVE",
                         "upper_bound": "INCLUSIVE",
+                        "quantifier": "ANY",
+                        "clock_tolerance_ms": 0,
                     },
                 },
                 {
@@ -209,6 +258,29 @@ def _write_skill(
                         "assertion": "The target event caused the incident.",
                         "evidence_events": ["target_event"],
                     },
+                },
+            ],
+            "terminal_paths": [
+                {
+                    "id": "complete",
+                    "resolution_status": "COMPLETE",
+                    "condition": {
+                        "any_of": [
+                            {
+                                "all_of": [
+                                    {
+                                        "rule_id": "target_causality",
+                                        "result": "PASS",
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                },
+                {
+                    "id": "none",
+                    "resolution_status": "NONE",
+                    "condition": {"any_of": [{"all_of": []}]},
                 },
             ],
         }
@@ -278,14 +350,14 @@ def test_builtin_assets_and_port_use_exact_versioned_refs() -> None:
 
     assert set(refs) == expected_builtin_ids
     upgraded_versions = {
-        "agent-profile/specialist": "1.0.1",
-        "agent-profile/reviewer": "1.0.1",
+        "agent-profile/specialist": "3.0.0",
+        "agent-profile/reviewer": "3.0.0",
         "tool-bundle/router": "2.0.0",
         "tool-bundle/diagnose": "3.0.0",
         "tool-bundle/review": "2.0.0",
         "output-contract/route": "2.0.0",
-        "output-contract/diagnose": "4.0.1",
-        "output-contract/review": "2.0.0",
+        "output-contract/diagnose": "5.0.0",
+        "output-contract/review": "3.0.0",
     }
     for ref in refs.values():
         assert ref.version == upgraded_versions.get(ref.id, "1.0.0")
@@ -900,7 +972,7 @@ def test_product_hash_rejects_non_utf8_paths() -> None:
         ({"requires_logparse": True, "logparse_plan": None}, "logparse_plan object"),
         ({"entry_document": "../escape.md"}, "relative POSIX path"),
         ({"entry_document": "nested//entry.md"}, "relative POSIX path"),
-        ({"schema_version": True}, "integer 4"),
+        ({"schema_version": True}, "integer 5"),
         ({"deployment_scope": "DEVELOPMENT"}, "deployment_scope"),
     ],
 )
@@ -941,6 +1013,60 @@ def test_skill_verification_contract_rejects_missing_bounds_and_suppression(
     )
     with pytest.raises(ValueError, match="fields are invalid"):
         _new_catalog(skill_dir=tmp_path / "other-skills")
+
+
+def test_skill_catalog_accepts_scoped_observation_policies_and_rejects_bad_refs(
+    tmp_path: Path,
+) -> None:
+    skills = tmp_path / "skills"
+    skill_dir = skills / "candidate"
+    manifest = _write_skill(skill_dir, requires_logparse=True)
+    manifest["verification_contract"]["observation_policies"] = [
+        {
+            "id": "source_suppression",
+            "kind": "SUPPRESSION",
+            "scope": "process_instance",
+            "key_fields": ["value"],
+            "window_ms": 1000,
+            "max_observed": None,
+            "boundary": "CLOSED_OPEN",
+        },
+        {
+            "id": "source_rate_limit",
+            "kind": "RATE_LIMIT",
+            "scope": "process_instance",
+            "key_fields": [],
+            "window_ms": 2000,
+            "max_observed": 1,
+            "boundary": "CLOSED_OPEN",
+        },
+    ]
+    manifest["verification_contract"]["event_extractors"][0][
+        "observation_policy_ids"
+    ] = ["source_suppression", "source_rate_limit"]
+    (skill_dir / "diagnosis-skill.json").write_bytes(
+        canonical_json_bytes(manifest)
+    )
+
+    catalog = _new_catalog(
+        skill_dir=skills,
+        logparse_tool=_logparse_asset(),
+        logparse_broker_factory=_BrokerFactory(),
+    )
+    assert catalog.route_bindings().available_skill_refs
+
+    manifest["verification_contract"]["event_extractors"][0][
+        "observation_policy_ids"
+    ] = ["unknown_policy"]
+    (skill_dir / "diagnosis-skill.json").write_bytes(
+        canonical_json_bytes(manifest)
+    )
+    with pytest.raises(ValueError, match="observation policy"):
+        _new_catalog(
+            skill_dir=skills,
+            logparse_tool=_logparse_asset(),
+            logparse_broker_factory=_BrokerFactory(),
+        )
 
 
 def test_skill_rule_remediation_only_names_missing_only_requirements(

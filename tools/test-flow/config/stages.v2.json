@@ -101,6 +101,17 @@
       "platforms": ["windows", "macos", "linux"]
     },
     {
+      "id": "real.skill-generation",
+      "kind": "isolated-real",
+      "depends_on": ["deterministic.full"],
+      "gates": ["real.agent.skill-generation"],
+      "identity_set": "real-skill-generation",
+      "timeout_seconds": 1200,
+      "progress_class": "real",
+      "reuse": {"dev": "identity", "release": "never"},
+      "platforms": ["windows", "macos", "linux"]
+    },
+    {
       "id": "real.route",
       "kind": "isolated-real",
       "depends_on": ["real.agent-backend"],

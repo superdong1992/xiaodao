@@ -183,16 +183,16 @@ def test_agent_draft_forbids_server_generated_result_artifacts(
             "declared_sha256": hashlib.sha256(b"{}" ).hexdigest(),
             "metadata": (
                 {
-                    "schema_version": 2,
-                    "format_id": "problem-locator-result-archive-v2",
+                    "schema_version": 3,
+                    "format_id": "problem-locator-result-archive-v3",
                     "description": "forged",
                     "user_result_proposal_key": "forged-json",
                     "target_log_count": 0,
                 }
                 if is_archive
                 else {
-                    "schema_version": 2,
-                    "format_id": "problem-locator-diagnosis-v2",
+                    "schema_version": 3,
+                    "format_id": "problem-locator-diagnosis-v3",
                     "description": "forged",
                 }
             ),

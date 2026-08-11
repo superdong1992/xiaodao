@@ -661,7 +661,7 @@ def test_partial_result_publish_is_api_atomic_and_retry_adopts_first_file(
     }
     artifact = accepted[ArtifactKind.USER_RESULT]
     user_result_bytes = result_bytes[ArtifactKind.USER_RESULT]
-    assert artifact.size == len(user_result_bytes) == 1604
+    assert artifact.size == len(user_result_bytes) == 2299
     assert artifact.sha256 == hashlib.sha256(user_result_bytes).hexdigest()
     assert artifact.storage_key == result_targets["user_result"]
     assert accepted[ArtifactKind.USER_RESULT_ARCHIVE].storage_key == result_targets[

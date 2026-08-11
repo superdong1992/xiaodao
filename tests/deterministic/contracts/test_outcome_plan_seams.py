@@ -155,6 +155,19 @@ def test_review_assessment_echoes_target_and_only_reviews_fixed_evidence() -> No
         validate_outcome_for_job(job, drifted)
 
 
+def _candidate_semantic_preimage(candidate: dict) -> dict:
+    return {
+        "resolution_status": candidate["resolution_status"],
+        "terminal_path_id": candidate["terminal_path_id"],
+        "statement": candidate["statement"],
+        "causal_factors": candidate["causal_factors"],
+        "candidate_factors": candidate["candidate_factors"],
+        "excluded_factors": candidate["excluded_factors"],
+        "supporting_evidence_refs": candidate["supporting_evidence_refs"],
+        "completion_criteria_mapping": candidate["completion_criteria_mapping"],
+    }
+
+
 def _review_job_with_completion_mapping_only_evidence() -> Job:
     job = _model("job-review.json", Job)
     payload = job.model_dump(mode="json")
@@ -165,11 +178,7 @@ def _review_job_with_completion_mapping_only_evidence() -> Job:
         completion_only_ref
     ]
     candidate["content_hash"] = canonical_json_sha256(
-        {
-            "statement": candidate["statement"],
-            "supporting_evidence_refs": candidate["supporting_evidence_refs"],
-            "completion_criteria_mapping": candidate["completion_criteria_mapping"],
-        }
+        _candidate_semantic_preimage(candidate)
     )
     payload["context_snapshot"]["evidence_refs"].append(completion_only_ref)
     payload["evidence_refs"].append(completion_only_ref)
@@ -189,11 +198,7 @@ def _review_job_with_reordered_candidate(*, include_extra: bool = False) -> Job:
         second_ref,
     ]
     candidate["content_hash"] = canonical_json_sha256(
-        {
-            "statement": candidate["statement"],
-            "supporting_evidence_refs": candidate["supporting_evidence_refs"],
-            "completion_criteria_mapping": candidate["completion_criteria_mapping"],
-        }
+        _candidate_semantic_preimage(candidate)
     )
     payload["context_snapshot"]["evidence_refs"] = [first_ref, second_ref]
     payload["evidence_refs"] = [first_ref, second_ref]

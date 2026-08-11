@@ -9,7 +9,7 @@ import pytest
 
 from problem_locator.contracts import (
     EvidenceBinding,
-    UserResultPayloadV2,
+    UserResultPayloadV3,
     parse_canonical_json_bytes,
 )
 from problem_locator.integrations.result_archive import (
@@ -106,7 +106,7 @@ def _report(
     *,
     raw_digest: str | None = None,
     excerpt: str | None = None,
-) -> UserResultPayloadV2:
+) -> UserResultPayloadV3:
     binding = _binding().model_dump(mode="json")
     if first_log is None:
         citation = {
@@ -140,10 +140,10 @@ def _report(
                 "offset_ms": 0,
             }
         ]
-    return UserResultPayloadV2.model_validate(
+    return UserResultPayloadV3.model_validate(
         {
-            "schema_version": 2,
-            "format_id": "problem-locator-diagnosis-v2",
+            "schema_version": 3,
+            "format_id": "problem-locator-diagnosis-v3",
             "status": "COMPLETED",
             "source_job_type": "DIAGNOSE",
             "problem_statement": "支付调用库存服务超时。",
@@ -156,12 +156,24 @@ def _report(
                     "citations": [citation],
                 }
             ],
+            "causal_factors": [
+                {
+                    "factor_id": "confirmed_factor",
+                    "role": "CAUSE",
+                    "statement": "库存服务接管期间请求超过截止时间。",
+                    "evidence_bindings": [binding],
+                    "required_rule_ids": ["timeout_present"],
+                    "citations": [citation],
+                }
+            ],
+            "candidate_factors": [],
+            "excluded_factors": [],
             "supporting_evidence_bindings": [binding],
             "completion_criteria_mapping": [
                 {
                     "criterion_index": 0,
                     "criterion": "确认超时请求。",
-                    "satisfied": True,
+                    "status": "SATISFIED",
                     "evidence_bindings": [binding],
                     "explanation": "目标日志包含超时原文。",
                 }
@@ -175,6 +187,8 @@ def _report(
                     "evidence_bindings": [binding],
                     "citations": [citation],
                     "observed_times": [PROBLEM_TIME] if problem_time else [],
+                    "event_observations": [],
+                    "derived_values": [],
                     "issues": [],
                 }
             ],
@@ -189,11 +203,12 @@ def _report(
             "evidence_gaps": ["未取得下游线程栈。"],
             "limitations": ["结论仅覆盖已声明完成条件。"],
             "recommendations": ["检查接管窗口并增加超时保护。"],
+            "safety_notes": ["超时结果不代表后续执行已经取消。"],
         }
     )
 
 
-def test_result_archive_v2_is_deterministic_and_uses_plan_order() -> None:
+def test_result_archive_v3_is_deterministic_and_uses_plan_order() -> None:
     logs = _logs()
     report = _report(logs[0])
 
@@ -224,8 +239,8 @@ def test_result_archive_v2_is_deterministic_and_uses_plan_order() -> None:
         ]
         manifest_bytes = archive.read("archive-manifest.json")
         manifest = parse_canonical_json_bytes(manifest_bytes)
-        assert manifest["schema_version"] == 2
-        assert manifest["format_id"] == "problem-locator-result-archive-v2"
+        assert manifest["schema_version"] == 3
+        assert manifest["format_id"] == "problem-locator-result-archive-v3"
         assert manifest["target_log_count"] == 2
         assert [item["ordinal"] for item in manifest["target_logs"]] == [1, 2]
         assert manifest["target_logs"][0]["evidence_bindings"] == [
@@ -238,6 +253,37 @@ def test_result_archive_v2_is_deterministic_and_uses_plan_order() -> None:
         assert "result_txt_sha256" in manifest
         assert "user_result_sha256" not in manifest
         assert "result_txt" not in manifest
+
+
+def test_partial_result_is_preserved_in_json_text_and_archive() -> None:
+    logs = _logs()
+    value = _report(logs[0]).model_dump(mode="python")
+    value["status"] = "PARTIAL"
+    value["root_cause"] = None
+    value["completion_criteria_mapping"][0]["status"] = (
+        "PARTIALLY_SATISFIED"
+    )
+    report = UserResultPayloadV3.model_validate(value)
+
+    data = build_result_archive(
+        report,
+        problem_time=PROBLEM_TIME,
+        target_logs=logs,
+    )
+    text = validate_result_archive_bytes(
+        data,
+        report=report,
+        problem_time=PROBLEM_TIME,
+        target_logs=logs,
+    )
+
+    assert "结果完整度：PARTIAL" in text
+    assert "已形成部分定位" in text
+    with zipfile.ZipFile(io.BytesIO(data)) as archive:
+        assert archive.namelist()[0:2] == [
+            "result.txt",
+            "archive-manifest.json",
+        ]
 
 
 def test_archive_manifest_annotations_exclude_unused_evidence() -> None:
@@ -428,10 +474,14 @@ def test_inconclusive_result_never_builds_result_zip() -> None:
         status="INCONCLUSIVE",
         root_cause=None,
         findings=[],
+        causal_factors=[],
+        candidate_factors=[],
+        excluded_factors=[],
+        supporting_evidence_bindings=[],
         evidence_gaps=["根因证据不足。"],
     )
-    report = UserResultPayloadV2.model_validate(value)
-    with pytest.raises(ValueError, match="only a COMPLETED"):
+    report = UserResultPayloadV3.model_validate(value)
+    with pytest.raises(ValueError, match="only a completed or partial"):
         build_result_archive(
             report,
             problem_time=PROBLEM_TIME,

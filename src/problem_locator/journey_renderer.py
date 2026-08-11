@@ -44,7 +44,7 @@ _KNOWN_EVENTS = frozenset(
     }
 )
 _TERMINAL_STATUSES = frozenset(
-    {"RESOLVED", "UNRESOLVED", "FAILED", "CANCELLED"}
+    {"RESOLVED", "PARTIALLY_RESOLVED", "UNRESOLVED", "FAILED", "CANCELLED"}
 )
 _EVENT_TITLES = {
     "case.created": "创建 Case",
@@ -453,7 +453,7 @@ def render_brief(case_id: str, lines: tuple[JourneyLine, ...]) -> str:
     result.extend(
         [
             "",
-            f"{'最终结论' if terminal and status == 'RESOLVED' else '当前发现'}: "
+            f"{'最终结论' if terminal and status in {'RESOLVED', 'PARTIALLY_RESOLVED'} else '当前发现'}: "
             f"{conclusion or '尚未形成可记录的结论'}",
             f"待补充/阻塞: {_pending_text(lines)}",
             f"失败信息: {_latest_failure(lines)}",

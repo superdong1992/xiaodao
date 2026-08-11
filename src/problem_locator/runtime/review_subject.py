@@ -26,10 +26,10 @@ def _verification_contract(assets: ResolvedJobAssets) -> dict[str, Any]:
         raise ValueError("REVIEW requires a pinned diagnosis Skill")
     path = Path(assets.skill.root_path) / "diagnosis-skill.json"
     value = json.loads(path.read_bytes().decode("utf-8"))
-    if not isinstance(value, dict) or value.get("schema_version") != 4:
-        raise ValueError("REVIEW requires a diagnosis Skill manifest v4")
+    if not isinstance(value, dict) or value.get("schema_version") != 5:
+        raise ValueError("REVIEW requires a diagnosis Skill manifest v5")
     contract = value.get("verification_contract")
-    if not isinstance(contract, dict) or contract.get("schema_version") != 1:
+    if not isinstance(contract, dict) or contract.get("schema_version") != 2:
         raise ValueError("REVIEW Skill has no verification contract")
     return contract
 
@@ -65,10 +65,26 @@ def _formal_evidence_by_binding(diagnosis, candidate) -> dict[str, str]:
     draft_groups = [
         draft.supporting_evidence_bindings,
         *(item.evidence_bindings for item in draft.completion_criteria_mapping),
+        *(
+            item.evidence_bindings
+            for item in (
+                draft.causal_factors
+                + draft.candidate_factors
+                + draft.excluded_factors
+            )
+        ),
     ]
     formal_groups = [
         candidate.supporting_evidence_refs,
         *(item.evidence_refs for item in candidate.completion_criteria_mapping),
+        *(
+            item.evidence_refs
+            for item in (
+                candidate.causal_factors
+                + candidate.candidate_factors
+                + candidate.excluded_factors
+            )
+        ),
     ]
     if len(draft_groups) != len(formal_groups):
         raise ValueError("Candidate Evidence groups changed before REVIEW")
@@ -96,6 +112,15 @@ def _required_candidate_evidence(candidate, job: Job) -> list[str]:
             evidence_ref
             for mapping in candidate.completion_criteria_mapping
             for evidence_ref in mapping.evidence_refs
+        ),
+        *(
+            evidence_ref
+            for factor in (
+                candidate.causal_factors
+                + candidate.candidate_factors
+                + candidate.excluded_factors
+            )
+            for evidence_ref in factor.evidence_refs
         ),
     }
     ordered = [evidence_ref for evidence_ref in job.evidence_refs if evidence_ref in required]

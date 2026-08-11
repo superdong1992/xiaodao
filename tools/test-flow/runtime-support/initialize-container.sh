@@ -66,21 +66,20 @@ test -z "$(find "$installed_assets" -xdev -type l -print -quit)"
 test -z "$(find "$installed_assets" -xdev -type f -links +1 -print -quit)"
 
 test ! -e /opt/e2e-skills
-/opt/venvs/xiaodao/bin/python -I \
-  /opt/src/xiaodao/.claude/skills/wiki-to-diagnosis-skill/scripts/generate_diagnosis_skill.py \
-  --wiki /opt/src/xiaodao/tests/fixtures/components/logparse/wiki/service-takeover.md \
-  --output-root /opt/e2e-skills >/dev/null
-/opt/venvs/xiaodao/bin/python -I \
-  /opt/src/xiaodao/.claude/skills/wiki-to-diagnosis-skill/scripts/validate_generated_skill.py \
-  /opt/e2e-skills/diagnose-service-takeover >/dev/null
+release_case_receipt="/evidence/stages/${receipt#/evidence/stages/}"
+release_case_receipt="${release_case_receipt%/container-init.json}/release-case.json"
+/opt/venvs/xiaodao/bin/python -I /test-flow-runtime/prepare_release_case.py \
+  --release-root /opt/src/xiaodao/tests/cases/release \
+  --generator /opt/src/xiaodao/.claude/skills/wiki-to-diagnosis-skill/scripts/generate_diagnosis_skill.py \
+  --validator /opt/src/xiaodao/.claude/skills/wiki-to-diagnosis-skill/scripts/validate_generated_skill.py \
+  --generated-skills /opt/e2e-skills \
+  --evidence-root /evidence \
+  --receipt "$release_case_receipt" >/dev/null
 
 if [ "$mode" = fresh ]; then
   test -z "$(find /var/lib/problem-locator -mindepth 1 -print -quit)"
-  test ! -e /evidence/synthetic-rpc-service-takeover.zip
-  /opt/venvs/xiaodao/bin/python -I /test-flow-runtime/prepare_real_zip.py >/dev/null
 else
   test -n "$(find /var/lib/problem-locator -mindepth 1 -print -quit)"
-  test -f /evidence/synthetic-rpc-service-takeover.zip
 fi
 
 /opt/venvs/xiaodao/bin/python -I /test-flow-runtime/prepare_claude_settings.py >/dev/null
@@ -109,12 +108,15 @@ for tree in /opt/src /opt/e2e-skills /opt/venvs /opt/uv-python; do
   test -z "$(runuser -u plagent -- find "$tree" -xdev -type d ! -executable -print -quit)"
   test -z "$(runuser -u plagent -- find "$tree" -xdev -writable -print -quit)"
 done
+find /opt/src/xiaodao/tests/cases/release -xdev -type f -exec chmod 0600 {} +
+find /opt/src/xiaodao/tests/cases/release -xdev -type d -exec chmod 0700 {} +
+runuser -u plagent -- test ! -r /opt/src/xiaodao/tests/cases/release
 runuser -u plagent -- test -w /var/lib/problem-locator
 runuser -u plagent -- test -r /run/plagent-claude/settings.json
 
 mkdir -p "$(dirname "$receipt")"
 test ! -e "$receipt"
 cat > "$receipt" <<EOF
-{"schema_version":1,"status":"PASS","mode":"$mode","xiaodao_snapshot_digest":"$expected_xiaodao_snapshot","logparse_commit":"$expected_logparse","mcp_commit":"$expected_mcp","claude_version":"2.1.89 (Claude Code)","service_uid":10001,"service_gid":10001,"settings_policy":"env-allowlist-only-no-hooks-v1","network_install":false,"uv_link_mode":"copy","installed_asset_hardlinks":0}
+{"schema_version":1,"status":"PASS","mode":"$mode","xiaodao_snapshot_digest":"$expected_xiaodao_snapshot","logparse_commit":"$expected_logparse","mcp_commit":"$expected_mcp","claude_version":"2.1.89 (Claude Code)","service_uid":10001,"service_gid":10001,"settings_policy":"env-allowlist-only-no-hooks-v1","network_install":false,"uv_link_mode":"copy","installed_asset_hardlinks":0,"case_source_redacted":true}
 EOF
 chmod 0600 "$receipt"

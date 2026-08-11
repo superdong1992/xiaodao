@@ -1,0 +1,1299 @@
+{
+  "schema_version": 5,
+  "generator_version": "5.0.0",
+  "id": "diagnose-anonymized-rpc-timeout",
+  "version": "5.0.0",
+  "capability": "anonymized-rpc-timeout",
+  "deployment_scope": "TEST_ONLY",
+  "summary": "从固定双端日志快照定位脱敏RPC超时的多个贡献因素",
+  "chinese_title": "脱敏RPC调用超时定位",
+  "module_name": "bbbb",
+  "problem_scope": "只分析用户提供的固定客户端与服务端日志快照；允许完整或部分结论，不从受抑制日志的缺失推导反证。",
+  "roles": [
+    {
+      "label": "client",
+      "description": "发起调用并接收响应的进程实例"
+    },
+    {
+      "label": "server",
+      "description": "在共享串行lane中接收并执行API的进程实例"
+    }
+  ],
+  "requirements": [
+    {
+      "name": "service_name",
+      "kind": "INPUT",
+      "stage": "INITIAL",
+      "fulfillment_source": "USER_FACT",
+      "prompt": "请提供超时调用的服务名。",
+      "constraints": {
+        "value_type": "STRING",
+        "min_utf8_bytes": 1,
+        "max_utf8_bytes": 256,
+        "pattern": null,
+        "allowed_values": []
+      },
+      "supplement_policy": "MISSING_ONLY"
+    },
+    {
+      "name": "api_name",
+      "kind": "INPUT",
+      "stage": "INITIAL",
+      "fulfillment_source": "USER_FACT",
+      "prompt": "请提供超时调用的API名。",
+      "constraints": {
+        "value_type": "STRING",
+        "min_utf8_bytes": 1,
+        "max_utf8_bytes": 256,
+        "pattern": null,
+        "allowed_values": []
+      },
+      "supplement_policy": "MISSING_ONLY"
+    },
+    {
+      "name": "target_version",
+      "kind": "INPUT",
+      "stage": "INITIAL",
+      "fulfillment_source": "USER_FACT",
+      "prompt": "请提供目标模块版本分类。",
+      "constraints": {
+        "value_type": "STRING",
+        "min_utf8_bytes": 1,
+        "max_utf8_bytes": 256,
+        "pattern": null,
+        "allowed_values": []
+      },
+      "supplement_policy": "MISSING_ONLY"
+    },
+    {
+      "name": "transport_protocol",
+      "kind": "INPUT",
+      "stage": "INITIAL",
+      "fulfillment_source": "USER_FACT",
+      "prompt": "请提供底层通信协议分类。",
+      "constraints": {
+        "value_type": "STRING",
+        "min_utf8_bytes": 1,
+        "max_utf8_bytes": 256,
+        "pattern": null,
+        "allowed_values": []
+      },
+      "supplement_policy": "MISSING_ONLY"
+    },
+    {
+      "name": "problem_time",
+      "kind": "INPUT",
+      "stage": "INITIAL",
+      "fulfillment_source": "USER_FACT",
+      "prompt": "请提供毫秒精度UTC问题时间。",
+      "constraints": {
+        "value_type": "STRING",
+        "min_utf8_bytes": 1,
+        "max_utf8_bytes": 24,
+        "pattern": null,
+        "allowed_values": []
+      },
+      "supplement_policy": "MISSING_ONLY"
+    },
+    {
+      "name": "client_process",
+      "kind": "INPUT",
+      "stage": "INITIAL",
+      "fulfillment_source": "USER_FACT",
+      "prompt": "请提供客户端进程名。",
+      "constraints": {
+        "value_type": "STRING",
+        "min_utf8_bytes": 1,
+        "max_utf8_bytes": 256,
+        "pattern": null,
+        "allowed_values": []
+      },
+      "supplement_policy": "MISSING_ONLY"
+    },
+    {
+      "name": "server_process",
+      "kind": "INPUT",
+      "stage": "INITIAL",
+      "fulfillment_source": "USER_FACT",
+      "prompt": "请提供服务端进程名。",
+      "constraints": {
+        "value_type": "STRING",
+        "min_utf8_bytes": 1,
+        "max_utf8_bytes": 256,
+        "pattern": null,
+        "allowed_values": []
+      },
+      "supplement_policy": "MISSING_ONLY"
+    },
+    {
+      "name": "log_archive",
+      "kind": "ATTACHMENT",
+      "stage": "INITIAL",
+      "fulfillment_source": "READY_ATTACHMENT",
+      "prompt": "请上传Logparse支持的固定日志归档。",
+      "constraints": {
+        "min_count": 1,
+        "max_count": 1
+      },
+      "supplement_policy": "MISSING_ONLY"
+    },
+    {
+      "name": "request_id",
+      "kind": "INPUT",
+      "stage": "AFTER_LOGPARSE",
+      "fulfillment_source": "USER_FACT",
+      "prompt": "请提供需要关联的进程内请求ID。",
+      "constraints": {
+        "value_type": "STRING",
+        "min_utf8_bytes": 1,
+        "max_utf8_bytes": 64,
+        "pattern": null,
+        "allowed_values": []
+      },
+      "supplement_policy": "MISSING_ONLY"
+    }
+  ],
+  "logparse_plan": {
+    "attachment_requirement": "log_archive",
+    "problem_time_binding": {
+      "source": "USER_FACT",
+      "name": "problem_time"
+    },
+    "anchors": [
+      {
+        "label": "client",
+        "module": {
+          "source": "SKILL_FIXED",
+          "value": "bbbb"
+        },
+        "slot": {
+          "source": "SKILL_FIXED",
+          "value": "client_slot"
+        },
+        "process_name": {
+          "source": "USER_FACT",
+          "name": "client_process"
+        },
+        "pid": null
+      },
+      {
+        "label": "server",
+        "module": {
+          "source": "SKILL_FIXED",
+          "value": "bbbb"
+        },
+        "slot": {
+          "source": "SKILL_FIXED",
+          "value": "server_slot"
+        },
+        "process_name": {
+          "source": "USER_FACT",
+          "name": "server_process"
+        },
+        "pid": null
+      }
+    ]
+  },
+  "verification_contract": {
+    "schema_version": 2,
+    "observation_policies": [
+      {
+        "id": "bbbb_default_suppression",
+        "kind": "SUPPRESSION",
+        "scope": "process_instance",
+        "key_fields": [],
+        "window_ms": 75000,
+        "max_observed": null,
+        "boundary": "CLOSED_OPEN"
+      },
+      {
+        "id": "queue_rate_limit",
+        "kind": "RATE_LIMIT",
+        "scope": "process_instance",
+        "key_fields": [],
+        "window_ms": 180000,
+        "max_observed": 1,
+        "boundary": "CLOSED_OPEN"
+      }
+    ],
+    "event_extractors": [
+      {
+        "id": "client_timeout_call",
+        "anchor": "client",
+        "members": [
+          {
+            "match_mode": "SEARCH",
+            "line_pattern": "rpc call (?P<service>[^:\\s]+):(?P<api>\\S+) timeout limit (?P<timeout_ms>\\d+) recv no response"
+          }
+        ],
+        "fields": [
+          {
+            "name": "service",
+            "type": "STRING",
+            "unit": null,
+            "clock_domain": null
+          },
+          {
+            "name": "api",
+            "type": "STRING",
+            "unit": null,
+            "clock_domain": null
+          },
+          {
+            "name": "timeout_ms",
+            "type": "INTEGER",
+            "unit": "MILLISECOND",
+            "clock_domain": null
+          }
+        ],
+        "timestamp_field": null,
+        "group_by": [
+          "service",
+          "api",
+          "timeout_ms"
+        ],
+        "selectors": [
+          {
+            "field": "service",
+            "operator": "EQUALS",
+            "value": {
+              "source": "USER_FACT",
+              "name": "service_name"
+            }
+          },
+          {
+            "field": "api",
+            "operator": "EQUALS",
+            "value": {
+              "source": "USER_FACT",
+              "name": "api_name"
+            }
+          }
+        ],
+        "max_gap_lines": 0,
+        "min_matches": 0,
+        "max_matches": null,
+        "observation_policy_ids": [
+          "bbbb_default_suppression"
+        ]
+      },
+      {
+        "id": "client_timeout_detail",
+        "anchor": "client",
+        "members": [
+          {
+            "match_mode": "SEARCH",
+            "line_pattern": "(?P<service>\\S+) rpc (?P<call_type>sync|async) call unsuccess, reqid\\((?P<request_id>\\d+)\\), timeout (?P<timeout_ms>\\d+)"
+          }
+        ],
+        "fields": [
+          {
+            "name": "service",
+            "type": "STRING",
+            "unit": null,
+            "clock_domain": null
+          },
+          {
+            "name": "call_type",
+            "type": "STRING",
+            "unit": null,
+            "clock_domain": null
+          },
+          {
+            "name": "request_id",
+            "type": "STRING",
+            "unit": null,
+            "clock_domain": null
+          },
+          {
+            "name": "timeout_ms",
+            "type": "INTEGER",
+            "unit": "MILLISECOND",
+            "clock_domain": null
+          }
+        ],
+        "timestamp_field": null,
+        "group_by": [
+          "request_id"
+        ],
+        "selectors": [
+          {
+            "field": "service",
+            "operator": "EQUALS",
+            "value": {
+              "source": "USER_FACT",
+              "name": "service_name"
+            }
+          },
+          {
+            "field": "request_id",
+            "operator": "EQUALS",
+            "value": {
+              "source": "USER_FACT",
+              "name": "request_id"
+            }
+          }
+        ],
+        "max_gap_lines": 0,
+        "min_matches": 0,
+        "max_matches": null,
+        "observation_policy_ids": [
+          "bbbb_default_suppression"
+        ]
+      },
+      {
+        "id": "queue_history",
+        "anchor": "server",
+        "members": [
+          {
+            "match_mode": "SEARCH",
+            "line_pattern": "\\[BBBB\\]The first service:(?P<first_service>[^,]+), api:(?P<first_api>[^,]+), end time:(?P<first_end_us>\\d+), cost time:(?P<first_cost_us>\\d+), queue time:(?P<first_queue_us>\\d+), timeout:(?P<first_timeout_ms>\\d+)"
+          },
+          {
+            "match_mode": "SEARCH",
+            "line_pattern": "\\[BBBB\\]The second service:(?P<second_service>[^,]+), api:(?P<second_api>[^,]+), end time:(?P<second_end_us>\\d+), cost time:(?P<second_cost_us>\\d+), queue time:(?P<second_queue_us>\\d+), timeout:(?P<second_timeout_ms>\\d+)"
+          },
+          {
+            "match_mode": "SEARCH",
+            "line_pattern": "\\[BBBB\\]The third service:(?P<third_service>[^,]+), api:(?P<third_api>[^,]+), end time:(?P<third_end_us>\\d+), cost time:(?P<third_cost_us>\\d+), queue time:(?P<third_queue_us>\\d+), timeout:(?P<third_timeout_ms>\\d+)"
+          },
+          {
+            "match_mode": "SEARCH",
+            "line_pattern": "\\[BBBB\\]The fourth service:(?P<fourth_service>[^,]+), api:(?P<fourth_api>[^,]+), end time:(?P<fourth_end_us>\\d+), cost time:(?P<fourth_cost_us>\\d+), queue time:(?P<fourth_queue_us>\\d+), timeout:(?P<fourth_timeout_ms>\\d+)"
+          },
+          {
+            "match_mode": "SEARCH",
+            "line_pattern": "\\[BBBB\\]The fifth service:(?P<fifth_service>[^,]+), api:(?P<fifth_api>[^,]+), end time:(?P<fifth_end_us>\\d+), cost time:(?P<fifth_cost_us>\\d+), queue time:(?P<fifth_queue_us>\\d+), timeout:(?P<fifth_timeout_ms>\\d+)"
+          }
+        ],
+        "fields": [
+          {
+            "name": "first_service",
+            "type": "STRING",
+            "unit": null,
+            "clock_domain": null
+          },
+          {
+            "name": "first_api",
+            "type": "STRING",
+            "unit": null,
+            "clock_domain": null
+          },
+          {
+            "name": "first_end_us",
+            "type": "INTEGER",
+            "unit": "MICROSECOND",
+            "clock_domain": "server_clock"
+          },
+          {
+            "name": "first_cost_us",
+            "type": "INTEGER",
+            "unit": "MICROSECOND",
+            "clock_domain": null
+          },
+          {
+            "name": "first_queue_us",
+            "type": "INTEGER",
+            "unit": "MICROSECOND",
+            "clock_domain": null
+          },
+          {
+            "name": "first_timeout_ms",
+            "type": "INTEGER",
+            "unit": "MILLISECOND",
+            "clock_domain": null
+          },
+          {
+            "name": "second_service",
+            "type": "STRING",
+            "unit": null,
+            "clock_domain": null
+          },
+          {
+            "name": "second_api",
+            "type": "STRING",
+            "unit": null,
+            "clock_domain": null
+          },
+          {
+            "name": "second_end_us",
+            "type": "INTEGER",
+            "unit": "MICROSECOND",
+            "clock_domain": "server_clock"
+          },
+          {
+            "name": "second_cost_us",
+            "type": "INTEGER",
+            "unit": "MICROSECOND",
+            "clock_domain": null
+          },
+          {
+            "name": "second_queue_us",
+            "type": "INTEGER",
+            "unit": "MICROSECOND",
+            "clock_domain": null
+          },
+          {
+            "name": "second_timeout_ms",
+            "type": "INTEGER",
+            "unit": "MILLISECOND",
+            "clock_domain": null
+          },
+          {
+            "name": "third_service",
+            "type": "STRING",
+            "unit": null,
+            "clock_domain": null
+          },
+          {
+            "name": "third_api",
+            "type": "STRING",
+            "unit": null,
+            "clock_domain": null
+          },
+          {
+            "name": "third_end_us",
+            "type": "INTEGER",
+            "unit": "MICROSECOND",
+            "clock_domain": "server_clock"
+          },
+          {
+            "name": "third_cost_us",
+            "type": "INTEGER",
+            "unit": "MICROSECOND",
+            "clock_domain": null
+          },
+          {
+            "name": "third_queue_us",
+            "type": "INTEGER",
+            "unit": "MICROSECOND",
+            "clock_domain": null
+          },
+          {
+            "name": "third_timeout_ms",
+            "type": "INTEGER",
+            "unit": "MILLISECOND",
+            "clock_domain": null
+          },
+          {
+            "name": "fourth_service",
+            "type": "STRING",
+            "unit": null,
+            "clock_domain": null
+          },
+          {
+            "name": "fourth_api",
+            "type": "STRING",
+            "unit": null,
+            "clock_domain": null
+          },
+          {
+            "name": "fourth_end_us",
+            "type": "INTEGER",
+            "unit": "MICROSECOND",
+            "clock_domain": "server_clock"
+          },
+          {
+            "name": "fourth_cost_us",
+            "type": "INTEGER",
+            "unit": "MICROSECOND",
+            "clock_domain": null
+          },
+          {
+            "name": "fourth_queue_us",
+            "type": "INTEGER",
+            "unit": "MICROSECOND",
+            "clock_domain": null
+          },
+          {
+            "name": "fourth_timeout_ms",
+            "type": "INTEGER",
+            "unit": "MILLISECOND",
+            "clock_domain": null
+          },
+          {
+            "name": "fifth_service",
+            "type": "STRING",
+            "unit": null,
+            "clock_domain": null
+          },
+          {
+            "name": "fifth_api",
+            "type": "STRING",
+            "unit": null,
+            "clock_domain": null
+          },
+          {
+            "name": "fifth_end_us",
+            "type": "INTEGER",
+            "unit": "MICROSECOND",
+            "clock_domain": "server_clock"
+          },
+          {
+            "name": "fifth_cost_us",
+            "type": "INTEGER",
+            "unit": "MICROSECOND",
+            "clock_domain": null
+          },
+          {
+            "name": "fifth_queue_us",
+            "type": "INTEGER",
+            "unit": "MICROSECOND",
+            "clock_domain": null
+          },
+          {
+            "name": "fifth_timeout_ms",
+            "type": "INTEGER",
+            "unit": "MILLISECOND",
+            "clock_domain": null
+          }
+        ],
+        "timestamp_field": "first_end_us",
+        "group_by": [
+          "first_service",
+          "first_api",
+          "first_end_us"
+        ],
+        "selectors": [
+          {
+            "field": "first_service",
+            "operator": "EQUALS",
+            "value": {
+              "source": "USER_FACT",
+              "name": "service_name"
+            }
+          },
+          {
+            "field": "first_api",
+            "operator": "EQUALS",
+            "value": {
+              "source": "USER_FACT",
+              "name": "api_name"
+            }
+          }
+        ],
+        "max_gap_lines": 1,
+        "min_matches": 0,
+        "max_matches": null,
+        "observation_policy_ids": [
+          "bbbb_default_suppression",
+          "queue_rate_limit"
+        ]
+      },
+      {
+        "id": "late_response",
+        "anchor": "client",
+        "members": [
+          {
+            "match_mode": "SEARCH",
+            "line_pattern": "late response service:(?P<service>[^,]+), api:(?P<api>[^,]+), reqid:(?P<request_id>\\d+), timeout:(?P<timeout_ms>\\d+), client_send:(?P<client_send_us>\\d+), server_recv:(?P<server_recv_us>\\d+), server_send:(?P<server_send_us>\\d+), client_now:(?P<client_now_us>\\d+)"
+          }
+        ],
+        "fields": [
+          {
+            "name": "service",
+            "type": "STRING",
+            "unit": null,
+            "clock_domain": null
+          },
+          {
+            "name": "api",
+            "type": "STRING",
+            "unit": null,
+            "clock_domain": null
+          },
+          {
+            "name": "request_id",
+            "type": "STRING",
+            "unit": null,
+            "clock_domain": null
+          },
+          {
+            "name": "timeout_ms",
+            "type": "INTEGER",
+            "unit": "MILLISECOND",
+            "clock_domain": null
+          },
+          {
+            "name": "client_send_us",
+            "type": "INTEGER",
+            "unit": "MICROSECOND",
+            "clock_domain": "client_clock"
+          },
+          {
+            "name": "server_recv_us",
+            "type": "INTEGER",
+            "unit": "MICROSECOND",
+            "clock_domain": "server_clock"
+          },
+          {
+            "name": "server_send_us",
+            "type": "INTEGER",
+            "unit": "MICROSECOND",
+            "clock_domain": "server_clock"
+          },
+          {
+            "name": "client_now_us",
+            "type": "INTEGER",
+            "unit": "MICROSECOND",
+            "clock_domain": "client_clock"
+          }
+        ],
+        "timestamp_field": "client_now_us",
+        "group_by": [
+          "request_id"
+        ],
+        "selectors": [
+          {
+            "field": "service",
+            "operator": "EQUALS",
+            "value": {
+              "source": "USER_FACT",
+              "name": "service_name"
+            }
+          },
+          {
+            "field": "api",
+            "operator": "EQUALS",
+            "value": {
+              "source": "USER_FACT",
+              "name": "api_name"
+            }
+          },
+          {
+            "field": "request_id",
+            "operator": "EQUALS",
+            "value": {
+              "source": "USER_FACT",
+              "name": "request_id"
+            }
+          }
+        ],
+        "max_gap_lines": 0,
+        "min_matches": 0,
+        "max_matches": null,
+        "observation_policy_ids": [
+          "bbbb_default_suppression"
+        ]
+      },
+      {
+        "id": "api_complete",
+        "anchor": "server",
+        "members": [
+          {
+            "match_mode": "SEARCH",
+            "line_pattern": "api complete service:(?P<service>[^,]+), api:(?P<api>[^,]+), start:(?P<start_us>\\d+), end:(?P<end_us>\\d+), cost:(?P<cost_us>\\d+), timeout:(?P<timeout_ms>\\d+)"
+          }
+        ],
+        "fields": [
+          {
+            "name": "service",
+            "type": "STRING",
+            "unit": null,
+            "clock_domain": null
+          },
+          {
+            "name": "api",
+            "type": "STRING",
+            "unit": null,
+            "clock_domain": null
+          },
+          {
+            "name": "start_us",
+            "type": "INTEGER",
+            "unit": "MICROSECOND",
+            "clock_domain": "server_clock"
+          },
+          {
+            "name": "end_us",
+            "type": "INTEGER",
+            "unit": "MICROSECOND",
+            "clock_domain": "server_clock"
+          },
+          {
+            "name": "cost_us",
+            "type": "INTEGER",
+            "unit": "MICROSECOND",
+            "clock_domain": null
+          },
+          {
+            "name": "timeout_ms",
+            "type": "INTEGER",
+            "unit": "MILLISECOND",
+            "clock_domain": null
+          }
+        ],
+        "timestamp_field": "end_us",
+        "group_by": [
+          "service",
+          "api",
+          "end_us"
+        ],
+        "selectors": [
+          {
+            "field": "service",
+            "operator": "EQUALS",
+            "value": {
+              "source": "USER_FACT",
+              "name": "service_name"
+            }
+          },
+          {
+            "field": "api",
+            "operator": "EQUALS",
+            "value": {
+              "source": "USER_FACT",
+              "name": "api_name"
+            }
+          }
+        ],
+        "max_gap_lines": 0,
+        "min_matches": 0,
+        "max_matches": null,
+        "observation_policy_ids": [
+          "bbbb_default_suppression"
+        ]
+      }
+    ],
+    "rules": [
+      {
+        "id": "enhanced_version",
+        "kind": "FACT_IN",
+        "description": "目标版本必须包含增强诊断能力。",
+        "depends_on": [],
+        "remediation_requirements": [],
+        "parameters": {
+          "fact_name": "target_version",
+          "allowed_values": [
+            "enhanced_v2"
+          ]
+        }
+      },
+      {
+        "id": "known_protocol",
+        "kind": "FACT_IN",
+        "description": "协议必须属于Wiki声明的已知集合。",
+        "depends_on": [],
+        "remediation_requirements": [],
+        "parameters": {
+          "fact_name": "transport_protocol",
+          "allowed_values": [
+            "standard",
+            "silent_timeout_detail"
+          ]
+        }
+      },
+      {
+        "id": "client_call_present",
+        "kind": "EVENT_PRESENT",
+        "description": "客户端同步超时消息体已出现。",
+        "depends_on": [],
+        "remediation_requirements": [],
+        "parameters": {
+          "event": "client_timeout_call"
+        }
+      },
+      {
+        "id": "client_detail_present",
+        "kind": "EVENT_PRESENT",
+        "description": "客户端请求ID超时消息体已出现。",
+        "depends_on": [],
+        "remediation_requirements": [],
+        "parameters": {
+          "event": "client_timeout_detail"
+        }
+      },
+      {
+        "id": "queue_history_present",
+        "kind": "EVENT_PRESENT",
+        "description": "服务端五行排队历史块已出现。",
+        "depends_on": [],
+        "remediation_requirements": [],
+        "parameters": {
+          "event": "queue_history"
+        }
+      },
+      {
+        "id": "late_response_present",
+        "kind": "EVENT_PRESENT",
+        "description": "客户端最终收到晚响应。",
+        "depends_on": [],
+        "remediation_requirements": [],
+        "parameters": {
+          "event": "late_response"
+        }
+      },
+      {
+        "id": "api_complete_present",
+        "kind": "EVENT_PRESENT",
+        "description": "服务端目标API执行完成记录已出现。",
+        "depends_on": [],
+        "remediation_requirements": [],
+        "parameters": {
+          "event": "api_complete"
+        }
+      },
+      {
+        "id": "complete_service_correlates",
+        "kind": "FIELDS_EQUAL",
+        "description": "完整路径的客户端和服务端记录属于同一服务。",
+        "depends_on": [
+          "client_call_present",
+          "client_detail_present",
+          "queue_history_present"
+        ],
+        "remediation_requirements": [],
+        "parameters": {
+          "quantifier": "EXISTS",
+          "equalities": [
+            {
+              "members": [
+                {
+                  "event": "client_timeout_call",
+                  "field": "service"
+                },
+                {
+                  "event": "client_timeout_detail",
+                  "field": "service"
+                },
+                {
+                  "event": "queue_history",
+                  "field": "first_service"
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "id": "complete_api_correlates",
+        "kind": "FIELDS_EQUAL",
+        "description": "完整路径的目标API与排队块首条一致。",
+        "depends_on": [
+          "client_call_present",
+          "queue_history_present"
+        ],
+        "remediation_requirements": [],
+        "parameters": {
+          "quantifier": "EXISTS",
+          "equalities": [
+            {
+              "members": [
+                {
+                  "event": "client_timeout_call",
+                  "field": "api"
+                },
+                {
+                  "event": "queue_history",
+                  "field": "first_api"
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "id": "partial_target_correlates",
+        "kind": "FIELDS_EQUAL",
+        "description": "部分路径的超时、晚响应和执行记录属于同一目标。",
+        "depends_on": [
+          "client_call_present",
+          "late_response_present",
+          "api_complete_present"
+        ],
+        "remediation_requirements": [],
+        "parameters": {
+          "quantifier": "EXISTS",
+          "equalities": [
+            {
+              "members": [
+                {
+                  "event": "client_timeout_call",
+                  "field": "service"
+                },
+                {
+                  "event": "late_response",
+                  "field": "service"
+                },
+                {
+                  "event": "api_complete",
+                  "field": "service"
+                }
+              ]
+            },
+            {
+              "members": [
+                {
+                  "event": "client_timeout_call",
+                  "field": "api"
+                },
+                {
+                  "event": "late_response",
+                  "field": "api"
+                },
+                {
+                  "event": "api_complete",
+                  "field": "api"
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "id": "queue_total_exceeds_timeout",
+        "kind": "NUMERIC_COMPARE",
+        "description": "目标API排队加执行时间超过超时阈值。",
+        "depends_on": [
+          "queue_history_present"
+        ],
+        "remediation_requirements": [],
+        "parameters": {
+          "left": {
+            "kind": "ADD",
+            "left": {
+              "kind": "FIELD",
+              "event": "queue_history",
+              "field": "first_queue_us"
+            },
+            "right": {
+              "kind": "FIELD",
+              "event": "queue_history",
+              "field": "first_cost_us"
+            }
+          },
+          "operator": "GT",
+          "right": {
+            "kind": "FIELD",
+            "event": "queue_history",
+            "field": "first_timeout_ms"
+          },
+          "quantifier": "EXISTS",
+          "joins": [],
+          "clock_tolerance_ms": 0
+        }
+      },
+      {
+        "id": "target_execution_within_timeout",
+        "kind": "NUMERIC_COMPARE",
+        "description": "目标API自身执行时间没有越过超时阈值。",
+        "depends_on": [
+          "queue_history_present"
+        ],
+        "remediation_requirements": [],
+        "parameters": {
+          "left": {
+            "kind": "FIELD",
+            "event": "queue_history",
+            "field": "first_cost_us"
+          },
+          "operator": "LTE",
+          "right": {
+            "kind": "FIELD",
+            "event": "queue_history",
+            "field": "first_timeout_ms"
+          },
+          "quantifier": "EXISTS",
+          "joins": [],
+          "clock_tolerance_ms": 0
+        }
+      },
+      {
+        "id": "prior_api_longer_than_target",
+        "kind": "NUMERIC_COMPARE",
+        "description": "相邻前序API执行时间长于目标API。",
+        "depends_on": [
+          "queue_history_present"
+        ],
+        "remediation_requirements": [],
+        "parameters": {
+          "left": {
+            "kind": "FIELD",
+            "event": "queue_history",
+            "field": "second_cost_us"
+          },
+          "operator": "GT",
+          "right": {
+            "kind": "FIELD",
+            "event": "queue_history",
+            "field": "first_cost_us"
+          },
+          "quantifier": "EXISTS",
+          "joins": [],
+          "clock_tolerance_ms": 0
+        }
+      },
+      {
+        "id": "api_duration_exceeds_timeout",
+        "kind": "NUMERIC_COMPARE",
+        "description": "目标API自身执行时长超过超时阈值。",
+        "depends_on": [
+          "api_complete_present"
+        ],
+        "remediation_requirements": [],
+        "parameters": {
+          "left": {
+            "kind": "FIELD",
+            "event": "api_complete",
+            "field": "cost_us"
+          },
+          "operator": "GT",
+          "right": {
+            "kind": "FIELD",
+            "event": "api_complete",
+            "field": "timeout_ms"
+          },
+          "quantifier": "EXISTS",
+          "joins": [],
+          "clock_tolerance_ms": 0
+        }
+      },
+      {
+        "id": "server_queue_positive",
+        "kind": "NUMERIC_COMPARE",
+        "description": "服务端接收时间晚于客户端发送时间。",
+        "depends_on": [
+          "late_response_present"
+        ],
+        "remediation_requirements": [],
+        "parameters": {
+          "left": {
+            "kind": "SUBTRACT",
+            "left": {
+              "kind": "FIELD",
+              "event": "late_response",
+              "field": "server_recv_us"
+            },
+            "right": {
+              "kind": "FIELD",
+              "event": "late_response",
+              "field": "client_send_us"
+            }
+          },
+          "operator": "GT",
+          "right": {
+            "kind": "CONST",
+            "value": 0,
+            "unit": "MICROSECOND"
+          },
+          "quantifier": "EXISTS",
+          "joins": [],
+          "clock_tolerance_ms": 100
+        }
+      },
+      {
+        "id": "client_queue_positive",
+        "kind": "NUMERIC_COMPARE",
+        "description": "客户端当前时间晚于服务端发送时间。",
+        "depends_on": [
+          "late_response_present"
+        ],
+        "remediation_requirements": [],
+        "parameters": {
+          "left": {
+            "kind": "SUBTRACT",
+            "left": {
+              "kind": "FIELD",
+              "event": "late_response",
+              "field": "client_now_us"
+            },
+            "right": {
+              "kind": "FIELD",
+              "event": "late_response",
+              "field": "server_send_us"
+            }
+          },
+          "operator": "GT",
+          "right": {
+            "kind": "CONST",
+            "value": 0,
+            "unit": "MICROSECOND"
+          },
+          "quantifier": "EXISTS",
+          "joins": [],
+          "clock_tolerance_ms": 100
+        }
+      },
+      {
+        "id": "response_after_deadline",
+        "kind": "NUMERIC_COMPARE",
+        "description": "同一客户端时钟下晚响应总耗时超过deadline。",
+        "depends_on": [
+          "late_response_present"
+        ],
+        "remediation_requirements": [],
+        "parameters": {
+          "left": {
+            "kind": "SUBTRACT",
+            "left": {
+              "kind": "FIELD",
+              "event": "late_response",
+              "field": "client_now_us"
+            },
+            "right": {
+              "kind": "FIELD",
+              "event": "late_response",
+              "field": "client_send_us"
+            }
+          },
+          "operator": "GT",
+          "right": {
+            "kind": "FIELD",
+            "event": "late_response",
+            "field": "timeout_ms"
+          },
+          "quantifier": "EXISTS",
+          "joins": [],
+          "clock_tolerance_ms": 0
+        }
+      },
+      {
+        "id": "queue_contributed_timeout",
+        "kind": "SEMANTIC_CAUSALITY",
+        "description": "两名Agent独立判断服务端排队是否共同导致超时。",
+        "depends_on": [
+          "enhanced_version",
+          "known_protocol",
+          "complete_service_correlates",
+          "complete_api_correlates",
+          "queue_total_exceeds_timeout",
+          "target_execution_within_timeout"
+        ],
+        "remediation_requirements": [],
+        "parameters": {
+          "assertion": "同一固定快照中的客户端超时和服务端五行排队块共同支持服务端排队是超时贡献因素。",
+          "evidence_events": [
+            "client_timeout_call",
+            "client_timeout_detail",
+            "queue_history"
+          ]
+        }
+      },
+      {
+        "id": "upstream_api_caused_queue",
+        "kind": "SEMANTIC_CAUSALITY",
+        "description": "两名Agent独立判断前序长API是否造成目标API排队。",
+        "depends_on": [
+          "prior_api_longer_than_target",
+          "queue_total_exceeds_timeout"
+        ],
+        "remediation_requirements": [],
+        "parameters": {
+          "assertion": "五行历史中紧邻目标调用的前序长API支持共享串行lane中的上游阻塞因素。",
+          "evidence_events": [
+            "queue_history"
+          ]
+        }
+      },
+      {
+        "id": "partial_snapshot_supported",
+        "kind": "SEMANTIC_CAUSALITY",
+        "description": "两名Agent独立确认该快照只支持部分定位。",
+        "depends_on": [
+          "enhanced_version",
+          "known_protocol",
+          "partial_target_correlates",
+          "response_after_deadline"
+        ],
+        "remediation_requirements": [],
+        "parameters": {
+          "assertion": "超时、晚响应和执行完成正向证据足以排除目标API自身超时，但跨时钟容差和日志抑制使服务端与客户端排队贡献仍未决。",
+          "evidence_events": [
+            "client_timeout_call",
+            "late_response",
+            "api_complete"
+          ]
+        }
+      }
+    ],
+    "terminal_paths": [
+      {
+        "id": "complete_queue_and_upstream",
+        "resolution_status": "COMPLETE",
+        "condition": {
+          "any_of": [
+            {
+              "all_of": [
+                {
+                  "rule_id": "queue_contributed_timeout",
+                  "result": "PASS"
+                },
+                {
+                  "rule_id": "upstream_api_caused_queue",
+                  "result": "PASS"
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "id": "partial_cross_clock_ambiguity",
+        "resolution_status": "PARTIAL",
+        "condition": {
+          "any_of": [
+            {
+              "all_of": [
+                {
+                  "rule_id": "api_duration_exceeds_timeout",
+                  "result": "FAIL"
+                },
+                {
+                  "rule_id": "server_queue_positive",
+                  "result": "UNKNOWN"
+                },
+                {
+                  "rule_id": "client_queue_positive",
+                  "result": "UNKNOWN"
+                },
+                {
+                  "rule_id": "partial_snapshot_supported",
+                  "result": "PASS"
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "id": "none",
+        "resolution_status": "NONE",
+        "condition": {
+          "any_of": [
+            {
+              "all_of": []
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "time_characteristics": [
+    "所有微秒整数时间显式声明clock domain。",
+    "跨client/server时钟比较使用100毫秒容差；同一时钟使用0容差。",
+    "固定快照之外不补日志、不等待未来证据。"
+  ],
+  "analysis_steps": [
+    "确认版本、协议、两侧进程实例和固定日志快照。",
+    "以进程实例与请求ID组成复合身份，并提取客户端超时、晚响应、服务端执行和五行排队记录。",
+    "按显式单位与clock domain重算排队、执行和deadline关系。",
+    "选择首个成立的COMPLETE、PARTIAL或NONE路径，并结构化列出确认、候选和排除因素。"
+  ],
+  "judgement_rules": [
+    "受SUPPRESSION或RATE_LIMIT影响时，正向日志仍有效，缺失和上界计数只能是UNKNOWN。",
+    "允许多个因素共同贡献，不强制选择唯一根因。",
+    "超时不等于取消，结果必须提示后续执行和副作用风险。",
+    "Wiki列出的原因不是穷尽集合，结论只覆盖Skill声明范围。"
+  ],
+  "output_requirements": [
+    "COMPLETE列出服务端排队与上游共享lane长API两个因素及各自证据。",
+    "PARTIAL保留已排除的目标API自身超时，以及服务端和客户端排队两个未决候选。",
+    "公开原始日志引用、派生值、单位、时钟容差、观测下界、证据缺口和安全说明。"
+  ],
+  "assumptions": [
+    "离线用例的长日志3和4稳定消息体由clarifications.md专门定义，不外推为真实产品格式。",
+    "五行排队块中first是当前触发调用，second是紧邻的前序调用；真实Wiki若不保证顺序必须重新澄清。"
+  ],
+  "requires_logparse": true,
+  "logparse_product": "bbbb"
+}

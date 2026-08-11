@@ -11,11 +11,11 @@ from problem_locator.contracts import (
     AgentJobOutcomeDraftV2,
     ArtifactKind,
     JobOutcome,
-    UserResultArchiveMetadataV2,
+    UserResultArchiveMetadataV3,
     UserResultCitationV2,
     UserResultFindingV2,
-    UserResultMetadataV2,
-    UserResultPayloadV2,
+    UserResultMetadataV3,
+    UserResultPayloadV3,
     UserResultTimeRelevanceV2,
     UserResultVerificationRuleV2,
     finalize_unresolved_result,
@@ -35,8 +35,8 @@ def _positive(name: str) -> dict:
     return load_json(FIXTURE_ROOT / "positive" / name)
 
 
-def test_user_result_v2_exposes_the_complete_public_shape_and_rejects_v1() -> None:
-    payload = UserResultPayloadV2.model_validate(_positive("user-result.json"))
+def test_user_result_v3_exposes_the_complete_public_shape_and_rejects_legacy_versions() -> None:
+    payload = UserResultPayloadV3.model_validate(_positive("user-result.json"))
     assert set(type(payload).model_fields) == {
         "schema_version",
         "format_id",
@@ -45,6 +45,9 @@ def test_user_result_v2_exposes_the_complete_public_shape_and_rejects_v1() -> No
         "problem_statement",
         "root_cause",
         "findings",
+        "causal_factors",
+        "candidate_factors",
+        "excluded_factors",
         "supporting_evidence_bindings",
         "completion_criteria_mapping",
         "verification_rules",
@@ -52,16 +55,17 @@ def test_user_result_v2_exposes_the_complete_public_shape_and_rejects_v1() -> No
         "evidence_gaps",
         "limitations",
         "recommendations",
+        "safety_notes",
     }
     with pytest.raises(ValidationError):
-        UserResultPayloadV2.model_validate(
+        UserResultPayloadV3.model_validate(
             {
                 "schema_version": 1,
                 "format_id": "problem-locator-diagnosis-v1",
             }
         )
     with pytest.raises(ValidationError):
-        UserResultMetadataV2.model_validate(
+        UserResultMetadataV3.model_validate(
             {
                 "schema_version": 1,
                 "format_id": "problem-locator-diagnosis-v1",
@@ -69,7 +73,14 @@ def test_user_result_v2_exposes_the_complete_public_shape_and_rejects_v1() -> No
             }
         )
     with pytest.raises(ValidationError):
-        UserResultArchiveMetadataV2.model_validate(
+        UserResultPayloadV3.model_validate(
+            {
+                "schema_version": 2,
+                "format_id": "problem-locator-diagnosis-v2",
+            }
+        )
+    with pytest.raises(ValidationError):
+        UserResultArchiveMetadataV3.model_validate(
             {
                 "schema_version": 1,
                 "format_id": "problem-locator-result-archive-v1",
@@ -90,9 +101,32 @@ def test_inconclusive_user_result_requires_an_explicit_evidence_gap() -> None:
     ]
 
     with pytest.raises(ValidationError, match="requires at least one evidence gap"):
-        UserResultPayloadV2.model_validate(payload)
+        UserResultPayloadV3.model_validate(payload)
     with pytest.raises(JsonSchemaValidationError):
         schema_validator("user-result.schema.json").validate(payload)
+
+
+def test_partial_user_result_preserves_reviewed_progress_and_explicit_gap() -> None:
+    payload = _positive("user-result.json")
+    payload["status"] = "PARTIAL"
+    payload["root_cause"] = None
+    payload["completion_criteria_mapping"][0]["status"] = "PARTIALLY_SATISFIED"
+    payload["evidence_gaps"] = [
+        "The fixed snapshot cannot distinguish the remaining candidate factors."
+    ]
+    parsed = UserResultPayloadV3.model_validate(payload)
+    assert parsed.status == "PARTIAL"
+    assert parsed.causal_factors
+    schema_validator("user-result.schema.json").validate(payload)
+
+
+def test_partial_user_result_cannot_claim_every_criterion_is_complete() -> None:
+    payload = _positive("user-result.json")
+    payload["status"] = "PARTIAL"
+    payload["root_cause"] = None
+    payload["evidence_gaps"] = ["One contribution remains unknown."]
+    with pytest.raises(ValidationError, match="explicitly incomplete criterion"):
+        UserResultPayloadV3.model_validate(payload)
 
 
 def test_public_citation_location_is_generic_or_fully_populated() -> None:
@@ -194,6 +228,8 @@ def test_finding_and_rule_bindings_exactly_follow_citation_order(model_type: typ
             status="SEMANTIC_ONLY",
             explanation="The rule was assessed semantically.",
             observed_times=[],
+            event_observations=[],
+            derived_values=[],
             issues=[],
         )
         message = "verification rule citations must cover evidence_bindings"

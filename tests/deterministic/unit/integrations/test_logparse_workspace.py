@@ -520,8 +520,8 @@ def test_bind_logparse_run_rejects_a_non_logparse_artifact_with_the_target_id(
         name="diagnosis-result.json",
         content_type="application/json",
         metadata=UserResultMetadata(
-            schema_version=2,
-            format_id="problem-locator-diagnosis-v2",
+            schema_version=3,
+            format_id="problem-locator-diagnosis-v3",
             description="synthetic result",
         ),
     )

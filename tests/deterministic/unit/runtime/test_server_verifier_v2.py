@@ -366,6 +366,17 @@ def _build(
     candidate["completion_criteria_mapping"][0]["evidence_bindings"] = [
         server_binding
     ]
+    candidate["causal_factors"] = [
+        {
+            "factor_id": "takeover_pool_wait",
+            "role": "CAUSE",
+            "statement": candidate["statement"],
+            "evidence_bindings": [client_binding, server_binding],
+            "required_rule_ids": ["takeover_pool_wait_caused_timeout"],
+        }
+    ]
+    candidate["candidate_factors"] = []
+    candidate["excluded_factors"] = []
     draft = AgentJobOutcomeDraftV2.model_validate(draft_value)
     draft_bytes = canonical_json_bytes(draft)
     verification = verify_agent_draft(
@@ -480,13 +491,26 @@ def _review_inputs(
         {
             "criterion_index": 0,
             "criterion": criterion,
-            "satisfied": True,
+            "status": "SATISFIED",
             "evidence_refs": [SERVER_EVIDENCE],
             "explanation": "The server event completes the fixed criterion.",
         }
     ]
     candidate_preimage = {
+        "resolution_status": candidate_draft.resolution_status.value,
+        "terminal_path_id": candidate_draft.terminal_path_id,
         "statement": candidate_draft.statement,
+        "causal_factors": [
+            {
+                "factor_id": "takeover_pool_wait",
+                "role": "CAUSE",
+                "statement": candidate_draft.statement,
+                "evidence_refs": [CLIENT_EVIDENCE, SERVER_EVIDENCE],
+                "required_rule_ids": ["takeover_pool_wait_caused_timeout"],
+            }
+        ],
+        "candidate_factors": [],
+        "excluded_factors": [],
         "supporting_evidence_refs": [CLIENT_EVIDENCE],
         "completion_criteria_mapping": completion_mapping,
     }
@@ -934,6 +958,10 @@ def test_initial_parse_evidence_is_locked_to_broker_artifact_proposal(
     candidate["completion_criteria_mapping"][0]["evidence_bindings"] = [
         server_binding
     ]
+    candidate["causal_factors"][0]["evidence_bindings"] = [
+        client_binding,
+        server_binding,
+    ]
     citations = [
         {
             "evidence_binding": client_binding,
@@ -1084,6 +1112,12 @@ def test_diagnosis_candidate_must_close_over_every_audited_evidence_binding(
             "evidence_proposal_key": None,
         }
     ]
+    candidate["causal_factors"][0]["evidence_bindings"] = [
+        {
+            "existing_evidence_id": CLIENT_EVIDENCE,
+            "evidence_proposal_key": None,
+        }
+    ]
     incomplete = AgentJobOutcomeDraftV2.model_validate(value)
     verification = verify_agent_draft(
         workspace_root=tmp_path,
@@ -1226,6 +1260,15 @@ def test_no_log_semantic_skill_preserves_candidate_evidence_through_review(
     diagnosis_candidate["completion_criteria_mapping"][0]["evidence_bindings"] = [
         manual_binding
     ]
+    diagnosis_candidate["causal_factors"] = [
+        {
+            "factor_id": "manual_assessment",
+            "role": "CAUSE",
+            "statement": diagnosis_candidate["statement"],
+            "evidence_bindings": [manual_binding],
+            "required_rule_ids": ["manual_causal_assessment"],
+        }
+    ]
     diagnosis_draft = AgentJobOutcomeDraftV2.model_validate(diagnosis_value)
     diagnosis = verify_agent_draft(
         workspace_root=tmp_path,
@@ -1276,13 +1319,26 @@ def test_no_log_semantic_skill_preserves_candidate_evidence_through_review(
 
     criterion = diagnosis_candidate["completion_criteria_mapping"][0]
     candidate_preimage = {
+        "resolution_status": diagnosis_candidate["resolution_status"],
+        "terminal_path_id": diagnosis_candidate["terminal_path_id"],
         "statement": diagnosis_candidate["statement"],
+        "causal_factors": [
+            {
+                "factor_id": "manual_assessment",
+                "role": "CAUSE",
+                "statement": diagnosis_candidate["statement"],
+                "evidence_refs": [CLIENT_EVIDENCE],
+                "required_rule_ids": ["manual_causal_assessment"],
+            }
+        ],
+        "candidate_factors": [],
+        "excluded_factors": [],
         "supporting_evidence_refs": [CLIENT_EVIDENCE],
         "completion_criteria_mapping": [
             {
                 "criterion_index": criterion["criterion_index"],
                 "criterion": criterion["criterion"],
-                "satisfied": True,
+                "status": "SATISFIED",
                 "evidence_refs": [CLIENT_EVIDENCE],
                 "explanation": criterion["explanation"],
             }
@@ -1451,6 +1507,13 @@ def test_hidden_duplicate_in_locator_cannot_bypass_exactly_one(
         is ServerRuleStatus.VERIFIED_FAIL
     )
     assert len(presence.server_evaluation.line_ranges) == 2
+    semantic = next(
+        item
+        for item in verification.audit.rules
+        if item.server_evaluation.rule_kind == "SEMANTIC_CAUSALITY"
+    )
+    assert semantic.server_evaluation.status is ServerRuleStatus.SEMANTIC_ONLY
+    assert semantic.server_evaluation.issues
     # The Agent cites only client line 1, but the immutable Evidence locator
     # contains a second matching physical line.  The server scan owns
     # cardinality and therefore cannot be narrowed by the citation.
@@ -1484,7 +1547,7 @@ def test_user_fact_field_mismatch_is_mechanically_rejected(
     }
 
 
-def test_cross_role_field_mismatch_is_reported_by_correlation_rule(
+def test_failed_dependency_makes_cross_role_correlation_not_applicable(
     tmp_path: Path,
 ) -> None:
     _, _, _, _, verification = _build(
@@ -1499,9 +1562,18 @@ def test_cross_role_field_mismatch_is_reported_by_correlation_rule(
         for item in verification.audit.rules
         if item.rule_id == "method_correlates_across_roles"
     )
+    server_match = next(
+        item
+        for item in verification.audit.rules
+        if item.rule_id == "server_method_matches"
+    )
+    assert (
+        server_match.server_evaluation.status
+        is ServerRuleStatus.VERIFIED_FAIL
+    )
     assert (
         correlation.server_evaluation.status
-        is ServerRuleStatus.VERIFIED_FAIL
+        is ServerRuleStatus.NOT_APPLICABLE
     )
 
 

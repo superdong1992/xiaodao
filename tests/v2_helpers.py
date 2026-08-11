@@ -9,6 +9,7 @@ from problem_locator.contracts import (
     ReviewCausalAssertion,
     ReviewSubjectV2,
     canonical_json_sha256,
+    review_required_evidence_refs,
 )
 
 
@@ -52,14 +53,7 @@ def blind_review_subject(
     if job.skill_ref is None or job.context_snapshot.candidate_conclusion is None:
         raise ValueError("a REVIEW test Job requires a pinned Skill and Candidate")
     candidate = job.context_snapshot.candidate_conclusion
-    candidate_evidence = {
-        *candidate.supporting_evidence_refs,
-        *(
-            ref
-            for mapping in candidate.completion_criteria_mapping
-            for ref in mapping.evidence_refs
-        ),
-    }
+    candidate_evidence = set(review_required_evidence_refs(candidate))
     required_evidence_refs = [
         ref for ref in job.evidence_refs if ref in candidate_evidence
     ]

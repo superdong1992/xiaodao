@@ -1,4 +1,4 @@
-"""Pydantic models for the frozen Problem Locator V4 public contract.
+"""Pydantic models for the frozen Problem Locator V5 public contract.
 
 The module deliberately keeps all wire/persistence DTO definitions in one place;
 ``commands``, ``outcomes`` and ``errors`` provide responsibility-oriented exports.
@@ -30,11 +30,14 @@ from .enums import (
     AssetKind,
     AttachmentFilenameSuffix,
     AttachmentStatus,
+    CausalFactorRole,
     CandidateMutationAction,
     CandidateStatus,
     CaseStatus,
+    CompletionCriterionStatus,
     ContextSectionKind,
     DiagnosisMode,
+    DiagnosisResolutionStatus,
     DiagnosisItemStatus,
     DiagnosisProvenanceType,
     ErrorCode,
@@ -556,15 +559,32 @@ class PendingRequirement(ContractModel):
 class CompletionCriterionMapping(ContractModel):
     criterion_index: NonNegativeInt
     criterion: NonEmptyText
-    satisfied: bool
+    status: CompletionCriterionStatus
     evidence_refs: list[OpaqueId]
     explanation: NonEmptyText
 
     @model_validator(mode="after")
     def validate_mapping(self) -> CompletionCriterionMapping:
         _unique(self.evidence_refs, "evidence_refs")
-        if self.satisfied and not self.evidence_refs:
-            raise ValueError("a satisfied criterion requires evidence")
+        if self.status in {
+            CompletionCriterionStatus.SATISFIED,
+            CompletionCriterionStatus.PARTIALLY_SATISFIED,
+        } and not self.evidence_refs:
+            raise ValueError("a satisfied or partially satisfied criterion requires evidence")
+        return self
+
+
+class CausalFactor(ContractModel):
+    factor_id: ContractName
+    role: CausalFactorRole
+    statement: NonEmptyText
+    evidence_refs: Annotated[list[OpaqueId], Field(min_length=1)]
+    required_rule_ids: Annotated[list[NonEmptyText], Field(min_length=1)]
+
+    @model_validator(mode="after")
+    def validate_factor(self) -> CausalFactor:
+        _unique(self.evidence_refs, "CausalFactor.evidence_refs")
+        _unique(self.required_rule_ids, "CausalFactor.required_rule_ids")
         return self
 
 
@@ -578,7 +598,12 @@ class CandidateConclusion(ContractModel):
     conclusion_id: OpaqueId
     revision: PositiveInt
     content_hash: Sha256
+    resolution_status: DiagnosisResolutionStatus
+    terminal_path_id: ContractName
     statement: NonEmptyText
+    causal_factors: list[CausalFactor]
+    candidate_factors: list[CausalFactor]
+    excluded_factors: list[CausalFactor]
     supporting_evidence_refs: list[OpaqueId]
     completion_criteria_mapping: Annotated[
         list[CompletionCriterionMapping], Field(min_length=1)
@@ -592,8 +617,48 @@ class CandidateConclusion(ContractModel):
         indices = [entry.criterion_index for entry in self.completion_criteria_mapping]
         if indices != list(range(len(indices))):
             raise ValueError("completion criteria mappings must be contiguous and sorted from index zero")
+        factors = [*self.causal_factors, *self.candidate_factors, *self.excluded_factors]
+        _unique([item.factor_id for item in factors], "Candidate factor_id")
+        if self.resolution_status is DiagnosisResolutionStatus.COMPLETE:
+            if not self.causal_factors:
+                raise ValueError("a COMPLETE Candidate requires at least one causal factor")
+            if self.candidate_factors:
+                raise ValueError("a COMPLETE Candidate cannot retain candidate factors")
+            if any(
+                item.status is not CompletionCriterionStatus.SATISFIED
+                for item in self.completion_criteria_mapping
+            ):
+                raise ValueError("a COMPLETE Candidate requires every criterion satisfied")
+        else:
+            if not (self.causal_factors or self.excluded_factors):
+                raise ValueError(
+                    "a PARTIAL Candidate requires a confirmed or excluded factor"
+                )
+            if not any(
+                item.status
+                in {
+                    CompletionCriterionStatus.SATISFIED,
+                    CompletionCriterionStatus.PARTIALLY_SATISFIED,
+                }
+                for item in self.completion_criteria_mapping
+            ):
+                raise ValueError(
+                    "a PARTIAL Candidate requires evidence-backed criterion progress"
+                )
+            if all(
+                item.status is CompletionCriterionStatus.SATISFIED
+                for item in self.completion_criteria_mapping
+            ):
+                raise ValueError(
+                    "a PARTIAL Candidate requires an explicitly incomplete criterion"
+                )
         preimage = {
+            "resolution_status": self.resolution_status,
+            "terminal_path_id": self.terminal_path_id,
             "statement": self.statement,
+            "causal_factors": [item.model_dump(mode="json") for item in self.causal_factors],
+            "candidate_factors": [item.model_dump(mode="json") for item in self.candidate_factors],
+            "excluded_factors": [item.model_dump(mode="json") for item in self.excluded_factors],
             "supporting_evidence_refs": self.supporting_evidence_refs,
             "completion_criteria_mapping": [entry.model_dump(mode="json") for entry in self.completion_criteria_mapping],
         }
@@ -615,6 +680,15 @@ def review_required_evidence_refs(
         ref
         for mapping in candidate.completion_criteria_mapping
         for ref in mapping.evidence_refs
+    )
+    refs.extend(
+        ref
+        for factor in (
+            candidate.causal_factors
+            + candidate.candidate_factors
+            + candidate.excluded_factors
+        )
+        for ref in factor.evidence_refs
     )
     for ref in refs:
         if ref not in seen:
@@ -718,8 +792,17 @@ class DiagnosisState(ContractModel):
             )
             if any(ref not in evidence_set for ref in candidate_evidence):
                 raise ValueError("candidate Evidence must belong to DiagnosisState")
-            if any(not mapping.satisfied or not mapping.evidence_refs for mapping in mappings):
-                raise ValueError("candidate criteria must be satisfied and evidence-backed")
+            factor_evidence = [
+                ref
+                for factor in (
+                    candidate.causal_factors
+                    + candidate.candidate_factors
+                    + candidate.excluded_factors
+                )
+                for ref in factor.evidence_refs
+            ]
+            if any(ref not in evidence_set for ref in factor_evidence):
+                raise ValueError("candidate factor Evidence must belong to DiagnosisState")
         return self
 
 
@@ -857,22 +940,36 @@ class Case(ContractModel):
                 raise ValueError(
                     "generic terminal cases forbid specialized result and selected Skill fields"
                 )
-        elif self.status in {CaseStatus.RESOLVED, CaseStatus.UNRESOLVED}:
+        elif self.status in {
+            CaseStatus.RESOLVED,
+            CaseStatus.PARTIALLY_RESOLVED,
+            CaseStatus.UNRESOLVED,
+        }:
             pass
-        if self.status is CaseStatus.RESOLVED:
+        if self.status in {CaseStatus.RESOLVED, CaseStatus.PARTIALLY_RESOLVED}:
             if self.generic_result is None and (
                 self.final_result is None
                 or self.final_result.status is not CandidateStatus.ACCEPTED
             ):
-                raise ValueError("RESOLVED cases require an ACCEPTED final_result")
+                raise ValueError("resolved cases require an ACCEPTED final_result")
             if self.generic_result is None and (
                 self.diagnosis_state.candidate_conclusion != self.final_result
             ):
                 raise ValueError(
                     "RESOLVED final_result must equal the current DiagnosisState candidate"
                 )
+            if self.generic_result is None and self.final_result is not None:
+                expected = (
+                    DiagnosisResolutionStatus.COMPLETE
+                    if self.status is CaseStatus.RESOLVED
+                    else DiagnosisResolutionStatus.PARTIAL
+                )
+                if self.final_result.resolution_status is not expected:
+                    raise ValueError(
+                        "final_result resolution_status must equal the Case status"
+                    )
         elif self.final_result is not None:
-            raise ValueError("non-RESOLVED cases must have final_result=null")
+            raise ValueError("non-resolved cases must have final_result=null")
         if self.status is CaseStatus.UNRESOLVED:
             if self.generic_result is None and self.unresolved_result is None:
                 raise ValueError("UNRESOLVED cases require unresolved_result")
@@ -895,6 +992,7 @@ class Case(ContractModel):
             CaseStatus.WAITING_INPUT,
             CaseStatus.WAITING_ATTACHMENT,
             CaseStatus.RESOLVED,
+            CaseStatus.PARTIALLY_RESOLVED,
             CaseStatus.UNRESOLVED,
             CaseStatus.FAILED,
             CaseStatus.CANCELLED,
@@ -1003,8 +1101,6 @@ class Job(ContractModel):
             candidate = self.context_snapshot.candidate_conclusion
             if candidate is None or candidate.status is not CandidateStatus.REVIEWING:
                 raise ValueError("REVIEW snapshot requires a REVIEWING candidate")
-            if any(not mapping.satisfied or not mapping.evidence_refs for mapping in candidate.completion_criteria_mapping):
-                raise ValueError("REVIEW candidate criteria must all be satisfied and evidence-backed")
             if (
                 candidate.conclusion_id != self.review_target.candidate_conclusion_id
                 or candidate.revision != self.review_target.candidate_revision
@@ -1177,24 +1273,22 @@ class Evidence(ContractModel):
         return self
 
 
-class UserResultMetadataV2(ContractModel):
-    schema_version: Literal[2]
-    format_id: Literal["problem-locator-diagnosis-v2"]
+class UserResultMetadataV3(ContractModel):
+    schema_version: Literal[3]
+    format_id: Literal["problem-locator-diagnosis-v3"]
     description: DescriptionText
 
 
-class UserResultArchiveMetadataV2(ContractModel):
-    schema_version: Literal[2]
-    format_id: Literal["problem-locator-result-archive-v2"]
+class UserResultArchiveMetadataV3(ContractModel):
+    schema_version: Literal[3]
+    format_id: Literal["problem-locator-result-archive-v3"]
     description: DescriptionText
     user_result_proposal_key: NonEmptyText
     target_log_count: NonNegativeInt
 
 
-# Transitional Python names keep internal imports source-compatible while the
-# accepted wire contract is a hard v2 cut (the aliased classes reject v1).
-UserResultMetadata = UserResultMetadataV2
-UserResultArchiveMetadata = UserResultArchiveMetadataV2
+UserResultMetadata = UserResultMetadataV3
+UserResultArchiveMetadata = UserResultArchiveMetadataV3
 
 
 class DiagnosticExportMetadata(ContractModel):
@@ -1226,8 +1320,8 @@ class LogparseRunMetadata(ContractModel):
 
 
 ArtifactMetadata: TypeAlias = (
-    UserResultMetadataV2
-    | UserResultArchiveMetadataV2
+    UserResultMetadataV3
+    | UserResultArchiveMetadataV3
     | DiagnosticExportMetadata
     | LogparseRunMetadata
     | AuditBundleMetadata
@@ -1251,8 +1345,8 @@ class Artifact(ContractModel):
     @model_validator(mode="after")
     def validate_artifact(self) -> Artifact:
         expected_type = {
-            ArtifactKind.USER_RESULT: UserResultMetadataV2,
-            ArtifactKind.USER_RESULT_ARCHIVE: UserResultArchiveMetadataV2,
+            ArtifactKind.USER_RESULT: UserResultMetadataV3,
+            ArtifactKind.USER_RESULT_ARCHIVE: UserResultArchiveMetadataV3,
             ArtifactKind.DIAGNOSTIC_EXPORT: DiagnosticExportMetadata,
             ArtifactKind.LOGPARSE_RUN: LogparseRunMetadata,
             ArtifactKind.AUDIT_BUNDLE: AuditBundleMetadata,
@@ -1878,14 +1972,19 @@ class EvidenceSourceBinding(ContractModel):
 class CompletionCriterionDraftMapping(ContractModel):
     criterion_index: NonNegativeInt
     criterion: NonEmptyText
-    satisfied: bool
+    status: CompletionCriterionStatus
     evidence_bindings: list[EvidenceBinding]
     explanation: NonEmptyText
 
     @model_validator(mode="after")
     def validate_mapping(self) -> CompletionCriterionDraftMapping:
-        if self.satisfied and not self.evidence_bindings:
-            raise ValueError("a satisfied criterion requires at least one evidence binding")
+        if self.status in {
+            CompletionCriterionStatus.SATISFIED,
+            CompletionCriterionStatus.PARTIALLY_SATISFIED,
+        } and not self.evidence_bindings:
+            raise ValueError(
+                "a satisfied or partially satisfied criterion requires an evidence binding"
+            )
         keys = [
             binding.existing_evidence_id or f"proposal:{binding.evidence_proposal_key}"
             for binding in self.evidence_bindings
@@ -1894,10 +1993,36 @@ class CompletionCriterionDraftMapping(ContractModel):
         return self
 
 
+class CausalFactorDraft(ContractModel):
+    factor_id: ContractName
+    role: CausalFactorRole
+    statement: NonEmptyText
+    evidence_bindings: Annotated[list[EvidenceBinding], Field(min_length=1)]
+    required_rule_ids: Annotated[list[NonEmptyText], Field(min_length=1)]
+
+    @model_validator(mode="after")
+    def validate_factor(self) -> CausalFactorDraft:
+        _unique(
+            [
+                binding.existing_evidence_id
+                or f"proposal:{binding.evidence_proposal_key}"
+                for binding in self.evidence_bindings
+            ],
+            "CausalFactorDraft.evidence_bindings",
+        )
+        _unique(self.required_rule_ids, "CausalFactorDraft.required_rule_ids")
+        return self
+
+
 class CandidateConclusionDraft(ContractModel):
     proposal_key: NonEmptyText
     existing_conclusion_id: OpaqueId | None
+    resolution_status: DiagnosisResolutionStatus
+    terminal_path_id: ContractName
     statement: NonEmptyText
+    causal_factors: list[CausalFactorDraft]
+    candidate_factors: list[CausalFactorDraft]
+    excluded_factors: list[CausalFactorDraft]
     supporting_evidence_bindings: list[EvidenceBinding]
     completion_criteria_mapping: Annotated[
         list[CompletionCriterionDraftMapping], Field(min_length=1)
@@ -1913,8 +2038,45 @@ class CandidateConclusionDraft(ContractModel):
         indices = [entry.criterion_index for entry in self.completion_criteria_mapping]
         if indices != list(range(len(indices))):
             raise ValueError("candidate criterion mappings must be contiguous and sorted from index zero")
-        if any(not entry.satisfied or not entry.evidence_bindings for entry in self.completion_criteria_mapping):
-            raise ValueError("every candidate criterion must be satisfied and evidence-backed")
+        factors = [*self.causal_factors, *self.candidate_factors, *self.excluded_factors]
+        _unique([item.factor_id for item in factors], "Candidate draft factor_id")
+        if self.resolution_status is DiagnosisResolutionStatus.COMPLETE:
+            if not self.causal_factors:
+                raise ValueError("a COMPLETE Candidate draft requires a causal factor")
+            if self.candidate_factors:
+                raise ValueError(
+                    "a COMPLETE Candidate draft cannot retain candidate factors"
+                )
+            if any(
+                entry.status is not CompletionCriterionStatus.SATISFIED
+                for entry in self.completion_criteria_mapping
+            ):
+                raise ValueError(
+                    "a COMPLETE Candidate draft requires every criterion satisfied"
+                )
+        else:
+            if not (self.causal_factors or self.excluded_factors):
+                raise ValueError(
+                    "a PARTIAL Candidate draft requires a confirmed or excluded factor"
+                )
+            if not any(
+                entry.status
+                in {
+                    CompletionCriterionStatus.SATISFIED,
+                    CompletionCriterionStatus.PARTIALLY_SATISFIED,
+                }
+                for entry in self.completion_criteria_mapping
+            ):
+                raise ValueError(
+                    "a PARTIAL Candidate draft requires evidence-backed criterion progress"
+                )
+            if all(
+                entry.status is CompletionCriterionStatus.SATISFIED
+                for entry in self.completion_criteria_mapping
+            ):
+                raise ValueError(
+                    "a PARTIAL Candidate draft requires an explicitly incomplete criterion"
+                )
         return self
 
 
@@ -1997,11 +2159,21 @@ class UserResultVerificationRuleV2(ContractModel):
     evidence_bindings: list[EvidenceBinding]
     citations: list[UserResultCitationV2]
     observed_times: list[UtcTimestamp]
+    event_observations: list[EventObservationAudit]
+    derived_values: list[DerivedValueAudit]
     issues: list[NonEmptyText]
 
     @model_validator(mode="after")
     def validate_rule(self) -> UserResultVerificationRuleV2:
         _unique(self.observed_times, "UserResultVerificationRuleV2.observed_times")
+        _unique(
+            [item.event_id for item in self.event_observations],
+            "UserResultVerificationRuleV2.event_observations.event_id",
+        )
+        _unique(
+            [item.name for item in self.derived_values],
+            "UserResultVerificationRuleV2.derived_values.name",
+        )
         _unique(self.issues, "UserResultVerificationRuleV2.issues")
         _unique(
             [
@@ -2042,6 +2214,12 @@ class UserResultVerificationRuleV2(ContractModel):
             raise ValueError("failed or unverifiable verification rules require issues")
         if self.status is ServerRuleStatus.VERIFIED_PASS and self.issues:
             raise ValueError("VERIFIED_PASS verification rules forbid issues")
+        is_semantic_rule = self.rule_kind == "SEMANTIC_CAUSALITY"
+        is_semantic_status = self.status is ServerRuleStatus.SEMANTIC_ONLY
+        if is_semantic_rule != is_semantic_status:
+            raise ValueError(
+                "SEMANTIC_CAUSALITY rules and SEMANTIC_ONLY status must correspond"
+            )
         return self
 
 
@@ -2102,13 +2280,47 @@ class UserResultTimeRelevanceV2(ContractModel):
         return self
 
 
-class UserResultPayloadV2(ContractModel):
+class UserResultFactorV3(ContractModel):
+    factor_id: ContractName
+    role: CausalFactorRole
+    statement: NonEmptyText
+    evidence_bindings: Annotated[list[EvidenceBinding], Field(min_length=1)]
+    required_rule_ids: Annotated[list[NonEmptyText], Field(min_length=1)]
+    citations: list[UserResultCitationV2]
+
+    @model_validator(mode="after")
+    def validate_factor(self) -> UserResultFactorV3:
+        binding_keys = [
+            item.existing_evidence_id
+            or f"proposal:{item.evidence_proposal_key}"
+            for item in self.evidence_bindings
+        ]
+        _unique(binding_keys, "UserResultFactorV3.evidence_bindings")
+        _unique(self.required_rule_ids, "UserResultFactorV3.required_rule_ids")
+        citation_keys: list[str] = []
+        for citation in self.citations:
+            key = (
+                citation.evidence_binding.existing_evidence_id
+                or f"proposal:{citation.evidence_binding.evidence_proposal_key}"
+            )
+            if key not in citation_keys:
+                citation_keys.append(key)
+        if citation_keys != binding_keys:
+            raise ValueError(
+                "factor citations must cover evidence_bindings in declared order"
+            )
+        return self
+
+
+class UserResultPayloadV3(ContractModel):
     model_config = ConfigDict(
         json_schema_extra={
             "allOf": [
                 {
                     "if": {
-                        "properties": {"status": {"const": "INCONCLUSIVE"}},
+                        "properties": {
+                            "status": {"enum": ["PARTIAL", "INCONCLUSIVE"]}
+                        },
                         "required": ["status"],
                     },
                     "then": {
@@ -2119,13 +2331,16 @@ class UserResultPayloadV2(ContractModel):
             ]
         }
     )
-    schema_version: Literal[2]
-    format_id: Literal["problem-locator-diagnosis-v2"]
-    status: Literal["COMPLETED", "INCONCLUSIVE"]
+    schema_version: Literal[3]
+    format_id: Literal["problem-locator-diagnosis-v3"]
+    status: Literal["COMPLETED", "PARTIAL", "INCONCLUSIVE"]
     source_job_type: JobType
     problem_statement: NonEmptyText
     root_cause: NonEmptyText | None
     findings: list[UserResultFindingV2]
+    causal_factors: list[UserResultFactorV3]
+    candidate_factors: list[UserResultFactorV3]
+    excluded_factors: list[UserResultFactorV3]
     supporting_evidence_bindings: list[EvidenceBinding]
     completion_criteria_mapping: Annotated[
         list[CompletionCriterionDraftMapping], Field(min_length=1)
@@ -2135,9 +2350,10 @@ class UserResultPayloadV2(ContractModel):
     evidence_gaps: list[NonEmptyText]
     limitations: list[NonEmptyText]
     recommendations: Annotated[list[NonEmptyText], Field(min_length=1)]
+    safety_notes: Annotated[list[NonEmptyText], Field(min_length=1)]
 
     @model_validator(mode="after")
-    def validate_payload(self) -> UserResultPayloadV2:
+    def validate_payload(self) -> UserResultPayloadV3:
         if self.source_job_type is JobType.ROUTE:
             raise ValueError("USER_RESULT source_job_type must be DIAGNOSE or REVIEW")
         keys = [
@@ -2150,10 +2366,17 @@ class UserResultPayloadV2(ContractModel):
             raise ValueError("user-result criterion mappings must be contiguous and sorted from index zero")
         _unique(
             [entry.rule_id for entry in self.verification_rules],
-            "UserResultPayloadV2.verification_rules.rule_id",
+            "UserResultPayloadV3.verification_rules.rule_id",
         )
-        for field_name in ("evidence_gaps", "limitations", "recommendations"):
-            _unique(getattr(self, field_name), f"UserResultPayloadV2.{field_name}")
+        factors = [*self.causal_factors, *self.candidate_factors, *self.excluded_factors]
+        _unique([item.factor_id for item in factors], "UserResultPayloadV3.factor_id")
+        for field_name in (
+            "evidence_gaps",
+            "limitations",
+            "recommendations",
+            "safety_notes",
+        ):
+            _unique(getattr(self, field_name), f"UserResultPayloadV3.{field_name}")
         if self.status == "COMPLETED":
             if self.root_cause is None:
                 raise ValueError("COMPLETED USER_RESULT requires root_cause")
@@ -2165,11 +2388,43 @@ class UserResultPayloadV2(ContractModel):
                     "every COMPLETED finding must have Evidence bindings and citations"
                 )
             if any(
-                not entry.satisfied or not entry.evidence_bindings
+                entry.status is not CompletionCriterionStatus.SATISFIED
+                or not entry.evidence_bindings
                 for entry in self.completion_criteria_mapping
             ):
                 raise ValueError(
                     "COMPLETED USER_RESULT requires every criterion to be satisfied and evidence-backed"
+                )
+            if not self.causal_factors:
+                raise ValueError("COMPLETED USER_RESULT requires a causal factor")
+            if self.candidate_factors:
+                raise ValueError(
+                    "COMPLETED USER_RESULT cannot retain candidate factors"
+                )
+        elif self.status == "PARTIAL":
+            if not self.evidence_gaps:
+                raise ValueError("PARTIAL USER_RESULT requires an evidence gap")
+            if not (self.causal_factors or self.excluded_factors):
+                raise ValueError(
+                    "PARTIAL USER_RESULT requires a confirmed or excluded factor"
+                )
+            if not any(
+                entry.status
+                in {
+                    CompletionCriterionStatus.SATISFIED,
+                    CompletionCriterionStatus.PARTIALLY_SATISFIED,
+                }
+                for entry in self.completion_criteria_mapping
+            ):
+                raise ValueError(
+                    "PARTIAL USER_RESULT requires evidence-backed criterion progress"
+                )
+            if all(
+                entry.status is CompletionCriterionStatus.SATISFIED
+                for entry in self.completion_criteria_mapping
+            ):
+                raise ValueError(
+                    "PARTIAL USER_RESULT requires an explicitly incomplete criterion"
                 )
         else:
             if self.root_cause is not None:
@@ -2178,12 +2433,14 @@ class UserResultPayloadV2(ContractModel):
                 raise ValueError(
                     "INCONCLUSIVE USER_RESULT requires at least one evidence gap"
                 )
+            if self.findings or factors:
+                raise ValueError(
+                    "INCONCLUSIVE USER_RESULT cannot publish unreviewed factors or findings"
+                )
         return self
 
 
-# Internal callers may migrate independently, but both names validate only the
-# v2 schema/format pair.  There is intentionally no v1 union branch.
-UserResultPayload = UserResultPayloadV2
+UserResultPayload = UserResultPayloadV3
 
 
 class Finding(ContractModel):
@@ -2370,8 +2627,8 @@ def _validate_artifact_shape(
     tree_manifest: TreeManifest | None = None,
 ) -> None:
     expected_type = {
-        ArtifactKind.USER_RESULT: UserResultMetadataV2,
-        ArtifactKind.USER_RESULT_ARCHIVE: UserResultArchiveMetadataV2,
+        ArtifactKind.USER_RESULT: UserResultMetadataV3,
+        ArtifactKind.USER_RESULT_ARCHIVE: UserResultArchiveMetadataV3,
         ArtifactKind.DIAGNOSTIC_EXPORT: DiagnosticExportMetadata,
         ArtifactKind.LOGPARSE_RUN: LogparseRunMetadata,
         ArtifactKind.AUDIT_BUNDLE: AuditBundleMetadata,
@@ -2535,6 +2792,20 @@ class VerifiedLogLineRange(ContractModel):
         return self
 
 
+class EventObservationAudit(ContractModel):
+    event_id: ContractName
+    observed_count: NonNegativeInt
+    count_is_lower_bound: bool
+
+
+class DerivedValueAudit(ContractModel):
+    name: ContractName
+    value: str | int | None
+    unit: NonEmptyText | None
+    lower_bound: str | int | None
+    upper_bound: str | int | None
+
+
 class ServerRuleEvaluation(ContractModel):
     rule_id: NonEmptyText
     rule_kind: NonEmptyText
@@ -2544,6 +2815,8 @@ class ServerRuleEvaluation(ContractModel):
     anchor_id: NonEmptyText | None
     derived_anchor_time: UtcTimestamp | None
     observed_times: list[UtcTimestamp]
+    event_observations: list[EventObservationAudit]
+    derived_values: list[DerivedValueAudit]
     line_ranges: list[VerifiedLogLineRange]
     issues: list[NonEmptyText]
 
@@ -2560,6 +2833,14 @@ class ServerRuleEvaluation(ContractModel):
         )
         _unique(self.observed_times, "ServerRuleEvaluation.observed_times")
         _unique(
+            [item.event_id for item in self.event_observations],
+            "ServerRuleEvaluation.event_observations.event_id",
+        )
+        _unique(
+            [item.name for item in self.derived_values],
+            "ServerRuleEvaluation.derived_values.name",
+        )
+        _unique(
             [
                 (item.path, item.line_start, item.line_end, item.raw_bytes_sha256)
                 for item in self.line_ranges
@@ -2573,6 +2854,12 @@ class ServerRuleEvaluation(ContractModel):
             raise ValueError("failed or unverifiable rules require issues")
         if self.status is ServerRuleStatus.VERIFIED_PASS and self.issues:
             raise ValueError("VERIFIED_PASS forbids issues")
+        is_semantic_rule = self.rule_kind == "SEMANTIC_CAUSALITY"
+        is_semantic_status = self.status is ServerRuleStatus.SEMANTIC_ONLY
+        if is_semantic_rule != is_semantic_status:
+            raise ValueError(
+                "SEMANTIC_CAUSALITY rules and SEMANTIC_ONLY status must correspond"
+            )
         return self
 
 
@@ -2600,6 +2887,8 @@ class DecisionAuditV2(ContractModel):
     subject_hash: Sha256
     candidate_target: CandidateTarget | None
     diagnosis_audit_hash: Sha256 | None
+    selected_terminal_path_id: ContractName
+    terminal_resolution_status: Literal["COMPLETE", "PARTIAL", "NONE"]
     required_rule_ids: Annotated[list[NonEmptyText], Field(min_length=1)]
     required_evidence_bindings: list[EvidenceBinding]
     rules: Annotated[list[DecisionRuleAudit], Field(min_length=1)]
@@ -2948,30 +3237,70 @@ def _validate_effective_resolution_gate(
     if not resolves_candidate:
         return
     assert audit is not None
-    if any(
-        item.agent_claim is None
-        or item.agent_claim.claimed_result is not RuleClaimResult.PASS
-        for item in audit.rules
-    ):
-        raise ValueError(
-            "a Candidate/PASS Outcome requires an Agent PASS claim for every rule"
-        )
-    if any(item.server_evaluation.issues for item in audit.rules):
-        raise ValueError(
-            "a Candidate/PASS Outcome requires issue-free server evaluations"
-        )
-    if any(
-        (
-            item.server_evaluation.status is not ServerRuleStatus.SEMANTIC_ONLY
-            if item.server_evaluation.rule_kind == "SEMANTIC_CAUSALITY"
-            else item.server_evaluation.status is not ServerRuleStatus.VERIFIED_PASS
-        )
-        for item in audit.rules
-    ):
-        raise ValueError(
-            "a Candidate/PASS Outcome requires VERIFIED_PASS mechanical rules "
-            "and SEMANTIC_ONLY semantic rules"
-        )
+    if audit.terminal_resolution_status == "NONE":
+        raise ValueError("a Candidate/PASS Outcome requires a candidate terminal path")
+    if isinstance(payload, DiagnosisOutcome):
+        candidate = payload.candidate_conclusion_draft
+        assert candidate is not None
+        if (
+            candidate.terminal_path_id != audit.selected_terminal_path_id
+            or candidate.resolution_status.value
+            != audit.terminal_resolution_status
+        ):
+            raise ValueError("Candidate and DecisionAudit terminal paths differ")
+    aligned_results: dict[str, RuleClaimResult] = {}
+    for item in audit.rules:
+        claim = item.agent_claim
+        evaluation = item.server_evaluation
+        if claim is None:
+            raise ValueError("a Candidate/PASS Outcome requires every rule claim")
+        if evaluation.status is ServerRuleStatus.VERIFIED_PASS:
+            expected = RuleClaimResult.PASS
+        elif evaluation.status is ServerRuleStatus.VERIFIED_FAIL:
+            expected = RuleClaimResult.FAIL
+        elif evaluation.status in {
+            ServerRuleStatus.UNVERIFIABLE,
+            ServerRuleStatus.NOT_APPLICABLE,
+        }:
+            expected = RuleClaimResult.UNKNOWN
+        elif evaluation.status is ServerRuleStatus.SEMANTIC_ONLY:
+            expected = (
+                RuleClaimResult.UNKNOWN
+                if evaluation.issues
+                else claim.claimed_result
+            )
+        else:  # pragma: no cover - enum exhaustiveness
+            raise ValueError("unsupported server rule status")
+        if claim.claimed_result is not expected:
+            raise ValueError("Agent rule claim differs from the server evaluation")
+        aligned_results[item.rule_id] = claim.claimed_result
+    if isinstance(payload, DiagnosisOutcome):
+        candidate = payload.candidate_conclusion_draft
+        assert candidate is not None
+        for factor in candidate.causal_factors:
+            if any(
+                aligned_results.get(rule_id) is not RuleClaimResult.PASS
+                for rule_id in factor.required_rule_ids
+            ):
+                raise ValueError("confirmed causal factors require PASS rule claims")
+        for factor in candidate.candidate_factors:
+            results = [
+                aligned_results.get(rule_id)
+                for rule_id in factor.required_rule_ids
+            ]
+            if (
+                any(result is RuleClaimResult.FAIL for result in results)
+                or not any(result is RuleClaimResult.UNKNOWN for result in results)
+            ):
+                raise ValueError(
+                    "candidate factors require UNKNOWN claims and forbid FAIL claims"
+                )
+        for factor in candidate.excluded_factors:
+            if not any(
+                aligned_results.get(rule_id) is RuleClaimResult.FAIL
+                for rule_id in factor.required_rule_ids
+            ):
+                raise ValueError("excluded factors require at least one FAIL rule claim")
 
 
 def finalize_unresolved_result(
@@ -3040,7 +3369,7 @@ def _validate_server_final_user_results(
     if len(user_results) > 1 or len(archives) > 1:
         raise ValueError("a server-final Outcome may carry at most one user result pair")
 
-    completed_candidate = (
+    candidate_result = (
         job_type is JobType.DIAGNOSE
         and result_type is OutcomeResultType.COMPLETED
         and isinstance(payload, DiagnosisOutcome)
@@ -3056,10 +3385,10 @@ def _validate_server_final_user_results(
         if user_results or archives:
             raise ValueError("generic diagnosis Outcomes forbid result Artifacts")
         return
-    if completed_candidate:
+    if candidate_result:
         if len(user_results) != 1 or len(archives) != 1:
             raise ValueError(
-                "a completed Candidate Outcome requires exactly one USER_RESULT and one USER_RESULT_ARCHIVE"
+                "a reviewed Candidate Outcome requires exactly one USER_RESULT and one USER_RESULT_ARCHIVE"
             )
     elif unresolved_result:
         if len(user_results) != 1 or archives:
@@ -3071,7 +3400,7 @@ def _validate_server_final_user_results(
 
     if archives:
         metadata = archives[0].metadata
-        assert isinstance(metadata, UserResultArchiveMetadataV2)
+        assert isinstance(metadata, UserResultArchiveMetadataV3)
         if metadata.user_result_proposal_key != user_results[0].proposal_key:
             raise ValueError("USER_RESULT_ARCHIVE must bind the unique USER_RESULT proposal")
 
@@ -3111,6 +3440,12 @@ def _all_payload_evidence_bindings(payload: DiagnosisOutcome) -> list[EvidenceBi
         bindings.extend(candidate.supporting_evidence_bindings)
         for mapping in candidate.completion_criteria_mapping:
             bindings.extend(mapping.evidence_bindings)
+        for factor in (
+            candidate.causal_factors
+            + candidate.candidate_factors
+            + candidate.excluded_factors
+        ):
+            bindings.extend(factor.evidence_bindings)
     return bindings
 
 
@@ -3658,6 +3993,13 @@ class TransitionPlan(ContractModel):
             target = self.candidate_mutation.candidate_binding.existing_candidate_target
             if target is None or self.final_result_target != target:
                 raise ValueError("ACCEPTED candidate mutation requires matching final_result_target")
+            if self.target_case_status not in {
+                CaseStatus.RESOLVED,
+                CaseStatus.PARTIALLY_RESOLVED,
+            }:
+                raise ValueError(
+                    "ACCEPTED candidate mutation requires a resolved target Case status"
+                )
         elif self.final_result_target is not None:
             raise ValueError("final_result_target is only valid for candidate acceptance")
         if self.next_job_spec is not None:
@@ -4134,13 +4476,16 @@ class CaseAggregate(ContractModel):
                 raise ValueError(
                     "generic_result must exactly bind its GENERIC Job and Outcome"
                 )
-        if self.case.status is CaseStatus.RESOLVED and self.case.generic_result is None:
+        if self.case.status in {
+            CaseStatus.RESOLVED,
+            CaseStatus.PARTIALLY_RESOLVED,
+        } and self.case.generic_result is None:
             assert self.case.final_result is not None
             producing_job = self.jobs.get(
                 self.case.final_result.proposed_by_job_id
             )
             if producing_job is None or producing_job.job_type is not JobType.DIAGNOSE:
-                raise ValueError("RESOLVED Case requires a DIAGNOSE result Job")
+                raise ValueError("resolved Case requires a DIAGNOSE result Job")
             user_results = [
                 artifact
                 for artifact in self.artifacts.values()
@@ -4148,7 +4493,7 @@ class CaseAggregate(ContractModel):
                 and artifact.created_by_job_id == self.case.final_result.proposed_by_job_id
             ]
             if len(user_results) != 1:
-                raise ValueError("RESOLVED Case requires its accepted candidate USER_RESULT")
+                raise ValueError("resolved Case requires its accepted candidate USER_RESULT")
             result_archives = [
                 artifact
                 for artifact in self.artifacts.values()
@@ -4158,7 +4503,7 @@ class CaseAggregate(ContractModel):
             ]
             if len(result_archives) != 1:
                 raise ValueError(
-                    "RESOLVED Case requires its accepted candidate USER_RESULT_ARCHIVE"
+                    "resolved Case requires its accepted candidate USER_RESULT_ARCHIVE"
                 )
         if self.case.status is CaseStatus.UNRESOLVED and self.case.generic_result is None:
             assert self.case.unresolved_result is not None
@@ -4209,7 +4554,7 @@ class CaseAggregate(ContractModel):
 
 
 class StateFile(ContractModel):
-    schema_version: Literal[4]
+    schema_version: Literal[5]
     contract_revision: Literal[CONTRACT_REVISION]
     generation: NonNegativeInt
     installation_id: OpaqueId
@@ -4491,14 +4836,24 @@ class CaseView(ContractModel):
                 or self.selected_skill_ref is not None
             ):
                 raise ValueError("generic CaseView forbids specialized result fields")
-        if self.status is CaseStatus.RESOLVED:
+        if self.status in {CaseStatus.RESOLVED, CaseStatus.PARTIALLY_RESOLVED}:
             if self.generic_result is None and (
                 self.final_result is None
                 or self.final_result.status is not CandidateStatus.ACCEPTED
             ):
-                raise ValueError("RESOLVED case views require an ACCEPTED final result")
+                raise ValueError("resolved case views require an ACCEPTED final result")
+            if self.generic_result is None and self.final_result is not None:
+                expected = (
+                    DiagnosisResolutionStatus.COMPLETE
+                    if self.status is CaseStatus.RESOLVED
+                    else DiagnosisResolutionStatus.PARTIAL
+                )
+                if self.final_result.resolution_status is not expected:
+                    raise ValueError(
+                        "final result resolution_status must equal CaseView status"
+                    )
         elif self.final_result is not None:
-            raise ValueError("non-RESOLVED case views must have final_result=null")
+            raise ValueError("non-resolved case views must have final_result=null")
         if self.status is CaseStatus.UNRESOLVED:
             if self.generic_result is None and self.unresolved_result is None:
                 raise ValueError("UNRESOLVED case views require unresolved_result")
@@ -4550,8 +4905,6 @@ class CaseView(ContractModel):
                 for index, (mapping, criterion) in enumerate(zip(mappings, criteria, strict=True))
             ):
                 raise ValueError("CaseView final result must cover its ProblemSpec criteria")
-            if any(not mapping.satisfied or not mapping.evidence_refs for mapping in mappings):
-                raise ValueError("CaseView final result criteria must be satisfied and evidenced")
         if any(not artifact.downloadable for artifact in self.artifacts):
             raise ValueError("CaseView.artifacts may contain only downloadable summaries")
         _unique([artifact.artifact_id for artifact in self.artifacts], "CaseView artifact IDs")
@@ -4563,20 +4916,23 @@ class CaseView(ContractModel):
             for artifact in self.artifacts
             if artifact.kind is ArtifactKind.USER_RESULT_ARCHIVE
         ]
-        if self.status is CaseStatus.RESOLVED and self.generic_result is None:
+        if self.status in {
+            CaseStatus.RESOLVED,
+            CaseStatus.PARTIALLY_RESOLVED,
+        } and self.generic_result is None:
             assert self.final_result is not None
             if len(user_results) != 1 or (
                 user_results[0].created_by_job_id != self.final_result.proposed_by_job_id
             ):
                 raise ValueError(
-                    "RESOLVED CaseView requires the accepted candidate's USER_RESULT"
+                    "resolved CaseView requires the accepted candidate's USER_RESULT"
                 )
             if len(result_archives) != 1 or (
                 result_archives[0].created_by_job_id
                 != self.final_result.proposed_by_job_id
             ):
                 raise ValueError(
-                    "RESOLVED CaseView requires the accepted candidate's USER_RESULT_ARCHIVE"
+                    "resolved CaseView requires the accepted candidate's USER_RESULT_ARCHIVE"
                 )
         elif self.status is CaseStatus.UNRESOLVED and self.generic_result is None:
             assert self.unresolved_result is not None
@@ -5154,8 +5510,8 @@ class StateExportResource(ContractModel):
 
 
 class StateExport(ContractModel):
-    export_schema_version: Literal[4]
-    schema_version: Literal[4]
+    export_schema_version: Literal[5]
+    schema_version: Literal[5]
     contract_revision: Literal[CONTRACT_REVISION]
     source_generation: NonNegativeInt
     installation_id: OpaqueId
@@ -5224,7 +5580,7 @@ class ContractManifestEntry(ContractModel):
 
 
 class ContractManifest(ContractModel):
-    schema_version: Literal[4]
+    schema_version: Literal[5]
     contract_revision: Literal[CONTRACT_REVISION]
     generator_version: NonEmptyText
     files: list[ContractManifestEntry]

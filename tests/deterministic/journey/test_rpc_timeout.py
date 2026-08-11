@@ -496,6 +496,7 @@ def _wait_for_review_marker(
             CaseStatus.FAILED.value,
             CaseStatus.INTERRUPTED.value,
             CaseStatus.RESOLVED.value,
+            CaseStatus.PARTIALLY_RESOLVED.value,
             CaseStatus.UNRESOLVED.value,
         }:
             aggregate = stack.repository.read_snapshot().cases[case_id]
@@ -1089,8 +1090,8 @@ def test_r01_r14_rpc_timeout_is_one_durable_cross_module_path(
     assert len(user_results) == 1
     user_result = user_results[0]
     assert user_result.created_by_job_id == candidate_job_id
-    assert user_result.metadata.schema_version == 2
-    assert user_result.metadata.format_id == "problem-locator-diagnosis-v2"
+    assert user_result.metadata.schema_version == 3
+    assert user_result.metadata.format_id == "problem-locator-diagnosis-v3"
     result_archives = [
         item
         for item in reviewing.artifacts.values()
@@ -1099,8 +1100,8 @@ def test_r01_r14_rpc_timeout_is_one_durable_cross_module_path(
     assert len(result_archives) == 1
     result_archive = result_archives[0]
     assert result_archive.created_by_job_id == candidate_job_id
-    assert result_archive.metadata.schema_version == 2
-    assert result_archive.metadata.format_id == "problem-locator-result-archive-v2"
+    assert result_archive.metadata.schema_version == 3
+    assert result_archive.metadata.format_id == "problem-locator-result-archive-v3"
     assert result_archive.metadata.user_result_proposal_key == "server-user-result"
     assert result_archive.metadata.target_log_count == 2
     candidate_outcome = next(
@@ -1245,8 +1246,12 @@ def test_r01_r14_rpc_timeout_is_one_durable_cross_module_path(
     experience = _cross_project_result_experience()
     payload = UserResultPayload.model_validate_json(download.content)
     assert canonical_json_bytes(payload) == download.content
-    assert payload.schema_version == 2
-    assert payload.format_id == experience["result_json_expectations"]["format_id"]
+    assert payload.schema_version == 3
+    assert (
+        experience["result_json_expectations"]["format_id"]
+        == "problem-locator-diagnosis-v2"
+    )
+    assert payload.format_id == "problem-locator-diagnosis-v3"
     assert set(experience["result_json_expectations"]["required_fields"]) <= set(
         payload.model_dump(mode="json")
     )
@@ -1275,8 +1280,8 @@ def test_r01_r14_rpc_timeout_is_one_durable_cross_module_path(
         archive_manifest_bytes = result_zip.read("archive-manifest.json")
         archive_manifest = parse_canonical_json_bytes(archive_manifest_bytes)
         assert canonical_json_bytes(archive_manifest) == archive_manifest_bytes
-        assert archive_manifest["schema_version"] == 2
-        assert archive_manifest["format_id"] == "problem-locator-result-archive-v2"
+        assert archive_manifest["schema_version"] == 3
+        assert archive_manifest["format_id"] == "problem-locator-result-archive-v3"
         assert archive_manifest["problem_time"] == PARAMETER_GROUP_A["problem_time"]
         assert archive_manifest["diagnosis_result_sha256"] == user_result.sha256
         assert archive_manifest["target_log_count"] == len(golden_targets)

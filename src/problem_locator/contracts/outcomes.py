@@ -10,6 +10,7 @@ from .enums import (
     AttachmentStatus,
     CandidateStatus,
     DiagnosisMode,
+    DiagnosisResolutionStatus,
     ErrorCode,
     EvidenceSourceType,
     FieldUpdateAction,
@@ -73,7 +74,7 @@ from .models import (
     SubmitSupplementTriggerPayload,
     TransitionPlan,
     TriggerPayload,
-    UserResultPayloadV2,
+    UserResultPayloadV3,
     UserFactEvidenceLocator,
     ValidatedTrigger,
     WorkspaceArtifactInput,
@@ -246,6 +247,12 @@ def _payload_evidence_bindings(payload: OutcomePayload | None) -> list[EvidenceB
         bindings.extend(candidate.supporting_evidence_bindings)
         for mapping in candidate.completion_criteria_mapping:
             bindings.extend(mapping.evidence_bindings)
+        for factor in (
+            candidate.causal_factors
+            + candidate.candidate_factors
+            + candidate.excluded_factors
+        ):
+            bindings.extend(factor.evidence_bindings)
     return bindings
 
 
@@ -257,6 +264,12 @@ def _candidate_evidence_bindings(
     bindings = list(candidate.supporting_evidence_bindings)
     for mapping in candidate.completion_criteria_mapping:
         bindings.extend(mapping.evidence_bindings)
+    for factor in (
+        candidate.causal_factors
+        + candidate.candidate_factors
+        + candidate.excluded_factors
+    ):
+        bindings.extend(factor.evidence_bindings)
     return bindings
 
 
@@ -621,8 +634,8 @@ def validate_user_result_for_outcome(
     job: Job,
     outcome: AgentJobOutcome | JobOutcome,
     result_bytes: bytes,
-) -> UserResultPayloadV2:
-    """Validate the canonical server-final USER_RESULT v2 representation."""
+) -> UserResultPayloadV3:
+    """Validate the canonical server-final USER_RESULT v3 representation."""
 
     try:
         parsed_result = parse_canonical_json_bytes(result_bytes)
@@ -634,7 +647,7 @@ def validate_user_result_for_outcome(
             "USER_RESULT bytes are not canonical",
         ) from None
     try:
-        result = UserResultPayloadV2.model_validate(parsed_result)
+        result = UserResultPayloadV3.model_validate(parsed_result)
     except (KeyboardInterrupt, SystemExit):
         raise
     except Exception:
@@ -644,7 +657,7 @@ def validate_user_result_for_outcome(
         ) from None
     payload = outcome.payload
     candidate = payload.candidate_conclusion_draft if isinstance(payload, DiagnosisOutcome) else None
-    completed_candidate = (
+    candidate_result = (
         outcome.job_type is JobType.DIAGNOSE
         and outcome.result_type is OutcomeResultType.COMPLETED
         and candidate is not None
@@ -655,7 +668,7 @@ def validate_user_result_for_outcome(
         and isinstance(payload, ReviewAssessment)
         and payload.verdict is not ReviewVerdict.PASS
     )
-    if not completed_candidate and not unresolved_result:
+    if not candidate_result and not unresolved_result:
         raise UserResultValidationError(
             "outcome_branch",
             "this Outcome branch cannot publish USER_RESULT",
@@ -663,17 +676,29 @@ def validate_user_result_for_outcome(
     expected = {
         "source_job_type": outcome.job_type,
         "problem_statement": job.context_snapshot.problem_spec.statement,
-        "status": "COMPLETED" if completed_candidate else "INCONCLUSIVE",
+        "status": (
+            "COMPLETED"
+            if candidate_result
+            and candidate is not None
+            and candidate.resolution_status is DiagnosisResolutionStatus.COMPLETE
+            else "PARTIAL"
+            if candidate_result
+            else "INCONCLUSIVE"
+        ),
         "recommendations": [
             payload.recommended_next_step
             if isinstance(payload, DiagnosisOutcome)
             else payload.recommendation
         ],
     }
-    if completed_candidate:
+    if candidate_result:
         assert candidate is not None
         expected.update(
-            root_cause=candidate.statement,
+            root_cause=(
+                candidate.statement
+                if candidate.resolution_status is DiagnosisResolutionStatus.COMPLETE
+                else None
+            ),
             supporting_evidence_bindings=candidate.supporting_evidence_bindings,
             completion_criteria_mapping=candidate.completion_criteria_mapping,
         )
@@ -688,8 +713,35 @@ def validate_user_result_for_outcome(
                 f"{field_name}_mismatch",
                 f"USER_RESULT {field_name} must exactly match the server-final Outcome seam",
             )
-    if completed_candidate:
+    if candidate_result:
         assert isinstance(payload, DiagnosisOutcome)
+        assert candidate is not None
+        for report_values, draft_values in (
+            (result.causal_factors, candidate.causal_factors),
+            (result.candidate_factors, candidate.candidate_factors),
+            (result.excluded_factors, candidate.excluded_factors),
+        ):
+            if len(report_values) != len(draft_values) or any(
+                (
+                    report.factor_id,
+                    report.role,
+                    report.statement,
+                    report.evidence_bindings,
+                    report.required_rule_ids,
+                )
+                != (
+                    draft.factor_id,
+                    draft.role,
+                    draft.statement,
+                    draft.evidence_bindings,
+                    draft.required_rule_ids,
+                )
+                for report, draft in zip(report_values, draft_values, strict=True)
+            ):
+                raise UserResultValidationError(
+                    "factors_mismatch",
+                    "USER_RESULT factors must exactly reflect the Diagnosis Candidate",
+                )
         expected_findings = [
             (item.statement, item.confidence, item.evidence_bindings)
             for item in payload.findings
@@ -716,6 +768,8 @@ def validate_user_result_for_outcome(
             item.server_evaluation.status,
             item.server_evaluation.evidence_bindings,
             item.server_evaluation.observed_times,
+            item.server_evaluation.event_observations,
+            item.server_evaluation.derived_values,
             item.server_evaluation.issues,
         )
         for item in audit.rules
@@ -727,6 +781,8 @@ def validate_user_result_for_outcome(
             item.status,
             item.evidence_bindings,
             item.observed_times,
+            item.event_observations,
+            item.derived_values,
             item.issues,
         )
         for item in result.verification_rules
@@ -777,14 +833,24 @@ def validate_user_result_for_outcome(
 
 
 def validate_user_result_resolution(
-    result: UserResultPayloadV2,
+    result: UserResultPayloadV3,
     final_candidate: CandidateConclusion,
     evidence_ids_by_proposal: Mapping[str, str],
 ) -> CandidateConclusion:
-    """Validate completed v2 bindings after S03 resolves proposal keys to IDs."""
+    """Validate complete or partial v3 bindings after proposal formalization."""
 
-    if result.status != "COMPLETED" or result.root_cause is None:
-        raise ValueError("only a COMPLETED USER_RESULT can resolve a Candidate")
+    expected_status = (
+        "COMPLETED"
+        if final_candidate.resolution_status
+        is DiagnosisResolutionStatus.COMPLETE
+        else "PARTIAL"
+    )
+    if result.status != expected_status:
+        raise ValueError("USER_RESULT status must match the final Candidate")
+    if expected_status == "COMPLETED" and result.root_cause is None:
+        raise ValueError("a completed USER_RESULT requires root_cause")
+    if expected_status == "PARTIAL" and result.root_cause is not None:
+        raise ValueError("a partial USER_RESULT must not claim a complete root cause")
 
     def resolve(binding: EvidenceBinding) -> str:
         if binding.existing_evidence_id is not None:
@@ -799,7 +865,11 @@ def validate_user_result_resolution(
         resolve(binding) for binding in result.supporting_evidence_bindings
     ]
     if (
-        result.root_cause != final_candidate.statement
+        (
+            result.root_cause != final_candidate.statement
+            if expected_status == "COMPLETED"
+            else result.root_cause is not None
+        )
         or resolved_supporting != final_candidate.supporting_evidence_refs
         or len(result.completion_criteria_mapping)
         != len(final_candidate.completion_criteria_mapping)
@@ -813,12 +883,35 @@ def validate_user_result_resolution(
         if (
             draft_mapping.criterion_index != final_mapping.criterion_index
             or draft_mapping.criterion != final_mapping.criterion
-            or draft_mapping.satisfied != final_mapping.satisfied
+            or draft_mapping.status is not final_mapping.status
             or draft_mapping.explanation != final_mapping.explanation
             or [resolve(binding) for binding in draft_mapping.evidence_bindings]
             != final_mapping.evidence_refs
         ):
             raise ValueError("resolved USER_RESULT mapping does not match the final Candidate")
+
+    def validate_factors(result_factors, candidate_factors) -> None:
+        if len(result_factors) != len(candidate_factors):
+            raise ValueError("resolved USER_RESULT factor count does not match Candidate")
+        for report_factor, candidate_factor in zip(
+            result_factors, candidate_factors, strict=True
+        ):
+            if (
+                report_factor.factor_id != candidate_factor.factor_id
+                or report_factor.role is not candidate_factor.role
+                or report_factor.statement != candidate_factor.statement
+                or report_factor.required_rule_ids
+                != candidate_factor.required_rule_ids
+                or [resolve(binding) for binding in report_factor.evidence_bindings]
+                != candidate_factor.evidence_refs
+            ):
+                raise ValueError(
+                    "resolved USER_RESULT factor does not match the final Candidate"
+                )
+
+    validate_factors(result.causal_factors, final_candidate.causal_factors)
+    validate_factors(result.candidate_factors, final_candidate.candidate_factors)
+    validate_factors(result.excluded_factors, final_candidate.excluded_factors)
     return final_candidate
 
 
@@ -1128,7 +1221,7 @@ __all__ = [
     "SubmitSupplementTriggerPayload",
     "TransitionPlan",
     "TriggerPayload",
-    "UserResultPayloadV2",
+    "UserResultPayloadV3",
     "ValidatedTrigger",
     "apply_problem_spec_patch",
     "coordinator_outcome_error_failure",

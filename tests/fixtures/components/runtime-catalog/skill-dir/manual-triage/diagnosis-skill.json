@@ -6,12 +6,13 @@
   "logparse_plan": null,
   "requirements": [],
   "requires_logparse": false,
-  "schema_version": 4,
+  "schema_version": 5,
   "summary": "Diagnose a service incident from structured facts and existing evidence.",
   "tool_bundle_id": "tool-bundle/diagnose",
-  "version": "4.0.0",
+  "version": "5.0.0",
   "verification_contract": {
-    "schema_version": 1,
+    "schema_version": 2,
+    "observation_policies": [],
     "event_extractors": [],
     "rules": [
       {
@@ -23,6 +24,35 @@
         "parameters": {
           "assertion": "The existing evidence supports the candidate.",
           "evidence_events": []
+        }
+      }
+    ],
+    "terminal_paths": [
+      {
+        "id": "complete",
+        "resolution_status": "COMPLETE",
+        "condition": {
+          "any_of": [
+            {
+              "all_of": [
+                {
+                  "rule_id": "manual_causality",
+                  "result": "PASS"
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "id": "none",
+        "resolution_status": "NONE",
+        "condition": {
+          "any_of": [
+            {
+              "all_of": []
+            }
+          ]
         }
       }
     ]

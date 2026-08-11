@@ -100,8 +100,8 @@ def unresolved_user_result_proposal(job: Job) -> ArtifactProposal:
         sha256=staged.sha256,
         staged_resource_ref=staged,
         metadata=UserResultMetadata(
-            schema_version=2,
-            format_id="problem-locator-diagnosis-v2",
+            schema_version=3,
+            format_id="problem-locator-diagnosis-v3",
             description="Canonical unresolved diagnosis result.",
         ),
     )

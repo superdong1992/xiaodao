@@ -1,4 +1,4 @@
-"""Frozen public enumerations for the Problem Locator V2 contract."""
+"""Frozen public enumerations for the Problem Locator V3 contract."""
 
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ class CaseStatus(StrEnum):
     WAITING_ATTACHMENT = "WAITING_ATTACHMENT"
     REVIEWING = "REVIEWING"
     RESOLVED = "RESOLVED"
+    PARTIALLY_RESOLVED = "PARTIALLY_RESOLVED"
     UNRESOLVED = "UNRESOLVED"
     FAILED = "FAILED"
     CANCELLED = "CANCELLED"
@@ -87,6 +88,24 @@ class CandidateStatus(StrEnum):
     ACCEPTED = "ACCEPTED"
 
 
+class DiagnosisResolutionStatus(StrEnum):
+    COMPLETE = "COMPLETE"
+    PARTIAL = "PARTIAL"
+
+
+class CompletionCriterionStatus(StrEnum):
+    SATISFIED = "SATISFIED"
+    PARTIALLY_SATISFIED = "PARTIALLY_SATISFIED"
+    UNSATISFIED = "UNSATISFIED"
+    UNKNOWN = "UNKNOWN"
+
+
+class CausalFactorRole(StrEnum):
+    CAUSE = "CAUSE"
+    CONTRIBUTOR = "CONTRIBUTOR"
+    CONDITION = "CONDITION"
+
+
 class ReviewVerdict(StrEnum):
     PASS = "PASS"
     NEED_MORE_EVIDENCE = "NEED_MORE_EVIDENCE"
@@ -132,6 +151,7 @@ class ServerRuleStatus(StrEnum):
     VERIFIED_FAIL = "VERIFIED_FAIL"
     UNVERIFIABLE = "UNVERIFIABLE"
     SEMANTIC_ONLY = "SEMANTIC_ONLY"
+    NOT_APPLICABLE = "NOT_APPLICABLE"
 
 
 class UnresolvedReasonCode(StrEnum):

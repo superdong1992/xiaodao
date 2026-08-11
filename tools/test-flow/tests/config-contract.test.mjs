@@ -57,7 +57,7 @@ test("orphan Gates fail before admission", () => {
   }, (root) => loadConfiguration(REPO_ROOT, root)), (error) => error.code === "CONFIG_ORPHAN_GATE");
 });
 
-test("release.full has one fresh six-stage CrossJob closure on every Client platform", () => {
+test("release.full has one isolated Wiki generation Gate followed by one fresh six-stage CrossJob closure on every Client platform", () => {
   const config = loadConfiguration(REPO_ROOT);
   const expected = [
     "journey.cross-job.environment",
@@ -70,7 +70,11 @@ test("release.full has one fresh six-stage CrossJob closure on every Client plat
   for (const client of ["windows", "macos", "linux"]) {
     const closure = resolveGoalClosure(config, { goalId: "release.full", track: "release", client });
     assert.deepEqual(closure.stages.filter((stage) => stage.id.startsWith("journey.cross-job.")).map((stage) => stage.id), expected);
-    assert.equal(closure.stages.filter((stage) => stage.kind === "isolated-real").length, 0);
+    assert.deepEqual(
+      closure.stages.filter((stage) => stage.kind === "isolated-real").map((stage) => stage.id),
+      ["real.skill-generation"],
+    );
+    assert.ok(closure.stages.findIndex((stage) => stage.id === "real.skill-generation") < closure.stages.findIndex((stage) => stage.id === "journey.cross-job.environment"));
     assert.ok(closure.stages.filter((stage) => stage.id.startsWith("journey.cross-job.")).every((stage) => stage.reuse.release === "never"));
   }
 });
@@ -108,7 +112,7 @@ test("every public platform has a repository-owned adapter and no harness identi
   assert.equal(fs.existsSync(path.join(REPO_ROOT, "tools", "test-flow", "harness")), false);
 });
 
-test("every repository identity path exists and all diagnosis Skill identities are distinct", () => {
+test("every repository identity path exists and generated, approved and legacy diagnosis Skill identities stay distinct", () => {
   const config = loadConfiguration(REPO_ROOT);
   for (const [componentId, component] of Object.entries(config.identities.components)) {
     if (component.kind !== "paths") continue;
@@ -116,7 +120,31 @@ test("every repository identity path exists and all diagnosis Skill identities a
       assert.equal(fs.existsSync(path.join(REPO_ROOT, relative)), true, `${componentId} is missing ${relative}`);
     }
   }
-  assert.deepEqual(config.identities.components["skill.diagnose"].paths, [
+  assert.deepEqual(config.identities.components["skill.diagnose"], {
+    kind: "release-case",
+    root: "tests/cases/release",
+    partition: "approved",
+  });
+  assert.deepEqual(config.identities.components["case.wiki"], {
+    kind: "release-case",
+    root: "tests/cases/release",
+    partition: "wiki",
+  });
+  assert.deepEqual(config.identities.components["case.journey"], {
+    kind: "release-case",
+    root: "tests/cases/release",
+    partition: "journey",
+  });
+  assert.deepEqual(config.identities.components["case.oracle"], {
+    kind: "release-case",
+    root: "tests/cases/release",
+    partition: "oracle",
+  });
+  assert.deepEqual(config.identities.components["skill.generator"].paths, [
+    ".claude/skills/wiki-to-diagnosis-skill",
+    "src/problem_locator/runtime/verification_contract.py",
+  ]);
+  assert.deepEqual(config.identities.components["skill.legacy-diagnose"].paths, [
     "tests/fixtures/components/diagnosis-generator/diagnose-service-takeover",
   ]);
   assert.deepEqual(config.identities.components["skill.logparse"].paths, [

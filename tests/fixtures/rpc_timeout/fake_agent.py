@@ -227,17 +227,17 @@ def _empty_delta(**updates: object) -> DiagnosisStateDelta:
 def _skill_manifest(context: str) -> dict[str, object]:
     skill = _section(context, "SKILL")
     match = re.search(
-        r"<!-- DIAGNOSIS_SKILL_MANIFEST_V4_BEGIN -->\s*"
+        r"<!-- DIAGNOSIS_SKILL_MANIFEST_V5_BEGIN -->\s*"
         r"```json\s*(\{.*?\})\s*```\s*"
-        r"<!-- DIAGNOSIS_SKILL_MANIFEST_V4_END -->",
+        r"<!-- DIAGNOSIS_SKILL_MANIFEST_V5_END -->",
         skill,
         flags=re.DOTALL,
     )
     if match is None:
-        raise RuntimeError("the pinned Skill manifest v4 is absent")
+        raise RuntimeError("the pinned Skill manifest v5 is absent")
     value = json.loads(match.group(1))
-    if not isinstance(value, dict) or value.get("schema_version") != 4:
-        raise RuntimeError("the pinned Skill manifest is not v4")
+    if not isinstance(value, dict) or value.get("schema_version") != 5:
+        raise RuntimeError("the pinned Skill manifest is not v5")
     return value
 
 
@@ -805,14 +805,27 @@ def _candidate(
     mapping = CompletionCriterionDraftMapping(
         criterion_index=0,
         criterion=criterion,
-        satisfied=True,
+        status="SATISFIED",
         evidence_bindings=evidence_bindings,
         explanation="The request identifier appears in the parsed log.",
     )
     candidate = CandidateConclusionDraft(
         proposal_key="candidate",
         existing_conclusion_id=None,
+        resolution_status="COMPLETE",
+        terminal_path_id="complete",
         statement="The inventory RPC exceeded its deadline.",
+        causal_factors=[
+            {
+                "factor_id": "takeover_pool_wait",
+                "role": "CAUSE",
+                "statement": "The inventory RPC exceeded its deadline.",
+                "evidence_bindings": evidence_bindings,
+                "required_rule_ids": ["takeover_pool_wait_caused_timeout"],
+            }
+        ],
+        candidate_factors=[],
+        excluded_factors=[],
         # Deliberately reverse Candidate order.  Public archive scope/order is
         # owned by the resolved Logparse plan, never by Evidence traversal.
         supporting_evidence_bindings=list(reversed(evidence_bindings)),
@@ -874,13 +887,26 @@ def _same_job_candidate(
     candidate = CandidateConclusionDraft(
         proposal_key="candidate",
         existing_conclusion_id=None,
+        resolution_status="COMPLETE",
+        terminal_path_id="complete",
         statement="The inventory RPC exceeded its deadline.",
+        causal_factors=[
+            {
+                "factor_id": "takeover_pool_wait",
+                "role": "CAUSE",
+                "statement": "The inventory RPC exceeded its deadline.",
+                "evidence_bindings": evidence_bindings,
+                "required_rule_ids": ["takeover_pool_wait_caused_timeout"],
+            }
+        ],
+        candidate_factors=[],
+        excluded_factors=[],
         supporting_evidence_bindings=list(reversed(evidence_bindings)),
         completion_criteria_mapping=[
             CompletionCriterionDraftMapping(
                 criterion_index=0,
                 criterion=criterion,
-                satisfied=True,
+                status="SATISFIED",
                 evidence_bindings=evidence_bindings,
                 explanation="The request identifier appears in the parsed log.",
             )

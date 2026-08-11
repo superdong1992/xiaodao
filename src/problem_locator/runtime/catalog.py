@@ -34,6 +34,11 @@ from problem_locator.contracts import (
     default_resource_limits,
 )
 
+from .verification_contract import (
+    MANIFEST_SCHEMA_VERSION,
+    validate_verification_contract,
+)
+
 
 BUILTIN_ASSET_ROOT = Path(__file__).with_name("assets")
 _DEFAULT_ASSET_VERSION = "1.0.0"
@@ -98,13 +103,13 @@ _BUILTIN_SPECS = (
         "profiles/specialist",
         AssetKind.AGENT_PROFILE,
         "agent-profile/specialist",
-        "1.0.1",
+        "3.0.0",
     ),
     _BuiltinSpec(
         "profiles/reviewer",
         AssetKind.AGENT_PROFILE,
         "agent-profile/reviewer",
-        "1.0.1",
+        "3.0.0",
     ),
     _BuiltinSpec(
         "profiles/generic-locator",
@@ -164,13 +169,13 @@ _BUILTIN_SPECS = (
         "output-contracts/diagnose",
         AssetKind.OUTPUT_CONTRACT,
         "output-contract/diagnose",
-        "4.0.1",
+        "5.0.0",
     ),
     _BuiltinSpec(
         "output-contracts/review",
         AssetKind.OUTPUT_CONTRACT,
         "output-contract/review",
-        "2.0.0",
+        "3.0.0",
     ),
     _BuiltinSpec(
         "output-contracts/generic-locator",
@@ -734,7 +739,7 @@ def _require_event_field(
     return event, field
 
 
-def _require_verification_contract(
+def _require_verification_contract_v1(
     value: Any,
     *,
     requirements: tuple[dict[str, Any], ...],
@@ -1000,6 +1005,32 @@ def _require_verification_contract(
     return value
 
 
+def _require_verification_contract(
+    value: Any,
+    *,
+    requirements: tuple[dict[str, Any], ...],
+    logparse_plan: dict[str, Any] | None,
+    requires_logparse: bool,
+) -> dict[str, Any]:
+    """Validate the hard-cut v2 contract without carrying v1 wire semantics."""
+
+    return validate_verification_contract(
+        value,
+        requirements=requirements,
+        anchor_labels=(
+            set()
+            if logparse_plan is None
+            else {item["label"] for item in logparse_plan["anchors"]}
+        ),
+        role_labels=(
+            set()
+            if logparse_plan is None
+            else {item["label"] for item in logparse_plan["anchors"]}
+        ),
+        requires_logparse=requires_logparse,
+    )
+
+
 def _load_skill(root: Path) -> _SkillDescriptor:
     content_hash = hash_product_directory(root)
     manifest_path = root / "diagnosis-skill.json"
@@ -1024,8 +1055,13 @@ def _load_skill(root: Path) -> _SkillDescriptor:
         optional={"logparse_product"},
         manifest_name="diagnosis-skill.json",
     )
-    if type(manifest["schema_version"]) is not int or manifest["schema_version"] != 4:
-        raise ValueError("diagnosis-skill.json schema_version must equal integer 4")
+    if (
+        type(manifest["schema_version"]) is not int
+        or manifest["schema_version"] != MANIFEST_SCHEMA_VERSION
+    ):
+        raise ValueError(
+            "diagnosis-skill.json schema_version must equal integer 5"
+        )
     skill_id = manifest["id"]
     if not isinstance(skill_id, str) or _SKILL_ID_PATTERN.fullmatch(skill_id) is None:
         raise ValueError("diagnosis skill id does not match the frozen pattern")

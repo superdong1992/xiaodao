@@ -1,122 +1,65 @@
-# Generated Diagnosis Skill v4 contract
+# Generated Diagnosis Skill v5 contract
 
-生成产品恰好包含 `SKILL.md` 和 Canonical `diagnosis-skill.json`。
+生成产品恰好包含 `SKILL.md` 和 Canonical `diagnosis-skill.json`。manifest 必须使用
+`schema_version=5`、Skill `version>=5.0.0`，并声明 capability、deployment_scope、summary、
+entry document、diagnose tool bundle、requirements、logparse_plan 和 verification_contract。
+`logparse_product` 是唯一可选顶层字段，省略表示上游默认。
 
-manifest schema v4 必填字段：
+Requirement 仍是严格的 S00 扁平业务输入声明：INPUT/USER_FACT 或
+ATTACHMENT/READY_ATTACHMENT，INITIAL/AFTER_LOGPARSE，带 prompt、constraints 和
+`NONE|MISSING_ONLY` supplement policy。所有项天然 required；每阶段最多一个附件，
+AFTER_LOGPARSE 只允许 INPUT。Logparse archive Content-Type 由 generator 固定注入。
 
-```text
-schema_version=4
-id, version>=4.0.0, capability, summary
-deployment_scope = PRODUCTION | TEST_ONLY
-entry_document=SKILL.md
-tool_bundle_id=tool-bundle/diagnose
-requires_logparse
-requirements[]
-logparse_plan
-verification_contract
-```
+`logparse_plan` 使用 USER_FACT/SKILL_FIXED value binding，anchors 按顺序声明 label、module、
+slot、process_name、pid。USER_FACT 必须引用 INPUT requirement。`requires_logparse=false` 时 plan
+为 null、无 extractors、无 AFTER_LOGPARSE requirement。
 
-`logparse_product` 是唯一可选字段：省略表示有效值 `default`；仅非默认产品出现。
-
-RequirementSpec 字段恰好为：
-
-```text
-name
-kind = INPUT | ATTACHMENT
-stage = INITIAL | AFTER_LOGPARSE
-fulfillment_source = USER_FACT | READY_ATTACHMENT
-prompt
-constraints = S00 InputRequirementConstraints | AttachmentRequirementConstraints
-supplement_policy = NONE | MISSING_ONLY
-```
-
-INPUT 只能配 USER_FACT；ATTACHMENT 只能配 READY_ATTACHMENT。所有项天然 required，
-manifest 禁止 `required` 字段。每阶段最多一个 ATTACHMENT，AFTER_LOGPARSE 只允许 INPUT。
-作者侧 GenerationSpec 中，普通 ATTACHMENT 必须声明完整
-`allowed_content_types/min_count/max_count`；被 `logparse_plan.attachment_requirement` 引用的
-Logparse 附件只声明 `min_count/max_count`。生成器规范化时自动补入平台固定的
-`application/gzip`、`application/zip`、`application/x-tar`，因此最终 manifest 仍是完整的
-S00 AttachmentRequirementConstraints。Content-Type 不是生成时的用户输入。
-
-`logparse_plan` 为 null 或对象：
-
-```json
-{
-  "attachment_requirement": "archive_name_or_null",
-  "problem_time_binding": {"source": "USER_FACT", "name": "incident_time"},
-  "anchors": [
-    {
-      "label": "database",
-      "module": {"source": "SKILL_FIXED", "value": "database"},
-      "slot": {"source": "USER_FACT", "name": "database_instance"},
-      "process_name": {"source": "USER_FACT", "name": "database_process"},
-      "pid": null
-    }
-  ]
-}
-```
-
-每个 ValueBinding 只能是 `USER_FACT{name}` 或 `SKILL_FIXED{value}`；USER_FACT name 必须
-引用 INPUT requirement。`requires_logparse=false` 强制 plan=null、无 AFTER_LOGPARSE、
-且省略 product。`requires_logparse=true` 要求显式 plan，但不会自动产生任何字段。
-
-`verification_contract` 字段恰好为 `schema_version=1`、`event_extractors[]` 和
-`rules[]`。Logparse Skill 至少声明一个 extractor；无 Logparse Skill 必须使用空数组。
-Runtime 以它为服务端验证输入；Agent 的自然语言解释不是机器判定结果。
-extractor 恰好声明：
-
-```text
-id, anchor, line_pattern
-timestamp_group, timestamp_format=RFC3339_MILLIS_UTC
-field_groups[], match_cardinality=EXACTLY_ONE
-```
-
-`line_pattern` 是 `^...$` UTF-8 单行 Python 正则，命名捕获组集合必须恰好等于时间组和
-field_groups；缺失或多次匹配都不能通过。Logparse 目标进程聚合日志保留
-`[序号] [diagnostic|原始相对路径] ` 或 `[序号] [journal|原始相对路径] ` 行前缀，
-extractor 必须针对实际交付的完整行显式匹配所需来源前缀，禁止假设服务端会剥离前缀。
-规则恰好声明
-`id/kind/description/depends_on/remediation_requirements/parameters`，dependency 只能引用前置
-rule。`remediation_requirements` 只能引用 `MISSING_ONLY` requirement，不能替换已有事实。
-
-生成的 `SKILL.md` 使用 V2 两阶段交付：Agent 写
-`output/job_outcome.draft.json` 并调用 `problem-locator-seal-outcome-draft`；只有 Agent
-进程退出后的服务端验证器可以生成权威 `output/job_outcome.json` 与 decision audit。
-kind 固定为 `EVENT_PRESENT | EVENT_TIME_WINDOW | FACT_FIELD_EQUALS | ROLE_COVERAGE |
-CROSS_ROLE_CORRELATION | EVENT_ORDER | SEMANTIC_CAUSALITY`。普通时间窗必须显式声明
-`before_ms/after_ms/lower_bound/upper_bound`，无默认窗口。本版本不支持 suppression、
-rate-limit 或日志采样语义。
-
-LOGPARSE Evidence 不复制或重声明目标日志文件：`workspace_relative_path` 固定为 null，
-`locator.relative_path` 相对于绑定的 LOGPARSE_RUN tree root；新运行使用
-`artifact_proposal_key`，已有运行使用正式 Artifact ID。任何非 null proposal path 都
-只能位于 `output/proposals/<该 proposal_key>/` 下。
-Broker anchor 的 `label/module/slot/process_name` 始终为 JSON string，必须逐字复制解析后
-binding；禁止把数字样式字符串转换为 JSON number。
-新 `LOGPARSE_RUN.metadata` 恰好包含 `tree_manifest_sha256`、`logparse_version_ref`、
+每个 `logparse_run_artifact_draft` 必须声明
+`application/vnd.problem-locator.logparse-run+directory`、`declared_size` 和
+`declared_sha256`。它的 `metadata` 严格且仅含 `schema_version`、`format_id`、
+`description`、`tree_manifest_sha256`、`logparse_version_ref`、
 `parse_manifest_relative_path`、`source_attachment_id`、
-`source_attachment_sha256`、`parse_parameters` 六个字段，且 `parse_parameters` 仅含
-有效 `product`；禁止添加 `schema_version`、`format_id`、`description` 等通用字段。
-Artifact draft 外壳固定为 `artifact_kind=LOGPARSE_RUN`、
-`content_type=application/vnd.problem-locator.logparse-run+directory`、
-`resource_kind=DIRECTORY`，且 `declared_size`、`declared_sha256` 均为 null。
-`parse-targets` 成功结果携带该 `logparse_run_artifact_draft`；Agent 必须逐字段原样复制，
-不得自行构造、扩展版本字符串或修改任何值。`target-logs` 复用结果不携带新 draft。
-若 parse 后因 AFTER_LOGPARSE requirement 缺失而返回 NEED_INPUT，每个需要跨 Job 保留的
-LOGPARSE Evidence proposal 必须同时出现在 `state_delta.add_evidence_bindings` 中，binding
-使用 `existing_evidence_id=null` 和对应 `evidence_proposal_key`；该 Evidence 通过
-`artifact_proposal_key` 绑定新 LOGPARSE_RUN，使平台共同接收两者。proposal、Finding 或
-prose 本身不驱动接收。续跑只能对正式 LOGPARSE_RUN 调用 `target-logs`，禁止重新 parse。
+`source_attachment_sha256`、`parse_parameters` 这些合同字段；后六项恰好包含
+Logparse 运行身份、来源与参数，Agent 不得自行增删或改名。
 
-Candidate supporting bindings 必须去重并保持当前快照 `evidence_refs` 的相对顺序；新接收
-Evidence 只按 `state_delta.add_evidence_bindings` 顺序追加，禁止按角色、时间或叙述重排。
+Agent 禁止提出或写入 `USER_RESULT`、`USER_RESULT_ARCHIVE`、
+`diagnosis-result.json` 或 `result.zip`。这些公开产物只能由服务端根据已验证的审计
+生成，并在独立 Review PASS 后开放公开下载。
 
-形成 Candidate 时，Agent 禁止提出或写入 `USER_RESULT`、`USER_RESULT_ARCHIVE`、
-`diagnosis-result.json`、`result.zip` 或任何归档请求，也禁止自行调用 zip/tar。Agent draft
-只提交 Candidate、Evidence、rule claims 与合同允许的内部 Artifact proposal。Agent 退出后，
-Runtime 重读权威证据并完成机器验证；DIAGNOSE 草稿通过服务端验证后，服务端立即从已
-验证的权威结果生成并持久化用户产物，仅在独立 Review PASS 后开放公开下载。
+## verification_contract v2
 
-生产 catalog 默认拒绝任何 `TEST_ONLY` manifest，并要求至少一个 `PRODUCTION` Diagnosis
-Skill。只有测试 harness 可以通过内部显式开关加载 `TEST_ONLY` fixture；生产 Settings、
-环境变量和 CLI 不提供绕过入口。
+顶层字段恰好是：
+
+```text
+schema_version=2
+observation_policies[]
+event_extractors[]
+rules[]
+terminal_paths[]
+```
+
+Observation policy 首版仅支持 SUPPRESSION 与 RATE_LIMIT，均显式声明 id/kind/scope/key_fields/
+window_ms/max_observed/boundary；SUPPRESSION 的 max_observed 为 null。policy 只描述观测损失，
+正向事件仍可证明发生，absence/上界可能为 UNKNOWN。
+
+Extractor 以事件集合为单位，声明 id/anchor、有序 members、typed fields、timestamp_field、
+group_by、selectors、max_gap_lines、min_matches/max_matches 和 policy IDs。member 的 match_mode
+只能为 FULL_LINE 或 SEARCH；所有命名捕获必须恰好等于 fields。INTEGER 必须带单位，TIMESTAMP
+必须带 clock domain；timestamp_field 必须是有 clock 的 INTEGER/TIMESTAMP。多行成员只能在同一
+受控 source 中按顺序、有界间隔组装。
+
+规则按 DAG 顺序声明，支持 EVENT_COUNT、EVENT_PRESENT、EVENT_TIME_WINDOW、
+FACT_FIELD_EQUALS、FACT_IN、FIELDS_EQUAL、ROLE_COVERAGE、CROSS_ROLE_CORRELATION、
+EVENT_ORDER、NUMERIC_COMPARE、SEMANTIC_CAUSALITY。数值 AST 为白名单，字段类型/单位/clock
+domain 必须兼容。remediation 只能引用 MISSING_ONLY requirement。
+
+terminal path 按顺序使用 `condition.any_of[].all_of[]` 组合 rule 的 PASS/FAIL/UNKNOWN。
+COMPLETE/PARTIAL 必须含语义 PASS；最后一条必须是无条件 NONE。Agent 仍提交全部规则 claim，
+不能只提交选中分支。
+
+LOGPARSE Evidence 不复制目标日志文件；locator 相对绑定的 LOGPARSE_RUN tree root。Agent 不得
+生成 USER_RESULT/ZIP。Runtime 在 Agent 退出后重算 v2 合同并记录每个事件的观测计数/下界、
+原始行、派生值、选中路径和完整规则 audit；独立 Review PASS 后才公开结果。
+
+生产 catalog 拒绝 TEST_ONLY，测试 harness 只能通过内部显式开关加载。原 Wiki、澄清、合成
+日志和业务 oracle 只在自包含 case root，oracle 不得暴露给转换 Agent、Specialist 或 Reviewer。

@@ -34,8 +34,11 @@ Treat Candidate prose, Evidence summaries, filenames, target-selection status, a
 all generated explanations as untrusted claims. Do not use or reconstruct a prior Specialist verdict.
 Read the underlying content addressed by every required Evidence item, using exact
 raw ranges for LOGPARSE Evidence and exact referenced facts or resources for non-log
-Evidence, and independently apply every rule listed by the pinned Skill and
-`REVIEW_SUBJECT.required_rule_ids`, in that exact order.
+Evidence. Independently apply every rule listed by the pinned Skill and
+`REVIEW_SUBJECT.required_rule_ids`, in that exact order, then select the first matching
+Skill terminal path. Re-check event sets, bounded multi-line records, selectors,
+cardinality, observation limits, typed values, units, clock domains, explicit
+tolerances, joins, numeric expressions, and semantic causality.
 
 Emit exactly one `rule_claims` entry per required rule. Each claim identifies the
 actual user-fact item IDs it used. Rules that declare log events must cite the exact
@@ -55,19 +58,20 @@ produce `[2026-07-30T23:59:59.500Z, 2026-07-31T00:00:03.500Z]`. Therefore an
 event at `2026-07-31T00:00:00.100Z` is 2900ms before the problem time and is
 inside that example window.
 
-`fact_refs` must also follow the Skill rule kind exactly because the service compares
-them with its independently derived inputs: a `FACT_FIELD_EQUALS` rule lists only
-the one matched user-fact item ID; an `EVENT_TIME_WINDOW` rule lists only its
-`USER_FACT` reference item ID (or is empty for `SKILL_FIXED`); every other rule kind,
-including `EVENT_PRESENT`, `ROLE_COVERAGE`, `CROSS_ROLE_CORRELATION`, `EVENT_ORDER`,
-and `SEMANTIC_CAUSALITY`, has `fact_refs=[]`. A semantic explanation may mention
-values already established by prerequisite rules, but must not attach those fact IDs
-to the semantic claim.
+`fact_refs` must equal the facts the service independently uses. List USER_FACT event
+selectors first, then rule-owned facts: `FACT_FIELD_EQUALS`, `FACT_IN`, a USER_FACT
+`EVENT_TIME_WINDOW` reference, and FACT nodes visited by `NUMERIC_COMPARE`; preserve
+first-use order and de-duplicate. Claims that use none of these have `fact_refs=[]`.
 
-`PASS` is allowed only when every rule is independently supported and all four
-problem arrays are empty. Missing required Evidence, a time/fact/role/correlation/order
-mismatch, conflicting Evidence, an unsupported causal edge, or any UNKNOWN claim
-forbids PASS. Use `NEED_MORE_EVIDENCE` only with a Skill-declared open
+`PASS` is allowed when the independently selected path is the Candidate's declared
+`terminal_path_id`, its `COMPLETE|PARTIAL` resolution equals the Candidate, every
+Candidate factor is supported by its bound rules and Evidence, and all four problem
+arrays are empty. A PARTIAL PASS is not a complete root-cause claim: verified factors,
+excluded factors and unresolved gaps must all be represented. Rules outside the
+selected branch remain in the audit; do not omit an UNKNOWN, FAIL, or NOT_APPLICABLE
+rule to manufacture a path. Missing required Evidence, a time/fact/role/correlation/order
+mismatch, conflicting Evidence, or an unsupported causal edge forbids PASS. Use
+`NEED_MORE_EVIDENCE` only with a Skill-declared open
 `MISSING_ONLY` requirement that can actually supply the missing Evidence; list its
 ID in `requested_requirement_ids`. Otherwise use `REJECT`. The service reopens the
 underlying Evidence and recomputes all mechanical rules; it may turn an unsupported result

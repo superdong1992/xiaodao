@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "problem-locator"
-version = "2.0.0"
+version = "3.0.0"
 description = "Problem Locator V2"
 requires-python = ">=3.12,<3.13"
 dependencies = [

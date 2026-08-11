@@ -44,9 +44,14 @@ def test_review_job_target_candidate_and_supporting_evidence_are_fixed() -> None
     assert candidate["supporting_evidence_refs"] == job["evidence_refs"]
 
     preimage = {
-        "completion_criteria_mapping": candidate["completion_criteria_mapping"],
+        "resolution_status": candidate["resolution_status"],
+        "terminal_path_id": candidate["terminal_path_id"],
         "statement": candidate["statement"],
+        "causal_factors": candidate["causal_factors"],
+        "candidate_factors": candidate["candidate_factors"],
+        "excluded_factors": candidate["excluded_factors"],
         "supporting_evidence_refs": candidate["supporting_evidence_refs"],
+        "completion_criteria_mapping": candidate["completion_criteria_mapping"],
     }
     assert canonical_json_sha256(preimage) == candidate["content_hash"]
 

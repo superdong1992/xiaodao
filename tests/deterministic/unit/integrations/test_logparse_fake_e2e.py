@@ -389,6 +389,8 @@ def _need_input_outcomes(
             "subject_hash": "2" * 64,
             "candidate_target": None,
             "diagnosis_audit_hash": None,
+            "selected_terminal_path_id": "none",
+            "terminal_resolution_status": "NONE",
             "required_rule_ids": ["causal_chain"],
             "required_evidence_bindings": [],
             "rules": [
@@ -411,6 +413,8 @@ def _need_input_outcomes(
                         "derived_anchor_time": None,
                         "observed_times": [],
                         "line_ranges": [],
+                        "event_observations": [],
+                        "derived_values": [],
                         "issues": [],
                     },
                 }

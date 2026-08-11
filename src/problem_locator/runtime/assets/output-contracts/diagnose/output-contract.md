@@ -90,21 +90,21 @@ binding 写入 `state_delta.add_evidence_bindings`，其中新 Evidence 使用
 `consumed_evidence_refs`。Evidence summary、Finding、文件名、Logparse target 状态和
 先前 Outcome 都只是待验证陈述。
 
-逐条核对 Skill 定义的事件基数、普通时间窗口、事实字段、必需角色、跨角色关联和事件
-顺序。语义因果规则必须由完整 Evidence 链支持；有日志事件时引用原始行，无日志规则则
-核对 Candidate 实际绑定的结构化或用户 Evidence。“时间接近”或“故事听起来合理”不能
-代替因果证据。任何必选事实缺失、字段/时间不符、角色/关联缺失、顺序错误、所需 Evidence
-未读、证据冲突或因果仍不确定时，禁止提出 Candidate。
+逐条核对 Skill 定义的事件集合、单行或有界多行记录、选择器、基数、普通时间窗口、事实字段、
+必需角色、同/跨 anchor 关联、事件顺序和带单位数值表达式。只使用 Skill 显式声明的 clock
+domain 与容差；禁止发明全局时钟容差。语义因果规则必须由完整 Evidence 链支持；有日志事件时
+引用原始行/行段，无日志规则则核对 Candidate 实际绑定的结构化或用户 Evidence。“时间接近”
+或“故事听起来合理”不能代替因果证据。
 
-本版本不实现日志抑制、限流或采样窗口扩展；不得自行推导此类容差。后续由 Skill 合同
-显式声明后再扩展服务端验证。
+Skill 的 `observation_policies` 可以声明 `SUPPRESSION` 与 `RATE_LIMIT`。这些 lossy policy
+不削弱已经观测到的正向事件，但会使缺失和受上界约束的计数只能视为 UNKNOWN/下界；不得把
+“没有匹配日志”当作反证，也不得自行补写历史日志、扩大固定快照或等待未来日志。
 
-`fact_refs` 必须严格服从 Skill 的规则种类，因为服务端会把它与独立推导的输入逐项比较：
-`FACT_FIELD_EQUALS` 只列出唯一匹配的 user-fact item ID；`EVENT_TIME_WINDOW` 只列出
-它的 `USER_FACT` reference item ID（`SKILL_FIXED` 时为空）；every other rule kind，
-包括 `EVENT_PRESENT`、`ROLE_COVERAGE`、`CROSS_ROLE_CORRELATION`、`EVENT_ORDER` 和
-`SEMANTIC_CAUSALITY`, has `fact_refs=[]`。语义说明可以引用已由前置规则验证的值，
-但不得把这些 fact ID 附加到跨角色、顺序或语义 claim。
+`fact_refs` 必须严格等于服务端重算该规则实际使用的 user-fact item ID，并保持确定性顺序：
+先列该规则所引用事件 selector 使用的 USER_FACT，再列规则自身的事实。`FACT_FIELD_EQUALS`
+追加其 fact，`FACT_IN` 追加被检查的 fact，`EVENT_TIME_WINDOW` 在 reference 为 USER_FACT 时
+追加该 fact，`NUMERIC_COMPARE` 按表达式遍历顺序追加 FACT 节点；重复 ID 只保留第一次。
+没有 selector 或规则事实的 claim 使用空数组。
 
 每条 `EVENT_TIME_WINDOW` 的下界必须计算为 `problem_time - before_ms`，上界必须计算为
 `problem_time + after_ms`；不得交换参数，也不得把 `before_ms` 加到问题时间上。例如
@@ -115,10 +115,17 @@ binding 写入 `state_delta.add_evidence_bindings`，其中新 Evidence 使用
 ## Evidence、Candidate 与服务端用户结果
 
 Evidence 只能来自当前 Job 固定输入或同一 draft 的合法 proposal。新 LOGPARSE Evidence
-必须绑定 broker 返回的同一 `LOGPARSE_RUN`。Candidate supporting bindings 与每个
-completion mapping 必须覆盖全部所需 Evidence，保持当前快照和新增 binding 的稳定顺序，
-并同时列入 `consumed_evidence_refs`。正式 `evidence_refs` 必须保持当前 Job Evidence 的
-固定子序列；禁止按业务角色、日志时间或叙述顺序重新排序。
+必须绑定 broker 返回的同一 `LOGPARSE_RUN`。Candidate 先绑定服务端将重算出的第一条匹配
+terminal path：`COMPLETE|PARTIAL` 才允许 Candidate，`NONE` 禁止 Candidate。
+`resolution_status` 与 `terminal_path_id` 必须逐字匹配；COMPLETE 的 criteria 全为
+`SATISFIED`，PARTIAL 必须保留已证实进展并显式标记未完成项。
+
+`causal_factors`、`candidate_factors`、`excluded_factors` 分别记录已证实、仍待区分和已排除
+因素。每项都要绑定 Evidence 和实际支持它的 rule IDs；允许多个共同贡献因素。Candidate
+supporting bindings、factor bindings 与每个 completion mapping 共同覆盖全部所需 Evidence，
+保持当前快照和新增 binding 的稳定顺序，并同时列入 `consumed_evidence_refs`。正式
+`evidence_refs` 必须保持当前 Job Evidence 的固定子序列；禁止按业务角色、日志时间或叙述
+顺序重新排序。
 
 Agent 禁止提出或写入 `USER_RESULT`、`USER_RESULT_ARCHIVE`、`diagnosis-result.json`、
 `result.zip` 或任何归档请求，也禁止自行调用 zip/tar。Agent draft 只提交 Candidate、

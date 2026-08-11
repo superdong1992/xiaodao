@@ -75,7 +75,7 @@ USER_FACT_TRIGGER_ID = "00000000-0000-0000-0000-000000000031"
 DIAGNOSE_EPOCH = "00000000-0000-0000-0000-000000000090"
 REVIEW_EPOCH = "00000000-0000-0000-0000-000000000091"
 USER_RESULT_SHA256 = (
-    "f007959ca610e60f2b57cf30c3b91f740a87b7ea3a05b5fb103f302d3a0e9a22"
+    "f45604205d60aacb6df55376fc9793d0dcaf99ee02b3e58bd8ca692c1a2eac85"
 )
 
 
@@ -199,7 +199,7 @@ def _candidate_outcome_with_real_resources(
     tmp_path: Path,
 ) -> tuple[JobOutcome, dict[ArtifactKind, bytes]]:
     result_bytes = (FIXTURES / "user-result.json").read_bytes()
-    assert len(result_bytes) == 1604
+    assert len(result_bytes) == 2299
     assert hashlib.sha256(result_bytes).hexdigest() == USER_RESULT_SHA256
     user_result = resources.stage_file(
         source.job_id,
@@ -430,13 +430,13 @@ def test_r12_r14_candidate_review_download_and_restart_are_one_durable_path(
     assert result_archive.created_by_job_id == candidate.proposed_by_job_id
     assert user_result.size == len(expected_result_bodies[ArtifactKind.USER_RESULT])
     assert user_result.sha256 == USER_RESULT_SHA256
-    assert user_result.metadata.schema_version == 2
-    assert user_result.metadata.format_id == "problem-locator-diagnosis-v2"
+    assert user_result.metadata.schema_version == 3
+    assert user_result.metadata.format_id == "problem-locator-diagnosis-v3"
     assert result_archive.size == len(
         expected_result_bodies[ArtifactKind.USER_RESULT_ARCHIVE]
     )
-    assert result_archive.metadata.schema_version == 2
-    assert result_archive.metadata.format_id == "problem-locator-result-archive-v2"
+    assert result_archive.metadata.schema_version == 3
+    assert result_archive.metadata.format_id == "problem-locator-result-archive-v3"
     processing = candidate_state.outcome_processing_records[outcome.outcome_id]
     assert processing.accepted_artifact_ids.count(user_result.artifact_id) == 1
     assert processing.accepted_artifact_ids.count(result_archive.artifact_id) == 1
@@ -534,7 +534,7 @@ def test_r12_r14_candidate_review_download_and_restart_are_one_durable_path(
     finally:
         opened.stream.close()
     assert downloaded == expected_result_bodies[ArtifactKind.USER_RESULT]
-    assert len(downloaded) == 1604
+    assert len(downloaded) == 2299
     assert hashlib.sha256(downloaded).hexdigest() == USER_RESULT_SHA256
     payload = UserResultPayload.model_validate_json(downloaded)
     assert payload.problem_statement == restarted_view.problem_spec.statement

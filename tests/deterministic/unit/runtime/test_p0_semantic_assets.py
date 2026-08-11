@@ -24,8 +24,8 @@ def test_specialist_assets_require_skill_and_raw_evidence_checks() -> None:
     profile_meta, profile = _asset("profiles/specialist")
     contract_meta, contract = _asset("output-contracts/diagnose")
 
-    assert profile_meta["version"] == "1.0.1"
-    assert contract_meta["version"] == "4.0.1"
+    assert profile_meta["version"] == "3.0.0"
+    assert contract_meta["version"] == "5.0.0"
     for material in (profile, contract):
         assert "problem_time" in material
         assert "user_facts" in material
@@ -36,8 +36,9 @@ def test_specialist_assets_require_skill_and_raw_evidence_checks() -> None:
     assert "problem-locator-pack-result" not in contract
     assert "`artifact_proposal_key=K`" in contract
     assert "`parse-1-run`" in contract
-    assert "every other rule kind" in contract
-    assert "`SEMANTIC_CAUSALITY`, has `fact_refs=[]`" in contract
+    assert "terminal path" in contract
+    assert "SUPPRESSION" in contract
+    assert "RATE_LIMIT" in contract
     assert "`problem_time - before_ms`" in contract
     assert "`problem_time + after_ms`" in contract
     assert "2026-07-30T23:59:59.500Z" in contract
@@ -49,8 +50,8 @@ def test_reviewer_assets_require_independent_rule_replay_and_full_evidence_union
     profile_meta, profile = _asset("profiles/reviewer")
     contract_meta, contract = _asset("output-contracts/review")
 
-    assert profile_meta["version"] == "1.0.1"
-    assert contract_meta["version"] == "2.0.0"
+    assert profile_meta["version"] == "3.0.0"
+    assert contract_meta["version"] == "3.0.0"
     for material in (profile, contract):
         assert "problem_time" in material
         assert "raw" in material.lower()
@@ -60,8 +61,9 @@ def test_reviewer_assets_require_independent_rule_replay_and_full_evidence_union
     assert "must equal" in contract
     assert "forbids PASS" in contract
     assert "rule_claims" in contract
-    assert "every other rule kind" in contract
-    assert "`SEMANTIC_CAUSALITY`, has `fact_refs=[]`" in contract
+    assert "terminal_path_id" in contract
+    assert "COMPLETE|PARTIAL" in contract
+    assert "NOT_APPLICABLE" in contract
     assert "`problem_time - before_ms`" in contract
     assert "`problem_time + after_ms`" in contract
     assert "2026-07-30T23:59:59.500Z" in contract

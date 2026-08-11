@@ -172,13 +172,26 @@ def _candidate_draft(*, existing_id: str | None = None) -> CandidateConclusionDr
     return CandidateConclusionDraft(
         proposal_key="candidate",
         existing_conclusion_id=existing_id,
+        resolution_status="COMPLETE",
+        terminal_path_id="complete",
         statement="The inventory RPC exceeded its deadline.",
+        causal_factors=[
+            {
+                "factor_id": "primary_cause",
+                "role": "CAUSE",
+                "statement": "The inventory RPC exceeded its deadline.",
+                "evidence_bindings": [binding],
+                "required_rule_ids": ["causal_chain"],
+            }
+        ],
+        candidate_factors=[],
+        excluded_factors=[],
         supporting_evidence_bindings=[binding],
         completion_criteria_mapping=[
             CompletionCriterionDraftMapping(
                 criterion_index=0,
                 criterion="The cause is evidenced.",
-                satisfied=True,
+                status="SATISFIED",
                 evidence_bindings=[binding],
                 explanation="The timeout is present in the fixed evidence.",
             )
@@ -349,7 +362,14 @@ def test_candidate_hash_preimage_and_existing_candidate_revision_are_frozen() ->
     )
     assert candidate is not None
     preimage = {
+        "resolution_status": candidate.resolution_status,
+        "terminal_path_id": candidate.terminal_path_id,
         "statement": candidate.statement,
+        "causal_factors": [
+            item.model_dump(mode="json") for item in candidate.causal_factors
+        ],
+        "candidate_factors": [],
+        "excluded_factors": [],
         "supporting_evidence_refs": [EVIDENCE_1],
         "completion_criteria_mapping": [
             candidate.completion_criteria_mapping[0].model_dump(mode="json")
@@ -388,6 +408,46 @@ def test_candidate_hash_preimage_and_existing_candidate_revision_are_frozen() ->
     assert revised.conclusion_id == CANDIDATE_ID
     assert revised.revision == 2
     assert revised.proposed_by_job_id == _id(12)
+
+
+def test_candidate_resolution_status_cannot_overstate_or_hide_incomplete_work() -> None:
+    complete = _candidate_draft().model_dump(mode="python")
+    complete["candidate_factors"] = [
+        {
+            **complete["causal_factors"][0],
+            "factor_id": "remaining_candidate",
+        }
+    ]
+    with pytest.raises(ValueError, match="COMPLETE Candidate draft cannot retain"):
+        CandidateConclusionDraft.model_validate(complete)
+
+    partial = _candidate_draft().model_dump(mode="python")
+    partial["resolution_status"] = "PARTIAL"
+    partial["terminal_path_id"] = "partial"
+    with pytest.raises(ValueError, match="explicitly incomplete criterion"):
+        CandidateConclusionDraft.model_validate(partial)
+
+
+def test_partial_candidate_preserves_reviewable_progress_and_content_hash() -> None:
+    value = _candidate_draft().model_dump(mode="python")
+    value["resolution_status"] = "PARTIAL"
+    value["terminal_path_id"] = "partial"
+    value["completion_criteria_mapping"][0]["status"] = "PARTIALLY_SATISFIED"
+    draft = CandidateConclusionDraft.model_validate(value)
+    candidate = formalize_accepted_candidate(
+        draft,
+        "candidate",
+        current_candidate=None,
+        problem_completion_criteria=["The cause is evidenced."],
+        existing_evidence_ids={EVIDENCE_0},
+        evidence_ids_by_proposal_key={"evidence-one": EVIDENCE_1},
+        candidate_ids_by_proposal_key={"candidate": CANDIDATE_ID},
+        proposed_by_job_id=JOB_ID,
+    )
+    assert candidate is not None
+    assert candidate.resolution_status.value == "PARTIAL"
+    assert candidate.terminal_path_id == "partial"
+    assert candidate.content_hash
 
 
 def test_applies_delta_in_s01_order_and_bumps_semantic_revision_once() -> None:

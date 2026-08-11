@@ -80,10 +80,25 @@ def test_candidate_hash_preimage_ignores_identity_and_status() -> None:
             "criterion": "Identify the timed-out request.",
             "evidence_refs": ["00000000-0000-0000-0000-000000000040"],
             "explanation": "The request identifier appears in the parsed log.",
-            "satisfied": True,
+            "status": "SATISFIED",
         }
     ]
     preimage = {
+        "resolution_status": "COMPLETE",
+        "terminal_path_id": "complete",
+        "causal_factors": [
+            {
+                "factor_id": "primary_cause",
+                "role": "CAUSE",
+                "statement": "The inventory RPC exceeded its deadline.",
+                "evidence_refs": [
+                    "00000000-0000-0000-0000-000000000040"
+                ],
+                "required_rule_ids": ["causal_chain"],
+            }
+        ],
+        "candidate_factors": [],
+        "excluded_factors": [],
         "completion_criteria_mapping": mapping,
         "statement": "The inventory RPC exceeded its deadline.",
         "supporting_evidence_refs": [

@@ -650,6 +650,9 @@ def test_review_user_result_recommendation_is_bound_to_review_assessment() -> No
         source_job_type="REVIEW",
         root_cause=None,
         findings=[],
+        causal_factors=[],
+        candidate_factors=[],
+        excluded_factors=[],
         evidence_gaps=["The causal claim is unsupported."],
         recommendations=[outcome_value["payload"]["recommendation"]],
     )

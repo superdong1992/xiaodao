@@ -7,9 +7,9 @@ from types import MappingProxyType
 from typing import Literal, Mapping
 
 
-SCHEMA_VERSION = 4
-CONTRACT_REVISION = "v4-contract-r1"
-GENERATOR_VERSION = "4"
+SCHEMA_VERSION = 5
+CONTRACT_REVISION = "v5-contract-r1"
+GENERATOR_VERSION = "5"
 
 ROUTER_CONTEXT_BYTES = 131_072
 DIAGNOSE_CONTEXT_BYTES = 204_800

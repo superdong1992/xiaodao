@@ -25,9 +25,14 @@ const caps = {
   max_budget_usd: Number(values.max_budget_usd),
   hard_timeout_seconds: Number(values.hard_timeout_seconds),
 };
-if (!values.claude_entry || !values.settings || !values.model || !values.usage_root || !Number.isSafeInteger(caps.max_turns) || caps.max_turns <= 0 || !Number.isSafeInteger(caps.max_total_tokens) || caps.max_total_tokens <= 0 || !Number.isFinite(caps.max_budget_usd) || caps.max_budget_usd <= 0 || !Number.isSafeInteger(caps.hard_timeout_seconds) || caps.hard_timeout_seconds <= 0) {
+const workflow = values.workflow ?? "job";
+if (!values.claude_entry || !values.settings || !values.model || !values.usage_root || !["job", "skill-generation"].includes(workflow) || !Number.isSafeInteger(caps.max_turns) || caps.max_turns <= 0 || !Number.isSafeInteger(caps.max_total_tokens) || caps.max_total_tokens <= 0 || !Number.isFinite(caps.max_budget_usd) || caps.max_budget_usd <= 0 || !Number.isSafeInteger(caps.hard_timeout_seconds) || caps.hard_timeout_seconds <= 0) {
   throw new Error("WRAPPER_REQUIRED_INPUT_INVALID");
 }
+
+const toolArguments = workflow === "skill-generation"
+  ? ["--tools", "Read,Write,Skill", "--allowedTools", "Skill(wiki-to-diagnosis-skill)"]
+  : ["--tools", "Read,Write"];
 
 const child = spawn(process.execPath, [
   values.claude_entry,
@@ -41,7 +46,7 @@ const child = spawn(process.execPath, [
   "--model", values.model,
   "--max-turns", String(caps.max_turns),
   "--max-budget-usd", String(caps.max_budget_usd),
-  "--tools", "Read,Write",
+  ...toolArguments,
 ], { cwd: process.cwd(), env: process.env, stdio: ["pipe", "pipe", "pipe"] });
 
 process.stdin.pipe(child.stdin);

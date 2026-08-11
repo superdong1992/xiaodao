@@ -75,8 +75,8 @@ test("Release is fresh, binds an immutable source snapshot and exposes exact per
   assert.equal(built.plan.resume, "fresh");
   assert.equal(built.options.crossJobAdapter, path.join(REPO_ROOT, "tools", "test-flow", "adapters", "macos-linux-release.mjs"));
   assert.deepEqual(built.plan.budget, {
-    estimated_tokens: 410000,
-    sum_of_per_invocation_caps_usd: 27,
+    estimated_tokens: 422000,
+    sum_of_per_invocation_caps_usd: 30,
     cumulative_spending_cap: null,
     per_invocation_hard_enforced: true,
   });
@@ -104,7 +104,10 @@ test("all supported Clients resolve to repository-owned first-party adapters", (
       built.options.crossJobAdapter,
       path.join(REPO_ROOT, "tools", "test-flow", "adapters", `${client}-linux-release.mjs`),
     );
-    assert.equal(built.plan.stages.filter((stage) => stage.kind === "isolated-real").length, 0);
+    assert.deepEqual(
+      built.plan.stages.filter((stage) => stage.kind === "isolated-real").map((stage) => stage.id),
+      ["real.skill-generation"],
+    );
     assert.ok(built.plan.stages.filter((stage) => stage.id.startsWith("journey.cross-job.")).every((stage) => stage.decision === "RUN"));
   }
 });

@@ -128,8 +128,8 @@ def test_nonempty_state_export_is_complete_canonical_and_generation_consistent(
             sha256=user_result_ref.sha256,
             storage_key=user_result_ref.storage_key,
             metadata=UserResultMetadata(
-                schema_version=2,
-                format_id="problem-locator-diagnosis-v2",
+                schema_version=3,
+                format_id="problem-locator-diagnosis-v3",
                 description="Canonical diagnosis result for export coverage.",
             ),
             created_by_job_id=source_job.job_id,
