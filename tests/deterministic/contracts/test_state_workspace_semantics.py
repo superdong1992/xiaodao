@@ -102,6 +102,7 @@ def test_resolved_case_final_result_is_the_complete_current_candidate() -> None:
                 "case_id": CASE_ID,
                 "status": CaseStatus.RESOLVED,
                 "case_revision": 9,
+                "raw_problem_text": diagnosis_state["problem_spec"]["statement"],
                 "diagnosis_state": diagnosis_state,
                 "active_job_id": None,
                 "selected_skill_ref": review_job.skill_ref,
@@ -260,6 +261,7 @@ def test_create_trigger_user_fact_provenance_references_the_trigger() -> None:
         supersedes=[],
     )
     payload = CreateCaseTriggerPayload(
+        raw_problem_text=problem_spec.statement,
         problem_spec=problem_spec.model_copy(update={"revision": 1}),
         initial_user_facts=[fact],
     )

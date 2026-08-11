@@ -337,6 +337,7 @@ class _Stack:
         self.broker_factory = _CapturingBrokerFactory(broker_factory)
         self.catalog = VersionedAssetCatalog(
             skill_dir=SKILL_DIR,
+            generic_skill_name="generic-problem-locator-smoke",
             logparse_tool=logparse_asset,
             logparse_broker_factory=self.broker_factory,
             allow_test_skills=True,
@@ -780,6 +781,7 @@ def test_r01_r14_rpc_timeout_is_one_durable_cross_module_path(
         "problem_locator_create_case",
         {
             "request_id": "s08-r01-create",
+            "raw_problem_text": "A payment service call to inventory times out.",
             "statement": "A payment service call to inventory times out.",
             "expected_behavior": "The payment request completes.",
             "actual_behavior": "The payment request times out.",
@@ -1467,6 +1469,7 @@ def test_same_job_uses_initial_order_fact_and_survives_restart(
         "problem_locator_create_case",
         {
             "request_id": "s08-same-job-create",
+            "raw_problem_text": "A payment service call to inventory times out.",
             "statement": "A payment service call to inventory times out.",
             "expected_behavior": "The payment request completes.",
             "actual_behavior": "The payment request times out.",

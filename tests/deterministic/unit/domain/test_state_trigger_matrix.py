@@ -101,6 +101,7 @@ def _case_without_active(status: CaseStatus) -> CaseSnapshot:
             case_id=CASE_ID,
             status=status,
             case_revision=7,
+            raw_problem_text=state.problem_spec.statement,
             diagnosis_state=state,
             active_job_id=None,
             selected_skill_ref=None,
@@ -140,6 +141,7 @@ def _case_without_active(status: CaseStatus) -> CaseSnapshot:
             case_id=CASE_ID,
             status=status,
             case_revision=7,
+            raw_problem_text=resolved_state.problem_spec.statement,
             diagnosis_state=resolved_state,
             active_job_id=None,
             selected_skill_ref=review.skill_ref,
@@ -153,6 +155,7 @@ def _case_without_active(status: CaseStatus) -> CaseSnapshot:
             case_id=CASE_ID,
             status=status,
             case_revision=7 if status is not CaseStatus.NEW else 1,
+            raw_problem_text=state.problem_spec.statement,
             diagnosis_state=state,
             active_job_id=None,
             selected_skill_ref=None,
@@ -193,6 +196,7 @@ def _request(snapshot: CaseSnapshot, trigger_type: TriggerType):
     resources = continuation()
     if trigger_type is TriggerType.CREATE_CASE:
         payload = CreateCaseTriggerPayload(
+            raw_problem_text=snapshot.case.raw_problem_text,
             problem_spec=snapshot.case.diagnosis_state.problem_spec,
             initial_user_facts=snapshot.case.diagnosis_state.user_facts,
         )

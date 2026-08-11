@@ -21,6 +21,7 @@ from problem_locator.contracts import (
     ApplicationPortError,
     AssetAvailabilityReport,
     AssetKind,
+    DiagnosisMode,
     ErrorCode,
     JobType,
     LogparseBrokerFactory,
@@ -44,6 +45,7 @@ _LOG_ARCHIVE_CONTENT_TYPES = (
     "application/x-tar",
 )
 _SKILL_ID_PATTERN = re.compile(r"[a-z][a-z0-9-]{1,63}\Z")
+_GENERIC_SKILL_NAME_PATTERN = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*\Z")
 _WINDOWS_DRIVE_PATTERN = re.compile(r"[A-Za-z]:")
 
 
@@ -105,6 +107,11 @@ _BUILTIN_SPECS = (
         "1.0.1",
     ),
     _BuiltinSpec(
+        "profiles/generic-locator",
+        AssetKind.AGENT_PROFILE,
+        "agent-profile/generic-locator",
+    ),
+    _BuiltinSpec(
         "tool-bundles/router",
         AssetKind.TOOL_BUNDLE,
         "tool-bundle/router",
@@ -123,6 +130,11 @@ _BUILTIN_SPECS = (
         "2.0.0",
     ),
     _BuiltinSpec(
+        "tool-bundles/generic-locator",
+        AssetKind.TOOL_BUNDLE,
+        "tool-bundle/generic-locator",
+    ),
+    _BuiltinSpec(
         "context-policies/route",
         AssetKind.CONTEXT_POLICY,
         "context-policy/route",
@@ -136,6 +148,11 @@ _BUILTIN_SPECS = (
         "context-policies/review",
         AssetKind.CONTEXT_POLICY,
         "context-policy/review",
+    ),
+    _BuiltinSpec(
+        "context-policies/generic-locator",
+        AssetKind.CONTEXT_POLICY,
+        "context-policy/generic-locator",
     ),
     _BuiltinSpec(
         "output-contracts/route",
@@ -154,6 +171,11 @@ _BUILTIN_SPECS = (
         AssetKind.OUTPUT_CONTRACT,
         "output-contract/review",
         "2.0.0",
+    ),
+    _BuiltinSpec(
+        "output-contracts/generic-locator",
+        AssetKind.OUTPUT_CONTRACT,
+        "output-contract/generic-locator",
     ),
 )
 _BUILTIN_SPECS_BY_ID = {item.asset_id: item for item in _BUILTIN_SPECS}
@@ -1099,10 +1121,19 @@ class VersionedAssetCatalog:
         assets_root: Path = BUILTIN_ASSET_ROOT,
         logparse_tool: ResolvedAsset | None = None,
         logparse_broker_factory: LogparseBrokerFactory | None = None,
+        generic_skill_name: str,
         allow_test_skills: bool = False,
     ) -> None:
         if type(allow_test_skills) is not bool:
             raise TypeError("allow_test_skills must be a boolean")
+        if (
+            not isinstance(generic_skill_name, str)
+            or len(generic_skill_name) > 64
+            or _GENERIC_SKILL_NAME_PATTERN.fullmatch(generic_skill_name) is None
+        ):
+            raise ValueError(
+                "generic_skill_name must be a standard lowercase hyphen Skill name"
+            )
         if (logparse_tool is None) != (logparse_broker_factory is None):
             raise ValueError(
                 "logparse ResolvedAsset and LogparseBrokerFactory must be supplied together"
@@ -1118,6 +1149,7 @@ class VersionedAssetCatalog:
         self._builtin_refs: dict[str, VersionedRef] = {}
         self._skills: dict[tuple[str, str, str], _SkillDescriptor] = {}
         self._logparse_tool_ref: VersionedRef | None = None
+        self._generic_skill_name = generic_skill_name
         # The frozen factory Port intentionally has no fingerprint read surface.
         # Keeping this exact instance alive enforces pair identity as far as S00
         # permits without inventing a private protocol.
@@ -1381,6 +1413,8 @@ class VersionedAssetCatalog:
                 }
             ]
             bindings = RuntimeBindings(
+                diagnosis_mode=None,
+                generic_skill_name=None,
                 agent_profile_ref=self._builtin_ref("agent-profile/router"),
                 available_skill_refs=[
                     _clone_model(ref) for ref in compatible_skill_refs
@@ -1499,6 +1533,8 @@ class VersionedAssetCatalog:
                 ) from None
         try:
             bindings = RuntimeBindings(
+                diagnosis_mode=DiagnosisMode.SPECIALIZED,
+                generic_skill_name=None,
                 agent_profile_ref=self._builtin_ref("agent-profile/specialist"),
                 available_skill_refs=[],
                 skill_ref=_clone_model(descriptor.resolved_asset.ref),
@@ -1528,6 +1564,43 @@ class VersionedAssetCatalog:
                 "diagnose_bindings",
                 ErrorCode.CONFIG_INVALID,
                 "The diagnosis runtime binding configuration is invalid.",
+            ) from None
+        return _clone_model(bindings)
+
+    def generic_diagnose_bindings(self) -> RuntimeBindings:
+        try:
+            bindings = RuntimeBindings(
+                diagnosis_mode=DiagnosisMode.GENERIC,
+                generic_skill_name=self._generic_skill_name,
+                agent_profile_ref=self._builtin_ref("agent-profile/generic-locator"),
+                available_skill_refs=[],
+                skill_ref=None,
+                tool_bundle_ref=self._builtin_ref("tool-bundle/generic-locator"),
+                context_policy_ref=self._builtin_ref(
+                    "context-policy/generic-locator"
+                ),
+                output_contract_ref=self._builtin_ref(
+                    "output-contract/generic-locator"
+                ),
+                logparse_tool_ref=None,
+                logparse_product=None,
+                resource_limits=default_resource_limits(JobType.DIAGNOSE),
+            )
+            refs = (
+                bindings.agent_profile_ref,
+                bindings.tool_bundle_ref,
+                bindings.context_policy_ref,
+                bindings.output_contract_ref,
+            )
+            if not all(self._ref_is_current(ref) for ref in refs):
+                raise ValueError("generic diagnosis built-ins are unavailable")
+        except ApplicationPortError:
+            raise
+        except Exception:
+            raise _catalog_port_error(
+                "generic_diagnose_bindings",
+                ErrorCode.CONFIG_INVALID,
+                "The generic diagnosis runtime binding configuration is invalid.",
             ) from None
         return _clone_model(bindings)
 
@@ -1577,6 +1650,8 @@ class VersionedAssetCatalog:
             ) from None
         try:
             bindings = RuntimeBindings(
+                diagnosis_mode=None,
+                generic_skill_name=None,
                 agent_profile_ref=self._builtin_ref("agent-profile/reviewer"),
                 available_skill_refs=[],
                 skill_ref=_clone_model(descriptor.resolved_asset.ref),

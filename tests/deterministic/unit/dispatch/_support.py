@@ -166,6 +166,7 @@ def case_view_for_job(job: Job) -> CaseView:
         active_job = JobSummary(
             job_id=job.job_id,
             job_type=job.job_type,
+            diagnosis_mode=job.diagnosis_mode,
             status=job.status,
             goal=job.goal,
             base_state_revision=job.base_state_revision,
@@ -184,6 +185,9 @@ def case_view_for_job(job: Job) -> CaseView:
         case_id=job.case_id,
         status=status,
         case_revision=1,
+        raw_problem_text=(
+            job.generic_problem_text or job.context_snapshot.problem_spec.statement
+        ),
         diagnosis_state_revision=job.base_state_revision,
         problem_spec=job.context_snapshot.problem_spec,
         user_facts=job.context_snapshot.user_facts,

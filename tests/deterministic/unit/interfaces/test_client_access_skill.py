@@ -182,6 +182,7 @@ def test_skill_document_names_tools_and_safety_invariants() -> None:
     assert "`name` and `declared_size`" in skill
     assert "`attachment_name` or `declared_byte_count`" in skill
     assert '"statement": "<problem statement>"' in skill
+    assert '"raw_problem_text": "<the user\'s complete original problem text>"' in skill
     assert '"initial_user_fact_names": ["<requirement_name>"]' in skill
     assert '"initial_user_fact_values": ["<exact string value>"]' in skill
     assert '"problem_spec": {' not in skill
@@ -232,6 +233,7 @@ def test_create_case_uses_one_stable_generated_request_id() -> None:
     workflow = ClientAccessWorkflow(mcp, FakeCurl(), FixedIds([REQUEST_1]))
 
     actual = workflow.create_case(
+        raw_problem_text="原始问题描述\nrequest-id: 请求-α-7",
         problem_spec=problem_spec_input(),
         initial_user_facts=(
             {"name": "host", "value": "node-1"},
@@ -248,6 +250,7 @@ def test_create_case_uses_one_stable_generated_request_id() -> None:
             "problem_locator_create_case",
             {
                 "request_id": REQUEST_1,
+                "raw_problem_text": "原始问题描述\nrequest-id: 请求-α-7",
                 **problem_spec_input(),
                 "initial_user_fact_names": ["host", "region"],
                 "initial_user_fact_values": ["node-1", "华北"],

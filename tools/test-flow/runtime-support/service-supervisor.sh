@@ -119,6 +119,7 @@ service_claude_command="/usr/bin/timeout --foreground --signal=TERM --kill-after
     BIND_HOST=0.0.0.0 \
     PORT=8000 \
     SKILL_DIR=/opt/e2e-skills \
+    GENERIC_SKILL_NAME=generic-problem-locator-smoke \
     LOGPARSE_REPO=/opt/src/logparse \
     LOGPARSE_CONFIG_PATH=/opt/src/logparse/config.yaml \
     LOGPARSE_PYTHON=/opt/venvs/logparse/bin/python \

@@ -42,6 +42,8 @@ def _route_job() -> Job:
 def _route_bindings() -> RuntimeBindings:
     job = _route_job()
     return RuntimeBindings(
+        diagnosis_mode=job.diagnosis_mode,
+        generic_skill_name=job.generic_skill_name,
         agent_profile_ref=job.agent_profile_ref,
         available_skill_refs=job.available_skill_refs,
         skill_ref=job.skill_ref,
@@ -57,6 +59,7 @@ def _route_bindings() -> RuntimeBindings:
 def _create_command() -> CreateCase:
     return CreateCase(
         idempotency_key="create-case-1",
+        raw_problem_text="RPC timeout\nrequest-id: 请求-α-7",
         problem_spec={
             "statement": "RPC timeout",
             "expected_behavior": "RPC succeeds",
@@ -105,6 +108,7 @@ def test_create_trigger_preserves_input_and_preallocated_fact_ids() -> None:
     assert trigger.trigger_type is TriggerType.CREATE_CASE
     assert trigger.expected_case_revision == 0
     assert trigger.payload.problem_spec.revision == 1
+    assert trigger.payload.raw_problem_text == "RPC timeout\nrequest-id: 请求-α-7"
     assert [item.item_id for item in trigger.payload.initial_user_facts] == fact_ids
     assert [item.statement for item in trigger.payload.initial_user_facts] == [
         "us-east",

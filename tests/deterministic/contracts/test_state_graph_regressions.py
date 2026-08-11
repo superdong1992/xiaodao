@@ -145,6 +145,7 @@ def _job_summary(job: dict) -> dict:
         for name in (
             "job_id",
             "job_type",
+            "diagnosis_mode",
             "status",
             "goal",
             "base_state_revision",
@@ -164,6 +165,7 @@ def _running_case_view_payload() -> dict:
         "case_id": case["case_id"],
         "status": case["status"],
         "case_revision": case["case_revision"],
+        "raw_problem_text": case["raw_problem_text"],
         "diagnosis_state_revision": diagnosis["revision"],
         "problem_spec": diagnosis["problem_spec"],
         "user_facts": diagnosis["user_facts"],
@@ -188,6 +190,9 @@ def _resolved_case_view_payload() -> dict:
         "case_id": CASE_ID,
         "status": CaseStatus.RESOLVED,
         "case_revision": 4,
+        "raw_problem_text": review_job["context_snapshot"]["problem_spec"][
+            "statement"
+        ],
         "diagnosis_state_revision": review_job["base_state_revision"],
         "problem_spec": review_job["context_snapshot"]["problem_spec"],
         "user_facts": review_job["context_snapshot"]["user_facts"],

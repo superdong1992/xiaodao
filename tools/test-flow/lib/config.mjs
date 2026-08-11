@@ -13,7 +13,7 @@ const REPOSITORY_CHECKS = new Set(["python-compileall", "uv-lock", "git-diff-che
 const CAPABILITY_ADAPTERS = new Set(["host-capability", "server-linux-capability"]);
 const CROSS_JOB_PHASES = new Set(["environment", "route", "upload", "diagnose", "publish-restart"]);
 const OBSERVATIONS = new Set(["review-state-transition"]);
-const ENVIRONMENT_PROFILES = new Set(["real-logparse", "real-agent-backend", "real-route", "real-diagnose", "real-review"]);
+const ENVIRONMENT_PROFILES = new Set(["real-logparse", "real-agent-backend", "real-generic-locator", "real-route", "real-diagnose", "real-review"]);
 const RELEASE_SETTINGS_ENVIRONMENT = Object.freeze([
   "ANTHROPIC_AUTH_TOKEN",
   "ANTHROPIC_BASE_URL",

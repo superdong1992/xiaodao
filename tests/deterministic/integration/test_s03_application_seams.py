@@ -57,6 +57,8 @@ def _route_bindings() -> RuntimeBindings:
         (ROOT / "tests/fixtures/contracts/positive/job-route.json").read_text()
     )
     return RuntimeBindings(
+        diagnosis_mode=route.diagnosis_mode,
+        generic_skill_name=route.generic_skill_name,
         agent_profile_ref=route.agent_profile_ref,
         available_skill_refs=route.available_skill_refs,
         skill_ref=route.skill_ref,
@@ -113,6 +115,7 @@ class _LeaseCheckingMemoryRecords(InMemoryExecutionRecordStore):
 def _create_command() -> CreateCase:
     return CreateCase(
         idempotency_key="s08-create-rpc-timeout",
+        raw_problem_text="Payment to inventory RPC times out",
         problem_spec={
             "statement": "Payment to inventory RPC times out",
             "expected_behavior": "The inventory RPC returns successfully",

@@ -27,6 +27,7 @@ from problem_locator.contracts import (
     DiagnosisItem,
     DiagnosisItemChange,
     DiagnosisItemDraft,
+    DiagnosisMode,
     DiagnosisOutcome,
     DiagnosisOutcomeTriggerPayload,
     DiagnosisState,
@@ -37,6 +38,9 @@ from problem_locator.contracts import (
     ExecutionFailedTriggerPayload,
     ExecutionFailure,
     FieldUpdateAction,
+    GenericDiagnosisOutcome,
+    GenericResult,
+    GenericResultStatus,
     InputRequirementConstraints,
     Job,
     JobLifecycleUpdate,
@@ -122,6 +126,7 @@ _STABLE_TARGET_FIELDS = frozenset(
 
 _ROUTE_GOAL = "Select a diagnosis skill for the fixed problem."
 _DIAGNOSE_GOAL = "Diagnose the fixed problem using the selected skill."
+_GENERIC_DIAGNOSE_GOAL = "Diagnose the raw problem with the configured generic Skill."
 _SUPPLEMENT_GOAL = "Continue diagnosis with the accepted supplement."
 _REVIEW_GOAL = "Review the fixed candidate against all supporting evidence."
 
@@ -265,6 +270,8 @@ def _dedupe_evidence_bindings(
 
 def _runtime_from_job(job: Job) -> RuntimeBindings:
     return RuntimeBindings(
+        diagnosis_mode=job.diagnosis_mode,
+        generic_skill_name=job.generic_skill_name,
         agent_profile_ref=job.agent_profile_ref,
         available_skill_refs=job.available_skill_refs,
         skill_ref=job.skill_ref,
@@ -443,7 +450,10 @@ class DomainCoordinator:
             or state.candidate_conclusion is not None
             or case.selected_skill_ref is not None
             or case.final_result is not None
+            or case.unresolved_result is not None
+            or case.generic_result is not None
             or case.failure is not None
+            or case.raw_problem_text != payload.raw_problem_text
         ):
             return _validation(
                 "The transient NEW snapshot does not match the normalized CreateCase payload."
@@ -506,16 +516,23 @@ class DomainCoordinator:
         decision = outcome.payload
         assert isinstance(decision, RouteDecision)
         if decision.kind is RouteKind.NO_CAPABILITY:
-            failure = CaseFailure(
-                code=ErrorCode.NO_CAPABILITY,
-                message=decision.reason,
-                source_job_id=active.job_id,
-                source_outcome_id=outcome.outcome_id,
-                occurred_at=trigger.occurred_at,
+            next_job = self._job_spec(
+                trigger,
+                JobType.DIAGNOSE,
+                target_state_revision=snapshot.case.diagnosis_state.revision,
+                goal=_GENERIC_DIAGNOSE_GOAL,
+                evidence_bindings=[],
+                attachment_refs=[],
+                previous_outcome_refs=[],
+                artifact_bindings=[],
+                selected_skill_ref=None,
+                generic_problem_text=snapshot.case.raw_problem_text,
             )
+            if isinstance(next_job, ApplicationError):
+                return next_job
             return TransitionPlan(
                 accepted_state_delta=_empty_delta(),
-                target_case_status=CaseStatus.FAILED,
+                target_case_status=CaseStatus.RUNNING,
                 job_updates=[_job_update(active, JobStatus.SUCCEEDED, trigger.occurred_at)],
                 outcome_disposition=OutcomeDisposition.APPLIED,
                 accepted_evidence_proposal_keys=[],
@@ -525,15 +542,12 @@ class DomainCoordinator:
                     action=FieldUpdateAction.CLEAR,
                     value=None,
                 ),
-                case_failure_update=CaseFailureUpdate(
-                    action=FieldUpdateAction.SET,
-                    value=failure,
-                ),
+                case_failure_update=None,
                 candidate_mutation=None,
-                next_job_spec=None,
+                next_job_spec=next_job,
                 final_result_target=None,
                 clear_active_job=True,
-                reason="The fixed route candidate set has no matching capability.",
+                reason="No specialized capability matched; start generic diagnosis.",
             )
 
         assert decision.skill_ref is not None
@@ -594,6 +608,53 @@ class DomainCoordinator:
                 source_outcome_id=outcome.outcome_id,
                 disposition=OutcomeDisposition.APPLIED,
             )
+        if active.diagnosis_mode is DiagnosisMode.GENERIC:
+            generic = outcome.payload
+            if (
+                not isinstance(generic, GenericDiagnosisOutcome)
+                or generic.skill_name != active.generic_skill_name
+                or outcome.result_type is not OutcomeResultType.COMPLETED
+                or outcome.consumed_evidence_refs
+                or outcome.proposed_evidence
+                or outcome.proposed_artifacts
+                or outcome.decision_audit is not None
+            ):
+                return _validation(
+                    "A GENERIC DIAGNOSE Outcome must be the isolated generic result."
+                )
+            terminal_status = CaseStatus(generic.status.value)
+            return TransitionPlan(
+                accepted_state_delta=_empty_delta(),
+                target_case_status=terminal_status,
+                job_updates=[
+                    _job_update(active, JobStatus.SUCCEEDED, trigger.occurred_at)
+                ],
+                outcome_disposition=OutcomeDisposition.APPLIED,
+                accepted_evidence_proposal_keys=[],
+                accepted_artifact_proposal_keys=[],
+                accepted_candidate_proposal_key=None,
+                selected_skill_update=SelectedSkillUpdate(
+                    action=FieldUpdateAction.CLEAR,
+                    value=None,
+                ),
+                case_failure_update=None,
+                candidate_mutation=None,
+                next_job_spec=None,
+                final_result_target=None,
+                generic_result=GenericResult(
+                    status=GenericResultStatus(generic.status.value),
+                    conclusion=generic.conclusion,
+                    root_cause_analysis=generic.root_cause_analysis,
+                    skill_name=generic.skill_name,
+                    source_job_id=active.job_id,
+                    source_outcome_id=outcome.outcome_id,
+                    occurred_at=outcome.produced_at,
+                ),
+                clear_active_job=True,
+                reason="Apply the generic diagnosis result directly without review.",
+            )
+        if active.diagnosis_mode is not DiagnosisMode.SPECIALIZED:
+            return _validation("A DIAGNOSE Job must have a frozen diagnosis mode.")
         diagnosis = outcome.payload
         assert isinstance(diagnosis, DiagnosisOutcome)
         candidate = diagnosis.candidate_conclusion_draft
@@ -1390,7 +1451,12 @@ class DomainCoordinator:
             source.job_type is JobType.ROUTE
             and selected_skill is not None
         ) or (
+            source.job_type is JobType.DIAGNOSE
+            and source.diagnosis_mode is DiagnosisMode.GENERIC
+            and selected_skill is not None
+        ) or (
             source.job_type is not JobType.ROUTE
+            and source.diagnosis_mode is not DiagnosisMode.GENERIC
             and selected_skill != source.skill_ref
         ):
             return _validation(
@@ -1435,6 +1501,7 @@ class DomainCoordinator:
             selected_skill_ref=source.skill_ref,
             review_target_binding=review_binding,
             replacement_for_job_id=source.job_id,
+            generic_problem_text=source.generic_problem_text,
         )
         if isinstance(next_job, ApplicationError):
             return next_job
@@ -1777,6 +1844,7 @@ class DomainCoordinator:
         selected_skill_ref: VersionedRef | None,
         review_target_binding: ReviewTargetBinding | None = None,
         replacement_for_job_id: str | None = None,
+        generic_problem_text: str | None = None,
     ) -> JobSpec | ApplicationError:
         bindings = trigger.runtime_bindings_by_job_type.get(job_type)
         if bindings is None:
@@ -1789,6 +1857,14 @@ class DomainCoordinator:
         if job_type is JobType.ROUTE:
             if selected_skill_ref is not None:
                 return _validation("A ROUTE Job cannot have a selected Skill.")
+        elif (
+            job_type is JobType.DIAGNOSE
+            and bindings.diagnosis_mode is DiagnosisMode.GENERIC
+        ):
+            if selected_skill_ref is not None or bindings.skill_ref is not None:
+                return _validation(
+                    "GENERIC RuntimeBindings must not select a specialized Skill."
+                )
         elif selected_skill_ref is None or bindings.skill_ref != selected_skill_ref:
             return _validation(
                 "RuntimeBindings do not match the Case selected Skill.",
@@ -1802,6 +1878,9 @@ class DomainCoordinator:
             )
         return JobSpec(
             job_type=job_type,
+            diagnosis_mode=bindings.diagnosis_mode,
+            generic_skill_name=bindings.generic_skill_name,
+            generic_problem_text=generic_problem_text,
             goal=goal,
             target_state_revision=target_state_revision,
             evidence_bindings=evidence_bindings,

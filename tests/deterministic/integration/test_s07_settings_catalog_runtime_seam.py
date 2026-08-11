@@ -38,6 +38,7 @@ def test_settings_pin_one_s07_pair_into_s04_catalog_and_runtime(tmp_path: Path) 
             "DATA_ROOT": str(tmp_path / "data"),
             "PUBLIC_BASE_URL": "http://127.0.0.1:8000",
             "SKILL_DIR": str(SKILL_DIR),
+            "GENERIC_SKILL_NAME": "generic-problem-locator-smoke",
             "LOGPARSE_REPO": str(FAKE_LOGPARSE_REPO),
             "LOGPARSE_CONFIG_PATH": str(FAKE_LOGPARSE_CONFIG),
             "LOGPARSE_PYTHON": str(configured_python),
@@ -65,6 +66,7 @@ def test_settings_pin_one_s07_pair_into_s04_catalog_and_runtime(tmp_path: Path) 
 
     catalog = VersionedAssetCatalog(
         skill_dir=settings.skill_dir,
+        generic_skill_name=settings.generic_skill_name,
         logparse_tool=logparse_asset,
         logparse_broker_factory=broker_factory,
         allow_test_skills=True,

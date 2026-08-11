@@ -42,6 +42,7 @@ def test_same_normalized_request_reuses_receipt_but_conflicting_request_is_rejec
     ledger = IdempotencyScenario()
     first = CreateCase(
         idempotency_key="create-request-1",
+        raw_problem_text=_problem_input().statement,
         problem_spec=_problem_input(),
         initial_user_facts=[],
         wait_seconds=0,

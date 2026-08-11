@@ -177,6 +177,7 @@ EXPECTED_SUCCESS_RETURNS: dict[str, Any] = {
     "AssetCatalogPort.resolve": models.ResolvedAsset,
     "AssetCatalogPort.route_bindings": models.RuntimeBindings,
     "AssetCatalogPort.diagnose_bindings": models.RuntimeBindings,
+    "AssetCatalogPort.generic_diagnose_bindings": models.RuntimeBindings,
     "AssetCatalogPort.review_bindings": models.RuntimeBindings,
     "Runtime.execute": models.RuntimeExecutionReceipt,
     "JobControlPort.claim_job": commands.ClaimReceipt,

@@ -559,6 +559,9 @@ def test_builds_pending_job_from_final_state_and_projector() -> None:
     target = DiagnosisState.model_validate(target.model_dump(mode="python"))
     spec = JobSpec(
         job_type=JobType.DIAGNOSE,
+        diagnosis_mode="SPECIALIZED",
+        generic_skill_name=None,
+        generic_problem_text=None,
         goal="Continue the fixed diagnosis.",
         target_state_revision=2,
         evidence_bindings=[
@@ -605,6 +608,57 @@ def test_builds_pending_job_from_final_state_and_projector() -> None:
     assert job.created_at == OCCURRED_AT
 
 
+def test_generic_job_skips_context_projection_and_freezes_only_raw_problem_text() -> None:
+    target = _state()
+    spec = JobSpec(
+        job_type=JobType.DIAGNOSE,
+        diagnosis_mode="GENERIC",
+        generic_skill_name="generic-problem-locator-smoke",
+        generic_problem_text="原始问题第一行\n第二行逐字保留",
+        goal="Run the configured generic problem locator.",
+        target_state_revision=target.revision,
+        evidence_bindings=[],
+        attachment_refs=[],
+        previous_outcome_refs=[],
+        artifact_bindings=[],
+        agent_profile_ref=_ref("generic-profile", "a"),
+        available_skill_refs=[],
+        skill_ref=None,
+        tool_bundle_ref=_ref("generic-tools", "b"),
+        context_policy_ref=_ref("generic-context", "c"),
+        output_contract_ref=_ref("generic-outcome", "d"),
+        logparse_tool_ref=None,
+        logparse_product=None,
+        review_target_binding=None,
+        replacement_for_job_id=None,
+        resource_limits=default_resource_limits(JobType.DIAGNOSE),
+    )
+    projector = _RecordingProjector()
+
+    job = build_job(
+        spec,
+        job_id=_id(12),
+        case_id=CASE_ID,
+        created_at=OCCURRED_AT,
+        target_diagnosis_state=target,
+        projector=projector,
+        existing_evidence_ids=set(target.evidence_refs),
+        evidence_ids_by_proposal_key={},
+        existing_artifact_ids=set(),
+        artifact_ids_by_proposal_key={},
+        existing_candidate=target.candidate_conclusion,
+        candidates_by_proposal_key={},
+    )
+
+    assert projector.seen is None
+    assert job.context_snapshot is None
+    assert job.generic_problem_text == "原始问题第一行\n第二行逐字保留"
+    assert job.evidence_refs == []
+    assert job.attachment_refs == []
+    assert job.previous_outcome_refs == []
+    assert job.artifact_refs == []
+
+
 def test_build_job_orders_evidence_as_target_snapshot_subsequence() -> None:
     target = _state().model_copy(
         update={"revision": 2, "evidence_refs": [EVIDENCE_0, EVIDENCE_1]}
@@ -612,6 +666,9 @@ def test_build_job_orders_evidence_as_target_snapshot_subsequence() -> None:
     target = DiagnosisState.model_validate(target.model_dump(mode="python"))
     spec = JobSpec(
         job_type=JobType.DIAGNOSE,
+        diagnosis_mode="SPECIALIZED",
+        generic_skill_name=None,
+        generic_problem_text=None,
         goal="Continue with both accepted evidence records.",
         target_state_revision=2,
         evidence_bindings=[

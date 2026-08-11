@@ -133,6 +133,7 @@ def project_case_components(
         case_id=case.case_id,
         status=case.status,
         case_revision=case.case_revision,
+        raw_problem_text=case.raw_problem_text,
         diagnosis_state_revision=case.diagnosis_state.revision,
         problem_spec=case.diagnosis_state.problem_spec,
         user_facts=list(case.diagnosis_state.user_facts),
@@ -143,6 +144,7 @@ def project_case_components(
         selected_skill_ref=case.selected_skill_ref,
         final_result=case.final_result,
         unresolved_result=case.unresolved_result,
+        generic_result=case.generic_result,
         failure=case.failure,
         artifacts=project_artifact_summaries(case, artifacts),
         created_at=case.created_at,
@@ -338,6 +340,7 @@ def _job_summary(job: Job) -> JobSummary:
     return JobSummary(
         job_id=job.job_id,
         job_type=job.job_type,
+        diagnosis_mode=job.diagnosis_mode,
         status=job.status,
         goal=job.goal,
         base_state_revision=job.base_state_revision,

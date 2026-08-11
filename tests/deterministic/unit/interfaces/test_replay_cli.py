@@ -73,6 +73,7 @@ def _settings(tmp_path: Path) -> Settings:
         bind_host="127.0.0.1",
         port=8000,
         claude_command="claude",
+        generic_skill_name="generic-problem-locator-smoke",
         skill_dir=skill,
         logparse_repo=repo,
         logparse_config_path=config,
@@ -316,9 +317,9 @@ def test_replay_document_parent_sync_failure_rolls_back_complete_link(
     assert list(tmp_path.glob(f".{destination.name}.*.tmp")) == []
 
 
-def test_v3_state_contract_is_the_replay_hard_cut() -> None:
-    assert SCHEMA_VERSION == 3
-    assert CONTRACT_REVISION == "v3-contract-r1"
+def test_v4_state_contract_is_the_replay_hard_cut() -> None:
+    assert SCHEMA_VERSION == 4
+    assert CONTRACT_REVISION == "v4-contract-r1"
 
 
 def test_replay_projection_and_output_root_share_the_current_state_boundary(

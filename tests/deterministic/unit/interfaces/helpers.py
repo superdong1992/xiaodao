@@ -49,6 +49,7 @@ def case_view(*, revision: int = 1, artifacts: list[ArtifactSummary] | None = No
         case_id=CASE_ID,
         status=CaseStatus.WAITING_INPUT,
         case_revision=revision,
+        raw_problem_text="RPC request times out.",
         diagnosis_state_revision=1,
         problem_spec=ProblemSpec(revision=1, **problem_spec_input()),
         user_facts=[],

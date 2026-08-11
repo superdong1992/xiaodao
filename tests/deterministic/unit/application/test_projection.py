@@ -121,6 +121,7 @@ def _case(
         case_id=base.case_id,
         status=status,
         case_revision=base.case_revision,
+        raw_problem_text=base.raw_problem_text,
         diagnosis_state=diagnosis or base.diagnosis_state,
         active_job_id=active_job_id,
         selected_skill_ref=base.selected_skill_ref,

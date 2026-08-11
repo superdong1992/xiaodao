@@ -81,12 +81,15 @@ def apply_transition_plan_to_case(
 
     if (plan.next_job_spec is None) != (created_job is None):
         raise ValueError("created_job must exist exactly when next_job_spec exists")
-    if (plan.target_case_status is CaseStatus.UNRESOLVED) != (
-        unresolved_result is not None
+    if plan.generic_result is None and (
+        (plan.target_case_status is CaseStatus.UNRESOLVED)
+        != (unresolved_result is not None)
     ):
         raise ValueError(
             "unresolved_result must exist exactly for an UNRESOLVED plan"
         )
+    if plan.generic_result is not None and unresolved_result is not None:
+        raise ValueError("generic terminal plans forbid unresolved_result")
     if created_job is not None:
         if (
             created_job.case_id != current.case_id
@@ -112,6 +115,7 @@ def apply_transition_plan_to_case(
         ),
         final_result=resolve_final_result(candidate, plan.final_result_target),
         unresolved_result=unresolved_result,
+        generic_result=plan.generic_result,
         failure=apply_case_failure_update(
             current.failure,
             plan.case_failure_update,

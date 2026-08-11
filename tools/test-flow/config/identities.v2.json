@@ -15,6 +15,7 @@
     "adapter.cross-job": {"kind": "paths", "paths": ["tools/test-flow/adapters/cross-job-core.mjs", "tools/test-flow/adapters/macos-linux-release.mjs", "tools/test-flow/adapters/windows-linux-release.mjs", "tools/test-flow/adapters/linux-linux-release.mjs"]},
     "skill.client": {"kind": "paths", "paths": [".claude/skills/problem-locator-client"]},
     "skill.diagnose": {"kind": "paths", "paths": ["tests/fixtures/components/diagnosis-generator/diagnose-service-takeover"]},
+    "skill.generic-smoke": {"kind": "paths", "paths": ["tests/fixtures/components/generic-problem-locator-smoke"]},
     "skill.logparse": {"kind": "paths", "paths": [".claude/skills/logparse-diagnose"]},
     "source.agent": {"kind": "paths", "paths": ["src/problem_locator/runtime/agent_backend.py", "src/problem_locator/runtime/claude_command.py", "src/problem_locator/runtime/process_tree.py"]},
     "source.route": {"kind": "paths", "paths": ["src/problem_locator/domain", "src/problem_locator/runtime"]},
@@ -55,6 +56,10 @@
     },
     "real-agent": {
       "producer": ["source.agent", "runtime.claude", "runtime.settings", "runtime.release"],
+      "proof": ["proof.real", "framework.runner"]
+    },
+    "real-generic-locator": {
+      "producer": ["product.source", "source.agent", "source.diagnose", "skill.generic-smoke", "runtime.claude", "runtime.settings", "runtime.release"],
       "proof": ["proof.real", "framework.runner"]
     },
     "real-route": {

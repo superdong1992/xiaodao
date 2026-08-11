@@ -626,6 +626,18 @@ class OutcomeSubmissionService:
                 )
             }
         payload = outcome.payload
+        if (
+            job.job_type is JobType.ROUTE
+            and outcome.result_type is OutcomeResultType.NO_CAPABILITY
+        ):
+            bindings = self._asset_catalog.generic_diagnose_bindings()
+            return {
+                JobType.DIAGNOSE: _validate_catalog_bindings(
+                    JobType.DIAGNOSE,
+                    bindings,
+                    expected_skill_ref=None,
+                )
+            }
         skill_ref = (
             getattr(payload, "skill_ref", None)
             if job.job_type is JobType.ROUTE
@@ -1610,6 +1622,11 @@ def _expected_next_job_type(
 
     payload = outcome.payload
     if job.job_type is JobType.ROUTE:
+        if (
+            outcome.result_type is OutcomeResultType.NO_CAPABILITY
+            and getattr(payload, "kind", None) is RouteKind.NO_CAPABILITY
+        ):
+            return JobType.DIAGNOSE
         if (
             outcome.result_type is OutcomeResultType.COMPLETED
             and getattr(payload, "kind", None) is RouteKind.MATCHED

@@ -15,6 +15,7 @@ EXPECTED_ENV_KEYS = {
     "CLAUDE_COMMAND",
     "DATA_ROOT",
     "DFX_LOG_LEVEL",
+    "GENERIC_SKILL_NAME",
     "DFX_LOG_DIR",
     "LOGPARSE_CONFIG_PATH",
     "LOGPARSE_PYTHON",
@@ -67,7 +68,7 @@ def test_release_metadata_keeps_the_offline_database_boundary() -> None:
 
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     required_release_boundaries = (
-        "State、Job 和权威 Outcome 已硬切到 V3",
+        "State、Job 和权威 Outcome 已硬切到 V4",
         "Replay every durable, finalized but unconfirmed Job Outcome",
         "`state.json` approaches 16 MiB",
         "retained history approaches 500 Cases",

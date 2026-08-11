@@ -19,6 +19,7 @@ from problem_locator.contracts.enums import (
     ArtifactKind,
     AssetKind,
     AttachmentStatus,
+    DiagnosisMode,
     ErrorCode,
     OutcomeDisposition,
     ResourceKind,
@@ -278,6 +279,8 @@ def runtime_bindings(version: str, digest_character: str) -> RuntimeBindings:
     from problem_locator.contracts.enums import JobType
 
     return RuntimeBindings(
+        diagnosis_mode=DiagnosisMode.SPECIALIZED,
+        generic_skill_name=None,
         agent_profile_ref=ref("specialist-profile"),
         available_skill_refs=[],
         skill_ref=ref("rpc-timeout"),
@@ -320,6 +323,8 @@ def assets_for_bindings(bindings: RuntimeBindings) -> list[ResolvedAsset]:
 
 def bindings_from_job(job: Job) -> RuntimeBindings:
     return RuntimeBindings(
+        diagnosis_mode=job.diagnosis_mode,
+        generic_skill_name=job.generic_skill_name,
         agent_profile_ref=job.agent_profile_ref,
         available_skill_refs=job.available_skill_refs,
         skill_ref=job.skill_ref,

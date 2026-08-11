@@ -24,6 +24,7 @@ from problem_locator.contracts import (
     ArtifactKind,
     AssetKind,
     CaseAggregate,
+    DiagnosisMode,
     ErrorCode,
     ERROR_SPECS,
     ExecutionFileRef,
@@ -31,6 +32,8 @@ from problem_locator.contracts import (
     ExecutionLogSinks,
     ExecutionStage,
     FixtureManifest,
+    GenericDiagnosisOutcome,
+    GenericResultStatus,
     Job,
     JobOutcome,
     JobStatus,
@@ -41,6 +44,8 @@ from problem_locator.contracts import (
     ResolvedAsset,
     ResourceKind,
     ResourceRef,
+    RouteDecision,
+    RouteKind,
     RuntimeExecutionReceipt,
     RuntimeInfrastructureError,
     StateFile,
@@ -69,6 +74,10 @@ from problem_locator.runtime.diagnosis_runtime import (
     _discard_unreferenced_staged,
 )
 from problem_locator.runtime.failures import RuntimeExecutionError, runtime_failure
+from problem_locator.runtime.generic_locator import (
+    GENERIC_RESULT_FILENAME,
+    MAX_GENERIC_RESULT_BYTES,
+)
 from problem_locator.runtime.outcome_publisher import OutcomePublisher
 from problem_locator.runtime.outcome_finalizer import (
     DRAFT_FINALIZATION_MARKER_RELATIVE_PATH,
@@ -402,7 +411,10 @@ def _make_route_catalog(tmp_path: Path) -> VersionedAssetCatalog:
         CATALOG_FIXTURES / "skill-dir/manual-triage",
         skill_dir / "manual-triage",
     )
-    return VersionedAssetCatalog(skill_dir=skill_dir)
+    return VersionedAssetCatalog(
+        skill_dir=skill_dir,
+        generic_skill_name="generic-problem-locator-smoke",
+    )
 
 
 def _job_from_catalog(catalog: VersionedAssetCatalog) -> Job:
@@ -480,6 +492,70 @@ def _running_route_job(catalog: VersionedAssetCatalog) -> Job:
     return Job.model_validate(payload)
 
 
+_GENERIC_RAW_PROBLEM = (
+    "订单支付成功后页面仍显示“处理中”。\n"
+    "request-id: 订单-α-42\n"
+    "已确认：刷新三次仍复现"
+)
+
+
+def _running_generic_job(catalog: VersionedAssetCatalog) -> Job:
+    payload = _route_job().model_dump(mode="json")
+    bindings = catalog.generic_diagnose_bindings()
+    payload.update(bindings.model_dump(mode="json"))
+    payload.update(
+        {
+            "job_type": "DIAGNOSE",
+            "diagnosis_mode": "GENERIC",
+            "generic_skill_name": "generic-problem-locator-smoke",
+            "generic_problem_text": _GENERIC_RAW_PROBLEM,
+            "status": "RUNNING",
+            "goal": "Run the configured generic problem locator.",
+            "context_snapshot": None,
+            "evidence_refs": [],
+            "attachment_refs": [],
+            "previous_outcome_refs": [],
+            "artifact_refs": [],
+            "available_skill_refs": [],
+            "skill_ref": None,
+            "review_target": None,
+            "started_at": "2026-07-31T00:00:01.000Z",
+            "runtime_epoch": "00000000-0000-4000-8000-000000000499",
+        }
+    )
+    return Job.model_validate(payload)
+
+
+def _generic_aggregate(job: Job) -> CaseAggregate:
+    state = StateFile.model_validate(_json("state.json"))
+    aggregate = next(iter(state.cases.values()))
+    payload = aggregate.model_dump(mode="json")
+    payload["case"].update(
+        raw_problem_text=job.generic_problem_text,
+        active_job_id=job.job_id,
+        selected_skill_ref=None,
+    )
+    payload["jobs"] = {job.job_id: job.model_dump(mode="json")}
+    return CaseAggregate.model_validate(payload)
+
+
+def _generic_result_bytes(
+    *,
+    status: str = "RESOLVED",
+    conclusion: str = "generic-skill-input-contract-ok",
+    root_cause: str = "已逐字确认通用定位输入与预期一致。",
+) -> bytes:
+    return (
+        "<<<GENERIC_DIAGNOSIS_RESULT_V1>>>\n"
+        f"STATUS: {status}\n"
+        "CONCLUSION:\n"
+        f"{conclusion}\n"
+        "ROOT_CAUSE_ANALYSIS:\n"
+        f"{root_cause}\n"
+        "<<<END_GENERIC_DIAGNOSIS_RESULT_V1>>>\n"
+    ).encode("utf-8")
+
+
 def _route_agent_outcome(job: Job) -> AgentJobOutcomeDraftV2:
     payload = _json("agent-job-outcome-draft-route.json")
     payload.update(
@@ -492,6 +568,20 @@ def _route_agent_outcome(job: Job) -> AgentJobOutcomeDraftV2:
     )
     payload["payload"]["skill_ref"] = job.available_skill_refs[0].model_dump(
         mode="json"
+    )
+    return AgentJobOutcomeDraftV2.model_validate(payload)
+
+
+def _route_agent_no_capability(job: Job) -> AgentJobOutcomeDraftV2:
+    payload = _route_agent_outcome(job).model_dump(mode="python")
+    payload.update(
+        result_type=OutcomeResultType.NO_CAPABILITY,
+        payload=RouteDecision(
+            kind=RouteKind.NO_CAPABILITY,
+            skill_ref=None,
+            reason="No specialized Skill semantically matches the problem.",
+            confidence=0.91,
+        ),
     )
     return AgentJobOutcomeDraftV2.model_validate(payload)
 
@@ -571,6 +661,39 @@ class _NeverBackend:
         raise AssertionError("Backend must not be called")
 
 
+class _GenericRuntimeBackend:
+    def __init__(
+        self,
+        result_bytes: bytes | None,
+        *,
+        failure: RuntimeExecutionError | None = None,
+    ) -> None:
+        self.result_bytes = result_bytes
+        self.failure = failure
+        self.calls: list[dict[str, Any]] = []
+
+    def execute(self, **kwargs: Any) -> BackendExecution:
+        self.calls.append(kwargs)
+        if self.failure is not None:
+            raise self.failure
+        workspace_root = Path(kwargs["workspace_root"])
+        if self.result_bytes is not None:
+            (workspace_root / "output" / GENERIC_RESULT_FILENAME).write_bytes(
+                self.result_bytes
+            )
+        sinks: ExecutionLogSinks = kwargs["log_sinks"]
+        unique = {id(sinks.stdout): sinks.stdout, id(sinks.stderr): sinks.stderr}
+        for sink in unique.values():
+            sink.flush()
+            sink.close()
+        return BackendExecution(
+            returncode=0,
+            stdout_stderr_bytes=0,
+            workspace_bytes=0,
+            elapsed_seconds=0.01,
+        )
+
+
 class _TooLargeContext:
     def build(self, job: Job, materials: Any) -> object:
         del job, materials
@@ -634,6 +757,28 @@ def _runtime_fixture(
     return runtime, job, state, actual_backend, actual_records
 
 
+def _generic_runtime_fixture(
+    tmp_path: Path,
+    backend: _GenericRuntimeBackend,
+) -> tuple[DiagnosisRuntime, Job, _StateView, InMemoryExecutionRecordStore]:
+    catalog = _make_route_catalog(tmp_path)
+    job = _running_generic_job(catalog)
+    state = _StateView(_generic_aggregate(job))
+    records = InMemoryExecutionRecordStore()
+    runtime = DiagnosisRuntime(
+        state_repository=state,
+        resource_store=_UnusedResourceStore(),
+        asset_catalog=catalog,
+        logparse_broker_factory=None,
+        execution_records=records,
+        clock=_Clock(),
+        id_generator=_Ids(),
+        workspace_manager=WorkspaceManager(tmp_path / "generic-data"),
+        backend=backend,  # type: ignore[arg-type]
+    )
+    return runtime, job, state, records
+
+
 def test_empty_route_candidate_set_publishes_no_capability_without_backend(
     tmp_path: Path,
 ) -> None:
@@ -691,6 +836,113 @@ def test_empty_route_candidate_set_publishes_no_capability_without_backend(
     assert state.calls == []
     assert records.log_sinks == {}
     assert len(records.publish_outcome_calls) == 1
+
+
+def test_router_semantic_no_match_publishes_no_capability_after_backend(
+    tmp_path: Path,
+) -> None:
+    backend = _RuntimeBackend(None)
+    runtime, job, state, _, records = _runtime_fixture(tmp_path, backend=backend)
+    backend.outcome_bytes = canonical_json_bytes(_route_agent_no_capability(job))
+
+    receipt = runtime.execute(job, InMemoryCancellationSignal())
+
+    assert len(backend.calls) == 1
+    assert state.calls == [job.case_id]
+    assert receipt.job_outcome.result_type is OutcomeResultType.NO_CAPABILITY
+    assert receipt.job_outcome.payload is not None
+    assert receipt.job_outcome.payload.kind is RouteKind.NO_CAPABILITY
+    assert receipt.job_outcome.payload.skill_ref is None
+    assert len(records.publish_outcome_calls) == 1
+
+
+def test_generic_runtime_passes_only_exact_multiline_unicode_and_reads_result_file(
+    tmp_path: Path,
+) -> None:
+    backend = _GenericRuntimeBackend(_generic_result_bytes())
+    runtime, job, state, records = _generic_runtime_fixture(tmp_path, backend)
+
+    receipt = runtime.execute(job, InMemoryCancellationSignal())
+
+    assert job.diagnosis_mode is DiagnosisMode.GENERIC
+    assert job.context_snapshot is None
+    assert job.evidence_refs == job.attachment_refs == job.previous_outcome_refs == []
+    assert job.artifact_refs == []
+    assert len(backend.calls) == 1
+    prompt = backend.calls[0]["prompt"]
+    marker = (
+        "<<<RAW_PROBLEM_TEXT_UTF8_BYTES:"
+        f"{len(_GENERIC_RAW_PROBLEM.encode('utf-8'))}>>>\n"
+    )
+    payload = prompt.split(marker, 1)[1].split(
+        "\n<<<END_RAW_PROBLEM_TEXT>>>", 1
+    )[0]
+    assert payload == _GENERIC_RAW_PROBLEM
+    workspace_root = Path(backend.calls[0]["workspace_root"])
+    manifest = json.loads((workspace_root / "inputs" / "manifest.json").read_bytes())
+    assert manifest["entries"] == []
+    assert manifest["logparse_tool_ref"] is None
+    assert manifest["logparse_product"] is None
+    assert state.calls == [job.case_id]
+    assert receipt.job_outcome.result_type is OutcomeResultType.COMPLETED
+    assert isinstance(receipt.job_outcome.payload, GenericDiagnosisOutcome)
+    assert receipt.job_outcome.payload.status is GenericResultStatus.RESOLVED
+    assert receipt.job_outcome.payload.conclusion == "generic-skill-input-contract-ok"
+    assert receipt.job_outcome.consumed_evidence_refs == []
+    assert receipt.job_outcome.proposed_evidence == []
+    assert receipt.job_outcome.proposed_artifacts == []
+    assert receipt.job_outcome.decision_audit is None
+    assert len(records.publish_outcome_calls) == 1
+
+
+@pytest.mark.parametrize(
+    "result_bytes",
+    [
+        None,
+        b"\xff",
+        b"prefix\n" + _generic_result_bytes(),
+        _generic_result_bytes(conclusion="```not-allowed```"),
+        b"x" * (MAX_GENERIC_RESULT_BYTES + 1),
+    ],
+    ids=["missing", "invalid-utf8", "extra-text", "code-fence", "oversize"],
+)
+def test_generic_runtime_maps_invalid_result_file_to_nonretryable_failure(
+    tmp_path: Path,
+    result_bytes: bytes | None,
+) -> None:
+    backend = _GenericRuntimeBackend(result_bytes)
+    runtime, job, _, _ = _generic_runtime_fixture(tmp_path, backend)
+
+    receipt = runtime.execute(job, InMemoryCancellationSignal())
+
+    assert len(backend.calls) == 1
+    assert receipt.job_outcome.result_type is OutcomeResultType.FAILED
+    assert receipt.job_outcome.error is not None
+    assert receipt.job_outcome.error.code is ErrorCode.OUTCOME_INVALID
+    assert receipt.job_outcome.error.retryable is False
+
+
+def test_generic_runtime_never_retries_a_retryable_backend_failure(
+    tmp_path: Path,
+) -> None:
+    backend = _GenericRuntimeBackend(
+        None,
+        failure=runtime_failure(
+            stage=ExecutionStage.BACKEND_EXECUTE,
+            code=ErrorCode.BACKEND_EXIT_FAILED,
+            message="Injected backend failure.",
+            retryable=True,
+        ),
+    )
+    runtime, job, _, _ = _generic_runtime_fixture(tmp_path, backend)
+
+    receipt = runtime.execute(job, InMemoryCancellationSignal())
+
+    assert len(backend.calls) == 1
+    assert receipt.job_outcome.result_type is OutcomeResultType.FAILED
+    assert receipt.job_outcome.error is not None
+    assert receipt.job_outcome.error.code is ErrorCode.BACKEND_EXIT_FAILED
+    assert receipt.job_outcome.error.retryable is False
 
 
 def test_public_asset_fake_typed_resolve_failure_preserves_details_as_outcome(
@@ -1432,6 +1684,7 @@ def _logparse_catalog(
     )
     return VersionedAssetCatalog(
         skill_dir=skill_dir,
+        generic_skill_name="generic-problem-locator-smoke",
         logparse_tool=asset,
         logparse_broker_factory=factory,
     )

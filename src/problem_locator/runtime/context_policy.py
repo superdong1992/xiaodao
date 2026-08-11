@@ -15,6 +15,7 @@ from problem_locator.contracts import (
     ApplicationPortError,
     AssetCatalogPort,
     AssetKind,
+    DiagnosisMode,
     ErrorCode,
     ExecutionStage,
     Job,
@@ -330,6 +331,11 @@ class RuntimeAssetResolver:
                     ],
                 }
             ).decode("utf-8")
+            skill_text = None
+        elif job.diagnosis_mode is DiagnosisMode.GENERIC:
+            if skill is not None or job.skill_ref is not None:
+                raise _invalid_asset() from None
+            skill_index = None
             skill_text = None
         else:
             if skill is None or job.skill_ref is None:

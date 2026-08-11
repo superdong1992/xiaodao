@@ -1,4 +1,4 @@
-"""Pydantic models for the frozen Problem Locator V3 public contract.
+"""Pydantic models for the frozen Problem Locator V4 public contract.
 
 The module deliberately keeps all wire/persistence DTO definitions in one place;
 ``commands``, ``outcomes`` and ``errors`` provide responsibility-oriented exports.
@@ -34,6 +34,7 @@ from .enums import (
     CandidateStatus,
     CaseStatus,
     ContextSectionKind,
+    DiagnosisMode,
     DiagnosisItemStatus,
     DiagnosisProvenanceType,
     ErrorCode,
@@ -41,6 +42,7 @@ from .enums import (
     ExecutionStage,
     FailureReportDisposition,
     FieldUpdateAction,
+    GenericResultStatus,
     JobStatus,
     JobType,
     OutcomeDisposition,
@@ -76,6 +78,7 @@ UTC_TIMESTAMP_PATTERN = r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$"
 SHA256_PATTERN = r"^[0-9a-f]{64}$"
 CONTENT_TYPE_PATTERN = r"^[a-z0-9][a-z0-9!#$&^_.+\-]{0,62}/[a-z0-9][a-z0-9!#$&^_.+\-]{0,62}$"
 NAME_PATTERN = r"^[a-z][a-z0-9_]{0,63}$"
+SKILL_NAME_PATTERN = r"^[a-z0-9]+(?:-[a-z0-9]+)*$"
 FORMAT_ID_PATTERN = r"^[a-z][a-z0-9.\-]{0,63}$"
 GIT_OBJECT_PATTERN = r"^[0-9a-f]{40,64}$"
 
@@ -264,6 +267,15 @@ UtcTimestamp: TypeAlias = Annotated[
 Sha256: TypeAlias = Annotated[str, StringConstraints(pattern=SHA256_PATTERN, strict=True)]
 ContentType: TypeAlias = Annotated[str, StringConstraints(pattern=CONTENT_TYPE_PATTERN, strict=True)]
 ContractName: TypeAlias = Annotated[str, StringConstraints(pattern=NAME_PATTERN, strict=True)]
+SkillName: TypeAlias = Annotated[
+    str,
+    StringConstraints(
+        min_length=1,
+        max_length=64,
+        pattern=SKILL_NAME_PATTERN,
+        strict=True,
+    ),
+]
 NonEmptyText: TypeAlias = Annotated[
     str,
     StringConstraints(min_length=1, max_length=MAX_USER_TEXT_UTF8_BYTES, strict=True),
@@ -324,6 +336,8 @@ class ResourceLimits(ContractModel):
 def _validate_role_bindings(
     job_type: JobType,
     *,
+    diagnosis_mode: DiagnosisMode | None,
+    generic_skill_name: str | None,
     available_skill_refs: list[VersionedRef],
     skill_ref: VersionedRef | None,
     logparse_tool_ref: VersionedRef | None,
@@ -333,15 +347,41 @@ def _validate_role_bindings(
     if resource_limits != default_resource_limits(job_type):
         raise ValueError("resource_limits must equal the frozen defaults for the Job role")
     if job_type is JobType.ROUTE:
-        if skill_ref is not None or logparse_tool_ref is not None or logparse_product is not None:
-            raise ValueError("ROUTE bindings forbid selected skill and logparse")
-    else:
-        if available_skill_refs or skill_ref is None:
-            raise ValueError("DIAGNOSE/REVIEW bindings require one skill and no route candidates")
-        if job_type is JobType.REVIEW and (
-            logparse_tool_ref is not None or logparse_product is not None
+        if (
+            diagnosis_mode is not None
+            or generic_skill_name is not None
+            or skill_ref is not None
+            or logparse_tool_ref is not None
+            or logparse_product is not None
         ):
+            raise ValueError("ROUTE bindings forbid selected skill and logparse")
+        return
+    if available_skill_refs:
+        raise ValueError("DIAGNOSE/REVIEW bindings forbid route candidates")
+    if job_type is JobType.REVIEW:
+        if diagnosis_mode is not None or generic_skill_name is not None:
+            raise ValueError("REVIEW bindings forbid diagnosis mode and generic Skill")
+        if skill_ref is None:
+            raise ValueError("REVIEW bindings require one selected Skill")
+        if logparse_tool_ref is not None or logparse_product is not None:
             raise ValueError("REVIEW bindings forbid logparse")
+        return
+    if diagnosis_mode is DiagnosisMode.SPECIALIZED:
+        if generic_skill_name is not None or skill_ref is None:
+            raise ValueError("SPECIALIZED DIAGNOSE requires one selected Skill")
+        return
+    if diagnosis_mode is DiagnosisMode.GENERIC:
+        if (
+            generic_skill_name is None
+            or skill_ref is not None
+            or logparse_tool_ref is not None
+            or logparse_product is not None
+        ):
+            raise ValueError(
+                "GENERIC DIAGNOSE requires only a preinstalled generic Skill name"
+            )
+        return
+    raise ValueError("DIAGNOSE bindings require an explicit diagnosis mode")
 
 
 class ProblemSpecInput(ContractModel):
@@ -776,15 +816,27 @@ class UnresolvedResult(ContractModel):
         return self
 
 
+class GenericResult(ContractModel):
+    status: GenericResultStatus
+    conclusion: NonEmptyText
+    root_cause_analysis: NonEmptyText
+    skill_name: SkillName
+    source_job_id: OpaqueId
+    source_outcome_id: OpaqueId
+    occurred_at: UtcTimestamp
+
+
 class Case(ContractModel):
     case_id: OpaqueId
     status: CaseStatus
     case_revision: PositiveInt
+    raw_problem_text: NonEmptyText
     diagnosis_state: DiagnosisState
     active_job_id: OpaqueId | None
     selected_skill_ref: VersionedRef | None
     final_result: CandidateConclusion | None
     unresolved_result: UnresolvedResult | None = None
+    generic_result: GenericResult | None = None
     failure: CaseFailure | None
     created_at: UtcTimestamp
     updated_at: UtcTimestamp
@@ -793,22 +845,46 @@ class Case(ContractModel):
     def validate_terminal_fields(self) -> Case:
         if (self.status is CaseStatus.FAILED) != (self.failure is not None):
             raise ValueError("failure must be present exactly for FAILED cases")
+        if self.generic_result is not None:
+            expected_status = CaseStatus(self.generic_result.status.value)
+            if self.status is not expected_status:
+                raise ValueError("generic_result status must equal the Case terminal status")
+            if (
+                self.final_result is not None
+                or self.unresolved_result is not None
+                or self.selected_skill_ref is not None
+            ):
+                raise ValueError(
+                    "generic terminal cases forbid specialized result and selected Skill fields"
+                )
+        elif self.status in {CaseStatus.RESOLVED, CaseStatus.UNRESOLVED}:
+            pass
         if self.status is CaseStatus.RESOLVED:
-            if self.final_result is None or self.final_result.status is not CandidateStatus.ACCEPTED:
+            if self.generic_result is None and (
+                self.final_result is None
+                or self.final_result.status is not CandidateStatus.ACCEPTED
+            ):
                 raise ValueError("RESOLVED cases require an ACCEPTED final_result")
-            if self.diagnosis_state.candidate_conclusion != self.final_result:
+            if self.generic_result is None and (
+                self.diagnosis_state.candidate_conclusion != self.final_result
+            ):
                 raise ValueError(
                     "RESOLVED final_result must equal the current DiagnosisState candidate"
                 )
         elif self.final_result is not None:
             raise ValueError("non-RESOLVED cases must have final_result=null")
         if self.status is CaseStatus.UNRESOLVED:
-            if self.unresolved_result is None:
+            if self.generic_result is None and self.unresolved_result is None:
                 raise ValueError("UNRESOLVED cases require unresolved_result")
             if self.failure is not None:
                 raise ValueError("UNRESOLVED cases forbid failure")
         elif self.unresolved_result is not None:
             raise ValueError("only UNRESOLVED cases may carry unresolved_result")
+        if (
+            self.generic_result is not None
+            and self.status not in {CaseStatus.RESOLVED, CaseStatus.UNRESOLVED}
+        ):
+            raise ValueError("generic_result is valid only for a generic terminal Case")
         if self.status is CaseStatus.REVIEWING:
             candidate = self.diagnosis_state.candidate_conclusion
             if candidate is None or candidate.status is not CandidateStatus.REVIEWING:
@@ -832,10 +908,13 @@ class Job(ContractModel):
     job_id: OpaqueId
     case_id: OpaqueId
     job_type: JobType
+    diagnosis_mode: DiagnosisMode | None
+    generic_skill_name: SkillName | None
+    generic_problem_text: NonEmptyText | None
     status: JobStatus
     goal: NonEmptyText
     base_state_revision: PositiveInt
-    context_snapshot: ContextSnapshot
+    context_snapshot: ContextSnapshot | None
     evidence_refs: list[OpaqueId]
     attachment_refs: list[OpaqueId]
     previous_outcome_refs: list[OpaqueId]
@@ -858,18 +937,59 @@ class Job(ContractModel):
 
     @model_validator(mode="after")
     def validate_job(self) -> Job:
-        if self.base_state_revision != self.context_snapshot.diagnosis_state_revision:
-            raise ValueError("base_state_revision must match context snapshot revision")
+        generic = (
+            self.job_type is JobType.DIAGNOSE
+            and self.diagnosis_mode is DiagnosisMode.GENERIC
+        )
+        if generic:
+            if self.context_snapshot is not None:
+                raise ValueError(
+                    "GENERIC DIAGNOSE forbids a specialized ContextSnapshot"
+                )
+        else:
+            if self.context_snapshot is None:
+                raise ValueError("non-generic Jobs require a ContextSnapshot")
+            if (
+                self.base_state_revision
+                != self.context_snapshot.diagnosis_state_revision
+            ):
+                raise ValueError(
+                    "base_state_revision must match context snapshot revision"
+                )
         for name in ("evidence_refs", "attachment_refs", "previous_outcome_refs", "artifact_refs"):
             _unique(getattr(self, name), name)
-        snapshot_refs = self.context_snapshot.evidence_refs
-        if [ref for ref in snapshot_refs if ref in set(self.evidence_refs)] != self.evidence_refs:
-            raise ValueError("job evidence_refs must be a de-duplicated subsequence of snapshot evidence_refs")
+        if self.context_snapshot is not None:
+            snapshot_refs = self.context_snapshot.evidence_refs
+            if [ref for ref in snapshot_refs if ref in set(self.evidence_refs)] != self.evidence_refs:
+                raise ValueError("job evidence_refs must be a de-duplicated subsequence of snapshot evidence_refs")
         _unique([ref.id + "@" + ref.version + "#" + ref.content_hash for ref in self.available_skill_refs], "available_skill_refs")
         if (self.logparse_tool_ref is None) != (self.logparse_product is None):
             raise ValueError("logparse_tool_ref and logparse_product must be both null or both non-null")
         if self.logparse_tool_ref is not None and self.job_type is not JobType.DIAGNOSE:
             raise ValueError("only DIAGNOSE jobs may use logparse")
+        if self.job_type is JobType.DIAGNOSE:
+            if self.diagnosis_mode is DiagnosisMode.GENERIC:
+                if self.generic_problem_text is None:
+                    raise ValueError("GENERIC DIAGNOSE requires its frozen raw problem text")
+                if any(
+                    (
+                        self.evidence_refs,
+                        self.attachment_refs,
+                        self.previous_outcome_refs,
+                        self.artifact_refs,
+                    )
+                ):
+                    raise ValueError(
+                        "GENERIC DIAGNOSE forbids Evidence, Attachments, Artifacts, and history"
+                    )
+            elif self.generic_problem_text is not None:
+                raise ValueError("SPECIALIZED DIAGNOSE forbids generic problem text")
+        elif (
+            self.diagnosis_mode is not None
+            or self.generic_skill_name is not None
+            or self.generic_problem_text is not None
+        ):
+            raise ValueError("only DIAGNOSE jobs may carry diagnosis-mode fields")
         if self.job_type is JobType.ROUTE:
             if self.review_target is not None:
                 raise ValueError("ROUTE jobs forbid skill_ref/review_target")
@@ -879,6 +999,7 @@ class Job(ContractModel):
         else:
             if self.review_target is None or self.logparse_tool_ref is not None:
                 raise ValueError("REVIEW jobs require review_target and forbid logparse")
+            assert self.context_snapshot is not None
             candidate = self.context_snapshot.candidate_conclusion
             if candidate is None or candidate.status is not CandidateStatus.REVIEWING:
                 raise ValueError("REVIEW snapshot requires a REVIEWING candidate")
@@ -899,6 +1020,8 @@ class Job(ContractModel):
                 )
         _validate_role_bindings(
             self.job_type,
+            diagnosis_mode=self.diagnosis_mode,
+            generic_skill_name=self.generic_skill_name,
             available_skill_refs=self.available_skill_refs,
             skill_ref=self.skill_ref,
             logparse_tool_ref=self.logparse_tool_ref,
@@ -1288,6 +1411,8 @@ class ResolvedAsset(ContractModel):
 
 
 class RuntimeBindings(ContractModel):
+    diagnosis_mode: DiagnosisMode | None
+    generic_skill_name: SkillName | None
     agent_profile_ref: VersionedRef
     available_skill_refs: list[VersionedRef]
     skill_ref: VersionedRef | None
@@ -1306,6 +1431,14 @@ class RuntimeBindings(ContractModel):
             [ref.id + "@" + ref.version + "#" + ref.content_hash for ref in self.available_skill_refs],
             "available_skill_refs",
         )
+        # Role-specific validation happens where the JobType is known.  The
+        # pair itself is nevertheless exact and cannot describe an ambiguous
+        # generic/specialized DIAGNOSE binding.
+        if self.diagnosis_mode is DiagnosisMode.GENERIC:
+            if self.generic_skill_name is None or self.skill_ref is not None:
+                raise ValueError("GENERIC bindings require only generic_skill_name")
+        elif self.generic_skill_name is not None:
+            raise ValueError("generic_skill_name is valid only for GENERIC bindings")
         return self
 
 
@@ -2299,6 +2432,13 @@ class DiagnosisOutcome(ContractModel):
         return self
 
 
+class GenericDiagnosisOutcome(ContractModel):
+    status: GenericResultStatus
+    conclusion: NonEmptyText
+    root_cause_analysis: NonEmptyText
+    skill_name: SkillName
+
+
 class ReviewAssessment(ContractModel):
     candidate_conclusion_id: OpaqueId
     candidate_revision: PositiveInt
@@ -2343,7 +2483,8 @@ class ReviewAssessment(ContractModel):
         return self
 
 
-OutcomePayload: TypeAlias = RouteDecision | DiagnosisOutcome | ReviewAssessment
+AgentOutcomePayload: TypeAlias = RouteDecision | DiagnosisOutcome | ReviewAssessment
+OutcomePayload: TypeAlias = AgentOutcomePayload | GenericDiagnosisOutcome
 
 
 class AgentEvidenceCitation(ContractModel):
@@ -2495,7 +2636,7 @@ class AgentJobOutcomeDraftV2(ContractModel):
     job_type: JobType
     base_state_revision: PositiveInt
     result_type: OutcomeResultType
-    payload: OutcomePayload | None
+    payload: AgentOutcomePayload | None
     consumed_evidence_refs: list[OpaqueId]
     proposed_evidence_drafts: list[AgentEvidenceProposalDraft]
     proposed_artifact_drafts: list[AgentArtifactProposalDraft]
@@ -2547,7 +2688,7 @@ class AgentJobOutcome(ContractModel):
     job_type: JobType
     base_state_revision: PositiveInt
     result_type: OutcomeResultType
-    payload: OutcomePayload | None
+    payload: AgentOutcomePayload | None
     consumed_evidence_refs: list[OpaqueId]
     proposed_evidence_drafts: list[AgentEvidenceProposalDraft]
     proposed_artifact_drafts: list[AgentArtifactProposalDraft]
@@ -2613,6 +2754,15 @@ class JobOutcome(ContractModel):
     def validate_outcome(self) -> JobOutcome:
         _validate_outcome_shape(self.job_type, self.result_type, self.payload, self.error)
         _unique(self.consumed_evidence_refs, "consumed_evidence_refs")
+        if isinstance(self.payload, GenericDiagnosisOutcome) and (
+            self.consumed_evidence_refs
+            or self.proposed_evidence
+            or self.proposed_artifacts
+            or self.decision_audit is not None
+        ):
+            raise ValueError(
+                "generic diagnosis Outcomes forbid evidence, artifacts, and decision audit"
+            )
         _validate_proposal_keys(
             [proposal.proposal_key for proposal in self.proposed_evidence],
             [proposal.proposal_key for proposal in self.proposed_artifacts],
@@ -2684,9 +2834,15 @@ def _validate_outcome_shape(
         return
     if payload is None or error is not None:
         raise ValueError("non-failed outcomes require a payload and error=null")
-    expected = {JobType.ROUTE: RouteDecision, JobType.DIAGNOSE: DiagnosisOutcome, JobType.REVIEW: ReviewAssessment}[job_type]
+    expected: type[ContractModel] | tuple[type[ContractModel], ...] = {
+        JobType.ROUTE: RouteDecision,
+        JobType.DIAGNOSE: (DiagnosisOutcome, GenericDiagnosisOutcome),
+        JobType.REVIEW: ReviewAssessment,
+    }[job_type]
     if not isinstance(payload, expected):
         raise ValueError("payload type does not match job_type")
+    if isinstance(payload, GenericDiagnosisOutcome) and result_type is not OutcomeResultType.COMPLETED:
+        raise ValueError("generic diagnosis results must use COMPLETED")
     if result_type is OutcomeResultType.NO_CAPABILITY and (
         not isinstance(payload, RouteDecision) or payload.kind is not RouteKind.NO_CAPABILITY
     ):
@@ -2712,8 +2868,8 @@ def _validate_decision_audit_binding(
     audit: DecisionAuditV2 | None,
 ) -> None:
     requires_audit = (
-        outcome.job_type in {JobType.DIAGNOSE, JobType.REVIEW}
-        and outcome.result_type is not OutcomeResultType.FAILED
+        outcome.result_type is not OutcomeResultType.FAILED
+        and isinstance(outcome.payload, (DiagnosisOutcome, ReviewAssessment))
     )
     if requires_audit != (audit is not None):
         raise ValueError(
@@ -2896,6 +3052,10 @@ def _validate_server_final_user_results(
         and isinstance(payload, ReviewAssessment)
         and payload.verdict is not ReviewVerdict.PASS
     )
+    if isinstance(payload, GenericDiagnosisOutcome):
+        if user_results or archives:
+            raise ValueError("generic diagnosis Outcomes forbid result Artifacts")
+        return
     if completed_candidate:
         if len(user_results) != 1 or len(archives) != 1:
             raise ValueError(
@@ -3078,6 +3238,9 @@ class JobLifecycleUpdate(ContractModel):
 
 class JobSpec(ContractModel):
     job_type: JobType
+    diagnosis_mode: DiagnosisMode | None
+    generic_skill_name: SkillName | None
+    generic_problem_text: NonEmptyText | None
     goal: NonEmptyText
     target_state_revision: PositiveInt
     evidence_bindings: list[PlannedResourceBinding]
@@ -3124,6 +3287,29 @@ class JobSpec(ContractModel):
             raise ValueError("logparse_tool_ref and logparse_product must be both null or both non-null")
         if self.logparse_tool_ref is not None and self.job_type is not JobType.DIAGNOSE:
             raise ValueError("only DIAGNOSE JobSpec may use logparse")
+        if self.job_type is JobType.DIAGNOSE:
+            if self.diagnosis_mode is DiagnosisMode.GENERIC:
+                if self.generic_problem_text is None:
+                    raise ValueError("GENERIC JobSpec requires frozen raw problem text")
+                if any(
+                    (
+                        self.evidence_bindings,
+                        self.attachment_refs,
+                        self.previous_outcome_refs,
+                        self.artifact_bindings,
+                    )
+                ):
+                    raise ValueError(
+                        "GENERIC JobSpec forbids Evidence, Attachments, Artifacts, and history"
+                    )
+            elif self.generic_problem_text is not None:
+                raise ValueError("SPECIALIZED JobSpec forbids generic problem text")
+        elif (
+            self.diagnosis_mode is not None
+            or self.generic_skill_name is not None
+            or self.generic_problem_text is not None
+        ):
+            raise ValueError("only DIAGNOSE JobSpec may carry diagnosis-mode fields")
         if self.job_type is JobType.ROUTE:
             if self.review_target_binding is not None:
                 raise ValueError("ROUTE JobSpec forbids skill/review target")
@@ -3134,6 +3320,8 @@ class JobSpec(ContractModel):
             raise ValueError("REVIEW JobSpec requires review target and forbids logparse")
         _validate_role_bindings(
             self.job_type,
+            diagnosis_mode=self.diagnosis_mode,
+            generic_skill_name=self.generic_skill_name,
             available_skill_refs=self.available_skill_refs,
             skill_ref=self.skill_ref,
             logparse_tool_ref=self.logparse_tool_ref,
@@ -3144,6 +3332,7 @@ class JobSpec(ContractModel):
 
 
 class CreateCaseTriggerPayload(ContractModel):
+    raw_problem_text: NonEmptyText
     problem_spec: ProblemSpec
     initial_user_facts: Annotated[
         list[DiagnosisItem], Field(max_length=MAX_INITIAL_USER_FACTS)
@@ -3326,6 +3515,8 @@ class ValidatedTrigger(ContractModel):
         for job_type, bindings in self.runtime_bindings_by_job_type.items():
             _validate_role_bindings(
                 job_type,
+                diagnosis_mode=bindings.diagnosis_mode,
+                generic_skill_name=bindings.generic_skill_name,
                 available_skill_refs=bindings.available_skill_refs,
                 skill_ref=bindings.skill_ref,
                 logparse_tool_ref=bindings.logparse_tool_ref,
@@ -3390,6 +3581,7 @@ class TransitionPlan(ContractModel):
     next_job_spec: JobSpec | None
     final_result_target: CandidateTarget | None
     unresolved_result_draft: UnresolvedResultDraft | None = None
+    generic_result: GenericResult | None = None
     clear_active_job: bool
     reason: NonEmptyText
 
@@ -3405,10 +3597,34 @@ class TransitionPlan(ContractModel):
                 raise ValueError("FAILED plans must SET case failure")
         elif self.case_failure_update is not None and self.case_failure_update.action is FieldUpdateAction.SET:
             raise ValueError("non-FAILED plans cannot SET case failure")
-        if self.target_case_status is CaseStatus.UNRESOLVED:
-            if self.unresolved_result_draft is None:
+        if self.generic_result is not None:
+            expected_status = CaseStatus(self.generic_result.status.value)
+            if self.target_case_status is not expected_status:
                 raise ValueError(
-                    "UNRESOLVED plans require an unresolved_result_draft"
+                    "generic_result status must equal the planned Case terminal status"
+                )
+            if (
+                self.unresolved_result_draft is not None
+                or self.accepted_evidence_proposal_keys
+                or self.accepted_artifact_proposal_keys
+                or self.accepted_candidate_proposal_key is not None
+                or self.candidate_mutation is not None
+                or self.next_job_spec is not None
+                or self.final_result_target is not None
+                or not self.clear_active_job
+            ):
+                raise ValueError(
+                    "generic terminal plans forbid specialized results, resources, and next Jobs"
+                )
+            if (
+                self.selected_skill_update is None
+                or self.selected_skill_update.action is not FieldUpdateAction.CLEAR
+            ):
+                raise ValueError("generic terminal plans must clear selected_skill_ref")
+        if self.target_case_status is CaseStatus.UNRESOLVED:
+            if self.unresolved_result_draft is None and self.generic_result is None:
+                raise ValueError(
+                    "UNRESOLVED plans require an unresolved or generic result"
                 )
             if self.next_job_spec is not None or not self.clear_active_job:
                 raise ValueError(
@@ -3418,6 +3634,11 @@ class TransitionPlan(ContractModel):
             raise ValueError(
                 "only UNRESOLVED plans may carry unresolved_result_draft"
             )
+        if (
+            self.generic_result is not None
+            and self.target_case_status not in {CaseStatus.RESOLVED, CaseStatus.UNRESOLVED}
+        ):
+            raise ValueError("generic_result is valid only for a terminal generic plan")
         if self.accepted_candidate_proposal_key is not None:
             if (
                 self.candidate_mutation is None
@@ -3733,9 +3954,22 @@ class CaseAggregate(ContractModel):
 
         replacement_sources: list[str] = []
         for job in self.jobs.values():
+            if (
+                job.diagnosis_mode is DiagnosisMode.GENERIC
+                and job.generic_problem_text != self.case.raw_problem_text
+            ):
+                raise ValueError(
+                    "GENERIC Job input must equal the Case raw_problem_text"
+                )
             if any(ref not in self.evidence for ref in job.evidence_refs):
                 raise ValueError("Job contains a dangling Evidence reference")
-            if any(ref not in self.evidence for ref in job.context_snapshot.evidence_refs):
+            if (
+                job.context_snapshot is not None
+                and any(
+                    ref not in self.evidence
+                    for ref in job.context_snapshot.evidence_refs
+                )
+            ):
                 raise ValueError("Job snapshot contains a dangling Evidence reference")
             if any(
                 ref not in self.attachments
@@ -3871,7 +4105,36 @@ class CaseAggregate(ContractModel):
             if job is None or job.runtime_epoch != failure_record.runtime_epoch:
                 raise ValueError("ExecutionFailureRecord must match its Job runtime epoch")
 
-        if self.case.status is CaseStatus.RESOLVED:
+        if self.case.generic_result is not None:
+            generic = self.case.generic_result
+            source_job = self.jobs.get(generic.source_job_id)
+            source_outcome = self.outcomes.get(generic.source_outcome_id)
+            processing = self.outcome_processing_records.get(generic.source_outcome_id)
+            if (
+                source_job is None
+                or source_job.job_type is not JobType.DIAGNOSE
+                or source_job.diagnosis_mode is not DiagnosisMode.GENERIC
+                or source_job.generic_skill_name != generic.skill_name
+                or source_job.status is not JobStatus.SUCCEEDED
+                or source_outcome is None
+                or source_outcome.job_id != source_job.job_id
+                or source_outcome.job_type is not JobType.DIAGNOSE
+                or source_outcome.result_type is not OutcomeResultType.COMPLETED
+                or not isinstance(source_outcome.payload, GenericDiagnosisOutcome)
+                or source_outcome.payload.status is not generic.status
+                or source_outcome.payload.conclusion != generic.conclusion
+                or source_outcome.payload.root_cause_analysis
+                != generic.root_cause_analysis
+                or source_outcome.payload.skill_name != generic.skill_name
+                or source_outcome.produced_at != generic.occurred_at
+                or processing is None
+                or processing.job_id != source_job.job_id
+                or processing.disposition is not OutcomeDisposition.APPLIED
+            ):
+                raise ValueError(
+                    "generic_result must exactly bind its GENERIC Job and Outcome"
+                )
+        if self.case.status is CaseStatus.RESOLVED and self.case.generic_result is None:
             assert self.case.final_result is not None
             producing_job = self.jobs.get(
                 self.case.final_result.proposed_by_job_id
@@ -3897,7 +4160,7 @@ class CaseAggregate(ContractModel):
                 raise ValueError(
                     "RESOLVED Case requires its accepted candidate USER_RESULT_ARCHIVE"
                 )
-        if self.case.status is CaseStatus.UNRESOLVED:
+        if self.case.status is CaseStatus.UNRESOLVED and self.case.generic_result is None:
             assert self.case.unresolved_result is not None
             unresolved = self.case.unresolved_result
             artifact = self.artifacts.get(unresolved.audit_artifact_id)
@@ -3946,7 +4209,7 @@ class CaseAggregate(ContractModel):
 
 
 class StateFile(ContractModel):
-    schema_version: Literal[3]
+    schema_version: Literal[4]
     contract_revision: Literal[CONTRACT_REVISION]
     generation: NonNegativeInt
     installation_id: OpaqueId
@@ -4108,6 +4371,7 @@ class CommitReceipt(ContractModel):
 class JobSummary(ContractModel):
     job_id: OpaqueId
     job_type: JobType
+    diagnosis_mode: DiagnosisMode | None
     status: JobStatus
     goal: NonEmptyText
     base_state_revision: PositiveInt
@@ -4197,6 +4461,7 @@ class CaseView(ContractModel):
     case_id: OpaqueId
     status: CaseStatus
     case_revision: PositiveInt
+    raw_problem_text: NonEmptyText
     diagnosis_state_revision: PositiveInt
     problem_spec: ProblemSpec
     user_facts: list[DiagnosisItem]
@@ -4207,6 +4472,7 @@ class CaseView(ContractModel):
     selected_skill_ref: VersionedRef | None
     final_result: CandidateConclusion | None
     unresolved_result: UnresolvedResult | None = None
+    generic_result: GenericResult | None = None
     failure: CaseFailure | None
     artifacts: list[ArtifactSummary]
     created_at: UtcTimestamp
@@ -4216,13 +4482,25 @@ class CaseView(ContractModel):
     def validate_view(self) -> CaseView:
         if (self.status is CaseStatus.FAILED) != (self.failure is not None):
             raise ValueError("failure must be present exactly for FAILED case views")
+        if self.generic_result is not None:
+            if self.status is not CaseStatus(self.generic_result.status.value):
+                raise ValueError("generic_result status must equal CaseView status")
+            if (
+                self.final_result is not None
+                or self.unresolved_result is not None
+                or self.selected_skill_ref is not None
+            ):
+                raise ValueError("generic CaseView forbids specialized result fields")
         if self.status is CaseStatus.RESOLVED:
-            if self.final_result is None or self.final_result.status is not CandidateStatus.ACCEPTED:
+            if self.generic_result is None and (
+                self.final_result is None
+                or self.final_result.status is not CandidateStatus.ACCEPTED
+            ):
                 raise ValueError("RESOLVED case views require an ACCEPTED final result")
         elif self.final_result is not None:
             raise ValueError("non-RESOLVED case views must have final_result=null")
         if self.status is CaseStatus.UNRESOLVED:
-            if self.unresolved_result is None:
+            if self.generic_result is None and self.unresolved_result is None:
                 raise ValueError("UNRESOLVED case views require unresolved_result")
         elif self.unresolved_result is not None:
             raise ValueError("only UNRESOLVED case views may carry unresolved_result")
@@ -4285,7 +4563,7 @@ class CaseView(ContractModel):
             for artifact in self.artifacts
             if artifact.kind is ArtifactKind.USER_RESULT_ARCHIVE
         ]
-        if self.status is CaseStatus.RESOLVED:
+        if self.status is CaseStatus.RESOLVED and self.generic_result is None:
             assert self.final_result is not None
             if len(user_results) != 1 or (
                 user_results[0].created_by_job_id != self.final_result.proposed_by_job_id
@@ -4300,7 +4578,7 @@ class CaseView(ContractModel):
                 raise ValueError(
                     "RESOLVED CaseView requires the accepted candidate's USER_RESULT_ARCHIVE"
                 )
-        elif self.status is CaseStatus.UNRESOLVED:
+        elif self.status is CaseStatus.UNRESOLVED and self.generic_result is None:
             assert self.unresolved_result is not None
             if (
                 len(user_results) != 1
@@ -4318,7 +4596,7 @@ class CaseView(ContractModel):
             for artifact in self.artifacts
             if artifact.kind is ArtifactKind.AUDIT_BUNDLE
         ]
-        if self.status is CaseStatus.UNRESOLVED:
+        if self.status is CaseStatus.UNRESOLVED and self.generic_result is None:
             assert self.unresolved_result is not None
             if (
                 len(audit_bundles) != 1
@@ -4342,6 +4620,7 @@ class CreateCase(ContractModel):
     model_config = ConfigDict(json_schema_extra={"hash_excluded_fields": ["wait_seconds"]})
 
     idempotency_key: NonEmptyText
+    raw_problem_text: NonEmptyText
     problem_spec: ProblemSpecInput
     initial_user_facts: Annotated[
         list[UserFactInput], Field(max_length=MAX_INITIAL_USER_FACTS)
@@ -4875,8 +5154,8 @@ class StateExportResource(ContractModel):
 
 
 class StateExport(ContractModel):
-    export_schema_version: Literal[3]
-    schema_version: Literal[3]
+    export_schema_version: Literal[4]
+    schema_version: Literal[4]
     contract_revision: Literal[CONTRACT_REVISION]
     source_generation: NonNegativeInt
     installation_id: OpaqueId
@@ -4945,7 +5224,7 @@ class ContractManifestEntry(ContractModel):
 
 
 class ContractManifest(ContractModel):
-    schema_version: Literal[3]
+    schema_version: Literal[4]
     contract_revision: Literal[CONTRACT_REVISION]
     generator_version: NonEmptyText
     files: list[ContractManifestEntry]
@@ -5076,10 +5355,12 @@ __all__ = [model.__name__ for model in _CONTRACT_MODEL_TYPES] + [
     "OpaqueId",
     "OUTCOME_REJECTION_CODES",
     "OutcomePayload",
+    "AgentOutcomePayload",
     "PositiveInt",
     "RelativePosixPath",
     "RequirementConstraints",
     "Sha256",
+    "SkillName",
     "TriggerPayload",
     "UNTRUSTED_OUTCOME_REJECTION_CODES",
     "UtcTimestamp",

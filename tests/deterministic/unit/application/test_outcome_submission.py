@@ -28,6 +28,7 @@ from problem_locator.contracts import (
     CaseFailureUpdate,
     CaseStatus,
     DiagnosticExportMetadata,
+    DiagnosisMode,
     DiagnosisOutcome,
     DiagnosisStateDelta,
     ErrorCode,
@@ -39,6 +40,8 @@ from problem_locator.contracts import (
     EvidenceSourceType,
     ExecutionFileRef,
     FieldUpdateAction,
+    GenericDiagnosisOutcome,
+    GenericResultStatus,
     Job,
     JobLifecycleUpdate,
     JobOutcome,
@@ -53,6 +56,8 @@ from problem_locator.contracts import (
     PlannedResourceBinding,
     ResourceKind,
     ResourceRef,
+    RouteDecision,
+    RouteKind,
     ReviewTargetBinding,
     RuntimeBindings,
     SelectedSkillUpdate,
@@ -83,6 +88,7 @@ from tests.deterministic.contracts.fakes import (
     RecordingDispatcher,
     ScriptedCoordinator,
 )
+from tests.deterministic.contracts.scenario_fakes import assets_for_bindings
 
 
 ROOT = Path(__file__).resolve().parents[4]
@@ -181,6 +187,91 @@ def _running_state() -> StateFile:
         runtime_epoch=RUNTIME_EPOCH,
     )
     return StateFile.model_validate(payload)
+
+
+_GENERIC_RAW_PROBLEM = "原始问题第一行\nrequest-id: 订单-α-42\n原始问题第三行"
+
+
+def _running_generic_state() -> StateFile:
+    payload = _load("state.json")
+    aggregate = payload["cases"][CASE_ID]
+    job = _load("job-diagnose.json")
+    job.update(
+        diagnosis_mode=DiagnosisMode.GENERIC,
+        generic_skill_name="generic-problem-locator-smoke",
+        generic_problem_text=_GENERIC_RAW_PROBLEM,
+        status=JobStatus.RUNNING,
+        goal="Run the configured generic problem locator.",
+        base_state_revision=1,
+        context_snapshot=None,
+        evidence_refs=[],
+        attachment_refs=[],
+        previous_outcome_refs=[],
+        artifact_refs=[],
+        skill_ref=None,
+        logparse_tool_ref=None,
+        logparse_product=None,
+        review_target=None,
+        started_at="2026-07-31T00:01:00.000Z",
+        finished_at=None,
+        runtime_epoch=RUNTIME_EPOCH,
+    )
+    aggregate["case"].update(
+        status=CaseStatus.RUNNING,
+        case_revision=2,
+        raw_problem_text=_GENERIC_RAW_PROBLEM,
+        active_job_id=DIAGNOSE_JOB_ID,
+        selected_skill_ref=None,
+        final_result=None,
+        unresolved_result=None,
+        generic_result=None,
+        failure=None,
+        updated_at="2026-07-31T00:01:00.000Z",
+    )
+    aggregate["jobs"] = {DIAGNOSE_JOB_ID: job}
+    aggregate["outcomes"] = {}
+    aggregate["outcome_processing_records"] = {}
+    aggregate["execution_failure_records"] = {}
+    aggregate["evidence"] = {}
+    aggregate["artifacts"] = {}
+    return StateFile.model_validate(payload)
+
+
+def _generic_outcome(status: GenericResultStatus) -> JobOutcome:
+    return JobOutcome(
+        outcome_id="00000000-0000-0000-0000-000000000081",
+        job_id=DIAGNOSE_JOB_ID,
+        case_id=CASE_ID,
+        job_type=JobType.DIAGNOSE,
+        base_state_revision=1,
+        result_type=OutcomeResultType.COMPLETED,
+        payload=GenericDiagnosisOutcome(
+            status=status,
+            conclusion="通用定位结论",
+            root_cause_analysis="通用定位文字版根因分析",
+            skill_name="generic-problem-locator-smoke",
+        ),
+        consumed_evidence_refs=[],
+        proposed_evidence=[],
+        proposed_artifacts=[],
+        error=None,
+        produced_at="2026-07-31T00:04:00.000Z",
+        decision_audit=None,
+    )
+
+
+def _generic_bindings() -> RuntimeBindings:
+    specialized = runtime_bindings_from_job(
+        Job.model_validate(_load("job-diagnose.json"))
+    ).model_dump(mode="python")
+    specialized.update(
+        diagnosis_mode=DiagnosisMode.GENERIC,
+        generic_skill_name="generic-problem-locator-smoke",
+        skill_ref=None,
+        logparse_tool_ref=None,
+        logparse_product=None,
+    )
+    return RuntimeBindings.model_validate(specialized)
 
 
 def _running_diagnosis_candidate_state() -> StateFile:
@@ -458,6 +549,9 @@ def _route_to_diagnose_plan(snapshot, trigger) -> TransitionPlan:
         candidate_mutation=None,
         next_job_spec=JobSpec(
             job_type=JobType.DIAGNOSE,
+            diagnosis_mode=bindings.diagnosis_mode,
+            generic_skill_name=bindings.generic_skill_name,
+            generic_problem_text=None,
             goal="Diagnose the routed RPC timeout.",
             target_state_revision=snapshot.case.diagnosis_state.revision,
             evidence_bindings=[],
@@ -522,6 +616,9 @@ def _diagnosis_to_review_plan(snapshot, trigger) -> TransitionPlan:
         ),
         next_job_spec=JobSpec(
             job_type=JobType.REVIEW,
+            diagnosis_mode=bindings.diagnosis_mode,
+            generic_skill_name=bindings.generic_skill_name,
+            generic_problem_text=None,
             goal=review_template.goal,
             target_state_revision=snapshot.case.diagnosis_state.revision + 1,
             evidence_bindings=[
@@ -3340,3 +3437,124 @@ def test_unresolved_submission_fails_closed_on_execution_audit_fault(
     assert resources.staged_resource_count == 0
     assert dispatcher.submit_calls == []
     assert guard.acquire_calls == guard.release_calls == 0
+
+
+def test_route_no_capability_persists_and_dispatches_isolated_generic_job() -> None:
+    state = _running_state()
+    active = state.cases[CASE_ID].jobs[JOB_ID]
+    outcome_payload = _load("job-outcome-route.json")
+    outcome_payload.update(
+        result_type=OutcomeResultType.NO_CAPABILITY,
+        payload=RouteDecision(
+            kind=RouteKind.NO_CAPABILITY,
+            skill_ref=None,
+            reason="No specialized Skill semantically matches the problem.",
+            confidence=0.93,
+        ),
+    )
+    outcome = JobOutcome.model_validate(outcome_payload)
+    bindings = _generic_bindings()
+    catalog = FakeAssetCatalog(
+        assets=assets_for_bindings(bindings),
+        generic=bindings,
+    )
+    records = InMemoryExecutionRecordStore()
+    file_ref = records.publish_outcome_bytes(
+        active.job_id,
+        canonical_json_bytes(outcome),
+    )
+    service, repository, resources, _, dispatcher, _, _ = _service(
+        state,
+        DomainCoordinator(),
+        records,
+        catalog=catalog,
+    )
+
+    receipt = service.submit_outcome(outcome, file_ref)
+
+    assert receipt.disposition is OutcomeDisposition.APPLIED
+    aggregate = repository.read_snapshot().cases[CASE_ID]
+    assert aggregate.case.status is CaseStatus.RUNNING
+    assert aggregate.case.selected_skill_ref is None
+    assert aggregate.case.active_job_id is not None
+    generic_job = aggregate.jobs[aggregate.case.active_job_id]
+    assert generic_job.job_type is JobType.DIAGNOSE
+    assert generic_job.diagnosis_mode is DiagnosisMode.GENERIC
+    assert generic_job.generic_skill_name == "generic-problem-locator-smoke"
+    assert generic_job.generic_problem_text == aggregate.case.raw_problem_text
+    assert generic_job.context_snapshot is None
+    assert generic_job.skill_ref is None
+    assert generic_job.evidence_refs == []
+    assert generic_job.attachment_refs == []
+    assert generic_job.previous_outcome_refs == []
+    assert generic_job.artifact_refs == []
+    assert aggregate.jobs[JOB_ID].status is JobStatus.SUCCEEDED
+    assert aggregate.evidence == {}
+    assert aggregate.artifacts == {}
+    assert catalog.generic_calls == 1
+    assert resources.publish_calls == []
+    assert dispatcher.submit_calls == [generic_job.job_id]
+
+
+@pytest.mark.parametrize(
+    ("generic_status", "case_status"),
+    [
+        (GenericResultStatus.RESOLVED, CaseStatus.RESOLVED),
+        (GenericResultStatus.UNRESOLVED, CaseStatus.UNRESOLVED),
+    ],
+)
+def test_generic_result_applies_directly_without_resources_or_review_and_replays(
+    generic_status: GenericResultStatus,
+    case_status: CaseStatus,
+) -> None:
+    outcome = _generic_outcome(generic_status)
+    records = InMemoryExecutionRecordStore()
+    file_ref = records.publish_outcome_bytes(
+        outcome.job_id,
+        canonical_json_bytes(outcome),
+    )
+    service, repository, resources, guard, dispatcher, _, _ = _service(
+        _running_generic_state(),
+        DomainCoordinator(),
+        records,
+    )
+
+    receipt = service.submit_outcome(outcome, file_ref)
+
+    assert receipt.disposition is OutcomeDisposition.APPLIED
+    aggregate = repository.read_snapshot().cases[CASE_ID]
+    assert aggregate.case.status is case_status
+    assert aggregate.case.active_job_id is None
+    assert aggregate.case.selected_skill_ref is None
+    assert aggregate.case.final_result is None
+    assert aggregate.case.unresolved_result is None
+    assert aggregate.case.failure is None
+    assert aggregate.case.generic_result is not None
+    assert aggregate.case.generic_result.status is generic_status
+    assert aggregate.case.generic_result.conclusion == "通用定位结论"
+    assert receipt.case_view.generic_result == aggregate.case.generic_result
+    assert aggregate.jobs[DIAGNOSE_JOB_ID].status is JobStatus.SUCCEEDED
+    assert aggregate.evidence == {}
+    assert aggregate.artifacts == {}
+    processing = aggregate.outcome_processing_records[outcome.outcome_id]
+    assert processing.disposition is OutcomeDisposition.APPLIED
+    assert processing.accepted_evidence_ids == []
+    assert processing.accepted_artifact_ids == []
+    assert processing.generated_artifact_ids == []
+    assert processing.created_job_id is None
+    assert resources.publish_calls == []
+    assert dispatcher.submit_calls == []
+
+    restarted, _, _, _, restarted_dispatcher, _, _ = _service(
+        repository,
+        DomainCoordinator(),
+        records,
+    )
+    duplicate = restarted.submit_outcome(outcome, file_ref)
+    assert duplicate.disposition is OutcomeDisposition.DUPLICATE
+    assert repository.read_snapshot().cases[CASE_ID].case.generic_result == (
+        aggregate.case.generic_result
+    )
+    assert len(repository.commit_calls) == 1
+    assert restarted_dispatcher.submit_calls == []
+    assert guard.acquire_calls == guard.release_calls == 1

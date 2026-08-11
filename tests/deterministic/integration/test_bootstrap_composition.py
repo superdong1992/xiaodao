@@ -44,6 +44,7 @@ def _settings(data_root: Path) -> Settings:
             "DATA_ROOT": str(data_root),
             "PUBLIC_BASE_URL": "http://127.0.0.1:8000",
             "SKILL_DIR": str(SKILL_DIR),
+            "GENERIC_SKILL_NAME": "generic-problem-locator-smoke",
             "LOGPARSE_REPO": str(FAKE_LOGPARSE_REPO),
             "LOGPARSE_CONFIG_PATH": str(FAKE_LOGPARSE_CONFIG),
             "LOGPARSE_PYTHON": sys.executable,

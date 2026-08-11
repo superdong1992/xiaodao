@@ -90,6 +90,17 @@
       "platforms": ["windows", "macos", "linux"]
     },
     {
+      "id": "real.generic-locator",
+      "kind": "isolated-real",
+      "depends_on": ["real.agent-backend"],
+      "gates": ["real.agent.generic-locator"],
+      "identity_set": "real-generic-locator",
+      "timeout_seconds": 1200,
+      "progress_class": "real",
+      "reuse": {"dev": "identity", "release": "never"},
+      "platforms": ["windows", "macos", "linux"]
+    },
+    {
       "id": "real.route",
       "kind": "isolated-real",
       "depends_on": ["real.agent-backend"],

@@ -107,7 +107,7 @@ class ReplayManifest(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
     schema_version: Literal[1]
-    state_schema_version: Literal[3]
+    state_schema_version: Literal[4]
     contract_revision: str
     replay_id: str
     mode: ReplayMode
@@ -483,7 +483,7 @@ def _decode_source_state(raw_bytes: bytes) -> StateFile:
     ):
         raise _fail(
             ErrorCode.STATE_SCHEMA_UNSUPPORTED,
-            "Replay accepts only the current State V3 contract.",
+            "Replay accepts only the current State V4 contract.",
             "SOURCE_STATE_SCHEMA_UNSUPPORTED",
         )
     try:
@@ -491,7 +491,7 @@ def _decode_source_state(raw_bytes: bytes) -> StateFile:
     except (TypeError, ValueError, ValidationError) as exc:
         raise _fail(
             ErrorCode.STATE_CORRUPT,
-            "Source State V3 violates its canonical contract.",
+            "Source State V4 violates its canonical contract.",
             "SOURCE_STATE_CORRUPT",
         ) from exc
 
@@ -557,6 +557,8 @@ def _rebind_pending_job(job: Job, bindings: Any) -> Job:
         started_at=None,
         finished_at=None,
         runtime_epoch=None,
+        diagnosis_mode=bindings.diagnosis_mode,
+        generic_skill_name=bindings.generic_skill_name,
         agent_profile_ref=bindings.agent_profile_ref,
         available_skill_refs=bindings.available_skill_refs,
         skill_ref=bindings.skill_ref,
@@ -947,7 +949,7 @@ def _source_target_outcome(
     if expected is not None and published != expected:
         raise _fail(
             ErrorCode.STATE_CORRUPT,
-            "The source target Outcome does not match State V3.",
+            "The source target Outcome does not match State V4.",
             "SOURCE_EXECUTION_RECORD_INVALID",
         )
     if (
@@ -1078,6 +1080,7 @@ def _prepare_projection(
                 skill_dir=settings.skill_dir,
                 logparse_tool=logparse_asset,
                 logparse_broker_factory=broker_factory,
+                generic_skill_name=settings.generic_skill_name,
             )
             bindings = _current_bindings(catalog, source_job)
         except ReplayError:

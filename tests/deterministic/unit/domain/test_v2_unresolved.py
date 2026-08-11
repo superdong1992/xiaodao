@@ -373,6 +373,7 @@ def test_only_matching_unresolved_result_artifacts_are_downloadable() -> None:
         case_id=job.case_id,
         status=CaseStatus.UNRESOLVED,
         case_revision=4,
+        raw_problem_text=state.problem_spec.statement,
         diagnosis_state=state,
         active_job_id=None,
         selected_skill_ref=job.skill_ref,

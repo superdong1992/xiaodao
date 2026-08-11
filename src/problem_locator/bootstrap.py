@@ -1038,6 +1038,7 @@ def _assemble(
             skill_dir=settings.skill_dir,
             logparse_tool=logparse_asset,
             logparse_broker_factory=broker_factory,
+            generic_skill_name=settings.generic_skill_name,
             allow_test_skills=allow_test_skills,
         )
     except (OSError, TypeError, ValueError) as exc:

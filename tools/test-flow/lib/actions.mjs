@@ -660,11 +660,28 @@ function realEnvironment(context, profile) {
   const common = {
     ...runtime.environment,
     S08_REAL_AGENT_COMMAND: command,
+    S08_REAL_GENERIC_LOCATOR_AGENT_COMMAND: command,
     S08_REAL_ROUTE_AGENT_COMMAND: command,
     S08_REAL_DIAGNOSE_AGENT_COMMAND: command,
     S08_REAL_REVIEW_AGENT_COMMAND: command,
   };
   if (profile === "real-agent-backend") return { env: { ...common, S08_REAL_AGENT_GATE: "1" } };
+  if (profile === "real-generic-locator") {
+    const skillName = "generic-problem-locator-smoke";
+    const skillPath = path.join(
+      context.repoRoot,
+      "tests",
+      "fixtures",
+      "components",
+      skillName,
+    );
+    if (!fs.existsSync(path.join(skillPath, "SKILL.md"))) return { error: "GENERIC_LOCATOR_SKILL_MISSING" };
+    const skillRoot = path.join(runtime.config, "skills");
+    const installed = path.join(skillRoot, skillName);
+    ensureDirectory(skillRoot);
+    if (!fs.existsSync(installed)) fs.cpSync(skillPath, installed, { recursive: true, errorOnExist: true, force: false });
+    return { env: { ...common, S08_REAL_GENERIC_LOCATOR_GATE: "1" } };
+  }
   if (profile === "real-route") return { env: { ...common, S08_REAL_ROUTE_AGENT_GATE: "1" } };
   if (profile === "real-review") return { env: { ...common, S08_REAL_REVIEW_AGENT_GATE: "1" } };
   if (profile === "real-diagnose") {

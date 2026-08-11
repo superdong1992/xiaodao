@@ -1,0 +1,7 @@
+interface:
+  display_name: "Generic Problem Locator Smoke"
+  short_description: "Validate the generic locator text contract"
+  default_prompt: "Use $generic-problem-locator-smoke to validate the fixed smoke-test input contract."
+
+policy:
+  allow_implicit_invocation: false

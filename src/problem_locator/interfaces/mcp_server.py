@@ -82,6 +82,12 @@ class _RequestModel(BaseModel):
 
 class CreateCaseRequest(_RequestModel):
     request_id: NonEmptyText
+    raw_problem_text: NonEmptyText = Field(
+        description=(
+            "Original user problem text passed verbatim to the generic locator "
+            "when no specialized Skill matches."
+        )
+    )
     statement: NonEmptyText = Field(
         description="Concise statement of the problem to diagnose."
     )
@@ -251,7 +257,7 @@ _REQUESTS: dict[str, type[_RequestModel]] = {
 
 _DESCRIPTIONS = {
     "problem_locator_create_case": (
-        "Create a new diagnosis case. Supply the eight problem specification "
+        "Create a new diagnosis case. Supply raw_problem_text and the eight problem specification "
         "members as flat root fields. Pair optional initial fact names and values "
         "by array index."
     ),
@@ -412,6 +418,7 @@ class McpAdapter:
                 ]
                 command = CreateCase(
                     idempotency_key=request.request_id,
+                    raw_problem_text=request.raw_problem_text,
                     problem_spec=problem_spec,
                     initial_user_facts=initial_user_facts,
                     wait_seconds=request.wait_seconds,

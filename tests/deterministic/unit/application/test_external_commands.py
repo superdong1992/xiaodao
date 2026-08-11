@@ -112,6 +112,8 @@ def _job(name: str) -> Job:
 
 def _bindings(job: Job) -> RuntimeBindings:
     return RuntimeBindings(
+        diagnosis_mode=job.diagnosis_mode,
+        generic_skill_name=job.generic_skill_name,
         agent_profile_ref=job.agent_profile_ref,
         available_skill_refs=job.available_skill_refs,
         skill_ref=job.skill_ref,
@@ -197,6 +199,9 @@ def _job_spec(
 ) -> JobSpec:
     return JobSpec(
         job_type=template.job_type,
+        diagnosis_mode=template.diagnosis_mode,
+        generic_skill_name=template.generic_skill_name,
+        generic_problem_text=template.generic_problem_text,
         goal=template.goal,
         target_state_revision=target_revision,
         evidence_bindings=[],
@@ -388,6 +393,7 @@ def _create_command(
 ) -> CreateCase:
     return CreateCase(
         idempotency_key="create-1",
+        raw_problem_text=statement,
         problem_spec={
             "statement": statement,
             "expected_behavior": "RPC succeeds",
@@ -1021,6 +1027,9 @@ def _waiting_state(requirement_name: str = "rpc_method") -> StateFile:
         job_id=SOURCE_JOB_ID,
         case_id=CASE_ID,
         job_type=JobType.DIAGNOSE,
+        diagnosis_mode=diagnose_template.diagnosis_mode,
+        generic_skill_name=diagnose_template.generic_skill_name,
+        generic_problem_text=diagnose_template.generic_problem_text,
         status=JobStatus.SUCCEEDED,
         goal="Collect a missing RPC method.",
         base_state_revision=1,

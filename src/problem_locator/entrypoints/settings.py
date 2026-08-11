@@ -18,6 +18,7 @@ _REQUIRED = (
     "SKILL_DIR",
     "LOGPARSE_REPO",
     "LOGPARSE_CONFIG_PATH",
+    "GENERIC_SKILL_NAME",
 )
 _PATH_KEYS = (
     "DATA_ROOT",
@@ -27,6 +28,7 @@ _PATH_KEYS = (
 )
 _FORBIDDEN_LIMIT_KEY = re.compile(r".+_(?:LIMIT|MAX|RETENTION)_.+")
 _DFX_LOG_LEVELS = frozenset({"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"})
+_GENERIC_SKILL_NAME = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*\Z")
 
 
 class SettingsError(ValueError):
@@ -40,6 +42,7 @@ class Settings:
     bind_host: str
     port: int
     claude_command: str
+    generic_skill_name: str
     skill_dir: Path
     logparse_repo: Path
     logparse_config_path: Path
@@ -117,6 +120,15 @@ class Settings:
         if not bind_host or bind_host.isspace() or not claude_command or claude_command.isspace():
             raise SettingsError("BIND_HOST and CLAUDE_COMMAND must be non-empty")
 
+        generic_skill_name = values["GENERIC_SKILL_NAME"]
+        if (
+            len(generic_skill_name) > 64
+            or _GENERIC_SKILL_NAME.fullmatch(generic_skill_name) is None
+        ):
+            raise SettingsError(
+                "GENERIC_SKILL_NAME must be a standard lowercase hyphen Skill name"
+            )
+
         raw_logparse_python = values.get("LOGPARSE_PYTHON", sys.executable)
         logparse_python = Path(raw_logparse_python)
         if not logparse_python.is_absolute():
@@ -139,6 +151,7 @@ class Settings:
             bind_host=bind_host,
             port=port,
             claude_command=claude_command,
+            generic_skill_name=generic_skill_name,
             skill_dir=paths["SKILL_DIR"],
             logparse_repo=paths["LOGPARSE_REPO"],
             logparse_config_path=paths["LOGPARSE_CONFIG_PATH"],
@@ -152,6 +165,7 @@ class Settings:
             "Settings(data_root=<configured>, public_base_url="
             f"{self.public_base_url!r}, bind_host={self.bind_host!r}, port={self.port}, "
             "claude_command=<configured>, skill_dir=<configured>, "
+            f"generic_skill_name={self.generic_skill_name!r}, "
             "logparse_repo=<redacted>, logparse_config_path=<redacted>, "
             "logparse_python=<redacted>, "
             f"dfx_log_level={self.dfx_log_level!r}, "

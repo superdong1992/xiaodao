@@ -14,6 +14,7 @@ def environment(tmp_path: Path) -> dict[str, str]:
         "DATA_ROOT": str(tmp_path / "data"),
         "PUBLIC_BASE_URL": "http://127.0.0.1:8000/service",
         "SKILL_DIR": str(tmp_path / "skills"),
+        "GENERIC_SKILL_NAME": "generic-problem-locator-smoke",
         "LOGPARSE_REPO": str(tmp_path / "logparse-secret-repo"),
         "LOGPARSE_CONFIG_PATH": str(tmp_path / "logparse-secret.toml"),
     }
@@ -27,6 +28,7 @@ def test_process_environment_overrides_utf8_env_file(tmp_path: Path) -> None:
                 f"DATA_ROOT={tmp_path / 'file-data'}",
                 "PUBLIC_BASE_URL=https://env.example.test/base",
                 f"SKILL_DIR={tmp_path / 'skills'}",
+                "GENERIC_SKILL_NAME=generic-problem-locator-smoke",
                 f"LOGPARSE_REPO={tmp_path / '日志 repo'}",
                 f"LOGPARSE_CONFIG_PATH={tmp_path / '配置.toml'}",
                 "PORT=9000",
@@ -43,6 +45,7 @@ def test_process_environment_overrides_utf8_env_file(tmp_path: Path) -> None:
     assert settings.public_base_url == "https://env.example.test/base"
     assert settings.bind_host == "127.0.0.1"
     assert settings.claude_command == "claude"
+    assert settings.generic_skill_name == "generic-problem-locator-smoke"
     assert settings.logparse_python.is_absolute()
 
 
@@ -112,6 +115,8 @@ def test_legacy_dfx_log_file_is_always_rejected(
         ("PUBLIC_BASE_URL", "http://[invalid"),
         ("PUBLIC_BASE_URL", "http://example.test:0"),
         ("PUBLIC_BASE_URL", " https://example.test"),
+        ("GENERIC_SKILL_NAME", "Generic_Problem_Locator"),
+        ("GENERIC_SKILL_NAME", "generic--problem-locator"),
         ("JOB_CONCURRENCY", "2"),
         ("AGENT_MAX_BYTES", "1"),
         ("FILE_RETENTION_SECONDS", "1"),
@@ -136,6 +141,7 @@ def test_every_required_setting_is_enforced(tmp_path: Path) -> None:
         "DATA_ROOT",
         "PUBLIC_BASE_URL",
         "SKILL_DIR",
+        "GENERIC_SKILL_NAME",
         "LOGPARSE_REPO",
         "LOGPARSE_CONFIG_PATH",
     ):

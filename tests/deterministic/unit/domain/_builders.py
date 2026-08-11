@@ -148,6 +148,8 @@ def interrupted(job: Job) -> Job:
 
 def runtime_bindings(job: Job) -> RuntimeBindings:
     return RuntimeBindings(
+        diagnosis_mode=job.diagnosis_mode,
+        generic_skill_name=job.generic_skill_name,
         agent_profile_ref=job.agent_profile_ref,
         available_skill_refs=job.available_skill_refs,
         skill_ref=job.skill_ref,
@@ -188,6 +190,9 @@ def snapshot_with_active(
         case_id=job.case_id,
         status=target_status,
         case_revision=case_revision,
+        raw_problem_text=(
+            job.generic_problem_text or job.context_snapshot.problem_spec.statement
+        ),
         diagnosis_state=diagnosis_state,
         active_job_id=active.job_id,
         selected_skill_ref=(
@@ -217,6 +222,7 @@ def waiting_snapshot(
         case_id=CASE_ID,
         status=status,
         case_revision=case_revision,
+        raw_problem_text=state.problem_spec.statement,
         diagnosis_state=state,
         active_job_id=None,
         selected_skill_ref=selected_skill_ref or diagnose_job().skill_ref,
@@ -245,6 +251,9 @@ def interrupted_snapshot(
         case_id=source.case_id,
         status=CaseStatus.INTERRUPTED,
         case_revision=case_revision,
+        raw_problem_text=(
+            source.generic_problem_text or source.context_snapshot.problem_spec.statement
+        ),
         diagnosis_state=state,
         active_job_id=None,
         selected_skill_ref=(
@@ -268,6 +277,7 @@ def failed_case_snapshot(state: DiagnosisState) -> CaseSnapshot:
         case_id=CASE_ID,
         status=CaseStatus.FAILED,
         case_revision=7,
+        raw_problem_text=state.problem_spec.statement,
         diagnosis_state=state,
         active_job_id=None,
         selected_skill_ref=None,

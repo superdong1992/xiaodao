@@ -64,6 +64,7 @@ ENUM_EXPECTATIONS = {
         "RESOLVED_LOGPARSE_PLAN",
     ),
     "DiagnosisItemStatus": ("ACTIVE", "RESOLVED", "REJECTED", "SUPERSEDED"),
+    "DiagnosisMode": ("SPECIALIZED", "GENERIC"),
     "DiagnosisProvenanceType": ("USER_INPUT", "AGENT_OUTCOME"),
     "EvidenceSourceType": (
         "USER_FACT",
@@ -85,6 +86,7 @@ ENUM_EXPECTATIONS = {
     ),
     "FailureReportDisposition": ("APPLIED", "DUPLICATE", "STALE"),
     "FieldUpdateAction": ("SET", "CLEAR"),
+    "GenericResultStatus": ("RESOLVED", "UNRESOLVED"),
     "JobStatus": (
         "PENDING",
         "RUNNING",

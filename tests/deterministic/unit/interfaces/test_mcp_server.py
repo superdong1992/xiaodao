@@ -65,6 +65,7 @@ def _create_case_arguments(
 ) -> dict[str, object]:
     return {
         "request_id": request_id,
+        "raw_problem_text": "原始问题描述\nrequest-id: 请求-α-7",
         **problem_spec_input(),
         "initial_user_fact_names": fact_names or [],
         "initial_user_fact_values": fact_values or [],
@@ -221,11 +222,43 @@ def test_mcp_rebuilds_flat_create_case_inputs_without_data_loss() -> None:
 
     assert result["ok"] is True
     created = command.calls[0]
+    assert created.raw_problem_text == "原始问题描述\nrequest-id: 请求-α-7"
     assert created.problem_spec.model_dump(mode="json") == problem_spec_input()
     assert [fact.model_dump(mode="json") for fact in created.initial_user_facts] == [
         {"name": "host", "value": "node-1"},
         {"name": "region", "value": "华北"},
     ]
+
+
+def test_mcp_raw_problem_text_uses_a_strict_64_kib_utf8_limit() -> None:
+    command = FakeApplicationService(
+        [application_response(operation="CreateCase", revision=1)]
+    )
+    adapter = McpAdapter(
+        command,
+        FakeQuery(),
+        public_base_url="http://127.0.0.1:8000",
+    )
+    exact = ("界" * 21_845) + "a"
+    assert len(exact.encode("utf-8")) == 65_536
+
+    accepted = asyncio.run(
+        adapter.call(
+            TOOL_NAMES[0],
+            {**_create_case_arguments(), "raw_problem_text": exact},
+        )
+    )
+    rejected = asyncio.run(
+        adapter.call(
+            TOOL_NAMES[0],
+            {**_create_case_arguments(), "raw_problem_text": "界" * 21_846},
+        )
+    )
+
+    assert accepted["ok"] is True
+    assert command.calls[0].raw_problem_text == exact
+    assert rejected["ok"] is False
+    assert rejected["error"]["code"] == ErrorCode.VALIDATION_ERROR.value
 
 
 def test_mcp_accepts_exactly_64_flat_initial_fact_pairs() -> None:
@@ -696,6 +729,7 @@ def test_official_sdk_calls_all_seven_stateless_tools(caplog) -> None:
                             TOOL_NAMES[0]: (
                                 {
                                     "request_id",
+                                    "raw_problem_text",
                                     "statement",
                                     "expected_behavior",
                                     "actual_behavior",
@@ -710,6 +744,7 @@ def test_official_sdk_calls_all_seven_stateless_tools(caplog) -> None:
                                 },
                                 {
                                     "request_id",
+                                    "raw_problem_text",
                                     "statement",
                                     "expected_behavior",
                                     "actual_behavior",

@@ -20,6 +20,7 @@ from problem_locator.contracts.enums import (
     ArtifactKind,
     CandidateMutationAction,
     CandidateStatus,
+    DiagnosisMode,
     DiagnosisItemStatus,
     FieldUpdateAction,
     JobStatus,
@@ -943,11 +944,15 @@ def build_job(
 
     if spec.target_state_revision != target_diagnosis_state.revision:
         raise ValueError("JobSpec target revision does not match DiagnosisState")
-    snapshot = projector.project(target_diagnosis_state.model_copy(deep=True))
-    if not isinstance(snapshot, ContextSnapshot):
-        raise ValueError("ContextSnapshotProjector returned a non-contract value")
-    if snapshot.diagnosis_state_revision != spec.target_state_revision:
-        raise ValueError("projected ContextSnapshot has the wrong revision")
+    snapshot: ContextSnapshot | None
+    if spec.diagnosis_mode is DiagnosisMode.GENERIC:
+        snapshot = None
+    else:
+        snapshot = projector.project(target_diagnosis_state.model_copy(deep=True))
+        if not isinstance(snapshot, ContextSnapshot):
+            raise ValueError("ContextSnapshotProjector returned a non-contract value")
+        if snapshot.diagnosis_state_revision != spec.target_state_revision:
+            raise ValueError("projected ContextSnapshot has the wrong revision")
 
     resolved_evidence_refs = [
         resolve_planned_resource_binding(
@@ -960,11 +965,15 @@ def build_job(
     if len(resolved_evidence_refs) != len(set(resolved_evidence_refs)):
         raise ValueError("JobSpec evidence bindings resolve to duplicate Evidence IDs")
     requested_evidence_refs = set(resolved_evidence_refs)
-    evidence_refs = [
-        evidence_id
-        for evidence_id in snapshot.evidence_refs
-        if evidence_id in requested_evidence_refs
-    ]
+    evidence_refs = (
+        []
+        if snapshot is None
+        else [
+            evidence_id
+            for evidence_id in snapshot.evidence_refs
+            if evidence_id in requested_evidence_refs
+        ]
+    )
     if len(evidence_refs) != len(requested_evidence_refs):
         raise ValueError("JobSpec evidence bindings are absent from the target snapshot")
     artifact_refs = [
@@ -989,6 +998,9 @@ def build_job(
         job_id=job_id,
         case_id=case_id,
         job_type=spec.job_type,
+        diagnosis_mode=spec.diagnosis_mode,
+        generic_skill_name=spec.generic_skill_name,
+        generic_problem_text=spec.generic_problem_text,
         status=JobStatus.PENDING,
         goal=spec.goal,
         base_state_revision=spec.target_state_revision,

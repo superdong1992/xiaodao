@@ -322,6 +322,7 @@ class ClientAccessWorkflow:
     def create_case(
         self,
         *,
+        raw_problem_text: str,
         problem_spec: Mapping[str, Any],
         initial_user_facts: Sequence[Mapping[str, Any]] = (),
         wait_seconds: int = 0,
@@ -331,6 +332,7 @@ class ClientAccessWorkflow:
         arguments.update(
             {
                 "request_id": self._ids.new("request"),
+                "raw_problem_text": raw_problem_text,
                 "initial_user_fact_names": [item.get("name") for item in facts],
                 "initial_user_fact_values": [item.get("value") for item in facts],
                 "wait_seconds": wait_seconds,

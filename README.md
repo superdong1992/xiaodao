@@ -8,7 +8,7 @@
 | --- | --- |
 | Problem Locator package | `2.0.0` |
 | State / Job / Outcome schema | `3` |
-| S00 contract revision | `v3-contract-r1` |
+| S00 contract revision | `v4-contract-r1` |
 | GenerationSpec | `v4` |
 | Diagnosis Skill generator / 生成 Skill | `4.0.0` |
 | Diagnosis Skill manifest | `4`（`verification_contract.schema_version=1`） |
@@ -16,7 +16,7 @@
 | Specialist / Reviewer profile | `1.0.1` / `1.0.1` |
 | Router / Diagnose / Review tool bundle | `2.0.0` / `3.0.0` / `2.0.0` |
 
-State、Job 和权威 Outcome 已硬切到 V3。Problem Locator 2.0.0 只接受路径尚不存在或目录完全为空的全新 `DATA_ROOT`，首次启动会写入 canonical `data-format.json`；已有非空但无 marker、使用旧 marker 或 marker 被篡改的目录都会启动失败，服务不会迁移、改写或删除其中任何内容。升级前必须先备份旧目录，再使用新的 `DATA_ROOT`；需要保留的 V1/V2 State、Job 或 Outcome 只能作为只读历史材料另行处理。
+State、Job 和权威 Outcome 已硬切到 V4。Problem Locator 2.0.0 只接受路径尚不存在或目录完全为空的全新 `DATA_ROOT`，首次启动会写入 canonical `data-format.json`；已有非空但无 marker、使用旧 marker 或 marker 被篡改的目录都会启动失败，服务不会迁移、改写或删除其中任何内容。升级前必须先备份旧目录，再使用新的 `DATA_ROOT`；需要保留的 V1/V2/V3 State、Job 或 Outcome 只能作为只读历史材料另行处理。
 
 本仓库将故障定位能力分为三层：
 
@@ -76,6 +76,7 @@ uv lock --check
 | `DATA_ROOT` | 是 | 无 | 独占的持久化状态、资源和任务根目录 |
 | `PUBLIC_BASE_URL` | 是 | 无 | 对外提供服务的 HTTP(S) 根地址，不得包含查询参数或片段 |
 | `SKILL_DIR` | 是 | 无 | 外部受控的生产 Diagnosis Skill 目录；必须至少包含一个 `PRODUCTION` Skill，且生产 catalog 拒绝任何 `TEST_ONLY` Skill。不得指向仓库 `.claude/skills` |
+| `GENERIC_SKILL_NAME` | 是 | 无 | Agent 环境中预装的通用定位 Skill 名称；仅允许标准小写连字符名称，启动时不实际调用检查安装 |
 | `LOGPARSE_REPO` | 是 | 无 | 受控的 Logparse 源码目录；Git checkout 和源码压缩包解压目录均受支持，启动时按实际内容生成指纹 |
 | `LOGPARSE_CONFIG_PATH` | 是 | 无 | Logparse 工作区内的配置文件 |
 | `BIND_HOST` | 否 | `127.0.0.1` | Uvicorn 监听地址 |
@@ -122,7 +123,7 @@ uv run python -m problem_locator serve --env-file /absolute/path/to/service.env
 
 | 工具 | 参数形状 |
 | --- | --- |
-| `problem_locator_create_case` | `request_id/statement/expected_behavior/actual_behavior/scope: string` req；`goals/non_goals/constraints/completion_criteria: array<string>` req；`initial_user_fact_names/initial_user_fact_values: array<string>` opt；`wait_seconds: integer` opt |
+| `problem_locator_create_case` | `request_id/raw_problem_text/statement/expected_behavior/actual_behavior/scope: string` req；`goals/non_goals/constraints/completion_criteria: array<string>` req；`initial_user_fact_names/initial_user_fact_values: array<string>` opt；`wait_seconds: integer` opt |
 | `problem_locator_prepare_attachment` | `request_id/case_id/name/content_type` req；`expected_case_revision: integer` req；`declared_size: integer\|null` opt；`declared_sha256: string\|null` opt |
 | `problem_locator_submit_supplement` | `request_id/case_id` req；`expected_case_revision: integer` req；`input_names/input_values: array<string>` req；`attachment_ids: array<string>` req；`wait_seconds` opt |
 | `problem_locator_get_case` | `case_id` req；`wait_for_job_id: string\|null` opt；`wait_seconds` opt |
@@ -227,7 +228,7 @@ Case 中已有的 `problem_time` 和其他 USER_FACT 是冻结输入，不能在
 
 ## 隔离重放指定 Job
 
-`replay-job` 是普通本地 CLI，不引入管理员角色、管理 API、认证或权限模型。它只接受当前 V3 State/Job/Outcome 闭包，并在新的隔离安装中按当前固定资产执行指定阶段：
+`replay-job` 是普通本地 CLI，不引入管理员角色、管理 API、认证或权限模型。它只接受当前 V4 State/Job/Outcome 闭包，并在新的隔离安装中按当前固定资产执行指定阶段：
 
 - `diagnose-only`：源 Job 必须是 DIAGNOSE；执行服务端终结，但不向隔离 State 提交诊断 Outcome。
 - `review-only`：源 Job 必须是 REVIEW；执行服务端终结，但不向隔离 State 提交 Review Outcome。
@@ -257,9 +258,9 @@ uv run python -m problem_locator replay-job \
 
 ## 启动恢复与重试语义
 
-启动恢复只适用于同一 `schema_version=3`、`contract_revision=v3-contract-r1` 的数据。读取 `state.json` 时会先严格校验 V3 envelope 和全部引用；任何 V1/V2 State、Job、Outcome 或混合版本闭包都会以 `STATE_SCHEMA_UNSUPPORTED`/状态损坏拒绝，调度器不会尝试兼容、迁移或运行其中的旧 Job。
+启动恢复只适用于同一 `schema_version=4`、`contract_revision=v4-contract-r1` 的数据。读取 `state.json` 时会先严格校验 V4 envelope 和全部引用；任何旧版 State、Job、Outcome 或混合版本闭包都会以 `STATE_SCHEMA_UNSUPPORTED`/状态损坏拒绝，调度器不会尝试兼容、迁移或运行其中的旧 Job。
 
-对于已经由当前 State V3 服务创建的数据，每次启动时调度器都会创建新的运行时 epoch，并在接受新任务之前完成以下恢复流程：
+对于已经由当前 State V4 服务创建的数据，每次启动时调度器都会创建新的运行时 epoch，并在接受新任务之前完成以下恢复流程：
 
 1. 逐字节重放所有已持久化、已最终确定但尚未确认的 Job Outcome。
 2. 完成重放后，才会把没有最终 Outcome 的同合同 `RUNNING` 任务标记为 `INTERRUPTED`。
@@ -282,7 +283,7 @@ uv run python -m problem_locator export-state \
   --output /absolute/path/outside-data-root/state-export.json
 ```
 
-`validate-state` 输出规范化的 `ValidationReport`。`export-state` 输出规范化的 `StateExport`，其中包含单个状态世代、完整对象数量，以及按顺序排列的资源大小/哈希清单。导出文件必须位于 `DATA_ROOT` 之外；它只用于审计和同合同备份核对，不能替代资源备份，也不能把 V1/V2 数据转换为 State V3。
+`validate-state` 输出规范化的 `ValidationReport`。`export-state` 输出规范化的 `StateExport`，其中包含单个状态世代、完整对象数量，以及按顺序排列的资源大小/哈希清单。导出文件必须位于 `DATA_ROOT` 之外；它只用于审计和同合同备份核对，不能替代资源备份，也不能把旧数据转换为 State V4。
 
 创建可恢复备份：
 
@@ -291,17 +292,17 @@ uv run python -m problem_locator export-state \
 3. 完整复制 `DATA_ROOT` 目录树，并尽量以原子方式保证 `state.json`、`jobs/**` 和 `resources/**` 来自同一个停机时间点。
 4. 将导出文件与备份放在一起，以便核对对象数量和哈希。
 
-恢复时，应将损坏的数据根目录保持为只读，把完整且已知可用的 State V3 备份复制到一个新的绝对路径，执行 `validate-state`，并核对导出文件中的对象数量和哈希，最后使用新的数据根目录启动服务。
+恢复时，应将损坏的数据根目录保持为只读，把完整且已知可用的 State V4 备份复制到一个新的绝对路径，执行 `validate-state`，并核对导出文件中的对象数量和哈希，最后使用新的数据根目录启动服务。
 
 不要手工编辑 `state.json`，不要丢弃已经最终确定的 outbox 文件，也不要静默回退到 `state.json.prev`。
 
-State V3 与所有 V1/V2 State、Job 和 Outcome 有意不兼容。服务不提供原地迁移、旧 Job 恢复、隐藏旧字段或按需转换路径；部署当前版本时使用新的数据根目录。
+State V4 与所有 V1/V2/V3 State、Job 和 Outcome 有意不兼容。服务不提供原地迁移、旧 Job 恢复、隐藏旧字段或按需转换路径；部署当前版本时使用新的空数据根目录。
 
 ### 冻结发布边界声明
 
 以下英文短句是发布测试使用的稳定语义标识；中文解释是规范正文：
 
-- State V3 is a hard cut：服务不迁移或恢复 V1/V2 State、Job、Outcome。
+- State V4 is a hard cut：服务不迁移或恢复 V1/V2/V3 State、Job、Outcome。
 - Replay every durable, finalized but unconfirmed Job Outcome：启动时先重放所有已最终确定但未确认的 Outcome。
 - 当 `state.json` approaches 16 MiB 时，应启动离线迁移设计。
 - 当 retained history approaches 500 Cases 时，应启动离线迁移设计。

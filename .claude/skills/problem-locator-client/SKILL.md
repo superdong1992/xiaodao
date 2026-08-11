@@ -36,6 +36,7 @@ Use only the following flat argument shapes:
 ```json
 {
   "request_id": "<stable-request-id>",
+  "raw_problem_text": "<the user's complete original problem text>",
   "statement": "<problem statement>",
   "expected_behavior": "<expected behavior>",
   "actual_behavior": "<actual behavior>",
@@ -130,7 +131,7 @@ After every write response, show the durable business receipt first. When `case_
 
 ## Create or inspect a Case
 
-1. Build all eight flat problem fields without a revision and preserve the user's text exactly.
+1. Copy the user's complete original problem description into `raw_problem_text` without trimming or normalization, then build all eight flat problem fields without a revision.
 2. Call `problem_locator_create_case` with a fresh stable `request_id`.
 3. Poll or finitely wait with `problem_locator_get_case`; never create a replacement Case merely because waiting timed out.
 

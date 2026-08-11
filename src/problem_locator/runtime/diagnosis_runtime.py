@@ -12,6 +12,7 @@ from problem_locator.contracts import (
     CaseAggregate,
     Clock,
     BoundedContext,
+    DiagnosisMode,
     ErrorCode,
     ExecutionFailure,
     ExecutionLogSinks,
@@ -53,6 +54,7 @@ from .agent_backend import AgentBackend, BackendExecutionLimits
 from .context_builder import ContextBuilder, ContextLimitExceeded, ContextMaterials
 from .context_policy import ResolvedJobAssets, RuntimeAssetResolver
 from .failures import RuntimeExecutionError, runtime_failure
+from .generic_locator import GenericLocatorExecutor
 from .outcome_publisher import OutcomePublisher
 from .output_reader import (
     RejectedAgentOutputError,
@@ -168,6 +170,7 @@ class DiagnosisRuntime:
         backend: AgentBackend,
         context_builder: ContextBuilder | None = None,
         backend_test_limits: BackendExecutionLimits | None = None,
+        generic_locator_executor: GenericLocatorExecutor | None = None,
     ) -> None:
         self._state_repository = state_repository
         self._resource_store = resource_store
@@ -181,6 +184,14 @@ class DiagnosisRuntime:
         self._clock = clock
         self._id_generator = id_generator
         self._publisher = OutcomePublisher(execution_records, clock, id_generator)
+        self._generic_locator_executor = generic_locator_executor or GenericLocatorExecutor(
+            backend=backend,
+            workspace_manager=workspace_manager,
+            execution_records=execution_records,
+            clock=clock,
+            id_generator=id_generator,
+            backend_test_limits=backend_test_limits,
+        )
 
     def execute(
         self,
@@ -207,6 +218,14 @@ class DiagnosisRuntime:
         except Exception:
             failure = _unexpected_failure().failure
         assert failure is not None
+        if job.diagnosis_mode is DiagnosisMode.GENERIC and failure.retryable:
+            failure = ExecutionFailure(
+                stage=failure.stage,
+                code=failure.code,
+                message=failure.message,
+                retryable=False,
+                details=list(failure.details),
+            )
         record_stage_failed(failure)
         # Publish outside the handler so the public infrastructure exception
         # cannot retain an unsafe parser, OS, or adapter exception as context.
@@ -255,6 +274,37 @@ class DiagnosisRuntime:
                 code=ErrorCode.OUTCOME_INVALID,
                 message="Runtime requires an already-claimed RUNNING Job.",
         )
+        if job.diagnosis_mode is DiagnosisMode.GENERIC:
+            aggregate = self._read_case(job)
+            execution = self._generic_locator_executor.execute(
+                job=job,
+                aggregate=aggregate,
+                assets=assets,
+                resource_store=self._resource_store,
+                cancellation=cancellation,
+            )
+            publishing = record_stage_started(
+                ExecutionStage.EXECUTION_RECORD,
+                data={"operation": "publish_generic_success"},
+            )
+            try:
+                receipt = self._publisher.publish_success(
+                    job,
+                    execution.outcome,
+                    execution.workspace.manifest,
+                )
+            except (TypeError, ValueError):
+                raise _unexpected_failure() from None
+            record_stage_completed(
+                ExecutionStage.EXECUTION_RECORD,
+                publishing,
+                data={
+                    "operation": "publish_generic_success",
+                    "outcome_file_ref": receipt.outcome_file_ref,
+                },
+            )
+            self._record_produced_outcome(receipt)
+            return receipt
         if job.job_type is JobType.ROUTE and not job.available_skill_refs:
             return self._publish_no_capability(job)
         preparing = record_stage_started(ExecutionStage.WORKSPACE_PREPARE)

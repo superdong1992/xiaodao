@@ -113,6 +113,7 @@ def build_create_case_trigger(
         expected_case_revision=0,
         idempotency_key=command.idempotency_key,
         payload=CreateCaseTriggerPayload(
+            raw_problem_text=command.raw_problem_text,
             problem_spec=problem_spec_at_revision_one(command),
             initial_user_facts=facts,
         ),
@@ -195,6 +196,8 @@ def runtime_bindings_from_job(job: Job) -> RuntimeBindings:
     """Mechanically recover the complete frozen bindings from job.json."""
 
     return RuntimeBindings(
+        diagnosis_mode=job.diagnosis_mode,
+        generic_skill_name=job.generic_skill_name,
         agent_profile_ref=job.agent_profile_ref,
         available_skill_refs=list(job.available_skill_refs),
         skill_ref=job.skill_ref,

@@ -1913,11 +1913,13 @@ class FakeAssetCatalog:
         *,
         assets: Iterable[ResolvedAsset] = (),
         route: RuntimeBindings | None = None,
+        generic: RuntimeBindings | None = None,
         diagnose: Mapping[tuple[str, str, str], RuntimeBindings] | None = None,
         review: Mapping[tuple[str, str, str], RuntimeBindings] | None = None,
     ) -> None:
         self._assets = {_ref_key(asset.ref): _clone(asset) for asset in assets}
         self._route = _clone(route)
+        self._generic = _clone(generic)
         self._diagnose = {key: _clone(value) for key, value in (diagnose or {}).items()}
         self._review = {key: _clone(value) for key, value in (review or {}).items()}
         self.check_calls: list[tuple[VersionedRef, ...]] = []
@@ -1925,6 +1927,7 @@ class FakeAssetCatalog:
         self.route_calls = 0
         self.route_user_fact_name_calls: list[tuple[str, ...]] = []
         self.diagnose_calls: list[VersionedRef] = []
+        self.generic_calls = 0
         self.review_calls: list[VersionedRef] = []
         self._failures: defaultdict[str, deque[ApplicationPortError]] = (
             defaultdict(deque)
@@ -1992,6 +1995,16 @@ class FakeAssetCatalog:
                 "The pinned diagnosis runtime bindings are unavailable.",
             )
         return _clone(value)
+
+    def generic_diagnose_bindings(self) -> RuntimeBindings:
+        self._maybe_fail("generic_diagnose_bindings")
+        self.generic_calls += 1
+        if self._generic is None:
+            raise _port_error(
+                ErrorCode.CONFIG_INVALID,
+                "The generic diagnosis runtime bindings are not configured.",
+            )
+        return _clone(self._generic)
 
     def review_bindings(self, skill_ref: VersionedRef) -> RuntimeBindings:
         self._maybe_fail("review_bindings")

@@ -150,6 +150,9 @@ def test_r3_exact_port_error_closure_is_not_overwide() -> None:
             ErrorCode.ASSET_VERSION_UNAVAILABLE,
             ErrorCode.CONFIG_INVALID,
         },
+        "AssetCatalogPort.generic_diagnose_bindings": {
+            ErrorCode.CONFIG_INVALID,
+        },
         "AssetCatalogPort.review_bindings": {
             ErrorCode.ASSET_VERSION_UNAVAILABLE,
             ErrorCode.CONFIG_INVALID,
@@ -205,6 +208,7 @@ def test_asset_catalog_is_part_of_typed_port_conformance() -> None:
         "resolve": getattr(__import__("problem_locator.contracts.models", fromlist=["ResolvedAsset"]), "ResolvedAsset"),
         "route_bindings": getattr(__import__("problem_locator.contracts.models", fromlist=["RuntimeBindings"]), "RuntimeBindings"),
         "diagnose_bindings": getattr(__import__("problem_locator.contracts.models", fromlist=["RuntimeBindings"]), "RuntimeBindings"),
+        "generic_diagnose_bindings": getattr(__import__("problem_locator.contracts.models", fromlist=["RuntimeBindings"]), "RuntimeBindings"),
         "review_bindings": getattr(__import__("problem_locator.contracts.models", fromlist=["RuntimeBindings"]), "RuntimeBindings"),
     }
     for method_name, expected in expected_returns.items():
@@ -834,6 +838,7 @@ def test_asset_catalog_negative_and_exception_channels_are_disjoint() -> None:
     for method, args, natural_code in (
         ("route_bindings", (), ErrorCode.CONFIG_INVALID),
         ("diagnose_bindings", (old_ref,), ErrorCode.ASSET_VERSION_UNAVAILABLE),
+        ("generic_diagnose_bindings", (), ErrorCode.CONFIG_INVALID),
         ("review_bindings", (old_ref,), ErrorCode.ASSET_VERSION_UNAVAILABLE),
     ):
         with pytest.raises(errors.ApplicationPortError) as raised:

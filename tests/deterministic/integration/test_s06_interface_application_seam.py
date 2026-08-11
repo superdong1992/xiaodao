@@ -38,6 +38,8 @@ FIXED_TIME = "2026-07-31T08:06:00.000Z"
 def _route_bindings() -> RuntimeBindings:
     route = Job.model_validate_json((FIXTURES / "job-route.json").read_text())
     return RuntimeBindings(
+        diagnosis_mode=route.diagnosis_mode,
+        generic_skill_name=route.generic_skill_name,
         agent_profile_ref=route.agent_profile_ref,
         available_skill_refs=route.available_skill_refs,
         skill_ref=route.skill_ref,
@@ -86,6 +88,7 @@ def _application():
 def _create_arguments(statement: str = "Payment RPC timeout") -> dict[str, object]:
     return {
         "request_id": "s08-mcp-create",
+        "raw_problem_text": statement,
         "statement": statement,
         "expected_behavior": "Inventory responds before the deadline",
         "actual_behavior": "Payment observes an RPC timeout",

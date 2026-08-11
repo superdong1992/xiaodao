@@ -33,6 +33,16 @@ class JobType(StrEnum):
     REVIEW = "REVIEW"
 
 
+class DiagnosisMode(StrEnum):
+    SPECIALIZED = "SPECIALIZED"
+    GENERIC = "GENERIC"
+
+
+class GenericResultStatus(StrEnum):
+    RESOLVED = "RESOLVED"
+    UNRESOLVED = "UNRESOLVED"
+
+
 class OutcomeDisposition(StrEnum):
     APPLIED = "APPLIED"
     DUPLICATE = "DUPLICATE"

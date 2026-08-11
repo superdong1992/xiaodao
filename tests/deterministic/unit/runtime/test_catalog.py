@@ -39,6 +39,14 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[4]
 FIXTURE_ROOT = REPOSITORY_ROOT / "tests/fixtures/components/runtime-catalog"
 SKILL_DIR = FIXTURE_ROOT / "skill-dir"
 LOGPARSE_ROOT = FIXTURE_ROOT / "logparse-tool"
+GENERIC_SKILL_NAME = "generic-problem-locator-smoke"
+
+
+def _new_catalog(**kwargs: Any) -> VersionedAssetCatalog:
+    return VersionedAssetCatalog(
+        generic_skill_name=GENERIC_SKILL_NAME,
+        **kwargs,
+    )
 
 
 class _BrokerFactory:
@@ -59,7 +67,7 @@ def _logparse_asset(*, kind: AssetKind = AssetKind.LOGPARSE_TOOL) -> ResolvedAss
 
 
 def _catalog() -> VersionedAssetCatalog:
-    return VersionedAssetCatalog(
+    return _new_catalog(
         skill_dir=SKILL_DIR,
         logparse_tool=_logparse_asset(),
         logparse_broker_factory=_BrokerFactory(),
@@ -222,15 +230,19 @@ def test_builtin_assets_and_port_use_exact_versioned_refs() -> None:
         "agent-profile/router",
         "agent-profile/specialist",
         "agent-profile/reviewer",
+        "agent-profile/generic-locator",
         "tool-bundle/router",
         "tool-bundle/diagnose",
         "tool-bundle/review",
+        "tool-bundle/generic-locator",
         "context-policy/route",
         "context-policy/diagnose",
         "context-policy/review",
+        "context-policy/generic-locator",
         "output-contract/route",
         "output-contract/diagnose",
         "output-contract/review",
+        "output-contract/generic-locator",
     }
     refs = {
         route.agent_profile_ref.id: route.agent_profile_ref,
@@ -252,6 +264,17 @@ def test_builtin_assets_and_port_use_exact_versioned_refs() -> None:
             review.output_contract_ref,
         ):
             refs[ref.id] = ref
+    generic = catalog.generic_diagnose_bindings()
+    assert generic.diagnosis_mode.value == "GENERIC"
+    assert generic.generic_skill_name == GENERIC_SKILL_NAME
+    assert generic.skill_ref is None
+    for ref in (
+        generic.agent_profile_ref,
+        generic.tool_bundle_ref,
+        generic.context_policy_ref,
+        generic.output_contract_ref,
+    ):
+        refs[ref.id] = ref
 
     assert set(refs) == expected_builtin_ids
     upgraded_versions = {
@@ -503,16 +526,32 @@ def test_direct_child_skill_scan_bindings_and_deep_copy_isolation() -> None:
 
 def test_logparse_asset_and_factory_must_be_paired() -> None:
     with pytest.raises(ValueError, match="supplied together"):
-        VersionedAssetCatalog(skill_dir=SKILL_DIR, logparse_tool=_logparse_asset())
+        _new_catalog(skill_dir=SKILL_DIR, logparse_tool=_logparse_asset())
     with pytest.raises(ValueError, match="supplied together"):
-        VersionedAssetCatalog(
+        _new_catalog(
             skill_dir=SKILL_DIR,
             logparse_broker_factory=_BrokerFactory(),
         )
     with pytest.raises(ValueError, match="asset_kind=LOGPARSE_TOOL"):
-        VersionedAssetCatalog(
+        _new_catalog(
             skill_dir=SKILL_DIR,
             logparse_tool=_logparse_asset(kind=AssetKind.TOOL_BUNDLE),
+            logparse_broker_factory=_BrokerFactory(),
+        )
+
+
+@pytest.mark.parametrize(
+    "skill_name",
+    ("Generic_Problem_Locator", "generic--problem-locator", "-generic"),
+)
+def test_generic_skill_name_must_use_standard_lowercase_hyphens(
+    skill_name: str,
+) -> None:
+    with pytest.raises(ValueError, match="lowercase hyphen"):
+        VersionedAssetCatalog(
+            skill_dir=SKILL_DIR,
+            generic_skill_name=skill_name,
+            logparse_tool=_logparse_asset(),
             logparse_broker_factory=_BrokerFactory(),
         )
 
@@ -523,7 +562,7 @@ def test_production_catalog_rejects_test_only_and_requires_production(
     empty = tmp_path / "empty"
     empty.mkdir()
     with pytest.raises(ValueError, match="at least one PRODUCTION"):
-        VersionedAssetCatalog(skill_dir=empty)
+        _new_catalog(skill_dir=empty)
 
     test_only = tmp_path / "test-only"
     _write_skill(
@@ -532,9 +571,9 @@ def test_production_catalog_rejects_test_only_and_requires_production(
         deployment_scope="TEST_ONLY",
     )
     with pytest.raises(ValueError, match="TEST_ONLY diagnosis skills are forbidden"):
-        VersionedAssetCatalog(skill_dir=test_only)
+        _new_catalog(skill_dir=test_only)
 
-    catalog = VersionedAssetCatalog(
+    catalog = _new_catalog(
         skill_dir=test_only,
         allow_test_skills=True,
     )
@@ -550,14 +589,14 @@ def test_production_catalog_rejects_test_only_and_requires_production(
         deployment_scope="TEST_ONLY",
     )
     with pytest.raises(ValueError, match="TEST_ONLY diagnosis skills are forbidden"):
-        VersionedAssetCatalog(skill_dir=mixed)
+        _new_catalog(skill_dir=mixed)
 
 
 def test_test_skill_allowance_is_an_explicit_boolean(tmp_path: Path) -> None:
     skill_dir = tmp_path / "skills"
     _write_skill(skill_dir / "production")
     with pytest.raises(TypeError, match="allow_test_skills must be a boolean"):
-        VersionedAssetCatalog(skill_dir=skill_dir, allow_test_skills=1)  # type: ignore[arg-type]
+        _new_catalog(skill_dir=skill_dir, allow_test_skills=1)  # type: ignore[arg-type]
 
 
 def test_required_logparse_skill_rejects_missing_pair(tmp_path: Path) -> None:
@@ -568,18 +607,18 @@ def test_required_logparse_skill_rejects_missing_pair(tmp_path: Path) -> None:
         logparse_product="inventory-service",
     )
     with pytest.raises(ValueError, match="requires_logparse"):
-        VersionedAssetCatalog(skill_dir=skill_dir)
+        _new_catalog(skill_dir=skill_dir)
 
     plain_skill_dir = tmp_path / "plain-skills"
     _write_skill(plain_skill_dir / "plain")
-    catalog = VersionedAssetCatalog(skill_dir=plain_skill_dir)
+    catalog = _new_catalog(skill_dir=plain_skill_dir)
     assert catalog.diagnose_bindings(catalog.route_bindings().available_skill_refs[0]).logparse_tool_ref is None
 
 
 def test_logparse_skill_omitted_product_uses_effective_default(tmp_path: Path) -> None:
     skill_dir = tmp_path / "skills"
     _write_skill(skill_dir / "default-product", requires_logparse=True)
-    catalog = VersionedAssetCatalog(
+    catalog = _new_catalog(
         skill_dir=skill_dir,
         logparse_tool=_logparse_asset(),
         logparse_broker_factory=_BrokerFactory(),
@@ -631,7 +670,7 @@ def test_hash_drift_never_resolves_the_previous_ref(tmp_path: Path) -> None:
     shutil.copytree(BUILTIN_ASSET_ROOT, assets_root)
     skill_dir = tmp_path / "skills"
     skill_dir.mkdir()
-    first = VersionedAssetCatalog(
+    first = _new_catalog(
         skill_dir=skill_dir,
         assets_root=assets_root,
         allow_test_skills=True,
@@ -640,7 +679,7 @@ def test_hash_drift_never_resolves_the_previous_ref(tmp_path: Path) -> None:
 
     with (assets_root / "profiles/router/profile.md").open("ab") as stream:
         stream.write(b"\nconfiguration drift\n")
-    second = VersionedAssetCatalog(
+    second = _new_catalog(
         skill_dir=skill_dir,
         assets_root=assets_root,
         allow_test_skills=True,
@@ -666,7 +705,7 @@ def test_same_catalog_instance_rejects_product_drift_on_every_port_view(
     shutil.copytree(BUILTIN_ASSET_ROOT, assets_root)
     skill_dir = tmp_path / "skills"
     _write_skill(skill_dir / "fixed")
-    catalog = VersionedAssetCatalog(
+    catalog = _new_catalog(
         skill_dir=skill_dir,
         assets_root=assets_root,
     )
@@ -724,7 +763,7 @@ def test_binding_configuration_damage_uses_only_typed_port_errors(
     shutil.copytree(BUILTIN_ASSET_ROOT, assets_root)
     skill_dir = tmp_path / "skills"
     _write_skill(skill_dir / "fixed")
-    catalog = VersionedAssetCatalog(skill_dir=skill_dir, assets_root=assets_root)
+    catalog = _new_catalog(skill_dir=skill_dir, assets_root=assets_root)
     skill_ref = catalog.route_bindings().available_skill_refs[0]
 
     (assets_root / "tool-bundles/diagnose/tool-bundle.json").write_text(
@@ -764,7 +803,7 @@ def test_binding_configuration_damage_uses_only_typed_port_errors(
     shutil.copytree(BUILTIN_ASSET_ROOT, structural_assets)
     structural_skills = tmp_path / "structural-skills"
     _write_skill(structural_skills / "fixed")
-    structural = VersionedAssetCatalog(
+    structural = _new_catalog(
         skill_dir=structural_skills,
         assets_root=structural_assets,
     )
@@ -873,7 +912,7 @@ def test_skill_manifest_is_strict(
     skill_dir = tmp_path / "skills"
     _write_skill(skill_dir / "candidate", extra=extra)
     with pytest.raises(ValueError, match=message):
-        VersionedAssetCatalog(skill_dir=skill_dir)
+        _new_catalog(skill_dir=skill_dir)
 
 
 def test_skill_verification_contract_rejects_missing_bounds_and_suppression(
@@ -890,7 +929,7 @@ def test_skill_verification_contract_rejects_missing_bounds_and_suppression(
     del time_rule["parameters"]["upper_bound"]
     (skill_dir / "diagnosis-skill.json").write_bytes(canonical_json_bytes(manifest))
     with pytest.raises(ValueError, match="fields are invalid"):
-        VersionedAssetCatalog(skill_dir=skills)
+        _new_catalog(skill_dir=skills)
 
     manifest = _write_skill(
         tmp_path / "other-skills/candidate",
@@ -901,7 +940,7 @@ def test_skill_verification_contract_rejects_missing_bounds_and_suppression(
         canonical_json_bytes(manifest)
     )
     with pytest.raises(ValueError, match="fields are invalid"):
-        VersionedAssetCatalog(skill_dir=tmp_path / "other-skills")
+        _new_catalog(skill_dir=tmp_path / "other-skills")
 
 
 def test_skill_rule_remediation_only_names_missing_only_requirements(
@@ -916,7 +955,7 @@ def test_skill_rule_remediation_only_names_missing_only_requirements(
     ] = ["problem_time"]
     (skill_dir / "diagnosis-skill.json").write_bytes(canonical_json_bytes(manifest))
     with pytest.raises(ValueError, match="MISSING_ONLY"):
-        VersionedAssetCatalog(skill_dir=skills)
+        _new_catalog(skill_dir=skills)
 
 
 def test_skill_manifest_rejects_duplicate_json_keys_and_missing_entry(tmp_path: Path) -> None:
@@ -930,13 +969,13 @@ def test_skill_manifest_rejects_duplicate_json_keys_and_missing_entry(tmp_path: 
         encoding="utf-8",
     )
     with pytest.raises(ValueError, match="duplicate JSON key"):
-        VersionedAssetCatalog(skill_dir=duplicate_dir.parent)
+        _new_catalog(skill_dir=duplicate_dir.parent)
 
     missing_dir = tmp_path / "missing-skills/missing"
     _write_skill(missing_dir)
     (missing_dir / "SKILL.md").unlink()
     with pytest.raises(ValueError, match="entry is unavailable"):
-        VersionedAssetCatalog(skill_dir=missing_dir.parent)
+        _new_catalog(skill_dir=missing_dir.parent)
 
 
 def test_duplicate_skill_id_and_version_is_configuration_damage(tmp_path: Path) -> None:
@@ -945,7 +984,7 @@ def test_duplicate_skill_id_and_version_is_configuration_damage(tmp_path: Path) 
     _write_skill(skill_dir / "second", skill_id="same-skill", version="1.0.0")
     (skill_dir / "second/SKILL.md").write_text("different bytes\n", encoding="utf-8")
     with pytest.raises(ValueError, match="duplicate asset id/version"):
-        VersionedAssetCatalog(skill_dir=skill_dir)
+        _new_catalog(skill_dir=skill_dir)
 
 
 def test_builtin_manifest_is_strict(tmp_path: Path) -> None:
@@ -958,7 +997,7 @@ def test_builtin_manifest_is_strict(tmp_path: Path) -> None:
     skill_dir = tmp_path / "skills"
     skill_dir.mkdir()
     with pytest.raises(ValueError, match="fields are invalid"):
-        VersionedAssetCatalog(skill_dir=skill_dir, assets_root=assets_root)
+        _new_catalog(skill_dir=skill_dir, assets_root=assets_root)
 
 
 def test_catalog_fixture_manifest_matches_every_owned_file() -> None:

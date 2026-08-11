@@ -95,6 +95,7 @@ const run = docker(context, [
   "--env", "TEST_FLOW_UV_OFFLINE=1",
   "--env", "TEST_FLOW_UV_CACHE_DIR=/root/.cache/uv",
   "--env", "SKILL_DIR=/opt/src/xiaodao/tests/fixtures/components/runtime-catalog/skill-dir",
+  "--env", "GENERIC_SKILL_NAME=generic-problem-locator-smoke",
   "--env", "LOGPARSE_REPO=/opt/src/logparse",
   "--env", "LOGPARSE_CONFIG_PATH=/opt/src/logparse/config.yaml",
   "--env", "LOGPARSE_PYTHON=/opt/venvs/logparse/bin/python",

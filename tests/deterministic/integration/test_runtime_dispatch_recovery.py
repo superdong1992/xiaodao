@@ -996,7 +996,10 @@ def _real_route_catalog(tmp_path: Path) -> VersionedAssetCatalog:
         RUNTIME_CATALOG / "skill-dir/manual-triage",
         skill_dir / "manual-triage",
     )
-    return VersionedAssetCatalog(skill_dir=skill_dir)
+    return VersionedAssetCatalog(
+        skill_dir=skill_dir,
+        generic_skill_name="generic-problem-locator-smoke",
+    )
 
 
 def _state_with_catalog_route_job(catalog: VersionedAssetCatalog) -> tuple[StateFile, Job]:

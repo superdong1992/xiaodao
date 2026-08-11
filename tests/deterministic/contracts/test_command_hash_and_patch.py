@@ -70,6 +70,7 @@ def test_every_external_write_command_declares_hash_exclusions(
 def test_wait_duration_is_excluded_but_array_order_remains_semantic() -> None:
     base = CreateCase(
         idempotency_key="create-1",
+        raw_problem_text="A payment service call to inventory times out.",
         problem_spec=_problem_spec_input(),
         initial_user_facts=[
             UserFactInput(name="region", value="us-east-1"),

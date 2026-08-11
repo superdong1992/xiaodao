@@ -9,6 +9,7 @@ from .enums import (
     ArtifactKind,
     AttachmentStatus,
     CandidateStatus,
+    DiagnosisMode,
     ErrorCode,
     EvidenceSourceType,
     FieldUpdateAction,
@@ -41,6 +42,7 @@ from .models import (
     DiagnosisItemChange,
     DiagnosisItemDraft,
     DiagnosisOutcome,
+    GenericDiagnosisOutcome,
     DiagnosisOutcomeTriggerPayload,
     DiagnosisStateDelta,
     EvidenceBinding,
@@ -286,6 +288,41 @@ def validate_outcome_for_job(
     if any(ref not in job_evidence for ref in outcome.consumed_evidence_refs):
         raise ValueError("consumed_evidence_refs must be fixed by the Job")
 
+    payload = outcome.payload
+    if job.diagnosis_mode is DiagnosisMode.GENERIC:
+        proposed_evidence = (
+            outcome.proposed_evidence_drafts
+            if isinstance(outcome, AgentJobOutcome)
+            else outcome.proposed_evidence
+        )
+        proposed_artifacts = (
+            outcome.proposed_artifact_drafts
+            if isinstance(outcome, AgentJobOutcome)
+            else outcome.proposed_artifacts
+        )
+        if (
+            isinstance(outcome, AgentJobOutcome)
+            or job.context_snapshot is not None
+            or outcome.consumed_evidence_refs
+            or proposed_evidence
+            or proposed_artifacts
+            or outcome.decision_audit is not None
+        ):
+            raise ValueError(
+                "GENERIC Job and Outcome must remain isolated from specialized context"
+            )
+        if outcome.result_type is OutcomeResultType.FAILED:
+            return outcome
+        if (
+            outcome.result_type is not OutcomeResultType.COMPLETED
+            or not isinstance(payload, GenericDiagnosisOutcome)
+            or payload.skill_name != job.generic_skill_name
+        ):
+            raise ValueError(
+                "GENERIC Job requires a matching generic diagnosis Outcome"
+            )
+        return outcome
+
     audit = outcome.decision_audit
     if audit is not None:
         if audit.skill_ref != job.skill_ref:
@@ -329,12 +366,20 @@ def validate_outcome_for_job(
                     "REVIEW decision audit Evidence must preserve the fixed Job order"
                 )
 
-    payload = outcome.payload
+    if (
+        job.job_type is JobType.DIAGNOSE
+        and outcome.result_type is not OutcomeResultType.FAILED
+    ):
+        if isinstance(payload, GenericDiagnosisOutcome):
+            raise ValueError(
+                "SPECIALIZED Job cannot publish a generic diagnosis Outcome"
+            )
     if isinstance(payload, RouteDecision):
         if payload.kind is RouteKind.MATCHED and payload.skill_ref not in job.available_skill_refs:
             raise ValueError("MATCHED route skill_ref must belong to Job.available_skill_refs")
 
     if isinstance(payload, ReviewAssessment):
+        assert job.context_snapshot is not None
         target = job.review_target
         if target is None or (
             payload.candidate_conclusion_id != target.candidate_conclusion_id
@@ -369,6 +414,7 @@ def validate_outcome_for_job(
             raise ValueError("PASS must review every required candidate Evidence")
 
     if isinstance(payload, DiagnosisOutcome):
+        assert job.context_snapshot is not None
         requirements = {
             requirement.requirement_id: requirement
             for requirement in job.context_snapshot.pending_requirements
@@ -426,6 +472,7 @@ def validate_outcome_for_job(
         if isinstance(outcome, AgentJobOutcome)
         else outcome.proposed_evidence
     )
+    assert job.context_snapshot is not None
     source_sets = {
         EvidenceSourceType.USER_FACT: {
             item.item_id for item in job.context_snapshot.user_facts
@@ -962,6 +1009,32 @@ def validate_transition_plan_for_outcome(
             raise ValueError("MATCHED route plan must SET the selected skill")
     if (
         plan.outcome_disposition is OutcomeDisposition.APPLIED
+        and isinstance(payload, RouteDecision)
+        and payload.kind is RouteKind.NO_CAPABILITY
+    ):
+        update = plan.selected_skill_update
+        if update is None or update.action is not FieldUpdateAction.CLEAR:
+            raise ValueError("NO_CAPABILITY route plan must CLEAR the selected skill")
+    if isinstance(payload, GenericDiagnosisOutcome):
+        result = plan.generic_result
+        if (
+            plan.outcome_disposition is not OutcomeDisposition.APPLIED
+            or result is None
+            or result.status is not payload.status
+            or result.conclusion != payload.conclusion
+            or result.root_cause_analysis != payload.root_cause_analysis
+            or result.skill_name != payload.skill_name
+            or result.source_job_id != outcome.job_id
+            or result.source_outcome_id != outcome.outcome_id
+            or result.occurred_at != outcome.produced_at
+        ):
+            raise ValueError(
+                "generic diagnosis plan must directly bind the complete Outcome result"
+            )
+    elif plan.generic_result is not None:
+        raise ValueError("only a generic diagnosis Outcome may install generic_result")
+    if (
+        plan.outcome_disposition is OutcomeDisposition.APPLIED
         and outcome.result_type is OutcomeResultType.REROUTE
     ):
         update = plan.selected_skill_update
@@ -1032,6 +1105,7 @@ __all__ = [
     "EvidenceSourceBinding",
     "ExecutionFailedTriggerPayload",
     "Finding",
+    "GenericDiagnosisOutcome",
     "JobOutcome",
     "Job",
     "JobSpec",

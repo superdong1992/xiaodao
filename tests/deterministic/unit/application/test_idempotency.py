@@ -34,6 +34,7 @@ def _state() -> StateFile:
 def _command(*, wait_seconds: int = 0, statement: str = "RPC timeout") -> CreateCase:
     return CreateCase(
         idempotency_key="create-1",
+        raw_problem_text=statement,
         problem_spec={
             "statement": statement,
             "expected_behavior": "The RPC succeeds.",

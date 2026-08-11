@@ -1,4 +1,4 @@
-"""Frozen Problem Locator V3 public contract package.
+"""Frozen Problem Locator V4 public contract package.
 
 All later implementation slices import public vocabulary from this package.
 The schema registry is the single source used to generate the ten frozen

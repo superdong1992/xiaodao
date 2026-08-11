@@ -108,7 +108,7 @@ test("every public platform has a repository-owned adapter and no harness identi
   assert.equal(fs.existsSync(path.join(REPO_ROOT, "tools", "test-flow", "harness")), false);
 });
 
-test("every repository identity path exists and the two diagnosis skills are distinct", () => {
+test("every repository identity path exists and all diagnosis Skill identities are distinct", () => {
   const config = loadConfiguration(REPO_ROOT);
   for (const [componentId, component] of Object.entries(config.identities.components)) {
     if (component.kind !== "paths") continue;
@@ -121,6 +121,9 @@ test("every repository identity path exists and the two diagnosis skills are dis
   ]);
   assert.deepEqual(config.identities.components["skill.logparse"].paths, [
     ".claude/skills/logparse-diagnose",
+  ]);
+  assert.deepEqual(config.identities.components["skill.generic-smoke"].paths, [
+    "tests/fixtures/components/generic-problem-locator-smoke",
   ]);
 });
 

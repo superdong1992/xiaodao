@@ -86,6 +86,8 @@ def _model(name: str, model_type: type[Any]) -> Any:
 
 def _runtime_bindings(job: Job) -> RuntimeBindings:
     return RuntimeBindings(
+        diagnosis_mode=job.diagnosis_mode,
+        generic_skill_name=job.generic_skill_name,
         agent_profile_ref=job.agent_profile_ref,
         available_skill_refs=job.available_skill_refs,
         skill_ref=job.skill_ref,
@@ -132,6 +134,7 @@ def _create_trigger() -> ValidatedTrigger:
         expected_case_revision=0,
         idempotency_key="create-case-regression",
         payload=CreateCaseTriggerPayload(
+            raw_problem_text=source_job.context_snapshot.problem_spec.statement,
             problem_spec=source_job.context_snapshot.problem_spec,
             initial_user_facts=[],
         ),
@@ -476,6 +479,9 @@ def test_installed_candidate_requires_next_review_job_to_bind_the_new_proposal()
     def next_review_job(review_binding: ReviewTargetBinding) -> JobSpec:
         return JobSpec(
             job_type=JobType.REVIEW,
+            diagnosis_mode=review_job.diagnosis_mode,
+            generic_skill_name=review_job.generic_skill_name,
+            generic_problem_text=review_job.generic_problem_text,
             goal=review_job.goal,
             target_state_revision=review_job.base_state_revision,
             evidence_bindings=[

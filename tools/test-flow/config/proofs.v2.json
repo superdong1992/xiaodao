@@ -24,6 +24,7 @@
       "selectable_proofs": [
         "proof.real-logparse",
         "proof.real-agent-backend",
+        "proof.real-generic-locator",
         "proof.real-route",
         "proof.real-diagnose",
         "proof.real-review",
@@ -91,6 +92,11 @@
       "description": "The isolated real Agent backend contract passes.",
       "acceptance": "all",
       "stages": ["real.agent-backend"]
+    },
+    "proof.real-generic-locator": {
+      "description": "The isolated real Agent loads the preinstalled generic locator Skill, preserves its exact Unicode input, and writes the strict result file.",
+      "acceptance": "all",
+      "stages": ["real.generic-locator"]
     },
     "proof.real-route": {
       "description": "The isolated real ROUTE Agent contract passes.",
