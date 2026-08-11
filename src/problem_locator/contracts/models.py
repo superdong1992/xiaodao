@@ -2840,8 +2840,8 @@ def finalize_unresolved_result(
 
 def _validate_diagnosis_result_requests(result_type: OutcomeResultType, payload: DiagnosisOutcome) -> None:
     if result_type is OutcomeResultType.NEED_INPUT:
-        if not payload.requested_input or payload.requested_attachments:
-            raise ValueError("NEED_INPUT requires requested_input and forbids requested_attachments")
+        if not payload.requested_input:
+            raise ValueError("NEED_INPUT requires requested_input")
     elif result_type is OutcomeResultType.NEED_ATTACHMENT:
         if not payload.requested_attachments or payload.requested_input:
             raise ValueError("NEED_ATTACHMENT requires requested_attachments and forbids requested_input")

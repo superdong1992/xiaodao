@@ -64,6 +64,81 @@ def _workspace(tmp_path: Path) -> Path:
     return root
 
 
+def _pending_requirement(
+    *,
+    requirement_id: str,
+    job_id: str,
+    kind: str,
+    name: str,
+) -> dict[str, object]:
+    constraints = (
+        {
+            "value_type": "STRING",
+            "min_utf8_bytes": 1,
+            "max_utf8_bytes": 256,
+            "pattern": None,
+            "allowed_values": [],
+        }
+        if kind == "INPUT"
+        else {
+            "allowed_content_types": ["application/zip"],
+            "min_count": 1,
+            "max_count": 1,
+        }
+    )
+    return {
+        "requirement_id": requirement_id,
+        "kind": kind,
+        "name": name,
+        "prompt": f"Provide {name}.",
+        "required": True,
+        "constraints": constraints,
+        "status": "OPEN",
+        "requested_by_job_id": job_id,
+        "fulfilled_by_refs": [],
+        "supplement_policy": "MISSING_ONLY",
+    }
+
+
+def _mixed_wait_draft() -> dict[str, object]:
+    value = _fixture("agent-job-outcome-draft-diagnosis.json")
+    input_ids = [
+        "00000000-0000-0000-0000-000000000096",
+        "00000000-0000-0000-0000-000000000097",
+    ]
+    attachment_id = "00000000-0000-0000-0000-000000000098"
+    job_id = str(value["job_id"])
+    payload = value["payload"]
+    assert isinstance(payload, dict)
+    state_delta = payload["state_delta"]
+    assert isinstance(state_delta, dict)
+    value["result_type"] = "NEED_INPUT"
+    payload["candidate_conclusion_draft"] = None
+    payload["requested_input"] = input_ids
+    payload["requested_attachments"] = [attachment_id]
+    state_delta["add_pending_requirements"] = [
+        _pending_requirement(
+            requirement_id=input_ids[0],
+            job_id=job_id,
+            kind="INPUT",
+            name="caller_service",
+        ),
+        _pending_requirement(
+            requirement_id=input_ids[1],
+            job_id=job_id,
+            kind="INPUT",
+            name="rpc_method",
+        ),
+        _pending_requirement(
+            requirement_id=attachment_id,
+            job_id=job_id,
+            kind="ATTACHMENT",
+            name="log_archive",
+        ),
+    ]
+    return value
+
+
 def test_sealer_canonicalizes_v2_draft_without_minting_server_fields(
     tmp_path: Path,
 ) -> None:
@@ -86,6 +161,38 @@ def test_sealer_canonicalizes_v2_draft_without_minting_server_fields(
         marker_bytes,
         SealedAgentOutcomeDraftMarker,
     ) == marker
+
+
+def test_sealer_accepts_need_input_with_multiple_inputs_and_attachment(
+    tmp_path: Path,
+) -> None:
+    root = _workspace(tmp_path)
+    path = root / DRAFT_OUTCOME_RELATIVE_PATH
+    path.write_bytes(_pretty_reversed(_mixed_wait_draft()))
+
+    seal_agent_outcome_draft(root)
+
+    draft = parse_canonical_json_bytes(path.read_bytes(), AgentJobOutcomeDraftV2)
+    assert draft.result_type.value == "NEED_INPUT"
+    assert len(draft.payload.requested_input) == 2
+    assert len(draft.payload.requested_attachments) == 1
+    assert len(draft.payload.state_delta.add_pending_requirements) == 3
+    assert (root / DRAFT_FINALIZATION_MARKER_RELATIVE_PATH).is_file()
+
+
+def test_sealer_rejects_need_attachment_that_also_requests_input(
+    tmp_path: Path,
+) -> None:
+    root = _workspace(tmp_path)
+    path = root / DRAFT_OUTCOME_RELATIVE_PATH
+    invalid = _mixed_wait_draft()
+    invalid["result_type"] = "NEED_ATTACHMENT"
+    path.write_bytes(canonical_json_bytes(invalid))
+
+    with pytest.raises(ValueError, match="forbids requested_input"):
+        seal_agent_outcome_draft(root)
+
+    assert not (root / DRAFT_FINALIZATION_MARKER_RELATIVE_PATH).exists()
 
 
 def test_sealer_rejects_agent_owned_final_outcome_path(tmp_path: Path) -> None:

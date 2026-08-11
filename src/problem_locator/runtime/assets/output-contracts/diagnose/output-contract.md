@@ -32,6 +32,13 @@ method、order 或其他 USER_FACT 是当前 Case 的冻结输入，禁止请求
 错误或与日志不匹配，本 Case 不得形成 Candidate，服务端会以 `INCONCLUSIVE` 终止，用户
 应使用正确事实创建新 Case。
 
+`NEED_INPUT` 的 `requested_input` 必须非空；同一等待 Outcome 还可以在
+`requested_attachments` 中同时请求当前阶段确实缺失的 ATTACHMENT。此时 Case 以 INPUT
+优先进入 `WAITING_INPUT`，部分补参会被持久化；全部 INPUT 补齐但 ATTACHMENT 仍缺失时，
+Case 直接转为 `WAITING_ATTACHMENT`，不创建中间 DIAGNOSE Job。只有没有待请求 INPUT 时
+才使用 `NEED_ATTACHMENT`，且该结果禁止携带 `requested_input`。每个新建的 OPEN
+requirement 都必须出现在与其 kind 对应的 requested 数组中。
+
 构造 `state_delta.add_pending_requirements` 时，必须把当前 Skill 对应 requirement 的
 `kind/name/prompt/constraints/supplement_policy` 逐字段原样复制到 PendingRequirement；
 每一项都必须显式写出 `supplement_policy`，禁止省略后依赖 Schema 的 `NONE` 默认值，也

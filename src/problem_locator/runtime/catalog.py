@@ -147,7 +147,7 @@ _BUILTIN_SPECS = (
         "output-contracts/diagnose",
         AssetKind.OUTPUT_CONTRACT,
         "output-contract/diagnose",
-        "4.0.0",
+        "4.0.1",
     ),
     _BuiltinSpec(
         "output-contracts/review",

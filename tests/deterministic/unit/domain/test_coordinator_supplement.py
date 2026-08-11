@@ -107,6 +107,7 @@ def test_partial_input_is_persisted_without_creating_a_job() -> None:
         pending_requirements=[
             _requirement(REQ_A, "caller_service"),
             _requirement(REQ_B, "rpc_method"),
+            _attachment_requirement(),
         ],
     )
     snapshot = waiting_snapshot(state, status="WAITING_INPUT")
@@ -131,6 +132,11 @@ def test_partial_input_is_persisted_without_creating_a_job() -> None:
         item.requirement_id
         for item in plan.accepted_state_delta.fulfill_requirements
     ] == [REQ_A]
+    assert any(
+        item.requirement_id == REQ_ATTACHMENT
+        for item in state.pending_requirements
+        if item.status is RequirementStatus.OPEN
+    )
     assert plan.clear_active_job is False
 
 

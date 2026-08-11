@@ -256,14 +256,24 @@ def _validate_requirement_requests(
         raise ValueError("new Agent requirements must be requested by the wait result")
 
     if isinstance(payload, DiagnosisOutcome):
-        if draft.result_type is OutcomeResultType.NEED_INPUT:
-            expected_kind = RequirementKind.INPUT
-        elif draft.result_type is OutcomeResultType.NEED_ATTACHMENT:
-            expected_kind = RequirementKind.ATTACHMENT
-        else:
+        if draft.result_type not in {
+            OutcomeResultType.NEED_INPUT,
+            OutcomeResultType.NEED_ATTACHMENT,
+        }:
             raise ValueError("only NEED_INPUT/NEED_ATTACHMENT may add requirements")
-        if any(item.kind is not expected_kind for item in requested):
-            raise ValueError("wait result requests the wrong requirement kind")
+        input_count = len(payload.requested_input)
+        if any(
+            item.kind is not RequirementKind.INPUT
+            for item in requested[:input_count]
+        ):
+            raise ValueError("requested_input must resolve OPEN INPUT requirements")
+        if any(
+            item.kind is not RequirementKind.ATTACHMENT
+            for item in requested[input_count:]
+        ):
+            raise ValueError(
+                "requested_attachments must resolve OPEN ATTACHMENT requirements"
+            )
 
     for requirement in requested:
         pinned = pinned_by_name.get(requirement.name)

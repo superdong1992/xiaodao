@@ -9,6 +9,7 @@ from problem_locator.contracts import (
     AttachmentRequirementConstraints,
     CandidateMutationAction,
     CandidateStatus,
+    CaseStatus,
     DiagnosisItem,
     DiagnosisItemChange,
     DiagnosisItemDraft,
@@ -61,6 +62,7 @@ REQUIREMENT_ID = "00000000-0000-0000-0000-000000000032"
 ATTACHMENT_REQUIREMENT_ID = "00000000-0000-0000-0000-000000000033"
 LOGPARSE_STAGING_ID = "00000000-0000-0000-0000-000000000034"
 LOGPARSE_FACT_ID = "00000000-0000-0000-0000-000000000035"
+SECOND_REQUIREMENT_ID = "00000000-0000-0000-0000-000000000036"
 
 
 def _empty_delta(**changes: object) -> DiagnosisStateDelta:
@@ -216,6 +218,87 @@ def test_need_input_accepts_requirement_and_ends_the_job() -> None:
     assert plan.target_case_status.value == "WAITING_INPUT"
     assert plan.job_updates[0].target_status is JobStatus.SUCCEEDED
     assert plan.accepted_state_delta.add_pending_requirements == [requirement]
+    assert plan.next_job_spec is None
+    assert plan.clear_active_job is True
+    assert validate_transition_plan_for_outcome(plan, outcome) is plan
+
+
+def test_need_input_accepts_multiple_inputs_and_attachment_in_one_wait() -> None:
+    source = diagnose_job()
+    snapshot = snapshot_with_active(source)
+    input_requirements = [
+        PendingRequirement(
+            requirement_id=requirement_id,
+            kind=RequirementKind.INPUT,
+            name=name,
+            prompt=f"Provide {name}.",
+            required=True,
+            constraints=InputRequirementConstraints(
+                value_type="STRING",
+                min_utf8_bytes=1,
+                max_utf8_bytes=64,
+                pattern=None,
+                allowed_values=[],
+            ),
+            status=RequirementStatus.OPEN,
+            requested_by_job_id=source.job_id,
+            fulfilled_by_refs=[],
+            supplement_policy=SupplementPolicy.MISSING_ONLY,
+        )
+        for requirement_id, name in (
+            (REQUIREMENT_ID, "caller_service"),
+            (SECOND_REQUIREMENT_ID, "rpc_method"),
+        )
+    ]
+    attachment = PendingRequirement(
+        requirement_id=ATTACHMENT_REQUIREMENT_ID,
+        kind=RequirementKind.ATTACHMENT,
+        name="log_archive",
+        prompt="Attach the fixed log archive.",
+        required=True,
+        constraints=AttachmentRequirementConstraints(
+            allowed_content_types=["application/gzip"],
+            min_count=1,
+            max_count=1,
+        ),
+        status=RequirementStatus.OPEN,
+        requested_by_job_id=source.job_id,
+        fulfilled_by_refs=[],
+        supplement_policy=SupplementPolicy.MISSING_ONLY,
+    )
+    requirements = [*input_requirements, attachment]
+    outcome = _diagnosis_job_outcome(
+        OutcomeResultType.NEED_INPUT,
+        DiagnosisOutcome(
+            findings=[],
+            state_delta=_empty_delta(add_pending_requirements=requirements),
+            requested_input=[
+                requirement.requirement_id for requirement in input_requirements
+            ],
+            requested_attachments=[attachment.requirement_id],
+            candidate_conclusion_draft=None,
+            recommended_next_step="Collect the missing inputs and log archive.",
+        ),
+    )
+    request = trigger(
+        snapshot,
+        trigger_type=TriggerType.DIAGNOSIS_OUTCOME,
+        payload=DiagnosisOutcomeTriggerPayload(job_outcome=outcome),
+        continuation_resources=continuation(
+            incoming_outcome_id=outcome.outcome_id,
+            job=source,
+        ),
+        occurred_at=outcome.produced_at,
+    )
+
+    plan = DomainCoordinator().plan(snapshot, request)
+
+    assert not isinstance(plan, ApplicationError)
+    assert plan.target_case_status is CaseStatus.WAITING_INPUT
+    assert {
+        requirement.requirement_id: requirement
+        for requirement in plan.accepted_state_delta.add_pending_requirements
+    } == {requirement.requirement_id: requirement for requirement in requirements}
     assert plan.next_job_spec is None
     assert plan.clear_active_job is True
     assert validate_transition_plan_for_outcome(plan, outcome) is plan

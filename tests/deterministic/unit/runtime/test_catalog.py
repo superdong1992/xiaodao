@@ -261,7 +261,7 @@ def test_builtin_assets_and_port_use_exact_versioned_refs() -> None:
         "tool-bundle/diagnose": "3.0.0",
         "tool-bundle/review": "2.0.0",
         "output-contract/route": "2.0.0",
-        "output-contract/diagnose": "4.0.0",
+        "output-contract/diagnose": "4.0.1",
         "output-contract/review": "2.0.0",
     }
     for ref in refs.values():

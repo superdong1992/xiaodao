@@ -25,7 +25,7 @@ def test_specialist_assets_require_skill_and_raw_evidence_checks() -> None:
     contract_meta, contract = _asset("output-contracts/diagnose")
 
     assert profile_meta["version"] == "1.0.1"
-    assert contract_meta["version"] == "4.0.0"
+    assert contract_meta["version"] == "4.0.1"
     for material in (profile, contract):
         assert "problem_time" in material
         assert "user_facts" in material
