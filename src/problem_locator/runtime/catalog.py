@@ -1354,14 +1354,36 @@ class VersionedAssetCatalog:
             ) from None
         return _clone_model(resolved)
 
-    def route_bindings(self) -> RuntimeBindings:
+    def route_bindings(
+        self,
+        user_fact_names: Sequence[str] = (),
+    ) -> RuntimeBindings:
         try:
             if not self._route_skill_configuration_is_valid():
                 raise ValueError("route skill configuration is invalid")
+            if isinstance(user_fact_names, (str, bytes)):
+                raise TypeError("user fact names must be a sequence of strings")
+            fact_names = tuple(user_fact_names)
+            if (
+                any(not isinstance(name, str) or not name for name in fact_names)
+                or len(set(fact_names)) != len(fact_names)
+            ):
+                raise ValueError("user fact names must be unique non-empty strings")
+            required_fact_names = set(fact_names)
+            compatible_skill_refs = [
+                ref
+                for ref in self._route_skill_refs
+                if required_fact_names
+                <= {
+                    requirement["name"]
+                    for requirement in self._skills[_ref_key(ref)].requirements
+                    if requirement["kind"] == "INPUT"
+                }
+            ]
             bindings = RuntimeBindings(
                 agent_profile_ref=self._builtin_ref("agent-profile/router"),
                 available_skill_refs=[
-                    _clone_model(ref) for ref in self._route_skill_refs
+                    _clone_model(ref) for ref in compatible_skill_refs
                 ],
                 skill_ref=None,
                 tool_bundle_ref=self._builtin_ref("tool-bundle/router"),

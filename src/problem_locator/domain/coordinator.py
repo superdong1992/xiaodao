@@ -702,6 +702,10 @@ class DomainCoordinator:
             )
 
         if outcome.result_type is OutcomeResultType.REROUTE:
+            if not semantic_change:
+                return _validation(
+                    "A reroute diagnosis must make semantic progress before routing again."
+                )
             next_job = self._job_spec(
                 trigger,
                 JobType.ROUTE,

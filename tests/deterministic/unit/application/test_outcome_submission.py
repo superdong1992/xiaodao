@@ -28,6 +28,7 @@ from problem_locator.contracts import (
     CaseFailureUpdate,
     CaseStatus,
     DiagnosticExportMetadata,
+    DiagnosisOutcome,
     DiagnosisStateDelta,
     ErrorCode,
     ERROR_SPECS,
@@ -2277,6 +2278,56 @@ def test_completed_diagnosis_without_candidate_offers_same_pinned_diagnose_bindi
 
     assert offered == {JobType.DIAGNOSE: binding}
     assert catalog.diagnose_calls == [source_job.skill_ref]
+
+
+def test_reroute_binding_uses_exact_frozen_user_fact_names() -> None:
+    source_payload = _load("job-diagnose.json")
+    fact = make_user_fact(
+        UserFactInput(name="request_id", value="payment-42"),
+        item_id=USER_FACT_ID,
+        trigger_id=USER_FACT_TRIGGER_ID,
+        created_revision=2,
+    )
+    source_payload["context_snapshot"]["user_facts"] = [
+        fact.model_dump(mode="python")
+    ]
+    source_job = Job.model_validate(source_payload)
+    route_binding = runtime_bindings_from_job(
+        Job.model_validate(_load("job-route.json"))
+    )
+    catalog = FakeAssetCatalog(route=route_binding)
+    service, _, _, _, _, _, _ = _service(
+        _running_state(),
+        ScriptedCoordinator(),
+        InMemoryExecutionRecordStore(),
+        catalog=catalog,
+    )
+    outcome = JobOutcome(
+        outcome_id="00000000-0000-4000-8000-000000000211",
+        job_id=source_job.job_id,
+        case_id=source_job.case_id,
+        job_type=source_job.job_type,
+        base_state_revision=source_job.base_state_revision,
+        result_type=OutcomeResultType.REROUTE,
+        payload=DiagnosisOutcome(
+            findings=[],
+            state_delta=_empty_delta(),
+            requested_input=[],
+            requested_attachments=[],
+            candidate_conclusion_draft=None,
+            recommended_next_step="Route again after semantic progress.",
+        ),
+        consumed_evidence_refs=[],
+        proposed_evidence=[],
+        proposed_artifacts=[],
+        error=None,
+        produced_at=PROCESSED_AT,
+    )
+
+    offered = service._bindings_for_outcome(source_job, outcome)
+
+    assert offered == {JobType.ROUTE: route_binding}
+    assert catalog.route_user_fact_name_calls == [("request_id",)]
 
 
 def test_state_write_retry_reuses_published_next_job_a_not_current_catalog_b() -> None:

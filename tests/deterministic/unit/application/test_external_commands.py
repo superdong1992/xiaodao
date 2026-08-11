@@ -677,6 +677,7 @@ def test_create_catalog_config_fault_is_typed_and_commits_nothing() -> None:
 
     assert error.error.retryable is False
     assert catalog.route_calls == 1
+    assert catalog.route_user_fact_name_calls == [("region",)]
     assert coordinator.calls == []
     assert repository.commit_calls == []
     assert guard.acquire_calls == 0

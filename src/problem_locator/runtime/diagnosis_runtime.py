@@ -19,6 +19,7 @@ from problem_locator.contracts import (
     ExecutionStage,
     IdGenerator,
     Job,
+    JobOutcome,
     JobStatus,
     JobType,
     OutcomeResultType,
@@ -27,6 +28,8 @@ from problem_locator.contracts import (
     LogparseBrokerSession,
     LogparseParseClaim,
     ResourceStore,
+    RouteDecision,
+    RouteKind,
     RuntimeExecutionReceipt,
     RuntimeInfrastructureError,
     ResolvedLogparseAnchor,
@@ -252,6 +255,8 @@ class DiagnosisRuntime:
                 code=ErrorCode.OUTCOME_INVALID,
                 message="Runtime requires an already-claimed RUNNING Job.",
         )
+        if job.job_type is JobType.ROUTE and not job.available_skill_refs:
+            return self._publish_no_capability(job)
         preparing = record_stage_started(ExecutionStage.WORKSPACE_PREPARE)
         aggregate = self._read_case(job)
         try:
@@ -516,6 +521,56 @@ class DiagnosisRuntime:
                 staged.staged_refs,
                 receipt,
             )
+        return receipt
+
+    def _publish_no_capability(self, job: Job) -> RuntimeExecutionReceipt:
+        fact_names = sorted(
+            fact.provenance.input_name
+            for fact in job.context_snapshot.user_facts
+            if fact.provenance.input_name is not None
+        )
+        reason = (
+            "No diagnosis skill declares every supplied user-fact name: "
+            + ", ".join(fact_names)
+            if fact_names
+            else "No diagnosis skill is available for the frozen case."
+        )
+        outcome = JobOutcome(
+            outcome_id=self._id_generator.new("job_outcome"),
+            job_id=job.job_id,
+            case_id=job.case_id,
+            job_type=job.job_type,
+            base_state_revision=job.base_state_revision,
+            result_type=OutcomeResultType.NO_CAPABILITY,
+            payload=RouteDecision(
+                kind=RouteKind.NO_CAPABILITY,
+                skill_ref=None,
+                reason=reason,
+                confidence=1.0,
+            ),
+            consumed_evidence_refs=[],
+            proposed_evidence=[],
+            proposed_artifacts=[],
+            error=None,
+            produced_at=self._clock.now(),
+        )
+        publishing = record_stage_started(
+            ExecutionStage.EXECUTION_RECORD,
+            data={"operation": "publish_no_capability"},
+        )
+        try:
+            receipt = self._publisher.publish_success(job, outcome)
+        except (TypeError, ValueError):
+            raise _unexpected_failure() from None
+        record_stage_completed(
+            ExecutionStage.EXECUTION_RECORD,
+            publishing,
+            data={
+                "operation": "publish_no_capability",
+                "outcome_file_ref": receipt.outcome_file_ref,
+            },
+        )
+        self._record_produced_outcome(receipt)
         return receipt
 
     @staticmethod

@@ -611,10 +611,18 @@ class OutcomeSubmissionService:
         if next_job_type is None:
             return {}
         if next_job_type is JobType.ROUTE:
+            user_fact_names: list[str] = []
+            for fact in job.context_snapshot.user_facts:
+                name = fact.provenance.input_name
+                if name is None:
+                    raise ValueError(
+                        "user facts require exact input-name provenance"
+                    )
+                user_fact_names.append(name)
             return {
                 JobType.ROUTE: _validate_catalog_bindings(
                     JobType.ROUTE,
-                    self._asset_catalog.route_bindings(),
+                    self._asset_catalog.route_bindings(user_fact_names),
                 )
             }
         payload = outcome.payload

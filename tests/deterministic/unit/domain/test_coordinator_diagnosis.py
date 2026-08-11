@@ -655,7 +655,13 @@ def test_reroute_clears_skill_and_only_carries_the_incoming_outcome() -> None:
         OutcomeResultType.REROUTE,
         DiagnosisOutcome(
             findings=[],
-            state_delta=_empty_delta(),
+            state_delta=_empty_delta(
+                problem_spec_patch=ProblemSpecPatch(
+                    actual_behavior=(
+                        "The timeout now reproduces in the newly identified subsystem."
+                    )
+                )
+            ),
             requested_input=[],
             requested_attachments=[],
             candidate_conclusion_draft=None,
@@ -687,6 +693,42 @@ def test_reroute_clears_skill_and_only_carries_the_incoming_outcome() -> None:
     assert plan.next_job_spec.artifact_bindings == []
     assert plan.next_job_spec.previous_outcome_refs == [outcome.outcome_id]
     assert validate_transition_plan_for_outcome(plan, outcome) is plan
+
+
+def test_zero_actionable_requirement_reroute_without_progress_is_rejected() -> None:
+    source = diagnose_job()
+    snapshot = snapshot_with_active(source)
+    assert snapshot.case.diagnosis_state.pending_requirements == []
+    outcome = _diagnosis_job_outcome(
+        OutcomeResultType.REROUTE,
+        DiagnosisOutcome(
+            findings=[],
+            state_delta=_empty_delta(),
+            requested_input=[],
+            requested_attachments=[],
+            candidate_conclusion_draft=None,
+            recommended_next_step="Poll routing again without new information.",
+        ),
+    )
+    route = rebuild(route_job(), case_id=source.case_id)
+    request = trigger(
+        snapshot,
+        trigger_type=TriggerType.DIAGNOSIS_OUTCOME,
+        payload=DiagnosisOutcomeTriggerPayload(job_outcome=outcome),
+        bindings={JobType.ROUTE: runtime_bindings(route)},
+        continuation_resources=continuation(
+            incoming_outcome_id=outcome.outcome_id,
+            job=source,
+        ),
+        occurred_at=outcome.produced_at,
+    )
+
+    result = DomainCoordinator().plan(snapshot, request)
+
+    assert isinstance(result, ApplicationError)
+    assert result.code is ErrorCode.VALIDATION_ERROR
+    assert result.retryable is False
+    assert "semantic progress" in result.message
 
 
 def test_same_round_logparse_continuation_never_infers_attachment_metadata() -> None:

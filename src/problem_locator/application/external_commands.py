@@ -290,7 +290,9 @@ class ExternalCommandHandler:
                 ]
                 route_bindings = _validated_catalog_bindings(
                     JobType.ROUTE,
-                    self._asset_catalog.route_bindings(),
+                    self._asset_catalog.route_bindings(
+                        [fact.name for fact in command.initial_user_facts]
+                    ),
                 )
 
             assert case_id is not None

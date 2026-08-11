@@ -1923,6 +1923,7 @@ class FakeAssetCatalog:
         self.check_calls: list[tuple[VersionedRef, ...]] = []
         self.resolve_calls: list[VersionedRef] = []
         self.route_calls = 0
+        self.route_user_fact_name_calls: list[tuple[str, ...]] = []
         self.diagnose_calls: list[VersionedRef] = []
         self.review_calls: list[VersionedRef] = []
         self._failures: defaultdict[str, deque[ApplicationPortError]] = (
@@ -1967,9 +1968,13 @@ class FakeAssetCatalog:
             )
         return _clone(value)
 
-    def route_bindings(self) -> RuntimeBindings:
+    def route_bindings(
+        self,
+        user_fact_names: Sequence[str] = (),
+    ) -> RuntimeBindings:
         self._maybe_fail("route_bindings")
         self.route_calls += 1
+        self.route_user_fact_name_calls.append(tuple(user_fact_names))
         if self._route is None:
             raise _port_error(
                 ErrorCode.CONFIG_INVALID,

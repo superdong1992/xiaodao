@@ -292,6 +292,33 @@ def test_builtin_assets_and_port_use_exact_versioned_refs() -> None:
     )
 
 
+def test_route_candidates_require_exact_declared_input_fact_names() -> None:
+    catalog = _catalog()
+
+    unfiltered = {
+        ref.id for ref in catalog.route_bindings().available_skill_refs
+    }
+    problem_time = {
+        ref.id
+        for ref in catalog.route_bindings(["problem_time"]).available_skill_refs
+    }
+    complete_rpc_identity = {
+        ref.id
+        for ref in catalog.route_bindings(
+            ["caller_service", "problem_time"]
+        ).available_skill_refs
+    }
+
+    assert unfiltered == {
+        "diagnosis-skill/manual-triage",
+        "diagnosis-skill/rpc-log-analysis",
+    }
+    assert problem_time == {"diagnosis-skill/rpc-log-analysis"}
+    assert complete_rpc_identity == {"diagnosis-skill/rpc-log-analysis"}
+    assert catalog.route_bindings(["unknown_fact"]).available_skill_refs == []
+    assert catalog.route_bindings(["log_archive"]).available_skill_refs == []
+
+
 @pytest.mark.parametrize("role", ["route", "diagnose", "review"])
 def test_builtin_output_contract_requires_canonical_v2_agent_draft(role: str) -> None:
     contract = (

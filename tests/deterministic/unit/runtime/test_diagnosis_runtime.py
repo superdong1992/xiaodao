@@ -634,6 +634,65 @@ def _runtime_fixture(
     return runtime, job, state, actual_backend, actual_records
 
 
+def test_empty_route_candidate_set_publishes_no_capability_without_backend(
+    tmp_path: Path,
+) -> None:
+    catalog = _make_route_catalog(tmp_path)
+    payload = _route_job().model_dump(mode="json")
+    bindings = catalog.route_bindings(["unknown_fact"])
+    assert bindings.available_skill_refs == []
+    payload.update(bindings.model_dump(mode="json"))
+    payload["context_snapshot"]["user_facts"] = [
+        {
+            "item_id": "00000000-0000-4000-8000-000000000498",
+            "statement": "opaque fact value",
+            "status": "ACTIVE",
+            "provenance": {
+                "source_type": "USER_INPUT",
+                "source_ref": "00000000-0000-4000-8000-000000000497",
+                "input_name": "unknown_fact",
+            },
+            "evidence_refs": [],
+            "created_revision": 1,
+            "supersedes": [],
+        }
+    ]
+    payload.update(
+        {
+            "status": "RUNNING",
+            "started_at": "2026-07-31T00:00:01.000Z",
+            "runtime_epoch": "00000000-0000-4000-8000-000000000499",
+        }
+    )
+    job = Job.model_validate(payload)
+    state = _StateView(_route_aggregate(job))
+    records = InMemoryExecutionRecordStore()
+    runtime = DiagnosisRuntime(
+        state_repository=state,
+        resource_store=_UnusedResourceStore(),
+        asset_catalog=catalog,
+        logparse_broker_factory=None,
+        execution_records=records,
+        clock=_Clock(),
+        id_generator=_Ids(),
+        workspace_manager=WorkspaceManager(tmp_path / "empty-route-data"),
+        backend=_NeverBackend(),  # type: ignore[arg-type]
+    )
+
+    receipt = runtime.execute(job, InMemoryCancellationSignal())
+
+    assert receipt.job_outcome.result_type is OutcomeResultType.NO_CAPABILITY
+    assert receipt.job_outcome.payload is not None
+    assert receipt.job_outcome.payload.kind.value == "NO_CAPABILITY"
+    assert receipt.job_outcome.payload.skill_ref is None
+    assert receipt.job_outcome.payload.reason == (
+        "No diagnosis skill declares every supplied user-fact name: unknown_fact"
+    )
+    assert state.calls == []
+    assert records.log_sinks == {}
+    assert len(records.publish_outcome_calls) == 1
+
+
 def test_public_asset_fake_typed_resolve_failure_preserves_details_as_outcome(
     tmp_path: Path,
 ) -> None:

@@ -130,6 +130,11 @@ uv run python -m problem_locator serve --env-file /absolute/path/to/service.env
 | `problem_locator_cancel_case` | `request_id/case_id/expected_case_revision` req |
 | `problem_locator_list_artifacts` | `case_id` req |
 
+`problem_locator_create_case` 的初始事实采用严格身份匹配：每个
+`initial_user_fact_names` 名称都必须由候选 Skill 声明为 `INPUT`
+requirement；名称不会通过别名或叙述文本推断。若没有 Skill 能同时声明全部已提供
+事实，服务端会在调用诊断模型前确定性返回 `NO_CAPABILITY`。
+
 七个公开 MCP input schema 全部扁平化，根属性只能是标量、nullable 标量或标量数组。`create_case` 的八个问题字段直接位于根层；两组 name/value 数组必须等长并按索引配对。完整规范示例见客户端 Skill。
 
 仓库内置的 [`.claude/skills/problem-locator-client`](.claude/skills/problem-locator-client) Skill 说明了安全的请求 ID、修订版本处理方式、上传请求头以及产物哈希校验方法。文件内容只通过 HTTP 传输，绝不会嵌入 MCP 消息。
