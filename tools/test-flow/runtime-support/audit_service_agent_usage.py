@@ -10,6 +10,13 @@ from typing import Any
 
 
 REAL_JOB_TYPES = {"ROUTE", "DIAGNOSE", "REVIEW"}
+TOKEN_FIELDS = (
+    "input_tokens",
+    "output_tokens",
+    "cache_creation_input_tokens",
+    "cache_read_input_tokens",
+)
+TOKEN_FORMULA = "+".join(TOKEN_FIELDS)
 
 
 def _arguments() -> argparse.Namespace:
@@ -57,16 +64,22 @@ def _invocation(job_root: Path, arguments: argparse.Namespace) -> dict[str, Any]
     usage = final.get("usage")
     if not isinstance(usage, dict):
         raise RuntimeError(f"MODEL_USAGE_MISSING:{job_id}")
-    observed = {
-        "input_tokens": int(usage.get("input_tokens", -1)),
-        "output_tokens": int(usage.get("output_tokens", -1)),
-        "cost_usd": float(final.get("total_cost_usd", final.get("cost_usd", -1))),
-    }
-    if min(observed["input_tokens"], observed["output_tokens"]) < 0:
+    token_values = {name: usage.get(name) for name in TOKEN_FIELDS}
+    if any(
+        not isinstance(value, int) or isinstance(value, bool) or value < 0
+        for value in token_values.values()
+    ):
         raise RuntimeError(f"MODEL_USAGE_INVALID:{job_id}")
-    if observed["cost_usd"] < 0:
+    cost = final.get("total_cost_usd", final.get("cost_usd"))
+    if not isinstance(cost, (int, float)) or isinstance(cost, bool) or cost < 0:
         raise RuntimeError(f"MODEL_COST_INVALID:{job_id}")
-    if observed["input_tokens"] + observed["output_tokens"] > arguments.max_total_tokens:
+    observed = {
+        "schema_version": 1,
+        **token_values,
+        "total_tokens": sum(token_values.values()),
+        "cost_usd": round(float(cost), 6),
+    }
+    if observed["total_tokens"] > arguments.max_total_tokens:
         raise RuntimeError(f"MODEL_TOKEN_CAP_EXCEEDED:{job_id}")
     if observed["cost_usd"] > arguments.max_budget_usd:
         raise RuntimeError(f"MODEL_BUDGET_CAP_EXCEEDED:{job_id}")
@@ -83,6 +96,7 @@ def _invocation(job_root: Path, arguments: argparse.Namespace) -> dict[str, Any]
     ):
         raise RuntimeError(f"MODEL_TERMINAL_INVALID:{job_id}")
     return {
+        "schema_version": 3,
         "invocation_id": f"server-agent:{job_id}",
         "class": "server-agent",
         "job_id": job_id,
@@ -101,11 +115,16 @@ def _invocation(job_root: Path, arguments: argparse.Namespace) -> dict[str, Any]
             "is_error": final.get("is_error"),
         },
         "turns": turns,
+        "wrapper_outcome": {
+            "schema_version": 1,
+            "status": "PASS",
+            "code": None,
+        },
         "hard_cap_enforcement": {
             "turns": "claude-cli",
             "cost_usd": "claude-cli",
             "hard_timeout_seconds": "service-process-timeout",
-            "total_tokens": "terminal-usage-postcondition",
+            "total_tokens": f"terminal-usage-postcondition:{TOKEN_FORMULA}",
         },
     }
 
@@ -145,8 +164,10 @@ def main() -> None:
     _write_new(
         arguments.output,
         {
-            "schema_version": 2,
+            "schema_version": 3,
             "status": "PASS",
+            "usage_complete": True,
+            "token_formula": TOKEN_FORMULA,
             "invocations": invocations,
             "new_job_ids": [invocation["job_id"] for invocation in invocations],
         },

@@ -12,6 +12,7 @@ from tests.deterministic.unit.storage.fakes import (
     FakeFileSync,
     FaultInjectingReplace,
 )
+from tests.deterministic.unit.storage.platform_support import symlink_or_skip
 
 
 def _writer(
@@ -150,7 +151,7 @@ def test_existing_state_symlink_is_rejected_without_changing_its_target(
     layout, writer, _, replace = _writer(tmp_path)
     outside = tmp_path.parent / f"{tmp_path.name}-outside-state"
     outside.write_bytes(b"outside\n")
-    layout.state.symlink_to(outside)
+    symlink_or_skip(layout.state, outside)
     try:
         with pytest.raises(ValueError, match="ordinary file"):
             writer.write(b"new\n")

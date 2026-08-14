@@ -447,24 +447,38 @@ def test_cancellation_while_descendant_holds_exited_parent_pipes_wins(
 ) -> None:
     root = _workspace(tmp_path)
     cancellation = _Signal()
-    timer = threading.Timer(
-        0.1,
-        cancellation.cancel,
-        args=(CancellationReason.USER_CANCEL,),
-    )
-    timer.start()
+    marker = root / "output/proposals/child/child.pid"
+    child_started = threading.Event()
+
+    def cancel_after_child_started() -> None:
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            if marker.is_file():
+                child_started.set()
+                # Let the short-lived parent exit while its child keeps the
+                # inherited pipes open, then exercise cancellation of the tree.
+                time.sleep(0.05)
+                break
+            time.sleep(0.01)
+        cancellation.cancel(CancellationReason.USER_CANCEL)
+
+    cancel_thread = threading.Thread(target=cancel_after_child_started, daemon=True)
+    cancel_thread.start()
     try:
         with pytest.raises(RuntimeExecutionError) as caught:
             _execute(
                 _backend("child-after-parent-exit"),
                 root,
                 cancellation=cancellation,
+                limits=_limits(wall_time=5.0),
             )
     finally:
-        timer.cancel()
+        cancel_thread.join(timeout=3.0)
 
+    assert not cancel_thread.is_alive()
+    assert child_started.is_set()
     _assert_failure(caught, ErrorCode.BACKEND_CANCELLED)
-    child_pid = int((root / "output/proposals/child/child.pid").read_text())
+    child_pid = int(marker.read_text())
     deadline = time.monotonic() + 2.0
     while time.monotonic() < deadline and _pid_exists(child_pid):
         time.sleep(0.02)

@@ -14,6 +14,12 @@ import {
   verifySourceSnapshot,
 } from "./source-snapshot.mjs";
 import { adjudicateStagePerformance } from "./status.mjs";
+import { isCompleteUsage, normalizeUsage, sumUsage, TOKEN_USAGE_FORMULA, zeroUsage } from "./usage.mjs";
+import {
+  ISOLATED_AGENT_ENV_POLICY_VERSION,
+  ISOLATED_AGENT_OUTPUT_CAP_ENFORCEMENT,
+  validEnvironmentKeySummary,
+} from "../runtime-support/isolated-agent-env.mjs";
 import {
   canonicalJson,
   readJson,
@@ -123,12 +129,12 @@ function locateGateEvidence(attemptRoot, stageId, gateId, name) {
   return candidates.find((candidate) => fs.existsSync(candidate) && fs.statSync(candidate).isFile()) ?? null;
 }
 
-function applyGateEvidenceContract({ actionResult, gate, gatePlan, stage, attemptRoot }) {
-  if (actionResult.status !== "PASS") return { result: actionResult, evidence: [] };
+export function applyGateEvidenceContract({ actionResult, gate, gatePlan, stage, attemptRoot }) {
   const evidence = [];
   for (const name of gate.evidence) {
     const filePath = locateGateEvidence(attemptRoot, stage.id, gatePlan.id, name);
     if (!filePath) {
+      if (actionResult.status !== "PASS") continue;
       return {
         result: { ...actionResult, status: "ERROR", failure_domain: "HARNESS", code: "GATE_REQUIRED_EVIDENCE_MISSING", missing_evidence: name },
         evidence,
@@ -139,7 +145,32 @@ function applyGateEvidenceContract({ actionResult, gate, gatePlan, stage, attemp
   return { result: actionResult, evidence };
 }
 
-function applyHardCaps({ result, planStage, expectedModel }) {
+export function validOutputTokenCapEvidence(invocation, caps) {
+  if (Object.hasOwn(invocation, "observed_request_limits")) return false;
+  const declaredCap = caps?.max_output_tokens;
+  const marker = invocation.hard_cap_enforcement?.max_output_tokens;
+  if (declaredCap === undefined) {
+    if (marker !== undefined) return false;
+    if (invocation.class !== "isolated-agent") return true;
+    return invocation.environment_policy?.schema_version === 1
+      && invocation.environment_policy?.version === ISOLATED_AGENT_ENV_POLICY_VERSION
+      && validEnvironmentKeySummary(invocation.environment_policy?.inbound)
+      && validEnvironmentKeySummary(invocation.environment_policy?.claude_process)
+      && !(invocation.environment_policy.inbound.key_names ?? []).includes("CLAUDE_CODE_MAX_OUTPUT_TOKENS")
+      && !(invocation.environment_policy.claude_process.key_names ?? []).includes("CLAUDE_CODE_MAX_OUTPUT_TOKENS");
+  }
+  return Number.isSafeInteger(declaredCap)
+    && declaredCap > 0
+    && marker === ISOLATED_AGENT_OUTPUT_CAP_ENFORCEMENT
+    && invocation.environment_policy?.schema_version === 1
+    && invocation.environment_policy?.version === ISOLATED_AGENT_ENV_POLICY_VERSION
+    && validEnvironmentKeySummary(invocation.environment_policy?.inbound)
+    && validEnvironmentKeySummary(invocation.environment_policy?.claude_process)
+    && !(invocation.environment_policy?.inbound?.key_names ?? []).includes("CLAUDE_CODE_MAX_OUTPUT_TOKENS")
+    && (invocation.environment_policy?.claude_process?.key_names ?? []).includes("CLAUDE_CODE_MAX_OUTPUT_TOKENS");
+}
+
+export function applyHardCaps({ result, planStage, expectedModel }) {
   if (result.status !== "PASS") return result;
   const expected = planStage.invocation_caps ?? [];
   const actual = result.invocations ?? [];
@@ -159,11 +190,18 @@ function applyHardCaps({ result, planStage, expectedModel }) {
     }
     for (const invocation of members) {
       if (
-        invocation.usage_complete !== true
+        invocation.schema_version !== 3
+        || !isCompleteUsage(invocation.usage)
+        || invocation.usage_complete !== true
         || invocation.effective_model !== expectedModel
         || canonicalJson(invocation.effective_caps) !== canonicalJson(declaration.caps)
         || invocation.terminal?.subtype !== "success"
         || invocation.terminal?.is_error !== false
+        || invocation.wrapper_outcome?.schema_version !== 1
+        || invocation.wrapper_outcome?.status !== "PASS"
+        || invocation.wrapper_outcome?.code !== null
+        || invocation.hard_cap_enforcement?.total_tokens !== `terminal-usage-postcondition:${TOKEN_USAGE_FORMULA}`
+        || !validOutputTokenCapEvidence(invocation, declaration.caps)
       ) {
         return { ...result, status: "ERROR", failure_domain: "HARNESS", code: "MODEL_HARD_CAP_RECEIPT_MISMATCH" };
       }
@@ -174,7 +212,7 @@ function applyHardCaps({ result, planStage, expectedModel }) {
       if (!Number.isFinite(usage.cost_usd) || usage.cost_usd < 0 || usage.cost_usd > declaration.caps.max_budget_usd) {
         return { ...result, status: "FAIL", failure_domain: "CONTRACT", code: "MODEL_BUDGET_CAP_EXCEEDED" };
       }
-      const totalTokens = Number(usage.input_tokens ?? 0) + Number(usage.output_tokens ?? 0);
+      const totalTokens = usage.total_tokens;
       if (!Number.isSafeInteger(totalTokens) || totalTokens < 0 || totalTokens > declaration.caps.max_total_tokens) {
         return { ...result, status: "FAIL", failure_domain: "CONTRACT", code: "MODEL_TOKEN_CAP_EXCEEDED" };
       }
@@ -201,7 +239,7 @@ function writeGateReceipt({ attemptRoot, stage, gatePlan, actionResult, evidence
     code: actionResult.code ?? null,
     failure_domain: actionResult.failure_domain ?? null,
     elapsed_seconds: Number(actionResult.elapsed_seconds ?? 0),
-    usage: actionResult.usage ?? { input_tokens: 0, output_tokens: 0, cost_usd: 0 },
+    usage: normalizeUsage(actionResult.usage),
     usage_complete: actionResult.usage_complete ?? (planStage.invocation_caps?.length ? false : true),
     effective_caps: actionResult.effective_caps ?? null,
     model_invocations: actionResult.invocations ?? [],
@@ -320,7 +358,7 @@ function notRunStage(stage, planStage) {
     performance_status: "NOT_MEASURED",
     performance_baseline: null,
     elapsed_seconds: 0,
-    usage: { input_tokens: 0, output_tokens: 0, cost_usd: 0 },
+    usage: zeroUsage(),
     gates: [],
     checkpoint: null,
   };
@@ -414,7 +452,7 @@ export async function runFlow(repoRoot, options) {
           performance_status: "NOT_MEASURED",
           performance_baseline: null,
           elapsed_seconds: null,
-          usage: { input_tokens: 0, output_tokens: 0, cost_usd: 0 },
+          usage: zeroUsage(),
           gates: [],
           checkpoint: planStage.reuse.source_checkpoint ?? null,
         });
@@ -505,11 +543,7 @@ export async function runFlow(repoRoot, options) {
         }
       }
       const elapsedSeconds = Math.round(gateResults.reduce((sum, gate) => sum + Number(gate.elapsed_seconds ?? 0), 0) * 1000) / 1000;
-      const usage = gateResults.reduce((total, gate) => ({
-        input_tokens: total.input_tokens + Number(gate.usage?.input_tokens ?? 0),
-        output_tokens: total.output_tokens + Number(gate.usage?.output_tokens ?? 0),
-        cost_usd: Math.round((total.cost_usd + Number(gate.usage?.cost_usd ?? 0)) * 1_000_000) / 1_000_000,
-      }), { input_tokens: 0, output_tokens: 0, cost_usd: 0 });
+      const usage = sumUsage(gateResults.map((gate) => gate.usage));
       let performance = { status: "NOT_MEASURED", baseline: null, consecutive_significant_regressions: 0, reason: null };
       if (status === "PASS") {
         performance = adjudicateStagePerformance({
@@ -659,11 +693,7 @@ export async function runFlow(repoRoot, options) {
     lineage: { ...plan.lineage, fresh_admission: stageResults.find((stage) => stage.id === "journey.cross-job.environment")?.gates?.[0]?.fresh_admission ?? null },
     admission: plan.admission,
     pre_finalization_resource_receipt: preFinalizationResourceReceipt,
-    usage: stageResults.reduce((usage, stage) => ({
-      input_tokens: usage.input_tokens + Number(stage.usage?.input_tokens ?? 0),
-      output_tokens: usage.output_tokens + Number(stage.usage?.output_tokens ?? 0),
-      cost_usd: Math.round((usage.cost_usd + Number(stage.usage?.cost_usd ?? 0)) * 1_000_000) / 1_000_000,
-    }), { input_tokens: 0, output_tokens: 0, cost_usd: 0 }),
+    usage: sumUsage(stageResults.map((stage) => stage.usage)),
     candidate_input_digest: sha256Bytes(canonicalJson({ run_id: runId, plan_fingerprint: plan.plan_fingerprint, proofs, stages: stageResults.map((stage) => ({ id: stage.id, digest: stage.stage_receipt_digest })) })),
   };
   const verdict = await finalizeAttempt({

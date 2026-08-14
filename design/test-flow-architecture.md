@@ -50,6 +50,8 @@ cross-validator 对未知字段、悬空引用、DAG 环、孤儿、不可达 cl
 
 Release 的真实 Agent、ROUTE、DIAGNOSE、REVIEW 与 Logparse claim 由同一 fresh CrossJob 给出，不重复运行隔离真实 Gate。编译、锁文件和 Git whitespace 是正式 cheap Gate，而不是文档外的人工附加步骤。
 
+Release case 的 Logparse 产品适配属于测试输入闭包，而不是外部仓库的预置状态。容器初始化从已审阅 Skill/driver 的产品、anchor 与事实绑定生成独立配置，并将原始附件逐行保真投影为冻结 Logparse 当前插件的 loose-diagnostic 格式；在任何模型阶段之前，冻结 Logparse 必须完成 smoke parse 且解析出每个预期 module/slot/process。配置与归档投影都由收据摘要绑定，运行时不修改外部 Logparse checkout。
+
 pytest Gate 必须解析 JUnit：执行数为零、全部 skipped、低于 `min_passed` 或违反 skip policy 都不能 PASS。退出码只能作为一个输入，不能替代结构化计数。
 
 ## 4. CrossJob 分段与 checkpoint
@@ -77,7 +79,7 @@ Linux 是唯一 Server 平台。Windows 与 macOS 默认使用本机 Client，Li
 
 ## 6. 身份模型
 
-Release planning 会枚举 Git 可见工作树：使用 tracked 文件的当前工作树字节，并纳入所有未被 ignore 的 untracked 文件；忽略文件和 `.git` 元数据不属于发布源码。排序后的 path、类型、可执行位、大小和内容 SHA-256 形成 source snapshot manifest 与唯一 digest。base commit、branch 和当时是否 dirty 只作为溯源元数据，不参与“是否允许执行”的判断。
+Release planning 会枚举 Git 可见工作树：使用 tracked 文件的当前工作树字节，并纳入所有未被 ignore 的 untracked 文件；忽略文件和 `.git` 元数据不属于发布源码。排序后的 path、类型、可执行位、大小和内容 SHA-256 形成 source snapshot manifest 与唯一 digest。base commit、branch 和当时是否 dirty 只作为溯源元数据，不参与“是否允许执行”的判断。Windows Docker bind mount 会把文件 mode 合成为 `0777`；CrossJob 初始化只在私有副本中先按清单核对路径、类型、字节和链接目标，再施加清单声明的可执行位并执行完整 digest 复核，不能把 bind mount 的合成 mode 当作源码事实。
 
 执行前把该快照物化到新的 attempt scratch；正式 Host/Linux/CrossJob adapter 只读取物化副本，直接读取工作树的 Gate 在执行前后复验同一清单。Linux 容器复制源码后再次按密封 manifest 验证完整 path set、模式和内容。planning 到 verdict 期间任何 Git 可见源码漂移都使本次运行 ERROR；因此不可变性由内容合同保证，不依赖提前提交。
 
@@ -91,7 +93,7 @@ Release planning 会枚举 Git 可见工作树：使用 tracked 文件的当前�
 
 ## 7. 真实模型预算
 
-runtime profile 为每个真实 Gate 声明 model、turn、token、USD 与 time 上限。plan 同时显示 estimate 和 hard caps。turn、USD 与时间由执行器/provider 强制；token 上限由终端 usage receipt 再次校验。命令没有生效上限、receipt 缺 model/cap/terminal usage，或实际 usage 超限，都不能 PASS。
+runtime profile 为每个真实 Gate 声明 model、turn、token、USD 与 time 上限；Stage 可显式选择一个版本化 cap，未选择时回落到该类 Gate 的默认 cap。plan 同时显示 estimate 和 hard caps。turn、USD 与时间由执行器/provider 强制；token 上限由终端 usage receipt 再次校验。版本化 usage 合同分别保存普通输入、输出、cache creation 与 cache read token，并以四项之和作为 `total_tokens`；Gate、Stage、verdict 聚合和 `max_total_tokens` 判定都使用这一个 cache-inclusive 公式。可选的 `max_output_tokens` 表示单次模型请求的输出上限，不是累计 Agent usage。它由身份绑定的 wrapper 参数、只注入 Claude 子进程的环境值、固定 CLI 上限校验及密封 runtime 实现共同证明；Claude Code 终态 `modelUsage.maxOutputTokens` 是静态模型档位默认值而非请求 `max_tokens` 回显，不能作为 cap 证明。命令没有生效上限、receipt 缺 model/cap/任一 terminal usage 分项、总数不一致，或实际 usage 超限，都不能 PASS。若模型返回结构完整的失败 terminal，执行器先密封实际 usage 与失败码，再保持调用和 Gate 失败；没有合法 terminal 的调用只能标为 usage 不完整，不能伪造零消耗证明。
 
 同一失败身份不允许盲重试。下一次运行必须记录新的 `reason`、`hypothesis` 和 `expected_evidence`；这三个字段进入 plan 和证据。
 

@@ -276,7 +276,9 @@ def _sync_windows_directory(
         raise failure
 
 
-def _chmod_no_follow(path: Path | str, mode: int) -> None:
+def chmod_no_follow(path: Path | str, mode: int) -> None:
+    """Apply permissions without accepting a final link or reparse-point swap."""
+
     try:
         os.chmod(path, mode, follow_symlinks=False)
     except NotImplementedError:
@@ -290,6 +292,22 @@ def _chmod_no_follow(path: Path | str, mode: int) -> None:
         if stat.S_ISLNK(metadata.st_mode) or is_reparse_point(metadata):
             raise OSError("chmod target must not be a symbolic link")
         os.chmod(target, mode)
+        final_metadata = os.lstat(target)
+        if (
+            stat.S_ISLNK(final_metadata.st_mode)
+            or is_reparse_point(final_metadata)
+            or (
+                final_metadata.st_dev,
+                final_metadata.st_ino,
+                stat.S_IFMT(final_metadata.st_mode),
+            )
+            != (
+                metadata.st_dev,
+                metadata.st_ino,
+                stat.S_IFMT(metadata.st_mode),
+            )
+        ):
+            raise OSError("chmod target changed while permissions were applied")
 
 
 class PlatformFileSync:
@@ -301,7 +319,7 @@ class PlatformFileSync:
         fsync_fn: Callable[[int], None] = os.fsync,
         open_fn: Callable[..., int] = os.open,
         close_fn: Callable[[int], None] = os.close,
-        chmod_fn: Callable[[Path | str, int], None] = _chmod_no_follow,
+        chmod_fn: Callable[[Path | str, int], None] = chmod_no_follow,
         directory_sync_fn: Callable[[Path], None] | None = None,
     ) -> None:
         self._fsync = fsync_fn
@@ -481,6 +499,7 @@ class PlatformReplaceOperation:
 
 
 __all__ = [
+    "chmod_no_follow",
     "FileInstanceLock",
     "InstanceLockBackend",
     "PlatformFileSync",

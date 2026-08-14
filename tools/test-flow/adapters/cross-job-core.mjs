@@ -24,12 +24,21 @@ import {
 } from "../lib/events.mjs";
 import { recoverStageAuditProgress } from "../lib/evidence.mjs";
 import {
+  compareReleaseCaseEntries,
+  diagnosisSkillRuntimeRefId,
   discoverReleaseCaseRoot,
   loadReleaseCaseInputs,
   loadReleaseCaseOracle,
   releaseCaseDigests,
 } from "../lib/release-case.mjs";
 import { verifyMaterializedSourceSnapshot } from "../lib/source-snapshot.mjs";
+import {
+  isCompleteUsage,
+  normalizeUsage,
+  sumUsage,
+  TOKEN_USAGE_FORMULA,
+  zeroUsage,
+} from "../lib/usage.mjs";
 import { canonicalJson, ensureDirectory, sha256Bytes, sha256File } from "../lib/util.mjs";
 
 const MAX_ATTACHMENT_BYTES = 2684354560;
@@ -125,7 +134,7 @@ function selectedReleaseCase(repoRoot) {
   requireCondition(attachments.length === 1, "RELEASE_CASE_ATTACHMENT_REQUIREMENT", "FAIL", "CONTRACT");
   requireCondition(canonicalJson(skillManifest.logparse_plan.anchors.map((item) => item.label)) === canonicalJson(scenario.driver.attachment_anchor_names), "RELEASE_CASE_ANCHOR_DRIFT", "FAIL", "CONTRACT");
   const approvedProductRecords = fs.readdirSync(inputs.approved_skill_dir, { withFileTypes: true })
-    .sort((left, right) => left.name.localeCompare(right.name, "en"))
+    .sort(compareReleaseCaseEntries)
     .map((entry) => {
       requireCondition(entry.isFile() && !entry.isSymbolicLink(), "RELEASE_CASE_APPROVED_SKILL_NODE", "FAIL", "CONTRACT");
       const absolute = path.join(inputs.approved_skill_dir, entry.name);
@@ -141,8 +150,10 @@ function selectedReleaseCase(repoRoot) {
     driver: scenario.driver,
     oracle: scenarioOracle.oracle,
     semantic_oracle: gateOracle.semantic_oracle,
+    logparse_product: skillManifest.logparse_product,
     skill: {
       id: skillManifest.id,
+      runtime_ref_id: diagnosisSkillRuntimeRefId(skillManifest.id),
       version: skillManifest.version,
       content_hash: packageTreeIdentity(inputs.approved_skill_dir).digest,
       product_digest: sha256Bytes(canonicalJson(approvedProductRecords)),
@@ -417,15 +428,23 @@ function parseClaudeStream(text, expectedCwd, { allowErrorTerminal = false } = {
   requireCondition(skills.length === 1 && skills[0].ordinal === 0 && skills[0].input?.skill === "problem-locator-client", "CLIENT_SKILL_INVOCATION_INVALID", "FAIL", "CONTRACT");
   const mcpRecords = records.filter((record) => record.tool_name !== "Skill");
   requireCondition(mcpRecords.length > 0, "CLIENT_MCP_CALL_MISSING", "FAIL", "CONTRACT");
+  let usage;
+  try {
+    usage = normalizeUsage({
+      input_tokens: Number(terminal.usage?.input_tokens ?? -1),
+      output_tokens: Number(terminal.usage?.output_tokens ?? -1),
+      cache_creation_input_tokens: Number(terminal.usage?.cache_creation_input_tokens ?? -1),
+      cache_read_input_tokens: Number(terminal.usage?.cache_read_input_tokens ?? -1),
+      cost_usd: Number(terminal.total_cost_usd ?? terminal.cost_usd ?? -1),
+    });
+  } catch {
+    requireCondition(false, "CLIENT_MODEL_USAGE_INVALID");
+  }
   return {
     schema_version: 1,
     init: { cwd: init.cwd, effective_model: init.model, permission_mode: init.permissionMode, tools: init.tools, mcp_servers: servers },
     records: mcpRecords,
-    usage: {
-      input_tokens: Number(terminal.usage?.input_tokens ?? 0),
-      output_tokens: Number(terminal.usage?.output_tokens ?? 0),
-      cost_usd: Number(terminal.total_cost_usd ?? terminal.cost_usd ?? 0),
-    },
+    usage,
     terminal: { subtype: terminal.subtype, is_error: terminal.is_error },
     turns: Number(terminal.num_turns),
   };
@@ -592,7 +611,7 @@ function validatePhaseOne(audit, releaseCase, requestIds, archive, publicBaseUrl
   const descriptor = prepareData.upload;
   requireCondition(view?.status === "WAITING_ATTACHMENT" && UUID.test(view.case_id) && Number.isInteger(view.case_revision), "PHASE1_CASE_VIEW", "FAIL", "CONTRACT");
   requireCondition(canonicalJson(openRequirementNames(view, "ATTACHMENT")) === canonicalJson([releaseCase.skill.attachment_requirement]), "PHASE1_ATTACHMENT_REQUIREMENT", "FAIL", "CONTRACT");
-  requireCondition(view.selected_skill_ref?.id === releaseCase.skill.id && view.selected_skill_ref?.version === releaseCase.skill.version, "PHASE1_SELECTED_SKILL", "FAIL", "CONTRACT");
+  requireCondition(view.selected_skill_ref?.id === releaseCase.skill.runtime_ref_id && view.selected_skill_ref?.version === releaseCase.skill.version, "PHASE1_SELECTED_SKILL", "FAIL", "CONTRACT");
   exactKeys(descriptor, ["attachment_id", "method", "url", "required_headers", "max_bytes", "expires_at"], "PHASE1_UPLOAD_DESCRIPTOR_SHAPE");
   requireCondition(UUID.test(descriptor.attachment_id) && descriptor.method === "PUT" && descriptor.url === `${publicBaseUrl}/api/v1/attachments/${descriptor.attachment_id}/content` && descriptor.max_bytes === MAX_ATTACHMENT_BYTES && descriptor.expires_at === null, "PHASE1_UPLOAD_DESCRIPTOR", "FAIL", "CONTRACT");
   exactKeys(descriptor.required_headers, ["Content-Length", "Content-Type", "Idempotency-Key", "X-Content-SHA256"], "PHASE1_UPLOAD_HEADERS_SHAPE");
@@ -679,7 +698,7 @@ function validatePhaseThree(audit, state, releaseCase) {
   const resolved = [...views].reverse().find((entry) => entry.ordinal > (reviewing?.ordinal ?? Infinity) && entry.view.status === releaseCase.oracle.case_status);
   requireCondition(reviewing && resolved && resolved.view.final_result?.status === "ACCEPTED", "PHASE3_REVIEW_RESOLUTION", "FAIL", "CONTRACT");
   requireCondition(resolved.view.final_result?.resolution_status === releaseCase.oracle.resolution_status, "PHASE3_RESOLUTION_STATUS", "FAIL", "CONTRACT");
-  requireCondition(resolved.view.selected_skill_ref?.id === releaseCase.skill.id && resolved.view.selected_skill_ref?.version === releaseCase.skill.version, "PHASE3_SELECTED_SKILL", "FAIL", "CONTRACT");
+  requireCondition(resolved.view.selected_skill_ref?.id === releaseCase.skill.runtime_ref_id && resolved.view.selected_skill_ref?.version === releaseCase.skill.version, "PHASE3_SELECTED_SKILL", "FAIL", "CONTRACT");
   const listData = successData(lists[0]);
   const artifacts = listData.artifacts;
   requireCondition(Array.isArray(artifacts) && artifacts.length === 2, "PHASE3_ARTIFACT_COUNT", "FAIL", "CONTRACT");
@@ -715,7 +734,7 @@ function validateRestart(audit, state, releaseCase) {
   const view = caseView(records[0]);
   const artifacts = successData(records[1]).artifacts;
   requireCondition(view?.case_id === state.case_id && view.status === releaseCase.oracle.case_status && view.case_revision === state.resolved_case_revision && view.final_result?.status === "ACCEPTED" && view.final_result?.resolution_status === releaseCase.oracle.resolution_status, "RESTART_CASE_MISMATCH", "FAIL", "CONTRACT");
-  requireCondition(view.selected_skill_ref?.id === releaseCase.skill.id && view.selected_skill_ref?.version === releaseCase.skill.version, "RESTART_SELECTED_SKILL", "FAIL", "CONTRACT");
+  requireCondition(view.selected_skill_ref?.id === releaseCase.skill.runtime_ref_id && view.selected_skill_ref?.version === releaseCase.skill.version, "RESTART_SELECTED_SKILL", "FAIL", "CONTRACT");
   requireCondition(Array.isArray(artifacts) && artifacts.length === 2, "RESTART_ARTIFACT_COUNT", "FAIL", "CONTRACT");
   for (const expected of [state.public_artifact, state.public_result_archive]) {
     const actual = artifacts.find((artifact) => artifact.artifact_id === expected.artifact_id);
@@ -949,7 +968,10 @@ async function initializeContainer(configuration, state, containerName, mode, st
     path.join(configuration.attemptRoot, "payload", "stages", stageId, "release-case.json"),
   );
   requireCondition(
-    initialization.status === "PASS" && initialization.xiaodao_snapshot_digest === configuration.sourceSnapshotDigest && initialization.case_source_redacted === true,
+    initialization.status === "PASS"
+      && initialization.xiaodao_snapshot_digest === configuration.sourceSnapshotDigest
+      && initialization.case_source_redacted === true
+      && SHA256.test(initialization.logparse_config_sha256),
     "CONTAINER_INIT_RECEIPT_INVALID",
   );
   requireCondition(
@@ -959,6 +981,12 @@ async function initializeContainer(configuration, state, containerName, mode, st
       && caseReceipt.scenario_id === configuration.releaseCase.scenario_id
       && caseReceipt.skill_id === configuration.releaseCase.skill.id
       && caseReceipt.skill_product_digest === configuration.releaseCase.skill.product_digest
+      && caseReceipt.logparse_product === configuration.releaseCase.logparse_product
+      && caseReceipt.archive_projection === "logparse-current-loose-diagnostic-v2"
+      && Number.isSafeInteger(caseReceipt.logparse_config_size)
+      && caseReceipt.logparse_config_size > 0
+      && SHA256.test(caseReceipt.logparse_config_sha256)
+      && caseReceipt.logparse_config_sha256 === initialization.logparse_config_sha256
       && typeof caseReceipt.archive_name === "string"
       && Number.isSafeInteger(caseReceipt.archive_size)
       && caseReceipt.archive_size > 0
@@ -971,6 +999,8 @@ async function initializeContainer(configuration, state, containerName, mode, st
     input_digest: configuration.releaseCase.input_digest,
     oracle_digest: configuration.releaseCase.oracle_digest,
     skill_id: configuration.releaseCase.skill.id,
+    logparse_product: caseReceipt.logparse_product,
+    logparse_config_sha256: caseReceipt.logparse_config_sha256,
   };
   state.archive = {
     name: caseReceipt.archive_name,
@@ -1045,7 +1075,7 @@ async function createFreshEnvironment(configuration, stageRoot, runtimeIdentity)
     },
     client_calls: [],
     audited_service_job_ids: [],
-    usage: { input_tokens: 0, output_tokens: 0, cost_usd: 0 },
+    usage: zeroUsage(),
   };
   appendResource(configuration.resourceRegistry, configuration.attemptRoot, "volume", state.volume, configuration.resourceLabel);
   await docker(configuration.dockerContext, ["volume", "create", "--label", configuration.resourceLabel, state.volume]);
@@ -1233,19 +1263,23 @@ async function createCheckpointSource(configuration, state, continuation) {
 }
 
 function addUsage(state, usage) {
-  for (const name of ["input_tokens", "output_tokens", "cost_usd"]) state.usage[name] = Math.round((state.usage[name] + Number(usage[name] ?? 0)) * 1_000_000) / 1_000_000;
+  state.usage = sumUsage([state.usage, usage]);
 }
 
-function sumUsage(invocations) {
-  return invocations.reduce((total, invocation) => ({
-    input_tokens: total.input_tokens + Number(invocation.usage?.input_tokens ?? 0),
-    output_tokens: total.output_tokens + Number(invocation.usage?.output_tokens ?? 0),
-    cost_usd: Math.round((total.cost_usd + Number(invocation.usage?.cost_usd ?? 0)) * 1_000_000) / 1_000_000,
-  }), { input_tokens: 0, output_tokens: 0, cost_usd: 0 });
+function validSuccessfulInvocationReceipt(invocation) {
+  return invocation?.schema_version === 3
+    && invocation.usage_complete === true
+    && isCompleteUsage(invocation.usage)
+    && invocation.terminal?.subtype === "success"
+    && invocation.terminal?.is_error === false
+    && invocation.wrapper_outcome?.schema_version === 1
+    && invocation.wrapper_outcome?.status === "PASS"
+    && invocation.wrapper_outcome?.code === null;
 }
 
 function hostInvocation(phase, audit, caps) {
   return {
+    schema_version: 3,
     invocation_id: `host-client:${phase}`,
     class: "host-client",
     effective_model: audit.init.effective_model,
@@ -1254,11 +1288,12 @@ function hostInvocation(phase, audit, caps) {
     usage: audit.usage,
     terminal: audit.terminal,
     turns: audit.turns,
+    wrapper_outcome: { schema_version: 1, status: "PASS", code: null },
     hard_cap_enforcement: {
       turns: "claude-cli",
       cost_usd: "claude-cli",
       hard_timeout_seconds: "host-process-watchdog",
-      total_tokens: "terminal-usage-postcondition",
+      total_tokens: `terminal-usage-postcondition:${TOKEN_USAGE_FORMULA}`,
     },
   };
 }
@@ -1279,7 +1314,16 @@ async function auditServiceAgentUsage(configuration, state, instance) {
   for (const jobId of state.audited_service_job_ids ?? []) args.push("--exclude-job-id", jobId);
   await docker(configuration.dockerContext, args);
   const receipt = readJson(path.join(configuration.stageRoot, `service-agent-usage-${instance}.json`));
-  requireCondition(receipt?.schema_version === 2 && receipt.status === "PASS" && Array.isArray(receipt.invocations) && Array.isArray(receipt.new_job_ids), "SERVICE_AGENT_USAGE_RECEIPT_INVALID");
+  requireCondition(
+    receipt?.schema_version === 3
+      && receipt.status === "PASS"
+      && receipt.usage_complete === true
+      && receipt.token_formula === TOKEN_USAGE_FORMULA
+      && Array.isArray(receipt.invocations)
+      && receipt.invocations.every(validSuccessfulInvocationReceipt)
+      && Array.isArray(receipt.new_job_ids),
+    "SERVICE_AGENT_USAGE_RECEIPT_INVALID",
+  );
   state.audited_service_job_ids = [...new Set([...(state.audited_service_job_ids ?? []), ...receipt.new_job_ids])].sort();
   atomicState(configuration.statePath, state);
   return receipt.invocations;
@@ -1288,10 +1332,14 @@ async function auditServiceAgentUsage(configuration, state, instance) {
 function stageReceipt(configuration, value) {
   const receiptPath = path.join(configuration.stageRoot, "adapter-result.json");
   const invocations = value.invocations ?? [];
-  const usage = value.usage ?? sumUsage(invocations);
-  const usageComplete = invocations.every((invocation) => invocation.usage_complete === true);
+  requireCondition(
+    Array.isArray(invocations) && invocations.every(validSuccessfulInvocationReceipt),
+    "MODEL_INVOCATION_RECEIPT_INVALID",
+  );
+  const usage = value.usage ? normalizeUsage(value.usage) : sumUsage(invocations.map((invocation) => invocation.usage));
+  const usageComplete = isCompleteUsage(usage);
   writeNew(receiptPath, {
-    schema_version: 2,
+    schema_version: 3,
     stage_id: configuration.stage,
     gate_id: configuration.gateId,
     runtime_profile_digest: configuration.runtimeProfileDigest,
@@ -1371,7 +1419,7 @@ async function applyRestoredCheckpoint(configuration, state) {
       submit_inputs: continuation.adapter_request_submit_inputs,
     },
     client_calls: [],
-    usage: { input_tokens: 0, output_tokens: 0, cost_usd: 0 },
+    usage: zeroUsage(),
   });
   if (continuation.adapter_upload_method) {
     state.upload_descriptor = {
@@ -1614,7 +1662,7 @@ try {
           stageId: configuration.stage,
         });
         writeNew(receiptPath, {
-          schema_version: 2,
+          schema_version: 3,
           stage_id: configuration.stage ?? "unknown",
           gate_id: configuration.gateId ?? null,
           runtime_profile_digest: configuration.runtimeProfileDigest ?? null,

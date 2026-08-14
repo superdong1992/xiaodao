@@ -13,6 +13,7 @@ from problem_locator.storage.coordination import StorageCoordinationLock
 from problem_locator.storage.layout import StorageLayout
 from problem_locator.storage.quarantine import QuarantineMover
 from tests.deterministic.unit.storage.fakes import FakeFileSync, FaultInjectingReplace
+from tests.deterministic.unit.storage.platform_support import symlink_or_skip
 
 
 CASE_ID = "00000000-0000-0000-0000-000000000101"
@@ -142,7 +143,7 @@ def test_candidate_symlink_is_rejected_without_touching_target(tmp_path: Path) -
     target = tmp_path / "outside"
     target.write_bytes(b"keep")
     candidate = layout.uploads / RESOURCE_ID
-    candidate.symlink_to(target)
+    symlink_or_skip(candidate, target)
 
     with pytest.raises(ValueError, match="symbolic links"):
         mover.move_if(CLEANUP_ID, candidate, lambda: True)
@@ -159,7 +160,11 @@ def test_delete_rejects_quarantine_symlink_ancestor_without_touching_sentinel(
     external_target.mkdir(parents=True)
     sentinel = external_target / "sentinel"
     sentinel.write_bytes(b"keep")
-    (layout.quarantine / CLEANUP_ID).symlink_to(outside, target_is_directory=True)
+    symlink_or_skip(
+        layout.quarantine / CLEANUP_ID,
+        outside,
+        target_is_directory=True,
+    )
 
     apparent_target = (
         layout.quarantine / CLEANUP_ID / "tmp" / "uploads" / RESOURCE_ID

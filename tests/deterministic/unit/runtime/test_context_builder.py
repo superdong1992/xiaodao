@@ -561,7 +561,7 @@ def test_manifest_is_reserved_before_optional_evidence_and_scan_is_job_ordered()
         if section.kind is ContextSectionKind.EVIDENCE
     ]
 
-    assert selected_ids == [ids[0], ids[3]]
+    assert selected_ids == [ids[0], ids[1], ids[3]]
     assert all(
         not section.required
         for section in context.sections

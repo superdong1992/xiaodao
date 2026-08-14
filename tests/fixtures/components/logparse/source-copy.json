@@ -2,10 +2,34 @@
   "added_files": [
     {
       "mode": "100644",
+      "path": "references/generation-spec-v5-reference.md",
+      "purpose": "Define the exact, generic GenerationSpec v5 object contract without requiring source-code inspection.",
+      "sha256": "959aded3048acb6fd86a42b82364d8c808976c21f42192d18ff5950989050ac5",
+      "size": 15170,
+      "source": "S08 self-contained reference; no counterpart exists in the frozen upstream source tree."
+    },
+    {
+      "mode": "100644",
+      "path": "references/neutral-logparse-generation-spec-v5.json",
+      "purpose": "Demonstrate a business-neutral, complex Logparse GenerationSpec v5 with lossy policies and terminal paths.",
+      "sha256": "ccf488647105e40ddc02e25921747a7408222cc263655ce415930361477eb8b3",
+      "size": 16041,
+      "source": "S08 self-contained reference; no counterpart exists in the frozen upstream source tree."
+    },
+    {
+      "mode": "100644",
+      "path": "references/verification-contract-v2-reference.md",
+      "purpose": "Define exact verification contract v2 policies, extractors, rules, numeric expressions, and terminal paths.",
+      "sha256": "bbb1a550e618b1b11f4d621ec2d699b5ad674e272f79e0d4378043604333120c",
+      "size": 20642,
+      "source": "S08 self-contained reference; no counterpart exists in the frozen upstream source tree."
+    },
+    {
+      "mode": "100644",
       "path": "scripts/generate_diagnosis_skill.py",
       "purpose": "Deterministically build, hash, validate, and atomically publish Diagnosis Skill products from GenerationSpec v5.",
-      "sha256": "3646ca28f271ee798b90855f0ba11348655d1ac01e5e75dfec008ef72a88929b",
-      "size": 39002,
+      "sha256": "b5aa127f5b16316539237fc423579e5997aa5280c95514d1c7bbb43d9c2330c4",
+      "size": 39037,
       "source": "S07 new implementation; no counterpart exists in the frozen upstream source tree."
     }
   ],
@@ -23,8 +47,8 @@
       "change_reason": "Upgrade the generator workflow to GenerationSpec v5, manifest schema v5, explicit deployment scope, and server-owned public results.",
       "delivered": {
         "mode": "100644",
-        "size": 6874,
-        "sha256": "1132bb563b645dc9aa06d941b55f8156d16bfd8fcc4d2fac94fb90bbd29eacce"
+        "size": 12352,
+        "sha256": "4c354491a5080d7b3efde08e08183bc899d129d3fda8a6fc1377704d4e939d4e"
       },
       "path": "SKILL.md",
       "source": {

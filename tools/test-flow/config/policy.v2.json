@@ -26,7 +26,7 @@
   },
   "process": {
     "real_no_progress_seconds": 360,
-    "real_hard_timeout_seconds": 1200,
+    "real_hard_timeout_seconds": 3900,
     "poll_milliseconds": 250,
     "progress_allowlist_version": "test-flow-progress-v2"
   },

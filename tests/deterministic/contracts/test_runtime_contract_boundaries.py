@@ -347,7 +347,7 @@ def _bounded_required_context(
     )
 
 
-def test_job_instruction_and_resource_manifest_fit_exactly_200_kib() -> None:
+def test_job_instruction_and_resource_manifest_fit_exactly_256_kib() -> None:
     seed_job = Job.model_validate(
         load_json(FIXTURE_ROOT / "positive" / "job-diagnose.json")
     )
@@ -366,7 +366,7 @@ def test_job_instruction_and_resource_manifest_fit_exactly_200_kib() -> None:
         job, manifest, limit_bytes=SPECIALIST_CONTEXT_BYTES
     )
 
-    assert context.utf8_bytes == SPECIALIST_CONTEXT_BYTES == 204_800
+    assert context.utf8_bytes == SPECIALIST_CONTEXT_BYTES == 262_144
     assert [section.kind for section in context.sections] == [
         ContextSectionKind.JOB_INSTRUCTION,
         ContextSectionKind.RESOURCE_MANIFEST,

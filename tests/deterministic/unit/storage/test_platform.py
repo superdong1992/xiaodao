@@ -17,6 +17,7 @@ from problem_locator.storage.platform import (
     WindowsInstanceLockBackend,
     _sync_windows_directory,
 )
+from tests.deterministic.unit.storage.platform_support import symlink_or_skip
 
 
 class _RecordingLockBackend:
@@ -197,7 +198,7 @@ def test_file_instance_lock_rejects_symbolic_link(tmp_path: Path) -> None:
     real = tmp_path / "real.lock"
     real.touch()
     link = tmp_path / ".instance.lock"
-    link.symlink_to(real)
+    symlink_or_skip(link, real)
     lock = FileInstanceLock(link, _RecordingLockBackend())
 
     with pytest.raises(OSError):
@@ -278,7 +279,7 @@ def test_platform_file_sync_rejects_read_only_symbolic_link(tmp_path: Path) -> N
     payload = tmp_path / "payload"
     payload.write_bytes(b"bytes")
     link = tmp_path / "link"
-    link.symlink_to(payload)
+    symlink_or_skip(link, payload)
 
     with pytest.raises(OSError, match="symbolic link"):
         PlatformFileSync().make_read_only(link)

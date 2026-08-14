@@ -60,27 +60,27 @@
       "proof": ["proof.real", "framework.runner"]
     },
     "real-agent": {
-      "producer": ["source.agent", "runtime.claude", "runtime.settings", "runtime.release"],
+      "producer": ["source.agent", "runtime.support", "runtime.claude", "runtime.settings", "runtime.release"],
       "proof": ["proof.real", "framework.runner"]
     },
     "real-generic-locator": {
-      "producer": ["product.source", "source.agent", "source.diagnose", "skill.generic-smoke", "runtime.claude", "runtime.settings", "runtime.release"],
+      "producer": ["product.source", "source.agent", "source.diagnose", "skill.generic-smoke", "runtime.support", "runtime.claude", "runtime.settings", "runtime.release"],
       "proof": ["proof.real", "framework.runner"]
     },
     "real-route": {
-      "producer": ["source.agent", "source.route", "runtime.claude", "runtime.settings", "runtime.release"],
+      "producer": ["source.agent", "source.route", "runtime.support", "runtime.claude", "runtime.settings", "runtime.release"],
       "proof": ["proof.real", "framework.runner"]
     },
     "real-diagnose": {
-      "producer": ["source.agent", "source.diagnose", "source.logparse", "skill.legacy-diagnose", "skill.logparse", "external.logparse", "runtime.claude", "runtime.settings", "runtime.release", "runtime.environment"],
+      "producer": ["source.agent", "source.diagnose", "source.logparse", "skill.legacy-diagnose", "skill.logparse", "runtime.support", "external.logparse", "runtime.claude", "runtime.settings", "runtime.release", "runtime.environment"],
       "proof": ["proof.real", "framework.runner"]
     },
     "real-review": {
-      "producer": ["source.agent", "source.review", "runtime.claude", "runtime.settings", "runtime.release"],
+      "producer": ["source.agent", "source.review", "runtime.support", "runtime.claude", "runtime.settings", "runtime.release"],
       "proof": ["proof.real", "framework.runner"]
     },
     "real-skill-generation": {
-      "producer": ["case.wiki", "skill.generator", "source.agent", "runtime.claude", "runtime.settings", "runtime.release"],
+      "producer": ["product.source", "case.wiki", "case.journey", "skill.generator", "source.agent", "runtime.support", "runtime.claude", "runtime.settings", "runtime.release"],
       "proof": ["skill.diagnose", "case.oracle", "proof.real", "framework.runner"]
     },
     "cross-job": {

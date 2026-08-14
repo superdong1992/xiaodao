@@ -2,7 +2,12 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
+import { normalizeUsage } from "./usage.mjs";
 import { ensureDirectory, FlowError, readJson } from "./util.mjs";
+import {
+  buildIsolatedAgentEnvironment,
+  ISOLATED_AGENT_ENV_POLICY_VERSION,
+} from "../runtime-support/isolated-agent-env.mjs";
 
 const SEMANTIC_TYPES = new Set([
   "tool_result",
@@ -53,7 +58,7 @@ function addUsage(usage, line) {
       ["cache_creation_input_tokens", "cache_creation_input_tokens"],
       ["cache_read_input_tokens", "cache_read_input_tokens"],
     ]) {
-      if (Number.isFinite(candidate[source])) usage[target] += candidate[source];
+      if (Number.isSafeInteger(candidate[source]) && candidate[source] >= 0) usage[target] += candidate[source];
     }
   }
   if (Number.isFinite(value?.total_cost_usd)) usage.cost_usd = Math.max(usage.cost_usd, value.total_cost_usd);
@@ -88,11 +93,28 @@ class CappedLog {
   }
 }
 
-function killTree(child) {
+function killTree(child, windowsTerminationPath = null) {
   if (!child.pid) return Promise.resolve({ requested: false, forced: false });
   if (process.platform === "win32") {
-    const result = spawnSync("taskkill.exe", ["/PID", String(child.pid), "/T", "/F"], { windowsHide: true, encoding: "utf8" });
-    return Promise.resolve({ requested: true, forced: true, taskkill_exit_code: result.status });
+    if (typeof windowsTerminationPath !== "string" || windowsTerminationPath.length === 0) {
+      const result = spawnSync("taskkill.exe", ["/PID", String(child.pid), "/T", "/F"], { windowsHide: true, encoding: "utf8" });
+      return Promise.resolve({ requested: true, forced: true, taskkill_exit_code: result.status });
+    }
+    fs.writeFileSync(windowsTerminationPath, "terminate\n", { encoding: "utf8", mode: 0o600, flag: "wx" });
+    return new Promise((resolve) => {
+      let completed = false;
+      const finish = (receipt) => {
+        if (completed) return;
+        completed = true;
+        clearTimeout(fallback);
+        resolve(receipt);
+      };
+      const fallback = setTimeout(() => {
+        const result = spawnSync("taskkill.exe", ["/PID", String(child.pid), "/T", "/F"], { windowsHide: true, encoding: "utf8" });
+        finish({ requested: true, forced: true, taskkill_exit_code: result.status });
+      }, 5000);
+      child.once("exit", () => finish({ requested: true, forced: false }));
+    });
   }
   let signalled = false;
   try { process.kill(-child.pid, "SIGTERM"); signalled = true; } catch {}
@@ -107,10 +129,21 @@ function killTree(child) {
   });
 }
 
+export function canonicalWindowsEnvironment(environment) {
+  const entries = new Map();
+  for (const [name, value] of Object.entries(environment)) {
+    const folded = name.toUpperCase();
+    if (entries.has(folded)) entries.delete(folded);
+    entries.set(folded, [name, value]);
+  }
+  return Object.fromEntries(entries.values());
+}
+
 function windowsInvocation({ repoRoot, command, args, cwd, environment, stdoutPath, stderrPath, rawLogLimitBytes }) {
   const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "test-flow-process-"));
   const specPath = path.join(temporaryRoot, "spec.json");
   const statusPath = path.join(temporaryRoot, "status.json");
+  const terminationPath = path.join(temporaryRoot, "terminate.request");
   fs.writeFileSync(specPath, JSON.stringify({
     executable: command,
     arguments: args,
@@ -118,6 +151,7 @@ function windowsInvocation({ repoRoot, command, args, cwd, environment, stdoutPa
     environment,
     stdout_path: stdoutPath,
     stderr_path: stderrPath,
+    termination_path: terminationPath,
     raw_log_limit_bytes: rawLogLimitBytes,
   }), { encoding: "utf8", mode: 0o600, flag: "wx" });
   return {
@@ -125,6 +159,7 @@ function windowsInvocation({ repoRoot, command, args, cwd, environment, stdoutPa
     args: ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", path.join(repoRoot, "tools", "test-flow", "adapters", "windows-process.ps1"), "-SpecPath", specPath, "-StatusPath", statusPath],
     temporaryRoot,
     statusPath,
+    terminationPath,
     childWritesLogs: true,
   };
 }
@@ -160,11 +195,18 @@ export function runProcess({
   executionId = stage.id,
   pollMilliseconds = 250,
   progressAllowlistVersion = PROGRESS_ALLOWLIST_VERSION,
+  environmentPolicy = null,
 }) {
   if (progressAllowlistVersion !== PROGRESS_ALLOWLIST_VERSION) {
     return Promise.reject(new FlowError(
       "PROCESS_PROGRESS_VERSION",
       `Unsupported progress allowlist version ${progressAllowlistVersion}`,
+    ));
+  }
+  if (environmentPolicy !== null && environmentPolicy !== ISOLATED_AGENT_ENV_POLICY_VERSION) {
+    return Promise.reject(new FlowError(
+      "PROCESS_ENVIRONMENT_POLICY_VERSION",
+      `Unsupported process environment policy ${String(environmentPolicy)}`,
     ));
   }
   return new Promise((resolve, reject) => {
@@ -173,19 +215,24 @@ export function runProcess({
     const safeExecutionId = String(executionId).replace(/[^A-Za-z0-9_.-]/g, "-");
     const stdoutPath = path.join(logsRoot, `${safeExecutionId}.stdout.log`);
     const stderrPath = path.join(logsRoot, `${safeExecutionId}.stderr.log`);
-    const environment = { ...process.env, ...env };
-    let invocation = { command, args, temporaryRoot: null, statusPath: null, childWritesLogs: false };
+    const environment = environmentPolicy === ISOLATED_AGENT_ENV_POLICY_VERSION
+      ? buildIsolatedAgentEnvironment({ ambient: process.env, explicit: env })
+      : { ...process.env, ...env };
+    const executionEnvironment = process.platform === "win32"
+      ? canonicalWindowsEnvironment(environment)
+      : environment;
+    let invocation = { command, args, temporaryRoot: null, statusPath: null, terminationPath: null, childWritesLogs: false };
     let stdoutLog = null;
     let stderrLog = null;
     if (process.platform === "win32") {
-      invocation = windowsInvocation({ repoRoot, command, args, cwd, environment: env, stdoutPath, stderrPath, rawLogLimitBytes });
+      invocation = windowsInvocation({ repoRoot, command, args, cwd, environment: executionEnvironment, stdoutPath, stderrPath, rawLogLimitBytes });
     } else {
       stdoutLog = new CappedLog(stdoutPath, rawLogLimitBytes);
       stderrLog = new CappedLog(stderrPath, rawLogLimitBytes);
     }
     const child = spawn(invocation.command, invocation.args, {
       cwd,
-      env: environment,
+      env: executionEnvironment,
       windowsHide: true,
       detached: process.platform !== "win32",
       stdio: invocation.childWritesLogs ? ["ignore", "ignore", "ignore"] : ["ignore", "pipe", "pipe"],
@@ -211,7 +258,7 @@ export function runProcess({
         last_progress_type: lastProgressType,
         kill: null,
       };
-      killPromise = killTree(child).then((kill) => { termination.kill = kill; return kill; });
+      killPromise = killTree(child, invocation.terminationPath).then((kill) => { termination.kill = kill; return kill; });
     };
     const onLine = (line) => {
       addUsage(usage, line);
@@ -305,7 +352,7 @@ export function runProcess({
         signal,
         elapsed_seconds: Math.round(elapsedSeconds * 1000) / 1000,
         termination,
-        usage,
+        usage: normalizeUsage(usage),
         stdout_path: path.relative(attemptRoot, stdoutPath).split(path.sep).join("/"),
         stderr_path: path.relative(attemptRoot, stderrPath).split(path.sep).join("/"),
         stdout_truncated: stdoutTruncated,

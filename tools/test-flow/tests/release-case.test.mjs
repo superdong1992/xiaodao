@@ -6,6 +6,9 @@ import path from "node:path";
 import test from "node:test";
 
 import {
+  compareReleaseCaseEntries,
+  diagnosisSkillRuntimeRefId,
+  discoverReleaseCaseRoot,
   loadReleaseCase,
   loadReleaseCaseInputs,
   loadReleaseCaseOracle,
@@ -16,7 +19,20 @@ import { canonicalJson } from "../lib/util.mjs";
 
 
 const REPOSITORY_ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\/(?:([A-Za-z]:))/, "$1")), "..", "..", "..");
-const CASE_ROOT = path.join(REPOSITORY_ROOT, "tests", "cases", "release", "rpc-timeout-anonymized");
+const RELEASE_CASES_ROOT = path.join(REPOSITORY_ROOT, "tests", "cases", "release");
+const CASE_ROOT = discoverReleaseCaseRoot(RELEASE_CASES_ROOT);
+
+test("diagnosis skill manifest ids map to the frozen runtime asset namespace", () => {
+  assert.equal(diagnosisSkillRuntimeRefId("diagnose-example"), "diagnosis-skill/diagnose-example");
+  for (const invalid of ["diagnosis-skill/diagnose-example", "A", "a", "has_underscore", "x".repeat(65)]) {
+    assert.throws(() => diagnosisSkillRuntimeRefId(invalid), /Release case diagnosis skill manifest id is invalid/);
+  }
+});
+
+test("release case directory ordering is ordinal and independent of host collation", () => {
+  const entries = [{ name: "diagnosis-skill.json" }, { name: "SKILL.md" }];
+  assert.deepEqual(entries.sort(compareReleaseCaseEntries).map((entry) => entry.name), ["SKILL.md", "diagnosis-skill.json"]);
+});
 
 function filesBelow(root) {
   const result = [];
@@ -102,20 +118,63 @@ function writeNeutralCase(root, { withAttachment, fieldName }) {
 
 test("the release case loader verifies hashes and keeps every oracle on an explicit gate-only path", () => {
   const verified = verifyReleaseCaseManifest(CASE_ROOT);
+  const descriptor = JSON.parse(fs.readFileSync(path.join(CASE_ROOT, "case.json"), "utf8"));
   const loaded = loadReleaseCase(CASE_ROOT);
   const inputs = loadReleaseCaseInputs(CASE_ROOT);
   const oracle = loadReleaseCaseOracle(CASE_ROOT);
   const digests = releaseCaseDigests(CASE_ROOT);
 
-  assert.equal(verified.manifest.root, "tests/cases/release/rpc-timeout-anonymized");
-  assert.deepEqual(loaded.scenarios.map((item) => item.scenario_id), ["complete", "partial"]);
+  assert.equal(path.resolve(REPOSITORY_ROOT, verified.manifest.root), path.resolve(CASE_ROOT));
+  assert.deepEqual(loaded.scenarios.map((item) => item.scenario_id), descriptor.scenarios.map((item) => item.scenario_id));
   assert.equal(Object.hasOwn(inputs, "semantic_oracle"), false);
   assert.equal(Object.hasOwn(inputs.scenarios[0], "oracle"), false);
   assert.equal(oracle.semantic_oracle.oracle_visibility, "GATE_ONLY");
   assert.match(inputs.wiki, /\(#|（#/);
   assert.doesNotMatch(fs.readFileSync(path.join(inputs.approved_skill_dir, "SKILL.md"), "utf8"), /\(#|（#|#\)|#）/);
   assert.equal(digests.input_records.some((item) => item.path.endsWith("oracle.json")), false);
-  assert.equal(digests.oracle_records.length, 3);
+  assert.equal(digests.oracle_records.length, 1 + descriptor.scenarios.length);
+});
+
+test("product semantic targets are explicit GenerationSpec prose fields", () => {
+  const loaded = loadReleaseCaseOracle(CASE_ROOT).semantic_oracle;
+  const projection = loaded.generated_spec_oracle;
+  const safeProseFields = [
+    "analysis_steps",
+    "assumptions",
+    "chinese_title",
+    "judgement_rules",
+    "output_requirements",
+    "problem_scope",
+    "summary",
+    "time_characteristics",
+  ];
+  assert.equal(projection.projection_version, 4);
+  assert.equal(
+    projection.required_product_semantics.every(
+      (semantic) => Array.isArray(semantic.target_fields)
+        && semantic.target_fields.length > 0,
+    ),
+    true,
+  );
+  assert.deepEqual(
+    projection.required_product_semantics.find(
+      (semantic) => semantic.id === "fixed_snapshot_boundary",
+    ).target_fields,
+    safeProseFields,
+  );
+
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "release-case-semantic-target-"));
+  const root = path.join(parent, "case");
+  fs.cpSync(CASE_ROOT, root, { recursive: true });
+  const semanticOracle = path.join(root, "oracle.json");
+  const oracleValue = JSON.parse(fs.readFileSync(semanticOracle, "utf8"));
+  oracleValue.generated_spec_oracle.required_product_semantics[0].target_fields = ["roles"];
+  fs.writeFileSync(semanticOracle, canonicalJson(oracleValue), "utf8");
+  refreshManifest(root);
+  assert.throws(
+    () => loadReleaseCaseOracle(root),
+    /required product semantic target_fields are invalid/,
+  );
 });
 
 test("two heterogeneous neutral cases drive different scalar inputs and attachment shapes without framework business fields", () => {
@@ -130,6 +189,53 @@ test("two heterogeneous neutral cases drive different scalar inputs and attachme
   assert.deepEqual(first.scenarios[0].driver.attachment_files, []);
   assert.deepEqual(second.scenarios[0].driver.initial_user_fact_names, ["metric_y"]);
   assert.deepEqual(second.scenarios[0].driver.attachment_files, ["archive.zip"]);
+  assert.equal(second.scenarios[0].attachment_paths[0], path.join(withAttachment, "scenarios", "one", "archive.zip"));
+});
+
+test("input, approved-product, driver, and oracle roles must name mutually exclusive files", () => {
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "release-case-role-alias-"));
+  const mutations = [
+    (descriptor) => { descriptor.clarifications = descriptor.input_wiki; },
+    (descriptor) => { descriptor.generation_spec = descriptor.input_wiki; },
+    (descriptor) => { descriptor.semantic_oracle = descriptor.input_wiki; },
+    (descriptor) => { descriptor.approved_skill_dir = "input"; },
+    (descriptor) => { descriptor.scenarios[0].driver = descriptor.input_wiki; },
+    (descriptor) => { descriptor.scenarios[0].oracle = descriptor.scenarios[0].driver; },
+  ];
+
+  mutations.forEach((mutate, index) => {
+    const root = path.join(parent, `case-${index}`);
+    writeNeutralCase(root, { withAttachment: false, fieldName: `value_${index}` });
+    const descriptorPath = path.join(root, "case.json");
+    const descriptor = JSON.parse(fs.readFileSync(descriptorPath, "utf8"));
+    mutate(descriptor);
+    fs.writeFileSync(descriptorPath, canonicalJson(descriptor), "utf8");
+    refreshManifest(root);
+    assert.throws(() => loadReleaseCase(root), /file roles must be mutually exclusive/);
+  });
+});
+
+test("attachments resolve beside their driver and cannot alias input or oracle roles", () => {
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "release-case-attachment-alias-"));
+
+  const oracleAlias = path.join(parent, "oracle-alias");
+  writeNeutralCase(oracleAlias, { withAttachment: false, fieldName: "oracle_alias" });
+  const oracleDriverPath = path.join(oracleAlias, "scenarios", "one", "driver.json");
+  const oracleDriver = JSON.parse(fs.readFileSync(oracleDriverPath, "utf8"));
+  oracleDriver.attachment_files = ["oracle.json"];
+  oracleDriver.attachment_anchor_names = ["source_a"];
+  fs.writeFileSync(oracleDriverPath, canonicalJson(oracleDriver), "utf8");
+  refreshManifest(oracleAlias);
+  assert.throws(() => loadReleaseCaseInputs(oracleAlias), /attachment aliases an input or oracle role/);
+
+  const inputAlias = path.join(parent, "input-alias");
+  writeNeutralCase(inputAlias, { withAttachment: true, fieldName: "input_alias" });
+  const descriptorPath = path.join(inputAlias, "case.json");
+  const descriptor = JSON.parse(fs.readFileSync(descriptorPath, "utf8"));
+  descriptor.input_wiki = "scenarios/one/archive.zip";
+  fs.writeFileSync(descriptorPath, canonicalJson(descriptor), "utf8");
+  refreshManifest(inputAlias);
+  assert.throws(() => loadReleaseCaseInputs(inputAlias), /attachment aliases an input or oracle role/);
 });
 
 test("unknown actions, traversal, hash drift, and oracle-only changes fail closed or invalidate only the proof digest", () => {

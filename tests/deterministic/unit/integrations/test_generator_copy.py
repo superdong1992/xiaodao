@@ -48,16 +48,47 @@ EXPECTED_SOURCE_CHANGES = {
         "embedded machine-source consistency, and Agent artifact prohibitions.",
     ),
 }
-EXPECTED_ADDED_FILE = {
-    "path": "scripts/generate_diagnosis_skill.py",
-    "source": (
-        "S07 new implementation; no counterpart exists in the frozen upstream "
-        "source tree."
-    ),
-    "purpose": (
-        "Deterministically build, hash, validate, and atomically publish Diagnosis "
-        "Skill products from GenerationSpec v5."
-    ),
+EXPECTED_ADDED_FILES = {
+    "references/generation-spec-v5-reference.md": {
+        "source": (
+            "S08 self-contained reference; no counterpart exists in the frozen "
+            "upstream source tree."
+        ),
+        "purpose": (
+            "Define the exact, generic GenerationSpec v5 object contract without "
+            "requiring source-code inspection."
+        ),
+    },
+    "references/neutral-logparse-generation-spec-v5.json": {
+        "source": (
+            "S08 self-contained reference; no counterpart exists in the frozen "
+            "upstream source tree."
+        ),
+        "purpose": (
+            "Demonstrate a business-neutral, complex Logparse GenerationSpec v5 "
+            "with lossy policies and terminal paths."
+        ),
+    },
+    "references/verification-contract-v2-reference.md": {
+        "source": (
+            "S08 self-contained reference; no counterpart exists in the frozen "
+            "upstream source tree."
+        ),
+        "purpose": (
+            "Define exact verification contract v2 policies, extractors, rules, "
+            "numeric expressions, and terminal paths."
+        ),
+    },
+    "scripts/generate_diagnosis_skill.py": {
+        "source": (
+            "S07 new implementation; no counterpart exists in the frozen upstream "
+            "source tree."
+        ),
+        "purpose": (
+            "Deterministically build, hash, validate, and atomically publish "
+            "Diagnosis Skill products from GenerationSpec v5."
+        ),
+    },
 }
 EXPECTED_EXCLUDED_PATTERNS = (
     "**/__pycache__/**",
@@ -259,24 +290,25 @@ def test_source_copy_receipt_has_complete_sorted_fields() -> None:
 
     added_files = manifest["added_files"]
     assert isinstance(added_files, list)
-    assert tuple(entry["path"] for entry in added_files) == (
-        EXPECTED_ADDED_FILE["path"],
+    assert tuple(entry["path"] for entry in added_files) == tuple(
+        sorted(EXPECTED_ADDED_FILES)
     )
-    added = added_files[0]
-    assert set(added) == {
-        "path",
-        "source",
-        "purpose",
-        "mode",
-        "size",
-        "sha256",
-    }
-    assert {
-        "path": added["path"],
-        "source": added["source"],
-        "purpose": added["purpose"],
-    } == EXPECTED_ADDED_FILE
-    _assert_file_facts_shape({key: added[key] for key in ("mode", "size", "sha256")})
+    for added in added_files:
+        assert set(added) == {
+            "path",
+            "source",
+            "purpose",
+            "mode",
+            "size",
+            "sha256",
+        }
+        assert {
+            "source": added["source"],
+            "purpose": added["purpose"],
+        } == EXPECTED_ADDED_FILES[added["path"]]
+        _assert_file_facts_shape(
+            {key: added[key] for key in ("mode", "size", "sha256")}
+        )
 
 
 def test_receipt_matches_source_and_every_delivered_byte(
@@ -335,12 +367,12 @@ def test_receipt_matches_source_and_every_delivered_byte(
             assert expected_status == "modified_for_v4_deployment_contract"
             assert entry["delivered"]["sha256"] != entry["source"]["sha256"]
 
-    added = manifest["added_files"][0]
-    added_path = added["path"]
-    assert added_path not in source_files
-    assert {key: added[key] for key in ("mode", "size", "sha256")} == _file_facts(
-        DELIVERED_SKILL / added_path
-    )
+    for added in manifest["added_files"]:
+        added_path = added["path"]
+        assert added_path not in source_files
+        assert {key: added[key] for key in ("mode", "size", "sha256")} == _file_facts(
+            DELIVERED_SKILL / added_path
+        )
 
     delivered_files = _tree_files(DELIVERED_SKILL)
     expected_delivered = tuple(
@@ -349,7 +381,7 @@ def test_receipt_matches_source_and_every_delivered_byte(
             for path, (status, _) in EXPECTED_SOURCE_CHANGES.items()
             if status != "removed_for_v4_service_ownership"
         )
-        + [EXPECTED_ADDED_FILE["path"]]
+        + list(EXPECTED_ADDED_FILES)
     )
     assert delivered_files == tuple(sorted(expected_delivered))
     assert not any(_matches_exclusion(path, patterns) for path in delivered_files)

@@ -14,9 +14,34 @@
       "oracle": "scenarios/complete/oracle.json"
     },
     {
+      "scenario_id": "complete-api-overrun",
+      "driver": "scenarios/complete_api_overrun/driver.json",
+      "oracle": "scenarios/complete_api_overrun/oracle.json"
+    },
+    {
+      "scenario_id": "complete-deadloop-overrun",
+      "driver": "scenarios/complete_deadloop_overrun/driver.json",
+      "oracle": "scenarios/complete_deadloop_overrun/oracle.json"
+    },
+    {
+      "scenario_id": "partial-server-aggregate",
+      "driver": "scenarios/partial_server_aggregate/driver.json",
+      "oracle": "scenarios/partial_server_aggregate/oracle.json"
+    },
+    {
       "scenario_id": "partial",
       "driver": "scenarios/partial/driver.json",
       "oracle": "scenarios/partial/oracle.json"
+    },
+    {
+      "scenario_id": "partial-client-aggregate",
+      "driver": "scenarios/partial_client_aggregate/driver.json",
+      "oracle": "scenarios/partial_client_aggregate/oracle.json"
+    },
+    {
+      "scenario_id": "none",
+      "driver": "scenarios/none/driver.json",
+      "oracle": "scenarios/none/oracle.json"
     }
   ],
   "allowed_actions": ["skill_generation", "specialized_diagnosis"]

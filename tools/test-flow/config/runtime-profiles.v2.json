@@ -14,7 +14,8 @@
         "version_output": "2.1.89 (Claude Code)",
         "tarball_sha256": "680e35001b24b604f58958e3a324bb758be3c069c0a3f89585156256f17a9c87",
         "cli_sha256": "a9950ef6407fdc750bddb673852485500387e524a99d42385cb81e7d17128e01",
-        "model": "deepseek-v4-flash[1m]"
+        "model": "deepseek-v4-flash[1m]",
+        "max_output_tokens_upper_limit": 64000
       },
       "uv": {
         "version": "0.11.32",
@@ -45,8 +46,9 @@
         "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"
       ],
       "real_caps": {
-        "isolated": {"max_turns": 12, "max_total_tokens": 200000, "max_budget_usd": 3, "hard_timeout_seconds": 1200},
-        "service_agent": {"max_turns": 50, "max_total_tokens": 400000, "max_budget_usd": 3, "hard_timeout_seconds": 600},
+        "isolated": {"max_turns": 12, "max_total_tokens": 1000000, "max_budget_usd": 3, "hard_timeout_seconds": 900},
+        "isolated.skill-generation": {"max_turns": 12, "max_total_tokens": 1000000, "max_output_tokens": 64000, "max_budget_usd": 10, "hard_timeout_seconds": 1800},
+        "service_agent": {"max_turns": 50, "max_total_tokens": 2000000, "max_budget_usd": 3, "hard_timeout_seconds": 600},
         "journey.route": {"max_turns": 50, "max_total_tokens": 400000, "max_budget_usd": 3, "hard_timeout_seconds": 1200},
         "journey.diagnose": {"max_turns": 50, "max_total_tokens": 600000, "max_budget_usd": 5, "hard_timeout_seconds": 1200},
         "journey.publish-restart": {"max_turns": 10, "max_total_tokens": 100000, "max_budget_usd": 1, "hard_timeout_seconds": 1200}

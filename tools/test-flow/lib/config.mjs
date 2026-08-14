@@ -23,6 +23,7 @@ const RELEASE_SETTINGS_ENVIRONMENT = Object.freeze([
   "API_TIMEOUT_MS",
   "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
 ]);
+const PINNED_CLAUDE_MAX_OUTPUT_TOKENS_UPPER_LIMIT = 64_000;
 
 function object(value, code, label) {
   assertFlow(value !== null && typeof value === "object" && !Array.isArray(value), code, `${label} must be an object`);
@@ -99,11 +100,15 @@ function validateStages(stages) {
   assertFlow(Array.isArray(stages.stages) && stages.stages.length > 0, "CONFIG_STAGES_EMPTY", "stages must be non-empty");
   const ids = new Set();
   for (const stage of stages.stages) {
-    exactKeys(stage, ["id", "kind", "depends_on", "gates", "identity_set", "timeout_seconds", "progress_class", "reuse", "checkpoint", "platforms"], "CONFIG_STAGE_FIELDS", `stage ${stage?.id ?? "?"}`);
+    exactKeys(stage, ["id", "kind", "depends_on", "gates", "identity_set", "real_cap_id", "timeout_seconds", "progress_class", "reuse", "checkpoint", "platforms"], "CONFIG_STAGE_FIELDS", `stage ${stage?.id ?? "?"}`);
     identifier(stage.id, "CONFIG_STAGE_ID", "stage id");
     assertFlow(!ids.has(stage.id), "CONFIG_STAGE_DUPLICATE", `Duplicate stage ${stage.id}`);
     ids.add(stage.id);
     assertFlow(STAGE_KINDS.has(stage.kind), "CONFIG_STAGE_KIND", `Unsupported kind for ${stage.id}`);
+    if (stage.real_cap_id !== undefined) {
+      identifier(stage.real_cap_id, "CONFIG_STAGE_REAL_CAP", `${stage.id} real cap id`);
+      assertFlow(stage.kind === "isolated-real" && stage.id !== "real.logparse", "CONFIG_STAGE_REAL_CAP_SCOPE", `${stage.id} cannot select an isolated real cap`);
+    }
     stringArray(stage.depends_on, "CONFIG_STAGE_DEPENDENCIES", `${stage.id}.depends_on`);
     stringArray(stage.gates, "CONFIG_STAGE_GATES", `${stage.id}.gates`, { nonEmpty: true });
     identifier(stage.identity_set, "CONFIG_STAGE_IDENTITY", `${stage.id} identity set`);
@@ -126,7 +131,7 @@ function validateStages(stages) {
 
 const GATE_FIELDS = {
   "node-test": ["kind", "test_files", "test_glob", "exclude", "min_passed", "evidence"],
-  pytest: ["kind", "selectors", "selector_mode", "pytest_args", "environment_profile", "min_passed", "skip_policy", "runtime_profile", "evidence"],
+  pytest: ["kind", "selectors", "selector_mode", "pytest_args", "environment_profile", "min_passed", "skip_policy", "runtime_profile", "evidence", "isolated_agent_invocations"],
   "repository-check": ["kind", "check", "paths", "evidence"],
   "capability-adapter": ["kind", "adapter", "runtime_profile", "required_claims", "evidence"],
   "cross-job-adapter": ["kind", "phase", "runtime_profile", "evidence_contract", "evidence"],
@@ -177,7 +182,13 @@ function validateGates(gates) {
       if (gate.selector_mode) assertFlow(gate.selector_mode === "affected", "CONFIG_PYTEST_SELECTOR_MODE", `${gateId} has unsupported selector_mode`);
       if (gate.pytest_args) stringArray(gate.pytest_args, "CONFIG_PYTEST_ARGS", `${gateId}.pytest_args`);
       if (gate.environment_profile) assertFlow(ENVIRONMENT_PROFILES.has(gate.environment_profile), "CONFIG_PYTEST_ENVIRONMENT", `${gateId} has unknown environment profile`);
+      if (gate.isolated_agent_invocations !== undefined) {
+        positiveInteger(gate.isolated_agent_invocations, "CONFIG_PYTEST_INVOCATIONS", `${gateId}.isolated_agent_invocations`);
+      }
+      const isolatedAgentGate = Boolean(gate.environment_profile && gate.environment_profile !== "real-logparse");
+      assertFlow(isolatedAgentGate === (gate.isolated_agent_invocations !== undefined), "CONFIG_PYTEST_INVOCATIONS", `${gateId} must declare isolated Agent invocations exactly when its environment launches isolated Agents`);
       positiveInteger(gate.min_passed, "CONFIG_PYTEST_MIN", `${gateId}.min_passed`);
+      if (isolatedAgentGate) assertFlow(gate.min_passed >= gate.isolated_agent_invocations, "CONFIG_PYTEST_INVOCATIONS", `${gateId} must prove at least every declared isolated Agent invocation`);
       assertFlow(PYTEST_SKIP_POLICIES.has(gate.skip_policy), "CONFIG_PYTEST_SKIP", `${gateId} has invalid skip policy`);
       identifier(gate.runtime_profile, "CONFIG_GATE_RUNTIME", `${gateId} runtime profile`);
     } else if (gate.kind === "repository-check") {
@@ -305,7 +316,7 @@ function validateRuntimeProfiles(runtimeProfiles) {
     }
     assertFlow(profile.kind === "formal-release", "CONFIG_RUNTIME_KIND", `${profileId} has invalid runtime kind`);
     exactKeys(profile, ["kind", "claude", "uv", "python", "hatchling", "base_image", "external_sources", "settings_environment_allowlist", "real_caps", "network_policy"], "CONFIG_RUNTIME_PROFILE_FIELDS", `runtime profile ${profileId}`);
-    exactKeys(profile.claude, ["package", "version", "version_output", "tarball_sha256", "cli_sha256", "model"], "CONFIG_RUNTIME_CLAUDE_FIELDS", `${profileId}.claude`);
+    exactKeys(profile.claude, ["package", "version", "version_output", "tarball_sha256", "cli_sha256", "model", "max_output_tokens_upper_limit"], "CONFIG_RUNTIME_CLAUDE_FIELDS", `${profileId}.claude`);
     exactKeys(profile.uv, ["version", "archive_sha256", "uv_sha256", "uvx_sha256"], "CONFIG_RUNTIME_UV_FIELDS", `${profileId}.uv`);
     exactKeys(profile.base_image, ["name", "source", "os", "architecture", "macos_docker_context"], "CONFIG_RUNTIME_IMAGE_FIELDS", `${profileId}.base_image`);
     exactKeys(profile.external_sources, ["logparse", "mcp"], "CONFIG_RUNTIME_EXTERNAL_FIELDS", `${profileId}.external_sources`);
@@ -315,6 +326,12 @@ function validateRuntimeProfiles(runtimeProfiles) {
     sha256(profile.claude.tarball_sha256, "CONFIG_RUNTIME_CLAUDE_HASH", `${profileId}.claude.tarball_sha256`);
     sha256(profile.claude.cli_sha256, "CONFIG_RUNTIME_CLAUDE_HASH", `${profileId}.claude.cli_sha256`);
     assertFlow(/^[a-zA-Z0-9_.\[\]-]+$/.test(profile.claude.model), "CONFIG_RUNTIME_MODEL", `${profileId}.claude.model is invalid`);
+    positiveInteger(profile.claude.max_output_tokens_upper_limit, "CONFIG_RUNTIME_MAX_OUTPUT_TOKENS", `${profileId}.claude.max_output_tokens_upper_limit`);
+    assertFlow(
+      profile.claude.max_output_tokens_upper_limit === PINNED_CLAUDE_MAX_OUTPUT_TOKENS_UPPER_LIMIT,
+      "CONFIG_RUNTIME_MAX_OUTPUT_TOKENS",
+      `${profileId}.claude.max_output_tokens_upper_limit does not match the pinned Claude runtime`,
+    );
     nonEmptyString(profile.uv.version, "CONFIG_RUNTIME_UV_VERSION", `${profileId}.uv.version`);
     for (const name of ["archive_sha256", "uv_sha256", "uvx_sha256"]) sha256(profile.uv[name], "CONFIG_RUNTIME_UV_HASH", `${profileId}.uv.${name}`);
     assertFlow(/^3\.12\.\d+$/.test(profile.python), "CONFIG_RUNTIME_PYTHON_VERSION", `${profileId}.python must pin Python 3.12`);
@@ -325,17 +342,28 @@ function validateRuntimeProfiles(runtimeProfiles) {
     for (const [name, commit] of Object.entries(profile.external_sources)) assertFlow(/^[a-f0-9]{40}$/.test(commit), "CONFIG_RUNTIME_EXTERNAL_COMMIT", `${profileId}.external_sources.${name} must be a commit SHA`);
     stringArray(profile.settings_environment_allowlist, "CONFIG_RUNTIME_SETTINGS_ENV", `${profileId}.settings_environment_allowlist`, { nonEmpty: true });
     assertFlow(canonicalJson([...profile.settings_environment_allowlist].sort()) === canonicalJson([...RELEASE_SETTINGS_ENVIRONMENT].sort()), "CONFIG_RUNTIME_SETTINGS_ENV", `${profileId} has an unsupported settings environment allowlist`);
-    exactKeys(profile.real_caps, ["isolated", "service_agent", "journey.route", "journey.diagnose", "journey.publish-restart"], "CONFIG_RUNTIME_CAPS_FIELDS", `${profileId}.real_caps`);
+    exactKeys(profile.real_caps, ["isolated", "isolated.skill-generation", "service_agent", "journey.route", "journey.diagnose", "journey.publish-restart"], "CONFIG_RUNTIME_CAPS_FIELDS", `${profileId}.real_caps`);
     for (const [capId, cap] of Object.entries(profile.real_caps)) {
-      exactKeys(cap, ["max_turns", "max_total_tokens", "max_budget_usd", "hard_timeout_seconds"], "CONFIG_RUNTIME_CAP_FIELDS", `${profileId}.real_caps.${capId}`);
+      exactKeys(cap, ["max_turns", "max_total_tokens", "max_output_tokens", "max_budget_usd", "hard_timeout_seconds"], "CONFIG_RUNTIME_CAP_FIELDS", `${profileId}.real_caps.${capId}`);
       positiveInteger(cap.max_turns, "CONFIG_RUNTIME_MAX_TURNS", `${capId}.max_turns`);
       positiveInteger(cap.max_total_tokens, "CONFIG_RUNTIME_MAX_TOKENS", `${capId}.max_total_tokens`);
+      if (cap.max_output_tokens !== undefined) {
+        positiveInteger(cap.max_output_tokens, "CONFIG_RUNTIME_MAX_OUTPUT_TOKENS", `${capId}.max_output_tokens`);
+        assertFlow(capId === "isolated" || capId.startsWith("isolated."), "CONFIG_RUNTIME_MAX_OUTPUT_TOKENS_SCOPE", `${capId}.max_output_tokens is only supported for isolated Agent caps`);
+        assertFlow(cap.max_output_tokens <= profile.claude.max_output_tokens_upper_limit, "CONFIG_RUNTIME_MAX_OUTPUT_TOKENS", `${capId}.max_output_tokens exceeds the pinned Claude runtime limit`);
+        assertFlow(cap.max_output_tokens <= cap.max_total_tokens, "CONFIG_RUNTIME_MAX_OUTPUT_TOKENS", `${capId}.max_output_tokens exceeds max_total_tokens`);
+      }
       nonNegativeNumber(cap.max_budget_usd, "CONFIG_RUNTIME_MAX_BUDGET", `${capId}.max_budget_usd`);
       assertFlow(cap.max_budget_usd > 0, "CONFIG_RUNTIME_MAX_BUDGET", `${capId}.max_budget_usd must be positive`);
       positiveInteger(cap.hard_timeout_seconds, "CONFIG_RUNTIME_CAP_TIMEOUT", `${capId}.hard_timeout_seconds`);
     }
     assertFlow(profile.network_policy === "release-offline-pull-never", "CONFIG_RUNTIME_NETWORK_POLICY", `${profileId} has an unsupported network policy`);
   }
+}
+
+export function realCapIdForStage(stage) {
+  if (stage.kind === "isolated-real" && stage.id !== "real.logparse") return stage.real_cap_id ?? "isolated";
+  return null;
 }
 
 function crossValidate(config) {
@@ -353,7 +381,7 @@ function crossValidate(config) {
   for (const profile of Object.values(config.runtimeProfiles.profiles)) {
     if (profile.kind !== "formal-release") continue;
     for (const [capId, cap] of Object.entries(profile.real_caps)) {
-      assertFlow(cap.hard_timeout_seconds <= config.policy.process.real_hard_timeout_seconds, "CONFIG_RUNTIME_CAP_TIMEOUT_POLICY", `${capId} exceeds the process hard-timeout policy`);
+      assertFlow(cap.hard_timeout_seconds < config.policy.process.real_hard_timeout_seconds, "CONFIG_RUNTIME_CAP_TIMEOUT_POLICY", `${capId} must leave time for runtime termination and evidence finalization`);
     }
   }
 
@@ -361,6 +389,16 @@ function crossValidate(config) {
     assertFlow(identitySetIds.has(stage.identity_set), "CONFIG_STAGE_IDENTITY_UNKNOWN", `${stage.id} references unknown identity set ${stage.identity_set}`);
     if (["capability", "isolated-real", "real-journey"].includes(stage.kind)) {
       assertFlow(stage.timeout_seconds <= config.policy.process.real_hard_timeout_seconds, "CONFIG_REAL_STAGE_TIMEOUT_POLICY", `${stage.id} exceeds the process hard-timeout policy`);
+    }
+    if (stage.kind === "isolated-real" && stage.id !== "real.logparse") {
+      const invocationCount = stage.gates.reduce((sum, gateId) => sum + config.gates.gates[gateId].isolated_agent_invocations, 0);
+      const realCapId = realCapIdForStage(stage);
+      const isolatedCaps = Object.values(config.runtimeProfiles.profiles)
+        .filter((profile) => profile.kind === "formal-release")
+        .map((profile) => profile.real_caps[realCapId]);
+      assertFlow(isolatedCaps.every(Boolean), "CONFIG_STAGE_REAL_CAP_UNKNOWN", `${stage.id} references unknown real cap ${realCapId}`);
+      const isolatedTimeout = isolatedCaps.map((cap) => cap.hard_timeout_seconds);
+      assertFlow(isolatedTimeout.every((timeout) => invocationCount * (timeout + 30) + 30 < stage.timeout_seconds), "CONFIG_ISOLATED_TIMEOUT_MARGIN", `${stage.id} must cover every declared Backend invocation and evidence finalization`);
     }
     for (const dependency of stage.depends_on) {
       assertFlow(stageIds.has(dependency), "CONFIG_STAGE_DEPENDENCY_UNKNOWN", `${stage.id} depends on unknown ${dependency}`);

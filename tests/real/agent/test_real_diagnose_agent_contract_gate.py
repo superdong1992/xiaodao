@@ -66,7 +66,7 @@ GENERATION_SPEC_ROOT = (
     ROOT / "tests/fixtures/components/diagnosis-generator/specs"
 )
 SKILL_PRODUCT_SHA256 = (
-    "eaa059e98e2fde9b923e0bce3e860422b2944aeabe939b57920793f70337b618"
+    "abd24d9517aede8df21af384ece6c059ef493af29f320bb39049547e84eb79ff"
 )
 PARAMETER_GROUP_A = {
     "caller_service",
@@ -338,7 +338,9 @@ def test_real_agent_v3_requirement_isolation_gate(
             ),
             resource_limits=job.resource_limits,
             test_limits=BackendExecutionLimits(
-                wall_time_seconds=240.0,
+                wall_time_seconds=float(
+                    os.environ["TEST_FLOW_AGENT_BACKEND_WALL_TIME_SECONDS"]
+                ),
                 stdout_stderr_bytes=4 * 1024 * 1024,
                 workspace_bytes=8 * 1024 * 1024,
                 poll_interval_seconds=0.02,
@@ -504,7 +506,9 @@ def test_real_first_log_diagnose_agent_produces_valid_continuation(
             resource_limits=job.resource_limits,
             broker_environment=broker_environment,
             test_limits=BackendExecutionLimits(
-                wall_time_seconds=240.0,
+                wall_time_seconds=float(
+                    os.environ["TEST_FLOW_AGENT_BACKEND_WALL_TIME_SECONDS"]
+                ),
                 stdout_stderr_bytes=4 * 1024 * 1024,
                 workspace_bytes=8 * 1024 * 1024,
                 poll_interval_seconds=0.02,
@@ -671,7 +675,9 @@ def test_real_diagnose_agent_requests_parameter_group_a_from_generated_skill(
             ),
             resource_limits=default_resource_limits(JobType.DIAGNOSE),
             test_limits=BackendExecutionLimits(
-                wall_time_seconds=240.0,
+                wall_time_seconds=float(
+                    os.environ["TEST_FLOW_AGENT_BACKEND_WALL_TIME_SECONDS"]
+                ),
                 stdout_stderr_bytes=4 * 1024 * 1024,
                 workspace_bytes=8 * 1024 * 1024,
                 poll_interval_seconds=0.02,
@@ -918,7 +924,9 @@ def test_real_diagnose_agent_requests_parameter_group_a_from_generated_skill(
             ),
             resource_limits=default_resource_limits(JobType.DIAGNOSE),
             test_limits=BackendExecutionLimits(
-                wall_time_seconds=240.0,
+                wall_time_seconds=float(
+                    os.environ["TEST_FLOW_AGENT_BACKEND_WALL_TIME_SECONDS"]
+                ),
                 stdout_stderr_bytes=4 * 1024 * 1024,
                 workspace_bytes=8 * 1024 * 1024,
                 poll_interval_seconds=0.02,

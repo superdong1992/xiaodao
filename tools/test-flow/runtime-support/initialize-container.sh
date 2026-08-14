@@ -1,5 +1,5 @@
 #!/bin/sh
-# Runtime support shared by the first-party CrossJob adapters.
+# POSIX runtime support shared by the first-party CrossJob adapters.
 set -eu
 umask 077
 
@@ -42,7 +42,8 @@ cp -a /source/xiaodao/. /opt/src/xiaodao/
 node /test-flow-runtime/verify-source-snapshot.mjs \
   --root /opt/src/xiaodao \
   --manifest /evidence/source/source-snapshot.json \
-  --expected-digest "$expected_xiaodao_snapshot" >/dev/null
+  --expected-digest "$expected_xiaodao_snapshot" \
+  --materialize-file-modes >/dev/null
 
 GIT_CONFIG_GLOBAL="$source_git_config" git -c core.autocrlf=false clone --no-hardlinks /source/logparse /opt/src/logparse >/dev/null
 git -C /opt/src/logparse checkout --detach "$expected_logparse" >/dev/null
@@ -66,6 +67,7 @@ test -z "$(find "$installed_assets" -xdev -type l -print -quit)"
 test -z "$(find "$installed_assets" -xdev -type f -links +1 -print -quit)"
 
 test ! -e /opt/e2e-skills
+test ! -e /opt/e2e-logparse
 release_case_receipt="/evidence/stages/${receipt#/evidence/stages/}"
 release_case_receipt="${release_case_receipt%/container-init.json}/release-case.json"
 /opt/venvs/xiaodao/bin/python -I /test-flow-runtime/prepare_release_case.py \
@@ -74,7 +76,15 @@ release_case_receipt="${release_case_receipt%/container-init.json}/release-case.
   --validator /opt/src/xiaodao/.claude/skills/wiki-to-diagnosis-skill/scripts/validate_generated_skill.py \
   --generated-skills /opt/e2e-skills \
   --evidence-root /evidence \
+  --logparse-config /opt/e2e-logparse/config.yaml \
+  --logparse-python /opt/venvs/logparse/bin/python \
+  --logparse-repo /opt/src/logparse \
   --receipt "$release_case_receipt" >/dev/null
+test -s /opt/e2e-logparse/config.yaml
+logparse_config_sha256=$(sha256sum /opt/e2e-logparse/config.yaml | cut -d ' ' -f 1)
+case "$logparse_config_sha256" in
+  *[!0-9a-f]*|'') exit 70 ;;
+esac
 
 if [ "$mode" = fresh ]; then
   test -z "$(find /var/lib/problem-locator -mindepth 1 -print -quit)"
@@ -101,9 +111,9 @@ chown 10001:10001 /run/plagent-claude/settings.json
 
 chown 10001:10001 /var/lib/problem-locator
 chmod 0700 /var/lib/problem-locator
-chmod -R a+rX /opt/src /opt/e2e-skills /opt/venvs /opt/uv-python
-chmod -R go-w /opt/src /opt/e2e-skills /opt/venvs /opt/uv-python
-for tree in /opt/src /opt/e2e-skills /opt/venvs /opt/uv-python; do
+chmod -R a+rX /opt/src /opt/e2e-skills /opt/e2e-logparse /opt/venvs /opt/uv-python
+chmod -R go-w /opt/src /opt/e2e-skills /opt/e2e-logparse /opt/venvs /opt/uv-python
+for tree in /opt/src /opt/e2e-skills /opt/e2e-logparse /opt/venvs /opt/uv-python; do
   test -z "$(runuser -u plagent -- find "$tree" -xdev ! -readable -print -quit)"
   test -z "$(runuser -u plagent -- find "$tree" -xdev -type d ! -executable -print -quit)"
   test -z "$(runuser -u plagent -- find "$tree" -xdev -writable -print -quit)"
@@ -117,6 +127,6 @@ runuser -u plagent -- test -r /run/plagent-claude/settings.json
 mkdir -p "$(dirname "$receipt")"
 test ! -e "$receipt"
 cat > "$receipt" <<EOF
-{"schema_version":1,"status":"PASS","mode":"$mode","xiaodao_snapshot_digest":"$expected_xiaodao_snapshot","logparse_commit":"$expected_logparse","mcp_commit":"$expected_mcp","claude_version":"2.1.89 (Claude Code)","service_uid":10001,"service_gid":10001,"settings_policy":"env-allowlist-only-no-hooks-v1","network_install":false,"uv_link_mode":"copy","installed_asset_hardlinks":0,"case_source_redacted":true}
+{"schema_version":1,"status":"PASS","mode":"$mode","xiaodao_snapshot_digest":"$expected_xiaodao_snapshot","logparse_commit":"$expected_logparse","logparse_config_sha256":"$logparse_config_sha256","mcp_commit":"$expected_mcp","claude_version":"2.1.89 (Claude Code)","service_uid":10001,"service_gid":10001,"settings_policy":"env-allowlist-only-no-hooks-v1","network_install":false,"uv_link_mode":"copy","installed_asset_hardlinks":0,"case_source_redacted":true}
 EOF
 chmod 0600 "$receipt"

@@ -39,7 +39,7 @@ from .atomic import (
 )
 from .layout import StorageLayout
 from .paths import ensure_no_symlink_ancestors, parse_storage_key, resource_path
-from .platform import PlatformReplaceOperation
+from .platform import PlatformReplaceOperation, chmod_no_follow
 from .streams import FileBinaryStream, copy_binary_stream, hash_file
 from .tree import TreeInspection, inspect_tree, verify_tree
 
@@ -519,6 +519,8 @@ class FormalResourceReader:
         if is_reparse_point(metadata) or stat.S_ISLNK(metadata.st_mode):
             return
         if stat.S_ISREG(metadata.st_mode):
+            if os.name == "nt" and not bool(stat.S_IMODE(metadata.st_mode) & 0o222):
+                chmod_no_follow(path, stat.S_IRUSR | stat.S_IWUSR)
             path.unlink()
             return
         if not stat.S_ISDIR(metadata.st_mode):

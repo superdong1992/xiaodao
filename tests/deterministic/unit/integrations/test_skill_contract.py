@@ -318,6 +318,240 @@ def test_agent_candidate_forbids_public_result_artifacts() -> None:
     assert "只提交 Candidate" in generated_skill
 
 
+def test_wiki_conversion_contract_is_self_contained_and_business_neutral() -> None:
+    skill = _text(GENERATOR_SKILL / "SKILL.md")
+    references = {
+        name: GENERATOR_SKILL / "references" / name
+        for name in (
+            "generation-spec-v5-reference.md",
+            "verification-contract-v2-reference.md",
+            "neutral-logparse-generation-spec-v5.json",
+        )
+    }
+    for name, path in references.items():
+        assert path.is_file(), name
+        assert f"references/{name}" in skill
+    assert "Base directory for this skill:" in skill
+    assert "不得把裸 `references/...` 交给 `Read`" in skill
+    assert "不得相对当前工作目录、输入 workspace" in skill
+    assert "Role label" in skill and "anchor label" in skill
+    assert "递归展开全部 `depends_on`" in skill
+    assert "PASS/FAIL/UNKNOWN 条件" in skill
+
+    for document, heading in (
+        (skill, "Write 前机器引用闭包检查"),
+        (
+            _text(references["verification-contract-v2-reference.md"]),
+            "最终 Write 前的机械闭包算法",
+        ),
+    ):
+        for token in (
+            heading,
+            "event_id -> field 名称集",
+            "递归遍历",
+            "(event, field)",
+            "field ∈ event_id -> field 名称集",
+            "INPUT Requirement",
+            "已见 rule ID",
+            "跨 event 借用 field",
+            "不得 `Write`",
+            "重新完整核对",
+        ):
+            assert token in document
+
+    generation_reference = _text(references["generation-spec-v5-reference.md"])
+    verification_reference = _text(
+        references["verification-contract-v2-reference.md"]
+    )
+    generator = _text(
+        GENERATOR_SKILL / "scripts" / "generate_diagnosis_skill.py"
+    )
+    neutral = _json(references["neutral-logparse-generation-spec-v5.json"])
+
+    assert "Write 前语义保真检查" in skill
+    for document in (skill, generation_reference):
+        for token in (
+            "`(# ... #)`",
+            "`（# ... #）`",
+            "整个正文",
+            "标记外正文",
+            "转换元数据",
+            "临时禁止集合仅包含旁注中未由",
+            "标记外正文或权威澄清独立支持的实质内容",
+            "只能用于排除审计",
+            "绝不能用",
+            "理解、补全、修正或推断业务语义",
+            "复制、改写、概括",
+            "GenerationSpec 字段值",
+            "语义重叠",
+            "只能依据标记外正文或",
+            "权威澄清生成并记录具体源映射",
+            "不得因旁注重复而删除合法事实",
+            "不得借旁注补足外部来源未声明的",
+            "限定",
+            "旁注标记",
+            "旁注独有的逐字或独特片段",
+            "未闭合",
+            "嵌套",
+            "交叉",
+            "不得猜测边界",
+            "唯一最终 `Write` 前",
+            "递归遍历待写 GenerationSpec 的所有对象和数组",
+            "检查每一个字符串值",
+            "每项语义及限定确认到标记外正文或权威澄清的具体源映射",
+            "外部来源未独立支持的旁注内容",
+            "立即丢弃整份草稿",
+            "最多允许",
+            "一次从标记外正文与权威澄清重新构造",
+            "不能就地删改命中字段",
+            "该次复检仍失败时",
+            "立即停止并请求澄清",
+            "不得再次重构或 `Write`",
+            "源映射独立支持",
+            "完整语义及限定",
+            "复检通过前不得",
+        ):
+            assert token in document
+        for token in (
+            "`judgement_rules`",
+            "`output_requirements`",
+            "安全判断",
+            "最终用户",
+            "否定",
+            "可能性",
+            "风险后果",
+            "不要求逐字复制",
+        ):
+            assert token in document
+        assert "同时" in document or "兼具" in document
+    assert "解释任何业务语义前" in skill
+    assert "可以帮助理解匿名化、简写和特殊边界" not in skill
+    assert "A conversion Agent may read these notes as author guidance" not in generator
+    for token in (
+        "conversion metadata removed before business interpretation",
+        "neither author guidance nor diagnosis knowledge",
+        "must never enter",
+        "a generated product",
+    ):
+        assert token in generator
+
+    assert "自包含唯一合同" in generation_reference
+    assert "自包含唯一合同" in verification_reference
+    for token in (
+        "observation_policies",
+        "event_extractors",
+        "NUMERIC_COMPARE",
+        "SEMANTIC_CAUSALITY",
+        "terminal_paths",
+        "COMPLETE",
+        "PARTIAL",
+        "NONE",
+    ):
+        assert token in verification_reference
+    assert "合取式就绪门槛" in verification_reference
+    assert "可达性 witness" in verification_reference
+    for forbidden in (
+        "scripts/generate_diagnosis_skill.py",
+        "scripts/validate_generated_skill.py",
+        "src/problem_locator/runtime/verification_contract.py",
+        "以该实现为准",
+    ):
+        assert forbidden not in generation_reference
+        assert forbidden not in verification_reference
+
+    assert neutral["requires_logparse"] is True
+    contract = neutral["verification_contract"]
+    assert set(neutral) == {
+        "schema_version",
+        "generator_version",
+        "id",
+        "version",
+        "capability",
+        "deployment_scope",
+        "summary",
+        "chinese_title",
+        "module_name",
+        "problem_scope",
+        "roles",
+        "requirements",
+        "logparse_plan",
+        "verification_contract",
+        "time_characteristics",
+        "analysis_steps",
+        "judgement_rules",
+        "output_requirements",
+        "assumptions",
+        "requires_logparse",
+    }
+    assert set(contract) == {
+        "schema_version",
+        "observation_policies",
+        "event_extractors",
+        "rules",
+        "terminal_paths",
+    }
+    assert {item["kind"] for item in contract["observation_policies"]} == {
+        "SUPPRESSION",
+        "RATE_LIMIT",
+    }
+    assert any(len(item["members"]) > 1 for item in contract["event_extractors"])
+    assert any(item["kind"] == "NUMERIC_COMPARE" for item in contract["rules"])
+    assert {item["resolution_status"] for item in contract["terminal_paths"]} == {
+        "COMPLETE",
+        "PARTIAL",
+        "NONE",
+    }
+    assert max(
+        item["parameters"].get("clock_tolerance_ms", 0)
+        for item in contract["rules"]
+    ) > 0
+    duration_rule = next(
+        item for item in contract["rules"]
+        if item["id"] == "local_duration_over_budget"
+    )
+    converted_budget = duration_rule["parameters"]["right"]
+    assert converted_budget["kind"] == "CONVERT"
+    assert converted_budget["unit"] == "MICROSECOND"
+
+    combined = "\n".join(
+        [
+            generation_reference,
+            verification_reference,
+            json.dumps(neutral, ensure_ascii=False),
+        ]
+    ).casefold()
+    case_roots = sorted(
+        path.parent
+        for path in (REPO_ROOT / "tests" / "cases" / "release").glob("*/case.json")
+    )
+    assert case_roots
+    business_canaries = [
+        canary
+        for case_root in case_roots
+        for canary in _json(case_root / "oracle.json")["business_canaries"]
+    ]
+    for canary in business_canaries:
+        assert str(canary).casefold() not in combined
+
+
+def test_real_wiki_gate_allows_only_inputs_and_declared_skill_references() -> None:
+    gate = _text(
+        REPO_ROOT / "tests/real/agent/test_real_wiki_skill_generation_gate.py"
+    )
+    assert "only the references explicitly linked by the loaded Skill" in gate
+    assert "actual absolute directory shown after `Base directory for this skill:`" in gate
+    assert "Never pass a bare references/... path to Read" in gate
+    assert "resolve it against the workspace cwd" in gate
+    assert "Do not read repository source" in gate
+    assert "generator or validator implementations" in gate
+    assert "case oracles" in gate
+    assert (
+        "Then read inputs/wiki.md, inputs/clarifications.md, references/" not in gate
+    )
+    assert "Then read only inputs/wiki.md and inputs/clarifications.md" not in gate
+    assert "Do not read outside inputs/" not in gate
+
+
 def test_skills_define_no_private_errors_direct_cli_or_raw_capabilities() -> None:
     documents = [
         path

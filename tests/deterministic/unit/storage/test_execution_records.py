@@ -28,7 +28,9 @@ from problem_locator.storage.coordination import (
     StorageCoordinationLock,
 )
 from problem_locator.storage.execution_records import FileExecutionRecordStore
+from problem_locator.storage.platform import PlatformFileSync
 from tests.deterministic.unit.storage.fakes import FakeFileSync
+from tests.deterministic.unit.storage.platform_support import symlink_or_skip
 
 
 REPOSITORY_ROOT = Path(__file__).parents[4]
@@ -93,6 +95,7 @@ class RecordingFileSync:
         self.file_calls: list[Path] = []
         self.directory_calls: list[Path] = []
         self.read_only_calls: list[Path] = []
+        self._platform = PlatformFileSync()
 
     @staticmethod
     def _sync_path(path_or_handle: object) -> Path:
@@ -106,30 +109,15 @@ class RecordingFileSync:
     def sync_file(self, path_or_handle: object) -> None:
         path = self._sync_path(path_or_handle)
         self.file_calls.append(path)
-        if hasattr(path_or_handle, "fileno"):
-            os.fsync(path_or_handle.fileno())  # type: ignore[union-attr]
-            return
-        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
-        try:
-            os.fsync(descriptor)
-        finally:
-            os.close(descriptor)
+        self._platform.sync_file(path_or_handle)  # type: ignore[arg-type]
 
     def sync_directory(self, path: Path) -> None:
         self.directory_calls.append(path)
-        descriptor = os.open(
-            path,
-            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
-        )
-        try:
-            os.fsync(descriptor)
-        finally:
-            os.close(descriptor)
+        self._platform.sync_directory(path)
 
     def make_read_only(self, path: Path) -> None:
         self.read_only_calls.append(path)
-        mode = stat.S_IMODE(path.lstat().st_mode) & ~0o222
-        os.chmod(path, mode, follow_symlinks=False)
+        self._platform.make_read_only(path)
 
     def clear(self) -> None:
         self.file_calls.clear()
@@ -156,8 +144,7 @@ class FailFirstReadOnly(RecordingFileSync):
         if not self.failed:
             self.failed = True
             raise OSError("injected chmod failure")
-        mode = stat.S_IMODE(path.lstat().st_mode) & ~0o222
-        os.chmod(path, mode, follow_symlinks=False)
+        self._platform.make_read_only(path)
 
 
 class NoOpReadOnly(RecordingFileSync):
@@ -176,48 +163,27 @@ class FailFirstFileSync(RecordingFileSync):
         if not self.failed:
             self.failed = True
             raise OSError("injected fsync failure")
-        if hasattr(path_or_handle, "fileno"):
-            os.fsync(path_or_handle.fileno())  # type: ignore[union-attr]
-            return
-        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
-        try:
-            os.fsync(descriptor)
-        finally:
-            os.close(descriptor)
+        self._platform.sync_file(path_or_handle)  # type: ignore[arg-type]
 
 
 class DurableFaultFileSync(FakeFileSync):
     """Fault-scheduled sync double that also performs the filesystem effect."""
 
+    def __init__(self) -> None:
+        super().__init__()
+        self._platform = PlatformFileSync()
+
     def sync_file(self, path_or_handle: object) -> None:
         super().sync_file(path_or_handle)  # type: ignore[arg-type]
-        if hasattr(path_or_handle, "fileno"):
-            os.fsync(path_or_handle.fileno())  # type: ignore[union-attr]
-            return
-        descriptor = os.open(
-            Path(path_or_handle),  # type: ignore[arg-type]
-            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
-        )
-        try:
-            os.fsync(descriptor)
-        finally:
-            os.close(descriptor)
+        self._platform.sync_file(path_or_handle)  # type: ignore[arg-type]
 
     def sync_directory(self, path: Path) -> None:
         super().sync_directory(path)
-        descriptor = os.open(
-            path,
-            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
-        )
-        try:
-            os.fsync(descriptor)
-        finally:
-            os.close(descriptor)
+        self._platform.sync_directory(path)
 
     def make_read_only(self, path: Path) -> None:
         super().make_read_only(path)
-        mode = stat.S_IMODE(path.lstat().st_mode) & ~0o222
-        os.chmod(path, mode, follow_symlinks=False)
+        self._platform.make_read_only(path)
 
 
 class FailingReplacer:
@@ -679,7 +645,7 @@ def test_read_rejects_final_file_and_job_directory_symlinks(
     target.write_bytes(_fixture_bytes("job-route.json"))
     job_directory = tmp_path / "jobs" / ROUTE_JOB_ID
     job_directory.mkdir(parents=True)
-    (job_directory / "job.json").symlink_to(target)
+    symlink_or_skip(job_directory / "job.json", target)
     store = _store(tmp_path, coordination)
 
     with _raises_port_error(ErrorCode.EXECUTION_RECORD_FAILED):
@@ -687,7 +653,7 @@ def test_read_rejects_final_file_and_job_directory_symlinks(
 
     (job_directory / "job.json").unlink()
     job_directory.rmdir()
-    job_directory.symlink_to(tmp_path)
+    symlink_or_skip(job_directory, tmp_path, target_is_directory=True)
     with _raises_port_error(ErrorCode.EXECUTION_RECORD_FAILED):
         store.read_published_job(ROUTE_JOB_ID)
 
@@ -808,7 +774,7 @@ def test_nonempty_or_linked_logs_are_never_truncated_or_reused(
     stdout_path.unlink()
     target = tmp_path / "outside-log"
     target.write_bytes(b"")
-    stdout_path.symlink_to(target)
+    symlink_or_skip(stdout_path, target)
     with _raises_port_error(ErrorCode.EXECUTION_RECORD_FAILED):
         store.open_log_sinks(ROUTE_JOB_ID, JOB_STDOUT_STDERR_BYTES)
     assert target.read_bytes() == b""

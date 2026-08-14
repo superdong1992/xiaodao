@@ -24,6 +24,10 @@ VALIDATOR_PATH = (
     REPOSITORY_ROOT
     / ".claude/skills/wiki-to-diagnosis-skill/scripts/validate_generated_skill.py"
 )
+NEUTRAL_REFERENCE_SPEC = (
+    REPOSITORY_ROOT
+    / ".claude/skills/wiki-to-diagnosis-skill/references/neutral-logparse-generation-spec-v5.json"
+)
 SPEC_ROOT = REPOSITORY_ROOT / "tests/fixtures/components/diagnosis-generator/specs"
 RPC_WIKI = (
     REPOSITORY_ROOT
@@ -60,6 +64,19 @@ def _manifest(skill_dir: Path) -> dict[str, Any]:
     value = json.loads(raw)
     assert raw.endswith(b"\n") and not raw.endswith(b"\n\n")
     return value
+
+
+def test_self_contained_neutral_reference_is_a_valid_generation_spec(
+    generator: Any,
+) -> None:
+    spec = generator.load_generation_spec(NEUTRAL_REFERENCE_SPEC)
+    assert spec.skill_id == "diagnose-neutral-event-chain"
+    assert spec.requires_logparse is True
+    assert len(spec.verification_contract["event_extractors"]) == 2
+    assert [
+        item["resolution_status"]
+        for item in spec.verification_contract["terminal_paths"]
+    ] == ["COMPLETE", "PARTIAL", "NONE"]
 
 
 @pytest.mark.parametrize(

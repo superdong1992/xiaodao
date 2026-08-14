@@ -1,13 +1,13 @@
 from __future__ import annotations
 
+import ctypes
+from ctypes import wintypes
 import json
 import os
 from pathlib import Path
 import shlex
 import sys
 import time
-
-import pytest
 
 from problem_locator.application import build_application_service
 from problem_locator.contracts import (
@@ -55,6 +55,29 @@ FIXED_TIME = "2026-07-31T08:17:00.000Z"
 
 
 def _pid_exists(pid: int) -> bool:
+    if os.name == "nt":
+        kernel32 = ctypes.WinDLL(  # type: ignore[attr-defined]
+            "kernel32",
+            use_last_error=True,
+        )
+        kernel32.OpenProcess.argtypes = [
+            wintypes.DWORD,
+            wintypes.BOOL,
+            wintypes.DWORD,
+        ]
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+        kernel32.WaitForSingleObject.restype = wintypes.DWORD
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        raw_handle = kernel32.OpenProcess(0x00100000 | 0x001000, False, pid)
+        if not raw_handle:
+            return ctypes.get_last_error() == 5
+        handle = wintypes.HANDLE(raw_handle)
+        try:
+            return int(kernel32.WaitForSingleObject(handle, 0)) == 0x00000102
+        finally:
+            kernel32.CloseHandle(handle)
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -71,14 +94,17 @@ class _BackendTimeoutRuntime:
         workspace_root: Path,
     ) -> None:
         command = (
-            f"FAKE_CLAUDE_MODE=child-hang {shlex.quote(sys.executable)} "
+            f"{shlex.quote(sys.executable)} "
             f"{shlex.quote(os.fspath(FAKE_CLAUDE))}"
         )
-        self.backend = AgentBackend(command)
+        self.backend = AgentBackend(
+            command,
+            parent_environment={"FAKE_CLAUDE_MODE": "child-hang"},
+        )
         self.publisher = OutcomePublisher(
             records,
             FakeClock(FIXED_TIME),
-            DeterministicIdGenerator(seed="s08-macos-timeout-outcome"),
+            DeterministicIdGenerator(seed="s08-host-timeout-outcome"),
         )
         self.records = records
         self.workspace_root = workspace_root
@@ -118,8 +144,7 @@ class _BackendTimeoutRuntime:
         raise AssertionError("child-hang backend unexpectedly returned success")
 
 
-@pytest.mark.skipif(sys.platform != "darwin", reason="native macOS process gate")
-def test_macos_timeout_kills_the_real_child_tree_without_rerunning_agent(
+def test_host_timeout_kills_the_real_child_tree_without_rerunning_agent(
     tmp_path: Path,
 ) -> None:
     data_root = tmp_path / "data"
@@ -129,7 +154,7 @@ def test_macos_timeout_kills_the_real_child_tree_without_rerunning_agent(
     publication_guard = InProcessPublicationCommitGuard(coordination_lock)
     attachment_registry = AttachmentUploadRegistry()
     upload_guard = InProcessAttachmentUploadGuard(attachment_registry)
-    ids = DeterministicIdGenerator(seed="s08-macos-tree-storage")
+    ids = DeterministicIdGenerator(seed="s08-host-tree-storage")
     records = FileExecutionRecordStore(data_root, coordination_lock)
     state = StateFile.model_validate_json(
         (FIXTURES / "state.json").read_text(encoding="utf-8")
@@ -164,7 +189,7 @@ def test_macos_timeout_kills_the_real_child_tree_without_rerunning_agent(
         dispatcher=RecordingDispatcher(),
         notifier=InMemoryStateChangeNotifier(),
         clock=FakeClock(FIXED_TIME),
-        ids=DeterministicIdGenerator(seed="s08-macos-tree-application"),
+        ids=DeterministicIdGenerator(seed="s08-host-tree-application"),
     )
     runtime = _BackendTimeoutRuntime(records, tmp_path / "workspace")
     epoch = RuntimeEpochContext()

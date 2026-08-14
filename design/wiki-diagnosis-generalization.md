@@ -1,6 +1,6 @@
 # Wiki 定位能力泛化设计
 
-状态：已实施；确定性验收通过，真实 Skill 生成等待缓存封存
+状态：已实施；最终交接状态只以仓库外密封 verdict 为准
 
 基线：`main@f477742c0678da210f5c59a3f05ea3725c790246`
 更新时间：2026-08-12
@@ -198,14 +198,15 @@ GENERIC 结果合同首版保持 `RESOLVED|UNRESOLVED`，不借用 SPECIALIZED �
 ## 自包含业务用例与泛化护栏
 
 所有业务专有材料只放在一个 case root：原始 Wiki、补充澄清、生成规范、批准的 Skill、合成
-日志归档、两个场景的驱动输入和 oracle。通用 loader 只认识文件角色、哈希、action 和通用结果
+日志归档、三个场景的驱动输入和 oracle。通用 loader 只认识文件角色、哈希、action 和通用结果
 字段，不认识业务服务名、日志文案、协议、版本或阈值。
 
-首版 case 含两个固定快照场景：
+首版 case 含三个固定快照场景：
 
 1. 一条 COMPLETE 场景，验证多行记录、复合关联、数值推导和多个共同贡献因素；
-2. 一条 PARTIAL 场景，验证正向证据可以排除一项，而跨时钟容差与日志抑制使其余候选保持
-   UNKNOWN；快照中更早的日志只能作为抑制上下文，不能当成目标事件证明。
+2. 一条 PARTIAL 场景，验证正向证据确认一个聚合延迟域，而跨时钟容差与日志抑制使更具体的
+   服务端排队、API 执行和客户端收包贡献保持 UNKNOWN，不把缺日志写成排除；
+3. 一条 NONE 场景，验证完整快照只有非目标调用且目标日志可能受抑制时，不误关联、不猜结论。
 
 真实 Wiki 和真实日志不进入仓库；case 使用脱敏 Wiki 与小型合成日志。真实部署后不运行仓库
 测试，问题由用户带现场证据另行反馈。仓库测试证明的是通用转换/合同/执行能力，不外推真实
@@ -221,15 +222,26 @@ case 专有词没有泄漏到通用源码、适配器或配置。
 所有活动只从 `tools/test-flow/run.ps1|run.sh` 进入：
 
 1. Dev 先执行 `dev.default` 的 affected 与 full deterministic；
-2. 新增真实 Wiki→Skill Gate：真实模型只读取原始 Wiki/澄清，产物经确定性 validator、语义
-   oracle 和旁注剥离检查；
-3. 确定性验证用同一批准产物分别执行 COMPLETE 与 PARTIAL 两个场景，覆盖服务端重算、独立 Review、
-   结果公开和归档；Release 只保留一个选定场景的 fresh CrossJob，验证 Logparse 只解析一次、重启后
-   下载字节不变，不把两个业务场景硬编码进编排器；
+2. 新增真实 Wiki→Skill Gate：真实模型必须先加载身份绑定的转换 Skill，只能读取原始 Wiki、澄清和
+   Skill 直接声明的自包含通用合同参考，并且只能写唯一 GenerationSpec 输出；完整工具轨迹、实际
+   `dontAsk` 权限模式和先读后写顺序进入密封 usage 收据。产物经确定性 validator、case-local 语义
+   oracle 和旁注剥离检查。批准 Skill 仍由批准的
+   GenerationSpec 确定性渲染并固定字节，真实模型产物证明语义符合而不要求复现唯一措辞；
+3. 确定性场景回放用同一批准产物覆盖 COMPLETE、PARTIAL 与 NONE 的事件提取、机械规则重算和首条
+   terminal path 选择；语义规则的预期结果来自 case-local reviewed oracle，不能把这一步冒充真实
+   Specialist/Reviewer 执行。Release 只对一个选定场景执行 fresh CrossJob，从而真实覆盖独立 Review、
+   结果公开、归档、Logparse 只解析一次和重启后下载字节不变，不把多个业务场景硬编码进编排器；
 4. Release 仍从 GENESIS 与空 DATA_ROOT 开始，并把 case input digest、批准 Skill digest、模型、
    Client/Server/Logparse/MCP 和源码快照全部纳入 identity；
 5. 真实模型活动必须先 `--plan-only`。缺少 cache seal 等 admission 条件时只报告 BLOCKED，不运行
    模型且不盲重试。
+
+工具轨迹合同保持“唯一成功 Write 且它是最后一个工具调用”。提示词继续要求模型一次提交完整 Write；
+审计层仅容忍一次无路径、无内容的严格空对象 Write 显式失败，并要求它在全部必读材料成功返回后紧邻
+唯一成功 Write。该例外由本地 Write 必填字段合同重新分类，不依赖 provider 错误字符串，也不授予任何
+新的写入目标。含任一参数的失败 Write、权限拒绝、失败 Read、重复成功 Write 或 Write 后工具仍 fail
+closed。密封 v2 receipt 只保留相对路径、序号、结果和空输入本地分类，不保留 raw error、Write content
+或绝对路径。
 
 实现前权威基线证据为 `run-20260811T164446Z-49c22067`：`PASS_WITH_WARNINGS`，功能与证据复核
 均为 PASS；总计 2373 passed、1 skipped、0 failed/errors，唯一 warning 为
@@ -251,8 +263,17 @@ case 专有词没有泄漏到通用源码、适配器或配置。
 
 `proof.real-skill-generation` / `real.skill-generation` 也必须对同一个最终 snapshot 单独执行 plan-only。
 官方 Claude Code 2.1.89 CLI、包信息与 env-only settings 应先完成身份检查；若正式缓存没有
-`cache-seal.json`，admission 应以 `CLAUDE_CACHE_SEAL_MISSING` 阻塞且不得调用模型。计划上限仍为
-12 turns、200,000 token、3 USD 与 1200 秒。真实 Wiki→Skill 生成与 fresh Release CrossJob 只有在
+`cache-seal.json`，admission 应以 `CLAUDE_CACHE_SEAL_MISSING` 阻塞且不得调用模型。Wiki→Skill 使用
+独立、配置驱动的上限：12 turns、1,000,000 total token、单次模型请求最多 64,000 output token、10 USD 与 1800 秒 wrapper；其他 isolated
+Agent Gate 继续使用各自的默认上限，不能因该业务用例被一并放大。total token 严格等于 input、output、cache creation input 与
+cache read input 四项之和，四项缺失或派生总量不一致时不得标记 usage complete。64,000 是单次请求限制，不得拿它和跨多轮累计的 `output_tokens` 比较；其证明来自身份绑定的 wrapper 参数、Claude 子进程专用环境、固定 CLI 上限校验和密封 runtime 实现。Claude Code 终态 `modelUsage.maxOutputTokens` 只是静态模型档位默认值，不是实际请求值回显，不得用于 cap 证明。真实 Agent 进程只
+继承版本化最小环境白名单，provider 认证来自已审计的 env-only settings；收据仅封存有效环境键名及
+其摘要，不封存秘密值。Wiki→Skill 的 Backend wall time 为 1830 秒、Stage 总时限为 2100 秒；其他
+真实 Stage 仍按所选 cap 与声明的串行调用数另留终止宽限、生成物校验与证据密封余量。若模型返回
+结构完整的失败终态，wrapper 必须先保存真实 terminal usage 再保持非零退出；记录 usage 不会把失败
+Gate 改判为通过。真实 pytest Gate 会捕获内部模型流，
+所以不把它误当成编排器可验证的实时进度，也不启用无进展计时；直接输出可信语义事件的 adapter
+仍使用 360 秒无进展保护。真实 Wiki→Skill 生成与 fresh Release CrossJob 只有在
 各自 Gate 实际执行并形成密封 verdict 后才能宣称通过。
 
 ## 完成判据

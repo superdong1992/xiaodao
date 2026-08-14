@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import {
   ensureDirectory,
@@ -13,6 +14,18 @@ import {
   RELEASE_BASE_IMAGE,
   materializeClaudeSettings,
 } from "./release-inputs.mjs";
+import { isCompleteUsage, sumUsage, TOKEN_USAGE_FORMULA } from "./usage.mjs";
+import {
+  buildIsolatedAgentEnvironment,
+  ISOLATED_AGENT_CLAUDE_OUTPUT_TOKEN_KEY,
+  ISOLATED_AGENT_ENV_POLICY_VERSION,
+  ISOLATED_AGENT_OUTPUT_CAP_ENFORCEMENT,
+  validEnvironmentKeySummary,
+} from "../runtime-support/isolated-agent-env.mjs";
+import {
+  SKILL_GENERATION_TRACE_SCHEMA_VERSION,
+  validSkillGenerationTraceAuditReceipt,
+} from "../runtime-support/isolated-agent-tool-audit.mjs";
 
 function pythonRuntime(repoRoot) {
   return resolvePythonTestRuntime(repoRoot);
@@ -54,6 +67,14 @@ export function parseJUnitSummary(filePath) {
     skipped,
     executed: tests - skipped,
   };
+}
+
+export function materializePytestSummary(stageEvidence) {
+  const junitPath = path.join(stageEvidence, "pytest.xml");
+  if (!fs.existsSync(junitPath)) return null;
+  const summary = parseJUnitSummary(junitPath);
+  writeJsonSync(path.join(stageEvidence, "pytest-summary.json"), summary);
+  return summary;
 }
 
 export function evaluatePytestSummary(summary, { minPassed = 1, skipPolicy = "forbid-all-skipped" } = {}) {
@@ -159,6 +180,7 @@ async function pytestAction(context, stage, selectors, {
   minPassed = 1,
   skipPolicy = "forbid-all-skipped",
   selection = null,
+  isolatedAgent = false,
 } = {}) {
   const runtime = pythonRuntime(context.repoRoot);
   if (!runtime) {
@@ -175,12 +197,29 @@ async function pytestAction(context, stage, selectors, {
     writeJsonSync(path.join(stageEvidence, "pytest-summary.json"), summary);
     return { status: "NOT_REQUIRED", failure_domain: null, code: "AFFECTED_SCOPE_EMPTY", elapsed_seconds: 0, pytest: summary, selection };
   }
-  const scratch = path.join(context.attemptRoot, "scratch", gateExecutionId(stage, context.gateId ?? stage.id));
+  const externalScratch = process.platform === "win32";
+  const windowsScratchBoundary = isolatedAgent
+    ? os.tmpdir()
+    : path.join(context.repoRoot, ".tmp", "p");
+  if (externalScratch) ensureDirectory(windowsScratchBoundary);
+  const scratch = externalScratch
+    ? fs.mkdtempSync(path.join(windowsScratchBoundary, "p-"))
+    : path.join(context.attemptRoot, "scratch", gateExecutionId(stage, context.gateId ?? stage.id));
+  const scratchBoundary = externalScratch ? windowsScratchBoundary : context.attemptRoot;
+  const pytestScratch = externalScratch ? scratch : path.join(scratch, "pytest");
   ensureDirectory(scratch);
-  const loopback = probeLoopbackCapability(runtime, context.repoRoot);
+  const processEnvironment = {
+    PYTHONNOUSERSITE: "1",
+    PYTHONPYCACHEPREFIX: path.join(scratch, "pycache"),
+    ...env,
+  };
+  const loopbackEnvironment = isolatedAgent
+    ? buildIsolatedAgentEnvironment({ ambient: process.env, explicit: processEnvironment })
+    : process.env;
+  const loopback = probeLoopbackCapability(runtime, context.repoRoot, loopbackEnvironment);
   writeJsonSync(path.join(stageEvidence, "loopback-capability.json"), loopback);
   if (loopback.status !== "PASS") {
-    removeTreeWritable(scratch, context.attemptRoot);
+    removeTreeWritable(scratch, scratchBoundary);
     return {
       status: "BLOCKED",
       failure_domain: "INFRA",
@@ -194,40 +233,44 @@ async function pytestAction(context, stage, selectors, {
     ...selectors,
     "-q",
     "-p", "no:cacheprovider",
-    `--basetemp=${path.join(scratch, "pytest")}`,
+    `--basetemp=${pytestScratch}`,
     `--junitxml=${path.join(stageEvidence, "pytest.xml")}`,
     ...extra,
   ];
-  const result = await runProcess({
-    repoRoot: context.repoRoot,
-    attemptRoot: context.attemptRoot,
-    stage,
-    command: runtime.command,
-    args,
-    cwd: context.repoRoot,
-    env: {
-      PYTHONNOUSERSITE: "1",
-      PYTHONPYCACHEPREFIX: path.join(scratch, "pycache"),
-      ...env,
-    },
-    hardTimeoutSeconds: stage.timeout_seconds,
-    noProgressSeconds: real ? context.policies.real_no_progress_seconds : null,
-    rawLogLimitBytes: context.policies.raw_log_file_limit_bytes,
-    eventWriter: context.eventWriter,
-    executionId: gateExecutionId(stage, context.gateId ?? stage.id),
-    pollMilliseconds: context.policies.poll_milliseconds,
-    progressAllowlistVersion: context.policies.progress_allowlist_version,
-  });
-  removeTreeWritable(scratch, context.attemptRoot);
-  if (result.status === "ERROR") return { ...result, failure_domain: "HARNESS", code: result.termination?.trigger ?? "PROCESS_EVIDENCE_ERROR" };
-  if (result.status === "INCONCLUSIVE") return { ...result, failure_domain: "EXTERNAL", code: result.termination.trigger };
-  if (result.status !== "PASS") return { ...result, failure_domain: real ? "CONTRACT" : "PRODUCT", code: "PYTEST_FAILED" };
-  let summary;
+  let result;
   try {
-    summary = parseJUnitSummary(path.join(stageEvidence, "pytest.xml"));
-    writeJsonSync(path.join(stageEvidence, "pytest-summary.json"), summary);
+    result = await runProcess({
+      repoRoot: context.repoRoot,
+      attemptRoot: context.attemptRoot,
+      stage,
+      command: runtime.command,
+      args,
+      cwd: context.repoRoot,
+      env: processEnvironment,
+      hardTimeoutSeconds: stage.timeout_seconds,
+      noProgressSeconds: null,
+      rawLogLimitBytes: context.policies.raw_log_file_limit_bytes,
+      eventWriter: context.eventWriter,
+      executionId: gateExecutionId(stage, context.gateId ?? stage.id),
+      pollMilliseconds: context.policies.poll_milliseconds,
+      progressAllowlistVersion: context.policies.progress_allowlist_version,
+      environmentPolicy: isolatedAgent ? ISOLATED_AGENT_ENV_POLICY_VERSION : null,
+    });
+  } finally {
+    removeTreeWritable(scratch, scratchBoundary);
+  }
+  let summary = null;
+  let summaryError = null;
+  try {
+    summary = materializePytestSummary(stageEvidence);
   } catch (error) {
-    return { ...result, status: "ERROR", failure_domain: "HARNESS", code: error.message, pytest: null };
+    summaryError = error;
+  }
+  if (result.status === "ERROR") return { ...result, failure_domain: "HARNESS", code: result.termination?.trigger ?? "PROCESS_EVIDENCE_ERROR", pytest: summary };
+  if (result.status === "INCONCLUSIVE") return { ...result, failure_domain: "EXTERNAL", code: result.termination.trigger, pytest: summary };
+  if (result.status !== "PASS") return { ...result, failure_domain: real ? "CONTRACT" : "PRODUCT", code: "PYTEST_FAILED", pytest: summary };
+  if (summaryError !== null || summary === null) {
+    return { ...result, status: "ERROR", failure_domain: "HARNESS", code: summaryError?.message ?? "JUNIT_MISSING", pytest: null };
   }
   const evaluation = evaluatePytestSummary(summary, { minPassed, skipPolicy });
   return { ...result, ...evaluation, pytest: summary, selection };
@@ -297,9 +340,15 @@ async function repositoryCheck(context, stage, gate) {
   let args;
   const scratch = path.join(context.attemptRoot, "scratch", gateExecutionId(stage, context.gateId));
   ensureDirectory(scratch);
+  let externalPycacheRoot = null;
+  let pycacheRoot = path.join(scratch, "pycache");
   if (gate.check === "python-compileall") {
     const runtime = pythonRuntime(context.repoRoot);
     if (!runtime) return { status: "BLOCKED", failure_domain: "INFRA", code: "PYTHON_312_TEST_RUNTIME_MISSING", elapsed_seconds: 0 };
+    if (process.platform === "win32") {
+      externalPycacheRoot = fs.mkdtempSync(path.join(os.tmpdir(), "test-flow-compileall-"));
+      pycacheRoot = externalPycacheRoot;
+    }
     command = runtime.command;
     args = [...runtime.interpreterPrefix, "-m", "compileall", "-q", ...gate.paths];
   } else if (gate.check === "uv-lock") {
@@ -313,26 +362,31 @@ async function repositoryCheck(context, stage, gate) {
   } else {
     return { status: "ERROR", failure_domain: "HARNESS", code: "REPOSITORY_CHECK_UNSUPPORTED", elapsed_seconds: 0 };
   }
-  const result = await runProcess({
-    repoRoot: gate.check === "git-diff-check" ? context.sourceRepoRoot : context.repoRoot,
-    attemptRoot: context.attemptRoot,
-    stage,
-    command,
-    args,
-    cwd: gate.check === "git-diff-check" ? context.sourceRepoRoot : context.repoRoot,
-    env: {
-      PYTHONNOUSERSITE: "1",
-      PYTHONPYCACHEPREFIX: path.join(scratch, "pycache"),
-    },
-    hardTimeoutSeconds: stage.timeout_seconds,
-    noProgressSeconds: null,
-    rawLogLimitBytes: context.policies.raw_log_file_limit_bytes,
-    eventWriter: context.eventWriter,
-    executionId: gateExecutionId(stage, context.gateId),
-    pollMilliseconds: context.policies.poll_milliseconds,
-    progressAllowlistVersion: context.policies.progress_allowlist_version,
-  });
-  removeTreeWritable(scratch, context.attemptRoot);
+  let result;
+  try {
+    result = await runProcess({
+      repoRoot: gate.check === "git-diff-check" ? context.sourceRepoRoot : context.repoRoot,
+      attemptRoot: context.attemptRoot,
+      stage,
+      command,
+      args,
+      cwd: gate.check === "git-diff-check" ? context.sourceRepoRoot : context.repoRoot,
+      env: {
+        PYTHONNOUSERSITE: "1",
+        PYTHONPYCACHEPREFIX: pycacheRoot,
+      },
+      hardTimeoutSeconds: stage.timeout_seconds,
+      noProgressSeconds: null,
+      rawLogLimitBytes: context.policies.raw_log_file_limit_bytes,
+      eventWriter: context.eventWriter,
+      executionId: gateExecutionId(stage, context.gateId),
+      pollMilliseconds: context.policies.poll_milliseconds,
+      progressAllowlistVersion: context.policies.progress_allowlist_version,
+    });
+  } finally {
+    removeTreeWritable(scratch, context.attemptRoot);
+    if (externalPycacheRoot !== null) removeTreeWritable(externalPycacheRoot, os.tmpdir());
+  }
   const receipt = {
     schema_version: 2,
     check: gate.check,
@@ -375,20 +429,83 @@ function agentCommand(context, workflow = "job") {
   if (!caps?.max_turns || !caps?.max_budget_usd || !caps?.hard_timeout_seconds) return null;
   const usageRoot = path.join(context.gateRoot, "model-usage");
   ensureDirectory(usageRoot);
-  return `${quoteShell(process.execPath)} ${quoteShell(path.join(context.repoRoot, "tools", "test-flow", "runtime-support", "isolated-agent-wrapper.mjs"))} --claude-entry ${quoteShell(runtime.entry)} --settings ${quoteShell(runtime.settings)} --model ${quoteShell(context.runtimeProfile.claude.model)} --usage-root ${quoteShell(usageRoot)} --max-turns ${caps.max_turns} --max-total-tokens ${caps.max_total_tokens} --max-budget-usd ${caps.max_budget_usd} --hard-timeout-seconds ${caps.hard_timeout_seconds} --workflow ${quoteShell(workflow)}`;
+  const skillRootArgument = workflow === "skill-generation"
+    ? ` --skill-root ${quoteShell(path.join(runtime.config, "skills", "wiki-to-diagnosis-skill"))} --source-root ${quoteShell(context.repoRoot)}`
+    : "";
+  const maxOutputTokensArgument = caps.max_output_tokens === undefined
+    ? ""
+    : ` --max-output-tokens ${caps.max_output_tokens} --max-output-tokens-upper-limit ${context.runtimeProfile.claude.max_output_tokens_upper_limit}`;
+  return `${quoteShell(process.execPath)} ${quoteShell(path.join(context.repoRoot, "tools", "test-flow", "runtime-support", "isolated-agent-wrapper.mjs"))} --claude-entry ${quoteShell(runtime.entry)} --settings ${quoteShell(runtime.settings)} --model ${quoteShell(context.runtimeProfile.claude.model)} --usage-root ${quoteShell(usageRoot)} --max-turns ${caps.max_turns} --max-total-tokens ${caps.max_total_tokens}${maxOutputTokensArgument} --max-budget-usd ${caps.max_budget_usd} --hard-timeout-seconds ${caps.hard_timeout_seconds} --workflow ${quoteShell(workflow)}${skillRootArgument}`;
 }
 
-function collectIsolatedModelUsage(context) {
+function validIsolatedOutputCapReceipt(invocation) {
+  const cap = invocation.effective_caps?.max_output_tokens;
+  const inboundKeys = invocation.environment_policy?.inbound?.key_names ?? [];
+  const claudeKeys = invocation.environment_policy?.claude_process?.key_names ?? [];
+  const enforcement = invocation.hard_cap_enforcement?.max_output_tokens;
+  if (inboundKeys.includes(ISOLATED_AGENT_CLAUDE_OUTPUT_TOKEN_KEY)) return false;
+  if (cap === undefined) {
+    return !claudeKeys.includes(ISOLATED_AGENT_CLAUDE_OUTPUT_TOKEN_KEY)
+      && enforcement === undefined;
+  }
+  return Number.isSafeInteger(cap)
+    && cap > 0
+    && cap <= invocation.effective_caps.max_total_tokens
+    && claudeKeys.includes(ISOLATED_AGENT_CLAUDE_OUTPUT_TOKEN_KEY)
+    && enforcement === ISOLATED_AGENT_OUTPUT_CAP_ENFORCEMENT;
+}
+
+export function collectIsolatedModelUsage(context, profile) {
   const usageRoot = path.join(context.gateRoot, "model-usage");
   const files = fs.existsSync(usageRoot) ? fs.readdirSync(usageRoot).filter((name) => name.endsWith(".json")).sort() : [];
   const invocations = files.map((name) => JSON.parse(fs.readFileSync(path.join(usageRoot, name), "utf8")));
-  if (invocations.some((invocation) => invocation?.schema_version !== 2 || invocation.class !== "isolated-agent" || invocation.usage_complete !== true)) throw new Error("ISOLATED_MODEL_USAGE_RECEIPT_INVALID");
-  const usage = invocations.reduce((total, invocation) => ({
-    input_tokens: total.input_tokens + Number(invocation.usage.input_tokens),
-    output_tokens: total.output_tokens + Number(invocation.usage.output_tokens),
-    cost_usd: Math.round((total.cost_usd + Number(invocation.usage.cost_usd)) * 1_000_000) / 1_000_000,
-  }), { input_tokens: 0, output_tokens: 0, cost_usd: 0 });
-  const summary = { schema_version: 2, status: "PASS", invocations, usage };
+  if (invocations.length === 0) throw new Error("ISOLATED_MODEL_USAGE_RECEIPT_MISSING");
+  if (invocations.some((invocation) => (
+    invocation?.schema_version !== 3
+    || invocation.class !== "isolated-agent"
+    || invocation.usage_complete !== true
+    || !isCompleteUsage(invocation.usage)
+    || Object.hasOwn(invocation, "observed_request_limits")
+  ))) throw new Error("ISOLATED_MODEL_USAGE_RECEIPT_INVALID");
+  if (invocations.some((invocation) => (
+    invocation.environment_policy?.schema_version !== 1
+    || invocation.environment_policy?.version !== ISOLATED_AGENT_ENV_POLICY_VERSION
+    || invocation.environment_policy?.provider_auth_source !== "audited-settings-file"
+    || !validEnvironmentKeySummary(invocation.environment_policy?.inbound)
+    || !validEnvironmentKeySummary(invocation.environment_policy?.claude_process)
+    || !validIsolatedOutputCapReceipt(invocation)
+  ))) throw new Error("ISOLATED_MODEL_ENVIRONMENT_POLICY_RECEIPT_INVALID");
+  const expectedWorkflow = profile === "real-skill-generation" ? "skill-generation" : "job";
+  if (invocations.some((invocation) => invocation.workflow !== expectedWorkflow)) throw new Error("ISOLATED_MODEL_WORKFLOW_RECEIPT_INVALID");
+  if (invocations.some((invocation) => (
+    typeof invocation.terminal?.subtype !== "string"
+    || typeof invocation.terminal?.is_error !== "boolean"
+    || invocation.wrapper_outcome?.schema_version !== 1
+    || !["PASS", "FAIL"].includes(invocation.wrapper_outcome?.status)
+    || (invocation.wrapper_outcome.status === "PASS" && invocation.wrapper_outcome.code !== null)
+    || (invocation.wrapper_outcome.status === "FAIL" && !/^WRAPPER_[A-Z0-9_]+$/.test(invocation.wrapper_outcome.code ?? ""))
+  ))) throw new Error("ISOLATED_MODEL_TERMINAL_RECEIPT_INVALID");
+  if (expectedWorkflow === "skill-generation" && invocations.some((invocation) => {
+    const audit = invocation.tool_trace_audit;
+    if (audit === null) return invocation.wrapper_outcome.status === "PASS";
+    const passedAudit = validSkillGenerationTraceAuditReceipt(audit);
+    const failedAudit = audit?.schema_version === SKILL_GENERATION_TRACE_SCHEMA_VERSION
+      && audit.status === "FAIL"
+      && audit.workflow === "skill-generation"
+      && /^SKILL_TRACE_[A-Z0-9_]+$/.test(audit.code ?? "")
+      && Object.keys(audit).sort().join("\0") === ["code", "schema_version", "status", "workflow"].join("\0");
+    return invocation.wrapper_outcome.status === "PASS" ? !passedAudit : !(passedAudit || failedAudit);
+  })) throw new Error("ISOLATED_MODEL_TOOL_TRACE_AUDIT_INVALID");
+  if (expectedWorkflow === "job" && invocations.some((invocation) => invocation.tool_trace_audit !== null)) throw new Error("ISOLATED_MODEL_TOOL_TRACE_AUDIT_UNEXPECTED");
+  const usage = sumUsage(invocations.map((invocation) => invocation.usage));
+  const summary = {
+    schema_version: 3,
+    status: "PASS",
+    usage_complete: true,
+    token_formula: TOKEN_USAGE_FORMULA,
+    invocations,
+    usage,
+  };
   writeJsonSync(path.join(context.gateRoot, "model-usage.json"), summary);
   return summary;
 }
@@ -567,7 +684,7 @@ async function crossJob(context, stage) {
     return { ...result, status: "ERROR", failure_domain: "HARNESS", code: "CROSS_JOB_RECEIPT_INVALID" };
   }
   const receiptStatuses = new Set(["PASS", "FAIL", "INCONCLUSIVE", "BLOCKED", "ERROR"]);
-  if (receipt.schema_version !== 2 || !receiptStatuses.has(receipt.status) || receipt.stage_id !== stage.id || receipt.gate_id !== context.gateId || receipt.runtime_profile_digest !== context.plan.runtime_profile_digest) {
+  if (receipt.schema_version !== 3 || !receiptStatuses.has(receipt.status) || receipt.stage_id !== stage.id || receipt.gate_id !== context.gateId || receipt.runtime_profile_digest !== context.plan.runtime_profile_digest) {
     return { ...result, status: "ERROR", failure_domain: "HARNESS", code: "CROSS_JOB_RECEIPT_INVALID" };
   }
   if (result.status === "ERROR") return { ...result, failure_domain: "HARNESS", code: result.termination?.trigger ?? "CROSS_JOB_EVIDENCE_ERROR" };
@@ -662,6 +779,10 @@ function realEnvironment(context, profile) {
   if (!runtime) return { error: "CLAUDE_RUNTIME_MISSING" };
   const common = {
     ...runtime.environment,
+    TEST_FLOW_AGENT_BACKEND_WALL_TIME_SECONDS: String(Math.min(
+      context.planStage.timeout_seconds - 30,
+      context.planStage.hard_caps.hard_timeout_seconds + 30,
+    )),
     S08_REAL_AGENT_COMMAND: command,
     S08_REAL_GENERIC_LOCATOR_AGENT_COMMAND: command,
     S08_REAL_SKILL_GENERATION_AGENT_COMMAND: command,
@@ -698,6 +819,10 @@ function realEnvironment(context, profile) {
       env: {
         ...common,
         S08_REAL_SKILL_GENERATION_GATE: "1",
+        S08_REAL_SKILL_GENERATION_AUDIT_PATH: path.join(
+          context.gateRoot,
+          "scenario-evaluation-audit.json",
+        ),
         S08_RELEASE_CASES_ROOT: path.join(context.repoRoot, "tests", "cases", "release"),
       },
     };
@@ -760,12 +885,16 @@ export async function executeGate(context, stage, gateId, gate) {
       minPassed: gate.min_passed,
       skipPolicy: gate.skip_policy,
       selection,
+      isolatedAgent: Boolean(gate.environment_profile && gate.environment_profile !== "real-logparse"),
     });
-    if (result.status === "PASS" && gate.environment_profile && gate.environment_profile !== "real-logparse") {
+    if (gate.environment_profile && gate.environment_profile !== "real-logparse") {
       try {
-        const modelUsage = collectIsolatedModelUsage(scoped);
+        const modelUsage = collectIsolatedModelUsage(scoped, gate.environment_profile);
         return { ...result, invocations: modelUsage.invocations, usage: modelUsage.usage, usage_complete: true };
-      } catch {
+      } catch (error) {
+        if (result.status !== "PASS" && error?.message === "ISOLATED_MODEL_USAGE_RECEIPT_MISSING") {
+          return { ...result, invocations: [], usage_complete: false };
+        }
         return { ...result, status: "ERROR", failure_domain: "HARNESS", code: "ISOLATED_MODEL_USAGE_RECEIPT_INVALID" };
       }
     }

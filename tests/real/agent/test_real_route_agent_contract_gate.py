@@ -135,7 +135,9 @@ def test_real_route_agent_synthesizes_valid_outcome_from_production_contract(
             ),
             resource_limits=default_resource_limits(JobType.ROUTE),
             test_limits=BackendExecutionLimits(
-                wall_time_seconds=240.0,
+                wall_time_seconds=float(
+                    os.environ["TEST_FLOW_AGENT_BACKEND_WALL_TIME_SECONDS"]
+                ),
                 stdout_stderr_bytes=4 * 1024 * 1024,
                 workspace_bytes=8 * 1024 * 1024,
                 poll_interval_seconds=0.02,

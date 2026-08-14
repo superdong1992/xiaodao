@@ -849,8 +849,9 @@ _AUTHOR_NOTE = re.compile(r"(?s)(?:\(#.*?#\)|（#.*?#）)")
 def strip_author_notes(wiki_text: str) -> str:
     """Remove the two author-note forms from material copied into products.
 
-    A conversion Agent may read these notes as author guidance.  They are not
-    diagnosis knowledge and must never be copied into a generated product.
+    Author notes are conversion metadata removed before business interpretation.
+    They are neither author guidance nor diagnosis knowledge and must never enter
+    a generated product.
     """
 
     wiki = normalize_wiki(wiki_text)

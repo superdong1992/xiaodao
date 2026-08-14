@@ -80,23 +80,37 @@ function validateSymlink(root, absolute, target) {
   if (!resolvedPathInside(root, resolvedTarget)) throw new Error(`SOURCE_SNAPSHOT_SYMLINK_OUTSIDE_ROOT:${absolute}`);
 }
 
-function record(root, expected) {
+function record(root, expected, { useExpectedFileMode = false } = {}) {
   const absolute = path.resolve(root, ...expected.path.split("/"));
   if (!absolute.startsWith(`${root}${path.sep}`)) throw new Error(`SOURCE_SNAPSHOT_PATH_INVALID:${expected.path}`);
   const metadata = fs.lstatSync(absolute);
   if (expected.kind === "symlink") {
+    if (expected.mode !== "120000") throw new Error(`SOURCE_SNAPSHOT_MODE_INVALID:${expected.path}`);
     const target = fs.readlinkSync(absolute);
     validateSymlink(root, absolute, target);
     return { path: expected.path, kind: "symlink", mode: "120000", target };
+  }
+  if (expected.kind !== "file" || !["100644", "100755"].includes(expected.mode)) {
+    throw new Error(`SOURCE_SNAPSHOT_MODE_INVALID:${expected.path}`);
   }
   if (!metadata.isFile()) throw new Error(`SOURCE_SNAPSHOT_ENTRY_INVALID:${expected.path}`);
   return {
     path: expected.path,
     kind: "file",
-    mode: metadata.mode & 0o111 ? "100755" : "100644",
+    mode: useExpectedFileMode ? expected.mode : metadata.mode & 0o111 ? "100755" : "100644",
     size: metadata.size,
     sha256: fileDigest(absolute),
   };
+}
+
+function materializeFileModes(root, records) {
+  const contentObserved = records.map((item) => record(root, item, { useExpectedFileMode: true }));
+  if (digest(canonicalJson(contentObserved)) !== expectedDigest) throw new Error("SOURCE_SNAPSHOT_CONTENT_DRIFT");
+  for (const item of records) {
+    if (item.kind !== "file") continue;
+    const absolute = path.resolve(root, ...item.path.split("/"));
+    fs.chmodSync(absolute, item.mode === "100755" ? 0o755 : 0o644);
+  }
 }
 
 const root = path.resolve(argument("--root"));
@@ -114,6 +128,7 @@ if (manifest.digest !== expectedDigest || manifestDigest !== expectedDigest || m
 if (canonicalJson(leafPaths(root)) !== canonicalJson(records.map((item) => item.path))) {
   throw new Error("SOURCE_SNAPSHOT_PATH_SET_DRIFT");
 }
+if (process.argv.includes("--materialize-file-modes")) materializeFileModes(root, records);
 const observed = records.map((item) => record(root, item));
 if (digest(canonicalJson(observed)) !== expectedDigest) throw new Error("SOURCE_SNAPSHOT_CONTENT_DRIFT");
 process.stdout.write(`${JSON.stringify({ schema_version: 1, status: "PASS", digest: expectedDigest, file_count: records.length })}\n`);

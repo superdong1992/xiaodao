@@ -1,0 +1,25 @@
+{
+  "resolution_status": "NONE",
+  "terminal_path_id": "none",
+  "case_status": "UNRESOLVED",
+  "causal_factor_ids": [],
+  "candidate_factor_ids": ["server_receive_queue", "direct_api_overrun", "client_receive_queue"],
+  "excluded_factor_ids": [],
+  "criterion_statuses": ["SATISFIED", "SATISFIED", "SATISFIED"],
+  "required_rule_results": {
+    "client_call_present": "UNKNOWN",
+    "client_detail_present": "UNKNOWN",
+    "queue_history_present": "UNKNOWN",
+    "late_response_present": "UNKNOWN",
+    "api_complete_present": "UNKNOWN",
+    "deadloop_present": "UNKNOWN",
+    "api_overrun_confirmed": "UNKNOWN",
+    "deadloop_overrun_confirmed": "UNKNOWN",
+    "queue_contributed_timeout": "UNKNOWN",
+    "upstream_api_caused_queue": "UNKNOWN",
+    "partial_snapshot_supported": "UNKNOWN",
+    "server_receive_aggregate_partial": "UNKNOWN",
+    "client_receive_aggregate_partial": "UNKNOWN"
+  },
+  "required_safety_phrases": ["超时不等于取消", "固定 Diagnosis Skill"]
+}

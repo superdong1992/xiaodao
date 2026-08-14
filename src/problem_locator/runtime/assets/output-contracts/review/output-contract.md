@@ -58,10 +58,32 @@ produce `[2026-07-30T23:59:59.500Z, 2026-07-31T00:00:03.500Z]`. Therefore an
 event at `2026-07-31T00:00:00.100Z` is 2900ms before the problem time and is
 inside that example window.
 
-`fact_refs` must equal the facts the service independently uses. List USER_FACT event
-selectors first, then rule-owned facts: `FACT_FIELD_EQUALS`, `FACT_IN`, a USER_FACT
-`EVENT_TIME_WINDOW` reference, and FACT nodes visited by `NUMERIC_COMPARE`; preserve
-first-use order and de-duplicate. Claims that use none of these have `fact_refs=[]`.
+`fact_refs` must equal the facts the service independently uses. This is a mechanical
+list, not a summary of which facts seem important to the explanation. Build it for
+every rule before deciding that rule's result, including rules that finish as
+`UNKNOWN` or `NOT_APPLICABLE` and rules whose referenced event has no matches:
+
+1. Determine the rule's directly referenced event IDs in contract order. This is the
+   single `event` for event rules; each event member for coverage, correlation,
+   equality and ordering rules; each `FIELD` operand and join event for
+   `NUMERIC_COMPARE`; and `evidence_events` for `SEMANTIC_CAUSALITY`. Do not add an
+   event merely because it belongs to a dependency rule.
+2. For each directly referenced event, traverse its extractor `selectors` in
+   declaration order. For every selector whose `value.source` is `USER_FACT`, find
+   the unique current fact with the same `provenance.input_name` and append that
+   fact's item ID. Do this even when the event is absent, lossy, or made
+   non-applicable by a failed dependency; those facts still define the event set the
+   service attempted to evaluate.
+3. Append rule-owned facts in expression order: `FACT_FIELD_EQUALS`, `FACT_IN`, a
+   USER_FACT `EVENT_TIME_WINDOW` reference, and FACT nodes visited by
+   `NUMERIC_COMPARE`.
+4. De-duplicate by first use without sorting. Only when both fact-collection passes
+   contribute nothing may the claim use `fact_refs=[]`.
+
+Before sealing, make an in-reasoning row for every required rule containing its
+direct event IDs, selector fact IDs, rule-owned fact IDs and final `fact_refs`, and
+check that all four columns follow the steps above. Do not write this checklist to
+the Workspace.
 
 `PASS` is allowed when the independently selected path is the Candidate's declared
 `terminal_path_id`, its `COMPLETE|PARTIAL` resolution equals the Candidate, every

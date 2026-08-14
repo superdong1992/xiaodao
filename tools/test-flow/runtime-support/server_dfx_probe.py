@@ -31,6 +31,7 @@ EXPECTED_VALIDATION_FIELDS = {
     "goals",
     "non_goals",
     "problem_spec",
+    "raw_problem_text",
     "scope",
     "statement",
 }

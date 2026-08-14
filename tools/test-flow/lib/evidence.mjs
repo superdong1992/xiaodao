@@ -11,6 +11,18 @@ import {
 } from "./util.mjs";
 import { buildWaterfallSummary, readRelayedEventPart, validateEventFile } from "./events.mjs";
 import { classifyRun } from "./status.mjs";
+import {
+  ISOLATED_AGENT_ENV_POLICY_VERSION,
+  ISOLATED_AGENT_OUTPUT_CAP_ENFORCEMENT,
+  validEnvironmentKeySummary,
+} from "../runtime-support/isolated-agent-env.mjs";
+import {
+  isCompleteUsage,
+  normalizeUsage as normalizeTokenUsage,
+  sumUsage as sumTokenUsage,
+  TOKEN_USAGE_FORMULA,
+  zeroUsage,
+} from "./usage.mjs";
 
 const SECRET_PATTERNS = [
   { code: "ANTHROPIC_KEY", expression: /sk-ant-[A-Za-z0-9_-]{16,}/g },
@@ -207,7 +219,7 @@ async function awaitRequiredEventVisibility(attemptRoot, requiredFiles, seconds)
 }
 
 export function recoverStageAuditProgress({ attemptRoot, stageRoot, stageId }) {
-  const progress = { client_tool_calls: 0, server_tool_calls: 0, usage: { input_tokens: 0, output_tokens: 0, cost_usd: 0 } };
+  const progress = { client_tool_calls: 0, server_tool_calls: 0, usage: zeroUsage() };
   const resolvedAttempt = path.resolve(attemptRoot);
   const resolvedStage = path.resolve(stageRoot);
   if (!resolvedStage.startsWith(`${resolvedAttempt}${path.sep}`) || !fs.existsSync(resolvedStage)) return progress;
@@ -216,9 +228,7 @@ export function recoverStageAuditProgress({ attemptRoot, stageRoot, stageId }) {
       const audit = readJson(path.join(resolvedStage, name));
       if (!Array.isArray(audit.records)) continue;
       progress.client_tool_calls += audit.records.length;
-      progress.usage.input_tokens += Number(audit.usage?.input_tokens ?? 0);
-      progress.usage.output_tokens += Number(audit.usage?.output_tokens ?? 0);
-      progress.usage.cost_usd = Math.round((progress.usage.cost_usd + Number(audit.usage?.cost_usd ?? 0)) * 1_000_000) / 1_000_000;
+      progress.usage = sumTokenUsage([progress.usage, audit.usage]);
     } catch {}
   }
   const instance = new Map([
@@ -277,29 +287,40 @@ const CANDIDATE_FIELDS = Object.freeze([
 ]);
 
 function normalizedUsage(value) {
-  return {
-    input_tokens: Number(value?.input_tokens ?? 0),
-    output_tokens: Number(value?.output_tokens ?? 0),
-    cost_usd: Math.round(Number(value?.cost_usd ?? 0) * 1_000_000) / 1_000_000,
-  };
+  return normalizeTokenUsage(value);
 }
 
 function sumUsage(values) {
-  return values.reduce((total, value) => {
-    const usage = normalizedUsage(value);
-    return {
-      input_tokens: total.input_tokens + usage.input_tokens,
-      output_tokens: total.output_tokens + usage.output_tokens,
-      cost_usd: Math.round((total.cost_usd + usage.cost_usd) * 1_000_000) / 1_000_000,
-    };
-  }, { input_tokens: 0, output_tokens: 0, cost_usd: 0 });
+  return sumTokenUsage(values);
 }
 
 function validUsage(value) {
-  const usage = normalizedUsage(value);
-  return Number.isSafeInteger(usage.input_tokens) && usage.input_tokens >= 0
-    && Number.isSafeInteger(usage.output_tokens) && usage.output_tokens >= 0
-    && Number.isFinite(usage.cost_usd) && usage.cost_usd >= 0;
+  return isCompleteUsage(value);
+}
+
+export function validOutputTokenCapEvidence(invocation, caps) {
+  if (Object.hasOwn(invocation, "observed_request_limits")) return false;
+  const declaredCap = caps?.max_output_tokens;
+  const marker = invocation.hard_cap_enforcement?.max_output_tokens;
+  if (declaredCap === undefined) {
+    if (marker !== undefined) return false;
+    if (invocation.class !== "isolated-agent") return true;
+    return invocation.environment_policy?.schema_version === 1
+      && invocation.environment_policy?.version === ISOLATED_AGENT_ENV_POLICY_VERSION
+      && validEnvironmentKeySummary(invocation.environment_policy?.inbound)
+      && validEnvironmentKeySummary(invocation.environment_policy?.claude_process)
+      && !(invocation.environment_policy.inbound.key_names ?? []).includes("CLAUDE_CODE_MAX_OUTPUT_TOKENS")
+      && !(invocation.environment_policy.claude_process.key_names ?? []).includes("CLAUDE_CODE_MAX_OUTPUT_TOKENS");
+  }
+  return Number.isSafeInteger(declaredCap)
+    && declaredCap > 0
+    && marker === ISOLATED_AGENT_OUTPUT_CAP_ENFORCEMENT
+    && invocation.environment_policy?.schema_version === 1
+    && invocation.environment_policy?.version === ISOLATED_AGENT_ENV_POLICY_VERSION
+    && validEnvironmentKeySummary(invocation.environment_policy?.inbound)
+    && validEnvironmentKeySummary(invocation.environment_policy?.claude_process)
+    && !(invocation.environment_policy?.inbound?.key_names ?? []).includes("CLAUDE_CODE_MAX_OUTPUT_TOKENS")
+    && (invocation.environment_policy?.claude_process?.key_names ?? []).includes("CLAUDE_CODE_MAX_OUTPUT_TOKENS");
 }
 
 function auditExecutedStageUsage(plan, planned, stage, failures) {
@@ -313,6 +334,10 @@ function auditExecutedStageUsage(plan, planned, stage, failures) {
   }
   const declarations = planned.invocation_caps ?? [];
   const invocations = gates.flatMap((gate) => gate.model_invocations ?? []);
+  if (invocations.some((invocation) => invocation?.schema_version !== 3 || !validUsage(invocation.usage))) {
+    failures.push({ code: "MODEL_USAGE_INVALID", stage_id: stage.id });
+    return;
+  }
   for (const gate of gates) {
     if ((gate.model_invocations ?? []).length > 0 && canonicalJson(normalizedUsage(gate.usage)) !== canonicalJson(sumUsage(gate.model_invocations.map((invocation) => invocation.usage)))) {
       failures.push({ code: "GATE_MODEL_USAGE_MISMATCH", stage_id: stage.id, gate_id: gate.id });
@@ -341,12 +366,17 @@ function auditExecutedStageUsage(plan, planned, stage, failures) {
       const usage = normalizedUsage(invocation.usage);
       const capsMatch = canonicalJson(invocation.effective_caps) === canonicalJson(declaration.caps);
       const terminalSuccess = invocation.terminal?.subtype === "success" && invocation.terminal?.is_error === false;
+      const wrapperSuccess = invocation.wrapper_outcome?.schema_version === 1
+        && invocation.wrapper_outcome?.status === "PASS"
+        && invocation.wrapper_outcome?.code === null;
       const modelMatches = typeof plan.release_inputs?.settings?.model === "string" && invocation.effective_model === plan.release_inputs.settings.model;
       const withinCaps = Number.isSafeInteger(invocation.turns) && invocation.turns > 0 && invocation.turns <= declaration.caps.max_turns
         && validUsage(usage)
         && usage.cost_usd <= declaration.caps.max_budget_usd
-        && usage.input_tokens + usage.output_tokens <= declaration.caps.max_total_tokens;
-      if (invocation.usage_complete !== true || !capsMatch || !terminalSuccess || !modelMatches || !withinCaps) {
+        && usage.total_tokens <= declaration.caps.max_total_tokens
+        && invocation.hard_cap_enforcement?.total_tokens === `terminal-usage-postcondition:${TOKEN_USAGE_FORMULA}`
+        && validOutputTokenCapEvidence(invocation, declaration.caps);
+      if (invocation.usage_complete !== true || !capsMatch || !terminalSuccess || !wrapperSuccess || !modelMatches || !withinCaps) {
         failures.push({ code: "MODEL_HARD_CAP_RECEIPT_MISMATCH", stage_id: stage.id, invocation_id: invocation.invocation_id ?? null });
       }
     }
@@ -601,11 +631,7 @@ function buildVerdict({ candidate, payloadSeal, streams, waterfall, scan, resour
     policy_digest: candidate.policy_digest,
     status_policy: candidate.status_policy,
     plan_fingerprint: candidate.plan_fingerprint,
-    usage: {
-      input_tokens: Number.isSafeInteger(candidate.usage?.input_tokens) && candidate.usage.input_tokens >= 0 ? candidate.usage.input_tokens : 0,
-      output_tokens: Number.isSafeInteger(candidate.usage?.output_tokens) && candidate.usage.output_tokens >= 0 ? candidate.usage.output_tokens : 0,
-      cost_usd: Number.isFinite(candidate.usage?.cost_usd) && candidate.usage.cost_usd >= 0 ? candidate.usage.cost_usd : 0,
-    },
+    usage: validUsage(candidate.usage) ? normalizedUsage(candidate.usage) : zeroUsage(),
     secret_scan: { status: scan.status, sensitive_value_occurrences: scan.sensitive_value_occurrences },
     candidate_input_digest: candidate.candidate_input_digest,
     payload_seal_digest: payloadSeal.root_digest,

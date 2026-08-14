@@ -8,11 +8,12 @@ import { fileURLToPath } from "node:url";
 
 import { allowedEmptyEventFiles, createAttempt, finalizeAttempt, recoverStageAuditProgress, requiredEventFiles, verifyVerdict } from "../lib/evidence.mjs";
 import { EventWriter } from "../lib/events.mjs";
+import { zeroUsage } from "../lib/usage.mjs";
 import { canonicalJson, removeTreeWritable, sha256Bytes, sha256File, writeJsonSync } from "../lib/util.mjs";
 
 const TOOL_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const STATUS_POLICY = { pass: 0, pass_with_warnings: 0, fail: 1, blocked: 2, error: 3 };
-const ZERO_USAGE = { input_tokens: 0, output_tokens: 0, cost_usd: 0 };
+const ZERO_USAGE = zeroUsage();
 
 function closeMinimalStream(attemptRoot, runId) {
   const writer = new EventWriter({ attemptRoot, runId, producerId: "orchestrator", producerType: "orchestrator" });
@@ -433,7 +434,15 @@ test("failed adapter progress recovers completed calls and authoritative usage",
     fs.mkdirSync(stageRoot, { recursive: true });
     writeJsonSync(path.join(stageRoot, "phase1.authoritative.json"), {
       records: [{ tool_name: "problem_locator_create_case" }, { tool_name: "problem_locator_get_case" }],
-      usage: { input_tokens: 100, output_tokens: 20, cost_usd: 0.125 },
+      usage: {
+        schema_version: 1,
+        input_tokens: 100,
+        output_tokens: 20,
+        cache_creation_input_tokens: 30,
+        cache_read_input_tokens: 40,
+        total_tokens: 190,
+        cost_usd: 0.125,
+      },
     });
     writeJsonSync(path.join(attemptRoot, "payload", "service-route-supervisor.json"), { status: "PASS" });
     const writer = new EventWriter({ attemptRoot, runId: "run-progress", producerId: "service-linux-route-diagnostics", producerType: "service" });
@@ -446,7 +455,15 @@ test("failed adapter progress recovers completed calls and authoritative usage",
     assert.deepEqual(recoverStageAuditProgress({ attemptRoot, stageRoot, stageId }), {
       client_tool_calls: 2,
       server_tool_calls: 2,
-      usage: { input_tokens: 100, output_tokens: 20, cost_usd: 0.125 },
+      usage: {
+        schema_version: 1,
+        input_tokens: 100,
+        output_tokens: 20,
+        cache_creation_input_tokens: 30,
+        cache_read_input_tokens: 40,
+        total_tokens: 190,
+        cost_usd: 0.125,
+      },
     });
   } finally { fs.rmSync(attemptRoot, { recursive: true, force: true }); }
 });

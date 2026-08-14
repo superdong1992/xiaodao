@@ -342,7 +342,7 @@ def test_retryability_sets_do_not_grow_silently() -> None:
 
 def test_resource_limits_are_the_frozen_v1_values() -> None:
     assert limits.ROUTER_CONTEXT_BYTES == 131_072
-    assert limits.SPECIALIST_CONTEXT_BYTES == 204_800
+    assert limits.SPECIALIST_CONTEXT_BYTES == 262_144
     assert limits.REVIEWER_CONTEXT_BYTES == 204_800
     assert limits.MAX_ATTACHMENT_BYTES == 2_684_354_560
     assert limits.MAX_CASE_RESOURCE_BYTES == 5_368_709_120
@@ -367,7 +367,7 @@ def test_default_resource_limits_are_role_specific_only_for_context() -> None:
     diagnose = limits.default_resource_limits(enums.JobType.DIAGNOSE)
     review = limits.default_resource_limits(enums.JobType.REVIEW)
     assert public_value(route, "context_bytes") == 131_072
-    assert public_value(diagnose, "context_bytes") == 204_800
+    assert public_value(diagnose, "context_bytes") == 262_144
     assert public_value(review, "context_bytes") == 204_800
     for value in (route, diagnose, review):
         assert public_value(value, "wall_time_seconds") == 1_800

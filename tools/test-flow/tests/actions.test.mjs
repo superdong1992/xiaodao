@@ -1,14 +1,61 @@
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { evaluatePytestSummary, parseJUnitSummary, planAffectedSelection, probeLoopbackCapability } from "../lib/actions.mjs";
+import { collectIsolatedModelUsage, evaluatePytestSummary, materializePytestSummary, parseJUnitSummary, planAffectedSelection, probeLoopbackCapability } from "../lib/actions.mjs";
+import { applyGateEvidenceContract } from "../lib/engine.mjs";
+import {
+  environmentKeySummary,
+  ISOLATED_AGENT_ENV_POLICY_VERSION,
+  ISOLATED_AGENT_OUTPUT_CAP_ENFORCEMENT,
+} from "../runtime-support/isolated-agent-env.mjs";
+import {
+  SKILL_GENERATION_TOOL_ATTEMPT_POLICY,
+  SKILL_GENERATION_TRACE_SCHEMA_VERSION,
+} from "../runtime-support/isolated-agent-tool-audit.mjs";
 
 function writeTest(file) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, "def test_placeholder():\n    assert True\n");
+}
+
+function passingSkillTraceAudit() {
+  const requiredReads = [
+    "workspace/inputs/wiki.md",
+    "workspace/inputs/clarifications.md",
+    "skill/references/generation-spec-v5-reference.md",
+    "skill/references/verification-contract-v2-reference.md",
+  ];
+  return {
+    schema_version: SKILL_GENERATION_TRACE_SCHEMA_VERSION,
+    status: "PASS",
+    workflow: "skill-generation",
+    skill: "wiki-to-diagnosis-skill",
+    tool_inventory: ["Skill", "Read", "Write"],
+    permission_mode: "dontAsk",
+    permission_policy_sha256: "a".repeat(64),
+    attempt_policy: SKILL_GENERATION_TOOL_ATTEMPT_POLICY,
+    attempt_policy_sha256: crypto.createHash("sha256").update(JSON.stringify(SKILL_GENERATION_TOOL_ATTEMPT_POLICY)).digest("hex"),
+    tool_sequence: [
+      { ordinal: 0, tool: "Skill", outcome: "SUCCESS" },
+      ...requiredReads.map((readPath, index) => ({ ordinal: index + 1, tool: "Read", outcome: "SUCCESS", path: readPath })),
+      { ordinal: 5, tool: "Write", outcome: "SUCCESS", path: "workspace/output/generation-spec.json" },
+    ],
+    accepted_validation_rejections: [],
+    required_reads: requiredReads,
+    observed_reads: requiredReads.map((readPath, index) => ({ ordinal: index + 1, path: readPath })),
+    linked_references: requiredReads.filter((readPath) => readPath.startsWith("skill/")),
+    output: {
+      ordinal: 5,
+      path: "workspace/output/generation-spec.json",
+      size_bytes: 3,
+      sha256: "b".repeat(64),
+    },
+    terminal: { subtype: "success", is_error: false },
+  };
 }
 
 test("a narrow affected selection runs before the full suite", () => {
@@ -96,6 +143,225 @@ test("pytest's testsuites wrapper aggregates inner suite counters", () => {
       skipped: 1,
       executed: 4,
     });
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a parseable failing JUnit result is materialized as a summary", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "test-flow-junit-failure-summary-"));
+  try {
+    fs.writeFileSync(path.join(root, "pytest.xml"), '<testsuites tests="1" failures="1" errors="0" skipped="0"></testsuites>\n');
+    const summary = materializePytestSummary(root);
+    assert.deepEqual(summary, {
+      schema_version: 2,
+      tests: 1,
+      passed: 0,
+      failures: 1,
+      errors: 0,
+      skipped: 0,
+      executed: 1,
+    });
+    assert.deepEqual(JSON.parse(fs.readFileSync(path.join(root, "pytest-summary.json"), "utf8")), summary);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("failed Gates index existing declared evidence while PASS still requires every file", () => {
+  const attemptRoot = fs.mkdtempSync(path.join(os.tmpdir(), "test-flow-failure-evidence-"));
+  try {
+    const stage = { id: "real.skill-generation" };
+    const gatePlan = { id: "real.agent.skill-generation" };
+    const gate = { evidence: ["pytest.xml", "pytest-summary.json", "scenario-evaluation-audit.json"] };
+    const gateRoot = path.join(attemptRoot, "payload", "stages", stage.id, "gates", gatePlan.id);
+    fs.mkdirSync(gateRoot, { recursive: true });
+    fs.writeFileSync(path.join(gateRoot, "pytest.xml"), "<testsuites tests=\"1\" failures=\"1\"/>\n");
+    fs.writeFileSync(path.join(gateRoot, "scenario-evaluation-audit.json"), '{"schema_version":1,"status":"FAIL"}\n');
+
+    const failed = applyGateEvidenceContract({
+      actionResult: { status: "FAIL", failure_domain: "CONTRACT", code: "PYTEST_FAILED" },
+      gate,
+      gatePlan,
+      stage,
+      attemptRoot,
+    });
+    assert.equal(failed.result.status, "FAIL");
+    assert.deepEqual(failed.evidence.map((item) => path.basename(item.path)), ["pytest.xml", "scenario-evaluation-audit.json"]);
+
+    const incompletePass = applyGateEvidenceContract({
+      actionResult: { status: "PASS" },
+      gate,
+      gatePlan,
+      stage,
+      attemptRoot,
+    });
+    assert.equal(incompletePass.result.status, "ERROR");
+    assert.equal(incompletePass.result.code, "GATE_REQUIRED_EVIDENCE_MISSING");
+
+    fs.writeFileSync(path.join(gateRoot, "pytest-summary.json"), '{"schema_version":2}\n');
+    const completePass = applyGateEvidenceContract({
+      actionResult: { status: "PASS" },
+      gate,
+      gatePlan,
+      stage,
+      attemptRoot,
+    });
+    assert.equal(completePass.result.status, "PASS");
+    assert.equal(completePass.evidence.length, 3);
+  } finally {
+    fs.rmSync(attemptRoot, { recursive: true, force: true });
+  }
+});
+
+test("failed isolated invocation usage is collected as evidence without converting the Gate to PASS", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "test-flow-failed-model-usage-"));
+  try {
+    const usageRoot = path.join(root, "model-usage");
+    fs.mkdirSync(usageRoot);
+    const usage = {
+      schema_version: 1,
+      input_tokens: 24411,
+      output_tokens: 97144,
+      cache_creation_input_tokens: 0,
+      cache_read_input_tokens: 68736,
+      total_tokens: 190291,
+      cost_usd: 3.398151,
+    };
+    fs.writeFileSync(path.join(usageRoot, "failed.json"), `${JSON.stringify({
+      schema_version: 3,
+      invocation_id: "isolated-agent:failed",
+      class: "isolated-agent",
+      workflow: "skill-generation",
+      environment_policy: {
+        schema_version: 1,
+        version: ISOLATED_AGENT_ENV_POLICY_VERSION,
+        provider_auth_source: "audited-settings-file",
+        session_credentials: "NONE",
+        inbound: environmentKeySummary({ PATH: "/bin" }),
+        claude_process: environmentKeySummary({ PATH: "/bin" }),
+      },
+      tool_trace_audit: null,
+      effective_model: "test-model",
+      effective_caps: { max_turns: 12, max_total_tokens: 1000000, max_budget_usd: 3, hard_timeout_seconds: 900 },
+      usage_complete: true,
+      usage,
+      terminal: { subtype: "error_max_budget_usd", is_error: true },
+      turns: 7,
+      wrapper_outcome: { schema_version: 1, status: "FAIL", code: "WRAPPER_MODEL_TERMINAL_INVALID" },
+      hard_cap_enforcement: {},
+      timed_out: false,
+      process: { exit_code: 1, signal: null },
+    })}\n`);
+    const summary = collectIsolatedModelUsage({ gateRoot: root }, "real-skill-generation");
+    assert.equal(summary.status, "PASS");
+    assert.deepEqual(summary.usage, usage);
+    assert.equal(summary.invocations.length, 1);
+    assert.equal(summary.invocations[0].wrapper_outcome.status, "FAIL");
+    assert.deepEqual(JSON.parse(fs.readFileSync(path.join(root, "model-usage.json"), "utf8")), summary);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("missing failed invocation usage remains incomplete instead of hiding the original Gate failure", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "test-flow-missing-model-usage-"));
+  try {
+    assert.throws(
+      () => collectIsolatedModelUsage({ gateRoot: root }, "real-skill-generation"),
+      /ISOLATED_MODEL_USAGE_RECEIPT_MISSING/,
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("isolated usage collection requires the child-env and sealed runtime binding for an output cap", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "test-flow-output-cap-receipt-"));
+  try {
+    const usageRoot = path.join(root, "model-usage");
+    fs.mkdirSync(usageRoot);
+    const usage = {
+      schema_version: 1,
+      input_tokens: 10,
+      output_tokens: 20,
+      cache_creation_input_tokens: 0,
+      cache_read_input_tokens: 0,
+      total_tokens: 30,
+      cost_usd: 0.01,
+    };
+    fs.writeFileSync(path.join(usageRoot, "capped.json"), `${JSON.stringify({
+      schema_version: 3,
+      invocation_id: "isolated-agent:capped",
+      class: "isolated-agent",
+      workflow: "skill-generation",
+      environment_policy: {
+        schema_version: 1,
+        version: ISOLATED_AGENT_ENV_POLICY_VERSION,
+        provider_auth_source: "audited-settings-file",
+        session_credentials: "NONE",
+        inbound: environmentKeySummary({ HOME: "/home/test", PATH: "/bin" }),
+        claude_process: environmentKeySummary({ CLAUDE_CODE_MAX_OUTPUT_TOKENS: "64000", HOME: "/home/test", PATH: "/bin" }),
+      },
+      tool_trace_audit: passingSkillTraceAudit(),
+      effective_model: "test-model",
+      effective_caps: { max_turns: 12, max_total_tokens: 1000000, max_output_tokens: 64000, max_budget_usd: 10, hard_timeout_seconds: 900 },
+      usage_complete: true,
+      usage,
+      terminal: { subtype: "success", is_error: false },
+      turns: 1,
+      wrapper_outcome: { schema_version: 1, status: "PASS", code: null },
+      hard_cap_enforcement: {
+        total_tokens: "terminal-usage-postcondition:input+output+cache_creation_input+cache_read_input",
+        max_output_tokens: ISOLATED_AGENT_OUTPUT_CAP_ENFORCEMENT,
+      },
+      timed_out: false,
+      process: { exit_code: 0, signal: null },
+    })}\n`);
+    const summary = collectIsolatedModelUsage({ gateRoot: root }, "real-skill-generation");
+    assert.equal(summary.status, "PASS");
+    assert.equal(summary.invocations[0].hard_cap_enforcement.max_output_tokens, ISOLATED_AGENT_OUTPUT_CAP_ENFORCEMENT);
+    const invalidReceipt = structuredClone(summary.invocations[0]);
+    invalidReceipt.hard_cap_enforcement.max_output_tokens = "terminal-model-usage-echo";
+    fs.rmSync(path.join(root, "model-usage.json"));
+    fs.writeFileSync(path.join(usageRoot, "capped.json"), `${JSON.stringify(invalidReceipt)}\n`);
+    assert.throws(
+      () => collectIsolatedModelUsage({ gateRoot: root }, "real-skill-generation"),
+      /ISOLATED_MODEL_ENVIRONMENT_POLICY_RECEIPT_INVALID/,
+    );
+    const legacyReceipt = structuredClone(summary.invocations[0]);
+    legacyReceipt.observed_request_limits = [64000];
+    fs.writeFileSync(path.join(usageRoot, "capped.json"), `${JSON.stringify(legacyReceipt)}\n`);
+    assert.throws(
+      () => collectIsolatedModelUsage({ gateRoot: root }, "real-skill-generation"),
+      /ISOLATED_MODEL_USAGE_RECEIPT_INVALID/,
+    );
+    const invalidToolAudit = structuredClone(summary.invocations[0]);
+    invalidToolAudit.tool_trace_audit.attempt_policy.max_empty_write_rejections = 2;
+    fs.writeFileSync(path.join(usageRoot, "capped.json"), `${JSON.stringify(invalidToolAudit)}\n`);
+    assert.throws(
+      () => collectIsolatedModelUsage({ gateRoot: root }, "real-skill-generation"),
+      /ISOLATED_MODEL_TOOL_TRACE_AUDIT_INVALID/,
+    );
+    const failedToolAudit = structuredClone(summary.invocations[0]);
+    failedToolAudit.tool_trace_audit = {
+      schema_version: SKILL_GENERATION_TRACE_SCHEMA_VERSION,
+      status: "FAIL",
+      workflow: "skill-generation",
+      code: "SKILL_TRACE_TOOL_RESULT_ERROR",
+    };
+    failedToolAudit.wrapper_outcome = { schema_version: 1, status: "FAIL", code: "WRAPPER_SKILL_TRACE_INVALID" };
+    failedToolAudit.process.exit_code = 1;
+    fs.writeFileSync(path.join(usageRoot, "capped.json"), `${JSON.stringify(failedToolAudit)}\n`);
+    const failedSummary = collectIsolatedModelUsage({ gateRoot: root }, "real-skill-generation");
+    assert.equal(failedSummary.invocations[0].tool_trace_audit.schema_version, SKILL_GENERATION_TRACE_SCHEMA_VERSION);
+    fs.rmSync(path.join(root, "model-usage.json"));
+    failedToolAudit.tool_trace_audit.unexpected = true;
+    fs.writeFileSync(path.join(usageRoot, "capped.json"), `${JSON.stringify(failedToolAudit)}\n`);
+    assert.throws(
+      () => collectIsolatedModelUsage({ gateRoot: root }, "real-skill-generation"),
+      /ISOLATED_MODEL_TOOL_TRACE_AUDIT_INVALID/,
+    );
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

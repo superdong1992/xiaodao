@@ -34,6 +34,7 @@ namespace ProblemLocator.TestFlow {
         [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] public static extern IntPtr CreateJobObject(IntPtr attributes, string name);
         [DllImport("kernel32.dll", SetLastError=true)] [return: MarshalAs(UnmanagedType.Bool)] public static extern bool SetInformationJobObject(IntPtr job, Int32 kind, IntPtr value, UInt32 length);
         [DllImport("kernel32.dll", SetLastError=true)] [return: MarshalAs(UnmanagedType.Bool)] public static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
+        [DllImport("kernel32.dll", SetLastError=true)] [return: MarshalAs(UnmanagedType.Bool)] public static extern bool TerminateJobObject(IntPtr job, UInt32 exitCode);
         [DllImport("kernel32.dll", SetLastError=true)] [return: MarshalAs(UnmanagedType.Bool)] public static extern bool CloseHandle(IntPtr handle);
     }
 }
@@ -80,19 +81,19 @@ function New-KillOnCloseJob {
 }
 
 $spec = [IO.File]::ReadAllText([IO.Path]::GetFullPath($SpecPath), $utf8) | ConvertFrom-Json
-$stdoutWriter = $null
-$stderrWriter = $null
+$stdoutStream = $null
+$stderrStream = $null
 $process = $null
 $job = [IntPtr]::Zero
 $started = [DateTime]::UtcNow
 $streamLimit = [int64]$spec.raw_log_limit_bytes
 if ($streamLimit -le 0) { throw 'TEST_FLOW_RAW_LOG_LIMIT' }
-$streamState = [hashtable]::Synchronized(@{
+$terminationPath = [IO.Path]::GetFullPath([string]$spec.termination_path)
+$streamState = @{
     stdout_bytes = [int64]0
     stderr_bytes = [int64]0
     exceeded = $false
-})
-$newlineBytes = [int64]$utf8.GetByteCount([Environment]::NewLine)
+}
 try {
     $start = New-Object Diagnostics.ProcessStartInfo
     $start.FileName = [string]$spec.executable
@@ -104,14 +105,23 @@ try {
     $start.RedirectStandardError = $true
     $start.StandardOutputEncoding = $utf8
     $start.StandardErrorEncoding = $utf8
+    $start.EnvironmentVariables.Clear()
     foreach ($property in @($spec.environment.PSObject.Properties)) {
         $start.EnvironmentVariables[[string]$property.Name] = [string]$property.Value
     }
 
-    $stdoutWriter = New-Object IO.StreamWriter([string]$spec.stdout_path, $false, $utf8)
-    $stderrWriter = New-Object IO.StreamWriter([string]$spec.stderr_path, $false, $utf8)
-    $stdoutWriter.AutoFlush = $true
-    $stderrWriter.AutoFlush = $true
+    $stdoutStream = [IO.File]::Open(
+        [IO.Path]::GetFullPath([string]$spec.stdout_path),
+        [IO.FileMode]::CreateNew,
+        [IO.FileAccess]::Write,
+        [IO.FileShare]::Read
+    )
+    $stderrStream = [IO.File]::Open(
+        [IO.Path]::GetFullPath([string]$spec.stderr_path),
+        [IO.FileMode]::CreateNew,
+        [IO.FileAccess]::Write,
+        [IO.FileShare]::Read
+    )
     $process = New-Object Diagnostics.Process
     $process.StartInfo = $start
     $job = New-KillOnCloseJob
@@ -119,46 +129,99 @@ try {
     if (-not [ProblemLocator.TestFlow.NativeJob]::AssignProcessToJobObject($job, $process.Handle)) {
         throw "TEST_FLOW_JOB_ASSIGN:$([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
     }
-    $process.add_OutputDataReceived([Diagnostics.DataReceivedEventHandler]{
-        param($sender, $event)
-        if ($null -ne $event.Data) {
-            $count = [int64]$utf8.GetByteCount($event.Data) + $newlineBytes
-            [Threading.Monitor]::Enter($streamState.SyncRoot)
-            try {
-                if (($streamState.stdout_bytes + $count) -le $streamLimit) {
-                    $stdoutWriter.WriteLine($event.Data)
-                    $streamState.stdout_bytes += $count
-                }
-                else { $streamState.exceeded = $true }
+    $bufferSize = 65536
+    $stdoutBuffer = New-Object byte[] $bufferSize
+    $stderrBuffer = New-Object byte[] $bufferSize
+    $stdoutRead = $process.StandardOutput.BaseStream.ReadAsync($stdoutBuffer, 0, $stdoutBuffer.Length)
+    $stderrRead = $process.StandardError.BaseStream.ReadAsync($stderrBuffer, 0, $stderrBuffer.Length)
+    $stdoutDone = $false
+    $stderrDone = $false
+    $limitTriggered = $false
+    $externalTerminationTriggered = $false
+    while (-not ($process.HasExited -and $stdoutDone -and $stderrDone)) {
+        if (-not $stdoutDone -and $stdoutRead.IsCompleted) {
+            $stdoutCount = [int]$stdoutRead.GetAwaiter().GetResult()
+            if ($stdoutCount -eq 0) {
+                $stdoutDone = $true
             }
-            finally { [Threading.Monitor]::Exit($streamState.SyncRoot) }
-        }
-    })
-    $process.add_ErrorDataReceived([Diagnostics.DataReceivedEventHandler]{
-        param($sender, $event)
-        if ($null -ne $event.Data) {
-            $count = [int64]$utf8.GetByteCount($event.Data) + $newlineBytes
-            [Threading.Monitor]::Enter($streamState.SyncRoot)
-            try {
-                if (($streamState.stderr_bytes + $count) -le $streamLimit) {
-                    $stderrWriter.WriteLine($event.Data)
-                    $streamState.stderr_bytes += $count
+            else {
+                $stdoutRemaining = $streamLimit - [int64]$streamState.stdout_bytes
+                $stdoutWriteCount = $stdoutCount
+                if ($stdoutRemaining -lt $stdoutWriteCount) {
+                    $stdoutWriteCount = [int][Math]::Max([int64]0, $stdoutRemaining)
                 }
-                else { $streamState.exceeded = $true }
+                if ($stdoutWriteCount -gt 0) {
+                    $stdoutStream.Write($stdoutBuffer, 0, $stdoutWriteCount)
+                    $stdoutStream.Flush()
+                    $streamState.stdout_bytes += [int64]$stdoutWriteCount
+                }
+                if ($stdoutWriteCount -lt $stdoutCount) {
+                    $streamState.exceeded = $true
+                    $stdoutDone = $true
+                }
+                else {
+                    $stdoutRead = $process.StandardOutput.BaseStream.ReadAsync($stdoutBuffer, 0, $stdoutBuffer.Length)
+                }
             }
-            finally { [Threading.Monitor]::Exit($streamState.SyncRoot) }
         }
-    })
-    $process.BeginOutputReadLine()
-    $process.BeginErrorReadLine()
-    while (-not $process.WaitForExit(100)) {
-        if ([bool]$streamState.exceeded) {
-            [void][ProblemLocator.TestFlow.NativeJob]::CloseHandle($job)
+        if (-not $stderrDone -and $stderrRead.IsCompleted) {
+            $stderrCount = [int]$stderrRead.GetAwaiter().GetResult()
+            if ($stderrCount -eq 0) {
+                $stderrDone = $true
+            }
+            else {
+                $stderrRemaining = $streamLimit - [int64]$streamState.stderr_bytes
+                $stderrWriteCount = $stderrCount
+                if ($stderrRemaining -lt $stderrWriteCount) {
+                    $stderrWriteCount = [int][Math]::Max([int64]0, $stderrRemaining)
+                }
+                if ($stderrWriteCount -gt 0) {
+                    $stderrStream.Write($stderrBuffer, 0, $stderrWriteCount)
+                    $stderrStream.Flush()
+                    $streamState.stderr_bytes += [int64]$stderrWriteCount
+                }
+                if ($stderrWriteCount -lt $stderrCount) {
+                    $streamState.exceeded = $true
+                    $stderrDone = $true
+                }
+                else {
+                    $stderrRead = $process.StandardError.BaseStream.ReadAsync($stderrBuffer, 0, $stderrBuffer.Length)
+                }
+            }
+        }
+        if ([bool]$streamState.exceeded -and $job -ne [IntPtr]::Zero) {
+            if (-not [ProblemLocator.TestFlow.NativeJob]::TerminateJobObject($job, 1)) {
+                throw "TEST_FLOW_JOB_TERMINATE:$([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
+            }
+            if (-not [ProblemLocator.TestFlow.NativeJob]::CloseHandle($job)) {
+                throw "TEST_FLOW_JOB_CLOSE:$([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
+            }
             $job = [IntPtr]::Zero
+            $limitTriggered = $true
             break
         }
+        if ([IO.File]::Exists($terminationPath) -and $job -ne [IntPtr]::Zero) {
+            if (-not [ProblemLocator.TestFlow.NativeJob]::TerminateJobObject($job, 1)) {
+                throw "TEST_FLOW_JOB_TERMINATE:$([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
+            }
+            if (-not [ProblemLocator.TestFlow.NativeJob]::CloseHandle($job)) {
+                throw "TEST_FLOW_JOB_CLOSE:$([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
+            }
+            $job = [IntPtr]::Zero
+            $externalTerminationTriggered = $true
+            break
+        }
+        if (-not $process.HasExited) { [void]$process.WaitForExit(10) }
+        else { [Threading.Thread]::Sleep(10) }
     }
-    $process.WaitForExit()
+    if ($limitTriggered -or $externalTerminationTriggered) {
+        if (-not $process.WaitForExit(5000)) { throw 'TEST_FLOW_JOB_TERMINATION_TIMEOUT' }
+    }
+    else {
+        $process.WaitForExit()
+    }
+    $stdoutStream.Flush($true)
+    $stderrStream.Flush($true)
     $status = [ordered]@{
         schema_version = 1
         status = 'EXITED'
@@ -166,6 +229,7 @@ try {
         process_id = $process.Id
         job_assigned = $true
         raw_log_limit_exceeded = [bool]$streamState.exceeded
+        external_termination_requested = [bool]$externalTerminationTriggered
         elapsed_milliseconds = [int64](([DateTime]::UtcNow - $started).TotalMilliseconds)
     }
     $stream = [IO.File]::Open([IO.Path]::GetFullPath($StatusPath), [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
@@ -178,8 +242,8 @@ try {
     exit $process.ExitCode
 }
 finally {
-    if ($null -ne $stdoutWriter) { $stdoutWriter.Dispose() }
-    if ($null -ne $stderrWriter) { $stderrWriter.Dispose() }
+    if ($null -ne $stdoutStream) { $stdoutStream.Dispose() }
+    if ($null -ne $stderrStream) { $stderrStream.Dispose() }
     if ($job -ne [IntPtr]::Zero) { [void][ProblemLocator.TestFlow.NativeJob]::CloseHandle($job) }
     if ($null -ne $process) { $process.Dispose() }
 }

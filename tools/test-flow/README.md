@@ -98,11 +98,36 @@ Windows 使用 `--client windows`，显式 Linux Client 使用 `--client linux`�
 
 Release 从 GENESIS 和新的空 `DATA_ROOT` 开始，不复用业务 checkpoint。它执行一条 CrossJob：Environment、Route、Upload、Diagnose、自动 Review、Publish/Restart，并同时证明真实 Agent、真实 Logparse、七工具扁平 schema、服务端 DFX、安装分发、重启恢复和证据完整性。
 
+正式用例的日志归档不是假设外部 Logparse 已预装业务产品配置。容器初始化会从已审阅 Diagnosis Skill 的 `logparse_product`、anchors 和 journey driver 机械生成独立的只读运行时配置，并把每份原始附件无损投影为当前 Logparse loose-diagnostic 输入；初始化阶段先用冻结 Logparse 提交完成一次无模型 smoke parse，逐一证明 module/slot/process anchor 可解析。配置摘要、归档投影版本和归档摘要写入 Release case 与容器收据，服务只使用该独立配置，外部 Logparse Git 快照仍保持未修改。
+
 ## 预算、超时与性能
 
-真实 Gate 的计划列出模型、turn/token/USD/time 上限和预计成本。turn、USD 与进程时限由执行器或 provider 强制；token 上限还会由终端 receipt 复核，usage 缺失或超限不能 PASS。
+真实 Gate 的计划列出模型、turn/token/USD/time 上限和预计成本。cap 可由 Stage 显式选择；未选择时使用该类 Gate 的默认 cap，因此某个长耗时工作流可以获得独立上限而不放大其他真实 Gate。turn、USD 与进程时限由执行器或 provider 强制；token 上限还会由终端 receipt 复核，usage 缺失或超限不能 PASS。模型 usage 使用版本化的 cache-inclusive 合同，逐项记录 `input_tokens`、`output_tokens`、`cache_creation_input_tokens` 与 `cache_read_input_tokens`，并强制 `total_tokens = input_tokens + output_tokens + cache_creation_input_tokens + cache_read_input_tokens`。四个分项任一缺失、总数不一致或总数超过 `max_total_tokens` 时，`usage_complete` 不得为真且 Gate 不能 PASS；Gate、Stage 与最终 verdict 的累计值沿用同一公式。Skill-generation 另外声明 `max_output_tokens=64000`：它是每次模型请求的输出上限，不是整次 Agent 调用的累计输出量。该上限由身份绑定的 wrapper 参数、只注入 Claude 子进程的 `CLAUDE_CODE_MAX_OUTPUT_TOKENS`、固定 Claude CLI 上限校验及密封 runtime 实现共同证明；终态 `modelUsage.maxOutputTokens` 在固定 Claude Code 版本中只是静态模型档位默认值，不是实际请求 `max_tokens` 的回显，不进入 cap 证明。结构完整的失败终态也会先持久化实际 terminal usage，再保持原 Gate 失败；缺少合法终态时不得把零调用误报为完整 usage。
 
-只有 allowlist 中的语义事件能刷新无进展计时。硬时限始终生效。性能使用同一版本化策略累计样本：样本不足是 `NOT_CALIBRATED`；Dev 回归告警；Release 同一性能身份第一次显著变慢为 warning，连续第二次才失败。复用 Stage 不产生性能样本。
+只有直接向编排器输出 allowlist 语义事件的 adapter 才启用无进展计时。pytest 包装的真实 Agent Gate
+会捕获内部模型流，编排器无法把该流当成可信的实时进度，因此明确禁用无进展计时；模型 wrapper 的
+硬时限必须短于 Backend wall time，Stage 总时限还必须覆盖该 Gate 声明的全部串行调用与证据收尾，
+从而保证终止宽限、JUnit、usage 与最终证据能够落盘。硬时限始终生效。性能使用同一版本化策略累计
+样本：样本不足是 `NOT_CALIBRATED`；Dev 回归告警；Release 同一性能身份第一次显著变慢为 warning，
+连续第二次才失败。复用 Stage 不产生性能样本。
+
+真实 Wiki→Skill Gate 使用独立于源码仓库的临时 workspace。Claude 的有效工具仅为
+`Skill/Read/Write`，权限模式必须是 `dontAsk`；Read 白名单只包含 Wiki、澄清和转换 Skill 直接链接的
+普通 reference，Write 白名单只包含唯一 GenerationSpec。wrapper 会在模型结束后审计完整工具轨迹，
+确认 Skill 首次且唯一调用成功、四份必读材料完整返回后才发生最后一次成功 Write，并将相对路径审计
+结果写入必需的 `model-usage.json`。提示词仍要求模型只发起一次参数完整的 Write；轨迹审计只额外容忍
+一次严格 `input={}` 且明确失败的 Write 参数校验尝试，而且它必须发生在全部必读材料成功返回后并紧邻
+唯一成功 Write。该尝试按本地必填字段合同分类，不读取 provider 错误文案，也不算文件变更；任何含参数
+的失败 Write、失败 Read、权限拒绝、越界或部分读取、重复成功 Write、成功 Write 后的工具调用仍使 Gate
+失败。v2 工具审计 receipt 只记录相对路径、调用结果和本地分类，不记录原始错误、Write 内容或绝对路径。
+
+所有 pytest 包装的真实 isolated Agent Gate 还使用版本化的
+`isolated-agent-env-allowlist-v2` 环境策略。pytest 只继承跨平台启动所需的
+`PATH/HOME/SystemRoot/TEMP` 等基础键，并显式加入当前 Test Flow Gate 所需的键；宿主 provider、代理、
+云平台和 CI 环境变量不会进入 pytest、AgentBackend 或 Claude wrapper。模型 provider 认证只由已审计的
+env-only settings 文件提供；Logparse 会话凭据只能由 AgentBackend 的显式 broker 机制成对加入。
+wrapper 会再次拒绝未知入站键；Skill-generation 的单响应上限只由计划派生，宿主同名环境变量不能覆盖。invocation receipt 会写入策略版本、有效键名列表及其 SHA-256，
+不写入任何环境值或 secret。该策略实现位于 `runtime.support` 身份中，源码变化会使既有证明失效。
 
 ## Verdict 与退出码
 

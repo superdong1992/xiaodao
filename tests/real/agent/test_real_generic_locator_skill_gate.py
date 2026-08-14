@@ -123,7 +123,9 @@ def test_real_preinstalled_generic_skill_receives_exact_input_and_writes_result(
         workspace_manager=WorkspaceManager(tmp_path / "data"),
         backend=AgentBackend(command),
         backend_test_limits=BackendExecutionLimits(
-            wall_time_seconds=180.0,
+            wall_time_seconds=float(
+                os.environ["TEST_FLOW_AGENT_BACKEND_WALL_TIME_SECONDS"]
+            ),
             stdout_stderr_bytes=4 * 1024 * 1024,
             workspace_bytes=8 * 1024 * 1024,
             poll_interval_seconds=0.02,

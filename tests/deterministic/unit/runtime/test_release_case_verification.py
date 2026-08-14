@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -39,10 +40,11 @@ def _rule_result(status: ServerRuleStatus, *, semantic_result: str | None) -> st
 
 def _scenario_lines(
     case_root: Path,
+    scenario_ref: dict[str, object],
     driver: dict[str, object],
 ) -> list[_ResolvedLine]:
     result: list[_ResolvedLine] = []
-    scenario_root = case_root / "scenarios" / str(driver["scenario_id"])
+    scenario_root = (case_root / str(scenario_ref["driver"])).parent
     attachments = list(driver["attachment_files"])
     anchors = list(driver["attachment_anchor_names"])
     assert len(attachments) == len(anchors)
@@ -85,6 +87,7 @@ def test_release_case_scenarios_select_the_reviewed_terminal_paths(
     contract = spec["verification_contract"]
     extractors = contract["event_extractors"]
     extractor_by_id = {item["id"]: item for item in extractors}
+    multiline_matched = False
 
     for scenario_ref in descriptor["scenarios"]:
         driver = _json(case_root / scenario_ref["driver"])
@@ -108,7 +111,7 @@ def test_release_case_scenarios_select_the_reviewed_terminal_paths(
         }
         events, scan_complete = _extract_events(
             extractors,
-            _scenario_lines(case_root, driver),
+            _scenario_lines(case_root, scenario_ref, driver),
             set(),
             facts,
         )
@@ -162,14 +165,162 @@ def test_release_case_scenarios_select_the_reviewed_terminal_paths(
                 item["id"] for item in extractors if len(item["members"]) > 1
             }
             assert multiline_ids
-            assert any(
+            multiline_matched = multiline_matched or any(
                 len(match.lines) > 1
                 for event_id in multiline_ids
                 for match in events[event_id]
-            ) or oracle["resolution_status"] == "PARTIAL"
+            )
         if expected_skill["requires_numeric_compare"]:
             assert any(item["kind"] == "NUMERIC_COMPARE" for item in contract["rules"])
         assert max(
             item["parameters"].get("clock_tolerance_ms", 0)
             for item in contract["rules"]
         ) == expected_skill["requires_cross_clock_tolerance_ms"]
+
+    if semantic_oracle["expected_skill"]["requires_multiline_event"]:
+        assert multiline_matched
+
+
+@pytest.mark.parametrize("case_root", _release_cases(), ids=lambda path: path.name)
+def test_release_case_policy_projection_matches_the_approved_contract(
+    case_root: Path,
+) -> None:
+    descriptor = _json(case_root / "case.json")
+    spec = _json(case_root / str(descriptor["generation_spec"]))
+    semantic_oracle = _json(case_root / str(descriptor["semantic_oracle"]))
+    projection = semantic_oracle["generated_spec_oracle"]
+    assert projection["projection_version"] == 4
+
+    def policies(values: list[dict[str, object]]) -> list[dict[str, object]]:
+        return sorted(
+            ({**item, "key_fields": sorted(item["key_fields"])} for item in values),
+            key=lambda item: str(item["id"]),
+        )
+
+    def bindings(values: list[dict[str, object]]) -> list[dict[str, object]]:
+        return sorted(
+            (
+                {
+                    "event_id": item["event_id"],
+                    "observation_policy_ids": sorted(
+                        item["observation_policy_ids"]
+                    ),
+                }
+                for item in values
+            ),
+            key=lambda item: str(item["event_id"]),
+        )
+
+    contract = spec["verification_contract"]
+    actual_bindings = [
+        {
+            "event_id": extractor["id"],
+            "observation_policy_ids": extractor["observation_policy_ids"],
+        }
+        for extractor in contract["event_extractors"]
+    ]
+    assert policies(contract["observation_policies"]) == policies(
+        projection["observation_policies"]
+    )
+    assert bindings(actual_bindings) == bindings(
+        projection["event_policy_bindings"]
+    )
+
+    allowed_target_fields = {
+        "analysis_steps",
+        "assumptions",
+        "chinese_title",
+        "judgement_rules",
+        "output_requirements",
+        "problem_scope",
+        "summary",
+        "time_characteristics",
+    }
+    semantics = projection["required_product_semantics"]
+    assert semantics
+    assert len({item["id"] for item in semantics}) == len(semantics)
+    for semantic in semantics:
+        target_fields = semantic["target_fields"]
+        assert target_fields
+        assert len(target_fields) == len(set(target_fields))
+        assert set(target_fields) <= allowed_target_fields
+        segments: list[str] = []
+        for field in target_fields:
+            value = spec[field]
+            if isinstance(value, str):
+                segments.append(value)
+            else:
+                assert isinstance(value, list)
+                assert all(isinstance(item, str) for item in value)
+                segments.extend(value)
+        approved_spec_text = "\n".join(segments)
+        for alternatives in semantic["all_of_any_patterns"]:
+            assert any(
+                re.search(pattern, approved_spec_text, re.IGNORECASE)
+                for pattern in alternatives
+            ), (semantic["id"], alternatives)
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("不针对用户问题时间启动等待或监控。", True),
+        ("不得根据用户问题时间启动监控。", True),
+        ("不启动监控。", True),
+        ("针对用户问题时间启动等待或监控。", False),
+        ("根据用户问题时间启动监控。", False),
+        ("不影响诊断，根据用户问题时间启动监控。", False),
+        ("不得不根据用户问题时间启动监控。", False),
+    ],
+)
+def test_release_case_monitoring_semantic_requires_an_explicit_prohibition(
+    text: str,
+    expected: bool,
+) -> None:
+    semantics = [
+        semantic
+        for case_root in _release_cases()
+        for semantic in _json(case_root / "oracle.json")["generated_spec_oracle"][
+            "required_product_semantics"
+        ]
+        if semantic["id"] == "fixed_snapshot_boundary"
+    ]
+    assert len(semantics) == 1
+    monitoring_patterns = semantics[0]["all_of_any_patterns"][-1]
+    assert any(
+        re.search(pattern, text, re.IGNORECASE)
+        for pattern in monitoring_patterns
+    ) is expected
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("不等待未来日志。", True),
+        ("不针对用户问题时间启动等待或监控。", True),
+        ("不得根据用户问题时间启动等待。", True),
+        ("禁止启动等待。", True),
+        ("针对用户问题时间启动等待或监控。", False),
+        ("根据用户问题时间启动等待。", False),
+        ("不影响诊断，根据用户问题时间启动等待。", False),
+        ("不得不根据用户问题时间启动等待。", False),
+    ],
+)
+def test_release_case_waiting_semantic_requires_an_explicit_prohibition(
+    text: str,
+    expected: bool,
+) -> None:
+    semantics = [
+        semantic
+        for case_root in _release_cases()
+        for semantic in _json(case_root / "oracle.json")["generated_spec_oracle"][
+            "required_product_semantics"
+        ]
+        if semantic["id"] == "fixed_snapshot_boundary"
+    ]
+    assert len(semantics) == 1
+    waiting_patterns = semantics[0]["all_of_any_patterns"][2]
+    assert any(
+        re.search(pattern, text, re.IGNORECASE)
+        for pattern in waiting_patterns
+    ) is expected

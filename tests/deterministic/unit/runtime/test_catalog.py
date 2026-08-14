@@ -518,8 +518,27 @@ def test_builtin_review_output_contract_materializes_review_binding_rules() -> N
     assert "REVIEW_SUBJECT.required_rule_ids" in contract
     assert "Do not use or reconstruct a prior Specialist verdict" in contract
     assert "Emit exactly one `rule_claims` entry per required rule" in contract
+    assert "including rules that finish as" in contract
+    assert "`UNKNOWN` or `NOT_APPLICABLE`" in contract
+    assert "Do this even when the event is absent, lossy" in contract
+    assert "De-duplicate by first use without sorting" in contract
+    assert "direct event IDs, selector fact IDs, rule-owned fact IDs" in contract
     assert "MISSING_ONLY" in contract
     assert "REVIEW proposes no Evidence or Artifact" in contract
+
+
+def test_builtin_reviewer_profile_keeps_selector_facts_for_non_positive_rules() -> None:
+    profile = (
+        BUILTIN_ASSET_ROOT
+        / "profiles"
+        / "reviewer"
+        / "profile.md"
+    ).read_text(encoding="utf-8")
+
+    assert "`fact_refs` as a mechanically derived execution input" in profile
+    assert "before evaluating dependencies or event cardinality" in profile
+    assert "`UNKNOWN` or `NOT_APPLICABLE`" in profile
+    assert "Use `fact_refs=[]` only when that complete traversal" in profile
 
 
 def test_builtin_tool_bundles_all_declare_the_installed_draft_sealer() -> None:

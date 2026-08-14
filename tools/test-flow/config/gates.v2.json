@@ -23,7 +23,7 @@
     "repo.compileall": {
       "kind": "repository-check",
       "check": "python-compileall",
-      "paths": ["src", "tests"],
+      "paths": ["src", "tests", "tools/test-flow/runtime-support"],
       "evidence": ["repository-check.json"]
     },
     "repo.uv-lock": {
@@ -114,7 +114,8 @@
       "min_passed": 1,
       "skip_policy": "forbid",
       "runtime_profile": "release",
-      "evidence": ["pytest.xml", "pytest-summary.json", "model-usage.json"]
+      "evidence": ["pytest.xml", "pytest-summary.json", "model-usage.json"],
+      "isolated_agent_invocations": 1
     },
     "real.agent.generic-locator": {
       "kind": "pytest",
@@ -123,7 +124,8 @@
       "min_passed": 1,
       "skip_policy": "forbid",
       "runtime_profile": "release",
-      "evidence": ["pytest.xml", "pytest-summary.json", "model-usage.json"]
+      "evidence": ["pytest.xml", "pytest-summary.json", "model-usage.json"],
+      "isolated_agent_invocations": 1
     },
     "real.agent.skill-generation": {
       "kind": "pytest",
@@ -132,7 +134,8 @@
       "min_passed": 1,
       "skip_policy": "forbid",
       "runtime_profile": "release",
-      "evidence": ["pytest.xml", "pytest-summary.json", "model-usage.json"]
+      "evidence": ["pytest.xml", "pytest-summary.json", "model-usage.json", "scenario-evaluation-audit.json"],
+      "isolated_agent_invocations": 1
     },
     "real.agent.route": {
       "kind": "pytest",
@@ -141,7 +144,8 @@
       "min_passed": 1,
       "skip_policy": "forbid",
       "runtime_profile": "release",
-      "evidence": ["pytest.xml", "pytest-summary.json", "model-usage.json"]
+      "evidence": ["pytest.xml", "pytest-summary.json", "model-usage.json"],
+      "isolated_agent_invocations": 1
     },
     "real.agent.diagnose": {
       "kind": "pytest",
@@ -150,10 +154,11 @@
         "tests/real/agent/test_real_diagnose_agent_contract_gate.py::test_real_first_log_diagnose_agent_produces_valid_continuation"
       ],
       "environment_profile": "real-diagnose",
-      "min_passed": 2,
+      "min_passed": 4,
       "skip_policy": "forbid",
       "runtime_profile": "release",
-      "evidence": ["pytest.xml", "pytest-summary.json", "model-usage.json"]
+      "evidence": ["pytest.xml", "pytest-summary.json", "model-usage.json"],
+      "isolated_agent_invocations": 4
     },
     "real.agent.review": {
       "kind": "pytest",
@@ -162,7 +167,8 @@
       "min_passed": 1,
       "skip_policy": "forbid",
       "runtime_profile": "release",
-      "evidence": ["pytest.xml", "pytest-summary.json", "model-usage.json"]
+      "evidence": ["pytest.xml", "pytest-summary.json", "model-usage.json"],
+      "isolated_agent_invocations": 1
     },
     "journey.environment": {
       "kind": "cross-job-adapter",

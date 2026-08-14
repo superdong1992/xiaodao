@@ -1,17 +1,17 @@
 {
   "scenario_id": "partial",
   "problem": {
-    "raw_problem_text": "svc_alpha的Fetch调用超时后收到晚响应；请只根据固定快照判断能确认和不能确认的因素。",
+    "raw_problem_text": "svc_alpha的Fetch调用超时后收到晚响应；请只根据固定快照区分已确认的服务端聚合停留与仍未决的具体贡献。",
     "statement": "脱敏RPC调用超过客户端deadline后收到晚响应",
     "expected_behavior": "客户端在deadline前接收响应",
     "actual_behavior": "客户端先返回超时，随后在固定快照中记录到晚响应。",
     "scope": "svc_alpha/Fetch固定日志快照",
-    "goals": ["区分已排除因素与仍不能区分的候选贡献因素。"],
+    "goals": ["确认同一服务端时钟下的聚合停留是否越过deadline，并保留无法继续拆分的具体候选贡献因素。"],
     "non_goals": ["补采历史日志或等待未来日志。"],
     "constraints": ["只使用固定快照，并采用用例声明的跨时钟容差。"],
     "completion_criteria": [
-      "排除目标API自身执行超时",
-      "说明服务端与客户端排队因素为何仍未决",
+      "确认服务端接收到发送的聚合停留超过deadline",
+      "说明服务端接收排队、目标API自身超时与客户端接收排队为何仍未决",
       "保留超时不等于取消的安全说明"
     ]
   },

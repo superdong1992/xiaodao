@@ -11,6 +11,7 @@ export const NEGATIVE_PROBE_VALIDATION_FIELDS = Object.freeze([
   "goals",
   "non_goals",
   "problem_spec",
+  "raw_problem_text",
   "scope",
   "statement",
 ]);

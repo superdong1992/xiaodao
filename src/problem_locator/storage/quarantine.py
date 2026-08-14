@@ -17,6 +17,7 @@ from problem_locator.contracts import OpaqueId
 from .atomic import FileSync, Replacer, is_reparse_point, require_real_directory
 from .layout import StorageLayout
 from .paths import ensure_no_symlink_ancestors
+from .platform import chmod_no_follow
 
 
 _OPAQUE_ID_ADAPTER = TypeAdapter(OpaqueId)
@@ -142,16 +143,15 @@ class QuarantineMover:
                 # parent is writable.  Make only the orphan's top-level node
                 # owner-writable while the coordination lock excludes adoption.
                 original_mode = stat.S_IMODE(candidate_metadata.st_mode)
-                os.chmod(
+                chmod_no_follow(
                     candidate,
                     original_mode | stat.S_IWUSR,
-                    follow_symlinks=False,
                 )
             try:
                 self._replacer.replace(candidate, destination)
             except BaseException:
                 if original_mode is not None and candidate.exists():
-                    os.chmod(candidate, original_mode, follow_symlinks=False)
+                    chmod_no_follow(candidate, original_mode)
                 raise
             self._file_sync.sync_directory(candidate.parent)
             self._file_sync.sync_directory(destination.parent)
@@ -226,7 +226,7 @@ class QuarantineMover:
             try:
                 target.unlink()
             except PermissionError:
-                os.chmod(target, stat.S_IRUSR | stat.S_IWUSR, follow_symlinks=False)
+                chmod_no_follow(target, stat.S_IRUSR | stat.S_IWUSR)
                 target.unlink()
         elif stat.S_ISDIR(target_metadata.st_mode):
             for current, directory_names, _ in os.walk(
@@ -234,7 +234,7 @@ class QuarantineMover:
                 topdown=True,
                 followlinks=False,
             ):
-                os.chmod(current, stat.S_IRWXU, follow_symlinks=False)
+                chmod_no_follow(current, stat.S_IRWXU)
                 current_path = Path(current)
                 for directory_name in directory_names:
                     child = current_path / directory_name
@@ -242,7 +242,7 @@ class QuarantineMover:
                     if stat.S_ISDIR(child_metadata.st_mode) and not is_reparse_point(
                         child_metadata
                     ):
-                        os.chmod(child, stat.S_IRWXU, follow_symlinks=False)
+                        chmod_no_follow(child, stat.S_IRWXU)
 
             def make_writable_and_retry(
                 function: Callable[[str], object],
@@ -253,8 +253,8 @@ class QuarantineMover:
                     raise error
                 parent = Path(path).parent
                 if parent != Path(path):
-                    os.chmod(parent, stat.S_IRWXU, follow_symlinks=False)
-                os.chmod(path, stat.S_IRWXU, follow_symlinks=False)
+                    chmod_no_follow(parent, stat.S_IRWXU)
+                chmod_no_follow(path, stat.S_IRWXU)
                 function(path)
 
             shutil.rmtree(target, onexc=make_writable_and_retry)

@@ -1,0 +1,20 @@
+{
+  "resolution_status": "COMPLETE",
+  "terminal_path_id": "complete_deadloop_overrun",
+  "case_status": "RESOLVED",
+  "causal_factor_ids": ["direct_api_overrun"],
+  "candidate_factor_ids": [],
+  "excluded_factor_ids": [],
+  "criterion_statuses": ["SATISFIED", "SATISFIED", "SATISFIED"],
+  "required_rule_results": {
+    "enhanced_version": "PASS",
+    "deadloop_present": "PASS",
+    "deadloop_execution_exceeds_twice_timeout": "PASS",
+    "deadloop_execution_exceeds_sixty_seconds": "PASS",
+    "deadloop_overrun_confirmed": "PASS",
+    "queue_contributed_timeout": "UNKNOWN",
+    "upstream_api_caused_queue": "UNKNOWN",
+    "api_overrun_confirmed": "UNKNOWN"
+  },
+  "required_safety_phrases": ["超时不等于取消", "固定 Diagnosis Skill"]
+}

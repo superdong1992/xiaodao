@@ -148,7 +148,9 @@ def _path_bytes(path: Path) -> dict[str, bytes]:
 def test_applied_candidate_stages_expire_without_deleting_formal_state(
     tmp_path: Path,
 ) -> None:
-    data_root = tmp_path / "data"
+    # Quarantine preserves the original staging hierarchy below another UUID.
+    # Keep that doubled path below the legacy Windows directory-path limit.
+    data_root = tmp_path.parent / "r" if os.name == "nt" else tmp_path / "data"
     layout = StorageLayout.at(data_root)
     layout.initialize_v2_data_root()
     lock = StorageCoordinationLock()

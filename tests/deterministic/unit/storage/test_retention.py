@@ -18,6 +18,7 @@ from problem_locator.storage.retention import RetentionScanner
 from problem_locator.storage.streams import hash_file
 from problem_locator.storage.tree import inspect_tree
 from tests.deterministic.unit.storage.fakes import FixedClock
+from tests.deterministic.unit.storage.platform_support import symlink_or_skip
 
 
 NOW = "2026-01-10T12:00:00.000Z"
@@ -56,7 +57,11 @@ def _layout(tmp_path: Path) -> StorageLayout:
 
 def _set_age(path: Path, age_seconds: int) -> None:
     timestamp_ns = int((NOW_SECONDS - age_seconds) * 1_000_000_000)
-    os.utime(path, ns=(timestamp_ns, timestamp_ns), follow_symlinks=False)
+    if os.utime in os.supports_follow_symlinks:
+        os.utime(path, ns=(timestamp_ns, timestamp_ns), follow_symlinks=False)
+        return
+    assert not path.is_symlink()
+    os.utime(path, ns=(timestamp_ns, timestamp_ns))
 
 
 def _candidate_pairs(scanner: RetentionScanner) -> set[tuple[str, Path]]:
@@ -292,8 +297,20 @@ def test_invalid_identifiers_and_managed_directory_names_are_rejected(
         "upload_regular_file",
         "upload_marker_symlink",
         "proposal_symlink",
-        "proposal_marker_fifo",
-        "workspace_fifo",
+        pytest.param(
+            "proposal_marker_fifo",
+            marks=pytest.mark.skipif(
+                not hasattr(os, "mkfifo"),
+                reason="FIFO creation is unavailable",
+            ),
+        ),
+        pytest.param(
+            "workspace_fifo",
+            marks=pytest.mark.skipif(
+                not hasattr(os, "mkfifo"),
+                reason="FIFO creation is unavailable",
+            ),
+        ),
         "state_temp_directory",
         "state_temp_symlink",
         "formal_leaf_symlink",
@@ -311,7 +328,8 @@ def test_links_and_nonordinary_managed_nodes_are_rejected(
     outside_file.write_bytes(b"outside")
 
     if invalid_node == "upload_symlink":
-        (layout.uploads / UPLOAD_OLD_ID).symlink_to(
+        symlink_or_skip(
+            layout.uploads / UPLOAD_OLD_ID,
             outside_directory,
             target_is_directory=True,
         )
@@ -320,9 +338,10 @@ def test_links_and_nonordinary_managed_nodes_are_rejected(
     elif invalid_node == "upload_marker_symlink":
         upload = layout.uploads / UPLOAD_OLD_ID
         upload.mkdir()
-        (upload / "staged.json").symlink_to(outside_file)
+        symlink_or_skip(upload / "staged.json", outside_file)
     elif invalid_node == "proposal_symlink":
-        (layout.proposals / PROPOSAL_OLD_JOB_ID).symlink_to(
+        symlink_or_skip(
+            layout.proposals / PROPOSAL_OLD_JOB_ID,
             outside_directory,
             target_is_directory=True,
         )
@@ -339,7 +358,7 @@ def test_links_and_nonordinary_managed_nodes_are_rejected(
     elif invalid_node == "state_temp_directory":
         (layout.state_temporary / "state.tmp").mkdir()
     elif invalid_node == "state_temp_symlink":
-        (layout.state_temporary / "state.tmp").symlink_to(outside_file)
+        symlink_or_skip(layout.state_temporary / "state.tmp", outside_file)
     elif invalid_node == "formal_leaf_symlink":
         leaf = (
             layout.cases_resources
@@ -349,7 +368,7 @@ def test_links_and_nonordinary_managed_nodes_are_rejected(
             / "payload"
         )
         leaf.parent.mkdir(parents=True)
-        leaf.symlink_to(outside_file)
+        symlink_or_skip(leaf, outside_file)
     elif invalid_node == "job_regular_file":
         (layout.jobs / JOB_OLD_ID).write_bytes(b"not a directory")
     else:  # pragma: no cover - parametrization is exhaustive

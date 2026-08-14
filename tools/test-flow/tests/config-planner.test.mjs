@@ -76,7 +76,7 @@ test("Release is fresh, binds an immutable source snapshot and exposes exact per
   assert.equal(built.options.crossJobAdapter, path.join(REPO_ROOT, "tools", "test-flow", "adapters", "macos-linux-release.mjs"));
   assert.deepEqual(built.plan.budget, {
     estimated_tokens: 422000,
-    sum_of_per_invocation_caps_usd: 30,
+    sum_of_per_invocation_caps_usd: 37,
     cumulative_spending_cap: null,
     per_invocation_hard_enforced: true,
   });
@@ -84,13 +84,13 @@ test("Release is fresh, binds an immutable source snapshot and exposes exact per
   const route = built.plan.stages.find((stage) => stage.id === "journey.cross-job.route");
   const diagnose = built.plan.stages.find((stage) => stage.id === "journey.cross-job.diagnose");
   const publish = built.plan.stages.find((stage) => stage.id === "journey.cross-job.publish-restart");
-  assert.deepEqual(route.invocation_caps.map((entry) => [entry.class, entry.min_count, entry.max_count, entry.caps.max_budget_usd]), [
-    ["host-client", 1, 1, 3],
-    ["server-agent", 3, 3, 3],
+  assert.deepEqual(route.invocation_caps.map((entry) => [entry.class, entry.min_count, entry.max_count, entry.caps.max_total_tokens, entry.caps.max_budget_usd]), [
+    ["host-client", 1, 1, 400000, 3],
+    ["server-agent", 2, 3, 2000000, 3],
   ]);
-  assert.deepEqual(diagnose.invocation_caps.map((entry) => [entry.class, entry.min_count, entry.max_count, entry.caps.max_budget_usd]), [
-    ["host-client", 1, 1, 5],
-    ["server-agent", 3, 3, 3],
+  assert.deepEqual(diagnose.invocation_caps.map((entry) => [entry.class, entry.min_count, entry.max_count, entry.caps.max_total_tokens, entry.caps.max_budget_usd]), [
+    ["host-client", 1, 1, 600000, 5],
+    ["server-agent", 2, 3, 2000000, 3],
   ]);
   assert.deepEqual(publish.invocation_caps.map((entry) => [entry.class, entry.min_count, entry.max_count, entry.caps.max_budget_usd]), [
     ["host-client", 1, 1, 1],
@@ -110,6 +110,44 @@ test("all supported Clients resolve to repository-owned first-party adapters", (
     );
     assert.ok(built.plan.stages.filter((stage) => stage.id.startsWith("journey.cross-job.")).every((stage) => stage.decision === "RUN"));
   }
+});
+
+test("plans expose only observable progress and exact serial model deadlines", () => {
+  const built = buildIsolatedRunPlan({ track: "dev", goal: "dev.real", stage: "real.skill-generation", planOnly: true });
+  const stage = built.plan.stages.find((candidate) => candidate.id === "real.skill-generation");
+  assert.equal(stage.no_progress_seconds, null);
+  assert.equal(stage.timeout_seconds, 2100);
+  assert.deepEqual(stage.hard_caps, {
+    max_turns: 12,
+    max_total_tokens: 1000000,
+    max_output_tokens: 64000,
+    max_budget_usd: 10,
+    hard_timeout_seconds: 1800,
+  });
+  assert.deepEqual(stage.invocation_caps.map((entry) => [entry.class, entry.min_count, entry.max_count]), [
+    ["isolated-agent", 1, 1],
+  ]);
+  assert.ok(stage.hard_caps.hard_timeout_seconds + 60 < stage.timeout_seconds);
+
+  const diagnoseBuilt = buildIsolatedRunPlan({ track: "dev", goal: "dev.real", stage: "real.diagnose", planOnly: true });
+  const diagnose = diagnoseBuilt.plan.stages.find((candidate) => candidate.id === "real.diagnose");
+  assert.equal(diagnose.no_progress_seconds, null);
+  assert.equal(diagnose.timeout_seconds, 3900);
+  assert.deepEqual(diagnose.invocation_caps.map((entry) => [entry.class, entry.min_count, entry.max_count]), [
+    ["isolated-agent", 4, 4],
+  ]);
+  assert.equal(diagnose.hard_caps.max_budget_usd, 3);
+  assert.equal(diagnose.hard_caps.hard_timeout_seconds, 900);
+  assert.equal(diagnose.hard_caps.max_output_tokens, undefined);
+  assert.ok(4 * (diagnose.hard_caps.hard_timeout_seconds + 30) + 30 < diagnose.timeout_seconds);
+
+  const serverBuilt = buildIsolatedRunPlan({ track: "release", client: "linux", planOnly: true });
+  const host = serverBuilt.plan.stages.find((candidate) => candidate.id === "platform.host-capability");
+  const server = serverBuilt.plan.stages.find((candidate) => candidate.id === "platform.server-linux-capability");
+  const journey = serverBuilt.plan.stages.find((candidate) => candidate.id === "journey.cross-job.environment");
+  assert.equal(host.no_progress_seconds, null);
+  assert.equal(server.no_progress_seconds, 360);
+  assert.equal(journey.no_progress_seconds, 360);
 });
 
 test("retired rollout goals and caller-supplied adapters cannot become an execution path", () => {

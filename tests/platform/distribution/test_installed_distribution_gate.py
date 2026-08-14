@@ -26,7 +26,7 @@ from problem_locator.contracts import (
 
 ROOT = Path(__file__).resolve().parents[3]
 TAKEOVER_PRODUCT_HASH = (
-    "eaa059e98e2fde9b923e0bce3e860422b2944aeabe939b57920793f70337b618"
+    "abd24d9517aede8df21af384ece6c059ef493af29f320bb39049547e84eb79ff"
 )
 TAKEOVER_SKILL = (
     ROOT

@@ -101,7 +101,7 @@
       "stages": ["real.generic-locator"]
     },
     "proof.real-skill-generation": {
-      "description": "A real conversion Agent turns only the reviewed human Wiki and clarifications into the exact approved Diagnosis Skill without leaking author notes or oracle data.",
+      "description": "A real conversion Agent first loads the identity-bound Wiki conversion Skill, reads and writes only the permission-scoped inputs, declared self-contained references and generation output, and produces a valid Diagnosis Skill that satisfies the case-local executable and prose oracle without leaking author notes or oracle data; its complete tool trace is audited and sealed.",
       "acceptance": "all",
       "stages": ["real.skill-generation"]
     },

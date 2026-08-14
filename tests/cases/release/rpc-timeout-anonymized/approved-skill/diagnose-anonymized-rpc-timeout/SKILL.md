@@ -11,7 +11,7 @@ requirements、阶段、工具映射和判定规则。
 
 <!-- DIAGNOSIS_SKILL_MANIFEST_V5_BEGIN -->
 ```json
-{"capability":"anonymized-rpc-timeout","deployment_scope":"TEST_ONLY","entry_document":"SKILL.md","id":"diagnose-anonymized-rpc-timeout","logparse_plan":{"anchors":[{"label":"client","module":{"source":"SKILL_FIXED","value":"bbbb"},"pid":null,"process_name":{"name":"client_process","source":"USER_FACT"},"slot":{"source":"SKILL_FIXED","value":"client_slot"}},{"label":"server","module":{"source":"SKILL_FIXED","value":"bbbb"},"pid":null,"process_name":{"name":"server_process","source":"USER_FACT"},"slot":{"source":"SKILL_FIXED","value":"server_slot"}}],"attachment_requirement":"log_archive","problem_time_binding":{"name":"problem_time","source":"USER_FACT"}},"logparse_product":"bbbb","requirements":[{"constraints":{"allowed_values":[],"max_utf8_bytes":256,"min_utf8_bytes":1,"pattern":null,"value_type":"STRING"},"fulfillment_source":"USER_FACT","kind":"INPUT","name":"service_name","prompt":"请提供超时调用的服务名。","stage":"INITIAL","supplement_policy":"MISSING_ONLY"},{"constraints":{"allowed_values":[],"max_utf8_bytes":256,"min_utf8_bytes":1,"pattern":null,"value_type":"STRING"},"fulfillment_source":"USER_FACT","kind":"INPUT","name":"api_name","prompt":"请提供超时调用的API名。","stage":"INITIAL","supplement_policy":"MISSING_ONLY"},{"constraints":{"allowed_values":[],"max_utf8_bytes":256,"min_utf8_bytes":1,"pattern":null,"value_type":"STRING"},"fulfillment_source":"USER_FACT","kind":"INPUT","name":"target_version","prompt":"请提供目标模块版本分类。","stage":"INITIAL","supplement_policy":"MISSING_ONLY"},{"constraints":{"allowed_values":[],"max_utf8_bytes":256,"min_utf8_bytes":1,"pattern":null,"value_type":"STRING"},"fulfillment_source":"USER_FACT","kind":"INPUT","name":"transport_protocol","prompt":"请提供底层通信协议分类。","stage":"INITIAL","supplement_policy":"MISSING_ONLY"},{"constraints":{"allowed_values":[],"max_utf8_bytes":24,"min_utf8_bytes":1,"pattern":null,"value_type":"STRING"},"fulfillment_source":"USER_FACT","kind":"INPUT","name":"problem_time","prompt":"请提供毫秒精度UTC问题时间。","stage":"INITIAL","supplement_policy":"MISSING_ONLY"},{"constraints":{"allowed_values":[],"max_utf8_bytes":256,"min_utf8_bytes":1,"pattern":null,"value_type":"STRING"},"fulfillment_source":"USER_FACT","kind":"INPUT","name":"client_process","prompt":"请提供客户端进程名。","stage":"INITIAL","supplement_policy":"MISSING_ONLY"},{"constraints":{"allowed_values":[],"max_utf8_bytes":256,"min_utf8_bytes":1,"pattern":null,"value_type":"STRING"},"fulfillment_source":"USER_FACT","kind":"INPUT","name":"server_process","prompt":"请提供服务端进程名。","stage":"INITIAL","supplement_policy":"MISSING_ONLY"},{"constraints":{"allowed_content_types":["application/gzip","application/zip","application/x-tar"],"max_count":1,"min_count":1},"fulfillment_source":"READY_ATTACHMENT","kind":"ATTACHMENT","name":"log_archive","prompt":"请上传Logparse支持的固定日志归档。","stage":"INITIAL","supplement_policy":"MISSING_ONLY"},{"constraints":{"allowed_values":[],"max_utf8_bytes":64,"min_utf8_bytes":1,"pattern":null,"value_type":"STRING"},"fulfillment_source":"USER_FACT","kind":"INPUT","name":"request_id","prompt":"请提供需要关联的进程内请求ID。","stage":"AFTER_LOGPARSE","supplement_policy":"MISSING_ONLY"}],"requires_logparse":true,"schema_version":5,"summary":"从固定双端日志快照定位脱敏RPC超时的多个贡献因素","tool_bundle_id":"tool-bundle/diagnose","verification_contract":{"event_extractors":[{"anchor":"client","fields":[{"clock_domain":null,"name":"service","type":"STRING","unit":null},{"clock_domain":null,"name":"api","type":"STRING","unit":null},{"clock_domain":null,"name":"timeout_ms","type":"INTEGER","unit":"MILLISECOND"}],"group_by":["service","api","timeout_ms"],"id":"client_timeout_call","max_gap_lines":0,"max_matches":null,"members":[{"line_pattern":"rpc call (?P<service>[^:\\s]+):(?P<api>\\S+) timeout limit (?P<timeout_ms>\\d+) recv no response","match_mode":"SEARCH"}],"min_matches":0,"observation_policy_ids":["bbbb_default_suppression"],"selectors":[{"field":"service","operator":"EQUALS","value":{"name":"service_name","source":"USER_FACT"}},{"field":"api","operator":"EQUALS","value":{"name":"api_name","source":"USER_FACT"}}],"timestamp_field":null},{"anchor":"client","fields":[{"clock_domain":null,"name":"service","type":"STRING","unit":null},{"clock_domain":null,"name":"call_type","type":"STRING","unit":null},{"clock_domain":null,"name":"request_id","type":"STRING","unit":null},{"clock_domain":null,"name":"timeout_ms","type":"INTEGER","unit":"MILLISECOND"}],"group_by":["request_id"],"id":"client_timeout_detail","max_gap_lines":0,"max_matches":null,"members":[{"line_pattern":"(?P<service>\\S+) rpc (?P<call_type>sync|async) call unsuccess, reqid\\((?P<request_id>\\d+)\\), timeout (?P<timeout_ms>\\d+)","match_mode":"SEARCH"}],"min_matches":0,"observation_policy_ids":["bbbb_default_suppression"],"selectors":[{"field":"service","operator":"EQUALS","value":{"name":"service_name","source":"USER_FACT"}},{"field":"request_id","operator":"EQUALS","value":{"name":"request_id","source":"USER_FACT"}}],"timestamp_field":null},{"anchor":"server","fields":[{"clock_domain":null,"name":"first_service","type":"STRING","unit":null},{"clock_domain":null,"name":"first_api","type":"STRING","unit":null},{"clock_domain":"server_clock","name":"first_end_us","type":"INTEGER","unit":"MICROSECOND"},{"clock_domain":null,"name":"first_cost_us","type":"INTEGER","unit":"MICROSECOND"},{"clock_domain":null,"name":"first_queue_us","type":"INTEGER","unit":"MICROSECOND"},{"clock_domain":null,"name":"first_timeout_ms","type":"INTEGER","unit":"MILLISECOND"},{"clock_domain":null,"name":"second_service","type":"STRING","unit":null},{"clock_domain":null,"name":"second_api","type":"STRING","unit":null},{"clock_domain":"server_clock","name":"second_end_us","type":"INTEGER","unit":"MICROSECOND"},{"clock_domain":null,"name":"second_cost_us","type":"INTEGER","unit":"MICROSECOND"},{"clock_domain":null,"name":"second_queue_us","type":"INTEGER","unit":"MICROSECOND"},{"clock_domain":null,"name":"second_timeout_ms","type":"INTEGER","unit":"MILLISECOND"},{"clock_domain":null,"name":"third_service","type":"STRING","unit":null},{"clock_domain":null,"name":"third_api","type":"STRING","unit":null},{"clock_domain":"server_clock","name":"third_end_us","type":"INTEGER","unit":"MICROSECOND"},{"clock_domain":null,"name":"third_cost_us","type":"INTEGER","unit":"MICROSECOND"},{"clock_domain":null,"name":"third_queue_us","type":"INTEGER","unit":"MICROSECOND"},{"clock_domain":null,"name":"third_timeout_ms","type":"INTEGER","unit":"MILLISECOND"},{"clock_domain":null,"name":"fourth_service","type":"STRING","unit":null},{"clock_domain":null,"name":"fourth_api","type":"STRING","unit":null},{"clock_domain":"server_clock","name":"fourth_end_us","type":"INTEGER","unit":"MICROSECOND"},{"clock_domain":null,"name":"fourth_cost_us","type":"INTEGER","unit":"MICROSECOND"},{"clock_domain":null,"name":"fourth_queue_us","type":"INTEGER","unit":"MICROSECOND"},{"clock_domain":null,"name":"fourth_timeout_ms","type":"INTEGER","unit":"MILLISECOND"},{"clock_domain":null,"name":"fifth_service","type":"STRING","unit":null},{"clock_domain":null,"name":"fifth_api","type":"STRING","unit":null},{"clock_domain":"server_clock","name":"fifth_end_us","type":"INTEGER","unit":"MICROSECOND"},{"clock_domain":null,"name":"fifth_cost_us","type":"INTEGER","unit":"MICROSECOND"},{"clock_domain":null,"name":"fifth_queue_us","type":"INTEGER","unit":"MICROSECOND"},{"clock_domain":null,"name":"fifth_timeout_ms","type":"INTEGER","unit":"MILLISECOND"}],"group_by":["first_service","first_api","first_end_us"],"id":"queue_history","max_gap_lines":1,"max_matches":null,"members":[{"line_pattern":"\\[BBBB\\]The first service:(?P<first_service>[^,]+), api:(?P<first_api>[^,]+), end time:(?P<first_end_us>\\d+), cost time:(?P<first_cost_us>\\d+), queue time:(?P<first_queue_us>\\d+), timeout:(?P<first_timeout_ms>\\d+)","match_mode":"SEARCH"},{"line_pattern":"\\[BBBB\\]The second service:(?P<second_service>[^,]+), api:(?P<second_api>[^,]+), end time:(?P<second_end_us>\\d+), cost time:(?P<second_cost_us>\\d+), queue time:(?P<second_queue_us>\\d+), timeout:(?P<second_timeout_ms>\\d+)","match_mode":"SEARCH"},{"line_pattern":"\\[BBBB\\]The third service:(?P<third_service>[^,]+), api:(?P<third_api>[^,]+), end time:(?P<third_end_us>\\d+), cost time:(?P<third_cost_us>\\d+), queue time:(?P<third_queue_us>\\d+), timeout:(?P<third_timeout_ms>\\d+)","match_mode":"SEARCH"},{"line_pattern":"\\[BBBB\\]The fourth service:(?P<fourth_service>[^,]+), api:(?P<fourth_api>[^,]+), end time:(?P<fourth_end_us>\\d+), cost time:(?P<fourth_cost_us>\\d+), queue time:(?P<fourth_queue_us>\\d+), timeout:(?P<fourth_timeout_ms>\\d+)","match_mode":"SEARCH"},{"line_pattern":"\\[BBBB\\]The fifth service:(?P<fifth_service>[^,]+), api:(?P<fifth_api>[^,]+), end time:(?P<fifth_end_us>\\d+), cost time:(?P<fifth_cost_us>\\d+), queue time:(?P<fifth_queue_us>\\d+), timeout:(?P<fifth_timeout_ms>\\d+)","match_mode":"SEARCH"}],"min_matches":0,"observation_policy_ids":["bbbb_default_suppression","queue_rate_limit"],"selectors":[{"field":"first_service","operator":"EQUALS","value":{"name":"service_name","source":"USER_FACT"}},{"field":"first_api","operator":"EQUALS","value":{"name":"api_name","source":"USER_FACT"}}],"timestamp_field":"first_end_us"},{"anchor":"client","fields":[{"clock_domain":null,"name":"service","type":"STRING","unit":null},{"clock_domain":null,"name":"api","type":"STRING","unit":null},{"clock_domain":null,"name":"request_id","type":"STRING","unit":null},{"clock_domain":null,"name":"timeout_ms","type":"INTEGER","unit":"MILLISECOND"},{"clock_domain":"client_clock","name":"client_send_us","type":"INTEGER","unit":"MICROSECOND"},{"clock_domain":"server_clock","name":"server_recv_us","type":"INTEGER","unit":"MICROSECOND"},{"clock_domain":"server_clock","name":"server_send_us","type":"INTEGER","unit":"MICROSECOND"},{"clock_domain":"client_clock","name":"client_now_us","type":"INTEGER","unit":"MICROSECOND"}],"group_by":["request_id"],"id":"late_response","max_gap_lines":0,"max_matches":null,"members":[{"line_pattern":"late response service:(?P<service>[^,]+), api:(?P<api>[^,]+), reqid:(?P<request_id>\\d+), timeout:(?P<timeout_ms>\\d+), client_send:(?P<client_send_us>\\d+), server_recv:(?P<server_recv_us>\\d+), server_send:(?P<server_send_us>\\d+), client_now:(?P<client_now_us>\\d+)","match_mode":"SEARCH"}],"min_matches":0,"observation_policy_ids":["bbbb_default_suppression"],"selectors":[{"field":"service","operator":"EQUALS","value":{"name":"service_name","source":"USER_FACT"}},{"field":"api","operator":"EQUALS","value":{"name":"api_name","source":"USER_FACT"}},{"field":"request_id","operator":"EQUALS","value":{"name":"request_id","source":"USER_FACT"}}],"timestamp_field":"client_now_us"},{"anchor":"server","fields":[{"clock_domain":null,"name":"service","type":"STRING","unit":null},{"clock_domain":null,"name":"api","type":"STRING","unit":null},{"clock_domain":"server_clock","name":"start_us","type":"INTEGER","unit":"MICROSECOND"},{"clock_domain":"server_clock","name":"end_us","type":"INTEGER","unit":"MICROSECOND"},{"clock_domain":null,"name":"cost_us","type":"INTEGER","unit":"MICROSECOND"},{"clock_domain":null,"name":"timeout_ms","type":"INTEGER","unit":"MILLISECOND"}],"group_by":["service","api","end_us"],"id":"api_complete","max_gap_lines":0,"max_matches":null,"members":[{"line_pattern":"api complete service:(?P<service>[^,]+), api:(?P<api>[^,]+), start:(?P<start_us>\\d+), end:(?P<end_us>\\d+), cost:(?P<cost_us>\\d+), timeout:(?P<timeout_ms>\\d+)","match_mode":"SEARCH"}],"min_matches":0,"observation_policy_ids":["bbbb_default_suppression"],"selectors":[{"field":"service","operator":"EQUALS","value":{"name":"service_name","source":"USER_FACT"}},{"field":"api","operator":"EQUALS","value":{"name":"api_name","source":"USER_FACT"}}],"timestamp_field":"end_us"}],"observation_policies":[{"boundary":"CLOSED_OPEN","id":"bbbb_default_suppression","key_fields":[],"kind":"SUPPRESSION","max_observed":null,"scope":"process_instance","window_ms":75000},{"boundary":"CLOSED_OPEN","id":"queue_rate_limit","key_fields":[],"kind":"RATE_LIMIT","max_observed":1,"scope":"process_instance","window_ms":180000}],"rules":[{"depends_on":[],"description":"目标版本必须包含增强诊断能力。","id":"enhanced_version","kind":"FACT_IN","parameters":{"allowed_values":["enhanced_v2"],"fact_name":"target_version"},"remediation_requirements":[]},{"depends_on":[],"description":"协议必须属于Wiki声明的已知集合。","id":"known_protocol","kind":"FACT_IN","parameters":{"allowed_values":["standard","silent_timeout_detail"],"fact_name":"transport_protocol"},"remediation_requirements":[]},{"depends_on":[],"description":"客户端同步超时消息体已出现。","id":"client_call_present","kind":"EVENT_PRESENT","parameters":{"event":"client_timeout_call"},"remediation_requirements":[]},{"depends_on":[],"description":"客户端请求ID超时消息体已出现。","id":"client_detail_present","kind":"EVENT_PRESENT","parameters":{"event":"client_timeout_detail"},"remediation_requirements":[]},{"depends_on":[],"description":"服务端五行排队历史块已出现。","id":"queue_history_present","kind":"EVENT_PRESENT","parameters":{"event":"queue_history"},"remediation_requirements":[]},{"depends_on":[],"description":"客户端最终收到晚响应。","id":"late_response_present","kind":"EVENT_PRESENT","parameters":{"event":"late_response"},"remediation_requirements":[]},{"depends_on":[],"description":"服务端目标API执行完成记录已出现。","id":"api_complete_present","kind":"EVENT_PRESENT","parameters":{"event":"api_complete"},"remediation_requirements":[]},{"depends_on":["client_call_present","client_detail_present","queue_history_present"],"description":"完整路径的客户端和服务端记录属于同一服务。","id":"complete_service_correlates","kind":"FIELDS_EQUAL","parameters":{"equalities":[{"members":[{"event":"client_timeout_call","field":"service"},{"event":"client_timeout_detail","field":"service"},{"event":"queue_history","field":"first_service"}]}],"quantifier":"EXISTS"},"remediation_requirements":[]},{"depends_on":["client_call_present","queue_history_present"],"description":"完整路径的目标API与排队块首条一致。","id":"complete_api_correlates","kind":"FIELDS_EQUAL","parameters":{"equalities":[{"members":[{"event":"client_timeout_call","field":"api"},{"event":"queue_history","field":"first_api"}]}],"quantifier":"EXISTS"},"remediation_requirements":[]},{"depends_on":["client_call_present","late_response_present","api_complete_present"],"description":"部分路径的超时、晚响应和执行记录属于同一目标。","id":"partial_target_correlates","kind":"FIELDS_EQUAL","parameters":{"equalities":[{"members":[{"event":"client_timeout_call","field":"service"},{"event":"late_response","field":"service"},{"event":"api_complete","field":"service"}]},{"members":[{"event":"client_timeout_call","field":"api"},{"event":"late_response","field":"api"},{"event":"api_complete","field":"api"}]}],"quantifier":"EXISTS"},"remediation_requirements":[]},{"depends_on":["queue_history_present"],"description":"目标API排队加执行时间超过超时阈值。","id":"queue_total_exceeds_timeout","kind":"NUMERIC_COMPARE","parameters":{"clock_tolerance_ms":0,"joins":[],"left":{"kind":"ADD","left":{"event":"queue_history","field":"first_queue_us","kind":"FIELD"},"right":{"event":"queue_history","field":"first_cost_us","kind":"FIELD"}},"operator":"GT","quantifier":"EXISTS","right":{"event":"queue_history","field":"first_timeout_ms","kind":"FIELD"}},"remediation_requirements":[]},{"depends_on":["queue_history_present"],"description":"目标API自身执行时间没有越过超时阈值。","id":"target_execution_within_timeout","kind":"NUMERIC_COMPARE","parameters":{"clock_tolerance_ms":0,"joins":[],"left":{"event":"queue_history","field":"first_cost_us","kind":"FIELD"},"operator":"LTE","quantifier":"EXISTS","right":{"event":"queue_history","field":"first_timeout_ms","kind":"FIELD"}},"remediation_requirements":[]},{"depends_on":["queue_history_present"],"description":"相邻前序API执行时间长于目标API。","id":"prior_api_longer_than_target","kind":"NUMERIC_COMPARE","parameters":{"clock_tolerance_ms":0,"joins":[],"left":{"event":"queue_history","field":"second_cost_us","kind":"FIELD"},"operator":"GT","quantifier":"EXISTS","right":{"event":"queue_history","field":"first_cost_us","kind":"FIELD"}},"remediation_requirements":[]},{"depends_on":["api_complete_present"],"description":"目标API自身执行时长超过超时阈值。","id":"api_duration_exceeds_timeout","kind":"NUMERIC_COMPARE","parameters":{"clock_tolerance_ms":0,"joins":[],"left":{"event":"api_complete","field":"cost_us","kind":"FIELD"},"operator":"GT","quantifier":"EXISTS","right":{"event":"api_complete","field":"timeout_ms","kind":"FIELD"}},"remediation_requirements":[]},{"depends_on":["late_response_present"],"description":"服务端接收时间晚于客户端发送时间。","id":"server_queue_positive","kind":"NUMERIC_COMPARE","parameters":{"clock_tolerance_ms":100,"joins":[],"left":{"kind":"SUBTRACT","left":{"event":"late_response","field":"server_recv_us","kind":"FIELD"},"right":{"event":"late_response","field":"client_send_us","kind":"FIELD"}},"operator":"GT","quantifier":"EXISTS","right":{"kind":"CONST","unit":"MICROSECOND","value":0}},"remediation_requirements":[]},{"depends_on":["late_response_present"],"description":"客户端当前时间晚于服务端发送时间。","id":"client_queue_positive","kind":"NUMERIC_COMPARE","parameters":{"clock_tolerance_ms":100,"joins":[],"left":{"kind":"SUBTRACT","left":{"event":"late_response","field":"client_now_us","kind":"FIELD"},"right":{"event":"late_response","field":"server_send_us","kind":"FIELD"}},"operator":"GT","quantifier":"EXISTS","right":{"kind":"CONST","unit":"MICROSECOND","value":0}},"remediation_requirements":[]},{"depends_on":["late_response_present"],"description":"同一客户端时钟下晚响应总耗时超过deadline。","id":"response_after_deadline","kind":"NUMERIC_COMPARE","parameters":{"clock_tolerance_ms":0,"joins":[],"left":{"kind":"SUBTRACT","left":{"event":"late_response","field":"client_now_us","kind":"FIELD"},"right":{"event":"late_response","field":"client_send_us","kind":"FIELD"}},"operator":"GT","quantifier":"EXISTS","right":{"event":"late_response","field":"timeout_ms","kind":"FIELD"}},"remediation_requirements":[]},{"depends_on":["enhanced_version","known_protocol","complete_service_correlates","complete_api_correlates","queue_total_exceeds_timeout","target_execution_within_timeout"],"description":"两名Agent独立判断服务端排队是否共同导致超时。","id":"queue_contributed_timeout","kind":"SEMANTIC_CAUSALITY","parameters":{"assertion":"同一固定快照中的客户端超时和服务端五行排队块共同支持服务端排队是超时贡献因素。","evidence_events":["client_timeout_call","client_timeout_detail","queue_history"]},"remediation_requirements":[]},{"depends_on":["prior_api_longer_than_target","queue_total_exceeds_timeout"],"description":"两名Agent独立判断前序长API是否造成目标API排队。","id":"upstream_api_caused_queue","kind":"SEMANTIC_CAUSALITY","parameters":{"assertion":"五行历史中紧邻目标调用的前序长API支持共享串行lane中的上游阻塞因素。","evidence_events":["queue_history"]},"remediation_requirements":[]},{"depends_on":["enhanced_version","known_protocol","partial_target_correlates","response_after_deadline"],"description":"两名Agent独立确认该快照只支持部分定位。","id":"partial_snapshot_supported","kind":"SEMANTIC_CAUSALITY","parameters":{"assertion":"超时、晚响应和执行完成正向证据足以排除目标API自身超时，但跨时钟容差和日志抑制使服务端与客户端排队贡献仍未决。","evidence_events":["client_timeout_call","late_response","api_complete"]},"remediation_requirements":[]}],"schema_version":2,"terminal_paths":[{"condition":{"any_of":[{"all_of":[{"result":"PASS","rule_id":"queue_contributed_timeout"},{"result":"PASS","rule_id":"upstream_api_caused_queue"}]}]},"id":"complete_queue_and_upstream","resolution_status":"COMPLETE"},{"condition":{"any_of":[{"all_of":[{"result":"FAIL","rule_id":"api_duration_exceeds_timeout"},{"result":"UNKNOWN","rule_id":"server_queue_positive"},{"result":"UNKNOWN","rule_id":"client_queue_positive"},{"result":"PASS","rule_id":"partial_snapshot_supported"}]}]},"id":"partial_cross_clock_ambiguity","resolution_status":"PARTIAL"},{"condition":{"any_of":[{"all_of":[]}]},"id":"none","resolution_status":"NONE"}]},"version":"5.0.0"}
+{"capability":"anonymized-rpc-timeout","deployment_scope":"TEST_ONLY","entry_document":"SKILL.md","id":"diagnose-anonymized-rpc-timeout","logparse_plan":{"anchors":[{"label":"client","module":{"source":"SKILL_FIXED","value":"bbbb"},"pid":null,"process_name":{"name":"client_process","source":"USER_FACT"},"slot":{"source":"SKILL_FIXED","value":"client_slot"}},{"label":"server","module":{"source":"SKILL_FIXED","value":"bbbb"},"pid":null,"process_name":{"name":"server_process","source":"USER_FACT"},"slot":{"source":"SKILL_FIXED","value":"server_slot"}}],"attachment_requirement":"log_archive","problem_time_binding":{"name":"problem_time","source":"USER_FACT"}},"logparse_product":"bbbb","requirements":[{"constraints":{"allowed_values":[],"max_utf8_bytes":256,"min_utf8_bytes":1,"pattern":null,"value_type":"STRING"},"fulfillment_source":"USER_FACT","kind":"INPUT","name":"service_name","prompt":"请提供超时调用的服务名。","stage":"INITIAL","supplement_policy":"MISSING_ONLY"},{"constraints":{"allowed_values":[],"max_utf8_bytes":256,"min_utf8_bytes":1,"pattern":null,"value_type":"STRING"},"fulfillment_source":"USER_FACT","kind":"INPUT","name":"api_name","prompt":"请提供超时调用的API名。","stage":"INITIAL","supplement_policy":"MISSING_ONLY"},{"constraints":{"allowed_values":[],"max_utf8_bytes":256,"min_utf8_bytes":1,"pattern":null,"value_type":"STRING"},"fulfillment_source":"USER_FACT","kind":"INPUT","name":"target_version","prompt":"请提供目标模块版本分类。","stage":"INITIAL","supplement_policy":"MISSING_ONLY"},{"constraints":{"allowed_values":[],"max_utf8_bytes":256,"min_utf8_bytes":1,"pattern":null,"value_type":"STRING"},"fulfillment_source":"USER_FACT","kind":"INPUT","name":"transport_protocol","prompt":"请提供底层通信协议分类。","stage":"INITIAL","supplement_policy":"MISSING_ONLY"},{"constraints":{"allowed_values":[],"max_utf8_bytes":24,"min_utf8_bytes":1,"pattern":null,"value_type":"STRING"},"fulfillment_source":"USER_FACT","kind":"INPUT","name":"problem_time","prompt":"请提供毫秒精度UTC问题时间。","stage":"INITIAL","supplement_policy":"MISSING_ONLY"},{"constraints":{"allowed_values":[],"max_utf8_bytes":256,"min_utf8_bytes":1,"pattern":null,"value_type":"STRING"},"fulfillment_source":"USER_FACT","kind":"INPUT","name":"client_process","prompt":"请提供客户端进程名。","stage":"INITIAL","supplement_policy":"MISSING_ONLY"},{"constraints":{"allowed_values":[],"max_utf8_bytes":256,"min_utf8_bytes":1,"pattern":null,"value_type":"STRING"},"fulfillment_source":"USER_FACT","kind":"INPUT","name":"server_process","prompt":"请提供服务端进程名。","stage":"INITIAL","supplement_policy":"MISSING_ONLY"},{"constraints":{"allowed_content_types":["application/gzip","application/zip","application/x-tar"],"max_count":1,"min_count":1},"fulfillment_source":"READY_ATTACHMENT","kind":"ATTACHMENT","name":"log_archive","prompt":"请上传Logparse支持的固定日志归档。","stage":"INITIAL","supplement_policy":"MISSING_ONLY"},{"constraints":{"allowed_values":[],"max_utf8_bytes":64,"min_utf8_bytes":1,"pattern":null,"value_type":"STRING"},"fulfillment_source":"USER_FACT","kind":"INPUT","name":"request_id","prompt":"请提供需要关联的进程内请求ID。","stage":"AFTER_LOGPARSE","supplement_policy":"MISSING_ONLY"}],"requires_logparse":true,"schema_version":5,"summary":"从固定双端日志快照定位脱敏RPC超时的多个贡献因素","tool_bundle_id":"tool-bundle/diagnose","verification_contract":{"event_extractors":[{"anchor":"client","fields":[{"clock_domain":null,"name":"service","type":"STRING","unit":null},{"clock_domain":null,"name":"api","type":"STRING","unit":null},{"clock_domain":null,"name":"timeout_ms","type":"INTEGER","unit":"MILLISECOND"}],"group_by":["service","api","timeout_ms"],"id":"client_timeout_call","max_gap_lines":0,"max_matches":null,"members":[{"line_pattern":"rpc call (?P<service>[^:\\s]+):(?P<api>\\S+) timeout limit (?P<timeout_ms>\\d+) recv no response","match_mode":"SEARCH"}],"min_matches":0,"observation_policy_ids":["bbbb_default_suppression"],"selectors":[{"field":"service","operator":"EQUALS","value":{"name":"service_name","source":"USER_FACT"}},{"field":"api","operator":"EQUALS","value":{"name":"api_name","source":"USER_FACT"}}],"timestamp_field":null},{"anchor":"client","fields":[{"clock_domain":null,"name":"service","type":"STRING","unit":null},{"clock_domain":null,"name":"call_type","type":"STRING","unit":null},{"clock_domain":null,"name":"request_id","type":"STRING","unit":null},{"clock_domain":null,"name":"timeout_ms","type":"INTEGER","unit":"MILLISECOND"}],"group_by":["request_id"],"id":"client_timeout_detail","max_gap_lines":0,"max_matches":null,"members":[{"line_pattern":"(?P<service>\\S+) rpc (?P<call_type>sync|async) call unsuccess, reqid\\((?P<request_id>\\d+)\\), timeout (?P<timeout_ms>\\d+)","match_mode":"SEARCH"}],"min_matches":0,"observation_policy_ids":["bbbb_default_suppression"],"selectors":[{"field":"service","operator":"EQUALS","value":{"name":"service_name","source":"USER_FACT"}},{"field":"request_id","operator":"EQUALS","value":{"name":"request_id","source":"USER_FACT"}}],"timestamp_field":null},{"anchor":"server","fields":[{"clock_domain":null,"name":"first_service","type":"STRING","unit":null},{"clock_domain":null,"name":"first_api","type":"STRING","unit":null},{"clock_domain":"server_clock","name":"first_end_us","type":"INTEGER","unit":"MICROSECOND"},{"clock_domain":null,"name":"first_cost_us","type":"INTEGER","unit":"MICROSECOND"},{"clock_domain":null,"name":"first_queue_us","type":"INTEGER","unit":"MICROSECOND"},{"clock_domain":null,"name":"first_timeout_ms","type":"INTEGER","unit":"MILLISECOND"},{"clock_domain":null,"name":"second_service","type":"STRING","unit":null},{"clock_domain":null,"name":"second_api","type":"STRING","unit":null},{"clock_domain":"server_clock","name":"second_end_us","type":"INTEGER","unit":"MICROSECOND"},{"clock_domain":null,"name":"second_cost_us","type":"INTEGER","unit":"MICROSECOND"},{"clock_domain":null,"name":"second_queue_us","type":"INTEGER","unit":"MICROSECOND"},{"clock_domain":null,"name":"second_timeout_ms","type":"INTEGER","unit":"MILLISECOND"},{"clock_domain":null,"name":"third_service","type":"STRING","unit":null},{"clock_domain":null,"name":"third_api","type":"STRING","unit":null},{"clock_domain":"server_clock","name":"third_end_us","type":"INTEGER","unit":"MICROSECOND"},{"clock_domain":null,"name":"third_cost_us","type":"INTEGER","unit":"MICROSECOND"},{"clock_domain":null,"name":"third_queue_us","type":"INTEGER","unit":"MICROSECOND"},{"clock_domain":null,"name":"third_timeout_ms","type":"INTEGER","unit":"MILLISECOND"},{"clock_domain":null,"name":"fourth_service","type":"STRING","unit":null},{"clock_domain":null,"name":"fourth_api","type":"STRING","unit":null},{"clock_domain":"server_clock","name":"fourth_end_us","type":"INTEGER","unit":"MICROSECOND"},{"clock_domain":null,"name":"fourth_cost_us","type":"INTEGER","unit":"MICROSECOND"},{"clock_domain":null,"name":"fourth_queue_us","type":"INTEGER","unit":"MICROSECOND"},{"clock_domain":null,"name":"fourth_timeout_ms","type":"INTEGER","unit":"MILLISECOND"},{"clock_domain":null,"name":"fifth_service","type":"STRING","unit":null},{"clock_domain":null,"name":"fifth_api","type":"STRING","unit":null},{"clock_domain":"server_clock","name":"fifth_end_us","type":"INTEGER","unit":"MICROSECOND"},{"clock_domain":null,"name":"fifth_cost_us","type":"INTEGER","unit":"MICROSECOND"},{"clock_domain":null,"name":"fifth_queue_us","type":"INTEGER","unit":"MICROSECOND"},{"clock_domain":null,"name":"fifth_timeout_ms","type":"INTEGER","unit":"MILLISECOND"}],"group_by":["first_service","first_api","first_end_us"],"id":"queue_history","max_gap_lines":1,"max_matches":null,"members":[{"line_pattern":"\\[BBBB\\]The first service:(?P<first_service>[^,]+), api:(?P<first_api>[^,]+), end time:(?P<first_end_us>\\d+), cost time:(?P<first_cost_us>\\d+), queue time:(?P<first_queue_us>\\d+), timeout:(?P<first_timeout_ms>\\d+)","match_mode":"SEARCH"},{"line_pattern":"\\[BBBB\\]The second service:(?P<second_service>[^,]+), api:(?P<second_api>[^,]+), end time:(?P<second_end_us>\\d+), cost time:(?P<second_cost_us>\\d+), queue time:(?P<second_queue_us>\\d+), timeout:(?P<second_timeout_ms>\\d+)","match_mode":"SEARCH"},{"line_pattern":"\\[BBBB\\]The third service:(?P<third_service>[^,]+), api:(?P<third_api>[^,]+), end time:(?P<third_end_us>\\d+), cost time:(?P<third_cost_us>\\d+), queue time:(?P<third_queue_us>\\d+), timeout:(?P<third_timeout_ms>\\d+)","match_mode":"SEARCH"},{"line_pattern":"\\[BBBB\\]The fourth service:(?P<fourth_service>[^,]+), api:(?P<fourth_api>[^,]+), end time:(?P<fourth_end_us>\\d+), cost time:(?P<fourth_cost_us>\\d+), queue time:(?P<fourth_queue_us>\\d+), timeout:(?P<fourth_timeout_ms>\\d+)","match_mode":"SEARCH"},{"line_pattern":"\\[BBBB\\]The fifth service:(?P<fifth_service>[^,]+), api:(?P<fifth_api>[^,]+), end time:(?P<fifth_end_us>\\d+), cost time:(?P<fifth_cost_us>\\d+), queue time:(?P<fifth_queue_us>\\d+), timeout:(?P<fifth_timeout_ms>\\d+)","match_mode":"SEARCH"}],"min_matches":0,"observation_policy_ids":["bbbb_default_suppression","queue_rate_limit"],"selectors":[{"field":"first_service","operator":"EQUALS","value":{"name":"service_name","source":"USER_FACT"}},{"field":"first_api","operator":"EQUALS","value":{"name":"api_name","source":"USER_FACT"}}],"timestamp_field":"first_end_us"},{"anchor":"client","fields":[{"clock_domain":null,"name":"service","type":"STRING","unit":null},{"clock_domain":null,"name":"api","type":"STRING","unit":null},{"clock_domain":null,"name":"request_id","type":"STRING","unit":null},{"clock_domain":null,"name":"timeout_ms","type":"INTEGER","unit":"MILLISECOND"},{"clock_domain":"client_clock","name":"client_send_us","type":"INTEGER","unit":"MICROSECOND"},{"clock_domain":"server_clock","name":"server_recv_us","type":"INTEGER","unit":"MICROSECOND"},{"clock_domain":"server_clock","name":"server_send_us","type":"INTEGER","unit":"MICROSECOND"},{"clock_domain":"client_clock","name":"client_now_us","type":"INTEGER","unit":"MICROSECOND"}],"group_by":["request_id"],"id":"late_response","max_gap_lines":0,"max_matches":null,"members":[{"line_pattern":"late response service:(?P<service>[^,]+), api:(?P<api>[^,]+), reqid:(?P<request_id>\\d+), timeout:(?P<timeout_ms>\\d+), client_send:(?P<client_send_us>\\d+), server_recv:(?P<server_recv_us>\\d+), server_send:(?P<server_send_us>\\d+), client_now:(?P<client_now_us>\\d+)","match_mode":"SEARCH"}],"min_matches":0,"observation_policy_ids":["bbbb_default_suppression"],"selectors":[{"field":"service","operator":"EQUALS","value":{"name":"service_name","source":"USER_FACT"}},{"field":"api","operator":"EQUALS","value":{"name":"api_name","source":"USER_FACT"}},{"field":"request_id","operator":"EQUALS","value":{"name":"request_id","source":"USER_FACT"}}],"timestamp_field":"client_now_us"},{"anchor":"server","fields":[{"clock_domain":null,"name":"service","type":"STRING","unit":null},{"clock_domain":null,"name":"api","type":"STRING","unit":null},{"clock_domain":"server_clock","name":"start_us","type":"INTEGER","unit":"MICROSECOND"},{"clock_domain":"server_clock","name":"end_us","type":"INTEGER","unit":"MICROSECOND"},{"clock_domain":null,"name":"cost_us","type":"INTEGER","unit":"MICROSECOND"},{"clock_domain":null,"name":"timeout_ms","type":"INTEGER","unit":"MILLISECOND"}],"group_by":["service","api","end_us"],"id":"api_complete","max_gap_lines":0,"max_matches":null,"members":[{"line_pattern":"api complete service:(?P<service>[^,]+), api:(?P<api>[^,]+), start:(?P<start_us>\\d+), end:(?P<end_us>\\d+), cost:(?P<cost_us>\\d+), timeout:(?P<timeout_ms>\\d+)","match_mode":"SEARCH"}],"min_matches":0,"observation_policy_ids":["bbbb_default_suppression"],"selectors":[{"field":"service","operator":"EQUALS","value":{"name":"service_name","source":"USER_FACT"}},{"field":"api","operator":"EQUALS","value":{"name":"api_name","source":"USER_FACT"}}],"timestamp_field":"end_us"},{"anchor":"server","fields":[{"clock_domain":null,"name":"service","type":"STRING","unit":null},{"clock_domain":null,"name":"api","type":"STRING","unit":null},{"clock_domain":"server_clock","name":"start_us","type":"INTEGER","unit":"MICROSECOND"},{"clock_domain":"server_clock","name":"cur_us","type":"INTEGER","unit":"MICROSECOND"},{"clock_domain":"server_clock","name":"request_us","type":"INTEGER","unit":"MICROSECOND"},{"clock_domain":null,"name":"timeout_ms","type":"INTEGER","unit":"MILLISECOND"}],"group_by":["service","api","cur_us"],"id":"deadloop_detected","max_gap_lines":0,"max_matches":null,"members":[{"line_pattern":"cost too long, service:(?P<service>[^,]+), api:(?P<api>[^,]+), start time:(?P<start_us>\\d+), cur time:(?P<cur_us>\\d+), request time:(?P<request_us>\\d+), timeout:(?P<timeout_ms>\\d+)","match_mode":"SEARCH"}],"min_matches":0,"observation_policy_ids":["bbbb_default_suppression"],"selectors":[{"field":"service","operator":"EQUALS","value":{"name":"service_name","source":"USER_FACT"}},{"field":"api","operator":"EQUALS","value":{"name":"api_name","source":"USER_FACT"}}],"timestamp_field":"cur_us"}],"observation_policies":[{"boundary":"CLOSED_OPEN","id":"bbbb_default_suppression","key_fields":[],"kind":"SUPPRESSION","max_observed":null,"scope":"process_instance_source_line_errno","window_ms":75000},{"boundary":"CLOSED_OPEN","id":"queue_rate_limit","key_fields":[],"kind":"RATE_LIMIT","max_observed":1,"scope":"process_instance","window_ms":180000}],"rules":[{"depends_on":[],"description":"目标版本必须包含增强诊断能力。","id":"enhanced_version","kind":"FACT_IN","parameters":{"allowed_values":["enhanced_v2"],"fact_name":"target_version"},"remediation_requirements":[]},{"depends_on":[],"description":"协议必须属于Wiki声明的已知集合。","id":"known_protocol","kind":"FACT_IN","parameters":{"allowed_values":["standard","silent_timeout_detail"],"fact_name":"transport_protocol"},"remediation_requirements":[]},{"depends_on":[],"description":"客户端同步超时消息体已出现。","id":"client_call_present","kind":"EVENT_PRESENT","parameters":{"event":"client_timeout_call"},"remediation_requirements":[]},{"depends_on":[],"description":"客户端请求ID超时消息体已出现。","id":"client_detail_present","kind":"EVENT_PRESENT","parameters":{"event":"client_timeout_detail"},"remediation_requirements":[]},{"depends_on":[],"description":"服务端五行排队历史块已出现。","id":"queue_history_present","kind":"EVENT_PRESENT","parameters":{"event":"queue_history"},"remediation_requirements":[]},{"depends_on":[],"description":"客户端最终收到晚响应。","id":"late_response_present","kind":"EVENT_PRESENT","parameters":{"event":"late_response"},"remediation_requirements":[]},{"depends_on":[],"description":"服务端目标API执行完成记录已出现。","id":"api_complete_present","kind":"EVENT_PRESENT","parameters":{"event":"api_complete"},"remediation_requirements":[]},{"depends_on":[],"description":"服务端目标API死循环检测记录已出现。","id":"deadloop_present","kind":"EVENT_PRESENT","parameters":{"event":"deadloop_detected"},"remediation_requirements":[]},{"depends_on":["client_call_present","client_detail_present","queue_history_present"],"description":"完整路径的客户端和服务端记录属于同一服务。","id":"complete_service_correlates","kind":"FIELDS_EQUAL","parameters":{"equalities":[{"members":[{"event":"client_timeout_call","field":"service"},{"event":"client_timeout_detail","field":"service"},{"event":"queue_history","field":"first_service"}]}],"quantifier":"EXISTS"},"remediation_requirements":[]},{"depends_on":["client_call_present","queue_history_present"],"description":"完整路径的目标API与排队块首条一致。","id":"complete_api_correlates","kind":"FIELDS_EQUAL","parameters":{"equalities":[{"members":[{"event":"client_timeout_call","field":"api"},{"event":"queue_history","field":"first_api"}]}],"quantifier":"EXISTS"},"remediation_requirements":[]},{"depends_on":["client_call_present","client_detail_present","queue_history_present"],"description":"完整排队路径的客户端概览、请求明细和五行块使用同一超时阈值。","id":"complete_timeout_consistent","kind":"FIELDS_EQUAL","parameters":{"equalities":[{"members":[{"event":"client_timeout_call","field":"timeout_ms"},{"event":"client_timeout_detail","field":"timeout_ms"},{"event":"queue_history","field":"first_timeout_ms"}]}],"quantifier":"EXISTS"},"remediation_requirements":[]},{"depends_on":["queue_history_present"],"description":"目标API排队加执行时间超过超时阈值。","id":"queue_total_exceeds_timeout","kind":"NUMERIC_COMPARE","parameters":{"clock_tolerance_ms":0,"joins":[],"left":{"kind":"ADD","left":{"event":"queue_history","field":"first_queue_us","kind":"FIELD"},"right":{"event":"queue_history","field":"first_cost_us","kind":"FIELD"}},"operator":"GT","quantifier":"EXISTS","right":{"kind":"CONVERT","operand":{"event":"queue_history","field":"first_timeout_ms","kind":"FIELD"},"unit":"MICROSECOND"}},"remediation_requirements":[]},{"depends_on":["queue_history_present"],"description":"目标API自身执行时间没有越过超时阈值。","id":"target_execution_within_timeout","kind":"NUMERIC_COMPARE","parameters":{"clock_tolerance_ms":0,"joins":[],"left":{"event":"queue_history","field":"first_cost_us","kind":"FIELD"},"operator":"LTE","quantifier":"EXISTS","right":{"kind":"CONVERT","operand":{"event":"queue_history","field":"first_timeout_ms","kind":"FIELD"},"unit":"MICROSECOND"}},"remediation_requirements":[]},{"depends_on":["queue_history_present"],"description":"目标API在服务端记录到正的排队时长。","id":"target_queue_positive","kind":"NUMERIC_COMPARE","parameters":{"clock_tolerance_ms":0,"joins":[],"left":{"event":"queue_history","field":"first_queue_us","kind":"FIELD"},"operator":"GT","quantifier":"EXISTS","right":{"kind":"CONST","unit":"MICROSECOND","value":0}},"remediation_requirements":[]},{"depends_on":["queue_history_present"],"description":"second前序API结束时刻等于由first结束减执行耗时得到的目标API开始时刻。","id":"prior_end_equals_target_start","kind":"NUMERIC_COMPARE","parameters":{"clock_tolerance_ms":0,"joins":[],"left":{"event":"queue_history","field":"second_end_us","kind":"FIELD"},"operator":"EQ","quantifier":"EXISTS","right":{"kind":"SUBTRACT","left":{"event":"queue_history","field":"first_end_us","kind":"FIELD"},"right":{"event":"queue_history","field":"first_cost_us","kind":"FIELD"}}},"remediation_requirements":[]},{"depends_on":["queue_history_present","target_queue_positive","prior_end_equals_target_start"],"description":"second前序API执行开始早于目标API开始；结合紧邻结束与正排队时长可机械确认执行区间和目标排队区间重叠。","id":"prior_execution_overlaps_target_queue","kind":"NUMERIC_COMPARE","parameters":{"clock_tolerance_ms":0,"joins":[],"left":{"kind":"SUBTRACT","left":{"event":"queue_history","field":"second_end_us","kind":"FIELD"},"right":{"event":"queue_history","field":"second_cost_us","kind":"FIELD"}},"operator":"LT","quantifier":"EXISTS","right":{"kind":"SUBTRACT","left":{"event":"queue_history","field":"first_end_us","kind":"FIELD"},"right":{"event":"queue_history","field":"first_cost_us","kind":"FIELD"}}},"remediation_requirements":[]},{"depends_on":["queue_history_present"],"description":"相邻前序API执行时间长于目标API。","id":"prior_api_longer_than_target","kind":"NUMERIC_COMPARE","parameters":{"clock_tolerance_ms":0,"joins":[],"left":{"event":"queue_history","field":"second_cost_us","kind":"FIELD"},"operator":"GT","quantifier":"EXISTS","right":{"event":"queue_history","field":"first_cost_us","kind":"FIELD"}},"remediation_requirements":[]},{"depends_on":["api_complete_present"],"description":"目标API自身执行时长超过超时阈值。","id":"api_duration_exceeds_timeout","kind":"NUMERIC_COMPARE","parameters":{"clock_tolerance_ms":0,"joins":[],"left":{"event":"api_complete","field":"cost_us","kind":"FIELD"},"operator":"GT","quantifier":"EXISTS","right":{"kind":"CONVERT","operand":{"event":"api_complete","field":"timeout_ms","kind":"FIELD"},"unit":"MICROSECOND"}},"remediation_requirements":[]},{"depends_on":["late_response_present"],"description":"同一服务端时钟下从接收到发送的聚合停留时长超过超时阈值。","id":"server_sojourn_exceeds_timeout","kind":"NUMERIC_COMPARE","parameters":{"clock_tolerance_ms":0,"joins":[],"left":{"kind":"SUBTRACT","left":{"event":"late_response","field":"server_send_us","kind":"FIELD"},"right":{"event":"late_response","field":"server_recv_us","kind":"FIELD"}},"operator":"GT","quantifier":"EXISTS","right":{"kind":"CONVERT","operand":{"event":"late_response","field":"timeout_ms","kind":"FIELD"},"unit":"MICROSECOND"}},"remediation_requirements":[]},{"depends_on":["late_response_present"],"description":"服务端接收时间晚于客户端发送时间。","id":"server_queue_positive","kind":"NUMERIC_COMPARE","parameters":{"clock_tolerance_ms":100,"joins":[],"left":{"kind":"SUBTRACT","left":{"event":"late_response","field":"server_recv_us","kind":"FIELD"},"right":{"event":"late_response","field":"client_send_us","kind":"FIELD"}},"operator":"GT","quantifier":"EXISTS","right":{"kind":"CONST","unit":"MICROSECOND","value":0}},"remediation_requirements":[]},{"depends_on":["late_response_present"],"description":"客户端当前时间晚于服务端发送时间。","id":"client_queue_positive","kind":"NUMERIC_COMPARE","parameters":{"clock_tolerance_ms":100,"joins":[],"left":{"kind":"SUBTRACT","left":{"event":"late_response","field":"client_now_us","kind":"FIELD"},"right":{"event":"late_response","field":"server_send_us","kind":"FIELD"}},"operator":"GT","quantifier":"EXISTS","right":{"kind":"CONST","unit":"MICROSECOND","value":0}},"remediation_requirements":[]},{"depends_on":["late_response_present"],"description":"客户端发送到服务端接收的跨时钟聚合时长在100毫秒容差后仍超过超时预算。","id":"server_receive_aggregate_exceeds_timeout","kind":"NUMERIC_COMPARE","parameters":{"clock_tolerance_ms":100,"joins":[],"left":{"kind":"SUBTRACT","left":{"event":"late_response","field":"server_recv_us","kind":"FIELD"},"right":{"event":"late_response","field":"client_send_us","kind":"FIELD"}},"operator":"GT","quantifier":"EXISTS","right":{"kind":"CONVERT","operand":{"event":"late_response","field":"timeout_ms","kind":"FIELD"},"unit":"MICROSECOND"}},"remediation_requirements":[]},{"depends_on":["late_response_present"],"description":"服务端发送到客户端当前时刻的跨时钟聚合时长在100毫秒容差后仍超过超时预算。","id":"client_receive_aggregate_exceeds_timeout","kind":"NUMERIC_COMPARE","parameters":{"clock_tolerance_ms":100,"joins":[],"left":{"kind":"SUBTRACT","left":{"event":"late_response","field":"client_now_us","kind":"FIELD"},"right":{"event":"late_response","field":"server_send_us","kind":"FIELD"}},"operator":"GT","quantifier":"EXISTS","right":{"kind":"CONVERT","operand":{"event":"late_response","field":"timeout_ms","kind":"FIELD"},"unit":"MICROSECOND"}},"remediation_requirements":[]},{"depends_on":["late_response_present"],"description":"同一客户端时钟下晚响应总耗时超过deadline。","id":"response_after_deadline","kind":"NUMERIC_COMPARE","parameters":{"clock_tolerance_ms":0,"joins":[],"left":{"kind":"SUBTRACT","left":{"event":"late_response","field":"client_now_us","kind":"FIELD"},"right":{"event":"late_response","field":"client_send_us","kind":"FIELD"}},"operator":"GT","quantifier":"EXISTS","right":{"kind":"CONVERT","operand":{"event":"late_response","field":"timeout_ms","kind":"FIELD"},"unit":"MICROSECOND"}},"remediation_requirements":[]},{"depends_on":["deadloop_present"],"description":"死循环检测时同一服务端时钟下的执行时长严格超过两倍超时预算。","id":"deadloop_execution_exceeds_twice_timeout","kind":"NUMERIC_COMPARE","parameters":{"clock_tolerance_ms":0,"joins":[],"left":{"kind":"SUBTRACT","left":{"event":"deadloop_detected","field":"cur_us","kind":"FIELD"},"right":{"event":"deadloop_detected","field":"start_us","kind":"FIELD"}},"operator":"GT","quantifier":"EXISTS","right":{"kind":"MULTIPLY_CONST","multiplier":2,"operand":{"kind":"CONVERT","operand":{"event":"deadloop_detected","field":"timeout_ms","kind":"FIELD"},"unit":"MICROSECOND"}}},"remediation_requirements":[]},{"depends_on":["deadloop_present"],"description":"死循环检测时同一服务端时钟下的执行时长严格超过60秒。","id":"deadloop_execution_exceeds_sixty_seconds","kind":"NUMERIC_COMPARE","parameters":{"clock_tolerance_ms":0,"joins":[],"left":{"kind":"SUBTRACT","left":{"event":"deadloop_detected","field":"cur_us","kind":"FIELD"},"right":{"event":"deadloop_detected","field":"start_us","kind":"FIELD"}},"operator":"GT","quantifier":"EXISTS","right":{"kind":"CONST","unit":"SECOND","value":60}},"remediation_requirements":[]},{"depends_on":["enhanced_version","known_protocol","complete_service_correlates","complete_api_correlates","complete_timeout_consistent","queue_total_exceeds_timeout","target_execution_within_timeout","target_queue_positive"],"description":"两名Agent独立判断服务端排队是否共同导致超时。","id":"queue_contributed_timeout","kind":"SEMANTIC_CAUSALITY","parameters":{"assertion":"同一固定快照中超时阈值一致的客户端超时与服务端五行块，机械确认目标排队加执行越过预算且自身执行未越界，支持服务端排队是超时贡献因素。","evidence_events":["client_timeout_call","client_timeout_detail","queue_history"]},"remediation_requirements":[]},{"depends_on":["enhanced_version","complete_service_correlates","complete_api_correlates","prior_api_longer_than_target","prior_end_equals_target_start","prior_execution_overlaps_target_queue","target_queue_positive"],"description":"两名Agent独立判断前序长API是否造成目标API排队。","id":"upstream_api_caused_queue","kind":"SEMANTIC_CAUSALITY","parameters":{"assertion":"五行历史机械确认second前序API结束等于目标开始，且其执行区间与目标排队区间重叠，因此支持共享串行lane中的上游阻塞因素。","evidence_events":["queue_history"]},"remediation_requirements":[]},{"depends_on":["api_complete_present","api_duration_exceeds_timeout"],"description":"两名Agent独立确认目标API完成时自身执行已经超过超时预算。","id":"api_overrun_confirmed","kind":"SEMANTIC_CAUSALITY","parameters":{"assertion":"目标service和API选择器命中的执行完成正向日志及同钟耗时，足以确认direct_api_overrun；该路径不依赖增强版本。","evidence_events":["api_complete"]},"remediation_requirements":[]},{"depends_on":["enhanced_version","deadloop_present","deadloop_execution_exceeds_twice_timeout","deadloop_execution_exceeds_sixty_seconds"],"description":"两名Agent独立确认增强版本目标API仍在执行且达到死循环检测双阈值。","id":"deadloop_overrun_confirmed","kind":"SEMANTIC_CAUSALITY","parameters":{"assertion":"增强版本的死循环检测正向日志同时证明执行时长严格超过两倍timeout和60秒，足以确认direct_api_overrun；once-per-call只限制重复打印，不用于缺失推理。","evidence_events":["deadloop_detected"]},"remediation_requirements":[]},{"depends_on":["late_response_present","response_after_deadline","server_sojourn_exceeds_timeout"],"description":"两名Agent独立确认该快照只支持部分定位。","id":"partial_snapshot_supported","kind":"SEMANTIC_CAUSALITY","parameters":{"assertion":"late_response自身的service、API和request选择器及同钟计算确认服务端聚合停留超过deadline；它不依赖增强版本或同步专用日志，但具体direct_api_overrun机制以及跨钟收发贡献仍是候选。","evidence_events":["late_response"]},"remediation_requirements":[]},{"depends_on":["late_response_present","response_after_deadline","server_receive_aggregate_exceeds_timeout"],"description":"两名Agent独立确认客户端发送到服务端接收的聚合段已超预算但机制仍未决。","id":"server_receive_aggregate_partial","kind":"SEMANTIC_CAUSALITY","parameters":{"assertion":"late_response正向证据在100毫秒跨钟容差后仍确认server_receive_aggregate_overrun，但不能把该聚合段直接等同某个线程阻塞，server_receive_queue仍是候选机制。","evidence_events":["late_response"]},"remediation_requirements":[]},{"depends_on":["late_response_present","response_after_deadline","client_receive_aggregate_exceeds_timeout"],"description":"两名Agent独立确认服务端发送到客户端当前时刻的聚合段已超预算但机制仍未决。","id":"client_receive_aggregate_partial","kind":"SEMANTIC_CAUSALITY","parameters":{"assertion":"late_response正向证据在100毫秒跨钟容差后仍确认client_receive_aggregate_overrun，但不能把该聚合段直接等同某个线程阻塞，client_receive_queue仍是候选机制。","evidence_events":["late_response"]},"remediation_requirements":[]}],"schema_version":2,"terminal_paths":[{"condition":{"any_of":[{"all_of":[{"result":"PASS","rule_id":"queue_contributed_timeout"},{"result":"PASS","rule_id":"upstream_api_caused_queue"}]}]},"id":"complete_queue_and_upstream","resolution_status":"COMPLETE"},{"condition":{"any_of":[{"all_of":[{"result":"PASS","rule_id":"api_overrun_confirmed"}]}]},"id":"complete_api_overrun","resolution_status":"COMPLETE"},{"condition":{"any_of":[{"all_of":[{"result":"PASS","rule_id":"deadloop_overrun_confirmed"}]}]},"id":"complete_deadloop_overrun","resolution_status":"COMPLETE"},{"condition":{"any_of":[{"all_of":[{"result":"PASS","rule_id":"server_receive_aggregate_partial"}]}]},"id":"partial_server_receive_aggregate","resolution_status":"PARTIAL"},{"condition":{"any_of":[{"all_of":[{"result":"PASS","rule_id":"server_sojourn_exceeds_timeout"},{"result":"UNKNOWN","rule_id":"api_complete_present"},{"result":"UNKNOWN","rule_id":"queue_history_present"},{"result":"UNKNOWN","rule_id":"api_duration_exceeds_timeout"},{"result":"UNKNOWN","rule_id":"server_queue_positive"},{"result":"UNKNOWN","rule_id":"client_queue_positive"},{"result":"PASS","rule_id":"partial_snapshot_supported"}]}]},"id":"partial_cross_clock_ambiguity","resolution_status":"PARTIAL"},{"condition":{"any_of":[{"all_of":[{"result":"PASS","rule_id":"client_receive_aggregate_partial"}]}]},"id":"partial_client_receive_aggregate","resolution_status":"PARTIAL"},{"condition":{"any_of":[{"all_of":[]}]},"id":"none","resolution_status":"NONE"}]},"version":"5.0.0"}
 ```
 <!-- DIAGNOSIS_SKILL_MANIFEST_V5_END -->
 
@@ -672,6 +672,84 @@ MIME type 或计算 broker 受控树的 size/hash。
         }
       ],
       "timestamp_field": "end_us"
+    },
+    {
+      "anchor": "server",
+      "fields": [
+        {
+          "clock_domain": null,
+          "name": "service",
+          "type": "STRING",
+          "unit": null
+        },
+        {
+          "clock_domain": null,
+          "name": "api",
+          "type": "STRING",
+          "unit": null
+        },
+        {
+          "clock_domain": "server_clock",
+          "name": "start_us",
+          "type": "INTEGER",
+          "unit": "MICROSECOND"
+        },
+        {
+          "clock_domain": "server_clock",
+          "name": "cur_us",
+          "type": "INTEGER",
+          "unit": "MICROSECOND"
+        },
+        {
+          "clock_domain": "server_clock",
+          "name": "request_us",
+          "type": "INTEGER",
+          "unit": "MICROSECOND"
+        },
+        {
+          "clock_domain": null,
+          "name": "timeout_ms",
+          "type": "INTEGER",
+          "unit": "MILLISECOND"
+        }
+      ],
+      "group_by": [
+        "service",
+        "api",
+        "cur_us"
+      ],
+      "id": "deadloop_detected",
+      "max_gap_lines": 0,
+      "max_matches": null,
+      "members": [
+        {
+          "line_pattern": "cost too long, service:(?P<service>[^,]+), api:(?P<api>[^,]+), start time:(?P<start_us>\\d+), cur time:(?P<cur_us>\\d+), request time:(?P<request_us>\\d+), timeout:(?P<timeout_ms>\\d+)",
+          "match_mode": "SEARCH"
+        }
+      ],
+      "min_matches": 0,
+      "observation_policy_ids": [
+        "bbbb_default_suppression"
+      ],
+      "selectors": [
+        {
+          "field": "service",
+          "operator": "EQUALS",
+          "value": {
+            "name": "service_name",
+            "source": "USER_FACT"
+          }
+        },
+        {
+          "field": "api",
+          "operator": "EQUALS",
+          "value": {
+            "name": "api_name",
+            "source": "USER_FACT"
+          }
+        }
+      ],
+      "timestamp_field": "cur_us"
     }
   ],
   "observation_policies": [
@@ -681,7 +759,7 @@ MIME type 或计算 broker 受控树的 size/hash。
       "key_fields": [],
       "kind": "SUPPRESSION",
       "max_observed": null,
-      "scope": "process_instance",
+      "scope": "process_instance_source_line_errno",
       "window_ms": 75000
     },
     {
@@ -773,6 +851,16 @@ MIME type 或计算 broker 受控树的 size/hash。
       "remediation_requirements": []
     },
     {
+      "depends_on": [],
+      "description": "服务端目标API死循环检测记录已出现。",
+      "id": "deadloop_present",
+      "kind": "EVENT_PRESENT",
+      "parameters": {
+        "event": "deadloop_detected"
+      },
+      "remediation_requirements": []
+    },
+    {
       "depends_on": [
         "client_call_present",
         "client_detail_present",
@@ -834,11 +922,11 @@ MIME type 或计算 broker 受控树的 size/hash。
     {
       "depends_on": [
         "client_call_present",
-        "late_response_present",
-        "api_complete_present"
+        "client_detail_present",
+        "queue_history_present"
       ],
-      "description": "部分路径的超时、晚响应和执行记录属于同一目标。",
-      "id": "partial_target_correlates",
+      "description": "完整排队路径的客户端概览、请求明细和五行块使用同一超时阈值。",
+      "id": "complete_timeout_consistent",
       "kind": "FIELDS_EQUAL",
       "parameters": {
         "equalities": [
@@ -846,31 +934,15 @@ MIME type 或计算 broker 受控树的 size/hash。
             "members": [
               {
                 "event": "client_timeout_call",
-                "field": "service"
+                "field": "timeout_ms"
               },
               {
-                "event": "late_response",
-                "field": "service"
+                "event": "client_timeout_detail",
+                "field": "timeout_ms"
               },
               {
-                "event": "api_complete",
-                "field": "service"
-              }
-            ]
-          },
-          {
-            "members": [
-              {
-                "event": "client_timeout_call",
-                "field": "api"
-              },
-              {
-                "event": "late_response",
-                "field": "api"
-              },
-              {
-                "event": "api_complete",
-                "field": "api"
+                "event": "queue_history",
+                "field": "first_timeout_ms"
               }
             ]
           }
@@ -905,9 +977,13 @@ MIME type 或计算 broker 受控树的 size/hash。
         "operator": "GT",
         "quantifier": "EXISTS",
         "right": {
-          "event": "queue_history",
-          "field": "first_timeout_ms",
-          "kind": "FIELD"
+          "kind": "CONVERT",
+          "operand": {
+            "event": "queue_history",
+            "field": "first_timeout_ms",
+            "kind": "FIELD"
+          },
+          "unit": "MICROSECOND"
         }
       },
       "remediation_requirements": []
@@ -930,9 +1006,114 @@ MIME type 或计算 broker 受控树的 size/hash。
         "operator": "LTE",
         "quantifier": "EXISTS",
         "right": {
+          "kind": "CONVERT",
+          "operand": {
+            "event": "queue_history",
+            "field": "first_timeout_ms",
+            "kind": "FIELD"
+          },
+          "unit": "MICROSECOND"
+        }
+      },
+      "remediation_requirements": []
+    },
+    {
+      "depends_on": [
+        "queue_history_present"
+      ],
+      "description": "目标API在服务端记录到正的排队时长。",
+      "id": "target_queue_positive",
+      "kind": "NUMERIC_COMPARE",
+      "parameters": {
+        "clock_tolerance_ms": 0,
+        "joins": [],
+        "left": {
           "event": "queue_history",
-          "field": "first_timeout_ms",
+          "field": "first_queue_us",
           "kind": "FIELD"
+        },
+        "operator": "GT",
+        "quantifier": "EXISTS",
+        "right": {
+          "kind": "CONST",
+          "unit": "MICROSECOND",
+          "value": 0
+        }
+      },
+      "remediation_requirements": []
+    },
+    {
+      "depends_on": [
+        "queue_history_present"
+      ],
+      "description": "second前序API结束时刻等于由first结束减执行耗时得到的目标API开始时刻。",
+      "id": "prior_end_equals_target_start",
+      "kind": "NUMERIC_COMPARE",
+      "parameters": {
+        "clock_tolerance_ms": 0,
+        "joins": [],
+        "left": {
+          "event": "queue_history",
+          "field": "second_end_us",
+          "kind": "FIELD"
+        },
+        "operator": "EQ",
+        "quantifier": "EXISTS",
+        "right": {
+          "kind": "SUBTRACT",
+          "left": {
+            "event": "queue_history",
+            "field": "first_end_us",
+            "kind": "FIELD"
+          },
+          "right": {
+            "event": "queue_history",
+            "field": "first_cost_us",
+            "kind": "FIELD"
+          }
+        }
+      },
+      "remediation_requirements": []
+    },
+    {
+      "depends_on": [
+        "queue_history_present",
+        "target_queue_positive",
+        "prior_end_equals_target_start"
+      ],
+      "description": "second前序API执行开始早于目标API开始；结合紧邻结束与正排队时长可机械确认执行区间和目标排队区间重叠。",
+      "id": "prior_execution_overlaps_target_queue",
+      "kind": "NUMERIC_COMPARE",
+      "parameters": {
+        "clock_tolerance_ms": 0,
+        "joins": [],
+        "left": {
+          "kind": "SUBTRACT",
+          "left": {
+            "event": "queue_history",
+            "field": "second_end_us",
+            "kind": "FIELD"
+          },
+          "right": {
+            "event": "queue_history",
+            "field": "second_cost_us",
+            "kind": "FIELD"
+          }
+        },
+        "operator": "LT",
+        "quantifier": "EXISTS",
+        "right": {
+          "kind": "SUBTRACT",
+          "left": {
+            "event": "queue_history",
+            "field": "first_end_us",
+            "kind": "FIELD"
+          },
+          "right": {
+            "event": "queue_history",
+            "field": "first_cost_us",
+            "kind": "FIELD"
+          }
         }
       },
       "remediation_requirements": []
@@ -980,9 +1161,50 @@ MIME type 或计算 broker 受控树的 size/hash。
         "operator": "GT",
         "quantifier": "EXISTS",
         "right": {
-          "event": "api_complete",
-          "field": "timeout_ms",
-          "kind": "FIELD"
+          "kind": "CONVERT",
+          "operand": {
+            "event": "api_complete",
+            "field": "timeout_ms",
+            "kind": "FIELD"
+          },
+          "unit": "MICROSECOND"
+        }
+      },
+      "remediation_requirements": []
+    },
+    {
+      "depends_on": [
+        "late_response_present"
+      ],
+      "description": "同一服务端时钟下从接收到发送的聚合停留时长超过超时阈值。",
+      "id": "server_sojourn_exceeds_timeout",
+      "kind": "NUMERIC_COMPARE",
+      "parameters": {
+        "clock_tolerance_ms": 0,
+        "joins": [],
+        "left": {
+          "kind": "SUBTRACT",
+          "left": {
+            "event": "late_response",
+            "field": "server_send_us",
+            "kind": "FIELD"
+          },
+          "right": {
+            "event": "late_response",
+            "field": "server_recv_us",
+            "kind": "FIELD"
+          }
+        },
+        "operator": "GT",
+        "quantifier": "EXISTS",
+        "right": {
+          "kind": "CONVERT",
+          "operand": {
+            "event": "late_response",
+            "field": "timeout_ms",
+            "kind": "FIELD"
+          },
+          "unit": "MICROSECOND"
         }
       },
       "remediation_requirements": []
@@ -1057,6 +1279,80 @@ MIME type 或计算 broker 受控树的 size/hash。
       "depends_on": [
         "late_response_present"
       ],
+      "description": "客户端发送到服务端接收的跨时钟聚合时长在100毫秒容差后仍超过超时预算。",
+      "id": "server_receive_aggregate_exceeds_timeout",
+      "kind": "NUMERIC_COMPARE",
+      "parameters": {
+        "clock_tolerance_ms": 100,
+        "joins": [],
+        "left": {
+          "kind": "SUBTRACT",
+          "left": {
+            "event": "late_response",
+            "field": "server_recv_us",
+            "kind": "FIELD"
+          },
+          "right": {
+            "event": "late_response",
+            "field": "client_send_us",
+            "kind": "FIELD"
+          }
+        },
+        "operator": "GT",
+        "quantifier": "EXISTS",
+        "right": {
+          "kind": "CONVERT",
+          "operand": {
+            "event": "late_response",
+            "field": "timeout_ms",
+            "kind": "FIELD"
+          },
+          "unit": "MICROSECOND"
+        }
+      },
+      "remediation_requirements": []
+    },
+    {
+      "depends_on": [
+        "late_response_present"
+      ],
+      "description": "服务端发送到客户端当前时刻的跨时钟聚合时长在100毫秒容差后仍超过超时预算。",
+      "id": "client_receive_aggregate_exceeds_timeout",
+      "kind": "NUMERIC_COMPARE",
+      "parameters": {
+        "clock_tolerance_ms": 100,
+        "joins": [],
+        "left": {
+          "kind": "SUBTRACT",
+          "left": {
+            "event": "late_response",
+            "field": "client_now_us",
+            "kind": "FIELD"
+          },
+          "right": {
+            "event": "late_response",
+            "field": "server_send_us",
+            "kind": "FIELD"
+          }
+        },
+        "operator": "GT",
+        "quantifier": "EXISTS",
+        "right": {
+          "kind": "CONVERT",
+          "operand": {
+            "event": "late_response",
+            "field": "timeout_ms",
+            "kind": "FIELD"
+          },
+          "unit": "MICROSECOND"
+        }
+      },
+      "remediation_requirements": []
+    },
+    {
+      "depends_on": [
+        "late_response_present"
+      ],
       "description": "同一客户端时钟下晚响应总耗时超过deadline。",
       "id": "response_after_deadline",
       "kind": "NUMERIC_COMPARE",
@@ -1079,9 +1375,87 @@ MIME type 或计算 broker 受控树的 size/hash。
         "operator": "GT",
         "quantifier": "EXISTS",
         "right": {
-          "event": "late_response",
-          "field": "timeout_ms",
-          "kind": "FIELD"
+          "kind": "CONVERT",
+          "operand": {
+            "event": "late_response",
+            "field": "timeout_ms",
+            "kind": "FIELD"
+          },
+          "unit": "MICROSECOND"
+        }
+      },
+      "remediation_requirements": []
+    },
+    {
+      "depends_on": [
+        "deadloop_present"
+      ],
+      "description": "死循环检测时同一服务端时钟下的执行时长严格超过两倍超时预算。",
+      "id": "deadloop_execution_exceeds_twice_timeout",
+      "kind": "NUMERIC_COMPARE",
+      "parameters": {
+        "clock_tolerance_ms": 0,
+        "joins": [],
+        "left": {
+          "kind": "SUBTRACT",
+          "left": {
+            "event": "deadloop_detected",
+            "field": "cur_us",
+            "kind": "FIELD"
+          },
+          "right": {
+            "event": "deadloop_detected",
+            "field": "start_us",
+            "kind": "FIELD"
+          }
+        },
+        "operator": "GT",
+        "quantifier": "EXISTS",
+        "right": {
+          "kind": "MULTIPLY_CONST",
+          "multiplier": 2,
+          "operand": {
+            "kind": "CONVERT",
+            "operand": {
+              "event": "deadloop_detected",
+              "field": "timeout_ms",
+              "kind": "FIELD"
+            },
+            "unit": "MICROSECOND"
+          }
+        }
+      },
+      "remediation_requirements": []
+    },
+    {
+      "depends_on": [
+        "deadloop_present"
+      ],
+      "description": "死循环检测时同一服务端时钟下的执行时长严格超过60秒。",
+      "id": "deadloop_execution_exceeds_sixty_seconds",
+      "kind": "NUMERIC_COMPARE",
+      "parameters": {
+        "clock_tolerance_ms": 0,
+        "joins": [],
+        "left": {
+          "kind": "SUBTRACT",
+          "left": {
+            "event": "deadloop_detected",
+            "field": "cur_us",
+            "kind": "FIELD"
+          },
+          "right": {
+            "event": "deadloop_detected",
+            "field": "start_us",
+            "kind": "FIELD"
+          }
+        },
+        "operator": "GT",
+        "quantifier": "EXISTS",
+        "right": {
+          "kind": "CONST",
+          "unit": "SECOND",
+          "value": 60
         }
       },
       "remediation_requirements": []
@@ -1092,14 +1466,16 @@ MIME type 或计算 broker 受控树的 size/hash。
         "known_protocol",
         "complete_service_correlates",
         "complete_api_correlates",
+        "complete_timeout_consistent",
         "queue_total_exceeds_timeout",
-        "target_execution_within_timeout"
+        "target_execution_within_timeout",
+        "target_queue_positive"
       ],
       "description": "两名Agent独立判断服务端排队是否共同导致超时。",
       "id": "queue_contributed_timeout",
       "kind": "SEMANTIC_CAUSALITY",
       "parameters": {
-        "assertion": "同一固定快照中的客户端超时和服务端五行排队块共同支持服务端排队是超时贡献因素。",
+        "assertion": "同一固定快照中超时阈值一致的客户端超时与服务端五行块，机械确认目标排队加执行越过预算且自身执行未越界，支持服务端排队是超时贡献因素。",
         "evidence_events": [
           "client_timeout_call",
           "client_timeout_detail",
@@ -1110,14 +1486,19 @@ MIME type 或计算 broker 受控树的 size/hash。
     },
     {
       "depends_on": [
+        "enhanced_version",
+        "complete_service_correlates",
+        "complete_api_correlates",
         "prior_api_longer_than_target",
-        "queue_total_exceeds_timeout"
+        "prior_end_equals_target_start",
+        "prior_execution_overlaps_target_queue",
+        "target_queue_positive"
       ],
       "description": "两名Agent独立判断前序长API是否造成目标API排队。",
       "id": "upstream_api_caused_queue",
       "kind": "SEMANTIC_CAUSALITY",
       "parameters": {
-        "assertion": "五行历史中紧邻目标调用的前序长API支持共享串行lane中的上游阻塞因素。",
+        "assertion": "五行历史机械确认second前序API结束等于目标开始，且其执行区间与目标排队区间重叠，因此支持共享串行lane中的上游阻塞因素。",
         "evidence_events": [
           "queue_history"
         ]
@@ -1126,20 +1507,85 @@ MIME type 或计算 broker 受控树的 size/hash。
     },
     {
       "depends_on": [
+        "api_complete_present",
+        "api_duration_exceeds_timeout"
+      ],
+      "description": "两名Agent独立确认目标API完成时自身执行已经超过超时预算。",
+      "id": "api_overrun_confirmed",
+      "kind": "SEMANTIC_CAUSALITY",
+      "parameters": {
+        "assertion": "目标service和API选择器命中的执行完成正向日志及同钟耗时，足以确认direct_api_overrun；该路径不依赖增强版本。",
+        "evidence_events": [
+          "api_complete"
+        ]
+      },
+      "remediation_requirements": []
+    },
+    {
+      "depends_on": [
         "enhanced_version",
-        "known_protocol",
-        "partial_target_correlates",
-        "response_after_deadline"
+        "deadloop_present",
+        "deadloop_execution_exceeds_twice_timeout",
+        "deadloop_execution_exceeds_sixty_seconds"
+      ],
+      "description": "两名Agent独立确认增强版本目标API仍在执行且达到死循环检测双阈值。",
+      "id": "deadloop_overrun_confirmed",
+      "kind": "SEMANTIC_CAUSALITY",
+      "parameters": {
+        "assertion": "增强版本的死循环检测正向日志同时证明执行时长严格超过两倍timeout和60秒，足以确认direct_api_overrun；once-per-call只限制重复打印，不用于缺失推理。",
+        "evidence_events": [
+          "deadloop_detected"
+        ]
+      },
+      "remediation_requirements": []
+    },
+    {
+      "depends_on": [
+        "late_response_present",
+        "response_after_deadline",
+        "server_sojourn_exceeds_timeout"
       ],
       "description": "两名Agent独立确认该快照只支持部分定位。",
       "id": "partial_snapshot_supported",
       "kind": "SEMANTIC_CAUSALITY",
       "parameters": {
-        "assertion": "超时、晚响应和执行完成正向证据足以排除目标API自身超时，但跨时钟容差和日志抑制使服务端与客户端排队贡献仍未决。",
+        "assertion": "late_response自身的service、API和request选择器及同钟计算确认服务端聚合停留超过deadline；它不依赖增强版本或同步专用日志，但具体direct_api_overrun机制以及跨钟收发贡献仍是候选。",
         "evidence_events": [
-          "client_timeout_call",
-          "late_response",
-          "api_complete"
+          "late_response"
+        ]
+      },
+      "remediation_requirements": []
+    },
+    {
+      "depends_on": [
+        "late_response_present",
+        "response_after_deadline",
+        "server_receive_aggregate_exceeds_timeout"
+      ],
+      "description": "两名Agent独立确认客户端发送到服务端接收的聚合段已超预算但机制仍未决。",
+      "id": "server_receive_aggregate_partial",
+      "kind": "SEMANTIC_CAUSALITY",
+      "parameters": {
+        "assertion": "late_response正向证据在100毫秒跨钟容差后仍确认server_receive_aggregate_overrun，但不能把该聚合段直接等同某个线程阻塞，server_receive_queue仍是候选机制。",
+        "evidence_events": [
+          "late_response"
+        ]
+      },
+      "remediation_requirements": []
+    },
+    {
+      "depends_on": [
+        "late_response_present",
+        "response_after_deadline",
+        "client_receive_aggregate_exceeds_timeout"
+      ],
+      "description": "两名Agent独立确认服务端发送到客户端当前时刻的聚合段已超预算但机制仍未决。",
+      "id": "client_receive_aggregate_partial",
+      "kind": "SEMANTIC_CAUSALITY",
+      "parameters": {
+        "assertion": "late_response正向证据在100毫秒跨钟容差后仍确认client_receive_aggregate_overrun，但不能把该聚合段直接等同某个线程阻塞，client_receive_queue仍是候选机制。",
+        "evidence_events": [
+          "late_response"
         ]
       },
       "remediation_requirements": []
@@ -1173,7 +1619,67 @@ MIME type 或计算 broker 受控树的 size/hash。
           {
             "all_of": [
               {
-                "result": "FAIL",
+                "result": "PASS",
+                "rule_id": "api_overrun_confirmed"
+              }
+            ]
+          }
+        ]
+      },
+      "id": "complete_api_overrun",
+      "resolution_status": "COMPLETE"
+    },
+    {
+      "condition": {
+        "any_of": [
+          {
+            "all_of": [
+              {
+                "result": "PASS",
+                "rule_id": "deadloop_overrun_confirmed"
+              }
+            ]
+          }
+        ]
+      },
+      "id": "complete_deadloop_overrun",
+      "resolution_status": "COMPLETE"
+    },
+    {
+      "condition": {
+        "any_of": [
+          {
+            "all_of": [
+              {
+                "result": "PASS",
+                "rule_id": "server_receive_aggregate_partial"
+              }
+            ]
+          }
+        ]
+      },
+      "id": "partial_server_receive_aggregate",
+      "resolution_status": "PARTIAL"
+    },
+    {
+      "condition": {
+        "any_of": [
+          {
+            "all_of": [
+              {
+                "result": "PASS",
+                "rule_id": "server_sojourn_exceeds_timeout"
+              },
+              {
+                "result": "UNKNOWN",
+                "rule_id": "api_complete_present"
+              },
+              {
+                "result": "UNKNOWN",
+                "rule_id": "queue_history_present"
+              },
+              {
+                "result": "UNKNOWN",
                 "rule_id": "api_duration_exceeds_timeout"
               },
               {
@@ -1199,6 +1705,22 @@ MIME type 或计算 broker 受控树的 size/hash。
       "condition": {
         "any_of": [
           {
+            "all_of": [
+              {
+                "result": "PASS",
+                "rule_id": "client_receive_aggregate_partial"
+              }
+            ]
+          }
+        ]
+      },
+      "id": "partial_client_receive_aggregate",
+      "resolution_status": "PARTIAL"
+    },
+    {
+      "condition": {
+        "any_of": [
+          {
             "all_of": []
           }
         ]
@@ -1212,29 +1734,32 @@ MIME type 或计算 broker 受控树的 size/hash。
 
 ## 分析步骤
 
-- 确认版本、协议、两侧进程实例和固定日志快照。
-- 以进程实例与请求ID组成复合身份，并提取客户端超时、晚响应、服务端执行和五行排队记录。
-- 按显式单位与clock domain重算排队、执行和deadline关系。
-- 选择首个成立的COMPLETE、PARTIAL或NONE路径，并结构化列出确认、候选和排除因素。
+- 确认协议、两侧进程实例和固定日志快照；enhanced_version只守卫增强排队与deadloop路径，late_response和api_complete正向路径不依赖版本。
+- 以进程实例与请求ID组成复合身份，并提取client_timeout_call、client_timeout_detail、queue_history、late_response、api_complete和deadloop_detected。
+- 按显式单位与clock domain重算目标start/request、second执行与目标排队区间重叠、Q/S/C和deadline关系。
+- 按声明顺序选择首个成立的COMPLETE或PARTIAL正向semantic路径；仅在所有正向路径不成立时进入NONE，并结构化列出确认、候选和排除因素。
 
 ## 时间特征
 
 - 所有微秒整数时间显式声明clock domain。
-- 跨client/server时钟比较使用100毫秒容差；同一时钟使用0容差。
-- 固定快照之外不补日志、不等待未来证据。
+- Q和C跨client/server时钟比较使用100毫秒容差；S与客户端端到端同钟计算使用0容差。
+- Q=server_recv-client_send、S=server_send-server_recv、C=client_now-server_send，timeout从毫秒显式转换为微秒后再比较。
+- 固定快照之外不补日志、不等待未来证据，也不启动监控。
 
 ## 判定规则
 
-- 受SUPPRESSION或RATE_LIMIT影响时，正向日志仍有效，缺失和上界计数只能是UNKNOWN。
+- BBBB默认SUPPRESSION的内在键是进程实例、源码行和错误码，动态key_fields为空；所有事件引用该策略，queue_history再叠加RATE_LIMIT，正向日志仍有效而缺失和上界计数只能是UNKNOWN。
+- api_complete、deadloop_detected或late_response聚合超预算等正向强证据必须进入对应COMPLETE或PARTIAL，不能落入NONE；once-per-call不用于absence推理。
 - 允许多个因素共同贡献，不强制选择唯一根因。
 - 超时不等于取消，结果必须提示后续执行和副作用风险。
 - Wiki列出的原因不是穷尽集合，结论只覆盖Skill声明范围。
 
 ## 输出要求
 
-- COMPLETE列出服务端排队与上游共享lane长API两个因素及各自证据。
-- PARTIAL保留已排除的目标API自身超时，以及服务端和客户端排队两个未决候选。
-- 公开原始日志引用、派生值、单位、时钟容差、观测下界、证据缺口和安全说明。
+- COMPLETE路径complete_queue_and_upstream输出server_queue_contribution和upstream_lane_blocker；complete_api_overrun与complete_deadloop_overrun输出direct_api_overrun，并分别引用完成日志或双阈值deadloop证据。
+- PARTIAL路径partial_server_receive_aggregate输出server_receive_aggregate_overrun并保留server_receive_queue候选；partial_cross_clock_ambiguity输出server_side_sojourn_overrun并保留server_receive_queue、direct_api_overrun、client_receive_queue候选；partial_client_receive_aggregate输出client_receive_aggregate_overrun并保留client_receive_queue候选。
+- case-local path id完整集合固定为complete_queue_and_upstream、complete_api_overrun、complete_deadloop_overrun、partial_server_receive_aggregate、partial_cross_clock_ambiguity、partial_client_receive_aggregate、none；任一正向semantic PASS都必须在无条件none之前被选中。
+- case-local event id完整集合固定为client_timeout_call、client_timeout_detail、queue_history、late_response、api_complete、deadloop_detected；rule id完整集合固定为enhanced_version、known_protocol、client_call_present、client_detail_present、queue_history_present、late_response_present、api_complete_present、deadloop_present、complete_service_correlates、complete_api_correlates、complete_timeout_consistent、queue_total_exceeds_timeout、target_execution_within_timeout、target_queue_positive、prior_end_equals_target_start、prior_execution_overlaps_target_queue、prior_api_longer_than_target、api_duration_exceeds_timeout、server_sojourn_exceeds_timeout、server_queue_positive、client_queue_positive、server_receive_aggregate_exceeds_timeout、client_receive_aggregate_exceeds_timeout、response_after_deadline、deadloop_execution_exceeds_twice_timeout、deadloop_execution_exceeds_sixty_seconds、queue_contributed_timeout、upstream_api_caused_queue、api_overrun_confirmed、deadloop_overrun_confirmed、partial_snapshot_supported、server_receive_aggregate_partial、client_receive_aggregate_partial；factor id完整集合固定为server_queue_contribution、upstream_lane_blocker、direct_api_overrun、server_side_sojourn_overrun、server_receive_aggregate_overrun、client_receive_aggregate_overrun、server_receive_queue、client_receive_queue。每个结果公开原始日志引用、派生值、单位、时钟容差、观测下界、证据缺口和安全说明。
 
 ## 假设
 

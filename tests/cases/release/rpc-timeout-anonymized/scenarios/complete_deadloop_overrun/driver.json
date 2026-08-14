@@ -1,0 +1,40 @@
+{
+  "scenario_id": "complete-deadloop-overrun",
+  "problem": {
+    "raw_problem_text": "svc_alpha的Fetch调用超时，增强版本固定快照出现目标API仍在执行的死循环检测日志。",
+    "statement": "脱敏RPC调用超过客户端deadline且目标API仍在执行",
+    "expected_behavior": "目标API在deadline内完成并由客户端接收响应",
+    "actual_behavior": "目标API仍在执行，机械时长同时越过死循环检测的两个阈值。",
+    "scope": "svc_alpha/Fetch固定日志快照",
+    "goals": ["根据增强版本正向日志确认目标API自身执行超预算。"],
+    "non_goals": ["从死循环日志缺失反推没有死循环。"],
+    "constraints": ["只使用本用例提供的固定双端日志快照。"],
+    "completion_criteria": [
+      "确认目标版本支持死循环检测日志",
+      "确认执行时长严格超过两倍timeout且严格超过60秒",
+      "保留超时不等于取消的安全说明"
+    ]
+  },
+  "initial_user_fact_names": [
+    "service_name",
+    "api_name",
+    "target_version",
+    "transport_protocol",
+    "problem_time",
+    "client_process",
+    "server_process"
+  ],
+  "initial_user_fact_values": [
+    "svc_alpha",
+    "Fetch",
+    "enhanced_v2",
+    "standard",
+    "2026-08-08T00:01:00.000Z",
+    "client_proc",
+    "server_proc"
+  ],
+  "supplement_input_names": ["request_id"],
+  "supplement_input_values": ["42"],
+  "attachment_files": ["client.log", "server.log"],
+  "attachment_anchor_names": ["client", "server"]
+}

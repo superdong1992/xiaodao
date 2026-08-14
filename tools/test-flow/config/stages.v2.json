@@ -106,7 +106,8 @@
       "depends_on": ["deterministic.full"],
       "gates": ["real.agent.skill-generation"],
       "identity_set": "real-skill-generation",
-      "timeout_seconds": 1200,
+      "real_cap_id": "isolated.skill-generation",
+      "timeout_seconds": 2100,
       "progress_class": "real",
       "reuse": {"dev": "identity", "release": "never"},
       "platforms": ["windows", "macos", "linux"]
@@ -128,7 +129,7 @@
       "depends_on": ["real.agent-backend"],
       "gates": ["real.agent.diagnose"],
       "identity_set": "real-diagnose",
-      "timeout_seconds": 1200,
+      "timeout_seconds": 3900,
       "progress_class": "real",
       "reuse": {"dev": "identity", "release": "never"},
       "platforms": ["windows", "macos", "linux"]

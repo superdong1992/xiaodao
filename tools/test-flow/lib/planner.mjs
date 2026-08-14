@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { canonicalJson, commandExists, runSync, sha256Bytes } from "./util.mjs";
-import { canonicalStageDefinition, loadConfiguration, resolveGoalClosure } from "./config.mjs";
+import { canonicalStageDefinition, loadConfiguration, realCapIdForStage, resolveGoalClosure } from "./config.mjs";
 import {
   changedFiles,
   computeIdentitySets,
@@ -129,29 +129,39 @@ function filterReusableChain(selected, reusable, track) {
 }
 
 function capForStage(stage, profile) {
-  if (stage.kind === "isolated-real" && stage.id !== "real.logparse") return profile.real_caps.isolated;
+  const isolatedCapId = realCapIdForStage(stage);
+  if (isolatedCapId) return profile.real_caps[isolatedCapId];
   if (stage.id === "journey.cross-job.route") return profile.real_caps["journey.route"];
   if (stage.id === "journey.cross-job.diagnose") return profile.real_caps["journey.diagnose"];
   if (stage.id === "journey.cross-job.publish-restart") return profile.real_caps["journey.publish-restart"];
   return null;
 }
 
-function invocationCapsForStage(stage, profile) {
+function invocationCapsForStage(stage, profile, gates) {
   const cap = capForStage(stage, profile);
   if (stage.id === "real.logparse") return [];
   if (stage.kind === "isolated-real") {
-    return [{ class: "isolated-agent", min_count: stage.id === "real.diagnose" ? 2 : 1, max_count: stage.id === "real.diagnose" ? 2 : 1, caps: cap }];
+    const count = stage.gates.reduce((sum, gateId) => sum + gates[gateId].isolated_agent_invocations, 0);
+    return [{ class: "isolated-agent", min_count: count, max_count: count, caps: cap }];
   }
   if (stage.id === "journey.cross-job.route") return [
     { class: "host-client", min_count: 1, max_count: 1, caps: cap },
-    { class: "server-agent", min_count: 3, max_count: 3, caps: profile.real_caps.service_agent },
+    { class: "server-agent", min_count: 2, max_count: 3, caps: profile.real_caps.service_agent },
   ];
   if (stage.id === "journey.cross-job.diagnose") return [
     { class: "host-client", min_count: 1, max_count: 1, caps: cap },
-    { class: "server-agent", min_count: 3, max_count: 3, caps: profile.real_caps.service_agent },
+    { class: "server-agent", min_count: 2, max_count: 3, caps: profile.real_caps.service_agent },
   ];
   if (stage.id === "journey.cross-job.publish-restart") return [{ class: "host-client", min_count: 1, max_count: 1, caps: cap }];
   return [];
+}
+
+function noProgressForStage(stage, gates, seconds) {
+  const definitions = stage.gates.map((gateId) => gates[gateId]);
+  const enabled = definitions.filter((gate) => gate.kind === "cross-job-adapter" || (gate.kind === "capability-adapter" && gate.adapter === "server-linux-capability"));
+  if (enabled.length === 0) return null;
+  if (enabled.length !== definitions.length) throw new Error("MIXED_PROGRESS_POLICY_UNSUPPORTED");
+  return seconds;
 }
 
 export function buildRunPlan(repoRoot, options = {}) {
@@ -304,7 +314,6 @@ export function buildRunPlan(repoRoot, options = {}) {
   const stagePlan = closure.stages.map((stage) => {
     const reuse = reusable.get(stage.id);
     const cap = capForStage(stage, runtimeProfile);
-    const invocationCaps = invocationCapsForStage(stage, runtimeProfile);
     const gatePlans = stage.gates.map((gateId) => {
       const definition = config.gates.gates[gateId];
       const gateRuntimeProfile = definition.runtime_profile ?? null;
@@ -321,6 +330,7 @@ export function buildRunPlan(repoRoot, options = {}) {
           : null,
       };
     });
+    const invocationCaps = invocationCapsForStage(stage, runtimeProfile, config.gates.gates);
     return {
       id: stage.id,
       kind: stage.kind,
@@ -340,7 +350,7 @@ export function buildRunPlan(repoRoot, options = {}) {
         current_reaudit: reuse.current_reaudit,
       } : null,
       timeout_seconds: stage.timeout_seconds,
-      no_progress_seconds: ["isolated-real", "real-journey", "capability"].includes(stage.kind) ? config.policy.process.real_no_progress_seconds : null,
+      no_progress_seconds: noProgressForStage(stage, config.gates.gates, config.policy.process.real_no_progress_seconds),
       performance_mode: (config.policy.performance.stages[stage.id] ?? config.policy.performance.stages["*"]).mode,
       hard_caps: cap,
       invocation_caps: invocationCaps,
@@ -419,7 +429,13 @@ export function buildRunPlan(repoRoot, options = {}) {
       estimated_tokens: stagePlan.reduce((sum, stage) => sum + stage.estimated_tokens, 0),
       sum_of_per_invocation_caps_usd: stagePlan.reduce((sum, stage) => sum + stage.estimated_cost_usd, 0),
       cumulative_spending_cap: null,
-      per_invocation_hard_enforced: stagePlan.flatMap((stage) => stage.invocation_caps).every((item) => item.caps.max_turns > 0 && item.caps.max_total_tokens > 0 && item.caps.max_budget_usd > 0 && item.caps.hard_timeout_seconds > 0),
+      per_invocation_hard_enforced: stagePlan.flatMap((stage) => stage.invocation_caps).every((item) => (
+        item.caps.max_turns > 0
+        && item.caps.max_total_tokens > 0
+        && (item.caps.max_output_tokens === undefined || item.caps.max_output_tokens > 0)
+        && item.caps.max_budget_usd > 0
+        && item.caps.hard_timeout_seconds > 0
+      )),
     },
     policies: {
       process: config.policy.process,

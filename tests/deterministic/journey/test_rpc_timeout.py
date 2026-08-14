@@ -54,6 +54,7 @@ from problem_locator.storage.execution_records import FileExecutionRecordStore
 from problem_locator.storage.layout import StorageLayout
 from problem_locator.storage.platform import PlatformFileSync
 from problem_locator.storage.resource_store import FileResourceStore
+from problem_locator.storage.staging import StagedObjectWriter
 from problem_locator.storage.state_repository import JsonFileStateRepository
 from tests.deterministic.contracts.fakes import (
     DeterministicIdGenerator,
@@ -558,6 +559,11 @@ def _wait_for_review_marker(
                         ],
                         "execution_logs": execution_logs,
                         "broker_open_errors": stack.broker_factory.open_errors,
+                        "stage_tree_failures": getattr(
+                            stack,
+                            "stage_tree_failures",
+                            [],
+                        ),
                     },
                     sort_keys=True,
                 )
@@ -1445,7 +1451,9 @@ def test_same_job_uses_initial_order_fact_and_survives_restart(
 ) -> None:
     """Prove the cheap SameJob path without spending a real-model call."""
 
-    data_root = ROOT / ".s08-same-job" if os.name == "nt" else tmp_path / ".s08"
+    # Reuse the compact, ignored Windows roots already exercised by the full
+    # cross-module journey; each test removes them before and after use.
+    data_root = ROOT / ".s08" if os.name == "nt" else tmp_path / ".s08"
     logparse_checkout = data_root.parent / ".s08lp"
     _remove_test_data_root(data_root)
     _remove_test_data_root(logparse_checkout)
@@ -1459,6 +1467,35 @@ def test_same_job_uses_initial_order_fact_and_survives_restart(
         monkeypatch.setenv(name, value)
     monkeypatch.setenv("S07_FAKE_LOGPARSE_RECORD", os.fspath(logparse_record))
 
+    stage_tree_failures: list[dict[str, int | str | None]] = []
+    original_stage_tree_content = StagedObjectWriter.stage_tree_content
+
+    def record_stage_tree_failure(
+        self: StagedObjectWriter,
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
+        try:
+            return original_stage_tree_content(self, *args, **kwargs)
+        except BaseException as error:
+            filename = getattr(error, "filename", None)
+            stage_tree_failures.append(
+                {
+                    "error_type": type(error).__name__,
+                    "errno": getattr(error, "errno", None),
+                    "winerror": getattr(error, "winerror", None),
+                    "filename_length": (
+                        len(os.fspath(filename)) if filename is not None else None
+                    ),
+                }
+            )
+            raise
+
+    monkeypatch.setattr(
+        StagedObjectWriter,
+        "stage_tree_content",
+        record_stage_tree_failure,
+    )
     stack = _Stack(
         data_root,
         logparse_record=logparse_record,
@@ -1467,6 +1504,7 @@ def test_same_job_uses_initial_order_fact_and_survives_restart(
         review_release=review_release,
         seed="s08-same-job-first-process",
     )
+    stack.stage_tree_failures = stage_tree_failures
     archive = ARCHIVE.read_bytes()
     archive_sha256 = hashlib.sha256(archive).hexdigest()
     created = _mcp(
@@ -1610,6 +1648,7 @@ def test_same_job_uses_initial_order_fact_and_survives_restart(
         review_release=review_release,
         seed="s08-same-job-restarted-process",
     )
+    restarted.stage_tree_failures = stage_tree_failures
     restarted.start()
     restarted.wait_idle()
     assert _query(restarted.mcp, case_id) == resolved_view

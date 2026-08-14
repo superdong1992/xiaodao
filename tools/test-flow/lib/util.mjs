@@ -134,6 +134,10 @@ export function commandExists(command) {
 }
 
 export function resolveCommand(command) {
+  if (path.isAbsolute(command)) {
+    const resolved = path.resolve(command);
+    return fs.existsSync(resolved) && fs.statSync(resolved).isFile() ? resolved : null;
+  }
   const probe = process.platform === "win32"
     ? runSync("where.exe", [command])
     : runSync("sh", ["-c", "command -v -- \"$1\"", "test-flow", command]);

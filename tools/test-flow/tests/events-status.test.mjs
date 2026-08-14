@@ -6,6 +6,7 @@ import test from "node:test";
 
 import {
   EventWriter,
+  NEGATIVE_PROBE_VALIDATION_FIELDS,
   readRelayedEventPart,
   readServerMcpCorrespondence,
   validateEventFile,
@@ -24,10 +25,7 @@ const PUBLIC_TOOLS = [
   "problem_locator_cancel_case",
   "problem_locator_list_artifacts",
 ];
-const VALIDATION_FIELDS = [
-  "actual_behavior", "completion_criteria", "constraints", "expected_behavior",
-  "goals", "non_goals", "problem_spec", "scope", "statement",
-];
+const VALIDATION_FIELDS = [...NEGATIVE_PROBE_VALIDATION_FIELDS];
 
 function writeRelay({ attemptRoot, runId, instance, mode, rawEvents, relayEvents, allowEmpty = false }) {
   const parts = path.join(attemptRoot, "payload", "events", "parts");

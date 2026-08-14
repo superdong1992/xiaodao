@@ -17,6 +17,23 @@ function git(root, ...args) {
   assert.equal(result.status, 0, result.stderr);
 }
 
+const RUNTIME_VERIFIER = path.resolve(
+  import.meta.dirname,
+  "..",
+  "runtime-support",
+  "verify-source-snapshot.mjs",
+);
+
+function runtimeVerify(root, manifestPath, expectedDigest, ...extra) {
+  return spawnSync(process.execPath, [
+    RUNTIME_VERIFIER,
+    "--root", root,
+    "--manifest", manifestPath,
+    "--expected-digest", expectedDigest,
+    ...extra,
+  ], { encoding: "utf8" });
+}
+
 test("source snapshots bind tracked modifications and untracked files before the final persistence commit", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "test-flow-source-snapshot-"));
   const materializedParent = fs.mkdtempSync(path.join(os.tmpdir(), "test-flow-source-materialized-"));
@@ -38,6 +55,27 @@ test("source snapshots bind tracked modifications and untracked files before the
     materializeSourceSnapshot(root, materialized, snapshot);
     assert.equal(verifyMaterializedSourceSnapshot(materialized, snapshot).status, "PASS");
     assert.equal(fs.readFileSync(path.join(materialized, "tracked.txt"), "utf8"), "dirty working tree version\n");
+
+    const manifestPath = path.join(materializedParent, "source-snapshot.json");
+    fs.writeFileSync(manifestPath, `${JSON.stringify(snapshot)}\n`);
+    const trackedRecord = snapshot.records.find((record) => record.path === "tracked.txt");
+    const trackedMaterialized = path.join(materialized, "tracked.txt");
+    if (process.platform !== "win32") {
+      fs.chmodSync(trackedMaterialized, trackedRecord.mode === "100755" ? 0o644 : 0o755);
+      const strict = runtimeVerify(materialized, manifestPath, snapshot.digest);
+      assert.notEqual(strict.status, 0, strict.stdout);
+      assert.match(strict.stderr, /SOURCE_SNAPSHOT_CONTENT_DRIFT/);
+    }
+    const normalized = runtimeVerify(materialized, manifestPath, snapshot.digest, "--materialize-file-modes");
+    assert.equal(normalized.status, 0, normalized.stderr);
+    assert.equal(JSON.parse(normalized.stdout).status, "PASS");
+    assert.equal(verifyMaterializedSourceSnapshot(materialized, snapshot).status, "PASS");
+
+    fs.appendFileSync(trackedMaterialized, "tampered after materialization\n");
+    const tampered = runtimeVerify(materialized, manifestPath, snapshot.digest, "--materialize-file-modes");
+    assert.notEqual(tampered.status, 0, tampered.stdout);
+    assert.match(tampered.stderr, /SOURCE_SNAPSHOT_CONTENT_DRIFT/);
+    fs.writeFileSync(trackedMaterialized, "dirty working tree version\n");
 
     fs.writeFileSync(path.join(root, "tracked.txt"), "drifted after planning\n");
     assert.equal(verifySourceSnapshot(root, snapshot).status, "FAIL");

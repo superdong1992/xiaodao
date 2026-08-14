@@ -15,9 +15,13 @@ Agent；脚本只做严格规范化、渲染与校验，不用启发式 NLP 猜�
 ## 输入与旁注
 
 输入可以是普通 Markdown，不要求作者手写 JSON、完整平台日志前缀或正则。`(# ... #)` 与
-`（# ... #）` 是作者给转换 Agent 的元旁注：可以帮助理解匿名化、简写和特殊边界，但不得复制
-到 GenerationSpec 的业务文本、生成 Skill、manifest 或最终用户结果。括号不配对时停止并请
-作者修正。
+`（# ... #）` 是转换元数据。解释任何业务语义前，先剔除每个旁注的起止标记及其整个正文，
+只保留标记外正文作为业务事实源。旁注正文只能用于排除审计；临时禁止集合仅包含旁注中未由
+标记外正文或权威澄清独立支持的实质内容。旁注与外部来源语义重叠时，只能依据标记外正文或
+权威澄清生成并记录具体源映射，不得因旁注重复而删除合法事实，也不得借旁注补足外部来源未声明的
+限定。绝不能用旁注正文理解、补全、修正或推断业务语义；旁注标记、旁注独有的逐字或独特片段，
+以及临时禁止集合中的内容均不得复制、改写、概括或转成约束、GenerationSpec 字段值、生成 Skill、
+manifest 或最终用户结果。发现未闭合、嵌套或交叉的旁注标记时停止并请作者修正，不得猜测边界。
 
 作者给出的稳定日志消息体可以生成 `SEARCH` 定位器；只有作者明确给出完整行合同才使用
 `FULL_LINE`。Wiki 只描述超长日志“包含哪些字段”而没有稳定文本时，把它留作语义证据要求，
@@ -54,10 +58,57 @@ INPUT requirement；空集合不添加任何默认业务字段。
 
 ## GenerationSpec v5
 
-按 [wiki-template.md](references/wiki-template.md) 形成独立 JSON，或把完全相同的对象放入转换
-Agent 的工作 Wiki 中唯一 `## GenerationSpec v5` fence。该 fence 是 Agent 的中间机器产物，
-不是要求 Wiki 作者填写的格式。requirements、logparse_plan 和 verification_contract 是唯一
-机器事实源。
+Skill 工具的加载结果会显示 `Base directory for this skill: <实际绝对目录>`。该实际目录是本
+Skill 所有相对链接的唯一解析根。调用 `Read` 时，必须先用它作为下面 `references/...` 目标的
+绝对前缀；不得把裸 `references/...` 交给 `Read`，也不得相对当前工作目录、输入 workspace
+或仓库根解析。
+
+构造 JSON 前必须完整读取 [GenerationSpec v5 精确参考](references/generation-spec-v5-reference.md)
+和 [verification contract v2 精确参考](references/verification-contract-v2-reference.md)。它们是转换
+Agent 可使用的自包含格式合同；不要读取 generator、validator、Runtime 或测试源码来反推格式。
+[wiki-template.md](references/wiki-template.md) 只演示无 Logparse 的最小对象，
+[neutral-logparse-generation-spec-v5.json](references/neutral-logparse-generation-spec-v5.json) 只演示
+复杂 Logparse 结构。示例中的 identity、名称、文本、阈值和策略均不是默认值，禁止复制到当前
+业务产物；所有业务值必须来自当前 Wiki 与已确认澄清。
+
+按上述合同形成独立 JSON，或把完全相同的对象放入转换 Agent 的工作 Wiki 中唯一
+`## GenerationSpec v5` fence。该 fence 是 Agent 的中间机器产物，不是要求 Wiki 作者填写的
+格式。requirements、logparse_plan 和 verification_contract 是唯一机器事实源。
+
+### Write 前语义保真检查
+
+在对 GenerationSpec 执行唯一最终 `Write` 前，对照 Wiki 与已确认澄清逐项检查：
+
+1. 枚举所有带义务、禁止、允许、条件、限制、可能性或风险后果的陈述，不得只保留机械规则所需片段。
+2. 影响是否可安全判断或采取行动的内容写入 `judgement_rules`；必须向最终用户展示的警示、限制或
+   风险后果写入 `output_requirements`。同一陈述兼具两种作用时必须双落点，不能用其中一个替代另一个。
+3. 保留原文的否定方向、条件与适用范围、确定性/可能性强度及风险后果；不得把“可能”提升为“必然”，
+   也不得把禁止、例外或未知改写成肯定结论。
+4. 默认只要求语义等价，不要求逐字复制；只有输入明确要求固定措辞、原文引用或逐字保留时才逐字写入。
+5. 为每条上述陈述确认源文本到目标字段的映射；无法确定落点或语气强度时先澄清，不得静默省略。
+6. 在唯一最终 `Write` 前，递归遍历待写 GenerationSpec 的所有对象和数组，检查每一个字符串值。
+   为其中每项语义及限定确认到标记外正文或权威澄清的具体源映射。任一值含旁注标记、旁注独有的
+   逐字或独特片段，或复制、改写、概括外部来源未独立支持的旁注内容，立即丢弃整份草稿；最多允许
+   一次从标记外正文与权威澄清重新构造并重新递归检查，不能就地删改命中字段。该次复检仍失败时
+   立即停止并请求澄清，不得再次重构或 `Write`。语义重叠且源映射独立支持完整语义及限定时，不得
+   因旁注重复而删除合法事实。复检通过前不得 `Write`。
+
+### Write 前机器引用闭包检查
+
+语义保真检查通过后、唯一最终 `Write` 前，按声明顺序构造并核对以下只读符号表：INPUT Requirement
+名称集、Role label 集、Anchor label 集、policy ID 集、`event_id -> field 名称集`、已见 rule ID 集。
+
+1. 对每个 extractor，逐项确认 anchor、policy、policy key、selector field、`timestamp_field` 与
+   `group_by` 都存在于相应符号表；selector 的 `USER_FACT` 必须命名 INPUT Requirement。
+2. 对每条 rule 递归遍历 `parameters` 和 NumericExpression。每个 event 必须命名 extractor；每个
+   `(event, field)` 必须满足 `field ∈ event_id -> field 名称集`；每个 `FACT`/`USER_FACT` 必须命名
+   INPUT Requirement；role 必须已声明且与被引用 event 的 anchor 一致。
+3. `depends_on` 只能使用该 rule 之前的已见 rule ID；`remediation_requirements` 只能使用
+   `MISSING_ONLY` Requirement。检查完成后再把当前 rule ID 加入已见集合。
+4. 每个 terminal condition term 必须命名已声明 rule，并保留既定的前序与可达性检查。
+
+发现任何缺失、拼写漂移或跨 event 借用 field 时不得 `Write`。只修正引用后从第 1 步重新完整核对
+一次；若仍不闭合，立即停止并请求澄清，不得靠 validator 报错后再猜测或继续写出。
 
 verification contract v2 使用：
 
@@ -68,6 +119,12 @@ verification contract v2 使用：
   数值表达式与 SEMANTIC_CAUSALITY；
 - `terminal_paths[]`：按顺序匹配 DNF 条件，结果为 `COMPLETE|PARTIAL|NONE`，最后必须有无条件
   NONE fallback。COMPLETE/PARTIAL 路径必须包含至少一个 SEMANTIC_CAUSALITY PASS。
+
+多个 Logparse anchor 表示参与诊断的不同贡献者时，为每个贡献者声明唯一 Role，并让 Role label
+与对应 anchor label 一致；只有不存在角色或贡献者语义时才使用空 `roles`。每条
+SEMANTIC_CAUSALITY 只依赖该结论必要且能够同时成立的机械前提。对每个 COMPLETE/PARTIAL 的每个
+DNF branch，递归展开全部 `depends_on`，确认规则结果在当前观测策略、时钟容差和前序 path 下可同时
+满足；禁止把其他原因分支的 semantic rule 或与本分支矛盾的 PASS/FAIL/UNKNOWN 条件串入当前路径。
 
 数值表达式只使用 FIELD/FACT/CONST、ADD/SUBTRACT、MULTIPLY_CONST 和 CONVERT；禁止任意代码。
 跨 clock domain 的比较必须显式写 `clock_tolerance_ms`，框架无默认。进程局部 ID 不得当作全局

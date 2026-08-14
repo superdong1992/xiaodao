@@ -79,6 +79,63 @@ test("release.full has one isolated Wiki generation Gate followed by one fresh s
   }
 });
 
+test("repository Python compilation covers runtime support scripts used by Release", () => {
+  const config = loadConfiguration(REPO_ROOT);
+  assert.deepEqual(config.gates.gates["repo.compileall"].paths, [
+    "src",
+    "tests",
+    "tools/test-flow/runtime-support",
+  ]);
+});
+
+test("every isolated real Agent Gate declares its exact invocation count", () => {
+  const config = loadConfiguration(REPO_ROOT);
+  const gates = Object.entries(config.gates.gates)
+    .filter(([, gate]) => gate.kind === "pytest" && gate.environment_profile?.startsWith("real-") && gate.environment_profile !== "real-logparse");
+  assert.ok(gates.length > 0);
+  for (const [gateId, gate] of gates) {
+    assert.ok(Number.isInteger(gate.isolated_agent_invocations) && gate.isolated_agent_invocations > 0, gateId);
+    assert.ok(gate.min_passed >= gate.isolated_agent_invocations, gateId);
+  }
+  assert.equal(config.gates.gates["real.agent.diagnose"].isolated_agent_invocations, 4);
+  assert.deepEqual(config.gates.gates["real.agent.skill-generation"].evidence, [
+    "pytest.xml",
+    "pytest-summary.json",
+    "model-usage.json",
+    "scenario-evaluation-audit.json",
+  ]);
+});
+
+test("model watchdogs cover every serial Backend invocation and Stage evidence", () => {
+  const config = loadConfiguration(REPO_ROOT);
+  const release = config.runtimeProfiles.profiles.release;
+  const isolatedStages = config.stages.stages.filter((stage) => stage.kind === "isolated-real" && stage.id !== "real.logparse");
+  assert.ok(isolatedStages.length > 0);
+  for (const stage of isolatedStages) {
+    const count = stage.gates.reduce((sum, gateId) => sum + config.gates.gates[gateId].isolated_agent_invocations, 0);
+    const cap = release.real_caps[stage.real_cap_id ?? "isolated"];
+    assert.ok(count * (cap.hard_timeout_seconds + 30) + 30 < stage.timeout_seconds, stage.id);
+  }
+  assert.ok(config.policy.process.real_no_progress_seconds < release.real_caps.isolated.hard_timeout_seconds);
+  assert.equal(release.claude.max_output_tokens_upper_limit, 64000);
+  assert.deepEqual(release.real_caps["isolated.skill-generation"], {
+    max_turns: 12,
+    max_total_tokens: 1000000,
+    max_output_tokens: 64000,
+    max_budget_usd: 10,
+    hard_timeout_seconds: 1800,
+  });
+  assert.deepEqual(release.real_caps.service_agent, {
+    max_turns: 50,
+    max_total_tokens: 2000000,
+    max_budget_usd: 3,
+    hard_timeout_seconds: 600,
+  });
+  assert.ok(Object.entries(release.real_caps).every(([capId, cap]) => capId === "isolated.skill-generation" || cap.max_output_tokens === undefined));
+  assert.equal(config.stages.stages.find((stage) => stage.id === "real.skill-generation").real_cap_id, "isolated.skill-generation");
+  assert.equal(config.stages.stages.find((stage) => stage.id === "real.diagnose").real_cap_id, undefined);
+});
+
 test("finalization and rollout migration scaffolding are not schedulable Stages", () => {
   const config = loadConfiguration(REPO_ROOT);
   const ids = config.stages.stages.map((stage) => stage.id);
@@ -153,6 +210,11 @@ test("every repository identity path exists and generated, approved and legacy d
   assert.deepEqual(config.identities.components["skill.generic-smoke"].paths, [
     "tests/fixtures/components/generic-problem-locator-smoke",
   ]);
+  for (const setId of ["real-agent", "real-generic-locator", "real-route", "real-diagnose", "real-review", "real-skill-generation"]) {
+    assert.ok(config.identities.sets[setId].producer.includes("runtime.support"), setId);
+  }
+  assert.ok(config.identities.sets["real-skill-generation"].producer.includes("product.source"));
+  assert.ok(config.identities.sets["real-skill-generation"].producer.includes("case.journey"));
 });
 
 test("unsupported policy versions and dead fields fail closed", () => {
@@ -162,4 +224,40 @@ test("unsupported policy versions and dead fields fail closed", () => {
   assert.throws(() => withConfigMutation("proofs.v2.json", (value) => {
     value.proofs["proof.framework"].fresh = true;
   }, (root) => loadConfiguration(REPO_ROOT, root)), (error) => error.code === "CONFIG_PROOF_FIELDS");
+});
+
+test("isolated invocation and aggregate deadline declarations fail closed", () => {
+  assert.throws(() => withConfigMutation("gates.v2.json", (value) => {
+    delete value.gates["real.agent.skill-generation"].isolated_agent_invocations;
+  }, (root) => loadConfiguration(REPO_ROOT, root)), (error) => error.code === "CONFIG_PYTEST_INVOCATIONS");
+  assert.throws(() => withConfigMutation("gates.v2.json", (value) => {
+    value.gates["real.agent.diagnose"].isolated_agent_invocations = 5;
+  }, (root) => loadConfiguration(REPO_ROOT, root)), (error) => error.code === "CONFIG_PYTEST_INVOCATIONS");
+  assert.throws(() => withConfigMutation("stages.v2.json", (value) => {
+    value.stages.find((stage) => stage.id === "real.diagnose").timeout_seconds = 1200;
+  }, (root) => loadConfiguration(REPO_ROOT, root)), (error) => error.code === "CONFIG_ISOLATED_TIMEOUT_MARGIN");
+  assert.throws(() => withConfigMutation("stages.v2.json", (value) => {
+    value.stages.find((stage) => stage.id === "real.skill-generation").real_cap_id = "isolated.unknown";
+  }, (root) => loadConfiguration(REPO_ROOT, root)), (error) => error.code === "CONFIG_STAGE_REAL_CAP_UNKNOWN");
+  assert.throws(() => withConfigMutation("stages.v2.json", (value) => {
+    value.stages.find((stage) => stage.id === "framework.self-test").real_cap_id = "isolated";
+  }, (root) => loadConfiguration(REPO_ROOT, root)), (error) => error.code === "CONFIG_STAGE_REAL_CAP_SCOPE");
+  assert.throws(() => withConfigMutation("stages.v2.json", (value) => {
+    value.stages.find((stage) => stage.id === "real.skill-generation").timeout_seconds = 1860;
+  }, (root) => loadConfiguration(REPO_ROOT, root)), (error) => error.code === "CONFIG_ISOLATED_TIMEOUT_MARGIN");
+});
+
+test("isolated output token caps are positive and cannot exceed the pinned Claude runtime", () => {
+  assert.throws(() => withConfigMutation("runtime-profiles.v2.json", (value) => {
+    value.profiles.release.claude.max_output_tokens_upper_limit = 128000;
+  }, (root) => loadConfiguration(REPO_ROOT, root)), (error) => error.code === "CONFIG_RUNTIME_MAX_OUTPUT_TOKENS");
+  assert.throws(() => withConfigMutation("runtime-profiles.v2.json", (value) => {
+    value.profiles.release.real_caps["isolated.skill-generation"].max_output_tokens = 0;
+  }, (root) => loadConfiguration(REPO_ROOT, root)), (error) => error.code === "CONFIG_RUNTIME_MAX_OUTPUT_TOKENS");
+  assert.throws(() => withConfigMutation("runtime-profiles.v2.json", (value) => {
+    value.profiles.release.real_caps["isolated.skill-generation"].max_output_tokens = 64001;
+  }, (root) => loadConfiguration(REPO_ROOT, root)), (error) => error.code === "CONFIG_RUNTIME_MAX_OUTPUT_TOKENS");
+  assert.throws(() => withConfigMutation("runtime-profiles.v2.json", (value) => {
+    value.profiles.release.real_caps.service_agent.max_output_tokens = 1;
+  }, (root) => loadConfiguration(REPO_ROOT, root)), (error) => error.code === "CONFIG_RUNTIME_MAX_OUTPUT_TOKENS_SCOPE");
 });
