@@ -1,11 +1,11 @@
 ---
 name: wiki-to-diagnosis-skill
-description: 将普通 UTF-8 故障定位 Wiki 转换为通用 Problem Locator 专用 Diagnosis Skill；识别作者旁注，声明 requirements、Logparse 映射、事件集合、观测限制、机器规则和 COMPLETE/PARTIAL/NONE 终态路径，生成并校验 manifest schema v5。用于新建或升级 diagnose-* Skill。
+description: 将普通 UTF-8 故障定位 Wiki 转换为通用 Problem Locator 专用 Diagnosis Skill；让作者确认角色及 Wiki 参数的 REQUIRED/OPTIONAL/CONDITIONAL 定义，声明 Logparse 映射、事件集合、观测限制、机器规则和 COMPLETE/PARTIAL/NONE 终态路径，生成并校验 manifest schema v6。用于新建或升级 diagnose-* Skill。
 ---
 
-# Wiki to Diagnosis Skill v5
+# Wiki to Diagnosis Skill v6
 
-本 Skill 把人编写的业务定位 Wiki 理解为一份明确、可审计的 `GenerationSpec v5`，再调用确定性
+本 Skill 把人编写的业务定位 Wiki 理解为一份明确、可审计的 `GenerationSpec v6`，再调用确定性
 generator 生成恰好两个文件：`SKILL.md` 与 `diagnosis-skill.json`。自然语言理解属于当前转换
 Agent；脚本只做严格规范化、渲染与校验，不用启发式 NLP 猜规则。
 
@@ -32,8 +32,9 @@ manifest 或最终用户结果。发现未闭合、嵌套或交叉的旁注标�
 先完整阅读 Wiki，再只询问缺失且会改变产物的问题：
 
 1. Skill id/capability/版本、`PRODUCTION|TEST_ONLY` 和定位范围；
-2. requirements 的 name、`INPUT|ATTACHMENT`、阶段、提示、约束和补充策略；
-3. Logparse archive、problem time、anchors 及 USER_FACT/SKILL_FIXED binding；
+2. Wiki 专属 requirements 的 name、阶段、提示、约束、来源以及
+   `REQUIRED|OPTIONAL|CONDITIONAL`；
+3. Logparse roles、各 role 的 `REQUIRED|OPTIONAL`、Wiki 来源及固定 module；
 4. 依赖“日志缺失”分支的 observation policy 与跨时钟容差；
 5. COMPLETE、PARTIAL、NONE 各自需要哪些规则结果，以及因素/排除项如何绑定证据。
 
@@ -42,37 +43,66 @@ manifest 或最终用户结果。发现未闭合、嵌套或交叉的旁注标�
 抑制、少数明确无抑制”时，应把默认策略展开成每个受影响 event 的 policy 引用，例外 event
 使用空引用。多个策略可以叠加。
 
-不要询问日志归档 Content-Type。平台按后缀固定映射 `.gz/.tar.gz/.tgz`、`.zip`、`.tar`。
+内置 profile 自动声明全局 `problem_time`、每个 role 的 `slot/process_name/pid` 和 Logparse
+归档，不要向作者询问这些字段的定义或日志归档 Content-Type。平台按后缀固定映射
+`.gz/.tar.gz/.tgz`、`.zip`、`.tar`。
+
+### 作者确认门禁
+
+模型只能提出候选，不得替作者确认。生成最终 GenerationSpec 前，展示两张表：
+
+1. role label、说明、`REQUIRED|OPTIONAL`、具体 Wiki 来源；
+2. Wiki 参数 name、阶段、提示、`REQUIRED|OPTIONAL|CONDITIONAL`、条件及具体 Wiki 来源。
+
+作者提供的完整权威澄清文件可以直接完成确认；只对缺失或冲突项询问作者。每个最终 role 和
+Wiki requirement 都必须带非空 `source_reference` 与字面量 `confirmed=true`。未确认完整时停止，
+不得写 GenerationSpec、不得调用 generator，也不得把模型置信度当作确认。
 
 ## Requirements 与工具边界
 
-所有 requirement 都是必需项，不存在 optional 参数。旧 `custom_parameters` 必须显式转成
-INPUT requirement；空集合不添加任何默认业务字段。
+GenerationSpec 的 `requirements` 只包含 Wiki 专属参数。内置 profile 在 generator 中自动注入：
+
+- 全局 `problem_time`：REQUIRED；
+- 每个已确认 role 的 `<role>_slot`、`<role>_process_name`：REQUIRED；
+- 每个已确认 role 的 `<role>_pid`：OPTIONAL；
+- Logparse Skill 的 `log_archive`：REQUIRED。
+
+Wiki 参数使用三态：REQUIRED 始终激活；OPTIONAL 从不主动请求，只使用创建 Case 时已经提供的
+事实；CONDITIONAL 仅在显式机器 DNF 条件成立时激活。REQUIRED/CONDITIONAL 使用
+`MISSING_ONLY`，OPTIONAL 使用 `NONE`。REQUIRED role 始终激活；OPTIONAL role 完全未提供时不
+激活，一旦它的任一扁平字段已提供，就激活该 role 并要求补齐 slot 与 process_name。旧
+`custom_parameters` 必须显式转成 Wiki INPUT requirement。
+
+CONDITIONAL 的 `activation_condition` 只使用严格 DNF：term exact fields 为
+`source/name/operator/value`，operator 只能是 `EQUALS`。INITIAL 与 AFTER_LOGPARSE 都可读取另一
+个非条件 INITIAL `USER_FACT`；只有 AFTER_LOGPARSE 可读取 `RULE_RESULT=PASS|FAIL|UNKNOWN`。
+RULE_RESULT 必须来自 verification contract 的机械 rule，禁止 SEMANTIC_CAUSALITY，且该 rule 的
+事实、selector 与递归依赖不得使用待激活参数。禁止自依赖、条件链和循环。
 
 - `requires_logparse` 只控制工具绑定，不代表 RPC 或固定参数组。
 - `LOGPARSE_RESULT` 只能形成 Evidence/Finding/proposed fact，不能满足 USER_FACT。
 - 每阶段最多一个 ATTACHMENT；AFTER_LOGPARSE 只允许 INPUT。
-- 一个等待轮次可以同时请求缺失 INPUT 和 ATTACHMENT，保持两个 ID 数组与 requirement 顺序。
+- 每个等待轮次先请求当前阶段全部缺失 INPUT；INPUT 齐全后，下一轮才请求缺失 ATTACHMENT。
 - parse 后等待补参时，必须用 `state_delta.add_evidence_bindings` 接受要跨 Job 保留的 Evidence，
   并让它绑定同一 `LOGPARSE_RUN`；续跑只复用正式运行，不重新 parse。
 
-## GenerationSpec v5
+## GenerationSpec v6
 
 Skill 工具的加载结果会显示 `Base directory for this skill: <实际绝对目录>`。该实际目录是本
 Skill 所有相对链接的唯一解析根。调用 `Read` 时，必须先用它作为下面 `references/...` 目标的
 绝对前缀；不得把裸 `references/...` 交给 `Read`，也不得相对当前工作目录、输入 workspace
 或仓库根解析。
 
-构造 JSON 前必须完整读取 [GenerationSpec v5 精确参考](references/generation-spec-v5-reference.md)
+构造 JSON 前必须完整读取 [GenerationSpec v6 精确参考](references/generation-spec-v6-reference.md)
 和 [verification contract v2 精确参考](references/verification-contract-v2-reference.md)。它们是转换
 Agent 可使用的自包含格式合同；不要读取 generator、validator、Runtime 或测试源码来反推格式。
 [wiki-template.md](references/wiki-template.md) 只演示无 Logparse 的最小对象，
-[neutral-logparse-generation-spec-v5.json](references/neutral-logparse-generation-spec-v5.json) 只演示
+[neutral-logparse-generation-spec-v6.json](references/neutral-logparse-generation-spec-v6.json) 只演示
 复杂 Logparse 结构。示例中的 identity、名称、文本、阈值和策略均不是默认值，禁止复制到当前
 业务产物；所有业务值必须来自当前 Wiki 与已确认澄清。
 
 按上述合同形成独立 JSON，或把完全相同的对象放入转换 Agent 的工作 Wiki 中唯一
-`## GenerationSpec v5` fence。该 fence 是 Agent 的中间机器产物，不是要求 Wiki 作者填写的
+`## GenerationSpec v6` fence。该 fence 是 Agent 的中间机器产物，不是要求 Wiki 作者填写的
 格式。requirements、logparse_plan 和 verification_contract 是唯一机器事实源。
 
 ### Write 前语义保真检查
@@ -121,7 +151,8 @@ verification contract v2 使用：
   NONE fallback。COMPLETE/PARTIAL 路径必须包含至少一个 SEMANTIC_CAUSALITY PASS。
 
 多个 Logparse anchor 表示参与诊断的不同贡献者时，为每个贡献者声明唯一 Role，并让 Role label
-与对应 anchor label 一致；只有不存在角色或贡献者语义时才使用空 `roles`。每条
+与对应 anchor label 一致。Logparse Skill 至少有一个 REQUIRED role；非 Logparse Skill 使用空
+`roles`。role label 使用 lower snake case，以便稳定生成扁平字段。每条
 SEMANTIC_CAUSALITY 只依赖该结论必要且能够同时成立的机械前提。对每个 COMPLETE/PARTIAL 的每个
 DNF branch，递归展开全部 `depends_on`，确认规则结果在当前观测策略、时钟容差和前序 path 下可同时
 满足；禁止把其他原因分支的 semantic rule 或与本分支矛盾的 PASS/FAIL/UNKNOWN 条件串入当前路径。
@@ -137,12 +168,13 @@ DNF branch，递归展开全部 `depends_on`，确认规则结果在当前观测
 
 ```text
 python scripts/generate_diagnosis_skill.py --spec <generation-spec.json> --output-root <parent>
-python scripts/generate_diagnosis_skill.py --wiki <agent-authored-wiki-with-v5-fence.md> --output-root <parent>
+python scripts/generate_diagnosis_skill.py --wiki <agent-authored-wiki-with-v6-fence.md> --output-root <parent>
 python scripts/validate_generated_skill.py <generated-skill-dir>
 ```
 
 同一 id/version 的不同语义禁止覆盖；明确升级版本时才使用
-`--replace-different-version`。validator 必须确认 Canonical manifest、v5 marker、旁注不泄漏、
+`--replace-different-version`。validator 必须确认 Canonical manifest、v6 marker、profile 快照及
+哈希、作者确认元数据、旁注不泄漏、
 机器块逐字一致、Agent 不生成公开用户产物，并验证至少一个与当前业务异构的 Skill 没有字段泄漏。
 
 ## Candidate 与验收
@@ -158,5 +190,5 @@ Agent 只写并封存 `output/job_outcome.draft.json`，禁止创建 USER_RESULT
 PARTIAL 进入 PARTIALLY_RESOLVED，二者均公开服务端 JSON 与 ZIP。
 
 至少验收：一个多行/重复/多因素 COMPLETE；一个受抑制与时钟容差限制的 PARTIAL；一个 NONE；
-两个中性异构规范；旁注剥离；业务 canary 只存在自包含 case root；混合 INPUT+ATTACHMENT 和
+两个中性异构规范；旁注剥离；业务 canary 只存在自包含 case root；分阶段 INPUT/ATTACHMENT 和
 initial fact 精确名称过滤不回归。所有仓库测试只经 `tools/test-flow/run.ps1|run.sh`。

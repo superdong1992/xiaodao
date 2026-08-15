@@ -228,6 +228,9 @@ def _skill_index_entry(
         "entry_document",
         "tool_bundle_id",
         "requires_logparse",
+        "input_profile",
+        "input_profile_sha256",
+        "roles",
         "requirements",
         "logparse_plan",
         "verification_contract",
@@ -235,7 +238,7 @@ def _skill_index_entry(
     if set(manifest) not in (required, required | {"logparse_product"}):
         raise _invalid_asset() from None
     if (
-        manifest.get("schema_version") != 5
+        manifest.get("schema_version") != 6
         or manifest.get("deployment_scope") not in {"PRODUCTION", "TEST_ONLY"}
         or not isinstance(manifest.get("capability"), str)
         or not manifest["capability"]

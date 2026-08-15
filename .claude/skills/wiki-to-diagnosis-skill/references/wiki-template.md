@@ -1,16 +1,16 @@
-# Diagnosis Wiki / GenerationSpec v5 模板
+# Diagnosis Wiki / GenerationSpec v6 模板
 
 Wiki 作者可以自由写普通 Markdown，并用 `(# ... #)` 或 `（# ... #）` 给转换 Agent 写不进入
 产物的旁注。下面 JSON 是转换 Agent 的中间产物最小示例，不是要求 Wiki 作者填写的正文格式。
 
-## GenerationSpec v5
+## GenerationSpec v6
 
 ```json
 {
-  "schema_version": 5,
-  "generator_version": "5.0.0",
+  "schema_version": 6,
+  "generator_version": "6.0.0",
   "id": "diagnose-manual-triage",
-  "version": "5.0.0",
+  "version": "6.0.0",
   "capability": "manual-triage",
   "deployment_scope": "PRODUCTION",
   "summary": "根据用户证据执行人工定位",
@@ -32,7 +32,11 @@ Wiki 作者可以自由写普通 Markdown，并用 `(# ... #)` 或 `（# ... #�
         "pattern": null,
         "allowed_values": []
       },
-      "supplement_policy": "MISSING_ONLY"
+      "supplement_policy": "MISSING_ONLY",
+      "requiredness": "REQUIRED",
+      "activation_condition": null,
+      "source_reference": "Wiki 的受影响组件章节",
+      "confirmed": true
     }
   ],
   "logparse_plan": null,

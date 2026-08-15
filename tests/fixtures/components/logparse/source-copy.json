@@ -2,34 +2,34 @@
   "added_files": [
     {
       "mode": "100644",
-      "path": "references/generation-spec-v5-reference.md",
-      "purpose": "Define the exact, generic GenerationSpec v5 object contract without requiring source-code inspection.",
-      "sha256": "959aded3048acb6fd86a42b82364d8c808976c21f42192d18ff5950989050ac5",
-      "size": 15170,
+      "path": "references/generation-spec-v6-reference.md",
+      "purpose": "Define the exact, generic GenerationSpec v6 object contract without requiring source-code inspection.",
+      "sha256": "fcf8c098754409bf52cb1f56367e16556f5d71f059d8da4b51cc0d2ee1392f71",
+      "size": 12018,
       "source": "S08 self-contained reference; no counterpart exists in the frozen upstream source tree."
     },
     {
       "mode": "100644",
-      "path": "references/neutral-logparse-generation-spec-v5.json",
-      "purpose": "Demonstrate a business-neutral, complex Logparse GenerationSpec v5 with lossy policies and terminal paths.",
-      "sha256": "ccf488647105e40ddc02e25921747a7408222cc263655ce415930361477eb8b3",
-      "size": 16041,
+      "path": "references/neutral-logparse-generation-spec-v6.json",
+      "purpose": "Demonstrate a business-neutral, complex Logparse GenerationSpec v6 with lossy policies and terminal paths.",
+      "sha256": "dc7bc1f175f505e1a199ed97a8b0c6b0368d60cbea9ee3e2c683de64014bc7b7",
+      "size": 14390,
       "source": "S08 self-contained reference; no counterpart exists in the frozen upstream source tree."
     },
     {
       "mode": "100644",
       "path": "references/verification-contract-v2-reference.md",
       "purpose": "Define exact verification contract v2 policies, extractors, rules, numeric expressions, and terminal paths.",
-      "sha256": "bbb1a550e618b1b11f4d621ec2d699b5ad674e272f79e0d4378043604333120c",
+      "sha256": "c64596f6eea2c2d8daa67494eb8d3639fb07ae80edbdb7a99df6cd5d9ab68605",
       "size": 20642,
       "source": "S08 self-contained reference; no counterpart exists in the frozen upstream source tree."
     },
     {
       "mode": "100644",
       "path": "scripts/generate_diagnosis_skill.py",
-      "purpose": "Deterministically build, hash, validate, and atomically publish Diagnosis Skill products from GenerationSpec v5.",
-      "sha256": "b5aa127f5b16316539237fc423579e5997aa5280c95514d1c7bbb43d9c2330c4",
-      "size": 39037,
+      "purpose": "Deterministically build, hash, validate, and atomically publish Diagnosis Skill products from GenerationSpec v6.",
+      "sha256": "ea9ea49ac5d327fb23f28ccb326f9dca21140d601cd35079e29a69e5af491c82",
+      "size": 48935,
       "source": "S07 new implementation; no counterpart exists in the frozen upstream source tree."
     }
   ],
@@ -44,11 +44,11 @@
   ],
   "files": [
     {
-      "change_reason": "Upgrade the generator workflow to GenerationSpec v5, manifest schema v5, explicit deployment scope, and server-owned public results.",
+      "change_reason": "Upgrade the generator workflow to GenerationSpec v6, manifest schema v6, author-confirmed definitions, and the built-in input profile.",
       "delivered": {
         "mode": "100644",
-        "size": 12352,
-        "sha256": "4c354491a5080d7b3efde08e08183bc899d129d3fda8a6fc1377704d4e939d4e"
+        "size": 14526,
+        "sha256": "f156ac9a67533b38fc962781e1e6a62768af9f550844ad7ff52aef269d3c01b6"
       },
       "path": "SKILL.md",
       "source": {
@@ -59,11 +59,11 @@
       "status": "modified_for_v4_deployment_contract"
     },
     {
-      "change_reason": "Document manifest schema v5, deployment scope, generic Logparse bindings, declarative verification rules, and server-owned public results.",
+      "change_reason": "Document manifest schema v6, deterministic requirement activation, generic Logparse bindings, and server-owned public results.",
       "delivered": {
         "mode": "100644",
-        "size": 3864,
-        "sha256": "80552f4d1aa3e764442f37bbccf887f78410014e5e26ffd7e724fe3f134b8aa6"
+        "size": 4059,
+        "sha256": "0366ef503857babf9e48c4f249689b9fc1d76d942f277bc081d9d71a4908b1bf"
       },
       "path": "references/generated-skill-contract.md",
       "source": {
@@ -74,11 +74,11 @@
       "status": "modified_for_v4_deployment_contract"
     },
     {
-      "change_reason": "Replace the RPC fixture template with an embedded deterministic GenerationSpec v5 example with explicit deployment scope.",
+      "change_reason": "Replace the RPC fixture template with an embedded deterministic GenerationSpec v6 example with confirmed roles and Wiki requirements.",
       "delivered": {
         "mode": "100644",
-        "size": 2540,
-        "sha256": "c19eb05b33a1a00629df35581342bcfb7748c3cb97c34454f9759fbc35c79987"
+        "size": 2694,
+        "sha256": "a14bdb532751e67267b531160fbc49d61dbcac6c791daf928d41a323f48874df"
       },
       "path": "references/wiki-template.md",
       "source": {
@@ -100,11 +100,11 @@
       "status": "removed_for_v4_service_ownership"
     },
     {
-      "change_reason": "Validate manifest schema v5, deployment scope, verification contracts, embedded machine-source consistency, and Agent artifact prohibitions.",
+      "change_reason": "Validate manifest schema v6, the built-in input profile, activation contracts, embedded machine-source consistency, and Agent artifact prohibitions.",
       "delivered": {
         "mode": "100644",
-        "size": 18112,
-        "sha256": "26d48efce405ab3ea4822888b493035064a623d9b65d933468cdcd7895f1c03f"
+        "size": 19528,
+        "sha256": "50111f55fa4d0d8ea9fe292b41a8aaf058358a5f5a66b22d016d01e6e35cd2eb"
       },
       "path": "scripts/validate_generated_skill.py",
       "source": {

@@ -11,6 +11,14 @@ from problem_locator.runtime.verification_contract import (
     MANIFEST_SCHEMA_VERSION,
     validate_verification_contract,
 )
+from problem_locator.runtime.input_profile import (
+    builtin_input_profile_sha256,
+    expand_profile_requirements,
+    load_builtin_input_profile,
+)
+from problem_locator.runtime.requirement_activation import (
+    validate_requirement_activation_contract,
+)
 
 
 PRODUCT_FILES = {"SKILL.md", "diagnosis-skill.json"}
@@ -24,6 +32,9 @@ MANIFEST_REQUIRED = {
     "entry_document",
     "tool_bundle_id",
     "requires_logparse",
+    "input_profile",
+    "input_profile_sha256",
+    "roles",
     "requirements",
     "logparse_plan",
     "verification_contract",
@@ -52,11 +63,11 @@ def _canonical_json_bytes(value: object) -> bytes:
 
 def _embedded_manifest(markdown: str) -> object:
     matches = re.findall(
-        r"(?ms)<!-- DIAGNOSIS_SKILL_MANIFEST_V5_BEGIN -->\s*```json\s*(.*?)\s*```\s*<!-- DIAGNOSIS_SKILL_MANIFEST_V5_END -->",
+        r"(?ms)<!-- DIAGNOSIS_SKILL_MANIFEST_V6_BEGIN -->\s*```json\s*(.*?)\s*```\s*<!-- DIAGNOSIS_SKILL_MANIFEST_V6_END -->",
         markdown,
     )
     if len(matches) != 1:
-        raise ValueError("SKILL.md must embed exactly one manifest v5 block")
+        raise ValueError("SKILL.md must embed exactly one manifest v6 block")
     return json.loads(matches[0])
 
 
@@ -311,7 +322,7 @@ def validate_skill_directory(skill_dir: str | Path) -> ValidationResult:
     if not MANIFEST_REQUIRED <= actual_fields or actual_fields - MANIFEST_REQUIRED - MANIFEST_OPTIONAL:
         errors.append("diagnosis-skill.json field set is invalid")
     if manifest.get("schema_version") != MANIFEST_SCHEMA_VERSION:
-        errors.append("manifest schema_version must be 5")
+        errors.append("manifest schema_version must be 6")
     if manifest.get("deployment_scope") not in {"PRODUCTION", "TEST_ONLY"}:
         errors.append("deployment_scope must be PRODUCTION or TEST_ONLY")
     if manifest.get("entry_document") != "SKILL.md":
@@ -320,8 +331,17 @@ def validate_skill_directory(skill_dir: str | Path) -> ValidationResult:
         errors.append("tool_bundle_id must be tool-bundle/diagnose")
     version = manifest.get("version")
     match = re.fullmatch(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", version or "")
-    if match is None or int(match.group(1)) < 5:
-        errors.append("manifest version must be 5.0.0 or later")
+    if match is None or int(match.group(1)) < 6:
+        errors.append("manifest version must be 6.0.0 or later")
+    profile = load_builtin_input_profile()
+    if manifest.get("input_profile") != profile:
+        errors.append("manifest input_profile must equal the built-in profile")
+    if manifest.get("input_profile_sha256") != builtin_input_profile_sha256(profile):
+        errors.append("manifest input_profile_sha256 is invalid")
+    roles = manifest.get("roles")
+    if not isinstance(roles, list):
+        errors.append("roles must be an array")
+        roles = []
     requirements = manifest.get("requirements")
     if not isinstance(requirements, list):
         errors.append("requirements must be an array")
@@ -329,15 +349,25 @@ def validate_skill_directory(skill_dir: str | Path) -> ValidationResult:
     names = [item.get("name") for item in requirements if isinstance(item, dict)]
     if len(names) != len(requirements) or len(names) != len(set(names)):
         errors.append("requirements must contain unique named objects")
-    if any("required" in item for item in requirements if isinstance(item, dict)):
-        errors.append("requirements are intrinsically required and forbid a required field")
     if any(
         item.get("supplement_policy") not in {"NONE", "MISSING_ONLY"}
         for item in requirements
         if isinstance(item, dict)
     ):
         errors.append("requirements must declare supplement_policy")
+    if any(
+        item.get("requiredness") not in {"REQUIRED", "OPTIONAL", "CONDITIONAL"}
+        for item in requirements
+        if isinstance(item, dict)
+    ):
+        errors.append("requirements must declare requiredness")
     requires_logparse = manifest.get("requires_logparse")
+    expected_profile_requirements = expand_profile_requirements(
+        roles,
+        requires_logparse=requires_logparse is True,
+    )
+    if [item for item in requirements if isinstance(item, dict) and item.get("origin") != "WIKI"] != expected_profile_requirements:
+        errors.append("profile requirements are not canonically expanded")
     if type(requires_logparse) is not bool:
         errors.append("requires_logparse must be boolean")
     if requires_logparse:
@@ -360,6 +390,13 @@ def validate_skill_directory(skill_dir: str | Path) -> ValidationResult:
             requires_logparse,
         )
     )
+    try:
+        validate_requirement_activation_contract(
+            requirements,
+            manifest.get("verification_contract"),
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        errors.append(str(exc))
     try:
         markdown = (root / "SKILL.md").read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
@@ -407,7 +444,7 @@ def validate_skill_directory(skill_dir: str | Path) -> ValidationResult:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Validate a generated Diagnosis Skill v5.")
+    parser = argparse.ArgumentParser(description="Validate a generated Diagnosis Skill v6.")
     parser.add_argument("skill_dir", type=Path)
     args = parser.parse_args(argv)
     results = [("skill", validate_skill_directory(args.skill_dir))]

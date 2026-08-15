@@ -6,9 +6,15 @@
     "expected_behavior": "客户端在deadline前接收响应",
     "actual_behavior": "固定快照确认服务端发送到客户端当前时刻的聚合段在容差后仍越过预算。",
     "scope": "svc_alpha/Fetch固定日志快照",
-    "goals": ["确认客户端接收聚合段越过预算，同时保留具体线程机制为候选。"],
-    "non_goals": ["把跨时钟聚合段直接等同某个线程的排队时长。"],
-    "constraints": ["只使用固定快照，并对Q和C使用100毫秒跨时钟容差。"],
+    "goals": [
+      "确认客户端接收聚合段越过预算，同时保留具体线程机制为候选。"
+    ],
+    "non_goals": [
+      "把跨时钟聚合段直接等同某个线程的排队时长。"
+    ],
+    "constraints": [
+      "只使用固定快照，并对Q和C使用100毫秒跨时钟容差。"
+    ],
     "completion_criteria": [
       "确认C在100毫秒容差后仍严格超过deadline",
       "不把服务端同钟S或客户端发送段Q误判为本路径的已确认贡献",
@@ -21,8 +27,10 @@
     "target_version",
     "transport_protocol",
     "problem_time",
-    "client_process",
-    "server_process"
+    "client_slot",
+    "client_process_name",
+    "server_slot",
+    "server_process_name"
   ],
   "initial_user_fact_values": [
     "svc_alpha",
@@ -30,11 +38,23 @@
     "legacy_v1",
     "silent_timeout_detail",
     "2026-08-08T00:00:05.000Z",
+    "client_slot",
     "client_proc",
+    "server_slot",
     "server_proc"
   ],
-  "supplement_input_names": ["request_id"],
-  "supplement_input_values": ["42"],
-  "attachment_files": ["client.log", "server.log"],
-  "attachment_anchor_names": ["client", "server"]
+  "supplement_input_names": [
+    "request_id"
+  ],
+  "supplement_input_values": [
+    "42"
+  ],
+  "attachment_files": [
+    "client.log",
+    "server.log"
+  ],
+  "attachment_anchor_names": [
+    "client",
+    "server"
+  ]
 }

@@ -1,17 +1,20 @@
-# Generated Diagnosis Skill v5 contract
+# Generated Diagnosis Skill v6 contract
 
 生成产品恰好包含 `SKILL.md` 和 Canonical `diagnosis-skill.json`。manifest 必须使用
-`schema_version=5`、Skill `version>=5.0.0`，并声明 capability、deployment_scope、summary、
-entry document、diagnose tool bundle、requirements、logparse_plan 和 verification_contract。
+`schema_version=6`、Skill `version>=6.0.0`，并声明 capability、deployment_scope、summary、
+entry document、diagnose tool bundle、内置 input profile 快照及哈希、roles、requirements、
+logparse_plan 和 verification_contract。
 `logparse_product` 是唯一可选顶层字段，省略表示上游默认。
 
-Requirement 仍是严格的 S00 扁平业务输入声明：INPUT/USER_FACT 或
-ATTACHMENT/READY_ATTACHMENT，INITIAL/AFTER_LOGPARSE，带 prompt、constraints 和
-`NONE|MISSING_ONLY` supplement policy。所有项天然 required；每阶段最多一个附件，
-AFTER_LOGPARSE 只允许 INPUT。Logparse archive Content-Type 由 generator 固定注入。
+Requirement 仍是严格的扁平输入声明：INPUT/USER_FACT 或 ATTACHMENT/READY_ATTACHMENT，
+INITIAL/AFTER_LOGPARSE，带 prompt、constraints、origin、role、requiredness、activation condition
+和 supplement policy。profile 自动注入 `problem_time`、每个 role 的 slot/process_name/pid 与
+Logparse archive。REQUIRED 始终激活，OPTIONAL 不主动询问，CONDITIONAL 仅在机器条件成立时
+激活；AFTER_LOGPARSE 只允许 INPUT。
 
-`logparse_plan` 使用 USER_FACT/SKILL_FIXED value binding，anchors 按顺序声明 label、module、
-slot、process_name、pid。USER_FACT 必须引用 INPUT requirement。`requires_logparse=false` 时 plan
+`logparse_plan` 使用 USER_FACT/SKILL_FIXED value binding，manifest anchors 按顺序声明
+label、module、slot、process_name、pid；后三者由 role label 派生。USER_FACT 必须引用 INPUT
+requirement。`requires_logparse=false` 时 plan
 为 null、无 extractors、无 AFTER_LOGPARSE requirement。
 
 每个 `logparse_run_artifact_draft` 必须声明

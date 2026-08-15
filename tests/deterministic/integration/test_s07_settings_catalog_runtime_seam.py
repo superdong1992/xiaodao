@@ -27,7 +27,7 @@ FAKE_LOGPARSE_REPO = ROOT / "tests/fixtures/components/logparse/fake/repo"
 FAKE_LOGPARSE_CONFIG = FAKE_LOGPARSE_REPO / "config.yaml"
 TAKEOVER_SKILL_ID = "diagnosis-skill/diagnose-service-takeover"
 TAKEOVER_PRODUCT_HASH = (
-    "abd24d9517aede8df21af384ece6c059ef493af29f320bb39049547e84eb79ff"
+    "7f0447460e4a56f882a1f46493ceb645930c0a527bccb303c7929a1d7b3cbe9e"
 )
 
 
@@ -77,7 +77,7 @@ def test_settings_pin_one_s07_pair_into_s04_catalog_and_runtime(tmp_path: Path) 
         for ref in route_bindings.available_skill_refs
         if ref.id == TAKEOVER_SKILL_ID
     )
-    assert takeover_ref.version == "5.0.0"
+    assert takeover_ref.version == "6.0.0"
     assert (
         hash_product_directory(settings.skill_dir / "diagnose-service-takeover")
         == TAKEOVER_PRODUCT_HASH

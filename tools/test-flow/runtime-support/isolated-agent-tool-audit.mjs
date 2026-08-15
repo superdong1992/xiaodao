@@ -70,7 +70,7 @@ const REQUIRED_INPUT_PATHS = Object.freeze([
   "inputs/clarifications.md",
 ]);
 const DEFAULT_REQUIRED_REFERENCES = Object.freeze([
-  "references/generation-spec-v5-reference.md",
+  "references/generation-spec-v6-reference.md",
   "references/verification-contract-v2-reference.md",
 ]);
 const DEFAULT_REQUIRED_RECEIPT_READS = Object.freeze([

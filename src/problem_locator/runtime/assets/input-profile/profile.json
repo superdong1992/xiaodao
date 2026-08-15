@@ -1,0 +1,81 @@
+{
+  "schema_version": 1,
+  "profile_id": "builtin-global-v1",
+  "global_requirements": [
+    {
+      "name": "problem_time",
+      "kind": "INPUT",
+      "stage": "INITIAL",
+      "fulfillment_source": "USER_FACT",
+      "prompt": "请提供毫秒精度 UTC 问题时间。",
+      "constraints": {
+        "value_type": "STRING",
+        "min_utf8_bytes": 24,
+        "max_utf8_bytes": 24,
+        "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$",
+        "allowed_values": []
+      },
+      "supplement_policy": "MISSING_ONLY",
+      "requiredness": "REQUIRED"
+    }
+  ],
+  "role_fields": [
+    {
+      "suffix": "slot",
+      "prompt_template": "请提供 {role} 角色的 slot。",
+      "constraints": {
+        "value_type": "STRING",
+        "min_utf8_bytes": 1,
+        "max_utf8_bytes": 256,
+        "pattern": null,
+        "allowed_values": []
+      },
+      "supplement_policy": "MISSING_ONLY",
+      "requiredness": "REQUIRED"
+    },
+    {
+      "suffix": "process_name",
+      "prompt_template": "请提供 {role} 角色的 process_name。",
+      "constraints": {
+        "value_type": "STRING",
+        "min_utf8_bytes": 1,
+        "max_utf8_bytes": 256,
+        "pattern": null,
+        "allowed_values": []
+      },
+      "supplement_policy": "MISSING_ONLY",
+      "requiredness": "REQUIRED"
+    },
+    {
+      "suffix": "pid",
+      "prompt_template": "如已知，请提供 {role} 角色的 pid。",
+      "constraints": {
+        "value_type": "STRING",
+        "min_utf8_bytes": 1,
+        "max_utf8_bytes": 256,
+        "pattern": null,
+        "allowed_values": []
+      },
+      "supplement_policy": "NONE",
+      "requiredness": "OPTIONAL"
+    }
+  ],
+  "log_archive_requirement": {
+    "name": "log_archive",
+    "kind": "ATTACHMENT",
+    "stage": "INITIAL",
+    "fulfillment_source": "READY_ATTACHMENT",
+    "prompt": "请上传 Logparse 支持的日志归档。",
+    "constraints": {
+      "allowed_content_types": [
+        "application/gzip",
+        "application/zip",
+        "application/x-tar"
+      ],
+      "min_count": 1,
+      "max_count": 1
+    },
+    "supplement_policy": "MISSING_ONLY",
+    "requiredness": "REQUIRED"
+  }
+}

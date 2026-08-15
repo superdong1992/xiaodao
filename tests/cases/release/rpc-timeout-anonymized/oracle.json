@@ -2,21 +2,28 @@
   "schema_version": 1,
   "expected_skill": {
     "id": "diagnose-anonymized-rpc-timeout",
-    "version": "5.0.0",
+    "version": "6.0.0",
     "capability": "anonymized-rpc-timeout",
     "deployment_scope": "TEST_ONLY",
     "requirement_names": [
+      "problem_time",
+      "client_slot",
+      "client_process_name",
+      "client_pid",
+      "server_slot",
+      "server_process_name",
+      "server_pid",
       "service_name",
       "api_name",
       "target_version",
       "transport_protocol",
-      "problem_time",
-      "client_process",
-      "server_process",
       "log_archive",
       "request_id"
     ],
-    "observation_policy_kinds": ["SUPPRESSION", "RATE_LIMIT"],
+    "observation_policy_kinds": [
+      "SUPPRESSION",
+      "RATE_LIMIT"
+    ],
     "terminal_paths": [
       "complete_queue_and_upstream",
       "complete_api_overrun",
@@ -28,7 +35,26 @@
     ],
     "requires_multiline_event": true,
     "requires_numeric_compare": true,
-    "requires_cross_clock_tolerance_ms": 100
+    "requires_cross_clock_tolerance_ms": 100,
+    "role_presence": {
+      "client": "REQUIRED",
+      "server": "REQUIRED"
+    },
+    "requirement_requiredness": {
+      "problem_time": "REQUIRED",
+      "client_slot": "REQUIRED",
+      "client_process_name": "REQUIRED",
+      "client_pid": "OPTIONAL",
+      "server_slot": "REQUIRED",
+      "server_process_name": "REQUIRED",
+      "server_pid": "OPTIONAL",
+      "service_name": "REQUIRED",
+      "api_name": "REQUIRED",
+      "target_version": "OPTIONAL",
+      "transport_protocol": "OPTIONAL",
+      "log_archive": "REQUIRED",
+      "request_id": "CONDITIONAL"
+    }
   },
   "generated_spec_oracle": {
     "projection_version": 4,
@@ -53,12 +79,43 @@
       }
     ],
     "event_policy_bindings": [
-      {"event_id": "client_timeout_call", "observation_policy_ids": ["bbbb_default_suppression"]},
-      {"event_id": "client_timeout_detail", "observation_policy_ids": ["bbbb_default_suppression"]},
-      {"event_id": "queue_history", "observation_policy_ids": ["bbbb_default_suppression", "queue_rate_limit"]},
-      {"event_id": "late_response", "observation_policy_ids": ["bbbb_default_suppression"]},
-      {"event_id": "api_complete", "observation_policy_ids": ["bbbb_default_suppression"]},
-      {"event_id": "deadloop_detected", "observation_policy_ids": ["bbbb_default_suppression"]}
+      {
+        "event_id": "client_timeout_call",
+        "observation_policy_ids": [
+          "bbbb_default_suppression"
+        ]
+      },
+      {
+        "event_id": "client_timeout_detail",
+        "observation_policy_ids": [
+          "bbbb_default_suppression"
+        ]
+      },
+      {
+        "event_id": "queue_history",
+        "observation_policy_ids": [
+          "bbbb_default_suppression",
+          "queue_rate_limit"
+        ]
+      },
+      {
+        "event_id": "late_response",
+        "observation_policy_ids": [
+          "bbbb_default_suppression"
+        ]
+      },
+      {
+        "event_id": "api_complete",
+        "observation_policy_ids": [
+          "bbbb_default_suppression"
+        ]
+      },
+      {
+        "event_id": "deadloop_detected",
+        "observation_policy_ids": [
+          "bbbb_default_suppression"
+        ]
+      }
     ],
     "required_product_semantics": [
       {
@@ -74,10 +131,22 @@
           "time_characteristics"
         ],
         "all_of_any_patterns": [
-          ["(?<!非)(?<!不)固定[^。；\\n]{0,24}(日志|快照)", "(?<!not\\s)\\bfixed\\b[^.\\n;]{0,40}\\b(log|snapshot)\\b"],
-          ["不(?:再)?补(?:充)?[^。；\\n]{0,16}(?:历史)?日志", "\\b(?:do\\s+not|don't|never)\\s+(?:backfill|collect)\\b[^.\\n;]{0,40}\\b(?:historical\\s+)?logs?\\b"],
-          ["不(?:再)?等待(?:未来)?(?:日志|证据)?|(?<!不得)(?:(?:不(?:得|再|应|会|可|能|允许|要|需)?)|禁止)\\s*(?:(?:针对|根据|围绕|基于)[^。；，,\\n]{0,24})?启动\\s*(?:等待|等候)", "\\b(?:do\\s+not|don't|never)\\s+(?:start\\s+)?wait(?:ing)?\\b"],
-          ["(?<!不得)(?:(?:不(?:得|再|应|会|可|能|允许|要|需)?)|禁止)\\s*(?:(?:(?:针对|根据|围绕|基于)[^。；，,\\n]{0,24})?启动\\s*(?:(?:等待|等候)\\s*或\\s*)?(?:任何\\s*)?|(?:进行|持续)?\\s*(?:任何\\s*)?)监控", "\\b(?:(?:do\\s+not|don't|never)\\s+(?:start|run|perform)?\\s*monitor(?:ing)?|no\\s+monitoring)\\b"]
+          [
+            "(?<!非)(?<!不)固定[^。；\\n]{0,24}(日志|快照)",
+            "(?<!not\\s)\\bfixed\\b[^.\\n;]{0,40}\\b(log|snapshot)\\b"
+          ],
+          [
+            "不(?:再)?补(?:充)?[^。；\\n]{0,16}(?:历史)?日志",
+            "\\b(?:do\\s+not|don't|never)\\s+(?:backfill|collect)\\b[^.\\n;]{0,40}\\b(?:historical\\s+)?logs?\\b"
+          ],
+          [
+            "不(?:再)?等待(?:未来)?(?:日志|证据)?|(?<!不得)(?:(?:不(?:得|再|应|会|可|能|允许|要|需)?)|禁止)\\s*(?:(?:针对|根据|围绕|基于)[^。；，,\\n]{0,24})?启动\\s*(?:等待|等候)",
+            "\\b(?:do\\s+not|don't|never)\\s+(?:start\\s+)?wait(?:ing)?\\b"
+          ],
+          [
+            "(?<!不得)(?:(?:不(?:得|再|应|会|可|能|允许|要|需)?)|禁止)\\s*(?:(?:(?:针对|根据|围绕|基于)[^。；，,\\n]{0,24})?启动\\s*(?:(?:等待|等候)\\s*或\\s*)?(?:任何\\s*)?|(?:进行|持续)?\\s*(?:任何\\s*)?)监控",
+            "\\b(?:(?:do\\s+not|don't|never)\\s+(?:start|run|perform)?\\s*monitor(?:ing)?|no\\s+monitoring)\\b"
+          ]
         ]
       },
       {
@@ -87,9 +156,18 @@
           "output_requirements"
         ],
         "all_of_any_patterns": [
-          ["超时\\s*(?:本身\\s*)?(?:(?:并不|不)\\s*(?:等于|代表|意味(?:着)?|表示)|并非|不是)\\s*(?:(?:请求|调用|操作)\\s*)?(?:(?:已经|已)\\s*)?取消", "\\btimeout\\b\\s+(?:itself\\s+)?(?:(?:does\\s+not|doesn't)\\s+(?:necessarily\\s+)?(?:mean|imply|represent)\\s+(?:that\\s+)?(?:the\\s+)?(?:request\\s+|call\\s+|operation\\s+)?(?:is\\s+|was\\s+)?cancel(?:lation|l?ed|l?ing)?\\b(?!\\s+(?:is\\s+)?(?:impossible|absent|prevented))|(?:is\\s+not|isn't)\\s+(?:(?:the\\s+)?same\\s+as\\s+|equal\\s+to\\s+)?cancel(?:lation|l?ed|l?ing)?\\b)"],
-          ["(?<!不会)(?<!不能)(?<!不再)(?<!无法)(?<!无需)(?<!禁止)(?<!停止)(?<!不得)(?<!不允许)(?:后续|稍后|继续)(?:\\s*(?:API|请求|调用|操作|仍|可能|会|可以|可))*\\s*执行|(?<!不)(?:仍可能|仍会)\\s*(?:继续)?执行", "\\b(?:may|might|can|could|will)\\s+(?:still\\s+)?(?:continue\\s+to\\s+)?execut(?:e|ed|ing)\\b|\\bexecution\\b[^.\\n;]{0,32}\\b(?:may|might|can|could|will)\\s+continue\\b"],
-          ["(?<!不)(?<!无)(?<!未)(?<!不会)(?<!不能)(?<!不再)(?<!无法)(?<!未曾)(?<!没有)(?:(?:可能|仍可能|可能会|会|可|存在|产生|导致|带来)[^。；\\n]{0,12}副作用|副作用\\s*(?:风险|仍可能|可能|需(?:要)?(?:警惕|提示|注意)|不能排除))", "\\b(?:may|might|can|could)\\s+(?:cause|produce|have)\\s+side[- ]effects?\\b|(?<!no\\s)(?<!zero\\s)(?<!without\\s)\\bside[- ]effects?\\b\\s+(?:risk|risks|remain\\s+possible|are\\s+possible)\\b"]
+          [
+            "超时\\s*(?:本身\\s*)?(?:(?:并不|不)\\s*(?:等于|代表|意味(?:着)?|表示)|并非|不是)\\s*(?:(?:请求|调用|操作)\\s*)?(?:(?:已经|已)\\s*)?取消",
+            "\\btimeout\\b\\s+(?:itself\\s+)?(?:(?:does\\s+not|doesn't)\\s+(?:necessarily\\s+)?(?:mean|imply|represent)\\s+(?:that\\s+)?(?:the\\s+)?(?:request\\s+|call\\s+|operation\\s+)?(?:is\\s+|was\\s+)?cancel(?:lation|l?ed|l?ing)?\\b(?!\\s+(?:is\\s+)?(?:impossible|absent|prevented))|(?:is\\s+not|isn't)\\s+(?:(?:the\\s+)?same\\s+as\\s+|equal\\s+to\\s+)?cancel(?:lation|l?ed|l?ing)?\\b)"
+          ],
+          [
+            "(?<!不会)(?<!不能)(?<!不再)(?<!无法)(?<!无需)(?<!禁止)(?<!停止)(?<!不得)(?<!不允许)(?:后续|稍后|继续)(?:\\s*(?:API|请求|调用|操作|仍|可能|会|可以|可))*\\s*执行|(?<!不)(?:仍可能|仍会)\\s*(?:继续)?执行",
+            "\\b(?:may|might|can|could|will)\\s+(?:still\\s+)?(?:continue\\s+to\\s+)?execut(?:e|ed|ing)\\b|\\bexecution\\b[^.\\n;]{0,32}\\b(?:may|might|can|could|will)\\s+continue\\b"
+          ],
+          [
+            "(?<!不)(?<!无)(?<!未)(?<!不会)(?<!不能)(?<!不再)(?<!无法)(?<!未曾)(?<!没有)(?:(?:可能|仍可能|可能会|会|可|存在|产生|导致|带来)[^。；\\n]{0,12}副作用|副作用\\s*(?:风险|仍可能|可能|需(?:要)?(?:警惕|提示|注意)|不能排除))",
+            "\\b(?:may|might|can|could)\\s+(?:cause|produce|have)\\s+side[- ]effects?\\b|(?<!no\\s)(?<!zero\\s)(?<!without\\s)\\bside[- ]effects?\\b\\s+(?:risk|risks|remain\\s+possible|are\\s+possible)\\b"
+          ]
         ]
       }
     ]

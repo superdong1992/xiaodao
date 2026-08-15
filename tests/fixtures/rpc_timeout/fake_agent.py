@@ -66,27 +66,47 @@ from problem_locator.runtime.outcome_finalizer import (  # noqa: E402
 PARAMETER_REQUIREMENTS = (
     (
         "00000000-0000-0000-0000-000000000101",
+        "problem_time",
+        "Provide the millisecond UTC problem time.",
+    ),
+    (
+        "00000000-0000-0000-0000-000000000102",
+        "client_slot",
+        "Provide the client slot.",
+    ),
+    (
+        "00000000-0000-0000-0000-000000000103",
+        "client_process_name",
+        "Provide the client process name.",
+    ),
+    (
+        "00000000-0000-0000-0000-000000000104",
+        "server_slot",
+        "Provide the server slot.",
+    ),
+    (
+        "00000000-0000-0000-0000-000000000105",
+        "server_process_name",
+        "Provide the server process name.",
+    ),
+    (
+        "00000000-0000-0000-0000-000000000106",
         "caller_service",
         "Provide the RPC caller service.",
     ),
     (
-        "00000000-0000-0000-0000-000000000102",
+        "00000000-0000-0000-0000-000000000107",
         "server_service",
         "Provide the RPC server service.",
     ),
     (
-        "00000000-0000-0000-0000-000000000103",
+        "00000000-0000-0000-0000-000000000108",
         "rpc_method",
         "Provide the timed-out RPC method.",
     ),
-    (
-        "00000000-0000-0000-0000-000000000104",
-        "problem_time",
-        "Provide the millisecond UTC problem time.",
-    ),
 )
-ATTACHMENT_REQUIREMENT_ID = "00000000-0000-0000-0000-000000000105"
-ORDER_REQUIREMENT_ID = "00000000-0000-0000-0000-000000000106"
+ATTACHMENT_REQUIREMENT_ID = "00000000-0000-0000-0000-000000000109"
+ORDER_REQUIREMENT_ID = "00000000-0000-0000-0000-000000000110"
 ARCHIVE_BYTES_MARKER = b"synthetic payment-to-inventory RPC timeout archive"
 EVIDENCE_IDS = (
     "00000000-0000-0000-0000-000000000040",
@@ -227,17 +247,17 @@ def _empty_delta(**updates: object) -> DiagnosisStateDelta:
 def _skill_manifest(context: str) -> dict[str, object]:
     skill = _section(context, "SKILL")
     match = re.search(
-        r"<!-- DIAGNOSIS_SKILL_MANIFEST_V5_BEGIN -->\s*"
+        r"<!-- DIAGNOSIS_SKILL_MANIFEST_V6_BEGIN -->\s*"
         r"```json\s*(\{.*?\})\s*```\s*"
-        r"<!-- DIAGNOSIS_SKILL_MANIFEST_V5_END -->",
+        r"<!-- DIAGNOSIS_SKILL_MANIFEST_V6_END -->",
         skill,
         flags=re.DOTALL,
     )
     if match is None:
-        raise RuntimeError("the pinned Skill manifest v5 is absent")
+        raise RuntimeError("the pinned Skill manifest v6 is absent")
     value = json.loads(match.group(1))
-    if not isinstance(value, dict) or value.get("schema_version") != 5:
-        raise RuntimeError("the pinned Skill manifest is not v5")
+    if not isinstance(value, dict) or value.get("schema_version") != 6:
+        raise RuntimeError("the pinned Skill manifest is not v6")
     return value
 
 

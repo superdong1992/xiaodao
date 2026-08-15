@@ -40,11 +40,11 @@ ROOT = Path(__file__).resolve().parents[4]
 CONTRACTS = ROOT / "tests/fixtures/contracts/positive"
 SPEC = (
     ROOT
-    / "tests/fixtures/components/diagnosis-generator/specs/rpc-service-takeover.json"
+    / "tests/fixtures/components/diagnosis-generator/diagnose-service-takeover/diagnosis-skill.json"
 )
 MANUAL_SPEC = (
     ROOT
-    / "tests/fixtures/components/diagnosis-generator/specs/manual-triage.json"
+    / "tests/fixtures/components/runtime-catalog/skill-dir/manual-triage/diagnosis-skill.json"
 )
 CLIENT_EVIDENCE = "00000000-0000-0000-0000-000000000041"
 SERVER_EVIDENCE = "00000000-0000-0000-0000-000000000042"
@@ -161,6 +161,10 @@ def _build(
         ("server_service", "inventory"),
         ("rpc_method", rpc_method_fact),
         ("problem_time", problem_time),
+        ("client_slot", "slot_1"),
+        ("client_process_name", "checkout-client"),
+        ("server_slot", "slot_2"),
+        ("server_process_name", "inventory-server"),
     ]
     if include_order_fact:
         names_and_values.append(("order_id", client_order_id))
@@ -379,17 +383,19 @@ def _build(
     candidate["excluded_factors"] = []
     draft = AgentJobOutcomeDraftV2.model_validate(draft_value)
     draft_bytes = canonical_json_bytes(draft)
-    verification = verify_agent_draft(
-        workspace_root=tmp_path,
-        job=job,
-        manifest=manifest,
-        draft=draft,
-        draft_bytes=draft_bytes,
-        proposal_resources=(),
-        skill_root=skill_root,
-        broker_audit_bytes=_broker_audit(manifest),
-        diagnosis_audit=None,
-    )
+    verification = None
+    if include_order_fact:
+        verification = verify_agent_draft(
+            workspace_root=tmp_path,
+            job=job,
+            manifest=manifest,
+            draft=draft,
+            draft_bytes=draft_bytes,
+            proposal_resources=(),
+            skill_root=skill_root,
+            broker_audit_bytes=_broker_audit(manifest),
+            diagnosis_audit=None,
+        )
     return job, manifest, draft, draft_bytes, verification
 
 
@@ -754,6 +760,11 @@ def _add_open_review_requirement(
             "allowed_values": [],
         },
         "supplement_policy": "MISSING_ONLY",
+        "origin": "WIKI",
+        "role": None,
+        "requiredness": "REQUIRED",
+        "activation_condition": None,
+        "source_reference": "Confirmed diagnostic note definition.",
     }
     skill_path = tmp_path / "skill/diagnosis-skill.json"
     skill = _json(skill_path)
@@ -1244,7 +1255,7 @@ def test_no_log_semantic_skill_preserves_candidate_evidence_through_review(
     diagnosis_value["consumed_evidence_refs"] = [CLIENT_EVIDENCE]
     diagnosis_value["rule_claims"] = [
         {
-            "rule_id": "manual_causal_assessment",
+            "rule_id": "manual_causality",
             "claimed_result": "PASS",
             "fact_refs": [],
             "citations": [],
@@ -1266,7 +1277,7 @@ def test_no_log_semantic_skill_preserves_candidate_evidence_through_review(
             "role": "CAUSE",
             "statement": diagnosis_candidate["statement"],
             "evidence_bindings": [manual_binding],
-            "required_rule_ids": ["manual_causal_assessment"],
+            "required_rule_ids": ["manual_causality"],
         }
     ]
     diagnosis_draft = AgentJobOutcomeDraftV2.model_validate(diagnosis_value)
@@ -1328,7 +1339,7 @@ def test_no_log_semantic_skill_preserves_candidate_evidence_through_review(
                 "role": "CAUSE",
                 "statement": diagnosis_candidate["statement"],
                 "evidence_refs": [CLIENT_EVIDENCE],
-                "required_rule_ids": ["manual_causal_assessment"],
+                "required_rule_ids": ["manual_causality"],
             }
         ],
         "candidate_factors": [],
@@ -1396,20 +1407,20 @@ def test_no_log_semantic_skill_preserves_candidate_evidence_through_review(
         "candidate": candidate,
         "causal_assertions": [
             {
-                "rule_id": "manual_causal_assessment",
+                "rule_id": "manual_causality",
                 "statement": manual_skill["verification_contract"]["rules"][0][
                     "parameters"
                 ]["assertion"],
             }
         ],
-        "required_rule_ids": ["manual_causal_assessment"],
+        "required_rule_ids": ["manual_causality"],
         "required_evidence_refs": [CLIENT_EVIDENCE],
         "mechanical_facts": [
             {
                 "fact_id": "server_diagnosis_audit_integrity",
                 "name": "diagnosis_audit_integrity",
                 "value": "VERIFIED_PASS",
-                "source_rule_id": "manual_causal_assessment",
+                "source_rule_id": "manual_causality",
                 "evidence_refs": [CLIENT_EVIDENCE],
             }
         ],
@@ -1463,7 +1474,7 @@ def test_no_log_semantic_skill_preserves_candidate_evidence_through_review(
             "error": None,
             "rule_claims": [
                 {
-                    "rule_id": "manual_causal_assessment",
+                    "rule_id": "manual_causality",
                     "claimed_result": "PASS",
                     "fact_refs": [],
                     "citations": [],
@@ -1708,7 +1719,7 @@ def test_missing_only_requirement_cannot_request_an_existing_user_fact(
     )
     wait_draft = _need_order_id_draft(job, draft)
 
-    with pytest.raises(ValueError, match="already fulfilled"):
+    with pytest.raises(ValueError, match="exactly the server-activated"):
         verify_agent_draft(
             workspace_root=tmp_path,
             job=job,

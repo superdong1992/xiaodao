@@ -2,14 +2,14 @@
 
 本 Wiki 是 RPC 专属 E2E Fixture；其中业务字段不得进入通用 output contract 或生成模板。
 
-## GenerationSpec v5
+## GenerationSpec v6
 
 ```json
 {
-  "schema_version": 5,
-  "generator_version": "5.0.0",
+  "schema_version": 6,
+  "generator_version": "6.0.0",
   "id": "diagnose-service-takeover",
-  "version": "5.0.0",
+  "version": "6.0.0",
   "capability": "service-takeover",
   "deployment_scope": "TEST_ONLY",
   "summary": "定位合成服务接管场景中的 RPC 超时",
@@ -19,11 +19,17 @@
   "roles": [
     {
       "label": "client",
-      "description": "调用方进程"
+      "description": "调用方进程",
+      "presence": "REQUIRED",
+      "source_reference": "已确认的 client 角色说明：调用方进程",
+      "confirmed": true
     },
     {
       "label": "server",
-      "description": "服务方进程"
+      "description": "服务方进程",
+      "presence": "REQUIRED",
+      "source_reference": "已确认的 server 角色说明：服务方进程",
+      "confirmed": true
     }
   ],
   "requirements": [
@@ -40,7 +46,11 @@
         "pattern": null,
         "allowed_values": []
       },
-      "supplement_policy": "MISSING_ONLY"
+      "supplement_policy": "MISSING_ONLY",
+      "requiredness": "REQUIRED",
+      "activation_condition": null,
+      "source_reference": "已确认的 Wiki 参数定义：请提供调用方服务名。",
+      "confirmed": true
     },
     {
       "name": "server_service",
@@ -55,7 +65,11 @@
         "pattern": null,
         "allowed_values": []
       },
-      "supplement_policy": "MISSING_ONLY"
+      "supplement_policy": "MISSING_ONLY",
+      "requiredness": "REQUIRED",
+      "activation_condition": null,
+      "source_reference": "已确认的 Wiki 参数定义：请提供服务方服务名。",
+      "confirmed": true
     },
     {
       "name": "rpc_method",
@@ -70,34 +84,11 @@
         "pattern": null,
         "allowed_values": []
       },
-      "supplement_policy": "MISSING_ONLY"
-    },
-    {
-      "name": "problem_time",
-      "kind": "INPUT",
-      "stage": "INITIAL",
-      "fulfillment_source": "USER_FACT",
-      "prompt": "请提供毫秒精度 UTC 问题时间。",
-      "constraints": {
-        "value_type": "STRING",
-        "min_utf8_bytes": 24,
-        "max_utf8_bytes": 24,
-        "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$",
-        "allowed_values": []
-      },
-      "supplement_policy": "MISSING_ONLY"
-    },
-    {
-      "name": "log_archive",
-      "kind": "ATTACHMENT",
-      "stage": "INITIAL",
-      "fulfillment_source": "READY_ATTACHMENT",
-      "prompt": "请上传 Logparse 支持的日志归档。",
-      "constraints": {
-        "min_count": 1,
-        "max_count": 1
-      },
-      "supplement_policy": "MISSING_ONLY"
+      "supplement_policy": "MISSING_ONLY",
+      "requiredness": "REQUIRED",
+      "activation_condition": null,
+      "source_reference": "已确认的 Wiki 参数定义：请提供超时的 RPC 方法名。",
+      "confirmed": true
     },
     {
       "name": "order_id",
@@ -112,47 +103,28 @@
         "pattern": null,
         "allowed_values": []
       },
-      "supplement_policy": "MISSING_ONLY"
+      "supplement_policy": "MISSING_ONLY",
+      "requiredness": "REQUIRED",
+      "activation_condition": null,
+      "source_reference": "已确认的 Wiki 参数定义：请提供用于两端日志关联的订单号。",
+      "confirmed": true
     }
   ],
   "logparse_plan": {
-    "attachment_requirement": "log_archive",
-    "problem_time_binding": {
-      "source": "USER_FACT",
-      "name": "problem_time"
-    },
     "anchors": [
       {
         "label": "client",
         "module": {
           "source": "SKILL_FIXED",
           "value": "compact"
-        },
-        "slot": {
-          "source": "SKILL_FIXED",
-          "value": "slot_1"
-        },
-        "process_name": {
-          "source": "SKILL_FIXED",
-          "value": "checkout-client"
-        },
-        "pid": null
+        }
       },
       {
         "label": "server",
         "module": {
           "source": "SKILL_FIXED",
           "value": "compact"
-        },
-        "slot": {
-          "source": "SKILL_FIXED",
-          "value": "slot_2"
-        },
-        "process_name": {
-          "source": "SKILL_FIXED",
-          "value": "inventory-server"
-        },
-        "pid": null
+        }
       }
     ]
   },

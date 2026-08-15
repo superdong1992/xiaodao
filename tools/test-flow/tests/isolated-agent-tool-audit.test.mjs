@@ -29,12 +29,12 @@ function workspaceFixture() {
   write(workspaceRoot, "inputs/clarifications.md");
   write(skillRoot, "SKILL.md", [
     "# Converter",
-    "[generation](references/generation-spec-v5-reference.md)",
+    "[generation](references/generation-spec-v6-reference.md)",
     "[verification](references/verification-contract-v2-reference.md)",
     "[optional](references/ordinary-example.md)",
     "",
   ].join("\n"));
-  write(skillRoot, "references/generation-spec-v5-reference.md");
+  write(skillRoot, "references/generation-spec-v6-reference.md");
   write(skillRoot, "references/verification-contract-v2-reference.md");
   write(skillRoot, "references/ordinary-example.md");
   write(workspaceRoot, "unlinked.md");
@@ -68,7 +68,7 @@ function validEvents(workspaceRoot, skillRoot, content = "{}") {
     ...invocation("skill", "Skill", { skill: "wiki-to-diagnosis-skill" }),
     ...invocation("wiki", "Read", { file_path: path.join(workspaceRoot, "inputs", "wiki.md") }),
     ...invocation("clarifications", "Read", { file_path: path.join(workspaceRoot, "inputs", "clarifications.md") }),
-    ...invocation("generation", "Read", { file_path: path.join(skillRoot, "references", "generation-spec-v5-reference.md") }),
+    ...invocation("generation", "Read", { file_path: path.join(skillRoot, "references", "generation-spec-v6-reference.md") }),
     ...invocation("verification", "Read", { file_path: path.join(skillRoot, "references", "verification-contract-v2-reference.md") }),
     ...invocation("optional", "Read", { file_path: path.join(skillRoot, "references", "ordinary-example.md"), limit: 200 }),
     ...invocation("write", "Write", { file_path: path.join(workspaceRoot, "output", "generation-spec.json"), content }),
@@ -78,7 +78,7 @@ function validEvents(workspaceRoot, skillRoot, content = "{}") {
 
 function arrangeValid() {
   const fixture = workspaceFixture();
-  const content = "{\"schema_version\":5}\n";
+  const content = "{\"schema_version\":6}\n";
   write(fixture.workspaceRoot, "output/generation-spec.json", content);
   return { ...fixture, content, events: validEvents(fixture.workspaceRoot, fixture.skillRoot, content) };
 }
@@ -111,7 +111,7 @@ test("audits a complete, confined Skill-generation trace and returns only relati
     assert.deepEqual(receipt.required_reads, [
       "workspace/inputs/wiki.md",
       "workspace/inputs/clarifications.md",
-      "skill/references/generation-spec-v5-reference.md",
+      "skill/references/generation-spec-v6-reference.md",
       "skill/references/verification-contract-v2-reference.md",
     ]);
     assert.equal(receipt.output.path, "workspace/output/generation-spec.json");
@@ -256,7 +256,7 @@ test("discovers sorted, unique, ordinary direct Skill references", () => {
   const fixture = arrangeValid();
   try {
     assert.deepEqual(discoverLinkedSkillReferences(fixture.skillRoot), [
-      "references/generation-spec-v5-reference.md",
+      "references/generation-spec-v6-reference.md",
       "references/ordinary-example.md",
       "references/verification-contract-v2-reference.md",
     ]);
@@ -394,13 +394,13 @@ test("permits only the two inputs and ordinary references linked by SKILL.md", (
     unlinked[11].message.content[0].input.file_path = "unlinked.md";
     errorCode(() => auditSkillGenerationTrace({ ...fixture, events: unlinked }), CODES.READ_UNLINKED);
 
-    write(fixture.workspaceRoot, "references/generation-spec-v5-reference.md");
+    write(fixture.workspaceRoot, "references/generation-spec-v6-reference.md");
     const workspaceShadow = structuredClone(fixture.events);
     replaceToolPath(
       workspaceShadow,
       "Read",
       2,
-      path.join(fixture.workspaceRoot, "references", "generation-spec-v5-reference.md"),
+      path.join(fixture.workspaceRoot, "references", "generation-spec-v6-reference.md"),
     );
     errorCode(() => auditSkillGenerationTrace({ ...fixture, events: workspaceShadow }), CODES.READ_UNLINKED);
 
@@ -534,7 +534,7 @@ test("requires exactly one successful Write to the fixed regular output path", (
 test("rejects symlinks in every observed input, reference, or output path", { skip: process.platform === "win32" }, async (context) => {
   for (const target of [
     { root: "workspaceRoot", relative: "inputs/wiki.md" },
-    { root: "skillRoot", relative: "references/generation-spec-v5-reference.md" },
+    { root: "skillRoot", relative: "references/generation-spec-v6-reference.md" },
     { root: "workspaceRoot", relative: "output/generation-spec.json" },
   ]) {
     await context.test(target.relative, () => {

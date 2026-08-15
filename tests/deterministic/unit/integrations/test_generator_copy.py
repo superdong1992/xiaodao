@@ -24,18 +24,18 @@ EXPECTED_CHECKOUT_EVIDENCE = {
 EXPECTED_SOURCE_CHANGES = {
     "SKILL.md": (
         "modified_for_v4_deployment_contract",
-        "Upgrade the generator workflow to GenerationSpec v5, manifest schema v5, "
-        "explicit deployment scope, and server-owned public results.",
+        "Upgrade the generator workflow to GenerationSpec v6, manifest schema v6, "
+        "author-confirmed definitions, and the built-in input profile.",
     ),
     "references/generated-skill-contract.md": (
         "modified_for_v4_deployment_contract",
-        "Document manifest schema v5, deployment scope, generic Logparse bindings, "
-        "declarative verification rules, and server-owned public results.",
+        "Document manifest schema v6, deterministic requirement activation, generic "
+        "Logparse bindings, and server-owned public results.",
     ),
     "references/wiki-template.md": (
         "modified_for_v4_deployment_contract",
         "Replace the RPC fixture template with an embedded deterministic "
-        "GenerationSpec v5 example with explicit deployment scope.",
+        "GenerationSpec v6 example with confirmed roles and Wiki requirements.",
     ),
     "scripts/pack_result_zip.py": (
         "removed_for_v4_service_ownership",
@@ -44,28 +44,28 @@ EXPECTED_SOURCE_CHANGES = {
     ),
     "scripts/validate_generated_skill.py": (
         "modified_for_v4_deployment_contract",
-        "Validate manifest schema v5, deployment scope, verification contracts, "
+        "Validate manifest schema v6, the built-in input profile, activation contracts, "
         "embedded machine-source consistency, and Agent artifact prohibitions.",
     ),
 }
 EXPECTED_ADDED_FILES = {
-    "references/generation-spec-v5-reference.md": {
+    "references/generation-spec-v6-reference.md": {
         "source": (
             "S08 self-contained reference; no counterpart exists in the frozen "
             "upstream source tree."
         ),
         "purpose": (
-            "Define the exact, generic GenerationSpec v5 object contract without "
+            "Define the exact, generic GenerationSpec v6 object contract without "
             "requiring source-code inspection."
         ),
     },
-    "references/neutral-logparse-generation-spec-v5.json": {
+    "references/neutral-logparse-generation-spec-v6.json": {
         "source": (
             "S08 self-contained reference; no counterpart exists in the frozen "
             "upstream source tree."
         ),
         "purpose": (
-            "Demonstrate a business-neutral, complex Logparse GenerationSpec v5 "
+            "Demonstrate a business-neutral, complex Logparse GenerationSpec v6 "
             "with lossy policies and terminal paths."
         ),
     },
@@ -86,7 +86,7 @@ EXPECTED_ADDED_FILES = {
         ),
         "purpose": (
             "Deterministically build, hash, validate, and atomically publish "
-            "Diagnosis Skill products from GenerationSpec v5."
+            "Diagnosis Skill products from GenerationSpec v6."
         ),
     },
 }

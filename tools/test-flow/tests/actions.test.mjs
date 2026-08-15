@@ -26,7 +26,7 @@ function passingSkillTraceAudit() {
   const requiredReads = [
     "workspace/inputs/wiki.md",
     "workspace/inputs/clarifications.md",
-    "skill/references/generation-spec-v5-reference.md",
+    "skill/references/generation-spec-v6-reference.md",
     "skill/references/verification-contract-v2-reference.md",
   ];
   return {

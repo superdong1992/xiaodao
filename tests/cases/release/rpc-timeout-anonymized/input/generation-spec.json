@@ -1,8 +1,8 @@
 {
-  "schema_version": 5,
-  "generator_version": "5.0.0",
+  "schema_version": 6,
+  "generator_version": "6.0.0",
   "id": "diagnose-anonymized-rpc-timeout",
-  "version": "5.0.0",
+  "version": "6.0.0",
   "capability": "anonymized-rpc-timeout",
   "deployment_scope": "TEST_ONLY",
   "summary": "从固定双端日志快照定位脱敏RPC超时的多个贡献因素",
@@ -12,11 +12,17 @@
   "roles": [
     {
       "label": "client",
-      "description": "发起调用并接收响应的进程实例"
+      "description": "发起调用并接收响应的进程实例",
+      "presence": "REQUIRED",
+      "source_reference": "已确认的 client 角色说明：发起调用并接收响应的进程实例",
+      "confirmed": true
     },
     {
       "label": "server",
-      "description": "在共享串行lane中接收并执行API的进程实例"
+      "description": "在共享串行lane中接收并执行API的进程实例",
+      "presence": "REQUIRED",
+      "source_reference": "已确认的 server 角色说明：在共享串行lane中接收并执行API的进程实例",
+      "confirmed": true
     }
   ],
   "requirements": [
@@ -33,7 +39,11 @@
         "pattern": null,
         "allowed_values": []
       },
-      "supplement_policy": "MISSING_ONLY"
+      "supplement_policy": "MISSING_ONLY",
+      "requiredness": "REQUIRED",
+      "activation_condition": null,
+      "source_reference": "已确认的 Wiki 参数定义：请提供超时调用的服务名。",
+      "confirmed": true
     },
     {
       "name": "api_name",
@@ -48,7 +58,11 @@
         "pattern": null,
         "allowed_values": []
       },
-      "supplement_policy": "MISSING_ONLY"
+      "supplement_policy": "MISSING_ONLY",
+      "requiredness": "REQUIRED",
+      "activation_condition": null,
+      "source_reference": "已确认的 Wiki 参数定义：请提供超时调用的API名。",
+      "confirmed": true
     },
     {
       "name": "target_version",
@@ -63,7 +77,11 @@
         "pattern": null,
         "allowed_values": []
       },
-      "supplement_policy": "MISSING_ONLY"
+      "supplement_policy": "NONE",
+      "requiredness": "OPTIONAL",
+      "activation_condition": null,
+      "source_reference": "已确认的 Wiki 参数定义：请提供目标模块版本分类。",
+      "confirmed": true
     },
     {
       "name": "transport_protocol",
@@ -78,64 +96,11 @@
         "pattern": null,
         "allowed_values": []
       },
-      "supplement_policy": "MISSING_ONLY"
-    },
-    {
-      "name": "problem_time",
-      "kind": "INPUT",
-      "stage": "INITIAL",
-      "fulfillment_source": "USER_FACT",
-      "prompt": "请提供毫秒精度UTC问题时间。",
-      "constraints": {
-        "value_type": "STRING",
-        "min_utf8_bytes": 1,
-        "max_utf8_bytes": 24,
-        "pattern": null,
-        "allowed_values": []
-      },
-      "supplement_policy": "MISSING_ONLY"
-    },
-    {
-      "name": "client_process",
-      "kind": "INPUT",
-      "stage": "INITIAL",
-      "fulfillment_source": "USER_FACT",
-      "prompt": "请提供客户端进程名。",
-      "constraints": {
-        "value_type": "STRING",
-        "min_utf8_bytes": 1,
-        "max_utf8_bytes": 256,
-        "pattern": null,
-        "allowed_values": []
-      },
-      "supplement_policy": "MISSING_ONLY"
-    },
-    {
-      "name": "server_process",
-      "kind": "INPUT",
-      "stage": "INITIAL",
-      "fulfillment_source": "USER_FACT",
-      "prompt": "请提供服务端进程名。",
-      "constraints": {
-        "value_type": "STRING",
-        "min_utf8_bytes": 1,
-        "max_utf8_bytes": 256,
-        "pattern": null,
-        "allowed_values": []
-      },
-      "supplement_policy": "MISSING_ONLY"
-    },
-    {
-      "name": "log_archive",
-      "kind": "ATTACHMENT",
-      "stage": "INITIAL",
-      "fulfillment_source": "READY_ATTACHMENT",
-      "prompt": "请上传Logparse支持的固定日志归档。",
-      "constraints": {
-        "min_count": 1,
-        "max_count": 1
-      },
-      "supplement_policy": "MISSING_ONLY"
+      "supplement_policy": "NONE",
+      "requiredness": "OPTIONAL",
+      "activation_condition": null,
+      "source_reference": "已确认的 Wiki 参数定义：请提供底层通信协议分类。",
+      "confirmed": true
     },
     {
       "name": "request_id",
@@ -150,47 +115,41 @@
         "pattern": null,
         "allowed_values": []
       },
-      "supplement_policy": "MISSING_ONLY"
+      "supplement_policy": "MISSING_ONLY",
+      "requiredness": "CONDITIONAL",
+      "activation_condition": {
+        "any_of": [
+          {
+            "all_of": [
+              {
+                "source": "USER_FACT",
+                "name": "transport_protocol",
+                "operator": "EQUALS",
+                "value": "standard"
+              }
+            ]
+          }
+        ]
+      },
+      "source_reference": "已确认的 Wiki 参数定义：请提供需要关联的进程内请求ID。",
+      "confirmed": true
     }
   ],
   "logparse_plan": {
-    "attachment_requirement": "log_archive",
-    "problem_time_binding": {
-      "source": "USER_FACT",
-      "name": "problem_time"
-    },
     "anchors": [
       {
         "label": "client",
         "module": {
           "source": "SKILL_FIXED",
           "value": "bbbb"
-        },
-        "slot": {
-          "source": "SKILL_FIXED",
-          "value": "client_slot"
-        },
-        "process_name": {
-          "source": "USER_FACT",
-          "name": "client_process"
-        },
-        "pid": null
+        }
       },
       {
         "label": "server",
         "module": {
           "source": "SKILL_FIXED",
           "value": "bbbb"
-        },
-        "slot": {
-          "source": "SKILL_FIXED",
-          "value": "server_slot"
-        },
-        "process_name": {
-          "source": "USER_FACT",
-          "name": "server_process"
-        },
-        "pid": null
+        }
       }
     ]
   },

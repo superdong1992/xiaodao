@@ -78,10 +78,12 @@ const EXPECTED_SKILL_FIELDS = [
   "deployment_scope",
   "id",
   "observation_policy_kinds",
+  "requirement_requiredness",
   "requirement_names",
   "requires_cross_clock_tolerance_ms",
   "requires_multiline_event",
   "requires_numeric_compare",
+  "role_presence",
   "terminal_paths",
   "version",
 ];
@@ -245,6 +247,34 @@ function loadSemanticOracle(loaded) {
   exactKeys(oracle, SEMANTIC_ORACLE_FIELDS, "RELEASE_CASE_SEMANTIC_ORACLE_FIELDS", "Release case semantic oracle");
   exactKeys(oracle.expected_skill, EXPECTED_SKILL_FIELDS, "RELEASE_CASE_EXPECTED_SKILL_FIELDS", "Release case expected skill");
   assertFlow(oracle.schema_version === 1 && oracle.oracle_visibility === "GATE_ONLY", "RELEASE_CASE_SEMANTIC_ORACLE_VERSION", "Release case semantic oracle metadata is invalid");
+  assertFlow(
+    oracle.expected_skill.role_presence
+      && typeof oracle.expected_skill.role_presence === "object"
+      && !Array.isArray(oracle.expected_skill.role_presence)
+      && Object.entries(oracle.expected_skill.role_presence).every(
+        ([name, presence]) => /^[a-z][a-z0-9_]{0,63}$/.test(name)
+          && ["REQUIRED", "OPTIONAL"].includes(presence),
+      ),
+    "RELEASE_CASE_ROLE_PRESENCE",
+    "Release case expected role presence is invalid",
+  );
+  assertFlow(
+    oracle.expected_skill.requirement_requiredness
+      && typeof oracle.expected_skill.requirement_requiredness === "object"
+      && !Array.isArray(oracle.expected_skill.requirement_requiredness)
+      && Object.entries(oracle.expected_skill.requirement_requiredness).every(
+        ([name, requiredness]) => /^[a-z][a-z0-9_]{0,63}$/.test(name)
+          && ["REQUIRED", "OPTIONAL", "CONDITIONAL"].includes(requiredness),
+      ),
+    "RELEASE_CASE_REQUIREMENT_REQUIREDNESS",
+    "Release case expected requirement requiredness is invalid",
+  );
+  assertFlow(
+    canonicalJson(Object.keys(oracle.expected_skill.requirement_requiredness).sort())
+      === canonicalJson([...oracle.expected_skill.requirement_names].sort()),
+    "RELEASE_CASE_REQUIREMENT_REQUIREDNESS_NAMES",
+    "Release case requiredness names disagree with requirement_names",
+  );
   scalarArray(oracle.author_note_markers_forbidden_in_product, "RELEASE_CASE_NOTE_MARKERS", "Release case forbidden note markers");
   scalarArray(oracle.business_canaries, "RELEASE_CASE_CANARIES", "Release case business canaries");
   exactKeys(oracle.generated_spec_oracle, GENERATED_SPEC_ORACLE_FIELDS, "RELEASE_CASE_GENERATED_ORACLE_FIELDS", "Release case generated spec oracle");

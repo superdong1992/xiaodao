@@ -10,6 +10,11 @@ from problem_locator.contracts import (
     PendingRequirement,
     canonical_json_bytes,
 )
+from problem_locator.runtime.input_profile import (
+    builtin_input_profile_sha256,
+    expand_profile_requirements,
+    load_builtin_input_profile,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
@@ -83,19 +88,49 @@ def test_all_three_skill_frontmatters_have_only_name_and_description() -> None:
         assert body.strip()
 
 
-def test_diagnosis_manifest_v5_is_exact_canonical_and_spec_owned() -> None:
+def test_diagnosis_manifest_v6_is_exact_canonical_and_profile_owned() -> None:
     spec = _json(SPEC_ROOT / "rpc-service-takeover.json")
-    requirements = json.loads(json.dumps(spec["requirements"]))
-    logparse_attachment = spec["logparse_plan"]["attachment_requirement"]
-    attachment = next(
-        item for item in requirements if item["name"] == logparse_attachment
-    )
-    assert "allowed_content_types" not in attachment["constraints"]
-    attachment["constraints"]["allowed_content_types"] = [
-        "application/gzip",
-        "application/zip",
-        "application/x-tar",
+    roles = [
+        {key: item[key] for key in ("label", "description", "presence", "source_reference")}
+        for item in spec["roles"]
     ]
+    requirements = expand_profile_requirements(roles, requires_logparse=True)
+    requirements.extend(
+        {
+            key: value
+            for key, value in item.items()
+            if key != "confirmed"
+        }
+        | {"origin": "WIKI", "role": None}
+        for item in spec["requirements"]
+    )
+    requirements = sorted(
+        enumerate(requirements),
+        key=lambda entry: (
+            0 if entry[1]["stage"] == "INITIAL" else 1,
+            0 if entry[1]["kind"] == "INPUT" else 1,
+            entry[0],
+        ),
+    )
+    requirements = [item for _, item in requirements]
+    logparse_plan = {
+        "attachment_requirement": "log_archive",
+        "problem_time_binding": {"source": "USER_FACT", "name": "problem_time"},
+        "anchors": [
+            {
+                "label": role["label"],
+                "module": anchor["module"],
+                "slot": {"source": "USER_FACT", "name": f"{role['label']}_slot"},
+                "process_name": {
+                    "source": "USER_FACT",
+                    "name": f"{role['label']}_process_name",
+                },
+                "pid": {"source": "USER_FACT", "name": f"{role['label']}_pid"},
+            }
+            for role, anchor in zip(roles, spec["logparse_plan"]["anchors"], strict=True)
+        ],
+    }
+    profile = load_builtin_input_profile()
     expected = {
         key: spec[key]
         for key in (
@@ -106,7 +141,6 @@ def test_diagnosis_manifest_v5_is_exact_canonical_and_spec_owned() -> None:
             "deployment_scope",
             "summary",
             "requires_logparse",
-            "logparse_plan",
             "logparse_product",
             "verification_contract",
         )
@@ -115,7 +149,11 @@ def test_diagnosis_manifest_v5_is_exact_canonical_and_spec_owned() -> None:
         {
             "entry_document": "SKILL.md",
             "tool_bundle_id": "tool-bundle/diagnose",
+            "input_profile": profile,
+            "input_profile_sha256": builtin_input_profile_sha256(profile),
+            "roles": roles,
             "requirements": requirements,
+            "logparse_plan": logparse_plan,
         }
     )
 
@@ -126,8 +164,8 @@ def test_diagnosis_manifest_v5_is_exact_canonical_and_spec_owned() -> None:
 
     generated = _text(TAKEOVER_SKILL / "SKILL.md")
     embedded = generated.split(
-        "<!-- DIAGNOSIS_SKILL_MANIFEST_V5_BEGIN -->\n```json\n", 1
-    )[1].split("\n```\n<!-- DIAGNOSIS_SKILL_MANIFEST_V5_END -->", 1)[0]
+        "<!-- DIAGNOSIS_SKILL_MANIFEST_V6_BEGIN -->\n```json\n", 1
+    )[1].split("\n```\n<!-- DIAGNOSIS_SKILL_MANIFEST_V6_END -->", 1)[0]
     assert embedded.encode("utf-8") + b"\n" == payload
 
 
@@ -143,17 +181,11 @@ def test_global_generated_contract_is_generic_and_business_fields_are_isolated()
         "caller_service",
         "server_service",
         "rpc_method",
-        "problem_time",
-        "log_archive",
         "order_id",
     }
-    for name in rpc_names - {"problem_time", "log_archive"}:
+    for name in rpc_names:
         assert name not in generator_contract
         assert name not in global_contract
-    # problem_time is also the generic upstream Logparse request field, so its
-    # mechanical name may appear globally; RPC-only requirement names may not.
-    for document in (generator_contract, global_contract):
-        assert "`log_archive`" not in document
 
     specs = {
         path.stem: _json(path)
@@ -171,10 +203,6 @@ def test_global_generated_contract_is_generic_and_business_fields_are_isolated()
     }
     assert rpc_names == names["rpc-service-takeover"]
     assert names["database-deadlock"] == {
-        "database_instance",
-        "database_process",
-        "incident_time",
-        "database_logs",
         "victim_transaction_id",
     }
     assert names["manual-triage"] == {
@@ -190,7 +218,8 @@ def test_requirements_drive_need_outcomes_and_use_public_s00_constraints() -> No
     generated_skill = _text(TAKEOVER_SKILL / "SKILL.md")
     normalized_skill = re.sub(r"\s+", " ", generated_skill)
     manifest = _json(TAKEOVER_SKILL / "diagnosis-skill.json")
-    assert "阶段全部缺失 INPUT 并返回 NEED_INPUT" in normalized_skill
+    assert "当前阶段全部已激活且缺失的 INPUT" in normalized_skill
+    assert "NEED_INPUT" in normalized_skill
     assert "ATTACHMENT 并返回 NEED_ATTACHMENT" in normalized_skill
     for requirement in manifest["requirements"]:
         assert f"`{requirement['name']}`" in generated_skill
@@ -246,7 +275,7 @@ def test_logparse_default_and_parse_once_rules_have_one_owner() -> None:
     assert "parse-once" in generated_skill
     assert "LOGPARSE_RUN 复用" in generated_skill
     assert "product 为 `compact`" in generated_skill
-    assert '"slot_1"' in generated_skill and '"slot_2"' in generated_skill
+    assert '"client_slot"' in generated_skill and '"server_slot"' in generated_skill
 
 
 def test_logparse_evidence_paths_are_locator_owned_not_proposal_owned() -> None:
@@ -323,9 +352,9 @@ def test_wiki_conversion_contract_is_self_contained_and_business_neutral() -> No
     references = {
         name: GENERATOR_SKILL / "references" / name
         for name in (
-            "generation-spec-v5-reference.md",
+            "generation-spec-v6-reference.md",
             "verification-contract-v2-reference.md",
-            "neutral-logparse-generation-spec-v5.json",
+            "neutral-logparse-generation-spec-v6.json",
         )
     }
     for name, path in references.items():
@@ -359,14 +388,14 @@ def test_wiki_conversion_contract_is_self_contained_and_business_neutral() -> No
         ):
             assert token in document
 
-    generation_reference = _text(references["generation-spec-v5-reference.md"])
+    generation_reference = _text(references["generation-spec-v6-reference.md"])
     verification_reference = _text(
         references["verification-contract-v2-reference.md"]
     )
     generator = _text(
         GENERATOR_SKILL / "scripts" / "generate_diagnosis_skill.py"
     )
-    neutral = _json(references["neutral-logparse-generation-spec-v5.json"])
+    neutral = _json(references["neutral-logparse-generation-spec-v6.json"])
 
     assert "Write 前语义保真检查" in skill
     for document in (skill, generation_reference):

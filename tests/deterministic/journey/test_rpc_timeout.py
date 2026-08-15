@@ -91,10 +91,14 @@ RAW_LOGPARSE_ENV = {
     "PROBLEM_LOCATOR_LOGPARSE_TOKEN": "s08-stale-broker-token-sentinel",
 }
 PARAMETER_GROUP_A = {
+    "problem_time": "2026-07-31T00:00:03.000Z",
+    "client_slot": "slot_1",
+    "client_process_name": "checkout-client",
+    "server_slot": "slot_2",
+    "server_process_name": "inventory-server",
     "caller_service": "payment-service",
     "server_service": "inventory-service",
     "rpc_method": "ReserveStock",
-    "problem_time": "2026-07-31T00:00:03.000Z",
 }
 RAW_RPC_CLIENT_LOG = (
     "2026-07-31T00:00:03.000Z COMPACT payment-service "
@@ -863,10 +867,10 @@ def test_r01_r14_rpc_timeout_is_one_durable_cross_module_path(
             "request_id": "s08-r04-partial-a",
             "case_id": case_id,
             "expected_case_revision": r04_revision,
-            "input_names": ["caller_service", "server_service"],
+            "input_names": ["problem_time", "client_slot"],
             "input_values": [
-                PARAMETER_GROUP_A["caller_service"],
-                PARAMETER_GROUP_A["server_service"],
+                PARAMETER_GROUP_A["problem_time"],
+                PARAMETER_GROUP_A["client_slot"],
             ],
             "attachment_ids": [],
             "wait_seconds": 0,
@@ -876,7 +880,7 @@ def test_r01_r14_rpc_timeout_is_one_durable_cross_module_path(
     assert partial["case_view"]["status"] == CaseStatus.WAITING_INPUT.value
     assert {
         item["provenance"]["input_name"] for item in partial["case_view"]["user_facts"]
-    } == {"caller_service", "server_service"}
+    } == {"problem_time", "client_slot"}
     job_count_after_partial = len(stack.repository.read_snapshot().cases[case_id].jobs)
 
     # R05/R06: completing group A creates one DIAGNOSE Job which asks once for logs.
@@ -887,11 +891,8 @@ def test_r01_r14_rpc_timeout_is_one_durable_cross_module_path(
             "request_id": "s08-r05-complete-a",
             "case_id": case_id,
             "expected_case_revision": partial["case_view"]["case_revision"],
-            "input_names": ["rpc_method", "problem_time"],
-            "input_values": [
-                PARAMETER_GROUP_A["rpc_method"],
-                PARAMETER_GROUP_A["problem_time"],
-            ],
+            "input_names": list(PARAMETER_GROUP_A)[2:],
+            "input_values": list(PARAMETER_GROUP_A.values())[2:],
             "attachment_ids": [],
             "wait_seconds": 0,
         },

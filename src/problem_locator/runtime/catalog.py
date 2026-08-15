@@ -38,6 +38,12 @@ from .verification_contract import (
     MANIFEST_SCHEMA_VERSION,
     validate_verification_contract,
 )
+from .input_profile import (
+    builtin_input_profile_sha256,
+    expand_profile_requirements,
+    load_builtin_input_profile,
+)
+from .requirement_activation import validate_requirement_activation_contract
 
 
 BUILTIN_ASSET_ROOT = Path(__file__).with_name("assets")
@@ -92,6 +98,7 @@ class _SkillDescriptor:
     tool_bundle_id: str
     requires_logparse: bool
     logparse_product: str | None
+    roles: tuple[dict[str, Any], ...]
     requirements: tuple[dict[str, Any], ...]
     logparse_plan: dict[str, Any] | None
     verification_contract: dict[str, Any]
@@ -501,7 +508,95 @@ def _require_binding(value: Any, *, field_name: str) -> dict[str, Any]:
     return value
 
 
-def _require_skill_requirements(value: Any) -> tuple[dict[str, Any], ...]:
+def _require_skill_roles(value: Any) -> tuple[dict[str, Any], ...]:
+    if not isinstance(value, list) or len(value) > 20:
+        raise ValueError("diagnosis skill roles must be an array")
+    result: list[dict[str, Any]] = []
+    labels: set[str] = set()
+    for index, role in enumerate(value):
+        field_name = f"roles[{index}]"
+        if not isinstance(role, dict):
+            raise ValueError(f"{field_name} must be an object")
+        _require_exact_fields(
+            role,
+            required={"label", "description", "presence", "source_reference"},
+            manifest_name=field_name,
+        )
+        label = role["label"]
+        if (
+            not isinstance(label, str)
+            or re.fullmatch(r"[a-z][a-z0-9_]{0,63}", label) is None
+            or label in labels
+        ):
+            raise ValueError("diagnosis skill role labels must be unique lower snake case")
+        labels.add(label)
+        if not isinstance(role["description"], str) or not role["description"]:
+            raise ValueError(f"{field_name}.description is invalid")
+        if role["presence"] not in {"REQUIRED", "OPTIONAL"}:
+            raise ValueError(f"{field_name}.presence is invalid")
+        if not isinstance(role["source_reference"], str) or not role["source_reference"]:
+            raise ValueError(f"{field_name}.source_reference is invalid")
+        result.append(role)
+    return tuple(result)
+
+
+def _require_activation_condition(value: Any, *, field_name: str) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError(f"{field_name} must be an object or null")
+    _require_exact_fields(value, required={"any_of"}, manifest_name=field_name)
+    branches = value["any_of"]
+    if not isinstance(branches, list) or not 1 <= len(branches) <= 20:
+        raise ValueError(f"{field_name}.any_of is invalid")
+    branch_keys: set[str] = set()
+    for branch_index, branch in enumerate(branches):
+        branch_name = f"{field_name}.any_of[{branch_index}]"
+        if not isinstance(branch, dict):
+            raise ValueError(f"{branch_name} must be an object")
+        _require_exact_fields(branch, required={"all_of"}, manifest_name=branch_name)
+        terms = branch["all_of"]
+        if not isinstance(terms, list) or not 1 <= len(terms) <= 20:
+            raise ValueError(f"{branch_name}.all_of is invalid")
+        term_keys: set[str] = set()
+        for term_index, term in enumerate(terms):
+            term_name = f"{branch_name}.all_of[{term_index}]"
+            if not isinstance(term, dict):
+                raise ValueError(f"{term_name} must be an object")
+            _require_exact_fields(
+                term,
+                required={"source", "name", "operator", "value"},
+                manifest_name=term_name,
+            )
+            if (
+                term["source"] not in {"USER_FACT", "RULE_RESULT"}
+                or not isinstance(term["name"], str)
+                or re.fullmatch(r"[a-z][a-z0-9_]{0,63}", term["name"]) is None
+                or term["operator"] != "EQUALS"
+                or not isinstance(term["value"], str)
+                or not term["value"]
+                or (
+                    term["source"] == "RULE_RESULT"
+                    and term["value"] not in {"PASS", "FAIL", "UNKNOWN"}
+                )
+            ):
+                raise ValueError(f"{term_name} is invalid")
+            key = json.dumps(term, sort_keys=True, separators=(",", ":"))
+            if key in term_keys:
+                raise ValueError(f"{branch_name} terms must be unique")
+            term_keys.add(key)
+        key = json.dumps(branch, sort_keys=True, separators=(",", ":"))
+        if key in branch_keys:
+            raise ValueError(f"{field_name} branches must be unique")
+        branch_keys.add(key)
+    return value
+
+
+def _require_skill_requirements(
+    value: Any,
+    *,
+    roles: tuple[dict[str, Any], ...],
+) -> tuple[dict[str, Any], ...]:
     if not isinstance(value, list):
         raise ValueError("diagnosis skill requirements must be an array")
     requirements: list[dict[str, Any]] = []
@@ -521,6 +616,11 @@ def _require_skill_requirements(value: Any) -> tuple[dict[str, Any], ...]:
                 "prompt",
                 "constraints",
                 "supplement_policy",
+                "origin",
+                "role",
+                "requiredness",
+                "activation_condition",
+                "source_reference",
             },
             manifest_name=field_name,
         )
@@ -609,6 +709,33 @@ def _require_skill_requirements(value: Any) -> tuple[dict[str, Any], ...]:
                 raise ValueError("ATTACHMENT count limits are invalid")
         else:
             raise ValueError(f"{field_name}.kind is invalid")
+        origin = item["origin"]
+        role = item["role"]
+        requiredness = item["requiredness"]
+        condition = _require_activation_condition(
+            item["activation_condition"],
+            field_name=f"{field_name}.activation_condition",
+        )
+        if origin not in {"PROFILE_GLOBAL", "PROFILE_ROLE", "PLATFORM", "WIKI"}:
+            raise ValueError(f"{field_name}.origin is invalid")
+        role_labels = {entry["label"] for entry in roles}
+        if role is not None and (not isinstance(role, str) or role not in role_labels):
+            raise ValueError(f"{field_name}.role is invalid")
+        if (origin == "PROFILE_ROLE") != (role is not None):
+            raise ValueError(f"{field_name}.origin and role disagree")
+        if requiredness not in {"REQUIRED", "OPTIONAL", "CONDITIONAL"}:
+            raise ValueError(f"{field_name}.requiredness is invalid")
+        if (requiredness == "CONDITIONAL") != (condition is not None):
+            raise ValueError(f"{field_name}.activation_condition is invalid")
+        expected_policy = "NONE" if requiredness == "OPTIONAL" else "MISSING_ONLY"
+        if item["supplement_policy"] != expected_policy:
+            raise ValueError(f"{field_name}.supplement_policy disagrees with requiredness")
+        source_reference = item["source_reference"]
+        if origin == "WIKI":
+            if not isinstance(source_reference, str) or not source_reference:
+                raise ValueError(f"{field_name}.source_reference is required")
+        elif source_reference is not None:
+            raise ValueError(f"{field_name}.source_reference must be null")
         requirements.append(item)
     return tuple(requirements)
 
@@ -1010,6 +1137,7 @@ def _require_verification_contract(
     *,
     requirements: tuple[dict[str, Any], ...],
     logparse_plan: dict[str, Any] | None,
+    roles: tuple[dict[str, Any], ...],
     requires_logparse: bool,
 ) -> dict[str, Any]:
     """Validate the hard-cut v2 contract without carrying v1 wire semantics."""
@@ -1022,11 +1150,7 @@ def _require_verification_contract(
             if logparse_plan is None
             else {item["label"] for item in logparse_plan["anchors"]}
         ),
-        role_labels=(
-            set()
-            if logparse_plan is None
-            else {item["label"] for item in logparse_plan["anchors"]}
-        ),
+        role_labels={item["label"] for item in roles},
         requires_logparse=requires_logparse,
     )
 
@@ -1045,6 +1169,9 @@ def _load_skill(root: Path) -> _SkillDescriptor:
         "entry_document",
         "tool_bundle_id",
         "requires_logparse",
+        "input_profile",
+        "input_profile_sha256",
+        "roles",
         "requirements",
         "logparse_plan",
         "verification_contract",
@@ -1060,7 +1187,7 @@ def _load_skill(root: Path) -> _SkillDescriptor:
         or manifest["schema_version"] != MANIFEST_SCHEMA_VERSION
     ):
         raise ValueError(
-            "diagnosis-skill.json schema_version must equal integer 5"
+            "diagnosis-skill.json schema_version must equal integer 6"
         )
     skill_id = manifest["id"]
     if not isinstance(skill_id, str) or _SKILL_ID_PATTERN.fullmatch(skill_id) is None:
@@ -1086,7 +1213,22 @@ def _load_skill(root: Path) -> _SkillDescriptor:
     if type(requires_logparse) is not bool:
         raise ValueError("diagnosis skill requires_logparse must be a boolean")
     logparse_product = manifest.get("logparse_product")
-    requirements = _require_skill_requirements(manifest["requirements"])
+    profile = load_builtin_input_profile()
+    if manifest["input_profile"] != profile:
+        raise ValueError("diagnosis Skill input_profile differs from the built-in profile")
+    if manifest["input_profile_sha256"] != builtin_input_profile_sha256(profile):
+        raise ValueError("diagnosis Skill input_profile_sha256 is invalid")
+    roles = _require_skill_roles(manifest["roles"])
+    requirements = _require_skill_requirements(manifest["requirements"], roles=roles)
+    expected_profile_requirements = expand_profile_requirements(
+        roles,
+        requires_logparse=requires_logparse,
+    )
+    actual_profile_requirements = [
+        item for item in requirements if item["origin"] != "WIKI"
+    ]
+    if actual_profile_requirements != expected_profile_requirements:
+        raise ValueError("diagnosis Skill profile requirements were not expanded canonically")
     logparse_plan = manifest["logparse_plan"]
     if requires_logparse:
         if logparse_product is not None and (
@@ -1102,6 +1244,12 @@ def _load_skill(root: Path) -> _SkillDescriptor:
             requirements=requirements,
         )
         logparse_product = logparse_product or _DEFAULT_LOGPARSE_PRODUCT
+        if [item["label"] for item in logparse_plan["anchors"]] != [
+            item["label"] for item in roles
+        ]:
+            raise ValueError("diagnosis Skill roles and Logparse anchors must match in order")
+        if not any(item["presence"] == "REQUIRED" for item in roles):
+            raise ValueError("Logparse Skill requires at least one REQUIRED role")
     else:
         if logparse_product is not None:
             raise ValueError("non-logparse skill must omit logparse_product")
@@ -1109,12 +1257,16 @@ def _load_skill(root: Path) -> _SkillDescriptor:
             raise ValueError("non-logparse skill must use logparse_plan=null")
         if any(item["stage"] == "AFTER_LOGPARSE" for item in requirements):
             raise ValueError("non-logparse skill forbids AFTER_LOGPARSE requirements")
+        if roles:
+            raise ValueError("non-logparse skill forbids roles")
     verification_contract = _require_verification_contract(
         manifest["verification_contract"],
         requirements=requirements,
         logparse_plan=logparse_plan,
+        roles=roles,
         requires_logparse=requires_logparse,
     )
+    validate_requirement_activation_contract(requirements, verification_contract)
     entry_document = manifest["entry_document"]
     if not isinstance(entry_document, str):
         raise ValueError("diagnosis skill entry_document must be a string")
@@ -1141,6 +1293,7 @@ def _load_skill(root: Path) -> _SkillDescriptor:
         tool_bundle_id=tool_bundle_id,
         requires_logparse=requires_logparse,
         logparse_product=logparse_product,
+        roles=roles,
         requirements=requirements,
         logparse_plan=logparse_plan,
         verification_contract=verification_contract,

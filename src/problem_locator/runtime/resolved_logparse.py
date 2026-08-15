@@ -15,6 +15,7 @@ from problem_locator.contracts import (
 from problem_locator.integrations.logparse.requests import Anchor, ResolvedLogparsePlan
 
 from .context_policy import ResolvedJobAssets
+from .requirement_activation import active_role_labels
 
 
 class ResolvedLogparsePlanNotReady(ValueError):
@@ -26,8 +27,8 @@ def _manifest(assets: ResolvedJobAssets) -> dict[str, Any]:
         raise ValueError("logparse Job requires a pinned diagnosis Skill")
     path = Path(assets.skill.root_path) / "diagnosis-skill.json"
     value = json.loads(path.read_bytes().decode("utf-8"))
-    if not isinstance(value, dict) or value.get("schema_version") != 5:
-        raise ValueError("diagnosis Skill manifest v5 is required")
+    if not isinstance(value, dict) or value.get("schema_version") != 6:
+        raise ValueError("diagnosis Skill manifest v6 is required")
     return value
 
 
@@ -64,6 +65,18 @@ def _binding(value: object, facts: dict[str, str]) -> str:
     raise ValueError("Skill binding shape is invalid")
 
 
+def _optional_binding(value: object, facts: dict[str, str]) -> str | None:
+    if (
+        isinstance(value, dict)
+        and set(value) == {"source", "name"}
+        and value.get("source") == "USER_FACT"
+        and isinstance(value.get("name"), str)
+        and value["name"] not in facts
+    ):
+        return None
+    return _binding(value, facts)
+
+
 def _attachment_id(job: Job, plan: dict[str, Any]) -> str:
     requirement_name = plan.get("attachment_requirement")
     matching: list[str] = []
@@ -97,6 +110,10 @@ def compile_resolved_logparse_plan(
     if not isinstance(plan, dict):
         raise ValueError("logparse Job Skill requires logparse_plan")
     facts = _facts(job)
+    raw_roles = manifest.get("roles")
+    if not isinstance(raw_roles, list):
+        raise ValueError("logparse Job Skill requires roles")
+    active_roles = set(active_role_labels(raw_roles, facts))
     problem_binding = plan.get("problem_time_binding")
     problem_time = _binding(problem_binding, facts)
     raw_anchors = plan.get("anchors")
@@ -109,6 +126,8 @@ def compile_resolved_logparse_plan(
         label = raw.get("label")
         if not isinstance(label, str):
             raise ValueError("logparse anchor label must be a string")
+        if label not in active_roles:
+            continue
         pid_value = raw.get("pid")
         anchors.append(
             Anchor(
@@ -116,9 +135,11 @@ def compile_resolved_logparse_plan(
                 module=_binding(raw.get("module"), facts),
                 slot=_binding(raw.get("slot"), facts),
                 process_name=_binding(raw.get("process_name"), facts),
-                pid=None if pid_value is None else _binding(pid_value, facts),
+                pid=None if pid_value is None else _optional_binding(pid_value, facts),
             )
         )
+    if not anchors:
+        raise ResolvedLogparsePlanNotReady("no Logparse role is active")
 
     run_ids = [
         artifact_id

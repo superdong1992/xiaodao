@@ -33,6 +33,11 @@ from problem_locator.runtime.catalog import (
     VersionedAssetCatalog,
     hash_product_directory,
 )
+from problem_locator.runtime.input_profile import (
+    builtin_input_profile_sha256,
+    expand_profile_requirements,
+    load_builtin_input_profile,
+)
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[4]
@@ -91,15 +96,17 @@ def _write_skill(
     root: Path,
     *,
     skill_id: str = "test-skill",
-    version: str = "5.0.0",
+    version: str = "6.0.0",
     deployment_scope: str = "PRODUCTION",
     requires_logparse: bool = False,
     logparse_product: str | None = None,
     extra: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     root.mkdir(parents=True)
+    profile = load_builtin_input_profile()
+    roles: list[dict[str, Any]] = []
     manifest: dict[str, Any] = {
-        "schema_version": 5,
+        "schema_version": 6,
         "id": skill_id,
         "version": version,
         "capability": "test-capability",
@@ -108,7 +115,13 @@ def _write_skill(
         "entry_document": "SKILL.md",
         "tool_bundle_id": "tool-bundle/diagnose",
         "requires_logparse": requires_logparse,
-        "requirements": [],
+        "input_profile": profile,
+        "input_profile_sha256": builtin_input_profile_sha256(profile),
+        "roles": roles,
+        "requirements": expand_profile_requirements(
+            roles,
+            requires_logparse=requires_logparse,
+        ),
         "logparse_plan": None,
         "verification_contract": {
             "schema_version": 2,
@@ -153,33 +166,32 @@ def _write_skill(
         },
     }
     if requires_logparse:
-        manifest["requirements"] = [
+        roles.append(
             {
-                "name": "problem_time",
-                "kind": "INPUT",
-                "stage": "INITIAL",
-                "fulfillment_source": "USER_FACT",
-                "prompt": "Provide problem time.",
-                "supplement_policy": "MISSING_ONLY",
-                "constraints": {
-                    "value_type": "STRING",
-                    "min_utf8_bytes": 1,
-                    "max_utf8_bytes": 256,
-                    "pattern": None,
-                    "allowed_values": [],
-                },
+                "label": "target",
+                "description": "The target process.",
+                "presence": "REQUIRED",
+                "source_reference": "Confirmed test role definition.",
             }
-        ]
+        )
+        manifest["roles"] = roles
+        manifest["requirements"] = expand_profile_requirements(
+            roles,
+            requires_logparse=True,
+        )
         manifest["logparse_plan"] = {
-            "attachment_requirement": None,
+            "attachment_requirement": "log_archive",
             "problem_time_binding": {"source": "USER_FACT", "name": "problem_time"},
             "anchors": [
                 {
                     "label": "target",
                     "module": {"source": "SKILL_FIXED", "value": "module"},
-                    "slot": {"source": "SKILL_FIXED", "value": "slot"},
-                    "process_name": {"source": "SKILL_FIXED", "value": "process"},
-                    "pid": None,
+                    "slot": {"source": "USER_FACT", "name": "target_slot"},
+                    "process_name": {
+                        "source": "USER_FACT",
+                        "name": "target_process_name",
+                    },
+                    "pid": {"source": "USER_FACT", "name": "target_pid"},
                 }
             ],
         }
@@ -408,7 +420,10 @@ def test_route_candidates_require_exact_declared_input_fact_names() -> None:
         "diagnosis-skill/manual-triage",
         "diagnosis-skill/rpc-log-analysis",
     }
-    assert problem_time == {"diagnosis-skill/rpc-log-analysis"}
+    assert problem_time == {
+        "diagnosis-skill/manual-triage",
+        "diagnosis-skill/rpc-log-analysis",
+    }
     assert complete_rpc_identity == {"diagnosis-skill/rpc-log-analysis"}
     assert catalog.route_bindings(["unknown_fact"]).available_skill_refs == []
     assert catalog.route_bindings(["log_archive"]).available_skill_refs == []
@@ -988,10 +1003,13 @@ def test_product_hash_rejects_non_utf8_paths() -> None:
         ({"id": "UPPERCASE"}, "frozen pattern"),
         ({"tool_bundle_id": "tool-bundle/review"}, "tool_bundle_id"),
         ({"requires_logparse": False, "logparse_product": "not-null"}, "omit logparse_product"),
-        ({"requires_logparse": True, "logparse_plan": None}, "logparse_plan object"),
+        (
+            {"requires_logparse": True, "logparse_plan": None},
+            "profile requirements|logparse_plan object",
+        ),
         ({"entry_document": "../escape.md"}, "relative POSIX path"),
         ({"entry_document": "nested//entry.md"}, "relative POSIX path"),
-        ({"schema_version": True}, "integer 5"),
+        ({"schema_version": True}, "integer 6"),
         ({"deployment_scope": "DEVELOPMENT"}, "deployment_scope"),
     ],
 )
@@ -1004,6 +1022,24 @@ def test_skill_manifest_is_strict(
     _write_skill(skill_dir / "candidate", extra=extra)
     with pytest.raises(ValueError, match=message):
         _new_catalog(skill_dir=skill_dir)
+
+
+def test_skill_manifest_rejects_profile_snapshot_or_hash_drift(tmp_path: Path) -> None:
+    skills = tmp_path / "skills"
+    skill = skills / "candidate"
+    manifest = _write_skill(skill)
+    manifest["input_profile"]["profile_id"] = "different"
+    (skill / "diagnosis-skill.json").write_bytes(canonical_json_bytes(manifest))
+    with pytest.raises(ValueError, match="differs from the built-in profile"):
+        _new_catalog(skill_dir=skills)
+
+    other_skills = tmp_path / "other-skills"
+    other_skill = other_skills / "candidate"
+    manifest = _write_skill(other_skill)
+    manifest["input_profile_sha256"] = "0" * 64
+    (other_skill / "diagnosis-skill.json").write_bytes(canonical_json_bytes(manifest))
+    with pytest.raises(ValueError, match="input_profile_sha256"):
+        _new_catalog(skill_dir=other_skills)
 
 
 def test_skill_verification_contract_rejects_missing_bounds_and_suppression(
@@ -1099,7 +1135,10 @@ def test_skill_rule_remediation_only_names_missing_only_requirements(
         "remediation_requirements"
     ] = ["problem_time"]
     (skill_dir / "diagnosis-skill.json").write_bytes(canonical_json_bytes(manifest))
-    with pytest.raises(ValueError, match="MISSING_ONLY"):
+    with pytest.raises(
+        ValueError,
+        match="supplement_policy disagrees with requiredness|MISSING_ONLY",
+    ):
         _new_catalog(skill_dir=skills)
 
 

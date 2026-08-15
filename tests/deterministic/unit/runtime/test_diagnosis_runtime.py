@@ -1738,6 +1738,32 @@ _LOGPARSE_USER_FACTS = [
         "created_revision": 1,
         "supersedes": [],
     },
+    {
+        "item_id": "00000000-0000-4000-8000-000000000453",
+        "statement": "client",
+        "status": "ACTIVE",
+        "provenance": {
+            "source_type": "USER_INPUT",
+            "source_ref": "00000000-0000-4000-8000-000000000001",
+            "input_name": "client_slot",
+        },
+        "evidence_refs": [],
+        "created_revision": 1,
+        "supersedes": [],
+    },
+    {
+        "item_id": "00000000-0000-4000-8000-000000000454",
+        "statement": "checkout-service",
+        "status": "ACTIVE",
+        "provenance": {
+            "source_type": "USER_INPUT",
+            "source_ref": "00000000-0000-4000-8000-000000000001",
+            "input_name": "client_process_name",
+        },
+        "evidence_refs": [],
+        "created_revision": 1,
+        "supersedes": [],
+    },
 ]
 
 

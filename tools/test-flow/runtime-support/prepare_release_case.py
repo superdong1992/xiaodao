@@ -178,8 +178,19 @@ def build_logparse_projection(
         label = identifier(anchor.get("label"), "anchor label")
         if label in anchors_by_label:
             raise SystemExit("release case logparse anchor is duplicated")
-        if anchor.get("pid") is not None:
-            raise SystemExit("release case runtime projection does not accept PID anchors")
+        pid_binding = anchor.get("pid")
+        if pid_binding is not None:
+            if (
+                not isinstance(pid_binding, dict)
+                or set(pid_binding) != {"name", "source"}
+                or pid_binding.get("source") != "USER_FACT"
+                or not isinstance(pid_binding.get("name"), str)
+                or not pid_binding["name"]
+            ):
+                raise SystemExit("release case PID fact binding is invalid")
+            pid_name = str(pid_binding["name"])
+            if pid_name in facts:
+                identifier(facts[pid_name], "anchor PID")
         anchors_by_label[label] = anchor
 
     projections: dict[str, dict[str, str]] = {}

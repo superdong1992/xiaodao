@@ -2,14 +2,17 @@
 
 本文件只补齐会改变可执行测试语义的信息，不代表真实产品日志格式。
 
-本离线用例的转换身份固定为：Skill id `diagnose-anonymized-rpc-timeout`、版本 `5.0.0`、
-capability `anonymized-rpc-timeout`、deployment scope `TEST_ONLY`。INITIAL INPUT 依次为
-`service_name`、`api_name`、`target_version`、`transport_protocol`、`problem_time`、
-`client_process`、`server_process`，INITIAL ATTACHMENT 为 `log_archive`，AFTER_LOGPARSE INPUT
-为 `request_id`。Logparse anchors 依次为 `client` 与 `server`，module 固定为 `bbbb`，slot
-分别为 `client_slot`、`server_slot`，process name 分别绑定 `client_process`、`server_process`。
-本用例的 roles 依次为 `client` 与 `server`，role label 必须分别与同名 anchor label 一致；
-前者表示发起调用并接收响应的客户端贡献者，后者表示在共享串行 lane 中接收并执行 API 的服务端贡献者。
+本离线用例的转换身份固定为：Skill id `diagnose-anonymized-rpc-timeout`、版本 `6.0.0`、
+capability `anonymized-rpc-timeout`、deployment scope `TEST_ONLY`。作者确认 `client` 与 `server`
+依次为 REQUIRED role，role label 必须分别与同名 anchor label 一致；前者表示发起调用并接收响应的
+客户端贡献者，后者表示在共享串行 lane 中接收并执行 API 的服务端贡献者。两者 module 固定为
+`bbbb`。内置 profile 自动生成 `problem_time`、每个 role 的 `slot/process_name/pid` 以及
+`log_archive`；其中 `problem_time`、`slot`、`process_name` 与归档必选，`pid` 可选。
+
+作者确认 Wiki 专属参数中 `service_name`、`api_name` 为 REQUIRED，`target_version`、
+`transport_protocol` 为 OPTIONAL；AFTER_LOGPARSE 的 `request_id` 为 CONDITIONAL，仅当已提供的
+`transport_protocol` 等于 `standard` 时激活。上述澄清是 GenerationSpec 中 `confirmed=true`
+的权威来源；不得把未确认的模型提议直接写入最终 GenerationSpec。
 终止路径 id 按选择顺序固定为 `complete_queue_and_upstream`、`complete_api_overrun`、
 `complete_deadloop_overrun`、`partial_server_receive_aggregate`、
 `partial_cross_clock_ambiguity`、`partial_client_receive_aggregate`、`none`；最后一条才是无条件

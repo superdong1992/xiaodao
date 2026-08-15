@@ -7,7 +7,7 @@
   "capability": "database-deadlock",
   "deployment_scope": "TEST_ONLY",
   "chinese_title": "数据库死锁定位",
-  "generator_version": "5.0.0",
+  "generator_version": "6.0.0",
   "id": "diagnose-database-deadlock",
   "judgement_rules": [
     "死锁图和受害事务必须由同一事故窗口 Evidence 支持。"
@@ -19,23 +19,9 @@
         "module": {
           "source": "SKILL_FIXED",
           "value": "database"
-        },
-        "pid": null,
-        "process_name": {
-          "name": "database_process",
-          "source": "USER_FACT"
-        },
-        "slot": {
-          "name": "database_instance",
-          "source": "USER_FACT"
         }
       }
-    ],
-    "attachment_requirement": "database_logs",
-    "problem_time_binding": {
-      "name": "incident_time",
-      "source": "USER_FACT"
-    }
+    ]
   },
   "module_name": "database",
   "output_requirements": [
@@ -53,82 +39,32 @@
       },
       "fulfillment_source": "USER_FACT",
       "kind": "INPUT",
-      "name": "database_instance",
-      "prompt": "请提供数据库实例名。",
-      "stage": "INITIAL",
-      "supplement_policy": "MISSING_ONLY"
-    },
-    {
-      "constraints": {
-        "allowed_values": [],
-        "max_utf8_bytes": 256,
-        "min_utf8_bytes": 1,
-        "pattern": null,
-        "value_type": "STRING"
-      },
-      "fulfillment_source": "USER_FACT",
-      "kind": "INPUT",
-      "name": "database_process",
-      "prompt": "请提供数据库进程名。",
-      "stage": "INITIAL",
-      "supplement_policy": "MISSING_ONLY"
-    },
-    {
-      "constraints": {
-        "allowed_values": [],
-        "max_utf8_bytes": 24,
-        "min_utf8_bytes": 24,
-        "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$",
-        "value_type": "STRING"
-      },
-      "fulfillment_source": "USER_FACT",
-      "kind": "INPUT",
-      "name": "incident_time",
-      "prompt": "请提供毫秒精度 UTC 事故时间。",
-      "stage": "INITIAL",
-      "supplement_policy": "MISSING_ONLY"
-    },
-    {
-      "constraints": {
-        "max_count": 1,
-        "min_count": 1
-      },
-      "fulfillment_source": "READY_ATTACHMENT",
-      "kind": "ATTACHMENT",
-      "name": "database_logs",
-      "prompt": "请上传 Logparse 支持的数据库日志归档。",
-      "stage": "INITIAL",
-      "supplement_policy": "MISSING_ONLY"
-    },
-    {
-      "constraints": {
-        "allowed_values": [],
-        "max_utf8_bytes": 256,
-        "min_utf8_bytes": 1,
-        "pattern": null,
-        "value_type": "STRING"
-      },
-      "fulfillment_source": "USER_FACT",
-      "kind": "INPUT",
       "name": "victim_transaction_id",
       "prompt": "请提供需要确认的受害事务 ID。",
       "stage": "AFTER_LOGPARSE",
-      "supplement_policy": "MISSING_ONLY"
+      "supplement_policy": "MISSING_ONLY",
+      "requiredness": "REQUIRED",
+      "activation_condition": null,
+      "source_reference": "已确认的 Wiki 参数定义：请提供需要确认的受害事务 ID。",
+      "confirmed": true
     }
   ],
   "requires_logparse": true,
   "roles": [
     {
+      "label": "database",
       "description": "发生死锁的数据库进程",
-      "label": "database"
+      "presence": "REQUIRED",
+      "source_reference": "已确认的 database 角色说明：发生死锁的数据库进程",
+      "confirmed": true
     }
   ],
-  "schema_version": 5,
+  "schema_version": 6,
   "summary": "定位数据库死锁并确认受害事务",
   "time_characteristics": [
     "incident_time 映射为 broker problem_time。"
   ],
-  "version": "5.0.0",
+  "version": "6.0.0",
   "verification_contract": {
     "schema_version": 2,
     "observation_policies": [],
@@ -188,7 +124,7 @@
           "event": "database_deadlock",
           "reference": {
             "source": "USER_FACT",
-            "name": "incident_time"
+            "name": "problem_time"
           },
           "before_ms": 5000,
           "after_ms": 5000,

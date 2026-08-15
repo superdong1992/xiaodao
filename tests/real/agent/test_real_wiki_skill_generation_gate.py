@@ -295,6 +295,13 @@ def _assert_business_invariants(
     assert [item["name"] for item in manifest["requirements"]] == expected[
         "requirement_names"
     ]
+    assert {
+        item["label"]: item["presence"] for item in manifest["roles"]
+    } == expected["role_presence"]
+    assert {
+        item["name"]: item["requiredness"]
+        for item in manifest["requirements"]
+    } == expected["requirement_requiredness"]
     policies = contract["observation_policies"]
     assert sorted({item["kind"] for item in policies}) == sorted(
         expected["observation_policy_kinds"]
@@ -1076,13 +1083,13 @@ def test_real_conversion_agent_builds_an_executable_reviewed_skill_from_plain_wi
 
     stdout = _Sink()
     stderr = _Sink()
-    prompt = """Use the wiki-to-diagnosis-skill Skill to convert this reviewed plain Markdown Wiki into one executable GenerationSpec v5.
+    prompt = """Use the wiki-to-diagnosis-skill Skill to convert this reviewed plain Markdown Wiki into one executable GenerationSpec v6.
 
-Your first action must call the Skill tool with exactly {"skill":"wiki-to-diagnosis-skill"}. After it succeeds, take the actual absolute directory shown after `Base directory for this skill:` in the Skill result. Read inputs/wiki.md and inputs/clarifications.md from the current workspace. For each required Skill reference, join that returned absolute directory with references/generation-spec-v5-reference.md or references/verification-contract-v2-reference.md before calling Read. Never pass a bare references/... path to Read or resolve it against the workspace cwd. Among Skill resources, read only the references explicitly linked by the loaded Skill. The clarifications are authoritative when they resolve ambiguity. Do not read repository source, generator or validator implementations, tests, case oracles, or any other path. Do not ask questions, use the network, or invent a platform log prefix. Treat both (# ... #) and （# ... #） as conversion-only author notes that must not enter any product field.
+Your first action must call the Skill tool with exactly {"skill":"wiki-to-diagnosis-skill"}. After it succeeds, take the actual absolute directory shown after `Base directory for this skill:` in the Skill result. Read inputs/wiki.md and inputs/clarifications.md from the current workspace. For each required Skill reference, join that returned absolute directory with references/generation-spec-v6-reference.md or references/verification-contract-v2-reference.md before calling Read. Never pass a bare references/... path to Read or resolve it against the workspace cwd. Among Skill resources, read only the references explicitly linked by the loaded Skill. The clarifications are authoritative author confirmations for every role and Wiki parameter definition. Do not read repository source, generator or validator implementations, tests, case oracles, or any other path. Do not ask questions, use the network, or invent a platform log prefix. Treat both (# ... #) and （# ... #） as conversion-only author notes that must not enter any product field.
 
 Construct the complete JSON object before starting any file mutation. Only after every required Read has completed, call Write exactly once with both `file_path` and non-empty `content` in that same tool input; set `file_path` to output/generation-spec.json and put the entire JSON object in `content`. Do not call Write with missing or empty arguments, do not split the object across writes, and do not use Bash or another file-writing tool. Write no JSON in the final response.
 
-The one UTF-8 JSON object must satisfy the loaded Skill's GenerationSpec v5 contract and preserve the Wiki's multiple contributors, lossy observation policies, multiline record, explicit clock tolerance, COMPLETE/PARTIAL/NONE paths, fixed-snapshot boundary, and timeout-not-cancellation safety meaning. Create no other output file or directory. After the single Write succeeds, stop.
+The one UTF-8 JSON object must satisfy the loaded Skill's GenerationSpec v6 contract and preserve the Wiki's multiple contributors, lossy observation policies, multiline record, explicit clock tolerance, COMPLETE/PARTIAL/NONE paths, fixed-snapshot boundary, and timeout-not-cancellation safety meaning. Create no other output file or directory. After the single Write succeeds, stop.
 """
     try:
         execution = AgentBackend(command).execute(
@@ -1118,8 +1125,8 @@ The one UTF-8 JSON object must satisfy the loaded Skill's GenerationSpec v5 cont
     assert (inputs / "wiki.md").read_bytes() == wiki
     assert (inputs / "clarifications.md").read_bytes() == clarifications
 
-    generator = _load_module(GENERATOR_PATH, "_real_wiki_generator_v5")
-    validator = _load_module(VALIDATOR_PATH, "_real_wiki_validator_v5")
+    generator = _load_module(GENERATOR_PATH, "_real_wiki_generator_v6")
+    validator = _load_module(VALIDATOR_PATH, "_real_wiki_validator_v6")
     model_spec = generator.load_generation_spec(output / "generation-spec.json")
     compiled_root = tmp_path / "compiled"
     generated = generator.generate_diagnosis_skill(model_spec, compiled_root)

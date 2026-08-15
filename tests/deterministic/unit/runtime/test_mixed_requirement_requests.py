@@ -85,17 +85,24 @@ def _pending_requirement(
 
 def _mixed_draft(
     job: Job,
-) -> tuple[AgentJobOutcomeDraftV2, list[dict[str, object]]]:
+) -> tuple[
+    AgentJobOutcomeDraftV2,
+    list[dict[str, object]],
+    list[dict[str, object]],
+]:
     manifest = _json(SKILL_MANIFEST)
     pinned = manifest["requirements"]
     assert isinstance(pinned, list)
     pinned_requirements = [dict(item) for item in pinned if isinstance(item, dict)]
     by_name = {str(item["name"]): item for item in pinned_requirements}
     requested_names = [
+        "problem_time",
+        "client_slot",
+        "client_process_name",
+        "server_slot",
+        "server_process_name",
         "server_service",
         "rpc_method",
-        "problem_time",
-        "log_archive",
     ]
     ids_by_name = {
         name: f"00000000-0000-0000-0000-{index:012d}"
@@ -118,36 +125,45 @@ def _mixed_draft(
     payload = value["payload"]
     assert isinstance(payload, dict)
     payload["candidate_conclusion_draft"] = None
-    payload["requested_input"] = [
-        ids_by_name[name] for name in requested_names if name != "log_archive"
-    ]
-    payload["requested_attachments"] = [ids_by_name["log_archive"]]
+    payload["requested_input"] = [ids_by_name[name] for name in requested_names]
+    payload["requested_attachments"] = []
     state_delta = payload["state_delta"]
     assert isinstance(state_delta, dict)
     state_delta["add_pending_requirements"] = requirements
-    return AgentJobOutcomeDraftV2.model_validate(value), pinned_requirements
+    roles = manifest["roles"]
+    assert isinstance(roles, list)
+    return (
+        AgentJobOutcomeDraftV2.model_validate(value),
+        pinned_requirements,
+        [dict(item) for item in roles if isinstance(item, dict)],
+    )
 
 
-def test_server_verifier_accepts_missing_inputs_and_attachment_after_partial_input(
+def test_server_verifier_accepts_exact_active_missing_inputs_after_partial_input(
 ) -> None:
     job = _partial_job()
-    draft, pinned_requirements = _mixed_draft(job)
+    draft, pinned_requirements, pinned_roles = _mixed_draft(job)
 
     _validate_requirement_requests(
         job=job,
         manifest=_empty_manifest(job),
         draft=draft,
         pinned_requirements=pinned_requirements,
+        pinned_roles=pinned_roles,
+        rule_results={},
     )
 
     requested = [
         item.name for item in draft.payload.state_delta.add_pending_requirements
     ]
     assert requested == [
+        "problem_time",
+        "client_slot",
+        "client_process_name",
+        "server_slot",
+        "server_process_name",
         "server_service",
         "rpc_method",
-        "problem_time",
-        "log_archive",
     ]
     assert "caller_service" not in requested
 
@@ -155,32 +171,35 @@ def test_server_verifier_accepts_missing_inputs_and_attachment_after_partial_inp
 def test_server_verifier_rejects_requirement_ids_in_the_wrong_requested_array(
 ) -> None:
     job = _partial_job()
-    draft, pinned_requirements = _mixed_draft(job)
+    draft, pinned_requirements, pinned_roles = _mixed_draft(job)
     value = draft.model_dump(mode="json")
     payload = value["payload"]
-    first_input = payload["requested_input"][0]
-    attachment = payload["requested_attachments"][0]
-    payload["requested_input"][0] = attachment
-    payload["requested_attachments"][0] = first_input
+    first_input = payload["requested_input"].pop()
+    payload["requested_attachments"].append(first_input)
     invalid = AgentJobOutcomeDraftV2.model_validate(value)
 
-    with pytest.raises(ValueError, match="requested_input must resolve OPEN INPUT"):
+    with pytest.raises(
+        ValueError,
+        match="requested_attachments must resolve OPEN ATTACHMENT",
+    ):
         _validate_requirement_requests(
             job=job,
             manifest=_empty_manifest(job),
             draft=invalid,
             pinned_requirements=pinned_requirements,
+            pinned_roles=pinned_roles,
+            rule_results={},
         )
 
 
 def test_server_verifier_rejects_requesting_an_already_present_partial_input(
 ) -> None:
     job = _partial_job()
-    draft, pinned_requirements = _mixed_draft(job)
+    draft, pinned_requirements, pinned_roles = _mixed_draft(job)
     pinned_by_name = {str(item["name"]): item for item in pinned_requirements}
     value = draft.model_dump(mode="json")
     payload = value["payload"]
-    requirement_id = "00000000-0000-0000-0000-000000000100"
+    requirement_id = "00000000-0000-0000-0000-000000000120"
     payload["requested_input"].append(requirement_id)
     payload["state_delta"]["add_pending_requirements"].append(
         _pending_requirement(
@@ -191,10 +210,52 @@ def test_server_verifier_rejects_requesting_an_already_present_partial_input(
     )
     invalid = AgentJobOutcomeDraftV2.model_validate(value)
 
-    with pytest.raises(ValueError, match="already fulfilled"):
+    with pytest.raises(ValueError, match="exactly the server-activated"):
         _validate_requirement_requests(
             job=job,
             manifest=_empty_manifest(job),
             draft=invalid,
             pinned_requirements=pinned_requirements,
+            pinned_roles=pinned_roles,
+            rule_results={},
+        )
+
+
+def test_server_verifier_rejects_omitting_one_active_missing_input() -> None:
+    job = _partial_job()
+    draft, pinned_requirements, pinned_roles = _mixed_draft(job)
+    value = draft.model_dump(mode="json")
+    payload = value["payload"]
+    omitted_id = payload["requested_input"].pop()
+    payload["state_delta"]["add_pending_requirements"] = [
+        item
+        for item in payload["state_delta"]["add_pending_requirements"]
+        if item["requirement_id"] != omitted_id
+    ]
+    invalid = AgentJobOutcomeDraftV2.model_validate(value)
+
+    with pytest.raises(ValueError, match="exactly the server-activated"):
+        _validate_requirement_requests(
+            job=job,
+            manifest=_empty_manifest(job),
+            draft=invalid,
+            pinned_requirements=pinned_requirements,
+            pinned_roles=pinned_roles,
+            rule_results={},
+        )
+
+
+def test_server_verifier_rejects_requesting_an_inactive_optional_role() -> None:
+    job = _partial_job()
+    draft, pinned_requirements, pinned_roles = _mixed_draft(job)
+    pinned_roles[1]["presence"] = "OPTIONAL"
+
+    with pytest.raises(ValueError, match="exactly the server-activated"):
+        _validate_requirement_requests(
+            job=job,
+            manifest=_empty_manifest(job),
+            draft=draft,
+            pinned_requirements=pinned_requirements,
+            pinned_roles=pinned_roles,
+            rule_results={},
         )

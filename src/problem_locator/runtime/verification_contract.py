@@ -11,7 +11,7 @@ import re
 from typing import Any, Mapping
 
 
-MANIFEST_SCHEMA_VERSION = 5
+MANIFEST_SCHEMA_VERSION = 6
 VERIFICATION_CONTRACT_SCHEMA_VERSION = 2
 
 _NAME = re.compile(r"[a-z][a-z0-9_]{0,63}\Z")

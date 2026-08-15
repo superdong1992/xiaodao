@@ -88,11 +88,11 @@ test("a failed Skill trace writes the strict nested audit schema without raw too
     fs.writeFileSync(path.join(workspace, "inputs", "wiki.md"), "wiki\n");
     fs.writeFileSync(path.join(workspace, "inputs", "clarifications.md"), "clarifications\n");
     fs.writeFileSync(path.join(skillRoot, "SKILL.md"), [
-      "[generation](references/generation-spec-v5-reference.md)",
+      "[generation](references/generation-spec-v6-reference.md)",
       "[verification](references/verification-contract-v2-reference.md)",
       "",
     ].join("\n"));
-    fs.writeFileSync(path.join(skillRoot, "references", "generation-spec-v5-reference.md"), "generation\n");
+    fs.writeFileSync(path.join(skillRoot, "references", "generation-spec-v6-reference.md"), "generation\n");
     fs.writeFileSync(path.join(skillRoot, "references", "verification-contract-v2-reference.md"), "verification\n");
     fs.writeFileSync(settings, "{}\n");
     fs.writeFileSync(fakeClaude, `

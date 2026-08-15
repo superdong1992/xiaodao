@@ -1,8 +1,8 @@
 {
-  "schema_version": 5,
-  "generator_version": "5.0.0",
+  "schema_version": 6,
+  "generator_version": "6.0.0",
   "id": "diagnose-neutral-event-chain",
-  "version": "5.0.0",
+  "version": "6.0.0",
   "capability": "neutral-event-chain",
   "deployment_scope": "TEST_ONLY",
   "summary": "定位中性双端事件链中的超预算与观测不确定性",
@@ -12,71 +12,20 @@
   "roles": [
     {
       "label": "source",
-      "description": "产生事件 A 多行记录的源进程"
+      "description": "产生事件 A 多行记录的源进程",
+      "presence": "REQUIRED",
+      "source_reference": "已确认的 source 角色说明：产生事件 A 多行记录的源进程",
+      "confirmed": true
     },
     {
       "label": "observer",
-      "description": "产生事件 B 观测记录的观察进程"
+      "description": "产生事件 B 观测记录的观察进程",
+      "presence": "REQUIRED",
+      "source_reference": "已确认的 observer 角色说明：产生事件 B 观测记录的观察进程",
+      "confirmed": true
     }
   ],
   "requirements": [
-    {
-      "name": "source_process",
-      "kind": "INPUT",
-      "stage": "INITIAL",
-      "fulfillment_source": "USER_FACT",
-      "prompt": "请提供源进程名。",
-      "constraints": {
-        "value_type": "STRING",
-        "min_utf8_bytes": 1,
-        "max_utf8_bytes": 256,
-        "pattern": null,
-        "allowed_values": []
-      },
-      "supplement_policy": "MISSING_ONLY"
-    },
-    {
-      "name": "observer_process",
-      "kind": "INPUT",
-      "stage": "INITIAL",
-      "fulfillment_source": "USER_FACT",
-      "prompt": "请提供观察进程名。",
-      "constraints": {
-        "value_type": "STRING",
-        "min_utf8_bytes": 1,
-        "max_utf8_bytes": 256,
-        "pattern": null,
-        "allowed_values": []
-      },
-      "supplement_policy": "MISSING_ONLY"
-    },
-    {
-      "name": "problem_time",
-      "kind": "INPUT",
-      "stage": "INITIAL",
-      "fulfillment_source": "USER_FACT",
-      "prompt": "请提供毫秒精度 UTC 问题时间。",
-      "constraints": {
-        "value_type": "STRING",
-        "min_utf8_bytes": 24,
-        "max_utf8_bytes": 24,
-        "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$",
-        "allowed_values": []
-      },
-      "supplement_policy": "MISSING_ONLY"
-    },
-    {
-      "name": "log_archive",
-      "kind": "ATTACHMENT",
-      "stage": "INITIAL",
-      "fulfillment_source": "READY_ATTACHMENT",
-      "prompt": "请上传 Logparse 支持的日志归档。",
-      "constraints": {
-        "min_count": 1,
-        "max_count": 1
-      },
-      "supplement_policy": "MISSING_ONLY"
-    },
     {
       "name": "correlation_id",
       "kind": "INPUT",
@@ -90,47 +39,28 @@
         "pattern": null,
         "allowed_values": []
       },
-      "supplement_policy": "MISSING_ONLY"
+      "supplement_policy": "MISSING_ONLY",
+      "requiredness": "REQUIRED",
+      "activation_condition": null,
+      "source_reference": "已确认的 Wiki 参数定义：请提供用于关联事件 A 与事件 B 的标识。",
+      "confirmed": true
     }
   ],
   "logparse_plan": {
-    "attachment_requirement": "log_archive",
-    "problem_time_binding": {
-      "source": "USER_FACT",
-      "name": "problem_time"
-    },
     "anchors": [
       {
         "label": "source",
         "module": {
           "source": "SKILL_FIXED",
           "value": "neutral"
-        },
-        "slot": {
-          "source": "SKILL_FIXED",
-          "value": "source_slot"
-        },
-        "process_name": {
-          "source": "USER_FACT",
-          "name": "source_process"
-        },
-        "pid": null
+        }
       },
       {
         "label": "observer",
         "module": {
           "source": "SKILL_FIXED",
           "value": "neutral"
-        },
-        "slot": {
-          "source": "SKILL_FIXED",
-          "value": "observer_slot"
-        },
-        "process_name": {
-          "source": "USER_FACT",
-          "name": "observer_process"
-        },
-        "pid": null
+        }
       }
     ]
   },

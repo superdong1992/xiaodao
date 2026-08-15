@@ -4,7 +4,7 @@
 合同版本为 `schema_version = 2`。转换 Agent 不需要也不得通过读取生成器、validator 或
 Runtime 源码补充、覆盖本文；维护者必须用合同测试保证 reference、生成器与 Runtime
 同步。包含本对象的 GenerationSpec 结构见
-[generation-spec-v5-reference.md](generation-spec-v5-reference.md)。
+[generation-spec-v6-reference.md](generation-spec-v6-reference.md)。
 
 业务事件名、日志消息、正则、阈值、clock domain、观测窗口和因果断言不是平台默认值，
 只能来自当前 Wiki，并且只能保存在当前生成 Skill 或自包含业务用例中。

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 import hashlib
 import json
 import os
@@ -16,24 +16,24 @@ from problem_locator.runtime.verification_contract import (
     MANIFEST_SCHEMA_VERSION,
     validate_verification_contract,
 )
+from problem_locator.runtime.input_profile import (
+    builtin_input_profile_sha256,
+    expand_profile_requirements,
+    load_builtin_input_profile,
+)
 
 
-GENERATOR_VERSION = "5.0.0"
-SPEC_SCHEMA_VERSION = 5
+GENERATOR_VERSION = "6.0.0"
+SPEC_SCHEMA_VERSION = 6
 PRODUCT_FILES = ("SKILL.md", "diagnosis-skill.json")
 DEPLOYMENT_SCOPES = frozenset({"PRODUCTION", "TEST_ONLY"})
-LOG_ARCHIVE_CONTENT_TYPES = (
-    "application/gzip",
-    "application/zip",
-    "application/x-tar",
-)
 SKILL_ID_PATTERN = re.compile(r"^diagnose-[a-z0-9]+(?:-[a-z0-9]+)*$")
 CAPABILITY_PATTERN = re.compile(r"^[a-z][a-z0-9-]{1,63}$")
 SEMVER_PATTERN = re.compile(
     r"^(?P<major>0|[1-9][0-9]*)\.(?P<minor>0|[1-9][0-9]*)\.(?P<patch>0|[1-9][0-9]*)$"
 )
 NAME_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
-ROLE_LABEL_PATTERN = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
+ROLE_LABEL_PATTERN = NAME_PATTERN
 def _require_exact_keys(value: Mapping[str, Any], expected: set[str], name: str) -> None:
     actual = set(value)
     if actual != expected:
@@ -81,19 +81,97 @@ def _text_tuple(value: Any, name: str, *, minimum: int = 0) -> tuple[str, ...]:
 class Role:
     label: str
     description: str
+    presence: str
+    source_reference: str
+    confirmed: bool
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> "Role":
-        _require_exact_keys(value, {"label", "description"}, "role")
+        _require_exact_keys(
+            value,
+            {"label", "description", "presence", "source_reference", "confirmed"},
+            "role",
+        )
         label = _single_line(value["label"], "role.label", maximum=64)
         if ROLE_LABEL_PATTERN.fullmatch(label) is None:
             raise ValueError("role.label is invalid")
+        presence = value["presence"]
+        if presence not in {"REQUIRED", "OPTIONAL"}:
+            raise ValueError("role.presence must be REQUIRED or OPTIONAL")
+        if value["confirmed"] is not True:
+            raise ValueError("role must be explicitly confirmed by the Skill author")
         return cls(
             label=label,
             description=_single_line(
                 value["description"], "role.description", maximum=512
             ),
+            presence=presence,
+            source_reference=_single_line(
+                value["source_reference"], "role.source_reference", maximum=4096
+            ),
+            confirmed=True,
         )
+
+    def to_manifest_mapping(self) -> dict[str, Any]:
+        return {
+            "label": self.label,
+            "description": self.description,
+            "presence": self.presence,
+            "source_reference": self.source_reference,
+        }
+
+
+def _activation_condition(value: Any, name: str) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError(f"{name} must be an object or null")
+    _require_exact_keys(value, {"any_of"}, name)
+    branches = _sequence(value["any_of"], f"{name}.any_of", maximum=20)
+    if not branches:
+        raise ValueError(f"{name}.any_of must not be empty")
+    normalized: list[dict[str, Any]] = []
+    for branch_index, branch in enumerate(branches):
+        if not isinstance(branch, dict):
+            raise ValueError(f"{name}.any_of[] must be an object")
+        _require_exact_keys(branch, {"all_of"}, f"{name}.any_of[{branch_index}]")
+        terms = _sequence(
+            branch["all_of"], f"{name}.any_of[{branch_index}].all_of", maximum=20
+        )
+        if not terms:
+            raise ValueError(f"{name} branches must not be empty")
+        normalized_terms: list[dict[str, str]] = []
+        for term_index, term in enumerate(terms):
+            if not isinstance(term, dict):
+                raise ValueError(f"{name} term must be an object")
+            _require_exact_keys(
+                term,
+                {"source", "name", "operator", "value"},
+                f"{name}.any_of[{branch_index}].all_of[{term_index}]",
+            )
+            source = term["source"]
+            term_name = _single_line(term["name"], f"{name}.term.name", maximum=64)
+            term_value = _single_line(term["value"], f"{name}.term.value", maximum=4096)
+            if source not in {"USER_FACT", "RULE_RESULT"}:
+                raise ValueError(f"{name} term source is invalid")
+            if NAME_PATTERN.fullmatch(term_name) is None or term["operator"] != "EQUALS":
+                raise ValueError(f"{name} term is invalid")
+            if source == "RULE_RESULT" and term_value not in {"PASS", "FAIL", "UNKNOWN"}:
+                raise ValueError(f"{name} RULE_RESULT value is invalid")
+            normalized_terms.append(
+                {
+                    "source": source,
+                    "name": term_name,
+                    "operator": "EQUALS",
+                    "value": term_value,
+                }
+            )
+        if len({json.dumps(item, sort_keys=True) for item in normalized_terms}) != len(normalized_terms):
+            raise ValueError(f"{name} terms must be unique within a branch")
+        normalized.append({"all_of": normalized_terms})
+    if len({json.dumps(item, sort_keys=True) for item in normalized}) != len(normalized):
+        raise ValueError(f"{name} branches must be unique")
+    return {"any_of": normalized}
 
 
 @dataclass(frozen=True)
@@ -105,6 +183,10 @@ class Requirement:
     prompt: str
     constraints: dict[str, Any]
     supplement_policy: str
+    requiredness: str
+    activation_condition: dict[str, Any] | None
+    source_reference: str
+    confirmed: bool
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> "Requirement":
@@ -118,6 +200,10 @@ class Requirement:
                 "prompt",
                 "constraints",
                 "supplement_policy",
+                "requiredness",
+                "activation_condition",
+                "source_reference",
+                "confirmed",
             },
             "requirement",
         )
@@ -200,6 +286,21 @@ class Requirement:
             raise ValueError(
                 "requirement.supplement_policy must be NONE or MISSING_ONLY"
             )
+        requiredness = value["requiredness"]
+        if requiredness not in {"REQUIRED", "OPTIONAL", "CONDITIONAL"}:
+            raise ValueError("requirement.requiredness is invalid")
+        condition = _activation_condition(
+            value["activation_condition"], "requirement.activation_condition"
+        )
+        if (requiredness == "CONDITIONAL") != (condition is not None):
+            raise ValueError("only CONDITIONAL requirements declare activation_condition")
+        expected_policy = "NONE" if requiredness == "OPTIONAL" else "MISSING_ONLY"
+        if supplement_policy != expected_policy:
+            raise ValueError(
+                f"{requiredness} requirement must use {expected_policy} supplement_policy"
+            )
+        if value["confirmed"] is not True:
+            raise ValueError("requirement must be explicitly confirmed by the Skill author")
         return cls(
             name=name,
             kind=kind,
@@ -208,10 +309,29 @@ class Requirement:
             prompt=_single_line(value["prompt"], "requirement.prompt", maximum=4096),
             constraints=dict(constraints),
             supplement_policy=supplement_policy,
+            requiredness=requiredness,
+            activation_condition=condition,
+            source_reference=_single_line(
+                value["source_reference"], "requirement.source_reference", maximum=4096
+            ),
+            confirmed=True,
         )
 
-    def to_mapping(self) -> dict[str, Any]:
-        return asdict(self)
+    def to_manifest_mapping(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "kind": self.kind,
+            "stage": self.stage,
+            "fulfillment_source": self.fulfillment_source,
+            "prompt": self.prompt,
+            "constraints": self.constraints,
+            "supplement_policy": self.supplement_policy,
+            "origin": "WIKI",
+            "role": None,
+            "requiredness": self.requiredness,
+            "activation_condition": self.activation_condition,
+            "source_reference": self.source_reference,
+        }
 
 
 def _binding(value: Any, name: str) -> dict[str, str]:
@@ -238,16 +358,7 @@ def _logparse_plan(value: Any) -> dict[str, Any] | None:
         return None
     if not isinstance(value, dict):
         raise ValueError("logparse_plan must be an object or null")
-    _require_exact_keys(
-        value,
-        {"attachment_requirement", "problem_time_binding", "anchors"},
-        "logparse_plan",
-    )
-    attachment = value["attachment_requirement"]
-    if attachment is not None:
-        attachment = _single_line(
-            attachment, "logparse_plan.attachment_requirement", maximum=64
-        )
+    _require_exact_keys(value, {"anchors"}, "logparse_plan")
     anchors = []
     labels: set[str] = set()
     for index, raw in enumerate(_sequence(value["anchors"], "logparse_plan.anchors", maximum=20)):
@@ -255,69 +366,121 @@ def _logparse_plan(value: Any) -> dict[str, Any] | None:
             raise ValueError("logparse anchor must be an object")
         _require_exact_keys(
             raw,
-            {"label", "module", "slot", "process_name", "pid"},
+            {"label", "module"},
             "logparse anchor",
         )
         label = _single_line(raw["label"], "anchor.label", maximum=64)
         if label in labels:
             raise ValueError("anchor labels must be unique")
         labels.add(label)
-        anchors.append(
-            {
-                "label": label,
-                "module": _binding(raw["module"], f"anchors[{index}].module"),
-                "slot": _binding(raw["slot"], f"anchors[{index}].slot"),
-                "process_name": _binding(
-                    raw["process_name"], f"anchors[{index}].process_name"
-                ),
-                "pid": None
-                if raw["pid"] is None
-                else _binding(raw["pid"], f"anchors[{index}].pid"),
-            }
-        )
+        module = _binding(raw["module"], f"anchors[{index}].module")
+        if module["source"] != "SKILL_FIXED":
+            raise ValueError("anchor.module must be fixed by the Skill")
+        anchors.append({"label": label, "module": module})
     if not anchors:
         raise ValueError("logparse_plan requires at least one anchor")
+    return {"anchors": anchors}
+
+
+def _ordered_manifest_requirements(
+    roles: Sequence[Role],
+    wiki_requirements: Sequence[Requirement],
+    *,
+    requires_logparse: bool,
+) -> list[dict[str, Any]]:
+    result = expand_profile_requirements(
+        [item.to_manifest_mapping() for item in roles],
+        requires_logparse=requires_logparse,
+    )
+    result.extend(item.to_manifest_mapping() for item in wiki_requirements)
+    indexed = list(enumerate(result))
+    indexed.sort(
+        key=lambda entry: (
+            0 if entry[1]["stage"] == "INITIAL" else 1,
+            0 if entry[1]["kind"] == "INPUT" else 1,
+            entry[0],
+        )
+    )
+    return [item for _, item in indexed]
+
+
+def _manifest_logparse_plan(
+    logparse_plan: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if logparse_plan is None:
+        return None
     return {
-        "attachment_requirement": attachment,
-        "problem_time_binding": _binding(
-            value["problem_time_binding"], "problem_time_binding"
-        ),
-        "anchors": anchors,
+        "attachment_requirement": "log_archive",
+        "problem_time_binding": {"source": "USER_FACT", "name": "problem_time"},
+        "anchors": [
+            {
+                "label": anchor["label"],
+                "module": anchor["module"],
+                "slot": {"source": "USER_FACT", "name": f"{anchor['label']}_slot"},
+                "process_name": {
+                    "source": "USER_FACT",
+                    "name": f"{anchor['label']}_process_name",
+                },
+                "pid": {"source": "USER_FACT", "name": f"{anchor['label']}_pid"},
+            }
+            for anchor in logparse_plan["anchors"]
+        ],
     }
 
 
-def _normalize_requirement_mappings(
-    value: Any,
-    logparse_plan: dict[str, Any] | None,
-) -> list[Mapping[str, Any]]:
-    """Inject platform-owned constraints without turning them into author inputs."""
+def _collect_user_fact_names(value: Any) -> set[str]:
+    result: set[str] = set()
+    if isinstance(value, dict):
+        if value.get("source") == "USER_FACT" and isinstance(value.get("name"), str):
+            result.add(value["name"])
+        if isinstance(value.get("fact_name"), str):
+            result.add(value["fact_name"])
+        if value.get("kind") == "FACT" and isinstance(value.get("name"), str):
+            result.add(value["name"])
+        for item in value.values():
+            result.update(_collect_user_fact_names(item))
+    elif isinstance(value, list):
+        for item in value:
+            result.update(_collect_user_fact_names(item))
+    return result
 
-    raw_requirements = _sequence(value, "requirements", maximum=64)
-    logparse_attachment = (
-        None
-        if logparse_plan is None
-        else logparse_plan["attachment_requirement"]
-    )
-    normalized: list[Mapping[str, Any]] = []
-    for raw in raw_requirements:
-        if not isinstance(raw, Mapping):
-            raise ValueError("requirement must be an object")
-        requirement = dict(raw)
-        constraints = requirement.get("constraints")
-        if (
-            logparse_attachment is not None
-            and requirement.get("name") == logparse_attachment
-            and requirement.get("kind") == "ATTACHMENT"
-            and isinstance(constraints, Mapping)
-        ):
-            normalized_constraints = dict(constraints)
-            normalized_constraints.setdefault(
-                "allowed_content_types",
-                list(LOG_ARCHIVE_CONTENT_TYPES),
-            )
-            requirement["constraints"] = normalized_constraints
-        normalized.append(requirement)
-    return normalized
+
+def _collect_event_names(value: Any) -> set[str]:
+    result: set[str] = set()
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if key in {"event", "before_event", "after_event"} and isinstance(item, str):
+                result.add(item)
+            elif key == "evidence_events" and isinstance(item, list):
+                result.update(entry for entry in item if isinstance(entry, str))
+            else:
+                result.update(_collect_event_names(item))
+    elif isinstance(value, list):
+        for item in value:
+            result.update(_collect_event_names(item))
+    return result
+
+
+def _rule_fact_dependencies(contract: Mapping[str, Any]) -> dict[str, set[str]]:
+    selector_facts = {
+        extractor["id"]: _collect_user_fact_names(extractor.get("selectors", []))
+        for extractor in contract["event_extractors"]
+    }
+    direct: dict[str, set[str]] = {}
+    dependencies: dict[str, list[str]] = {}
+    for rule in contract["rules"]:
+        names = _collect_user_fact_names(rule["parameters"])
+        for event in _collect_event_names(rule["parameters"]):
+            names.update(selector_facts.get(event, set()))
+        direct[rule["id"]] = names
+        dependencies[rule["id"]] = list(rule["depends_on"])
+    expanded: dict[str, set[str]] = {}
+    for rule in contract["rules"]:
+        names = set(direct[rule["id"]])
+        for dependency in dependencies[rule["id"]]:
+            names.update(expanded[dependency])
+        expanded[rule["id"]] = names
+    return expanded
 
 
 @dataclass(frozen=True)
@@ -371,7 +534,7 @@ class GenerationSpec:
         if not required <= actual or actual - required - optional:
             raise ValueError("generation spec field set is invalid")
         if value["schema_version"] != SPEC_SCHEMA_VERSION:
-            raise ValueError("generation spec schema_version must be 5")
+            raise ValueError("generation spec schema_version must be 6")
         if value["generator_version"] != GENERATOR_VERSION:
             raise ValueError(f"generator_version must be {GENERATOR_VERSION}")
         requires_logparse = value["requires_logparse"]
@@ -384,20 +547,20 @@ class GenerationSpec:
         if product is not None:
             product = _single_line(product, "logparse_product", maximum=4096)
         logparse_plan = _logparse_plan(value["logparse_plan"])
-        requirements = tuple(
-            Requirement.from_mapping(item)
-            for item in _normalize_requirement_mappings(
-                value["requirements"],
-                logparse_plan,
-            )
-        )
         roles = tuple(
             Role.from_mapping(item)
             for item in _sequence(value["roles"], "roles", maximum=20)
         )
+        requirements = tuple(
+            Requirement.from_mapping(item)
+            for item in _sequence(value["requirements"], "requirements", maximum=64)
+        )
+        manifest_requirements = _ordered_manifest_requirements(
+            roles, requirements, requires_logparse=requires_logparse
+        )
         verification_contract = validate_verification_contract(
             value["verification_contract"],
-            requirements=tuple(item.to_mapping() for item in requirements),
+            requirements=manifest_requirements,
             anchor_labels=(
                 set()
                 if logparse_plan is None
@@ -446,22 +609,27 @@ class GenerationSpec:
         if SKILL_ID_PATTERN.fullmatch(self.skill_id) is None:
             raise ValueError("id must match diagnose-<lower-kebab-capability>")
         match = SEMVER_PATTERN.fullmatch(self.version)
-        if match is None or int(match.group("major")) < 5:
-            raise ValueError("generated Skill version must be semantic version 5.0.0 or later")
+        if match is None or int(match.group("major")) < 6:
+            raise ValueError("generated Skill version must be semantic version 6.0.0 or later")
         if CAPABILITY_PATTERN.fullmatch(self.capability) is None:
             raise ValueError("capability is invalid")
         if self.deployment_scope not in DEPLOYMENT_SCOPES:
             raise ValueError("deployment_scope must be PRODUCTION or TEST_ONLY")
-        names = [item.name for item in self.requirements]
+        role_labels = [item.label for item in self.roles]
+        if len(role_labels) != len(set(role_labels)):
+            raise ValueError("role labels must be unique")
+        names = [item["name"] for item in self.manifest_requirements()]
         if len(names) != len(set(names)):
-            raise ValueError("requirement names must be unique")
-        stages = [item.stage for item in self.requirements]
+            raise ValueError("Wiki requirements must not collide with profile-reserved names")
+        if len(names) > 128:
+            raise ValueError("expanded requirements exceed the manifest limit")
+        stages = [item["stage"] for item in self.manifest_requirements()]
         if stages != sorted(stages, key={"INITIAL": 0, "AFTER_LOGPARSE": 1}.get):
             raise ValueError("requirements must be ordered by stage")
         for stage in {"INITIAL", "AFTER_LOGPARSE"}:
             if sum(
-                item.kind == "ATTACHMENT" and item.stage == stage
-                for item in self.requirements
+                item["kind"] == "ATTACHMENT" and item["stage"] == stage
+                for item in self.manifest_requirements()
             ) > 1:
                 raise ValueError("at most one ATTACHMENT is supported per stage")
         if self.requires_logparse:
@@ -469,43 +637,71 @@ class GenerationSpec:
                 raise ValueError("requires_logparse=true requires logparse_plan")
             if self.logparse_product == "default":
                 raise ValueError("omit logparse_product to select the upstream default")
-            attachment = self.logparse_plan["attachment_requirement"]
-            if attachment is not None:
-                requirement = next(
-                    (item for item in self.requirements if item.name == attachment),
-                    None,
-                )
-                if requirement is None or requirement.kind != "ATTACHMENT":
-                    raise ValueError("logparse attachment must name an ATTACHMENT requirement")
-                if tuple(requirement.constraints["allowed_content_types"]) != LOG_ARCHIVE_CONTENT_TYPES:
-                    raise ValueError("logparse archive ContentTypes are platform-fixed")
-            input_names = {
-                item.name for item in self.requirements if item.kind == "INPUT"
-            }
-            bindings = [self.logparse_plan["problem_time_binding"]]
-            bindings.extend(
-                anchor[field]
-                for anchor in self.logparse_plan["anchors"]
-                for field in ("module", "slot", "process_name", "pid")
-                if anchor[field] is not None
-            )
-            if any(
-                binding["source"] == "USER_FACT"
-                and binding["name"] not in input_names
-                for binding in bindings
-            ):
-                raise ValueError("USER_FACT tool bindings must name INPUT requirements")
+            anchor_labels = [item["label"] for item in self.logparse_plan["anchors"]]
+            if anchor_labels != role_labels:
+                raise ValueError("Logparse anchors must match confirmed roles in order")
+            if not any(item.presence == "REQUIRED" for item in self.roles):
+                raise ValueError("Logparse Skill requires at least one REQUIRED role")
+            if any(item.kind == "ATTACHMENT" for item in self.requirements):
+                raise ValueError("Logparse archive is platform-injected; Wiki attachments are forbidden")
         else:
             if self.logparse_plan is not None or self.logparse_product is not None:
                 raise ValueError("non-logparse Skill forbids logparse plan/product")
+            if self.roles:
+                raise ValueError("non-logparse Skill forbids Logparse roles")
             if any(item.stage == "AFTER_LOGPARSE" for item in self.requirements):
                 raise ValueError("non-logparse Skill forbids AFTER_LOGPARSE requirements")
+        self._validate_activation_conditions()
         self._validate_verification_contract()
+
+    def manifest_requirements(self) -> list[dict[str, Any]]:
+        return _ordered_manifest_requirements(
+            self.roles,
+            self.requirements,
+            requires_logparse=self.requires_logparse,
+        )
+
+    def manifest_logparse_plan(self) -> dict[str, Any] | None:
+        return _manifest_logparse_plan(self.logparse_plan)
+
+    def _validate_activation_conditions(self) -> None:
+        requirements = {item["name"]: item for item in self.manifest_requirements()}
+        rules = {item["id"]: item for item in self.verification_contract["rules"]}
+        rule_facts = _rule_fact_dependencies(self.verification_contract)
+        for requirement in requirements.values():
+            condition = requirement["activation_condition"]
+            if condition is None:
+                continue
+            for branch in condition["any_of"]:
+                for term in branch["all_of"]:
+                    if term["source"] == "USER_FACT":
+                        source = requirements.get(term["name"])
+                        if (
+                            source is None
+                            or source["kind"] != "INPUT"
+                            or source["stage"] != "INITIAL"
+                            or source["requiredness"] == "CONDITIONAL"
+                            or source["name"] == requirement["name"]
+                        ):
+                            raise ValueError(
+                                "activation USER_FACT must name another non-conditional INITIAL input"
+                            )
+                    else:
+                        rule = rules.get(term["name"])
+                        if (
+                            requirement["stage"] != "AFTER_LOGPARSE"
+                            or rule is None
+                            or rule["kind"] == "SEMANTIC_CAUSALITY"
+                            or requirement["name"] in rule_facts[term["name"]]
+                        ):
+                            raise ValueError(
+                                "activation RULE_RESULT must be an independent mechanical AFTER_LOGPARSE rule"
+                            )
 
     def _validate_verification_contract(self) -> None:
         normalized = validate_verification_contract(
             self.verification_contract,
-            requirements=tuple(item.to_mapping() for item in self.requirements),
+            requirements=self.manifest_requirements(),
             anchor_labels=(
                 set()
                 if self.logparse_plan is None
@@ -537,6 +733,7 @@ def canonical_json_bytes(value: Any) -> bytes:
 
 def diagnosis_skill_manifest(spec: GenerationSpec) -> dict[str, Any]:
     spec.validate()
+    profile = load_builtin_input_profile()
     manifest: dict[str, Any] = {
         "schema_version": MANIFEST_SCHEMA_VERSION,
         "id": spec.skill_id,
@@ -547,8 +744,11 @@ def diagnosis_skill_manifest(spec: GenerationSpec) -> dict[str, Any]:
         "entry_document": "SKILL.md",
         "tool_bundle_id": "tool-bundle/diagnose",
         "requires_logparse": spec.requires_logparse,
-        "requirements": [item.to_mapping() for item in spec.requirements],
-        "logparse_plan": spec.logparse_plan,
+        "input_profile": profile,
+        "input_profile_sha256": builtin_input_profile_sha256(profile),
+        "roles": [item.to_manifest_mapping() for item in spec.roles],
+        "requirements": spec.manifest_requirements(),
+        "logparse_plan": spec.manifest_logparse_plan(),
         "verification_contract": spec.verification_contract,
     }
     if spec.logparse_product is not None:
@@ -564,17 +764,21 @@ def _render_skill_markdown(spec: GenerationSpec) -> str:
     manifest = diagnosis_skill_manifest(spec)
     embedded = canonical_json_bytes(manifest).decode("utf-8").strip()
     rows = "\n".join(
-        f"| `{item.name}` | {item.kind} | {item.stage} | {item.fulfillment_source} | {item.supplement_policy} | {item.prompt.replace('|', '\\|')} | `{json.dumps(item.constraints, ensure_ascii=False, sort_keys=True, separators=(',', ':'))}` |"
-        for item in spec.requirements
-    ) or "| — | — | — | — | 本 Skill 不请求业务输入或附件 | `{}` |"
+        f"| `{item['name']}` | {item['origin']} | {item['role'] or '—'} | {item['kind']} | {item['stage']} | {item['requiredness']} | `{json.dumps(item['activation_condition'], ensure_ascii=False, sort_keys=True, separators=(',', ':'))}` | {item['prompt'].replace('|', '\\|')} | `{json.dumps(item['constraints'], ensure_ascii=False, sort_keys=True, separators=(',', ':'))}` |"
+        for item in manifest["requirements"]
+    )
     roles = "\n".join(
-        f"- `{role.label}`：{role.description}" for role in spec.roles
+        f"- `{role.label}`（{role.presence}）：{role.description}；来源：{role.source_reference}"
+        for role in spec.roles
     ) or "- 未声明业务角色。"
-    initial_workflow = """按声明顺序执行阶段算法：先复用当前快照中有效事实和同名 OPEN requirement；请求当前
-阶段全部缺失 INPUT 并返回 NEED_INPUT；INPUT 齐全后才请求该阶段 ATTACHMENT 并返回
-NEED_ATTACHMENT。"""
+    initial_workflow = """按 manifest 执行确定性激活算法，不得自行改变 requiredness：先复用当前快照中的
+USER_FACT 和同名 OPEN requirement；REQUIRED 始终激活，OPTIONAL 永不主动请求，
+CONDITIONAL 只在 activation_condition 成立时激活。REQUIRED 角色始终激活；OPTIONAL 角色在
+该角色任一扁平字段已经提供时才激活。只请求当前阶段全部已激活且缺失的 INPUT 并返回
+NEED_INPUT；INPUT 齐全后才请求已激活且缺失的 ATTACHMENT 并返回 NEED_ATTACHMENT。
+服务端会重算同一集合，拒绝多请求、少请求或请求未激活参数。"""
     has_after_logparse = any(
-        item.stage == "AFTER_LOGPARSE" for item in spec.requirements
+        item["stage"] == "AFTER_LOGPARSE" for item in manifest["requirements"]
     )
     if has_after_logparse:
         stage_workflow = initial_workflow + """
@@ -622,7 +826,7 @@ MIME type 或计算 broker 受控树的 size/hash。
 业务映射的机器事实如下，不得改名、猜值或从日志反向满足 USER_FACT requirement：
 
 ```json
-{json.dumps(spec.logparse_plan, ensure_ascii=False, sort_keys=True, indent=2)}
+{json.dumps(manifest['logparse_plan'], ensure_ascii=False, sort_keys=True, indent=2)}
 ```
 
 归档附件只接受平台固定后缀映射：`.gz/.tar.gz/.tgz -> application/gzip`、
@@ -645,11 +849,11 @@ description: {json.dumps(spec.summary, ensure_ascii=False)}
 contract 只定义通用 Schema、安全、Evidence/Candidate 与原子输出；本文件独占业务
 requirements、阶段、工具映射和判定规则。
 
-<!-- DIAGNOSIS_SKILL_MANIFEST_V5_BEGIN -->
+<!-- DIAGNOSIS_SKILL_MANIFEST_V6_BEGIN -->
 ```json
 {embedded}
 ```
-<!-- DIAGNOSIS_SKILL_MANIFEST_V5_END -->
+<!-- DIAGNOSIS_SKILL_MANIFEST_V6_END -->
 
 ## 范围与角色
 
@@ -659,11 +863,11 @@ requirements、阶段、工具映射和判定规则。
 
 ## Requirements
 
-所有声明均为必需项；空数组表示不添加任何默认参数。
-INPUT 只能由 `USER_FACT` 满足，ATTACHMENT 只能由 `READY_ATTACHMENT` 满足。
+本表已经合并内置 profile 与 Wiki 参数。OPTIONAL 不主动请求；CONDITIONAL 只有条件成立才会
+成为阻塞项。INPUT 只能由 `USER_FACT` 满足，ATTACHMENT 只能由 `READY_ATTACHMENT` 满足。
 
-| 名称 | 类型 | 阶段 | 满足来源 | 补充策略 | 用户提示 | S00 constraints |
-| --- | --- | --- | --- | --- | --- | --- |
+| 名称 | 来源 | 角色 | 类型 | 阶段 | 必选性 | 激活条件 | 用户提示 | constraints |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
 {rows}
 
 {stage_workflow}
@@ -862,7 +1066,7 @@ def strip_author_notes(wiki_text: str) -> str:
 
 
 def build_spec_from_wiki(wiki_text: str, **overrides: Any) -> GenerationSpec:
-    """Read one Agent-authored fenced GenerationSpec v5 from a wiki document.
+    """Read one Agent-authored fenced GenerationSpec v6 from a wiki document.
 
     Natural-language Wiki interpretation belongs to the conversion Agent.  The
     deterministic renderer consumes the Agent's explicit spec and never guesses
@@ -871,20 +1075,20 @@ def build_spec_from_wiki(wiki_text: str, **overrides: Any) -> GenerationSpec:
 
     wiki = normalize_wiki(wiki_text)
     matches = re.findall(
-        r"(?ms)^## GenerationSpec v5\s*$.*?^```json\s*$\n(.*?)^```\s*$",
+        r"(?ms)^## GenerationSpec v6\s*$.*?^```json\s*$\n(.*?)^```\s*$",
         wiki,
     )
     if len(matches) != 1:
         raise ValueError(
             "deterministic rendering requires exactly one Agent-authored "
-            "'## GenerationSpec v5' JSON fence"
+            "'## GenerationSpec v6' JSON fence"
         )
     try:
         value = json.loads(matches[0])
     except json.JSONDecodeError as exc:
-        raise ValueError("wiki GenerationSpec v5 JSON is invalid") from exc
+        raise ValueError("wiki GenerationSpec v6 JSON is invalid") from exc
     if not isinstance(value, dict):
-        raise ValueError("wiki GenerationSpec v5 must be an object")
+        raise ValueError("wiki GenerationSpec v6 must be an object")
     allowed_overrides = {"capability", "summary", "version"}
     unknown = set(overrides) - allowed_overrides
     if unknown:

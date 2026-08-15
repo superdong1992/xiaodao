@@ -52,6 +52,7 @@ from problem_locator.contracts import (
 
 from .authoritative_targets import resolve_authoritative_targets
 from .verification_contract import terminal_path_matches
+from .requirement_activation import resolve_requirements
 
 
 _RFC3339_MILLIS_UTC = "%Y-%m-%dT%H:%M:%S.%fZ"
@@ -132,7 +133,9 @@ def _unique_strings(values: Iterable[str]) -> list[str]:
     return result
 
 
-def _load_contract(skill_root: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+def _load_contract(
+    skill_root: Path,
+) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
     path = Path(skill_root) / "diagnosis-skill.json"
 
     def unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -150,8 +153,8 @@ def _load_contract(skill_root: Path) -> tuple[dict[str, Any], list[dict[str, Any
             ValueError(f"non-finite manifest value: {value}")
         ),
     )
-    if not isinstance(value, dict) or value.get("schema_version") != 5:
-        raise ValueError("server verifier requires a pinned Skill manifest v5")
+    if not isinstance(value, dict) or value.get("schema_version") != 6:
+        raise ValueError("server verifier requires a pinned Skill manifest v6")
     contract = value.get("verification_contract")
     if not isinstance(contract, dict) or contract.get("schema_version") != 2:
         raise ValueError("server verifier requires verification_contract v2")
@@ -171,7 +174,10 @@ def _load_contract(skill_root: Path) -> tuple[dict[str, Any], list[dict[str, Any
     requirements = value.get("requirements")
     if not isinstance(requirements, list):
         raise ValueError("server verifier requires pinned Skill requirements")
-    return contract, requirements
+    roles = value.get("roles")
+    if not isinstance(roles, list):
+        raise ValueError("server verifier requires pinned Skill roles")
+    return contract, requirements, roles
 
 
 def _pinned_requirements_by_name(
@@ -186,6 +192,11 @@ def _pinned_requirements_by_name(
         "prompt",
         "constraints",
         "supplement_policy",
+        "origin",
+        "role",
+        "requiredness",
+        "activation_condition",
+        "source_reference",
     }
     for item in requirements:
         if not isinstance(item, dict) or set(item) != required_fields:
@@ -226,6 +237,8 @@ def _validate_requirement_requests(
     manifest: WorkspaceInputManifest,
     draft: AgentJobOutcomeDraftV2,
     pinned_requirements: list[dict[str, Any]],
+    pinned_roles: list[dict[str, Any]],
+    rule_results: Mapping[str, str],
 ) -> None:
     """Reject Agent-invented waits before they can become an Outcome."""
 
@@ -233,8 +246,6 @@ def _validate_requirement_requests(
     if isinstance(payload, DiagnosisOutcome):
         new_requirements = list(payload.state_delta.add_pending_requirements)
         requested_ids = [*payload.requested_input, *payload.requested_attachments]
-        if not new_requirements and not requested_ids:
-            return
     elif isinstance(payload, ReviewAssessment):
         new_requirements = []
         requested_ids = list(payload.requested_requirement_ids)
@@ -249,6 +260,30 @@ def _validate_requirement_requests(
             return
     else:
         return
+
+    has_logparse_phase = manifest.resolved_logparse_plan is not None or any(
+        isinstance(item, WorkspaceEvidenceInput)
+        and item.source_type is EvidenceSourceType.LOGPARSE
+        for item in manifest.entries
+    )
+    fact_values: dict[str, str] = {}
+    for fact in job.context_snapshot.user_facts:
+        name = fact.provenance.input_name
+        if name is None:
+            continue
+        if name in fact_values:
+            raise ValueError("Job contains duplicate USER_FACT input names")
+        fact_values[name] = fact.statement
+    attachment_ready = bool(job.attachment_refs) or has_logparse_phase
+    expected_resolution = resolve_requirements(
+        roles=pinned_roles,
+        requirements=pinned_requirements,
+        facts=fact_values,
+        attachment_ready=attachment_ready,
+        after_logparse=has_logparse_phase,
+        rule_results=rule_results,
+    )
+    expected_names = [item["name"] for item in expected_resolution.requested_requirements]
 
     pinned_by_name = _pinned_requirements_by_name(pinned_requirements)
     existing = list(job.context_snapshot.pending_requirements)
@@ -270,6 +305,12 @@ def _validate_requirement_requests(
         if requirement is None or requirement.status is not RequirementStatus.OPEN:
             raise ValueError("requested requirement is not one fixed OPEN requirement")
         requested.append(requirement)
+    if isinstance(payload, DiagnosisOutcome) and [item.name for item in requested] != expected_names:
+        raise ValueError(
+            "Agent must request exactly the server-activated missing requirements"
+        )
+    if isinstance(payload, DiagnosisOutcome) and not requested and not new_requirements:
+        return
     if any(
         item.requirement_id not in set(requested_ids)
         for item in new_requirements
@@ -316,11 +357,6 @@ def _validate_requirement_requests(
         ):
             raise ValueError("Agent requirement differs from the pinned Skill")
         stage = pinned["stage"]
-        has_logparse_phase = manifest.resolved_logparse_plan is not None or any(
-            isinstance(item, WorkspaceEvidenceInput)
-            and item.source_type is EvidenceSourceType.LOGPARSE
-            for item in manifest.entries
-        )
         if stage not in {"INITIAL", "AFTER_LOGPARSE"} or (
             stage == "AFTER_LOGPARSE" and not has_logparse_phase
         ):
@@ -2088,13 +2124,7 @@ def verify_agent_draft(
 
     if job.job_type is JobType.ROUTE or job.skill_ref is None:
         raise ValueError("ROUTE drafts do not enter the decision verifier")
-    contract, pinned_requirements = _load_contract(skill_root)
-    _validate_requirement_requests(
-        job=job,
-        manifest=manifest,
-        draft=draft,
-        pinned_requirements=pinned_requirements,
-    )
+    contract, pinned_requirements, pinned_roles = _load_contract(skill_root)
     extractors = list(contract["event_extractors"])
     rules = list(contract["rules"])
     terminal_paths = list(contract["terminal_paths"])
@@ -2185,6 +2215,25 @@ def verify_agent_draft(
                 server_evaluation=evaluation,
             )
         )
+
+    activation_rule_results = {
+        rule_id: (
+            "PASS"
+            if evaluation.status is ServerRuleStatus.VERIFIED_PASS
+            else "FAIL"
+            if evaluation.status is ServerRuleStatus.VERIFIED_FAIL
+            else "UNKNOWN"
+        )
+        for rule_id, evaluation in evaluated.items()
+    }
+    _validate_requirement_requests(
+        job=job,
+        manifest=manifest,
+        draft=draft,
+        pinned_requirements=pinned_requirements,
+        pinned_roles=pinned_roles,
+        rule_results=activation_rule_results,
+    )
 
     selected_path = _select_terminal_path(
         terminal_paths,

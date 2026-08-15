@@ -26,8 +26,8 @@ def _verification_contract(assets: ResolvedJobAssets) -> dict[str, Any]:
         raise ValueError("REVIEW requires a pinned diagnosis Skill")
     path = Path(assets.skill.root_path) / "diagnosis-skill.json"
     value = json.loads(path.read_bytes().decode("utf-8"))
-    if not isinstance(value, dict) or value.get("schema_version") != 5:
-        raise ValueError("REVIEW requires a diagnosis Skill manifest v5")
+    if not isinstance(value, dict) or value.get("schema_version") != 6:
+        raise ValueError("REVIEW requires a diagnosis Skill manifest v6")
     contract = value.get("verification_contract")
     if not isinstance(contract, dict) or contract.get("schema_version") != 2:
         raise ValueError("REVIEW Skill has no verification contract")

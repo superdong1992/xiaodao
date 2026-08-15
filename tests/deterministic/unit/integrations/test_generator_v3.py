@@ -26,7 +26,7 @@ VALIDATOR_PATH = (
 )
 NEUTRAL_REFERENCE_SPEC = (
     REPOSITORY_ROOT
-    / ".claude/skills/wiki-to-diagnosis-skill/references/neutral-logparse-generation-spec-v5.json"
+    / ".claude/skills/wiki-to-diagnosis-skill/references/neutral-logparse-generation-spec-v6.json"
 )
 SPEC_ROOT = REPOSITORY_ROOT / "tests/fixtures/components/diagnosis-generator/specs"
 RPC_WIKI = (
@@ -51,12 +51,12 @@ def _load(path: Path, name: str) -> Any:
 
 @pytest.fixture(scope="module")
 def generator() -> Any:
-    return _load(GENERATOR_PATH, "_problem_locator_generate_v5")
+    return _load(GENERATOR_PATH, "_problem_locator_generate_v6")
 
 
 @pytest.fixture(scope="module")
 def validator() -> Any:
-    return _load(VALIDATOR_PATH, "_problem_locator_validate_v5")
+    return _load(VALIDATOR_PATH, "_problem_locator_validate_v6")
 
 
 def _manifest(skill_dir: Path) -> dict[str, Any]:
@@ -85,10 +85,16 @@ def test_self_contained_neutral_reference_is_a_valid_generation_spec(
         (
             "rpc-service-takeover.json",
             [
+                "problem_time",
+                "client_slot",
+                "client_process_name",
+                "client_pid",
+                "server_slot",
+                "server_process_name",
+                "server_pid",
                 "caller_service",
                 "server_service",
                 "rpc_method",
-                "problem_time",
                 "log_archive",
                 "order_id",
             ],
@@ -97,17 +103,23 @@ def test_self_contained_neutral_reference_is_a_valid_generation_spec(
         (
             "database-deadlock.json",
             [
-                "database_instance",
-                "database_process",
-                "incident_time",
-                "database_logs",
+                "problem_time",
+                "database_slot",
+                "database_process_name",
+                "database_pid",
+                "log_archive",
                 "victim_transaction_id",
             ],
             None,
         ),
         (
             "manual-triage.json",
-            ["affected_component", "observed_symptom", "reproduction_steps"],
+            [
+                "problem_time",
+                "affected_component",
+                "observed_symptom",
+                "reproduction_steps",
+            ],
             None,
         ),
     ],
@@ -129,16 +141,24 @@ def test_three_heterogeneous_specs_generate_deterministically(
     assert validator.validate_skill_directory(first.skill_dir).ok
 
     manifest = _manifest(first.skill_dir)
-    assert manifest["schema_version"] == 5
-    assert manifest["version"] == "5.0.0"
+    assert manifest["schema_version"] == 6
+    assert manifest["version"] == "6.0.0"
     assert manifest["deployment_scope"] == "TEST_ONLY"
+    assert manifest["input_profile"]["profile_id"] == "builtin-global-v1"
+    assert len(manifest["input_profile_sha256"]) == 64
     assert [item["name"] for item in manifest["requirements"]] == expected_names
     assert all("required" not in item for item in manifest["requirements"])
+    assert all(
+        item["requiredness"] in {"REQUIRED", "OPTIONAL", "CONDITIONAL"}
+        for item in manifest["requirements"]
+    )
     assert all(
         item["supplement_policy"] in {"NONE", "MISSING_ONLY"}
         for item in manifest["requirements"]
     )
     assert manifest["verification_contract"]["schema_version"] == 2
+    assert all("confirmed" not in item for item in manifest["roles"])
+    assert all("confirmed" not in item for item in manifest["requirements"])
     if expected_product is None:
         assert "logparse_product" not in manifest
     else:
@@ -171,7 +191,7 @@ def test_default_product_is_effective_runtime_default_not_manifest_field(
     assert "logparse_product" not in manifest
     assert manifest["logparse_plan"]["problem_time_binding"] == {
         "source": "USER_FACT",
-        "name": "incident_time",
+        "name": "problem_time",
     }
 
 
@@ -189,12 +209,12 @@ def test_wiki_fence_is_the_same_rpc_machine_source(generator: Any) -> None:
     from_wiki = generator.build_spec_from_wiki(RPC_WIKI.read_text(encoding="utf-8"))
     from_spec = generator.load_generation_spec(SPEC_ROOT / "rpc-service-takeover.json")
     assert generator.render_product(from_wiki) == generator.render_product(from_spec)
-    assert [anchor["slot"]["value"] for anchor in from_spec.logparse_plan["anchors"]] == [
-        "slot_1",
-        "slot_2",
+    assert [anchor["label"] for anchor in from_spec.logparse_plan["anchors"]] == [
+        "client",
+        "server",
     ]
     assert all(
-        anchor["process_name"]["source"] == "SKILL_FIXED"
+        anchor["module"]["source"] == "SKILL_FIXED"
         for anchor in from_spec.logparse_plan["anchors"]
     )
 
@@ -324,10 +344,31 @@ def test_verification_contract_rejects_defaults_legacy_suppression_and_bad_remed
         generator.GenerationSpec.from_mapping(value)
 
 
-def test_optional_requirement_is_rejected(generator: Any) -> None:
+def test_legacy_required_field_is_rejected(generator: Any) -> None:
     value = json.loads((SPEC_ROOT / "manual-triage.json").read_text(encoding="utf-8"))
     value["requirements"][0]["required"] = False
     with pytest.raises(ValueError, match="requirement fields"):
+        generator.GenerationSpec.from_mapping(value)
+
+
+def test_unconfirmed_role_or_requirement_is_rejected(generator: Any) -> None:
+    value = json.loads((SPEC_ROOT / "rpc-service-takeover.json").read_text("utf-8"))
+    value["roles"][0]["confirmed"] = False
+    with pytest.raises(ValueError, match="explicitly confirmed"):
+        generator.GenerationSpec.from_mapping(value)
+
+    value = json.loads((SPEC_ROOT / "rpc-service-takeover.json").read_text("utf-8"))
+    value["requirements"][0]["confirmed"] = False
+    with pytest.raises(ValueError, match="explicitly confirmed"):
+        generator.GenerationSpec.from_mapping(value)
+
+
+def test_profile_reserved_requirement_name_is_rejected(generator: Any) -> None:
+    value = json.loads((SPEC_ROOT / "manual-triage.json").read_text("utf-8"))
+    reserved = json.loads(json.dumps(value["requirements"][0]))
+    reserved["name"] = "problem_time"
+    value["requirements"].append(reserved)
+    with pytest.raises(ValueError, match="profile-reserved"):
         generator.GenerationSpec.from_mapping(value)
 
 
@@ -358,9 +399,28 @@ def test_logparse_archive_content_types_are_platform_fixed(generator: Any) -> No
     value = json.loads(
         (SPEC_ROOT / "database-deadlock.json").read_text(encoding="utf-8")
     )
-    attachment = next(item for item in value["requirements"] if item["kind"] == "ATTACHMENT")
-    attachment["constraints"]["allowed_content_types"] = ["application/octet-stream"]
-    with pytest.raises(ValueError, match="platform-fixed"):
+    attachment = {
+        "name": "wiki_archive",
+        "kind": "ATTACHMENT",
+        "stage": "INITIAL",
+        "fulfillment_source": "READY_ATTACHMENT",
+        "prompt": "Upload logs.",
+        "constraints": {
+            "allowed_content_types": ["application/octet-stream"],
+            "min_count": 1,
+            "max_count": 1,
+        },
+        "supplement_policy": "MISSING_ONLY",
+        "requiredness": "REQUIRED",
+        "activation_condition": None,
+        "source_reference": "Confirmed Wiki attachment definition.",
+        "confirmed": True,
+    }
+    value["requirements"].append(attachment)
+    with pytest.raises(
+        ValueError,
+        match="platform-injected|at most one ATTACHMENT",
+    ):
         generator.GenerationSpec.from_mapping(value)
 
 
@@ -370,14 +430,13 @@ def test_logparse_archive_content_types_are_injected_without_mutating_author_inp
     value = json.loads(
         (SPEC_ROOT / "database-deadlock.json").read_text(encoding="utf-8")
     )
-    attachment = next(item for item in value["requirements"] if item["kind"] == "ATTACHMENT")
-    assert "allowed_content_types" not in attachment["constraints"]
-
     spec = generator.GenerationSpec.from_mapping(value)
-    normalized = next(item for item in spec.requirements if item.kind == "ATTACHMENT")
+    normalized = next(
+        item for item in spec.manifest_requirements() if item["name"] == "log_archive"
+    )
 
-    assert "allowed_content_types" not in attachment["constraints"]
-    assert normalized.constraints["allowed_content_types"] == [
+    assert all(item["kind"] != "ATTACHMENT" for item in value["requirements"])
+    assert normalized["constraints"]["allowed_content_types"] == [
         "application/gzip",
         "application/zip",
         "application/x-tar",
@@ -393,11 +452,15 @@ def test_non_logparse_attachment_still_requires_business_content_types(
             "name": "manual_attachment",
             "kind": "ATTACHMENT",
             "stage": "INITIAL",
-                "fulfillment_source": "READY_ATTACHMENT",
-                "prompt": "请上传人工排查附件。",
-                "constraints": {"min_count": 1, "max_count": 1},
-                "supplement_policy": "MISSING_ONLY",
-            }
+            "fulfillment_source": "READY_ATTACHMENT",
+            "prompt": "请上传人工排查附件。",
+            "constraints": {"min_count": 1, "max_count": 1},
+            "supplement_policy": "MISSING_ONLY",
+            "requiredness": "REQUIRED",
+            "activation_condition": None,
+            "source_reference": "已确认的 Wiki 人工排查附件定义。",
+            "confirmed": True,
+        }
     )
     with pytest.raises(ValueError, match="ATTACHMENT constraints"):
         generator.GenerationSpec.from_mapping(value)
