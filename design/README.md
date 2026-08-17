@@ -11,6 +11,7 @@
 - 真实 Wiki 转专用定位 Skill、证据规则与部分终态：[`wiki-diagnosis-generalization.md`](wiki-diagnosis-generalization.md)
 - 测试操作与证据管理：[`tools/test-flow/README.md`](../tools/test-flow/README.md)
 - 当前活跃产品待办：[`TODO.md`](../TODO.md)
+- 已修复问题、回归历史与专项测试：[`FIXED_ISSUES.md`](../FIXED_ISSUES.md)
 - 公开 MCP 合同：生成的 `schemas/`、运行时 `src/` 合同和 `.claude/skills/problem-locator-client/`
 - Diagnosis Skill 合同：GenerationSpec、生成 manifest、output contracts 和生成资产
 

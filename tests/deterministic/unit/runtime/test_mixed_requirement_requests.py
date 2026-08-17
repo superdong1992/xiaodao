@@ -103,6 +103,7 @@ def _mixed_draft(
         "server_process_name",
         "server_service",
         "rpc_method",
+        "log_archive",
     ]
     ids_by_name = {
         name: f"00000000-0000-0000-0000-{index:012d}"
@@ -125,8 +126,10 @@ def _mixed_draft(
     payload = value["payload"]
     assert isinstance(payload, dict)
     payload["candidate_conclusion_draft"] = None
-    payload["requested_input"] = [ids_by_name[name] for name in requested_names]
-    payload["requested_attachments"] = []
+    payload["requested_input"] = [
+        ids_by_name[name] for name in requested_names if name != "log_archive"
+    ]
+    payload["requested_attachments"] = [ids_by_name["log_archive"]]
     state_delta = payload["state_delta"]
     assert isinstance(state_delta, dict)
     state_delta["add_pending_requirements"] = requirements
@@ -139,7 +142,7 @@ def _mixed_draft(
     )
 
 
-def test_server_verifier_accepts_exact_active_missing_inputs_after_partial_input(
+def test_server_verifier_accepts_missing_inputs_and_attachment_after_partial_input(
 ) -> None:
     job = _partial_job()
     draft, pinned_requirements, pinned_roles = _mixed_draft(job)
@@ -164,6 +167,7 @@ def test_server_verifier_accepts_exact_active_missing_inputs_after_partial_input
         "server_process_name",
         "server_service",
         "rpc_method",
+        "log_archive",
     ]
     assert "caller_service" not in requested
 
@@ -175,7 +179,7 @@ def test_server_verifier_rejects_requirement_ids_in_the_wrong_requested_array(
     value = draft.model_dump(mode="json")
     payload = value["payload"]
     first_input = payload["requested_input"].pop()
-    payload["requested_attachments"].append(first_input)
+    payload["requested_attachments"].insert(0, first_input)
     invalid = AgentJobOutcomeDraftV2.model_validate(value)
 
     with pytest.raises(

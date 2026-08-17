@@ -823,7 +823,7 @@ def test_r01_r14_rpc_timeout_is_one_durable_cross_module_path(
     assert queued_route_assets.available, queued_route_assets.model_dump(mode="json")
     RuntimeAssetResolver(stack.catalog).resolve_job(queued_route)
 
-    # R02/R03: real scheduler + Runtime accept MATCHED, then persist group A.
+    # R02/R03: Runtime accepts MATCHED, then requests group A and logs together.
     stack.start()
     stack.wait_idle()
     waiting_a = _query(stack.mcp, case_id)
@@ -836,7 +836,10 @@ def test_r01_r14_rpc_timeout_is_one_durable_cross_module_path(
         for item in waiting_a["pending_requirements"]
         if item["status"] == RequirementStatus.OPEN.value
     ]
-    assert [item["name"] for item in open_a] == list(PARAMETER_GROUP_A)
+    assert [item["name"] for item in open_a] == [
+        *PARAMETER_GROUP_A,
+        "log_archive",
+    ]
     first_snapshot = stack.repository.read_snapshot()
     aggregate = first_snapshot.cases[case_id]
     route_job = aggregate.jobs[route_job_id]
@@ -857,6 +860,18 @@ def test_r01_r14_rpc_timeout_is_one_durable_cross_module_path(
         if item.job_id == initial_diagnose.job_id
     )
     assert initial_outcome.result_type is OutcomeResultType.NEED_INPUT
+    initial_requirements = {
+        item.requirement_id: item
+        for item in initial_outcome.payload.state_delta.add_pending_requirements
+    }
+    assert [
+        initial_requirements[item].name
+        for item in initial_outcome.payload.requested_input
+    ] == list(PARAMETER_GROUP_A)
+    assert [
+        initial_requirements[item].name
+        for item in initial_outcome.payload.requested_attachments
+    ] == ["log_archive"]
 
     # R04: a strict partial supplement persists facts but creates no Job.
     r04_revision = waiting_a["case_revision"]
@@ -883,7 +898,7 @@ def test_r01_r14_rpc_timeout_is_one_durable_cross_module_path(
     } == {"problem_time", "client_slot"}
     job_count_after_partial = len(stack.repository.read_snapshot().cases[case_id].jobs)
 
-    # R05/R06: completing group A creates one DIAGNOSE Job which asks once for logs.
+    # R05/R06: completing group A moves directly to the existing attachment wait.
     completed_a = _mcp(
         stack.mcp,
         "problem_locator_submit_supplement",
@@ -897,15 +912,14 @@ def test_r01_r14_rpc_timeout_is_one_durable_cross_module_path(
             "wait_seconds": 0,
         },
     )
-    assert completed_a["business_receipt"]["job_id"] is not None
-    stack.wait_idle()
+    assert completed_a["business_receipt"]["job_id"] is None
     waiting_attachment = _query(stack.mcp, case_id)
     assert waiting_attachment["status"] == CaseStatus.WAITING_ATTACHMENT.value, json.dumps(
         waiting_attachment,
         sort_keys=True,
     )
     assert len(stack.repository.read_snapshot().cases[case_id].jobs) == (
-        job_count_after_partial + 1
+        job_count_after_partial
     )
     open_attachment = [
         item
@@ -1192,7 +1206,6 @@ def test_r01_r14_rpc_timeout_is_one_durable_cross_module_path(
         "DIAGNOSE",
         "DIAGNOSE",
         "DIAGNOSE",
-        "DIAGNOSE",
         "REVIEW",
     ]
     assert len({item["pid"] for item in sessions}) == len(sessions)
@@ -1402,7 +1415,7 @@ def test_r01_r14_rpc_timeout_is_one_durable_cross_module_path(
     assert hidden.status_code == 404
     assert hidden.json()["error"]["code"] == "ARTIFACT_NOT_FOUND"
     _assert_logparse_record(logparse_record, expected_target_count=4)
-    assert len(_agent_records(agent_record)) == 6
+    assert len(_agent_records(agent_record)) == 5
     restarted.shutdown()
     http_responses.extend(
         [
@@ -1536,7 +1549,10 @@ def test_same_job_uses_initial_order_fact_and_survives_restart(
         item["name"]
         for item in waiting_a["pending_requirements"]
         if item["status"] == RequirementStatus.OPEN.value
-    ] == list(PARAMETER_GROUP_A)
+    ] == [*PARAMETER_GROUP_A, "log_archive"]
+    job_count_before_inputs = len(
+        stack.repository.read_snapshot().cases[case_id].jobs
+    )
 
     submitted_a = _mcp(
         stack.mcp,
@@ -1551,10 +1567,12 @@ def test_same_job_uses_initial_order_fact_and_survives_restart(
             "wait_seconds": 0,
         },
     )
-    assert submitted_a["business_receipt"]["job_id"] is not None
-    stack.wait_idle()
+    assert submitted_a["business_receipt"]["job_id"] is None
     waiting_attachment = _query(stack.mcp, case_id)
     assert waiting_attachment["status"] == CaseStatus.WAITING_ATTACHMENT.value
+    assert len(stack.repository.read_snapshot().cases[case_id].jobs) == (
+        job_count_before_inputs
+    )
     assert {
         item["provenance"]["input_name"]
         for item in waiting_attachment["user_facts"]
@@ -1628,7 +1646,6 @@ def test_same_job_uses_initial_order_fact_and_survives_restart(
     assert resolved_view["final_result"]["status"] == CandidateStatus.ACCEPTED.value
     assert [item["job_type"] for item in _agent_records(agent_record)] == [
         "ROUTE",
-        "DIAGNOSE",
         "DIAGNOSE",
         "DIAGNOSE",
         "REVIEW",

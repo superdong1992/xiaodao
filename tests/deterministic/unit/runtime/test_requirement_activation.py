@@ -105,7 +105,7 @@ def test_builtin_profile_is_canonical_and_expands_fixed_role_fields() -> None:
     assert by_name["log_archive"]["kind"] == "ATTACHMENT"
 
 
-def test_required_role_requests_slot_and_process_name_but_never_pid() -> None:
+def test_required_role_requests_missing_inputs_and_attachment_but_never_pid() -> None:
     requirements = expand_profile_requirements(_roles(), requires_logparse=True)
     result = resolve_requirements(
         roles=_roles(),
@@ -120,6 +120,7 @@ def test_required_role_requests_slot_and_process_name_but_never_pid() -> None:
         "problem_time",
         "client_slot",
         "client_process_name",
+        "log_archive",
     ]
     assert "client_pid" in result.inactive_requirement_names
 
@@ -152,6 +153,7 @@ def test_optional_role_is_dormant_until_any_role_field_appears() -> None:
     assert [item["name"] for item in activated.requested_requirements] == [
         "server_slot",
         "server_process_name",
+        "log_archive",
     ]
 
 

@@ -588,7 +588,7 @@ def _request_parameter_group_a(
     snapshot: dict[str, object],
 ) -> AgentJobOutcomeDraftV2:
     job_id = str(instruction["job_id"])
-    requirements = [
+    input_requirements = [
         _pending_requirement(
             requirement_id=requirement_id,
             pinned=_pinned_requirement(skill_manifest, name),
@@ -596,16 +596,26 @@ def _request_parameter_group_a(
         )
         for requirement_id, name, _ in PARAMETER_REQUIREMENTS
     ]
+    attachment_requirement = _pending_requirement(
+        requirement_id=ATTACHMENT_REQUIREMENT_ID,
+        pinned=_pinned_requirement(skill_manifest, "log_archive"),
+        job_id=job_id,
+    )
+    requirements = [*input_requirements, attachment_requirement]
     return _agent_outcome(
         instruction,
         result_type=OutcomeResultType.NEED_INPUT,
         payload=DiagnosisOutcome(
             findings=[],
             state_delta=_empty_delta(add_pending_requirements=requirements),
-            requested_input=[item.requirement_id for item in requirements],
-            requested_attachments=[],
+            requested_input=[
+                item.requirement_id for item in input_requirements
+            ],
+            requested_attachments=[attachment_requirement.requirement_id],
             candidate_conclusion_draft=None,
-            recommended_next_step="Collect the complete parameter group A.",
+            recommended_next_step=(
+                "Collect the complete parameter group A and log archive."
+            ),
         ),
         rule_claims=_rule_claims(
             skill_manifest=skill_manifest,

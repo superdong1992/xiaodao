@@ -125,7 +125,7 @@ def resolve_requirements(
         and item["name"] not in facts
     ]
     if missing_initial_inputs:
-        requested = missing_initial_inputs
+        requested = [*missing_initial_inputs, *missing_initial_attachments]
     elif missing_initial_attachments:
         requested = missing_initial_attachments
     elif after_logparse:
