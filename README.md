@@ -75,7 +75,7 @@ uv lock --check
 |---|:---:|---|---|
 | `DATA_ROOT` | 是 | 无 | 独占的持久化状态、资源和任务根目录 |
 | `PUBLIC_BASE_URL` | 是 | 无 | 对外提供服务的 HTTP(S) 根地址，不得包含查询参数或片段 |
-| `SKILL_DIR` | 是 | 无 | 外部受控的生产 Diagnosis Skill 目录；必须至少包含一个 `PRODUCTION` Skill，且生产 catalog 拒绝任何 `TEST_ONLY` Skill。不得指向仓库 `.claude/skills` |
+| `SKILL_DIR` | 是 | 无 | 外部受控的生产 Diagnosis Skill 目录；必须是实际绝对目录，但纯通用部署时可以为空。若包含 Diagnosis Skill，则生产 catalog 拒绝任何 `TEST_ONLY` Skill。不得指向仓库 `.claude/skills` |
 | `GENERIC_SKILL_NAME` | 是 | 无 | Agent 环境中预装的通用定位 Skill 名称；仅允许标准小写连字符名称，启动时不实际调用检查安装 |
 | `LOGPARSE_REPO` | 是 | 无 | 受控的 Logparse 源码目录；Git checkout 和源码压缩包解压目录均受支持，启动时按实际内容生成指纹 |
 | `LOGPARSE_CONFIG_PATH` | 是 | 无 | Logparse 工作区内的配置文件 |
@@ -96,6 +96,8 @@ uv lock --check
 普通黑盒 Skill，不是 `SKILL_DIR` 中带 `diagnosis-skill.json` 的专用 Diagnosis Skill。
 Windows、macOS 和显式 Linux Client 都只通过 HTTP 调用服务端，不安装或执行这个通用
 Skill。服务进程启动时只校验名称格式，不检查 Skill 是否真实存在或能否正确输出结果。
+只部署通用定位 Skill 时，`SKILL_DIR` 仍须指向一个实际绝对目录，但该目录可以为空；此时
+ROUTE 没有专用候选，会确定性转入 GENERIC DIAGNOSE，不调用路由 Agent。
 
 将 Skill 安装到运行 `CLAUDE_COMMAND` 的同一 Linux 服务账号和同一 Agent 配置根。例如，
 有效 Agent 配置根为 `/home/problem-locator/.claude`、Skill 名称为

@@ -38,12 +38,12 @@ FAKE_LOGPARSE_CONFIG = FAKE_LOGPARSE_REPO / "config.yaml"
 CASE_ID = "00000000-0000-0000-0000-000000000801"
 
 
-def _settings(data_root: Path) -> Settings:
+def _settings(data_root: Path, *, skill_dir: Path = SKILL_DIR) -> Settings:
     return Settings.load(
         environ={
             "DATA_ROOT": str(data_root),
             "PUBLIC_BASE_URL": "http://127.0.0.1:8000",
-            "SKILL_DIR": str(SKILL_DIR),
+            "SKILL_DIR": str(skill_dir),
             "GENERIC_SKILL_NAME": "generic-problem-locator-smoke",
             "LOGPARSE_REPO": str(FAKE_LOGPARSE_REPO),
             "LOGPARSE_CONFIG_PATH": str(FAKE_LOGPARSE_CONFIG),
@@ -61,6 +61,34 @@ def test_public_create_app_does_not_expose_the_test_skill_override(
             _settings(tmp_path / "data"),
             allow_test_skills=True,
         )
+
+
+def test_production_app_starts_with_empty_diagnosis_skill_catalog(
+    tmp_path: Path,
+) -> None:
+    empty_skill_dir = tmp_path / "empty-skills"
+    empty_skill_dir.mkdir()
+    app = create_app(
+        _settings(
+            tmp_path / "data",
+            skill_dir=empty_skill_dir,
+        )
+    )
+    graph = app.state.problem_locator_composition
+
+    assert graph is not None
+    assert graph.asset_catalog.route_bindings().available_skill_refs == []
+    assert (
+        graph.asset_catalog.generic_diagnose_bindings().generic_skill_name
+        == "generic-problem-locator-smoke"
+    )
+    with TestClient(app) as client:
+        readiness = client.get("/ready")
+        assert readiness.status_code == 200
+        assert readiness.json()["data"]["ready"] is True
+
+    assert graph.closed is True
+    assert graph.instance_lock.is_acquired() is False
 
 
 def test_production_clock_ids_and_notifier_follow_frozen_shapes() -> None:

@@ -15,6 +15,7 @@ from problem_locator.contracts import (
     ApplicationPortError,
     AssetCatalogPort,
     AssetKind,
+    DiagnosisMode,
     ErrorCode,
     DiagnosisOutcome,
     DiagnosisStateDelta,
@@ -662,13 +663,22 @@ def test_generic_skill_name_must_use_standard_lowercase_hyphens(
         )
 
 
-def test_production_catalog_rejects_test_only_and_requires_production(
+def test_production_catalog_allows_empty_skill_directory_for_generic_only(
     tmp_path: Path,
 ) -> None:
     empty = tmp_path / "empty"
     empty.mkdir()
-    with pytest.raises(ValueError, match="at least one PRODUCTION"):
-        _new_catalog(skill_dir=empty)
+
+    catalog = _new_catalog(skill_dir=empty)
+
+    assert catalog.route_bindings().available_skill_refs == []
+    generic = catalog.generic_diagnose_bindings()
+    assert generic.diagnosis_mode is DiagnosisMode.GENERIC
+    assert generic.generic_skill_name == GENERIC_SKILL_NAME
+    assert generic.skill_ref is None
+
+
+def test_production_catalog_rejects_test_only(tmp_path: Path) -> None:
 
     test_only = tmp_path / "test-only"
     _write_skill(

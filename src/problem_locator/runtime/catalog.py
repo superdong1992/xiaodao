@@ -1364,13 +1364,6 @@ class VersionedAssetCatalog:
                 "TEST_ONLY diagnosis skills are forbidden in the production catalog: "
                 + ", ".join(test_only_ids)
             )
-        if not allow_test_skills and not any(
-            descriptor.deployment_scope == "PRODUCTION"
-            for descriptor in skill_descriptors
-        ):
-            raise ValueError(
-                "the production catalog requires at least one PRODUCTION diagnosis skill"
-            )
 
         for descriptor in skill_descriptors:
             self._register(descriptor.resolved_asset)
