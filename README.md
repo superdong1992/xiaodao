@@ -81,7 +81,7 @@ uv lock --check
 | `LOGPARSE_CONFIG_PATH` | 是 | 无 | Logparse 工作区内的配置文件 |
 | `BIND_HOST` | 否 | `127.0.0.1` | Uvicorn 监听地址 |
 | `PORT` | 否 | `8000` | Uvicorn 监听端口 |
-| `CLAUDE_COMMAND` | 否 | `claude` | Agent 命令，会被解析为 argv 参数模板 |
+| `CLAUDE_COMMAND` | 否 | `claude` | Agent 命令，会原样解析为 argv 参数模板；服务不会自动追加 stream-json 参数 |
 | `LOGPARSE_PYTHON` | 否 | 当前 Python | Logparse 使用的 Python 启动命令 |
 | `DFX_LOG_LEVEL` | 否 | `INFO` | 结构化诊断日志级别：`DEBUG`、`INFO`、`WARNING`、`ERROR` 或 `CRITICAL` |
 | `DFX_LOG_DIR` | 否 | 无 | 服务端可观测日志目录的绝对路径；配置后生成 `debug.jsonl`、`journey.jsonl` 和按 Case 渲染的人类可读日志 |
@@ -284,7 +284,30 @@ uv run python -m problem_locator render-journey \
   --log-dir /var/log/problem-locator
 ```
 
-`detailed.log` 保留全部语义事件及 `journey.jsonl:<line>` 来源，适合逐步定位；`brief.log` 只保留 Case 状态、关键里程碑、当前结论、阻塞项和失败点。运行中的 Case 会明确标记为“当前快照”，不会伪装成最终结论。仓库内置的 [`.claude/skills/render-problem-locator-trace`](.claude/skills/render-problem-locator-trace) Skill 只调用该命令，不自行解析 Journey，也不回退到 debug 日志。
+`brief.log` 会先给出 Case 墙钟时间、系统处理/用户等待/未归类时间，以及按关键路径占比排列的
+Top 3“主要耗时来源”；排名只说明时间主要花在哪里，不使用固定慢阈值，也不自动判定异常。
+`detailed.log` 保留全部语义事件及 `journey.jsonl:<line>` 来源，并增加逐 Job 的排队、执行、
+投递、阶段树、Agent 与 Logparse 子步骤证据。父子阶段和并发区间按时间线分配，避免把
+`TOOL_EXECUTE`、`BACKEND_EXECUTE` 和其内部操作重复相加。运行中的 Case 会明确标记为“当前快照”，
+不会伪装成最终结论。仓库内置的 [`.claude/skills/render-problem-locator-trace`](.claude/skills/render-problem-locator-trace)
+Skill 只调用该命令，不自行解析 Journey，也不回退到 debug 日志。
+
+Agent 细分是服务端对脱敏后 stdout 的被动观察。若 `CLAUDE_COMMAND` 输出受支持的 Claude
+`stream-json`，详细日志可展示 CLI 报告的总耗时、模型 API 累计耗时、轮次和 token 数，以及
+thinking/text 块和受控工具名的首末到达窗口。thinking、text 和工具窗口可能重叠，只作为嵌套
+证据，不能与模型时间或 Case 总时间直接相加；日志不记录 prompt、模型正文、工具输入输出或
+隐藏思维内容。
+
+服务不会修改或自动补全 `CLAUDE_COMMAND`。需要完整 Agent 细分时，应由部署者在私有配置中
+显式提供相应参数，例如：
+
+```dotenv
+CLAUDE_COMMAND="claude -p --output-format stream-json --verbose"
+```
+
+如果命令输出普通文本、畸形或不完整的 stream-json，定位任务本身仍按原行为完成；`brief.log`
+和 `detailed.log` 保留 Backend 等基础耗时，并以 `UNAVAILABLE`/`PARTIAL` 和稳定原因码明确说明
+为什么无法给出模型细分。
 
 如果不配置 `DFX_LOG_DIR`，Journey 日志关闭，原有 debug 日志仍写入 stderr，可由 Docker、systemd 或启动脚本收集和轮转。直接启动时也可以这样重定向：
 

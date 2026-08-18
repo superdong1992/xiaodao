@@ -578,6 +578,47 @@ def _evaluation_issue_codes(
     return ["UNMAPPED_EVALUATION_ISSUE"]
 
 
+def _evaluation_diagnostic_audit(
+    rule: dict[str, Any],
+    evaluation: Any,
+    *,
+    evaluated: dict[str, Any],
+    rule_by_id: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    blocked_dependencies: list[dict[str, Any]] = []
+    for dependency_id in rule["depends_on"]:
+        dependency = evaluated[dependency_id]
+        if (
+            dependency.status
+            in {
+                ServerRuleStatus.VERIFIED_PASS,
+                ServerRuleStatus.SEMANTIC_ONLY,
+            }
+            and not dependency.issues
+        ):
+            continue
+        blocked_dependencies.append(
+            {
+                "rule_id": _audit_identifier(dependency_id),
+                "status": _audit_identifier(dependency.status.value),
+                "issues": _evaluation_issue_codes(
+                    rule_by_id[dependency_id], dependency
+                ),
+            }
+        )
+    return {
+        "blocked_dependencies": blocked_dependencies,
+        "event_observations": [
+            {
+                "event_id": _audit_identifier(item.event_id),
+                "observed_count": item.observed_count,
+                "count_is_lower_bound": item.count_is_lower_bound,
+            }
+            for item in evaluation.event_observations
+        ],
+    }
+
+
 def _scenario_audit_path() -> Path:
     configured = os.environ.get("S08_REAL_SKILL_GENERATION_AUDIT_PATH")
     assert configured, "S08_REAL_SKILL_GENERATION_AUDIT_PATH is required"
@@ -929,6 +970,12 @@ def _assert_scenario_oracles(
                     "rule_structure": _rule_structure_audit(
                         rule_by_id[rule_id]
                     ),
+                    "evaluation_diagnostic": _evaluation_diagnostic_audit(
+                        rule_by_id[rule_id],
+                        evaluation,
+                        evaluated=evaluated,
+                        rule_by_id=rule_by_id,
+                    ),
                 }
             )
         mismatches.extend(scenario_mismatches)
@@ -1088,6 +1135,10 @@ def test_real_conversion_agent_builds_an_executable_reviewed_skill_from_plain_wi
 Your first action must call the Skill tool with exactly {"skill":"wiki-to-diagnosis-skill"}. After it succeeds, take the actual absolute directory shown after `Base directory for this skill:` in the Skill result. Read inputs/wiki.md and inputs/clarifications.md from the current workspace. For each required Skill reference, join that returned absolute directory with references/generation-spec-v6-reference.md or references/verification-contract-v2-reference.md before calling Read. Never pass a bare references/... path to Read or resolve it against the workspace cwd. Among Skill resources, read only the references explicitly linked by the loaded Skill. The clarifications are authoritative author confirmations for every role and Wiki parameter definition. Do not read repository source, generator or validator implementations, tests, case oracles, or any other path. Do not ask questions, use the network, or invent a platform log prefix. Treat both (# ... #) and （# ... #） as conversion-only author notes that must not enter any product field.
 
 Construct the complete JSON object before starting any file mutation. Only after every required Read has completed, call Write exactly once with both `file_path` and non-empty `content` in that same tool input; set `file_path` to output/generation-spec.json and put the entire JSON object in `content`. Do not call Write with missing or empty arguments, do not split the object across writes, and do not use Bash or another file-writing tool. Write no JSON in the final response.
+
+    Before Write, perform the exact per-reference event-field inventory required by section 9.1 of the loaded verification reference. Recursively enumerate every rule and numeric-expression (event, field) pair, and verify the field belongs to that exact event; a field existing only on another event is invalid. For every FIELDS_EQUAL member, use the field actually declared by that member's own event; the two sides may and often do use different field names, so never copy the first member's field name onto the second event merely to express equality. Keep this inventory internal and do not write it as a second artifact.
+
+    Also perform section 9.2's internal positive-witness evaluation before Write. For every non-fallback COMPLETE or PARTIAL path, use only stable log message bodies and confirmed facts from the Wiki/clarifications; apply the actual final line_pattern, match_mode, multiline grouping and selectors, require nonzero events, then evaluate the required mechanical dependency closure in declaration order. No required dependency may become FAIL, UNKNOWN or NOT_APPLICABLE, and every FIELDS_EQUAL/join must have one occurrence tuple whose member values actually match. Do not write if a positive witness cannot be constructed from the supplied source material; do not invent logs, read tests/oracles, or emit the witness as another artifact.
 
 The one UTF-8 JSON object must satisfy the loaded Skill's GenerationSpec v6 contract and preserve the Wiki's multiple contributors, lossy observation policies, multiline record, explicit clock tolerance, COMPLETE/PARTIAL/NONE paths, fixed-snapshot boundary, and timeout-not-cancellation safety meaning. Create no other output file or directory. After the single Write succeeds, stop.
 """

@@ -62,6 +62,7 @@ from problem_locator.integrations.logparse import (
     build_logparse_runtime,
     cli,
 )
+from problem_locator.integrations.logparse import broker as broker_module
 from problem_locator.integrations.logparse.outputs import (
     ControlledRun,
     inspect_controlled_run,
@@ -579,6 +580,12 @@ def test_first_parse_dual_anchor_claim_audit_close_and_fixed_argv(
     capsys: pytest.CaptureFixture[str],
     pinned_asset: ResolvedAsset,
 ) -> None:
+    journey_events: list[tuple[str, dict[str, object]]] = []
+
+    def capture_journey(event: str, **fields: object) -> None:
+        journey_events.append((event, fields))
+
+    monkeypatch.setattr(broker_module, "record_journey_event", capture_journey)
     source = b"synthetic fake archive"
     job = _job(pinned_asset.ref)
     workspace = tmp_path / "workspace"
@@ -699,6 +706,46 @@ def test_first_parse_dual_anchor_claim_audit_close_and_fixed_argv(
         record = _record(record_path)
         assert record["parse_count"] == 1
         assert record["target_logs_count"] == 2
+        assert [event for event, _fields in journey_events] == [
+            "job.logparse.operation.started",
+            "job.logparse.phase.completed",
+            "job.logparse.phase.completed",
+            "job.logparse.phase.completed",
+            "job.logparse.operation.completed",
+        ]
+        phase_data = [
+            fields["data"]
+            for event, fields in journey_events
+            if event == "job.logparse.phase.completed"
+        ]
+        assert phase_data == [
+            {
+                "operation": "parse-targets",
+                "phase": "PARSE",
+                "ordinal": 1,
+                "ok": True,
+                "error_code": None,
+            },
+            {
+                "operation": "parse-targets",
+                "phase": "TARGET",
+                "ordinal": 1,
+                "ok": True,
+                "error_code": None,
+            },
+            {
+                "operation": "parse-targets",
+                "phase": "TARGET",
+                "ordinal": 2,
+                "ok": True,
+                "error_code": None,
+            },
+        ]
+        assert all(fields["case_id"] == job.case_id for _event, fields in journey_events)
+        assert all(fields["job_id"] == job.job_id for _event, fields in journey_events)
+        encoded_journey = json.dumps(journey_events, ensure_ascii=False)
+        assert os.fspath(workspace) not in encoded_journey
+        assert request.model_dump_json() not in encoded_journey
         assert record["invocations"] == [
             {
                 "command": "parse",

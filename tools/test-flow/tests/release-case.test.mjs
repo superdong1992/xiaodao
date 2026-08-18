@@ -12,6 +12,7 @@ import {
   loadReleaseCase,
   loadReleaseCaseInputs,
   loadReleaseCaseOracle,
+  releaseCaseInputCoverage,
   releaseCaseDigests,
   verifyReleaseCaseManifest,
 } from "../lib/release-case.mjs";
@@ -32,6 +33,33 @@ test("diagnosis skill manifest ids map to the frozen runtime asset namespace", (
 test("release case directory ordering is ordinal and independent of host collation", () => {
   const entries = [{ name: "diagnosis-skill.json" }, { name: "SKILL.md" }];
   assert.deepEqual(entries.sort(compareReleaseCaseEntries).map((entry) => entry.name), ["SKILL.md", "diagnosis-skill.json"]);
+});
+
+test("Release driver may omit optional initial facts and reorder the declared inputs", () => {
+  const inputs = loadReleaseCaseInputs(CASE_ROOT);
+  const scenario = inputs.scenarios.find((item) => item.scenario_id === inputs.journey_scenario);
+  assert.ok(scenario);
+  const manifest = JSON.parse(fs.readFileSync(path.join(inputs.approved_skill_dir, "diagnosis-skill.json"), "utf8"));
+  assert.deepEqual(releaseCaseInputCoverage(manifest, scenario.driver), {
+    initialValid: true,
+    supplementValid: true,
+  });
+
+  const reversed = {
+    ...scenario.driver,
+    initial_user_fact_names: [...scenario.driver.initial_user_fact_names].reverse(),
+  };
+  assert.equal(releaseCaseInputCoverage(manifest, reversed).initialValid, true);
+  const missingRequired = {
+    ...scenario.driver,
+    initial_user_fact_names: scenario.driver.initial_user_fact_names.filter((name) => name !== "problem_time"),
+  };
+  assert.equal(releaseCaseInputCoverage(manifest, missingRequired).initialValid, false);
+  const unknown = {
+    ...scenario.driver,
+    initial_user_fact_names: [...scenario.driver.initial_user_fact_names, "unknown_fact"],
+  };
+  assert.equal(releaseCaseInputCoverage(manifest, unknown).initialValid, false);
 });
 
 function filesBelow(root) {

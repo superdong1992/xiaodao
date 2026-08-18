@@ -10,7 +10,7 @@ import time
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Literal
 
 from problem_locator.contracts.enums import (
     CancellationReason,
@@ -25,8 +25,13 @@ from problem_locator.contracts.models import (
 )
 from problem_locator.contracts.ports import AppendOnlyByteSink, CancellationSignal
 from problem_locator.diagnostics import log_event
-from problem_locator.journey import record_stage_completed, record_stage_started
+from problem_locator.journey import (
+    record_journey_event,
+    record_stage_completed,
+    record_stage_started,
+)
 
+from .agent_telemetry import AgentStreamTelemetry, TelemetryTeeSink
 from .claude_command import ClaudeCommandError, prepare_claude_command
 from .failures import RuntimeExecutionError, runtime_failure
 from .process_tree import ManagedProcess, ProcessTreeError, spawn_managed_process
@@ -194,7 +199,9 @@ class AgentBackend:
         resource_limits: ResourceLimits,
         broker_environment: dict[str, str] | None = None,
         test_limits: BackendExecutionLimits | None = None,
+        diagnosis_mode: Literal["GENERIC", "SPECIALIZED"] = "SPECIALIZED",
     ) -> BackendExecution:
+        telemetry = AgentStreamTelemetry(monotonic=self._monotonic)
         stdout_sink = _OwnedSink(log_sinks.stdout)
         stderr_sink = (
             stdout_sink
@@ -220,6 +227,7 @@ class AgentBackend:
                 resource_limits=resource_limits,
                 broker_environment=broker_environment,
                 test_limits=test_limits,
+                telemetry=telemetry,
             )
         except RuntimeExecutionError as exc:
             failure = exc.failure
@@ -249,6 +257,17 @@ class AgentBackend:
                 )
             else:
                 failure = _append_execution_log_detail(failure)
+        try:
+            record_journey_event(
+                "job.backend.telemetry",
+                data=telemetry.snapshot(
+                    diagnosis_mode=diagnosis_mode,
+                    backend_status="FAILED" if failure is not None else "SUCCESS",
+                ),
+            )
+        except Exception:
+            # Telemetry is diagnostic-only and cannot change the Job outcome.
+            pass
         if failure is not None:
             raise RuntimeExecutionError(failure) from None
         assert result is not None
@@ -264,6 +283,7 @@ class AgentBackend:
         resource_limits: ResourceLimits,
         broker_environment: dict[str, str] | None = None,
         test_limits: BackendExecutionLimits | None = None,
+        telemetry: AgentStreamTelemetry,
     ) -> BackendExecution:
         limits = test_limits or BackendExecutionLimits.from_resource_limits(
             resource_limits
@@ -302,7 +322,9 @@ class AgentBackend:
             if value
         )
         stdout_sink = StreamingSecretRedactor(
-            secrets, log_sinks.stdout, close_sink=False
+            secrets,
+            TelemetryTeeSink(log_sinks.stdout, telemetry),
+            close_sink=False,
         )
         stderr_sink = StreamingSecretRedactor(
             secrets, log_sinks.stderr, close_sink=False
@@ -380,6 +402,7 @@ class AgentBackend:
                         "file_descriptor": stdin_fd,
                         "stop": io_stop,
                         "poll_interval_seconds": limits.poll_interval_seconds,
+                        "telemetry": telemetry,
                     },
                     name="problem-locator-agent-stdin",
                 )
@@ -660,6 +683,7 @@ def _write_prompt(
     file_descriptor: int | None = None,
     stop: threading.Event | None = None,
     poll_interval_seconds: float = 0.01,
+    telemetry: AgentStreamTelemetry | None = None,
 ) -> None:
     def stopped() -> bool:
         return stop is not None and stop.is_set()
@@ -670,9 +694,12 @@ def _write_prompt(
         else:
             stop.wait(poll_interval_seconds)
 
+    payload = b""
+    offset = 0
     try:
         payload = prompt.encode("utf-8")
-        offset = 0
+        if telemetry is not None:
+            telemetry.prompt_started(len(payload))
         while offset < len(payload):
             if stopped():
                 break
@@ -698,6 +725,10 @@ def _write_prompt(
         except BaseException as exc:
             if state.failure is None and not stopped():
                 state.failure = exc
+        if telemetry is not None:
+            telemetry.prompt_finished(
+                completed=state.failure is None and not stopped() and offset == len(payload)
+            )
         state.finished.set()
 
 

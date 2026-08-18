@@ -21,6 +21,9 @@ def test_trace_skill_is_a_thin_product_cli_wrapper() -> None:
     assert "fall back to `debug.jsonl`" in normalized_skill
     assert "Exit 2" in skill and "Exit 3" in skill and "Exit 4" in skill
     assert "detailed.log" in skill and "brief.log" in skill
+    assert "critical-path ranking" in skill
+    assert "COMPLETE`, `PARTIAL`, or `UNAVAILABLE" in skill
+    assert "must not be added" in skill
     assert "$render-problem-locator-trace" in metadata
     assert not (SKILL_ROOT / "scripts").exists()
 
@@ -34,3 +37,7 @@ def test_readme_documents_journey_generation_and_snapshots() -> None:
     assert "render-journey" in readme
     assert "detailed.log" in readme and "brief.log" in readme
     assert "当前快照" in readme
+    assert "主要耗时来源" in readme
+    assert "UNAVAILABLE" in readme and "PARTIAL" in readme
+    assert "不会修改或自动补全 `CLAUDE_COMMAND`" in readme
+    assert "--output-format stream-json --verbose" in readme

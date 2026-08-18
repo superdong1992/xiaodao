@@ -70,9 +70,14 @@ def test_real_claude_code_writes_exact_agent_outcome_through_backend(
 
     invocation = prepare_claude_command(command)
     executable = Path(invocation.argv[0])
-    assert executable.name in {"claude", "claude.exe"}
+    assert executable.name in {"node", "node.exe"}
+    wrapper = Path(invocation.argv[1])
+    assert wrapper.name == "isolated-agent-wrapper.mjs"
+    claude_entry_index = invocation.argv.index("--claude-entry") + 1
+    claude_entry = Path(invocation.argv[claude_entry_index])
+    assert claude_entry.name == "cli.js"
     version = subprocess.run(
-        [os.fspath(executable), "--version"],
+        [os.fspath(executable), os.fspath(claude_entry), "--version"],
         cwd=tmp_path,
         env=invocation.environment,
         check=True,

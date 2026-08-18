@@ -746,14 +746,20 @@ def validate_verification_contract(
             "remediation_requirements": remediation,
             "parameters": parameters,
         }
-        for event, field in _rule_event_fields(rule):
+        for reference_index, (event, field) in enumerate(_rule_event_fields(rule)):
             extractor = extractor_by_id.get(event)
             if extractor is None:
-                raise ValueError("verification rule names an unknown event")
+                raise ValueError(
+                    f"{name} kind {kind} reference[{reference_index}] "
+                    "names an unknown event"
+                )
             if field is not None and field not in {
                 item["name"] for item in extractor["fields"]
             }:
-                raise ValueError("verification rule names an unknown event field")
+                raise ValueError(
+                    f"{name} kind {kind} reference[{reference_index}] "
+                    "names an unknown event field"
+                )
         if kind == "ROLE_COVERAGE" and any(
             item["role"] not in role_labels
             or extractor_by_id[item["event"]]["anchor"] != item["role"]

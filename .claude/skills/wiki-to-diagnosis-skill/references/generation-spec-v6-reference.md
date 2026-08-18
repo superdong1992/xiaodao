@@ -161,7 +161,8 @@ INPUT constraints exact keys：
 ```
 
 `value_type` 仅 `STRING`；byte 范围满足 `1 <= min <= max <= 65536`；pattern 为 null 或可编译
-Python regex；allowed_values 是唯一非空字符串数组。
+Python regex；`allowed_values` 必须始终是数组，成员是唯一非空字符串。没有枚举限制时必须写
+空数组 `[]`，绝不能写 JSON `null`；有枚举限制时写 1..100 个唯一非空字符串。
 
 ATTACHMENT constraints exact keys：
 

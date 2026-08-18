@@ -253,6 +253,7 @@ class GenericLocatorExecutor:
             log_sinks=self._open_log_sinks(job),
             resource_limits=job.resource_limits,
             test_limits=self._backend_test_limits,
+            diagnosis_mode="GENERIC",
         )
         validating = record_stage_started(ExecutionStage.OUTCOME_VALIDATE)
         assert job.generic_skill_name is not None

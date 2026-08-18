@@ -165,6 +165,20 @@ def main() -> int:
                     source_sequence = expected
                     output_sequence += 1
                     os.write(raw_fd, line + b"\n")
+                    source_data = event.get("data")
+                    if not isinstance(source_data, dict):
+                        source_data = {}
+                    usage_counts = source_data.get("usage_counts")
+                    usage_total = (
+                        sum(
+                            value
+                            for value in usage_counts.values()
+                            if isinstance(value, int) and not isinstance(value, bool) and value >= 0
+                        )
+                        if isinstance(usage_counts, dict)
+                        else None
+                    )
+                    telemetry_tools = source_data.get("tool_observations")
                     tools = event.get("tools")
                     arguments_value = event.get("arguments")
                     canonical_arguments = (
@@ -236,6 +250,29 @@ def main() -> int:
                             "validation_errors": _validation_error_facts(
                                 event.get("validation_errors")
                             ),
+                            "semantic_stage": source_data.get("stage"),
+                            "diagnosis_mode": source_data.get("diagnosis_mode"),
+                            "backend_status": source_data.get("backend_status"),
+                            "stream_status": source_data.get("stream_status"),
+                            "stream_reason": source_data.get("stream_reason"),
+                            "content_included": source_data.get("content_included"),
+                            "cli_duration_ms": source_data.get("cli_duration_ms"),
+                            "model_api_duration_ms": source_data.get(
+                                "model_api_duration_ms"
+                            ),
+                            "prompt_bytes": source_data.get("prompt_bytes"),
+                            "prompt_write_ms": source_data.get("prompt_write_ms"),
+                            "turn_count": source_data.get("turn_count"),
+                            "usage_unit": source_data.get("usage_unit"),
+                            "usage_total": usage_total,
+                            "telemetry_tool_count": (
+                                len(telemetry_tools)
+                                if isinstance(telemetry_tools, list)
+                                else None
+                            ),
+                            "logparse_operation": source_data.get("operation"),
+                            "logparse_phase": source_data.get("phase"),
+                            "logparse_ordinal": source_data.get("ordinal"),
                         },
                     }
                     encoded = (

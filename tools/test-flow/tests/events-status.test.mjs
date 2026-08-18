@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 
 import {
+  buildWaterfallSummary,
   EventWriter,
   NEGATIVE_PROBE_VALIDATION_FIELDS,
   readRelayedEventPart,
@@ -124,6 +125,49 @@ test("event envelopes reject sensitive keys while accepting ordinary metric name
     writer.write("stage.progress", { data: { message_code: "token_count_updated" } });
     assert.throws(() => writer.write("stage.progress", { data: { auth_token: "redacted" } }), (error) => error.code === "EVENT_DATA_SENSITIVE_KEY");
     writer.close();
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("waterfall summary indexes content-free Agent and Logparse timing coverage", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "test-flow-dfx-telemetry-"));
+  try {
+    const writer = new EventWriter({ attemptRoot: root, runId: "run-dfx", producerId: "service-linux", producerType: "service" });
+    writer.write("job.backend.telemetry", {
+      caseId: "case-1",
+      jobId: "job-1",
+      data: {
+        job_type: "DIAGNOSE",
+        stream_status: "COMPLETE",
+        stream_reason: null,
+        content_included: false,
+        cli_duration_ms: 100,
+        model_api_duration_ms: 80,
+        usage_total: 12,
+      },
+    });
+    writer.write("job.logparse.phase.completed", {
+      caseId: "case-1",
+      jobId: "job-1",
+      data: { job_type: "DIAGNOSE", logparse_operation: "parse-targets", logparse_phase: "PARSE", duration_ms: 10 },
+    });
+    writer.write("job.logparse.operation.completed", {
+      caseId: "case-1",
+      jobId: "job-1",
+      data: { job_type: "DIAGNOSE", logparse_operation: "parse-targets", duration_ms: 12 },
+    });
+    writer.close();
+
+    const summary = buildWaterfallSummary(root, { stages: [] });
+    assert.deepEqual(summary.server_dfx_telemetry, {
+      backend_events: 1,
+      complete: 1,
+      partial: 0,
+      unavailable: 0,
+      reasons: [],
+      content_policy_violations: 0,
+      logparse_operations: 1,
+      logparse_phases: 1,
+    });
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 

@@ -397,6 +397,38 @@ def test_wiki_conversion_contract_is_self_contained_and_business_neutral() -> No
     )
     neutral = _json(references["neutral-logparse-generation-spec-v6.json"])
 
+    assert "`allowed_values` 必须始终是数组" in generation_reference
+    assert "空数组 `[]`，绝不能写 JSON `null`" in generation_reference
+    for token in (
+        "逐引用内部清单",
+        "field ∈ fields(event)",
+        "request_event.end_ms",
+        "即使存在于 `response_event`",
+        "NUMERIC_COMPARE.parameters.left/right",
+        "不能只检查顶层 Rule",
+        '"event": "server_event", "field": "server_request_id"',
+        '"event": "server_event", "field": "client_request_id"',
+        "两侧字段名不要求相同",
+        "不是字段名文本本身",
+    ):
+        assert token in skill or token in verification_reference
+
+    for document in (skill, verification_reference):
+        normalized_document = re.sub(r"\s+", " ", document)
+        for token in (
+            "正向 witness",
+            "稳定日志消息体",
+            "实际 `line_pattern`",
+            "match_mode",
+            "event count",
+            "按声明顺序",
+            "NOT_APPLICABLE",
+            "occurrence tuple",
+            "不能只证明 JSON 可加载",
+            "不得 `Write`",
+        ):
+            assert token in normalized_document
+
     assert "Write 前语义保真检查" in skill
     for document in (skill, generation_reference):
         for token in (

@@ -392,6 +392,16 @@ export function buildWaterfallSummary(attemptRoot, candidate) {
   let retryEvents = 0;
   let timeoutEvents = 0;
   let serverOperationDurationMs = 0;
+  const telemetry = {
+    backend_events: 0,
+    complete: 0,
+    partial: 0,
+    unavailable: 0,
+    reasons: new Set(),
+    content_policy_violations: 0,
+    logparse_operations: 0,
+    logparse_phases: 0,
+  };
   const jobEvents = new Map();
   for (const relative of eventFilesRecursive(eventsRoot)) {
     const filePath = path.join(eventsRoot, relative);
@@ -408,6 +418,17 @@ export function buildWaterfallSummary(attemptRoot, candidate) {
       if (/retry|duplicate/.test(event.event_type)) retryEvents += 1;
       if (/timeout|deadline/.test(event.event_type) || /TIMEOUT|DEADLINE/.test(String(event.data?.error_code ?? ""))) timeoutEvents += 1;
       if (Number.isFinite(event.data?.duration_ms)) serverOperationDurationMs += Number(event.data.duration_ms);
+      if (event.event_type === "job.backend.telemetry") {
+        telemetry.backend_events += 1;
+        const status = String(event.data?.stream_status ?? "").toLowerCase();
+        if (status === "complete") telemetry.complete += 1;
+        else if (status === "partial") telemetry.partial += 1;
+        else if (status === "unavailable") telemetry.unavailable += 1;
+        if (typeof event.data?.stream_reason === "string" && event.data.stream_reason) telemetry.reasons.add(event.data.stream_reason);
+        if (event.data?.content_included !== false) telemetry.content_policy_violations += 1;
+      }
+      if (/^job\.logparse\.operation\.(?:completed|failed)$/.test(event.event_type)) telemetry.logparse_operations += 1;
+      if (/^job\.logparse\.phase\.(?:completed|failed)$/.test(event.event_type)) telemetry.logparse_phases += 1;
       if (typeof event.job_id === "string" && event.job_id && typeof event.data?.job_type === "string") {
         const values = jobEvents.get(event.job_id) ?? [];
         values.push(event);
@@ -467,6 +488,16 @@ export function buildWaterfallSummary(attemptRoot, candidate) {
     producers,
     host_spans: hostSpans,
     server_job_spans: serverJobSpans,
+    server_dfx_telemetry: {
+      backend_events: telemetry.backend_events,
+      complete: telemetry.complete,
+      partial: telemetry.partial,
+      unavailable: telemetry.unavailable,
+      reasons: [...telemetry.reasons].sort(),
+      content_policy_violations: telemetry.content_policy_violations,
+      logparse_operations: telemetry.logparse_operations,
+      logparse_phases: telemetry.logparse_phases,
+    },
     totals: {
       event_bytes: totalBytes,
       transfer_bytes: transferBytes,

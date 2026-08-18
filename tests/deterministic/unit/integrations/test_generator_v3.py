@@ -79,6 +79,26 @@ def test_self_contained_neutral_reference_is_a_valid_generation_spec(
     ] == ["COMPLETE", "PARTIAL", "NONE"]
 
 
+def test_unknown_event_field_error_reports_only_controlled_location(
+    generator: Any,
+) -> None:
+    payload = json.loads(NEUTRAL_REFERENCE_SPEC.read_bytes())
+    sensitive_field = "private_model_field_must_not_leak"
+    payload["verification_contract"]["rules"][3]["parameters"]["left"][
+        "field"
+    ] = sensitive_field
+
+    with pytest.raises(ValueError) as caught:
+        generator.GenerationSpec.from_mapping(payload)
+
+    message = str(caught.value)
+    assert message == (
+        "verification_contract.rules[3] kind NUMERIC_COMPARE reference[0] "
+        "names an unknown event field"
+    )
+    assert sensitive_field not in message
+
+
 @pytest.mark.parametrize(
     ("spec_name", "expected_names", "expected_product"),
     [

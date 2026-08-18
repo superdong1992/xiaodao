@@ -11,6 +11,7 @@ import secrets
 import stat
 import subprocess
 import threading
+import time
 from collections.abc import Callable
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -38,6 +39,7 @@ from problem_locator.contracts import (
     parse_canonical_json_bytes,
     validate_workspace_manifest_for_job,
 )
+from problem_locator.journey import record_journey_event
 
 from .claim import FaultPoint, create_parse_claim
 from .fingerprint import (
@@ -558,7 +560,46 @@ class PinnedLogparseBrokerSession:
         if asset_failure is not None:
             return HTTPStatus.UNPROCESSABLE_ENTITY, canonical_json_bytes(asset_failure)
 
-        if envelope.operation == "parse-targets":
+        operation = envelope.operation
+        started = time.perf_counter()
+        record_journey_event(
+            "job.logparse.operation.started",
+            case_id=self._job.case_id,
+            job_id=self._job.job_id,
+            job_type=self._job.job_type,
+            data={"operation": operation},
+        )
+        status, result = self._dispatch_operation(
+            operation,
+            proposal_key,
+            request_bytes,
+            manifest,
+        )
+        ok = int(status) < 400
+        record_journey_event(
+            "job.logparse.operation.completed" if ok else "job.logparse.operation.failed",
+            case_id=self._job.case_id,
+            job_id=self._job.job_id,
+            job_type=self._job.job_type,
+            duration_ms=(time.perf_counter() - started) * 1000,
+            data={
+                "operation": operation,
+                "ok": ok,
+                "http_status": int(status),
+                "error_code": None if ok else f"HTTP_{int(status)}",
+            },
+        )
+        return status, result
+
+    def _dispatch_operation(
+        self,
+        operation: str,
+        proposal_key: str,
+        request_bytes: bytes,
+        manifest: WorkspaceInputManifest,
+    ) -> tuple[int, bytes]:
+
+        if operation == "parse-targets":
             try:
                 request = parse_canonical_json_bytes(request_bytes, ParseTargetsRequest)
                 self._resolved_plan.validate_request(request)
@@ -570,7 +611,7 @@ class PinnedLogparseBrokerSession:
                 return HTTPStatus.UNPROCESSABLE_ENTITY, canonical_json_bytes(failure)
             status, result = self._parse_targets(request, request_bytes, manifest)
             self._record_operation(
-                envelope.operation,
+                operation,
                 request_bytes,
                 status,
                 result,
@@ -585,14 +626,22 @@ class PinnedLogparseBrokerSession:
             return HTTPStatus.UNPROCESSABLE_ENTITY, canonical_json_bytes(failure)
         status, result = self._target_logs(request, manifest)
         self._record_operation(
-            envelope.operation,
+            operation,
             request_bytes,
             status,
             result,
         )
         return status, result
 
-    def _run_process(self, argv: list[str]) -> tuple[ProcessResult, ExecutionFailure | None]:
+    def _run_process(
+        self,
+        argv: list[str],
+        *,
+        operation: str,
+        phase: str,
+        ordinal: int,
+    ) -> tuple[ProcessResult, ExecutionFailure | None]:
+        started = time.perf_counter()
         self._fault_point("before_process")
         result = self._executor.run(
             argv,
@@ -600,13 +649,34 @@ class PinnedLogparseBrokerSession:
             cancellation=self._cancellation,
         )
         self._fault_point("process_finished")
+        error_code: str | None = None
         if result.start_failed:
-            return result, _tool_failure(ErrorCode.LOGPARSE_FAILED, retryable=True)
-        if result.cancelled:
-            return result, None
-        if result.output_limited or result.returncode != 0:
-            return result, _tool_failure(ErrorCode.LOGPARSE_FAILED)
-        return result, None
+            failure = _tool_failure(ErrorCode.LOGPARSE_FAILED, retryable=True)
+            error_code = ErrorCode.LOGPARSE_FAILED.value
+        elif result.cancelled:
+            failure = None
+            error_code = "CANCELLED"
+        elif result.output_limited or result.returncode != 0:
+            failure = _tool_failure(ErrorCode.LOGPARSE_FAILED)
+            error_code = ErrorCode.LOGPARSE_FAILED.value
+        else:
+            failure = None
+        ok = error_code is None
+        record_journey_event(
+            "job.logparse.phase.completed" if ok else "job.logparse.phase.failed",
+            case_id=self._job.case_id,
+            job_id=self._job.job_id,
+            job_type=self._job.job_type,
+            duration_ms=(time.perf_counter() - started) * 1000,
+            data={
+                "operation": operation,
+                "phase": phase,
+                "ordinal": ordinal,
+                "ok": ok,
+                "error_code": error_code,
+            },
+        )
+        return result, failure
 
     def _target_argv(
         self,
@@ -645,10 +715,11 @@ class PinnedLogparseBrokerSession:
         output_root: Path,
         problem_time: str,
         anchors: list[Anchor],
+        operation: str,
         logparse_run_artifact_draft: AgentArtifactProposalDraft | None = None,
     ) -> tuple[bytes | None, ExecutionFailure | None, bool]:
         targets: list[dict[str, object]] = []
-        for anchor in anchors:
+        for ordinal, anchor in enumerate(anchors, start=1):
             asset_failure = self._current_asset_failure()
             if asset_failure is not None:
                 return None, asset_failure, False
@@ -658,7 +729,10 @@ class PinnedLogparseBrokerSession:
                     output_root=output_root,
                     problem_time=problem_time,
                     anchor=anchor,
-                )
+                ),
+                operation=operation,
+                phase="TARGET",
+                ordinal=ordinal,
             )
             if result.cancelled:
                 return None, None, True
@@ -792,7 +866,12 @@ class PinnedLogparseBrokerSession:
             return HTTPStatus.UNPROCESSABLE_ENTITY, canonical_json_bytes(
                 asset_failure
             )
-        result, failure = self._run_process(argv)
+        result, failure = self._run_process(
+            argv,
+            operation="parse-targets",
+            phase="PARSE",
+            ordinal=1,
+        )
         if result.cancelled:
             return HTTPStatus.SERVICE_UNAVAILABLE, canonical_json_bytes({})
         if failure is not None:
@@ -810,6 +889,7 @@ class PinnedLogparseBrokerSession:
             output_root=run.root,
             problem_time=request.problem_time,
             anchors=list(request.anchors),
+            operation="parse-targets",
             logparse_run_artifact_draft=AgentArtifactProposalDraft(
                 proposal_key=request.artifact_proposal_key,
                 artifact_kind=ArtifactKind.LOGPARSE_RUN,
@@ -859,6 +939,7 @@ class PinnedLogparseBrokerSession:
             output_root=bound.run.root,
             problem_time=request.problem_time,
             anchors=list(request.anchors),
+            operation="target-logs",
         )
         if cancelled:
             return HTTPStatus.SERVICE_UNAVAILABLE, canonical_json_bytes({})

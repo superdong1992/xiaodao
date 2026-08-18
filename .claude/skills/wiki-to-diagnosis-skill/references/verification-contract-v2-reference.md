@@ -539,6 +539,100 @@ label 集、policy ID 集、`event_id -> field 名称集` 与已见 rule ID 集�
 发现任一缺失、拼写漂移或跨 event 借用 field 时不得 `Write`；修正后必须从第 1 步重新完整核对。
 不得依赖 validator 的失败消息来补做这一步。
 
+把 Rule 字段引用展开成内部清单，清单只用于 Write 前核对，不写入 GenerationSpec。每一行至少包含
+`rule index`、`parameter location`、`event`、`field` 和该 event 的 declared field set。必须展开：
+
+- `FACT_FIELD_EQUALS.parameters.event/field`；
+- `FIELDS_EQUAL.parameters.equalities[*].members[*]`；
+- `CROSS_ROLE_CORRELATION.parameters.members[*]`；
+- `EVENT_ORDER.parameters.joins[*].members[*]`；
+- `NUMERIC_COMPARE.parameters.left/right` 内递归出现的每个 `FIELD`，以及
+  `parameters.joins[*].members[*]`。
+
+例如符号表是 `request_event -> {trace_id, start_ms}`、
+`response_event -> {trace_id, end_ms}`：
+
+- `request_event.trace_id`、`request_event.start_ms`、`response_event.trace_id` 和
+  `response_event.end_ms` 是闭合引用；
+- `request_event.end_ms` **不是**闭合引用。`end_ms` 即使存在于 `response_event`，也绝不能被
+  `request_event` 借用；应把 event 改为 `response_event`，或把 Rule 改为引用
+  `request_event` 实际声明的字段；
+- Equality/join 两侧分别按各自 member 的 event 核对，不能因为另一侧 event 声明了同名字段就
+  视为通过；NumericExpression 的嵌套 `FIELD` 也必须逐个核对，不能只检查顶层 Rule。
+
+FIELDS_EQUAL 的两侧字段名不要求相同。若符号表是
+`client_event -> {client_request_id}`、`server_event -> {server_request_id}`，正确写法是：
+
+```json
+{
+  "equalities": [
+    {
+      "members": [
+        {"event": "client_event", "field": "client_request_id"},
+        {"event": "server_event", "field": "server_request_id"}
+      ]
+    }
+  ],
+  "quantifier": "EXISTS"
+}
+```
+
+下面是禁止写法，因为第二个 member 的 `server_event` 没有声明 `client_request_id`：
+
+```json
+{
+  "equalities": [
+    {
+      "members": [
+        {"event": "client_event", "field": "client_request_id"},
+        {"event": "server_event", "field": "client_request_id"}
+      ]
+    }
+  ],
+  "quantifier": "EXISTS"
+}
+```
+
+不要为了表达两个业务标识相等而强制复用同一字段名；FIELDS_EQUAL 比较的是两个已闭合的
+EventField 值，不是字段名文本本身。对每个 Equality，`reference[0]`、`reference[1]` 及后续
+member 都必须分别通过各自 event 的 field set 检查。
+
+只有内部清单的每一行都满足 `field ∈ fields(event)`，才允许执行唯一 `Write`。任何一行无法闭合时
+停止，不得写出近似字段名、跨 event 借字段或等待 validator 纠错。
+
+### 9.2 最终 Write 前的正向 witness 演算
+
+引用闭包只证明名称合法，不证明 extractor 能命中源材料，也不证明 Rule 在预期路径中可执行。
+最终 `Write` 前，必须只用标记外 Wiki 正文与权威澄清中的稳定日志消息体和已确认事实，执行下面的
+内部演算；不得读取测试、scenario、oracle、Runtime 或 validator，也不得把 witness 写进
+GenerationSpec：
+
+1. 对每个非 fallback `COMPLETE|PARTIAL` TerminalPath 构造至少一个正向 witness。witness 中每条
+   event 必须来自源材料里的实际稳定消息体，禁止为了匹配正则而改写、补全或伪造日志。
+2. 对 path 递归依赖闭包中的每个 EventExtractor，把实际消息体逐条代入实际 `line_pattern` 与
+   `match_mode`。`SEARCH` 必须在原消息体中真实命中，`FULL_LINE` 必须整行命中；
+   多行 extractor 还必须核对 member 顺序、`max_gap_lines`、group capture 和 `group_by`。每个 Field
+   的命名 capture 必须真实产生值。
+3. 用已确认事实执行每个 selector；selector 过滤后，path 正向依赖的 event count 必须大于零。
+   observation policy 不会把已经命中的正向 event 抹掉，但也不能把零次命中伪装成 presence。
+4. 按 Rule 声明顺序演算 path 所需 semantic rule 的递归依赖闭包。每个机械依赖必须得到正向结果，
+   不得为 `FAIL`、`UNKNOWN` 或 `NOT_APPLICABLE`；semantic rule 的 `evidence_events` 必须非零且所有
+   机械前提 ready，否则该 path 没有正向 witness。
+5. 对 `FIELDS_EQUAL`、`CROSS_ROLE_CORRELATION` 以及 join，必须在 witness 中找到同一个 occurrence
+   tuple，使每个 Equality 的所有 member **实际值**相等。字段名可不同，字段引用闭合也仍不足以
+   证明值相等；不得因为类型、单位或字段名相似就声明 Equality。
+
+例如源材料的实际消息体是 `edge value:3000` 与 `core budget:3000`，对应 extractor 分别捕获
+`edge_value="3000"` 与 `core_budget="3000"`，则两 event 的 presence 及
+`edge_event.edge_value == core_event.core_budget` 可以形成正向 witness。以下任一情况都失败：
+
+- `line_pattern` 写成 `edge value=(?P<edge_value>\\d+)`，因为实际消息体使用冒号，event count 为零；
+- Equality 比较 `edge_value` 与另一个实际为不同值的字段，即使两侧 `(event, field)` 都合法；
+- FIELDS_EQUAL 依赖一个会得到 `UNKNOWN` 的 presence rule，导致自身为 `NOT_APPLICABLE`。
+
+不能只证明 JSON 可加载、extractor 名称存在或 DAG 静态可达。任一非 fallback path 无法从源材料
+构造上述正向 witness 时不得 `Write`；应请求澄清，而不是发明日志、字段值或隐含场景。
+
 ## 10. TerminalPath 与 DNF
 
 TerminalPath 按数组顺序声明。每个 path exact keys：

@@ -29,6 +29,7 @@ import {
   discoverReleaseCaseRoot,
   loadReleaseCaseInputs,
   loadReleaseCaseOracle,
+  releaseCaseInputCoverage,
   releaseCaseDigests,
 } from "../lib/release-case.mjs";
 import { verifyMaterializedSourceSnapshot } from "../lib/source-snapshot.mjs";
@@ -126,11 +127,10 @@ function selectedReleaseCase(repoRoot) {
   const scenarioOracle = gateOracle.scenarios.find((item) => item.scenario_id === inputs.journey_scenario);
   requireCondition(scenario && scenarioOracle, "RELEASE_CASE_JOURNEY_SCENARIO_MISSING");
   const skillManifest = readJson(path.join(inputs.approved_skill_dir, "diagnosis-skill.json"));
-  const initialInputs = skillManifest.requirements.filter((item) => item.kind === "INPUT" && item.stage === "INITIAL").map((item) => item.name);
-  const afterInputs = skillManifest.requirements.filter((item) => item.kind === "INPUT" && item.stage === "AFTER_LOGPARSE").map((item) => item.name);
+  const inputCoverage = releaseCaseInputCoverage(skillManifest, scenario.driver);
   const attachments = skillManifest.requirements.filter((item) => item.kind === "ATTACHMENT" && item.stage === "INITIAL");
-  requireCondition(canonicalJson(initialInputs) === canonicalJson(scenario.driver.initial_user_fact_names), "RELEASE_CASE_INITIAL_INPUT_DRIFT", "FAIL", "CONTRACT");
-  requireCondition(canonicalJson(afterInputs) === canonicalJson(scenario.driver.supplement_input_names), "RELEASE_CASE_SUPPLEMENT_INPUT_DRIFT", "FAIL", "CONTRACT");
+  requireCondition(inputCoverage.initialValid, "RELEASE_CASE_INITIAL_INPUT_DRIFT", "FAIL", "CONTRACT");
+  requireCondition(inputCoverage.supplementValid, "RELEASE_CASE_SUPPLEMENT_INPUT_DRIFT", "FAIL", "CONTRACT");
   requireCondition(attachments.length === 1, "RELEASE_CASE_ATTACHMENT_REQUIREMENT", "FAIL", "CONTRACT");
   requireCondition(canonicalJson(skillManifest.logparse_plan.anchors.map((item) => item.label)) === canonicalJson(scenario.driver.attachment_anchor_names), "RELEASE_CASE_ANCHOR_DRIFT", "FAIL", "CONTRACT");
   const approvedProductRecords = fs.readdirSync(inputs.approved_skill_dir, { withFileTypes: true })

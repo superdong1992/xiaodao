@@ -54,6 +54,44 @@ export function diagnosisSkillRuntimeRefId(manifestId) {
   );
   return `diagnosis-skill/${manifestId}`;
 }
+
+export function releaseCaseInputCoverage(skillManifest, driver) {
+  const requirements = Array.isArray(skillManifest?.requirements)
+    ? skillManifest.requirements
+    : [];
+  const initialRequirements = requirements.filter(
+    (item) => item?.kind === "INPUT" && item?.stage === "INITIAL",
+  );
+  const initialNames = Array.isArray(driver?.initial_user_fact_names)
+    ? driver.initial_user_fact_names
+    : [];
+  const declaredInitial = new Set(initialRequirements.map((item) => item.name));
+  const requiredInitial = new Set(
+    initialRequirements
+      .filter((item) => item.requiredness === "REQUIRED")
+      .map((item) => item.name),
+  );
+  const providedInitial = new Set(initialNames);
+  const initialValid = (
+    initialNames.length === providedInitial.size
+    && initialNames.every((name) => declaredInitial.has(name))
+    && [...requiredInitial].every((name) => providedInitial.has(name))
+  );
+
+  const afterNames = requirements
+    .filter((item) => item?.kind === "INPUT" && item?.stage === "AFTER_LOGPARSE")
+    .map((item) => item.name);
+  const supplementNames = Array.isArray(driver?.supplement_input_names)
+    ? driver.supplement_input_names
+    : [];
+  const supplementValid = (
+    afterNames.length === new Set(afterNames).size
+    && supplementNames.length === new Set(supplementNames).size
+    && afterNames.length === supplementNames.length
+    && afterNames.every((name) => supplementNames.includes(name))
+  );
+  return { initialValid, supplementValid };
+}
 const SCENARIO_ORACLE_FIELDS = [
   "candidate_factor_ids",
   "case_status",

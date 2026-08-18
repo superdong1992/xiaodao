@@ -14,6 +14,7 @@ from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
 
 from problem_locator.contracts.models import NonEmptyText, OpaqueId, UtcTimestamp
 from problem_locator.journey import JourneyEvent
+from problem_locator.journey_timing import JobTiming, TimingReport, analyze_timing
 
 
 _KNOWN_EVENTS = frozenset(
@@ -41,6 +42,12 @@ _KNOWN_EVENTS = frozenset(
         "job.outcome.rejected",
         "job.outcome.stale",
         "job.execution.failure_applied",
+        "job.backend.telemetry",
+        "job.logparse.operation.started",
+        "job.logparse.operation.completed",
+        "job.logparse.operation.failed",
+        "job.logparse.phase.completed",
+        "job.logparse.phase.failed",
     }
 )
 _TERMINAL_STATUSES = frozenset(
@@ -70,6 +77,12 @@ _EVENT_TITLES = {
     "job.outcome.rejected": "Outcome 被拒绝",
     "job.outcome.stale": "Outcome 已过期",
     "job.execution.failure_applied": "执行基础设施失败已应用",
+    "job.backend.telemetry": "Agent 耗时遥测",
+    "job.logparse.operation.started": "Logparse 操作开始",
+    "job.logparse.operation.completed": "Logparse 操作完成",
+    "job.logparse.operation.failed": "Logparse 操作失败",
+    "job.logparse.phase.completed": "Logparse 子阶段完成",
+    "job.logparse.phase.failed": "Logparse 子阶段失败",
 }
 
 
@@ -231,6 +244,219 @@ def _duration_text(lines: tuple[JourneyLine, ...]) -> str:
     return "".join(parts)
 
 
+def _timing_text(duration_ms: float | None) -> str:
+    if duration_ms is None:
+        return "无证据"
+    if duration_ms < 1000:
+        return f"{duration_ms:.3f} ms"
+    seconds = duration_ms / 1000
+    if seconds < 60:
+        return f"{seconds:.3f} s"
+    minutes, remainder = divmod(seconds, 60)
+    if minutes < 60:
+        return f"{int(minutes)}m{remainder:.3f}s"
+    hours, minutes = divmod(int(minutes), 60)
+    return f"{hours}h{minutes}m{remainder:.3f}s"
+
+
+def _share_text(duration_ms: float, elapsed_ms: float) -> str:
+    share = 0.0 if elapsed_ms <= 0 else duration_ms / elapsed_ms
+    return f"{share * 100:.1f}%"
+
+
+def _source_text(source_lines: tuple[int, ...]) -> str:
+    if not source_lines:
+        return "无直接事件行"
+    return "、".join(f"journey.jsonl:{line}" for line in source_lines)
+
+
+def _telemetry_status(report: TimingReport) -> str:
+    entries = [entry for job in report.jobs for entry in job.telemetry]
+    if not entries:
+        return "Agent 细分不可用：该 Journey 未记录 job.backend.telemetry（旧版本或尚未执行 Agent）"
+    complete = sum(data.get("stream_status") == "COMPLETE" for _, data in entries)
+    if complete == len(entries):
+        return f"Agent 细分: COMPLETE（{complete}/{len(entries)} 次调用）"
+    reasons = sorted(
+        {
+            str(data.get("stream_reason") or data.get("stream_status") or "UNKNOWN")
+            for _, data in entries
+            if data.get("stream_status") != "COMPLETE"
+        }
+    )
+    return (
+        f"Agent 细分: {complete}/{len(entries)} 次完整；"
+        f"不可用/部分原因：{'、'.join(reasons)}"
+    )
+
+
+def _brief_timing(report: TimingReport) -> list[str]:
+    result = [
+        "耗时归因:",
+        f"- Case 墙钟: {_timing_text(report.elapsed_ms)}",
+        (
+            f"- 系统处理: {_timing_text(report.system_processing_ms)} "
+            f"({_share_text(report.system_processing_ms, report.elapsed_ms)})；"
+            f"用户等待: {_timing_text(report.user_wait_ms)} "
+            f"({_share_text(report.user_wait_ms, report.elapsed_ms)})；"
+            f"未归类: {_timing_text(report.unclassified_ms)} "
+            f"({_share_text(report.unclassified_ms, report.elapsed_ms)})"
+        ),
+        "- 主要耗时来源（按 Case 关键路径排名，非异常判定）:",
+    ]
+    if report.causes:
+        for index, cause in enumerate(report.causes[:3], start=1):
+            result.append(
+                f"  {index}. {cause.label}: {_timing_text(cause.duration_ms)} "
+                f"({cause.share * 100:.1f}%)"
+            )
+    else:
+        result.append("  1. 当前事件不足以形成可计量区间")
+    result.append(f"- {_telemetry_status(report)}")
+    return result
+
+
+def _number(data: dict[str, Any], name: str) -> float | None:
+    value = data.get(name)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    result = float(value)
+    return result if result >= 0 else None
+
+
+def _backend_duration(job: JobTiming) -> float | None:
+    values = [
+        span.duration_ms
+        for span in job.spans
+        if span.category == "stage" and span.detail == "BACKEND_EXECUTE"
+    ]
+    return sum(values) if values else None
+
+
+def _detailed_telemetry(job: JobTiming) -> list[str]:
+    if not job.telemetry:
+        return ["    Agent 细分: 不可用（该 Journey 未记录遥测事件）"]
+    result: list[str] = []
+    backend_ms = _backend_duration(job)
+    for ordinal, (line_number, data) in enumerate(job.telemetry, start=1):
+        status = data.get("stream_status", "UNKNOWN")
+        reason = data.get("stream_reason")
+        result.append(
+            f"    Agent 调用 #{ordinal}: {status}"
+            f"{f' / {reason}' if reason else ''}，模式={data.get('diagnosis_mode', 'UNKNOWN')}，"
+            f"来源 journey.jsonl:{line_number}"
+        )
+        cli_ms = _number(data, "cli_duration_ms")
+        api_ms = _number(data, "model_api_duration_ms")
+        result.append(
+            f"      服务端 Backend: {_timing_text(backend_ms)}；"
+            f"CLI 报告总耗时: {_timing_text(cli_ms)}；"
+            f"模型 API 累计: {_timing_text(api_ms)}"
+        )
+        if backend_ms is not None and cli_ms is not None and cli_ms <= backend_ms:
+            result.append(
+                f"      服务端包装开销: {_timing_text(backend_ms - cli_ms)}"
+            )
+        elif backend_ms is not None and cli_ms is not None:
+            result.append("      服务端包装开销: 证据不一致，未生成负残差")
+        if cli_ms is not None and api_ms is not None and api_ms <= cli_ms:
+            result.append(f"      CLI 非 API 时间: {_timing_text(cli_ms - api_ms)}")
+        elif cli_ms is not None and api_ms is not None:
+            result.append("      CLI 非 API 时间: 证据不一致，未生成负残差")
+        result.append(
+            f"      Prompt: {data.get('prompt_bytes', 0)} bytes，"
+            f"写入状态={data.get('prompt_write_status', 'UNKNOWN')}，"
+            f"写入耗时={_timing_text(_number(data, 'prompt_write_ms'))}"
+        )
+        result.append(
+            f"      轮次={data.get('turn_count')}；token 用量={data.get('usage_counts', {})}"
+        )
+        blocks = data.get("block_observations")
+        if isinstance(blocks, dict):
+            for block_name in ("thinking", "text"):
+                block = blocks.get(block_name)
+                if not isinstance(block, dict):
+                    continue
+                result.append(
+                    f"      {block_name} 观察: blocks={block.get('block_count', 0)}，"
+                    f"bytes={block.get('utf8_bytes', 0)}，"
+                    f"window={_timing_text(_number(block, 'observed_window_ms'))}"
+                )
+        tools = data.get("tool_observations")
+        if isinstance(tools, list) and tools:
+            result.append(
+                "      工具观察（嵌套、不可与模型时间直接相加）: "
+                f"并集={_timing_text(_number(data, 'tool_observed_union_ms'))}"
+            )
+            for tool in tools:
+                if not isinstance(tool, dict):
+                    continue
+                result.append(
+                    f"        - {tool.get('name', 'OTHER')}: calls={tool.get('call_count', 0)}，"
+                    f"completed={tool.get('completed_count', 0)}，"
+                    f"observed={_timing_text(_number(tool, 'observed_duration_ms'))}，"
+                    f"max={_timing_text(_number(tool, 'max_call_ms'))}"
+                )
+        result.append(
+            f"      内容记录: {str(data.get('content_included', False)).lower()}"
+        )
+    return result
+
+
+def _detailed_timing(report: TimingReport) -> list[str]:
+    result = [
+        "耗时归因摘要",
+        f"  Case 墙钟: {_timing_text(report.elapsed_ms)}",
+        (
+            f"  系统处理: {_timing_text(report.system_processing_ms)}；"
+            f"用户等待: {_timing_text(report.user_wait_ms)}；"
+            f"未归类: {_timing_text(report.unclassified_ms)}"
+        ),
+        "  主要耗时来源（按 Case 关键路径排名，非异常判定）:",
+    ]
+    if report.causes:
+        for index, cause in enumerate(report.causes[:3], start=1):
+            result.append(
+                f"    {index}. {cause.label}: {_timing_text(cause.duration_ms)} "
+                f"({cause.share * 100:.1f}%)；证据 {_source_text(cause.source_lines)}"
+            )
+    else:
+        result.append("    1. 当前事件不足以形成可计量区间")
+    result.extend([f"  {_telemetry_status(report)}", "", "逐 Job 耗时证据"])
+    if not report.jobs:
+        result.append("  无 Job 事件")
+    for job in report.jobs:
+        result.extend(
+            [
+                f"  Job {job.job_id} [{job.job_type}]",
+                (
+                    f"    排队={_timing_text(job.queue_ms)}；"
+                    f"执行={_timing_text(job.runtime_ms)}；"
+                    f"投递={_timing_text(job.delivery_ms)}"
+                ),
+                "    阶段/工具区间（父子重叠由关键路径分配消除）:",
+            ]
+        )
+        owned = [
+            span
+            for span in job.spans
+            if span.category in {"stage", "logparse_operation", "logparse_phase"}
+        ]
+        if owned:
+            for span in owned:
+                result.append(
+                    f"      - {span.label}: {_timing_text(span.duration_ms)}，"
+                    f"status={span.status}，journey.jsonl:{span.line_number}"
+                )
+        else:
+            result.append("      - 无阶段区间")
+        result.extend(_detailed_telemetry(job))
+    result.extend(["", "口径说明:"])
+    result.extend(f"  - {note}" for note in report.notes)
+    result.append("")
+    return result
+
+
 def _pretty_data(data: dict[str, Any]) -> list[str]:
     rendered = json.dumps(
         data,
@@ -261,6 +487,7 @@ def render_detailed(
     if unknown_count:
         result.append(f"完整性提示: 存在 {unknown_count} 个未识别事件，已按通用格式保留")
     result.append("")
+    result.extend(_detailed_timing(analyze_timing(lines)))
 
     for line in lines:
         event = line.event
@@ -444,8 +671,9 @@ def render_brief(case_id: str, lines: tuple[JourneyLine, ...]) -> str:
         f"耗时: {_duration_text(lines)}",
         f"截至: {lines[-1].event.timestamp} / sequence {lines[-1].event.sequence}",
         "",
-        "定位路径:",
     ]
+    result.extend(_brief_timing(analyze_timing(lines)))
+    result.extend(["", "定位路径:"])
     if milestones:
         result.extend(f"{index}. {item}" for index, item in enumerate(milestones, start=1))
     else:

@@ -4,8 +4,8 @@
       "mode": "100644",
       "path": "references/generation-spec-v6-reference.md",
       "purpose": "Define the exact, generic GenerationSpec v6 object contract without requiring source-code inspection.",
-      "sha256": "fcf8c098754409bf52cb1f56367e16556f5d71f059d8da4b51cc0d2ee1392f71",
-      "size": 12018,
+      "sha256": "aea573190918ef014b68926280ec5fdbd44af64a2716a4141fae800326c05cd3",
+      "size": 12175,
       "source": "S08 self-contained reference; no counterpart exists in the frozen upstream source tree."
     },
     {
@@ -20,8 +20,8 @@
       "mode": "100644",
       "path": "references/verification-contract-v2-reference.md",
       "purpose": "Define exact verification contract v2 policies, extractors, rules, numeric expressions, and terminal paths.",
-      "sha256": "c64596f6eea2c2d8daa67494eb8d3639fb07ae80edbdb7a99df6cd5d9ab68605",
-      "size": 20642,
+      "sha256": "8c05956168f50be922199878dd3ff67bc729658d698c4732c2c8b726ffbc8699",
+      "size": 25941,
       "source": "S08 self-contained reference; no counterpart exists in the frozen upstream source tree."
     },
     {
@@ -47,8 +47,8 @@
       "change_reason": "Upgrade the generator workflow to GenerationSpec v6, manifest schema v6, author-confirmed definitions, and the built-in input profile.",
       "delivered": {
         "mode": "100644",
-        "size": 14526,
-        "sha256": "f156ac9a67533b38fc962781e1e6a62768af9f550844ad7ff52aef269d3c01b6"
+        "size": 16315,
+        "sha256": "6045bd309e6d2f4ebaf111bb3f3e67ac787856f773a7e57b72bfab9d37785aa8"
       },
       "path": "SKILL.md",
       "source": {

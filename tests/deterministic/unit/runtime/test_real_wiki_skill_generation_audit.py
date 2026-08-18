@@ -145,6 +145,65 @@ def test_product_semantic_failure_audit_is_field_attributed_and_bounded(
         assert forbidden not in serialized
 
 
+def test_rule_mismatch_diagnostic_reports_only_controlled_dependencies_and_counts(
+    gate: Any,
+) -> None:
+    dependency = SimpleNamespace(
+        status=gate.ServerRuleStatus.UNVERIFIABLE,
+        issues=["never-seal-dependency-prose"],
+    )
+    evaluation = SimpleNamespace(
+        event_observations=[
+            SimpleNamespace(
+                event_id="client_detail",
+                observed_count=0,
+                count_is_lower_bound=True,
+                raw_value="never-seal-event-value",
+            )
+        ]
+    )
+    rule = {
+        "id": "correlates",
+        "kind": "FIELDS_EQUAL",
+        "depends_on": ["client_detail_present"],
+        "parameters": {"equalities": [], "quantifier": "EXISTS"},
+    }
+    rule_by_id = {
+        "correlates": rule,
+        "client_detail_present": {
+            "id": "client_detail_present",
+            "kind": "EVENT_PRESENT",
+        },
+    }
+
+    audit = gate._evaluation_diagnostic_audit(
+        rule,
+        evaluation,
+        evaluated={"client_detail_present": dependency},
+        rule_by_id=rule_by_id,
+    )
+
+    assert audit == {
+        "blocked_dependencies": [
+            {
+                "rule_id": "client_detail_present",
+                "status": "UNVERIFIABLE",
+                "issues": ["RULE_EVALUATION_UNVERIFIABLE"],
+            }
+        ],
+        "event_observations": [
+            {
+                "event_id": "client_detail",
+                "observed_count": 0,
+                "count_is_lower_bound": True,
+            }
+        ],
+    }
+    serialized = json.dumps(audit, ensure_ascii=False, sort_keys=True)
+    assert "never-seal-dependency-prose" not in serialized
+    assert "never-seal-event-value" not in serialized
+
+
 def test_terminal_path_mismatch_audit_projects_only_generated_dnf_terms(
     gate: Any,
 ) -> None:

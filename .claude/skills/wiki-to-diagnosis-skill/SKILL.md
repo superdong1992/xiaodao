@@ -95,7 +95,8 @@ Skill 所有相对链接的唯一解析根。调用 `Read` 时，必须先用它
 
 构造 JSON 前必须完整读取 [GenerationSpec v6 精确参考](references/generation-spec-v6-reference.md)
 和 [verification contract v2 精确参考](references/verification-contract-v2-reference.md)。它们是转换
-Agent 可使用的自包含格式合同；不要读取 generator、validator、Runtime 或测试源码来反推格式。
+Agent 可使用的自包含格式合同；必须执行 verification reference 第 9.1 节的逐引用内部清单并对照
+其中的正反例，再开始唯一 `Write`。不要读取 generator、validator、Runtime 或测试源码来反推格式。
 [wiki-template.md](references/wiki-template.md) 只演示无 Logparse 的最小对象，
 [neutral-logparse-generation-spec-v6.json](references/neutral-logparse-generation-spec-v6.json) 只演示
 复杂 Logparse 结构。示例中的 identity、名称、文本、阈值和策略均不是默认值，禁止复制到当前
@@ -130,15 +131,31 @@ Agent 可使用的自包含格式合同；不要读取 generator、validator、R
 
 1. 对每个 extractor，逐项确认 anchor、policy、policy key、selector field、`timestamp_field` 与
    `group_by` 都存在于相应符号表；selector 的 `USER_FACT` 必须命名 INPUT Requirement。
-2. 对每条 rule 递归遍历 `parameters` 和 NumericExpression。每个 event 必须命名 extractor；每个
-   `(event, field)` 必须满足 `field ∈ event_id -> field 名称集`；每个 `FACT`/`USER_FACT` 必须命名
-   INPUT Requirement；role 必须已声明且与被引用 event 的 anchor 一致。
+2. 对每条 rule 递归遍历 `parameters` 和 NumericExpression，把每个字段引用按 verification
+   reference 第 9.1 节列为内部清单。每个 event 必须命名 extractor；每个 `(event, field)` 必须满足
+   `field ∈ event_id -> field 名称集`，字段即使存在于另一个 event 也不能借用；每个
+   `FACT`/`USER_FACT` 必须命名 INPUT Requirement；role 必须已声明且与被引用 event 的 anchor 一致。
+   特别是 FIELDS_EQUAL/Equality 的各 member 字段名不要求相同；每个 member 必须使用自己 event
+   实际声明的字段，禁止为了表达“相等”把第一侧字段名复制到第二侧。
 3. `depends_on` 只能使用该 rule 之前的已见 rule ID；`remediation_requirements` 只能使用
    `MISSING_ONLY` Requirement。检查完成后再把当前 rule ID 加入已见集合。
 4. 每个 terminal condition term 必须命名已声明 rule，并保留既定的前序与可达性检查。
+5. 对每个非 fallback `COMPLETE|PARTIAL` path，用标记外 Wiki 正文或权威澄清中的稳定日志消息体
+   构造至少一个内部正向 witness。把原始消息体逐条代入实际 `line_pattern` 与 `match_mode`，再检查
+   多行顺序/间隔/group、selector 与已确认事实、event count，以及按声明顺序执行后的机械依赖状态。
+   path 所需的 event 必须实际抽取为非零；所需机械 rule 必须能够正向成立；所需
+   `SEMANTIC_CAUSALITY` 不得因缺失 event 或非正向依赖而带 issue。尤其是 `FIELDS_EQUAL`，witness
+   必须存在一个 occurrence tuple，使每个 Equality 的 member **值**相等；字段引用闭合但样例值
+   不相等不能算通过。
 
 发现任何缺失、拼写漂移或跨 event 借用 field 时不得 `Write`。只修正引用后从第 1 步重新完整核对
 一次；若仍不闭合，立即停止并请求澄清，不得靠 validator 报错后再猜测或继续写出。
+
+正向 witness 只使用当前 Wiki 标记外正文与权威澄清，不读取仓库测试、oracle 或实现，也不把内部
+witness 写进 GenerationSpec。不能只证明 JSON 可加载或 Rule DAG 名称可达：若实际消息体不匹配
+extractor、selector 过滤掉目标 event、event count 为零、依赖会得到 `FAIL|UNKNOWN|NOT_APPLICABLE`，
+或 Equality 找不到同时满足的 occurrence tuple，就不得 `Write`。源材料不足以构造某条非 fallback
+path 的正向 witness 时先请求澄清，禁止伪造日志或假定字段值。
 
 verification contract v2 使用：
 
