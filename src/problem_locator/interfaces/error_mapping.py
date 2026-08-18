@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from fastapi.exceptions import RequestValidationError
 from pydantic import ValidationError
 
 from problem_locator.contracts.enums import ErrorCode
@@ -99,10 +100,12 @@ def _public_actual(value: Any) -> str | int | bool | None:
 
 
 def validation_diagnostics(
-    error: ValidationError | ValueError | TypeError,
+    error: ValidationError | RequestValidationError | ValueError | TypeError,
 ) -> list[dict[str, Any]]:
     if isinstance(error, ValidationError):
         return error.errors(include_url=False, include_input=True)
+    if isinstance(error, RequestValidationError):
+        return error.errors()
     return [
         {
             "type": type(error).__name__,
@@ -114,7 +117,7 @@ def validation_diagnostics(
 
 
 def validation_error_from(
-    error: ValidationError | ValueError | TypeError,
+    error: ValidationError | RequestValidationError | ValueError | TypeError,
 ) -> ApplicationError:
     """Project framework diagnostics into the existing public detail grammar."""
 

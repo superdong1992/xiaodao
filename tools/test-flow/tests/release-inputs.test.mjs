@@ -157,9 +157,20 @@ test("the first-party adapter matrix is thin, platform-bound and shares one core
     assert.match(wrapper, new RegExp(`TEST_FLOW_FIRST_PARTY_DOCKER_CONTEXT = "${context}"`));
     assert.match(wrapper, /import\("\.\/cross-job-core\.mjs"\)/);
   }
-  const core = fs.readFileSync(path.join(TOOL_ROOT, "adapters", "cross-job-core.mjs"), "utf8");
+  const corePath = path.join(TOOL_ROOT, "adapters", "cross-job-core.mjs");
+  const core = fs.readFileSync(corePath, "utf8");
+  const syntax = spawnSync(process.execPath, ["--check", corePath], { encoding: "utf8" });
+  assert.equal(syntax.status, 0, syntax.stderr);
   assert.match(core, /process\.platform === configuration\.expectedHostPlatform/);
   assert.match(core, /configuration\.client === configuration\.expectedClient/);
+  assert.match(core, /runChromePage/);
+  assert.match(core, /content_length_control: "user-agent"/);
+  assert.match(core, /CHROME_ARTIFACT_DOWNLOAD_MISMATCH/);
+  assert.match(core, /CHROME_IDENTITY_DRIFT/);
+  const actions = fs.readFileSync(path.join(TOOL_ROOT, "lib", "actions.mjs"), "utf8");
+  assert.match(actions, /--chrome-version/);
+  assert.match(actions, /CROSS_JOB_BROWSER_UPLOAD_RECEIPT_INVALID/);
+  assert.match(actions, /CROSS_JOB_BROWSER_API_RECEIPT_INVALID/);
 });
 
 test("Linux capability installs the immutable source snapshot from the sealed offline cache before testing", () => {

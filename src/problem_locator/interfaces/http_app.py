@@ -10,24 +10,29 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any, TypeVar
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Query, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
+from pydantic import TypeAdapter, ValidationError
 
+from problem_locator import __version__
 from problem_locator.contracts.commands import (
     ApplicationResponse,
+    CreateCase,
     PrepareAttachment,
+    SubmitSupplement,
     UploadAttachmentContent,
 )
 from problem_locator.contracts.errors import ApplicationPortError
 from problem_locator.contracts.limits import MAX_ATTACHMENT_BYTES
 from problem_locator.contracts.models import (
     ContentType,
-    NonEmptyText,
-    NonNegativeInt,
     OpaqueId,
-    PositiveInt,
+    ProblemSpecInput,
     Sha256,
+    UserFactInput,
+    WaitSeconds,
 )
 from problem_locator.contracts.ports import (
     ApplicationCommandPort,
@@ -45,27 +50,40 @@ from .error_mapping import (
 )
 from .http_streaming import AsyncRequestBinaryStream, iterate_binary_stream
 from .mcp_server import create_mcp_transport
-from .projections import upload_descriptor
+from .projections import artifact_view, web_upload_descriptor
+from .rest_models import (
+    ApplicationSuccessEnvelope,
+    ArtifactListSuccessEnvelope,
+    CaseQuerySuccessEnvelope,
+    CreateCaseBody,
+    ErrorEnvelope,
+    PrepareAttachmentBody,
+    PrepareAttachmentSuccessEnvelope,
+    SubmitSupplementBody,
+    UploadReadySuccessEnvelope,
+)
 
 
 _OPAQUE_ID = TypeAdapter(OpaqueId)
 _CONTENT_TYPE = TypeAdapter(ContentType)
 _SHA256 = TypeAdapter(Sha256)
+_WAIT_SECONDS = TypeAdapter(WaitSeconds)
 _DECIMAL_BYTES = re.compile(r"(?:0|[1-9][0-9]*)")
 _T = TypeVar("_T")
 
 
-class _JsonBody(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
-
-
-class PrepareAttachmentBody(_JsonBody):
-    request_id: NonEmptyText
-    expected_case_revision: PositiveInt
-    name: NonEmptyText
-    content_type: ContentType
-    declared_size: NonNegativeInt | None = None
-    declared_sha256: Sha256 | None = None
+_ERROR_RESPONSES = {
+    status: {"model": ErrorEnvelope, "description": "Problem Locator error envelope."}
+    for status in (400, 404, 409, 413, 422, 500, 502, 503, 504)
+}
+_UPLOAD_REQUEST_CONTENT = {
+    content_type: {"schema": {"type": "string", "format": "binary"}}
+    for content_type in (
+        "application/gzip",
+        "application/zip",
+        "application/x-tar",
+    )
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,7 +101,7 @@ def _json(data: dict[str, Any], *, status_code: int = 200) -> JSONResponse:
 def _log_http_validation_failure(
     operation: str,
     arguments: dict[str, Any],
-    error: ValidationError | ValueError | TypeError,
+    error: ValidationError | RequestValidationError | ValueError | TypeError,
 ) -> None:
     log_event(
         "http.operation.validation_failed",
@@ -185,16 +203,6 @@ class _ClosingStreamingResponse(StreamingResponse):
             self._source_stream.close()
 
 
-async def _json_object(request: Request) -> dict[str, Any]:
-    try:
-        value = await request.json()
-    except (UnicodeDecodeError, ValueError) as exc:
-        raise ValueError("request body is not valid JSON") from exc
-    if not isinstance(value, dict):
-        raise ValueError("request JSON must be an object")
-    return value
-
-
 def parse_upload_headers(request: Request, attachment_id: str) -> UploadHeaders:
     """Validate all four upload headers before exposing the request body."""
 
@@ -259,12 +267,48 @@ def create_http_app(
 
     app = FastAPI(
         title="Problem Locator V1",
-        docs_url=None,
+        version=__version__,
+        docs_url="/docs",
         redoc_url=None,
-        openapi_url=None,
+        openapi_url="/openapi.json",
         lifespan=lifespan,
     )
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=False,
+        allow_methods=["GET", "POST", "PUT", "OPTIONS"],
+        allow_headers=[
+            "Content-Type",
+            "Idempotency-Key",
+            "X-Content-SHA256",
+        ],
+        expose_headers=[
+            "Content-Length",
+            "Content-Type",
+            "X-Content-SHA256",
+            "X-Problem-Locator-Correlation-ID",
+        ],
+    )
+    # Add diagnostics last so it wraps CORS-generated OPTIONS responses too.
     app.add_middleware(HttpDiagnosticsMiddleware)
+
+    @app.exception_handler(RequestValidationError)
+    async def request_validation_error(
+        request: Request,
+        exc: RequestValidationError,
+    ) -> JSONResponse:
+        route = request.scope.get("route")
+        operation = getattr(route, "name", None) or request.url.path
+        arguments: dict[str, Any] = {
+            "path": dict(request.path_params),
+            "query": list(request.query_params.multi_items()),
+        }
+        if exc.body is not None:
+            arguments["body"] = exc.body
+        _log_http_validation_failure(operation, arguments, exc)
+        error = validation_error_from(exc)
+        return _json(error_envelope(error), status_code=http_status_for(error))
 
     @app.get("/live")
     async def live() -> JSONResponse:
@@ -306,37 +350,40 @@ def create_http_app(
             status_code=http_status_for(report.error),
         )
 
-    @app.post("/api/v1/cases/{case_id}/attachments")
-    async def prepare_attachment(case_id: str, request: Request) -> JSONResponse:
-        operation = "prepare_attachment"
-        arguments: dict[str, Any] = {"case_id": case_id}
+    @app.post(
+        "/api/v1/cases",
+        response_model=ApplicationSuccessEnvelope,
+        responses=_ERROR_RESPONSES,
+        name="create_case",
+        tags=["cases"],
+    )
+    async def create_case(body: CreateCaseBody) -> JSONResponse:
+        operation = "create_case"
+        arguments: dict[str, Any] = {
+            "body": body.model_dump(mode="json", by_alias=True)
+        }
+        log_event(
+            "http.operation.parameters",
+            operation=operation,
+            arguments=arguments,
+        )
         try:
-            typed_case_id = _OPAQUE_ID.validate_python(case_id)
-            raw_body = await _json_object(request)
-            arguments["body"] = raw_body
-            log_event(
-                "http.operation.parameters",
-                operation=operation,
-                arguments=arguments,
+            problem_spec = ProblemSpecInput.model_validate(
+                body.problem_spec.model_dump(mode="python"),
+                strict=True,
             )
-            body = PrepareAttachmentBody.model_validate(raw_body)
-            command = PrepareAttachment(
+            initial_user_facts = [
+                UserFactInput(name=fact.name, value=fact.value)
+                for fact in body.initial_user_facts
+            ]
+            command = CreateCase(
                 idempotency_key=body.request_id,
-                case_id=typed_case_id,
-                expected_case_revision=body.expected_case_revision,
-                name=body.name,
-                content_type=body.content_type,
-                declared_size=body.declared_size,
-                declared_sha256=body.declared_sha256,
+                raw_problem_text=body.raw_problem_text,
+                problem_spec=problem_spec,
+                initial_user_facts=initial_user_facts,
+                wait_seconds=body.wait_seconds,
             )
         except (ValidationError, ValueError, TypeError) as exc:
-            if "body" not in arguments:
-                buffered_body = getattr(request, "_body", None)
-                if isinstance(buffered_body, bytes):
-                    arguments["raw_body"] = buffered_body.decode(
-                        "utf-8",
-                        errors="replace",
-                    )
             _log_http_validation_failure(operation, arguments, exc)
             error = validation_error_from(exc)
             return _json(error_envelope(error), status_code=http_status_for(error))
@@ -348,7 +395,155 @@ def create_http_app(
                 operation=operation,
                 arguments=arguments,
             )
-        descriptor = upload_descriptor(
+        return _json(success_envelope(response))
+
+    @app.get(
+        "/api/v1/cases/{case_id}",
+        response_model=CaseQuerySuccessEnvelope,
+        responses=_ERROR_RESPONSES,
+        name="get_case",
+        tags=["cases"],
+    )
+    async def get_case(
+        case_id: str,
+        request: Request,
+        wait_for_job_id: str | None = Query(default=None),
+        wait_seconds: int = Query(default=0, ge=0, le=30),
+    ) -> JSONResponse:
+        operation = "get_case"
+        arguments: dict[str, Any] = {
+            "case_id": case_id,
+            "query": list(request.query_params.multi_items()),
+        }
+        log_event(
+            "http.operation.parameters",
+            operation=operation,
+            arguments=arguments,
+        )
+        try:
+            query_items = list(request.query_params.multi_items())
+            allowed = {"wait_for_job_id", "wait_seconds"}
+            names = [name for name, _value in query_items]
+            if any(name not in allowed for name in names):
+                raise ValueError("query contains an unknown parameter")
+            if len(names) != len(set(names)):
+                raise ValueError("query parameters must appear at most once")
+            typed_case_id = _OPAQUE_ID.validate_python(case_id)
+            typed_wait_job_id = (
+                None
+                if wait_for_job_id is None
+                else _OPAQUE_ID.validate_python(wait_for_job_id)
+            )
+            typed_wait_seconds = _WAIT_SECONDS.validate_python(wait_seconds)
+        except (ValidationError, ValueError, TypeError) as exc:
+            _log_http_validation_failure(operation, arguments, exc)
+            error = validation_error_from(exc)
+            return _json(error_envelope(error), status_code=http_status_for(error))
+        try:
+            response = await _port_call(
+                query_port.get_case,
+                typed_case_id,
+                typed_wait_job_id,
+                typed_wait_seconds,
+            )
+        except ApplicationPortError as exc:
+            return _port_error_response(
+                exc,
+                operation=operation,
+                arguments=arguments,
+            )
+        return _json(success_envelope(response))
+
+    @app.post(
+        "/api/v1/cases/{case_id}/supplements",
+        response_model=ApplicationSuccessEnvelope,
+        responses=_ERROR_RESPONSES,
+        name="submit_supplement",
+        tags=["cases"],
+    )
+    async def submit_supplement(
+        case_id: str,
+        body: SubmitSupplementBody,
+    ) -> JSONResponse:
+        operation = "submit_supplement"
+        arguments: dict[str, Any] = {
+            "case_id": case_id,
+            "body": body.model_dump(mode="json", by_alias=True),
+        }
+        log_event(
+            "http.operation.parameters",
+            operation=operation,
+            arguments=arguments,
+        )
+        try:
+            typed_case_id = _OPAQUE_ID.validate_python(case_id)
+            command = SubmitSupplement(
+                idempotency_key=body.request_id,
+                case_id=typed_case_id,
+                expected_case_revision=body.expected_case_revision,
+                inputs={item.name: item.value for item in body.inputs},
+                attachment_ids=body.attachment_ids,
+                wait_seconds=body.wait_seconds,
+            )
+        except (ValidationError, ValueError, TypeError) as exc:
+            _log_http_validation_failure(operation, arguments, exc)
+            error = validation_error_from(exc)
+            return _json(error_envelope(error), status_code=http_status_for(error))
+        try:
+            response = await _port_call(command_port.execute, command)
+        except ApplicationPortError as exc:
+            return _port_error_response(
+                exc,
+                operation=operation,
+                arguments=arguments,
+            )
+        return _json(success_envelope(response))
+
+    @app.post(
+        "/api/v1/cases/{case_id}/attachments",
+        response_model=PrepareAttachmentSuccessEnvelope,
+        responses=_ERROR_RESPONSES,
+        name="prepare_attachment",
+        tags=["attachments"],
+    )
+    async def prepare_attachment(
+        case_id: str,
+        body: PrepareAttachmentBody,
+    ) -> JSONResponse:
+        operation = "prepare_attachment"
+        arguments: dict[str, Any] = {
+            "case_id": case_id,
+            "body": body.model_dump(mode="json", by_alias=True),
+        }
+        log_event(
+            "http.operation.parameters",
+            operation=operation,
+            arguments=arguments,
+        )
+        try:
+            typed_case_id = _OPAQUE_ID.validate_python(case_id)
+            command = PrepareAttachment(
+                idempotency_key=body.request_id,
+                case_id=typed_case_id,
+                expected_case_revision=body.expected_case_revision,
+                name=body.name,
+                content_type=body.content_type,
+                declared_size=body.declared_size,
+                declared_sha256=body.declared_sha256,
+            )
+        except (ValidationError, ValueError, TypeError) as exc:
+            _log_http_validation_failure(operation, arguments, exc)
+            error = validation_error_from(exc)
+            return _json(error_envelope(error), status_code=http_status_for(error))
+        try:
+            response = await _port_call(command_port.execute, command)
+        except ApplicationPortError as exc:
+            return _port_error_response(
+                exc,
+                operation=operation,
+                arguments=arguments,
+            )
+        descriptor = web_upload_descriptor(
             response,
             public_base_url=public_base_url,
             content_type=body.content_type,
@@ -361,7 +556,40 @@ def create_http_app(
             )
         )
 
-    @app.put("/api/v1/attachments/{attachment_id}/content")
+    @app.put(
+        "/api/v1/attachments/{attachment_id}/content",
+        response_model=UploadReadySuccessEnvelope,
+        responses=_ERROR_RESPONSES,
+        name="upload_attachment",
+        tags=["attachments"],
+        openapi_extra={
+            "requestBody": {
+                "required": True,
+                "content": _UPLOAD_REQUEST_CONTENT,
+            },
+            "parameters": [
+                {
+                    "name": "Idempotency-Key",
+                    "in": "header",
+                    "required": True,
+                    "schema": {"type": "string"},
+                },
+                {
+                    "name": "X-Content-SHA256",
+                    "in": "header",
+                    "required": True,
+                    "schema": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                },
+                {
+                    "name": "Content-Length",
+                    "in": "header",
+                    "required": True,
+                    "description": "Generated by Chrome for a File or Blob body; browser JavaScript must not set it.",
+                    "schema": {"type": "integer", "minimum": 0},
+                },
+            ],
+        },
+    )
     async def upload_attachment(attachment_id: str, request: Request) -> JSONResponse:
         operation = "upload_attachment"
         arguments: dict[str, Any] = {
@@ -440,7 +668,85 @@ def create_http_app(
             )
         )
 
-    @app.get("/api/v1/artifacts/{artifact_id}/content")
+    @app.get(
+        "/api/v1/cases/{case_id}/artifacts",
+        response_model=ArtifactListSuccessEnvelope,
+        responses=_ERROR_RESPONSES,
+        name="list_artifacts",
+        tags=["artifacts"],
+    )
+    async def list_artifacts(case_id: str, request: Request) -> JSONResponse:
+        operation = "list_artifacts"
+        arguments: dict[str, Any] = {
+            "case_id": case_id,
+            "query": list(request.query_params.multi_items()),
+        }
+        log_event(
+            "http.operation.parameters",
+            operation=operation,
+            arguments=arguments,
+        )
+        try:
+            if request.query_params:
+                raise ValueError("artifact list does not accept query parameters")
+            typed_case_id = _OPAQUE_ID.validate_python(case_id)
+        except (ValidationError, ValueError, TypeError) as exc:
+            _log_http_validation_failure(operation, arguments, exc)
+            error = validation_error_from(exc)
+            return _json(error_envelope(error), status_code=http_status_for(error))
+        try:
+            response = await _port_call(
+                query_port.list_artifacts,
+                typed_case_id,
+                False,
+            )
+        except ApplicationPortError as exc:
+            return _port_error_response(
+                exc,
+                operation=operation,
+                arguments=arguments,
+            )
+        views = [
+            artifact_view(
+                summary,
+                case_id=typed_case_id,
+                public_base_url=public_base_url,
+            )
+            for summary in response.artifacts
+        ]
+        return _json(success_envelope({"artifacts": views}))
+
+    @app.get(
+        "/api/v1/artifacts/{artifact_id}/content",
+        responses={
+            200: {
+                "description": "Immutable downloadable artifact bytes.",
+                "content": {
+                    "application/octet-stream": {
+                        "schema": {"type": "string", "format": "binary"}
+                    }
+                },
+                "headers": {
+                    "Content-Length": {
+                        "schema": {"type": "integer", "minimum": 0}
+                    },
+                    "Content-Type": {"schema": {"type": "string"}},
+                    "X-Content-SHA256": {
+                        "schema": {
+                            "type": "string",
+                            "pattern": "^[0-9a-f]{64}$",
+                        }
+                    },
+                    "X-Problem-Locator-Correlation-ID": {
+                        "schema": {"type": "string"}
+                    },
+                },
+            },
+            **_ERROR_RESPONSES,
+        },
+        name="download_artifact",
+        tags=["artifacts"],
+    )
     async def download_artifact(artifact_id: str, request: Request):
         operation = "download_artifact"
         arguments: dict[str, Any] = {
@@ -499,7 +805,9 @@ def create_http_app(
 
 
 __all__ = [
+    "CreateCaseBody",
     "PrepareAttachmentBody",
+    "SubmitSupplementBody",
     "UploadHeaders",
     "create_http_app",
     "parse_upload_headers",

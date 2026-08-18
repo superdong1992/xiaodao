@@ -22,6 +22,7 @@ import {
   validateUvCache,
 } from "./release-inputs.mjs";
 import { captureSourceSnapshot, publicSourceSnapshot } from "./source-snapshot.mjs";
+import { chromeIdentity } from "./browser.mjs";
 
 const BUILT_IN_ADAPTERS = Object.freeze({
   macos: "macos-linux-release.mjs",
@@ -175,6 +176,9 @@ export function buildRunPlan(repoRoot, options = {}) {
   const planningClient = client ?? "linux";
   const closure = resolveGoalClosure(config, { goalId: goal, track, requestedStage: options.stage ?? null, client: planningClient });
   const crossJobSelected = closure.stages.some((stage) => stage.kind === "real-journey" || stage.id === "journey.cross-job.review");
+  const browserIdentity = crossJobSelected
+    ? chromeIdentity()
+    : { status: "NOT_REQUIRED", product: "Google Chrome", version: null, executable_sha256: null, code: null };
   const effectiveAdapter = crossJobSelected ? builtInAdapter(repoRoot, client) : null;
   const effectiveOptions = { ...options, crossJobAdapter: effectiveAdapter };
   const runtimeProfileId = options.runtimeProfile ?? defaults.runtime_profile;
@@ -274,6 +278,7 @@ export function buildRunPlan(repoRoot, options = {}) {
   else if (formalRuntime && settingsIdentity.status !== "PRESENT") blockers.push({ code: "CLAUDE_SETTINGS_INVALID", detail: `Claude settings violate the runtime profile: ${settingsIdentity.code ?? "invalid"}.` });
 
   if (crossJobSelected && !effectiveAdapter) blockers.push({ code: "CROSS_JOB_ADAPTER_REQUIRED", detail: `No first-party ${client ?? "unresolved"}→Linux CrossJob adapter was selected.` });
+  if (crossJobSelected && browserIdentity.status !== "PRESENT") blockers.push({ code: "CHROME_REQUIRED", detail: `CrossJob Web API proof requires Google Chrome: ${browserIdentity.code ?? "invalid"}.` });
   if (effectiveAdapter && (!path.isAbsolute(effectiveAdapter) || !fs.existsSync(effectiveAdapter) || !fs.statSync(effectiveAdapter).isFile())) blockers.push({ code: "CROSS_JOB_ADAPTER_INVALID", detail: "The selected CrossJob adapter is not an existing repository-owned or explicit file." });
   if (crossJobSelected && client && effectiveAdapter !== builtInAdapter(repoRoot, client)) blockers.push({ code: "BUILTIN_ADAPTER_IDENTITY_INVALID", detail: `The ${client} first-party adapter did not resolve exactly.` });
 
@@ -405,6 +410,7 @@ export function buildRunPlan(repoRoot, options = {}) {
         fingerprint: settingsIdentity.fingerprint ?? null,
         policy: "env-allowlist-only-no-hooks-v1",
       },
+      browser: browserIdentity,
       docker: dockerIdentity,
       image: imageIdentity,
       uv_cache: uvIdentity,

@@ -205,9 +205,9 @@ def test_prepare_post_uses_the_same_command_and_descriptor_projection() -> None:
     assert upload["required_headers"] == {
         "Idempotency-Key": ATTACHMENT_ID,
         "Content-Type": "application/zip",
-        "Content-Length": "10",
         "X-Content-SHA256": SHA256_A,
     }
+    assert upload["expected_content_length"] == 10
     assert len(command.calls) == 1
     recorded = command.calls[0]
     assert type(recorded).__name__ == "PrepareAttachment"
@@ -247,8 +247,8 @@ def test_prepare_post_preserves_every_frozen_application_command_error(
                 "expected_case_revision": 1,
                 "name": "logs.zip",
                 "content_type": "application/zip",
-                "declared_size": None,
-                "declared_sha256": None,
+                "declared_size": 10,
+                "declared_sha256": SHA256_A,
             },
         )
 
@@ -281,8 +281,8 @@ def test_prepare_rejects_extra_fields_without_calling_port(caplog) -> None:
                 "expected_case_revision": 1,
                 "name": "logs.zip",
                 "content_type": "application/zip",
-                "declared_size": None,
-                "declared_sha256": None,
+                "declared_size": 10,
+                "declared_sha256": SHA256_A,
                 "unexpected": "forbidden",
             },
         )
@@ -291,7 +291,7 @@ def test_prepare_rejects_extra_fields_without_calling_port(caplog) -> None:
     assert response.status_code == 400
     body = response.json()
     assert body["error"]["code"] == ErrorCode.VALIDATION_ERROR.value
-    assert body["error"]["details"][0]["field"] == "unexpected"
+    assert body["error"]["details"][0]["field"] == "body.unexpected"
     assert body["error"]["details"][0]["actual"] == "forbidden"
     assert response.headers["x-problem-locator-correlation-id"]
     failure = next(
@@ -302,6 +302,7 @@ def test_prepare_rejects_extra_fields_without_calling_port(caplog) -> None:
     )
     assert failure.dfx_fields["arguments"]["body"]["unexpected"] == "forbidden"
     assert failure.dfx_fields["validation_errors"][0]["loc"] == (
+        "body",
         "unexpected",
     )
     assert command.calls == []
@@ -335,8 +336,8 @@ def test_prepare_rejects_unsafe_or_content_type_mismatched_archive_name(
                 "expected_case_revision": 1,
                 "name": name,
                 "content_type": content_type,
-                "declared_size": None,
-                "declared_sha256": None,
+                "declared_size": 10,
+                "declared_sha256": SHA256_A,
             },
         )
 
@@ -375,7 +376,7 @@ def test_prepare_size_limit_is_classified_by_application_port_not_http_validatio
             "expected_case_revision": 1,
             "name": "logs.zip",
             "content_type": "application/zip",
-            "declared_sha256": None,
+            "declared_sha256": SHA256_A,
         }
         at_limit = await client.post(
             f"/api/v1/cases/{CASE_ID}/attachments",
@@ -397,9 +398,9 @@ def test_prepare_size_limit_is_classified_by_application_port_not_http_validatio
 
     at_limit, above_limit = _run(app, operation)
     assert at_limit.status_code == 200
-    assert at_limit.json()["data"]["upload"]["required_headers"][
-        "Content-Length"
-    ] == str(MAX_ATTACHMENT_BYTES)
+    assert at_limit.json()["data"]["upload"]["expected_content_length"] == (
+        MAX_ATTACHMENT_BYTES
+    )
     assert above_limit.status_code == 413
     assert above_limit.json()["error"] == limit_error.model_dump(mode="json")
     assert [item.declared_size for item in command.calls] == [
@@ -427,7 +428,7 @@ def test_prepare_declared_size_is_strict_nonnegative(declared_size: object) -> N
                 "name": "logs.zip",
                 "content_type": "application/zip",
                 "declared_size": declared_size,
-                "declared_sha256": None,
+                "declared_sha256": SHA256_A,
             },
         )
 

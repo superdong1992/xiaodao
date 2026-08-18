@@ -4,7 +4,26 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
+import { chromeIdentity } from "../lib/browser.mjs";
 import { hashConfiguredPaths, performanceIdentity, pythonImportPathIdentity, stageIdentity } from "../lib/identity.mjs";
+
+test("Chrome identity freezes the version and executable bytes", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "test-flow-chrome-identity-"));
+  try {
+    const executable = path.join(root, process.platform === "win32" ? "chrome.exe" : "google-chrome");
+    fs.writeFileSync(executable, "frozen chrome launcher\n");
+    const identity = chromeIdentity(
+      { TEST_FLOW_CHROME: executable },
+      process.platform,
+      () => ({ status: 0, stdout: "Google Chrome 140.0.7339.1\n", stderr: "" }),
+    );
+    assert.equal(identity.status, "PRESENT");
+    assert.equal(identity.version, "Google Chrome 140.0.7339.1");
+    assert.match(identity.executable_sha256, /^[a-f0-9]{64}$/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test("Python import identity changes when external PYTHONPATH content changes", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "test-flow-python-path-"));

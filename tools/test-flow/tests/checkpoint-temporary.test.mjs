@@ -154,6 +154,28 @@ test("checkpoint classifier accepts only completed uploads and processed proposa
   }
 });
 
+test("checkpoint classifier accepts controlled payload temporaries from rejected upload retries once READY", () => {
+  const value = fixture();
+  try {
+    const upload = path.join(value.root, "tmp", "uploads", ATTACHMENT_ID);
+    for (const token of [
+      "00000000-0000-0000-0000-000000000008",
+      "00000000-0000-0000-0000-000000000009",
+    ]) {
+      fs.writeFileSync(path.join(upload, `.payload-${token}.tmp`), "rejected upload bytes\n", { mode: 0o600 });
+    }
+
+    const receipt = classifyCheckpointTemporary(value.root);
+    assert.equal(receipt.status, "PASS");
+    assert.equal(receipt.excluded_completed_uploads, 1);
+
+    fs.writeFileSync(path.join(upload, ".payload-not-an-opaque-id.tmp"), "untrusted\n", { mode: 0o600 });
+    expectCode(() => classifyCheckpointTemporary(value.root), "CHECKPOINT_UPLOAD_STAGE_INVALID");
+  } finally {
+    fs.rmSync(value.root, { recursive: true, force: true });
+  }
+});
+
 test("checkpoint classifier rejects a finalized but unprocessed durable outbox", () => {
   const value = fixture();
   try {

@@ -14,6 +14,8 @@ from problem_locator.contracts.limits import MAX_ATTACHMENT_BYTES
 from problem_locator.contracts.models import ContentType
 from pydantic import TypeAdapter
 
+from .rest_models import WebUploadDescriptor, WebUploadRequiredHeaders
+
 
 _CONTENT_TYPE = TypeAdapter(ContentType)
 
@@ -57,6 +59,36 @@ def upload_descriptor(
     )
 
 
+def web_upload_descriptor(
+    response: ApplicationResponse,
+    *,
+    public_base_url: str,
+    content_type: str,
+    declared_size: int,
+    declared_sha256: str,
+) -> WebUploadDescriptor:
+    """Project the prepare receipt into headers a browser script can set."""
+
+    attachment_id = response.business_receipt.primary_resource_id
+    canonical_content_type = _CONTENT_TYPE.validate_python(content_type)
+    return WebUploadDescriptor(
+        attachment_id=attachment_id,
+        method="PUT",
+        url=append_public_path(
+            public_base_url,
+            f"/api/v1/attachments/{quote(attachment_id, safe='')}/content",
+        ),
+        required_headers=WebUploadRequiredHeaders(
+            idempotency_key=attachment_id,
+            content_type=canonical_content_type,
+            content_sha256=declared_sha256,
+        ),
+        expected_content_length=declared_size,
+        max_bytes=MAX_ATTACHMENT_BYTES,
+        expires_at=None,
+    )
+
+
 def artifact_view(
     summary: ArtifactSummary,
     *,
@@ -84,4 +116,9 @@ def artifact_view(
     )
 
 
-__all__ = ["append_public_path", "artifact_view", "upload_descriptor"]
+__all__ = [
+    "append_public_path",
+    "artifact_view",
+    "upload_descriptor",
+    "web_upload_descriptor",
+]

@@ -46,7 +46,7 @@ cross-validator 对未知字段、悬空引用、DAG 环、孤儿、不可达 cl
 
 - `dev.default`：framework/config、仓库静态检查、affected 与 full deterministic；不使用真实模型。
 - `dev.real`：完整 Dev 确定性闭包，加一个显式选择的真实 Proof/Stage。
-- `release.full`：framework/config、静态检查、完整 deterministic/SameJob、Host/Client、Linux Server 与安装分发、兼容/取消、真实模型与 Logparse，以及一条 fresh CrossJob。
+- `release.full`：framework/config、静态检查、完整 deterministic/SameJob、Host/Client、Linux Server 与安装分发、兼容/取消、真实 Chrome Web API、真实模型与 Logparse，以及一条 fresh CrossJob。
 
 Release 的真实 Agent、ROUTE、DIAGNOSE、REVIEW 与 Logparse claim 由同一 fresh CrossJob 给出，不重复运行隔离真实 Gate。编译、锁文件和 Git whitespace 是正式 cheap Gate，而不是文档外的人工附加步骤。
 
@@ -60,8 +60,8 @@ CrossJob 有六个逻辑 Stage：
 
 1. Environment
 2. Route
-3. Upload
-4. Diagnose
+3. Upload（真实 Chrome 跨源重放 REST 创建/查询/准备，并用 `Blob` 验证上传）
+4. Diagnose（模型与 Review 完成后，真实 Chrome 重放补参并验证查询、列表和下载）
 5. 自动 Review
 6. Publish/Restart
 
@@ -73,7 +73,7 @@ Release 对真实旅程一律 `reuse=never`，忽略业务 checkpoint，从 GENE
 
 ## 5. 平台模型
 
-Linux 是唯一 Server 平台。Windows 与 macOS 默认使用本机 Client，Linux Client 仅在显式选择时启用；三者都通过 HTTP 直连 Linux Server，且都有仓库拥有的 built-in adapter。三个薄 wrapper 共享相同 Gate receipt、checkpoint、DFX、预算和 evidence 合同，不接受调用方提供任意 adapter 命令。
+Linux 是唯一 Server 平台。Windows 与 macOS 默认使用本机 Client，Linux Client 仅在显式选择时启用；三者都通过 HTTP 直连 Linux Server，且都有仓库拥有的 built-in adapter。三个薄 wrapper 共享相同 Gate receipt、checkpoint、DFX、预算和 evidence 合同，不接受调用方提供任意 adapter 命令。Web API 浏览器目标固定为 Google Chrome；规划会记录版本和可执行文件哈希，Upload/Diagnose Stage 从本机 Chrome 直接跨源访问容器中的 Linux Uvicorn。
 
 平台“受支持”与“已在某次发布真实通过”是两件事。一个 verdict 只证明其中记录的 Client 平台、Server、不可变源码快照、运行时 profile 和外部输入；不得把 macOS 的真实 PASS 外推到 Windows 或 Linux Client。每个平台的真实认证必须由该平台自己的 `release.full` verdict 给出。
 

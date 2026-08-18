@@ -1,23 +1,26 @@
-# Web FastAPI 接口方案讨论稿
+# Web FastAPI 接口决议
 
-状态：讨论中，尚未形成实施决策
+状态：已形成实施决议；历史选项保留用于说明取舍
 
 ## 1. 目的与边界
 
-本文用于讨论 Problem Locator 如何向独立前端提供浏览器可用的 FastAPI HTTP API。
+本文记录 Problem Locator 向独立前端提供浏览器可用 FastAPI HTTP API 的最终决议。
 前端页面、组件、样式、前端工程和前端部署实现不属于本文范围。
 
-本文不是当前权威合同，也不表示下述接口已经实现。最终方案确定后，需要同步更新根
-`README.md`、公开合同、测试合同和部署说明；实际行为仍以运行时代码、schema、生成资产和
-Test Flow verdict 为准。
+实际行为以运行时代码、`/openapi.json`、版本化 OpenAPI 摘要和 Test Flow verdict 为准。
+
+最终范围为创建、单 Case 查询/长轮询、两阶段附件上传、补参、公开产物列表和下载。不提供
+恢复、取消、服务端 Case 历史列表、认证、权限、用户或租户模型。REST 使用独立嵌套 DTO；
+七个 MCP 输入 schema 继续严格扁平。服务启用无凭据通配 CORS，并正式支持当前稳定版 Chrome
+直接跨源调用 Linux Uvicorn。
 
 ## 2. 当前架构事实
 
 当前服务是 Linux 单实例、单 Uvicorn worker、单 Job worker 的 FastAPI 应用：
 
 - Claude Code Host 通过 Streamable HTTP `/mcp` 调用七个公开 MCP 工具。
-- FastAPI 已提供 `/live`、`/ready`、附件准备与上传、产物下载。
-- 创建、查询、补参、恢复、取消和产物列表尚未以普通 REST API 暴露。
+- FastAPI 提供 `/live`、`/ready`、`/openapi.json`、`/docs` 和本文冻结的七个 REST 操作。
+- 恢复、取消和服务端 Case 历史列表不以普通 REST API 暴露。
 - `ApplicationService` 已经实现上述业务能力，HTTP 层可以复用相同的 Command、Query、
   `DomainCoordinator`、存储和调度路径，不需要另建诊断流程。
 - `get_case` 原生支持最长 30 秒的等待，可以作为浏览器长轮询基础，首版不必引入
@@ -28,7 +31,7 @@ Test Flow verdict 为准。
 ```mermaid
 flowchart LR
     Claude["Claude Code Host"] -->|"Streamable HTTP"| MCP["/mcp<br/>七个扁平工具"]
-    Frontend["独立前端"] -.->|"待新增"| REST["FastAPI REST API"]
+    Frontend["独立前端"] -->|"HTTP + JSON / binary"| REST["FastAPI REST API"]
 
     MCP --> App["ApplicationService"]
     REST --> App
@@ -49,7 +52,7 @@ flowchart LR
 
 ### 选项 A：完整闭环
 
-建议的资源与动作如下，路径只用于讨论，尚未冻结：
+历史候选的完整资源与动作如下；最终冻结范围见本节末的决议：
 
 | 方法与路径 | 用途 | 应用层映射 |
 | --- | --- | --- |
@@ -89,9 +92,10 @@ flowchart LR
 实现最少，但 Case 进入 `WAITING_INPUT`、`WAITING_ATTACHMENT` 或 `INTERRUPTED` 后，网页流程会
 停止，必须切换到 Claude Code。该选项更接近只读演示，不构成完整网页版支持。
 
-### 当前建议
+### 最终决议
 
-选择选项 A。它新增的是 HTTP 适配能力，而不是第二套诊断业务逻辑，范围与现有应用层能力一致。
+采用定制范围：创建、查询、附件、补参、公开产物列表和下载；不纳入选项 A 中的恢复和取消。
+新增的是 HTTP 适配能力，不是第二套诊断业务逻辑。
 
 ## 4. 决策二：前端与 FastAPI 的部署关系
 
@@ -140,13 +144,10 @@ https://locator.example.internal/mcp       -> FastAPI
 默认不开放跨域；只有配置精确 Origin allowlist 时才安装或启用 CORS 中间件。生产可以使用同域，
 本地开发或特殊部署可以显式加入 `http://localhost:<port>` 或固定前端域名。
 
-### 当前建议
+### 最终决议
 
-选择选项 C，但把生产默认部署写成同域反向代理。应用内不接受通配 Origin；未配置 allowlist 时
-不返回跨域许可。
-
-此建议不包含 Problem Locator 自建账号体系。若需要应用内用户、会话、角色或租户隔离，应作为
-独立设计处理，不能用 CORS 代替。
+服务允许任意 Origin，`allow_credentials=false`，允许 `GET`、`POST`、`PUT`、`OPTIONS` 和网页
+所需的三个可控请求头。首版明确不包含账号、Cookie、会话、角色、权限、所有权或租户隔离。
 
 ## 5. 决策三：REST 请求合同形态
 
@@ -227,7 +228,7 @@ REST 继续使用根层 `statement`、`expected_behavior` 等字段，并通过
 类型，错误信息、幂等内容身份和测试面都会扩大，也不符合当前严格拒绝错误字段、不做隐式兼容的
 设计风格。
 
-### 当前建议
+### 最终决议
 
 选择选项 A。REST 使用独立的严格嵌套 DTO；MCP 扁平合同保持不变；不提供双形态兼容层。
 
@@ -244,21 +245,16 @@ REST 继续使用根层 `statement`、`expected_behavior` 等字段，并通过
 - 每个 HTTP 请求继续产生 `X-Problem-Locator-Correlation-ID`，参数、验证失败和应用错误继续进入
   服务端 DFX；语义状态变化继续由应用层写 Journey。
 
-## 7. 附件上传的浏览器兼容性待验证项
+## 7. 附件上传的浏览器合同
 
-现有上传协议要求 `Idempotency-Key`、`Content-Type`、`Content-Length` 和
-`X-Content-SHA256` 恰好出现一次。浏览器脚本不能直接控制所有传输级请求头，因此实施前必须使用
-真实浏览器、真实 `Blob`/`File` 和目标反向代理做最小验证，确认 User Agent 是否稳定产生服务端
-要求的 `Content-Length`，并确认跨域预检允许自定义头。
+REST 附件准备要求 `declared_size` 和 `declared_sha256` 必填；MCP 仍允许二者为 null。REST 上传描述
+只把 `Idempotency-Key`、`Content-Type`、`X-Content-SHA256` 列为脚本可控的 required headers，并用
+`expected_content_length` 表达预期长度。Chrome 使用真实 `Blob`/`File` 作为 PUT body 并生成
+`Content-Length`；服务端仍要求四个实际请求头恰好出现一次。
 
-在该问题得到证据前，不应直接修改上传合同。若现有协议不能稳定用于目标浏览器，再单独比较：
-
-- 保留两阶段上传，但增加浏览器可控的显式长度头；
-- 新增浏览器专用的流式上传入口；
-- 由同域反向代理规范化并保留已验证的请求头。
-
-任何选择都必须继续满足附件大小、SHA-256、Content-Type、幂等、流式读取、上传锁和 Case 容量
-约束，不能用服务端 `json.loads`、隐藏字段或客户端 Hook 掩盖错误类型。
+合同继续满足附件大小、SHA-256、Content-Type、幂等、流式读取、上传锁和 Case 容量约束。正式
+验收必须覆盖真实 Chrome 跨源预检和上传；curl 或 `httpx` 只能覆盖服务端确定性行为，不能替代该
+浏览器证据。
 
 ## 8. Case 列表是独立决策
 
@@ -271,25 +267,23 @@ Case ID、页面深链接或前端本地历史打开 Case，但不自动包含�
 - 新增全局分页列表：需要定义排序、游标、字段裁剪、总量限制和谁有权看到哪些 Case。
 - 新增按用户隔离的分页列表：必须先有可信用户身份和 Case 所有权模型。
 
-在访问模型确定之前，不建议直接增加返回所有 Case 的端点。
+最终决议是不新增列表。网页保存创建响应中的 Case ID，并通过深链接重新打开。
 
-## 9. 实施前需要形成的决议
+## 9. 已形成的决议
 
-团队讨论后至少应明确：
-
-1. 首版选择完整闭环、核心诊断还是只提交与查询。
-2. 生产是否同域，以及是否提供可选的精确 CORS allowlist。
-3. REST 是否采用独立嵌套 DTO。
-4. 是否需要应用内认证、用户/租户隔离和 Case 所有权。
-5. 首版是否需要服务端 Case 列表。
-6. 目标浏览器、目标反向代理和附件上传协议的真实验证结果。
+1. 首版提供创建、查询、附件、补参、公开产物列表和下载。
+2. 启用无凭据通配 CORS，不设计访问模型。
+3. REST 使用独立嵌套 DTO，响应复用公开应用 DTO 和 envelope。
+4. 不提供 Case 列表、恢复或取消。
+5. REST 附件元数据必填，MCP 和官方客户端 Skill 不变。
+6. `/openapi.json` 与 `/docs` 公开；正式浏览器目标仅为当前稳定版 Chrome，且不验证反向代理。
 
 ## 10. 确定方案后的验证原则
 
 - 先为新增 HTTP DTO、路由、错误映射、幂等和版本冲突增加确定性接口测试。
 - 增加 REST 与 MCP 对同一应用命令产生等价业务结果的测试，但不要求两者请求 JSON 形态相同。
 - 对七个 MCP 工具运行全量 schema lint，证明扁平合同没有回归。
-- 用真实浏览器验证创建、长轮询、补参、上传、取消、恢复和下载；跨域方案还要覆盖成功与拒绝的
-  CORS 预检。
+- 用真实 Chrome 验证创建、长轮询、补参、上传和下载，并覆盖成功的通配 CORS 预检；不测试未
+  暴露的取消和恢复。
 - 所有新测试活动仍以 `tools/test-flow/run.sh` 或 `tools/test-flow/run.ps1` 为唯一入口；最终结论只
   来自与对应源码身份绑定的 `verdict.json`。

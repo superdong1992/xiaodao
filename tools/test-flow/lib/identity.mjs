@@ -18,6 +18,7 @@ import {
   discoverReleaseCaseRoot,
   releaseCasePartition,
 } from "./release-case.mjs";
+import { chromeIdentity } from "./browser.mjs";
 
 const IGNORED_NAMES = new Set([".git", ".tmp", ".pytest_cache", "__pycache__", "node_modules", ".venv"]);
 
@@ -252,6 +253,7 @@ export function environmentIdentity(repoRoot, environment = process.env) {
     architecture: process.arch,
     node: process.version,
     kernel: os.release(),
+    chrome: chromeIdentity(environment),
     python_test_runtime: python
       ? {
           ...python.identity,

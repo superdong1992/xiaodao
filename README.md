@@ -189,9 +189,74 @@ uv run python -m problem_locator serve --env-file /absolute/path/to/service.env
 - MCP 传输端点：`/mcp`
 - 存活检查：`GET /live`
 - 就绪检查：`GET /ready`
+- OpenAPI：`GET /openapi.json`
+- Swagger 调试页：`GET /docs`
+- 创建 Case：`POST /api/v1/cases`
+- 查询或长轮询 Case：`GET /api/v1/cases/{case_id}`
 - 准备附件：`POST /api/v1/cases/{case_id}/attachments`
 - 上传已准备的附件内容：`PUT /api/v1/attachments/{attachment_id}/content`
+- 提交补充输入和 READY 附件：`POST /api/v1/cases/{case_id}/supplements`
+- 列出公开产物：`GET /api/v1/cases/{case_id}/artifacts`
 - 下载公开产物：`GET /api/v1/artifacts/{artifact_id}/content`
+
+### 浏览器 REST API
+
+REST 与 MCP 共用同一个 `ApplicationService`、状态机、存储和调度路径，但请求合同相互独立。
+REST 使用严格的嵌套 JSON；MCP 继续使用下节所述的七个扁平工具，二者不接受对方的请求形态。
+所有 JSON 响应使用 `ok/data/error` envelope，参数错误为 `400`，资源不存在为 `404`，revision
+或幂等冲突为 `409`，其余状态继续由公开 `ApplicationError` 映射决定。成功写操作返回现有
+`ApplicationResponse`，其中 `case_view` 在提交后重新投影失败时可以为 `null`，此时
+`business_receipt` 仍是持久化成功的权威回执。
+
+创建请求示例：
+
+```json
+{
+  "request_id": "web-create-0001",
+  "raw_problem_text": "RPC request times out.",
+  "problem_spec": {
+    "statement": "RPC request times out.",
+    "expected_behavior": "The RPC completes before its deadline.",
+    "actual_behavior": "The caller reports a timeout.",
+    "scope": "Payment to inventory RPC.",
+    "goals": ["Locate the evidenced cause."],
+    "non_goals": [],
+    "constraints": ["Use only supplied evidence."],
+    "completion_criteria": ["Identify an evidenced cause."]
+  },
+  "initial_user_facts": [
+    {"name": "problem_time", "value": "2026-08-18 10:30"}
+  ],
+  "wait_seconds": 0
+}
+```
+
+`wait_seconds` 默认为 `0`，最大为 30。`GET /api/v1/cases/{case_id}` 还接受可选
+`wait_for_job_id`；省略时会等待当前活动 Job。有限等待结束后仍返回 `200`，由
+`data.wait_timed_out` 区分超时和状态已推进。首版 REST 不提供 Case 列表、恢复或取消端点；
+网页必须保存创建响应中的 Case ID，`INTERRUPTED` Case 只能查询。
+
+附件使用两阶段上传。REST 准备请求必须提供 `request_id`、`expected_case_revision`、`name`、
+`content_type`、`declared_size` 和小写 `declared_sha256`。响应中的 `required_headers` 只包含网页
+脚本可设置的 `Idempotency-Key`、`Content-Type` 和 `X-Content-SHA256`；
+`expected_content_length` 是浏览器应通过 `File`/`Blob` 请求体产生的长度。PUT 不是 multipart，
+Chrome 生成 `Content-Length`，服务端仍在读取请求体前校验该头，并在流式读取期间校验实际大小和
+SHA-256。上传变为 `READY` 后，仍必须通过 supplements 端点显式采用：
+
+```json
+{
+  "request_id": "web-supplement-0001",
+  "expected_case_revision": 3,
+  "inputs": [{"name": "problem_time", "value": "2026-08-18 10:30"}],
+  "attachment_ids": ["00000000-0000-0000-0000-000000000001"],
+  "wait_seconds": 0
+}
+```
+
+服务以无凭据通配 CORS 支持任意网页来源，允许 `GET`、`POST`、`PUT` 和 `OPTIONS`；不使用
+Cookie、账号、Case 所有权或租户隔离。浏览器和生成客户端应以运行时 `/openapi.json` 为机器合同，
+以 `/docs` 进行交互调试；版本化摘要保存在
+[`schemas/v2/web-api.openapi.snapshot.json`](schemas/v2/web-api.openapi.snapshot.json)。
 
 服务提供以下 7 个远程 MCP 工具：
 
@@ -442,4 +507,4 @@ V3 不包含 PostgreSQL、ORM、双写机制或分布式锁。当满足以下任
 
 测试计划、Dev 运行、真实模型重试合同、Release 缓存准备、三平台 built-in adapter、证据管理和退出码统一见 [`tools/test-flow/README.md`](tools/test-flow/README.md)。不要直接运行底层 selector 后自行组合发布结论。
 
-Release closure 会分别验证 Linux Server 原生启动与安装分发、本机 Client/Host、进程树与取消、完整 deterministic/SameJob、真实 Logparse、真实 Agent 以及 fresh CrossJob。skip 不等于通过；每个 Gate 的 JUnit 执行/跳过计数、平台、源码快照 digest、base Git SHA、runtime profile、外部源码和 executable identity 都写入 receipt。只有绑定该不可变快照、最后生成且可重新验证的 `verdict.json` 能证明该次发布；测试通过后可以把完全相同的字节提交到 Git，任何源码变化都必须重新 Release。
+Release closure 会分别验证 Linux Server 原生启动与安装分发、本机 Client/Host、进程树与取消、完整 deterministic/SameJob、真实 Chrome 跨源 REST、真实 Logparse、真实 Agent 以及 fresh CrossJob。Chrome 的版本和可执行文件 SHA-256 会进入 Upload/Diagnose Stage identity；浏览器会重放同一幂等业务请求，不创建第二套诊断旅程。skip 不等于通过；每个 Gate 的 JUnit 执行/跳过计数、平台、源码快照 digest、base Git SHA、runtime profile、外部源码和 executable identity 都写入 receipt。只有绑定该不可变快照、最后生成且可重新验证的 `verdict.json` 能证明该次发布；测试通过后可以把完全相同的字节提交到 Git，任何源码变化都必须重新 Release。

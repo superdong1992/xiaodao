@@ -624,6 +624,8 @@ async function crossJob(context, stage) {
   add("--mcp-source", context.options.mcpSource);
   add("--base-image", RELEASE_BASE_IMAGE);
   add("--runtime-profile-digest", context.plan.runtime_profile_digest);
+  add("--chrome-version", context.plan.release_inputs?.browser?.version);
+  add("--chrome-sha256", context.plan.release_inputs?.browser?.executable_sha256);
   add("--gate-id", context.gateId);
   add("--resource-registry", context.resources.filePath);
   add("--resource-label", `problem-locator.test-flow.run=${path.basename(context.attemptRoot)}`);
@@ -687,6 +689,12 @@ async function crossJob(context, stage) {
   if (receipt.schema_version !== 3 || !receiptStatuses.has(receipt.status) || receipt.stage_id !== stage.id || receipt.gate_id !== context.gateId || receipt.runtime_profile_digest !== context.plan.runtime_profile_digest) {
     return { ...result, status: "ERROR", failure_domain: "HARNESS", code: "CROSS_JOB_RECEIPT_INVALID" };
   }
+  if (receipt.status === "PASS" && stage.id === "journey.cross-job.upload" && receipt.browser_upload?.status !== "PASS") {
+    return { ...result, status: "ERROR", failure_domain: "HARNESS", code: "CROSS_JOB_BROWSER_UPLOAD_RECEIPT_INVALID" };
+  }
+  if (receipt.status === "PASS" && stage.id === "journey.cross-job.diagnose" && receipt.browser_api?.status !== "PASS") {
+    return { ...result, status: "ERROR", failure_domain: "HARNESS", code: "CROSS_JOB_BROWSER_API_RECEIPT_INVALID" };
+  }
   if (result.status === "ERROR") return { ...result, failure_domain: "HARNESS", code: result.termination?.trigger ?? "CROSS_JOB_EVIDENCE_ERROR" };
   if (result.status === "INCONCLUSIVE") return { ...result, failure_domain: "EXTERNAL", code: result.termination?.trigger ?? "EXTERNAL_INCONCLUSIVE" };
   if (receipt.status !== "PASS") {
@@ -704,6 +712,8 @@ async function crossJob(context, stage) {
         client_tool_calls: receipt.client_tool_calls ?? 0,
         server_tool_calls: receipt.server_tool_calls ?? 0,
         checkpoint_ready: receipt.checkpoint_ready ?? false,
+        browser_upload: receipt.browser_upload ?? null,
+        browser_api: receipt.browser_api ?? null,
       },
     };
   }
@@ -721,6 +731,8 @@ async function crossJob(context, stage) {
       server_tool_calls: receipt.server_tool_calls ?? 0,
       checkpoint_ready: receipt.checkpoint_ready ?? false,
       restart_verified: receipt.restart_verified ?? false,
+      browser_upload: receipt.browser_upload ?? null,
+      browser_api: receipt.browser_api ?? null,
     },
   };
 }

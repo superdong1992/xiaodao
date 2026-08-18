@@ -2,7 +2,9 @@
 // Shared first-party Windows/macOS/Linux Client to Linux Server CrossJob core.
 import crypto from "node:crypto";
 import fs from "node:fs";
+import http from "node:http";
 import net from "node:net";
+import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import {
@@ -41,6 +43,7 @@ import {
   zeroUsage,
 } from "../lib/usage.mjs";
 import { canonicalJson, ensureDirectory, sha256Bytes, sha256File } from "../lib/util.mjs";
+import { chromeIdentity, resolveChromeExecutable } from "../lib/browser.mjs";
 
 const MAX_ATTACHMENT_BYTES = 2684354560;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -105,6 +108,13 @@ function writeTextNew(filePath, value) {
   } finally {
     fs.closeSync(descriptor);
   }
+}
+
+function scriptJson(value) {
+  return JSON.stringify(value)
+    .replaceAll("<", "\\u003c")
+    .replaceAll("\u2028", "\\u2028")
+    .replaceAll("\u2029", "\\u2029");
 }
 
 function atomicState(filePath, value) {
@@ -230,6 +240,70 @@ async function run(command, args, { cwd = undefined, env = process.env, forward 
       stderr: Buffer.concat(stderr).toString("utf8"),
     }));
   });
+}
+
+async function runChromePage(label, page, fixtureBytes = null) {
+  const chrome = chromeIdentity();
+  const chromeExecutable = resolveChromeExecutable();
+  requireCondition(chrome.status === "PRESENT" && chromeExecutable, chrome.code ?? "CHROME_REQUIRED", "BLOCKED", "INFRA");
+  const fixtureServer = http.createServer((request, response) => {
+    if (request.url === "/fixture" && fixtureBytes !== null) {
+      response.writeHead(200, {
+        "Cache-Control": "no-store",
+        "Content-Length": String(fixtureBytes.length),
+        "Content-Type": "application/octet-stream",
+      });
+      response.end(fixtureBytes);
+      return;
+    }
+    response.writeHead(200, {
+      "Cache-Control": "no-store",
+      "Content-Type": "text/html; charset=utf-8",
+    });
+    response.end(page);
+  });
+  await new Promise((resolve, reject) => {
+    fixtureServer.once("error", reject);
+    fixtureServer.listen({ host: "127.0.0.1", port: 0 }, resolve);
+  });
+  const fixtureAddress = fixtureServer.address();
+  requireCondition(typeof fixtureAddress === "object" && fixtureAddress && Number.isInteger(fixtureAddress.port), "BROWSER_FIXTURE_ADDRESS_INVALID");
+  const browserOrigin = `http://127.0.0.1:${fixtureAddress.port}`;
+  const profile = fs.mkdtempSync(path.join(os.tmpdir(), `test-flow-chrome-${label}-`));
+  let chromeRun;
+  try {
+    const chromeArguments = [
+      "--headless=new",
+      "--disable-background-networking",
+      "--disable-component-update",
+      "--disable-default-apps",
+      "--disable-gpu",
+      "--disable-sync",
+      "--metrics-recording-only",
+      "--no-default-browser-check",
+      "--no-first-run",
+      "--no-proxy-server",
+      `--user-data-dir=${profile}`,
+      "--virtual-time-budget=30000",
+      "--dump-dom",
+      `${browserOrigin}/`,
+    ];
+    if (typeof process.getuid === "function" && process.getuid() === 0) chromeArguments.unshift("--no-sandbox");
+    chromeRun = await run(chromeExecutable, chromeArguments, { forward: false, maximumBytes: 8 * 1024 * 1024 });
+  } finally {
+    await new Promise((resolve) => fixtureServer.close(resolve));
+    fs.rmSync(profile, { recursive: true, force: true });
+  }
+  requireCondition(chromeRun.status === 0, `CHROME_${label.toUpperCase()}_EXIT_${chromeRun.status}`, "FAIL", "BROWSER");
+  const match = chromeRun.stdout.match(/data-result="([A-Za-z0-9+/=]+)"/);
+  requireCondition(match, `CHROME_${label.toUpperCase()}_RESULT_MISSING`, "FAIL", "BROWSER");
+  let result;
+  try {
+    result = JSON.parse(Buffer.from(match[1], "base64").toString("utf8"));
+  } catch {
+    throw new StageError(`CHROME_${label.toUpperCase()}_RESULT_INVALID`, "FAIL", "BROWSER");
+  }
+  return { browserOrigin, chrome, chromeRun, result };
 }
 
 function dockerArgs(context, args) {
@@ -621,6 +695,7 @@ function validatePhaseOne(audit, releaseCase, requestIds, archive, publicBaseUrl
     case_id: view.case_id,
     attachment_id: descriptor.attachment_id,
     prepared_case_revision: view.case_revision,
+    prepare_expected_case_revision: prepare[0].input.expected_case_revision,
     selected_skill_ref: view.selected_skill_ref,
     upload_descriptor: descriptor,
   };
@@ -631,15 +706,141 @@ async function uploadAttachment(configuration, state, stageRoot) {
   const archive = path.join(configuration.attemptRoot, "payload", state.archive.name);
   requireCondition(fs.existsSync(archive) && fs.statSync(archive).size === state.archive.size && sha256File(archive) === state.archive.sha256, "UPLOAD_FIXTURE_INVALID");
   requireCondition(descriptor.url === `${state.public_base_url}/api/v1/attachments/${state.attachment_id}/content`, "UPLOAD_URL_INVALID");
-  const startedAtUtc = new Date().toISOString();
-  const started = process.hrtime.bigint();
+  const flatCreate = expectedCreateInput(configuration.releaseCase, state.request_ids);
+  const problemKeys = ["statement", "expected_behavior", "actual_behavior", "scope", "goals", "non_goals", "constraints", "completion_criteria"];
+  const createBody = {
+    request_id: flatCreate.request_id,
+    raw_problem_text: flatCreate.raw_problem_text,
+    problem_spec: Object.fromEntries(problemKeys.map((name) => [name, flatCreate[name]])),
+    initial_user_facts: flatCreate.initial_user_fact_names.map((name, index) => ({ name, value: flatCreate.initial_user_fact_values[index] })),
+    wait_seconds: flatCreate.wait_seconds,
+  };
+  const prepareBody = {
+    request_id: state.request_ids.prepare,
+    expected_case_revision: state.prepare_expected_case_revision,
+    name: state.archive.name,
+    content_type: state.archive.content_type,
+    declared_size: state.archive.size,
+    declared_sha256: state.archive.sha256,
+  };
+
+  const archiveBytes = fs.readFileSync(archive);
+  const page = `<!doctype html><html><head><meta charset="utf-8"><title>PENDING</title></head><body><script>
+const configuration = ${scriptJson({
+    createUrl: `${state.public_base_url}/api/v1/cases`,
+    caseUrl: `${state.public_base_url}/api/v1/cases/${state.case_id}`,
+    prepareUrl: `${state.public_base_url}/api/v1/cases/${state.case_id}/attachments`,
+    createBody,
+    prepareBody,
+  })};
+function encoded(value) {
+  const bytes = new TextEncoder().encode(JSON.stringify(value));
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary);
+}
+async function jsonRequest(url, options = {}) {
+  const response = await fetch(url, options);
+  const text = await response.text();
+  let envelope = null;
+  try { envelope = JSON.parse(text); } catch {}
+  return {
+    status: response.status,
+    envelope,
+    correlation_id: response.headers.get("x-problem-locator-correlation-id"),
+  };
+}
+async function upload(label, bytes, descriptor) {
   const response = await fetch(descriptor.url, {
     method: "PUT",
     headers: descriptor.required_headers,
-    body: fs.readFileSync(archive),
-    signal: AbortSignal.timeout(135_000),
+    body: new Blob([bytes], { type: descriptor.required_headers["Content-Type"] }),
   });
   const text = await response.text();
+  let envelope = null;
+  try { envelope = JSON.parse(text); } catch {}
+  return {
+    label,
+    status: response.status,
+    error_code: envelope?.error?.code ?? null,
+    data: envelope?.data ?? null,
+    correlation_id: response.headers.get("x-problem-locator-correlation-id"),
+    response_sha256: response.headers.get("x-content-sha256"),
+  };
+}
+(async () => {
+  const create = await jsonRequest(configuration.createUrl, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(configuration.createBody),
+  });
+  const queryBefore = await jsonRequest(configuration.caseUrl + "?wait_seconds=0");
+  const prepare = await jsonRequest(configuration.prepareUrl, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(configuration.prepareBody),
+  });
+  const descriptor = prepare.envelope?.data?.upload;
+  if (!descriptor) throw new Error("REST prepare did not return an upload descriptor");
+  const fixture = await fetch("/fixture", { cache: "no-store" });
+  if (!fixture.ok) throw new Error("fixture fetch failed");
+  const bytes = await fixture.arrayBuffer();
+  if (bytes.byteLength < 2) throw new Error("fixture is too small");
+  const wrongHash = bytes.slice(0);
+  new Uint8Array(wrongHash)[0] ^= 1;
+  const results = [
+    await upload("size-mismatch", bytes.slice(0, bytes.byteLength - 1), descriptor),
+    await upload("hash-mismatch", wrongHash, descriptor),
+    await upload("ready", bytes, descriptor),
+  ];
+  const queryAfter = await jsonRequest(configuration.caseUrl + "?wait_seconds=0");
+  document.documentElement.dataset.result = encoded({ ok: true, body_kind: "Blob", byte_length: bytes.byteLength, create, query_before: queryBefore, prepare, descriptor, results, query_after: queryAfter });
+  document.title = "DONE";
+})().catch((error) => {
+  document.documentElement.dataset.result = encoded({ ok: false, error: String(error?.stack ?? error) });
+  document.title = "FAILED";
+});
+</script></body></html>`;
+
+  const startedAtUtc = new Date().toISOString();
+  const started = process.hrtime.bigint();
+  const { browserOrigin, chrome, chromeRun, result: browserResult } = await runChromePage(
+    "upload",
+    page,
+    archiveBytes,
+  );
+  requireCondition(browserResult.ok === true && browserResult.body_kind === "Blob" && browserResult.byte_length === archiveBytes.length, "CHROME_UPLOAD_EXECUTION_FAILED", "FAIL", "BROWSER");
+  requireCondition(browserResult.create?.status === 200 && browserResult.create.envelope?.ok === true && browserResult.create.envelope?.data?.business_receipt?.case_id === state.case_id, "CHROME_CREATE_REPLAY_INVALID", "FAIL", "CONTRACT");
+  requireCondition(browserResult.query_before?.status === 200 && browserResult.query_before.envelope?.data?.case_view?.status === "WAITING_ATTACHMENT", "CHROME_QUERY_BEFORE_UPLOAD_INVALID", "FAIL", "CONTRACT");
+  requireCondition(browserResult.prepare?.status === 200 && browserResult.prepare.envelope?.ok === true && browserResult.prepare.envelope?.data?.application_response?.business_receipt?.primary_resource_id === state.attachment_id, "CHROME_PREPARE_REPLAY_INVALID", "FAIL", "CONTRACT");
+  const webDescriptor = browserResult.descriptor;
+  exactKeys(webDescriptor, ["attachment_id", "method", "url", "required_headers", "expected_content_length", "max_bytes", "expires_at"], "CHROME_UPLOAD_DESCRIPTOR_SHAPE");
+  exactKeys(webDescriptor.required_headers, ["Content-Type", "Idempotency-Key", "X-Content-SHA256"], "CHROME_UPLOAD_HEADERS_SHAPE");
+  requireCondition(webDescriptor.attachment_id === state.attachment_id && webDescriptor.method === "PUT" && webDescriptor.url === descriptor.url && webDescriptor.expected_content_length === state.archive.size && webDescriptor.required_headers["Idempotency-Key"] === state.attachment_id && webDescriptor.required_headers["Content-Type"] === state.archive.content_type && webDescriptor.required_headers["X-Content-SHA256"] === state.archive.sha256, "CHROME_UPLOAD_DESCRIPTOR_INVALID", "FAIL", "CONTRACT");
+  const [sizeMismatch, hashMismatch, ready] = browserResult.results ?? [];
+  requireCondition(sizeMismatch?.label === "size-mismatch" && sizeMismatch.status === 400 && sizeMismatch.error_code === "VALIDATION_ERROR", "CHROME_SIZE_MISMATCH_NOT_REJECTED", "FAIL", "CONTRACT");
+  requireCondition(hashMismatch?.label === "hash-mismatch" && hashMismatch.status === 422 && hashMismatch.error_code === "RESOURCE_HASH_MISMATCH", "CHROME_HASH_MISMATCH_NOT_REJECTED", "FAIL", "CONTRACT");
+  requireCondition(ready?.label === "ready" && ready.status === 200 && ready.data?.case_id === state.case_id && ready.data?.attachment_id === state.attachment_id && ready.data?.status === "READY" && Number.isInteger(ready.data.case_revision) && ready.data.case_revision > state.prepared_case_revision, "CHROME_UPLOAD_RESPONSE_INVALID", "FAIL", "CONTRACT");
+  requireCondition(browserResult.query_after?.status === 200 && browserResult.query_after.envelope?.data?.case_view?.case_revision === ready.data.case_revision, "CHROME_QUERY_AFTER_UPLOAD_INVALID", "FAIL", "CONTRACT");
+  requireCondition(typeof ready.correlation_id === "string" && ready.correlation_id.length > 0, "CHROME_CORRELATION_HEADER_NOT_EXPOSED", "FAIL", "CONTRACT");
+  const browserHeaders = webDescriptor.required_headers;
+  const browserReceipt = {
+    schema_version: 1,
+    status: "PASS",
+    browser: chrome,
+    origin: browserOrigin,
+    target_origin: new URL(descriptor.url).origin,
+    cross_origin: browserOrigin !== new URL(descriptor.url).origin,
+    operations: ["create_case", "get_case", "prepare_attachment", "upload_attachment"],
+    body_kind: browserResult.body_kind,
+    content_length_control: "user-agent",
+    scripted_headers: Object.keys(browserHeaders).sort(),
+    size_mismatch_status: sizeMismatch.status,
+    hash_mismatch_status: hashMismatch.status,
+    ready_status: ready.status,
+    correlation_header_exposed: true,
+  };
+  writeNew(path.join(stageRoot, "chrome-upload.json"), browserReceipt);
   writeNew(path.join(stageRoot, "upload.timing.json"), {
     schema_version: 2,
     span: "host.http-upload",
@@ -648,18 +849,14 @@ async function uploadAttachment(configuration, state, stageRoot) {
     finished_at_utc: new Date().toISOString(),
     duration_ms: Math.round(Number(process.hrtime.bigint() - started) / 1_000_000),
     request_bytes: fs.statSync(archive).size,
-    response_bytes: Buffer.byteLength(text),
-    http_status: response.status,
+    response_bytes: Buffer.byteLength(chromeRun.stdout),
+    http_status: ready.status,
     retries: 0,
     timed_out: false,
   });
-  writeTextNew(path.join(stageRoot, "upload.response.json"), `${text.trim()}\n`);
-  requireCondition(response.status === 200, `UPLOAD_HTTP_${response.status}`, "FAIL", "PRODUCT");
-  const envelope = JSON.parse(text);
-  const data = envelope?.data;
-  requireCondition(envelope?.ok === true && envelope.error === null && data?.case_id === state.case_id && data?.attachment_id === state.attachment_id && data?.status === "READY" && Number.isInteger(data.case_revision) && data.case_revision > state.prepared_case_revision, "UPLOAD_RESPONSE_INVALID", "FAIL", "CONTRACT");
+  writeTextNew(path.join(stageRoot, "upload.response.json"), `${canonicalJson(ready)}`);
   process.stdout.write("TEST_FLOW_PROGRESS attachment.upload.completed\n");
-  return { status: "READY", case_revision: data.case_revision };
+  return { status: "READY", case_revision: ready.data.case_revision, browser_upload: browserReceipt };
 }
 
 function phaseThreePrompt(state, releaseCase) {
@@ -717,7 +914,101 @@ function validatePhaseThree(audit, state, releaseCase) {
     observed_statuses: views.map((entry) => entry.view.status),
     public_artifact: publicArtifact,
     public_result_archive: publicArchive,
+    rest_supplements: submits.map((record) => ({
+      request_id: record.input.request_id,
+      expected_case_revision: record.input.expected_case_revision,
+      inputs: record.input.input_names.map((name, index) => ({ name, value: record.input.input_values[index] })),
+      attachment_ids: record.input.attachment_ids,
+      wait_seconds: record.input.wait_seconds,
+    })),
   };
+}
+
+async function verifyResolvedWebApi(configuration, state, summary, stageRoot) {
+  const expectedArtifacts = [summary.public_artifact, summary.public_result_archive];
+  const page = `<!doctype html><html><head><meta charset="utf-8"><title>PENDING</title></head><body><script>
+const configuration = ${scriptJson({
+    caseUrl: `${state.public_base_url}/api/v1/cases/${state.case_id}`,
+    supplementsUrl: `${state.public_base_url}/api/v1/cases/${state.case_id}/supplements`,
+    artifactsUrl: `${state.public_base_url}/api/v1/cases/${state.case_id}/artifacts`,
+    supplements: summary.rest_supplements,
+  })};
+function encoded(value) {
+  const bytes = new TextEncoder().encode(JSON.stringify(value));
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary);
+}
+async function jsonRequest(url, options = {}) {
+  const response = await fetch(url, options);
+  const text = await response.text();
+  let envelope = null;
+  try { envelope = JSON.parse(text); } catch {}
+  return { status: response.status, envelope, correlation_id: response.headers.get("x-problem-locator-correlation-id") };
+}
+async function digest(bytes) {
+  const value = await crypto.subtle.digest("SHA-256", bytes);
+  return [...new Uint8Array(value)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+(async () => {
+  const supplements = [];
+  for (const body of configuration.supplements) {
+    supplements.push(await jsonRequest(configuration.supplementsUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }));
+  }
+  const query = await jsonRequest(configuration.caseUrl + "?wait_seconds=30");
+  const artifacts = await jsonRequest(configuration.artifactsUrl);
+  const downloads = [];
+  for (const artifact of artifacts.envelope?.data?.artifacts ?? []) {
+    const response = await fetch(artifact.download_url);
+    const bytes = await response.arrayBuffer();
+    downloads.push({
+      artifact_id: artifact.artifact_id,
+      status: response.status,
+      size: bytes.byteLength,
+      sha256: await digest(bytes),
+      header_sha256: response.headers.get("x-content-sha256"),
+      header_length: response.headers.get("content-length"),
+      correlation_id: response.headers.get("x-problem-locator-correlation-id"),
+    });
+  }
+  document.documentElement.dataset.result = encoded({ ok: true, supplements, query, artifacts, downloads });
+  document.title = "DONE";
+})().catch((error) => {
+  document.documentElement.dataset.result = encoded({ ok: false, error: String(error?.stack ?? error) });
+  document.title = "FAILED";
+});
+</script></body></html>`;
+  const { browserOrigin, chrome, result } = await runChromePage("resolved-api", page);
+  requireCondition(result.ok === true, "CHROME_RESOLVED_API_EXECUTION_FAILED", "FAIL", "BROWSER");
+  requireCondition(Array.isArray(result.supplements) && result.supplements.length === summary.rest_supplements.length && result.supplements.every((item) => item.status === 200 && item.envelope?.ok === true && typeof item.correlation_id === "string"), "CHROME_SUPPLEMENT_REPLAY_INVALID", "FAIL", "CONTRACT");
+  requireCondition(result.query?.status === 200 && result.query.envelope?.data?.case_view?.case_id === state.case_id && result.query.envelope?.data?.case_view?.case_revision === summary.resolved_case_revision && result.query.envelope?.data?.wait_timed_out === false, "CHROME_TERMINAL_QUERY_INVALID", "FAIL", "CONTRACT");
+  const listed = result.artifacts?.envelope?.data?.artifacts;
+  requireCondition(result.artifacts?.status === 200 && Array.isArray(listed) && listed.length === expectedArtifacts.length, "CHROME_ARTIFACT_LIST_INVALID", "FAIL", "CONTRACT");
+  for (const expected of expectedArtifacts) {
+    const listedArtifact = listed.find((item) => item.artifact_id === expected.artifact_id);
+    const download = result.downloads?.find((item) => item.artifact_id === expected.artifact_id);
+    requireCondition(listedArtifact?.size === expected.size && listedArtifact?.sha256 === expected.sha256 && listedArtifact?.download_url === expected.download_url, "CHROME_ARTIFACT_VIEW_MISMATCH", "FAIL", "CONTRACT");
+    requireCondition(download?.status === 200 && download.size === expected.size && download.sha256 === expected.sha256 && download.header_sha256 === expected.sha256 && download.header_length === String(expected.size) && typeof download.correlation_id === "string", "CHROME_ARTIFACT_DOWNLOAD_MISMATCH", "FAIL", "CONTRACT");
+  }
+  const receipt = {
+    schema_version: 1,
+    status: "PASS",
+    browser: chrome,
+    origin: browserOrigin,
+    target_origin: new URL(state.public_base_url).origin,
+    cross_origin: browserOrigin !== new URL(state.public_base_url).origin,
+    operations: ["submit_supplement", "get_case", "list_artifacts", "download_artifact"],
+    supplement_replays: result.supplements.length,
+    artifacts_verified: expectedArtifacts.length,
+    correlation_header_exposed: true,
+    content_headers_exposed: true,
+  };
+  writeNew(path.join(stageRoot, "chrome-resolved-api.json"), receipt);
+  return receipt;
 }
 
 function restartPrompt(state) {
@@ -1214,13 +1505,14 @@ async function createCheckpointSource(configuration, state, continuation) {
     try { fs.rmSync(archiveHostPath, { force: true }); } catch {}
   }
   const adapterContinuation = {
-    adapter_state_schema_version: 3,
+    adapter_state_schema_version: 4,
     adapter_case_input_digest: state.release_case?.input_digest ?? null,
     adapter_case_scenario_id: state.release_case?.scenario_id ?? null,
     adapter_case_skill_id: state.release_case?.skill_id ?? null,
     adapter_case_id: state.case_id ?? null,
     adapter_attachment_id: state.attachment_id ?? null,
     adapter_prepared_case_revision: state.prepared_case_revision ?? null,
+    adapter_prepare_expected_case_revision: state.prepare_expected_case_revision ?? null,
     adapter_case_revision: state.case_revision ?? null,
     adapter_status: state.status ?? null,
     adapter_resolved_case_revision: state.resolved_case_revision ?? null,
@@ -1374,7 +1666,7 @@ async function applyRestoredCheckpoint(configuration, state) {
     continuation?.schema_version === 1
       && continuation.release_eligible === false
       && continuation.next_stage === configuration.stage
-      && continuation.adapter_state_schema_version === 3
+      && continuation.adapter_state_schema_version === 4
       && continuation.adapter_case_input_digest === configuration.releaseCase.input_digest
       && continuation.adapter_case_scenario_id === configuration.releaseCase.scenario_id
       && continuation.adapter_case_skill_id === configuration.releaseCase.skill.id,
@@ -1407,6 +1699,7 @@ async function applyRestoredCheckpoint(configuration, state) {
     case_id: caseId,
     attachment_id: continuation.adapter_attachment_id,
     prepared_case_revision: continuation.adapter_prepared_case_revision,
+    prepare_expected_case_revision: continuation.adapter_prepare_expected_case_revision,
     case_revision: continuation.adapter_case_revision,
     status: continuation.adapter_status,
     resolved_case_revision: continuation.adapter_resolved_case_revision,
@@ -1521,7 +1814,7 @@ async function execute(configuration) {
       request_ids: Object.values(state.request_ids),
     });
     if (!configuration.terminalAfterStage) await startService(configuration, state, "diagnose");
-    stageReceipt(configuration, { status: "PASS", client_tool_calls: 0, server_tool_calls: correspondence.server_completed, checkpoint_ready: checkpoint.status === "PASS", invocations: [] });
+    stageReceipt(configuration, { status: "PASS", client_tool_calls: 0, server_tool_calls: correspondence.server_completed, checkpoint_ready: checkpoint.status === "PASS", browser_upload: upload.browser_upload, invocations: [] });
     return;
   }
 
@@ -1529,6 +1822,12 @@ async function execute(configuration) {
     requireCondition(configuration.hardCaps !== null, "DIAGNOSE_HARD_CAPS_MISSING", "BLOCKED", "INFRA");
     const audit = await runClaude(configuration, state, configuration.stageRoot, "phase3", phaseThreePrompt(state, configuration.releaseCase), configuration.hardCaps.max_turns, configuration.hardCaps.max_budget_usd);
     const summary = validatePhaseThree(audit, state, configuration.releaseCase);
+    const browserApi = await verifyResolvedWebApi(
+      configuration,
+      state,
+      summary,
+      configuration.stageRoot,
+    );
     Object.assign(state, summary);
     state.client_calls.push(...audit.records.map((record, index) => ({ phase: "phase3", ordinal: state.client_calls.length + index, tool_name: record.tool_name, input: record.input })));
     addUsage(state, audit.usage);
@@ -1545,7 +1844,7 @@ async function execute(configuration) {
       observed_statuses: state.observed_statuses,
     });
     const invocations = [hostInvocation("diagnose", audit, configuration.hardCaps), ...correspondence.service_invocations];
-    stageReceipt(configuration, { status: "PASS", client_tool_calls: audit.records.length, server_tool_calls: correspondence.server_completed, checkpoint_ready: checkpoint.status === "PASS", invocations });
+    stageReceipt(configuration, { status: "PASS", client_tool_calls: audit.records.length, server_tool_calls: correspondence.server_completed, checkpoint_ready: checkpoint.status === "PASS", browser_api: browserApi, invocations });
     return;
   }
 
@@ -1603,6 +1902,8 @@ const configuration = {
   resourceLabel: values.resource_label,
   gateId: values.gate_id,
   runtimeProfileDigest: values.runtime_profile_digest,
+  expectedChromeVersion: values.chrome_version,
+  expectedChromeSha256: values.chrome_sha256,
   checkpointOutputSource: values.checkpoint_output_source && path.resolve(values.checkpoint_output_source),
   restoredDataRoot: values.restored_data_root && path.resolve(values.restored_data_root),
   restoredCheckpointId: values.restored_checkpoint_id,
@@ -1630,9 +1931,11 @@ configuration.stageRoot = configuration.attemptRoot && configuration.stage && pa
 
 let receiptWritten = false;
 try {
-  for (const [name, value] of Object.entries({ stage: configuration.stage, gateId: configuration.gateId, runtimeProfileDigest: configuration.runtimeProfileDigest, expectedClient: configuration.expectedClient, expectedHostPlatform: configuration.expectedHostPlatform, repoRoot: configuration.repoRoot, attemptRoot: configuration.attemptRoot, sourceSnapshotDigest: configuration.sourceSnapshotDigest, sourceSnapshotManifest: configuration.sourceSnapshotManifest, resourceRegistry: configuration.resourceRegistry, resourceLabel: configuration.resourceLabel, baseImage: configuration.baseImage })) {
+  for (const [name, value] of Object.entries({ stage: configuration.stage, gateId: configuration.gateId, runtimeProfileDigest: configuration.runtimeProfileDigest, expectedClient: configuration.expectedClient, expectedHostPlatform: configuration.expectedHostPlatform, expectedChromeVersion: configuration.expectedChromeVersion, expectedChromeSha256: configuration.expectedChromeSha256, repoRoot: configuration.repoRoot, attemptRoot: configuration.attemptRoot, sourceSnapshotDigest: configuration.sourceSnapshotDigest, sourceSnapshotManifest: configuration.sourceSnapshotManifest, resourceRegistry: configuration.resourceRegistry, resourceLabel: configuration.resourceLabel, baseImage: configuration.baseImage })) {
     requireCondition(Boolean(value), `ADAPTER_REQUIRED_${name.toUpperCase()}`);
   }
+  const observedChrome = chromeIdentity();
+  requireCondition(observedChrome.status === "PRESENT" && observedChrome.version === configuration.expectedChromeVersion && observedChrome.executable_sha256 === configuration.expectedChromeSha256, "CHROME_IDENTITY_DRIFT", "BLOCKED", "INFRA");
   if (configuration.hardCaps) {
     requireCondition(Number.isSafeInteger(configuration.hardCaps.max_turns) && configuration.hardCaps.max_turns > 0, "ADAPTER_MAX_TURNS_INVALID");
     requireCondition(Number.isSafeInteger(configuration.hardCaps.max_total_tokens) && configuration.hardCaps.max_total_tokens > 0, "ADAPTER_MAX_TOKENS_INVALID");

@@ -5,7 +5,9 @@ import fs from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const UUID_TEXT = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
+const UUID = new RegExp(`^${UUID_TEXT}$`);
+const UPLOAD_TEMPORARY_FILE = new RegExp(`^\\.payload-${UUID_TEXT}\\.tmp$`);
 const PROPOSAL_DIRECTORY = /^p-[0-9a-f]{64}$/;
 const TERMINAL_JOB_STATUSES = new Set(["SUCCEEDED", "FAILED", "CANCELLED", "INTERRUPTED"]);
 const ROOT_ENTRIES = new Set([".instance.lock", "data-format.json", "jobs", "resources", "state.json", "state.json.prev", "tmp"]);
@@ -229,7 +231,13 @@ function verifyUploads(dataRoot, facts) {
     };
     const marker = readCanonicalObject(path.join(stage, "staged.json"), "CHECKPOINT_UPLOAD_STAGE_INVALID");
     requireCondition(canonicalJson(marker) === canonicalJson(expected), "CHECKPOINT_UPLOAD_STAGE_INVALID");
-    const entries = exactEntries(stage, new Set(["payload", "staged.json"]), new Set(["staged.json"]), "CHECKPOINT_UPLOAD_STAGE_INVALID");
+    const entries = fs.readdirSync(stage);
+    requireCondition(entries.includes("staged.json"), "CHECKPOINT_UPLOAD_STAGE_INVALID");
+    for (const name of entries) {
+      if (name === "payload" || name === "staged.json") continue;
+      requireCondition(UPLOAD_TEMPORARY_FILE.test(name), "CHECKPOINT_UPLOAD_STAGE_INVALID");
+      ordinaryFile(path.join(stage, name), "CHECKPOINT_UPLOAD_STAGE_INVALID");
+    }
     if (entries.includes("payload")) ordinaryFile(path.join(stage, "payload"), "CHECKPOINT_UPLOAD_STAGE_INVALID");
     scanDiscardedTree(stage, "CHECKPOINT_UPLOAD_STAGE_INVALID");
     count += 1;
