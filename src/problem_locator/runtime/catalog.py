@@ -122,6 +122,7 @@ _BUILTIN_SPECS = (
         "profiles/generic-locator",
         AssetKind.AGENT_PROFILE,
         "agent-profile/generic-locator",
+        "2.0.0",
     ),
     _BuiltinSpec(
         "tool-bundles/router",
@@ -188,6 +189,7 @@ _BUILTIN_SPECS = (
         "output-contracts/generic-locator",
         AssetKind.OUTPUT_CONTRACT,
         "output-contract/generic-locator",
+        "2.0.0",
     ),
 )
 _BUILTIN_SPECS_BY_ID = {item.asset_id: item for item in _BUILTIN_SPECS}

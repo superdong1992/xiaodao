@@ -371,6 +371,8 @@ def test_builtin_assets_and_port_use_exact_versioned_refs() -> None:
         "output-contract/route": "2.0.0",
         "output-contract/diagnose": "5.0.0",
         "output-contract/review": "3.0.0",
+        "agent-profile/generic-locator": "2.0.0",
+        "output-contract/generic-locator": "2.0.0",
     }
     for ref in refs.values():
         assert ref.version == upgraded_versions.get(ref.id, "1.0.0")
@@ -443,6 +445,33 @@ def test_builtin_output_contract_requires_canonical_v2_agent_draft(role: str) ->
     assert "schemas/v2/agent-job-outcome-draft.schema.json" in contract
     assert "Canonical-JSON" in contract
     assert "problem-locator-seal-outcome-draft" in contract
+
+
+def test_builtin_generic_assets_require_one_complete_v2_markdown_result() -> None:
+    profile = (
+        BUILTIN_ASSET_ROOT
+        / "profiles"
+        / "generic-locator"
+        / "profile.md"
+    ).read_text(encoding="utf-8")
+    contract = (
+        BUILTIN_ASSET_ROOT
+        / "output-contracts"
+        / "generic-locator"
+        / "output-contract.md"
+    ).read_text(encoding="utf-8")
+
+    assert "complete user-facing Markdown report" in profile
+    assert "do not also write the legacy V1 result file" in profile
+    assert "output/generic_diagnosis_result.md" in contract
+    assert "<<<GENERIC_DIAGNOSIS_RESULT_V2:RESOLVED>>>" in contract
+    assert "<<<GENERIC_DIAGNOSIS_RESULT_V2:UNRESOLVED>>>" in contract
+    assert "Every byte after that first LF" in contract
+    assert "at most 65536 UTF-8 bytes" in contract
+    assert "fenced code blocks" in contract
+    assert "byte-order mark (BOM)" in contract
+    assert "CRLF line" in contract
+    assert "Do not also" in contract
 
 
 @pytest.mark.parametrize("role", ["route", "diagnose", "review"])
@@ -1132,6 +1161,34 @@ def test_skill_catalog_accepts_scoped_observation_policies_and_rejects_bad_refs(
             logparse_tool=_logparse_asset(),
             logparse_broker_factory=_BrokerFactory(),
         )
+
+
+@pytest.mark.parametrize(
+    ("selector_fact", "message"),
+    [
+        ("not_declared", "declared INPUT"),
+        ("target_pid", "OPTIONAL input"),
+    ],
+)
+def test_skill_catalog_rejects_unsafe_selector_user_facts(
+    tmp_path: Path,
+    selector_fact: str,
+    message: str,
+) -> None:
+    skills = tmp_path / "skills"
+    skill_dir = skills / "candidate"
+    manifest = _write_skill(skill_dir, requires_logparse=True)
+    manifest["verification_contract"]["event_extractors"][0]["selectors"] = [
+        {
+            "field": "value",
+            "operator": "EQUALS",
+            "value": {"source": "USER_FACT", "name": selector_fact},
+        }
+    ]
+    (skill_dir / "diagnosis-skill.json").write_bytes(canonical_json_bytes(manifest))
+
+    with pytest.raises(ValueError, match=message):
+        _new_catalog(skill_dir=skills)
 
 
 def test_skill_rule_remediation_only_names_missing_only_requirements(

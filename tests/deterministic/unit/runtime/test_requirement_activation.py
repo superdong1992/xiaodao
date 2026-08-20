@@ -79,11 +79,15 @@ def _fact_condition(name: str, value: str) -> dict[str, object]:
     }
 
 
-def _contract(*, rules: list[dict[str, object]] | None = None) -> dict[str, object]:
+def _contract(
+    *,
+    rules: list[dict[str, object]] | None = None,
+    event_extractors: list[dict[str, object]] | None = None,
+) -> dict[str, object]:
     return {
         "schema_version": 2,
         "observation_policies": [],
-        "event_extractors": [],
+        "event_extractors": [] if event_extractors is None else event_extractors,
         "rules": [] if rules is None else rules,
         "terminal_paths": [],
     }
@@ -185,6 +189,7 @@ def test_required_optional_and_conditional_wiki_parameters_are_deterministic() -
         after_logparse=True,
     )
     assert inactive.requested_requirements == ()
+    assert "request_id" not in inactive.active_requirement_names
     assert {"api_name", "protocol", "request_id"} <= set(
         inactive.inactive_requirement_names
     )
@@ -196,6 +201,7 @@ def test_required_optional_and_conditional_wiki_parameters_are_deterministic() -
         attachment_ready=True,
         after_logparse=True,
     )
+    assert active.active_requirement_names.count("request_id") == 1
     assert [item["name"] for item in active.requested_requirements] == ["request_id"]
 
 
@@ -282,3 +288,141 @@ def test_rule_activation_rejects_semantic_and_target_dependent_rules() -> None:
     mechanical["parameters"] = {"fact_name": "request_id"}
     with pytest.raises(ValueError, match="independent mechanical"):
         validate_requirement_activation_contract([target], _contract(rules=[mechanical]))
+
+
+def _rule_condition(rule_name: str) -> dict[str, object]:
+    return {
+        "any_of": [
+            {
+                "all_of": [
+                    {
+                        "source": "RULE_RESULT",
+                        "name": rule_name,
+                        "operator": "EQUALS",
+                        "value": "PASS",
+                    }
+                ]
+            }
+        ]
+    }
+
+
+def _selector_event(event_id: str, fact_name: str | None) -> dict[str, object]:
+    selectors: list[dict[str, object]] = []
+    if fact_name is not None:
+        selectors.append(
+            {
+                "value": {
+                    "source": "USER_FACT",
+                    "name": fact_name,
+                }
+            }
+        )
+    return {"id": event_id, "selectors": selectors}
+
+
+def _present_rule(
+    rule_id: str,
+    event_id: str,
+    *,
+    depends_on: list[str] | None = None,
+) -> dict[str, object]:
+    return {
+        "id": rule_id,
+        "kind": "EVENT_PRESENT",
+        "depends_on": [] if depends_on is None else depends_on,
+        "parameters": {"event": event_id},
+    }
+
+
+def test_rule_activation_rejects_cross_conditional_selector_cycle() -> None:
+    requirements = [
+        _wiki_input(
+            "left",
+            requiredness="CONDITIONAL",
+            stage="AFTER_LOGPARSE",
+            condition=_rule_condition("right_present"),
+        ),
+        _wiki_input(
+            "right",
+            requiredness="CONDITIONAL",
+            stage="AFTER_LOGPARSE",
+            condition=_rule_condition("left_present"),
+        ),
+    ]
+    contract = _contract(
+        event_extractors=[
+            _selector_event("left_event", "left"),
+            _selector_event("right_event", "right"),
+        ],
+        rules=[
+            _present_rule("left_present", "left_event"),
+            _present_rule("right_present", "right_event"),
+        ],
+    )
+
+    with pytest.raises(ValueError, match="independent mechanical"):
+        validate_requirement_activation_contract(requirements, contract)
+
+
+def test_rule_activation_rejects_conditional_selector_in_dependency_closure() -> None:
+    requirements = [
+        _wiki_input("mode", requiredness="REQUIRED"),
+        _wiki_input(
+            "source",
+            requiredness="CONDITIONAL",
+            stage="AFTER_LOGPARSE",
+            condition=_fact_condition("mode", "enabled"),
+        ),
+        _wiki_input(
+            "target",
+            requiredness="CONDITIONAL",
+            stage="AFTER_LOGPARSE",
+            condition=_rule_condition("final_present"),
+        ),
+    ]
+    contract = _contract(
+        event_extractors=[
+            _selector_event("source_event", "source"),
+            _selector_event("final_event", None),
+        ],
+        rules=[
+            _present_rule("source_present", "source_event"),
+            _present_rule(
+                "final_present",
+                "final_event",
+                depends_on=["source_present"],
+            ),
+        ],
+    )
+
+    with pytest.raises(ValueError, match="independent mechanical"):
+        validate_requirement_activation_contract(requirements, contract)
+
+
+def test_rule_activation_allows_required_selector_in_dependency_closure() -> None:
+    requirements = [
+        _wiki_input("source", requiredness="REQUIRED"),
+        _wiki_input(
+            "target",
+            requiredness="CONDITIONAL",
+            stage="AFTER_LOGPARSE",
+            condition=_rule_condition("final_present"),
+        ),
+    ]
+    contract = _contract(
+        event_extractors=[
+            _selector_event("source_event", "source"),
+            _selector_event("final_event", None),
+        ],
+        rules=[
+            _present_rule("source_present", "source_event"),
+            _present_rule(
+                "final_present",
+                "final_event",
+                depends_on=["source_present"],
+            ),
+        ],
+    )
+
+    validate_requirement_activation_contract(requirements, contract)

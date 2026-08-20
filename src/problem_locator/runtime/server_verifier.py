@@ -61,6 +61,42 @@ _RFC3339_MILLIS_UTC_PATTERN = re.compile(
 )
 
 
+_SCAN_ISSUES = {
+    "SELECTOR_MISSING": (
+        "SELECTOR_MISSING: A required event selector user fact is missing or "
+        "ambiguous."
+    ),
+    "SELECTOR_CONDITION_INACTIVE": (
+        "SELECTOR_CONDITION_INACTIVE: The event selector's CONDITIONAL input "
+        "is not active for this case."
+    ),
+    "ANCHOR_UNBOUND": (
+        "ANCHOR_UNBOUND: Raw LOGPARSE Evidence could not be bound to a "
+        "server-selected anchor."
+    ),
+    "ANCHOR_EVIDENCE_MISSING": (
+        "ANCHOR_EVIDENCE_MISSING: No server-bound raw LOGPARSE Evidence is "
+        "available for the event anchor."
+    ),
+    "LOCATOR_UNBOUNDED": (
+        "LOCATOR_UNBOUNDED: A raw LOGPARSE Evidence locator has no complete "
+        "line bounds."
+    ),
+    "LOCATOR_PARTIAL": (
+        "LOCATOR_PARTIAL: A raw LOGPARSE Evidence locator covers only part "
+        "of its file."
+    ),
+    "LOSSY_OBSERVATION_POLICY": (
+        "LOSSY_OBSERVATION_POLICY: The event extractor is subject to a lossy "
+        "observation policy."
+    ),
+    "FULL_SCAN_NO_MATCH": (
+        "FULL_SCAN_NO_MATCH: A complete bounded scan found no event matching "
+        "the extractor and selectors."
+    ),
+}
+
+
 def _parse_millisecond_utc(value: str) -> datetime:
     if _RFC3339_MILLIS_UTC_PATTERN.fullmatch(value) is None:
         raise ValueError("timestamp is not millisecond UTC")
@@ -103,6 +139,13 @@ class _EventMatch:
     @property
     def line(self) -> _ResolvedLine:
         return self.lines[0]
+
+
+@dataclass(frozen=True, slots=True)
+class _EventScanState:
+    complete: bool
+    inactive: bool
+    issues: tuple[str, ...]
 
 
 def _binding_key(binding: EvidenceBinding) -> str:
@@ -584,7 +627,7 @@ def _resolve_evidence_lines(
     dict[str, set[str]],
     dict[str, set[tuple[str, str, int]]],
     list[EvidenceBinding],
-    set[str],
+    dict[str, set[str]],
 ]:
     evidence_entries = {
         entry.resource_id: entry
@@ -605,7 +648,10 @@ def _resolve_evidence_lines(
     file_cache: dict[Path, list[bytes]] = {}
     participating: list[EvidenceBinding] = []
     sources: dict[str, _EvidenceSource] = {}
-    incomplete_anchors: set[str] = set()
+    scan_issues_by_anchor: dict[str, set[str]] = {}
+
+    def add_scan_issue(anchor: str, issue: str) -> None:
+        scan_issues_by_anchor.setdefault(anchor, set()).add(issue)
 
     def source_for(binding: EvidenceBinding, *, citation: bool) -> _EvidenceSource | None:
         key = _binding_key(binding)
@@ -710,11 +756,14 @@ def _resolve_evidence_lines(
             # cannot prove which extractor owns this Evidence.  Mark the
             # entire scan incomplete instead of letting another Evidence for
             # the same rule make the input look complete.
-            incomplete_anchors.add("*")
+            add_scan_issue("*", _SCAN_ISSUES["ANCHOR_UNBOUND"])
         start = source.locator.start_line
         end = source.locator.end_line
         if start is None or end is None:
-            incomplete_anchors.add(source.anchor or "*")
+            add_scan_issue(
+                source.anchor or "*",
+                _SCAN_ISSUES["LOCATOR_UNBOUNDED"],
+            )
             continue
         physical = physical_lines(source)
         if end > len(physical):
@@ -722,7 +771,10 @@ def _resolve_evidence_lines(
         if start != 1 or end != len(physical):
             # Positive matches remain usable, but an Agent-bounded excerpt is
             # not a server-owned absence/count universe for the whole file.
-            incomplete_anchors.add(source.anchor or "*")
+            add_scan_issue(
+                source.anchor or "*",
+                _SCAN_ISSUES["LOCATOR_PARTIAL"],
+            )
         for line_number in range(start, end + 1):
             scan_lines.append(resolved_line(source, line_number))
 
@@ -753,18 +805,39 @@ def _resolve_evidence_lines(
         claim_bindings,
         claim_line_keys,
         participating,
-        incomplete_anchors,
+        scan_issues_by_anchor,
     )
 
 
-def _extract_events(
+def _extract_events_with_audit(
     extractors: list[dict[str, Any]],
     lines: list[_ResolvedLine],
-    incomplete_anchors: set[str],
+    scan_issues_by_anchor: Mapping[str, set[str]],
     facts: Mapping[str, list[Any]],
-) -> tuple[dict[str, list[_EventMatch]], dict[str, bool]]:
+    *,
+    pinned_requirements: Iterable[Mapping[str, Any]] = (),
+    pinned_roles: Iterable[Mapping[str, Any]] = (),
+    rule_results: Mapping[str, str] | None = None,
+) -> tuple[dict[str, list[_EventMatch]], dict[str, _EventScanState]]:
     matches: dict[str, list[_EventMatch]] = {}
-    event_scan_complete: dict[str, bool] = {}
+    event_scan_state: dict[str, _EventScanState] = {}
+    requirements = list(pinned_requirements)
+    inactive_requirements: set[str] = set()
+    if requirements:
+        activation_facts = {
+            name: candidates[0].statement
+            for name, candidates in facts.items()
+            if len(candidates) == 1
+        }
+        resolution = resolve_requirements(
+            roles=list(pinned_roles),
+            requirements=requirements,
+            facts=activation_facts,
+            attachment_ready=True,
+            after_logparse=True,
+            rule_results={} if rule_results is None else rule_results,
+        )
+        inactive_requirements.update(resolution.inactive_requirement_names)
     for extractor in extractors:
         event_id = extractor["id"]
         anchor = extractor["anchor"]
@@ -783,21 +856,48 @@ def _extract_events(
         )
         selector_values: dict[str, str] = {}
         selectors_complete = True
+        selector_inactive = False
+        event_issues = _unique_strings(
+            [
+                *sorted(scan_issues_by_anchor.get("*", set())),
+                *sorted(scan_issues_by_anchor.get(anchor, set())),
+            ]
+        )
         for selector in extractor["selectors"]:
             binding = selector["value"]
             if binding["source"] == "SKILL_FIXED":
                 selector_values[selector["field"]] = binding["value"]
                 continue
+            if binding["name"] in inactive_requirements:
+                selector_inactive = True
+                continue
             candidates = facts.get(binding["name"], [])
             if len(candidates) != 1:
                 selectors_complete = False
+                event_issues.append(_SCAN_ISSUES["SELECTOR_MISSING"])
                 continue
             selector_values[selector["field"]] = candidates[0].statement
-        event_scan_complete[event_id] = (
-            bool(anchor_lines)
-            and "*" not in incomplete_anchors
-            and anchor not in incomplete_anchors
-            and selectors_complete
+        if selector_inactive:
+            matches[event_id] = []
+            event_scan_state[event_id] = _EventScanState(
+                complete=False,
+                inactive=True,
+                issues=(_SCAN_ISSUES["SELECTOR_CONDITION_INACTIVE"],),
+            )
+            continue
+        if not anchor_lines and not event_issues:
+            event_issues.append(_SCAN_ISSUES["ANCHOR_EVIDENCE_MISSING"])
+        if extractor["observation_policy_ids"]:
+            event_issues.append(_SCAN_ISSUES["LOSSY_OBSERVATION_POLICY"])
+        event_issues = _unique_strings(event_issues)
+        event_scan_state[event_id] = _EventScanState(
+            complete=(
+                bool(anchor_lines)
+                and not event_issues
+                and selectors_complete
+            ),
+            inactive=False,
+            issues=tuple(event_issues),
         )
         current: list[_EventMatch] = []
         if not selectors_complete:
@@ -918,7 +1018,38 @@ def _extract_events(
                 grouped.setdefault(key, item)
             current = list(grouped.values())
         matches[event_id] = current
-    return matches, event_scan_complete
+    return matches, event_scan_state
+
+
+def _extract_events(
+    extractors: list[dict[str, Any]],
+    lines: list[_ResolvedLine],
+    incomplete_anchors: set[str],
+    facts: Mapping[str, list[Any]],
+) -> tuple[dict[str, list[_EventMatch]], dict[str, bool]]:
+    """Compatibility helper for deterministic contract-oracle tests."""
+
+    limitations = {
+        anchor: {_SCAN_ISSUES["LOCATOR_PARTIAL"]}
+        for anchor in incomplete_anchors
+    }
+    events, states = _extract_events_with_audit(
+        extractors,
+        lines,
+        limitations,
+        facts,
+    )
+    return events, {
+        event_id: (
+            state.complete
+            or (
+                not state.inactive
+                and state.issues
+                == (_SCAN_ISSUES["LOSSY_OBSERVATION_POLICY"],)
+            )
+        )
+        for event_id, state in states.items()
+    }
 
 
 def _event_material(
@@ -1229,6 +1360,7 @@ def _aggregate_results(
     values: list[RuleClaimResult],
     *,
     quantifier: str,
+    observations_complete: bool = True,
 ) -> RuleClaimResult:
     if not values:
         return RuleClaimResult.UNKNOWN
@@ -1236,12 +1368,20 @@ def _aggregate_results(
         if RuleClaimResult.PASS in values:
             return RuleClaimResult.PASS
         if all(item is RuleClaimResult.FAIL for item in values):
-            return RuleClaimResult.FAIL
+            return (
+                RuleClaimResult.FAIL
+                if observations_complete
+                else RuleClaimResult.UNKNOWN
+            )
         return RuleClaimResult.UNKNOWN
-    if all(item is RuleClaimResult.PASS for item in values):
-        return RuleClaimResult.PASS
     if RuleClaimResult.FAIL in values:
         return RuleClaimResult.FAIL
+    if all(item is RuleClaimResult.PASS for item in values):
+        return (
+            RuleClaimResult.PASS
+            if observations_complete
+            else RuleClaimResult.UNKNOWN
+        )
     return RuleClaimResult.UNKNOWN
 
 
@@ -1288,6 +1428,7 @@ def _evaluate_rule(
     extractor_by_id: Mapping[str, Mapping[str, Any]],
     facts: Mapping[str, list[Any]],
     prior: Mapping[str, ServerRuleEvaluation],
+    event_scan_state: Mapping[str, _EventScanState] | None = None,
 ) -> ServerRuleEvaluation:
     dependencies = [prior[item] for item in rule["depends_on"]]
     kind = rule["kind"]
@@ -1310,12 +1451,58 @@ def _evaluate_rule(
             fact_refs=_unique_strings([*selector_fact_refs, *explicit]),
         )
 
+    scan_states = (
+        {
+            event_id: _EventScanState(
+                complete=(
+                    event_scan_complete.get(event_id, False)
+                    and not extractor_by_id[event_id][
+                        "observation_policy_ids"
+                    ]
+                ),
+                inactive=False,
+                issues=(
+                    (_SCAN_ISSUES["LOSSY_OBSERVATION_POLICY"],)
+                    if extractor_by_id[event_id]["observation_policy_ids"]
+                    else ()
+                ),
+            )
+            for event_id in event_ids
+        }
+        if event_scan_state is None
+        else {event_id: event_scan_state[event_id] for event_id in event_ids}
+    )
     lower_bound_events = {
         event_id
         for event_id in event_ids
-        if not event_scan_complete.get(event_id, False)
-        or bool(extractor_by_id[event_id]["observation_policy_ids"])
+        if not scan_states[event_id].complete
     }
+
+    def scan_failure_issues(event_id: str) -> list[str]:
+        state = scan_states[event_id]
+        if state.issues:
+            return list(state.issues)
+        if state.complete and not events[event_id]:
+            return [_SCAN_ISSUES["FULL_SCAN_NO_MATCH"]]
+        return [
+            "The selected event set does not meet its declared minimum "
+            "cardinality."
+        ]
+
+    def result_issues(
+        result: RuleClaimResult,
+        default: str,
+    ) -> list[str]:
+        if result is RuleClaimResult.PASS:
+            return []
+        scan_issues: list[str] = []
+        for event_id in event_ids:
+            state = scan_states[event_id]
+            if result is RuleClaimResult.UNKNOWN:
+                scan_issues.extend(state.issues)
+            if state.complete and not events[event_id]:
+                scan_issues.extend(scan_failure_issues(event_id))
+        return _unique_strings([*scan_issues, default])
 
     if kind != "SEMANTIC_CAUSALITY" and any(
         item.status not in {
@@ -1339,6 +1526,14 @@ def _evaluate_rule(
             count = len(events[event_id])
             minimum = extractor["min_matches"]
             maximum = extractor["max_matches"]
+            if scan_states[event_id].inactive:
+                return evaluation(
+                    rule=rule,
+                    status=ServerRuleStatus.NOT_APPLICABLE,
+                    events=events,
+                    count_lower_bound_events=lower_bound_events,
+                    issues=list(scan_states[event_id].issues),
+                )
             if count < minimum:
                 uncertain = event_id in lower_bound_events
                 return evaluation(
@@ -1346,7 +1541,7 @@ def _evaluate_rule(
                     status=(ServerRuleStatus.UNVERIFIABLE if uncertain else ServerRuleStatus.VERIFIED_FAIL),
                     events=events,
                     count_lower_bound_events=lower_bound_events,
-                    issues=["The selected event set does not meet its declared minimum cardinality."],
+                    issues=scan_failure_issues(event_id),
                 )
             if maximum is not None and count > maximum:
                 return evaluation(
@@ -1392,9 +1587,11 @@ def _evaluate_rule(
                     upper_bound=None if event_id in lower_bound_events else count,
                 )
             ],
-            issues=[] if result is RuleClaimResult.PASS else [
-                "The observed event cardinality cannot satisfy the declared count with current observability."
-            ],
+            issues=(
+                []
+                if result is RuleClaimResult.PASS
+                else scan_failure_issues(event_id)
+            ),
         )
 
     if kind == "EVENT_TIME_WINDOW":
@@ -1459,7 +1656,11 @@ def _evaluate_rule(
                 if wholly_outside
                 else RuleClaimResult.UNKNOWN
             )
-        result = _aggregate_results(results, quantifier=parameters["quantifier"])
+        result = _aggregate_results(
+            results,
+            quantifier=parameters["quantifier"],
+            observations_complete=parameters["event"] not in lower_bound_events,
+        )
         if not results and parameters["event"] not in lower_bound_events:
             result = RuleClaimResult.FAIL
         return evaluation(
@@ -1469,9 +1670,10 @@ def _evaluate_rule(
             fact_refs=fact_refs,
             derived_anchor_time=reference_value,
             count_lower_bound_events=lower_bound_events,
-            issues=[] if result is RuleClaimResult.PASS else [
-                "The event time is outside or overlaps the explicit incident-window uncertainty boundary."
-            ],
+            issues=result_issues(
+                result,
+                "The event time is outside or overlaps the explicit incident-window uncertainty boundary.",
+            ),
         )
 
     if kind == "FACT_FIELD_EQUALS":
@@ -1491,7 +1693,11 @@ def _evaluate_rule(
             else RuleClaimResult.FAIL
             for item in events[parameters["event"]]
         ]
-        result = _aggregate_results(values, quantifier=parameters["quantifier"])
+        result = _aggregate_results(
+            values,
+            quantifier=parameters["quantifier"],
+            observations_complete=parameters["event"] not in lower_bound_events,
+        )
         if not values and parameters["event"] not in lower_bound_events:
             result = RuleClaimResult.FAIL
         return evaluation(
@@ -1500,9 +1706,10 @@ def _evaluate_rule(
             events=events,
             fact_refs=[fact.item_id],
             count_lower_bound_events=lower_bound_events,
-            issues=[] if result is RuleClaimResult.PASS else [
-                "The selected event fields do not conclusively equal the fixed user fact."
-            ],
+            issues=result_issues(
+                result,
+                "The selected event fields do not conclusively equal the fixed user fact.",
+            ),
         )
 
     if kind == "FACT_IN":
@@ -1538,7 +1745,10 @@ def _evaluate_rule(
             status=_server_status(result),
             events=events,
             count_lower_bound_events=lower_bound_events,
-            issues=[] if result is RuleClaimResult.PASS else ["The required role event coverage is incomplete."],
+            issues=result_issues(
+                result,
+                "The required role event coverage is incomplete.",
+            ),
         )
 
     if kind in {"FIELDS_EQUAL", "CROSS_ROLE_CORRELATION"}:
@@ -1557,9 +1767,10 @@ def _evaluate_rule(
             status=_server_status(result),
             events=events,
             count_lower_bound_events=lower_bound_events,
-            issues=[] if result is RuleClaimResult.PASS else [
-                "No single occurrence tuple satisfies all declared field equalities."
-            ],
+            issues=result_issues(
+                result,
+                "No single occurrence tuple satisfies all declared field equalities.",
+            ),
         )
 
     if kind == "EVENT_ORDER":
@@ -1592,7 +1803,11 @@ def _evaluate_rule(
                     uncertainty=tolerance,
                 )
             )
-        result = _aggregate_results(values, quantifier="EXISTS")
+        result = _aggregate_results(
+            values,
+            quantifier="EXISTS",
+            observations_complete=not lower_bound_events,
+        )
         if not values and not lower_bound_events:
             result = RuleClaimResult.FAIL
         derived = [] if first_delta is None else [
@@ -1610,9 +1825,10 @@ def _evaluate_rule(
             events=events,
             count_lower_bound_events=lower_bound_events,
             derived_values=derived,
-            issues=[] if result is RuleClaimResult.PASS else [
-                "Event order fails or overlaps the explicit cross-clock tolerance."
-            ],
+            issues=result_issues(
+                result,
+                "Event order fails or overlaps the explicit cross-clock tolerance.",
+            ),
         )
 
     if kind == "NUMERIC_COMPARE":
@@ -1647,7 +1863,11 @@ def _evaluate_rule(
             except (KeyError, TypeError, ValueError) as exc:
                 evaluation_error = str(exc)
                 results.append(RuleClaimResult.UNKNOWN)
-        result = _aggregate_results(results, quantifier=parameters["quantifier"])
+        result = _aggregate_results(
+            results,
+            quantifier=parameters["quantifier"],
+            observations_complete=not lower_bound_events,
+        )
         if not results and not lower_bound_events:
             result = RuleClaimResult.FAIL
         derived: list[DerivedValueAudit] = []
@@ -1674,10 +1894,11 @@ def _evaluate_rule(
             fact_refs=fact_refs,
             count_lower_bound_events=lower_bound_events,
             derived_values=derived,
-            issues=[] if result is RuleClaimResult.PASS else [
+            issues=result_issues(
+                result,
                 evaluation_error
-                or "The numeric comparison fails or overlaps its explicit uncertainty interval."
-            ],
+                or "The numeric comparison fails or overlaps its explicit uncertainty interval.",
+            ),
         )
 
     if kind == "SEMANTIC_CAUSALITY":
@@ -1699,9 +1920,14 @@ def _evaluate_rule(
             status=ServerRuleStatus.SEMANTIC_ONLY,
             events=events,
             count_lower_bound_events=lower_bound_events,
-            issues=[] if not missing and prerequisites_ready else [
-                "Semantic review lacks verified positive evidence or mechanical prerequisites."
-            ],
+            issues=(
+                []
+                if not missing and prerequisites_ready
+                else result_issues(
+                    RuleClaimResult.UNKNOWN,
+                    "Semantic review lacks verified positive evidence or mechanical prerequisites.",
+                )
+            ),
         )
     raise ValueError("unsupported verification rule kind")
 
@@ -2155,7 +2381,7 @@ def verify_agent_draft(
         claim_bindings,
         claim_line_keys,
         participating_bindings,
-        incomplete_anchors,
+        scan_issues_by_anchor,
     ) = _resolve_evidence_lines(
         workspace_root=workspace_root,
         job=job,
@@ -2168,13 +2394,52 @@ def verify_agent_draft(
         ),
     )
     fact_values = _facts(job)
-    events, event_scan_complete = _extract_events(
+    preliminary_events, preliminary_scan_state = _extract_events_with_audit(
         extractors,
         lines,
-        incomplete_anchors,
+        scan_issues_by_anchor,
         fact_values,
+        pinned_requirements=pinned_requirements,
+        pinned_roles=pinned_roles,
     )
     extractor_by_id = {item["id"]: item for item in extractors}
+    preliminary_evaluated: dict[str, ServerRuleEvaluation] = {}
+    preliminary_scan_complete = {
+        event_id: state.complete
+        for event_id, state in preliminary_scan_state.items()
+    }
+    for rule in rules:
+        preliminary_evaluated[rule["id"]] = _evaluate_rule(
+            rule,
+            events=preliminary_events,
+            event_scan_complete=preliminary_scan_complete,
+            event_scan_state=preliminary_scan_state,
+            extractor_by_id=extractor_by_id,
+            facts=fact_values,
+            prior=preliminary_evaluated,
+        )
+    preliminary_rule_results = {
+        rule_id: (
+            "PASS"
+            if evaluation.status is ServerRuleStatus.VERIFIED_PASS
+            else "FAIL"
+            if evaluation.status is ServerRuleStatus.VERIFIED_FAIL
+            else "UNKNOWN"
+        )
+        for rule_id, evaluation in preliminary_evaluated.items()
+    }
+    events, event_scan_state = _extract_events_with_audit(
+        extractors,
+        lines,
+        scan_issues_by_anchor,
+        fact_values,
+        pinned_requirements=pinned_requirements,
+        pinned_roles=pinned_roles,
+        rule_results=preliminary_rule_results,
+    )
+    event_scan_complete = {
+        event_id: state.complete for event_id, state in event_scan_state.items()
+    }
     evaluated: dict[str, ServerRuleEvaluation] = {}
     audit_rules: list[DecisionRuleAudit] = []
     alignments: list[RuleClaimResult | None] = []
@@ -2183,6 +2448,7 @@ def verify_agent_draft(
             rule,
             events=events,
             event_scan_complete=event_scan_complete,
+            event_scan_state=event_scan_state,
             extractor_by_id=extractor_by_id,
             facts=fact_values,
             prior=evaluated,

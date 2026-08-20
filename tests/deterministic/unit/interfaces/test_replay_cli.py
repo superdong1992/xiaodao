@@ -318,8 +318,8 @@ def test_replay_document_parent_sync_failure_rolls_back_complete_link(
 
 
 def test_v4_state_contract_is_the_replay_hard_cut() -> None:
-    assert SCHEMA_VERSION == 5
-    assert CONTRACT_REVISION == "v5-contract-r1"
+    assert SCHEMA_VERSION == 6
+    assert CONTRACT_REVISION == "v6-contract-r1"
 
 
 def test_replay_projection_and_output_root_share_the_current_state_boundary(

@@ -49,6 +49,46 @@ EXPECTED_SOURCE_CHANGES = {
     ),
 }
 EXPECTED_ADDED_FILES = {
+    "references/checkpoints/01-begin-repeated-families-and-paths.md": {
+        "source": (
+            "S08 bounded-construction control; no counterpart exists in the frozen "
+            "upstream source tree."
+        ),
+        "purpose": (
+            "Provide a business-neutral read-only boundary before the bounded "
+            "verification-core blueprint."
+        ),
+    },
+    "references/checkpoints/02-begin-9-1-inventory.md": {
+        "source": (
+            "S08 bounded-construction control; no counterpart exists in the frozen "
+            "upstream source tree."
+        ),
+        "purpose": (
+            "Provide a business-neutral read-only boundary between the core and "
+            "repeated rule-family blueprints."
+        ),
+    },
+    "references/checkpoints/03-begin-9-2-witnesses.md": {
+        "source": (
+            "S08 bounded-construction control; no counterpart exists in the frozen "
+            "upstream source tree."
+        ),
+        "purpose": (
+            "Provide a business-neutral read-only boundary before the combined "
+            "section 9.1 and 9.2 audits."
+        ),
+    },
+    "references/checkpoints/04-write-now.md": {
+        "source": (
+            "S08 bounded-construction control; no counterpart exists in the frozen "
+            "upstream source tree."
+        ),
+        "purpose": (
+            "Provide a business-neutral read-only boundary immediately before the "
+            "single typed StructuredOutput submission."
+        ),
+    },
     "references/generation-spec-v6-reference.md": {
         "source": (
             "S08 self-contained reference; no counterpart exists in the frozen "

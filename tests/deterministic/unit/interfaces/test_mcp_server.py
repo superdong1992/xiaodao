@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 from contextlib import asynccontextmanager
@@ -15,14 +16,26 @@ from starlette.routing import Route
 
 from problem_locator import __version__
 from problem_locator.contracts.commands import ArtifactListResponse, CaseQueryResponse
-from problem_locator.contracts.enums import ErrorCode
+from problem_locator.contracts.enums import (
+    ArtifactKind,
+    CaseStatus,
+    ErrorCode,
+    GenericResultStatus,
+    ResourceKind,
+)
 from problem_locator.contracts.errors import (
     ERROR_SPECS,
     PORT_ERROR_CODES,
     ApplicationPortError,
 )
 from problem_locator.contracts.limits import MAX_ATTACHMENT_BYTES, MAX_INITIAL_USER_FACTS
-from problem_locator.contracts.models import ApplicationError, ApplicationErrorDetail
+from problem_locator.contracts.models import (
+    ApplicationError,
+    ApplicationErrorDetail,
+    ArtifactSummary,
+    CaseView,
+    GenericResultV2,
+)
 from problem_locator.contracts.ports import (
     ApplicationCommandPort,
     ApplicationQueryPort,
@@ -34,6 +47,8 @@ from tests.deterministic.unit.interfaces.helpers import (
     ARTIFACT_ID,
     ATTACHMENT_ID,
     CASE_ID,
+    FIXED_TIME,
+    JOB_ID,
     application_response,
     artifact_summary,
     case_view,
@@ -77,10 +92,92 @@ def _structured(result):
     return result.structuredContent
 
 
+def _generic_v2_public_view() -> tuple[CaseView, ArtifactSummary]:
+    report = "# 通用定位报告\n\n```text\nrequest-id: 订单-α-42\n```\n"
+    report_bytes = report.encode("utf-8")
+    report_sha256 = hashlib.sha256(report_bytes).hexdigest()
+    result = GenericResultV2(
+        format_version=2,
+        status=GenericResultStatus.RESOLVED,
+        report_markdown=report,
+        report_utf8_size=len(report_bytes),
+        report_sha256=report_sha256,
+        report_artifact_id=ARTIFACT_ID,
+        skill_name="generic-problem-locator-dual-mode",
+        source_job_id=JOB_ID,
+        source_outcome_id="00000000-0000-0000-0000-000000000005",
+        occurred_at=FIXED_TIME,
+    )
+    artifact = ArtifactSummary(
+        artifact_id=ARTIFACT_ID,
+        kind=ArtifactKind.GENERIC_REPORT,
+        name="generic-diagnosis-report.md",
+        content_type="text/markdown",
+        resource_kind=ResourceKind.FILE,
+        size=len(report_bytes),
+        sha256=report_sha256,
+        created_by_job_id=JOB_ID,
+        created_at=FIXED_TIME,
+        downloadable=True,
+    )
+    payload = case_view().model_dump(mode="python")
+    payload.update(
+        status=CaseStatus.RESOLVED,
+        generic_result=None,
+        generic_result_v2=result,
+        artifacts=[artifact],
+    )
+    return CaseView.model_validate(payload), artifact
+
+
 def test_interface_fakes_conform_to_the_frozen_ports() -> None:
     assert isinstance(FakeApplicationService(), ApplicationCommandPort)
     assert isinstance(FakeQuery(), ApplicationQueryPort)
     assert isinstance(FakeStateAdmin(readiness=readiness()), StateAdminPort)
+
+
+def test_mcp_get_case_and_list_artifacts_preserve_generic_v2_report_contract() -> None:
+    view, artifact = _generic_v2_public_view()
+    query = FakeQuery()
+    query.queue(
+        "get_case",
+        CaseQueryResponse(case_view=view, wait_timed_out=False),
+    )
+    query.queue(
+        "list_artifacts",
+        ArtifactListResponse(artifacts=[artifact]),
+    )
+    adapter = McpAdapter(
+        FakeApplicationService(),
+        query,
+        public_base_url="http://127.0.0.1:8000",
+    )
+
+    case_result = asyncio.run(
+        adapter.call(
+            "problem_locator_get_case",
+            {"case_id": CASE_ID, "wait_for_job_id": None, "wait_seconds": 0},
+        )
+    )
+    artifact_result = asyncio.run(
+        adapter.call(
+            "problem_locator_list_artifacts",
+            {"case_id": CASE_ID},
+        )
+    )
+
+    public_result = case_result["data"]["case_view"]["generic_result_v2"]
+    assert public_result["report_markdown"] == view.generic_result_v2.report_markdown
+    assert public_result["report_utf8_size"] == artifact.size
+    assert public_result["report_sha256"] == artifact.sha256
+    assert public_result["report_artifact_id"] == artifact.artifact_id
+    assert "<<<GENERIC_DIAGNOSIS_RESULT_V2:" not in public_result["report_markdown"]
+    public_artifact = artifact_result["data"]["artifacts"][0]
+    assert public_artifact["kind"] == ArtifactKind.GENERIC_REPORT.value
+    assert public_artifact["size"] == artifact.size
+    assert public_artifact["sha256"] == artifact.sha256
+    assert "storage_key" not in public_artifact
+    assert "metadata" not in public_artifact
 
 
 def test_fake_application_service_replays_same_request_and_rejects_changed_payload() -> None:

@@ -1,4 +1,4 @@
-"""Frozen public enumerations for the Problem Locator V3 contract."""
+"""Frozen public enumerations for the Problem Locator V4 contract."""
 
 from __future__ import annotations
 
@@ -130,6 +130,7 @@ class RequirementStatus(StrEnum):
 class ArtifactKind(StrEnum):
     USER_RESULT = "USER_RESULT"
     USER_RESULT_ARCHIVE = "USER_RESULT_ARCHIVE"
+    GENERIC_REPORT = "GENERIC_REPORT"
     DIAGNOSTIC_EXPORT = "DIAGNOSTIC_EXPORT"
     LOGPARSE_RUN = "LOGPARSE_RUN"
     AUDIT_BUNDLE = "AUDIT_BUNDLE"

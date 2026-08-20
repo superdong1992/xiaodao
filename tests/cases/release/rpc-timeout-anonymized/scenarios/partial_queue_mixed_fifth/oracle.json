@@ -1,0 +1,35 @@
+{
+  "resolution_status": "PARTIAL",
+  "terminal_path_id": "partial_queue_mixed_coverage",
+  "case_status": "PARTIALLY_RESOLVED",
+  "causal_factor_ids": [
+    "server_queue_contribution",
+    "upstream_lane_blocker",
+    "non_rpc_lane_occupancy"
+  ],
+  "candidate_factor_ids": [],
+  "excluded_factor_ids": [
+    "direct_api_overrun"
+  ],
+  "criterion_statuses": [
+    "SATISFIED",
+    "PARTIALLY_SATISFIED",
+    "SATISFIED"
+  ],
+  "required_rule_results": {
+    "q_fifth_present": "PASS",
+    "q_fifth_total_exceeds_timeout": "PASS",
+    "q_fifth_execution_within_timeout": "PASS",
+    "q_fifth_overlap_second_starts_before_end": "PASS",
+    "q_fifth_overlap_second_ends_after_start": "PASS",
+    "q_fifth_gap_first_second_open": "PASS",
+    "q_fifth_gap_first_second_before_end": "PASS",
+    "q_fifth_gap_first_second_after_start": "PASS",
+    "q_fifth_overlap_second_confirmed": "PASS",
+    "q_fifth_gap_first_second_confirmed": "PASS"
+  },
+  "required_safety_phrases": [
+    "超时不等于取消",
+    "固定 Diagnosis Skill"
+  ]
+}

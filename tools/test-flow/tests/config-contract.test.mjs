@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -207,14 +208,43 @@ test("every repository identity path exists and generated, approved and legacy d
   assert.deepEqual(config.identities.components["skill.logparse"].paths, [
     ".claude/skills/logparse-diagnose",
   ]);
-  assert.deepEqual(config.identities.components["skill.generic-smoke"].paths, [
-    "tests/fixtures/components/generic-problem-locator-smoke",
+  assert.deepEqual(config.identities.components["skill.generic-adapter"].paths, [
+    ".claude/skills/adapt-lan-generic-locator-v2",
   ]);
+  assert.deepEqual(config.identities.components["skill.generic-parity"].paths, [
+    "tests/fixtures/components/generic-problem-locator-dual-mode",
+  ]);
+  assert.ok(config.identities.sets.deterministic.producer.includes("skill.generic-adapter"));
+  assert.ok(config.identities.sets["real-generic-locator"].producer.includes("skill.generic-adapter"));
+  assert.ok(config.identities.sets["real-generic-locator"].producer.includes("skill.generic-parity"));
+  assert.equal(config.identities.components["skill.generic-smoke"], undefined);
   for (const setId of ["real-agent", "real-generic-locator", "real-route", "real-diagnose", "real-review", "real-skill-generation"]) {
     assert.ok(config.identities.sets[setId].producer.includes("runtime.support"), setId);
   }
   assert.ok(config.identities.sets["real-skill-generation"].producer.includes("product.source"));
   assert.ok(config.identities.sets["real-skill-generation"].producer.includes("case.journey"));
+});
+
+test("the standalone browser REST guide participates in framework proof identity", () => {
+  const config = loadConfiguration(REPO_ROOT);
+  assert.ok(config.identities.components["framework.docs"].paths.includes("docs/browser-rest-api.md"));
+  assert.ok(config.identities.components["framework.docs"].paths.includes(".gitattributes"));
+  assert.ok(config.identities.components["product.source"].paths.includes(".gitattributes"));
+  assert.ok(config.identities.sets.framework.proof.includes("framework.docs"));
+});
+
+test("Git checkouts and the current worktree preserve byte-pinned text as LF", () => {
+  const attributes = fs.readFileSync(path.join(REPO_ROOT, ".gitattributes"), "utf8");
+  assert.ok(attributes.split(/\r?\n/u).includes("* text=auto eol=lf"));
+  const result = spawnSync(
+    "git",
+    ["-c", `safe.directory=${REPO_ROOT}`, "-C", REPO_ROOT, "ls-files", "--eol"],
+    { encoding: "utf8" },
+  );
+  assert.equal(result.status, 0, result.stderr);
+  const nonLfText = result.stdout.split(/\r?\n/u)
+    .filter((line) => /w\/(?:crlf|mixed)\b/u.test(line));
+  assert.deepEqual(nonLfText, [], "tracked text contains CRLF or mixed working-tree bytes");
 });
 
 test("unsupported policy versions and dead fields fail closed", () => {

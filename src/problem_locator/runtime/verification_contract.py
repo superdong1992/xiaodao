@@ -713,6 +713,20 @@ def validate_verification_contract(
         raise ValueError("Logparse Skills require extractors; non-Logparse Skills forbid them")
 
     requirement_by_name = {item["name"]: item for item in requirements}
+    for extractor in extractors:
+        for selector in extractor["selectors"]:
+            binding = selector["value"]
+            if binding["source"] != "USER_FACT":
+                continue
+            requirement = requirement_by_name.get(binding["name"])
+            if requirement is None or requirement["kind"] != "INPUT":
+                raise ValueError(
+                    "event selector USER_FACT must name a declared INPUT requirement"
+                )
+            if requirement["requiredness"] == "OPTIONAL":
+                raise ValueError(
+                    "event selector USER_FACT must not name an OPTIONAL input"
+                )
     input_names = {
         item["name"] for item in requirements if item["kind"] == "INPUT"
     }

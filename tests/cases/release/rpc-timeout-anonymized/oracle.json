@@ -2,7 +2,7 @@
   "schema_version": 1,
   "expected_skill": {
     "id": "diagnose-anonymized-rpc-timeout",
-    "version": "6.0.0",
+    "version": "6.2.0",
     "capability": "anonymized-rpc-timeout",
     "deployment_scope": "TEST_ONLY",
     "requirement_names": [
@@ -28,6 +28,8 @@
       "complete_queue_and_upstream",
       "complete_api_overrun",
       "complete_deadloop_overrun",
+      "partial_queue_non_rpc_lane",
+      "partial_queue_mixed_coverage",
       "partial_server_receive_aggregate",
       "partial_cross_clock_ambiguity",
       "partial_client_receive_aggregate",
@@ -92,13 +94,6 @@
         ]
       },
       {
-        "event_id": "queue_history",
-        "observation_policy_ids": [
-          "bbbb_default_suppression",
-          "queue_rate_limit"
-        ]
-      },
-      {
         "event_id": "late_response",
         "observation_policy_ids": [
           "bbbb_default_suppression"
@@ -114,6 +109,41 @@
         "event_id": "deadloop_detected",
         "observation_policy_ids": [
           "bbbb_default_suppression"
+        ]
+      },
+      {
+        "event_id": "queue_history_target_first",
+        "observation_policy_ids": [
+          "bbbb_default_suppression",
+          "queue_rate_limit"
+        ]
+      },
+      {
+        "event_id": "queue_history_target_second",
+        "observation_policy_ids": [
+          "bbbb_default_suppression",
+          "queue_rate_limit"
+        ]
+      },
+      {
+        "event_id": "queue_history_target_third",
+        "observation_policy_ids": [
+          "bbbb_default_suppression",
+          "queue_rate_limit"
+        ]
+      },
+      {
+        "event_id": "queue_history_target_fourth",
+        "observation_policy_ids": [
+          "bbbb_default_suppression",
+          "queue_rate_limit"
+        ]
+      },
+      {
+        "event_id": "queue_history_target_fifth",
+        "observation_policy_ids": [
+          "bbbb_default_suppression",
+          "queue_rate_limit"
         ]
       }
     ],
@@ -192,7 +222,11 @@
     "CCCC_ERRNO_REQUEST_TIMEOUT_FAIL",
     "cccc_dbgex",
     "svc_alpha",
-    "partial_cross_clock_ambiguity"
+    "partial_cross_clock_ambiguity",
+    "queue_history_target_fifth",
+    "fifth_service",
+    "partial_queue_non_rpc_lane",
+    "non_rpc_lane_occupancy"
   ],
   "oracle_visibility": "GATE_ONLY"
 }

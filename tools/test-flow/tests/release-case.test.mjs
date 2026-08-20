@@ -17,6 +17,7 @@ import {
   verifyReleaseCaseManifest,
 } from "../lib/release-case.mjs";
 import { canonicalJson } from "../lib/util.mjs";
+import { validGenerationSpecSubmission } from "../runtime-support/isolated-agent-tool-audit.mjs";
 
 
 const REPOSITORY_ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\/(?:([A-Za-z]:))/, "$1")), "..", "..", "..");
@@ -37,19 +38,29 @@ test("release case directory ordering is ordinal and independent of host collati
 
 test("Release driver may omit optional initial facts and reorder the declared inputs", () => {
   const inputs = loadReleaseCaseInputs(CASE_ROOT);
+  const manifest = JSON.parse(fs.readFileSync(path.join(inputs.approved_skill_dir, "diagnosis-skill.json"), "utf8"));
+  for (const scenario of inputs.scenarios) {
+    assert.deepEqual(
+      releaseCaseInputCoverage(manifest, scenario.driver),
+      { initialValid: true, supplementValid: true },
+      scenario.scenario_id,
+    );
+  }
   const scenario = inputs.scenarios.find((item) => item.scenario_id === inputs.journey_scenario);
   assert.ok(scenario);
-  const manifest = JSON.parse(fs.readFileSync(path.join(inputs.approved_skill_dir, "diagnosis-skill.json"), "utf8"));
-  assert.deepEqual(releaseCaseInputCoverage(manifest, scenario.driver), {
-    initialValid: true,
-    supplementValid: true,
-  });
 
+  const reversedPairs = scenario.driver.initial_user_fact_names
+    .map((name, index) => [name, scenario.driver.initial_user_fact_values[index]])
+    .reverse();
   const reversed = {
     ...scenario.driver,
-    initial_user_fact_names: [...scenario.driver.initial_user_fact_names].reverse(),
+    initial_user_fact_names: reversedPairs.map(([name]) => name),
+    initial_user_fact_values: reversedPairs.map(([, value]) => value),
   };
-  assert.equal(releaseCaseInputCoverage(manifest, reversed).initialValid, true);
+  assert.deepEqual(
+    releaseCaseInputCoverage(manifest, reversed),
+    { initialValid: true, supplementValid: true },
+  );
   const missingRequired = {
     ...scenario.driver,
     initial_user_fact_names: scenario.driver.initial_user_fact_names.filter((name) => name !== "problem_time"),
@@ -60,6 +71,77 @@ test("Release driver may omit optional initial facts and reorder the declared in
     initial_user_fact_names: [...scenario.driver.initial_user_fact_names, "unknown_fact"],
   };
   assert.equal(releaseCaseInputCoverage(manifest, unknown).initialValid, false);
+
+  const inactiveSupplement = {
+    ...scenario.driver,
+    initial_user_fact_values: scenario.driver.initial_user_fact_names.map(
+      (name, index) => (
+        name === "transport_protocol"
+          ? "silent_timeout_detail"
+          : scenario.driver.initial_user_fact_values[index]
+      ),
+    ),
+  };
+  assert.equal(
+    releaseCaseInputCoverage(manifest, inactiveSupplement).supplementValid,
+    false,
+  );
+  const missingActiveSupplement = {
+    ...scenario.driver,
+    supplement_input_names: [],
+    supplement_input_values: [],
+  };
+  assert.equal(
+    releaseCaseInputCoverage(manifest, missingActiveSupplement).supplementValid,
+    false,
+  );
+});
+
+test("Release supplement coverage respects requiredness and three-state activation", () => {
+  const input = (name, requiredness, activation_condition = null) => ({
+    name,
+    kind: "INPUT",
+    stage: "AFTER_LOGPARSE",
+    requiredness,
+    activation_condition,
+  });
+  const factTerm = {
+    source: "USER_FACT",
+    name: "transport",
+    operator: "EQUALS",
+    value: "standard",
+  };
+  const ruleTerm = {
+    source: "RULE_RESULT",
+    name: "anchor_present",
+    operator: "EQUALS",
+    value: "PASS",
+  };
+  const condition = (...terms) => ({ any_of: [{ all_of: terms }] });
+  const driver = (transport, names) => ({
+    initial_user_fact_names: ["transport"],
+    initial_user_fact_values: [transport],
+    supplement_input_names: names,
+  });
+  const coverage = (requirements, transport, names) => releaseCaseInputCoverage(
+    { requirements },
+    driver(transport, names),
+  ).supplementValid;
+
+  assert.equal(coverage([input("required", "REQUIRED")], "standard", []), false);
+  assert.equal(coverage([input("required", "REQUIRED")], "standard", ["required"]), true);
+  assert.equal(coverage([input("optional", "OPTIONAL")], "standard", []), true);
+  assert.equal(coverage([input("optional", "OPTIONAL")], "standard", ["optional"]), false);
+  assert.equal(coverage([input("rule", "CONDITIONAL", condition(ruleTerm))], "standard", []), true);
+  assert.equal(coverage([input("rule", "CONDITIONAL", condition(ruleTerm))], "standard", ["rule"]), true);
+  assert.equal(coverage([input("mixed", "CONDITIONAL", condition(factTerm, ruleTerm))], "silent", []), true);
+  assert.equal(coverage([input("mixed", "CONDITIONAL", condition(factTerm, ruleTerm))], "silent", ["mixed"]), false);
+  assert.equal(coverage([input("mixed", "CONDITIONAL", condition(factTerm, ruleTerm))], "standard", []), true);
+  assert.equal(coverage([input("mixed", "CONDITIONAL", condition(factTerm, ruleTerm))], "standard", ["mixed"]), true);
+  assert.equal(coverage([input("fact", "CONDITIONAL", condition(factTerm))], "standard", []), false);
+  assert.equal(coverage([input("fact", "CONDITIONAL", condition(factTerm))], "silent", []), true);
+  assert.equal(coverage([input("fact", "CONDITIONAL", condition(factTerm))], "standard", ["unknown"]), false);
+  assert.equal(coverage([input("fact", "CONDITIONAL", condition(factTerm))], "standard", ["fact", "fact"]), false);
 });
 
 function filesBelow(root) {
@@ -156,6 +238,7 @@ test("the release case loader verifies hashes and keeps every oracle on an expli
   assert.deepEqual(loaded.scenarios.map((item) => item.scenario_id), descriptor.scenarios.map((item) => item.scenario_id));
   assert.equal(Object.hasOwn(inputs, "semantic_oracle"), false);
   assert.equal(Object.hasOwn(inputs.scenarios[0], "oracle"), false);
+  assert.equal(validGenerationSpecSubmission(inputs.generation_spec), true);
   assert.equal(oracle.semantic_oracle.oracle_visibility, "GATE_ONLY");
   assert.match(inputs.wiki, /\(#|（#/);
   assert.doesNotMatch(fs.readFileSync(path.join(inputs.approved_skill_dir, "SKILL.md"), "utf8"), /\(#|（#|#\)|#）/);

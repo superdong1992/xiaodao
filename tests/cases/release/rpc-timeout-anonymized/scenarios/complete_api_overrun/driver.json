@@ -43,12 +43,8 @@
     "server_slot",
     "server_proc"
   ],
-  "supplement_input_names": [
-    "request_id"
-  ],
-  "supplement_input_values": [
-    "42"
-  ],
+  "supplement_input_names": [],
+  "supplement_input_values": [],
   "attachment_files": [
     "client.log",
     "server.log"

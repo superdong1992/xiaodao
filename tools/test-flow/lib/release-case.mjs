@@ -81,14 +81,72 @@ export function releaseCaseInputCoverage(skillManifest, driver) {
   const afterNames = requirements
     .filter((item) => item?.kind === "INPUT" && item?.stage === "AFTER_LOGPARSE")
     .map((item) => item.name);
+  const initialValues = Array.isArray(driver?.initial_user_fact_values)
+    ? driver.initial_user_fact_values
+    : [];
+  const initialFacts = new Map(
+    initialNames.length === initialValues.length
+      ? initialNames.map((name, index) => [name, initialValues[index]])
+      : [],
+  );
+  const activationState = (condition) => {
+    if (!condition || !Array.isArray(condition.any_of)) return "FALSE";
+    const branchStates = condition.any_of.map((branch) => {
+      if (!Array.isArray(branch?.all_of) || branch.all_of.length === 0) return "FALSE";
+      let unknown = false;
+      for (const term of branch.all_of) {
+        if (term?.source === "USER_FACT") {
+          if (
+            term.operator !== "EQUALS"
+            || initialFacts.get(term.name) !== term.value
+          ) return "FALSE";
+        } else if (term?.source === "RULE_RESULT") {
+          unknown = true;
+        } else {
+          return "FALSE";
+        }
+      }
+      return unknown ? "UNKNOWN" : "TRUE";
+    });
+    if (branchStates.includes("TRUE")) return "TRUE";
+    if (branchStates.includes("UNKNOWN")) return "UNKNOWN";
+    return "FALSE";
+  };
+  const afterRequirements = requirements.filter(
+    (item) => item?.kind === "INPUT" && item?.stage === "AFTER_LOGPARSE",
+  );
   const supplementNames = Array.isArray(driver?.supplement_input_names)
     ? driver.supplement_input_names
     : [];
+  const declaredAfter = new Set(afterNames);
+  const afterActivation = new Map(
+    afterRequirements.map((item) => [
+      item.name,
+      item.requiredness === "REQUIRED"
+        ? "TRUE"
+        : item.requiredness === "CONDITIONAL"
+          ? activationState(item.activation_condition)
+          : "FALSE",
+    ]),
+  );
+  const expectedAfter = new Set(
+    [...afterActivation]
+      .filter(([, state]) => state === "TRUE")
+      .map(([name]) => name),
+  );
+  const unknownAfter = new Set(
+    [...afterActivation]
+      .filter(([, state]) => state === "UNKNOWN")
+      .map(([name]) => name),
+  );
   const supplementValid = (
     afterNames.length === new Set(afterNames).size
     && supplementNames.length === new Set(supplementNames).size
-    && afterNames.length === supplementNames.length
-    && afterNames.every((name) => supplementNames.includes(name))
+    && supplementNames.every((name) => declaredAfter.has(name))
+    && [...expectedAfter].every((name) => supplementNames.includes(name))
+    && supplementNames.every(
+      (name) => expectedAfter.has(name) || unknownAfter.has(name),
+    )
   );
   return { initialValid, supplementValid };
 }

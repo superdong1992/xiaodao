@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
+import json
+import re
 
 import httpx
 
@@ -12,9 +13,28 @@ from problem_locator.contracts.commands import (
     SubmitSupplement,
 )
 from problem_locator.contracts.enums import ErrorCode
+from problem_locator.contracts.limits import (
+    MAX_ATTACHMENT_BYTES,
+    MAX_DESCRIPTION_UTF8_BYTES,
+    MAX_USER_TEXT_UTF8_BYTES,
+)
 from problem_locator.contracts.serialization import canonical_json_bytes
+from problem_locator.interfaces.error_mapping import http_status_for
 from problem_locator.interfaces.http_app import create_http_app
 from problem_locator.interfaces.mcp_server import McpAdapter
+from problem_locator.interfaces.rest_models import (
+    ApplicationSuccessEnvelope,
+    ArtifactListSuccessEnvelope,
+    CaseQuerySuccessEnvelope,
+    CreateCaseBody,
+    ErrorEnvelope,
+    LiveSuccessEnvelope,
+    PrepareAttachmentBody,
+    PrepareAttachmentSuccessEnvelope,
+    ReadinessSuccessEnvelope,
+    SubmitSupplementBody,
+    UploadReadySuccessEnvelope,
+)
 from tests.deterministic.contracts._support import REPOSITORY_ROOT
 from tests.deterministic.unit.interfaces.fakes import (
     FakeApplicationService,
@@ -37,6 +57,14 @@ from tests.deterministic.unit.interfaces.helpers import (
 
 REQUEST_ID = "10000000-0000-0000-0000-000000000001"
 REQUEST_ID_2 = "10000000-0000-0000-0000-000000000002"
+
+
+def _guide_json_examples() -> list[object]:
+    guide = (REPOSITORY_ROOT / "docs/browser-rest-api.md").read_text(encoding="utf-8")
+    return [
+        json.loads(match)
+        for match in re.findall(r"```json\s*\n([\s\S]*?)```", guide)
+    ]
 
 
 def _run(app, operation):
@@ -243,6 +271,25 @@ def test_get_case_maps_long_poll_query_and_rejects_unknown_parameters() -> None:
     assert invalid.json()["error"]["code"] == ErrorCode.VALIDATION_ERROR.value
 
 
+def test_openapi_uuid_metadata_preserves_application_validation_errors() -> None:
+    app = _app()
+
+    async def operation(client: httpx.AsyncClient):
+        invalid_path = await client.get("/api/v1/cases/NOT-A-UUID")
+        invalid_query = await client.get(
+            f"/api/v1/cases/{CASE_ID}",
+            params={"wait_for_job_id": "NOT-A-UUID"},
+        )
+        return invalid_path, invalid_query
+
+    invalid_path, invalid_query = _run(app, operation)
+
+    for response in (invalid_path, invalid_query):
+        assert response.status_code == 400
+        assert response.json()["error"]["code"] == ErrorCode.VALIDATION_ERROR.value
+        assert response.json()["error"]["details"][0]["field"] == "$"
+
+
 def test_submit_supplement_maps_named_values_and_ready_attachments() -> None:
     command = FakeApplicationService(
         [application_response(operation="SubmitSupplement", revision=4)]
@@ -364,23 +411,54 @@ def test_openapi_and_swagger_publish_the_browser_contract() -> None:
 
     assert openapi_response.status_code == 200
     schema = openapi_response.json()
-    expected_paths = {
-        "/api/v1/cases",
-        "/api/v1/cases/{case_id}",
-        "/api/v1/cases/{case_id}/attachments",
-        "/api/v1/attachments/{attachment_id}/content",
-        "/api/v1/cases/{case_id}/supplements",
-        "/api/v1/cases/{case_id}/artifacts",
-        "/api/v1/artifacts/{artifact_id}/content",
+    expected_operations = {
+        ("/live", "get"): "get_liveness",
+        ("/ready", "get"): "get_readiness",
+        ("/api/v1/cases", "post"): "create_case",
+        ("/api/v1/cases/{case_id}", "get"): "get_case",
+        (
+            "/api/v1/cases/{case_id}/attachments",
+            "post",
+        ): "prepare_attachment",
+        (
+            "/api/v1/attachments/{attachment_id}/content",
+            "put",
+        ): "upload_attachment",
+        (
+            "/api/v1/cases/{case_id}/supplements",
+            "post",
+        ): "submit_supplement",
+        ("/api/v1/cases/{case_id}/artifacts", "get"): "list_artifacts",
+        (
+            "/api/v1/artifacts/{artifact_id}/content",
+            "get",
+        ): "download_artifact",
     }
-    assert expected_paths <= set(schema["paths"])
+    assert set(schema["paths"]) == {path for path, _method in expected_operations}
     assert "/mcp" not in schema["paths"]
+    assert {
+        (path, method): schema["paths"][path][method]["operationId"]
+        for path, method in expected_operations
+    } == expected_operations
+    for path, method in expected_operations:
+        operation = schema["paths"][path][method]
+        assert operation["summary"]
+        assert operation["description"]
+        for response in operation["responses"].values():
+            assert response["description"]
+            assert "X-Problem-Locator-Correlation-ID" in response["headers"]
 
     create_schema = schema["components"]["schemas"]["CreateCaseBody"]
     assert "problem_spec" in create_schema["required"]
     assert "initial_user_facts" in create_schema["properties"]
+    assert create_schema["properties"]["initial_user_facts"]["default"] == []
+    assert create_schema["examples"]
     prepare_schema = schema["components"]["schemas"]["PrepareAttachmentBody"]
     assert {"declared_size", "declared_sha256"} <= set(prepare_schema["required"])
+    assert (
+        prepare_schema["properties"]["declared_size"]["maximum"]
+        == MAX_ATTACHMENT_BYTES
+    )
 
     upload = schema["paths"][
         "/api/v1/attachments/{attachment_id}/content"
@@ -395,14 +473,34 @@ def test_openapi_and_swagger_publish_the_browser_contract() -> None:
         item["schema"] == {"type": "string", "format": "binary"}
         for item in binary_content.values()
     )
+    assert {item["name"] for item in upload["parameters"] if item["in"] == "header"} == {
+        "Idempotency-Key",
+        "Content-Type",
+        "Content-Length",
+        "X-Content-SHA256",
+    }
     content_length = next(
         item for item in upload["parameters"] if item["name"] == "Content-Length"
     )
     assert "Chrome" in content_length["description"]
 
-    download = schema["paths"][
+    download_operation = schema["paths"][
         "/api/v1/artifacts/{artifact_id}/content"
-    ]["get"]["responses"]["200"]
+    ]["get"]
+    case_query = next(
+        item
+        for item in download_operation["parameters"]
+        if item["in"] == "query" and item["name"] == "case_id"
+    )
+    assert case_query["required"] is True
+    assert case_query["schema"]["format"] == "uuid"
+    wait_for_job = next(
+        item
+        for item in schema["paths"]["/api/v1/cases/{case_id}"]["get"]["parameters"]
+        if item["name"] == "wait_for_job_id"
+    )
+    assert "active Job in the initial snapshot" in wait_for_job["description"]
+    download = download_operation["responses"]["200"]
     assert {
         "Content-Length",
         "Content-Type",
@@ -414,31 +512,331 @@ def test_openapi_and_swagger_publish_the_browser_contract() -> None:
     assert "Swagger UI" in docs_response.text
 
 
+def test_openapi_describes_every_parameter_and_reachable_model_field() -> None:
+    schema = _app().openapi()
+    uuid_names = {
+        "case_id",
+        "wait_for_job_id",
+        "attachment_id",
+        "artifact_id",
+    }
+
+    for path_item in schema["paths"].values():
+        for method, operation in path_item.items():
+            if method not in {"get", "post", "put"}:
+                continue
+            for parameter in operation.get("parameters", []):
+                assert parameter["description"]
+                assert parameter["schema"]
+                if parameter["name"] in uuid_names:
+                    outer_schema = parameter["schema"]
+                    parameter_schema = outer_schema
+                    if "anyOf" in outer_schema:
+                        parameter_schema = next(
+                            item
+                            for item in outer_schema["anyOf"]
+                            if item.get("type") == "string"
+                        )
+                    assert (
+                        parameter_schema.get("format")
+                        or outer_schema.get("format")
+                    ) == "uuid"
+                    assert parameter_schema["pattern"].startswith("^")
+            if "requestBody" in operation:
+                assert operation["requestBody"]["description"]
+
+    missing = [
+        f"{schema_name}.{field_name}"
+        for schema_name, component in schema["components"]["schemas"].items()
+        for field_name, field_schema in component.get("properties", {}).items()
+        if not field_schema.get("description")
+    ]
+    assert missing == []
+
+    components = schema["components"]["schemas"]
+    generic_v2 = components["GenericResultV2"]
+    assert set(generic_v2["properties"]) == {
+        "format_version",
+        "status",
+        "report_markdown",
+        "report_utf8_size",
+        "report_sha256",
+        "report_artifact_id",
+        "skill_name",
+        "source_job_id",
+        "source_outcome_id",
+        "occurred_at",
+    }
+    assert set(generic_v2["required"]) == set(generic_v2["properties"])
+    assert generic_v2["properties"]["format_version"]["const"] == 2
+    assert "GenericResultV2" in json.dumps(
+        components["CaseView"]["properties"]["generic_result_v2"]
+    )
+    assert "GENERIC_REPORT" in components["ArtifactKind"]["enum"]
+    assert all(
+        component.get("description")
+        for component in schema["components"]["schemas"].values()
+    )
+
+    utf8_limited_fields = []
+
+    def collect_utf8_limits(value: object) -> set[int]:
+        limits: set[int] = set()
+        if isinstance(value, dict):
+            if "x-max-utf8-bytes" in value:
+                limits.add(value["x-max-utf8-bytes"])
+            for nested in value.values():
+                limits.update(collect_utf8_limits(nested))
+        elif isinstance(value, list):
+            for nested in value:
+                limits.update(collect_utf8_limits(nested))
+        return limits
+
+    for schema_name, component in schema["components"]["schemas"].items():
+        for field_name, field_schema in component.get("properties", {}).items():
+            limits = collect_utf8_limits(field_schema)
+            if not limits:
+                continue
+            utf8_limited_fields.append(f"{schema_name}.{field_name}")
+            assert "UTF-8 bytes" in field_schema["description"]
+            assert limits <= {
+                MAX_USER_TEXT_UTF8_BYTES,
+                MAX_DESCRIPTION_UTF8_BYTES,
+            }
+    assert utf8_limited_fields
+
+    response_refs: set[str] = set()
+
+    def collect_refs(value: object) -> None:
+        if isinstance(value, dict):
+            ref = value.get("$ref")
+            if isinstance(ref, str) and ref.startswith("#/components/schemas/"):
+                response_refs.add(ref.rsplit("/", 1)[-1])
+            for nested in value.values():
+                collect_refs(nested)
+        elif isinstance(value, list):
+            for nested in value:
+                collect_refs(nested)
+
+    for path_item in schema["paths"].values():
+        for method, operation in path_item.items():
+            if method not in {"get", "post", "put"}:
+                continue
+            collect_refs(operation.get("responses", {}))
+
+    visited: set[str] = set()
+    while response_refs - visited:
+        schema_name = next(iter(response_refs - visited))
+        visited.add(schema_name)
+        component = schema["components"]["schemas"][schema_name]
+        collect_refs(component)
+        properties = component.get("properties", {})
+        if component.get("type") == "object" and properties:
+            assert component["required"] == list(properties)
+
+
+def test_openapi_examples_validate_against_the_real_rest_dtos() -> None:
+    schema = _app().openapi()
+    components = schema["components"]["schemas"]
+    operations_with_error_examples: set[str] = set()
+
+    for model, schema_name in (
+        (CreateCaseBody, "CreateCaseBody"),
+        (PrepareAttachmentBody, "PrepareAttachmentBody"),
+        (SubmitSupplementBody, "SubmitSupplementBody"),
+    ):
+        examples = components[schema_name]["examples"]
+        assert examples
+        for example in examples:
+            model.model_validate(example)
+
+    success_models = {
+        "get_liveness": LiveSuccessEnvelope,
+        "get_readiness": ReadinessSuccessEnvelope,
+        "create_case": ApplicationSuccessEnvelope,
+        "get_case": CaseQuerySuccessEnvelope,
+        "submit_supplement": ApplicationSuccessEnvelope,
+        "prepare_attachment": PrepareAttachmentSuccessEnvelope,
+        "upload_attachment": UploadReadySuccessEnvelope,
+        "list_artifacts": ArtifactListSuccessEnvelope,
+    }
+    for path_item in schema["paths"].values():
+        for method, operation in path_item.items():
+            if method not in {"get", "post", "put"}:
+                continue
+            operation_id = operation["operationId"]
+            if operation_id in success_models:
+                value = operation["responses"]["200"]["content"][
+                    "application/json"
+                ]["examples"]["success"]["value"]
+                success_models[operation_id].model_validate(value)
+            for status, response in operation.get("responses", {}).items():
+                for media in response.get("content", {}).values():
+                    for example in media.get("examples", {}).values():
+                        value = example["value"]
+                        if value.get("ok") is not False:
+                            continue
+                        parsed = ErrorEnvelope.model_validate(value)
+                        assert http_status_for(parsed.error) == int(status)
+                        operations_with_error_examples.add(operation_id)
+
+    assert operations_with_error_examples == {
+        "get_readiness",
+        "create_case",
+        "get_case",
+        "submit_supplement",
+        "prepare_attachment",
+        "upload_attachment",
+        "list_artifacts",
+        "download_artifact",
+    }
+
+    input_constraints = components["InputRequirementConstraints"]["properties"]
+    assert "empty array" in input_constraints["allowed_values"]["description"]
+    assert "Python fullmatch" in input_constraints["pattern"]["description"]
+    assert "version string" in components["VersionedRef"]["properties"][
+        "version"
+    ]["description"]
+
+    operations = {
+        operation["operationId"]: operation
+        for path_item in schema["paths"].values()
+        for method, operation in path_item.items()
+        if method in {"get", "post", "put"}
+    }
+    created = operations["create_case"]["responses"]["200"]["content"][
+        "application/json"
+    ]["examples"]["success"]["value"]["data"]
+    assert created["business_receipt"]["status"] == "RUNNING"
+    assert created["business_receipt"]["job_id"] == created["case_view"][
+        "active_job"
+    ]["job_id"]
+    assert created["case_view"]["status"] == "RUNNING"
+    assert created["case_view"]["generic_result"] is None
+    assert created["case_view"]["generic_result_v2"] is None
+
+    submit = operations["submit_supplement"]["responses"]["200"]["content"][
+        "application/json"
+    ]["examples"]["success"]["value"]["data"]
+    assert submit["business_receipt"]["case_revision"] == 2
+    assert submit["case_view"]["case_revision"] == 2
+    assert submit["business_receipt"]["status"] == "RUNNING"
+
+    prepared = operations["prepare_attachment"]["responses"]["200"]["content"][
+        "application/json"
+    ]["examples"]["success"]["value"]["data"]["application_response"]
+    assert prepared["business_receipt"]["case_revision"] == 2
+    assert prepared["case_view"]["case_revision"] == 2
+    assert prepared["business_receipt"]["status"] == "UPLOADING"
+
+    uploaded = operations["upload_attachment"]["responses"]["200"]["content"][
+        "application/json"
+    ]["examples"]["success"]["value"]["data"]
+    assert uploaded["case_revision"] == 3
+
+    revision_conflict_operations = {
+        operation_id
+        for operation_id, operation in operations.items()
+        for response in operation["responses"].values()
+        for media in response.get("content", {}).values()
+        for example in media.get("examples", {}).values()
+        if isinstance(example["value"].get("error"), dict)
+        and example["value"]["error"].get("code") == "REVISION_CONFLICT"
+    }
+    assert revision_conflict_operations == {
+        "submit_supplement",
+        "prepare_attachment",
+    }
+
+
+def test_guide_json_examples_validate_against_the_real_rest_dtos() -> None:
+    examples = _guide_json_examples()
+    assert len(examples) == 13
+    assert examples[0] == {"ok": True, "data": {}, "error": None}
+
+    for index, model in (
+        (4, CreateCaseBody),
+        (7, PrepareAttachmentBody),
+        (10, SubmitSupplementBody),
+    ):
+        model.model_validate(examples[index])
+
+    for index, model in (
+        (1, ErrorEnvelope),
+        (2, LiveSuccessEnvelope),
+        (3, ReadinessSuccessEnvelope),
+        (5, ApplicationSuccessEnvelope),
+        (6, CaseQuerySuccessEnvelope),
+        (8, PrepareAttachmentSuccessEnvelope),
+        (9, UploadReadySuccessEnvelope),
+        (11, ApplicationSuccessEnvelope),
+        (12, ArtifactListSuccessEnvelope),
+    ):
+        parsed = model.model_validate(examples[index])
+        assert parsed.model_dump(
+            mode="json",
+            by_alias=True,
+            exclude_none=False,
+            exclude_unset=False,
+        ) == examples[index]
+
+    queried_case_view = examples[6]["data"]["case_view"]
+    assert queried_case_view["generic_result"] is None
+    assert queried_case_view["generic_result_v2"] is None
+
+
+def test_create_case_openapi_and_guide_examples_execute_through_asgi() -> None:
+    command = FakeApplicationService(
+        [
+            application_response(operation="CreateCase", with_case_view=False),
+            application_response(operation="CreateCase", with_case_view=False),
+        ]
+    )
+    app = _app(command=command)
+    openapi_payload = app.openapi()["components"]["schemas"]["CreateCaseBody"][
+        "examples"
+    ][0]
+    guide_payload = _guide_json_examples()[4]
+
+    async def operation(client: httpx.AsyncClient):
+        return (
+            await client.post("/api/v1/cases", json=openapi_payload),
+            await client.post("/api/v1/cases", json=guide_payload),
+        )
+
+    responses = _run(app, operation)
+
+    assert [response.status_code for response in responses] == [200, 200]
+    assert [call.idempotency_key for call in command.calls] == [
+        openapi_payload["request_id"],
+        guide_payload["request_id"],
+    ]
+
+
+def test_openapi_contains_no_cross_protocol_surface() -> None:
+    document = canonical_json_bytes(_app().openapi()).lower()
+    assert b'"/mcp"' not in document
+    assert b"problem_locator_create_case" not in document
+    assert b"claude" not in document
+
+
 def test_openapi_contract_matches_versioned_snapshot() -> None:
     schema = _app().openapi()
-    document_bytes = canonical_json_bytes(schema)
-    snapshot = {
-        "schema_version": 1,
-        "openapi": schema["openapi"],
-        "info": schema["info"],
-        "document_sha256": hashlib.sha256(document_bytes).hexdigest(),
-        "operations": {
-            path: sorted(
-                method
-                for method in item
-                if method in {"get", "post", "put", "delete", "patch"}
-            )
-            for path, item in sorted(schema["paths"].items())
-        },
-        "component_schemas": sorted(schema["components"]["schemas"]),
-    }
-    expected = canonical_json_bytes(snapshot)
+    expected = canonical_json_bytes(schema)
     snapshot_path = REPOSITORY_ROOT / "schemas/v2/web-api.openapi.snapshot.json"
     actual = snapshot_path.read_bytes()
     assert actual == expected, (
-        f"regenerate {snapshot_path.relative_to(REPOSITORY_ROOT)} as "
-        f"{expected.decode('utf-8')}"
+        f"regenerate the complete canonical document at "
+        f"{snapshot_path.relative_to(REPOSITORY_ROOT)}"
     )
+
+    app = _app()
+
+    async def operation(client: httpx.AsyncClient):
+        return await client.get("/openapi.json")
+
+    response = _run(app, operation)
+    assert response.content == actual
 
 
 def test_wildcard_cors_allows_browser_preflight_without_credentials() -> None:

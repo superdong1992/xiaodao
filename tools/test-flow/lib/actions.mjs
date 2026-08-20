@@ -2,6 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {
+  canonicalJson,
   ensureDirectory,
   removeTreeWritable,
   resolveCommand,
@@ -20,11 +21,17 @@ import {
   ISOLATED_AGENT_CLAUDE_OUTPUT_TOKEN_KEY,
   ISOLATED_AGENT_ENV_POLICY_VERSION,
   ISOLATED_AGENT_OUTPUT_CAP_ENFORCEMENT,
+  ISOLATED_AGENT_STRUCTURED_OUTPUT_RETRY_ENFORCEMENT,
+  ISOLATED_AGENT_STRUCTURED_OUTPUT_RETRY_KEY,
   validEnvironmentKeySummary,
 } from "../runtime-support/isolated-agent-env.mjs";
 import {
-  SKILL_GENERATION_TRACE_SCHEMA_VERSION,
+  validSkillGenerationFailedTraceAuditReceipt,
+  validSkillGenerationIncompleteAuditRejectedReceipt,
+  validSkillGenerationIncompleteTraceAuditReceipt,
+  validSkillGenerationPartialTraceAuditReceipt,
   validSkillGenerationTraceAuditReceipt,
+  validIsolatedAgentStreamEventType,
 } from "../runtime-support/isolated-agent-tool-audit.mjs";
 
 function pythonRuntime(repoRoot) {
@@ -37,6 +44,41 @@ function gateExecutionId(stage, gateId) {
 
 function gateRoot(context, stage) {
   return context.gateRoot ?? path.join(context.attemptRoot, "payload", "stages", stage.id);
+}
+
+export function pytestBaseTempPath(scratch, platform = process.platform) {
+  const pathApi = platform === "win32" ? path.win32 : path.posix;
+  const absolute = pathApi.resolve(scratch);
+  if (platform !== "win32" || absolute.startsWith("\\\\?\\")) return absolute;
+  if (absolute.startsWith("\\\\")) return `\\\\?\\UNC\\${absolute.slice(2)}`;
+  return `\\\\?\\${absolute}`;
+}
+
+export function pytestScratchBoundary({
+  platform = process.platform,
+  temporaryDirectory = os.tmpdir(),
+  repoRoot = null,
+  isolatedAgent = false,
+  configuredWindowsDirectory = process.env.TEST_FLOW_WINDOWS_SCRATCH_ROOT ?? null,
+  attemptRoot,
+} = {}) {
+  const pathApi = platform === "win32" ? path.win32 : path.posix;
+  if (platform === "win32") {
+    if (configuredWindowsDirectory !== null) {
+      if (!pathApi.isAbsolute(configuredWindowsDirectory)) {
+        throw new Error("PYTEST_WINDOWS_SCRATCH_ROOT_ABSOLUTE_REQUIRED");
+      }
+      return pathApi.resolve(configuredWindowsDirectory);
+    }
+    const systemTemporary = pathApi.resolve(temporaryDirectory);
+    if (isolatedAgent || repoRoot === null) return systemTemporary;
+    const repositoryTemporary = pathApi.resolve(repoRoot, ".tmp", "p");
+    return repositoryTemporary.length <= systemTemporary.length
+      ? repositoryTemporary
+      : systemTemporary;
+  }
+  if (!attemptRoot) throw new Error("PYTEST_ATTEMPT_ROOT_REQUIRED");
+  return pathApi.resolve(attemptRoot);
 }
 
 function xmlInteger(attributes, name) {
@@ -114,6 +156,9 @@ function affectedSelectors(changedFiles) {
     if (file.startsWith("tests/deterministic/") && file.endsWith(".py")) {
       add(path.posix.basename(file).startsWith("test_") ? file : path.posix.dirname(file));
       continue;
+    }
+    if (file === "docs/browser-rest-api.md" || file === "schemas/v2/web-api.openapi.snapshot.json") {
+      add("tests/deterministic/unit/interfaces/test_web_api.py");
     }
     if (/^(schemas|src\/problem_locator\/contracts)\//.test(file)) add("tests/deterministic/contracts");
     if (/^src\/problem_locator\/domain\//.test(file)) add("tests/deterministic/unit/domain", "tests/deterministic/integration/test_s01_contract_domain_seam.py");
@@ -198,14 +243,20 @@ async function pytestAction(context, stage, selectors, {
     return { status: "NOT_REQUIRED", failure_domain: null, code: "AFFECTED_SCOPE_EMPTY", elapsed_seconds: 0, pytest: summary, selection };
   }
   const externalScratch = process.platform === "win32";
-  const windowsScratchBoundary = isolatedAgent
-    ? os.tmpdir()
-    : path.join(context.repoRoot, ".tmp", "p");
-  if (externalScratch) ensureDirectory(windowsScratchBoundary);
-  const scratch = externalScratch
-    ? fs.mkdtempSync(path.join(windowsScratchBoundary, "p-"))
-    : path.join(context.attemptRoot, "scratch", gateExecutionId(stage, context.gateId ?? stage.id));
-  const scratchBoundary = externalScratch ? windowsScratchBoundary : context.attemptRoot;
+  let scratchBoundary = context.attemptRoot;
+  let scratch;
+  if (externalScratch) {
+    const ordinaryBoundary = pytestScratchBoundary({
+      attemptRoot: context.attemptRoot,
+      repoRoot: context.repoRoot,
+      isolatedAgent,
+    });
+    ensureDirectory(ordinaryBoundary);
+    scratchBoundary = pytestBaseTempPath(fs.realpathSync.native(ordinaryBoundary));
+    scratch = fs.mkdtempSync(path.join(scratchBoundary, "p-"));
+  } else {
+    scratch = path.join(context.attemptRoot, "scratch", gateExecutionId(stage, context.gateId ?? stage.id));
+  }
   const pytestScratch = externalScratch ? scratch : path.join(scratch, "pytest");
   ensureDirectory(scratch);
   const processEnvironment = {
@@ -233,7 +284,7 @@ async function pytestAction(context, stage, selectors, {
     ...selectors,
     "-q",
     "-p", "no:cacheprovider",
-    `--basetemp=${pytestScratch}`,
+    `--basetemp=${pytestBaseTempPath(pytestScratch)}`,
     `--junitxml=${path.join(stageEvidence, "pytest.xml")}`,
     ...extra,
   ];
@@ -425,12 +476,22 @@ function preparedClaudeRuntime(context) {
 function agentCommand(context, workflow = "job") {
   const runtime = preparedClaudeRuntime(context);
   if (!runtime) return null;
+  const validationRuntime = workflow === "skill-generation"
+    ? pythonRuntime(context.repoRoot)
+    : null;
+  const validationPython = validationRuntime?.identity?.python_executable ?? null;
+  if (workflow === "skill-generation" && (
+    !validationRuntime
+    || typeof validationPython !== "string"
+    || !path.isAbsolute(validationPython)
+    || !fs.existsSync(validationPython)
+  )) return null;
   const caps = context.planStage.hard_caps;
   if (!caps?.max_turns || !caps?.max_budget_usd || !caps?.hard_timeout_seconds) return null;
   const usageRoot = path.join(context.gateRoot, "model-usage");
   ensureDirectory(usageRoot);
   const skillRootArgument = workflow === "skill-generation"
-    ? ` --skill-root ${quoteShell(path.join(runtime.config, "skills", "wiki-to-diagnosis-skill"))} --source-root ${quoteShell(context.repoRoot)}`
+    ? ` --skill-root ${quoteShell(path.join(runtime.config, "skills", "wiki-to-diagnosis-skill"))} --source-root ${quoteShell(context.repoRoot)} --validator-command ${quoteShell(validationPython)} --validator-prefix-json ${quoteShell("[]")} --validator-script ${quoteShell(path.join(context.repoRoot, "tools", "test-flow", "runtime-support", "compile_skill_generation_rule_ir.py"))}`
     : "";
   const maxOutputTokensArgument = caps.max_output_tokens === undefined
     ? ""
@@ -455,7 +516,175 @@ function validIsolatedOutputCapReceipt(invocation) {
     && enforcement === ISOLATED_AGENT_OUTPUT_CAP_ENFORCEMENT;
 }
 
-export function collectIsolatedModelUsage(context, profile) {
+function validIsolatedStructuredOutputRetryReceipt(invocation) {
+  const inboundKeys = invocation.environment_policy?.inbound?.key_names ?? [];
+  const claudeKeys = invocation.environment_policy?.claude_process?.key_names ?? [];
+  const enforcement = invocation.hard_cap_enforcement?.structured_output_retries;
+  if (inboundKeys.includes(ISOLATED_AGENT_STRUCTURED_OUTPUT_RETRY_KEY)) return false;
+  if (invocation.workflow === "skill-generation") {
+    return claudeKeys.includes(ISOLATED_AGENT_STRUCTURED_OUTPUT_RETRY_KEY)
+      && enforcement === ISOLATED_AGENT_STRUCTURED_OUTPUT_RETRY_ENFORCEMENT;
+  }
+  return !claudeKeys.includes(ISOLATED_AGENT_STRUCTURED_OUTPUT_RETRY_KEY)
+    && enforcement === undefined;
+}
+
+function validIsolatedTotalTokenCapReceipt(invocation) {
+  return invocation.hard_cap_enforcement?.total_tokens
+    === `terminal-usage-postcondition:${TOKEN_USAGE_FORMULA}`;
+}
+
+function validIsolatedStreamReceipt(invocation) {
+  const stream = invocation.stream;
+  return stream?.schema_version === 1
+    && Number.isSafeInteger(stream.event_count)
+    && stream.event_count >= 0
+    && Number.isSafeInteger(stream.parsed_event_count)
+    && stream.parsed_event_count >= 0
+    && stream.parsed_event_count <= stream.event_count
+    && Number.isSafeInteger(stream.init_count)
+    && stream.init_count >= 0
+    && Number.isSafeInteger(stream.result_count)
+    && stream.result_count >= 0
+    && (stream.last_event_type === null
+      ? stream.event_count === 0 && stream.parsed_event_count === 0
+      : validIsolatedAgentStreamEventType(stream.last_event_type))
+    && typeof stream.complete === "boolean";
+}
+
+function completeIsolatedInvocation(invocation) {
+  const usageComplete = invocation.usage_complete === true
+    && isCompleteUsage(invocation.usage)
+    && invocation.usage.total_tokens > 0;
+  const turnsShapeValid = Number.isSafeInteger(invocation.turns) && invocation.turns > 0;
+  const capsShapeValid = Number.isSafeInteger(invocation.effective_caps?.max_total_tokens)
+    && invocation.effective_caps.max_total_tokens > 0
+    && Number.isFinite(invocation.effective_caps?.max_budget_usd)
+    && invocation.effective_caps.max_budget_usd > 0;
+  const usageWithinCaps = usageComplete && capsShapeValid
+    && invocation.usage.total_tokens <= invocation.effective_caps.max_total_tokens
+    && invocation.usage.cost_usd <= invocation.effective_caps.max_budget_usd;
+  const usageExceedsCaps = usageComplete && capsShapeValid
+    && (invocation.usage.total_tokens > invocation.effective_caps.max_total_tokens
+      || invocation.usage.cost_usd > invocation.effective_caps.max_budget_usd);
+  const trustedMalformedTurnsFailure = !turnsShapeValid
+    && invocation.wrapper_outcome?.status === "FAIL"
+    && (
+      (invocation.wrapper_outcome.code === "WRAPPER_MODEL_TERMINAL_INVALID" && usageWithinCaps)
+      || (invocation.wrapper_outcome.code === "WRAPPER_MODEL_CAP_EXCEEDED" && usageExceedsCaps)
+    );
+  return usageComplete
+    && typeof invocation.effective_model === "string"
+    && typeof invocation.terminal?.subtype === "string"
+    && typeof invocation.terminal?.is_error === "boolean"
+    && (turnsShapeValid || trustedMalformedTurnsFailure)
+    && invocation.timed_out === false
+    && invocation.stream?.complete === true
+    && invocation.stream.event_count === invocation.stream.parsed_event_count
+    && invocation.stream.init_count === 1
+    && invocation.stream.result_count === 1
+    && invocation.stream.last_event_type === "result";
+}
+
+function incompleteFailedIsolatedInvocation(invocation) {
+  const code = invocation.wrapper_outcome?.code;
+  const supported = new Set([
+    "WRAPPER_MODEL_STREAM_INVALID",
+    "WRAPPER_MODEL_TIMEOUT",
+    "WRAPPER_MODEL_USAGE_INVALID",
+  ]);
+  const partialAudit = validSkillGenerationPartialTraceAuditReceipt(invocation.tool_trace_audit);
+  const incompleteTraceAudit = validSkillGenerationIncompleteTraceAuditReceipt(invocation.tool_trace_audit);
+  const incompleteAuditRejected = validSkillGenerationIncompleteAuditRejectedReceipt(invocation.tool_trace_audit);
+  const incompleteAuditValid = (invocation.tool_trace_audit === null
+      && !terminalLessSkillTraceAuditRequired(invocation))
+    || (code === "WRAPPER_MODEL_USAGE_INVALID" && partialAudit)
+    || (["WRAPPER_MODEL_STREAM_INVALID", "WRAPPER_MODEL_TIMEOUT"].includes(code)
+      && (incompleteTraceAuditMatchesInvocation(invocation, invocation.tool_trace_audit)
+        || (incompleteAuditRejected
+          && incompleteAuditRejectedMatchesInvocation(invocation, invocation.tool_trace_audit))));
+  const commonValid = invocation.wrapper_outcome?.status === "FAIL"
+    && supported.has(code)
+    && invocation.usage_complete === false
+    && invocation.usage === null
+    && invocation.terminal === null
+    && invocation.turns === null
+    && incompleteAuditValid
+    && invocation.stream?.complete === (code === "WRAPPER_MODEL_USAGE_INVALID");
+  if (!commonValid) return false;
+  if (code === "WRAPPER_MODEL_TIMEOUT") {
+    return invocation.timed_out === true
+      && invocation.process?.exit_code === null
+      && ["SIGTERM", "SIGKILL"].includes(invocation.process?.signal)
+      && invocation.process?.wrapper_exit_code === 124;
+  }
+  if (code === "WRAPPER_MODEL_STREAM_INVALID") {
+    const childExited = Number.isSafeInteger(invocation.process?.exit_code)
+      && invocation.process.signal === null;
+    const childSignaled = invocation.process?.exit_code === null
+      && typeof invocation.process?.signal === "string"
+      && /^[A-Z][A-Z0-9_]{1,31}$/.test(invocation.process.signal);
+    return invocation.timed_out === false
+      && (childExited || childSignaled)
+      && invocation.process?.wrapper_exit_code === 1;
+  }
+  return invocation.timed_out === false;
+}
+
+function terminalLessSkillTraceAuditRequired(invocation) {
+  const stream = invocation?.stream;
+  return invocation?.workflow === "skill-generation"
+    && ["WRAPPER_MODEL_STREAM_INVALID", "WRAPPER_MODEL_TIMEOUT"].includes(invocation.wrapper_outcome?.code)
+    && stream?.complete === false
+    && Number.isSafeInteger(stream.event_count)
+    && stream.event_count > 0
+    && stream.parsed_event_count === stream.event_count
+    && stream.init_count === 1
+    && stream.result_count === 0;
+}
+
+function incompleteTraceAuditMatchesInvocation(invocation, audit) {
+  return validSkillGenerationIncompleteTraceAuditReceipt(audit)
+    && invocation.workflow === "skill-generation"
+    && invocation.wrapper_outcome?.status === "FAIL"
+    && ["WRAPPER_MODEL_STREAM_INVALID", "WRAPPER_MODEL_TIMEOUT"].includes(invocation.wrapper_outcome.code)
+    && invocation.usage_complete === false
+    && invocation.usage === null
+    && invocation.terminal === null
+    && invocation.turns === null
+    && invocation.stream?.complete === false
+    && invocation.stream?.result_count === 0
+    && canonicalJson(audit.stream) === canonicalJson(invocation.stream);
+}
+
+function incompleteAuditRejectedMatchesInvocation(invocation, audit) {
+  return validSkillGenerationIncompleteAuditRejectedReceipt(audit)
+    && invocation.workflow === "skill-generation"
+    && invocation.wrapper_outcome?.status === "FAIL"
+    && ["WRAPPER_MODEL_STREAM_INVALID", "WRAPPER_MODEL_TIMEOUT"].includes(invocation.wrapper_outcome.code)
+    && invocation.usage_complete === false
+    && invocation.usage === null
+    && invocation.terminal === null
+    && invocation.turns === null
+    && invocation.stream?.complete === false
+    && invocation.stream?.result_count === 0
+    && canonicalJson(audit.stream) === canonicalJson(invocation.stream);
+}
+
+function partialTraceMatchesInvocation(invocation, audit) {
+  if (!validSkillGenerationPartialTraceAuditReceipt(audit)
+    || invocation.wrapper_outcome?.status !== "FAIL") return false;
+  if (invocation.terminal !== null) {
+    return ["WRAPPER_MODEL_TERMINAL_INVALID", "WRAPPER_MODEL_CAP_EXCEEDED"].includes(invocation.wrapper_outcome.code)
+      && audit.terminal.subtype === invocation.terminal?.subtype
+      && audit.terminal.is_error === invocation.terminal?.is_error;
+  }
+  return invocation.usage_complete === false
+    && invocation.wrapper_outcome.code === "WRAPPER_MODEL_USAGE_INVALID"
+    && invocation.stream?.complete === true;
+}
+
+export function collectIsolatedModelUsage(context, profile, { actionStatus = "PASS" } = {}) {
   const usageRoot = path.join(context.gateRoot, "model-usage");
   const files = fs.existsSync(usageRoot) ? fs.readdirSync(usageRoot).filter((name) => name.endsWith(".json")).sort() : [];
   const invocations = files.map((name) => JSON.parse(fs.readFileSync(path.join(usageRoot, name), "utf8")));
@@ -463,9 +692,17 @@ export function collectIsolatedModelUsage(context, profile) {
   if (invocations.some((invocation) => (
     invocation?.schema_version !== 3
     || invocation.class !== "isolated-agent"
-    || invocation.usage_complete !== true
-    || !isCompleteUsage(invocation.usage)
     || Object.hasOwn(invocation, "observed_request_limits")
+    || (typeof invocation.effective_model !== "string" && invocation.effective_model !== null)
+    || typeof invocation.timed_out !== "boolean"
+    || (invocation.process?.exit_code !== null && !Number.isSafeInteger(invocation.process?.exit_code))
+    || (invocation.process?.signal !== null && typeof invocation.process?.signal !== "string")
+    || !Number.isSafeInteger(invocation.process?.wrapper_exit_code)
+    || invocation.process.wrapper_exit_code !== (
+      invocation.timed_out ? 124 : invocation.wrapper_outcome?.status === "FAIL" ? 1 : 0
+    )
+    || !validIsolatedStreamReceipt(invocation)
+    || (!completeIsolatedInvocation(invocation) && !incompleteFailedIsolatedInvocation(invocation))
   ))) throw new Error("ISOLATED_MODEL_USAGE_RECEIPT_INVALID");
   if (invocations.some((invocation) => (
     invocation.environment_policy?.schema_version !== 1
@@ -474,13 +711,13 @@ export function collectIsolatedModelUsage(context, profile) {
     || !validEnvironmentKeySummary(invocation.environment_policy?.inbound)
     || !validEnvironmentKeySummary(invocation.environment_policy?.claude_process)
     || !validIsolatedOutputCapReceipt(invocation)
+    || !validIsolatedStructuredOutputRetryReceipt(invocation)
+    || !validIsolatedTotalTokenCapReceipt(invocation)
   ))) throw new Error("ISOLATED_MODEL_ENVIRONMENT_POLICY_RECEIPT_INVALID");
   const expectedWorkflow = profile === "real-skill-generation" ? "skill-generation" : "job";
   if (invocations.some((invocation) => invocation.workflow !== expectedWorkflow)) throw new Error("ISOLATED_MODEL_WORKFLOW_RECEIPT_INVALID");
   if (invocations.some((invocation) => (
-    typeof invocation.terminal?.subtype !== "string"
-    || typeof invocation.terminal?.is_error !== "boolean"
-    || invocation.wrapper_outcome?.schema_version !== 1
+    invocation.wrapper_outcome?.schema_version !== 1
     || !["PASS", "FAIL"].includes(invocation.wrapper_outcome?.status)
     || (invocation.wrapper_outcome.status === "PASS" && invocation.wrapper_outcome.code !== null)
     || (invocation.wrapper_outcome.status === "FAIL" && !/^WRAPPER_[A-Z0-9_]+$/.test(invocation.wrapper_outcome.code ?? ""))
@@ -489,19 +726,42 @@ export function collectIsolatedModelUsage(context, profile) {
     const audit = invocation.tool_trace_audit;
     if (audit === null) return invocation.wrapper_outcome.status === "PASS";
     const passedAudit = validSkillGenerationTraceAuditReceipt(audit);
-    const failedAudit = audit?.schema_version === SKILL_GENERATION_TRACE_SCHEMA_VERSION
-      && audit.status === "FAIL"
-      && audit.workflow === "skill-generation"
-      && /^SKILL_TRACE_[A-Z0-9_]+$/.test(audit.code ?? "")
-      && Object.keys(audit).sort().join("\0") === ["code", "schema_version", "status", "workflow"].join("\0");
-    return invocation.wrapper_outcome.status === "PASS" ? !passedAudit : !(passedAudit || failedAudit);
+    const passedAuditMatchesFailure = passedAudit && [
+      "WRAPPER_MODEL_TERMINAL_INVALID",
+      "WRAPPER_MODEL_CAP_EXCEEDED",
+      "WRAPPER_CHILD_PROCESS_FAILED",
+    ].includes(invocation.wrapper_outcome.code);
+    const partialAudit = validSkillGenerationPartialTraceAuditReceipt(audit);
+    const incompleteTraceAudit = validSkillGenerationIncompleteTraceAuditReceipt(audit);
+    const incompleteAuditRejected = validSkillGenerationIncompleteAuditRejectedReceipt(audit);
+    const failedAudit = partialAudit
+      ? partialTraceMatchesInvocation(invocation, audit)
+      : incompleteTraceAudit
+        ? incompleteTraceAuditMatchesInvocation(invocation, audit)
+        : incompleteAuditRejected
+          ? incompleteAuditRejectedMatchesInvocation(invocation, audit)
+          : invocation.wrapper_outcome.code === "WRAPPER_SKILL_TRACE_INVALID"
+            && validSkillGenerationFailedTraceAuditReceipt(audit);
+    return invocation.wrapper_outcome.status === "PASS" ? !passedAudit : !(passedAuditMatchesFailure || failedAudit);
   })) throw new Error("ISOLATED_MODEL_TOOL_TRACE_AUDIT_INVALID");
   if (expectedWorkflow === "job" && invocations.some((invocation) => invocation.tool_trace_audit !== null)) throw new Error("ISOLATED_MODEL_TOOL_TRACE_AUDIT_UNEXPECTED");
-  const usage = sumUsage(invocations.map((invocation) => invocation.usage));
+  const usageComplete = invocations.every((invocation) => completeIsolatedInvocation(invocation));
+  if (actionStatus === "PASS" && invocations.some((invocation) => (
+    !completeIsolatedInvocation(invocation)
+    || invocation.wrapper_outcome.status !== "PASS"
+    || invocation.wrapper_outcome.code !== null
+    || invocation.terminal.subtype !== "success"
+    || invocation.terminal.is_error !== false
+    || invocation.timed_out !== false
+    || invocation.process?.exit_code !== 0
+    || invocation.process?.signal !== null
+  ))) throw new Error("ISOLATED_MODEL_TERMINAL_RECEIPT_INVALID");
+  if (actionStatus === "PASS" && !usageComplete) throw new Error("ISOLATED_MODEL_USAGE_RECEIPT_INVALID");
+  const usage = usageComplete ? sumUsage(invocations.map((invocation) => invocation.usage)) : null;
   const summary = {
     schema_version: 3,
-    status: "PASS",
-    usage_complete: true,
+    status: usageComplete ? "PASS" : "INCOMPLETE",
+    usage_complete: usageComplete,
     token_formula: TOKEN_USAGE_FORMULA,
     invocations,
     usage,
@@ -804,7 +1064,7 @@ function realEnvironment(context, profile) {
   };
   if (profile === "real-agent-backend") return { env: { ...common, S08_REAL_AGENT_GATE: "1" } };
   if (profile === "real-generic-locator") {
-    const skillName = "generic-problem-locator-smoke";
+    const skillName = "generic-problem-locator-dual-mode";
     const skillPath = path.join(
       context.repoRoot,
       "tests",
@@ -901,7 +1161,14 @@ export async function executeGate(context, stage, gateId, gate) {
     });
     if (gate.environment_profile && gate.environment_profile !== "real-logparse") {
       try {
-        const modelUsage = collectIsolatedModelUsage(scoped, gate.environment_profile);
+        const modelUsage = collectIsolatedModelUsage(
+          scoped,
+          gate.environment_profile,
+          { actionStatus: result.status },
+        );
+        if (!modelUsage.usage_complete) {
+          return { ...result, invocations: modelUsage.invocations, usage_complete: false };
+        }
         return { ...result, invocations: modelUsage.invocations, usage: modelUsage.usage, usage_complete: true };
       } catch (error) {
         if (result.status !== "PASS" && error?.message === "ISOLATED_MODEL_USAGE_RECEIPT_MISSING") {

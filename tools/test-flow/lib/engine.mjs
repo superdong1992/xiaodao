@@ -18,6 +18,8 @@ import { isCompleteUsage, normalizeUsage, sumUsage, TOKEN_USAGE_FORMULA, zeroUsa
 import {
   ISOLATED_AGENT_ENV_POLICY_VERSION,
   ISOLATED_AGENT_OUTPUT_CAP_ENFORCEMENT,
+  ISOLATED_AGENT_STRUCTURED_OUTPUT_RETRY_ENFORCEMENT,
+  ISOLATED_AGENT_STRUCTURED_OUTPUT_RETRY_KEY,
   validEnvironmentKeySummary,
 } from "../runtime-support/isolated-agent-env.mjs";
 import {
@@ -30,6 +32,11 @@ import {
   timestampForPath,
   writeJsonSync,
 } from "./util.mjs";
+import {
+  validSkillGenerationIncompleteAuditRejectedReceipt,
+  validSkillGenerationIncompleteTraceAuditReceipt,
+  validSkillGenerationTraceAuditReceipt,
+} from "../runtime-support/isolated-agent-tool-audit.mjs";
 
 function runIdentifier() {
   return `run-${timestampForPath()}-${crypto.randomBytes(4).toString("hex")}`;
@@ -170,8 +177,88 @@ export function validOutputTokenCapEvidence(invocation, caps) {
     && (invocation.environment_policy?.claude_process?.key_names ?? []).includes("CLAUDE_CODE_MAX_OUTPUT_TOKENS");
 }
 
+export function validStructuredOutputRetryEvidence(invocation) {
+  const inboundKeys = invocation.environment_policy?.inbound?.key_names ?? [];
+  const claudeKeys = invocation.environment_policy?.claude_process?.key_names ?? [];
+  const marker = invocation.hard_cap_enforcement?.structured_output_retries;
+  if (inboundKeys.includes(ISOLATED_AGENT_STRUCTURED_OUTPUT_RETRY_KEY)) return false;
+  if (invocation.workflow === "skill-generation") {
+    return claudeKeys.includes(ISOLATED_AGENT_STRUCTURED_OUTPUT_RETRY_KEY)
+      && marker === ISOLATED_AGENT_STRUCTURED_OUTPUT_RETRY_ENFORCEMENT;
+  }
+  return !claudeKeys.includes(ISOLATED_AGENT_STRUCTURED_OUTPUT_RETRY_KEY)
+    && marker === undefined;
+}
+
+export function validIncompleteSkillGenerationInvocationEvidence(invocation) {
+  const audit = invocation?.tool_trace_audit;
+  const code = invocation?.wrapper_outcome?.code;
+  const incompleteTraceAudit = validSkillGenerationIncompleteTraceAuditReceipt(audit);
+  const incompleteAuditRejected = validSkillGenerationIncompleteAuditRejectedReceipt(audit);
+  if (!(incompleteTraceAudit || incompleteAuditRejected)
+    || invocation.workflow !== "skill-generation"
+    || invocation.wrapper_outcome?.schema_version !== 1
+    || invocation.wrapper_outcome?.status !== "FAIL"
+    || !["WRAPPER_MODEL_STREAM_INVALID", "WRAPPER_MODEL_TIMEOUT"].includes(code)
+    || invocation.usage_complete !== false
+    || invocation.usage !== null
+    || invocation.terminal !== null
+    || invocation.turns !== null
+    || invocation.stream?.complete !== false
+    || invocation.stream?.result_count !== 0
+    || canonicalJson(audit.stream) !== canonicalJson(invocation.stream)) return false;
+  if (code === "WRAPPER_MODEL_TIMEOUT") {
+    return invocation.timed_out === true
+      && invocation.process?.exit_code === null
+      && ["SIGTERM", "SIGKILL"].includes(invocation.process?.signal)
+      && invocation.process.wrapper_exit_code === 124;
+  }
+  const childExited = Number.isSafeInteger(invocation.process?.exit_code)
+    && invocation.process.signal === null;
+  const childSignaled = invocation.process?.exit_code === null
+    && typeof invocation.process?.signal === "string"
+    && /^[A-Z][A-Z0-9_]{1,31}$/.test(invocation.process.signal);
+  return invocation.timed_out === false
+    && (childExited || childSignaled)
+    && invocation.process.wrapper_exit_code === 1;
+}
+
+function terminalLessSkillTraceAuditRequired(invocation) {
+  const stream = invocation?.stream;
+  return invocation?.workflow === "skill-generation"
+    && ["WRAPPER_MODEL_STREAM_INVALID", "WRAPPER_MODEL_TIMEOUT"].includes(invocation.wrapper_outcome?.code)
+    && stream?.complete === false
+    && Number.isSafeInteger(stream.event_count)
+    && stream.event_count > 0
+    && stream.parsed_event_count === stream.event_count
+    && stream.init_count === 1
+    && stream.result_count === 0;
+}
+
+function incompleteSkillTraceAuditNeedsValidation(invocation) {
+  const audit = invocation?.tool_trace_audit;
+  return terminalLessSkillTraceAuditRequired(invocation)
+    || (audit !== null && audit !== undefined && (
+      audit?.stream_state === "TERMINAL_MISSING"
+      || validSkillGenerationIncompleteTraceAuditReceipt(audit)
+      || validSkillGenerationIncompleteAuditRejectedReceipt(audit)
+      || (invocation?.workflow === "skill-generation"
+        && invocation?.wrapper_outcome?.status === "FAIL"
+        && ["WRAPPER_MODEL_STREAM_INVALID", "WRAPPER_MODEL_TIMEOUT"].includes(invocation.wrapper_outcome.code))
+    ));
+}
+
 export function applyHardCaps({ result, planStage, expectedModel }) {
-  if (result.status !== "PASS") return result;
+  if (result.status !== "PASS") {
+    const actual = result.invocations;
+    if (Array.isArray(actual) && actual.some((invocation) => (
+      incompleteSkillTraceAuditNeedsValidation(invocation)
+      && !validIncompleteSkillGenerationInvocationEvidence(invocation)
+    ))) {
+      return { ...result, status: "ERROR", failure_domain: "HARNESS", code: "MODEL_TOOL_TRACE_AUDIT_INVALID" };
+    }
+    return result;
+  }
   const expected = planStage.invocation_caps ?? [];
   const actual = result.invocations ?? [];
   if (!Array.isArray(actual)) return { ...result, status: "ERROR", failure_domain: "HARNESS", code: "MODEL_INVOCATION_RECEIPT_INVALID" };
@@ -192,6 +279,7 @@ export function applyHardCaps({ result, planStage, expectedModel }) {
       if (
         invocation.schema_version !== 3
         || !isCompleteUsage(invocation.usage)
+        || invocation.usage.total_tokens <= 0
         || invocation.usage_complete !== true
         || invocation.effective_model !== expectedModel
         || canonicalJson(invocation.effective_caps) !== canonicalJson(declaration.caps)
@@ -200,8 +288,13 @@ export function applyHardCaps({ result, planStage, expectedModel }) {
         || invocation.wrapper_outcome?.schema_version !== 1
         || invocation.wrapper_outcome?.status !== "PASS"
         || invocation.wrapper_outcome?.code !== null
+        || validSkillGenerationIncompleteTraceAuditReceipt(invocation.tool_trace_audit)
+        || validSkillGenerationIncompleteAuditRejectedReceipt(invocation.tool_trace_audit)
+        || (invocation.workflow === "skill-generation"
+          && !validSkillGenerationTraceAuditReceipt(invocation.tool_trace_audit))
         || invocation.hard_cap_enforcement?.total_tokens !== `terminal-usage-postcondition:${TOKEN_USAGE_FORMULA}`
         || !validOutputTokenCapEvidence(invocation, declaration.caps)
+        || !validStructuredOutputRetryEvidence(invocation)
       ) {
         return { ...result, status: "ERROR", failure_domain: "HARNESS", code: "MODEL_HARD_CAP_RECEIPT_MISMATCH" };
       }
@@ -213,7 +306,7 @@ export function applyHardCaps({ result, planStage, expectedModel }) {
         return { ...result, status: "FAIL", failure_domain: "CONTRACT", code: "MODEL_BUDGET_CAP_EXCEEDED" };
       }
       const totalTokens = usage.total_tokens;
-      if (!Number.isSafeInteger(totalTokens) || totalTokens < 0 || totalTokens > declaration.caps.max_total_tokens) {
+      if (!Number.isSafeInteger(totalTokens) || totalTokens <= 0 || totalTokens > declaration.caps.max_total_tokens) {
         return { ...result, status: "FAIL", failure_domain: "CONTRACT", code: "MODEL_TOKEN_CAP_EXCEEDED" };
       }
     }

@@ -21,7 +21,10 @@ def test_test_flow_identity_closure_replaces_the_manual_patch_allowlist() -> Non
 
     assert {"src", "schemas", "pyproject.toml", "uv.lock"} <= product_paths
     assert "tests/deterministic" not in product_paths
-    assert deterministic_paths == {"tests/deterministic"}
+    assert deterministic_paths == {
+        "tests/deterministic",
+        "prototypes/generation_blueprint",
+    }
     assert "tools/test-flow/lib" in framework_paths
     assert "product.source" in identity_sets["deterministic"]["producer"]
     assert "proof.deterministic" in identity_sets["deterministic"]["proof"]

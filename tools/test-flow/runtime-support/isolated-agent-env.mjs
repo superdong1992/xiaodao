@@ -1,9 +1,15 @@
 import crypto from "node:crypto";
 
 
-export const ISOLATED_AGENT_ENV_POLICY_VERSION = "isolated-agent-env-allowlist-v2";
+export const ISOLATED_AGENT_ENV_POLICY_VERSION = "isolated-agent-env-allowlist-v3";
 export const ISOLATED_AGENT_CLAUDE_OUTPUT_TOKEN_KEY = "CLAUDE_CODE_MAX_OUTPUT_TOKENS";
 export const ISOLATED_AGENT_OUTPUT_CAP_ENFORCEMENT = "identity-bound-wrapper-arg+child-only-env+pinned-cli-upper-limit+sealed-runtime-implementation";
+// Frozen Claude CLI 2.1.89 reads this exact key with parseInt after each
+// StructuredOutput tool-result and emits error_max_structured_output_retries
+// when the observed call count reaches the configured value.
+export const ISOLATED_AGENT_STRUCTURED_OUTPUT_RETRY_KEY = "MAX_STRUCTURED_OUTPUT_RETRIES";
+export const ISOLATED_AGENT_STRUCTURED_OUTPUT_RETRY_LIMIT = 2;
+export const ISOLATED_AGENT_STRUCTURED_OUTPUT_RETRY_ENFORCEMENT = "identity-bound-child-only-env+frozen-claude-cli-2.1.89-counter+limit-2";
 
 export const ISOLATED_AGENT_AMBIENT_KEYS = Object.freeze([
   "PATH",
@@ -30,6 +36,7 @@ const ISOLATED_AGENT_INBOUND_ONLY_KEYS = Object.freeze([
 
 const ISOLATED_AGENT_CLAUDE_CHILD_ONLY_KEYS = Object.freeze([
   ISOLATED_AGENT_CLAUDE_OUTPUT_TOKEN_KEY,
+  ISOLATED_AGENT_STRUCTURED_OUTPUT_RETRY_KEY,
 ]);
 
 export const ISOLATED_AGENT_EXPLICIT_KEYS = Object.freeze([

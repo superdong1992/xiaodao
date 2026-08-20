@@ -4,15 +4,14 @@
 
 本文件是仓库活跃待办的唯一清单。已完成事项由代码、当前设计与 Git 历史证明，不在这里保留关闭项。
 
-## P0：Diagnosis Skill 条件性可选参数
+## P0：Generic V2 生产 LAN A/B 验收
 
-- Diagnosis Skill 必须支持条件性可选参数。参数未命中其声明的诊断分支时，不得成为 OPEN requirement，也不得阻塞路由、诊断、Review 或结果交付；只有进入指定分支且该分支确实依赖该参数时，Runtime 才向用户索要。
-- 分支激活条件必须由 Skill 显式声明、可机读，并写入审计与 replay 输入；不得由 Agent 临时发明分支、用空字符串或隐藏默认值冒充未提供参数，也不得依赖客户端 Hook 修正语义。
-- 条件参数若已作为初始 USER_FACT 提供，应直接固定并复用，不得重复询问；若未提供，分支激活后才创建一次可补充的 OPEN requirement。
-- 生成器、manifest/合同、Catalog、Coordinator、服务端验证器和正反向测试必须共同覆盖“命中分支才询问、未命中分支不询问且不阻塞”。
+- 仓库内的 Generic V2 合同、服务端 `GENERIC_REPORT` 产物、确定性双模式 fixture 和 Release 证据都不能替代生产 LAN 验收；它们不证明私有通用定位 Skill 已完成适配、诊断正确或可在生产身份下运行。
+- 局域网管理员仍须在私有 Skill 中应用最小 framework-mode adapter，并在同一 Linux 服务账号、Agent、settings、模型和工具身份下，对同一输入分别执行原生 direct 与 framework V2 调用。收据只能保留 Skill tree 与显式版本、输入/结果的 size、SHA-256、受控状态、相同运行身份 manifest 的摘要和人工语义 verdict；不得保存或上传私有 Skill、报告正文、prompt、路径、stdout 或 stderr，也不得要求两个随机模型调用的报告 hash 相等。
+- 只有本地 A/B 得到明确人工语义结论后，才能在未来候选快照中登记相应修复；`not-reviewed`、身份不一致、内容泄漏或仅有仓库 Test Flow PASS 都不能关闭本事项。
 
-## P1：日志抑制、限流与采样规则
+## P1：日志抑制、限流与采样参数的细粒度 evaluator
 
-- 当前版本只支持普通事件时间窗，不声明或推断日志抑制、限流或采样语义。
-- 后续若业务 Skill 需要 75 秒或其他抑制机制，应新增显式、可机读的规则类型，并由 Skill 自己声明允许窗口方向、开闭边界、抑制键、最大间隔以及无日志时的可验证行为。
-- 框架不得硬编码 75 秒，也不得在 Skill 未声明时自行放宽时间窗口。
+- 当前合同已能声明 `SUPPRESSION`/`RATE_LIMIT` 的 `scope`、`key_fields`、`window_ms`、`max_observed` 和 `boundary`，Runtime 也会把绑定这类 policy 的扫描作为下界：正向观测可证，不完整观测不能用来证明“不存在”；selector 缺失、anchor/范围不完整、lossy policy 与完整扫描真 no-match 已分别审计。
+- 尚未完成的是通用 evaluator 对每个 policy 参数进行细粒度机械演算，包括 key/scope 分组、窗口边界与上限证明。在该能力具有直接合同和专项回归前，不得把有损扫描的零匹配升格为确定 FAIL。
+- 框架不得硬编码 75 秒或 RPC 业务常量，也不得在 Skill 未声明 policy 时自行放宽可观测边界。

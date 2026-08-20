@@ -18,6 +18,7 @@ from problem_locator.contracts import (
     EvidenceBinding,
     Job,
     OutcomeResultType,
+    RuleClaimResult,
     ReviewSubjectV2,
     ServerRuleStatus,
     WorkspaceInputManifest,
@@ -33,7 +34,15 @@ from problem_locator.runtime.result_types import CapturedTargetLog
 from problem_locator.runtime.server_outcome_finalizer import (
     finalize_server_outcome,
 )
-from problem_locator.runtime.server_verifier import verify_agent_draft
+from problem_locator.runtime.server_verifier import (
+    _EventMatch,
+    _EventScanState,
+    _ResolvedLine,
+    _aggregate_results,
+    _evaluate_rule,
+    _extract_events_with_audit,
+    verify_agent_draft,
+)
 
 
 ROOT = Path(__file__).resolve().parents[4]
@@ -138,6 +147,12 @@ def _build(
     takeover_time: str = "2026-01-03T00:00:00.500Z",
     pool_wait_time: str = "2026-01-03T00:00:02.000Z",
     null_client_locator: bool = False,
+    partial_client_locator: bool = False,
+    client_log_matches: bool = True,
+    client_target_match_status: str = "exact",
+    client_observation_policy: bool = False,
+    client_rule_conditional_selector: bool = False,
+    include_client_evidence: bool = True,
     fixed_time_reference: str | None = None,
     include_order_fact: bool = True,
 ):
@@ -149,6 +164,70 @@ def _build(
                     "source": "SKILL_FIXED",
                     "value": fixed_time_reference,
                 }
+    client_extractor = next(
+        item
+        for item in skill_manifest["verification_contract"]["event_extractors"]
+        if item["id"] == "client_timeout"
+    )
+    if client_observation_policy:
+        skill_manifest["verification_contract"]["observation_policies"] = [
+            {
+                "id": "client_log_suppression",
+                "kind": "SUPPRESSION",
+                "scope": "client_timeout",
+                "key_fields": ["rpc_method"],
+                "window_ms": 1000,
+                "max_observed": None,
+                "boundary": "CLOSED_OPEN",
+            }
+        ]
+        client_extractor["observation_policy_ids"] = [
+            "client_log_suppression"
+        ]
+    if client_rule_conditional_selector:
+        client_extractor["selectors"] = [
+            {
+                "field": "rpc_method",
+                "operator": "EQUALS",
+                "value": {
+                    "source": "USER_FACT",
+                    "name": "selected_rpc_method",
+                },
+            }
+        ]
+        selector_requirement = json.loads(
+            json.dumps(
+                next(
+                    item
+                    for item in skill_manifest["requirements"]
+                    if item["name"] == "rpc_method"
+                )
+            )
+        )
+        selector_requirement.update(
+            {
+                "name": "selected_rpc_method",
+                "stage": "AFTER_LOGPARSE",
+                "requiredness": "CONDITIONAL",
+                "activation_condition": {
+                    "any_of": [
+                        {
+                            "all_of": [
+                                {
+                                    "source": "RULE_RESULT",
+                                    "name": "server_takeover_present",
+                                    "operator": "EQUALS",
+                                    "value": "PASS",
+                                }
+                            ]
+                        }
+                    ]
+                },
+                "prompt": "Provide the selected RPC method.",
+                "source_reference": "Synthetic selector audit fixture.",
+            }
+        )
+        skill_manifest["requirements"].append(selector_requirement)
     skill_root = tmp_path / "skill"
     skill_root.mkdir()
     (skill_root / "diagnosis-skill.json").write_bytes(
@@ -168,6 +247,8 @@ def _build(
     ]
     if include_order_fact:
         names_and_values.append(("order_id", client_order_id))
+    if client_rule_conditional_selector:
+        names_and_values.append(("selected_rpc_method", client_rpc_method))
     fact_ids: dict[str, str] = {}
     user_facts = []
     for index, (name, value) in enumerate(names_and_values, start=80):
@@ -188,7 +269,11 @@ def _build(
                 "supersedes": [],
             }
         )
-    evidence_ids = [CLIENT_EVIDENCE, SERVER_EVIDENCE]
+    evidence_ids = (
+        [CLIENT_EVIDENCE, SERVER_EVIDENCE]
+        if include_client_evidence
+        else [SERVER_EVIDENCE]
+    )
     job_value["evidence_refs"] = evidence_ids
     job_value["attachment_refs"] = []
     job_value["previous_outcome_refs"] = []
@@ -201,31 +286,32 @@ def _build(
     artifact = next(
         item for item in old_manifest["entries"] if item["input_kind"] == "ARTIFACT"
     )
-    entries = [
-        {
-            "input_kind": "EVIDENCE",
-            "resource_id": CLIENT_EVIDENCE,
-            "relative_path": None,
-            "resource_kind": None,
-            "size": None,
-            "sha256": None,
-            "source_type": "LOGPARSE",
-            "source_ref": ARTIFACT_ID,
-            "locator": {
-                "kind": "LOGPARSE",
-                "relative_path": "client.log",
-                "start_line": None if null_client_locator else 1,
-                "end_line": (
-                    None
-                    if null_client_locator
-                    else 2 if hidden_duplicate_client_event else 1
-                ),
-                "start_time": None,
-                "end_time": None,
-            },
-            "summary": "Cited client event.",
-            "content_hash": None,
+    client_evidence_entry = {
+        "input_kind": "EVIDENCE",
+        "resource_id": CLIENT_EVIDENCE,
+        "relative_path": None,
+        "resource_kind": None,
+        "size": None,
+        "sha256": None,
+        "source_type": "LOGPARSE",
+        "source_ref": ARTIFACT_ID,
+        "locator": {
+            "kind": "LOGPARSE",
+            "relative_path": "client.log",
+            "start_line": None if null_client_locator else 1,
+            "end_line": (
+                None
+                if null_client_locator
+                else 2 if hidden_duplicate_client_event else 1
+            ),
+            "start_time": None,
+            "end_time": None,
         },
+        "summary": "Cited client event.",
+        "content_hash": None,
+    }
+    entries = [
+        *([client_evidence_entry] if include_client_evidence else []),
         {
             "input_kind": "EVIDENCE",
             "resource_id": SERVER_EVIDENCE,
@@ -292,8 +378,20 @@ def _build(
         f"method={client_rpc_method} order_id={client_order_id}\n"
     )
     duplicate_client_line = client_line.replace("[0001]", "[0002]", 1)
+    if not client_log_matches:
+        client_line = client_line.replace(
+            "rpc deadline exceeded",
+            "rpc completed",
+        )
+    trailing_client_line = (
+        "[0002] unrelated client diagnostic line\n"
+        if partial_client_locator
+        else ""
+    )
     (artifact_root / "client.log").write_text(
-        client_line + (duplicate_client_line if hidden_duplicate_client_event else ""),
+        client_line
+        + (duplicate_client_line if hidden_duplicate_client_event else "")
+        + trailing_client_line,
         encoding="utf-8",
     )
     (artifact_root / "server.log").write_text(
@@ -309,15 +407,16 @@ def _build(
         encoding="utf-8",
     )
 
-    citations = [
-        {
-            "evidence_binding": {
-                "existing_evidence_id": CLIENT_EVIDENCE,
-                "evidence_proposal_key": None,
-            },
-            "line_start": 1,
-            "line_end": 1,
+    client_citation = {
+        "evidence_binding": {
+            "existing_evidence_id": CLIENT_EVIDENCE,
+            "evidence_proposal_key": None,
         },
+        "line_start": 1,
+        "line_end": 1,
+    }
+    citations = [
+        *([client_citation] if include_client_evidence else []),
         {
             "evidence_binding": {
                 "existing_evidence_id": SERVER_EVIDENCE,
@@ -367,6 +466,8 @@ def _build(
         "evidence_proposal_key": None,
     }
     candidate["supporting_evidence_bindings"] = [client_binding]
+    if not include_client_evidence:
+        candidate["supporting_evidence_bindings"] = [server_binding]
     candidate["completion_criteria_mapping"][0]["evidence_bindings"] = [
         server_binding
     ]
@@ -375,7 +476,11 @@ def _build(
             "factor_id": "takeover_pool_wait",
             "role": "CAUSE",
             "statement": candidate["statement"],
-            "evidence_bindings": [client_binding, server_binding],
+            "evidence_bindings": (
+                [client_binding, server_binding]
+                if include_client_evidence
+                else [server_binding]
+            ),
             "required_rule_ids": ["takeover_pool_wait_caused_timeout"],
         }
     ]
@@ -393,10 +498,115 @@ def _build(
             draft_bytes=draft_bytes,
             proposal_resources=(),
             skill_root=skill_root,
-            broker_audit_bytes=_broker_audit(manifest),
+            broker_audit_bytes=_broker_audit(
+                manifest,
+                first_match_status=client_target_match_status,
+            ),
             diagnosis_audit=None,
         )
     return job, manifest, draft, draft_bytes, verification
+
+
+def _selector_presence_evaluation(selector_mode: str):
+    skill = _json(SPEC)
+    contract = skill["verification_contract"]
+    extractor = next(
+        item
+        for item in contract["event_extractors"]
+        if item["id"] == "client_timeout"
+    )
+    extractor["selectors"] = [
+        {
+            "field": "rpc_method",
+            "operator": "EQUALS",
+            "value": {
+                "source": "USER_FACT",
+                "name": "selected_rpc_method",
+            },
+        }
+    ]
+    selector_requirement = json.loads(
+        json.dumps(
+            next(
+                item
+                for item in skill["requirements"]
+                if item["name"] == "rpc_method"
+            )
+        )
+    )
+    selector_requirement.update(
+        {
+            "name": "selected_rpc_method",
+            "prompt": "Provide the selected RPC method.",
+            "source_reference": "Synthetic selector audit fixture.",
+        }
+    )
+    if selector_mode == "inactive":
+        selector_requirement["requiredness"] = "CONDITIONAL"
+        selector_requirement["activation_condition"] = {
+            "any_of": [
+                {
+                    "all_of": [
+                        {
+                            "source": "USER_FACT",
+                            "name": "caller_service",
+                            "operator": "EQUALS",
+                            "value": "inactive-caller",
+                        }
+                    ]
+                }
+            ]
+        }
+    skill["requirements"].append(selector_requirement)
+    raw_line = (
+        b"[0001] [diagnostic|slot_1/debug_20260103.log] "
+        b"2026-01-03T00:00:03.000Z COMPACT checkout "
+        b"proc=checkout-client-101 slot 1 cpu 0 |No[1] rpc deadline "
+        b"exceeded after 1000ms server=inventory method=Reserve "
+        b"order_id=ord-1\n"
+    )
+    line = _ResolvedLine(
+        binding=EvidenceBinding(
+            existing_evidence_id=CLIENT_EVIDENCE,
+            evidence_proposal_key=None,
+        ),
+        anchor="client",
+        source_key="synthetic-client",
+        relative_path="client.log",
+        line_number=1,
+        raw_line=raw_line,
+        text=raw_line.rstrip(b"\r\n").decode("utf-8"),
+    )
+    facts = {
+        "caller_service": [
+            SimpleNamespace(
+                item_id="00000000-0000-0000-0000-000000000090",
+                statement="checkout",
+            )
+        ]
+    }
+    events, states = _extract_events_with_audit(
+        [extractor],
+        [line],
+        {},
+        facts,
+        pinned_requirements=skill["requirements"],
+        pinned_roles=skill["roles"],
+    )
+    presence_rule = next(
+        item for item in contract["rules"] if item["id"] == "client_timeout_present"
+    )
+    return _evaluate_rule(
+        presence_rule,
+        events=events,
+        event_scan_complete={
+            event_id: state.complete for event_id, state in states.items()
+        },
+        event_scan_state=states,
+        extractor_by_id={extractor["id"]: extractor},
+        facts=facts,
+        prior={},
+    )
 
 
 def _captured_result_targets(
@@ -1624,6 +1834,274 @@ def test_unbounded_locator_fails_closed_even_when_agent_cites_a_line(
     )
     assert presence.server_evaluation.status is ServerRuleStatus.UNVERIFIABLE
     assert presence.server_evaluation.line_ranges == []
+    assert presence.server_evaluation.issues == [
+        "LOCATOR_UNBOUNDED: A raw LOGPARSE Evidence locator has no complete "
+        "line bounds."
+    ]
+
+
+@pytest.mark.parametrize(
+    "build_overrides",
+    [
+        {"partial_client_locator": True},
+        {"client_observation_policy": True},
+    ],
+    ids=["partial-locator", "lossy-policy"],
+)
+def test_incomplete_observability_keeps_positive_event_presence_verified(
+    tmp_path: Path,
+    build_overrides: dict[str, object],
+) -> None:
+    _, _, _, _, verification = _build(
+        tmp_path,
+        problem_time="2026-01-03T00:00:03.000Z",
+        **build_overrides,
+    )
+
+    presence = next(
+        item.server_evaluation
+        for item in verification.audit.rules
+        if item.rule_id == "client_timeout_present"
+    )
+    assert presence.status is ServerRuleStatus.VERIFIED_PASS
+    assert presence.issues == []
+    assert presence.event_observations[0].count_is_lower_bound is True
+
+
+@pytest.mark.parametrize(
+    ("build_overrides", "expected_status", "expected_code"),
+    [
+        (
+            {"client_log_matches": False},
+            ServerRuleStatus.VERIFIED_FAIL,
+            "FULL_SCAN_NO_MATCH",
+        ),
+        (
+            {
+                "client_log_matches": False,
+                "partial_client_locator": True,
+            },
+            ServerRuleStatus.UNVERIFIABLE,
+            "LOCATOR_PARTIAL",
+        ),
+        (
+            {
+                "client_log_matches": False,
+                "client_observation_policy": True,
+            },
+            ServerRuleStatus.UNVERIFIABLE,
+            "LOSSY_OBSERVATION_POLICY",
+        ),
+        (
+            {"client_target_match_status": "missing"},
+            ServerRuleStatus.UNVERIFIABLE,
+            "ANCHOR_UNBOUND",
+        ),
+        (
+            {"include_client_evidence": False},
+            ServerRuleStatus.UNVERIFIABLE,
+            "ANCHOR_EVIDENCE_MISSING",
+        ),
+    ],
+)
+def test_zero_match_audit_distinguishes_scan_limitations_from_true_absence(
+    tmp_path: Path,
+    build_overrides: dict[str, object],
+    expected_status: ServerRuleStatus,
+    expected_code: str,
+) -> None:
+    _, _, _, _, verification = _build(
+        tmp_path,
+        problem_time="2026-01-03T00:00:03.000Z",
+        **build_overrides,
+    )
+
+    presence = next(
+        item.server_evaluation
+        for item in verification.audit.rules
+        if item.rule_id == "client_timeout_present"
+    )
+    assert presence.status is expected_status
+    assert len(presence.issues) == 1
+    assert presence.issues[0].startswith(f"{expected_code}:")
+
+
+@pytest.mark.parametrize(
+    ("selector_mode", "expected_status", "expected_code"),
+    [
+        ("missing", ServerRuleStatus.UNVERIFIABLE, "SELECTOR_MISSING"),
+        (
+            "inactive",
+            ServerRuleStatus.NOT_APPLICABLE,
+            "SELECTOR_CONDITION_INACTIVE",
+        ),
+    ],
+)
+def test_selector_audit_distinguishes_missing_from_inactive_condition(
+    tmp_path: Path,
+    selector_mode: str,
+    expected_status: ServerRuleStatus,
+    expected_code: str,
+) -> None:
+    del tmp_path
+    presence = _selector_presence_evaluation(selector_mode)
+    assert presence.status is expected_status
+    assert len(presence.issues) == 1
+    assert presence.issues[0].startswith(f"{expected_code}:")
+
+
+@pytest.mark.parametrize(
+    ("quantifier", "observed_value", "expected_status"),
+    [
+        ("ANY", "different", ServerRuleStatus.UNVERIFIABLE),
+        ("ALL", "expected", ServerRuleStatus.UNVERIFIABLE),
+        ("ANY", "expected", ServerRuleStatus.VERIFIED_PASS),
+        ("ALL", "different", ServerRuleStatus.VERIFIED_FAIL),
+    ],
+)
+def test_lower_bound_quantifiers_do_not_overstate_observed_results(
+    quantifier: str,
+    observed_value: str,
+    expected_status: ServerRuleStatus,
+) -> None:
+    binding = EvidenceBinding(
+        existing_evidence_id=CLIENT_EVIDENCE,
+        evidence_proposal_key=None,
+    )
+    raw_line = b"synthetic event\n"
+    line = _ResolvedLine(
+        binding=binding,
+        anchor="client",
+        source_key="synthetic-client",
+        relative_path="client.log",
+        line_number=1,
+        raw_line=raw_line,
+        text="synthetic event",
+    )
+    event = _EventMatch(
+        event_id="selected_event",
+        anchor="client",
+        event_time=None,
+        timestamp_field=None,
+        fields={"selected_value": observed_value},
+        field_specs={
+            "selected_value": {
+                "name": "selected_value",
+                "type": "STRING",
+                "unit": None,
+                "clock_domain": None,
+            }
+        },
+        lines=(line,),
+        observation_policy_ids=("lossy_policy",),
+    )
+    extractor = {
+        "id": "selected_event",
+        "anchor": "client",
+        "members": [],
+        "fields": list(event.field_specs.values()),
+        "timestamp_field": None,
+        "group_by": [],
+        "selectors": [],
+        "max_gap_lines": 0,
+        "min_matches": 0,
+        "max_matches": None,
+        "observation_policy_ids": ["lossy_policy"],
+    }
+    rule = {
+        "id": "selected_value_matches",
+        "kind": "FACT_FIELD_EQUALS",
+        "description": "Compare the selected event value.",
+        "depends_on": [],
+        "remediation_requirements": [],
+        "parameters": {
+            "event": "selected_event",
+            "field": "selected_value",
+            "fact_name": "expected_value",
+            "quantifier": quantifier,
+        },
+    }
+    facts = {
+        "expected_value": [
+            SimpleNamespace(
+                item_id="00000000-0000-0000-0000-000000000090",
+                statement="expected",
+            )
+        ]
+    }
+    state = _EventScanState(
+        complete=False,
+        inactive=False,
+        issues=(
+            "LOSSY_OBSERVATION_POLICY: The event extractor is subject to a "
+            "lossy observation policy.",
+        ),
+    )
+
+    evaluation = _evaluate_rule(
+        rule,
+        events={"selected_event": [event]},
+        event_scan_complete={"selected_event": False},
+        event_scan_state={"selected_event": state},
+        extractor_by_id={"selected_event": extractor},
+        facts=facts,
+        prior={},
+    )
+
+    assert evaluation.status is expected_status
+    assert evaluation.event_observations[0].count_is_lower_bound is True
+    if expected_status is ServerRuleStatus.VERIFIED_PASS:
+        assert evaluation.issues == []
+    elif expected_status is ServerRuleStatus.VERIFIED_FAIL:
+        assert evaluation.issues == [
+            "The selected event fields do not conclusively equal the fixed user fact."
+        ]
+    else:
+        assert evaluation.issues[0].startswith("LOSSY_OBSERVATION_POLICY:")
+
+
+@pytest.mark.parametrize(
+    ("values", "quantifier", "complete", "expected"),
+    [
+        ([RuleClaimResult.PASS], "EXISTS", False, RuleClaimResult.PASS),
+        ([RuleClaimResult.FAIL], "EXISTS", False, RuleClaimResult.UNKNOWN),
+        ([RuleClaimResult.PASS], "ALL", False, RuleClaimResult.UNKNOWN),
+        ([RuleClaimResult.FAIL], "ALL", False, RuleClaimResult.FAIL),
+        ([RuleClaimResult.PASS], "EXISTS", True, RuleClaimResult.PASS),
+        ([RuleClaimResult.FAIL], "EXISTS", True, RuleClaimResult.FAIL),
+        ([RuleClaimResult.PASS], "ALL", True, RuleClaimResult.PASS),
+        ([RuleClaimResult.FAIL], "ALL", True, RuleClaimResult.FAIL),
+    ],
+)
+def test_result_quantifiers_respect_complete_and_lower_bound_event_sets(
+    values: list[RuleClaimResult],
+    quantifier: str,
+    complete: bool,
+    expected: RuleClaimResult,
+) -> None:
+    assert _aggregate_results(
+        values,
+        quantifier=quantifier,
+        observations_complete=complete,
+    ) is expected
+
+
+def test_rule_activated_selector_is_re_evaluated_after_mechanical_pass(
+    tmp_path: Path,
+) -> None:
+    _, _, _, _, verification = _build(
+        tmp_path,
+        problem_time="2026-01-03T00:00:03.000Z",
+        client_rule_conditional_selector=True,
+    )
+
+    presence = next(
+        item.server_evaluation
+        for item in verification.audit.rules
+        if item.rule_id == "client_timeout_present"
+    )
+    assert presence.status is ServerRuleStatus.VERIFIED_PASS
+    assert presence.issues == []
 
 
 def test_skill_fixed_time_reference_requires_no_user_fact_binding(

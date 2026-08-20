@@ -2,21 +2,37 @@
   "resolution_status": "COMPLETE",
   "terminal_path_id": "complete_queue_and_upstream",
   "case_status": "RESOLVED",
-  "causal_factor_ids": ["server_queue_contribution", "upstream_lane_blocker"],
+  "causal_factor_ids": [
+    "server_queue_contribution",
+    "upstream_lane_blocker"
+  ],
   "candidate_factor_ids": [],
   "excluded_factor_ids": [],
-  "criterion_statuses": ["SATISFIED", "SATISFIED", "SATISFIED"],
+  "criterion_statuses": [
+    "SATISFIED",
+    "SATISFIED",
+    "SATISFIED"
+  ],
   "required_rule_results": {
     "enhanced_version": "PASS",
-    "complete_timeout_consistent": "PASS",
-    "queue_contributed_timeout": "PASS",
-    "upstream_api_caused_queue": "PASS",
-    "queue_total_exceeds_timeout": "PASS",
-    "target_execution_within_timeout": "PASS",
-    "target_queue_positive": "PASS",
-    "prior_end_equals_target_start": "PASS",
-    "prior_execution_overlaps_target_queue": "PASS",
-    "prior_api_longer_than_target": "PASS"
+    "q_fifth_present": "PASS",
+    "q_fifth_timeout_consistent": "PASS",
+    "q_fifth_total_exceeds_timeout": "PASS",
+    "q_fifth_execution_within_timeout": "PASS",
+    "q_fifth_queue_positive": "PASS",
+    "q_fifth_serial_first_second": "PASS",
+    "q_fifth_serial_second_third": "PASS",
+    "q_fifth_serial_third_fourth": "PASS",
+    "q_fifth_serial_fourth_fifth": "PASS",
+    "q_fifth_cover_from_first_starts_before_queue": "PASS",
+    "q_fifth_cover_ends_after_queue": "PASS",
+    "q_fifth_cover_first_second_no_gap": "PASS",
+    "q_fifth_cover_second_third_no_gap": "PASS",
+    "q_fifth_cover_third_fourth_no_gap": "PASS",
+    "q_fifth_full_from_first": "PASS"
   },
-  "required_safety_phrases": ["超时不等于取消", "固定 Diagnosis Skill"]
+  "required_safety_phrases": [
+    "超时不等于取消",
+    "固定 Diagnosis Skill"
+  ]
 }

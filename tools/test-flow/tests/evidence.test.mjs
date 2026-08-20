@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
@@ -6,14 +7,109 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { allowedEmptyEventFiles, createAttempt, finalizeAttempt, recoverStageAuditProgress, requiredEventFiles, verifyVerdict } from "../lib/evidence.mjs";
+import { allowedEmptyEventFiles, auditExecutedStageUsage, createAttempt, finalizeAttempt, recoverStageAuditProgress, requiredEventFiles, verifyVerdict } from "../lib/evidence.mjs";
 import { EventWriter } from "../lib/events.mjs";
-import { zeroUsage } from "../lib/usage.mjs";
+import { TOKEN_USAGE_FORMULA, zeroUsage } from "../lib/usage.mjs";
 import { canonicalJson, removeTreeWritable, sha256Bytes, sha256File, writeJsonSync } from "../lib/util.mjs";
+import {
+  environmentKeySummary,
+  ISOLATED_AGENT_ENV_POLICY_VERSION,
+  ISOLATED_AGENT_STRUCTURED_OUTPUT_RETRY_ENFORCEMENT,
+  ISOLATED_AGENT_STRUCTURED_OUTPUT_RETRY_KEY,
+} from "../runtime-support/isolated-agent-env.mjs";
+import {
+  buildSkillGenerationIncompleteAuditRejectedReceipt,
+  SKILL_GENERATION_TRACE_CODES,
+  SKILL_GENERATION_TOOL_ATTEMPT_POLICY,
+  SKILL_GENERATION_TRACE_SCHEMA_VERSION,
+} from "../runtime-support/isolated-agent-tool-audit.mjs";
+import { SKILL_GENERATION_RULE_IR } from "../runtime-support/skill-generation-rule-ir.mjs";
 
 const TOOL_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const STATUS_POLICY = { pass: 0, pass_with_warnings: 0, fail: 1, blocked: 2, error: 3 };
 const ZERO_USAGE = zeroUsage();
+
+function passingSkillTraceAudit() {
+  const requiredReads = [
+    "workspace/inputs/wiki.md",
+    "workspace/inputs/clarifications.md",
+    "skill/references/generation-spec-v6-reference.md",
+    "skill/references/verification-contract-v2-reference.md",
+    "skill/references/checkpoints/01-begin-repeated-families-and-paths.md",
+    "skill/references/checkpoints/02-begin-9-1-inventory.md",
+    "skill/references/checkpoints/03-begin-9-2-witnesses.md",
+    "skill/references/checkpoints/04-write-now.md",
+  ];
+  const outputOrdinal = requiredReads.length + 1;
+  return {
+    schema_version: SKILL_GENERATION_TRACE_SCHEMA_VERSION,
+    status: "PASS",
+    workflow: "skill-generation",
+    skill: "wiki-to-diagnosis-skill",
+    tool_inventory: ["Skill", "Read", "StructuredOutput"],
+    permission_mode: "dontAsk",
+    permission_policy_sha256: "a".repeat(64),
+    attempt_policy: SKILL_GENERATION_TOOL_ATTEMPT_POLICY,
+    attempt_policy_sha256: crypto.createHash("sha256").update(JSON.stringify(SKILL_GENERATION_TOOL_ATTEMPT_POLICY)).digest("hex"),
+    tool_sequence: [
+      { ordinal: 0, tool: "Skill", outcome: "SUCCESS" },
+      ...requiredReads.map((readPath, index) => ({ ordinal: index + 1, tool: "Read", outcome: "SUCCESS", path: readPath })),
+      { ordinal: outputOrdinal, tool: "StructuredOutput", outcome: "SUCCESS" },
+    ],
+    accepted_validation_rejections: [],
+    required_reads: requiredReads,
+    observed_reads: requiredReads.map((readPath, index) => ({ ordinal: index + 1, path: readPath })),
+    linked_references: [
+      "skill/references/checkpoints/01-begin-repeated-families-and-paths.md",
+      "skill/references/checkpoints/02-begin-9-1-inventory.md",
+      "skill/references/checkpoints/03-begin-9-2-witnesses.md",
+      "skill/references/checkpoints/04-write-now.md",
+      "skill/references/generation-spec-v6-reference.md",
+      "skill/references/verification-contract-v2-reference.md",
+    ],
+    ir_input: {
+      ordinal: outputOrdinal,
+      size_bytes: 3,
+      sha256: "c".repeat(64),
+    },
+    compiler: {
+      id: SKILL_GENERATION_RULE_IR.compiler_id,
+      version: SKILL_GENERATION_RULE_IR.compiler_version,
+      blueprint_schema_version: SKILL_GENERATION_RULE_IR.blueprint_schema_version,
+      family_kind: SKILL_GENERATION_RULE_IR.family_kind,
+      family_version: SKILL_GENERATION_RULE_IR.family_version,
+    },
+    output: {
+      ordinal: outputOrdinal,
+      path: "workspace/output/generation-spec.json",
+      size_bytes: 3,
+      sha256: "b".repeat(64),
+    },
+    terminal: { subtype: "success", is_error: false },
+  };
+}
+
+function failedPartialSkillTraceAudit({ subtype = "error_max_turns", isError = true } = {}) {
+  return {
+    schema_version: SKILL_GENERATION_TRACE_SCHEMA_VERSION,
+    status: "FAIL",
+    workflow: "skill-generation",
+    code: "SKILL_TRACE_RESULT_NOT_SUCCESS",
+    tool_sequence: [
+      { ordinal: 0, tool: "Skill", outcome: "SUCCESS" },
+      { ordinal: 1, tool: "Read", outcome: "SUCCESS", path: "workspace/inputs/wiki.md" },
+      {
+        ordinal: 2,
+        tool: "StructuredOutput",
+        outcome: "ERROR",
+        size_bytes: 3,
+        sha256: "c".repeat(64),
+        diagnostic: { schema_version: 1, status: "INVALID_IR" },
+      },
+    ],
+    terminal: { subtype, is_error: isError },
+  };
+}
 
 function closeMinimalStream(attemptRoot, runId) {
   const writer = new EventWriter({ attemptRoot, runId, producerId: "orchestrator", producerType: "orchestrator" });
@@ -274,6 +370,493 @@ test("a fully sealed v2 candidate verifies and binds plan, Proof, Stage and Gate
     assert.equal(result.verdict.proofs[0].status, "PASS");
     assert.equal(verifyVerdict(result.attemptRoot).status, "PASS");
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("a failed planned invocation requires a sealed audit for a parse-complete terminal-less Skill timeout", () => {
+  const caps = {
+    max_turns: 12,
+    max_total_tokens: 1000000,
+    max_budget_usd: 10,
+    hard_timeout_seconds: 1800,
+  };
+  const invocation = {
+    schema_version: 3,
+    invocation_id: "isolated-agent:timeout",
+    class: "isolated-agent",
+    workflow: "skill-generation",
+    environment_policy: {
+      schema_version: 1,
+      version: ISOLATED_AGENT_ENV_POLICY_VERSION,
+      provider_auth_source: "audited-settings-file",
+      session_credentials: "NONE",
+      inbound: environmentKeySummary({ PATH: "/bin" }),
+      claude_process: environmentKeySummary({ PATH: "/bin", [ISOLATED_AGENT_STRUCTURED_OUTPUT_RETRY_KEY]: "2" }),
+    },
+    tool_trace_audit: null,
+    effective_model: "test-model",
+    effective_caps: caps,
+    usage_complete: false,
+    usage: null,
+    terminal: null,
+    turns: null,
+    stream: {
+      schema_version: 1,
+      event_count: 22,
+      parsed_event_count: 22,
+      init_count: 1,
+      result_count: 0,
+      last_event_type: "assistant",
+      complete: false,
+    },
+    wrapper_outcome: { schema_version: 1, status: "FAIL", code: "WRAPPER_MODEL_TIMEOUT" },
+    hard_cap_enforcement: {
+      turns: "claude-cli",
+      cost_usd: "claude-cli",
+      hard_timeout_seconds: "wrapper-process-watchdog",
+      total_tokens: `terminal-usage-postcondition:${TOKEN_USAGE_FORMULA}`,
+      structured_output_retries: ISOLATED_AGENT_STRUCTURED_OUTPUT_RETRY_ENFORCEMENT,
+    },
+    timed_out: true,
+    process: { exit_code: null, signal: "SIGTERM", wrapper_exit_code: 124 },
+  };
+  const planned = { invocation_caps: [{ class: "isolated-agent", min_count: 1, max_count: 1, caps }] };
+  const plan = { release_inputs: { settings: { model: "test-model" } } };
+  const failedStage = {
+    id: "real.skill-generation",
+    status: "FAIL",
+    usage: ZERO_USAGE,
+    gates: [{
+      id: "real.agent.skill-generation",
+      status: "FAIL",
+      usage: ZERO_USAGE,
+      usage_complete: false,
+      model_invocations: [invocation],
+    }],
+  };
+  const missingAuditFailures = [];
+  auditExecutedStageUsage(plan, planned, failedStage, missingAuditFailures);
+  assert.deepEqual(missingAuditFailures, [{ code: "MODEL_USAGE_INVALID", stage_id: "real.skill-generation" }]);
+
+  invocation.tool_trace_audit = buildSkillGenerationIncompleteAuditRejectedReceipt(
+    SKILL_GENERATION_TRACE_CODES.PHASE_SEQUENCE_INVALID,
+    structuredClone(invocation.stream),
+  );
+  const failures = [];
+  auditExecutedStageUsage(plan, planned, failedStage, failures);
+  assert.deepEqual(failures, []);
+  assert.doesNotMatch(JSON.stringify(invocation.tool_trace_audit), /content|thinking|raw|file_path|message|details/iu);
+
+  const streamInvalidStage = structuredClone(failedStage);
+  const streamInvalidInvocation = streamInvalidStage.gates[0].model_invocations[0];
+  streamInvalidInvocation.wrapper_outcome.code = "WRAPPER_MODEL_STREAM_INVALID";
+  streamInvalidInvocation.timed_out = false;
+  streamInvalidInvocation.process = { exit_code: 1, signal: null, wrapper_exit_code: 1 };
+  const streamInvalidFailures = [];
+  auditExecutedStageUsage(plan, planned, streamInvalidStage, streamInvalidFailures);
+  assert.deepEqual(streamInvalidFailures, []);
+
+  const nonDiagnosableStage = structuredClone(streamInvalidStage);
+  const nonDiagnosableInvocation = nonDiagnosableStage.gates[0].model_invocations[0];
+  nonDiagnosableInvocation.tool_trace_audit = null;
+  nonDiagnosableInvocation.stream.parsed_event_count -= 1;
+  const nonDiagnosableFailures = [];
+  auditExecutedStageUsage(plan, planned, nonDiagnosableStage, nonDiagnosableFailures);
+  assert.deepEqual(nonDiagnosableFailures, []);
+
+  const unknownEventStage = structuredClone(streamInvalidStage);
+  const unknownEventInvocation = unknownEventStage.gates[0].model_invocations[0];
+  unknownEventInvocation.tool_trace_audit = null;
+  unknownEventInvocation.stream.last_event_type = null;
+  const unknownEventFailures = [];
+  auditExecutedStageUsage(plan, planned, unknownEventStage, unknownEventFailures);
+  assert.deepEqual(unknownEventFailures, [{ code: "MODEL_USAGE_INVALID", stage_id: "real.skill-generation" }]);
+
+  for (const [name, mutate] of [
+    ["rejection raw field injected", (candidate) => { candidate.tool_trace_audit.raw = "must-not-pass"; }],
+    ["rejection stream changed", (candidate) => { candidate.tool_trace_audit.stream.event_count += 1; }],
+    ["terminal-less streams cannot end in result", (candidate) => {
+      candidate.stream.last_event_type = "result";
+      candidate.tool_trace_audit.stream.last_event_type = "result";
+    }],
+    ["rejection audit code unknown", (candidate) => { candidate.tool_trace_audit.audit_code = "SKILL_TRACE_UNKNOWN"; }],
+  ]) {
+    const tamperedStage = structuredClone(failedStage);
+    mutate(tamperedStage.gates[0].model_invocations[0]);
+    const tamperedFailures = [];
+    auditExecutedStageUsage(plan, planned, tamperedStage, tamperedFailures);
+    assert.deepEqual(tamperedFailures, [{ code: "MODEL_USAGE_INVALID", stage_id: "real.skill-generation" }], name);
+  }
+
+  const prefixStage = structuredClone(failedStage);
+  const prefixInvocation = prefixStage.gates[0].model_invocations[0];
+  prefixInvocation.tool_trace_audit = {
+    schema_version: SKILL_GENERATION_TRACE_SCHEMA_VERSION,
+    status: "FAIL",
+    workflow: "skill-generation",
+    code: SKILL_GENERATION_TRACE_CODES.INCOMPLETE_PREFIX,
+    stream_state: "TERMINAL_MISSING",
+    tool_sequence: [{ ordinal: 0, tool: "Skill", outcome: "PENDING" }],
+    stream: structuredClone(prefixInvocation.stream),
+  };
+  const prefixFailures = [];
+  auditExecutedStageUsage(plan, planned, prefixStage, prefixFailures);
+  assert.deepEqual(prefixFailures, []);
+  assert.doesNotMatch(JSON.stringify(prefixInvocation.tool_trace_audit), /content|thinking|raw|file_path/iu);
+
+  for (const [name, mutate] of [
+    ["prefix stream count changed", (candidate) => { candidate.tool_trace_audit.stream.event_count += 1; }],
+    ["prefix raw field injected", (candidate) => { candidate.tool_trace_audit.raw = "must-not-pass"; }],
+    ["prefix attached to usage failure", (candidate) => {
+      candidate.wrapper_outcome.code = "WRAPPER_MODEL_USAGE_INVALID";
+      candidate.timed_out = false;
+      candidate.process = { exit_code: 1, signal: null, wrapper_exit_code: 1 };
+      candidate.stream.complete = true;
+      candidate.tool_trace_audit.stream.complete = true;
+    }],
+  ]) {
+    const tamperedStage = structuredClone(prefixStage);
+    mutate(tamperedStage.gates[0].model_invocations[0]);
+    const tamperedFailures = [];
+    auditExecutedStageUsage(plan, planned, tamperedStage, tamperedFailures);
+    assert.deepEqual(tamperedFailures, [{ code: "MODEL_USAGE_INVALID", stage_id: "real.skill-generation" }], name);
+  }
+
+  const overCountFailures = [];
+  auditExecutedStageUsage(plan, planned, {
+    ...failedStage,
+    gates: failedStage.gates.map((gate) => ({
+      ...gate,
+      model_invocations: [
+        invocation,
+        { ...invocation, invocation_id: "isolated-agent:timeout-duplicate" },
+      ],
+    })),
+  }, overCountFailures);
+  assert.deepEqual(overCountFailures, [{
+    code: "MODEL_INVOCATION_COUNT_MISMATCH",
+    stage_id: "real.skill-generation",
+    class: "isolated-agent",
+  }]);
+
+  const passingFailures = [];
+  auditExecutedStageUsage(plan, planned, {
+    ...failedStage,
+    status: "PASS",
+    gates: failedStage.gates.map((gate) => ({ ...gate, status: "PASS" })),
+  }, passingFailures);
+  assert.deepEqual(passingFailures, [{
+    code: "MODEL_USAGE_INCOMPLETE",
+    stage_id: "real.skill-generation",
+    gate_id: "real.agent.skill-generation",
+  }]);
+
+  const fabricatedFailures = [];
+  auditExecutedStageUsage(plan, planned, {
+    ...failedStage,
+    gates: failedStage.gates.map((gate) => ({
+      ...gate,
+      model_invocations: [{ ...invocation, usage: ZERO_USAGE }],
+    })),
+  }, fabricatedFailures);
+  assert.deepEqual(fabricatedFailures, [{ code: "MODEL_USAGE_INVALID", stage_id: "real.skill-generation" }]);
+
+  for (const [name, mutate] of [
+    ["timeout flag cleared", (candidate) => { candidate.timed_out = false; }],
+    ["timeout wrapper exit changed", (candidate) => { candidate.process.wrapper_exit_code = 1; }],
+    ["timeout stream marked complete", (candidate) => { candidate.stream.complete = true; }],
+    ["timeout terminal fabricated", (candidate) => {
+      candidate.terminal = { subtype: "error_max_turns", is_error: true };
+    }],
+    ["timeout partial trace fabricated", (candidate) => {
+      candidate.tool_trace_audit = failedPartialSkillTraceAudit();
+    }],
+    ["timeout process exit and signal conflict", (candidate) => {
+      candidate.process.exit_code = 1;
+    }],
+    ["timeout exit zero without a termination signal", (candidate) => {
+      candidate.process = { exit_code: 0, signal: null, wrapper_exit_code: 124 };
+    }],
+    ["timeout untrusted termination signal", (candidate) => {
+      candidate.process = { exit_code: null, signal: "SIGUSR1", wrapper_exit_code: 124 };
+    }],
+  ]) {
+    const invalidStage = structuredClone(failedStage);
+    mutate(invalidStage.gates[0].model_invocations[0]);
+    const invalidFailures = [];
+    auditExecutedStageUsage(plan, planned, invalidStage, invalidFailures);
+    assert.deepEqual(
+      invalidFailures,
+      [{ code: "MODEL_USAGE_INVALID", stage_id: "real.skill-generation" }],
+      name,
+    );
+  }
+
+  const completeUsage = {
+    schema_version: 1,
+    input_tokens: 10,
+    output_tokens: 20,
+    cache_creation_input_tokens: 0,
+    cache_read_input_tokens: 0,
+    total_tokens: 30,
+    cost_usd: 0.01,
+  };
+  const partialInvocation = {
+    ...invocation,
+    invocation_id: "isolated-agent:max-turns",
+    tool_trace_audit: failedPartialSkillTraceAudit(),
+    usage_complete: true,
+    usage: completeUsage,
+    terminal: { subtype: "error_max_turns", is_error: true },
+    turns: 13,
+    stream: {
+      schema_version: 1,
+      event_count: 22,
+      parsed_event_count: 22,
+      init_count: 1,
+      result_count: 1,
+      last_event_type: "result",
+      complete: true,
+    },
+    wrapper_outcome: { schema_version: 1, status: "FAIL", code: "WRAPPER_MODEL_CAP_EXCEEDED" },
+    timed_out: false,
+    process: { exit_code: 1, signal: null, wrapper_exit_code: 1 },
+  };
+  const partialStage = {
+    ...failedStage,
+    usage: completeUsage,
+    gates: [{
+      ...failedStage.gates[0],
+      usage: completeUsage,
+      usage_complete: true,
+      model_invocations: [partialInvocation],
+    }],
+  };
+  const partialFailures = [];
+  auditExecutedStageUsage(plan, planned, partialStage, partialFailures);
+  assert.deepEqual(partialFailures, []);
+  assert.doesNotMatch(JSON.stringify(partialInvocation.tool_trace_audit), /content|thinking|raw|file_path/iu);
+
+  const injectedPartial = structuredClone(partialStage);
+  injectedPartial.gates[0].model_invocations[0].tool_trace_audit.tool_sequence[0].content = "must-not-pass";
+  const injectedFailures = [];
+  auditExecutedStageUsage(plan, planned, injectedPartial, injectedFailures);
+  assert.deepEqual(injectedFailures, [{
+    code: "MODEL_TOOL_TRACE_AUDIT_INVALID",
+    stage_id: "real.skill-generation",
+    invocation_id: "isolated-agent:max-turns",
+  }]);
+
+  const diagnosticTamper = structuredClone(partialStage);
+  diagnosticTamper.gates[0].model_invocations[0].tool_trace_audit.tool_sequence.at(-1).diagnostic.raw = "must-not-pass";
+  const diagnosticFailures = [];
+  auditExecutedStageUsage(plan, planned, diagnosticTamper, diagnosticFailures);
+  assert.deepEqual(diagnosticFailures, [{
+    code: "MODEL_TOOL_TRACE_AUDIT_INVALID",
+    stage_id: "real.skill-generation",
+    invocation_id: "isolated-agent:max-turns",
+  }]);
+
+  const unknownCompletedAudit = structuredClone(partialStage);
+  const unknownInvocation = unknownCompletedAudit.gates[0].model_invocations[0];
+  unknownInvocation.tool_trace_audit = {
+    schema_version: SKILL_GENERATION_TRACE_SCHEMA_VERSION,
+    status: "FAIL",
+    workflow: "skill-generation",
+    code: "SKILL_TRACE_UNKNOWN",
+  };
+  unknownInvocation.wrapper_outcome.code = "WRAPPER_SKILL_TRACE_INVALID";
+  unknownInvocation.terminal = { subtype: "success", is_error: false };
+  unknownInvocation.turns = 1;
+  unknownInvocation.process = { exit_code: 0, signal: null, wrapper_exit_code: 1 };
+  const unknownFailures = [];
+  auditExecutedStageUsage(plan, planned, unknownCompletedAudit, unknownFailures);
+  assert.deepEqual(unknownFailures, [{
+    code: "MODEL_TOOL_TRACE_AUDIT_INVALID",
+    stage_id: "real.skill-generation",
+    invocation_id: "isolated-agent:max-turns",
+  }]);
+
+  const mismatchedTerminal = structuredClone(partialStage);
+  mismatchedTerminal.gates[0].model_invocations[0].tool_trace_audit.terminal.subtype = "error_max_budget_usd";
+  const mismatchFailures = [];
+  auditExecutedStageUsage(plan, planned, mismatchedTerminal, mismatchFailures);
+  assert.deepEqual(mismatchFailures, [{
+    code: "MODEL_TOOL_TRACE_AUDIT_INVALID",
+    stage_id: "real.skill-generation",
+    invocation_id: "isolated-agent:max-turns",
+  }]);
+
+  for (const [name, mutate] of [
+    ["complete failure marked timed out", (candidate) => { candidate.timed_out = true; }],
+    ["complete failure stream truncated", (candidate) => { candidate.stream.complete = false; }],
+    ["complete failure stream count mismatch", (candidate) => { candidate.stream.parsed_event_count -= 1; }],
+    ["complete failure wrapper exit mismatch", (candidate) => { candidate.process.wrapper_exit_code = 0; }],
+    ["complete failure process exit and signal conflict", (candidate) => { candidate.process.signal = "SIGTERM"; }],
+    ["complete failure wrapper code mismatch", (candidate) => {
+      candidate.wrapper_outcome.code = "WRAPPER_SKILL_TRACE_INVALID";
+    }],
+    ["complete failure terminal no longer explains failure", (candidate) => {
+      candidate.terminal = { subtype: "success", is_error: false };
+      candidate.turns = 12;
+    }],
+    ["complete failure model removed", (candidate) => { candidate.effective_model = null; }],
+  ]) {
+    const invalidStage = structuredClone(partialStage);
+    mutate(invalidStage.gates[0].model_invocations[0]);
+    const invalidFailures = [];
+    auditExecutedStageUsage(plan, planned, invalidStage, invalidFailures);
+    assert.deepEqual(invalidFailures, [{
+      code: "MODEL_HARD_CAP_RECEIPT_MISMATCH",
+      stage_id: "real.skill-generation",
+      invocation_id: "isolated-agent:max-turns",
+    }], name);
+  }
+});
+
+test("a passing skill-generation invocation must retain a valid trace audit receipt", () => {
+  const caps = {
+    max_turns: 12,
+    max_total_tokens: 1000000,
+    max_budget_usd: 10,
+    hard_timeout_seconds: 1800,
+  };
+  const usage = {
+    schema_version: 1,
+    input_tokens: 10,
+    output_tokens: 20,
+    cache_creation_input_tokens: 0,
+    cache_read_input_tokens: 0,
+    total_tokens: 30,
+    cost_usd: 0.01,
+  };
+  const invocation = {
+    schema_version: 3,
+    invocation_id: "isolated-agent:skill-generation",
+    class: "isolated-agent",
+    workflow: "skill-generation",
+    environment_policy: {
+      schema_version: 1,
+      version: ISOLATED_AGENT_ENV_POLICY_VERSION,
+      provider_auth_source: "audited-settings-file",
+      session_credentials: "NONE",
+      inbound: environmentKeySummary({ PATH: "/bin" }),
+      claude_process: environmentKeySummary({ PATH: "/bin", [ISOLATED_AGENT_STRUCTURED_OUTPUT_RETRY_KEY]: "2" }),
+    },
+    tool_trace_audit: passingSkillTraceAudit(),
+    effective_model: "test-model",
+    effective_caps: caps,
+    usage_complete: true,
+    usage,
+    terminal: { subtype: "success", is_error: false },
+    turns: 1,
+    stream: {
+      schema_version: 1,
+      event_count: 10,
+      parsed_event_count: 10,
+      init_count: 1,
+      result_count: 1,
+      last_event_type: "result",
+      complete: true,
+    },
+    wrapper_outcome: { schema_version: 1, status: "PASS", code: null },
+    hard_cap_enforcement: {
+      turns: "claude-cli",
+      cost_usd: "claude-cli",
+      hard_timeout_seconds: "wrapper-process-watchdog",
+      total_tokens: `terminal-usage-postcondition:${TOKEN_USAGE_FORMULA}`,
+      structured_output_retries: ISOLATED_AGENT_STRUCTURED_OUTPUT_RETRY_ENFORCEMENT,
+    },
+    timed_out: false,
+    process: { exit_code: 0, signal: null, wrapper_exit_code: 0 },
+  };
+  const planned = { invocation_caps: [{ class: "isolated-agent", min_count: 1, max_count: 1, caps }] };
+  const plan = { release_inputs: { settings: { model: "test-model" } } };
+  const stage = {
+    id: "real.skill-generation",
+    status: "PASS",
+    usage,
+    gates: [{
+      id: "real.agent.skill-generation",
+      status: "PASS",
+      usage,
+      usage_complete: true,
+      model_invocations: [invocation],
+    }],
+  };
+  const failures = [];
+  auditExecutedStageUsage(plan, planned, stage, failures);
+  assert.deepEqual(failures, []);
+
+  for (const [name, mutate] of [
+    ["timed out", (candidate) => { candidate.timed_out = true; }],
+    ["stream incomplete", (candidate) => { candidate.stream.complete = false; }],
+    ["stream event count mismatch", (candidate) => { candidate.stream.event_count += 1; }],
+    ["stream init count mismatch", (candidate) => { candidate.stream.init_count = 0; }],
+    ["stream result count mismatch", (candidate) => { candidate.stream.result_count = 0; }],
+    ["stream last event mismatch", (candidate) => { candidate.stream.last_event_type = "assistant"; }],
+    ["child exit nonzero", (candidate) => { candidate.process.exit_code = 1; }],
+    ["child exit and signal conflict", (candidate) => { candidate.process.signal = "SIGTERM"; }],
+    ["wrapper exit nonzero", (candidate) => { candidate.process.wrapper_exit_code = 1; }],
+    ["terminal subtype failed", (candidate) => { candidate.terminal.subtype = "error_max_turns"; }],
+    ["terminal is_error failed", (candidate) => { candidate.terminal.is_error = true; }],
+    ["wrapper outcome failed", (candidate) => {
+      candidate.wrapper_outcome = {
+        schema_version: 1,
+        status: "FAIL",
+        code: "WRAPPER_MODEL_TERMINAL_INVALID",
+      };
+    }],
+    ["structured retry seal changed", (candidate) => {
+      candidate.hard_cap_enforcement.structured_output_retries = "unsealed";
+    }],
+    ["structured retry child key missing", (candidate) => {
+      candidate.environment_policy.claude_process = environmentKeySummary({ PATH: "/bin" });
+    }],
+    ["unexpected raw field", (candidate) => { candidate.raw = "/private/absolute/path"; }],
+  ]) {
+    const invalidStage = structuredClone(stage);
+    mutate(invalidStage.gates[0].model_invocations[0]);
+    const invalidFailures = [];
+    auditExecutedStageUsage(plan, planned, invalidStage, invalidFailures);
+    assert.deepEqual(invalidFailures, [{
+      code: "MODEL_HARD_CAP_RECEIPT_MISMATCH",
+      stage_id: "real.skill-generation",
+      invocation_id: "isolated-agent:skill-generation",
+    }], name);
+  }
+
+  const zeroTokenStage = structuredClone(stage);
+  zeroTokenStage.usage = structuredClone(ZERO_USAGE);
+  zeroTokenStage.gates[0].usage = structuredClone(ZERO_USAGE);
+  zeroTokenStage.gates[0].model_invocations[0].usage = structuredClone(ZERO_USAGE);
+  const zeroTokenFailures = [];
+  auditExecutedStageUsage(plan, planned, zeroTokenStage, zeroTokenFailures);
+  assert.deepEqual(zeroTokenFailures, [{
+    code: "MODEL_HARD_CAP_RECEIPT_MISMATCH",
+    stage_id: "real.skill-generation",
+    invocation_id: "isolated-agent:skill-generation",
+  }]);
+
+  const tampered = structuredClone(stage);
+  tampered.gates[0].model_invocations[0].tool_trace_audit.output.sha256 = "not-a-digest";
+  const tamperedFailures = [];
+  auditExecutedStageUsage(plan, planned, tampered, tamperedFailures);
+  assert.deepEqual(tamperedFailures, [{
+    code: "MODEL_TOOL_TRACE_AUDIT_INVALID",
+    stage_id: "real.skill-generation",
+    invocation_id: "isolated-agent:skill-generation",
+  }]);
+
+  const disguisedAsJob = structuredClone(stage);
+  disguisedAsJob.gates[0].model_invocations[0].workflow = "job";
+  disguisedAsJob.gates[0].model_invocations[0].tool_trace_audit = null;
+  const disguisedFailures = [];
+  auditExecutedStageUsage(plan, planned, disguisedAsJob, disguisedFailures);
+  assert.deepEqual(disguisedFailures, [{
+    code: "MODEL_TOOL_TRACE_AUDIT_INVALID",
+    stage_id: "real.skill-generation",
+    invocation_id: "isolated-agent:skill-generation",
+  }]);
 });
 
 test("cleanup failure commits overall ERROR and cannot remain reusable", async () => {

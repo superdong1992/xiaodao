@@ -21,6 +21,30 @@ import {
 import { chromeIdentity } from "./browser.mjs";
 
 const IGNORED_NAMES = new Set([".git", ".tmp", ".pytest_cache", "__pycache__", "node_modules", ".venv"]);
+const ENVIRONMENT_CONTROL_NAMES = Object.freeze([
+  "LANG",
+  "LC_ALL",
+  "PYTHONHASHSEED",
+  "PYTHONHOME",
+  "PYTHONIOENCODING",
+  "PYTHONPATH",
+  "PYTHONUTF8",
+  "PYTHONWARNINGS",
+  "PYTEST_ADDOPTS",
+  "PYTEST_DISABLE_PLUGIN_AUTOLOAD",
+  "PYTEST_PLUGINS",
+  "TEST_FLOW_WINDOWS_SCRATCH_ROOT",
+  "TZ",
+]);
+
+export function environmentControlIdentity(environment = process.env) {
+  return Object.fromEntries(
+    ENVIRONMENT_CONTROL_NAMES.map((name) => [
+      name,
+      environment[name] === undefined ? null : sha256Bytes(environment[name]),
+    ]),
+  );
+}
 
 function git(repoRoot, args) {
   return runSync("git", ["-C", repoRoot, ...args]);
@@ -234,20 +258,6 @@ export function pythonImportPathIdentity(repoRoot, pythonDetails) {
 
 export function environmentIdentity(repoRoot, environment = process.env) {
   const python = resolvePythonTestRuntime(repoRoot, environment);
-  const controlNames = [
-    "LANG",
-    "LC_ALL",
-    "PYTHONHASHSEED",
-    "PYTHONHOME",
-    "PYTHONIOENCODING",
-    "PYTHONPATH",
-    "PYTHONUTF8",
-    "PYTHONWARNINGS",
-    "PYTEST_ADDOPTS",
-    "PYTEST_DISABLE_PLUGIN_AUTOLOAD",
-    "PYTEST_PLUGINS",
-    "TZ",
-  ];
   return {
     platform: process.platform,
     architecture: process.arch,
@@ -258,9 +268,7 @@ export function environmentIdentity(repoRoot, environment = process.env) {
       ? {
           ...python.identity,
           import_paths: pythonImportPathIdentity(repoRoot, python.details),
-          environment_controls: Object.fromEntries(
-            controlNames.map((name) => [name, environment[name] === undefined ? null : sha256Bytes(environment[name])]),
-          ),
+          environment_controls: environmentControlIdentity(environment),
         }
       : { status: "MISSING" },
   };

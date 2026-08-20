@@ -181,6 +181,11 @@ def validate_requirement_activation_contract(
     """Reject cyclic, semantic or target-dependent activation conditions."""
 
     requirement_by_name = {item["name"]: item for item in requirements}
+    conditional_requirement_names = {
+        item["name"]
+        for item in requirements
+        if item["requiredness"] == "CONDITIONAL"
+    }
     selector_facts = {
         extractor["id"]: _collect_user_fact_names(extractor.get("selectors", []))
         for extractor in verification_contract["event_extractors"]
@@ -218,7 +223,10 @@ def validate_requirement_activation_contract(
                         requirement["stage"] != "AFTER_LOGPARSE"
                         or rule is None
                         or rule["kind"] == "SEMANTIC_CAUSALITY"
-                        or requirement["name"] in expanded_rule_facts[term["name"]]
+                        or bool(
+                            conditional_requirement_names
+                            & expanded_rule_facts[term["name"]]
+                        )
                     ):
                         raise ValueError(
                             "activation RULE_RESULT must be an independent mechanical AFTER_LOGPARSE rule"

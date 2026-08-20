@@ -14,8 +14,18 @@ import { classifyRun } from "./status.mjs";
 import {
   ISOLATED_AGENT_ENV_POLICY_VERSION,
   ISOLATED_AGENT_OUTPUT_CAP_ENFORCEMENT,
+  ISOLATED_AGENT_STRUCTURED_OUTPUT_RETRY_ENFORCEMENT,
+  ISOLATED_AGENT_STRUCTURED_OUTPUT_RETRY_KEY,
   validEnvironmentKeySummary,
 } from "../runtime-support/isolated-agent-env.mjs";
+import {
+  validSkillGenerationFailedTraceAuditReceipt,
+  validSkillGenerationIncompleteAuditRejectedReceipt,
+  validSkillGenerationIncompleteTraceAuditReceipt,
+  validSkillGenerationPartialTraceAuditReceipt,
+  validSkillGenerationTraceAuditReceipt,
+  validIsolatedAgentStreamEventType,
+} from "../runtime-support/isolated-agent-tool-audit.mjs";
 import {
   isCompleteUsage,
   normalizeUsage as normalizeTokenUsage,
@@ -298,6 +308,189 @@ function validUsage(value) {
   return isCompleteUsage(value);
 }
 
+function isPlainObject(value) {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+function exactKeys(value, expected) {
+  return isPlainObject(value)
+    && Object.keys(value).sort().join("\0") === [...expected].sort().join("\0");
+}
+
+const ISOLATED_INVOCATION_FIELDS = Object.freeze([
+  "schema_version", "invocation_id", "class", "workflow", "environment_policy",
+  "tool_trace_audit", "effective_model", "effective_caps", "usage_complete", "usage",
+  "terminal", "turns", "stream", "wrapper_outcome", "hard_cap_enforcement",
+  "timed_out", "process",
+]);
+
+function validIsolatedEnvironmentPolicy(value) {
+  return exactKeys(value, [
+    "schema_version", "version", "provider_auth_source", "session_credentials",
+    "inbound", "claude_process",
+  ])
+    && value.schema_version === 1
+    && value.version === ISOLATED_AGENT_ENV_POLICY_VERSION
+    && value.provider_auth_source === "audited-settings-file"
+    && ["NONE", "explicit-logparse-broker"].includes(value.session_credentials)
+    && validEnvironmentKeySummary(value.inbound)
+    && validEnvironmentKeySummary(value.claude_process);
+}
+
+function validIsolatedProcess(value) {
+  if (!exactKeys(value, ["exit_code", "signal", "wrapper_exit_code"])
+    || !Number.isSafeInteger(value.wrapper_exit_code)) return false;
+  const exited = Number.isSafeInteger(value.exit_code) && value.signal === null;
+  const signaled = value.exit_code === null
+    && typeof value.signal === "string"
+    && /^[A-Z][A-Z0-9_]{1,31}$/.test(value.signal);
+  return exited || signaled;
+}
+
+function validIsolatedStreamShape(value) {
+  return exactKeys(value, [
+    "schema_version", "event_count", "parsed_event_count", "init_count",
+    "result_count", "last_event_type", "complete",
+  ])
+    && value.schema_version === 1
+    && Number.isSafeInteger(value.event_count)
+    && value.event_count >= 0
+    && Number.isSafeInteger(value.parsed_event_count)
+    && value.parsed_event_count >= 0
+    && value.parsed_event_count <= value.event_count
+    && Number.isSafeInteger(value.init_count)
+    && value.init_count >= 0
+    && Number.isSafeInteger(value.result_count)
+    && value.result_count >= 0
+    && (value.last_event_type === null
+      ? value.event_count === 0 && value.parsed_event_count === 0
+      : validIsolatedAgentStreamEventType(value.last_event_type))
+    && typeof value.complete === "boolean";
+}
+
+function validCompleteIsolatedStream(value) {
+  return validIsolatedStreamShape(value)
+    && value.complete === true
+    && value.event_count === value.parsed_event_count
+    && value.event_count >= 2
+    && value.init_count === 1
+    && value.result_count === 1
+    && value.last_event_type === "result";
+}
+
+function validIsolatedTerminal(value) {
+  return exactKeys(value, ["subtype", "is_error"])
+    && typeof value.subtype === "string"
+    && /^[a-z][a-z0-9_]{0,63}$/.test(value.subtype)
+    && typeof value.is_error === "boolean";
+}
+
+function validIsolatedWrapperOutcome(value) {
+  return exactKeys(value, ["schema_version", "status", "code"])
+    && value.schema_version === 1
+    && (
+      (value.status === "PASS" && value.code === null)
+      || (value.status === "FAIL" && /^WRAPPER_[A-Z0-9_]+$/.test(value.code ?? ""))
+    );
+}
+
+function validIsolatedCaps(value) {
+  return isPlainObject(value)
+    && Object.keys(value).every((key) => [
+      "max_turns", "max_total_tokens", "max_output_tokens", "max_budget_usd",
+      "hard_timeout_seconds",
+    ].includes(key))
+    && Number.isSafeInteger(value.max_turns)
+    && value.max_turns > 0
+    && Number.isSafeInteger(value.max_total_tokens)
+    && value.max_total_tokens > 0
+    && (value.max_output_tokens === undefined || (
+      Number.isSafeInteger(value.max_output_tokens)
+      && value.max_output_tokens > 0
+      && value.max_output_tokens <= value.max_total_tokens
+    ))
+    && Number.isFinite(value.max_budget_usd)
+    && value.max_budget_usd > 0
+    && Number.isSafeInteger(value.hard_timeout_seconds)
+    && value.hard_timeout_seconds > 0;
+}
+
+function validIsolatedHardCapEvidence(invocation, caps) {
+  if (!validIsolatedCaps(caps)) return false;
+  const enforcement = invocation.hard_cap_enforcement;
+  if (!isPlainObject(enforcement)
+    || !Object.keys(enforcement).every((key) => [
+      "turns", "cost_usd", "hard_timeout_seconds", "total_tokens", "max_output_tokens",
+      "structured_output_retries",
+    ].includes(key))
+    || enforcement.turns !== "claude-cli"
+    || enforcement.cost_usd !== "claude-cli"
+    || enforcement.hard_timeout_seconds !== "wrapper-process-watchdog"
+    || enforcement.total_tokens !== `terminal-usage-postcondition:${TOKEN_USAGE_FORMULA}`) return false;
+  return validOutputTokenCapEvidence(invocation, caps)
+    && validStructuredOutputRetryEvidence(invocation);
+}
+
+function validCompleteIsolatedInvocation(invocation, caps) {
+  if (!exactKeys(invocation, ISOLATED_INVOCATION_FIELDS)
+    || invocation.schema_version !== 3
+    || invocation.class !== "isolated-agent"
+    || !["job", "skill-generation"].includes(invocation.workflow)
+    || !validIsolatedEnvironmentPolicy(invocation.environment_policy)
+    || typeof invocation.effective_model !== "string"
+    || invocation.effective_model.length === 0
+    || invocation.usage_complete !== true
+    || !validUsage(invocation.usage)
+    || invocation.usage.total_tokens <= 0
+    || !validIsolatedTerminal(invocation.terminal)
+    || !(invocation.turns === null || Number.isSafeInteger(invocation.turns))
+    || invocation.timed_out !== false
+    || !validCompleteIsolatedStream(invocation.stream)
+    || !validIsolatedWrapperOutcome(invocation.wrapper_outcome)
+    || !validIsolatedProcess(invocation.process)
+    || !validIsolatedHardCapEvidence(invocation, caps)) return false;
+
+  const terminalSucceeded = invocation.terminal.subtype === "success"
+    && invocation.terminal.is_error === false;
+  const turnsShapeValid = Number.isSafeInteger(invocation.turns) && invocation.turns > 0;
+  const turnsWithinCaps = turnsShapeValid && invocation.turns <= caps.max_turns;
+  const usageWithinCaps = invocation.usage.total_tokens <= caps.max_total_tokens
+    && invocation.usage.cost_usd <= caps.max_budget_usd;
+  const childSucceeded = invocation.process.exit_code === 0 && invocation.process.signal === null;
+  const wrapper = invocation.wrapper_outcome;
+  if (wrapper.status === "PASS") {
+    return wrapper.code === null
+      && invocation.process.wrapper_exit_code === 0
+      && terminalSucceeded
+      && turnsWithinCaps
+      && usageWithinCaps
+      && childSucceeded;
+  }
+  if (invocation.process.wrapper_exit_code !== 1) return false;
+  if (wrapper.code === "WRAPPER_MODEL_TERMINAL_INVALID") {
+    return usageWithinCaps && (
+      !turnsShapeValid
+      || (!terminalSucceeded && turnsWithinCaps)
+    );
+  }
+  if (wrapper.code === "WRAPPER_MODEL_CAP_EXCEEDED") {
+    return !usageWithinCaps || (turnsShapeValid && !turnsWithinCaps);
+  }
+  if (wrapper.code === "WRAPPER_CHILD_PROCESS_FAILED") {
+    return terminalSucceeded && turnsWithinCaps && usageWithinCaps && !childSucceeded;
+  }
+  if (wrapper.code === "WRAPPER_SKILL_TRACE_INVALID") {
+    return invocation.workflow === "skill-generation"
+      && terminalSucceeded
+      && turnsWithinCaps
+      && usageWithinCaps
+      && childSucceeded;
+  }
+  return false;
+}
+
 export function validOutputTokenCapEvidence(invocation, caps) {
   if (Object.hasOwn(invocation, "observed_request_limits")) return false;
   const declaredCap = caps?.max_output_tokens;
@@ -323,7 +516,171 @@ export function validOutputTokenCapEvidence(invocation, caps) {
     && (invocation.environment_policy?.claude_process?.key_names ?? []).includes("CLAUDE_CODE_MAX_OUTPUT_TOKENS");
 }
 
-function auditExecutedStageUsage(plan, planned, stage, failures) {
+export function validStructuredOutputRetryEvidence(invocation) {
+  const inboundKeys = invocation.environment_policy?.inbound?.key_names ?? [];
+  const claudeKeys = invocation.environment_policy?.claude_process?.key_names ?? [];
+  const marker = invocation.hard_cap_enforcement?.structured_output_retries;
+  if (inboundKeys.includes(ISOLATED_AGENT_STRUCTURED_OUTPUT_RETRY_KEY)) return false;
+  if (invocation.workflow === "skill-generation") {
+    return claudeKeys.includes(ISOLATED_AGENT_STRUCTURED_OUTPUT_RETRY_KEY)
+      && marker === ISOLATED_AGENT_STRUCTURED_OUTPUT_RETRY_ENFORCEMENT;
+  }
+  return !claudeKeys.includes(ISOLATED_AGENT_STRUCTURED_OUTPUT_RETRY_KEY)
+    && marker === undefined;
+}
+
+function validIncompleteFailedInvocation(invocation) {
+  const code = invocation?.wrapper_outcome?.code;
+  const stream = invocation?.stream;
+  const partialAudit = validSkillGenerationPartialTraceAuditReceipt(invocation?.tool_trace_audit);
+  const incompleteTraceAudit = validSkillGenerationIncompleteTraceAuditReceipt(invocation?.tool_trace_audit);
+  const incompleteAuditRejected = validSkillGenerationIncompleteAuditRejectedReceipt(invocation?.tool_trace_audit);
+  const incompleteAuditValid = (invocation?.tool_trace_audit === null
+      && !terminalLessSkillTraceAuditRequired(invocation))
+    || (code === "WRAPPER_MODEL_USAGE_INVALID" && partialAudit)
+    || (["WRAPPER_MODEL_STREAM_INVALID", "WRAPPER_MODEL_TIMEOUT"].includes(code)
+      && (incompleteTraceAuditMatchesInvocation(invocation, invocation.tool_trace_audit)
+        || (incompleteAuditRejected
+          && incompleteAuditRejectedMatchesInvocation(invocation, invocation.tool_trace_audit))));
+  const commonValid = exactKeys(invocation, ISOLATED_INVOCATION_FIELDS)
+    && invocation.schema_version === 3
+    && invocation.class === "isolated-agent"
+    && ["job", "skill-generation"].includes(invocation.workflow)
+    && (invocation.tool_trace_audit === null || invocation.workflow === "skill-generation")
+    && validIsolatedEnvironmentPolicy(invocation.environment_policy)
+    && (invocation.effective_model === null || (
+      typeof invocation.effective_model === "string" && invocation.effective_model.length > 0
+    ))
+    && validIsolatedCaps(invocation.effective_caps)
+    && validIsolatedWrapperOutcome(invocation.wrapper_outcome)
+    && invocation.wrapper_outcome.status === "FAIL"
+    && ["WRAPPER_MODEL_STREAM_INVALID", "WRAPPER_MODEL_TIMEOUT", "WRAPPER_MODEL_USAGE_INVALID"].includes(code)
+    && invocation.usage_complete === false
+    && invocation.usage === null
+    && invocation.terminal === null
+    && invocation.turns === null
+    && incompleteAuditValid
+    && validIsolatedProcess(invocation.process)
+    && validIsolatedStreamShape(stream)
+    && validIsolatedHardCapEvidence(invocation, invocation.effective_caps);
+  if (!commonValid) return false;
+  if (code === "WRAPPER_MODEL_TIMEOUT") {
+    return invocation.timed_out === true
+      && invocation.process.exit_code === null
+      && ["SIGTERM", "SIGKILL"].includes(invocation.process.signal)
+      && invocation.process.wrapper_exit_code === 124
+      && stream.complete === false
+      && (invocation.tool_trace_audit === null || incompleteTraceAudit || incompleteAuditRejected);
+  }
+  if (code === "WRAPPER_MODEL_STREAM_INVALID") {
+    const childExited = Number.isSafeInteger(invocation.process.exit_code)
+      && invocation.process.signal === null;
+    const childSignaled = invocation.process.exit_code === null
+      && typeof invocation.process.signal === "string"
+      && /^[A-Z][A-Z0-9_]{1,31}$/.test(invocation.process.signal);
+    return invocation.timed_out === false
+      && (childExited || childSignaled)
+      && invocation.process.wrapper_exit_code === 1
+      && stream.complete === false
+      && (invocation.tool_trace_audit === null || incompleteTraceAudit || incompleteAuditRejected);
+  }
+  return invocation.timed_out === false
+    && invocation.process.wrapper_exit_code === 1
+    && validCompleteIsolatedStream(stream);
+}
+
+function terminalLessSkillTraceAuditRequired(invocation) {
+  const stream = invocation?.stream;
+  return invocation?.workflow === "skill-generation"
+    && ["WRAPPER_MODEL_STREAM_INVALID", "WRAPPER_MODEL_TIMEOUT"].includes(invocation.wrapper_outcome?.code)
+    && stream?.complete === false
+    && Number.isSafeInteger(stream.event_count)
+    && stream.event_count > 0
+    && stream.parsed_event_count === stream.event_count
+    && stream.init_count === 1
+    && stream.result_count === 0;
+}
+
+function incompleteTraceAuditMatchesInvocation(invocation, audit) {
+  return validSkillGenerationIncompleteTraceAuditReceipt(audit)
+    && invocation.workflow === "skill-generation"
+    && invocation.wrapper_outcome?.status === "FAIL"
+    && ["WRAPPER_MODEL_STREAM_INVALID", "WRAPPER_MODEL_TIMEOUT"].includes(invocation.wrapper_outcome.code)
+    && invocation.usage_complete === false
+    && invocation.usage === null
+    && invocation.terminal === null
+    && invocation.turns === null
+    && invocation.stream?.complete === false
+    && invocation.stream?.result_count === 0
+    && canonicalJson(audit.stream) === canonicalJson(invocation.stream);
+}
+
+function incompleteAuditRejectedMatchesInvocation(invocation, audit) {
+  return validSkillGenerationIncompleteAuditRejectedReceipt(audit)
+    && invocation.workflow === "skill-generation"
+    && invocation.wrapper_outcome?.status === "FAIL"
+    && ["WRAPPER_MODEL_STREAM_INVALID", "WRAPPER_MODEL_TIMEOUT"].includes(invocation.wrapper_outcome.code)
+    && invocation.usage_complete === false
+    && invocation.usage === null
+    && invocation.terminal === null
+    && invocation.turns === null
+    && invocation.stream?.complete === false
+    && invocation.stream?.result_count === 0
+    && canonicalJson(audit.stream) === canonicalJson(invocation.stream);
+}
+
+function partialTraceMatchesInvocation(invocation, audit) {
+  if (!validSkillGenerationPartialTraceAuditReceipt(audit)
+    || invocation.wrapper_outcome?.status !== "FAIL") return false;
+  if (invocation.terminal !== null) {
+    return ["WRAPPER_MODEL_TERMINAL_INVALID", "WRAPPER_MODEL_CAP_EXCEEDED"].includes(invocation.wrapper_outcome.code)
+      && audit.terminal.subtype === invocation.terminal?.subtype
+      && audit.terminal.is_error === invocation.terminal?.is_error;
+  }
+  return invocation.usage_complete === false
+    && invocation.wrapper_outcome.code === "WRAPPER_MODEL_USAGE_INVALID"
+    && invocation.stream?.complete === true;
+}
+
+function validFailedStageSkillTrace(stage, planned, invocation) {
+  const requiresSkillTrace = stage.id === "real.skill-generation"
+    || planned.identity_set === "real-skill-generation"
+    || invocation.workflow === "skill-generation";
+  if (!requiresSkillTrace) return invocation.tool_trace_audit === null;
+  if (invocation.workflow !== "skill-generation") return false;
+  if (invocation.wrapper_outcome?.status === "PASS") {
+    return validSkillGenerationTraceAuditReceipt(invocation.tool_trace_audit);
+  }
+  if (invocation.wrapper_outcome?.status !== "FAIL") return false;
+  const wrapperCode = invocation.wrapper_outcome.code;
+  if (invocation.tool_trace_audit === null) {
+    if (terminalLessSkillTraceAuditRequired(invocation)) return false;
+    return [
+      "WRAPPER_MODEL_TERMINAL_INVALID",
+      "WRAPPER_MODEL_CAP_EXCEEDED",
+      "WRAPPER_MODEL_STREAM_INVALID",
+      "WRAPPER_MODEL_TIMEOUT",
+      "WRAPPER_MODEL_USAGE_INVALID",
+    ].includes(wrapperCode);
+  }
+  if (validSkillGenerationTraceAuditReceipt(invocation.tool_trace_audit)) {
+    return [
+      "WRAPPER_MODEL_TERMINAL_INVALID",
+      "WRAPPER_MODEL_CAP_EXCEEDED",
+      "WRAPPER_CHILD_PROCESS_FAILED",
+    ].includes(wrapperCode);
+  }
+  const incompleteTraceAudit = validSkillGenerationIncompleteTraceAuditReceipt(invocation.tool_trace_audit);
+  if (incompleteTraceAudit) return incompleteTraceAuditMatchesInvocation(invocation, invocation.tool_trace_audit);
+  const incompleteAuditRejected = validSkillGenerationIncompleteAuditRejectedReceipt(invocation.tool_trace_audit);
+  if (incompleteAuditRejected) return incompleteAuditRejectedMatchesInvocation(invocation, invocation.tool_trace_audit);
+  const partialAudit = validSkillGenerationPartialTraceAuditReceipt(invocation.tool_trace_audit);
+  if (partialAudit) return partialTraceMatchesInvocation(invocation, invocation.tool_trace_audit);
+  return wrapperCode === "WRAPPER_SKILL_TRACE_INVALID"
+    && validSkillGenerationFailedTraceAuditReceipt(invocation.tool_trace_audit);
+}
+
+export function auditExecutedStageUsage(plan, planned, stage, failures) {
   const gates = stage.gates ?? [];
   if (!validUsage(stage.usage) || gates.some((gate) => !validUsage(gate.usage))) {
     failures.push({ code: "MODEL_USAGE_INVALID", stage_id: stage.id });
@@ -334,12 +691,27 @@ function auditExecutedStageUsage(plan, planned, stage, failures) {
   }
   const declarations = planned.invocation_caps ?? [];
   const invocations = gates.flatMap((gate) => gate.model_invocations ?? []);
-  if (invocations.some((invocation) => invocation?.schema_version !== 3 || !validUsage(invocation.usage))) {
+  const incompleteInvocations = new Set(
+    invocations.filter((invocation) => validIncompleteFailedInvocation(invocation)),
+  );
+  if (invocations.some((invocation) => (
+    invocation?.schema_version !== 3
+    || ((invocation.usage_complete !== true || !validUsage(invocation.usage)) && !incompleteInvocations.has(invocation))
+  ))) {
     failures.push({ code: "MODEL_USAGE_INVALID", stage_id: stage.id });
     return;
   }
   for (const gate of gates) {
-    if ((gate.model_invocations ?? []).length > 0 && canonicalJson(normalizedUsage(gate.usage)) !== canonicalJson(sumUsage(gate.model_invocations.map((invocation) => invocation.usage)))) {
+    const members = gate.model_invocations ?? [];
+    const incomplete = members.some((invocation) => incompleteInvocations.has(invocation));
+    if (incomplete && (
+      stage.status === "PASS"
+      || gate.status === "PASS"
+      || gate.usage_complete !== false
+      || canonicalJson(normalizedUsage(gate.usage)) !== canonicalJson(zeroUsage())
+    )) {
+      failures.push({ code: "MODEL_USAGE_INCOMPLETE", stage_id: stage.id, gate_id: gate.id });
+    } else if (members.length > 0 && !incomplete && canonicalJson(normalizedUsage(gate.usage)) !== canonicalJson(sumUsage(members.map((invocation) => invocation.usage)))) {
       failures.push({ code: "GATE_MODEL_USAGE_MISMATCH", stage_id: stage.id, gate_id: gate.id });
     }
   }
@@ -347,8 +719,6 @@ function auditExecutedStageUsage(plan, planned, stage, failures) {
     if (invocations.length > 0) failures.push({ code: "MODEL_INVOCATION_UNPLANNED", stage_id: stage.id });
     return;
   }
-  if (stage.status !== "PASS") return;
-  if (gates.some((gate) => gate.usage_complete !== true)) failures.push({ code: "MODEL_USAGE_INCOMPLETE", stage_id: stage.id });
   const ids = invocations.map((invocation) => invocation?.invocation_id);
   if (ids.some((id) => typeof id !== "string" || id.length === 0) || new Set(ids).size !== ids.length) {
     failures.push({ code: "MODEL_INVOCATION_ID_INVALID", stage_id: stage.id });
@@ -358,7 +728,43 @@ function auditExecutedStageUsage(plan, planned, stage, failures) {
   if (invocations.some((invocation) => !declaredClasses.has(invocation?.class))) failures.push({ code: "MODEL_INVOCATION_CLASS_UNEXPECTED", stage_id: stage.id });
   for (const declaration of declarations) {
     const members = invocations.filter((invocation) => invocation?.class === declaration.class);
-    if (members.length < declaration.min_count || members.length > declaration.max_count) {
+    if (members.length > declaration.max_count) {
+      failures.push({ code: "MODEL_INVOCATION_COUNT_MISMATCH", stage_id: stage.id, class: declaration.class });
+    }
+  }
+  if (stage.status === "PASS" && incompleteInvocations.size > 0) return;
+  if (stage.status !== "PASS") {
+    for (const invocation of invocations) {
+      const declaration = declarations.find((item) => item.class === invocation.class);
+      if (!declaration) continue;
+      const isolatedStateValid = invocation.class !== "isolated-agent"
+        || incompleteInvocations.has(invocation)
+        || validCompleteIsolatedInvocation(invocation, declaration.caps);
+      const capsMatch = canonicalJson(invocation.effective_caps) === canonicalJson(declaration.caps);
+      const completeIsolated = invocation.class === "isolated-agent"
+        && invocation.usage_complete === true;
+      const modelMatches = completeIsolated
+        ? typeof plan.release_inputs?.settings?.model === "string"
+          && invocation.effective_model === plan.release_inputs.settings.model
+        : invocation.effective_model === null
+          || (typeof plan.release_inputs?.settings?.model === "string" && invocation.effective_model === plan.release_inputs.settings.model);
+      const hardCapsValid = invocation.class === "isolated-agent"
+        ? validIsolatedHardCapEvidence(invocation, declaration.caps)
+        : validOutputTokenCapEvidence(invocation, declaration.caps);
+      if (!isolatedStateValid || !capsMatch || !modelMatches || !hardCapsValid) {
+        failures.push({ code: "MODEL_HARD_CAP_RECEIPT_MISMATCH", stage_id: stage.id, invocation_id: invocation.invocation_id ?? null });
+        continue;
+      }
+      if (!validFailedStageSkillTrace(stage, planned, invocation)) {
+        failures.push({ code: "MODEL_TOOL_TRACE_AUDIT_INVALID", stage_id: stage.id, invocation_id: invocation.invocation_id ?? null });
+      }
+    }
+    return;
+  }
+  if (gates.some((gate) => gate.usage_complete !== true)) failures.push({ code: "MODEL_USAGE_INCOMPLETE", stage_id: stage.id });
+  for (const declaration of declarations) {
+    const members = invocations.filter((invocation) => invocation?.class === declaration.class);
+    if (members.length < declaration.min_count) {
       failures.push({ code: "MODEL_INVOCATION_COUNT_MISMATCH", stage_id: stage.id, class: declaration.class });
       continue;
     }
@@ -369,14 +775,25 @@ function auditExecutedStageUsage(plan, planned, stage, failures) {
       const wrapperSuccess = invocation.wrapper_outcome?.schema_version === 1
         && invocation.wrapper_outcome?.status === "PASS"
         && invocation.wrapper_outcome?.code === null;
+      const requiresSkillTraceAudit = stage.id === "real.skill-generation"
+        || planned.identity_set === "real-skill-generation"
+        || invocation.workflow === "skill-generation";
+      const toolTraceAuditValid = !requiresSkillTraceAudit || (
+        invocation.workflow === "skill-generation"
+        && validSkillGenerationTraceAuditReceipt(invocation.tool_trace_audit)
+      );
       const modelMatches = typeof plan.release_inputs?.settings?.model === "string" && invocation.effective_model === plan.release_inputs.settings.model;
+      const isolatedStateValid = invocation.class !== "isolated-agent"
+        || validCompleteIsolatedInvocation(invocation, declaration.caps);
       const withinCaps = Number.isSafeInteger(invocation.turns) && invocation.turns > 0 && invocation.turns <= declaration.caps.max_turns
         && validUsage(usage)
         && usage.cost_usd <= declaration.caps.max_budget_usd
         && usage.total_tokens <= declaration.caps.max_total_tokens
         && invocation.hard_cap_enforcement?.total_tokens === `terminal-usage-postcondition:${TOKEN_USAGE_FORMULA}`
         && validOutputTokenCapEvidence(invocation, declaration.caps);
-      if (invocation.usage_complete !== true || !capsMatch || !terminalSuccess || !wrapperSuccess || !modelMatches || !withinCaps) {
+      if (!toolTraceAuditValid) {
+        failures.push({ code: "MODEL_TOOL_TRACE_AUDIT_INVALID", stage_id: stage.id, invocation_id: invocation.invocation_id ?? null });
+      } else if (!isolatedStateValid || invocation.usage_complete !== true || !capsMatch || !terminalSuccess || !wrapperSuccess || !modelMatches || !withinCaps) {
         failures.push({ code: "MODEL_HARD_CAP_RECEIPT_MISMATCH", stage_id: stage.id, invocation_id: invocation.invocation_id ?? null });
       }
     }

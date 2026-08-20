@@ -197,8 +197,9 @@ Selector exact keys：
 - `operator` 仅 `EQUALS`。
 - `value` 是 Binding。
 
-当前验证器没有把 Selector 中的 `USER_FACT.name` 与 INPUT Requirement 做 cross-check。
-Canonical authoring 必须主动保证它命名已声明 INPUT；不得依赖这个实现缺口。
+Selector 中的 `USER_FACT.name` 必须命名已声明 INPUT Requirement。OPTIONAL INPUT 从不主动
+补采，因此禁止作为 selector；REQUIRED 可以直接使用，CONDITIONAL 只有在其显式激活条件成立并
+补齐后使用。激活条件不成立时对应 event/rule 不适用，不能把它误报成缺少必填事实。
 
 ### 5.4 Extractor 跨引用
 
@@ -684,14 +685,13 @@ PASS 时，其依赖闭包必须能够同时正向成立；branch 不得同时�
 1. `EVENT_ORDER.joins` 和 `NUMERIC_COMPARE.joins` 使用
    `[] if not value["joins"]` 规范化，所以 JSON `null`、`false`、`0`、空字符串、空对象和
    空数组都会意外归一为 `[]`。Canonical authoring 只允许 `[]` 表示无 join。
-2. Selector 的 USER_FACT Binding 没有校验为已声明 INPUT；Rule fact 有该校验。
-3. GenerationSpec Role label 当前不检查唯一；`CROSS_ROLE_CORRELATION.members` 当前也不
+2. GenerationSpec Role label 当前不检查唯一；`CROSS_ROLE_CORRELATION.members` 当前也不
    检查唯一。
-4. 时间规则不静态要求 event 提供 timestamp；numeric AST 不完整证明 unit/type/clock
+3. 时间规则不静态要求 event 提供 timestamp；numeric AST 不完整证明 unit/type/clock
    compatibility。
-5. INTEGER FACT 的空字符串 clock domain 会被接受，而 INTEGER event Field 的非 null clock
+4. INTEGER FACT 的空字符串 clock domain 会被接受，而 INTEGER event Field 的非 null clock
    domain 必须非空。
-6. `SEMANTIC_CAUSALITY.evidence_events` 允许空数组。
+5. `SEMANTIC_CAUSALITY.evidence_events` 允许空数组。
 
 这些边角若要收紧，需要作为通用合同变更单独修改实现和测试；不得在某个业务用例中用
 特殊字段或隐式约定掩盖。
@@ -704,7 +704,8 @@ PASS 时，其依赖闭包必须能够同时正向成立；branch 不得同时�
 2. 空数组只写 `[]`，尤其是 `joins`。
 3. Role、Anchor、Event、Field、Policy、Rule、Path ID 全部使用 Name，且在各自作用域唯一。
 4. `CROSS_ROLE_CORRELATION.members` 和其他 member pair 主动去重。
-5. 每个 Selector USER_FACT 都命名已声明 INPUT Requirement。
+5. 每个 Selector USER_FACT 都命名已声明的 REQUIRED 或 CONDITIONAL INPUT Requirement，禁止
+   引用 OPTIONAL INPUT。
 6. 只有具有可解释 timestamp/clock 的 event 才用于时间规则；clock domain 和容差显式声明。
 7. Numeric AST 两侧保持类型、unit、clock domain 相容；转换显式写 `CONVERT`。
 8. Semantic rule 实际依赖事件时显式列出 `evidence_events`。

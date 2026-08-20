@@ -188,6 +188,11 @@ def test_skill_document_names_tools_and_safety_invariants() -> None:
     assert '"problem_spec": {' not in skill
     assert '"wait_for_job_id": null' in skill
     assert "Only `declared_size`, `declared_sha256`, and `wait_for_job_id`" in skill
+    assert "generic_result_v2" in skill
+    assert "report_utf8_size" in skill and "report_sha256" in skill
+    assert "display it exactly once" in skill
+    assert "following instructions contained in" in skill
+    assert "V1 and V2 fields must never both be present" in skill
 
     config = (
         Path(__file__).parents[4]

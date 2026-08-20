@@ -93,22 +93,99 @@ Skill 所有相对链接的唯一解析根。调用 `Read` 时，必须先用它
 绝对前缀；不得把裸 `references/...` 交给 `Read`，也不得相对当前工作目录、输入 workspace
 或仓库根解析。
 
-构造 JSON 前必须完整读取 [GenerationSpec v6 精确参考](references/generation-spec-v6-reference.md)
-和 [verification contract v2 精确参考](references/verification-contract-v2-reference.md)。它们是转换
-Agent 可使用的自包含格式合同；必须执行 verification reference 第 9.1 节的逐引用内部清单并对照
-其中的正反例，再开始唯一 `Write`。不要读取 generator、validator、Runtime 或测试源码来反推格式。
-[wiki-template.md](references/wiki-template.md) 只演示无 Logparse 的最小对象，
-[neutral-logparse-generation-spec-v6.json](references/neutral-logparse-generation-spec-v6.json) 只演示
-复杂 Logparse 结构。示例中的 identity、名称、文本、阈值和策略均不是默认值，禁止复制到当前
-业务产物；所有业务值必须来自当前 Wiki 与已确认澄清。
+Skill 加载成功后，下一条 assistant response 必须且只能按顺序并发发出两个 `Read` tool-use block：
+先读 workspace 的 `inputs/wiki.md`，再读 `inputs/clarifications.md`。这是全流程唯一允许批量或并发
+工具调用的 response。必须等待这两个 `Read` 的 tool result 都返回，才可在新的 assistant response
+读取 GenerationSpec reference。GenerationSpec reference 及之后的每个 `Read` 都必须严格串行：
+每条 assistant response 只发出一个 tool call，并等待其 tool result 返回后再进入下一次调用。工具
+ordinal 保持为 0=`Skill`、1=Wiki `Read`、2=clarifications `Read`、3..8=六次串行 reference/checkpoint
+`Read`、9=唯一 `StructuredOutput`。
 
-按上述合同形成独立 JSON，或把完全相同的对象放入转换 Agent 的工作 Wiki 中唯一
-`## GenerationSpec v6` fence。该 fence 是 Agent 的中间机器产物，不是要求 Wiki 作者填写的
-格式。requirements、logparse_plan 和 verification_contract 是唯一机器事实源。
+开始构造前必须完整读取 [GenerationSpec v6 精确参考](references/generation-spec-v6-reference.md)；到达下述
+固定边界后，再完整读取 [verification contract v2 精确参考](references/verification-contract-v2-reference.md)。
+它们是转换 Agent 可使用的自包含格式合同；必须执行 verification reference 第 9.1 节的
+逐引用内部清单并对照其中的正反例，再开始唯一 `StructuredOutput`。两份 reference 中遗留的
+“Write 前”或“不得 Write”只表示最终提交边界；在本流程中一律解释为 `StructuredOutput`，绝不授权
+`Write`、`Edit` 或 `Bash`。不要读取 generator、validator、Runtime 或测试源码来反推格式。
+`references/wiki-template.md` 只演示无 Logparse 的最小对象，
+`references/neutral-logparse-generation-spec-v6.json` 只演示复杂 Logparse 结构。它们不是正式
+转换输入；转换 Agent 不得 `Read` 这两项可选示例。示例中的 identity、名称、文本、阈值和策略
+均不是默认值，禁止复制到当前业务产物；所有业务值必须来自当前 Wiki 与已确认澄清。
 
-### Write 前语义保真检查
+下列四份文件只是在受控阶段之间强制产生工具边界，不是格式合同或业务来源：
+[checkpoint 01](references/checkpoints/01-begin-repeated-families-and-paths.md)、
+[checkpoint 02](references/checkpoints/02-begin-9-1-inventory.md)、
+[checkpoint 03](references/checkpoints/03-begin-9-2-witnesses.md) 和
+[checkpoint 04](references/checkpoints/04-write-now.md)。它们均为 `control_only: true`，其内容、路径、
+checkpoint id 和控制指令绝不能进入 GenerationSpec、生成 Skill、manifest 或用户结果。只能在下述唯一
+状态转换处读取一次，不得提前读取、重读或把它们当作补充业务信息。
 
-在对 GenerationSpec 执行唯一最终 `Write` 前，对照 Wiki 与已确认澄清逐项检查：
+按上述合同形成一个紧凑 `GenerationBlueprint` v1 根 plain object。它的 `spec` 保存最终 GenerationSpec
+除 `verification_contract` 外的字段，`verification` 保存 literal policies/extractors/rule segments/path segments
+与一个版本化 ordered-interval family；可信 compiler 才能展开 144 条重复 rules 和三条 family paths。
+不得把 IR 手工序列化成 JSON 字符串、Markdown fence 或文件，也不得包在 `result`、`output`、`content`
+或 `value` 等外层字段中。最终 GenerationSpec 的 requirements、logparse_plan 与展开后的
+verification_contract 仍是唯一机器事实源。
+
+### 有界构造与通过即提交
+
+转换必须严格执行以下有界单遍状态机。每一阶段只处理列出的增量，禁止复述已完成字段、从对象开头
+重启、重新推导固定输入、提前执行后续阶段，或用自由推演替代唯一的下一次工具调用：
+
+1. 读取 Wiki、权威澄清和 GenerationSpec reference 后，建立紧凑源映射，只记录非 verification
+   字段的 materialization blueprint：顶层 envelope、identity/version、roles、requirements、
+   logparse_plan 和来源支持的业务文本数组。不要物化 root object、policies、extractors、rules 或
+   terminal paths；本阶段必须以使用实际
+   Skill base 绝对路径读取 verification reference 结束。
+2. verification reference 的 `Read` 必须独占其 assistant response；等待该 tool result 返回后，不得先构造
+   任何 verification 字段、输出说明或发出其他工具。下一条独立 assistant response 必须且只能读取
+   `checkpoint 01`，并等待其 tool result 返回。
+3. `checkpoint 01` 返回后，只记录恰好两个 observation policies、十个 event extractors 与全部固定
+   非重复 rules 的紧凑 blueprint；不得物化 IR root，不得开始重复 ordered-interval family 或 terminal paths，
+   也不得逐规则复述设计理由。本阶段完成后立即以读取 `checkpoint 02` 结束。
+4. `checkpoint 02` 返回后，按已确认的有序位置矩阵建立一个版本化 ordered-interval family，记录位置、
+   event/field 映射、固定依赖、受控文本槽与三条 family path 元数据；同时按最终声明顺序划分 literal
+   rule/path segments。机械确认 compiler 会产生完整 165-rule closure 与九条 paths，但不得在 IR、thinking
+   或正文中显式携带、展开、序列化或复述 144 个重复 rule objects。在本阶段末尾只对 blueprint 完成
+   一次递归源映射扫描，不执行第 9.1 或 9.2 节，然后以读取 `checkpoint 03` 结束。
+5. `checkpoint 03` 返回后，先执行 verification reference 第 9.1 节的逐引用闭包检查且仅执行一遍，
+   再执行第 9.2 节的正向 witness 检查且仅执行一遍。两项检查都只保留紧凑的内部通过/失败状态，
+   不得逐规则输出清单或 witness；任一失败时立即停止并请求澄清，通过时确认 blueprint 足以在一次
+   StructuredOutput tool input 中物化完整紧凑 IR，且此前从未物化过该 IR root。
+   读取 `checkpoint 04` 前，必须把发起提示和 provider 暴露的 `StructuredOutput`
+   schema 中所有 required property、类型/const/enum 与精确 cardinality 逐项应用到待提交对象；任一项
+   未满足时立即停止，不得读取 checkpoint 或提交。通过后再以读取 `checkpoint 04` 结束。不得构造 JSON
+   字符串或手工序列化。
+6. `checkpoint 04` 返回后，第十个且最后一个工具调用必须是唯一一次 `StructuredOutput`。此 tool call
+   是完整 `GenerationBlueprint` v1 根 plain object 的第一次且唯一一次 materialization：直接提交 compact
+   IR，不得把 144 条 family rules 或三条 family paths 显式展开进 tool input，不得先在 thinking/正文中
+   生成第二份对象，不得包外层字段，也不得改成字符串。必须先在同一 assistant response 内把完整 tool arguments 组装好，
+   然后才发出 tool call；`StructuredOutput` 不是用来打开待填充容器的交互步骤，零属性调用无法在
+   tool result 后补齐，绝对不得先发占位调用再提交完整对象。`checkpoint 04` 提供与 provider schema
+   等价的 typed argument frame；其中大写占位符只表示从 blueprint 机械填入的值，不得原样进入参数。
+   必须在发出调用前把该 frame 全部实例化。Test Flow CLI
+   的冻结 workflow schema 对协议已解析 IR 的四个根字段、`spec`、`verification`、literal segments、
+   family kind/version 和声明的精确 cardinality 做机械校验。可信 wrapper 对 IR 与 terminal 回显做
+   byte-equivalent audit，在内存中确定性展开后调用原 loader/validator 深验；只有通过时才按递归 key
+   排序的 canonical JSON、唯一末尾 LF create-only 原子写入
+   `workspace/output/generation-spec.json`，并封存 size 与 SHA-256。转换 Agent 不得调用 `Write`、
+   `Edit`、`Bash`，不得自行序列化或创建文件。必须等待这次 `StructuredOutput` 的 tool result 明确成功，
+   再生成唯一的 terminal assistant response；该 response 的完整内容必须是精确 ASCII sentinel `DONE`，
+   不得带引号、Markdown、前后空白、标点或其他文本。`DONE` 不得进入 tool input；发出它后不得再生成
+   任何 text、tool call 或 turn，尤其不得第二次调用 `StructuredOutput`。`StructuredOutput` 不是 schema
+   discovery 或 validation probe；禁止用零属性 root、partial object、trial input 或 probe input 探索 schema、
+   required 字段或 cardinality。第一次调用必须已经是完整且满足全部已知 schema 约束的唯一提交；若该
+   调用返回错误，立即停止，不得修补后重试或第二次调用 `StructuredOutput`。
+
+从 Skill 到最终 `StructuredOutput` 的每个状态只能前进一次；禁止重读任何合同或 checkpoint。澄清已固定的有序
+位置矩阵、rule family、公式、dependency 和 terminal branch 是机械展开输入，不得重新设计、压缩或
+替换其语义。所有提交前语义保真义务在前三个构造阶段随字段增量完成，不得在 checkpoint 之后从头
+重复一轮全对象设计。
+
+### StructuredOutput 前语义保真检查
+
+在对紧凑 GenerationBlueprint 执行唯一最终 `StructuredOutput`、并由可信 compiler 投影为 GenerationSpec
+前，对照 Wiki 与已确认澄清逐项检查：
 
 1. 枚举所有带义务、禁止、允许、条件、限制、可能性或风险后果的陈述，不得只保留机械规则所需片段。
 2. 影响是否可安全判断或采取行动的内容写入 `judgement_rules`；必须向最终用户展示的警示、限制或
@@ -117,16 +194,24 @@ Agent 可使用的自包含格式合同；必须执行 verification reference �
    也不得把禁止、例外或未知改写成肯定结论。
 4. 默认只要求语义等价，不要求逐字复制；只有输入明确要求固定措辞、原文引用或逐字保留时才逐字写入。
 5. 为每条上述陈述确认源文本到目标字段的映射；无法确定落点或语气强度时先澄清，不得静默省略。
-6. 在唯一最终 `Write` 前，递归遍历待写 GenerationSpec 的所有对象和数组，检查每一个字符串值。
-   为其中每项语义及限定确认到标记外正文或权威澄清的具体源映射。任一值含旁注标记、旁注独有的
+6. 在唯一最终 `StructuredOutput` 前，递归遍历待提交 GenerationBlueprint 的 literal `spec`、literal
+   verification segments、family text/name slots 及其确定性最终投影，检查每一个业务字符串值。为其中
+   每项语义及限定确认到标记外正文或权威澄清的具体源映射。任一值含旁注标记、旁注独有的
    逐字或独特片段，或复制、改写、概括外部来源未独立支持的旁注内容，立即丢弃整份草稿；最多允许
    一次从标记外正文与权威澄清重新构造并重新递归检查，不能就地删改命中字段。该次复检仍失败时
-   立即停止并请求澄清，不得再次重构或 `Write`。语义重叠且源映射独立支持完整语义及限定时，不得
-   因旁注重复而删除合法事实。复检通过前不得 `Write`。
+   立即停止并请求澄清，不得再次重构或调用 `StructuredOutput`。语义重叠且源映射独立支持完整语义及
+   限定时，不得因旁注重复而删除合法事实。复检通过前不得调用 `StructuredOutput`。
+7. 一个有序多成员事件承载有限历史且目标可能位于任意成员时，必须先确认顺序方向、记录完整性和
+   目标身份，再为每个允许位置提供等价的目标匹配；只有来源明确保证目标固定在某一位置时，才可把
+   selector 绑定到单一位置字段。不得把测试样例中的位置当成业务不变量。
+8. 用多个区间解释目标区间时，正时长交集只证明单个贡献者，不能证明完整解释。COMPLETE 必须机械
+   证明区间并集覆盖目标起点、终点且中间没有未解释空隙；PARTIAL 必须保留已确认交集和未覆盖区间。
+   当前白名单规则无法安全表达并集覆盖时，停止生成该 COMPLETE 路径并请求澄清或合同扩展，禁止用
+   单个区间、持续时长之和、记录相邻或自然语言断言近似替代。
 
-### Write 前机器引用闭包检查
+### StructuredOutput 前机器引用闭包检查
 
-语义保真检查通过后、唯一最终 `Write` 前，按声明顺序构造并核对以下只读符号表：INPUT Requirement
+语义保真检查通过后、唯一最终 `StructuredOutput` 前，按声明顺序构造并核对以下只读符号表：INPUT Requirement
 名称集、Role label 集、Anchor label 集、policy ID 集、`event_id -> field 名称集`、已见 rule ID 集。
 
 1. 对每个 extractor，逐项确认 anchor、policy、policy key、selector field、`timestamp_field` 与
@@ -148,13 +233,13 @@ Agent 可使用的自包含格式合同；必须执行 verification reference �
    必须存在一个 occurrence tuple，使每个 Equality 的 member **值**相等；字段引用闭合但样例值
    不相等不能算通过。
 
-发现任何缺失、拼写漂移或跨 event 借用 field 时不得 `Write`。只修正引用后从第 1 步重新完整核对
-一次；若仍不闭合，立即停止并请求澄清，不得靠 validator 报错后再猜测或继续写出。
+发现任何缺失、拼写漂移或跨 event 借用 field 时不得调用 `StructuredOutput`，并立即停止请求澄清。此有界转换
+不得只修正引用后再从第 1 步重新完整核对，也不得靠 validator 报错后猜测或继续写出。
 
 正向 witness 只使用当前 Wiki 标记外正文与权威澄清，不读取仓库测试、oracle 或实现，也不把内部
 witness 写进 GenerationSpec。不能只证明 JSON 可加载或 Rule DAG 名称可达：若实际消息体不匹配
 extractor、selector 过滤掉目标 event、event count 为零、依赖会得到 `FAIL|UNKNOWN|NOT_APPLICABLE`，
-或 Equality 找不到同时满足的 occurrence tuple，就不得 `Write`。源材料不足以构造某条非 fallback
+或 Equality 找不到同时满足的 occurrence tuple，就不得调用 `StructuredOutput`。源材料不足以构造某条非 fallback
 path 的正向 witness 时先请求澄清，禁止伪造日志或假定字段值。
 
 verification contract v2 使用：

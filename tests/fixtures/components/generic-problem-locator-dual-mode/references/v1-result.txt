@@ -1,0 +1,7 @@
+<<<GENERIC_DIAGNOSIS_RESULT_V1>>>
+STATUS: RESOLVED
+CONCLUSION:
+支付成功，但页面没有收到 request-id 订单-α-42 对应的状态完成回写。
+ROOT_CAUSE_ANALYSIS:
+支付结果与页面状态不同步，且连续刷新三次仍复现；受控输入表明应检查支付完成事件到订单状态消费者的关联链路。
+<<<END_GENERIC_DIAGNOSIS_RESULT_V1>>>

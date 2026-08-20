@@ -7,7 +7,7 @@ import logging
 import os
 import threading
 import shutil
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +33,7 @@ from problem_locator.contracts import (
     ExecutionStage,
     FixtureManifest,
     GenericDiagnosisOutcome,
+    GenericDiagnosisOutcomeV2,
     GenericResultStatus,
     Job,
     JobOutcome,
@@ -76,6 +77,8 @@ from problem_locator.runtime.diagnosis_runtime import (
 from problem_locator.runtime.failures import RuntimeExecutionError, runtime_failure
 from problem_locator.runtime.generic_locator import (
     GENERIC_RESULT_FILENAME,
+    GENERIC_RESULT_V2_FILENAME,
+    MAX_GENERIC_REPORT_BYTES,
     MAX_GENERIC_RESULT_BYTES,
 )
 from problem_locator.runtime.outcome_publisher import OutcomePublisher
@@ -556,6 +559,21 @@ def _generic_result_bytes(
     ).encode("utf-8")
 
 
+def _generic_v2_result_bytes(
+    report_markdown: str | bytes,
+    *,
+    status: str = "RESOLVED",
+) -> bytes:
+    body = (
+        report_markdown.encode("utf-8")
+        if isinstance(report_markdown, str)
+        else report_markdown
+    )
+    return (
+        f"<<<GENERIC_DIAGNOSIS_RESULT_V2:{status}>>>\n".encode("ascii") + body
+    )
+
+
 def _route_agent_outcome(job: Job) -> AgentJobOutcomeDraftV2:
     payload = _json("agent-job-outcome-draft-route.json")
     payload.update(
@@ -666,9 +684,13 @@ class _GenericRuntimeBackend:
         self,
         result_bytes: bytes | None,
         *,
+        v2_result_bytes: bytes | None = None,
+        result_writer: Callable[[Path], None] | None = None,
         failure: RuntimeExecutionError | None = None,
     ) -> None:
         self.result_bytes = result_bytes
+        self.v2_result_bytes = v2_result_bytes
+        self.result_writer = result_writer
         self.failure = failure
         self.calls: list[dict[str, Any]] = []
 
@@ -681,6 +703,12 @@ class _GenericRuntimeBackend:
             (workspace_root / "output" / GENERIC_RESULT_FILENAME).write_bytes(
                 self.result_bytes
             )
+        if self.v2_result_bytes is not None:
+            (workspace_root / "output" / GENERIC_RESULT_V2_FILENAME).write_bytes(
+                self.v2_result_bytes
+            )
+        if self.result_writer is not None:
+            self.result_writer(workspace_root / "output")
         sinks: ExecutionLogSinks = kwargs["log_sinks"]
         unique = {id(sinks.stdout): sinks.stdout, id(sinks.stderr): sinks.stderr}
         for sink in unique.values():
@@ -893,6 +921,168 @@ def test_generic_runtime_passes_only_exact_multiline_unicode_and_reads_result_fi
     assert receipt.job_outcome.proposed_artifacts == []
     assert receipt.job_outcome.decision_audit is None
     assert len(records.publish_outcome_calls) == 1
+
+
+@pytest.mark.parametrize("status", ["RESOLVED", "UNRESOLVED"])
+def test_generic_runtime_preserves_complete_v2_markdown_bytes_and_digest(
+    tmp_path: Path,
+    status: str,
+) -> None:
+    report = (
+        "# 定位结论\r\n\r\n"
+        "保留 Unicode、表格、CRLF 和代码围栏。\r\n\r\n"
+        "| 字段 | 值 |\n| --- | --- |\n| request | 订单-α-42 |\n\n"
+        "```json\n{\"ok\": true}\n```\n\n"
+        "<<<GENERIC_DIAGNOSIS_RESULT_V2:RESOLVED>>>\n"
+    )
+    report_bytes = report.encode("utf-8")
+    backend = _GenericRuntimeBackend(
+        None,
+        v2_result_bytes=_generic_v2_result_bytes(report, status=status),
+    )
+    runtime, job, state, records = _generic_runtime_fixture(tmp_path, backend)
+
+    receipt = runtime.execute(job, InMemoryCancellationSignal())
+
+    assert state.calls == [job.case_id]
+    assert receipt.job_outcome.result_type is OutcomeResultType.COMPLETED
+    assert isinstance(receipt.job_outcome.payload, GenericDiagnosisOutcomeV2)
+    assert receipt.job_outcome.payload.format_version == 2
+    assert receipt.job_outcome.payload.status is GenericResultStatus(status)
+    assert receipt.job_outcome.payload.report_markdown == report
+    assert receipt.job_outcome.payload.report_utf8_size == len(report_bytes)
+    assert receipt.job_outcome.payload.report_sha256 == hashlib.sha256(
+        report_bytes
+    ).hexdigest()
+    assert receipt.job_outcome.payload.skill_name == job.generic_skill_name
+    assert receipt.job_outcome.consumed_evidence_refs == []
+    assert receipt.job_outcome.proposed_evidence == []
+    assert receipt.job_outcome.proposed_artifacts == []
+    assert receipt.job_outcome.decision_audit is None
+    assert len(records.publish_outcome_calls) == 1
+
+
+def test_generic_runtime_accepts_exact_v2_markdown_body_byte_limit(
+    tmp_path: Path,
+) -> None:
+    report_bytes = b"x" * MAX_GENERIC_REPORT_BYTES
+    backend = _GenericRuntimeBackend(
+        None,
+        v2_result_bytes=_generic_v2_result_bytes(report_bytes),
+    )
+    runtime, job, _, _ = _generic_runtime_fixture(tmp_path, backend)
+
+    receipt = runtime.execute(job, InMemoryCancellationSignal())
+
+    assert isinstance(receipt.job_outcome.payload, GenericDiagnosisOutcomeV2)
+    assert receipt.job_outcome.payload.report_utf8_size == MAX_GENERIC_REPORT_BYTES
+    assert (
+        receipt.job_outcome.payload.report_markdown
+        == "x" * MAX_GENERIC_REPORT_BYTES
+    )
+
+
+@pytest.mark.parametrize(
+    "v2_result_bytes",
+    [
+        b"",
+        b"<<<GENERIC_DIAGNOSIS_RESULT_V2:RESOLVED>>>\r\n# report\n",
+        b"<<<GENERIC_DIAGNOSIS_RESULT_V2:UNKNOWN>>>\n# report\n",
+        b"<<<GENERIC_DIAGNOSIS_RESULT_V2:RESOLVED>>>",
+        b"<<<GENERIC_DIAGNOSIS_RESULT_V2:RESOLVED>>>\n",
+        b"<<<GENERIC_DIAGNOSIS_RESULT_V2:RESOLVED>>>\n \t\n",
+        b"<<<GENERIC_DIAGNOSIS_RESULT_V2:RESOLVED>>>\n\xff",
+        b"\xef\xbb\xbf<<<GENERIC_DIAGNOSIS_RESULT_V2:RESOLVED>>>\n# report\n",
+        b"<<<GENERIC_DIAGNOSIS_RESULT_V2:RESOLVED>>>\n\xef\xbb\xbf# report\n",
+        b"<<<GENERIC_DIAGNOSIS_RESULT_V2:RESOLVED>>>\n"
+        + b"x" * (MAX_GENERIC_REPORT_BYTES + 1),
+    ],
+    ids=[
+        "empty-file",
+        "crlf-status-line",
+        "unknown-status",
+        "missing-status-lf",
+        "empty-body",
+        "whitespace-body",
+        "invalid-body-utf8",
+        "file-utf8-bom",
+        "body-utf8-bom",
+        "oversize-body",
+    ],
+)
+def test_generic_runtime_rejects_invalid_v2_result(
+    tmp_path: Path,
+    v2_result_bytes: bytes,
+) -> None:
+    backend = _GenericRuntimeBackend(
+        None,
+        v2_result_bytes=v2_result_bytes,
+    )
+    runtime, job, _, _ = _generic_runtime_fixture(tmp_path, backend)
+
+    receipt = runtime.execute(job, InMemoryCancellationSignal())
+
+    assert receipt.job_outcome.result_type is OutcomeResultType.FAILED
+    assert receipt.job_outcome.error is not None
+    assert receipt.job_outcome.error.code is ErrorCode.OUTCOME_INVALID
+    assert receipt.job_outcome.error.retryable is False
+
+
+def test_generic_runtime_never_falls_back_from_invalid_v2_to_valid_v1(
+    tmp_path: Path,
+) -> None:
+    backend = _GenericRuntimeBackend(
+        _generic_result_bytes(),
+        v2_result_bytes=b"<<<GENERIC_DIAGNOSIS_RESULT_V2:RESOLVED>>>\n",
+    )
+    runtime, job, _, _ = _generic_runtime_fixture(tmp_path, backend)
+
+    receipt = runtime.execute(job, InMemoryCancellationSignal())
+
+    assert receipt.job_outcome.result_type is OutcomeResultType.FAILED
+    assert receipt.job_outcome.error is not None
+    assert receipt.job_outcome.error.code is ErrorCode.OUTCOME_INVALID
+    assert receipt.job_outcome.error.retryable is False
+
+
+def test_generic_runtime_rejects_valid_v1_and_v2_files_as_ambiguous(
+    tmp_path: Path,
+) -> None:
+    backend = _GenericRuntimeBackend(
+        _generic_result_bytes(),
+        v2_result_bytes=_generic_v2_result_bytes("# complete report\n"),
+    )
+    runtime, job, _, _ = _generic_runtime_fixture(tmp_path, backend)
+
+    receipt = runtime.execute(job, InMemoryCancellationSignal())
+
+    assert receipt.job_outcome.result_type is OutcomeResultType.FAILED
+    assert receipt.job_outcome.error is not None
+    assert receipt.job_outcome.error.code is ErrorCode.OUTCOME_INVALID
+
+
+@pytest.mark.parametrize("unsafe_kind", ["directory", "hardlink"])
+def test_generic_runtime_rejects_unsafe_v2_result_nodes(
+    tmp_path: Path,
+    unsafe_kind: str,
+) -> None:
+    def write_unsafe(output: Path) -> None:
+        result = output / GENERIC_RESULT_V2_FILENAME
+        if unsafe_kind == "directory":
+            result.mkdir()
+            return
+        source = output / "untrusted-source.md"
+        source.write_bytes(_generic_v2_result_bytes("# report\n"))
+        os.link(source, result)
+
+    backend = _GenericRuntimeBackend(None, result_writer=write_unsafe)
+    runtime, job, _, _ = _generic_runtime_fixture(tmp_path, backend)
+
+    receipt = runtime.execute(job, InMemoryCancellationSignal())
+
+    assert receipt.job_outcome.result_type is OutcomeResultType.FAILED
+    assert receipt.job_outcome.error is not None
+    assert receipt.job_outcome.error.code is ErrorCode.OUTCOME_INVALID
 
 
 @pytest.mark.parametrize(

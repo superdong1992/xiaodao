@@ -2,14 +2,22 @@
   "resolution_status": "PARTIAL",
   "terminal_path_id": "partial_server_receive_aggregate",
   "case_status": "PARTIALLY_RESOLVED",
-  "causal_factor_ids": ["server_receive_aggregate_overrun"],
-  "candidate_factor_ids": ["server_receive_queue"],
+  "causal_factor_ids": [
+    "server_receive_aggregate_overrun"
+  ],
+  "candidate_factor_ids": [
+    "server_receive_queue"
+  ],
   "excluded_factor_ids": [],
-  "criterion_statuses": ["SATISFIED", "SATISFIED", "SATISFIED"],
+  "criterion_statuses": [
+    "SATISFIED",
+    "PARTIALLY_SATISFIED",
+    "SATISFIED"
+  ],
   "required_rule_results": {
     "enhanced_version": "FAIL",
     "late_response_present": "PASS",
-    "server_sojourn_exceeds_timeout": "FAIL",
+    "server_sojourn_exceeds_timeout": "UNKNOWN",
     "server_queue_positive": "PASS",
     "client_queue_positive": "PASS",
     "server_receive_aggregate_exceeds_timeout": "PASS",
@@ -21,5 +29,8 @@
     "api_overrun_confirmed": "UNKNOWN",
     "deadloop_overrun_confirmed": "UNKNOWN"
   },
-  "required_safety_phrases": ["超时不等于取消", "固定 Diagnosis Skill"]
+  "required_safety_phrases": [
+    "超时不等于取消",
+    "固定 Diagnosis Skill"
+  ]
 }

@@ -247,7 +247,8 @@ plan 为 null、roles 为空、extractors 为空、禁止 AFTER_LOGPARSE 和 log
 
 verification contract v2 校验看到的是 profile 展开后的完整 requirement 集，而不是仅 Wiki
 requirements。因此 selector、FACT、时间 reference 和 remediation 可以引用 `problem_time`、角色
-字段或 Wiki 参数。所有 USER_FACT 必须命名完整集合中的 INPUT。
+字段或 Wiki 参数。所有 USER_FACT 必须命名完整集合中的 INPUT；selector 不得引用 OPTIONAL
+INPUT，只能引用始终可用的 REQUIRED 或由显式条件激活后补齐的 CONDITIONAL INPUT。
 
 Role/Anchor/Event/Field/Rule 的引用闭包、机械 rule、SEMANTIC_CAUSALITY 和终态 DNF 规则见独立
 v2 参考。CONDITIONAL RULE_RESULT 额外遵守第 7 节的独立性限制。

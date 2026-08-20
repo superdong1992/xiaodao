@@ -1,0 +1,30 @@
+{
+  "resolution_status": "PARTIAL",
+  "terminal_path_id": "partial_queue_non_rpc_lane",
+  "case_status": "PARTIALLY_RESOLVED",
+  "causal_factor_ids": [
+    "server_queue_contribution",
+    "non_rpc_lane_occupancy"
+  ],
+  "candidate_factor_ids": [],
+  "excluded_factor_ids": [
+    "direct_api_overrun",
+    "upstream_lane_blocker"
+  ],
+  "criterion_statuses": [
+    "SATISFIED",
+    "PARTIALLY_SATISFIED",
+    "SATISFIED"
+  ],
+  "required_rule_results": {
+    "q_fifth_present": "PASS",
+    "q_fifth_total_exceeds_timeout": "PASS",
+    "q_fifth_execution_within_timeout": "PASS",
+    "q_fifth_latest_prior_before_queue": "PASS",
+    "q_fifth_non_rpc_lane_confirmed": "PASS"
+  },
+  "required_safety_phrases": [
+    "超时不等于取消",
+    "固定 Diagnosis Skill"
+  ]
+}

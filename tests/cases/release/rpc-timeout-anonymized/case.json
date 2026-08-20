@@ -14,6 +14,16 @@
       "oracle": "scenarios/complete/oracle.json"
     },
     {
+      "scenario_id": "partial-queue-mixed-fifth",
+      "driver": "scenarios/partial_queue_mixed_fifth/driver.json",
+      "oracle": "scenarios/partial_queue_mixed_fifth/oracle.json"
+    },
+    {
+      "scenario_id": "partial-queue-non-rpc-fifth",
+      "driver": "scenarios/partial_queue_non_rpc_fifth/driver.json",
+      "oracle": "scenarios/partial_queue_non_rpc_fifth/oracle.json"
+    },
+    {
       "scenario_id": "complete-api-overrun",
       "driver": "scenarios/complete_api_overrun/driver.json",
       "oracle": "scenarios/complete_api_overrun/oracle.json"
@@ -44,5 +54,8 @@
       "oracle": "scenarios/none/oracle.json"
     }
   ],
-  "allowed_actions": ["skill_generation", "specialized_diagnosis"]
+  "allowed_actions": [
+    "skill_generation",
+    "specialized_diagnosis"
+  ]
 }

@@ -195,10 +195,10 @@ test("Linux capability installs the immutable source snapshot from the sealed of
 
 test("active runtime support is explicit and the historical harness closure is gone", () => {
   const expected = [
-    "audit_service_agent_usage.py", "checkpoint-temporary.mjs", "export-checkpoint.sh",
+    "audit_service_agent_usage.py", "checkpoint-temporary.mjs", "compile_skill_generation_rule_ir.py", "export-checkpoint.sh",
     "initialize-container.sh", "isolated-agent-env.mjs", "isolated-agent-tool-audit.mjs", "isolated-agent-wrapper.mjs", "prepare_claude_settings.py",
     "prepare_nonroot_settings.py", "prepare_release_case.py", "relay_service_journey.py",
-    "server_dfx_probe.py", "service-supervisor.sh", "stop-service.sh", "test_service_launcher.py",
+    "server_dfx_probe.py", "service-supervisor.sh", "skill-generation-rule-ir.mjs", "skill_generation_rule_ir.py", "stop-service.sh", "test_service_launcher.py",
     "verify-source-snapshot.mjs",
   ];
   assert.deepEqual(fs.readdirSync(SUPPORT_ROOT).sort(), expected.sort());
@@ -320,15 +320,37 @@ test("model invocations preserve failed terminals while PASS still requires exac
   assert.match(isolated, /cache_creation_input_tokens/);
   assert.match(isolated, /cache_read_input_tokens/);
   assert.match(isolated, /usage\.total_tokens > caps\.max_total_tokens/);
-  assert.match(isolated, /terminalSucceeded = final\.subtype === "success" && final\.is_error === false/);
+  assert.match(isolated, /terminalSucceeded = usageComplete && final\.subtype === "success" && final\.is_error === false/);
   assert.match(isolated, /wrapper_outcome:/);
   assert.match(isolated, /WRAPPER_MODEL_TERMINAL_INVALID/);
+  assert.match(isolated, /WRAPPER_MODEL_TIMEOUT/);
+  assert.match(isolated, /new TextDecoder\("utf-8", \{ fatal: true \}\)/);
+  assert.match(isolated, /terminalShapeValid/);
+  assert.match(isolated, /typeof rawCost !== "number"/);
+  assert.match(isolated, /rawTokens\.every\(\(value\) => Number\.isSafeInteger\(value\) && value >= 0\)/);
+  assert.match(isolated, /rawTotalTokens === 0/);
+  assert.match(isolated, /init\[0\]\.model === values\.model \? values\.model : null/);
+  assert.doesNotMatch(isolated, /Number\(final\.usage/);
+  assert.match(isolated, /usage_complete: usageComplete/);
+  assert.match(isolated, /terminal: usageComplete \?/);
+  assert.match(isolated, /wrapper_exit_code: wrapperExitCode/);
+  assert.match(isolated, /fs\.linkSync\(temporary, filePath\)/);
+  assert.match(isolated, /fs\.unlinkSync\(temporary\)/);
   assert.match(actions, /--max-output-tokens/);
   assert.match(actions, /max_output_tokens_upper_limit/);
+  assert.match(actions, /status: usageComplete \? "PASS" : "INCOMPLETE"/);
+  assert.match(actions, /\{ actionStatus: result\.status \}/);
   assert.match(isolated, /ISOLATED_AGENT_CLAUDE_OUTPUT_TOKEN_KEY/);
   assert.match(isolated, /allowClaudeChildControls: true/);
   assert.match(isolated, /ISOLATED_AGENT_OUTPUT_CAP_ENFORCEMENT/);
+  assert.match(isolated, /ISOLATED_AGENT_STRUCTURED_OUTPUT_RETRY_KEY/);
+  assert.match(isolated, /ISOLATED_AGENT_STRUCTURED_OUTPUT_RETRY_LIMIT/);
+  assert.match(isolated, /structured_output_retries: ISOLATED_AGENT_STRUCTURED_OUTPUT_RETRY_ENFORCEMENT/);
   assert.match(isolatedEnvironment, /identity-bound-wrapper-arg\+child-only-env\+pinned-cli-upper-limit\+sealed-runtime-implementation/);
+  assert.match(isolatedEnvironment, /isolated-agent-env-allowlist-v3/);
+  assert.match(isolatedEnvironment, /frozen-claude-cli-2\.1\.89-counter\+limit-2/);
+  assert.ok(isolated.indexOf("usage.total_tokens > caps.max_total_tokens") < isolated.indexOf("else if (!turnsShapeValid)"));
+  assert.ok(isolated.indexOf("final.num_turns > caps.max_turns") < isolated.indexOf("else if (!turnsShapeValid)"));
   assert.doesNotMatch(isolated, /modelUsage\[effectiveModel\]|effectiveLimit === declaredCap/);
   assert.match(actions, /if \(gate\.environment_profile && gate\.environment_profile !== "real-logparse"\)/);
   assert.match(isolated, /auditSkillGenerationTrace/);
@@ -343,6 +365,10 @@ test("model invocations preserve failed terminals while PASS still requires exac
   assert.doesNotMatch(isolated, /"--no-session-persistence",\s*"--dangerously-skip-permissions"/);
   assert.match(engine, /invocation\.wrapper_outcome\?\.schema_version !== 1/);
   assert.match(evidence, /invocation\.wrapper_outcome\?\.schema_version === 1/);
+  assert.match(evidence, /validIncompleteFailedInvocation/);
+  assert.match(evidence, /stage\.id === "real\.skill-generation"/);
+  assert.match(evidence, /validSkillGenerationTraceAuditReceipt\(invocation\.tool_trace_audit\)/);
+  assert.match(evidence, /MODEL_TOOL_TRACE_AUDIT_INVALID/);
   assert.match(serviceAudit, /MODEL_TERMINAL_INVALID/);
   assert.match(serviceAudit, /max_total_tokens/);
   assert.match(serviceAudit, /cache_creation_input_tokens/);
@@ -351,29 +377,127 @@ test("model invocations preserve failed terminals while PASS still requires exac
   assert.match(serviceAudit, /"wrapper_outcome": \{\s*"schema_version": 1,\s*"status": "PASS",\s*"code": None/);
 });
 
-test("Skill generation grants one exact file-write permission without exposing Edit or Bash", () => {
+test("Skill generation uses one structured output and wrapper-owned canonical materialization", () => {
   const audit = fs.readFileSync(path.join(SUPPORT_ROOT, "isolated-agent-tool-audit.mjs"), "utf8");
   const wrapper = fs.readFileSync(path.join(SUPPORT_ROOT, "isolated-agent-wrapper.mjs"), "utf8");
+  const ruleIr = fs.readFileSync(path.join(SUPPORT_ROOT, "skill-generation-rule-ir.mjs"), "utf8");
   const actions = fs.readFileSync(path.join(TOOL_ROOT, "lib", "actions.mjs"), "utf8");
+  const evidence = fs.readFileSync(path.join(TOOL_ROOT, "lib", "evidence.mjs"), "utf8");
+  const engine = fs.readFileSync(path.join(TOOL_ROOT, "lib", "engine.mjs"), "utf8");
   const realGate = fs.readFileSync(path.join(TOOL_ROOT, "..", "..", "tests", "real", "agent", "test_real_wiki_skill_generation_gate.py"), "utf8");
-  assert.match(audit, /const ALLOWED_TOOLS = Object\.freeze\(\["Skill", "Read", "Write"\]\)/);
-  assert.match(audit, /"Edit\(\/output\/generation-spec\.json\)"/);
-  assert.doesNotMatch(audit, /"Write\(\/output\/generation-spec\.json\)"/);
-  assert.match(audit, /successfulWrites\.length === 1/);
-  assert.match(audit, /max_empty_write_rejections: 1/);
-  assert.match(audit, /exactKeys\(record\.input, \[\]\)/);
-  assert.match(audit, /record\.result\.explicit_error === true/);
-  assert.match(audit, /rejectedWrite\.ordinal === successfulWrite\.ordinal - 1/);
-  assert.match(audit, /rejectedWrite\.result_event_index < successfulWrite\.use_event_index/);
+  assert.match(audit, /SKILL_GENERATION_PHASE_ALLOWED_TOOLS = Object\.freeze\(\["Skill", "Read", "StructuredOutput"\]\)/);
+  assert.match(audit, /phaseMode \? \["StructuredOutput"\]/);
+  assert.match(audit, /SKILL_GENERATION_TRACE_SCHEMA_VERSION = 8/);
+  assert.match(audit, /version: "skill-generation-tool-attempts-v6"/);
+  assert.match(audit, /classification: "batched-inputs-exact-ordered-checkpoints-compact-ir-structured-output"/);
+  assert.match(audit, /max_empty_write_rejections: 0/);
+  assert.match(audit, /required_read_count: 8/);
+  assert.match(audit, /SKILL_GENERATION_PHASE_REQUIRED_RECEIPT_READS/);
+  for (const checkpoint of [
+    "01-begin-repeated-families-and-paths.md",
+    "02-begin-9-1-inventory.md",
+    "03-begin-9-2-witnesses.md",
+    "04-write-now.md",
+  ]) assert.match(audit, new RegExp(checkpoint.replaceAll(".", "\\.")));
+  assert.match(audit, /structuredOutputs\.length === 1 && successfulStructuredOutputs\.length === 1/);
+  assert.match(audit, /\{ ordinal: 9, tool: "StructuredOutput", outcome: "SUCCESS" \}/);
+  assert.match(audit, /value\.accepted_validation_rejections\.length !== 0/);
   assert.match(audit, /validSkillGenerationTraceAuditReceipt/);
-  assert.match(audit, /exactKeys\(record\.input, \["file_path", "content"\]\)/);
-  assert.match(audit, /record\.input\.content\.trim\(\)\.length > 0/);
-  assert.match(wrapper, /"--tools", "Read,Write,Skill"/);
+  assert.match(audit, /canonicalJson\(finalRecord\.input\) === canonicalJson\(terminal\.structured_output\)/);
+  assert.match(audit, /GENERATION_SPEC_SUBMISSION_JSON_SCHEMA = deepFreeze/);
+  assert.match(ruleIr, /GENERATION_BLUEPRINT_SUBMISSION_JSON_SCHEMA = deepFreeze/);
+  assert.match(ruleIr, /max_canonical_bytes: 48 \* 1024/);
+  assert.match(ruleIr, /const SPEC_REQUIRED = Object\.freeze/);
+  assert.match(ruleIr, /ordered_interval_family/);
+  assert.match(ruleIr, /literal_rule_segments/);
+  assert.match(ruleIr, /literal_terminal_segments/);
+  assert.match(ruleIr, /export function validGenerationBlueprintSubmission/);
+  assert.match(ruleIr, /export function validSkillGenerationCompilerReceipt/);
+  assert.match(audit, /additionalProperties: false/);
+  assert.match(audit, /roles: \{ type: "array", minItems: 2, maxItems: 2/);
+  assert.match(audit, /requirements: \{ type: "array", minItems: 5, maxItems: 5/);
+  assert.match(audit, /anchors: \{ type: "array", minItems: 2, maxItems: 2/);
+  assert.match(audit, /observation_policies: \{ type: "array", minItems: 2, maxItems: 2/);
+  assert.match(audit, /event_extractors: \{ type: "array", minItems: 10, maxItems: 10/);
+  assert.match(audit, /rules: \{ type: "array", minItems: 165, maxItems: 165/);
+  assert.match(audit, /terminal_paths: \{ type: "array", minItems: 9, maxItems: 9/);
+  assert.match(audit, /time_characteristics: \{ type: "array", minItems: 4, maxItems: 4/);
+  assert.match(audit, /analysis_steps: \{ type: "array", minItems: 5, maxItems: 5/);
+  assert.match(audit, /judgement_rules: \{ type: "array", minItems: 6, maxItems: 6/);
+  assert.match(audit, /output_requirements: \{ type: "array", minItems: 5, maxItems: 5/);
+  assert.match(audit, /assumptions: \{ type: "array", minItems: 3, maxItems: 3/);
+  assert.match(audit, /export function validGenerationSpecSubmission/);
+  assert.match(audit, /export function buildGenerationSpecSubmissionDiagnostic/);
+  assert.match(audit, /export function validGenerationSpecSubmissionDiagnostic/);
+  assert.match(audit, /SCHEMA_VALID_TOOL_REJECTED/);
+  assert.match(audit, /diagnostic: buildGenerationBlueprintSubmissionDiagnostic\(record\.input\)/);
+  assert.match(audit, /records\[1\]\.use_event_index === records\[2\]\.use_event_index/);
+  assert.match(audit, /records\[2\]\.result_event_index < records\[3\]\.use_event_index/);
+  assert.match(audit, /terminal\.result === "DONE"/);
+  assert.match(audit, /export function auditIncompleteSkillGenerationTrace/);
+  assert.match(audit, /validSkillGenerationIncompleteTraceAuditReceipt/);
+  assert.match(audit, /INCOMPLETE_PREFIX_SEQUENCE_INVALID/);
+  assert.match(audit, /INCOMPLETE_PREFIX_REJECTED/);
+  assert.match(audit, /validSkillGenerationIncompleteAuditRejectedReceipt/);
+  assert.match(audit, /buildSkillGenerationIncompleteAuditRejectedReceipt/);
+  assert.match(audit, /ISOLATED_AGENT_STREAM_EVENT_TYPES/);
+  assert.match(audit, /validIsolatedAgentStreamEventType/);
+  assert.match(audit, /outcome: record\.result\?\.outcome \?\? "PENDING"/);
+  assert.match(audit, /stream_state: "TERMINAL_MISSING"/);
+  assert.match(audit, /export function auditPartialSkillGenerationTrace/);
+  assert.match(audit, /validSkillGenerationPartialTraceAuditReceipt/);
+  assert.match(audit, /code: SKILL_GENERATION_TRACE_CODES\.RESULT_NOT_SUCCESS/);
+  assert.match(audit, /size_bytes: inputBytes\.length/);
+  assert.match(audit, /events\[0\] === initEvents\[0\]/);
+  assert.match(wrapper, /"--tools", "Read,Skill,StructuredOutput"/);
+  assert.match(wrapper, /"--json-schema", JSON\.stringify\(GENERATION_BLUEPRINT_SUBMISSION_JSON_SCHEMA\)/);
+  assert.match(wrapper, /compileAndValidateRuleIr\(final\.structured_output\)/);
+  assert.match(wrapper, /auditSkillGenerationTrace\(\{[\s\S]*compilation,/);
+  assert.match(wrapper, /atomicCreateJson\(outputPath, compilation\.spec\)/);
+  assert.match(wrapper, /compile_skill_generation_rule_ir\.py/);
+  assert.match(actions, /validationRuntime\?\.identity\?\.python_executable/);
+  assert.match(actions, /--validator-prefix-json \$\{quoteShell\("\[\]"\)\}/);
+  assert.match(actions, /compile_skill_generation_rule_ir\.py/);
   assert.match(wrapper, /"--permission-mode", "dontAsk"/);
+  assert.match(wrapper, /if \(workflow !== "skill-generation"\) process\.stdout\.write\(chunk\)/);
+  assert.match(wrapper, /terminalReportedFailure/);
+  assert.match(wrapper, /incompletePrefixCandidate/);
+  assert.match(wrapper, /auditIncompleteSkillGenerationTrace/);
+  assert.match(wrapper, /error instanceof SkillGenerationTraceAuditError/);
+  assert.match(wrapper, /buildSkillGenerationIncompleteAuditRejectedReceipt\(error\.code, streamReceipt\)/);
+  assert.match(wrapper, /validIsolatedAgentStreamEventType/);
+  assert.match(wrapper, /streamLines\.length === events\.length/);
+  assert.match(wrapper, /terminal\.length === 0/);
+  assert.match(wrapper, /auditPartialSkillGenerationTrace/);
   assert.match(wrapper, /schema_version: SKILL_GENERATION_TRACE_SCHEMA_VERSION/);
+  assert.match(wrapper, /WRAPPER_SKILL_TRACE_INVALID/);
+  assert.match(wrapper, /error\?\.details\?\.diagnostic/);
   assert.match(actions, /validSkillGenerationTraceAuditReceipt\(audit\)/);
-  assert.match(realGate, /call Write exactly once with both `file_path` and non-empty `content`/);
-  assert.match(realGate, /do not use Bash or another file-writing tool/);
+  assert.match(audit, /validSkillGenerationWriteJsonDiagnostic\(value\.diagnostic\)/);
+  assert.match(actions, /validSkillGenerationFailedTraceAuditReceipt/);
+  assert.match(actions, /partialTraceMatchesInvocation/);
+  assert.match(actions, /incompleteTraceAuditMatchesInvocation/);
+  assert.match(actions, /validSkillGenerationIncompleteTraceAuditReceipt/);
+  assert.match(actions, /validSkillGenerationIncompleteAuditRejectedReceipt/);
+  assert.match(actions, /terminalLessSkillTraceAuditRequired/);
+  assert.match(actions, /validIsolatedAgentStreamEventType/);
+  assert.match(actions, /terminal-usage-postcondition:\$\{TOKEN_USAGE_FORMULA\}/);
+  assert.match(actions, /validIsolatedStructuredOutputRetryReceipt/);
+  assert.match(evidence, /validSkillGenerationFailedTraceAuditReceipt/);
+  assert.match(evidence, /validFailedStageSkillTrace/);
+  assert.match(evidence, /validStructuredOutputRetryEvidence/);
+  assert.match(evidence, /incompleteTraceAuditMatchesInvocation/);
+  assert.match(evidence, /validSkillGenerationIncompleteTraceAuditReceipt/);
+  assert.match(evidence, /validSkillGenerationIncompleteAuditRejectedReceipt/);
+  assert.match(evidence, /terminalLessSkillTraceAuditRequired/);
+  assert.match(evidence, /validIsolatedAgentStreamEventType/);
+  assert.match(engine, /validIncompleteSkillGenerationInvocationEvidence/);
+  assert.match(engine, /validSkillGenerationIncompleteAuditRejectedReceipt/);
+  assert.match(realGate, /call Read exactly eight times/);
+  assert.match(realGate, /exactly two concurrent Read tool-use blocks/);
+  assert.match(realGate, /StructuredOutput/);
+  assert.match(realGate, /ASCII `DONE`/);
+  assert.match(realGate, /Do not call Write, Edit, or Bash/);
 });
 
 test("checkpoints export stable state without symlinks, hardlinks or retained temporary workspaces", () => {

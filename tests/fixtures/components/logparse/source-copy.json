@@ -2,10 +2,42 @@
   "added_files": [
     {
       "mode": "100644",
+      "path": "references/checkpoints/01-begin-repeated-families-and-paths.md",
+      "purpose": "Provide a business-neutral read-only boundary before the bounded verification-core blueprint.",
+      "sha256": "e39b961e1425444e3aa2969421763b1300b12d44390de9bc456a61bbfb4f313d",
+      "size": 1250,
+      "source": "S08 bounded-construction control; no counterpart exists in the frozen upstream source tree."
+    },
+    {
+      "mode": "100644",
+      "path": "references/checkpoints/02-begin-9-1-inventory.md",
+      "purpose": "Provide a business-neutral read-only boundary between the core and repeated rule-family blueprints.",
+      "sha256": "62d0f79f45ed9f2cedf94964ada567d6e1b746c2ecb1c128b879655ee19a43a1",
+      "size": 1139,
+      "source": "S08 bounded-construction control; no counterpart exists in the frozen upstream source tree."
+    },
+    {
+      "mode": "100644",
+      "path": "references/checkpoints/03-begin-9-2-witnesses.md",
+      "purpose": "Provide a business-neutral read-only boundary before the combined section 9.1 and 9.2 audits.",
+      "sha256": "0c6bf8e2ac911a90a8c3bcbe38e66cdcfc3c9d1e1a47c2deb350d17335b5fdb8",
+      "size": 953,
+      "source": "S08 bounded-construction control; no counterpart exists in the frozen upstream source tree."
+    },
+    {
+      "mode": "100644",
+      "path": "references/checkpoints/04-write-now.md",
+      "purpose": "Provide a business-neutral read-only boundary immediately before the single typed StructuredOutput submission.",
+      "sha256": "81ec9b9b5be16e31f3e62b1e4cce68a1e2a90f568ccfc5fad3e0771b331c7486",
+      "size": 7359,
+      "source": "S08 bounded-construction control; no counterpart exists in the frozen upstream source tree."
+    },
+    {
+      "mode": "100644",
       "path": "references/generation-spec-v6-reference.md",
       "purpose": "Define the exact, generic GenerationSpec v6 object contract without requiring source-code inspection.",
-      "sha256": "aea573190918ef014b68926280ec5fdbd44af64a2716a4141fae800326c05cd3",
-      "size": 12175,
+      "sha256": "8621dc9e3abfc18e4413cc84c79bcc073c39b36aa0d3c6473431f2a5cf0b3e3d",
+      "size": 12308,
       "source": "S08 self-contained reference; no counterpart exists in the frozen upstream source tree."
     },
     {
@@ -20,8 +52,8 @@
       "mode": "100644",
       "path": "references/verification-contract-v2-reference.md",
       "purpose": "Define exact verification contract v2 policies, extractors, rules, numeric expressions, and terminal paths.",
-      "sha256": "8c05956168f50be922199878dd3ff67bc729658d698c4732c2c8b726ffbc8699",
-      "size": 25941,
+      "sha256": "958a72b07a131823795cfd21d16c3860303ee9af730a6afc3e83d4db9ab8ec7f",
+      "size": 26051,
       "source": "S08 self-contained reference; no counterpart exists in the frozen upstream source tree."
     },
     {
@@ -47,8 +79,8 @@
       "change_reason": "Upgrade the generator workflow to GenerationSpec v6, manifest schema v6, author-confirmed definitions, and the built-in input profile.",
       "delivered": {
         "mode": "100644",
-        "size": 16315,
-        "sha256": "6045bd309e6d2f4ebaf111bb3f3e67ac787856f773a7e57b72bfab9d37785aa8"
+        "size": 25170,
+        "sha256": "5d4de675f8716e2f10ea584e49126dd5a0313b6aca41cab5c383305ffe535f21"
       },
       "path": "SKILL.md",
       "source": {

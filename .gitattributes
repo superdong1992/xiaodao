@@ -1,3 +1,10 @@
+* text=auto eol=lf
+
 tools/test-flow/**/*.sh text eol=lf
-tests/fixtures/**/fixture-manifest.json text eol=lf
-tests/fixtures/rpc_timeout/fake_agent.py text eol=lf
+tests/fixtures/** text eol=lf
+tests/fixtures/**/*.zip -text !eol
+tests/cases/release/** text eol=lf
+schemas/**/*.json text eol=lf
+src/problem_locator/contracts/**/*.py text eol=lf
+src/problem_locator/runtime/assets/** text eol=lf
+.claude/skills/** text eol=lf

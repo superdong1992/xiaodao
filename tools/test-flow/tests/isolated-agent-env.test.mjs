@@ -7,6 +7,8 @@ import {
   environmentKeySummary,
   ISOLATED_AGENT_CLAUDE_OUTPUT_TOKEN_KEY,
   ISOLATED_AGENT_ENV_POLICY_VERSION,
+  ISOLATED_AGENT_STRUCTURED_OUTPUT_RETRY_KEY,
+  ISOLATED_AGENT_STRUCTURED_OUTPUT_RETRY_LIMIT,
   validEnvironmentKeySummary,
 } from "../runtime-support/isolated-agent-env.mjs";
 
@@ -24,6 +26,7 @@ test("isolated Agent environment keeps only runtime necessities and explicit Tes
     GITHUB_TOKEN: "ci-secret-canary",
     CI: "true",
     CLAUDE_CODE_MAX_OUTPUT_TOKENS: "32000",
+    MAX_STRUCTURED_OUTPUT_RETRIES: "99",
     S08_REAL_AGENT_GATE: "ambient-spoof",
     TEST_FLOW_AMBIENT_SECRET_CANARY: "ambient-secret-canary",
   };
@@ -46,12 +49,17 @@ test("isolated Agent environment keeps only runtime necessities and explicit Tes
     S08_REAL_AGENT_COMMAND: "/isolated/wrapper",
     S08_REAL_AGENT_GATE: "1",
   });
-  assert.equal(ISOLATED_AGENT_ENV_POLICY_VERSION, "isolated-agent-env-allowlist-v2");
+  assert.equal(ISOLATED_AGENT_ENV_POLICY_VERSION, "isolated-agent-env-allowlist-v3");
   assert.equal(JSON.stringify(environment).includes("secret-canary"), false);
   assert.equal(Object.hasOwn(environment, ISOLATED_AGENT_CLAUDE_OUTPUT_TOKEN_KEY), false);
+  assert.equal(Object.hasOwn(environment, ISOLATED_AGENT_STRUCTURED_OUTPUT_RETRY_KEY), false);
 });
 
-test("Claude output token control is child-only and cannot be inherited or supplied inbound", () => {
+test("Claude output and structured retry controls are child-only and cannot be inherited or supplied inbound", () => {
+  assert.throws(
+    () => assertIsolatedAgentInboundEnvironment({ PATH: "/bin", [ISOLATED_AGENT_STRUCTURED_OUTPUT_RETRY_KEY]: "99" }),
+    /ISOLATED_AGENT_INBOUND_KEY_FORBIDDEN/,
+  );
   assert.throws(
     () => assertIsolatedAgentInboundEnvironment({ PATH: "/bin", [ISOLATED_AGENT_CLAUDE_OUTPUT_TOKEN_KEY]: "32000" }),
     /ISOLATED_AGENT_INBOUND_KEY_FORBIDDEN/,
@@ -59,16 +67,26 @@ test("Claude output token control is child-only and cannot be inherited or suppl
   assert.throws(
     () => buildIsolatedAgentEnvironment({
       ambient: { PATH: "/bin", [ISOLATED_AGENT_CLAUDE_OUTPUT_TOKEN_KEY]: "32000" },
-      explicit: { [ISOLATED_AGENT_CLAUDE_OUTPUT_TOKEN_KEY]: "64000" },
+      explicit: {
+        [ISOLATED_AGENT_CLAUDE_OUTPUT_TOKEN_KEY]: "64000",
+        [ISOLATED_AGENT_STRUCTURED_OUTPUT_RETRY_KEY]: "99",
+      },
     }),
     /ISOLATED_AGENT_EXPLICIT_KEY_FORBIDDEN/,
   );
   const child = buildIsolatedAgentEnvironment({
     ambient: { PATH: "/bin", [ISOLATED_AGENT_CLAUDE_OUTPUT_TOKEN_KEY]: "32000" },
-    explicit: { [ISOLATED_AGENT_CLAUDE_OUTPUT_TOKEN_KEY]: "64000" },
+    explicit: {
+      [ISOLATED_AGENT_CLAUDE_OUTPUT_TOKEN_KEY]: "64000",
+      [ISOLATED_AGENT_STRUCTURED_OUTPUT_RETRY_KEY]: String(ISOLATED_AGENT_STRUCTURED_OUTPUT_RETRY_LIMIT),
+    },
     allowClaudeChildControls: true,
   });
-  assert.deepEqual(child, { PATH: "/bin", [ISOLATED_AGENT_CLAUDE_OUTPUT_TOKEN_KEY]: "64000" });
+  assert.deepEqual(child, {
+    PATH: "/bin",
+    [ISOLATED_AGENT_CLAUDE_OUTPUT_TOKEN_KEY]: "64000",
+    [ISOLATED_AGENT_STRUCTURED_OUTPUT_RETRY_KEY]: "2",
+  });
 });
 
 test("the Skill-generation audit path is explicit-only and reaches pytest", () => {

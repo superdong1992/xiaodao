@@ -147,6 +147,14 @@ def test_release_case_scenarios_select_the_reviewed_terminal_paths(
         )
         assert selected["id"] == oracle["terminal_path_id"]
         assert selected["resolution_status"] == oracle["resolution_status"]
+        if oracle["resolution_status"] == "PARTIAL":
+            assert any(
+                status != "SATISFIED" for status in oracle["criterion_statuses"]
+            )
+        if oracle["resolution_status"] == "NONE":
+            assert oracle["causal_factor_ids"] == []
+            assert oracle["candidate_factor_ids"] == []
+            assert set(oracle["criterion_statuses"]) == {"UNKNOWN"}
 
         for event_id, matches in events.items():
             if extractor_by_id[event_id]["observation_policy_ids"] and matches:
@@ -179,6 +187,55 @@ def test_release_case_scenarios_select_the_reviewed_terminal_paths(
 
     if semantic_oracle["expected_skill"]["requires_multiline_event"]:
         assert multiline_matched
+
+
+@pytest.mark.parametrize("case_root", _release_cases(), ids=lambda path: path.name)
+def test_release_case_ordered_selector_families_cover_each_member_position(
+    case_root: Path,
+) -> None:
+    descriptor = _json(case_root / "case.json")
+    spec = _json(case_root / str(descriptor["generation_spec"]))
+    families: dict[tuple[object, ...], list[tuple[dict[str, object], int]]] = {}
+
+    def pattern_shape(pattern: str) -> str:
+        return re.sub(r"\(\?P<[^>]+>([^()]*)\)", r"\1", pattern)
+
+    for extractor in spec["verification_contract"]["event_extractors"]:
+        selectors = extractor["selectors"]
+        members = extractor["members"]
+        if len(members) < 2 or not selectors:
+            continue
+        selector_fields = [selector["field"] for selector in selectors]
+        selected_positions = [
+            index
+            for index, member in enumerate(members)
+            if all(
+                f"(?P<{field}>" in member["line_pattern"]
+                for field in selector_fields
+            )
+        ]
+        assert len(selected_positions) == 1
+        key = (
+            extractor["anchor"],
+            tuple(pattern_shape(member["line_pattern"]) for member in members),
+            tuple(
+                (
+                    selector["operator"],
+                    selector["value"]["source"],
+                    selector["value"].get("name"),
+                )
+                for selector in selectors
+            ),
+            tuple(extractor["observation_policy_ids"]),
+        )
+        families.setdefault(key, []).append((extractor, selected_positions[0]))
+
+    for family in families.values():
+        if len(family) == 1:
+            continue
+        member_count = len(family[0][0]["members"])
+        assert len(family) == member_count
+        assert sorted(position for _, position in family) == list(range(member_count))
 
 
 @pytest.mark.parametrize("case_root", _release_cases(), ids=lambda path: path.name)

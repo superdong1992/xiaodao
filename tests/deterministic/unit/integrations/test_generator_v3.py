@@ -79,6 +79,59 @@ def test_self_contained_neutral_reference_is_a_valid_generation_spec(
     ] == ["COMPLETE", "PARTIAL", "NONE"]
 
 
+@pytest.mark.parametrize(
+    ("selector_fact", "requiredness", "supplement_policy", "message"),
+    [
+        ("not_declared", "REQUIRED", "MISSING_ONLY", "declared INPUT"),
+        ("log_archive", "REQUIRED", "MISSING_ONLY", "declared INPUT"),
+        ("correlation_id", "OPTIONAL", "NONE", "OPTIONAL input"),
+    ],
+)
+def test_selector_user_fact_requires_a_declared_non_optional_input(
+    generator: Any,
+    selector_fact: str,
+    requiredness: str,
+    supplement_policy: str,
+    message: str,
+) -> None:
+    payload = json.loads(NEUTRAL_REFERENCE_SPEC.read_bytes())
+    payload["requirements"][0]["requiredness"] = requiredness
+    payload["requirements"][0]["supplement_policy"] = supplement_policy
+    payload["verification_contract"]["event_extractors"][0]["selectors"][0][
+        "value"
+    ]["name"] = selector_fact
+
+    with pytest.raises(ValueError, match=message):
+        generator.GenerationSpec.from_mapping(payload)
+
+
+def test_selector_user_fact_accepts_a_conditional_input(
+    generator: Any,
+) -> None:
+    payload = json.loads(NEUTRAL_REFERENCE_SPEC.read_bytes())
+    payload["requirements"][0]["requiredness"] = "CONDITIONAL"
+    payload["requirements"][0]["activation_condition"] = {
+        "any_of": [
+            {
+                "all_of": [
+                    {
+                        "source": "USER_FACT",
+                        "name": "problem_time",
+                        "operator": "EQUALS",
+                        "value": "2026-08-15T00:00:00.000Z",
+                    }
+                ]
+            }
+        ]
+    }
+
+    spec = generator.GenerationSpec.from_mapping(payload)
+
+    assert spec.verification_contract["event_extractors"][0]["selectors"][0][
+        "value"
+    ] == {"source": "USER_FACT", "name": "correlation_id"}
+
+
 def test_unknown_event_field_error_reports_only_controlled_location(
     generator: Any,
 ) -> None:

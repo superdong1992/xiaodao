@@ -518,7 +518,19 @@ class FileResourceStore:
                             ErrorCode.RESOURCE_HASH_MISMATCH,
                             "The generated staged marker differs from deterministic input.",
                         )
-                    self._validate_staged_content(staged_ref)
+                    try:
+                        self._validate_staged_content(staged_ref)
+                    except FileNotFoundError:
+                        # Formal publication moves the payload but deliberately
+                        # retains the immutable marker.  A later State commit
+                        # failure must therefore be able to reconstruct the
+                        # same private stage from the server-owned bytes before
+                        # adopting the already-published formal target.
+                        self._restore_generated_file_content(
+                            directory,
+                            staged_ref,
+                            stream,
+                        )
                     return staged_ref
                 observation = self._writer.stage_file_content(
                     directory,
@@ -547,13 +559,61 @@ class FileResourceStore:
             code = self._stage_value_error_code(error)
             raise _port_error(
                 code,
-                "The generated audit file could not be staged.",
+                "The generated file could not be staged.",
             ) from None
         except (FileExistsError, OSError, TypeError, ValidationError, RuntimeError):
             raise _port_error(
                 ErrorCode.RESOURCE_STAGE_FAILED,
-                "The generated audit file could not be staged.",
+                "The generated file could not be staged.",
             ) from None
+
+    def _restore_generated_file_content(
+        self,
+        directory: Path,
+        staged_ref: StagedResourceRef,
+        stream: BinaryStream,
+    ) -> None:
+        """Rebuild only a missing generated FILE payload under its exact marker."""
+
+        if (
+            staged_ref.resource_kind is not ResourceKind.FILE
+            or staged_ref.tree_manifest is not None
+        ):
+            raise ValueError("generated file restoration requires a FILE receipt")
+        marker_path = directory / "staged.json"
+        before = require_ordinary_file(marker_path)
+        self._read_and_match_marker(directory, staged_ref)
+        after = require_ordinary_file(marker_path)
+        stable_fields = (
+            "st_dev",
+            "st_ino",
+            "st_size",
+            "st_mtime_ns",
+            "st_ctime_ns",
+            "st_nlink",
+        )
+        if any(
+            getattr(before, field) != getattr(after, field)
+            for field in stable_fields
+        ):
+            raise OSError("generated staged marker changed before restoration")
+
+        marker_path.unlink()
+        self._file_sync.sync_directory(directory)
+        observed = self._writer.stage_file_content(
+            directory,
+            stream,
+            byte_limit=MAX_CASE_RESOURCE_BYTES,
+            expected_size=staged_ref.size,
+            expected_sha256=staged_ref.sha256,
+        )
+        if observed.size != staged_ref.size or observed.sha256 != staged_ref.sha256:
+            raise ValueError("restored generated payload differs from its receipt")
+        self._writer.publish_marker(
+            directory,
+            self._expected_marker_bytes(staged_ref),
+        )
+        self._validate_staged_content(staged_ref)
 
     def stage_tree(
         self,
