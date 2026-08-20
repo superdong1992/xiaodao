@@ -41,6 +41,7 @@ from problem_locator.contracts import (
     ExecutionFileRef,
     FieldUpdateAction,
     GenericDiagnosisOutcome,
+    GenericDiagnosisOutcomeV2,
     GenericResultStatus,
     Job,
     JobLifecycleUpdate,
@@ -190,6 +191,16 @@ def _running_state() -> StateFile:
 
 
 _GENERIC_RAW_PROBLEM = "原始问题第一行\nrequest-id: 订单-α-42\n原始问题第三行"
+_GENERIC_V2_REPORT_BYTES = (
+    ROOT
+    / "tests"
+    / "fixtures"
+    / "components"
+    / "generic-problem-locator-dual-mode"
+    / "references"
+    / "native-report.md"
+).read_bytes()
+_GENERIC_V2_REPORT = _GENERIC_V2_REPORT_BYTES.decode("utf-8", errors="strict")
 
 
 def _running_generic_state() -> StateFile:
@@ -225,6 +236,7 @@ def _running_generic_state() -> StateFile:
         final_result=None,
         unresolved_result=None,
         generic_result=None,
+        generic_result_v2=None,
         failure=None,
         updated_at="2026-07-31T00:01:00.000Z",
     )
@@ -249,6 +261,32 @@ def _generic_outcome(status: GenericResultStatus) -> JobOutcome:
             status=status,
             conclusion="通用定位结论",
             root_cause_analysis="通用定位文字版根因分析",
+            skill_name="generic-problem-locator-smoke",
+        ),
+        consumed_evidence_refs=[],
+        proposed_evidence=[],
+        proposed_artifacts=[],
+        error=None,
+        produced_at="2026-07-31T00:04:00.000Z",
+        decision_audit=None,
+    )
+
+
+def _generic_v2_outcome(status: GenericResultStatus) -> JobOutcome:
+    report_bytes = _GENERIC_V2_REPORT.encode("utf-8")
+    return JobOutcome(
+        outcome_id="00000000-0000-0000-0000-000000000082",
+        job_id=DIAGNOSE_JOB_ID,
+        case_id=CASE_ID,
+        job_type=JobType.DIAGNOSE,
+        base_state_revision=1,
+        result_type=OutcomeResultType.COMPLETED,
+        payload=GenericDiagnosisOutcomeV2(
+            format_version=2,
+            status=status,
+            report_markdown=_GENERIC_V2_REPORT,
+            report_utf8_size=len(report_bytes),
+            report_sha256=hashlib.sha256(report_bytes).hexdigest(),
             skill_name="generic-problem-locator-smoke",
         ),
         consumed_evidence_refs=[],
@@ -3566,3 +3604,245 @@ def test_generic_result_applies_directly_without_resources_or_review_and_replays
     assert len(repository.commit_calls) == 1
     assert restarted_dispatcher.submit_calls == []
     assert guard.acquire_calls == guard.release_calls == 1
+
+
+@pytest.mark.parametrize(
+    ("generic_status", "case_status"),
+    [
+        (GenericResultStatus.RESOLVED, CaseStatus.RESOLVED),
+        (GenericResultStatus.UNRESOLVED, CaseStatus.UNRESOLVED),
+    ],
+)
+def test_generic_v2_result_publishes_exact_server_generated_markdown(
+    generic_status: GenericResultStatus,
+    case_status: CaseStatus,
+) -> None:
+    outcome = _generic_v2_outcome(generic_status)
+    records = InMemoryExecutionRecordStore()
+    file_ref = records.publish_outcome_bytes(
+        outcome.job_id,
+        canonical_json_bytes(outcome),
+    )
+    service, repository, resources, guard, dispatcher, _, _ = _service(
+        _running_generic_state(),
+        DomainCoordinator(),
+        records,
+    )
+
+    receipt = service.submit_outcome(outcome, file_ref)
+
+    assert receipt.disposition is OutcomeDisposition.APPLIED
+    aggregate = repository.read_snapshot().cases[CASE_ID]
+    assert aggregate.case.status is case_status
+    assert aggregate.case.generic_result is None
+    result = aggregate.case.generic_result_v2
+    assert result is not None
+    expected_bytes = _GENERIC_V2_REPORT.encode("utf-8")
+    expected_sha256 = hashlib.sha256(expected_bytes).hexdigest()
+    assert result.status is generic_status
+    assert result.report_markdown == _GENERIC_V2_REPORT
+    assert result.report_utf8_size == len(expected_bytes)
+    assert result.report_sha256 == expected_sha256
+    assert receipt.case_view is not None
+    assert receipt.case_view.generic_result_v2 == result
+
+    artifacts = [
+        item
+        for item in aggregate.artifacts.values()
+        if item.kind is ArtifactKind.GENERIC_REPORT
+    ]
+    assert len(artifacts) == 1
+    artifact = artifacts[0]
+    assert artifact.artifact_id == result.report_artifact_id
+    assert artifact.name == "generic-diagnosis-report.md"
+    assert artifact.content_type == "text/markdown"
+    assert artifact.size == len(expected_bytes)
+    assert artifact.sha256 == expected_sha256
+    assert {item.artifact_id for item in receipt.case_view.artifacts} == {
+        artifact.artifact_id
+    }
+
+    stream = resources.open_read(
+        ResourceRef(
+            resource_kind=artifact.resource_kind,
+            storage_key=artifact.storage_key,
+            size=artifact.size,
+            sha256=artifact.sha256,
+        )
+    )
+    try:
+        assert stream.read(artifact.size + 1) == expected_bytes
+        assert stream.read(1) == b""
+    finally:
+        stream.close()
+
+    processing = aggregate.outcome_processing_records[outcome.outcome_id]
+    assert processing.accepted_artifact_ids == []
+    assert processing.generated_artifact_ids == [artifact.artifact_id]
+    assert dispatcher.submit_calls == []
+
+    duplicate = service.submit_outcome(outcome, file_ref)
+    assert duplicate.disposition is OutcomeDisposition.DUPLICATE
+    assert len(repository.commit_calls) == 1
+    assert guard.acquire_calls == guard.release_calls == 1
+
+
+def _applied_generic_state(outcome: JobOutcome) -> StateFile:
+    records = InMemoryExecutionRecordStore()
+    file_ref = records.publish_outcome_bytes(
+        outcome.job_id,
+        canonical_json_bytes(outcome),
+    )
+    service, repository, _, _, _, _, _ = _service(
+        _running_generic_state(),
+        DomainCoordinator(),
+        records,
+    )
+    receipt = service.submit_outcome(outcome, file_ref)
+    assert receipt.disposition is OutcomeDisposition.APPLIED
+    return repository.read_snapshot()
+
+
+def test_state_entry_rejects_a_v2_report_with_a_leading_utf8_bom() -> None:
+    outcome = _generic_v2_outcome(GenericResultStatus.RESOLVED)
+    payload = _applied_generic_state(outcome).model_dump(mode="python")
+    aggregate = payload["cases"][CASE_ID]
+    case_result = aggregate["case"]["generic_result_v2"]
+    report = "\ufeff" + case_result["report_markdown"]
+    report_bytes = report.encode("utf-8")
+    report_sha256 = hashlib.sha256(report_bytes).hexdigest()
+
+    for result in (
+        case_result,
+        aggregate["outcomes"][outcome.outcome_id]["payload"],
+    ):
+        result["report_markdown"] = report
+        result["report_utf8_size"] = len(report_bytes)
+        result["report_sha256"] = report_sha256
+
+    report_artifact_id = case_result["report_artifact_id"]
+    report_artifact = aggregate["artifacts"][report_artifact_id]
+    report_artifact["size"] = len(report_bytes)
+    report_artifact["sha256"] = report_sha256
+    report_artifact["metadata"]["report_utf8_size"] = len(report_bytes)
+    report_artifact["metadata"]["report_sha256"] = report_sha256
+
+    outcome_bytes = canonical_json_bytes(
+        aggregate["outcomes"][outcome.outcome_id]
+    )
+    processing = aggregate["outcome_processing_records"][outcome.outcome_id]
+    processing["outcome_hash"] = hashlib.sha256(outcome_bytes).hexdigest()
+    processing["outcome_file_ref"]["size"] = len(outcome_bytes)
+    processing["outcome_file_ref"]["sha256"] = processing["outcome_hash"]
+
+    with pytest.raises(ValueError):
+        StateFile.model_validate(payload)
+
+
+@pytest.mark.parametrize("v2", [False, True], ids=["v1", "v2"])
+@pytest.mark.parametrize(
+    "forbidden_field",
+    ["accepted_evidence_ids", "accepted_artifact_ids", "created_job_id"],
+)
+def test_state_rejects_generic_processing_with_specialized_closure(
+    v2: bool,
+    forbidden_field: str,
+) -> None:
+    outcome = (
+        _generic_v2_outcome(GenericResultStatus.RESOLVED)
+        if v2
+        else _generic_outcome(GenericResultStatus.RESOLVED)
+    )
+    payload = _applied_generic_state(outcome).model_dump(mode="python")
+    aggregate = payload["cases"][CASE_ID]
+    processing = aggregate["outcome_processing_records"][outcome.outcome_id]
+
+    if forbidden_field == "accepted_evidence_ids":
+        evidence_id = "00000000-0000-0000-0000-000000000093"
+        aggregate["evidence"][evidence_id] = {
+            "evidence_id": evidence_id,
+            "case_id": CASE_ID,
+            "source_type": "PREVIOUS_OUTCOME",
+            "source_ref": outcome.outcome_id,
+            "locator": {"kind": "PREVIOUS_OUTCOME", "json_pointer": ""},
+            "summary": "Forbidden generic processing Evidence.",
+            "collected_at": outcome.produced_at,
+            "content_hash": None,
+            "resource_ref": None,
+        }
+        processing[forbidden_field] = [evidence_id]
+    elif forbidden_field == "accepted_artifact_ids":
+        artifact_id = "00000000-0000-0000-0000-000000000094"
+        artifact_bytes = b"{}"
+        aggregate["artifacts"][artifact_id] = {
+            "artifact_id": artifact_id,
+            "case_id": CASE_ID,
+            "kind": "DIAGNOSTIC_EXPORT",
+            "name": "forbidden-generic-artifact.json",
+            "content_type": "application/json",
+            "resource_kind": "FILE",
+            "size": len(artifact_bytes),
+            "sha256": hashlib.sha256(artifact_bytes).hexdigest(),
+            "storage_key": (
+                f"resources/cases/{CASE_ID}/artifacts/{artifact_id}/payload"
+            ),
+            "metadata": {
+                "schema_version": 1,
+                "format_id": "forbidden-generic-closure",
+                "description": "Forbidden generic processing Artifact.",
+            },
+            "created_by_job_id": outcome.job_id,
+            "created_at": outcome.produced_at,
+        }
+        processing[forbidden_field] = [artifact_id]
+    else:
+        created_job_id = "00000000-0000-0000-0000-000000000095"
+        created_job = dict(aggregate["jobs"][outcome.job_id])
+        created_job.update(
+            job_id=created_job_id,
+            created_at=outcome.produced_at,
+            started_at=outcome.produced_at,
+            finished_at=outcome.produced_at,
+            status="SUCCEEDED",
+        )
+        aggregate["jobs"][created_job_id] = created_job
+        processing[forbidden_field] = created_job_id
+
+    with pytest.raises(ValueError):
+        StateFile.model_validate(payload)
+
+
+def test_state_rejects_v1_generic_processing_with_a_generated_artifact() -> None:
+    outcome = _generic_outcome(GenericResultStatus.RESOLVED)
+    payload = _applied_generic_state(outcome).model_dump(mode="python")
+    aggregate = payload["cases"][CASE_ID]
+    processing = aggregate["outcome_processing_records"][outcome.outcome_id]
+    artifact_id = "00000000-0000-0000-0000-000000000096"
+    artifact_bytes = b"PK"
+    aggregate["artifacts"][artifact_id] = {
+        "artifact_id": artifact_id,
+        "case_id": CASE_ID,
+        "kind": "AUDIT_BUNDLE",
+        "name": "forbidden-generic-audit.zip",
+        "content_type": "application/zip",
+        "resource_kind": "FILE",
+        "size": len(artifact_bytes),
+        "sha256": hashlib.sha256(artifact_bytes).hexdigest(),
+        "storage_key": (
+            f"resources/cases/{CASE_ID}/artifacts/{artifact_id}/payload"
+        ),
+        "metadata": {
+            "schema_version": 1,
+            "format_id": "problem-locator-audit-bundle-v1",
+            "description": "Forbidden V1 generic generated Artifact.",
+            "case_id": CASE_ID,
+            "source_job_id": outcome.job_id,
+            "source_outcome_id": outcome.outcome_id,
+        },
+        "created_by_job_id": outcome.job_id,
+        "created_at": processing["processed_at"],
+    }
+    processing["generated_artifact_ids"] = [artifact_id]
+
+    with pytest.raises(ValueError):
+        StateFile.model_validate(payload)

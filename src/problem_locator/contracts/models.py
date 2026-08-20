@@ -1,4 +1,4 @@
-"""Pydantic models for the frozen Problem Locator V5 public contract.
+"""Pydantic models for the frozen Problem Locator V6 public contract.
 
 The module deliberately keeps all wire/persistence DTO definitions in one place;
 ``commands``, ``outcomes`` and ``errors`` provide responsibility-oriented exports.
@@ -899,7 +899,23 @@ class UnresolvedResult(ContractModel):
         return self
 
 
+def _validate_generic_report_content(
+    report_markdown: str,
+    report_utf8_size: int,
+    report_sha256: str,
+) -> None:
+    if report_markdown.startswith("\ufeff"):
+        raise ValueError("generic report must not start with a UTF-8 BOM")
+    report_bytes = report_markdown.encode("utf-8")
+    if len(report_bytes) != report_utf8_size:
+        raise ValueError("generic report UTF-8 size does not match its content")
+    if hashlib.sha256(report_bytes).hexdigest() != report_sha256:
+        raise ValueError("generic report SHA-256 does not match its content")
+
+
 class GenericResult(ContractModel):
+    """Legacy V1 generic terminal result; its public shape is frozen."""
+
     status: GenericResultStatus
     conclusion: NonEmptyText
     root_cause_analysis: NonEmptyText
@@ -907,6 +923,60 @@ class GenericResult(ContractModel):
     source_job_id: OpaqueId
     source_outcome_id: OpaqueId
     occurred_at: UtcTimestamp
+
+
+class GenericResultV2Draft(ContractModel):
+    format_version: Literal[2]
+    status: GenericResultStatus
+    report_markdown: NonEmptyText
+    report_utf8_size: NonNegativeInt
+    report_sha256: Sha256
+    skill_name: SkillName
+    source_job_id: OpaqueId
+    source_outcome_id: OpaqueId
+    occurred_at: UtcTimestamp
+
+    @model_validator(mode="after")
+    def validate_report(self) -> GenericResultV2Draft:
+        _validate_generic_report_content(
+            self.report_markdown,
+            self.report_utf8_size,
+            self.report_sha256,
+        )
+        return self
+
+
+class GenericResultV2(ContractModel):
+    format_version: Literal[2]
+    status: GenericResultStatus
+    report_markdown: NonEmptyText
+    report_utf8_size: NonNegativeInt
+    report_sha256: Sha256
+    report_artifact_id: OpaqueId
+    skill_name: SkillName
+    source_job_id: OpaqueId
+    source_outcome_id: OpaqueId
+    occurred_at: UtcTimestamp
+
+    @model_validator(mode="after")
+    def validate_report(self) -> GenericResultV2:
+        _validate_generic_report_content(
+            self.report_markdown,
+            self.report_utf8_size,
+            self.report_sha256,
+        )
+        return self
+
+
+def finalize_generic_result_v2(
+    draft: GenericResultV2Draft,
+    report_artifact_id: str,
+) -> GenericResultV2:
+    """Bind a validated V2 result draft to its formal public Markdown Artifact."""
+
+    payload = draft.model_dump(mode="python")
+    payload["report_artifact_id"] = report_artifact_id
+    return GenericResultV2.model_validate(payload)
 
 
 class Case(ContractModel):
@@ -920,6 +990,7 @@ class Case(ContractModel):
     final_result: CandidateConclusion | None
     unresolved_result: UnresolvedResult | None = None
     generic_result: GenericResult | None = None
+    generic_result_v2: GenericResultV2 | None = None
     failure: CaseFailure | None
     created_at: UtcTimestamp
     updated_at: UtcTimestamp
@@ -928,10 +999,15 @@ class Case(ContractModel):
     def validate_terminal_fields(self) -> Case:
         if (self.status is CaseStatus.FAILED) != (self.failure is not None):
             raise ValueError("failure must be present exactly for FAILED cases")
-        if self.generic_result is not None:
-            expected_status = CaseStatus(self.generic_result.status.value)
+        if self.generic_result is not None and self.generic_result_v2 is not None:
+            raise ValueError("V1 and V2 generic results are mutually exclusive")
+        generic_result = self.generic_result or self.generic_result_v2
+        if generic_result is not None:
+            expected_status = CaseStatus(generic_result.status.value)
             if self.status is not expected_status:
-                raise ValueError("generic_result status must equal the Case terminal status")
+                raise ValueError(
+                    "generic result status must equal the Case terminal status"
+                )
             if (
                 self.final_result is not None
                 or self.unresolved_result is not None
@@ -947,18 +1023,18 @@ class Case(ContractModel):
         }:
             pass
         if self.status in {CaseStatus.RESOLVED, CaseStatus.PARTIALLY_RESOLVED}:
-            if self.generic_result is None and (
+            if generic_result is None and (
                 self.final_result is None
                 or self.final_result.status is not CandidateStatus.ACCEPTED
             ):
                 raise ValueError("resolved cases require an ACCEPTED final_result")
-            if self.generic_result is None and (
+            if generic_result is None and (
                 self.diagnosis_state.candidate_conclusion != self.final_result
             ):
                 raise ValueError(
                     "RESOLVED final_result must equal the current DiagnosisState candidate"
                 )
-            if self.generic_result is None and self.final_result is not None:
+            if generic_result is None and self.final_result is not None:
                 expected = (
                     DiagnosisResolutionStatus.COMPLETE
                     if self.status is CaseStatus.RESOLVED
@@ -971,17 +1047,17 @@ class Case(ContractModel):
         elif self.final_result is not None:
             raise ValueError("non-resolved cases must have final_result=null")
         if self.status is CaseStatus.UNRESOLVED:
-            if self.generic_result is None and self.unresolved_result is None:
+            if generic_result is None and self.unresolved_result is None:
                 raise ValueError("UNRESOLVED cases require unresolved_result")
             if self.failure is not None:
                 raise ValueError("UNRESOLVED cases forbid failure")
         elif self.unresolved_result is not None:
             raise ValueError("only UNRESOLVED cases may carry unresolved_result")
         if (
-            self.generic_result is not None
+            generic_result is not None
             and self.status not in {CaseStatus.RESOLVED, CaseStatus.UNRESOLVED}
         ):
-            raise ValueError("generic_result is valid only for a generic terminal Case")
+            raise ValueError("generic results are valid only for a generic terminal Case")
         if self.status is CaseStatus.REVIEWING:
             candidate = self.diagnosis_state.candidate_conclusion
             if candidate is None or candidate.status is not CandidateStatus.REVIEWING:
@@ -1291,6 +1367,18 @@ UserResultMetadata = UserResultMetadataV3
 UserResultArchiveMetadata = UserResultArchiveMetadataV3
 
 
+class GenericReportMetadataV1(ContractModel):
+    schema_version: Literal[1]
+    format_id: Literal["problem-locator-generic-report-v1"]
+    description: DescriptionText
+    generic_result_format_version: Literal[2]
+    status: GenericResultStatus
+    source_job_id: OpaqueId
+    source_outcome_id: OpaqueId
+    report_utf8_size: NonNegativeInt
+    report_sha256: Sha256
+
+
 class DiagnosticExportMetadata(ContractModel):
     schema_version: Literal[1]
     format_id: Annotated[str, StringConstraints(pattern=FORMAT_ID_PATTERN, strict=True)]
@@ -1322,6 +1410,7 @@ class LogparseRunMetadata(ContractModel):
 ArtifactMetadata: TypeAlias = (
     UserResultMetadataV3
     | UserResultArchiveMetadataV3
+    | GenericReportMetadataV1
     | DiagnosticExportMetadata
     | LogparseRunMetadata
     | AuditBundleMetadata
@@ -1347,6 +1436,7 @@ class Artifact(ContractModel):
         expected_type = {
             ArtifactKind.USER_RESULT: UserResultMetadataV3,
             ArtifactKind.USER_RESULT_ARCHIVE: UserResultArchiveMetadataV3,
+            ArtifactKind.GENERIC_REPORT: GenericReportMetadataV1,
             ArtifactKind.DIAGNOSTIC_EXPORT: DiagnosticExportMetadata,
             ArtifactKind.LOGPARSE_RUN: LogparseRunMetadata,
             ArtifactKind.AUDIT_BUNDLE: AuditBundleMetadata,
@@ -1362,6 +1452,21 @@ class Artifact(ContractModel):
                 or self.content_type != "application/zip"
             ):
                 raise ValueError("USER_RESULT_ARCHIVE must be an application/zip FILE")
+        if self.kind is ArtifactKind.GENERIC_REPORT:
+            if (
+                self.resource_kind is not ResourceKind.FILE
+                or self.content_type != "text/markdown"
+            ):
+                raise ValueError("GENERIC_REPORT must be a text/markdown FILE")
+            assert isinstance(self.metadata, GenericReportMetadataV1)
+            if (
+                self.metadata.source_job_id != self.created_by_job_id
+                or self.metadata.report_utf8_size != self.size
+                or self.metadata.report_sha256 != self.sha256
+            ):
+                raise ValueError(
+                    "GENERIC_REPORT metadata must match its creator and content"
+                )
         if self.kind is ArtifactKind.AUDIT_BUNDLE and (
             self.resource_kind is not ResourceKind.FILE
             or self.content_type != "application/zip"
@@ -2547,8 +2652,11 @@ class AgentArtifactProposalDraft(ContractModel):
 
     @model_validator(mode="after")
     def validate_draft(self) -> AgentArtifactProposalDraft:
-        if self.artifact_kind is ArtifactKind.AUDIT_BUNDLE:
-            raise ValueError("AUDIT_BUNDLE is server-generated and cannot be proposed")
+        if self.artifact_kind in {
+            ArtifactKind.AUDIT_BUNDLE,
+            ArtifactKind.GENERIC_REPORT,
+        }:
+            raise ValueError("server-generated Artifacts cannot be proposed")
         if not self.workspace_relative_path.startswith(f"output/proposals/{self.proposal_key}/"):
             raise ValueError("proposal workspace paths must be rooted below output/proposals/<proposal_key>/")
         _validate_artifact_shape(
@@ -2597,8 +2705,11 @@ class ArtifactProposal(ContractModel):
 
     @model_validator(mode="after")
     def validate_proposal(self) -> ArtifactProposal:
-        if self.artifact_kind is ArtifactKind.AUDIT_BUNDLE:
-            raise ValueError("AUDIT_BUNDLE is server-generated and cannot be proposed")
+        if self.artifact_kind in {
+            ArtifactKind.AUDIT_BUNDLE,
+            ArtifactKind.GENERIC_REPORT,
+        }:
+            raise ValueError("server-generated Artifacts cannot be proposed")
         if self.staged_resource_ref.proposal_key != self.proposal_key:
             raise ValueError("staged resource proposal_key mismatch")
         if (
@@ -2629,6 +2740,7 @@ def _validate_artifact_shape(
     expected_type = {
         ArtifactKind.USER_RESULT: UserResultMetadataV3,
         ArtifactKind.USER_RESULT_ARCHIVE: UserResultArchiveMetadataV3,
+        ArtifactKind.GENERIC_REPORT: GenericReportMetadataV1,
         ArtifactKind.DIAGNOSTIC_EXPORT: DiagnosticExportMetadata,
         ArtifactKind.LOGPARSE_RUN: LogparseRunMetadata,
         ArtifactKind.AUDIT_BUNDLE: AuditBundleMetadata,
@@ -2641,6 +2753,10 @@ def _validate_artifact_shape(
         resource_kind is not ResourceKind.FILE or content_type != "application/zip"
     ):
         raise ValueError("USER_RESULT_ARCHIVE must be an application/zip FILE")
+    if kind is ArtifactKind.GENERIC_REPORT and (
+        resource_kind is not ResourceKind.FILE or content_type != "text/markdown"
+    ):
+        raise ValueError("GENERIC_REPORT must be a text/markdown FILE")
     if kind is ArtifactKind.AUDIT_BUNDLE and (
         resource_kind is not ResourceKind.FILE or content_type != "application/zip"
     ):
@@ -2690,10 +2806,30 @@ class DiagnosisOutcome(ContractModel):
 
 
 class GenericDiagnosisOutcome(ContractModel):
+    """Legacy V1 generic Outcome payload; its public shape is frozen."""
+
     status: GenericResultStatus
     conclusion: NonEmptyText
     root_cause_analysis: NonEmptyText
     skill_name: SkillName
+
+
+class GenericDiagnosisOutcomeV2(ContractModel):
+    format_version: Literal[2]
+    status: GenericResultStatus
+    report_markdown: NonEmptyText
+    report_utf8_size: NonNegativeInt
+    report_sha256: Sha256
+    skill_name: SkillName
+
+    @model_validator(mode="after")
+    def validate_report(self) -> GenericDiagnosisOutcomeV2:
+        _validate_generic_report_content(
+            self.report_markdown,
+            self.report_utf8_size,
+            self.report_sha256,
+        )
+        return self
 
 
 class ReviewAssessment(ContractModel):
@@ -2741,7 +2877,9 @@ class ReviewAssessment(ContractModel):
 
 
 AgentOutcomePayload: TypeAlias = RouteDecision | DiagnosisOutcome | ReviewAssessment
-OutcomePayload: TypeAlias = AgentOutcomePayload | GenericDiagnosisOutcome
+OutcomePayload: TypeAlias = (
+    AgentOutcomePayload | GenericDiagnosisOutcome | GenericDiagnosisOutcomeV2
+)
 
 
 class AgentEvidenceCitation(ContractModel):
@@ -2941,12 +3079,20 @@ class AgentJobOutcomeDraftV2(ContractModel):
         _unique([claim.rule_id for claim in self.rule_claims], "rule_claims.rule_id")
         if self.job_type is JobType.ROUTE and self.rule_claims:
             raise ValueError("ROUTE drafts forbid rule claims")
+        waiting_for_user_material = (
+            self.job_type is JobType.DIAGNOSE
+            and self.result_type
+            in {OutcomeResultType.NEED_INPUT, OutcomeResultType.NEED_ATTACHMENT}
+        )
         if (
             self.job_type in {JobType.DIAGNOSE, JobType.REVIEW}
             and self.result_type is not OutcomeResultType.FAILED
+            and not waiting_for_user_material
             and not self.rule_claims
         ):
-            raise ValueError("non-failed DIAGNOSE/REVIEW drafts require rule claims")
+            raise ValueError(
+                "non-waiting DIAGNOSE/REVIEW drafts require rule claims"
+            )
         _validate_proposal_keys(
             [draft.proposal_key for draft in self.proposed_evidence_drafts],
             [draft.proposal_key for draft in self.proposed_artifact_drafts],
@@ -3043,7 +3189,9 @@ class JobOutcome(ContractModel):
     def validate_outcome(self) -> JobOutcome:
         _validate_outcome_shape(self.job_type, self.result_type, self.payload, self.error)
         _unique(self.consumed_evidence_refs, "consumed_evidence_refs")
-        if isinstance(self.payload, GenericDiagnosisOutcome) and (
+        if isinstance(
+            self.payload, (GenericDiagnosisOutcome, GenericDiagnosisOutcomeV2)
+        ) and (
             self.consumed_evidence_refs
             or self.proposed_evidence
             or self.proposed_artifacts
@@ -3125,12 +3273,18 @@ def _validate_outcome_shape(
         raise ValueError("non-failed outcomes require a payload and error=null")
     expected: type[ContractModel] | tuple[type[ContractModel], ...] = {
         JobType.ROUTE: RouteDecision,
-        JobType.DIAGNOSE: (DiagnosisOutcome, GenericDiagnosisOutcome),
+        JobType.DIAGNOSE: (
+            DiagnosisOutcome,
+            GenericDiagnosisOutcome,
+            GenericDiagnosisOutcomeV2,
+        ),
         JobType.REVIEW: ReviewAssessment,
     }[job_type]
     if not isinstance(payload, expected):
         raise ValueError("payload type does not match job_type")
-    if isinstance(payload, GenericDiagnosisOutcome) and result_type is not OutcomeResultType.COMPLETED:
+    if isinstance(
+        payload, (GenericDiagnosisOutcome, GenericDiagnosisOutcomeV2)
+    ) and result_type is not OutcomeResultType.COMPLETED:
         raise ValueError("generic diagnosis results must use COMPLETED")
     if result_type is OutcomeResultType.NO_CAPABILITY and (
         not isinstance(payload, RouteDecision) or payload.kind is not RouteKind.NO_CAPABILITY
@@ -3381,7 +3535,7 @@ def _validate_server_final_user_results(
         and isinstance(payload, ReviewAssessment)
         and payload.verdict is not ReviewVerdict.PASS
     )
-    if isinstance(payload, GenericDiagnosisOutcome):
+    if isinstance(payload, (GenericDiagnosisOutcome, GenericDiagnosisOutcomeV2)):
         if user_results or archives:
             raise ValueError("generic diagnosis Outcomes forbid result Artifacts")
         return
@@ -3917,6 +4071,7 @@ class TransitionPlan(ContractModel):
     final_result_target: CandidateTarget | None
     unresolved_result_draft: UnresolvedResultDraft | None = None
     generic_result: GenericResult | None = None
+    generic_result_v2_draft: GenericResultV2Draft | None = None
     clear_active_job: bool
     reason: NonEmptyText
 
@@ -3932,8 +4087,14 @@ class TransitionPlan(ContractModel):
                 raise ValueError("FAILED plans must SET case failure")
         elif self.case_failure_update is not None and self.case_failure_update.action is FieldUpdateAction.SET:
             raise ValueError("non-FAILED plans cannot SET case failure")
-        if self.generic_result is not None:
-            expected_status = CaseStatus(self.generic_result.status.value)
+        if (
+            self.generic_result is not None
+            and self.generic_result_v2_draft is not None
+        ):
+            raise ValueError("V1 and V2 generic plan results are mutually exclusive")
+        generic_result = self.generic_result or self.generic_result_v2_draft
+        if generic_result is not None:
+            expected_status = CaseStatus(generic_result.status.value)
             if self.target_case_status is not expected_status:
                 raise ValueError(
                     "generic_result status must equal the planned Case terminal status"
@@ -3957,7 +4118,7 @@ class TransitionPlan(ContractModel):
             ):
                 raise ValueError("generic terminal plans must clear selected_skill_ref")
         if self.target_case_status is CaseStatus.UNRESOLVED:
-            if self.unresolved_result_draft is None and self.generic_result is None:
+            if self.unresolved_result_draft is None and generic_result is None:
                 raise ValueError(
                     "UNRESOLVED plans require an unresolved or generic result"
                 )
@@ -3970,10 +4131,10 @@ class TransitionPlan(ContractModel):
                 "only UNRESOLVED plans may carry unresolved_result_draft"
             )
         if (
-            self.generic_result is not None
+            generic_result is not None
             and self.target_case_status not in {CaseStatus.RESOLVED, CaseStatus.UNRESOLVED}
         ):
-            raise ValueError("generic_result is valid only for a terminal generic plan")
+            raise ValueError("generic results are valid only for a terminal generic plan")
         if self.accepted_candidate_proposal_key is not None:
             if (
                 self.candidate_mutation is None
@@ -4367,6 +4528,15 @@ class CaseAggregate(ContractModel):
                     raise ValueError(
                         "AUDIT_BUNDLE metadata must resolve its Case, Job, and Outcome"
                     )
+            if artifact.kind is ArtifactKind.GENERIC_REPORT:
+                assert isinstance(artifact.metadata, GenericReportMetadataV1)
+                if (
+                    artifact.metadata.source_job_id != artifact.created_by_job_id
+                    or artifact.metadata.source_outcome_id not in self.outcomes
+                ):
+                    raise ValueError(
+                        "GENERIC_REPORT metadata must resolve its Job and Outcome"
+                    )
             if artifact.kind is ArtifactKind.LOGPARSE_RUN:
                 assert isinstance(artifact.metadata, LogparseRunMetadata)
                 attachment = self.attachments.get(artifact.metadata.source_attachment_id)
@@ -4428,14 +4598,18 @@ class CaseAggregate(ContractModel):
                 if any(
                     item is not None
                     and (
-                        item.kind is not ArtifactKind.AUDIT_BUNDLE
+                        item.kind
+                        not in {
+                            ArtifactKind.AUDIT_BUNDLE,
+                            ArtifactKind.GENERIC_REPORT,
+                        }
                         or item.created_at != record.processed_at
                         or item.created_by_job_id != job.job_id
                     )
                     for item in generated_artifacts
                 ):
                     raise ValueError(
-                        "generated Artifacts must be audit bundles created during processing"
+                        "generated Artifacts must use a server-generated kind and processing time"
                     )
                 if record.created_job_id is not None:
                     created_job = self.jobs.get(record.created_job_id)
@@ -4472,14 +4646,96 @@ class CaseAggregate(ContractModel):
                 or processing is None
                 or processing.job_id != source_job.job_id
                 or processing.disposition is not OutcomeDisposition.APPLIED
+                or processing.accepted_evidence_ids
+                or processing.accepted_artifact_ids
+                or processing.generated_artifact_ids
+                or processing.created_job_id is not None
             ):
                 raise ValueError(
                     "generic_result must exactly bind its GENERIC Job and Outcome"
                 )
+        if self.case.generic_result_v2 is not None:
+            generic = self.case.generic_result_v2
+            source_job = self.jobs.get(generic.source_job_id)
+            source_outcome = self.outcomes.get(generic.source_outcome_id)
+            processing = self.outcome_processing_records.get(
+                generic.source_outcome_id
+            )
+            report_artifact = self.artifacts.get(generic.report_artifact_id)
+            metadata = (
+                None if report_artifact is None else report_artifact.metadata
+            )
+            source_reports = [
+                artifact.artifact_id
+                for artifact in self.artifacts.values()
+                if artifact.kind is ArtifactKind.GENERIC_REPORT
+                and artifact.created_by_job_id == generic.source_job_id
+            ]
+            if (
+                source_job is None
+                or source_job.job_type is not JobType.DIAGNOSE
+                or source_job.diagnosis_mode is not DiagnosisMode.GENERIC
+                or source_job.generic_skill_name != generic.skill_name
+                or source_job.status is not JobStatus.SUCCEEDED
+                or source_outcome is None
+                or source_outcome.job_id != source_job.job_id
+                or source_outcome.job_type is not JobType.DIAGNOSE
+                or source_outcome.result_type is not OutcomeResultType.COMPLETED
+                or not isinstance(
+                    source_outcome.payload, GenericDiagnosisOutcomeV2
+                )
+                or source_outcome.payload.status is not generic.status
+                or source_outcome.payload.report_markdown
+                != generic.report_markdown
+                or source_outcome.payload.report_utf8_size
+                != generic.report_utf8_size
+                or source_outcome.payload.report_sha256 != generic.report_sha256
+                or source_outcome.payload.skill_name != generic.skill_name
+                or source_outcome.produced_at != generic.occurred_at
+                or processing is None
+                or processing.job_id != source_job.job_id
+                or processing.disposition is not OutcomeDisposition.APPLIED
+                or processing.accepted_evidence_ids
+                or processing.accepted_artifact_ids
+                or processing.created_job_id is not None
+                or processing.generated_artifact_ids
+                != [generic.report_artifact_id]
+                or report_artifact is None
+                or report_artifact.kind is not ArtifactKind.GENERIC_REPORT
+                or report_artifact.content_type != "text/markdown"
+                or report_artifact.resource_kind is not ResourceKind.FILE
+                or report_artifact.size != generic.report_utf8_size
+                or report_artifact.sha256 != generic.report_sha256
+                or report_artifact.created_by_job_id != generic.source_job_id
+                or source_reports != [generic.report_artifact_id]
+                or not isinstance(metadata, GenericReportMetadataV1)
+                or metadata.status is not generic.status
+                or metadata.source_job_id != generic.source_job_id
+                or metadata.source_outcome_id != generic.source_outcome_id
+                or metadata.report_utf8_size != generic.report_utf8_size
+                or metadata.report_sha256 != generic.report_sha256
+            ):
+                raise ValueError(
+                    "generic_result_v2 must exactly bind its Outcome and public report Artifact"
+                )
+        generic_report_ids = sorted(
+            artifact.artifact_id
+            for artifact in self.artifacts.values()
+            if artifact.kind is ArtifactKind.GENERIC_REPORT
+        )
+        expected_generic_report_ids = (
+            []
+            if self.case.generic_result_v2 is None
+            else [self.case.generic_result_v2.report_artifact_id]
+        )
+        if generic_report_ids != expected_generic_report_ids:
+            raise ValueError(
+                "formal GENERIC_REPORT Artifacts must exactly match generic_result_v2"
+            )
         if self.case.status in {
             CaseStatus.RESOLVED,
             CaseStatus.PARTIALLY_RESOLVED,
-        } and self.case.generic_result is None:
+        } and self.case.generic_result is None and self.case.generic_result_v2 is None:
             assert self.case.final_result is not None
             producing_job = self.jobs.get(
                 self.case.final_result.proposed_by_job_id
@@ -4505,7 +4761,11 @@ class CaseAggregate(ContractModel):
                 raise ValueError(
                     "resolved Case requires its accepted candidate USER_RESULT_ARCHIVE"
                 )
-        if self.case.status is CaseStatus.UNRESOLVED and self.case.generic_result is None:
+        if (
+            self.case.status is CaseStatus.UNRESOLVED
+            and self.case.generic_result is None
+            and self.case.generic_result_v2 is None
+        ):
             assert self.case.unresolved_result is not None
             unresolved = self.case.unresolved_result
             artifact = self.artifacts.get(unresolved.audit_artifact_id)
@@ -4554,7 +4814,7 @@ class CaseAggregate(ContractModel):
 
 
 class StateFile(ContractModel):
-    schema_version: Literal[5]
+    schema_version: Literal[6]
     contract_revision: Literal[CONTRACT_REVISION]
     generation: NonNegativeInt
     installation_id: OpaqueId
@@ -4770,6 +5030,13 @@ class ArtifactSummary(ContractModel):
             raise ValueError(
                 "USER_RESULT_ARCHIVE summary must describe an application/zip FILE"
             )
+        if self.kind is ArtifactKind.GENERIC_REPORT and (
+            self.resource_kind is not ResourceKind.FILE
+            or self.content_type != "text/markdown"
+        ):
+            raise ValueError(
+                "GENERIC_REPORT summary must describe a text/markdown FILE"
+            )
         if self.kind is ArtifactKind.DIAGNOSTIC_EXPORT and not self.downloadable:
             raise ValueError("DIAGNOSTIC_EXPORT is always downloadable")
         if self.kind is ArtifactKind.LOGPARSE_RUN:
@@ -4818,6 +5085,7 @@ class CaseView(ContractModel):
     final_result: CandidateConclusion | None
     unresolved_result: UnresolvedResult | None = None
     generic_result: GenericResult | None = None
+    generic_result_v2: GenericResultV2 | None = None
     failure: CaseFailure | None
     artifacts: list[ArtifactSummary]
     created_at: UtcTimestamp
@@ -4827,9 +5095,12 @@ class CaseView(ContractModel):
     def validate_view(self) -> CaseView:
         if (self.status is CaseStatus.FAILED) != (self.failure is not None):
             raise ValueError("failure must be present exactly for FAILED case views")
-        if self.generic_result is not None:
-            if self.status is not CaseStatus(self.generic_result.status.value):
-                raise ValueError("generic_result status must equal CaseView status")
+        if self.generic_result is not None and self.generic_result_v2 is not None:
+            raise ValueError("V1 and V2 generic CaseView results are mutually exclusive")
+        generic_result = self.generic_result or self.generic_result_v2
+        if generic_result is not None:
+            if self.status is not CaseStatus(generic_result.status.value):
+                raise ValueError("generic result status must equal CaseView status")
             if (
                 self.final_result is not None
                 or self.unresolved_result is not None
@@ -4837,12 +5108,12 @@ class CaseView(ContractModel):
             ):
                 raise ValueError("generic CaseView forbids specialized result fields")
         if self.status in {CaseStatus.RESOLVED, CaseStatus.PARTIALLY_RESOLVED}:
-            if self.generic_result is None and (
+            if generic_result is None and (
                 self.final_result is None
                 or self.final_result.status is not CandidateStatus.ACCEPTED
             ):
                 raise ValueError("resolved case views require an ACCEPTED final result")
-            if self.generic_result is None and self.final_result is not None:
+            if generic_result is None and self.final_result is not None:
                 expected = (
                     DiagnosisResolutionStatus.COMPLETE
                     if self.status is CaseStatus.RESOLVED
@@ -4855,7 +5126,7 @@ class CaseView(ContractModel):
         elif self.final_result is not None:
             raise ValueError("non-resolved case views must have final_result=null")
         if self.status is CaseStatus.UNRESOLVED:
-            if self.generic_result is None and self.unresolved_result is None:
+            if generic_result is None and self.unresolved_result is None:
                 raise ValueError("UNRESOLVED case views require unresolved_result")
         elif self.unresolved_result is not None:
             raise ValueError("only UNRESOLVED case views may carry unresolved_result")
@@ -4916,10 +5187,15 @@ class CaseView(ContractModel):
             for artifact in self.artifacts
             if artifact.kind is ArtifactKind.USER_RESULT_ARCHIVE
         ]
+        generic_reports = [
+            artifact
+            for artifact in self.artifacts
+            if artifact.kind is ArtifactKind.GENERIC_REPORT
+        ]
         if self.status in {
             CaseStatus.RESOLVED,
             CaseStatus.PARTIALLY_RESOLVED,
-        } and self.generic_result is None:
+        } and generic_result is None:
             assert self.final_result is not None
             if len(user_results) != 1 or (
                 user_results[0].created_by_job_id != self.final_result.proposed_by_job_id
@@ -4934,7 +5210,7 @@ class CaseView(ContractModel):
                 raise ValueError(
                     "resolved CaseView requires the accepted candidate's USER_RESULT_ARCHIVE"
                 )
-        elif self.status is CaseStatus.UNRESOLVED and self.generic_result is None:
+        elif self.status is CaseStatus.UNRESOLVED and generic_result is None:
             assert self.unresolved_result is not None
             if (
                 len(user_results) != 1
@@ -4947,12 +5223,26 @@ class CaseView(ContractModel):
                 )
         elif user_results or result_archives:
             raise ValueError("non-terminal CaseView cannot expose user result Artifacts")
+        if self.generic_result_v2 is not None:
+            report = self.generic_result_v2
+            if (
+                len(generic_reports) != 1
+                or generic_reports[0].artifact_id != report.report_artifact_id
+                or generic_reports[0].size != report.report_utf8_size
+                or generic_reports[0].sha256 != report.report_sha256
+                or generic_reports[0].created_by_job_id != report.source_job_id
+            ):
+                raise ValueError(
+                    "V2 generic CaseView requires its exact public Markdown report"
+                )
+        elif generic_reports:
+            raise ValueError("only a V2 generic CaseView may expose GENERIC_REPORT")
         audit_bundles = [
             artifact
             for artifact in self.artifacts
             if artifact.kind is ArtifactKind.AUDIT_BUNDLE
         ]
-        if self.status is CaseStatus.UNRESOLVED and self.generic_result is None:
+        if self.status is CaseStatus.UNRESOLVED and generic_result is None:
             assert self.unresolved_result is not None
             if (
                 len(audit_bundles) != 1
@@ -5510,8 +5800,8 @@ class StateExportResource(ContractModel):
 
 
 class StateExport(ContractModel):
-    export_schema_version: Literal[5]
-    schema_version: Literal[5]
+    export_schema_version: Literal[6]
+    schema_version: Literal[6]
     contract_revision: Literal[CONTRACT_REVISION]
     source_generation: NonNegativeInt
     installation_id: OpaqueId
@@ -5580,7 +5870,7 @@ class ContractManifestEntry(ContractModel):
 
 
 class ContractManifest(ContractModel):
-    schema_version: Literal[5]
+    schema_version: Literal[6]
     contract_revision: Literal[CONTRACT_REVISION]
     generator_version: NonEmptyText
     files: list[ContractManifestEntry]
@@ -5728,6 +6018,7 @@ __all__ = [model.__name__ for model in _CONTRACT_MODEL_TYPES] + [
     "default_resource_limits",
     "derive_attachment_content_type",
     "derive_attachment_filename_suffix",
+    "finalize_generic_result_v2",
     "finalize_unresolved_result",
     "validate_job_instruction_for_job",
     "review_required_evidence_refs",

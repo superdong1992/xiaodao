@@ -25,7 +25,7 @@ def test_specialist_assets_require_skill_and_raw_evidence_checks() -> None:
     contract_meta, contract = _asset("output-contracts/diagnose")
 
     assert profile_meta["version"] == "3.0.0"
-    assert contract_meta["version"] == "5.0.0"
+    assert contract_meta["version"] == "5.1.0"
     for material in (profile, contract):
         assert "problem_time" in material
         assert "user_facts" in material
@@ -44,6 +44,11 @@ def test_specialist_assets_require_skill_and_raw_evidence_checks() -> None:
     assert "2026-07-30T23:59:59.500Z" in contract
     assert "禁止跳过本 Job 的 `target-logs`" in contract
     assert "空 audit、重复成功操作或错误操作" in contract
+    assert "### 等待用户材料快路径" in contract
+    assert "`NEED_INPUT` 或 `NEED_ATTACHMENT`" in contract
+    assert "`rule_claims=[]`" in contract
+    assert "数量、顺序和 rule ID 完全一致" in contract
+    assert "或 grep `site-packages`" in contract
 
 
 def test_reviewer_assets_require_independent_rule_replay_and_full_evidence_union() -> None:

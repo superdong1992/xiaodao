@@ -54,6 +54,14 @@ def is_artifact_downloadable(case: Case, artifact: Artifact) -> bool:
             and case.unresolved_result is not None
             and case.unresolved_result.audit_artifact_id == artifact.artifact_id
         )
+    if artifact.kind is ArtifactKind.GENERIC_REPORT:
+        return (
+            case.generic_result_v2 is not None
+            and case.generic_result_v2.report_artifact_id == artifact.artifact_id
+            and case.generic_result_v2.source_job_id == artifact.created_by_job_id
+            and case.generic_result_v2.report_utf8_size == artifact.size
+            and case.generic_result_v2.report_sha256 == artifact.sha256
+        )
     if artifact.kind not in {
         ArtifactKind.USER_RESULT,
         ArtifactKind.USER_RESULT_ARCHIVE,
@@ -145,6 +153,7 @@ def project_case_components(
         final_result=case.final_result,
         unresolved_result=case.unresolved_result,
         generic_result=case.generic_result,
+        generic_result_v2=case.generic_result_v2,
         failure=case.failure,
         artifacts=project_artifact_summaries(case, artifacts),
         created_at=case.created_at,

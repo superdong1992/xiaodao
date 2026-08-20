@@ -26,6 +26,7 @@ from problem_locator.contracts import (
     ExecutionFailure,
     ExecutionFailedTriggerPayload,
     ExecutionFileRef,
+    GenericReportMetadataV1,
     Job,
     JobOutcome,
     JobStatus,
@@ -52,6 +53,7 @@ from problem_locator.contracts import (
     ValidatedTrigger,
     VersionedRef,
     canonical_json_bytes,
+    finalize_generic_result_v2,
     finalize_unresolved_result,
 )
 from problem_locator.contracts.errors import deterministic_outcome_failure
@@ -111,6 +113,7 @@ from .runtime_bindings import (
 
 _MAX_COMMIT_ATTEMPTS = 3
 _SERVER_AUDIT_PROPOSAL_KEY = "server-audit-bundle"
+_SERVER_GENERIC_REPORT_PROPOSAL_KEY = "server-generic-report"
 
 
 @dataclass(frozen=True, slots=True)
@@ -690,6 +693,68 @@ class OutcomeSubmissionService:
         generated_audit_artifact_id: str | None = None
         generated_audit_staged: StagedResourceRef | None = None
         generated_audit_target: PlannedResourceTarget | None = None
+        generated_generic_report_artifact_id: str | None = None
+        generated_generic_report_staged: StagedResourceRef | None = None
+        generated_generic_report_target: PlannedResourceTarget | None = None
+        generic_result_v2_draft = plan.generic_result_v2_draft
+        if generic_result_v2_draft is not None:
+            report_bytes = generic_result_v2_draft.report_markdown.encode("utf-8")
+            generated_generic_report_artifact_id = self._ids.derive(
+                "artifact",
+                [
+                    snapshot.installation_id,
+                    job.case_id,
+                    outcome.outcome_id,
+                    "generic-report",
+                ],
+            )
+            generated_staging_id = self._ids.derive(
+                "resource_staging",
+                [
+                    snapshot.installation_id,
+                    job.case_id,
+                    outcome.outcome_id,
+                    "generic-report",
+                ],
+            )
+            try:
+                generated_generic_report_staged = (
+                    self._resource_store.stage_generated_file(
+                        job.job_id,
+                        _SERVER_GENERIC_REPORT_PROPOSAL_KEY,
+                        generated_staging_id,
+                        io.BytesIO(report_bytes),
+                        expected_size=generic_result_v2_draft.report_utf8_size,
+                        expected_sha256=generic_result_v2_draft.report_sha256,
+                    )
+                )
+                generated_generic_report_target = self._resource_store.plan_target(
+                    job.case_id,
+                    ResourceType.ARTIFACT,
+                    generated_generic_report_artifact_id,
+                    ResourceKind.FILE,
+                    generated_generic_report_staged.size,
+                    generated_generic_report_staged.sha256,
+                )
+            except ApplicationPortError as error:
+                if error.error.code in {
+                    ErrorCode.RESOURCE_STAGE_FAILED,
+                    ErrorCode.RESOURCE_HASH_MISMATCH,
+                    ErrorCode.RESOURCE_SIZE_MISMATCH,
+                    ErrorCode.RESOURCE_LIMIT_EXCEEDED,
+                    ErrorCode.PATH_VIOLATION,
+                    ErrorCode.VALIDATION_ERROR,
+                }:
+                    raise_port_error(
+                        ErrorCode.RESOURCE_PUBLISH_FAILED,
+                        "The server generic report could not be staged safely.",
+                    )
+                raise
+            except (OSError, TypeError, ValueError, ValidationError):
+                raise_port_error(
+                    ErrorCode.RESOURCE_PUBLISH_FAILED,
+                    "The server generic report could not be staged safely.",
+                )
         unresolved_evidence_refs: list[str] = []
         if plan.unresolved_result_draft is not None:
             try:
@@ -799,6 +864,17 @@ class OutcomeSubmissionService:
         target_rows: list[
             tuple[str, StagedResourceRef, PlannedResourceTarget]
         ] = []
+        if (
+            generated_generic_report_staged is not None
+            and generated_generic_report_target is not None
+        ):
+            target_rows.append(
+                (
+                    _SERVER_GENERIC_REPORT_PROPOSAL_KEY,
+                    generated_generic_report_staged,
+                    generated_generic_report_target,
+                )
+            )
         if generated_audit_staged is not None and generated_audit_target is not None:
             target_rows.append(
                 (
@@ -995,6 +1071,58 @@ class OutcomeSubmissionService:
                             created_by_job_id=job.job_id,
                             created_at=processed_at,
                         )
+                    finalized_generic_result_v2 = None
+                    if generated_generic_report_artifact_id is not None:
+                        if generic_result_v2_draft is None:
+                            raise ValueError(
+                                "generated generic report has no V2 result draft"
+                            )
+                        published = published_resources[
+                            _SERVER_GENERIC_REPORT_PROPOSAL_KEY
+                        ]
+                        if (
+                            published.resource_kind is not ResourceKind.FILE
+                            or published.size
+                            != generic_result_v2_draft.report_utf8_size
+                            or published.sha256
+                            != generic_result_v2_draft.report_sha256
+                        ):
+                            raise ValueError(
+                                "server-generated generic report differs from its Outcome"
+                            )
+                        formal_generated_artifacts[
+                            generated_generic_report_artifact_id
+                        ] = Artifact(
+                            artifact_id=generated_generic_report_artifact_id,
+                            case_id=job.case_id,
+                            kind=ArtifactKind.GENERIC_REPORT,
+                            name="generic-diagnosis-report.md",
+                            content_type="text/markdown",
+                            resource_kind=ResourceKind.FILE,
+                            size=published.size,
+                            sha256=published.sha256,
+                            storage_key=published.storage_key,
+                            metadata=GenericReportMetadataV1(
+                                schema_version=1,
+                                format_id="problem-locator-generic-report-v1",
+                                description=(
+                                    "Server-generated public copy of the validated "
+                                    "generic diagnosis Markdown report."
+                                ),
+                                generic_result_format_version=2,
+                                status=generic_result_v2_draft.status,
+                                source_job_id=job.job_id,
+                                source_outcome_id=outcome.outcome_id,
+                                report_utf8_size=published.size,
+                                report_sha256=published.sha256,
+                            ),
+                            created_by_job_id=job.job_id,
+                            created_at=processed_at,
+                        )
+                        finalized_generic_result_v2 = finalize_generic_result_v2(
+                            generic_result_v2_draft,
+                            generated_generic_report_artifact_id,
+                        )
                     formal_candidate = formalize_accepted_candidate(
                         draft,
                         plan.accepted_candidate_proposal_key,
@@ -1063,6 +1191,7 @@ class OutcomeSubmissionService:
                         created_job=created_job,
                         processed_at=processed_at,
                         unresolved_result=unresolved_result,
+                        generic_result_v2=finalized_generic_result_v2,
                     )
                     active_job = (
                         None

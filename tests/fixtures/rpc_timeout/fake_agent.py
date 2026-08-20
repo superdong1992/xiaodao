@@ -617,11 +617,7 @@ def _request_parameter_group_a(
                 "Collect the complete parameter group A and log archive."
             ),
         ),
-        rule_claims=_rule_claims(
-            skill_manifest=skill_manifest,
-            snapshot=snapshot,
-            event_bindings={},
-        ),
+        rule_claims=[],
     )
 
 
@@ -647,11 +643,7 @@ def _request_attachment(
             candidate_conclusion_draft=None,
             recommended_next_step="Upload and explicitly submit the log archive.",
         ),
-        rule_claims=_rule_claims(
-            skill_manifest=skill_manifest,
-            snapshot=snapshot,
-            event_bindings={},
-        ),
+        rule_claims=[],
     )
 
 

@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "problem-locator"
-version = "3.0.0"
-description = "Problem Locator V2"
+version = "4.0.0"
+description = "Problem Locator V4"
 requires-python = ">=3.12,<3.13"
 dependencies = [
   "pydantic==2.13.4",

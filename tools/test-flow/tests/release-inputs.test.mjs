@@ -285,6 +285,9 @@ test("CrossJob runtime uses pull-never, empty labeled storage and authoritative 
   assert.match(core, /canonicalJson\(receipt\.validation_fields\) === canonicalJson\(NEGATIVE_PROBE_VALIDATION_FIELDS\)/);
   assert.match(core, /client_dfx_absent: true/);
   assert.match(core, /CLIENT_DFX_FORBIDDEN/);
+  assert.match(core, /fixedGetCasePollingInvariant\("<authoritative-case-id>"\)/);
+  assert.match(core, /fixedGetCasePollingInvariant\(state\.case_id\)/);
+  assert.match(core, /Poll with the same literal get-case input/);
   assert.match(core, /runtime_ref_id: diagnosisSkillRuntimeRefId\(skillManifest\.id\)/);
   for (const code of ["PHASE1_SELECTED_SKILL", "PHASE3_SELECTED_SKILL", "RESTART_SELECTED_SKILL"]) {
     assert.match(core, new RegExp(`selected_skill_ref\\?\\.id === releaseCase\\.skill\\.runtime_ref_id[^\\n]+${code}`));

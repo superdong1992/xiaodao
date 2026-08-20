@@ -21,6 +21,18 @@ Job/Case 绑定。Agent draft 不得包含 `outcome_id`、`produced_at`、
 `decision_audit` 或任何服务端校验字段。`FAILED` 需要 `payload=null` 和非空 error；
 非失败 draft 需要 `error=null`。
 
+### 等待用户材料快路径
+
+当且仅当当前 DIAGNOSE Job 只是在请求 Skill 已声明且当前确实缺失的材料，结果为
+`NEED_INPUT` 或 `NEED_ATTACHMENT`，并且没有 Candidate 时，必须使用等待快路径：
+`rule_claims=[]`。服务端仍会从固定 Skill 重算全部规则、选择 terminal path 并逐字段校验
+requirement 的声明与激活；空 Agent claims 不会跳过这些检查。此快路径不得运行 Logparse，
+不得展开逐规则 UNKNOWN 说明，也不得为了反推草稿形状读取或 grep 安装包源码。
+
+除此之外，每个非失败 DIAGNOSE draft 的 `rule_claims` 必须与
+`verification_contract.rules` 数量、顺序和 rule ID 完全一致。等待态若选择提交 claims，
+同样只能提交这一完整有序集合，禁止部分或乱序 claims。
+
 Never create a temporary file at workspace root; its direct children remain exactly
 `inputs`, `runtime`, and `output`.
 
@@ -82,8 +94,9 @@ binding 写入 `state_delta.add_evidence_bindings`，其中新 Evidence 使用
 
 ## 逐规则诊断
 
-非失败 DIAGNOSE draft 必须按 Skill `verification_contract.rules` 的声明顺序输出恰好一条
-`rule_claims`。每条 claim 必须列出实际使用的 user-fact item ID；凡规则声明日志事件，
+除上述 `NEED_INPUT|NEED_ATTACHMENT` 空 claims 快路径外，非失败 DIAGNOSE draft 必须按
+Skill `verification_contract.rules` 的声明顺序为每条规则输出恰好一条 `rule_claims`。
+每条 claim 必须列出实际使用的 user-fact item ID；凡规则声明日志事件，
 必须引用已读取的原始 Evidence binding 与 inclusive 行号。无日志 Skill 中
 `evidence_events` 为空的 `SEMANTIC_CAUSALITY` 不得伪造行号 citation，但 Candidate 仍必须
 把实际依赖的非日志 Evidence 纳入 supporting/completion bindings 和
@@ -152,3 +165,7 @@ Outcome ID、时间、验证结论或公开用户产物。成功后不得继续�
 Agent 进程退出后，服务端重新读取原始证据、重算机械规则并生成唯一权威的
 `output/job_outcome.json`、`decision_audit.json` 和可观察的证据行记录。stdout、stderr、
 隐藏思维过程或半成品都不是业务输出。
+
+首次 Write 前必须最后确认：等待快路径使用空 `rule_claims`；其他非失败 DIAGNOSE 使用
+完整有序 claims。上方展开 Schema 与本合同 prose 是唯一输出形状来源；禁止读取
+或 grep `site-packages`、sealer 实现或其他安装包源码来发现隐藏合同。

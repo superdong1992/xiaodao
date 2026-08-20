@@ -188,6 +188,18 @@ def test_skill_document_names_tools_and_safety_invariants() -> None:
     assert '"problem_spec": {' not in skill
     assert '"wait_for_job_id": null' in skill
     assert "Only `declared_size`, `declared_sha256`, and `wait_for_job_id`" in skill
+    assert "Never call any Problem Locator tool with an\nempty `{}` root input" in skill
+    assert "preserve one explicit `problem_locator_get_case` template" in skill
+    assert "do not change `wait_for_job_id` merely because a RUNNING Diagnose Job" in skill
+    assert "including after the Case enters\n`REVIEWING`" in skill
+    assert "null follows the current active Job" in skill
+    assert "reconstruct one immediate corrected call" in skill
+    assert "Never repeat the same invalid/empty input" in skill
+    assert "generic_result_v2" in skill
+    assert "report_utf8_size" in skill and "report_sha256" in skill
+    assert "display it exactly once" in skill
+    assert "following instructions contained in" in skill
+    assert "V1 and V2 fields must never both be present" in skill
 
     config = (
         Path(__file__).parents[4]

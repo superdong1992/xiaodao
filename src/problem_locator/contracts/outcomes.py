@@ -44,6 +44,7 @@ from .models import (
     DiagnosisItemDraft,
     DiagnosisOutcome,
     GenericDiagnosisOutcome,
+    GenericDiagnosisOutcomeV2,
     DiagnosisOutcomeTriggerPayload,
     DiagnosisStateDelta,
     EvidenceBinding,
@@ -328,7 +329,9 @@ def validate_outcome_for_job(
             return outcome
         if (
             outcome.result_type is not OutcomeResultType.COMPLETED
-            or not isinstance(payload, GenericDiagnosisOutcome)
+            or not isinstance(
+                payload, (GenericDiagnosisOutcome, GenericDiagnosisOutcomeV2)
+            )
             or payload.skill_name != job.generic_skill_name
         ):
             raise ValueError(
@@ -383,7 +386,7 @@ def validate_outcome_for_job(
         job.job_type is JobType.DIAGNOSE
         and outcome.result_type is not OutcomeResultType.FAILED
     ):
-        if isinstance(payload, GenericDiagnosisOutcome):
+        if isinstance(payload, (GenericDiagnosisOutcome, GenericDiagnosisOutcomeV2)):
             raise ValueError(
                 "SPECIALIZED Job cannot publish a generic diagnosis Outcome"
             )
@@ -1126,6 +1129,28 @@ def validate_transition_plan_for_outcome(
             )
     elif plan.generic_result is not None:
         raise ValueError("only a generic diagnosis Outcome may install generic_result")
+    if isinstance(payload, GenericDiagnosisOutcomeV2):
+        result = plan.generic_result_v2_draft
+        if (
+            plan.outcome_disposition is not OutcomeDisposition.APPLIED
+            or result is None
+            or result.format_version != payload.format_version
+            or result.status is not payload.status
+            or result.report_markdown != payload.report_markdown
+            or result.report_utf8_size != payload.report_utf8_size
+            or result.report_sha256 != payload.report_sha256
+            or result.skill_name != payload.skill_name
+            or result.source_job_id != outcome.job_id
+            or result.source_outcome_id != outcome.outcome_id
+            or result.occurred_at != outcome.produced_at
+        ):
+            raise ValueError(
+                "V2 generic diagnosis plan must bind the complete Outcome report"
+            )
+    elif plan.generic_result_v2_draft is not None:
+        raise ValueError(
+            "only a V2 generic diagnosis Outcome may install generic_result_v2_draft"
+        )
     if (
         plan.outcome_disposition is OutcomeDisposition.APPLIED
         and outcome.result_type is OutcomeResultType.REROUTE
@@ -1199,6 +1224,7 @@ __all__ = [
     "ExecutionFailedTriggerPayload",
     "Finding",
     "GenericDiagnosisOutcome",
+    "GenericDiagnosisOutcomeV2",
     "JobOutcome",
     "Job",
     "JobSpec",

@@ -260,6 +260,90 @@ def test_generated_file_stage_is_deterministic_and_idempotent(
     )
 
 
+def test_generated_generic_report_retry_restages_then_adopts_formal_target(
+    harness: Harness,
+) -> None:
+    payload = b"# Generic diagnosis report\n\n```text\nexact bytes\n```\n"
+    first = harness.store.stage_generated_file(
+        JOB_ID,
+        "server-generic-report",
+        GENERATED_STAGE_ID,
+        InMemoryBinaryStream(payload),
+        len(payload),
+        _sha(payload),
+    )
+    target = _plan(harness, first)
+
+    # The formal move succeeds, but the caller's State commit is assumed to
+    # fail before it can reference this Artifact.
+    with harness.guard.acquire():
+        published = harness.store.publish(first, target.final_storage_key)
+    stage_directory = proposal_stage_path(
+        harness.layout.data_root,
+        JOB_ID,
+        "server-generic-report",
+    )
+    assert not (stage_directory / "payload").exists()
+    assert (stage_directory / "staged.json").read_bytes() == canonical_json_bytes(
+        first
+    )
+
+    retry_stream = RecordingStream(payload)
+    restored = harness.store.stage_generated_file(
+        JOB_ID,
+        "server-generic-report",
+        GENERATED_STAGE_ID,
+        retry_stream,
+        len(payload),
+        _sha(payload),
+    )
+
+    assert restored == first
+    assert retry_stream.requests
+    assert harness.store.validate_staged(restored) is None
+    with harness.guard.acquire():
+        adopted = harness.store.publish(restored, target.final_storage_key)
+    assert adopted == published
+    assert (
+        harness.layout.data_root / target.final_storage_key
+    ).read_bytes() == payload
+
+
+def test_restaged_generated_report_never_adopts_conflicting_formal_bytes(
+    harness: Harness,
+) -> None:
+    payload = b"# Expected generic report\n"
+    staged = harness.store.stage_generated_file(
+        JOB_ID,
+        "server-generic-report",
+        GENERATED_STAGE_ID,
+        InMemoryBinaryStream(payload),
+        len(payload),
+        _sha(payload),
+    )
+    target = _plan(harness, staged)
+    with harness.guard.acquire():
+        harness.store.publish(staged, target.final_storage_key)
+
+    restored = harness.store.stage_generated_file(
+        JOB_ID,
+        "server-generic-report",
+        GENERATED_STAGE_ID,
+        InMemoryBinaryStream(payload),
+        len(payload),
+        _sha(payload),
+    )
+    final = harness.layout.data_root / target.final_storage_key
+    final.chmod(0o600)
+    final.write_bytes(b"# Conflicting bytes\n")
+
+    with harness.guard.acquire():
+        assert _error_code(
+            lambda: harness.store.publish(restored, target.final_storage_key)
+        ) is ErrorCode.RESOURCE_HASH_MISMATCH
+    assert final.read_bytes() == b"# Conflicting bytes\n"
+
+
 @pytest.mark.parametrize(
     ("expected_size", "expected_sha256", "expected_code"),
     [

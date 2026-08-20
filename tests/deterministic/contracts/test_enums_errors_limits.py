@@ -19,6 +19,7 @@ ENUM_EXPECTATIONS = {
     "ArtifactKind": (
         "USER_RESULT",
         "USER_RESULT_ARCHIVE",
+        "GENERIC_REPORT",
         "DIAGNOSTIC_EXPORT",
         "LOGPARSE_RUN",
         "AUDIT_BUNDLE",

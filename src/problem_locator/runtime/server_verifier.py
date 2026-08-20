@@ -2133,6 +2133,17 @@ def verify_agent_draft(
     unknown_claims = [item for item in claims if item not in set(required_rule_ids)]
     if unknown_claims:
         raise ValueError("Agent draft claims rules outside the pinned Skill")
+    claim_ids = [item.rule_id for item in draft.rule_claims]
+    waiting_without_claims = (
+        job.job_type is JobType.DIAGNOSE
+        and draft.result_type
+        in {OutcomeResultType.NEED_INPUT, OutcomeResultType.NEED_ATTACHMENT}
+        and not claim_ids
+    )
+    if not waiting_without_claims and claim_ids != required_rule_ids:
+        raise ValueError(
+            "Agent draft rule claims must exactly follow the pinned Skill"
+        )
 
     anchor_paths, allowed_logparse_sources = _target_anchor_paths(
         broker_audit_bytes,

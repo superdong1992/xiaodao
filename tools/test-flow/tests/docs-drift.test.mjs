@@ -9,6 +9,7 @@ const AUTHORITATIVE = [
   "AGENTS.md",
   "README.md",
   "TODO.md",
+  "docs/browser-rest-api.md",
   "design/README.md",
   "design/test-flow-architecture.md",
   "tools/test-flow/README.md",
@@ -54,4 +55,18 @@ test("the operator and architecture authorities are singular and explicit", () =
   const design = fs.readFileSync(path.join(REPO_ROOT, "design", "README.md"), "utf8");
   assert.match(root, /tools\/test-flow\/README\.md/);
   assert.match(design, /test-flow-architecture\.md/);
+});
+
+test("README keeps the browser REST API entry isolated from other protocols", () => {
+  const root = fs.readFileSync(path.join(REPO_ROOT, "README.md"), "utf8");
+  const heading = /^### 浏览器 REST API\s*$/m;
+  const match = heading.exec(root);
+  assert.ok(match, "README is missing the browser REST API heading");
+  const following = root.slice(match.index + match[0].length);
+  const nextHeading = /^###\s+.+$/m.exec(following);
+  assert.ok(nextHeading, "browser REST API entry must end at the next peer heading");
+  const section = following.slice(0, nextHeading.index);
+  assert.match(section, /\]\(docs\/browser-rest-api\.md\)/, "browser REST API entry must link the standalone guide");
+  assert.doesNotMatch(section, /\/api\/v1\//, "endpoint details belong in the standalone guide");
+  assert.doesNotMatch(section, /\b(?:MCP|Claude|Skill)\b|problem_locator_[a-z_]+/i, "browser REST API entry contains cross-protocol details");
 });

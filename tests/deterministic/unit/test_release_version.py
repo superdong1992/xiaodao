@@ -7,10 +7,10 @@ from problem_locator import __version__
 
 
 ROOT = Path(__file__).resolve().parents[3]
-RELEASE_VERSION = "3.0.0"
+RELEASE_VERSION = "4.0.0"
 
 
-def test_runtime_project_and_lock_publish_one_v2_release_version() -> None:
+def test_runtime_project_and_lock_publish_one_v4_release_version() -> None:
     project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     lock = tomllib.loads((ROOT / "uv.lock").read_text(encoding="utf-8"))
     locked_project = [

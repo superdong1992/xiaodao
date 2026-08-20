@@ -19,6 +19,7 @@ import {
   validateClaudeDistribution,
 } from "../lib/release-inputs.mjs";
 import { extractCheckpointSourceArchive } from "../lib/checkpoint.mjs";
+import { fixedGetCasePollingInvariant } from "../lib/cross-job-polling.mjs";
 import {
   NEGATIVE_PROBE_VALIDATION_FIELDS,
   readRelayedEventPart,
@@ -661,6 +662,7 @@ function phaseOnePrompt(releaseCase, requestIds, archive) {
 
 0. Your first action MUST call the Skill tool with skill=problem-locator-client (exact input {"skill":"problem-locator-client"}). Until that Skill tool_result is received successfully, do not call any problem_locator MCP tool.
 1. Call problem_locator_create_case exactly once with this exact flat root input (do not send problem_spec or any nested object): ${createInput}
+${fixedGetCasePollingInvariant("<authoritative-case-id>")}
 2. Poll problem_locator_get_case with non-empty case_id input and wait_seconds 30 until status WAITING_ATTACHMENT has exactly the OPEN ATTACHMENT requirement ${JSON.stringify(releaseCase.skill.attachment_requirement)}. Use wait_seconds 30 on every poll; do not rapid-poll. The initial facts were already supplied to create_case, so do not resubmit them and do not accept WAITING_INPUT as the target state.
 3. Call problem_locator_prepare_attachment exactly once with request_id "${requestIds.prepare}", the latest revision, name ${JSON.stringify(archive.name)}, content_type ${JSON.stringify(archive.content_type)}, declared_size ${archive.size}, and declared_sha256 "${archive.sha256}". The call must contain exactly those seven required root properties and must never send nested input.
 4. Stop immediately after the successful prepare result. Do not upload, submit the attachment, or call another tool.`;
@@ -867,7 +869,8 @@ function phaseThreePrompt(state, releaseCase) {
 
 0. First call Skill with exact input {"skill":"problem-locator-client"}; do not call MCP before it succeeds.
 1. Call problem_locator_submit_supplement exactly once with request_id "${state.request_ids.submit_attachment}", case_id "${state.case_id}", expected_case_revision ${state.case_revision}, input_names [], input_values [], attachment_ids ["${state.attachment_id}"], wait_seconds 0.
-${supplement} Poll with wait_seconds 30. Observe REVIEWING, then continue with the authoritative active review job id until a terminal case status with final_result.status ACCEPTED. Use wait_seconds 30 on every poll, do not rapid-poll, and do not skip REVIEWING.
+${fixedGetCasePollingInvariant(state.case_id)}
+${supplement} Poll with the same literal get-case input. Observe REVIEWING, then continue unchanged until a terminal case status with final_result.status ACCEPTED. Use wait_seconds 30 on every poll, do not rapid-poll, and do not skip REVIEWING.
 5. Call problem_locator_list_artifacts exactly once for this Case and stop. Do not call another tool.`;
 }
 

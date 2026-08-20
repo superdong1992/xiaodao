@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import stat
@@ -18,6 +19,7 @@ from problem_locator.contracts import (
     ExecutionRecordStore,
     ExecutionStage,
     GenericDiagnosisOutcome,
+    GenericDiagnosisOutcomeV2,
     GenericResultStatus,
     IdGenerator,
     Job,
@@ -38,7 +40,17 @@ from .workspace import PreparedWorkspace, WorkspaceManager
 
 
 GENERIC_RESULT_FILENAME = "generic_diagnosis_result.txt"
+GENERIC_RESULT_V2_FILENAME = "generic_diagnosis_result.md"
 MAX_GENERIC_RESULT_BYTES = 65_536
+MAX_GENERIC_REPORT_BYTES = 65_536
+_GENERIC_V2_STATUS_HEADERS = {
+    b"<<<GENERIC_DIAGNOSIS_RESULT_V2:RESOLVED>>>\n": GenericResultStatus.RESOLVED,
+    b"<<<GENERIC_DIAGNOSIS_RESULT_V2:UNRESOLVED>>>\n": GenericResultStatus.UNRESOLVED,
+}
+MAX_GENERIC_RESULT_V2_BYTES = MAX_GENERIC_REPORT_BYTES + max(
+    len(header) for header in _GENERIC_V2_STATUS_HEADERS
+)
+_UTF8_BOM = b"\xef\xbb\xbf"
 GENERIC_RESULT_PATTERN = re.compile(
     r"\A<<<GENERIC_DIAGNOSIS_RESULT_V1>>>\r?\n"
     r"STATUS: (?P<status>RESOLVED|UNRESOLVED)\r?\n"
@@ -70,8 +82,23 @@ def _same_identity(left: os.stat_result, right: os.stat_result) -> bool:
     return left.st_dev == right.st_dev and left.st_ino == right.st_ino
 
 
-def _read_result_bytes(workspace: PreparedWorkspace) -> bytes:
-    path = workspace.root / "output" / GENERIC_RESULT_FILENAME
+def _result_node_exists(workspace: PreparedWorkspace, filename: str) -> bool:
+    try:
+        (workspace.root / "output" / filename).lstat()
+    except FileNotFoundError:
+        return False
+    except OSError:
+        raise _invalid_result() from None
+    return True
+
+
+def _read_result_bytes(
+    workspace: PreparedWorkspace,
+    *,
+    filename: str,
+    max_bytes: int,
+) -> bytes:
+    path = workspace.root / "output" / filename
     descriptor = -1
     try:
         output_before = (workspace.root / "output").stat(follow_symlinks=False)
@@ -86,7 +113,7 @@ def _read_result_bytes(workspace: PreparedWorkspace) -> bytes:
             stat.S_ISLNK(before.st_mode)
             or not stat.S_ISREG(before.st_mode)
             or before.st_nlink != 1
-            or before.st_size > MAX_GENERIC_RESULT_BYTES
+            or before.st_size > max_bytes
         ):
             raise ValueError("generic result node is unsafe")
         flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
@@ -97,11 +124,11 @@ def _read_result_bytes(workspace: PreparedWorkspace) -> bytes:
             not stat.S_ISREG(opened.st_mode)
             or opened.st_nlink != 1
             or not _same_identity(before, opened)
-            or opened.st_size > MAX_GENERIC_RESULT_BYTES
+            or opened.st_size > max_bytes
         ):
             raise ValueError("generic result changed before read")
         chunks: list[bytes] = []
-        remaining = MAX_GENERIC_RESULT_BYTES + 1
+        remaining = max_bytes + 1
         while remaining:
             chunk = os.read(descriptor, min(65_536, remaining))
             if not chunk:
@@ -109,7 +136,7 @@ def _read_result_bytes(workspace: PreparedWorkspace) -> bytes:
             chunks.append(chunk)
             remaining -= len(chunk)
         payload = b"".join(chunks)
-        if len(payload) > MAX_GENERIC_RESULT_BYTES:
+        if len(payload) > max_bytes:
             raise ValueError("generic result exceeds byte limit")
         after_descriptor = os.fstat(descriptor)
         after_name = path.lstat()
@@ -131,12 +158,7 @@ def _read_result_bytes(workspace: PreparedWorkspace) -> bytes:
             os.close(descriptor)
 
 
-def parse_generic_result(
-    workspace: PreparedWorkspace,
-    *,
-    skill_name: str,
-) -> GenericDiagnosisOutcome:
-    raw = _read_result_bytes(workspace)
+def _parse_v1_result(raw: bytes, *, skill_name: str) -> GenericDiagnosisOutcome:
     try:
         text = raw.decode("utf-8", errors="strict")
     except UnicodeDecodeError:
@@ -161,6 +183,70 @@ def parse_generic_result(
         # The name is bound by the immutable Job, never trusted from Agent text.
         skill_name=skill_name,
     )
+
+
+def _parse_v2_result(raw: bytes, *, skill_name: str) -> GenericDiagnosisOutcomeV2:
+    if raw.startswith(_UTF8_BOM):
+        raise _invalid_result() from None
+    status: GenericResultStatus | None = None
+    body = b""
+    for header, candidate_status in _GENERIC_V2_STATUS_HEADERS.items():
+        if raw.startswith(header):
+            status = candidate_status
+            body = raw[len(header) :]
+            break
+    if (
+        status is None
+        or not body
+        or len(body) > MAX_GENERIC_REPORT_BYTES
+        or body.startswith(_UTF8_BOM)
+    ):
+        raise _invalid_result() from None
+    try:
+        report_markdown = body.decode("utf-8", errors="strict")
+        return GenericDiagnosisOutcomeV2(
+            format_version=2,
+            status=status,
+            report_markdown=report_markdown,
+            report_utf8_size=len(body),
+            report_sha256=hashlib.sha256(body).hexdigest(),
+            # The name is bound by the immutable Job, never trusted from Agent text.
+            skill_name=skill_name,
+        )
+    except (TypeError, UnicodeDecodeError, UnicodeEncodeError, ValueError):
+        raise _invalid_result() from None
+
+
+def parse_generic_result(
+    workspace: PreparedWorkspace,
+    *,
+    skill_name: str,
+) -> GenericDiagnosisOutcome | GenericDiagnosisOutcomeV2:
+    v2_exists = _result_node_exists(workspace, GENERIC_RESULT_V2_FILENAME)
+    v1_exists = _result_node_exists(workspace, GENERIC_RESULT_FILENAME)
+    if v2_exists and v1_exists:
+        raise _invalid_result() from None
+    if v2_exists:
+        raw = _read_result_bytes(
+            workspace,
+            filename=GENERIC_RESULT_V2_FILENAME,
+            max_bytes=MAX_GENERIC_RESULT_V2_BYTES,
+        )
+        # A late legacy file is still an ambiguous result, never a fallback.
+        if _result_node_exists(workspace, GENERIC_RESULT_FILENAME):
+            raise _invalid_result() from None
+        return _parse_v2_result(raw, skill_name=skill_name)
+    if not v1_exists:
+        raise _invalid_result() from None
+    raw = _read_result_bytes(
+        workspace,
+        filename=GENERIC_RESULT_FILENAME,
+        max_bytes=MAX_GENERIC_RESULT_BYTES,
+    )
+    # A V2 node that appears during the read makes the result ambiguous.
+    if _result_node_exists(workspace, GENERIC_RESULT_V2_FILENAME):
+        raise _invalid_result() from None
+    return _parse_v1_result(raw, skill_name=skill_name)
 
 
 class GenericLocatorExecutor:
@@ -343,8 +429,11 @@ class GenericLocatorExecutor:
 __all__ = [
     "GENERIC_RESULT_FILENAME",
     "GENERIC_RESULT_PATTERN",
+    "GENERIC_RESULT_V2_FILENAME",
     "GenericLocatorExecution",
     "GenericLocatorExecutor",
+    "MAX_GENERIC_REPORT_BYTES",
     "MAX_GENERIC_RESULT_BYTES",
+    "MAX_GENERIC_RESULT_V2_BYTES",
     "parse_generic_result",
 ]

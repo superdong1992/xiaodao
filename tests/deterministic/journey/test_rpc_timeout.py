@@ -160,10 +160,9 @@ def _golden_target_archive_names() -> tuple[list[dict[str, Any]], list[str]]:
     return targets, names
 
 
-def _materialize_fake_logparse_checkout(parent: Path) -> tuple[Path, Path]:
+def _materialize_fake_logparse_checkout(checkout: Path) -> tuple[Path, Path]:
     """Give fingerprinting a real top-level Git checkout on every platform."""
 
-    checkout = parent / ".s08lp"
     if not checkout.exists():
         checkout.mkdir()
         source = (FAKE_LOGPARSE_REPO / "cli.py").read_text(encoding="utf-8")
@@ -214,6 +213,27 @@ def _remove_test_data_root(root: Path) -> None:
             os.chmod(path, stat.S_IRWXU)
     os.chmod(root, stat.S_IRWXU)
     shutil.rmtree(root)
+
+
+def _windows_extended_path(path: Path) -> Path:
+    absolute = os.path.abspath(os.fspath(path))
+    if absolute.startswith("\\\\?\\"):
+        return Path(absolute)
+    if absolute.startswith("\\\\"):
+        return Path("\\\\?\\UNC\\" + absolute[2:])
+    return Path("\\\\?\\" + absolute)
+
+
+def _journey_storage_roots(tmp_path: Path, discriminator: str) -> tuple[Path, Path]:
+    """Choose isolated short roots and opt Windows into extended paths."""
+
+    if os.name != "nt":
+        return tmp_path / ".s08", tmp_path / ".s08lp"
+    compact = tmp_path.parent / discriminator
+    return (
+        _windows_extended_path(compact),
+        _windows_extended_path(compact.with_name(compact.name + "lp")),
+    )
 
 
 class _E2EIds(DeterministicIdGenerator):
@@ -332,7 +352,7 @@ class _Stack:
             self.attachment_registry
         )
         fake_logparse_repo, fake_logparse_config = _materialize_fake_logparse_checkout(
-            data_root.parent
+            data_root.with_name(data_root.name + "lp")
         )
         logparse_asset, broker_factory = build_logparse_runtime(
             fake_logparse_repo,
@@ -752,8 +772,7 @@ def test_r01_r14_rpc_timeout_is_one_durable_cross_module_path(
     # Keep the staged LOGPARSE_RUN below the legacy Windows MAX_PATH boundary.
     # On POSIX, use pytest's native temporary filesystem so a Docker Desktop
     # bind mount cannot destabilize inode-based workspace safety checks.
-    data_root = ROOT / ".s08" if os.name == "nt" else tmp_path / ".s08"
-    logparse_checkout = data_root.parent / ".s08lp"
+    data_root, logparse_checkout = _journey_storage_roots(tmp_path, "r")
     _remove_test_data_root(data_root)
     _remove_test_data_root(logparse_checkout)
     request.addfinalizer(lambda: _remove_test_data_root(data_root))
@@ -1465,10 +1484,9 @@ def test_same_job_uses_initial_order_fact_and_survives_restart(
 ) -> None:
     """Prove the cheap SameJob path without spending a real-model call."""
 
-    # Reuse the compact, ignored Windows roots already exercised by the full
-    # cross-module journey; each test removes them before and after use.
-    data_root = ROOT / ".s08" if os.name == "nt" else tmp_path / ".s08"
-    logparse_checkout = data_root.parent / ".s08lp"
+    # Reuse the compact Windows-root strategy exercised by the full
+    # cross-module journey; each process/test pair owns a distinct exact path.
+    data_root, logparse_checkout = _journey_storage_roots(tmp_path, "s")
     _remove_test_data_root(data_root)
     _remove_test_data_root(logparse_checkout)
     request.addfinalizer(lambda: _remove_test_data_root(data_root))

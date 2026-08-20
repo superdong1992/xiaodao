@@ -40,7 +40,9 @@ from problem_locator.contracts import (
     ExecutionFailure,
     FieldUpdateAction,
     GenericDiagnosisOutcome,
+    GenericDiagnosisOutcomeV2,
     GenericResult,
+    GenericResultV2Draft,
     GenericResultStatus,
     InputRequirementConstraints,
     Job,
@@ -453,6 +455,7 @@ class DomainCoordinator:
             or case.final_result is not None
             or case.unresolved_result is not None
             or case.generic_result is not None
+            or case.generic_result_v2 is not None
             or case.failure is not None
             or case.raw_problem_text != payload.raw_problem_text
         ):
@@ -612,7 +615,9 @@ class DomainCoordinator:
         if active.diagnosis_mode is DiagnosisMode.GENERIC:
             generic = outcome.payload
             if (
-                not isinstance(generic, GenericDiagnosisOutcome)
+                not isinstance(
+                    generic, (GenericDiagnosisOutcome, GenericDiagnosisOutcomeV2)
+                )
                 or generic.skill_name != active.generic_skill_name
                 or outcome.result_type is not OutcomeResultType.COMPLETED
                 or outcome.consumed_evidence_refs
@@ -624,7 +629,7 @@ class DomainCoordinator:
                     "A GENERIC DIAGNOSE Outcome must be the isolated generic result."
                 )
             terminal_status = CaseStatus(generic.status.value)
-            return TransitionPlan(
+            common = dict(
                 accepted_state_delta=_empty_delta(),
                 target_case_status=terminal_status,
                 job_updates=[
@@ -642,6 +647,26 @@ class DomainCoordinator:
                 candidate_mutation=None,
                 next_job_spec=None,
                 final_result_target=None,
+                clear_active_job=True,
+                reason="Apply the generic diagnosis result directly without review.",
+            )
+            if isinstance(generic, GenericDiagnosisOutcomeV2):
+                return TransitionPlan(
+                    **common,
+                    generic_result_v2_draft=GenericResultV2Draft(
+                        format_version=generic.format_version,
+                        status=GenericResultStatus(generic.status.value),
+                        report_markdown=generic.report_markdown,
+                        report_utf8_size=generic.report_utf8_size,
+                        report_sha256=generic.report_sha256,
+                        skill_name=generic.skill_name,
+                        source_job_id=active.job_id,
+                        source_outcome_id=outcome.outcome_id,
+                        occurred_at=outcome.produced_at,
+                    ),
+                )
+            return TransitionPlan(
+                **common,
                 generic_result=GenericResult(
                     status=GenericResultStatus(generic.status.value),
                     conclusion=generic.conclusion,
@@ -651,8 +676,6 @@ class DomainCoordinator:
                     source_outcome_id=outcome.outcome_id,
                     occurred_at=outcome.produced_at,
                 ),
-                clear_active_job=True,
-                reason="Apply the generic diagnosis result directly without review.",
             )
         if active.diagnosis_mode is not DiagnosisMode.SPECIALIZED:
             return _validation("A DIAGNOSE Job must have a frozen diagnosis mode.")

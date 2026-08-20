@@ -35,6 +35,40 @@ function gateExecutionId(stage, gateId) {
   return `${stage.id}--${gateId}`;
 }
 
+export function pytestScratchBoundary({
+  platform = process.platform,
+  temporaryDirectory = os.tmpdir(),
+  repoRoot = null,
+  isolatedAgent = false,
+  configuredWindowsDirectory = process.env.TEST_FLOW_WINDOWS_SCRATCH_ROOT ?? null,
+  attemptRoot,
+} = {}) {
+  if (platform === "win32") {
+    if (configuredWindowsDirectory !== null) {
+      if (!path.isAbsolute(configuredWindowsDirectory)) {
+        throw new Error("PYTEST_WINDOWS_SCRATCH_ROOT_ABSOLUTE_REQUIRED");
+      }
+      return path.resolve(configuredWindowsDirectory);
+    }
+    const systemTemporary = path.resolve(temporaryDirectory);
+    if (isolatedAgent || repoRoot === null) return systemTemporary;
+    const repositoryTemporary = path.resolve(repoRoot, ".tmp", "p");
+    return repositoryTemporary.length <= systemTemporary.length
+      ? repositoryTemporary
+      : systemTemporary;
+  }
+  if (!attemptRoot) throw new Error("PYTEST_ATTEMPT_ROOT_REQUIRED");
+  return path.resolve(attemptRoot);
+}
+
+export function pytestBaseTempPath(scratch, platform = process.platform) {
+  const pathApi = platform === "win32" ? path.win32 : path.posix;
+  const absolute = pathApi.resolve(scratch);
+  if (platform !== "win32" || absolute.startsWith("\\\\?\\")) return absolute;
+  if (absolute.startsWith("\\\\")) return `\\\\?\\UNC\\${absolute.slice(2)}`;
+  return `\\\\?\\${absolute}`;
+}
+
 function gateRoot(context, stage) {
   return context.gateRoot ?? path.join(context.attemptRoot, "payload", "stages", stage.id);
 }
@@ -114,6 +148,9 @@ function affectedSelectors(changedFiles) {
     if (file.startsWith("tests/deterministic/") && file.endsWith(".py")) {
       add(path.posix.basename(file).startsWith("test_") ? file : path.posix.dirname(file));
       continue;
+    }
+    if (file === "docs/browser-rest-api.md" || file === "schemas/v2/web-api.openapi.snapshot.json") {
+      add("tests/deterministic/unit/interfaces/test_web_api.py");
     }
     if (/^(schemas|src\/problem_locator\/contracts)\//.test(file)) add("tests/deterministic/contracts");
     if (/^src\/problem_locator\/domain\//.test(file)) add("tests/deterministic/unit/domain", "tests/deterministic/integration/test_s01_contract_domain_seam.py");
@@ -198,14 +235,15 @@ async function pytestAction(context, stage, selectors, {
     return { status: "NOT_REQUIRED", failure_domain: null, code: "AFFECTED_SCOPE_EMPTY", elapsed_seconds: 0, pytest: summary, selection };
   }
   const externalScratch = process.platform === "win32";
-  const windowsScratchBoundary = isolatedAgent
-    ? os.tmpdir()
-    : path.join(context.repoRoot, ".tmp", "p");
-  if (externalScratch) ensureDirectory(windowsScratchBoundary);
+  const scratchBoundary = pytestScratchBoundary({
+    attemptRoot: context.attemptRoot,
+    repoRoot: context.repoRoot,
+    isolatedAgent,
+  });
+  if (externalScratch) ensureDirectory(scratchBoundary);
   const scratch = externalScratch
-    ? fs.mkdtempSync(path.join(windowsScratchBoundary, "p-"))
+    ? fs.mkdtempSync(path.join(scratchBoundary, "p-"))
     : path.join(context.attemptRoot, "scratch", gateExecutionId(stage, context.gateId ?? stage.id));
-  const scratchBoundary = externalScratch ? windowsScratchBoundary : context.attemptRoot;
   const pytestScratch = externalScratch ? scratch : path.join(scratch, "pytest");
   ensureDirectory(scratch);
   const processEnvironment = {
@@ -233,7 +271,7 @@ async function pytestAction(context, stage, selectors, {
     ...selectors,
     "-q",
     "-p", "no:cacheprovider",
-    `--basetemp=${pytestScratch}`,
+    `--basetemp=${pytestBaseTempPath(pytestScratch)}`,
     `--junitxml=${path.join(stageEvidence, "pytest.xml")}`,
     ...extra,
   ];
@@ -804,7 +842,7 @@ function realEnvironment(context, profile) {
   };
   if (profile === "real-agent-backend") return { env: { ...common, S08_REAL_AGENT_GATE: "1" } };
   if (profile === "real-generic-locator") {
-    const skillName = "generic-problem-locator-smoke";
+    const skillName = "generic-problem-locator-dual-mode";
     const skillPath = path.join(
       context.repoRoot,
       "tests",

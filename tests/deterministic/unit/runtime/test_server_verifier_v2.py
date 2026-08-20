@@ -712,6 +712,7 @@ def _need_order_id_draft(
     }
     value = source.model_dump(mode="json")
     value["result_type"] = "NEED_INPUT"
+    value["rule_claims"] = []
     value["payload"]["candidate_conclusion_draft"] = None
     value["payload"]["requested_input"] = [requirement_id]
     value["payload"]["requested_attachments"] = []
@@ -739,6 +740,62 @@ def _verify_review(
         broker_audit_bytes=None,
         diagnosis_audit=diagnosis_audit,
     )
+
+
+@pytest.mark.parametrize("mutation", ["missing", "reordered"])
+def test_completed_diagnosis_claims_exactly_follow_the_pinned_skill(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    job, manifest, draft, _, _ = _build(
+        tmp_path,
+        problem_time="2026-01-03T00:00:03.000Z",
+    )
+    value = draft.model_dump(mode="json")
+    if mutation == "missing":
+        value["rule_claims"].pop()
+    else:
+        value["rule_claims"] = list(reversed(value["rule_claims"]))
+    invalid = AgentJobOutcomeDraftV2.model_validate(value)
+
+    with pytest.raises(ValueError, match="exactly follow the pinned Skill"):
+        verify_agent_draft(
+            workspace_root=tmp_path,
+            job=job,
+            manifest=manifest,
+            draft=invalid,
+            draft_bytes=canonical_json_bytes(invalid),
+            proposal_resources=(),
+            skill_root=tmp_path / "skill",
+            broker_audit_bytes=_broker_audit(manifest),
+            diagnosis_audit=None,
+        )
+
+
+def test_review_claims_exactly_follow_the_pinned_skill(tmp_path: Path) -> None:
+    diagnosis_job, diagnosis_manifest, diagnosis_draft, _, diagnosis = _build(
+        tmp_path,
+        problem_time="2026-01-03T00:00:03.000Z",
+    )
+    assert diagnosis is not None
+    review_job, review_manifest, review_draft = _review_inputs(
+        diagnosis_job=diagnosis_job,
+        diagnosis_manifest=diagnosis_manifest,
+        diagnosis_draft=diagnosis_draft,
+        diagnosis_audit=diagnosis.audit,
+    )
+    value = review_draft.model_dump(mode="json")
+    value["rule_claims"] = list(reversed(value["rule_claims"]))
+    invalid = AgentJobOutcomeDraftV2.model_validate(value)
+
+    with pytest.raises(ValueError, match="exactly follow the pinned Skill"):
+        _verify_review(
+            tmp_path,
+            job=review_job,
+            manifest=review_manifest,
+            draft=invalid,
+            diagnosis_audit=diagnosis.audit,
+        )
 
 
 def _add_open_review_requirement(

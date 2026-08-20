@@ -24,6 +24,11 @@ Windows、macOS 和显式 Linux Client 都有仓库内置 adapter。`--client au
 
 PowerShell 使用同参数的 `tools/test-flow/run.ps1`。计划会列出 Goal、Proof、Stage、Gate、依赖、身份、复用决定、性能身份、预计资源和 admission blocker。
 
+Windows pytest 默认在仓库 `.tmp/p` 与系统临时目录中选择物理路径较短的一侧。若深层 worktree
+仍可能触发 `MAX_PATH`，可在规划和实际运行两次命令中把
+`TEST_FLOW_WINDOWS_SCRATCH_ROOT` 设为同一个已存在或可创建的绝对可写短目录；编排器只在其下
+创建独占 `p-*` 子目录，清理仍禁止删除边界本身或越界路径。
+
 ## Dev 真实测试
 
 `dev.real` 必须选择一个 Stage，并显式允许真实模型。第一次运行同样先看计划：

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -9,7 +10,7 @@ import pytest
 
 from problem_locator.contracts import (
     DiagnosisMode,
-    GenericDiagnosisOutcome,
+    GenericDiagnosisOutcomeV2,
     GenericResultStatus,
     Job,
     JobStatus,
@@ -39,6 +40,16 @@ RAW_PROBLEM_TEXT = (
     "request-id: 订单-α-42\n"
     "已确认：刷新三次仍复现"
 )
+GENERIC_SKILL_NAME = "generic-problem-locator-dual-mode"
+NATIVE_REPORT = (
+    ROOT
+    / "tests"
+    / "fixtures"
+    / "components"
+    / GENERIC_SKILL_NAME
+    / "references"
+    / "native-report.md"
+)
 
 
 def _load(name: str) -> dict[str, object]:
@@ -53,17 +64,17 @@ def _generic_state(tmp_path: Path) -> tuple[StateFile, Job, VersionedAssetCatalo
     )
     catalog = VersionedAssetCatalog(
         skill_dir=skill_dir,
-        generic_skill_name="generic-problem-locator-smoke",
+        generic_skill_name=GENERIC_SKILL_NAME,
     )
     payload = _load("job-route.json")
     payload.update(catalog.generic_diagnose_bindings().model_dump(mode="json"))
     payload.update(
         job_type="DIAGNOSE",
         diagnosis_mode=DiagnosisMode.GENERIC,
-        generic_skill_name="generic-problem-locator-smoke",
+        generic_skill_name=GENERIC_SKILL_NAME,
         generic_problem_text=RAW_PROBLEM_TEXT,
         status=JobStatus.RUNNING,
-        goal="Run the configured generic problem locator smoke Skill.",
+        goal="Run the configured dual-mode generic problem locator Skill.",
         base_state_revision=1,
         context_snapshot=None,
         evidence_refs=[],
@@ -91,6 +102,7 @@ def _generic_state(tmp_path: Path) -> tuple[StateFile, Job, VersionedAssetCatalo
         final_result=None,
         unresolved_result=None,
         generic_result=None,
+        generic_result_v2=None,
         failure=None,
     )
     aggregate["jobs"] = {job.job_id: job.model_dump(mode="json")}
@@ -102,7 +114,7 @@ def _generic_state(tmp_path: Path) -> tuple[StateFile, Job, VersionedAssetCatalo
     return StateFile.model_validate(state_payload), job, catalog
 
 
-def test_real_preinstalled_generic_skill_receives_exact_input_and_writes_result(
+def test_real_preinstalled_generic_skill_preserves_the_rich_v2_report(
     tmp_path: Path,
 ) -> None:
     if os.environ.get("S08_REAL_GENERIC_LOCATOR_GATE") != "1":
@@ -145,14 +157,16 @@ def test_real_preinstalled_generic_skill_receives_exact_input_and_writes_result(
             f"stderr={stderr.decode('utf-8', 'replace')!r}"
         )
     assert receipt.job_outcome.result_type is OutcomeResultType.COMPLETED
-    assert isinstance(receipt.job_outcome.payload, GenericDiagnosisOutcome)
-    assert receipt.job_outcome.payload.status is GenericResultStatus.RESOLVED
-    assert receipt.job_outcome.payload.conclusion == "generic-skill-input-contract-ok"
-    assert (
-        receipt.job_outcome.payload.root_cause_analysis
-        == "已逐字确认通用定位输入与预期的多行 Unicode 文本一致。"
-    )
-    assert receipt.job_outcome.payload.skill_name == "generic-problem-locator-smoke"
+    assert isinstance(receipt.job_outcome.payload, GenericDiagnosisOutcomeV2)
+    report = NATIVE_REPORT.read_bytes()
+    payload = receipt.job_outcome.payload
+    assert payload.format_version == 2
+    assert payload.status is GenericResultStatus.RESOLVED
+    assert payload.report_markdown.encode("utf-8") == report
+    assert payload.report_utf8_size == len(report)
+    assert payload.report_sha256 == hashlib.sha256(report).hexdigest()
+    assert payload.skill_name == GENERIC_SKILL_NAME
+    assert "LAN_FIXTURE_PRIVATE_7f91c4" not in payload.report_markdown
     assert job.context_snapshot is None
     assert job.evidence_refs == job.attachment_refs == job.previous_outcome_refs == []
     assert job.artifact_refs == []

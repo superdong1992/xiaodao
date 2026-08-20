@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+
 import pytest
 
 from problem_locator.contracts import (
@@ -16,6 +18,7 @@ from problem_locator.contracts import (
     ErrorCode,
     FieldUpdateAction,
     GenericDiagnosisOutcome,
+    GenericDiagnosisOutcomeV2,
     GenericResultStatus,
     Job,
     JobStatus,
@@ -332,6 +335,67 @@ def test_generic_diagnosis_result_becomes_terminal_without_review(
     assert plan.accepted_artifact_proposal_keys == []
     assert plan.selected_skill_update is not None
     assert plan.selected_skill_update.action is FieldUpdateAction.CLEAR
+    assert validate_transition_plan_for_outcome(plan, outcome) is plan
+
+
+@pytest.mark.parametrize(
+    ("generic_status", "case_status"),
+    [
+        (GenericResultStatus.RESOLVED, CaseStatus.RESOLVED),
+        (GenericResultStatus.UNRESOLVED, CaseStatus.UNRESOLVED),
+    ],
+)
+def test_generic_v2_markdown_result_becomes_a_terminal_artifact_draft(
+    generic_status: GenericResultStatus,
+    case_status: CaseStatus,
+) -> None:
+    job = _generic_diagnose_job()
+    snapshot = _generic_snapshot(job)
+    report = "# 定位报告\n\n| 项目 | 结论 |\n| --- | --- |\n| 状态 | 已确认 |\n\n```json\n{\"ok\":true}\n```\n"
+    report_bytes = report.encode("utf-8")
+    outcome = rebuild(
+        diagnosis_outcome(),
+        result_type=OutcomeResultType.COMPLETED,
+        payload=GenericDiagnosisOutcomeV2(
+            format_version=2,
+            status=generic_status,
+            report_markdown=report,
+            report_utf8_size=len(report_bytes),
+            report_sha256=hashlib.sha256(report_bytes).hexdigest(),
+            skill_name="generic-problem-locator-smoke",
+        ),
+        consumed_evidence_refs=[],
+        proposed_evidence=[],
+        proposed_artifacts=[],
+        decision_audit=None,
+    )
+    request = trigger(
+        snapshot,
+        trigger_type=TriggerType.DIAGNOSIS_OUTCOME,
+        payload=DiagnosisOutcomeTriggerPayload(job_outcome=outcome),
+        bindings={},
+        continuation_resources=continuation(
+            incoming_outcome_id=outcome.outcome_id,
+            job=job,
+        ),
+        occurred_at=outcome.produced_at,
+    )
+
+    plan = DomainCoordinator().plan(snapshot, request)
+
+    assert not isinstance(plan, ApplicationError)
+    assert plan.target_case_status is case_status
+    assert plan.generic_result is None
+    assert plan.generic_result_v2_draft is not None
+    assert plan.generic_result_v2_draft.status is generic_status
+    assert plan.generic_result_v2_draft.report_markdown == report
+    assert plan.generic_result_v2_draft.report_utf8_size == len(report_bytes)
+    assert plan.generic_result_v2_draft.report_sha256 == hashlib.sha256(
+        report_bytes
+    ).hexdigest()
+    assert plan.generic_result_v2_draft.source_job_id == job.job_id
+    assert plan.generic_result_v2_draft.source_outcome_id == outcome.outcome_id
+    assert plan.accepted_artifact_proposal_keys == []
     assert validate_transition_plan_for_outcome(plan, outcome) is plan
 
 

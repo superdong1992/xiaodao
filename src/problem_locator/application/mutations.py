@@ -12,6 +12,7 @@ from problem_locator.contracts import (
     DiagnosisState,
     Evidence,
     ExecutionFailureRecord,
+    GenericResultV2,
     IdempotencyRecord,
     Job,
     JobLifecycleUpdate,
@@ -22,6 +23,7 @@ from problem_locator.contracts import (
     StateMutation,
     TransitionPlan,
     UnresolvedResult,
+    finalize_generic_result_v2,
 )
 
 from .formalization import (
@@ -76,19 +78,37 @@ def apply_transition_plan_to_case(
     created_job: Job | None,
     processed_at: str,
     unresolved_result: UnresolvedResult | None = None,
+    generic_result_v2: GenericResultV2 | None = None,
 ) -> Case:
     """Apply only explicit plan fields after DiagnosisState formalization."""
 
     if (plan.next_job_spec is None) != (created_job is None):
         raise ValueError("created_job must exist exactly when next_job_spec exists")
-    if plan.generic_result is None and (
+    if (plan.generic_result_v2_draft is None) != (generic_result_v2 is None):
+        raise ValueError(
+            "generic_result_v2 must exist exactly for a V2 generic result draft"
+        )
+    if generic_result_v2 is not None:
+        assert plan.generic_result_v2_draft is not None
+        expected_v2 = finalize_generic_result_v2(
+            plan.generic_result_v2_draft,
+            generic_result_v2.report_artifact_id,
+        )
+        if generic_result_v2 != expected_v2:
+            raise ValueError(
+                "generic_result_v2 must finalize the complete TransitionPlan draft"
+            )
+    if plan.generic_result is not None and generic_result_v2 is not None:
+        raise ValueError("V1 and V2 generic results are mutually exclusive")
+    generic_result = plan.generic_result or generic_result_v2
+    if generic_result is None and (
         (plan.target_case_status is CaseStatus.UNRESOLVED)
         != (unresolved_result is not None)
     ):
         raise ValueError(
             "unresolved_result must exist exactly for an UNRESOLVED plan"
         )
-    if plan.generic_result is not None and unresolved_result is not None:
+    if generic_result is not None and unresolved_result is not None:
         raise ValueError("generic terminal plans forbid unresolved_result")
     if created_job is not None:
         if (
@@ -116,6 +136,7 @@ def apply_transition_plan_to_case(
         final_result=resolve_final_result(candidate, plan.final_result_target),
         unresolved_result=unresolved_result,
         generic_result=plan.generic_result,
+        generic_result_v2=generic_result_v2,
         failure=apply_case_failure_update(
             current.failure,
             plan.case_failure_update,

@@ -136,6 +136,7 @@ def _mixed_wait_draft() -> dict[str, object]:
             name="log_archive",
         ),
     ]
+    value["rule_claims"] = []
     return value
 
 
@@ -178,6 +179,50 @@ def test_sealer_accepts_need_input_with_multiple_inputs_and_attachment(
     assert len(draft.payload.requested_attachments) == 1
     assert len(draft.payload.state_delta.add_pending_requirements) == 3
     assert (root / DRAFT_FINALIZATION_MARKER_RELATIVE_PATH).is_file()
+
+
+def test_sealer_accepts_need_attachment_without_rule_claims(
+    tmp_path: Path,
+) -> None:
+    root = _workspace(tmp_path)
+    path = root / DRAFT_OUTCOME_RELATIVE_PATH
+    value = _mixed_wait_draft()
+    payload = value["payload"]
+    assert isinstance(payload, dict)
+    state_delta = payload["state_delta"]
+    assert isinstance(state_delta, dict)
+    attachment_id = payload["requested_attachments"][0]
+    value["result_type"] = "NEED_ATTACHMENT"
+    payload["requested_input"] = []
+    state_delta["add_pending_requirements"] = [
+        item
+        for item in state_delta["add_pending_requirements"]
+        if item["requirement_id"] == attachment_id
+    ]
+    path.write_bytes(canonical_json_bytes(value))
+
+    seal_agent_outcome_draft(root)
+
+    draft = parse_canonical_json_bytes(path.read_bytes(), AgentJobOutcomeDraftV2)
+    assert draft.result_type.value == "NEED_ATTACHMENT"
+    assert draft.rule_claims == []
+    assert draft.payload.requested_input == []
+    assert draft.payload.requested_attachments == [attachment_id]
+
+
+def test_sealer_rejects_completed_diagnosis_without_rule_claims(
+    tmp_path: Path,
+) -> None:
+    root = _workspace(tmp_path)
+    path = root / DRAFT_OUTCOME_RELATIVE_PATH
+    value = _v2_draft("agent-job-outcome-diagnosis.json")
+    value["rule_claims"] = []
+    path.write_bytes(canonical_json_bytes(value))
+
+    with pytest.raises(ValueError, match="non-waiting DIAGNOSE/REVIEW"):
+        seal_agent_outcome_draft(root)
+
+    assert not (root / DRAFT_FINALIZATION_MARKER_RELATIVE_PATH).exists()
 
 
 def test_sealer_rejects_need_attachment_that_also_requests_input(

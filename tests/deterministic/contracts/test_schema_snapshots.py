@@ -45,10 +45,9 @@ def _walk_json(value: Any) -> Iterator[Any]:
 
 def test_schema_registry_is_the_exact_frozen_public_set() -> None:
     assert set(SCHEMA_MODELS) == EXPECTED_SCHEMA_NAMES
-    assert SCHEMA_VERSION == 5
-    assert CONTRACT_REVISION == "v5-contract-r1"
-    assert isinstance(GENERATOR_VERSION, str)
-    assert GENERATOR_VERSION.strip()
+    assert SCHEMA_VERSION == 6
+    assert CONTRACT_REVISION == "v6-contract-r1"
+    assert GENERATOR_VERSION == "6"
 
 
 def test_generated_schema_snapshots_are_byte_stable() -> None:
@@ -92,7 +91,7 @@ def test_contract_manifest_covers_the_exact_frozen_inputs() -> None:
         "generator_version",
         "schema_version",
     }
-    assert manifest["schema_version"] == 5
+    assert manifest["schema_version"] == 6
     assert manifest["contract_revision"] == CONTRACT_REVISION
     assert manifest["generator_version"] == GENERATOR_VERSION
 

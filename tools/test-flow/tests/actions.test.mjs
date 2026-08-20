@@ -5,8 +5,18 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { collectIsolatedModelUsage, evaluatePytestSummary, materializePytestSummary, parseJUnitSummary, planAffectedSelection, probeLoopbackCapability } from "../lib/actions.mjs";
+import {
+  collectIsolatedModelUsage,
+  evaluatePytestSummary,
+  materializePytestSummary,
+  parseJUnitSummary,
+  planAffectedSelection,
+  probeLoopbackCapability,
+  pytestBaseTempPath,
+  pytestScratchBoundary,
+} from "../lib/actions.mjs";
 import { applyGateEvidenceContract } from "../lib/engine.mjs";
+import { removeTreeWritable } from "../lib/util.mjs";
 import {
   environmentKeySummary,
   ISOLATED_AGENT_ENV_POLICY_VERSION,
@@ -58,6 +68,105 @@ function passingSkillTraceAudit() {
   };
 }
 
+test("Windows pytest selects the shortest safe default and honors an absolute override", () => {
+  const temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "test-flow-pytest-boundary-"));
+  const longAttemptRoot = path.join(
+    temporaryDirectory,
+    "codex-worktrees",
+    "a-very-long-worktree-name-that-must-not-prefix-pytest-scratch",
+  );
+  try {
+    const ordinary = pytestScratchBoundary({
+      platform: "win32",
+      temporaryDirectory,
+      repoRoot: longAttemptRoot,
+      attemptRoot: longAttemptRoot,
+      isolatedAgent: false,
+      configuredWindowsDirectory: null,
+    });
+    const isolated = pytestScratchBoundary({
+      platform: "win32",
+      temporaryDirectory,
+      repoRoot: longAttemptRoot,
+      attemptRoot: longAttemptRoot,
+      isolatedAgent: true,
+      configuredWindowsDirectory: null,
+    });
+    assert.equal(ordinary, path.resolve(temporaryDirectory));
+    assert.equal(isolated, ordinary);
+    assert.equal(ordinary.includes("codex-worktrees"), false);
+
+    const shortRepoRoot = path.join(temporaryDirectory, "r");
+    assert.equal(
+      pytestScratchBoundary({
+        platform: "win32",
+        temporaryDirectory: path.join(temporaryDirectory, "long-system-temp-name"),
+        repoRoot: shortRepoRoot,
+        attemptRoot: longAttemptRoot,
+        isolatedAgent: false,
+        configuredWindowsDirectory: null,
+      }),
+      path.resolve(shortRepoRoot, ".tmp", "p"),
+    );
+    const configured = path.join(temporaryDirectory, "configured");
+    assert.equal(
+      pytestScratchBoundary({
+        platform: "win32",
+        temporaryDirectory,
+        repoRoot: longAttemptRoot,
+        attemptRoot: longAttemptRoot,
+        configuredWindowsDirectory: configured,
+      }),
+      path.resolve(configured),
+    );
+    assert.throws(
+      () => pytestScratchBoundary({
+        platform: "win32",
+        temporaryDirectory,
+        repoRoot: longAttemptRoot,
+        attemptRoot: longAttemptRoot,
+        configuredWindowsDirectory: "relative-scratch",
+      }),
+      /PYTEST_WINDOWS_SCRATCH_ROOT_ABSOLUTE_REQUIRED/,
+    );
+
+    const scratch = fs.mkdtempSync(path.join(ordinary, "p-"));
+    assert.equal(path.dirname(scratch), ordinary);
+    removeTreeWritable(scratch, ordinary);
+    assert.equal(fs.existsSync(scratch), false);
+    assert.throws(
+      () => removeTreeWritable(ordinary, ordinary),
+      (error) => error.code === "CLEANUP_PATH_OUTSIDE_ATTEMPT",
+    );
+  } finally {
+    fs.rmSync(temporaryDirectory, { recursive: true, force: true });
+  }
+});
+
+test("Windows pytest base temp uses an extended-length path without moving scratch", () => {
+  assert.equal(
+    pytestBaseTempPath("C:\\workspace\\.tmp\\p\\p-123456", "win32"),
+    "\\\\?\\C:\\workspace\\.tmp\\p\\p-123456",
+  );
+  assert.equal(
+    pytestBaseTempPath("\\\\server\\share\\p-123456", "win32"),
+    "\\\\?\\UNC\\server\\share\\p-123456",
+  );
+  assert.equal(pytestBaseTempPath("/tmp/p-123456", "linux"), "/tmp/p-123456");
+});
+
+test("non-Windows pytest scratch keeps the attempt root boundary", () => {
+  const attemptRoot = path.join(os.tmpdir(), "test-flow-attempt-boundary");
+  assert.equal(
+    pytestScratchBoundary({
+      platform: "linux",
+      temporaryDirectory: path.join(os.tmpdir(), "must-not-be-used"),
+      attemptRoot,
+    }),
+    path.resolve(attemptRoot),
+  );
+});
+
 test("a narrow affected selection runs before the full suite", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "test-flow-affected-narrow-"));
   try {
@@ -82,6 +191,31 @@ test("a broad affected selection is folded into the following full suite", () =>
     assert.equal(selection.covered_test_files, 4);
     assert.equal(selection.total_test_files, 4);
     assert.equal(selection.defer_to_full, true);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("REST guide and OpenAPI snapshot changes select the browser contract regression", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "test-flow-affected-rest-guide-"));
+  try {
+    for (const name of ["a", "b", "c", "d"]) writeTest(path.join(root, "tests", "deterministic", "unit", `test_${name}.py`));
+    writeTest(path.join(root, "tests", "deterministic", "contracts", "test_contract.py"));
+    const webApiTest = path.join(root, "tests", "deterministic", "unit", "interfaces", "test_web_api.py");
+    writeTest(webApiTest);
+
+    const guideSelection = planAffectedSelection(root, ["docs/browser-rest-api.md"]);
+    assert.deepEqual(guideSelection.selectors, ["tests/deterministic/unit/interfaces/test_web_api.py"]);
+    assert.equal(guideSelection.covered_test_files, 1);
+    assert.equal(guideSelection.defer_to_full, false);
+
+    const snapshotSelection = planAffectedSelection(root, ["schemas/v2/web-api.openapi.snapshot.json"]);
+    assert.deepEqual(snapshotSelection.selectors, [
+      "tests/deterministic/contracts",
+      "tests/deterministic/unit/interfaces/test_web_api.py",
+    ]);
+    assert.equal(snapshotSelection.covered_test_files, 2);
+    assert.equal(snapshotSelection.defer_to_full, false);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
