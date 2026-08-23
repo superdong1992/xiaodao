@@ -1,17 +1,12 @@
 {
-  "scenario_id": "server-queue-delay",
+  "scenario_id": "server-queue-single",
   "problem_time": "2026-08-23T10:00:05.100000+08:00",
   "client_process": "rpc_client",
   "server_process": "rpc_server",
-  "service": "svc_orders",
-  "api": "Reserve",
+  "service": "svc_billing",
+  "api": "Charge",
   "expected_status": "CONFIRMED",
   "expected_branch_markers": ["QUEUE_HISTORY"],
-  "expected_terms": [
-    "svc_catalog",
-    "Refresh",
-    "svc_auth",
-    "Sync"
-  ],
+  "expected_terms": ["无法确认", "贡献者"],
   "forbidden_evidence_terms": []
 }

@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "scenario_id": "deadloop-detected",
+  "status": "CONFIRMED",
+  "confirmed_methods": ["api-execution-too-long"],
+  "candidate_methods": [],
+  "evidence": [
+    {
+      "method_id": "api-execution-too-long",
+      "anchor": "server",
+      "marker": "DEADLOOP_DETECTED",
+      "summary": "服务 svc_compute 的 Run 记录 start_us=0、current_us=65000001、timeout_ms=20000；执行时长为 65000001 微秒，超过 60 秒及超时阈值 20000000 微秒的两倍，满足死循环检测条件。"
+    }
+  ],
+  "limitations": [
+    "客户端日志仅显示 reqid(401) 超时；服务端 DEADLOOP_DETECTED 记录未包含 request_id，无法仅凭现有字段证明两条日志属于同一次调用。",
+    "未观察到 LATE_RESPONSE、API_COMPLETE 或 QUEUE_HISTORY，因此无法进一步确认服务端排队或客户端收包阻塞原因。",
+    "DEADLOOP_DETECTED 受条件打印及 BBBB 进程级抑制影响，缺失相关记录不能排除其他原因。"
+  ],
+  "safety_notes": [
+    "RPC 超时不等于调用已取消；服务端可能已继续执行 Run，并可能产生后续副作用。"
+  ],
+  "logparse_receipt_sha256": "12784b2e6e6f5ae25f1d19425d8962819557499ee2a79e3d42bb06dc59e4cf05"
+}

@@ -11,6 +11,7 @@ from pathlib import Path, PurePosixPath
 
 
 NAME_PATTERN = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*\Z")
+FIELD_PATTERN = re.compile(r"[a-z][a-z0-9]*(?:_[a-z0-9]+)*\Z")
 SHA256_PATTERN = re.compile(r"[0-9a-f]{64}\Z")
 METHOD_HEADINGS = (
     "## 适用条件",
@@ -25,6 +26,9 @@ ROOT_KEYS = {
     "schema_version",
     "skill_name",
     "source_wiki_sha256",
+    "required_user_inputs",
+    "required_artifacts",
+    "log_derived_fields",
     "shared_references",
     "methods",
 }
@@ -100,6 +104,36 @@ def _read_json(path: Path, errors: list[str]) -> object | None:
         return None
 
 
+def _field_ids(value: object, label: str, errors: list[str]) -> list[str]:
+    if not isinstance(value, list):
+        errors.append(f"{label} must be an array")
+        return []
+    if any(not isinstance(item, str) or not FIELD_PATTERN.fullmatch(item) for item in value):
+        errors.append(f"{label} must contain lowercase snake_case identifiers")
+        return []
+    if len(value) != len(set(value)):
+        errors.append(f"{label} must contain unique identifiers")
+    return list(value)
+
+
+def _wiki_log_templates(text: str) -> list[str]:
+    templates: list[str] = []
+    in_text_fence = False
+    for raw_line in text.splitlines():
+        stripped = raw_line.strip()
+        if stripped == "```text":
+            in_text_fence = True
+            continue
+        if stripped == "```" and in_text_fence:
+            in_text_fence = False
+            continue
+        if not in_text_fence or not stripped:
+            continue
+        if re.search(r"\{[A-Za-z_][A-Za-z0-9_]*\}|%[A-Za-z]", stripped):
+            templates.append(stripped)
+    return templates
+
+
 def validate(skill_dir: Path, wiki: Path) -> dict[str, object]:
     errors: list[str] = []
     skill_dir = skill_dir.resolve()
@@ -129,7 +163,7 @@ def validate(skill_dir: Path, wiki: Path) -> dict[str, object]:
             errors.append(f"SKILL.md is not UTF-8: {exc}")
         else:
             frontmatter = _frontmatter(skill_text, errors)
-            for required_phrase in ("methods.json", "target_logs", "Logparse"):
+            for required_phrase in ("request.json", "methods.json", "target_logs", "Logparse"):
                 if required_phrase not in skill_text:
                     errors.append(f"SKILL.md must mention {required_phrase}")
 
@@ -141,6 +175,7 @@ def validate(skill_dir: Path, wiki: Path) -> dict[str, object]:
         errors.append(f"Wiki is not UTF-8: {exc}")
         wiki_text = ""
     wiki_sha256 = hashlib.sha256(wiki_bytes).hexdigest()
+    wiki_templates = _wiki_log_templates(wiki_text)
 
     method_count = 0
     marker_count = 0
@@ -163,6 +198,19 @@ def validate(skill_dir: Path, wiki: Path) -> dict[str, object]:
             errors.append("source_wiki_sha256 must be lowercase SHA-256")
         elif source_sha != wiki_sha256:
             errors.append("source_wiki_sha256 does not match the supplied Wiki")
+
+        required_user_inputs = _field_ids(
+            manifest.get("required_user_inputs"), "required_user_inputs", errors
+        )
+        required_artifacts = _field_ids(
+            manifest.get("required_artifacts"), "required_artifacts", errors
+        )
+        log_derived_fields = _field_ids(
+            manifest.get("log_derived_fields"), "log_derived_fields", errors
+        )
+        declared_fields = required_user_inputs + required_artifacts + log_derived_fields
+        if len(declared_fields) != len(set(declared_fields)):
+            errors.append("input and log-derived identifiers must be disjoint")
 
         shared = manifest.get("shared_references")
         if not isinstance(shared, list) or any(_safe_reference(item) is None for item in shared):
@@ -260,12 +308,22 @@ def validate(skill_dir: Path, wiki: Path) -> dict[str, object]:
         elif not (stat.S_ISREG(metadata.st_mode) or stat.S_ISDIR(metadata.st_mode)):
             errors.append(f"generated package contains unsupported path type: {path}")
 
+    package_text = "\n".join(
+        path.read_text(encoding="utf-8", errors="replace")
+        for path in sorted(skill_dir.rglob("*"))
+        if path.is_file() and not path.is_symlink() and path.suffix in {".md", ".json"}
+    )
+    for template in wiki_templates:
+        if template not in package_text:
+            errors.append(f"generated package lost Wiki log template: {template}")
+
     return {
         "ok": not errors,
         "skill_name": frontmatter.get("name"),
         "source_wiki_sha256": wiki_sha256,
         "method_count": method_count,
         "marker_count": marker_count,
+        "template_count": len(wiki_templates),
         "errors": errors,
     }
 

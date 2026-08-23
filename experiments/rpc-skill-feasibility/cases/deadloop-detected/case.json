@@ -1,0 +1,12 @@
+{
+  "scenario_id": "deadloop-detected",
+  "problem_time": "2026-08-23T10:00:05.100000+08:00",
+  "client_process": "rpc_client",
+  "server_process": "rpc_server",
+  "service": "svc_compute",
+  "api": "Run",
+  "expected_status": "CONFIRMED",
+  "expected_branch_markers": ["DEADLOOP_DETECTED"],
+  "expected_terms": ["65000001", "20000"],
+  "forbidden_evidence_terms": []
+}

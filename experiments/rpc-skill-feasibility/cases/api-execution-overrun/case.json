@@ -1,10 +1,12 @@
 {
   "scenario_id": "api-execution-overrun",
   "problem_time": "2026-08-23T10:00:05.500000+08:00",
-  "problem": "rpc_client 调用 svc_orders:Reserve 时发生 5000 毫秒超时。请只根据冻结的 Logparse 目标日志判断原因。",
   "client_process": "rpc_client",
   "server_process": "rpc_server",
+  "service": "svc_orders",
+  "api": "Reserve",
   "expected_status": "CONFIRMED",
-  "expected_branch_marker": "API_COMPLETE",
-  "expected_terms": []
+  "expected_branch_markers": ["API_COMPLETE"],
+  "expected_terms": [],
+  "forbidden_evidence_terms": []
 }

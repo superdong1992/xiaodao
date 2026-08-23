@@ -1,5 +1,5 @@
 {
-  "scenario_id": "client-receive-blocked",
+  "scenario_id": "unrelated-log-noise",
   "problem_time": "2026-08-23T10:00:05.200000+08:00",
   "client_process": "rpc_client",
   "server_process": "rpc_server",
@@ -7,6 +7,6 @@
   "api": "Lookup",
   "expected_status": "CONFIRMED",
   "expected_branch_markers": ["LATE_RESPONSE"],
-  "expected_terms": ["request_id=303"],
-  "forbidden_evidence_terms": []
+  "expected_terms": ["request_id=601"],
+  "forbidden_evidence_terms": ["svc_noise", "NoiseApi", "SlowNoise", "QueueNoise"]
 }

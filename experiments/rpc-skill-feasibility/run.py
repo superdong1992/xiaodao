@@ -32,19 +32,31 @@ LOGPARSE_PRODUCT = "rpc-skill-feasibility"
 MODEL = "gpt-5.6-luna"
 REASONING_EFFORT = "medium"
 GENERATED_SKILL_NAME = "diagnose-rpc-timeout"
+HARDENING_PHASE = "hardening"
 EXPECTED_WIKI_SHA256 = (
-    "9138ee2358137fdc1dcc828f08a0f89ebc5e55816f71a1142ccd5d9b8ddc8161"
+    "eb39edf220d0eed91ae03eb712efd8974a5e5c82c3deed035c236a0d1bf28aab"
 )
 CASE_KEYS = {
     "scenario_id",
     "problem_time",
-    "problem",
     "client_process",
     "server_process",
+    "service",
+    "api",
     "expected_status",
-    "expected_branch_marker",
+    "expected_branch_markers",
     "expected_terms",
+    "forbidden_evidence_terms",
 }
+EXPECTED_REQUIRED_USER_INPUTS = {
+    "problem_time",
+    "client_process",
+    "server_process",
+    "service",
+    "api",
+}
+EXPECTED_REQUIRED_ARTIFACTS = {"log_archive"}
+EXPECTED_LOG_DERIVED_FIELDS = {"request_id", "timeout_ms"}
 REQUIRED_WIKI_MARKERS = {
     "rpc call %s:%s timeout limit %u recv no response",
     "%s rpc %s call unsuccess, reqid(%u), timeout %u",
@@ -231,12 +243,24 @@ def load_cases(selected: set[str] | None) -> list[Case]:
             continue
         if data.get("expected_status") not in {"CONFIRMED", "INSUFFICIENT"}:
             raise ExperimentError("structure", f"unsupported expected status: {descriptor}")
-        marker = data.get("expected_branch_marker")
-        if marker is not None and marker not in REQUIRED_WIKI_MARKERS:
-            raise ExperimentError("structure", f"invalid expected branch marker: {descriptor}")
-        terms = data.get("expected_terms")
-        if not isinstance(terms, list) or any(not isinstance(item, str) or not item for item in terms):
-            raise ExperimentError("structure", f"invalid expected terms: {descriptor}")
+        markers = data.get("expected_branch_markers")
+        if (
+            not isinstance(markers, list)
+            or any(marker not in REQUIRED_WIKI_MARKERS for marker in markers)
+            or len(markers) != len(set(markers))
+        ):
+            raise ExperimentError("structure", f"invalid expected branch markers: {descriptor}")
+        for key in ("expected_terms", "forbidden_evidence_terms"):
+            terms = data.get(key)
+            if (
+                not isinstance(terms, list)
+                or any(not isinstance(item, str) or not item for item in terms)
+                or len(terms) != len(set(terms))
+            ):
+                raise ExperimentError("structure", f"invalid {key}: {descriptor}")
+        for key in ("problem_time", "client_process", "server_process", "service", "api"):
+            if not isinstance(data.get(key), str) or not str(data[key]).strip():
+                raise ExperimentError("structure", f"invalid required input {key}: {descriptor}")
         for label in ("client", "server"):
             ordinary_file(descriptor.parent / "raw" / f"{label}.log", f"{label} raw log")
         cases.append(Case(descriptor.parent, data))
@@ -331,12 +355,35 @@ def case_input_identity(
             }
         )
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "scenario_id": case.scenario_id,
         "problem_time": case.data["problem_time"],
+        "target_selectors": {
+            "module": "rpc",
+            "slot": "1",
+            "client_process": case.data["client_process"],
+            "server_process": case.data["server_process"],
+        },
         "config_sha256": sha256_file(config),
         "logparse": logparse,
         "raw_inputs": raw_inputs,
+    }
+
+
+def legacy_case_input_identity(
+    case: Case,
+    *,
+    config: Path,
+    logparse: dict[str, str],
+) -> dict[str, object]:
+    current = case_input_identity(case, config=config, logparse=logparse)
+    return {
+        "schema_version": 1,
+        "scenario_id": current["scenario_id"],
+        "problem_time": current["problem_time"],
+        "config_sha256": current["config_sha256"],
+        "logparse": current["logparse"],
+        "raw_inputs": current["raw_inputs"],
     }
 
 
@@ -375,10 +422,11 @@ def _target_from_payload(payload: object, label: str) -> dict[str, object]:
 def _verify_cached_preprocessing(
     cache: Path,
     *,
-    fingerprint: str,
+    accepted_fingerprints: set[str],
+    expected_processes: dict[str, str],
 ) -> dict[str, object]:
     state = read_json(cache / "state.json")
-    if not isinstance(state, dict) or state.get("input_fingerprint") != fingerprint:
+    if not isinstance(state, dict) or state.get("input_fingerprint") not in accepted_fingerprints:
         raise ExperimentError(
             "logparse_cache",
             f"cached input identity changed for {cache.name}; refusing a silent reparse",
@@ -411,6 +459,12 @@ def _verify_cached_preprocessing(
         ordinary_file(path, "cached frozen target log")
         if sha256_file(path) != item.get("sha256"):
             raise ExperimentError("logparse_cache", f"cached frozen target log changed: {path}")
+        label = str(item.get("label"))
+        if label not in expected_processes or item.get("process_name") != expected_processes[label]:
+            raise ExperimentError(
+                "logparse_cache",
+                f"cached target process changed for {cache.name}: {label}",
+            )
     return {
         "cache": cache,
         "cache_hit": True,
@@ -430,9 +484,19 @@ def preprocess_case(
     cache = runtime_root / "preprocessed" / case.scenario_id
     input_identity = case_input_identity(case, config=config, logparse=identity)
     fingerprint = sha256_bytes(canonical_bytes(input_identity))
+    legacy_fingerprint = sha256_bytes(
+        canonical_bytes(legacy_case_input_identity(case, config=config, logparse=identity))
+    )
     state_path = cache / "state.json"
     if state_path.exists():
-        return _verify_cached_preprocessing(cache, fingerprint=fingerprint)
+        return _verify_cached_preprocessing(
+            cache,
+            accepted_fingerprints={fingerprint, legacy_fingerprint},
+            expected_processes={
+                "client": str(case.data["client_process"]),
+                "server": str(case.data["server_process"]),
+            },
+        )
     if cache.exists() and any(cache.iterdir()):
         raise ExperimentError(
             "logparse_cache",
@@ -696,6 +760,23 @@ def map_generated_methods(skill_dir: Path) -> tuple[dict[str, dict[str, object]]
     manifest = read_json(skill_dir / "methods.json")
     if not isinstance(manifest, dict) or not isinstance(manifest.get("methods"), list):
         raise ExperimentError("structure", "generated methods.json is invalid")
+    exact_inputs = {
+        "required_user_inputs": EXPECTED_REQUIRED_USER_INPUTS,
+        "required_artifacts": EXPECTED_REQUIRED_ARTIFACTS,
+    }
+    for key, expected in exact_inputs.items():
+        actual = manifest.get(key)
+        if not isinstance(actual, list) or set(actual) != expected or len(actual) != len(expected):
+            raise ExperimentError(
+                "input_fidelity",
+                f"generated Skill {key} mismatch: expected {sorted(expected)}, got {actual}",
+            )
+    derived = manifest.get("log_derived_fields")
+    if not isinstance(derived, list) or not EXPECTED_LOG_DERIVED_FIELDS.issubset(set(derived)):
+        raise ExperimentError(
+            "input_fidelity",
+            "generated Skill must keep request_id and timeout_ms as log-derived fields",
+        )
     methods = manifest["methods"]
     if len(methods) != 3:
         raise ExperimentError(
@@ -744,12 +825,21 @@ def map_generated_methods(skill_dir: Path) -> tuple[dict[str, dict[str, object]]
         )
     mapping = {
         "API_COMPLETE": str(api[0]["id"]),
+        "DEADLOOP_DETECTED": str(api[0]["id"]),
         "QUEUE_HISTORY": str(queue[0]["id"]),
         "LATE_RESPONSE": str(client[0]["id"]),
     }
     if len(set(mapping.values())) != 3:
         raise ExperimentError("branch_routing", "generated branch methods are not independent")
     return by_id, mapping
+
+
+def phase_root(runtime_root: Path) -> Path:
+    return runtime_root / HARDENING_PHASE
+
+
+def phase_round_root(runtime_root: Path, round_number: int) -> Path:
+    return phase_root(runtime_root) / "rounds" / f"round-{round_number}"
 
 
 def generate_skill(
@@ -759,7 +849,7 @@ def generate_skill(
     wiki: Path,
     codex_bin: str,
 ) -> dict[str, object]:
-    round_root = runtime_root / "rounds" / f"round-{round_number}"
+    round_root = phase_round_root(runtime_root, round_number)
     if round_root.exists():
         raise ExperimentError(
             "iteration",
@@ -778,7 +868,9 @@ def generate_skill(
 要求：
 - 人工 Wiki 是唯一业务事实源，不得修改。
 - 只生成元 Skill 输出合同允许的文件，不生成旧版 manifest、GenerationSpec、README 或测试框架。
+- 完整保留 Wiki 声明的用户参数、日志附件和日志派生字段；不得把日志字段改成用户参数。
 - 生成物必须消费冻结的 target_logs 与 receipt，运行时不能再次调用 Logparse。
+- 诊断输入中可能存在多次相关调用；检查全部正向证据，只在证据足以证明属于同一次调用时合并。
 - 完成后执行元 Skill 自带的 validate_generated_skill.py；只有校验 PASS 才结束。
 """
     trace = round_root / "generation/codex.jsonl"
@@ -820,7 +912,7 @@ def load_generated_round(
     runtime_root: Path,
     wiki: Path,
 ) -> dict[str, object]:
-    round_root = runtime_root / "rounds" / f"round-{round_number}"
+    round_root = phase_round_root(runtime_root, round_number)
     workspace = round_root / "generation/workspace"
     generated = workspace / "generated" / GENERATED_SKILL_NAME
     ordinary_file(round_root / "generation/codex.jsonl", "completed generation trace")
@@ -846,6 +938,26 @@ def load_generated_round(
         "methods": methods,
         "branch_mapping": mapping,
         "trace": summary,
+    }
+
+
+def diagnosis_request(case: Case, receipt: dict[str, object]) -> dict[str, object]:
+    archive = receipt.get("archive")
+    if not isinstance(archive, dict):
+        raise ExperimentError("logparse", f"receipt archive is invalid for {case.scenario_id}")
+    return {
+        "schema_version": 1,
+        "scenario_id": case.scenario_id,
+        "problem_time": case.data["problem_time"],
+        "client_process": case.data["client_process"],
+        "server_process": case.data["server_process"],
+        "service": case.data["service"],
+        "api": case.data["api"],
+        "log_archive": {
+            "name": archive.get("name"),
+            "sha256": archive.get("sha256"),
+            "status": "consumed_by_logparse",
+        },
     }
 
 
@@ -891,9 +1003,9 @@ def prepare_diagnosis_workspace(
         input_root / "target_logs.json",
         {"schema_version": 1, "target_logs": target_logs},
     )
-    (input_root / "problem.md").write_text(
-        f"# 待定位问题\n\nscenario_id: `{case.scenario_id}`\n\n{case.data['problem']}\n",
-        encoding="utf-8",
+    write_json(
+        input_root / "request.json",
+        diagnosis_request(case, receipt),
     )
     shutil.copyfile(
         EXPERIMENT_ROOT / "schemas/diagnosis-result.schema.json",
@@ -982,9 +1094,15 @@ def validate_diagnosis_result(
     limitations = _string_array(result.get("limitations"), "limitations")
     safety_notes = _string_array(result.get("safety_notes"), "safety_notes")
     safety_text = " ".join(safety_notes).casefold()
-    if "不等于取消" not in safety_text and not (
-        "not" in safety_text and ("cancel" in safety_text or "cancellation" in safety_text)
-    ):
+    chinese_cancellation_boundary = (
+        "超时" in safety_text
+        and "取消" in safety_text
+        and any(term in safety_text for term in ("不", "未", "并非"))
+    )
+    english_cancellation_boundary = "not" in safety_text and (
+        "cancel" in safety_text or "cancellation" in safety_text
+    )
+    if not chinese_cancellation_boundary and not english_cancellation_boundary:
         raise ExperimentError("wiki_fidelity", f"timeout cancellation safety note missing in {case.scenario_id}")
 
     expected_status = str(case.data["expected_status"])
@@ -993,8 +1111,9 @@ def validate_diagnosis_result(
             "branch_routing",
             f"expected {expected_status}, got {result.get('status')} for {case.scenario_id}",
         )
-    expected_marker = case.data["expected_branch_marker"]
-    if expected_marker is None:
+    expected_markers = case.data["expected_branch_markers"]
+    assert isinstance(expected_markers, list)
+    if not expected_markers:
         if confirmed:
             raise ExperimentError("overclaim", f"insufficient evidence confirmed a cause: {confirmed}")
         limitation_text = " ".join(limitations).casefold()
@@ -1004,18 +1123,27 @@ def validate_diagnosis_result(
                 "insufficient result did not preserve suppression/rate-limit uncertainty",
             )
     else:
-        expected_method = branch_mapping[str(expected_marker)]
-        if confirmed != [expected_method]:
+        expected_methods = {branch_mapping[str(marker)] for marker in expected_markers}
+        if set(confirmed) != expected_methods or len(confirmed) != len(expected_methods):
             raise ExperimentError(
                 "branch_routing",
-                f"expected only {expected_method}, got {confirmed} for {case.scenario_id}",
+                f"expected methods {sorted(expected_methods)}, got {confirmed} for {case.scenario_id}",
             )
     rendered = json.dumps(result, ensure_ascii=False, sort_keys=True)
     missing_terms = [term for term in case.data["expected_terms"] if term not in rendered]
     if missing_terms:
         raise ExperimentError(
             "calculation",
-            f"result omitted expected queue contributors for {case.scenario_id}: {missing_terms}",
+            f"result omitted expected terms for {case.scenario_id}: {missing_terms}",
+        )
+    evidence_rendered = json.dumps(evidence, ensure_ascii=False, sort_keys=True)
+    forbidden_terms = [
+        term for term in case.data["forbidden_evidence_terms"] if term in evidence_rendered
+    ]
+    if forbidden_terms:
+        raise ExperimentError(
+            "evidence_misassociation",
+            f"unrelated evidence entered {case.scenario_id}: {forbidden_terms}",
         )
     return {
         "scenario_id": case.scenario_id,
@@ -1033,38 +1161,73 @@ def diagnose_case(
     preprocessing: dict[str, object],
     generation: dict[str, object],
     codex_bin: str,
+    diagnosis_group: str,
 ) -> dict[str, object]:
     round_root = Path(str(generation["round_root"]))
-    diagnosis_root = round_root / "diagnoses" / case.scenario_id
-    workspace, receipt_sha256 = prepare_diagnosis_workspace(
-        case=case,
-        preprocessing=preprocessing,
-        generated_skill=Path(str(generation["skill_dir"])),
-        root=diagnosis_root,
-    )
-    prompt = f"""使用 $diagnose-rpc-timeout 定位 input/problem.md 中的问题。
+    diagnosis_root = round_root / diagnosis_group / case.scenario_id
+    trace = diagnosis_root / "codex.jsonl"
+    final = diagnosis_root / "result.json"
+    if diagnosis_root.exists():
+        workspace = diagnosis_root / "workspace"
+        ordinary_file(trace, f"existing diagnosis trace for {case.scenario_id}")
+        ordinary_file(final, f"existing diagnosis result for {case.scenario_id}")
+        receipt_input = workspace / "input/logparse-receipt.json"
+        ordinary_file(receipt_input, f"existing diagnosis receipt for {case.scenario_id}")
+        receipt_sha256 = sha256_file(receipt_input)
+        if receipt_sha256 != preprocessing.get("receipt_sha256"):
+            raise ExperimentError(
+                "iteration",
+                f"existing diagnosis input changed for {case.scenario_id}; refusing a model retry",
+            )
+        receipt = preprocessing.get("receipt")
+        if not isinstance(receipt, dict):
+            raise ExperimentError(
+                "logparse",
+                f"preprocessing receipt is invalid for {case.scenario_id}",
+            )
+        request_input = workspace / "input/request.json"
+        ordinary_file(request_input, f"existing diagnosis request for {case.scenario_id}")
+        if read_json(request_input) != diagnosis_request(case, receipt):
+            raise ExperimentError(
+                "iteration",
+                f"existing diagnosis request changed for {case.scenario_id}; refusing a model retry",
+            )
+        installed_skill = workspace / ".agents/skills" / GENERATED_SKILL_NAME
+        if tree_digest(installed_skill) != generation.get("skill_sha256"):
+            raise ExperimentError(
+                "iteration",
+                f"existing generated Skill changed for {case.scenario_id}; refusing reuse",
+            )
+    else:
+        workspace, receipt_sha256 = prepare_diagnosis_workspace(
+            case=case,
+            preprocessing=preprocessing,
+            generated_skill=Path(str(generation["skill_dir"])),
+            root=diagnosis_root,
+        )
+        prompt = f"""使用 $diagnose-rpc-timeout 定位 input/request.json 中的问题。
 
 输入边界：
-- Logparse 已经完成；只读取 input/target_logs.json 列出的 evidence 日志和 input/logparse-receipt.json。
+- request.json 是完整使用入口在 Logparse 之后保留的请求；用户没有提供 request_id 或 timeout_ms，只能从日志获得。
+- Logparse 已经完成；只读取 input/request.json、input/target_logs.json 列出的 evidence 日志和 input/logparse-receipt.json。
 - 不调用 Logparse，不读取工作区以外路径，不查找 raw、case.json、oracle 或预期答案。
-- 检查所有有正向证据的方法，不能在第一条命中后停止。
+- 检查 service/API 范围内所有相关调用和所有正向证据，不能在第一条命中后停止。
+- 不同调用使用日志中的 request_id 或执行时间段区分；证据不足以证明属于同一次调用时不得强行合并。
 - 最终只输出符合 input/diagnosis-result.schema.json 的 JSON，文字字段使用自然中文。
 - scenario_id 必须是 {case.scenario_id}。
 - logparse_receipt_sha256 必须是 {receipt_sha256}。
 """
-    trace = diagnosis_root / "codex.jsonl"
-    stderr = diagnosis_root / "codex.stderr.txt"
-    final = diagnosis_root / "result.json"
-    codex_command(
-        codex_bin,
-        workspace=workspace,
-        sandbox="read-only",
-        prompt=prompt,
-        trace=trace,
-        stderr=stderr,
-        final=final,
-        output_schema=workspace / "input/diagnosis-result.schema.json",
-    )
+        stderr = diagnosis_root / "codex.stderr.txt"
+        codex_command(
+            codex_bin,
+            workspace=workspace,
+            sandbox="read-only",
+            prompt=prompt,
+            trace=trace,
+            stderr=stderr,
+            final=final,
+            output_schema=workspace / "input/diagnosis-result.schema.json",
+        )
     summary = trace_summary(trace)
     validate_diagnosis_trace(summary, case.scenario_id)
     result = read_json(final)
@@ -1097,7 +1260,7 @@ def build_promotion(
     preprocessing: dict[str, dict[str, object]],
     diagnoses: list[dict[str, object]],
 ) -> Path:
-    promotion = runtime_root / "promotion" / f"round-{round_number}"
+    promotion = phase_root(runtime_root) / "promotion" / f"round-{round_number}"
     if promotion.exists():
         raise ExperimentError("iteration", f"promotion already exists: {promotion}")
     promotion.mkdir(parents=True)
@@ -1173,7 +1336,7 @@ def build_promotion(
 
 
 def record_failure(runtime_root: Path, round_number: int | None, exc: ExperimentError) -> None:
-    failure_root = runtime_root / "failures"
+    failure_root = phase_root(runtime_root) / "failures"
     failure_root.mkdir(parents=True, exist_ok=True)
     name = f"round-{round_number}.json" if round_number is not None else "prepare.json"
     write_json(
@@ -1276,6 +1439,11 @@ def main() -> int:
                 codex_bin=args.codex_bin,
             )
         diagnoses: list[dict[str, object]] = []
+        all_case_ids = {
+            path.parent.name for path in (EXPERIMENT_ROOT / "cases").glob("*/case.json")
+        }
+        selected_case_ids = {case.scenario_id for case in cases}
+        diagnosis_group = "diagnoses" if selected_case_ids == all_case_ids else "affected-diagnoses"
         for case in cases:
             print(f"[diagnose] {case.scenario_id}", flush=True)
             diagnoses.append(
@@ -1284,15 +1452,24 @@ def main() -> int:
                     preprocessing=preprocessing[case.scenario_id],
                     generation=generation,
                     codex_bin=args.codex_bin,
+                    diagnosis_group=diagnosis_group,
                 )
             )
-        if {case.scenario_id for case in cases} != {
-            path.parent.name for path in (EXPERIMENT_ROOT / "cases").glob("*/case.json")
-        }:
-            raise ExperimentError(
-                "iteration",
-                "a subset run cannot be promoted; rerun all cases after affected cases pass",
+        if selected_case_ids != all_case_ids:
+            print(
+                json.dumps(
+                    {
+                        "status": "PASS",
+                        "scope": "affected-cases",
+                        "round": round_number,
+                        "generated_skill_sha256": generation["skill_sha256"],
+                        "diagnoses": diagnoses,
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
             )
+            return 0
         promotion = build_promotion(
             runtime_root=runtime_root,
             round_number=round_number,

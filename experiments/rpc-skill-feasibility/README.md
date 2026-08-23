@@ -1,6 +1,8 @@
 # RPC 超时定位 Skill 可行性实验
 
-这个目录只验证一条最短链路：人工 Wiki 经实验版元 Skill 生成一个定位 Skill，再由同一个定位 Skill 诊断四份冻结日志。它不使用项目 Test Flow，也不产生 Release verdict。
+这个目录验证一条最短链路：人工 Wiki 经实验版元 Skill 生成一个定位 Skill，再由同一个定位 Skill 诊断九份冻结日志。它不使用项目 Test Flow，也不产生 Release verdict。
+
+当前加固阶段在三轮上限内未全量通过，不能宣称九例 PASS。失败范围和最后生成物身份见 `artifacts/HARDENING_RESULTS.md`；`artifacts/RESULTS.md` 保留此前四例可行性基线。
 
 运行前提：
 
@@ -24,4 +26,4 @@ python3 experiments/rpc-skill-feasibility/run.py \
   --logparse-root /path/to/logparse
 ```
 
-运行产物保存在被 Git 忽略的 `.tmp/rpc-skill-feasibility/`。同一用例的输入或 Logparse 身份变化后，运行器会拒绝复用旧 receipt，也不会静默重新解析；需要人工移走对应缓存目录后再开始新的实验身份。
+运行产物保存在被 Git 忽略的 `.tmp/rpc-skill-feasibility/`。同一个用例再次运行时，如果原始日志、问题时间、两端进程以及 Logparse 配置和版本没有变化，运行器直接复用冻结日志。如果这些内容变化或上次预处理未完整结束，运行器停止并说明原因；新输入必须使用新的用例记录，不能覆盖旧收据后静默重跑。
