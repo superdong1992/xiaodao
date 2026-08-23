@@ -8,5 +8,6 @@
   "expected_status": "CONFIRMED",
   "expected_branch_markers": ["DEADLOOP_DETECTED"],
   "expected_terms": ["65000001", "20000"],
+  "expected_evidence_identities": [],
   "forbidden_evidence_terms": []
 }

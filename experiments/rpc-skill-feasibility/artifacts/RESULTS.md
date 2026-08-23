@@ -1,6 +1,6 @@
 # RPC 超时定位 Skill 可行性结果
 
-> 本文件记录人工 Wiki 修改前的四例可行性基线。后续九例加固在三轮上限内未全量通过，见 [HARDENING_RESULTS.md](HARDENING_RESULTS.md)。
+> 本文件记录人工 Wiki 修改前的四例可行性基线。后续九例加固见 [HARDENING_RESULTS.md](HARDENING_RESULTS.md)，通用证据溯源修复见 [EVIDENCE_GROUNDING_RESULTS.md](EVIDENCE_GROUNDING_RESULTS.md)；两者均未形成九例 PASS。
 
 结论：功能可行性验证通过。同一个由 Wiki 生成的定位 Skill 在不知道预期答案的情况下，正确处理了 API 执行过长、服务端排队、客户端收包阻塞和证据不足四种场景。
 

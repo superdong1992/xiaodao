@@ -8,5 +8,6 @@
   "expected_status": "INSUFFICIENT",
   "expected_branch_markers": [],
   "expected_terms": [],
+  "expected_evidence_identities": [],
   "forbidden_evidence_terms": []
 }

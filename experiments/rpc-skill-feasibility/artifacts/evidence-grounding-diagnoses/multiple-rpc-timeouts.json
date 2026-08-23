@@ -1,0 +1,61 @@
+{
+  "schema_version": 2,
+  "scenario_id": "multiple-rpc-timeouts",
+  "status": "CONFIRMED",
+  "confirmed_methods": [
+    "api-execution-too-long",
+    "client-receive-queue-blocked"
+  ],
+  "candidate_methods": [
+    "server-receive-queue-blocked"
+  ],
+  "evidence": [
+    {
+      "method_id": "api-execution-too-long",
+      "summary": "目标 API svc_orders:Reserve 执行耗时 6500000 微秒，确认 API 自身执行时间过长。",
+      "identity_tokens": [
+        "service=svc_orders",
+        "api=Reserve",
+        "start_us=10000000",
+        "end_us=16500000",
+        "cost_us=6500000"
+      ],
+      "sources": [
+        {
+          "anchor": "server",
+          "marker": "API_COMPLETE",
+          "line": "[....] [diagnostic|slot_loose/server.log] 2026-08-23T10:00:06.000000+08:00 RPC Service=feasibility; Slot=1; CPU-Id=0; ProcessName=rpc_server; Context=API_COMPLETE service=svc_orders api=Reserve start_us=10000000 end_us=16500000 cost_us=6500000)"
+        }
+      ]
+    },
+    {
+      "method_id": "client-receive-queue-blocked",
+      "summary": "request_id=501 的端到端耗时为 4500000 微秒，超过 3000 毫秒超时；服务端执行耗时为 1000000 微秒，而客户端收包排队耗时为 3400000 微秒，支持客户端收包线程阻塞。",
+      "identity_tokens": [
+        "service=svc_orders",
+        "api=Reserve",
+        "request_id=501",
+        "client_send_us=1000000",
+        "server_recv_us=1100000",
+        "server_send_us=2100000",
+        "client_now_us=5500000"
+      ],
+      "sources": [
+        {
+          "anchor": "client",
+          "marker": "LATE_RESPONSE",
+          "line": "[....] [diagnostic|slot_loose/client.log] 2026-08-23T10:00:05.500000+08:00 RPC Service=feasibility; Slot=1; CPU-Id=0; ProcessName=rpc_client; Context=LATE_RESPONSE service=svc_orders api=Reserve request_id=501 client_send_us=1000000 server_recv_us=1100000 server_send_us=2100000 client_now_us=5500000)"
+        }
+      ]
+    }
+  ],
+  "limitations": [
+    "第二条客户端超时日志没有 request_id，无法与其他事件可靠合并。",
+    "未观察到 QUEUE_HISTORY 或 DEADLOOP_DETECTED，无法确认服务端收包线程被前序操作占用；日志抑制或限流也可能造成相关证据缺失。",
+    "API_COMPLETE 事件缺少 request_id，已作为独立 evidence 保留。"
+  ],
+  "safety_notes": [
+    "RPC 超时不等于取消；服务端 API 可能已经执行完成，后续仍可能产生副作用。"
+  ],
+  "logparse_receipt_sha256": "a5ebbef5cc1fd0aa44655739bbde1a9eb9376059c44fdc6e14a6795b215c47e1"
+}

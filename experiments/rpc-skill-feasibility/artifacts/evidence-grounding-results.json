@@ -1,0 +1,108 @@
+{
+  "schema_version": 1,
+  "status": "FAIL",
+  "scope": "functional-feasibility-only",
+  "phase": "evidence-grounding",
+  "round_limit": 3,
+  "wiki_sha256": "eb39edf220d0eed91ae03eb712efd8974a5e5c82c3deed035c236a0d1bf28aab",
+  "generated_skill_sha256": "bf37c11c575c44da14e5ae4f5a6a1770b2cac1273f4fe4eae45e1489f95a229a",
+  "diagnosis_schema_version": 2,
+  "model": "gpt-5.6-luna",
+  "reasoning_effort": "medium",
+  "codex_cli_version": "codex-cli 0.149.0-alpha.4.1",
+  "preflight_incidents": [
+    {
+      "round": 1,
+      "category": "schema_compatibility",
+      "counted_as_semantic_round": false,
+      "summary": "Structured Outputs rejected uniqueItems before model inference; deterministic runner validation retained uniqueness enforcement."
+    }
+  ],
+  "rounds": [
+    {
+      "round": 1,
+      "category": "evidence_identity",
+      "result": "FAIL",
+      "summary": "Source lines were preserved, but named identity fields were reduced to bare values."
+    },
+    {
+      "round": 2,
+      "category": "wiki_fidelity",
+      "result": "FAIL",
+      "summary": "One evidence branch of an existing cause was incorrectly split into a fourth method."
+    },
+    {
+      "round": 3,
+      "category": "output_contract",
+      "result": "FAIL",
+      "summary": "Both causes, separate event identities, and exact source lines were preserved, but logparse_receipt_sha256 was copied incorrectly."
+    }
+  ],
+  "executed_diagnoses": [
+    {
+      "scenario_id": "multiple-rpc-timeouts",
+      "semantic_result": "FAIL",
+      "original_evidence_loss_observed_fixed": true,
+      "result_file": "evidence-grounding-diagnoses/multiple-rpc-timeouts.json"
+    }
+  ],
+  "not_executed": [
+    "api-execution-overrun",
+    "client-receive-blocked",
+    "deadloop-detected",
+    "insufficient-evidence",
+    "server-queue-delay",
+    "server-queue-five",
+    "server-queue-single",
+    "unrelated-log-noise"
+  ],
+  "deterministic_followup": {
+    "generic_non_rpc_contract_self_check": "PASS",
+    "round_3_with_actual_receipt_hash": "PASS_DIAGNOSTIC_ISOLATION_ONLY",
+    "receipt_hash_schema_binding": "IMPLEMENTED_NOT_LUNA_RETESTED"
+  },
+  "model_usage": {
+    "round_1_generation": {
+      "input_tokens": 226137,
+      "cached_input_tokens": 198400,
+      "output_tokens": 9818,
+      "reasoning_output_tokens": 632
+    },
+    "round_1_diagnosis": {
+      "input_tokens": 64596,
+      "cached_input_tokens": 43264,
+      "output_tokens": 2385,
+      "reasoning_output_tokens": 664
+    },
+    "round_2_generation": {
+      "input_tokens": 188661,
+      "cached_input_tokens": 162816,
+      "output_tokens": 8772,
+      "reasoning_output_tokens": 368
+    },
+    "round_3_generation": {
+      "input_tokens": 102507,
+      "cached_input_tokens": 85760,
+      "output_tokens": 5121,
+      "reasoning_output_tokens": 559
+    },
+    "round_3_diagnosis": {
+      "input_tokens": 81868,
+      "cached_input_tokens": 60416,
+      "output_tokens": 3839,
+      "reasoning_output_tokens": 1275
+    }
+  },
+  "logparse": {
+    "case_count": 9,
+    "parse_invocations_per_case": 1,
+    "target_query_invocations_per_case": 2,
+    "diagnosis_stage_invocations": 0
+  },
+  "claims": {
+    "test_flow_used": false,
+    "release_verdict": false,
+    "all_cases_passed": false,
+    "final_generated_skill_snapshot_saved": false
+  }
+}

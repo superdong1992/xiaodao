@@ -8,5 +8,6 @@
   "expected_status": "CONFIRMED",
   "expected_branch_markers": ["LATE_RESPONSE"],
   "expected_terms": ["request_id=303"],
+  "expected_evidence_identities": [],
   "forbidden_evidence_terms": []
 }

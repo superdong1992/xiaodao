@@ -32,7 +32,7 @@ LOGPARSE_PRODUCT = "rpc-skill-feasibility"
 MODEL = "gpt-5.6-luna"
 REASONING_EFFORT = "medium"
 GENERATED_SKILL_NAME = "diagnose-rpc-timeout"
-HARDENING_PHASE = "hardening"
+HARDENING_PHASE = "evidence-grounding"
 EXPECTED_WIKI_SHA256 = (
     "eb39edf220d0eed91ae03eb712efd8974a5e5c82c3deed035c236a0d1bf28aab"
 )
@@ -46,6 +46,7 @@ CASE_KEYS = {
     "expected_status",
     "expected_branch_markers",
     "expected_terms",
+    "expected_evidence_identities",
     "forbidden_evidence_terms",
 }
 EXPECTED_REQUIRED_USER_INPUTS = {
@@ -73,6 +74,10 @@ META_CANARIES = {
     "DEADLOOP_DETECTED",
     "LATE_RESPONSE",
     "rpc call %s:%s",
+    "request_id",
+    "timeout_ms",
+    "start_us",
+    "end_us",
 }
 DIAGNOSIS_RESULT_KEYS = {
     "schema_version",
@@ -85,7 +90,9 @@ DIAGNOSIS_RESULT_KEYS = {
     "safety_notes",
     "logparse_receipt_sha256",
 }
-EVIDENCE_KEYS = {"method_id", "anchor", "marker", "summary"}
+EVIDENCE_KEYS = {"method_id", "summary", "identity_tokens", "sources"}
+EVIDENCE_SOURCE_KEYS = {"anchor", "marker", "line"}
+EXPECTED_EVIDENCE_IDENTITY_KEYS = {"branch_marker", "identity_tokens"}
 DIAGNOSIS_TRACE_FORBIDDEN = {
     "mech-target-logs",
     "cli.py parse",
@@ -258,6 +265,46 @@ def load_cases(selected: set[str] | None) -> list[Case]:
                 or len(terms) != len(set(terms))
             ):
                 raise ExperimentError("structure", f"invalid {key}: {descriptor}")
+        expected_identities = data.get("expected_evidence_identities")
+        if not isinstance(expected_identities, list):
+            raise ExperimentError(
+                "structure",
+                f"invalid expected_evidence_identities: {descriptor}",
+            )
+        identity_expectations: set[tuple[str, tuple[str, ...]]] = set()
+        for expectation in expected_identities:
+            if (
+                not isinstance(expectation, dict)
+                or set(expectation) != EXPECTED_EVIDENCE_IDENTITY_KEYS
+            ):
+                raise ExperimentError(
+                    "structure",
+                    f"invalid expected evidence identity: {descriptor}",
+                )
+            marker = expectation.get("branch_marker")
+            tokens = expectation.get("identity_tokens")
+            if marker not in markers:
+                raise ExperimentError(
+                    "structure",
+                    f"evidence identity marker is not an expected branch: {descriptor}",
+                )
+            if (
+                not isinstance(tokens, list)
+                or not tokens
+                or any(not isinstance(token, str) or not token.strip() for token in tokens)
+                or len(tokens) != len(set(tokens))
+            ):
+                raise ExperimentError(
+                    "structure",
+                    f"invalid evidence identity tokens: {descriptor}",
+                )
+            identity = (str(marker), tuple(sorted(tokens)))
+            if identity in identity_expectations:
+                raise ExperimentError(
+                    "structure",
+                    f"duplicate evidence identity expectation: {descriptor}",
+                )
+            identity_expectations.add(identity)
         for key in ("problem_time", "client_process", "server_process", "service", "api"):
             if not isinstance(data.get(key), str) or not str(data[key]).strip():
                 raise ExperimentError("structure", f"invalid required input {key}: {descriptor}")
@@ -871,6 +918,8 @@ def generate_skill(
 - 完整保留 Wiki 声明的用户参数、日志附件和日志派生字段；不得把日志字段改成用户参数。
 - 生成物必须消费冻结的 target_logs 与 receipt，运行时不能再次调用 Logparse。
 - 诊断输入中可能存在多次相关调用；检查全部正向证据，只在证据足以证明属于同一次调用时合并。
+- 每个原因、每次独立事件分别输出 evidence；使用 sources 原样引用冻结日志，并用 identity_tokens 保留来源中的事件身份字面量。
+- Wiki 明确列出的原因决定方法边界；属于同一原因的不同日志和检测条件是证据分支，不得按日志类型另拆方法。
 - 完成后执行元 Skill 自带的 validate_generated_skill.py；只有校验 PASS 才结束。
 """
     trace = round_root / "generation/codex.jsonl"
@@ -961,6 +1010,23 @@ def diagnosis_request(case: Case, receipt: dict[str, object]) -> dict[str, objec
     }
 
 
+def bound_diagnosis_schema(receipt_sha256: str) -> dict[str, object]:
+    if not re.fullmatch(r"[0-9a-f]{64}", receipt_sha256):
+        raise ExperimentError("output_contract", "receipt SHA-256 is invalid")
+    schema = read_json(EXPERIMENT_ROOT / "schemas/diagnosis-result.schema.json")
+    if not isinstance(schema, dict):
+        raise ExperimentError("structure", "diagnosis result schema is invalid")
+    properties = schema.get("properties")
+    if not isinstance(properties, dict):
+        raise ExperimentError("structure", "diagnosis result schema properties are invalid")
+    receipt_contract = properties.get("logparse_receipt_sha256")
+    if not isinstance(receipt_contract, dict):
+        raise ExperimentError("structure", "diagnosis receipt contract is invalid")
+    receipt_contract.pop("pattern", None)
+    receipt_contract["const"] = receipt_sha256
+    return schema
+
+
 def prepare_diagnosis_workspace(
     *,
     case: Case,
@@ -1007,9 +1073,9 @@ def prepare_diagnosis_workspace(
         input_root / "request.json",
         diagnosis_request(case, receipt),
     )
-    shutil.copyfile(
-        EXPERIMENT_ROOT / "schemas/diagnosis-result.schema.json",
+    write_json(
         input_root / "diagnosis-result.schema.json",
+        bound_diagnosis_schema(receipt_sha256),
     )
     init_isolated_git(workspace)
     return workspace, receipt_sha256
@@ -1035,7 +1101,9 @@ def validate_diagnosis_trace(summary: dict[str, object], scenario_id: str) -> No
 
 
 def _string_array(value: object, label: str) -> list[str]:
-    if not isinstance(value, list) or any(not isinstance(item, str) or not item for item in value):
+    if not isinstance(value, list) or any(
+        not isinstance(item, str) or not item.strip() for item in value
+    ):
         raise ExperimentError("output_contract", f"{label} must be an array of non-empty strings")
     if len(value) != len(set(value)):
         raise ExperimentError("output_contract", f"{label} must contain unique values")
@@ -1053,7 +1121,7 @@ def validate_diagnosis_result(
 ) -> dict[str, object]:
     if not isinstance(result, dict) or set(result) != DIAGNOSIS_RESULT_KEYS:
         raise ExperimentError("output_contract", f"result keys mismatch for {case.scenario_id}")
-    if result.get("schema_version") != 1 or result.get("scenario_id") != case.scenario_id:
+    if result.get("schema_version") != 2 or result.get("scenario_id") != case.scenario_id:
         raise ExperimentError("output_contract", f"result identity mismatch for {case.scenario_id}")
     if result.get("status") not in {"CONFIRMED", "PARTIAL", "INSUFFICIENT"}:
         raise ExperimentError("output_contract", f"invalid result status for {case.scenario_id}")
@@ -1067,27 +1135,107 @@ def validate_diagnosis_result(
     evidence = result.get("evidence")
     if not isinstance(evidence, list):
         raise ExperimentError("output_contract", f"evidence must be an array for {case.scenario_id}")
-    evidence_text = "\n".join(
-        (workspace / "evidence" / f"{label}.log").read_text(encoding="utf-8")
+    evidence_lines = {
+        label: (workspace / "evidence" / f"{label}.log")
+        .read_text(encoding="utf-8")
+        .splitlines()
         for label in ("client", "server")
-    )
+    }
     confirmed_with_evidence: set[str] = set()
+    evidence_identities: set[tuple[str, tuple[str, ...]]] = set()
     for index, item in enumerate(evidence):
         if not isinstance(item, dict) or set(item) != EVIDENCE_KEYS:
             raise ExperimentError("output_contract", f"invalid evidence {index} for {case.scenario_id}")
-        if item.get("method_id") not in known_ids or item.get("anchor") not in {"client", "server"}:
+        method_id = item.get("method_id")
+        if method_id not in known_ids:
             raise ExperimentError("output_contract", f"invalid evidence identity for {case.scenario_id}")
-        marker = item.get("marker")
         summary = item.get("summary")
-        if not isinstance(marker, str) or not marker or marker not in evidence_text:
+        if not isinstance(summary, str) or not summary.strip():
+            raise ExperimentError("output_contract", f"empty evidence summary for {case.scenario_id}")
+        identity_tokens = _string_array(
+            item.get("identity_tokens"),
+            f"evidence {index} identity_tokens",
+        )
+        identity = (str(method_id), tuple(sorted(identity_tokens)))
+        if identity in evidence_identities:
+            raise ExperimentError(
+                "evidence_identity",
+                f"duplicate method occurrence in {case.scenario_id}: {identity}",
+            )
+        evidence_identities.add(identity)
+
+        sources = item.get("sources")
+        if not isinstance(sources, list) or not sources:
+            raise ExperimentError(
+                "output_contract",
+                f"evidence sources must be non-empty for {case.scenario_id}",
+            )
+        method = methods[str(method_id)]
+        method_markers = method.get("evidence_markers")
+        if not isinstance(method_markers, list):
+            raise ExperimentError("structure", f"method markers are invalid: {method_id}")
+        positive_marker_seen = False
+        cited_lines: list[str] = []
+        source_signatures: set[tuple[str, str, str]] = set()
+        for source_index, source in enumerate(sources):
+            if not isinstance(source, dict) or set(source) != EVIDENCE_SOURCE_KEYS:
+                raise ExperimentError(
+                    "output_contract",
+                    f"invalid source {source_index} in evidence {index} for {case.scenario_id}",
+                )
+            anchor = source.get("anchor")
+            marker = source.get("marker")
+            line = source.get("line")
+            if anchor not in evidence_lines:
+                raise ExperimentError(
+                    "output_contract",
+                    f"invalid evidence source anchor for {case.scenario_id}: {anchor}",
+                )
+            if not isinstance(marker, str) or not marker.strip():
+                raise ExperimentError(
+                    "output_contract",
+                    f"empty evidence source marker for {case.scenario_id}",
+                )
+            if not isinstance(line, str) or not line.strip():
+                raise ExperimentError(
+                    "output_contract",
+                    f"empty evidence source line for {case.scenario_id}",
+                )
+            if line not in evidence_lines[str(anchor)]:
+                raise ExperimentError(
+                    "evidence_grounding",
+                    f"evidence source line is absent from frozen {anchor} log for {case.scenario_id}",
+                )
+            if marker not in line:
+                raise ExperimentError(
+                    "evidence_grounding",
+                    f"evidence marker is absent from its source line for {case.scenario_id}: {marker}",
+                )
+            signature = (str(anchor), marker, line)
+            if signature in source_signatures:
+                raise ExperimentError(
+                    "output_contract",
+                    f"duplicate source in evidence {index} for {case.scenario_id}",
+                )
+            source_signatures.add(signature)
+            cited_lines.append(line)
+            if marker in method_markers:
+                positive_marker_seen = True
+        if not positive_marker_seen:
             raise ExperimentError(
                 "evidence_grounding",
-                f"evidence marker is not present in frozen logs for {case.scenario_id}: {marker}",
+                f"evidence {index} has no indexed positive marker for {method_id}",
             )
-        if not isinstance(summary, str) or not summary:
-            raise ExperimentError("output_contract", f"empty evidence summary for {case.scenario_id}")
-        if item.get("method_id") in confirmed:
-            confirmed_with_evidence.add(str(item["method_id"]))
+        absent_tokens = [
+            token for token in identity_tokens if not any(token in line for line in cited_lines)
+        ]
+        if absent_tokens:
+            raise ExperimentError(
+                "evidence_identity",
+                f"identity tokens are absent from cited sources for {case.scenario_id}: {absent_tokens}",
+            )
+        if method_id in confirmed:
+            confirmed_with_evidence.add(str(method_id))
     if set(confirmed) != confirmed_with_evidence:
         raise ExperimentError("evidence_grounding", f"confirmed method lacks evidence for {case.scenario_id}")
 
@@ -1129,6 +1277,35 @@ def validate_diagnosis_result(
                 "branch_routing",
                 f"expected methods {sorted(expected_methods)}, got {confirmed} for {case.scenario_id}",
             )
+    expected_identities = case.data["expected_evidence_identities"]
+    assert isinstance(expected_identities, list)
+    for expectation in expected_identities:
+        assert isinstance(expectation, dict)
+        marker = str(expectation["branch_marker"])
+        expected_method = branch_mapping[marker]
+        tokens = set(expectation["identity_tokens"])
+        matched = False
+        for item in evidence:
+            assert isinstance(item, dict)
+            if item.get("method_id") != expected_method:
+                continue
+            actual_tokens = item.get("identity_tokens")
+            sources = item.get("sources")
+            if not isinstance(actual_tokens, list) or not isinstance(sources, list):
+                continue
+            if not tokens.issubset(set(actual_tokens)):
+                continue
+            if any(
+                isinstance(source, dict) and source.get("marker") == marker
+                for source in sources
+            ):
+                matched = True
+                break
+        if not matched:
+            raise ExperimentError(
+                "evidence_identity",
+                f"expected identity {sorted(tokens)} for {marker} was not preserved in {case.scenario_id}",
+            )
     rendered = json.dumps(result, ensure_ascii=False, sort_keys=True)
     missing_terms = [term for term in case.data["expected_terms"] if term not in rendered]
     if missing_terms:
@@ -1164,7 +1341,14 @@ def diagnose_case(
     diagnosis_group: str,
 ) -> dict[str, object]:
     round_root = Path(str(generation["round_root"]))
-    diagnosis_root = round_root / diagnosis_group / case.scenario_id
+    expected_schema = bound_diagnosis_schema(str(preprocessing["receipt_sha256"]))
+    schema_identity = sha256_bytes(canonical_bytes(expected_schema))[:16]
+    diagnosis_root = (
+        round_root
+        / diagnosis_group
+        / case.scenario_id
+        / f"schema-{schema_identity}"
+    )
     trace = diagnosis_root / "codex.jsonl"
     final = diagnosis_root / "result.json"
     if diagnosis_root.exists():
@@ -1198,6 +1382,13 @@ def diagnose_case(
                 "iteration",
                 f"existing generated Skill changed for {case.scenario_id}; refusing reuse",
             )
+        schema_input = workspace / "input/diagnosis-result.schema.json"
+        ordinary_file(schema_input, f"existing diagnosis schema for {case.scenario_id}")
+        if read_json(schema_input) != expected_schema:
+            raise ExperimentError(
+                "iteration",
+                f"existing diagnosis schema changed for {case.scenario_id}; refusing reuse",
+            )
     else:
         workspace, receipt_sha256 = prepare_diagnosis_workspace(
             case=case,
@@ -1212,7 +1403,11 @@ def diagnose_case(
 - Logparse 已经完成；只读取 input/request.json、input/target_logs.json 列出的 evidence 日志和 input/logparse-receipt.json。
 - 不调用 Logparse，不读取工作区以外路径，不查找 raw、case.json、oracle 或预期答案。
 - 检查 service/API 范围内所有相关调用和所有正向证据，不能在第一条命中后停止。
-- 不同调用使用日志中的 request_id 或执行时间段区分；证据不足以证明属于同一次调用时不得强行合并。
+- 每个原因、每次独立调用分别输出一条 evidence；证据不足以证明属于同一次调用时不得强行合并。
+- 每条 evidence 的 sources 必须原样复制实际使用的完整冻结日志行，marker 必须来自对应行。
+- identity_tokens 必须原样来自本条 evidence 的 sources，并足以保留日志中已有的调用身份；不能只在 summary 中描述。
+- 日志以命名字段表达身份时，identity_tokens 必须保留完整字段名和值，不能只输出裸值。
+- 候选方法没有正向日志时只写入 candidate_methods 或 limitations，不得编造 evidence。
 - 最终只输出符合 input/diagnosis-result.schema.json 的 JSON，文字字段使用自然中文。
 - scenario_id 必须是 {case.scenario_id}。
 - logparse_receipt_sha256 必须是 {receipt_sha256}。
@@ -1339,8 +1534,14 @@ def record_failure(runtime_root: Path, round_number: int | None, exc: Experiment
     failure_root = phase_root(runtime_root) / "failures"
     failure_root.mkdir(parents=True, exist_ok=True)
     name = f"round-{round_number}.json" if round_number is not None else "prepare.json"
+    destination = failure_root / name
+    attempt = 2
+    while destination.exists():
+        stem = Path(name).stem
+        destination = failure_root / f"{stem}-attempt-{attempt}.json"
+        attempt += 1
     write_json(
-        failure_root / name,
+        destination,
         {
             "schema_version": 1,
             "status": "FAIL",

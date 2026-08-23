@@ -8,5 +8,6 @@
   "expected_status": "CONFIRMED",
   "expected_branch_markers": ["QUEUE_HISTORY"],
   "expected_terms": ["无法确认", "贡献者"],
+  "expected_evidence_identities": [],
   "forbidden_evidence_terms": []
 }

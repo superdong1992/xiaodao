@@ -1,5 +1,7 @@
 # RPC 超时定位 Skill 加固结果
 
+> 针对本文件最后一个未闭合点的后续通用修复见 [EVIDENCE_GROUNDING_RESULTS.md](EVIDENCE_GROUNDING_RESULTS.md)。
+
 结论：三轮上限内未完成九例加固，按实验停止条件结束。该结果不是 Test Flow 或 Release verdict。
 
 ## 实验身份

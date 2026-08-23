@@ -163,7 +163,14 @@ def validate(skill_dir: Path, wiki: Path) -> dict[str, object]:
             errors.append(f"SKILL.md is not UTF-8: {exc}")
         else:
             frontmatter = _frontmatter(skill_text, errors)
-            for required_phrase in ("request.json", "methods.json", "target_logs", "Logparse"):
+            for required_phrase in (
+                "request.json",
+                "methods.json",
+                "target_logs",
+                "Logparse",
+                "identity_tokens",
+                "sources",
+            ):
                 if required_phrase not in skill_text:
                     errors.append(f"SKILL.md must mention {required_phrase}")
 
