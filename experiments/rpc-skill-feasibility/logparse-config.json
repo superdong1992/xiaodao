@@ -1,0 +1,57 @@
+{
+  "schema_version": 2,
+  "pipeline": {
+    "debug_expand_gz": false,
+    "extraction_workers": "auto",
+    "diagnostic_scan_workers": "auto",
+    "keep_workspace": false
+  },
+  "products": {
+    "rpc-skill-feasibility": {
+      "archive": {
+        "recursive_extraction": false,
+        "compressed_extensions": [
+          ".zip"
+        ]
+      },
+      "discovery": {
+        "plugin": "backend.extensions.products.current.scanner.ScannerPlugin",
+        "config": {
+          "loose_diagnostics": {
+            "enabled": true,
+            "file_patterns": [
+              "client.log",
+              "server.log"
+            ]
+          },
+          "filename_timestamp_regex": "(?!)"
+        }
+      },
+      "parser": {
+        "plugin": "backend.extensions.products.current.parser.ParserPlugin",
+        "config": {
+          "timestamp_regex": "(\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?)([+-]\\d{2}:\\d{2})?",
+          "active_period_gap_seconds": 300
+        }
+      },
+      "mechanisms": {
+        "rpc": {
+          "plugin": "backend.extensions.mechanisms.module1.Module1Plugin",
+          "enabled": true,
+          "depends_on": [],
+          "config": {
+            "module_name": "rpc",
+            "diag_pattern": "Service=[^;]*;\\s*Slot=(?P<Slot>[^;]+);\\s*CPU-Id=(?P<CPU_Id>[^;]*);\\s*ProcessName=(?P<ProcessName>[^;]+);\\s*Context=(?P<Context>.*)\\)$",
+            "active_master_keyword": "",
+            "lifecycle_split": {
+              "process_name_mapping": {},
+              "reliable_processes": [],
+              "multi_instance_processes": []
+            },
+            "sequence_pattern": "(?!)"
+          }
+        }
+      }
+    }
+  }
+}

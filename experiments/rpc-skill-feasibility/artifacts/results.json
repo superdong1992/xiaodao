@@ -1,0 +1,166 @@
+{
+  "schema_version": 1,
+  "status": "PASS",
+  "scope": "functional-feasibility-only",
+  "round": 2,
+  "model": "gpt-5.6-luna",
+  "reasoning_effort": "medium",
+  "codex_cli_version": "codex-cli 0.149.0-alpha.4.1",
+  "source": {
+    "wiki_sha256": "9138ee2358137fdc1dcc828f08a0f89ebc5e55816f71a1142ccd5d9b8ddc8161",
+    "meta_skill_sha256": "bfa7cf874cbdecdd0fecb5910f672fa5ef0d76da7b40bc824ae946f2b2d751e7",
+    "case_ids": [
+      "api-execution-overrun",
+      "client-receive-blocked",
+      "insufficient-evidence",
+      "server-queue-delay"
+    ]
+  },
+  "logparse_identity": {
+    "git_head": "a233b500d9c99e6815d1ffd82cb4ca55bbfe657a",
+    "git_status_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "cli_sha256": "19b9a5c5f9e31a85325c2915822b20cc43b5628becef923ccbc44c79074cff88",
+    "python": "Python 3.12.13"
+  },
+  "generated_skill_sha256": "c1618c664f4518c83d967204aa1a37ad5ecf9468c9588d7d6fd20ebd625cf431",
+  "generation": {
+    "validation": {
+      "ok": true,
+      "skill_name": "diagnose-rpc-timeout",
+      "source_wiki_sha256": "9138ee2358137fdc1dcc828f08a0f89ebc5e55816f71a1142ccd5d9b8ddc8161",
+      "method_count": 3,
+      "marker_count": 4,
+      "errors": []
+    },
+    "branch_mapping": {
+      "API_COMPLETE": "api-execution-slow",
+      "QUEUE_HISTORY": "server-queueing",
+      "LATE_RESPONSE": "client-receive-blocked"
+    },
+    "thread_id": "01a02dd5-4a61-7f00-95b6-ff6dfcfd2f19",
+    "usage": {
+      "input_tokens": 469688,
+      "cached_input_tokens": 434688,
+      "cache_write_input_tokens": 0,
+      "output_tokens": 11149,
+      "reasoning_output_tokens": 667
+    }
+  },
+  "preprocessing": {
+    "api-execution-overrun": {
+      "cache_hit": true,
+      "parse_invocations": 1,
+      "target_query_invocations": 2,
+      "receipt_sha256": "8d78946fb48b8233dbb02bebba29bd73ea2345c28a0a226a8916d176cb9f36d9"
+    },
+    "client-receive-blocked": {
+      "cache_hit": true,
+      "parse_invocations": 1,
+      "target_query_invocations": 2,
+      "receipt_sha256": "2444bb59c24c52fe26ac2327aa08c2efcb3c5b3fc0128f9219779516a10576cc"
+    },
+    "insufficient-evidence": {
+      "cache_hit": true,
+      "parse_invocations": 1,
+      "target_query_invocations": 2,
+      "receipt_sha256": "f66a789b136d23d0107c6a00425f3c6dabc6180bb9da75cafcd3ca9f9343a4f4"
+    },
+    "server-queue-delay": {
+      "cache_hit": true,
+      "parse_invocations": 1,
+      "target_query_invocations": 2,
+      "receipt_sha256": "28d745331100423052bb04a5fbbc4b13ef02c47ecfd4ef8df0b2e7334a618391"
+    }
+  },
+  "diagnoses": [
+    {
+      "scenario_id": "api-execution-overrun",
+      "status": "CONFIRMED",
+      "confirmed_methods": ["api-execution-slow"],
+      "candidate_methods": ["server-queueing", "client-receive-blocked"],
+      "evidence_count": 1,
+      "receipt_sha256": "8d78946fb48b8233dbb02bebba29bd73ea2345c28a0a226a8916d176cb9f36d9",
+      "result_file": "diagnoses/api-execution-overrun.json",
+      "trace": {
+        "thread_id": "01a02ddc-056a-7d61-98a0-96fe1a485612",
+        "command_count": 8,
+        "logparse_invocations": 0,
+        "usage": {
+          "input_tokens": 94049,
+          "cached_input_tokens": 73472,
+          "cache_write_input_tokens": 0,
+          "output_tokens": 1720,
+          "reasoning_output_tokens": 438
+        }
+      }
+    },
+    {
+      "scenario_id": "client-receive-blocked",
+      "status": "CONFIRMED",
+      "confirmed_methods": ["client-receive-blocked"],
+      "candidate_methods": [],
+      "evidence_count": 1,
+      "receipt_sha256": "2444bb59c24c52fe26ac2327aa08c2efcb3c5b3fc0128f9219779516a10576cc",
+      "result_file": "diagnoses/client-receive-blocked.json",
+      "trace": {
+        "thread_id": "01a02ddc-b0ef-7df0-8216-da788de81971",
+        "command_count": 8,
+        "logparse_invocations": 0,
+        "usage": {
+          "input_tokens": 77013,
+          "cached_input_tokens": 57344,
+          "cache_write_input_tokens": 0,
+          "output_tokens": 1569,
+          "reasoning_output_tokens": 382
+        }
+      }
+    },
+    {
+      "scenario_id": "insufficient-evidence",
+      "status": "INSUFFICIENT",
+      "confirmed_methods": [],
+      "candidate_methods": ["api-execution-slow", "server-queueing", "client-receive-blocked"],
+      "evidence_count": 0,
+      "receipt_sha256": "f66a789b136d23d0107c6a00425f3c6dabc6180bb9da75cafcd3ca9f9343a4f4",
+      "result_file": "diagnoses/insufficient-evidence.json",
+      "trace": {
+        "thread_id": "01a02ddd-53f7-77d3-8996-cb0777679b38",
+        "command_count": 8,
+        "logparse_invocations": 0,
+        "usage": {
+          "input_tokens": 76798,
+          "cached_input_tokens": 57344,
+          "cache_write_input_tokens": 0,
+          "output_tokens": 1649,
+          "reasoning_output_tokens": 378
+        }
+      }
+    },
+    {
+      "scenario_id": "server-queue-delay",
+      "status": "CONFIRMED",
+      "confirmed_methods": ["server-queueing"],
+      "candidate_methods": ["api-execution-slow", "client-receive-blocked"],
+      "evidence_count": 3,
+      "receipt_sha256": "28d745331100423052bb04a5fbbc4b13ef02c47ecfd4ef8df0b2e7334a618391",
+      "result_file": "diagnoses/server-queue-delay.json",
+      "trace": {
+        "thread_id": "01a02dde-01be-73d0-940e-79419b1bab1e",
+        "command_count": 8,
+        "logparse_invocations": 0,
+        "usage": {
+          "input_tokens": 96116,
+          "cached_input_tokens": 72704,
+          "cache_write_input_tokens": 0,
+          "output_tokens": 2454,
+          "reasoning_output_tokens": 774
+        }
+      }
+    }
+  ],
+  "claims": {
+    "test_flow_used": false,
+    "release_verdict": false,
+    "logparse_invocations_during_diagnosis": 0
+  }
+}

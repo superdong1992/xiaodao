@@ -1,0 +1,15 @@
+{
+  "scenario_id": "server-queue-delay",
+  "problem_time": "2026-08-23T10:00:05.100000+08:00",
+  "problem": "rpc_client 调用 svc_orders:Reserve 时发生 4000 毫秒超时。请只根据冻结的 Logparse 目标日志判断原因，并在证据允许时列出所有排队贡献者。",
+  "client_process": "rpc_client",
+  "server_process": "rpc_server",
+  "expected_status": "CONFIRMED",
+  "expected_branch_marker": "QUEUE_HISTORY",
+  "expected_terms": [
+    "svc_catalog",
+    "Refresh",
+    "svc_auth",
+    "Sync"
+  ]
+}

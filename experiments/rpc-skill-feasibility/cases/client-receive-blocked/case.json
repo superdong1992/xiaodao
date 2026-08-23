@@ -1,0 +1,10 @@
+{
+  "scenario_id": "client-receive-blocked",
+  "problem_time": "2026-08-23T10:00:05.200000+08:00",
+  "problem": "rpc_client 调用 svc_profile:Lookup 时发生 3000 毫秒超时，随后收到迟到响应。请只根据冻结的 Logparse 目标日志判断原因。",
+  "client_process": "rpc_client",
+  "server_process": "rpc_server",
+  "expected_status": "CONFIRMED",
+  "expected_branch_marker": "LATE_RESPONSE",
+  "expected_terms": []
+}

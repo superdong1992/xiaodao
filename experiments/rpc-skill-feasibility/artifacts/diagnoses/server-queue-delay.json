@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "scenario_id": "server-queue-delay",
+  "status": "CONFIRMED",
+  "confirmed_methods": [
+    "server-queueing"
+  ],
+  "candidate_methods": [
+    "api-execution-slow",
+    "client-receive-blocked"
+  ],
+  "evidence": [
+    {
+      "method_id": "server-queueing",
+      "anchor": "server",
+      "marker": "QUEUE_HISTORY print_time_ms=6000 ordinal=first service=svc_catalog api=Refresh end_us=3000000 cost_us=2000000 queue_us=100000 timeout_ms=3000",
+      "summary": "与目标历史输出相差 800 毫秒。svc_catalog:Refresh 实际执行区间为 1000000–3000000 微秒，与目标排队区间 500000–4500000 微秒重叠 2000000 微秒，是排队贡献者。"
+    },
+    {
+      "method_id": "server-queueing",
+      "anchor": "server",
+      "marker": "QUEUE_HISTORY print_time_ms=6300 ordinal=second service=svc_auth api=Sync end_us=4500000 cost_us=1500000 queue_us=200000 timeout_ms=3000",
+      "summary": "与目标历史输出相差 500 毫秒。svc_auth:Sync 实际执行区间为 3000000–4500000 微秒，与目标排队区间重叠 1500000 微秒，是排队贡献者。"
+    },
+    {
+      "method_id": "server-queueing",
+      "anchor": "server",
+      "marker": "QUEUE_HISTORY print_time_ms=6800 ordinal=third service=svc_orders api=Reserve end_us=5200000 cost_us=700000 queue_us=4000000 timeout_ms=4000",
+      "summary": "最后一条记录匹配目标 svc_orders:Reserve。目标执行耗时 700000 微秒，小于 4000000 微秒超时限额；排队加执行为 4700000 微秒，超过超时限额，因此确认收包线程排队导致超时。目标执行区间为 4500000–5200000 微秒，排队区间为 500000–4500000 微秒。"
+    }
+  ],
+  "limitations": [
+    "仅检查了 input/target_logs.json 指定的 evidence/client.log 和 evidence/server.log，未检查其他日志，因此无法判断未列出的前序操作是否存在。",
+    "未发现 api-execution-slow 或 client-receive-blocked 的正向标记；但日志抑制、限流或条件打印可能造成观测缺失，不能据此排除这些可能性。"
+  ],
+  "safety_notes": [
+    "RPC 超时不等于取消；服务端可能仍在执行，并可能产生副作用。"
+  ],
+  "logparse_receipt_sha256": "28d745331100423052bb04a5fbbc4b13ef02c47ecfd4ef8df0b2e7334a618391"
+}

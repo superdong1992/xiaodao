@@ -1,0 +1,10 @@
+{
+  "scenario_id": "insufficient-evidence",
+  "problem_time": "2026-08-23T10:00:04.950000+08:00",
+  "problem": "rpc_client 调用 svc_report:Build 时发生 5000 毫秒超时。请只根据冻结的 Logparse 目标日志判断原因。",
+  "client_process": "rpc_client",
+  "server_process": "rpc_server",
+  "expected_status": "INSUFFICIENT",
+  "expected_branch_marker": null,
+  "expected_terms": []
+}

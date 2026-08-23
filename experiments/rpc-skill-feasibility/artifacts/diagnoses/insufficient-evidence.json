@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "scenario_id": "insufficient-evidence",
+  "status": "INSUFFICIENT",
+  "confirmed_methods": [],
+  "candidate_methods": [
+    "api-execution-slow",
+    "server-queueing",
+    "client-receive-blocked"
+  ],
+  "evidence": [],
+  "limitations": [
+    "目标日志仅包含客户端超时记录和服务端心跳记录，未出现任何方法的正向 evidence marker。",
+    "客户端超时记录只能确认截止时间内未收到响应，不能区分 API 执行过慢、服务端收包线程排队或客户端收包线程阻塞。",
+    "日志可能受日志抑制、排队历史限流或死循环条件打印影响；缺少对应日志不代表相关原因不存在。",
+    "结论仅适用于 input/target_logs.json 指定的 client 与 server evidence 日志范围。"
+  ],
+  "safety_notes": [
+    "RPC 超时不等于取消；服务端可能仍在执行 API 并产生副作用。"
+  ],
+  "logparse_receipt_sha256": "f66a789b136d23d0107c6a00425f3c6dabc6180bb9da75cafcd3ca9f9343a4f4"
+}

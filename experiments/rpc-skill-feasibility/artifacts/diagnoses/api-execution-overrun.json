@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "scenario_id": "api-execution-overrun",
+  "status": "CONFIRMED",
+  "confirmed_methods": [
+    "api-execution-slow"
+  ],
+  "candidate_methods": [
+    "server-queueing",
+    "client-receive-blocked"
+  ],
+  "evidence": [
+    {
+      "method_id": "api-execution-slow",
+      "anchor": "server",
+      "marker": "API_COMPLETE service=svc_orders api=Reserve start_us=1000000 end_us=7500000 cost_us=6500000",
+      "summary": "svc_orders:Reserve 执行耗时 6,500,000 微秒，即 6500 毫秒，超过 5000 毫秒超时阈值 1500 毫秒，因此确认 API 自身执行过慢。"
+    }
+  ],
+  "limitations": [
+    "仅检查了 input/target_logs.json 指定的 evidence/client.log 和 evidence/server.log。",
+    "未发现 server-queueing 或 client-receive-blocked 的正向证据；日志抑制、排队历史限流和条件打印可能造成观测缺失，因此不能据此排除它们。"
+  ],
+  "safety_notes": [
+    "RPC 超时不等于取消；服务端可能仍在执行并产生副作用。",
+    "本结论仅适用于冻结目标日志范围内的 svc_orders:Reserve 请求。"
+  ],
+  "logparse_receipt_sha256": "8d78946fb48b8233dbb02bebba29bd73ea2345c28a0a226a8916d176cb9f36d9"
+}
