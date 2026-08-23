@@ -1,70 +1,143 @@
-# CCCC（#CCCC是RPC模块的名字，匿名化了#）简介
+# CCCC 简介
 
-CCCC即RPC（Remote Procedure Call）过程远程调用，它的作用是把消息收发通信的编程方式转变为API接口调用方式，极大提升了开发效率。在xxx（#版本号匿名化了#）版本，引入了cccc_dbgex（#新增了一个目录，实现了cccc模块的维测能力增强#）维测增强能力，因此基于旧版本的定位wiki上修改得到本wiki。
+CCCC 是 RPC（Remote Procedure Call，远程过程调用）模块。它把消息收发的编程方式转换为 API
+接口调用方式，提升了开发效率。BBBB 是 CCCC 的上一级进程间消息通信机制。
 
-# RPC调用超时失败
+下文日志模板中，`{字段名}` 表示运行时字段值，花括号不属于日志原文；`%s`、`%u` 等格式化占位符
+同样表示运行时字段值。
 
-无论是rpc同步调用，还是异步调用，都有rpc超时的概念。在指定时间内cccc client的收包线程没有收到cccc server回复的包含api执行结果的rpc响应消息，那么就会触发rpc超时失败：
+# RPC 调用超时失败
 
-1. 同步请求会在rpc超时时返回，并填充返回结构体CCCC_STATUS_S，将bRpcSuccess设置为false，将uiErrno设置为`0xaaaaaaaa(#错误码被匿名化了#) CCCC_ERRNO_REQUEST_TIMEOUT_FAIL`。
-2. 异步请求会在rpc超时时调用用户注册的回调函数，该函数的第一个入参也是结构体CCCC_STATUS_S，设置的内容与同步超时一致。
+RPC 同步调用和异步调用都存在超时。在指定时间内，CCCC client 的收包线程没有收到 CCCC server
+返回的、包含 API 执行结果的 RPC 响应消息，就会触发 RPC 超时失败：
 
-rpc超时只能说明响应没有在deadline前被客户端接收；API可能尚未开始、正在执行、已经执行或稍后执行，超时本身不等于取消。
+1. 同步请求超时后返回，并填充结构体 `CCCC_STATUS_S`：`bRpcSuccess=false`，
+   `uiErrno=0xaaaaaaaa CCCC_ERRNO_REQUEST_TIMEOUT_FAIL`。
+2. 异步请求超时后调用用户注册的回调函数，第一个入参也是 `CCCC_STATUS_S`，内容与同步超时一致。
 
-# RPC调用超时失败的可能原因
+RPC 超时说明客户端没有在截止时间前收到响应，服务端可能执行该 API。超时本身不等于取消，
+后续执行仍可能产生副作用。
 
-RPC超时可能有以下常见原因，按本Wiki的局部经验从大到小排序，但不是穷尽集合：
+# RPC 调用超时失败的可能原因
 
-- 原因1：用户指定的rpc对应的api执行时间过长。
-- 原因2：rpc server收包线程串行承载多个服务实例或融合业务，同一执行lane中的前序耗时操作导致后续API排队。
-- 原因3：rpc client收包线程被作为server的API、异步回调或其他融合业务阻塞。
+RPC 超时的常见原因如下，按可能性从大到小排序：
 
-# BBBB（#这是CCCC对应的上一级进程间消息通信机制的名字，也是logparse配置中的一个模块#）日志定位
+1. 用户调用的 API 执行时间过长。
+2. RPC server 收包线程在此之前执行了其他耗时操作（包括但不限于其他 API 调用），目标 API 排队
+   等待，响应无法在截止时间前返回，触发超时。
+3. RPC client 收包线程被本进程作为 server 承载的 API 调用、异步回调等其他耗时操作阻塞。
 
-BBBB默认存在进程级日志抑制：同一进程内，如果75秒内打印过同源码行、同错误码日志，后续相同键日志不会再次打印。除非某条日志明确说明“无抑制”，否则本Wiki中的BBBB日志均按受该默认规则影响处理；字段值、请求ID和线程不属于默认抑制键。
+# BBBB 日志定位
 
-1. 同步调用超时：`rpc call %s:%s timeout limit %u recv no response`，依次为服务名、API名、超时时间（毫秒）。
-2. 同步和异步超时：`%s rpc %s call unsuccess, reqid(%u), timeout %u`，依次为服务名、调用类型、进程内唯一请求ID、超时时间（毫秒）。一种通信协议不记录本条日志。
-3. 客户端最终收到晚响应时会打印三条很长的日志，包含服务名、API名、请求ID、客户端发送、服务端接收、服务端发送和客户端当前时间等微秒时间戳。（#原日志很长，这里只描述稳定字段语义#）
-4. 服务端API执行结束后，若API自身耗时超过超时阈值，会打印服务名、API名、开始、结束和耗时（微秒）。（#原日志很长，这里只描述稳定字段语义#）
+BBBB 默认存在进程级日志抑制：同一进程内，如果 75 秒内已经打印过同一源码行且错误码相同的日志，
+后续同一源码行、同一错误码的日志不再打印。抑制只看进程、源码行和错误码，日志里的字段值、请求
+ID、线程是什么都不影响；字段值不同也不会重新打印。除非某条日志明确说明"无抑制"，否则以下
+BBBB 日志均受此规则影响。
 
-日志3不用把整条平台前缀手打出来，稳定消息体能唯一匹配就够了。拿到这四个时间后，我一般先拆成三段：
+例如，同一 client 进程内，svc_alpha 的 Fetch 调用超时，打印了"rpc call svc_alpha:Fetch timeout
+limit 5000 recv no response"日志；75 秒内 svc_beta 的 List 调用也超时，虽然服务名和 API 名都
+不同，但仍是同一源码行、同一错误码，这次不再打印。日志里只有一条记录，两次超时却都发生了。
 
-- `Q = 服务端接收时间 - 客户端发送时间`，表示请求从客户端发送到服务端接收这一大段。
-- `S = 服务端发送时间 - 服务端接收时间`，表示请求在服务端这一大段的停留。
-- `C = 客户端当前时间 - 服务端发送时间`，表示响应从服务端发送到客户端当前这一大段。
+## 客户端超时日志
 
-客户端端到端耗时是`客户端当前时间 - 客户端发送时间`，也就是`Q + S + C`。timeout日志里是毫秒，
-上面时间戳是微秒，比较前要先统一单位。Q和C跨客户端、服务端两套时钟，不能因为算出来是正数就直接认定
-具体线程排队；必须带上明确的跨时钟容差，容差区间压着阈值时只能说UNKNOWN。S是服务端同一时钟，客户端端到端
-也是客户端同一时钟，可以直接按0容差计算。Q、S或C某一大段即使在考虑容差后仍超过timeout，也只能先确认该
-聚合段超预算，具体是哪一个线程、回调或API机制阻塞还要看其他正向日志。
+1. 同步调用超时：
 
-日志3和日志4本身是正向证据，不依赖cccc_dbgex增强版本；只有后面的五行排队日志和死循环检测日志依赖增强版本。
-5. 如果只有客户端超时日志，且两侧进程仍存活，只能保留服务端lane阻塞和客户端收包线程阻塞等候选，不能从缺日志二选一。
-6. 新版本的排队超时日志在服务端执行结束后一次打印同一线程最近5次API：
+   ```text
+   rpc call %s:%s timeout limit %u recv no response
+   ```
 
-```text
-[BBBB]The first service:{服务名}, api:{API名}, end time:{结束时间}, cost time:{执行耗时}, queue time:{排队时间}, timeout:{超时时间}
-[BBBB]The second service:{服务名}, api:{API名}, end time:{结束时间}, cost time:{执行耗时}, queue time:{排队时间}, timeout:{超时时间}
-[BBBB]The third service:{服务名}, api:{API名}, end time:{结束时间}, cost time:{执行耗时}, queue time:{排队时间}, timeout:{超时时间}
-[BBBB]The fourth service:{服务名}, api:{API名}, end time:{结束时间}, cost time:{执行耗时}, queue time:{排队时间}, timeout:{超时时间}
-[BBBB]The fifth service:{服务名}, api:{API名}, end time:{结束时间}, cost time:{执行耗时}, queue time:{排队时间}, timeout:{超时时间}
-```
+   字段依次为服务名、API 名和超时时间（毫秒）。
 
-执行耗时为`end-start`，queue time为`start-request`。该五行块还受同进程180秒一次的限流，并叠加BBBB默认抑制。目标API前面的长耗时API可能才是上游根因。
+2. 同步和异步调用超时：
 
-7. 新版本在API仍执行时可打印死循环检测日志：
+   ```text
+   %s rpc %s call unsuccess, reqid(%u), timeout %u
+   ```
 
-```text
-[BBBB]cost too long, service:{服务名}, api:{API名}, start time:{开始时间}, cur time:{当前时间}, request time:{请求时间}, timeout:{超时时间}
-```
+   字段依次为服务名、API 名、进程内唯一请求 ID 和超时时间（毫秒）。
 
-当执行时长同时超过2倍timeout且超过60秒时触发；同一次调用只打印一次，并叠加BBBB默认抑制。（#当前通用合同首版只正式支持SUPPRESSION和RATE_LIMIT；once-per-call仅作为限制说明，不用于absence推理#）
+## 晚响应与 API 完成日志
 
-死循环日志只能用已经打印出来的正向记录：`当前时间-开始时间`必须同时严格大于`2*timeout`和60秒，
-并且版本确实支持该日志，才能确认API自身执行超预算。没看到这条日志时，不能拿“同一次只打印一次”反推没有死循环。
+3. 客户端最终收到迟到响应（late response）时打印：
 
-# 特殊说明
+   ```text
+   LATE_RESPONSE service={service} api={api} request_id={request_id} client_send_us={client_send_us} server_recv_us={server_recv_us} server_send_us={server_send_us} client_now_us={client_now_us}
+   ```
 
-cccc_dbgex只在匿名化版本边界之后存在。固定日志快照之外不补历史日志、不针对用户问题时间启动等待或监控。
+   四个时间字段都是微秒时间戳，能拆成三段：
+
+   - 服务端收包线程排队时间：`server_recv_us - client_send_us`
+   - 服务端 API 执行时间：`server_send_us - server_recv_us`
+   - 客户端收包线程排队时间：`client_now_us - server_send_us`
+
+   三段之和等于客户端端到端时间 `client_now_us - client_send_us`。与超时时间比较前，先把超时
+   时间从毫秒换算成微秒。端到端总时长超过超时时间时，先看服务端 API 执行时间：它单独超过超时
+   时间，说明是 API 自身执行过慢；没有超过，则说明执行本身没有超时，是收包线程排队让总时长
+   超过了超时时间，两个排队时间中更长的一方，对应被占用更久的收包线程。
+
+4. 服务端 API 执行结束时发现执行时间超过超时时间时打印：
+
+   ```text
+   API_COMPLETE service={service} api={api} start_us={start_us} end_us={end_us} cost_us={cost_us}
+   ```
+
+   `start_us`、`end_us`、`cost_us` 都是微秒值，`cost_us=end_us-start_us`。能看到这条日志，
+   就说明 API 自身执行时间已经超过了超时时间。
+
+## 排队历史日志
+
+5. 服务端目标 API 执行结束后，会打印该收包线程最近的 1–5 条 API 历史，从旧到新依次对应
+   `first|second|third|fourth|fifth` 五种序号：
+
+   ```text
+   QUEUE_HISTORY print_time_ms={print_time_ms} ordinal={ordinal} service={service} api={api} end_us={end_us} cost_us={cost_us} queue_us={queue_us} timeout_ms={timeout_ms}
+   ```
+
+   每条记录的 `print_time_ms` 是这条日志的打印时间。所有匹配记录中，最早和最晚打印时间相差
+   不超过 1000 毫秒的，视为同一次历史输出；中间可以夹杂任意其他日志。历史条数不固定，1–5 条
+   都有可能；序号从旧到新排列，`first` 是最旧的一条，最后一条记录始终是当前目标 API（条数为 N
+   时，最后一条对应第 N 个序号），且必须与当前服务名和 API 名一致。
+
+   对目标记录按以下两个条件判断是否因排队超时：
+
+   ```text
+   target_cost_us + target_queue_us > target_timeout_ms * 1000
+   target_cost_us < target_timeout_ms * 1000
+   ```
+
+   两个条件同时成立，说明目标 API 自身执行没有超过超时时间，但排队加上执行的总耗时超过了超时
+   时间，可见是排队导致超时。
+
+   目标 API 的排队区间按以下公式还原：
+
+   ```text
+   target_execution_start_us = target_end_us - target_cost_us
+   target_queue_start_us = target_execution_start_us - target_queue_us
+   ```
+
+   对目标之前的每条 API，只使用其 `end_us` 和 `cost_us` 计算实际执行区间；它自己的 `queue_us`
+   只表示它在排队，不代表占用收包线程，不参与贡献判断：
+
+   ```text
+   prior_execution_start_us = prior_end_us - prior_cost_us
+   overlap_us = min(prior_end_us, target_execution_start_us)
+                - max(prior_execution_start_us, target_queue_start_us)
+   ```
+
+   `overlap_us > 0` 表示该前序 API 在目标 API 排队期间实际占用了收包线程。所有满足该条件的前序
+   API 都是排队贡献者，不只选最近、耗时最长或经验上最可疑的一条。只有目标一条记录时，可以判断
+   目标是否因排队超时，但无法确认具体是哪个前序 API 贡献了排队。
+
+   排队历史日志受同进程 180 秒一次的限流，并叠加 BBBB 默认抑制。日志缺失不能反推没有排队。
+
+## 死循环检测日志
+
+6. API 仍在执行时可能打印：
+
+   ```text
+   DEADLOOP_DETECTED service={service} api={api} start_us={start_us} current_us={current_us} request_us={request_us} timeout_ms={timeout_ms}
+   ```
+
+   当 API 执行时长（`current_us - start_us`）超过超时时间的 2 倍，并且超过 60 秒时，才会打印
+   这条日志（超时时间以毫秒计，先换算成微秒再比较）。同一次调用只打印一次，并叠加 BBBB 默认
+   抑制。没看到这条日志不代表没有死循环。
