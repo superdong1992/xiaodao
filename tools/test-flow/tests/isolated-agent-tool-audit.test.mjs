@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -8,11 +9,66 @@ import {
   auditSkillGenerationTrace,
   discoverLinkedSkillReferences,
   skillGenerationPermissionRules,
-  SKILL_GENERATION_TOOL_ATTEMPT_POLICY,
   SKILL_GENERATION_TRACE_CODES as CODES,
   SKILL_GENERATION_TRACE_SCHEMA_VERSION,
   validSkillGenerationTraceAuditReceipt,
 } from "../runtime-support/isolated-agent-tool-audit.mjs";
+
+const SKILL = "diagnose-rpc-timeout";
+const WIKI = [
+  "# Wiki",
+  "",
+  "  ```text  ",
+  "  API_COMPLETE service={service} cost_us={cost_us}  ",
+  "not a template",
+  "%s rpc timeout %u",
+  "API_COMPLETE service={service} cost_us={cost_us}",
+  "```",
+  "",
+].join("\r\n");
+const LOG_TEMPLATES = Object.freeze([
+  "API_COMPLETE service={service} cost_us={cost_us}",
+  "%s rpc timeout %u",
+  "API_COMPLETE service={service} cost_us={cost_us}",
+]);
+const SOURCE_LOG_TEMPLATES = `# Source log templates\n\n\`\`\`text\n${LOG_TEMPLATES.join("\n")}\n\`\`\`\n`;
+const SOURCE_LOG_TEMPLATES_REFERENCE = "references/source-log-templates.md";
+
+function canonicalJson(value) {
+  if (Array.isArray(value)) return `[${value.map((item) => canonicalJson(item)).join(",")}]`;
+  if (value !== null && typeof value === "object") return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(",")}}`;
+  return JSON.stringify(value);
+}
+
+function sha256(value) {
+  return crypto.createHash("sha256").update(value).digest("hex");
+}
+
+function sourceIdentity(wiki = WIKI, templates = LOG_TEMPLATES) {
+  const value = {
+    algorithm: "sha256",
+    log_template_extraction_version: 1,
+    log_template_inventory_sha256: sha256(canonicalJson({ version: 1, templates })),
+    log_templates: [...templates],
+    schema_version: 2,
+    sha256: sha256(wiki),
+    source_path: "inputs/wiki.md",
+  };
+  return `${canonicalJson(value)}\n`;
+}
+
+const PACKAGE_FILES = Object.freeze({
+  [`output/${SKILL}/SKILL.md`]: "---\nname: diagnose-rpc-timeout\ndescription: Diagnose RPC timeout evidence.\n---\n",
+  [`output/${SKILL}/methods.json`]: `${JSON.stringify({
+    schema_version: 1,
+    skill_name: SKILL,
+    shared_references: [SOURCE_LOG_TEMPLATES_REFERENCE, "references/shared-boundaries.md"],
+    methods: [{ reference: "references/api-overrun.md" }],
+  })}\n`,
+  [`output/${SKILL}/references/api-overrun.md`]: "# API overrun\n",
+  [`output/${SKILL}/references/shared-boundaries.md`]: "# Shared boundaries\n",
+  [`output/${SKILL}/${SOURCE_LOG_TEMPLATES_REFERENCE}`]: SOURCE_LOG_TEMPLATES,
+});
 
 function write(root, relative, content = `${relative}\n`) {
   const target = path.join(root, ...relative.split("/"));
@@ -20,35 +76,24 @@ function write(root, relative, content = `${relative}\n`) {
   fs.writeFileSync(target, content, "utf8");
 }
 
-function workspaceFixture() {
-  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "isolated-agent-audit-"));
+function fixtureRoot() {
+  const parent = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "methods-trace-audit-")));
   const workspaceRoot = path.join(parent, "workspace");
-  const skillRoot = path.join(parent, "installed-skill");
+  const skillRoot = path.join(parent, "installed-meta-skill");
   fs.mkdirSync(workspaceRoot);
-  write(workspaceRoot, "inputs/wiki.md");
-  write(workspaceRoot, "inputs/clarifications.md");
-  write(skillRoot, "SKILL.md", [
-    "# Converter",
-    "[generation](references/generation-spec-v6-reference.md)",
-    "[verification](references/verification-contract-v2-reference.md)",
-    "[optional](references/ordinary-example.md)",
-    "",
-  ].join("\n"));
-  write(skillRoot, "references/generation-spec-v6-reference.md");
-  write(skillRoot, "references/verification-contract-v2-reference.md");
-  write(skillRoot, "references/ordinary-example.md");
-  write(workspaceRoot, "unlinked.md");
+  write(workspaceRoot, "inputs/wiki.md", WIKI);
+  write(workspaceRoot, "runtime/source-wiki-identity.json", sourceIdentity());
+  write(skillRoot, "SKILL.md", "# Converter\n[output contract](references/output-contract.md)\n");
+  write(skillRoot, "references/output-contract.md", "# Methods output contract\n");
+  for (const [relative, content] of Object.entries(PACKAGE_FILES)) write(workspaceRoot, relative, content);
   return { parent, workspaceRoot, skillRoot };
 }
 
 function toolUse(id, name, input) {
-  return {
-    type: "assistant",
-    message: { role: "assistant", content: [{ type: "tool_use", id, name, input }] },
-  };
+  return { type: "assistant", message: { role: "assistant", content: [{ type: "tool_use", id, name, input }] } };
 }
 
-function toolResult(id, tool = "ordinary", { error = false, success = undefined } = {}) {
+function toolResult(id, tool, { error = false, success = undefined } = {}) {
   const raw = tool === "Skill" ? { success: success ?? !error } : { type: tool.toLowerCase() };
   if (error && tool !== "Skill") raw.isError = true;
   return {
@@ -58,251 +103,284 @@ function toolResult(id, tool = "ordinary", { error = false, success = undefined 
   };
 }
 
-function invocation(id, name, input, options) {
-  return [toolUse(id, name, input), toolResult(id, name, options)];
+function invocation(id, tool, input, options = {}) {
+  return [toolUse(id, tool, input), toolResult(id, tool, options)];
 }
 
-function validEvents(workspaceRoot, skillRoot, content = "{}") {
+function validEvents(workspaceRoot, skillRoot) {
   return [
     { type: "system", subtype: "init", cwd: workspaceRoot, permissionMode: "dontAsk", tools: ["Read", "Skill", "Write"] },
     ...invocation("skill", "Skill", { skill: "wiki-to-diagnosis-skill" }),
     ...invocation("wiki", "Read", { file_path: path.join(workspaceRoot, "inputs", "wiki.md") }),
-    ...invocation("clarifications", "Read", { file_path: path.join(workspaceRoot, "inputs", "clarifications.md") }),
-    ...invocation("generation", "Read", { file_path: path.join(skillRoot, "references", "generation-spec-v6-reference.md") }),
-    ...invocation("verification", "Read", { file_path: path.join(skillRoot, "references", "verification-contract-v2-reference.md") }),
-    ...invocation("optional", "Read", { file_path: path.join(skillRoot, "references", "ordinary-example.md"), limit: 200 }),
-    ...invocation("write", "Write", { file_path: path.join(workspaceRoot, "output", "generation-spec.json"), content }),
+    ...invocation("identity", "Read", { file_path: path.join(workspaceRoot, "runtime", "source-wiki-identity.json") }),
+    ...invocation("contract", "Read", { file_path: path.join(skillRoot, "references", "output-contract.md") }),
+    ...Object.entries(PACKAGE_FILES).flatMap(([relative, content], index) => invocation(`write-${index}`, "Write", { file_path: relative, content })),
     { type: "result", subtype: "success", is_error: false },
   ];
 }
 
 function arrangeValid() {
-  const fixture = workspaceFixture();
-  const content = "{\"schema_version\":6}\n";
-  write(fixture.workspaceRoot, "output/generation-spec.json", content);
-  return { ...fixture, content, events: validEvents(fixture.workspaceRoot, fixture.skillRoot, content) };
+  const fixture = fixtureRoot();
+  return { ...fixture, events: validEvents(fixture.workspaceRoot, fixture.skillRoot) };
 }
 
-function replaceToolPath(events, tool, occurrence, filePath) {
-  const matches = events.filter((event) => event?.message?.content?.[0]?.type === "tool_use"
-    && event.message.content[0].name === tool);
-  matches[occurrence].message.content[0].input.file_path = filePath;
+function useEvent(events, id) {
+  return events.find((event) => event?.message?.content?.[0]?.id === id);
 }
 
-function errorCode(callback, code) {
-  assert.throws(callback, (error) => error?.code === code, code);
+function resultEvent(events, id) {
+  return events.find((event) => event?.message?.content?.[0]?.tool_use_id === id);
 }
 
-test("audits a complete, confined Skill-generation trace and returns only relative paths", () => {
+function replacePackageContent(fixture, relative, content) {
+  write(fixture.workspaceRoot, relative, content);
+  const event = fixture.events.find((candidate) => {
+    const block = candidate?.message?.content?.[0];
+    return block?.type === "tool_use" && block.name === "Write" && block.input?.file_path === relative;
+  });
+  assert.ok(event, `missing Write fixture for ${relative}`);
+  event.message.content[0].input.content = content;
+}
+
+function errorCode(action, expected) {
+  assert.throws(action, (error) => error?.code === expected);
+}
+
+function absolutePermissionRule(filePath) {
+  const resolved = path.resolve(filePath);
+  const drive = /^([A-Za-z]):[\\/](.*)$/.exec(resolved);
+  const portable = drive
+    ? `${drive[1]}/${drive[2].replaceAll("\\", "/")}`
+    : resolved.split(path.sep).join("/").replace(/^\/+/, "");
+  return `Read(//${portable.replaceAll("\\", "\\\\").replaceAll("(", "\\(").replaceAll(")", "\\)")})`;
+}
+
+test("audits one strict multi-file Methods package and emits a closed v5 receipt", () => {
   const fixture = arrangeValid();
   try {
     const receipt = auditSkillGenerationTrace(fixture);
     assert.equal(receipt.schema_version, SKILL_GENERATION_TRACE_SCHEMA_VERSION);
     assert.equal(receipt.status, "PASS");
-    assert.equal(receipt.workflow, "skill-generation");
-    assert.deepEqual(receipt.tool_inventory, ["Skill", "Read", "Write"]);
-    assert.equal(receipt.permission_mode, "dontAsk");
-    assert.match(receipt.permission_policy_sha256, /^[a-f0-9]{64}$/);
-    assert.deepEqual(receipt.attempt_policy, SKILL_GENERATION_TOOL_ATTEMPT_POLICY);
-    assert.match(receipt.attempt_policy_sha256, /^[a-f0-9]{64}$/);
-    assert.deepEqual(receipt.accepted_validation_rejections, []);
-    assert.deepEqual(receipt.tool_sequence.map((item) => item.tool), ["Skill", "Read", "Read", "Read", "Read", "Read", "Write"]);
-    assert.ok(receipt.tool_sequence.every((item) => item.outcome === "SUCCESS"));
+    assert.equal(receipt.package.skill_name, SKILL);
+    assert.equal(receipt.package.file_count, Object.keys(PACKAGE_FILES).length);
     assert.deepEqual(receipt.required_reads, [
       "workspace/inputs/wiki.md",
-      "workspace/inputs/clarifications.md",
-      "skill/references/generation-spec-v6-reference.md",
-      "skill/references/verification-contract-v2-reference.md",
+      "workspace/runtime/source-wiki-identity.json",
+      "skill/references/output-contract.md",
     ]);
-    assert.equal(receipt.output.path, "workspace/output/generation-spec.json");
-    assert.equal(receipt.output.size_bytes, Buffer.byteLength(fixture.content));
-    assert.match(receipt.output.sha256, /^[a-f0-9]{64}$/);
+    assert.deepEqual(receipt.linked_references, ["skill/references/output-contract.md"]);
+    assert.equal(receipt.tool_sequence.filter((record) => record.tool === "Write").length, 5);
+    assert.deepEqual(receipt.source_log_templates, {
+      extraction_version: 1,
+      count: 3,
+      inventory_sha256: sha256(canonicalJson({ version: 1, templates: LOG_TEMPLATES })),
+      reference_path: `workspace/output/${SKILL}/${SOURCE_LOG_TEMPLATES_REFERENCE}`,
+      reference_sha256: sha256(SOURCE_LOG_TEMPLATES),
+    });
     assert.equal(validSkillGenerationTraceAuditReceipt(receipt), true);
-    for (const item of receipt.tool_sequence) {
-      if (item.path) assert.equal(path.posix.isAbsolute(item.path) || path.win32.isAbsolute(item.path), false);
-    }
-    assert.doesNotMatch(JSON.stringify(receipt), new RegExp(fixture.workspaceRoot.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
-    assert.doesNotMatch(JSON.stringify(receipt), new RegExp(fixture.skillRoot.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
-  } finally {
-    fs.rmSync(fixture.parent, { recursive: true, force: true });
-  }
-});
-
-test("records one explicit empty Write validation rejection immediately before the only successful Write", () => {
-  const fixture = arrangeValid();
-  try {
-    const events = structuredClone(fixture.events);
-    events.splice(-3, 0, ...invocation("empty-write", "Write", {}, { error: true }));
-    const receipt = auditSkillGenerationTrace({ ...fixture, events });
-    assert.equal(receipt.status, "PASS");
-    assert.equal(validSkillGenerationTraceAuditReceipt(receipt), true);
-    assert.deepEqual(receipt.tool_sequence.slice(-2), [
-      {
-        ordinal: receipt.tool_sequence.length - 2,
-        tool: "Write",
-        outcome: "REJECTED",
-        classification: "EMPTY_INPUT_REQUIRED_FIELDS_ABSENT",
-      },
-      {
-        ordinal: receipt.tool_sequence.length - 1,
-        tool: "Write",
-        outcome: "SUCCESS",
-        path: "workspace/output/generation-spec.json",
-      },
-    ]);
-    assert.deepEqual(receipt.accepted_validation_rejections, [{
-      ordinal: receipt.tool_sequence.length - 2,
-      tool: "Write",
-      classification: "EMPTY_INPUT_REQUIRED_FIELDS_ABSENT",
-      input_key_names: [],
-      result_completed_before_success: true,
-    }]);
-    assert.equal(receipt.output.ordinal, receipt.tool_sequence.length - 1);
-    assert.doesNotMatch(JSON.stringify(receipt), /isError|tool_use_error|InputValidationError|content|file_path/);
 
     const tampered = structuredClone(receipt);
-    tampered.accepted_validation_rejections[0].input_key_names.push("file_path");
+    tampered.package.files[0].sha256 = "0".repeat(64);
     assert.equal(validSkillGenerationTraceAuditReceipt(tampered), false);
+
+    const legacy = structuredClone(receipt);
+    legacy.schema_version = 4;
+    assert.equal(validSkillGenerationTraceAuditReceipt(legacy), false);
   } finally {
     fs.rmSync(fixture.parent, { recursive: true, force: true });
   }
 });
 
-test("builds exact least-privilege CLI rules with Edit authorizing only the audited Write path", () => {
+test("grants only the Wiki, source identity, linked output contract, Skill load, and audited output subtree", () => {
   const fixture = arrangeValid();
   try {
     const linkedReferences = discoverLinkedSkillReferences(fixture.skillRoot);
-    const absoluteRule = (relative) => {
-      const resolved = path.resolve(fixture.skillRoot, ...relative.split("/"));
-      const drive = /^([A-Za-z]):[\\/](.*)$/.exec(resolved);
-      const portable = drive
-        ? `${drive[1]}/${drive[2].replaceAll("\\", "/")}`
-        : resolved.split(path.sep).join("/").replace(/^\/+/, "");
-      const escaped = portable.replaceAll("\\", "\\\\").replaceAll("(", "\\(").replaceAll(")", "\\)");
-      return `Read(//${escaped})`;
-    };
+    assert.deepEqual(linkedReferences, ["references/output-contract.md"]);
     assert.deepEqual(skillGenerationPermissionRules({ ...fixture, linkedReferences }), [
       "Skill(wiki-to-diagnosis-skill)",
       "Read(/inputs/wiki.md)",
-      "Read(/inputs/clarifications.md)",
-      ...linkedReferences.map(absoluteRule),
-      "Edit(/output/generation-spec.json)",
+      "Read(/runtime/source-wiki-identity.json)",
+      absolutePermissionRule(path.join(fixture.skillRoot, "references", "output-contract.md")),
+      "Edit(/output/**)",
     ]);
   } finally {
     fs.rmSync(fixture.parent, { recursive: true, force: true });
   }
 });
 
-test("permission rules escape special characters in absolute Skill paths", () => {
+test("hard-cuts clarifications and every GenerationSpec-era meta Skill reference", () => {
   const fixture = arrangeValid();
-  const parentWithParens = `${fixture.parent} (safe)`;
   try {
-    fs.renameSync(fixture.parent, parentWithParens);
-    const workspaceRoot = path.join(parentWithParens, "workspace");
-    const skillRoot = path.join(parentWithParens, "installed-skill");
-    const linkedReferences = discoverLinkedSkillReferences(skillRoot);
-    const rules = skillGenerationPermissionRules({ workspaceRoot, skillRoot, linkedReferences });
-    assert.ok(rules.some((rule) => rule.includes("\\(safe\\)")));
-    if (process.platform === "win32") {
-      assert.ok(rules.filter((rule) => rule.startsWith("Read(//")).every((rule) => /^Read\(\/[\/][A-Za-z]\//.test(rule)));
-      assert.ok(rules.every((rule) => !/\/\/[A-Za-z]:\//.test(rule)));
-    }
-  } finally {
-    fs.rmSync(parentWithParens, { recursive: true, force: true });
-  }
-});
+    write(fixture.workspaceRoot, "inputs/clarifications.md", "legacy\n");
+    const legacyRead = structuredClone(fixture.events);
+    useEvent(legacyRead, "wiki").message.content[0].input.file_path = "inputs/clarifications.md";
+    errorCode(() => auditSkillGenerationTrace({ ...fixture, events: legacyRead }), CODES.READ_UNLINKED);
 
-test("permission rules reject an unsafe root or incomplete and injected reference lists", () => {
-  const fixture = arrangeValid();
-  try {
-    const linkedReferences = discoverLinkedSkillReferences(fixture.skillRoot);
-    errorCode(() => skillGenerationPermissionRules({
-      workspaceRoot: "relative-workspace",
-      skillRoot: fixture.skillRoot,
-      linkedReferences,
-    }), CODES.ROOT_INVALID);
-    errorCode(() => skillGenerationPermissionRules({
-      ...fixture,
-      linkedReferences: linkedReferences.slice(1),
-    }), CODES.REQUIRED_REFERENCE_INVALID);
-    errorCode(() => skillGenerationPermissionRules({
-      ...fixture,
-      linkedReferences: [...linkedReferences, "references/../unlinked.md"],
-    }), CODES.PATH_TRAVERSAL);
+    write(fixture.skillRoot, "references/generation-spec-v6-reference.md", "legacy\n");
+    write(fixture.skillRoot, "SKILL.md", [
+      "[output](references/output-contract.md)",
+      "[legacy](references/generation-spec-v6-reference.md)",
+      "",
+    ].join("\n"));
+    errorCode(() => discoverLinkedSkillReferences(fixture.skillRoot), CODES.REQUIRED_REFERENCE_INVALID);
   } finally {
     fs.rmSync(fixture.parent, { recursive: true, force: true });
   }
 });
 
-test("trace audit rejects a workspace nested in the source repository", () => {
+test("requires the first and only exact successful meta Skill invocation", () => {
   const fixture = arrangeValid();
   try {
-    const linkedReferences = discoverLinkedSkillReferences(fixture.skillRoot);
-    errorCode(() => skillGenerationPermissionRules({
-      ...fixture,
-      linkedReferences,
-      sourceRoot: fixture.parent,
-    }), CODES.ROOT_INVALID);
-    errorCode(() => auditSkillGenerationTrace({
-      ...fixture,
-      sourceRoot: fixture.parent,
-    }), CODES.ROOT_INVALID);
+    const wrong = structuredClone(fixture.events);
+    useEvent(wrong, "skill").message.content[0].input.extra = true;
+    errorCode(() => auditSkillGenerationTrace({ ...fixture, events: wrong }), CODES.SKILL_INVOCATION_INVALID);
+
+    const failed = structuredClone(fixture.events);
+    resultEvent(failed, "skill").tool_use_result.success = false;
+    errorCode(() => auditSkillGenerationTrace({ ...fixture, events: failed }), CODES.TOOL_RESULT_ERROR);
+
+    const second = structuredClone(fixture.events);
+    second.splice(-1, 0, ...invocation("skill-again", "Skill", { skill: "wiki-to-diagnosis-skill" }));
+    errorCode(() => auditSkillGenerationTrace({ ...fixture, events: second }), CODES.SKILL_INVOCATION_INVALID);
   } finally {
     fs.rmSync(fixture.parent, { recursive: true, force: true });
   }
 });
 
-test("discovers sorted, unique, ordinary direct Skill references", () => {
+test("rejects any extra tool, failed call, missing result, or non-sequential call", () => {
   const fixture = arrangeValid();
   try {
-    assert.deepEqual(discoverLinkedSkillReferences(fixture.skillRoot), [
-      "references/generation-spec-v6-reference.md",
-      "references/ordinary-example.md",
-      "references/verification-contract-v2-reference.md",
-    ]);
+    const bash = structuredClone(fixture.events);
+    bash.splice(-1, 0, ...invocation("bash", "Bash", { command: "true" }));
+    errorCode(() => auditSkillGenerationTrace({ ...fixture, events: bash }), CODES.TOOL_NOT_ALLOWED);
+
+    const failedWrite = structuredClone(fixture.events);
+    resultEvent(failedWrite, "write-0").message.content[0].is_error = true;
+    resultEvent(failedWrite, "write-0").tool_use_result.isError = true;
+    errorCode(() => auditSkillGenerationTrace({ ...fixture, events: failedWrite }), CODES.TOOL_RESULT_ERROR);
+
+    const missing = structuredClone(fixture.events);
+    missing.splice(missing.indexOf(resultEvent(missing, "contract")), 1);
+    errorCode(() => auditSkillGenerationTrace({ ...fixture, events: missing }), CODES.TOOL_RESULT_MISSING);
+
+    const concurrent = structuredClone(fixture.events);
+    const contractResult = resultEvent(concurrent, "contract");
+    concurrent.splice(concurrent.indexOf(contractResult), 1);
+    concurrent.splice(concurrent.indexOf(useEvent(concurrent, "write-0")) + 1, 0, contractResult);
+    errorCode(() => auditSkillGenerationTrace({ ...fixture, events: concurrent }), CODES.REQUIRED_READ_ORDER_INVALID);
   } finally {
     fs.rmSync(fixture.parent, { recursive: true, force: true });
   }
 });
 
-test("reference discovery rejects remote, absolute, traversing, missing, and nonordinary links", async (context) => {
+test("allows exactly three full Reads and requires all before every Write", () => {
+  const fixture = arrangeValid();
+  try {
+    const partial = structuredClone(fixture.events);
+    useEvent(partial, "wiki").message.content[0].input.limit = 1;
+    errorCode(() => auditSkillGenerationTrace({ ...fixture, events: partial }), CODES.READ_INPUT_INVALID);
+
+    const extra = structuredClone(fixture.events);
+    extra.splice(extra.indexOf(useEvent(extra, "write-0")), 0, ...invocation("wiki-again", "Read", { file_path: "inputs/wiki.md" }));
+    errorCode(() => auditSkillGenerationTrace({ ...fixture, events: extra }), CODES.REQUIRED_READ_MISSING);
+
+    const unlinked = structuredClone(fixture.events);
+    write(fixture.workspaceRoot, "other.md", "no\n");
+    useEvent(unlinked, "wiki").message.content[0].input.file_path = "other.md";
+    errorCode(() => auditSkillGenerationTrace({ ...fixture, events: unlinked }), CODES.READ_UNLINKED);
+
+    const afterWrite = structuredClone(fixture.events);
+    const contractPair = [useEvent(afterWrite, "contract"), resultEvent(afterWrite, "contract")];
+    for (const event of contractPair) afterWrite.splice(afterWrite.indexOf(event), 1);
+    afterWrite.splice(-1, 0, ...contractPair);
+    errorCode(() => auditSkillGenerationTrace({ ...fixture, events: afterWrite }), CODES.REQUIRED_READ_ORDER_INVALID);
+  } finally {
+    fs.rmSync(fixture.parent, { recursive: true, force: true });
+  }
+});
+
+test("requires a closed canonical v2 source identity with the exact ordered Wiki template inventory", async (context) => {
   const cases = [
-    ["remote", "[bad](https://example.invalid/reference)", CODES.SKILL_LINK_INVALID],
-    ["absolute", `[bad](${path.resolve("outside.md").replaceAll("\\", "/")})`, CODES.SKILL_LINK_INVALID],
-    ["traversal", "[bad](references/../../outside.md)", CODES.SKILL_LINK_INVALID],
-    ["missing", "[bad](references/missing.md)", CODES.PATH_MISSING],
-    ["image-only", "![bad](references/ordinary-example.md)", CODES.SKILL_LINK_INVALID],
-    ["reference-style", "[bad][reference]\n\n[reference]: references/ordinary-example.md", CODES.SKILL_LINK_INVALID],
-    ["html", "<a href=\"references/ordinary-example.md\">bad</a>", CODES.SKILL_LINK_INVALID],
+    ["legacy schema", (value) => { value.schema_version = 1; }],
+    ["extra key", (value) => { value.extra = true; }],
+    ["Wiki digest substitution", (value) => { value.sha256 = "0".repeat(64); }],
+    ["extraction version substitution", (value) => { value.log_template_extraction_version = 2; }],
+    ["template omission", (value) => { value.log_templates.pop(); }],
+    ["template reordering", (value) => { [value.log_templates[0], value.log_templates[1]] = [value.log_templates[1], value.log_templates[0]]; }],
+    ["template substitution", (value) => { value.log_templates[0] = "INVENTED value={value}"; }],
+    ["inventory digest substitution", (value) => { value.log_template_inventory_sha256 = "0".repeat(64); }],
   ];
-  for (const [name, markdown, code] of cases) {
+  for (const [name, mutate] of cases) {
     await context.test(name, () => {
       const fixture = arrangeValid();
       try {
-        write(fixture.skillRoot, "SKILL.md", `${markdown}\n`);
-        errorCode(() => discoverLinkedSkillReferences(fixture.skillRoot), code);
+        const identityPath = path.join(fixture.workspaceRoot, "runtime", "source-wiki-identity.json");
+        const value = JSON.parse(fs.readFileSync(identityPath, "utf8"));
+        mutate(value);
+        fs.writeFileSync(identityPath, `${canonicalJson(value)}\n`);
+        errorCode(() => auditSkillGenerationTrace(fixture), CODES.SOURCE_IDENTITY_INVALID);
       } finally {
         fs.rmSync(fixture.parent, { recursive: true, force: true });
       }
     });
   }
+
+  await context.test("non-canonical bytes", () => {
+    const fixture = arrangeValid();
+    try {
+      const identityPath = path.join(fixture.workspaceRoot, "runtime", "source-wiki-identity.json");
+      const value = JSON.parse(fs.readFileSync(identityPath, "utf8"));
+      fs.writeFileSync(identityPath, `${JSON.stringify(value, null, 2)}\n`);
+      errorCode(
+        () => skillGenerationPermissionRules({ ...fixture, linkedReferences: ["references/output-contract.md"] }),
+        CODES.SOURCE_IDENTITY_INVALID,
+      );
+    } finally {
+      fs.rmSync(fixture.parent, { recursive: true, force: true });
+    }
+  });
 });
 
-test("reference discovery and audit reject hardlinked files", { skip: process.platform === "win32" }, async (context) => {
-  for (const target of [
-    { root: "skillRoot", relative: "references/ordinary-example.md" },
-    { root: "workspaceRoot", relative: "inputs/wiki.md" },
-    { root: "workspaceRoot", relative: "output/generation-spec.json" },
-  ]) {
-    await context.test(target.relative, () => {
+test("requires one traced deterministic source-log-templates shared reference", async (context) => {
+  const cases = [
+    ["fixed reference missing from package", (fixture) => {
+      fs.rmSync(path.join(fixture.workspaceRoot, `output/${SKILL}/${SOURCE_LOG_TEMPLATES_REFERENCE}`));
+      for (const event of [useEvent(fixture.events, "write-4"), resultEvent(fixture.events, "write-4")]) {
+        fixture.events.splice(fixture.events.indexOf(event), 1);
+      }
+    }, CODES.SOURCE_LOG_TEMPLATES_INVALID],
+    ["fixed reference materialized without a traced Write", (fixture) => {
+      for (const event of [useEvent(fixture.events, "write-4"), resultEvent(fixture.events, "write-4")]) {
+        fixture.events.splice(fixture.events.indexOf(event), 1);
+      }
+    }, CODES.OUTPUT_TREE_INVALID],
+    ["template omitted from fixed reference", (fixture) => {
+      const relative = `output/${SKILL}/${SOURCE_LOG_TEMPLATES_REFERENCE}`;
+      replacePackageContent(fixture, relative, `# Source log templates\n\n\`\`\`text\n${LOG_TEMPLATES.slice(0, -1).join("\n")}\n\`\`\`\n`);
+    }, CODES.SOURCE_LOG_TEMPLATES_INVALID],
+    ["template order changed in fixed reference", (fixture) => {
+      const relative = `output/${SKILL}/${SOURCE_LOG_TEMPLATES_REFERENCE}`;
+      replacePackageContent(fixture, relative, `# Source log templates\n\n\`\`\`text\n${[LOG_TEMPLATES[1], LOG_TEMPLATES[0], LOG_TEMPLATES[2]].join("\n")}\n\`\`\`\n`);
+    }, CODES.SOURCE_LOG_TEMPLATES_INVALID],
+    ["fixed reference is not first shared reference", (fixture) => {
+      const relative = `output/${SKILL}/methods.json`;
+      const methods = JSON.parse(PACKAGE_FILES[relative]);
+      methods.shared_references.reverse();
+      replacePackageContent(fixture, relative, `${JSON.stringify(methods)}\n`);
+    }, CODES.SOURCE_LOG_TEMPLATES_INVALID],
+    ["fixed reference is used as a method reference", (fixture) => {
+      const relative = `output/${SKILL}/methods.json`;
+      const methods = JSON.parse(PACKAGE_FILES[relative]);
+      methods.methods[0].reference = SOURCE_LOG_TEMPLATES_REFERENCE;
+      replacePackageContent(fixture, relative, `${JSON.stringify(methods)}\n`);
+    }, CODES.SOURCE_LOG_TEMPLATES_INVALID],
+  ];
+  for (const [name, mutate, expectedCode] of cases) {
+    await context.test(name, () => {
       const fixture = arrangeValid();
       try {
-        const original = path.join(fixture[target.root], ...target.relative.split("/"));
-        fs.linkSync(original, path.join(fixture.parent, `hardlink-${path.basename(target.relative)}`));
-        const action = target.root === "skillRoot"
-          ? () => discoverLinkedSkillReferences(fixture.skillRoot)
-          : () => auditSkillGenerationTrace(fixture);
-        errorCode(action, CODES.PATH_HARDLINK);
+        mutate(fixture);
+        errorCode(() => auditSkillGenerationTrace(fixture), expectedCode);
       } finally {
         fs.rmSync(fixture.parent, { recursive: true, force: true });
       }
@@ -310,245 +388,97 @@ test("reference discovery and audit reject hardlinked files", { skip: process.pl
   }
 });
 
-test("requires one init, one final successful result, and the exact tool inventory", () => {
-  const fixture = arrangeValid();
-  try {
-    errorCode(() => auditSkillGenerationTrace({ ...fixture, events: fixture.events.slice(1) }), CODES.INIT_INVALID);
-    errorCode(() => auditSkillGenerationTrace({ ...fixture, events: [fixture.events[0], ...fixture.events] }), CODES.INIT_INVALID);
-    errorCode(() => auditSkillGenerationTrace({ ...fixture, events: fixture.events.slice(0, -1) }), CODES.RESULT_INVALID);
-    const errorTerminal = structuredClone(fixture.events);
-    errorTerminal.at(-1).subtype = "error_during_execution";
-    errorTerminal.at(-1).is_error = true;
-    errorCode(() => auditSkillGenerationTrace({ ...fixture, events: errorTerminal }), CODES.RESULT_NOT_SUCCESS);
-    const inventory = structuredClone(fixture.events);
-    inventory[0].tools.push("Bash");
-    errorCode(() => auditSkillGenerationTrace({ ...fixture, events: inventory }), CODES.TOOL_INVENTORY_INVALID);
-    const permissionMode = structuredClone(fixture.events);
-    permissionMode[0].permissionMode = "bypassPermissions";
-    errorCode(() => auditSkillGenerationTrace({ ...fixture, events: permissionMode }), CODES.PERMISSION_MODE_INVALID);
-  } finally {
-    fs.rmSync(fixture.parent, { recursive: true, force: true });
+test("rejects legacy, escaping, mixed-root, duplicate, missing, and untraced output paths", async (context) => {
+  const cases = [
+    ["legacy GenerationSpec", (fixture, events) => { useEvent(events, "write-0").message.content[0].input.file_path = "output/generation-spec.json"; }, CODES.WRITE_PATH_INVALID],
+    ["escaping path", (fixture, events) => { useEvent(events, "write-0").message.content[0].input.file_path = "output/../escape.md"; }, CODES.PATH_TRAVERSAL],
+    ["second Skill root", (fixture, events) => { useEvent(events, "write-0").message.content[0].input.file_path = "output/other-skill/SKILL.md"; }, CODES.WRITE_PATH_INVALID],
+    ["duplicate Write", (fixture, events) => { events.splice(-1, 0, ...invocation("duplicate", "Write", { file_path: `output/${SKILL}/SKILL.md`, content: PACKAGE_FILES[`output/${SKILL}/SKILL.md`] })); }, CODES.OUTPUT_TREE_INVALID],
+    ["missing traced Write", (fixture, events) => { const use = useEvent(events, "write-3"); const result = resultEvent(events, "write-3"); events.splice(events.indexOf(use), 1); events.splice(events.indexOf(result), 1); }, CODES.OUTPUT_TREE_INVALID],
+    ["extra untraced file", (fixture) => { write(fixture.workspaceRoot, `output/${SKILL}/references/untraced.md`, "extra\n"); }, CODES.OUTPUT_TREE_INVALID],
+  ];
+  for (const [name, mutate, code] of cases) {
+    await context.test(name, () => {
+      const fixture = arrangeValid();
+      try {
+        const events = structuredClone(fixture.events);
+        mutate(fixture, events);
+        errorCode(() => auditSkillGenerationTrace({ ...fixture, events }), code);
+      } finally {
+        fs.rmSync(fixture.parent, { recursive: true, force: true });
+      }
+    });
   }
 });
 
-test("requires the first and only tool call to be the exact successful Skill invocation", () => {
+test("requires exact Write inputs and byte-for-byte materialization", () => {
   const fixture = arrangeValid();
   try {
-    const wrongInput = structuredClone(fixture.events);
-    wrongInput[1].message.content[0].input.extra = true;
-    errorCode(() => auditSkillGenerationTrace({ ...fixture, events: wrongInput }), CODES.SKILL_INVOCATION_INVALID);
-
-    const readFirst = structuredClone(fixture.events);
-    const skillPair = readFirst.splice(1, 2);
-    readFirst.splice(3, 0, ...skillPair);
-    errorCode(() => auditSkillGenerationTrace({ ...fixture, events: readFirst }), CODES.SKILL_INVOCATION_INVALID);
-
-    const failedSkill = structuredClone(fixture.events);
-    failedSkill[2].tool_use_result.success = false;
-    failedSkill[2].message.content[0].is_error = false;
-    errorCode(() => auditSkillGenerationTrace({ ...fixture, events: failedSkill }), CODES.TOOL_RESULT_ERROR);
-
-    const implicitSkill = structuredClone(fixture.events);
-    implicitSkill[2].tool_use_result = {};
-    errorCode(() => auditSkillGenerationTrace({ ...fixture, events: implicitSkill }), CODES.SKILL_RESULT_INVALID);
-  } finally {
-    fs.rmSync(fixture.parent, { recursive: true, force: true });
-  }
-});
-
-test("rejects disallowed tools and malformed, missing, duplicate, or failed tool results", () => {
-  const fixture = arrangeValid();
-  try {
-    const otherTool = structuredClone(fixture.events);
-    otherTool.splice(-1, 0, ...invocation("other", "Bash", { command: "true" }));
-    errorCode(() => auditSkillGenerationTrace({ ...fixture, events: otherTool }), CODES.TOOL_NOT_ALLOWED);
-
-    const unpaired = structuredClone(fixture.events);
-    unpaired.splice(4, 1);
-    errorCode(() => auditSkillGenerationTrace({ ...fixture, events: unpaired }), CODES.TOOL_RESULT_MISSING);
-
-    const unmatched = structuredClone(fixture.events);
-    unmatched.splice(-1, 0, toolResult("absent", "Read"));
-    errorCode(() => auditSkillGenerationTrace({ ...fixture, events: unmatched }), CODES.TOOL_RESULT_UNMATCHED);
-
-    const duplicate = structuredClone(fixture.events);
-    duplicate.splice(-1, 0, toolResult("wiki", "Read"));
-    errorCode(() => auditSkillGenerationTrace({ ...fixture, events: duplicate }), CODES.TOOL_RESULT_DUPLICATE);
-
-    const failedRead = structuredClone(fixture.events);
-    failedRead[4].message.content[0].is_error = true;
-    errorCode(() => auditSkillGenerationTrace({ ...fixture, events: failedRead }), CODES.TOOL_RESULT_ERROR);
-  } finally {
-    fs.rmSync(fixture.parent, { recursive: true, force: true });
-  }
-});
-
-test("permits only the two inputs and ordinary references linked by SKILL.md", () => {
-  const fixture = arrangeValid();
-  try {
-    const missingRequired = structuredClone(fixture.events);
-    missingRequired.splice(7, 2);
-    errorCode(() => auditSkillGenerationTrace({ ...fixture, events: missingRequired }), CODES.REQUIRED_READ_MISSING);
-
-    const unlinked = structuredClone(fixture.events);
-    unlinked[11].message.content[0].input.file_path = "unlinked.md";
-    errorCode(() => auditSkillGenerationTrace({ ...fixture, events: unlinked }), CODES.READ_UNLINKED);
-
-    write(fixture.workspaceRoot, "references/generation-spec-v6-reference.md");
-    const workspaceShadow = structuredClone(fixture.events);
-    replaceToolPath(
-      workspaceShadow,
-      "Read",
-      2,
-      path.join(fixture.workspaceRoot, "references", "generation-spec-v6-reference.md"),
-    );
-    errorCode(() => auditSkillGenerationTrace({ ...fixture, events: workspaceShadow }), CODES.READ_UNLINKED);
-
-    const absolute = structuredClone(fixture.events);
-    absolute[3].message.content[0].input.file_path = path.resolve(fixture.parent, "outside.md");
-    errorCode(() => auditSkillGenerationTrace({ ...fixture, events: absolute }), CODES.READ_UNLINKED);
-
-    const traversal = structuredClone(fixture.events);
-    traversal[3].message.content[0].input.file_path = "inputs/../inputs/wiki.md";
-    errorCode(() => auditSkillGenerationTrace({ ...fixture, events: traversal }), CODES.PATH_TRAVERSAL);
-
-    const relativePaths = structuredClone(fixture.events);
-    replaceToolPath(relativePaths, "Read", 0, "inputs/wiki.md");
-    replaceToolPath(relativePaths, "Read", 1, "inputs/clarifications.md");
-    replaceToolPath(relativePaths, "Write", 0, "output/generation-spec.json");
-    assert.equal(auditSkillGenerationTrace({ ...fixture, events: relativePaths }).status, "PASS");
-
-    const partialRequiredRead = structuredClone(fixture.events);
-    partialRequiredRead[3].message.content[0].input.limit = 1;
-    errorCode(() => auditSkillGenerationTrace({ ...fixture, events: partialRequiredRead }), CODES.REQUIRED_READ_PARTIAL);
-
-    const readBeforeSkillResult = structuredClone(fixture.events);
-    const skillResult = readBeforeSkillResult.splice(2, 1);
-    readBeforeSkillResult.splice(4, 0, ...skillResult);
-    errorCode(() => auditSkillGenerationTrace({ ...fixture, events: readBeforeSkillResult }), CODES.REQUIRED_READ_ORDER_INVALID);
-
-    const requiredReadAfterWrite = structuredClone(fixture.events);
-    const generationRead = requiredReadAfterWrite.splice(7, 2);
-    requiredReadAfterWrite.splice(-1, 0, ...generationRead);
-    errorCode(() => auditSkillGenerationTrace({ ...fixture, events: requiredReadAfterWrite }), CODES.REQUIRED_READ_ORDER_INVALID);
-
-    errorCode(() => auditSkillGenerationTrace({
-      ...fixture,
-      requiredReferencePaths: ["references/not-linked.md"],
-    }), CODES.REQUIRED_REFERENCE_INVALID);
-  } finally {
-    fs.rmSync(fixture.parent, { recursive: true, force: true });
-  }
-});
-
-test("requires exactly one successful Write to the fixed regular output path", () => {
-  const fixture = arrangeValid();
-  try {
-    const missingWrite = structuredClone(fixture.events);
-    missingWrite.splice(-3, 2);
-    errorCode(() => auditSkillGenerationTrace({ ...fixture, events: missingWrite }), CODES.WRITE_COUNT_INVALID);
-
-    const duplicateWrite = structuredClone(fixture.events);
-    duplicateWrite.splice(-1, 0, ...invocation("write-again", "Write", {
-      file_path: path.join(fixture.workspaceRoot, "output", "generation-spec.json"),
-      content: fixture.content,
-    }));
-    errorCode(() => auditSkillGenerationTrace({ ...fixture, events: duplicateWrite }), CODES.WRITE_COUNT_INVALID);
-
-    const twoEmptyRejections = structuredClone(fixture.events);
-    twoEmptyRejections.splice(-3, 0,
-      ...invocation("empty-write-1", "Write", {}, { error: true }),
-      ...invocation("empty-write-2", "Write", {}, { error: true }));
-    errorCode(() => auditSkillGenerationTrace({ ...fixture, events: twoEmptyRejections }), CODES.WRITE_COUNT_INVALID);
-
-    const emptyBeforeRequiredReads = structuredClone(fixture.events);
-    emptyBeforeRequiredReads.splice(3, 0, ...invocation("empty-write", "Write", {}, { error: true }));
-    errorCode(() => auditSkillGenerationTrace({ ...fixture, events: emptyBeforeRequiredReads }), CODES.REQUIRED_READ_ORDER_INVALID);
-
-    const readBetweenRetryAndSuccess = structuredClone(fixture.events);
-    readBetweenRetryAndSuccess.splice(-5, 0, ...invocation("empty-write", "Write", {}, { error: true }));
-    errorCode(() => auditSkillGenerationTrace({ ...fixture, events: readBetweenRetryAndSuccess }), CODES.REQUIRED_READ_ORDER_INVALID);
-
-    const successBeforeRetryResult = structuredClone(fixture.events);
-    successBeforeRetryResult.splice(-3, 0, ...invocation("empty-write", "Write", {}, { error: true }));
-    const retryResultIndex = successBeforeRetryResult.findIndex((event) => event?.message?.content?.[0]?.tool_use_id === "empty-write");
-    const [retryResult] = successBeforeRetryResult.splice(retryResultIndex, 1);
-    const successfulWriteUseIndex = successBeforeRetryResult.findIndex((event) => event?.message?.content?.[0]?.id === "write");
-    successBeforeRetryResult.splice(successfulWriteUseIndex + 1, 0, retryResult);
-    errorCode(() => auditSkillGenerationTrace({ ...fixture, events: successBeforeRetryResult }), CODES.REQUIRED_READ_ORDER_INVALID);
-
-    const emptyAfterSuccess = structuredClone(fixture.events);
-    emptyAfterSuccess.splice(-1, 0, ...invocation("empty-write", "Write", {}, { error: true }));
-    errorCode(() => auditSkillGenerationTrace({ ...fixture, events: emptyAfterSuccess }), CODES.REQUIRED_READ_ORDER_INVALID);
-
-    for (const input of [
-      { file_path: "output/generation-spec.json" },
-      { content: fixture.content },
-      { unexpected: true },
-      null,
-      [],
-    ]) {
-      const failedWriteWithInput = structuredClone(fixture.events);
-      failedWriteWithInput.splice(-3, 0, ...invocation("failed-write", "Write", input, { error: true }));
-      errorCode(() => auditSkillGenerationTrace({ ...fixture, events: failedWriteWithInput }), CODES.TOOL_RESULT_ERROR);
-    }
-
-    const permissionDeniedWrite = structuredClone(fixture.events);
-    permissionDeniedWrite.at(-2).message.content[0].is_error = true;
-    permissionDeniedWrite.at(-2).tool_use_result = "Error: permission denied";
-    errorCode(() => auditSkillGenerationTrace({ ...fixture, events: permissionDeniedWrite }), CODES.TOOL_RESULT_ERROR);
-
-    const contradictoryEmptyWrite = structuredClone(fixture.events);
-    const contradictory = invocation("empty-write", "Write", {}, { error: true });
-    contradictory[1].tool_use_result.success = true;
-    contradictoryEmptyWrite.splice(-3, 0, ...contradictory);
-    errorCode(() => auditSkillGenerationTrace({ ...fixture, events: contradictoryEmptyWrite }), CODES.TOOL_RESULT_ERROR);
-
     const missingContent = structuredClone(fixture.events);
-    delete missingContent.at(-3).message.content[0].input.content;
+    delete useEvent(missingContent, "write-0").message.content[0].input.content;
     errorCode(() => auditSkillGenerationTrace({ ...fixture, events: missingContent }), CODES.WRITE_INPUT_INVALID);
 
-    const emptyContent = structuredClone(fixture.events);
-    emptyContent.at(-3).message.content[0].input.content = " \n";
-    errorCode(() => auditSkillGenerationTrace({ ...fixture, events: emptyContent }), CODES.WRITE_INPUT_INVALID);
+    const empty = structuredClone(fixture.events);
+    useEvent(empty, "write-0").message.content[0].input.content = "";
+    errorCode(() => auditSkillGenerationTrace({ ...fixture, events: empty }), CODES.WRITE_INPUT_INVALID);
 
-    const wrongWrite = structuredClone(fixture.events);
-    wrongWrite.at(-3).message.content[0].input.file_path = "output/other.json";
-    errorCode(() => auditSkillGenerationTrace({ ...fixture, events: wrongWrite }), CODES.WRITE_PATH_INVALID);
-
-    const failedWrongWrite = structuredClone(fixture.events);
-    failedWrongWrite.splice(-3, 0, ...invocation("wrong-write", "Write", {
-      file_path: "output/other.json",
-      content: fixture.content,
-    }, { error: true }));
-    errorCode(() => auditSkillGenerationTrace({ ...fixture, events: failedWrongWrite }), CODES.TOOL_RESULT_ERROR);
-
-    const mismatchedContent = structuredClone(fixture.events);
-    mismatchedContent.at(-3).message.content[0].input.content = "{}";
-    errorCode(() => auditSkillGenerationTrace({ ...fixture, events: mismatchedContent }), CODES.WRITE_CONTENT_MISMATCH);
+    const mismatch = structuredClone(fixture.events);
+    useEvent(mismatch, "write-0").message.content[0].input.content += "drift\n";
+    errorCode(() => auditSkillGenerationTrace({ ...fixture, events: mismatch }), CODES.WRITE_CONTENT_MISMATCH);
   } finally {
     fs.rmSync(fixture.parent, { recursive: true, force: true });
   }
 });
 
-test("rejects symlinks in every observed input, reference, or output path", { skip: process.platform === "win32" }, async (context) => {
-  for (const target of [
-    { root: "workspaceRoot", relative: "inputs/wiki.md" },
-    { root: "skillRoot", relative: "references/generation-spec-v6-reference.md" },
-    { root: "workspaceRoot", relative: "output/generation-spec.json" },
+test("rejects unsafe roots, references, symlinks, and hardlinks", { skip: process.platform === "win32" }, async (context) => {
+  await context.test("nested source workspace", () => {
+    const fixture = arrangeValid();
+    try {
+      errorCode(() => auditSkillGenerationTrace({ ...fixture, sourceRoot: fixture.parent }), CODES.ROOT_INVALID);
+    } finally {
+      fs.rmSync(fixture.parent, { recursive: true, force: true });
+    }
+  });
+
+  await context.test("remote Skill link", () => {
+    const fixture = arrangeValid();
+    try {
+      write(fixture.skillRoot, "SKILL.md", "[bad](https://example.invalid/output-contract.md)\n");
+      errorCode(() => discoverLinkedSkillReferences(fixture.skillRoot), CODES.SKILL_LINK_INVALID);
+    } finally {
+      fs.rmSync(fixture.parent, { recursive: true, force: true });
+    }
+  });
+
+  for (const [label, rootKey, relative] of [
+    ["wiki symlink", "workspaceRoot", "inputs/wiki.md"],
+    ["source identity symlink", "workspaceRoot", "runtime/source-wiki-identity.json"],
+    ["contract symlink", "skillRoot", "references/output-contract.md"],
+    ["output symlink", "workspaceRoot", `output/${SKILL}/references/api-overrun.md`],
   ]) {
-    await context.test(target.relative, () => {
+    await context.test(label, () => {
       const fixture = arrangeValid();
       try {
-        const link = path.join(fixture[target.root], ...target.relative.split("/"));
-        const realTarget = path.join(fixture[target.root], `real-${path.basename(target.relative)}`);
-        fs.writeFileSync(realTarget, fs.readFileSync(link));
+        const link = path.join(fixture[rootKey], ...relative.split("/"));
+        const target = path.join(fixture.parent, `real-${path.basename(relative)}`);
+        fs.writeFileSync(target, fs.readFileSync(link));
         fs.rmSync(link);
-        fs.symlinkSync(path.relative(path.dirname(link), realTarget), link);
+        fs.symlinkSync(target, link);
         errorCode(() => auditSkillGenerationTrace(fixture), CODES.PATH_SYMLINK);
       } finally {
         fs.rmSync(fixture.parent, { recursive: true, force: true });
       }
     });
   }
+
+  await context.test("output hardlink", () => {
+    const fixture = arrangeValid();
+    try {
+      const output = path.join(fixture.workspaceRoot, `output/${SKILL}/methods.json`);
+      fs.linkSync(output, path.join(fixture.parent, "methods-hardlink.json"));
+      errorCode(() => auditSkillGenerationTrace(fixture), CODES.PATH_HARDLINK);
+    } finally {
+      fs.rmSync(fixture.parent, { recursive: true, force: true });
+    }
+  });
 });

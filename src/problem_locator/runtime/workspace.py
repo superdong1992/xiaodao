@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import stat
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, Literal
 
 from problem_locator.contracts.errors import ApplicationPortError
 from problem_locator.contracts.enums import (
@@ -48,6 +51,7 @@ from problem_locator.contracts.serialization import (
 )
 
 from .failures import RuntimeExecutionError, runtime_failure
+from .methods_grounding import FrozenTargetLogV1
 from .outcome_finalizer import DRAFT_FINALIZATION_MARKER_NAME
 
 
@@ -99,6 +103,17 @@ class PreparedWorkspace:
     @property
     def tool_state_root(self) -> Path:
         return self.root / "runtime" / "tool-state"
+
+
+@dataclass(frozen=True, slots=True)
+class FrozenMethodsWorkspaceInputs:
+    """Exact server-owned inputs handed only to the Methods Agent pass."""
+
+    request_bytes: bytes
+    target_logs_bytes: bytes
+    receipt_bytes: bytes
+    receipt_sha256: str
+    target_logs: tuple[FrozenTargetLogV1, ...]
 
 
 def _safe_dir_fd_operations_supported() -> bool:
@@ -1012,6 +1027,19 @@ def _set_inputs_read_only(inputs_root: Path) -> None:
         ) from exc
 
 
+_METHODS_SOURCE_ID = re.compile(r"[a-z][a-z0-9]*(?:[_-][a-z0-9]+)*\Z")
+_METHODS_RECEIPT_CONTEXT_FIELDS = frozenset(
+    {
+        "job_id",
+        "case_id",
+        "registration_id",
+        "operation",
+        "broker_request_sha256",
+        "broker_audit_sha256",
+    }
+)
+
+
 class WorkspaceManager:
     """Create and verify the fixed workspace tree for exactly one Job."""
 
@@ -1026,6 +1054,7 @@ class WorkspaceManager:
         *,
         resolved_logparse_plan: ResolvedLogparsePlanInput | None = None,
         review_subject: ReviewSubjectV2 | None = None,
+        workspace_phase: Literal["logparse-preprocess"] | None = None,
     ) -> PreparedWorkspace:
         if aggregate.case.case_id != job.case_id or aggregate.jobs.get(job.job_id) != job:
             raise runtime_failure(
@@ -1050,7 +1079,12 @@ class WorkspaceManager:
         if any(item.case_id != job.case_id for item in outcomes):
             raise self._invalid_fixed_binding("previous Outcome")
 
-        root = self._data_root / "tmp" / "workspaces" / job.job_id
+        workspace_name = (
+            job.job_id
+            if workspace_phase is None
+            else f"{job.job_id}.{workspace_phase}"
+        )
+        root = self._data_root / "tmp" / "workspaces" / workspace_name
         try:
             root.mkdir(parents=True, exist_ok=False)
             (root / "inputs").mkdir()
@@ -1256,6 +1290,223 @@ class WorkspaceManager:
             code=ErrorCode.OUTCOME_INVALID,
             message=f"A fixed {label} does not belong to the executing Job Case.",
         )
+
+    @staticmethod
+    def freeze_methods_inputs(
+        workspace: PreparedWorkspace,
+        *,
+        request: Mapping[str, Any],
+        target_logs: Sequence[tuple[str, str, bytes]],
+        receipt_context: Mapping[str, Any],
+    ) -> FrozenMethodsWorkspaceInputs:
+        """Atomically add the minimal server-owned Methods input surface.
+
+        Pass A has already exited and its broker capability has been revoked.
+        The input directory is temporarily made writable only by this server
+        code, populated with copies of the reread target bytes, and locked
+        read-only again before Pass B starts.
+        """
+
+        if not isinstance(workspace, PreparedWorkspace):
+            raise TypeError("workspace must be a PreparedWorkspace")
+        if not isinstance(request, Mapping) or not isinstance(receipt_context, Mapping):
+            raise TypeError("Methods request and receipt context must be mappings")
+        if set(receipt_context) != _METHODS_RECEIPT_CONTEXT_FIELDS:
+            raise ValueError("Methods receipt context fields are invalid")
+        entries = tuple(target_logs)
+        if not entries:
+            raise ValueError("Methods preprocessing must freeze at least one target log")
+        source_ids: set[str] = set()
+        for source_id, label, content in entries:
+            if (
+                not isinstance(source_id, str)
+                or _METHODS_SOURCE_ID.fullmatch(source_id) is None
+                or source_id in source_ids
+                or not isinstance(label, str)
+                or not label
+                or not isinstance(content, bytes)
+            ):
+                raise ValueError("Methods target-log identity is invalid")
+            source_ids.add(source_id)
+
+        inputs_root = workspace.root / "inputs"
+        try:
+            metadata = inputs_root.stat(follow_symlinks=False)
+            if (
+                inputs_root.is_symlink()
+                or not stat.S_ISDIR(metadata.st_mode)
+                or _identity(metadata)
+                != (workspace.inputs_device, workspace.inputs_inode)
+            ):
+                raise _UnsafeWorkspaceError("workspace inputs identity changed")
+            reserved = {
+                "request.json",
+                "target_logs.json",
+                "target-logs",
+                "logparse-receipt.json",
+            }
+            if any((inputs_root / name).exists() for name in reserved):
+                raise _UnsafeWorkspaceError("Methods inputs already exist")
+
+            inputs_root.chmod(0o755)
+            target_root = inputs_root / "target-logs"
+            target_root.mkdir(mode=0o700)
+            frozen: list[FrozenTargetLogV1] = []
+            target_rows: list[dict[str, Any]] = []
+            for source_id, label, content in entries:
+                relative_path = f"inputs/target-logs/{source_id}.log"
+                digest = bytes_sha256(content)
+                _atomic_write(workspace.root / relative_path, content)
+                frozen.append(
+                    FrozenTargetLogV1(
+                        source_id=source_id,
+                        relative_path=relative_path,
+                        content_sha256=digest,
+                        content=content,
+                    )
+                )
+                target_rows.append(
+                    {
+                        "source_id": source_id,
+                        "label": label,
+                        "log_path": relative_path,
+                        "size": len(content),
+                        "content_sha256": digest,
+                    }
+                )
+
+            target_logs_bytes = canonical_json_bytes(
+                {"schema_version": 1, "target_logs": target_rows}
+            )
+            receipt_bytes = canonical_json_bytes(
+                {
+                    "schema_version": 1,
+                    **dict(receipt_context),
+                    "target_logs": target_rows,
+                }
+            )
+            request_value = dict(request)
+            if "target_logs_path" in request_value or "logparse_receipt_path" in request_value:
+                raise ValueError("Methods request path fields are server-owned")
+            request_value.update(
+                {
+                    "target_logs_path": "inputs/target_logs.json",
+                    "logparse_receipt_path": "inputs/logparse-receipt.json",
+                }
+            )
+            request_bytes = canonical_json_bytes(request_value)
+            _atomic_write(inputs_root / "target_logs.json", target_logs_bytes)
+            _atomic_write(inputs_root / "logparse-receipt.json", receipt_bytes)
+            _atomic_write(inputs_root / "request.json", request_bytes)
+        except (OSError, TypeError, ValueError, _UnsafeWorkspaceError) as exc:
+            raise runtime_failure(
+                stage=ExecutionStage.WORKSPACE_PREPARE,
+                code=ErrorCode.WORKSPACE_PREPARE_FAILED,
+                message="Frozen Methods inputs could not be published safely.",
+                retryable=True,
+            ) from exc
+        finally:
+            _set_inputs_read_only(inputs_root)
+
+        try:
+            final_metadata = inputs_root.stat(follow_symlinks=False)
+            if _identity(final_metadata) != (
+                workspace.inputs_device,
+                workspace.inputs_inode,
+            ):
+                raise _UnsafeWorkspaceError("workspace inputs identity changed")
+        except (OSError, _UnsafeWorkspaceError) as exc:
+            raise runtime_failure(
+                stage=ExecutionStage.WORKSPACE_PREPARE,
+                code=ErrorCode.WORKSPACE_PREPARE_FAILED,
+                message="Frozen Methods inputs could not be verified safely.",
+                retryable=True,
+            ) from exc
+        return FrozenMethodsWorkspaceInputs(
+            request_bytes=request_bytes,
+            target_logs_bytes=target_logs_bytes,
+            receipt_bytes=receipt_bytes,
+            receipt_sha256=bytes_sha256(receipt_bytes),
+            target_logs=tuple(frozen),
+        )
+
+    @staticmethod
+    def write_logparse_preprocessing_request(
+        workspace: PreparedWorkspace,
+        *,
+        request_bytes: bytes,
+        operation: Literal["parse-targets", "target-logs"],
+    ) -> tuple[str, str]:
+        """Publish the product-owned request consumed by Pass A's sole tool call."""
+
+        if not isinstance(request_bytes, bytes) or not request_bytes:
+            raise TypeError("Logparse preprocessing request must be non-empty bytes")
+        if operation not in {"parse-targets", "target-logs"}:
+            raise ValueError("Logparse preprocessing operation is invalid")
+        request_path = "output/proposals/methods-preprocess/request.json"
+        result_path = "output/proposals/methods-preprocess/target_logs.json"
+        try:
+            output_metadata = (workspace.root / "output").stat(follow_symlinks=False)
+            if (
+                (workspace.root / "output").is_symlink()
+                or not stat.S_ISDIR(output_metadata.st_mode)
+                or _identity(output_metadata)
+                != (workspace.output_device, workspace.output_inode)
+            ):
+                raise _UnsafeWorkspaceError("workspace output identity changed")
+            request_target = _safe_destination(workspace.root, request_path)
+            result_target = _safe_destination(workspace.root, result_path)
+            if request_target.exists() or result_target.exists():
+                raise _UnsafeWorkspaceError("Logparse preprocessing output already exists")
+            _atomic_write(request_target, request_bytes)
+        except (OSError, ValueError, _UnsafeWorkspaceError) as exc:
+            raise runtime_failure(
+                stage=ExecutionStage.WORKSPACE_PREPARE,
+                code=ErrorCode.WORKSPACE_PREPARE_FAILED,
+                message="Logparse preprocessing request could not be published safely.",
+                retryable=True,
+            ) from exc
+        return request_path, result_path
+
+    @staticmethod
+    def freeze_methods_review_inputs(
+        workspace: PreparedWorkspace,
+        *,
+        diagnosis_bytes: bytes,
+        grounding_audit_bytes: bytes,
+    ) -> None:
+        """Materialize the exact prior grounded diagnosis for blind Review."""
+
+        if not diagnosis_bytes or not grounding_audit_bytes:
+            raise ValueError("Methods Review inputs must be non-empty")
+        inputs_root = workspace.root / "inputs"
+        try:
+            metadata = inputs_root.stat(follow_symlinks=False)
+            if (
+                inputs_root.is_symlink()
+                or not stat.S_ISDIR(metadata.st_mode)
+                or _identity(metadata)
+                != (workspace.inputs_device, workspace.inputs_inode)
+            ):
+                raise _UnsafeWorkspaceError("workspace inputs identity changed")
+            targets = (
+                inputs_root / "method-diagnosis.json",
+                inputs_root / "method-grounding-audit.json",
+            )
+            if any(path.exists() for path in targets):
+                raise _UnsafeWorkspaceError("Methods Review inputs already exist")
+            inputs_root.chmod(0o755)
+            _atomic_write(targets[0], diagnosis_bytes)
+            _atomic_write(targets[1], grounding_audit_bytes)
+        except (OSError, TypeError, ValueError, _UnsafeWorkspaceError) as exc:
+            raise runtime_failure(
+                stage=ExecutionStage.WORKSPACE_PREPARE,
+                code=ErrorCode.WORKSPACE_PREPARE_FAILED,
+                message="Frozen Methods Review inputs could not be published safely.",
+                retryable=True,
+            ) from exc
+        finally:
+            _set_inputs_read_only(inputs_root)
 
     @staticmethod
     def write_context(workspace: PreparedWorkspace, body: str) -> None:
@@ -1559,6 +1810,7 @@ class WorkspaceManager:
                 os.close(root_descriptor)
 
 __all__ = [
+    "FrozenMethodsWorkspaceInputs",
     "PreparedWorkspace",
     "WorkspaceManager",
     "inspect_file",

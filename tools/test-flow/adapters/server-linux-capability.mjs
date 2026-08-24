@@ -1,10 +1,18 @@
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import {
   RELEASE_CLAUDE_VERSION_OUTPUT,
+  RELEASE_CLAUDE_CLI_SHA256,
   RELEASE_DOCKER_ARCH,
   RELEASE_DOCKER_CONTEXT,
   RELEASE_DOCKER_OS,
+  RELEASE_PYTHON_VERSION,
+  RELEASE_UV_SHA256,
+  RELEASE_UV_VERSION_OUTPUT,
+  RELEASE_UVX_SHA256,
+  RELEASE_UVX_VERSION_OUTPUT,
+  dockerContextArgs,
 } from "../lib/release-inputs.mjs";
 import { runSync } from "../lib/util.mjs";
 
@@ -13,18 +21,35 @@ function argument(name) {
   return index === -1 ? null : process.argv[index + 1];
 }
 
-function blocked(code, message) {
+let terminationRoot = null;
+
+function terminate(status, code, message, exitCode) {
+  if (terminationRoot !== null) {
+    try {
+      fs.writeFileSync(
+        path.join(terminationRoot, "server-capability-termination.json"),
+        `${JSON.stringify({ schema_version: 1, status, code })}\n`,
+        { encoding: "utf8", mode: 0o600, flag: "wx" },
+      );
+    } catch {
+      process.stderr.write("SERVER_CAPABILITY_TERMINATION_RECEIPT: could not record the controlled termination\n");
+      process.exit(4);
+    }
+  }
   process.stderr.write(`${code}: ${message}\n`);
-  process.exit(2);
+  process.exit(exitCode);
+}
+
+function blocked(code, message) {
+  terminate("BLOCKED", code, message, 2);
 }
 
 function failed(code, message) {
-  process.stderr.write(`${code}: ${message}\n`);
-  process.exit(3);
+  terminate("FAIL", code, message, 3);
 }
 
 function docker(context, args) {
-  return runSync("docker", context && context !== "default" ? ["--context", context, ...args] : args);
+  return runSync("docker", dockerContextArgs(context ?? "default", args));
 }
 
 const outputRoot = path.resolve(argument("--output-root") ?? ".");
@@ -41,9 +66,10 @@ const serviceMaxTotalTokens = argument("--service-agent-max-total-tokens");
 const serviceMaxBudgetUsd = argument("--service-agent-max-budget-usd");
 const serviceHardTimeoutSeconds = argument("--service-agent-hard-timeout-seconds");
 fs.mkdirSync(outputRoot, { recursive: true, mode: 0o700 });
+terminationRoot = outputRoot;
 
 if (process.platform === "darwin" && context !== RELEASE_DOCKER_CONTEXT) blocked("SERVER_CAPABILITY_CONTEXT", "the macOS Release server is bound to Docker context colima");
-if (!image || !runtimeProfileDigest || !model || !serviceMaxTurns || !serviceMaxTotalTokens || !serviceMaxBudgetUsd || !serviceHardTimeoutSeconds || !fs.existsSync(path.join(repoRoot, "pyproject.toml")) || !fs.existsSync(path.join(logparseSource, "config.yaml")) || !containerName || !/^problem-locator\.test-flow\.run=run-[A-Za-z0-9-]+$/.test(resourceLabel ?? "")) {
+if (!/^sha256:[a-f0-9]{64}$/.test(image ?? "") || !runtimeProfileDigest || !model || !serviceMaxTurns || !serviceMaxTotalTokens || !serviceMaxBudgetUsd || !serviceHardTimeoutSeconds || !fs.existsSync(path.join(repoRoot, "pyproject.toml")) || !fs.existsSync(path.join(logparseSource, "config.yaml")) || !containerName || !/^problem-locator\.test-flow\.run=run-[A-Za-z0-9-]+$/.test(resourceLabel ?? "")) {
   failed("SERVER_CAPABILITY_ARGUMENTS", "image, registered container name, and exact run label are required");
 }
 
@@ -63,6 +89,7 @@ try { imageMetadata = JSON.parse(imageInspect.stdout)[0]; } catch { failed("SERV
 if (imageMetadata.Os !== RELEASE_DOCKER_OS || imageMetadata.Architecture !== RELEASE_DOCKER_ARCH) {
   blocked("SERVER_CAPABILITY_IMAGE_PLATFORM", "the cached Release image is not linux/amd64");
 }
+if (imageMetadata.Id !== image) failed("SERVER_CAPABILITY_IMAGE_IDENTITY", "the inspected image differs from the frozen planning identity");
 
 const capabilityCommand = [
   "export UV_CACHE_DIR=/root/.cache/uv UV_LINK_MODE=copy UV_NO_PROGRESS=1",
@@ -71,8 +98,12 @@ const capabilityCommand = [
   "test -z \"$(find /opt/venvs/xiaodao/lib/python3.12/site-packages/problem_locator/runtime/assets -xdev -type f -links +1 -print -quit)\" || exit 72",
   "claude --version",
   "node -p process.arch",
+  "sha256sum /opt/claude-code/cli.js /usr/local/bin/uv /usr/local/bin/uvx",
+  "uv --version",
+  "uvx --version",
+  "/opt/venvs/xiaodao/bin/python --version",
   "cd /opt/src/xiaodao",
-  "/opt/venvs/xiaodao/bin/python -m pytest -q -p no:cacheprovider --basetemp=/tmp/pytest --junitxml=/evidence/platform-server.xml tests/platform/server_linux/test_native_startup_gate.py::test_native_linux_startup_gate tests/platform/distribution/test_installed_distribution_gate.py::test_clean_installed_distribution_import_cli_and_server_gate",
+  "/opt/venvs/xiaodao/bin/python -m pytest -q -p no:cacheprovider --basetemp=/tmp/pytest --junitxml=/evidence/platform-server.xml tests/platform/server_linux/test_native_startup_gate.py::test_native_linux_startup_gate tests/platform/distribution/test_installed_distribution_gate.py::test_clean_installed_distribution_import_cli_and_server_gate tests/platform/compat/test_macos_process_tree_gate.py::test_host_timeout_kills_the_real_child_tree_without_rerunning_agent",
 ].join("; ");
 
 const run = docker(context, [
@@ -108,9 +139,32 @@ process.stderr.write(run.stderr);
 if (run.status === 72) blocked("SERVER_CAPABILITY_OFFLINE_INSTALL", "the sealed offline Linux runtime could not install the immutable source snapshot");
 if (run.status !== 0) failed("SERVER_CAPABILITY_CONTRACT", "the offline Linux capability tests failed");
 const lines = run.stdout.split(/\r?\n/).filter(Boolean);
-if (lines[0] !== RELEASE_CLAUDE_VERSION_OUTPUT || lines[1] !== "x64") {
-  blocked("SERVER_CAPABILITY_CLAUDE", "Linux Agent CLI must be official npm 2.1.89 on x64 Node");
+const hashedRuntime = lines.slice(2, 5).map((line) => /^(?<sha>[a-f0-9]{64})\s+(?<file>\S+)$/.exec(line)?.groups ?? null);
+if (lines[0] !== RELEASE_CLAUDE_VERSION_OUTPUT
+  || lines[1] !== "x64"
+  || hashedRuntime.some((item) => item === null)
+  || hashedRuntime[0].file !== "/opt/claude-code/cli.js"
+  || hashedRuntime[0].sha !== RELEASE_CLAUDE_CLI_SHA256
+  || hashedRuntime[1].file !== "/usr/local/bin/uv"
+  || hashedRuntime[1].sha !== RELEASE_UV_SHA256
+  || hashedRuntime[2].file !== "/usr/local/bin/uvx"
+  || hashedRuntime[2].sha !== RELEASE_UVX_SHA256
+  || lines[5] !== RELEASE_UV_VERSION_OUTPUT
+  || lines[6] !== RELEASE_UVX_VERSION_OUTPUT
+  || lines[7] !== `Python ${RELEASE_PYTHON_VERSION}`) {
+  blocked("SERVER_CAPABILITY_RUNTIME_IDENTITY", "Linux Agent CLI, uv, uvx and Python must match the frozen runtime profile");
 }
+const runtimeIdentity = {
+  schema_version: 1,
+  image_id: imageMetadata.Id,
+  claude: { path: hashedRuntime[0].file, sha256: hashedRuntime[0].sha, version: lines[0] },
+  node: { architecture: lines[1] },
+  uv: { path: hashedRuntime[1].file, sha256: hashedRuntime[1].sha, version: lines[5] },
+  uvx: { path: hashedRuntime[2].file, sha256: hashedRuntime[2].sha, version: lines[6] },
+  python: { version: lines[7] },
+};
+const runtimeIdentityBytes = `${JSON.stringify(runtimeIdentity)}\n`;
+fs.writeFileSync(path.join(outputRoot, "server-runtime-identity.json"), runtimeIdentityBytes, { encoding: "utf8", mode: 0o600, flag: "wx" });
 if (!fs.existsSync(path.join(outputRoot, "platform-server.xml"))) failed("SERVER_CAPABILITY_PLATFORM_EVIDENCE", "Linux platform JUnit evidence is missing");
 const created = docker(context, ["container", "inspect", containerName]);
 if (created.status !== 0) failed("SERVER_CAPABILITY_CONTAINER_RECEIPT", "registered probe container is not inspectable");
@@ -122,13 +176,14 @@ if (createdMetadata.Config?.Labels?.[labelName] !== labelValue || createdMetadat
 }
 
 fs.writeFileSync(path.join(outputRoot, "server-linux-capability-result.json"), `${JSON.stringify({
-  schema_version: 2,
+  schema_version: 3,
   runtime_profile_digest: runtimeProfileDigest,
   status: "PASS",
   claims: {
     "linux-runtime": "PASS",
     "installed-distribution": "PASS",
-    "native-startup": "PASS"
+    "native-startup": "PASS",
+    "process-tree-cleanup": "PASS"
   },
   docker_context: context,
   os: RELEASE_DOCKER_OS,
@@ -136,6 +191,7 @@ fs.writeFileSync(path.join(outputRoot, "server-linux-capability-result.json"), `
   docker_version: metadata.Version ?? null,
   image,
   image_id: imageMetadata.Id,
+  runtime_identity_sha256: crypto.createHash("sha256").update(runtimeIdentityBytes).digest("hex"),
   claude_version: RELEASE_CLAUDE_VERSION_OUTPUT,
   node_architecture: "x64",
   network: "none",

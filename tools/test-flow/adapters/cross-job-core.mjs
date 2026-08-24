@@ -7,8 +7,17 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import {
+  RELEASE_CLAUDE_CLI_SHA256,
   RELEASE_CLAUDE_VERSION_OUTPUT,
+  RELEASE_CLAUDE_VERSION,
+  RELEASE_CHROME_HEADLESS_SHELL_ARCHIVE_SHA256,
+  RELEASE_CHROME_HEADLESS_SHELL_EXECUTABLE_SHA256,
+  RELEASE_CHROME_HEADLESS_SHELL_PRODUCT,
+  RELEASE_CHROME_HEADLESS_SHELL_VERSION,
+  RELEASE_CHROME_HEADLESS_SHELL_VERSION_OUTPUT,
+  RELEASE_CLIENT_IMAGE,
   RELEASE_LOGPARSE_COMMIT,
   RELEASE_MCP_COMMIT,
   RELEASE_MODEL,
@@ -16,6 +25,7 @@ import {
   materializeAttemptClaudeSettings,
   materializeClaudeSettings,
   packageTreeIdentity,
+  dockerContextArgs,
   validateClaudeDistribution,
 } from "../lib/release-inputs.mjs";
 import { extractCheckpointSourceArchive } from "../lib/checkpoint.mjs";
@@ -27,15 +37,16 @@ import {
 } from "../lib/events.mjs";
 import { recoverStageAuditProgress } from "../lib/evidence.mjs";
 import {
-  compareReleaseCaseEntries,
-  diagnosisSkillRuntimeRefId,
   discoverReleaseCaseRoot,
   loadReleaseCaseInputs,
   loadReleaseCaseOracle,
-  releaseCaseInputCoverage,
   releaseCaseDigests,
 } from "../lib/release-case.mjs";
 import { verifyMaterializedSourceSnapshot } from "../lib/source-snapshot.mjs";
+import {
+  validateMethodsGroundingExecutionRecord,
+  validateReleaseDiagnosisReport,
+} from "../lib/methods-oracle.mjs";
 import {
   isCompleteUsage,
   normalizeUsage,
@@ -60,18 +71,41 @@ const TOOL_NAMES = Object.freeze([
 ]);
 const FULL_TOOL_NAMES = Object.freeze(TOOL_NAMES.map((name) => `mcp__problem-locator__${name}`));
 const INSTANCE_ORDER = Object.freeze(["route", "upload", "diagnose", "restart"]);
+const DUAL_LINUX_TOPOLOGY = "dual-linux-containers";
+const LINUX_CLIENT_HOME = "/client-home";
+const LINUX_BROWSER_RUNNER_RELATIVE = "tools/test-flow/runtime-support/linux_client_browser_runner.py";
+const LINUX_BROWSER_RUNNER_CONTAINER = `/workspace/${LINUX_BROWSER_RUNNER_RELATIVE}`;
+const LINUX_BROWSER_SUMMARY_PREFIX = "TEST_FLOW_BROWSER_EXECUTION_V1=";
+const LINUX_BROWSER_ARGUMENT_PROFILE = "chrome-headless-shell-for-testing-local-v1";
+const ADAPTER_STAGE_IDS = new Set([
+  "journey.cross-job.environment",
+  "journey.cross-job.route",
+  "journey.cross-job.upload",
+  "journey.cross-job.diagnose",
+  "journey.cross-job.publish-restart",
+]);
 
 class StageError extends Error {
-  constructor(code, status = "ERROR", domain = "HARNESS") {
+  constructor(code, status = "ERROR", domain = "HARNESS", browserFailure = null) {
     super(code);
     this.code = code;
     this.status = status;
     this.domain = domain;
+    this.browserFailure = browserFailure;
   }
 }
 
 function requireCondition(condition, code, status = "ERROR", domain = "HARNESS") {
   if (!condition) throw new StageError(code, status, domain);
+}
+
+export function linuxClientUserIdentity({
+  uid = typeof process.getuid === "function" ? process.getuid() : null,
+  gid = typeof process.getgid === "function" ? process.getgid() : null,
+} = {}) {
+  requireCondition(Number.isSafeInteger(uid) && uid > 0, "LINUX_CLIENT_NON_ROOT_UID_REQUIRED", "BLOCKED", "INFRA");
+  requireCondition(Number.isSafeInteger(gid) && gid >= 0, "LINUX_CLIENT_GID_REQUIRED", "BLOCKED", "INFRA");
+  return Object.freeze({ uid, gid, root: false, docker_user: `${uid}:${gid}` });
 }
 
 function parseArguments(argv) {
@@ -129,7 +163,140 @@ function readJson(filePath) {
   return JSON.parse(fs.readFileSync(filePath, "utf8"));
 }
 
-function selectedReleaseCase(repoRoot) {
+function validateGeneratedSkillRoot(rootPath, attemptRoot) {
+  requireCondition(rootPath && path.isAbsolute(rootPath), "GENERATED_SKILL_ROOT_REQUIRED", "BLOCKED", "INFRA");
+  const root = path.resolve(rootPath);
+  const attempt = path.resolve(attemptRoot);
+  requireCondition(root.startsWith(`${attempt}${path.sep}`), "GENERATED_SKILL_ROOT_OUTSIDE_ATTEMPT", "BLOCKED", "INFRA");
+  requireCondition(fs.existsSync(root) && fs.lstatSync(root).isDirectory() && !fs.lstatSync(root).isSymbolicLink(), "GENERATED_SKILL_ROOT_MISSING", "BLOCKED", "INFRA");
+  const realRoot = fs.realpathSync.native(root);
+  const realAttempt = fs.realpathSync.native(attempt);
+  const contained = process.platform === "win32"
+    ? realRoot.toLowerCase().startsWith(`${realAttempt.toLowerCase()}${path.sep}`)
+    : realRoot.startsWith(`${realAttempt}${path.sep}`);
+  requireCondition(contained, "GENERATED_SKILL_ROOT_REALPATH_INVALID", "BLOCKED", "INFRA");
+  const identity = packageTreeIdentity(root);
+  requireCondition(identity.status === "PRESENT", "GENERATED_SKILL_TREE_INVALID", "FAIL", "CONTRACT");
+  const registrationEntries = fs.readdirSync(root, { withFileTypes: true });
+  requireCondition(registrationEntries.length === 1 && registrationEntries[0].isDirectory(), "GENERATED_SKILL_REGISTRATION_SET_INVALID", "FAIL", "CONTRACT");
+  const registrationId = registrationEntries[0].name;
+  requireCondition(/^[a-z0-9][a-z0-9-]{0,127}$/.test(registrationId), "GENERATED_SKILL_REGISTRATION_ID_INVALID", "FAIL", "CONTRACT");
+  const registrationRoot = path.join(root, registrationId);
+  const registrationNames = fs.readdirSync(registrationRoot).sort();
+  requireCondition(canonicalJson(registrationNames) === canonicalJson(["package", "registration-template.json"]), "GENERATED_SKILL_REGISTRATION_FILES_INVALID", "FAIL", "CONTRACT");
+  const registration = readJson(path.join(registrationRoot, "registration-template.json"));
+  requireCondition(registration?.registration_id === registrationId, "GENERATED_SKILL_REGISTRATION_METADATA_INVALID", "FAIL", "CONTRACT");
+  const packageRoot = path.join(registrationRoot, "package");
+  const skillEntries = fs.readdirSync(packageRoot, { withFileTypes: true });
+  requireCondition(skillEntries.length === 1 && skillEntries[0].isDirectory(), "GENERATED_SKILL_PACKAGE_SET_INVALID", "FAIL", "CONTRACT");
+  const skillName = skillEntries[0].name;
+  const skillRoot = path.join(packageRoot, skillName);
+  const skillNames = fs.readdirSync(skillRoot).sort();
+  requireCondition(canonicalJson(skillNames) === canonicalJson(["SKILL.md", "methods.json", "references"]), "GENERATED_SKILL_PACKAGE_FILES_INVALID", "FAIL", "CONTRACT");
+  const references = fs.readdirSync(path.join(skillRoot, "references"), { withFileTypes: true });
+  requireCondition(references.length > 0 && references.every((entry) => entry.isFile() && entry.name.endsWith(".md")), "GENERATED_SKILL_REFERENCES_INVALID", "FAIL", "CONTRACT");
+  const methods = readJson(path.join(skillRoot, "methods.json"));
+  requireCondition(methods?.schema_version === 1 && methods.skill_name === skillName && Array.isArray(methods.methods) && methods.methods.length > 0, "GENERATED_SKILL_METHODS_INVALID", "FAIL", "CONTRACT");
+  requireCondition(
+    registration?.package?.relative_path === `package/${skillName}`
+      && registration.package.skill_name === skillName
+      && registration.package.source_wiki_sha256 === methods.source_wiki_sha256
+      && SHA256.test(methods.source_wiki_sha256 ?? ""),
+    "GENERATED_SKILL_PACKAGE_BINDING_INVALID",
+    "FAIL",
+    "CONTRACT",
+  );
+  const packageIdentity = packageTreeIdentity(skillRoot);
+  requireCondition(packageIdentity.status === "PRESENT", "GENERATED_SKILL_PACKAGE_TREE_INVALID", "FAIL", "CONTRACT");
+  const packageEntries = packageIdentity.records
+    .filter((entry) => entry.kind === "file")
+    .map(({ path: entryPath, size, sha256 }) => ({ path: entryPath, size, sha256 }))
+    .sort((left, right) => left.path < right.path ? -1 : left.path > right.path ? 1 : 0);
+  const registrationSha256 = sha256File(path.join(registrationRoot, "registration-template.json"));
+  const packageTreeSha256 = sha256Bytes(canonicalJson({ version: 1, entries: packageEntries }));
+  const combinedSha256 = sha256Bytes(canonicalJson({
+    schema_version: 1,
+    registration_id: registrationId,
+    registration_sha256: registrationSha256,
+    package_tree_sha256: packageTreeSha256,
+  }));
+  const contentTreeSha256 = sha256Bytes(canonicalJson({
+    version: 1,
+    entries: identity.records
+      .filter((entry) => entry.kind === "file")
+      .map(({ path: entryPath, size, sha256 }) => ({ path: entryPath, size, sha256 }))
+      .sort((left, right) => left.path < right.path ? -1 : left.path > right.path ? 1 : 0),
+  }));
+  const generationReceiptPath = path.join(path.dirname(root), "generated-skill.json");
+  requireCondition(fs.existsSync(generationReceiptPath), "GENERATED_SKILL_GATE_RECEIPT_MISSING", "BLOCKED", "INFRA");
+  const generationReceiptMetadata = fs.lstatSync(generationReceiptPath);
+  requireCondition(
+    generationReceiptMetadata.isFile() && !generationReceiptMetadata.isSymbolicLink() && generationReceiptMetadata.nlink === 1,
+    "GENERATED_SKILL_GATE_RECEIPT_INVALID",
+    "FAIL",
+    "CONTRACT",
+  );
+  const generationReceipt = readJson(generationReceiptPath);
+  requireCondition(
+    generationReceipt?.schema_version === 1
+      && generationReceipt.status === "PASS"
+      && generationReceipt.registration_id === registrationId
+      && generationReceipt.skill_name === skillName
+      && generationReceipt.source_wiki_sha256 === methods.source_wiki_sha256
+      && generationReceipt.registration_sha256 === registrationSha256
+      && generationReceipt.package_tree_sha256 === packageTreeSha256
+      && generationReceipt.combined_sha256 === combinedSha256,
+    "GENERATED_SKILL_GATE_RECEIPT_DRIFT",
+    "FAIL",
+    "CONTRACT",
+  );
+  return {
+    root,
+    registration_root: registrationRoot,
+    skill_root: skillRoot,
+    registration_id: registrationId,
+    skill_name: skillName,
+    tree_digest: identity.digest,
+    package_digest: packageIdentity.digest,
+    registration_sha256: registrationSha256,
+    package_tree_sha256: packageTreeSha256,
+    combined_sha256: combinedSha256,
+    content_tree_sha256: contentTreeSha256,
+    generation_receipt_sha256: sha256File(generationReceiptPath),
+    source_wiki_sha256: methods.source_wiki_sha256,
+    registration,
+    methods,
+    generation_receipt: generationReceipt,
+  };
+}
+
+function factorId(methodId) {
+  requireCondition(/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(methodId ?? ""), "GENERATED_SKILL_METHOD_ID_INVALID", "FAIL", "CONTRACT");
+  return methodId.replaceAll("-", "_");
+}
+
+function sortedStrings(value, code) {
+  requireCondition(Array.isArray(value) && value.every((item) => typeof item === "string" && item.length > 0) && value.length === new Set(value).size, code, "FAIL", "CONTRACT");
+  return [...value].sort();
+}
+
+function mapOracleMarkerGroups(groups, generatedMethods, code) {
+  const selected = groups.map((group) => {
+    const markers = sortedStrings(group, code);
+    const candidates = generatedMethods.filter((entry) => markers.every((marker) => (
+      entry.semantic_markers.some((declared) => declared.includes(marker))
+    )));
+    requireCondition(candidates.length > 0, code, "FAIL", "CONTRACT");
+    const minimumMarkerCount = Math.min(...candidates.map((entry) => entry.semantic_markers.length));
+    const minimal = candidates.filter((entry) => entry.semantic_markers.length === minimumMarkerCount);
+    requireCondition(minimal.length === 1, `${code}_AMBIGUOUS`, "FAIL", "CONTRACT");
+    return minimal[0].method.id;
+  });
+  requireCondition(selected.length === new Set(selected).size, `${code}_DUPLICATE`, "FAIL", "CONTRACT");
+  return selected;
+}
+
+function selectedReleaseCase(repoRoot, generatedSkill) {
   const root = discoverReleaseCaseRoot(path.join(repoRoot, "tests", "cases", "release"));
   const inputs = loadReleaseCaseInputs(root);
   const gateOracle = loadReleaseCaseOracle(root);
@@ -137,23 +304,72 @@ function selectedReleaseCase(repoRoot) {
   const scenario = inputs.scenarios.find((item) => item.scenario_id === inputs.journey_scenario);
   const scenarioOracle = gateOracle.scenarios.find((item) => item.scenario_id === inputs.journey_scenario);
   requireCondition(scenario && scenarioOracle, "RELEASE_CASE_JOURNEY_SCENARIO_MISSING");
-  const skillManifest = readJson(path.join(inputs.approved_skill_dir, "diagnosis-skill.json"));
-  const inputCoverage = releaseCaseInputCoverage(skillManifest, scenario.driver);
-  const attachments = skillManifest.requirements.filter((item) => item.kind === "ATTACHMENT" && item.stage === "INITIAL");
-  requireCondition(inputCoverage.initialValid, "RELEASE_CASE_INITIAL_INPUT_DRIFT", "FAIL", "CONTRACT");
-  requireCondition(inputCoverage.supplementValid, "RELEASE_CASE_SUPPLEMENT_INPUT_DRIFT", "FAIL", "CONTRACT");
-  requireCondition(attachments.length === 1, "RELEASE_CASE_ATTACHMENT_REQUIREMENT", "FAIL", "CONTRACT");
-  requireCondition(canonicalJson(skillManifest.logparse_plan.anchors.map((item) => item.label)) === canonicalJson(scenario.driver.attachment_anchor_names), "RELEASE_CASE_ANCHOR_DRIFT", "FAIL", "CONTRACT");
-  const approvedProductRecords = fs.readdirSync(inputs.approved_skill_dir, { withFileTypes: true })
-    .sort(compareReleaseCaseEntries)
-    .map((entry) => {
-      requireCondition(entry.isFile() && !entry.isSymbolicLink(), "RELEASE_CASE_APPROVED_SKILL_NODE", "FAIL", "CONTRACT");
-      const absolute = path.join(inputs.approved_skill_dir, entry.name);
-      const metadata = fs.statSync(absolute);
-      requireCondition(metadata.nlink === 1, "RELEASE_CASE_APPROVED_SKILL_LINK", "FAIL", "CONTRACT");
-      return { path: entry.name, size: metadata.size, sha256: sha256File(absolute) };
-    });
-  requireCondition(canonicalJson(approvedProductRecords.map((item) => item.path)) === canonicalJson(["SKILL.md", "diagnosis-skill.json"]), "RELEASE_CASE_APPROVED_SKILL_FILES", "FAIL", "CONTRACT");
+  const product = inputs.product_registration;
+  requireCondition(canonicalJson(generatedSkill.registration) === canonicalJson(inputs.registration_template), "GENERATED_SKILL_REGISTRATION_TEMPLATE_DRIFT", "FAIL", "CONTRACT");
+  requireCondition(
+    generatedSkill.registration_sha256 === sha256File(inputs.registration_template_path),
+    "GENERATED_SKILL_REGISTRATION_BYTES_DRIFT",
+    "FAIL",
+    "CONTRACT",
+  );
+  requireCondition(
+    generatedSkill.registration_id === product.registration_id
+      && generatedSkill.skill_name === product.skill_name
+      && generatedSkill.generation_receipt.case_id === inputs.case_id
+      && generatedSkill.generation_receipt.runtime_ref_id === product.runtime_ref_id
+      && generatedSkill.generation_receipt.version === product.version
+      && generatedSkill.source_wiki_sha256 === product.source_wiki_sha256
+      && generatedSkill.registration.version === product.version
+      && generatedSkill.registration.runtime?.preprocessing?.logparse_product === product.logparse_product
+      && generatedSkill.registration.runtime?.preprocessing?.logparse_plan?.attachment_requirement === product.attachment_requirement,
+    "GENERATED_SKILL_PRODUCT_REGISTRATION_DRIFT",
+    "FAIL",
+    "CONTRACT",
+  );
+  const expectedPackage = gateOracle.semantic_oracle.expected_package;
+  const methods = generatedSkill.methods;
+  requireCondition(
+    methods.skill_name === expectedPackage.skill_name
+      && methods.source_wiki_sha256 === expectedPackage.source_wiki_sha256
+      && canonicalJson(sortedStrings(methods.required_user_inputs, "GENERATED_SKILL_REQUIRED_INPUTS_INVALID")) === canonicalJson(sortedStrings(expectedPackage.required_user_inputs, "RELEASE_CASE_EXPECTED_INPUTS_INVALID"))
+      && canonicalJson(sortedStrings(methods.required_artifacts, "GENERATED_SKILL_REQUIRED_ARTIFACTS_INVALID")) === canonicalJson(sortedStrings(expectedPackage.required_artifacts, "RELEASE_CASE_EXPECTED_ARTIFACTS_INVALID"))
+      && canonicalJson(sortedStrings(methods.log_derived_fields, "GENERATED_SKILL_LOG_FIELDS_INVALID")) === canonicalJson(sortedStrings(expectedPackage.required_log_derived_fields, "RELEASE_CASE_EXPECTED_LOG_FIELDS_INVALID")),
+    "GENERATED_SKILL_METHODS_PACKAGE_DRIFT",
+    "FAIL",
+    "CONTRACT",
+  );
+  const methodIds = methods.methods.map((method) => method.id);
+  requireCondition(methodIds.length === new Set(methodIds).size, "GENERATED_SKILL_METHOD_IDS_DUPLICATE", "FAIL", "CONTRACT");
+  const generatedMethods = gateOracle.semantic_oracle.expected_package.method_marker_sets.map((semantic) => {
+    const semanticMarkers = sortedStrings(semantic.all_markers, "RELEASE_CASE_METHOD_MARKERS_INVALID");
+    const matches = methods.methods.filter((method) => (
+      canonicalJson(sortedStrings(method.evidence_markers, "GENERATED_SKILL_METHOD_MARKERS_INVALID")) === canonicalJson(semanticMarkers)
+    ));
+    requireCondition(matches.length === 1, "GENERATED_SKILL_METHOD_SEMANTIC_MAPPING_INVALID", "FAIL", "CONTRACT");
+    return { semantic_id: semantic.semantic_id, semantic_markers: semanticMarkers, method: matches[0] };
+  });
+  requireCondition(generatedMethods.length === methods.methods.length && new Set(generatedMethods.map((entry) => entry.method.id)).size === methods.methods.length, "GENERATED_SKILL_METHOD_SET_DRIFT", "FAIL", "CONTRACT");
+  const confirmedMethodIds = mapOracleMarkerGroups(scenarioOracle.oracle.required_confirmed_marker_groups, generatedMethods, "RELEASE_CASE_CONFIRMED_METHOD_MAPPING");
+  const candidateMethodIds = mapOracleMarkerGroups(scenarioOracle.oracle.required_candidate_marker_groups, generatedMethods, "RELEASE_CASE_CANDIDATE_METHOD_MAPPING");
+  const causalFactorIds = confirmedMethodIds.map(factorId);
+  const candidateFactorIds = candidateMethodIds.map(factorId);
+  requireCondition(causalFactorIds.every((item) => !candidateFactorIds.includes(item)), "RELEASE_CASE_FACTOR_CLASS_OVERLAP", "FAIL", "CONTRACT");
+  const requiredEvidenceIdentities = scenarioOracle.oracle.required_evidence_identities.map((identity) => {
+    const [mappedMethodId] = mapOracleMarkerGroups([[identity.marker]], generatedMethods, "RELEASE_CASE_EVIDENCE_IDENTITY_MAPPING");
+    const mappedFactorId = factorId(mappedMethodId);
+    requireCondition(
+      [...causalFactorIds, ...candidateFactorIds].includes(mappedFactorId),
+      "RELEASE_CASE_EVIDENCE_IDENTITY_FACTOR_UNCLASSIFIED",
+      "FAIL",
+      "CONTRACT",
+    );
+    return {
+      factor_id: mappedFactorId,
+      marker: identity.marker,
+      identity_tokens: sortedStrings(identity.identity_tokens, "RELEASE_CASE_EVIDENCE_IDENTITY_TOKENS_INVALID"),
+    };
+  });
+  const resolutionStatus = candidateFactorIds.length > 0 ? "PARTIAL" : "COMPLETE";
   return {
     root,
     case_id: inputs.case_id,
@@ -161,14 +377,27 @@ function selectedReleaseCase(repoRoot) {
     driver: scenario.driver,
     oracle: scenarioOracle.oracle,
     semantic_oracle: gateOracle.semantic_oracle,
-    logparse_product: skillManifest.logparse_product,
+    logparse_product: product.logparse_product,
     skill: {
-      id: skillManifest.id,
-      runtime_ref_id: diagnosisSkillRuntimeRefId(skillManifest.id),
-      version: skillManifest.version,
-      content_hash: packageTreeIdentity(inputs.approved_skill_dir).digest,
-      product_digest: sha256Bytes(canonicalJson(approvedProductRecords)),
-      attachment_requirement: attachments[0].name,
+      id: product.registration_id,
+      runtime_ref_id: product.runtime_ref_id,
+      version: product.version,
+      content_hash: generatedSkill.combined_sha256,
+      product_digest: generatedSkill.combined_sha256,
+      attachment_requirement: product.attachment_requirement,
+    },
+    result_expectation: {
+      expected_methods_status: scenarioOracle.oracle.expected_status,
+      case_status: resolutionStatus === "COMPLETE" ? "RESOLVED" : "PARTIALLY_RESOLVED",
+      resolution_status: resolutionStatus,
+      report_status: resolutionStatus === "COMPLETE" ? "COMPLETED" : "PARTIAL",
+      confirmed_method_ids: confirmedMethodIds,
+      candidate_method_ids: candidateMethodIds,
+      causal_factor_ids: causalFactorIds,
+      candidate_factor_ids: candidateFactorIds,
+      excluded_factor_ids: [],
+      required_evidence_identities: requiredEvidenceIdentities,
+      forbidden_evidence_terms: sortedStrings(scenarioOracle.oracle.forbidden_evidence_terms, "RELEASE_CASE_FORBIDDEN_EVIDENCE_TERMS_INVALID"),
     },
     input_digest: digests.input_digest,
     oracle_digest: digests.oracle_digest,
@@ -180,14 +409,82 @@ function safeName(prefix, runId, suffix = "") {
   return `${prefix}-${digest}${suffix ? `-${suffix}` : ""}`;
 }
 
+function dockerSocketMounted(mounts) {
+  return (mounts ?? []).some((mount) => [mount?.Source, mount?.Destination]
+    .some((entry) => typeof entry === "string" && path.posix.basename(entry.replaceAll("\\", "/")) === "docker.sock"));
+}
+
+function exactLoopbackPortBinding(value, port) {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  if (canonicalJson(Object.keys(value).sort()) !== canonicalJson(["8000/tcp"])) return false;
+  const bindings = value["8000/tcp"];
+  return Array.isArray(bindings)
+    && bindings.length === 1
+    && canonicalJson(Object.keys(bindings[0] ?? {}).sort()) === canonicalJson(["HostIp", "HostPort"])
+    && bindings[0].HostIp === "127.0.0.1"
+    && bindings[0].HostPort === String(port);
+}
+
+export function validServerRuntimeInspection({
+  topology,
+  stageId,
+  state,
+  expectedServerImageId,
+  expectedRunId,
+  server,
+  serverImage,
+}) {
+  const dualLinuxContainers = topology === DUAL_LINUX_TOPOLOGY;
+  const expectedInitialContainer = safeName("pltf-server", expectedRunId, "initial");
+  const expectedRestartContainer = safeName("pltf-server", expectedRunId, "restart");
+  const expectedActiveContainer = stageId === "journey.cross-job.publish-restart"
+    ? expectedRestartContainer
+    : expectedInitialContainer;
+  if (!["host-client", DUAL_LINUX_TOPOLOGY].includes(topology)
+    || !/^sha256:[a-f0-9]{64}$/.test(expectedServerImageId ?? "")
+    || state?.run_id !== expectedRunId
+    || state?.image_id !== expectedServerImageId
+    || state?.runtime_images?.server_image_id !== expectedServerImageId
+    || state?.initial_container !== expectedInitialContainer
+    || state?.restart_container !== expectedRestartContainer
+    || state?.active_container !== expectedActiveContainer
+    || server?.Name !== `/${state.active_container}`
+    || server?.Image !== expectedServerImageId
+    || server?.Config?.Image !== expectedServerImageId
+    || server?.Config?.Labels?.["problem-locator.test-flow.run"] !== expectedRunId
+    || server?.State?.Running !== true
+    || serverImage?.Id !== expectedServerImageId
+    || serverImage?.Os !== "linux"
+    || serverImage?.Architecture !== "amd64"
+    || dockerSocketMounted(server?.Mounts)) return false;
+
+  const hostPortBindings = server?.HostConfig?.PortBindings ?? {};
+  const publishedPorts = server?.NetworkSettings?.Ports ?? {};
+  if (dualLinuxContainers) {
+    return Object.keys(hostPortBindings).length === 0
+      && Object.values(publishedPorts).every((binding) => binding === null);
+  }
+  return Number.isSafeInteger(state?.port)
+    && state.port > 0
+    && state.port <= 65535
+    && state.network === null
+    && state.client_container === null
+    && state.client_image_id === null
+    && state.runtime_images?.client_image_id === null
+    && state.selected_client_runtime_observed === null
+    && exactLoopbackPortBinding(hostPortBindings, state.port)
+    && exactLoopbackPortBinding(publishedPorts, state.port);
+}
+
 function currentReleaseRuntimeIdentity(configuration) {
   const distribution = validateClaudeDistribution(configuration.claudeEntry);
   requireCondition(distribution.status === "PRESENT", `CLAUDE_DISTRIBUTION_${distribution.code ?? "INVALID"}`, "BLOCKED", "INFRA");
   const settings = claudeSettingsIdentity(configuration.claudeSettings);
   requireCondition(settings.status === "PRESENT", `CLAUDE_SETTINGS_${settings.code ?? "INVALID"}`, "BLOCKED", "INFRA");
+  const dualLinuxContainers = configuration.topology === DUAL_LINUX_TOPOLOGY;
   return {
-    schema_version: 1,
-    claude: {
+    schema_version: 2,
+    orchestrator_distribution_source: {
       entry: distribution.entry,
       version: distribution.version,
       cli_sha256: distribution.cli_sha256,
@@ -196,6 +493,24 @@ function currentReleaseRuntimeIdentity(configuration) {
       tarball_sha256: distribution.tarball_sha256,
       node_version: distribution.node?.version ?? null,
       node_sha256: distribution.node?.sha256 ?? null,
+    },
+    selected_client_runtime: dualLinuxContainers ? {
+      execution_topology: "darwin-orchestrated-linux-container",
+      platform: "linux/amd64",
+      image_id: configuration.expectedClientImageId,
+      node_identity_boundary: "client-image-id",
+      node_observation: "runtime-container-probe-required",
+      claude_version: RELEASE_CLAUDE_VERSION_OUTPUT,
+      claude_cli_sha256: RELEASE_CLAUDE_CLI_SHA256,
+    } : {
+      execution_topology: "native-host",
+      platform: configuration.client,
+      image_id: null,
+      node_identity_boundary: "node-binary-sha256",
+      node_version: distribution.node?.version ?? null,
+      node_sha256: distribution.node?.sha256 ?? null,
+      claude_version: distribution.version,
+      claude_cli_sha256: distribution.cli_sha256,
     },
     settings: {
       endpoint: settings.endpoint,
@@ -221,11 +536,13 @@ async function run(command, args, { cwd = undefined, env = process.env, forward 
     const stdout = [];
     const stderr = [];
     let bytes = 0;
+    let terminalError = null;
     const consume = (collection, target, chunk) => {
+      if (terminalError) return;
       bytes += chunk.length;
       if (bytes > maximumBytes) {
+        terminalError = new StageError("ADAPTER_COMMAND_OUTPUT_LIMIT");
         child.kill("SIGKILL");
-        reject(new StageError("ADAPTER_COMMAND_OUTPUT_LIMIT"));
         return;
       }
       collection.push(chunk);
@@ -233,17 +550,25 @@ async function run(command, args, { cwd = undefined, env = process.env, forward 
     };
     child.stdout.on("data", (chunk) => consume(stdout, process.stdout, chunk));
     child.stderr.on("data", (chunk) => consume(stderr, process.stderr, chunk));
-    child.once("error", reject);
-    child.once("exit", (code, signal) => resolve({
-      status: code,
-      signal,
-      stdout: Buffer.concat(stdout).toString("utf8"),
-      stderr: Buffer.concat(stderr).toString("utf8"),
-    }));
+    child.once("error", (error) => { terminalError = terminalError ?? error; });
+    child.once("close", (code, signal) => {
+      if (terminalError) {
+        reject(terminalError);
+        return;
+      }
+      resolve({
+        status: code,
+        signal,
+        stdout: Buffer.concat(stdout).toString("utf8"),
+        stderr: Buffer.concat(stderr).toString("utf8"),
+      });
+    });
   });
 }
 
-async function runChromePage(label, page, fixtureBytes = null) {
+export { run as runCommandCapture };
+
+async function runHostChromePage(label, page, fixtureBytes = null) {
   const chrome = chromeIdentity();
   const chromeExecutable = resolveChromeExecutable();
   requireCondition(chrome.status === "PRESENT" && chromeExecutable, chrome.code ?? "CHROME_REQUIRED", "BLOCKED", "INFRA");
@@ -307,8 +632,385 @@ async function runChromePage(label, page, fixtureBytes = null) {
   return { browserOrigin, chrome, chromeRun, result };
 }
 
+function hasExactKeys(value, expected) {
+  return value !== null
+    && typeof value === "object"
+    && !Array.isArray(value)
+    && canonicalJson(Object.keys(value).sort()) === canonicalJson([...expected].sort());
+}
+
+function validCaptureDigest(value) {
+  return hasExactKeys(value, ["byte_count", "sha256", "truncated"])
+    && Number.isSafeInteger(value.byte_count)
+    && value.byte_count >= 0
+    && SHA256.test(value.sha256 ?? "")
+    && value.truncated === false;
+}
+
+function validLinuxBrowserProcessTree(value) {
+  if (!hasExactKeys(value, [
+    "strategy", "session_started", "termination_reason", "term_sent",
+    "kill_sent", "parent_reaped", "group_absent",
+  ])
+    || value.strategy !== "posix-process-group-v1"
+    || typeof value.session_started !== "boolean"
+    || !["NONE", "TIMEOUT", "RESIDUAL_AFTER_EXIT"].includes(value.termination_reason)
+    || typeof value.term_sent !== "boolean"
+    || typeof value.kill_sent !== "boolean"
+    || typeof value.parent_reaped !== "boolean"
+    || typeof value.group_absent !== "boolean"
+    || (value.kill_sent && !value.term_sent)) return false;
+  if (!value.session_started) {
+    return value.termination_reason === "NONE"
+      && value.term_sent === false
+      && value.kill_sent === false
+      && value.parent_reaped === false
+      && value.group_absent === true;
+  }
+  if (value.termination_reason === "NONE") return value.term_sent === false && value.kill_sent === false;
+  return value.term_sent === true;
+}
+
+function completedLinuxBrowserProcessTree(value) {
+  return validLinuxBrowserProcessTree(value)
+    && value.session_started === true
+    && value.parent_reaped === true
+    && value.group_absent === true;
+}
+
+export function validLinuxClientBrowserExecution(value, { label, stdout = null } = {}) {
+  if (!hasExactKeys(value, [
+    "schema_version", "wrapper_status", "failure_code", "label", "argument_profile",
+    "home", "browser_started", "browser_exit_code", "browser_signal_number",
+    "browser_signal_name", "timed_out", "stdout", "stderr", "cleanup",
+  ])
+    || value.schema_version !== 1
+    || !["PASS", "ERROR"].includes(value.wrapper_status)
+    || value.label !== label
+    || value.argument_profile !== LINUX_BROWSER_ARGUMENT_PROFILE
+    || !hasExactKeys(value.home, ["path", "realpath", "present", "writable"])
+    || ![null, LINUX_CLIENT_HOME].includes(value.home.path)
+    || ![null, LINUX_CLIENT_HOME].includes(value.home.realpath)
+    || typeof value.home.present !== "boolean"
+    || typeof value.home.writable !== "boolean"
+    || typeof value.browser_started !== "boolean"
+    || !(value.browser_exit_code === null || (Number.isSafeInteger(value.browser_exit_code) && value.browser_exit_code >= 0))
+    || !(value.browser_signal_number === null || (Number.isSafeInteger(value.browser_signal_number) && value.browser_signal_number > 0))
+    || !(value.browser_signal_name === null || /^SIG[A-Z0-9]+$/.test(value.browser_signal_name))
+    || typeof value.timed_out !== "boolean"
+    || !validCaptureDigest(value.stdout)
+    || !validCaptureDigest(value.stderr)
+    || !hasExactKeys(value.cleanup, ["http_server_stopped", "profile_removed", "process_tree"])
+    || typeof value.cleanup.http_server_stopped !== "boolean"
+    || typeof value.cleanup.profile_removed !== "boolean"
+    || !validLinuxBrowserProcessTree(value.cleanup.process_tree)) return false;
+  if (value.wrapper_status === "PASS" && value.failure_code !== null) return false;
+  if (value.wrapper_status === "ERROR" && !/^[A-Z][A-Z0-9_]{0,127}$/.test(value.failure_code ?? "")) return false;
+  if (value.wrapper_status === "PASS" && !completedLinuxBrowserProcessTree(value.cleanup.process_tree)) return false;
+  if (value.browser_started !== value.cleanup.process_tree.session_started) return false;
+  if (value.timed_out && value.cleanup.process_tree.termination_reason !== "TIMEOUT") return false;
+  if (!value.timed_out && value.cleanup.process_tree.termination_reason === "TIMEOUT") return false;
+  if (value.browser_signal_number === null !== (value.browser_signal_name === null)) return false;
+  if (value.timed_out && (value.browser_exit_code !== null || value.browser_signal_number !== null)) return false;
+  if (!value.timed_out && value.browser_started && ((value.browser_exit_code === null) === (value.browser_signal_number === null))) return false;
+  if (stdout !== null && (value.stdout.byte_count !== Buffer.byteLength(stdout) || value.stdout.sha256 !== sha256Bytes(stdout))) return false;
+  return true;
+}
+
+export function parseLinuxClientBrowserExecution(chromeRun, label) {
+  const summaries = String(chromeRun?.stderr ?? "")
+    .split(/\r?\n/)
+    .filter((line) => line.startsWith(LINUX_BROWSER_SUMMARY_PREFIX));
+  if (summaries.length !== 1) return null;
+  const encoded = summaries[0].slice(LINUX_BROWSER_SUMMARY_PREFIX.length);
+  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(encoded)) return null;
+  try {
+    const value = JSON.parse(Buffer.from(encoded, "base64").toString("utf8"));
+    return validLinuxClientBrowserExecution(value, { label, stdout: chromeRun.stdout }) ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+function redactedTextCapture(value) {
+  const text = String(value ?? "");
+  return {
+    byte_count: Buffer.byteLength(text),
+    sha256: sha256Bytes(text),
+    truncated: false,
+  };
+}
+
+export function buildLinuxClientBrowserFailureReceipt({
+  label,
+  runId,
+  clientContainer,
+  clientImageId,
+  clientRuntime,
+  browser,
+  runnerSha256,
+  chromeRun,
+  execution,
+  status = "FAIL",
+  failureDomain = "BROWSER",
+  code = null,
+}) {
+  const outerStatus = Number.isSafeInteger(chromeRun?.status) ? chromeRun.status : null;
+  const encodedSignalCandidate = outerStatus !== null && outerStatus >= 129 && outerStatus <= 192
+    ? outerStatus - 128
+    : null;
+  let browserAttribution = "UNOBSERVED";
+  if (execution?.browser_signal_number !== null && execution?.browser_signal_number !== undefined) browserAttribution = "CONFIRMED_SUBPROCESS_SIGNAL";
+  else if (execution?.browser_exit_code !== null && execution?.browser_exit_code !== undefined) browserAttribution = "CONFIRMED_SUBPROCESS_EXIT_CODE";
+  else if (execution?.timed_out === true) browserAttribution = "CONFIRMED_SUBPROCESS_TIMEOUT";
+  return {
+    schema_version: 1,
+    status,
+    failure_domain: failureDomain,
+    code,
+    label,
+    topology: DUAL_LINUX_TOPOLOGY,
+    run_id: runId,
+    execution_layer: "docker-exec-linux-client-wrapper",
+    client: {
+      container: clientContainer,
+      image_id: clientImageId,
+      user: clientRuntime?.user ?? null,
+      home: execution?.home ?? clientRuntime?.home ?? null,
+    },
+    runner: {
+      relative_path: LINUX_BROWSER_RUNNER_RELATIVE,
+      sha256: runnerSha256,
+      argument_profile: LINUX_BROWSER_ARGUMENT_PROFILE,
+    },
+    browser,
+    launcher: {
+      kind: "docker-cli-exec",
+      exit_code: outerStatus,
+      signal: chromeRun?.signal ?? null,
+      encoded_signal_candidate: encodedSignalCandidate,
+      candidate_attribution: encodedSignalCandidate === null ? null : "UNCONFIRMED_POSIX_EXIT_CONVENTION",
+    },
+    wrapper: execution ? {
+      status: execution.wrapper_status,
+      failure_code: execution.failure_code,
+      cleanup: execution.cleanup,
+    } : null,
+    browser_process: execution ? {
+      started: execution.browser_started,
+      exit_code: execution.browser_exit_code,
+      signal_number: execution.browser_signal_number,
+      signal_name: execution.browser_signal_name,
+      timed_out: execution.timed_out,
+      attribution: browserAttribution,
+    } : {
+      started: null,
+      exit_code: null,
+      signal_number: null,
+      signal_name: null,
+      timed_out: null,
+      attribution: "UNOBSERVED",
+    },
+    capture: {
+      browser_stdout: execution?.stdout ?? redactedTextCapture(chromeRun?.stdout),
+      browser_stderr: execution?.stderr ?? null,
+      launcher_stderr: redactedTextCapture(chromeRun?.stderr),
+      result_marker_present: /data-result="[A-Za-z0-9+/=]+"/.test(String(chromeRun?.stdout ?? "")),
+    },
+  };
+}
+
+async function runChromePage(
+  configuration,
+  state,
+  label,
+  page,
+  fixtureBytes = null,
+  {
+    failureStatus = "FAIL",
+    failureDomain = "BROWSER",
+    validateResult = null,
+    resultFailureCode = null,
+  } = {},
+) {
+  if (configuration.topology !== DUAL_LINUX_TOPOLOGY) return runHostChromePage(label, page, fixtureBytes);
+  requireCondition(state.client_container, "LINUX_CLIENT_CONTAINER_MISSING", "BLOCKED", "INFRA");
+  const runtime = ensureClientRuntime(configuration, state);
+  const browserRoot = path.join(runtime.runtimeRoot, "browser", configuration.stage, label);
+  ensureDirectory(browserRoot);
+  const pagePath = path.join(browserRoot, "index.html");
+  const fixturePath = path.join(browserRoot, "fixture");
+  writeTextNew(pagePath, page);
+  if (fixtureBytes !== null) {
+    const descriptor = fs.openSync(fixturePath, "wx", 0o600);
+    try { fs.writeFileSync(descriptor, fixtureBytes); fs.fsyncSync(descriptor); } finally { fs.closeSync(descriptor); }
+  }
+  const containerRoot = `/client-runtime/browser/${configuration.stage}/${label}`;
+  const port = 18765;
+  const browserOrigin = `http://127.0.0.1:${port}`;
+  const runnerPath = path.join(configuration.repoRoot, ...LINUX_BROWSER_RUNNER_RELATIVE.split("/"));
+  requireCondition(fs.existsSync(runnerPath), "LINUX_CLIENT_BROWSER_RUNNER_MISSING", "BLOCKED", "INFRA");
+  const runnerSha256 = sha256File(runnerPath);
+  const chromeRun = await run("docker", dockerArgs(configuration.dockerContext, [
+    "exec", state.client_container,
+    "/opt/venvs/xiaodao/bin/python", LINUX_BROWSER_RUNNER_CONTAINER,
+    "--chrome", "/opt/chrome-headless-shell/chrome-headless-shell",
+    "--directory", containerRoot,
+    "--port", String(port),
+    "--label", label,
+  ]), { forward: false, maximumBytes: 8 * 1024 * 1024 });
+  const execution = parseLinuxClientBrowserExecution(chromeRun, label);
+  const persistFailure = (code) => {
+    const browser = {
+      status: "PRESENT",
+      product: RELEASE_CHROME_HEADLESS_SHELL_PRODUCT,
+      version: RELEASE_CHROME_HEADLESS_SHELL_VERSION_OUTPUT,
+      executable_sha256: RELEASE_CHROME_HEADLESS_SHELL_EXECUTABLE_SHA256,
+      code: null,
+    };
+    const failureReceipt = buildLinuxClientBrowserFailureReceipt({
+      label,
+      runId: state.run_id,
+      clientContainer: state.client_container,
+      clientImageId: state.client_image_id,
+      clientRuntime: state.selected_client_runtime_observed,
+      browser,
+      runnerSha256,
+      chromeRun,
+      execution,
+      status: failureStatus,
+      failureDomain,
+      code,
+    });
+    const failurePath = path.join(configuration.stageRoot, `chrome-${label}-failure.json`);
+    writeNew(failurePath, failureReceipt);
+    const binding = { path: path.basename(failurePath), sha256: sha256File(failurePath) };
+    throw new StageError(code, failureStatus, failureDomain, binding);
+  };
+  if (chromeRun.status !== 0 || chromeRun.signal !== null) {
+    const suffix = chromeRun.signal ? `DOCKER_SIGNAL_${chromeRun.signal}` : `DOCKER_EXIT_${chromeRun.status}`;
+    persistFailure(`CHROME_${label.toUpperCase()}_${suffix}`);
+  }
+  if (!execution) persistFailure(`CHROME_${label.toUpperCase()}_EXECUTION_RECEIPT_INVALID`);
+  if (execution.wrapper_status !== "PASS") persistFailure(`CHROME_${label.toUpperCase()}_WRAPPER_ERROR`);
+  if (execution.timed_out) persistFailure(`CHROME_${label.toUpperCase()}_TIMEOUT`);
+  if (execution.browser_signal_number !== null) persistFailure(`CHROME_${label.toUpperCase()}_SIGNAL_${execution.browser_signal_name ?? execution.browser_signal_number}`);
+  if (execution.browser_exit_code !== 0) persistFailure(`CHROME_${label.toUpperCase()}_EXIT_${execution.browser_exit_code}`);
+  if (execution.home.path !== LINUX_CLIENT_HOME
+    || execution.home.realpath !== LINUX_CLIENT_HOME
+    || execution.home.present !== true
+    || execution.home.writable !== true
+    || execution.cleanup.http_server_stopped !== true
+    || execution.cleanup.profile_removed !== true
+    || !completedLinuxBrowserProcessTree(execution.cleanup.process_tree)) {
+    persistFailure(`CHROME_${label.toUpperCase()}_RUNTIME_BOUNDARY_INVALID`);
+  }
+  const match = chromeRun.stdout.match(/data-result="([A-Za-z0-9+/=]+)"/);
+  if (!match) persistFailure(`CHROME_${label.toUpperCase()}_RESULT_MISSING`);
+  let result;
+  try { result = JSON.parse(Buffer.from(match[1], "base64").toString("utf8")); }
+  catch { persistFailure(`CHROME_${label.toUpperCase()}_RESULT_INVALID`); }
+  if (validateResult !== null && !validateResult(result)) {
+    persistFailure(resultFailureCode ?? `CHROME_${label.toUpperCase()}_RESULT_INVALID`);
+  }
+  return {
+    browserOrigin,
+    chrome: {
+      status: "PRESENT",
+      product: RELEASE_CHROME_HEADLESS_SHELL_PRODUCT,
+      version: RELEASE_CHROME_HEADLESS_SHELL_VERSION_OUTPUT,
+      executable_sha256: RELEASE_CHROME_HEADLESS_SHELL_EXECUTABLE_SHA256,
+      code: null,
+    },
+    chromeRun,
+    browserExecution: execution,
+    runner: { relative_path: LINUX_BROWSER_RUNNER_RELATIVE, sha256: runnerSha256 },
+    failBrowser: persistFailure,
+    result,
+  };
+}
+
+async function probeLinuxClientBrowserCapability(configuration, state, stageRoot) {
+  if (configuration.topology !== DUAL_LINUX_TOPOLOGY) return null;
+  const challenge = sha256Bytes(`${state.run_id}:${state.client_container}:linux-client-browser-capability-v1`);
+  const page = `<!doctype html><html><head><meta charset="utf-8"><title>PENDING</title></head><body><script>
+const value = ${scriptJson({ schema_version: 1, ok: true, capability: "headless-dom-roundtrip", challenge })};
+const bytes = new TextEncoder().encode(JSON.stringify(value));
+let binary = "";
+for (const byte of bytes) binary += String.fromCharCode(byte);
+document.documentElement.dataset.result = btoa(binary);
+document.title = "DONE";
+</script></body></html>`;
+  const {
+    browserOrigin,
+    chrome,
+    chromeRun,
+    browserExecution,
+    runner,
+    result,
+  } = await runChromePage(
+    configuration,
+    state,
+    "capability",
+    page,
+    null,
+    {
+      failureStatus: "BLOCKED",
+      failureDomain: "INFRA",
+      validateResult: (value) => (
+        hasExactKeys(value, ["schema_version", "ok", "capability", "challenge"])
+          && value.schema_version === 1
+          && value.ok === true
+          && value.capability === "headless-dom-roundtrip"
+          && value.challenge === challenge
+      ),
+      resultFailureCode: "CHROME_CAPABILITY_RESULT_INVALID",
+    },
+  );
+  const receipt = {
+    schema_version: 1,
+    status: "PASS",
+    code: null,
+    kind: "linux-client-headless-dom-roundtrip",
+    topology: DUAL_LINUX_TOPOLOGY,
+    run_id: state.run_id,
+    client_container: state.client_container,
+    client_image_id: state.client_image_id,
+    execution_user: state.selected_client_runtime_observed.user,
+    home: browserExecution.home,
+    browser: chrome,
+    runner: { ...runner, argument_profile: browserExecution.argument_profile },
+    launcher_contract: {
+      kind: "docker-cli-exec-to-python-subprocess",
+      network_scope: "container-loopback-only",
+      docker_exec_count: 1,
+      retries: 0,
+    },
+    probe: {
+      origin: browserOrigin,
+      challenge_sha256: challenge,
+      result_sha256: sha256Bytes(canonicalJson(result)),
+      launcher_exit_code: chromeRun.status,
+      launcher_signal: chromeRun.signal,
+      browser_exit_code: browserExecution.browser_exit_code,
+      browser_signal_number: browserExecution.browser_signal_number,
+      browser_signal_name: browserExecution.browser_signal_name,
+      timed_out: browserExecution.timed_out,
+      stdout: browserExecution.stdout,
+      stderr: browserExecution.stderr,
+      result_marker: "data-result",
+      cleanup: browserExecution.cleanup,
+    },
+    usage_complete: true,
+    invocations: [],
+    usage: zeroUsage(),
+  };
+  writeNew(path.join(stageRoot, "linux-client-browser-capability.json"), receipt);
+  return receipt;
+}
+
 function dockerArgs(context, args) {
-  return context && context !== "default" ? ["--context", context, ...args] : args;
+  return dockerContextArgs(context ?? "default", args);
 }
 
 async function docker(context, args, options = {}) {
@@ -321,7 +1023,8 @@ function appendResource(registryPath, attemptRoot, kind, name, label) {
   const registry = path.resolve(registryPath);
   const root = path.resolve(attemptRoot);
   requireCondition(registry.startsWith(`${root}${path.sep}`), "RESOURCE_REGISTRY_OUTSIDE_ATTEMPT");
-  requireCondition(["container", "volume"].includes(kind) && /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/.test(name), "RESOURCE_RECORD_INVALID");
+  requireCondition(label === `problem-locator.test-flow.run=${path.basename(root)}`, "RESOURCE_LABEL_INVALID");
+  requireCondition(["container", "network", "volume"].includes(kind) && /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/.test(name), "RESOURCE_RECORD_INVALID");
   const existing = fs.existsSync(registry)
     ? fs.readFileSync(registry, "utf8").split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line))
     : [];
@@ -343,7 +1046,7 @@ async function availablePort() {
   });
 }
 
-async function waitReady(publicBaseUrl) {
+async function waitHostReady(publicBaseUrl) {
   const deadline = Date.now() + 90_000;
   let probes = 0;
   while (Date.now() < deadline) {
@@ -364,6 +1067,31 @@ async function waitReady(publicBaseUrl) {
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
   throw new StageError("SERVICE_READINESS_TIMEOUT", "BLOCKED", "INFRA");
+}
+
+async function waitReady(configuration, state) {
+  if (configuration.topology !== DUAL_LINUX_TOPOLOGY) return waitHostReady(state.public_base_url);
+  const probe = await run("docker", dockerArgs(configuration.dockerContext, [
+    "exec", state.client_container,
+    "/opt/venvs/xiaodao/bin/python", "-I", "-c",
+    `import json, sys, time, urllib.request
+base=sys.argv[1]
+for attempt in range(1, 361):
+    try:
+        with urllib.request.urlopen(base + "/live", timeout=3) as live, urllib.request.urlopen(base + "/ready", timeout=3) as ready:
+            live_body=json.load(live); ready_body=json.load(ready)
+            if live.status == 200 and ready.status == 200 and live_body.get("ok") is True and ready_body.get("ok") is True and ready_body.get("data", {}).get("ready") is True:
+                print(json.dumps({"probes": attempt, "live": True, "ready": True}, separators=(",", ":")))
+                raise SystemExit(0)
+    except Exception:
+        pass
+    time.sleep(0.25)
+raise SystemExit(1)`,
+    state.public_base_url,
+  ]), { forward: false });
+  requireCondition(probe.status === 0, "SERVICE_READINESS_TIMEOUT", "BLOCKED", "INFRA");
+  process.stdout.write("TEST_FLOW_PROGRESS request.completed\n");
+  return JSON.parse(probe.stdout.trim());
 }
 
 async function captureReadinessDiagnostic(configuration, state, instance, code) {
@@ -527,6 +1255,7 @@ function parseClaudeStream(text, expectedCwd, { allowErrorTerminal = false } = {
 
 async function runClaude(configuration, state, stageRoot, phase, prompt, maxTurns, maxBudgetUsd) {
   const runtime = ensureClientRuntime(configuration, state);
+  const containerClient = configuration.topology === DUAL_LINUX_TOPOLOGY;
   const promptPath = path.join(stageRoot, `${phase}.prompt.txt`);
   const stdoutPath = path.join(stageRoot, `${phase}.stream-json.stdout.ndjson`);
   const stderrPath = path.join(stageRoot, `${phase}.stderr.txt`);
@@ -543,8 +1272,7 @@ async function runClaude(configuration, state, stageRoot, phase, prompt, maxTurn
   environment.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "1";
   environment.NO_PROXY = "127.0.0.1,localhost";
   environment.no_proxy = environment.NO_PROXY;
-  const args = [
-    configuration.claudeEntry,
+  const claudeArgs = [
     "--print",
     "--output-format", "stream-json",
     "--verbose",
@@ -552,8 +1280,8 @@ async function runClaude(configuration, state, stageRoot, phase, prompt, maxTurn
     "--max-turns", String(maxTurns),
     "--max-budget-usd", String(maxBudgetUsd),
     "--setting-sources", "user",
-    "--settings", runtime.settingsPath,
-    "--mcp-config", runtime.mcpPath,
+    "--settings", containerClient ? "/client-runtime/settings.json" : runtime.settingsPath,
+    "--mcp-config", containerClient ? "/client-runtime/mcp.json" : runtime.mcpPath,
     "--strict-mcp-config",
     "--tools=Skill",
     "--allowedTools", "Skill(problem-locator-client)",
@@ -563,18 +1291,34 @@ async function runClaude(configuration, state, stageRoot, phase, prompt, maxTurn
     "--no-session-persistence",
     prompt,
   ];
+  const command = containerClient ? "docker" : process.execPath;
+  const args = containerClient
+    ? dockerArgs(configuration.dockerContext, [
+        "exec",
+        "--workdir", "/workspace",
+        "--env", "HOME=/client-runtime/home",
+        "--env", "CLAUDE_CONFIG_DIR=/client-runtime/config",
+        "--env", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1",
+        "--env", "NO_PROXY=problem-locator-server,127.0.0.1,localhost",
+        "--env", "no_proxy=problem-locator-server,127.0.0.1,localhost",
+        state.client_container,
+        "timeout", "--signal=TERM", "--kill-after=10s", `${configuration.hardCaps.hard_timeout_seconds}s`,
+        "node", "/opt/claude-code/cli.js",
+        ...claudeArgs,
+      ])
+    : [configuration.claudeEntry, ...claudeArgs];
   const chunks = [];
   const stderrChunks = [];
   const invocationStartedUtc = new Date().toISOString();
   const invocationStarted = process.hrtime.bigint();
   const exit = await new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, args, { cwd: configuration.repoRoot, env: environment, stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(command, args, { cwd: containerClient ? undefined : configuration.repoRoot, env: containerClient ? process.env : environment, stdio: ["ignore", "pipe", "pipe"] });
     let timedOut = false;
     const timeout = setTimeout(() => {
       timedOut = true;
       child.kill("SIGTERM");
       setTimeout(() => child.exitCode === null && child.kill("SIGKILL"), 5000).unref();
-    }, configuration.hardCaps.hard_timeout_seconds * 1000);
+    }, (configuration.hardCaps.hard_timeout_seconds + (containerClient ? 20 : 0)) * 1000);
     timeout.unref();
     child.stdout.on("data", (chunk) => {
       chunks.push(chunk);
@@ -593,13 +1337,32 @@ async function runClaude(configuration, state, stageRoot, phase, prompt, maxTurn
   fs.fsyncSync(stderrDescriptor);
   fs.closeSync(stdoutDescriptor);
   fs.closeSync(stderrDescriptor);
-  const audit = parseClaudeStream(Buffer.concat(chunks).toString("utf8"), configuration.repoRoot, { allowErrorTerminal: exit.code !== 0 });
+  const timedOut = exit.timedOut || (containerClient && [124, 137].includes(exit.code));
+  if (timedOut) {
+    writeNew(path.join(stageRoot, `${phase}.timing.json`), {
+      schema_version: 2,
+      span: containerClient ? "linux-client-container.model-and-mcp-wait" : "host.model-and-mcp-wait",
+      phase,
+      clock_domain: containerClient ? "linux-client-container" : `${configuration.client}-host`,
+      started_at_utc: invocationStartedUtc,
+      finished_at_utc: new Date().toISOString(),
+      duration_ms: Math.round(Number(process.hrtime.bigint() - invocationStarted) / 1_000_000),
+      timed_out: true,
+      max_turns: maxTurns,
+      max_budget_usd: maxBudgetUsd,
+      max_total_tokens: configuration.hardCaps.max_total_tokens,
+      effective_model: null,
+      usage: null,
+    });
+    throw new StageError(`CLAUDE_${phase.toUpperCase()}_HARD_TIMEOUT`, "INCONCLUSIVE", "EXTERNAL");
+  }
+  const audit = parseClaudeStream(Buffer.concat(chunks).toString("utf8"), containerClient ? "/workspace" : configuration.repoRoot, { allowErrorTerminal: exit.code !== 0 });
   writeNew(auditPath, audit);
   writeNew(path.join(stageRoot, `${phase}.timing.json`), {
     schema_version: 2,
-    span: "host.model-and-mcp-wait",
+    span: containerClient ? "linux-client-container.model-and-mcp-wait" : "host.model-and-mcp-wait",
     phase,
-    clock_domain: `${configuration.client}-host`,
+    clock_domain: containerClient ? "linux-client-container" : `${configuration.client}-host`,
     started_at_utc: invocationStartedUtc,
     finished_at_utc: new Date().toISOString(),
     duration_ms: Math.round(Number(process.hrtime.bigint() - invocationStarted) / 1_000_000),
@@ -616,7 +1379,13 @@ async function runClaude(configuration, state, stageRoot, phase, prompt, maxTurn
     path.join(stageRoot, `${phase}.client-dfx.jsonl`),
   ];
   requireCondition(forbidden.every((filePath) => !fs.existsSync(filePath)), "CLIENT_DFX_FORBIDDEN");
-  if (exit.timedOut) throw new StageError(`CLAUDE_${phase.toUpperCase()}_HARD_TIMEOUT`, "INCONCLUSIVE", "EXTERNAL");
+  if (containerClient) {
+    const containerDfx = await run("docker", dockerArgs(configuration.dockerContext, [
+      "exec", state.client_container, "sh", "-eu", "-c",
+      "test ! -e /client-runtime/client-dfx.jsonl && test ! -e /client-runtime/.problem-locator/client-dfx.jsonl",
+    ]), { forward: false });
+    requireCondition(containerDfx.status === 0, "CLIENT_DFX_FORBIDDEN");
+  }
   if (exit.code !== 0) throw new StageError(`CLAUDE_${phase.toUpperCase()}_EXIT_${exit.code ?? exit.signal}`, "INCONCLUSIVE", "EXTERNAL");
   return audit;
 }
@@ -686,7 +1455,15 @@ function validatePhaseOne(audit, releaseCase, requestIds, archive, publicBaseUrl
   const view = response?.case_view;
   const descriptor = prepareData.upload;
   requireCondition(view?.status === "WAITING_ATTACHMENT" && UUID.test(view.case_id) && Number.isInteger(view.case_revision), "PHASE1_CASE_VIEW", "FAIL", "CONTRACT");
-  requireCondition(canonicalJson(openRequirementNames(view, "ATTACHMENT")) === canonicalJson([releaseCase.skill.attachment_requirement]), "PHASE1_ATTACHMENT_REQUIREMENT", "FAIL", "CONTRACT");
+  const attachmentRequirements = (view.pending_requirements ?? [])
+    .filter((item) => item.status === "OPEN" && item.kind === "ATTACHMENT");
+  requireCondition(
+    canonicalJson(attachmentRequirements.map((item) => item.name)) === canonicalJson([releaseCase.skill.attachment_requirement])
+      && UUID.test(attachmentRequirements[0]?.requested_by_job_id ?? ""),
+    "PHASE1_ATTACHMENT_REQUIREMENT",
+    "FAIL",
+    "CONTRACT",
+  );
   requireCondition(view.selected_skill_ref?.id === releaseCase.skill.runtime_ref_id && view.selected_skill_ref?.version === releaseCase.skill.version, "PHASE1_SELECTED_SKILL", "FAIL", "CONTRACT");
   exactKeys(descriptor, ["attachment_id", "method", "url", "required_headers", "max_bytes", "expires_at"], "PHASE1_UPLOAD_DESCRIPTOR_SHAPE");
   requireCondition(UUID.test(descriptor.attachment_id) && descriptor.method === "PUT" && descriptor.url === `${publicBaseUrl}/api/v1/attachments/${descriptor.attachment_id}/content` && descriptor.max_bytes === MAX_ATTACHMENT_BYTES && descriptor.expires_at === null, "PHASE1_UPLOAD_DESCRIPTOR", "FAIL", "CONTRACT");
@@ -698,6 +1475,7 @@ function validatePhaseOne(audit, releaseCase, requestIds, archive, publicBaseUrl
     attachment_id: descriptor.attachment_id,
     prepared_case_revision: view.case_revision,
     prepare_expected_case_revision: prepare[0].input.expected_case_revision,
+    methods_preflight_job_id: attachmentRequirements[0].requested_by_job_id,
     selected_skill_ref: view.selected_skill_ref,
     upload_descriptor: descriptor,
   };
@@ -806,11 +1584,15 @@ async function upload(label, bytes, descriptor) {
 
   const startedAtUtc = new Date().toISOString();
   const started = process.hrtime.bigint();
-  const { browserOrigin, chrome, chromeRun, result: browserResult } = await runChromePage(
+  const { browserOrigin, chrome, chromeRun, failBrowser, result: browserResult } = await runChromePage(
+    configuration,
+    state,
     "upload",
     page,
     archiveBytes,
   );
+  if (!(browserResult.ok === true && browserResult.body_kind === "Blob" && browserResult.byte_length === archiveBytes.length)
+    && typeof failBrowser === "function") failBrowser("CHROME_UPLOAD_EXECUTION_FAILED");
   requireCondition(browserResult.ok === true && browserResult.body_kind === "Blob" && browserResult.byte_length === archiveBytes.length, "CHROME_UPLOAD_EXECUTION_FAILED", "FAIL", "BROWSER");
   requireCondition(browserResult.create?.status === 200 && browserResult.create.envelope?.ok === true && browserResult.create.envelope?.data?.business_receipt?.case_id === state.case_id, "CHROME_CREATE_REPLAY_INVALID", "FAIL", "CONTRACT");
   requireCondition(browserResult.query_before?.status === 200 && browserResult.query_before.envelope?.data?.case_view?.status === "WAITING_ATTACHMENT", "CHROME_QUERY_BEFORE_UPLOAD_INVALID", "FAIL", "CONTRACT");
@@ -845,8 +1627,8 @@ async function upload(label, bytes, descriptor) {
   writeNew(path.join(stageRoot, "chrome-upload.json"), browserReceipt);
   writeNew(path.join(stageRoot, "upload.timing.json"), {
     schema_version: 2,
-    span: "host.http-upload",
-    clock_domain: `${configuration.client}-host`,
+    span: configuration.topology === DUAL_LINUX_TOPOLOGY ? "linux-client-container.http-upload" : "host.http-upload",
+    clock_domain: configuration.topology === DUAL_LINUX_TOPOLOGY ? "linux-client-container" : `${configuration.client}-host`,
     started_at_utc: startedAtUtc,
     finished_at_utc: new Date().toISOString(),
     duration_ms: Math.round(Number(process.hrtime.bigint() - started) / 1_000_000),
@@ -895,9 +1677,9 @@ function validatePhaseThree(audit, state, releaseCase) {
     terminalPredecessor = submits[1];
   }
   const reviewing = views.find((entry) => entry.ordinal > terminalPredecessor.ordinal && entry.view.status === "REVIEWING");
-  const resolved = [...views].reverse().find((entry) => entry.ordinal > (reviewing?.ordinal ?? Infinity) && entry.view.status === releaseCase.oracle.case_status);
+  const resolved = [...views].reverse().find((entry) => entry.ordinal > (reviewing?.ordinal ?? Infinity) && entry.view.status === releaseCase.result_expectation.case_status);
   requireCondition(reviewing && resolved && resolved.view.final_result?.status === "ACCEPTED", "PHASE3_REVIEW_RESOLUTION", "FAIL", "CONTRACT");
-  requireCondition(resolved.view.final_result?.resolution_status === releaseCase.oracle.resolution_status, "PHASE3_RESOLUTION_STATUS", "FAIL", "CONTRACT");
+  requireCondition(resolved.view.final_result?.resolution_status === releaseCase.result_expectation.resolution_status, "PHASE3_RESOLUTION_STATUS", "FAIL", "CONTRACT");
   requireCondition(resolved.view.selected_skill_ref?.id === releaseCase.skill.runtime_ref_id && resolved.view.selected_skill_ref?.version === releaseCase.skill.version, "PHASE3_SELECTED_SKILL", "FAIL", "CONTRACT");
   const listData = successData(lists[0]);
   const artifacts = listData.artifacts;
@@ -985,7 +1767,8 @@ async function digest(bytes) {
   document.title = "FAILED";
 });
 </script></body></html>`;
-  const { browserOrigin, chrome, result } = await runChromePage("resolved-api", page);
+  const { browserOrigin, chrome, failBrowser, result } = await runChromePage(configuration, state, "resolved-api", page);
+  if (result.ok !== true && typeof failBrowser === "function") failBrowser("CHROME_RESOLVED-API_EXECUTION_FAILED");
   requireCondition(result.ok === true, "CHROME_RESOLVED_API_EXECUTION_FAILED", "FAIL", "BROWSER");
   requireCondition(Array.isArray(result.supplements) && result.supplements.length === summary.rest_supplements.length && result.supplements.every((item) => item.status === 200 && item.envelope?.ok === true && typeof item.correlation_id === "string"), "CHROME_SUPPLEMENT_REPLAY_INVALID", "FAIL", "CONTRACT");
   requireCondition(result.query?.status === 200 && result.query.envelope?.data?.case_view?.case_id === state.case_id && result.query.envelope?.data?.case_view?.case_revision === summary.resolved_case_revision && result.query.envelope?.data?.wait_timed_out === false, "CHROME_TERMINAL_QUERY_INVALID", "FAIL", "CONTRACT");
@@ -1027,7 +1810,7 @@ function validateRestart(audit, state, releaseCase) {
   requireCondition(records.length === 2 && records[0].tool_name === "problem_locator_get_case" && records[1].tool_name === "problem_locator_list_artifacts", "RESTART_CALL_SEQUENCE", "FAIL", "CONTRACT");
   const view = caseView(records[0]);
   const artifacts = successData(records[1]).artifacts;
-  requireCondition(view?.case_id === state.case_id && view.status === releaseCase.oracle.case_status && view.case_revision === state.resolved_case_revision && view.final_result?.status === "ACCEPTED" && view.final_result?.resolution_status === releaseCase.oracle.resolution_status, "RESTART_CASE_MISMATCH", "FAIL", "CONTRACT");
+  requireCondition(view?.case_id === state.case_id && view.status === releaseCase.result_expectation.case_status && view.case_revision === state.resolved_case_revision && view.final_result?.status === "ACCEPTED" && view.final_result?.resolution_status === releaseCase.result_expectation.resolution_status, "RESTART_CASE_MISMATCH", "FAIL", "CONTRACT");
   requireCondition(view.selected_skill_ref?.id === releaseCase.skill.runtime_ref_id && view.selected_skill_ref?.version === releaseCase.skill.version, "RESTART_SELECTED_SKILL", "FAIL", "CONTRACT");
   requireCondition(Array.isArray(artifacts) && artifacts.length === 2, "RESTART_ARTIFACT_COUNT", "FAIL", "CONTRACT");
   for (const expected of [state.public_artifact, state.public_result_archive]) {
@@ -1041,35 +1824,54 @@ async function downloadArtifacts(configuration, state, stageRoot) {
   for (const [label, artifact] of [["diagnosis-result", state.public_artifact], ["result-archive", state.public_result_archive]]) {
     const startedAtUtc = new Date().toISOString();
     const started = process.hrtime.bigint();
-    const response = await fetch(artifact.download_url, { signal: AbortSignal.timeout(60_000) });
-    const bytes = Buffer.from(await response.arrayBuffer());
+    let httpStatus;
+    let bytes;
+    if (configuration.topology === DUAL_LINUX_TOPOLOGY) {
+      const runtime = ensureClientRuntime(configuration, state);
+      const downloadRoot = path.join(runtime.runtimeRoot, "downloads", configuration.stage);
+      ensureDirectory(downloadRoot);
+      const target = path.join(downloadRoot, label);
+      const containerTarget = `/client-runtime/downloads/${configuration.stage}/${label}`;
+      const transfer = await run("docker", dockerArgs(configuration.dockerContext, [
+        "exec", state.client_container,
+        "curl", "--noproxy", "*", "--fail", "--silent", "--show-error", "--max-time", "60",
+        "--output", containerTarget,
+        "--write-out", "%{http_code}",
+        "--", artifact.download_url,
+      ]), { forward: false });
+      httpStatus = Number(transfer.stdout.trim());
+      requireCondition(transfer.status === 0 && fs.existsSync(target), `RESTART_DOWNLOAD_${label.toUpperCase().replaceAll("-", "_")}`, "FAIL", "PRODUCT");
+      bytes = fs.readFileSync(target);
+    } else {
+      const response = await fetch(artifact.download_url, { signal: AbortSignal.timeout(60_000) });
+      httpStatus = response.status;
+      bytes = Buffer.from(await response.arrayBuffer());
+    }
     writeNew(path.join(stageRoot, `restart-${label}.timing.json`), {
       schema_version: 2,
-      span: "host.http-download",
-      clock_domain: `${configuration.client}-host`,
+      span: configuration.topology === DUAL_LINUX_TOPOLOGY ? "linux-client-container.http-download" : "host.http-download",
+      clock_domain: configuration.topology === DUAL_LINUX_TOPOLOGY ? "linux-client-container" : `${configuration.client}-host`,
       started_at_utc: startedAtUtc,
       finished_at_utc: new Date().toISOString(),
       duration_ms: Math.round(Number(process.hrtime.bigint() - started) / 1_000_000),
       response_bytes: bytes.length,
-      http_status: response.status,
+      http_status: httpStatus,
       retries: 0,
       timed_out: false,
     });
-    requireCondition(response.status === 200 && bytes.length === artifact.size && sha256Bytes(bytes) === artifact.sha256, `RESTART_DOWNLOAD_${label.toUpperCase().replaceAll("-", "_")}`, "FAIL", "PRODUCT");
+    requireCondition(httpStatus === 200 && bytes.length === artifact.size && sha256Bytes(bytes) === artifact.sha256, `RESTART_DOWNLOAD_${label.toUpperCase().replaceAll("-", "_")}`, "FAIL", "PRODUCT");
     if (artifact.content_type === "application/json") {
       const report = JSON.parse(bytes.toString("utf8"));
-      const expectedStatus = configuration.releaseCase.oracle.resolution_status === "COMPLETE" ? "COMPLETED" : "PARTIAL";
-      requireCondition(report?.schema_version === 3 && report.status === expectedStatus, "RESTART_RESULT_STATUS", "FAIL", "CONTRACT");
-      for (const [field, expected] of [
-        ["causal_factors", configuration.releaseCase.oracle.causal_factor_ids],
-        ["candidate_factors", configuration.releaseCase.oracle.candidate_factor_ids],
-        ["excluded_factors", configuration.releaseCase.oracle.excluded_factor_ids],
-      ]) {
-        requireCondition(canonicalJson((report[field] ?? []).map((item) => item.factor_id)) === canonicalJson(expected), `RESTART_RESULT_${field.toUpperCase()}`, "FAIL", "CONTRACT");
+      try {
+        validateReleaseDiagnosisReport({
+          report,
+          expectation: configuration.releaseCase.result_expectation,
+          completionCriteria: configuration.releaseCase.driver.problem.completion_criteria,
+          requiredSafetyPhrases: configuration.releaseCase.oracle.required_safety_phrases,
+        });
+      } catch (error) {
+        throw new StageError(error?.code ?? "RESTART_RESULT_INVALID", "FAIL", "CONTRACT");
       }
-      requireCondition(canonicalJson((report.completion_criteria_mapping ?? []).map((item) => item.status)) === canonicalJson(configuration.releaseCase.oracle.criterion_statuses), "RESTART_RESULT_CRITERIA", "FAIL", "CONTRACT");
-      const serialized = canonicalJson(report);
-      requireCondition(configuration.releaseCase.oracle.required_safety_phrases.every((phrase) => serialized.includes(phrase)), "RESTART_RESULT_SAFETY_NOTES", "FAIL", "CONTRACT");
     }
     if (artifact.content_type === "application/zip") requireCondition(bytes.subarray(0, 2).toString("binary") === "PK", "RESTART_ARCHIVE_FORMAT", "FAIL", "CONTRACT");
     fs.writeFileSync(path.join(stageRoot, `restart-${label}.${artifact.content_type === "application/json" ? "json" : "zip"}`), bytes, { flag: "wx", mode: 0o600 });
@@ -1175,7 +1977,7 @@ async function startService(configuration, state, instance, { allowEmptyJourney 
   state.current_instance = instance;
   atomicState(configuration.statePath, state);
   try {
-    return await waitReady(state.public_base_url);
+    return await waitReady(configuration, state);
   } catch (error) {
     try { await captureReadinessDiagnostic(configuration, state, instance, error?.code ?? "SERVICE_READINESS_ERROR"); } catch {}
     throw error;
@@ -1226,8 +2028,12 @@ async function stopService(configuration, state, { indexLabel = null } = {}) {
   await quiesceService(configuration, state);
   indexEventParts(configuration, state, "journey", indexLabel);
   indexEventParts(configuration, state, "diagnostics", indexLabel);
-  const serviceInvocations = await auditServiceAgentUsage(configuration, state, instance);
-  return { ...verifyCorrespondence(state, configuration.attemptRoot), service_invocations: serviceInvocations };
+  const serviceUsage = await auditServiceAgentUsage(configuration, state, instance);
+  return {
+    ...verifyCorrespondence(state, configuration.attemptRoot),
+    service_invocations: serviceUsage.invocations,
+    service_no_model_jobs: serviceUsage.noModelJobs,
+  };
 }
 
 async function archiveFailureServiceEvidence(configuration) {
@@ -1245,8 +2051,87 @@ async function archiveFailureServiceEvidence(configuration) {
   }
 }
 
+export async function installGeneratedSkill(configuration, state, containerName, stageId, dockerRunner = docker) {
+  const installedRoot = "/opt/e2e-skills";
+  await dockerRunner(configuration.dockerContext, [
+    "exec", containerName,
+    "sh", "-eu", "-c",
+    `source_root=/run/generated-specialized-skill
+installed_root=/opt/e2e-skills
+test -d "$source_root"
+test ! -e "$installed_root"
+install -d -m 0555 -o 0 -g 0 "$installed_root"
+cp -a "$source_root"/. "$installed_root"/
+diff -qr "$source_root" "$installed_root"
+test -z "$(find "$installed_root" -type l -print -quit)"
+test -z "$(find "$installed_root" -type f -links +1 -print -quit)"
+chown -R 0:0 "$installed_root"
+find "$installed_root" -type d -exec chmod 0555 {} +
+find "$installed_root" -type f -exec chmod 0444 {} +
+test -z "$(find "$installed_root" -xdev -perm /022 -print -quit)"
+test -z "$(find "$installed_root" -xdev ! -user root -print -quit)"
+test -z "$(find "$installed_root" -xdev ! -group root -print -quit)"`,
+  ]);
+  const installedProbe = await dockerRunner(configuration.dockerContext, [
+    "exec", containerName,
+    "/opt/venvs/xiaodao/bin/python", "-I", "-c",
+    `import hashlib,json,os,stat,sys
+root=sys.argv[1]
+records=[]
+for current, directories, files in os.walk(root, followlinks=False):
+    directories.sort(); files.sort()
+    for name in files:
+        absolute=os.path.join(current,name); metadata=os.lstat(absolute)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1: raise SystemExit(2)
+        payload=open(absolute,"rb").read()
+        records.append({"path":os.path.relpath(absolute,root).replace(os.sep,"/"),"size":len(payload),"sha256":hashlib.sha256(payload).hexdigest()})
+print(json.dumps(records,ensure_ascii=False,separators=(",",":"),sort_keys=True))`,
+    installedRoot,
+  ], { forward: false });
+  const installedEntries = JSON.parse(installedProbe.stdout).sort((left, right) => (
+    left.path < right.path ? -1 : left.path > right.path ? 1 : 0
+  ));
+  const installedContentTreeSha256 = sha256Bytes(canonicalJson({ version: 1, entries: installedEntries }));
+  requireCondition(installedContentTreeSha256 === configuration.generatedSkill.content_tree_sha256, "GENERATED_SKILL_INSTALLED_TREE_DRIFT", "FAIL", "CONTRACT");
+  const receipt = {
+    schema_version: 1,
+    status: "PASS",
+    registration_id: configuration.generatedSkill.registration_id,
+    skill_name: configuration.generatedSkill.skill_name,
+    tree_digest: configuration.generatedSkill.tree_digest,
+    package_digest: configuration.generatedSkill.package_digest,
+    registration_sha256: configuration.generatedSkill.registration_sha256,
+    package_tree_sha256: configuration.generatedSkill.package_tree_sha256,
+    combined_sha256: configuration.generatedSkill.combined_sha256,
+    content_tree_sha256: configuration.generatedSkill.content_tree_sha256,
+    generation_receipt_sha256: configuration.generatedSkill.generation_receipt_sha256,
+    installed_content_tree_sha256: installedContentTreeSha256,
+    source_wiki_sha256: configuration.generatedSkill.source_wiki_sha256,
+    mount: "/run/generated-specialized-skill",
+    installed_root: installedRoot,
+    container: containerName,
+  };
+  writeNew(path.join(configuration.attemptRoot, "payload", "stages", stageId, "generated-skill-install.json"), receipt);
+  state.generated_skill = {
+    registration_id: receipt.registration_id,
+    skill_name: receipt.skill_name,
+    tree_digest: receipt.tree_digest,
+    package_digest: receipt.package_digest,
+    registration_sha256: receipt.registration_sha256,
+    package_tree_sha256: receipt.package_tree_sha256,
+    combined_sha256: receipt.combined_sha256,
+    content_tree_sha256: receipt.content_tree_sha256,
+    generation_receipt_sha256: receipt.generation_receipt_sha256,
+    installed_content_tree_sha256: receipt.installed_content_tree_sha256,
+    source_wiki_sha256: receipt.source_wiki_sha256,
+  };
+  atomicState(configuration.statePath, state);
+  return receipt;
+}
+
 async function initializeContainer(configuration, state, containerName, mode, stageId) {
   const receipt = `/evidence/stages/${stageId}/container-init.json`;
+  const generatedSkillInstall = await installGeneratedSkill(configuration, state, containerName, stageId);
   await docker(configuration.dockerContext, [
     "exec", containerName,
     "sh", "/test-flow-runtime/initialize-container.sh",
@@ -1269,22 +2154,32 @@ async function initializeContainer(configuration, state, containerName, mode, st
     "CONTAINER_INIT_RECEIPT_INVALID",
   );
   requireCondition(
-    caseReceipt?.schema_version === 1
+    caseReceipt?.schema_version === 2
       && caseReceipt.status === "PASS"
       && caseReceipt.case_id === configuration.releaseCase.case_id
       && caseReceipt.scenario_id === configuration.releaseCase.scenario_id
-      && caseReceipt.skill_id === configuration.releaseCase.skill.id
-      && caseReceipt.skill_product_digest === configuration.releaseCase.skill.product_digest
+      && caseReceipt.registration_id === configuration.generatedSkill.registration_id
+      && caseReceipt.skill_name === configuration.generatedSkill.skill_name
+      && caseReceipt.runtime_ref_id === configuration.releaseCase.skill.runtime_ref_id
+      && caseReceipt.version === configuration.releaseCase.skill.version
+      && caseReceipt.source_wiki_sha256 === configuration.generatedSkill.source_wiki_sha256
+      && caseReceipt.registration_sha256 === configuration.generatedSkill.registration_sha256
+      && caseReceipt.package_tree_sha256 === configuration.generatedSkill.package_tree_sha256
+      && caseReceipt.combined_sha256 === configuration.generatedSkill.combined_sha256
       && caseReceipt.logparse_product === configuration.releaseCase.logparse_product
-      && caseReceipt.archive_projection === "logparse-current-loose-diagnostic-v2"
+      && caseReceipt.attachment_requirement === configuration.releaseCase.skill.attachment_requirement
+      && caseReceipt.archive_projection === "frozen-raw-log-v1"
       && Number.isSafeInteger(caseReceipt.logparse_config_size)
       && caseReceipt.logparse_config_size > 0
       && SHA256.test(caseReceipt.logparse_config_sha256)
       && caseReceipt.logparse_config_sha256 === initialization.logparse_config_sha256
       && typeof caseReceipt.archive_name === "string"
+      && caseReceipt.archive_content_type === "application/zip"
       && Number.isSafeInteger(caseReceipt.archive_size)
       && caseReceipt.archive_size > 0
-      && SHA256.test(caseReceipt.archive_sha256),
+      && SHA256.test(caseReceipt.archive_sha256)
+      && Number.isSafeInteger(caseReceipt.archive_member_count)
+      && caseReceipt.archive_member_count > 0,
     "RELEASE_CASE_RECEIPT_INVALID",
   );
   state.release_case = {
@@ -1293,6 +2188,9 @@ async function initializeContainer(configuration, state, containerName, mode, st
     input_digest: configuration.releaseCase.input_digest,
     oracle_digest: configuration.releaseCase.oracle_digest,
     skill_id: configuration.releaseCase.skill.id,
+    registration_id: caseReceipt.registration_id,
+    skill_name: caseReceipt.skill_name,
+    combined_sha256: caseReceipt.combined_sha256,
     logparse_product: caseReceipt.logparse_product,
     logparse_config_sha256: caseReceipt.logparse_config_sha256,
   };
@@ -1304,19 +2202,21 @@ async function initializeContainer(configuration, state, containerName, mode, st
     member_count: caseReceipt.archive_member_count,
   };
   atomicState(configuration.statePath, state);
-  return { initialization, caseReceipt };
+  return { initialization, caseReceipt, generatedSkillInstall };
 }
 
 async function createContainer(configuration, state, containerName, mode, stageId, register = true) {
   if (register) appendResource(configuration.resourceRegistry, configuration.attemptRoot, "container", containerName, configuration.resourceLabel);
+  const networkArguments = configuration.topology === DUAL_LINUX_TOPOLOGY
+    ? ["--network", state.network, "--network-alias", "problem-locator-server"]
+    : ["--network", "bridge", "--publish", `127.0.0.1:${state.port}:8000/tcp`];
   await docker(configuration.dockerContext, [
     "run", "--detach", "--init",
     "--name", containerName,
     "--label", configuration.resourceLabel,
     "--pull", "never",
     "--platform", "linux/amd64",
-    "--network", "bridge",
-    "--publish", `127.0.0.1:${state.port}:8000/tcp`,
+    ...networkArguments,
     "--env", `E2E_RUN_ID=${state.run_id}`,
     "--env", `E2E_PUBLIC_BASE_URL=${state.public_base_url}`,
     "--env", `TEST_FLOW_SERVICE_MODEL=${RELEASE_MODEL}`,
@@ -1332,6 +2232,7 @@ async function createContainer(configuration, state, containerName, mode, stageI
     "--mount", `type=bind,src=${configuration.containerClaudeSettings},dst=/run/host-claude-settings.json,readonly`,
     "--mount", `type=bind,src=${path.join(configuration.repoRoot, ".claude", "skills", "logparse-diagnose")},dst=/run/plagent-claude/.claude/skills/logparse-diagnose,readonly`,
     "--mount", `type=bind,src=${path.join(configuration.repoRoot, "tools", "test-flow", "runtime-support")},dst=/test-flow-runtime,readonly`,
+    "--mount", `type=bind,src=${configuration.generatedSkill.root},dst=/run/generated-specialized-skill,readonly`,
     "--mount", `type=bind,src=${path.join(configuration.attemptRoot, "payload")},dst=/evidence`,
     "--mount", `type=volume,src=${state.volume},dst=/var/lib/problem-locator`,
     state.image_id,
@@ -1341,26 +2242,154 @@ async function createContainer(configuration, state, containerName, mode, stageI
   atomicState(configuration.statePath, state);
 }
 
+async function createLinuxClientContainer(configuration, state) {
+  const runtime = ensureClientRuntime(configuration, state);
+  const clientUser = linuxClientUserIdentity();
+  appendResource(configuration.resourceRegistry, configuration.attemptRoot, "container", state.client_container, configuration.resourceLabel);
+  await docker(configuration.dockerContext, [
+    "run", "--detach", "--init",
+    "--name", state.client_container,
+    "--label", configuration.resourceLabel,
+    "--user", clientUser.docker_user,
+    "--pull", "never",
+    "--platform", "linux/amd64",
+    "--network", state.network,
+    "--network-alias", "problem-locator-client",
+    "--read-only",
+    "--env", `HOME=${LINUX_CLIENT_HOME}`,
+    "--env", "NO_PROXY=problem-locator-server,problem-locator-client,127.0.0.1,localhost",
+    "--env", "no_proxy=problem-locator-server,problem-locator-client,127.0.0.1,localhost",
+    "--shm-size", "1073741824",
+    "--tmpfs", "/tmp:rw,exec,nosuid,nodev,mode=1777,size=1073741824",
+    "--tmpfs", `/client-home:rw,noexec,nosuid,nodev,mode=0700,uid=${clientUser.uid},gid=${clientUser.gid},size=536870912`,
+    "--mount", `type=bind,src=${configuration.repoRoot},dst=/workspace,readonly`,
+    "--mount", `type=bind,src=${runtime.runtimeRoot},dst=/client-runtime`,
+    state.client_image_id,
+    "sleep", "infinity",
+  ]);
+  state.selected_client_runtime_observed = await probeLinuxClientRuntime(configuration, state);
+}
+
+async function probeLinuxClientRuntime(configuration, state) {
+  const runtimeProbe = await docker(configuration.dockerContext, [
+    "exec", state.client_container,
+    "/usr/bin/node", "-e",
+    `const crypto=require("node:crypto");const fs=require("node:fs");const cp=require("node:child_process");
+const digest=(file)=>crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
+const home=process.env.HOME??null;
+let homeWritable=false;
+let homeRealpath=null;
+if(home){homeRealpath=fs.realpathSync(home);const probe=home+"/.test-flow-home-"+process.pid+"-"+crypto.randomUUID();fs.writeFileSync(probe,"",{flag:"wx",mode:0o600});fs.unlinkSync(probe);homeWritable=true;}
+process.stdout.write(JSON.stringify({
+  uid:typeof process.getuid==="function"?process.getuid():null,
+  gid:typeof process.getgid==="function"?process.getgid():null,
+  home,
+  home_realpath:homeRealpath,
+  home_writable:homeWritable,
+  node_version:process.version,
+  node_architecture:process.arch,
+  node_executable:fs.realpathSync(process.execPath),
+  node_sha256:digest(process.execPath),
+  claude_cli_sha256:digest("/opt/claude-code/cli.js"),
+  claude_version:cp.execFileSync("/usr/local/bin/claude",["--version"],{encoding:"utf8"}).trim(),
+  headless_shell_sha256:digest("/opt/chrome-headless-shell/chrome-headless-shell"),
+  headless_shell_version:cp.execFileSync("/opt/chrome-headless-shell/chrome-headless-shell",["--version"],{encoding:"utf8"}).trim(),
+}));`,
+  ], { forward: false });
+  const runtimeIdentity = JSON.parse(runtimeProbe.stdout);
+  requireCondition(
+    Number.isSafeInteger(runtimeIdentity.uid)
+      && runtimeIdentity.uid > 0
+      && Number.isSafeInteger(runtimeIdentity.gid)
+      && runtimeIdentity.gid >= 0
+      && runtimeIdentity.home === LINUX_CLIENT_HOME
+      && runtimeIdentity.home_realpath === LINUX_CLIENT_HOME
+      && runtimeIdentity.home_writable === true
+      && /^v\d+\./.test(runtimeIdentity.node_version ?? "")
+      && runtimeIdentity.node_architecture === "x64"
+      && path.isAbsolute(runtimeIdentity.node_executable ?? "")
+      && SHA256.test(runtimeIdentity.node_sha256 ?? "")
+      && runtimeIdentity.claude_cli_sha256 === RELEASE_CLAUDE_CLI_SHA256
+      && runtimeIdentity.claude_version === RELEASE_CLAUDE_VERSION_OUTPUT
+      && runtimeIdentity.headless_shell_sha256 === RELEASE_CHROME_HEADLESS_SHELL_EXECUTABLE_SHA256
+      && runtimeIdentity.headless_shell_version === RELEASE_CHROME_HEADLESS_SHELL_VERSION_OUTPUT,
+    "LINUX_CLIENT_RUNTIME_IDENTITY_DRIFT",
+    "BLOCKED",
+    "INFRA",
+  );
+  return {
+    schema_version: 1,
+    status: "PASS",
+    platform: "linux/amd64",
+    image_id: state.client_image_id,
+    identity_boundary: "client-image-id",
+    user: { uid: runtimeIdentity.uid, gid: runtimeIdentity.gid, root: false },
+    node: {
+      version: runtimeIdentity.node_version,
+      architecture: runtimeIdentity.node_architecture,
+      executable: runtimeIdentity.node_executable,
+      sha256: runtimeIdentity.node_sha256,
+    },
+    claude: { version: runtimeIdentity.claude_version, cli_sha256: runtimeIdentity.claude_cli_sha256 },
+    headless_shell: {
+      product: RELEASE_CHROME_HEADLESS_SHELL_PRODUCT,
+      version: runtimeIdentity.headless_shell_version,
+      executable_sha256: runtimeIdentity.headless_shell_sha256,
+    },
+  };
+}
+
 async function createFreshEnvironment(configuration, stageRoot, runtimeIdentity) {
   requireCondition(configuration.freshDataRoot, "FRESH_DATA_ROOT_FLAG_REQUIRED", "BLOCKED", "INFRA");
   requireCondition(!fs.existsSync(configuration.statePath), "ADAPTER_STATE_ALREADY_EXISTS");
   const runId = path.basename(configuration.attemptRoot);
-  const port = await availablePort();
+  const dualLinuxContainers = configuration.topology === DUAL_LINUX_TOPOLOGY;
+  const port = dualLinuxContainers ? null : await availablePort();
   const imageInspect = await docker(configuration.dockerContext, ["image", "inspect", configuration.baseImage], { forward: false });
   const imageMetadata = JSON.parse(imageInspect.stdout)[0];
   requireCondition(imageMetadata?.Os === "linux" && imageMetadata?.Architecture === "amd64" && typeof imageMetadata?.Id === "string", "RELEASE_IMAGE_IDENTITY_INVALID", "BLOCKED", "INFRA");
+  if (configuration.expectedServerImageId) requireCondition(imageMetadata.Id === configuration.expectedServerImageId, "RELEASE_SERVER_IMAGE_ID_DRIFT", "BLOCKED", "INFRA");
+  let clientImageMetadata = null;
+  if (dualLinuxContainers) {
+    const clientImageInspect = await docker(configuration.dockerContext, ["image", "inspect", RELEASE_CLIENT_IMAGE], { forward: false });
+    clientImageMetadata = JSON.parse(clientImageInspect.stdout)[0];
+    const labels = clientImageMetadata?.Config?.Labels ?? {};
+    requireCondition(
+      clientImageMetadata?.Os === "linux"
+        && clientImageMetadata?.Architecture === "amd64"
+        && typeof clientImageMetadata?.Id === "string"
+        && clientImageMetadata.Id === configuration.expectedClientImageId
+        && labels["problem-locator.e2e.role"] === "linux-client"
+        && labels["problem-locator.e2e.claude"] === `npm-${RELEASE_CLAUDE_VERSION}`
+        && labels["problem-locator.e2e.chrome-headless-shell-version"] === RELEASE_CHROME_HEADLESS_SHELL_VERSION
+        && labels["problem-locator.e2e.chrome-headless-shell-sha256"] === RELEASE_CHROME_HEADLESS_SHELL_EXECUTABLE_SHA256
+        && labels["problem-locator.e2e.chrome-headless-shell-archive-sha256"] === RELEASE_CHROME_HEADLESS_SHELL_ARCHIVE_SHA256,
+      "RELEASE_CLIENT_IMAGE_IDENTITY_INVALID",
+      "BLOCKED",
+      "INFRA",
+    );
+  }
   const state = {
     schema_version: 1,
     run_id: runId,
     volume: safeName("pltf-data", runId),
+    network: dualLinuxContainers ? safeName("pltf-net", runId) : null,
+    client_container: dualLinuxContainers ? safeName("pltf-client", runId) : null,
     initial_container: safeName("pltf-server", runId, "initial"),
     restart_container: safeName("pltf-server", runId, "restart"),
     active_container: null,
     current_instance: null,
     port,
-    public_base_url: `http://127.0.0.1:${port}`,
+    public_base_url: dualLinuxContainers ? "http://problem-locator-server:8000" : `http://127.0.0.1:${port}`,
     image_id: imageMetadata.Id,
+    client_image_id: clientImageMetadata?.Id ?? null,
+    topology: configuration.topology,
+    runtime_images: {
+      server_image_id: configuration.expectedServerImageId,
+      client_image_id: dualLinuxContainers ? configuration.expectedClientImageId : null,
+    },
     runtime_identity: runtimeIdentity,
+    selected_client_runtime_observed: null,
     request_ids: {
       create: `${configuration.client}-${sha256Bytes(runId).slice(0, 12)}-create-v1`,
       prepare: `${configuration.client}-${sha256Bytes(runId).slice(0, 12)}-prepare-v1`,
@@ -1371,13 +2400,63 @@ async function createFreshEnvironment(configuration, stageRoot, runtimeIdentity)
     audited_service_job_ids: [],
     usage: zeroUsage(),
   };
+  if (dualLinuxContainers) {
+    appendResource(configuration.resourceRegistry, configuration.attemptRoot, "network", state.network, configuration.resourceLabel);
+    await docker(configuration.dockerContext, ["network", "create", "--label", configuration.resourceLabel, state.network]);
+  }
   appendResource(configuration.resourceRegistry, configuration.attemptRoot, "volume", state.volume, configuration.resourceLabel);
   await docker(configuration.dockerContext, ["volume", "create", "--label", configuration.resourceLabel, state.volume]);
+  if (dualLinuxContainers) await createLinuxClientContainer(configuration, state);
   await createContainer(configuration, state, state.initial_container, "fresh", configuration.stage, true);
   await docker(configuration.dockerContext, ["exec", state.active_container, "sh", "-eu", "-c", "test -z \"$(find /var/lib/problem-locator -mindepth 1 -print -quit)\""]);
   const volumeInspect = await docker(configuration.dockerContext, ["volume", "inspect", state.volume], { forward: false });
   const volumeMetadata = JSON.parse(volumeInspect.stdout)[0];
   requireCondition(volumeMetadata.Labels?.["problem-locator.test-flow.run"] === runId, "FRESH_VOLUME_LABEL_MISMATCH");
+  let topologyAdmission = null;
+  if (dualLinuxContainers) {
+    const [clientInspect, serverInspect, networkInspect] = await Promise.all([
+      docker(configuration.dockerContext, ["container", "inspect", state.client_container], { forward: false }),
+      docker(configuration.dockerContext, ["container", "inspect", state.initial_container], { forward: false }),
+      docker(configuration.dockerContext, ["network", "inspect", state.network], { forward: false }),
+    ]);
+    const clientMetadata = JSON.parse(clientInspect.stdout)[0];
+    const serverMetadata = JSON.parse(serverInspect.stdout)[0];
+    const networkMetadata = JSON.parse(networkInspect.stdout)[0];
+    const clientAddress = clientMetadata.NetworkSettings?.Networks?.[state.network]?.IPAddress;
+    const serverAddress = serverMetadata.NetworkSettings?.Networks?.[state.network]?.IPAddress;
+    const serverPortBindings = serverMetadata.HostConfig?.PortBindings ?? {};
+    const serverPublishedPorts = serverMetadata.NetworkSettings?.Ports ?? {};
+    const forbiddenDockerSocket = [...(clientMetadata.Mounts ?? []), ...(serverMetadata.Mounts ?? [])]
+      .some((mount) => mount.Source === "/var/run/docker.sock" || mount.Destination === "/var/run/docker.sock");
+    const clientHomeBindings = (clientMetadata.Config?.Env ?? []).filter((entry) => entry === `HOME=${LINUX_CLIENT_HOME}`);
+    requireCondition(
+      networkMetadata.Labels?.["problem-locator.test-flow.run"] === runId
+        && typeof clientAddress === "string" && clientAddress.length > 0
+        && typeof serverAddress === "string" && serverAddress.length > 0
+        && clientAddress !== serverAddress
+        && Object.keys(serverPortBindings).length === 0
+        && Object.values(serverPublishedPorts).every((binding) => binding === null)
+        && clientHomeBindings.length === 1
+        && forbiddenDockerSocket === false,
+      "DUAL_LINUX_TOPOLOGY_INVALID",
+      "BLOCKED",
+      "INFRA",
+    );
+    topologyAdmission = {
+      schema_version: 1,
+      status: "PASS",
+      orchestrator: process.platform,
+      client: { platform: "linux/amd64", image_id: state.client_image_id, container: state.client_container, address: clientAddress, runtime: state.selected_client_runtime_observed },
+      server: { platform: "linux/amd64", image_id: state.image_id, container: state.initial_container, address: serverAddress, published_ports: [] },
+      network: state.network,
+      endpoint: state.public_base_url,
+      docker_socket_mounted: false,
+    };
+    writeNew(path.join(stageRoot, "dual-linux-topology.json"), topologyAdmission);
+  }
+  const browserCapability = dualLinuxContainers
+    ? await probeLinuxClientBrowserCapability(configuration, state, stageRoot)
+    : null;
   const freshAdmission = {
     schema_version: 1,
     status: "PASS",
@@ -1388,6 +2467,9 @@ async function createFreshEnvironment(configuration, stageRoot, runtimeIdentity)
     server_os: "linux",
     server_architecture: "x86_64",
     platform: "linux/amd64",
+    topology: configuration.topology,
+    topology_receipt: topologyAdmission ? "dual-linux-topology.json" : null,
+    browser_capability_receipt: browserCapability ? "linux-client-browser-capability.json" : null,
   };
   writeNew(path.join(stageRoot, "fresh-admission.json"), freshAdmission);
   await initializeContainer(configuration, state, state.initial_container, "fresh", configuration.stage);
@@ -1395,7 +2477,7 @@ async function createFreshEnvironment(configuration, stageRoot, runtimeIdentity)
   atomicState(configuration.statePath, state);
   await startService(configuration, state, "route", { allowEmptyJourney: true });
   const dfxProbe = await runServerDfxProbe(configuration, state);
-  return { state, freshAdmission, dfxProbe };
+  return { state, freshAdmission, dfxProbe, browserCapability };
 }
 
 function exportedJobs(exported) {
@@ -1561,7 +2643,7 @@ function addUsage(state, usage) {
   state.usage = sumUsage([state.usage, usage]);
 }
 
-function validSuccessfulInvocationReceipt(invocation) {
+export function validSuccessfulInvocationReceipt(invocation) {
   return invocation?.schema_version === 3
     && invocation.usage_complete === true
     && isCompleteUsage(invocation.usage)
@@ -1572,11 +2654,78 @@ function validSuccessfulInvocationReceipt(invocation) {
     && invocation.wrapper_outcome?.code === null;
 }
 
-function hostInvocation(phase, audit, caps) {
+function validServiceAgentInvocationReceipt(invocation) {
+  return validSuccessfulInvocationReceipt(invocation)
+    && typeof invocation.job_id === "string"
+    && UUID.test(invocation.job_id);
+}
+
+function validMethodsPreflightReceipt(receipt) {
+  return receipt?.schema_version === 2
+    && canonicalJson(Object.keys(receipt).sort()) === canonicalJson([
+      "schema_version", "kind", "job_id", "job_type", "result_type",
+      "registration_id", "decision_audit_absent", "model_invoked", "log_pair",
+      "job_sha256", "job_outcome_sha256", "methods_preflight_sha256",
+    ].sort())
+    && receipt.kind === "methods-server-preflight"
+    && typeof receipt.job_id === "string"
+    && receipt.job_type === "DIAGNOSE"
+    && ["NEED_INPUT", "NEED_ATTACHMENT"].includes(receipt.result_type)
+    && typeof receipt.registration_id === "string"
+    && receipt.decision_audit_absent === true
+    && receipt.model_invoked === false
+    && receipt.log_pair === "ABSENT"
+    && [
+      receipt.job_sha256,
+      receipt.job_outcome_sha256,
+      receipt.methods_preflight_sha256,
+    ].every((digest) => /^[a-f0-9]{64}$/.test(digest));
+}
+
+export function validServiceAgentUsageReceipt(receipt) {
+  if (
+    canonicalJson(Object.keys(receipt ?? {}).sort()) !== canonicalJson([
+      "schema_version", "status", "usage_complete", "token_formula",
+      "invocations", "no_model_jobs", "new_job_ids",
+    ].sort())
+    || receipt.schema_version !== 3
+    || receipt.status !== "PASS"
+    || receipt.usage_complete !== true
+    || receipt.token_formula !== TOKEN_USAGE_FORMULA
+    || !Array.isArray(receipt.invocations)
+    || !receipt.invocations.every(validServiceAgentInvocationReceipt)
+    || !Array.isArray(receipt.no_model_jobs)
+    || !receipt.no_model_jobs.every(validMethodsPreflightReceipt)
+    || !Array.isArray(receipt.new_job_ids)
+    || !receipt.new_job_ids.every((jobId) => typeof jobId === "string" && UUID.test(jobId))
+  ) return false;
+  const invocationJobIds = receipt.invocations.map((invocation) => invocation.job_id);
+  const noModelJobIds = receipt.no_model_jobs.map((preflight) => preflight.job_id);
+  if (new Set(noModelJobIds).size !== noModelJobIds.length) return false;
+  if (invocationJobIds.some((jobId) => noModelJobIds.includes(jobId))) return false;
+  const expectedJobIds = [...new Set([...invocationJobIds, ...noModelJobIds])].sort();
+  return canonicalJson(receipt.new_job_ids) === canonicalJson(expectedJobIds);
+}
+
+export function validRouteMethodsPreflightEvidence(
+  receipts,
+  { registrationId, expectedJobId },
+) {
+  if (!Array.isArray(receipts) || receipts.length !== 1) return false;
+  const [receipt] = receipts;
+  return validMethodsPreflightReceipt(receipt)
+    && receipt.result_type === "NEED_ATTACHMENT"
+    && receipt.registration_id === registrationId
+    && receipt.job_id === expectedJobId;
+}
+
+function clientInvocation(configuration, phase, audit, caps) {
+  const containerClient = configuration.topology === DUAL_LINUX_TOPOLOGY;
   return {
     schema_version: 3,
-    invocation_id: `host-client:${phase}`,
-    class: "host-client",
+    invocation_id: `${containerClient ? "linux-client-container" : "host-client"}:${phase}`,
+    class: containerClient ? "linux-client-container" : "host-client",
+    execution_topology: containerClient ? "darwin-orchestrated-linux-container" : "native-host-client",
     effective_model: audit.init.effective_model,
     effective_caps: caps,
     usage_complete: true,
@@ -1587,7 +2736,7 @@ function hostInvocation(phase, audit, caps) {
     hard_cap_enforcement: {
       turns: "claude-cli",
       cost_usd: "claude-cli",
-      hard_timeout_seconds: "host-process-watchdog",
+      hard_timeout_seconds: containerClient ? "container-cli-timeout-plus-orchestrator-watchdog" : "host-process-watchdog",
       total_tokens: `terminal-usage-postcondition:${TOKEN_USAGE_FORMULA}`,
     },
   };
@@ -1610,21 +2759,172 @@ async function auditServiceAgentUsage(configuration, state, instance) {
   await docker(configuration.dockerContext, args);
   const receipt = readJson(path.join(configuration.stageRoot, `service-agent-usage-${instance}.json`));
   requireCondition(
-    receipt?.schema_version === 3
-      && receipt.status === "PASS"
-      && receipt.usage_complete === true
-      && receipt.token_formula === TOKEN_USAGE_FORMULA
-      && Array.isArray(receipt.invocations)
-      && receipt.invocations.every(validSuccessfulInvocationReceipt)
-      && Array.isArray(receipt.new_job_ids),
+    validServiceAgentUsageReceipt(receipt),
     "SERVICE_AGENT_USAGE_RECEIPT_INVALID",
   );
   state.audited_service_job_ids = [...new Set([...(state.audited_service_job_ids ?? []), ...receipt.new_job_ids])].sort();
   atomicState(configuration.statePath, state);
-  return receipt.invocations;
+  return { invocations: receipt.invocations, noModelJobs: receipt.no_model_jobs };
 }
 
-function stageReceipt(configuration, value) {
+async function captureMethodsGroundingOracle(configuration, state, serviceInvocations) {
+  const diagnosisJobIds = [...new Set(serviceInvocations
+    .filter((invocation) => invocation.job_type === "DIAGNOSE")
+    .map((invocation) => invocation.job_id))];
+  requireCondition(
+    diagnosisJobIds.length === 1 && UUID.test(diagnosisJobIds[0] ?? ""),
+    "METHODS_ORACLE_DIAGNOSE_JOB_ID_INVALID",
+    "FAIL",
+    "CONTRACT",
+  );
+  const diagnosisJobId = diagnosisJobIds[0];
+  const files = [
+    ["job.json", "methods-diagnose-job.json"],
+    ["method-grounding-audit.json", "methods-grounding-audit.json"],
+    ["methods_logparse_receipt.json", "methods-logparse-receipt.json"],
+  ];
+  for (const [sourceName, destinationName] of files) {
+    const destination = path.join(configuration.stageRoot, destinationName);
+    requireCondition(!fs.existsSync(destination), "METHODS_ORACLE_CAPTURE_ALREADY_EXISTS");
+    const copied = await run("docker", dockerArgs(configuration.dockerContext, [
+      "cp",
+      `${state.active_container}:/var/lib/problem-locator/jobs/${diagnosisJobId}/${sourceName}`,
+      destination,
+    ]), { forward: false });
+    requireCondition(copied.status === 0, "METHODS_ORACLE_EXECUTION_RECORD_MISSING", "FAIL", "CONTRACT");
+    const metadata = fs.lstatSync(destination);
+    requireCondition(metadata.isFile() && !metadata.isSymbolicLink() && metadata.nlink === 1 && metadata.size > 0, "METHODS_ORACLE_CAPTURE_INVALID", "FAIL", "CONTRACT");
+  }
+  let summary;
+  try {
+    summary = validateMethodsGroundingExecutionRecord({
+      jobBytes: fs.readFileSync(path.join(configuration.stageRoot, "methods-diagnose-job.json")),
+      auditBytes: fs.readFileSync(path.join(configuration.stageRoot, "methods-grounding-audit.json")),
+      logparseReceiptBytes: fs.readFileSync(path.join(configuration.stageRoot, "methods-logparse-receipt.json")),
+      expected: {
+        diagnosis_job_id: diagnosisJobId,
+        case_id: state.case_id,
+        skill_ref: {
+          id: configuration.releaseCase.skill.runtime_ref_id,
+          version: configuration.releaseCase.skill.version,
+          content_hash: configuration.releaseCase.skill.content_hash,
+        },
+        logparse_product: configuration.releaseCase.logparse_product,
+        registration_id: configuration.generatedSkill.registration_id,
+        registration_sha256: configuration.generatedSkill.registration_sha256,
+        package_tree_sha256: configuration.generatedSkill.package_tree_sha256,
+        combined_sha256: configuration.generatedSkill.combined_sha256,
+        status: configuration.releaseCase.result_expectation.expected_methods_status,
+        confirmed_methods: configuration.releaseCase.result_expectation.confirmed_method_ids,
+        known_method_ids: configuration.generatedSkill.methods.methods.map((method) => method.id),
+        source_ids: configuration.releaseCase.driver.attachment_anchor_names,
+        evidence_count: configuration.releaseCase.result_expectation.required_evidence_identities.length,
+      },
+    });
+  } catch (error) {
+    throw new StageError(error?.code ?? "METHODS_ORACLE_VALIDATION_FAILED", "FAIL", "CONTRACT");
+  }
+  writeNew(path.join(configuration.stageRoot, "methods-grounding-oracle.json"), summary);
+  return summary;
+}
+
+async function verifyRuntimeResources(configuration, state) {
+  const dualLinuxContainers = configuration.topology === DUAL_LINUX_TOPOLOGY;
+  const runId = path.basename(configuration.attemptRoot);
+  requireCondition(
+    state.active_container
+      && state.image_id === configuration.expectedServerImageId
+      && state.runtime_images?.server_image_id === configuration.expectedServerImageId
+      && state.runtime_images?.client_image_id === (dualLinuxContainers ? configuration.expectedClientImageId : null),
+    "SERVER_RUNTIME_STATE_INVALID",
+    "BLOCKED",
+    "INFRA",
+  );
+  if (dualLinuxContainers) {
+    requireCondition(state.client_container && state.network, "DUAL_LINUX_RUNTIME_STATE_INVALID", "BLOCKED", "INFRA");
+  }
+  const inspections = await Promise.all([
+    docker(configuration.dockerContext, ["container", "inspect", state.active_container], { forward: false }),
+    docker(configuration.dockerContext, ["image", "inspect", configuration.expectedServerImageId], { forward: false }),
+    ...(dualLinuxContainers ? [
+      docker(configuration.dockerContext, ["container", "inspect", state.client_container], { forward: false }),
+      docker(configuration.dockerContext, ["image", "inspect", configuration.expectedClientImageId], { forward: false }),
+      docker(configuration.dockerContext, ["network", "inspect", state.network], { forward: false }),
+    ] : []),
+  ]);
+  const server = JSON.parse(inspections[0].stdout)[0];
+  const serverImage = JSON.parse(inspections[1].stdout)[0];
+  requireCondition(
+    validServerRuntimeInspection({
+      topology: configuration.topology,
+      stageId: configuration.stage,
+      state,
+      expectedServerImageId: configuration.expectedServerImageId,
+      expectedRunId: runId,
+      server,
+      serverImage,
+    }),
+    "SERVER_RUNTIME_RESOURCE_DRIFT",
+    "BLOCKED",
+    "INFRA",
+  );
+
+  if (!dualLinuxContainers) {
+    return {
+      client_container: null,
+      server_container: state.active_container,
+      client_image_id: null,
+      server_image_id: server.Image,
+      network: null,
+      selected_client_runtime: null,
+    };
+  }
+
+  const client = JSON.parse(inspections[2].stdout)[0];
+  const clientImage = JSON.parse(inspections[3].stdout)[0];
+  const network = JSON.parse(inspections[4].stdout)[0];
+  const observedClientRuntime = await probeLinuxClientRuntime(configuration, state);
+  const clientAddress = client.NetworkSettings?.Networks?.[state.network]?.IPAddress;
+  const serverAddress = server.NetworkSettings?.Networks?.[state.network]?.IPAddress;
+  const clientHomeBindings = (client.Config?.Env ?? []).filter((entry) => entry === `HOME=${LINUX_CLIENT_HOME}`);
+  requireCondition(
+    state.client_image_id === configuration.expectedClientImageId
+      && client.Name === `/${state.client_container}`
+      && client.Image === configuration.expectedClientImageId
+      && client.Config?.Image === configuration.expectedClientImageId
+      && client.Config?.User === `${observedClientRuntime.user.uid}:${observedClientRuntime.user.gid}`
+      && client.Config?.Labels?.["problem-locator.test-flow.run"] === runId
+      && client.State?.Running === true
+      && clientImage?.Id === configuration.expectedClientImageId
+      && clientImage?.Os === "linux"
+      && clientImage?.Architecture === "amd64"
+      && network.Name === state.network
+      && network.Labels?.["problem-locator.test-flow.run"] === runId
+      && typeof clientAddress === "string" && clientAddress.length > 0
+      && typeof serverAddress === "string" && serverAddress.length > 0
+      && clientAddress !== serverAddress
+      && client.HostConfig?.ReadonlyRootfs === true
+      && clientHomeBindings.length === 1
+      && state.selected_client_runtime_observed !== null
+      && canonicalJson(observedClientRuntime) === canonicalJson(state.selected_client_runtime_observed)
+      && dockerSocketMounted(client.Mounts) === false,
+    "DUAL_LINUX_RUNTIME_RESOURCE_DRIFT",
+    "BLOCKED",
+    "INFRA",
+  );
+  return {
+    client_container: state.client_container,
+    server_container: state.active_container,
+    client_image_id: client.Image,
+    server_image_id: server.Image,
+    network: state.network,
+    selected_client_runtime: observedClientRuntime,
+  };
+}
+
+async function stageReceipt(configuration, value) {
+  const state = fs.existsSync(configuration.statePath) ? readJson(configuration.statePath) : null;
+  const runtimeResources = state ? await verifyRuntimeResources(configuration, state) : null;
   const receiptPath = path.join(configuration.stageRoot, "adapter-result.json");
   const invocations = value.invocations ?? [];
   requireCondition(
@@ -1634,13 +2934,31 @@ function stageReceipt(configuration, value) {
   const usage = value.usage ? normalizeUsage(value.usage) : sumUsage(invocations.map((invocation) => invocation.usage));
   const usageComplete = isCompleteUsage(usage);
   writeNew(receiptPath, {
+    ...value,
     schema_version: 3,
     stage_id: configuration.stage,
     gate_id: configuration.gateId,
     runtime_profile_digest: configuration.runtimeProfileDigest,
+    topology: configuration.topology,
+    runtime_images: {
+      server_image_id: configuration.expectedServerImageId,
+      client_image_id: configuration.topology === DUAL_LINUX_TOPOLOGY ? configuration.expectedClientImageId : null,
+    },
+    runtime_resources: runtimeResources,
+    generated_skill: {
+      registration_id: configuration.generatedSkill.registration_id,
+      skill_name: configuration.generatedSkill.skill_name,
+      tree_digest: configuration.generatedSkill.tree_digest,
+      package_digest: configuration.generatedSkill.package_digest,
+      registration_sha256: configuration.generatedSkill.registration_sha256,
+      package_tree_sha256: configuration.generatedSkill.package_tree_sha256,
+      combined_sha256: configuration.generatedSkill.combined_sha256,
+      content_tree_sha256: configuration.generatedSkill.content_tree_sha256,
+      generation_receipt_sha256: configuration.generatedSkill.generation_receipt_sha256,
+      source_wiki_sha256: configuration.generatedSkill.source_wiki_sha256,
+    },
     effective_caps: null,
     usage_complete: usageComplete,
-    ...value,
     invocations,
     usage,
   });
@@ -1678,6 +2996,7 @@ async function applyRestoredCheckpoint(configuration, state) {
   if (state.current_instance) {
     const discarded = await stopService(configuration, state, { indexLabel: "restore-discarded-route" });
     requireCondition(discarded.service_invocations.length === 0, "CHECKPOINT_RESTORE_FRESH_ENVIRONMENT_MODEL_ACTIVITY", "FAIL", "CONTRACT");
+    requireCondition(discarded.service_no_model_jobs.length === 0, "CHECKPOINT_RESTORE_FRESH_ENVIRONMENT_PREFLIGHT_ACTIVITY", "FAIL", "CONTRACT");
   }
   await docker(configuration.dockerContext, [
     "exec", state.active_container,
@@ -1749,6 +3068,10 @@ async function applyRestoredCheckpoint(configuration, state) {
 
 async function execute(configuration) {
   requireCondition(process.platform === configuration.expectedHostPlatform && configuration.client === configuration.expectedClient, "CROSS_JOB_ADAPTER_HOST_REQUIRED", "BLOCKED", "INFRA");
+  requireCondition(["host-client", DUAL_LINUX_TOPOLOGY].includes(configuration.topology), "CROSS_JOB_TOPOLOGY_INVALID", "BLOCKED", "INFRA");
+  if (configuration.topology === DUAL_LINUX_TOPOLOGY) {
+    requireCondition(process.platform === "darwin" && configuration.client === "linux" && configuration.dockerContext === "colima", "DUAL_LINUX_TOPOLOGY_HOST_INVALID", "BLOCKED", "INFRA");
+  }
   requireCondition(["release", "dev"].includes(configuration.track), "CROSS_JOB_ADAPTER_TRACK_UNSUPPORTED", "BLOCKED", "INFRA");
   if (configuration.expectedDockerContext !== "default") requireCondition(configuration.dockerContext === configuration.expectedDockerContext, "CROSS_JOB_ADAPTER_DOCKER_CONTEXT", "BLOCKED", "INFRA");
   requireCondition(configuration.sourceSnapshotDigest && configuration.sourceSnapshotManifest && configuration.logparseSource && configuration.mcpSource && configuration.claudeEntry && configuration.claudeSettings, "CROSS_JOB_ADAPTER_INPUT_MISSING", "BLOCKED", "INFRA");
@@ -1766,18 +3089,42 @@ async function execute(configuration) {
   }
 
   if (configuration.stage === "journey.cross-job.environment") {
-    const { state, freshAdmission, dfxProbe } = await createFreshEnvironment(configuration, configuration.stageRoot, runtimeIdentity);
+    const { state, freshAdmission, dfxProbe, browserCapability } = await createFreshEnvironment(configuration, configuration.stageRoot, runtimeIdentity);
     const terminalCorrespondence = configuration.terminalAfterStage ? await stopService(configuration, state) : null;
     const invocations = terminalCorrespondence?.service_invocations ?? [];
     requireCondition(invocations.length === 0, "ENVIRONMENT_UNEXPECTED_MODEL_INVOCATION", "FAIL", "CONTRACT");
-    stageReceipt(configuration, { status: "PASS", fresh_admission: freshAdmission, server_dfx_probe: dfxProbe, client_tool_calls: 0, server_tool_calls: 1, terminal_correspondence: terminalCorrespondence, checkpoint_ready: false, invocations });
+    requireCondition((terminalCorrespondence?.service_no_model_jobs ?? []).length === 0, "ENVIRONMENT_UNEXPECTED_PREFLIGHT_ACTIVITY", "FAIL", "CONTRACT");
+    await stageReceipt(configuration, { status: "PASS", fresh_admission: freshAdmission, server_dfx_probe: dfxProbe, browser_capability: browserCapability, client_tool_calls: 0, server_tool_calls: 1, terminal_correspondence: terminalCorrespondence, checkpoint_ready: false, invocations });
     return;
   }
 
   requireCondition(fs.existsSync(configuration.statePath), "ADAPTER_STATE_MISSING");
   const state = readJson(configuration.statePath);
   requireCondition(state.schema_version === 1 && state.run_id === path.basename(configuration.attemptRoot), "ADAPTER_STATE_INVALID");
+  requireCondition(state.topology === configuration.topology, "ADAPTER_TOPOLOGY_DRIFT", "BLOCKED", "INFRA");
+  requireCondition(
+    state.image_id === configuration.expectedServerImageId
+      && state.runtime_images?.server_image_id === configuration.expectedServerImageId
+      && state.runtime_images?.client_image_id === (configuration.topology === DUAL_LINUX_TOPOLOGY ? configuration.expectedClientImageId : null),
+    "ADAPTER_IMAGE_IDENTITY_DRIFT",
+    "BLOCKED",
+    "INFRA",
+  );
+  requireCondition(
+    state.generated_skill?.tree_digest === configuration.generatedSkill.tree_digest
+      && state.generated_skill?.registration_id === configuration.generatedSkill.registration_id
+      && state.generated_skill?.registration_sha256 === configuration.generatedSkill.registration_sha256
+      && state.generated_skill?.package_tree_sha256 === configuration.generatedSkill.package_tree_sha256
+      && state.generated_skill?.combined_sha256 === configuration.generatedSkill.combined_sha256
+      && state.generated_skill?.content_tree_sha256 === configuration.generatedSkill.content_tree_sha256
+      && state.generated_skill?.generation_receipt_sha256 === configuration.generatedSkill.generation_receipt_sha256
+      && state.generated_skill?.installed_content_tree_sha256 === configuration.generatedSkill.content_tree_sha256,
+    "GENERATED_SKILL_IDENTITY_DRIFT",
+    "BLOCKED",
+    "INFRA",
+  );
   requireCondition(canonicalJson(state.runtime_identity) === canonicalJson(runtimeIdentity), "RELEASE_RUNTIME_IDENTITY_DRIFT", "BLOCKED", "INFRA");
+  await verifyRuntimeResources(configuration, state);
   if (configuration.restoredDataRoot) await applyRestoredCheckpoint(configuration, state);
 
   if (configuration.stage === "journey.cross-job.route") {
@@ -1790,7 +3137,16 @@ async function execute(configuration) {
     atomicState(configuration.statePath, state);
     const correspondence = await stopService(configuration, state);
     const jobTypes = correspondence.service_invocations.map((invocation) => invocation.job_type).sort();
-    requireCondition(jobTypes.filter((item) => item === "ROUTE").length === 1 && jobTypes.includes("DIAGNOSE") && jobTypes.every((item) => ["DIAGNOSE", "ROUTE"].includes(item)), "ROUTE_SERVICE_AGENT_INVOCATIONS", "FAIL", "CONTRACT");
+    requireCondition(jobTypes.length === 1 && jobTypes[0] === "ROUTE", "ROUTE_SERVICE_AGENT_INVOCATIONS", "FAIL", "CONTRACT");
+    requireCondition(
+      validRouteMethodsPreflightEvidence(correspondence.service_no_model_jobs, {
+        registrationId: configuration.generatedSkill.registration_id,
+        expectedJobId: state.methods_preflight_job_id,
+      }),
+      "ROUTE_METHODS_PREFLIGHT_JOBS",
+      "FAIL",
+      "CONTRACT",
+    );
     const checkpoint = await createCheckpointSource(configuration, state, {
       case_id: state.case_id,
       attachment_id: state.attachment_id,
@@ -1798,8 +3154,8 @@ async function execute(configuration) {
       request_ids: Object.values(state.request_ids),
     });
     if (!configuration.terminalAfterStage) await startService(configuration, state, "upload");
-    const invocations = [hostInvocation("route", audit, configuration.hardCaps), ...correspondence.service_invocations];
-    stageReceipt(configuration, { status: "PASS", client_tool_calls: audit.records.length, server_tool_calls: correspondence.server_completed, checkpoint_ready: checkpoint.status === "PASS", invocations });
+    const invocations = [clientInvocation(configuration, "route", audit, configuration.hardCaps), ...correspondence.service_invocations];
+    await stageReceipt(configuration, { status: "PASS", client_tool_calls: audit.records.length, server_tool_calls: correspondence.server_completed, checkpoint_ready: checkpoint.status === "PASS", invocations });
     return;
   }
 
@@ -1809,6 +3165,7 @@ async function execute(configuration) {
     atomicState(configuration.statePath, state);
     const correspondence = await stopService(configuration, state);
     requireCondition(correspondence.service_invocations.length === 0, "UPLOAD_UNEXPECTED_MODEL_INVOCATION", "FAIL", "CONTRACT");
+    requireCondition(correspondence.service_no_model_jobs.length === 0, "UPLOAD_UNEXPECTED_PREFLIGHT_ACTIVITY", "FAIL", "CONTRACT");
     const checkpoint = await createCheckpointSource(configuration, state, {
       case_id: state.case_id,
       attachment_id: state.attachment_id,
@@ -1817,7 +3174,7 @@ async function execute(configuration) {
       request_ids: Object.values(state.request_ids),
     });
     if (!configuration.terminalAfterStage) await startService(configuration, state, "diagnose");
-    stageReceipt(configuration, { status: "PASS", client_tool_calls: 0, server_tool_calls: correspondence.server_completed, checkpoint_ready: checkpoint.status === "PASS", browser_upload: upload.browser_upload, invocations: [] });
+    await stageReceipt(configuration, { status: "PASS", client_tool_calls: 0, server_tool_calls: correspondence.server_completed, checkpoint_ready: checkpoint.status === "PASS", browser_upload: upload.browser_upload, invocations: [] });
     return;
   }
 
@@ -1837,7 +3194,18 @@ async function execute(configuration) {
     atomicState(configuration.statePath, state);
     const correspondence = await stopService(configuration, state);
     const jobTypes = correspondence.service_invocations.map((invocation) => invocation.job_type).sort();
-    requireCondition(jobTypes.includes("DIAGNOSE") && jobTypes.includes("REVIEW") && jobTypes.every((item) => ["DIAGNOSE", "REVIEW"].includes(item)), "DIAGNOSE_SERVICE_AGENT_INVOCATIONS", "FAIL", "CONTRACT");
+    requireCondition(
+      JSON.stringify(jobTypes) === JSON.stringify(["DIAGNOSE", "DIAGNOSE", "REVIEW"]),
+      "DIAGNOSE_SERVICE_AGENT_INVOCATIONS",
+      "FAIL",
+      "CONTRACT",
+    );
+    requireCondition(correspondence.service_no_model_jobs.length === 0, "DIAGNOSE_UNEXPECTED_PREFLIGHT_ACTIVITY", "FAIL", "CONTRACT");
+    const methodsGrounding = await captureMethodsGroundingOracle(
+      configuration,
+      state,
+      correspondence.service_invocations,
+    );
     const checkpoint = await createCheckpointSource(configuration, state, {
       case_id: state.case_id,
       attachment_id: state.attachment_id,
@@ -1846,8 +3214,8 @@ async function execute(configuration) {
       public_archive_id: state.public_result_archive.artifact_id,
       observed_statuses: state.observed_statuses,
     });
-    const invocations = [hostInvocation("diagnose", audit, configuration.hardCaps), ...correspondence.service_invocations];
-    stageReceipt(configuration, { status: "PASS", client_tool_calls: audit.records.length, server_tool_calls: correspondence.server_completed, checkpoint_ready: checkpoint.status === "PASS", browser_api: browserApi, invocations });
+    const invocations = [clientInvocation(configuration, "diagnose", audit, configuration.hardCaps), ...correspondence.service_invocations];
+    await stageReceipt(configuration, { status: "PASS", client_tool_calls: audit.records.length, server_tool_calls: correspondence.server_completed, checkpoint_ready: checkpoint.status === "PASS", browser_api: browserApi, methods_grounding: methodsGrounding, invocations });
     return;
   }
 
@@ -1869,6 +3237,7 @@ async function execute(configuration) {
     await downloadArtifacts(configuration, state, configuration.stageRoot);
     const correspondence = await stopService(configuration, state);
     requireCondition(correspondence.service_invocations.length === 0, "RESTART_UNEXPECTED_MODEL_INVOCATION", "FAIL", "CONTRACT");
+    requireCondition(correspondence.service_no_model_jobs.length === 0, "RESTART_UNEXPECTED_PREFLIGHT_ACTIVITY", "FAIL", "CONTRACT");
     const checkpoint = await createCheckpointSource(configuration, state, {
       case_id: state.case_id,
       resolved_case_revision: state.resolved_case_revision,
@@ -1877,13 +3246,14 @@ async function execute(configuration) {
       restart_verified: true,
     });
     writeNew(path.join(configuration.stageRoot, "client-server-correspondence.json"), { schema_version: 1, ...correspondence });
-    stageReceipt(configuration, { status: "PASS", client_tool_calls: audit.records.length, server_tool_calls: correspondence.server_completed, checkpoint_ready: checkpoint.status === "PASS", restart_verified: true, invocations: [hostInvocation("publish-restart", audit, configuration.hardCaps)] });
+    await stageReceipt(configuration, { status: "PASS", client_tool_calls: audit.records.length, server_tool_calls: correspondence.server_completed, checkpoint_ready: checkpoint.status === "PASS", restart_verified: true, invocations: [clientInvocation(configuration, "publish-restart", audit, configuration.hardCaps)] });
     return;
   }
 
   throw new StageError("CROSS_JOB_ADAPTER_STAGE_UNKNOWN");
 }
 
+async function main() {
 const parsed = parseArguments(process.argv.slice(2));
 const values = parsed.values;
 const configuration = {
@@ -1901,6 +3271,8 @@ const configuration = {
   logparseSource: values.logparse_source && path.resolve(values.logparse_source),
   mcpSource: values.mcp_source && path.resolve(values.mcp_source),
   baseImage: values.base_image,
+  expectedServerImageId: values.server_image_id,
+  expectedClientImageId: values.client_image_id,
   resourceRegistry: values.resource_registry && path.resolve(values.resource_registry),
   resourceLabel: values.resource_label,
   gateId: values.gate_id,
@@ -1916,6 +3288,8 @@ const configuration = {
   expectedClient: process.env.TEST_FLOW_FIRST_PARTY_CLIENT,
   expectedHostPlatform: process.env.TEST_FLOW_FIRST_PARTY_HOST_PLATFORM,
   expectedDockerContext: process.env.TEST_FLOW_FIRST_PARTY_DOCKER_CONTEXT,
+  topology: process.env.TEST_FLOW_FIRST_PARTY_TOPOLOGY,
+  generatedSkillRoot: values.generated_skill_root && path.resolve(values.generated_skill_root),
   hardCaps: values.max_turns ? {
     max_turns: Number(values.max_turns),
     max_total_tokens: Number(values.max_total_tokens),
@@ -1930,15 +3304,31 @@ const configuration = {
   },
 };
 configuration.statePath = configuration.attemptRoot && path.join(configuration.attemptRoot, "scratch", "cross-job", "state.json");
-configuration.stageRoot = configuration.attemptRoot && configuration.stage && path.join(configuration.attemptRoot, "payload", "stages", configuration.stage);
+configuration.stageRoot = configuration.attemptRoot && ADAPTER_STAGE_IDS.has(configuration.stage)
+  ? path.join(configuration.attemptRoot, "payload", "stages", configuration.stage)
+  : null;
 
 let receiptWritten = false;
 try {
-  for (const [name, value] of Object.entries({ stage: configuration.stage, gateId: configuration.gateId, runtimeProfileDigest: configuration.runtimeProfileDigest, expectedClient: configuration.expectedClient, expectedHostPlatform: configuration.expectedHostPlatform, expectedChromeVersion: configuration.expectedChromeVersion, expectedChromeSha256: configuration.expectedChromeSha256, repoRoot: configuration.repoRoot, attemptRoot: configuration.attemptRoot, sourceSnapshotDigest: configuration.sourceSnapshotDigest, sourceSnapshotManifest: configuration.sourceSnapshotManifest, resourceRegistry: configuration.resourceRegistry, resourceLabel: configuration.resourceLabel, baseImage: configuration.baseImage })) {
+  requireCondition(ADAPTER_STAGE_IDS.has(configuration.stage), "ADAPTER_STAGE_INVALID");
+  for (const [name, value] of Object.entries({ stage: configuration.stage, gateId: configuration.gateId, runtimeProfileDigest: configuration.runtimeProfileDigest, expectedClient: configuration.expectedClient, expectedHostPlatform: configuration.expectedHostPlatform, topology: configuration.topology, expectedChromeVersion: configuration.expectedChromeVersion, expectedChromeSha256: configuration.expectedChromeSha256, repoRoot: configuration.repoRoot, attemptRoot: configuration.attemptRoot, sourceSnapshotDigest: configuration.sourceSnapshotDigest, sourceSnapshotManifest: configuration.sourceSnapshotManifest, resourceRegistry: configuration.resourceRegistry, resourceLabel: configuration.resourceLabel, baseImage: configuration.baseImage, generatedSkillRoot: configuration.generatedSkillRoot })) {
     requireCondition(Boolean(value), `ADAPTER_REQUIRED_${name.toUpperCase()}`);
   }
-  const observedChrome = chromeIdentity();
-  requireCondition(observedChrome.status === "PRESENT" && observedChrome.version === configuration.expectedChromeVersion && observedChrome.executable_sha256 === configuration.expectedChromeSha256, "CHROME_IDENTITY_DRIFT", "BLOCKED", "INFRA");
+  requireCondition(/^sha256:[a-f0-9]{64}$/.test(configuration.expectedServerImageId ?? ""), "SERVER_IMAGE_ID_REQUIRED", "BLOCKED", "INFRA");
+  if (configuration.topology === DUAL_LINUX_TOPOLOGY) {
+    requireCondition(
+      configuration.expectedChromeVersion === RELEASE_CHROME_HEADLESS_SHELL_VERSION_OUTPUT
+        && configuration.expectedChromeSha256 === RELEASE_CHROME_HEADLESS_SHELL_EXECUTABLE_SHA256,
+      "CHROME_IDENTITY_DRIFT",
+      "BLOCKED",
+      "INFRA",
+    );
+    requireCondition(/^sha256:[a-f0-9]{64}$/.test(configuration.expectedClientImageId ?? ""), "DUAL_LINUX_IMAGE_IDS_REQUIRED", "BLOCKED", "INFRA");
+  } else {
+    const observedChrome = chromeIdentity();
+    requireCondition(observedChrome.status === "PRESENT" && observedChrome.version === configuration.expectedChromeVersion && observedChrome.executable_sha256 === configuration.expectedChromeSha256, "CHROME_IDENTITY_DRIFT", "BLOCKED", "INFRA");
+  }
+  configuration.generatedSkill = validateGeneratedSkillRoot(configuration.generatedSkillRoot, configuration.attemptRoot);
   if (configuration.hardCaps) {
     requireCondition(Number.isSafeInteger(configuration.hardCaps.max_turns) && configuration.hardCaps.max_turns > 0, "ADAPTER_MAX_TURNS_INVALID");
     requireCondition(Number.isSafeInteger(configuration.hardCaps.max_total_tokens) && configuration.hardCaps.max_total_tokens > 0, "ADAPTER_MAX_TOKENS_INVALID");
@@ -1949,7 +3339,7 @@ try {
   requireCondition(Number.isSafeInteger(configuration.serviceAgentCaps.max_total_tokens) && configuration.serviceAgentCaps.max_total_tokens > 0, "ADAPTER_SERVICE_MAX_TOKENS_INVALID");
   requireCondition(Number.isFinite(configuration.serviceAgentCaps.max_budget_usd) && configuration.serviceAgentCaps.max_budget_usd > 0, "ADAPTER_SERVICE_MAX_BUDGET_INVALID");
   requireCondition(Number.isSafeInteger(configuration.serviceAgentCaps.hard_timeout_seconds) && configuration.serviceAgentCaps.hard_timeout_seconds > 0, "ADAPTER_SERVICE_HARD_TIMEOUT_INVALID");
-  configuration.releaseCase = selectedReleaseCase(configuration.repoRoot);
+  configuration.releaseCase = selectedReleaseCase(configuration.repoRoot, configuration.generatedSkill);
   ensureDirectory(configuration.stageRoot);
   await execute(configuration);
   receiptWritten = true;
@@ -1972,11 +3362,29 @@ try {
           stage_id: configuration.stage ?? "unknown",
           gate_id: configuration.gateId ?? null,
           runtime_profile_digest: configuration.runtimeProfileDigest ?? null,
+          topology: configuration.topology ?? null,
+          runtime_images: {
+            server_image_id: configuration.expectedServerImageId ?? null,
+            client_image_id: configuration.topology === DUAL_LINUX_TOPOLOGY ? configuration.expectedClientImageId ?? null : null,
+          },
+          generated_skill: configuration.generatedSkill ? {
+            registration_id: configuration.generatedSkill.registration_id,
+            skill_name: configuration.generatedSkill.skill_name,
+            tree_digest: configuration.generatedSkill.tree_digest,
+            package_digest: configuration.generatedSkill.package_digest,
+            registration_sha256: configuration.generatedSkill.registration_sha256,
+            package_tree_sha256: configuration.generatedSkill.package_tree_sha256,
+            combined_sha256: configuration.generatedSkill.combined_sha256,
+            content_tree_sha256: configuration.generatedSkill.content_tree_sha256,
+            generation_receipt_sha256: configuration.generatedSkill.generation_receipt_sha256,
+            source_wiki_sha256: configuration.generatedSkill.source_wiki_sha256,
+          } : null,
           effective_caps: configuration.hardCaps,
           usage_complete: false,
           status: failure.status,
           failure_domain: failure.domain,
           code: failure.code,
+          browser_failure: failure.browserFailure,
           client_tool_calls: progress.client_tool_calls,
           server_tool_calls: progress.server_tool_calls,
           checkpoint_ready: false,
@@ -1991,3 +3399,10 @@ try {
 }
 
 void receiptWritten;
+}
+
+const invokedDirectly = process.argv[1]
+  ? path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)
+  : false;
+
+if (invokedDirectly || process.env.TEST_FLOW_FIRST_PARTY_TOPOLOGY) await main();

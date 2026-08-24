@@ -550,7 +550,11 @@ def test_applies_delta_in_s01_order_and_bumps_semantic_revision_once() -> None:
     assert result.active_hypotheses[0].statement == "Updated first hypothesis"
     assert [item.item_id for item in result.rejected_hypotheses] == [_id(301)]
     assert [item.item_id for item in result.open_questions] == [_id(409), _id(410)]
-    assert [item.requirement_id for item in result.pending_requirements] == [_id(500), _id(509), _id(510)]
+    assert [item.requirement_id for item in result.pending_requirements] == [
+        _id(500),
+        _id(510),
+        _id(509),
+    ]
     assert result.pending_requirements[0].status is RequirementStatus.FULFILLED
     assert result.evidence_refs == [EVIDENCE_0, EVIDENCE_1, EVIDENCE_2]
     assert result.candidate_conclusion is not None

@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "skill_name": "manual-triage",
+  "source_wiki_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+  "required_user_inputs": ["problem_time"],
+  "required_artifacts": [],
+  "log_derived_fields": [],
+  "shared_references": ["references/shared-boundaries.md"],
+  "methods": [
+    {
+      "id": "service-boundary-failure",
+      "title": "Service boundary failure",
+      "reference": "references/service-boundary-failure.md",
+      "priority": 1,
+      "evidence_markers": ["SERVICE_FACT"]
+    }
+  ]
+}

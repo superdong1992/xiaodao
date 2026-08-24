@@ -49,7 +49,7 @@
       "id": "platform.host-capability",
       "kind": "capability",
       "depends_on": ["deterministic.full"],
-      "gates": ["platform.host-adapter", "platform.compat-contract"],
+      "gates": ["platform.host-adapter"],
       "identity_set": "host-client",
       "timeout_seconds": 300,
       "progress_class": "external",
@@ -107,10 +107,44 @@
       "gates": ["real.agent.skill-generation"],
       "identity_set": "real-skill-generation",
       "real_cap_id": "isolated.skill-generation",
+      "estimated_tokens": 600000,
       "timeout_seconds": 2100,
       "progress_class": "real",
       "reuse": {"dev": "identity", "release": "never"},
       "platforms": ["windows", "macos", "linux"]
+    },
+    {
+      "id": "real.codex-luna-methods",
+      "kind": "capability",
+      "depends_on": ["deterministic.full"],
+      "gates": ["real.codex-luna.methods"],
+      "identity_set": "real-codex-luna-methods",
+      "timeout_seconds": 8550,
+      "progress_class": "real",
+      "reuse": {"dev": "identity", "release": "never"},
+      "platforms": ["windows", "macos", "linux"]
+    },
+    {
+      "id": "real.macos-codex-luna-methods",
+      "kind": "capability",
+      "depends_on": [],
+      "gates": ["real.macos-codex-luna-methods"],
+      "identity_set": "macos-codex-luna-methods",
+      "timeout_seconds": 1800,
+      "progress_class": "real",
+      "reuse": {"dev": "identity", "release": "never"},
+      "platforms": ["macos"]
+    },
+    {
+      "id": "real.macos-codex-luna-e2e",
+      "kind": "capability",
+      "depends_on": [],
+      "gates": ["real.macos-codex-luna-e2e"],
+      "identity_set": "macos-codex-luna-e2e",
+      "timeout_seconds": 1800,
+      "progress_class": "real",
+      "reuse": {"dev": "never", "release": "never"},
+      "platforms": ["macos"]
     },
     {
       "id": "real.route",
@@ -119,17 +153,6 @@
       "gates": ["real.agent.route"],
       "identity_set": "real-route",
       "timeout_seconds": 1200,
-      "progress_class": "real",
-      "reuse": {"dev": "identity", "release": "never"},
-      "platforms": ["windows", "macos", "linux"]
-    },
-    {
-      "id": "real.diagnose",
-      "kind": "isolated-real",
-      "depends_on": ["real.agent-backend"],
-      "gates": ["real.agent.diagnose"],
-      "identity_set": "real-diagnose",
-      "timeout_seconds": 3900,
       "progress_class": "real",
       "reuse": {"dev": "identity", "release": "never"},
       "platforms": ["windows", "macos", "linux"]
@@ -148,7 +171,7 @@
     {
       "id": "journey.cross-job.environment",
       "kind": "real-journey",
-      "depends_on": ["platform.host-capability", "platform.server-linux-capability"],
+      "depends_on": ["platform.host-capability", "platform.server-linux-capability", "real.skill-generation"],
       "gates": ["journey.environment"],
       "identity_set": "cross-job",
       "timeout_seconds": 1200,

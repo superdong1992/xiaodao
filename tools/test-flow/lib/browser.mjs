@@ -71,7 +71,7 @@ export function chromeIdentity(
   const versionLine = `${probe.stdout ?? ""}\n${probe.stderr ?? ""}`
     .split(/\r?\n/)
     .map((line) => line.trim())
-    .find((line) => /^Google Chrome(?:\s+|\|)\d+(?:\.\d+){2,3}$/.test(line)) ?? null;
+    .find((line) => /^Google Chrome(?: for Testing)?(?:\s+|\|)\d+(?:\.\d+){2,3}$/.test(line)) ?? null;
   const version = versionLine?.replace("|", " ") ?? null;
   if (probe.status !== 0 || version === null) {
     const identity = {

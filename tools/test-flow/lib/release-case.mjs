@@ -1,198 +1,52 @@
 import fs from "node:fs";
 import path from "node:path";
 
-import {
-  assertFlow,
-  canonicalJson,
-  readJson,
-  sha256Bytes,
-  sha256File,
-} from "./util.mjs";
+import { assertFlow, canonicalJson, readJson, sha256Bytes, sha256File } from "./util.mjs";
 
-
-const CASE_FIELDS = [
-  "allowed_actions",
-  "approved_skill_dir",
-  "case_id",
-  "clarifications",
-  "generation_spec",
-  "input_wiki",
-  "journey_scenario",
-  "scenarios",
-  "schema_version",
-  "semantic_oracle",
-];
-const DIAGNOSIS_SKILL_MANIFEST_ID = /^[a-z][a-z0-9-]{1,63}$/;
+const CASE_FIELDS = ["allowed_actions", "case_id", "input_wiki", "journey_scenario", "registration_template", "scenarios", "schema_version", "semantic_oracle"];
 const SCENARIO_FIELDS = ["driver", "oracle", "scenario_id"];
-const DRIVER_FIELDS = [
-  "attachment_anchor_names",
-  "attachment_files",
-  "initial_user_fact_names",
-  "initial_user_fact_values",
-  "problem",
-  "scenario_id",
-  "supplement_input_names",
-  "supplement_input_values",
-];
-const PROBLEM_FIELDS = [
-  "actual_behavior",
-  "completion_criteria",
-  "constraints",
-  "expected_behavior",
-  "goals",
-  "non_goals",
-  "raw_problem_text",
-  "scope",
-  "statement",
-];
-
-export function diagnosisSkillRuntimeRefId(manifestId) {
-  assertFlow(
-    typeof manifestId === "string" && DIAGNOSIS_SKILL_MANIFEST_ID.test(manifestId),
-    "RELEASE_CASE_SKILL_ID",
-    "Release case diagnosis skill manifest id is invalid",
-  );
-  return `diagnosis-skill/${manifestId}`;
-}
-
-export function releaseCaseInputCoverage(skillManifest, driver) {
-  const requirements = Array.isArray(skillManifest?.requirements)
-    ? skillManifest.requirements
-    : [];
-  const initialRequirements = requirements.filter(
-    (item) => item?.kind === "INPUT" && item?.stage === "INITIAL",
-  );
-  const initialNames = Array.isArray(driver?.initial_user_fact_names)
-    ? driver.initial_user_fact_names
-    : [];
-  const declaredInitial = new Set(initialRequirements.map((item) => item.name));
-  const requiredInitial = new Set(
-    initialRequirements
-      .filter((item) => item.requiredness === "REQUIRED")
-      .map((item) => item.name),
-  );
-  const providedInitial = new Set(initialNames);
-  const initialValid = (
-    initialNames.length === providedInitial.size
-    && initialNames.every((name) => declaredInitial.has(name))
-    && [...requiredInitial].every((name) => providedInitial.has(name))
-  );
-
-  const afterNames = requirements
-    .filter((item) => item?.kind === "INPUT" && item?.stage === "AFTER_LOGPARSE")
-    .map((item) => item.name);
-  const supplementNames = Array.isArray(driver?.supplement_input_names)
-    ? driver.supplement_input_names
-    : [];
-  const supplementValid = (
-    afterNames.length === new Set(afterNames).size
-    && supplementNames.length === new Set(supplementNames).size
-    && afterNames.length === supplementNames.length
-    && afterNames.every((name) => supplementNames.includes(name))
-  );
-  return { initialValid, supplementValid };
-}
-const SCENARIO_ORACLE_FIELDS = [
-  "candidate_factor_ids",
-  "case_status",
-  "causal_factor_ids",
-  "criterion_statuses",
-  "excluded_factor_ids",
-  "required_rule_results",
-  "required_safety_phrases",
-  "resolution_status",
-  "terminal_path_id",
-];
-const SEMANTIC_ORACLE_FIELDS = [
-  "author_note_markers_forbidden_in_product",
-  "business_canaries",
-  "expected_skill",
-  "generated_spec_oracle",
-  "oracle_visibility",
-  "schema_version",
-];
-const EXPECTED_SKILL_FIELDS = [
-  "capability",
-  "deployment_scope",
-  "id",
-  "observation_policy_kinds",
-  "requirement_requiredness",
-  "requirement_names",
-  "requires_cross_clock_tolerance_ms",
-  "requires_multiline_event",
-  "requires_numeric_compare",
-  "role_presence",
-  "terminal_paths",
-  "version",
-];
-const GENERATED_SPEC_ORACLE_FIELDS = [
-  "event_policy_bindings",
-  "observation_policies",
-  "projection_version",
-  "required_product_semantics",
-];
-const OBSERVATION_POLICY_FIELDS = [
-  "boundary",
-  "id",
-  "key_fields",
-  "kind",
-  "max_observed",
-  "scope",
-  "window_ms",
-];
-const EVENT_POLICY_BINDING_FIELDS = ["event_id", "observation_policy_ids"];
-const REQUIRED_PRODUCT_SEMANTIC_FIELDS = [
-  "all_of_any_patterns",
-  "id",
-  "target_fields",
-];
-const PRODUCT_SEMANTIC_TARGET_FIELDS = new Set([
-  "analysis_steps",
-  "assumptions",
-  "chinese_title",
-  "judgement_rules",
-  "output_requirements",
-  "problem_scope",
-  "summary",
-  "time_characteristics",
-]);
+const DRIVER_FIELDS = ["attachment_anchor_names", "attachment_files", "initial_user_fact_names", "initial_user_fact_values", "problem", "scenario_id", "supplement_input_names", "supplement_input_values"];
+const PROBLEM_FIELDS = ["actual_behavior", "completion_criteria", "constraints", "expected_behavior", "goals", "non_goals", "raw_problem_text", "scope", "statement"];
+const REGISTRATION_FIELDS = ["capability", "deployment_scope", "package", "registration_id", "runtime", "schema_version", "summary", "version"];
+const PACKAGE_FIELDS = ["relative_path", "skill_name", "source_wiki_sha256"];
+const RUNTIME_FIELDS = ["diagnose", "preprocessing", "review"];
+const ROLE_BINDING_FIELDS = ["agent_profile_id", "context_policy_id", "output_contract_id", "tool_bundle_id"];
+const PREPROCESSING_FIELDS = ["logparse_plan", "logparse_product", "requires_logparse", "roles"];
+const ROLE_FIELDS = ["description", "label", "presence", "source_reference"];
+const PLAN_FIELDS = ["anchors", "attachment_requirement", "problem_time_binding"];
+const ANCHOR_FIELDS = ["label", "module", "pid", "process_name", "slot"];
+const SEMANTIC_ORACLE_FIELDS = ["author_note_markers_forbidden_in_product", "business_canaries", "expected_package", "oracle_visibility", "schema_version"];
+const EXPECTED_PACKAGE_FIELDS = ["forbidden_paths", "method_marker_sets", "required_artifacts", "required_log_derived_fields", "required_shared_markers", "required_user_inputs", "skill_name", "source_wiki_sha256"];
+const METHOD_MARKER_SET_FIELDS = ["all_markers", "semantic_id"];
+const SCENARIO_ORACLE_FIELDS = ["expected_status", "forbidden_evidence_terms", "oracle_visibility", "required_candidate_marker_groups", "required_confirmed_marker_groups", "required_evidence_identities", "required_safety_phrases", "scenario_id", "schema_version"];
+const EVIDENCE_IDENTITY_FIELDS = ["identity_tokens", "marker"];
 const MANIFEST_FIELDS = ["files", "owner_spec", "root", "schema_version"];
 const MANIFEST_FILE_FIELDS = ["path", "purpose", "schema_ref", "sha256", "size"];
-const ALLOWED_ACTIONS = new Set(["skill_generation", "specialized_diagnosis"]);
+const ALLOWED_ACTIONS = new Set(["methods_skill_generation", "specialized_diagnosis"]);
+const REGISTRATION_ID = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+const USER_FACT = /^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$/;
+const SHA256 = /^[0-9a-f]{64}$/;
+const SEMVER = /^(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:[-+][0-9A-Za-z.-]+)?$/;
+const DIAGNOSE_BINDING = { agent_profile_id: "agent-profile/specialist", tool_bundle_id: "tool-bundle/diagnose", context_policy_id: "context-policy/diagnose", output_contract_id: "output-contract/diagnose" };
+const REVIEW_BINDING = { agent_profile_id: "agent-profile/reviewer", tool_bundle_id: "tool-bundle/review", context_policy_id: "context-policy/review", output_contract_id: "output-contract/review" };
 
 function exactKeys(value, expected, code, label) {
-  const actual = value && typeof value === "object" && !Array.isArray(value)
-    ? Object.keys(value).sort()
-    : [];
-  assertFlow(
-    canonicalJson(actual) === canonicalJson([...expected].sort()),
-    code,
-    `${label} fields are invalid`,
-    { actual, expected: [...expected].sort() },
-  );
+  const actual = value && typeof value === "object" && !Array.isArray(value) ? Object.keys(value).sort() : [];
+  assertFlow(canonicalJson(actual) === canonicalJson([...expected].sort()), code, `${label} fields are invalid`, { actual, expected: [...expected].sort() });
 }
 
 function safeRelative(value, code = "RELEASE_CASE_PATH_INVALID") {
-  assertFlow(
-    typeof value === "string"
-      && value.length > 0
-      && !value.includes("\\")
-      && !path.posix.isAbsolute(value)
-      && value.split("/").every((part) => part && part !== "." && part !== ".."),
-    code,
-    `Release case path is unsafe: ${String(value)}`,
-  );
+  assertFlow(typeof value === "string" && value.length > 0 && !value.includes("\\") && !path.posix.isAbsolute(value) && value.split("/").every((part) => part && part !== "." && part !== ".."), code, `Release case path is unsafe: ${String(value)}`);
   return value;
 }
 
-function scalarArray(value, code, label, { nonempty = false } = {}) {
-  assertFlow(
-    Array.isArray(value)
-      && (!nonempty || value.length > 0)
-      && value.every((item) => ["string", "number", "boolean"].includes(typeof item)),
-    code,
-    `${label} must be a${nonempty ? " non-empty" : ""} scalar array`,
-  );
+function stringArray(value, code, label, { nonempty = false, pattern = null, unique = true } = {}) {
+  assertFlow(Array.isArray(value) && (!nonempty || value.length > 0) && value.every((item) => typeof item === "string" && item.length > 0 && (!pattern || pattern.test(item))) && (!unique || value.length === new Set(value).size), code, `${label} must contain valid strings`);
+  return value;
+}
+
+function markerGroups(value, code, label) {
+  assertFlow(Array.isArray(value) && value.every((group) => Array.isArray(group) && group.length > 0 && group.every((item) => typeof item === "string" && item.length > 0) && group.length === new Set(group).size), code, `${label} must contain non-empty marker groups`);
   return value;
 }
 
@@ -205,173 +59,18 @@ function assertExclusiveRolePaths(entries) {
   const owners = new Map();
   for (const [role, absolute] of entries) {
     const identity = pathIdentity(absolute);
-    assertFlow(
-      !owners.has(identity),
-      "RELEASE_CASE_ROLE_ALIAS",
-      `Release case file roles must be mutually exclusive: ${owners.get(identity)} and ${role}`,
-    );
+    assertFlow(!owners.has(identity), "RELEASE_CASE_ROLE_ALIAS", `Release case file roles must be mutually exclusive: ${owners.get(identity)} and ${role}`);
     owners.set(identity, role);
   }
   return new Set(owners.keys());
 }
 
-function rolePathEntries(loaded) {
-  return [
-    ["input_wiki", loaded.wiki_path],
-    ["clarifications", loaded.clarifications_path],
-    ["generation_spec", loaded.generation_spec_path],
-    ...loaded.approved_skill_files.map((absolute, index) => [`approved_skill_file[${index}]`, absolute]),
-    ["semantic_oracle", loaded.semantic_oracle_path],
-    ...loaded.scenarios.flatMap((scenario) => [
-      [`scenario[${scenario.scenario_id}].driver`, scenario.driver_path],
-      [`scenario[${scenario.scenario_id}].oracle`, scenario.oracle_path],
-    ]),
-  ];
+export function diagnosisSkillRuntimeRefId(registrationId) {
+  assertFlow(typeof registrationId === "string" && REGISTRATION_ID.test(registrationId), "RELEASE_CASE_REGISTRATION_ID", "Release case Methods registration id is invalid");
+  return `diagnosis-skill/${registrationId}`;
 }
 
-function loadDriver(scenario, reservedRolePaths) {
-  const driver = readJson(scenario.driver_path);
-  exactKeys(driver, DRIVER_FIELDS, "RELEASE_CASE_DRIVER_FIELDS", "Release case driver");
-  exactKeys(driver.problem, PROBLEM_FIELDS, "RELEASE_CASE_PROBLEM_FIELDS", "Release case problem");
-  assertFlow(driver.scenario_id === scenario.scenario_id, "RELEASE_CASE_DRIVER_ID", "Release case driver scenario_id is inconsistent");
-  for (const field of PROBLEM_FIELDS.filter((name) => !["completion_criteria", "constraints", "goals", "non_goals"].includes(name))) {
-    assertFlow(typeof driver.problem[field] === "string" && driver.problem[field].trim(), "RELEASE_CASE_PROBLEM_VALUE", `Release case problem ${field} is empty`);
-  }
-  for (const field of ["completion_criteria", "constraints", "goals", "non_goals"]) {
-    scalarArray(driver.problem[field], "RELEASE_CASE_PROBLEM_ARRAY", `Release case problem ${field}`, { nonempty: field !== "non_goals" });
-    assertFlow(driver.problem[field].every((item) => typeof item === "string" && item.length > 0), "RELEASE_CASE_PROBLEM_ARRAY_VALUE", `Release case problem ${field} contains an invalid value`);
-  }
-  for (const [namesField, valuesField] of [
-    ["initial_user_fact_names", "initial_user_fact_values"],
-    ["supplement_input_names", "supplement_input_values"],
-  ]) {
-    const names = scalarArray(driver[namesField], "RELEASE_CASE_INPUT_NAMES", `Release case ${namesField}`);
-    const values = scalarArray(driver[valuesField], "RELEASE_CASE_INPUT_VALUES", `Release case ${valuesField}`);
-    assertFlow(names.length === values.length, "RELEASE_CASE_INPUT_LENGTH", `${namesField} and ${valuesField} must have equal lengths`);
-    assertFlow(names.every((item) => typeof item === "string" && item.length > 0), "RELEASE_CASE_INPUT_NAME", `${namesField} contains an invalid name`);
-  }
-  scalarArray(driver.attachment_files, "RELEASE_CASE_ATTACHMENTS", "Release case attachment_files");
-  scalarArray(driver.attachment_anchor_names, "RELEASE_CASE_ATTACHMENT_ANCHORS", "Release case attachment_anchor_names");
-  assertFlow(driver.attachment_anchor_names.length === driver.attachment_files.length, "RELEASE_CASE_ATTACHMENT_LENGTH", "attachment_anchor_names and attachment_files must have equal lengths");
-  assertFlow(driver.attachment_anchor_names.every((item) => typeof item === "string" && /^[a-z][a-z0-9_]*$/.test(item)), "RELEASE_CASE_ATTACHMENT_ANCHOR", "Release case attachment anchor is invalid");
-  for (const attachment of driver.attachment_files) {
-    safeRelative(attachment, "RELEASE_CASE_ATTACHMENT_PATH");
-    const attachmentPath = resolveOwnedPath(path.dirname(scenario.driver_path), attachment);
-    assertFlow(
-      !reservedRolePaths.has(pathIdentity(attachmentPath)),
-      "RELEASE_CASE_ATTACHMENT_ROLE_ALIAS",
-      `Release case attachment aliases an input or oracle role: ${attachment}`,
-    );
-  }
-  return driver;
-}
-
-function loadScenarioOracle(scenario) {
-  const oracle = readJson(scenario.oracle_path);
-  exactKeys(oracle, SCENARIO_ORACLE_FIELDS, "RELEASE_CASE_ORACLE_FIELDS", "Release case scenario oracle");
-  for (const field of ["candidate_factor_ids", "causal_factor_ids", "criterion_statuses", "excluded_factor_ids", "required_safety_phrases"]) {
-    scalarArray(oracle[field], "RELEASE_CASE_ORACLE_ARRAY", `Release case oracle ${field}`);
-  }
-  assertFlow(oracle.required_rule_results && typeof oracle.required_rule_results === "object" && !Array.isArray(oracle.required_rule_results), "RELEASE_CASE_ORACLE_RULES", "Release case oracle required_rule_results must be an object");
-  assertFlow(Object.entries(oracle.required_rule_results).every(([key, value]) => key && ["PASS", "FAIL", "UNKNOWN"].includes(value)), "RELEASE_CASE_ORACLE_RULE_RESULT", "Release case oracle rule result is invalid");
-  for (const field of ["case_status", "resolution_status", "terminal_path_id"]) {
-    assertFlow(typeof oracle[field] === "string" && oracle[field].length > 0, "RELEASE_CASE_ORACLE_VALUE", `Release case oracle ${field} is empty`);
-  }
-  return oracle;
-}
-
-function loadSemanticOracle(loaded) {
-  const oracle = readJson(loaded.semantic_oracle_path);
-  exactKeys(oracle, SEMANTIC_ORACLE_FIELDS, "RELEASE_CASE_SEMANTIC_ORACLE_FIELDS", "Release case semantic oracle");
-  exactKeys(oracle.expected_skill, EXPECTED_SKILL_FIELDS, "RELEASE_CASE_EXPECTED_SKILL_FIELDS", "Release case expected skill");
-  assertFlow(oracle.schema_version === 1 && oracle.oracle_visibility === "GATE_ONLY", "RELEASE_CASE_SEMANTIC_ORACLE_VERSION", "Release case semantic oracle metadata is invalid");
-  assertFlow(
-    oracle.expected_skill.role_presence
-      && typeof oracle.expected_skill.role_presence === "object"
-      && !Array.isArray(oracle.expected_skill.role_presence)
-      && Object.entries(oracle.expected_skill.role_presence).every(
-        ([name, presence]) => /^[a-z][a-z0-9_]{0,63}$/.test(name)
-          && ["REQUIRED", "OPTIONAL"].includes(presence),
-      ),
-    "RELEASE_CASE_ROLE_PRESENCE",
-    "Release case expected role presence is invalid",
-  );
-  assertFlow(
-    oracle.expected_skill.requirement_requiredness
-      && typeof oracle.expected_skill.requirement_requiredness === "object"
-      && !Array.isArray(oracle.expected_skill.requirement_requiredness)
-      && Object.entries(oracle.expected_skill.requirement_requiredness).every(
-        ([name, requiredness]) => /^[a-z][a-z0-9_]{0,63}$/.test(name)
-          && ["REQUIRED", "OPTIONAL", "CONDITIONAL"].includes(requiredness),
-      ),
-    "RELEASE_CASE_REQUIREMENT_REQUIREDNESS",
-    "Release case expected requirement requiredness is invalid",
-  );
-  assertFlow(
-    canonicalJson(Object.keys(oracle.expected_skill.requirement_requiredness).sort())
-      === canonicalJson([...oracle.expected_skill.requirement_names].sort()),
-    "RELEASE_CASE_REQUIREMENT_REQUIREDNESS_NAMES",
-    "Release case requiredness names disagree with requirement_names",
-  );
-  scalarArray(oracle.author_note_markers_forbidden_in_product, "RELEASE_CASE_NOTE_MARKERS", "Release case forbidden note markers");
-  scalarArray(oracle.business_canaries, "RELEASE_CASE_CANARIES", "Release case business canaries");
-  exactKeys(oracle.generated_spec_oracle, GENERATED_SPEC_ORACLE_FIELDS, "RELEASE_CASE_GENERATED_ORACLE_FIELDS", "Release case generated spec oracle");
-  assertFlow(oracle.generated_spec_oracle.projection_version === 4, "RELEASE_CASE_GENERATED_ORACLE_VERSION", "Release case generated spec oracle version is invalid");
-  const policies = oracle.generated_spec_oracle.observation_policies;
-  assertFlow(Array.isArray(policies), "RELEASE_CASE_OBSERVATION_POLICIES", "Release case observation policies must be an array");
-  const policyIds = new Set();
-  for (const policy of policies) {
-    exactKeys(policy, OBSERVATION_POLICY_FIELDS, "RELEASE_CASE_OBSERVATION_POLICY_FIELDS", "Release case observation policy");
-    assertFlow(typeof policy.id === "string" && /^[a-z][a-z0-9_]{0,63}$/.test(policy.id) && !policyIds.has(policy.id), "RELEASE_CASE_OBSERVATION_POLICY_ID", "Release case observation policy id is invalid or duplicated");
-    policyIds.add(policy.id);
-    assertFlow(["SUPPRESSION", "RATE_LIMIT"].includes(policy.kind), "RELEASE_CASE_OBSERVATION_POLICY_KIND", "Release case observation policy kind is invalid");
-    assertFlow(typeof policy.scope === "string" && /^[a-z][a-z0-9_]{0,63}$/.test(policy.scope), "RELEASE_CASE_OBSERVATION_POLICY_SCOPE", "Release case observation policy scope is invalid");
-    scalarArray(policy.key_fields, "RELEASE_CASE_OBSERVATION_POLICY_KEYS", "Release case observation policy key_fields");
-    assertFlow(policy.key_fields.every((value) => typeof value === "string" && /^[a-z][a-z0-9_]{0,63}$/.test(value)) && new Set(policy.key_fields).size === policy.key_fields.length, "RELEASE_CASE_OBSERVATION_POLICY_KEYS", "Release case observation policy key_fields are invalid");
-    assertFlow(Number.isInteger(policy.window_ms) && policy.window_ms > 0 && policy.window_ms <= 604800000, "RELEASE_CASE_OBSERVATION_POLICY_WINDOW", "Release case observation policy window is invalid");
-    assertFlow(["CLOSED_OPEN", "CLOSED_CLOSED"].includes(policy.boundary), "RELEASE_CASE_OBSERVATION_POLICY_BOUNDARY", "Release case observation policy boundary is invalid");
-    assertFlow(
-      policy.kind === "SUPPRESSION"
-        ? policy.max_observed === null
-        : Number.isInteger(policy.max_observed) && policy.max_observed > 0 && policy.max_observed <= 1000000,
-      "RELEASE_CASE_OBSERVATION_POLICY_MAX",
-      "Release case observation policy max_observed is invalid",
-    );
-  }
-  assertFlow(
-    canonicalJson([...new Set(policies.map((policy) => policy.kind))].sort())
-      === canonicalJson([...new Set(oracle.expected_skill.observation_policy_kinds)].sort()),
-    "RELEASE_CASE_OBSERVATION_POLICY_KINDS",
-    "Release case expected policy kinds disagree with the executable policy projection",
-  );
-  const bindings = oracle.generated_spec_oracle.event_policy_bindings;
-  assertFlow(Array.isArray(bindings), "RELEASE_CASE_EVENT_POLICY_BINDINGS", "Release case event policy bindings must be an array");
-  const eventIds = new Set();
-  for (const binding of bindings) {
-    exactKeys(binding, EVENT_POLICY_BINDING_FIELDS, "RELEASE_CASE_EVENT_POLICY_BINDING_FIELDS", "Release case event policy binding");
-    assertFlow(typeof binding.event_id === "string" && /^[a-z][a-z0-9_]{0,63}$/.test(binding.event_id) && !eventIds.has(binding.event_id), "RELEASE_CASE_EVENT_POLICY_BINDING_ID", "Release case event policy binding id is invalid or duplicated");
-    eventIds.add(binding.event_id);
-    scalarArray(binding.observation_policy_ids, "RELEASE_CASE_EVENT_POLICY_BINDING_POLICIES", "Release case event policy binding observation_policy_ids");
-    assertFlow(binding.observation_policy_ids.every((value) => typeof value === "string" && policyIds.has(value)) && new Set(binding.observation_policy_ids).size === binding.observation_policy_ids.length, "RELEASE_CASE_EVENT_POLICY_BINDING_POLICIES", "Release case event policy binding references an invalid or duplicated policy");
-  }
-  const semantics = oracle.generated_spec_oracle.required_product_semantics;
-  assertFlow(Array.isArray(semantics) && semantics.length > 0, "RELEASE_CASE_REQUIRED_PRODUCT_SEMANTICS", "Release case required product semantics must be non-empty");
-  const semanticIds = new Set();
-  for (const semantic of semantics) {
-    exactKeys(semantic, REQUIRED_PRODUCT_SEMANTIC_FIELDS, "RELEASE_CASE_REQUIRED_PRODUCT_SEMANTIC_FIELDS", "Release case required product semantic");
-    assertFlow(typeof semantic.id === "string" && /^[a-z][a-z0-9_]{0,63}$/.test(semantic.id) && !semanticIds.has(semantic.id), "RELEASE_CASE_REQUIRED_PRODUCT_SEMANTIC_ID", "Release case required product semantic id is invalid or duplicated");
-    semanticIds.add(semantic.id);
-    scalarArray(semantic.target_fields, "RELEASE_CASE_REQUIRED_PRODUCT_SEMANTIC_TARGET_FIELDS", "Release case required product semantic target_fields", { nonempty: true });
-    assertFlow(
-      semantic.target_fields.every((field) => PRODUCT_SEMANTIC_TARGET_FIELDS.has(field))
-        && new Set(semantic.target_fields).size === semantic.target_fields.length,
-      "RELEASE_CASE_REQUIRED_PRODUCT_SEMANTIC_TARGET_FIELDS",
-      "Release case required product semantic target_fields are invalid or duplicated",
-    );
-    assertFlow(Array.isArray(semantic.all_of_any_patterns) && semantic.all_of_any_patterns.length > 0 && semantic.all_of_any_patterns.every((group) => Array.isArray(group) && group.length > 0 && group.every((pattern) => typeof pattern === "string" && pattern.length > 0)), "RELEASE_CASE_REQUIRED_PRODUCT_SEMANTIC_PATTERNS", "Release case required product semantic patterns are invalid");
-  }
-  return oracle;
-}
+export const methodsSkillRuntimeRefId = diagnosisSkillRuntimeRefId;
 
 export function compareReleaseCaseEntries(left, right) {
   return left.name < right.name ? -1 : left.name > right.name ? 1 : 0;
@@ -383,17 +82,14 @@ function ordinaryFiles(root) {
     for (const entry of fs.readdirSync(directory, { withFileTypes: true }).sort(compareReleaseCaseEntries)) {
       const absolute = path.join(directory, entry.name);
       const relative = path.relative(root, absolute).split(path.sep).join("/");
-      if (entry.isSymbolicLink()) {
-        assertFlow(false, "RELEASE_CASE_LINK_FORBIDDEN", `Release case links are forbidden: ${relative}`);
-      }
+      if (entry.isSymbolicLink()) assertFlow(false, "RELEASE_CASE_LINK_FORBIDDEN", `Release case links are forbidden: ${relative}`);
       if (entry.isDirectory()) visit(absolute);
       else if (entry.isFile() && relative !== "fixture-manifest.json") {
-        const stat = fs.statSync(absolute);
-        assertFlow(stat.nlink === 1, "RELEASE_CASE_HARDLINK_FORBIDDEN", `Release case hard links are forbidden: ${relative}`);
-        records.push({ path: relative, absolute, size: stat.size, sha256: sha256File(absolute) });
-      } else if (!entry.isFile()) {
-        assertFlow(false, "RELEASE_CASE_NODE_UNSUPPORTED", `Unsupported release case node: ${relative}`);
-      }
+        const metadata = fs.statSync(absolute);
+        const maximumLinks = process.platform === "win32" ? 2 : 1;
+        assertFlow(metadata.nlink <= maximumLinks, "RELEASE_CASE_HARDLINK_FORBIDDEN", `Release case hard links are forbidden: ${relative}`);
+        records.push({ path: relative, absolute, size: metadata.size, sha256: sha256File(absolute) });
+      } else if (!entry.isFile()) assertFlow(false, "RELEASE_CASE_NODE_UNSUPPORTED", `Unsupported release case node: ${relative}`);
     }
   };
   visit(root);
@@ -403,25 +99,19 @@ function ordinaryFiles(root) {
 function resolveOwnedPath(root, relative, { directory = false } = {}) {
   safeRelative(relative);
   const absolute = path.resolve(root, ...relative.split("/"));
-  const prefix = `${path.resolve(root)}${path.sep}`;
-  assertFlow(absolute.startsWith(prefix), "RELEASE_CASE_PATH_ESCAPE", `Release case path escapes its root: ${relative}`);
-  const stat = fs.lstatSync(absolute);
-  assertFlow(!stat.isSymbolicLink(), "RELEASE_CASE_LINK_FORBIDDEN", `Release case path is a link: ${relative}`);
-  assertFlow(
-    directory ? stat.isDirectory() : stat.isFile(),
-    "RELEASE_CASE_PATH_KIND",
-    `Release case path has the wrong kind: ${relative}`,
-  );
+  assertFlow(absolute.startsWith(`${path.resolve(root)}${path.sep}`), "RELEASE_CASE_PATH_ESCAPE", `Release case path escapes its root: ${relative}`);
+  const metadata = fs.lstatSync(absolute);
+  assertFlow(!metadata.isSymbolicLink(), "RELEASE_CASE_LINK_FORBIDDEN", `Release case path is a link: ${relative}`);
+  assertFlow(directory ? metadata.isDirectory() : metadata.isFile(), "RELEASE_CASE_PATH_KIND", `Release case path has the wrong kind: ${relative}`);
   return absolute;
 }
 
 export function verifyReleaseCaseManifest(caseRoot) {
   const root = path.resolve(caseRoot);
-  const manifestPath = path.join(root, "fixture-manifest.json");
-  const manifest = readJson(manifestPath);
+  const manifest = readJson(path.join(root, "fixture-manifest.json"));
   exactKeys(manifest, MANIFEST_FIELDS, "RELEASE_CASE_MANIFEST_FIELDS", "Release case manifest");
-  assertFlow(manifest.schema_version === 1, "RELEASE_CASE_MANIFEST_VERSION", "Release case manifest schema_version must be 1");
-  assertFlow(manifest.owner_spec === "WIKI_DIAGNOSIS_GENERALIZATION", "RELEASE_CASE_MANIFEST_OWNER", "Release case manifest owner is invalid");
+  assertFlow(manifest.schema_version === 2, "RELEASE_CASE_MANIFEST_VERSION", "Release case manifest schema_version must be 2");
+  assertFlow(manifest.owner_spec === "METHODS_SKILL_RELEASE_CASE", "RELEASE_CASE_MANIFEST_OWNER", "Release case manifest owner is invalid");
   safeRelative(manifest.root, "RELEASE_CASE_MANIFEST_ROOT");
   assertFlow(Array.isArray(manifest.files), "RELEASE_CASE_MANIFEST_FILES", "Release case manifest files must be an array");
   const actual = ordinaryFiles(root);
@@ -431,128 +121,231 @@ export function verifyReleaseCaseManifest(caseRoot) {
     assertFlow(typeof entry.purpose === "string" && entry.purpose.trim(), "RELEASE_CASE_MANIFEST_PURPOSE", `Release case purpose is empty: ${entry.path}`);
     assertFlow(entry.schema_ref === null, "RELEASE_CASE_MANIFEST_SCHEMA_REF", `Release case-local files do not accept external schema refs: ${entry.path}`);
     assertFlow(Number.isInteger(entry.size) && entry.size >= 0, "RELEASE_CASE_MANIFEST_SIZE", `Release case size is invalid: ${entry.path}`);
-    assertFlow(typeof entry.sha256 === "string" && /^[0-9a-f]{64}$/.test(entry.sha256), "RELEASE_CASE_MANIFEST_SHA", `Release case digest is invalid: ${entry.path}`);
+    assertFlow(typeof entry.sha256 === "string" && SHA256.test(entry.sha256), "RELEASE_CASE_MANIFEST_SHA", `Release case digest is invalid: ${entry.path}`);
     return entry;
   });
-  assertFlow(
-    canonicalJson(declared.map((entry) => entry.path)) === canonicalJson(actual.map((entry) => entry.path)),
-    "RELEASE_CASE_MANIFEST_COVERAGE",
-    "Release case manifest does not cover the exact owned file set",
-  );
-  for (let index = 0; index < actual.length; index += 1) {
-    assertFlow(declared[index].size === actual[index].size, "RELEASE_CASE_MANIFEST_SIZE_DRIFT", `Release case size drift: ${actual[index].path}`);
-    assertFlow(declared[index].sha256 === actual[index].sha256, "RELEASE_CASE_MANIFEST_HASH_DRIFT", `Release case hash drift: ${actual[index].path}`);
-  }
+  assertFlow(canonicalJson(declared.map((entry) => entry.path)) === canonicalJson(actual.map((entry) => entry.path)), "RELEASE_CASE_MANIFEST_COVERAGE", "Release case manifest does not cover the exact owned file set");
+  actual.forEach((record, index) => {
+    assertFlow(declared[index].size === record.size, "RELEASE_CASE_MANIFEST_SIZE_DRIFT", `Release case size drift: ${record.path}`);
+    assertFlow(declared[index].sha256 === record.sha256, "RELEASE_CASE_MANIFEST_HASH_DRIFT", `Release case hash drift: ${record.path}`);
+  });
   return { root, manifest, records: actual };
+}
+
+function validateBinding(value, label, { nullable = false } = {}) {
+  if (nullable && value === null) return;
+  assertFlow(value && typeof value === "object" && !Array.isArray(value), "RELEASE_CASE_REGISTRATION_BINDING", `${label} must be a binding object`);
+  const fields = Object.keys(value).sort().join(",");
+  const validUserFact = fields === "name,source" && value.source === "USER_FACT" && typeof value.name === "string" && USER_FACT.test(value.name);
+  const validFixed = fields === "source,value" && value.source === "SKILL_FIXED" && typeof value.value === "string" && value.value.length > 0;
+  assertFlow(validUserFact || validFixed, "RELEASE_CASE_REGISTRATION_BINDING", `${label} has an invalid binding`);
+}
+
+function loadRegistrationTemplate(loaded) {
+  const value = readJson(loaded.registration_template_path);
+  exactKeys(value, REGISTRATION_FIELDS, "RELEASE_CASE_REGISTRATION_FIELDS", "Release registration template");
+  assertFlow(value.schema_version === 1, "RELEASE_CASE_REGISTRATION_VERSION", "Release registration schema_version must be 1");
+  assertFlow(typeof value.registration_id === "string" && REGISTRATION_ID.test(value.registration_id), "RELEASE_CASE_REGISTRATION_ID", "Release registration_id is invalid");
+  assertFlow(path.basename(path.dirname(loaded.registration_template_path)) === value.registration_id, "RELEASE_CASE_REGISTRATION_DIRECTORY", "Release registration_id must match its directory");
+  assertFlow(typeof value.version === "string" && SEMVER.test(value.version), "RELEASE_CASE_REGISTRATION_SEMVER", "Release registration version is invalid");
+  assertFlow(typeof value.capability === "string" && value.capability.length > 0 && !value.capability.includes("\n"), "RELEASE_CASE_REGISTRATION_CAPABILITY", "Release registration capability is invalid");
+  assertFlow(typeof value.summary === "string" && value.summary.trim(), "RELEASE_CASE_REGISTRATION_SUMMARY", "Release registration summary is invalid");
+  assertFlow(["PRODUCTION", "TEST_ONLY"].includes(value.deployment_scope), "RELEASE_CASE_REGISTRATION_SCOPE", "Release registration deployment_scope is invalid");
+  exactKeys(value.package, PACKAGE_FIELDS, "RELEASE_CASE_REGISTRATION_PACKAGE_FIELDS", "Release registration package");
+  assertFlow(typeof value.package.skill_name === "string" && REGISTRATION_ID.test(value.package.skill_name), "RELEASE_CASE_REGISTRATION_SKILL_NAME", "Release registration skill_name is invalid");
+  assertFlow(value.package.relative_path === `package/${value.package.skill_name}`, "RELEASE_CASE_REGISTRATION_PACKAGE_PATH", "Release registration package path is invalid");
+  assertFlow(typeof value.package.source_wiki_sha256 === "string" && SHA256.test(value.package.source_wiki_sha256), "RELEASE_CASE_REGISTRATION_WIKI_SHA", "Release registration Wiki digest is invalid");
+  assertFlow(value.package.source_wiki_sha256 === sha256File(loaded.wiki_path), "RELEASE_CASE_REGISTRATION_WIKI_DRIFT", "Release registration Wiki digest differs from the case Wiki");
+  exactKeys(value.runtime, RUNTIME_FIELDS, "RELEASE_CASE_REGISTRATION_RUNTIME_FIELDS", "Release registration runtime");
+  for (const [role, expected] of [["diagnose", DIAGNOSE_BINDING], ["review", REVIEW_BINDING]]) {
+    exactKeys(value.runtime[role], ROLE_BINDING_FIELDS, "RELEASE_CASE_REGISTRATION_ROLE_BINDING_FIELDS", `Release registration ${role} binding`);
+    assertFlow(canonicalJson(value.runtime[role]) === canonicalJson(expected), "RELEASE_CASE_REGISTRATION_ROLE_BINDING", `Release registration ${role} binding must use product built-ins`);
+  }
+  const preprocessing = value.runtime.preprocessing;
+  exactKeys(preprocessing, PREPROCESSING_FIELDS, "RELEASE_CASE_REGISTRATION_PREPROCESSING_FIELDS", "Release registration preprocessing");
+  assertFlow(preprocessing.requires_logparse === true, "RELEASE_CASE_REGISTRATION_LOGPARSE", "Release registration must require Logparse");
+  assertFlow(typeof preprocessing.logparse_product === "string" && preprocessing.logparse_product && preprocessing.logparse_product !== "default", "RELEASE_CASE_REGISTRATION_LOGPARSE_PRODUCT", "Release registration Logparse product is invalid");
+  assertFlow(Array.isArray(preprocessing.roles) && preprocessing.roles.length > 0, "RELEASE_CASE_REGISTRATION_ROLES", "Release registration roles are invalid");
+  const roleLabels = preprocessing.roles.map((role) => {
+    exactKeys(role, ROLE_FIELDS, "RELEASE_CASE_REGISTRATION_ROLE_FIELDS", "Release registration role");
+    assertFlow(typeof role.label === "string" && USER_FACT.test(role.label), "RELEASE_CASE_REGISTRATION_ROLE_LABEL", "Release registration role label is invalid");
+    assertFlow(typeof role.description === "string" && role.description.trim() && typeof role.source_reference === "string" && role.source_reference.trim(), "RELEASE_CASE_REGISTRATION_ROLE_METADATA", "Release registration role metadata is invalid");
+    assertFlow(["REQUIRED", "OPTIONAL"].includes(role.presence), "RELEASE_CASE_REGISTRATION_ROLE_PRESENCE", "Release registration role presence is invalid");
+    return role.label;
+  });
+  assertFlow(roleLabels.length === new Set(roleLabels).size && preprocessing.roles.some((role) => role.presence === "REQUIRED"), "RELEASE_CASE_REGISTRATION_ROLES", "Release registration roles must be unique and include REQUIRED");
+  const plan = preprocessing.logparse_plan;
+  exactKeys(plan, PLAN_FIELDS, "RELEASE_CASE_REGISTRATION_PLAN_FIELDS", "Release registration Logparse plan");
+  assertFlow(plan.attachment_requirement === "log_archive", "RELEASE_CASE_REGISTRATION_ATTACHMENT", "Release registration attachment requirement must be log_archive");
+  validateBinding(plan.problem_time_binding, "problem_time_binding");
+  assertFlow(Array.isArray(plan.anchors) && plan.anchors.length === roleLabels.length, "RELEASE_CASE_REGISTRATION_ANCHORS", "Release registration anchors must match roles");
+  const anchorLabels = plan.anchors.map((anchor, index) => {
+    exactKeys(anchor, ANCHOR_FIELDS, "RELEASE_CASE_REGISTRATION_ANCHOR_FIELDS", "Release registration anchor");
+    assertFlow(anchor.label === roleLabels[index], "RELEASE_CASE_REGISTRATION_ANCHOR_LABEL", "Release registration anchor order must match roles");
+    validateBinding(anchor.module, `anchors[${index}].module`);
+    validateBinding(anchor.slot, `anchors[${index}].slot`);
+    validateBinding(anchor.process_name, `anchors[${index}].process_name`);
+    validateBinding(anchor.pid, `anchors[${index}].pid`, { nullable: true });
+    return anchor.label;
+  });
+  assertFlow(anchorLabels.length === new Set(anchorLabels).size, "RELEASE_CASE_REGISTRATION_ANCHORS", "Release registration anchor labels must be unique");
+  return value;
+}
+
+function rolePathEntries(loaded) {
+  return [["input_wiki", loaded.wiki_path], ["registration_template", loaded.registration_template_path], ["semantic_oracle", loaded.semantic_oracle_path], ...loaded.scenarios.flatMap((scenario) => [[`scenario[${scenario.scenario_id}].driver`, scenario.driver_path], [`scenario[${scenario.scenario_id}].oracle`, scenario.oracle_path]])];
+}
+
+function loadDriver(scenario, reservedRolePaths) {
+  const driver = readJson(scenario.driver_path);
+  exactKeys(driver, DRIVER_FIELDS, "RELEASE_CASE_DRIVER_FIELDS", "Release case driver");
+  exactKeys(driver.problem, PROBLEM_FIELDS, "RELEASE_CASE_PROBLEM_FIELDS", "Release case problem");
+  assertFlow(driver.scenario_id === scenario.scenario_id, "RELEASE_CASE_DRIVER_ID", "Release case driver scenario_id is inconsistent");
+  for (const field of PROBLEM_FIELDS.filter((name) => !["completion_criteria", "constraints", "goals", "non_goals"].includes(name))) assertFlow(typeof driver.problem[field] === "string" && driver.problem[field].trim(), "RELEASE_CASE_PROBLEM_VALUE", `Release case problem ${field} is empty`);
+  for (const field of ["completion_criteria", "constraints", "goals", "non_goals"]) stringArray(driver.problem[field], "RELEASE_CASE_PROBLEM_ARRAY", `Release case problem ${field}`, { nonempty: field !== "non_goals" });
+  for (const [namesField, valuesField] of [["initial_user_fact_names", "initial_user_fact_values"], ["supplement_input_names", "supplement_input_values"]]) {
+    const names = stringArray(driver[namesField], "RELEASE_CASE_INPUT_NAMES", `Release case ${namesField}`, { pattern: USER_FACT });
+    const values = stringArray(driver[valuesField], "RELEASE_CASE_INPUT_VALUES", `Release case ${valuesField}`, { unique: false });
+    assertFlow(names.length === values.length, "RELEASE_CASE_INPUT_LENGTH", `${namesField} and ${valuesField} must have equal lengths`);
+  }
+  stringArray(driver.attachment_files, "RELEASE_CASE_ATTACHMENTS", "Release case attachment_files");
+  stringArray(driver.attachment_anchor_names, "RELEASE_CASE_ATTACHMENT_ANCHORS", "Release case attachment_anchor_names", { pattern: USER_FACT });
+  assertFlow(driver.attachment_anchor_names.length === driver.attachment_files.length, "RELEASE_CASE_ATTACHMENT_LENGTH", "attachment anchors and files must have equal lengths");
+  const attachmentPaths = driver.attachment_files.map((relative) => {
+    safeRelative(relative, "RELEASE_CASE_ATTACHMENT_PATH");
+    const absolute = resolveOwnedPath(path.dirname(scenario.driver_path), relative);
+    assertFlow(!reservedRolePaths.has(pathIdentity(absolute)), "RELEASE_CASE_ATTACHMENT_ROLE_ALIAS", "Release case attachment aliases an input or oracle role");
+    return absolute;
+  });
+  return { driver, attachment_paths: attachmentPaths };
 }
 
 export function loadReleaseCase(caseRoot) {
   const verified = verifyReleaseCaseManifest(caseRoot);
   const descriptor = readJson(resolveOwnedPath(verified.root, "case.json"));
   exactKeys(descriptor, CASE_FIELDS, "RELEASE_CASE_FIELDS", "Release case descriptor");
-  assertFlow(descriptor.schema_version === 1, "RELEASE_CASE_VERSION", "Release case schema_version must be 1");
-  assertFlow(typeof descriptor.case_id === "string" && /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(descriptor.case_id), "RELEASE_CASE_ID", "Release case_id is invalid");
-  assertFlow(
-    Array.isArray(descriptor.allowed_actions)
-      && descriptor.allowed_actions.length > 0
-      && new Set(descriptor.allowed_actions).size === descriptor.allowed_actions.length
-      && descriptor.allowed_actions.every((value) => ALLOWED_ACTIONS.has(value)),
-    "RELEASE_CASE_ACTIONS",
-    "Release case actions are invalid",
-  );
+  assertFlow(descriptor.schema_version === 2, "RELEASE_CASE_VERSION", "Release case schema_version must be 2");
+  assertFlow(typeof descriptor.case_id === "string" && REGISTRATION_ID.test(descriptor.case_id), "RELEASE_CASE_ID", "Release case_id is invalid");
+  assertFlow(Array.isArray(descriptor.allowed_actions) && descriptor.allowed_actions.length > 0 && descriptor.allowed_actions.length === new Set(descriptor.allowed_actions).size && descriptor.allowed_actions.every((value) => ALLOWED_ACTIONS.has(value)), "RELEASE_CASE_ACTIONS", "Release case actions are invalid");
   assertFlow(Array.isArray(descriptor.scenarios) && descriptor.scenarios.length > 0, "RELEASE_CASE_SCENARIOS", "Release case requires scenarios");
   const scenarios = descriptor.scenarios.map((scenario) => {
     exactKeys(scenario, SCENARIO_FIELDS, "RELEASE_CASE_SCENARIO_FIELDS", "Release case scenario");
-    assertFlow(typeof scenario.scenario_id === "string" && /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(scenario.scenario_id), "RELEASE_CASE_SCENARIO_ID", "Release scenario_id is invalid");
-    return {
-      scenario_id: scenario.scenario_id,
-      driver_path: resolveOwnedPath(verified.root, scenario.driver),
-      oracle_path: resolveOwnedPath(verified.root, scenario.oracle),
-    };
+    assertFlow(typeof scenario.scenario_id === "string" && REGISTRATION_ID.test(scenario.scenario_id), "RELEASE_CASE_SCENARIO_ID", "Release scenario_id is invalid");
+    return { scenario_id: scenario.scenario_id, driver_path: resolveOwnedPath(verified.root, scenario.driver), oracle_path: resolveOwnedPath(verified.root, scenario.oracle) };
   });
-  assertFlow(new Set(scenarios.map((item) => item.scenario_id)).size === scenarios.length, "RELEASE_CASE_SCENARIO_DUPLICATE", "Release scenario IDs must be unique");
+  assertFlow(scenarios.length === new Set(scenarios.map((item) => item.scenario_id)).size, "RELEASE_CASE_SCENARIO_DUPLICATE", "Release scenario IDs must be unique");
   assertFlow(scenarios.some((item) => item.scenario_id === descriptor.journey_scenario), "RELEASE_CASE_JOURNEY_SCENARIO", "Release journey_scenario must name a declared scenario");
-  const approvedSkillDir = resolveOwnedPath(verified.root, descriptor.approved_skill_dir, { directory: true });
-  const approvedPrefix = `${path.relative(verified.root, approvedSkillDir).split(path.sep).join("/")}/`;
-  const approvedSkillFiles = verified.records
-    .filter((record) => record.path.startsWith(approvedPrefix))
-    .map((record) => resolveOwnedPath(verified.root, record.path));
-  const loaded = {
-    case_id: descriptor.case_id,
-    allowed_actions: [...descriptor.allowed_actions],
-    journey_scenario: descriptor.journey_scenario,
-    wiki_path: resolveOwnedPath(verified.root, descriptor.input_wiki),
-    clarifications_path: resolveOwnedPath(verified.root, descriptor.clarifications),
-    generation_spec_path: resolveOwnedPath(verified.root, descriptor.generation_spec),
-    approved_skill_dir: approvedSkillDir,
-    approved_skill_files: approvedSkillFiles,
-    semantic_oracle_path: resolveOwnedPath(verified.root, descriptor.semantic_oracle),
-    scenarios,
-    manifest: verified.manifest,
-  };
+  const loaded = { case_id: descriptor.case_id, allowed_actions: [...descriptor.allowed_actions], journey_scenario: descriptor.journey_scenario, wiki_path: resolveOwnedPath(verified.root, descriptor.input_wiki), registration_template_path: resolveOwnedPath(verified.root, descriptor.registration_template), semantic_oracle_path: resolveOwnedPath(verified.root, descriptor.semantic_oracle), scenarios, manifest: verified.manifest };
   const reservedRolePaths = assertExclusiveRolePaths(rolePathEntries(loaded));
   for (const scenario of scenarios) loadDriver(scenario, reservedRolePaths);
+  loadRegistrationTemplate(loaded);
   return loaded;
 }
 
 export function loadReleaseCaseInputs(caseRoot) {
   const loaded = loadReleaseCase(caseRoot);
   const reservedRolePaths = new Set(rolePathEntries(loaded).map(([, absolute]) => pathIdentity(absolute)));
+  const registrationTemplate = loadRegistrationTemplate(loaded);
   return {
     case_id: loaded.case_id,
     allowed_actions: loaded.allowed_actions,
     journey_scenario: loaded.journey_scenario,
     wiki: fs.readFileSync(loaded.wiki_path, "utf8"),
-    clarifications: fs.readFileSync(loaded.clarifications_path, "utf8"),
-    generation_spec: readJson(loaded.generation_spec_path),
-    approved_skill_dir: loaded.approved_skill_dir,
-    scenarios: loaded.scenarios.map((scenario) => {
-      const driver = loadDriver(scenario, reservedRolePaths);
-      return {
-        scenario_id: scenario.scenario_id,
-        driver,
-        attachment_paths: driver.attachment_files.map((relative) => resolveOwnedPath(path.dirname(scenario.driver_path), relative)),
-      };
-    }),
+    wiki_path: loaded.wiki_path,
+    registration_template: registrationTemplate,
+    registration_template_path: loaded.registration_template_path,
+    product_registration: { registration_id: registrationTemplate.registration_id, runtime_ref_id: diagnosisSkillRuntimeRefId(registrationTemplate.registration_id), version: registrationTemplate.version, skill_name: registrationTemplate.package.skill_name, source_wiki_sha256: registrationTemplate.package.source_wiki_sha256, logparse_product: registrationTemplate.runtime.preprocessing.logparse_product, attachment_requirement: registrationTemplate.runtime.preprocessing.logparse_plan.attachment_requirement },
+    scenarios: loaded.scenarios.map((scenario) => { const { driver, attachment_paths } = loadDriver(scenario, reservedRolePaths); return { scenario_id: scenario.scenario_id, driver, attachment_paths }; }),
   };
+}
+
+function loadSemanticOracle(loaded) {
+  const oracle = readJson(loaded.semantic_oracle_path);
+  exactKeys(oracle, SEMANTIC_ORACLE_FIELDS, "RELEASE_CASE_SEMANTIC_ORACLE_FIELDS", "Release case semantic oracle");
+  assertFlow(oracle.schema_version === 2 && oracle.oracle_visibility === "GATE_ONLY", "RELEASE_CASE_SEMANTIC_ORACLE_VERSION", "Release case semantic oracle metadata is invalid");
+  stringArray(oracle.author_note_markers_forbidden_in_product, "RELEASE_CASE_NOTE_MARKERS", "Release case forbidden note markers");
+  stringArray(oracle.business_canaries, "RELEASE_CASE_CANARIES", "Release case business canaries", { nonempty: true });
+  const expected = oracle.expected_package;
+  exactKeys(expected, EXPECTED_PACKAGE_FIELDS, "RELEASE_CASE_EXPECTED_PACKAGE_FIELDS", "Release case expected package");
+  assertFlow(typeof expected.skill_name === "string" && REGISTRATION_ID.test(expected.skill_name), "RELEASE_CASE_EXPECTED_SKILL_NAME", "Release expected skill name is invalid");
+  assertFlow(typeof expected.source_wiki_sha256 === "string" && SHA256.test(expected.source_wiki_sha256), "RELEASE_CASE_EXPECTED_WIKI_SHA", "Release expected Wiki digest is invalid");
+  assertFlow(expected.source_wiki_sha256 === sha256File(loaded.wiki_path), "RELEASE_CASE_EXPECTED_WIKI_DRIFT", "Release expected Wiki digest differs from the case Wiki");
+  stringArray(expected.required_user_inputs, "RELEASE_CASE_EXPECTED_INPUTS", "Release expected user inputs", { nonempty: true, pattern: USER_FACT });
+  stringArray(expected.required_artifacts, "RELEASE_CASE_EXPECTED_ARTIFACTS", "Release expected artifacts", { nonempty: true, pattern: USER_FACT });
+  stringArray(expected.required_log_derived_fields, "RELEASE_CASE_EXPECTED_LOG_FIELDS", "Release expected log-derived fields", { nonempty: true, pattern: USER_FACT });
+  stringArray(expected.required_shared_markers, "RELEASE_CASE_EXPECTED_SHARED_MARKERS", "Release expected shared markers", { nonempty: true });
+  stringArray(expected.forbidden_paths, "RELEASE_CASE_EXPECTED_FORBIDDEN_PATHS", "Release forbidden paths", { nonempty: true });
+  assertFlow(Array.isArray(expected.method_marker_sets) && expected.method_marker_sets.length > 0, "RELEASE_CASE_EXPECTED_METHODS", "Release expected method marker sets are invalid");
+  const semanticIds = [];
+  for (const item of expected.method_marker_sets) {
+    exactKeys(item, METHOD_MARKER_SET_FIELDS, "RELEASE_CASE_EXPECTED_METHOD_FIELDS", "Release expected method marker set");
+    assertFlow(typeof item.semantic_id === "string" && USER_FACT.test(item.semantic_id), "RELEASE_CASE_EXPECTED_METHOD_ID", "Release expected semantic method id is invalid");
+    stringArray(item.all_markers, "RELEASE_CASE_EXPECTED_METHOD_MARKERS", "Release expected method markers", { nonempty: true });
+    semanticIds.push(item.semantic_id);
+  }
+  assertFlow(semanticIds.length === new Set(semanticIds).size, "RELEASE_CASE_EXPECTED_METHOD_ID", "Release expected semantic method ids must be unique");
+  const wiki = fs.readFileSync(loaded.wiki_path, "utf8");
+  for (const marker of [...expected.required_shared_markers, ...expected.method_marker_sets.flatMap((item) => item.all_markers)]) assertFlow(wiki.includes(marker), "RELEASE_CASE_ORACLE_MARKER_NOT_IN_WIKI", `Release oracle marker is absent from the Wiki: ${marker}`);
+  const registration = loadRegistrationTemplate(loaded);
+  assertFlow(registration.package.skill_name === expected.skill_name && registration.package.source_wiki_sha256 === expected.source_wiki_sha256, "RELEASE_CASE_ORACLE_REGISTRATION", "Release expected package differs from registration");
+  return oracle;
+}
+
+function loadScenarioOracle(scenario, loaded) {
+  const oracle = readJson(scenario.oracle_path);
+  exactKeys(oracle, SCENARIO_ORACLE_FIELDS, "RELEASE_CASE_SCENARIO_ORACLE_FIELDS", "Release scenario oracle");
+  assertFlow(oracle.schema_version === 2 && oracle.oracle_visibility === "GATE_ONLY", "RELEASE_CASE_SCENARIO_ORACLE_VERSION", "Release scenario oracle metadata is invalid");
+  assertFlow(oracle.scenario_id === scenario.scenario_id, "RELEASE_CASE_SCENARIO_ORACLE_ID", "Release scenario oracle id is inconsistent");
+  assertFlow(["CONFIRMED", "PARTIAL", "INSUFFICIENT"].includes(oracle.expected_status), "RELEASE_CASE_SCENARIO_STATUS", "Release scenario expected status is invalid");
+  markerGroups(oracle.required_confirmed_marker_groups, "RELEASE_CASE_CONFIRMED_MARKERS", "Release confirmed marker groups");
+  markerGroups(oracle.required_candidate_marker_groups, "RELEASE_CASE_CANDIDATE_MARKERS", "Release candidate marker groups");
+  stringArray(oracle.forbidden_evidence_terms, "RELEASE_CASE_FORBIDDEN_EVIDENCE", "Release forbidden evidence terms");
+  stringArray(oracle.required_safety_phrases, "RELEASE_CASE_SAFETY_PHRASES", "Release required safety phrases", { nonempty: true });
+  assertFlow(Array.isArray(oracle.required_evidence_identities), "RELEASE_CASE_EVIDENCE_IDENTITIES", "Release evidence identities must be an array");
+  const { attachment_paths: attachmentPaths } = loadDriver(scenario, new Set(rolePathEntries(loaded).map(([, absolute]) => pathIdentity(absolute))));
+  const attachmentLines = attachmentPaths.flatMap((absolute) => fs.readFileSync(absolute, "utf8")
+    .split(/\r?\n/)
+    .map((line, index) => ({ absolute, line_number: index + 1, line }))
+    .filter((item) => item.line.length > 0));
+  const claimedOccurrences = new Set();
+  for (const identity of oracle.required_evidence_identities) {
+    exactKeys(identity, EVIDENCE_IDENTITY_FIELDS, "RELEASE_CASE_EVIDENCE_IDENTITY_FIELDS", "Release evidence identity");
+    assertFlow(typeof identity.marker === "string" && identity.marker.length > 0, "RELEASE_CASE_EVIDENCE_MARKER", "Release evidence marker is invalid");
+    stringArray(identity.identity_tokens, "RELEASE_CASE_EVIDENCE_TOKENS", "Release evidence identity tokens", { nonempty: true });
+    const matches = attachmentLines.filter((item) => item.line.includes(identity.marker)
+      && identity.identity_tokens.every((token) => item.line.includes(token)));
+    assertFlow(matches.length === 1, "RELEASE_CASE_EVIDENCE_NOT_UNIQUE", "Release evidence identity must match exactly one frozen log line");
+    const occurrence = `${pathIdentity(matches[0].absolute)}\0${matches[0].line_number}`;
+    assertFlow(!claimedOccurrences.has(occurrence), "RELEASE_CASE_EVIDENCE_EVENT_MERGED", "Release evidence identities must name distinct frozen log events");
+    claimedOccurrences.add(occurrence);
+  }
+  return oracle;
 }
 
 export function loadReleaseCaseOracle(caseRoot) {
   const loaded = loadReleaseCase(caseRoot);
-  return {
-    case_id: loaded.case_id,
-    semantic_oracle: loadSemanticOracle(loaded),
-    scenarios: loaded.scenarios.map((scenario) => ({
-      scenario_id: scenario.scenario_id,
-      oracle: loadScenarioOracle(scenario),
-    })),
-  };
+  const semanticOracle = loadSemanticOracle(loaded);
+  for (const scenario of loaded.scenarios) {
+    const driver = readJson(scenario.driver_path);
+    assertFlow(canonicalJson([...driver.initial_user_fact_names].sort()) === canonicalJson([...semanticOracle.expected_package.required_user_inputs].sort()), "RELEASE_CASE_DRIVER_INPUT_COVERAGE", "Release driver inputs must exactly cover the expected Methods user inputs");
+  }
+  return { case_id: loaded.case_id, semantic_oracle: semanticOracle, scenarios: loaded.scenarios.map((scenario) => ({ scenario_id: scenario.scenario_id, oracle: loadScenarioOracle(scenario, loaded) })) };
 }
 
 export function releaseCaseDigests(caseRoot) {
   const loaded = loadReleaseCase(caseRoot);
-  const oraclePaths = new Set([
-    path.relative(path.resolve(caseRoot), loaded.semantic_oracle_path).split(path.sep).join("/"),
-    ...loaded.scenarios.map((scenario) => path.relative(path.resolve(caseRoot), scenario.oracle_path).split(path.sep).join("/")),
-  ]);
-  const records = verifyReleaseCaseManifest(caseRoot).records.map(({ path: relative, size, sha256 }) => ({ path: relative, size, sha256 }));
+  const root = path.resolve(caseRoot);
+  const relative = (absolute) => path.relative(root, absolute).split(path.sep).join("/");
+  const oraclePaths = new Set([relative(loaded.semantic_oracle_path), ...loaded.scenarios.map((scenario) => relative(scenario.oracle_path))]);
+  const records = verifyReleaseCaseManifest(caseRoot).records.map(({ path: recordPath, size, sha256 }) => ({ path: recordPath, size, sha256 }));
   const input = records.filter((record) => !oraclePaths.has(record.path));
   const oracle = records.filter((record) => oraclePaths.has(record.path));
-  return {
-    input_digest: sha256Bytes(canonicalJson(input)),
-    oracle_digest: sha256Bytes(canonicalJson(oracle)),
-    all_digest: sha256Bytes(canonicalJson(records)),
-    input_records: input,
-    oracle_records: oracle,
-  };
+  return { input_digest: sha256Bytes(canonicalJson(input)), oracle_digest: sha256Bytes(canonicalJson(oracle)), all_digest: sha256Bytes(canonicalJson(records)), input_records: input, oracle_records: oracle };
 }
 
 export function discoverReleaseCaseRoot(releaseRoot) {
   const root = path.resolve(releaseRoot);
-  const candidates = fs.readdirSync(root, { withFileTypes: true })
-    .filter((entry) => entry.isDirectory() && fs.existsSync(path.join(root, entry.name, "case.json")))
-    .map((entry) => path.join(root, entry.name))
-    .sort();
+  const candidates = fs.readdirSync(root, { withFileTypes: true }).filter((entry) => entry.isDirectory() && fs.existsSync(path.join(root, entry.name, "case.json"))).map((entry) => path.join(root, entry.name)).sort();
   assertFlow(candidates.length === 1, "RELEASE_CASE_SELECTION", "Exactly one reviewed Release case must be selected by the repository snapshot");
   return candidates[0];
 }
@@ -564,19 +357,13 @@ export function releaseCasePartition(caseRoot, partition) {
   const records = verifyReleaseCaseManifest(caseRoot).records.map(({ path: recordPath, size, sha256 }) => ({ path: recordPath, size, sha256 }));
   const semanticOracle = relative(loaded.semantic_oracle_path);
   const scenarioOracles = new Set(loaded.scenarios.map((scenario) => relative(scenario.oracle_path)));
-  const approvedPrefix = `${relative(loaded.approved_skill_dir)}/`;
-  const wikiPaths = new Set([relative(loaded.wiki_path), relative(loaded.clarifications_path)]);
-  const generationSpec = relative(loaded.generation_spec_path);
+  const wiki = relative(loaded.wiki_path);
+  const registration = relative(loaded.registration_template_path);
   let selected;
-  if (partition === "wiki") selected = records.filter((record) => wikiPaths.has(record.path));
-  else if (partition === "approved") selected = records.filter((record) => record.path === generationSpec || record.path.startsWith(approvedPrefix));
+  if (partition === "wiki") selected = records.filter((record) => record.path === wiki);
+  else if (partition === "registration") selected = records.filter((record) => record.path === registration);
   else if (partition === "oracle") selected = records.filter((record) => record.path === semanticOracle || scenarioOracles.has(record.path));
   else if (partition === "journey") selected = records.filter((record) => record.path !== semanticOracle && !scenarioOracles.has(record.path));
   else assertFlow(false, "RELEASE_CASE_PARTITION", `Unknown Release case partition: ${String(partition)}`);
-  return {
-    case_id: loaded.case_id,
-    partition,
-    digest: sha256Bytes(canonicalJson(selected)),
-    records: selected,
-  };
+  return { case_id: loaded.case_id, partition, digest: sha256Bytes(canonicalJson(selected)), records: selected };
 }

@@ -10,6 +10,7 @@ import stat
 import sys
 import threading
 import time
+from collections.abc import Callable
 from ctypes import wintypes
 from pathlib import Path
 
@@ -28,6 +29,7 @@ from problem_locator.runtime import agent_backend as backend_module
 from problem_locator.runtime import process_tree as process_tree_module
 from problem_locator.runtime.agent_backend import AgentBackend, BackendExecutionLimits
 from problem_locator.runtime.failures import RuntimeExecutionError
+from tests.process_tree_test_support import ChildPidReadyMonotonic
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[4]
@@ -224,11 +226,17 @@ def _limits(
     )
 
 
-def _backend(mode: str, **environment: str) -> AgentBackend:
+def _backend(
+    mode: str,
+    *,
+    monotonic: Callable[[], float] = time.monotonic,
+    **environment: str,
+) -> AgentBackend:
     command = f"{shlex.quote(sys.executable)} {shlex.quote(str(FAKE_CLAUDE))}"
     return AgentBackend(
         command,
         parent_environment={"FAKE_CLAUDE_MODE": mode, **environment},
+        monotonic=monotonic,
     )
 
 
@@ -607,14 +615,22 @@ def test_timeout_cannot_be_blocked_by_agent_ignoring_stdin(tmp_path: Path) -> No
 @pytest.mark.skipif(os.name == "nt", reason="POSIX process-group assertion")
 def test_timeout_terminates_complete_posix_child_tree(tmp_path: Path) -> None:
     root = _workspace(tmp_path)
+    marker = root / "output/proposals/child/child.pid"
+    ready_clock = ChildPidReadyMonotonic(marker)
     with pytest.raises(RuntimeExecutionError) as caught:
         _execute(
-            _backend("child-hang"),
+            _backend(
+                "child-hang",
+                monotonic=ready_clock,
+                FAKE_CHILD_PID_DELAY_SECONDS="0.35",
+            ),
             root,
             limits=_limits(wall_time=0.25),
         )
     _assert_failure(caught, ErrorCode.BACKEND_TIMEOUT)
-    child_pid = int((root / "output/proposals/child/child.pid").read_text())
+    child_pid = ready_clock.ready_pid
+    assert child_pid is not None
+    assert int(marker.read_text(encoding="ascii")) == child_pid
     deadline = time.monotonic() + 2.0
     while time.monotonic() < deadline and _pid_exists(child_pid):
         time.sleep(0.02)
@@ -624,14 +640,22 @@ def test_timeout_terminates_complete_posix_child_tree(tmp_path: Path) -> None:
 @pytest.mark.skipif(os.name != "nt", reason="Windows Job Object assertion")
 def test_timeout_terminates_complete_windows_child_tree(tmp_path: Path) -> None:
     root = _workspace(tmp_path)
+    marker = root / "output/proposals/child/child.pid"
+    ready_clock = ChildPidReadyMonotonic(marker)
     with pytest.raises(RuntimeExecutionError) as caught:
         _execute(
-            _backend("child-hang"),
+            _backend(
+                "child-hang",
+                monotonic=ready_clock,
+                FAKE_CHILD_PID_DELAY_SECONDS="0.35",
+            ),
             root,
             limits=_limits(wall_time=0.25),
         )
     _assert_failure(caught, ErrorCode.BACKEND_TIMEOUT)
-    child_pid = int((root / "output/proposals/child/child.pid").read_text())
+    child_pid = ready_clock.ready_pid
+    assert child_pid is not None
+    assert int(marker.read_text(encoding="ascii")) == child_pid
     deadline = time.monotonic() + 2.0
     while time.monotonic() < deadline and _pid_exists(child_pid):
         time.sleep(0.02)

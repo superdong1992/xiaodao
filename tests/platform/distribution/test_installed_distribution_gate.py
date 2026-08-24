@@ -25,16 +25,23 @@ from problem_locator.contracts import (
 
 
 ROOT = Path(__file__).resolve().parents[3]
-TAKEOVER_PRODUCT_HASH = (
-    "7f0447460e4a56f882a1f46493ceb645930c0a527bccb303c7929a1d7b3cbe9e"
+RPC_REGISTRATION_SHA256 = (
+    "a1f8f59d5c3904ed545c5ae54b4d9a3b5e80e80bdd74e4cc51dff2b7adb8bcde"
 )
-TAKEOVER_SKILL = (
+RPC_PACKAGE_TREE_SHA256 = (
+    "d4002ab1ae9bfaf49a5db4f84a9932e9a0918de55b6248175b4f25a6873ffd3c"
+)
+RPC_COMBINED_SHA256 = (
+    "c456d5b74889f3c4ddbebd483867abe5bc258feea9c274045feda6f9dea2ce07"
+)
+RPC_REGISTRATION = (
     ROOT
     / "tests"
     / "fixtures"
     / "components"
-    / "diagnosis-generator"
-    / "diagnose-service-takeover"
+    / "runtime-catalog"
+    / "skill-dir"
+    / "rpc-log-analysis"
 )
 OFFICIAL_KEYS = {
     "BIND_HOST",
@@ -52,7 +59,7 @@ EXPECTED_RUNTIME_VERSIONS = {
     "fastapi": "0.139.2",
     "httpx": "0.28.1",
     "mcp": "1.29.0",
-    "problem-locator": "4.0.0",
+    "problem-locator": "5.0.0",
     "pydantic": "2.13.4",
     "python-dotenv": "1.2.2",
     "starlette": "1.3.1",
@@ -384,7 +391,7 @@ def test_clean_installed_distribution_import_cli_and_server_gate(
     skill_dir, logparse_repo, logparse_config, logparse_python = (
         _real_asset_paths(outside_cwd, _outside_environment())
     )
-    assert TAKEOVER_SKILL.is_dir() and not TAKEOVER_SKILL.is_symlink()
+    assert RPC_REGISTRATION.is_dir() and not RPC_REGISTRATION.is_symlink()
 
     wheelhouse = tmp_path / "wheelhouse"
     _run_checked(
@@ -517,7 +524,12 @@ def test_clean_installed_distribution_import_cli_and_server_gate(
         import sysconfig
 
         import problem_locator
-        from problem_locator.runtime.catalog import hash_product_directory
+        from problem_locator.runtime.methods_skill import (
+            load_specialized_skill_registration,
+        )
+
+        registration_root = pathlib.Path(sys.argv[1])
+        resolved_skill = load_specialized_skill_registration(registration_root)
 
         names = (
             "fastapi",
@@ -537,7 +549,13 @@ def test_clean_installed_distribution_import_cli_and_server_gate(
             "cwd": os.getcwd(),
             "module_file": str(pathlib.Path(problem_locator.__file__).resolve()),
             "purelib": str(pathlib.Path(sysconfig.get_paths()["purelib"]).resolve()),
-            "skill_hash": hash_product_directory(pathlib.Path(sys.argv[1])),
+            "registration_id": resolved_skill.registration_id,
+            "registration_sha256": resolved_skill.registration_sha256,
+            "package_tree_sha256": resolved_skill.package_tree_sha256,
+            "combined_sha256": resolved_skill.combined_sha256,
+            "package_relative_path": str(
+                resolved_skill.package_root.relative_to(registration_root)
+            ),
             "sys_path": sys.path,
             "versions": {
                 name: importlib.metadata.version(name) for name in names
@@ -554,7 +572,7 @@ def test_clean_installed_distribution_import_cli_and_server_gate(
             "-I",
             "-c",
             probe_code,
-            os.fspath(TAKEOVER_SKILL),
+            os.fspath(RPC_REGISTRATION),
         ],
         cwd=outside_cwd,
         environ=installed_environ,
@@ -571,7 +589,11 @@ def test_clean_installed_distribution_import_cli_and_server_gate(
     assert probe["versions"] == EXPECTED_RUNTIME_VERSIONS
     assert probe["has_hatchling"] is False
     assert probe["has_pytest"] is False
-    assert probe["skill_hash"] == TAKEOVER_PRODUCT_HASH
+    assert probe["registration_id"] == "rpc-log-analysis"
+    assert probe["registration_sha256"] == RPC_REGISTRATION_SHA256
+    assert probe["package_tree_sha256"] == RPC_PACKAGE_TREE_SHA256
+    assert probe["combined_sha256"] == RPC_COMBINED_SHA256
+    assert probe["package_relative_path"] == "package/rpc-log-analysis"
 
     data_root = tmp_path / "installed-data"
     export_path = tmp_path / "installed-state-export.json"

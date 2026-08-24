@@ -27,14 +27,26 @@
         "proof.real-generic-locator",
         "proof.real-skill-generation",
         "proof.real-route",
-        "proof.real-diagnose",
         "proof.real-review",
+        "proof.real-codex-luna-methods",
         "proof.dev-cross-job-environment",
         "proof.dev-cross-job-route",
         "proof.dev-cross-job-upload",
         "proof.dev-cross-job-diagnose-review",
         "proof.dev-cross-job-publish-restart"
       ]
+    },
+    "dev.macos-codex-luna-methods": {
+      "description": "Generate and freeze one macOS arm64 Codex/Luna Methods package under its complete producer identity.",
+      "tracks": ["dev"],
+      "required_proofs": ["proof.real-macos-codex-luna-methods"],
+      "selectable_proofs": []
+    },
+    "dev.macos-codex-luna-e2e": {
+      "description": "Run one fresh-data-root macOS Codex/Luna MCP smoke without Docker, browser, or business REST APIs.",
+      "tracks": ["dev"],
+      "required_proofs": ["proof.real-macos-codex-luna-e2e"],
+      "selectable_proofs": []
     },
     "release.full": {
       "description": "A clean-source, fresh CrossJob Release closure with all deterministic and platform claims.",
@@ -50,6 +62,17 @@
         "proof.server-dfx",
         "proof.real-agent-cross-job",
         "proof.real-logparse-cross-job"
+      ],
+      "selectable_proofs": []
+    },
+    "release.codex-luna-methods": {
+      "description": "A clean-source, Darwin-arm64 validation of the pinned Codex CLI plus gpt-5.6-luna Methods exploration flow.",
+      "tracks": ["release"],
+      "required_proofs": [
+        "proof.framework",
+        "proof.repository-static",
+        "proof.deterministic-full",
+        "proof.real-codex-luna-methods"
       ],
       "selectable_proofs": []
     }
@@ -76,12 +99,12 @@
       "stages": ["deterministic.full"]
     },
     "proof.host-client-capability": {
-      "description": "The native Client exposes and calls only the flat seven-tool HTTP contract without client DFX.",
+      "description": "The selected Client execution topology exposes and calls only the flat seven-tool HTTP contract without client DFX.",
       "acceptance": "all",
       "stages": ["platform.host-capability"]
     },
     "proof.linux-server-capability": {
-      "description": "The Linux Server runtime, installed distribution and platform contracts are executable.",
+      "description": "The Linux Server runtime, installed distribution, native startup and process-tree cleanup contracts are executable.",
       "acceptance": "all",
       "stages": ["platform.server-linux-capability"]
     },
@@ -101,19 +124,29 @@
       "stages": ["real.generic-locator"]
     },
     "proof.real-skill-generation": {
-      "description": "A real conversion Agent first loads the identity-bound Wiki conversion Skill, reads and writes only the permission-scoped inputs, declared self-contained references and generation output, and produces a valid Diagnosis Skill that satisfies the case-local executable and prose oracle without leaking author notes or oracle data; its complete tool trace is audited and sealed.",
+      "description": "Claude Code with the pinned DeepSeek Flash model loads the identity-bound Wiki conversion Skill and directly produces one valid Methods diagnosis package; no GenerationSpec, compiled manifest, approved package, compatibility layer or oracle is exposed to the Agent.",
       "acceptance": "all",
       "stages": ["real.skill-generation"]
+    },
+    "proof.real-codex-luna-methods": {
+      "description": "The pinned Codex CLI and gpt-5.6-luna generate one Methods package and reuse that exact byte identity for nine read-only diagnoses; ten model calls, isolation, grounding, posthoc aggregate usage and cost are sealed as Release evidence.",
+      "acceptance": "all",
+      "stages": ["real.codex-luna-methods"]
+    },
+    "proof.real-macos-codex-luna-methods": {
+      "description": "One pinned Codex CLI plus gpt-5.6-luna turn generates, validates, manifests, and atomically freezes the Methods package.",
+      "acceptance": "all",
+      "stages": ["real.macos-codex-luna-methods"]
+    },
+    "proof.real-macos-codex-luna-e2e": {
+      "description": "One Client plus ROUTE, Logparse, DIAGNOSE, and REVIEW complete the api-execution-overrun MCP smoke with exactly five Luna calls and no retry.",
+      "acceptance": "all",
+      "stages": ["real.macos-codex-luna-e2e"]
     },
     "proof.real-route": {
       "description": "The isolated real ROUTE Agent contract passes.",
       "acceptance": "all",
       "stages": ["real.route"]
-    },
-    "proof.real-diagnose": {
-      "description": "The isolated real DIAGNOSE Agent contract passes.",
-      "acceptance": "all",
-      "stages": ["real.diagnose"]
     },
     "proof.real-review": {
       "description": "The isolated real REVIEW Agent contract passes.",

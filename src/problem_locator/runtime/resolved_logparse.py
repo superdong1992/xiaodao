@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any
 
@@ -15,21 +14,48 @@ from problem_locator.contracts import (
 from problem_locator.integrations.logparse.requests import Anchor, ResolvedLogparsePlan
 
 from .context_policy import ResolvedJobAssets
-from .requirement_activation import active_role_labels
+from .methods_skill import load_specialized_skill_registration
 
 
 class ResolvedLogparsePlanNotReady(ValueError):
     """The pinned plan is valid but a required frozen input is still missing."""
 
 
+def _active_role_labels(
+    roles: list[dict[str, Any]],
+    anchors: list[dict[str, Any]],
+    facts: dict[str, str],
+) -> tuple[str, ...]:
+    if len(roles) != len(anchors):
+        raise ValueError("logparse roles and anchors must match one-for-one")
+    result: list[str] = []
+    for role, anchor in zip(roles, anchors, strict=True):
+        label = role["label"]
+        if anchor.get("label") != label:
+            raise ValueError("logparse role and anchor order is invalid")
+        bound_fact_names = {
+            binding["name"]
+            for field in ("module", "slot", "process_name", "pid")
+            if isinstance((binding := anchor.get(field)), dict)
+            and binding.get("source") == "USER_FACT"
+            and isinstance(binding.get("name"), str)
+        }
+        if role["presence"] == "REQUIRED" or bound_fact_names.intersection(facts):
+            result.append(label)
+    return tuple(result)
+
+
 def _manifest(assets: ResolvedJobAssets) -> dict[str, Any]:
     if assets.skill is None:
         raise ValueError("logparse Job requires a pinned diagnosis Skill")
-    path = Path(assets.skill.root_path) / "diagnosis-skill.json"
-    value = json.loads(path.read_bytes().decode("utf-8"))
-    if not isinstance(value, dict) or value.get("schema_version") != 6:
-        raise ValueError("diagnosis Skill manifest v6 is required")
-    return value
+    specialized = load_specialized_skill_registration(Path(assets.skill.root_path))
+    if specialized.combined_sha256 != assets.skill.ref.content_hash:
+        raise ValueError("registered Methods Skill differs from the pinned ref")
+    preprocessing = specialized.registration.preprocessing
+    return {
+        "roles": list(preprocessing.roles),
+        "logparse_plan": preprocessing.logparse_plan,
+    }
 
 
 def _facts(job: Job) -> dict[str, str]:
@@ -113,12 +139,16 @@ def compile_resolved_logparse_plan(
     raw_roles = manifest.get("roles")
     if not isinstance(raw_roles, list):
         raise ValueError("logparse Job Skill requires roles")
-    active_roles = set(active_role_labels(raw_roles, facts))
     problem_binding = plan.get("problem_time_binding")
     problem_time = _binding(problem_binding, facts)
     raw_anchors = plan.get("anchors")
     if not isinstance(raw_anchors, list) or not raw_anchors:
         raise ValueError("logparse plan requires ordered anchors")
+    if not all(isinstance(item, dict) for item in raw_anchors):
+        raise ValueError("logparse anchors must be objects")
+    active_roles = set(
+        _active_role_labels(raw_roles, raw_anchors, facts)  # type: ignore[arg-type]
+    )
     anchors: list[Anchor] = []
     for raw in raw_anchors:
         if not isinstance(raw, dict):

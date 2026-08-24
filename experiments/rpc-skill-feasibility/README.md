@@ -1,37 +1,45 @@
-# RPC 超时定位 Skill 可行性实验
+# RPC 超时定位 Skill 历史可行性实验
 
-这个目录验证一条最短链路：人工 Wiki 经实验版元 Skill 生成一个定位 Skill，再由同一个定位 Skill 诊断九份冻结日志。它不使用项目 Test Flow，也不产生 Release verdict。
+这个目录仅保留 Methods 工程化前的历史探索记录。当时用一份人工 Wiki 生成定位
+Skill，再对九份冻结日志做多轮诊断；这些记录帮助确认了原文证据、身份 token、
+多事件拆分和候选方法的必要性。
 
-当前加固阶段和后续证据溯源修复均在各自三轮上限内停止，不能宣称九例 PASS。原始加固失败见
-`artifacts/HARDENING_RESULTS.md`，证据溯源修复结果见 `artifacts/EVIDENCE_GROUNDING_RESULTS.md`；
-`artifacts/RESULTS.md` 保留此前四例可行性基线。
+历史结果包括：
 
-运行前提：
+- [`artifacts/RESULTS.md`](artifacts/RESULTS.md)：早期四例可行性基线；
+- [`artifacts/HARDENING_RESULTS.md`](artifacts/HARDENING_RESULTS.md)：加固实验；
+- [`artifacts/EVIDENCE_GROUNDING_RESULTS.md`](artifacts/EVIDENCE_GROUNDING_RESULTS.md)：证据 grounding 试验。
 
-- 从仓库根目录执行；
-- 本机 `codex` 已登录并可使用 `gpt-5.6-luna`；
-- 提供 Logparse 仓库，且其中已有可运行的 `.venv/bin/python`。
+它们只描述当时的实验输入、运行器和模型行为，不是当前产品回归证据，不产生
+Test Flow verdict，也不能支持“九例 PASS”或 Release PASS 结论。
 
-执行全部预处理、生成和诊断：
+## 当前唯一入口
 
-```bash
-python3 experiments/rpc-skill-feasibility/run.py \
-  --round 1 \
-  --logparse-root /path/to/logparse
-```
+旧 `run.py`、`check_evidence_contract.py` 和实验版元 Skill 已退役；不得从本目录直接
+执行预处理、生成或诊断，也不得用历史 JSON/Markdown 产物组装新的发布结论。
 
-只验证实验源文件并完成每个用例的一次 Logparse 预处理：
+当前 Methods 架构见
+[`design/wiki-diagnosis-generalization.md`](../../design/wiki-diagnosis-generalization.md)，所有测试活动只从
+[`tools/test-flow/run.sh`](../../tools/test-flow/run.sh) 或 Windows 等价入口 `run.ps1` 进入，操作、缓存、
+预算、身份与证据合同见
+[`tools/test-flow/README.md`](../../tools/test-flow/README.md)。
 
-```bash
-python3 experiments/rpc-skill-feasibility/run.py \
-  --prepare-only \
-  --logparse-root /path/to/logparse
-```
-
-单独验证领域无关的证据原文、身份 token 和多事件合同：
+日常确定性验证使用 `dev.default`；它不调用真实模型：
 
 ```bash
-python3 -B experiments/rpc-skill-feasibility/check_evidence_contract.py
+./tools/test-flow/run.sh --track dev --goal dev.default
 ```
 
-运行产物保存在被 Git 忽略的 `.tmp/rpc-skill-feasibility/`。同一个用例再次运行时，如果原始日志、问题时间、两端进程以及 Logparse 配置和版本没有变化，运行器直接复用冻结日志。如果这些内容变化或上次预处理未完整结束，运行器停止并说明原因；新输入必须使用新的用例记录，不能覆盖旧收据后静默重跑。
+Codex CLI + `gpt-5.6-luna` 探索已收口为独立的 `release.codex-luna-methods` Goal；它不属于
+产品 `release.full` 的 CrossJob 闭包。该 Goal 用一次 Methods 生成加九次只读诊断，绑定精确
+Codex CLI、`gpt-5.6-luna`、`medium` reasoning、Logparse 输入和不可变 source snapshot。
+运行前必须先对 `release.codex-luna-methods` 执行 `--plan-only`，提供配置要求的
+`--logparse-source`、`--codex-entry` 和 `--codex-auth`，并显式确认
+`--allow-codex-posthoc-budget`；它不需要 MCP、Claude Code 或 Docker 输入。不得直接调用
+`tools/test-flow/runtime-support/codex-luna-exploration-runner.mjs` 或从本目录绕过 Test Flow。
+
+要同时宣称产品 Linux→Linux CrossJob 和 Codex Luna 探索通过，必须分别执行两个 Goal，且两个
+权威 `verdict.json` 必须绑定同一个 Git-visible source snapshot digest。
+
+只有最后与当前 Git-visible source snapshot 精确绑定的 `verdict.json` 是权威结论；plan-only、
+半成品证据目录、历史 artifact 或直接运行底层 runner 都不能代替它。

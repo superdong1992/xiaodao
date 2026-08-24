@@ -48,6 +48,23 @@ _OPAQUE_ID_ADAPTER = TypeAdapter(OpaqueId)
 _SHA256_ADAPTER = TypeAdapter(Sha256)
 _PROPOSAL_DIRECTORY_PATTERN = re.compile(r"^p-[0-9a-f]{64}$")
 _TEMP_TOKEN_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+_LOGPARSE_PREPROCESS_WORKSPACE_SUFFIX = ".logparse-preprocess"
+
+
+def _validate_workspace_segment(segment: str) -> None:
+    """Accept only a Job UUID or its one product-owned Pass A workspace."""
+
+    job_id = (
+        segment[: -len(_LOGPARSE_PREPROCESS_WORKSPACE_SUFFIX)]
+        if segment.endswith(_LOGPARSE_PREPROCESS_WORKSPACE_SUFFIX)
+        else segment
+    )
+    _OPAQUE_ID_ADAPTER.validate_python(job_id)
+    if segment not in {
+        job_id,
+        f"{job_id}{_LOGPARSE_PREPROCESS_WORKSPACE_SUFFIX}",
+    }:
+        raise ValueError("workspace segment is not a fixed product workspace identity")
 
 
 class _CoordinationLock(Protocol):
@@ -464,7 +481,7 @@ class FormalResourceReader:
             or parts[3] != "inputs"
         ):
             raise ValueError("destination is not the frozen workspace input path")
-        _OPAQUE_ID_ADAPTER.validate_python(parts[2])
+        _validate_workspace_segment(parts[2])
 
         address = parse_storage_key(resource_ref.storage_key)
         workspace_relative_path = "/".join(parts[3:])

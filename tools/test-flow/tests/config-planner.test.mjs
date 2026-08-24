@@ -6,7 +6,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { loadConfiguration, topologicalStages } from "../lib/config.mjs";
-import { buildRunPlan, resolveClient, retryRequirement } from "../lib/planner.mjs";
+import { buildRunPlan, builtInAdapter, releaseImageValidationMode, resolveClient, retryRequirement, supportedCodexLunaOrchestrator, supportedHostClientTopology } from "../lib/planner.mjs";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 
@@ -75,34 +75,142 @@ test("Release is fresh, binds an immutable source snapshot and exposes exact per
   assert.equal(built.plan.resume, "fresh");
   assert.equal(built.options.crossJobAdapter, path.join(REPO_ROOT, "tools", "test-flow", "adapters", "macos-linux-release.mjs"));
   assert.deepEqual(built.plan.budget, {
-    estimated_tokens: 422000,
-    sum_of_per_invocation_caps_usd: 37,
+    estimated_tokens: 910000,
+    sum_of_per_invocation_caps_usd: 31,
     cumulative_spending_cap: null,
     per_invocation_hard_enforced: true,
   });
+
+  const codex = built.plan.stages.find((stage) => stage.id === "real.codex-luna-methods");
+  assert.equal(codex, undefined);
+  assert.deepEqual(built.plan.release_inputs.codex, { status: "NOT_REQUIRED" });
+  assert.deepEqual(built.plan.release_inputs.codex_logparse_runtime, { status: "NOT_REQUIRED" });
+  assert.equal(codes.includes("CODEX_RUNTIME_INVALID"), false);
+  assert.equal(codes.includes("CODEX_POSTHOC_BUDGET_ACK_REQUIRED"), false);
 
   const route = built.plan.stages.find((stage) => stage.id === "journey.cross-job.route");
   const diagnose = built.plan.stages.find((stage) => stage.id === "journey.cross-job.diagnose");
   const publish = built.plan.stages.find((stage) => stage.id === "journey.cross-job.publish-restart");
   assert.deepEqual(route.invocation_caps.map((entry) => [entry.class, entry.min_count, entry.max_count, entry.caps.max_total_tokens, entry.caps.max_budget_usd]), [
     ["host-client", 1, 1, 400000, 3],
-    ["server-agent", 2, 3, 2000000, 3],
+    ["server-agent", 1, 1, 2000000, 3],
   ]);
   assert.deepEqual(diagnose.invocation_caps.map((entry) => [entry.class, entry.min_count, entry.max_count, entry.caps.max_total_tokens, entry.caps.max_budget_usd]), [
     ["host-client", 1, 1, 600000, 5],
-    ["server-agent", 2, 3, 2000000, 3],
+    ["server-agent", 3, 3, 2000000, 3],
   ]);
   assert.deepEqual(publish.invocation_caps.map((entry) => [entry.class, entry.min_count, entry.max_count, entry.caps.max_budget_usd]), [
     ["host-client", 1, 1, 1],
   ]);
 });
 
+test("Codex posthoc aggregate budget requires an explicit acknowledgement and remains visible after acknowledgement", () => {
+  const built = buildIsolatedRunPlan({
+    track: "release",
+    goal: "release.codex-luna-methods",
+    client: "macos",
+    planOnly: true,
+    allowCodexPosthocBudget: true,
+  });
+  const blockerCodes = built.plan.admission.blockers.map((entry) => entry.code);
+  const warningCodes = built.plan.admission.warnings.map((entry) => entry.code);
+  assert.equal(blockerCodes.includes("CODEX_POSTHOC_BUDGET_ACK_REQUIRED"), false);
+  assert.ok(blockerCodes.includes("CODEX_RUNTIME_INVALID"));
+  assert.deepEqual(warningCodes.filter((code) => code === "CODEX_POSTHOC_BUDGET_EXCEPTION"), ["CODEX_POSTHOC_BUDGET_EXCEPTION"]);
+  assert.equal(built.plan.budget.posthoc_aggregate_limits.acknowledged, true);
+  assert.equal(built.plan.budget.per_invocation_hard_enforced, false);
+  assert.deepEqual(built.plan.budget, {
+    estimated_tokens: 5000000,
+    sum_of_per_invocation_caps_usd: 10,
+    cumulative_spending_cap: null,
+    posthoc_aggregate_limits: {
+      exception_id: "PSE-CODEX-LUNA-POSTHOC-001",
+      calls: 10,
+      tokens: 5000000,
+      equivalent_usd: 10,
+      enforcement: "posthoc-terminal-aggregate",
+      acknowledged: true,
+    },
+    per_invocation_hard_enforced: false,
+  });
+  assert.equal(blockerCodes.includes("CLAUDE_ENTRY_REQUIRED"), false);
+  assert.equal(blockerCodes.includes("CLAUDE_SETTINGS_REQUIRED"), false);
+  assert.equal(blockerCodes.includes("MCP_SOURCE_INVALID"), false);
+  assert.equal(blockerCodes.includes("DOCKER_CONTEXT_REQUIRED"), false);
+  assert.equal(blockerCodes.includes("CODEX_CLIENT_LABEL_INVALID"), false);
+  assert.equal(built.plan.release_inputs.topology, "darwin-local-codex");
+  assert.equal(built.plan.release_inputs.network_policy, "codex-app-server-provider-only-command-network-denied");
+  assert.equal(built.plan.release_inputs.cross_job_adapter, null);
+});
+
+test("Codex Luna goal cannot be mislabeled as a Linux Client proof", () => {
+  const built = buildIsolatedRunPlan({
+    track: "release",
+    goal: "release.codex-luna-methods",
+    client: "linux",
+    planOnly: true,
+    allowCodexPosthocBudget: true,
+  });
+  assert.ok(built.plan.admission.blockers.some((entry) => entry.code === "CODEX_CLIENT_LABEL_INVALID"));
+  assert.equal(built.plan.release_inputs.topology, "darwin-local-codex");
+});
+
+test("macOS Luna bootstrap and E2E are independent one-stage Dev goals with exact budgets and cache admission", () => {
+  const methods = buildIsolatedRunPlan({
+    track: "dev",
+    goal: "dev.macos-codex-luna-methods",
+    client: "macos",
+    planOnly: true,
+    allowRealModel: true,
+    allowCodexPosthocBudget: true,
+    reason: "plan",
+  }).plan;
+  assert.deepEqual(methods.stages.map((stage) => stage.id), ["real.macos-codex-luna-methods"]);
+  assert.equal(methods.stages[0].no_progress_seconds, 180);
+  assert.deepEqual(methods.stages[0].invocation_caps.map((item) => [item.class, item.min_count, item.max_count]), [["codex-luna-methods-bootstrap", 1, 1]]);
+  assert.equal(methods.stages[0].invocation_caps[0].per_call_hard_timeout_seconds, 600);
+  assert.equal(methods.budget.posthoc_aggregate_limits.calls, 1);
+  assert.equal(methods.budget.posthoc_aggregate_limits.tokens, 1_000_000);
+  assert.equal(methods.budget.posthoc_aggregate_limits.equivalent_usd, 2);
+
+  const e2e = buildIsolatedRunPlan({
+    track: "dev",
+    goal: "dev.macos-codex-luna-e2e",
+    client: "macos",
+    scenario: "api-execution-overrun",
+    planOnly: true,
+    allowRealModel: true,
+    allowCodexPosthocBudget: true,
+    reason: "plan",
+  }).plan;
+  assert.deepEqual(e2e.stages.map((stage) => stage.id), ["real.macos-codex-luna-e2e"]);
+  assert.equal(e2e.scenario, "api-execution-overrun");
+  assert.deepEqual(e2e.stages[0].invocation_caps[0].phases, ["CLIENT", "ROUTE", "LOGPARSE", "DIAGNOSE", "REVIEW"]);
+  assert.equal(e2e.stages[0].invocation_caps[0].per_call_hard_timeout_seconds, 600);
+  assert.equal(e2e.budget.posthoc_aggregate_limits.calls, 5);
+  assert.equal(e2e.budget.posthoc_aggregate_limits.tokens, 2_000_000);
+  assert.equal(e2e.budget.posthoc_aggregate_limits.equivalent_usd, 3);
+  assert.ok(e2e.admission.blockers.some((item) => item.code === "MACOS_CODEX_LUNA_METHODS_CACHE_REQUIRED"));
+
+  const invalid = buildIsolatedRunPlan({
+    track: "dev",
+    goal: "dev.macos-codex-luna-e2e",
+    client: "macos",
+    scenario: "../untrusted",
+    planOnly: true,
+  }).plan;
+  assert.ok(invalid.admission.blockers.some((item) => item.code === "MACOS_CODEX_LUNA_SCENARIO_INVALID"));
+});
+
 test("all supported Clients resolve to repository-owned first-party adapters", () => {
   for (const client of ["windows", "macos", "linux"]) {
     const built = buildIsolatedRunPlan({ track: "release", client, planOnly: true });
+    const adapterName = process.platform === "darwin" && client === "linux"
+      ? "macos-linux-linux-release.mjs"
+      : `${client}-linux-release.mjs`;
     assert.equal(
       built.options.crossJobAdapter,
-      path.join(REPO_ROOT, "tools", "test-flow", "adapters", `${client}-linux-release.mjs`),
+      path.join(REPO_ROOT, "tools", "test-flow", "adapters", adapterName),
     );
     assert.deepEqual(
       built.plan.stages.filter((stage) => stage.kind === "isolated-real").map((stage) => stage.id),
@@ -118,28 +226,17 @@ test("plans expose only observable progress and exact serial model deadlines", (
   assert.equal(stage.no_progress_seconds, null);
   assert.equal(stage.timeout_seconds, 2100);
   assert.deepEqual(stage.hard_caps, {
-    max_turns: 12,
+    max_turns: 16,
     max_total_tokens: 1000000,
     max_output_tokens: 64000,
     max_budget_usd: 10,
     hard_timeout_seconds: 1800,
   });
+  assert.equal(stage.estimated_tokens, 600000);
   assert.deepEqual(stage.invocation_caps.map((entry) => [entry.class, entry.min_count, entry.max_count]), [
     ["isolated-agent", 1, 1],
   ]);
   assert.ok(stage.hard_caps.hard_timeout_seconds + 60 < stage.timeout_seconds);
-
-  const diagnoseBuilt = buildIsolatedRunPlan({ track: "dev", goal: "dev.real", stage: "real.diagnose", planOnly: true });
-  const diagnose = diagnoseBuilt.plan.stages.find((candidate) => candidate.id === "real.diagnose");
-  assert.equal(diagnose.no_progress_seconds, null);
-  assert.equal(diagnose.timeout_seconds, 3900);
-  assert.deepEqual(diagnose.invocation_caps.map((entry) => [entry.class, entry.min_count, entry.max_count]), [
-    ["isolated-agent", 4, 4],
-  ]);
-  assert.equal(diagnose.hard_caps.max_budget_usd, 3);
-  assert.equal(diagnose.hard_caps.hard_timeout_seconds, 900);
-  assert.equal(diagnose.hard_caps.max_output_tokens, undefined);
-  assert.ok(4 * (diagnose.hard_caps.hard_timeout_seconds + 30) + 30 < diagnose.timeout_seconds);
 
   const serverBuilt = buildIsolatedRunPlan({ track: "release", client: "linux", planOnly: true });
   const host = serverBuilt.plan.stages.find((candidate) => candidate.id === "platform.host-capability");
@@ -162,6 +259,10 @@ test("retired rollout goals and caller-supplied adapters cannot become an execut
     planOnly: true,
   });
   assert.equal(built.options.crossJobAdapter, path.join(REPO_ROOT, "tools", "test-flow", "adapters", "macos-linux-release.mjs"));
+  assert.throws(
+    () => buildIsolatedRunPlan({ track: "dev", goal: "dev.real", stage: "real.diagnose", planOnly: true }),
+    (error) => error.code === "REAL_STAGE_INVALID",
+  );
 });
 
 test("client auto follows Windows/macOS and Linux remains explicit", () => {
@@ -169,6 +270,66 @@ test("client auto follows Windows/macOS and Linux remains explicit", () => {
   assert.equal(resolveClient("auto", "darwin"), "macos");
   assert.equal(resolveClient("auto", "linux"), null);
   assert.equal(resolveClient("linux", "darwin"), "linux");
+});
+
+test("Darwin explicit Linux selects only the dual-container adapter and rejects unsupported host-client pairs", () => {
+  assert.equal(
+    builtInAdapter(REPO_ROOT, "linux", "darwin"),
+    path.join(REPO_ROOT, "tools", "test-flow", "adapters", "macos-linux-linux-release.mjs"),
+  );
+  assert.equal(builtInAdapter(REPO_ROOT, "linux", "linux"), path.join(REPO_ROOT, "tools", "test-flow", "adapters", "linux-linux-release.mjs"));
+  assert.equal(supportedHostClientTopology("linux", "darwin"), true);
+  assert.equal(supportedHostClientTopology("macos", "darwin"), true);
+  assert.equal(supportedHostClientTopology("windows", "darwin"), false);
+  assert.equal(supportedHostClientTopology("linux", "win32"), false);
+});
+
+test("the exact Mach-O Codex Luna flow is bound to a Darwin arm64 orchestrator", () => {
+  assert.equal(supportedCodexLunaOrchestrator("darwin", "arm64"), true);
+  assert.equal(supportedCodexLunaOrchestrator("darwin", "x64"), false);
+  assert.equal(supportedCodexLunaOrchestrator("linux", "arm64"), false);
+  assert.equal(supportedCodexLunaOrchestrator("win32", "x64"), false);
+});
+
+test("every formal orchestrator freezes the Linux Server image by exact identity", () => {
+  assert.equal(releaseImageValidationMode("darwin", true), "sealed-darwin-cache");
+  assert.equal(releaseImageValidationMode("win32", true), "portable-exact-server-image");
+  assert.equal(releaseImageValidationMode("linux", true), "portable-exact-server-image");
+  assert.equal(releaseImageValidationMode("linux", false), "not-required");
+});
+
+test("Darwin explicit Linux declares the Client runtime by frozen image instead of the orchestrator Node", (context) => {
+  if (process.platform !== "darwin") {
+    context.skip("Darwin orchestrator regression");
+    return;
+  }
+  const built = buildIsolatedRunPlan({ track: "release", client: "linux", planOnly: true });
+  const declared = built.plan.release_inputs.claude.selected_client_runtime;
+  const source = built.plan.release_inputs.claude.orchestrator_distribution_source;
+  assert.equal(declared.execution_topology, "darwin-orchestrated-linux-container");
+  assert.equal(declared.platform, "linux/amd64");
+  assert.equal(declared.node_identity_boundary, "client-image-id");
+  assert.equal(declared.node.version, null);
+  assert.equal(declared.node.sha256, null);
+  assert.deepEqual(Object.keys(declared.claude).sort(), ["cli_sha256", "version"]);
+  assert.equal(Object.hasOwn(declared.claude, "tarball_sha256"), false);
+  assert.equal(source.node.version, process.version);
+  assert.notEqual(source.node.sha256, null);
+  for (const stageId of ["journey.cross-job.route", "journey.cross-job.diagnose", "journey.cross-job.publish-restart"]) {
+    const declaration = built.plan.stages.find((stage) => stage.id === stageId).invocation_caps[0];
+    assert.equal(declaration.class, "linux-client-container");
+    assert.equal(declaration.execution_topology, "darwin-orchestrated-linux-container");
+  }
+});
+
+test("the planner emits a hard blocker for an unsupported current host-client topology", (context) => {
+  if (process.platform !== "darwin") {
+    context.skip("Darwin orchestrator regression");
+    return;
+  }
+  const built = buildIsolatedRunPlan({ track: "release", client: "windows", planOnly: true });
+  assert.ok(built.plan.admission.blockers.some((entry) => entry.code === "HOST_CLIENT_TOPOLOGY_UNSUPPORTED"));
+  assert.notEqual(built.plan.admission.status, "ADMITTED");
 });
 
 test("a later same-identity PASS resolves an earlier retry stop", () => {

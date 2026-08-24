@@ -104,7 +104,17 @@ USER_FACT_ID = "00000000-0000-0000-0000-000000000030"
 USER_FACT_TRIGGER_ID = "00000000-0000-0000-0000-000000000031"
 RUNTIME_EPOCH = "00000000-0000-0000-0000-000000000090"
 PROCESSED_AT = "2026-07-31T00:05:00.000Z"
-_AUDIT_DRAFT_BYTES = b'{"observable":"agent draft"}'
+_METHOD_DIAGNOSIS_DRAFT_BYTES = canonical_json_bytes(
+    {
+        "schema_version": 1,
+        "status": "INSUFFICIENT",
+        "confirmed_methods": [],
+        "candidate_methods": [],
+        "evidence": [],
+        "limitations": ["The required event is outside the declared window."],
+        "safety_notes": ["Only frozen target logs were inspected."],
+    }
+)
 
 
 class _CountingRepository(InMemoryStateRepository):
@@ -932,7 +942,7 @@ def _inconclusive_diagnosis_outcome(
         )
         _bind_staged_result_files(payload, staged)
     payload["decision_audit"]["source_draft_sha256"] = hashlib.sha256(
-        _AUDIT_DRAFT_BYTES
+        _METHOD_DIAGNOSIS_DRAFT_BYTES
     ).hexdigest()
     payload["decision_audit"]["selected_terminal_path_id"] = "none"
     payload["decision_audit"]["terminal_resolution_status"] = "NONE"
@@ -956,12 +966,64 @@ def _publish_required_diagnosis_audit(
 ) -> None:
     if "context.txt" not in omit:
         records.publish_audit_bytes(outcome.job_id, "context.txt", b"fixed context\n")
-    if "agent_job_outcome.draft.json" not in omit:
+    if "method-diagnosis.draft.json" not in omit:
         records.publish_audit_bytes(
             outcome.job_id,
-            "agent_job_outcome.draft.json",
-            _AUDIT_DRAFT_BYTES,
+            "method-diagnosis.draft.json",
+            _METHOD_DIAGNOSIS_DRAFT_BYTES,
         )
+    methods_records = {
+        "logparse_broker_audit.json": {
+            "schema_version": 1,
+            "job_id": outcome.job_id,
+            "records": [],
+        },
+        "method-grounding-audit.json": {
+            "schema_version": 1,
+            "registration_id": "test-timeout",
+            "registration_sha256": "1" * 64,
+            "package_tree_sha256": "2" * 64,
+            "combined_sha256": "3" * 64,
+            "logparse_receipt_sha256": "4" * 64,
+            "status": "INSUFFICIENT",
+            "confirmed_methods": [],
+            "evidence_count": 0,
+            "checked_source_count": 1,
+            "skill_load": {
+                "package_tree_sha256": "2" * 64,
+                "scanned_source_ids": ["server"],
+                "marker_hits": [],
+                "loaded_method_ids": [],
+            },
+        },
+        "methods_logparse_receipt.json": {
+            "schema_version": 1,
+            "job_id": outcome.job_id,
+            "case_id": outcome.case_id,
+            "registration_id": "test-timeout",
+            "target_logs": [],
+        },
+        "methods_request.json": {
+            "schema_version": 1,
+            "job_id": outcome.job_id,
+            "case_id": outcome.case_id,
+            "registration_id": "test-timeout",
+            "user_inputs": [],
+            "target_logs_path": "inputs/target_logs.json",
+            "logparse_receipt_path": "inputs/logparse-receipt.json",
+        },
+        "methods_target_logs.json": {
+            "schema_version": 1,
+            "target_logs": [],
+        },
+    }
+    for filename, value in methods_records.items():
+        if filename not in omit:
+            records.publish_audit_bytes(
+                outcome.job_id,
+                filename,
+                canonical_json_bytes(value),
+            )
     assert outcome.decision_audit is not None
     agent_outcome_value = outcome.model_dump(mode="json")
     agent_outcome_value["proposed_evidence_drafts"] = agent_outcome_value.pop(
@@ -1010,7 +1072,7 @@ def _publish_required_diagnosis_audit(
             "schema_version": 2,
             "relative_path": "output/job_outcome.json",
             "source_draft_sha256": hashlib.sha256(
-                _AUDIT_DRAFT_BYTES
+                _METHOD_DIAGNOSIS_DRAFT_BYTES
             ).hexdigest(),
             "outcome_size": len(agent_outcome_bytes),
             "outcome_sha256": (
@@ -3333,6 +3395,17 @@ def test_unresolved_submission_atomically_binds_downloadable_audit_and_replays()
         assert names[0] == "manifest.json"
         assert any(name.endswith("/decision_audit.json") for name in names)
         assert any(name.endswith("/decision_evidence.jsonl") for name in names)
+        assert any(name.endswith("/method-diagnosis.draft.json") for name in names)
+        assert all(
+            any(name.endswith(f"/{filename}") for name in names)
+            for filename in (
+                "logparse_broker_audit.json",
+                "method-grounding-audit.json",
+                "methods_logparse_receipt.json",
+                "methods_request.json",
+                "methods_target_logs.json",
+            )
+        )
         assert all("user_result" not in name.lower() for name in names)
         assert all("upload" not in name.lower() for name in names)
         assert all("logparse-tree" not in name.lower() for name in names)

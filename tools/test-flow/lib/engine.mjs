@@ -188,19 +188,25 @@ export function applyHardCaps({ result, planStage, expectedModel }) {
     if (members.length < declaration.min_count || members.length > declaration.max_count) {
       return { ...result, status: "ERROR", failure_domain: "HARNESS", code: "MODEL_INVOCATION_COUNT_MISMATCH" };
     }
+    const expectedInvocationModel = declaration.model ?? expectedModel;
     for (const invocation of members) {
+      const totalTokenEnforcement = declaration.aggregate
+        ? invocation.hard_cap_enforcement?.total_tokens === `posthoc-terminal-aggregate:${TOKEN_USAGE_FORMULA}`
+        : invocation.hard_cap_enforcement?.total_tokens === `terminal-usage-postcondition:${TOKEN_USAGE_FORMULA}`;
       if (
         invocation.schema_version !== 3
+        || (declaration.execution_topology !== undefined && invocation.execution_topology !== declaration.execution_topology)
         || !isCompleteUsage(invocation.usage)
         || invocation.usage_complete !== true
-        || invocation.effective_model !== expectedModel
+        || invocation.effective_model !== expectedInvocationModel
+        || (declaration.reasoning_effort !== undefined && invocation.effective_reasoning_effort !== declaration.reasoning_effort)
         || canonicalJson(invocation.effective_caps) !== canonicalJson(declaration.caps)
         || invocation.terminal?.subtype !== "success"
         || invocation.terminal?.is_error !== false
         || invocation.wrapper_outcome?.schema_version !== 1
         || invocation.wrapper_outcome?.status !== "PASS"
         || invocation.wrapper_outcome?.code !== null
-        || invocation.hard_cap_enforcement?.total_tokens !== `terminal-usage-postcondition:${TOKEN_USAGE_FORMULA}`
+        || !totalTokenEnforcement
         || !validOutputTokenCapEvidence(invocation, declaration.caps)
       ) {
         return { ...result, status: "ERROR", failure_domain: "HARNESS", code: "MODEL_HARD_CAP_RECEIPT_MISMATCH" };
@@ -215,6 +221,15 @@ export function applyHardCaps({ result, planStage, expectedModel }) {
       const totalTokens = usage.total_tokens;
       if (!Number.isSafeInteger(totalTokens) || totalTokens < 0 || totalTokens > declaration.caps.max_total_tokens) {
         return { ...result, status: "FAIL", failure_domain: "CONTRACT", code: "MODEL_TOKEN_CAP_EXCEEDED" };
+      }
+    }
+    if (declaration.aggregate) {
+      const aggregate = sumUsage(members.map((invocation) => invocation.usage));
+      if (aggregate.total_tokens > declaration.caps.max_total_tokens) {
+        return { ...result, status: "FAIL", failure_domain: "CONTRACT", code: "MODEL_TOKEN_CAP_EXCEEDED" };
+      }
+      if (aggregate.cost_usd > declaration.caps.max_budget_usd) {
+        return { ...result, status: "FAIL", failure_domain: "CONTRACT", code: "MODEL_BUDGET_CAP_EXCEEDED" };
       }
     }
   }
@@ -396,7 +411,12 @@ export async function runFlow(repoRoot, options) {
     producerType: "orchestrator",
     limitBytes: policies.event_file_limit_bytes,
   });
-  const resources = new ResourceRegistry(attemptRoot, runId, { dockerContext: built.options.dockerContext ?? null });
+  const resources = new ResourceRegistry(attemptRoot, runId, {
+    dockerContext: built.options.dockerContext ?? null,
+    expectedDockerIdentity: plan.release_inputs?.docker?.status === "PRESENT"
+      ? plan.release_inputs.docker
+      : null,
+  });
   const stageResults = [];
   let operationStatus = "PASS";
   let stopped = false;

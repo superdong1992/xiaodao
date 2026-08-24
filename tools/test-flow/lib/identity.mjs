@@ -274,6 +274,8 @@ export function computeIdentitySets({
   claudeEntry = null,
   claudeSettings = null,
   releaseRuntime = null,
+  codexRuntime = null,
+  codexLogparseRuntime = null,
 }) {
   const components = {};
   const sharedClient = clientIdentity(claudeEntry);
@@ -312,6 +314,10 @@ export function computeIdentitySets({
       value = { kind: definition.kind, ...sharedModel };
     } else if (definition.kind === "release-runtime") {
       value = { kind: definition.kind, value: releaseRuntime };
+    } else if (definition.kind === "codex-runtime") {
+      value = { kind: definition.kind, value: codexRuntime };
+    } else if (definition.kind === "codex-logparse-runtime") {
+      value = { kind: definition.kind, value: codexLogparseRuntime };
     } else if (definition.kind === "environment") {
       value = { kind: definition.kind, value: sharedEnvironment };
     } else {
@@ -345,13 +351,16 @@ export function stageIdentity(stage, identitySets, policies) {
   const identitySet = identitySets[stage.identity_set];
   if (!identitySet) throw new Error(`IDENTITY_SET_UNKNOWN:${stage.identity_set}`);
   const stateful = stage.id.startsWith("journey.cross-job.");
-  const producerIdentity = sha256Bytes(canonicalJson({
+  const producerPayload = {
     schema_version: 2,
     identity_set: stage.identity_set,
     set_digest: identitySet.producer_digest,
     parent_checkpoint: stateful ? policies.parent_checkpoint ?? "GENESIS" : "GENESIS",
     scenario: stateful ? policies.scenario ?? "CrossJob" : null,
-  }));
+  };
+  if (!stateful && policies.scenario !== null && policies.scenario !== undefined) producerPayload.scenario = policies.scenario;
+  if (policies.methods_package_digest !== null && policies.methods_package_digest !== undefined) producerPayload.methods_package_digest = policies.methods_package_digest;
+  const producerIdentity = sha256Bytes(canonicalJson(producerPayload));
   const proofIdentity = sha256Bytes(canonicalJson({
     schema_version: 2,
     producer_identity: producerIdentity,

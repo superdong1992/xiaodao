@@ -60,6 +60,12 @@ def test_logparse_fixture_manifest_matches_schema_dto_and_disk() -> None:
     assert len(paths) == len(set(paths))
     assert paths == list(actual)
     assert "fixture-manifest.json" not in paths
+    assert all(path.startswith(("fake/", "real/")) for path in paths)
+    assert {
+        "source-copy.json",
+        "supported-formats.json",
+        "wiki/service-takeover.md",
+    }.isdisjoint(paths)
 
     for entry in manifest.files:
         data = actual[entry.path].read_bytes()

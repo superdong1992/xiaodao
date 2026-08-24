@@ -99,6 +99,25 @@ test("a failed wrapper outcome cannot pass even when the terminal shape and usag
   assert.equal(result.code, "MODEL_HARD_CAP_RECEIPT_MISMATCH");
 });
 
+test("the engine independently rejects a receipt above the planned 16-turn boundary", () => {
+  const caps = { ...CAPS, max_turns: 16, max_total_tokens: 1000000 };
+  const observed = invocation(normalizeUsage({
+    input_tokens: 10,
+    output_tokens: 20,
+    cache_creation_input_tokens: 0,
+    cache_read_input_tokens: 0,
+    cost_usd: 0.1,
+  }), caps);
+  observed.turns = 17;
+  const result = applyHardCaps({
+    result: { status: "PASS", invocations: [observed] },
+    planStage: { invocation_caps: [{ class: "isolated-agent", min_count: 1, max_count: 1, caps }] },
+    expectedModel: "test-model",
+  });
+  assert.equal(result.status, "FAIL");
+  assert.equal(result.code, "MODEL_TURN_CAP_EXCEEDED");
+});
+
 test("a receipt cannot change the planned per-response output token cap", () => {
   const observed = invocation(normalizeUsage({
     input_tokens: 10,
@@ -111,6 +130,24 @@ test("a receipt cannot change the planned per-response output token cap", () => 
   const result = applyHardCaps({
     result: { status: "PASS", invocations: [observed] },
     planStage: { invocation_caps: [{ class: "isolated-agent", min_count: 1, max_count: 1, caps: CAPS }] },
+    expectedModel: "test-model",
+  });
+  assert.equal(result.status, "ERROR");
+  assert.equal(result.code, "MODEL_HARD_CAP_RECEIPT_MISMATCH");
+});
+
+test("a receipt cannot change a planned reasoning effort", () => {
+  const observed = invocation(normalizeUsage({
+    input_tokens: 10,
+    output_tokens: 10,
+    cache_creation_input_tokens: 0,
+    cache_read_input_tokens: 0,
+    cost_usd: 0.1,
+  }));
+  observed.effective_reasoning_effort = "high";
+  const result = applyHardCaps({
+    result: { status: "PASS", invocations: [observed] },
+    planStage: { invocation_caps: [{ class: "isolated-agent", min_count: 1, max_count: 1, reasoning_effort: "medium", caps: CAPS }] },
     expectedModel: "test-model",
   });
   assert.equal(result.status, "ERROR");

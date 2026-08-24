@@ -46,7 +46,7 @@ test("isolated Agent environment keeps only runtime necessities and explicit Tes
     S08_REAL_AGENT_COMMAND: "/isolated/wrapper",
     S08_REAL_AGENT_GATE: "1",
   });
-  assert.equal(ISOLATED_AGENT_ENV_POLICY_VERSION, "isolated-agent-env-allowlist-v2");
+  assert.equal(ISOLATED_AGENT_ENV_POLICY_VERSION, "isolated-agent-env-allowlist-v3");
   assert.equal(JSON.stringify(environment).includes("secret-canary"), false);
   assert.equal(Object.hasOwn(environment, ISOLATED_AGENT_CLAUDE_OUTPUT_TOKEN_KEY), false);
 });
@@ -79,17 +79,35 @@ test("the Skill-generation audit path is explicit-only and reaches pytest", () =
     },
     explicit: {
       S08_REAL_SKILL_GENERATION_AUDIT_PATH: "/evidence/scenario-evaluation-audit.json",
+      S08_REAL_SKILL_GENERATION_OUTPUT_ROOT: "/evidence/generated-skill",
+      S08_REAL_SKILL_GENERATION_RECEIPT_PATH: "/evidence/generated-skill.json",
     },
   });
   assert.deepEqual(environment, {
     PATH: "/bin",
     S08_REAL_SKILL_GENERATION_AUDIT_PATH: "/evidence/scenario-evaluation-audit.json",
+    S08_REAL_SKILL_GENERATION_OUTPUT_ROOT: "/evidence/generated-skill",
+    S08_REAL_SKILL_GENERATION_RECEIPT_PATH: "/evidence/generated-skill.json",
   });
   assert.deepEqual(
     assertIsolatedAgentInboundEnvironment(environment).key_names,
-    ["PATH", "S08_REAL_SKILL_GENERATION_AUDIT_PATH"],
+    [
+      "PATH",
+      "S08_REAL_SKILL_GENERATION_AUDIT_PATH",
+      "S08_REAL_SKILL_GENERATION_OUTPUT_ROOT",
+      "S08_REAL_SKILL_GENERATION_RECEIPT_PATH",
+    ],
   );
   assert.deepEqual(buildIsolatedAgentEnvironment({ ambient: environment }), { PATH: "/bin" });
+});
+
+test("the macOS CoreFoundation locale hint is audited inbound but never forwarded", () => {
+  const inbound = { PATH: "/bin", __CF_USER_TEXT_ENCODING: "0x1F5:0x0:0x0" };
+  assert.deepEqual(
+    assertIsolatedAgentInboundEnvironment(inbound).key_names,
+    ["PATH", "__CF_USER_TEXT_ENCODING"],
+  );
+  assert.deepEqual(buildIsolatedAgentEnvironment({ ambient: inbound }), { PATH: "/bin" });
 });
 
 test("environment receipt contains only sorted key names and a verifiable digest", () => {

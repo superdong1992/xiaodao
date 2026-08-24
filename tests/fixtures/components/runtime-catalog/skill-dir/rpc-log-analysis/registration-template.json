@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "registration_id": "rpc-log-analysis",
+  "version": "1.0.0",
+  "capability": "rpc-timeout-log-analysis",
+  "deployment_scope": "PRODUCTION",
+  "summary": "Correlate a client RPC timeout with frozen client and server target logs.",
+  "package": {
+    "relative_path": "package/rpc-log-analysis",
+    "skill_name": "rpc-log-analysis",
+    "source_wiki_sha256": "2222222222222222222222222222222222222222222222222222222222222222"
+  },
+  "runtime": {
+    "diagnose": {
+      "agent_profile_id": "agent-profile/specialist",
+      "tool_bundle_id": "tool-bundle/diagnose",
+      "context_policy_id": "context-policy/diagnose",
+      "output_contract_id": "output-contract/diagnose"
+    },
+    "review": {
+      "agent_profile_id": "agent-profile/reviewer",
+      "tool_bundle_id": "tool-bundle/review",
+      "context_policy_id": "context-policy/review",
+      "output_contract_id": "output-contract/review"
+    },
+    "preprocessing": {
+      "requires_logparse": true,
+      "logparse_product": "compact",
+      "roles": [
+        {
+          "label": "client",
+          "description": "RPC calling process.",
+          "presence": "REQUIRED",
+          "source_reference": "Reviewed runtime catalog fixture."
+        },
+        {
+          "label": "server",
+          "description": "RPC serving process.",
+          "presence": "REQUIRED",
+          "source_reference": "Reviewed runtime catalog fixture."
+        }
+      ],
+      "logparse_plan": {
+        "attachment_requirement": "log_archive",
+        "problem_time_binding": {"source": "USER_FACT", "name": "problem_time"},
+        "anchors": [
+          {
+            "label": "client",
+            "module": {"source": "SKILL_FIXED", "value": "compact"},
+            "slot": {"source": "USER_FACT", "name": "client_slot"},
+            "process_name": {"source": "USER_FACT", "name": "client_process_name"},
+            "pid": null
+          },
+          {
+            "label": "server",
+            "module": {"source": "SKILL_FIXED", "value": "compact"},
+            "slot": {"source": "USER_FACT", "name": "server_slot"},
+            "process_name": {"source": "USER_FACT", "name": "server_process_name"},
+            "pid": null
+          }
+        ]
+      }
+    }
+  }
+}

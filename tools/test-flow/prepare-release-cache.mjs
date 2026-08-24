@@ -6,6 +6,11 @@ import { fileURLToPath } from "node:url";
 import {
   RELEASE_BASE_IMAGE,
   RELEASE_BASE_IMAGE_SOURCE,
+  RELEASE_CHROME_HEADLESS_SHELL_ARCHIVE_SHA256,
+  RELEASE_CHROME_HEADLESS_SHELL_EXECUTABLE_SHA256,
+  RELEASE_CHROME_HEADLESS_SHELL_PLATFORM,
+  RELEASE_CHROME_HEADLESS_SHELL_PRODUCT,
+  RELEASE_CHROME_HEADLESS_SHELL_VERSION,
   RELEASE_CLAUDE_CLI_SHA256,
   RELEASE_CLAUDE_TARBALL_SHA256,
   RELEASE_CLAUDE_VERSION,
@@ -13,6 +18,7 @@ import {
   RELEASE_DOCKER_CONTEXT,
   RELEASE_DOCKER_OS,
   RELEASE_HATCHLING_VERSION,
+  RELEASE_CLIENT_IMAGE,
   RELEASE_PYTHON_VERSION,
   RELEASE_UV_ARCHIVE_SHA256,
   RELEASE_UV_SHA256,
@@ -20,6 +26,7 @@ import {
   RELEASE_UVX_SHA256,
   packageTreeIdentity,
   releaseCachePaths,
+  validateChromeHeadlessShellCache,
   validateClaudeDistribution,
   validateUvCache,
 } from "./lib/release-inputs.mjs";
@@ -29,6 +36,7 @@ const TOOL_ROOT = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_REPO_ROOT = path.resolve(TOOL_ROOT, "..", "..");
 const CLAUDE_URL = `https://registry.npmjs.org/@anthropic-ai/claude-code/-/claude-code-${RELEASE_CLAUDE_VERSION}.tgz`;
 const UV_URL = `https://github.com/astral-sh/uv/releases/download/${RELEASE_UV_VERSION}/uv-x86_64-unknown-linux-gnu.tar.gz`;
+const CHROME_HEADLESS_SHELL_URL = `https://storage.googleapis.com/chrome-for-testing-public/${RELEASE_CHROME_HEADLESS_SHELL_VERSION}/${RELEASE_CHROME_HEADLESS_SHELL_PLATFORM}/chrome-headless-shell-${RELEASE_CHROME_HEADLESS_SHELL_PLATFORM}.zip`;
 
 function argument(name) {
   const index = process.argv.indexOf(name);
@@ -143,8 +151,42 @@ function prepareUv(paths, stagingRoot) {
   process.stdout.write(`uv_cache=PASS version=${RELEASE_UV_VERSION} archive_sha256=${validated.archive_sha256}\n`);
 }
 
+function prepareChromeHeadlessShell(paths, stagingRoot) {
+  const staging = path.join(stagingRoot, "chrome-headless-shell-for-testing");
+  ensureDirectory(staging);
+  const archive = path.join(staging, path.basename(paths.chromeHeadlessShellArchive));
+  download(CHROME_HEADLESS_SHELL_URL, archive);
+  if (sha256File(archive) !== RELEASE_CHROME_HEADLESS_SHELL_ARCHIVE_SHA256) {
+    throw new Error("CHROME_HEADLESS_SHELL_ARCHIVE_HASH_MISMATCH");
+  }
+  execute("unzip", ["-q", archive, "-d", staging]);
+  const executable = path.join(
+    staging,
+    `chrome-headless-shell-${RELEASE_CHROME_HEADLESS_SHELL_PLATFORM}`,
+    "chrome-headless-shell",
+  );
+  fs.chmodSync(executable, 0o755);
+  if (sha256File(executable) !== RELEASE_CHROME_HEADLESS_SHELL_EXECUTABLE_SHA256) {
+    throw new Error("CHROME_HEADLESS_SHELL_EXECUTABLE_HASH_MISMATCH");
+  }
+  writeExclusive(path.join(staging, "cache-seal.json"), {
+    schema_version: 1,
+    kind: "official-chrome-headless-shell-for-testing-cache",
+    product: RELEASE_CHROME_HEADLESS_SHELL_PRODUCT,
+    source_url: CHROME_HEADLESS_SHELL_URL,
+    version: RELEASE_CHROME_HEADLESS_SHELL_VERSION,
+    platform: RELEASE_CHROME_HEADLESS_SHELL_PLATFORM,
+    archive_sha256: RELEASE_CHROME_HEADLESS_SHELL_ARCHIVE_SHA256,
+    executable_sha256: RELEASE_CHROME_HEADLESS_SHELL_EXECUTABLE_SHA256,
+  });
+  publishDirectory(staging, paths.chromeHeadlessShellRoot);
+  const validated = validateChromeHeadlessShellCache(paths);
+  if (validated.status !== "PRESENT") throw new Error(`CHROME_HEADLESS_SHELL_CACHE_VALIDATION_FAILED:${validated.code}`);
+  process.stdout.write(`chrome_headless_shell_cache=PASS version=${RELEASE_CHROME_HEADLESS_SHELL_VERSION} archive_sha256=${validated.archive_sha256}\n`);
+}
+
 function prepareImage(repoRoot, paths, dockerContext) {
-  const logPath = path.join(paths.cacheRoot, "base-image-build.log");
+  const logPath = path.join(paths.cacheRoot, "server-image-build.log");
   const build = runSync("docker", [
     "--context", dockerContext,
     "buildx", "build",
@@ -169,9 +211,40 @@ function prepareImage(repoRoot, paths, dockerContext) {
   ], { cwd: repoRoot, maxBuffer: 256 * 1024 * 1024 });
   fs.writeFileSync(logPath, `${build.stdout}${build.stderr}`, { encoding: "utf8", mode: 0o600 });
   if (build.status !== 0) throw new Error(`BASE_IMAGE_BUILD_FAILED:${build.status}:${build.stderr.slice(-4000)}`);
-  const inspect = execute("docker", ["--context", dockerContext, "image", "inspect", RELEASE_BASE_IMAGE]);
-  const metadata = JSON.parse(inspect.stdout)[0];
-  if (metadata.Os !== RELEASE_DOCKER_OS || metadata.Architecture !== RELEASE_DOCKER_ARCH) throw new Error("BASE_IMAGE_PLATFORM_MISMATCH");
+  const serverInspect = execute("docker", ["--context", dockerContext, "image", "inspect", RELEASE_BASE_IMAGE]);
+  const serverMetadata = JSON.parse(serverInspect.stdout)[0];
+  if (serverMetadata.Os !== RELEASE_DOCKER_OS || serverMetadata.Architecture !== RELEASE_DOCKER_ARCH) throw new Error("BASE_IMAGE_PLATFORM_MISMATCH");
+
+  const clientLogPath = path.join(paths.cacheRoot, "client-image-build.log");
+  const clientBuild = runSync("docker", [
+    "--context", dockerContext,
+    "buildx", "build",
+    "--platform", "linux/amd64",
+    "--provenance=false",
+    "--load",
+    "--progress", "plain",
+    "--build-context", `chromeheadlessshellcache=${paths.chromeHeadlessShellDistribution}`,
+    "--build-arg", `BASE_IMAGE=${RELEASE_BASE_IMAGE}`,
+    "--build-arg", `CHROME_HEADLESS_SHELL_VERSION=${RELEASE_CHROME_HEADLESS_SHELL_VERSION}`,
+    "--build-arg", `CHROME_HEADLESS_SHELL_ARCHIVE_SHA256=${RELEASE_CHROME_HEADLESS_SHELL_ARCHIVE_SHA256}`,
+    "--build-arg", `CHROME_HEADLESS_SHELL_EXECUTABLE_SHA256=${RELEASE_CHROME_HEADLESS_SHELL_EXECUTABLE_SHA256}`,
+    "--tag", RELEASE_CLIENT_IMAGE,
+    "--file", path.join(repoRoot, "tools", "test-flow", "Dockerfile.client"),
+    repoRoot,
+  ], { cwd: repoRoot, maxBuffer: 256 * 1024 * 1024 });
+  fs.writeFileSync(clientLogPath, `${clientBuild.stdout}${clientBuild.stderr}`, { encoding: "utf8", mode: 0o600 });
+  if (clientBuild.status !== 0) throw new Error(`CLIENT_IMAGE_BUILD_FAILED:${clientBuild.status}:${clientBuild.stderr.slice(-4000)}`);
+  const clientInspect = execute("docker", ["--context", dockerContext, "image", "inspect", RELEASE_CLIENT_IMAGE]);
+  const clientMetadata = JSON.parse(clientInspect.stdout)[0];
+  if (clientMetadata.Os !== RELEASE_DOCKER_OS || clientMetadata.Architecture !== RELEASE_DOCKER_ARCH) throw new Error("CLIENT_IMAGE_PLATFORM_MISMATCH");
+  const clientLabels = clientMetadata.Config?.Labels ?? {};
+  if (clientLabels["problem-locator.e2e.role"] !== "linux-client"
+    || clientLabels["problem-locator.e2e.chrome-headless-shell-version"] !== RELEASE_CHROME_HEADLESS_SHELL_VERSION
+    || clientLabels["problem-locator.e2e.chrome-headless-shell-product"] !== RELEASE_CHROME_HEADLESS_SHELL_PRODUCT
+    || clientLabels["problem-locator.e2e.chrome-headless-shell-sha256"] !== RELEASE_CHROME_HEADLESS_SHELL_EXECUTABLE_SHA256
+    || clientLabels["problem-locator.e2e.chrome-headless-shell-archive-sha256"] !== RELEASE_CHROME_HEADLESS_SHELL_ARCHIVE_SHA256) {
+    throw new Error("CLIENT_IMAGE_LABEL_MISMATCH");
+  }
   const sealPath = paths.releaseSeal;
   if (fs.existsSync(sealPath)) {
     const backup = `${sealPath}.previous-${crypto.randomBytes(4).toString("hex")}`;
@@ -179,10 +252,12 @@ function prepareImage(repoRoot, paths, dockerContext) {
     process.stdout.write(`preserved_previous_release_seal=${backup}\n`);
   }
   writeExclusive(sealPath, {
-    schema_version: 1,
-    kind: "macos-linux-release-cache",
-    image: RELEASE_BASE_IMAGE,
-    image_id: metadata.Id,
+    schema_version: 3,
+    kind: "macos-dual-linux-release-cache",
+    server_image: RELEASE_BASE_IMAGE,
+    server_image_id: serverMetadata.Id,
+    client_image: RELEASE_CLIENT_IMAGE,
+    client_image_id: clientMetadata.Id,
     platform: "linux/amd64",
     docker_context: dockerContext,
     claude_tarball_sha256: RELEASE_CLAUDE_TARBALL_SHA256,
@@ -191,9 +266,15 @@ function prepareImage(repoRoot, paths, dockerContext) {
     uv_sha256: RELEASE_UV_SHA256,
     uvx_sha256: RELEASE_UVX_SHA256,
     hatchling_version: RELEASE_HATCHLING_VERSION,
+    chrome_headless_shell_product: RELEASE_CHROME_HEADLESS_SHELL_PRODUCT,
+    chrome_headless_shell_version: RELEASE_CHROME_HEADLESS_SHELL_VERSION,
+    chrome_headless_shell_archive_sha256: RELEASE_CHROME_HEADLESS_SHELL_ARCHIVE_SHA256,
+    chrome_headless_shell_executable_sha256: RELEASE_CHROME_HEADLESS_SHELL_EXECUTABLE_SHA256,
   });
-  process.stdout.write(`base_image=PASS image=${RELEASE_BASE_IMAGE} image_id=${metadata.Id}\n`);
-  process.stdout.write(`build_log=${logPath}\n`);
+  process.stdout.write(`server_image=PASS image=${RELEASE_BASE_IMAGE} image_id=${serverMetadata.Id}\n`);
+  process.stdout.write(`client_image=PASS image=${RELEASE_CLIENT_IMAGE} image_id=${clientMetadata.Id}\n`);
+  process.stdout.write(`server_build_log=${logPath}\n`);
+  process.stdout.write(`client_build_log=${clientLogPath}\n`);
 }
 
 function main() {
@@ -209,6 +290,7 @@ function main() {
   try {
     prepareClaude(paths, stagingRoot);
     prepareUv(paths, stagingRoot);
+    prepareChromeHeadlessShell(paths, stagingRoot);
     if (!has("--skip-image")) prepareImage(repoRoot, paths, dockerContext);
   } finally {
     fs.rmSync(stagingRoot, { recursive: true, force: true });

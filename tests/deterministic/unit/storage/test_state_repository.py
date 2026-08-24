@@ -186,8 +186,8 @@ def test_empty_directory_initializes_generation_one_canonical_state(
 
     snapshot = repository.read_snapshot()
     assert isinstance(repository, StateRepository)
-    assert snapshot.schema_version == SCHEMA_VERSION == 6
-    assert snapshot.contract_revision == CONTRACT_REVISION == "v6-contract-r1"
+    assert snapshot.schema_version == SCHEMA_VERSION == 7
+    assert snapshot.contract_revision == CONTRACT_REVISION == "v7-contract-r1"
     assert snapshot.generation == 1
     assert snapshot.created_at == INITIAL_TIME
     assert snapshot.updated_at == INITIAL_TIME

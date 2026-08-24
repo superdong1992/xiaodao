@@ -1,2 +1,0 @@
-[BBBB] rpc call svc_alpha:Fetch timeout limit 5000 recv no response
-[BBBB] svc_alpha rpc sync call unsuccess, reqid(42), timeout 5000

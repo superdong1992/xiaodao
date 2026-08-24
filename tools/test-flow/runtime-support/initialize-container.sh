@@ -66,15 +66,19 @@ test -d "$installed_assets"
 test -z "$(find "$installed_assets" -xdev -type l -print -quit)"
 test -z "$(find "$installed_assets" -xdev -type f -links +1 -print -quit)"
 
-test ! -e /opt/e2e-skills
+test -d /opt/e2e-skills
+test -n "$(find /opt/e2e-skills -mindepth 1 -print -quit)"
+test -z "$(find /opt/e2e-skills -xdev -type l -print -quit)"
+test -z "$(find /opt/e2e-skills -xdev -type f -links +1 -print -quit)"
+test -z "$(find /opt/e2e-skills -xdev -perm /022 -print -quit)"
+test -z "$(find /opt/e2e-skills -xdev ! -user root -print -quit)"
+test -z "$(find /opt/e2e-skills -xdev ! -group root -print -quit)"
 test ! -e /opt/e2e-logparse
 release_case_receipt="/evidence/stages/${receipt#/evidence/stages/}"
 release_case_receipt="${release_case_receipt%/container-init.json}/release-case.json"
 /opt/venvs/xiaodao/bin/python -I /test-flow-runtime/prepare_release_case.py \
   --release-root /opt/src/xiaodao/tests/cases/release \
-  --generator /opt/src/xiaodao/.claude/skills/wiki-to-diagnosis-skill/scripts/generate_diagnosis_skill.py \
-  --validator /opt/src/xiaodao/.claude/skills/wiki-to-diagnosis-skill/scripts/validate_generated_skill.py \
-  --generated-skills /opt/e2e-skills \
+  --generated-skill-root /opt/e2e-skills \
   --evidence-root /evidence \
   --logparse-config /opt/e2e-logparse/config.yaml \
   --logparse-python /opt/venvs/logparse/bin/python \

@@ -19,7 +19,6 @@ from fastapi.testclient import TestClient
 
 from problem_locator.application import build_application_service
 from problem_locator.contracts import (
-    AgentJobOutcomeDraftV2,
     ArtifactKind,
     AttachmentStatus,
     CandidateStatus,
@@ -43,6 +42,10 @@ from problem_locator.runtime.agent_backend import AgentBackend, BackendExecution
 from problem_locator.runtime.catalog import VersionedAssetCatalog
 from problem_locator.runtime.context_policy import RuntimeAssetResolver
 from problem_locator.runtime.diagnosis_runtime import DiagnosisRuntime
+from problem_locator.runtime.methods_grounding import (
+    MethodDiagnosisDraftV1,
+    MethodReviewV1,
+)
 from problem_locator.runtime.workspace import WorkspaceManager
 from problem_locator.storage.coordination import (
     AttachmentUploadRegistry,
@@ -75,7 +78,7 @@ EXPECTED_PARSE_COUNTER = FIXTURES / "expected-parse-counter.json"
 CROSS_PROJECT_EXPERIENCE = FIXTURES / "cross-project-result-experience.json"
 FAKE_LOGPARSE_REPO = ROOT / "tests/fixtures/components/logparse/fake/repo"
 FAKE_LOGPARSE_CONFIG = FAKE_LOGPARSE_REPO / "config.yaml"
-SKILL_DIR = ROOT / "tests/fixtures/components/diagnosis-generator"
+SKILL_DIR = ROOT / "tests/fixtures/components/runtime-catalog/skill-dir"
 EVIDENCE_IDS = [
     "00000000-0000-0000-0000-000000000040",
     "00000000-0000-0000-0000-000000000041",
@@ -243,6 +246,8 @@ class _E2EIds(DeterministicIdGenerator):
         evidence_ids_by_key = {
             "rpc-timeout-evidence": EVIDENCE_IDS[0],
             "rpc-timeout-server-evidence": EVIDENCE_IDS[1],
+            "methods-target-1": EVIDENCE_IDS[0],
+            "methods-target-2": EVIDENCE_IDS[1],
         }
         if kind == "evidence" and tuple(stable_parts)[-1] in evidence_ids_by_key:
             self.derive_calls.append((kind, tuple(stable_parts)))
@@ -474,6 +479,9 @@ def _case_failure_diagnostics(stack: _Stack, case_id: str) -> str:
             "stderr.log",
             "broker_audit.json",
             "agent_job_outcome.draft.json",
+            "method-diagnosis.draft.json",
+            "method-review.draft.json",
+            "methods_preflight.json",
         ):
             log_path = job_root / filename
             if log_path.is_file():
@@ -548,6 +556,9 @@ def _wait_for_review_marker(
                     "stderr.log",
                     "broker_audit.json",
                     "agent_job_outcome.draft.json",
+                    "method-diagnosis.draft.json",
+                    "method-review.draft.json",
+                    "methods_preflight.json",
                 ):
                     log_path = job_root / filename
                     if log_path.is_file():
@@ -678,7 +689,20 @@ def _assert_no_sensitive_surfaces(
         is_execution_surface = (
             len(parts) >= 3
             and parts[0] == "jobs"
-            and path.name in {"stdout.log", "stderr.log", "job_outcome.json"}
+            and path.name
+            in {
+                "stdout.log",
+                "stderr.log",
+                "job_outcome.json",
+                "agent_job_outcome.json",
+                "method-diagnosis.draft.json",
+                "method-review.draft.json",
+                "method-grounding-audit.json",
+                "methods_logparse_receipt.json",
+                "methods_preflight.json",
+                "methods_request.json",
+                "methods_target_logs.json",
+            }
         )
         is_published_proposal = bool(parts) and parts[0] == "resources"
         is_workspace_proposal = (
@@ -690,11 +714,19 @@ def _assert_no_sensitive_surfaces(
             "tmp",
             "proposals",
         )
+        is_workspace_methods_output = (
+            len(parts) >= 5
+            and parts[0:2] == ("tmp", "workspaces")
+            and parts[3] == "output"
+            and path.name
+            in {"method-diagnosis.draft.json", "method-review.draft.json"}
+        )
         if not (
             is_execution_surface
             or is_published_proposal
             or is_workspace_proposal
             or is_staged_proposal
+            or is_workspace_methods_output
         ):
             continue
         payload = path.read_bytes()
@@ -879,6 +911,18 @@ def test_r01_r14_rpc_timeout_is_one_durable_cross_module_path(
         if item.job_id == initial_diagnose.job_id
     )
     assert initial_outcome.result_type is OutcomeResultType.NEED_INPUT
+    assert initial_outcome.decision_audit is None
+    preflight_bytes = stack.records.read_audit_bytes(
+        initial_diagnose.job_id,
+        "methods_preflight.json",
+    )
+    assert preflight_bytes is not None
+    preflight = parse_canonical_json_bytes(preflight_bytes)
+    assert canonical_json_bytes(preflight) == preflight_bytes
+    assert preflight["job_id"] == initial_diagnose.job_id
+    assert preflight["result_type"] == OutcomeResultType.NEED_INPUT
+    assert [item["phase"] for item in _agent_records(agent_record)] == ["ROUTE"]
+    assert not logparse_record.exists()
     initial_requirements = {
         item.requirement_id: item
         for item in initial_outcome.payload.state_delta.add_pending_requirements
@@ -990,7 +1034,8 @@ def test_r01_r14_rpc_timeout_is_one_durable_cross_module_path(
     assert ready_aggregate.case.status is CaseStatus.WAITING_ATTACHMENT
     assert ready_aggregate.case.active_job_id is None
 
-    # R08/R09/R10: explicit reference dispatches; parse executes exactly once.
+    # R08/R09/R10: explicit reference dispatches one two-pass Methods Job;
+    # product-owned Logparse executes exactly once before the Methods pass.
     submitted_attachment = _mcp(
         stack.mcp,
         "problem_locator_submit_supplement",
@@ -1005,125 +1050,98 @@ def test_r01_r14_rpc_timeout_is_one_durable_cross_module_path(
         },
     )
     assert submitted_attachment["business_receipt"]["job_id"] is not None
-    stack.wait_idle()
-    r08_job_id = submitted_attachment["business_receipt"]["job_id"]
-    r08_job = stack.repository.read_snapshot().cases[case_id].jobs[r08_job_id]
-    assert r08_job.attachment_refs == [attachment_id]
-    waiting_order = _query(stack.mcp, case_id)
-    assert waiting_order["status"] == CaseStatus.WAITING_INPUT.value, (
-        _case_failure_diagnostics(stack, case_id)
-    )
-    assert [
-        item["name"]
-        for item in waiting_order["pending_requirements"]
-        if item["status"] == RequirementStatus.OPEN.value
-    ] == ["order_id"]
-    _assert_logparse_record(
-        logparse_record,
-        expected_target_count=2,
-    )
-    r10_snapshot = stack.repository.read_snapshot()
-    r10 = r10_snapshot.cases[case_id]
-    logparse_runs = [
-        item for item in r10.artifacts.values() if item.kind is ArtifactKind.LOGPARSE_RUN
-    ]
-    assert len(logparse_runs) == 1
-    logparse_run = logparse_runs[0]
-    assert logparse_run.created_by_job_id == r08_job_id
-    assert list(r10.evidence) == EVIDENCE_IDS
-    assert all(
-        r10.evidence[evidence_id].source_type.value == "LOGPARSE"
-        and r10.evidence[evidence_id].source_ref == logparse_run.artifact_id
-        for evidence_id in EVIDENCE_IDS
-    )
-    order_outcome = next(
-        outcome
-        for outcome in r10.outcomes.values()
-        if outcome.result_type is OutcomeResultType.NEED_INPUT
-        and any(
-            requirement.name == "order_id"
-            for requirement in outcome.payload.state_delta.add_pending_requirements
-        )
-    )
-    r10_processing = r10.outcome_processing_records[order_outcome.outcome_id]
-    assert r10_processing.job_id == r08_job_id
-    assert r10_processing.accepted_evidence_ids == EVIDENCE_IDS
-    assert r10_processing.accepted_artifact_ids == [logparse_run.artifact_id]
-
-    # R11/R12: the next immutable Job closes over R10 and reuses the run.
-    submitted_order = _mcp(
-        stack.mcp,
-        "problem_locator_submit_supplement",
-        {
-            "request_id": "s08-r11-submit-order",
-            "case_id": case_id,
-            "expected_case_revision": waiting_order["case_revision"],
-            "input_names": ["order_id"],
-            "input_values": ["synthetic-order-0001"],
-            "attachment_ids": [],
-            "wait_seconds": 0,
-        },
-    )
-    candidate_job_id = submitted_order["business_receipt"]["job_id"]
+    candidate_job_id = submitted_attachment["business_receipt"]["job_id"]
     _wait_for_review_marker(stack, case_id, review_entered)
     reviewing_snapshot = stack.repository.read_snapshot()
     reviewing = reviewing_snapshot.cases[case_id]
     candidate_job = reviewing.jobs[candidate_job_id]
-    assert candidate_job.evidence_refs == EVIDENCE_IDS
     assert candidate_job.attachment_refs == [attachment_id]
-    assert candidate_job.artifact_refs == [logparse_run.artifact_id]
-    assert candidate_job.previous_outcome_refs == [
-        order_outcome.outcome_id,
-        *r08_job.previous_outcome_refs,
-    ]
+    assert candidate_job.evidence_refs == []
+    assert candidate_job.artifact_refs == []
     assert reviewing.case.status is CaseStatus.REVIEWING
+    _assert_logparse_record(
+        logparse_record,
+        expected_target_count=2,
+    )
+    logparse_runs = [
+        item
+        for item in reviewing.artifacts.values()
+        if item.kind is ArtifactKind.LOGPARSE_RUN
+    ]
+    assert len(logparse_runs) == 1
+    logparse_run = logparse_runs[0]
+    assert logparse_run.created_by_job_id == candidate_job_id
+    assert list(reviewing.evidence) == EVIDENCE_IDS
+    assert all(
+        reviewing.evidence[evidence_id].source_type.value == "LOGPARSE"
+        and reviewing.evidence[evidence_id].source_ref == logparse_run.artifact_id
+        for evidence_id in EVIDENCE_IDS
+    )
+    candidate_outcome = next(
+        outcome
+        for outcome in reviewing.outcomes.values()
+        if outcome.job_id == candidate_job_id
+    )
+    assert candidate_outcome.result_type is OutcomeResultType.COMPLETED
+    assert candidate_outcome.decision_audit is not None
+
+    # R11/R12: the same immutable Job freezes the Pass-A receipt/target bytes,
+    # emits only the Methods draft, and publishes the server-mapped Candidate.
     candidate = reviewing.case.diagnosis_state.candidate_conclusion
     assert candidate is not None
     assert candidate.status is CandidateStatus.REVIEWING
     assert candidate.proposed_by_job_id == candidate_job_id
-    assert candidate.supporting_evidence_refs == list(reversed(EVIDENCE_IDS))
+    assert candidate.supporting_evidence_refs == EVIDENCE_IDS
     assert candidate.completion_criteria_mapping[0].evidence_refs == EVIDENCE_IDS
-    initial_target_result = (
+    preprocessing_target_result = (
         data_root
         / "tmp"
         / "workspaces"
-        / r08_job_id
+        / f"{candidate_job_id}.logparse-preprocess"
         / "output"
         / "proposals"
-        / "logparse-run"
+        / "methods-preprocess"
         / "target_logs.json"
     ).read_bytes()
-    continuation_target_result = (
-        data_root
-        / "tmp"
-        / "workspaces"
-        / candidate_job_id
-        / "output"
-        / "proposals"
-        / "reuse-logparse-run"
-        / "target_logs.json"
-    ).read_bytes()
-    initial_target_payload = parse_canonical_json_bytes(initial_target_result)
-    continuation_target_payload = parse_canonical_json_bytes(
-        continuation_target_result
+    preprocessing_target_payload = parse_canonical_json_bytes(
+        preprocessing_target_result
     )
-    assert set(initial_target_payload) == {
+    assert isinstance(preprocessing_target_payload, dict)
+    assert set(preprocessing_target_payload) == {
         "api_version",
         "logparse_run_artifact_draft",
         "schema_version",
         "target_logs",
     }
-    assert set(continuation_target_payload) == {
-        "api_version",
-        "schema_version",
-        "target_logs",
-    }
-    initial_target_projection = {
-        name: initial_target_payload[name]
+    preprocessing_projection = {
+        name: preprocessing_target_payload[name]
         for name in ("api_version", "schema_version", "target_logs")
     }
-    assert canonical_json_bytes(initial_target_projection) == continuation_target_result
-    assert continuation_target_result == EXPECTED_TARGET_LOGS.read_bytes()
+    assert canonical_json_bytes(preprocessing_projection) == (
+        EXPECTED_TARGET_LOGS.read_bytes()
+    )
+    frozen_target_path = (
+        data_root
+        / "tmp"
+        / "workspaces"
+        / candidate_job_id
+        / "inputs"
+        / "target_logs.json"
+    )
+    frozen_target_bytes = frozen_target_path.read_bytes()
+    frozen_targets = parse_canonical_json_bytes(frozen_target_bytes)
+    assert canonical_json_bytes(frozen_targets) == frozen_target_bytes
+    assert [item["source_id"] for item in frozen_targets["target_logs"]] == [
+        "client",
+        "server",
+    ]
+    receipt_path = frozen_target_path.with_name("logparse-receipt.json")
+    receipt_bytes = receipt_path.read_bytes()
+    receipt = parse_canonical_json_bytes(receipt_bytes)
+    assert canonical_json_bytes(receipt) == receipt_bytes
+    assert receipt["job_id"] == candidate_job_id
+    assert receipt["operation"] == "parse-targets"
+    assert receipt["target_logs"] == frozen_targets["target_logs"]
     user_results = [
         item for item in reviewing.artifacts.values() if item.kind is ArtifactKind.USER_RESULT
     ]
@@ -1144,11 +1162,6 @@ def test_r01_r14_rpc_timeout_is_one_durable_cross_module_path(
     assert result_archive.metadata.format_id == "problem-locator-result-archive-v3"
     assert result_archive.metadata.user_result_proposal_key == "server-user-result"
     assert result_archive.metadata.target_log_count == 2
-    candidate_outcome = next(
-        outcome
-        for outcome in reviewing.outcomes.values()
-        if outcome.job_id == candidate_job_id
-    )
     assert {
         proposal.proposal_key: proposal.artifact_kind
         for proposal in candidate_outcome.proposed_artifacts
@@ -1158,30 +1171,47 @@ def test_r01_r14_rpc_timeout_is_one_durable_cross_module_path(
         "server-user-result": ArtifactKind.USER_RESULT,
         "server-user-result-archive": ArtifactKind.USER_RESULT_ARCHIVE,
     }
-    agent_draft_path = (
+    methods_draft_path = (
         data_root
         / "tmp"
         / "workspaces"
         / candidate_job_id
         / "output"
-        / "job_outcome.draft.json"
+        / "method-diagnosis.draft.json"
     )
-    agent_draft = parse_canonical_json_bytes(
-        agent_draft_path.read_bytes(),
-        model_type=AgentJobOutcomeDraftV2,
+    methods_draft_bytes = methods_draft_path.read_bytes()
+    methods_draft = MethodDiagnosisDraftV1.from_mapping(
+        parse_canonical_json_bytes(methods_draft_bytes)
     )
-    assert agent_draft.proposed_artifact_drafts == []
+    assert canonical_json_bytes(parse_canonical_json_bytes(methods_draft_bytes)) == (
+        methods_draft_bytes
+    )
+    assert methods_draft.status == "CONFIRMED"
+    assert methods_draft.confirmed_methods == ("rpc-call-timeout",)
+    assert methods_draft.candidate_methods == ()
+    assert len(methods_draft.evidence) == 1
+    assert methods_draft.evidence[0].identity_tokens == (
+        "order_id=synthetic-order-0001",
+    )
+    assert not (
+        methods_draft_path.parent / "job_outcome.draft.json"
+    ).exists()
     candidate_processing = reviewing.outcome_processing_records[
         candidate_outcome.outcome_id
     ]
     assert candidate_processing.job_id == candidate_job_id
     assert candidate_processing.accepted_artifact_ids == sorted(
-        [user_result.artifact_id, result_archive.artifact_id]
+        [
+            logparse_run.artifact_id,
+            user_result.artifact_id,
+            result_archive.artifact_id,
+        ]
     )
+    assert candidate_processing.accepted_evidence_ids == EVIDENCE_IDS
     assert candidate_processing.created_job_id == reviewing.case.active_job_id
     _assert_logparse_record(
         logparse_record,
-        expected_target_count=4,
+        expected_target_count=2,
     )
 
     # R13: capture the independent RUNNING review session, then release PASS.
@@ -1219,13 +1249,38 @@ def test_r01_r14_rpc_timeout_is_one_durable_cross_module_path(
     assert review_outcome.payload.evidence_conflicts == []
     assert review_outcome.payload.missing_evidence == []
     assert review_outcome.payload.stale_references == []
+    review_draft_path = (
+        data_root
+        / "tmp"
+        / "workspaces"
+        / review_job_id
+        / "output"
+        / "method-review.draft.json"
+    )
+    review_draft_bytes = review_draft_path.read_bytes()
+    review_draft = MethodReviewV1.from_mapping(
+        parse_canonical_json_bytes(review_draft_bytes)
+    )
+    assert canonical_json_bytes(parse_canonical_json_bytes(review_draft_bytes)) == (
+        review_draft_bytes
+    )
+    assert review_draft.verdict == "PASS"
+    assert [item.identity_tokens for item in review_draft.findings] == [
+        ("order_id=synthetic-order-0001",)
+    ]
+    assert not (review_draft_path.parent / "job_outcome.draft.json").exists()
     sessions = _agent_records(agent_record)
     assert [item["job_type"] for item in sessions] == [
         "ROUTE",
         "DIAGNOSE",
         "DIAGNOSE",
-        "DIAGNOSE",
         "REVIEW",
+    ]
+    assert [item["phase"] for item in sessions] == [
+        "ROUTE",
+        "LOGPARSE_PREPROCESS",
+        "METHODS_DIAGNOSE",
+        "METHODS_REVIEW",
     ]
     assert len({item["pid"] for item in sessions}) == len(sessions)
 
@@ -1298,15 +1353,24 @@ def test_r01_r14_rpc_timeout_is_one_durable_cross_module_path(
     assert payload.source_job_type is JobType.DIAGNOSE
     assert payload.problem_statement == restarted_view["problem_spec"]["statement"]
     assert payload.root_cause == restarted_view["final_result"]["statement"]
-    assert payload.findings == []
-    assert len(payload.verification_rules) == 20
+    assert len(payload.findings) == 1
+    assert payload.findings[0].evidence_bindings
+    assert payload.findings[0].citations
+    assert [item.factor_id for item in payload.causal_factors] == [
+        "rpc_call_timeout"
+    ]
+    assert len(payload.verification_rules) == 1
+    assert payload.verification_rules[0].rule_id.startswith(
+        "methods:rpc-call-timeout:"
+    )
     assert all(not item.issues for item in payload.verification_rules)
     assert payload.time_relevance.problem_time == PARAMETER_GROUP_A["problem_time"]
-    assert payload.time_relevance.assessment == "RELEVANT"
+    assert payload.time_relevance.assessment == "UNKNOWN"
+    assert payload.time_relevance.observations == []
     assert payload.evidence_gaps == []
     assert payload.limitations == []
     assert payload.recommendations == [
-        "Submit the fixed candidate for independent review."
+        "Submit the grounded Candidate to an independent Methods review."
     ]
     golden_targets, golden_target_names = _golden_target_archive_names()
     archive_expectations = experience["archive_expectations"]
@@ -1421,20 +1485,32 @@ def test_r01_r14_rpc_timeout_is_one_durable_cross_module_path(
         assert server_log == RPC_SERVER_LOG.encode("utf-8")
         assert b"synthetic-order-0001" in client_log
         assert b"synthetic-order-0001" in server_log
+    expected_proposal_keys = ["methods-target-1", "methods-target-2"]
+    assert all(
+        item.existing_evidence_id is None
+        for item in payload.supporting_evidence_bindings
+    )
     assert [
-        item.existing_evidence_id for item in payload.supporting_evidence_bindings
-    ] == restarted_view["final_result"]["supporting_evidence_refs"]
-    assert [
-        [binding.existing_evidence_id for binding in item.evidence_bindings]
+        item.evidence_proposal_key for item in payload.supporting_evidence_bindings
+    ] == expected_proposal_keys
+    assert all(
+        binding.existing_evidence_id is None
         for item in payload.completion_criteria_mapping
-    ] == [
+        for binding in item.evidence_bindings
+    )
+    assert [
+        [binding.evidence_proposal_key for binding in item.evidence_bindings]
+        for item in payload.completion_criteria_mapping
+    ] == [expected_proposal_keys]
+    assert restarted_view["final_result"]["supporting_evidence_refs"] == EVIDENCE_IDS
+    assert [
         item["evidence_refs"]
         for item in restarted_view["final_result"]["completion_criteria_mapping"]
-    ]
+    ] == [EVIDENCE_IDS]
     assert hidden.status_code == 404
     assert hidden.json()["error"]["code"] == "ARTIFACT_NOT_FOUND"
-    _assert_logparse_record(logparse_record, expected_target_count=4)
-    assert len(_agent_records(agent_record)) == 5
+    _assert_logparse_record(logparse_record, expected_target_count=2)
+    assert len(_agent_records(agent_record)) == 4
     restarted.shutdown()
     http_responses.extend(
         [
@@ -1445,19 +1521,19 @@ def test_r01_r14_rpc_timeout_is_one_durable_cross_module_path(
         ]
     )
     capabilities = stack.broker_factory.capabilities
-    assert len(capabilities) == 2
+    assert len(capabilities) == 1
     assert len(
         {
             item["PROBLEM_LOCATOR_LOGPARSE_ENDPOINT"]
             for item in capabilities
         }
-    ) == 2
+    ) == 1
     assert len(
         {
             item["PROBLEM_LOCATOR_LOGPARSE_TOKEN"]
             for item in capabilities
         }
-    ) == 2
+    ) == 1
     assert len(restarted.broker_factory.capabilities) == 0
     attachment_path = data_root / ready_attachment.storage_key
     assert attachment_path.read_bytes() == archive
@@ -1662,12 +1738,20 @@ def test_same_job_uses_initial_order_fact_and_survives_restart(
     resolved_view = _query(stack.mcp, case_id)
     assert resolved_view["status"] == CaseStatus.RESOLVED.value
     assert resolved_view["final_result"]["status"] == CandidateStatus.ACCEPTED.value
-    assert [item["job_type"] for item in _agent_records(agent_record)] == [
+    sessions = _agent_records(agent_record)
+    assert [item["job_type"] for item in sessions] == [
         "ROUTE",
         "DIAGNOSE",
         "DIAGNOSE",
         "REVIEW",
     ]
+    assert [item["phase"] for item in sessions] == [
+        "ROUTE",
+        "LOGPARSE_PREPROCESS",
+        "METHODS_DIAGNOSE",
+        "METHODS_REVIEW",
+    ]
+    assert len({item["pid"] for item in sessions}) == len(sessions)
     resolved = stack.repository.read_snapshot().cases[case_id]
     public_artifacts = [
         item for item in resolved.artifacts.values()

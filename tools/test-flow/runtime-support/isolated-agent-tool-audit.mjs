@@ -24,6 +24,8 @@ export const SKILL_GENERATION_TRACE_CODES = Object.freeze({
   SKILL_DOCUMENT_INVALID: "SKILL_TRACE_SKILL_DOCUMENT_INVALID",
   SKILL_LINK_INVALID: "SKILL_TRACE_SKILL_LINK_INVALID",
   REQUIRED_REFERENCE_INVALID: "SKILL_TRACE_REQUIRED_REFERENCE_INVALID",
+  SOURCE_IDENTITY_INVALID: "SKILL_TRACE_SOURCE_IDENTITY_INVALID",
+  SOURCE_LOG_TEMPLATES_INVALID: "SKILL_TRACE_SOURCE_LOG_TEMPLATES_INVALID",
   PATH_ABSOLUTE: "SKILL_TRACE_PATH_ABSOLUTE",
   PATH_TRAVERSAL: "SKILL_TRACE_PATH_TRAVERSAL",
   PATH_NOT_NORMALIZED: "SKILL_TRACE_PATH_NOT_NORMALIZED",
@@ -40,6 +42,7 @@ export const SKILL_GENERATION_TRACE_CODES = Object.freeze({
   WRITE_COUNT_INVALID: "SKILL_TRACE_WRITE_COUNT_INVALID",
   WRITE_PATH_INVALID: "SKILL_TRACE_WRITE_PATH_INVALID",
   WRITE_CONTENT_MISMATCH: "SKILL_TRACE_WRITE_CONTENT_MISMATCH",
+  OUTPUT_TREE_INVALID: "SKILL_TRACE_OUTPUT_TREE_INVALID",
 });
 
 export class SkillGenerationTraceAuditError extends Error {
@@ -52,32 +55,19 @@ export class SkillGenerationTraceAuditError extends Error {
 }
 
 const ALLOWED_TOOLS = Object.freeze(["Skill", "Read", "Write"]);
-export const SKILL_GENERATION_TRACE_SCHEMA_VERSION = 2;
-export const SKILL_GENERATION_TOOL_ATTEMPT_POLICY = Object.freeze({
-  schema_version: 1,
-  version: "skill-generation-tool-attempts-v2",
-  classification: "locally-recomputed-required-fields-absent",
-  max_empty_write_rejections: 1,
-  empty_write_rejection_requires_explicit_error: true,
-  empty_write_rejection_must_follow_required_reads: true,
-  empty_write_rejection_must_immediately_precede_success: true,
-  empty_write_rejection_result_must_precede_success: true,
-  successful_write_count: 1,
-  successful_write_must_be_final_tool: true,
-});
-const REQUIRED_INPUT_PATHS = Object.freeze([
-  "inputs/wiki.md",
-  "inputs/clarifications.md",
+const REQUIRED_INPUT_PATH = "inputs/wiki.md";
+const REQUIRED_SOURCE_IDENTITY_PATH = "runtime/source-wiki-identity.json";
+const REQUIRED_REFERENCE_PATH = "references/output-contract.md";
+const SOURCE_LOG_TEMPLATES_REFERENCE = "references/source-log-templates.md";
+const REQUIRED_RECEIPT_READS = Object.freeze([
+  `workspace/${REQUIRED_INPUT_PATH}`,
+  `workspace/${REQUIRED_SOURCE_IDENTITY_PATH}`,
+  `skill/${REQUIRED_REFERENCE_PATH}`,
 ]);
-const DEFAULT_REQUIRED_REFERENCES = Object.freeze([
-  "references/generation-spec-v6-reference.md",
-  "references/verification-contract-v2-reference.md",
-]);
-const DEFAULT_REQUIRED_RECEIPT_READS = Object.freeze([
-  ...REQUIRED_INPUT_PATHS.map((relative) => `workspace/${relative}`),
-  ...DEFAULT_REQUIRED_REFERENCES.map((relative) => `skill/${relative}`),
-]);
-const OUTPUT_PATH = "output/generation-spec.json";
+const SKILL_NAME = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+const REFERENCE_NAME = /^[a-z0-9]+(?:-[a-z0-9]+)*\.md$/;
+
+export const SKILL_GENERATION_TRACE_SCHEMA_VERSION = 5;
 
 function fail(code, message, details = {}) {
   throw new SkillGenerationTraceAuditError(code, message, details);
@@ -98,9 +88,54 @@ function exactKeys(value, expected) {
     && Object.keys(value).sort().join("\0") === [...expected].sort().join("\0");
 }
 
+function canonicalJson(value) {
+  if (Array.isArray(value)) return `[${value.map((item) => canonicalJson(item)).join(",")}]`;
+  if (isPlainObject(value)) return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(",")}}`;
+  return JSON.stringify(value);
+}
+
+function sha256Bytes(value) {
+  return crypto.createHash("sha256").update(value).digest("hex");
+}
+
+function decodeUtf8(bytes, code, message) {
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    fail(code, message);
+  }
+}
+
+function wikiLogTemplates(text) {
+  const templates = [];
+  let inTextFence = false;
+  for (const rawLine of text.split(/\r\n|[\n\v\f\r\x1c-\x1e\x85\u2028\u2029]/u)) {
+    const stripped = rawLine.trim();
+    if (stripped === "```text") {
+      inTextFence = true;
+      continue;
+    }
+    if (stripped === "```" && inTextFence) {
+      inTextFence = false;
+      continue;
+    }
+    if (!inTextFence || stripped.length === 0) continue;
+    if (/\{[A-Za-z_][A-Za-z0-9_]*\}|%[A-Za-z]/.test(stripped)) templates.push(stripped);
+  }
+  return templates;
+}
+
+function templateInventorySha256(templates) {
+  return sha256Bytes(canonicalJson({ version: 1, templates }));
+}
+
+function sourceLogTemplatesBytes(templates) {
+  return Buffer.from(`# Source log templates\n\n\`\`\`text\n${templates.join("\n")}\n\`\`\`\n`, "utf8");
+}
+
 function portableRelativePath(value) {
-  requireAudit(typeof value === "string" && value.length > 0 && !value.includes("\0"), SKILL_GENERATION_TRACE_CODES.PATH_NOT_NORMALIZED, "Tool paths must be non-empty portable relative paths");
-  requireAudit(!path.posix.isAbsolute(value) && !path.win32.isAbsolute(value), SKILL_GENERATION_TRACE_CODES.PATH_ABSOLUTE, "Absolute tool paths are forbidden");
+  requireAudit(typeof value === "string" && value.length > 0 && !value.includes("\0"), SKILL_GENERATION_TRACE_CODES.PATH_NOT_NORMALIZED, "Tool paths must be non-empty portable paths");
+  requireAudit(!path.posix.isAbsolute(value) && !path.win32.isAbsolute(value), SKILL_GENERATION_TRACE_CODES.PATH_ABSOLUTE, "Expected a relative tool path");
   const slashed = value.replaceAll("\\", "/");
   const segments = slashed.split("/");
   requireAudit(!segments.includes(".."), SKILL_GENERATION_TRACE_CODES.PATH_TRAVERSAL, "Tool paths must not traverse parent directories");
@@ -108,17 +143,15 @@ function portableRelativePath(value) {
   return slashed;
 }
 
-function dotSegmentPath(value) {
-  const slashed = value.replaceAll("\\", "/");
-  const withoutRoot = slashed
-    .replace(/^[A-Za-z]:\//, "")
-    .replace(/^\/+/, "");
-  return withoutRoot.split("/").some((segment) => segment === "" || segment === "." || segment === "..");
-}
-
 function pathInside(root, candidate) {
   const relative = path.relative(path.resolve(root), path.resolve(candidate));
   return relative === "" || (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
+}
+
+function sameAbsolutePath(left, right) {
+  const a = path.resolve(left);
+  const b = path.resolve(right);
+  return process.platform === "win32" ? a.toLowerCase() === b.toLowerCase() : a === b;
 }
 
 function inspectRoot(root, label) {
@@ -136,40 +169,101 @@ function inspectRoot(root, label) {
   } catch (error) {
     fail(SKILL_GENERATION_TRACE_CODES.ROOT_INVALID, `${label} cannot be resolved`, { cause: error?.code ?? "UNKNOWN" });
   }
-  const resolved = path.resolve(root);
-  const same = process.platform === "win32"
-    ? real.toLowerCase() === resolved.toLowerCase()
-    : real === resolved;
-  requireAudit(same, SKILL_GENERATION_TRACE_CODES.ROOT_INVALID, `${label} must not contain symlinked path components`);
+  requireAudit(sameAbsolutePath(real, root), SKILL_GENERATION_TRACE_CODES.ROOT_INVALID, `${label} must not contain symlinked path components`);
 }
 
-function inspectRegularFile(root, relativePath) {
-  inspectRoot(root, "Path root");
+function inspectDirectory(root, relativePath) {
   let current = path.resolve(root);
-  const segments = portableRelativePath(relativePath).split("/");
-  for (let index = 0; index < segments.length; index += 1) {
-    current = path.join(current, segments[index]);
+  for (const segment of portableRelativePath(relativePath).split("/")) {
+    current = path.join(current, segment);
     let metadata;
     try {
       metadata = fs.lstatSync(current);
     } catch (error) {
-      fail(SKILL_GENERATION_TRACE_CODES.PATH_MISSING, `Audited path does not exist: ${relativePath}`, { path: relativePath, cause: error?.code ?? "UNKNOWN" });
+      fail(SKILL_GENERATION_TRACE_CODES.PATH_MISSING, `Audited directory does not exist: ${relativePath}`, { cause: error?.code ?? "UNKNOWN" });
     }
-    requireAudit(!metadata.isSymbolicLink(), SKILL_GENERATION_TRACE_CODES.PATH_SYMLINK, `Audited paths must not contain symlinks: ${relativePath}`, { path: relativePath });
-    const final = index === segments.length - 1;
-    requireAudit(final ? metadata.isFile() : metadata.isDirectory(), SKILL_GENERATION_TRACE_CODES.PATH_KIND_INVALID, `Audited path has an invalid node kind: ${relativePath}`, { path: relativePath });
-    if (final) requireAudit(metadata.nlink === 1, SKILL_GENERATION_TRACE_CODES.PATH_HARDLINK, `Audited files must not be hardlinked: ${relativePath}`, { path: relativePath });
+    requireAudit(!metadata.isSymbolicLink(), SKILL_GENERATION_TRACE_CODES.PATH_SYMLINK, `Audited paths must not contain symlinks: ${relativePath}`);
+    requireAudit(metadata.isDirectory(), SKILL_GENERATION_TRACE_CODES.PATH_KIND_INVALID, `Audited path is not a directory: ${relativePath}`);
   }
-  requireAudit(pathInside(root, current), SKILL_GENERATION_TRACE_CODES.PATH_TRAVERSAL, `Audited path escapes its root: ${relativePath}`, { path: relativePath });
+  requireAudit(pathInside(root, current), SKILL_GENERATION_TRACE_CODES.PATH_TRAVERSAL, `Audited path escapes its root: ${relativePath}`);
   return current;
 }
 
-function ordinaryMarkdownLinks(document) {
-  const links = [];
-  const ordinaryText = ordinaryMarkdownText(document);
-  const pattern = /(?<!!)\[[^\]\r\n]*\]\(\s*(?:<([^>\r\n]+)>|([^\s)]+))(?:\s+(?:"[^"]*"|'[^']*'))?\s*\)/g;
-  for (const match of ordinaryText.matchAll(pattern)) links.push(match[1] ?? match[2]);
-  return links;
+function inspectRegularFile(root, relativePath) {
+  const normalized = portableRelativePath(relativePath);
+  const segments = normalized.split("/");
+  let current = path.resolve(root);
+  for (const [index, segment] of segments.entries()) {
+    current = path.join(current, segment);
+    let metadata;
+    try {
+      metadata = fs.lstatSync(current);
+    } catch (error) {
+      fail(SKILL_GENERATION_TRACE_CODES.PATH_MISSING, `Audited path does not exist: ${relativePath}`, { cause: error?.code ?? "UNKNOWN" });
+    }
+    requireAudit(!metadata.isSymbolicLink(), SKILL_GENERATION_TRACE_CODES.PATH_SYMLINK, `Audited paths must not contain symlinks: ${relativePath}`);
+    const final = index === segments.length - 1;
+    requireAudit(final ? metadata.isFile() : metadata.isDirectory(), SKILL_GENERATION_TRACE_CODES.PATH_KIND_INVALID, `Audited path has an invalid node kind: ${relativePath}`);
+    if (final) requireAudit(metadata.nlink === 1, SKILL_GENERATION_TRACE_CODES.PATH_HARDLINK, `Audited files must not be hardlinked: ${relativePath}`);
+  }
+  requireAudit(pathInside(root, current), SKILL_GENERATION_TRACE_CODES.PATH_TRAVERSAL, `Audited path escapes its root: ${relativePath}`);
+  return current;
+}
+
+function inspectSourceIdentity(workspaceRoot) {
+  const wikiPath = inspectRegularFile(workspaceRoot, REQUIRED_INPUT_PATH);
+  const identityPath = inspectRegularFile(workspaceRoot, REQUIRED_SOURCE_IDENTITY_PATH);
+  const wikiBytes = fs.readFileSync(wikiPath);
+  const wikiTemplates = wikiLogTemplates(decodeUtf8(
+    wikiBytes,
+    SKILL_GENERATION_TRACE_CODES.SOURCE_IDENTITY_INVALID,
+    "inputs/wiki.md must be UTF-8",
+  ));
+  let bytes;
+  let identity;
+  try {
+    bytes = fs.readFileSync(identityPath);
+    identity = JSON.parse(decodeUtf8(
+      bytes,
+      SKILL_GENERATION_TRACE_CODES.SOURCE_IDENTITY_INVALID,
+      "Source Wiki identity must be UTF-8 JSON",
+    ));
+  } catch {
+    fail(SKILL_GENERATION_TRACE_CODES.SOURCE_IDENTITY_INVALID, "Source Wiki identity must be UTF-8 JSON");
+  }
+  requireAudit(
+    exactKeys(identity, [
+      "algorithm", "schema_version", "sha256", "source_path",
+      "log_template_extraction_version", "log_templates", "log_template_inventory_sha256",
+    ])
+      && identity.schema_version === 2
+      && identity.algorithm === "sha256"
+      && identity.source_path === REQUIRED_INPUT_PATH
+      && /^[a-f0-9]{64}$/.test(identity.sha256 ?? "")
+      && identity.log_template_extraction_version === 1
+      && Array.isArray(identity.log_templates)
+      && identity.log_templates.every((template) => typeof template === "string" && template.length > 0)
+      && /^[a-f0-9]{64}$/.test(identity.log_template_inventory_sha256 ?? ""),
+    SKILL_GENERATION_TRACE_CODES.SOURCE_IDENTITY_INVALID,
+    "Source Wiki identity does not match its closed schema",
+  );
+  requireAudit(
+    bytes.equals(Buffer.from(`${canonicalJson(identity)}\n`, "utf8")),
+    SKILL_GENERATION_TRACE_CODES.SOURCE_IDENTITY_INVALID,
+    "Source Wiki identity must use canonical JSON bytes",
+  );
+  requireAudit(
+    identity.sha256 === sha256Bytes(wikiBytes),
+    SKILL_GENERATION_TRACE_CODES.SOURCE_IDENTITY_INVALID,
+    "Source Wiki identity digest does not match inputs/wiki.md",
+  );
+  requireAudit(
+    JSON.stringify(identity.log_templates) === JSON.stringify(wikiTemplates)
+      && identity.log_template_inventory_sha256 === templateInventorySha256(wikiTemplates),
+    SKILL_GENERATION_TRACE_CODES.SOURCE_IDENTITY_INVALID,
+    "Source Wiki log template inventory does not match inputs/wiki.md",
+  );
+  return identity;
 }
 
 function ordinaryMarkdownText(document) {
@@ -177,6 +271,13 @@ function ordinaryMarkdownText(document) {
     .replace(/<!--[\s\S]*?-->/g, "")
     .replace(/^[ \t]*(?:```|~~~)[^\r\n]*\r?\n[\s\S]*?^[ \t]*(?:```|~~~)[ \t]*$/gm, "")
     .replace(/`[^`\r\n]*`/g, "");
+}
+
+function ordinaryMarkdownLinks(document) {
+  const links = [];
+  const pattern = /(?<!!)\[[^\]\r\n]*\]\(\s*(?:<([^>\r\n]+)>|([^\s)]+))(?:\s+(?:"[^"]*"|'[^']*'))?\s*\)/g;
+  for (const match of ordinaryMarkdownText(document).matchAll(pattern)) links.push(match[1] ?? match[2]);
+  return links;
 }
 
 export function discoverLinkedSkillReferences(skillRoot) {
@@ -189,11 +290,7 @@ export function discoverLinkedSkillReferences(skillRoot) {
     fail(SKILL_GENERATION_TRACE_CODES.SKILL_DOCUMENT_INVALID, "The Skill document could not be read as UTF-8", { cause: error?.code ?? "UNKNOWN" });
   }
   const ordinaryText = ordinaryMarkdownText(document);
-  requireAudit(
-    !/!\[[^\]\r\n]*\]\(\s*(?:<[^>\r\n]+>|[^\s)]+)|\[[^\]\r\n]+\]\[[^\]\r\n]*\]|<a\s+[^>]*href\s*=/i.test(ordinaryText),
-    SKILL_GENERATION_TRACE_CODES.SKILL_LINK_INVALID,
-    "Only ordinary inline Markdown links may declare Skill references",
-  );
+  requireAudit(!/!\[[^\]\r\n]*\]\(\s*(?:<[^>\r\n]+>|[^\s)]+)|\[[^\]\r\n]+\]\[[^\]\r\n]*\]|<a\s+[^>]*href\s*=/i.test(ordinaryText), SKILL_GENERATION_TRACE_CODES.SKILL_LINK_INVALID, "Only ordinary inline Markdown links may declare Skill references");
   const references = new Set();
   for (const target of ordinaryMarkdownLinks(document)) {
     requireAudit(!/^[a-z][a-z0-9+.-]*:/i.test(target) && !target.startsWith("#"), SKILL_GENERATION_TRACE_CODES.SKILL_LINK_INVALID, "Skill reference links must be local file paths");
@@ -203,30 +300,29 @@ export function discoverLinkedSkillReferences(skillRoot) {
     } catch (error) {
       fail(SKILL_GENERATION_TRACE_CODES.SKILL_LINK_INVALID, "A local Skill link is not a safe relative reference", { cause: error?.code ?? "UNKNOWN" });
     }
-    requireAudit(normalized.startsWith("references/"), SKILL_GENERATION_TRACE_CODES.SKILL_LINK_INVALID, "Local Skill links must remain under references/", { path: normalized });
+    requireAudit(normalized.startsWith("references/"), SKILL_GENERATION_TRACE_CODES.SKILL_LINK_INVALID, "Local Skill links must remain under references/");
     inspectRegularFile(skillRoot, normalized);
     references.add(normalized);
   }
-  return [...references].sort();
+  const discovered = [...references].sort();
+  requireAudit(discovered.length === 1 && discovered[0] === REQUIRED_REFERENCE_PATH, SKILL_GENERATION_TRACE_CODES.REQUIRED_REFERENCE_INVALID, "The meta Skill must link exactly references/output-contract.md");
+  return discovered;
 }
 
 function validatedLinkedReferences(skillRoot, linkedReferences) {
-  requireAudit(Array.isArray(linkedReferences) && linkedReferences.length > 0, SKILL_GENERATION_TRACE_CODES.REQUIRED_REFERENCE_INVALID, "linkedReferences must be a non-empty array");
+  requireAudit(Array.isArray(linkedReferences), SKILL_GENERATION_TRACE_CODES.REQUIRED_REFERENCE_INVALID, "linkedReferences must be an array");
   const discovered = discoverLinkedSkillReferences(skillRoot);
   const normalized = linkedReferences.map((relative) => portableRelativePath(relative));
-  requireAudit(new Set(normalized).size === normalized.length, SKILL_GENERATION_TRACE_CODES.REQUIRED_REFERENCE_INVALID, "linkedReferences must be unique");
-  requireAudit(normalized.every((relative) => relative.startsWith("references/")), SKILL_GENERATION_TRACE_CODES.REQUIRED_REFERENCE_INVALID, "linkedReferences must remain under references/");
-  requireAudit([...normalized].sort().join("\0") === discovered.join("\0"), SKILL_GENERATION_TRACE_CODES.REQUIRED_REFERENCE_INVALID, "linkedReferences must exactly match safe ordinary references discovered from SKILL.md");
-  for (const relative of normalized) inspectRegularFile(skillRoot, relative);
+  requireAudit(normalized.length === 1 && normalized[0] === REQUIRED_REFERENCE_PATH && normalized.join("\0") === discovered.join("\0"), SKILL_GENERATION_TRACE_CODES.REQUIRED_REFERENCE_INVALID, "linkedReferences must exactly match the meta Skill output contract");
   return discovered;
 }
 
 function permissionAbsolute(filePath) {
   const resolved = path.resolve(filePath);
-  let portable;
   const drive = /^([A-Za-z]):[\\/](.*)$/.exec(resolved);
-  if (drive) portable = `${drive[1]}/${drive[2].replaceAll("\\", "/")}`;
-  else portable = resolved.split(path.sep).join("/").replace(/^\/+/, "");
+  const portable = drive
+    ? `${drive[1]}/${drive[2].replaceAll("\\", "/")}`
+    : resolved.split(path.sep).join("/").replace(/^\/+/, "");
   return `//${portable.replaceAll("\\", "\\\\").replaceAll("(", "\\(").replaceAll(")", "\\)")}`;
 }
 
@@ -237,81 +333,17 @@ export function skillGenerationPermissionRules({ workspaceRoot, skillRoot, linke
     inspectRoot(sourceRoot, "Source root");
     requireAudit(!pathInside(sourceRoot, workspaceRoot) && !pathInside(workspaceRoot, sourceRoot), SKILL_GENERATION_TRACE_CODES.ROOT_INVALID, "The audited workspace must be outside the source repository");
   }
-  for (const relative of REQUIRED_INPUT_PATHS) inspectRegularFile(workspaceRoot, relative);
+  inspectSourceIdentity(workspaceRoot);
   const references = validatedLinkedReferences(skillRoot, linkedReferences);
   return [
     "Skill(wiki-to-diagnosis-skill)",
     "Read(/inputs/wiki.md)",
-    "Read(/inputs/clarifications.md)",
-    ...references.map((relative) => `Read(${permissionAbsolute(path.join(skillRoot, ...relative.split("/")))})`),
-    // Claude Code's Edit(path) permission category authorizes both Edit and
-    // Write file operations. The Write tool itself remains the only exposed
-    // and trace-audited file mutation tool for this workflow.
-    "Edit(/output/generation-spec.json)",
+    "Read(/runtime/source-wiki-identity.json)",
+    `Read(${permissionAbsolute(path.join(skillRoot, ...references[0].split("/")))})`,
+    // Claude Code's Edit permission category authorizes Write. The trace audit
+    // closes this wildcard to one Methods package and its exact files.
+    "Edit(/output/**)",
   ];
-}
-
-function sameAbsolutePath(left, right) {
-  const resolvedLeft = path.resolve(left);
-  const resolvedRight = path.resolve(right);
-  return process.platform === "win32"
-    ? resolvedLeft.toLowerCase() === resolvedRight.toLowerCase()
-    : resolvedLeft === resolvedRight;
-}
-
-function observedPath(value, { workspaceRoot, skillRoot, linkedReferences, mode }) {
-  requireAudit(typeof value === "string" && value.length > 0 && !value.includes("\0"), SKILL_GENERATION_TRACE_CODES.PATH_NOT_NORMALIZED, "Tool paths must be non-empty strings");
-  requireAudit(!dotSegmentPath(value), SKILL_GENERATION_TRACE_CODES.PATH_TRAVERSAL, "Tool paths must not contain empty, current, or parent segments");
-  const absolute = path.isAbsolute(value);
-  const foreignAbsolute = process.platform === "win32"
-    ? path.posix.isAbsolute(value)
-    : path.win32.isAbsolute(value);
-  if (!absolute && foreignAbsolute) {
-    fail(SKILL_GENERATION_TRACE_CODES.PATH_ABSOLUTE, "Foreign-platform absolute tool paths are forbidden");
-  }
-  const workspaceCandidates = mode === "read" ? REQUIRED_INPUT_PATHS : [OUTPUT_PATH];
-  if (!absolute) {
-    const relative = portableRelativePath(value);
-    requireAudit(workspaceCandidates.includes(relative), mode === "read" ? SKILL_GENERATION_TRACE_CODES.READ_UNLINKED : SKILL_GENERATION_TRACE_CODES.WRITE_PATH_INVALID, "Relative tool path is outside the fixed workspace allowlist", { path: relative });
-    inspectRegularFile(workspaceRoot, relative);
-    return { receiptPath: `workspace/${relative}`, absolutePath: path.join(workspaceRoot, ...relative.split("/")) };
-  }
-
-  for (const relative of workspaceCandidates) {
-    const candidate = path.join(workspaceRoot, ...relative.split("/"));
-    if (sameAbsolutePath(value, candidate)) {
-      inspectRegularFile(workspaceRoot, relative);
-      requireAudit(sameAbsolutePath(fs.realpathSync.native(value), fs.realpathSync.native(candidate)), SKILL_GENERATION_TRACE_CODES.PATH_SYMLINK, "Absolute workspace path must resolve exactly to its allowed file");
-      return { receiptPath: `workspace/${relative}`, absolutePath: candidate };
-    }
-  }
-  if (mode === "read") {
-    for (const relative of linkedReferences) {
-      const candidate = path.join(skillRoot, ...relative.split("/"));
-      if (sameAbsolutePath(value, candidate)) {
-        inspectRegularFile(skillRoot, relative);
-        requireAudit(sameAbsolutePath(fs.realpathSync.native(value), fs.realpathSync.native(candidate)), SKILL_GENERATION_TRACE_CODES.PATH_SYMLINK, "Absolute Skill reference path must resolve exactly to its discovered file");
-        return { receiptPath: `skill/${relative}`, absolutePath: candidate };
-      }
-    }
-  }
-  fail(mode === "read" ? SKILL_GENERATION_TRACE_CODES.READ_UNLINKED : SKILL_GENERATION_TRACE_CODES.WRITE_PATH_INVALID, "Absolute tool path is outside the exact audited allowlist");
-}
-
-function normalizeRequiredReferences(values, links) {
-  requireAudit(Array.isArray(values) && values.length > 0, SKILL_GENERATION_TRACE_CODES.REQUIRED_REFERENCE_INVALID, "At least one required Skill reference is needed");
-  const normalized = values.map((value) => {
-    let candidate;
-    try {
-      candidate = portableRelativePath(value);
-    } catch (error) {
-      fail(SKILL_GENERATION_TRACE_CODES.REQUIRED_REFERENCE_INVALID, "A required Skill reference is invalid", { cause: error?.code ?? "UNKNOWN" });
-    }
-    requireAudit(candidate.startsWith("references/") && links.has(candidate), SKILL_GENERATION_TRACE_CODES.REQUIRED_REFERENCE_INVALID, "A required Skill reference is not linked by SKILL.md", { path: candidate });
-    return candidate;
-  });
-  requireAudit(new Set(normalized).size === normalized.length, SKILL_GENERATION_TRACE_CODES.REQUIRED_REFERENCE_INVALID, "Required Skill references must be unique");
-  return normalized;
 }
 
 function parseToolRecords(events) {
@@ -325,15 +357,7 @@ function parseToolRecords(events) {
         requireAudit(event.type === "assistant" && event.message?.role === "assistant", SKILL_GENERATION_TRACE_CODES.TOOL_EVENT_INVALID, "tool_use must be emitted by an assistant message");
         requireAudit(ALLOWED_TOOLS.includes(block.name), SKILL_GENERATION_TRACE_CODES.TOOL_NOT_ALLOWED, `Tool is not allowed: ${String(block.name)}`);
         requireAudit(typeof block.id === "string" && block.id.length > 0 && !byId.has(block.id), SKILL_GENERATION_TRACE_CODES.TOOL_USE_ID_INVALID, "tool_use IDs must be non-empty and unique");
-        const record = {
-          ordinal: records.length,
-          id: block.id,
-          tool: block.name,
-          input: block.input,
-          result: null,
-          use_event_index: eventIndex,
-          result_event_index: null,
-        };
+        const record = { ordinal: records.length, id: block.id, tool: block.name, input: block.input, result: null, use_event_index: eventIndex, result_event_index: null };
         records.push(record);
         byId.set(record.id, record);
       } else if (block?.type === "tool_result") {
@@ -342,30 +366,15 @@ function parseToolRecords(events) {
         requireAudit(record !== undefined, SKILL_GENERATION_TRACE_CODES.TOOL_RESULT_UNMATCHED, "tool_result does not match a tool_use");
         requireAudit(record.result === null, SKILL_GENERATION_TRACE_CODES.TOOL_RESULT_DUPLICATE, "A tool_use has more than one tool_result");
         const raw = event.tool_use_result;
-        const failed = block.is_error === true
-          || raw?.isError === true
-          || raw?.is_error === true
-          || raw?.success === false;
-        record.result = {
-          raw,
-          outcome: failed ? "ERROR" : "SUCCESS",
-          explicit_error: block.is_error === true,
-          contradictory_success: failed && raw?.success === true,
-        };
+        const failed = block.is_error === true || raw?.isError === true || raw?.is_error === true || raw?.success === false;
+        record.result = { raw, outcome: failed ? "ERROR" : "SUCCESS" };
         record.result_event_index = eventIndex;
       }
     }
   }
   requireAudit(records.every((record) => record.result !== null), SKILL_GENERATION_TRACE_CODES.TOOL_RESULT_MISSING, "Every tool_use must have exactly one tool_result");
+  requireAudit(records.every((record) => record.result.outcome === "SUCCESS"), SKILL_GENERATION_TRACE_CODES.TOOL_RESULT_ERROR, "Failed tool calls are forbidden in Methods generation");
   return records;
-}
-
-function emptyWriteValidationRejection(record) {
-  return record.tool === "Write"
-    && exactKeys(record.input, [])
-    && record.result?.outcome === "ERROR"
-    && record.result.explicit_error === true
-    && record.result.contradictory_success === false;
 }
 
 function validateSkillInvocation(records) {
@@ -376,43 +385,162 @@ function validateSkillInvocation(records) {
 }
 
 function validateReadInput(record) {
-  requireAudit(isPlainObject(record.input) && typeof record.input.file_path === "string", SKILL_GENERATION_TRACE_CODES.READ_INPUT_INVALID, "Read input must contain file_path");
-  const allowed = new Set(["file_path", "offset", "limit", "pages"]);
-  requireAudit(Object.keys(record.input).every((key) => allowed.has(key)), SKILL_GENERATION_TRACE_CODES.READ_INPUT_INVALID, "Read input contains an unsupported field");
+  requireAudit(exactKeys(record.input, ["file_path"]) && typeof record.input.file_path === "string", SKILL_GENERATION_TRACE_CODES.READ_INPUT_INVALID, "Read input must contain only file_path; partial reads are forbidden");
   return record.input.file_path;
+}
+
+function observedReadPath(toolPath, { workspaceRoot, skillRoot }) {
+  if (path.isAbsolute(toolPath)) {
+    if (sameAbsolutePath(toolPath, path.join(workspaceRoot, REQUIRED_INPUT_PATH))) {
+      inspectRegularFile(workspaceRoot, REQUIRED_INPUT_PATH);
+      return `workspace/${REQUIRED_INPUT_PATH}`;
+    }
+    if (sameAbsolutePath(toolPath, path.join(workspaceRoot, REQUIRED_SOURCE_IDENTITY_PATH))) {
+      inspectSourceIdentity(workspaceRoot);
+      return `workspace/${REQUIRED_SOURCE_IDENTITY_PATH}`;
+    }
+    if (sameAbsolutePath(toolPath, path.join(skillRoot, REQUIRED_REFERENCE_PATH))) {
+      inspectRegularFile(skillRoot, REQUIRED_REFERENCE_PATH);
+      return `skill/${REQUIRED_REFERENCE_PATH}`;
+    }
+    fail(SKILL_GENERATION_TRACE_CODES.READ_UNLINKED, "Read may access only inputs/wiki.md, its source identity, and the linked output contract");
+  }
+  const relative = portableRelativePath(toolPath);
+  requireAudit(
+    relative === REQUIRED_INPUT_PATH || relative === REQUIRED_SOURCE_IDENTITY_PATH,
+    SKILL_GENERATION_TRACE_CODES.READ_UNLINKED,
+    "Relative Read paths may access only inputs/wiki.md or runtime/source-wiki-identity.json",
+  );
+  if (relative === REQUIRED_SOURCE_IDENTITY_PATH) inspectSourceIdentity(workspaceRoot);
+  else inspectRegularFile(workspaceRoot, relative);
+  return `workspace/${relative}`;
 }
 
 function validateWriteInput(record) {
-  requireAudit(
-    exactKeys(record.input, ["file_path", "content"])
-      && typeof record.input.file_path === "string"
-      && typeof record.input.content === "string"
-      && record.input.content.trim().length > 0,
-    SKILL_GENERATION_TRACE_CODES.WRITE_INPUT_INVALID,
-    "Write input must contain only non-empty string file_path and content fields",
-  );
-  return record.input.file_path;
+  requireAudit(exactKeys(record.input, ["file_path", "content"])
+    && typeof record.input.file_path === "string"
+    && typeof record.input.content === "string"
+    && record.input.content.length > 0,
+  SKILL_GENERATION_TRACE_CODES.WRITE_INPUT_INVALID,
+  "Write input must contain only non-empty string file_path and content fields");
 }
 
-function sha256File(filePath) {
-  return crypto.createHash("sha256").update(fs.readFileSync(filePath)).digest("hex");
-}
-
-function validReceiptPath(value, prefixes) {
-  try {
-    const normalized = portableRelativePath(value);
-    return prefixes.some((prefix) => normalized.startsWith(prefix));
-  } catch {
-    return false;
+function normalizedWorkspaceWrite(toolPath, workspaceRoot) {
+  let relative;
+  if (path.isAbsolute(toolPath)) {
+    requireAudit(pathInside(workspaceRoot, toolPath), SKILL_GENERATION_TRACE_CODES.WRITE_PATH_INVALID, "Write path must remain inside the isolated workspace");
+    relative = path.relative(workspaceRoot, path.resolve(toolPath)).split(path.sep).join("/");
+  } else {
+    relative = portableRelativePath(toolPath);
   }
+  const match = /^output\/([a-z0-9]+(?:-[a-z0-9]+)*)\/(SKILL\.md|methods\.json|references\/([a-z0-9]+(?:-[a-z0-9]+)*\.md))$/.exec(relative);
+  requireAudit(match !== null, SKILL_GENERATION_TRACE_CODES.WRITE_PATH_INVALID, "Write paths must be output/<skill>/{SKILL.md,methods.json,references/*.md}", { path: relative });
+  return { relative, skillName: match[1], absolute: path.join(workspaceRoot, ...relative.split("/")) };
+}
+
+function inspectOutputPackage(workspaceRoot, skillName, writes, sourceIdentity) {
+  requireAudit(SKILL_NAME.test(skillName), SKILL_GENERATION_TRACE_CODES.OUTPUT_TREE_INVALID, "Generated Skill name is invalid");
+  const outputRoot = inspectDirectory(workspaceRoot, "output");
+  const outputEntries = fs.readdirSync(outputRoot, { withFileTypes: true });
+  requireAudit(outputEntries.length === 1 && outputEntries[0].name === skillName && outputEntries[0].isDirectory() && !outputEntries[0].isSymbolicLink(), SKILL_GENERATION_TRACE_CODES.OUTPUT_TREE_INVALID, "output must contain exactly one real Skill directory");
+  const packageRoot = inspectDirectory(workspaceRoot, `output/${skillName}`);
+  const rootEntries = fs.readdirSync(packageRoot, { withFileTypes: true });
+  requireAudit(rootEntries.map((entry) => entry.name).sort().join("\0") === ["SKILL.md", "methods.json", "references"].join("\0"), SKILL_GENERATION_TRACE_CODES.OUTPUT_TREE_INVALID, "Generated package root entries are invalid");
+  const referencesRoot = inspectDirectory(workspaceRoot, `output/${skillName}/references`);
+  const references = fs.readdirSync(referencesRoot, { withFileTypes: true }).sort((left, right) => left.name.localeCompare(right.name));
+  requireAudit(references.length > 0, SKILL_GENERATION_TRACE_CODES.OUTPUT_TREE_INVALID, "references must not be empty");
+  requireAudit(references.every((entry) => !entry.isSymbolicLink()), SKILL_GENERATION_TRACE_CODES.PATH_SYMLINK, "Generated references must not contain symlinks");
+  requireAudit(references.every((entry) => entry.isFile() && REFERENCE_NAME.test(entry.name)), SKILL_GENERATION_TRACE_CODES.OUTPUT_TREE_INVALID, "references must contain only kebab-case Markdown files");
+
+  const actualRelativePaths = [
+    `output/${skillName}/SKILL.md`,
+    `output/${skillName}/methods.json`,
+    ...references.map((entry) => `output/${skillName}/references/${entry.name}`),
+  ].sort();
+  const writeRelativePaths = writes.map((write) => write.normalized.relative).sort();
+  requireAudit(new Set(writeRelativePaths).size === writeRelativePaths.length && actualRelativePaths.join("\0") === writeRelativePaths.join("\0"), SKILL_GENERATION_TRACE_CODES.OUTPUT_TREE_INVALID, "Every package file must be created by exactly one successful Write and no extra package files may exist");
+
+  const files = actualRelativePaths.map((relative) => {
+    const absolute = inspectRegularFile(workspaceRoot, relative);
+    const write = writes.find((candidate) => candidate.normalized.relative === relative);
+    const bytes = fs.readFileSync(absolute);
+    requireAudit(bytes.equals(Buffer.from(write.record.input.content, "utf8")), SKILL_GENERATION_TRACE_CODES.WRITE_CONTENT_MISMATCH, "Generated bytes do not match the successful Write input", { path: relative });
+    return {
+      path: `workspace/${relative}`,
+      size_bytes: bytes.length,
+      sha256: sha256Bytes(bytes),
+      write_ordinal: write.record.ordinal,
+    };
+  });
+  let methods;
+  try {
+    methods = JSON.parse(fs.readFileSync(path.join(packageRoot, "methods.json"), "utf8"));
+  } catch {
+    fail(SKILL_GENERATION_TRACE_CODES.OUTPUT_TREE_INVALID, "methods.json must be UTF-8 JSON");
+  }
+  requireAudit(isPlainObject(methods) && methods.schema_version === 1 && methods.skill_name === skillName, SKILL_GENERATION_TRACE_CODES.OUTPUT_TREE_INVALID, "methods.json must bind schema version 1 to the generated Skill name");
+  requireAudit(
+    Array.isArray(methods.shared_references)
+      && methods.shared_references[0] === SOURCE_LOG_TEMPLATES_REFERENCE,
+    SKILL_GENERATION_TRACE_CODES.SOURCE_LOG_TEMPLATES_INVALID,
+    `methods.json shared_references[0] must be ${SOURCE_LOG_TEMPLATES_REFERENCE}`,
+  );
+  requireAudit(
+    Array.isArray(methods.methods)
+      && methods.methods.every((method) => isPlainObject(method) && method.reference !== SOURCE_LOG_TEMPLATES_REFERENCE),
+    SKILL_GENERATION_TRACE_CODES.SOURCE_LOG_TEMPLATES_INVALID,
+    `${SOURCE_LOG_TEMPLATES_REFERENCE} must not be used as a method reference`,
+  );
+  const sourceLogTemplatesRelative = `output/${skillName}/${SOURCE_LOG_TEMPLATES_REFERENCE}`;
+  const sourceLogTemplatesFile = files.find((file) => file.path === `workspace/${sourceLogTemplatesRelative}`);
+  requireAudit(
+    sourceLogTemplatesFile !== undefined,
+    SKILL_GENERATION_TRACE_CODES.SOURCE_LOG_TEMPLATES_INVALID,
+    `Generated package must contain ${SOURCE_LOG_TEMPLATES_REFERENCE}`,
+  );
+  const expectedSourceLogTemplatesBytes = sourceLogTemplatesBytes(sourceIdentity.log_templates);
+  requireAudit(
+    fs.readFileSync(inspectRegularFile(workspaceRoot, sourceLogTemplatesRelative)).equals(expectedSourceLogTemplatesBytes),
+    SKILL_GENERATION_TRACE_CODES.SOURCE_LOG_TEMPLATES_INVALID,
+    `${SOURCE_LOG_TEMPLATES_REFERENCE} must exactly render the source identity template inventory`,
+  );
+  return {
+    package: {
+      skill_name: skillName,
+      root: `workspace/output/${skillName}`,
+      file_count: files.length,
+      files,
+      content_tree_sha256: sha256Bytes(canonicalJson({ version: 1, files: files.map(({ path: filePath, size_bytes, sha256 }) => ({ path: filePath, size_bytes, sha256 })) })),
+    },
+    sourceLogTemplates: {
+      extraction_version: sourceIdentity.log_template_extraction_version,
+      count: sourceIdentity.log_templates.length,
+      inventory_sha256: sourceIdentity.log_template_inventory_sha256,
+      reference_path: sourceLogTemplatesFile.path,
+      reference_sha256: sourceLogTemplatesFile.sha256,
+    },
+  };
+}
+
+function validReceiptFile(value, skillName) {
+  if (!exactKeys(value, ["path", "size_bytes", "sha256", "write_ordinal"])) return false;
+  const prefix = `workspace/output/${skillName}/`;
+  const relative = typeof value.path === "string" && value.path.startsWith(prefix)
+    ? value.path.slice(prefix.length)
+    : "";
+  return typeof value.path === "string"
+    && (relative === "SKILL.md" || relative === "methods.json" || /^references\/[a-z0-9]+(?:-[a-z0-9]+)*\.md$/.test(relative))
+    && Number.isSafeInteger(value.size_bytes)
+    && value.size_bytes > 0
+    && /^[a-f0-9]{64}$/.test(value.sha256 ?? "")
+    && Number.isSafeInteger(value.write_ordinal);
 }
 
 export function validSkillGenerationTraceAuditReceipt(value) {
   if (!exactKeys(value, [
     "schema_version", "status", "workflow", "skill", "tool_inventory", "permission_mode",
-    "permission_policy_sha256", "attempt_policy", "attempt_policy_sha256", "tool_sequence",
-    "accepted_validation_rejections", "required_reads", "observed_reads", "linked_references",
-    "output", "terminal",
+    "permission_policy_sha256", "tool_sequence", "required_reads", "observed_reads",
+    "linked_references", "package", "source_log_templates", "terminal",
   ])) return false;
   if (value.schema_version !== SKILL_GENERATION_TRACE_SCHEMA_VERSION
     || value.status !== "PASS"
@@ -421,84 +549,58 @@ export function validSkillGenerationTraceAuditReceipt(value) {
     || value.permission_mode !== "dontAsk"
     || JSON.stringify(value.tool_inventory) !== JSON.stringify(ALLOWED_TOOLS)
     || !/^[a-f0-9]{64}$/.test(value.permission_policy_sha256 ?? "")
-    || JSON.stringify(value.attempt_policy) !== JSON.stringify(SKILL_GENERATION_TOOL_ATTEMPT_POLICY)
-    || value.attempt_policy_sha256 !== crypto.createHash("sha256").update(JSON.stringify(SKILL_GENERATION_TOOL_ATTEMPT_POLICY)).digest("hex")) return false;
-  if (!Array.isArray(value.tool_sequence)
-    || value.tool_sequence.length === 0
-    || !Array.isArray(value.accepted_validation_rejections)
-    || !Array.isArray(value.required_reads)
-    || value.required_reads.length === 0
-    || !Array.isArray(value.observed_reads)
-    || !Array.isArray(value.linked_references)) return false;
-  if (!value.tool_sequence.every((record, ordinal) => record?.ordinal === ordinal)) return false;
-  if (!value.tool_sequence.every((record) => ALLOWED_TOOLS.includes(record?.tool))) return false;
-
-  const skillRecords = value.tool_sequence.filter((record) => record?.tool === "Skill");
-  const readRecords = value.tool_sequence.filter((record) => record?.tool === "Read");
-  const writeRecords = value.tool_sequence.filter((record) => record?.tool === "Write");
-  const successfulWrites = writeRecords.filter((record) => record?.outcome === "SUCCESS");
-  const rejectedWrites = writeRecords.filter((record) => record?.outcome === "REJECTED");
-  if (skillRecords.length !== 1
-    || !exactKeys(skillRecords[0], ["ordinal", "tool", "outcome"])
-    || skillRecords[0].ordinal !== 0
-    || skillRecords[0].outcome !== "SUCCESS"
-    || successfulWrites.length !== 1
-    || successfulWrites[0].ordinal !== value.tool_sequence.length - 1
-    || !exactKeys(successfulWrites[0], ["ordinal", "tool", "outcome", "path"])
-    || successfulWrites[0].path !== "workspace/output/generation-spec.json"
-    || rejectedWrites.length > SKILL_GENERATION_TOOL_ATTEMPT_POLICY.max_empty_write_rejections
-    || writeRecords.length !== successfulWrites.length + rejectedWrites.length) return false;
-  if (!readRecords.every((record) => exactKeys(record, ["ordinal", "tool", "outcome", "path"])
-    && record.outcome === "SUCCESS"
-    && validReceiptPath(record.path, ["workspace/inputs/", "skill/references/"]))) return false;
-  if (!rejectedWrites.every((record) => exactKeys(record, ["ordinal", "tool", "outcome", "classification"])
-    && record.classification === "EMPTY_INPUT_REQUIRED_FIELDS_ABSENT"
-    && record.ordinal === successfulWrites[0].ordinal - 1)) return false;
-
-  if (value.accepted_validation_rejections.length !== rejectedWrites.length
-    || !value.accepted_validation_rejections.every((record, index) => exactKeys(record, ["ordinal", "tool", "classification", "input_key_names", "result_completed_before_success"])
-      && record.ordinal === rejectedWrites[index].ordinal
-      && record.tool === "Write"
-      && record.classification === "EMPTY_INPUT_REQUIRED_FIELDS_ABSENT"
-      && Array.isArray(record.input_key_names)
-      && record.input_key_names.length === 0
-      && record.result_completed_before_success === true)) return false;
-  if (JSON.stringify(value.required_reads) !== JSON.stringify(DEFAULT_REQUIRED_RECEIPT_READS)
-    || !value.required_reads.every((readPath) => validReceiptPath(readPath, ["workspace/inputs/", "skill/references/"]))
-    || new Set(value.linked_references).size !== value.linked_references.length
-    || !value.linked_references.every((readPath) => validReceiptPath(readPath, ["skill/references/"]))
-    || !DEFAULT_REQUIRED_RECEIPT_READS.filter((readPath) => readPath.startsWith("skill/")).every((readPath) => value.linked_references.includes(readPath))
-    || !readRecords.filter((record) => record.path.startsWith("skill/")).every((record) => value.linked_references.includes(record.path))) return false;
-  const expectedObservedReads = readRecords.map((record) => ({ ordinal: record.ordinal, path: record.path }));
-  if (JSON.stringify(value.observed_reads) !== JSON.stringify(expectedObservedReads)
-    || !value.observed_reads.every((record) => exactKeys(record, ["ordinal", "path"])
-      && Number.isSafeInteger(record.ordinal)
-      && record.ordinal > 0
-      && record.ordinal < successfulWrites[0].ordinal)) return false;
-  if (!value.required_reads.every((required) => value.observed_reads.some((record) => record.path === required))) return false;
-  if (!exactKeys(value.output, ["ordinal", "path", "size_bytes", "sha256"])
-    || value.output.ordinal !== successfulWrites[0].ordinal
-    || value.output.path !== successfulWrites[0].path
-    || !Number.isSafeInteger(value.output.size_bytes)
-    || value.output.size_bytes <= 0
-    || !/^[a-f0-9]{64}$/.test(value.output.sha256 ?? "")) return false;
+    || JSON.stringify(value.required_reads) !== JSON.stringify(REQUIRED_RECEIPT_READS)
+    || JSON.stringify(value.linked_references) !== JSON.stringify([`skill/${REQUIRED_REFERENCE_PATH}`])) return false;
+  if (!Array.isArray(value.tool_sequence) || !Array.isArray(value.observed_reads) || value.tool_sequence.length < 7) return false;
+  if (!value.tool_sequence.every((record, ordinal) => record?.ordinal === ordinal && ALLOWED_TOOLS.includes(record.tool) && record.outcome === "SUCCESS")) return false;
+  const skillRecords = value.tool_sequence.filter((record) => record.tool === "Skill");
+  const readRecords = value.tool_sequence.filter((record) => record.tool === "Read");
+  const writeRecords = value.tool_sequence.filter((record) => record.tool === "Write");
+  if (skillRecords.length !== 1 || skillRecords[0].ordinal !== 0 || !exactKeys(skillRecords[0], ["ordinal", "tool", "outcome"])) return false;
+  if (readRecords.length !== 3 || writeRecords.length < 3) return false;
+  if (!readRecords.every((record) => exactKeys(record, ["ordinal", "tool", "outcome", "path"]))) return false;
+  if (!writeRecords.every((record) => exactKeys(record, ["ordinal", "tool", "outcome", "path"]))) return false;
+  if (!readRecords.every((record) => record.ordinal < writeRecords[0].ordinal) || !writeRecords.every((record, index) => record.ordinal === writeRecords[0].ordinal + index)) return false;
+  if (new Set(readRecords.map((record) => record.path)).size !== 3 || !REQUIRED_RECEIPT_READS.every((required) => readRecords.some((record) => record.path === required))) return false;
+  const expectedObserved = readRecords.map((record) => ({ ordinal: record.ordinal, path: record.path }));
+  if (JSON.stringify(value.observed_reads) !== JSON.stringify(expectedObserved)) return false;
+  const packageValue = value.package;
+  if (!exactKeys(packageValue, ["skill_name", "root", "file_count", "files", "content_tree_sha256"])
+    || !SKILL_NAME.test(packageValue.skill_name ?? "")
+    || packageValue.root !== `workspace/output/${packageValue.skill_name}`
+    || !Array.isArray(packageValue.files)
+    || packageValue.file_count !== packageValue.files.length
+    || packageValue.file_count !== writeRecords.length
+    || !packageValue.files.every((file) => validReceiptFile(file, packageValue.skill_name))
+    || new Set(packageValue.files.map((file) => file.path)).size !== packageValue.files.length
+    || packageValue.files.map((file) => file.path).join("\0") !== packageValue.files.map((file) => file.path).sort().join("\0")
+    || packageValue.files.filter((file) => file.path === `${packageValue.root}/SKILL.md`).length !== 1
+    || packageValue.files.filter((file) => file.path === `${packageValue.root}/methods.json`).length !== 1
+    || !packageValue.files.some((file) => file.path.startsWith(`${packageValue.root}/references/`))
+    || !/^[a-f0-9]{64}$/.test(packageValue.content_tree_sha256 ?? "")) return false;
+  const expectedDigest = sha256Bytes(canonicalJson({ version: 1, files: packageValue.files.map(({ path: filePath, size_bytes, sha256 }) => ({ path: filePath, size_bytes, sha256 })) }));
+  if (packageValue.content_tree_sha256 !== expectedDigest) return false;
+  if (!writeRecords.every((record) => packageValue.files.some((file) => file.path === record.path && file.write_ordinal === record.ordinal))) return false;
+  const sourceLogTemplates = value.source_log_templates;
+  const expectedReferencePath = `${packageValue.root}/${SOURCE_LOG_TEMPLATES_REFERENCE}`;
+  const referenceFile = packageValue.files.find((file) => file.path === expectedReferencePath);
+  if (!exactKeys(sourceLogTemplates, [
+    "extraction_version", "count", "inventory_sha256", "reference_path", "reference_sha256",
+  ])
+    || sourceLogTemplates.extraction_version !== 1
+    || !Number.isSafeInteger(sourceLogTemplates.count)
+    || sourceLogTemplates.count < 0
+    || !/^[a-f0-9]{64}$/.test(sourceLogTemplates.inventory_sha256 ?? "")
+    || sourceLogTemplates.reference_path !== expectedReferencePath
+    || !/^[a-f0-9]{64}$/.test(sourceLogTemplates.reference_sha256 ?? "")
+    || referenceFile === undefined
+    || referenceFile.sha256 !== sourceLogTemplates.reference_sha256) return false;
   return exactKeys(value.terminal, ["subtype", "is_error"])
     && value.terminal.subtype === "success"
     && value.terminal.is_error === false;
 }
 
-/**
- * Audits a completed Claude stream-json trace for the isolated Wiki conversion
- * workflow. requiredReferencePaths are relative to skillRoot. All tool paths
- * and every path returned in the receipt are relative to workspaceRoot.
- */
-export function auditSkillGenerationTrace({
-  events,
-  workspaceRoot,
-  skillRoot,
-  sourceRoot = null,
-  requiredReferencePaths = DEFAULT_REQUIRED_REFERENCES,
-}) {
+export function auditSkillGenerationTrace({ events, workspaceRoot, skillRoot, sourceRoot = null }) {
   requireAudit(Array.isArray(events) && events.length > 0 && events.every(isPlainObject), SKILL_GENERATION_TRACE_CODES.EVENTS_INVALID, "events must be a non-empty array of stream-json objects");
   requireAudit(!events.some((event) => event.type === "error"), SKILL_GENERATION_TRACE_CODES.STREAM_ERROR, "The stream contains an explicit error event");
   inspectRoot(workspaceRoot, "Workspace root");
@@ -511,73 +613,35 @@ export function auditSkillGenerationTrace({
   const initEvents = events.filter((event) => event.type === "system" && event.subtype === "init");
   requireAudit(initEvents.length === 1, SKILL_GENERATION_TRACE_CODES.INIT_INVALID, "The trace must contain exactly one init event");
   const init = initEvents[0];
-  requireAudit(typeof init.cwd === "string" && path.resolve(init.cwd) === path.resolve(workspaceRoot), SKILL_GENERATION_TRACE_CODES.INIT_CWD_MISMATCH, "The init cwd must equal the audited workspace");
+  requireAudit(typeof init.cwd === "string" && sameAbsolutePath(init.cwd, workspaceRoot), SKILL_GENERATION_TRACE_CODES.INIT_CWD_MISMATCH, "The init cwd must equal the audited workspace");
   requireAudit(init.permissionMode === "dontAsk", SKILL_GENERATION_TRACE_CODES.PERMISSION_MODE_INVALID, "The effective permission mode must be dontAsk");
   requireAudit(Array.isArray(init.tools) && init.tools.length === ALLOWED_TOOLS.length && new Set(init.tools).size === ALLOWED_TOOLS.length && ALLOWED_TOOLS.every((tool) => init.tools.includes(tool)), SKILL_GENERATION_TRACE_CODES.TOOL_INVENTORY_INVALID, "The init tool inventory must contain only Skill, Read and Write");
-
   const terminalEvents = events.filter((event) => event.type === "result");
   requireAudit(terminalEvents.length === 1 && events.at(-1) === terminalEvents[0], SKILL_GENERATION_TRACE_CODES.RESULT_INVALID, "The trace must end with exactly one result event");
   const terminal = terminalEvents[0];
   requireAudit(terminal.subtype === "success" && terminal.is_error === false, SKILL_GENERATION_TRACE_CODES.RESULT_NOT_SUCCESS, "The terminal result must report success");
 
   const linkedReferences = discoverLinkedSkillReferences(skillRoot);
-  const links = new Set(linkedReferences);
-  const requiredReferences = normalizeRequiredReferences(requiredReferencePaths, links);
-  const requiredReads = [
-    ...REQUIRED_INPUT_PATHS.map((relative) => `workspace/${relative}`),
-    ...requiredReferences.map((relative) => `skill/${relative}`),
-  ];
-
-  for (const inputPath of REQUIRED_INPUT_PATHS) inspectRegularFile(workspaceRoot, inputPath);
+  const sourceIdentity = inspectSourceIdentity(workspaceRoot);
   const records = parseToolRecords(events);
-  const failedRecords = records.filter((record) => record.result.outcome === "ERROR");
-  const acceptedValidationRejections = failedRecords.filter(emptyWriteValidationRejection);
-  requireAudit(
-    failedRecords.length === acceptedValidationRejections.length,
-    SKILL_GENERATION_TRACE_CODES.TOOL_RESULT_ERROR,
-    "Only one explicitly failed, strictly empty Write input may be treated as a non-mutating validation rejection",
-  );
-  requireAudit(
-    acceptedValidationRejections.length <= SKILL_GENERATION_TOOL_ATTEMPT_POLICY.max_empty_write_rejections,
-    SKILL_GENERATION_TRACE_CODES.WRITE_COUNT_INVALID,
-    "At most one strictly empty Write validation rejection is allowed",
-  );
   validateSkillInvocation(records);
+  const reads = records.filter((record) => record.tool === "Read");
+  requireAudit(reads.length === 3, SKILL_GENERATION_TRACE_CODES.REQUIRED_READ_MISSING, "The trace must read exactly the Wiki, source identity, and linked output contract once each");
+  const observedReads = reads.map((record) => ({ ordinal: record.ordinal, path: observedReadPath(validateReadInput(record), { workspaceRoot, skillRoot }), result_event_index: record.result_event_index }));
+  requireAudit(new Set(observedReads.map((record) => record.path)).size === 3 && REQUIRED_RECEIPT_READS.every((required) => observedReads.some((record) => record.path === required)), SKILL_GENERATION_TRACE_CODES.REQUIRED_READ_MISSING, "The trace did not read all three required sources exactly once");
 
-  const reads = [];
-  for (const record of records.filter((candidate) => candidate.tool === "Read")) {
-    const toolPath = validateReadInput(record);
-    const normalized = observedPath(toolPath, { workspaceRoot, skillRoot, linkedReferences, mode: "read" });
-    if (requiredReads.includes(normalized.receiptPath)) {
-      requireAudit(!Object.hasOwn(record.input, "offset") && !Object.hasOwn(record.input, "limit") && !Object.hasOwn(record.input, "pages"), SKILL_GENERATION_TRACE_CODES.REQUIRED_READ_PARTIAL, "Every required input and contract reference must be read in full", { path: normalized.receiptPath });
-    }
-    reads.push({ ordinal: record.ordinal, path: normalized.receiptPath, result_event_index: record.result_event_index });
-  }
-  const observedReadPaths = new Set(reads.map((read) => read.path));
-  const missingReads = requiredReads.filter((relative) => !observedReadPaths.has(relative));
-  requireAudit(missingReads.length === 0, SKILL_GENERATION_TRACE_CODES.REQUIRED_READ_MISSING, "The trace did not read every required input and Skill reference", { paths: missingReads });
+  const writeRecords = records.filter((record) => record.tool === "Write");
+  requireAudit(writeRecords.length >= 3, SKILL_GENERATION_TRACE_CODES.WRITE_COUNT_INVALID, "Methods generation requires SKILL.md, methods.json, and at least one reference Write");
+  requireAudit(records.slice(1, 4).every((record) => record.tool === "Read") && records.slice(4).every((record) => record.tool === "Write"), SKILL_GENERATION_TRACE_CODES.REQUIRED_READ_ORDER_INVALID, "All three required Reads must complete before a contiguous final sequence of Writes");
+  for (const read of observedReads) requireAudit(read.result_event_index < writeRecords[0].use_event_index, SKILL_GENERATION_TRACE_CODES.REQUIRED_READ_ORDER_INVALID, "All three required Reads must complete before the first Write");
 
-  const writes = records.filter((candidate) => candidate.tool === "Write");
-  const successfulWrites = writes.filter((record) => record.result.outcome === "SUCCESS");
-  requireAudit(successfulWrites.length === 1, SKILL_GENERATION_TRACE_CODES.WRITE_COUNT_INVALID, "The trace must contain exactly one successful Write invocation");
-  const successfulWrite = successfulWrites[0];
-  requireAudit(successfulWrite.ordinal === records.length - 1, SKILL_GENERATION_TRACE_CODES.REQUIRED_READ_ORDER_INVALID, "The successful Write must be the final tool invocation");
-  for (const requiredRead of requiredReads) {
-    requireAudit(reads.some((read) => read.path === requiredRead && read.result_event_index < successfulWrite.use_event_index), SKILL_GENERATION_TRACE_CODES.REQUIRED_READ_ORDER_INVALID, "Every required Read must finish before the successful Write starts", { path: requiredRead });
-  }
-  if (acceptedValidationRejections.length === 1) {
-    const rejectedWrite = acceptedValidationRejections[0];
-    requireAudit(rejectedWrite.ordinal === successfulWrite.ordinal - 1, SKILL_GENERATION_TRACE_CODES.REQUIRED_READ_ORDER_INVALID, "The empty Write validation rejection must immediately precede the successful Write");
-    requireAudit(rejectedWrite.result_event_index < successfulWrite.use_event_index, SKILL_GENERATION_TRACE_CODES.REQUIRED_READ_ORDER_INVALID, "The empty Write validation rejection must finish before the successful Write starts");
-    for (const requiredRead of requiredReads) {
-      requireAudit(reads.some((read) => read.path === requiredRead && read.result_event_index < rejectedWrite.use_event_index), SKILL_GENERATION_TRACE_CODES.REQUIRED_READ_ORDER_INVALID, "Every required Read must finish before an empty Write validation rejection", { path: requiredRead });
-    }
-  }
-  const writeToolPath = validateWriteInput(successfulWrite);
-  const normalizedWrite = observedPath(writeToolPath, { workspaceRoot, skillRoot, linkedReferences, mode: "write" });
-  const writePath = normalizedWrite.receiptPath;
-  const outputAbsolute = normalizedWrite.absolutePath;
-  requireAudit(fs.readFileSync(outputAbsolute, "utf8") === successfulWrite.input.content, SKILL_GENERATION_TRACE_CODES.WRITE_CONTENT_MISMATCH, "The output bytes do not match the successful Write input");
+  const writes = writeRecords.map((record) => {
+    validateWriteInput(record);
+    return { record, normalized: normalizedWorkspaceWrite(record.input.file_path, workspaceRoot) };
+  });
+  const skillNames = new Set(writes.map((write) => write.normalized.skillName));
+  requireAudit(skillNames.size === 1, SKILL_GENERATION_TRACE_CODES.WRITE_PATH_INVALID, "All Writes must target one generated Skill directory");
+  const auditedOutput = inspectOutputPackage(workspaceRoot, [...skillNames][0], writes, sourceIdentity);
 
   return {
     schema_version: SKILL_GENERATION_TRACE_SCHEMA_VERSION,
@@ -586,45 +650,20 @@ export function auditSkillGenerationTrace({
     skill: "wiki-to-diagnosis-skill",
     tool_inventory: [...ALLOWED_TOOLS],
     permission_mode: init.permissionMode,
-    permission_policy_sha256: crypto.createHash("sha256").update(JSON.stringify(
-      skillGenerationPermissionRules({ workspaceRoot, skillRoot, linkedReferences, sourceRoot }),
-    )).digest("hex"),
-    attempt_policy: SKILL_GENERATION_TOOL_ATTEMPT_POLICY,
-    attempt_policy_sha256: crypto.createHash("sha256").update(JSON.stringify(
-      SKILL_GENERATION_TOOL_ATTEMPT_POLICY,
-    )).digest("hex"),
+    permission_policy_sha256: sha256Bytes(JSON.stringify(skillGenerationPermissionRules({ workspaceRoot, skillRoot, linkedReferences, sourceRoot }))),
     tool_sequence: records.map((record) => {
-      if (record.tool === "Read") return {
-        ordinal: record.ordinal,
-        tool: record.tool,
-        outcome: "SUCCESS",
-        path: observedPath(validateReadInput(record), { workspaceRoot, skillRoot, linkedReferences, mode: "read" }).receiptPath,
-      };
-      if (record === acceptedValidationRejections[0]) return {
-        ordinal: record.ordinal,
-        tool: record.tool,
-        outcome: "REJECTED",
-        classification: "EMPTY_INPUT_REQUIRED_FIELDS_ABSENT",
-      };
-      if (record.tool === "Write") return { ordinal: record.ordinal, tool: record.tool, outcome: "SUCCESS", path: writePath };
-      return { ordinal: record.ordinal, tool: record.tool, outcome: "SUCCESS" };
+      if (record.tool === "Read") return { ordinal: record.ordinal, tool: "Read", outcome: "SUCCESS", path: observedReadPath(validateReadInput(record), { workspaceRoot, skillRoot }) };
+      if (record.tool === "Write") {
+        const normalized = normalizedWorkspaceWrite(record.input.file_path, workspaceRoot);
+        return { ordinal: record.ordinal, tool: "Write", outcome: "SUCCESS", path: `workspace/${normalized.relative}` };
+      }
+      return { ordinal: record.ordinal, tool: "Skill", outcome: "SUCCESS" };
     }),
-    accepted_validation_rejections: acceptedValidationRejections.map((record) => ({
-      ordinal: record.ordinal,
-      tool: "Write",
-      classification: "EMPTY_INPUT_REQUIRED_FIELDS_ABSENT",
-      input_key_names: [],
-      result_completed_before_success: true,
-    })),
-    required_reads: requiredReads,
-    observed_reads: reads.map(({ ordinal, path: readPath }) => ({ ordinal, path: readPath })),
+    required_reads: [...REQUIRED_RECEIPT_READS],
+    observed_reads: observedReads.map(({ ordinal, path: readPath }) => ({ ordinal, path: readPath })),
     linked_references: linkedReferences.map((relative) => `skill/${relative}`),
-    output: {
-      ordinal: successfulWrite.ordinal,
-      path: writePath,
-      size_bytes: fs.statSync(outputAbsolute).size,
-      sha256: sha256File(outputAbsolute),
-    },
+    package: auditedOutput.package,
+    source_log_templates: auditedOutput.sourceLogTemplates,
     terminal: { subtype: terminal.subtype, is_error: terminal.is_error },
   };
 }

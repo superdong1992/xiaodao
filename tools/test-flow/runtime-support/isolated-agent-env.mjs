@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 
 
-export const ISOLATED_AGENT_ENV_POLICY_VERSION = "isolated-agent-env-allowlist-v2";
+export const ISOLATED_AGENT_ENV_POLICY_VERSION = "isolated-agent-env-allowlist-v3";
 export const ISOLATED_AGENT_CLAUDE_OUTPUT_TOKEN_KEY = "CLAUDE_CODE_MAX_OUTPUT_TOKENS";
 export const ISOLATED_AGENT_OUTPUT_CAP_ENFORCEMENT = "identity-bound-wrapper-arg+child-only-env+pinned-cli-upper-limit+sealed-runtime-implementation";
 
@@ -19,6 +19,10 @@ export const ISOLATED_AGENT_AMBIENT_KEYS = Object.freeze([
 ]);
 
 const ISOLATED_AGENT_INBOUND_ONLY_KEYS = Object.freeze([
+  // CoreFoundation injects this non-secret locale hint when a Node process
+  // starts on macOS, even when spawn receives an explicit minimal env.
+  // Audit it inbound and deliberately do not forward it to pytest or Claude.
+  "__CF_USER_TEXT_ENCODING",
   "PYTEST_CURRENT_TEST",
   "PYTEST_VERSION",
   "HOMEDRIVE",
@@ -42,18 +46,16 @@ export const ISOLATED_AGENT_EXPLICIT_KEYS = Object.freeze([
   "S08_REAL_GENERIC_LOCATOR_AGENT_COMMAND",
   "S08_REAL_SKILL_GENERATION_AGENT_COMMAND",
   "S08_REAL_SKILL_GENERATION_AUDIT_PATH",
+  "S08_REAL_SKILL_GENERATION_OUTPUT_ROOT",
+  "S08_REAL_SKILL_GENERATION_RECEIPT_PATH",
   "S08_REAL_ROUTE_AGENT_COMMAND",
-  "S08_REAL_DIAGNOSE_AGENT_COMMAND",
   "S08_REAL_REVIEW_AGENT_COMMAND",
   "S08_REAL_AGENT_GATE",
   "S08_REAL_GENERIC_LOCATOR_GATE",
   "S08_REAL_SKILL_GENERATION_GATE",
   "S08_REAL_ROUTE_AGENT_GATE",
-  "S08_REAL_DIAGNOSE_AGENT_V3_MATRIX_GATE",
-  "S08_REAL_FIRST_LOG_AGENT_GATE",
   "S08_REAL_REVIEW_AGENT_GATE",
   "S08_RELEASE_CASES_ROOT",
-  "S08_REAL_DIAGNOSE_SKILL_PATH",
   "LOGPARSE_REPO",
   "LOGPARSE_CONFIG_PATH",
   "LOGPARSE_PYTHON",

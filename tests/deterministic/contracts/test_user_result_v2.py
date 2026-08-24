@@ -120,6 +120,16 @@ def test_partial_user_result_preserves_reviewed_progress_and_explicit_gap() -> N
     schema_validator("user-result.schema.json").validate(payload)
 
 
+def test_user_result_safety_notes_preserve_an_explicit_empty_methods_array() -> None:
+    payload = _positive("user-result.json")
+    payload["safety_notes"] = []
+
+    parsed = UserResultPayloadV3.model_validate(payload)
+
+    assert parsed.safety_notes == []
+    schema_validator("user-result.schema.json").validate(payload)
+
+
 def test_partial_user_result_cannot_claim_every_criterion_is_complete() -> None:
     payload = _positive("user-result.json")
     payload["status"] = "PARTIAL"

@@ -10,6 +10,13 @@ import {
   CLAUDE_SETTINGS_ENV_KEYS,
   RELEASE_BASE_IMAGE,
   RELEASE_BASE_IMAGE_SOURCE,
+  RELEASE_CHROME_HEADLESS_SHELL_ARCHIVE_SHA256,
+  RELEASE_CHROME_HEADLESS_SHELL_EXECUTABLE_SHA256,
+  RELEASE_CHROME_HEADLESS_SHELL_PLATFORM,
+  RELEASE_CHROME_HEADLESS_SHELL_PRODUCT,
+  RELEASE_CHROME_HEADLESS_SHELL_VERSION,
+  RELEASE_CHROME_HEADLESS_SHELL_VERSION_OUTPUT,
+  RELEASE_CLIENT_IMAGE,
   RELEASE_CLAUDE_CLI_SHA256,
   RELEASE_CLAUDE_TARBALL_SHA256,
   RELEASE_CLAUDE_VERSION,
@@ -19,15 +26,257 @@ import {
   RELEASE_RUNTIME_PROFILE,
   RELEASE_UV_ARCHIVE_SHA256,
   RELEASE_UV_VERSION,
+  RELEASE_UV_VERSION_OUTPUT,
+  RELEASE_UVX_VERSION_OUTPUT,
   claudeSettingsIdentity,
+  codexLogparseRuntimeIdentity,
+  dockerContextArgs,
+  dockerServerIdentity,
   materializeAttemptClaudeSettings,
   materializeClaudeSettings,
+  probeReleaseClientHeadlessShell,
+  releaseCachePaths,
+  sameDockerRuntimeIdentity,
+  validateChromeHeadlessShellCache,
   validateClaudeDistribution,
 } from "../lib/release-inputs.mjs";
 import { NEGATIVE_PROBE_VALIDATION_FIELDS } from "../lib/events.mjs";
 
 const TOOL_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const SUPPORT_ROOT = path.join(TOOL_ROOT, "runtime-support");
+
+test("Docker context arguments use ambient semantics for explicit default and exact named contexts otherwise", () => {
+  assert.deepEqual(dockerContextArgs(null, ["version"]), ["version"]);
+  assert.deepEqual(dockerContextArgs("default", ["image", "inspect", "sha256:abc"]), ["image", "inspect", "sha256:abc"]);
+  assert.deepEqual(dockerContextArgs("colima", ["version"]), ["--context", "colima", "version"]);
+  assert.throws(() => dockerContextArgs("../escape", ["version"]), /DOCKER_CONTEXT_ARGUMENTS_INVALID/);
+});
+
+test("dual Linux planning executes one closed zero-network Headless Shell smoke before admission", () => {
+  const calls = [];
+  const clientImageId = `sha256:${"a".repeat(64)}`;
+  const dockerIdentity = { status: "PRESENT", docker_cli: "/fixture/docker", context: "colima" };
+  const commandRunner = (command, args) => {
+    calls.push({ command, args: [...args] });
+    const dataUrl = args.at(-1);
+    assert.match(dataUrl, /^data:text\/html,/);
+    return {
+      status: 0,
+      signal: null,
+      stdout: `${decodeURIComponent(dataUrl.slice("data:text/html,".length))}\n`,
+      stderr: "diagnostic text is not persisted",
+    };
+  };
+  const receipt = probeReleaseClientHeadlessShell({
+    dockerIdentity,
+    clientImageId,
+    commandRunner,
+    uid: 501,
+    gid: 20,
+  });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].command, "/fixture/docker");
+  assert.deepEqual(calls[0].args.slice(0, 3), ["--context", "colima", "run"]);
+  assert.equal(calls[0].args.filter((value) => value === "--rm").length, 1);
+  assert.equal(calls[0].args.includes("--init"), true);
+  assert.equal(calls[0].args.includes("none"), true);
+  assert.equal(calls[0].args.includes("501:20"), true);
+  assert.equal(calls[0].args.includes(clientImageId), true);
+  assert.equal(calls[0].args.includes("/opt/chrome-headless-shell/chrome-headless-shell"), true);
+  assert.deepEqual(receipt, {
+    schema_version: 1,
+    status: "PASS",
+    code: null,
+    kind: "linux-client-headless-shell-plan-smoke",
+    argument_profile: "chrome-headless-shell-plan-smoke-v1",
+    execution_layer: "docker-run-client-image",
+    network_scope: "none",
+    image_id: clientImageId,
+    execution_user: { uid: 501, gid: 20, root: false },
+    executable: "/opt/chrome-headless-shell/chrome-headless-shell",
+    challenge_sha256: "e845b0fcff00e98dcba8238c1153e673dcdcc602cc49dd0a91a577ae14c06854",
+    stdout: {
+      byte_count: 183,
+      sha256: "b0cd909b40e3b72644fc9834ab6223de4715e00f10f7a25d6e2620c7da34ae7d",
+      truncated: false,
+    },
+    launcher: { exit_code: 0, signal: null, retries: 0 },
+  });
+
+  assert.throws(() => probeReleaseClientHeadlessShell({
+    dockerIdentity,
+    clientImageId,
+    commandRunner: () => ({ status: 124, signal: null, stdout: "", stderr: "timeout" }),
+    uid: 501,
+    gid: 20,
+  }), /RELEASE_CLIENT_HEADLESS_SHELL_SMOKE_EXIT_124/);
+  assert.throws(() => probeReleaseClientHeadlessShell({
+    dockerIdentity,
+    clientImageId,
+    commandRunner: () => ({ status: 0, signal: null, stdout: "<html></html>", stderr: "" }),
+    uid: 501,
+    gid: 20,
+  }), /RELEASE_CLIENT_HEADLESS_SHELL_SMOKE_RESULT_MISSING/);
+  assert.throws(() => probeReleaseClientHeadlessShell({
+    dockerIdentity,
+    clientImageId,
+    commandRunner,
+    uid: 0,
+    gid: 0,
+  }), /RELEASE_CLIENT_HEADLESS_SHELL_SMOKE_NON_ROOT_REQUIRED/);
+});
+
+function observedDockerIdentity({
+  context = "default",
+  serverId = "daemon-identity-1",
+  versionOs = "linux",
+  infoOs = "linux",
+  versionArchitecture = "amd64",
+  infoArchitecture = "x86_64",
+  version = "29.7.2",
+  infoVersion = "29.7.2",
+  colimaStatus = '{"status":"Running","generation":1}',
+  environment = {},
+} = {}) {
+  const calls = [];
+  const response = (stdout, status = 0) => ({ status, stdout: `${stdout}\n`, stderr: "" });
+  const commandRunner = (command, args) => {
+    calls.push({ command, args: [...args] });
+    if (command === "/fixture/colima") {
+      if (args[0] === "version") return response("colima version 0.9.1");
+      if (args[0] === "status" && args[1] === "--json") return response(colimaStatus);
+      throw new Error(`unexpected Colima fixture command: ${args.join(" ")}`);
+    }
+    const dockerArgs = context === "default" ? args : args.slice(2);
+    if (dockerArgs[0] === "version") {
+      return response(JSON.stringify({
+        Platform: { Name: "Docker Engine" },
+        Components: [],
+        Version: version,
+        ApiVersion: "1.53",
+        MinAPIVersion: "1.44",
+        GitCommit: "fixture",
+        GoVersion: "go1.25",
+        Os: versionOs,
+        Arch: versionArchitecture,
+        KernelVersion: "fixture",
+        BuildTime: "fixture",
+      }));
+    }
+    if (dockerArgs[0] === "info") {
+      return response(JSON.stringify({
+        ID: serverId,
+        OSType: infoOs,
+        Architecture: infoArchitecture,
+        ServerVersion: infoVersion,
+      }));
+    }
+    if (args[0] === "context" && args[1] === "show") return response("ambient-linux");
+    if (args[0] === "context" && args[1] === "inspect") {
+      return response(JSON.stringify([{ Name: context === "default" ? "ambient-linux" : context, Endpoints: { docker: { Host: "unix:///fixture.sock" } } }]));
+    }
+    throw new Error(`unexpected fixture command: ${command} ${args.join(" ")}`);
+  };
+  const identity = dockerServerIdentity(context, {
+    commandResolver: (name) => `/fixture/${name}`,
+    fileResolver: (filePath) => filePath,
+    commandRunner,
+    fileHasher: () => "a".repeat(64),
+    environment,
+  });
+  return { identity, calls };
+}
+
+test("Docker daemon identity reads the nonempty ID from info while version keeps its real no-ID shape", () => {
+  const ambient = observedDockerIdentity();
+  assert.equal(ambient.identity.status, "PRESENT", ambient.identity.code);
+  assert.equal(ambient.identity.server_id, "daemon-identity-1");
+  assert.equal(ambient.identity.os, "linux");
+  assert.equal(ambient.identity.architecture, "amd64");
+  assert.equal(ambient.identity.version, "29.7.2");
+  const ambientDockerCalls = ambient.calls.filter((call) => call.command === "/fixture/docker" && call.args[0] !== "context");
+  assert.ok(ambientDockerCalls.some((call) => call.args[0] === "version"));
+  assert.ok(ambientDockerCalls.some((call) => call.args[0] === "info"));
+  assert.ok(ambientDockerCalls.every((call) => call.args[0] !== "--context"));
+
+  const named = observedDockerIdentity({ context: "remote-linux" });
+  assert.equal(named.identity.status, "PRESENT", named.identity.code);
+  const namedDockerCalls = named.calls.filter((call) => call.command === "/fixture/docker" && call.args[0] === "--context");
+  assert.ok(namedDockerCalls.some((call) => call.args[2] === "version"));
+  assert.ok(namedDockerCalls.some((call) => call.args[2] === "info"));
+  assert.ok(namedDockerCalls.every((call) => call.args[1] === "remote-linux"));
+});
+
+test("Docker daemon identity fails closed when info omits its ID or disagrees with version", () => {
+  const missing = observedDockerIdentity({ serverId: "" }).identity;
+  assert.equal(missing.status, "INVALID");
+  assert.equal(missing.code, "DOCKER_SERVER_ID_MISSING");
+
+  const disagreement = observedDockerIdentity({ infoArchitecture: "arm64" }).identity;
+  assert.equal(disagreement.status, "INVALID");
+  assert.equal(disagreement.code, "DOCKER_SERVER_METADATA_MISMATCH");
+});
+
+test("Docker runtime equality binds a nonempty daemon ID, OS, architecture and version", () => {
+  const expected = observedDockerIdentity().identity;
+  assert.equal(sameDockerRuntimeIdentity(expected, { ...expected }), true);
+  for (const [field, value] of [
+    ["server_id", "daemon-identity-2"],
+    ["os", "windows"],
+    ["architecture", "arm64"],
+    ["version", "29.7.3"],
+    ["context", "other-requested-context"],
+    ["effective_context", "other-context"],
+    ["context_fingerprint", "b".repeat(64)],
+    ["docker_cli_sha256", "c".repeat(64)],
+  ]) {
+    assert.equal(sameDockerRuntimeIdentity(expected, { ...expected, [field]: value }), false, field);
+  }
+  assert.equal(sameDockerRuntimeIdentity({ ...expected, server_id: null }, { ...expected, server_id: null }), false);
+  assert.equal(sameDockerRuntimeIdentity({ ...expected, version: null }, { ...expected, version: null }), false);
+  assert.equal(sameDockerRuntimeIdentity({ ...expected, context_fingerprint: "invalid" }, { ...expected, context_fingerprint: "invalid" }), false);
+  assert.equal(sameDockerRuntimeIdentity({ ...expected, docker_cli_sha256: "invalid" }, { ...expected, docker_cli_sha256: "invalid" }), false);
+});
+
+test("Docker context identity binds API negotiation and Colima runtime observations", () => {
+  const apiDefault = observedDockerIdentity({ environment: {} }).identity;
+  const apiPinned = observedDockerIdentity({ environment: { DOCKER_API_VERSION: "1.49" } }).identity;
+  assert.notEqual(apiDefault.context_fingerprint, apiPinned.context_fingerprint);
+  assert.equal(sameDockerRuntimeIdentity(apiDefault, apiPinned), false);
+
+  const colima = observedDockerIdentity({ context: "colima" }).identity;
+  const restarted = observedDockerIdentity({ context: "colima", colimaStatus: '{"status":"Running","generation":2}' }).identity;
+  assert.equal(colima.status, "PRESENT", colima.code);
+  assert.equal(restarted.status, "PRESENT", restarted.code);
+  assert.notEqual(colima.context_fingerprint, restarted.context_fingerprint);
+  assert.equal(sameDockerRuntimeIdentity(colima, restarted), false);
+});
+
+test("Codex Logparse runtime identity binds venv, interpreter and external Python import roots", {
+  skip: process.platform === "win32",
+}, (t) => {
+  const root = fs.mkdtempSync(path.join(fs.existsSync("/private/tmp") ? "/private/tmp" : os.tmpdir(), "test-flow-codex-logparse-runtime-"));
+  try {
+    fs.writeFileSync(path.join(root, "cli.py"), "print('logparse')\n");
+    const created = spawnSync("python3", ["-m", "venv", path.join(root, ".venv")], { encoding: "utf8", timeout: 120_000 });
+    if (created.status !== 0) {
+      t.skip(`python3 -m venv unavailable: ${created.stderr}`);
+      return;
+    }
+    const marker = path.join(root, ".venv", "runtime-marker.txt");
+    fs.writeFileSync(marker, "first\n");
+    const first = codexLogparseRuntimeIdentity(root);
+    assert.equal(first.status, "PRESENT", first.code);
+    assert.match(first.venv.tree_sha256, /^[a-f0-9]{64}$/);
+    assert.match(first.python.resolved_sha256, /^[a-f0-9]{64}$/);
+    assert.ok(first.python.runtime.import_paths.some((entry) => entry.status === "PRESENT" && entry.kind === "directory"));
+    fs.writeFileSync(marker, "second\n");
+    const second = codexLogparseRuntimeIdentity(root);
+    assert.equal(second.status, "PRESENT", second.code);
+    assert.notEqual(second.venv.tree_sha256, first.venv.tree_sha256);
+    assert.equal(second.python.resolved_sha256, first.python.resolved_sha256);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
 
 function settingsPayload(overrides = {}) {
   return {
@@ -125,6 +374,8 @@ test("runtime profile is the sole frozen version and artifact-pin source", () =>
   assert.equal(RELEASE_CLAUDE_VERSION, RELEASE_RUNTIME_PROFILE.claude.version);
   assert.equal(RELEASE_RUNTIME_PROFILE.claude.max_output_tokens_upper_limit, 64000);
   assert.equal(RELEASE_UV_VERSION, RELEASE_RUNTIME_PROFILE.uv.version);
+  assert.equal(RELEASE_UV_VERSION_OUTPUT, RELEASE_RUNTIME_PROFILE.uv.version_output);
+  assert.equal(RELEASE_UVX_VERSION_OUTPUT, RELEASE_RUNTIME_PROFILE.uv.uvx_version_output);
   assert.equal(RELEASE_PYTHON_VERSION, RELEASE_RUNTIME_PROFILE.python);
   assert.equal(RELEASE_HATCHLING_VERSION, RELEASE_RUNTIME_PROFILE.hatchling);
   assert.equal(RELEASE_BASE_IMAGE, RELEASE_RUNTIME_PROFILE.base_image.name);
@@ -142,6 +393,39 @@ test("the Dockerfile has no hidden version defaults and cache preparation suppli
   }
   assert.match(dockerfile, /hatchling==\$\{HATCHLING_VERSION\}/);
   assert.match(dockerfile, /problem-locator\.e2e\.claude="npm-\$\{CLAUDE_VERSION\}"/);
+  const clientDockerfile = fs.readFileSync(path.join(TOOL_ROOT, "Dockerfile.client"), "utf8");
+  for (const name of ["BASE_IMAGE", "CHROME_HEADLESS_SHELL_VERSION", "CHROME_HEADLESS_SHELL_ARCHIVE_SHA256", "CHROME_HEADLESS_SHELL_EXECUTABLE_SHA256"]) {
+    assert.match(clientDockerfile, new RegExp(`^ARG ${name}$`, "m"));
+    assert.match(preparer, new RegExp(`--build-arg[\\s\\S]{0,100}${name}=\\$\\{RELEASE_`));
+  }
+  assert.match(clientDockerfile, /problem-locator\.e2e\.role="linux-client"/);
+  assert.match(clientDockerfile, /Google Chrome for Testing \$\{CHROME_HEADLESS_SHELL_VERSION\}/);
+  assert.match(clientDockerfile, /COPY --from=chromeheadlessshellcache \. \/opt\/chrome-headless-shell/);
+  assert.match(clientDockerfile, /problem-locator\.e2e\.chrome-headless-shell-version=/);
+  assert.match(clientDockerfile, /problem-locator\.e2e\.chrome-headless-shell-product="Chrome Headless Shell for Testing"/);
+  assert.match(clientDockerfile, /problem-locator\.e2e\.chrome-headless-shell-archive-sha256=/);
+  assert.match(clientDockerfile, /problem-locator\.e2e\.chrome-headless-shell-sha256=/);
+  assert.match(preparer, /chrome-headless-shell-\$\{RELEASE_CHROME_HEADLESS_SHELL_PLATFORM\}\.zip/);
+  assert.doesNotMatch(preparer, /const CHROME_URL =/);
+  assert.match(RELEASE_CLIENT_IMAGE, /client-cft-headless-shell-152\.0\.7977\.54$/);
+  assert.equal(RELEASE_CHROME_HEADLESS_SHELL_VERSION, "152.0.7977.54");
+  assert.equal(RELEASE_CHROME_HEADLESS_SHELL_PRODUCT, "Chrome Headless Shell for Testing");
+  assert.equal(RELEASE_CHROME_HEADLESS_SHELL_VERSION_OUTPUT, "Google Chrome for Testing 152.0.7977.54");
+  assert.equal(RELEASE_CHROME_HEADLESS_SHELL_PLATFORM, "linux64");
+  assert.equal(RELEASE_CHROME_HEADLESS_SHELL_ARCHIVE_SHA256, "11cedb5568cd374a76eb738e40bd434cd0c9956820fb406b8bd9edca53428d3e");
+  assert.equal(RELEASE_CHROME_HEADLESS_SHELL_EXECUTABLE_SHA256, "8a3f72f9676736c45e94ae3279b4e2e6a1e323187f9a5e73c9a760e8cc1296ea");
+  assert.doesNotMatch(clientDockerfile, /TEST_FLOW_CHROME=/);
+  assert.doesNotMatch(clientDockerfile, /problem-locator\.e2e\.chrome-(?:version|sha256|archive-sha256)=/);
+  assert.doesNotMatch(clientDockerfile, /\/opt\/chrome-for-testing\/chrome/);
+
+  const cache = releaseCachePaths(TOOL_ROOT, path.join(os.tmpdir(), "release-cache-root"));
+  assert.match(cache.chromeHeadlessShellRoot, /chrome-headless-shell-for-testing\/152\.0\.7977\.54\/linux64$/);
+  assert.match(cache.chromeHeadlessShellArchive, /chrome-headless-shell-linux64-152\.0\.7977\.54\.zip$/);
+  assert.match(cache.chromeHeadlessShellDistribution, /chrome-headless-shell-linux64$/);
+  assert.match(cache.chromeHeadlessShellExecutable, /chrome-headless-shell-linux64\/chrome-headless-shell$/);
+  assert.equal(Object.hasOwn(cache, "chromeRoot"), false);
+  assert.equal(Object.hasOwn(cache, "chromeExecutable"), false);
+  assert.equal(validateChromeHeadlessShellCache(cache).code, "CHROME_HEADLESS_SHELL_CACHE_FILE_MISSING");
 });
 
 test("the first-party adapter matrix is thin, platform-bound and shares one core contract", () => {
@@ -156,7 +440,13 @@ test("the first-party adapter matrix is thin, platform-bound and shares one core
     assert.match(wrapper, new RegExp(`TEST_FLOW_FIRST_PARTY_HOST_PLATFORM = "${host}"`));
     assert.match(wrapper, new RegExp(`TEST_FLOW_FIRST_PARTY_DOCKER_CONTEXT = "${context}"`));
     assert.match(wrapper, /import\("\.\/cross-job-core\.mjs"\)/);
+    assert.match(wrapper, /TEST_FLOW_FIRST_PARTY_TOPOLOGY = "host-client"/);
   }
+  const dual = fs.readFileSync(path.join(TOOL_ROOT, "adapters", "macos-linux-linux-release.mjs"), "utf8");
+  assert.match(dual, /TEST_FLOW_FIRST_PARTY_CLIENT = "linux"/);
+  assert.match(dual, /TEST_FLOW_FIRST_PARTY_HOST_PLATFORM = "darwin"/);
+  assert.match(dual, /TEST_FLOW_FIRST_PARTY_DOCKER_CONTEXT = "colima"/);
+  assert.match(dual, /TEST_FLOW_FIRST_PARTY_TOPOLOGY = "dual-linux-containers"/);
   const corePath = path.join(TOOL_ROOT, "adapters", "cross-job-core.mjs");
   const core = fs.readFileSync(corePath, "utf8");
   const syntax = spawnSync(process.execPath, ["--check", corePath], { encoding: "utf8" });
@@ -167,10 +457,71 @@ test("the first-party adapter matrix is thin, platform-bound and shares one core
   assert.match(core, /content_length_control: "user-agent"/);
   assert.match(core, /CHROME_ARTIFACT_DOWNLOAD_MISMATCH/);
   assert.match(core, /CHROME_IDENTITY_DRIFT/);
+  assert.match(core, /"--network-alias", "problem-locator-client"/);
+  assert.match(core, /"--network-alias", "problem-locator-server"/);
+  assert.match(core, /public_base_url: dualLinuxContainers \? "http:\/\/problem-locator-server:8000"/);
+  assert.match(core, /Object\.keys\(serverPortBindings\)\.length === 0/);
+  assert.match(core, /DUAL_LINUX_IMAGE_IDS_REQUIRED/);
+  assert.match(core, /RELEASE_CLIENT_IMAGE_IDENTITY_INVALID/);
+  assert.match(core, /GENERATED_SKILL_ROOT_REQUIRED/);
+  assert.match(core, /dst=\/run\/generated-specialized-skill,readonly/);
   const actions = fs.readFileSync(path.join(TOOL_ROOT, "lib", "actions.mjs"), "utf8");
   assert.match(actions, /--chrome-version/);
   assert.match(actions, /CROSS_JOB_BROWSER_UPLOAD_RECEIPT_INVALID/);
   assert.match(actions, /CROSS_JOB_BROWSER_API_RECEIPT_INVALID/);
+});
+
+test("the dual Linux adapter fails closed on traversal, mutable Skills, proxy leakage and runtime replacement", () => {
+  const corePath = path.join(TOOL_ROOT, "adapters", "cross-job-core.mjs");
+  const core = fs.readFileSync(corePath, "utf8");
+  const methodsOracle = fs.readFileSync(path.join(TOOL_ROOT, "lib", "methods-oracle.mjs"), "utf8");
+  const initializer = fs.readFileSync(path.join(SUPPORT_ROOT, "initialize-container.sh"), "utf8");
+  assert.match(core, /ADAPTER_STAGE_IDS\.has\(configuration\.stage\)/);
+  assert.match(core, /GENERATED_SKILL_ROOT_REALPATH_INVALID/);
+  assert.match(core, /GENERATED_SKILL_GATE_RECEIPT_MISSING/);
+  assert.match(core, /GENERATED_SKILL_GATE_RECEIPT_DRIFT/);
+  assert.match(core, /RESOURCE_LABEL_INVALID/);
+  assert.match(core, /"timeout", "--signal=TERM", "--kill-after=10s"/);
+  assert.match(core, /env: containerClient \? process\.env : environment/);
+  assert.match(core, /chown -R 0:0 "\$installed_root"/);
+  assert.match(core, /find "\$installed_root" -type f -exec chmod 0444/);
+  assert.match(core, /GENERATED_SKILL_INSTALLED_TREE_DRIFT/);
+  assert.match(core, /DUAL_LINUX_RUNTIME_RESOURCE_DRIFT/);
+  assert.match(core, /client\.Image === configuration\.expectedClientImageId/);
+  assert.match(core, /validServerRuntimeInspection\(\{/);
+  assert.match(core, /SERVER_RUNTIME_RESOURCE_DRIFT/);
+  assert.match(core, /"--read-only"/);
+  assert.match(core, /client\.HostConfig\?\.ReadonlyRootfs === true/);
+  assert.match(core, /node_identity_boundary: "client-image-id"/);
+  assert.match(core, /node_sha256:digest\(process\.execPath\)/);
+  assert.match(core, /canonicalJson\(observedClientRuntime\) === canonicalJson\(state\.selected_client_runtime_observed\)/);
+  assert.match(core, /runtimeIdentity\.claude_cli_sha256 === RELEASE_CLAUDE_CLI_SHA256/);
+  assert.match(core, /runtimeIdentity\.headless_shell_sha256 === RELEASE_CHROME_HEADLESS_SHELL_EXECUTABLE_SHA256/);
+  assert.match(core, /"NO_PROXY=problem-locator-server,problem-locator-client,127\.0\.0\.1,localhost"/);
+  assert.match(core, /"curl", "--noproxy", "\*"/);
+  assert.match(initializer, /find \/opt\/e2e-skills -xdev -perm \/022/);
+  assert.match(initializer, /runuser -u plagent -- find "\$tree" -xdev -writable/);
+  assert.match(core, /GENERATED_SKILL_REGISTRATION_BYTES_DRIFT/);
+  assert.match(core, /validateReleaseDiagnosisReport/);
+  assert.match(methodsOracle, /RELEASE_RESULT_EVIDENCE_IDENTITY/);
+  assert.match(methodsOracle, /RELEASE_RESULT_EVIDENCE_EVENT_MERGED/);
+  assert.match(methodsOracle, /RESTART_RESULT_FORBIDDEN_EVIDENCE/);
+  assert.match(methodsOracle, /requiredSafetyPhrases\.every/);
+
+  const attemptRoot = fs.mkdtempSync(path.join(os.tmpdir(), "test-flow-stage-traversal-"));
+  try {
+    const escaped = path.join(attemptRoot, "payload", "escape");
+    const result = spawnSync(process.execPath, [
+      corePath,
+      "--stage", "../../escape",
+      "--attempt-root", attemptRoot,
+    ], { encoding: "utf8" });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /ADAPTER_STAGE_INVALID/);
+    assert.equal(fs.existsSync(escaped), false);
+  } finally {
+    fs.rmSync(attemptRoot, { recursive: true, force: true });
+  }
 });
 
 test("Linux capability installs the immutable source snapshot from the sealed offline cache before testing", () => {
@@ -178,6 +529,7 @@ test("Linux capability installs the immutable source snapshot from the sealed of
   const platformTests = [
     fs.readFileSync(path.join(TOOL_ROOT, "..", "..", "tests", "platform", "server_linux", "test_native_startup_gate.py"), "utf8"),
     fs.readFileSync(path.join(TOOL_ROOT, "..", "..", "tests", "platform", "distribution", "test_installed_distribution_gate.py"), "utf8"),
+    fs.readFileSync(path.join(TOOL_ROOT, "..", "..", "tests", "platform", "compat", "test_macos_process_tree_gate.py"), "utf8"),
   ].join("\n");
   assert.match(adapter, /UV_CACHE_DIR=\/root\/\.cache\/uv/);
   assert.match(adapter, /UV_LINK_MODE=copy/);
@@ -187,6 +539,12 @@ test("Linux capability installs the immutable source snapshot from the sealed of
   assert.ok(adapter.indexOf("uv pip install --offline") < adapter.indexOf("python -m pytest"));
   assert.match(adapter, /SERVER_CAPABILITY_OFFLINE_INSTALL/);
   assert.match(adapter, /SERVER_CAPABILITY_CONTRACT/);
+  assert.match(adapter, /lines\[5\] !== RELEASE_UV_VERSION_OUTPUT/);
+  assert.match(adapter, /lines\[6\] !== RELEASE_UVX_VERSION_OUTPUT/);
+  assert.match(adapter, /server-capability-termination\.json/);
+  assert.doesNotMatch(adapter, /SERVER_MODEL_CAPABILITY_UNAVAILABLE/);
+  assert.match(adapter, /tests\/platform\/compat\/test_macos_process_tree_gate\.py::test_host_timeout_kills_the_real_child_tree_without_rerunning_agent/);
+  assert.match(adapter, /"process-tree-cleanup": "PASS"/);
   assert.match(platformTests, /environ\["UV_LINK_MODE"\] = "copy"/);
   assert.match(platformTests, /shutil\.copytree\(sealed_runtime, venv, symlinks=True\)/);
   assert.doesNotMatch(platformTests, /"venv",\s*"--no-project"/);
@@ -196,7 +554,9 @@ test("Linux capability installs the immutable source snapshot from the sealed of
 test("active runtime support is explicit and the historical harness closure is gone", () => {
   const expected = [
     "audit_service_agent_usage.py", "checkpoint-temporary.mjs", "export-checkpoint.sh",
-    "initialize-container.sh", "isolated-agent-env.mjs", "isolated-agent-tool-audit.mjs", "isolated-agent-wrapper.mjs", "prepare_claude_settings.py",
+    "codex-luna-app-server-runtime.mjs", "codex-luna-app-server.mjs", "codex-luna-contract.mjs", "codex-luna-diagnosis.schema.json", "codex-luna-exploration-runner.mjs", "codex-luna-prepare.py",
+    "initialize-container.sh", "isolated-agent-env.mjs", "isolated-agent-tool-audit.mjs", "isolated-agent-wrapper.mjs", "linux_client_browser_runner.py",
+    "macos-codex-luna-e2e-contract.mjs", "macos-codex-luna-e2e-runner.mjs", "macos-codex-luna-methods-runner.mjs", "macos-codex-luna-service-wrapper.mjs", "macos_codex_luna_mcp_probe.py", "prepare_claude_settings.py",
     "prepare_nonroot_settings.py", "prepare_release_case.py", "relay_service_journey.py",
     "server_dfx_probe.py", "service-supervisor.sh", "stop-service.sh", "test_service_launcher.py",
     "verify-source-snapshot.mjs",
@@ -253,18 +613,20 @@ test("container initialization verifies the exact product snapshot and external 
   assert.match(initializer, /logparse_config_sha256=\$\(sha256sum/);
   assert.match(supervisor, /LOGPARSE_CONFIG_PATH=\/opt\/e2e-logparse\/config\.yaml/);
   assert.doesNotMatch(supervisor, /LOGPARSE_CONFIG_PATH=\/opt\/src\/logparse\/config\.yaml/);
-  assert.match(releaseCase, /logparse-current-loose-diagnostic-v2/);
+  assert.match(releaseCase, /frozen-raw-log-v1/);
   assert.match(releaseCase, /build_logparse_projection/);
   assert.match(releaseCase, /smoke_test_logparse/);
   assert.match(releaseCase, /release case Logparse process projection is invalid/);
+  assert.match(releaseCase, /load_specialized_skill_registration/);
+  assert.doesNotMatch(releaseCase, /diagnosis-skill\.json|generation_spec|approved_skill_dir/);
   const releaseRoot = path.join(TOOL_ROOT, "..", "..", "tests", "cases", "release");
   const cases = fs.readdirSync(releaseRoot, { withFileTypes: true })
     .filter((entry) => entry.isDirectory() && fs.existsSync(path.join(releaseRoot, entry.name, "case.json")));
   assert.equal(cases.length, 1);
   const descriptor = JSON.parse(fs.readFileSync(path.join(releaseRoot, cases[0].name, "case.json"), "utf8"));
-  const approved = JSON.parse(fs.readFileSync(path.join(releaseRoot, cases[0].name, descriptor.approved_skill_dir, "diagnosis-skill.json"), "utf8"));
+  const registration = JSON.parse(fs.readFileSync(path.join(releaseRoot, cases[0].name, descriptor.registration_template), "utf8"));
   assert.equal(releaseCase.includes(descriptor.case_id), false);
-  assert.equal(releaseCase.includes(approved.logparse_product), false);
+  assert.equal(releaseCase.includes(registration.runtime.preprocessing.logparse_product), false);
 });
 
 test("CrossJob runtime uses pull-never, empty labeled storage and authoritative server DFX", () => {
@@ -288,7 +650,7 @@ test("CrossJob runtime uses pull-never, empty labeled storage and authoritative 
   assert.match(core, /fixedGetCasePollingInvariant\("<authoritative-case-id>"\)/);
   assert.match(core, /fixedGetCasePollingInvariant\(state\.case_id\)/);
   assert.match(core, /Poll with the same literal get-case input/);
-  assert.match(core, /runtime_ref_id: diagnosisSkillRuntimeRefId\(skillManifest\.id\)/);
+  assert.match(core, /runtime_ref_id: product\.runtime_ref_id/);
   for (const code of ["PHASE1_SELECTED_SKILL", "PHASE3_SELECTED_SKILL", "RESTART_SELECTED_SKILL"]) {
     assert.match(core, new RegExp(`selected_skill_ref\\?\\.id === releaseCase\\.skill\\.runtime_ref_id[^\\n]+${code}`));
   }
@@ -313,12 +675,24 @@ test("model invocations preserve failed terminals while PASS still requires exac
   assert.match(core, /terminal-usage-postcondition:\$\{TOKEN_USAGE_FORMULA\}/);
   assert.match(core, /wrapper_outcome: \{ schema_version: 1, status: "PASS", code: null \}/);
   assert.match(core, /function validSuccessfulInvocationReceipt/);
-  assert.match(core, /receipt\.invocations\.every\(validSuccessfulInvocationReceipt\)/);
+  assert.match(core, /function validServiceAgentInvocationReceipt/);
+  assert.match(core, /export function validServiceAgentUsageReceipt/);
+  assert.match(core, /validServiceAgentUsageReceipt\(receipt\)/);
+  assert.match(core, /canonicalJson\(receipt\.new_job_ids\) === canonicalJson\(expectedJobIds\)/);
   assert.match(core, /Array\.isArray\(invocations\) && invocations\.every\(validSuccessfulInvocationReceipt\)/);
-  assert.match(core, /jobTypes\.filter\(\(item\) => item === "ROUTE"\)\.length === 1/);
-  assert.match(core, /jobTypes\.includes\("DIAGNOSE"\) && jobTypes\.every\(\(item\) => \["DIAGNOSE", "ROUTE"\]\.includes\(item\)\)/);
-  assert.match(core, /jobTypes\.includes\("DIAGNOSE"\) && jobTypes\.includes\("REVIEW"\)/);
-  assert.match(core, /jobTypes\.every\(\(item\) => \["DIAGNOSE", "REVIEW"\]\.includes\(item\)\)/);
+  assert.match(core, /jobTypes\.length === 1 && jobTypes\[0\] === "ROUTE"/);
+  assert.match(core, /validRouteMethodsPreflightEvidence\(correspondence\.service_no_model_jobs/);
+  assert.match(core, /registrationId: configuration\.generatedSkill\.registration_id/);
+  assert.match(core, /expectedJobId: state\.methods_preflight_job_id/);
+  assert.match(core, /methods_preflight_job_id: attachmentRequirements\[0\]\.requested_by_job_id/);
+  assert.match(core, /receipt\.result_type === "NEED_ATTACHMENT"/);
+  assert.match(core, /receipt\.model_invoked === false/);
+  assert.match(core, /receipt\.log_pair === "ABSENT"/);
+  assert.match(core, /receipt\.job_sha256/);
+  assert.match(core, /receipt\.job_outcome_sha256/);
+  assert.match(core, /receipt\.methods_preflight_sha256/);
+  assert.match(core, /JSON\.stringify\(jobTypes\) === JSON\.stringify\(\["DIAGNOSE", "DIAGNOSE", "REVIEW"\]\)/);
+  assert.match(core, /DIAGNOSE_UNEXPECTED_PREFLIGHT_ACTIVITY/);
   assert.match(isolated, /WRAPPER_MODEL_CAP_EXCEEDED/);
   assert.match(isolated, /cache_creation_input_tokens/);
   assert.match(isolated, /cache_read_input_tokens/);
@@ -354,29 +728,28 @@ test("model invocations preserve failed terminals while PASS still requires exac
   assert.match(serviceAudit, /"wrapper_outcome": \{\s*"schema_version": 1,\s*"status": "PASS",\s*"code": None/);
 });
 
-test("Skill generation grants one exact file-write permission without exposing Edit or Bash", () => {
+test("Skill generation grants only an audited Methods package subtree without exposing Bash", () => {
   const audit = fs.readFileSync(path.join(SUPPORT_ROOT, "isolated-agent-tool-audit.mjs"), "utf8");
   const wrapper = fs.readFileSync(path.join(SUPPORT_ROOT, "isolated-agent-wrapper.mjs"), "utf8");
   const actions = fs.readFileSync(path.join(TOOL_ROOT, "lib", "actions.mjs"), "utf8");
   const realGate = fs.readFileSync(path.join(TOOL_ROOT, "..", "..", "tests", "real", "agent", "test_real_wiki_skill_generation_gate.py"), "utf8");
   assert.match(audit, /const ALLOWED_TOOLS = Object\.freeze\(\["Skill", "Read", "Write"\]\)/);
-  assert.match(audit, /"Edit\(\/output\/generation-spec\.json\)"/);
-  assert.doesNotMatch(audit, /"Write\(\/output\/generation-spec\.json\)"/);
-  assert.match(audit, /successfulWrites\.length === 1/);
-  assert.match(audit, /max_empty_write_rejections: 1/);
-  assert.match(audit, /exactKeys\(record\.input, \[\]\)/);
-  assert.match(audit, /record\.result\.explicit_error === true/);
-  assert.match(audit, /rejectedWrite\.ordinal === successfulWrite\.ordinal - 1/);
-  assert.match(audit, /rejectedWrite\.result_event_index < successfulWrite\.use_event_index/);
+  assert.match(audit, /"Edit\(\/output\/\*\*\)"/);
+  assert.doesNotMatch(audit, /generation-spec\.json/);
+  assert.match(audit, /writeRecords\.length >= 3/);
+  assert.match(audit, /Failed tool calls are forbidden in Methods generation/);
+  assert.match(audit, /Every package file must be created by exactly one successful Write/);
+  assert.match(audit, /output\/<skill>\/\{SKILL\.md,methods\.json,references\/\*\.md\}/);
   assert.match(audit, /validSkillGenerationTraceAuditReceipt/);
   assert.match(audit, /exactKeys\(record\.input, \["file_path", "content"\]\)/);
-  assert.match(audit, /record\.input\.content\.trim\(\)\.length > 0/);
+  assert.match(audit, /record\.input\.content\.length > 0/);
   assert.match(wrapper, /"--tools", "Read,Write,Skill"/);
   assert.match(wrapper, /"--permission-mode", "dontAsk"/);
   assert.match(wrapper, /schema_version: SKILL_GENERATION_TRACE_SCHEMA_VERSION/);
   assert.match(actions, /validSkillGenerationTraceAuditReceipt\(audit\)/);
-  assert.match(realGate, /call Write exactly once with both `file_path` and non-empty `content`/);
-  assert.match(realGate, /do not use Bash or another file-writing tool/);
+  assert.match(actions, /"\.agents", "skills", skillName/);
+  assert.match(realGate, /Use exactly one successful Write call per final package file/);
+  assert.match(realGate, /Do not call Bash, Edit, Glob, Grep/);
 });
 
 test("checkpoints export stable state without symlinks, hardlinks or retained temporary workspaces", () => {

@@ -1,7 +1,7 @@
 # Test Flow 终态架构
 
 状态：当前权威设计  
-更新时间：2026-08-10
+更新时间：2026-08-24
 
 本文定义 Test Flow 的最终结构与不变量。操作命令只在
 [`tools/test-flow/README.md`](../tools/test-flow/README.md) 维护。
@@ -42,13 +42,18 @@ cross-validator 对未知字段、悬空引用、DAG 环、孤儿、不可达 cl
 
 ## 3. Goal 与发布证明闭包
 
-公开 Goal 只有三个：
+公开 Goal 只有六个：
 
 - `dev.default`：framework/config、仓库静态检查、affected 与 full deterministic；不使用真实模型。
 - `dev.real`：完整 Dev 确定性闭包，加一个显式选择的真实 Proof/Stage。
-- `release.full`：framework/config、静态检查、完整 deterministic/SameJob、Host/Client、Linux Server 与安装分发、兼容/取消、真实 Chrome Web API、真实模型与 Logparse，以及一条 fresh CrossJob。
+- `dev.macos-codex-luna-methods`：Darwin arm64 上恰好一次 Codex CLI + `gpt-5.6-luna`/medium 调用，独立生成并校验 Methods package，再按完整 producer identity 写入不可变缓存；不执行诊断旅程。
+- `dev.macos-codex-luna-e2e`：Darwin arm64 上从空 `DATA_ROOT` 执行单场景本机 Streamable HTTP MCP 冒烟；恰好一条 Client 调用和 ROUTE/Logparse/DIAGNOSE/REVIEW 四条 Server 调用，不使用 Docker、浏览器、重启或业务 REST，也不自动生成 Methods cache。
+- `release.full`：framework/config、静态检查、完整 deterministic/SameJob、Host/Client、Linux Server 与安装分发、兼容/取消、真实浏览器 Web API、真实模型与 Logparse，以及一条 fresh CrossJob。
+- `release.codex-luna-methods`：Darwin arm64 上独立冻结 Codex CLI + `gpt-5.6-luna` Methods 探索流；每次调用使用新的 stdio app-server/ephemeral thread/turn，ChatGPT token 只经内存 stdin 传递，单层 named permission profile 禁止 command network 和越界文件访问，producer 与独立 consumer 共同绑定脱敏 trace、raw/terminal usage、schema/profile bytes、无 `auth.json` 和 durable package；它不进入产品 CrossJob 闭包，二者以相同 source snapshot digest 的两个 verdict 联合交付。
 
 Release 的真实 Agent、ROUTE、DIAGNOSE、REVIEW 与 Logparse claim 由同一 fresh CrossJob 给出，不重复运行隔离真实 Gate。编译、锁文件和 Git whitespace 是正式 cheap Gate，而不是文档外的人工附加步骤。
+
+两个 macOS 快速 Goal 都保持一条 Proof → 一条 Stage → 一个 built-in Gate，不继承 CrossJob 六阶段或 checkpoint。Methods cache key 显式绑定 Wiki、元 Skill tree、输出合同、validator、registration template、Codex CLI 字节/版本/平台/架构、精确模型与 effort、prompt/runner 合同；E2E planning 复算同一 key，缺失、损坏或身份漂移均在任何模型调用前阻断。当前 scenario matrix 只允许 `api-execution-overrun`，`--scenario` 不能接受路径或命令。
 
 Release case 的 Logparse 产品适配属于测试输入闭包，而不是外部仓库的预置状态。容器初始化从已审阅 Skill/driver 的产品、anchor 与事实绑定生成独立配置，并将原始附件逐行保真投影为冻结 Logparse 当前插件的 loose-diagnostic 格式；在任何模型阶段之前，冻结 Logparse 必须完成 smoke parse 且解析出每个预期 module/slot/process。配置与归档投影都由收据摘要绑定，运行时不修改外部 Logparse checkout。
 
@@ -60,8 +65,8 @@ CrossJob 有六个逻辑 Stage：
 
 1. Environment
 2. Route
-3. Upload（真实 Chrome 跨源重放 REST 创建/查询/准备，并用 `Blob` 验证上传）
-4. Diagnose（模型与 Review 完成后，真实 Chrome 重放补参并验证查询、列表和下载）
+3. Upload（真实浏览器运行体跨源重放 REST 创建/查询/准备，并用 `Blob` 验证上传）
+4. Diagnose（模型与 Review 完成后，真实浏览器运行体重放补参并验证查询、列表和下载）
 5. 自动 Review
 6. Publish/Restart
 
@@ -73,7 +78,7 @@ Release 对真实旅程一律 `reuse=never`，忽略业务 checkpoint，从 GENE
 
 ## 5. 平台模型
 
-Linux 是唯一 Server 平台。Windows 与 macOS 默认使用本机 Client，Linux Client 仅在显式选择时启用；三者都通过 HTTP 直连 Linux Server，且都有仓库拥有的 built-in adapter。三个薄 wrapper 共享相同 Gate receipt、checkpoint、DFX、预算和 evidence 合同，不接受调用方提供任意 adapter 命令。Web API 浏览器目标固定为 Google Chrome；规划会记录版本和可执行文件哈希，Upload/Diagnose Stage 从本机 Chrome 直接跨源访问容器中的 Linux Uvicorn。
+Linux 是唯一 Server 平台。Windows 与 macOS 默认使用本机 Client，Linux Client 仅在显式选择时启用；三者都通过 HTTP 直连 Linux Server，且都有仓库拥有的 built-in adapter。三个薄 wrapper 共享相同 Gate receipt、checkpoint、DFX、预算和 evidence 合同，不接受调用方提供任意 adapter 命令。host-client 的 Web API 运行体固定为 Google Chrome；Darwin 调度的显式 Linux Client 固定为 Client image 内的官方 Chrome Headless Shell。planning 先用冻结 image 做无网络 DOM smoke，environment 再从非 root Linux Client 容器以 loopback runner 复核 HOME、执行体与进程树边界，Upload/Diagnose 才允许访问 Linux Uvicorn。
 
 平台“受支持”与“已在某次发布真实通过”是两件事。一个 verdict 只证明其中记录的 Client 平台、Server、不可变源码快照、运行时 profile 和外部输入；不得把 macOS 的真实 PASS 外推到 Windows 或 Linux Client。每个平台的真实认证必须由该平台自己的 `release.full` verdict 给出。
 
@@ -91,9 +96,20 @@ Release planning 会枚举 Git 可见工作树：使用 tracked 文件的当前�
 
 产品输入和测试实现分开建模：测试/文档变化会使 framework proof 失效，但不应无意义地改变业务 producer identity。真实 Agent 的 Claude entry、settings allowlist、Skill、Logparse 配置/Python和外部提交都必须入身份。任何定义或依赖变化都必须使预期 closure 精确失效。
 
+Wiki→Methods 生成不要求受限模型执行不可审计的密码学心算，也不依赖模型自行记住散落的完整日志
+模板。Gate 在 invocation 前从冻结 Wiki 原始字节生成 closed-schema v2 canonical source-identity
+sidecar；它同时绑定 Wiki SHA-256 与 extraction-v1 机械模板清单。v5 tool-trace policy 仍只允许模型
+恰好读取 Wiki、identity 和元 Skill output contract 三个来源，并要求清单逐项逐序写入固定
+`references/source-log-templates.md`，作为 `methods.json.shared_references[0]`。sidecar schema、
+canonical bytes、digest-to-Wiki、清单与固定引用字节在启动前和收尾时由独立路径校验；receipt 只保存
+模板数量和摘要，不保存正文。模型只能逐字复制 digest/清单，canonical validator 随后仍直接重算
+Wiki SHA-256 与模板文件。不得开放 Bash、从 semantic oracle 或 registration 泄漏业务答案、放宽
+校验，或在模型退出后回填/补写生成包。Codex/Luna 的第一次 generation call 物化同一 v2 identity；
+后续九次 diagnosis 不接触该生成期 sidecar。
+
 ## 7. 真实模型预算
 
-runtime profile 为每个真实 Gate 声明 model、turn、token、USD 与 time 上限；Stage 可显式选择一个版本化 cap，未选择时回落到该类 Gate 的默认 cap。plan 同时显示 estimate 和 hard caps。turn、USD 与时间由执行器/provider 强制；token 上限由终端 usage receipt 再次校验。版本化 usage 合同分别保存普通输入、输出、cache creation 与 cache read token，并以四项之和作为 `total_tokens`；Gate、Stage、verdict 聚合和 `max_total_tokens` 判定都使用这一个 cache-inclusive 公式。可选的 `max_output_tokens` 表示单次模型请求的输出上限，不是累计 Agent usage。它由身份绑定的 wrapper 参数、只注入 Claude 子进程的环境值、固定 CLI 上限校验及密封 runtime 实现共同证明；Claude Code 终态 `modelUsage.maxOutputTokens` 是静态模型档位默认值而非请求 `max_tokens` 回显，不能作为 cap 证明。命令没有生效上限、receipt 缺 model/cap/任一 terminal usage 分项、总数不一致，或实际 usage 超限，都不能 PASS。若模型返回结构完整的失败 terminal，执行器先密封实际 usage 与失败码，再保持调用和 Gate 失败；没有合法 terminal 的调用只能标为 usage 不完整，不能伪造零消耗证明。
+runtime profile 为每个真实 Gate 声明 model、turn、token、USD 与 time 上限；Stage 可显式选择一个版本化 cap，未选择时回落到该类 Gate 的默认 cap。plan 同时显示非阻断 estimate 和 hard caps，estimate 不得超过同 Stage 声明 invocation 的聚合 hard token cap，也不能替代后者。Methods Skill generation 以已执行样本估算 600,000 cache-inclusive tokens；16 turns、1,000,000 total tokens、$10 与 1800 秒才是阻断上限。turn、USD 与时间由执行器/provider 强制；token 上限由终端 usage receipt 再次校验。版本化 usage 合同分别保存普通输入、输出、cache creation 与 cache read token，并以四项之和作为 `total_tokens`；Gate、Stage、verdict 聚合和 `max_total_tokens` 判定都使用这一个 cache-inclusive 公式。可选的 `max_output_tokens` 表示单次模型请求的输出上限，不是累计 Agent usage。它由身份绑定的 wrapper 参数、只注入 Claude 子进程的环境值、固定 CLI 上限校验及密封 runtime 实现共同证明；Claude Code 终态 `modelUsage.maxOutputTokens` 是静态模型档位默认值而非请求 `max_tokens` 回显，不能作为 cap 证明。命令没有生效上限、receipt 缺 model/cap/任一 terminal usage 分项、总数不一致，或实际 usage 超限，都不能 PASS。若模型返回结构完整的失败 terminal，执行器先密封实际 usage 与失败码，再保持调用和 Gate 失败；没有合法 terminal 的调用只能标为 usage 不完整，不能伪造零消耗证明。
 
 同一失败身份不允许盲重试。下一次运行必须记录新的 `reason`、`hypothesis` 和 `expected_evidence`；这三个字段进入 plan 和证据。
 

@@ -35,7 +35,7 @@ from problem_locator.integrations.logparse.paths import resolve_workspace_path
 from .authoritative_targets import AuthoritativeTargetSet
 from .outcome_finalizer import SERVER_OUTCOME_RELATIVE_PATH
 from .result_types import CapturedTargetLog, ServerGeneratedResultFile
-from .server_verifier import VerificationResult
+from .verification_result import VerificationResult
 from .user_results import build_server_result_bundle
 
 
@@ -126,6 +126,8 @@ def _normalized_inconclusive_payload(
             recommended_next_step=(
                 "Required evidence rules did not pass server verification."
             ),
+            limitations=list(payload.limitations),
+            safety_notes=list(payload.safety_notes),
         )
     return payload.model_copy(
         update={

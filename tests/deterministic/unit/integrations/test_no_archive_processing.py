@@ -8,16 +8,10 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
 SRC_ROOT = REPO_ROOT / "src" / "problem_locator"
-SKILL_ROOT = REPO_ROOT / ".claude" / "skills"
 SKILL_DIRS = (
-    SKILL_ROOT / "wiki-to-diagnosis-skill",
-    SKILL_ROOT / "logparse-diagnose",
-    REPO_ROOT
-    / "tests"
-    / "fixtures"
-    / "components"
-    / "diagnosis-generator"
-    / "diagnose-service-takeover",
+    REPO_ROOT / ".agents" / "skills" / "wiki-to-diagnosis-skill",
+    REPO_ROOT / ".claude" / "skills" / "logparse-diagnose",
+    REPO_ROOT / "tests/fixtures/components/runtime-catalog/skill-dir",
 )
 LOGPARSE_ROOT = SRC_ROOT / "integrations" / "logparse"
 

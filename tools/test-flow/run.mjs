@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { runFlow } from "./lib/engine.mjs";
@@ -15,12 +16,13 @@ Usage:
 
 Core options:
   --track dev|release            Default: dev
-  --goal <proof-goal>            dev.default, dev.real, release.full
+  --goal <proof-goal>            Includes dev.macos-codex-luna-methods and dev.macos-codex-luna-e2e
   --stage <stage-id>             Required by dev.real
   --plan-only                    Resolve proof, identity, reuse and admission only
   --client auto|windows|macos|linux
   --resume auto|fresh
   --allow-real-model             Required for a Dev real-model proof
+  --scenario <repository-id>     macOS Luna E2E scenario; default: api-execution-overrun
 
 Structured retry/override intent:
   --reason <text>
@@ -33,8 +35,11 @@ Environment/dependency inputs:
   --base <git-commit>
   --logparse-source <absolute-path>
   --mcp-source <absolute-path>
-  --claude-entry <absolute-cli.js> Release/real required; never falls back to global claude
+  --claude-entry <absolute-cli.js> Claude-based Release/real proofs; never falls back to global claude
   --claude-settings <absolute-path> Source for env-only temporary settings; Hooks are never copied
+  --codex-entry <absolute-codex>    Release Codex proof; exact pinned ChatGPT app binary
+  --codex-auth <absolute-path>      Codex ChatGPT auth source; default: ~/.codex/auth.json
+  --allow-codex-posthoc-budget     Acknowledge Codex token/USD limits are terminal postconditions
   --docker-context colima          Required for macOS Release
   --cache-root <absolute-path>     Default: <repo>/.tmp/test-flow-cache
 
@@ -51,6 +56,7 @@ function parseArguments(argv) {
     ["--track", "track"],
     ["--goal", "goal"],
     ["--stage", "stage"],
+    ["--scenario", "scenario"],
     ["--client", "client"],
     ["--resume", "resume"],
     ["--reason", "reason"],
@@ -63,6 +69,8 @@ function parseArguments(argv) {
     ["--mcp-source", "mcpSource"],
     ["--claude-entry", "claudeEntry"],
     ["--claude-settings", "claudeSettings"],
+    ["--codex-entry", "codexEntry"],
+    ["--codex-auth", "codexAuth"],
     ["--docker-context", "dockerContext"],
     ["--cache-root", "cacheRoot"],
   ]);
@@ -71,6 +79,7 @@ function parseArguments(argv) {
     if (argument === "--help" || argument === "-h") options.help = true;
     else if (argument === "--plan-only") options.planOnly = true;
     else if (argument === "--allow-real-model") options.allowRealModel = true;
+    else if (argument === "--allow-codex-posthoc-budget") options.allowCodexPosthocBudget = true;
     else if (valueOptions.has(argument)) {
       if (index + 1 >= argv.length) throw new Error(`ARGUMENT_VALUE_MISSING:${argument}`);
       options[valueOptions.get(argument)] = argv[++index];
@@ -90,7 +99,8 @@ async function main() {
   }
   const repoRoot = path.resolve(options.repoRoot ?? DEFAULT_REPO_ROOT);
   delete options.repoRoot;
-  for (const name of ["logparseSource", "mcpSource", "claudeEntry", "claudeSettings", "cacheRoot"]) {
+  if (!options.codexAuth) options.codexAuth = path.join(os.homedir(), ".codex", "auth.json");
+  for (const name of ["logparseSource", "mcpSource", "claudeEntry", "claudeSettings", "codexEntry", "codexAuth", "cacheRoot"]) {
     if (!options[name]) continue;
     if (!path.isAbsolute(options[name])) throw new Error(`ARGUMENT_ABSOLUTE_REQUIRED:${name}`);
     options[name] = path.resolve(options[name]);

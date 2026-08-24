@@ -82,20 +82,42 @@
       "runtime_profile": "release",
       "evidence": ["host-capability-result.json"]
     },
-    "platform.compat-contract": {
-      "kind": "pytest",
-      "selectors": ["tests/platform/compat"],
-      "min_passed": 1,
-      "skip_policy": "allow-explicit",
-      "runtime_profile": "python-test",
-      "evidence": ["pytest.xml", "pytest-summary.json"]
-    },
     "platform.server-linux-adapter": {
       "kind": "capability-adapter",
       "adapter": "server-linux-capability",
       "runtime_profile": "release",
-      "required_claims": ["linux-runtime", "installed-distribution", "native-startup"],
-      "evidence": ["server-linux-capability-result.json", "platform-server.xml"]
+      "required_claims": ["linux-runtime", "installed-distribution", "native-startup", "process-tree-cleanup"],
+      "evidence": ["server-linux-capability-result.json", "server-runtime-identity.json", "platform-server.xml"]
+    },
+    "real.codex-luna.methods": {
+      "kind": "capability-adapter",
+      "adapter": "codex-luna-methods",
+      "runtime_profile": "release",
+      "evidence": [
+        "codex-luna-preprocessing.json",
+        "codex-luna-logparse-runtime.json",
+        "codex-luna-stage-inputs.json",
+        "codex-luna-call-manifest.json",
+        "codex-luna-consumer-audit.json",
+        "codex-luna-result.json",
+        "codex-luna-identity.json",
+        "codex-luna-invocations.json",
+        "codex-luna-usage.json",
+        "codex-luna-security-audit.json",
+        "codex-luna-skill.json"
+      ]
+    },
+    "real.macos-codex-luna-methods": {
+      "kind": "capability-adapter",
+      "adapter": "macos-codex-luna-methods",
+      "runtime_profile": "release",
+      "evidence": ["codex-identity.json", "model-invocations.json", "model-usage.json", "methods-package.json", "security-audit.json", "gate-receipt.json"]
+    },
+    "real.macos-codex-luna-e2e": {
+      "kind": "capability-adapter",
+      "adapter": "macos-codex-luna-e2e",
+      "runtime_profile": "release",
+      "evidence": ["scenario-input.json", "scenario-oracle.json", "methods-package.json", "codex-identity.json", "model-invocations.json", "model-usage.json", "client-events.jsonl", "mcp-tool-calls.json", "attachment.json", "server-events.ndjson", "final-case.json", "artifact-index.json", "http-boundary-audit.json", "security-audit.json", "gate-receipt.json"]
     },
     "real.logparse": {
       "kind": "pytest",
@@ -134,7 +156,7 @@
       "min_passed": 1,
       "skip_policy": "forbid",
       "runtime_profile": "release",
-      "evidence": ["pytest.xml", "pytest-summary.json", "model-usage.json", "scenario-evaluation-audit.json"],
+      "evidence": ["pytest.xml", "pytest-summary.json", "model-usage.json", "scenario-evaluation-audit.json", "generated-skill.json"],
       "isolated_agent_invocations": 1
     },
     "real.agent.route": {
@@ -146,19 +168,6 @@
       "runtime_profile": "release",
       "evidence": ["pytest.xml", "pytest-summary.json", "model-usage.json"],
       "isolated_agent_invocations": 1
-    },
-    "real.agent.diagnose": {
-      "kind": "pytest",
-      "selectors": [
-        "tests/real/agent/test_real_diagnose_agent_contract_gate.py::test_real_agent_v3_requirement_isolation_gate",
-        "tests/real/agent/test_real_diagnose_agent_contract_gate.py::test_real_first_log_diagnose_agent_produces_valid_continuation"
-      ],
-      "environment_profile": "real-diagnose",
-      "min_passed": 4,
-      "skip_policy": "forbid",
-      "runtime_profile": "release",
-      "evidence": ["pytest.xml", "pytest-summary.json", "model-usage.json"],
-      "isolated_agent_invocations": 4
     },
     "real.agent.review": {
       "kind": "pytest",
@@ -175,7 +184,7 @@
       "phase": "environment",
       "runtime_profile": "release",
       "evidence_contract": {
-        "id": "cross-job-environment-v2",
+        "id": "cross-job-environment-v3",
         "event_stream": {
           "instance": "route",
           "pass_requires": ["diagnostics", "journey"],

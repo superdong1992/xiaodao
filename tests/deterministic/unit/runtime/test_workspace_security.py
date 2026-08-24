@@ -257,6 +257,42 @@ def test_attachment_suffix_helper_drives_exact_read_only_workspace_path(
         _restore_inputs_permissions(workspace.root)
 
 
+def test_workspace_manager_prepares_main_and_product_owned_logparse_workspaces(
+    tmp_path: Path,
+) -> None:
+    payload = b"same immutable archive for both passes"
+    job, aggregate, attachment = _attachment_job_and_aggregate(
+        name="logs.zip",
+        content_type="application/zip",
+        payload=payload,
+    )
+    store = _AttachmentStore(payload)
+    manager = WorkspaceManager(tmp_path / "data")
+
+    main = manager.prepare(job, aggregate, store)  # type: ignore[arg-type]
+    logparse = manager.prepare(
+        job,
+        aggregate,
+        store,  # type: ignore[arg-type]
+        workspace_phase="logparse-preprocess",
+    )
+    try:
+        assert main.root.name == job.job_id
+        assert logparse.root.name == f"{job.job_id}.logparse-preprocess"
+        relative = Path(
+            f"inputs/attachments/{attachment.attachment_id}/payload.zip"
+        )
+        assert store.calls == [
+            (_attachment_ref_for_test(attachment), main.root / relative),
+            (_attachment_ref_for_test(attachment), logparse.root / relative),
+        ]
+        assert (main.root / relative).read_bytes() == payload
+        assert (logparse.root / relative).read_bytes() == payload
+    finally:
+        _restore_inputs_permissions(main.root)
+        _restore_inputs_permissions(logparse.root)
+
+
 def _attachment_ref_for_test(attachment: Attachment) -> ResourceRef:
     assert attachment.storage_key is not None
     assert attachment.size is not None

@@ -1,4 +1,4 @@
-"""Pydantic models for the frozen Problem Locator V6 public contract.
+"""Pydantic models for the frozen Problem Locator V7 public contract.
 
 The module deliberately keeps all wire/persistence DTO definitions in one place;
 ``commands``, ``outcomes`` and ``errors`` provide responsibility-oriented exports.
@@ -2455,7 +2455,7 @@ class UserResultPayloadV3(ContractModel):
     evidence_gaps: list[NonEmptyText]
     limitations: list[NonEmptyText]
     recommendations: Annotated[list[NonEmptyText], Field(min_length=1)]
-    safety_notes: Annotated[list[NonEmptyText], Field(min_length=1)]
+    safety_notes: list[NonEmptyText]
 
     @model_validator(mode="after")
     def validate_payload(self) -> UserResultPayloadV3:
@@ -2797,11 +2797,15 @@ class DiagnosisOutcome(ContractModel):
     requested_attachments: list[OpaqueId]
     candidate_conclusion_draft: CandidateConclusionDraft | None
     recommended_next_step: NonEmptyText
+    limitations: list[NonEmptyText] = Field(default_factory=list)
+    safety_notes: list[NonEmptyText] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def validate_requests(self) -> DiagnosisOutcome:
         _unique(self.requested_input, "requested_input")
         _unique(self.requested_attachments, "requested_attachments")
+        _unique(self.limitations, "DiagnosisOutcome.limitations")
+        _unique(self.safety_notes, "DiagnosisOutcome.safety_notes")
         return self
 
 
@@ -3310,13 +3314,24 @@ def _validate_decision_audit_binding(
     outcome: AgentJobOutcome | JobOutcome,
     audit: DecisionAuditV2 | None,
 ) -> None:
+    waiting_for_user_material = (
+        isinstance(outcome.payload, DiagnosisOutcome)
+        and outcome.result_type
+        in {OutcomeResultType.NEED_INPUT, OutcomeResultType.NEED_ATTACHMENT}
+    )
     requires_audit = (
         outcome.result_type is not OutcomeResultType.FAILED
         and isinstance(outcome.payload, (DiagnosisOutcome, ReviewAssessment))
+        and not waiting_for_user_material
     )
     if requires_audit != (audit is not None):
+        if waiting_for_user_material:
+            raise ValueError(
+                "waiting DIAGNOSE outcomes forbid a decision audit"
+            )
         raise ValueError(
-            "non-failed DIAGNOSE/REVIEW outcomes require exactly one decision audit"
+            "completed or inconclusive DIAGNOSE/REVIEW outcomes require "
+            "exactly one decision audit"
         )
     if audit is None:
         return
@@ -4814,7 +4829,7 @@ class CaseAggregate(ContractModel):
 
 
 class StateFile(ContractModel):
-    schema_version: Literal[6]
+    schema_version: Literal[7]
     contract_revision: Literal[CONTRACT_REVISION]
     generation: NonNegativeInt
     installation_id: OpaqueId
@@ -5800,8 +5815,8 @@ class StateExportResource(ContractModel):
 
 
 class StateExport(ContractModel):
-    export_schema_version: Literal[6]
-    schema_version: Literal[6]
+    export_schema_version: Literal[7]
+    schema_version: Literal[7]
     contract_revision: Literal[CONTRACT_REVISION]
     source_generation: NonNegativeInt
     installation_id: OpaqueId
@@ -5870,7 +5885,7 @@ class ContractManifestEntry(ContractModel):
 
 
 class ContractManifest(ContractModel):
-    schema_version: Literal[6]
+    schema_version: Literal[7]
     contract_revision: Literal[CONTRACT_REVISION]
     generator_version: NonEmptyText
     files: list[ContractManifestEntry]

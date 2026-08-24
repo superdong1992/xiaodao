@@ -575,6 +575,33 @@ def test_rejected_agent_output_replace_failure_leaves_no_partial_file(
 
 
 @pytest.mark.parametrize(
+    "filename",
+    (
+        "method-diagnosis.draft.json",
+        "method-review.draft.json",
+        "logparse_broker_audit.json",
+        "method-grounding-audit.json",
+        "methods_logparse_receipt.json",
+        "methods_preflight.json",
+        "methods_request.json",
+        "methods_target_logs.json",
+    ),
+)
+def test_methods_runtime_records_are_allowlisted_for_publish_and_audit_read(
+    filename: str,
+    tmp_path: Path,
+    coordination: CoordinationLock,
+) -> None:
+    store = _store(tmp_path, coordination)
+    payload = f"observable:{filename}".encode()
+
+    ref = store.publish_audit_bytes(DIAGNOSE_JOB_ID, filename, payload)
+
+    assert ref.relative_key == f"jobs/{DIAGNOSE_JOB_ID}/{filename}"
+    assert store.read_audit_bytes(DIAGNOSE_JOB_ID, filename) == payload
+
+
+@pytest.mark.parametrize(
     ("job_id", "payload"),
     [
         (DIAGNOSE_JOB_ID, _route_outcome_bytes()),

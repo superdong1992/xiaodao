@@ -1,48 +1,16 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "case_id": "rpc-timeout-anonymized",
   "input_wiki": "input/wiki.md",
-  "clarifications": "input/clarifications.md",
-  "generation_spec": "input/generation-spec.json",
-  "approved_skill_dir": "approved-skill/diagnose-anonymized-rpc-timeout",
+  "registration_template": "registration/rpc-timeout-methods-v1/registration-template.json",
   "semantic_oracle": "oracle.json",
-  "journey_scenario": "complete",
+  "journey_scenario": "multiple-rpc-timeouts",
   "scenarios": [
     {
-      "scenario_id": "complete",
-      "driver": "scenarios/complete/driver.json",
-      "oracle": "scenarios/complete/oracle.json"
-    },
-    {
-      "scenario_id": "complete-api-overrun",
-      "driver": "scenarios/complete_api_overrun/driver.json",
-      "oracle": "scenarios/complete_api_overrun/oracle.json"
-    },
-    {
-      "scenario_id": "complete-deadloop-overrun",
-      "driver": "scenarios/complete_deadloop_overrun/driver.json",
-      "oracle": "scenarios/complete_deadloop_overrun/oracle.json"
-    },
-    {
-      "scenario_id": "partial-server-aggregate",
-      "driver": "scenarios/partial_server_aggregate/driver.json",
-      "oracle": "scenarios/partial_server_aggregate/oracle.json"
-    },
-    {
-      "scenario_id": "partial",
-      "driver": "scenarios/partial/driver.json",
-      "oracle": "scenarios/partial/oracle.json"
-    },
-    {
-      "scenario_id": "partial-client-aggregate",
-      "driver": "scenarios/partial_client_aggregate/driver.json",
-      "oracle": "scenarios/partial_client_aggregate/oracle.json"
-    },
-    {
-      "scenario_id": "none",
-      "driver": "scenarios/none/driver.json",
-      "oracle": "scenarios/none/oracle.json"
+      "scenario_id": "multiple-rpc-timeouts",
+      "driver": "scenarios/multiple-rpc-timeouts/driver.json",
+      "oracle": "scenarios/multiple-rpc-timeouts/oracle.json"
     }
   ],
-  "allowed_actions": ["skill_generation", "specialized_diagnosis"]
+  "allowed_actions": ["methods_skill_generation", "specialized_diagnosis"]
 }

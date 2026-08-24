@@ -263,6 +263,7 @@ def _need_order_id_outcome(
             "consumed_evidence_refs": [],
             "proposed_artifacts": [proposal.model_dump(mode="json")],
             "error": None,
+            "decision_audit": None,
         }
     )
     evidence_binding = {
