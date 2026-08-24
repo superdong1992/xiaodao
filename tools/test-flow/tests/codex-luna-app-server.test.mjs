@@ -18,9 +18,12 @@ import {
   buildCodexLunaTurnStartRequest,
   CODEX_LUNA_APP_SERVER_PROTOCOL_VERSION,
   CODEX_LUNA_APP_SERVER_REQUEST_IDS,
+  CODEX_LUNA_APP_SERVER_SESSION_SOURCE,
   CODEX_LUNA_DISABLED_FEATURES,
+  CODEX_LUNA_RAW_CUSTOM_TOOL_NAMES,
   CODEX_LUNA_RAW_RESPONSE_ITEM_SANITIZER_FIELDS,
   CODEX_LUNA_RAW_RESPONSE_ITEM_TYPES_ALLOWED,
+  CODEX_LUNA_RAW_MESSAGE_ROLES_ALLOWED,
   CODEX_LUNA_RAW_SHELL_FUNCTION_NAMES,
   CODEX_LUNA_SYSTEM_SKILL_NAMES,
   codexLunaPermissionProfileId,
@@ -81,7 +84,7 @@ function parse(messages = transcript(), overrides = {}) {
 function tokenUsage() {
   return {
     total: usageBreakdown(),
-    last: usageBreakdown(),
+    last: usageBreakdown({ totalTokens: 50, inputTokens: 40, cachedInputTokens: 20, outputTokens: 10, reasoningOutputTokens: 2 }),
     modelContextWindow: 400_000,
   };
 }
@@ -160,7 +163,7 @@ function transcript() {
           parentThreadId: null,
           ephemeral: true,
           path: null,
-          source: "appServer",
+          source: "vscode",
           modelProvider: "openai",
           cwd: WORKSPACE,
           cliVersion: "0.149.0-alpha.4.1",
@@ -274,6 +277,7 @@ test("isolated config uses only a named least-privilege profile and binds one ab
   assert.equal(generation.network_enabled, false);
   assert.equal(generation.skill_path, SKILL);
   assert.match(generation.config_toml, /default_permissions = "test-flow-codex-luna-generation"/);
+  assert.match(generation.config_toml, /project_doc_max_bytes = 0/);
   assert.match(generation.config_toml, /":root" = "deny"/);
   assert.match(generation.config_toml, /":minimal" = "read"/);
   assert.match(generation.config_toml, /\[permissions\.test-flow-codex-luna-generation\.filesystem\.":workspace_roots"\]\n"\." = "write"/);
@@ -305,6 +309,11 @@ test("isolated config uses only a named least-privilege profile and binds one ab
     () => buildCodexLunaIsolatedConfig({ workspaceRoot: WORKSPACE, skillPath: "/private/tmp/other/SKILL.md", codexHome: CODEX_HOME, mode: "generation" }),
     (error) => error.code === "CODEX_LUNA_APP_SERVER_SKILL_OUTSIDE_WORKSPACE",
   );
+  const servicePrivateSkill = path.join(CODEX_HOME, "skills", "service-skill", "SKILL.md");
+  const servicePrivateHome = "/private/tmp/test-flow-codex-luna/service-shell-home";
+  const serviceProfile = buildCodexLunaIsolatedConfig({ workspaceRoot: WORKSPACE, skillPath: servicePrivateSkill, codexHome: CODEX_HOME, shellHome: servicePrivateHome, mode: "service" });
+  assert.equal(serviceProfile.skill_path, servicePrivateSkill);
+  assert.equal(serviceProfile.shell_home, servicePrivateHome);
   assert.throws(
     () => buildCodexLunaIsolatedConfig({ workspaceRoot: WORKSPACE, skillPath: SKILL, codexHome: `${WORKSPACE}/codex-home`, mode: "generation" }),
     (error) => error.code === "CODEX_LUNA_APP_SERVER_PRIVATE_PATH_OVERLAP",
@@ -365,6 +374,24 @@ test("client transcript accepts completed Problem Locator MCP items but other mo
   assert.throws(() => parse(messages, { mode: "diagnosis" }), (error) => error.code === "CODEX_LUNA_APP_SERVER_TOOL_REJECTED");
 });
 
+test("client transcript tolerates informational MCP Server lifecycle notifications", () => {
+  const messages = transcript();
+  const clientProfile = codexLunaPermissionProfileId("client");
+  messages.find((entry) => entry.id === CODEX_LUNA_APP_SERVER_REQUEST_IDS.permissionProfileList).result.data[0].id = clientProfile;
+  const thread = messages.find((entry) => entry.id === CODEX_LUNA_APP_SERVER_REQUEST_IDS.threadStart).result;
+  thread.activePermissionProfile.id = clientProfile;
+  thread.sandbox.networkAccess = true;
+  messages.splice(-2, 0, {
+    method: "mcpServer/startupStatus/updated",
+    params: { server: "problem-locator", status: "ready" },
+  });
+  assert.equal(parse(messages, { mode: "client" }).status, "PASS");
+  assert.throws(
+    () => parse(messages, { mode: "diagnosis" }),
+    (error) => error.code === "CODEX_LUNA_APP_SERVER_NOTIFICATION_REJECTED",
+  );
+});
+
 test("request builders select external auth, an empty runtime-root list, and no legacy sandbox field", () => {
   const initialize = buildCodexLunaInitializeRequest();
   assert.equal(initialize.method, "initialize");
@@ -378,17 +405,20 @@ test("request builders select external auth, an empty runtime-root list, and no 
 
   const args = buildCodexLunaAppServerArguments();
   assert.deepEqual(CODEX_LUNA_RAW_SHELL_FUNCTION_NAMES, ["shell_command"]);
-  assert.deepEqual(CODEX_LUNA_RAW_RESPONSE_ITEM_TYPES_ALLOWED, ["message", "reasoning", "local_shell_call", "function_call", "function_call_output"]);
+  assert.deepEqual(CODEX_LUNA_RAW_CUSTOM_TOOL_NAMES, ["apply_patch", "exec", "wait"]);
+  assert.deepEqual(CODEX_LUNA_RAW_RESPONSE_ITEM_TYPES_ALLOWED, ["message", "reasoning", "local_shell_call", "function_call", "function_call_output", "custom_tool_call", "custom_tool_call_output"]);
   assert.deepEqual(CODEX_LUNA_RAW_RESPONSE_ITEM_SANITIZER_FIELDS, {
     message: ["type", "role"],
     reasoning: ["type"],
     local_shell_call: ["type", "call_id", "status", "action.type"],
     function_call: ["type", "name", "namespace", "call_id"],
     function_call_output: ["type", "call_id"],
+    custom_tool_call: ["type", "name", "namespace", "call_id", "status"],
+    custom_tool_call_output: ["type", "name", "call_id"],
   });
   assert.deepEqual(CODEX_LUNA_DISABLED_FEATURES, [
     "apps", "auth_elicitation", "browser_use", "browser_use_external", "browser_use_full_cdp_access",
-    "code_mode_host", "computer_use", "current_time_reminder", "default_mode_request_user_input",
+    "computer_use", "current_time_reminder", "default_mode_request_user_input",
     "deferred_executor", "enable_mcp_apps", "executor_capability_discovery", "external_agent_memory_import",
     "goals", "guardian_approval", "hooks", "image_generation", "in_app_browser", "in_app_chat", "memories",
     "multi_agent", "multi_agent_v2", "network_proxy", "plugin_sharing", "plugins", "realtime_conversation",
@@ -400,11 +430,13 @@ test("request builders select external auth, an empty runtime-root list, and no 
   assert.deepEqual(args.slice(3), CODEX_LUNA_DISABLED_FEATURES.flatMap((feature) => ["--disable", feature]));
   assert.equal(args.includes("shell_tool"), false);
   assert.equal(args.includes("unified_exec"), false);
+  assert.equal(args.includes("code_mode_host"), false);
 
   const thread = buildCodexLunaThreadStartRequest({ workspaceRoot: WORKSPACE, mode: "generation", developerInstructions: "Use the configured skill." });
   assert.equal(thread.params.model, CODEX_LUNA_MODEL);
   assert.equal(thread.params.allowProviderModelFallback, false);
   assert.deepEqual(thread.params.runtimeWorkspaceRoots, []);
+  assert.equal(Object.hasOwn(thread.params, "environments"), false);
   assert.equal(thread.params.permissions, codexLunaPermissionProfileId("generation"));
   assert.equal(thread.params.approvalPolicy, "never");
   assert.equal(thread.params.ephemeral, true);
@@ -419,6 +451,7 @@ test("request builders select external auth, an empty runtime-root list, and no 
     { type: "skill", name: "diagnose-rpc-timeout", path: SKILL },
     { type: "text", text: "Diagnose.", text_elements: [] },
   ]);
+  assert.equal(Object.hasOwn(turnRequest.params, "environments"), false);
   assert.deepEqual(turnRequest.params.runtimeWorkspaceRoots, []);
   assert.equal(turnRequest.params.permissions, codexLunaPermissionProfileId("diagnosis"));
   assert.equal(turnRequest.params.model, CODEX_LUNA_MODEL);
@@ -426,6 +459,9 @@ test("request builders select external auth, an empty runtime-root list, and no 
   assert.equal(Object.hasOwn(turnRequest.params, "sandboxPolicy"), false);
   schema.properties.answer.type = "number";
   assert.equal(turnRequest.params.outputSchema.properties.answer.type, "string");
+  const serviceSkill = path.join(CODEX_HOME, "skills", "service-skill", "SKILL.md");
+  const serviceTurn = buildCodexLunaTurnStartRequest({ threadId: THREAD_ID, prompt: "Route.", workspaceRoot: WORKSPACE, skillPath: serviceSkill, codexHome: CODEX_HOME, mode: "service" });
+  assert.equal(serviceTurn.params.input[0].path, serviceSkill);
 });
 
 test("external ChatGPT token is written only to stdin and never returned or echoed by failures", () => {
@@ -480,7 +516,7 @@ test("one complete app-server turn binds thread, turn, model, profile, final mes
     reasoning_output_tokens: 5,
     total_tokens: 120,
   });
-  assert.equal(parsed.thread_token_usage.last.totalTokens, 120);
+  assert.equal(parsed.thread_token_usage.last.totalTokens, 50);
   assert.equal(parsed.raw_response_count, 2);
   assert.deepEqual(parsed.raw_response_usage, usageBreakdown());
   assert.equal(parsed.raw_response_item_count, 6);
@@ -490,12 +526,140 @@ test("one complete app-server turn binds thread, turn, model, profile, final mes
     local_shell_call: 1,
     function_call: 1,
     function_call_output: 2,
+    custom_tool_call: 0,
+    custom_tool_call_output: 0,
   });
+  assert.deepEqual(CODEX_LUNA_RAW_MESSAGE_ROLES_ALLOWED, ["assistant", "developer", "system", "user"]);
+  assert.deepEqual(parsed.raw_response_message_role_counts, { assistant: 1, developer: 0, system: 0, user: 0 });
   assert.deepEqual(parsed.raw_shell_function_names, ["shell_command"]);
   assert.deepEqual(parsed.raw_shell_call_ids, ["raw-shell-function-1", "raw-local-shell-1"]);
   assert.deepEqual(parsed.raw_shell_output_call_ids, ["raw-shell-function-1", "raw-local-shell-1"]);
   assert.doesNotMatch(JSON.stringify(parsed), /ignored unified diff/);
   assert.doesNotMatch(JSON.stringify(parsed), new RegExp(SECRET));
+});
+
+test("warning notifications preserve only a closed content receipt and valid thread scope", () => {
+  const messages = transcript();
+  messages.splice(5, 0, {
+    method: "warning",
+    params: {
+      threadId: null,
+      message_receipt: { redacted_sha256: "a".repeat(64), byte_count: 24 },
+    },
+  });
+  const parsed = parse(messages);
+  assert.deepEqual(parsed.warning_receipts, [{ thread_id: null, redacted_sha256: "a".repeat(64), byte_count: 24 }]);
+
+  const raw = transcript();
+  raw.splice(5, 0, { method: "warning", params: { message: "raw warning", threadId: null } });
+  assert.throws(() => parse(raw), (error) => error.code === "CODEX_LUNA_APP_SERVER_WARNING_INVALID");
+
+  const foreign = transcript();
+  foreign.splice(5, 0, {
+    method: "warning",
+    params: { threadId: "foreign-thread", message_receipt: { redacted_sha256: "b".repeat(64), byte_count: 10 } },
+  });
+  assert.throws(() => parse(foreign), (error) => error.code === "CODEX_LUNA_APP_SERVER_WARNING_SCOPE_INVALID");
+});
+
+test("raw Responses accepts the closed content-free Responses message roles and rejects other roles", () => {
+  for (const role of CODEX_LUNA_RAW_MESSAGE_ROLES_ALLOWED) {
+    const accepted = transcript();
+    accepted.find((entry) => entry.method === "rawResponseItem/completed" && entry.params.item.type === "message").params.item.role = role;
+    const parsed = parse(accepted);
+    assert.deepEqual(parsed.raw_response_message_role_counts, Object.fromEntries(CODEX_LUNA_RAW_MESSAGE_ROLES_ALLOWED.map((candidate) => [candidate, candidate === role ? 1 : 0])));
+  }
+
+  for (const role of ["tool", "function", ""]) {
+    const rejected = transcript();
+    rejected.find((entry) => entry.method === "rawResponseItem/completed" && entry.params.item.type === "message").params.item.role = role;
+    assert.throws(() => parse(rejected), (error) => error.code === "CODEX_LUNA_APP_SERVER_RAW_MESSAGE_INVALID" && error.details.role === role);
+  }
+});
+
+test("generation accepts only paired apply_patch receipts and workspace-confined hashed file changes", () => {
+  const messages = transcript();
+  const generationProfile = codexLunaPermissionProfileId("generation");
+  messages.find((entry) => entry.id === CODEX_LUNA_APP_SERVER_REQUEST_IDS.permissionProfileList).result.data[0].id = generationProfile;
+  messages.find((entry) => entry.id === CODEX_LUNA_APP_SERVER_REQUEST_IDS.threadStart).result.activePermissionProfile.id = generationProfile;
+
+  const finalIndex = messages.findIndex((entry) => entry.method === "item/started" && entry.params.item.type === "agentMessage");
+  messages.splice(finalIndex, 0,
+    {
+      method: "item/started",
+      params: { threadId: THREAD_ID, turnId: TURN_ID, item: { type: "fileChange", id: "patch-1", status: "inProgress", changes: [] } },
+    },
+    {
+      method: "item/completed",
+      params: {
+        threadId: THREAD_ID,
+        turnId: TURN_ID,
+        item: {
+          type: "fileChange",
+          id: "patch-1",
+          status: "completed",
+          changes: [{
+            path: "generated/diagnose-rpc-timeout/SKILL.md",
+            kind: { type: "add", move_path: null },
+            diff_receipt: { redacted_sha256: "c".repeat(64), byte_count: 123 },
+          }],
+        },
+      },
+    },
+  );
+  const rawUsageIndex = messages.findIndex((entry) => entry.method === "rawResponse/completed");
+  messages.splice(rawUsageIndex, 0,
+    rawResponseItem({ type: "custom_tool_call", name: "apply_patch", namespace: null, call_id: "patch-call-1", status: "completed", content_receipt: { redacted_sha256: "d".repeat(64), byte_count: 456 } }),
+    rawResponseItem({ type: "custom_tool_call_output", name: "apply_patch", call_id: "patch-call-1", content_receipt: { redacted_sha256: "e".repeat(64), byte_count: 32 } }),
+  );
+
+  const parsed = parse(messages, { mode: "generation" });
+  assert.deepEqual(parsed.raw_custom_tool_names, ["apply_patch"]);
+  assert.deepEqual(parsed.raw_custom_tool_call_ids, ["patch-call-1"]);
+  assert.deepEqual(parsed.raw_custom_tool_output_call_ids, ["patch-call-1"]);
+  assert.equal(parsed.file_change_count, 1);
+  assert.equal(parsed.file_changes[0].changes[0].diff_receipt.byte_count, 123);
+
+  const serviceMessages = structuredClone(messages);
+  const serviceProfile = codexLunaPermissionProfileId("service");
+  serviceMessages.find((entry) => entry.id === CODEX_LUNA_APP_SERVER_REQUEST_IDS.permissionProfileList).result.data[0].id = serviceProfile;
+  const serviceThread = serviceMessages.find((entry) => entry.id === CODEX_LUNA_APP_SERVER_REQUEST_IDS.threadStart).result;
+  serviceThread.activePermissionProfile.id = serviceProfile;
+  serviceThread.sandbox.networkAccess = true;
+  assert.equal(parse(serviceMessages, { mode: "service" }).file_change_count, 1);
+
+  assert.throws(() => parse(messages, { mode: "diagnosis" }), (error) => error.code === "CODEX_LUNA_APP_SERVER_TOOL_REJECTED" && error.details.item_type === "fileChange");
+
+  const wrongTool = structuredClone(messages);
+  wrongTool.find((entry) => entry.method === "rawResponseItem/completed" && entry.params.item.type === "custom_tool_call").params.item.name = "web_search";
+  assert.throws(() => parse(wrongTool, { mode: "generation" }), (error) => error.code === "CODEX_LUNA_APP_SERVER_RAW_CUSTOM_TOOL_REJECTED" && error.details.function_name === "web_search");
+
+  const missingOutput = structuredClone(messages);
+  missingOutput.splice(missingOutput.findIndex((entry) => entry.method === "rawResponseItem/completed" && entry.params.item.type === "custom_tool_call_output"), 1);
+  assert.throws(() => parse(missingOutput, { mode: "generation" }), (error) => error.code === "CODEX_LUNA_APP_SERVER_RAW_CUSTOM_TOOL_OUTPUT_MISSING");
+
+  const escaped = structuredClone(messages);
+  escaped.find((entry) => entry.method === "item/completed" && entry.params.item.type === "fileChange").params.item.changes[0].path = "../../escaped.txt";
+  assert.throws(() => parse(escaped, { mode: "generation" }), (error) => error.code === "CODEX_LUNA_APP_SERVER_FILE_CHANGE_WORKSPACE_INVALID");
+});
+
+test("Code Mode exec and wait are paired content-free orchestration receipts in every invocation mode", () => {
+  const messages = transcript();
+  const rawUsageIndex = messages.findIndex((entry) => entry.method === "rawResponse/completed");
+  messages.splice(rawUsageIndex, 0,
+    rawResponseItem({ type: "custom_tool_call", name: "exec", namespace: null, call_id: "code-call-1", status: "completed", content_receipt: { redacted_sha256: "1".repeat(64), byte_count: 300 } }),
+    rawResponseItem({ type: "custom_tool_call_output", name: "exec", call_id: "code-call-1", content_receipt: { redacted_sha256: "2".repeat(64), byte_count: 40 } }),
+    rawResponseItem({ type: "custom_tool_call", name: "wait", namespace: null, call_id: "wait-call-1", status: "completed", content_receipt: { redacted_sha256: "3".repeat(64), byte_count: 20 } }),
+    rawResponseItem({ type: "custom_tool_call_output", name: "wait", call_id: "wait-call-1", content_receipt: { redacted_sha256: "4".repeat(64), byte_count: 40 } }),
+  );
+  const parsed = parse(messages);
+  assert.deepEqual(parsed.raw_custom_tool_names, ["exec", "wait"]);
+  assert.deepEqual(parsed.raw_custom_tool_call_ids, ["code-call-1", "wait-call-1"]);
+  assert.deepEqual(parsed.raw_custom_tool_output_call_ids, ["code-call-1", "wait-call-1"]);
+
+  const orphan = structuredClone(messages);
+  orphan.splice(orphan.findIndex((entry) => entry.method === "rawResponseItem/completed" && entry.params.item.call_id === "code-call-1" && entry.params.item.type === "custom_tool_call"), 1);
+  assert.throws(() => parse(orphan), (error) => error.code === "CODEX_LUNA_APP_SERVER_RAW_CUSTOM_TOOL_OUTPUT_INVALID");
 });
 
 test("server approval, permission, input, refresh, and dynamic tool requests fail closed", async (t) => {
@@ -546,7 +710,7 @@ test("MCP, web, collaboration, image, file-change, and other non-command tools f
   }
 });
 
-test("raw Responses items allow only assistant messages, reasoning, and the pinned Luna shell protocol", async (t) => {
+test("raw Responses items allow only closed messages, generation apply_patch, reasoning, and the pinned Luna shell protocol", async (t) => {
   await t.test("sanitizer minimum fields remain sufficient", () => {
     const messages = transcript();
     for (const message of messages.filter((entry) => entry.method === "rawResponseItem/completed")) {
@@ -564,8 +728,6 @@ test("raw Responses items allow only assistant messages, reasoning, and the pinn
     "agent_message",
     "tool_search_call",
     "tool_search_output",
-    "custom_tool_call",
-    "custom_tool_call_output",
     "web_search_call",
     "image_generation_call",
     "compaction",
@@ -600,10 +762,10 @@ test("raw Responses items allow only assistant messages, reasoning, and the pinn
     messages.find((entry) => entry.method === "rawResponseItem/completed" && entry.params.item.type === "function_call").params.item.namespace = "plugin";
     assert.throws(() => parse(messages), (error) => error.code === "CODEX_LUNA_APP_SERVER_RAW_SHELL_FUNCTION_REJECTED");
   });
-  await t.test("reject non-assistant message", () => {
+  await t.test("reject non-allowlisted message role", () => {
     const messages = transcript();
     messages.find((entry) => entry.method === "rawResponseItem/completed" && entry.params.item.type === "message").params.item.role = "tool";
-    assert.throws(() => parse(messages), (error) => error.code === "CODEX_LUNA_APP_SERVER_RAW_MESSAGE_INVALID");
+    assert.throws(() => parse(messages), (error) => error.code === "CODEX_LUNA_APP_SERVER_RAW_MESSAGE_INVALID" && error.details.role === "tool");
   });
   await t.test("reject duplicate shell call id", () => {
     const messages = transcript();
@@ -723,7 +885,7 @@ test("the transcript parser rejects incomplete usage, multiple scopes, failed tu
       (error) => error.code === "CODEX_LUNA_APP_SERVER_RAW_USAGE_MISSING",
     );
   });
-  await t.test("raw response aggregate differs from terminal last", () => {
+  await t.test("raw response aggregate differs from terminal total", () => {
     const mutated = transcript();
     const raw = mutated.find((message) => message.method === "rawResponse/completed").params.usage;
     raw.inputTokens += 1;
@@ -733,7 +895,7 @@ test("the transcript parser rejects incomplete usage, multiple scopes, failed tu
       (error) => error.code === "CODEX_LUNA_APP_SERVER_USAGE_RECONCILIATION_FAILED",
     );
   });
-  await t.test("terminal total differs from raw aggregate and last", () => {
+  await t.test("terminal total differs from raw aggregate", () => {
     const mutated = transcript();
     const total = mutated.find((message) => message.method === "thread/tokenUsage/updated").params.tokenUsage.total;
     total.inputTokens += 1;
@@ -741,6 +903,16 @@ test("the transcript parser rejects incomplete usage, multiple scopes, failed tu
     assert.throws(
       () => parse(mutated),
       (error) => error.code === "CODEX_LUNA_APP_SERVER_USAGE_RECONCILIATION_FAILED",
+    );
+  });
+  await t.test("terminal last differs from final raw response", () => {
+    const mutated = transcript();
+    const last = mutated.find((message) => message.method === "thread/tokenUsage/updated").params.tokenUsage.last;
+    last.inputTokens += 1;
+    last.totalTokens += 1;
+    assert.throws(
+      () => parse(mutated),
+      (error) => error.code === "CODEX_LUNA_APP_SERVER_USAGE_RECONCILIATION_FAILED" && error.details.field === "totalTokens",
     );
   });
   await t.test("terminal message phase must be exact final_answer", () => {
@@ -757,25 +929,25 @@ test("the transcript parser rejects incomplete usage, multiple scopes, failed tu
 test("thread response persistence, provider, sandbox, reviewer, and instruction-source boundaries fail closed", async (t) => {
   const cases = [
     ["outer provider", (response) => { response.modelProvider = "other"; }, "CODEX_LUNA_APP_SERVER_MODEL_IDENTITY_INVALID"],
-    ["inner provider", (response) => { response.thread.modelProvider = "other"; }, "CODEX_LUNA_APP_SERVER_THREAD_BOUNDARY_INVALID"],
-    ["non-ephemeral", (response) => { response.thread.ephemeral = false; }, "CODEX_LUNA_APP_SERVER_THREAD_BOUNDARY_INVALID"],
-    ["persisted path", (response) => { response.thread.path = `${WORKSPACE}/thread.jsonl`; }, "CODEX_LUNA_APP_SERVER_THREAD_BOUNDARY_INVALID"],
-    ["parent lineage", (response) => { response.thread.parentThreadId = "parent"; }, "CODEX_LUNA_APP_SERVER_THREAD_BOUNDARY_INVALID"],
-    ["session mismatch", (response) => { response.thread.sessionId = "other-session"; }, "CODEX_LUNA_APP_SERVER_THREAD_BOUNDARY_INVALID"],
-    ["source mismatch", (response) => { response.thread.source = "cli"; }, "CODEX_LUNA_APP_SERVER_THREAD_BOUNDARY_INVALID"],
-    ["preexisting turns", (response) => { response.thread.turns = [turn("completed")]; }, "CODEX_LUNA_APP_SERVER_THREAD_BOUNDARY_INVALID"],
+    ["inner provider", (response) => { response.thread.modelProvider = "other"; }, "CODEX_LUNA_APP_SERVER_THREAD_BOUNDARY_INVALID", "model_provider"],
+    ["non-ephemeral", (response) => { response.thread.ephemeral = false; }, "CODEX_LUNA_APP_SERVER_THREAD_BOUNDARY_INVALID", "ephemeral"],
+    ["persisted path", (response) => { response.thread.path = `${WORKSPACE}/thread.jsonl`; }, "CODEX_LUNA_APP_SERVER_THREAD_BOUNDARY_INVALID", "path"],
+    ["parent lineage", (response) => { response.thread.parentThreadId = "parent"; }, "CODEX_LUNA_APP_SERVER_THREAD_BOUNDARY_INVALID", "parent_thread_id"],
+    ["session mismatch", (response) => { response.thread.sessionId = "other-session"; }, "CODEX_LUNA_APP_SERVER_THREAD_BOUNDARY_INVALID", "session_id"],
+    ["source mismatch", (response) => { response.thread.source = "cli"; }, "CODEX_LUNA_APP_SERVER_THREAD_BOUNDARY_INVALID", "source"],
+    ["preexisting turns", (response) => { response.thread.turns = [turn("completed")]; }, "CODEX_LUNA_APP_SERVER_THREAD_BOUNDARY_INVALID", "initial_turns"],
     ["network projection", (response) => { response.sandbox.networkAccess = true; }, "CODEX_LUNA_APP_SERVER_SANDBOX_PROJECTION_INVALID"],
     ["reviewer", (response) => { response.approvalsReviewer = "guardian"; }, "CODEX_LUNA_APP_SERVER_APPROVAL_REVIEWER_INVALID"],
     ["multi-agent", (response) => { response.multiAgentMode = "auto"; }, "CODEX_LUNA_APP_SERVER_MULTI_AGENT_BOUNDARY_INVALID"],
     ["runtime roots", (response) => { response.runtimeWorkspaceRoots = [WORKSPACE]; }, "CODEX_LUNA_APP_SERVER_WORKSPACE_BINDING_INVALID"],
     ["outside instruction source", (response) => { response.instructionSources = ["/private/tmp/outside/AGENTS.md"]; }, "CODEX_LUNA_APP_SERVER_INSTRUCTION_SOURCES_INVALID"],
   ];
-  for (const [name, mutate, code] of cases) {
+  for (const [name, mutate, code, field] of cases) {
     await t.test(name, () => {
       const mutated = transcript();
       const response = mutated.find((message) => message.id === CODEX_LUNA_APP_SERVER_REQUEST_IDS.threadStart).result;
       mutate(response);
-      assert.throws(() => parse(mutated), (error) => error.code === code);
+      assert.throws(() => parse(mutated), (error) => error.code === code && (field === undefined || error.details.field === field));
     });
   }
 });
@@ -814,8 +986,16 @@ test("evidence includes exact profile bytes and protocol identity without creden
   assert.equal(evidence.protocol.version, CODEX_LUNA_APP_SERVER_PROTOCOL_VERSION);
   assert.equal(evidence.protocol.authentication, "external-chatgpt-tokens-in-memory");
   assert.equal(evidence.protocol.experimental_raw_events, true);
+  assert.equal(evidence.protocol.session_source, CODEX_LUNA_APP_SERVER_SESSION_SOURCE);
   assert.deepEqual(evidence.protocol.raw_response_item_types_allowed, CODEX_LUNA_RAW_RESPONSE_ITEM_TYPES_ALLOWED);
+  assert.deepEqual(evidence.protocol.raw_response_message_roles_allowed, CODEX_LUNA_RAW_MESSAGE_ROLES_ALLOWED);
   assert.deepEqual(evidence.protocol.raw_shell_function_names_allowed, CODEX_LUNA_RAW_SHELL_FUNCTION_NAMES);
+  assert.deepEqual(evidence.protocol.raw_custom_tool_names_allowed, CODEX_LUNA_RAW_CUSTOM_TOOL_NAMES);
+  assert.deepEqual(evidence.protocol.raw_custom_tool_modes_allowed, {
+    apply_patch: ["generation", "service"],
+    exec: ["generation", "diagnosis", "service", "client"],
+    wait: ["generation", "diagnosis", "service", "client"],
+  });
   assert.deepEqual(evidence.protocol.disabled_features, CODEX_LUNA_DISABLED_FEATURES);
   assert.match(evidence.protocol.launch_arguments_sha256, /^[a-f0-9]{64}$/);
   assert.equal(evidence.permission_profile.bytes_utf8, profile.config_toml);
@@ -833,14 +1013,17 @@ test("evidence includes exact profile bytes and protocol identity without creden
 test("pinned app-server accepts and reports the strict profile and skill boundary without auth or a model turn", {
   skip: process.platform !== "darwin" || !fs.existsSync(PINNED_CODEX),
 }, async () => {
-  const root = fs.mkdtempSync(path.join(fs.existsSync("/private/tmp") ? "/private/tmp" : os.tmpdir(), "codex-app-server-profile-"));
+  const inheritedSkill = path.join(process.cwd(), ".agents", "skills", "wiki-to-diagnosis-skill", "SKILL.md");
+  const tempParent = fs.existsSync(inheritedSkill) ? path.join(process.cwd(), ".tmp") : (fs.existsSync("/private/tmp") ? "/private/tmp" : os.tmpdir());
+  fs.mkdirSync(tempParent, { recursive: true });
+  const root = fs.mkdtempSync(path.join(tempParent, "codex-app-server-profile-"));
   let child = null;
   try {
     const codexHome = path.join(root, "codex-home");
     const home = path.join(root, "home");
     const workspace = path.join(root, "workspace");
     const shellHome = path.join(workspace, ".shell-home");
-    const skill = path.join(workspace, ".agents", "skills", "test-skill", "SKILL.md");
+    const skill = path.join(codexHome, "skills", "test-skill", "SKILL.md");
     fs.mkdirSync(codexHome, { recursive: true, mode: 0o700 });
     fs.mkdirSync(home, { recursive: true, mode: 0o700 });
     fs.mkdirSync(shellHome, { recursive: true, mode: 0o700 });
@@ -856,7 +1039,8 @@ test("pinned app-server accepts and reports the strict profile and skill boundar
       skillPath: skill,
       codexHome,
       shellHome,
-      mode: "diagnosis",
+      mode: "service",
+      disabledSkillPaths: fs.existsSync(inheritedSkill) ? [inheritedSkill] : [],
     });
     fs.writeFileSync(path.join(codexHome, "config.toml"), profile.config_toml, { mode: 0o600 });
     child = spawn(PINNED_CODEX, buildCodexLunaAppServerArguments(), {
@@ -930,6 +1114,7 @@ test("pinned app-server accepts and reports the strict profile and skill boundar
     const cwdSkills = listedSkills.data.find((entry) => entry.cwd === workspace);
     assert.deepEqual(cwdSkills?.errors, []);
     assert.ok(cwdSkills?.skills.some((entry) => entry.name === "test-skill" && entry.path === skill && entry.enabled === true));
+    if (fs.existsSync(inheritedSkill)) assert.ok(cwdSkills?.skills.some((entry) => entry.path === inheritedSkill && entry.enabled === false));
     for (const name of CODEX_LUNA_SYSTEM_SKILL_NAMES) {
       assert.ok(cwdSkills?.skills.some((entry) => entry.name === name && entry.path === systemSkillPath(name, codexHome) && entry.enabled === false));
     }

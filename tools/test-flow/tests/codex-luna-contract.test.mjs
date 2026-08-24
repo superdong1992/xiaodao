@@ -214,6 +214,8 @@ test("validateCodexLunaIdentity returns only a safe receipt for the current loca
   assert.equal(receipt.status, "PASS");
   assert.equal(receipt.cli.version, CODEX_LUNA_EXPECTED_CLI_VERSION);
   assert.equal(receipt.cli.sha256, CODEX_LUNA_EXPECTED_CLI_SHA256);
+  assert.match(receipt.cli.code_mode_host.sha256, /^[a-f0-9]{64}$/);
+  assert.ok(receipt.cli.code_mode_host.size > 0);
   assert.equal(receipt.auth.auth_mode, "chatgpt");
   assert.equal(receipt.auth.kind, "chatgpt-external-tokens");
   assert.match(receipt.auth.account_id_sha256, /^[a-f0-9]{64}$/);

@@ -78,6 +78,9 @@ function codexIdentity() {
       sha256: "0".repeat(64),
       platform: "darwin",
       architecture: "arm64",
+      code_mode_host: {
+        sha256: "1".repeat(64),
+      },
     },
   };
 }
@@ -134,10 +137,15 @@ test("scenario mapper excludes oracle fields and preserves the five deterministi
   assert.deepEqual(Object.keys(facts), ["scenario_id", "problem_time", "client_process", "server_process", "service", "api"]);
   const mapped = mapScenarioToCreateCase(facts);
   assert.deepEqual(mapped.initial_user_fact_names, ["problem_time", "client_process", "server_process", "service", "api"]);
-  assert.deepEqual(mapped.initial_user_fact_values, [facts.problem_time, facts.client_process, facts.server_process, facts.service, facts.api]);
+  assert.deepEqual(mapped.initial_user_fact_values, ["2026-08-23T02:00:05.500Z", facts.client_process, facts.server_process, facts.service, facts.api]);
+  assert.match(mapped.raw_problem_text, /2026-08-23T02:00:05\.500Z/);
   assert.equal(JSON.stringify(mapped).includes("CONFIRMED"), false);
   assert.throws(
     () => mapScenarioToCreateCase({ ...facts, expected_status: "CONFIRMED" }),
+    (error) => error.code === "MACOS_CODEX_LUNA_MAPPER_INPUT_INVALID",
+  );
+  assert.throws(
+    () => mapScenarioToCreateCase({ ...facts, problem_time: "2026-08-23T10:00:05.500" }),
     (error) => error.code === "MACOS_CODEX_LUNA_MAPPER_INPUT_INVALID",
   );
   const oracle = loadScenarioOracle(path.join(f.scenarioRoot, "case.json"), facts.scenario_id);
@@ -293,11 +301,17 @@ test("oracle is loaded after execution and binds status, marker, forbidden terms
     sealedDiagnosis: {
       status: "CONFIRMED",
       confirmed_methods: ["api-complete-method"],
-      evidence: [{ method_id: "api-complete-method", identity_tokens: ["request_id=1"], sources: [{ source_id: "server", file_name: "server.log", raw_sha256: sha256Bytes(serverBytes), line_number: 2, marker: "API_COMPLETE", line: "API_COMPLETE" }] }],
+      evidence: [{ method_id: "api-complete-method", identity_tokens: ["request_id=1"], sources: [{ source_id: "server", file_name: "server.log", raw_sha256: sha256Bytes(serverBytes), line_number: 2, marker: "API_COMPLETE service=", line: "API_COMPLETE" }] }],
     },
     evidenceSources: [{ source_id: "server", file_name: "server.log", raw_sha256: sha256Bytes(serverBytes), lines: ["server one", "API_COMPLETE", ""] }],
   });
   assert.equal(result.status, "PASS");
+  assert.throws(() => auditOracle({
+    oracle,
+    publicCase: { status: "COMPLETED" },
+    sealedDiagnosis: { status: "CONFIRMED", confirmed_methods: ["api-complete-method"], evidence: [{ method_id: "api-complete-method", identity_tokens: [], sources: [{ marker: "API_COMPLETELY" }] }] },
+    evidenceSources: [],
+  }), (error) => error.code === "MACOS_CODEX_LUNA_BRANCH_MARKER_MISSING");
   assert.throws(() => auditOracle({
     oracle,
     publicCase: { status: "COMPLETED" },

@@ -177,6 +177,15 @@ function sanitizedInboundMessage(message, { redactCanaries }) {
     const rawItem = safe.params?.item;
     const item = { type: rawItem?.type ?? null };
     if (rawItem?.type === "message") item.role = rawItem.role ?? null;
+    else if (rawItem?.type === "custom_tool_call") {
+      item.name = rawItem.name ?? null;
+      item.namespace = rawItem.namespace ?? null;
+      item.call_id = rawItem.call_id ?? null;
+      item.status = rawItem.status ?? null;
+    } else if (rawItem?.type === "custom_tool_call_output") {
+      item.name = rawItem.name ?? null;
+      item.call_id = rawItem.call_id ?? null;
+    }
     else if (rawItem?.type === "function_call") {
       item.name = rawItem.name ?? null;
       item.namespace = rawItem.namespace ?? null;
@@ -200,12 +209,32 @@ function sanitizedInboundMessage(message, { redactCanaries }) {
     };
   } else if (safe?.method === "account/rateLimits/updated") {
     safe.params = { state_receipt: digestValue(safe.params ?? null) };
+  } else if (safe?.method === "warning") {
+    safe.params = {
+      threadId: safe.params?.threadId ?? null,
+      message_receipt: digestValue(safe.params?.message ?? null),
+    };
   } else if (/\/(?:delta|outputDelta)$/.test(safe?.method ?? "")) {
     safe.params = {
       threadId: safe.params?.threadId,
       turnId: safe.params?.turnId,
       itemId: safe.params?.itemId ?? null,
       delta: digestValue(safe.params ?? null),
+    };
+  } else if (["item/started", "item/completed"].includes(safe?.method) && safe.params?.item?.type === "fileChange") {
+    const rawItem = safe.params.item;
+    safe.params.item = {
+      type: rawItem.type,
+      id: rawItem.id,
+      status: rawItem.status,
+      changes: Array.isArray(rawItem.changes) ? rawItem.changes.map((change) => ({
+        path: change?.path ?? null,
+        kind: {
+          type: change?.kind?.type ?? null,
+          move_path: change?.kind?.move_path ?? null,
+        },
+        diff_receipt: digestValue(change?.diff ?? null),
+      })) : null,
     };
   } else if (["item/started", "item/completed"].includes(safe?.method) && safe.params?.item?.type === "commandExecution") {
     if (safe.params.item.aggregatedOutput !== null && safe.params.item.aggregatedOutput !== undefined) {
@@ -353,6 +382,19 @@ function authJsonPaths(root) {
   return treeManifest(root).filter((entry) => path.posix.basename(entry.path) === "auth.json");
 }
 
+export function installServiceSkillInCodexHome(codexHome, sourceSkillPath) {
+  ordinaryFile(sourceSkillPath, "service Skill");
+  const source = fs.readFileSync(sourceSkillPath, "utf8");
+  const declaredName = source.match(/^name:\s*([a-z0-9][a-z0-9-]{0,63})\s*$/m)?.[1] ?? null;
+  const skillName = declaredName;
+  requireRuntime(/^[a-z0-9][a-z0-9-]{0,63}$/.test(skillName), "CODEX_LUNA_SERVICE_SKILL_NAME_INVALID", "Service Skill directory has an invalid name");
+  const destination = path.join(codexHome, "skills", skillName, "SKILL.md");
+  fs.mkdirSync(path.dirname(destination), { recursive: true, mode: 0o700 });
+  fs.copyFileSync(sourceSkillPath, destination, fs.constants.COPYFILE_EXCL);
+  fs.chmodSync(destination, 0o400);
+  return destination;
+}
+
 export async function runCodexLunaAppServerCall({
   codexEntry,
   auth,
@@ -361,6 +403,7 @@ export async function runCodexLunaAppServerCall({
   skillPath,
   mode,
   mcpServer = null,
+  disabledSkillPaths = [],
   prompt,
   outputSchema,
   callRoot,
@@ -371,13 +414,19 @@ export async function runCodexLunaAppServerCall({
   forbiddenReadPaths,
   wallSeconds,
   noProgressSeconds,
+  shellHome: requestedShellHome = null,
+  shellPath: requestedShellPath = "/usr/bin:/bin:/usr/sbin:/sbin",
   onProgress = null,
 }) {
+  const codeModeHostPath = path.join(path.dirname(path.resolve(codexEntry)), "codex-code-mode-host");
+  const codeModeHostMetadata = ordinaryFile(codeModeHostPath, "Codex code-mode host");
+  requireRuntime((codeModeHostMetadata.mode & 0o111) !== 0, "CODEX_LUNA_CODE_MODE_HOST_NOT_EXECUTABLE", "Codex code-mode host must be executable");
   createDirectoryExclusive(callRoot);
   const codexHome = createDirectoryExclusive(path.join(callRoot, "codex-home"));
   const home = createDirectoryExclusive(path.join(callRoot, "home"));
   const temporary = createDirectoryExclusive(path.join(callRoot, "tmp"));
-  const shellHome = path.join(workspaceRoot, ".shell-home");
+  const configuredSkillPath = mode === "service" ? installServiceSkillInCodexHome(codexHome, skillPath) : skillPath;
+  const shellHome = path.resolve(requestedShellHome ?? path.join(workspaceRoot, ".shell-home"));
   if (!fs.existsSync(shellHome)) fs.mkdirSync(shellHome, { recursive: true, mode: 0o700 });
   const childEnvironment = {
     ...environment,
@@ -388,18 +437,22 @@ export async function runCodexLunaAppServerCall({
     TEMP: temporary,
     LANG: "C.UTF-8",
   };
+  childEnvironment.PATH = `${path.dirname(codeModeHostPath)}:${environment.PATH ?? "/usr/bin:/bin:/usr/sbin:/sbin"}`;
   const profile = buildCodexLunaIsolatedConfig({
     workspaceRoot,
-    skillPath,
+    skillPath: configuredSkillPath,
     codexHome,
     shellHome,
-    shellPath: "/usr/bin:/bin:/usr/sbin:/sbin",
+    shellPath: requestedShellPath,
     shellLang: "C.UTF-8",
     mode,
     mcpServer,
+    disabledSkillPaths,
   });
   writeFileExclusive(path.join(codexHome, "config.toml"), profile.config_toml);
-  const preflight = await probeCodexLunaPermissionProfile({ codexEntry, profile, workspaceRoot, skillPath, forbiddenReadPaths, environment: childEnvironment });
+  const preflight = mode === "service"
+    ? { schema_version: 1, status: "SKIP", reason: "standalone-lightweight-service" }
+    : await probeCodexLunaPermissionProfile({ codexEntry, profile, workspaceRoot, skillPath, forbiddenReadPaths, environment: childEnvironment });
 
   const appServerArguments = buildCodexLunaAppServerArguments();
   const child = spawn(codexEntry, appServerArguments, {
@@ -495,7 +548,8 @@ export async function runCodexLunaAppServerCall({
     onProgress?.("app-server-message", 1);
     if (cleanupStarted) {
       const cleanupResponse = message.id === CLEANUP_REQUEST_ID && typeof message.method !== "string";
-      const cleanupNotification = message.method === "account/updated" && !Object.hasOwn(message, "id");
+      const cleanupNotification = (message.method === "account/updated" || (mode === "client" && String(message.method ?? "").startsWith("mcpServer/")))
+        && !Object.hasOwn(message, "id");
       if (!cleanupResponse && !cleanupNotification) {
         abort(new CodexLunaAppServerRuntimeError("CODEX_LUNA_APP_SERVER_LATE_MESSAGE_REJECTED", "Codex app-server emitted an unexpected message after the validated turn", { method: message.method ?? null, id: message.id ?? null }));
         return;
@@ -517,7 +571,11 @@ export async function runCodexLunaAppServerCall({
         return;
       }
       pendingResponses.delete(`${typeof message.id}:${String(message.id)}`);
-      if (Object.hasOwn(message, "error")) pending.reject(new CodexLunaAppServerRuntimeError("CODEX_LUNA_APP_SERVER_RESPONSE_ERROR", "Codex app-server request failed", { id: message.id }));
+      if (Object.hasOwn(message, "error")) pending.reject(new CodexLunaAppServerRuntimeError("CODEX_LUNA_APP_SERVER_RESPONSE_ERROR", "Codex app-server request failed", {
+        id: message.id,
+        response_code: Number.isSafeInteger(message.error?.code) ? message.error.code : null,
+        response_message: typeof message.error?.message === "string" ? message.error.message.slice(0, 1024) : null,
+      }));
       else pending.resolve(message.result);
     } else if (typeof message.method === "string") {
       if (message.method === "error") {
@@ -615,12 +673,12 @@ export async function runCodexLunaAppServerCall({
     const thread = await request(buildCodexLunaThreadStartRequest({ workspaceRoot, mode }));
     const threadId = thread?.thread?.id;
     requireRuntime(typeof threadId === "string" && threadId.length > 0, "CODEX_LUNA_APP_SERVER_THREAD_START_INVALID", "thread/start did not return a thread id");
-    await request(buildCodexLunaTurnStartRequest({ threadId, prompt, workspaceRoot, skillPath, mode, outputSchema }));
+    await request(buildCodexLunaTurnStartRequest({ threadId, prompt, workspaceRoot, skillPath: configuredSkillPath, codexHome, mode, outputSchema }));
     await waitNotification("turn/completed", (params) => params?.threadId === threadId && params?.turn?.status === "completed");
     completedTurn = true;
     parsed = parseCodexLunaAppServerTranscript(persistedInbound, {
       workspaceRoot,
-      skillPath,
+      skillPath: configuredSkillPath,
       codexHome,
       mode,
       secretValues: auth.canaries,
@@ -676,6 +734,13 @@ export async function runCodexLunaAppServerCall({
       tree_sha256: treeDigest(codexHome),
       manifest: homeManifest,
       auth_json_files: 0,
+    },
+    code_mode_host: {
+      schema_version: 1,
+      status: "PASS",
+      sha256: sha256File(codeModeHostPath),
+      size: codeModeHostMetadata.size,
+      path_sha256: sha256Bytes(codeModeHostPath),
     },
     trace_sha256: traceReceipt.sha256,
     final_sha256: sha256File(finalPath),

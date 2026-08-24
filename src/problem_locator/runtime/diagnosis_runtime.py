@@ -1383,7 +1383,14 @@ class DiagnosisRuntime:
         candidate = job.context_snapshot.candidate_conclusion
         if candidate is None:
             raise ValueError("Methods REVIEW lacks its immutable Candidate")
-        required_evidence = review_required_evidence_refs(candidate)
+        candidate_required_evidence = set(review_required_evidence_refs(candidate))
+        required_evidence = tuple(
+            evidence_ref
+            for evidence_ref in job.evidence_refs
+            if evidence_ref in candidate_required_evidence
+        )
+        if set(required_evidence) != candidate_required_evidence:
+            raise ValueError("Methods REVIEW required Evidence is not fixed by its Job")
         if not required_evidence or not diagnosis.draft.evidence:
             raise ValueError("Methods REVIEW requires grounded evidence")
         rule_ids: list[str] = []

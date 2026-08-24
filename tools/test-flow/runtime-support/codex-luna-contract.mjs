@@ -182,6 +182,9 @@ export function validateCodexLunaIdentity(entry, authFile) {
   const metadata = ordinaryFile(entry, "Codex executable");
   requireContract((metadata.mode & 0o111) !== 0, "CODEX_LUNA_CLI_NOT_EXECUTABLE", "Codex entry must be executable");
   const cliSha256 = sha256File(entry);
+  const codeModeHostPath = path.join(path.dirname(path.resolve(entry)), "codex-code-mode-host");
+  const codeModeHostMetadata = ordinaryFile(codeModeHostPath, "Codex code-mode host");
+  requireContract((codeModeHostMetadata.mode & 0o111) !== 0, "CODEX_LUNA_CODE_MODE_HOST_NOT_EXECUTABLE", "Codex code-mode host must be executable");
   requireContract(cliSha256 === CODEX_LUNA_EXPECTED_CLI_SHA256, "CODEX_LUNA_CLI_SHA256_MISMATCH", "Codex executable does not match the frozen local identity", { expected: CODEX_LUNA_EXPECTED_CLI_SHA256, actual: cliSha256 });
   const versionProbe = spawnSync(entry, ["--version"], {
     cwd: path.dirname(path.resolve(entry)),
@@ -251,6 +254,11 @@ export function validateCodexLunaIdentity(entry, authFile) {
       platform: process.platform,
       architecture: process.arch,
       entry_path_sha256: sha256Bytes(path.resolve(entry)),
+      code_mode_host: {
+        sha256: sha256File(codeModeHostPath),
+        size: codeModeHostMetadata.size,
+        path_sha256: sha256Bytes(codeModeHostPath),
+      },
     },
     auth: {
       kind: "chatgpt-external-tokens",

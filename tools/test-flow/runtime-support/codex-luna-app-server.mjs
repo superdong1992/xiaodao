@@ -11,6 +11,7 @@ import { MACOS_CODEX_LUNA_PUBLIC_TOOLS } from "./macos-codex-luna-e2e-contract.m
 export const CODEX_LUNA_APP_SERVER_SCHEMA_VERSION = 1;
 export const CODEX_LUNA_APP_SERVER_PROTOCOL_VERSION = "v2";
 export const CODEX_LUNA_APP_SERVER_TRANSPORT = "jsonl-stdio";
+export const CODEX_LUNA_APP_SERVER_SESSION_SOURCE = "vscode";
 export const CODEX_LUNA_APP_SERVER_CLIENT = Object.freeze({
   name: "xiaodao_test_flow",
   title: "Xiaodao Test Flow",
@@ -34,12 +35,15 @@ export const CODEX_LUNA_SYSTEM_SKILL_NAMES = Object.freeze([
   "skill-installer",
 ]);
 export const CODEX_LUNA_RAW_SHELL_FUNCTION_NAMES = Object.freeze(["shell_command"]);
+export const CODEX_LUNA_RAW_CUSTOM_TOOL_NAMES = Object.freeze(["apply_patch", "exec", "wait"]);
 export const CODEX_LUNA_RAW_RESPONSE_ITEM_TYPES_ALLOWED = Object.freeze([
   "message",
   "reasoning",
   "local_shell_call",
   "function_call",
   "function_call_output",
+  "custom_tool_call",
+  "custom_tool_call_output",
 ]);
 export const CODEX_LUNA_RAW_RESPONSE_ITEM_SANITIZER_FIELDS = Object.freeze({
   message: Object.freeze(["type", "role"]),
@@ -47,6 +51,8 @@ export const CODEX_LUNA_RAW_RESPONSE_ITEM_SANITIZER_FIELDS = Object.freeze({
   local_shell_call: Object.freeze(["type", "call_id", "status", "action.type"]),
   function_call: Object.freeze(["type", "name", "namespace", "call_id"]),
   function_call_output: Object.freeze(["type", "call_id"]),
+  custom_tool_call: Object.freeze(["type", "name", "namespace", "call_id", "status"]),
+  custom_tool_call_output: Object.freeze(["type", "name", "call_id"]),
 });
 export const CODEX_LUNA_DISABLED_FEATURES = Object.freeze([
   "apps",
@@ -54,7 +60,6 @@ export const CODEX_LUNA_DISABLED_FEATURES = Object.freeze([
   "browser_use",
   "browser_use_external",
   "browser_use_full_cdp_access",
-  "code_mode_host",
   "computer_use",
   "current_time_reminder",
   "default_mode_request_user_input",
@@ -93,6 +98,9 @@ export const CODEX_LUNA_DISABLED_FEATURES = Object.freeze([
 const PROFILE_PREFIX = "test-flow-codex-luna";
 const RAW_RESPONSE_ITEM_TYPES_ALLOWED = new Set(CODEX_LUNA_RAW_RESPONSE_ITEM_TYPES_ALLOWED);
 const RAW_SHELL_FUNCTION_NAMES = new Set(CODEX_LUNA_RAW_SHELL_FUNCTION_NAMES);
+const RAW_CUSTOM_TOOL_NAMES = new Set(CODEX_LUNA_RAW_CUSTOM_TOOL_NAMES);
+export const CODEX_LUNA_RAW_MESSAGE_ROLES_ALLOWED = Object.freeze(["assistant", "developer", "system", "user"]);
+const RAW_MESSAGE_ROLES_ALLOWED = new Set(CODEX_LUNA_RAW_MESSAGE_ROLES_ALLOWED);
 const MODE_POLICY = Object.freeze({
   generation: Object.freeze({ workspace_access: "write", network_enabled: false, mcp: false }),
   diagnosis: Object.freeze({ workspace_access: "read", network_enabled: false, mcp: false }),
@@ -125,7 +133,12 @@ const NOTIFICATIONS_ALLOWED = new Set([
   "rawResponse/completed",
   "turn/diff/updated",
   "account/rateLimits/updated",
+  "warning",
 ]);
+
+function notificationAllowed(method, mode) {
+  return NOTIFICATIONS_ALLOWED.has(method) || (mode === "client" && method.startsWith("mcpServer/"));
+}
 const TURN_SCOPED_DELTA_NOTIFICATIONS = new Set([
   "item/agentMessage/delta",
   "item/reasoning/summaryTextDelta",
@@ -193,13 +206,14 @@ function normalizedWorkspaceRoot(workspaceRoot) {
   return resolved;
 }
 
-function normalizedSkillPath(skillPath, workspaceRoot) {
+function normalizedSkillPath(skillPath, workspaceRoot, privateSkillRoot = null) {
   requireAppServer(isNonEmptyString(skillPath) && path.isAbsolute(skillPath), "CODEX_LUNA_APP_SERVER_SKILL_PATH_INVALID", "Skill path must be absolute");
   requireAppServer(!skillPath.includes("\0") && !/[\r\n]/.test(skillPath), "CODEX_LUNA_APP_SERVER_SKILL_PATH_INVALID", "Skill path contains forbidden characters");
   const resolved = path.resolve(skillPath);
   requireAppServer(path.basename(resolved) === "SKILL.md", "CODEX_LUNA_APP_SERVER_SKILL_PATH_INVALID", "Skill config path must point to SKILL.md itself");
-  const relative = path.relative(workspaceRoot, resolved);
-  requireAppServer(relative !== "" && relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative), "CODEX_LUNA_APP_SERVER_SKILL_OUTSIDE_WORKSPACE", "Skill path must stay inside the invocation workspace");
+  const insideWorkspace = pathIsInside(workspaceRoot, resolved) && resolved !== workspaceRoot;
+  const insidePrivateSkillRoot = privateSkillRoot !== null && pathIsInside(privateSkillRoot, resolved) && resolved !== privateSkillRoot;
+  requireAppServer(insideWorkspace || insidePrivateSkillRoot, "CODEX_LUNA_APP_SERVER_SKILL_OUTSIDE_WORKSPACE", "Skill path must stay inside the invocation workspace or the service invocation's isolated Codex home");
   return resolved;
 }
 
@@ -229,6 +243,10 @@ function skillName(skillPath) {
 function normalizedMode(mode) {
   requireAppServer(Object.hasOwn(MODE_POLICY, mode), "CODEX_LUNA_APP_SERVER_MODE_INVALID", "App-server invocation mode must be generation, diagnosis, service, or client");
   return mode;
+}
+
+function rawCustomToolAllowed(name, mode) {
+  return (name === "apply_patch" && ["generation", "service"].includes(mode)) || name === "exec" || name === "wait";
 }
 
 function normalizedMcpServer(value, mode) {
@@ -310,20 +328,28 @@ export function buildCodexLunaIsolatedConfig({
   shellLang = "C.UTF-8",
   mode,
   mcpServer = null,
+  disabledSkillPaths = [],
 }) {
   const normalizedModeValue = normalizedMode(mode);
   const modePolicy = MODE_POLICY[normalizedModeValue];
   const normalizedMcp = normalizedMcpServer(mcpServer, normalizedModeValue);
   const normalizedRoot = normalizedWorkspaceRoot(workspaceRoot);
-  const normalizedSkill = normalizedSkillPath(skillPath, normalizedRoot);
   const normalizedCodexHome = normalizedPrivateDirectory(codexHome, "Codex home");
+  const normalizedSkill = normalizedSkillPath(skillPath, normalizedRoot, normalizedModeValue === "service" ? normalizedCodexHome : null);
   const normalizedShellHome = normalizedPrivateDirectory(shellHome ?? path.join(normalizedRoot, ".shell-home"), "Shell home");
   requireAppServer(!pathIsInside(normalizedRoot, normalizedCodexHome) && !pathIsInside(normalizedCodexHome, normalizedRoot), "CODEX_LUNA_APP_SERVER_PRIVATE_PATH_OVERLAP", "Codex home and the invocation workspace must be disjoint");
-  requireAppServer(pathIsInside(normalizedRoot, normalizedShellHome), "CODEX_LUNA_APP_SERVER_SHELL_HOME_OUTSIDE_WORKSPACE", "Shell home must stay inside the invocation workspace");
+  requireAppServer(normalizedModeValue === "service" || pathIsInside(normalizedRoot, normalizedShellHome), "CODEX_LUNA_APP_SERVER_SHELL_HOME_OUTSIDE_WORKSPACE", "Shell home must stay inside the invocation workspace except for the standalone service invocation's private home");
   requireAppServer(!pathIsInside(normalizedCodexHome, normalizedShellHome) && !pathIsInside(normalizedShellHome, normalizedCodexHome), "CODEX_LUNA_APP_SERVER_PRIVATE_PATH_OVERLAP", "Shell home and Codex home must be disjoint");
   requireAppServer(isNonEmptyString(shellPath) && !/[\0\r\n]/.test(shellPath), "CODEX_LUNA_APP_SERVER_SHELL_PATH_INVALID", "Shell PATH is invalid");
   requireAppServer(isNonEmptyString(shellLang) && !/[\0\r\n]/.test(shellLang), "CODEX_LUNA_APP_SERVER_SHELL_LANG_INVALID", "Shell LANG is invalid");
   const disabledSystemSkills = systemSkillPaths(normalizedCodexHome);
+  requireAppServer(Array.isArray(disabledSkillPaths), "CODEX_LUNA_APP_SERVER_DISABLED_SKILLS_INVALID", "Additional disabled Skill paths must be an array");
+  const additionalDisabledSkills = disabledSkillPaths.map((configuredSkill) => {
+    requireAppServer(isNonEmptyString(configuredSkill) && path.isAbsolute(configuredSkill) && path.basename(configuredSkill) === "SKILL.md" && !configuredSkill.includes("\0") && !/[\r\n]/.test(configuredSkill), "CODEX_LUNA_APP_SERVER_DISABLED_SKILLS_INVALID", "Additional disabled Skill path is invalid");
+    return path.resolve(configuredSkill);
+  });
+  requireAppServer(new Set(additionalDisabledSkills).size === additionalDisabledSkills.length && !additionalDisabledSkills.includes(normalizedSkill), "CODEX_LUNA_APP_SERVER_DISABLED_SKILLS_INVALID", "Additional disabled Skill paths are duplicated or disable the intended Skill");
+  const allDisabledSkills = [...disabledSystemSkills, ...additionalDisabledSkills];
   const profileId = codexLunaPermissionProfileId(normalizedModeValue);
   const workspaceAccess = modePolicy.workspace_access;
   const brokerEnvironmentKeys = normalizedModeValue === "service"
@@ -337,6 +363,7 @@ export function buildCodexLunaIsolatedConfig({
     `default_permissions = ${tomlString(profileId)}`,
     "web_search = \"disabled\"",
     "allow_login_shell = false",
+    "project_doc_max_bytes = 0",
     "",
     "[analytics]",
     "enabled = false",
@@ -373,7 +400,7 @@ export function buildCodexLunaIsolatedConfig({
     "PYTHONDONTWRITEBYTECODE = \"1\"",
     "PYTHONNOUSERSITE = \"1\"",
     "",
-    ...disabledSystemSkills.flatMap((configuredSkill) => [
+    ...allDisabledSkills.flatMap((configuredSkill) => [
       "[[skills.config]]",
       `path = ${tomlString(configuredSkill)}`,
       "enabled = false",
@@ -412,6 +439,7 @@ export function buildCodexLunaIsolatedConfig({
     codex_home: normalizedCodexHome,
     codex_home_sha256: sha256Bytes(normalizedCodexHome),
     disabled_system_skill_paths: Object.freeze([...disabledSystemSkills]),
+    disabled_additional_skill_paths: Object.freeze([...additionalDisabledSkills]),
     shell_home: normalizedShellHome,
     shell_path: shellPath,
     shell_lang: shellLang,
@@ -553,7 +581,6 @@ export function buildCodexLunaThreadStartRequest({
     approvalsReviewer: "user",
     permissions: profileId,
     ephemeral: true,
-    environments: [],
     dynamicTools: [],
     selectedCapabilityRoots: [],
     experimentalRawEvents: true,
@@ -567,6 +594,7 @@ export function buildCodexLunaTurnStartRequest({
   prompt,
   workspaceRoot,
   skillPath,
+  codexHome = null,
   mode,
   outputSchema = null,
   id = CODEX_LUNA_APP_SERVER_REQUEST_IDS.turnStart,
@@ -576,19 +604,20 @@ export function buildCodexLunaTurnStartRequest({
   requireAppServer(isNonEmptyString(prompt), "CODEX_LUNA_APP_SERVER_PROMPT_INVALID", "Turn prompt must be non-empty");
   requireAppServer(outputSchema === null || isPlainObject(outputSchema), "CODEX_LUNA_APP_SERVER_OUTPUT_SCHEMA_INVALID", "Output schema must be null or one JSON object");
   const root = normalizedWorkspaceRoot(workspaceRoot);
-  const intendedSkillPath = normalizedSkillPath(skillPath, root);
+  const normalizedModeValue = normalizedMode(mode);
+  const privateSkillRoot = normalizedModeValue === "service" ? normalizedPrivateDirectory(codexHome, "Codex home") : null;
+  const intendedSkillPath = normalizedSkillPath(skillPath, root, privateSkillRoot);
   const params = {
     threadId,
     input: [
       { type: "skill", name: skillName(intendedSkillPath), path: intendedSkillPath },
       { type: "text", text: prompt, text_elements: [] },
     ],
-    environments: [],
     cwd: root,
     runtimeWorkspaceRoots: [],
     approvalPolicy: "never",
     approvalsReviewer: "user",
-    permissions: codexLunaPermissionProfileId(mode),
+    permissions: codexLunaPermissionProfileId(normalizedModeValue),
     model: CODEX_LUNA_MODEL,
     effort: CODEX_LUNA_REASONING_EFFORT,
   };
@@ -708,10 +737,10 @@ export function parseCodexLunaAppServerTranscript(transcript, {
   requireAppServer(new Set(Object.values(requestIds).map((value) => `${typeof value}:${String(value)}`)).size === 7, "CODEX_LUNA_APP_SERVER_REQUEST_IDS_DUPLICATE", "Request ids must be distinct");
   requireAppServer(Array.isArray(secretValues), "CODEX_LUNA_APP_SERVER_SECRETS_INVALID", "Secret canaries must be an array");
   const expectedRoot = normalizedWorkspaceRoot(workspaceRoot);
-  const expectedSkillPath = normalizedSkillPath(skillPath, expectedRoot);
   const expectedCodexHome = normalizedPrivateDirectory(codexHome, "Codex home");
-  const expectedSystemSkillPaths = systemSkillPaths(expectedCodexHome);
   const expectedMode = normalizedMode(mode);
+  const expectedSkillPath = normalizedSkillPath(skillPath, expectedRoot, expectedMode === "service" ? expectedCodexHome : null);
+  const expectedSystemSkillPaths = systemSkillPaths(expectedCodexHome);
   const modePolicy = MODE_POLICY[expectedMode];
   const expectedProfileId = codexLunaPermissionProfileId(expectedMode);
   const messages = parseTranscriptMessages(transcript);
@@ -731,7 +760,11 @@ export function parseCodexLunaAppServerTranscript(transcript, {
   const rawShellCalls = new Map();
   const rawMcpCalls = new Map();
   const rawShellOutputCallIds = new Set();
+  const rawCustomToolCalls = new Map();
+  const rawCustomToolOutputCallIds = new Set();
   const mcpToolCalls = [];
+  const fileChanges = [];
+  const warningReceipts = [];
 
   for (const [index, message] of messages.entries()) {
     const hasMethod = isNonEmptyString(message.method);
@@ -747,7 +780,7 @@ export function parseCodexLunaAppServerTranscript(transcript, {
       continue;
     }
     requireAppServer(hasMethod && !hasId, "CODEX_LUNA_APP_SERVER_MESSAGE_INVALID", "App-server message is neither a response nor a notification", { line: index + 1 });
-    requireAppServer(NOTIFICATIONS_ALLOWED.has(message.method), "CODEX_LUNA_APP_SERVER_NOTIFICATION_REJECTED", "App-server emitted an unapproved notification", { method: message.method, line: index + 1 });
+    requireAppServer(notificationAllowed(message.method, expectedMode), "CODEX_LUNA_APP_SERVER_NOTIFICATION_REJECTED", "App-server emitted an unapproved notification", { method: message.method, line: index + 1 });
     const occurrences = notifications.get(message.method) ?? [];
     occurrences.push({ message, index });
     notifications.set(message.method, occurrences);
@@ -777,20 +810,57 @@ export function parseCodexLunaAppServerTranscript(transcript, {
       requireAppServer(RAW_RESPONSE_ITEM_TYPES_ALLOWED.has(item.type), "CODEX_LUNA_APP_SERVER_RAW_RESPONSE_ITEM_TYPE_REJECTED", "Raw Responses API item used a disallowed capability", { item_type: item.type, line: index + 1 });
       const receipt = { type: item.type };
       if (item.type === "message") {
-        requireAppServer(item.role === "assistant", "CODEX_LUNA_APP_SERVER_RAW_MESSAGE_INVALID", "Raw response message must have the assistant role", { line: index + 1 });
+        requireAppServer(RAW_MESSAGE_ROLES_ALLOWED.has(item.role), "CODEX_LUNA_APP_SERVER_RAW_MESSAGE_INVALID", "Raw response message role is outside the pinned allowlist", { line: index + 1, role: item.role ?? null });
         receipt.role = item.role;
+      } else if (item.type === "custom_tool_call") {
+        requireAppServer(
+          RAW_CUSTOM_TOOL_NAMES.has(item.name)
+            && rawCustomToolAllowed(item.name, expectedMode)
+            && (item.namespace === undefined || item.namespace === null),
+          "CODEX_LUNA_APP_SERVER_RAW_CUSTOM_TOOL_REJECTED",
+          "Raw custom tool call is outside the mode-specific allowlist",
+          { function_name: item.name ?? null, line: index + 1 },
+        );
+        requireAppServer(
+          isNonEmptyString(item.call_id)
+            && !rawShellCalls.has(item.call_id)
+            && !rawMcpCalls.has(item.call_id)
+            && !rawCustomToolCalls.has(item.call_id),
+          "CODEX_LUNA_APP_SERVER_RAW_CUSTOM_TOOL_CALL_INVALID",
+          "Raw custom tool call id is missing or duplicated",
+          { line: index + 1 },
+        );
+        rawCustomToolCalls.set(item.call_id, { type: item.type, name: item.name });
+        receipt.name = item.name;
+        receipt.namespace = item.namespace ?? null;
+        receipt.call_id = item.call_id;
+        receipt.status = item.status ?? null;
+      } else if (item.type === "custom_tool_call_output") {
+        const call = rawCustomToolCalls.get(item.call_id);
+        requireAppServer(
+          call !== undefined
+            && rawCustomToolAllowed(call.name, expectedMode)
+            && (item.name === null || item.name === undefined || item.name === call.name)
+            && !rawCustomToolOutputCallIds.has(item.call_id),
+          "CODEX_LUNA_APP_SERVER_RAW_CUSTOM_TOOL_OUTPUT_INVALID",
+          "Raw custom tool output has no unique preceding allowed custom tool call",
+          { line: index + 1 },
+        );
+        rawCustomToolOutputCallIds.add(item.call_id);
+        receipt.name = item.name ?? null;
+        receipt.call_id = item.call_id;
       } else if (item.type === "function_call") {
         const shellCall = RAW_SHELL_FUNCTION_NAMES.has(item.name) && (item.namespace === undefined || item.namespace === null);
         const mcpCall = expectedMode === "client" && MACOS_CODEX_LUNA_PUBLIC_TOOLS.some((tool) => item.name === tool || item.name?.endsWith(`__${tool}`));
         requireAppServer(shellCall || mcpCall, "CODEX_LUNA_APP_SERVER_RAW_SHELL_FUNCTION_REJECTED", "Raw function call is neither the pinned Luna shell function nor an allowed Problem Locator MCP tool", { function_name: item.name ?? null, line: index + 1 });
-        requireAppServer(isNonEmptyString(item.call_id) && !rawShellCalls.has(item.call_id) && !rawMcpCalls.has(item.call_id), "CODEX_LUNA_APP_SERVER_RAW_SHELL_CALL_INVALID", "Raw function call id is missing or duplicated", { line: index + 1 });
+        requireAppServer(isNonEmptyString(item.call_id) && !rawShellCalls.has(item.call_id) && !rawMcpCalls.has(item.call_id) && !rawCustomToolCalls.has(item.call_id), "CODEX_LUNA_APP_SERVER_RAW_SHELL_CALL_INVALID", "Raw function call id is missing or duplicated", { line: index + 1 });
         if (shellCall) rawShellCalls.set(item.call_id, { type: item.type, name: item.name });
         else rawMcpCalls.set(item.call_id, { type: item.type, name: item.name });
         receipt.name = item.name;
         receipt.namespace = item.namespace ?? null;
         receipt.call_id = item.call_id;
       } else if (item.type === "local_shell_call") {
-        requireAppServer(isNonEmptyString(item.call_id) && !rawShellCalls.has(item.call_id), "CODEX_LUNA_APP_SERVER_RAW_SHELL_CALL_INVALID", "Raw local shell call id is missing or duplicated", { line: index + 1 });
+        requireAppServer(isNonEmptyString(item.call_id) && !rawShellCalls.has(item.call_id) && !rawMcpCalls.has(item.call_id) && !rawCustomToolCalls.has(item.call_id), "CODEX_LUNA_APP_SERVER_RAW_SHELL_CALL_INVALID", "Raw local shell call id is missing or duplicated", { line: index + 1 });
         requireAppServer(["completed", "in_progress", "incomplete"].includes(item.status) && item.action?.type === "exec", "CODEX_LUNA_APP_SERVER_RAW_SHELL_CALL_INVALID", "Raw local shell call status or action is invalid", { line: index + 1 });
         rawShellCalls.set(item.call_id, { type: item.type, name: null });
         receipt.call_id = item.call_id;
@@ -806,7 +876,9 @@ export function parseCodexLunaAppServerTranscript(transcript, {
       bindScope(threadIds, turnIds, message.params.threadId, message.params.turnId, message.method);
       const item = message.params.item;
       requireAppServer(isPlainObject(item) && isNonEmptyString(item.type) && isNonEmptyString(item.id), "CODEX_LUNA_APP_SERVER_ITEM_INVALID", `${message.method} item is invalid`, { line: index + 1 });
-      const allowedThreadItem = THREAD_ITEM_TYPES_ALLOWED.has(item.type) || (expectedMode === "client" && item.type === "mcpToolCall");
+      const allowedThreadItem = THREAD_ITEM_TYPES_ALLOWED.has(item.type)
+        || (expectedMode === "client" && item.type === "mcpToolCall")
+        || (["generation", "service"].includes(expectedMode) && item.type === "fileChange");
       requireAppServer(allowedThreadItem, "CODEX_LUNA_APP_SERVER_TOOL_REJECTED", "App-server turn used a disallowed tool or item type", { item_type: item.type, line: index + 1 });
       if (message.method === "item/completed") {
         completedItems.push({ item, index });
@@ -826,6 +898,38 @@ export function parseCodexLunaAppServerTranscript(transcript, {
             exit_code: item.exitCode,
             duration_ms: item.durationMs,
           });
+        } else if (item.type === "fileChange") {
+          requireAppServer(
+            exactObjectKeys(item, ["type", "id", "status", "changes"])
+              && ["completed", "failed", "declined"].includes(item.status)
+              && Array.isArray(item.changes),
+            "CODEX_LUNA_APP_SERVER_FILE_CHANGE_INVALID",
+            "Completed generation file change is not a closed terminal receipt",
+            { item_id: item.id },
+          );
+          const changes = item.changes.map((change) => {
+            requireAppServer(
+              exactObjectKeys(change, ["path", "kind", "diff_receipt"])
+                && isNonEmptyString(change.path)
+                && exactObjectKeys(change.kind, ["type", "move_path"])
+                && ["add", "delete", "update"].includes(change.kind.type)
+                && (change.kind.move_path === null || isNonEmptyString(change.kind.move_path))
+                && exactObjectKeys(change.diff_receipt, ["redacted_sha256", "byte_count"])
+                && /^[a-f0-9]{64}$/.test(change.diff_receipt.redacted_sha256)
+                && safeInteger(change.diff_receipt.byte_count),
+              "CODEX_LUNA_APP_SERVER_FILE_CHANGE_INVALID",
+              "Generation file change contains an invalid path, kind, or diff receipt",
+              { item_id: item.id },
+            );
+            const resolvedPath = path.isAbsolute(change.path) ? path.resolve(change.path) : path.resolve(expectedRoot, change.path);
+            requireAppServer(pathIsInside(expectedRoot, resolvedPath), "CODEX_LUNA_APP_SERVER_FILE_CHANGE_WORKSPACE_INVALID", "Generation file change targets outside the invocation workspace", { item_id: item.id });
+            if (change.kind.move_path !== null) {
+              const resolvedMovePath = path.isAbsolute(change.kind.move_path) ? path.resolve(change.kind.move_path) : path.resolve(expectedRoot, change.kind.move_path);
+              requireAppServer(change.kind.type === "update" && pathIsInside(expectedRoot, resolvedMovePath), "CODEX_LUNA_APP_SERVER_FILE_CHANGE_WORKSPACE_INVALID", "Generation file move targets outside the invocation workspace", { item_id: item.id });
+            }
+            return cloneJson(change, "file change receipt");
+          });
+          fileChanges.push({ item_id: item.id, status: item.status, changes });
         } else if (item.type === "mcpToolCall") {
           requireAppServer(item.server === "problem-locator" && MACOS_CODEX_LUNA_PUBLIC_TOOLS.includes(item.tool) && item.status === "completed" && isPlainObject(item.arguments) && item.error == null, "CODEX_LUNA_APP_SERVER_MCP_TOOL_CALL_INVALID", "Completed MCP tool call violates the server/tool/status/argument boundary", { item_id: item.id });
           mcpToolCalls.push({
@@ -847,6 +951,20 @@ export function parseCodexLunaAppServerTranscript(transcript, {
       bindScope(threadIds, turnIds, message.params.threadId, message.params.turnId, message.method);
     } else if (message.method === "account/rateLimits/updated") {
       requireAppServer(isPlainObject(message.params), "CODEX_LUNA_APP_SERVER_NOTIFICATION_INVALID", "account/rateLimits/updated params are invalid", { line: index + 1 });
+    } else if (message.method === "warning") {
+      const params = message.params;
+      requireAppServer(
+        exactObjectKeys(params, ["threadId", "message_receipt"])
+          && (params.threadId === null || isNonEmptyString(params.threadId))
+          && exactObjectKeys(params.message_receipt, ["redacted_sha256", "byte_count"])
+          && /^[a-f0-9]{64}$/.test(params.message_receipt.redacted_sha256)
+          && safeInteger(params.message_receipt.byte_count)
+          && params.message_receipt.byte_count > 0,
+        "CODEX_LUNA_APP_SERVER_WARNING_INVALID",
+        "Warning notification must be a closed content-free receipt",
+        { line: index + 1 },
+      );
+      warningReceipts.push({ index, thread_id: params.threadId, ...params.message_receipt });
     }
   }
 
@@ -902,6 +1020,7 @@ export function parseCodexLunaAppServerTranscript(transcript, {
   requireAppServer(turnIds.size === 1, "CODEX_LUNA_APP_SERVER_TURN_CARDINALITY_INVALID", "Transcript contains more than one turn", { count: turnIds.size });
   const threadId = [...threadIds][0];
   const turnId = [...turnIds][0];
+  requireAppServer(warningReceipts.every((warning) => warning.thread_id === null || warning.thread_id === threadId), "CODEX_LUNA_APP_SERVER_WARNING_SCOPE_INVALID", "Warning notification targets another thread");
 
   requireAppServer(threadStart.thread?.id === threadId && threadStarted.message.params.thread?.id === threadId, "CODEX_LUNA_APP_SERVER_THREAD_BINDING_INVALID", "Thread response and notifications disagree");
   requireAppServer(threadStart.model === CODEX_LUNA_MODEL && threadStart.reasoningEffort === CODEX_LUNA_REASONING_EFFORT && threadStart.modelProvider === "openai", "CODEX_LUNA_APP_SERVER_MODEL_IDENTITY_INVALID", "Thread did not use the pinned OpenAI model and reasoning effort");
@@ -915,20 +1034,24 @@ export function parseCodexLunaAppServerTranscript(transcript, {
   requireAppServer(isPlainObject(threadStart.sandbox) && threadStart.sandbox.networkAccess === modePolicy.network_enabled, "CODEX_LUNA_APP_SERVER_SANDBOX_PROJECTION_INVALID", "Legacy sandbox projection must match the selected command-network policy");
   requireAppServer(threadStart.activePermissionProfile?.id === expectedProfileId && threadStart.activePermissionProfile?.extends === null, "CODEX_LUNA_APP_SERVER_PERMISSION_PROFILE_INVALID", "Thread did not activate the exact custom permission profile");
   requireAppServer(threadStart.multiAgentMode === "explicitRequestOnly", "CODEX_LUNA_APP_SERVER_MULTI_AGENT_BOUNDARY_INVALID", "Thread unexpectedly activated multi-agent behavior");
+  const threadBoundaryChecks = [
+    ["session_id", threadStart.thread.sessionId === threadId],
+    ["forked_from_id", threadStart.thread.forkedFromId === null],
+    ["parent_thread_id", threadStart.thread.parentThreadId === null],
+    ["ephemeral", threadStart.thread.ephemeral === true],
+    ["path", threadStart.thread.path === null],
+    ["source", threadStart.thread.source === CODEX_LUNA_APP_SERVER_SESSION_SOURCE],
+    ["model_provider", threadStart.thread.modelProvider === "openai"],
+    ["cwd", threadStart.thread.cwd === expectedRoot],
+    ["cli_version", threadStart.thread.cliVersion === CODEX_LUNA_CLI_VERSION],
+    ["initial_turns", Array.isArray(threadStart.thread.turns) && threadStart.thread.turns.length === 0],
+  ];
+  const failedThreadBoundary = threadBoundaryChecks.find(([, passed]) => !passed);
   requireAppServer(
-    threadStart.thread.sessionId === threadId
-      && threadStart.thread.forkedFromId === null
-      && threadStart.thread.parentThreadId === null
-      && threadStart.thread.ephemeral === true
-      && threadStart.thread.path === null
-      && threadStart.thread.source === "appServer"
-      && threadStart.thread.modelProvider === "openai"
-      && threadStart.thread.cwd === expectedRoot
-      && threadStart.thread.cliVersion === CODEX_LUNA_CLI_VERSION
-      && Array.isArray(threadStart.thread.turns)
-      && threadStart.thread.turns.length === 0,
+    failedThreadBoundary === undefined,
     "CODEX_LUNA_APP_SERVER_THREAD_BOUNDARY_INVALID",
     "Thread persistence, lineage, source, provider, or workspace boundary is invalid",
+    { field: failedThreadBoundary?.[0] ?? null },
   );
   requireAppServer(turnStart.turn?.id === turnId && turnStart.turn?.status === "inProgress" && turnStart.turn?.error === null, "CODEX_LUNA_APP_SERVER_TURN_START_INVALID", "Turn start response is invalid");
   requireAppServer(turnStarted.message.params.turn?.id === turnId && turnStarted.message.params.turn?.status === "inProgress", "CODEX_LUNA_APP_SERVER_TURN_START_INVALID", "Turn started notification is invalid");
@@ -939,14 +1062,21 @@ export function parseCodexLunaAppServerTranscript(transcript, {
   const terminalUsage = usageUpdates.at(-1);
   requireAppServer(terminalUsage.index < turnCompleted.index, "CODEX_LUNA_APP_SERVER_EVENT_ORDER_INVALID", "Terminal token usage was not observed before turn completion");
   requireAppServer(rawResponseUsages.length > 0, "CODEX_LUNA_APP_SERVER_RAW_USAGE_MISSING", "Turn has no raw Responses API usage receipts");
+  requireAppServer(
+    rawCustomToolCalls.size === rawCustomToolOutputCallIds.size
+      && [...rawCustomToolCalls.keys()].every((callId) => rawCustomToolOutputCallIds.has(callId)),
+    "CODEX_LUNA_APP_SERVER_RAW_CUSTOM_TOOL_OUTPUT_MISSING",
+    "Every allowed raw custom tool call must have exactly one output receipt",
+  );
   requireAppServer(rawResponseUsages.every((entry) => entry.index < turnCompleted.index), "CODEX_LUNA_APP_SERVER_EVENT_ORDER_INVALID", "Raw response usage was emitted after turn completion");
   const rawResponseUsage = sumUsageBreakdowns(rawResponseUsages.map((entry) => entry.usage));
+  const lastRawResponseUsage = rawResponseUsages.at(-1).usage;
   for (const key of Object.keys(rawResponseUsage)) {
     requireAppServer(
-      rawResponseUsage[key] === terminalUsage.usage.last[key]
-        && rawResponseUsage[key] === terminalUsage.usage.total[key],
+      rawResponseUsage[key] === terminalUsage.usage.total[key]
+        && lastRawResponseUsage[key] === terminalUsage.usage.last[key],
       "CODEX_LUNA_APP_SERVER_USAGE_RECONCILIATION_FAILED",
-      "Aggregated raw response usage does not equal terminal ThreadTokenUsage last and total",
+      "Raw response aggregate/final usage does not equal terminal ThreadTokenUsage total/last",
       { field: key },
     );
   }
@@ -990,18 +1120,25 @@ export function parseCodexLunaAppServerTranscript(transcript, {
     raw_response_usage: rawResponseUsage,
     raw_response_item_count: rawResponseItems.length,
     raw_response_item_type_counts: Object.fromEntries(CODEX_LUNA_RAW_RESPONSE_ITEM_TYPES_ALLOWED.map((type) => [type, rawResponseItems.filter((entry) => entry.type === type).length])),
+    raw_response_message_role_counts: Object.fromEntries(CODEX_LUNA_RAW_MESSAGE_ROLES_ALLOWED.map((role) => [role, rawResponseItems.filter((entry) => entry.type === "message" && entry.role === role).length])),
     raw_shell_function_names: [...new Set(rawResponseItems.filter((entry) => entry.type === "function_call").map((entry) => entry.name))],
     raw_shell_call_ids: [...rawShellCalls.keys()],
     raw_mcp_call_ids: [...rawMcpCalls.keys()],
     raw_shell_output_call_ids: [...rawShellOutputCallIds],
+    raw_custom_tool_names: [...new Set([...rawCustomToolCalls.values()].map((entry) => entry.name))],
+    raw_custom_tool_call_ids: [...rawCustomToolCalls.keys()],
+    raw_custom_tool_output_call_ids: [...rawCustomToolOutputCallIds],
+    file_changes: fileChanges,
+    file_change_count: fileChanges.length,
+    warning_receipts: warningReceipts.map(({ index, ...warning }) => warning),
     thread_token_usage: terminalUsage.usage,
     usage: {
-      input_tokens: terminalUsage.usage.last.inputTokens,
-      cached_input_tokens: terminalUsage.usage.last.cachedInputTokens,
-      cache_write_input_tokens: terminalUsage.usage.last.cacheWriteInputTokens,
-      output_tokens: terminalUsage.usage.last.outputTokens,
-      reasoning_output_tokens: terminalUsage.usage.last.reasoningOutputTokens,
-      total_tokens: terminalUsage.usage.last.totalTokens,
+      input_tokens: terminalUsage.usage.total.inputTokens,
+      cached_input_tokens: terminalUsage.usage.total.cachedInputTokens,
+      cache_write_input_tokens: terminalUsage.usage.total.cacheWriteInputTokens,
+      output_tokens: terminalUsage.usage.total.outputTokens,
+      reasoning_output_tokens: terminalUsage.usage.total.reasoningOutputTokens,
+      total_tokens: terminalUsage.usage.total.totalTokens,
     },
     inbound_message_count: messages.length,
   };
@@ -1020,6 +1157,7 @@ export function buildCodexLunaAppServerEvidenceSummary({ profile, transcript, se
     shellLang: profile.shell_lang,
     mode: profile.invocation_mode,
     mcpServer: profile.mcp_server,
+    disabledSkillPaths: profile.disabled_additional_skill_paths,
   });
   requireAppServer(
     profile.profile_id === rebuilt.profile_id
@@ -1030,6 +1168,7 @@ export function buildCodexLunaAppServerEvidenceSummary({ profile, transcript, se
       && JSON.stringify(profile.mcp_server) === JSON.stringify(rebuilt.mcp_server)
       && profile.codex_home_sha256 === rebuilt.codex_home_sha256
       && JSON.stringify(profile.disabled_system_skill_paths) === JSON.stringify(rebuilt.disabled_system_skill_paths)
+      && JSON.stringify(profile.disabled_additional_skill_paths) === JSON.stringify(rebuilt.disabled_additional_skill_paths)
       && JSON.stringify(profile.shell_environment) === JSON.stringify(rebuilt.shell_environment)
       && profile.config_toml === rebuilt.config_toml
       && profile.config_sha256 === rebuilt.config_sha256
@@ -1061,8 +1200,16 @@ export function buildCodexLunaAppServerEvidenceSummary({ profile, transcript, se
       pinned_cli_version: CODEX_LUNA_CLI_VERSION,
       experimental_api: true,
       experimental_raw_events: true,
+      session_source: CODEX_LUNA_APP_SERVER_SESSION_SOURCE,
       raw_response_item_types_allowed: [...CODEX_LUNA_RAW_RESPONSE_ITEM_TYPES_ALLOWED],
+      raw_response_message_roles_allowed: [...CODEX_LUNA_RAW_MESSAGE_ROLES_ALLOWED],
       raw_shell_function_names_allowed: [...CODEX_LUNA_RAW_SHELL_FUNCTION_NAMES],
+      raw_custom_tool_names_allowed: [...CODEX_LUNA_RAW_CUSTOM_TOOL_NAMES],
+      raw_custom_tool_modes_allowed: {
+        apply_patch: ["generation", "service"],
+        exec: ["generation", "diagnosis", "service", "client"],
+        wait: ["generation", "diagnosis", "service", "client"],
+      },
       authentication: "external-chatgpt-tokens-in-memory",
       disabled_features: [...CODEX_LUNA_DISABLED_FEATURES],
       launch_arguments_sha256: sha256Bytes(JSON.stringify(buildCodexLunaAppServerArguments())),

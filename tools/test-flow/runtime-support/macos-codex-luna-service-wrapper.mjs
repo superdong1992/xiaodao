@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import fs from "node:fs";
 import path from "node:path";
+import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 import {
@@ -90,6 +91,21 @@ function writeJsonExclusive(filePath, value) {
   fs.writeFileSync(filePath, `${canonicalJson(value)}\n`, { encoding: "utf8", mode: 0o600, flag: "wx" });
 }
 
+export function safeServiceError(error) {
+  const safeDetails = {};
+  for (const key of ["id", "response_code", "response_message", "method", "field", "item_type", "function_name", "line"]) {
+    const value = error?.details?.[key];
+    if (typeof value === "string" || typeof value === "number" || typeof value === "boolean" || value === null) safeDetails[key] = value;
+  }
+  return {
+    schema_version: 1,
+    status: "FAIL",
+    code: error?.code ?? "MACOS_CODEX_LUNA_SERVICE_WRAPPER_FAILED",
+    message: error?.message ?? String(error),
+    ...(Object.keys(safeDetails).length > 0 ? { details: safeDetails } : {}),
+  };
+}
+
 function claimInvocation(privateRoot, phase) {
   const claimsRoot = path.join(privateRoot, "server-claims");
   fs.mkdirSync(claimsRoot, { recursive: true, mode: 0o700 });
@@ -101,14 +117,88 @@ function claimInvocation(privateRoot, phase) {
   return claim;
 }
 
-function installSkill(workspaceRoot, skillSource) {
-  const root = path.join(workspaceRoot, "runtime", "tool-state", "codex-service-skill");
-  if (fs.existsSync(root)) fail("MACOS_CODEX_LUNA_SERVICE_SKILL_COLLISION", "Server Agent Skill destination already exists");
-  fs.mkdirSync(root, { recursive: true, mode: 0o700 });
-  const destination = path.join(root, "SKILL.md");
-  fs.copyFileSync(skillSource, destination, fs.constants.COPYFILE_EXCL);
-  fs.chmodSync(destination, 0o400);
-  return destination;
+export function repositorySkillPaths(sourceRoot) {
+  const skillsRoot = path.join(path.resolve(sourceRoot), ".agents", "skills");
+  if (!fs.existsSync(skillsRoot)) return [];
+  return fs.readdirSync(skillsRoot, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => path.join(skillsRoot, entry.name, "SKILL.md"))
+    .filter((candidate) => {
+      try { return fs.statSync(candidate).isFile(); } catch { return false; }
+    })
+    .sort();
+}
+
+export function sealServiceOutcomeDraft({ phase, workspaceRoot, sourceRoot }) {
+  if (phase !== "ROUTE") return { required: false, invoked: false, status: "SKIP" };
+  const finalizer = path.join(path.resolve(sourceRoot), ".venv", "bin", "problem-locator-seal-outcome-draft");
+  let metadata;
+  try { metadata = fs.statSync(finalizer); } catch { fail("MACOS_CODEX_LUNA_SERVICE_FINALIZER_MISSING", "Repository outcome finalizer command is missing"); }
+  if (!metadata.isFile() || (metadata.mode & 0o111) === 0) fail("MACOS_CODEX_LUNA_SERVICE_FINALIZER_INVALID", "Repository outcome finalizer command is not executable");
+  const marker = path.join(workspaceRoot, "runtime", "tool-state", "agent-job-outcome-draft.finalized");
+  if (fs.existsSync(marker)) return { required: true, invoked: false, status: "PASS", marker_sha256: sha256Bytes(fs.readFileSync(marker)) };
+  const result = spawnSync(finalizer, [], {
+    cwd: workspaceRoot,
+    env: {
+      PATH: `${path.dirname(finalizer)}:/usr/bin:/bin:/usr/sbin:/sbin`,
+      LANG: "C.UTF-8",
+      PYTHONDONTWRITEBYTECODE: "1",
+      PYTHONNOUSERSITE: "1",
+    },
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+    timeout: 30_000,
+  });
+  if (result.status !== 0 || result.signal !== null || result.error || !fs.existsSync(marker)) fail("MACOS_CODEX_LUNA_SERVICE_FINALIZER_FAILED", "Repository outcome finalizer command failed");
+  return { required: true, invoked: true, status: "PASS", marker_sha256: sha256Bytes(fs.readFileSync(marker)) };
+}
+
+export function runServiceLogparseCommand({ phase, prompt, workspaceRoot, sourceRoot, environment }) {
+  if (phase !== "LOGPARSE") return { required: false, invoked: false, status: "SKIP" };
+  const match = prompt.match(/^problem-locator-logparse (parse-targets|target-logs) --request ([a-zA-Z0-9._/-]+\.json) --result ([a-zA-Z0-9._/-]+\.json)$/m);
+  if (!match || [match[2], match[3]].some((value) => value.startsWith("/") || value.split("/").includes("..") || !value.startsWith("output/proposals/"))) fail("MACOS_CODEX_LUNA_SERVICE_LOGPARSE_COMMAND_INVALID", "Product Logparse prompt does not contain one safe fixed command");
+  const [, operation, requestPath, resultPath] = match;
+  const resultFile = path.join(workspaceRoot, ...resultPath.split("/"));
+  if (fs.existsSync(resultFile)) return { required: true, invoked: false, status: "PASS", operation, request_path_sha256: sha256Bytes(requestPath), result_path_sha256: sha256Bytes(resultPath) };
+  const command = path.join(path.resolve(sourceRoot), ".venv", "bin", "problem-locator-logparse");
+  let metadata;
+  try { metadata = fs.statSync(command); } catch { fail("MACOS_CODEX_LUNA_SERVICE_LOGPARSE_MISSING", "Repository Logparse command is missing"); }
+  if (!metadata.isFile() || (metadata.mode & 0o111) === 0) fail("MACOS_CODEX_LUNA_SERVICE_LOGPARSE_INVALID", "Repository Logparse command is not executable");
+  const result = spawnSync(command, [operation, "--request", requestPath, "--result", resultPath], {
+    cwd: workspaceRoot,
+    env: {
+      PATH: `${path.dirname(command)}:/usr/bin:/bin:/usr/sbin:/sbin`,
+      LANG: "C.UTF-8",
+      PYTHONDONTWRITEBYTECODE: "1",
+      PYTHONNOUSERSITE: "1",
+      PROBLEM_LOCATOR_LOGPARSE_ENDPOINT: environment.PROBLEM_LOCATOR_LOGPARSE_ENDPOINT,
+      PROBLEM_LOCATOR_LOGPARSE_TOKEN: environment.PROBLEM_LOCATOR_LOGPARSE_TOKEN,
+    },
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+    timeout: 120_000,
+  });
+  if (result.status !== 0 || result.signal !== null || result.error || !fs.existsSync(resultFile)) fail("MACOS_CODEX_LUNA_SERVICE_LOGPARSE_FAILED", "Repository Logparse command failed");
+  return { required: true, invoked: true, status: "PASS", operation, request_path_sha256: sha256Bytes(requestPath), result_path_sha256: sha256Bytes(resultPath) };
+}
+
+export function canonicalizeMethodsDraft({ phase, workspaceRoot }) {
+  const relativePath = phase === "DIAGNOSE"
+    ? "output/method-diagnosis.draft.json"
+    : phase === "REVIEW"
+      ? "output/method-review.draft.json"
+      : null;
+  if (relativePath === null) return { required: false, invoked: false, status: "SKIP" };
+  const draftPath = path.join(workspaceRoot, ...relativePath.split("/"));
+  let metadata;
+  try { metadata = fs.lstatSync(draftPath); } catch { fail("MACOS_CODEX_LUNA_METHODS_DRAFT_MISSING", "Methods draft is missing"); }
+  if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.size > 2_000_000) fail("MACOS_CODEX_LUNA_METHODS_DRAFT_INVALID", "Methods draft is not a bounded ordinary file");
+  let value;
+  try { value = JSON.parse(fs.readFileSync(draftPath, "utf8")); } catch { fail("MACOS_CODEX_LUNA_METHODS_DRAFT_INVALID", "Methods draft is not valid JSON"); }
+  if (value === null || typeof value !== "object" || Array.isArray(value)) fail("MACOS_CODEX_LUNA_METHODS_DRAFT_INVALID", "Methods draft must be one JSON object");
+  const before = sha256Bytes(fs.readFileSync(draftPath));
+  fs.writeFileSync(draftPath, `${canonicalJson(value)}\n`, { encoding: "utf8", mode: 0o600 });
+  return { required: true, invoked: true, status: "PASS", relative_path: relativePath, before_sha256: before, after_sha256: sha256Bytes(fs.readFileSync(draftPath)) };
 }
 
 export async function runServiceInvocation(values, { stdin = process.stdin, stdout = process.stdout, ambient = process.env } = {}) {
@@ -119,7 +209,7 @@ export async function runServiceInvocation(values, { stdin = process.stdin, stdo
   const evidenceRoot = path.resolve(values["evidence-root"]);
   const usageRoot = path.resolve(values["usage-root"]);
   const claim = claimInvocation(privateRoot, phase);
-  const skillPath = installSkill(workspaceRoot, path.resolve(values["skill-source"]));
+  const skillPath = path.resolve(values["skill-source"]);
   const controlled = controlledEnvironment(ambient);
   const auth = readCodexLunaExternalAuth(path.resolve(values["auth-source"]), ambient);
   const brokerToken = controlled.brokerKeys.length === 2 ? controlled.environment.PROBLEM_LOCATOR_LOGPARSE_TOKEN : null;
@@ -148,8 +238,13 @@ export async function runServiceInvocation(values, { stdin = process.stdin, stdo
     forbiddenReadPaths: [path.resolve(values["auth-source"]), path.resolve(values["skill-source"])],
     wallSeconds: MACOS_CODEX_LUNA_CALL_WALL_SECONDS,
     noProgressSeconds: MACOS_CODEX_LUNA_NO_PROGRESS_SECONDS,
+    shellHome: path.join(claim, "shell-home"),
+    disabledSkillPaths: repositorySkillPaths(ambient.TEST_FLOW_SOURCE_ROOT),
     onProgress: () => stdout.write(`TEST_FLOW_PROGRESS service-agent ${phase}\n`),
   });
+  const methodsDraft = canonicalizeMethodsDraft({ phase, workspaceRoot });
+  const logparseRunner = runServiceLogparseCommand({ phase, prompt, workspaceRoot, sourceRoot: ambient.TEST_FLOW_SOURCE_ROOT, environment: controlled.environment });
+  const outcomeSealer = sealServiceOutcomeDraft({ phase, workspaceRoot, sourceRoot: ambient.TEST_FLOW_SOURCE_ROOT });
   const finishedAtUtc = new Date().toISOString();
   const invocationId = `${values["run-id"]}:server:${prefix}`;
   const receipt = {
@@ -170,6 +265,9 @@ export async function runServiceInvocation(values, { stdin = process.stdin, stdo
     usage: trace.usage,
     command_count: trace.command_receipts.length,
     command_receipts: trace.command_receipts,
+    methods_draft: methodsDraft,
+    logparse_runner: logparseRunner,
+    outcome_sealer: outcomeSealer,
     broker_environment: { present: controlled.brokerKeys.length === 2, keys: controlled.brokerKeys, values_persisted: false },
     workspace_sha256: sha256Bytes(workspaceRoot),
   };
@@ -184,7 +282,7 @@ async function main() {
     const values = parseArguments(process.argv.slice(2));
     await runServiceInvocation(values);
   } catch (error) {
-    process.stderr.write(`${canonicalJson({ schema_version: 1, status: "FAIL", code: error?.code ?? "MACOS_CODEX_LUNA_SERVICE_WRAPPER_FAILED", message: error?.message ?? String(error) })}\n`);
+    process.stderr.write(`${canonicalJson(safeServiceError(error))}\n`);
     process.exitCode = 1;
   }
 }

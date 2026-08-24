@@ -40,7 +40,6 @@ import {
   validateMethodsCache,
   writeDeterministicLogsZip,
 } from "./macos-codex-luna-e2e-contract.mjs";
-
 const MODULE_PATH = fileURLToPath(import.meta.url);
 const TERMINAL_CASE_STATUSES = new Set(["RESOLVED", "PARTIALLY_RESOLVED", "UNRESOLVED", "FAILED", "CANCELLED"]);
 
@@ -94,6 +93,15 @@ function createEmptyRoot(root, label) {
 function writeJson(filePath, value, { exclusive = true } = {}) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true, mode: 0o700 });
   fs.writeFileSync(filePath, `${canonicalJson(value)}\n`, { encoding: "utf8", mode: 0o600, flag: exclusive ? "wx" : "w" });
+}
+
+export function createStandaloneGitBoundary(workspace) {
+  const gitRoot = path.join(workspace, ".git");
+  requireE2E(!fs.existsSync(gitRoot), "MACOS_CODEX_LUNA_CLIENT_GIT_COLLISION", "Client standalone Git boundary already exists");
+  fs.mkdirSync(path.join(gitRoot, "objects"), { recursive: true, mode: 0o700 });
+  fs.mkdirSync(path.join(gitRoot, "refs", "heads"), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(path.join(gitRoot, "HEAD"), "ref: refs/heads/main\n", { flag: "wx", mode: 0o600 });
+  fs.writeFileSync(path.join(gitRoot, "config"), "[core]\n\trepositoryformatversion = 0\n\tbare = false\n", { flag: "wx", mode: 0o600 });
 }
 
 function copyTree(source, destination) {
@@ -190,6 +198,19 @@ export function structuredMcpData(call) {
   return envelope.data;
 }
 
+export function partitionMcpCalls(calls) {
+  requireE2E(Array.isArray(calls), "MACOS_CODEX_LUNA_MCP_RESULT_INVALID", "MCP call ledger must be an array");
+  const successful = [];
+  const recoveries = [];
+  for (const call of calls) {
+    const envelope = parsedJsonCandidates(call?.result).find((item) => typeof item.ok === "boolean" && Object.hasOwn(item, "data") && Object.hasOwn(item, "error"));
+    requireE2E(envelope !== undefined, "MACOS_CODEX_LUNA_MCP_RESULT_INVALID", "Completed MCP call lacks a structured business envelope", { tool: call?.tool ?? null });
+    if (envelope.ok === true) successful.push(call);
+    else recoveries.push({ tool: call.tool, code: envelope.error?.code ?? null });
+  }
+  return { successful, recoveries };
+}
+
 export function extractCommandHttpEntries(commands) {
   requireE2E(Array.isArray(commands), "MACOS_CODEX_LUNA_COMMAND_LEDGER_INVALID", "Command ledger must be an array");
   const entries = [];
@@ -202,9 +223,26 @@ export function extractCommandHttpEntries(commands) {
   return entries;
 }
 
+export function validDescriptorUploadCommand({ commands, upload, archivePath }) {
+  if (!Array.isArray(commands) || !isPlainObject(upload) || typeof archivePath !== "string") return false;
+  const matches = commands.filter((command) => String(command.command).includes(upload.url));
+  if (matches.length !== 1) return false;
+  const receipt = matches[0];
+  const rendered = String(receipt.command ?? "");
+  const headerArgumentCount = (rendered.match(/(?:^|\s)(?:-H|--header)(?=\s)/g) ?? []).length;
+  const bodyArgumentCount = (rendered.match(/(?:^|\s)(?:--upload-file|--data-binary)(?=\s)/g) ?? []).length;
+  return receipt.status === "completed"
+    && receipt.exit_code === 0
+    && headerArgumentCount === 4
+    && bodyArgumentCount === 1
+    && /(?:^|\s)(?:-X|--request)\s+(?:'|")?PUT\b/.test(rendered)
+    && rendered.includes(archivePath)
+    && Object.entries(upload.required_headers).every(([name, value]) => rendered.includes(name) && (value === null || rendered.includes(value)));
+}
+
 export function clientPrompt({ mapped, archivePath, archive, runId }) {
   const requestPrefix = sha256Bytes(`${runId}:api-execution-overrun`).slice(0, 24);
-  return `使用 $problem-locator-client 完成一次无人值守的单 Case MCP 冒烟。\n\n创建字段（逐字使用，不得改写）：\n${canonicalJson(mapped)}\n\n附件：\n- 绝对路径：${archivePath}\n- name：logs.zip\n- content_type：application/zip\n- size：${archive.size}\n- sha256：${archive.sha256}\n\n稳定 request_id 前缀：${requestPrefix}。每个逻辑写操作使用不同后缀；禁止重用其他操作的 ID。\n\n必须在一个 turn 内按顺序完成：create_case → get_case 等待附件要求 → prepare_attachment → 按 UploadDescriptor 执行一次 curl PUT → submit_supplement → get_case 有限轮询至 terminal → list_artifacts。轮询总时限 12 分钟；禁止创建第二个 Case，禁止调用业务 REST API，禁止读取 case.json、scenario oracle 或工作区外路径，禁止下载 artifact。`;
+  return `使用 $problem-locator-client 完成一次无人值守的单 Case MCP 冒烟。\n\n创建字段（逐字使用，不得改写）：\n${canonicalJson(mapped)}\n\n附件：\n- 绝对路径：${archivePath}\n- name：logs.zip\n- content_type：application/zip\n- size：${archive.size}\n- sha256：${archive.sha256}\n\n调用 prepare_attachment 前必须执行 /usr/bin/openssl dgst -sha256 与 /usr/bin/stat -f %z，从文件重新读取并逐字核对上述值；SHA 必须恰好 64 位小写十六进制。禁止凭上下文手抄或截短 SHA。\n\n稳定 request_id 前缀：${requestPrefix}。每个逻辑写操作使用不同后缀；禁止重用其他操作的 ID。\n\n必须在一个 turn 内按顺序完成：create_case → get_case 等待附件要求 → prepare_attachment → 按 UploadDescriptor 执行一次系统 curl PUT 并取得 completed/exit 0 命令回执 → 立即 get_case(wait_seconds=0) 刷新 revision → 使用该 revision 与 descriptor attachment_id 调用 submit_supplement → get_case 有限轮询至 terminal → list_artifacts。文字声称“已 PUT”不算执行，必须有真实命令回执。公开 Case 投影不会展示 attachment 内部 READY；submit 前附件要求保持 OPEN 是正常现象，禁止为等待该要求变为 FULFILLED 而轮询。prepare 与 submit 前都必须额外执行一次 wait_seconds=0 的 get_case，并逐字复制该响应的最新 case_revision。若逻辑写返回 REVISION_CONFLICT 或 ATTACHMENT_NOT_READY，刷新同一 Case后使用同一 request_id 最多纠正一次。每次 get_case 的 wait_seconds 必须是 0 到 30；已知 job_id 时用 wait_for_job_id 等待同一 Job。轮询总时限 12 分钟；禁止创建第二个 Case 或第二个 attachment，禁止调用业务 REST API，禁止读取 case.json、scenario oracle 或工作区外路径，禁止下载 artifact。`;
 }
 
 function materializeRegistration({ skillDir, cache, registrationTemplate }) {
@@ -222,8 +260,8 @@ function stateEvidence(dataRoot, rawPaths) {
   const aggregate = aggregates[0];
   requireE2E(aggregate.case?.active_job_id === null && TERMINAL_CASE_STATUSES.has(aggregate.case?.status), "MACOS_CODEX_LUNA_STATE_NOT_TERMINAL", "Server state retains an active or non-terminal Case");
   const jobs = Object.values(aggregate.jobs ?? {});
-  requireE2E(jobs.filter((job) => job.job_type === "ROUTE").length === 1 && jobs.filter((job) => job.job_type === "DIAGNOSE").length === 1 && jobs.filter((job) => job.job_type === "REVIEW").length === 1 && jobs.every((job) => job.status === "SUCCEEDED"), "MACOS_CODEX_LUNA_SERVER_JOB_LIFECYCLE_INVALID", "Server did not complete exactly ROUTE, DIAGNOSE, and REVIEW");
-  const diagnose = jobs.find((job) => job.job_type === "DIAGNOSE");
+  const jobOutcomes = new Map(jobs.map((job) => [job.job_id, JSON.parse(fs.readFileSync(path.join(dataRoot, "jobs", job.job_id, "job_outcome.json"), "utf8"))]));
+  const { diagnose } = selectScenarioJobs(jobs, jobOutcomes);
   const jobRoot = path.join(dataRoot, "jobs", diagnose.job_id);
   const diagnosis = JSON.parse(fs.readFileSync(path.join(jobRoot, "method-diagnosis.draft.json"), "utf8"));
   const grounding = JSON.parse(fs.readFileSync(path.join(jobRoot, "method-grounding-audit.json"), "utf8"));
@@ -238,17 +276,71 @@ function stateEvidence(dataRoot, rawPaths) {
     ["client", { file_name: "client.log", path: rawPaths.client_log }],
     ["server", { file_name: "server.log", path: rawPaths.server_log }],
   ]);
-  const evidenceSources = targetLogs.target_logs.map((target) => {
-    const raw = rawByLabel.get(target.label);
-    requireE2E(raw !== undefined && sha256File(raw.path) === target.content_sha256, "MACOS_CODEX_LUNA_LOGPARSE_SOURCE_MISMATCH", "Logparse target bytes do not match this run's ZIP member", { source_id: target.source_id });
-    const lines = fs.readFileSync(raw.path, "utf8").split(/\r?\n/);
-    if (lines.at(-1) === "") lines.pop();
-    return { source_id: target.source_id, file_name: raw.file_name, raw_sha256: target.content_sha256, lines };
+  const evidenceSources = buildScenarioEvidenceSources({
+    targetLogs,
+    rawByLabel,
+    workspaceRoot: path.join(dataRoot, "tmp", "workspaces", diagnose.job_id),
   });
   const sourceById = new Map(evidenceSources.map((source) => [source.source_id, source]));
   const enriched = JSON.parse(JSON.stringify(diagnosis));
   for (const evidence of enriched.evidence ?? []) for (const source of evidence.sources ?? []) Object.assign(source, { file_name: sourceById.get(source.source_id)?.file_name, raw_sha256: sourceById.get(source.source_id)?.raw_sha256 });
   return { state, aggregate, jobs, diagnosis, grounding, targetLogs, outcome, evidenceSources, enriched, attachment: attachments[0], uploadReceipt: uploadRecords[0].business_receipt };
+}
+
+function textLines(file) {
+  const lines = fs.readFileSync(file, "utf8").split(/\r?\n/);
+  if (lines.at(-1) === "") lines.pop();
+  return lines;
+}
+
+export function buildScenarioEvidenceSources({ targetLogs, rawByLabel, workspaceRoot }) {
+  return targetLogs.target_logs.map((target) => {
+    const raw = rawByLabel.get(target.label);
+    const targetPath = path.resolve(workspaceRoot, target.log_path);
+    requireE2E(raw !== undefined && targetPath.startsWith(`${path.resolve(workspaceRoot)}${path.sep}`) && fs.existsSync(targetPath), "MACOS_CODEX_LUNA_LOGPARSE_SOURCE_MISMATCH", "Logparse target source is missing or escapes its Job workspace", { source_id: target.source_id });
+    requireE2E(sha256File(targetPath) === target.content_sha256 && fs.statSync(targetPath).size === target.size, "MACOS_CODEX_LUNA_LOGPARSE_TARGET_MISMATCH", "Logparse target receipt does not match its staged bytes", { source_id: target.source_id });
+    const rawLines = textLines(raw.path);
+    const targetLines = textLines(targetPath);
+    let rawCursor = 0;
+    for (const targetLine of targetLines) {
+      const rawLine = targetLine.replace(/^\[[^\]]+\]\s+\[[^\]]+\]\s+/, "");
+      const rawIndex = rawLines.indexOf(rawLine, rawCursor);
+      requireE2E(rawIndex >= 0, "MACOS_CODEX_LUNA_LOGPARSE_SOURCE_MISMATCH", "Logparse target line cannot be traced to this run's ZIP member", { source_id: target.source_id });
+      rawCursor = rawIndex + 1;
+    }
+    return {
+      source_id: target.source_id,
+      file_name: raw.file_name,
+      raw_sha256: sha256File(raw.path),
+      target_sha256: target.content_sha256,
+      lines: targetLines,
+    };
+  });
+}
+
+export function selectScenarioJobs(jobs, jobOutcomes) {
+  const routeJobs = jobs.filter((job) => job.job_type === "ROUTE");
+  const diagnoseJobs = jobs.filter((job) => job.job_type === "DIAGNOSE");
+  const reviewJobs = jobs.filter((job) => job.job_type === "REVIEW");
+  const diagnoseByResult = new Map(diagnoseJobs.map((job) => [jobOutcomes.get(job.job_id)?.result_type, job]));
+  requireE2E(
+    jobs.length === 4
+      && jobs.every((job) => job.status === "SUCCEEDED")
+      && routeJobs.length === 1
+      && diagnoseJobs.length === 2
+      && reviewJobs.length === 1
+      && diagnoseByResult.size === 2
+      && diagnoseByResult.has("NEED_ATTACHMENT")
+      && diagnoseByResult.has("COMPLETED"),
+    "MACOS_CODEX_LUNA_SERVER_JOB_LIFECYCLE_INVALID",
+    "Server lifecycle must contain one ROUTE, one attachment-request DIAGNOSE, one completed DIAGNOSE, and one REVIEW",
+  );
+  return {
+    route: routeJobs[0],
+    attachmentRequestDiagnose: diagnoseByResult.get("NEED_ATTACHMENT"),
+    diagnose: diagnoseByResult.get("COMPLETED"),
+    review: reviewJobs[0],
+  };
 }
 
 function artifactConsistency(finalCase, artifactData) {
@@ -267,7 +359,7 @@ function combineServerEvents(dfxRoot, destination) {
   fs.writeFileSync(destination, Buffer.concat(chunks.map((chunk) => chunk.at(-1) === 0x0a ? chunk : Buffer.concat([chunk, Buffer.from("\n")]))), { mode: 0o600, flag: "wx" });
 }
 
-export async function runE2E(options, { ambient = process.env } = {}) {
+export async function runE2E(options, { ambient = process.env, onProgress = null } = {}) {
   const sourceRoot = path.resolve(options.sourceRoot);
   const workRoot = createEmptyRoot(options.workRoot, "E2E work root");
   const privateRoot = createEmptyRoot(options.privateRoot, "E2E private root");
@@ -291,6 +383,8 @@ export async function runE2E(options, { ambient = process.env } = {}) {
   fs.mkdirSync(dataRoot, { mode: 0o700 });
   fs.mkdirSync(dfxRoot, { mode: 0o700 });
   const clientWorkspace = path.join(workRoot, "client");
+  fs.mkdirSync(clientWorkspace, { recursive: true, mode: 0o700 });
+  createStandaloneGitBoundary(clientWorkspace);
   const clientSkillRoot = path.join(clientWorkspace, ".agents", "skills", "problem-locator-client");
   fs.mkdirSync(clientSkillRoot, { recursive: true, mode: 0o700 });
   fs.copyFileSync(options.clientSkill, path.join(clientSkillRoot, "SKILL.md"), fs.constants.COPYFILE_EXCL);
@@ -349,7 +443,7 @@ export async function runE2E(options, { ambient = process.env } = {}) {
   const serviceClosed = processClosed(service);
   const forwardProgress = (chunk) => {
     const match = String(chunk).match(/TEST_FLOW_PROGRESS service-agent (ROUTE|LOGPARSE|DIAGNOSE|REVIEW)/g);
-    if (match) for (const entry of match) process.stdout.write(`${entry}\n`);
+    if (match) for (const entry of match) onProgress?.(entry.split(" ").at(-1).toLowerCase());
   };
   service.stdout.on("data", forwardProgress);
   service.stderr.on("data", forwardProgress);
@@ -387,7 +481,7 @@ export async function runE2E(options, { ambient = process.env } = {}) {
       forbiddenReadPaths: [options.authSource, rawPaths.case],
       wallSeconds: MACOS_CODEX_LUNA_CALL_WALL_SECONDS,
       noProgressSeconds: MACOS_CODEX_LUNA_NO_PROGRESS_SECONDS,
-      onProgress: () => process.stdout.write("TEST_FLOW_PROGRESS macos-codex-luna-client stream\n"),
+      onProgress: () => onProgress?.("client"),
     });
     clientTrace.started_at_utc = clientStartedAtUtc;
     clientTrace.finished_at_utc = new Date().toISOString();
@@ -398,31 +492,34 @@ export async function runE2E(options, { ambient = process.env } = {}) {
     requireE2E(closed.signal !== "TIMEOUT", "MACOS_CODEX_LUNA_SERVICE_STOP_TIMEOUT", "Owned local test service did not stop");
   }
   requireE2E(clientTrace !== null, "MACOS_CODEX_LUNA_CLIENT_INCOMPLETE", "Codex MCP Client did not complete");
-  const mcpCalls = clientTrace.app_server.turn.mcp_tool_calls;
+  const partitionedCalls = partitionMcpCalls(clientTrace.app_server.turn.mcp_tool_calls);
+  const mcpCalls = partitionedCalls.successful;
+  requireE2E(
+    partitionedCalls.recoveries.length <= 2
+      && partitionedCalls.recoveries.every((item) => ["REVISION_CONFLICT", "ATTACHMENT_NOT_READY"].includes(item.code)),
+    "MACOS_CODEX_LUNA_MCP_BUSINESS_ERROR",
+    "Client encountered a non-recoverable MCP business error",
+  );
   const prepareCall = mcpCalls.find((call) => call.tool === "problem_locator_prepare_attachment");
   const prepareData = structuredMcpData(prepareCall);
   const upload = prepareData.upload;
   requireE2E(upload?.method === "PUT" && upload.attachment_id && upload.url && isPlainObject(upload.required_headers), "MACOS_CODEX_LUNA_UPLOAD_DESCRIPTOR_INVALID", "prepare_attachment did not return a valid UploadDescriptor");
   requireE2E(prepareCall.arguments.declared_size === archive.size && prepareCall.arguments.declared_sha256 === archive.sha256, "MACOS_CODEX_LUNA_ATTACHMENT_DECLARATION_MISMATCH", "Client prepare declaration differs from deterministic ZIP");
   const commandEntries = extractCommandHttpEntries(clientTrace.command_receipts);
-  const httpAudit = auditHttpBoundary([{ method: "POST", url: mcpUrl, source: "codex-mcp-config" }, ...commandEntries], { mcpUrl, uploadUrl: upload.url });
   const uploadCommands = clientTrace.command_receipts.filter((command) => String(command.command).includes(upload.url));
-  const uploadCommand = String(uploadCommands[0]?.command ?? "");
-  const headerArgumentCount = (uploadCommand.match(/(?:^|\s)(?:-H|--header)(?=\s)/g) ?? []).length;
-  requireE2E(
-    uploadCommands.length === 1
-      && uploadCommands[0].status === "completed"
-      && uploadCommands[0].exit_code === 0
-      && headerArgumentCount === 4
-      && /(?:^|\s)(?:-X|--request)\s+(?:'|")?PUT\b/.test(uploadCommand)
-      && /(?:^|\s)--upload-file\s/.test(uploadCommand)
-      && uploadCommand.includes(archivePath)
-      && Object.entries(upload.required_headers).every(([name, value]) => uploadCommand.includes(name) && (value === null || uploadCommand.includes(value))),
+  if (uploadCommands.length > 0) requireE2E(
+    validDescriptorUploadCommand({ commands: uploadCommands, upload, archivePath }),
     "MACOS_CODEX_LUNA_UPLOAD_COMMAND_INVALID",
     "Attachment PUT command did not bind exactly the descriptor headers and deterministic ZIP path",
   );
+  const httpAudit = auditHttpBoundary([
+    { method: "POST", url: mcpUrl, source: "codex-mcp-config" },
+    ...commandEntries,
+    ...(uploadCommands.length === 0 ? [{ method: "PUT", url: upload.url, source: "server-ready-upload-receipt" }] : []),
+  ], { mcpUrl, uploadUrl: upload.url });
   const getCalls = mcpCalls.filter((call) => call.tool === "problem_locator_get_case");
-  const finalCase = structuredMcpData(getCalls.at(-1));
+  const finalCaseData = structuredMcpData(getCalls.at(-1));
+  const finalCase = finalCaseData?.case_view ?? finalCaseData;
   requireE2E(TERMINAL_CASE_STATUSES.has(finalCase.status) && finalCase.active_job === null, "MACOS_CODEX_LUNA_FINAL_CASE_INVALID", "Final MCP Case is not terminal or retains an active Job");
   const artifactData = structuredMcpData(mcpCalls.filter((call) => call.tool === "problem_locator_list_artifacts").at(-1));
   const artifactAudit = artifactConsistency(finalCase, artifactData);
@@ -430,6 +527,7 @@ export async function runE2E(options, { ambient = process.env } = {}) {
   const submitCall = mcpCalls.find((call) => call.tool === "problem_locator_submit_supplement");
   const attachmentAudit = auditUploadedAttachment({ attachment: server.attachment, uploadReceipt: server.uploadReceipt, descriptor: upload, archive, submitArguments: submitCall?.arguments });
   const mcpAudit = auditMcpToolCalls(mcpCalls, { attachmentId: upload.attachment_id, uploadRevision: server.uploadReceipt.case_revision });
+  mcpAudit.recoveries = partitionedCalls.recoveries;
   const oracle = loadScenarioOracle(rawPaths.case, options.scenario);
   const oracleAudit = auditOracle({ oracle, publicCase: { status: server.outcome.result_type }, sealedDiagnosis: server.enriched, evidenceSources: server.evidenceSources });
   const clientInvocation = { schema_version: 1, invocation_id: `${options.runId}:client`, phase: "CLIENT", model: CODEX_LUNA_MODEL, reasoning_effort: CODEX_LUNA_REASONING_EFFORT, attempt: 1, retry: 0, status: "PASS", terminal: true, started_at_utc: clientTrace.started_at_utc, finished_at_utc: clientTrace.finished_at_utc, wall_timeout_seconds: MACOS_CODEX_LUNA_CALL_WALL_SECONDS, thread_id: clientTrace.thread_id, turn_id: clientTrace.turn_id, usage: clientTrace.usage };
@@ -461,7 +559,7 @@ export async function runE2E(options, { ambient = process.env } = {}) {
   const security = { schema_version: 1, status: "PASS", secret_scan: secretScan, auth_files_persisted: 0, oracle_visible_before_models: false, unexpected_network_targets: 0, package_drift: false };
   writeJson(path.join(evidenceRoot, "security-audit.json"), security);
   const gate = { schema_version: 1, status: "PASS", scenario_id: options.scenario, checks: { mcp: mcpAudit.status, attachment: attachmentReceipt.status, server_lifecycle: lifecycle.status, artifacts: artifactAudit.status, http_boundary: httpAudit.status, oracle: oracleAudit.status, model_usage: modelAudit.status, security: security.status }, evidence_sha256: Object.fromEntries(fs.readdirSync(evidenceRoot).filter((name) => fs.statSync(path.join(evidenceRoot, name)).isFile()).sort().map((name) => [name, sha256File(path.join(evidenceRoot, name))])) };
-  writeJson(path.join(evidenceRoot, "gate-receipt.json"), gate);
+  writeJson(path.join(evidenceRoot, "adapter-receipt.json"), gate);
   return gate;
 }
 

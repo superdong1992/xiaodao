@@ -404,3 +404,50 @@ def test_partial_review_subject_preserves_grounded_and_candidate_rule_order() ->
     assert [item.source_rule_id for item in subject.mechanical_facts] == (
         subject.required_rule_ids
     )
+
+    first_ref = job.evidence_refs[0]
+    second_ref = "00000000-0000-0000-0000-000000000041"
+    candidate = job.context_snapshot.candidate_conclusion
+    assert candidate is not None and job.review_target is not None
+    candidate_payload = candidate.model_dump(mode="json")
+    candidate_payload["supporting_evidence_refs"] = [second_ref, first_ref]
+    candidate_payload["completion_criteria_mapping"][0]["evidence_refs"] = [
+        first_ref,
+        second_ref,
+    ]
+    candidate_payload["content_hash"] = canonical_json_sha256(
+        {
+            "resolution_status": candidate_payload["resolution_status"],
+            "terminal_path_id": candidate_payload["terminal_path_id"],
+            "statement": candidate_payload["statement"],
+            "causal_factors": candidate_payload["causal_factors"],
+            "candidate_factors": candidate_payload["candidate_factors"],
+            "excluded_factors": candidate_payload["excluded_factors"],
+            "supporting_evidence_refs": candidate_payload["supporting_evidence_refs"],
+            "completion_criteria_mapping": candidate_payload["completion_criteria_mapping"],
+        }
+    )
+    reordered_candidate = type(candidate).model_validate(candidate_payload)
+    reordered_snapshot = job.context_snapshot.model_copy(
+        update={
+            "evidence_refs": [first_ref, second_ref],
+            "candidate_conclusion": reordered_candidate,
+        }
+    )
+    reordered_target = job.review_target.model_copy(
+        update={"candidate_content_hash": reordered_candidate.content_hash}
+    )
+    reordered_job = job.model_copy(
+        update={
+            "evidence_refs": [first_ref, second_ref],
+            "context_snapshot": reordered_snapshot,
+            "review_target": reordered_target,
+        }
+    )
+
+    reordered_subject = DiagnosisRuntime._methods_review_subject(
+        reordered_job,
+        verified,
+    )
+
+    assert reordered_subject.required_evidence_refs == [first_ref, second_ref]

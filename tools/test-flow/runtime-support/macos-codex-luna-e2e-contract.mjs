@@ -192,10 +192,14 @@ export function loadScenarioOracle(casePath, expectedScenarioId = null) {
 export function mapScenarioToCreateCase(facts) {
   requireE2E(exactKeys(facts, CASE_FACT_KEYS), "MACOS_CODEX_LUNA_MAPPER_INPUT_INVALID", "Scenario mapper accepts facts only; oracle fields are forbidden");
   for (const key of CASE_FACT_KEYS) requireE2E(isNonEmptyString(facts[key]), "MACOS_CODEX_LUNA_MAPPER_INPUT_INVALID", `Scenario fact ${key} is invalid`);
+  requireE2E(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})$/.test(facts.problem_time), "MACOS_CODEX_LUNA_MAPPER_INPUT_INVALID", "Scenario problem_time must be an ISO-8601 timestamp with a timezone");
+  const problemTimeMs = Date.parse(facts.problem_time);
+  requireE2E(Number.isFinite(problemTimeMs), "MACOS_CODEX_LUNA_MAPPER_INPUT_INVALID", "Scenario problem_time is not a real timestamp");
+  const problemTime = new Date(problemTimeMs).toISOString();
   const subject = `${facts.service}.${facts.api}`;
   return Object.freeze({
-    raw_problem_text: `问题时间 ${facts.problem_time}；客户端进程 ${facts.client_process}；服务端进程 ${facts.server_process}；服务 ${facts.service}；API ${facts.api}；客户端观察到 RPC timeout。`,
-    statement: `${subject} 在 ${facts.problem_time} 附近发生 RPC timeout`,
+    raw_problem_text: `问题时间 ${problemTime}；客户端进程 ${facts.client_process}；服务端进程 ${facts.server_process}；服务 ${facts.service}；API ${facts.api}；客户端观察到 RPC timeout。`,
+    statement: `${subject} 在 ${problemTime} 附近发生 RPC timeout`,
     expected_behavior: "RPC 请求在超时预算内完成并被客户端正常接收",
     actual_behavior: "客户端观察到 RPC timeout",
     scope: "仅定位给定 client/server 日志中的超时原因",
@@ -204,7 +208,7 @@ export function mapScenarioToCreateCase(facts) {
     constraints: ["只使用给定事实和日志，不补造证据"],
     completion_criteria: ["给出状态、根因或证据缺口，并绑定可核验日志证据"],
     initial_user_fact_names: ["problem_time", "client_process", "server_process", "service", "api"],
-    initial_user_fact_values: [facts.problem_time, facts.client_process, facts.server_process, facts.service, facts.api],
+    initial_user_fact_values: [problemTime, facts.client_process, facts.server_process, facts.service, facts.api],
   });
 }
 
@@ -529,6 +533,7 @@ export function buildMethodsProducerIdentity({ wiki, metaSkillRoot, registration
     codex: {
       version: codexIdentity.cli?.version,
       executable_sha256: codexIdentity.cli?.sha256,
+      code_mode_host_sha256: codexIdentity.cli?.code_mode_host?.sha256,
       platform: codexIdentity.cli?.platform,
       architecture: codexIdentity.cli?.architecture,
       model: CODEX_LUNA_MODEL,
@@ -586,8 +591,11 @@ export function auditOracle({ oracle, publicCase, sealedDiagnosis, evidenceSourc
   const confirmed = new Set(sealedDiagnosis.confirmed_methods ?? []);
   const evidence = sealedDiagnosis.evidence ?? [];
   requireE2E(Array.isArray(sealedDiagnosis.confirmed_methods) && Array.isArray(evidence), "MACOS_CODEX_LUNA_DIAGNOSIS_SHAPE_INVALID", "Server-sealed Methods diagnosis shape is invalid");
+  const markerMatches = (actual, expected) => typeof actual === "string"
+    && actual.startsWith(expected)
+    && (actual.length === expected.length || /[^A-Za-z0-9_]/.test(actual[expected.length]));
   for (const marker of oracle.expected_branch_markers) {
-    const matches = evidence.filter((item) => confirmed.has(item?.method_id) && (item.sources ?? []).some((source) => source?.marker === marker));
+    const matches = evidence.filter((item) => confirmed.has(item?.method_id) && (item.sources ?? []).some((source) => markerMatches(source?.marker, marker)));
     requireE2E(matches.length > 0, "MACOS_CODEX_LUNA_BRANCH_MARKER_MISSING", "Expected branch marker is absent from confirmed grounded evidence", { marker });
   }
   const rendered = canonicalJson(sealedDiagnosis);
@@ -608,7 +616,7 @@ export function auditOracle({ oracle, publicCase, sealedDiagnosis, evidenceSourc
       .filter(({ item }) => (
         confirmed.has(item?.method_id)
         && expectation.identity_tokens.every((token) => (item.identity_tokens ?? []).includes(token))
-        && (item.sources ?? []).some((source) => source?.marker === expectation.branch_marker)
+        && (item.sources ?? []).some((source) => markerMatches(source?.marker, expectation.branch_marker))
       ));
     requireE2E(matches.length === 1, "MACOS_CODEX_LUNA_EXPECTED_EVIDENCE_IDENTITY_MISMATCH", "Diagnosis did not preserve exactly one expected evidence identity", { branch_marker: expectation.branch_marker });
     requireE2E(!matchedEvidence.has(matches[0].index), "MACOS_CODEX_LUNA_EXPECTED_EVIDENCE_IDENTITY_MERGED", "One diagnosis evidence item merged multiple expected identities", { branch_marker: expectation.branch_marker });

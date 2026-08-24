@@ -25,6 +25,7 @@ import {
 } from "./codex-luna-exploration-runner.mjs";
 import {
   auditModelInvocations,
+  assertMethodsPackageUnchanged,
   buildMethodsCacheManifest,
   buildMethodsProducerIdentity,
   MACOS_CODEX_LUNA_CALL_WALL_SECONDS,
@@ -33,7 +34,6 @@ import {
   methodsCachePath,
   validateMethodsCache,
 } from "./macos-codex-luna-e2e-contract.mjs";
-
 const MODULE_PATH = fileURLToPath(import.meta.url);
 
 class MethodsRunnerError extends Error {
@@ -49,9 +49,28 @@ function fail(code, message, details = {}) {
   throw new MethodsRunnerError(code, message, details);
 }
 
+export function safeMethodsRunnerError(error) {
+  const safe = {
+    schema_version: 1,
+    status: "FAIL",
+    code: error?.code ?? "MACOS_CODEX_LUNA_METHODS_RUNNER_FAILED",
+    message: error?.message ?? String(error),
+  };
+  const details = error?.details;
+  if (details !== null && typeof details === "object" && !Array.isArray(details)) {
+    const projected = {};
+    for (const key of ["method", "line", "item_type", "function_name", "id", "role", "field"]) {
+      const value = details[key];
+      if (typeof value === "string" || Number.isSafeInteger(value) || value === null) projected[key] = value;
+    }
+    if (Object.keys(projected).length > 0) safe.details = projected;
+  }
+  return safe;
+}
+
 function parseArguments(argv) {
   const values = {};
-  const flags = new Set(["allow-posthoc-budget"]);
+  const flags = new Set(["allow-posthoc-budget", "verify-cache-only"]);
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
     if (!argument.startsWith("--")) fail("MACOS_CODEX_LUNA_METHODS_ARGUMENT_INVALID", "Arguments must use --name value syntax");
@@ -68,12 +87,72 @@ function parseArguments(argv) {
   return values;
 }
 
+export function verifyMethodsCacheOnly(options, { ambient = process.env } = {}) {
+  createEmptyRoot(options.workRoot, "Methods work root");
+  createEmptyRoot(options.privateRoot, "Methods private root");
+  const evidenceRoot = createEmptyRoot(options.evidenceRoot, "Methods evidence root");
+  createEmptyRoot(options.usageRoot, "Methods usage root");
+  const codexIdentity = validateCodexLunaIdentity(options.codexEntry, options.authSource);
+  const producer = buildMethodsProducerIdentity({ wiki: options.wiki, metaSkillRoot: options.metaSkillRoot, registrationTemplate: options.registrationTemplate, codexIdentity });
+  const cache = validateMethodsCache({ cacheRoot: options.cacheRoot, producer, registrationTemplate: options.registrationTemplate });
+  assertMethodsPackageUnchanged(cache);
+  const validator = path.join(options.metaSkillRoot, "scripts", "validate_generated_skill.py");
+  const validatorReceipt = validateGeneratedPackage({ pythonEntry: options.pythonEntry, validator, packageRoot: cache.package_root, wiki: options.wiki });
+  const auth = readCodexLunaExternalAuth(options.authSource, ambient);
+  const security = auditCodexLunaRuntimeSecrets({ roots: [cache.package_root], auth });
+  const identityReceipt = { schema_version: 1, status: "PASS", codex: codexIdentity, producer, execution: "cache-verification" };
+  const usage = {
+    schema_version: 1,
+    status: "PASS",
+    workflow: "methods-cache-verification",
+    expected_phases: [],
+    retry_count: 0,
+    aggregate: { input_tokens: 0, cached_input_tokens: 0, output_tokens: 0, total_tokens: 0, equivalent_usd: 0 },
+    price_snapshot: null,
+  };
+  const packageReceipt = {
+    schema_version: 1,
+    status: "PASS",
+    producer_identity: producer.producer_identity,
+    package_tree_sha256: cache.manifest.package.tree_sha256,
+    validator: validatorReceipt,
+    cache: { manifest_sha256: sha256Bytes(canonicalJson(cache.manifest)), manifest: cache.manifest },
+  };
+  const gate = {
+    schema_version: 1,
+    status: "PASS",
+    mode: "cache-verification",
+    checks: { invocation: false, validation: true, cache_publish: false, cache_identity: true, security: true },
+    evidence: {
+      codex_identity_sha256: sha256Bytes(canonicalJson(identityReceipt)),
+      methods_package_sha256: sha256Bytes(canonicalJson(packageReceipt)),
+      usage_sha256: sha256Bytes(canonicalJson(usage)),
+    },
+  };
+  writeJson(path.join(evidenceRoot, "codex-identity.json"), identityReceipt);
+  writeJson(path.join(evidenceRoot, "model-invocations.json"), { schema_version: 1, status: "PASS", retry_policy: "NONE", invocations: [] });
+  writeJson(path.join(evidenceRoot, "model-usage.json"), usage);
+  writeJson(path.join(evidenceRoot, "methods-package.json"), packageReceipt);
+  writeJson(path.join(evidenceRoot, "security-audit.json"), { schema_version: 1, status: "PASS", secret_scan: security, auth_persisted: false });
+  writeJson(path.join(evidenceRoot, "adapter-receipt.json"), gate);
+  return gate;
+}
+
 function createEmptyRoot(root, label) {
   const resolved = path.resolve(root);
   if (fs.existsSync(resolved)) {
     if (!fs.statSync(resolved).isDirectory() || fs.readdirSync(resolved).length !== 0) fail("MACOS_CODEX_LUNA_METHODS_ROOT_NOT_EMPTY", `${label} must be an empty directory`);
   } else fs.mkdirSync(resolved, { recursive: true, mode: 0o700 });
   return resolved;
+}
+
+export function buildMethodsEnvironment(ambient, { codexHome, home, temporary, pythonEntry }) {
+  if (!path.isAbsolute(pythonEntry) || !fs.existsSync(pythonEntry) || !fs.statSync(pythonEntry).isFile()) {
+    fail("MACOS_CODEX_LUNA_PYTHON_RUNTIME_MISSING", "Methods validator Python must be one existing absolute file");
+  }
+  const environment = safeEnvironment(ambient, { codexHome, home, temporary });
+  environment.PATH = `${path.dirname(pythonEntry)}:${environment.PATH}`;
+  return environment;
 }
 
 function writeJson(filePath, value, { exclusive = true } = {}) {
@@ -137,7 +216,7 @@ function publishCache({ cacheRoot, producer, packageRoot, registrationTemplate }
   return validateMethodsCache({ cacheRoot, producer, registrationTemplate });
 }
 
-export async function runMethodsBootstrap(options, { ambient = process.env } = {}) {
+export async function runMethodsBootstrap(options, { ambient = process.env, onProgress = null } = {}) {
   const workRoot = createEmptyRoot(options.workRoot, "Methods work root");
   const privateRoot = createEmptyRoot(options.privateRoot, "Methods private root");
   const evidenceRoot = createEmptyRoot(options.evidenceRoot, "Methods evidence root");
@@ -151,7 +230,7 @@ export async function runMethodsBootstrap(options, { ambient = process.env } = {
   const home = path.join(bootstrapRoot, "home");
   const temporary = path.join(bootstrapRoot, "tmp");
   for (const directory of [bootstrapRoot, codexHome, home, temporary]) fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
-  const environment = safeEnvironment(ambient, { codexHome, home, temporary });
+  const environment = buildMethodsEnvironment(ambient, { codexHome, home, temporary, pythonEntry: options.pythonEntry });
   const auth = readCodexLunaExternalAuth(options.authSource, ambient);
   const generationWorkspace = path.join(workRoot, "generation");
   const preparedGeneration = buildGenerationWorkspace({ attemptRoot: generationWorkspace, metaSkillRoot: options.metaSkillRoot, wiki: options.wiki });
@@ -175,7 +254,7 @@ export async function runMethodsBootstrap(options, { ambient = process.env } = {
     forbiddenReadPaths: [options.authSource, path.join(path.dirname(options.metaSkillRoot), "..", "..", "AGENTS.md")],
     wallSeconds: 600,
     noProgressSeconds: MACOS_CODEX_LUNA_NO_PROGRESS_SECONDS,
-    onProgress: () => process.stdout.write("TEST_FLOW_PROGRESS methods-bootstrap stream\n"),
+    onProgress: () => onProgress?.("methods-bootstrap"),
   });
   const finishedAtUtc = new Date().toISOString();
   const packageRoot = path.join(generationWorkspace, "generated", MACOS_CODEX_LUNA_SKILL_NAME);
@@ -210,14 +289,14 @@ export async function runMethodsBootstrap(options, { ambient = process.env } = {
   writeJson(path.join(evidenceRoot, "model-usage.json"), usage);
   writeJson(path.join(evidenceRoot, "methods-package.json"), packageReceipt);
   writeJson(path.join(evidenceRoot, "security-audit.json"), { schema_version: 1, status: "PASS", secret_scan: security, auth_persisted: false });
-  writeJson(path.join(evidenceRoot, "gate-receipt.json"), gate);
+  writeJson(path.join(evidenceRoot, "adapter-receipt.json"), gate);
   return gate;
 }
 
 async function main() {
   try {
     const values = parseArguments(process.argv.slice(2));
-    const result = await runMethodsBootstrap({
+    const options = {
       runId: values["run-id"],
       codexEntry: path.resolve(values["codex-entry"]),
       authSource: path.resolve(values["auth-source"]),
@@ -230,10 +309,13 @@ async function main() {
       privateRoot: path.resolve(values["private-root"]),
       evidenceRoot: path.resolve(values["evidence-root"]),
       usageRoot: path.resolve(values["usage-root"]),
-    });
+    };
+    const result = values["verify-cache-only"] === true
+      ? verifyMethodsCacheOnly(options)
+      : await runMethodsBootstrap(options);
     process.stdout.write(`${canonicalJson(result)}\n`);
   } catch (error) {
-    process.stderr.write(`${canonicalJson({ schema_version: 1, status: "FAIL", code: error?.code ?? "MACOS_CODEX_LUNA_METHODS_RUNNER_FAILED", message: error?.message ?? String(error) })}\n`);
+    process.stderr.write(`${canonicalJson(safeMethodsRunnerError(error))}\n`);
     process.exitCode = 1;
   }
 }
