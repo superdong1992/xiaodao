@@ -48,7 +48,20 @@ import {
   MACOS_CODEX_LUNA_SCENARIOS,
   methodsCachePath,
   validateMethodsCache,
-} from "../runtime-support/macos-codex-luna-e2e-contract.mjs";
+} from "../quick-validation/codex-luna/runtime/macos-codex-luna-e2e-contract.mjs";
+import {
+  CLAUDE_DEEPSEEK_CALL_WALL_SECONDS,
+  CLAUDE_DEEPSEEK_E2E_CALLS,
+  CLAUDE_DEEPSEEK_E2E_PHASES,
+  CLAUDE_DEEPSEEK_METHODS_CALLS,
+  CLAUDE_DEEPSEEK_MODEL,
+  CLAUDE_DEEPSEEK_NO_PROGRESS_SECONDS,
+  CLAUDE_DEEPSEEK_SCENARIOS,
+  buildMethodsProducerIdentity as buildClaudeDeepseekProducerIdentity,
+  methodsCachePath as claudeDeepseekCachePath,
+  validateClaudeDeepseekIdentity,
+  validateMethodsCache as validateClaudeDeepseekCache,
+} from "../quick-validation/claude-deepseek/runtime/claude-deepseek-contract.mjs";
 
 const BUILT_IN_ADAPTERS = Object.freeze({
   macos: "macos-linux-release.mjs",
@@ -117,6 +130,7 @@ function claudeRuntimeRequired(stages) {
   return stages.some((stage) => (
     stage.kind === "isolated-real"
     || stage.kind === "real-journey"
+    || claudeDeepseekStage(stage)
     || ["platform.host-capability", "platform.server-linux-capability"].includes(stage.id)
   ));
 }
@@ -131,6 +145,7 @@ function logparseRuntimeRequired(stages) {
     || stage.id === "platform.server-linux-capability"
     || stage.id === "real.codex-luna-methods"
     || stage.id === "real.macos-codex-luna-e2e"
+    || stage.id === "real.macos-claude-deepseek-e2e"
     || stage.kind === "real-journey"
   ));
 }
@@ -145,6 +160,10 @@ function codexLogparseRuntimeRequired(stages) {
 
 function macosCodexStage(stage) {
   return ["real.macos-codex-luna-methods", "real.macos-codex-luna-e2e"].includes(stage.id);
+}
+
+function claudeDeepseekStage(stage) {
+  return ["real.macos-claude-deepseek-methods", "real.macos-claude-deepseek-e2e"].includes(stage.id);
 }
 
 function selectedClientRuntimeIdentity({ clientDistribution, imageIdentity, dualLinuxContainers, hostPlatform }) {
@@ -254,6 +273,8 @@ function capForStage(stage, profile) {
   if (stage.id === "real.codex-luna-methods") return profile.real_caps["codex.methods"];
   if (stage.id === "real.macos-codex-luna-methods") return profile.real_caps["codex.macos-methods"];
   if (stage.id === "real.macos-codex-luna-e2e") return profile.real_caps["codex.macos-e2e"];
+  if (stage.id === "real.macos-claude-deepseek-methods") return profile.real_caps["claude.macos-methods"];
+  if (stage.id === "real.macos-claude-deepseek-e2e") return profile.real_caps["claude.macos-e2e"];
   const isolatedCapId = realCapIdForStage(stage);
   if (isolatedCapId) return profile.real_caps[isolatedCapId];
   if (stage.id === "journey.cross-job.route") return profile.real_caps["journey.route"];
@@ -301,6 +322,28 @@ function invocationCapsForStage(stage, profile, gates, {
     per_call_hard_timeout_seconds: MACOS_CODEX_LUNA_CALL_WALL_SECONDS,
     caps: cap,
   }];
+  if (stage.id === "real.macos-claude-deepseek-methods") return [{
+    class: "claude-deepseek-methods-bootstrap",
+    phases: ["METHODS_BOOTSTRAP"],
+    min_count: CLAUDE_DEEPSEEK_METHODS_CALLS,
+    max_count: CLAUDE_DEEPSEEK_METHODS_CALLS,
+    aggregate: true,
+    enforcement: "claude-cli-hard-caps-plus-terminal-aggregate",
+    model: CLAUDE_DEEPSEEK_MODEL,
+    per_call_hard_timeout_seconds: 1800,
+    caps: cap,
+  }];
+  if (stage.id === "real.macos-claude-deepseek-e2e") return [{
+    class: "claude-deepseek-macos-e2e",
+    phases: CLAUDE_DEEPSEEK_E2E_PHASES,
+    min_count: CLAUDE_DEEPSEEK_E2E_CALLS,
+    max_count: CLAUDE_DEEPSEEK_E2E_CALLS,
+    aggregate: true,
+    enforcement: "claude-cli-hard-caps-plus-terminal-aggregate",
+    model: CLAUDE_DEEPSEEK_MODEL,
+    per_call_hard_timeout_seconds: CLAUDE_DEEPSEEK_CALL_WALL_SECONDS,
+    caps: cap,
+  }];
   if (stage.kind === "isolated-real") {
     const count = stage.gates.reduce((sum, gateId) => sum + gates[gateId].isolated_agent_invocations, 0);
     return [{ class: "isolated-agent", min_count: count, max_count: count, caps: cap }];
@@ -319,10 +362,11 @@ function invocationCapsForStage(stage, profile, gates, {
 
 function noProgressForStage(stage, gates, seconds) {
   const definitions = stage.gates.map((gateId) => gates[gateId]);
-  const enabled = definitions.filter((gate) => gate.kind === "cross-job-adapter" || (gate.kind === "capability-adapter" && ["server-linux-capability", "codex-luna-methods", "macos-codex-luna-methods", "macos-codex-luna-e2e"].includes(gate.adapter)));
+  const enabled = definitions.filter((gate) => (claudeDeepseekStage(stage) && gate.kind === "node-test") || gate.kind === "cross-job-adapter" || (gate.kind === "capability-adapter" && ["server-linux-capability", "codex-luna-methods", "macos-codex-luna-methods", "macos-codex-luna-e2e", "macos-claude-deepseek-methods", "macos-claude-deepseek-e2e"].includes(gate.adapter)));
   if (enabled.length === 0) return null;
   if (enabled.length !== definitions.length) throw new Error("MIXED_PROGRESS_POLICY_UNSUPPORTED");
   if (macosCodexStage(stage)) return MACOS_CODEX_LUNA_NO_PROGRESS_SECONDS;
+  if (claudeDeepseekStage(stage)) return CLAUDE_DEEPSEEK_NO_PROGRESS_SECONDS;
   return seconds;
 }
 
@@ -339,6 +383,7 @@ export function buildRunPlan(repoRoot, options = {}) {
   const closure = resolveGoalClosure(config, { goalId: goal, track, requestedStage: options.stage ?? null, client: planningClient });
   const crossJobSelected = closure.stages.some((stage) => stage.kind === "real-journey" || stage.id === "journey.cross-job.review");
   const codexRequired = closure.stages.some((stage) => stage.id === "real.codex-luna-methods" || macosCodexStage(stage));
+  const claudeDeepseekSelected = closure.stages.some(claudeDeepseekStage);
   const dualLinuxContainers = crossJobSelected && hostPlatform === "darwin" && client === "linux";
   const effectiveAdapter = crossJobSelected ? builtInAdapter(repoRoot, client, hostPlatform) : null;
   const effectiveOptions = { ...options, crossJobAdapter: effectiveAdapter };
@@ -426,8 +471,8 @@ export function buildRunPlan(repoRoot, options = {}) {
     codexLogparseRuntime,
   });
 
-  const selectedScenario = closure.stages.some((stage) => stage.id === "real.macos-codex-luna-e2e")
-    ? options.scenario ?? MACOS_CODEX_LUNA_SCENARIOS[0]
+  const selectedScenario = closure.stages.some((stage) => ["real.macos-codex-luna-e2e", "real.macos-claude-deepseek-e2e"].includes(stage.id))
+    ? options.scenario ?? (claudeDeepseekSelected ? CLAUDE_DEEPSEEK_SCENARIOS[0] : MACOS_CODEX_LUNA_SCENARIOS[0])
     : null;
   const methodsBootstrapSelected = closure.stages.some((stage) => stage.id === "real.macos-codex-luna-methods");
   const macosE2ESelected = closure.stages.some((stage) => stage.id === "real.macos-codex-luna-e2e");
@@ -458,6 +503,29 @@ export function buildRunPlan(repoRoot, options = {}) {
       };
     }
   }
+  const claudeMethodsSelected = closure.stages.some((stage) => stage.id === "real.macos-claude-deepseek-methods");
+  const claudeE2ESelected = closure.stages.some((stage) => stage.id === "real.macos-claude-deepseek-e2e");
+  let claudeMethodsCache = { status: "NOT_REQUIRED", package_tree_sha256: null, producer_identity: null, cache_path: null, code: null };
+  if ((claudeMethodsSelected || claudeE2ESelected) && clientDistribution.status === "PRESENT" && settingsIdentity.status === "PRESENT") {
+    let producer = null;
+    try {
+      const claudeIdentity = validateClaudeDeepseekIdentity(effectiveOptions.claudeEntry, effectiveOptions.claudeSettings);
+      const releaseCaseRoot = path.join(repoRoot, "tests", "cases", "release", "rpc-timeout-anonymized");
+      const registrationTemplate = path.join(releaseCaseRoot, "registration", "rpc-timeout-methods-v1", "registration-template.json");
+      producer = buildClaudeDeepseekProducerIdentity({
+        wiki: path.join(releaseCaseRoot, "input", "wiki.md"),
+        metaSkillRoot: path.join(repoRoot, ".agents", "skills", "wiki-to-diagnosis-skill"),
+        registrationTemplate,
+        claudeIdentity,
+      });
+      const cachePath = claudeDeepseekCachePath(cachePaths.cacheRoot, producer.producer_identity);
+      const receipt = validateClaudeDeepseekCache({ cacheRoot: cachePaths.cacheRoot, producer, registrationTemplate });
+      claudeMethodsCache = { status: "PRESENT", package_tree_sha256: receipt.manifest.package.tree_sha256, producer_identity: producer.producer_identity, cache_path: cachePath, code: null };
+    } catch (error) {
+      const cachePath = producer ? claudeDeepseekCachePath(cachePaths.cacheRoot, producer.producer_identity) : null;
+      claudeMethodsCache = { status: cachePath !== null && !fs.existsSync(cachePath) ? "MISSING" : "INVALID", package_tree_sha256: null, producer_identity: producer?.producer_identity ?? null, cache_path: cachePath, code: error?.code ?? "CLAUDE_DEEPSEEK_METHODS_CACHE_INVALID" };
+    }
+  }
   const stageIdentities = {};
   const performanceIdentities = {};
   for (const stage of config.stages.stages) {
@@ -466,8 +534,8 @@ export function buildRunPlan(repoRoot, options = {}) {
     const definitionDigest = sha256Bytes(canonicalJson(canonicalStageDefinition(config, stage)));
     const identity = stageIdentity(stage, identities.sets, {
       parent_checkpoint: journeyDependency ? stageIdentities[journeyDependency].producer_identity : "GENESIS",
-      scenario: stage.id === "real.macos-codex-luna-e2e" ? selectedScenario : stage.id === "real.macos-codex-luna-methods" ? "methods-bootstrap" : stage.id.startsWith("journey.cross-job.") ? "CrossJob" : null,
-      methods_package_digest: stage.id === "real.macos-codex-luna-e2e" ? methodsCache.package_tree_sha256 ?? "MISSING" : null,
+      scenario: ["real.macos-codex-luna-e2e", "real.macos-claude-deepseek-e2e"].includes(stage.id) ? selectedScenario : ["real.macos-codex-luna-methods", "real.macos-claude-deepseek-methods"].includes(stage.id) ? "methods-bootstrap" : stage.id.startsWith("journey.cross-job.") ? "CrossJob" : null,
+      methods_package_digest: stage.id === "real.macos-codex-luna-e2e" ? methodsCache.package_tree_sha256 ?? "MISSING" : stage.id === "real.macos-claude-deepseek-e2e" ? claudeMethodsCache.package_tree_sha256 ?? "MISSING" : null,
       stage_definition_digest: definitionDigest,
       dependency_proof_identities: dependencyProofIdentities,
       config_bundle_digest: config.bundle_digest,
@@ -488,7 +556,7 @@ export function buildRunPlan(repoRoot, options = {}) {
 
   const blockers = [];
   const warnings = [];
-  const containsReal = closure.stages.some((stage) => ["isolated-real", "real-journey"].includes(stage.kind) || stage.id === "real.codex-luna-methods" || macosCodexStage(stage));
+  const containsReal = closure.stages.some((stage) => ["isolated-real", "real-journey"].includes(stage.kind) || stage.id === "real.codex-luna-methods" || macosCodexStage(stage) || claudeDeepseekStage(stage));
   if (!source.available) blockers.push({ code: "GIT_REQUIRED", detail: "A Git worktree is required to enumerate the source snapshot." });
   if (trackConfig.requires_source_snapshot && !sourceSnapshot.digest) blockers.push({ code: "SOURCE_SNAPSHOT_REQUIRED", detail: "The Git-visible worktree could not be frozen into an exact source snapshot." });
   if (track === "release" && !client) blockers.push({ code: "RELEASE_CLIENT_UNRESOLVED", detail: "Linux hosts require an explicit --client linux; Windows/macOS follow the host." });
@@ -508,10 +576,14 @@ export function buildRunPlan(repoRoot, options = {}) {
   if (codexLogparseRequired && codexLogparseRuntime.status !== "PRESENT") blockers.push({ code: "CODEX_LOGPARSE_RUNTIME_INVALID", detail: `Codex preprocessing requires the exact Logparse .venv, Python base runtime and CLI bytes: ${codexLogparseRuntime.code ?? "invalid"}.` });
   if (codexRequired && !supportedCodexLunaOrchestrator(hostPlatform, process.arch)) blockers.push({ code: "CODEX_ORCHESTRATOR_UNSUPPORTED", detail: "The pinned Codex CLI + gpt-5.6-luna exploration flow is supported only by the Darwin arm64 orchestrator that owns the exact Mach-O executable." });
   if (codexRequired && client !== "macos") blockers.push({ code: "CODEX_CLIENT_LABEL_INVALID", detail: "The local Codex exploration goal must use --client macos; it does not execute in or validate a Linux Client." });
+  if (claudeDeepseekSelected && !supportedCodexLunaOrchestrator(hostPlatform, process.arch)) blockers.push({ code: "CLAUDE_DEEPSEEK_ORCHESTRATOR_UNSUPPORTED", detail: "Claude/DeepSeek Quick Validation is supported only on Darwin arm64." });
+  if (claudeDeepseekSelected && client !== "macos") blockers.push({ code: "CLAUDE_DEEPSEEK_CLIENT_LABEL_INVALID", detail: "Claude/DeepSeek Quick Validation requires --client macos." });
   if (selectedScenario !== null && !MACOS_CODEX_LUNA_SCENARIOS.includes(selectedScenario)) blockers.push({ code: "MACOS_CODEX_LUNA_SCENARIO_INVALID", detail: `Scenario ${selectedScenario} is not in the repository-owned smoke matrix.` });
   if (methodsBootstrapSelected && methodsCache.status === "PRESENT") blockers.push({ code: "MACOS_CODEX_LUNA_METHODS_CACHE_ALREADY_PRESENT", detail: "The exact Methods producer cache already exists; use its prior verdict instead of spending another model call." });
   if (methodsBootstrapSelected && methodsCache.status === "INVALID") blockers.push({ code: "MACOS_CODEX_LUNA_METHODS_CACHE_INVALID", detail: `The exact Methods cache path exists but is invalid: ${methodsCache.code}.` });
   if (macosE2ESelected && methodsCache.status !== "PRESENT") blockers.push({ code: "MACOS_CODEX_LUNA_METHODS_CACHE_REQUIRED", detail: `E2E requires an exact frozen Methods cache produced by dev.macos-codex-luna-methods: ${methodsCache.code ?? "missing"}.` });
+  if (claudeMethodsSelected && claudeMethodsCache.status === "INVALID") blockers.push({ code: "CLAUDE_DEEPSEEK_METHODS_CACHE_INVALID", detail: `The exact Claude/DeepSeek Methods cache path exists but is invalid: ${claudeMethodsCache.code}.` });
+  if (claudeE2ESelected && claudeMethodsCache.status !== "PRESENT") blockers.push({ code: "CLAUDE_DEEPSEEK_METHODS_CACHE_REQUIRED", detail: `E2E requires the exact cache produced by dev.macos-claude-deepseek-methods: ${claudeMethodsCache.code ?? "missing"}.` });
   if (codexRequired && !effectiveOptions.allowCodexPosthocBudget) {
     blockers.push({ code: "CODEX_POSTHOC_BUDGET_ACK_REQUIRED", detail: `Acknowledge ${CODEX_LUNA_POSTHOC_EXCEPTION_ID}; Codex token and equivalent-USD limits are terminal audits, not spend prevention.` });
   } else if (codexRequired) {
@@ -571,7 +643,7 @@ export function buildRunPlan(repoRoot, options = {}) {
           : null,
       };
     });
-    const invocationCaps = invocationCapsForStage(stage, runtimeProfile, config.gates.gates, {
+    const invocationCaps = stage.id === "real.macos-claude-deepseek-methods" && claudeMethodsCache.status === "PRESENT" ? [] : invocationCapsForStage(stage, runtimeProfile, config.gates.gates, {
       clientInvocationClass: dualLinuxContainers ? "linux-client-container" : "host-client",
       clientExecutionTopology: dualLinuxContainers ? "darwin-orchestrated-linux-container" : "native-host-client",
     });
@@ -654,6 +726,7 @@ export function buildRunPlan(repoRoot, options = {}) {
       codex: codexRequired ? codexIdentity : { status: "NOT_REQUIRED" },
       codex_logparse_runtime: codexLogparseRequired ? codexLogparseRuntime : { status: "NOT_REQUIRED" },
       codex_luna_methods_cache: methodsCache,
+      claude_deepseek_methods_cache: claudeMethodsCache,
       browser: browserIdentity,
       docker: dockerIdentity,
       image: imageIdentity,
@@ -668,11 +741,13 @@ export function buildRunPlan(repoRoot, options = {}) {
         ? dualLinuxContainers
           ? "darwin-orchestrated-dual-linux-containers"
           : "host-client-to-linux-server"
+        : claudeDeepseekSelected
+          ? "darwin-local-claude-deepseek-quick-validation"
         : codexRequired
           ? "darwin-local-codex"
           : "not-applicable",
       orchestrator_platform: hostPlatform,
-      network_policy: crossJobSelected ? runtimeProfile.network_policy : closure.stages.some((stage) => stage.id === "real.macos-codex-luna-e2e") ? "provider-plus-ipv4-loopback-mcp-upload-and-logparse-broker" : codexRequired ? "codex-app-server-provider-only-command-network-denied" : "not-applicable",
+      network_policy: crossJobSelected ? runtimeProfile.network_policy : closure.stages.some((stage) => ["real.macos-codex-luna-e2e", "real.macos-claude-deepseek-e2e"].includes(stage.id)) ? "provider-plus-ipv4-loopback-mcp-upload-and-logparse-broker" : claudeDeepseekSelected ? "claude-provider-only" : codexRequired ? "codex-app-server-provider-only-command-network-denied" : "not-applicable",
     } : null,
     lineage: {
       root: track === "release" ? "GENESIS" : options.resume === "fresh" ? "GENESIS" : "AUTO",

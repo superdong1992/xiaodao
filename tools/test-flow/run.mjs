@@ -16,13 +16,13 @@ Usage:
 
 Core options:
   --track dev|release            Default: dev
-  --goal <proof-goal>            Includes dev.macos-codex-luna-methods and dev.macos-codex-luna-e2e
+  --goal <proof-goal>            Includes macOS Codex/Luna and Claude/DeepSeek Quick Validation goals
   --stage <stage-id>             Required by dev.real
   --plan-only                    Resolve proof, identity, reuse and admission only
   --client auto|windows|macos|linux
   --resume auto|fresh
   --allow-real-model             Required for a Dev real-model proof
-  --scenario <repository-id>     macOS Luna E2E scenario; default: api-execution-overrun
+  --scenario <repository-id>     macOS Quick E2E scenario; default: api-execution-overrun
 
 Structured retry/override intent:
   --reason <text>

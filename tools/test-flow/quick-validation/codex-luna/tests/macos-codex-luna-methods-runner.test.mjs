@@ -7,7 +7,7 @@ import test from "node:test";
 import {
   buildMethodsEnvironment,
   safeMethodsRunnerError,
-} from "../runtime-support/macos-codex-luna-methods-runner.mjs";
+} from "../runtime/macos-codex-luna-methods-runner.mjs";
 
 test("Methods model commands receive only the selected validator runtime ahead of the system PATH", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "macos-codex-luna-methods-env-"));

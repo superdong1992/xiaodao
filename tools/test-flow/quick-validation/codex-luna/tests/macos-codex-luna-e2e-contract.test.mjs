@@ -25,8 +25,8 @@ import {
   methodsCachePath,
   validateMethodsCache,
   writeDeterministicLogsZip,
-} from "../runtime-support/macos-codex-luna-e2e-contract.mjs";
-import { canonicalJson, sha256Bytes } from "../runtime-support/codex-luna-contract.mjs";
+} from "../runtime/macos-codex-luna-e2e-contract.mjs";
+import { canonicalJson, sha256Bytes } from "../../../runtime-support/codex-luna-contract.mjs";
 
 function fixture() {
   const root = fs.mkdtempSync(path.join("/private/tmp", "macos-luna-e2e-contract-"));

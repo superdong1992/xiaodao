@@ -14,7 +14,7 @@ import {
   selectScenarioJobs,
   structuredMcpData,
   validDescriptorUploadCommand,
-} from "../runtime-support/macos-codex-luna-e2e-runner.mjs";
+} from "../runtime/macos-codex-luna-e2e-runner.mjs";
 
 test("Logparse target evidence binds staged bytes and traces prefixed lines to the raw ZIP member", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "macos-luna-logparse-source-"));

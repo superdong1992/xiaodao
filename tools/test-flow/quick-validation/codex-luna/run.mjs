@@ -9,7 +9,7 @@ import {
   sha256Bytes,
   sha256File,
   validateCodexLunaIdentity,
-} from "../test-flow/runtime-support/codex-luna-contract.mjs";
+} from "../../runtime-support/codex-luna-contract.mjs";
 import {
   assertMethodsPackageUnchanged,
   buildMethodsProducerIdentity,
@@ -23,15 +23,15 @@ import {
   methodsCachePath,
   scenarioPaths,
   validateMethodsCache,
-} from "../test-flow/runtime-support/macos-codex-luna-e2e-contract.mjs";
-import { runE2E } from "../test-flow/runtime-support/macos-codex-luna-e2e-runner.mjs";
+} from "./runtime/macos-codex-luna-e2e-contract.mjs";
+import { runE2E } from "./runtime/macos-codex-luna-e2e-runner.mjs";
 import {
   runMethodsBootstrap,
   verifyMethodsCacheOnly,
-} from "../test-flow/runtime-support/macos-codex-luna-methods-runner.mjs";
+} from "./runtime/macos-codex-luna-methods-runner.mjs";
 
 const SCRIPT_ROOT = path.dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = path.resolve(SCRIPT_ROOT, "..", "..");
+const REPO_ROOT = path.resolve(SCRIPT_ROOT, "..", "..", "..", "..");
 const FRAMEWORK_ID = "macos-codex-luna-fast-e2e";
 const FRAMEWORK_VERSION = 1;
 const GOALS = new Set(["methods", "e2e"]);
@@ -103,8 +103,8 @@ function defaults(values) {
     codexEntry: path.resolve(values["codex-entry"] ?? "/Applications/ChatGPT.app/Contents/Resources/codex"),
     authSource: path.resolve(values["codex-auth"] ?? path.join(process.env.HOME ?? "", ".codex", "auth.json")),
     pythonEntry: path.resolve(values["python-entry"] ?? path.join(REPO_ROOT, ".venv", "bin", "python")),
-    cacheRoot: path.resolve(values["cache-root"] ?? path.join(REPO_ROOT, ".tmp", "macos-codex-luna", "cache")),
-    runsRoot: path.resolve(values["runs-root"] ?? path.join(REPO_ROOT, ".tmp", "macos-codex-luna", "runs")),
+    cacheRoot: path.resolve(values["cache-root"] ?? path.join(REPO_ROOT, ".tmp", "quick-validation", "codex-luna", "cache")),
+    runsRoot: path.resolve(values["runs-root"] ?? path.join(REPO_ROOT, ".tmp", "quick-validation", "codex-luna", "runs")),
     logparseRoot: path.resolve(values["logparse-root"] ?? path.join(process.env.HOME ?? "", "Documents", "Codex", "2026-06-29-github-issue-locator-logparse", "logparse")),
   };
 }
@@ -182,7 +182,7 @@ export function buildPlan(options) {
     mode,
     scenario: options.goal === "e2e" ? options.scenario : null,
     execution: {
-      entry: "tools/macos-codex-luna/run.mjs",
+      entry: "tools/test-flow/quick-validation/codex-luna/run.mjs",
       old_test_flow_orchestrator: false,
       source_snapshot: false,
       history_reuse: false,
@@ -346,8 +346,8 @@ export async function execute(options, plan) {
         sourceRoot: REPO_ROOT,
         logparseRoot: options.logparseRoot,
         scenario: options.scenario,
-        clientSkill: path.join(REPO_ROOT, "tools", "test-flow", "fixtures", "macos-codex-luna-client-skill", "problem-locator-client", "SKILL.md"),
-        serviceSkill: path.join(REPO_ROOT, "tools", "test-flow", "fixtures", "macos-codex-luna-service-skill", "problem-locator-service-agent", "SKILL.md"),
+        clientSkill: path.join(REPO_ROOT, "tools", "test-flow", "quick-validation", "codex-luna", "fixtures", "client-skill", "problem-locator-client", "SKILL.md"),
+        serviceSkill: path.join(REPO_ROOT, "tools", "test-flow", "quick-validation", "codex-luna", "fixtures", "service-skill", "problem-locator-service-agent", "SKILL.md"),
       }, { onProgress: progressReporter() });
     }
   } catch (error) {
@@ -366,7 +366,7 @@ export async function execute(options, plan) {
 }
 
 function usage() {
-  return `Usage:\n  ./tools/macos-codex-luna/run.sh --goal methods [--plan-only] [--allow-real-model]\n  ./tools/macos-codex-luna/run.sh --goal e2e --scenario api-execution-overrun [--plan-only] [--allow-real-model]\n\nThis entry has its own planner and lightweight verdict writer.\n`;
+  return `Usage:\n  ./tools/test-flow/quick-validation/codex-luna/run.sh --goal methods [--plan-only] [--allow-real-model]\n  ./tools/test-flow/quick-validation/codex-luna/run.sh --goal e2e --scenario api-execution-overrun [--plan-only] [--allow-real-model]\n\nThis entry has its own planner and lightweight verdict writer.\n`;
 }
 
 async function main() {

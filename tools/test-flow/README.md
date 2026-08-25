@@ -11,6 +11,8 @@
 | `dev.real` | `dev` | 在 `dev.default` 闭包之外，显式选择一个真实 Proof/Stage |
 | `dev.macos-codex-luna-methods` | `dev` | macOS arm64 上用一次 Codex CLI + gpt-5.6-luna 调用生成、校验并按完整 producer identity 冻结 Methods package |
 | `dev.macos-codex-luna-e2e` | `dev` | macOS arm64 上运行一个 fresh `DATA_ROOT` 的 Codex/Luna Streamable HTTP MCP 单场景冒烟；不含 Docker、浏览器或业务 REST |
+| `dev.macos-claude-deepseek-methods` | `dev` | 先运行迁移后的 Codex 与 Claude 快测合同，再用 Claude Code 2.1.89 + DeepSeek 生成、校验并原子冻结 Methods cache |
+| `dev.macos-claude-deepseek-e2e` | `dev` | 从空 `DATA_ROOT` 运行 CLIENT/ROUTE/LOGPARSE/DIAGNOSE/REVIEW 五进程 Claude MCP 冒烟；不进入 CrossJob |
 | `release.full` | `release` | 不可变源码快照上的完整发布证明；包含平台能力和从空数据根开始的 fresh CrossJob |
 | `release.codex-luna-methods` | `release` | 同一不可变源码快照上的独立 Codex CLI + gpt-5.6-luna Methods 探索验证；不属于产品 CrossJob 闭包 |
 

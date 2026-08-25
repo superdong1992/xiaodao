@@ -12,17 +12,17 @@ import {
   treeDigest,
   validateCodexLunaIdentity,
   verifyMethodsV1Package,
-} from "./codex-luna-contract.mjs";
+} from "../../../runtime-support/codex-luna-contract.mjs";
 import {
   auditCodexLunaRuntimeSecrets,
   readCodexLunaExternalAuth,
   runCodexLunaAppServerCall,
-} from "./codex-luna-app-server-runtime.mjs";
+} from "../../../runtime-support/codex-luna-app-server-runtime.mjs";
 import {
   buildGenerationWorkspace,
   generationPrompt,
   safeEnvironment,
-} from "./codex-luna-exploration-runner.mjs";
+} from "../../../runtime-support/codex-luna-exploration-runner.mjs";
 import {
   auditModelInvocations,
   assertMethodsPackageUnchanged,

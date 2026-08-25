@@ -89,7 +89,11 @@ import {
 import {
   MACOS_CODEX_LUNA_E2E_CALLS,
   MACOS_CODEX_LUNA_METHODS_CALLS,
-} from "../runtime-support/macos-codex-luna-e2e-contract.mjs";
+} from "../quick-validation/codex-luna/runtime/macos-codex-luna-e2e-contract.mjs";
+import {
+  CLAUDE_DEEPSEEK_E2E_CALLS,
+  CLAUDE_DEEPSEEK_METHODS_CALLS,
+} from "../quick-validation/claude-deepseek/runtime/claude-deepseek-contract.mjs";
 
 const LINUX_CLIENT_BROWSER_RUNNER_RELATIVE = "tools/test-flow/runtime-support/linux_client_browser_runner.py";
 const LINUX_CLIENT_BROWSER_ARGUMENT_PROFILE = "chrome-headless-shell-for-testing-local-v1";
@@ -2934,7 +2938,7 @@ async function runMacosCodexLunaGate(context, stage, { workflow }) {
     return { status: "BLOCKED", failure_domain: "INFRA", code: String(error?.message ?? "MACOS_CODEX_LUNA_INPUT_INVALID"), elapsed_seconds: 0 };
   }
   const usageRoot = path.join(context.attemptRoot, "payload", "model-usage", workflow === "methods" ? "macos-codex-luna-methods" : "macos-codex-luna-e2e");
-  const runner = path.join(context.sourceSnapshotRoot, "tools", "test-flow", "runtime-support", workflow === "methods" ? "macos-codex-luna-methods-runner.mjs" : "macos-codex-luna-e2e-runner.mjs");
+  const runner = path.join(context.sourceSnapshotRoot, "tools", "test-flow", "quick-validation", "codex-luna", "runtime", workflow === "methods" ? "macos-codex-luna-methods-runner.mjs" : "macos-codex-luna-e2e-runner.mjs");
   const common = [
     "--codex-entry", staged.stagedEntry,
     "--auth-source", staged.stagedAuth,
@@ -2961,8 +2965,8 @@ async function runMacosCodexLunaGate(context, stage, { workflow }) {
       "--source-root", context.sourceSnapshotRoot,
       "--logparse-root", context.options.logparseSource,
       "--scenario", context.options.scenario ?? "api-execution-overrun",
-      "--client-skill", path.join(context.sourceSnapshotRoot, "tools", "test-flow", "fixtures", "macos-codex-luna-client-skill", "problem-locator-client", "SKILL.md"),
-      "--service-skill", path.join(context.sourceSnapshotRoot, "tools", "test-flow", "fixtures", "macos-codex-luna-service-skill", "problem-locator-service-agent", "SKILL.md"),
+      "--client-skill", path.join(context.sourceSnapshotRoot, "tools", "test-flow", "quick-validation", "codex-luna", "fixtures", "client-skill", "problem-locator-client", "SKILL.md"),
+      "--service-skill", path.join(context.sourceSnapshotRoot, "tools", "test-flow", "quick-validation", "codex-luna", "fixtures", "service-skill", "problem-locator-service-agent", "SKILL.md"),
     ];
   const result = await runProcess({
     repoRoot: context.repoRoot,
@@ -3004,6 +3008,98 @@ async function runMacosCodexLunaGate(context, stage, { workflow }) {
     usage_complete: true,
     adapter_receipt: gate,
   };
+}
+
+function claudeDeepseekInvocationProjection(invocation, hardCaps, invocationClass) {
+  return {
+    schema_version: 3,
+    invocation_id: invocation.invocation_id,
+    class: invocationClass,
+    workflow: invocation.phase,
+    effective_model: invocation.model,
+    effective_caps: hardCaps,
+    usage_complete: invocation.terminal === true,
+    usage: invocation.usage,
+    environment_policy: invocation.environment_policy,
+    turns: invocation.turns,
+    terminal: { subtype: "success", is_error: false },
+    wrapper_outcome: { schema_version: 1, status: invocation.status, code: null },
+    hard_cap_enforcement: {
+      turns: "claude-cli",
+      cost_usd: "claude-cli",
+      hard_timeout_seconds: "wrapper-process-watchdog",
+      total_tokens: `posthoc-terminal-aggregate:${TOKEN_USAGE_FORMULA}`,
+      max_output_tokens: ISOLATED_AGENT_OUTPUT_CAP_ENFORCEMENT,
+      model_process_retry: "forbidden-by-phase-claim",
+    },
+  };
+}
+
+async function runMacosClaudeDeepseekGate(context, stage, { workflow }) {
+  const outputRoot = gateRoot(context, stage);
+  const scratchRoot = path.join(context.attemptRoot, "scratch", workflow === "methods" ? "macos-claude-deepseek-methods" : "macos-claude-deepseek-e2e");
+  ensureDirectory(scratchRoot);
+  let pythonEntry;
+  try { pythonEntry = macosCodexPythonEntry(context.repoRoot); }
+  catch (error) { return { status: "BLOCKED", failure_domain: "INFRA", code: String(error?.message ?? "CLAUDE_DEEPSEEK_PYTHON_RUNTIME_MISSING"), elapsed_seconds: 0 }; }
+  const usageRoot = path.join(context.attemptRoot, "payload", "model-usage", workflow === "methods" ? "macos-claude-deepseek-methods" : "macos-claude-deepseek-e2e");
+  const runner = path.join(context.sourceSnapshotRoot, "tools", "test-flow", "quick-validation", "claude-deepseek", "runtime", workflow === "methods" ? "claude-deepseek-methods-runner.mjs" : "claude-deepseek-e2e-runner.mjs");
+  const common = [
+    runner,
+    "--source-root", context.sourceSnapshotRoot,
+    "--claude-entry", context.options.claudeEntry,
+    "--claude-settings", context.options.claudeSettings,
+    "--python-entry", pythonEntry,
+    "--cache-root", context.options.cacheRoot ?? path.join(context.repoRoot, ".tmp", "test-flow-cache"),
+    "--work-root", path.join(scratchRoot, "work"),
+    "--private-root", path.join(scratchRoot, "private"),
+    "--evidence-root", outputRoot,
+    "--usage-root", usageRoot,
+    "--run-id", path.basename(context.attemptRoot),
+  ];
+  const releaseCaseRoot = path.join(context.sourceSnapshotRoot, "tests", "cases", "release", "rpc-timeout-anonymized");
+  const args = workflow === "methods" ? [
+    ...common,
+    "--meta-skill-root", path.join(context.sourceSnapshotRoot, ".agents", "skills", "wiki-to-diagnosis-skill"),
+    "--wiki", path.join(releaseCaseRoot, "input", "wiki.md"),
+    "--oracle", path.join(releaseCaseRoot, "oracle.json"),
+    "--registration-template", path.join(releaseCaseRoot, "registration", "rpc-timeout-methods-v1", "registration-template.json"),
+    ...(context.planStage.invocation_caps.length === 0 ? ["--verify-cache-only"] : []),
+  ] : [
+    ...common,
+    "--runtime-root", context.repoRoot,
+    "--logparse-root", context.options.logparseSource,
+    "--scenario", context.options.scenario ?? "api-execution-overrun",
+  ];
+  const result = await runProcess({
+    repoRoot: context.repoRoot,
+    attemptRoot: context.attemptRoot,
+    stage,
+    command: process.execPath,
+    args,
+    cwd: context.sourceSnapshotRoot,
+    hardTimeoutSeconds: stage.timeout_seconds - 30,
+    noProgressSeconds: context.planStage.no_progress_seconds,
+    rawLogLimitBytes: context.policies.raw_log_file_limit_bytes,
+    eventWriter: context.eventWriter,
+    executionId: gateExecutionId(stage, context.gateId),
+    pollMilliseconds: context.policies.poll_milliseconds,
+    progressAllowlistVersion: context.policies.progress_allowlist_version,
+  });
+  if (result.status !== "PASS") return { ...result, failure_domain: result.status === "ERROR" ? "HARNESS" : "CONTRACT", code: result.termination?.trigger ?? "CLAUDE_DEEPSEEK_RUNNER_FAILED" };
+  let gate;
+  let ledger;
+  try {
+    gate = JSON.parse(fs.readFileSync(path.join(outputRoot, "adapter-receipt.json"), "utf8"));
+    ledger = JSON.parse(fs.readFileSync(path.join(outputRoot, "model-invocations.json"), "utf8"));
+  } catch {
+    return { ...result, status: "ERROR", failure_domain: "HARNESS", code: "CLAUDE_DEEPSEEK_GATE_RECEIPT_INVALID" };
+  }
+  const expected = context.planStage.invocation_caps.reduce((sum, declaration) => sum + declaration.max_count, 0);
+  if (gate.status !== "PASS" || ledger.status !== "PASS" || ledger.invocations?.length !== expected) return { ...result, status: "ERROR", failure_domain: "HARNESS", code: "CLAUDE_DEEPSEEK_GATE_RECEIPT_INVALID" };
+  const invocationClass = workflow === "methods" ? "claude-deepseek-methods-bootstrap" : "claude-deepseek-macos-e2e";
+  const invocations = ledger.invocations.map((invocation) => claudeDeepseekInvocationProjection(invocation, context.planStage.hard_caps, invocationClass));
+  return { ...result, status: "PASS", failure_domain: null, code: null, invocations, usage: sumUsage(invocations.map((invocation) => invocation.usage)), usage_complete: true, adapter_receipt: gate };
 }
 
 async function crossJob(context, stage) {
@@ -3354,6 +3450,8 @@ export async function executeGate(context, stage, gateId, gate) {
     if (gate.adapter === "codex-luna-methods") return codexLunaMethods(scoped, stage);
     if (gate.adapter === "macos-codex-luna-methods") return runMacosCodexLunaGate(scoped, stage, { workflow: "methods" });
     if (gate.adapter === "macos-codex-luna-e2e") return runMacosCodexLunaGate(scoped, stage, { workflow: "e2e" });
+    if (gate.adapter === "macos-claude-deepseek-methods") return runMacosClaudeDeepseekGate(scoped, stage, { workflow: "methods" });
+    if (gate.adapter === "macos-claude-deepseek-e2e") return runMacosClaudeDeepseekGate(scoped, stage, { workflow: "e2e" });
   }
   if (gate.kind === "cross-job-adapter") return crossJob(scoped, stage);
   if (gate.kind === "observation" && gate.observation === "review-state-transition") return reviewObservation(scoped);

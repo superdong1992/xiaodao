@@ -119,6 +119,36 @@
       "runtime_profile": "release",
       "evidence": ["scenario-input.json", "scenario-oracle.json", "methods-package.json", "codex-identity.json", "model-invocations.json", "model-usage.json", "client-events.jsonl", "mcp-tool-calls.json", "attachment.json", "server-events.ndjson", "final-case.json", "artifact-index.json", "http-boundary-audit.json", "security-audit.json", "gate-receipt.json"]
     },
+    "quick.codex-luna.contracts": {
+      "kind": "node-test",
+      "test_glob": "tools/test-flow/quick-validation/codex-luna/tests/*.test.mjs",
+      "min_passed": 1,
+      "evidence": ["node-test.tap"]
+    },
+    "quick.claude-deepseek-methods.contracts": {
+      "kind": "node-test",
+      "test_files": ["tools/test-flow/quick-validation/claude-deepseek/tests/claude-deepseek-contract.test.mjs", "tools/test-flow/quick-validation/claude-deepseek/tests/claude-deepseek-process.test.mjs", "tools/test-flow/quick-validation/claude-deepseek/tests/claude-deepseek-methods-runner.test.mjs"],
+      "min_passed": 1,
+      "evidence": ["node-test.tap"]
+    },
+    "quick.claude-deepseek-e2e.contracts": {
+      "kind": "node-test",
+      "test_files": ["tools/test-flow/quick-validation/claude-deepseek/tests/claude-deepseek-contract.test.mjs", "tools/test-flow/quick-validation/claude-deepseek/tests/claude-deepseek-process.test.mjs", "tools/test-flow/quick-validation/claude-deepseek/tests/claude-deepseek-bash-policy.test.mjs", "tools/test-flow/quick-validation/claude-deepseek/tests/claude-deepseek-service-wrapper.test.mjs", "tools/test-flow/quick-validation/claude-deepseek/tests/claude-deepseek-e2e-runner.test.mjs"],
+      "min_passed": 1,
+      "evidence": ["node-test.tap"]
+    },
+    "real.macos-claude-deepseek-methods": {
+      "kind": "capability-adapter",
+      "adapter": "macos-claude-deepseek-methods",
+      "runtime_profile": "release",
+      "evidence": ["claude-identity.json", "model-invocations.json", "model-usage.json", "methods-package.json", "scenario-evaluation-audit.json", "security-audit.json", "adapter-receipt.json"]
+    },
+    "real.macos-claude-deepseek-e2e": {
+      "kind": "capability-adapter",
+      "adapter": "macos-claude-deepseek-e2e",
+      "runtime_profile": "release",
+      "evidence": ["scenario-input.json", "scenario-oracle.json", "methods-package.json", "claude-identity.json", "model-invocations.json", "model-usage.json", "client-events.jsonl", "mcp-tool-calls.json", "attachment.json", "server-events.ndjson", "final-case.json", "artifact-index.json", "http-boundary-audit.json", "security-audit.json", "adapter-receipt.json"]
+    },
     "real.logparse": {
       "kind": "pytest",
       "selectors": ["tests/real/logparse/test_logparse_real_e2e.py"],

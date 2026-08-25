@@ -6,7 +6,7 @@ import {
   CODEX_LUNA_MODEL,
   CODEX_LUNA_REASONING_EFFORT,
 } from "./codex-luna-contract.mjs";
-import { MACOS_CODEX_LUNA_PUBLIC_TOOLS } from "./macos-codex-luna-e2e-contract.mjs";
+import { MACOS_CODEX_LUNA_PUBLIC_TOOLS } from "../quick-validation/codex-luna/runtime/macos-codex-luna-e2e-contract.mjs";
 
 export const CODEX_LUNA_APP_SERVER_SCHEMA_VERSION = 1;
 export const CODEX_LUNA_APP_SERVER_PROTOCOL_VERSION = "v2";

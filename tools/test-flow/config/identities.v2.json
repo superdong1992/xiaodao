@@ -21,8 +21,10 @@
     "skill.registration": {"kind": "release-case", "root": "tests/cases/release", "partition": "registration"},
     "methods.matrix": {"kind": "paths", "paths": ["experiments/rpc-skill-feasibility/cases", "experiments/rpc-skill-feasibility/logparse-config.json", "experiments/rpc-skill-feasibility/schemas/diagnosis-result.schema.json"]},
     "case.macos-codex-luna": {"kind": "paths", "paths": ["experiments/rpc-skill-feasibility/cases/api-execution-overrun", "experiments/rpc-skill-feasibility/logparse-config.json"]},
-    "skill.macos-codex-luna-client": {"kind": "paths", "paths": ["tools/test-flow/fixtures/macos-codex-luna-client-skill"]},
-    "skill.macos-codex-luna-service": {"kind": "paths", "paths": ["tools/test-flow/fixtures/macos-codex-luna-service-skill"]},
+    "quick.codex-luna": {"kind": "paths", "paths": ["tools/test-flow/quick-validation/codex-luna"]},
+    "quick.claude-deepseek": {"kind": "paths", "paths": ["tools/test-flow/quick-validation/claude-deepseek"]},
+    "skill.macos-codex-luna-client": {"kind": "paths", "paths": ["tools/test-flow/quick-validation/codex-luna/fixtures/client-skill"]},
+    "skill.macos-codex-luna-service": {"kind": "paths", "paths": ["tools/test-flow/quick-validation/codex-luna/fixtures/service-skill"]},
     "skill.generic-adapter": {"kind": "paths", "paths": [".claude/skills/adapt-lan-generic-locator-v2"]},
     "skill.generic-parity": {"kind": "paths", "paths": ["tests/fixtures/components/generic-problem-locator-dual-mode"]},
     "skill.logparse": {"kind": "paths", "paths": [".claude/skills/logparse-diagnose"]},
@@ -90,12 +92,20 @@
       "proof": ["case.oracle", "methods.matrix", "proof.real", "framework.runner"]
     },
     "macos-codex-luna-methods": {
-      "producer": ["case.wiki", "skill.registration", "skill.generator", "runtime.support", "runtime.codex-luna", "runtime.environment"],
+      "producer": ["case.wiki", "skill.registration", "skill.generator", "quick.codex-luna", "runtime.support", "runtime.codex-luna", "runtime.environment"],
       "proof": ["proof.real", "framework.runner", "framework.tests"]
     },
     "macos-codex-luna-e2e": {
-      "producer": ["product.source", "case.wiki", "skill.registration", "case.macos-codex-luna", "skill.generator", "skill.macos-codex-luna-client", "skill.macos-codex-luna-service", "runtime.support", "runtime.codex-luna", "runtime.codex-logparse", "runtime.environment", "external.logparse"],
+      "producer": ["product.source", "case.wiki", "skill.registration", "case.macos-codex-luna", "skill.generator", "quick.codex-luna", "skill.macos-codex-luna-client", "skill.macos-codex-luna-service", "runtime.support", "runtime.codex-luna", "runtime.codex-logparse", "runtime.environment", "external.logparse"],
       "proof": ["case.oracle", "proof.real", "framework.runner", "framework.tests"]
+    },
+    "macos-claude-deepseek-methods": {
+      "producer": ["case.wiki", "skill.registration", "skill.generator", "quick.codex-luna", "quick.claude-deepseek", "runtime.support", "runtime.claude", "runtime.settings", "runtime.environment"],
+      "proof": ["case.oracle", "framework.tests", "framework.runner"]
+    },
+    "macos-claude-deepseek-e2e": {
+      "producer": ["product.source", "case.wiki", "skill.registration", "case.macos-codex-luna", "skill.generator", "skill.client", "skill.logparse", "quick.claude-deepseek", "runtime.support", "runtime.claude", "runtime.settings", "runtime.environment", "external.logparse"],
+      "proof": ["case.oracle", "framework.tests", "framework.runner"]
     },
     "cross-job": {
       "producer": ["product.source", "product.fixtures", "case.journey", "skill.client", "skill.registration", "skill.logparse", "runtime.support", "adapter.cross-job", "external.logparse", "external.mcp", "runtime.claude", "runtime.settings", "runtime.release", "runtime.environment"],

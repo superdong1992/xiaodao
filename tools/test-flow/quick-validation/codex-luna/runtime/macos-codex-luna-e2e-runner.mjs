@@ -14,12 +14,12 @@ import {
   sha256File,
   treeDigest,
   validateCodexLunaIdentity,
-} from "./codex-luna-contract.mjs";
+} from "../../../runtime-support/codex-luna-contract.mjs";
 import {
   readCodexLunaExternalAuth,
   runCodexLunaAppServerCall,
-} from "./codex-luna-app-server-runtime.mjs";
-import { safeEnvironment } from "./codex-luna-exploration-runner.mjs";
+} from "../../../runtime-support/codex-luna-app-server-runtime.mjs";
+import { safeEnvironment } from "../../../runtime-support/codex-luna-exploration-runner.mjs";
 import {
   assertMethodsPackageUnchanged,
   auditHttpBoundary,
@@ -400,7 +400,7 @@ export async function runE2E(options, { ambient = process.env, onProgress = null
   fs.mkdirSync(serverPrivateRoot, { recursive: true, mode: 0o700 });
   fs.mkdirSync(serviceEvidenceRoot, { recursive: true, mode: 0o700 });
   fs.mkdirSync(serviceUsageRoot, { recursive: true, mode: 0o700 });
-  const wrapper = path.join(sourceRoot, "tools", "test-flow", "runtime-support", "macos-codex-luna-service-wrapper.mjs");
+  const wrapper = path.join(sourceRoot, "tools", "test-flow", "quick-validation", "codex-luna", "runtime", "macos-codex-luna-service-wrapper.mjs");
   const serviceCommand = [
     process.execPath,
     wrapper,
@@ -450,7 +450,7 @@ export async function runE2E(options, { ambient = process.env, onProgress = null
   let clientTrace = null;
   let readiness = null;
   try {
-    readiness = await waitForMcp({ pythonEntry: options.pythonEntry, script: path.join(sourceRoot, "tools", "test-flow", "runtime-support", "macos_codex_luna_mcp_probe.py"), mcpUrl, output: path.join(privateRoot, "mcp-readiness.json") }, service);
+    readiness = await waitForMcp({ pythonEntry: options.pythonEntry, script: path.join(sourceRoot, "tools", "test-flow", "quick-validation", "codex-luna", "runtime", "macos_codex_luna_mcp_probe.py"), mcpUrl, output: path.join(privateRoot, "mcp-readiness.json") }, service);
     const listedAudit = auditListedMcpTools(readiness.tools);
     writeJson(path.join(evidenceRoot, "mcp-tools.json"), listedAudit);
     const clientPrivate = path.join(privateRoot, "client");

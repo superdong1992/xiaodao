@@ -16,7 +16,7 @@ const REUSE_POLICIES = new Set(["never", "identity", "checkpoint-chain"]);
 const PROGRESS_CLASSES = new Set(["local", "external", "real"]);
 const PYTEST_SKIP_POLICIES = new Set(["forbid", "forbid-all-skipped", "allow-explicit"]);
 const REPOSITORY_CHECKS = new Set(["python-compileall", "uv-lock", "git-diff-check"]);
-const CAPABILITY_ADAPTERS = new Set(["host-capability", "server-linux-capability", "codex-luna-methods", "macos-codex-luna-methods", "macos-codex-luna-e2e"]);
+const CAPABILITY_ADAPTERS = new Set(["host-capability", "server-linux-capability", "codex-luna-methods", "macos-codex-luna-methods", "macos-codex-luna-e2e", "macos-claude-deepseek-methods", "macos-claude-deepseek-e2e"]);
 const CROSS_JOB_PHASES = new Set(["environment", "route", "upload", "diagnose", "publish-restart"]);
 const OBSERVATIONS = new Set(["review-state-transition"]);
 const ENVIRONMENT_PROFILES = new Set(["real-logparse", "real-agent-backend", "real-generic-locator", "real-skill-generation", "real-route", "real-review"]);
@@ -362,14 +362,14 @@ function validateRuntimeProfiles(runtimeProfiles) {
     for (const [name, commit] of Object.entries(profile.external_sources)) assertFlow(/^[a-f0-9]{40}$/.test(commit), "CONFIG_RUNTIME_EXTERNAL_COMMIT", `${profileId}.external_sources.${name} must be a commit SHA`);
     stringArray(profile.settings_environment_allowlist, "CONFIG_RUNTIME_SETTINGS_ENV", `${profileId}.settings_environment_allowlist`, { nonEmpty: true });
     assertFlow(canonicalJson([...profile.settings_environment_allowlist].sort()) === canonicalJson([...RELEASE_SETTINGS_ENVIRONMENT].sort()), "CONFIG_RUNTIME_SETTINGS_ENV", `${profileId} has an unsupported settings environment allowlist`);
-    exactKeys(profile.real_caps, ["isolated", "isolated.skill-generation", "codex.methods", "codex.macos-methods", "codex.macos-e2e", "service_agent", "journey.route", "journey.diagnose", "journey.publish-restart"], "CONFIG_RUNTIME_CAPS_FIELDS", `${profileId}.real_caps`);
+    exactKeys(profile.real_caps, ["isolated", "isolated.skill-generation", "codex.methods", "codex.macos-methods", "codex.macos-e2e", "claude.macos-methods", "claude.macos-e2e", "service_agent", "journey.route", "journey.diagnose", "journey.publish-restart"], "CONFIG_RUNTIME_CAPS_FIELDS", `${profileId}.real_caps`);
     for (const [capId, cap] of Object.entries(profile.real_caps)) {
       exactKeys(cap, ["max_turns", "max_total_tokens", "max_output_tokens", "max_budget_usd", "hard_timeout_seconds"], "CONFIG_RUNTIME_CAP_FIELDS", `${profileId}.real_caps.${capId}`);
       positiveInteger(cap.max_turns, "CONFIG_RUNTIME_MAX_TURNS", `${capId}.max_turns`);
       positiveInteger(cap.max_total_tokens, "CONFIG_RUNTIME_MAX_TOKENS", `${capId}.max_total_tokens`);
       if (cap.max_output_tokens !== undefined) {
         positiveInteger(cap.max_output_tokens, "CONFIG_RUNTIME_MAX_OUTPUT_TOKENS", `${capId}.max_output_tokens`);
-        assertFlow(capId === "isolated" || capId.startsWith("isolated."), "CONFIG_RUNTIME_MAX_OUTPUT_TOKENS_SCOPE", `${capId}.max_output_tokens is only supported for isolated Agent caps`);
+        assertFlow(capId === "isolated" || capId.startsWith("isolated.") || capId.startsWith("claude."), "CONFIG_RUNTIME_MAX_OUTPUT_TOKENS_SCOPE", `${capId}.max_output_tokens is only supported for Claude Agent caps`);
         assertFlow(cap.max_output_tokens <= profile.claude.max_output_tokens_upper_limit, "CONFIG_RUNTIME_MAX_OUTPUT_TOKENS", `${capId}.max_output_tokens exceeds the pinned Claude runtime limit`);
         assertFlow(cap.max_output_tokens <= cap.max_total_tokens, "CONFIG_RUNTIME_MAX_OUTPUT_TOKENS", `${capId}.max_output_tokens exceeds max_total_tokens`);
       }

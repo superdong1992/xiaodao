@@ -11,21 +11,21 @@ MCP 和 Methods 的协议实现，不读取旧 Goal/Proof/Stage/Gate 配置，�
 入口：
 
 ```bash
-./tools/macos-codex-luna/run.sh --goal methods --plan-only
-./tools/macos-codex-luna/run.sh --goal methods --allow-real-model
+./tools/test-flow/quick-validation/codex-luna/run.sh --goal methods --plan-only
+./tools/test-flow/quick-validation/codex-luna/run.sh --goal methods --allow-real-model
 
-./tools/macos-codex-luna/run.sh --goal e2e \
+./tools/test-flow/quick-validation/codex-luna/run.sh --goal e2e \
   --scenario api-execution-overrun \
   --logparse-root /absolute/path/to/logparse \
   --plan-only
-./tools/macos-codex-luna/run.sh --goal e2e \
+./tools/test-flow/quick-validation/codex-luna/run.sh --goal e2e \
   --scenario api-execution-overrun \
   --logparse-root /absolute/path/to/logparse \
   --allow-real-model
 ```
 
 每次 run 的计划、工作目录、私有运行态和证据只写入
-`.tmp/macos-codex-luna/runs/<run-id>/`：
+`.tmp/quick-validation/codex-luna/runs/<run-id>/`：
 
 ```text
 plan.json
@@ -39,4 +39,4 @@ verdict.json
 
 `verdict.json` 是该独立工程的唯一结论。真实模型不自动重试。Methods cache 已存在时，
 Methods Goal 只进行身份、validator、tree digest 与 secret 的确定性复核，不重复调用模型。
-首次 Methods bootstrap 另写入 `.tmp/macos-codex-luna/cache/`，供后续 E2E 精确复用。
+首次 Methods bootstrap 另写入 `.tmp/quick-validation/codex-luna/cache/`，供后续 E2E 精确复用。

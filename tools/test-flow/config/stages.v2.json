@@ -147,6 +147,28 @@
       "platforms": ["macos"]
     },
     {
+      "id": "real.macos-claude-deepseek-methods",
+      "kind": "capability",
+      "depends_on": [],
+      "gates": ["quick.codex-luna.contracts", "quick.claude-deepseek-methods.contracts", "real.macos-claude-deepseek-methods"],
+      "identity_set": "macos-claude-deepseek-methods",
+      "timeout_seconds": 1800,
+      "progress_class": "real",
+      "reuse": {"dev": "identity", "release": "never"},
+      "platforms": ["macos"]
+    },
+    {
+      "id": "real.macos-claude-deepseek-e2e",
+      "kind": "capability",
+      "depends_on": [],
+      "gates": ["quick.claude-deepseek-e2e.contracts", "real.macos-claude-deepseek-e2e"],
+      "identity_set": "macos-claude-deepseek-e2e",
+      "timeout_seconds": 1800,
+      "progress_class": "real",
+      "reuse": {"dev": "never", "release": "never"},
+      "platforms": ["macos"]
+    },
+    {
       "id": "real.route",
       "kind": "isolated-real",
       "depends_on": ["real.agent-backend"],

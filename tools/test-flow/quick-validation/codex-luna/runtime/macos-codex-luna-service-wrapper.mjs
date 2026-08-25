@@ -9,11 +9,11 @@ import {
   CODEX_LUNA_MODEL,
   CODEX_LUNA_REASONING_EFFORT,
   sha256Bytes,
-} from "./codex-luna-contract.mjs";
+} from "../../../runtime-support/codex-luna-contract.mjs";
 import {
   readCodexLunaExternalAuth,
   runCodexLunaAppServerCall,
-} from "./codex-luna-app-server-runtime.mjs";
+} from "../../../runtime-support/codex-luna-app-server-runtime.mjs";
 import {
   MACOS_CODEX_LUNA_CALL_WALL_SECONDS,
   MACOS_CODEX_LUNA_NO_PROGRESS_SECONDS,

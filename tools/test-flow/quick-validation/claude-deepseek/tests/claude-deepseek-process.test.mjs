@@ -1,0 +1,118 @@
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import test from "node:test";
+
+import {
+  controlledClaudeEnvironment,
+  projectClaudeTools,
+  runClaudeProcess,
+} from "../runtime/claude-deepseek-process.mjs";
+
+test("controlled Claude environment drops ambient provider, proxy, and hook state", () => {
+  const environment = controlledClaudeEnvironment({
+    LANG: "zh_CN.UTF-8",
+    ANTHROPIC_AUTH_TOKEN: "ambient-secret",
+    ANTHROPIC_BASE_URL: "https://wrong.example",
+    HTTP_PROXY: "http://proxy.example",
+    CLAUDE_CODE_HOOKS: "bad",
+  }, {
+    configRoot: "/private/tmp/config",
+    home: "/private/tmp/home",
+    temporary: "/private/tmp/tmp",
+  });
+  assert.equal(environment.ANTHROPIC_AUTH_TOKEN, undefined);
+  assert.equal(environment.ANTHROPIC_BASE_URL, undefined);
+  assert.equal(environment.HTTP_PROXY, undefined);
+  assert.equal(environment.CLAUDE_CODE_HOOKS, undefined);
+  assert.equal(environment.CLAUDE_CODE_MAX_OUTPUT_TOKENS, "64000");
+  assert.equal(environment.CLAUDE_CONFIG_DIR, "/private/tmp/config");
+});
+
+test("tool projection separates Skill, MCP and Bash without parsing narrative text", () => {
+  const events = [
+    { type: "assistant", message: { content: [
+      { type: "tool_use", id: "skill", name: "Skill", input: { skill: "problem-locator-client" } },
+      { type: "tool_use", id: "mcp", name: "mcp__problem-locator__problem_locator_get_case", input: { case_id: "case", wait_seconds: 0 } },
+      { type: "tool_use", id: "bash", name: "Bash", input: { command: "/usr/bin/stat -f %z /tmp/logs.zip" } },
+    ] } },
+    { type: "user", message: { content: [{ type: "tool_result", tool_use_id: "skill", is_error: false, content: "loaded" }] }, tool_use_result: { loaded: true } },
+    { type: "user", message: { content: [{ type: "tool_result", tool_use_id: "mcp", is_error: false, content: "ok" }] }, tool_use_result: { structuredContent: { ok: true, data: { case_id: "case" }, error: null } } },
+    { type: "user", message: { content: [{ type: "tool_result", tool_use_id: "bash", is_error: false, content: "42" }] }, tool_use_result: { stdout: "42\n", stderr: "", exitCode: 0 } },
+  ];
+  const projected = projectClaudeTools(events);
+  assert.deepEqual(projected.skills, [{ ordinal: 0, skill: "problem-locator-client" }]);
+  assert.equal(projected.mcp[0].tool, "problem_locator_get_case");
+  assert.equal(projected.bash[0].exit_code, 0);
+  assert.deepEqual(projected.denied, []);
+});
+
+test("tool projection records permission-denied attempts without counting them as executions", () => {
+  const events = [
+    { type: "assistant", message: { content: [
+      { type: "tool_use", id: "curl", name: "Bash", input: { command: "curl --request PUT https://denied.invalid" } },
+      { type: "tool_use", id: "glob", name: "Glob", input: { pattern: "**/*" } },
+      { type: "tool_use", id: "stat", name: "Bash", input: { command: "/usr/bin/stat -f %z /tmp/logs.zip" } },
+    ] } },
+    { type: "user", message: { content: [{ type: "tool_result", tool_use_id: "curl", is_error: true, content: "permission denied" }] }, tool_use_result: { error: "permission denied" } },
+    { type: "user", message: { content: [{ type: "tool_result", tool_use_id: "glob", is_error: true, content: "permission denied" }] }, tool_use_result: { error: "permission denied" } },
+    { type: "user", message: { content: [{ type: "tool_result", tool_use_id: "stat", is_error: false, content: "42" }] }, tool_use_result: { stdout: "42\n", stderr: "", exitCode: 0 } },
+  ];
+  const projected = projectClaudeTools(events, { allowToolErrors: true });
+  assert.equal(projected.bash.length, 1);
+  assert.equal(projected.bash[0].command, "/usr/bin/stat -f %z /tmp/logs.zip");
+  assert.deepEqual(projected.denied.map(({ name, program, executed }) => ({ name, program, executed })), [
+    { name: "Bash", program: "curl", executed: false },
+    { name: "Glob", program: null, executed: false },
+  ]);
+  assert.ok(projected.denied.every((item) => /^[0-9a-f]{64}$/u.test(item.input_sha256)));
+});
+
+test("process wrapper emits one audited terminal receipt with no retry", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "claude-deepseek-process-"));
+  const fake = path.join(root, "fake-cli.js");
+  const settings = path.join(root, "settings.json");
+  const cwd = path.join(root, "workspace");
+  const configRoot = path.join(root, "config");
+  const home = path.join(root, "home");
+  const temporary = path.join(root, "tmp");
+  for (const directory of [cwd, configRoot, home, temporary]) fs.mkdirSync(directory);
+  fs.writeFileSync(settings, "{}\n");
+  fs.writeFileSync(fake, `
+process.stdin.resume();
+process.stdin.on("end", () => {
+  const events = [
+    {type:"system",subtype:"init",model:"deepseek-v4-flash[1m]",cwd:process.cwd(),permissionMode:"dontAsk",tools:["Read"]},
+    {type:"assistant",message:{role:"assistant",content:[{type:"tool_use",id:"read",name:"Read",input:{file_path:"inputs/wiki.md"}}]}},
+    {type:"user",message:{role:"user",content:[{type:"tool_result",tool_use_id:"read",is_error:false,content:"ok"}]},tool_use_result:{content:"ok"}},
+    {type:"result",subtype:"success",is_error:false,num_turns:2,usage:{input_tokens:10,output_tokens:5,cache_creation_input_tokens:3,cache_read_input_tokens:2},total_cost_usd:0.01},
+  ];
+  for (const event of events) process.stdout.write(JSON.stringify(event)+"\\n");
+});
+`);
+  const tracePath = path.join(root, "trace.ndjson");
+  const receiptPath = path.join(root, "receipt.json");
+  const result = await runClaudeProcess({
+    claudeEntry: fake,
+    settings,
+    cwd,
+    prompt: "read",
+    phase: "METHODS_BOOTSTRAP",
+    invocationId: "run:methods",
+    tools: ["Read"],
+    allowedTools: [],
+    maxTurns: 16,
+    maxBudgetUsd: 10,
+    wallTimeoutSeconds: 30,
+    noProgressSeconds: 5,
+    tracePath,
+    receiptPath,
+    environment: { configRoot, home, temporary },
+  }, { ambient: {} });
+  assert.equal(result.receipt.status, "PASS");
+  assert.equal(result.receipt.retry, 0);
+  assert.equal(result.receipt.usage.total_tokens, 20);
+  assert.equal(fs.readFileSync(tracePath, "utf8").trim().split("\n").length, 4);
+  assert.equal(JSON.parse(fs.readFileSync(receiptPath, "utf8")).phase, "METHODS_BOOTSTRAP");
+});

@@ -13,10 +13,10 @@ import {
   safeServiceError,
   sealServiceOutcomeDraft,
   serverInvocationPhase,
-} from "../runtime-support/macos-codex-luna-service-wrapper.mjs";
+} from "../runtime/macos-codex-luna-service-wrapper.mjs";
 
 test("service Skill keeps missing registered artifacts in the post-route requirement flow", () => {
-  const skill = fs.readFileSync(path.join(process.cwd(), "tools", "test-flow", "fixtures", "macos-codex-luna-service-skill", "problem-locator-service-agent", "SKILL.md"), "utf8");
+  const skill = fs.readFileSync(path.join(process.cwd(), "tools", "test-flow", "quick-validation", "codex-luna", "fixtures", "service-skill", "problem-locator-service-agent", "SKILL.md"), "utf8");
   assert.match(skill, /required_artifacts.*later DIAGNOSE job can request/);
   assert.match(skill, /select that registration as `MATCHED`/);
   assert.match(skill, /Do not return `NO_CAPABILITY` merely because `log_archive` is absent/);

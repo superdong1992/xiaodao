@@ -10,7 +10,7 @@ import {
   sha256File,
   treeDigest,
   treeManifest,
-} from "./codex-luna-contract.mjs";
+} from "../../../runtime-support/codex-luna-contract.mjs";
 
 export const MACOS_CODEX_LUNA_E2E_CONTRACT_VERSION = 1;
 export const MACOS_CODEX_LUNA_METHODS_PROMPT_VERSION = 1;
