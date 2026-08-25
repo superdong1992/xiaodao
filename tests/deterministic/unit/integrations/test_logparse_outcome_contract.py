@@ -142,7 +142,12 @@ def _agent_outcome(
 ) -> AgentJobOutcome:
     evidence_drafts = evidence or []
     artifact_drafts = artifacts or []
-    audit = _decision_audit(job, evidence_drafts, payload)
+    audit = (
+        None
+        if result_type
+        in {OutcomeResultType.NEED_INPUT, OutcomeResultType.NEED_ATTACHMENT}
+        else _decision_audit(job, evidence_drafts, payload)
+    )
     return AgentJobOutcome(
         outcome_id=outcome_id,
         job_id=job.job_id,

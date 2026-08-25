@@ -1,6 +1,12 @@
 import fs from "node:fs";
 import path from "node:path";
 import { assertFlow, canonicalJson, readJson, sha256Bytes, sha256File } from "./util.mjs";
+import {
+  CODEX_LUNA_CLI_VERSION,
+  CODEX_LUNA_EXPECTED_CLI_SHA256,
+  CODEX_LUNA_MODEL,
+  CODEX_LUNA_REASONING_EFFORT,
+} from "../runtime-support/codex-luna-contract.mjs";
 
 const IDENTIFIER = /^[a-z0-9][a-z0-9.-]*$/;
 const PLATFORMS = new Set(["windows", "macos", "linux"]);
@@ -10,10 +16,10 @@ const REUSE_POLICIES = new Set(["never", "identity", "checkpoint-chain"]);
 const PROGRESS_CLASSES = new Set(["local", "external", "real"]);
 const PYTEST_SKIP_POLICIES = new Set(["forbid", "forbid-all-skipped", "allow-explicit"]);
 const REPOSITORY_CHECKS = new Set(["python-compileall", "uv-lock", "git-diff-check"]);
-const CAPABILITY_ADAPTERS = new Set(["host-capability", "server-linux-capability"]);
+const CAPABILITY_ADAPTERS = new Set(["host-capability", "server-linux-capability", "codex-luna-methods", "macos-codex-luna-methods", "macos-codex-luna-e2e", "macos-claude-deepseek-methods", "macos-claude-deepseek-e2e"]);
 const CROSS_JOB_PHASES = new Set(["environment", "route", "upload", "diagnose", "publish-restart"]);
 const OBSERVATIONS = new Set(["review-state-transition"]);
-const ENVIRONMENT_PROFILES = new Set(["real-logparse", "real-agent-backend", "real-generic-locator", "real-skill-generation", "real-route", "real-diagnose", "real-review"]);
+const ENVIRONMENT_PROFILES = new Set(["real-logparse", "real-agent-backend", "real-generic-locator", "real-skill-generation", "real-route", "real-review"]);
 const RELEASE_SETTINGS_ENVIRONMENT = Object.freeze([
   "ANTHROPIC_AUTH_TOKEN",
   "ANTHROPIC_BASE_URL",
@@ -100,7 +106,7 @@ function validateStages(stages) {
   assertFlow(Array.isArray(stages.stages) && stages.stages.length > 0, "CONFIG_STAGES_EMPTY", "stages must be non-empty");
   const ids = new Set();
   for (const stage of stages.stages) {
-    exactKeys(stage, ["id", "kind", "depends_on", "gates", "identity_set", "real_cap_id", "timeout_seconds", "progress_class", "reuse", "checkpoint", "platforms"], "CONFIG_STAGE_FIELDS", `stage ${stage?.id ?? "?"}`);
+    exactKeys(stage, ["id", "kind", "depends_on", "gates", "identity_set", "real_cap_id", "estimated_tokens", "timeout_seconds", "progress_class", "reuse", "checkpoint", "platforms"], "CONFIG_STAGE_FIELDS", `stage ${stage?.id ?? "?"}`);
     identifier(stage.id, "CONFIG_STAGE_ID", "stage id");
     assertFlow(!ids.has(stage.id), "CONFIG_STAGE_DUPLICATE", `Duplicate stage ${stage.id}`);
     ids.add(stage.id);
@@ -108,6 +114,10 @@ function validateStages(stages) {
     if (stage.real_cap_id !== undefined) {
       identifier(stage.real_cap_id, "CONFIG_STAGE_REAL_CAP", `${stage.id} real cap id`);
       assertFlow(stage.kind === "isolated-real" && stage.id !== "real.logparse", "CONFIG_STAGE_REAL_CAP_SCOPE", `${stage.id} cannot select an isolated real cap`);
+    }
+    if (stage.estimated_tokens !== undefined) {
+      positiveInteger(stage.estimated_tokens, "CONFIG_STAGE_ESTIMATED_TOKENS", `${stage.id}.estimated_tokens`);
+      assertFlow(stage.kind === "isolated-real", "CONFIG_STAGE_ESTIMATED_TOKENS_SCOPE", `${stage.id} cannot declare a model token estimate`);
     }
     stringArray(stage.depends_on, "CONFIG_STAGE_DEPENDENCIES", `${stage.id}.depends_on`);
     stringArray(stage.gates, "CONFIG_STAGE_GATES", `${stage.id}.gates`, { nonEmpty: true });
@@ -231,7 +241,7 @@ function validateIdentities(identities) {
   assertFlow(identities.schema_version === 2, "CONFIG_IDENTITIES_VERSION", "Unsupported identity schema version");
   object(identities.components, "CONFIG_IDENTITY_COMPONENTS", "identity components");
   object(identities.sets, "CONFIG_IDENTITY_SETS", "identity sets");
-  const kinds = new Set(["paths", "release-case", "external-tree", "client-distribution", "claude-settings", "release-runtime", "environment"]);
+  const kinds = new Set(["paths", "release-case", "external-tree", "client-distribution", "claude-settings", "release-runtime", "codex-runtime", "codex-logparse-runtime", "environment"]);
   for (const [componentId, component] of Object.entries(identities.components)) {
     identifier(componentId, "CONFIG_IDENTITY_COMPONENT_ID", "identity component id");
     object(component, "CONFIG_IDENTITY_COMPONENT", `identity component ${componentId}`);
@@ -243,7 +253,7 @@ function validateIdentities(identities) {
     }
     if (component.kind === "release-case") {
       relativePath(component.root, "CONFIG_IDENTITY_RELEASE_CASE_ROOT", `${componentId} release case root`);
-      assertFlow(["wiki", "approved", "journey", "oracle"].includes(component.partition), "CONFIG_IDENTITY_RELEASE_CASE_PARTITION", `${componentId} has an invalid Release case partition`);
+      assertFlow(["wiki", "registration", "journey", "oracle"].includes(component.partition), "CONFIG_IDENTITY_RELEASE_CASE_PARTITION", `${componentId} has an invalid Release case partition`);
     }
     if (component.kind === "external-tree") identifier(component.name, "CONFIG_IDENTITY_EXTERNAL", `${componentId} external name`);
   }
@@ -315,9 +325,10 @@ function validateRuntimeProfiles(runtimeProfiles) {
       continue;
     }
     assertFlow(profile.kind === "formal-release", "CONFIG_RUNTIME_KIND", `${profileId} has invalid runtime kind`);
-    exactKeys(profile, ["kind", "claude", "uv", "python", "hatchling", "base_image", "external_sources", "settings_environment_allowlist", "real_caps", "network_policy"], "CONFIG_RUNTIME_PROFILE_FIELDS", `runtime profile ${profileId}`);
+    exactKeys(profile, ["kind", "claude", "codex", "uv", "python", "hatchling", "base_image", "external_sources", "settings_environment_allowlist", "real_caps", "network_policy"], "CONFIG_RUNTIME_PROFILE_FIELDS", `runtime profile ${profileId}`);
     exactKeys(profile.claude, ["package", "version", "version_output", "tarball_sha256", "cli_sha256", "model", "max_output_tokens_upper_limit"], "CONFIG_RUNTIME_CLAUDE_FIELDS", `${profileId}.claude`);
-    exactKeys(profile.uv, ["version", "archive_sha256", "uv_sha256", "uvx_sha256"], "CONFIG_RUNTIME_UV_FIELDS", `${profileId}.uv`);
+    exactKeys(profile.codex, ["product", "version", "executable_sha256", "model", "reasoning_effort", "auth_kind", "budget_enforcement"], "CONFIG_RUNTIME_CODEX_FIELDS", `${profileId}.codex`);
+    exactKeys(profile.uv, ["version", "version_output", "uvx_version_output", "archive_sha256", "uv_sha256", "uvx_sha256"], "CONFIG_RUNTIME_UV_FIELDS", `${profileId}.uv`);
     exactKeys(profile.base_image, ["name", "source", "os", "architecture", "macos_docker_context"], "CONFIG_RUNTIME_IMAGE_FIELDS", `${profileId}.base_image`);
     exactKeys(profile.external_sources, ["logparse", "mcp"], "CONFIG_RUNTIME_EXTERNAL_FIELDS", `${profileId}.external_sources`);
     assertFlow(profile.claude.package === "@anthropic-ai/claude-code", "CONFIG_RUNTIME_CLAUDE_PACKAGE", `${profileId} must use the official Claude Code package`);
@@ -332,7 +343,16 @@ function validateRuntimeProfiles(runtimeProfiles) {
       "CONFIG_RUNTIME_MAX_OUTPUT_TOKENS",
       `${profileId}.claude.max_output_tokens_upper_limit does not match the pinned Claude runtime`,
     );
+    assertFlow(profile.codex.product === "codex-cli", "CONFIG_RUNTIME_CODEX_PRODUCT", `${profileId}.codex.product is invalid`);
+    assertFlow(profile.codex.version === CODEX_LUNA_CLI_VERSION, "CONFIG_RUNTIME_CODEX_VERSION", `${profileId}.codex.version is invalid`);
+    assertFlow(profile.codex.executable_sha256 === CODEX_LUNA_EXPECTED_CLI_SHA256, "CONFIG_RUNTIME_CODEX_HASH", `${profileId}.codex.executable_sha256 does not match the executable contract`);
+    assertFlow(profile.codex.model === CODEX_LUNA_MODEL, "CONFIG_RUNTIME_CODEX_MODEL", `${profileId}.codex.model is invalid`);
+    assertFlow(profile.codex.reasoning_effort === CODEX_LUNA_REASONING_EFFORT, "CONFIG_RUNTIME_CODEX_EFFORT", `${profileId}.codex.reasoning_effort is invalid`);
+    assertFlow(profile.codex.auth_kind === "chatgpt-external-tokens", "CONFIG_RUNTIME_CODEX_AUTH", `${profileId}.codex.auth_kind is invalid`);
+    assertFlow(profile.codex.budget_enforcement === "posthoc-terminal-aggregate", "CONFIG_RUNTIME_CODEX_BUDGET", `${profileId}.codex.budget_enforcement is invalid`);
     nonEmptyString(profile.uv.version, "CONFIG_RUNTIME_UV_VERSION", `${profileId}.uv.version`);
+    assertFlow(profile.uv.version_output === `uv ${profile.uv.version} (x86_64-unknown-linux-gnu)`, "CONFIG_RUNTIME_UV_VERSION_OUTPUT", `${profileId}.uv.version_output does not match the pinned linux/amd64 binary`);
+    assertFlow(profile.uv.uvx_version_output === `uvx ${profile.uv.version} (x86_64-unknown-linux-gnu)`, "CONFIG_RUNTIME_UVX_VERSION_OUTPUT", `${profileId}.uv.uvx_version_output does not match the pinned linux/amd64 binary`);
     for (const name of ["archive_sha256", "uv_sha256", "uvx_sha256"]) sha256(profile.uv[name], "CONFIG_RUNTIME_UV_HASH", `${profileId}.uv.${name}`);
     assertFlow(/^3\.12\.\d+$/.test(profile.python), "CONFIG_RUNTIME_PYTHON_VERSION", `${profileId}.python must pin Python 3.12`);
     nonEmptyString(profile.hatchling, "CONFIG_RUNTIME_HATCHLING", `${profileId}.hatchling`);
@@ -342,14 +362,14 @@ function validateRuntimeProfiles(runtimeProfiles) {
     for (const [name, commit] of Object.entries(profile.external_sources)) assertFlow(/^[a-f0-9]{40}$/.test(commit), "CONFIG_RUNTIME_EXTERNAL_COMMIT", `${profileId}.external_sources.${name} must be a commit SHA`);
     stringArray(profile.settings_environment_allowlist, "CONFIG_RUNTIME_SETTINGS_ENV", `${profileId}.settings_environment_allowlist`, { nonEmpty: true });
     assertFlow(canonicalJson([...profile.settings_environment_allowlist].sort()) === canonicalJson([...RELEASE_SETTINGS_ENVIRONMENT].sort()), "CONFIG_RUNTIME_SETTINGS_ENV", `${profileId} has an unsupported settings environment allowlist`);
-    exactKeys(profile.real_caps, ["isolated", "isolated.skill-generation", "service_agent", "journey.route", "journey.diagnose", "journey.publish-restart"], "CONFIG_RUNTIME_CAPS_FIELDS", `${profileId}.real_caps`);
+    exactKeys(profile.real_caps, ["isolated", "isolated.skill-generation", "codex.methods", "codex.macos-methods", "codex.macos-e2e", "claude.macos-methods", "claude.macos-e2e", "service_agent", "journey.route", "journey.diagnose", "journey.publish-restart"], "CONFIG_RUNTIME_CAPS_FIELDS", `${profileId}.real_caps`);
     for (const [capId, cap] of Object.entries(profile.real_caps)) {
       exactKeys(cap, ["max_turns", "max_total_tokens", "max_output_tokens", "max_budget_usd", "hard_timeout_seconds"], "CONFIG_RUNTIME_CAP_FIELDS", `${profileId}.real_caps.${capId}`);
       positiveInteger(cap.max_turns, "CONFIG_RUNTIME_MAX_TURNS", `${capId}.max_turns`);
       positiveInteger(cap.max_total_tokens, "CONFIG_RUNTIME_MAX_TOKENS", `${capId}.max_total_tokens`);
       if (cap.max_output_tokens !== undefined) {
         positiveInteger(cap.max_output_tokens, "CONFIG_RUNTIME_MAX_OUTPUT_TOKENS", `${capId}.max_output_tokens`);
-        assertFlow(capId === "isolated" || capId.startsWith("isolated."), "CONFIG_RUNTIME_MAX_OUTPUT_TOKENS_SCOPE", `${capId}.max_output_tokens is only supported for isolated Agent caps`);
+        assertFlow(capId === "isolated" || capId.startsWith("isolated.") || capId.startsWith("claude."), "CONFIG_RUNTIME_MAX_OUTPUT_TOKENS_SCOPE", `${capId}.max_output_tokens is only supported for Claude Agent caps`);
         assertFlow(cap.max_output_tokens <= profile.claude.max_output_tokens_upper_limit, "CONFIG_RUNTIME_MAX_OUTPUT_TOKENS", `${capId}.max_output_tokens exceeds the pinned Claude runtime limit`);
         assertFlow(cap.max_output_tokens <= cap.max_total_tokens, "CONFIG_RUNTIME_MAX_OUTPUT_TOKENS", `${capId}.max_output_tokens exceeds max_total_tokens`);
       }
@@ -399,6 +419,9 @@ function crossValidate(config) {
       assertFlow(isolatedCaps.every(Boolean), "CONFIG_STAGE_REAL_CAP_UNKNOWN", `${stage.id} references unknown real cap ${realCapId}`);
       const isolatedTimeout = isolatedCaps.map((cap) => cap.hard_timeout_seconds);
       assertFlow(isolatedTimeout.every((timeout) => invocationCount * (timeout + 30) + 30 < stage.timeout_seconds), "CONFIG_ISOLATED_TIMEOUT_MARGIN", `${stage.id} must cover every declared Backend invocation and evidence finalization`);
+      if (stage.estimated_tokens !== undefined) {
+        assertFlow(isolatedCaps.every((cap) => stage.estimated_tokens <= invocationCount * cap.max_total_tokens), "CONFIG_STAGE_ESTIMATED_TOKENS_CAP", `${stage.id}.estimated_tokens exceeds its aggregate hard token cap`);
+      }
     }
     for (const dependency of stage.depends_on) {
       assertFlow(stageIds.has(dependency), "CONFIG_STAGE_DEPENDENCY_UNKNOWN", `${stage.id} depends on unknown ${dependency}`);

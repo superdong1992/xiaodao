@@ -42,7 +42,23 @@ async function main() {
   fs.mkdirSync(outputRoot, { recursive: true, mode: 0o700 });
   const claude = argument("--claude-entry");
   const runtimeProfileDigest = argument("--runtime-profile-digest");
+  const executionTopology = argument("--execution-topology");
+  const clientImageId = argument("--client-image-id");
   if (!runtimeProfileDigest || !/^[a-f0-9]{64}$/.test(runtimeProfileDigest)) throw new Error("--runtime-profile-digest is required");
+  if (!["native-host", "darwin-orchestrated-linux-container"].includes(executionTopology)) throw new Error("--execution-topology is invalid");
+  if (executionTopology === "darwin-orchestrated-linux-container") {
+    if (process.platform !== "linux" || !/^sha256:[a-f0-9]{64}$/.test(clientImageId ?? "")) {
+      throw new Error("the containerized Linux capability requires its frozen image identity");
+    }
+  } else if (clientImageId !== null) {
+    throw new Error("native host capability forbids a client image identity");
+  }
+  const processUid = typeof process.getuid === "function" ? process.getuid() : null;
+  const processGid = typeof process.getgid === "function" ? process.getgid() : null;
+  if (executionTopology === "darwin-orchestrated-linux-container"
+    && (!Number.isSafeInteger(processUid) || processUid <= 0 || !Number.isSafeInteger(processGid) || processGid < 0)) {
+    throw new Error("the containerized Linux capability must execute as an explicit non-root uid:gid");
+  }
   if (!claude || !path.isAbsolute(claude) || path.basename(claude) !== "cli.js" || !fs.existsSync(claude) || !fs.statSync(claude).isFile()) {
     throw new Error("--claude-entry must identify an existing absolute official npm cli.js");
   }
@@ -126,7 +142,7 @@ async function main() {
     });
     const rejected = await bypass.json();
     if (rejected.result?.structuredContent?.error?.code !== "VALIDATION_ERROR") throw new Error("server did not reject a removed composite field");
-    fs.writeFileSync(path.join(outputRoot, "host-capability-result.json"), `${JSON.stringify({ schema_version: 2, status: "PASS", runtime_profile_digest: runtimeProfileDigest, client: process.platform === "darwin" ? "macos" : process.platform === "win32" ? "windows" : "linux", claude_version: version.stdout.trim(), claude_cli_sha256: RELEASE_CLAUDE_CLI_SHA256, distribution: "official-npm", flat_schema: true, flat_call: true, client_dfx_absent: true })}\n`, { encoding: "utf8", mode: 0o600, flag: "wx" });
+    fs.writeFileSync(path.join(outputRoot, "host-capability-result.json"), `${JSON.stringify({ schema_version: 3, status: "PASS", runtime_profile_digest: runtimeProfileDigest, client: process.platform === "darwin" ? "macos" : process.platform === "win32" ? "windows" : "linux", architecture: process.arch, execution_topology: executionTopology, client_image_id: clientImageId, execution_user: { uid: processUid, gid: processGid, root: processUid === 0 }, node_version: process.version, node_executable: fs.realpathSync(process.execPath), node_sha256: sha256File(process.execPath), claude_version: version.stdout.trim(), claude_cli_sha256: RELEASE_CLAUDE_CLI_SHA256, distribution: "official-npm", flat_schema: true, flat_call: true, client_dfx_absent: true })}\n`, { encoding: "utf8", mode: 0o600, flag: "wx" });
     process.stdout.write("TEST_FLOW_PROGRESS request.completed\n");
   } finally {
     server.kill("SIGTERM");

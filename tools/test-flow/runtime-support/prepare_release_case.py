@@ -2,21 +2,22 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import importlib.util
 import json
 import os
 import re
 import stat
 import subprocess
-import sys
 import tempfile
 import zipfile
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path, PurePosixPath
 
 
-_ARCHIVE_PROJECTION = "logparse-current-loose-diagnostic-v2"
-_CONFIG_IDENTIFIER = re.compile(r"[A-Za-z][A-Za-z0-9_.-]{0,127}\Z")
+from problem_locator.runtime.methods_skill import load_specialized_skill_registration
+
+
+_ARCHIVE_PROJECTION = "frozen-raw-log-v1"
+_CONFIG_IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z")
 _TIMESTAMP_REGEX = (
     r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?)"
     r"([+-]\d{2}:\d{2})?"
@@ -68,33 +69,14 @@ def single_case(release_root: Path) -> Path:
     return candidates[0]
 
 
-def product_digest(root: Path) -> str:
-    records = []
-    for path in sorted(root.iterdir(), key=lambda item: item.name):
-        metadata = path.lstat()
-        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
-            raise SystemExit("approved Skill contains a non-ordinary file")
-        payload = path.read_bytes()
-        records.append(
-            {
-                "path": path.name,
-                "size": len(payload),
-                "sha256": hashlib.sha256(payload).hexdigest(),
-            }
-        )
-    if [item["path"] for item in records] != ["SKILL.md", "diagnosis-skill.json"]:
-        raise SystemExit("approved Skill file set is invalid")
-    return hashlib.sha256(canonical(records)).hexdigest()
-
-
-def load_module(path: Path, name: str):
-    spec = importlib.util.spec_from_file_location(name, path)
-    if spec is None or spec.loader is None:
-        raise SystemExit("release case generator module is unavailable")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[name] = module
-    spec.loader.exec_module(module)
-    return module
+def one_registration(root: Path) -> Path:
+    metadata = root.lstat()
+    if not stat.S_ISDIR(metadata.st_mode) or root.is_symlink():
+        raise SystemExit("generated Methods root must be one real directory")
+    children = sorted(root.iterdir(), key=lambda item: item.name)
+    if len(children) != 1 or not children[0].is_dir() or children[0].is_symlink():
+        raise SystemExit("generated Methods root must contain exactly one registration")
+    return children[0]
 
 
 def identifier(value: object, label: str) -> str:
@@ -131,8 +113,8 @@ def driver_facts(driver: dict[str, object]) -> dict[str, str]:
     return dict(zip(names, values, strict=True))
 
 
-def normalized_problem_time(skill_manifest: dict[str, object], facts: dict[str, str]) -> str:
-    plan = skill_manifest.get("logparse_plan")
+def normalized_problem_time(preprocessing: dict[str, object], facts: dict[str, str]) -> str:
+    plan = preprocessing.get("logparse_plan")
     if not isinstance(plan, dict):
         raise SystemExit("release case logparse plan is invalid")
     binding = plan.get("problem_time_binding")
@@ -151,13 +133,13 @@ def normalized_problem_time(skill_manifest: dict[str, object], facts: dict[str, 
 
 
 def build_logparse_projection(
-    skill_manifest: dict[str, object],
+    preprocessing: dict[str, object],
     driver: dict[str, object],
 ) -> tuple[dict[str, object], dict[str, dict[str, str]], str]:
-    product = identifier(skill_manifest.get("logparse_product"), "logparse product")
+    product = identifier(preprocessing.get("logparse_product"), "logparse product")
     facts = driver_facts(driver)
-    timestamp = normalized_problem_time(skill_manifest, facts)
-    plan = skill_manifest.get("logparse_plan")
+    timestamp = normalized_problem_time(preprocessing, facts)
+    plan = preprocessing.get("logparse_plan")
     assert isinstance(plan, dict)
     anchors = plan.get("anchors")
     attachment_names = driver.get("attachment_files")
@@ -283,32 +265,16 @@ def build_logparse_projection(
     return config, projections, product
 
 
-def projected_log_bytes(payload: bytes, projection: dict[str, str]) -> bytes:
+def frozen_log_bytes(payload: bytes) -> bytes:
     try:
         text = payload.decode("utf-8", errors="strict")
     except UnicodeDecodeError as exc:
         raise SystemExit("release case attachment is not UTF-8") from exc
     if "\x00" in text:
         raise SystemExit("release case attachment contains NUL")
-    lines = text.splitlines()
-    if not lines:
+    if not text.splitlines():
         raise SystemExit("release case attachment is empty")
-    try:
-        initial_timestamp = datetime.fromisoformat(projection["timestamp"])
-        rendered = []
-        for ordinal, line in enumerate(lines):
-            timestamp = (initial_timestamp + timedelta(microseconds=ordinal)).isoformat(
-                timespec="microseconds"
-            )
-            prefix = (
-                f'{timestamp} {projection["module"].upper()} '
-                f'Service=release-case; Slot={projection["slot"]}; CPU-Id=0; '
-                f'ProcessName={projection["process"]}; Context='
-            )
-            rendered.append(f"{prefix}{line})")
-    except (OverflowError, ValueError) as exc:
-        raise SystemExit("release case projection timestamp is invalid") from exc
-    return ("\n".join(rendered) + "\n").encode("utf-8")
+    return payload if payload.endswith(b"\n") else payload + b"\n"
 
 
 def build_archive(
@@ -343,7 +309,7 @@ def build_archive(
             info.external_attr = (stat.S_IFREG | 0o644) << 16
             archive.writestr(
                 info,
-                projected_log_bytes(source.read_bytes(), projections[name]),
+                frozen_log_bytes(source.read_bytes()),
                 compress_type=zipfile.ZIP_DEFLATED,
                 compresslevel=9,
             )
@@ -459,9 +425,7 @@ def smoke_test_logparse(
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--release-root", type=Path, required=True)
-    parser.add_argument("--generator", type=Path, required=True)
-    parser.add_argument("--validator", type=Path, required=True)
-    parser.add_argument("--generated-skills", type=Path, required=True)
+    parser.add_argument("--generated-skill-root", type=Path, required=True)
     parser.add_argument("--evidence-root", type=Path, required=True)
     parser.add_argument("--logparse-config", type=Path, required=True)
     parser.add_argument("--logparse-python", type=Path, required=True)
@@ -483,31 +447,25 @@ def main() -> int:
     if scenario is None:
         raise SystemExit("journey scenario is not declared")
     driver_path = ordinary_file(case_root, scenario.get("driver"))
-    generator = load_module(args.generator, "_release_case_generator_v5")
-    validator = load_module(args.validator, "_release_case_validator_v5")
-    generation_spec = generator.load_generation_spec(
-        ordinary_file(case_root, descriptor["generation_spec"])
-    )
-    generated_result = generator.generate_diagnosis_skill(
-        generation_spec,
-        args.generated_skills,
-    )
-    validation = validator.validate_skill_directory(generated_result.skill_dir)
-    if not validation.ok:
-        raise SystemExit("generated Skill failed validation")
-
-    skill_manifest = json.loads(
-        ordinary_file(case_root, f'{descriptor["approved_skill_dir"]}/diagnosis-skill.json').read_bytes()
-    )
-    skill_id = skill_manifest.get("id")
-    generated = args.generated_skills / str(skill_id)
-    approved = case_root.joinpath(*safe_relative(descriptor["approved_skill_dir"]).parts)
-    if not generated.is_dir() or product_digest(generated) != product_digest(approved):
-        raise SystemExit("generated Skill differs from the reviewed approved product")
+    registration_root = one_registration(args.generated_skill_root)
+    try:
+        generated = load_specialized_skill_registration(registration_root)
+    except (OSError, TypeError, ValueError) as exc:
+        raise SystemExit("generated Methods registration failed product validation") from exc
+    expected_template = ordinary_file(case_root, descriptor["registration_template"])
+    actual_template = registration_root / "registration-template.json"
+    if actual_template.read_bytes() != expected_template.read_bytes():
+        raise SystemExit("generated Methods registration differs from the product template")
+    wiki = ordinary_file(case_root, descriptor["input_wiki"])
+    wiki_sha256 = hashlib.sha256(wiki.read_bytes()).hexdigest()
+    if generated.registration.source_wiki_sha256 != wiki_sha256:
+        raise SystemExit("generated Methods package differs from the frozen Wiki")
 
     driver = json.loads(driver_path.read_bytes())
+    registration_value = json.loads(actual_template.read_bytes())
+    preprocessing = registration_value["runtime"]["preprocessing"]
     logparse_config, projections, logparse_product = build_logparse_projection(
-        skill_manifest,
+        preprocessing,
         driver,
     )
     config_payload = canonical(logparse_config)
@@ -530,13 +488,20 @@ def main() -> int:
         projections=projections,
     )
     receipt = {
-        "schema_version": 1,
+        "schema_version": 2,
         "status": "PASS",
         "case_id": descriptor["case_id"],
         "scenario_id": scenario_id,
-        "skill_id": skill_id,
-        "skill_product_digest": product_digest(generated),
+        "registration_id": generated.registration_id,
+        "runtime_ref_id": f"diagnosis-skill/{generated.registration_id}",
+        "version": generated.registration.version,
+        "skill_name": generated.methods.skill_name,
+        "source_wiki_sha256": generated.methods.source_wiki_sha256,
+        "registration_sha256": generated.registration_sha256,
+        "package_tree_sha256": generated.package_tree_sha256,
+        "combined_sha256": generated.combined_sha256,
         "logparse_product": logparse_product,
+        "attachment_requirement": preprocessing["logparse_plan"]["attachment_requirement"],
         "logparse_config_size": len(config_payload),
         "logparse_config_sha256": hashlib.sha256(config_payload).hexdigest(),
         "archive_projection": _ARCHIVE_PROJECTION,

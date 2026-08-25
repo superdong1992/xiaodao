@@ -3,7 +3,6 @@ from __future__ import annotations
 import importlib.util
 import json
 import sys
-from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -34,19 +33,19 @@ def _reviewed_inputs() -> tuple[dict, dict]:
         if item["scenario_id"] == descriptor["journey_scenario"]
     )
     driver = json.loads((CASE_ROOT / scenario["driver"]).read_bytes())
-    skill = json.loads(
-        (CASE_ROOT / descriptor["approved_skill_dir"] / "diagnosis-skill.json").read_bytes()
+    registration = json.loads(
+        (CASE_ROOT / descriptor["registration_template"]).read_bytes()
     )
-    return skill, driver
+    return registration["runtime"]["preprocessing"], driver
 
 
-def test_reviewed_skill_and_driver_project_to_one_bounded_logparse_runtime() -> None:
+def test_product_registration_and_driver_project_to_one_bounded_logparse_runtime() -> None:
     support = _module()
-    skill, driver = _reviewed_inputs()
+    preprocessing, driver = _reviewed_inputs()
 
-    config, projections, product = support.build_logparse_projection(skill, driver)
+    config, projections, product = support.build_logparse_projection(preprocessing, driver)
 
-    assert product == skill["logparse_product"]
+    assert product == preprocessing["logparse_product"]
     assert list(config["products"]) == [product]
     assert config["products"][product]["archive"] == {
         "recursive_extraction": False,
@@ -62,44 +61,23 @@ def test_reviewed_skill_and_driver_project_to_one_bounded_logparse_runtime() -> 
     assert set(config["products"][product]["mechanisms"]) == {
         item["module"] for item in projections.values()
     }
-    for projection in projections.values():
-        rendered = support.projected_log_bytes(b"public sample line\n", projection).decode()
-        assert rendered.endswith("Context=public sample line)\n")
-        assert projection["module"].upper() in rendered
-        assert f'Slot={projection["slot"]};' in rendered
-        assert f'ProcessName={projection["process"]};' in rendered
 
 
-def test_projected_log_bytes_preserves_source_order_with_monotonic_timestamps() -> None:
+def test_frozen_log_bytes_preserves_authored_lines_without_projection() -> None:
     support = _module()
-    skill, driver = _reviewed_inputs()
-    _config, projections, _product = support.build_logparse_projection(skill, driver)
-    projection = next(iter(projections.values()))
+    payload = b"first source line\nsecond source line\nthird source line\n"
 
-    rendered = support.projected_log_bytes(
-        b"first source line\nsecond source line\nthird source line\n",
-        projection,
-    ).decode().splitlines()
-
-    timestamps = [datetime.fromisoformat(line.split(" ", 1)[0]) for line in rendered]
-    assert timestamps == [
-        datetime.fromisoformat(projection["timestamp"]) + timedelta(microseconds=ordinal)
-        for ordinal in range(3)
-    ]
-    assert [line.rsplit("Context=", 1)[1] for line in rendered] == [
-        "first source line)",
-        "second source line)",
-        "third source line)",
-    ]
+    assert support.frozen_log_bytes(payload) == payload
+    assert support.frozen_log_bytes(payload.rstrip(b"\n")) == payload
 
 
 def test_projection_rejects_skill_and_attachment_anchor_drift() -> None:
     support = _module()
-    skill, driver = _reviewed_inputs()
-    skill["logparse_plan"]["anchors"] = skill["logparse_plan"]["anchors"][:-1]
+    preprocessing, driver = _reviewed_inputs()
+    preprocessing["logparse_plan"]["anchors"] = preprocessing["logparse_plan"]["anchors"][:-1]
 
     with pytest.raises(SystemExit, match="attachment anchor is not declared"):
-        support.build_logparse_projection(skill, driver)
+        support.build_logparse_projection(preprocessing, driver)
 
 
 @pytest.mark.parametrize(
@@ -110,10 +88,8 @@ def test_projection_rejects_skill_and_attachment_anchor_drift() -> None:
         (b"\xff", "UTF-8"),
     ],
 )
-def test_projected_log_bytes_rejects_unsafe_inputs(payload: bytes, message: str) -> None:
+def test_frozen_log_bytes_rejects_unsafe_inputs(payload: bytes, message: str) -> None:
     support = _module()
-    skill, driver = _reviewed_inputs()
-    _config, projections, _product = support.build_logparse_projection(skill, driver)
 
     with pytest.raises(SystemExit, match=message):
-        support.projected_log_bytes(payload, next(iter(projections.values())))
+        support.frozen_log_bytes(payload)

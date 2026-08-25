@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "scenario_id": "multiple-rpc-timeouts",
+  "status": "CONFIRMED",
+  "confirmed_methods": ["api-execution-too-long", "client-recv-blocked"],
+  "candidate_methods": ["server-recv-queue"],
+  "evidence": [
+    {
+      "method_id": "api-execution-too-long",
+      "anchor": "server",
+      "marker": "API_COMPLETE",
+      "summary": "svc_orders.Reserve 执行 6500000 微秒（6.5 秒），超过日志中的 3000/5000 毫秒超时阈值；该 API 调用自身执行过长。"
+    },
+    {
+      "method_id": "client-recv-blocked",
+      "anchor": "client",
+      "marker": "LATE_RESPONSE",
+      "summary": "request_id=501：端到端耗时 4500000 微秒，服务端执行 1000000 微秒，客户端收包侧排队 3400000 微秒；对应超时为 3000 毫秒，且客户端排队时间更长，确认客户端收包线程阻塞。"
+    },
+    {
+      "method_id": "server-recv-queue",
+      "anchor": "client",
+      "marker": "LATE_RESPONSE",
+      "summary": "发现 request_id=501 的晚响应，但未发现 QUEUE_HISTORY，缺少服务端收包排队及贡献者的正向证据。"
+    }
+  ],
+  "limitations": [
+    "client.log 中 request_id=501 对应的超时为 3000 毫秒；另一条 5000 毫秒超时记录没有 request_id，不能与该调用强行合并。",
+    "API_COMPLETE 缺少 request_id，不能与 LATE_RESPONSE 调用合并；其作为独立目标 API 完成记录保留。",
+    "QUEUE_HISTORY、DEADLOOP_DETECTED 未出现；相关日志可能受 BBBB 抑制、限流或条件打印影响，缺失不能排除相应原因。"
+  ],
+  "safety_notes": [
+    "RPC 超时不等于取消；服务端可能已继续执行，后续执行可能产生副作用。"
+  ],
+  "logparse_receipt_sha256": "a5ebbef5cc1fd0aa44655739bbdeba1f9eb9376059c44fdc6e14a6795b215c47"
+}

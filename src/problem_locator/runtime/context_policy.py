@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 import stat
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -28,6 +28,7 @@ from problem_locator.contracts import (
 from .catalog import hash_product_directory
 from .context_builder import ContextMaterials
 from .failures import runtime_failure
+from .methods_skill import load_specialized_skill_registration
 from .workspace import PreparedWorkspace
 
 
@@ -62,12 +63,27 @@ class ResolvedJobAssets:
     skill_text: str | None
     skill_index_text: str | None
 
-    def bind_workspace(self, workspace: PreparedWorkspace) -> ResolvedContextAssets:
+    def bind_workspace(
+        self,
+        workspace: PreparedWorkspace,
+        *,
+        loaded_method_ids: Sequence[str] | None = None,
+    ) -> ResolvedContextAssets:
         """Attach only the already-frozen Workspace view to context materials."""
 
+        skill_text = self.skill_text
+        if loaded_method_ids is not None:
+            if self.skill is None:
+                raise _invalid_asset() from None
+            skill_text = _load_entry_text(
+                self.skill,
+                self.skill.ref,
+                AssetKind.DIAGNOSIS_SKILL,
+                loaded_method_ids=loaded_method_ids,
+            )
         materials = ContextMaterials(
             profile=self.profile_text,
-            skill=self.skill_text,
+            skill=skill_text,
             skill_index=self.skill_index_text,
             tool_bundle=self.tool_bundle_text,
             output_contract=self.output_contract_text,
@@ -178,7 +194,11 @@ def _validate_resolved_asset(
         # config, interpreter path and version), so its paired Catalog/Broker
         # is the authority and this resolver must not substitute a second hash
         # algorithm for that frozen ref.
-        if (
+        if expected_kind is AssetKind.DIAGNOSIS_SKILL:
+            specialized = load_specialized_skill_registration(root)
+            if specialized.combined_sha256 != expected_ref.content_hash:
+                raise ValueError("registered Methods Skill content drifted")
+        elif (
             expected_kind is not AssetKind.LOGPARSE_TOOL
             and hash_product_directory(root) != expected_ref.content_hash
         ):
@@ -192,16 +212,60 @@ def _load_entry_text(
     resolved: ResolvedAsset,
     expected_ref: VersionedRef,
     expected_kind: AssetKind,
+    *,
+    loaded_method_ids: Sequence[str] | None = None,
 ) -> str:
     root = _validate_resolved_asset(resolved, expected_ref, expected_kind)
+    if expected_kind is AssetKind.DIAGNOSIS_SKILL:
+        specialized = load_specialized_skill_registration(root)
+        package_root = specialized.package_root
+        if loaded_method_ids is None:
+            selected_method_ids = tuple(
+                item.id for item in specialized.methods.methods
+            )
+        else:
+            selected_method_ids = tuple(loaded_method_ids)
+            if (
+                any(not isinstance(item, str) or not item for item in selected_method_ids)
+                or len(selected_method_ids) != len(set(selected_method_ids))
+                or not set(selected_method_ids).issubset(
+                    specialized.methods.method_by_id
+                )
+            ):
+                raise _invalid_asset() from None
+        selected = set(selected_method_ids)
+        ordered_paths = [
+            "SKILL.md",
+            "methods.json",
+            *specialized.methods.shared_references,
+            *(
+                item.reference
+                for item in specialized.methods.methods
+                if item.id in selected
+            ),
+        ]
+        rendered: list[str] = []
+        seen: set[str] = set()
+        for relative in ordered_paths:
+            if relative in seen:
+                continue
+            seen.add(relative)
+            target = _safe_entry(package_root, relative)
+            try:
+                text = target.read_bytes().decode("utf-8")
+            except (OSError, UnicodeDecodeError):
+                raise _invalid_asset() from None
+            rendered.append(
+                f'<<<METHODS_SKILL_FILE path="{relative}">>>\n'
+                f"{text.rstrip()}\n"
+                "<<<END METHODS_SKILL_FILE>>>"
+            )
+        return "\n".join(rendered) + "\n"
     manifest_name = (
-        "diagnosis-skill.json"
-        if expected_kind is AssetKind.DIAGNOSIS_SKILL
-        else "asset.json"
+        "asset.json"
     )
     manifest = _parse_manifest(root / manifest_name)
-    entry_field = "entry_document" if manifest_name == "diagnosis-skill.json" else "entry"
-    target = _safe_entry(root, manifest.get(entry_field))
+    target = _safe_entry(root, manifest.get("entry"))
     try:
         return target.read_bytes().decode("utf-8")
     except (OSError, UnicodeDecodeError):
@@ -217,45 +281,20 @@ def _skill_index_entry(
         expected_ref,
         AssetKind.DIAGNOSIS_SKILL,
     )
-    manifest = _parse_manifest(root / "diagnosis-skill.json")
-    required = {
-        "schema_version",
-        "deployment_scope",
-        "id",
-        "version",
-        "capability",
-        "summary",
-        "entry_document",
-        "tool_bundle_id",
-        "requires_logparse",
-        "input_profile",
-        "input_profile_sha256",
-        "roles",
-        "requirements",
-        "logparse_plan",
-        "verification_contract",
-    }
-    if set(manifest) not in (required, required | {"logparse_product"}):
+    try:
+        specialized = load_specialized_skill_registration(root)
+    except (OSError, TypeError, ValueError):
         raise _invalid_asset() from None
-    if (
-        manifest.get("schema_version") != 6
-        or manifest.get("deployment_scope") not in {"PRODUCTION", "TEST_ONLY"}
-        or not isinstance(manifest.get("capability"), str)
-        or not manifest["capability"]
-        or not isinstance(manifest.get("summary"), str)
-        or not manifest["summary"]
-    ):
-        raise _invalid_asset() from None
+    registration = specialized.registration
     return {
         "ref": expected_ref.model_dump(mode="json"),
-        "capability": manifest["capability"],
-        "summary": manifest["summary"],
-        "requires_logparse": manifest.get("requires_logparse"),
-        "logparse_product": (
-            manifest.get("logparse_product", "default")
-            if manifest.get("requires_logparse") is True
-            else None
-        ),
+        "registration_id": registration.registration_id,
+        "capability": registration.capability,
+        "summary": registration.summary,
+        "required_user_inputs": list(specialized.methods.required_user_inputs),
+        "required_artifacts": list(specialized.methods.required_artifacts),
+        "requires_logparse": registration.preprocessing.requires_logparse,
+        "logparse_product": registration.preprocessing.logparse_product,
     }
 
 
@@ -348,6 +387,7 @@ class RuntimeAssetResolver:
                 skill,
                 job.skill_ref,
                 AssetKind.DIAGNOSIS_SKILL,
+                loaded_method_ids=(),
             )
 
         return ResolvedJobAssets(

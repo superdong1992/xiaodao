@@ -2,10 +2,18 @@ from __future__ import annotations
 
 # Runtime support shared by the first-party CrossJob adapters.
 
+import os
 import sys
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
+
+_explicit_source_root = os.environ.get("TEST_FLOW_SOURCE_ROOT")
+if _explicit_source_root:
+    explicit_source = Path(_explicit_source_root) / "src"
+    if not explicit_source.is_absolute() or not (explicit_source / "problem_locator").is_dir():
+        raise RuntimeError("TEST_FLOW_SOURCE_ROOT is invalid")
+    sys.path.insert(0, str(explicit_source))
 
 try:
     from problem_locator.bootstrap import _create_test_app, cli_hooks

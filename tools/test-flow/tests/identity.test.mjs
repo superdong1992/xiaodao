@@ -25,6 +25,23 @@ test("Chrome identity freezes the version and executable bytes", () => {
   }
 });
 
+test("Chrome identity accepts the pinned Chrome for Testing version format", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "test-flow-cft-identity-"));
+  try {
+    const executable = path.join(root, "chrome");
+    fs.writeFileSync(executable, "frozen cft launcher\n");
+    const identity = chromeIdentity(
+      { TEST_FLOW_CHROME: executable },
+      "linux",
+      () => ({ status: 0, stdout: "Google Chrome for Testing 152.0.7977.54\n", stderr: "" }),
+    );
+    assert.equal(identity.status, "PRESENT");
+    assert.equal(identity.version, "Google Chrome for Testing 152.0.7977.54");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("Python import identity changes when external PYTHONPATH content changes", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "test-flow-python-path-"));
   try {

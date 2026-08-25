@@ -1,9 +1,8 @@
-"""Validate the only business output accepted from an Agent workspace.
+"""Validate the immutable output protocol selected for one Agent workspace.
 
-The reader is deliberately a pre-staging boundary.  It returns proposal paths
-only after the complete Agent outcome, every declared proposal resource, and a
-possible USER_RESULT have passed the frozen S00 validators.  Callers therefore
-cannot accidentally stage a prefix of an otherwise invalid Agent response.
+Specialized diagnosis/review use their exact Methods draft paths; ROUTE and
+generic diagnosis retain the sealed legacy envelope.  The reader remains a
+pre-staging boundary, so callers cannot stage a prefix of an invalid response.
 """
 
 from __future__ import annotations
@@ -15,7 +14,7 @@ import os
 import stat
 from collections.abc import Callable, Iterable
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 from typing import Any, BinaryIO, Iterator, TypeAlias
@@ -24,9 +23,11 @@ from pydantic import ValidationError
 
 from problem_locator.contracts.enums import (
     ArtifactKind,
+    DiagnosisMode,
     ErrorCode,
     EvidenceSourceType,
     ExecutionStage,
+    JobType,
     OutcomeResultType,
     ResourceKind,
 )
@@ -61,8 +62,10 @@ from .authoritative_targets import (
     AuthoritativeTargetLog,
     AuthoritativeTargetSet,
     resolve_authoritative_targets,
+    validated_successful_broker_record,
 )
 from .failures import RuntimeExecutionError, runtime_failure
+from .methods_grounding import MethodDiagnosisDraftV1, MethodReviewV1
 from .outcome_finalizer import (
     DRAFT_FINALIZATION_MARKER_NAME,
     SealedAgentOutcomeDraftMarker,
@@ -391,11 +394,63 @@ class ValidatedAgentOutput:
 class ValidatedAgentDraft:
     """Frozen, sealed Agent draft and all proposal bytes, before server decision."""
 
+    kind: "ValidatedOutputKind" = field(
+        default_factory=lambda: ValidatedOutputKind.LEGACY_AGENT_DRAFT,
+        init=False,
+    )
     draft: AgentJobOutcomeDraftV2
     canonical_bytes: bytes
     proposal_resources: tuple[ValidatedProposalResource, ...]
     authoritative_targets: AuthoritativeTargetSet | None
     target_logs: tuple[CapturedTargetLog, ...]
+
+
+class ValidatedOutputKind(StrEnum):
+    """Discriminator for the mutually exclusive Agent output protocols."""
+
+    LEGACY_AGENT_DRAFT = "LEGACY_AGENT_DRAFT"
+    METHOD_DIAGNOSIS_DRAFT = "METHOD_DIAGNOSIS_DRAFT"
+    METHOD_REVIEW_DRAFT = "METHOD_REVIEW_DRAFT"
+
+
+@dataclass(frozen=True, slots=True)
+class ValidatedMethodDiagnosisDraft:
+    """One canonical Methods diagnosis draft from the hard-cut output path."""
+
+    kind: ValidatedOutputKind = field(
+        default=ValidatedOutputKind.METHOD_DIAGNOSIS_DRAFT,
+        init=False,
+    )
+    draft: MethodDiagnosisDraftV1
+    canonical_bytes: bytes
+
+
+@dataclass(frozen=True, slots=True)
+class ValidatedMethodReviewDraft:
+    """One canonical Methods review draft from the hard-cut output path."""
+
+    kind: ValidatedOutputKind = field(
+        default=ValidatedOutputKind.METHOD_REVIEW_DRAFT,
+        init=False,
+    )
+    draft: MethodReviewV1
+    canonical_bytes: bytes
+
+
+@dataclass(frozen=True, slots=True)
+class ValidatedMethodsPreprocessing:
+    """Server-reread Logparse output ready to freeze for the Methods pass."""
+
+    request_bytes: bytes
+    broker_audit_bytes: bytes
+    authoritative_targets: AuthoritativeTargetSet
+    target_logs: tuple[CapturedTargetLog, ...]
+    proposal_resources: tuple[ValidatedProposalResource, ...]
+
+
+ValidatedAgentDraftOutput: TypeAlias = (
+    ValidatedAgentDraft | ValidatedMethodDiagnosisDraft | ValidatedMethodReviewDraft
+)
 
 
 class _ExactSecretScanner:
@@ -1500,6 +1555,171 @@ def _capture_authoritative_target_logs(
     return target_set, tuple(captured)
 
 
+def read_methods_preprocessing(
+    workspace: PreparedWorkspace,
+    job: Job,
+    workspace_manifest: WorkspaceInputManifest,
+    *,
+    broker_audit_bytes: bytes,
+    request_bytes: bytes | None,
+    secrets: Iterable[bytes | str] = (),
+) -> ValidatedMethodsPreprocessing:
+    """Reread and freeze the product-owned Pass-A Logparse result.
+
+    The Methods Agent never receives the broker capability.  This boundary
+    resolves the one successful operation from the server audit, re-hashes its
+    controlled source tree, and captures only the declared target-log bytes.
+    """
+
+    if not isinstance(workspace, PreparedWorkspace):
+        raise TypeError("Methods preprocessing requires a PreparedWorkspace")
+    if workspace.manifest != workspace_manifest:
+        raise ValueError("Methods preprocessing manifest differs from the Workspace")
+    if job.job_type is not JobType.DIAGNOSE or job.diagnosis_mode is not DiagnosisMode.SPECIALIZED:
+        raise ValueError("Methods preprocessing is valid only for specialized diagnosis")
+    if workspace_manifest.resolved_logparse_plan is None:
+        raise ValueError("Methods preprocessing requires a resolved Logparse plan")
+    patterns = _normalize_secrets(secrets)
+    root_identity = (workspace.root_device, workspace.root_inode)
+    output_boundary = _FrozenReadBoundary(
+        top_level=_WorkspaceTopLevel.OUTPUT,
+        identity=(workspace.output_device, workspace.output_inode),
+    )
+    inputs_boundary = _FrozenReadBoundary(
+        top_level=_WorkspaceTopLevel.INPUTS,
+        identity=(workspace.inputs_device, workspace.inputs_inode),
+    )
+    target_set = resolve_authoritative_targets(
+        workspace_manifest,
+        broker_audit_bytes,
+    )
+    record = validated_successful_broker_record(
+        broker_audit_bytes,
+        job_id=job.job_id,
+    )
+    canonical_request = canonical_json_bytes(record["request"])
+    if record.get("request_sha256") != bytes_sha256(canonical_request):
+        raise ValueError("Logparse request digest differs from its broker audit")
+    if request_bytes is not None and request_bytes != canonical_request:
+        raise ValueError("accepted Logparse request differs from the broker audit")
+
+    resources: dict[str, ValidatedProposalResource] = {}
+    first = target_set.targets[0]
+    if first.source_kind == "OUTPUT_PROPOSAL":
+        draft = AgentArtifactProposalDraft.model_validate(
+            record["result"].get("logparse_run_artifact_draft")
+        )
+        if (
+            draft.proposal_key != first.source_ref
+            or draft.workspace_relative_path != first.source_root
+            or draft.resource_kind is not ResourceKind.DIRECTORY
+            or draft.artifact_kind is not ArtifactKind.LOGPARSE_RUN
+        ):
+            raise ValueError("Logparse proposal source differs from the audit")
+        source_path = workspace.root / first.source_root
+        size, sha256, tree_manifest = _inspect_tree(
+            source_path,
+            workspace_root=workspace.root,
+            patterns=patterns,
+            max_bytes=job.resource_limits.workspace_bytes,
+            root_identity=root_identity,
+            boundary=output_boundary,
+        )
+        if target_set.source_size is not None or target_set.source_sha256 != sha256:
+            raise ValueError("Logparse proposal tree differs from the authoritative target set")
+        resource = ValidatedProposalResource(
+            draft=draft,
+            proposal_key=draft.proposal_key,
+            workspace_relative_path=first.source_root,
+            path=source_path,
+            resource_kind=ResourceKind.DIRECTORY,
+            size=size,
+            sha256=sha256,
+            tree_manifest=tree_manifest,
+            source_snapshot=_snapshot_source(
+                workspace.root,
+                first.source_root,
+                root_identity=root_identity,
+                boundary=output_boundary,
+            ),
+        )
+        resources[draft.proposal_key] = resource
+
+    tree_manifest, boundary = _tree_manifest_for_authoritative_source(
+        workspace_root=workspace.root,
+        target_set=target_set,
+        workspace_manifest=workspace_manifest,
+        resources=resources,
+        patterns=patterns,
+        root_identity=root_identity,
+        output_boundary=output_boundary,
+        inputs_boundary=inputs_boundary,
+    )
+    entries = {entry.path: entry for entry in tree_manifest.entries}
+    captured: list[CapturedTargetLog] = []
+    for target in target_set.targets:
+        if not target.deliverable:
+            continue
+        if target.log_path is None or target.workspace_relative_path is None:
+            raise ValueError("deliverable Logparse target lacks its source path")
+        expected = entries.get(target.log_path)
+        if expected is None:
+            raise ValueError("Logparse target is absent from the frozen source tree")
+        size, sha256, content, _ = _read_frozen_relative_file(
+            workspace.root,
+            target.workspace_relative_path,
+            patterns=patterns,
+            capture=True,
+            root_identity=root_identity,
+            boundary=boundary,
+            max_bytes=expected.size,
+        )
+        if size != expected.size or sha256 != expected.sha256 or content is None:
+            raise ValueError("Logparse target differs from the frozen source tree")
+        captured.append(
+            CapturedTargetLog(
+                target=target,
+                content=content,
+                evidence_bindings=(
+                    EvidenceBinding(
+                        existing_evidence_id=None,
+                        evidence_proposal_key=f"methods-target-{target.ordinal}",
+                    ),
+                ),
+            )
+        )
+    for resource in resources.values():
+        resource.verify_unchanged()
+    if first.source_kind == "INPUT_ARTIFACT":
+        artifact = next(
+            entry
+            for entry in workspace_manifest.entries
+            if isinstance(entry, WorkspaceArtifactInput)
+            and entry.resource_id == first.source_ref
+        )
+        size, sha256, final_manifest = _inspect_tree(
+            workspace.root / first.source_root,
+            workspace_root=workspace.root,
+            patterns=patterns,
+            max_bytes=artifact.size,
+            root_identity=root_identity,
+            boundary=inputs_boundary,
+        )
+        if (
+            size != artifact.size
+            or sha256 != artifact.sha256
+            or final_manifest != tree_manifest
+        ):
+            raise ValueError("materialized Logparse run changed during target capture")
+    return ValidatedMethodsPreprocessing(
+        request_bytes=canonical_request,
+        broker_audit_bytes=broker_audit_bytes,
+        authoritative_targets=target_set,
+        target_logs=tuple(captured),
+        proposal_resources=tuple(resources.values()),
+    )
+
+
 def _read_validated_output(
     workspace: PreparedWorkspace | Path,
     workspace_root: Path,
@@ -1687,6 +1907,168 @@ def _read_validated_output(
     )
 
 
+def _method_output_protocol(
+    job: Job,
+) -> tuple[
+    str,
+    Callable[[Any], MethodDiagnosisDraftV1 | MethodReviewV1],
+    ValidatedOutputKind,
+] | None:
+    """Return the hard-cut Methods path and parser for this Job, if any."""
+
+    if (
+        job.job_type is JobType.DIAGNOSE
+        and job.diagnosis_mode is DiagnosisMode.SPECIALIZED
+    ):
+        return (
+            "output/method-diagnosis.draft.json",
+            MethodDiagnosisDraftV1.from_mapping,
+            ValidatedOutputKind.METHOD_DIAGNOSIS_DRAFT,
+        )
+    if job.job_type is JobType.REVIEW:
+        return (
+            "output/method-review.draft.json",
+            MethodReviewV1.from_mapping,
+            ValidatedOutputKind.METHOD_REVIEW_DRAFT,
+        )
+    return None
+
+
+def _read_method_agent_output(
+    workspace: PreparedWorkspace | Path,
+    job: Job,
+    *,
+    relative_path: str,
+    parser: Callable[[Any], MethodDiagnosisDraftV1 | MethodReviewV1],
+    kind: ValidatedOutputKind,
+    patterns: tuple[bytes, ...],
+) -> ValidatedMethodDiagnosisDraft | ValidatedMethodReviewDraft:
+    """Read one canonical Methods draft without consulting the legacy envelope."""
+
+    workspace_root = (
+        workspace.root if isinstance(workspace, PreparedWorkspace) else Path(workspace)
+    )
+    missing = False
+    invalid = False
+    failure_category = "method_draft_validation"
+    diagnostic_reason: str | None = None
+    final_outcome_state = "not_checked"
+    final_outcome_bytes: int | None = None
+    raw_draft_bytes: bytes | None = None
+    parsed: MethodDiagnosisDraftV1 | MethodReviewV1 | None = None
+    canonical_bytes: bytes | None = None
+    try:
+        if isinstance(workspace, PreparedWorkspace):
+            root_identity = (workspace.root_device, workspace.root_inode)
+            output_identity = (workspace.output_device, workspace.output_inode)
+        else:
+            root_metadata = _lstat(workspace_root)
+            _assert_directory(root_metadata, device=root_metadata.st_dev)
+            root_identity = _identity(root_metadata)
+            output_metadata = _lstat(workspace_root / "output", missing_outcome=True)
+            _assert_directory(output_metadata, device=root_metadata.st_dev)
+            output_identity = _identity(output_metadata)
+        output_boundary = _FrozenReadBoundary(
+            top_level=_WorkspaceTopLevel.OUTPUT,
+            identity=output_identity,
+        )
+        metadata = _lstat(workspace_root / relative_path, missing_outcome=True)
+        final_outcome_state = "present"
+        final_outcome_bytes = metadata.st_size
+        initial = _snapshot_source(
+            workspace_root,
+            relative_path,
+            root_identity=root_identity,
+            boundary=output_boundary,
+        )
+        _, _, raw_draft_bytes, _ = _read_frozen_relative_file(
+            workspace_root,
+            relative_path,
+            capture=True,
+            root_identity=root_identity,
+            boundary=output_boundary,
+            max_bytes=job.resource_limits.workspace_bytes,
+        )
+        assert raw_draft_bytes is not None
+        document = parse_agent_json_bytes(raw_draft_bytes)
+        if raw_draft_bytes != document.canonical_bytes:
+            failure_category = "method_draft_non_canonical"
+            diagnostic_reason = "Methods draft bytes are not Canonical JSON"
+            raise _InvalidOutput
+        parsed = parser(document.value)
+        canonical_bytes = raw_draft_bytes
+        _scan_bytes(canonical_bytes, patterns)
+        _assert_snapshot_paths(initial)
+        final_metadata = _lstat(workspace_root / relative_path)
+        if _fingerprint(final_metadata) != initial.leaf_fingerprint:
+            failure_category = "method_draft_stability"
+            diagnostic_reason = "Methods draft changed during validation"
+            raise _InvalidOutput
+    except _MissingOutcome:
+        missing = True
+        final_outcome_state = "missing"
+        failure_category = "method_draft_missing"
+    except (InvalidJsonBytesError, TypeError, ValueError) as exc:
+        invalid = True
+        if failure_category == "method_draft_validation":
+            failure_category = "method_draft_schema"
+        diagnostic_reason = str(exc)
+    except _InvalidOutput:
+        invalid = True
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except Exception:
+        invalid = True
+
+    if missing:
+        _log_output_rejection(
+            workspace_root,
+            job,
+            code=ErrorCode.OUTCOME_MISSING,
+            failure_category=failure_category,
+            final_outcome_state=final_outcome_state,
+            final_outcome_bytes=final_outcome_bytes,
+        )
+        raise runtime_failure(
+            stage=ExecutionStage.OUTCOME_VALIDATE,
+            code=ErrorCode.OUTCOME_MISSING,
+            message="Methods draft file is missing.",
+        ) from None
+    if invalid:
+        _log_output_rejection(
+            workspace_root,
+            job,
+            code=ErrorCode.OUTCOME_INVALID,
+            failure_category=failure_category,
+            final_outcome_state=final_outcome_state,
+            final_outcome_bytes=final_outcome_bytes,
+            diagnostic_reason=diagnostic_reason,
+        )
+        failure = runtime_failure(
+            stage=ExecutionStage.OUTCOME_VALIDATE,
+            code=ErrorCode.OUTCOME_INVALID,
+            message="Methods draft validation failed.",
+        ).failure
+        raise RejectedAgentOutputError(
+            failure,
+            failure_category=failure_category,
+            raw_outcome_bytes=raw_draft_bytes,
+        ) from None
+    assert parsed is not None and canonical_bytes is not None
+    if kind is ValidatedOutputKind.METHOD_DIAGNOSIS_DRAFT:
+        assert isinstance(parsed, MethodDiagnosisDraftV1)
+        return ValidatedMethodDiagnosisDraft(
+            draft=parsed,
+            canonical_bytes=canonical_bytes,
+        )
+    assert kind is ValidatedOutputKind.METHOD_REVIEW_DRAFT
+    assert isinstance(parsed, MethodReviewV1)
+    return ValidatedMethodReviewDraft(
+        draft=parsed,
+        canonical_bytes=canonical_bytes,
+    )
+
+
 def read_agent_output(
     workspace: PreparedWorkspace | Path,
     job: Job,
@@ -1694,15 +2076,26 @@ def read_agent_output(
     *,
     secrets: Iterable[bytes | str] = (),
     broker_audit_bytes: bytes | None = None,
-) -> ValidatedAgentDraft:
-    """Read the sealed V2 Agent draft and freeze every proposal resource.
+) -> ValidatedAgentDraftOutput:
+    """Read the one output protocol selected by the immutable Job.
 
-    ``.part`` files are never considered.  Any Agent-controlled invalidity is
-    collapsed to the frozen OUTCOME_INVALID failure without retaining an
-    exception cause, path, content, endpoint, or token in the error surface.
+    Specialized DIAGNOSE and REVIEW Jobs use the Methods-only draft paths.
+    ROUTE and GENERIC DIAGNOSE retain the legacy sealed V2 envelope. ``.part``
+    files are never considered on either path.
     """
 
     patterns = _normalize_secrets(secrets)
+    method_protocol = _method_output_protocol(job)
+    if method_protocol is not None:
+        relative_path, parser, kind = method_protocol
+        return _read_method_agent_output(
+            workspace,
+            job,
+            relative_path=relative_path,
+            parser=parser,
+            kind=kind,
+            patterns=patterns,
+        )
     workspace_root = (
         workspace.root
         if isinstance(workspace, PreparedWorkspace)
@@ -1844,8 +2237,14 @@ def read_agent_output(
 
 __all__ = [
     "ValidatedAgentDraft",
+    "ValidatedAgentDraftOutput",
     "ValidatedAgentOutput",
+    "ValidatedMethodDiagnosisDraft",
+    "ValidatedMethodReviewDraft",
+    "ValidatedMethodsPreprocessing",
+    "ValidatedOutputKind",
     "ValidatedProposalResource",
     "RejectedAgentOutputError",
     "read_agent_output",
+    "read_methods_preprocessing",
 ]

@@ -540,6 +540,86 @@ def test_reader_materializes_file_at_fixed_workspace_path_by_hardlink(
         reader.materialize(ref, layout.workspaces / JOB_ID / "inputs" / "wrong")
 
 
+def test_reader_materializes_one_resource_into_main_and_logparse_workspaces(
+    tmp_path: Path,
+) -> None:
+    layout = _layout(tmp_path)
+    source, ref = _formal_file(layout, b"two-pass resource", read_only=True)
+    reader = FormalResourceReader(layout, DurableRecordingFileSync())
+    relative = Path("inputs") / "evidence" / RESOURCE_ID / "payload"
+    main_destination = layout.workspaces / JOB_ID / relative
+    logparse_destination = (
+        layout.workspaces / f"{JOB_ID}.logparse-preprocess" / relative
+    )
+
+    assert reader.materialize(ref, main_destination) == main_destination
+    assert reader.materialize(ref, logparse_destination) == logparse_destination
+
+    assert main_destination.read_bytes() == b"two-pass resource"
+    assert logparse_destination.read_bytes() == b"two-pass resource"
+    assert {
+        source.stat().st_ino,
+        main_destination.stat().st_ino,
+        logparse_destination.stat().st_ino,
+    } == {source.stat().st_ino}
+
+
+@pytest.mark.parametrize(
+    "workspace_segment",
+    [
+        f"{JOB_ID}.review",
+        f"{JOB_ID}.logparse-preprocess.extra",
+        f"{JOB_ID}.logparse-preprocess.logparse-preprocess",
+        "not-a-job-id.logparse-preprocess",
+    ],
+)
+def test_reader_rejects_non_product_workspace_suffixes(
+    tmp_path: Path,
+    workspace_segment: str,
+) -> None:
+    layout = _layout(tmp_path)
+    source, ref = _formal_file(layout, b"fixed source", read_only=True)
+    destination = (
+        layout.workspaces
+        / workspace_segment
+        / "inputs"
+        / "evidence"
+        / RESOURCE_ID
+        / "payload"
+    )
+
+    with pytest.raises(ValueError):
+        FormalResourceReader(layout, DurableRecordingFileSync()).materialize(
+            ref,
+            destination,
+        )
+
+    assert source.read_bytes() == b"fixed source"
+    assert not destination.exists()
+
+
+def test_reader_rejects_traversal_from_logparse_workspace(tmp_path: Path) -> None:
+    layout = _layout(tmp_path)
+    source, ref = _formal_file(layout, b"fixed source", read_only=True)
+    destination = (
+        layout.workspaces
+        / f"{JOB_ID}.logparse-preprocess"
+        / "inputs"
+        / ".."
+        / "evidence"
+        / RESOURCE_ID
+        / "payload"
+    )
+
+    with pytest.raises(ValueError, match="traversal"):
+        FormalResourceReader(layout, DurableRecordingFileSync()).materialize(
+            ref,
+            destination,
+        )
+
+    assert source.read_bytes() == b"fixed source"
+
+
 @pytest.mark.parametrize("suffix", [None, *tuple(AttachmentFilenameSuffix)])
 def test_reader_materializes_attachment_file_at_exact_archive_workspace_path(
     tmp_path: Path,

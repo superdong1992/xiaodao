@@ -13,12 +13,14 @@ from problem_locator.contracts import (
     AgentJobOutcome,
     CaseAggregate,
     DecisionAuditV2,
+    DiagnosisMode,
     EvidenceBinding,
     ExecutionRecordStore,
     Job,
     JobOutcome,
     JobType,
     NonEmptyText,
+    OutcomeResultType,
     PositiveInt,
     RelativePosixPath,
     ReviewSubjectV2,
@@ -37,6 +39,13 @@ from .audit_bundle import AuditBundleSource, BuiltAuditBundle, build_audit_bundl
 
 _OPTIONAL_JOB_FILES = (
     "broker_audit.json",
+)
+_METHODS_DIAGNOSIS_FILES = (
+    "logparse_broker_audit.json",
+    "method-grounding-audit.json",
+    "methods_logparse_receipt.json",
+    "methods_request.json",
+    "methods_target_logs.json",
 )
 _DECISION_EVIDENCE_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
@@ -184,6 +193,28 @@ def _required_execution_bytes(
             f"required V2 execution record is unavailable: {job_id}/{filename}"
         )
     return payload
+
+
+def _source_draft_filename(job: Job) -> str:
+    """Select the hard-cut wire draft that the server finalization binds."""
+
+    if job.job_type is JobType.REVIEW:
+        return "method-review.draft.json"
+    if (
+        job.job_type is JobType.DIAGNOSE
+        and job.diagnosis_mode is DiagnosisMode.SPECIALIZED
+    ):
+        return "method-diagnosis.draft.json"
+    return "agent_job_outcome.draft.json"
+
+
+def _is_methods_preflight(job: Job, outcome: JobOutcome) -> bool:
+    return (
+        job.job_type is JobType.DIAGNOSE
+        and job.diagnosis_mode is DiagnosisMode.SPECIALIZED
+        and outcome.result_type
+        in {OutcomeResultType.NEED_INPUT, OutcomeResultType.NEED_ATTACHMENT}
+    )
 
 
 def _validated_finalization_bytes(
@@ -394,25 +425,38 @@ def assemble_unresolved_audit_bundle(
         if job is None or outcome is None:
             raise ValueError("audit Job closure is incomplete")
         prefix = f"jobs/{job.job_type.value.lower()}/{job_id}"
-        sources.extend(
-            (
+        sources.append(
+            AuditBundleSource(
+                f"{prefix}/job.json",
+                canonical_json_bytes(job),
+                required=True,
+            )
+        )
+        if _is_methods_preflight(job, outcome):
+            sources.append(
                 AuditBundleSource(
-                    f"{prefix}/job.json",
-                    canonical_json_bytes(job),
+                    f"{prefix}/methods_preflight.json",
+                    _required_execution_bytes(
+                        execution_records, job_id, "methods_preflight.json"
+                    ),
                     required=True,
-                ),
+                )
+            )
+        else:
+            sources.append(
                 AuditBundleSource(
                     f"{prefix}/context.txt",
                     _required_execution_bytes(
                         execution_records, job_id, "context.txt"
                     ),
                     required=True,
-                ),
-                AuditBundleSource(
-                    f"{prefix}/job_outcome.json",
-                    canonical_json_bytes(outcome),
-                    required=True,
-                ),
+                )
+            )
+        sources.append(
+            AuditBundleSource(
+                f"{prefix}/job_outcome.json",
+                canonical_json_bytes(outcome),
+                required=True,
             )
         )
         sources.append(
@@ -432,10 +476,11 @@ def assemble_unresolved_audit_bundle(
                 raise ValueError(
                     "persisted decision audit differs from the accepted Outcome"
                 )
+            draft_filename = _source_draft_filename(job)
             draft_bytes = _required_execution_bytes(
                 execution_records,
                 job_id,
-                "agent_job_outcome.draft.json",
+                draft_filename,
             )
             agent_outcome_bytes = _required_execution_bytes(
                 execution_records,
@@ -464,7 +509,7 @@ def assemble_unresolved_audit_bundle(
             )
             sources.append(
                 AuditBundleSource(
-                    f"{prefix}/agent_job_outcome.draft.json",
+                    f"{prefix}/{draft_filename}",
                     draft_bytes,
                     required=True,
                 )
@@ -514,6 +559,22 @@ def assemble_unresolved_audit_bundle(
                         required=True,
                     )
                 )
+            elif (
+                job.job_type is JobType.DIAGNOSE
+                and job.diagnosis_mode is DiagnosisMode.SPECIALIZED
+            ):
+                for filename in _METHODS_DIAGNOSIS_FILES:
+                    sources.append(
+                        AuditBundleSource(
+                            f"{prefix}/{filename}",
+                            _required_execution_bytes(
+                                execution_records,
+                                job_id,
+                                filename,
+                            ),
+                            required=True,
+                        )
+                    )
         for filename in _OPTIONAL_JOB_FILES:
             payload = execution_records.read_audit_bytes(job_id, filename)
             if payload is not None:

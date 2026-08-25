@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "registration_id": "manual-triage",
+  "version": "1.0.0",
+  "capability": "manual-service-triage",
+  "deployment_scope": "PRODUCTION",
+  "summary": "Diagnose a service incident from structured facts and existing evidence.",
+  "package": {
+    "relative_path": "package/manual-triage",
+    "skill_name": "manual-triage",
+    "source_wiki_sha256": "1111111111111111111111111111111111111111111111111111111111111111"
+  },
+  "runtime": {
+    "diagnose": {
+      "agent_profile_id": "agent-profile/specialist",
+      "tool_bundle_id": "tool-bundle/diagnose",
+      "context_policy_id": "context-policy/diagnose",
+      "output_contract_id": "output-contract/diagnose"
+    },
+    "review": {
+      "agent_profile_id": "agent-profile/reviewer",
+      "tool_bundle_id": "tool-bundle/review",
+      "context_policy_id": "context-policy/review",
+      "output_contract_id": "output-contract/review"
+    },
+    "preprocessing": {
+      "requires_logparse": false,
+      "logparse_product": null,
+      "roles": [],
+      "logparse_plan": null
+    }
+  }
+}

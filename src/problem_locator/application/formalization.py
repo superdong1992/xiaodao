@@ -901,13 +901,8 @@ def apply_diagnosis_state_delta(
     if current_requirement_ids.intersection(new_requirement_ids):
         raise ValueError("accepted delta attempts to add an existing requirement")
     requirements.extend(
-        sorted(
-            (
-                requirement.model_copy(deep=True)
-                for requirement in delta.add_pending_requirements
-            ),
-            key=lambda requirement: requirement.requirement_id,
-        )
+        requirement.model_copy(deep=True)
+        for requirement in delta.add_pending_requirements
     )
 
     # 7. Formal Evidence IDs enter state after every binding resolves.
@@ -925,7 +920,7 @@ def apply_diagnosis_state_delta(
         candidates_by_proposal_key=candidate_mapping,
     )
 
-    # 9. Existing order was retained above; each new group was ID-sorted.
+    # 9. Existing order and each validated new group's semantic order were retained.
     payload = {
         "revision": current.revision,
         "problem_spec": problem_spec,

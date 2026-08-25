@@ -22,7 +22,6 @@ from problem_locator.contracts import (
     CreateCase,
     DiagnosisOutcome,
     DiagnosisStateDelta,
-    DecisionAuditV2,
     ErrorCode,
     ExecutionFileRef,
     InputRequirementConstraints,
@@ -142,56 +141,6 @@ def _empty_delta(**updates: object) -> DiagnosisStateDelta:
     }
     values.update(updates)
     return DiagnosisStateDelta.model_validate(values)
-
-
-def _decision_audit(job: Job) -> DecisionAuditV2:
-    """Build the minimal server-owned V2 audit needed by waiting fixtures."""
-
-    assert job.skill_ref is not None
-    rule_id = "missing_requirement_policy"
-    return DecisionAuditV2.model_validate(
-        {
-            "schema_version": 2,
-            "job_id": job.job_id,
-            "case_id": job.case_id,
-            "job_type": job.job_type.value,
-            "skill_ref": job.skill_ref.model_dump(mode="json"),
-            "source_draft_sha256": "1" * 64,
-            "subject_hash": "2" * 64,
-            "candidate_target": None,
-            "diagnosis_audit_hash": None,
-            "selected_terminal_path_id": "none",
-            "terminal_resolution_status": "NONE",
-            "required_rule_ids": [rule_id],
-            "required_evidence_bindings": [],
-            "rules": [
-                {
-                    "rule_id": rule_id,
-                    "agent_claim": {
-                        "rule_id": rule_id,
-                        "claimed_result": "PASS",
-                        "fact_refs": [],
-                        "citations": [],
-                        "explanation": "The declared requirement is still missing.",
-                    },
-                    "server_evaluation": {
-                        "rule_id": rule_id,
-                        "rule_kind": "SEMANTIC_CAUSALITY",
-                        "status": "SEMANTIC_ONLY",
-                        "fact_refs": [],
-                        "evidence_bindings": [],
-                        "anchor_id": None,
-                        "derived_anchor_time": None,
-                        "observed_times": [],
-                        "line_ranges": [],
-                        "event_observations": [],
-                        "derived_values": [],
-                        "issues": [],
-                    },
-                }
-            ],
-        }
-    )
 
 
 def _job_spec(
@@ -1095,7 +1044,7 @@ def _waiting_state(requirement_name: str = "rpc_method") -> StateFile:
         proposed_artifacts=[],
         error=None,
         produced_at="2026-07-31T00:01:00.000Z",
-        decision_audit=_decision_audit(source_job),
+        decision_audit=None,
     )
     outcome_bytes = canonical_json_bytes(outcome)
     outcome_ref = ExecutionFileRef(
@@ -1220,7 +1169,7 @@ def _waiting_attachment_state(
         proposed_artifacts=[],
         error=None,
         produced_at="2026-07-31T00:01:00.000Z",
-        decision_audit=_decision_audit(source_job),
+        decision_audit=None,
     )
     outcome_bytes = canonical_json_bytes(outcome)
     outcome_ref = ExecutionFileRef(

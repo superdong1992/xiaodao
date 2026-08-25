@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "scenario_id": "client-receive-blocked",
+  "status": "CONFIRMED",
+  "confirmed_methods": [
+    "client-receive-blocked"
+  ],
+  "candidate_methods": [],
+  "evidence": [
+    {
+      "method_id": "client-receive-blocked",
+      "anchor": "client",
+      "marker": "LATE_RESPONSE service=svc_profile api=Lookup request_id=303 client_send_us=1000000 server_recv_us=1100000 server_send_us=2100000 client_now_us=5500000",
+      "summary": "请求303端到端耗时4500毫秒，超过3000毫秒超时；服务端收包排队100毫秒、API执行1000毫秒、客户端收包排队3400毫秒。客户端排队时间更长，且API执行未超过超时，确认客户端收包线程被阻塞。"
+    }
+  ],
+  "limitations": [
+    "未发现API_COMPLETE、DEADLOOP_DETECTED或QUEUE_HISTORY正向证据，因此无法确认用户API执行过长或服务端收包线程排队。",
+    "相关日志可能受75秒进程级抑制、排队历史限流或条件打印影响；缺失日志不能排除这些原因。",
+    "诊断范围仅限input/target_logs.json列出的client和server evidence日志。"
+  ],
+  "safety_notes": [
+    "RPC超时不等于取消；服务端可能仍在执行并产生副作用。"
+  ],
+  "logparse_receipt_sha256": "2444bb59c24c52fe26ac2327aa08c2efcb3c5b3fc0128f9219779516a10576cc"
+}

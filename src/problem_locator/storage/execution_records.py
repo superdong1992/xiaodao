@@ -75,10 +75,18 @@ _AUDIT_FILENAMES = frozenset(
     {
         "context.txt",
         "agent_job_outcome.draft.json",
+        "method-diagnosis.draft.json",
+        "method-review.draft.json",
         "agent_job_outcome.json",
         "decision_audit.json",
         "decision_evidence.jsonl",
         "broker_audit.json",
+        "logparse_broker_audit.json",
+        "method-grounding-audit.json",
+        "methods_logparse_receipt.json",
+        "methods_preflight.json",
+        "methods_request.json",
+        "methods_target_logs.json",
         "review_subject.json",
         "finalization_manifest.json",
     }

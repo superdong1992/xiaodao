@@ -424,29 +424,25 @@ def _target_for_anchor(
     )
 
 
-def resolve_authoritative_targets(
-    manifest: WorkspaceInputManifest,
+def validated_successful_broker_record(
     broker_audit_bytes: bytes,
-) -> AuthoritativeTargetSet:
-    """Resolve all target statuses from one unique successful broker operation."""
+    *,
+    job_id: str,
+) -> dict[str, Any]:
+    """Parse one product-owned broker audit and return its unique success."""
 
-    if not isinstance(manifest, WorkspaceInputManifest):
-        raise TypeError("manifest must be a WorkspaceInputManifest")
-    plan = manifest.resolved_logparse_plan
-    if plan is None:
-        raise ValueError("workspace has no resolved Logparse plan")
     audit = parse_canonical_json_bytes(broker_audit_bytes)
     if (
         not isinstance(audit, dict)
         or set(audit) != {"schema_version", "job_id", "operations"}
         or audit.get("schema_version") != 1
-        or audit.get("job_id") != manifest.job_id
+        or audit.get("job_id") != job_id
         or not isinstance(audit.get("operations"), list)
         or len(audit["operations"]) > 8
     ):
         raise ValueError("broker audit shape or identity is invalid")
 
-    successful: list[tuple[str, dict[str, Any], dict[str, Any]]] = []
+    successful: list[dict[str, Any]] = []
     expected_record_fields = {
         "operation",
         "request_sha256",
@@ -475,11 +471,31 @@ def resolve_authoritative_targets(
         ):
             raise ValueError("broker operation audit content is invalid")
         if status == 200:
-            successful.append((operation, request_value, result_value))
+            successful.append(record)
     if len(successful) != 1:
         raise ValueError("broker audit must contain exactly one successful target operation")
+    return successful[0]
 
-    operation, request_value, result_value = successful[0]
+
+def resolve_authoritative_targets(
+    manifest: WorkspaceInputManifest,
+    broker_audit_bytes: bytes,
+) -> AuthoritativeTargetSet:
+    """Resolve all target statuses from one unique successful broker operation."""
+
+    if not isinstance(manifest, WorkspaceInputManifest):
+        raise TypeError("manifest must be a WorkspaceInputManifest")
+    plan = manifest.resolved_logparse_plan
+    if plan is None:
+        raise ValueError("workspace has no resolved Logparse plan")
+
+    successful = validated_successful_broker_record(
+        broker_audit_bytes,
+        job_id=manifest.job_id,
+    )
+    operation = successful["operation"]
+    request_value = successful["request"]
+    result_value = successful["result"]
     expected_result_fields = {"schema_version", "api_version", "target_logs"}
     if plan.attachment_id is not None:
         expected_result_fields.add("logparse_run_artifact_draft")
@@ -543,4 +559,5 @@ __all__ = [
     "empty_authoritative_targets",
     "resolve_authoritative_targets",
     "semantic_archive_name",
+    "validated_successful_broker_record",
 ]

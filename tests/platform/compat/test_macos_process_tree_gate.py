@@ -43,6 +43,7 @@ from tests.deterministic.contracts.fakes import (
     RecordingDispatcher,
 )
 from tests.deterministic.contracts.scenario_fakes import assets_for_bindings, bindings_from_job
+from tests.process_tree_test_support import ChildPidReadyMonotonic
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -93,13 +94,19 @@ class _BackendTimeoutRuntime:
         records: FileExecutionRecordStore,
         workspace_root: Path,
     ) -> None:
+        self.marker = workspace_root / "output/proposals/child/child.pid"
+        self.ready_clock = ChildPidReadyMonotonic(self.marker)
         command = (
             f"{shlex.quote(sys.executable)} "
             f"{shlex.quote(os.fspath(FAKE_CLAUDE))}"
         )
         self.backend = AgentBackend(
             command,
-            parent_environment={"FAKE_CLAUDE_MODE": "child-hang"},
+            parent_environment={
+                "FAKE_CLAUDE_MODE": "child-hang",
+                "FAKE_CHILD_PID_DELAY_SECONDS": "0.35",
+            },
+            monotonic=self.ready_clock,
         )
         self.publisher = OutcomePublisher(
             records,
@@ -138,8 +145,9 @@ class _BackendTimeoutRuntime:
             )
         except RuntimeExecutionError as exc:
             self.failure_code = exc.failure.code
-            marker = self.workspace_root / "output/proposals/child/child.pid"
-            self.child_pid = int(marker.read_text(encoding="ascii"))
+            self.child_pid = self.ready_clock.ready_pid
+            assert self.child_pid is not None
+            assert int(self.marker.read_text(encoding="ascii")) == self.child_pid
             return self.publisher.publish_failure(job, exc.failure)
         raise AssertionError("child-hang backend unexpectedly returned success")
 

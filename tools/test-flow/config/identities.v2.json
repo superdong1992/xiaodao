@@ -9,17 +9,22 @@
     "framework.runner": {"kind": "paths", "paths": ["tools/test-flow/run.mjs", "tools/test-flow/run.sh", "tools/test-flow/run.ps1", "tools/test-flow/lib", "tools/test-flow/config", "tools/test-flow/adapters"]},
     "framework.tests": {"kind": "paths", "paths": ["tools/test-flow/tests"]},
     "framework.docs": {"kind": "paths", "paths": ["README.md", "docs/browser-rest-api.md", "tools/test-flow/README.md", "design/README.md", "design/test-flow-architecture.md", "AGENTS.md", "TODO.md"]},
-    "runtime.support": {"kind": "paths", "paths": ["tools/test-flow/runtime-support", "tools/test-flow/Dockerfile", "tools/test-flow/logparse-requirements.txt"]},
+    "runtime.support": {"kind": "paths", "paths": ["tools/test-flow/runtime-support", "tools/test-flow/Dockerfile", "tools/test-flow/Dockerfile.client", "tools/test-flow/Dockerfile.client.dockerignore", "tools/test-flow/logparse-requirements.txt"]},
     "adapter.host": {"kind": "paths", "paths": ["tools/test-flow/adapters/host-capability.mjs", "tools/test-flow/adapters/fixtures/claude-flat-probe.mjs"]},
     "adapter.server": {"kind": "paths", "paths": ["tools/test-flow/adapters/server-linux-capability.mjs"]},
-    "adapter.cross-job": {"kind": "paths", "paths": ["tools/test-flow/adapters/cross-job-core.mjs", "tools/test-flow/adapters/macos-linux-release.mjs", "tools/test-flow/adapters/windows-linux-release.mjs", "tools/test-flow/adapters/linux-linux-release.mjs"]},
+    "adapter.cross-job": {"kind": "paths", "paths": ["tools/test-flow/adapters/cross-job-core.mjs", "tools/test-flow/lib/methods-oracle.mjs", "tools/test-flow/adapters/macos-linux-release.mjs", "tools/test-flow/adapters/macos-linux-linux-release.mjs", "tools/test-flow/adapters/windows-linux-release.mjs", "tools/test-flow/adapters/linux-linux-release.mjs"]},
     "skill.client": {"kind": "paths", "paths": [".claude/skills/problem-locator-client"]},
     "case.wiki": {"kind": "release-case", "root": "tests/cases/release", "partition": "wiki"},
     "case.journey": {"kind": "release-case", "root": "tests/cases/release", "partition": "journey"},
     "case.oracle": {"kind": "release-case", "root": "tests/cases/release", "partition": "oracle"},
-    "skill.generator": {"kind": "paths", "paths": [".claude/skills/wiki-to-diagnosis-skill", "src/problem_locator/runtime/verification_contract.py"]},
-    "skill.diagnose": {"kind": "release-case", "root": "tests/cases/release", "partition": "approved"},
-    "skill.legacy-diagnose": {"kind": "paths", "paths": ["tests/fixtures/components/diagnosis-generator/diagnose-service-takeover"]},
+    "skill.generator": {"kind": "paths", "paths": [".agents/skills/wiki-to-diagnosis-skill"]},
+    "skill.registration": {"kind": "release-case", "root": "tests/cases/release", "partition": "registration"},
+    "methods.matrix": {"kind": "paths", "paths": ["experiments/rpc-skill-feasibility/cases", "experiments/rpc-skill-feasibility/logparse-config.json", "experiments/rpc-skill-feasibility/schemas/diagnosis-result.schema.json"]},
+    "case.macos-codex-luna": {"kind": "paths", "paths": ["experiments/rpc-skill-feasibility/cases/api-execution-overrun", "experiments/rpc-skill-feasibility/logparse-config.json"]},
+    "quick.codex-luna": {"kind": "paths", "paths": ["tools/test-flow/quick-validation/codex-luna"]},
+    "quick.claude-deepseek": {"kind": "paths", "paths": ["tools/test-flow/quick-validation/claude-deepseek"]},
+    "skill.macos-codex-luna-client": {"kind": "paths", "paths": ["tools/test-flow/quick-validation/codex-luna/fixtures/client-skill"]},
+    "skill.macos-codex-luna-service": {"kind": "paths", "paths": ["tools/test-flow/quick-validation/codex-luna/fixtures/service-skill"]},
     "skill.generic-adapter": {"kind": "paths", "paths": [".claude/skills/adapt-lan-generic-locator-v2"]},
     "skill.generic-parity": {"kind": "paths", "paths": ["tests/fixtures/components/generic-problem-locator-dual-mode"]},
     "skill.logparse": {"kind": "paths", "paths": [".claude/skills/logparse-diagnose"]},
@@ -33,6 +38,8 @@
     "runtime.claude": {"kind": "client-distribution"},
     "runtime.settings": {"kind": "claude-settings"},
     "runtime.release": {"kind": "release-runtime"},
+    "runtime.codex-luna": {"kind": "codex-runtime"},
+    "runtime.codex-logparse": {"kind": "codex-logparse-runtime"},
     "runtime.environment": {"kind": "environment"}
   },
   "sets": {
@@ -72,20 +79,36 @@
       "producer": ["source.agent", "source.route", "runtime.support", "runtime.claude", "runtime.settings", "runtime.release"],
       "proof": ["proof.real", "framework.runner"]
     },
-    "real-diagnose": {
-      "producer": ["source.agent", "source.diagnose", "source.logparse", "skill.legacy-diagnose", "skill.logparse", "runtime.support", "external.logparse", "runtime.claude", "runtime.settings", "runtime.release", "runtime.environment"],
-      "proof": ["proof.real", "framework.runner"]
-    },
     "real-review": {
       "producer": ["source.agent", "source.review", "runtime.support", "runtime.claude", "runtime.settings", "runtime.release"],
       "proof": ["proof.real", "framework.runner"]
     },
     "real-skill-generation": {
-      "producer": ["product.source", "case.wiki", "case.journey", "skill.generator", "source.agent", "runtime.support", "runtime.claude", "runtime.settings", "runtime.release"],
-      "proof": ["skill.diagnose", "case.oracle", "proof.real", "framework.runner"]
+      "producer": ["product.source", "case.wiki", "case.journey", "skill.registration", "skill.generator", "source.agent", "runtime.support", "runtime.claude", "runtime.settings", "runtime.release"],
+      "proof": ["case.oracle", "proof.real", "framework.runner"]
+    },
+    "real-codex-luna-methods": {
+      "producer": ["product.source", "case.wiki", "case.journey", "skill.registration", "methods.matrix", "skill.generator", "runtime.support", "runtime.codex-luna", "runtime.codex-logparse", "runtime.environment", "external.logparse"],
+      "proof": ["case.oracle", "methods.matrix", "proof.real", "framework.runner"]
+    },
+    "macos-codex-luna-methods": {
+      "producer": ["case.wiki", "skill.registration", "skill.generator", "quick.codex-luna", "runtime.support", "runtime.codex-luna", "runtime.environment"],
+      "proof": ["proof.real", "framework.runner", "framework.tests"]
+    },
+    "macos-codex-luna-e2e": {
+      "producer": ["product.source", "case.wiki", "skill.registration", "case.macos-codex-luna", "skill.generator", "quick.codex-luna", "skill.macos-codex-luna-client", "skill.macos-codex-luna-service", "runtime.support", "runtime.codex-luna", "runtime.codex-logparse", "runtime.environment", "external.logparse"],
+      "proof": ["case.oracle", "proof.real", "framework.runner", "framework.tests"]
+    },
+    "macos-claude-deepseek-methods": {
+      "producer": ["case.wiki", "skill.registration", "skill.generator", "quick.codex-luna", "quick.claude-deepseek", "runtime.support", "runtime.claude", "runtime.settings", "runtime.environment"],
+      "proof": ["case.oracle", "framework.tests", "framework.runner"]
+    },
+    "macos-claude-deepseek-e2e": {
+      "producer": ["product.source", "case.wiki", "skill.registration", "case.macos-codex-luna", "skill.generator", "skill.client", "skill.logparse", "quick.claude-deepseek", "runtime.support", "runtime.claude", "runtime.settings", "runtime.environment", "external.logparse"],
+      "proof": ["case.oracle", "framework.tests", "framework.runner"]
     },
     "cross-job": {
-      "producer": ["product.source", "product.fixtures", "case.journey", "skill.client", "skill.diagnose", "skill.logparse", "runtime.support", "adapter.cross-job", "external.logparse", "external.mcp", "runtime.claude", "runtime.settings", "runtime.release", "runtime.environment"],
+      "producer": ["product.source", "product.fixtures", "case.journey", "skill.client", "skill.registration", "skill.logparse", "runtime.support", "adapter.cross-job", "external.logparse", "external.mcp", "runtime.claude", "runtime.settings", "runtime.release", "runtime.environment"],
       "proof": ["case.oracle", "proof.platform", "proof.real", "framework.runner"]
     },
     "cross-job-route": {
@@ -97,11 +120,11 @@
       "proof": ["case.oracle", "proof.real", "framework.runner"]
     },
     "cross-job-diagnose": {
-      "producer": ["product.source", "product.fixtures", "case.journey", "source.agent", "source.diagnose", "source.logparse", "skill.diagnose", "skill.logparse", "runtime.support", "adapter.cross-job", "external.logparse", "external.mcp", "runtime.claude", "runtime.settings", "runtime.release", "runtime.environment"],
+      "producer": ["product.source", "product.fixtures", "case.journey", "source.agent", "source.diagnose", "source.logparse", "skill.registration", "skill.logparse", "runtime.support", "adapter.cross-job", "external.logparse", "external.mcp", "runtime.claude", "runtime.settings", "runtime.release", "runtime.environment"],
       "proof": ["case.oracle", "proof.real", "framework.runner"]
     },
     "cross-job-review": {
-      "producer": ["product.source", "case.journey", "source.review", "skill.diagnose", "runtime.support", "adapter.cross-job", "runtime.release"],
+      "producer": ["product.source", "case.journey", "source.review", "skill.registration", "runtime.support", "adapter.cross-job", "runtime.release"],
       "proof": ["case.oracle", "proof.real", "framework.runner"]
     }
   }

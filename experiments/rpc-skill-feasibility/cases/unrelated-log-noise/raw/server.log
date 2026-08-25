@@ -1,0 +1,2 @@
+2026-08-23T10:00:05.200000+08:00 RPC Service=feasibility; Slot=1; CPU-Id=0; ProcessName=rpc_server; Context=API_COMPLETE service=svc_noise api=SlowNoise start_us=1000000 end_us=9000000 cost_us=8000000)
+2026-08-23T10:00:05.200001+08:00 RPC Service=feasibility; Slot=1; CPU-Id=0; ProcessName=rpc_server; Context=QUEUE_HISTORY print_time_ms=6000 ordinal=first service=svc_noise api=QueueNoise end_us=5000000 cost_us=500000 queue_us=4000000 timeout_ms=3000)

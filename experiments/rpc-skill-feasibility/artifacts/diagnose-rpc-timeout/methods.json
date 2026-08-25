@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "skill_name": "diagnose-rpc-timeout",
+  "source_wiki_sha256": "9138ee2358137fdc1dcc828f08a0f89ebc5e55816f71a1142ccd5d9b8ddc8161",
+  "shared_references": ["references/shared-boundaries.md"],
+  "methods": [
+    {"id": "api-execution-slow", "title": "用户 API 执行时间过长", "reference": "references/api-execution-slow.md", "priority": 1, "evidence_markers": ["API_COMPLETE service=", "DEADLOOP_DETECTED service="]},
+    {"id": "server-queueing", "title": "RPC server 收包线程排队", "reference": "references/server-queueing.md", "priority": 2, "evidence_markers": ["QUEUE_HISTORY print_time_ms="]},
+    {"id": "client-receive-blocked", "title": "RPC client 收包线程被阻塞", "reference": "references/client-receive-blocked.md", "priority": 3, "evidence_markers": ["LATE_RESPONSE service="]}
+  ]
+}

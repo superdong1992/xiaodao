@@ -1,2 +1,0 @@
-[BBBB] rpc call svc_alpha:Fetch timeout limit 5000 recv no response
-[BBBB] late response service:svc_alpha, api:Fetch, reqid:42, timeout:5000, client_send:1786147200000000, server_recv:1786147200080000, server_send:1786147205120000, client_now:1786147205200000

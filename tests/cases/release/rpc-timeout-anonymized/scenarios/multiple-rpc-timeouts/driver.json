@@ -1,0 +1,20 @@
+{
+  "scenario_id": "multiple-rpc-timeouts",
+  "problem": {
+    "raw_problem_text": "svc_orders 的 Reserve RPC 在问题时间附近出现多次超时，请基于固定双端日志诊断全部有正向证据的方法。",
+    "statement": "RPC 调用在截止时间前未收到响应",
+    "expected_behavior": "客户端在超时截止前收到服务端响应。",
+    "actual_behavior": "客户端记录超时，并在截止时间后观察到迟到响应。",
+    "scope": "svc_orders/Reserve 的固定客户端与服务端日志快照",
+    "goals": ["识别每个有正向日志证据的独立超时原因。", "同一方法命中多次时保留每次独立调用的证据边界。"],
+    "non_goals": ["补采日志、调用网络服务或把日志缺失解释为原因不存在。"],
+    "constraints": ["只使用本用例提供的冻结双端日志与产品预处理结果。"],
+    "completion_criteria": ["分别确认两次 API 执行过长事件的正向证据。", "确认客户端收包线程阻塞的正向证据。", "保留服务端排队证据不足及 RPC 超时不等于取消的说明。"]
+  },
+  "initial_user_fact_names": ["problem_time", "client_process", "server_process", "service", "api"],
+  "initial_user_fact_values": ["2026-08-23T10:00:05.300000+08:00", "rpc_client", "rpc_server", "svc_orders", "Reserve"],
+  "supplement_input_names": [],
+  "supplement_input_values": [],
+  "attachment_files": ["client.log", "server.log"],
+  "attachment_anchor_names": ["client", "server"]
+}

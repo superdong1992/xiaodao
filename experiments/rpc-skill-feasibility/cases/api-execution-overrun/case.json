@@ -1,0 +1,13 @@
+{
+  "scenario_id": "api-execution-overrun",
+  "problem_time": "2026-08-23T10:00:05.500000+08:00",
+  "client_process": "rpc_client",
+  "server_process": "rpc_server",
+  "service": "svc_orders",
+  "api": "Reserve",
+  "expected_status": "CONFIRMED",
+  "expected_branch_markers": ["API_COMPLETE"],
+  "expected_terms": [],
+  "expected_evidence_identities": [],
+  "forbidden_evidence_terms": []
+}

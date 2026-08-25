@@ -22,7 +22,6 @@ from problem_locator.contracts import (
     AssetKind,
     DiagnosisOutcome,
     DiagnosisStateDelta,
-    DecisionAuditV2,
     ErrorCode,
     ExecutionFailure,
     ExecutionStage,
@@ -379,49 +378,7 @@ def _need_input_outcomes(
         declared_sha256=artifact.sha256,
         metadata=artifact.metadata,
     )
-    decision_audit = DecisionAuditV2.model_validate(
-        {
-            "schema_version": 2,
-            "job_id": job.job_id,
-            "case_id": job.case_id,
-            "job_type": job.job_type.value,
-            "skill_ref": job.skill_ref.model_dump(mode="json"),
-            "source_draft_sha256": "1" * 64,
-            "subject_hash": "2" * 64,
-            "candidate_target": None,
-            "diagnosis_audit_hash": None,
-            "selected_terminal_path_id": "none",
-            "terminal_resolution_status": "NONE",
-            "required_rule_ids": ["causal_chain"],
-            "required_evidence_bindings": [],
-            "rules": [
-                {
-                    "rule_id": "causal_chain",
-                    "agent_claim": {
-                        "rule_id": "causal_chain",
-                        "claimed_result": "UNKNOWN",
-                        "fact_refs": [],
-                        "citations": [],
-                        "explanation": "No diagnosis is claimed before supplement.",
-                    },
-                    "server_evaluation": {
-                        "rule_id": "causal_chain",
-                        "rule_kind": "SEMANTIC_CAUSALITY",
-                        "status": "SEMANTIC_ONLY",
-                        "fact_refs": [],
-                        "evidence_bindings": [],
-                        "anchor_id": None,
-                        "derived_anchor_time": None,
-                        "observed_times": [],
-                        "line_ranges": [],
-                        "event_observations": [],
-                        "derived_values": [],
-                        "issues": [],
-                    },
-                }
-            ],
-        }
-    )
+    decision_audit = None
     agent = AgentJobOutcome(
         outcome_id=FIRST_OUTCOME_ID,
         job_id=job.job_id,

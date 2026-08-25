@@ -1,6 +1,11 @@
 import fs from "node:fs";
 import path from "node:path";
 import { commandExists, ensureDirectory, runSync } from "./util.mjs";
+import {
+  dockerContextArgs,
+  dockerServerIdentity,
+  sameDockerRuntimeIdentity,
+} from "./release-inputs.mjs";
 
 const SAFE_NAME = /^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$/;
 
@@ -12,6 +17,8 @@ export class ResourceRegistry {
       commandAvailable = commandExists,
       runCommand = runSync,
       dockerContext = null,
+      expectedDockerIdentity = null,
+      dockerIdentityProbe = dockerServerIdentity,
     } = {},
   ) {
     this.attemptRoot = attemptRoot;
@@ -21,17 +28,16 @@ export class ResourceRegistry {
     this.commandAvailable = commandAvailable;
     this.runCommand = runCommand;
     this.dockerContext = dockerContext;
+    this.expectedDockerIdentity = expectedDockerIdentity;
+    this.dockerIdentityProbe = dockerIdentityProbe;
   }
 
   docker(args) {
-    return this.runCommand("docker", [
-      ...(this.dockerContext ? ["--context", this.dockerContext] : []),
-      ...args,
-    ]);
+    return this.runCommand("docker", dockerContextArgs(this.dockerContext ?? "default", args));
   }
 
   register(kind, name, label) {
-    if (!["container", "volume"].includes(kind)) throw new Error(`RESOURCE_KIND:${kind}`);
+    if (!["container", "network", "volume"].includes(kind)) throw new Error(`RESOURCE_KIND:${kind}`);
     if (!SAFE_NAME.test(name)) throw new Error(`RESOURCE_NAME:${name}`);
     if (label !== `problem-locator.test-flow.run=${this.runId}`) throw new Error("RESOURCE_LABEL_MISMATCH");
     if (this.resources.some((entry) => entry.kind === kind && entry.name === name)) throw new Error(`RESOURCE_DUPLICATE:${kind}:${name}`);
@@ -46,7 +52,7 @@ export class ResourceRegistry {
     for (const line of fs.readFileSync(this.filePath, "utf8").split(/\r?\n/).filter(Boolean)) {
       const record = JSON.parse(line);
       if (this.resources.some((entry) => entry.kind === record.kind && entry.name === record.name)) continue;
-      if (record.schema_version !== 2 || !["container", "volume"].includes(record.kind) || !SAFE_NAME.test(record.name) || record.label !== `problem-locator.test-flow.run=${this.runId}`) {
+      if (record.schema_version !== 2 || !["container", "network", "volume"].includes(record.kind) || !SAFE_NAME.test(record.name) || record.label !== `problem-locator.test-flow.run=${this.runId}`) {
         throw new Error("RESOURCE_EXTERNAL_RECORD_INVALID");
       }
       this.resources.push(record);
@@ -57,15 +63,29 @@ export class ResourceRegistry {
     this.loadExternalRecords();
     if (this.resources.length === 0) return { schema_version: 2, status: "PASS", policy: preserve ? "PRESERVE" : "DELETE", inspected: [], remaining: [] };
     if (!this.commandAvailable("docker")) return { schema_version: 2, status: "ERROR", policy: preserve ? "PRESERVE" : "DELETE", code: "DOCKER_MISSING", inspected: [], remaining: this.resources };
+    if (this.expectedDockerIdentity !== null) {
+      const observedDockerIdentity = this.dockerIdentityProbe(this.dockerContext ?? "default");
+      if (!sameDockerRuntimeIdentity(this.expectedDockerIdentity, observedDockerIdentity)) {
+        return {
+          schema_version: 2,
+          status: "ERROR",
+          policy: preserve ? "PRESERVE" : "DELETE",
+          code: "DOCKER_RUNTIME_IDENTITY_DRIFT",
+          inspected: [],
+          remaining: this.resources,
+        };
+      }
+    }
     const inspected = [];
     const remaining = [];
     let failed = false;
     const orderedResources = [
       ...this.resources.filter((resource) => resource.kind === "container"),
+      ...this.resources.filter((resource) => resource.kind === "network"),
       ...this.resources.filter((resource) => resource.kind === "volume"),
     ];
     for (const resource of orderedResources) {
-      const kindCommand = resource.kind === "container" ? "container" : "volume";
+      const kindCommand = resource.kind;
       const inspect = this.docker([kindCommand, "inspect", resource.name]);
       if (inspect.status !== 0) {
         inspected.push({ kind: resource.kind, name: resource.name, before: "ABSENT", action: "NONE", after: "ABSENT" });
@@ -92,7 +112,7 @@ export class ResourceRegistry {
         }
       } else if (!preserve) {
         action = "DELETE";
-        const remove = this.docker(["volume", "rm", resource.name]);
+        const remove = this.docker([kindCommand, "rm", resource.name]);
         if (remove.status !== 0) failed = true;
       } else {
         action = "PRESERVE";

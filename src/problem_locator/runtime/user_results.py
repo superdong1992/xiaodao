@@ -48,7 +48,7 @@ from problem_locator.integrations.result_archive import (
 
 from .authoritative_targets import AuthoritativeTargetSet
 from .result_types import CapturedTargetLog, ServerGeneratedResultFile
-from .server_verifier import VerificationResult
+from .verification_result import VerificationResult
 
 
 _RESULT_KEY = "server-user-result"
@@ -724,15 +724,26 @@ def build_server_result_bundle(
             authoritative_targets,
             completed=(report_status == "COMPLETED"),
         ),
-        limitations=_limitations(authoritative_targets),
+        limitations=_unique_text(
+            [
+                *(
+                    payload.limitations
+                    if isinstance(payload, DiagnosisOutcome)
+                    else []
+                ),
+                *_limitations(authoritative_targets),
+            ]
+        ),
         recommendations=[
             payload.recommended_next_step
             if isinstance(payload, DiagnosisOutcome)
             else payload.recommendation
         ],
-        safety_notes=[
-            "本结果只覆盖固定 Diagnosis Skill 声明的诊断范围；未列出的原因未被自动排除。"
-        ],
+        safety_notes=(
+            list(payload.safety_notes)
+            if isinstance(payload, DiagnosisOutcome)
+            else []
+        ),
     )
     report_bytes = canonical_json_bytes(report)
     result_draft = AgentArtifactProposalDraft(

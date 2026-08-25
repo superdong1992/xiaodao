@@ -293,11 +293,13 @@ def _outcome(number: int, job: Job, result_type: OutcomeResultType) -> JobOutcom
         result_type=result_type,
     )
     if result_type is OutcomeResultType.NEED_INPUT:
+        payload["decision_audit"] = None
         payload["payload"]["requested_input"] = [_uuid(901)]
         payload["payload"]["requested_attachments"] = []
         payload["payload"]["candidate_conclusion_draft"] = None
         payload["proposed_artifacts"] = []
     elif result_type is OutcomeResultType.NEED_ATTACHMENT:
+        payload["decision_audit"] = None
         payload["payload"]["requested_input"] = []
         payload["payload"]["requested_attachments"] = [_uuid(902)]
         payload["payload"]["candidate_conclusion_draft"] = None

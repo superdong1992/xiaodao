@@ -1,4 +1,4 @@
-"""Frozen public enumerations for the Problem Locator V4 contract."""
+"""Frozen public enumerations for the Problem Locator V5 contract."""
 
 from __future__ import annotations
 

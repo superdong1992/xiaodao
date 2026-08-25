@@ -1,0 +1,63 @@
+{
+  "schema_version": 1,
+  "status": "FAIL",
+  "scope": "functional-feasibility-only",
+  "round_limit": 3,
+  "wiki_sha256": "eb39edf220d0eed91ae03eb712efd8974a5e5c82c3deed035c236a0d1bf28aab",
+  "generated_skill_sha256": "d35cbb613e179cffcfdc8d034fae69f9db7715ff9a782c987bba9c17ec94ba15",
+  "model": "gpt-5.6-luna",
+  "reasoning_effort": "medium",
+  "codex_cli_version": "codex-cli 0.149.0-alpha.4.1",
+  "rounds": [
+    {
+      "round": 1,
+      "category": "input_fidelity",
+      "result": "FAIL",
+      "summary": "Required input meanings were preserved under unstable aliases; DEADLOOP_DETECTED was absent from the API method index."
+    },
+    {
+      "round": 2,
+      "category": "wiki_fidelity",
+      "result": "FAIL",
+      "summary": "Two common client timeout templates were absent from the generated package."
+    },
+    {
+      "round": 3,
+      "category": "evidence_identity",
+      "result": "FAIL",
+      "summary": "Multiple calls and both causes were reported, but the request-id-free API_COMPLETE evidence summary omitted start_us/end_us."
+    }
+  ],
+  "executed_diagnoses": [
+    {
+      "scenario_id": "deadloop-detected",
+      "semantic_result": "PASS",
+      "result_file": "hardening-diagnoses/deadloop-detected.json"
+    },
+    {
+      "scenario_id": "multiple-rpc-timeouts",
+      "semantic_result": "FAIL",
+      "result_file": "hardening-diagnoses/multiple-rpc-timeouts.json"
+    }
+  ],
+  "not_executed": [
+    "server-queue-five",
+    "server-queue-single",
+    "unrelated-log-noise",
+    "api-execution-overrun",
+    "client-receive-blocked",
+    "insufficient-evidence",
+    "server-queue-delay"
+  ],
+  "logparse": {
+    "case_count": 9,
+    "parse_invocations_per_case": 1,
+    "target_query_invocations_per_case": 2,
+    "diagnosis_invocations": 0
+  },
+  "claims": {
+    "test_flow_used": false,
+    "release_verdict": false,
+    "all_cases_passed": false
+  }
+}

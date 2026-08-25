@@ -17,8 +17,19 @@
         "model": "deepseek-v4-flash[1m]",
         "max_output_tokens_upper_limit": 64000
       },
+      "codex": {
+        "product": "codex-cli",
+        "version": "0.149.0-alpha.4.1",
+        "executable_sha256": "09db9560f6f9dec139d3324254fb3c8fdbad5ecce1d8c794113dc15294f6aefd",
+        "model": "gpt-5.6-luna",
+        "reasoning_effort": "medium",
+        "auth_kind": "chatgpt-external-tokens",
+        "budget_enforcement": "posthoc-terminal-aggregate"
+      },
       "uv": {
         "version": "0.11.32",
+        "version_output": "uv 0.11.32 (x86_64-unknown-linux-gnu)",
+        "uvx_version_output": "uvx 0.11.32 (x86_64-unknown-linux-gnu)",
         "archive_sha256": "aab924fd522efd06f1c5f3b93a243864fc453132c94b2dc49f1371b528a4b967",
         "uv_sha256": "da15297d6879b2cfbe5ea3cb03725c1613d51ba72892cc996468d871f0a532fb",
         "uvx_sha256": "31e409e837c16cbe9bdfd6534a1e2f6a774d937988027a4f0736ab52c7b6864d"
@@ -47,7 +58,12 @@
       ],
       "real_caps": {
         "isolated": {"max_turns": 12, "max_total_tokens": 1000000, "max_budget_usd": 3, "hard_timeout_seconds": 900},
-        "isolated.skill-generation": {"max_turns": 12, "max_total_tokens": 1000000, "max_output_tokens": 64000, "max_budget_usd": 10, "hard_timeout_seconds": 1800},
+        "isolated.skill-generation": {"max_turns": 16, "max_total_tokens": 1000000, "max_output_tokens": 64000, "max_budget_usd": 10, "hard_timeout_seconds": 1800},
+        "codex.methods": {"max_turns": 1, "max_total_tokens": 5000000, "max_budget_usd": 10, "hard_timeout_seconds": 7200},
+        "codex.macos-methods": {"max_turns": 1, "max_total_tokens": 1000000, "max_budget_usd": 2, "hard_timeout_seconds": 1800},
+        "codex.macos-e2e": {"max_turns": 5, "max_total_tokens": 2000000, "max_budget_usd": 3, "hard_timeout_seconds": 1800},
+        "claude.macos-methods": {"max_turns": 16, "max_total_tokens": 1000000, "max_output_tokens": 64000, "max_budget_usd": 10, "hard_timeout_seconds": 1800},
+        "claude.macos-e2e": {"max_turns": 50, "max_total_tokens": 2000000, "max_output_tokens": 64000, "max_budget_usd": 3, "hard_timeout_seconds": 1800},
         "service_agent": {"max_turns": 50, "max_total_tokens": 2000000, "max_budget_usd": 3, "hard_timeout_seconds": 600},
         "journey.route": {"max_turns": 50, "max_total_tokens": 400000, "max_budget_usd": 3, "hard_timeout_seconds": 1200},
         "journey.diagnose": {"max_turns": 50, "max_total_tokens": 600000, "max_budget_usd": 5, "hard_timeout_seconds": 1200},

@@ -2087,10 +2087,10 @@ class DomainCoordinator:
                 delta.resolve_questions,
                 key=lambda item: item.item_id,
             ),
-            add_pending_requirements=sorted(
-                delta.add_pending_requirements,
-                key=lambda item: item.requirement_id,
-            ),
+            # PendingRequirement order is semantic: requested_input follows the
+            # Skill/Profile declaration and the attachment follows that input
+            # group. Opaque derived IDs must not reorder the validated request.
+            add_pending_requirements=list(delta.add_pending_requirements),
             fulfill_requirements=[],
             add_evidence_bindings=additions,
         )

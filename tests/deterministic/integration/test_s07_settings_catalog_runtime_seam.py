@@ -6,11 +6,9 @@ from pathlib import Path
 from problem_locator.entrypoints.settings import Settings
 from problem_locator.integrations.logparse import build_logparse_runtime
 from problem_locator.runtime.agent_backend import AgentBackend
-from problem_locator.runtime.catalog import (
-    VersionedAssetCatalog,
-    hash_product_directory,
-)
+from problem_locator.runtime.catalog import VersionedAssetCatalog
 from problem_locator.runtime.diagnosis_runtime import DiagnosisRuntime
+from problem_locator.runtime.methods_skill import load_specialized_skill_registration
 from problem_locator.runtime.workspace import WorkspaceManager
 from tests.deterministic.contracts.fakes import (
     DeterministicIdGenerator,
@@ -22,12 +20,18 @@ from tests.deterministic.contracts.fakes import (
 
 
 ROOT = Path(__file__).resolve().parents[3]
-SKILL_DIR = ROOT / "tests/fixtures/components/diagnosis-generator"
+SKILL_DIR = ROOT / "tests/fixtures/components/runtime-catalog/skill-dir"
 FAKE_LOGPARSE_REPO = ROOT / "tests/fixtures/components/logparse/fake/repo"
 FAKE_LOGPARSE_CONFIG = FAKE_LOGPARSE_REPO / "config.yaml"
-TAKEOVER_SKILL_ID = "diagnosis-skill/diagnose-service-takeover"
-TAKEOVER_PRODUCT_HASH = (
-    "7f0447460e4a56f882a1f46493ceb645930c0a527bccb303c7929a1d7b3cbe9e"
+RPC_SKILL_ID = "diagnosis-skill/rpc-log-analysis"
+RPC_REGISTRATION_SHA256 = (
+    "a1f8f59d5c3904ed545c5ae54b4d9a3b5e80e80bdd74e4cc51dff2b7adb8bcde"
+)
+RPC_PACKAGE_TREE_SHA256 = (
+    "d4002ab1ae9bfaf49a5db4f84a9932e9a0918de55b6248175b4f25a6873ffd3c"
+)
+RPC_COMBINED_SHA256 = (
+    "c456d5b74889f3c4ddbebd483867abe5bc258feea9c274045feda6f9dea2ce07"
 )
 
 
@@ -72,23 +76,25 @@ def test_settings_pin_one_s07_pair_into_s04_catalog_and_runtime(tmp_path: Path) 
         allow_test_skills=True,
     )
     route_bindings = catalog.route_bindings()
-    takeover_ref = next(
+    rpc_ref = next(
         ref
         for ref in route_bindings.available_skill_refs
-        if ref.id == TAKEOVER_SKILL_ID
+        if ref.id == RPC_SKILL_ID
     )
-    assert takeover_ref.version == "6.0.0"
-    assert (
-        hash_product_directory(settings.skill_dir / "diagnose-service-takeover")
-        == TAKEOVER_PRODUCT_HASH
+    assert rpc_ref.version == "1.0.0"
+    resolved_skill = load_specialized_skill_registration(
+        settings.skill_dir / "rpc-log-analysis"
     )
-    assert takeover_ref.content_hash == TAKEOVER_PRODUCT_HASH
+    assert resolved_skill.registration_sha256 == RPC_REGISTRATION_SHA256
+    assert resolved_skill.package_tree_sha256 == RPC_PACKAGE_TREE_SHA256
+    assert resolved_skill.combined_sha256 == RPC_COMBINED_SHA256
+    assert rpc_ref.content_hash == RPC_COMBINED_SHA256
 
-    diagnose_bindings = catalog.diagnose_bindings(takeover_ref)
-    assert diagnose_bindings.skill_ref == takeover_ref
+    diagnose_bindings = catalog.diagnose_bindings(rpc_ref)
+    assert diagnose_bindings.skill_ref == rpc_ref
     assert diagnose_bindings.logparse_tool_ref == logparse_asset.ref
     assert diagnose_bindings.logparse_product == "compact"
-    assert catalog.resolve(takeover_ref).ref == takeover_ref
+    assert catalog.resolve(rpc_ref).ref == rpc_ref
     assert catalog.resolve(logparse_asset.ref) == logparse_asset
 
     # The frozen Catalog Port deliberately has no factory-identity read surface.

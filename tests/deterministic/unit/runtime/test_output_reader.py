@@ -13,7 +13,6 @@ import problem_locator.runtime.output_reader as output_reader_module
 
 from problem_locator.contracts.enums import ErrorCode, ExecutionStage, ResourceKind
 from problem_locator.contracts.models import (
-    AgentJobOutcomeDraftV2,
     FixtureManifest,
     Job,
     TreeManifest,
@@ -28,6 +27,7 @@ from problem_locator.contracts.serialization import (
 from problem_locator.runtime.failures import RuntimeExecutionError
 from problem_locator.runtime.output_reader import (
     RejectedAgentOutputError,
+    ValidatedMethodDiagnosisDraft,
     read_agent_output,
 )
 from problem_locator.runtime.outcome_finalizer import (
@@ -46,7 +46,7 @@ def _fixture_payload(name: str) -> dict[str, Any]:
     return json.loads((CONTRACT_FIXTURES / name).read_bytes())
 
 
-def _diagnosis_inputs() -> tuple[Job, WorkspaceInputManifest, dict[str, Any], bytes]:
+def _diagnosis_inputs() -> tuple[Job, WorkspaceInputManifest, dict[str, Any]]:
     job = parse_canonical_json_bytes(
         (CONTRACT_FIXTURES / "job-diagnose.json").read_bytes(),
         model_type=Job,
@@ -58,8 +58,15 @@ def _diagnosis_inputs() -> tuple[Job, WorkspaceInputManifest, dict[str, Any], by
     return (
         job,
         manifest,
-        _fixture_payload("agent-job-outcome-draft-diagnosis.json"),
-        (CONTRACT_FIXTURES / "user-result.json").read_bytes(),
+        {
+            "schema_version": 1,
+            "status": "INSUFFICIENT",
+            "confirmed_methods": [],
+            "candidate_methods": [],
+            "evidence": [],
+            "limitations": ["No positive Methods marker is present."],
+            "safety_notes": ["Do not infer a cause from an absent marker."],
+        },
     )
 
 
@@ -99,6 +106,15 @@ def _write_outcome(root: Path, payload: dict[str, Any] | bytes) -> Path:
     (tool_state / DRAFT_FINALIZATION_MARKER_NAME).write_bytes(
         canonical_json_bytes(marker)
     )
+    return path
+
+
+def _write_method_diagnosis(root: Path, payload: dict[str, Any] | bytes) -> Path:
+    output = root / "output"
+    output.mkdir(parents=True, exist_ok=True)
+    data = payload if isinstance(payload, bytes) else canonical_json_bytes(payload)
+    path = output / "method-diagnosis.draft.json"
+    path.write_bytes(data)
     return path
 
 
@@ -145,31 +161,36 @@ def _assert_failure(
     assert failure.details == []
 
 
-def test_reads_only_final_canonical_agent_draft_without_result_artifacts(
+def test_methods_reader_uses_only_final_canonical_draft_without_result_artifacts(
     tmp_path: Path,
 ) -> None:
-    job, manifest, payload, _ = _diagnosis_inputs()
-    manifest = manifest.model_copy(update={"resolved_logparse_plan": None})
-    outcome_path = _write_outcome(tmp_path, payload)
-    (outcome_path.parent / "job_outcome.draft.json.part").write_bytes(b"not JSON")
+    job, manifest, payload = _diagnosis_inputs()
+    outcome_path = _write_method_diagnosis(tmp_path, payload)
+    (outcome_path.parent / "method-diagnosis.draft.json.part").write_bytes(
+        b"not JSON"
+    )
+    (outcome_path.parent / "job_outcome.draft.json").write_bytes(b"not JSON")
+    (outcome_path.parent / "diagnosis-result.json").write_bytes(b"forged")
 
     result = read_agent_output(tmp_path, job, manifest)
 
-    expected_outcome = AgentJobOutcomeDraftV2.model_validate(payload)
-    assert result.draft == expected_outcome
-    assert result.canonical_bytes == canonical_json_bytes(expected_outcome)
-    assert result.proposal_resources == ()
-    assert result.authoritative_targets is None
-    assert result.target_logs == ()
+    assert isinstance(result, ValidatedMethodDiagnosisDraft)
+    assert result.canonical_bytes == canonical_json_bytes(payload)
+    assert result.draft.status == "INSUFFICIENT"
+    assert result.draft.limitations == (
+        "No positive Methods marker is present.",
+    )
+    assert result.draft.safety_notes == (
+        "Do not infer a cause from an absent marker.",
+    )
 
 
 @pytest.mark.parametrize("artifact_kind", ["USER_RESULT", "USER_RESULT_ARCHIVE"])
-def test_agent_draft_forbids_server_generated_result_artifacts(
+def test_methods_draft_forbids_server_generated_result_artifacts(
     tmp_path: Path,
     artifact_kind: str,
 ) -> None:
-    job, manifest, payload, _ = _diagnosis_inputs()
-    manifest = manifest.model_copy(update={"resolved_logparse_plan": None})
+    job, manifest, payload = _diagnosis_inputs()
     is_archive = artifact_kind == "USER_RESULT_ARCHIVE"
     payload["proposed_artifact_drafts"] = [
         {
@@ -198,7 +219,7 @@ def test_agent_draft_forbids_server_generated_result_artifacts(
             ),
         }
     ]
-    _write_outcome(tmp_path, payload)
+    _write_method_diagnosis(tmp_path, payload)
     _write_file_proposal(
         tmp_path,
         "output/proposals/forged-result/payload",
@@ -209,7 +230,7 @@ def test_agent_draft_forbids_server_generated_result_artifacts(
         read_agent_output(tmp_path, job, manifest)
 
     _assert_failure(captured, ErrorCode.OUTCOME_INVALID)
-    assert captured.value.failure_category == "outcome_schema"
+    assert captured.value.failure_category == "method_draft_schema"
 
 
 def test_frozen_binary_read_does_not_stop_at_ctrl_z(tmp_path: Path) -> None:

@@ -100,6 +100,12 @@ def _diagnosis_job_outcome(
         proposed_evidence=proposed_evidence or [],
         proposed_artifacts=proposed_artifacts or [],
         produced_at="2026-07-31T00:03:00.000Z",
+        decision_audit=(
+            None
+            if result_type
+            in {OutcomeResultType.NEED_INPUT, OutcomeResultType.NEED_ATTACHMENT}
+            else base.decision_audit
+        ),
     )
 
 
@@ -296,10 +302,7 @@ def test_need_input_accepts_multiple_inputs_and_attachment_in_one_wait() -> None
 
     assert not isinstance(plan, ApplicationError)
     assert plan.target_case_status is CaseStatus.WAITING_INPUT
-    assert {
-        requirement.requirement_id: requirement
-        for requirement in plan.accepted_state_delta.add_pending_requirements
-    } == {requirement.requirement_id: requirement for requirement in requirements}
+    assert plan.accepted_state_delta.add_pending_requirements == requirements
     assert plan.next_job_spec is None
     assert plan.clear_active_job is True
     assert validate_transition_plan_for_outcome(plan, outcome) is plan

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -72,8 +73,59 @@ process.exitCode = 1;
   }
 });
 
+test("a successful terminal accepts the planned turn boundary and rejects the next turn", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "isolated-agent-turn-cap-"));
+  try {
+    const fakeClaude = path.join(root, "fake-claude.mjs");
+    const settings = path.join(root, "settings.json");
+    fs.writeFileSync(settings, "{}\n");
+    fs.writeFileSync(fakeClaude, `
+const model = process.argv[process.argv.indexOf("--model") + 1];
+const turns = Number(model.split("-").at(-1));
+console.log(JSON.stringify({type:"system",subtype:"init",model}));
+console.log(JSON.stringify({
+  type:"result",subtype:"success",is_error:false,num_turns:turns,
+  total_cost_usd:0.01,
+  usage:{input_tokens:10,output_tokens:20,cache_creation_input_tokens:0,cache_read_input_tokens:0}
+}));
+`);
+    for (const turns of [16, 17]) {
+      const usageRoot = path.join(root, `usage-${turns}`);
+      const result = spawnSync(process.execPath, [
+        WRAPPER,
+        "--claude-entry", fakeClaude,
+        "--settings", settings,
+        "--model", `test-model-${turns}`,
+        "--usage-root", usageRoot,
+        "--max-turns", "16",
+        "--max-total-tokens", "1000000",
+        "--max-budget-usd", "10",
+        "--hard-timeout-seconds", "30",
+        "--workflow", "job",
+      ], {
+        cwd: root,
+        encoding: "utf8",
+        env: { PATH: process.env.PATH ?? "", HOME: root },
+      });
+      const [receiptFile] = fs.readdirSync(usageRoot);
+      const receipt = JSON.parse(fs.readFileSync(path.join(usageRoot, receiptFile), "utf8"));
+      assert.equal(receipt.turns, turns);
+      if (turns === 16) {
+        assert.equal(result.status, 0, result.stderr);
+        assert.deepEqual(receipt.wrapper_outcome, { schema_version: 1, status: "PASS", code: null });
+      } else {
+        assert.notEqual(result.status, 0);
+        assert.match(result.stderr, /WRAPPER_MODEL_TERMINAL_INVALID/);
+        assert.deepEqual(receipt.wrapper_outcome, { schema_version: 1, status: "FAIL", code: "WRAPPER_MODEL_TERMINAL_INVALID" });
+      }
+    }
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("a failed Skill trace writes the strict nested audit schema without raw tool data", () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "isolated-agent-skill-trace-"));
+  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "isolated-agent-skill-trace-")));
   try {
     const workspace = path.join(root, "workspace");
     const sourceRoot = path.join(root, "source");
@@ -82,18 +134,26 @@ test("a failed Skill trace writes the strict nested audit schema without raw too
     const fakeClaude = path.join(root, "fake-claude.mjs");
     const settings = path.join(root, "settings.json");
     fs.mkdirSync(path.join(workspace, "inputs"), { recursive: true });
+    fs.mkdirSync(path.join(workspace, "runtime"));
     fs.mkdirSync(path.join(workspace, "output"));
     fs.mkdirSync(sourceRoot);
     fs.mkdirSync(path.join(skillRoot, "references"), { recursive: true });
-    fs.writeFileSync(path.join(workspace, "inputs", "wiki.md"), "wiki\n");
-    fs.writeFileSync(path.join(workspace, "inputs", "clarifications.md"), "clarifications\n");
-    fs.writeFileSync(path.join(skillRoot, "SKILL.md"), [
-      "[generation](references/generation-spec-v6-reference.md)",
-      "[verification](references/verification-contract-v2-reference.md)",
-      "",
-    ].join("\n"));
-    fs.writeFileSync(path.join(skillRoot, "references", "generation-spec-v6-reference.md"), "generation\n");
-    fs.writeFileSync(path.join(skillRoot, "references", "verification-contract-v2-reference.md"), "verification\n");
+    const wiki = "wiki\n";
+    const templateInventorySha256 = crypto.createHash("sha256")
+      .update('{"templates":[],"version":1}')
+      .digest("hex");
+    fs.writeFileSync(path.join(workspace, "inputs", "wiki.md"), wiki);
+    fs.writeFileSync(path.join(workspace, "runtime", "source-wiki-identity.json"), `${JSON.stringify({
+      algorithm: "sha256",
+      log_template_extraction_version: 1,
+      log_template_inventory_sha256: templateInventorySha256,
+      log_templates: [],
+      schema_version: 2,
+      sha256: crypto.createHash("sha256").update(wiki).digest("hex"),
+      source_path: "inputs/wiki.md",
+    })}\n`);
+    fs.writeFileSync(path.join(skillRoot, "SKILL.md"), "[output](references/output-contract.md)\n");
+    fs.writeFileSync(path.join(skillRoot, "references", "output-contract.md"), "Methods output\n");
     fs.writeFileSync(settings, "{}\n");
     fs.writeFileSync(fakeClaude, `
 const model = process.argv[process.argv.indexOf("--model") + 1];

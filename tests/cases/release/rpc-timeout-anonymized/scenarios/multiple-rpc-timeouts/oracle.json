@@ -1,0 +1,15 @@
+{
+  "schema_version": 2,
+  "oracle_visibility": "GATE_ONLY",
+  "scenario_id": "multiple-rpc-timeouts",
+  "expected_status": "CONFIRMED",
+  "required_confirmed_marker_groups": [["API_COMPLETE"], ["LATE_RESPONSE"]],
+  "required_candidate_marker_groups": [["QUEUE_HISTORY"]],
+  "required_evidence_identities": [
+    {"marker": "LATE_RESPONSE", "identity_tokens": ["request_id=501"]},
+    {"marker": "API_COMPLETE", "identity_tokens": ["start_us=10000000", "end_us=16500000"]},
+    {"marker": "API_COMPLETE", "identity_tokens": ["start_us=20000000", "end_us=26800000"]}
+  ],
+  "forbidden_evidence_terms": [],
+  "required_safety_phrases": ["超时不等于取消"]
+}

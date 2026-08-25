@@ -24,9 +24,11 @@ For a `MATCHED` route, use `result_type=COMPLETED` and copy one compatible
 `result_type=NO_CAPABILITY` and `skill_ref=null`. ROUTE forbids `REROUTE`,
 `NEED_INPUT`, `NEED_ATTACHMENT`, and `INCONCLUSIVE`. `FAILED` requires a null
 payload and a non-null error; every non-failed draft requires `error=null`.
-Every `SKILL_INDEX` entry has already passed exact identity matching against all
-frozen user-fact names. If that filtering leaves no entry, the service publishes
-`NO_CAPABILITY` deterministically without invoking the routing Agent.
+`SKILL_INDEX` contains every registered production Methods Skill whose immutable
+identity and package structure passed server validation. The Router, not a
+user-fact-name filter, decides whether one Skill semantically matches the frozen
+problem and capabilities. If the production catalog itself is empty, the service
+publishes `NO_CAPABILITY` deterministically without invoking the routing Agent.
 
 ROUTE consumes and proposes nothing. Therefore `consumed_evidence_refs`, both
 proposal arrays, and `rule_claims` are empty. Never create a temporary file at

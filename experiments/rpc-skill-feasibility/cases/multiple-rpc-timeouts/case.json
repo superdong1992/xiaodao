@@ -1,0 +1,26 @@
+{
+  "scenario_id": "multiple-rpc-timeouts",
+  "problem_time": "2026-08-23T10:00:05.300000+08:00",
+  "client_process": "rpc_client",
+  "server_process": "rpc_server",
+  "service": "svc_orders",
+  "api": "Reserve",
+  "expected_status": "CONFIRMED",
+  "expected_branch_markers": ["LATE_RESPONSE", "API_COMPLETE"],
+  "expected_terms": ["request_id=501", "start_us=10000000", "end_us=16500000", "start_us=20000000", "end_us=26800000"],
+  "expected_evidence_identities": [
+    {
+      "branch_marker": "LATE_RESPONSE",
+      "identity_tokens": ["request_id=501"]
+    },
+    {
+      "branch_marker": "API_COMPLETE",
+      "identity_tokens": ["start_us=10000000", "end_us=16500000"]
+    },
+    {
+      "branch_marker": "API_COMPLETE",
+      "identity_tokens": ["start_us=20000000", "end_us=26800000"]
+    }
+  ],
+  "forbidden_evidence_terms": []
+}

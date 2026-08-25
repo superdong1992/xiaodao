@@ -407,7 +407,7 @@ def test_job_instruction_goal_and_resource_manifest_are_byte_exact() -> None:
 
 
 @pytest.mark.parametrize("job_type", list(JobType))
-def test_production_output_contract_materializes_exact_installed_s00_schemas(
+def test_production_output_contract_materializes_the_role_specific_protocol(
     job_type: JobType,
 ) -> None:
     job, materials, _, _ = _complete_inputs(job_type)
@@ -427,32 +427,37 @@ def test_production_output_contract_materializes_exact_installed_s00_schemas(
         if section.kind is ContextSectionKind.OUTPUT_CONTRACT
     )
     content = _section_content(context, output_index)
-    expected = schema_bundle_bytes()
-    markers = {
-        "agent-job-outcome-draft.schema.json": (
-            b"<<<BEGIN S00 AGENT JOB OUTCOME DRAFT SCHEMA>>>\n",
-            b"<<<END S00 AGENT JOB OUTCOME DRAFT SCHEMA>>>",
-        ),
-    }
-    if job_type is JobType.DIAGNOSE:
-        assert b"<<<BEGIN S00 USER RESULT SCHEMA>>>" not in content
-        assert b"<<<END S00 USER RESULT SCHEMA>>>" not in content
-        assert b"{{S00_USER_RESULT_SCHEMA_JSON}}" not in content
-        assert (
-            b'application/vnd.problem-locator.logparse-run+directory' in content
-        )
-        assert b'not the hash of `parse_manifest.json`' in content
-        assert b'`workspace_relative_path`' in content
-        assert b'`AFTER_LOGPARSE`' in content
-        assert b'order_id' not in content
-
     assert b"{{S00_" not in content
-    for schema_name, (begin, end) in markers.items():
+    if job_type is JobType.ROUTE:
+        expected = schema_bundle_bytes()["agent-job-outcome-draft.schema.json"]
+        begin = b"<<<BEGIN S00 AGENT JOB OUTCOME DRAFT SCHEMA>>>\n"
+        end = b"<<<END S00 AGENT JOB OUTCOME DRAFT SCHEMA>>>"
         assert content.count(begin) == 1
         assert content.count(end) == 1
         start = content.index(begin) + len(begin)
         finish = content.index(end, start)
-        assert content[start:finish] == expected[schema_name]
+        assert content[start:finish] == expected
+        assert b"every registered production Methods Skill" in content
+        assert b"user-fact-name filter" in content
+        assert b"passed exact identity matching against all" not in content
+        return
+
+    assert content == production_contract.encode("utf-8")
+    assert b"<<<BEGIN S00 AGENT JOB OUTCOME DRAFT SCHEMA>>>" not in content
+    assert b"output/job_outcome.draft.json" in content
+    assert b"Do not write" in content
+    if job_type is JobType.DIAGNOSE:
+        assert b"output/method-diagnosis.draft.json" in content
+        assert b'"limitations": []' in content
+        assert b'"safety_notes": []' in content
+        assert b"Scan every target log for every method" in content
+        assert b"Logparse has already run" in content
+    else:
+        assert job_type is JobType.REVIEW
+        assert b"output/method-review.draft.json" in content
+        assert b"inputs/method-grounding-audit.json" in content
+        assert b"exact set of" in content
+        assert b"Logparse is unavailable" in content
 
 
 def test_previous_outcome_is_full_canonical_dto_and_manifest_hash_is_checked() -> None:

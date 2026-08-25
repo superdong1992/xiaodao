@@ -13,6 +13,7 @@ from problem_locator.application.audit_bundle import (
     build_audit_bundle,
 )
 from problem_locator.application.audit_bundle_assembler import (
+    _source_draft_filename,
     _validated_decision_evidence_bytes,
     _validated_review_subject_bytes,
 )
@@ -26,6 +27,23 @@ from problem_locator.contracts import (
 
 
 FIXTURES = Path(__file__).resolve().parents[4] / "tests/fixtures/contracts/positive"
+
+
+@pytest.mark.parametrize(
+    ("fixture", "expected"),
+    (
+        ("job-route.json", "agent_job_outcome.draft.json"),
+        ("job-diagnose.json", "method-diagnosis.draft.json"),
+        ("job-review.json", "method-review.draft.json"),
+    ),
+)
+def test_audit_bundle_reads_the_protocol_specific_source_draft(
+    fixture: str,
+    expected: str,
+) -> None:
+    job = Job.model_validate_json((FIXTURES / fixture).read_bytes())
+
+    assert _source_draft_filename(job) == expected
 
 
 def test_audit_bundle_is_byte_deterministic_and_manifested() -> None:

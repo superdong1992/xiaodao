@@ -20,56 +20,38 @@ def _asset(relative: str) -> tuple[dict[str, object], str]:
     return metadata, content
 
 
-def test_specialist_assets_require_skill_and_raw_evidence_checks() -> None:
+def test_specialist_assets_require_methods_only_grounded_output() -> None:
     profile_meta, profile = _asset("profiles/specialist")
     contract_meta, contract = _asset("output-contracts/diagnose")
+    tool_meta, tool_bundle = _asset("tool-bundles/diagnose")
 
     assert profile_meta["version"] == "3.0.0"
-    assert contract_meta["version"] == "5.1.0"
-    for material in (profile, contract):
-        assert "problem_time" in material
-        assert "user_facts" in material
-        assert "raw" in material.lower() or "原始" in material
-        assert "causal" in material.lower() or "因果" in material
-        assert "role" in material.lower() or "角色" in material
-    assert "Agent 禁止提出或写入 `USER_RESULT`" in contract
-    assert "problem-locator-pack-result" not in contract
-    assert "`artifact_proposal_key=K`" in contract
-    assert "`parse-1-run`" in contract
-    assert "terminal path" in contract
-    assert "SUPPRESSION" in contract
-    assert "RATE_LIMIT" in contract
-    assert "`problem_time - before_ms`" in contract
-    assert "`problem_time + after_ms`" in contract
-    assert "2026-07-30T23:59:59.500Z" in contract
-    assert "禁止跳过本 Job 的 `target-logs`" in contract
-    assert "空 audit、重复成功操作或错误操作" in contract
-    assert "### 等待用户材料快路径" in contract
-    assert "`NEED_INPUT` 或 `NEED_ATTACHMENT`" in contract
-    assert "`rule_claims=[]`" in contract
-    assert "数量、顺序和 rule ID 完全一致" in contract
-    assert "或 grep `site-packages`" in contract
+    assert contract_meta["version"] == "6.0.0"
+    assert tool_meta["version"] == "4.0.0"
+    assert "raw" in profile.lower()
+    assert "output/method-diagnosis.draft.json" in contract
+    assert "inputs/logparse-receipt.json" in contract
+    assert "identity_tokens" in contract
+    assert "exact complete frozen log line" in contract
+    assert "do not run an\noutcome sealer" in contract
+    assert "output/job_outcome.draft.json" in contract
+    assert "problem-locator-logparse" not in tool_bundle
+    assert "problem-locator-seal-outcome-draft" not in tool_bundle
 
 
-def test_reviewer_assets_require_independent_rule_replay_and_full_evidence_union() -> None:
+def test_reviewer_assets_require_exact_methods_identity_coverage() -> None:
     profile_meta, profile = _asset("profiles/reviewer")
     contract_meta, contract = _asset("output-contracts/review")
+    tool_meta, tool_bundle = _asset("tool-bundles/review")
 
     assert profile_meta["version"] == "3.0.0"
-    assert contract_meta["version"] == "3.0.0"
-    for material in (profile, contract):
-        assert "problem_time" in material
-        assert "raw" in material.lower()
-        assert "causal" in material.lower()
-        assert "completion" in material
-        assert "consumed_evidence_refs" in material
-    assert "must equal" in contract
-    assert "forbids PASS" in contract
-    assert "rule_claims" in contract
-    assert "terminal_path_id" in contract
-    assert "COMPLETE|PARTIAL" in contract
-    assert "NOT_APPLICABLE" in contract
-    assert "`problem_time - before_ms`" in contract
-    assert "`problem_time + after_ms`" in contract
-    assert "2026-07-30T23:59:59.500Z" in contract
-    assert "problem-locator-seal-outcome-draft" in contract
+    assert contract_meta["version"] == "4.0.0"
+    assert tool_meta["version"] == "3.0.0"
+    assert "Independently" in profile
+    assert "output/method-review.draft.json" in contract
+    assert "inputs/method-diagnosis.json" in contract
+    assert "inputs/method-grounding-audit.json" in contract
+    assert "exact set" in contract
+    assert "(method_id, identity_tokens)" in contract
+    assert "problem-locator-logparse" not in tool_bundle
+    assert "problem-locator-seal-outcome-draft" not in tool_bundle

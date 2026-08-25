@@ -14,11 +14,10 @@ from problem_locator.contracts import (
     bytes_sha256,
     canonical_json_bytes,
 )
-from problem_locator.runtime.outcome_finalizer import (
-    DRAFT_FINALIZATION_MARKER_NAME,
-    SealedAgentOutcomeDraftMarker,
+from problem_locator.runtime.output_reader import (
+    read_methods_preprocessing,
 )
-from problem_locator.runtime.output_reader import RejectedAgentOutputError, read_agent_output
+from problem_locator.runtime.workspace import PreparedWorkspace
 
 
 ROOT = Path(__file__).resolve().parents[4]
@@ -31,22 +30,41 @@ def _json(name: str) -> dict[str, object]:
     return json.loads((FIXTURES / name).read_bytes())
 
 
-def _write_draft(root: Path, value: dict[str, object]) -> None:
-    data = canonical_json_bytes(value)
-    path = root / "output/job_outcome.draft.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(data)
-    marker = SealedAgentOutcomeDraftMarker(
-        schema_version=2,
-        relative_path="output/job_outcome.draft.json",
-        size=len(data),
-        sha256=bytes_sha256(data),
+def _prepared_workspace(
+    root: Path,
+    manifest: WorkspaceInputManifest,
+) -> PreparedWorkspace:
+    for relative in ("inputs", "runtime/tool-state", "output"):
+        (root / relative).mkdir(parents=True, exist_ok=True)
+    root_stat = root.stat(follow_symlinks=False)
+    inputs_stat = (root / "inputs").stat(follow_symlinks=False)
+    runtime_stat = (root / "runtime").stat(follow_symlinks=False)
+    tool_state_stat = (root / "runtime/tool-state").stat(follow_symlinks=False)
+    output_stat = (root / "output").stat(follow_symlinks=False)
+    return PreparedWorkspace(
+        root=root,
+        root_device=root_stat.st_dev,
+        root_inode=root_stat.st_ino,
+        inputs_device=inputs_stat.st_dev,
+        inputs_inode=inputs_stat.st_ino,
+        runtime_device=runtime_stat.st_dev,
+        runtime_inode=runtime_stat.st_ino,
+        tool_state_device=tool_state_stat.st_dev,
+        tool_state_inode=tool_state_stat.st_ino,
+        output_device=output_stat.st_dev,
+        output_inode=output_stat.st_ino,
+        manifest=manifest,
+        manifest_bytes=canonical_json_bytes(manifest),
+        attachments=(),
+        evidence=(),
+        artifacts=(),
+        previous_outcomes=(),
     )
-    state = root / "runtime/tool-state"
-    state.mkdir(parents=True)
-    (state / DRAFT_FINALIZATION_MARKER_NAME).write_bytes(
-        canonical_json_bytes(marker)
-    )
+
+
+def _request_bytes(audit_bytes: bytes) -> bytes:
+    value = json.loads(audit_bytes)
+    return canonical_json_bytes(value["operations"][0]["request"])
 
 
 def _audit(
@@ -124,7 +142,7 @@ def _parse_audit(
 
 def _prepared_values(
     root: Path,
-) -> tuple[Job, WorkspaceInputManifest, dict[str, object], list[dict[str, object]]]:
+) -> tuple[Job, WorkspaceInputManifest, list[dict[str, object]]]:
     job = Job.model_validate(_json("job-diagnose.json"))
     manifest_value = _json("workspace-input-manifest.json")
     anchors = [
@@ -217,18 +235,20 @@ def _prepared_values(
             "log_path": "logs/server.log",
         },
     ]
-    return job, manifest, _json("agent-job-outcome-draft-diagnosis.json"), targets
+    return job, manifest, targets
 
 
 def test_capture_scope_and_order_come_from_all_resolved_anchors(tmp_path: Path) -> None:
-    job, manifest, draft, targets = _prepared_values(tmp_path)
-    _write_draft(tmp_path, draft)
+    job, manifest, targets = _prepared_values(tmp_path)
+    workspace = _prepared_workspace(tmp_path, manifest)
+    audit_bytes = _audit(manifest, targets)
 
-    validated = read_agent_output(
-        tmp_path,
+    validated = read_methods_preprocessing(
+        workspace,
         job,
         manifest,
-        broker_audit_bytes=_audit(manifest, targets),
+        broker_audit_bytes=audit_bytes,
+        request_bytes=_request_bytes(audit_bytes),
     )
 
     assert validated.authoritative_targets is not None
@@ -245,75 +265,54 @@ def test_capture_scope_and_order_come_from_all_resolved_anchors(tmp_path: Path) 
         b"[0001] server takeover\n",
     ]
     assert [
-        binding.existing_evidence_id
-        for binding in validated.target_logs[0].evidence_bindings
-    ] == [EVIDENCE_ID]
-    # The Candidate cites only the caller Evidence, but the second anchor is
-    # still captured and delivered in plan order.
-    assert validated.target_logs[1].evidence_bindings == ()
+        item.evidence_bindings[0].evidence_proposal_key
+        for item in validated.target_logs
+    ] == ["methods-target-1", "methods-target-2"]
+    assert all(
+        item.evidence_bindings[0].existing_evidence_id is None
+        for item in validated.target_logs
+    )
 
 
-@pytest.mark.parametrize("audit_mode", ["absent", "no-success"])
-def test_failed_draft_with_resolved_plan_does_not_require_target_audit_success(
+@pytest.mark.parametrize("audit_mode", ["no-success", "ambiguous-success"])
+def test_methods_preprocessing_requires_one_successful_server_audit(
     tmp_path: Path,
     audit_mode: str,
 ) -> None:
-    job, manifest, draft, _targets = _prepared_values(tmp_path)
-    draft.update(
-        result_type="FAILED",
-        payload=None,
-        consumed_evidence_refs=[],
-        proposed_evidence_drafts=[],
-        proposed_artifact_drafts=[],
-        rule_claims=[],
-        error={
-            "stage": "TOOL_EXECUTE",
-            "code": "LOGPARSE_FAILED",
-            "message": "The fixed logparse execution failed.",
-            "retryable": False,
-            "details": [],
-        },
-    )
-    _write_draft(tmp_path, draft)
-    broker_audit_bytes = (
-        None
-        if audit_mode == "absent"
-        else canonical_json_bytes(
-            {
-                "schema_version": 1,
-                "job_id": manifest.job_id,
-                "operations": [],
-            }
+    job, manifest, targets = _prepared_values(tmp_path)
+    workspace = _prepared_workspace(tmp_path, manifest)
+    value = json.loads(_audit(manifest, targets))
+    if audit_mode == "no-success":
+        value["operations"] = []
+    else:
+        value["operations"].append(dict(value["operations"][0]))
+    broker_audit_bytes = canonical_json_bytes(value)
+
+    with pytest.raises(ValueError):
+        read_methods_preprocessing(
+            workspace,
+            job,
+            manifest,
+            broker_audit_bytes=broker_audit_bytes,
+            request_bytes=None,
         )
-    )
-
-    validated = read_agent_output(
-        tmp_path,
-        job,
-        manifest,
-        broker_audit_bytes=broker_audit_bytes,
-    )
-
-    assert validated.draft.result_type.value == "FAILED"
-    assert validated.draft.error is not None
-    assert validated.draft.error.code.value == "LOGPARSE_FAILED"
-    assert validated.authoritative_targets is None
-    assert validated.target_logs == ()
 
 
 def test_missing_target_is_preserved_for_inconclusive_server_result(
     tmp_path: Path,
 ) -> None:
-    job, manifest, draft, targets = _prepared_values(tmp_path)
+    job, manifest, targets = _prepared_values(tmp_path)
     targets[1].pop("log_path")
     targets[1]["match_status"] = "missing"
-    _write_draft(tmp_path, draft)
+    workspace = _prepared_workspace(tmp_path, manifest)
+    audit_bytes = _audit(manifest, targets)
 
-    validated = read_agent_output(
-        tmp_path,
+    validated = read_methods_preprocessing(
+        workspace,
         job,
         manifest,
-        broker_audit_bytes=_audit(manifest, targets),
+        broker_audit_bytes=audit_bytes,
+        request_bytes=_request_bytes(audit_bytes),
     )
 
     assert validated.authoritative_targets is not None
@@ -327,7 +326,7 @@ def test_missing_target_is_preserved_for_inconclusive_server_result(
 def test_new_parse_tree_cannot_drift_from_broker_owned_tree_hash(
     tmp_path: Path,
 ) -> None:
-    job, existing_manifest, draft, targets = _prepared_values(tmp_path)
+    job, existing_manifest, targets = _prepared_values(tmp_path)
     manifest_value = existing_manifest.model_dump(mode="json")
     attachment = next(
         item
@@ -380,22 +379,19 @@ def test_new_parse_tree_cannot_drift_from_broker_owned_tree_hash(
     }
     drifted_files = dict(original_files)
     drifted_files["logs/caller.log"] = b"[0001] tampered after broker response\r\n"
-    agent_draft = json.loads(canonical_json_bytes(broker_draft))
-    agent_draft["metadata"]["tree_manifest_sha256"] = tree_hash(drifted_files)
-    draft["proposed_artifact_drafts"] = [agent_draft]
     output_tree = tmp_path / "output/proposals/logparse-run/tree"
     for path, content in drifted_files.items():
         destination = output_tree / path
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_bytes(content)
-    _write_draft(tmp_path, draft)
+    workspace = _prepared_workspace(tmp_path, manifest)
+    audit_bytes = _parse_audit(manifest, targets, broker_draft)
 
-    with pytest.raises(RejectedAgentOutputError) as captured:
-        read_agent_output(
-            tmp_path,
+    with pytest.raises(ValueError, match="proposal tree differs"):
+        read_methods_preprocessing(
+            workspace,
             job,
             manifest,
-            broker_audit_bytes=_parse_audit(manifest, targets, broker_draft),
+            broker_audit_bytes=audit_bytes,
+            request_bytes=_request_bytes(audit_bytes),
         )
-
-    assert captured.value.failure_category == "authoritative_target_capture"

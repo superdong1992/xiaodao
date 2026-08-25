@@ -1,0 +1,13 @@
+{
+  "scenario_id": "insufficient-evidence",
+  "problem_time": "2026-08-23T10:00:04.950000+08:00",
+  "client_process": "rpc_client",
+  "server_process": "rpc_server",
+  "service": "svc_report",
+  "api": "Build",
+  "expected_status": "INSUFFICIENT",
+  "expected_branch_markers": [],
+  "expected_terms": [],
+  "expected_evidence_identities": [],
+  "forbidden_evidence_terms": []
+}

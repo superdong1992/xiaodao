@@ -362,22 +362,35 @@ function auditExecutedStageUsage(plan, planned, stage, failures) {
       failures.push({ code: "MODEL_INVOCATION_COUNT_MISMATCH", stage_id: stage.id, class: declaration.class });
       continue;
     }
+    const expectedInvocationModel = declaration.model ?? plan.release_inputs?.settings?.model;
     for (const invocation of members) {
       const usage = normalizedUsage(invocation.usage);
       const capsMatch = canonicalJson(invocation.effective_caps) === canonicalJson(declaration.caps);
+      const topologyMatches = declaration.execution_topology === undefined || invocation.execution_topology === declaration.execution_topology;
       const terminalSuccess = invocation.terminal?.subtype === "success" && invocation.terminal?.is_error === false;
       const wrapperSuccess = invocation.wrapper_outcome?.schema_version === 1
         && invocation.wrapper_outcome?.status === "PASS"
         && invocation.wrapper_outcome?.code === null;
-      const modelMatches = typeof plan.release_inputs?.settings?.model === "string" && invocation.effective_model === plan.release_inputs.settings.model;
+      const modelMatches = typeof expectedInvocationModel === "string" && invocation.effective_model === expectedInvocationModel;
+      const reasoningMatches = declaration.reasoning_effort === undefined
+        || invocation.effective_reasoning_effort === declaration.reasoning_effort;
+      const totalTokenEnforcement = declaration.aggregate
+        ? invocation.hard_cap_enforcement?.total_tokens === `posthoc-terminal-aggregate:${TOKEN_USAGE_FORMULA}`
+        : invocation.hard_cap_enforcement?.total_tokens === `terminal-usage-postcondition:${TOKEN_USAGE_FORMULA}`;
       const withinCaps = Number.isSafeInteger(invocation.turns) && invocation.turns > 0 && invocation.turns <= declaration.caps.max_turns
         && validUsage(usage)
         && usage.cost_usd <= declaration.caps.max_budget_usd
         && usage.total_tokens <= declaration.caps.max_total_tokens
-        && invocation.hard_cap_enforcement?.total_tokens === `terminal-usage-postcondition:${TOKEN_USAGE_FORMULA}`
+        && totalTokenEnforcement
         && validOutputTokenCapEvidence(invocation, declaration.caps);
-      if (invocation.usage_complete !== true || !capsMatch || !terminalSuccess || !wrapperSuccess || !modelMatches || !withinCaps) {
+      if (invocation.usage_complete !== true || !capsMatch || !topologyMatches || !terminalSuccess || !wrapperSuccess || !modelMatches || !reasoningMatches || !withinCaps) {
         failures.push({ code: "MODEL_HARD_CAP_RECEIPT_MISMATCH", stage_id: stage.id, invocation_id: invocation.invocation_id ?? null });
+      }
+    }
+    if (declaration.aggregate) {
+      const aggregate = sumUsage(members.map((invocation) => invocation.usage));
+      if (aggregate.total_tokens > declaration.caps.max_total_tokens || aggregate.cost_usd > declaration.caps.max_budget_usd) {
+        failures.push({ code: "MODEL_AGGREGATE_CAP_EXCEEDED", stage_id: stage.id, class: declaration.class });
       }
     }
   }

@@ -45,6 +45,20 @@ test("unknown configuration fields fail closed", () => {
   }, (root) => loadConfiguration(REPO_ROOT, root)), (error) => error.code === "CONFIG_GATE_FIELDS");
 });
 
+test("Codex runtime profile must equal the executable/model contract constants", () => {
+  const mutations = [
+    ["version", "0.149.0-alpha.4.2", "CONFIG_RUNTIME_CODEX_VERSION"],
+    ["executable_sha256", "0".repeat(64), "CONFIG_RUNTIME_CODEX_HASH"],
+    ["model", "gpt-5.6-sol", "CONFIG_RUNTIME_CODEX_MODEL"],
+    ["reasoning_effort", "high", "CONFIG_RUNTIME_CODEX_EFFORT"],
+  ];
+  for (const [field, replacement, code] of mutations) {
+    assert.throws(() => withConfigMutation("runtime-profiles.v2.json", (value) => {
+      value.profiles.release.codex[field] = replacement;
+    }, (root) => loadConfiguration(REPO_ROOT, root)), (error) => error.code === code);
+  }
+});
+
 test("orphan Gates fail before admission", () => {
   assert.throws(() => withConfigMutation("gates.v2.json", (value) => {
     value.gates["det.orphan"] = {
@@ -58,7 +72,7 @@ test("orphan Gates fail before admission", () => {
   }, (root) => loadConfiguration(REPO_ROOT, root)), (error) => error.code === "CONFIG_ORPHAN_GATE");
 });
 
-test("release.full has one isolated Wiki generation Gate followed by one fresh six-stage CrossJob closure on every Client platform", () => {
+test("release.full has one isolated Wiki generation Gate followed by one fresh six-stage CrossJob closure without Codex coupling", () => {
   const config = loadConfiguration(REPO_ROOT);
   const expected = [
     "journey.cross-job.environment",
@@ -75,9 +89,45 @@ test("release.full has one isolated Wiki generation Gate followed by one fresh s
       closure.stages.filter((stage) => stage.kind === "isolated-real").map((stage) => stage.id),
       ["real.skill-generation"],
     );
+    assert.equal(closure.stages.some((stage) => stage.id === "real.codex-luna-methods"), false);
     assert.ok(closure.stages.findIndex((stage) => stage.id === "real.skill-generation") < closure.stages.findIndex((stage) => stage.id === "journey.cross-job.environment"));
     assert.ok(closure.stages.filter((stage) => stage.id.startsWith("journey.cross-job.")).every((stage) => stage.reuse.release === "never"));
   }
+});
+
+test("Codex Luna is an independent Darwin Release goal and an explicit Dev real proof", () => {
+  const config = loadConfiguration(REPO_ROOT);
+  const release = resolveGoalClosure(config, {
+    goalId: "release.codex-luna-methods",
+    track: "release",
+    client: "macos",
+  });
+  assert.deepEqual(release.stages.map((stage) => stage.id), [
+    "framework.self-test",
+    "repository.static",
+    "deterministic.affected",
+    "deterministic.full",
+    "real.codex-luna-methods",
+  ]);
+  assert.equal(release.stages.some((stage) => stage.id === "real.skill-generation"), false);
+  assert.equal(release.stages.some((stage) => stage.id.startsWith("journey.cross-job.")), false);
+
+  const crossJobDev = resolveGoalClosure(config, {
+    goalId: "dev.real",
+    track: "dev",
+    requestedStage: "journey.cross-job.environment",
+    client: "macos",
+  });
+  assert.equal(crossJobDev.stages.some((stage) => stage.id === "real.codex-luna-methods"), false);
+
+  const codexDev = resolveGoalClosure(config, {
+    goalId: "dev.real",
+    track: "dev",
+    requestedStage: "real.codex-luna-methods",
+    client: "macos",
+  });
+  assert.equal(codexDev.stages.at(-1).id, "real.codex-luna-methods");
+  assert.equal(codexDev.stages.some((stage) => stage.id === "real.skill-generation"), false);
 });
 
 test("repository Python compilation covers runtime support scripts used by Release", () => {
@@ -98,12 +148,12 @@ test("every isolated real Agent Gate declares its exact invocation count", () =>
     assert.ok(Number.isInteger(gate.isolated_agent_invocations) && gate.isolated_agent_invocations > 0, gateId);
     assert.ok(gate.min_passed >= gate.isolated_agent_invocations, gateId);
   }
-  assert.equal(config.gates.gates["real.agent.diagnose"].isolated_agent_invocations, 4);
   assert.deepEqual(config.gates.gates["real.agent.skill-generation"].evidence, [
     "pytest.xml",
     "pytest-summary.json",
     "model-usage.json",
     "scenario-evaluation-audit.json",
+    "generated-skill.json",
   ]);
 });
 
@@ -120,12 +170,13 @@ test("model watchdogs cover every serial Backend invocation and Stage evidence",
   assert.ok(config.policy.process.real_no_progress_seconds < release.real_caps.isolated.hard_timeout_seconds);
   assert.equal(release.claude.max_output_tokens_upper_limit, 64000);
   assert.deepEqual(release.real_caps["isolated.skill-generation"], {
-    max_turns: 12,
+    max_turns: 16,
     max_total_tokens: 1000000,
     max_output_tokens: 64000,
     max_budget_usd: 10,
     hard_timeout_seconds: 1800,
   });
+  assert.equal(config.stages.stages.find((stage) => stage.id === "real.skill-generation").estimated_tokens, 600000);
   assert.deepEqual(release.real_caps.service_agent, {
     max_turns: 50,
     max_total_tokens: 2000000,
@@ -134,21 +185,32 @@ test("model watchdogs cover every serial Backend invocation and Stage evidence",
   });
   assert.ok(Object.entries(release.real_caps).every(([capId, cap]) => capId === "isolated.skill-generation" || cap.max_output_tokens === undefined));
   assert.equal(config.stages.stages.find((stage) => stage.id === "real.skill-generation").real_cap_id, "isolated.skill-generation");
-  assert.equal(config.stages.stages.find((stage) => stage.id === "real.diagnose").real_cap_id, undefined);
 });
 
-test("finalization and rollout migration scaffolding are not schedulable Stages", () => {
+test("finalization, rollout and the legacy v6 isolated diagnose path are not schedulable", () => {
   const config = loadConfiguration(REPO_ROOT);
   const ids = config.stages.stages.map((stage) => stage.id);
   assert.equal(ids.includes("evidence.finalize"), false);
   assert.equal(ids.includes("rollout.parity"), false);
+  assert.equal(ids.includes("real.diagnose"), false);
   assert.equal(Object.hasOwn(config.proofs.goals, "release.rollout-parity"), false);
+  assert.equal(config.proofs.goals["dev.real"].selectable_proofs.includes("proof.real-diagnose"), false);
+  assert.equal(Object.hasOwn(config.proofs.proofs, "proof.real-diagnose"), false);
+  assert.equal(Object.hasOwn(config.gates.gates, "real.agent.diagnose"), false);
+  assert.equal(Object.hasOwn(config.identities.components, "skill.legacy-diagnose"), false);
+  assert.equal(Object.hasOwn(config.identities.sets, "real-diagnose"), false);
 });
 
 test("host capability has one executable adapter path and no legacy environment-gated pytest", () => {
   const config = loadConfiguration(REPO_ROOT);
   const stage = config.stages.stages.find((candidate) => candidate.id === "platform.host-capability");
-  assert.deepEqual(stage.gates, ["platform.host-adapter", "platform.compat-contract"]);
+  const serverStage = config.stages.stages.find((candidate) => candidate.id === "platform.server-linux-capability");
+  assert.deepEqual(stage.gates, ["platform.host-adapter"]);
+  assert.equal(Object.hasOwn(config.gates.gates, "platform.compat-contract"), false);
+  assert.deepEqual(serverStage.gates, ["platform.server-linux-adapter"]);
+  assert.deepEqual(config.gates.gates["platform.server-linux-adapter"].required_claims, [
+    "linux-runtime", "installed-distribution", "native-startup", "process-tree-cleanup",
+  ]);
   assert.equal(Object.hasOwn(config.gates.gates, "platform.client-contract"), false);
   assert.equal(fs.existsSync(path.join(REPO_ROOT, "tests", "platform", "client")), false);
   assert.equal(fs.existsSync(path.join(REPO_ROOT, "tools", "test-flow", "adapters", "fixtures", "claude-flat-probe.mjs")), true);
@@ -170,7 +232,7 @@ test("every public platform has a repository-owned adapter and no harness identi
   assert.equal(fs.existsSync(path.join(REPO_ROOT, "tools", "test-flow", "harness")), false);
 });
 
-test("every repository identity path exists and generated, approved and legacy diagnosis Skill identities stay distinct", () => {
+test("every repository identity path exists and Methods registration and generator identities stay distinct", () => {
   const config = loadConfiguration(REPO_ROOT);
   for (const [componentId, component] of Object.entries(config.identities.components)) {
     if (component.kind !== "paths") continue;
@@ -178,10 +240,10 @@ test("every repository identity path exists and generated, approved and legacy d
       assert.equal(fs.existsSync(path.join(REPO_ROOT, relative)), true, `${componentId} is missing ${relative}`);
     }
   }
-  assert.deepEqual(config.identities.components["skill.diagnose"], {
+  assert.deepEqual(config.identities.components["skill.registration"], {
     kind: "release-case",
     root: "tests/cases/release",
-    partition: "approved",
+    partition: "registration",
   });
   assert.deepEqual(config.identities.components["case.wiki"], {
     kind: "release-case",
@@ -199,11 +261,7 @@ test("every repository identity path exists and generated, approved and legacy d
     partition: "oracle",
   });
   assert.deepEqual(config.identities.components["skill.generator"].paths, [
-    ".claude/skills/wiki-to-diagnosis-skill",
-    "src/problem_locator/runtime/verification_contract.py",
-  ]);
-  assert.deepEqual(config.identities.components["skill.legacy-diagnose"].paths, [
-    "tests/fixtures/components/diagnosis-generator/diagnose-service-takeover",
+    ".agents/skills/wiki-to-diagnosis-skill",
   ]);
   assert.deepEqual(config.identities.components["skill.logparse"].paths, [
     ".claude/skills/logparse-diagnose",
@@ -216,7 +274,7 @@ test("every repository identity path exists and generated, approved and legacy d
   ]);
   assert.ok(config.identities.sets.deterministic.producer.includes("skill.generic-adapter"));
   assert.ok(config.identities.sets["real-generic-locator"].producer.includes("skill.generic-adapter"));
-  for (const setId of ["real-agent", "real-generic-locator", "real-route", "real-diagnose", "real-review", "real-skill-generation"]) {
+  for (const setId of ["real-agent", "real-generic-locator", "real-route", "real-review", "real-skill-generation"]) {
     assert.ok(config.identities.sets[setId].producer.includes("runtime.support"), setId);
   }
   assert.ok(config.identities.sets["real-skill-generation"].producer.includes("product.source"));
@@ -257,10 +315,10 @@ test("isolated invocation and aggregate deadline declarations fail closed", () =
     delete value.gates["real.agent.skill-generation"].isolated_agent_invocations;
   }, (root) => loadConfiguration(REPO_ROOT, root)), (error) => error.code === "CONFIG_PYTEST_INVOCATIONS");
   assert.throws(() => withConfigMutation("gates.v2.json", (value) => {
-    value.gates["real.agent.diagnose"].isolated_agent_invocations = 5;
+    value.gates["real.agent.review"].isolated_agent_invocations = 2;
   }, (root) => loadConfiguration(REPO_ROOT, root)), (error) => error.code === "CONFIG_PYTEST_INVOCATIONS");
   assert.throws(() => withConfigMutation("stages.v2.json", (value) => {
-    value.stages.find((stage) => stage.id === "real.diagnose").timeout_seconds = 1200;
+    value.stages.find((stage) => stage.id === "real.review").timeout_seconds = 960;
   }, (root) => loadConfiguration(REPO_ROOT, root)), (error) => error.code === "CONFIG_ISOLATED_TIMEOUT_MARGIN");
   assert.throws(() => withConfigMutation("stages.v2.json", (value) => {
     value.stages.find((stage) => stage.id === "real.skill-generation").real_cap_id = "isolated.unknown";
@@ -271,6 +329,15 @@ test("isolated invocation and aggregate deadline declarations fail closed", () =
   assert.throws(() => withConfigMutation("stages.v2.json", (value) => {
     value.stages.find((stage) => stage.id === "real.skill-generation").timeout_seconds = 1860;
   }, (root) => loadConfiguration(REPO_ROOT, root)), (error) => error.code === "CONFIG_ISOLATED_TIMEOUT_MARGIN");
+  assert.throws(() => withConfigMutation("stages.v2.json", (value) => {
+    value.stages.find((stage) => stage.id === "real.skill-generation").estimated_tokens = 0;
+  }, (root) => loadConfiguration(REPO_ROOT, root)), (error) => error.code === "CONFIG_STAGE_ESTIMATED_TOKENS");
+  assert.throws(() => withConfigMutation("stages.v2.json", (value) => {
+    value.stages.find((stage) => stage.id === "framework.self-test").estimated_tokens = 1;
+  }, (root) => loadConfiguration(REPO_ROOT, root)), (error) => error.code === "CONFIG_STAGE_ESTIMATED_TOKENS_SCOPE");
+  assert.throws(() => withConfigMutation("stages.v2.json", (value) => {
+    value.stages.find((stage) => stage.id === "real.skill-generation").estimated_tokens = 1000001;
+  }, (root) => loadConfiguration(REPO_ROOT, root)), (error) => error.code === "CONFIG_STAGE_ESTIMATED_TOKENS_CAP");
 });
 
 test("isolated output token caps are positive and cannot exceed the pinned Claude runtime", () => {
