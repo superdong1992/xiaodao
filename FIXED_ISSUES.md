@@ -1,6 +1,6 @@
 # 已修复问题台账
 
-更新时间：2026-08-24
+更新时间：2026-08-25
 
 本文件记录已经在当前工作区验证、修复并由专项回归测试保护的问题。活跃待办仍只写入
 [`TODO.md`](TODO.md)；同一问题再次回归时更新原条目，不另建一个缺少历史关联的条目。
@@ -1112,3 +1112,244 @@
   执行并 PASS；deterministic full 2346 collected、2345 executed、1 explicit skip、0 failed/error。
   affected selector 实际执行后按策略 deferred-to-full；没有真实模型调用。本 verdict 引用元数据段
   不宣称被其所引用的源码快照覆盖。
+
+## PL-FIX-033：Claude Quick 输出上限加入配置后旧 watchdog 合同仍只允许 isolated cap
+
+- **状态**：已修复；是否验证通过以本条“最新 Test Flow verdict”为准。
+- **症状**：新增 Claude/DeepSeek Quick Validation 后，规定的 `dev.default` 在
+  `framework.config` 失败；`model watchdogs cover every serial Backend invocation and Stage evidence`
+  仍断言除 `isolated.skill-generation` 外任何 real cap 都不能声明 `max_output_tokens`，因而拒绝
+  已冻结为 64,000 的 `claude.macos-methods` 与 `claude.macos-e2e`。
+- **受影响版本**：引入 Claude/DeepSeek Quick Validation 的 `60d0292` 至当前基线
+  `5668fbb`；该失败与宿主平台无关，macOS/Linux 运行同一中央 deterministic Gate 都会触发。
+- **根因**：运行时配置和 `config.mjs` 已把 `claude.*` 定义为合法的 Claude Agent cap 范围，
+  但旧 watchdog 测试仍保留新增 Quick caps 之前的唯一 ID 白名单，提交时没有同步扩展闭合断言。
+- **不可回归行为**：仅 `isolated.skill-generation`、`claude.macos-methods`、
+  `claude.macos-e2e` 可以声明 `max_output_tokens`，且三者必须精确等于冻结 Claude runtime 上限；
+  其他 real cap 必须继续不含该字段，配置校验器仍拒绝非 Claude scope、零值和超上限值。
+- **修复历史**：2026-08-25，将旧单 ID 断言改为上述三个冻结 cap ID 的闭合集合；未修改
+  Goal、Proof、Stage、Gate、runtime profile 或模型预算。
+- **专项回归测试**：
+  - `tools/test-flow/tests/config-contract.test.mjs` 中
+    `model watchdogs cover every serial Backend invocation and Stage evidence`
+  - 同文件 `isolated output token caps are positive and cannot exceed the pinned Claude runtime`
+- **最新 Test Flow verdict**：修复后 Dev `run-20260825T090837Z-ef066b90` 为
+  `PASS_WITH_WARNINGS`；functional、operation、verification 均为 `PASS`，performance 为
+  `NOT_CALIBRATED`；验证源码快照
+  `git-visible-worktree-v1:09d3d9f7b328a71bfabf487290621fa28b570e9c5615b783cc4e399b0df5b70e`
+  （669 files）。framework config 18/18、framework Node 349 passed/4 skipped、docs 4/4；
+  deterministic full 为 contracts 569/569、unit 1730 passed/1 skipped、integration 45/45、
+  SameJob 4/4，零失败/错误；source materialization、worktree verification、secret/meta scan 均
+  `PASS`。本 verdict 引用元数据段不宣称被其所引用的源码快照覆盖。
+
+## PL-FIX-037：Ubuntu Codex Quick E2E 沿用 macOS service workspace 与本地 venv 假设
+
+- **状态**：已修复；是否验证通过以本条“最新 Test Flow verdict”为准。
+- **症状**：现有 `dev.macos-codex-luna-e2e` 经 Ubuntu 22.04 wrapper 运行时，先后出现
+  bubblewrap uid-map、`WORKSPACE_LIMIT`、materialized source path-set drift、合法附件 hard link
+  被拒、`MACOS_CODEX_LUNA_SERVICE_LOGPARSE_MISSING` 和外层 `NO_PROGRESS`。其中真实 ROUTE
+  transcript 一直正确选择 `diagnosis-skill/rpc-timeout-methods-v1`；失败发生在 Linux adapter/
+  runtime 边界，而不是同一模型在 Linux 生成了不同业务内容。
+- **受影响版本**：Ubuntu Codex Quick E2E 首次 root 适配至源码快照
+  `git-visible-worktree-v1:31988d171be5449b84e53948911023028dc7dfe3c6020ca5f92c8fc15a83764d`
+  （669 files）；权威失败证据包括 `run-20260825T104146Z-aa1552b0`、
+  `run-20260825T111811Z-7e326442`、`run-20260825T113636Z-d7407c41`、
+  `run-20260825T114319Z-e0238a40` 与 `run-20260825T114816Z-971e4232`。
+- **根因**：adapter 曾给允许使用 root 的 Codex child 额外注入 nested `setpriv`/cap-drop，破坏
+  bubblewrap uid map；恢复 root 后又把严格只允许 `inputs/output/runtime` 的产品 Workspace 直接
+  当作 Linux Codex project cwd，Codex 的 `.agents/.codex/.git` 项目元数据触发 fail-closed。
+  后续隔离镜像初版仍把 S02 合法只读 hard link 误当 Agent 输出 hard link，且 service runner
+  假定源码 checkout 自带 `.venv/bin/problem-locator-logparse`。此外 Python `-I` 会忽略
+  `PYTHONDONTWRITEBYTECODE`，服务导入 materialized source 时生成 `__pycache__`；Codex E2E main
+  也没有像 Claude E2E 一样向外层 watchdog 转发已经观察到的语义进度。
+- **不可回归行为**：Ubuntu wrapper 必须继续以 UID/GID 0、Docker 默认 root capability、只读根
+  文件系统和 Codex-scoped `seccomp=unconfined` 运行，不得重新引入 nested setpriv/cap-drop。
+  Linux service Codex project 必须位于产品 Workspace `runtime/` 下的可清理隔离目录，产品顶层
+  仍只能是 `inputs/output/runtime`；S02 可信普通 hard link 可以作为复制源，但隔离副本和模型 draft
+  必须为单链接普通文件，且只允许按阶段回写固定 draft。finalizer 与 Logparse CLI 必须由 runner
+  显式绑定到所选 Python 环境的冻结同级命令；service Python 必须使用 `-I -B`。CLIENT、ROUTE、
+  LOGPARSE、DIAGNOSE、REVIEW 的内部进度必须输出 allowlisted `stage.progress`，不得通过放大
+  no-progress 超时掩盖心跳遗漏。
+- **修复历史**：2026-08-25，撤销错误的 root child setpriv/cap-drop，保留 root bubblewrap 合同；
+  增加 content-free Workspace identity 失败收据并据此确认顶层污染；Linux service 改用
+  `runtime/test-flow-codex-project` 隔离项目，只发布固定 draft 后调用产品 finalizer/validator；
+  复制器接受受信只读 hard-link 源但继续拒绝链接或非普通节点；E2E service 增加 `-B`，并显式
+  传入 `problem-locator-seal-outcome-draft` 与 `problem-locator-logparse`；最后补齐
+  `TEST_FLOW_PROGRESS stage.progress codex-luna ...` 语义心跳。每个真实失败后均使用新
+  reason/hypothesis/expected evidence 重新 plan-only，未自动重试。
+- **专项回归测试**：
+  - `tools/test-flow/quick-validation/codex-luna/tests/macos-codex-luna-service-wrapper.test.mjs` 中
+    `Linux service project contains Codex metadata without changing the product Workspace root shape`
+  - 同文件 `server wrapper runs the one product-owned Logparse command without persisting broker credentials`
+    与 `server wrapper seals a service outcome draft before the Agent process exits`
+  - `tools/test-flow/quick-validation/codex-luna/tests/macos-codex-luna-e2e-runner.test.mjs` 中
+    `E2E service launch disables Python bytecode inside the materialized source snapshot` 与
+    `Codex E2E forwards semantic progress heartbeats to the outer Test Flow watchdog`
+  - `tests/deterministic/unit/runtime/test_agent_backend.py::test_workspace_identity_failure_reports_content_free_root_shape`
+  - `tools/test-flow/tests/wsl-quick-validation.test.mjs` 中 root/no-setpriv、system Codex 三件套及
+    Ubuntu wrapper delegate 合同测试
+- **最新 Test Flow verdict**：最终 Dev deterministic `run-20260825T120201Z-f36f4c31` 为
+  `PASS_WITH_WARNINGS`；functional、operation、verification 均为 `PASS`，performance 为
+  `NOT_CALIBRATED`；验证源码快照
+  `git-visible-worktree-v1:f992bed8b34ad8a95a80a2c5df95242aca9a5ba476ccc72fe42a53108deb104b`
+  （669 files），framework、repository static、affected 与 deterministic full 全部实际执行并
+  `PASS`。此前同一实现/专项测试字节的真实 Codex E2E
+  `run-20260825T115405Z-cc714117` 同为 `PASS_WITH_WARNINGS`，验证源码快照
+  `git-visible-worktree-v1:bec40897b9560216aefddb098f446e978acb774f05aaecacf1348c6bb2a5a294`
+  （669 files）；真实 Gate 实际执行 CLIENT、ROUTE、LOGPARSE、DIAGNOSE、REVIEW 各 1 次且
+  全部 terminal PASS，合计 834,437 tokens，Stage 223.337 秒。adapter、MCP、attachment、
+  artifact、HTTP boundary、oracle、security、source materialization 与 worktree verification
+  全部 `PASS`，secret scan 为零命中。本 verdict 引用元数据段不宣称被其所引用的源码快照覆盖。
+
+## PL-FIX-038：Ubuntu Claude Quick E2E 依赖 macOS checkout 本地 venv 且会写 pycache
+
+- **状态**：已修复；是否验证通过以本条“最新 Test Flow verdict”为准。
+- **症状**：Claude Methods cache 和 Ubuntu E2E plan 均已 PRESENT/ADMITTED，但当前 service wrapper
+  仍从源码 checkout 的 `.venv/bin` 查找 `problem-locator-seal-outcome-draft` 与
+  `problem-locator-logparse`，同时以 `python -I` 启动 materialized source 中的测试服务却只靠
+  `PYTHONDONTWRITEBYTECODE=1` 禁止 pycache。ext4 checkout 实际没有 `.venv`，因此真实流程若不修正
+  会在 ROUTE/LOGPARSE 的机械命令处失败，并令 materialized source path set 漂移。
+- **受影响版本**：修复前 Claude E2E plan-only 源码快照
+  `git-visible-worktree-v1:e36355d6d82d56ffb2ac56eb8037ec171833cb80e60dd7c29054de631d1ca155`
+  （669 files）；Claude Methods 不经过 E2E service launcher，不受此问题影响。
+- **根因**：E2E runner 沿用了原生 macOS checkout 通常自带项目 `.venv` 的假设，没有把已经由
+  action 选定的 Python runtime 同级产品 CLI 显式传给 service wrapper；Python `-I` 又隐含 `-E`，
+  会忽略所有 `PYTHON*` 环境变量，因此环境变量不能阻止 source import 生成 `__pycache__`。
+- **不可回归行为**：Claude service finalizer 与 Logparse 必须显式绑定到所选 `python-entry` 的
+  同级冻结命令，不得依赖 checkout `.venv`、ambient PATH 或 Codex runtime。E2E 服务必须使用
+  `-I -B`；Claude 继续使用自己的私有 settings、tool permission、禁止 service Bash 和既有
+  `stage.progress` 心跳，不得复制 Codex 的 seccomp/bubblewrap 或 service-project mirror。
+- **修复历史**：2026-08-25，在真实模型执行前复盘 Codex Linux 的已封存失败证据，并对当前
+  Claude 入口、ext4 checkout 和 exact image 做零模型核对；仅增加显式 `finalizer-entry`、
+  `logparse-entry` 和 `-B`，补齐闭合参数/源码专项测试。修复后的 plan 无 blocker/warning，首次
+  真实 Claude E2E 即完整通过，没有失败后重试。
+- **专项回归测试**：
+  - `tools/test-flow/quick-validation/claude-deepseek/tests/claude-deepseek-service-wrapper.test.mjs` 中
+    `service wrapper accepts only frozen Claude/provider roots and no external adapter` 与
+    `service Claude process has no dangerous permission mode or model Bash`
+  - `tools/test-flow/quick-validation/claude-deepseek/tests/claude-deepseek-e2e-runner.test.mjs` 中
+    `E2E service uses isolated Python without writing bytecode into the materialized source` 与
+    `client uses strict MCP, production Skill, exact Bash programs, and one fresh data root`
+- **最新 Test Flow verdict**：最终 Dev deterministic `run-20260825T123115Z-05e81c44` 为
+  `PASS`，functional、performance、operation、verification 均为 `PASS`；验证源码快照
+  `git-visible-worktree-v1:1c923e0651978a29eb1ca16f7723b20d0f3685ecce0f93b233b59f46c9b7512a`
+  （669 files）。此前同一实现/专项测试字节的真实 Claude E2E
+  `run-20260825T122501Z-d6ce1f1e` 为 `PASS_WITH_WARNINGS`，验证源码快照
+  `git-visible-worktree-v1:a16a736ac40fce05ab1545ecfd633ecb2cd5c1557aa57515470fa7515ab342d9`
+  （669 files）；functional、operation、verification 均为 `PASS`，仅 performance 为
+  `NOT_CALIBRATED`。真实 Gate 实际执行 CLIENT、ROUTE、LOGPARSE、DIAGNOSE、REVIEW 各 1 次且
+  全部 terminal PASS，总计 715,605 tokens、USD 1.537385，Stage 193.558 秒；finalizer、Logparse、
+  Methods canonicalizer、MCP、attachment、Bash policy、artifact、HTTP boundary、oracle、security、
+  source materialization 与 worktree verification 全部 `PASS`，secret scan 为零命中。本 verdict
+  引用元数据段不宣称被其所引用的源码快照覆盖。
+
+## PL-FIX-035：Codex Quick runner 已 PASS 但中央 action 读取了不存在的旧 Gate 文件名
+
+- **状态**：已修复；是否验证通过以本条“最新 Test Flow verdict”为准。
+- **症状**：中央 Codex Methods runner 已完成 1 次模型调用、canonical validator、secret scan 和
+  cache 原子发布，inner `adapter-receipt.json` 为 `PASS`，中央 Stage 却封存为
+  `ERROR / HARNESS / MACOS_CODEX_LUNA_GATE_RECEIPT_INVALID`。权威失败 run 为
+  `run-20260825T083916Z-82665555`。
+- **受影响版本**：`c5a5858` 将 provider runner 统一为 `adapter-receipt.json` 后，仍保留
+  `befc308` 中央 action/Gate 的旧 `gate-receipt.json` 消费合同；Codex Methods 与 E2E 两个中央
+  Goal 均受影响，和 macOS/Linux 平台无关。
+- **根因**：provider adapter receipt 与中央 engine 自有 Gate receipt 使用了两个不同层级的
+  概念；Codex action/config 没有随 runner 文件名迁移，而 Claude action/config 已使用正确的
+  `adapter-receipt.json`。中央 engine 的 `gate-receipt.json` 只有 action 返回后才写入，因此 action
+  不可能在执行中读取它。
+- **不可回归行为**：Codex provider runner、中央 action 与两个 Codex Quick Gate 必须统一消费
+  `adapter-receipt.json`；中央 `gate-receipt.json` 仍只由 engine 封存。Methods cache 已存在时，
+  planner 必须把 invocation caps 降为 0，并调用 runner 既有的 `--verify-cache-only` 路径；该路径
+  必须重跑 identity、tree、canonical validator 与 security 校验，不得再次调用模型或重发费用。
+- **修复历史**：2026-08-25，将两个 Codex Quick Gate 的 provider evidence 改为
+  `adapter-receipt.json`，中央 action 同步读取该文件；接通已存在的 cache-only runner，并从实际
+  invocation caps 推导期望调用数。失败 run 中成功发布的 package tree 为
+  `84ca3319c586ba103f4b0b305fcac3112b024426a5c65cf95eece617abf63ea6`，validator 为 `PASS`；
+  该结果不会通过再次生成来“修复”编排错误。
+- **专项回归测试**：
+  - `tools/test-flow/tests/wsl-quick-validation.test.mjs` 中
+    `central Codex Quick Gates consume the provider adapter receipt and can verify a published cache without a model`
+- **最新 Test Flow verdict**：最终 Dev deterministic `run-20260825T090837Z-ef066b90` 为
+  `PASS_WITH_WARNINGS`；functional、operation、verification 均为 `PASS`，performance 为
+  `NOT_CALIBRATED`；验证源码快照
+  `git-visible-worktree-v1:09d3d9f7b328a71bfabf487290621fa28b570e9c5615b783cc4e399b0df5b70e`
+  （669 files），framework config 18/18、Node 349 passed/4 skipped、docs 4/4，deterministic
+  contracts 569/569、unit 1730 passed/1 skipped、integration 45/45、SameJob 4/4。中央 Codex
+  Methods cache-verification `run-20260825T091208Z-fc467dae` 同为 `PASS_WITH_WARNINGS`，验证源码
+  快照为 `git-visible-worktree-v1:fadfa27763d04dcf9ad52c756e2e4c998b02f647591883607d3464ebc83d57ae`；
+  invocation/usage 均为 0，package tree 保持
+  `84ca3319c586ba103f4b0b305fcac3112b024426a5c65cf95eece617abf63ea6`，adapter、validator、
+  cache identity、security、operation 与 verification 全部 `PASS`。verdict 引用元数据段不宣称
+  被其所引用的源码快照覆盖。
+
+## PL-FIX-036：Ubuntu Quick 镜像将 Logparse venv 放在中央 E2E 合同之外
+
+- **状态**：已修复；是否验证通过以本条“最新 Test Flow verdict”为准。
+- **症状**：Codex Methods cache 已 PRESENT 后，现有中央 `dev.macos-codex-luna-e2e` 的
+  plan-only 仍被 `CODEX_LOGPARSE_RUNTIME_INVALID / CODEX_LOGPARSE_VENV_INVALID` 阻塞，真实 E2E
+  模型调用数为 0。
+- **受影响版本**：Ubuntu Quick 镜像
+  `sha256:44dc69c6dc11935dcc7168c6641db4ee47eab6d0778bfbbc622c6d0b6772acbb`；
+  对应源码快照
+  `git-visible-worktree-v1:586c3ef44ee358fe50c9054c9400d010a0e6aa330c439e2baf4fea2c61f20e4f`
+  （669 files）。
+- **根因**：薄镜像把冻结 Logparse Python 3.12 venv 建在 `/opt/venvs/logparse`，而现有中央
+  Codex E2E 身份和 action 固定消费干净 Logparse checkout 下的 `.venv/bin/python`；Methods 不需要
+  Logparse runtime，因此直到 E2E planning 才暴露。合同明确拒绝以 venv 根符号链接替代真实目录。
+- **不可回归行为**：镜像内 `/opt/logparse` 必须保持冻结 commit 且 Git clean，同时拥有真实目录
+  `/opt/logparse/.venv`；其 Python 必须为 3.12.13，`sys.prefix` 必须精确等于该 venv 根，完整 tree、
+  Python base、import paths 与 `cli.py` 必须继续由 `codexLogparseRuntimeIdentity` 冻结。不得放宽
+  E2E planner、改用 ambient Python 或用被合同拒绝的 venv 根软链。
+- **修复历史**：2026-08-25，镜像仍从冻结本地 cache 离线创建 venv，在复制并验证 Logparse
+  checkout 后将完整 venv 移入 `/opt/logparse/.venv`，并把 Python 版本与 `sys.prefix` 加入
+  network-none/read-only/root smoke；未修改 E2E runner、模型或业务合同。
+- **专项回归测试**：
+  - `tools/test-flow/tests/wsl-quick-validation.test.mjs` 中
+    `the image supplies Ubuntu 22.04 runtimes and only a BSD-stat compatibility boundary`
+  - `tools/test-flow/quick-validation/wsl/prepare-image.sh` 的 Logparse Python 版本与 `sys.prefix` smoke
+- **最新 Test Flow verdict**：新 exact image
+  `sha256:7ad87dbc0bacf0ac711ba6ca1215556454db3b080bb4f00c2b2d9af4494d87b0` 与 seal SHA-256
+  `3ddf45df139abe6822399f235120c48a7d8e108c96832f4023c3efb8ca47d09d` 已通过
+  network-none/read-only/root smoke；Codex E2E plan 中 `codex_logparse_runtime=PRESENT` 且
+  admission `ADMITTED`，Claude E2E plan 同样 cache PRESENT/ADMITTED。最终 Dev deterministic
+  `run-20260825T090837Z-ef066b90` 为 `PASS_WITH_WARNINGS`，functional、operation、verification
+  均为 `PASS`，验证源码快照
+  `git-visible-worktree-v1:09d3d9f7b328a71bfabf487290621fa28b570e9c5615b783cc4e399b0df5b70e`
+  （669 files）。随后 Codex E2E 已越过本条 venv blocker，在独立的 ROUTE Workspace blocker
+  `run-20260825T085932Z-3a2ea09e` 停止；该未完成事项记录于 `TODO.md`，不回归为本条 venv 失败。
+
+## PL-FIX-034：Ubuntu 中央 Codex Quick 私有复制 CLI 后丢失相邻 Code Mode host
+
+- **状态**：已修复；是否验证通过以本条“最新 Test Flow verdict”为准。
+- **症状**：Ubuntu 22.04 容器中的现有中央 `dev.macos-codex-luna-methods` 已 ADMITTED，
+  但真实 Gate 在生成包出现前失败；Codex 连续报告私有 scratch 下相邻
+  `codex-code-mode-host` 不存在，runner 随后因 `generated/diagnose-rpc-timeout` 不存在而退出。
+  权威 run `run-20260825T083119Z-d751652c` 的 Gate code 为
+  `MACOS_CODEX_LUNA_RUNNER_FAILED`，模型 invocation receipt 与 Test Flow usage 均为 0。
+- **受影响版本**：Ubuntu 22.04 中央 Quick wrapper 的首个真实源码快照
+  `git-visible-worktree-v1:70b1054a6eec709cd90dca83e896ce6f774c1a8256bc8889c098679445c39583`
+  （669 files）；原生 macOS 私有复制路径不受影响。
+- **根因**：中央 action 延续 macOS 的 attempt-private CLI 复制策略，只复制 `codex`，而 Linux
+  CLI 按自身相邻路径解析 Code Mode host；镜像中已经封存并验证的
+  `/usr/bin/codex`、`/usr/bin/codex-code-mode-host`、`/usr/bin/codex-linux-sandbox` 三件套因此没有
+  被作为同一运行时使用。
+- **不可回归行为**：显式 sealed Ubuntu 22.04 Linux/x64 标记下必须直接执行只读镜像中的 exact
+  `/usr/bin/codex`，让三件套保持相邻；认证仍必须复制到 attempt-private 0400 文件。非标记宿主及
+  原生 macOS 必须继续使用 attempt-private CLI 副本。调用方不能覆盖 system entry，三件套版本与
+  SHA-256 仍必须在 planning、执行和 receipt 中验证；不得改变 prompt、模型、reasoning、内容缓存键
+  或独立 validator。
+- **修复历史**：2026-08-25，将中央 Quick Codex entry staging 明确分为
+  `sealed-system-entry` 与 `attempt-private-copy`，并对 Linux system entry 固定为
+  `/usr/bin/codex`；失败后未以原身份盲重试。
+- **专项回归测试**：
+  - `tools/test-flow/tests/wsl-quick-validation.test.mjs` 中
+    `the container marker selects only the frozen Linux Codex and app-server identities`
+  - 同文件 `central Quick Goals accept native macOS or the explicitly marked Linux container only`
+- **最新 Test Flow verdict**：修复后 Dev `run-20260825T090837Z-ef066b90` 为
+  `PASS_WITH_WARNINGS`；functional、operation、verification 均为 `PASS`，performance 为
+  `NOT_CALIBRATED`；验证源码快照
+  `git-visible-worktree-v1:09d3d9f7b328a71bfabf487290621fa28b570e9c5615b783cc4e399b0df5b70e`
+  （669 files）。framework config 18/18、framework Node 349 passed/4 skipped、docs 4/4；
+  deterministic full 为 contracts 569/569、unit 1730 passed/1 skipped、integration 45/45、
+  SameJob 4/4，零失败/错误；source materialization、worktree verification、secret/meta scan 均
+  `PASS`。本 verdict 引用元数据段不宣称被其所引用的源码快照覆盖。

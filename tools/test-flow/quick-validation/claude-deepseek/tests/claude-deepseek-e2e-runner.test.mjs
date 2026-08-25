@@ -9,9 +9,20 @@ import {
   materializeClientSettings,
   parseArguments,
   safeE2EError,
+  serviceLauncherArguments,
 } from "../runtime/claude-deepseek-e2e-runner.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+
+test("E2E service uses isolated Python without writing bytecode into the materialized source", () => {
+  const sourceRoot = path.resolve("sealed-source");
+  assert.deepEqual(serviceLauncherArguments(sourceRoot), [
+    "-I",
+    "-B",
+    path.join(sourceRoot, "tools", "test-flow", "runtime-support", "test_service_launcher.py"),
+    "serve",
+  ]);
+});
 
 test("E2E runner accepts only repository-owned Claude inputs and rejects Docker, MCP source, and adapters", () => {
   const names = ["source-root", "claude-entry", "claude-settings", "python-entry", "logparse-root", "cache-root", "scenario", "work-root", "private-root", "evidence-root", "usage-root", "run-id"];
@@ -57,6 +68,8 @@ test("client uses strict MCP, production Skill, exact Bash programs, and one fre
   assert.match(source, /const dataRoot = path\.join\(workRoot, "data-root"\)/);
   assert.match(source, /treeBytes\(serviceEvidence\) \+ treeBytes\(serviceUsage\)/);
   assert.match(source, /TEST_FLOW_PROGRESS stage\.progress claude-deepseek/);
+  assert.match(source, /problem-locator-seal-outcome-draft/);
+  assert.match(source, /problem-locator-logparse/);
   assert.equal(source.includes("Chrome"), false);
   assert.equal(source.includes("docker"), false);
   assert.equal(source.includes("restart"), false);

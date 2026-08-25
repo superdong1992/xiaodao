@@ -10,6 +10,7 @@ import {
   readCodexLunaExternalAuth,
   runCodexLunaAppServerCall,
 } from "../runtime-support/codex-luna-app-server-runtime.mjs";
+import { codexLunaAppServerCliVersion } from "../runtime-support/codex-luna-contract.mjs";
 
 const RUNTIME_SOURCE = path.resolve(
   path.dirname(new URL(import.meta.url).pathname),
@@ -30,6 +31,7 @@ const ACCOUNT_ID = "account-canary-0123456789";
 const WORK_CONTENT = "work-content-that-must-be-replaced-by-a-receipt";
 const WARNING_CONTENT = "warning-content-that-must-be-replaced-by-a-receipt";
 const PATCH_CONTENT = "patch-content-that-must-be-replaced-by-a-receipt";
+const FAKE_CLI_VERSION = codexLunaAppServerCliVersion();
 
 test("service Skill installation binds the declared Skill name instead of its staging directory", (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-luna-service-skill-"));
@@ -42,6 +44,11 @@ test("service Skill installation binds the declared Skill name instead of its st
   const installed = installServiceSkillInCodexHome(codexHome, source);
   assert.equal(installed, path.join(codexHome, "skills", "declared-service-skill", "SKILL.md"));
   assert.equal(fs.readFileSync(installed, "utf8"), fs.readFileSync(source, "utf8"));
+  assert.equal(fs.lstatSync(installed).mode & 0o777, 0o400);
+  assert.throws(
+    () => installServiceSkillInCodexHome(codexHome, source),
+    (error) => error.code === "EEXIST",
+  );
 });
 
 const FAKE_CODEX = String.raw`#!/usr/bin/env node
@@ -180,7 +187,7 @@ lines.on("line", (line) => {
           source: "vscode",
           modelProvider: "openai",
           cwd,
-          cliVersion: "0.149.0-alpha.4.1",
+          cliVersion: ${JSON.stringify(FAKE_CLI_VERSION)},
           turns: [],
         },
         model: "gpt-5.6-luna",

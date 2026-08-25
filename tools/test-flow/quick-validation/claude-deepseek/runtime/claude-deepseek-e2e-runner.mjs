@@ -299,7 +299,7 @@ export async function runE2E(options, { ambient = process.env, onProgress = null
   const serviceUsage = path.join(usageRoot, "server");
   for (const directory of [servicePrivate, serviceEvidence, serviceUsage]) fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
   const wrapper = path.join(sourceRoot, "tools", "test-flow", "quick-validation", "claude-deepseek", "runtime", "claude-deepseek-service-wrapper.mjs");
-  const serviceCommand = [process.execPath, wrapper, "--source-root", sourceRoot, "--runtime-root", runtimeRoot, "--claude-entry", options.claudeEntry, "--settings", stagedSettings, "--config-root", serverConfig, "--private-root", servicePrivate, "--evidence-root", serviceEvidence, "--usage-root", serviceUsage, "--run-id", options.runId].map(shellQuote).join(" ");
+  const serviceCommand = [process.execPath, wrapper, "--source-root", sourceRoot, "--runtime-root", runtimeRoot, "--claude-entry", options.claudeEntry, "--settings", stagedSettings, "--config-root", serverConfig, "--finalizer-entry", path.join(path.dirname(options.pythonEntry), "problem-locator-seal-outcome-draft"), "--logparse-entry", path.join(path.dirname(options.pythonEntry), "problem-locator-logparse"), "--private-root", servicePrivate, "--evidence-root", serviceEvidence, "--usage-root", serviceUsage, "--run-id", options.runId].map(shellQuote).join(" ");
   const serviceLog = path.join(privateRoot, "service.log");
   const serviceLogStream = fs.createWriteStream(serviceLog, { flags: "wx", mode: 0o600 });
   const serviceEnvironment = {
@@ -307,7 +307,7 @@ export async function runE2E(options, { ambient = process.env, onProgress = null
     DATA_ROOT: dataRoot, DFX_LOG_DIR: dfxRoot, PUBLIC_BASE_URL: `http://127.0.0.1:${port}`, BIND_HOST: "127.0.0.1", PORT: String(port), SKILL_DIR: skillDir,
     GENERIC_SKILL_NAME: "generic-problem-locator-smoke", LOGPARSE_REPO: options.logparseRoot, LOGPARSE_CONFIG_PATH: path.join(sourceRoot, "experiments", "rpc-skill-feasibility", "logparse-config.json"), LOGPARSE_PYTHON: path.join(options.logparseRoot, ".venv", "bin", "python"), CLAUDE_COMMAND: serviceCommand,
   };
-  const service = spawn(options.pythonEntry, ["-I", path.join(sourceRoot, "tools", "test-flow", "runtime-support", "test_service_launcher.py"), "serve"], { cwd: sourceRoot, env: serviceEnvironment, stdio: ["ignore", "pipe", "pipe"], detached: true });
+  const service = spawn(options.pythonEntry, serviceLauncherArguments(sourceRoot), { cwd: sourceRoot, env: serviceEnvironment, stdio: ["ignore", "pipe", "pipe"], detached: true });
   service.stdout.pipe(serviceLogStream, { end: false });
   service.stderr.pipe(serviceLogStream, { end: false });
   const serviceClosed = processClosed(service);
@@ -397,6 +397,10 @@ export async function runE2E(options, { ambient = process.env, onProgress = null
 }
 
 export function safeE2EError(error) { return { schema_version: 1, status: "FAIL", code: error?.code ?? "CLAUDE_DEEPSEEK_E2E_RUNNER_FAILED", message: error?.message ?? String(error) }; }
+
+export function serviceLauncherArguments(sourceRoot) {
+  return ["-I", "-B", path.join(path.resolve(sourceRoot), "tools", "test-flow", "runtime-support", "test_service_launcher.py"), "serve"];
+}
 
 async function main() {
   try {

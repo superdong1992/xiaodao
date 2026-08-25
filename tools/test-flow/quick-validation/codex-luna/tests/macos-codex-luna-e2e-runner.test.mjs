@@ -9,12 +9,37 @@ import {
   buildScenarioEvidenceSources,
   clientPrompt,
   createStandaloneGitBoundary,
+  e2eProgressLine,
   extractCommandHttpEntries,
   partitionMcpCalls,
+  persistServiceFailureEvidence,
+  persistWorkspaceFailureEvidence,
   selectScenarioJobs,
+  serviceLauncherArguments,
   structuredMcpData,
   validDescriptorUploadCommand,
 } from "../runtime/macos-codex-luna-e2e-runner.mjs";
+
+test("E2E service launch disables Python bytecode inside the materialized source snapshot", () => {
+  const sourceRoot = path.resolve("sealed-source");
+  assert.deepEqual(serviceLauncherArguments(sourceRoot), [
+    "-I",
+    "-B",
+    path.join(sourceRoot, "tools", "test-flow", "runtime-support", "test_service_launcher.py"),
+    "serve",
+  ]);
+});
+
+test("Codex E2E forwards semantic progress heartbeats to the outer Test Flow watchdog", () => {
+  assert.equal(
+    e2eProgressLine("diagnose"),
+    "TEST_FLOW_PROGRESS stage.progress codex-luna diagnose\n",
+  );
+  assert.throws(
+    () => e2eProgressLine("unknown"),
+    (error) => error.code === "MACOS_CODEX_LUNA_PROGRESS_PHASE_INVALID",
+  );
+});
 
 test("Logparse target evidence binds staged bytes and traces prefixed lines to the raw ZIP member", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "macos-luna-logparse-source-"));
@@ -109,6 +134,123 @@ test("MCP partition keeps successes and records recoverable business envelopes",
   const success = { tool: "problem_locator_prepare_attachment", result: { structuredContent: { ok: true, data: { upload: {} }, error: null } } };
   const conflict = { tool: "problem_locator_prepare_attachment", result: { structuredContent: { ok: false, data: null, error: { code: "REVISION_CONFLICT" } } } };
   assert.deepEqual(partitionMcpCalls([conflict, success]), { successful: [success], recoveries: [{ tool: "problem_locator_prepare_attachment", code: "REVISION_CONFLICT" }] });
+});
+
+test("Workspace identity failures persist only closed, secret-scanned diagnostics", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "macos-luna-workspace-failure-"));
+  const dfxRoot = path.join(root, "dfx");
+  const evidenceRoot = path.join(root, "evidence");
+  const privateRoot = path.join(root, "private");
+  fs.mkdirSync(dfxRoot, { recursive: true });
+  fs.mkdirSync(evidenceRoot, { recursive: true });
+  fs.mkdirSync(privateRoot, { recursive: true });
+  const canary = "do-not-persist-canary";
+  fs.writeFileSync(path.join(dfxRoot, "debug.jsonl"), `${JSON.stringify({ event: "debug", private_value: canary })}\n`);
+  const fields = [
+    ["workspace.measurement_phase", "stable", "before_scan"],
+    ["workspace.root", "kind=directory;device=1;inode=2", "kind=directory;device=1;inode=2"],
+    ["workspace.inputs", "kind=directory;device=1;inode=3", "kind=directory;device=1;inode=3"],
+    ["workspace.output", "kind=directory;device=1;inode=4", "kind=directory;device=1;inode=4"],
+    ["workspace.runtime", "kind=directory;device=1;inode=5", "kind=directory;device=1;inode=5"],
+    ["workspace.top_level_shape", "expected-shape", "observed-shape"],
+  ];
+  const event = {
+    schema_version: 1,
+    sequence: 17,
+    timestamp: "2026-08-25T09:00:03.271Z",
+    level: "ERROR",
+    event: "job.stage.failed",
+    correlation_id: null,
+    request_id: null,
+    case_id: "case-id",
+    job_id: "job-id",
+    job_type: "ROUTE",
+    outcome_id: null,
+    duration_ms: null,
+    data: {
+      stage: "BACKEND_EXECUTE",
+      code: "WORKSPACE_LIMIT",
+      message: "Workspace output roots could not be measured safely.",
+      retryable: false,
+      details: [
+        ...fields.map(([field, expected, actual]) => ({ field, resource_type: "WORKSPACE", expected, actual })),
+        { field: "unrelated", resource_type: "PRIVATE", expected: canary, actual: canary },
+      ],
+    },
+  };
+  fs.writeFileSync(path.join(dfxRoot, "journey.jsonl"), `${JSON.stringify(event)}\n`);
+
+  try {
+    const result = persistWorkspaceFailureEvidence({
+      dfxRoot,
+      evidenceRoot,
+      privateRoot,
+      serviceTermination: { code: 0, signal: null },
+      canaries: [canary],
+    });
+    assert.equal(result.receipt.job.type, "ROUTE");
+    assert.equal(result.receipt.workspace_details.length, fields.length);
+    assert.equal(result.secret_scan.status, "PASS");
+    const persisted = fs.readFileSync(path.join(evidenceRoot, "service-runtime", "workspace-failure.json"), "utf8");
+    assert.doesNotMatch(persisted, new RegExp(canary, "u"));
+    assert.doesNotMatch(persisted, new RegExp(root.replaceAll("\\", "\\\\"), "u"));
+    assert.equal(JSON.parse(persisted).service_termination.code, 0);
+    assert.equal(JSON.parse(fs.readFileSync(path.join(evidenceRoot, "service-runtime", "workspace-failure-secret-scan.json"), "utf8")).status, "PASS");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("failed service Jobs persist only bounded logs after credential canary scanning", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "macos-luna-service-failure-"));
+  const jobId = "12345678-1234-1234-1234-123456789abc";
+  const dataRoot = path.join(root, "data");
+  const dfxRoot = path.join(root, "dfx");
+  const evidenceRoot = path.join(root, "evidence");
+  const privateRoot = path.join(root, "private");
+  const jobRoot = path.join(dataRoot, "jobs", jobId);
+  for (const directory of [jobRoot, dfxRoot, evidenceRoot, privateRoot]) fs.mkdirSync(directory, { recursive: true });
+  fs.writeFileSync(path.join(jobRoot, "stdout.log"), "safe stdout\n");
+  fs.writeFileSync(path.join(jobRoot, "stderr.log"), '{"code":"CODEX_LUNA_APP_SERVER_PROCESS_FAILED"}\n');
+  fs.writeFileSync(path.join(root, "service.log"), "safe service log\n");
+  fs.writeFileSync(path.join(dfxRoot, "debug.jsonl"), '{"event":"debug"}\n');
+  fs.writeFileSync(path.join(dfxRoot, "journey.jsonl"), '{"event":"job.stage.failed"}\n');
+  try {
+    const result = persistServiceFailureEvidence({
+      failedCase: {
+        case_id: "case-id",
+        status: "FAILED",
+        failure: {
+          code: "BACKEND_EXIT_FAILED",
+          message: "Agent process exited unsuccessfully.",
+          source_job_id: jobId,
+          source_outcome_id: "outcome-id",
+        },
+      },
+      dataRoot,
+      dfxRoot,
+      serviceLog: path.join(root, "service.log"),
+      evidenceRoot,
+      privateRoot,
+      serviceTermination: { code: 0, signal: null },
+      canaries: ["credential-canary-value"],
+    });
+    assert.equal(result.receipt.case.failure.source_job_id, jobId);
+    assert.equal(result.secret_scan.status, "PASS");
+    const destination = path.join(evidenceRoot, "service-runtime", "failure");
+    assert.deepEqual(fs.readdirSync(destination).sort(), [
+      "debug.jsonl",
+      "job-stderr.log",
+      "job-stdout.log",
+      "journey.jsonl",
+      "receipt.json",
+      "service.log",
+    ]);
+    assert.match(fs.readFileSync(path.join(destination, "job-stderr.log"), "utf8"), /CODEX_LUNA_APP_SERVER_PROCESS_FAILED/u);
+    assert.equal(JSON.parse(fs.readFileSync(path.join(evidenceRoot, "service-runtime", "failure-secret-scan.json"), "utf8")).status, "PASS");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("command HTTP extraction records curl method and URL without treating unrelated shell as HTTP", () => {

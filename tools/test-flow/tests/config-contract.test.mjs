@@ -183,7 +183,12 @@ test("model watchdogs cover every serial Backend invocation and Stage evidence",
     max_budget_usd: 3,
     hard_timeout_seconds: 600,
   });
-  assert.ok(Object.entries(release.real_caps).every(([capId, cap]) => capId === "isolated.skill-generation" || cap.max_output_tokens === undefined));
+  const outputCappedCaps = new Set(["isolated.skill-generation", "claude.macos-methods", "claude.macos-e2e"]);
+  assert.ok(Object.entries(release.real_caps).every(([capId, cap]) => (
+    outputCappedCaps.has(capId)
+      ? cap.max_output_tokens === release.claude.max_output_tokens_upper_limit
+      : cap.max_output_tokens === undefined
+  )));
   assert.equal(config.stages.stages.find((stage) => stage.id === "real.skill-generation").real_cap_id, "isolated.skill-generation");
 });
 

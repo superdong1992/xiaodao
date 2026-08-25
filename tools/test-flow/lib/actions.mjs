@@ -87,10 +87,6 @@ import {
   parseCodexLunaAppServerTranscript,
 } from "../runtime-support/codex-luna-app-server.mjs";
 import {
-  MACOS_CODEX_LUNA_E2E_CALLS,
-  MACOS_CODEX_LUNA_METHODS_CALLS,
-} from "../quick-validation/codex-luna/runtime/macos-codex-luna-e2e-contract.mjs";
-import {
   CLAUDE_DEEPSEEK_E2E_CALLS,
   CLAUDE_DEEPSEEK_METHODS_CALLS,
 } from "../quick-validation/claude-deepseek/runtime/claude-deepseek-contract.mjs";
@@ -2873,11 +2869,39 @@ async function codexLunaMethods(context, stage) {
 }
 
 function macosCodexPythonEntry(repoRoot) {
-  const candidate = process.platform === "win32"
-    ? path.join(repoRoot, ".venv", "Scripts", "python.exe")
-    : path.join(repoRoot, ".venv", "bin", "python");
-  if (!fs.existsSync(candidate) || !fs.statSync(candidate).isFile()) throw new Error("MACOS_CODEX_LUNA_PYTHON_RUNTIME_MISSING");
-  return candidate;
+  const runtime = resolvePythonTestRuntime(repoRoot);
+  if (runtime === null || runtime.interpreterPrefix.length !== 0) throw new Error("MACOS_CODEX_LUNA_PYTHON_RUNTIME_MISSING");
+  return runtime.command;
+}
+
+export function quickValidationCodexEntryStrategy({
+  platform = process.platform,
+  architecture = process.arch,
+  environment = process.env,
+} = {}) {
+  return platform === "linux"
+    && architecture === "x64"
+    && environment.TEST_FLOW_QUICK_UBUNTU2204_CONTAINER === "1"
+    ? "sealed-system-entry"
+    : "attempt-private-copy";
+}
+
+export function quickValidationScratchRoot(context, name, environment = process.env) {
+  const configured = environment.TEST_FLOW_QUICK_SCRATCH_ROOT;
+  if (!configured) return path.join(context.attemptRoot, "scratch", name);
+  if (environment.TEST_FLOW_QUICK_UBUNTU2204_CONTAINER !== "1" || !path.isAbsolute(configured)) {
+    throw new Error("QUICK_VALIDATION_SCRATCH_ROOT_INVALID");
+  }
+  const root = path.resolve(configured);
+  const attemptRoot = path.resolve(context.attemptRoot);
+  if (root === attemptRoot
+    || root.startsWith(`${attemptRoot}${path.sep}`)
+    || attemptRoot.startsWith(`${root}${path.sep}`)) {
+    throw new Error("QUICK_VALIDATION_SCRATCH_ROOT_OVERLAP");
+  }
+  const runRoot = path.join(root, path.basename(attemptRoot));
+  ensureDirectory(runRoot);
+  return path.join(runRoot, name);
 }
 
 function materializeMacosCodexInputs({ scratchRoot, codexEntry, codexAuth, planned }) {
@@ -2885,16 +2909,23 @@ function materializeMacosCodexInputs({ scratchRoot, codexEntry, codexAuth, plann
   if (!sameIdentity(planned, source)) throw new Error("MACOS_CODEX_LUNA_PLANNED_IDENTITY_DRIFT");
   const inputRoot = path.join(scratchRoot, "codex-inputs");
   fs.mkdirSync(inputRoot, { recursive: false, mode: 0o700 });
-  const stagedEntry = path.join(inputRoot, "codex");
+  const entryStrategy = quickValidationCodexEntryStrategy();
+  const stagedEntry = entryStrategy === "sealed-system-entry"
+    ? path.resolve(codexEntry)
+    : path.join(inputRoot, "codex");
   const stagedAuth = path.join(inputRoot, "auth.json");
-  fs.copyFileSync(codexEntry, stagedEntry, fs.constants.COPYFILE_EXCL);
-  fs.chmodSync(stagedEntry, 0o500);
+  if (entryStrategy === "sealed-system-entry") {
+    if (stagedEntry !== "/usr/bin/codex") throw new Error("QUICK_VALIDATION_CODEX_SYSTEM_ENTRY_INVALID");
+  } else {
+    fs.copyFileSync(codexEntry, stagedEntry, fs.constants.COPYFILE_EXCL);
+    fs.chmodSync(stagedEntry, 0o500);
+  }
   fs.copyFileSync(codexAuth, stagedAuth, fs.constants.COPYFILE_EXCL);
   fs.chmodSync(stagedAuth, 0o400);
   const executed = validateCodexLunaIdentity(stagedEntry, stagedAuth);
   if (!sameCodexPayloadIdentity(planned, executed)) throw new Error("MACOS_CODEX_LUNA_STAGED_IDENTITY_DRIFT");
   fs.chmodSync(inputRoot, 0o500);
-  return { inputRoot, stagedEntry, stagedAuth, source, executed };
+  return { inputRoot, stagedEntry, stagedAuth, source, executed, entryStrategy };
 }
 
 function macosCodexInvocationProjection(invocation, hardCaps, invocationClass) {
@@ -2922,7 +2953,7 @@ function macosCodexInvocationProjection(invocation, hardCaps, invocationClass) {
 
 async function runMacosCodexLunaGate(context, stage, { workflow }) {
   const outputRoot = gateRoot(context, stage);
-  const scratchRoot = path.join(context.attemptRoot, "scratch", workflow === "methods" ? "macos-codex-luna-methods" : "macos-codex-luna-e2e");
+  const scratchRoot = quickValidationScratchRoot(context, workflow === "methods" ? "macos-codex-luna-methods" : "macos-codex-luna-e2e");
   ensureDirectory(scratchRoot);
   let staged;
   let pythonEntry;
@@ -2958,6 +2989,7 @@ async function runMacosCodexLunaGate(context, stage, { workflow }) {
       "--meta-skill-root", path.join(context.sourceSnapshotRoot, ".agents", "skills", "wiki-to-diagnosis-skill"),
       "--wiki", releaseWikiPath(context.sourceSnapshotRoot),
       "--registration-template", path.join(context.sourceSnapshotRoot, "tests", "cases", "release", "rpc-timeout-anonymized", "registration", "rpc-timeout-methods-v1", "registration-template.json"),
+      ...(context.planStage.invocation_caps.length === 0 ? ["--verify-cache-only"] : []),
     ]
     : [
       runner,
@@ -2987,12 +3019,12 @@ async function runMacosCodexLunaGate(context, stage, { workflow }) {
   let gate;
   let invocationLedger;
   try {
-    gate = JSON.parse(fs.readFileSync(path.join(outputRoot, "gate-receipt.json"), "utf8"));
+    gate = JSON.parse(fs.readFileSync(path.join(outputRoot, "adapter-receipt.json"), "utf8"));
     invocationLedger = JSON.parse(fs.readFileSync(path.join(outputRoot, "model-invocations.json"), "utf8"));
   } catch {
     return { ...result, status: "ERROR", failure_domain: "HARNESS", code: "MACOS_CODEX_LUNA_GATE_RECEIPT_INVALID" };
   }
-  const expectedCalls = workflow === "methods" ? MACOS_CODEX_LUNA_METHODS_CALLS : MACOS_CODEX_LUNA_E2E_CALLS;
+  const expectedCalls = context.planStage.invocation_caps.reduce((sum, declaration) => sum + declaration.max_count, 0);
   if (gate.status !== "PASS" || invocationLedger.status !== "PASS" || invocationLedger.invocations?.length !== expectedCalls) {
     return { ...result, status: "ERROR", failure_domain: "HARNESS", code: "MACOS_CODEX_LUNA_GATE_RECEIPT_INVALID" };
   }
@@ -3037,7 +3069,7 @@ function claudeDeepseekInvocationProjection(invocation, hardCaps, invocationClas
 
 async function runMacosClaudeDeepseekGate(context, stage, { workflow }) {
   const outputRoot = gateRoot(context, stage);
-  const scratchRoot = path.join(context.attemptRoot, "scratch", workflow === "methods" ? "macos-claude-deepseek-methods" : "macos-claude-deepseek-e2e");
+  const scratchRoot = quickValidationScratchRoot(context, workflow === "methods" ? "macos-claude-deepseek-methods" : "macos-claude-deepseek-e2e");
   ensureDirectory(scratchRoot);
   let pythonEntry;
   try { pythonEntry = macosCodexPythonEntry(context.repoRoot); }

@@ -35,7 +35,7 @@ function fail(code, message) {
 
 export function parseArguments(argv) {
   const values = {};
-  const names = new Set(["source-root", "runtime-root", "claude-entry", "settings", "config-root", "private-root", "evidence-root", "usage-root", "run-id"]);
+  const names = new Set(["source-root", "runtime-root", "claude-entry", "settings", "config-root", "finalizer-entry", "logparse-entry", "private-root", "evidence-root", "usage-root", "run-id"]);
   for (let index = 0; index < argv.length; index += 2) {
     const argument = argv[index];
     if (!argument?.startsWith("--") || index + 1 >= argv.length || argv[index + 1].startsWith("--")) fail("CLAUDE_DEEPSEEK_SERVICE_ARGUMENT_INVALID", "Service wrapper arguments must use --name value pairs");
@@ -97,8 +97,7 @@ export async function runServiceInvocation(values, { stdin = process.stdin, stdo
   const usageRoot = path.resolve(values["usage-root"]);
   const claim = claimPhase(privateRoot, phase);
   const broker = brokerEnvironment(ambient);
-  const runtimeRoot = path.resolve(values["runtime-root"]);
-  const preLogparse = runServiceLogparseCommand({ phase, prompt, workspaceRoot, sourceRoot: runtimeRoot, environment: broker ?? {} });
+  const preLogparse = runServiceLogparseCommand({ phase, prompt, workspaceRoot, logparseEntry: path.resolve(values["logparse-entry"]), environment: broker ?? {} });
   const home = path.join(claim, "home");
   const temporary = path.join(claim, "tmp");
   for (const directory of [home, temporary]) fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
@@ -126,7 +125,7 @@ export async function runServiceInvocation(values, { stdin = process.stdin, stdo
   }, { ambient, onProgress: () => stdout.write(`QUICK_VALIDATION_PROGRESS service-agent ${phase}\n`) });
   if (result.records.some((record) => record.name === "Bash" && record.is_error !== true)) fail("CLAUDE_DEEPSEEK_SERVICE_BASH_EXECUTED", "Service Claude process executed forbidden Bash");
   const methodsDraft = canonicalizeMethodsDraft({ phase, workspaceRoot });
-  const outcomeSealer = sealServiceOutcomeDraft({ phase, workspaceRoot, sourceRoot: runtimeRoot });
+  const outcomeSealer = sealServiceOutcomeDraft({ phase, workspaceRoot, finalizerEntry: path.resolve(values["finalizer-entry"]) });
   const receipt = {
     ...result.receipt,
     pre_logparse: preLogparse,

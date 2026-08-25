@@ -942,6 +942,50 @@ def test_workspace_measurement_fails_safely_on_identity_swap(
     assert probe_calls >= 2
 
 
+def test_workspace_identity_failure_reports_content_free_root_shape(
+    tmp_path: Path,
+) -> None:
+    root = _workspace(tmp_path)
+    identity = backend_module._capture_workspace_identity(root)
+    assert identity is not None
+    (root / "unexpected-node").mkdir()
+
+    with pytest.raises(RuntimeExecutionError) as caught:
+        backend_module._temporary_workspace_bytes(
+            root,
+            limit=1024,
+            identity=identity,
+        )
+
+    _assert_failure(caught, ErrorCode.WORKSPACE_LIMIT)
+    failure = caught.value.failure
+    details = {detail.field: detail for detail in failure.details}
+    assert set(details) == {
+        "workspace.measurement_phase",
+        "workspace.root",
+        "workspace.inputs",
+        "workspace.output",
+        "workspace.runtime",
+        "workspace.top_level_shape",
+    }
+    assert details["workspace.measurement_phase"].actual == "before_scan"
+    assert details["workspace.root"].actual == details["workspace.root"].expected
+    for name in ("inputs", "output", "runtime"):
+        assert details[f"workspace.{name}"].actual == details[
+            f"workspace.{name}"
+        ].expected
+    assert json.loads(str(details["workspace.top_level_shape"].actual)) == [
+        {"kind": "directory", "name": "inputs"},
+        {"kind": "directory", "name": "output"},
+        {"kind": "directory", "name": "runtime"},
+        {"kind": "directory", "name": "unexpected-node"},
+    ]
+    assert str(tmp_path) not in json.dumps(
+        [detail.model_dump(mode="json") for detail in failure.details],
+        ensure_ascii=False,
+    )
+
+
 def test_closed_managed_process_never_signals_a_reused_group(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -7,6 +7,8 @@ import {
   auditNoSecretLeak,
   canonicalJson,
   CODEX_LUNA_APP_SERVER_SCHEMA_TREE_SHA256,
+  codexLunaAppServerCliVersion,
+  codexLunaHelperDirectory,
   collectSecretCanaries,
   ordinaryFile,
   sha256Bytes,
@@ -390,7 +392,7 @@ export function installServiceSkillInCodexHome(codexHome, sourceSkillPath) {
   requireRuntime(/^[a-z0-9][a-z0-9-]{0,63}$/.test(skillName), "CODEX_LUNA_SERVICE_SKILL_NAME_INVALID", "Service Skill directory has an invalid name");
   const destination = path.join(codexHome, "skills", skillName, "SKILL.md");
   fs.mkdirSync(path.dirname(destination), { recursive: true, mode: 0o700 });
-  fs.copyFileSync(sourceSkillPath, destination, fs.constants.COPYFILE_EXCL);
+  fs.writeFileSync(destination, source, { encoding: "utf8", flag: "wx", mode: 0o400 });
   fs.chmodSync(destination, 0o400);
   return destination;
 }
@@ -416,9 +418,10 @@ export async function runCodexLunaAppServerCall({
   noProgressSeconds,
   shellHome: requestedShellHome = null,
   shellPath: requestedShellPath = "/usr/bin:/bin:/usr/sbin:/sbin",
+  expectedCliVersion = codexLunaAppServerCliVersion(),
   onProgress = null,
 }) {
-  const codeModeHostPath = path.join(path.dirname(path.resolve(codexEntry)), "codex-code-mode-host");
+  const codeModeHostPath = path.join(codexLunaHelperDirectory(codexEntry), "codex-code-mode-host");
   const codeModeHostMetadata = ordinaryFile(codeModeHostPath, "Codex code-mode host");
   requireRuntime((codeModeHostMetadata.mode & 0o111) !== 0, "CODEX_LUNA_CODE_MODE_HOST_NOT_EXECUTABLE", "Codex code-mode host must be executable");
   createDirectoryExclusive(callRoot);
@@ -681,6 +684,7 @@ export async function runCodexLunaAppServerCall({
       skillPath: configuredSkillPath,
       codexHome,
       mode,
+      expectedCliVersion,
       secretValues: auth.canaries,
     });
     baseEvidence = buildCodexLunaAppServerEvidenceSummary({ profile, transcript: parsed, secretValues: auth.canaries });

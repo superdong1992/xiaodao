@@ -9,6 +9,10 @@ export const CODEX_LUNA_REASONING_EFFORT = "medium";
 export const CODEX_LUNA_CLI_VERSION = "0.149.0-alpha.4.1";
 export const CODEX_LUNA_EXPECTED_CLI_VERSION = `codex-cli ${CODEX_LUNA_CLI_VERSION}`;
 export const CODEX_LUNA_EXPECTED_CLI_SHA256 = "09db9560f6f9dec139d3324254fb3c8fdbad5ecce1d8c794113dc15294f6aefd";
+export const CODEX_LUNA_LINUX_CLI_VERSION = "0.149.1";
+export const CODEX_LUNA_LINUX_EXPECTED_CLI_VERSION = `codex-cli ${CODEX_LUNA_LINUX_CLI_VERSION}`;
+export const CODEX_LUNA_LINUX_EXPECTED_CLI_SHA256 = "73dc5888888f411c1f0fa7b81d866e721dcc86b527ce8e3b2cf4708661e823ba";
+export const CODEX_LUNA_LINUX_CODE_MODE_HOST_SHA256 = "48f3a0d48033039cc7caccd209edb0ee350b81f82ca851a7b129e146e4bec6fb";
 export const CODEX_LUNA_NORMAL_CALLS = 10;
 export const CODEX_LUNA_MAX_CALLS = 10;
 export const CODEX_LUNA_SCENARIO_COUNT = 9;
@@ -178,14 +182,53 @@ export function validateCodexLunaSourceWikiIdentity(identity, wikiBytes) {
   return expected;
 }
 
+export function codexLunaAppServerCliVersion({ platform = process.platform, architecture = process.arch, environment = process.env } = {}) {
+  return platform === "linux" && architecture === "x64" && environment.TEST_FLOW_QUICK_UBUNTU2204_CONTAINER === "1"
+    ? CODEX_LUNA_LINUX_CLI_VERSION
+    : CODEX_LUNA_CLI_VERSION;
+}
+
+export function codexLunaExecutableIdentity({ platform = process.platform, architecture = process.arch, environment = process.env } = {}) {
+  if (platform === "darwin" && architecture === "arm64") {
+    return Object.freeze({ version: CODEX_LUNA_EXPECTED_CLI_VERSION, cli_sha256: CODEX_LUNA_EXPECTED_CLI_SHA256, code_mode_host_sha256: null, linux_sandbox_sha256: null });
+  }
+  if (platform === "linux" && architecture === "x64" && environment.TEST_FLOW_QUICK_UBUNTU2204_CONTAINER === "1") {
+    return Object.freeze({ version: CODEX_LUNA_LINUX_EXPECTED_CLI_VERSION, cli_sha256: CODEX_LUNA_LINUX_EXPECTED_CLI_SHA256, code_mode_host_sha256: CODEX_LUNA_LINUX_CODE_MODE_HOST_SHA256, linux_sandbox_sha256: CODEX_LUNA_LINUX_EXPECTED_CLI_SHA256 });
+  }
+  fail("CODEX_LUNA_PLATFORM_UNSUPPORTED", "Codex/Luna supports native macOS arm64 or the sealed Ubuntu 22.04 container wrapper");
+}
+
+export function codexLunaHelperDirectory(
+  entry,
+  { platform = process.platform, architecture = process.arch, environment = process.env } = {},
+) {
+  return platform === "linux"
+    && architecture === "x64"
+    && environment.TEST_FLOW_QUICK_UBUNTU2204_CONTAINER === "1"
+    ? "/usr/bin"
+    : path.dirname(path.resolve(entry));
+}
+
 export function validateCodexLunaIdentity(entry, authFile) {
+  const expectedExecutable = codexLunaExecutableIdentity();
   const metadata = ordinaryFile(entry, "Codex executable");
   requireContract((metadata.mode & 0o111) !== 0, "CODEX_LUNA_CLI_NOT_EXECUTABLE", "Codex entry must be executable");
   const cliSha256 = sha256File(entry);
-  const codeModeHostPath = path.join(path.dirname(path.resolve(entry)), "codex-code-mode-host");
+  const helperRoot = codexLunaHelperDirectory(entry);
+  const codeModeHostPath = path.join(helperRoot, "codex-code-mode-host");
   const codeModeHostMetadata = ordinaryFile(codeModeHostPath, "Codex code-mode host");
   requireContract((codeModeHostMetadata.mode & 0o111) !== 0, "CODEX_LUNA_CODE_MODE_HOST_NOT_EXECUTABLE", "Codex code-mode host must be executable");
-  requireContract(cliSha256 === CODEX_LUNA_EXPECTED_CLI_SHA256, "CODEX_LUNA_CLI_SHA256_MISMATCH", "Codex executable does not match the frozen local identity", { expected: CODEX_LUNA_EXPECTED_CLI_SHA256, actual: cliSha256 });
+  const codeModeHostSha256 = sha256File(codeModeHostPath);
+  requireContract(cliSha256 === expectedExecutable.cli_sha256, "CODEX_LUNA_CLI_SHA256_MISMATCH", "Codex executable does not match the frozen platform identity", { expected: expectedExecutable.cli_sha256, actual: cliSha256 });
+  if (expectedExecutable.code_mode_host_sha256 !== null) requireContract(codeModeHostSha256 === expectedExecutable.code_mode_host_sha256, "CODEX_LUNA_CODE_MODE_HOST_SHA256_MISMATCH", "Codex code-mode host does not match the frozen Linux identity");
+  let linuxSandbox = null;
+  if (expectedExecutable.linux_sandbox_sha256 !== null) {
+    const linuxSandboxPath = path.join(helperRoot, "codex-linux-sandbox");
+    const linuxSandboxMetadata = ordinaryFile(linuxSandboxPath, "Codex Linux sandbox helper");
+    const linuxSandboxSha256 = sha256File(linuxSandboxPath);
+    requireContract((linuxSandboxMetadata.mode & 0o111) !== 0 && linuxSandboxSha256 === expectedExecutable.linux_sandbox_sha256, "CODEX_LUNA_LINUX_SANDBOX_IDENTITY_INVALID", "Codex Linux sandbox helper does not match the frozen CLI bytes");
+    linuxSandbox = { sha256: linuxSandboxSha256, size: linuxSandboxMetadata.size, path_sha256: sha256Bytes(linuxSandboxPath) };
+  }
   const versionProbe = spawnSync(entry, ["--version"], {
     cwd: path.dirname(path.resolve(entry)),
     env: Object.fromEntries(["PATH", "TMPDIR", "TMP", "TEMP", "LANG", "LC_ALL", "LC_CTYPE"].filter((key) => typeof process.env[key] === "string").map((key) => [key, process.env[key]])),
@@ -195,7 +238,7 @@ export function validateCodexLunaIdentity(entry, authFile) {
   });
   requireContract(versionProbe.status === 0 && versionProbe.signal === null && !versionProbe.error, "CODEX_LUNA_CLI_VERSION_PROBE_FAILED", "Codex version probe failed", { status: versionProbe.status, signal: versionProbe.signal, cause: versionProbe.error?.code ?? null });
   const version = String(versionProbe.stdout ?? "").split(/\r?\n/).map((line) => line.trim()).find((line) => line.startsWith("codex-cli "));
-  requireContract(version === CODEX_LUNA_EXPECTED_CLI_VERSION, "CODEX_LUNA_CLI_VERSION_MISMATCH", "Codex CLI version does not match the frozen identity", { expected: CODEX_LUNA_EXPECTED_CLI_VERSION, actual: version ?? null });
+  requireContract(version === expectedExecutable.version, "CODEX_LUNA_CLI_VERSION_MISMATCH", "Codex CLI version does not match the frozen identity", { expected: expectedExecutable.version, actual: version ?? null });
   const appServerProbe = spawnSync(entry, ["app-server", "--help"], {
     cwd: path.dirname(path.resolve(entry)),
     env: Object.fromEntries(["PATH", "TMPDIR", "TMP", "TEMP", "LANG", "LC_ALL", "LC_CTYPE"].filter((key) => typeof process.env[key] === "string").map((key) => [key, process.env[key]])),
@@ -255,10 +298,11 @@ export function validateCodexLunaIdentity(entry, authFile) {
       architecture: process.arch,
       entry_path_sha256: sha256Bytes(path.resolve(entry)),
       code_mode_host: {
-        sha256: sha256File(codeModeHostPath),
+        sha256: codeModeHostSha256,
         size: codeModeHostMetadata.size,
         path_sha256: sha256Bytes(codeModeHostPath),
       },
+      ...(linuxSandbox === null ? {} : { linux_sandbox: linuxSandbox }),
     },
     auth: {
       kind: "chatgpt-external-tokens",

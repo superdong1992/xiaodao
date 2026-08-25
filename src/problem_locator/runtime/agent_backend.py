@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import stat
@@ -1043,6 +1044,139 @@ def _top_level_from_scandir(
     return top_level
 
 
+def _workspace_node_kind(metadata: os.stat_result) -> str:
+    if _is_link_like(metadata):
+        return "link"
+    if stat.S_ISDIR(metadata.st_mode):
+        return "directory"
+    if stat.S_ISREG(metadata.st_mode):
+        return "file"
+    return "other"
+
+
+def _workspace_identity_label(
+    kind: str,
+    identity: tuple[int, int] | None,
+) -> str:
+    if identity is None:
+        return kind
+    return f"kind={kind};device={identity[0]};inode={identity[1]}"
+
+
+def _workspace_identity_mismatch_details(
+    root: Path,
+    identity: _WorkspaceIdentity,
+    *,
+    phase: Literal["before_scan", "after_scan"],
+) -> list[ApplicationErrorDetail]:
+    """Return content-free identities explaining a fail-closed root mismatch."""
+
+    observed_root = "unavailable"
+    observed_nodes: dict[str, tuple[str, tuple[int, int] | None]] = {}
+    try:
+        root_metadata = os.stat(root, follow_symlinks=False)
+        observed_root = _workspace_identity_label(
+            _workspace_node_kind(root_metadata),
+            _metadata_identity(root_metadata),
+        )
+        with os.scandir(root) as iterator:
+            for index, entry in enumerate(iterator):
+                if index >= 32:
+                    observed_nodes["<additional-nodes-truncated>"] = (
+                        "other",
+                        None,
+                    )
+                    break
+                try:
+                    metadata = entry.stat(follow_symlinks=False)
+                except OSError:
+                    observed_nodes[entry.name] = ("unavailable", None)
+                    continue
+                observed_nodes[entry.name] = (
+                    _workspace_node_kind(metadata),
+                    _metadata_identity(metadata),
+                )
+    except (OSError, TypeError, ValueError):
+        pass
+
+    details = [
+        ApplicationErrorDetail(
+            field="workspace.measurement_phase",
+            resource_type="WORKSPACE",
+            resource_id=None,
+            resource_ref=None,
+            expected="stable",
+            actual=phase,
+            limit=None,
+            observed=None,
+        ),
+        ApplicationErrorDetail(
+            field="workspace.root",
+            resource_type="WORKSPACE",
+            resource_id=None,
+            resource_ref=None,
+            expected=_workspace_identity_label("directory", identity.root),
+            actual=observed_root,
+            limit=None,
+            observed=None,
+        ),
+    ]
+    for name in sorted(_WORKSPACE_TOP_LEVEL):
+        expected = identity.top_level_identity(name)
+        observed = observed_nodes.get(name)
+        details.append(
+            ApplicationErrorDetail(
+                field=f"workspace.{name}",
+                resource_type="WORKSPACE",
+                resource_id=None,
+                resource_ref=None,
+                expected=(
+                    "missing-from-plan"
+                    if expected is None
+                    else _workspace_identity_label("directory", expected)
+                ),
+                actual=(
+                    "missing"
+                    if observed is None
+                    else _workspace_identity_label(*observed)
+                ),
+                limit=None,
+                observed=None,
+            )
+        )
+    expected_shape = [
+        {"kind": "directory", "name": name}
+        for name in sorted(_WORKSPACE_TOP_LEVEL)
+    ]
+    observed_shape = [
+        {"kind": kind, "name": name}
+        for name, (kind, _) in sorted(observed_nodes.items())
+    ]
+    details.append(
+        ApplicationErrorDetail(
+            field="workspace.top_level_shape",
+            resource_type="WORKSPACE",
+            resource_id=None,
+            resource_ref=None,
+            expected=json.dumps(
+                expected_shape,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+            actual=json.dumps(
+                observed_shape,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+            limit=None,
+            observed=None,
+        )
+    )
+    return details
+
+
 def _protect_workspace_root(
     root: Path,
     identity: _WorkspaceIdentity,
@@ -1135,11 +1269,32 @@ def _workspace_path_matches_identity(
         return False
 
 
-def _workspace_measurement_failure(message: str) -> RuntimeExecutionError:
+def _workspace_measurement_failure(
+    message: str,
+    *,
+    details: list[ApplicationErrorDetail] | None = None,
+) -> RuntimeExecutionError:
     return runtime_failure(
         stage=ExecutionStage.BACKEND_EXECUTE,
         code=ErrorCode.WORKSPACE_LIMIT,
         message=message,
+        details=[] if details is None else details,
+    )
+
+
+def _workspace_identity_mismatch_failure(
+    root: Path,
+    identity: _WorkspaceIdentity,
+    *,
+    phase: Literal["before_scan", "after_scan"],
+) -> RuntimeExecutionError:
+    return _workspace_measurement_failure(
+        "Workspace output roots could not be measured safely.",
+        details=_workspace_identity_mismatch_details(
+            root,
+            identity,
+            phase=phase,
+        ),
     )
 
 
@@ -1413,11 +1568,15 @@ def _temporary_workspace_bytes(
 
     check_abort()
     expected_identity = identity or _capture_workspace_identity(root)
-    if expected_identity is None or not _workspace_path_matches_identity(
-        root, expected_identity
-    ):
+    if expected_identity is None:
         raise _workspace_measurement_failure(
             "Workspace output roots could not be measured safely."
+        )
+    if not _workspace_path_matches_identity(root, expected_identity):
+        raise _workspace_identity_mismatch_failure(
+            root,
+            expected_identity,
+            phase="before_scan",
         )
     try:
         if _supports_anchored_workspace_scan():
@@ -1447,8 +1606,10 @@ def _temporary_workspace_bytes(
             "Workspace output could not be measured safely."
         ) from exc
     if not _workspace_path_matches_identity(root, expected_identity):
-        raise _workspace_measurement_failure(
-            "Workspace output roots could not be measured safely."
+        raise _workspace_identity_mismatch_failure(
+            root,
+            expected_identity,
+            phase="after_scan",
         )
     return total
 

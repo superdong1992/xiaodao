@@ -728,6 +728,7 @@ export function parseCodexLunaAppServerTranscript(transcript, {
   skillPath,
   codexHome,
   mode,
+  expectedCliVersion = CODEX_LUNA_CLI_VERSION,
   secretValues = [],
 } = {}) {
   requireAppServer(isPlainObject(requestIds), "CODEX_LUNA_APP_SERVER_REQUEST_IDS_INVALID", "Request id map is invalid");
@@ -989,7 +990,20 @@ export function parseCodexLunaAppServerTranscript(transcript, {
   const skillsList = responseFor(responses, requestIds.skillsList, "skills/list");
   requireAppServer(Array.isArray(skillsList.data) && skillsList.data.length === 1, "CODEX_LUNA_APP_SERVER_SKILLS_PROOF_INVALID", "Skills proof must contain exactly one cwd entry");
   const skillsEntry = skillsList.data[0];
-  requireAppServer(skillsEntry?.cwd === expectedRoot && Array.isArray(skillsEntry.skills) && Array.isArray(skillsEntry.errors) && skillsEntry.errors.length === 0, "CODEX_LUNA_APP_SERVER_SKILLS_PROOF_INVALID", "Skills proof cwd or errors are invalid");
+  requireAppServer(
+    skillsEntry?.cwd === expectedRoot
+      && Array.isArray(skillsEntry.skills)
+      && Array.isArray(skillsEntry.errors)
+      && skillsEntry.errors.length === 0,
+    "CODEX_LUNA_APP_SERVER_SKILLS_PROOF_INVALID",
+    "Skills proof cwd or errors are invalid",
+    {
+      field: "skills_list",
+      cwd_matches: skillsEntry?.cwd === expectedRoot,
+      errors_count: Array.isArray(skillsEntry?.errors) ? skillsEntry.errors.length : null,
+      skills_errors: Array.isArray(skillsEntry?.errors) ? JSON.stringify(skillsEntry.errors) : null,
+    },
+  );
   const enabledSkills = skillsEntry.skills.filter((entry) => entry?.enabled === true);
   requireAppServer(enabledSkills.length === 1 && enabledSkills[0].path === expectedSkillPath && enabledSkills[0].name === skillName(expectedSkillPath), "CODEX_LUNA_APP_SERVER_SKILLS_PROOF_INVALID", "Exactly the intended skill must be enabled");
   for (const systemSkillPath of expectedSystemSkillPaths) {
@@ -1043,7 +1057,7 @@ export function parseCodexLunaAppServerTranscript(transcript, {
     ["source", threadStart.thread.source === CODEX_LUNA_APP_SERVER_SESSION_SOURCE],
     ["model_provider", threadStart.thread.modelProvider === "openai"],
     ["cwd", threadStart.thread.cwd === expectedRoot],
-    ["cli_version", threadStart.thread.cliVersion === CODEX_LUNA_CLI_VERSION],
+    ["cli_version", threadStart.thread.cliVersion === expectedCliVersion],
     ["initial_turns", Array.isArray(threadStart.thread.turns) && threadStart.thread.turns.length === 0],
   ];
   const failedThreadBoundary = threadBoundaryChecks.find(([, passed]) => !passed);
@@ -1092,7 +1106,7 @@ export function parseCodexLunaAppServerTranscript(transcript, {
     status: "PASS",
     protocol_version: CODEX_LUNA_APP_SERVER_PROTOCOL_VERSION,
     transport: CODEX_LUNA_APP_SERVER_TRANSPORT,
-    pinned_cli_version: CODEX_LUNA_CLI_VERSION,
+    pinned_cli_version: expectedCliVersion,
     server_user_agent: initialize.userAgent,
     server_platform_family: initialize.platformFamily,
     server_platform_os: initialize.platformOs,
@@ -1197,7 +1211,7 @@ export function buildCodexLunaAppServerEvidenceSummary({ profile, transcript, se
       name: "codex-app-server",
       version: CODEX_LUNA_APP_SERVER_PROTOCOL_VERSION,
       transport: CODEX_LUNA_APP_SERVER_TRANSPORT,
-      pinned_cli_version: CODEX_LUNA_CLI_VERSION,
+      pinned_cli_version: transcript.pinned_cli_version,
       experimental_api: true,
       experimental_raw_events: true,
       session_source: CODEX_LUNA_APP_SERVER_SESSION_SOURCE,

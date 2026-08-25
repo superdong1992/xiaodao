@@ -10,6 +10,7 @@ import {
   canonicalJson,
   CODEX_LUNA_MODEL,
   CODEX_LUNA_REASONING_EFFORT,
+  codexLunaAppServerCliVersion,
   sha256Bytes,
   sha256File,
   treeDigest,
@@ -359,6 +360,178 @@ function combineServerEvents(dfxRoot, destination) {
   fs.writeFileSync(destination, Buffer.concat(chunks.map((chunk) => chunk.at(-1) === 0x0a ? chunk : Buffer.concat([chunk, Buffer.from("\n")]))), { mode: 0o600, flag: "wx" });
 }
 
+const WORKSPACE_IDENTITY_DETAIL_FIELDS = new Set([
+  "workspace.measurement_phase",
+  "workspace.root",
+  "workspace.inputs",
+  "workspace.output",
+  "workspace.runtime",
+  "workspace.top_level_shape",
+]);
+
+export function persistWorkspaceFailureEvidence({
+  dfxRoot,
+  evidenceRoot,
+  privateRoot,
+  serviceTermination,
+  canaries,
+}) {
+  const streams = ["debug.jsonl", "journey.jsonl"]
+    .map((name) => ({ name, filePath: path.join(dfxRoot, name) }))
+    .filter(({ filePath }) => fs.existsSync(filePath));
+  let failureEvent = null;
+  for (const { filePath } of streams) {
+    for (const line of fs.readFileSync(filePath, "utf8").split("\n")) {
+      if (line.length === 0) continue;
+      let event;
+      try { event = JSON.parse(line); } catch { continue; }
+      if (
+        event?.event === "job.stage.failed"
+        && event?.data?.code === "WORKSPACE_LIMIT"
+        && event?.data?.message === "Workspace output roots could not be measured safely."
+      ) failureEvent = event;
+    }
+  }
+  if (failureEvent === null) return null;
+  const workspaceDetails = Array.isArray(failureEvent.data.details)
+    ? failureEvent.data.details
+      .filter((detail) => (
+        isPlainObject(detail)
+        && detail.resource_type === "WORKSPACE"
+        && WORKSPACE_IDENTITY_DETAIL_FIELDS.has(detail.field)
+        && ["string", "number", "boolean"].includes(typeof detail.expected)
+        && ["string", "number", "boolean"].includes(typeof detail.actual)
+      ))
+      .map((detail) => ({
+        field: detail.field,
+        expected: detail.expected,
+        actual: detail.actual,
+      }))
+      .sort((left, right) => left.field.localeCompare(right.field))
+    : [];
+  requireE2E(
+    workspaceDetails.length === WORKSPACE_IDENTITY_DETAIL_FIELDS.size,
+    "MACOS_CODEX_LUNA_WORKSPACE_DIAGNOSTIC_INVALID",
+    "Workspace failure lacks the closed identity diagnostic fields",
+  );
+  const traceSources = streams.map(({ name, filePath }) => ({
+    name,
+    size: fs.statSync(filePath).size,
+    sha256: sha256File(filePath),
+  }));
+  const receipt = {
+    schema_version: 1,
+    status: "FAIL",
+    code: "WORKSPACE_LIMIT",
+    message: "Workspace output roots could not be measured safely.",
+    job: {
+      id: failureEvent.job_id ?? null,
+      type: failureEvent.job_type ?? null,
+    },
+    stage: failureEvent.data.stage ?? null,
+    source_event: {
+      sequence: failureEvent.sequence ?? null,
+      timestamp: failureEvent.timestamp ?? null,
+    },
+    workspace_details: workspaceDetails,
+    service_termination: {
+      code: Number.isInteger(serviceTermination?.code) ? serviceTermination.code : null,
+      signal: typeof serviceTermination?.signal === "string" ? serviceTermination.signal : null,
+    },
+    trace_sources: traceSources,
+  };
+  const temporary = path.join(privateRoot, "workspace-failure-receipt.json");
+  writeJson(temporary, receipt);
+  const secretScan = auditNoSecretLeak({ roots: [temporary], canaries });
+  const destinationRoot = path.join(evidenceRoot, "service-runtime");
+  fs.mkdirSync(destinationRoot, { recursive: true, mode: 0o700 });
+  fs.copyFileSync(
+    temporary,
+    path.join(destinationRoot, "workspace-failure.json"),
+    fs.constants.COPYFILE_EXCL,
+  );
+  writeJson(
+    path.join(destinationRoot, "workspace-failure-secret-scan.json"),
+    secretScan,
+  );
+  return { receipt, secret_scan: secretScan };
+}
+
+export function persistServiceFailureEvidence({
+  failedCase,
+  dataRoot,
+  dfxRoot,
+  serviceLog,
+  evidenceRoot,
+  privateRoot,
+  serviceTermination,
+  canaries,
+}) {
+  const jobId = failedCase?.failure?.source_job_id;
+  if (failedCase?.status !== "FAILED" || !/^[0-9a-f-]{36}$/u.test(jobId ?? "")) return null;
+  const candidates = [
+    ["job-stdout.log", path.join(dataRoot, "jobs", jobId, "stdout.log")],
+    ["job-stderr.log", path.join(dataRoot, "jobs", jobId, "stderr.log")],
+    ["service.log", serviceLog],
+    ["debug.jsonl", path.join(dfxRoot, "debug.jsonl")],
+    ["journey.jsonl", path.join(dfxRoot, "journey.jsonl")],
+  ];
+  const available = candidates.filter(([, filePath]) => {
+    if (!fs.existsSync(filePath)) return false;
+    const metadata = fs.lstatSync(filePath);
+    return metadata.isFile() && !metadata.isSymbolicLink();
+  });
+  requireE2E(
+    available.some(([name]) => name === "job-stderr.log"),
+    "MACOS_CODEX_LUNA_SERVICE_FAILURE_DIAGNOSTIC_INVALID",
+    "Failed service Job lacks its bounded stderr record",
+  );
+  const temporaryRoot = path.join(privateRoot, "service-failure-evidence");
+  fs.mkdirSync(temporaryRoot, { recursive: false, mode: 0o700 });
+  const logs = [];
+  for (const [name, source] of available) {
+    const destination = path.join(temporaryRoot, name);
+    const payload = fs.readFileSync(source);
+    fs.writeFileSync(destination, payload, { flag: "wx", mode: 0o600 });
+    logs.push({ name, size: payload.length, sha256: sha256Bytes(payload) });
+  }
+  const receipt = {
+    schema_version: 1,
+    status: "FAIL",
+    case: {
+      id: failedCase.case_id,
+      status: failedCase.status,
+      failure: {
+        code: failedCase.failure.code,
+        message: failedCase.failure.message,
+        source_job_id: jobId,
+        source_outcome_id: failedCase.failure.source_outcome_id ?? null,
+      },
+    },
+    service_termination: {
+      code: Number.isInteger(serviceTermination?.code) ? serviceTermination.code : null,
+      signal: typeof serviceTermination?.signal === "string" ? serviceTermination.signal : null,
+    },
+    logs: logs.sort((left, right) => left.name.localeCompare(right.name)),
+  };
+  writeJson(path.join(temporaryRoot, "receipt.json"), receipt);
+  const secretScan = auditNoSecretLeak({ roots: [temporaryRoot], canaries });
+  const destinationRoot = path.join(evidenceRoot, "service-runtime", "failure");
+  fs.mkdirSync(destinationRoot, { recursive: true, mode: 0o700 });
+  for (const entry of fs.readdirSync(temporaryRoot).sort()) {
+    fs.copyFileSync(
+      path.join(temporaryRoot, entry),
+      path.join(destinationRoot, entry),
+      fs.constants.COPYFILE_EXCL,
+    );
+  }
+  writeJson(
+    path.join(evidenceRoot, "service-runtime", "failure-secret-scan.json"),
+    secretScan,
+  );
+  return { receipt, secret_scan: secretScan };
+}
+
 export async function runE2E(options, { ambient = process.env, onProgress = null } = {}) {
   const sourceRoot = path.resolve(options.sourceRoot);
   const workRoot = createEmptyRoot(options.workRoot, "E2E work root");
@@ -400,6 +573,12 @@ export async function runE2E(options, { ambient = process.env, onProgress = null
   fs.mkdirSync(serverPrivateRoot, { recursive: true, mode: 0o700 });
   fs.mkdirSync(serviceEvidenceRoot, { recursive: true, mode: 0o700 });
   fs.mkdirSync(serviceUsageRoot, { recursive: true, mode: 0o700 });
+  const externalAuth = readCodexLunaExternalAuth(options.authSource, ambient);
+  const expectedCliVersion = codexLunaAppServerCliVersion({
+    platform: process.platform,
+    architecture: process.arch,
+    environment: ambient,
+  });
   const wrapper = path.join(sourceRoot, "tools", "test-flow", "quick-validation", "codex-luna", "runtime", "macos-codex-luna-service-wrapper.mjs");
   const serviceCommand = [
     process.execPath,
@@ -407,6 +586,9 @@ export async function runE2E(options, { ambient = process.env, onProgress = null
     "--codex-entry", options.codexEntry,
     "--auth-source", options.authSource,
     "--skill-source", options.serviceSkill,
+    "--finalizer-entry", path.join(path.dirname(options.pythonEntry), "problem-locator-seal-outcome-draft"),
+    "--logparse-entry", path.join(path.dirname(options.pythonEntry), "problem-locator-logparse"),
+    "--expected-cli-version", expectedCliVersion,
     "--private-root", serverPrivateRoot,
     "--evidence-root", serviceEvidenceRoot,
     "--usage-root", serviceUsageRoot,
@@ -432,7 +614,7 @@ export async function runE2E(options, { ambient = process.env, onProgress = null
     LOGPARSE_PYTHON: path.join(options.logparseRoot, ".venv", "bin", "python"),
     CLAUDE_COMMAND: serviceCommand,
   };
-  const service = spawn(options.pythonEntry, ["-I", path.join(sourceRoot, "tools", "test-flow", "runtime-support", "test_service_launcher.py"), "serve"], {
+  const service = spawn(options.pythonEntry, serviceLauncherArguments(sourceRoot), {
     cwd: sourceRoot,
     env: serviceEnvironment,
     stdio: ["ignore", "pipe", "pipe"],
@@ -459,7 +641,7 @@ export async function runE2E(options, { ambient = process.env, onProgress = null
     const temporary = path.join(clientPrivate, "bootstrap-tmp");
     for (const directory of [clientPrivate, codexHome, home, temporary]) fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
     const environment = safeEnvironment(ambient, { codexHome, home, temporary });
-    const auth = readCodexLunaExternalAuth(options.authSource, ambient);
+    const auth = externalAuth;
     const clientEvidence = path.join(evidenceRoot, "client-runtime");
     fs.mkdirSync(clientEvidence, { recursive: true, mode: 0o700 });
     const clientStartedAtUtc = new Date().toISOString();
@@ -489,11 +671,38 @@ export async function runE2E(options, { ambient = process.env, onProgress = null
     terminateOwnedProcess(service);
     const closed = await Promise.race([serviceClosed, wait(12_000).then(() => ({ code: null, signal: "TIMEOUT" }))]);
     serviceLogStream.end();
+    persistWorkspaceFailureEvidence({
+      dfxRoot,
+      evidenceRoot,
+      privateRoot,
+      serviceTermination: closed,
+      canaries: externalAuth.canaries,
+    });
     requireE2E(closed.signal !== "TIMEOUT", "MACOS_CODEX_LUNA_SERVICE_STOP_TIMEOUT", "Owned local test service did not stop");
   }
   requireE2E(clientTrace !== null, "MACOS_CODEX_LUNA_CLIENT_INCOMPLETE", "Codex MCP Client did not complete");
   const partitionedCalls = partitionMcpCalls(clientTrace.app_server.turn.mcp_tool_calls);
   const mcpCalls = partitionedCalls.successful;
+  const failedCase = mcpCalls
+    .filter((call) => ["problem_locator_create_case", "problem_locator_get_case"].includes(call.tool))
+    .map((call) => {
+      const data = structuredMcpData(call);
+      return data?.case_view ?? data;
+    })
+    .reverse()
+    .find((caseView) => caseView?.status === "FAILED" && caseView?.failure !== null);
+  if (failedCase !== undefined) {
+    persistServiceFailureEvidence({
+      failedCase,
+      dataRoot,
+      dfxRoot,
+      serviceLog,
+      evidenceRoot,
+      privateRoot,
+      serviceTermination: { code: service.exitCode ?? null, signal: service.signalCode ?? null },
+      canaries: externalAuth.canaries,
+    });
+  }
   requireE2E(
     partitionedCalls.recoveries.length <= 2
       && partitionedCalls.recoveries.every((item) => ["REVISION_CONFLICT", "ATTACHMENT_NOT_READY"].includes(item.code)),
@@ -563,6 +772,24 @@ export async function runE2E(options, { ambient = process.env, onProgress = null
   return gate;
 }
 
+export function serviceLauncherArguments(sourceRoot) {
+  return [
+    "-I",
+    "-B",
+    path.join(path.resolve(sourceRoot), "tools", "test-flow", "runtime-support", "test_service_launcher.py"),
+    "serve",
+  ];
+}
+
+export function e2eProgressLine(phase) {
+  requireE2E(
+    ["client", "route", "logparse", "diagnose", "review"].includes(phase),
+    "MACOS_CODEX_LUNA_PROGRESS_PHASE_INVALID",
+    "E2E progress phase is invalid",
+  );
+  return `TEST_FLOW_PROGRESS stage.progress codex-luna ${phase}\n`;
+}
+
 async function main() {
   try {
     const values = parseArguments(process.argv.slice(2));
@@ -581,6 +808,8 @@ async function main() {
       privateRoot: path.resolve(values["private-root"]),
       evidenceRoot: path.resolve(values["evidence-root"]),
       usageRoot: path.resolve(values["usage-root"]),
+    }, {
+      onProgress: (phase) => process.stdout.write(e2eProgressLine(phase)),
     });
     process.stdout.write(`${canonicalJson(result)}\n`);
   } catch (error) {

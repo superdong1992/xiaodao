@@ -111,13 +111,13 @@
       "kind": "capability-adapter",
       "adapter": "macos-codex-luna-methods",
       "runtime_profile": "release",
-      "evidence": ["codex-identity.json", "model-invocations.json", "model-usage.json", "methods-package.json", "security-audit.json", "gate-receipt.json"]
+      "evidence": ["codex-identity.json", "model-invocations.json", "model-usage.json", "methods-package.json", "security-audit.json", "adapter-receipt.json"]
     },
     "real.macos-codex-luna-e2e": {
       "kind": "capability-adapter",
       "adapter": "macos-codex-luna-e2e",
       "runtime_profile": "release",
-      "evidence": ["scenario-input.json", "scenario-oracle.json", "methods-package.json", "codex-identity.json", "model-invocations.json", "model-usage.json", "client-events.jsonl", "mcp-tool-calls.json", "attachment.json", "server-events.ndjson", "final-case.json", "artifact-index.json", "http-boundary-audit.json", "security-audit.json", "gate-receipt.json"]
+      "evidence": ["scenario-input.json", "scenario-oracle.json", "methods-package.json", "codex-identity.json", "model-invocations.json", "model-usage.json", "client-events.jsonl", "mcp-tool-calls.json", "attachment.json", "server-events.ndjson", "final-case.json", "artifact-index.json", "http-boundary-audit.json", "security-audit.json", "adapter-receipt.json"]
     },
     "quick.codex-luna.contracts": {
       "kind": "node-test",

@@ -25,6 +25,13 @@ const BROKER_KEYS = Object.freeze([
   "PROBLEM_LOCATOR_LOGPARSE_ENDPOINT",
   "PROBLEM_LOCATOR_LOGPARSE_TOKEN",
 ]);
+const LINUX_SERVICE_PROJECT_DIRECTORY = "test-flow-codex-project";
+const SERVICE_DRAFT_BY_PHASE = Object.freeze({
+  ROUTE: "output/job_outcome.draft.json",
+  DIAGNOSE: "output/method-diagnosis.draft.json",
+  REVIEW: "output/method-review.draft.json",
+});
+const MAX_SERVICE_DRAFT_BYTES = 2_000_000;
 
 class ServiceWrapperError extends Error {
   constructor(code, message) {
@@ -47,7 +54,7 @@ function parseArguments(argv) {
     if (Object.hasOwn(values, key)) fail("MACOS_CODEX_LUNA_SERVICE_ARGUMENT_DUPLICATE", "Service wrapper argument is duplicated");
     values[key] = argv[index + 1];
   }
-  const required = ["codex-entry", "auth-source", "skill-source", "private-root", "evidence-root", "usage-root", "run-id"];
+  const required = ["codex-entry", "auth-source", "skill-source", "finalizer-entry", "logparse-entry", "expected-cli-version", "private-root", "evidence-root", "usage-root", "run-id"];
   if (!required.every((name) => typeof values[name] === "string" && values[name].length > 0)) fail("MACOS_CODEX_LUNA_SERVICE_ARGUMENT_MISSING", "Service wrapper arguments are incomplete");
   return values;
 }
@@ -91,9 +98,78 @@ function writeJsonExclusive(filePath, value) {
   fs.writeFileSync(filePath, `${canonicalJson(value)}\n`, { encoding: "utf8", mode: 0o600, flag: "wx" });
 }
 
+function copyPlainTree(sourceRoot, destinationRoot, { skippedRoot = null } = {}) {
+  const source = path.resolve(sourceRoot);
+  if (skippedRoot !== null && source === path.resolve(skippedRoot)) return;
+  let metadata;
+  try { metadata = fs.lstatSync(source); } catch { fail("MACOS_CODEX_LUNA_SERVICE_PROJECT_INPUT_MISSING", "Service project input is unavailable"); }
+  if (!metadata.isDirectory() || metadata.isSymbolicLink()) fail("MACOS_CODEX_LUNA_SERVICE_PROJECT_INPUT_INVALID", "Service project input must be a plain directory");
+  if (fs.existsSync(destinationRoot)) fail("MACOS_CODEX_LUNA_SERVICE_PROJECT_DESTINATION_EXISTS", "Service project destination already exists");
+  fs.mkdirSync(destinationRoot, { mode: 0o700 });
+  for (const entry of fs.readdirSync(source, { withFileTypes: true }).sort((left, right) => left.name.localeCompare(right.name))) {
+    const sourcePath = path.join(source, entry.name);
+    if (skippedRoot !== null && path.resolve(sourcePath) === path.resolve(skippedRoot)) continue;
+    const destinationPath = path.join(destinationRoot, entry.name);
+    const entryMetadata = fs.lstatSync(sourcePath);
+    if (entryMetadata.isSymbolicLink()) fail("MACOS_CODEX_LUNA_SERVICE_PROJECT_INPUT_INVALID", "Service project input contains a symbolic link");
+    if (entryMetadata.isDirectory()) {
+      copyPlainTree(sourcePath, destinationPath, { skippedRoot });
+      continue;
+    }
+    if (!entryMetadata.isFile()) fail("MACOS_CODEX_LUNA_SERVICE_PROJECT_INPUT_INVALID", "Service project input contains a non-ordinary file");
+    fs.copyFileSync(sourcePath, destinationPath, fs.constants.COPYFILE_EXCL);
+    fs.chmodSync(destinationPath, entryMetadata.mode & 0o777);
+  }
+  fs.chmodSync(destinationRoot, metadata.mode & 0o777);
+}
+
+export function stageLinuxServiceProject(workspaceRoot) {
+  const root = path.resolve(workspaceRoot);
+  const runtimeRoot = path.join(root, "runtime");
+  const projectRoot = path.join(runtimeRoot, LINUX_SERVICE_PROJECT_DIRECTORY);
+  if (fs.existsSync(projectRoot)) fail("MACOS_CODEX_LUNA_SERVICE_PROJECT_EXISTS", "Linux service project workspace already exists");
+  fs.mkdirSync(projectRoot, { mode: 0o700 });
+  try {
+    copyPlainTree(path.join(root, "inputs"), path.join(projectRoot, "inputs"));
+    copyPlainTree(path.join(root, "output"), path.join(projectRoot, "output"));
+    copyPlainTree(runtimeRoot, path.join(projectRoot, "runtime"), { skippedRoot: projectRoot });
+  } catch (error) {
+    fs.rmSync(projectRoot, { recursive: true, force: true });
+    throw error;
+  }
+  return projectRoot;
+}
+
+export function publishLinuxServiceDraft({ phase, workspaceRoot, projectRoot }) {
+  const relativePath = SERVICE_DRAFT_BY_PHASE[phase] ?? null;
+  if (relativePath === null) return { required: false, published: false, status: "SKIP" };
+  const source = path.join(projectRoot, ...relativePath.split("/"));
+  const destination = path.join(workspaceRoot, ...relativePath.split("/"));
+  let metadata;
+  try { metadata = fs.lstatSync(source); } catch { fail("MACOS_CODEX_LUNA_SERVICE_DRAFT_MISSING", "Service project draft is missing"); }
+  if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.nlink !== 1 || metadata.size > MAX_SERVICE_DRAFT_BYTES) fail("MACOS_CODEX_LUNA_SERVICE_DRAFT_INVALID", "Service project draft is not a bounded ordinary file");
+  if (fs.existsSync(destination)) fail("MACOS_CODEX_LUNA_SERVICE_DRAFT_EXISTS", "Product Workspace draft already exists");
+  fs.copyFileSync(source, destination, fs.constants.COPYFILE_EXCL);
+  fs.chmodSync(destination, 0o600);
+  return {
+    required: true,
+    published: true,
+    status: "PASS",
+    relative_path: relativePath,
+    sha256: sha256Bytes(fs.readFileSync(destination)),
+    size: metadata.size,
+  };
+}
+
+export function removeLinuxServiceProject({ workspaceRoot, projectRoot }) {
+  const expected = path.join(path.resolve(workspaceRoot), "runtime", LINUX_SERVICE_PROJECT_DIRECTORY);
+  if (path.resolve(projectRoot) !== expected) fail("MACOS_CODEX_LUNA_SERVICE_PROJECT_PATH_INVALID", "Linux service project path is outside the fixed runtime location");
+  fs.rmSync(expected, { recursive: true, force: true });
+}
+
 export function safeServiceError(error) {
   const safeDetails = {};
-  for (const key of ["id", "response_code", "response_message", "method", "field", "item_type", "function_name", "line"]) {
+  for (const key of ["id", "response_code", "response_message", "method", "field", "item_type", "function_name", "line", "cwd_matches", "errors_count", "skills_errors"]) {
     const value = error?.details?.[key];
     if (typeof value === "string" || typeof value === "number" || typeof value === "boolean" || value === null) safeDetails[key] = value;
   }
@@ -129,9 +205,11 @@ export function repositorySkillPaths(sourceRoot) {
     .sort();
 }
 
-export function sealServiceOutcomeDraft({ phase, workspaceRoot, sourceRoot }) {
+export function sealServiceOutcomeDraft({ phase, workspaceRoot, sourceRoot = null, finalizerEntry = null }) {
   if (phase !== "ROUTE") return { required: false, invoked: false, status: "SKIP" };
-  const finalizer = path.join(path.resolve(sourceRoot), ".venv", "bin", "problem-locator-seal-outcome-draft");
+  const finalizer = finalizerEntry === null
+    ? path.join(path.resolve(sourceRoot), ".venv", "bin", "problem-locator-seal-outcome-draft")
+    : path.resolve(finalizerEntry);
   let metadata;
   try { metadata = fs.statSync(finalizer); } catch { fail("MACOS_CODEX_LUNA_SERVICE_FINALIZER_MISSING", "Repository outcome finalizer command is missing"); }
   if (!metadata.isFile() || (metadata.mode & 0o111) === 0) fail("MACOS_CODEX_LUNA_SERVICE_FINALIZER_INVALID", "Repository outcome finalizer command is not executable");
@@ -153,14 +231,16 @@ export function sealServiceOutcomeDraft({ phase, workspaceRoot, sourceRoot }) {
   return { required: true, invoked: true, status: "PASS", marker_sha256: sha256Bytes(fs.readFileSync(marker)) };
 }
 
-export function runServiceLogparseCommand({ phase, prompt, workspaceRoot, sourceRoot, environment }) {
+export function runServiceLogparseCommand({ phase, prompt, workspaceRoot, sourceRoot = null, logparseEntry = null, environment }) {
   if (phase !== "LOGPARSE") return { required: false, invoked: false, status: "SKIP" };
   const match = prompt.match(/^problem-locator-logparse (parse-targets|target-logs) --request ([a-zA-Z0-9._/-]+\.json) --result ([a-zA-Z0-9._/-]+\.json)$/m);
   if (!match || [match[2], match[3]].some((value) => value.startsWith("/") || value.split("/").includes("..") || !value.startsWith("output/proposals/"))) fail("MACOS_CODEX_LUNA_SERVICE_LOGPARSE_COMMAND_INVALID", "Product Logparse prompt does not contain one safe fixed command");
   const [, operation, requestPath, resultPath] = match;
   const resultFile = path.join(workspaceRoot, ...resultPath.split("/"));
   if (fs.existsSync(resultFile)) return { required: true, invoked: false, status: "PASS", operation, request_path_sha256: sha256Bytes(requestPath), result_path_sha256: sha256Bytes(resultPath) };
-  const command = path.join(path.resolve(sourceRoot), ".venv", "bin", "problem-locator-logparse");
+  const command = logparseEntry === null
+    ? path.join(path.resolve(sourceRoot), ".venv", "bin", "problem-locator-logparse")
+    : path.resolve(logparseEntry);
   let metadata;
   try { metadata = fs.statSync(command); } catch { fail("MACOS_CODEX_LUNA_SERVICE_LOGPARSE_MISSING", "Repository Logparse command is missing"); }
   if (!metadata.isFile() || (metadata.mode & 0o111) === 0) fail("MACOS_CODEX_LUNA_SERVICE_LOGPARSE_INVALID", "Repository Logparse command is not executable");
@@ -221,30 +301,44 @@ export async function runServiceInvocation(values, { stdin = process.stdin, stdo
   const prefix = phase.toLowerCase();
   const traceRoot = path.join(evidenceRoot, "server-invocations");
   const startedAtUtc = new Date().toISOString();
-  const trace = await runCodexLunaAppServerCall({
-    codexEntry: path.resolve(values["codex-entry"]),
-    auth: runtimeAuth,
-    environment: controlled.environment,
-    workspaceRoot,
-    skillPath,
-    mode: "service",
-    prompt,
-    outputSchema: null,
-    callRoot: path.join(claim, "app-server"),
-    privateRoot,
-    tracePath: path.join(traceRoot, `${prefix}.jsonl`),
-    stderrPath: path.join(traceRoot, `${prefix}.stderr.txt`),
-    finalPath: path.join(traceRoot, `${prefix}.final.txt`),
-    forbiddenReadPaths: [path.resolve(values["auth-source"]), path.resolve(values["skill-source"])],
-    wallSeconds: MACOS_CODEX_LUNA_CALL_WALL_SECONDS,
-    noProgressSeconds: MACOS_CODEX_LUNA_NO_PROGRESS_SECONDS,
-    shellHome: path.join(claim, "shell-home"),
-    disabledSkillPaths: repositorySkillPaths(ambient.TEST_FLOW_SOURCE_ROOT),
-    onProgress: () => stdout.write(`TEST_FLOW_PROGRESS service-agent ${phase}\n`),
-  });
+  const isolatedProject = process.platform === "linux";
+  const projectRoot = isolatedProject
+    ? stageLinuxServiceProject(workspaceRoot)
+    : workspaceRoot;
+  let trace;
+  let draftPublication = { required: false, published: false, status: "SKIP" };
+  try {
+    trace = await runCodexLunaAppServerCall({
+      codexEntry: path.resolve(values["codex-entry"]),
+      auth: runtimeAuth,
+      environment: controlled.environment,
+      workspaceRoot: projectRoot,
+      skillPath,
+      mode: "service",
+      prompt,
+      outputSchema: null,
+      callRoot: path.join(claim, "app-server"),
+      privateRoot,
+      tracePath: path.join(traceRoot, `${prefix}.jsonl`),
+      stderrPath: path.join(traceRoot, `${prefix}.stderr.txt`),
+      finalPath: path.join(traceRoot, `${prefix}.final.txt`),
+      forbiddenReadPaths: [path.resolve(values["auth-source"]), path.resolve(values["skill-source"])],
+      wallSeconds: MACOS_CODEX_LUNA_CALL_WALL_SECONDS,
+      noProgressSeconds: MACOS_CODEX_LUNA_NO_PROGRESS_SECONDS,
+      shellHome: path.join(claim, "shell-home"),
+      disabledSkillPaths: repositorySkillPaths(ambient.TEST_FLOW_SOURCE_ROOT),
+      expectedCliVersion: values["expected-cli-version"],
+      onProgress: () => stdout.write(`TEST_FLOW_PROGRESS service-agent ${phase}\n`),
+    });
+    if (isolatedProject) {
+      draftPublication = publishLinuxServiceDraft({ phase, workspaceRoot, projectRoot });
+    }
+  } finally {
+    if (isolatedProject) removeLinuxServiceProject({ workspaceRoot, projectRoot });
+  }
   const methodsDraft = canonicalizeMethodsDraft({ phase, workspaceRoot });
-  const logparseRunner = runServiceLogparseCommand({ phase, prompt, workspaceRoot, sourceRoot: ambient.TEST_FLOW_SOURCE_ROOT, environment: controlled.environment });
-  const outcomeSealer = sealServiceOutcomeDraft({ phase, workspaceRoot, sourceRoot: ambient.TEST_FLOW_SOURCE_ROOT });
+  const logparseRunner = runServiceLogparseCommand({ phase, prompt, workspaceRoot, logparseEntry: values["logparse-entry"], environment: controlled.environment });
+  const outcomeSealer = sealServiceOutcomeDraft({ phase, workspaceRoot, finalizerEntry: values["finalizer-entry"] });
   const finishedAtUtc = new Date().toISOString();
   const invocationId = `${values["run-id"]}:server:${prefix}`;
   const receipt = {
@@ -265,6 +359,12 @@ export async function runServiceInvocation(values, { stdin = process.stdin, stdo
     usage: trace.usage,
     command_count: trace.command_receipts.length,
     command_receipts: trace.command_receipts,
+    service_project: {
+      isolated: isolatedProject,
+      product_workspace_sha256: sha256Bytes(workspaceRoot),
+      project_workspace_sha256: sha256Bytes(projectRoot),
+      draft_publication: draftPublication,
+    },
     methods_draft: methodsDraft,
     logparse_runner: logparseRunner,
     outcome_sealer: outcomeSealer,

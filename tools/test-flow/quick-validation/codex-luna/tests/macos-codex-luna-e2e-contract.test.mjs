@@ -264,6 +264,23 @@ test("Methods cache binds all producer inputs and detects package drift", () => 
   assert.throws(() => validateMethodsCache({ cacheRoot, producer, registrationTemplate: f.registration }), (error) => error.code === "MACOS_CODEX_LUNA_METHODS_CACHE_IDENTITY_MISMATCH");
 });
 
+test("Methods content cache key excludes validated Codex runtime and platform identity", () => {
+  const f = fixture();
+  const nativeIdentity = codexIdentity();
+  const linuxIdentity = structuredClone(nativeIdentity);
+  linuxIdentity.cli.version = "codex-cli 0.149.1";
+  linuxIdentity.cli.sha256 = "2".repeat(64);
+  linuxIdentity.cli.code_mode_host.sha256 = "3".repeat(64);
+  linuxIdentity.cli.platform = "linux";
+  linuxIdentity.cli.architecture = "x64";
+  const nativeProducer = buildMethodsProducerIdentity({ wiki: f.wiki, metaSkillRoot: f.meta, registrationTemplate: f.registration, codexIdentity: nativeIdentity });
+  const linuxProducer = buildMethodsProducerIdentity({ wiki: f.wiki, metaSkillRoot: f.meta, registrationTemplate: f.registration, codexIdentity: linuxIdentity });
+  assert.equal(linuxProducer.producer_identity, nativeProducer.producer_identity);
+  assert.deepEqual(linuxProducer.inputs, nativeProducer.inputs);
+  assert.equal(Object.hasOwn(linuxProducer.inputs, "codex"), false);
+  assert.deepEqual(linuxProducer.inputs.model, { model: "gpt-5.6-luna", reasoning_effort: "medium" });
+});
+
 test("model audit requires one bootstrap or exactly five ordered E2E terminal calls with no retry", () => {
   assert.equal(auditModelInvocations(invocations(["METHODS_BOOTSTRAP"]), { workflow: "methods" }).aggregate.total_tokens, 150);
   assert.equal(auditModelInvocations(invocations(["CLIENT", "ROUTE", "LOGPARSE", "DIAGNOSE", "REVIEW"]), { workflow: "e2e" }).retry_count, 0);

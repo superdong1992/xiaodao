@@ -94,6 +94,17 @@ export function supportedCodexLunaOrchestrator(platform = process.platform, arch
   return platform === "darwin" && architecture === "arm64";
 }
 
+export function supportedQuickValidationOrchestrator(
+  platform = process.platform,
+  architecture = process.arch,
+  environment = process.env,
+) {
+  return supportedCodexLunaOrchestrator(platform, architecture)
+    || (platform === "linux"
+      && architecture === "x64"
+      && environment.TEST_FLOW_QUICK_UBUNTU2204_CONTAINER === "1");
+}
+
 export function releaseImageValidationMode(platform = process.platform, formalRuntime = true) {
   if (!formalRuntime) return "not-required";
   return platform === "darwin" ? "sealed-darwin-cache" : "portable-exact-server-image";
@@ -384,6 +395,9 @@ export function buildRunPlan(repoRoot, options = {}) {
   const crossJobSelected = closure.stages.some((stage) => stage.kind === "real-journey" || stage.id === "journey.cross-job.review");
   const codexRequired = closure.stages.some((stage) => stage.id === "real.codex-luna-methods" || macosCodexStage(stage));
   const claudeDeepseekSelected = closure.stages.some(claudeDeepseekStage);
+  const quickValidationSelected = closure.stages.some((stage) => macosCodexStage(stage) || claudeDeepseekStage(stage));
+  const quickValidationOrchestrator = quickValidationSelected
+    && supportedQuickValidationOrchestrator(hostPlatform, process.arch, process.env);
   const dualLinuxContainers = crossJobSelected && hostPlatform === "darwin" && client === "linux";
   const effectiveAdapter = crossJobSelected ? builtInAdapter(repoRoot, client, hostPlatform) : null;
   const effectiveOptions = { ...options, crossJobAdapter: effectiveAdapter };
@@ -561,7 +575,12 @@ export function buildRunPlan(repoRoot, options = {}) {
   if (trackConfig.requires_source_snapshot && !sourceSnapshot.digest) blockers.push({ code: "SOURCE_SNAPSHOT_REQUIRED", detail: "The Git-visible worktree could not be frozen into an exact source snapshot." });
   if (track === "release" && !client) blockers.push({ code: "RELEASE_CLIENT_UNRESOLVED", detail: "Linux hosts require an explicit --client linux; Windows/macOS follow the host." });
   if (client && !Object.hasOwn(BUILT_IN_ADAPTERS, client)) blockers.push({ code: "CLIENT_UNKNOWN", detail: `Unsupported client ${client}.` });
-  if (client && Object.hasOwn(BUILT_IN_ADAPTERS, client) && !supportedHostClientTopology(client, hostPlatform)) blockers.push({ code: "HOST_CLIENT_TOPOLOGY_UNSUPPORTED", detail: `Host ${hostPlatform} cannot orchestrate first-party Client ${client}.` });
+  if (client
+    && Object.hasOwn(BUILT_IN_ADAPTERS, client)
+    && !supportedHostClientTopology(client, hostPlatform)
+    && !(quickValidationOrchestrator && client === "macos")) {
+    blockers.push({ code: "HOST_CLIENT_TOPOLOGY_UNSUPPORTED", detail: `Host ${hostPlatform} cannot orchestrate first-party Client ${client}.` });
+  }
   if (track === "dev" && containsReal && trackConfig.real_requires_opt_in && !options.allowRealModel) blockers.push({ code: "DEV_REAL_OPT_IN_REQUIRED", detail: "Dev real proofs require --allow-real-model." });
   if (track === "dev" && containsReal && trackConfig.real_requires_intent && !options.reason) blockers.push({ code: "DEV_REAL_REASON_REQUIRED", detail: "Dev real proofs require --reason." });
   if (track === "release" && options.resume && !["fresh", "auto"].includes(options.resume)) blockers.push({ code: "RELEASE_RESUME_FORBIDDEN", detail: "Release must start from GENESIS and an empty DATA_ROOT." });
@@ -574,12 +593,15 @@ export function buildRunPlan(repoRoot, options = {}) {
   else if (claudeRequired && settingsIdentity.status !== "PRESENT") blockers.push({ code: "CLAUDE_SETTINGS_INVALID", detail: `Claude settings violate the runtime profile: ${settingsIdentity.code ?? "invalid"}.` });
   if (codexRequired && codexIdentity.status !== "PASS") blockers.push({ code: "CODEX_RUNTIME_INVALID", detail: `Codex CLI and ChatGPT authentication must match the frozen Luna contract: ${codexIdentity.code ?? "invalid"}.` });
   if (codexLogparseRequired && codexLogparseRuntime.status !== "PRESENT") blockers.push({ code: "CODEX_LOGPARSE_RUNTIME_INVALID", detail: `Codex preprocessing requires the exact Logparse .venv, Python base runtime and CLI bytes: ${codexLogparseRuntime.code ?? "invalid"}.` });
-  if (codexRequired && !supportedCodexLunaOrchestrator(hostPlatform, process.arch)) blockers.push({ code: "CODEX_ORCHESTRATOR_UNSUPPORTED", detail: "The pinned Codex CLI + gpt-5.6-luna exploration flow is supported only by the Darwin arm64 orchestrator that owns the exact Mach-O executable." });
+  if (codexRequired && !(quickValidationSelected
+    ? quickValidationOrchestrator
+    : supportedCodexLunaOrchestrator(hostPlatform, process.arch))) {
+    blockers.push({ code: "CODEX_ORCHESTRATOR_UNSUPPORTED", detail: "The pinned Codex CLI + gpt-5.6-luna exploration flow requires native Darwin arm64 or the sealed Ubuntu 22.04 Quick Validation container." });
+  }
   if (codexRequired && client !== "macos") blockers.push({ code: "CODEX_CLIENT_LABEL_INVALID", detail: "The local Codex exploration goal must use --client macos; it does not execute in or validate a Linux Client." });
-  if (claudeDeepseekSelected && !supportedCodexLunaOrchestrator(hostPlatform, process.arch)) blockers.push({ code: "CLAUDE_DEEPSEEK_ORCHESTRATOR_UNSUPPORTED", detail: "Claude/DeepSeek Quick Validation is supported only on Darwin arm64." });
+  if (claudeDeepseekSelected && !quickValidationOrchestrator) blockers.push({ code: "CLAUDE_DEEPSEEK_ORCHESTRATOR_UNSUPPORTED", detail: "Claude/DeepSeek Quick Validation requires native Darwin arm64 or the sealed Ubuntu 22.04 Quick Validation container." });
   if (claudeDeepseekSelected && client !== "macos") blockers.push({ code: "CLAUDE_DEEPSEEK_CLIENT_LABEL_INVALID", detail: "Claude/DeepSeek Quick Validation requires --client macos." });
   if (selectedScenario !== null && !MACOS_CODEX_LUNA_SCENARIOS.includes(selectedScenario)) blockers.push({ code: "MACOS_CODEX_LUNA_SCENARIO_INVALID", detail: `Scenario ${selectedScenario} is not in the repository-owned smoke matrix.` });
-  if (methodsBootstrapSelected && methodsCache.status === "PRESENT") blockers.push({ code: "MACOS_CODEX_LUNA_METHODS_CACHE_ALREADY_PRESENT", detail: "The exact Methods producer cache already exists; use its prior verdict instead of spending another model call." });
   if (methodsBootstrapSelected && methodsCache.status === "INVALID") blockers.push({ code: "MACOS_CODEX_LUNA_METHODS_CACHE_INVALID", detail: `The exact Methods cache path exists but is invalid: ${methodsCache.code}.` });
   if (macosE2ESelected && methodsCache.status !== "PRESENT") blockers.push({ code: "MACOS_CODEX_LUNA_METHODS_CACHE_REQUIRED", detail: `E2E requires an exact frozen Methods cache produced by dev.macos-codex-luna-methods: ${methodsCache.code ?? "missing"}.` });
   if (claudeMethodsSelected && claudeMethodsCache.status === "INVALID") blockers.push({ code: "CLAUDE_DEEPSEEK_METHODS_CACHE_INVALID", detail: `The exact Claude/DeepSeek Methods cache path exists but is invalid: ${claudeMethodsCache.code}.` });
@@ -643,7 +665,9 @@ export function buildRunPlan(repoRoot, options = {}) {
           : null,
       };
     });
-    const invocationCaps = stage.id === "real.macos-claude-deepseek-methods" && claudeMethodsCache.status === "PRESENT" ? [] : invocationCapsForStage(stage, runtimeProfile, config.gates.gates, {
+    const verifyCodexMethodsCache = stage.id === "real.macos-codex-luna-methods" && methodsCache.status === "PRESENT";
+    const verifyClaudeMethodsCache = stage.id === "real.macos-claude-deepseek-methods" && claudeMethodsCache.status === "PRESENT";
+    const invocationCaps = verifyCodexMethodsCache || verifyClaudeMethodsCache ? [] : invocationCapsForStage(stage, runtimeProfile, config.gates.gates, {
       clientInvocationClass: dualLinuxContainers ? "linux-client-container" : "host-client",
       clientExecutionTopology: dualLinuxContainers ? "darwin-orchestrated-linux-container" : "native-host-client",
     });
@@ -742,9 +766,13 @@ export function buildRunPlan(repoRoot, options = {}) {
           ? "darwin-orchestrated-dual-linux-containers"
           : "host-client-to-linux-server"
         : claudeDeepseekSelected
-          ? "darwin-local-claude-deepseek-quick-validation"
+          ? quickValidationOrchestrator && hostPlatform === "linux"
+            ? "sealed-ubuntu2204-container-claude-deepseek-quick-validation"
+            : "darwin-local-claude-deepseek-quick-validation"
         : codexRequired
-          ? "darwin-local-codex"
+          ? quickValidationOrchestrator && hostPlatform === "linux"
+            ? "sealed-ubuntu2204-container-codex-quick-validation"
+            : "darwin-local-codex"
           : "not-applicable",
       orchestrator_platform: hostPlatform,
       network_policy: crossJobSelected ? runtimeProfile.network_policy : closure.stages.some((stage) => ["real.macos-codex-luna-e2e", "real.macos-claude-deepseek-e2e"].includes(stage.id)) ? "provider-plus-ipv4-loopback-mcp-upload-and-logparse-broker" : claudeDeepseekSelected ? "claude-provider-only" : codexRequired ? "codex-app-server-provider-only-command-network-denied" : "not-applicable",

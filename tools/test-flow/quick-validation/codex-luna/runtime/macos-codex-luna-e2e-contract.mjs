@@ -530,19 +530,14 @@ export function buildMethodsProducerIdentity({ wiki, metaSkillRoot, registration
     output_contract: { sha256: sha256File(outputContract), size: ordinaryFile(outputContract, "Methods output contract").size },
     validator: { sha256: sha256File(validator), size: ordinaryFile(validator, "Methods validator").size },
     registration_template: { sha256: sha256File(registrationTemplate), size: ordinaryFile(registrationTemplate, "registration template").size },
-    codex: {
-      version: codexIdentity.cli?.version,
-      executable_sha256: codexIdentity.cli?.sha256,
-      code_mode_host_sha256: codexIdentity.cli?.code_mode_host?.sha256,
-      platform: codexIdentity.cli?.platform,
-      architecture: codexIdentity.cli?.architecture,
+    model: {
       model: CODEX_LUNA_MODEL,
       reasoning_effort: CODEX_LUNA_REASONING_EFFORT,
     },
     generation_prompt_version: MACOS_CODEX_LUNA_METHODS_PROMPT_VERSION,
     runner_contract: "macos-codex-luna-methods-bootstrap-v1",
   };
-  requireE2E(Object.values(inputs.codex).every(isNonEmptyString), "MACOS_CODEX_LUNA_CODEX_IDENTITY_INVALID", "Codex producer identity is incomplete");
+  requireE2E(Object.values(inputs.model).every(isNonEmptyString), "MACOS_CODEX_LUNA_MODEL_IDENTITY_INVALID", "Methods model identity is incomplete");
   return Object.freeze({ schema_version: 1, producer_identity: sha256Bytes(canonicalJson(inputs)), inputs });
 }
 

@@ -13,7 +13,7 @@ import {
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 test("service wrapper accepts only frozen Claude/provider roots and no external adapter", () => {
-  const names = ["source-root", "runtime-root", "claude-entry", "settings", "config-root", "private-root", "evidence-root", "usage-root", "run-id"];
+  const names = ["source-root", "runtime-root", "claude-entry", "settings", "config-root", "finalizer-entry", "logparse-entry", "private-root", "evidence-root", "usage-root", "run-id"];
   const argv = names.flatMap((name) => [`--${name}`, `/${name}`]);
   assert.equal(parseArguments(argv)["run-id"], "/run-id");
   assert.throws(() => parseArguments([...argv, "--adapter", "/tmp/other"]), (error) => error.code === "CLAUDE_DEEPSEEK_SERVICE_ARGUMENT_UNKNOWN");
@@ -29,6 +29,8 @@ test("service Claude process has no dangerous permission mode or model Bash", ()
   assert.match(source, /auditOnlyAllowedTools: \["Bash"\]/);
   assert.equal(source.includes('tools: ["Bash"'), false);
   assert.match(source, /runServiceLogparseCommand/);
+  assert.match(source, /logparseEntry: path\.resolve\(values\["logparse-entry"\]\)/);
+  assert.match(source, /finalizerEntry: path\.resolve\(values\["finalizer-entry"\]\)/);
   assert.match(source, /CLAUDE_DEEPSEEK_SERVICE_RETRY_FORBIDDEN/);
 });
 

@@ -8,11 +8,14 @@ import {
   controlledEnvironment,
   canonicalizeMethodsDraft,
   parseArguments,
+  publishLinuxServiceDraft,
+  removeLinuxServiceProject,
   repositorySkillPaths,
   runServiceLogparseCommand,
   safeServiceError,
   sealServiceOutcomeDraft,
   serverInvocationPhase,
+  stageLinuxServiceProject,
 } from "../runtime/macos-codex-luna-service-wrapper.mjs";
 
 test("service Skill keeps missing registered artifacts in the post-route requirement flow", () => {
@@ -52,6 +55,9 @@ test("server wrapper CLI accepts only complete unique name/value arguments", () 
     "--codex-entry", "/codex",
     "--auth-source", "/auth",
     "--skill-source", "/skill",
+    "--finalizer-entry", "/venv/bin/problem-locator-seal-outcome-draft",
+    "--logparse-entry", "/venv/bin/problem-locator-logparse",
+    "--expected-cli-version", "0.149.1",
     "--private-root", "/private",
     "--evidence-root", "/evidence",
     "--usage-root", "/usage",
@@ -70,12 +76,15 @@ test("server wrapper reports only allowlisted scalar error details", () => {
       response_code: -32600,
       response_message: "invalid request",
       item_type: "fileChange",
+      cwd_matches: false,
+      errors_count: 1,
+      skills_errors: '[{"message":"permission denied"}]',
       secret: "must-not-escape",
       nested: { token: "must-not-escape" },
     },
   });
   const receipt = safeServiceError(error);
-  assert.deepEqual(receipt.details, { id: 5, response_code: -32600, response_message: "invalid request", item_type: "fileChange" });
+  assert.deepEqual(receipt.details, { id: 5, response_code: -32600, response_message: "invalid request", item_type: "fileChange", cwd_matches: false, errors_count: 1, skills_errors: '[{"message":"permission denied"}]' });
   assert.doesNotMatch(JSON.stringify(receipt), /must-not-escape/);
 });
 
@@ -88,6 +97,36 @@ test("server wrapper enumerates only repository-owned Skill entry files", (t) =>
   assert.deepEqual(repositorySkillPaths(root), [path.join(root, ".agents", "skills", "one", "SKILL.md")]);
 });
 
+test("Linux service project contains Codex metadata without changing the product Workspace root shape", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "linux-luna-service-project-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const workspace = path.join(root, "workspace");
+  fs.mkdirSync(path.join(workspace, "inputs"), { recursive: true });
+  fs.mkdirSync(path.join(workspace, "output"), { recursive: true });
+  fs.mkdirSync(path.join(workspace, "runtime", "tool-state"), { recursive: true });
+  const resource = path.join(root, "immutable-resource.json");
+  fs.writeFileSync(resource, "{}\n");
+  fs.linkSync(resource, path.join(workspace, "inputs", "request.json"));
+  assert.equal(fs.statSync(path.join(workspace, "inputs", "request.json")).nlink >= 2, true);
+  fs.writeFileSync(path.join(workspace, "runtime", "context.txt"), "fixed context\n");
+
+  const project = stageLinuxServiceProject(workspace);
+  assert.equal(path.dirname(project), path.join(workspace, "runtime"));
+  assert.equal(fs.readFileSync(path.join(project, "inputs", "request.json"), "utf8"), "{}\n");
+  assert.equal(fs.statSync(path.join(project, "inputs", "request.json")).nlink, 1);
+  for (const name of [".agents", ".codex", ".git"]) fs.mkdirSync(path.join(project, name));
+  const draft = '{"schema_version":2,"result_type":"NO_CAPABILITY"}\n';
+  fs.writeFileSync(path.join(project, "output", "job_outcome.draft.json"), draft);
+
+  const publication = publishLinuxServiceDraft({ phase: "ROUTE", workspaceRoot: workspace, projectRoot: project });
+  assert.equal(publication.status, "PASS");
+  assert.equal(fs.readFileSync(path.join(workspace, "output", "job_outcome.draft.json"), "utf8"), draft);
+  removeLinuxServiceProject({ workspaceRoot: workspace, projectRoot: project });
+
+  assert.deepEqual(fs.readdirSync(workspace).sort(), ["inputs", "output", "runtime"]);
+  assert.deepEqual(fs.readdirSync(path.join(workspace, "runtime")).sort(), ["context.txt", "tool-state"]);
+});
+
 test("server wrapper seals a service outcome draft before the Agent process exits", (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "macos-luna-sealer-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
@@ -98,7 +137,7 @@ test("server wrapper seals a service outcome draft before the Agent process exit
   fs.mkdirSync(path.join(workspace, "inputs"), { recursive: true });
   fs.mkdirSync(path.join(workspace, "output"), { recursive: true });
   fs.writeFileSync(finalizer, "#!/bin/sh\nprintf '{\"schema_version\":2}' > runtime/tool-state/agent-job-outcome-draft.finalized\n", { mode: 0o700 });
-  const receipt = sealServiceOutcomeDraft({ phase: "ROUTE", workspaceRoot: workspace, sourceRoot: root });
+  const receipt = sealServiceOutcomeDraft({ phase: "ROUTE", workspaceRoot: workspace, finalizerEntry: finalizer });
   assert.equal(receipt.status, "PASS");
   assert.equal(receipt.invoked, true);
   assert.match(receipt.marker_sha256, /^[a-f0-9]{64}$/);
@@ -122,7 +161,7 @@ test("server wrapper runs the one product-owned Logparse command without persist
     phase: "LOGPARSE",
     prompt: `Run exactly one command:\nproblem-locator-logparse parse-targets --request ${request} --result ${result}\n`,
     workspaceRoot: workspace,
-    sourceRoot: root,
+    logparseEntry: command,
     environment: { PROBLEM_LOCATOR_LOGPARSE_ENDPOINT: "http://127.0.0.1:1/session", PROBLEM_LOCATOR_LOGPARSE_TOKEN: "secret-canary" },
   });
   assert.equal(receipt.status, "PASS");
