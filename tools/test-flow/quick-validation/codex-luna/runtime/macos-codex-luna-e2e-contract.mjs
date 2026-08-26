@@ -67,7 +67,9 @@ export const MACOS_CODEX_LUNA_PRICE_SNAPSHOT = Object.freeze({
 const CASE_FACT_KEYS = Object.freeze([
   "scenario_id",
   "problem_time",
+  "client_slot",
   "client_process",
+  "server_slot",
   "server_process",
   "service",
   "api",
@@ -220,7 +222,7 @@ export function mapScenarioToCreateCase(facts) {
   const problemTime = new Date(problemTimeMs).toISOString();
   const subject = `${facts.service}.${facts.api}`;
   return Object.freeze({
-    raw_problem_text: `问题时间 ${problemTime}；客户端进程 ${facts.client_process}；服务端进程 ${facts.server_process}；服务 ${facts.service}；API ${facts.api}；客户端观察到 RPC timeout。`,
+    raw_problem_text: `问题时间 ${problemTime}；客户端 slot ${facts.client_slot}、进程 ${facts.client_process}；服务端 slot ${facts.server_slot}、进程 ${facts.server_process}；服务 ${facts.service}；API ${facts.api}；客户端观察到 RPC timeout。`,
     statement: `${subject} 在 ${problemTime} 附近发生 RPC timeout`,
     expected_behavior: "RPC 请求在超时预算内完成并被客户端正常接收",
     actual_behavior: "客户端观察到 RPC timeout",
@@ -229,8 +231,8 @@ export function mapScenarioToCreateCase(facts) {
     non_goals: ["不修改服务，不执行恢复动作"],
     constraints: ["只使用给定事实和日志，不补造证据"],
     completion_criteria: ["给出状态、根因或证据缺口，并绑定可核验日志证据"],
-    initial_user_fact_names: ["problem_time", "client_process", "server_process", "service", "api"],
-    initial_user_fact_values: [problemTime, facts.client_process, facts.server_process, facts.service, facts.api],
+    initial_user_fact_names: ["problem_time", "client_slot", "client_process", "server_slot", "server_process", "service", "api"],
+    initial_user_fact_values: [problemTime, facts.client_slot, facts.client_process, facts.server_slot, facts.server_process, facts.service, facts.api],
   });
 }
 
@@ -417,20 +419,23 @@ export function auditMcpToolCalls(calls, { attachmentId = null, uploadRevision =
   return { schema_version: 1, status: "PASS", call_count: calls.length, sequence: names, write_request_ids: requestIds, revisions };
 }
 
-export function auditHttpBoundary(entries, { mcpUrl, uploadUrl }) {
+export function auditHttpBoundary(entries, { mcpUrl, uploadUrl, downloadUrl = null }) {
   requireE2E(Array.isArray(entries) && isNonEmptyString(mcpUrl) && isNonEmptyString(uploadUrl), "MACOS_CODEX_LUNA_HTTP_AUDIT_INPUT_INVALID", "HTTP boundary audit inputs are invalid");
   const mcp = new URL(mcpUrl);
   const upload = new URL(uploadUrl);
+  const download = downloadUrl === null ? null : new URL(downloadUrl);
   const normalized = entries.map((entry) => {
     requireE2E(isPlainObject(entry) && isNonEmptyString(entry.method) && isNonEmptyString(entry.url) && isNonEmptyString(entry.source), "MACOS_CODEX_LUNA_HTTP_ENTRY_INVALID", "HTTP audit entry is invalid");
     const target = new URL(entry.url);
     const method = entry.method.toUpperCase();
     const isMcp = target.href === mcp.href && ["GET", "POST", "DELETE"].includes(method);
     const isUpload = target.href === upload.href && method === "PUT";
-    requireE2E(isMcp || isUpload, "MACOS_CODEX_LUNA_HTTP_BOUNDARY_VIOLATION", "Observed HTTP call is outside /mcp transport and the UploadDescriptor PUT", { method, url: target.href, source: entry.source });
-    return { method, url: target.href, source: entry.source, category: isMcp ? "MCP_TRANSPORT" : "ATTACHMENT_PUT" };
+    const isDownload = download !== null && target.href === download.href && method === "GET";
+    requireE2E(isMcp || isUpload || isDownload, "MACOS_CODEX_LUNA_HTTP_BOUNDARY_VIOLATION", "Observed HTTP call is outside /mcp transport, the UploadDescriptor PUT, and the selected Artifact GET", { method, url: target.href, source: entry.source });
+    return { method, url: target.href, source: entry.source, category: isMcp ? "MCP_TRANSPORT" : isUpload ? "ATTACHMENT_PUT" : "ARTIFACT_GET" };
   });
   requireE2E(normalized.filter((entry) => entry.category === "ATTACHMENT_PUT").length === 1, "MACOS_CODEX_LUNA_UPLOAD_HTTP_CARDINALITY_INVALID", "UploadDescriptor must be used for exactly one PUT");
+  requireE2E(download === null || normalized.filter((entry) => entry.category === "ARTIFACT_GET").length === 1, "MACOS_CODEX_LUNA_DOWNLOAD_HTTP_CARDINALITY_INVALID", "Selected Artifact must be downloaded exactly once");
   return { schema_version: 1, status: "PASS", entries: normalized };
 }
 

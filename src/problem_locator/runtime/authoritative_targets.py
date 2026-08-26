@@ -428,8 +428,17 @@ def validated_successful_broker_record(
     broker_audit_bytes: bytes,
     *,
     job_id: str,
+    require_single_operation: bool = False,
 ) -> dict[str, Any]:
-    """Parse one product-owned broker audit and return its unique success."""
+    """Parse one product-owned broker audit and return its unique success.
+
+    Methods Pass A sets ``require_single_operation`` because a failed operation
+    followed by a successful retry violates its no-retry execution boundary.
+    Other broker consumers retain the existing unique-success audit contract.
+    """
+
+    if type(require_single_operation) is not bool:
+        raise TypeError("require_single_operation must be boolean")
 
     audit = parse_canonical_json_bytes(broker_audit_bytes)
     if (
@@ -441,6 +450,8 @@ def validated_successful_broker_record(
         or len(audit["operations"]) > 8
     ):
         raise ValueError("broker audit shape or identity is invalid")
+    if require_single_operation and len(audit["operations"]) != 1:
+        raise ValueError("broker audit must contain exactly one operation")
 
     successful: list[dict[str, Any]] = []
     expected_record_fields = {

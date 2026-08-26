@@ -22,13 +22,13 @@ State、Job 和权威 Outcome 已硬切到 V7。Problem Locator 5.0.0 只接受�
 本仓库将故障定位能力分为四层：
 
 - 产品注册只声明路由、必需用户输入/附件、Logparse 产品与 anchor，以及 DIAGNOSE/REVIEW 的内置运行时绑定。
-- Wiki 元 Skill 只生成闭合的 Methods package；包内没有产品注册、GenerationSpec、`diagnosis-skill.json` 或验证合同。
-- 产品拥有的 Logparse 预处理 Pass 在独立 Workspace 中完成唯一一次 parse/reuse，并把请求、目标日志与 receipt 冻结给 Methods Pass。
+- `.agents` 下的 Wiki 元 Skill 只生成闭合的 Methods package；`.claude` 下的局域网部署元 Skill 生成完整的生产 registration root，并在其 `package/` 中放置同一 Methods package。两者都不生成 GenerationSpec、`diagnosis-skill.json` 或验证合同。
+- 产品拥有的 Logparse 预处理 Pass 在独立 Workspace 中先加载一次现装 `logparse-diagnose`，由 Helper 完成唯一一次 broker parse/reuse，再把请求、目标日志与 receipt 冻结给 Methods Pass。
 - Methods Agent 只读取冻结请求、全部目标日志和按需加载的方法卡；服务端随后逐行校验 marker、identity token 与源日志字节，再映射到通用 Evidence、Candidate、Review 和 Result 域。
 
-`wiki-to-diagnosis-skill` 直接从一份已评审 Wiki 生成 `SKILL.md`、`methods.json` 和独立可加载的 `references/*.md` 方法卡。`methods.json` 固定声明源 Wiki SHA-256、必需用户输入、必需附件、日志派生字段、共享参考和有序方法索引；`shared_references[0]` 固定绑定逐项逐序保留源 Wiki 机械日志模板的 `references/source-log-templates.md`，每个方法必须有正向 evidence markers。产品在包外提供 `registration-template.json`，因此生成 Agent 无权制造部署范围、运行时资产、Logparse 产品或 anchor 绑定。
+`.agents/skills/wiki-to-diagnosis-skill` 直接从一份已评审 Wiki 生成 `SKILL.md`、`methods.json` 和独立可加载的 `references/*.md` 方法卡。`methods.json` 固定声明源 Wiki SHA-256、必需用户输入、必需附件、日志派生字段、共享参考和有序方法索引；`shared_references[0]` 固定绑定逐项逐序保留源 Wiki 机械日志模板的 `references/source-log-templates.md`，每个方法必须有正向 evidence markers。该入口仍由产品在包外提供 registration，供既有 Methods 两阶段链路使用。
 
-仓库另提供 [`.claude/skills/wiki-to-logparse-diagnosis-skill`](.claude/skills/wiki-to-logparse-diagnosis-skill)，用于生成局域网 Claude Code 直用的 Logparse 定位 Skill。它保留相同的 Wiki、方法卡、日志模板和 marker 完整性规则，但固定要求 `client_slot`、`client_process_name`、`server_slot`、`server_process_name`，并在输入齐全后先加载现装 `logparse-diagnose`。生成物直接回复定位摘要，同时用固定打包器交付 `result.txt` 与实际使用日志组成的扁平 `result.zip`。该直用产物不属于当前 Server 的 Methods registration，不能放入 `SKILL_DIR` 替代 `registration-template.json`；当前 `.agents/skills/wiki-to-diagnosis-skill` 和两阶段 Server 链路不受影响。
+仓库另提供 [`.claude/skills/wiki-to-logparse-diagnosis-skill`](.claude/skills/wiki-to-logparse-diagnosis-skill)，用于在局域网 Claude Code 中从 Wiki 生成可直接部署到 Linux Server `SKILL_DIR` 的完整 registration root。生成物包含 `registration-template.json` 与闭合 Methods package，固定要求 `client_slot`、`client_process_name`、`server_slot`、`server_process_name`，双端共用作者确认的 module，PID 仅在用户主动提供时使用。客户端不会加载这个业务 Skill，也不会在本地调用 Logparse；它只使用 `$problem-locator-client` 经 HTTP MCP 提交 Case。Server 完成 ROUTE、Helper 驱动的 Logparse 预处理、Methods 诊断、Review 和权威结果打包。
 
 Logparse 产品可以省略。省略时 Runtime 记录有效产品 `default`，Broker 不向上游强制传入 `--product`；只有非默认产品才显式传参。生成定位 Skill 时，作者只声明 Logparse 归档 requirement 的数量约束，不填写 Content-Type；上传时用户也只选择归档文件。平台按文件后缀确定内部 Content-Type：`.gz/.tar.gz/.tgz` 为 `application/gzip`，`.zip` 为 `application/zip`，`.tar` 为 `application/x-tar`。
 
@@ -51,7 +51,7 @@ Agent 无权预先构造、摘要或替代这两项结果。Reviewer 使用盲�
 
 每次运行的本地证据保存在 `.tmp/test-flow-evidence/<run-id>`。`verdict.json` 是唯一权威结论；缺失就是 `UNFINALIZED`。证据在复用前会按当前配置、密钥扫描器和事件合同重新审计，且不会自动删除。
 
-局域网直用元 Skill 的真实生成与诊断冒烟使用独立入口 [`tools/test-flow/quick-validation/claude-deepseek-lan-skill/run.sh`](tools/test-flow/quick-validation/claude-deepseek-lan-skill/run.sh)。该入口不接中央 Test Flow，独立 verdict 只证明对应 Fast E2E，不代表 Release 或当前 Server 链路通过。
+局域网元 Skill 的真实生成与用户链路冒烟复用 [`tools/test-flow/quick-validation/claude-deepseek/run.sh`](tools/test-flow/quick-validation/claude-deepseek/run.sh)。generation 生成并缓存完整 registration root；E2E 只消费精确缓存，由客户端 Claude Code 使用 `$problem-locator-client` 经 HTTP MCP 跑完 ROUTE、LOGPARSE、DIAGNOSE、REVIEW，并下载校验 `result.zip`。WSL standalone verdict 只证明密封环境中的 Fast E2E，不代表完整 Test Flow、Release 或物理局域网部署验收。
 
 Problem Locator 是一个单实例故障诊断服务。它接收结构化问题，收集事实与附件，执行固定版本的路由、诊断和盲审任务，最终发布经过机器验证和独立复核的完成态 `USER_RESULT`，或发布说明无法可靠定论的 `INCONCLUSIVE` `USER_RESULT` JSON 与 `UNRESOLVED` 审计包。
 
@@ -95,6 +95,10 @@ uv lock --check
 运行时限制是冻结的契约常量，不属于可配置项。5.0.0 会拒绝 `JOB_CONCURRENCY` 以及未知的 limit、max、retention 覆盖项，避免运维人员误以为某项实际上无效的限制已经生效。
 
 不要配置或持久化 `PROBLEM_LOCATOR_LOGPARSE_ENDPOINT` 和 `PROBLEM_LOCATOR_LOGPARSE_TOKEN`。这两个值会按任务临时创建，并在代理会话结束时删除。
+
+运行 `CLAUDE_COMMAND` 的 Linux 服务账号还必须在其 Agent 配置根中安装仓库当前
+`.claude/skills/logparse-diagnose`。SPECIALIZED Logparse Pass 会先加载该 Helper，再使用任务级
+broker；Helper 缺失或加载失败时任务直接失败，不会绕过 Skill 改为直接调用 broker。
 
 ### 局域网通用定位 Skill
 
@@ -352,8 +356,9 @@ SPECIALIZED 路径不再执行旧 manifest verification contract，Agent 也不�
 2. 若必需用户输入或 `log_archive` 尚未齐备，服务端在 Logparse plan 不可解析时执行
    无 Agent 的 no-plan preflight，仅发布 `NEED_INPUT`/`NEED_ATTACHMENT` 及
    `MISSING_ONLY` requirements。Methods 草稿无权动态请求材料。
-3. Pass A 在独立 `logparse-preprocess` Workspace 运行，不加载诊断 Skill，只允许对产品
-   生成的 request 执行唯一一次 `parse-targets` 或 `target-logs`。服务端核对 broker
+3. Pass A 在独立 `logparse-preprocess` Workspace 运行，不加载业务诊断 Skill；它必须先恰好
+   加载一次现装 `logparse-diagnose`，再由 Helper 对产品生成的 request 执行唯一一次
+   `parse-targets` 或 `target-logs`。Helper 不可用或调用失败时禁止直接 broker 回退。服务端核对 broker
    audit、claim 和请求字节，重新读取目标日志，然后把 `request.json`、
    `target_logs.json`、列出的日志字节与 `logparse-receipt.json` 冻结到主 Workspace。
 4. Pass A 退出后 broker 能力被撤销。Pass B 只接收冻结输入和按需加载的 Methods

@@ -4,7 +4,8 @@
 The fixture deliberately implements the production protocol split:
 
 * ROUTE retains the legacy route envelope.
-* Pass A receives only one product-owned Logparse command and no Skill.
+* Pass A requires one installed ``logparse-diagnose`` Helper load before one
+  product-owned Logparse broker command.
 * Pass B receives the frozen Methods package/target logs and writes only the
   Methods diagnosis draft.
 * REVIEW receives the frozen prior Methods diagnosis and writes only the
@@ -49,6 +50,11 @@ _PREPROCESS_COMMAND = re.compile(
     r"--request ([A-Za-z0-9_./-]+) --result ([A-Za-z0-9_./-]+)$",
     flags=re.MULTILINE,
 )
+_PREPROCESS_HEADER = (
+    "You are the product-owned Logparse preprocessing pass in "
+    "SERVER_PREPROCESS mode."
+)
+_PREPROCESS_HELPER_CALL = "Skill(logparse-diagnose)"
 _METHODS_FILE = re.compile(
     r'<<<METHODS_SKILL_FILE path="methods\.json">>>\n'
     r"(.*?)\n<<<END METHODS_SKILL_FILE>>>",
@@ -106,10 +112,20 @@ def _assert_safe_relative(value: object, *, prefix: str | None = None) -> str:
 
 
 def _preprocess(prompt: str) -> int:
+    helper_offsets = [
+        match.start()
+        for match in re.finditer(re.escape(_PREPROCESS_HELPER_CALL), prompt)
+    ]
+    if len(helper_offsets) != 1:
+        raise RuntimeError(
+            "Pass A must contain exactly one logparse-diagnose Helper call"
+        )
     commands = list(_PREPROCESS_COMMAND.finditer(prompt))
     if len(commands) != 1:
-        raise RuntimeError("Pass A must contain exactly one Logparse command")
+        raise RuntimeError("Pass A must contain exactly one Logparse broker command")
     command = commands[0]
+    if helper_offsets[0] >= command.start():
+        raise RuntimeError("Pass A must load the Helper before the broker command")
     operation = command.group(1)
     request_path = _assert_safe_relative(
         command.group(2),
@@ -353,7 +369,7 @@ def _review(instruction: dict[str, Any]) -> None:
 
 def main() -> int:
     context = sys.stdin.buffer.read().decode("utf-8")
-    if context.startswith("You are the product-owned Logparse preprocessing pass.\n"):
+    if context.startswith(_PREPROCESS_HEADER + "\n"):
         return _preprocess(context)
     instruction = json.loads(_section(context, "JOB_INSTRUCTION"))
     job_type = JobType(str(instruction["job_type"]))

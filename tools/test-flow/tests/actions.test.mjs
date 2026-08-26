@@ -20,6 +20,7 @@ import {
   validLinuxClientBrowserCapabilityReceipt,
   validCrossJobPassRuntimeBoundary,
   validCodexLunaPassBoundary,
+  validClaudeDeepseekInvocationLedger,
   validHostCapabilityReceipt,
   validServerRuntimeIdentity,
 } from "../lib/actions.mjs";
@@ -63,6 +64,16 @@ import {
   CODEX_LUNA_APP_SERVER_REQUEST_IDS,
   CODEX_LUNA_DISABLED_FEATURES,
 } from "../runtime-support/codex-luna-app-server.mjs";
+
+test("Claude E2E ledger must exactly match the scenario-specific planned phases", () => {
+  const phases = ["CLIENT", "ROUTE", "LOGPARSE", "DIAGNOSE"];
+  const planStage = { invocation_caps: [{ phases, min_count: 4, max_count: 4 }] };
+  const invocations = phases.map((phase) => ({ phase, status: "PASS", terminal: true }));
+  assert.equal(validClaudeDeepseekInvocationLedger(planStage, { status: "PASS", invocations }), true);
+  assert.equal(validClaudeDeepseekInvocationLedger(planStage, { status: "PASS", invocations: [...invocations, { phase: "REVIEW", status: "PASS", terminal: true }] }), false);
+  assert.equal(validClaudeDeepseekInvocationLedger(planStage, { status: "PASS", invocations: [invocations[0], invocations[2], invocations[1], invocations[3]] }), false);
+  assert.equal(validClaudeDeepseekInvocationLedger({ invocation_caps: [{ phases, min_count: 5, max_count: 5 }] }, { status: "PASS", invocations }), false);
+});
 
 function codexLunaFixtureGenerationPrompt() {
   return `使用 $wiki-to-diagnosis-skill，把 input/wiki.md 转换成一个名为 diagnose-rpc-timeout 的定位 Skill，并写入 generated/diagnose-rpc-timeout。

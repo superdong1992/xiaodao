@@ -89,6 +89,8 @@ test("producer and proof identity are separate but proof remains producer-bound"
   const productChanged = stageIdentity(stage, { deterministic: { producer_digest: "product-b", proof_digest: "tests-a" } }, policy);
   assert.notEqual(base.producer_identity, productChanged.producer_identity);
   assert.notEqual(base.proof_identity, productChanged.proof_identity);
+  const registrationChanged = stageIdentity(stage, { deterministic: { producer_digest: "product-a", proof_digest: "tests-a" } }, { ...policy, registration_tree_digest: "registration-a" });
+  assert.notEqual(base.producer_identity, registrationChanged.producer_identity);
 });
 
 test("performance identity changes with producer, policy version or stage policy", () => {

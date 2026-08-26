@@ -22,7 +22,7 @@ if [[ ${1:-} == "--inside-container" ]]; then
         --runs-root /evidence)
       [[ $mode == e2e ]] && command+=(--logparse-root /opt/logparse)
       ;;
-    claude-deepseek:methods)
+    claude-deepseek:generation)
       command=(bash "$repo_root/tools/test-flow/quick-validation/claude-deepseek/run.sh"
         --goal dev.macos-claude-deepseek-methods
         --client macos
@@ -40,24 +40,6 @@ if [[ ${1:-} == "--inside-container" ]]; then
         --claude-settings /run/secrets/claude-settings.json
         --python-entry /opt/venvs/xiaodao/bin/python
         --logparse-source /opt/logparse
-        --cache-root /cache
-        --runs-root /evidence)
-      ;;
-    claude-deepseek-lan-skill:generation)
-      command=(bash "$repo_root/tools/test-flow/quick-validation/claude-deepseek-lan-skill/run.sh"
-        --goal generation
-        --claude-entry /opt/claude-cache/package/cli.js
-        --claude-settings /run/secrets/claude-settings.json
-        --python-entry /opt/venvs/xiaodao/bin/python
-        --cache-root /cache
-        --runs-root /evidence)
-      ;;
-    claude-deepseek-lan-skill:diagnosis)
-      command=(bash "$repo_root/tools/test-flow/quick-validation/claude-deepseek-lan-skill/run.sh"
-        --goal diagnosis
-        --claude-entry /opt/claude-cache/package/cli.js
-        --claude-settings /run/secrets/claude-settings.json
-        --python-entry /opt/venvs/xiaodao/bin/python
         --cache-root /cache
         --runs-root /evidence)
       ;;
@@ -105,16 +87,16 @@ while (($#)); do
   esac
 done
 
-case "$provider" in codex-luna|claude-deepseek|claude-deepseek-lan-skill) ;; *) printf 'PROVIDER_REQUIRED\n' >&2; exit 2;; esac
+case "$provider" in codex-luna|claude-deepseek) ;; *) printf 'PROVIDER_REQUIRED\n' >&2; exit 2;; esac
 case "$provider:$mode" in
-  codex-luna:methods|codex-luna:e2e|claude-deepseek:methods|claude-deepseek:e2e|claude-deepseek-lan-skill:generation|claude-deepseek-lan-skill:diagnosis) ;;
+  codex-luna:methods|codex-luna:e2e|claude-deepseek:generation|claude-deepseek:e2e) ;;
   *) printf 'MODE_REQUIRED\n' >&2; exit 2 ;;
 esac
 test -n "$cache_root" || { printf 'CACHE_ROOT_REQUIRED\n' >&2; exit 2; }
 test -n "$evidence_root" || { printf 'EVIDENCE_ROOT_REQUIRED\n' >&2; exit 2; }
 case "$cache_root:$evidence_root" in /*:/*) ;; *) printf 'ABSOLUTE_OUTPUT_PATHS_REQUIRED\n' >&2; exit 2;; esac
-[[ $all_scenarios != true || $mode == e2e || "$provider:$mode" == claude-deepseek-lan-skill:diagnosis ]] || { printf 'ALL_SCENARIOS_REQUIRES_E2E\n' >&2; exit 2; }
-[[ -z $scenario || $mode == e2e || "$provider:$mode" == claude-deepseek-lan-skill:diagnosis ]] || { printf 'SCENARIO_REQUIRES_E2E\n' >&2; exit 2; }
+[[ $all_scenarios != true || $mode == e2e ]] || { printf 'ALL_SCENARIOS_REQUIRES_E2E\n' >&2; exit 2; }
+[[ -z $scenario || $mode == e2e ]] || { printf 'SCENARIO_REQUIRES_E2E\n' >&2; exit 2; }
 [[ $all_scenarios != true || -z $scenario ]] || { printf 'SCENARIO_SELECTION_CONFLICT\n' >&2; exit 2; }
 case "$(uname -r)" in *[Mm]icrosoft*WSL2*|*[Mm]icrosoft-standard-WSL2*) ;; *) printf 'WSL2_REQUIRED\n' >&2; exit 2;; esac
 test "$(. /etc/os-release && printf '%s' "$ID:$VERSION_ID")" = "ubuntu:22.04" || { printf 'UBUNTU_2204_HOST_REQUIRED\n' >&2; exit 2; }
@@ -130,7 +112,7 @@ test "$(docker image inspect "$image_id" --format '{{.Id}}')" = "$image_id" || {
 test "$(docker image inspect "$image_id" --format '{{index .Config.Labels "problem-locator.quick.container"}}')" = "ubuntu22.04-central-v1" || { printf 'IMAGE_PROFILE_INVALID\n' >&2; exit 2; }
 
 cache_mount="type=bind,src=$cache_root,dst=/cache"
-[[ $mode != e2e && "$provider:$mode" != claude-deepseek-lan-skill:diagnosis ]] || cache_mount+=",readonly"
+[[ $mode != e2e ]] || cache_mount+=",readonly"
 provider_mounts=(
   --mount "type=bind,src=$repo_root,dst=$repo_root,readonly"
   --mount "$cache_mount"
@@ -143,7 +125,7 @@ case "$provider" in
     provider_mounts+=(--mount "type=bind,src=$codex_auth,dst=/run/secrets/codex-auth.json,readonly")
     security+=(--security-opt seccomp=unconfined)
     ;;
-  claude-deepseek|claude-deepseek-lan-skill)
+  claude-deepseek)
     test -f "$claude_settings" || { printf 'CLAUDE_SETTINGS_MISSING\n' >&2; exit 2; }
     provider_mounts+=(--mount "type=bind,src=$claude_settings,dst=/run/secrets/claude-settings.json,readonly")
     ;;
@@ -221,7 +203,7 @@ single_args=("${retry_args[@]}")
 [[ $plan_only != true ]] || single_args+=(--plan-only)
 [[ $allow_real_model != true ]] || single_args+=(--allow-real-model)
 
-if [[ $provider == claude-deepseek-lan-skill || $mode != e2e || $all_scenarios != true ]]; then
+if [[ $mode != e2e || $all_scenarios != true ]]; then
   single_container="${container_prefix}-single"
   owned_containers+=("$single_container")
   run_provider_container "$single_container" "$evidence_root" "${single_args[@]}"

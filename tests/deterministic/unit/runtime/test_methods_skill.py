@@ -277,6 +277,19 @@ def test_registration_resolves_closed_package_and_three_bound_digests(tmp_path: 
     )
 
 
+def test_logparse_registration_accepts_default_product_id(tmp_path: Path) -> None:
+    root = _write_registration(tmp_path / "skills")
+    template = root / "registration-template.json"
+    value = json.loads(template.read_text(encoding="utf-8"))
+    value["runtime"]["preprocessing"]["logparse_product"] = "default"
+    _write_json(template, value)
+
+    resolved = load_specialized_skill_registration(root)
+
+    assert resolved.registration.preprocessing.requires_logparse is True
+    assert resolved.registration.preprocessing.logparse_product == "default"
+
+
 def test_package_and_catalog_contract_reject_legacy_or_extra_files(tmp_path: Path) -> None:
     package = _write_package(tmp_path)
     (package / "diagnosis-skill.json").write_text("{}\n", encoding="utf-8")

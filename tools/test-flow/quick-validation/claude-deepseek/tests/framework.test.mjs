@@ -40,6 +40,9 @@ test("Claude suite plan freezes nine scenarios, 44 processes, and aggregate limi
   assert.equal(plan.execution.usd_cap, 36);
   assert.equal(plan.execution.stage_wall_seconds, 16_200);
   assert.equal(plan.execution.per_scenario.find((item) => item.scenario_id === "insufficient-evidence").expected_model_processes, 4);
+  assert.equal(plan.inputs.client_prompt.version, 3);
+  assert.match(plan.inputs.client_prompt.sha256, /^[0-9a-f]{64}$/u);
+  assert.match(plan.inputs.provider_runtime.tree_sha256, /^[0-9a-f]{64}$/u);
 });
 
 test("blocked Claude suite writes one aggregate verdict and nine NOT_RUN results without a model", async () => {
@@ -171,6 +174,25 @@ test("central engine marks only Claude Quick deterministic contract Gates as zer
   assert.match(source, /\["real\.macos-claude-deepseek-methods", "real\.macos-claude-deepseek-e2e"\]\.includes\(stage\.id\)/);
 });
 
+test("central Claude adapter and planner use the new meta Skill and complete registration cache", () => {
+  const actions = fs.readFileSync(path.join(ROOT, "..", "..", "lib", "actions.mjs"), "utf8");
+  const actionStart = actions.indexOf("async function runMacosClaudeDeepseekGate");
+  const actionEnd = actions.indexOf("\nasync function crossJob", actionStart);
+  const claudeAction = actions.slice(actionStart, actionEnd);
+  assert.match(claudeAction, /\.claude", "skills", "wiki-to-logparse-diagnosis-skill/);
+  assert.match(claudeAction, /"--module", "rpc"/);
+  assert.equal(claudeAction.includes("--registration-template"), false);
+  const planner = fs.readFileSync(path.join(ROOT, "..", "..", "lib", "planner.mjs"), "utf8");
+  const cacheStart = planner.indexOf("const claudeMethodsSelected");
+  const cacheEnd = planner.indexOf("\n  const stageIdentities", cacheStart);
+  const claudeCache = planner.slice(cacheStart, cacheEnd);
+  assert.match(claudeCache, /wiki-to-logparse-diagnosis-skill/);
+  assert.match(claudeCache, /registration_tree_sha256/);
+  assert.match(claudeCache, /runtime_ref/);
+  assert.equal(claudeCache.includes("registrationTemplate"), false);
+  assert.match(planner, /registration_tree_digest: stage\.id === "real\.macos-claude-deepseek-e2e"/);
+});
+
 test("light Gate rejects missing evidence and wrong model-process cardinality", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "claude-deepseek-gate-"));
   for (const name of REQUIRED_EVIDENCE[METHODS_GOAL]) {
@@ -182,5 +204,5 @@ test("light Gate rejects missing evidence and wrong model-process cardinality", 
   assert.equal(sealGate({ goal: METHODS_GOAL, mode: "cache-verification", evidenceRoot: root, expectedCalls: 0 }).status, "PASS");
   const other = fs.mkdtempSync(path.join(os.tmpdir(), "claude-deepseek-gate-other-"));
   for (const name of REQUIRED_EVIDENCE[METHODS_GOAL]) fs.writeFileSync(path.join(other, name), name === "adapter-receipt.json" ? '{"status":"PASS"}\n' : name === "model-invocations.json" ? '{"invocations":[]}\n' : "{}\n");
-  assert.equal(sealGate({ goal: METHODS_GOAL, mode: "bootstrap", evidenceRoot: other, expectedCalls: 1 }).status, "FAIL");
+  assert.equal(sealGate({ goal: METHODS_GOAL, mode: "generation", evidenceRoot: other, expectedCalls: 1 }).status, "FAIL");
 });

@@ -51,16 +51,16 @@ import {
 } from "../quick-validation/codex-luna/runtime/macos-codex-luna-e2e-contract.mjs";
 import {
   CLAUDE_DEEPSEEK_CALL_WALL_SECONDS,
-  CLAUDE_DEEPSEEK_E2E_CALLS,
-  CLAUDE_DEEPSEEK_E2E_PHASES,
   CLAUDE_DEEPSEEK_METHODS_CALLS,
   CLAUDE_DEEPSEEK_MODEL,
+  CLAUDE_DEEPSEEK_MODULE,
   CLAUDE_DEEPSEEK_NO_PROGRESS_SECONDS,
   CLAUDE_DEEPSEEK_SCENARIOS,
-  buildMethodsProducerIdentity as buildClaudeDeepseekProducerIdentity,
-  methodsCachePath as claudeDeepseekCachePath,
+  claudeDeepseekE2EPhases,
+  buildRegistrationProducerIdentity as buildClaudeDeepseekProducerIdentity,
+  registrationCachePath as claudeDeepseekCachePath,
   validateClaudeDeepseekIdentity,
-  validateMethodsCache as validateClaudeDeepseekCache,
+  validateRegistrationCache as validateClaudeDeepseekCache,
 } from "../quick-validation/claude-deepseek/runtime/claude-deepseek-contract.mjs";
 
 const BUILT_IN_ADAPTERS = Object.freeze({
@@ -297,6 +297,7 @@ function capForStage(stage, profile) {
 function invocationCapsForStage(stage, profile, gates, {
   clientInvocationClass = "host-client",
   clientExecutionTopology = "native-host-client",
+  scenarioId = null,
 } = {}) {
   const cap = capForStage(stage, profile);
   if (stage.id === "real.logparse") return [];
@@ -334,8 +335,8 @@ function invocationCapsForStage(stage, profile, gates, {
     caps: cap,
   }];
   if (stage.id === "real.macos-claude-deepseek-methods") return [{
-    class: "claude-deepseek-methods-bootstrap",
-    phases: ["METHODS_BOOTSTRAP"],
+    class: "claude-deepseek-registration-generation",
+    phases: ["REGISTRATION_GENERATION"],
     min_count: CLAUDE_DEEPSEEK_METHODS_CALLS,
     max_count: CLAUDE_DEEPSEEK_METHODS_CALLS,
     aggregate: true,
@@ -344,17 +345,20 @@ function invocationCapsForStage(stage, profile, gates, {
     per_call_hard_timeout_seconds: 1800,
     caps: cap,
   }];
-  if (stage.id === "real.macos-claude-deepseek-e2e") return [{
+  if (stage.id === "real.macos-claude-deepseek-e2e") {
+    const phases = claudeDeepseekE2EPhases(scenarioId ?? CLAUDE_DEEPSEEK_SCENARIOS[0]);
+    return [{
     class: "claude-deepseek-macos-e2e",
-    phases: CLAUDE_DEEPSEEK_E2E_PHASES,
-    min_count: CLAUDE_DEEPSEEK_E2E_CALLS,
-    max_count: CLAUDE_DEEPSEEK_E2E_CALLS,
+    phases,
+    min_count: phases.length,
+    max_count: phases.length,
     aggregate: true,
     enforcement: "claude-cli-hard-caps-plus-terminal-aggregate",
     model: CLAUDE_DEEPSEEK_MODEL,
     per_call_hard_timeout_seconds: CLAUDE_DEEPSEEK_CALL_WALL_SECONDS,
     caps: cap,
   }];
+  }
   if (stage.kind === "isolated-real") {
     const count = stage.gates.reduce((sum, gateId) => sum + gates[gateId].isolated_agent_invocations, 0);
     return [{ class: "isolated-agent", min_count: count, max_count: count, caps: cap }];
@@ -519,25 +523,24 @@ export function buildRunPlan(repoRoot, options = {}) {
   }
   const claudeMethodsSelected = closure.stages.some((stage) => stage.id === "real.macos-claude-deepseek-methods");
   const claudeE2ESelected = closure.stages.some((stage) => stage.id === "real.macos-claude-deepseek-e2e");
-  let claudeMethodsCache = { status: "NOT_REQUIRED", package_tree_sha256: null, producer_identity: null, cache_path: null, code: null };
+  let claudeMethodsCache = { status: "NOT_REQUIRED", registration_tree_sha256: null, runtime_ref: null, producer_identity: null, cache_path: null, code: null };
   if ((claudeMethodsSelected || claudeE2ESelected) && clientDistribution.status === "PRESENT" && settingsIdentity.status === "PRESENT") {
     let producer = null;
     try {
       const claudeIdentity = validateClaudeDeepseekIdentity(effectiveOptions.claudeEntry, effectiveOptions.claudeSettings);
       const releaseCaseRoot = path.join(repoRoot, "tests", "cases", "release", "rpc-timeout-anonymized");
-      const registrationTemplate = path.join(releaseCaseRoot, "registration", "rpc-timeout-methods-v1", "registration-template.json");
       producer = buildClaudeDeepseekProducerIdentity({
         wiki: path.join(releaseCaseRoot, "input", "wiki.md"),
-        metaSkillRoot: path.join(repoRoot, ".agents", "skills", "wiki-to-diagnosis-skill"),
-        registrationTemplate,
+        metaSkillRoot: path.join(repoRoot, ".claude", "skills", "wiki-to-logparse-diagnosis-skill"),
         claudeIdentity,
+        module: CLAUDE_DEEPSEEK_MODULE,
       });
       const cachePath = claudeDeepseekCachePath(cachePaths.cacheRoot, producer.producer_identity);
-      const receipt = validateClaudeDeepseekCache({ cacheRoot: cachePaths.cacheRoot, producer, registrationTemplate });
-      claudeMethodsCache = { status: "PRESENT", package_tree_sha256: receipt.manifest.package.tree_sha256, producer_identity: producer.producer_identity, cache_path: cachePath, code: null };
+      const receipt = validateClaudeDeepseekCache({ cacheRoot: cachePaths.cacheRoot, producer });
+      claudeMethodsCache = { status: "PRESENT", registration_tree_sha256: receipt.manifest.registration.tree_sha256, runtime_ref: receipt.manifest.registration.runtime_ref, producer_identity: producer.producer_identity, cache_path: cachePath, code: null };
     } catch (error) {
       const cachePath = producer ? claudeDeepseekCachePath(cachePaths.cacheRoot, producer.producer_identity) : null;
-      claudeMethodsCache = { status: cachePath !== null && !fs.existsSync(cachePath) ? "MISSING" : "INVALID", package_tree_sha256: null, producer_identity: producer?.producer_identity ?? null, cache_path: cachePath, code: error?.code ?? "CLAUDE_DEEPSEEK_METHODS_CACHE_INVALID" };
+      claudeMethodsCache = { status: cachePath !== null && !fs.existsSync(cachePath) ? "MISSING" : "INVALID", registration_tree_sha256: null, runtime_ref: null, producer_identity: producer?.producer_identity ?? null, cache_path: cachePath, code: error?.code ?? "CLAUDE_DEEPSEEK_REGISTRATION_CACHE_INVALID" };
     }
   }
   const stageIdentities = {};
@@ -548,8 +551,9 @@ export function buildRunPlan(repoRoot, options = {}) {
     const definitionDigest = sha256Bytes(canonicalJson(canonicalStageDefinition(config, stage)));
     const identity = stageIdentity(stage, identities.sets, {
       parent_checkpoint: journeyDependency ? stageIdentities[journeyDependency].producer_identity : "GENESIS",
-      scenario: ["real.macos-codex-luna-e2e", "real.macos-claude-deepseek-e2e"].includes(stage.id) ? selectedScenario : ["real.macos-codex-luna-methods", "real.macos-claude-deepseek-methods"].includes(stage.id) ? "methods-bootstrap" : stage.id.startsWith("journey.cross-job.") ? "CrossJob" : null,
-      methods_package_digest: stage.id === "real.macos-codex-luna-e2e" ? methodsCache.package_tree_sha256 ?? "MISSING" : stage.id === "real.macos-claude-deepseek-e2e" ? claudeMethodsCache.package_tree_sha256 ?? "MISSING" : null,
+      scenario: ["real.macos-codex-luna-e2e", "real.macos-claude-deepseek-e2e"].includes(stage.id) ? selectedScenario : stage.id === "real.macos-codex-luna-methods" ? "methods-bootstrap" : stage.id === "real.macos-claude-deepseek-methods" ? "registration-generation" : stage.id.startsWith("journey.cross-job.") ? "CrossJob" : null,
+      methods_package_digest: stage.id === "real.macos-codex-luna-e2e" ? methodsCache.package_tree_sha256 ?? "MISSING" : null,
+      registration_tree_digest: stage.id === "real.macos-claude-deepseek-e2e" ? claudeMethodsCache.registration_tree_sha256 ?? "MISSING" : null,
       stage_definition_digest: definitionDigest,
       dependency_proof_identities: dependencyProofIdentities,
       config_bundle_digest: config.bundle_digest,
@@ -604,8 +608,8 @@ export function buildRunPlan(repoRoot, options = {}) {
   if (selectedScenario !== null && !MACOS_CODEX_LUNA_SCENARIOS.includes(selectedScenario)) blockers.push({ code: "MACOS_CODEX_LUNA_SCENARIO_INVALID", detail: `Scenario ${selectedScenario} is not in the repository-owned smoke matrix.` });
   if (methodsBootstrapSelected && methodsCache.status === "INVALID") blockers.push({ code: "MACOS_CODEX_LUNA_METHODS_CACHE_INVALID", detail: `The exact Methods cache path exists but is invalid: ${methodsCache.code}.` });
   if (macosE2ESelected && methodsCache.status !== "PRESENT") blockers.push({ code: "MACOS_CODEX_LUNA_METHODS_CACHE_REQUIRED", detail: `E2E requires an exact frozen Methods cache produced by dev.macos-codex-luna-methods: ${methodsCache.code ?? "missing"}.` });
-  if (claudeMethodsSelected && claudeMethodsCache.status === "INVALID") blockers.push({ code: "CLAUDE_DEEPSEEK_METHODS_CACHE_INVALID", detail: `The exact Claude/DeepSeek Methods cache path exists but is invalid: ${claudeMethodsCache.code}.` });
-  if (claudeE2ESelected && claudeMethodsCache.status !== "PRESENT") blockers.push({ code: "CLAUDE_DEEPSEEK_METHODS_CACHE_REQUIRED", detail: `E2E requires the exact cache produced by dev.macos-claude-deepseek-methods: ${claudeMethodsCache.code ?? "missing"}.` });
+  if (claudeMethodsSelected && claudeMethodsCache.status === "INVALID") blockers.push({ code: "CLAUDE_DEEPSEEK_REGISTRATION_CACHE_INVALID", detail: `The exact Claude/DeepSeek registration cache path exists but is invalid: ${claudeMethodsCache.code}.` });
+  if (claudeE2ESelected && claudeMethodsCache.status !== "PRESENT") blockers.push({ code: "CLAUDE_DEEPSEEK_REGISTRATION_CACHE_REQUIRED", detail: `E2E requires the exact registration cache produced by dev.macos-claude-deepseek-methods: ${claudeMethodsCache.code ?? "missing"}.` });
   if (codexRequired && !effectiveOptions.allowCodexPosthocBudget) {
     blockers.push({ code: "CODEX_POSTHOC_BUDGET_ACK_REQUIRED", detail: `Acknowledge ${CODEX_LUNA_POSTHOC_EXCEPTION_ID}; Codex token and equivalent-USD limits are terminal audits, not spend prevention.` });
   } else if (codexRequired) {
@@ -670,6 +674,7 @@ export function buildRunPlan(repoRoot, options = {}) {
     const invocationCaps = verifyCodexMethodsCache || verifyClaudeMethodsCache ? [] : invocationCapsForStage(stage, runtimeProfile, config.gates.gates, {
       clientInvocationClass: dualLinuxContainers ? "linux-client-container" : "host-client",
       clientExecutionTopology: dualLinuxContainers ? "darwin-orchestrated-linux-container" : "native-host-client",
+      scenarioId: selectedScenario,
     });
     return {
       id: stage.id,

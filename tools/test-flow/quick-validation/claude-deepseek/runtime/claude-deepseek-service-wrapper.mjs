@@ -3,10 +3,9 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { canonicalJson, sha256Bytes } from "../../../lib/util.mjs";
+import { canonicalJson, sha256Bytes, sha256File } from "../../../lib/util.mjs";
 import {
   canonicalizeMethodsDraft,
-  runServiceLogparseCommand,
   sealServiceOutcomeDraft,
   serverInvocationPhase,
 } from "../../codex-luna/runtime/macos-codex-luna-service-wrapper.mjs";
@@ -85,10 +84,29 @@ function brokerEnvironment(ambient) {
 }
 
 export function boundedServicePrompt(phase, prompt) {
+  const logparseBoundary = phase === "LOGPARSE"
+    ? " Your first tool use must be exactly Skill(logparse-diagnose). After it succeeds, your second and final tool use must be the single problem-locator-logparse command frozen in the product prompt. Use SERVER_PREPROCESS mode. Do not Read request.json, target_logs.json, or any target log. Do not load another Skill. If the Helper fails, stop immediately: do not invoke the broker, retry, or use a direct fallback."
+    : "";
   const reviewBoundary = phase === "REVIEW"
     ? " For REVIEW, copy every existing candidate limitation sentence verbatim into the review limitations; do not translate, paraphrase, summarize, or drop it."
     : "";
-  return `Controlled ${phase} Job boundary: the current working directory is the only readable workspace. Do not read repository, source, test-flow, AGENTS, settings, or paths outside this Job workspace. Do not attempt Bash, Glob, Grep, or another discovery tool; use only explicit Read paths supplied by the frozen prompt and resource manifest. Follow the frozen product prompt directly, read only files it identifies, and write only the required output/* draft. Write every user-visible statement, reason, limitation, safety note, and recommendation in natural Simplified Chinese. When a method confirms queuing from a single target history record but cannot identify a specific prior contributor, state 无法确认具体贡献者 explicitly.${reviewBoundary} The harness runs any fixed product finalizer or Logparse command after the model process.\n\n${prompt}`;
+  return `Controlled ${phase} Job boundary: the current working directory is the only readable workspace. Do not read repository, source, test-flow, AGENTS, settings, or paths outside this Job workspace. Do not attempt Glob, Grep, or another discovery tool; use only the phase-specific tools and explicit paths supplied by the frozen prompt and resource manifest. Follow the frozen product prompt directly and write only the required output/* draft. Write every user-visible statement, reason, limitation, safety note, and recommendation in natural Simplified Chinese. When a method confirms queuing from a single target history record but cannot identify a specific prior contributor, state 无法确认具体贡献者 explicitly.${reviewBoundary}${logparseBoundary} The harness runs only the fixed product finalizer after the model process; it never invokes Logparse for the model.\n\n${prompt}`;
+}
+
+export function expectedLogparseCommand(prompt) {
+  const matches = [...prompt.matchAll(/^problem-locator-logparse (parse-targets|target-logs) --request output\/proposals\/methods-preprocess\/request\.json --result output\/proposals\/methods-preprocess\/target_logs\.json$/gmu)];
+  if (matches.length !== 1) fail("CLAUDE_DEEPSEEK_SERVICE_LOGPARSE_COMMAND_INVALID", "LOGPARSE prompt must contain exactly one fixed broker command");
+  return { command: matches[0][0], operation: matches[0][1] };
+}
+
+export function auditLogparseToolTrace({ phase, prompt, result, workspaceRoot }) {
+  if (phase !== "LOGPARSE") return { schema_version: 1, required: false, status: "SKIP", helper_calls: 0, broker_calls: 0 };
+  const expected = expectedLogparseCommand(prompt);
+  if (result.records.length !== 2 || result.skills.length !== 1 || result.bash.length !== 1) fail("CLAUDE_DEEPSEEK_SERVICE_LOGPARSE_TRACE_INVALID", "LOGPARSE must contain exactly one Helper load followed by one broker call");
+  if (result.records[0].name !== "Skill" || result.records[0].input?.skill !== "logparse-diagnose" || result.records[1].name !== "Bash" || String(result.bash[0].command ?? "").trim() !== expected.command || result.bash[0].exit_code !== 0) fail("CLAUDE_DEEPSEEK_SERVICE_LOGPARSE_ORDER_INVALID", "LOGPARSE Helper and broker trace is missing, duplicated, or out of order");
+  const resultPath = path.join(workspaceRoot, "output", "proposals", "methods-preprocess", "target_logs.json");
+  if (!fs.existsSync(resultPath) || !fs.statSync(resultPath).isFile()) fail("CLAUDE_DEEPSEEK_SERVICE_LOGPARSE_RESULT_MISSING", "The single broker call did not create target_logs.json");
+  return { schema_version: 1, required: true, status: "PASS", mode: "SERVER_PREPROCESS", helper_calls: 1, helper_tool_ordinal: 0, broker_calls: 1, broker_tool_ordinal: 1, operation: expected.operation, command_sha256: sha256Bytes(expected.command), direct_fallback: false, retry_count: 0 };
 }
 
 export async function runServiceInvocation(values, { stdin = process.stdin, stdout = process.stdout, ambient = process.env } = {}) {
@@ -100,12 +118,21 @@ export async function runServiceInvocation(values, { stdin = process.stdin, stdo
   const usageRoot = path.resolve(values["usage-root"]);
   const claim = claimPhase(privateRoot, phase);
   const broker = brokerEnvironment(ambient);
-  const preLogparse = runServiceLogparseCommand({ phase, prompt, workspaceRoot, logparseEntry: path.resolve(values["logparse-entry"]), environment: broker ?? {} });
   const home = path.join(claim, "home");
   const temporary = path.join(claim, "tmp");
   for (const directory of [home, temporary]) fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
   const traceRoot = path.join(evidenceRoot, "server-invocations");
-  const allowedTools = ["Read(/**)", "Edit(/output/**)", "Skill(logparse-diagnose)", "Skill(diagnose-rpc-timeout)"];
+  const logparsePhase = phase === "LOGPARSE";
+  const logparseEntry = path.resolve(values["logparse-entry"]);
+  if (logparsePhase) {
+    let metadata;
+    try { metadata = fs.statSync(logparseEntry); } catch { fail("CLAUDE_DEEPSEEK_SERVICE_LOGPARSE_MISSING", "The job-scoped problem-locator-logparse entry is missing"); }
+    if (path.basename(logparseEntry) !== "problem-locator-logparse" || !metadata.isFile() || (metadata.mode & 0o111) === 0) fail("CLAUDE_DEEPSEEK_SERVICE_LOGPARSE_INVALID", "The job-scoped broker entry is not the expected executable");
+  }
+  const allowedTools = logparsePhase
+    ? ["Skill(logparse-diagnose)", "Bash(problem-locator-logparse:*)"]
+    : ["Read(/**)", "Edit(/output/**)", "Skill(diagnose-rpc-timeout)"];
+  const tracePath = path.join(traceRoot, `${phase.toLowerCase()}.stream-json.ndjson`);
   const result = await runClaudeProcess({
     claudeEntry: path.resolve(values["claude-entry"]),
     settings: path.resolve(values.settings),
@@ -113,30 +140,33 @@ export async function runServiceInvocation(values, { stdin = process.stdin, stdo
     prompt: boundedServicePrompt(phase, prompt),
     phase,
     invocationId: `${values["run-id"]}:server:${phase.toLowerCase()}`,
-    tools: ["Read", "Write", "Skill"],
+    tools: logparsePhase ? ["Bash", "Skill"] : ["Read", "Write", "Skill"],
     allowedTools,
-    allowToolErrors: true,
+    allowToolErrors: !logparsePhase,
     auditOnlyAllowedTools: ["Bash", "Glob"],
     maxTurns: CLAUDE_DEEPSEEK_E2E_MAX_TURNS,
     maxBudgetUsd: CLAUDE_DEEPSEEK_E2E_USD_LIMIT,
     wallTimeoutSeconds: CLAUDE_DEEPSEEK_CALL_WALL_SECONDS,
     noProgressSeconds: CLAUDE_DEEPSEEK_NO_PROGRESS_SECONDS,
-    tracePath: path.join(traceRoot, `${phase.toLowerCase()}.stream-json.ndjson`),
+    tracePath,
     stderrPath: path.join(traceRoot, `${phase.toLowerCase()}.stderr.txt`),
-    receiptPath: path.join(usageRoot, `${phase.toLowerCase()}.json`),
-    environment: { configRoot: path.resolve(values["config-root"]), home, temporary, brokerEnvironment: broker },
+    environment: { configRoot: path.resolve(values["config-root"]), home, temporary, brokerEnvironment: broker, brokerExecutableDirectory: logparsePhase ? path.dirname(logparseEntry) : null },
   }, { ambient, onProgress: () => stdout.write(`QUICK_VALIDATION_PROGRESS service-agent ${phase}\n`) });
-  if (result.records.some((record) => record.name === "Bash" && record.is_error !== true)) fail("CLAUDE_DEEPSEEK_SERVICE_BASH_EXECUTED", "Service Claude process executed forbidden Bash");
+  const baseHelperAudit = auditLogparseToolTrace({ phase, prompt, result, workspaceRoot });
+  const helperAudit = logparsePhase ? { ...baseHelperAudit, broker_entry_sha256: sha256File(logparseEntry), stream_trace_sha256: sha256File(tracePath), tool_sequence_sha256: sha256Bytes(canonicalJson(result.records.map((item) => ({ ordinal: item.ordinal, name: item.name, input: item.input, is_error: item.is_error })))) } : baseHelperAudit;
+  if (!logparsePhase && result.records.some((record) => record.name === "Bash" && record.is_error !== true)) fail("CLAUDE_DEEPSEEK_SERVICE_BASH_EXECUTED", "Non-LOGPARSE Claude process executed forbidden Bash");
   const methodsDraft = canonicalizeMethodsDraft({ phase, workspaceRoot });
   const outcomeSealer = sealServiceOutcomeDraft({ phase, workspaceRoot, finalizerEntry: path.resolve(values["finalizer-entry"]) });
   const receipt = {
     ...result.receipt,
-    pre_logparse: preLogparse,
+    logparse_runner: helperAudit.required ? { required: true, invoked: true, status: "PASS", operation: helperAudit.operation, executor: "claude-tool" } : { required: false, invoked: false, status: "SKIP" },
+    helper_audit: helperAudit,
     methods_draft: methodsDraft,
     outcome_sealer: outcomeSealer,
     broker_environment: { present: broker !== null, key_names: broker === null ? [] : Object.keys(broker).sort(), values_persisted: false },
     workspace_sha256: sha256Bytes(workspaceRoot),
   };
+  writeJsonNew(path.join(usageRoot, `${phase.toLowerCase()}.json`), receipt);
   writeJsonNew(path.join(traceRoot, `${phase.toLowerCase()}.receipt.json`), receipt);
   const terminal = result.events.at(-1);
   stdout.write(`${String(terminal?.result ?? "")}\n`);

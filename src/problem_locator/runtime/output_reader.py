@@ -1567,7 +1567,7 @@ def read_methods_preprocessing(
     """Reread and freeze the product-owned Pass-A Logparse result.
 
     The Methods Agent never receives the broker capability.  This boundary
-    resolves the one successful operation from the server audit, re-hashes its
+    requires one total successful operation in the server audit, re-hashes its
     controlled source tree, and captures only the declared target-log bytes.
     """
 
@@ -1589,13 +1589,14 @@ def read_methods_preprocessing(
         top_level=_WorkspaceTopLevel.INPUTS,
         identity=(workspace.inputs_device, workspace.inputs_inode),
     )
-    target_set = resolve_authoritative_targets(
-        workspace_manifest,
-        broker_audit_bytes,
-    )
     record = validated_successful_broker_record(
         broker_audit_bytes,
         job_id=job.job_id,
+        require_single_operation=True,
+    )
+    target_set = resolve_authoritative_targets(
+        workspace_manifest,
+        broker_audit_bytes,
     )
     canonical_request = canonical_json_bytes(record["request"])
     if record.get("request_sha256") != bytes_sha256(canonical_request):

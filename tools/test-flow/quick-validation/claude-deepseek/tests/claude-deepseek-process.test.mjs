@@ -30,12 +30,12 @@ test("controlled Claude environment drops ambient provider, proxy, and hook stat
   assert.equal(environment.CLAUDE_CONFIG_DIR, "/private/tmp/config");
 });
 
-test("controlled Claude environment prepends only explicit absolute PATH entries", () => {
+test("controlled Claude environment adds only the explicit Logparse broker directory", () => {
   const environment = controlledClaudeEnvironment({}, {
     configRoot: "/private/tmp/config",
     home: "/private/tmp/home",
     temporary: "/private/tmp/tmp",
-    pathEntries: ["/private/tmp/contract-bin"],
+    brokerExecutableDirectory: "/private/tmp/contract-bin",
   });
   assert.equal(environment.PATH, ["/private/tmp/contract-bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"].join(path.delimiter));
   assert.throws(
@@ -43,9 +43,9 @@ test("controlled Claude environment prepends only explicit absolute PATH entries
       configRoot: "/private/tmp/config",
       home: "/private/tmp/home",
       temporary: "/private/tmp/tmp",
-      pathEntries: ["relative-bin"],
+      brokerExecutableDirectory: "relative-bin",
     }),
-    /PATH additions/,
+    /broker executable directory/,
   );
 });
 

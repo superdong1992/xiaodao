@@ -1885,12 +1885,22 @@ class DiagnosisRuntime:
             )
         )
         prompt = (
-            "You are the product-owned Logparse preprocessing pass.\n"
-            "Do not load or execute any diagnosis Skill. Do not read target logs and "
-            "do not write a diagnosis or review draft.\n"
-            "Run exactly one command, wait for it to finish successfully, then exit:\n"
+            "You are the product-owned Logparse preprocessing pass in "
+            "SERVER_PREPROCESS mode.\n"
+            "Your first action must be exactly one Skill tool call: "
+            "Skill(logparse-diagnose)\n"
+            "If that Helper is unavailable, rejected, or fails to load, stop "
+            "immediately. Do not invoke the broker directly or use any fallback.\n"
+            "Do not load or execute any other Skill, including the selected business "
+            "diagnosis Skill. Do not read the request, broker result, or target logs; "
+            "do not diagnose; and do not write a diagnosis or review draft.\n"
+            "Only after the Helper loads successfully, follow its SERVER_PREPROCESS "
+            "contract and run exactly this one job-scoped broker request:\n"
             f"problem-locator-logparse {operation} --request {request_path} "
             f"--result {result_path}\n"
+            "The Runtime prewrote the request path. Do not edit or replace it. Wait "
+            "for the one request to finish successfully, then exit without reading "
+            "the result. Any failure ends this pass; never retry.\n"
         )
         tool_started = record_stage_started(
             ExecutionStage.TOOL_EXECUTE,
@@ -1977,18 +1987,21 @@ class DiagnosisRuntime:
             )
             request = self._methods_request_value(job, main_workspace, skill)
             record = parse_canonical_json_bytes(broker_audit_bytes)
-            successful = [
-                item
-                for item in record["operations"]
-                if item.get("http_status") == 200
-            ]
-            if len(successful) != 1:
-                raise ValueError("Methods preprocessing audit is not unique")
+            operations = record["operations"]
+            if (
+                len(operations) != 1
+                or not isinstance(operations[0], dict)
+                or operations[0].get("http_status") != 200
+            ):
+                raise ValueError(
+                    "Methods preprocessing audit must contain one successful operation"
+                )
+            successful = operations[0]
             receipt_context = {
                 "job_id": job.job_id,
                 "case_id": job.case_id,
                 "registration_id": skill.registration_id,
-                "operation": successful[0]["operation"],
+                "operation": successful["operation"],
                 "broker_request_sha256": bytes_sha256(validated.request_bytes),
                 "broker_audit_sha256": bytes_sha256(broker_audit_bytes),
             }

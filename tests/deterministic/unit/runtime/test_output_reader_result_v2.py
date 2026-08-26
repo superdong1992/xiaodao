@@ -274,8 +274,11 @@ def test_capture_scope_and_order_come_from_all_resolved_anchors(tmp_path: Path) 
     )
 
 
-@pytest.mark.parametrize("audit_mode", ["no-success", "ambiguous-success"])
-def test_methods_preprocessing_requires_one_successful_server_audit(
+@pytest.mark.parametrize(
+    "audit_mode",
+    ["no-success", "ambiguous-success", "failed-then-success"],
+)
+def test_methods_preprocessing_requires_one_total_successful_server_operation(
     tmp_path: Path,
     audit_mode: str,
 ) -> None:
@@ -284,11 +287,15 @@ def test_methods_preprocessing_requires_one_successful_server_audit(
     value = json.loads(_audit(manifest, targets))
     if audit_mode == "no-success":
         value["operations"] = []
-    else:
+    elif audit_mode == "ambiguous-success":
         value["operations"].append(dict(value["operations"][0]))
+    else:
+        failed = dict(value["operations"][0])
+        failed["http_status"] = 503
+        value["operations"].insert(0, failed)
     broker_audit_bytes = canonical_json_bytes(value)
 
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="exactly one operation"):
         read_methods_preprocessing(
             workspace,
             job,

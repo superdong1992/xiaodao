@@ -1,7 +1,9 @@
 {
   "scenario_id": "multiple-rpc-timeouts",
   "problem_time": "2026-08-23T10:00:05.300000+08:00",
+  "client_slot": "1",
   "client_process": "rpc_client",
+  "server_slot": "1",
   "server_process": "rpc_server",
   "service": "svc_orders",
   "api": "Reserve",

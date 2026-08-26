@@ -1,19 +1,43 @@
 ---
 name: logparse-diagnose
-description: Use inside a Problem Locator DIAGNOSE Job when a selected diagnosis Skill needs target logs from a fixed Attachment or an already accepted LOGPARSE_RUN. This skill uses only the job-scoped problem-locator-logparse broker client and never invokes logparse directly.
+description: Use inside a Problem Locator DIAGNOSE Job as the broker-facing Helper for product-owned Server preprocessing or for a selected diagnosis Skill that needs target logs. This skill uses only the job-scoped problem-locator-logparse broker client and never invokes logparse directly.
 ---
 
 # Logparse Diagnose
 
-Act only as the broker-facing helper for the selected `diagnose-*` Skill. Do not
-route, diagnose the business cause, create a Candidate, or write
-`output/job_outcome.draft.json`. Return the broker's machine result to the calling Skill.
+Act only as the broker-facing Helper for the Problem Locator Runtime or the selected
+`diagnose-*` Skill. Do not route, diagnose the business cause, create a Candidate,
+or write `output/job_outcome.draft.json`. Return control without interpreting the
+broker's machine result.
+
+## Invocation modes
+
+Use `SERVER_PREPROCESS` mode only when the product-owned Runtime prompt explicitly
+declares that mode and supplies one exact operation, one prewritten request path,
+and one result path. In this mode:
+
+- do not load or execute another Skill, including the selected business diagnosis
+  Skill;
+- do not read or rewrite the prewritten request;
+- invoke the supplied `problem-locator-logparse` command exactly once, only after
+  this Helper has loaded successfully;
+- wait for that request and exit immediately on success or failure, with no retry,
+  direct-Logparse fallback, alternate broker command, or path substitution; and
+- do not read the broker result or target log bodies, diagnose, or write any
+  diagnosis/review output. The Runtime alone validates the result, freezes target
+  logs, and decides whether Pass B may start.
+
+When the prompt does not explicitly declare `SERVER_PREPROCESS`, use the delegated
+diagnosis mode described in the remaining lifecycle sections. Never infer Server
+mode from path names or environment values.
 
 ## Authority and inputs
 
-Use the current S00 contract and the S07 request contract. Read exactly the
-Runtime-produced, read-only `inputs/manifest.json`; do not scan `inputs/`, read a
-Repository, infer file names, or use an old Session.
+In delegated diagnosis mode, use the current S00 contract and the S07 request
+contract. Read exactly the Runtime-produced, read-only `inputs/manifest.json`; do
+not scan `inputs/`, read a Repository, infer file names, or use an old Session.
+In `SERVER_PREPROCESS` mode, use only the operation and paths supplied by the
+product-owned prompt; do not inspect the manifest or derive replacements.
 
 The manifest is authoritative for:
 
@@ -39,7 +63,11 @@ and `.tar -> application/x-tar`.
 Use only the installed `problem-locator-logparse` client. It speaks to the
 Runtime-created job-scoped broker through the current process environment. Do not
 print, persist, forward, or inspect the endpoint/token. Do not start `cli.py`,
-construct raw logparse argv, use a shell, or fall back to a direct CLI path.
+construct raw Logparse argv, or fall back to a direct Logparse CLI path. Invoke the
+supplied client command with exactly one Bash tool call. The Bash input must be the
+single unmodified command: do not use a shell wrapper such as `sh -c`, command
+chaining, pipes, redirection, substitutions, environment assignments, or an
+alternate executable.
 
 Allowed commands are exactly:
 
@@ -58,10 +86,12 @@ proposal key. No other flags or positional arguments are allowed.
 
 ## Request bytes
 
-Write each request as valid, unambiguous UTF-8 JSON. The installed
+In delegated diagnosis mode, write each request as valid, unambiguous UTF-8 JSON.
+In `SERVER_PREPROCESS` mode, the Runtime has already written the canonical request;
+do not read, edit, replace, or recreate it. In both modes, the installed
 `problem-locator-logparse` client validates the operation-specific model,
-recursively canonicalizes the same request file, and atomically replaces it
-before contacting the broker. Common request fields are
+recursively canonicalizes the same request file, and atomically replaces it before
+contacting the broker. Common request fields are
 `schema_version=1`, a single millisecond UTC RFC 3339 `problem_time`, and ordered
 `anchors[]`. Every anchor contains only `label,module,slot,process_name,pid`; pid
 may be null. `label`, `module`, `slot`, and `process_name` are always JSON strings;
@@ -78,6 +108,10 @@ bytes through the S00 session audit surface. The Agent does not create, edit, or
 delete anything in `runtime/tool-state/`.
 
 ## First parse
+
+This section applies only to delegated diagnosis mode. In `SERVER_PREPROCESS`, the
+product-owned prompt fixes whether the sole operation is `parse-targets` or
+`target-logs`; do not repeat the lifecycle decision.
 
 Call `parse-targets` only when all conditions hold:
 
@@ -127,6 +161,9 @@ must not call `parse-targets` again.
 
 ## Reuse an accepted LOGPARSE_RUN
 
+This section applies only to delegated diagnosis mode. In `SERVER_PREPROCESS`, use
+the sole operation already fixed by the product-owned prompt.
+
 If the manifest contains any `LOGPARSE_RUN`, `parse-targets` is forbidden even
 when the source Attachment is also present. Validate the manifest entry's kind,
 directory resource kind, content type, size/hash, source Attachment id/hash,
@@ -140,7 +177,10 @@ Attachment, StateDelta, and PREVIOUS_OUTCOME—not from conversation history.
 
 ## Result and path boundary
 
-The broker result is the only authority for target log selection. Each returned
+The broker result is the only authority for target log selection. In
+`SERVER_PREPROCESS`, do not read or interpret that result; the Runtime owns all
+validation and freezing after the broker process exits. In delegated diagnosis
+mode, each returned
 `log_path` must resolve within the current controlled output root. Give the
 calling Skill only safe relative POSIX locations and machine fields needed to
 form S00 Evidence locators. Do not use nearby logs, directory traversal,

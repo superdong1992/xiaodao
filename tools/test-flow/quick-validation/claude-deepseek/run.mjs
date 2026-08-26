@@ -9,6 +9,7 @@ import { canonicalJson, sha256Bytes, sha256File } from "../../lib/util.mjs";
 import {
   CLAUDE_DEEPSEEK_E2E_TOKEN_LIMIT,
   CLAUDE_DEEPSEEK_E2E_USD_LIMIT,
+  CLAUDE_DEEPSEEK_MODULE,
   CLAUDE_DEEPSEEK_STAGE_WALL_SECONDS,
   CLAUDE_DEEPSEEK_METHODS_CALLS,
   CLAUDE_DEEPSEEK_METHODS_TOKEN_LIMIT,
@@ -16,15 +17,16 @@ import {
   CLAUDE_DEEPSEEK_MODEL,
   CLAUDE_DEEPSEEK_NO_PROGRESS_SECONDS,
   CLAUDE_DEEPSEEK_SCENARIOS,
-  assertMethodsPackageUnchanged,
-  buildMethodsProducerIdentity,
+  assertRegistrationUnchanged,
+  buildRegistrationProducerIdentity,
   claudeDeepseekE2ECallCount,
-  methodsCachePath,
+  registrationCachePath,
   scenarioPaths,
+  treeDigest,
   validateClaudeDeepseekIdentity,
-  validateMethodsCache,
+  validateRegistrationCache,
 } from "./runtime/claude-deepseek-contract.mjs";
-import { runE2E } from "./runtime/claude-deepseek-e2e-runner.mjs";
+import { clientToolInputPolicyIdentity, runE2E } from "./runtime/claude-deepseek-e2e-runner.mjs";
 import { runMethodsBootstrap, verifyMethodsCacheOnly } from "./runtime/claude-deepseek-methods-runner.mjs";
 import {
   aggregateUsage,
@@ -49,7 +51,7 @@ const VALUE_ARGUMENTS = new Set(["goal", "client", "claude-entry", "claude-setti
 
 const REQUIRED_EVIDENCE = Object.freeze({
   [METHODS_GOAL]: ["quick-codex-luna-contracts.tap", "quick-claude-methods-contracts.tap", "claude-identity.json", "model-invocations.json", "model-usage.json", "methods-package.json", "scenario-evaluation-audit.json", "security-audit.json", "adapter-receipt.json"],
-  [E2E_GOAL]: ["quick-claude-e2e-contracts.tap", "scenario-input.json", "scenario-oracle.json", "methods-package.json", "claude-identity.json", "model-invocations.json", "model-usage.json", "client-events.jsonl", "mcp-tool-calls.json", "attachment.json", "server-events.ndjson", "final-case.json", "artifact-index.json", "http-boundary-audit.json", "security-audit.json", "adapter-receipt.json"],
+  [E2E_GOAL]: ["quick-claude-e2e-contracts.tap", "scenario-input.json", "scenario-oracle.json", "methods-package.json", "claude-identity.json", "model-invocations.json", "model-usage.json", "client-events.jsonl", "client-skill.json", "mcp-tool-calls.json", "attachment.json", "server-events.ndjson", "server-lifecycle.json", "server-sealed-diagnosis.json", "final-case.json", "artifact-index.json", "artifact-download.json", "specialized-runtime.json", "logparse-config.json", "http-boundary-audit.json", "security-audit.json", "adapter-receipt.json"],
 });
 
 class QuickValidationError extends Error {
@@ -123,23 +125,25 @@ export function buildPlan(options) {
   requiredFile(options.claudeSettings, "CLAUDE_DEEPSEEK_SETTINGS_MISSING", "audited Claude settings", blockers);
   requiredFile(options.pythonEntry, "CLAUDE_DEEPSEEK_PYTHON_MISSING", "validator/service Python", blockers);
   const caseRoot = path.join(REPO_ROOT, "tests", "cases", "release", "rpc-timeout-anonymized");
-  const metaSkillRoot = path.join(REPO_ROOT, ".agents", "skills", "wiki-to-diagnosis-skill");
+  const metaSkillRoot = path.join(REPO_ROOT, ".claude", "skills", "wiki-to-logparse-diagnosis-skill");
   const wiki = path.join(caseRoot, "input", "wiki.md");
-  const registrationTemplate = path.join(caseRoot, "registration", "rpc-timeout-methods-v1", "registration-template.json");
+  const sourceLogparseConfig = path.join(REPO_ROOT, "experiments", "rpc-skill-feasibility", "logparse-config.json");
+  const helperRoot = path.join(REPO_ROOT, ".claude", "skills", "logparse-diagnose");
+  const brokerEntry = path.join(path.dirname(options.pythonEntry), "problem-locator-logparse");
   let identity = null;
   let producer = null;
-  let cache = { status: "UNKNOWN", code: null, path: null, package_tree_sha256: null };
+  let cache = { status: "UNKNOWN", code: null, path: null, registration_tree_sha256: null, runtime_ref: null };
   if (blockers.length === 0) {
     try {
       identity = validateClaudeDeepseekIdentity(options.claudeEntry, options.claudeSettings);
-      producer = buildMethodsProducerIdentity({ wiki, metaSkillRoot, registrationTemplate, claudeIdentity: identity });
-      const cachePath = methodsCachePath(options.cacheRoot, producer.producer_identity);
+      producer = buildRegistrationProducerIdentity({ wiki, metaSkillRoot, claudeIdentity: identity, module: CLAUDE_DEEPSEEK_MODULE });
+      const cachePath = registrationCachePath(options.cacheRoot, producer.producer_identity);
       try {
-        const receipt = validateMethodsCache({ cacheRoot: options.cacheRoot, producer, registrationTemplate });
-        assertMethodsPackageUnchanged(receipt);
-        cache = { status: "PRESENT", code: null, path: cachePath, package_tree_sha256: receipt.manifest.package.tree_sha256 };
+        const receipt = validateRegistrationCache({ cacheRoot: options.cacheRoot, producer });
+        assertRegistrationUnchanged(receipt);
+        cache = { status: "PRESENT", code: null, path: cachePath, registration_tree_sha256: receipt.manifest.registration.tree_sha256, runtime_ref: receipt.manifest.registration.runtime_ref };
       } catch (error) {
-        cache = { status: fs.existsSync(cachePath) ? "INVALID" : "MISSING", code: error?.code ?? "CLAUDE_DEEPSEEK_CACHE_INVALID", path: cachePath, package_tree_sha256: null };
+        cache = { status: fs.existsSync(cachePath) ? "INVALID" : "MISSING", code: error?.code ?? "CLAUDE_DEEPSEEK_CACHE_INVALID", path: cachePath, registration_tree_sha256: null, runtime_ref: null };
       }
     } catch (error) { blockers.push({ code: error?.code ?? "CLAUDE_DEEPSEEK_IDENTITY_INVALID", detail: error?.message ?? "Claude identity is invalid" }); }
   }
@@ -148,13 +152,27 @@ export function buildPlan(options) {
     : [];
   if (options.goal === E2E_GOAL) {
     requiredDirectory(options.logparseRoot, "CLAUDE_DEEPSEEK_LOGPARSE_MISSING", "Logparse source", blockers);
+    requiredFile(sourceLogparseConfig, "CLAUDE_DEEPSEEK_LOGPARSE_CONFIG_MISSING", "repository Logparse config", blockers);
+    requiredDirectory(helperRoot, "CLAUDE_DEEPSEEK_HELPER_MISSING", "Server logparse-diagnose Helper", blockers);
+    requiredFile(brokerEntry, "CLAUDE_DEEPSEEK_BROKER_ENTRY_MISSING", "job-scoped problem-locator-logparse entry", blockers);
     for (const scenario of scenarios) {
       try { scenarioPaths(REPO_ROOT, scenario); } catch (error) { blockers.push({ code: error?.code ?? "CLAUDE_DEEPSEEK_SCENARIO_INVALID", detail: error?.message ?? `Scenario is invalid: ${scenario}` }); }
     }
-    if (cache.status !== "PRESENT") blockers.push({ code: "CLAUDE_DEEPSEEK_METHODS_CACHE_REQUIRED", detail: `E2E requires the exact Methods cache (${cache.code ?? cache.status})` });
+    if (cache.status !== "PRESENT") blockers.push({ code: "CLAUDE_DEEPSEEK_REGISTRATION_CACHE_REQUIRED", detail: `E2E requires the exact generated registration cache (${cache.code ?? cache.status})` });
   }
-  if (options.goal === METHODS_GOAL && cache.status === "INVALID") blockers.push({ code: "CLAUDE_DEEPSEEK_METHODS_CACHE_INVALID", detail: `Exact producer path exists but is invalid (${cache.code})` });
-  const mode = options.goal === METHODS_GOAL ? (cache.status === "PRESENT" ? "cache-verification" : "bootstrap") : options.allScenarios ? "e2e-suite" : "e2e";
+  const helperIdentity = options.goal === E2E_GOAL && fs.existsSync(helperRoot) ? { name: "logparse-diagnose", tree_sha256: treeDigest(helperRoot, { directoryMode: 0o700 }) } : null;
+  const providerRuntimeIdentity = { tree_sha256: treeDigest(path.join(SCRIPT_ROOT, "runtime"), { directoryMode: 0o700 }) };
+  let logparseConfig = null;
+  if (options.goal === E2E_GOAL && fs.existsSync(sourceLogparseConfig)) {
+    try {
+      const config = JSON.parse(fs.readFileSync(sourceLogparseConfig, "utf8"));
+      const product = config.products?.["rpc-skill-feasibility"];
+      if (config.schema_version !== 2 || product === null || typeof product !== "object" || Array.isArray(product)) throw new Error("invalid-config");
+      logparseConfig = { materialization_version: 1, source_sha256: sha256File(sourceLogparseConfig), product: "default", module: CLAUDE_DEEPSEEK_MODULE, product_bytes_sha256: sha256Bytes(canonicalJson(product)) };
+    } catch { blockers.push({ code: "CLAUDE_DEEPSEEK_LOGPARSE_CONFIG_INVALID", detail: "Repository Logparse config cannot materialize the default product" }); }
+  }
+  if (options.goal === METHODS_GOAL && cache.status === "INVALID") blockers.push({ code: "CLAUDE_DEEPSEEK_REGISTRATION_CACHE_INVALID", detail: `Exact producer path exists but is invalid (${cache.code})` });
+  const mode = options.goal === METHODS_GOAL ? (cache.status === "PRESENT" ? "cache-verification" : "generation") : options.allScenarios ? "e2e-suite" : "e2e";
   const expectedCalls = mode === "cache-verification" ? 0 : options.goal === METHODS_GOAL ? CLAUDE_DEEPSEEK_METHODS_CALLS : expectedSuiteCalls(scenarios, claudeDeepseekE2ECallCount);
   const core = {
     schema_version: 1, framework: FRAMEWORK_ID, framework_version: FRAMEWORK_VERSION, goal: options.goal, mode, scenario: options.goal === E2E_GOAL && !options.allScenarios ? options.scenario : null, scenarios,
@@ -164,7 +182,7 @@ export function buildPlan(options) {
       per_scenario: scenarios.map((scenario) => ({ scenario_id: scenario, expected_model_processes: claudeDeepseekE2ECallCount(scenario), token_cap: CLAUDE_DEEPSEEK_E2E_TOKEN_LIMIT, usd_cap: CLAUDE_DEEPSEEK_E2E_USD_LIMIT })),
       stage_wall_seconds: options.goal === E2E_GOAL ? CLAUDE_DEEPSEEK_STAGE_WALL_SECONDS * scenarios.length : CLAUDE_DEEPSEEK_STAGE_WALL_SECONDS, per_process_wall_seconds: options.goal === METHODS_GOAL ? 1800 : 600, no_progress_seconds: CLAUDE_DEEPSEEK_NO_PROGRESS_SECONDS, docker: false, browser: false, restart: false,
     },
-    inputs: { repository_root: REPO_ROOT, scratch_root: options.scratchRoot, client: options.client, claude: identity, producer, methods_cache: cache, python_entry: options.pythonEntry, logparse_root: options.goal === E2E_GOAL ? options.logparseRoot : null, retry_context: options.retryContext },
+    inputs: { repository_root: REPO_ROOT, scratch_root: options.scratchRoot, provider_runtime: providerRuntimeIdentity, client: options.client, client_prompt: options.goal === E2E_GOAL ? clientToolInputPolicyIdentity() : null, claude: identity, producer, registration_cache: cache, helper: helperIdentity, module: CLAUDE_DEEPSEEK_MODULE, python_entry: options.pythonEntry, broker_entry: options.goal === E2E_GOAL && fs.existsSync(brokerEntry) ? { path: brokerEntry, sha256: sha256File(brokerEntry) } : null, logparse_root: options.goal === E2E_GOAL ? options.logparseRoot : null, logparse_config: logparseConfig, retry_context: options.retryContext },
     contracts: options.goal === METHODS_GOAL ? ["quick.codex-luna.contracts", "quick.claude-deepseek.methods.contracts"] : ["quick.claude-deepseek.e2e.contracts"],
     evidence: REQUIRED_EVIDENCE[options.goal],
     admission: { status: blockers.length === 0 ? "READY" : "BLOCKED", blockers },
@@ -303,7 +321,7 @@ async function executeOne(options, plan, {
       const caseRoot = path.join(REPO_ROOT, "tests", "cases", "release", "rpc-timeout-anonymized");
       const common = { runId: id, sourceRoot: REPO_ROOT, claudeEntry: options.claudeEntry, claudeSettings: options.claudeSettings, pythonEntry: options.pythonEntry, cacheRoot: options.cacheRoot, workRoot, privateRoot, evidenceRoot, usageRoot };
       if (plan.goal === METHODS_GOAL) {
-        const methodOptions = { ...common, metaSkillRoot: path.join(REPO_ROOT, ".agents", "skills", "wiki-to-diagnosis-skill"), wiki: path.join(caseRoot, "input", "wiki.md"), oracle: path.join(caseRoot, "oracle.json"), registrationTemplate: path.join(caseRoot, "registration", "rpc-timeout-methods-v1", "registration-template.json") };
+        const methodOptions = { ...common, metaSkillRoot: path.join(REPO_ROOT, ".claude", "skills", "wiki-to-logparse-diagnosis-skill"), wiki: path.join(caseRoot, "input", "wiki.md"), oracle: path.join(caseRoot, "oracle.json"), module: CLAUDE_DEEPSEEK_MODULE };
         if (plan.mode === "cache-verification") verifyMethodsCacheOnly(methodOptions); else await runMethodsBootstrap(methodOptions);
       } else await runE2E({ ...common, logparseRoot: options.logparseRoot, scenario: options.scenario });
     } catch (error) { failure = safeFailure(error); }

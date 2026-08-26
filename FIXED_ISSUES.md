@@ -1356,8 +1356,7 @@
 
 ## PL-FIX-039：WSL Fast E2E 错误委托中央 Goal，九场景缺少独立容器闭包
 
-- **状态**：代码修复完成；最终权威验证仍在进行，是否验证通过只以本条“最新 Test Flow verdict”
-  为准，当前不得宣称已验证通过。
+- **状态**：已修复；是否验证通过以本条“最新 Test Flow verdict”为准。
 - **症状**：Linux 开发期 Fast E2E 被接入中央 macOS Quick Goal，九场景曾在单一 provider 流程中
   串行执行；后段暴露工程兼容问题后只能从第一例重新开始。改回 standalone 并发容器后，又依次
   暴露 utility tmpfs 缺少 `/private/tmp`、root 子证据无法由宿主用户归集、Codex curl 参数漂移、
@@ -1505,3 +1504,175 @@
   `unrelated-log-noise` 全部 PASS。该 standalone verdict 只证明 Codex Linux 开发期 Fast E2E；Claude
   未在本轮最终字节上重跑，中央 `dev.default` 与 Release 也按用户明确指示未执行，不能据此外推为中央
   Test Flow、Release 或源码快照证明。本 verdict 引用元数据段不宣称被其所引用的测试字节覆盖。
+
+## PL-FIX-040：局域网 Logparse 元 Skill 生成物无法注册，Fast E2E 绕过真实 MCP 与 Server
+
+- **状态**：已修复；是否验证通过以本条“最新 Test Flow verdict”为准。
+- **症状**：`d13675d` 新增的元 Skill 只生成可在 Claude Code 本地直跑的 `SKILL.md`、
+  `logparse.json` 和打包脚本，没有 Server 必需的 `registration-template.json`；因此产物不能放入 Linux
+  Server `SKILL_DIR`，也无法参与 ROUTE。配套 Fast E2E 另建 provider，用仓库内 broker 合同桩直接跑
+  生成物，并由生成物自行调用 Helper、broker 和 ZIP 打包器；它没有复现用户实际的
+  `problem-locator-client -> HTTP MCP -> ROUTE -> LOGPARSE -> DIAGNOSE -> REVIEW -> result.zip`
+  链路，所以错误地把不可部署的产物判为可用。
+- **受影响版本**：提交 `d13675d49c6b8e86a9ddb6f5eb209ca1c45090b8`（`feat: add LAN logparse
+  diagnosis meta skill`）。
+- **根因**：把“局域网 Claude Code 直用”误解成客户端本地执行定位 Skill，混淆了客户端 Skill、
+  Server registration、Methods package 和 Server 预处理 Helper 四层职责；测试又复制出一套
+  `claude-deepseek-lan-skill` provider，以本地 broker 桩和自定义 ZIP 代替真实服务端链路，没有复用
+  已有 `claude-deepseek` 用户旅程。首次重构后，独立审查又确认三个会污染真实结论的缺口：Claude
+  E2E 服务端没有把当前 `sourceRoot` 注入 Python，中央 planner 对 `insufficient-evidence` 仍固定声明
+  5 次调用，客户端审计也没有证明 `problem-locator-client` 确实加载；定向测试当时仍会假通过。
+- **不可回归行为**：元 Skill 必须生成完整 PRODUCTION registration 根目录；
+  `registration-template.json` 与 `package/diagnose-*` 必须能被当前 Server loader 原样装载。
+  `client_slot`、`client_process_name`、`server_slot`、`server_process_name` 必须是动态且必填的 USER_FACT；
+  client/server 共用生成时确认的固定 module，PID 只允许作为可选 USER_FACT，内部
+  `logparse_product` 固定为 `default`。业务 Skill 不得调用 `logparse-diagnose`、broker、Logparse CLI
+  或自行打包 ZIP。Server LOGPARSE Pass A 必须先且只加载一次现装 `logparse-diagnose`，随后只执行一次
+  job-scoped broker 命令；Helper 加载失败、broker 失败或重试都必须停止。Fast E2E 只能复用现有
+  `claude-deepseek` provider：同一客户端只装 `problem-locator-client`，经 HTTP MCP 触发精确 ROUTE，
+  最后按服务端 descriptor 下载并独立校验 `result.zip`；不得再增加本地直跑 provider、broker 桩或
+  客户端自制 ZIP。
+- **修复历史**：2026-08-27，删除 `claude-deepseek-lan-skill` provider、仓库内 broker 桩和元 Skill
+  固定 packer；把元 Skill 改为生成完整 registration 与 Methods package，并让 validator 同时核对
+  Server loader 限额、路径、角色、固定 module、`default` product、方法卡和禁止越权调用。Server
+  增加闭合的 Helper-first Pass A，且把 broker 审计收紧为总操作数恰好一次并成功。现有
+  `claude-deepseek` generation cache 改为缓存模型生成的完整 registration 根；E2E 由客户端经 HTTP
+  MCP 跑完整五阶段，在 LOGPARSE 模型轨迹中核验 Helper -> 唯一 broker 顺序，并由客户端下载、runner
+  复核 Server v3 ZIP。独立审查后又把 `TEST_FLOW_SOURCE_ROOT` 精确绑定到本次只读源码根，中央计划与
+  invocation ledger 改为按场景核对阶段、顺序和数量，并新增客户端 Skill 双账本审计：首个且唯一
+  成功加载的 Skill 必须是 `problem-locator-client`；缺失、重复、其他 Skill 或加载失败一律拒绝。首次
+  WSL 真实 E2E `claude-deepseek-20260826T180040Z-ba507a95` 在零模型合同 Gate 封存为 FAIL：三个新增
+  Node 用例把临时目录建在只读源码根，触发 `EROFS`，`actual` 和 usage 均为空。确认首错后把这三个
+  用例统一改用 `os.tmpdir()`；该失败没有触发模型调用，也没有以原字节盲重试。修复后真实 E2E
+  `claude-deepseek-20260826T180325Z-e1468e95` 的五个模型进程和客户端下载均完成，但 runner 以
+  `CLAUDE_DEEPSEEK_SELECTED_SKILL_MISMATCH` 拒绝：cache 派生 ref 为 `19f60e…`，Server 实际 ref 为
+  `b92d13…`。根因是 JS 用 `localeCompare` 排 package 路径，把 `SKILL.md` 排在小写文件之后，而
+  Server 的冻结 Python 合同按 Unicode code point 排序。修复后改用显式 code-point 顺序，并把
+  generation contract 提升到 v3，使错误 cache 保持不可变并以新 producer identity 自然失效；没有
+  放宽 exact ref 审计。随后新身份 generation `claude-deepseek-20260826T181538Z-06fbd352` 的模型调用
+  正常结束，但 canonical validator 拒绝了 6 个缩短 marker。根据封存轨迹重建产物后确认，模型把
+  `API_COMPLETE`、`LATE_RESPONSE` 等事件名当成 marker，漏掉了 Wiki 模板中的稳定字面前缀。修复后
+  runner 从 source identity 的模板机械计算并在 prompt 中公开完整 canonical marker allowlist，不公开
+  隐藏 oracle 的方法分配；generation prompt 提升到 v3。元 Skill 同时新增明确反例，防止局域网直接
+  生成时再次把事件名缩写当作 marker。prompt v3 generation 通过后，真实 E2E
+  `claude-deepseek-20260826T183743Z-3fec2607` 已确认新 ref `e433b2…` 与 Server 完全一致，但 Client
+  Host 意外生成了一次空 `get_case`；测试专用 system prompt 又要求不可恢复地停止，与现装
+  `problem-locator-client` 允许一次紧邻零副作用语法纠正的合同冲突。修复后 client prompt v2 仍禁止
+  主动空调用，只允许同一模型进程在 Server 返回 `VALIDATION_ERROR` 后立刻用当前 Case、原生 null 或
+  真实 Job UUID、`wait_seconds=30` 完整纠正一次；中间插入工具、第二次空调用或纠正失败仍拒绝。
+  该分支不使用 Hook、不改写 MCP 参数、不修改服务端 schema，并把 prompt 版本、SHA-256 和字节数
+  加入 standalone plan identity。client prompt v2 的真实 E2E
+  `claude-deepseek-20260826T184641Z-3f332462` 随后完成五个阶段，但旧生命周期审计把真实附件旅程中的
+  两个 DIAGNOSE Job 误判为异常：第一个是缺附件时的零模型 preflight，第二个才是补件后的实际诊断；
+  审计还固定从第一个 Job 读取 broker audit。修复后精确要求一个 preflight 和一个实际 DIAGNOSE，
+  两者都必须保持 `SPECIALIZED` 与 exact ref，并用最终 `server.outcome.job_id` 选择实际诊断 Job；多余
+  或缺失 Job 仍拒绝。standalone plan 也新增完整 provider runtime tree SHA-256，确保审计代码变化会
+  形成新的可核验运行身份，而不是只靠 retry 说明区分。随后
+  `claude-deepseek-20260826T185756Z-5cd7d2ce` 的 Client Host 连续生成两次空 `get_case`，有界纠正审计
+  正确拒绝。轨迹同时暴露共享 client prompt 要求已知 Job ID 时传 UUID，而现装 Skill 要求普通轮询
+  始终传 null。client prompt v3 移除这项选择：本场景 `wait_for_job_id` 固定为原生 null，等待时用 30，
+  仅两次 revision refresh 用 0；空调用纠正也只接受 null 和 0/30。provider-specific prompt 会机械确认
+  已替换共享冲突句，未替换时直接阻断。最终 standalone E2E
+  `claude-deepseek-20260826T190333Z-5fd045f7` 为 PASS：5/5 个模型进程、`retry_count=0`，总计
+  1,002,709 tokens、USD 1.769453。CLIENT 首工具唯一加载 `problem-locator-client`；ROUTE 为
+  `MATCHED`；一个附件 preflight 与一个实际 DIAGNOSE 都保持 `SPECIALIZED` 和 ref `e433b2…`；
+  LOGPARSE 恰好先加载一次 Helper、再调用一次 broker，无 fallback/retry；双端 anchor 为 module
+  `rpc`、slot `1`、进程 `rpc_client/rpc_server`。客户端下载的 Server v3 `result.zip` 为 3747 字节、
+  SHA-256 `7a524e…c3cd`，包含 `result.txt`、`archive-manifest.json` 和两份实际使用日志；安全审计 PASS，
+  没有凭据落盘。该 standalone verdict 只证明本次 Fast E2E，不替代中央 Test Flow 或 Release。首次
+  中央 Dev `run-20260826T192433Z-676b81f2` 随后在同一源码快照上封存为 FAIL：framework、repository、
+  affected、contracts、unit 和 integration 均 PASS，只有 SameJob 的两条真实 Methods 旅程在 Pass A
+  报 `BACKEND_EXIT_FAILED`。失败证据确认生产 Runtime 已输出新的 `SERVER_PREPROCESS` 首行，但
+  `tests/fixtures/rpc_timeout/fake_agent.py` 仍只识别旧首行，误把预处理 prompt 当成普通 DIAGNOSE，读取
+  不存在的 `JOB_INSTRUCTION` 后异常退出。修复只更新确定性测试桩的 Pass A 分流，并在桩内锁定
+  `Skill(logparse-diagnose)` 恰好一次、broker 命令恰好一次且 Helper 必须在前；没有放宽生产合同。
+  容器挂载修正后的中央 Dev `run-20260826T194315Z-e94108c9` 已让 framework 与 repository 全部 PASS，
+  随后在 `det.affected` 以 1014 项中的唯一失败封存：受控 fixture manifest 仍记录修改前
+  `fake_agent.py` 的 size/SHA-256。同步更新该 canonical 完整性条目后再以新源码身份验证，不绕过
+  fixture 自校验。
+- **专项回归测试**：
+  - `tests/deterministic/unit/integrations/test_lan_logparse_meta_skill.py` 中
+    `test_valid_production_registration_passes`、`test_valid_production_registration_loads_in_server`、
+    缺少 slot、固定或重映射 anchor、module 漂移、非 `default` product、越权 Server 工作和路径越界的
+    正反例。
+  - `tests/deterministic/unit/runtime/test_diagnosis_runtime.py` 中
+    `test_methods_preprocess_prompt_declares_helper_before_one_broker_request`、
+    `test_methods_helper_load_failure_never_reaches_broker_or_pass_b`、
+    `test_methods_preprocessing_rejects_failed_operation_before_success` 和
+    `test_default_product_survives_compiler_and_workspace_manifest`。
+  - `tests/deterministic/unit/integrations/test_logparse_diagnose_skill.py` 与
+    `tests/deterministic/unit/runtime/test_output_reader_result_v2.py::test_methods_preprocessing_requires_one_total_successful_server_operation`。
+  - Claude/DeepSeek `claude-deepseek-contract.test.mjs`、`claude-deepseek-methods-runner.test.mjs`、
+    `claude-deepseek-service-wrapper.test.mjs`、`claude-deepseek-e2e-runner.test.mjs` 和
+    `claude-deepseek-bash-policy.test.mjs` 中完整 registration cache、动态 slot、精确 ROUTE、
+    Helper-first 唯一 broker、当前源码根、客户端 Skill 双账本、HTTP MCP、descriptor 下载与 Server v3
+    ZIP 校验用例。
+  - `tools/test-flow/tests/config-planner.test.mjs` 中 `insufficient-evidence` 的四阶段中央计划用例，以及
+    `tools/test-flow/tests/actions.test.mjs` 中按计划逐序核验 Claude E2E invocation ledger 的正反例。
+  - WSL 密封容器的 `quick-claude-e2e-contracts.tap` 直接在只读仓库挂载下执行上述测试，防止测试临时
+    文件再次写入源码树。
+  - `tests/deterministic/journey/test_rpc_timeout.py` 的两条 SameJob 旅程，以及其
+    `tests/fixtures/rpc_timeout/fake_agent.py` Pass A 合同断言，直接覆盖新 Helper-first 首行、唯一调用和
+    Helper-before-broker 顺序。
+  - `claude-deepseek-contract.test.mjs` 中
+    `registration runtime ref uses the Server code-point order for package paths`，直接用包含大写
+    `SKILL.md` 与小写文件的 package 复现旧排序差异。
+  - `claude-deepseek-methods-runner.test.mjs` 中 canonical marker 机械提取、prompt allowlist 与缩短事件名
+    反例；`test_lan_logparse_meta_skill.py::test_validator_rejects_shortened_event_name_marker` 直接复现
+    `API_COMPLETE` 被旧生成模型误写为 marker 的问题。
+  - `claude-deepseek-e2e-runner.test.mjs` 中空 `get_case` 只允许一次紧邻、完整、30 秒纠正的正反例，
+    client prompt identity，以及“附件 preflight + 实际 DIAGNOSE”双 Job 的正反例；
+    `framework.test.mjs` 核验该 identity 进入 standalone plan。
+- **最新 Test Flow verdict**：最终 Dev `run-20260826T200500Z-f663eeb6` 为
+  `PASS_WITH_WARNINGS`；functional、operation、verification 均为 `PASS`，performance 为
+  `NOT_CALIBRATED`；验证源码快照
+  `git-visible-worktree-v1:4ae9db980116027e6613e7190d61f4b75c3eff00e05a8d3694acf2a97e0db412`
+  （678 files）。当前快照下 affected 1013 passed/1 skipped、contracts 569/569、unit 1786
+  passed/1 skipped、integration 45/45、SameJob 4/4；framework 与 repository Stage 复用前一份
+  PASS receipt 并完成当前重审。standalone generation
+  `claude-deepseek-20260826T183253Z-3e225612` 和完整 MCP E2E
+  `claude-deepseek-20260826T190333Z-5fd045f7` 均为 PASS、`retry_count=0`，只分别证明本次真实模型
+  生成和 Fast E2E；本轮未运行 Release，不能外推为 Release 结论。本 verdict 引用元数据段不宣称
+  被其所引用的源码快照覆盖。
+
+## PL-FIX-041：去掉 Wiki 日志围栏的 text 标签后模板被静默丢失
+
+- **状态**：已修复；是否验证通过以本条“最新 Test Flow verdict”为准。
+- **症状**：同一 RPC 超时 Wiki 把日志块从带 `text` 标签的代码围栏改成无语言标签的代码围栏后，
+  生成器的来源身份只
+  收录带 `text` 标签的围栏，裸围栏中的日志模板被静默遗漏。共享症状模板因此可能不进入
+  `source-log-templates.md`，生成模型再把方法卡中的非围栏判定线索误当成“通用模式”或无法区分原因。
+- **受影响版本**：提交 `d13675d49c6b8e86a9ddb6f5eb209ca1c45090b8` 中的
+  `wiki-to-logparse-diagnosis-skill` 来源身份与 validator。
+- **根因**：日志模板提取器把 Markdown 语法着色标签当成业务语义，只识别带 `text` 标签的围栏，
+  没有把裸围栏
+  视为等价的纯文本日志块；元 Skill、validator 和 Fast E2E producer identity 又共同沿用了这条错误
+  规则，使缺失模板在缓存身份内看似自洽。
+- **不可回归行为**：source identity v2 必须同时提取 `text` 围栏和无语言标签围栏中带日志占位符的
+  完整非空行，并忽略明确标为其他语言的围栏；提取规则必须由元 Skill、validator、generation cache
+  identity 和语义 oracle 共用。所有来源模板必须完整写入固定的 `references/source-log-templates.md`；
+  每张方法卡只拥有自己的判定 marker，公共症状不得被复制成每种原因都“独有”的 marker，也不得因
+  修改围栏标签而静默消失。
+- **修复历史**：2026-08-27，将来源身份升级为 v2，并统一元 Skill、validator 与 Fast E2E 的围栏
+  处理和摘要绑定；同时把方法 marker oracle 收紧为精确一一对应，避免三张方法卡都复制同一组共享
+  症状仍被误判为通过。最终 prompt v3 generation
+  `claude-deepseek-20260826T183253Z-3e225612` 为 PASS：1/1 个模型进程、`retry_count=0`，validator
+  `errors=[]`，共保留 6 条模板、3 个方法和 6 个 canonical marker；其不可变 cache producer identity
+  为 `37fe5e…dc45`，随后被上述真实 E2E 精确消费。
+- **专项回归测试**：
+  - `tests/deterministic/unit/integrations/test_lan_logparse_meta_skill.py::test_source_identity_v2_extracts_text_and_bare_fences`
+  - 同文件 `test_validator_rejects_lost_bare_fence_template`、
+    `test_validator_rejects_stale_source_identity_extraction_version` 和
+    `test_marker_starting_with_placeholder_ignores_trailing_suffix`
+  - `tools/test-flow/quick-validation/claude-deepseek/tests/claude-deepseek-methods-runner.test.mjs` 中
+    `source identity v2 extracts text and bare fences while ignoring other language fences` 与严格方法 marker
+    集合 oracle 用例。
+- **最新 Test Flow verdict**：最终 Dev `run-20260826T200500Z-f663eeb6` 为
+  `PASS_WITH_WARNINGS`；functional、operation、verification 均为 `PASS`，performance 为
+  `NOT_CALIBRATED`；验证源码快照
+  `git-visible-worktree-v1:4ae9db980116027e6613e7190d61f4b75c3eff00e05a8d3694acf2a97e0db412`
+  （678 files）。affected 1013 passed/1 skipped、contracts 569/569、unit 1786 passed/1 skipped、
+  integration 45/45、SameJob 4/4。真实 generation
+  `claude-deepseek-20260826T183253Z-3e225612` 同为 PASS、`retry_count=0`，保留 6 条来源模板、3 张
+  方法卡和 6 个 canonical marker；该 standalone verdict 不替代中央验证，也不外推为 Release。
+  本 verdict 引用元数据段不宣称被其所引用的源码快照覆盖。

@@ -8,6 +8,7 @@ import re
 import stat
 import sys
 from pathlib import Path, PurePosixPath
+from typing import Any
 
 
 NAME_PATTERN = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*\Z")
@@ -22,8 +23,35 @@ METHOD_HEADINGS = (
     "## 未知边界",
     "## 输出含义",
 )
-ROOT_FILES = {"SKILL.md", "methods.json", "logparse.json", "references", "scripts"}
-SCRIPT_FILES = {"pack_result_zip.py"}
+REGISTRATION_ROOT_ENTRIES = {"registration-template.json", "package"}
+PACKAGE_ROOT_ENTRIES = {"SKILL.md", "methods.json", "references"}
+REGISTRATION_KEYS = {
+    "schema_version",
+    "registration_id",
+    "version",
+    "capability",
+    "deployment_scope",
+    "summary",
+    "package",
+    "runtime",
+}
+PACKAGE_BINDING_KEYS = {"relative_path", "skill_name", "source_wiki_sha256"}
+RUNTIME_KEYS = {"diagnose", "review", "preprocessing"}
+RUNTIME_BINDING_KEYS = {
+    "agent_profile_id",
+    "tool_bundle_id",
+    "context_policy_id",
+    "output_contract_id",
+}
+PREPROCESSING_KEYS = {
+    "requires_logparse",
+    "logparse_product",
+    "roles",
+    "logparse_plan",
+}
+ROLE_KEYS = {"label", "description", "presence", "source_reference"}
+PLAN_KEYS = {"attachment_requirement", "problem_time_binding", "anchors"}
+ANCHOR_KEYS = {"label", "module", "slot", "process_name", "pid"}
 METHODS_ROOT_KEYS = {
     "schema_version",
     "skill_name",
@@ -35,20 +63,14 @@ METHODS_ROOT_KEYS = {
     "methods",
 }
 METHOD_KEYS = {"id", "title", "reference", "priority", "evidence_markers"}
-LOGPARSE_ROOT_KEYS = {
+SOURCE_IDENTITY_KEYS = {
+    "algorithm",
+    "log_template_extraction_version",
+    "log_template_inventory_sha256",
+    "log_templates",
     "schema_version",
-    "helper_skill",
-    "module",
-    "problem_time_input",
-    "artifact_input",
-    "roles",
-}
-ROLE_KEYS = {
-    "label",
-    "required",
-    "slot_input",
-    "process_name_input",
-    "pid_input",
+    "sha256",
+    "source_path",
 }
 REQUIRED_INPUT_PREFIX = [
     "problem_time",
@@ -56,6 +78,8 @@ REQUIRED_INPUT_PREFIX = [
     "client_process_name",
     "server_slot",
     "server_process_name",
+    "client_pid",
+    "server_pid",
 ]
 FORBIDDEN_INPUT_ALIASES = {
     "api_name",
@@ -64,83 +88,153 @@ FORBIDDEN_INPUT_ALIASES = {
     "service_name",
     "slot",
 }
-EXPECTED_ROLES = [
-    {
-        "label": "client",
-        "required": True,
-        "slot_input": "client_slot",
-        "process_name_input": "client_process_name",
-        "pid_input": "client_pid",
-    },
-    {
-        "label": "server",
-        "required": True,
-        "slot_input": "server_slot",
-        "process_name_input": "server_process_name",
-        "pid_input": "server_pid",
-    },
-]
+DIAGNOSE_BINDING = {
+    "agent_profile_id": "agent-profile/specialist",
+    "tool_bundle_id": "tool-bundle/diagnose",
+    "context_policy_id": "context-policy/diagnose",
+    "output_contract_id": "output-contract/diagnose",
+}
+REVIEW_BINDING = {
+    "agent_profile_id": "agent-profile/reviewer",
+    "tool_bundle_id": "tool-bundle/review",
+    "context_policy_id": "context-policy/review",
+    "output_contract_id": "output-contract/review",
+}
 SOURCE_LOG_TEMPLATES_REFERENCE = "references/source-log-templates.md"
 SOURCE_IDENTITY_SCHEMA_VERSION = 2
-LOG_TEMPLATE_EXTRACTION_VERSION = 1
+LOG_TEMPLATE_EXTRACTION_VERSION = 2
+SERVER_BOUNDARY_SENTENCE = (
+    "Logparse 预处理、目标日志冻结、Review 和最终 Artifact 发布由 Server 完成；"
+    "诊断阶段不重新执行这些操作。"
+)
+OPTIONAL_PID_SENTENCE = (
+    "`client_pid` 和 `server_pid` 是可选事实；缺失时不请求补充，也不构成证据缺口。"
+)
 REQUIRED_SKILL_PHRASES = (
+    "request.json",
     "methods.json",
-    "logparse.json",
-    "required_user_inputs",
-    "required_artifacts",
-    "client_slot",
-    "client_process_name",
-    "server_slot",
-    "server_process_name",
-    "Skill(logparse-diagnose)",
+    "target_logs.json",
     "target_logs[*].log_path",
+    "Logparse",
     "identity_tokens",
-    "result.txt",
-    "result.zip",
-    "pack_result_zip.py",
-    "<label>__<module>__slot_<slot>__<process_name>[__pid_<pid>].log",
+    "sources",
 )
 REQUIRED_SKILL_SEMANTICS = (
     (
-        "exactly one Skill(logparse-diagnose) load",
+        "read only the frozen target log paths",
         re.compile(
-            r"(?:恰好|仅|只)(?:加载|调用)一次\s*`?Skill\(logparse-diagnose\)`?"
-            r"|(?:load|invoke)\s+`?Skill\(logparse-diagnose\)`?\s+exactly once"
-            r"|(?:load|invoke)\s+exactly once\s+`?Skill\(logparse-diagnose\)`?",
+            r"(?:只|仅)(?:读取|分析).*target_logs\[\*\]\.log_path"
+            r"|(?:read|analyze) only.*target_logs\[\*\]\.log_path",
+            re.IGNORECASE | re.DOTALL,
+        ),
+    ),
+    (
+        "scan all positive evidence markers before selecting method cards",
+        re.compile(
+            r"(?:先|before).*(?:全部|所有|all|every).*(?:正向|positive).*(?:marker|标记)",
+            re.IGNORECASE | re.DOTALL,
+        ),
+    ),
+    (
+        "avoid stopping after the first match",
+        re.compile(
+            r"(?:不能|不得|不要).*(?:第一|首个).*(?:停止|短路)"
+            r"|(?:do not|must not).*(?:first).*(?:stop|short-circuit)",
+            re.IGNORECASE | re.DOTALL,
+        ),
+    ),
+    (
+        "inspect all relevant calls",
+        re.compile(
+            r"(?:全部|所有|每个).*(?:相关调用|调用范围)"
+            r"|(?:all|every).*(?:relevant )?(?:calls?|requests?)",
+            re.IGNORECASE | re.DOTALL,
+        ),
+    ),
+    (
+        "report each independent event separately",
+        re.compile(
+            r"(?:每个原因|每种原因).*(?:每次|每个).*(?:独立事件).*(?:分别|单独)"
+            r"|(?:each).*(?:independent event).*(?:separately)",
+            re.IGNORECASE | re.DOTALL,
+        ),
+    ),
+)
+ACTION_PATTERN = (
+    r"(?:调用|加载|运行|执行|使用|启动|触发|"
+    r"(?<![A-Za-z])(?:load|invoke|call|run|execute|use|start|trigger|invocation|execution)"
+    r"(?![A-Za-z]))"
+)
+HELPER_TOKEN_PATTERN = r"(?<![A-Za-z0-9_])Helper(?![A-Za-z0-9_])"
+BROKER_TOKEN_PATTERN = r"(?<![A-Za-z0-9_])broker(?![A-Za-z0-9_])"
+PREPROCESS_PATTERN = r"(?:preprocess(?:ing)?|预处理)"
+FORBIDDEN_PACKAGE_PATTERNS = (
+    (
+        "logparse-diagnose",
+        re.compile(r"logparse-diagnose", re.IGNORECASE),
+    ),
+    (
+        "Skill( tool call",
+        re.compile(r"(?<![A-Za-z0-9_])Skill\s*\(", re.IGNORECASE),
+    ),
+    (
+        "Helper invocation",
+        re.compile(
+            ACTION_PATTERN
+            + r"[^\r\n]{0,24}"
+            + HELPER_TOKEN_PATTERN
+            + r"|"
+            + HELPER_TOKEN_PATTERN
+            + r"[^\r\n]{0,24}"
+            + ACTION_PATTERN,
             re.IGNORECASE,
         ),
     ),
-    ("flat result.zip delivery", re.compile(r"扁平|\bflat\b", re.IGNORECASE)),
-    ("actually used logs", re.compile(r"实际使用|所用日志|使用日志|\bused logs?\b", re.IGNORECASE)),
-    ("direct conclusion", re.compile(r"结论|\bconclusion\b", re.IGNORECASE)),
-    ("key evidence", re.compile(r"关键证据|\bkey evidence\b", re.IGNORECASE)),
-    ("evidence gaps", re.compile(r"证据缺口|\bevidence gaps?\b", re.IGNORECASE)),
-)
-FORBIDDEN_SKILL_PATTERNS = (
     (
-        "direct problem-locator-logparse command",
+        "broker preprocessing invocation",
         re.compile(
-            r"(?m)^[ \t]*(?:\$[ \t]*)?`?problem-locator-logparse(?:[ \t]|`|$)"
+            ACTION_PATTERN
+            + r"[^\r\n]{0,80}"
+            + BROKER_TOKEN_PATTERN
+            + r"[^\r\n]{0,80}"
+            + PREPROCESS_PATTERN
+            + r"|"
+            + ACTION_PATTERN
+            + r"[^\r\n]{0,80}"
+            + PREPROCESS_PATTERN
+            + r"[^\r\n]{0,80}"
+            + BROKER_TOKEN_PATTERN,
+            re.IGNORECASE,
         ),
     ),
-    (
-        "direct legacy cli.py command",
-        re.compile(
-            r"(?m)^[^\r\n]*\bcli\.py[ \t]+(?:parse|mech-target-logs)\b"
-        ),
-    ),
-    ("SKILL_FIXED binding", re.compile(r"\bSKILL_FIXED\b")),
+    ("problem-locator-logparse", re.compile(r"problem-locator-logparse", re.IGNORECASE)),
+    ("result.zip", re.compile(r"result\.zip", re.IGNORECASE)),
+    ("pack_result_zip", re.compile(r"pack_result_zip", re.IGNORECASE)),
+    ("logparse.json", re.compile(r"logparse\.json", re.IGNORECASE)),
+    ("cli.py", re.compile(r"cli\.py", re.IGNORECASE)),
 )
 
 
 def _ordinary(path: Path, label: str, errors: list[str]) -> bool:
     try:
         metadata = path.lstat()
-    except FileNotFoundError:
+    except OSError:
         errors.append(f"missing {label}: {path}")
         return False
     if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
         errors.append(f"{label} must be one ordinary file: {path}")
+        return False
+    return True
+
+
+def _real_directory(path: Path, label: str, errors: list[str]) -> bool:
+    try:
+        metadata = path.lstat()
+    except OSError:
+        errors.append(f"missing {label}: {path}")
+        return False
+    if not stat.S_ISDIR(metadata.st_mode) or path.is_symlink():
+        errors.append(f"{label} must be one real directory: {path}")
         return False
     return True
 
@@ -192,13 +286,29 @@ def _frontmatter(text: str, errors: list[str]) -> dict[str, str]:
     return values
 
 
-def _read_json(path: Path, errors: list[str]) -> object | None:
-    if not _ordinary(path, path.name, errors):
+def _read_json(path: Path, label: str, errors: list[str]) -> object | None:
+    if not _ordinary(path, label, errors):
         return None
+
+    def unique(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(f"duplicate field {key}")
+            result[key] = value
+        return result
+
+    def reject_constant(value: str) -> None:
+        raise ValueError(f"non-finite value {value}")
+
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        errors.append(f"invalid JSON in {path.name}: {exc}")
+        return json.loads(
+            path.read_text(encoding="utf-8"),
+            object_pairs_hook=unique,
+            parse_constant=reject_constant,
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        errors.append(f"invalid JSON in {label}: {exc}")
         return None
 
 
@@ -206,6 +316,8 @@ def _field_ids(value: object, label: str, errors: list[str]) -> list[str]:
     if not isinstance(value, list):
         errors.append(f"{label} must be an array")
         return []
+    if len(value) > 200:
+        errors.append(f"{label} must contain at most 200 identifiers")
     if any(not isinstance(item, str) or not FIELD_PATTERN.fullmatch(item) for item in value):
         errors.append(f"{label} must contain lowercase snake_case identifiers")
         return []
@@ -226,17 +338,22 @@ def _valid_module(value: object) -> bool:
 
 def _wiki_log_templates(text: str) -> list[str]:
     templates: list[str] = []
-    in_text_fence = False
+    in_fence = False
+    collect_fence = False
     for raw_line in text.splitlines():
         stripped = raw_line.strip()
-        if stripped == "```text":
-            in_text_fence = True
+        if in_fence:
+            if stripped == "```":
+                in_fence = False
+                collect_fence = False
+            elif collect_fence and stripped and LOG_PLACEHOLDER_PATTERN.search(stripped):
+                templates.append(stripped)
             continue
-        if stripped == "```" and in_text_fence:
-            in_text_fence = False
-            continue
-        if in_text_fence and stripped and LOG_PLACEHOLDER_PATTERN.search(stripped):
-            templates.append(stripped)
+        if stripped in {"```text", "```"}:
+            in_fence = True
+            collect_fence = True
+        elif stripped.startswith("```"):
+            in_fence = True
     return templates
 
 
@@ -286,16 +403,16 @@ def _wiki_named_log_fields(templates: list[str]) -> list[str]:
 
 
 def _canonical_evidence_marker(template: str) -> str | None:
-    match = LOG_PLACEHOLDER_PATTERN.search(template)
-    if match is None:
+    matches = list(LOG_PLACEHOLDER_PATTERN.finditer(template))
+    if not matches:
         return template.strip() or None
-    prefix = template[: match.start()].strip()
+    prefix = template[: matches[0].start()].strip()
     if prefix:
         return prefix
     literal_segments = [
-        segment.strip()
-        for segment in LOG_PLACEHOLDER_PATTERN.split(template)[::2]
-        if segment.strip()
+        template[left.end() : right.start()].strip()
+        for left, right in zip(matches, matches[1:])
+        if template[left.end() : right.start()].strip()
     ]
     if not literal_segments:
         return None
@@ -311,99 +428,437 @@ def _wiki_canonical_evidence_markers(templates: list[str]) -> list[str]:
     return markers
 
 
-def _validate_logparse(
+def _validate_source_identity(
+    path: Path | None,
+    *,
+    wiki_bytes: bytes,
+    wiki_templates: list[str],
+    errors: list[str],
+) -> None:
+    if path is None:
+        return
+    value = _read_json(path, "source identity", errors)
+    if not isinstance(value, dict):
+        if value is not None:
+            errors.append("source identity must contain one object")
+        return
+    if set(value) != SOURCE_IDENTITY_KEYS:
+        errors.append("source identity keys do not match schema v2")
+    if value.get("schema_version") != SOURCE_IDENTITY_SCHEMA_VERSION:
+        errors.append("source identity schema_version must be 2")
+    if value.get("algorithm") != "sha256":
+        errors.append("source identity algorithm must be sha256")
+    source_path = value.get("source_path")
+    if not isinstance(source_path, str) or not source_path or "\x00" in source_path:
+        errors.append("source identity source_path must be non-empty text")
+    if value.get("sha256") != hashlib.sha256(wiki_bytes).hexdigest():
+        errors.append("source identity sha256 does not match the supplied Wiki")
+    if value.get("log_template_extraction_version") != LOG_TEMPLATE_EXTRACTION_VERSION:
+        errors.append("source identity log_template_extraction_version must be 2")
+    if value.get("log_templates") != wiki_templates:
+        errors.append("source identity log_templates do not match extraction version 2")
+    if value.get("log_template_inventory_sha256") != _log_template_inventory_sha256(
+        wiki_templates
+    ):
+        errors.append("source identity log_template_inventory_sha256 does not match")
+
+
+def _validate_business_skill(
+    path: Path,
+    *,
+    expected_name: str | None,
+    errors: list[str],
+) -> dict[str, str]:
+    if not _ordinary(path, "business SKILL.md", errors):
+        return {}
+    try:
+        text = path.read_text(encoding="utf-8")
+    except UnicodeDecodeError as exc:
+        errors.append(f"business SKILL.md is not UTF-8: {exc}")
+        return {}
+    frontmatter = _frontmatter(text, errors)
+    if expected_name is not None and frontmatter.get("name") != expected_name:
+        errors.append("SKILL.md name must match the package directory")
+    for phrase in REQUIRED_SKILL_PHRASES:
+        if phrase not in text:
+            errors.append(f"SKILL.md must mention {phrase}")
+    for label, pattern in REQUIRED_SKILL_SEMANTICS:
+        if pattern.search(text) is None:
+            errors.append(f"SKILL.md must require {label}")
+    if SERVER_BOUNDARY_SENTENCE not in text:
+        errors.append("SKILL.md must contain the fixed Server-owned preprocessing boundary")
+    if OPTIONAL_PID_SENTENCE not in text:
+        errors.append("SKILL.md must contain the fixed optional PID boundary")
+    return frontmatter
+
+
+def _validate_package_tokens(package_root: Path, errors: list[str]) -> None:
+    for path in sorted(package_root.rglob("*")):
+        if path.suffix.lower() not in {".md", ".json"}:
+            continue
+        try:
+            metadata = path.lstat()
+        except OSError:
+            continue
+        if not stat.S_ISREG(metadata.st_mode):
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        relative = path.relative_to(package_root).as_posix()
+        for label, pattern in FORBIDDEN_PACKAGE_PATTERNS:
+            if pattern.search(text):
+                errors.append(
+                    f"business package text must not contain Server-owned token {label}: {relative}"
+                )
+
+
+def _validate_methods(
+    package_root: Path,
+    *,
+    wiki_sha256: str,
+    wiki_text: str,
+    wiki_templates: list[str],
+    expected_skill_name: str | None,
+    frontmatter: dict[str, str],
+    errors: list[str],
+) -> dict[str, object]:
+    manifest = _read_json(package_root / "methods.json", "methods.json", errors)
+    result: dict[str, object] = {
+        "skill_name": None,
+        "source_wiki_sha256": None,
+        "required_user_inputs": [],
+        "method_count": 0,
+        "marker_count": 0,
+    }
+    if not isinstance(manifest, dict):
+        if manifest is not None:
+            errors.append("methods.json must contain one object")
+        return result
+    if set(manifest) != METHODS_ROOT_KEYS:
+        errors.append("methods.json root keys do not match the Methods package contract")
+    if type(manifest.get("schema_version")) is not int or manifest.get("schema_version") != 1:
+        errors.append("methods.json schema_version must be 1")
+
+    skill_name = manifest.get("skill_name")
+    result["skill_name"] = skill_name
+    if not isinstance(skill_name, str) or not NAME_PATTERN.fullmatch(skill_name):
+        errors.append("methods.json skill_name is invalid")
+    else:
+        if not skill_name.startswith("diagnose-"):
+            errors.append("methods.json skill_name must start with diagnose-")
+        if expected_skill_name is not None and skill_name != expected_skill_name:
+            errors.append("methods.json skill_name must match the package directory")
+        if frontmatter.get("name") != skill_name:
+            errors.append("SKILL.md name must match methods.json skill_name")
+
+    source_sha = manifest.get("source_wiki_sha256")
+    result["source_wiki_sha256"] = source_sha
+    if not isinstance(source_sha, str) or not SHA256_PATTERN.fullmatch(source_sha):
+        errors.append("methods.json source_wiki_sha256 must be lowercase SHA-256")
+    elif source_sha != wiki_sha256:
+        errors.append("methods.json source_wiki_sha256 does not match the supplied Wiki")
+
+    required_user_inputs = _field_ids(
+        manifest.get("required_user_inputs"), "required_user_inputs", errors
+    )
+    result["required_user_inputs"] = required_user_inputs
+    if required_user_inputs[: len(REQUIRED_INPUT_PREFIX)] != REQUIRED_INPUT_PREFIX:
+        errors.append(
+            "required_user_inputs must start with the five mandatory anchor facts, then client_pid and server_pid"
+        )
+    aliases = sorted(FORBIDDEN_INPUT_ALIASES.intersection(required_user_inputs))
+    if aliases:
+        errors.append("required_user_inputs contains forbidden aliases: " + ", ".join(aliases))
+
+    required_artifacts = _field_ids(
+        manifest.get("required_artifacts"), "required_artifacts", errors
+    )
+    if required_artifacts != ["log_archive"]:
+        errors.append("required_artifacts must equal exactly [log_archive]")
+    log_derived_fields = _field_ids(
+        manifest.get("log_derived_fields"), "log_derived_fields", errors
+    )
+    expected_log_derived_fields = [
+        field
+        for field in _wiki_named_log_fields(wiki_templates)
+        if field not in required_user_inputs
+    ]
+    if log_derived_fields != expected_log_derived_fields:
+        errors.append(
+            "log_derived_fields must be the named Wiki log fields in first-appearance order, excluding required_user_inputs"
+        )
+    declared_fields = required_user_inputs + required_artifacts + log_derived_fields
+    if len(declared_fields) != len(set(declared_fields)):
+        errors.append("input, artifact and log-derived identifiers must be disjoint")
+
+    shared_raw = manifest.get("shared_references")
+    shared: list[str] = []
+    if not isinstance(shared_raw, list):
+        errors.append("shared_references must be an array")
+    else:
+        for item in shared_raw:
+            reference = _safe_reference(item)
+            if reference is None:
+                errors.append("shared_references must contain safe references/*.md paths")
+            else:
+                shared.append(reference)
+        if len(shared) != len(set(shared)):
+            errors.append("shared_references must be unique")
+    if not shared or shared[0] != SOURCE_LOG_TEMPLATES_REFERENCE:
+        errors.append("shared_references must start with references/source-log-templates.md")
+
+    methods = manifest.get("methods")
+    if not isinstance(methods, list) or not methods or len(methods) > 100:
+        errors.append("methods must be a non-empty array with at most 100 items")
+    if not isinstance(methods, list):
+        methods = []
+    result["method_count"] = len(methods)
+    wiki_markers = _wiki_canonical_evidence_markers(wiki_templates)
+    method_ids: set[str] = set()
+    method_references: set[str] = set()
+    priorities: list[int] = []
+    marker_count = 0
+    for index, method in enumerate(methods, start=1):
+        if not isinstance(method, dict) or set(method) != METHOD_KEYS:
+            errors.append(f"method {index} keys do not match the Methods package contract")
+            continue
+        method_id = method.get("id")
+        if not isinstance(method_id, str) or not NAME_PATTERN.fullmatch(method_id):
+            errors.append(f"method {index} id is invalid")
+        elif method_id in method_ids:
+            errors.append(f"method id is duplicated: {method_id}")
+        else:
+            method_ids.add(method_id)
+        title = method.get("title")
+        if not isinstance(title, str) or not title.strip() or "\n" in title or "\r" in title:
+            errors.append(f"method {index} title is invalid")
+        reference = _safe_reference(method.get("reference"))
+        if reference is None:
+            errors.append(f"method {index} reference is invalid")
+        elif reference == SOURCE_LOG_TEMPLATES_REFERENCE:
+            errors.append(f"method {index} must not use the fixed template reference")
+        elif reference in method_references or reference in shared:
+            errors.append(f"method reference is duplicated: {reference}")
+        else:
+            method_references.add(reference)
+        priority = method.get("priority")
+        if not isinstance(priority, int) or isinstance(priority, bool) or priority < 1:
+            errors.append(f"method {index} priority is invalid")
+        else:
+            priorities.append(priority)
+        markers = method.get("evidence_markers")
+        if (
+            not isinstance(markers, list)
+            or not markers
+            or len(markers) > 100
+            or any(
+                not isinstance(marker, str)
+                or not marker
+                or "\n" in marker
+                or "\r" in marker
+                or len(marker.encode("utf-8")) > 1024
+                for marker in markers
+            )
+            or len(markers) != len(set(markers))
+        ):
+            errors.append(f"method {index} evidence_markers are invalid")
+            markers = []
+        for marker in markers:
+            marker_count += 1
+            if marker not in wiki_text:
+                errors.append(f"method {index} evidence marker is absent from the Wiki: {marker}")
+            if marker not in wiki_markers:
+                errors.append(
+                    f"method {index} evidence marker is not a canonical stable Wiki log marker: {marker}"
+                )
+    result["marker_count"] = marker_count
+    if priorities != list(range(1, len(methods) + 1)):
+        errors.append("method priorities must be unique and consecutive from 1")
+
+    references_dir = package_root / "references"
+    expected_references = {*shared, *method_references}
+    if _real_directory(references_dir, "references directory", errors):
+        actual_entries = list(references_dir.iterdir())
+        actual_references = {
+            f"references/{entry.name}"
+            for entry in actual_entries
+            if entry.is_file() and not entry.is_symlink()
+        }
+        if len(actual_entries) != len(actual_references) or actual_references != expected_references:
+            errors.append("references directory does not exactly match methods.json")
+        reference_texts: dict[str, str] = {}
+        for reference in sorted(expected_references):
+            path = package_root / reference
+            if not _ordinary(path, reference, errors):
+                continue
+            try:
+                text = path.read_text(encoding="utf-8")
+            except UnicodeDecodeError as exc:
+                errors.append(f"{reference} is not UTF-8: {exc}")
+                continue
+            reference_texts[reference] = text
+            if reference in method_references:
+                for heading in METHOD_HEADINGS:
+                    if heading not in text:
+                        errors.append(f"{reference} is missing heading: {heading}")
+        if reference_texts.get(SOURCE_LOG_TEMPLATES_REFERENCE) != _render_source_log_templates(
+            wiki_templates
+        ):
+            errors.append(
+                "references/source-log-templates.md must exactly match the version 2 Wiki log template inventory"
+            )
+    return result
+
+
+def _validate_registration(
     value: object,
     *,
+    registration_id: str,
     expected_module: str,
+    package_skill_name: object,
+    package_source_sha256: object,
+    required_user_inputs: object,
     errors: list[str],
 ) -> None:
     if not isinstance(value, dict):
         if value is not None:
-            errors.append("logparse.json must contain one object")
+            errors.append("registration-template.json must contain one object")
         return
-    if set(value) != LOGPARSE_ROOT_KEYS:
-        errors.append("logparse.json root keys do not match the LAN Logparse contract")
-    if value.get("schema_version") != 1:
-        errors.append("logparse.json schema_version must be 1")
-    if value.get("helper_skill") != "logparse-diagnose":
-        errors.append("logparse.json helper_skill must be logparse-diagnose")
-    module = value.get("module")
-    if not _valid_module(module):
-        errors.append("logparse.json module must be non-empty canonical ASCII up to 128 bytes")
-    elif module != expected_module:
-        errors.append("logparse.json module does not match the user-confirmed module")
-    if value.get("problem_time_input") != "problem_time":
-        errors.append("logparse.json problem_time_input must be problem_time")
-    if value.get("artifact_input") != "log_archive":
-        errors.append("logparse.json artifact_input must be log_archive")
-    roles = value.get("roles")
-    if roles != EXPECTED_ROLES:
-        errors.append("logparse.json roles must be the exact required client/server input mappings")
-    elif any(set(role) != ROLE_KEYS for role in roles):
-        errors.append("logparse.json role keys do not match the LAN Logparse contract")
+    if set(value) != REGISTRATION_KEYS:
+        errors.append("registration-template.json root keys do not match the registration contract")
+    if type(value.get("schema_version")) is not int or value.get("schema_version") != 1:
+        errors.append("registration schema_version must be 1")
+    if value.get("registration_id") != registration_id or not NAME_PATTERN.fullmatch(
+        registration_id
+    ):
+        errors.append("registration_id must be lower kebab-case and match the output directory")
+    if value.get("version") != "1.0.0":
+        errors.append("registration version must be 1.0.0")
+    if value.get("deployment_scope") != "PRODUCTION":
+        errors.append("registration deployment_scope must be PRODUCTION")
+    capability = value.get("capability")
+    if not isinstance(capability, str) or not capability.strip() or "\n" in capability or "\r" in capability:
+        errors.append("registration capability must be non-empty single-line text")
+    summary = value.get("summary")
+    if not isinstance(summary, str) or not summary.strip():
+        errors.append("registration summary must be non-empty text")
+
+    package = value.get("package")
+    if not isinstance(package, dict):
+        errors.append("registration package must be one object")
+    else:
+        if set(package) != PACKAGE_BINDING_KEYS:
+            errors.append("registration package keys do not match the contract")
+        if package.get("skill_name") != package_skill_name:
+            errors.append("registration package skill_name differs from the Methods package")
+        if package.get("relative_path") != f"package/{package_skill_name}":
+            errors.append("registration package relative_path must equal package/<skill_name>")
+        source_sha = package.get("source_wiki_sha256")
+        if not isinstance(source_sha, str) or not SHA256_PATTERN.fullmatch(source_sha):
+            errors.append("registration package source_wiki_sha256 is invalid")
+        elif source_sha != package_source_sha256:
+            errors.append("registration and Methods package Wiki digests differ")
+
+    runtime = value.get("runtime")
+    if not isinstance(runtime, dict):
+        errors.append("registration runtime must be one object")
+        return
+    if set(runtime) != RUNTIME_KEYS:
+        errors.append("registration runtime keys do not match the contract")
+    for label, expected in (("diagnose", DIAGNOSE_BINDING), ("review", REVIEW_BINDING)):
+        binding = runtime.get(label)
+        if not isinstance(binding, dict) or set(binding) != RUNTIME_BINDING_KEYS or binding != expected:
+            errors.append(f"runtime.{label} must use the fixed product binding")
+
+    preprocessing = runtime.get("preprocessing")
+    if not isinstance(preprocessing, dict):
+        errors.append("runtime.preprocessing must be one object")
+        return
+    if set(preprocessing) != PREPROCESSING_KEYS:
+        errors.append("runtime.preprocessing keys do not match the contract")
+    if preprocessing.get("requires_logparse") is not True:
+        errors.append("runtime.preprocessing.requires_logparse must be true")
+    if preprocessing.get("logparse_product") != "default":
+        errors.append("runtime.preprocessing.logparse_product must be default")
+
+    roles = preprocessing.get("roles")
+    if not isinstance(roles, list) or len(roles) != 2:
+        errors.append("runtime.preprocessing.roles must contain client and server")
+    else:
+        for index, expected_label in enumerate(("client", "server")):
+            role = roles[index]
+            if not isinstance(role, dict) or set(role) != ROLE_KEYS:
+                errors.append(f"runtime.preprocessing.roles[{index}] keys are invalid")
+                continue
+            if role.get("label") != expected_label or role.get("presence") != "REQUIRED":
+                errors.append("runtime preprocessing roles must be required client then server")
+            if not isinstance(role.get("description"), str) or not role["description"].strip():
+                errors.append(f"runtime.preprocessing.roles[{index}].description is empty")
+            if not isinstance(role.get("source_reference"), str) or not role[
+                "source_reference"
+            ].strip():
+                errors.append(f"runtime.preprocessing.roles[{index}].source_reference is empty")
+
+    plan = preprocessing.get("logparse_plan")
+    if not isinstance(plan, dict):
+        errors.append("runtime.preprocessing.logparse_plan must be one object")
+        return
+    if set(plan) != PLAN_KEYS:
+        errors.append("runtime.preprocessing.logparse_plan keys do not match the contract")
+    if plan.get("attachment_requirement") != "log_archive":
+        errors.append("logparse_plan attachment_requirement must be log_archive")
+    if plan.get("problem_time_binding") != {
+        "source": "USER_FACT",
+        "name": "problem_time",
+    }:
+        errors.append("logparse_plan problem_time_binding must use problem_time USER_FACT")
+
+    expected_anchors = [
+        {
+            "label": "client",
+            "module": {"source": "SKILL_FIXED", "value": expected_module},
+            "slot": {"source": "USER_FACT", "name": "client_slot"},
+            "process_name": {"source": "USER_FACT", "name": "client_process_name"},
+            "pid": {"source": "USER_FACT", "name": "client_pid"},
+        },
+        {
+            "label": "server",
+            "module": {"source": "SKILL_FIXED", "value": expected_module},
+            "slot": {"source": "USER_FACT", "name": "server_slot"},
+            "process_name": {"source": "USER_FACT", "name": "server_process_name"},
+            "pid": {"source": "USER_FACT", "name": "server_pid"},
+        },
+    ]
+    anchors = plan.get("anchors")
+    if anchors != expected_anchors:
+        errors.append(
+            "logparse_plan anchors must use one fixed module and exact client/server USER_FACT bindings"
+        )
+    elif any(not isinstance(anchor, dict) or set(anchor) != ANCHOR_KEYS for anchor in anchors):
+        errors.append("logparse_plan anchor keys do not match the contract")
+    if isinstance(required_user_inputs, list) and required_user_inputs[:7] != REQUIRED_INPUT_PREFIX:
+        errors.append("registration bindings require the fixed seven-input Methods prefix")
 
 
-def validate(skill_dir: Path, wiki: Path, module: str) -> dict[str, object]:
+def validate(
+    registration_dir: Path,
+    wiki: Path,
+    module: str,
+    source_identity: Path | None = None,
+) -> dict[str, object]:
     errors: list[str] = []
-    skill_dir = skill_dir.resolve()
-    wiki = wiki.resolve()
     if not _valid_module(module):
         errors.append("--module must be non-empty canonical ASCII up to 128 bytes")
-    if not skill_dir.is_dir() or skill_dir.is_symlink():
-        errors.append(f"skill directory is unavailable: {skill_dir}")
+    if not _real_directory(registration_dir, "registration directory", errors):
         return {"ok": False, "errors": errors}
     if not _ordinary(wiki, "Wiki", errors):
         return {"ok": False, "errors": errors}
+    registration_dir = registration_dir.resolve()
+    wiki = wiki.resolve()
 
-    root_names = {entry.name for entry in skill_dir.iterdir()}
-    if root_names != ROOT_FILES:
-        errors.append(
-            "generated root entries must be exactly SKILL.md, methods.json, logparse.json, references, scripts"
-        )
-    references_dir = skill_dir / "references"
-    if not references_dir.is_dir() or references_dir.is_symlink():
-        errors.append("references must be one ordinary directory")
-    scripts_dir = skill_dir / "scripts"
-    if not scripts_dir.is_dir() or scripts_dir.is_symlink():
-        errors.append("scripts must be one ordinary directory")
-    elif {entry.name for entry in scripts_dir.iterdir()} != SCRIPT_FILES:
-        errors.append("scripts must contain exactly pack_result_zip.py")
-
-    skill_path = skill_dir / "SKILL.md"
-    skill_text = ""
-    frontmatter: dict[str, str] = {}
-    if _ordinary(skill_path, "SKILL.md", errors):
-        try:
-            skill_text = skill_path.read_text(encoding="utf-8")
-        except UnicodeDecodeError as exc:
-            errors.append(f"SKILL.md is not UTF-8: {exc}")
-        else:
-            frontmatter = _frontmatter(skill_text, errors)
-            for phrase in REQUIRED_SKILL_PHRASES:
-                if phrase not in skill_text:
-                    errors.append(f"SKILL.md must mention {phrase}")
-            for label, pattern in REQUIRED_SKILL_SEMANTICS:
-                if pattern.search(skill_text) is None:
-                    errors.append(f"SKILL.md must require {label}")
-            if "sources" not in skill_text and "来源路径" not in skill_text:
-                errors.append("SKILL.md must preserve evidence sources or 来源路径")
-            for label, pattern in FORBIDDEN_SKILL_PATTERNS:
-                if pattern.search(skill_text):
-                    errors.append(f"SKILL.md must delegate instead of embedding {label}")
-
-    expected_packer = Path(__file__).resolve().parents[1] / "assets" / "pack_result_zip.py"
-    generated_packer = scripts_dir / "pack_result_zip.py"
-    if _ordinary(expected_packer, "meta Skill pack_result_zip.py asset", errors) and _ordinary(
-        generated_packer, "generated pack_result_zip.py", errors
-    ):
-        if generated_packer.read_bytes() != expected_packer.read_bytes():
-            errors.append("generated pack_result_zip.py must exactly match the meta Skill asset")
-
-    logparse = _read_json(skill_dir / "logparse.json", errors)
-    _validate_logparse(logparse, expected_module=module, errors=errors)
-    manifest = _read_json(skill_dir / "methods.json", errors)
-
-    wiki_bytes = wiki.read_bytes() if wiki.exists() else b""
+    wiki_bytes = wiki.read_bytes()
     try:
         wiki_text = wiki_bytes.decode("utf-8")
     except UnicodeDecodeError as exc:
@@ -411,207 +866,123 @@ def validate(skill_dir: Path, wiki: Path, module: str) -> dict[str, object]:
         wiki_text = ""
     wiki_sha256 = hashlib.sha256(wiki_bytes).hexdigest()
     wiki_templates = _wiki_log_templates(wiki_text)
-    wiki_named_log_fields = _wiki_named_log_fields(wiki_templates)
-    wiki_canonical_markers = _wiki_canonical_evidence_markers(wiki_templates)
+    _validate_source_identity(
+        source_identity,
+        wiki_bytes=wiki_bytes,
+        wiki_templates=wiki_templates,
+        errors=errors,
+    )
 
-    method_count = 0
-    marker_count = 0
-    all_references: set[str] = set()
-    if isinstance(manifest, dict):
-        if set(manifest) != METHODS_ROOT_KEYS:
-            errors.append("methods.json root keys do not match the methods package contract")
-        if manifest.get("schema_version") != 1:
-            errors.append("methods.json schema_version must be 1")
-        skill_name = manifest.get("skill_name")
-        if not isinstance(skill_name, str) or not NAME_PATTERN.fullmatch(skill_name):
-            errors.append("methods.json skill_name is invalid")
+    root_names = {entry.name for entry in registration_dir.iterdir()}
+    if root_names != REGISTRATION_ROOT_ENTRIES:
+        errors.append(
+            "registration root entries must be exactly registration-template.json and package"
+        )
+    package_parent = registration_dir / "package"
+    package_root: Path | None = None
+    if _real_directory(package_parent, "registration package directory", errors):
+        package_children = list(package_parent.iterdir())
+        if (
+            len(package_children) != 1
+            or not package_children[0].is_dir()
+            or package_children[0].is_symlink()
+        ):
+            errors.append("registration package must contain exactly one real Skill directory")
         else:
-            if not skill_name.startswith("diagnose-"):
-                errors.append("methods.json skill_name must start with diagnose-")
-            if skill_name != skill_dir.name:
-                errors.append("methods.json skill_name must match the skill directory")
-            if frontmatter.get("name") != skill_name:
-                errors.append("SKILL.md name must match methods.json skill_name")
-        source_sha = manifest.get("source_wiki_sha256")
-        if not isinstance(source_sha, str) or not SHA256_PATTERN.fullmatch(source_sha):
-            errors.append("source_wiki_sha256 must be lowercase SHA-256")
-        elif source_sha != wiki_sha256:
-            errors.append("source_wiki_sha256 does not match the supplied Wiki")
+            package_root = package_children[0]
 
-        required_user_inputs = _field_ids(
-            manifest.get("required_user_inputs"), "required_user_inputs", errors
-        )
-        if required_user_inputs[: len(REQUIRED_INPUT_PREFIX)] != REQUIRED_INPUT_PREFIX:
+    method_result: dict[str, object] = {
+        "skill_name": None,
+        "source_wiki_sha256": None,
+        "required_user_inputs": [],
+        "method_count": 0,
+        "marker_count": 0,
+    }
+    if package_root is not None:
+        if not NAME_PATTERN.fullmatch(package_root.name) or not package_root.name.startswith(
+            "diagnose-"
+        ):
+            errors.append("package Skill directory must be lower kebab-case starting with diagnose-")
+        package_names = {entry.name for entry in package_root.iterdir()}
+        if package_names != PACKAGE_ROOT_ENTRIES:
             errors.append(
-                "required_user_inputs must start with problem_time and the required client/server slot/process inputs"
+                "Methods package entries must be exactly SKILL.md, methods.json, and references"
             )
-        aliases = sorted(FORBIDDEN_INPUT_ALIASES.intersection(required_user_inputs))
-        if aliases:
-            errors.append("required_user_inputs contains forbidden aliases: " + ", ".join(aliases))
-
-        required_artifacts = _field_ids(
-            manifest.get("required_artifacts"), "required_artifacts", errors
+        frontmatter = _validate_business_skill(
+            package_root / "SKILL.md",
+            expected_name=package_root.name,
+            errors=errors,
         )
-        if not required_artifacts or required_artifacts[0] != "log_archive":
-            errors.append("required_artifacts must start with log_archive")
-        log_derived_fields = _field_ids(
-            manifest.get("log_derived_fields"), "log_derived_fields", errors
+        method_result = _validate_methods(
+            package_root,
+            wiki_sha256=wiki_sha256,
+            wiki_text=wiki_text,
+            wiki_templates=wiki_templates,
+            expected_skill_name=package_root.name,
+            frontmatter=frontmatter,
+            errors=errors,
         )
-        expected_log_derived_fields = [
-            field for field in wiki_named_log_fields if field not in required_user_inputs
-        ]
-        if log_derived_fields != expected_log_derived_fields:
-            errors.append(
-                "log_derived_fields must be the named Wiki log fields in first-appearance order, excluding required_user_inputs"
-            )
-        declared_fields = required_user_inputs + required_artifacts + log_derived_fields
-        if len(declared_fields) != len(set(declared_fields)):
-            errors.append("input, artifact and log-derived identifiers must be disjoint")
+        _validate_package_tokens(package_root, errors)
 
-        shared = manifest.get("shared_references")
-        if not isinstance(shared, list) or any(_safe_reference(item) is None for item in shared):
-            errors.append("shared_references must contain safe references/*.md paths")
-            shared = []
-        if len(shared) != len(set(shared)):
-            errors.append("shared_references must be unique")
-        if not shared or shared[0] != SOURCE_LOG_TEMPLATES_REFERENCE:
-            errors.append("shared_references must start with references/source-log-templates.md")
-        all_references.update(str(item) for item in shared)
+    registration = _read_json(
+        registration_dir / "registration-template.json",
+        "registration-template.json",
+        errors,
+    )
+    _validate_registration(
+        registration,
+        registration_id=registration_dir.name,
+        expected_module=module,
+        package_skill_name=method_result["skill_name"],
+        package_source_sha256=method_result["source_wiki_sha256"],
+        required_user_inputs=method_result["required_user_inputs"],
+        errors=errors,
+    )
 
-        methods = manifest.get("methods")
-        if not isinstance(methods, list) or not methods:
-            errors.append("methods must be a non-empty array")
-            methods = []
-        method_count = len(methods)
-        ids: set[str] = set()
-        priorities: list[int] = []
-        method_references: set[str] = set()
-        for index, method in enumerate(methods, start=1):
-            if not isinstance(method, dict) or set(method) != METHOD_KEYS:
-                errors.append(f"method {index} keys do not match the methods package contract")
-                continue
-            method_id = method.get("id")
-            if not isinstance(method_id, str) or not NAME_PATTERN.fullmatch(method_id):
-                errors.append(f"method {index} id is invalid")
-            elif method_id in ids:
-                errors.append(f"method id is duplicated: {method_id}")
-            else:
-                ids.add(method_id)
-            title = method.get("title")
-            if not isinstance(title, str) or not title.strip():
-                errors.append(f"method {index} title is empty")
-            reference = _safe_reference(method.get("reference"))
-            if reference is None:
-                errors.append(f"method {index} reference is invalid")
-            elif reference == SOURCE_LOG_TEMPLATES_REFERENCE:
-                errors.append(f"method {index} must not use the fixed template reference")
-            elif reference in method_references:
-                errors.append(f"method reference is duplicated: {reference}")
-            else:
-                method_references.add(reference)
-                all_references.add(reference)
-            priority = method.get("priority")
-            if not isinstance(priority, int) or isinstance(priority, bool) or priority < 1:
-                errors.append(f"method {index} priority is invalid")
-            else:
-                priorities.append(priority)
-            markers = method.get("evidence_markers")
-            if (
-                not isinstance(markers, list)
-                or not markers
-                or any(not isinstance(marker, str) or not marker for marker in markers)
-                or len(markers) != len(set(markers))
-            ):
-                errors.append(f"method {index} evidence_markers are invalid")
-                markers = []
-            for marker in markers:
-                marker_count += 1
-                if marker not in wiki_text:
-                    errors.append(f"method {index} evidence marker is absent from the Wiki: {marker}")
-                if marker not in wiki_canonical_markers:
-                    errors.append(
-                        f"method {index} evidence marker is not a canonical stable Wiki log marker: {marker}"
-                    )
-        if priorities != list(range(1, method_count + 1)):
-            errors.append("method priorities must be unique and consecutive from 1")
-
-        if references_dir.is_dir():
-            actual_references = {
-                f"references/{entry.name}"
-                for entry in references_dir.iterdir()
-                if entry.is_file() and not entry.is_symlink()
-            }
-            if actual_references != all_references:
-                errors.append("references directory does not exactly match methods.json")
-            reference_texts: dict[str, str] = {}
-            for reference in sorted(all_references):
-                path = skill_dir / reference
-                if not _ordinary(path, reference, errors):
-                    continue
-                try:
-                    text = path.read_text(encoding="utf-8")
-                except UnicodeDecodeError as exc:
-                    errors.append(f"{reference} is not UTF-8: {exc}")
-                    continue
-                reference_texts[reference] = text
-                if reference in method_references:
-                    for heading in METHOD_HEADINGS:
-                        if heading not in text:
-                            errors.append(f"{reference} is missing heading: {heading}")
-            if reference_texts.get(SOURCE_LOG_TEMPLATES_REFERENCE) != _render_source_log_templates(
-                wiki_templates
-            ):
-                errors.append(
-                    "references/source-log-templates.md must exactly match the mechanically extracted Wiki log template inventory"
-                )
-    elif manifest is not None:
-        errors.append("methods.json must contain one object")
-
-    for path in skill_dir.rglob("*"):
+    for path in registration_dir.rglob("*"):
         try:
             metadata = path.lstat()
-        except FileNotFoundError:
+        except OSError:
             errors.append(f"generated path disappeared during validation: {path}")
             continue
         if stat.S_ISLNK(metadata.st_mode):
-            errors.append(f"generated package must not contain symlinks: {path}")
+            errors.append(f"generated registration must not contain symlinks: {path}")
         elif not (stat.S_ISREG(metadata.st_mode) or stat.S_ISDIR(metadata.st_mode)):
-            errors.append(f"generated package contains unsupported path type: {path}")
-
-    package_text = "\n".join(
-        path.read_text(encoding="utf-8", errors="replace")
-        for path in sorted(skill_dir.rglob("*"))
-        if path.is_file() and not path.is_symlink() and path.suffix in {".md", ".json"}
-    )
-    for template in wiki_templates:
-        if template not in package_text:
-            errors.append(f"generated package lost Wiki log template: {template}")
+            errors.append(f"generated registration contains unsupported path type: {path}")
 
     return {
         "ok": not errors,
-        "skill_name": frontmatter.get("name"),
+        "registration_id": registration_dir.name,
+        "skill_name": method_result["skill_name"],
         "source_wiki_sha256": wiki_sha256,
         "module": module,
-        "method_count": method_count,
-        "marker_count": marker_count,
+        "method_count": method_result["method_count"],
+        "marker_count": method_result["marker_count"],
         "template_count": len(wiki_templates),
+        "log_template_extraction_version": LOG_TEMPLATE_EXTRACTION_VERSION,
         "errors": errors,
     }
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--skill-dir", type=Path, required=True)
+    parser.add_argument("--registration-dir", type=Path, required=True)
     parser.add_argument("--wiki", type=Path, required=True)
     parser.add_argument("--module", required=True)
+    parser.add_argument("--source-identity", type=Path)
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args()
-    result = validate(args.skill_dir, args.wiki, args.module)
+    result = validate(
+        args.registration_dir,
+        args.wiki,
+        args.module,
+        args.source_identity,
+    )
     if args.json:
         print(json.dumps(result, ensure_ascii=False, sort_keys=True, indent=2))
     elif result["ok"]:
         print(
-            f"PASS: {result['skill_name']} "
+            f"PASS: {result['registration_id']} / {result['skill_name']} "
             f"({result['method_count']} methods, {result['marker_count']} markers)"
         )
     else:

@@ -479,8 +479,8 @@ def _preprocessing(value: Any, methods: MethodsManifestV1) -> PreprocessingBindi
         if product is not None or roles_raw != [] or plan_raw is not None:
             raise ValueError("non-Logparse registration must clear product, roles, and plan")
         return PreprocessingBindingV1(False, None, (), None)
-    if not isinstance(product, str) or not product or product == "default":
-        raise ValueError("Logparse registration requires a non-default product id")
+    if not isinstance(product, str) or not product:
+        raise ValueError("Logparse registration requires a product id")
     if "log_archive" not in methods.required_artifacts:
         raise ValueError("Logparse registration requires package artifact log_archive")
     if not isinstance(roles_raw, list) or not roles_raw or len(roles_raw) > 20:

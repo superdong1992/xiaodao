@@ -18,6 +18,7 @@
     "case.journey": {"kind": "release-case", "root": "tests/cases/release", "partition": "journey"},
     "case.oracle": {"kind": "release-case", "root": "tests/cases/release", "partition": "oracle"},
     "skill.generator": {"kind": "paths", "paths": [".agents/skills/wiki-to-diagnosis-skill"]},
+    "skill.logparse-generator": {"kind": "paths", "paths": [".claude/skills/wiki-to-logparse-diagnosis-skill"]},
     "skill.registration": {"kind": "release-case", "root": "tests/cases/release", "partition": "registration"},
     "methods.matrix": {"kind": "paths", "paths": ["experiments/rpc-skill-feasibility/cases", "experiments/rpc-skill-feasibility/logparse-config.json", "experiments/rpc-skill-feasibility/schemas/diagnosis-result.schema.json"]},
     "case.macos-codex-luna": {"kind": "paths", "paths": ["experiments/rpc-skill-feasibility/cases/api-execution-overrun", "experiments/rpc-skill-feasibility/logparse-config.json"]},
@@ -100,11 +101,11 @@
       "proof": ["case.oracle", "proof.real", "framework.runner", "framework.tests"]
     },
     "macos-claude-deepseek-methods": {
-      "producer": ["case.wiki", "skill.registration", "skill.generator", "quick.codex-luna", "quick.claude-deepseek", "runtime.support", "runtime.claude", "runtime.settings", "runtime.environment"],
+      "producer": ["case.wiki", "skill.logparse-generator", "quick.codex-luna", "quick.claude-deepseek", "runtime.support", "runtime.claude", "runtime.settings", "runtime.environment"],
       "proof": ["case.oracle", "framework.tests", "framework.runner"]
     },
     "macos-claude-deepseek-e2e": {
-      "producer": ["product.source", "case.wiki", "skill.registration", "case.macos-codex-luna", "skill.generator", "skill.client", "skill.logparse", "quick.claude-deepseek", "runtime.support", "runtime.claude", "runtime.settings", "runtime.environment", "external.logparse"],
+      "producer": ["product.source", "case.wiki", "case.macos-codex-luna", "skill.logparse-generator", "skill.client", "skill.logparse", "quick.claude-deepseek", "runtime.support", "runtime.claude", "runtime.settings", "runtime.environment", "external.logparse"],
       "proof": ["case.oracle", "framework.tests", "framework.runner"]
     },
     "cross-job": {

@@ -1,7 +1,9 @@
 {
   "scenario_id": "insufficient-evidence",
   "problem_time": "2026-08-23T10:00:04.950000+08:00",
+  "client_slot": "1",
   "client_process": "rpc_client",
+  "server_slot": "1",
   "server_process": "rpc_server",
   "service": "svc_report",
   "api": "Build",

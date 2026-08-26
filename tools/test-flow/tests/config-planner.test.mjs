@@ -202,6 +202,25 @@ test("macOS Luna bootstrap and E2E are independent one-stage Dev goals with exac
   assert.ok(invalid.admission.blockers.some((item) => item.code === "MACOS_CODEX_LUNA_SCENARIO_INVALID"));
 });
 
+test("central Claude E2E plan removes REVIEW and declares four calls for insufficient evidence", () => {
+  const build = (scenario) => buildIsolatedRunPlan({
+    track: "dev",
+    goal: "dev.macos-claude-deepseek-e2e",
+    client: "macos",
+    scenario,
+    planOnly: true,
+    allowRealModel: true,
+    reason: "plan",
+  }).plan;
+  const normal = build("api-execution-overrun");
+  assert.deepEqual(normal.stages[0].invocation_caps[0].phases, ["CLIENT", "ROUTE", "LOGPARSE", "DIAGNOSE", "REVIEW"]);
+  assert.equal(normal.stages[0].invocation_caps[0].max_count, 5);
+  const insufficient = build("insufficient-evidence");
+  const declaration = insufficient.stages[0].invocation_caps[0];
+  assert.deepEqual(declaration.phases, ["CLIENT", "ROUTE", "LOGPARSE", "DIAGNOSE"]);
+  assert.deepEqual([declaration.min_count, declaration.max_count], [4, 4]);
+});
+
 test("all supported Clients resolve to repository-owned first-party adapters", () => {
   for (const client of ["windows", "macos", "linux"]) {
     const built = buildIsolatedRunPlan({ track: "release", client, planOnly: true });

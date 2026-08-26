@@ -3067,6 +3067,14 @@ function claudeDeepseekInvocationProjection(invocation, hardCaps, invocationClas
   };
 }
 
+export function validClaudeDeepseekInvocationLedger(planStage, ledger) {
+  if (!Array.isArray(planStage?.invocation_caps) || ledger?.status !== "PASS" || !Array.isArray(ledger.invocations)) return false;
+  if (!planStage.invocation_caps.every((declaration) => Array.isArray(declaration.phases) && declaration.min_count === declaration.phases.length && declaration.max_count === declaration.phases.length)) return false;
+  const phases = planStage.invocation_caps.flatMap((declaration) => Array.isArray(declaration.phases) ? declaration.phases : []);
+  return ledger.invocations.length === phases.length
+    && ledger.invocations.every((invocation, index) => invocation?.status === "PASS" && invocation?.terminal === true && invocation.phase === phases[index]);
+}
+
 async function runMacosClaudeDeepseekGate(context, stage, { workflow }) {
   const outputRoot = gateRoot(context, stage);
   const scratchRoot = quickValidationScratchRoot(context, workflow === "methods" ? "macos-claude-deepseek-methods" : "macos-claude-deepseek-e2e");
@@ -3092,10 +3100,10 @@ async function runMacosClaudeDeepseekGate(context, stage, { workflow }) {
   const releaseCaseRoot = path.join(context.sourceSnapshotRoot, "tests", "cases", "release", "rpc-timeout-anonymized");
   const args = workflow === "methods" ? [
     ...common,
-    "--meta-skill-root", path.join(context.sourceSnapshotRoot, ".agents", "skills", "wiki-to-diagnosis-skill"),
+    "--meta-skill-root", path.join(context.sourceSnapshotRoot, ".claude", "skills", "wiki-to-logparse-diagnosis-skill"),
     "--wiki", path.join(releaseCaseRoot, "input", "wiki.md"),
     "--oracle", path.join(releaseCaseRoot, "oracle.json"),
-    "--registration-template", path.join(releaseCaseRoot, "registration", "rpc-timeout-methods-v1", "registration-template.json"),
+    "--module", "rpc",
     ...(context.planStage.invocation_caps.length === 0 ? ["--verify-cache-only"] : []),
   ] : [
     ...common,
@@ -3127,9 +3135,8 @@ async function runMacosClaudeDeepseekGate(context, stage, { workflow }) {
   } catch {
     return { ...result, status: "ERROR", failure_domain: "HARNESS", code: "CLAUDE_DEEPSEEK_GATE_RECEIPT_INVALID" };
   }
-  const expected = context.planStage.invocation_caps.reduce((sum, declaration) => sum + declaration.max_count, 0);
-  if (gate.status !== "PASS" || ledger.status !== "PASS" || ledger.invocations?.length !== expected) return { ...result, status: "ERROR", failure_domain: "HARNESS", code: "CLAUDE_DEEPSEEK_GATE_RECEIPT_INVALID" };
-  const invocationClass = workflow === "methods" ? "claude-deepseek-methods-bootstrap" : "claude-deepseek-macos-e2e";
+  if (gate.status !== "PASS" || !validClaudeDeepseekInvocationLedger(context.planStage, ledger)) return { ...result, status: "ERROR", failure_domain: "HARNESS", code: "CLAUDE_DEEPSEEK_GATE_RECEIPT_INVALID" };
+  const invocationClass = workflow === "methods" ? "claude-deepseek-registration-generation" : "claude-deepseek-macos-e2e";
   const invocations = ledger.invocations.map((invocation) => claudeDeepseekInvocationProjection(invocation, context.planStage.hard_caps, invocationClass));
   return { ...result, status: "PASS", failure_domain: null, code: null, invocations, usage: sumUsage(invocations.map((invocation) => invocation.usage)), usage_complete: true, adapter_receipt: gate };
 }

@@ -39,11 +39,11 @@ function writeNew(filePath, bytes) {
   fs.writeFileSync(filePath, bytes, { mode: 0o600, flag: "wx" });
 }
 
-export function controlledClaudeEnvironment(ambient, { configRoot, home, temporary, brokerEnvironment = null, pathEntries = [] } = {}) {
+export function controlledClaudeEnvironment(ambient, { configRoot, home, temporary, brokerEnvironment = null, brokerExecutableDirectory = null } = {}) {
   for (const value of [configRoot, home, temporary]) requireProcess(typeof value === "string" && path.isAbsolute(value), "CLAUDE_DEEPSEEK_ENV_ROOT_INVALID", "Claude environment roots must be absolute");
-  requireProcess(Array.isArray(pathEntries) && pathEntries.every((value) => typeof value === "string" && path.isAbsolute(value) && !value.includes(path.delimiter)), "CLAUDE_DEEPSEEK_ENV_PATH_INVALID", "Claude PATH additions must be absolute directories");
+  requireProcess(brokerExecutableDirectory === null || (typeof brokerExecutableDirectory === "string" && path.isAbsolute(brokerExecutableDirectory) && !brokerExecutableDirectory.includes(path.delimiter)), "CLAUDE_DEEPSEEK_BROKER_PATH_INVALID", "Logparse broker executable directory must be one absolute path");
   const environment = {
-    PATH: [...pathEntries, "/usr/bin", "/bin", "/usr/sbin", "/sbin"].join(path.delimiter),
+    PATH: [...(brokerExecutableDirectory === null ? [] : [brokerExecutableDirectory]), "/usr/bin", "/bin", "/usr/sbin", "/sbin"].join(path.delimiter),
     HOME: home,
     TMPDIR: temporary,
     LANG: ambient.LANG ?? "C.UTF-8",

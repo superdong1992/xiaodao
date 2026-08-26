@@ -1917,9 +1917,16 @@ class _RuntimeBrokerFactory:
 def _logparse_catalog(
     tmp_path: Path,
     factory: _RuntimeBrokerFactory | FakeLogparseBrokerFactory,
+    *,
+    logparse_product: str | None = None,
 ) -> VersionedAssetCatalog:
     skill_dir = tmp_path / "logparse-skills"
     shutil.copytree(CATALOG_FIXTURES / "skill-dir", skill_dir)
+    if logparse_product is not None:
+        template = skill_dir / "rpc-log-analysis/registration-template.json"
+        value = json.loads(template.read_bytes())
+        value["runtime"]["preprocessing"]["logparse_product"] = logparse_product
+        template.write_bytes(canonical_json_bytes(value))
     asset = ResolvedAsset(
         ref=VersionedRef(
             id="logparse-tool/fake",
@@ -2393,6 +2400,13 @@ class _MethodsTwoPassBackend:
 
     def _run_preprocessing(self, kwargs: dict[str, Any]) -> BackendExecution:
         workspace_root = Path(kwargs["workspace_root"])
+        if self.result == "helper_load_failed":
+            self._close_sinks(kwargs)
+            raise runtime_failure(
+                stage=ExecutionStage.BACKEND_EXECUTE,
+                code=ErrorCode.BACKEND_EXIT_FAILED,
+                message="The required Logparse Helper could not be loaded.",
+            )
         request_path = (
             workspace_root / "output/proposals/methods-preprocess/request.json"
         )
@@ -2494,22 +2508,26 @@ class _MethodsTwoPassBackend:
             "target_logs": targets,
             "logparse_run_artifact_draft": proposal.model_dump(mode="json"),
         }
+        successful_operation = {
+            "operation": "parse-targets",
+            "request_sha256": hashlib.sha256(request_bytes).hexdigest(),
+            "request": request,
+            "http_status": 200,
+            "result_sha256": hashlib.sha256(
+                canonical_json_bytes(result)
+            ).hexdigest(),
+            "result": result,
+        }
+        operations = [successful_operation]
+        if self.result == "retry_then_completed":
+            failed_operation = dict(successful_operation)
+            failed_operation["http_status"] = 503
+            operations.insert(0, failed_operation)
         audit_bytes = canonical_json_bytes(
             {
                 "schema_version": 1,
                 "job_id": manifest.job_id,
-                "operations": [
-                    {
-                        "operation": "parse-targets",
-                        "request_sha256": hashlib.sha256(request_bytes).hexdigest(),
-                        "request": request,
-                        "http_status": 200,
-                        "result_sha256": hashlib.sha256(
-                            canonical_json_bytes(result)
-                        ).hexdigest(),
-                        "result": result,
-                    }
-                ],
+                "operations": operations,
             }
         )
         setattr(session, "audit_bytes", lambda: audit_bytes)
@@ -2786,6 +2804,54 @@ def test_ready_logparse_job_rejects_untyped_compiler_omission(
     assert factory.calls == []
 
 
+def test_default_product_survives_compiler_and_workspace_manifest(
+    tmp_path: Path,
+) -> None:
+    factory = FakeLogparseBrokerFactory()
+    catalog = _logparse_catalog(
+        tmp_path,
+        factory,
+        logparse_product="default",
+    )
+    job, aggregate, resources = _claimed_logparse_job_state_and_resources(catalog)
+    backend = _MethodsTwoPassBackend(
+        factory,
+        job,
+        "helper_load_failed",
+    )
+    runtime = DiagnosisRuntime(
+        state_repository=_StateView(aggregate),
+        resource_store=resources,
+        asset_catalog=catalog,
+        logparse_broker_factory=factory,
+        execution_records=InMemoryExecutionRecordStore(),
+        clock=_Clock(),
+        id_generator=_Ids(),
+        workspace_manager=WorkspaceManager(tmp_path / "default-product-data"),
+        backend=backend,  # type: ignore[arg-type]
+    )
+
+    receipt = runtime.execute(job, InMemoryCancellationSignal())
+
+    assert job.logparse_product == "default"
+    assert receipt.job_outcome.error is not None
+    assert receipt.job_outcome.error.code is ErrorCode.BACKEND_EXIT_FAILED
+    preprocessing_root = Path(backend.calls[0]["workspace_root"])
+    manifest = parse_canonical_json_bytes(
+        (preprocessing_root / "inputs/manifest.json").read_bytes(),
+        WorkspaceInputManifest,
+    )
+    assert manifest.logparse_product == "default"
+    assert manifest.resolved_logparse_plan is not None
+    request = parse_canonical_json_bytes(
+        (
+            preprocessing_root
+            / "output/proposals/methods-preprocess/request.json"
+        ).read_bytes()
+    )
+    assert "logparse_product" not in request
+
+
 class _NonCanonicalClaimingBackend(_MethodsTwoPassBackend):
     @property
     def rejected_bytes(self) -> bytes | None:
@@ -3013,6 +3079,84 @@ def test_methods_two_pass_closes_broker_then_stages_grounded_result(
     records = runtime._execution_records
     assert isinstance(records, InMemoryExecutionRecordStore)
     assert records.publish_rejected_agent_output_calls == []
+
+
+def test_methods_preprocess_prompt_declares_helper_before_one_broker_request(
+    tmp_path: Path,
+) -> None:
+    # This deterministic backend verifies the frozen prompt only. The real Skill
+    # tool trace and its ordering against the broker call are Fast E2E evidence.
+    runtime, job, _, backend, _ = _public_fake_claiming_runtime(
+        tmp_path,
+        "completed",
+    )
+
+    receipt = runtime.execute(job, InMemoryCancellationSignal())
+
+    assert receipt.job_outcome.error is None
+    prompt = backend.calls[0]["prompt"]
+    helper_call = "Skill(logparse-diagnose)"
+    broker_call = (
+        "problem-locator-logparse parse-targets "
+        "--request output/proposals/methods-preprocess/request.json "
+        "--result output/proposals/methods-preprocess/target_logs.json"
+    )
+    assert prompt.count(helper_call) == 1
+    assert prompt.count("problem-locator-logparse") == 1
+    assert prompt.index(helper_call) < prompt.index(broker_call)
+    assert "SERVER_PREPROCESS" in prompt
+    assert "Do not load or execute any other Skill" in prompt
+    assert "Do not read the request, broker result, or target logs" in prompt
+    assert "Do not invoke the broker directly or use any fallback" in prompt
+    assert "never retry" in prompt
+
+
+def test_methods_helper_load_failure_never_reaches_broker_or_pass_b(
+    tmp_path: Path,
+) -> None:
+    # The fake models a terminal Helper-load failure; it does not claim to
+    # observe a real Claude Skill tool call. Fast E2E owns that trace proof.
+    runtime, job, factory, backend, _ = _public_fake_claiming_runtime(
+        tmp_path,
+        "helper_load_failed",
+    )
+
+    receipt = runtime.execute(job, InMemoryCancellationSignal())
+
+    assert receipt.job_outcome.error is not None
+    assert receipt.job_outcome.error.code is ErrorCode.BACKEND_EXIT_FAILED
+    assert len(backend.calls) == 1
+    assert len(factory.sessions) == 1
+    session = factory.sessions[0]
+    assert session.closed is True  # type: ignore[attr-defined]
+    assert session.close_calls == 1  # type: ignore[attr-defined]
+    assert session.parse_request_bytes() is None
+    records = runtime._execution_records
+    assert isinstance(records, InMemoryExecutionRecordStore)
+    assert records.read_audit_bytes(job.job_id, "logparse_broker_audit.json") is None
+    assert records.read_audit_bytes(job.job_id, "methods_target_logs.json") is None
+
+
+def test_methods_preprocessing_rejects_failed_operation_before_success(
+    tmp_path: Path,
+) -> None:
+    runtime, job, factory, backend, _ = _public_fake_claiming_runtime(
+        tmp_path,
+        "retry_then_completed",
+    )
+
+    receipt = runtime.execute(job, InMemoryCancellationSignal())
+
+    assert receipt.job_outcome.error is not None
+    assert receipt.job_outcome.error.code is ErrorCode.LOGPARSE_OUTPUT_INVALID
+    assert len(backend.calls) == 1
+    session = factory.sessions[0]
+    assert session.closed is True  # type: ignore[attr-defined]
+    assert session.close_calls == 1  # type: ignore[attr-defined]
+    assert session.parse_request_bytes() == backend.request_bytes
+    records = runtime._execution_records
+    assert isinstance(records, InMemoryExecutionRecordStore)
+    assert records.read_audit_bytes(job.job_id, "methods_target_logs.json") is None
 
 
 def test_missing_authoritative_target_downgrades_confirmed_methods_to_json_only(

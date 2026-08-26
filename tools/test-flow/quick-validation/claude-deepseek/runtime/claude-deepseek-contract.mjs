@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 import {
   CLAUDE_SETTINGS_ENV_KEYS,
@@ -25,18 +26,20 @@ import {
   loadScenarioOracle,
   STANDALONE_CODEX_LUNA_SCENARIOS,
   macosCodexLunaE2EPhases,
-  mapScenarioToCreateCase,
+  mapScenarioToCreateCase as mapBaseScenarioToCreateCase,
   scenarioPaths,
   writeDeterministicLogsZip,
 } from "../../codex-luna/runtime/macos-codex-luna-e2e-contract.mjs";
 
-export const CLAUDE_DEEPSEEK_CONTRACT_VERSION = 1;
+const RUNTIME_ROOT = path.dirname(fileURLToPath(import.meta.url));
+
+export const CLAUDE_DEEPSEEK_CONTRACT_VERSION = 3;
 export const CLAUDE_DEEPSEEK_MODEL = RELEASE_MODEL;
 export const CLAUDE_DEEPSEEK_VERSION = RELEASE_CLAUDE_VERSION;
 export const CLAUDE_DEEPSEEK_VERSION_OUTPUT = RELEASE_CLAUDE_VERSION_OUTPUT;
 export const CLAUDE_DEEPSEEK_CLI_SHA256 = RELEASE_CLAUDE_CLI_SHA256;
-export const CLAUDE_DEEPSEEK_METHODS_PROMPT_VERSION = 1;
-export const CLAUDE_DEEPSEEK_CLIENT_PROMPT_VERSION = 1;
+export const CLAUDE_DEEPSEEK_METHODS_PROMPT_VERSION = 3;
+export const CLAUDE_DEEPSEEK_CLIENT_PROMPT_VERSION = 3;
 export const CLAUDE_DEEPSEEK_METHODS_CALLS = 1;
 export const CLAUDE_DEEPSEEK_E2E_CALLS = 5;
 export const CLAUDE_DEEPSEEK_METHODS_TOKEN_LIMIT = 1_000_000;
@@ -53,6 +56,7 @@ export const CLAUDE_DEEPSEEK_NO_PROGRESS_SECONDS = 300;
 export const CLAUDE_DEEPSEEK_SCENARIOS = Object.freeze([...STANDALONE_CODEX_LUNA_SCENARIOS]);
 export const CLAUDE_DEEPSEEK_REGISTRATION_ID = "rpc-timeout-methods-v1";
 export const CLAUDE_DEEPSEEK_SKILL_NAME = "diagnose-rpc-timeout";
+export const CLAUDE_DEEPSEEK_MODULE = "rpc";
 export const CLAUDE_DEEPSEEK_PUBLIC_TOOLS = Object.freeze([
   "problem_locator_create_case",
   "problem_locator_prepare_attachment",
@@ -167,22 +171,84 @@ export function validateClaudeDeepseekIdentity(claudeEntry, claudeSettings) {
   });
 }
 
-export function buildMethodsProducerIdentity({ wiki, metaSkillRoot, registrationTemplate, claudeIdentity }) {
+function productTreeDigest(packageRoot) {
+  const entries = treeManifest(packageRoot)
+    .filter((item) => item.kind === "file" && item.path !== ".DS_Store" && !item.path.endsWith(".pyc") && !item.path.split("/").includes("__pycache__") && !item.path.split("/").includes(".pytest_cache") && item.path !== ".managed" && !path.posix.basename(item.path).startsWith(".managed.") && item.path !== ".codex-managed")
+    .map(({ path: relative, size, sha256 }) => ({ path: relative, size, sha256 }))
+    .sort((left, right) => left.path < right.path ? -1 : left.path > right.path ? 1 : 0);
+  return sha256Bytes(canonicalJson({ version: 1, entries }));
+}
+
+function registrationRuntimeRef(registrationRoot, registration) {
+  const registrationSha256 = sha256File(path.join(registrationRoot, "registration-template.json"));
+  const packageRoot = path.join(registrationRoot, "package", registration.package.skill_name);
+  const packageTreeSha256 = productTreeDigest(packageRoot);
+  return {
+    id: `diagnosis-skill/${registration.registration_id}`,
+    version: registration.version,
+    content_hash: sha256Bytes(canonicalJson({
+      schema_version: 1,
+      registration_id: registration.registration_id,
+      registration_sha256: registrationSha256,
+      package_tree_sha256: packageTreeSha256,
+    })),
+  };
+}
+
+export function validateRegistrationRoot(registrationRoot, { module = CLAUDE_DEEPSEEK_MODULE } = {}) {
+  const root = path.resolve(registrationRoot);
+  requireContract(fs.existsSync(root) && fs.statSync(root).isDirectory(), "CLAUDE_DEEPSEEK_REGISTRATION_ROOT_INVALID", "Generated registration root is unavailable");
+  const rootEntries = fs.readdirSync(root, { withFileTypes: true });
+  requireContract(rootEntries.length === 2 && rootEntries.some((item) => item.name === "registration-template.json" && item.isFile()) && rootEntries.some((item) => item.name === "package" && item.isDirectory()), "CLAUDE_DEEPSEEK_REGISTRATION_TREE_INVALID", "Registration root must contain exactly registration-template.json and package");
+  const registration = readJson(path.join(root, "registration-template.json"), "generated registration template");
+  requireContract(registration.schema_version === 1 && registration.registration_id === path.basename(root) && registration.registration_id === CLAUDE_DEEPSEEK_REGISTRATION_ID && registration.version === "1.0.0" && registration.deployment_scope === "PRODUCTION", "CLAUDE_DEEPSEEK_REGISTRATION_INVALID", "Generated registration identity is invalid");
+  requireContract(registration.package?.relative_path === `package/${CLAUDE_DEEPSEEK_SKILL_NAME}` && registration.package?.skill_name === CLAUDE_DEEPSEEK_SKILL_NAME, "CLAUDE_DEEPSEEK_REGISTRATION_PACKAGE_INVALID", "Generated registration package binding is invalid");
+  const packageParent = path.join(root, "package");
+  const packageChildren = fs.readdirSync(packageParent, { withFileTypes: true });
+  requireContract(packageChildren.length === 1 && packageChildren[0].isDirectory() && packageChildren[0].name === CLAUDE_DEEPSEEK_SKILL_NAME, "CLAUDE_DEEPSEEK_REGISTRATION_PACKAGE_INVALID", "Registration package must contain the generated Skill exactly once");
+  const packageRoot = path.join(packageParent, CLAUDE_DEEPSEEK_SKILL_NAME);
+  const methods = readJson(path.join(packageRoot, "methods.json"), "generated methods manifest");
+  const requiredPrefix = ["problem_time", "client_slot", "client_process_name", "server_slot", "server_process_name", "client_pid", "server_pid"];
+  requireContract(requiredPrefix.every((name, index) => methods.required_user_inputs?.[index] === name) && methods.required_artifacts?.includes("log_archive"), "CLAUDE_DEEPSEEK_METHODS_INPUTS_INVALID", "Generated Methods inputs do not bind the fixed dual-end anchors");
+  const preprocessing = registration.runtime?.preprocessing;
+  const anchors = preprocessing?.logparse_plan?.anchors;
+  const expectedAnchors = [
+    { label: "client", slot: "client_slot", process: "client_process_name", pid: "client_pid" },
+    { label: "server", slot: "server_slot", process: "server_process_name", pid: "server_pid" },
+  ];
+  requireContract(preprocessing?.requires_logparse === true && preprocessing?.logparse_product === "default" && preprocessing?.logparse_plan?.attachment_requirement === "log_archive" && preprocessing?.logparse_plan?.problem_time_binding?.source === "USER_FACT" && preprocessing.logparse_plan.problem_time_binding.name === "problem_time" && Array.isArray(anchors) && anchors.length === 2, "CLAUDE_DEEPSEEK_PREPROCESSING_INVALID", "Generated registration Logparse preprocessing contract is invalid");
+  for (const [index, expected] of expectedAnchors.entries()) {
+    const anchor = anchors[index];
+    requireContract(anchor?.label === expected.label && anchor.module?.source === "SKILL_FIXED" && anchor.module.value === module && anchor.slot?.source === "USER_FACT" && anchor.slot.name === expected.slot && anchor.process_name?.source === "USER_FACT" && anchor.process_name.name === expected.process && anchor.pid?.source === "USER_FACT" && anchor.pid.name === expected.pid, "CLAUDE_DEEPSEEK_ANCHOR_BINDING_INVALID", "Generated registration anchor binding drifted", { label: expected.label });
+  }
+  const skillText = fs.readFileSync(path.join(packageRoot, "SKILL.md"), "utf8");
+  const invokesHelper = skillText.split(/\r?\n/u).some((line) => /logparse-diagnose/iu.test(line) && /(?:调用|加载|使用|执行|invoke|load|use|call|run)/iu.test(line) && !/(?:不|不得|禁止|不要|无需|do not|must not|never)/iu.test(line));
+  const directBroker = skillText.split(/\r?\n/u).some((line) => /^\s*`?problem-locator-logparse(?:\s|`|$)/u.test(line));
+  requireContract(!invokesHelper && !directBroker, "CLAUDE_DEEPSEEK_GENERATED_SKILL_PREPROCESSING_FORBIDDEN", "Generated Methods Skill must consume frozen inputs and must not invoke the Helper or broker");
+  return Object.freeze({ root, registration, package_root: packageRoot, runtime_ref: registrationRuntimeRef(root, registration) });
+}
+
+export function buildRegistrationProducerIdentity({ wiki, metaSkillRoot, claudeIdentity, module = CLAUDE_DEEPSEEK_MODULE }) {
   ordinaryFile(wiki, "canonical Wiki");
-  ordinaryFile(registrationTemplate, "registration template");
   const outputContract = path.join(metaSkillRoot, "references", "output-contract.md");
   const validator = path.join(metaSkillRoot, "scripts", "validate_generated_skill.py");
+  const runner = path.join(RUNTIME_ROOT, "claude-deepseek-methods-runner.mjs");
   ordinaryFile(outputContract, "Methods output contract");
   ordinaryFile(validator, "Methods validator");
+  ordinaryFile(runner, "registration generation runner");
+  requireContract(module === CLAUDE_DEEPSEEK_MODULE, "CLAUDE_DEEPSEEK_MODULE_INVALID", "Registration generation module must be rpc");
   requireContract(claudeIdentity?.status === "PASS", "CLAUDE_DEEPSEEK_IDENTITY_INVALID", "Claude identity must be validated before building a producer identity");
   const inputs = {
     schema_version: 1,
     contract_version: CLAUDE_DEEPSEEK_CONTRACT_VERSION,
+    registration_id: CLAUDE_DEEPSEEK_REGISTRATION_ID,
+    skill_name: CLAUDE_DEEPSEEK_SKILL_NAME,
+    module,
     wiki: { sha256: sha256File(wiki), size: fs.statSync(wiki).size },
     meta_skill: { tree_sha256: treeDigest(metaSkillRoot, { directoryMode: 0o700 }) },
     output_contract: { sha256: sha256File(outputContract), size: fs.statSync(outputContract).size },
     validator: { sha256: sha256File(validator), size: fs.statSync(validator).size },
-    registration_template: { sha256: sha256File(registrationTemplate), size: fs.statSync(registrationTemplate).size },
+    source_identity: { schema_version: 2, log_template_extraction_version: 2 },
     claude: {
       version: claudeIdentity.cli.version,
       cli_sha256: claudeIdentity.cli.cli_sha256,
@@ -194,45 +260,52 @@ export function buildMethodsProducerIdentity({ wiki, metaSkillRoot, registration
       max_output_tokens: CLAUDE_DEEPSEEK_MAX_OUTPUT_TOKENS,
     },
     generation_prompt_version: CLAUDE_DEEPSEEK_METHODS_PROMPT_VERSION,
-    runner_contract: "claude-deepseek-methods-bootstrap-v1",
+    runner: { contract: "claude-deepseek-registration-generation-v2", sha256: sha256File(runner), size: fs.statSync(runner).size },
   };
   return Object.freeze({ schema_version: 1, producer_identity: sha256Bytes(canonicalJson(inputs)), inputs });
 }
 
-export function methodsCachePath(cacheRoot, producerIdentity) {
-  requireContract(path.isAbsolute(cacheRoot), "CLAUDE_DEEPSEEK_CACHE_ROOT_INVALID", "Methods cache root must be absolute");
+export function registrationCachePath(cacheRoot, producerIdentity) {
+  requireContract(path.isAbsolute(cacheRoot), "CLAUDE_DEEPSEEK_CACHE_ROOT_INVALID", "Registration cache root must be absolute");
   requireContract(/^[a-f0-9]{64}$/.test(producerIdentity), "CLAUDE_DEEPSEEK_PRODUCER_IDENTITY_INVALID", "Producer identity must be SHA-256");
-  return path.join(cacheRoot, "claude-deepseek-methods", producerIdentity);
+  return path.join(cacheRoot, "claude-deepseek-registration", producerIdentity);
 }
 
-export function buildMethodsCacheManifest({ producer, packageRoot, registrationTemplate }) {
+export function buildRegistrationCacheManifest({ producer, registrationRoot }) {
   requireContract(/^[a-f0-9]{64}$/.test(producer?.producer_identity ?? ""), "CLAUDE_DEEPSEEK_PRODUCER_IDENTITY_INVALID", "Producer identity is invalid");
-  const registration = readJson(registrationTemplate, "registration template");
-  requireContract(registration.registration_id === CLAUDE_DEEPSEEK_REGISTRATION_ID && registration.package?.skill_name === CLAUDE_DEEPSEEK_SKILL_NAME, "CLAUDE_DEEPSEEK_REGISTRATION_INVALID", "Registration does not bind the expected Methods package");
-  const files = treeManifest(packageRoot);
-  requireContract(files.length > 0, "CLAUDE_DEEPSEEK_METHODS_PACKAGE_EMPTY", "Methods package is empty");
+  const validated = validateRegistrationRoot(registrationRoot, { module: producer.inputs.module });
+  requireContract(validated.registration.package.source_wiki_sha256 === producer.inputs.wiki.sha256, "CLAUDE_DEEPSEEK_REGISTRATION_SOURCE_MISMATCH", "Generated registration does not bind the producer Wiki bytes");
+  const files = treeManifest(validated.root);
+  requireContract(files.length > 0, "CLAUDE_DEEPSEEK_REGISTRATION_EMPTY", "Generated registration is empty");
   return {
     schema_version: 1,
     producer,
-    package: { skill_name: CLAUDE_DEEPSEEK_SKILL_NAME, tree_sha256: sha256Bytes(canonicalJson(files)), files },
-    registration: { registration_id: CLAUDE_DEEPSEEK_REGISTRATION_ID, template_sha256: sha256File(registrationTemplate) },
+    registration: {
+      registration_id: CLAUDE_DEEPSEEK_REGISTRATION_ID,
+      skill_name: CLAUDE_DEEPSEEK_SKILL_NAME,
+      tree_sha256: sha256Bytes(canonicalJson(files)),
+      files,
+      template_sha256: sha256File(path.join(validated.root, "registration-template.json")),
+      package_tree_sha256: productTreeDigest(validated.package_root),
+      runtime_ref: validated.runtime_ref,
+    },
     publish: { strategy: "staging-directory-atomic-rename", collision: "byte-identical-only" },
   };
 }
 
-export function validateMethodsCache({ cacheRoot, producer, registrationTemplate }) {
-  const root = methodsCachePath(cacheRoot, producer.producer_identity);
-  const manifest = readJson(path.join(root, "manifest.json"), "Methods cache manifest");
-  const packageRoot = path.join(root, "package", CLAUDE_DEEPSEEK_SKILL_NAME);
-  const expected = buildMethodsCacheManifest({ producer, packageRoot, registrationTemplate });
-  requireContract(canonicalJson(manifest) === canonicalJson(expected), "CLAUDE_DEEPSEEK_METHODS_CACHE_IDENTITY_MISMATCH", "Methods cache, package bytes, or producer identity drifted");
-  return Object.freeze({ schema_version: 1, status: "PASS", root, package_root: packageRoot, manifest });
+export function validateRegistrationCache({ cacheRoot, producer }) {
+  const root = registrationCachePath(cacheRoot, producer.producer_identity);
+  const manifest = readJson(path.join(root, "manifest.json"), "registration cache manifest");
+  const registrationRoot = path.join(root, "registration", CLAUDE_DEEPSEEK_REGISTRATION_ID);
+  const expected = buildRegistrationCacheManifest({ producer, registrationRoot });
+  requireContract(canonicalJson(manifest) === canonicalJson(expected), "CLAUDE_DEEPSEEK_REGISTRATION_CACHE_IDENTITY_MISMATCH", "Registration cache, generated bytes, or producer identity drifted");
+  return Object.freeze({ schema_version: 1, status: "PASS", root, registration_root: registrationRoot, package_root: path.join(registrationRoot, "package", CLAUDE_DEEPSEEK_SKILL_NAME), manifest });
 }
 
-export function assertMethodsPackageUnchanged(cacheReceipt) {
-  requireContract(cacheReceipt?.status === "PASS", "CLAUDE_DEEPSEEK_METHODS_CACHE_RECEIPT_INVALID", "Methods cache receipt is invalid");
-  const current = treeDigest(cacheReceipt.package_root);
-  requireContract(current === cacheReceipt.manifest.package.tree_sha256, "CLAUDE_DEEPSEEK_METHODS_PACKAGE_DRIFT", "Frozen Methods package changed");
+export function assertRegistrationUnchanged(cacheReceipt) {
+  requireContract(cacheReceipt?.status === "PASS", "CLAUDE_DEEPSEEK_REGISTRATION_CACHE_RECEIPT_INVALID", "Registration cache receipt is invalid");
+  const current = treeDigest(cacheReceipt.registration_root);
+  requireContract(current === cacheReceipt.manifest.registration.tree_sha256, "CLAUDE_DEEPSEEK_REGISTRATION_DRIFT", "Frozen generated registration changed");
   return { schema_version: 1, status: "PASS", tree_sha256: current };
 }
 
@@ -264,11 +337,21 @@ export function claudeDeepseekE2ECallCount(scenarioId) {
   return claudeDeepseekE2EPhases(scenarioId).length;
 }
 
+export function mapScenarioToCreateCase(facts) {
+  const base = mapBaseScenarioToCreateCase(facts);
+  return Object.freeze({
+    ...base,
+    initial_user_fact_names: ["problem_time", "client_slot", "client_process_name", "server_slot", "server_process_name", "service", "api"],
+    initial_user_fact_values: [base.initial_user_fact_values[0], facts.client_slot, facts.client_process, facts.server_slot, facts.server_process, facts.service, facts.api],
+  });
+}
+
 export function auditClaudeInvocations(invocations, { workflow, scenarioId = null }) {
-  const phases = workflow === "methods" ? ["METHODS_BOOTSTRAP"] : claudeDeepseekE2EPhases(scenarioId);
-  const tokenLimit = workflow === "methods" ? CLAUDE_DEEPSEEK_METHODS_TOKEN_LIMIT : CLAUDE_DEEPSEEK_E2E_TOKEN_LIMIT;
-  const costLimit = workflow === "methods" ? CLAUDE_DEEPSEEK_METHODS_USD_LIMIT : CLAUDE_DEEPSEEK_E2E_USD_LIMIT;
-  const turnLimit = workflow === "methods" ? CLAUDE_DEEPSEEK_METHODS_MAX_TURNS : CLAUDE_DEEPSEEK_E2E_MAX_TURNS;
+  const generation = workflow === "generation";
+  const phases = generation ? ["REGISTRATION_GENERATION"] : claudeDeepseekE2EPhases(scenarioId);
+  const tokenLimit = generation ? CLAUDE_DEEPSEEK_METHODS_TOKEN_LIMIT : CLAUDE_DEEPSEEK_E2E_TOKEN_LIMIT;
+  const costLimit = generation ? CLAUDE_DEEPSEEK_METHODS_USD_LIMIT : CLAUDE_DEEPSEEK_E2E_USD_LIMIT;
+  const turnLimit = generation ? CLAUDE_DEEPSEEK_METHODS_MAX_TURNS : CLAUDE_DEEPSEEK_E2E_MAX_TURNS;
   requireContract(Array.isArray(invocations) && invocations.length === phases.length, "CLAUDE_DEEPSEEK_INVOCATION_COUNT_INVALID", "Claude process cardinality drifted", { expected: phases.length, actual: invocations?.length ?? null });
   for (const [index, item] of invocations.entries()) {
     requireContract(
@@ -281,7 +364,7 @@ export function auditClaudeInvocations(invocations, { workflow, scenarioId = nul
       && Number.isSafeInteger(item.turns)
       && item.turns > 0
       && item.turns <= turnLimit
-      && item.wall_timeout_seconds === (workflow === "methods" ? CLAUDE_DEEPSEEK_METHODS_WALL_SECONDS : CLAUDE_DEEPSEEK_CALL_WALL_SECONDS)
+      && item.wall_timeout_seconds === (generation ? CLAUDE_DEEPSEEK_METHODS_WALL_SECONDS : CLAUDE_DEEPSEEK_CALL_WALL_SECONDS)
       && Date.parse(item.finished_at_utc) >= Date.parse(item.started_at_utc),
       "CLAUDE_DEEPSEEK_INVOCATION_IDENTITY_INVALID",
       "Claude phase, identity, retry, terminal, turn, timeout, or timestamp contract drifted",
@@ -343,9 +426,9 @@ function shellWords(command) {
   return words.map((word) => ((word.startsWith("'") && word.endsWith("'")) || (word.startsWith('"') && word.endsWith('"'))) ? word.slice(1, -1) : word);
 }
 
-export function auditClientBash(commands, { archivePath, archive, descriptor }) {
+export function auditClientBash(commands, { archivePath, archive, descriptor, download = null }) {
   requireContract(Array.isArray(commands), "CLAUDE_DEEPSEEK_BASH_LEDGER_INVALID", "Bash ledger must be an array");
-  requireContract(commands.length === 3, "CLAUDE_DEEPSEEK_BASH_CARDINALITY_INVALID", "Client must run exactly openssl, stat, and one curl PUT");
+  requireContract(commands.length === (download === null ? 3 : 6), "CLAUDE_DEEPSEEK_BASH_CARDINALITY_INVALID", "Client Bash command cardinality does not match the upload/download workflow");
   const parsed = commands.map((entry) => ({ ...entry, words: shellWords(entry.command) }));
   requireContract(parsed.every((entry) => entry.status === "completed" && entry.exit_code === 0), "CLAUDE_DEEPSEEK_BASH_RESULT_INVALID", "Every allowed Bash command must complete successfully");
   requireContract(parsed[0].words[0] === "/usr/bin/openssl" && parsed[0].words[1] === "dgst" && parsed[0].words[2] === "-sha256" && parsed[0].words[3] === archivePath && parsed[0].words.length === 4, "CLAUDE_DEEPSEEK_OPENSSL_COMMAND_INVALID", "openssl command is not the exact digest command");
@@ -354,26 +437,34 @@ export function auditClientBash(commands, { archivePath, archive, descriptor }) 
   requireContract(curl.words[0] === "/usr/bin/curl" && curl.words.includes("PUT") && curl.words.includes(descriptor.url) && curl.words.includes(archivePath), "CLAUDE_DEEPSEEK_CURL_COMMAND_INVALID", "curl command is not bound to the UploadDescriptor and archive");
   requireContract((curl.words.filter((word) => word === "-H" || word === "--header").length === Object.keys(descriptor.required_headers).length), "CLAUDE_DEEPSEEK_CURL_HEADERS_INVALID", "curl must carry each and only each required upload header");
   requireContract(String(parsed[0].stdout ?? "").toLowerCase().includes(archive.sha256) && String(parsed[1].stdout ?? "").trim() === String(archive.size), "CLAUDE_DEEPSEEK_ATTACHMENT_PRECHECK_INVALID", "openssl/stat receipts do not match the deterministic ZIP");
-  return { schema_version: 1, status: "PASS", command_count: 3, programs: parsed.map((entry) => entry.words[0]), upload_count: 1 };
+  if (download !== null) {
+    requireContract(typeof download.path === "string" && path.isAbsolute(download.path) && Number.isSafeInteger(download.artifact?.size) && /^[a-f0-9]{64}$/u.test(download.artifact?.sha256 ?? "") && typeof download.artifact?.download_url === "string", "CLAUDE_DEEPSEEK_DOWNLOAD_DESCRIPTOR_INVALID", "Artifact download audit input is invalid");
+    const get = parsed[3];
+    requireContract(get.words[0] === "/usr/bin/curl" && get.words.includes("GET") && get.words.includes("--output") && get.words.includes(download.path) && get.words.includes(download.artifact.download_url), "CLAUDE_DEEPSEEK_DOWNLOAD_COMMAND_INVALID", "curl GET is not bound to list_artifacts download_url and the frozen result path");
+    requireContract(parsed[4].words[0] === "/usr/bin/stat" && parsed[4].words[1] === "-f" && parsed[4].words[2] === "%z" && parsed[4].words[3] === download.path && parsed[4].words.length === 4, "CLAUDE_DEEPSEEK_DOWNLOAD_STAT_INVALID", "Downloaded result stat command is invalid");
+    requireContract(parsed[5].words[0] === "/usr/bin/openssl" && parsed[5].words[1] === "dgst" && parsed[5].words[2] === "-sha256" && parsed[5].words[3] === download.path && parsed[5].words.length === 4, "CLAUDE_DEEPSEEK_DOWNLOAD_OPENSSL_INVALID", "Downloaded result digest command is invalid");
+    requireContract(String(parsed[4].stdout ?? "").trim() === String(download.artifact.size) && String(parsed[5].stdout ?? "").toLowerCase().includes(download.artifact.sha256), "CLAUDE_DEEPSEEK_DOWNLOAD_CHECK_INVALID", "Downloaded result size or SHA-256 receipt differs from list_artifacts");
+  }
+  return { schema_version: 2, status: "PASS", command_count: parsed.length, programs: parsed.map((entry) => entry.words[0]), upload_count: 1, download_count: download === null ? 0 : 1 };
 }
 
-export function publishMethodsCacheAtomically({ cacheRoot, producer, packageRoot, registrationTemplate, stagingRoot }) {
-  const destination = methodsCachePath(cacheRoot, producer.producer_identity);
-  const manifest = buildMethodsCacheManifest({ producer, packageRoot, registrationTemplate });
+export function publishRegistrationCacheAtomically({ cacheRoot, producer, registrationRoot, stagingRoot }) {
+  const destination = registrationCachePath(cacheRoot, producer.producer_identity);
+  const manifest = buildRegistrationCacheManifest({ producer, registrationRoot });
   const stage = path.resolve(stagingRoot);
   requireContract(!fs.existsSync(stage), "CLAUDE_DEEPSEEK_CACHE_STAGING_EXISTS", "Cache staging directory already exists");
-  fs.mkdirSync(path.join(stage, "package"), { recursive: true, mode: 0o700 });
-  fs.cpSync(packageRoot, path.join(stage, "package", CLAUDE_DEEPSEEK_SKILL_NAME), { recursive: true, errorOnExist: true, force: false });
+  fs.mkdirSync(path.join(stage, "registration"), { recursive: true, mode: 0o700 });
+  fs.cpSync(registrationRoot, path.join(stage, "registration", CLAUDE_DEEPSEEK_REGISTRATION_ID), { recursive: true, errorOnExist: true, force: false });
   fs.writeFileSync(path.join(stage, "manifest.json"), canonicalJson(manifest), { encoding: "utf8", mode: 0o600, flag: "wx" });
   fs.mkdirSync(path.dirname(destination), { recursive: true, mode: 0o700 });
   try { fs.renameSync(stage, destination); } catch (error) {
-    if (error.code !== "EEXIST" && error.code !== "ENOTEMPTY") throw error;
-    const existing = validateMethodsCache({ cacheRoot, producer, registrationTemplate });
+    if (!["EEXIST", "ENOTEMPTY", "EPERM"].includes(error.code) || !fs.existsSync(destination)) throw error;
+    const existing = validateRegistrationCache({ cacheRoot, producer });
     requireContract(canonicalJson(existing.manifest) === canonicalJson(manifest), "CLAUDE_DEEPSEEK_CACHE_COLLISION", "Existing producer identity contains different bytes");
     fs.rmSync(stage, { recursive: true });
     return { ...existing, published: false, collision: "byte-identical" };
   }
-  const receipt = validateMethodsCache({ cacheRoot, producer, registrationTemplate });
+  const receipt = validateRegistrationCache({ cacheRoot, producer });
   return { ...receipt, published: true, collision: null };
 }
 
@@ -387,7 +478,6 @@ export {
   buildDeterministicLogsZip,
   loadScenarioFacts,
   loadScenarioOracle,
-  mapScenarioToCreateCase,
   packageTreeIdentity,
   scenarioPaths,
   writeDeterministicLogsZip,

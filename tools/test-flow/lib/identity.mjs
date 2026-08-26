@@ -360,6 +360,7 @@ export function stageIdentity(stage, identitySets, policies) {
   };
   if (!stateful && policies.scenario !== null && policies.scenario !== undefined) producerPayload.scenario = policies.scenario;
   if (policies.methods_package_digest !== null && policies.methods_package_digest !== undefined) producerPayload.methods_package_digest = policies.methods_package_digest;
+  if (policies.registration_tree_digest !== null && policies.registration_tree_digest !== undefined) producerPayload.registration_tree_digest = policies.registration_tree_digest;
   const producerIdentity = sha256Bytes(canonicalJson(producerPayload));
   const proofIdentity = sha256Bytes(canonicalJson({
     schema_version: 2,

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
@@ -32,14 +33,16 @@ import {
 import { canonicalJson, sha256Bytes } from "../../../runtime-support/codex-luna-contract.mjs";
 
 function fixture() {
-  const root = fs.mkdtempSync(path.join("/private/tmp", "macos-luna-e2e-contract-"));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "macos-luna-e2e-contract-"));
   const scenarioRoot = path.join(root, "scenario");
   const rawRoot = path.join(scenarioRoot, "raw");
   fs.mkdirSync(rawRoot, { recursive: true });
   const scenario = {
     scenario_id: "api-execution-overrun",
     problem_time: "2026-08-23T10:00:05.500000+08:00",
+    client_slot: "1",
     client_process: "rpc_client",
+    server_slot: "1",
     server_process: "rpc_server",
     service: "svc_orders",
     api: "Reserve",
@@ -134,13 +137,13 @@ function invocations(phases) {
   }));
 }
 
-test("scenario mapper excludes oracle fields and preserves the five deterministic user facts", () => {
+test("scenario mapper excludes oracle fields and preserves both slots plus deterministic user facts", () => {
   const f = fixture();
   const facts = loadScenarioFacts(path.join(f.scenarioRoot, "case.json"), "api-execution-overrun");
-  assert.deepEqual(Object.keys(facts), ["scenario_id", "problem_time", "client_process", "server_process", "service", "api"]);
+  assert.deepEqual(Object.keys(facts), ["scenario_id", "problem_time", "client_slot", "client_process", "server_slot", "server_process", "service", "api"]);
   const mapped = mapScenarioToCreateCase(facts);
-  assert.deepEqual(mapped.initial_user_fact_names, ["problem_time", "client_process", "server_process", "service", "api"]);
-  assert.deepEqual(mapped.initial_user_fact_values, ["2026-08-23T02:00:05.500Z", facts.client_process, facts.server_process, facts.service, facts.api]);
+  assert.deepEqual(mapped.initial_user_fact_names, ["problem_time", "client_slot", "client_process", "server_slot", "server_process", "service", "api"]);
+  assert.deepEqual(mapped.initial_user_fact_values, ["2026-08-23T02:00:05.500Z", facts.client_slot, facts.client_process, facts.server_slot, facts.server_process, facts.service, facts.api]);
   assert.match(mapped.raw_problem_text, /2026-08-23T02:00:05\.500Z/);
   assert.equal(JSON.stringify(mapped).includes("CONFIRMED"), false);
   assert.throws(

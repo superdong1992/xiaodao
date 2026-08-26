@@ -7,8 +7,9 @@
 
 ## 目标与非目标
 
-这条链路把一份已评审的故障定位 Wiki 转成一个闭合 Methods package，再由
-Problem Locator 产品注册把它绑定到路由、用户输入、Logparse 产品与运行时资产。
+这条链路把一份已评审的故障定位 Wiki 转成一个闭合 Methods package。既有 `.agents`
+入口只生成 package，再由 Problem Locator 产品注册绑定路由与运行时；局域网 `.claude`
+入口直接生成包含同一 package 的完整生产 registration root。
 在一份固定日志快照上，系统只允许用可重新对照原始字节的正向证据确认方法；
 日志缺失、不可关联或证据不足必须保留为候选、限制或不可定论。
 
@@ -21,8 +22,10 @@ Agent 决定部署范围、Logparse anchor、运行时资产或权威业务结�
 
 - 状态只接受 State V7 / `v7-contract-r1` 的新空 `DATA_ROOT`，不迁移或恢复
   V1–V6 State、Job 或 Outcome。
-- 元 Skill 的生成物不再包含 `GenerationSpec`、编译 manifest、
-  `diagnosis-skill.json` 或产品 registration。旧 `.claude/skills/wiki-to-diagnosis-skill`
+- 两个现行元 Skill 都不再生成 `GenerationSpec`、编译 manifest 或
+  `diagnosis-skill.json`。`.agents/skills/wiki-to-diagnosis-skill` 只生成 package；
+  `.claude/skills/wiki-to-logparse-diagnosis-skill` 生成当前 Server 可直接加载的
+  `registration-template.json` 与闭合 package。旧 `.claude/skills/wiki-to-diagnosis-skill`
   生成器与旧生成 fixture 不是当前入口。
 - SPECIALIZED DIAGNOSE/REVIEW 不再接受 Agent 生成的 `AgentJobOutcomeDraftV2`，
   不再依赖 manifest verification contract、`verification_contract.py` 或
@@ -39,14 +42,15 @@ Agent 决定部署范围、Logparse anchor、运行时资产或权威业务结�
 | 层 | 拥有的信息 | 不得越界的信息 |
 | --- | --- | --- |
 | 作者 Wiki | 诊断方法、字段含义、正向日志模板、阈值/单位、观测与安全边界 | 产品部署和运行时资产版本 |
-| Wiki 元 Skill | 把 Wiki 忠实转为闭合 Methods package | 产品路由、Logparse 产品/anchor、Agent profile 和 output contract |
+| `.agents` Wiki 元 Skill | 把 Wiki 忠实转为闭合 Methods package | 产品路由、Logparse 产品/anchor、Agent profile 和 output contract |
+| `.claude` 局域网部署元 Skill | 生成完整生产 registration root；固定内置运行时绑定、内部默认 product、作者确认的 module 和双端 USER_FACT anchor | 不得改变 Wiki 诊断语义、固定 slot 或引入客户端本地运行链路 |
 | 产品 registration | 能力描述、部署范围、package 绑定、DIAGNOSE/REVIEW 资产、Logparse plan | 不得改写生成 package 的 Wiki 语义 |
 | Runtime | no-plan preflight、两 Pass 隔离、字节冻结、grounding、域模型映射、权威 Outcome | 不信任 Agent 摘要或自报证据 |
 | Test Flow Gate | 身份、工具轨迹、canonical validator、模型不可见的语义 oracle、主机/服务器证明 | 不向生成 Agent 泄露 oracle 或 registration |
 
 ## 闭合 Methods package
 
-`wiki-to-diagnosis-skill` 只生成以下目录：
+`.agents/skills/wiki-to-diagnosis-skill` 只生成以下目录：
 
 ```text
 <skill-name>/
@@ -71,13 +75,15 @@ package 根目录只能有这三类条目。`methods.json@1` 使用 exact-key �
 运行时必须扫描全部目标日志，不能在第一个 marker 命中后短路。抑制、限流、
 采样或条件打印只能形成未知边界，不能把日志缺失转换为排除证据。
 
-生成合同把两处原本可能由模型自由改写的表面表示机械化：`log_derived_fields` 按 Wiki `text`
+package-only 生成合同把两处原本可能由模型自由改写的表面表示机械化：`log_derived_fields` 按 Wiki `text`
 日志模板中命名占位符的首次出现顺序收集并排除用户输入；`evidence_markers` 使用第一个占位符前的
 完整稳定字面前缀（模板以占位符开头时使用最长稳定片段）。canonical validator 与 gate-only oracle
 必须遵循同一规则，因此不能用语义相近但字节不同的 marker，也不能让 oracle 漏掉日志命名字段。
 
 元 Skill 自带的 validator 校验目录、字段、frontmatter、Wiki hash、引用、方法卡标题和
-原文 marker，但不代替场景诊断或产品注册。
+原文 marker，但不代替场景诊断。局域网部署元 Skill 还校验完整 registration、固定运行时
+绑定、双端动态 slot/process、可选 PID、作者确认 module 和生产部署范围；其日志模板提取版本
+同时识别 `text` fence 与无语言 fence。
 
 ## 产品 registration 与身份
 
@@ -105,6 +111,11 @@ Job 的 `diagnosis-skill/<registration-id>` ref 绑定 registration version 与 
 registration 或 package 任一字节变化都会改变身份，已冻结 Job 不能被当前 Catalog
 静默替换。生产 Catalog 拒绝 `TEST_ONLY` 注册。
 
+局域网部署元 Skill 的输出目录名就是 `registration_id`，registration 使用 `version=1.0.0`、
+`deployment_scope=PRODUCTION` 和产品内置 DIAGNOSE/REVIEW 绑定。`logparse_product=default`
+表示 Broker 不向上游传 `--product`，不是一个用户参数；client/server 共用作者在生成时明确
+提供的 module，slot 与 process name 必须来自本次 Case 的 USER_FACT，PID 只在已提供时使用。
+
 ## 服务端 no-plan preflight
 
 ROUTE 只向声明了全部已提供 USER_FACT 名称的专用 registration 提供候选。
@@ -128,8 +139,9 @@ stdout/stderr 字节预算。
 
 - 使用独立 `<job-id>.logparse-preprocess` Workspace。
 - 不加载或执行 Methods package，不读取目标日志，不写诊断/Review 草稿。
-- 服务端预先写入一份产品 request；Pass A 只能调用一次
-  `problem-locator-logparse parse-targets` 或 `target-logs`。
+- 服务端预先写入一份产品 request；Pass A 必须先恰好加载一次现装
+  `logparse-diagnose`，再由 Helper 调用一次 `problem-locator-logparse parse-targets`
+  或 `target-logs`。Helper 不可用或失败时禁止直接 broker 回退。
 - 服务端在 pass 结束后验证 broker audit、claim、接受请求和 authoritative targets，
   并从已校验资源重新读取每份可交付目标日志的字节。
 
@@ -250,15 +262,19 @@ Test Flow 才在 package 外复制产品 registration，以同一 package 字节
 5. Release planning 冻结 Git 可见工作树；只有与该 source snapshot 精确绑定、最后原子写入且
    可重新校验的 `verdict.json` 能声明通过。
 
+局域网 Claude Code + DeepSeek Fast E2E 复用现有 `claude-deepseek` quick-validation：generation
+缓存完整 registration root，E2E 只消费精确缓存，客户端只加载 `$problem-locator-client` 并经
+HTTP MCP 跑完 ROUTE、LOGPARSE、DIAGNOSE、REVIEW，最后使用公开 download URL 下载并校验
+`result.zip`。它的 standalone verdict 不替代中央 Test Flow 或 Release。
+
 模型名称、预算、超时、执行平台、可执行文件 hash 和缓存 admission 条件由 Test Flow
 版本化配置管理；本文不把某次运行的 run ID 或 snapshot digest 固化为“最新结论”。
 
 ## 完成判据
 
-- 普通 Markdown Wiki 能直接生成只含 `SKILL.md` / `methods.json` / `references/*.md`
-  的闭合 Methods package；其中 `references/source-log-templates.md` 精确绑定 Wiki 的机械模板清单。
-- package 与产品 registration 分离，三层 hash 身份在 Catalog、Job、generation receipt
-  和 Test Flow 中一致。
+- 普通 Markdown Wiki 能由 `.agents` 入口生成闭合 Methods package，也能由局域网 `.claude`
+  入口生成包含该 package 的完整生产 registration root；固定模板引用精确绑定 Wiki 的机械清单。
+- registration 与 package 的三层 hash 身份在 Catalog、Job、generation receipt 和 Test Flow 中一致。
 - 缺少输入时只执行服务端 no-plan preflight，不启动模型；材料齐备后 Pass A
   是唯一 Logparse 能力持有者，Pass B 只读冻结日志。
 - Agent 只写 Methods diagnosis/review 草稿；原始行 grounding、Candidate/Review/Result 映射与

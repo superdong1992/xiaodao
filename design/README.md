@@ -13,8 +13,8 @@
 - 当前活跃产品待办：[`TODO.md`](../TODO.md)
 - 已修复问题、回归历史与专项测试：[`FIXED_ISSUES.md`](../FIXED_ISSUES.md)
 - 公开 MCP 合同：生成的 `schemas/`、运行时 `src/` 合同和 `.claude/skills/problem-locator-client/`
-- Methods Skill 合同：`.agents/skills/wiki-to-diagnosis-skill/`、产品拥有的 `registration-template.json`、内置 output contracts 和运行时加载器
-- 局域网直用 Logparse Skill 合同：`.claude/skills/wiki-to-logparse-diagnosis-skill/`；它与当前 Server Methods registration 分离
+- Methods package 合同：`.agents/skills/wiki-to-diagnosis-skill/`、内置 output contracts 和运行时加载器
+- 局域网部署 registration 生成合同：`.claude/skills/wiki-to-logparse-diagnosis-skill/`；它生成 `registration-template.json` 与闭合 Methods package，供客户端经 MCP 路由到当前 Server 两阶段链路
 
 发生冲突时，机器可校验的 schema、生成资产和运行时代码高于叙述性摘要；叙述文档必须随同一变更同步修正。测试发布结论只来自与对应不可变源码快照绑定的 Test Flow verdict，不能用文档、历史记录、Git 提交本身或代码存在性替代。
 
