@@ -26,7 +26,7 @@ test("service Claude process has no dangerous permission mode or model Bash", ()
   assert.match(source, /Read\(\/\*\*\)/);
   assert.match(source, /Edit\(\/output\/\*\*\)/);
   assert.match(source, /allowToolErrors: true/);
-  assert.match(source, /auditOnlyAllowedTools: \["Bash"\]/);
+  assert.match(source, /auditOnlyAllowedTools: \["Bash", "Glob"\]/);
   assert.equal(source.includes('tools: ["Bash"'), false);
   assert.match(source, /runServiceLogparseCommand/);
   assert.match(source, /logparseEntry: path\.resolve\(values\["logparse-entry"\]\)/);
@@ -38,9 +38,14 @@ test("service prompt closes repository reads and delegates fixed product command
   const prompt = boundedServicePrompt("ROUTE", "frozen product prompt");
   assert.match(prompt, /current working directory is the only readable workspace/);
   assert.match(prompt, /Do not read repository/);
-  assert.match(prompt, /Do not attempt Bash/);
+  assert.match(prompt, /Do not attempt Bash, Glob, Grep/);
+  assert.match(prompt, /natural Simplified Chinese/);
+  assert.match(prompt, /无法确认具体贡献者/);
   assert.match(prompt, /harness runs any fixed product finalizer or Logparse command/);
   assert.match(prompt, /frozen product prompt/);
+  const review = boundedServicePrompt("REVIEW", "review prompt");
+  assert.match(review, /copy every existing candidate limitation sentence verbatim/);
+  assert.match(review, /do not translate, paraphrase, summarize, or drop it/);
 });
 
 test("safe service failure does not project secrets or raw provider output", () => {

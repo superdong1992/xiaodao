@@ -34,7 +34,7 @@ export const CODEX_LUNA_SYSTEM_SKILL_NAMES = Object.freeze([
   "skill-creator",
   "skill-installer",
 ]);
-export const CODEX_LUNA_RAW_SHELL_FUNCTION_NAMES = Object.freeze(["shell_command"]);
+export const CODEX_LUNA_RAW_SHELL_FUNCTION_NAMES = Object.freeze(["shell_command", "wait"]);
 export const CODEX_LUNA_RAW_CUSTOM_TOOL_NAMES = Object.freeze(["apply_patch", "exec", "wait"]);
 export const CODEX_LUNA_RAW_RESPONSE_ITEM_TYPES_ALLOWED = Object.freeze([
   "message",
@@ -134,6 +134,7 @@ const NOTIFICATIONS_ALLOWED = new Set([
   "turn/diff/updated",
   "account/rateLimits/updated",
   "warning",
+  "error",
 ]);
 
 function notificationAllowed(method, mode) {
@@ -300,8 +301,11 @@ export function codexLunaPermissionProfileId(mode) {
   return `${PROFILE_PREFIX}-${normalizedMode(mode)}`;
 }
 
-export function buildCodexLunaAppServerArguments() {
+export function buildCodexLunaAppServerArguments({ workspaceRoot = null } = {}) {
+  const root = workspaceRoot === null ? "<WORKSPACE_ROOT>" : normalizedWorkspaceRoot(workspaceRoot);
   return [
+    "-C",
+    root,
     "app-server",
     "--stdio",
     "--strict-config",
@@ -766,6 +770,7 @@ export function parseCodexLunaAppServerTranscript(transcript, {
   const mcpToolCalls = [];
   const fileChanges = [];
   const warningReceipts = [];
+  const retryableErrorReceipts = [];
 
   for (const [index, message] of messages.entries()) {
     const hasMethod = isNonEmptyString(message.method);
@@ -796,6 +801,17 @@ export function parseCodexLunaAppServerTranscript(transcript, {
     } else if (message.method === "thread/tokenUsage/updated") {
       bindScope(threadIds, turnIds, message.params.threadId, message.params.turnId, message.method);
       usageUpdates.push({ index, usage: normalizeThreadTokenUsage(message.params.tokenUsage) });
+    } else if (message.method === "error") {
+      requireAppServer(isPlainObject(message.params) && message.params.will_retry === true, "CODEX_LUNA_APP_SERVER_RETRYABLE_ERROR_INVALID", "A retained App Server error notification must be explicitly retryable", { line: index + 1 });
+      bindScope(threadIds, turnIds, message.params.threadId, message.params.turnId, message.method);
+      retryableErrorReceipts.push({
+        index,
+        thread_id: message.params.threadId,
+        turn_id: message.params.turnId,
+        codex_error_info: typeof message.params.codex_error_info === "string" ? message.params.codex_error_info : null,
+        http_status_code: Number.isSafeInteger(message.params.http_status_code) ? message.params.http_status_code : null,
+        will_retry: true,
+      });
     } else if (message.method === "rawResponse/completed") {
       requireAppServer(isPlainObject(message.params), "CODEX_LUNA_APP_SERVER_RAW_RESPONSE_INVALID", "rawResponse/completed params are invalid", { line: index + 1 });
       bindScope(threadIds, turnIds, message.params.threadId, message.params.turnId, message.method);
@@ -890,10 +906,17 @@ export function parseCodexLunaAppServerTranscript(transcript, {
           requireAppServer(["completed", "failed", "declined"].includes(item.status), "CODEX_LUNA_APP_SERVER_COMMAND_STATUS_INVALID", "Command execution has no terminal status", { item_id: item.id });
           requireAppServer(item.exitCode === null || Number.isSafeInteger(item.exitCode), "CODEX_LUNA_APP_SERVER_COMMAND_EXIT_INVALID", "Command execution exit code is invalid", { item_id: item.id });
           requireAppServer(item.durationMs === null || safeInteger(item.durationMs), "CODEX_LUNA_APP_SERVER_COMMAND_DURATION_INVALID", "Command execution duration is invalid", { item_id: item.id });
+          const logicalCommand = Array.isArray(item.commandActions)
+            && item.commandActions.length === 1
+            && isPlainObject(item.commandActions[0])
+            && isNonEmptyString(item.commandActions[0].command)
+            ? item.commandActions[0].command
+            : null;
           commandIds.add(item.id);
           commands.push({
             item_id: item.id,
             command: item.command,
+            ...(logicalCommand === null ? {} : { logical_command: logicalCommand }),
             cwd: item.cwd,
             status: item.status,
             exit_code: item.exitCode,
@@ -1035,6 +1058,7 @@ export function parseCodexLunaAppServerTranscript(transcript, {
   const threadId = [...threadIds][0];
   const turnId = [...turnIds][0];
   requireAppServer(warningReceipts.every((warning) => warning.thread_id === null || warning.thread_id === threadId), "CODEX_LUNA_APP_SERVER_WARNING_SCOPE_INVALID", "Warning notification targets another thread");
+  requireAppServer(retryableErrorReceipts.every((receipt) => receipt.thread_id === threadId && receipt.turn_id === turnId), "CODEX_LUNA_APP_SERVER_RETRYABLE_ERROR_SCOPE_INVALID", "Retryable error notification targets another thread or turn");
 
   requireAppServer(threadStart.thread?.id === threadId && threadStarted.message.params.thread?.id === threadId, "CODEX_LUNA_APP_SERVER_THREAD_BINDING_INVALID", "Thread response and notifications disagree");
   requireAppServer(threadStart.model === CODEX_LUNA_MODEL && threadStart.reasoningEffort === CODEX_LUNA_REASONING_EFFORT && threadStart.modelProvider === "openai", "CODEX_LUNA_APP_SERVER_MODEL_IDENTITY_INVALID", "Thread did not use the pinned OpenAI model and reasoning effort");
@@ -1076,6 +1100,12 @@ export function parseCodexLunaAppServerTranscript(transcript, {
   const terminalUsage = usageUpdates.at(-1);
   requireAppServer(terminalUsage.index < turnCompleted.index, "CODEX_LUNA_APP_SERVER_EVENT_ORDER_INVALID", "Terminal token usage was not observed before turn completion");
   requireAppServer(rawResponseUsages.length > 0, "CODEX_LUNA_APP_SERVER_RAW_USAGE_MISSING", "Turn has no raw Responses API usage receipts");
+  requireAppServer(
+    rawShellCalls.size + rawMcpCalls.size === rawShellOutputCallIds.size
+      && [...rawShellCalls.keys(), ...rawMcpCalls.keys()].every((callId) => rawShellOutputCallIds.has(callId)),
+    "CODEX_LUNA_APP_SERVER_RAW_SHELL_OUTPUT_MISSING",
+    "Every allowed raw shell or MCP function call must have exactly one output receipt",
+  );
   requireAppServer(
     rawCustomToolCalls.size === rawCustomToolOutputCallIds.size
       && [...rawCustomToolCalls.keys()].every((callId) => rawCustomToolOutputCallIds.has(callId)),
@@ -1145,6 +1175,7 @@ export function parseCodexLunaAppServerTranscript(transcript, {
     file_changes: fileChanges,
     file_change_count: fileChanges.length,
     warning_receipts: warningReceipts.map(({ index, ...warning }) => warning),
+    retryable_error_receipts: retryableErrorReceipts.map(({ index, ...receipt }) => receipt),
     thread_token_usage: terminalUsage.usage,
     usage: {
       input_tokens: terminalUsage.usage.total.inputTokens,

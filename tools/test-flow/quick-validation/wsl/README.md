@@ -1,19 +1,8 @@
-# Ubuntu 22.04 container wrapper for Quick Validation
+# Ubuntu 22.04 Standalone Fast E2E
 
-This directory adds a sealed Ubuntu 22.04 execution boundary around the existing public Quick Validation
-Goals. It does not define another Goal, Proof, Stage, Gate, model call, cache, evidence format, or validator.
-Inside the container it delegates mechanically to the same canonical entry used by native macOS:
+该 wrapper 在 WSL2 Ubuntu 22.04 的密封 Linux/x64 容器中运行 provider standalone Fast E2E。它不调用中央 `tools/test-flow/run.sh`，也不创建 Goal/Proof/Stage/Gate。
 
-```text
-tools/test-flow/run.sh --track dev --client macos --goal dev.macos-*
-```
-
-The `macos` client value is the existing Goal contract label. The plan and runtime receipts separately record
-that the orchestrator is the sealed Linux/x64 container. The native macOS commands and identities remain
-unchanged.
-
-Build the image from the frozen local caches. The pinned Ubuntu base and all expensive layers are reused when
-they already exist; the script does not request a fresh pull:
+镜像仍从冻结本地缓存构建：
 
 ```bash
 bash tools/test-flow/quick-validation/wsl/prepare-image.sh \
@@ -22,58 +11,32 @@ bash tools/test-flow/quick-validation/wsl/prepare-image.sh \
   --logparse-source /home/xiaodao/quick-validation/src/logparse
 ```
 
-Plan the existing Codex/Luna Methods Goal in the container:
+Codex 九场景计划：
 
 ```bash
 bash tools/test-flow/quick-validation/wsl/run.sh \
-  --provider codex-luna \
+  --provider codex-luna --mode e2e --all-scenarios \
   --cache-root /home/xiaodao/quick-validation/cache \
-  --evidence-root /home/xiaodao/quick-validation/evidence/ubuntu2204-central \
+  --evidence-root /home/xiaodao/quick-validation/evidence/standalone-fast-e2e/codex-luna \
   --codex-auth /home/xiaodao/quick-validation/secrets/codex-auth.json \
-  -- --goal dev.macos-codex-luna-methods \
-  --allow-codex-posthoc-budget \
-  --allow-real-model \
-  --reason 'Run the existing Codex Luna Quick Validation in Ubuntu 22.04' \
-  --hypothesis 'The sealed container changes only the platform runtime boundary' \
-  --expected-evidence 'The existing central Codex Quick verdict and evidence' \
   --plan-only
 ```
 
-Plan the existing Claude/DeepSeek Methods Goal in the container:
+Claude 九场景计划：
 
 ```bash
 bash tools/test-flow/quick-validation/wsl/run.sh \
-  --provider claude-deepseek \
+  --provider claude-deepseek --mode e2e --all-scenarios \
   --cache-root /home/xiaodao/quick-validation/cache \
-  --evidence-root /home/xiaodao/quick-validation/evidence/ubuntu2204-central \
+  --evidence-root /home/xiaodao/quick-validation/evidence/standalone-fast-e2e/claude-deepseek \
   --claude-settings /home/xiaodao/quick-validation/secrets/claude-settings.json \
-  -- --goal dev.macos-claude-deepseek-methods \
-  --allow-real-model \
-  --reason 'Run the existing Claude DeepSeek Quick Validation in Ubuntu 22.04' \
-  --hypothesis 'The sealed container changes only the platform runtime boundary' \
-  --expected-evidence 'The existing central Claude Quick verdict and evidence' \
   --plan-only
 ```
 
-After a Methods cache has passed, select the matching `dev.macos-*-e2e` Goal with the same wrapper. Remove
-`--plan-only` only after reviewing that exact plan and its admission. The wrapper accepts only these four
-existing Quick Goals and owns all platform/runtime paths.
+Methods cache 缺失时改用 `--mode methods` 单独规划和执行。真实 E2E 必须先检查 plan；确认后移除 `--plan-only` 并加入 `--allow-real-model`。
 
-The container runs as UID/GID 0 with Docker's normal root capability set, a read-only root filesystem,
-Docker init, a container-private executable scratch tmpfs, provider-scoped read-only credentials, and no
-Docker socket, added capability, privileged mode, host PID, or host network. Codex alone receives
-`seccomp=unconfined` so its existing bubblewrap permission profile can create the Linux user namespace and
-uid map required by command execution. The wrapper does not add a nested `setpriv`/cap-drop boundary.
-`/private/tmp`, `/usr/bin/python3`, and BSD `stat -f %z` are thin compatibility boundaries for the existing
-tests; their test logic is not copied into the wrapper.
+`--all-scenarios` 由 wrapper 在容器层展开：先用 provider 的九场景 planner 做一次零模型规划，再运行一次共享确定性预检；全部通过后，同时启动九个 Docker 容器。每个容器只执行一个 provider `--scenario`，拥有独立的 PID/网络命名空间、`/tmp`、`/private/tmp`、`/root`、`/run/test-flow-scratch`、服务端口、`DATA_ROOT` 和 evidence 子根。仓库、Methods cache、image seal 和 provider credential 只以受控 bind mount 共享。
 
-For the Codex service phases, Linux project metadata stays in a disposable project beneath the product
-Workspace `runtime/` directory; the product Workspace root therefore remains exactly `inputs/`, `output/`,
-and `runtime/`. Only the phase's bounded ordinary draft is copied back before the existing product finalizer
-or validator runs. Trusted read-only hard-linked inputs are copied into independent files, while generated
-drafts must remain single-link files.
+持久化结果写到 `<evidence-root>/wsl-<provider>-suite-<run-id>/`：九份权威子结论位于 `scenarios/<scenario>/verdict.json`，根 `verdict.json` 按冻结顺序重算调用数和 usage。合同失败不影响其他已启动容器；工程失败也不强杀同伴，待九个已启动容器封存后把根状态置为 `ERROR`。suite 不自动重试。
 
-Both provider E2E service runners receive the frozen finalizer and Logparse CLI paths explicitly and start
-isolated Python with `-I -B`. Each provider forwards semantic `stage.progress` heartbeats to the existing
-Test Flow watchdog. Claude keeps its own private settings, tool-permission, and service Workspace design; it
-does not inherit the Codex bubblewrap or service-project mirror.
+wrapper 在启动容器前核验冻结 image seal 和镜像 ID，容器内 planner 再核验 marker、Ubuntu 22.04 系统身份、挂载的 image seal 和独立 tmpfs scratch。可执行的 work/private 放在临时 scratch，evidence、usage 和 verdict 才写入持久化目录，避免把 Linux sandbox workspace 放进 evidence bind mount。容器使用只读仓库、独立可写 cache/evidence、provider 专属只读凭据、只读根文件系统和 Docker init。Codex 单独启用现有 `seccomp=unconfined`，不增加 privileged、capability、Docker socket、host PID 或 host network。每个场景的服务端仍从空数据根启动，凭据不得进入证据。

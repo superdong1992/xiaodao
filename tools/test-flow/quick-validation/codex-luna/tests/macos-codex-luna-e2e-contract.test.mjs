@@ -18,9 +18,12 @@ import {
   buildMethodsProducerIdentity,
   loadScenarioFacts,
   loadScenarioOracle,
+  STANDALONE_CODEX_LUNA_SCENARIOS,
   MACOS_CODEX_LUNA_PUBLIC_TOOLS,
   MACOS_CODEX_LUNA_CALL_WALL_SECONDS,
   MACOS_CODEX_LUNA_NO_PROGRESS_SECONDS,
+  macosCodexLunaE2ECallCount,
+  macosCodexLunaE2EPhases,
   mapScenarioToCreateCase,
   methodsCachePath,
   validateMethodsCache,
@@ -153,6 +156,30 @@ test("scenario mapper excludes oracle fields and preserves the five deterministi
   assert.match(oracle.source_sha256, /^[a-f0-9]{64}$/);
 });
 
+test("Codex Quick matrix owns all nine exploration scenarios and their lifecycle-aware model phases", () => {
+  const expected = [
+    "api-execution-overrun",
+    "client-receive-blocked",
+    "deadloop-detected",
+    "insufficient-evidence",
+    "multiple-rpc-timeouts",
+    "server-queue-delay",
+    "server-queue-five",
+    "server-queue-single",
+    "unrelated-log-noise",
+  ];
+  assert.deepEqual(STANDALONE_CODEX_LUNA_SCENARIOS, expected);
+  for (const scenarioId of expected) {
+    const casePath = path.join(process.cwd(), "experiments", "rpc-skill-feasibility", "cases", scenarioId, "case.json");
+    const oracle = loadScenarioOracle(casePath, scenarioId);
+    const phases = macosCodexLunaE2EPhases(scenarioId);
+    assert.equal(phases.length, oracle.expected_status === "INSUFFICIENT" ? 4 : 5, scenarioId);
+    assert.equal(macosCodexLunaE2ECallCount(scenarioId), phases.length, scenarioId);
+  }
+  assert.deepEqual(macosCodexLunaE2EPhases("insufficient-evidence"), ["CLIENT", "ROUTE", "LOGPARSE", "DIAGNOSE"]);
+  assert.throws(() => macosCodexLunaE2EPhases("not-owned"), (error) => error.code === "MACOS_CODEX_LUNA_SCENARIO_UNSUPPORTED");
+});
+
 test("logs.zip is byte deterministic, ordered, source-preserving, and refuses overwrite", () => {
   const f = fixture();
   const first = buildDeterministicLogsZip({ clientLog: path.join(f.rawRoot, "client.log"), serverLog: path.join(f.rawRoot, "server.log") });
@@ -281,9 +308,10 @@ test("Methods content cache key excludes validated Codex runtime and platform id
   assert.deepEqual(linuxProducer.inputs.model, { model: "gpt-5.6-luna", reasoning_effort: "medium" });
 });
 
-test("model audit requires one bootstrap or exactly five ordered E2E terminal calls with no retry", () => {
+test("model audit requires one bootstrap or the scenario-specific ordered E2E terminal calls with no retry", () => {
   assert.equal(auditModelInvocations(invocations(["METHODS_BOOTSTRAP"]), { workflow: "methods" }).aggregate.total_tokens, 150);
-  assert.equal(auditModelInvocations(invocations(["CLIENT", "ROUTE", "LOGPARSE", "DIAGNOSE", "REVIEW"]), { workflow: "e2e" }).retry_count, 0);
+  assert.equal(auditModelInvocations(invocations(["CLIENT", "ROUTE", "LOGPARSE", "DIAGNOSE", "REVIEW"]), { workflow: "e2e", scenarioId: "api-execution-overrun" }).retry_count, 0);
+  assert.equal(auditModelInvocations(invocations(["CLIENT", "ROUTE", "LOGPARSE", "DIAGNOSE"]), { workflow: "e2e", scenarioId: "insufficient-evidence" }).retry_count, 0);
   assert.deepEqual(aggregateCodexUsage(invocations(["CLIENT", "ROUTE"]).map((item) => ({ usage: item.usage }))), {
     input_tokens: 200,
     cached_input_tokens: 40,
@@ -292,18 +320,18 @@ test("model audit requires one bootstrap or exactly five ordered E2E terminal ca
     equivalent_usd: 0.000153,
   });
   assert.throws(
-    () => auditModelInvocations(invocations(["CLIENT", "ROUTE", "DIAGNOSE", "REVIEW"]), { workflow: "e2e" }),
+    () => auditModelInvocations(invocations(["CLIENT", "ROUTE", "DIAGNOSE", "REVIEW"]), { workflow: "e2e", scenarioId: "api-execution-overrun" }),
     (error) => error.code === "MACOS_CODEX_LUNA_INVOCATION_COUNT_INVALID",
   );
   const retried = invocations(["CLIENT", "ROUTE", "LOGPARSE", "DIAGNOSE", "REVIEW"]);
   retried[2].retry = 1;
-  assert.throws(() => auditModelInvocations(retried, { workflow: "e2e" }), (error) => error.code === "MACOS_CODEX_LUNA_INVOCATION_IDENTITY_INVALID");
+  assert.throws(() => auditModelInvocations(retried, { workflow: "e2e", scenarioId: "api-execution-overrun" }), (error) => error.code === "MACOS_CODEX_LUNA_INVOCATION_IDENTITY_INVALID");
   const missingUsage = invocations(["CLIENT", "ROUTE", "LOGPARSE", "DIAGNOSE", "REVIEW"]);
   delete missingUsage[4].usage;
-  assert.throws(() => auditModelInvocations(missingUsage, { workflow: "e2e" }), (error) => error.code === "MACOS_CODEX_LUNA_TERMINAL_USAGE_INVALID");
+  assert.throws(() => auditModelInvocations(missingUsage, { workflow: "e2e", scenarioId: "api-execution-overrun" }), (error) => error.code === "MACOS_CODEX_LUNA_TERMINAL_USAGE_INVALID");
   const overBudget = invocations(["CLIENT", "ROUTE", "LOGPARSE", "DIAGNOSE", "REVIEW"]);
   overBudget[0].usage.input_tokens = 2_000_001;
-  assert.throws(() => auditModelInvocations(overBudget, { workflow: "e2e" }), (error) => error.code === "MACOS_CODEX_LUNA_BUDGET_EXCEEDED");
+  assert.throws(() => auditModelInvocations(overBudget, { workflow: "e2e", scenarioId: "api-execution-overrun" }), (error) => error.code === "MACOS_CODEX_LUNA_BUDGET_EXCEEDED");
   assert.equal(MACOS_CODEX_LUNA_CALL_WALL_SECONDS, 600);
   assert.equal(MACOS_CODEX_LUNA_NO_PROGRESS_SECONDS, 180);
 });
@@ -335,4 +363,96 @@ test("oracle is loaded after execution and binds status, marker, forbidden terms
     sealedDiagnosis: { status: "CONFIRMED", confirmed_methods: ["api-complete-method"], evidence: [{ method_id: "api-complete-method", identity_tokens: [], summary: "invented", sources: [{ marker: "API_COMPLETE" }] }] },
     evidenceSources: [],
   }), (error) => error.code === "MACOS_CODEX_LUNA_FORBIDDEN_TERM_PRESENT");
+
+  const insufficient = auditOracle({
+    oracle: { ...oracle, scenario_id: "insufficient-evidence", expected_status: "INSUFFICIENT", expected_branch_markers: [], expected_terms: [], expected_evidence_identities: [], forbidden_evidence_terms: [] },
+    publicCase: { status: "INCONCLUSIVE" },
+    sealedDiagnosis: { status: "INSUFFICIENT", confirmed_methods: [], candidate_methods: ["api-complete-method"], evidence: [] },
+    evidenceSources: [],
+  });
+  assert.equal(insufficient.expected_public_status, "INCONCLUSIVE");
+
+  const partial = auditOracle({
+    oracle: { ...oracle, expected_status: "PARTIAL", expected_branch_markers: [], expected_terms: [], expected_evidence_identities: [], forbidden_evidence_terms: [] },
+    publicCase: { status: "PARTIAL" },
+    sealedDiagnosis: { status: "PARTIAL", confirmed_methods: [], candidate_methods: ["api-complete-method"], evidence: [] },
+    evidenceSources: [],
+  });
+  assert.equal(partial.expected_public_status, "PARTIAL");
+});
+
+test("oracle deduplicates one frozen source cited by two methods but still rejects merged events", () => {
+  const line = "LATE_RESPONSE service=svc_orders api=Reserve request_id=501";
+  const raw = Buffer.from(`${line}\n`);
+  const frozen = {
+    source_id: "client",
+    file_name: "client.log",
+    raw_sha256: sha256Bytes(raw),
+    lines: [line, ""],
+  };
+  const source = {
+    source_id: frozen.source_id,
+    file_name: frozen.file_name,
+    raw_sha256: frozen.raw_sha256,
+    line_number: 1,
+    marker: "LATE_RESPONSE service=",
+    line,
+  };
+  const oracle = {
+    scenario_id: "multiple-rpc-timeouts",
+    expected_status: "CONFIRMED",
+    expected_branch_markers: ["LATE_RESPONSE"],
+    expected_terms: ["request_id=501"],
+    expected_evidence_identities: [{ branch_marker: "LATE_RESPONSE", identity_tokens: ["request_id=501"] }],
+    forbidden_evidence_terms: [],
+  };
+  const duplicatedCitation = {
+    status: "CONFIRMED",
+    confirmed_methods: ["server-receive-queue", "client-receive-queue"],
+    evidence: [
+      { method_id: "server-receive-queue", identity_tokens: ["request_id=501", "service=svc_orders"], sources: [source] },
+      { method_id: "client-receive-queue", identity_tokens: ["request_id=501", "service=svc_orders"], sources: [source] },
+    ],
+  };
+  assert.equal(auditOracle({
+    oracle,
+    publicCase: { status: "COMPLETED" },
+    sealedDiagnosis: duplicatedCitation,
+    evidenceSources: [frozen],
+  }).status, "PASS");
+
+  assert.throws(() => auditOracle({
+    oracle: {
+      ...oracle,
+      expected_evidence_identities: [
+        { branch_marker: "LATE_RESPONSE", identity_tokens: ["request_id=501"] },
+        { branch_marker: "LATE_RESPONSE", identity_tokens: ["service=svc_orders"] },
+      ],
+    },
+    publicCase: { status: "COMPLETED" },
+    sealedDiagnosis: duplicatedCitation,
+    evidenceSources: [frozen],
+  }), (error) => error.code === "MACOS_CODEX_LUNA_EXPECTED_EVIDENCE_IDENTITY_MERGED");
+});
+
+test("single-history queue oracle accepts natural contributor noun and verb forms", () => {
+  const scenarioRoot = path.join(process.cwd(), "experiments", "rpc-skill-feasibility", "cases", "server-queue-single");
+  const oracle = loadScenarioOracle(path.join(scenarioRoot, "case.json"), "server-queue-single");
+  assert.deepEqual(oracle.expected_terms, ["无法确认", "贡献"]);
+  const raw = fs.readFileSync(path.join(scenarioRoot, "raw", "server.log"));
+  const line = raw.toString("utf8").trimEnd();
+  const frozen = { source_id: "server", file_name: "server.log", raw_sha256: sha256Bytes(raw), lines: [line, ""] };
+  const source = { source_id: frozen.source_id, file_name: frozen.file_name, raw_sha256: frozen.raw_sha256, line_number: 1, marker: "QUEUE_HISTORY print_time_ms=", line };
+  for (const limitation of ["无法确认具体贡献者", "无法确认具体是哪个前序 API 贡献了排队"]) {
+    assert.equal(auditOracle({
+      oracle,
+      publicCase: { status: "COMPLETED" },
+      sealedDiagnosis: {
+        status: "CONFIRMED",
+        confirmed_methods: ["server-recv-thread-queuing"],
+        evidence: [{ method_id: "server-recv-thread-queuing", identity_tokens: ["service=svc_billing"], summary: limitation, sources: [source] }],
+      },
+      evidenceSources: [frozen],
+    }).status, "PASS");
+  }
 });

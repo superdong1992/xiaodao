@@ -403,8 +403,9 @@ test("request builders select external auth, an empty runtime-root list, and no 
   assert.deepEqual(buildCodexLunaPermissionProfileListRequest({ workspaceRoot: WORKSPACE }), { method: "permissionProfile/list", id: CODEX_LUNA_APP_SERVER_REQUEST_IDS.permissionProfileList, params: { cwd: WORKSPACE, limit: 100 } });
   assert.deepEqual(buildCodexLunaSkillsListRequest({ workspaceRoot: WORKSPACE }), { method: "skills/list", id: CODEX_LUNA_APP_SERVER_REQUEST_IDS.skillsList, params: { cwds: [WORKSPACE], forceReload: true } });
 
-  const args = buildCodexLunaAppServerArguments();
-  assert.deepEqual(CODEX_LUNA_RAW_SHELL_FUNCTION_NAMES, ["shell_command"]);
+  const args = buildCodexLunaAppServerArguments({ workspaceRoot: WORKSPACE });
+  const argumentReceipt = buildCodexLunaAppServerArguments();
+  assert.deepEqual(CODEX_LUNA_RAW_SHELL_FUNCTION_NAMES, ["shell_command", "wait"]);
   assert.deepEqual(CODEX_LUNA_RAW_CUSTOM_TOOL_NAMES, ["apply_patch", "exec", "wait"]);
   assert.deepEqual(CODEX_LUNA_RAW_RESPONSE_ITEM_TYPES_ALLOWED, ["message", "reasoning", "local_shell_call", "function_call", "function_call_output", "custom_tool_call", "custom_tool_call_output"]);
   assert.deepEqual(CODEX_LUNA_RAW_RESPONSE_ITEM_SANITIZER_FIELDS, {
@@ -426,8 +427,9 @@ test("request builders select external auth, an empty runtime-root list, and no 
     "skill_mcp_dependency_install", "skill_search", "standalone_web_search", "tool_call_mcp_elicitation",
     "tool_suggest", "unbounded_connection_retries", "view_image", "workspace_dependencies",
   ]);
-  assert.deepEqual(args.slice(0, 3), ["app-server", "--stdio", "--strict-config"]);
-  assert.deepEqual(args.slice(3), CODEX_LUNA_DISABLED_FEATURES.flatMap((feature) => ["--disable", feature]));
+  assert.deepEqual(args.slice(0, 5), ["-C", WORKSPACE, "app-server", "--stdio", "--strict-config"]);
+  assert.deepEqual(args.slice(5), CODEX_LUNA_DISABLED_FEATURES.flatMap((feature) => ["--disable", feature]));
+  assert.deepEqual(argumentReceipt.slice(0, 5), ["-C", "<WORKSPACE_ROOT>", "app-server", "--stdio", "--strict-config"]);
   assert.equal(args.includes("shell_tool"), false);
   assert.equal(args.includes("unified_exec"), false);
   assert.equal(args.includes("code_mode_host"), false);
@@ -536,6 +538,34 @@ test("one complete app-server turn binds thread, turn, model, profile, final mes
   assert.deepEqual(parsed.raw_shell_output_call_ids, ["raw-shell-function-1", "raw-local-shell-1"]);
   assert.doesNotMatch(JSON.stringify(parsed), /ignored unified diff/);
   assert.doesNotMatch(JSON.stringify(parsed), new RegExp(SECRET));
+});
+
+test("the pinned Code Mode wait function requires a paired raw output and no namespace", () => {
+  const messages = transcript();
+  const waitCall = messages.find((message) => message.method === "rawResponseItem/completed" && message.params?.item?.type === "function_call");
+  waitCall.params.item.name = "wait";
+  const parsed = parse(messages);
+  assert.deepEqual(parsed.raw_shell_function_names, ["wait"]);
+  assert.deepEqual(parsed.raw_shell_call_ids, ["raw-shell-function-1", "raw-local-shell-1"]);
+  assert.deepEqual(parsed.raw_shell_output_call_ids, ["raw-shell-function-1", "raw-local-shell-1"]);
+
+  const unpaired = transcript();
+  const callIndex = unpaired.findIndex((message) => message.method === "rawResponseItem/completed" && message.params?.item?.type === "function_call");
+  unpaired[callIndex].params.item.name = "wait";
+  const callId = unpaired[callIndex].params.item.call_id;
+  const outputIndex = unpaired.findIndex((message) => message.method === "rawResponseItem/completed" && message.params?.item?.type === "function_call_output" && message.params.item.call_id === callId);
+  unpaired.splice(outputIndex, 1);
+  assert.throws(() => parse(unpaired), (error) => error.code === "CODEX_LUNA_APP_SERVER_RAW_SHELL_OUTPUT_MISSING");
+});
+
+test("one semantic command action is retained alongside the executed outer shell command", () => {
+  const messages = transcript();
+  const command = messages.find((message) => message.method === "item/completed" && message.params?.item?.type === "commandExecution");
+  command.params.item.command = "/bin/bash -c '<escaped>'";
+  command.params.item.commandActions = [{ type: "unknown", command: "archive_sha=$(openssl); curl" }];
+  const parsed = parse(messages);
+  assert.equal(parsed.commands[0].command, "/bin/bash -c '<escaped>'");
+  assert.equal(parsed.commands[0].logical_command, "archive_sha=$(openssl); curl");
 });
 
 test("warning notifications preserve only a closed content receipt and valid thread scope", () => {
@@ -1043,7 +1073,7 @@ test("pinned app-server accepts and reports the strict profile and skill boundar
       disabledSkillPaths: fs.existsSync(inheritedSkill) ? [inheritedSkill] : [],
     });
     fs.writeFileSync(path.join(codexHome, "config.toml"), profile.config_toml, { mode: 0o600 });
-    child = spawn(PINNED_CODEX, buildCodexLunaAppServerArguments(), {
+    child = spawn(PINNED_CODEX, buildCodexLunaAppServerArguments({ workspaceRoot }), {
       cwd: workspace,
       env: {
         HOME: home,

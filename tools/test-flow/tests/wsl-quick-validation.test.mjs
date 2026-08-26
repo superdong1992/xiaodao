@@ -8,6 +8,10 @@ import { fileURLToPath } from "node:url";
 import { quickValidationCodexEntryStrategy, quickValidationScratchRoot } from "../lib/actions.mjs";
 import { supportedQuickValidationOrchestrator } from "../lib/planner.mjs";
 import {
+  WSL_CONTAINER_SUITE_SCENARIOS,
+  buildContainerSuitePlan,
+} from "../quick-validation/wsl/container-suite.mjs";
+import {
   CODEX_LUNA_EXPECTED_CLI_VERSION,
   CODEX_LUNA_LINUX_EXPECTED_CLI_SHA256,
   CODEX_LUNA_LINUX_EXPECTED_CLI_VERSION,
@@ -19,6 +23,42 @@ import {
 const TEST_FLOW_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const WSL_ROOT = path.join(TEST_FLOW_ROOT, "quick-validation", "wsl");
 const MARKED = { TEST_FLOW_QUICK_UBUNTU2204_CONTAINER: "1" };
+
+test("WSL all-scenarios freezes nine isolated containers instead of one provider suite container", () => {
+  const providerPlan = {
+    schema_version: 1,
+    framework: "macos-codex-luna-fast-e2e",
+    goal: "e2e",
+    mode: "e2e-suite",
+    scenarios: [...WSL_CONTAINER_SUITE_SCENARIOS],
+    execution: {
+      entry: "tools/test-flow/quick-validation/codex-luna/run.mjs",
+      expected_model_calls: 44,
+      token_cap: 18_000_000,
+      equivalent_usd_cap: 27,
+      wall_timeout_seconds: 16_200,
+    },
+    admission: { status: "READY", blockers: [] },
+    plan_sha256: "b".repeat(64),
+  };
+  const plan = buildContainerSuitePlan({
+    provider: "codex-luna",
+    providerPlan,
+    imageSeal: {
+      schema_version: 1,
+      image_id: `sha256:${"a".repeat(64)}`,
+      platform: "linux/amd64",
+      profile: "ubuntu22.04-central-v1",
+      status: "PASS",
+    },
+  });
+  assert.equal(plan.execution.topology, "NINE_ISOLATED_CONTAINERS");
+  assert.equal(plan.execution.container_count, 9);
+  assert.equal(plan.execution.max_concurrency, 9);
+  assert.equal(plan.execution.scenarios_per_container, 1);
+  assert.equal(plan.execution.suite_wall_seconds, 1_800);
+  assert.deepEqual(plan.scenarios, WSL_CONTAINER_SUITE_SCENARIOS);
+});
 
 test("central Quick Goals accept native macOS or the explicitly marked Linux container only", () => {
   assert.equal(supportedQuickValidationOrchestrator("darwin", "arm64", {}), true);
@@ -71,23 +111,43 @@ test("the container marker selects only the frozen Linux Codex and app-server id
   assert.equal(quickValidationCodexEntryStrategy({ platform: "linux", architecture: "x64", environment: {} }), "attempt-private-copy");
 });
 
-test("the Ubuntu wrapper delegates provider inputs to the existing central Quick Goals", () => {
+test("the Ubuntu wrapper delegates only to provider standalone Fast E2E entries", () => {
   const launcher = fs.readFileSync(path.join(WSL_ROOT, "run.sh"), "utf8");
+  const containerSuite = fs.readFileSync(path.join(WSL_ROOT, "container-suite.mjs"), "utf8");
   const codexE2E = fs.readFileSync(path.join(TEST_FLOW_ROOT, "quick-validation", "codex-luna", "runtime", "macos-codex-luna-e2e-runner.mjs"), "utf8");
   const codexService = fs.readFileSync(path.join(TEST_FLOW_ROOT, "quick-validation", "codex-luna", "runtime", "macos-codex-luna-service-wrapper.mjs"), "utf8");
   const codexRuntime = fs.readFileSync(path.join(TEST_FLOW_ROOT, "runtime-support", "codex-luna-app-server-runtime.mjs"), "utf8");
-  assert.match(launcher, /tools\/test-flow\/run\.sh/u);
-  assert.doesNotMatch(launcher, /quick-validation\/(?:codex-luna|claude-deepseek)\/run\.sh/u);
-  assert.match(launcher, /--track dev/u);
+  assert.doesNotMatch(launcher, /tools\/test-flow\/run\.sh/u);
+  assert.match(launcher, /quick-validation\/codex-luna\/run\.sh/u);
+  assert.match(launcher, /quick-validation\/claude-deepseek\/run\.sh/u);
+  assert.match(launcher, /--mode/u);
+  assert.match(launcher, /--all-scenarios/u);
+  assert.match(launcher, /container-suite\.mjs/u);
+  assert.match(launcher, /run_scenario_container "\$scenario_id" "\$scenario_container" &/u);
+  assert.match(launcher, /--scenario "\$scenario_id" --allow-real-model/u);
+  assert.match(launcher, /\.children\/\$scenario_id/u);
+  assert.match(launcher, /container-runtime\/\$scenario_id/u);
+  assert.match(launcher, /shared-preflight/u);
+  assert.match(launcher, /-materialize/u);
+  assert.match(launcher, /materialize --suite-root \/suite/u);
+  assert.match(launcher, /run_utility_container[\s\S]*\/private\/tmp:rw,exec,nosuid,nodev,mode=1777/u);
+  assert.match(containerSuite, /NINE_ISOLATED_CONTAINERS/u);
+  assert.match(containerSuite, /container_count: WSL_CONTAINER_SUITE_SCENARIOS\.length/u);
+  assert.match(containerSuite, /max_concurrency: WSL_CONTAINER_SUITE_SCENARIOS\.length/u);
+  assert.match(containerSuite, /FINISH_ALL_STARTED_CONTAINERS/u);
+  assert.doesNotMatch(launcher, /--track dev/u);
   assert.match(launcher, /--client macos/u);
-  assert.match(launcher, /dev\.macos-codex-luna-methods/u);
   assert.match(launcher, /dev\.macos-claude-deepseek-methods/u);
-  assert.match(launcher, /PROVIDER_GOAL_MISMATCH/u);
-  assert.match(launcher, /CONTAINER_OWNED_ARGUMENT/u);
+  assert.match(launcher, /PROVIDER_MODE_MISMATCH/u);
+  assert.match(launcher, /CENTRAL_OR_PROVIDER_OWNED_ARGUMENT/u);
+  assert.match(launcher, /ALL_SCENARIOS_REQUIRES_E2E/u);
+  assert.match(launcher, /SCENARIO_REQUIRES_E2E/u);
   assert.match(launcher, /TEST_FLOW_QUICK_UBUNTU2204_CONTAINER=1/u);
   assert.match(launcher, /TEST_FLOW_QUICK_SCRATCH_ROOT=\/run\/test-flow-scratch/u);
   assert.match(launcher, /TEST_FLOW_PYTHON=\/opt\/venvs\/xiaodao\/bin\/python/u);
   assert.match(launcher, /type=bind,src=\$repo_root,dst=\$repo_root,readonly/u);
+  assert.match(launcher, /cache_mount\+=",readonly"/u);
+  assert.match(launcher, /dst=\/run\/secrets\/image-seal\.json,readonly/u);
   assert.match(launcher, /codex-auth\.json,readonly/u);
   assert.match(launcher, /claude-settings\.json,readonly/u);
   assert.match(launcher, /--security-opt seccomp=unconfined/u);

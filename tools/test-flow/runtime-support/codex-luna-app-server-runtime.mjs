@@ -163,6 +163,43 @@ function digestValue(value) {
   return { redacted_sha256: sha256Bytes(payload), byte_count: Buffer.byteLength(payload) };
 }
 
+const CODEX_ERROR_INFO_SCALARS = new Set([
+  "contextWindowExceeded",
+  "sessionBudgetExceeded",
+  "usageLimitExceeded",
+  "serverOverloaded",
+  "cyberPolicy",
+  "misalignmentPolicyViolation",
+  "internalServerError",
+  "unauthorized",
+  "badRequest",
+  "threadRollbackFailed",
+  "sandboxError",
+  "other",
+]);
+const CODEX_ERROR_INFO_VARIANTS = [
+  "httpConnectionFailed",
+  "responseStreamConnectionFailed",
+  "responseStreamDisconnected",
+  "responseTooManyFailedAttempts",
+  "activeTurnNotSteerable",
+];
+
+function closedErrorNotificationDetails(params) {
+  const source = isPlainObject(params) ? params : {};
+  const rawInfo = isPlainObject(source.error) ? source.error.codexErrorInfo : null;
+  const scalarInfo = typeof rawInfo === "string" && CODEX_ERROR_INFO_SCALARS.has(rawInfo) ? rawInfo : null;
+  const variantInfo = isPlainObject(rawInfo)
+    ? CODEX_ERROR_INFO_VARIANTS.find((name) => Object.hasOwn(rawInfo, name)) ?? null
+    : null;
+  const status = variantInfo === null ? null : rawInfo[variantInfo]?.httpStatusCode;
+  return {
+    codex_error_info: scalarInfo ?? variantInfo,
+    http_status_code: Number.isSafeInteger(status) ? status : null,
+    will_retry: typeof source.willRetry === "boolean" ? source.willRetry : null,
+  };
+}
+
 function sanitizedInboundMessage(message, { redactCanaries }) {
   let safe = redactExactValues(JSON.parse(JSON.stringify(message)), redactCanaries);
   if (safe?.id === CODEX_LUNA_APP_SERVER_REQUEST_IDS.accountRead && isPlainObject(safe.result?.account)) {
@@ -215,6 +252,15 @@ function sanitizedInboundMessage(message, { redactCanaries }) {
     safe.params = {
       threadId: safe.params?.threadId ?? null,
       message_receipt: digestValue(safe.params?.message ?? null),
+    };
+  } else if (safe?.method === "error") {
+    const params = safe.params ?? {};
+    const details = closedErrorNotificationDetails(params);
+    safe.params = {
+      threadId: typeof params.threadId === "string" ? params.threadId : null,
+      turnId: typeof params.turnId === "string" ? params.turnId : null,
+      ...details,
+      error_receipt: digestValue(params),
     };
   } else if (/\/(?:delta|outputDelta)$/.test(safe?.method ?? "")) {
     safe.params = {
@@ -407,6 +453,8 @@ export async function runCodexLunaAppServerCall({
   mcpServer = null,
   disabledSkillPaths = [],
   prompt,
+  developerInstructions = null,
+  maxMcpToolCalls = null,
   outputSchema,
   callRoot,
   privateRoot,
@@ -421,6 +469,8 @@ export async function runCodexLunaAppServerCall({
   expectedCliVersion = codexLunaAppServerCliVersion(),
   onProgress = null,
 }) {
+  requireRuntime(developerInstructions === null || (typeof developerInstructions === "string" && developerInstructions.length > 0 && Buffer.byteLength(developerInstructions, "utf8") <= 4_096), "CODEX_LUNA_APP_SERVER_DEVELOPER_INSTRUCTIONS_INVALID", "Developer instructions must be null or a bounded non-empty string");
+  requireRuntime(maxMcpToolCalls === null || (Number.isSafeInteger(maxMcpToolCalls) && maxMcpToolCalls > 0 && maxMcpToolCalls <= 1_000), "CODEX_LUNA_APP_SERVER_MCP_CALL_LIMIT_INVALID", "MCP call limit must be null or a bounded positive integer");
   const codeModeHostPath = path.join(codexLunaHelperDirectory(codexEntry), "codex-code-mode-host");
   const codeModeHostMetadata = ordinaryFile(codeModeHostPath, "Codex code-mode host");
   requireRuntime((codeModeHostMetadata.mode & 0o111) !== 0, "CODEX_LUNA_CODE_MODE_HOST_NOT_EXECUTABLE", "Codex code-mode host must be executable");
@@ -457,7 +507,7 @@ export async function runCodexLunaAppServerCall({
     ? { schema_version: 1, status: "SKIP", reason: "standalone-lightweight-service" }
     : await probeCodexLunaPermissionProfile({ codexEntry, profile, workspaceRoot, skillPath, forbiddenReadPaths, environment: childEnvironment });
 
-  const appServerArguments = buildCodexLunaAppServerArguments();
+  const appServerArguments = buildCodexLunaAppServerArguments({ workspaceRoot });
   const child = spawn(codexEntry, appServerArguments, {
     cwd: workspaceRoot,
     env: childEnvironment,
@@ -480,6 +530,7 @@ export async function runCodexLunaAppServerCall({
   let noProgressTimedOut = false;
   let completedTurn = false;
   let cleanupStarted = false;
+  let mcpToolCallsStarted = 0;
   let noProgressTimer;
 
   const rejectWaiters = (error) => {
@@ -567,6 +618,13 @@ export async function runCodexLunaAppServerCall({
     }
     inbound.push(message);
     if (!cleanupStarted) persistedInbound.push(sanitizedInboundMessage(message, { redactCanaries: auth.redact_canaries }));
+    if (message.method === "item/started" && message.params?.item?.type === "mcpToolCall") {
+      mcpToolCallsStarted += 1;
+      if (maxMcpToolCalls !== null && mcpToolCallsStarted > maxMcpToolCalls) {
+        abort(new CodexLunaAppServerRuntimeError("CODEX_LUNA_APP_SERVER_MCP_CALL_LIMIT", "Codex app-server exceeded the bounded MCP call count", { limit: maxMcpToolCalls, observed: mcpToolCallsStarted }));
+        return;
+      }
+    }
     if (Object.hasOwn(message, "id") && typeof message.method !== "string") {
       const pending = pendingResponses.get(`${typeof message.id}:${String(message.id)}`);
       if (!pending) {
@@ -582,7 +640,16 @@ export async function runCodexLunaAppServerCall({
       else pending.resolve(message.result);
     } else if (typeof message.method === "string") {
       if (message.method === "error") {
-        abort(new CodexLunaAppServerRuntimeError("CODEX_LUNA_APP_SERVER_ERROR_NOTIFICATION", "Codex app-server emitted an error notification"));
+        const details = closedErrorNotificationDetails(message.params);
+        if (details.will_retry === true) {
+          resolveNotificationWaiters(message);
+          return;
+        }
+        abort(new CodexLunaAppServerRuntimeError(
+          details.will_retry === false ? "CODEX_LUNA_APP_SERVER_ERROR_NOTIFICATION" : "CODEX_LUNA_APP_SERVER_ERROR_NOTIFICATION_INVALID",
+          details.will_retry === false ? "Codex app-server emitted a terminal error notification" : "Codex app-server error notification omitted its retry decision",
+          details,
+        ));
         return;
       }
       resolveNotificationWaiters(message);
@@ -673,7 +740,7 @@ export async function runCodexLunaAppServerCall({
     await request(buildCodexLunaAccountReadRequest());
     await request(buildCodexLunaPermissionProfileListRequest({ workspaceRoot }));
     await request(buildCodexLunaSkillsListRequest({ workspaceRoot }));
-    const thread = await request(buildCodexLunaThreadStartRequest({ workspaceRoot, mode }));
+    const thread = await request(buildCodexLunaThreadStartRequest({ workspaceRoot, mode, developerInstructions }));
     const threadId = thread?.thread?.id;
     requireRuntime(typeof threadId === "string" && threadId.length > 0, "CODEX_LUNA_APP_SERVER_THREAD_START_INVALID", "thread/start did not return a thread id");
     await request(buildCodexLunaTurnStartRequest({ threadId, prompt, workspaceRoot, skillPath: configuredSkillPath, codexHome, mode, outputSchema }));
@@ -700,6 +767,9 @@ export async function runCodexLunaAppServerCall({
   clearTimeout(noProgressTimer);
   if (stdoutPending.trim().length > 0 && !fatalError) fatalError = new CodexLunaAppServerRuntimeError("CODEX_LUNA_APP_SERVER_JSONL_TRUNCATED", "Codex app-server ended with a partial JSONL frame");
   if (fatalError) {
+    if (["CODEX_LUNA_APP_SERVER_WALL_TIMEOUT", "CODEX_LUNA_APP_SERVER_NO_PROGRESS_TIMEOUT", "CODEX_LUNA_APP_SERVER_ERROR_NOTIFICATION", "CODEX_LUNA_APP_SERVER_RAW_SHELL_FUNCTION_REJECTED", "CODEX_LUNA_APP_SERVER_COMMAND_WORKSPACE_INVALID", "CODEX_LUNA_APP_SERVER_MCP_CALL_LIMIT"].includes(fatalError.code) && persistedInbound.length > 0) {
+      persistTranscript(tracePath, persistedInbound);
+    }
     writeFileExclusive(stderrPath, "[Test Flow withheld app-server stderr after a failed secret/protocol boundary.]\n");
     throw fatalError;
   }
@@ -717,7 +787,9 @@ export async function runCodexLunaAppServerCall({
     outbound,
     feature_disables: [...CODEX_LUNA_DISABLED_FEATURES],
     protocol_schema_tree_sha256: CODEX_LUNA_APP_SERVER_SCHEMA_TREE_SHA256,
-    arguments: [...appServerArguments],
+    arguments: buildCodexLunaAppServerArguments(),
+    mcp_tool_call_limit: maxMcpToolCalls,
+    developer_instructions: developerInstructions === null ? null : { sha256: sha256Bytes(developerInstructions), utf8_size: Buffer.byteLength(developerInstructions, "utf8") },
     preflight,
     cleanup: {
       schema_version: 1,

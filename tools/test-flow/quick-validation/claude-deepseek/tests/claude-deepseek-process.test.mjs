@@ -80,6 +80,8 @@ test("process wrapper emits one audited terminal receipt with no retry", async (
   for (const directory of [cwd, configRoot, home, temporary]) fs.mkdirSync(directory);
   fs.writeFileSync(settings, "{}\n");
   fs.writeFileSync(fake, `
+const systemPromptIndex = process.argv.indexOf("--append-system-prompt");
+if (systemPromptIndex < 0 || process.argv[systemPromptIndex + 1] !== "fixed system rule") process.exit(9);
 process.stdin.resume();
 process.stdin.on("end", () => {
   const events = [
@@ -98,6 +100,7 @@ process.stdin.on("end", () => {
     settings,
     cwd,
     prompt: "read",
+    appendSystemPrompt: "fixed system rule",
     phase: "METHODS_BOOTSTRAP",
     invocationId: "run:methods",
     tools: ["Read"],
@@ -113,6 +116,8 @@ process.stdin.on("end", () => {
   assert.equal(result.receipt.status, "PASS");
   assert.equal(result.receipt.retry, 0);
   assert.equal(result.receipt.usage.total_tokens, 20);
+  assert.equal(result.receipt.appended_system_prompt.utf8_size, 17);
+  assert.match(result.receipt.appended_system_prompt.sha256, /^[a-f0-9]{64}$/u);
   assert.equal(fs.readFileSync(tracePath, "utf8").trim().split("\n").length, 4);
   assert.equal(JSON.parse(fs.readFileSync(receiptPath, "utf8")).phase, "METHODS_BOOTSTRAP");
 });

@@ -6,6 +6,9 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import {
+  buildPlan,
+  defaults,
+  executeSuite,
   parseArguments,
   lightVerdict,
   sealLightGate,
@@ -16,8 +19,91 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 test("standalone CLI accepts only the two closed goals and scenario matrix", () => {
   assert.equal(parseArguments(["--goal", "methods"]).goal, "methods");
   assert.equal(parseArguments(["--goal", "e2e", "--scenario", "api-execution-overrun"]).scenario, "api-execution-overrun");
+  assert.equal(parseArguments(["--goal", "e2e", "--scenario", "unrelated-log-noise"]).scenario, "unrelated-log-noise");
+  assert.equal(parseArguments(["--goal", "e2e", "--all-scenarios"])["all-scenarios"], true);
+  assert.throws(() => parseArguments(["--goal", "e2e", "--all-scenarios", "--scenario", "api-execution-overrun"]), (error) => error.code === "LUNA_SCENARIO_SELECTION_CONFLICT");
   assert.throws(() => parseArguments(["--goal", "release.full"]), (error) => error.code === "LUNA_GOAL_INVALID");
   assert.throws(() => parseArguments(["--goal", "e2e", "--scenario", "../raw"]), (error) => error.code === "LUNA_SCENARIO_INVALID");
+});
+
+test("Codex suite plan freezes nine scenarios, 44 calls, and aggregate limits before admission", () => {
+  const options = defaults(parseArguments(["--goal", "e2e", "--all-scenarios", "--plan-only"]));
+  const plan = buildPlan(options);
+  assert.equal(plan.mode, "e2e-suite");
+  assert.equal(plan.scenarios.length, 9);
+  assert.equal(plan.execution.expected_model_calls, 44);
+  assert.equal(plan.execution.token_cap, 18_000_000);
+  assert.equal(plan.execution.equivalent_usd_cap, 27);
+  assert.equal(plan.execution.wall_timeout_seconds, 16_200);
+  assert.equal(plan.execution.per_scenario.find((item) => item.scenario_id === "insufficient-evidence").expected_model_calls, 4);
+});
+
+test("blocked Codex suite writes one aggregate verdict and nine NOT_RUN results without a model", async () => {
+  const runsRoot = fs.mkdtempSync(path.join(os.tmpdir(), "codex-suite-blocked-"));
+  const options = { ...defaults(parseArguments(["--goal", "e2e", "--all-scenarios"])), runsRoot };
+  const result = await executeSuite(options, buildPlan(options));
+  assert.equal(result.verdict.status, "BLOCKED");
+  assert.equal(result.verdict.model_calls.actual, 0);
+  assert.equal(result.verdict.scenarios.filter((item) => item.status === "NOT_RUN").length, 9);
+});
+
+function fakeCodexExecutor({ failureAt = null, failureCode = null, seen }) {
+  return async (options, childPlan, { runRoot }) => {
+    seen.push({ scenario: options.scenario, runRoot, usageRoot: path.join(runRoot, "usage"), evidenceRoot: path.join(runRoot, "evidence") });
+    fs.mkdirSync(runRoot, { recursive: true });
+    const failed = options.scenario === failureAt;
+    const actual = childPlan.execution.expected_model_calls;
+    const verdict = {
+      status: failed ? "FAIL" : "PASS",
+      model_calls: { expected: actual, actual, retry_count: 0 },
+      usage: { input_tokens: actual * 10, cost_usd: actual / 100 },
+      failure: failed ? { code: failureCode, message: "closed fixture failure" } : null,
+      failure_domain: null,
+    };
+    fs.writeFileSync(path.join(runRoot, "verdict.json"), JSON.stringify(verdict));
+    return { verdict, runRoot, exitCode: failed ? 1 : 0 };
+  };
+}
+
+test("Codex suite continues after a contract failure and keeps nine child roots fully isolated", async () => {
+  const runsRoot = fs.mkdtempSync(path.join(os.tmpdir(), "codex-suite-contract-"));
+  const options = { ...defaults(parseArguments(["--goal", "e2e", "--all-scenarios"])), runsRoot, allowRealModel: true };
+  const plan = { ...buildPlan(options), admission: { status: "READY", blockers: [] } };
+  const seen = [];
+  const result = await executeSuite(options, plan, {
+    executeOneImpl: fakeCodexExecutor({ failureAt: plan.scenarios[0], failureCode: "MACOS_CODEX_LUNA_EXPECTED_TERM_MISSING", seen }),
+    runSuiteContractsImpl(destination) { fs.writeFileSync(destination, "fixture preflight\n"); },
+  });
+  assert.equal(result.verdict.status, "FAIL");
+  assert.equal(result.verdict.stop_reason, null);
+  assert.deepEqual(seen.map((item) => item.scenario), plan.scenarios);
+  assert.equal(new Set(seen.map((item) => item.runRoot)).size, 9);
+  assert.equal(new Set(seen.map((item) => item.usageRoot)).size, 9);
+  assert.equal(new Set(seen.map((item) => item.evidenceRoot)).size, 9);
+  assert.equal(result.verdict.scenarios[0].failure_domain, "CONTRACT");
+  assert.equal(result.verdict.model_calls.actual, result.verdict.scenarios.reduce((sum, item) => sum + item.model_calls.actual, 0));
+  assert.equal(result.verdict.usage.input_tokens, result.verdict.scenarios.reduce((sum, item) => sum + item.usage.input_tokens, 0));
+  assert.equal(result.verdict.summary.completed, 9);
+  assert.equal(result.verdict.summary.not_run, 0);
+});
+
+test("Codex suite stops immediately after an engineering failure", async () => {
+  const runsRoot = fs.mkdtempSync(path.join(os.tmpdir(), "codex-suite-engineering-"));
+  const options = { ...defaults(parseArguments(["--goal", "e2e", "--all-scenarios"])), runsRoot, allowRealModel: true };
+  const plan = { ...buildPlan(options), admission: { status: "READY", blockers: [] } };
+  const seen = [];
+  const result = await executeSuite(options, plan, {
+    executeOneImpl: fakeCodexExecutor({ failureAt: plan.scenarios[1], failureCode: "MACOS_CODEX_LUNA_MCP_READINESS_TIMEOUT", seen }),
+    runSuiteContractsImpl(destination) { fs.writeFileSync(destination, "fixture preflight\n"); },
+  });
+  assert.equal(result.verdict.status, "ERROR");
+  assert.deepEqual(seen.map((item) => item.scenario), plan.scenarios.slice(0, 2));
+  assert.equal(result.verdict.summary.completed, 2);
+  assert.equal(result.verdict.summary.attempted, 2);
+  assert.equal(result.verdict.summary.not_run, 7);
+  assert.equal(result.verdict.scenarios[2].status, "NOT_RUN");
+  assert.equal(result.verdict.stop_reason.domain, "ENGINEERING");
+  assert.equal(result.verdict.stop_reason.failure.scenario_id, plan.scenarios[1]);
 });
 
 test("standalone entry does not import or invoke the old orchestrator stack", () => {

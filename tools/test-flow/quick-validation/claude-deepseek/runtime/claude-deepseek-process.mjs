@@ -143,6 +143,7 @@ export async function runClaudeProcess(options, { ambient = process.env, onProgr
   requireProcess(Array.isArray(options.tools) && options.tools.length > 0 && options.tools.every((item) => typeof item === "string" && item), "CLAUDE_DEEPSEEK_PROCESS_TOOLS_INVALID", "Claude tool inventory is invalid");
   requireProcess(Array.isArray(options.allowedTools) && options.allowedTools.every((item) => typeof item === "string" && item), "CLAUDE_DEEPSEEK_PROCESS_ALLOWLIST_INVALID", "Claude allowedTools is invalid");
   requireProcess(options.disallowedTools === undefined || (Array.isArray(options.disallowedTools) && options.disallowedTools.every((item) => typeof item === "string" && item)), "CLAUDE_DEEPSEEK_PROCESS_DENYLIST_INVALID", "Claude disallowedTools is invalid");
+  requireProcess(options.appendSystemPrompt === undefined || (typeof options.appendSystemPrompt === "string" && options.appendSystemPrompt.length > 0 && Buffer.byteLength(options.appendSystemPrompt, "utf8") <= 4_096), "CLAUDE_DEEPSEEK_PROCESS_SYSTEM_PROMPT_INVALID", "Claude appended system prompt must be a bounded non-empty string");
   requireProcess(Number.isSafeInteger(options.maxTurns) && options.maxTurns > 0 && Number.isFinite(options.maxBudgetUsd) && options.maxBudgetUsd > 0 && Number.isSafeInteger(options.wallTimeoutSeconds) && options.wallTimeoutSeconds > 0, "CLAUDE_DEEPSEEK_PROCESS_CAPS_INVALID", "Claude process caps are invalid");
   const environment = controlledClaudeEnvironment(ambient, options.environment);
   const args = [
@@ -155,6 +156,7 @@ export async function runClaudeProcess(options, { ambient = process.env, onProgr
     "--setting-sources", "user",
     "--settings", options.settings,
     "--model", CLAUDE_DEEPSEEK_MODEL,
+    ...(options.appendSystemPrompt ? ["--append-system-prompt", options.appendSystemPrompt] : []),
     "--max-turns", String(options.maxTurns),
     "--max-budget-usd", String(options.maxBudgetUsd),
     "--tools", options.tools.join(","),
@@ -195,7 +197,7 @@ export async function runClaudeProcess(options, { ambient = process.env, onProgr
   if (options.tracePath) writeNew(options.tracePath, stdoutBytes);
   if (options.stderrPath) writeNew(options.stderrPath, stderrBytes);
   requireProcess(!timedOut, "CLAUDE_DEEPSEEK_PROCESS_TIMEOUT", "Claude process exceeded its wall timeout");
-  requireProcess(!noProgressTimedOut, "CLAUDE_DEEPSEEK_PROCESS_NO_PROGRESS", "Claude process made no semantic stream progress for 180 seconds");
+  requireProcess(!noProgressTimedOut, "CLAUDE_DEEPSEEK_PROCESS_NO_PROGRESS", `Claude process made no semantic stream progress for ${options.noProgressSeconds} seconds`);
   requireProcess(exit.code === 0 && exit.signal === null, "CLAUDE_DEEPSEEK_PROCESS_FAILED", "Claude process exited unsuccessfully", { exit_code: exit.code, signal: exit.signal });
   const events = parseJsonLines(stdoutBytes);
   const stream = auditClaudeStream(events, { phase: options.phase, allowedTools: [...options.tools, ...options.allowedTools, ...(options.auditOnlyAllowedTools ?? [])], maxTurns: options.maxTurns, wallTimeoutSeconds: options.wallTimeoutSeconds });
@@ -216,6 +218,7 @@ export async function runClaudeProcess(options, { ambient = process.env, onProgr
     max_turns: options.maxTurns,
     max_budget_usd: options.maxBudgetUsd,
     max_output_tokens: CLAUDE_DEEPSEEK_MAX_OUTPUT_TOKENS,
+    appended_system_prompt: options.appendSystemPrompt ? { sha256: sha256Bytes(options.appendSystemPrompt), utf8_size: Buffer.byteLength(options.appendSystemPrompt, "utf8") } : null,
     environment_policy: {
       schema_version: 1,
       version: ISOLATED_AGENT_ENV_POLICY_VERSION,

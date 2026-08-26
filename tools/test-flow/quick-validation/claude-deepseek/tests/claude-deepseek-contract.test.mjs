@@ -11,7 +11,9 @@ import {
   CLAUDE_DEEPSEEK_E2E_PHASES,
   CLAUDE_DEEPSEEK_MAX_OUTPUT_TOKENS,
   CLAUDE_DEEPSEEK_MODEL,
+  CLAUDE_DEEPSEEK_NO_PROGRESS_SECONDS,
   CLAUDE_DEEPSEEK_PUBLIC_TOOLS,
+  CLAUDE_DEEPSEEK_SCENARIOS,
   CLAUDE_DEEPSEEK_VERSION,
   aggregateClaudeUsage,
   assertMethodsPackageUnchanged,
@@ -20,6 +22,8 @@ import {
   auditClientBash,
   buildMethodsCacheManifest,
   buildMethodsProducerIdentity,
+  claudeDeepseekE2ECallCount,
+  claudeDeepseekE2EPhases,
   methodsCachePath,
   publishMethodsCacheAtomically,
   validateMethodsCache,
@@ -85,6 +89,13 @@ test("Claude identity constants freeze 2.1.89, CLI hash, DeepSeek model, and 64k
   assert.equal(CLAUDE_DEEPSEEK_PUBLIC_TOOLS.length, 7);
 });
 
+test("Claude standalone owns the same nine scenarios with lifecycle-aware call counts", () => {
+  assert.equal(CLAUDE_DEEPSEEK_SCENARIOS.length, 9);
+  assert.deepEqual(claudeDeepseekE2EPhases("insufficient-evidence"), ["CLIENT", "ROUTE", "LOGPARSE", "DIAGNOSE"]);
+  assert.equal(claudeDeepseekE2ECallCount("insufficient-evidence"), 4);
+  for (const scenario of CLAUDE_DEEPSEEK_SCENARIOS.filter((item) => item !== "insufficient-evidence")) assert.equal(claudeDeepseekE2ECallCount(scenario), 5, scenario);
+});
+
 test("Methods producer identity includes settings and cache freezes through atomic rename", () => {
   const f = fixture();
   const producer = buildMethodsProducerIdentity({ wiki: f.wiki, metaSkillRoot: f.meta, registrationTemplate: f.registration, claudeIdentity: claudeIdentity() });
@@ -134,23 +145,33 @@ test("stream audit requires one init/result, pinned model, bounded turns, and al
   const bad = structuredClone(events);
   bad[1].message.content[0].name = "Bash";
   assert.throws(() => auditClaudeStream(bad, { phase: "METHODS_BOOTSTRAP", allowedTools: ["Read", "Write", "Skill"], maxTurns: 16, wallTimeoutSeconds: 1800 }), (error) => error.code === "CLAUDE_DEEPSEEK_STREAM_TOOL_FORBIDDEN");
+  const denied = structuredClone(bad);
+  denied.splice(2, 0, { type: "user", message: { content: [{ type: "tool_result", tool_use_id: "t1", is_error: true, content: "No such tool available" }] } });
+  assert.equal(auditClaudeStream(denied, { phase: "METHODS_BOOTSTRAP", allowedTools: ["Read", "Write", "Skill"], maxTurns: 16, wallTimeoutSeconds: 1800 }).status, "PASS");
+  assert.equal(CLAUDE_DEEPSEEK_NO_PROGRESS_SECONDS, 300);
 });
 
-test("usage aggregation is cache-inclusive and enforces exactly one or five no-retry processes", () => {
+test("usage aggregation is cache-inclusive and enforces lifecycle-aware no-retry processes", () => {
   const methods = auditClaudeInvocations(invocations(["METHODS_BOOTSTRAP"], "methods"), { workflow: "methods" });
   assert.equal(methods.aggregate.total_tokens, 20);
-  const e2e = auditClaudeInvocations(invocations(CLAUDE_DEEPSEEK_E2E_PHASES), { workflow: "e2e" });
+  const e2e = auditClaudeInvocations(invocations(CLAUDE_DEEPSEEK_E2E_PHASES), { workflow: "e2e", scenarioId: "api-execution-overrun" });
   assert.equal(e2e.aggregate.total_tokens, 100);
+  assert.equal(auditClaudeInvocations(invocations(["CLIENT", "ROUTE", "LOGPARSE", "DIAGNOSE"]), { workflow: "e2e", scenarioId: "insufficient-evidence" }).aggregate.total_tokens, 80);
   assert.deepEqual(aggregateClaudeUsage(invocations(["CLIENT", "ROUTE"])), {
     input_tokens: 20, output_tokens: 10, cache_creation_input_tokens: 6, cache_read_input_tokens: 4, total_tokens: 40, cost_usd: 0.02,
   });
-  assert.throws(() => auditClaudeInvocations(invocations(["CLIENT", "ROUTE", "DIAGNOSE", "REVIEW"]), { workflow: "e2e" }), (error) => error.code === "CLAUDE_DEEPSEEK_INVOCATION_COUNT_INVALID");
+  assert.throws(() => auditClaudeInvocations(invocations(["CLIENT", "ROUTE", "DIAGNOSE", "REVIEW"]), { workflow: "e2e", scenarioId: "api-execution-overrun" }), (error) => error.code === "CLAUDE_DEEPSEEK_INVOCATION_COUNT_INVALID");
   const retried = invocations(CLAUDE_DEEPSEEK_E2E_PHASES);
   retried[2].retry = 1;
-  assert.throws(() => auditClaudeInvocations(retried, { workflow: "e2e" }), (error) => error.code === "CLAUDE_DEEPSEEK_INVOCATION_IDENTITY_INVALID");
+  assert.throws(() => auditClaudeInvocations(retried, { workflow: "e2e", scenarioId: "api-execution-overrun" }), (error) => error.code === "CLAUDE_DEEPSEEK_INVOCATION_IDENTITY_INVALID");
+  const calibrated = invocations(CLAUDE_DEEPSEEK_E2E_PHASES);
+  [1.019079, 0.203663, 0.091923, 0.872387, 1.093734].forEach((cost, index) => { calibrated[index].usage.cost_usd = cost; });
+  assert.equal(auditClaudeInvocations(calibrated, { workflow: "e2e", scenarioId: "api-execution-overrun" }).aggregate.cost_usd, 3.280786);
+  calibrated[4].usage.cost_usd = 2;
+  assert.throws(() => auditClaudeInvocations(calibrated, { workflow: "e2e", scenarioId: "api-execution-overrun" }), (error) => error.code === "CLAUDE_DEEPSEEK_BUDGET_EXCEEDED");
   const over = invocations(CLAUDE_DEEPSEEK_E2E_PHASES);
   over[0].usage.cache_read_input_tokens = 2_000_001;
-  assert.throws(() => auditClaudeInvocations(over, { workflow: "e2e" }), (error) => error.code === "CLAUDE_DEEPSEEK_BUDGET_EXCEEDED");
+  assert.throws(() => auditClaudeInvocations(over, { workflow: "e2e", scenarioId: "api-execution-overrun" }), (error) => error.code === "CLAUDE_DEEPSEEK_BUDGET_EXCEEDED");
 });
 
 test("Bash audit permits exact openssl/stat and one descriptor-bound curl PUT only", () => {

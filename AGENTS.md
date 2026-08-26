@@ -38,10 +38,11 @@
 
 ## 测试活动约束
 
-- 新测试活动以 `tools/test-flow/run.sh` 或 `tools/test-flow/run.ps1` 为唯一入口。Goal、Proof、Stage、Gate、identity、policy 与 runtime profile 由 `tools/test-flow/config/*v2.json` 定义，不得绕过编排器拼装发布结论。
+- 正式 Test Flow、Release、源码快照证明和修复台账的最终验证以 `tools/test-flow/run.sh` 或 `tools/test-flow/run.ps1` 为唯一入口。Goal、Proof、Stage、Gate、identity、policy 与 runtime profile 由 `tools/test-flow/config/*v2.json` 定义，不得绕过编排器拼装发布结论。
+- Linux/macOS 开发期 Fast E2E 是唯一例外：只能使用仓库拥有的 `tools/test-flow/quick-validation/<provider>/run.sh`，或密封 Ubuntu 22.04 的 `tools/test-flow/quick-validation/wsl/run.sh`。standalone `verdict.json` 只证明其计划声明的 Fast E2E，不得外推为 Release、完整 Test Flow 或产品修复登记结论；不得把 Fast E2E 重新接入中央 Goal/Proof/Stage/Gate。
 - 默认先执行 Dev 的 affected + full deterministic 轨，不调用真实模型。SameJob 属于确定性旅程；Release 只保留一条从空 `DATA_ROOT` 开始的真实 CrossJob 旅程。
 - Windows、macOS 与显式 Linux Client 只能使用仓库拥有的 built-in adapter；不得从 CLI 注入任意 adapter 或为测试增加本地 MCP、代理、Hook、客户端专用 DFX。
-- 任何真实模型活动必须先查看 `--plan-only` 的 Proof、Stage、Gate、身份、复用、模型预算、预计 token/cost 与 admission blocker。不得盲重试；同一失败身份再次运行前必须给出新的 reason、hypothesis 和 expected evidence。
+- 任何真实模型活动必须先查看对应入口 `--plan-only` 中的身份、调用数、模型预算、预计 token/cost 与 admission blocker；中央 Test Flow 还必须查看 Proof、Stage、Gate 和复用决定。不得盲重试；同一失败身份再次运行前必须给出新的 reason、hypothesis 和 expected evidence。
 - `verdict.json` 是唯一权威结论。无 verdict、半成品目录、可独立编辑的摘要、未按当前扫描器和事件合同重审的旧 PASS 都不得复用或宣称通过。
 - Release 必须在 planning 时冻结 Git 可见工作树（tracked 当前字节与未忽略的 untracked 文件）的不可变源码快照，并绑定其 SHA-256 清单、当前 Client/Server/Logparse/MCP/Skill/模型上下文身份，从 GENESIS 和新空数据根开始。工作树无需预先提交，但从 planning 到 verdict 期间源码发生漂移必须失败；Git 提交只在全部验证完成后用于持久化完全相同的快照。Dev checkpoint 只能加速诊断，不能替代 fresh Release。
 - 测试证据不得自动删除。只能先用 `tools/test-flow/evidence.mjs report` 或 `prune` 的 dry-run 查看，再以精确 `--run-id --execute` 人工删除；被 verdict 引用的 source receipt 不得删除。

@@ -85,7 +85,10 @@ function brokerEnvironment(ambient) {
 }
 
 export function boundedServicePrompt(phase, prompt) {
-  return `Controlled ${phase} Job boundary: the current working directory is the only readable workspace. Do not read repository, source, test-flow, AGENTS, settings, or paths outside this Job workspace. Do not attempt Bash. Follow the frozen product prompt directly, read only files it identifies, and write only the required output/* draft. The harness runs any fixed product finalizer or Logparse command after the model process.\n\n${prompt}`;
+  const reviewBoundary = phase === "REVIEW"
+    ? " For REVIEW, copy every existing candidate limitation sentence verbatim into the review limitations; do not translate, paraphrase, summarize, or drop it."
+    : "";
+  return `Controlled ${phase} Job boundary: the current working directory is the only readable workspace. Do not read repository, source, test-flow, AGENTS, settings, or paths outside this Job workspace. Do not attempt Bash, Glob, Grep, or another discovery tool; use only explicit Read paths supplied by the frozen prompt and resource manifest. Follow the frozen product prompt directly, read only files it identifies, and write only the required output/* draft. Write every user-visible statement, reason, limitation, safety note, and recommendation in natural Simplified Chinese. When a method confirms queuing from a single target history record but cannot identify a specific prior contributor, state 无法确认具体贡献者 explicitly.${reviewBoundary} The harness runs any fixed product finalizer or Logparse command after the model process.\n\n${prompt}`;
 }
 
 export async function runServiceInvocation(values, { stdin = process.stdin, stdout = process.stdout, ambient = process.env } = {}) {
@@ -113,7 +116,7 @@ export async function runServiceInvocation(values, { stdin = process.stdin, stdo
     tools: ["Read", "Write", "Skill"],
     allowedTools,
     allowToolErrors: true,
-    auditOnlyAllowedTools: ["Bash"],
+    auditOnlyAllowedTools: ["Bash", "Glob"],
     maxTurns: CLAUDE_DEEPSEEK_E2E_MAX_TURNS,
     maxBudgetUsd: CLAUDE_DEEPSEEK_E2E_USD_LIMIT,
     wallTimeoutSeconds: CLAUDE_DEEPSEEK_CALL_WALL_SECONDS,

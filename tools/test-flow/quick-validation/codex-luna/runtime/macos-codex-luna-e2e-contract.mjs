@@ -16,6 +16,17 @@ export const MACOS_CODEX_LUNA_E2E_CONTRACT_VERSION = 1;
 export const MACOS_CODEX_LUNA_METHODS_PROMPT_VERSION = 1;
 export const MACOS_CODEX_LUNA_CLIENT_PROMPT_VERSION = 1;
 export const MACOS_CODEX_LUNA_SCENARIOS = Object.freeze(["api-execution-overrun"]);
+export const STANDALONE_CODEX_LUNA_SCENARIOS = Object.freeze([
+  "api-execution-overrun",
+  "client-receive-blocked",
+  "deadloop-detected",
+  "insufficient-evidence",
+  "multiple-rpc-timeouts",
+  "server-queue-delay",
+  "server-queue-five",
+  "server-queue-single",
+  "unrelated-log-noise",
+]);
 export const MACOS_CODEX_LUNA_METHODS_CALLS = 1;
 export const MACOS_CODEX_LUNA_E2E_CALLS = 5;
 export const MACOS_CODEX_LUNA_METHODS_TOKEN_LIMIT = 1_000_000;
@@ -132,8 +143,19 @@ function ordinaryFile(filePath, label) {
 }
 
 function normalizedScenarioId(value) {
-  requireE2E(MACOS_CODEX_LUNA_SCENARIOS.includes(value), "MACOS_CODEX_LUNA_SCENARIO_UNSUPPORTED", "Scenario is not in the repository-owned smoke matrix", { scenario_id: value });
+  requireE2E(STANDALONE_CODEX_LUNA_SCENARIOS.includes(value), "MACOS_CODEX_LUNA_SCENARIO_UNSUPPORTED", "Scenario is not in the repository-owned standalone matrix", { scenario_id: value });
   return value;
+}
+
+export function macosCodexLunaE2EPhases(scenarioId) {
+  const id = normalizedScenarioId(scenarioId);
+  return id === "insufficient-evidence"
+    ? Object.freeze(["CLIENT", "ROUTE", "LOGPARSE", "DIAGNOSE"])
+    : MACOS_CODEX_LUNA_SUCCESS_INVOCATIONS;
+}
+
+export function macosCodexLunaE2ECallCount(scenarioId) {
+  return macosCodexLunaE2EPhases(scenarioId).length;
 }
 
 export function scenarioPaths(sourceRoot, scenarioId) {
@@ -165,7 +187,7 @@ export function loadScenarioOracle(casePath, expectedScenarioId = null) {
   ordinaryFile(casePath, "scenario case.json");
   const value = readJson(casePath, "scenario case.json");
   if (expectedScenarioId !== null) requireE2E(value.scenario_id === expectedScenarioId, "MACOS_CODEX_LUNA_CASE_ID_MISMATCH", "Scenario directory and case.json differ");
-  requireE2E(["CONFIRMED", "CANDIDATE", "INSUFFICIENT_EVIDENCE"].includes(value.expected_status), "MACOS_CODEX_LUNA_ORACLE_STATUS_INVALID", "Scenario oracle status is invalid");
+  requireE2E(["CONFIRMED", "PARTIAL", "INSUFFICIENT"].includes(value.expected_status), "MACOS_CODEX_LUNA_ORACLE_STATUS_INVALID", "Scenario oracle status is invalid");
   for (const key of ["expected_branch_markers", "expected_terms", "forbidden_evidence_terms"]) {
     requireE2E(Array.isArray(value[key]) && value[key].every(isNonEmptyString), "MACOS_CODEX_LUNA_ORACLE_FIELD_INVALID", `Scenario oracle ${key} is invalid`);
   }
@@ -489,8 +511,10 @@ export function aggregateCodexUsage(invocations) {
   return aggregate;
 }
 
-export function auditModelInvocations(invocations, { workflow }) {
-  const expectedPhases = workflow === "methods" ? ["METHODS_BOOTSTRAP"] : MACOS_CODEX_LUNA_SUCCESS_INVOCATIONS;
+export function auditModelInvocations(invocations, { workflow, scenarioId = null }) {
+  const expectedPhases = workflow === "methods"
+    ? ["METHODS_BOOTSTRAP"]
+    : macosCodexLunaE2EPhases(scenarioId);
   const tokenLimit = workflow === "methods" ? MACOS_CODEX_LUNA_METHODS_TOKEN_LIMIT : MACOS_CODEX_LUNA_E2E_TOKEN_LIMIT;
   const costLimit = workflow === "methods" ? MACOS_CODEX_LUNA_METHODS_USD_LIMIT : MACOS_CODEX_LUNA_E2E_USD_LIMIT;
   requireE2E(Array.isArray(invocations) && invocations.length === expectedPhases.length, "MACOS_CODEX_LUNA_INVOCATION_COUNT_INVALID", "Model invocation count drifted", { workflow, expected: expectedPhases.length, actual: invocations?.length ?? null });
@@ -580,7 +604,11 @@ export function assertMethodsPackageUnchanged(cacheReceipt) {
 
 export function auditOracle({ oracle, publicCase, sealedDiagnosis, evidenceSources }) {
   requireE2E(isPlainObject(oracle) && isPlainObject(publicCase) && isPlainObject(sealedDiagnosis) && Array.isArray(evidenceSources), "MACOS_CODEX_LUNA_ORACLE_INPUT_INVALID", "Oracle audit inputs are invalid");
-  const expectedPublic = oracle.expected_status === "CONFIRMED" ? "COMPLETED" : oracle.expected_status;
+  const expectedPublic = {
+    CONFIRMED: "COMPLETED",
+    PARTIAL: "PARTIAL",
+    INSUFFICIENT: "INCONCLUSIVE",
+  }[oracle.expected_status];
   requireE2E(publicCase.status === expectedPublic, "MACOS_CODEX_LUNA_PUBLIC_STATUS_MISMATCH", "Final public Case status does not satisfy the scenario oracle", { expected: expectedPublic, actual: publicCase.status });
   requireE2E(sealedDiagnosis.status === oracle.expected_status, "MACOS_CODEX_LUNA_DIAGNOSIS_STATUS_MISMATCH", "Server-sealed Methods status does not satisfy the scenario oracle");
   const confirmed = new Set(sealedDiagnosis.confirmed_methods ?? []);
@@ -604,18 +632,39 @@ export function auditOracle({ oracle, publicCase, sealedDiagnosis, evidenceSourc
       requireE2E(frozen && frozen.raw_sha256 === source.raw_sha256 && frozen.file_name === source.file_name && frozen.lines?.[source.line_number - 1] === source.line, "MACOS_CODEX_LUNA_EVIDENCE_IDENTITY_INVALID", "Diagnosis evidence cannot be traced to this run's ZIP member", { source_id: source.source_id, line_number: source.line_number });
     }
   }
-  const matchedEvidence = new Set();
+  const matchedSourceIdentities = new Set();
+  const matchedEvidencePartitions = [];
   for (const expectation of oracle.expected_evidence_identities) {
-    const matches = evidence
-      .map((item, index) => ({ item, index }))
-      .filter(({ item }) => (
-        confirmed.has(item?.method_id)
-        && expectation.identity_tokens.every((token) => (item.identity_tokens ?? []).includes(token))
-        && (item.sources ?? []).some((source) => markerMatches(source?.marker, expectation.branch_marker))
-      ));
-    requireE2E(matches.length === 1, "MACOS_CODEX_LUNA_EXPECTED_EVIDENCE_IDENTITY_MISMATCH", "Diagnosis did not preserve exactly one expected evidence identity", { branch_marker: expectation.branch_marker });
-    requireE2E(!matchedEvidence.has(matches[0].index), "MACOS_CODEX_LUNA_EXPECTED_EVIDENCE_IDENTITY_MERGED", "One diagnosis evidence item merged multiple expected identities", { branch_marker: expectation.branch_marker });
-    matchedEvidence.add(matches[0].index);
+    const matchesBySource = new Map();
+    for (const [index, item] of evidence.entries()) {
+      if (!confirmed.has(item?.method_id)
+        || !expectation.identity_tokens.every((token) => (item.identity_tokens ?? []).includes(token))) continue;
+      for (const source of item.sources ?? []) {
+        if (!markerMatches(source?.marker, expectation.branch_marker)
+          || !expectation.identity_tokens.every((token) => source.line.includes(token))) continue;
+        const sourceIdentity = canonicalJson({
+          file_name: source.file_name,
+          line: source.line,
+          line_number: source.line_number,
+          raw_sha256: source.raw_sha256,
+          source_id: source.source_id,
+        });
+        const indexes = matchesBySource.get(sourceIdentity) ?? new Set();
+        indexes.add(index);
+        matchesBySource.set(sourceIdentity, indexes);
+      }
+    }
+    requireE2E(matchesBySource.size === 1, "MACOS_CODEX_LUNA_EXPECTED_EVIDENCE_IDENTITY_MISMATCH", "Diagnosis did not preserve exactly one frozen source identity", { branch_marker: expectation.branch_marker });
+    const [sourceIdentity, evidenceIndexes] = matchesBySource.entries().next().value;
+    requireE2E(!matchedSourceIdentities.has(sourceIdentity), "MACOS_CODEX_LUNA_EXPECTED_EVIDENCE_IDENTITY_MERGED", "One frozen source identity satisfied multiple expected identities", { branch_marker: expectation.branch_marker });
+    requireE2E(
+      matchedEvidencePartitions.every((indexes) => [...evidenceIndexes].every((index) => !indexes.has(index))),
+      "MACOS_CODEX_LUNA_EXPECTED_EVIDENCE_IDENTITY_MERGED",
+      "One diagnosis evidence item merged multiple expected identities",
+      { branch_marker: expectation.branch_marker },
+    );
+    matchedSourceIdentities.add(sourceIdentity);
+    matchedEvidencePartitions.push(evidenceIndexes);
   }
   return { schema_version: 1, status: "PASS", scenario_id: oracle.scenario_id, expected_public_status: expectedPublic };
 }

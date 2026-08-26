@@ -5,6 +5,7 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 import {
+  auditNoSecretLeak,
   canonicalJson,
   CODEX_LUNA_MODEL,
   CODEX_LUNA_REASONING_EFFORT,
@@ -32,17 +33,23 @@ const SERVICE_DRAFT_BY_PHASE = Object.freeze({
   REVIEW: "output/method-review.draft.json",
 });
 const MAX_SERVICE_DRAFT_BYTES = 2_000_000;
+export function serviceDeveloperInstructions(workspaceRoot) {
+  if (typeof workspaceRoot !== "string" || !path.isAbsolute(workspaceRoot) || /[\0\r\n]/u.test(workspaceRoot)) fail("MACOS_CODEX_LUNA_SERVICE_WORKSPACE_INVALID", "Service developer instructions require one absolute workspace");
+  const root = path.resolve(workspaceRoot);
+  return `Standalone Fast E2E 硬约束：唯一允许的命令工作目录是 ${JSON.stringify(root)}，每条 commandExecution.cwd 都必须逐字等于该路径；禁止 cd、chdir 或切到其他目录。附加的 Skill 绝对路径仅用于 app-server 配置，绝不能作为命令 cwd。写 diagnosis、review 或 outcome draft 前，必须先在上述 workspace 读取 inputs/manifest.json；所有结论、evidence ref、Case/Job/Outcome 身份都只能逐字绑定 manifest 与冻结输入，不能凭记忆补写或省略来源。每条 evidence 的 line_number 必须在其 source_id 对应的单个文件内从 1 计数，并逐字复制该文件整行，禁止使用跨文件或全局行号。遇到 LATE_RESPONSE 时，若存在相同 request_id 的 timeout 记录，必须优先使用该精确预算，禁止改用旁边的通用 timeout limit；必须枚举所有已加载 method 与 marker occurrence 后再结束诊断。`;
+}
 
 class ServiceWrapperError extends Error {
-  constructor(code, message) {
+  constructor(code, message, details = {}) {
     super(message);
     this.name = "ServiceWrapperError";
     this.code = code;
+    this.details = details;
   }
 }
 
-function fail(code, message) {
-  throw new ServiceWrapperError(code, message);
+function fail(code, message, details = {}) {
+  throw new ServiceWrapperError(code, message, details);
 }
 
 function parseArguments(argv) {
@@ -169,7 +176,7 @@ export function removeLinuxServiceProject({ workspaceRoot, projectRoot }) {
 
 export function safeServiceError(error) {
   const safeDetails = {};
-  for (const key of ["id", "response_code", "response_message", "method", "field", "item_type", "function_name", "line", "cwd_matches", "errors_count", "skills_errors"]) {
+  for (const key of ["id", "response_code", "response_message", "codex_error_info", "http_status_code", "will_retry", "method", "field", "item_type", "function_name", "line", "cwd_matches", "errors_count", "skills_errors"]) {
     const value = error?.details?.[key];
     if (typeof value === "string" || typeof value === "number" || typeof value === "boolean" || value === null) safeDetails[key] = value;
   }
@@ -215,6 +222,12 @@ export function sealServiceOutcomeDraft({ phase, workspaceRoot, sourceRoot = nul
   if (!metadata.isFile() || (metadata.mode & 0o111) === 0) fail("MACOS_CODEX_LUNA_SERVICE_FINALIZER_INVALID", "Repository outcome finalizer command is not executable");
   const marker = path.join(workspaceRoot, "runtime", "tool-state", "agent-job-outcome-draft.finalized");
   if (fs.existsSync(marker)) return { required: true, invoked: false, status: "PASS", marker_sha256: sha256Bytes(fs.readFileSync(marker)) };
+  const draft = path.join(workspaceRoot, "output", "job_outcome.draft.json");
+  let draftMetadata;
+  try { draftMetadata = fs.lstatSync(draft); } catch { fail("MACOS_CODEX_LUNA_SERVICE_DRAFT_MISSING", "ROUTE Agent draft is missing"); }
+  if (!draftMetadata.isFile() || draftMetadata.isSymbolicLink() || draftMetadata.nlink !== 1 || draftMetadata.size > MAX_SERVICE_DRAFT_BYTES) {
+    fail("MACOS_CODEX_LUNA_SERVICE_DRAFT_INVALID", "ROUTE Agent draft is not a bounded ordinary file");
+  }
   const result = spawnSync(finalizer, [], {
     cwd: workspaceRoot,
     env: {
@@ -227,8 +240,30 @@ export function sealServiceOutcomeDraft({ phase, workspaceRoot, sourceRoot = nul
     stdio: ["ignore", "pipe", "pipe"],
     timeout: 30_000,
   });
+  if (result.status === 2 && result.signal === null && !result.error && !fs.existsSync(marker)) {
+    fail("MACOS_CODEX_LUNA_SERVICE_DRAFT_REJECTED", "Product finalizer rejected the ROUTE Agent draft", { field: "output/job_outcome.draft.json" });
+  }
   if (result.status !== 0 || result.signal !== null || result.error || !fs.existsSync(marker)) fail("MACOS_CODEX_LUNA_SERVICE_FINALIZER_FAILED", "Repository outcome finalizer command failed");
   return { required: true, invoked: true, status: "PASS", marker_sha256: sha256Bytes(fs.readFileSync(marker)) };
+}
+
+export function persistRejectedServiceDraft({ phase, workspaceRoot, evidenceRoot, canaries }) {
+  if (phase !== "ROUTE") return { required: false, persisted: false, status: "SKIP" };
+  const relativePath = "output/job_outcome.draft.json";
+  const source = path.join(workspaceRoot, "output", "job_outcome.draft.json");
+  let metadata;
+  try { metadata = fs.lstatSync(source); } catch { fail("MACOS_CODEX_LUNA_SERVICE_DRAFT_MISSING", "Rejected ROUTE draft is unavailable"); }
+  if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.nlink !== 1 || metadata.size > MAX_SERVICE_DRAFT_BYTES) {
+    fail("MACOS_CODEX_LUNA_SERVICE_DRAFT_INVALID", "Rejected ROUTE draft is not a bounded ordinary file");
+  }
+  const secretScan = auditNoSecretLeak({ roots: [source], canaries });
+  const destinationRoot = path.join(evidenceRoot, "server-invocations");
+  fs.mkdirSync(destinationRoot, { recursive: true, mode: 0o700 });
+  const destination = path.join(destinationRoot, "route.rejected-draft.json");
+  fs.copyFileSync(source, destination, fs.constants.COPYFILE_EXCL);
+  fs.chmodSync(destination, 0o600);
+  writeJsonExclusive(path.join(destinationRoot, "route.rejected-draft-secret-scan.json"), secretScan);
+  return { required: true, persisted: true, status: "PASS", relative_path: relativePath, size: metadata.size, sha256: sha256Bytes(fs.readFileSync(source)) };
 }
 
 export function runServiceLogparseCommand({ phase, prompt, workspaceRoot, sourceRoot = null, logparseEntry = null, environment }) {
@@ -315,6 +350,7 @@ export async function runServiceInvocation(values, { stdin = process.stdin, stdo
       workspaceRoot: projectRoot,
       skillPath,
       mode: "service",
+      developerInstructions: serviceDeveloperInstructions(projectRoot),
       prompt,
       outputSchema: null,
       callRoot: path.join(claim, "app-server"),
@@ -338,7 +374,15 @@ export async function runServiceInvocation(values, { stdin = process.stdin, stdo
   }
   const methodsDraft = canonicalizeMethodsDraft({ phase, workspaceRoot });
   const logparseRunner = runServiceLogparseCommand({ phase, prompt, workspaceRoot, logparseEntry: values["logparse-entry"], environment: controlled.environment });
-  const outcomeSealer = sealServiceOutcomeDraft({ phase, workspaceRoot, finalizerEntry: values["finalizer-entry"] });
+  let outcomeSealer;
+  try {
+    outcomeSealer = sealServiceOutcomeDraft({ phase, workspaceRoot, finalizerEntry: values["finalizer-entry"] });
+  } catch (error) {
+    if (error?.code === "MACOS_CODEX_LUNA_SERVICE_DRAFT_REJECTED") {
+      persistRejectedServiceDraft({ phase, workspaceRoot, evidenceRoot, canaries: runtimeAuth.canaries });
+    }
+    throw error;
+  }
   const finishedAtUtc = new Date().toISOString();
   const invocationId = `${values["run-id"]}:server:${prefix}`;
   const receipt = {

@@ -35,6 +35,7 @@ import {
   MACOS_CODEX_LUNA_CALL_WALL_SECONDS,
   MACOS_CODEX_LUNA_NO_PROGRESS_SECONDS,
   MACOS_CODEX_LUNA_PUBLIC_TOOLS,
+  macosCodexLunaE2EPhases,
   MACOS_CODEX_LUNA_REGISTRATION_ID,
   mapScenarioToCreateCase,
   scenarioPaths,
@@ -43,6 +44,27 @@ import {
 } from "./macos-codex-luna-e2e-contract.mjs";
 const MODULE_PATH = fileURLToPath(import.meta.url);
 const TERMINAL_CASE_STATUSES = new Set(["RESOLVED", "PARTIALLY_RESOLVED", "UNRESOLVED", "FAILED", "CANCELLED"]);
+const MAX_FAILURE_EVIDENCE_BYTES = 64 * 1024 * 1024;
+const MAX_CLIENT_MCP_TOOL_CALLS = 24;
+const SERVICE_CONTRACT_FAILURE_CODES = new Set([
+  "MACOS_CODEX_LUNA_SERVICE_DRAFT_MISSING",
+  "MACOS_CODEX_LUNA_SERVICE_DRAFT_INVALID",
+  "MACOS_CODEX_LUNA_SERVICE_DRAFT_REJECTED",
+  "MACOS_CODEX_LUNA_METHODS_DRAFT_MISSING",
+  "MACOS_CODEX_LUNA_METHODS_DRAFT_INVALID",
+]);
+
+export function clientDeveloperInstructions(archive, workspaceRoot) {
+  requireE2E(Number.isSafeInteger(archive?.size) && archive.size >= 0 && /^[a-f0-9]{64}$/u.test(archive?.sha256 ?? "")
+    && typeof workspaceRoot === "string" && path.isAbsolute(workspaceRoot) && !/[\0\r\n]/u.test(workspaceRoot),
+  "MACOS_CODEX_LUNA_CLIENT_DEVELOPER_INSTRUCTIONS_INVALID", "Client developer instructions require one exact archive identity and absolute workspace");
+  const root = path.resolve(workspaceRoot);
+  return `Standalone Fast E2E 硬约束：唯一允许的命令工作目录是 ${JSON.stringify(root)}，每条 commandExecution.cwd 都必须逐字等于该路径；禁止 cd、chdir 或切到其他目录。附加的 problem-locator-client Skill 已由 app-server 加载，禁止使用 commandExecution、sed、cat 或其他 shell 再读 .agents/skills/problem-locator-client/SKILL.md；第一条允许的命令必须在上述 workspace 内核对附件的 openssl/stat。调用 prepare_attachment 时，declared_size 必须逐字使用整数 ${archive.size}，declared_sha256 必须逐字复制 ${archive.sha256}；禁止重算、缩写、漏字、改序或传 null。如果 prepare 只因 declared_size 或 declared_sha256 的 VALIDATION_ERROR 被零副作用拒绝，必须保留同一 request_id、Case、revision、name 与 content_type，立即用上述精确 size/SHA 纠正一次；禁止第二次纠正。`;
+}
+
+export function clientPollingInstructions() {
+  return "整个 turn 最多调用 get_case 16 次。每次 get_case 响应后必须重新读取 case_view.active_job.job_id；若它与刚等待的 wait_for_job_id 不同，下一次必须改用新值；若 active_job 为 null，严禁复用旧 job_id。不得连续紧密重复相同 get_case 参数；达到上限仍未 terminal 时立即停止。";
+}
 
 class E2ERunnerError extends Error {
   constructor(code, message, details = {}) {
@@ -94,6 +116,68 @@ function createEmptyRoot(root, label) {
 function writeJson(filePath, value, { exclusive = true } = {}) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true, mode: 0o700 });
   fs.writeFileSync(filePath, `${canonicalJson(value)}\n`, { encoding: "utf8", mode: 0o600, flag: exclusive ? "wx" : "w" });
+}
+
+function closedOracleFailure(error) {
+  const failure = {
+    code: typeof error?.code === "string" ? error.code : "MACOS_CODEX_LUNA_ORACLE_UNEXPECTED",
+    message: typeof error?.message === "string" ? error.message : String(error),
+  };
+  if (isPlainObject(error?.details)) {
+    const details = {};
+    for (const key of ["marker", "branch_marker", "term", "expected", "actual"]) {
+      const value = error.details[key];
+      if (typeof value === "string" || Number.isSafeInteger(value) || value === null) details[key] = value;
+    }
+    if (Object.keys(details).length > 0) failure.details = details;
+  }
+  return failure;
+}
+
+function evidenceDigests(evidenceRoot) {
+  return Object.fromEntries(fs.readdirSync(evidenceRoot)
+    .filter((name) => fs.statSync(path.join(evidenceRoot, name)).isFile())
+    .sort()
+    .map((name) => [name, sha256File(path.join(evidenceRoot, name))]));
+}
+
+export function sealOracleAdapterReceipt({
+  evidenceRoot,
+  scenarioId,
+  oracle,
+  publicStatus,
+  sealedDiagnosis,
+  evidenceSources,
+  checks,
+}) {
+  let oracleAudit;
+  try {
+    oracleAudit = auditOracle({
+      oracle,
+      publicCase: { status: publicStatus },
+      sealedDiagnosis,
+      evidenceSources,
+    });
+  } catch (error) {
+    writeJson(path.join(evidenceRoot, "adapter-receipt.json"), {
+      schema_version: 1,
+      status: "FAIL",
+      scenario_id: scenarioId,
+      checks: { ...checks, oracle: "FAIL" },
+      failure: closedOracleFailure(error),
+      evidence_sha256: evidenceDigests(evidenceRoot),
+    });
+    throw error;
+  }
+  const receipt = {
+    schema_version: 1,
+    status: "PASS",
+    scenario_id: scenarioId,
+    checks: { ...checks, oracle: oracleAudit.status },
+    evidence_sha256: evidenceDigests(evidenceRoot),
+  };
+  writeJson(path.join(evidenceRoot, "adapter-receipt.json"), receipt);
+  return receipt;
 }
 
 export function createStandaloneGitBoundary(workspace) {
@@ -212,38 +296,149 @@ export function partitionMcpCalls(calls) {
   return { successful, recoveries };
 }
 
+export function auditMcpRecoveries(calls, { archive }) {
+  requireE2E(Array.isArray(calls) && Number.isSafeInteger(archive?.size) && /^[a-f0-9]{64}$/u.test(archive?.sha256 ?? ""), "MACOS_CODEX_LUNA_MCP_RECOVERY_LEDGER_INVALID", "MCP recovery audit requires the complete ledger and frozen archive identity");
+  const envelopes = calls.map((call) => parsedJsonCandidates(call?.result).find((item) => typeof item.ok === "boolean" && Object.hasOwn(item, "data") && Object.hasOwn(item, "error")));
+  requireE2E(envelopes.every((item) => item !== undefined), "MACOS_CODEX_LUNA_MCP_RESULT_INVALID", "Completed MCP call lacks a structured business envelope");
+  const failureIndexes = envelopes.map((envelope, index) => envelope.ok === false ? index : -1).filter((index) => index >= 0);
+  requireE2E(failureIndexes.length <= 2, "MACOS_CODEX_LUNA_MCP_BUSINESS_ERROR", "Client exceeded the bounded business-error correction count");
+  const recoveries = failureIndexes.map((index) => {
+    const failure = calls[index];
+    const envelope = envelopes[index];
+    const code = envelope.error?.code ?? null;
+    const requestId = failure.arguments?.request_id;
+    if (["REVISION_CONFLICT", "ATTACHMENT_NOT_READY"].includes(code)) {
+      requireE2E(typeof requestId === "string" && requestId.length > 0, "MACOS_CODEX_LUNA_MCP_RECOVERY_INVALID", "Recoverable write error omitted its stable request ID");
+      const corrections = calls.filter((candidate, candidateIndex) => candidateIndex > index
+        && candidate.tool === failure.tool
+        && candidate.arguments?.request_id === requestId
+        && parsedJsonCandidates(candidate?.result).some((item) => item.ok === true && Object.hasOwn(item, "data")));
+      requireE2E(corrections.length === 1, "MACOS_CODEX_LUNA_MCP_RECOVERY_INVALID", "Recoverable write error must have exactly one successful correction with the same request ID");
+      return { tool: failure.tool, code, request_id: requestId };
+    }
+    const details = Array.isArray(envelope.error?.details) ? envelope.error.details : [];
+    const declarationValidation = failure.tool === "problem_locator_prepare_attachment"
+      && code === "VALIDATION_ERROR"
+      && envelope.error?.retryable === false
+      && typeof requestId === "string"
+      && requestId.length > 0
+      && details.length > 0
+      && details.every((detail) => ["declared_size", "declared_sha256"].includes(detail?.field));
+    requireE2E(declarationValidation, "MACOS_CODEX_LUNA_MCP_BUSINESS_ERROR", "Client encountered a non-recoverable MCP business error");
+    const correction = calls[index + 1];
+    const correctionKeys = isPlainObject(correction?.arguments) ? Object.keys(correction.arguments).sort() : [];
+    requireE2E(correction?.tool === failure.tool
+      && canonicalJson(correctionKeys) === canonicalJson(["case_id", "content_type", "declared_sha256", "declared_size", "expected_case_revision", "name", "request_id"])
+      && correction.arguments.request_id === requestId
+      && correction.arguments.case_id === failure.arguments.case_id
+      && correction.arguments.expected_case_revision === failure.arguments.expected_case_revision
+      && correction.arguments.name === failure.arguments.name
+      && correction.arguments.content_type === failure.arguments.content_type
+      && correction.arguments.declared_size === archive.size
+      && correction.arguments.declared_sha256 === archive.sha256
+      && envelopes[index + 1]?.ok === true,
+    "MACOS_CODEX_LUNA_MCP_RECOVERY_INVALID", "Attachment declaration validation must have one immediate exact successful correction");
+    return { tool: failure.tool, code: "ATTACHMENT_DECLARATION_VALIDATION", request_id: requestId };
+  });
+  return { schema_version: 1, status: "PASS", recoveries };
+}
+
 export function extractCommandHttpEntries(commands) {
   requireE2E(Array.isArray(commands), "MACOS_CODEX_LUNA_COMMAND_LEDGER_INVALID", "Command ledger must be an array");
   const entries = [];
   for (const command of commands) {
-    const urls = String(command.command ?? "").match(/https?:\/\/[^\s'\"]+/g) ?? [];
-    const rendered = String(command.command ?? "");
+    if (localCurlInitializationFailure(command)) continue;
+    const rendered = commandText(command);
+    const urls = rendered.match(/https?:\/\/[^\s'\"]+/g) ?? [];
     const method = /(?:--request|-X)\s+(?:'|")?PUT\b/i.test(rendered) ? "PUT" : "GET";
     for (const url of urls) entries.push({ method, url, source: `client-command:${command.item_id}` });
   }
   return entries;
 }
 
-export function validDescriptorUploadCommand({ commands, upload, archivePath }) {
-  if (!Array.isArray(commands) || !isPlainObject(upload) || typeof archivePath !== "string") return false;
-  const matches = commands.filter((command) => String(command.command).includes(upload.url));
-  if (matches.length !== 1) return false;
-  const receipt = matches[0];
-  const rendered = String(receipt.command ?? "");
-  const headerArgumentCount = (rendered.match(/(?:^|\s)(?:-H|--header)(?=\s)/g) ?? []).length;
-  const bodyArgumentCount = (rendered.match(/(?:^|\s)(?:--upload-file|--data-binary)(?=\s)/g) ?? []).length;
-  return receipt.status === "completed"
-    && receipt.exit_code === 0
-    && headerArgumentCount === 4
-    && bodyArgumentCount === 1
-    && /(?:^|\s)(?:-X|--request)\s+(?:'|")?PUT\b/.test(rendered)
-    && rendered.includes(archivePath)
-    && Object.entries(upload.required_headers).every(([name, value]) => rendered.includes(name) && (value === null || rendered.includes(value)));
+function commandText(command) {
+  return String(command?.logical_command ?? command?.command ?? "");
 }
 
-export function clientPrompt({ mapped, archivePath, archive, runId }) {
-  const requestPrefix = sha256Bytes(`${runId}:api-execution-overrun`).slice(0, 24);
-  return `使用 $problem-locator-client 完成一次无人值守的单 Case MCP 冒烟。\n\n创建字段（逐字使用，不得改写）：\n${canonicalJson(mapped)}\n\n附件：\n- 绝对路径：${archivePath}\n- name：logs.zip\n- content_type：application/zip\n- size：${archive.size}\n- sha256：${archive.sha256}\n\n调用 prepare_attachment 前必须执行 /usr/bin/openssl dgst -sha256 与 /usr/bin/stat -f %z，从文件重新读取并逐字核对上述值；SHA 必须恰好 64 位小写十六进制。禁止凭上下文手抄或截短 SHA。\n\n稳定 request_id 前缀：${requestPrefix}。每个逻辑写操作使用不同后缀；禁止重用其他操作的 ID。\n\n必须在一个 turn 内按顺序完成：create_case → get_case 等待附件要求 → prepare_attachment → 按 UploadDescriptor 执行一次系统 curl PUT 并取得 completed/exit 0 命令回执 → 立即 get_case(wait_seconds=0) 刷新 revision → 使用该 revision 与 descriptor attachment_id 调用 submit_supplement → get_case 有限轮询至 terminal → list_artifacts。文字声称“已 PUT”不算执行，必须有真实命令回执。公开 Case 投影不会展示 attachment 内部 READY；submit 前附件要求保持 OPEN 是正常现象，禁止为等待该要求变为 FULFILLED 而轮询。prepare 与 submit 前都必须额外执行一次 wait_seconds=0 的 get_case，并逐字复制该响应的最新 case_revision。若逻辑写返回 REVISION_CONFLICT 或 ATTACHMENT_NOT_READY，刷新同一 Case后使用同一 request_id 最多纠正一次。每次 get_case 的 wait_seconds 必须是 0 到 30；已知 job_id 时用 wait_for_job_id 等待同一 Job。轮询总时限 12 分钟；禁止创建第二个 Case 或第二个 attachment，禁止调用业务 REST API，禁止读取 case.json、scenario oracle 或工作区外路径，禁止下载 artifact。`;
+function localCurlInitializationFailure(command) {
+  const rendered = commandText(command);
+  return command?.status === "failed"
+    && command?.exit_code === 2
+    && /(?:^|[\s"])(?:\/usr\/bin\/)?curl(?:\s|$)/u.test(rendered);
+}
+
+function computedArchiveShaHeader({ rendered, archivePath, archiveSha256, headerName, headerValue }) {
+  if (headerName.toLowerCase() !== "x-content-sha256" || headerValue !== archiveSha256) return false;
+  const literalAssignments = [
+    "archive_sha=$(/usr/bin/openssl dgst -sha256 -r '" + archivePath + "')",
+    'archive_sha=$(/usr/bin/openssl dgst -sha256 -r "' + archivePath + '")',
+  ];
+  const pathAssignments = [
+    "archive_path='" + archivePath + "'",
+    'archive_path="' + archivePath + '"',
+  ];
+  const variableAssignments = [
+    'archive_sha=$(/usr/bin/openssl dgst -sha256 -r "$archive_path")',
+    'archive_sha=$(/usr/bin/openssl dgst -sha256 -r "${archive_path}")',
+  ];
+  const headerSpellings = [
+    '-H "' + headerName + ': ${archive_sha}"',
+    '--header "' + headerName + ': ${archive_sha}"',
+  ];
+  return (rendered.match(/\$\(/gu) ?? []).length === 1
+    && (literalAssignments.some((assignment) => rendered.includes(assignment))
+      || (pathAssignments.some((assignment) => rendered.includes(assignment))
+        && variableAssignments.some((assignment) => rendered.includes(assignment))))
+    && rendered.includes('archive_sha=${archive_sha%% *}')
+    && rendered.includes('/usr/bin/test "${#archive_sha}" -eq 64')
+    && headerSpellings.some((spelling) => rendered.includes(spelling));
+}
+
+function variableArchiveBodyBound(rendered, archivePath) {
+  const pathAssignments = [
+    "archive_path='" + archivePath + "'",
+    'archive_path="' + archivePath + '"',
+  ];
+  return pathAssignments.some((assignment) => rendered.includes(assignment))
+    && rendered.includes('--data-binary "@${archive_path}"');
+}
+
+export function validDescriptorUploadCommand({ commands, upload, archivePath, archiveSha256 = null }) {
+  if (!Array.isArray(commands) || !isPlainObject(upload) || typeof archivePath !== "string") return false;
+  const matches = commands.filter((command) => commandText(command).includes(upload.url));
+  const initializationFailures = matches.filter(localCurlInitializationFailure);
+  const successful = matches.filter((command) => command.status === "completed" && command.exit_code === 0);
+  if (initializationFailures.length > 1
+    || successful.length !== 1
+    || matches.length !== initializationFailures.length + successful.length
+    || matches.at(-1) !== successful[0]) return false;
+  const receipt = successful[0];
+  const rendered = commandText(receipt);
+  const headerArgumentCount = (rendered.match(/(?:^|\s)(?:-H|--header)(?=\s)/g) ?? []).length;
+  const bodyArgumentCount = (rendered.match(/(?:^|\s)(?:--upload-file|--data-binary)(?=\s)/g) ?? []).length;
+  const fileBodySpellings = [
+    `--data-binary '@${archivePath}'`,
+    `--data-binary \"@${archivePath}\"`,
+    `--data-binary @${archivePath}`,
+    `--upload-file '${archivePath}'`,
+    `--upload-file \"${archivePath}\"`,
+    `--upload-file ${archivePath}`,
+  ];
+  return headerArgumentCount === 4
+    && bodyArgumentCount === 1
+    && /(?:^|\s)(?:-X|--request)\s+(?:'|")?PUT\b/.test(rendered)
+    && (fileBodySpellings.some((spelling) => rendered.includes(spelling))
+      || variableArchiveBodyBound(rendered, archivePath))
+    && /(?:^|\s)--max-time\s+(?:'|")?60(?:'|")?(?:\s|$)/u.test(rendered)
+    && Object.entries(upload.required_headers).every(([name, value]) => rendered.includes(name)
+      && (value === null
+        || rendered.includes(value)
+        || computedArchiveShaHeader({ rendered, archivePath, archiveSha256, headerName: name, headerValue: value })));
+}
+
+export function clientPrompt({ mapped, archivePath, archive, runId, scenarioId }) {
+  const requestPrefix = sha256Bytes(`${runId}:${scenarioId}`).slice(0, 24);
+  return `使用 $problem-locator-client 完成一次无人值守的单 Case MCP 冒烟。\n\n创建字段（逐字使用，不得改写）：\n${canonicalJson(mapped)}\n\n附件：\n- 绝对路径：${archivePath}\n- name：logs.zip\n- content_type：application/zip\n- size：${archive.size}\n- sha256：${archive.sha256}\n\n调用 prepare_attachment 前必须执行 /usr/bin/openssl dgst -sha256 与 /usr/bin/stat -f %z，从文件重新读取并逐字核对上述值；SHA 必须恰好 64 位小写十六进制。禁止凭上下文手抄或截短 SHA。\n\n稳定 request_id 前缀：${requestPrefix}。每个逻辑写操作使用不同后缀；禁止重用其他操作的 ID。\n\n必须在一个 turn 内按顺序完成：create_case → get_case 等待附件要求 → prepare_attachment → 按 UploadDescriptor 执行一次系统 curl PUT 并取得 completed/exit 0 命令回执 → 立即 get_case(wait_seconds=0) 刷新 revision → 使用该 revision 与 descriptor attachment_id 调用 submit_supplement → get_case 有限轮询至 terminal → list_artifacts。curl 必须逐字复制 UploadDescriptor 的四个完整 required_headers，并固定使用 /usr/bin/curl --silent --show-error --fail-with-body --max-time 60 --request PUT、四个独立 --header 参数、--upload-file '${archivePath}' 和 descriptor URL。禁止在 curl 命令中重新计算、拼接或用 shell 变量展开 header；前面的 openssl/stat 回执若与 descriptor 不一致，立即停止且不得发 PUT。禁止使用 --data-binary。第一个 curl 没有 terminal 回执时严禁发起第二个 curl。只有 /usr/bin/curl 明确返回 status=failed 且 exit_code=2、证明在初始化前失败时，才允许纠正命令一次；任何其他失败、超时或可能已发出 PUT 的结果都禁止重试。文字声称“已 PUT”不算执行，必须有真实命令回执。公开 Case 投影不会展示 attachment 内部 READY；submit 前附件要求保持 OPEN 是正常现象，禁止为等待该要求变为 FULFILLED 而轮询。prepare 与 submit 前都必须额外执行一次 wait_seconds=0 的 get_case，并逐字复制该响应的最新 case_revision。若逻辑写返回 REVISION_CONFLICT 或 ATTACHMENT_NOT_READY，刷新同一 Case后使用同一 request_id 最多纠正一次。若 prepare 仅因 declared_size 或 declared_sha256 的 VALIDATION_ERROR 被零副作用拒绝，必须保留同一 request_id、Case、revision、name 与 content_type，立即逐字复制上方冻结 size/SHA 纠正一次；禁止第二次纠正或插入其他调用。每次 get_case 的 wait_seconds 必须是 0 到 30；已知 job_id 时用 wait_for_job_id 等待同一 Job。轮询总时限 8 分钟；禁止创建第二个 Case 或第二个 attachment，禁止调用业务 REST API，禁止读取 case.json、scenario oracle 或工作区外路径，禁止下载 artifact。`;
 }
 
 function materializeRegistration({ skillDir, cache, registrationTemplate }) {
@@ -254,7 +449,7 @@ function materializeRegistration({ skillDir, cache, registrationTemplate }) {
   return registrationRoot;
 }
 
-function stateEvidence(dataRoot, rawPaths) {
+function stateEvidence(dataRoot, rawPaths, expectedDiagnosisResultType) {
   const state = JSON.parse(fs.readFileSync(path.join(dataRoot, "state.json"), "utf8"));
   const aggregates = Object.values(state.cases ?? {});
   requireE2E(aggregates.length === 1, "MACOS_CODEX_LUNA_STATE_CASE_COUNT_INVALID", "Fresh DATA_ROOT must contain exactly one Case");
@@ -262,7 +457,7 @@ function stateEvidence(dataRoot, rawPaths) {
   requireE2E(aggregate.case?.active_job_id === null && TERMINAL_CASE_STATUSES.has(aggregate.case?.status), "MACOS_CODEX_LUNA_STATE_NOT_TERMINAL", "Server state retains an active or non-terminal Case");
   const jobs = Object.values(aggregate.jobs ?? {});
   const jobOutcomes = new Map(jobs.map((job) => [job.job_id, JSON.parse(fs.readFileSync(path.join(dataRoot, "jobs", job.job_id, "job_outcome.json"), "utf8"))]));
-  const { diagnose } = selectScenarioJobs(jobs, jobOutcomes);
+  const { diagnose } = selectScenarioJobs(jobs, jobOutcomes, expectedDiagnosisResultType);
   const jobRoot = path.join(dataRoot, "jobs", diagnose.job_id);
   const diagnosis = JSON.parse(fs.readFileSync(path.join(jobRoot, "method-diagnosis.draft.json"), "utf8"));
   const grounding = JSON.parse(fs.readFileSync(path.join(jobRoot, "method-grounding-audit.json"), "utf8"));
@@ -319,28 +514,34 @@ export function buildScenarioEvidenceSources({ targetLogs, rawByLabel, workspace
   });
 }
 
-export function selectScenarioJobs(jobs, jobOutcomes) {
+export function selectScenarioJobs(jobs, jobOutcomes, expectedDiagnosisResultType = "COMPLETED") {
+  requireE2E(
+    ["COMPLETED", "INCONCLUSIVE"].includes(expectedDiagnosisResultType),
+    "MACOS_CODEX_LUNA_SERVER_JOB_LIFECYCLE_INVALID",
+    "Expected terminal DIAGNOSE result type is invalid",
+  );
   const routeJobs = jobs.filter((job) => job.job_type === "ROUTE");
   const diagnoseJobs = jobs.filter((job) => job.job_type === "DIAGNOSE");
   const reviewJobs = jobs.filter((job) => job.job_type === "REVIEW");
   const diagnoseByResult = new Map(diagnoseJobs.map((job) => [jobOutcomes.get(job.job_id)?.result_type, job]));
+  const expectsReview = expectedDiagnosisResultType === "COMPLETED";
   requireE2E(
-    jobs.length === 4
+    jobs.length === (expectsReview ? 4 : 3)
       && jobs.every((job) => job.status === "SUCCEEDED")
       && routeJobs.length === 1
       && diagnoseJobs.length === 2
-      && reviewJobs.length === 1
+      && reviewJobs.length === (expectsReview ? 1 : 0)
       && diagnoseByResult.size === 2
       && diagnoseByResult.has("NEED_ATTACHMENT")
-      && diagnoseByResult.has("COMPLETED"),
+      && diagnoseByResult.has(expectedDiagnosisResultType),
     "MACOS_CODEX_LUNA_SERVER_JOB_LIFECYCLE_INVALID",
-    "Server lifecycle must contain one ROUTE, one attachment-request DIAGNOSE, one completed DIAGNOSE, and one REVIEW",
+    "Server lifecycle must contain one ROUTE, one attachment-request DIAGNOSE, the expected terminal DIAGNOSE, and REVIEW only for a Candidate",
   );
   return {
     route: routeJobs[0],
     attachmentRequestDiagnose: diagnoseByResult.get("NEED_ATTACHMENT"),
-    diagnose: diagnoseByResult.get("COMPLETED"),
-    review: reviewJobs[0],
+    diagnose: diagnoseByResult.get(expectedDiagnosisResultType),
+    review: expectsReview ? reviewJobs[0] : null,
   };
 }
 
@@ -532,6 +733,51 @@ export function persistServiceFailureEvidence({
   return { receipt, secret_scan: secretScan };
 }
 
+export function serviceJobFailureCode({ dataRoot, failedCase }) {
+  const jobId = failedCase?.failure?.source_job_id;
+  if (!/^[0-9a-f-]{36}$/u.test(jobId ?? "")) return "MACOS_CODEX_LUNA_SERVICE_JOB_FAILED";
+  const stderr = path.join(dataRoot, "jobs", jobId, "stderr.log");
+  if (!fs.existsSync(stderr)) return "MACOS_CODEX_LUNA_SERVICE_JOB_FAILED";
+  const lines = fs.readFileSync(stderr, "utf8").split(/\r?\n/u).filter((line) => line.trim().length > 0).reverse();
+  for (const line of lines) {
+    try {
+      const receipt = JSON.parse(line);
+      if (receipt?.status === "FAIL" && SERVICE_CONTRACT_FAILURE_CODES.has(receipt.code)) return receipt.code;
+    } catch {}
+  }
+  return "MACOS_CODEX_LUNA_SERVICE_JOB_FAILED";
+}
+
+export function persistRuntimeFailureEvidence({ dfxRoot, serviceLog, evidenceRoot, privateRoot, canaries }) {
+  const candidates = [
+    ["debug.jsonl", path.join(dfxRoot, "debug.jsonl")],
+    ["journey.jsonl", path.join(dfxRoot, "journey.jsonl")],
+    ["service.log", serviceLog],
+  ];
+  const available = candidates.filter(([, filePath]) => fs.existsSync(filePath) && fs.lstatSync(filePath).isFile() && !fs.lstatSync(filePath).isSymbolicLink());
+  requireE2E(available.some(([name]) => name === "debug.jsonl"), "MACOS_CODEX_LUNA_RUNTIME_FAILURE_DIAGNOSTIC_INVALID", "Runtime failure lacks its bounded debug log");
+  const temporaryRoot = path.join(privateRoot, "runtime-failure-evidence");
+  fs.mkdirSync(temporaryRoot, { recursive: false, mode: 0o700 });
+  const logs = [];
+  for (const [name, source] of available) {
+    const payload = fs.readFileSync(source);
+    requireE2E(payload.length <= MAX_FAILURE_EVIDENCE_BYTES, "MACOS_CODEX_LUNA_RUNTIME_FAILURE_DIAGNOSTIC_INVALID", "Runtime failure evidence exceeds its byte cap");
+    const destination = path.join(temporaryRoot, name);
+    fs.writeFileSync(destination, payload, { flag: "wx", mode: 0o600 });
+    logs.push({ name, size: payload.length, sha256: sha256Bytes(payload) });
+  }
+  const receipt = { schema_version: 1, status: "FAIL", logs: logs.sort((left, right) => left.name.localeCompare(right.name)) };
+  writeJson(path.join(temporaryRoot, "receipt.json"), receipt);
+  const secretScan = auditNoSecretLeak({ roots: [temporaryRoot], canaries });
+  const destinationRoot = path.join(evidenceRoot, "service-runtime", "client-failure");
+  fs.mkdirSync(destinationRoot, { recursive: true, mode: 0o700 });
+  for (const entry of fs.readdirSync(temporaryRoot).sort()) {
+    fs.copyFileSync(path.join(temporaryRoot, entry), path.join(destinationRoot, entry), fs.constants.COPYFILE_EXCL);
+  }
+  writeJson(path.join(evidenceRoot, "service-runtime", "client-failure-secret-scan.json"), secretScan);
+  return { receipt, secret_scan: secretScan };
+}
+
 export async function runE2E(options, { ambient = process.env, onProgress = null } = {}) {
   const sourceRoot = path.resolve(options.sourceRoot);
   const workRoot = createEmptyRoot(options.workRoot, "E2E work root");
@@ -540,6 +786,13 @@ export async function runE2E(options, { ambient = process.env, onProgress = null
   const usageRoot = createEmptyRoot(options.usageRoot, "E2E usage root");
   const rawPaths = scenarioPaths(sourceRoot, options.scenario);
   const facts = loadScenarioFacts(rawPaths.case, options.scenario);
+  const oracle = loadScenarioOracle(rawPaths.case, options.scenario);
+  const expectedPhases = macosCodexLunaE2EPhases(options.scenario);
+  const expectedDiagnosisResultType = {
+    CONFIRMED: "COMPLETED",
+    PARTIAL: "PARTIAL",
+    INSUFFICIENT: "INCONCLUSIVE",
+  }[oracle.expected_status];
   const mapped = mapScenarioToCreateCase(facts);
   const codexIdentity = validateCodexLunaIdentity(options.codexEntry, options.authSource);
   const metaSkillRoot = path.join(sourceRoot, ".agents", "skills", "wiki-to-diagnosis-skill");
@@ -631,6 +884,7 @@ export async function runE2E(options, { ambient = process.env, onProgress = null
   service.stderr.on("data", forwardProgress);
   let clientTrace = null;
   let readiness = null;
+  let clientFailure = null;
   try {
     readiness = await waitForMcp({ pythonEntry: options.pythonEntry, script: path.join(sourceRoot, "tools", "test-flow", "quick-validation", "codex-luna", "runtime", "macos_codex_luna_mcp_probe.py"), mcpUrl, output: path.join(privateRoot, "mcp-readiness.json") }, service);
     const listedAudit = auditListedMcpTools(readiness.tools);
@@ -652,8 +906,10 @@ export async function runE2E(options, { ambient = process.env, onProgress = null
       workspaceRoot: clientWorkspace,
       skillPath: path.join(clientSkillRoot, "SKILL.md"),
       mode: "client",
+      developerInstructions: `${clientDeveloperInstructions(archive, clientWorkspace)} ${clientPollingInstructions()}`,
+      maxMcpToolCalls: MAX_CLIENT_MCP_TOOL_CALLS,
       mcpServer: { name: "problem-locator", url: mcpUrl, enabled_tools: MACOS_CODEX_LUNA_PUBLIC_TOOLS, startup_timeout_sec: 15, tool_timeout_sec: 600 },
-      prompt: clientPrompt({ mapped, archivePath, archive, runId: options.runId }),
+      prompt: `${clientPrompt({ mapped, archivePath, archive, runId: options.runId, scenarioId: options.scenario })}\n\n${clientPollingInstructions()}`,
       outputSchema: null,
       callRoot: path.join(clientPrivate, "call"),
       privateRoot,
@@ -667,10 +923,15 @@ export async function runE2E(options, { ambient = process.env, onProgress = null
     });
     clientTrace.started_at_utc = clientStartedAtUtc;
     clientTrace.finished_at_utc = new Date().toISOString();
+  } catch (error) {
+    clientFailure = error;
   } finally {
     terminateOwnedProcess(service);
     const closed = await Promise.race([serviceClosed, wait(12_000).then(() => ({ code: null, signal: "TIMEOUT" }))]);
-    serviceLogStream.end();
+    await new Promise((resolve, reject) => {
+      serviceLogStream.once("error", reject);
+      serviceLogStream.end(resolve);
+    });
     persistWorkspaceFailureEvidence({
       dfxRoot,
       evidenceRoot,
@@ -679,6 +940,10 @@ export async function runE2E(options, { ambient = process.env, onProgress = null
       canaries: externalAuth.canaries,
     });
     requireE2E(closed.signal !== "TIMEOUT", "MACOS_CODEX_LUNA_SERVICE_STOP_TIMEOUT", "Owned local test service did not stop");
+  }
+  if (clientFailure !== null) {
+    persistRuntimeFailureEvidence({ dfxRoot, serviceLog, evidenceRoot, privateRoot, canaries: externalAuth.canaries });
+    throw clientFailure;
   }
   requireE2E(clientTrace !== null, "MACOS_CODEX_LUNA_CLIENT_INCOMPLETE", "Codex MCP Client did not complete");
   const partitionedCalls = partitionMcpCalls(clientTrace.app_server.turn.mcp_tool_calls);
@@ -692,6 +957,7 @@ export async function runE2E(options, { ambient = process.env, onProgress = null
     .reverse()
     .find((caseView) => caseView?.status === "FAILED" && caseView?.failure !== null);
   if (failedCase !== undefined) {
+    const serviceFailureCode = serviceJobFailureCode({ dataRoot, failedCase });
     persistServiceFailureEvidence({
       failedCase,
       dataRoot,
@@ -702,22 +968,18 @@ export async function runE2E(options, { ambient = process.env, onProgress = null
       serviceTermination: { code: service.exitCode ?? null, signal: service.signalCode ?? null },
       canaries: externalAuth.canaries,
     });
+    fail(serviceFailureCode, "Service Job failed before the scenario workflow completed", { response_code: failedCase.failure.code });
   }
-  requireE2E(
-    partitionedCalls.recoveries.length <= 2
-      && partitionedCalls.recoveries.every((item) => ["REVISION_CONFLICT", "ATTACHMENT_NOT_READY"].includes(item.code)),
-    "MACOS_CODEX_LUNA_MCP_BUSINESS_ERROR",
-    "Client encountered a non-recoverable MCP business error",
-  );
+  const recoveryAudit = auditMcpRecoveries(clientTrace.app_server.turn.mcp_tool_calls, { archive });
   const prepareCall = mcpCalls.find((call) => call.tool === "problem_locator_prepare_attachment");
   const prepareData = structuredMcpData(prepareCall);
   const upload = prepareData.upload;
   requireE2E(upload?.method === "PUT" && upload.attachment_id && upload.url && isPlainObject(upload.required_headers), "MACOS_CODEX_LUNA_UPLOAD_DESCRIPTOR_INVALID", "prepare_attachment did not return a valid UploadDescriptor");
   requireE2E(prepareCall.arguments.declared_size === archive.size && prepareCall.arguments.declared_sha256 === archive.sha256, "MACOS_CODEX_LUNA_ATTACHMENT_DECLARATION_MISMATCH", "Client prepare declaration differs from deterministic ZIP");
   const commandEntries = extractCommandHttpEntries(clientTrace.command_receipts);
-  const uploadCommands = clientTrace.command_receipts.filter((command) => String(command.command).includes(upload.url));
+  const uploadCommands = clientTrace.command_receipts.filter((command) => commandText(command).includes(upload.url));
   if (uploadCommands.length > 0) requireE2E(
-    validDescriptorUploadCommand({ commands: uploadCommands, upload, archivePath }),
+    validDescriptorUploadCommand({ commands: uploadCommands, upload, archivePath, archiveSha256: archive.sha256 }),
     "MACOS_CODEX_LUNA_UPLOAD_COMMAND_INVALID",
     "Attachment PUT command did not bind exactly the descriptor headers and deterministic ZIP path",
   );
@@ -726,26 +988,25 @@ export async function runE2E(options, { ambient = process.env, onProgress = null
     ...commandEntries,
     ...(uploadCommands.length === 0 ? [{ method: "PUT", url: upload.url, source: "server-ready-upload-receipt" }] : []),
   ], { mcpUrl, uploadUrl: upload.url });
+  const successfulUploadCommand = uploadCommands.find((command) => command.status === "completed" && command.exit_code === 0);
   const getCalls = mcpCalls.filter((call) => call.tool === "problem_locator_get_case");
   const finalCaseData = structuredMcpData(getCalls.at(-1));
   const finalCase = finalCaseData?.case_view ?? finalCaseData;
   requireE2E(TERMINAL_CASE_STATUSES.has(finalCase.status) && finalCase.active_job === null, "MACOS_CODEX_LUNA_FINAL_CASE_INVALID", "Final MCP Case is not terminal or retains an active Job");
   const artifactData = structuredMcpData(mcpCalls.filter((call) => call.tool === "problem_locator_list_artifacts").at(-1));
   const artifactAudit = artifactConsistency(finalCase, artifactData);
-  const server = stateEvidence(dataRoot, rawPaths);
+  const server = stateEvidence(dataRoot, rawPaths, expectedDiagnosisResultType);
   const submitCall = mcpCalls.find((call) => call.tool === "problem_locator_submit_supplement");
   const attachmentAudit = auditUploadedAttachment({ attachment: server.attachment, uploadReceipt: server.uploadReceipt, descriptor: upload, archive, submitArguments: submitCall?.arguments });
   const mcpAudit = auditMcpToolCalls(mcpCalls, { attachmentId: upload.attachment_id, uploadRevision: server.uploadReceipt.case_revision });
-  mcpAudit.recoveries = partitionedCalls.recoveries;
-  const oracle = loadScenarioOracle(rawPaths.case, options.scenario);
-  const oracleAudit = auditOracle({ oracle, publicCase: { status: server.outcome.result_type }, sealedDiagnosis: server.enriched, evidenceSources: server.evidenceSources });
+  mcpAudit.recoveries = recoveryAudit.recoveries;
   const clientInvocation = { schema_version: 1, invocation_id: `${options.runId}:client`, phase: "CLIENT", model: CODEX_LUNA_MODEL, reasoning_effort: CODEX_LUNA_REASONING_EFFORT, attempt: 1, retry: 0, status: "PASS", terminal: true, started_at_utc: clientTrace.started_at_utc, finished_at_utc: clientTrace.finished_at_utc, wall_timeout_seconds: MACOS_CODEX_LUNA_CALL_WALL_SECONDS, thread_id: clientTrace.thread_id, turn_id: clientTrace.turn_id, usage: clientTrace.usage };
-  const serverInvocations = ["route", "logparse", "diagnose", "review"].map((phase) => JSON.parse(fs.readFileSync(path.join(serviceUsageRoot, `${phase}.json`), "utf8")));
+  const serverInvocations = expectedPhases.slice(1).map((phase) => JSON.parse(fs.readFileSync(path.join(serviceUsageRoot, `${phase.toLowerCase()}.json`), "utf8")));
   const invocations = [clientInvocation, ...serverInvocations];
-  const modelAudit = auditModelInvocations(invocations, { workflow: "e2e" });
+  const modelAudit = auditModelInvocations(invocations, { workflow: "e2e", scenarioId: options.scenario });
   assertMethodsPackageUnchanged(cache);
   combineServerEvents(dfxRoot, path.join(evidenceRoot, "server-events.ndjson"));
-  const attachmentReceipt = { schema_version: 1, status: "PASS", archive, descriptor: { attachment_id: upload.attachment_id, method: upload.method, url_sha256: sha256Bytes(upload.url), required_header_names: Object.keys(upload.required_headers).sort(), max_bytes: upload.max_bytes }, upload: attachmentAudit, upload_command: { item_id: uploadCommands[0].item_id, status: uploadCommands[0].status, exit_code: uploadCommands[0].exit_code }, submitted: true };
+  const attachmentReceipt = { schema_version: 1, status: "PASS", archive, descriptor: { attachment_id: upload.attachment_id, method: upload.method, url_sha256: sha256Bytes(upload.url), required_header_names: Object.keys(upload.required_headers).sort(), max_bytes: upload.max_bytes }, upload: attachmentAudit, upload_command: { item_id: successfulUploadCommand.item_id, status: successfulUploadCommand.status, exit_code: successfulUploadCommand.exit_code, local_initialization_failures: uploadCommands.filter(localCurlInitializationFailure).length }, submitted: true };
   const methodsReceipt = { schema_version: 1, status: "PASS", producer_identity: producer.producer_identity, package_tree_sha256: cache.manifest.package.tree_sha256, registration_identity: cache.manifest.registration };
   const identityReceipt = { schema_version: 1, status: "PASS", codex: codexIdentity, model: CODEX_LUNA_MODEL, reasoning_effort: CODEX_LUNA_REASONING_EFFORT, auth_kind: "chatgpt-external-tokens" };
   const lifecycle = { schema_version: 1, status: "PASS", case_id: finalCase.case_id, public_case_status: finalCase.status, jobs: server.jobs.map((job) => ({ job_id: job.job_id, job_type: job.job_type, status: job.status })), wrapper_phases: serverInvocations.map((item) => item.phase), active_jobs: 0, logparse_target_count: server.targetLogs.target_logs.length };
@@ -767,9 +1028,23 @@ export async function runE2E(options, { ambient = process.env, onProgress = null
   const secretScan = auditNoSecretLeak({ roots: [evidenceRoot], canaries: auth.canaries });
   const security = { schema_version: 1, status: "PASS", secret_scan: secretScan, auth_files_persisted: 0, oracle_visible_before_models: false, unexpected_network_targets: 0, package_drift: false };
   writeJson(path.join(evidenceRoot, "security-audit.json"), security);
-  const gate = { schema_version: 1, status: "PASS", scenario_id: options.scenario, checks: { mcp: mcpAudit.status, attachment: attachmentReceipt.status, server_lifecycle: lifecycle.status, artifacts: artifactAudit.status, http_boundary: httpAudit.status, oracle: oracleAudit.status, model_usage: modelAudit.status, security: security.status }, evidence_sha256: Object.fromEntries(fs.readdirSync(evidenceRoot).filter((name) => fs.statSync(path.join(evidenceRoot, name)).isFile()).sort().map((name) => [name, sha256File(path.join(evidenceRoot, name))])) };
-  writeJson(path.join(evidenceRoot, "adapter-receipt.json"), gate);
-  return gate;
+  return sealOracleAdapterReceipt({
+    evidenceRoot,
+    scenarioId: options.scenario,
+    oracle,
+    publicStatus: server.outcome.result_type,
+    sealedDiagnosis: server.enriched,
+    evidenceSources: server.evidenceSources,
+    checks: {
+      mcp: mcpAudit.status,
+      attachment: attachmentReceipt.status,
+      server_lifecycle: lifecycle.status,
+      artifacts: artifactAudit.status,
+      http_boundary: httpAudit.status,
+      model_usage: modelAudit.status,
+      security: security.status,
+    },
+  });
 }
 
 export function serviceLauncherArguments(sourceRoot) {

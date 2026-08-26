@@ -1353,3 +1353,155 @@
   deterministic full 为 contracts 569/569、unit 1730 passed/1 skipped、integration 45/45、
   SameJob 4/4，零失败/错误；source materialization、worktree verification、secret/meta scan 均
   `PASS`。本 verdict 引用元数据段不宣称被其所引用的源码快照覆盖。
+
+## PL-FIX-039：WSL Fast E2E 错误委托中央 Goal，九场景缺少独立容器闭包
+
+- **状态**：代码修复完成；最终权威验证仍在进行，是否验证通过只以本条“最新 Test Flow verdict”
+  为准，当前不得宣称已验证通过。
+- **症状**：Linux 开发期 Fast E2E 被接入中央 macOS Quick Goal，九场景曾在单一 provider 流程中
+  串行执行；后段暴露工程兼容问题后只能从第一例重新开始。改回 standalone 并发容器后，又依次
+  暴露 utility tmpfs 缺少 `/private/tmp`、root 子证据无法由宿主用户归集、Codex curl 参数漂移、
+  重复证据身份误计数，以及 Claude Methods/E2E 确定性 TAP 污染空 evidence root、跨挂载 rename
+  `EXDEV`、Bash policy 拒绝规定的 `--max-time 60`、被拒 `Glob` 误判成已执行工具和中文 oracle
+  词形过拟合等问题。
+- **受影响版本**：Linux 九场景首次被扩入中央 `config/proofs/stages/identities/planner` 的错误方向，
+  至 standalone 九容器 wrapper 和两 provider runner 完成闭包前的工作树。代表性失败证据包括
+  `wsl-codex-luna-suite-20260826T040250Z-74259`、
+  `wsl-codex-luna-suite-20260826T040518Z-74728`、
+  `wsl-codex-luna-suite-20260826T043058Z-76512`、
+  `claude-deepseek-20260826T045937Z-ab93e44d`、
+  `claude-deepseek-20260826T050301Z-c738707d` 和
+  `wsl-claude-deepseek-suite-20260826T050818Z-79772`。
+- **根因**：测试入口边界定义错误，把开发期 Fast E2E 与中央 Release/Test Flow 证明混为一层；
+  WSL wrapper 又只处理平台委托，没有拥有九个独立容器的启动屏障、子根、root 权限归集和机械聚合。
+  两 provider 的原生 runner 仍隐含 macOS 单文件系统、空 evidence root、shell 参数和模型中文措辞
+  假设，专项测试未覆盖真实 WSL 挂载、并发及被拒工具事件。
+- **不可回归行为**：Linux/macOS 开发期 Fast E2E 只能走 provider standalone 或密封 Ubuntu 22.04
+  WSL wrapper，不得重新接入中央 Goal/Proof/Stage/Gate。WSL `--all-scenarios` 必须先完成零模型规划和
+  共享预检，再同时启动九个容器；每个容器只跑一个场景，拥有独立 scratch、DATA_ROOT、服务端口、
+  usage 和 evidence。Methods cache 缺失或身份漂移必须零调用阻断；suite 不自动重试。九份子 verdict
+  必须由 root utility 原子归集，根 verdict 按固定顺序重算 44 次活动、usage、完成数和停止原因。
+  Codex 与 Claude 都必须接受自然中文等价词形，但仍严格核验 oracle 状态、正向证据、来源身份、
+  附件、MCP、HTTP、artifact、模型调用数、预算、secret 和零重试边界。正式 Release、源码快照证明
+  和修复登记仍只认中央 Test Flow。Claude 只允许一次未实际轮询的 `get_case` 语法纠正：空 `{}`
+  必须立即补全，或把被错误编码成字符串 `"null"` 的 `wait_for_job_id` 以相同 `case_id`、
+  `wait_seconds` 立即改成原生 `null`/省略可选字段；其他 validation/business error 继续拒绝。
+  `prepare_attachment` 的 size/SHA 不得传 `null`。被拒且未执行的工具尝试必须留痕但不能冒充执行；
+  九路并发下单进程 no-progress 为 300 秒，仍受 600 秒硬墙钟约束。
+  Claude 每次 `get_case` 必须在同一 `tool_use.input` 一次性携带完整三字段，不能先发送空 `{}` 再补
+  参数；并发五阶段已确认的 USD 3.280786 合法样本必须准入，单例仍以 4 USD、suite 以 36 USD
+  硬阻断，2,000,000/18,000,000 token 上限保持不变。三字段约束必须使用 Claude Code 原生
+  `--append-system-prompt`，收据只保存 prompt SHA-256 与 UTF-8 字节数；不得用 Hook、代理或参数修补。
+  Codex app-server 的 client/service 约束必须使用原生 `thread/start.developerInstructions`：所有命令 cwd
+  固定在 invocation workspace，service draft 逐字绑定 `inputs/manifest.json` 与冻结输入，client 的
+  attachment size/SHA 逐字绑定确定性 ZIP；收据同样只保存指令 SHA-256 与 UTF-8 字节数，命令 cwd
+  越界、未落地来源或附件字节漂移仍必须失败。
+  client/service developer instructions 必须携带各 invocation 的绝对 workspace；已由 app-server 加载的
+  client Skill 禁止再用 shell 读取，client 第一条允许的命令只能是 workspace 内的附件 openssl/stat。
+  client 每个 turn 最多 16 次 `get_case`；每次响应后必须重新读取 `case_view.active_job.job_id`，Job
+  切换时立即改用新 ID，`active_job=null` 时不得复用旧 ID。client 总 MCP 启动数另以 24 次硬上限
+  早停并封存脱敏 transcript，防止紧轮询耗尽 app-server stdout；这不是自动重试。
+  app-server 进程还必须使用 CLI 原生全局 `-C <workspace>`，并与 `thread/start`、`turn/start` 的 cwd
+  绑定同一路径；启动参数收据以 `<WORKSPACE_ROOT>` 占位，不把一次性 run 路径混入协议身份。
+  Codex client 的 `prepare_attachment` 只有在 `declared_size`/`declared_sha256` 被零副作用
+  `VALIDATION_ERROR` 拒绝时，才允许保留同一 request_id、Case、revision、name 与 content_type，
+  立即按冻结附件身份精确纠正一次；插入其他调用、修改其他参数、第二次纠正或进程级重试都必须失败。
+  Service evidence 的 `line_number` 必须按对应 `source_id` 单文件从 1 计数并逐字复制整行；
+  `LATE_RESPONSE` 必须优先绑定相同 `request_id` 的 timeout，不能被旁边通用 timeout 覆盖；所有已加载
+  method 与 marker occurrence 必须枚举完再结束诊断。
+- **修复历史**：2026-08-25 至 2026-08-26，精确撤出中央九场景扩展并保留四个单场景可选认证 Goal；
+  为两个 provider 增加九场景 standalone suite，WSL wrapper 改为九容器 fan-out。随后依据每次封存
+  证据补齐 utility tmpfs、root materialization、跨设备 TAP 复制校验后同设备 rename、固定 descriptor
+  upload、证据源身份去重、Claude policy/audit-only denied tool 和 REVIEW 限制语边界。每次真实重跑
+  均使用新 run ID 与新的 reason/hypothesis/expected evidence，未自动重试。最终并发证据又补齐空
+  `get_case` 的一次性语法纠正、非空附件声明、通用 denied-tool 识别和 300 秒 no-progress 边界；
+  terminal Case 为 `FAILED` 时直接投影 service 工程失败，不再降级成 artifact 为空。Claude 九容器
+  `wsl-claude-deepseek-suite-20260826T062433Z-85046` 又取得 8/9 PASS，并保留了唯一失败场景
+  `server-queue-delay`：模型把原生 `null` 生成成字符串 `"null"`，服务端零副作用拒绝后立即以相同
+  Case/poll 参数省略可选字段并完成 RESOLVED；据此把 recovery 审计收窄为只承认这一次精确更正。
+  修复后的受影响单例 `claude-deepseek-20260826T063950Z-a021b57a` 为 PASS，模型直接使用原生
+  JSON `null`，5/5 个进程、零重试，730,105 tokens、USD 1.701213。随后最终字节九容器
+  `wsl-claude-deepseek-suite-20260826T064721Z-86600` 封存为 ERROR：`client-receive-blocked`
+  的模型思考包含完整参数，但实际 `tool_use.input` 七次为空 `{}`，审计按合同拒绝；
+  `multiple-rpc-timeouts` 五阶段全部 terminal PASS、1,325,546 tokens，但 USD 3.280786 超过旧 3 USD
+  单例上限。据此强化调用点提示且不放宽空输入，并把有权威逐阶段 usage 支持的单例上限校准为 4 USD。
+  受影响单例 `claude-deepseek-20260826T070431Z-db970c54` 随后以 5/5、零失败 envelope 通过；但
+  `claude-deepseek-20260826T070435Z-7b2e4c6b` 仍两次生成空 `tool_use.input`，模型还在 Skill 通用更正
+  建议与本场景强约束之间反复权衡。Claude Code 2.1.89 的密封 CLI help 已确认原生支持
+  `--append-system-prompt`，因此将不可恢复的三字段约束提升到 system 层，并显式覆盖该通用建议。
+  system-prompt 修复后的 `claude-deepseek-20260826T071732Z-ff912dc3` 为 PASS：客户端流没有任何
+  failure envelope，5/5 个进程、零重试、1,127,984 tokens、USD 2.821576；CLIENT receipt 绑定
+  system prompt SHA-256 `e2cd70575aa870e58396b3a1eb1267e87d28781119c48ceb73eb41217e704963`
+  与 451 UTF-8 字节。
+  同一最终字节的 Codex 九容器 `wsl-codex-luna-suite-20260826T073828Z-89435` 为 ERROR、4/9 PASS、
+  19/44 次调用、零重试：三个表面不同的 service/runner 失败均由
+  `CODEX_LUNA_APP_SERVER_COMMAND_WORKSPACE_INVALID` 触发；`api-execution-overrun` 的 DIAGNOSE draft
+  未绑定冻结来源而被 finalizer 以 `OUTCOME_INVALID` 拒绝；`server-queue-five` 把冻结 SHA 中的
+  `…7134f…` 抄成 `…713f…`。审计均正确，未予放宽；改用 app-server 原生 developer instructions
+  提升 cwd、manifest 与动态 archive identity 约束，并让 cwd 越界失败保留脱敏 transcript。
+  五个受影响单例随后并发验证：`client-receive-blocked`（`luna-20260826T075845Z-0119ad5a`）、
+  `server-queue-delay`（`luna-20260826T075842Z-c6207a3b`）和 `server-queue-five`
+  （`luna-20260826T075835Z-1a2698b4`）均 PASS，关闭 cwd 与 SHA 问题；
+  `multiple-rpc-timeouts`（`luna-20260826T075835Z-3bbea056`）5/5、零重试但漏掉
+  `LATE_RESPONSE request_id=501`，原因是误用通用 5000 而非同 reqid 的 3000 毫秒预算；
+  `api-execution-overrun`（`luna-20260826T075833Z-e5405769`）仍 `OUTCOME_INVALID`，新证据确认 Agent
+  把仅 1 行的 `server.log` 标成“第 3 行”。据此继续收窄 developer instruction，不修改 oracle/grounder。
+  收窄后 `multiple-rpc-timeouts`（`luna-20260826T080846Z-39dc656b`）以 5/5、零重试 PASS；
+  `api-execution-overrun`（`luna-20260826T080843Z-9db3667d`）越过 service finalizer，却在 client
+  `prepare_attachment` 把 64 位冻结 SHA 抄成 63 位，服务端按合同零副作用拒绝。为此新增上述一次性
+  精确纠正能力及完整 MCP ledger 审计，不改服务端 schema、不增加 Hook，也不做场景自动重试。
+  修复后 `api-execution-overrun`（`luna-20260826T082301Z-f00683da`）以 5/5、零重试 PASS；client
+  首次即提交完整 64 位 SHA，13 个 MCP 调用全部成功，未实际使用纠正分支。该例耗时 233.194 秒，
+  992,571 tokens、等价 USD 0.065418。
+  随后的完整九容器 `wsl-codex-luna-suite-20260826T083031Z-92866` 为 8/9 PASS、39/44、零重试；唯一
+  `server-queue-five` 在 ROUTE 首次读取 manifest 时把命令 cwd 落到外层 run 根，完全相同的下一条命令
+  才回到 invocation workspace，最终被现有越界审计以
+  `CODEX_LUNA_APP_SERVER_COMMAND_WORKSPACE_INVALID` 正确拒绝。密封 transcript 证明
+  `spawn(..., {cwd})` 和 thread/turn cwd 尚不足以稳定约束 Codex CLI 0.149.1 的首个 shell；据其官方
+  CLI help 增加全局 `-C`，让进程、thread、turn 三层工作根一致，不放宽越界合同。
+  `-C` 后的受影响单例 `luna-20260826T084913Z-c23145da` 已让 ROUTE、LOGPARSE、DIAGNOSE、REVIEW
+  四个 service invocation 全部完成，并越过附件上传；但 client 第一条命令仍尝试用外层 run 根重复读取
+  已附加的 `.agents/skills/problem-locator-client/SKILL.md`，失败后才在 client workspace 成功，最终
+  继续被越界审计拒绝。由此进一步把绝对 workspace 写进 client/service developer instructions，禁止
+  client shell 重读已加载 Skill，并固定其第一条允许命令为附件身份核对。
+  修复后 `server-queue-five` 单例 `luna-20260826T085850Z-eaed939b` 以 5/5、零重试 PASS，耗时
+  249.593 秒，836,031 tokens、等价 USD 0.058809。client 仅有两条命令，第一条即为附件
+  openssl/stat，未再读取 Skill，且 cwd 完全一致；ROUTE、LOGPARSE、DIAGNOSE、REVIEW 均 PASS，
+  23 条 service command 全部位于各自 `runtime/test-flow-codex-project`，无越界。
+  下一次完整九容器 `wsl-codex-luna-suite-20260826T090455Z-94784` 再次为 8/9 PASS、39/44、零重试；
+  `server-queue-five` 已在完整并发中 PASS，唯一失败转为 `multiple-rpc-timeouts` 的
+  `CODEX_LUNA_APP_SERVER_STDOUT_LIMIT`。服务 DFX 证明四个 service invocation 均已完成，但 client 在
+  DIAGNOSE Job 结束后仍复用旧 `wait_for_job_id`，3 分多钟内累计 5,163 次 `get_case`（正常 PASS 样本
+  `luna-20260826T080846Z-39dc656b` 只有 12 次总 MCP）；5,163 次响应把 app-server stdout 推过 64 MiB。
+  据此增加上述 Job handoff/轮询上限，并在 runtime 流式计数，超过 24 次立即失败，不再等到 stdout 膨胀。
+  修复后 `multiple-rpc-timeouts` 单例 `luna-20260826T092338Z-92061bf0` 以 5/5、零重试 PASS，耗时
+  275.851 秒，1,024,818 tokens、等价 USD 0.065500；总 MCP 为 14 次。第 10 次 `get_case` 返回新
+  REVIEW Job ID 后，第 11 次立即切换到新 ID，最终正常到达 `UNRESOLVED`，未触发 24 次早停。
+- **专项回归测试**：
+  - `tools/test-flow/quick-validation/wsl/container-suite.test.mjs`：九容器计划、root 归集、固定顺序聚合、
+    合同失败继续、工程失败封存和零调用阻断。
+  - `tools/test-flow/tests/wsl-quick-validation.test.mjs`：WSL 只能委托 standalone、中央 Goal 不作为 Linux
+    Fast E2E、密封 Linux 准入、普通 Linux 拒绝及容器边界。
+  - `tools/test-flow/quick-validation/standalone-suite.test.mjs` 与两 provider `framework.test.mjs`：九场景、
+    44 次活动、隔离子根、usage 重算、停止语义和 Methods cache admission。
+  - Codex `macos-codex-luna-e2e-contract.test.mjs`、`macos-codex-luna-e2e-runner.test.mjs`、
+    `macos-codex-luna-service-wrapper.test.mjs`：证据身份、descriptor upload、manifest 绑定、四/五阶段，
+    prepare 声明错误只能立即以同 request_id 和冻结身份精确纠正一次的正反例，以及 client 禁止 shell
+    重读已加载 Skill、首命令类型和 client/service 绝对 workspace 注入。
+  - `tools/test-flow/tests/codex-luna-app-server-runtime.test.mjs`：原生 developer instructions 转发、
+    指纹收据、全局 `-C` 与 OS cwd 同源、脱敏失败 transcript 及原有 app-server 权限/身份边界；
+    还直接复现第三次 MCP 启动越过测试上限时的流式早停；
+    `tools/test-flow/tests/codex-luna-app-server.test.mjs` 核验动态启动参数和稳定占位收据。
+  - Claude `claude-deepseek-bash-policy.test.mjs`、`claude-deepseek-e2e-runner.test.mjs`、
+    `claude-deepseek-service-wrapper.test.mjs`：空根 staging、EXDEV 归集、`--max-time 60`、denied Glob、
+    REVIEW limitations、字符串 `"null"` 的一次性同 poll 更正、空 `tool_use.input` 强阻断、
+    system prompt argv/收据、五阶段 USD 预算校准与中文词形。
+- **最新 Test Flow verdict**：当前交付字节的密封 Ubuntu standalone 专项回归为 127/127 PASS。
+  Codex Linux Standalone Fast E2E 根 verdict `wsl-codex-luna-suite-20260826T093151Z-96206` 为 PASS：
+  9/9 场景、44/44 次模型调用、`retry_count=0`，九个容器均 exit 0，工程失败与 stop reason 均为空；
+  总耗时 282.248 秒，7,886,191 tokens、等价 USD 0.502484。固定顺序的
+  `api-execution-overrun`、`client-receive-blocked`、`deadloop-detected`、`insufficient-evidence`、
+  `multiple-rpc-timeouts`、`server-queue-delay`、`server-queue-five`、`server-queue-single`、
+  `unrelated-log-noise` 全部 PASS。该 standalone verdict 只证明 Codex Linux 开发期 Fast E2E；Claude
+  未在本轮最终字节上重跑，中央 `dev.default` 与 Release 也按用户明确指示未执行，不能据此外推为中央
+  Test Flow、Release 或源码快照证明。本 verdict 引用元数据段不宣称被其所引用的测试字节覆盖。

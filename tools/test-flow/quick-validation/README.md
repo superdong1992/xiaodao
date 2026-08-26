@@ -1,35 +1,13 @@
-# Quick Validation
+# Standalone Fast E2E
 
-本目录收纳不进入 Release/CrossJob 闭包的 macOS arm64 快速端到端验证。每个 provider
-拥有独立的 runner、runtime、tests、证据与轻量 verdict；两套流程不共享认证、模型调用
-或缓存身份。通用 Codex app-server、探索 runner、schema 和正式 Claude runtime profile 继续
-由 `tools/test-flow/runtime-support/` 与 `tools/test-flow/config/` 持有。
+本目录提供开发期 Fast E2E。每个 provider 拥有独立 planner、runner、runtime、tests、缓存、证据和轻量 `verdict.json`，不读取中央 Goal/Proof/Stage/Gate，也不进入 Release/CrossJob finalization。
 
-- `codex-luna/`：冻结 Codex CLI + `gpt-5.6-luna` 的 Methods Bootstrap 与单场景 MCP E2E。
-- `claude-deepseek/`：冻结 Claude Code + `deepseek-v4-flash[1m]` 的对应流程。
+- `codex-luna/`：Codex CLI + `gpt-5.6-luna`。
+- `claude-deepseek/`：Claude Code + `deepseek-v4-flash[1m]`。
+- `wsl/`：在密封 Ubuntu 22.04 Linux/x64 容器中运行上述 standalone 入口。
 
-公共中央 Goal：
+两套 E2E 都支持仓库冻结的九个 RPC 场景。单场景用于定位问题；provider 原生 `--all-scenarios` 顺序执行九例，生成九份子 verdict 和一份聚合 verdict。WSL wrapper 的 `--all-scenarios` 则把九个单场景分发到九个相互隔离的 Docker 容器并发执行，再机械聚合相同的九场景结论。Methods cache 必须先独立生成并匹配完整 producer identity，suite 不会自动 Bootstrap。Linux planner 同时校验密封 marker、Ubuntu 22.04 系统身份、冻结 image seal 和 wrapper 专属 tmpfs scratch；普通 Linux、缺少 scratch 或伪造任一身份都会在规划阶段阻断。
 
-```text
-dev.macos-codex-luna-methods
-dev.macos-codex-luna-e2e
-dev.macos-claude-deepseek-methods
-dev.macos-claude-deepseek-e2e
-```
+standalone verdict 是对应 Fast E2E 的开发结论，只证明计划中声明的 provider、平台、场景和调用边界。正式 Test Flow、Release、源码快照和修复登记仍使用 `tools/test-flow/run.sh` 或 `run.ps1`。中央 macOS Quick Goal 仅保留为可选认证能力，不是 Fast E2E 默认入口。
 
-中央入口统一使用：
-
-```bash
-./tools/test-flow/run.sh --track dev --goal <上述-goal> <provider-inputs> --allow-real-model --plan-only
-./tools/test-flow/run.sh --track dev --goal <上述-goal> <provider-inputs> --allow-real-model
-```
-
-`<provider-inputs>` 的冻结参数和独立入口命令分别见 `codex-luna/README.md` 与
-`claude-deepseek/README.md`。真实执行前必须先查看同一组输入的 `--plan-only`。
-
-各 provider 也保留自己的 `run.sh`，便于只规划或只验证该 provider。Standalone 证据默认写到
-`.tmp/quick-validation/<provider>/runs/<run-id>/`，缓存默认写到
-`.tmp/quick-validation/<provider>/cache/`；中央 Goal 则使用 `--evidence-root` 与 `--cache-root`。
-
-Quick Validation 只证明自身计划中声明的本机 smoke，不证明 Docker、浏览器、重启、
-Windows/Linux Client、完整 Test Flow Release 或其他 provider 的状态。
+真实模型执行前必须先运行同参数的 `--plan-only`。suite 内不自动重试。原生串行 suite 遇到工程失败后停止后续场景；WSL 九容器越过共同预检后已全部启动，因此不会强杀同伴，而是等待已启动容器封存，再把聚合状态置为 `ERROR`。修复失败后重跑时，入口会生成新 run ID；调用方还必须提供新的 `--reason`、`--hypothesis` 和 `--expected-evidence`，并先复核新 plan。

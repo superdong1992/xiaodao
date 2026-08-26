@@ -23,6 +23,7 @@ import {
   CLAUDE_DEEPSEEK_NO_PROGRESS_SECONDS,
   CLAUDE_DEEPSEEK_PUBLIC_TOOLS,
   CLAUDE_DEEPSEEK_REGISTRATION_ID,
+  claudeDeepseekE2EPhases,
   assertMethodsPackageUnchanged,
   auditClaudeInvocations,
   auditClientBash,
@@ -46,6 +47,7 @@ const MODULE_PATH = fileURLToPath(import.meta.url);
 const TERMINAL_CASE_STATUSES = new Set(["RESOLVED", "PARTIALLY_RESOLVED", "UNRESOLVED", "FAILED", "CANCELLED"]);
 const FULL_MCP_TOOLS = Object.freeze(CLAUDE_DEEPSEEK_PUBLIC_TOOLS.map((name) => `mcp__problem-locator__${name}`));
 const CLIENT_DISALLOWED_TOOLS = Object.freeze(["Read", "Glob", "Grep", "Edit", "Write"]);
+const CLIENT_TOOL_INPUT_SYSTEM_PROMPT = "Standalone Fast E2E 硬约束：每次调用 problem_locator_get_case，必须在同一个 tool_use.input 中一次性传入 case_id、wait_for_job_id、wait_seconds。禁止发送空 {}，也禁止先发工具名再补参数；空输入属于不可恢复的场景失败，必须立即停止。本约束覆盖 Skill 中针对空 get_case 的通用更正建议。wait_for_job_id 只能是原生 JSON null 或真实 Job UUID，不能是字符串 null。";
 
 class E2ERunnerError extends Error {
   constructor(code, message, details = {}) {
@@ -175,6 +177,45 @@ export function auditMcpRecoveries(calls) {
   const recoveries = failures.map((failure) => {
     const envelope = businessEnvelope(failure.result);
     const code = envelope?.error?.code ?? null;
+    const validationDetails = Array.isArray(envelope?.error?.details) ? envelope.error.details : [];
+    const emptyGetCase = failure.tool === "problem_locator_get_case"
+      && code === "VALIDATION_ERROR"
+      && isPlainObject(failure.arguments)
+      && Object.keys(failure.arguments).length === 0;
+    const stringNullGetCase = failure.tool === "problem_locator_get_case"
+      && code === "VALIDATION_ERROR"
+      && envelope?.error?.retryable === false
+      && isPlainObject(failure.arguments)
+      && canonicalJson(Object.keys(failure.arguments).sort()) === canonicalJson(["case_id", "wait_for_job_id", "wait_seconds"])
+      && typeof failure.arguments.case_id === "string"
+      && failure.arguments.wait_for_job_id === "null"
+      && Number.isSafeInteger(failure.arguments.wait_seconds)
+      && failure.arguments.wait_seconds >= 0
+      && failure.arguments.wait_seconds <= 30
+      && validationDetails.length === 1
+      && validationDetails[0]?.field === "wait_for_job_id"
+      && validationDetails[0]?.actual === "null";
+    if (emptyGetCase || stringNullGetCase) {
+      const next = calls.filter((candidate) => candidate.ordinal > failure.ordinal).sort((left, right) => left.ordinal - right.ordinal)[0];
+      const completeEmptyCorrection = emptyGetCase
+        && typeof next?.arguments?.case_id === "string"
+        && (next.arguments.wait_for_job_id === null || typeof next.arguments.wait_for_job_id === "string")
+        && Number.isSafeInteger(next.arguments.wait_seconds)
+        && next.arguments.wait_seconds >= 0
+        && next.arguments.wait_seconds <= 30;
+      const correctedKeys = isPlainObject(next?.arguments) ? Object.keys(next.arguments).sort() : [];
+      const correctedStringNull = stringNullGetCase
+        && next?.arguments?.case_id === failure.arguments.case_id
+        && next.arguments.wait_seconds === failure.arguments.wait_seconds
+        && (canonicalJson(correctedKeys) === canonicalJson(["case_id", "wait_seconds"])
+          || (canonicalJson(correctedKeys) === canonicalJson(["case_id", "wait_for_job_id", "wait_seconds"])
+            && next.arguments.wait_for_job_id === null));
+      requireE2E(next?.tool === failure.tool
+        && (completeEmptyCorrection || correctedStringNull)
+        && businessEnvelope(next.result)?.ok === true,
+      "CLAUDE_DEEPSEEK_RECOVERY_REQUEST_ID_INVALID", "A get_case syntax validation error must have one immediate bounded successful correction");
+      return { tool: failure.tool, code: emptyGetCase ? "EMPTY_GET_CASE_VALIDATION" : "STRING_NULL_GET_CASE_VALIDATION", request_id: null, failed_ordinal: failure.ordinal, corrected_ordinal: next.ordinal };
+    }
     const requestId = failure.arguments?.request_id;
     requireE2E(["REVISION_CONFLICT", "ATTACHMENT_NOT_READY"].includes(code) && typeof requestId === "string" && requestId.length > 0, "CLAUDE_DEEPSEEK_RECOVERY_ERROR_INVALID", "Client encountered a non-recoverable MCP business error");
     const corrections = calls.filter((candidate) => candidate.ordinal > failure.ordinal
@@ -184,7 +225,9 @@ export function auditMcpRecoveries(calls) {
     requireE2E(corrections.length === 1, "CLAUDE_DEEPSEEK_RECOVERY_REQUEST_ID_INVALID", "A recoverable MCP error must have exactly one later successful correction with the original request ID");
     return { tool: failure.tool, code, request_id: requestId, failed_ordinal: failure.ordinal, corrected_ordinal: corrections[0].ordinal };
   });
-  requireE2E(new Set(recoveries.map((item) => `${item.tool}\0${item.request_id}`)).size === recoveries.length, "CLAUDE_DEEPSEEK_RECOVERY_REPEATED", "The same logical write cannot be corrected more than once");
+  requireE2E(recoveries.filter((item) => ["EMPTY_GET_CASE_VALIDATION", "STRING_NULL_GET_CASE_VALIDATION"].includes(item.code)).length <= 1,
+    "CLAUDE_DEEPSEEK_RECOVERY_REPEATED", "Client may correct at most one get_case syntax validation error");
+  requireE2E(new Set(recoveries.map((item) => item.request_id === null ? `${item.tool}\0ordinal:${item.failed_ordinal}` : `${item.tool}\0${item.request_id}`)).size === recoveries.length, "CLAUDE_DEEPSEEK_RECOVERY_REPEATED", "The same logical write cannot be corrected more than once");
   return { schema_version: 1, status: "PASS", recoveries };
 }
 
@@ -254,6 +297,13 @@ export async function runE2E(options, { ambient = process.env, onProgress = null
   const usageRoot = createEmptyRoot(options.usageRoot, "E2E usage root");
   const rawPaths = scenarioPaths(sourceRoot, options.scenario);
   const facts = loadScenarioFacts(rawPaths.case, options.scenario);
+  const oracle = loadScenarioOracle(rawPaths.case, options.scenario);
+  const expectedPhases = claudeDeepseekE2EPhases(options.scenario);
+  const expectedDiagnosisResultType = {
+    CONFIRMED: "COMPLETED",
+    PARTIAL: "PARTIAL",
+    INSUFFICIENT: "INCONCLUSIVE",
+  }[oracle.expected_status];
   const mapped = mapScenarioToCreateCase(facts);
   const identity = validateClaudeDeepseekIdentity(options.claudeEntry, options.claudeSettings);
   const releaseCaseRoot = path.join(sourceRoot, "tests", "cases", "release", "rpc-timeout-anonymized");
@@ -328,7 +378,8 @@ export async function runE2E(options, { ambient = process.env, onProgress = null
     const clientTmp = path.join(privateRoot, "client-tmp");
     for (const directory of [clientHome, clientTmp]) fs.mkdirSync(directory, { mode: 0o700 });
     client = await runClaudeProcess({
-      claudeEntry: options.claudeEntry, settings: clientSettings, cwd: clientWorkspace, prompt: `${clientPrompt({ mapped, archivePath, archive, runId: options.runId })}\n\ncurl PUT 必须写成一条物理命令行，不得使用反斜杠续行、换行、分号、管道或命令替换；使用 --request PUT、恰好四个 descriptor header 和 --upload-file 指向上述 ZIP。`, phase: "CLIENT", invocationId: `${options.runId}:client`,
+      claudeEntry: options.claudeEntry, settings: clientSettings, cwd: clientWorkspace, prompt: `${clientPrompt({ mapped, archivePath, archive, runId: options.runId })}\n\n每一次 problem_locator_get_case 都必须在同一个 tool_use.input 中一次性显式传入 case_id、wait_for_job_id、wait_seconds；不要先发送工具名再补参数。空输入 {} 会直接判定本场景失败，不得发送后再纠正。wait_for_job_id 只能传原生 JSON null 或真实 Job UUID，严禁传字符串 "null"；如果本次只因字符串 "null" 被 VALIDATION_ERROR 拒绝，必须保留相同 case_id 和 wait_seconds，立即改成原生 null；如果 Host 仍无法表达原生 null，只允许省略这个可选字段更正一次。调用 prepare_attachment 时，declared_size 必须是整数 ${archive.size}，declared_sha256 必须逐字使用 ${archive.sha256}；这两个字段禁止传 null。curl PUT 必须写成一条物理命令行，不得使用反斜杠续行、换行、分号、管道或命令替换；使用 --request PUT、--max-time 60、恰好四个 descriptor header 和 --upload-file 指向上述 ZIP。密封镜像已经为 /usr/bin/stat -f %z 提供兼容实现；该命令成功后不得再运行 stat -c、ls 或其他 Bash 探测。`, phase: "CLIENT", invocationId: `${options.runId}:client`,
+      appendSystemPrompt: CLIENT_TOOL_INPUT_SYSTEM_PROMPT,
       tools: ["Bash", "Skill"], allowedTools: ["Skill(problem-locator-client)", ...FULL_MCP_TOOLS, "Bash(/usr/bin/openssl:*)", "Bash(/usr/bin/stat:*)", "Bash(/usr/bin/curl:*)"],
       disallowedTools: CLIENT_DISALLOWED_TOOLS, auditOnlyAllowedTools: CLIENT_DISALLOWED_TOOLS, allowToolErrors: true,
       maxTurns: CLAUDE_DEEPSEEK_E2E_MAX_TURNS, maxBudgetUsd: CLAUDE_DEEPSEEK_E2E_USD_LIMIT, wallTimeoutSeconds: CLAUDE_DEEPSEEK_CALL_WALL_SECONDS, noProgressSeconds: CLAUDE_DEEPSEEK_NO_PROGRESS_SECONDS,
@@ -361,18 +412,18 @@ export async function runE2E(options, { ambient = process.env, onProgress = null
   const finalData = structuredMcpData(getCalls.at(-1));
   const finalCase = finalData?.case_view ?? finalData;
   requireE2E(TERMINAL_CASE_STATUSES.has(finalCase.status) && finalCase.active_job === null, "CLAUDE_DEEPSEEK_FINAL_CASE_INVALID", "Final Case is not terminal or retains an active Job");
+  requireE2E(finalCase.status !== "FAILED", "CLAUDE_DEEPSEEK_SERVICE_JOB_FAILED", "Service Job failed before the scenario workflow completed");
   const artifactData = structuredMcpData(mcpCalls.filter((call) => call.tool === "problem_locator_list_artifacts").at(-1));
   const artifactAudit = artifactConsistency(finalCase, artifactData);
-  const server = stateEvidence(dataRoot, rawPaths);
+  const server = stateEvidence(dataRoot, rawPaths, expectedDiagnosisResultType);
   const submit = mcpCalls.find((call) => call.tool === "problem_locator_submit_supplement");
   const attachmentAudit = auditUploadedAttachment({ attachment: server.attachment, uploadReceipt: server.uploadReceipt, descriptor: upload, archive, submitArguments: submit?.arguments });
   const mcpAudit = auditMcpToolCalls(mcpCalls, { attachmentId: upload.attachment_id, uploadRevision: server.uploadReceipt.case_revision });
   mcpAudit.recovery_audit = recoveryAudit;
-  const oracle = loadScenarioOracle(rawPaths.case, options.scenario);
   const oracleAudit = auditOracle({ oracle, publicCase: { status: server.outcome.result_type }, sealedDiagnosis: server.enriched, evidenceSources: server.evidenceSources });
-  const serverInvocations = ["route", "logparse", "diagnose", "review"].map((phase) => JSON.parse(fs.readFileSync(path.join(serviceUsage, `${phase}.json`), "utf8")));
+  const serverInvocations = expectedPhases.slice(1).map((phase) => JSON.parse(fs.readFileSync(path.join(serviceUsage, `${phase.toLowerCase()}.json`), "utf8")));
   const invocations = [client.receipt, ...serverInvocations];
-  const modelAudit = auditClaudeInvocations(invocations, { workflow: "e2e" });
+  const modelAudit = auditClaudeInvocations(invocations, { workflow: "e2e", scenarioId: options.scenario });
   assertMethodsPackageUnchanged(cache);
   combineServerEvents(dfxRoot, path.join(evidenceRoot, "server-events.ndjson"));
   const lifecycle = { schema_version: 1, status: "PASS", case_id: finalCase.case_id, public_case_status: finalCase.status, jobs: server.jobs.map((job) => ({ job_id: job.job_id, job_type: job.job_type, status: job.status })), wrapper_phases: serverInvocations.map((item) => item.phase), active_jobs: 0, logparse_target_count: server.targetLogs.target_logs.length };

@@ -23,6 +23,8 @@ import {
   buildDeterministicLogsZip,
   loadScenarioFacts,
   loadScenarioOracle,
+  STANDALONE_CODEX_LUNA_SCENARIOS,
+  macosCodexLunaE2EPhases,
   mapScenarioToCreateCase,
   scenarioPaths,
   writeDeterministicLogsZip,
@@ -40,15 +42,15 @@ export const CLAUDE_DEEPSEEK_E2E_CALLS = 5;
 export const CLAUDE_DEEPSEEK_METHODS_TOKEN_LIMIT = 1_000_000;
 export const CLAUDE_DEEPSEEK_METHODS_USD_LIMIT = 10;
 export const CLAUDE_DEEPSEEK_E2E_TOKEN_LIMIT = 2_000_000;
-export const CLAUDE_DEEPSEEK_E2E_USD_LIMIT = 3;
+export const CLAUDE_DEEPSEEK_E2E_USD_LIMIT = 4;
 export const CLAUDE_DEEPSEEK_METHODS_MAX_TURNS = 16;
 export const CLAUDE_DEEPSEEK_E2E_MAX_TURNS = 50;
 export const CLAUDE_DEEPSEEK_MAX_OUTPUT_TOKENS = 64_000;
 export const CLAUDE_DEEPSEEK_CALL_WALL_SECONDS = 600;
 export const CLAUDE_DEEPSEEK_METHODS_WALL_SECONDS = 1_800;
 export const CLAUDE_DEEPSEEK_STAGE_WALL_SECONDS = 1_800;
-export const CLAUDE_DEEPSEEK_NO_PROGRESS_SECONDS = 180;
-export const CLAUDE_DEEPSEEK_SCENARIOS = Object.freeze(["api-execution-overrun"]);
+export const CLAUDE_DEEPSEEK_NO_PROGRESS_SECONDS = 300;
+export const CLAUDE_DEEPSEEK_SCENARIOS = Object.freeze([...STANDALONE_CODEX_LUNA_SCENARIOS]);
 export const CLAUDE_DEEPSEEK_REGISTRATION_ID = "rpc-timeout-methods-v1";
 export const CLAUDE_DEEPSEEK_SKILL_NAME = "diagnose-rpc-timeout";
 export const CLAUDE_DEEPSEEK_PUBLIC_TOOLS = Object.freeze([
@@ -253,8 +255,17 @@ export function aggregateClaudeUsage(invocations) {
   return aggregate;
 }
 
-export function auditClaudeInvocations(invocations, { workflow }) {
-  const phases = workflow === "methods" ? ["METHODS_BOOTSTRAP"] : CLAUDE_DEEPSEEK_E2E_PHASES;
+export function claudeDeepseekE2EPhases(scenarioId) {
+  requireContract(CLAUDE_DEEPSEEK_SCENARIOS.includes(scenarioId), "CLAUDE_DEEPSEEK_SCENARIO_INVALID", "Scenario is outside the repository-owned matrix", { scenario_id: scenarioId });
+  return macosCodexLunaE2EPhases(scenarioId);
+}
+
+export function claudeDeepseekE2ECallCount(scenarioId) {
+  return claudeDeepseekE2EPhases(scenarioId).length;
+}
+
+export function auditClaudeInvocations(invocations, { workflow, scenarioId = null }) {
+  const phases = workflow === "methods" ? ["METHODS_BOOTSTRAP"] : claudeDeepseekE2EPhases(scenarioId);
   const tokenLimit = workflow === "methods" ? CLAUDE_DEEPSEEK_METHODS_TOKEN_LIMIT : CLAUDE_DEEPSEEK_E2E_TOKEN_LIMIT;
   const costLimit = workflow === "methods" ? CLAUDE_DEEPSEEK_METHODS_USD_LIMIT : CLAUDE_DEEPSEEK_E2E_USD_LIMIT;
   const turnLimit = workflow === "methods" ? CLAUDE_DEEPSEEK_METHODS_MAX_TURNS : CLAUDE_DEEPSEEK_E2E_MAX_TURNS;
@@ -306,7 +317,16 @@ export function auditClaudeStream(events, { phase, allowedTools, maxTurns, wallT
   requireContract(Number.isSafeInteger(result.num_turns) && result.num_turns > 0 && result.num_turns <= maxTurns, "CLAUDE_DEEPSEEK_STREAM_TURNS_INVALID", "Claude terminal turn count exceeded the cap");
   const tools = streamToolUses(events);
   const allowed = new Set(allowedTools);
-  requireContract(tools.every((item) => allowed.has(item.name)), "CLAUDE_DEEPSEEK_STREAM_TOOL_FORBIDDEN", "Claude used a tool outside the phase allowlist");
+  const deniedToolIds = new Set();
+  const visitDenied = (value) => {
+    if (Array.isArray(value)) value.forEach(visitDenied);
+    else if (isPlainObject(value)) {
+      if (value.type === "tool_result" && value.is_error === true && typeof value.tool_use_id === "string") deniedToolIds.add(value.tool_use_id);
+      Object.values(value).forEach(visitDenied);
+    }
+  };
+  events.forEach(visitDenied);
+  requireContract(tools.every((item) => allowed.has(item.name) || deniedToolIds.has(item.id)), "CLAUDE_DEEPSEEK_STREAM_TOOL_FORBIDDEN", "Claude used a tool outside the phase allowlist");
   const usage = normalizedUsage({
     input_tokens: result.usage?.input_tokens,
     output_tokens: result.usage?.output_tokens,

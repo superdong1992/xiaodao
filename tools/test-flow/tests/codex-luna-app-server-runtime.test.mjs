@@ -32,6 +32,7 @@ const WORK_CONTENT = "work-content-that-must-be-replaced-by-a-receipt";
 const WARNING_CONTENT = "warning-content-that-must-be-replaced-by-a-receipt";
 const PATCH_CONTENT = "patch-content-that-must-be-replaced-by-a-receipt";
 const FAKE_CLI_VERSION = codexLunaAppServerCliVersion();
+const DEVELOPER_INSTRUCTIONS = "Keep the invocation cwd fixed.";
 
 test("service Skill installation binds the declared Skill name instead of its staging directory", (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-luna-service-skill-"));
@@ -56,10 +57,17 @@ const fs = require("node:fs");
 const path = require("node:path");
 const readline = require("node:readline");
 
-const args = process.argv.slice(2);
+let args = process.argv.slice(2);
 const fakeMode = process.env.FAKE_CODEX_MODE || "success";
-const profileMode = fakeMode === "generation-apply-patch" ? "generation" : fakeMode === "late-mcp-notification" ? "client" : "diagnosis";
+const profileMode = fakeMode === "generation-apply-patch" ? "generation" : ["late-mcp-notification", "mcp-call-limit"].includes(fakeMode) ? "client" : "diagnosis";
 const skillPath = process.env.FAKE_CODEX_SKILL;
+
+if (args[0] === "-C") {
+  if (path.resolve(args[1] || "") !== process.cwd()) process.exit(63);
+  args = args.slice(2);
+} else if (args[0] === "app-server") {
+  process.exit(63);
+}
 
 if (args[0] === "sandbox") {
   const separator = args.indexOf("--");
@@ -169,6 +177,7 @@ lines.on("line", (line) => {
     return;
   }
   if (message.method === "thread/start") {
+    if (message.params.developerInstructions !== process.env.FAKE_CODEX_DEVELOPER_INSTRUCTIONS) process.exit(65);
     if (fakeMode === "response-error") {
       send({ id: message.id, error: { code: -32001, message: "client profile rejected" } });
       return;
@@ -210,6 +219,26 @@ lines.on("line", (line) => {
   if (message.method === "turn/start") {
     send({ id: message.id, result: { turn: turn("inProgress") } });
     send({ method: "turn/started", params: { threadId, turn: turn("inProgress") } });
+    if (fakeMode === "wall-timeout") {
+      send({ method: "item/started", params: { threadId, turnId, item: { type: "agentMessage", id: "partial-message", text: "", phase: "commentary" } } });
+      return;
+    }
+    if (fakeMode === "error-notification") {
+      send({ method: "error", params: { threadId, turnId, error: { message: "private provider detail", additionalDetails: "private additional detail", codexErrorInfo: "serverOverloaded" }, willRetry: false } });
+      return;
+    }
+    if (fakeMode === "retrying-error-notification") {
+      send({ method: "error", params: { threadId, turnId, error: { message: "private transient detail", additionalDetails: null, codexErrorInfo: { responseStreamDisconnected: { httpStatusCode: 503 } } }, willRetry: true } });
+    }
+    if (fakeMode === "wrong-raw-function") {
+      send({ method: "rawResponseItem/completed", params: { threadId, turnId, item: { type: "function_call", name: "unexpected_shell", call_id: "bad-call-1", arguments: "{}" } } });
+    }
+    if (fakeMode === "mcp-call-limit") {
+      for (let index = 1; index <= 3; index += 1) {
+        send({ method: "item/started", params: { threadId, turnId, item: { type: "mcpToolCall", id: "mcp-" + index, server: "problem-locator", tool: "problem_locator_get_case", status: "inProgress", arguments: { case_id: "case-one", wait_seconds: 30 } } } });
+      }
+      return;
+    }
     if (profileMode === "generation") {
       send({ method: "rawResponseItem/completed", params: { threadId, turnId, item: { type: "custom_tool_call", name: "exec", call_id: "code-call-1", input: ${JSON.stringify(PATCH_CONTENT)}, status: "completed" } } });
       send({ method: "item/started", params: { threadId, turnId, item: { type: "fileChange", id: "patch-item-1", status: "inProgress", changes: [] } } });
@@ -241,7 +270,7 @@ lines.on("line", (line) => {
 `;
 
 function makeFixture(t, fakeMode = "success") {
-  const invocationMode = fakeMode === "generation-apply-patch" ? "generation" : fakeMode === "late-mcp-notification" ? "client" : "diagnosis";
+  const invocationMode = fakeMode === "generation-apply-patch" ? "generation" : ["late-mcp-notification", "mcp-call-limit"].includes(fakeMode) ? "client" : "diagnosis";
   const root = fs.mkdtempSync(path.join(fs.existsSync("/private/tmp") ? "/private/tmp" : os.tmpdir(), "codex-luna-runtime-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const workspaceRoot = path.join(root, "workspace");
@@ -298,11 +327,13 @@ function makeFixture(t, fakeMode = "success") {
         PATH: process.env.PATH,
         FAKE_CODEX_MODE: fakeMode,
         FAKE_CODEX_SKILL: skillPath,
+        FAKE_CODEX_DEVELOPER_INSTRUCTIONS: DEVELOPER_INSTRUCTIONS,
       },
       workspaceRoot,
       skillPath,
       mode: invocationMode,
       prompt: "Diagnose the fixture.",
+      developerInstructions: DEVELOPER_INSTRUCTIONS,
       outputSchema: {
         type: "object",
         properties: { diagnosis: { type: "string" } },
@@ -373,6 +404,10 @@ test("fake app-server proves preflight, cleanup, sanitized trace, final, usage, 
   });
   assert.equal(result.process.exit_code, 0);
   assert.equal(result.app_server.status, "PASS");
+  assert.deepEqual(result.app_server.arguments.slice(0, 3), ["-C", "<WORKSPACE_ROOT>", "app-server"]);
+  assert.equal(result.app_server.mcp_tool_call_limit, null);
+  assert.equal(result.app_server.developer_instructions.utf8_size, Buffer.byteLength(DEVELOPER_INSTRUCTIONS, "utf8"));
+  assert.match(result.app_server.developer_instructions.sha256, /^[a-f0-9]{64}$/u);
   assert.equal(result.app_server.preflight.status, "PASS");
   assert.equal(result.app_server.turn.warning_receipts.length, 1);
   assert.match(result.app_server.turn.warning_receipts[0].redacted_sha256, /^[a-f0-9]{64}$/);
@@ -462,6 +497,78 @@ test("a credential echo fails closed before transcript persistence", async (t) =
   assert.doesNotMatch(stderr, new RegExp(ACCESS_TOKEN));
   assert.equal(fs.existsSync(fixture.tracePath), false);
   assert.equal(fs.existsSync(path.join(fixture.callRoot, "codex-home", "auth.json")), false);
+});
+
+test("a wall timeout persists only the sanitized partial transcript", async (t) => {
+  const fixture = makeFixture(t, "wall-timeout");
+  fixture.options.wallSeconds = 1;
+  fixture.options.noProgressSeconds = 5;
+  await assert.rejects(
+    runCodexLunaAppServerCall(fixture.options),
+    (error) => error.code === "CODEX_LUNA_APP_SERVER_WALL_TIMEOUT",
+  );
+  const trace = fs.readFileSync(fixture.tracePath, "utf8");
+  assert.match(trace, /partial-message/);
+  for (const secret of [ACCESS_TOKEN, REFRESH_TOKEN, ID_TOKEN, ACCOUNT_ID]) assert.doesNotMatch(trace, new RegExp(secret));
+  assert.equal(fs.readFileSync(fixture.stderrPath, "utf8"), "[Test Flow withheld app-server stderr after a failed secret/protocol boundary.]\n");
+});
+
+test("a bounded client MCP call count stops tight polling before the stdout boundary", async (t) => {
+  const fixture = makeFixture(t, "mcp-call-limit");
+  fixture.options.maxMcpToolCalls = 2;
+  await assert.rejects(
+    runCodexLunaAppServerCall(fixture.options),
+    (error) => error.code === "CODEX_LUNA_APP_SERVER_MCP_CALL_LIMIT"
+      && error.details.limit === 2
+      && error.details.observed === 3,
+  );
+  const trace = fs.readFileSync(fixture.tracePath, "utf8");
+  assert.equal(trace.trim().split("\n").filter((line) => JSON.parse(line).message?.params?.item?.type === "mcpToolCall").length, 3);
+  assert.equal(fs.readFileSync(fixture.stderrPath, "utf8"), "[Test Flow withheld app-server stderr after a failed secret/protocol boundary.]\n");
+});
+
+test("a terminal error notification persists only official closed fields and a receipt", async (t) => {
+  const fixture = makeFixture(t, "error-notification");
+  await assert.rejects(
+    runCodexLunaAppServerCall(fixture.options),
+    (error) => {
+      assert.equal(error.code, "CODEX_LUNA_APP_SERVER_ERROR_NOTIFICATION");
+      assert.deepEqual(error.details, { codex_error_info: "serverOverloaded", http_status_code: null, will_retry: false });
+      return true;
+    },
+  );
+  const trace = fs.readFileSync(fixture.tracePath, "utf8");
+  assert.match(trace, /serverOverloaded/);
+  assert.match(trace, /\"will_retry\":false/);
+  assert.doesNotMatch(trace, /private provider detail/);
+  assert.doesNotMatch(trace, /private additional detail/);
+  assert.match(trace, /error_receipt/);
+});
+
+test("an explicitly retryable error notification remains in the audited turn and does not abort", async (t) => {
+  const fixture = makeFixture(t, "retrying-error-notification");
+  const result = await runCodexLunaAppServerCall(fixture.options);
+  assert.equal(result.process.exit_code, 0);
+  assert.deepEqual(result.app_server.turn.retryable_error_receipts.map(({ thread_id, turn_id, ...receipt }) => receipt), [{
+    codex_error_info: "responseStreamDisconnected",
+    http_status_code: 503,
+    will_retry: true,
+  }]);
+  const trace = fs.readFileSync(fixture.tracePath, "utf8");
+  assert.match(trace, /responseStreamDisconnected/);
+  assert.match(trace, /\"will_retry\":true/);
+  assert.doesNotMatch(trace, /private transient detail/);
+});
+
+test("a rejected raw shell function persists its closed name in the sanitized trace", async (t) => {
+  const fixture = makeFixture(t, "wrong-raw-function");
+  await assert.rejects(
+    runCodexLunaAppServerCall(fixture.options),
+    (error) => error.code === "CODEX_LUNA_APP_SERVER_RAW_SHELL_FUNCTION_REJECTED" && error.details.function_name === "unexpected_shell",
+  );
+  const trace = fs.readFileSync(fixture.tracePath, "utf8");
+  assert.match(trace, /unexpected_shell/);
+  for (const secret of [ACCESS_TOKEN, REFRESH_TOKEN, ID_TOKEN, ACCOUNT_ID]) assert.doesNotMatch(trace, new RegExp(secret));
 });
 
 test("an App Server response failure retains its request id, code, and message", async (t) => {

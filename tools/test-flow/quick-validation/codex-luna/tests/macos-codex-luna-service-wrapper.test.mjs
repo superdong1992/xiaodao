@@ -8,9 +8,11 @@ import {
   controlledEnvironment,
   canonicalizeMethodsDraft,
   parseArguments,
+  persistRejectedServiceDraft,
   publishLinuxServiceDraft,
   removeLinuxServiceProject,
   repositorySkillPaths,
+  serviceDeveloperInstructions,
   runServiceLogparseCommand,
   safeServiceError,
   sealServiceOutcomeDraft,
@@ -23,6 +25,35 @@ test("service Skill keeps missing registered artifacts in the post-route require
   assert.match(skill, /required_artifacts.*later DIAGNOSE job can request/);
   assert.match(skill, /select that registration as `MATCHED`/);
   assert.match(skill, /Do not return `NO_CAPABILITY` merely because `log_archive` is absent/);
+  assert.match(skill, /harness runs the fixed product finalizer/);
+  assert.match(skill, /first workspace inspection command must be exactly `sed -n '1,160p' inputs\/manifest\.json`/);
+  assert.match(skill, /use `sed` to re-read both `inputs\/manifest\.json` and the draft/);
+  assert.match(skill, /If the manifest cannot be read, do not write a draft/);
+  assert.match(skill, /OUTPUT_CONTRACT finalizer paragraph describes the harness step/);
+  assert.match(skill, /Do not invoke, probe, or search for `problem-locator-seal-outcome-draft`/);
+  assert.match(skill, /use exactly these root fields and no others/);
+  assert.match(skill, /Copy the manifest's exact `case_id` into the draft/);
+  assert.match(skill, /Never add server-owned `outcome_id`, `produced_at`, or `decision_audit`/);
+  assert.match(skill, /enumerate every occurrence of every declared positive evidence marker/);
+  assert.match(skill, /higher-priority or already-confirmed method must not suppress another applicable method/);
+  assert.match(skill, /Do not stop after the first cause or the first target log/);
+  assert.match(skill, /all user-visible summaries, limitations, safety notes, and recommendations in natural Simplified Chinese/);
+  assert.match(skill, /overlap_us=1500000/);
+  assert.match(skill, /无法确认具体贡献者/);
+});
+
+test("service developer instructions pin cwd and bind every draft to the frozen manifest", () => {
+  const workspaceRoot = path.resolve("service-workspace");
+  const instructions = serviceDeveloperInstructions(workspaceRoot);
+  assert.match(instructions, /禁止 cd、chdir/);
+  assert.ok(instructions.includes(JSON.stringify(workspaceRoot)));
+  assert.match(instructions, /Skill 绝对路径仅用于 app-server 配置/);
+  assert.match(instructions, /inputs\/manifest\.json/);
+  assert.match(instructions, /只能逐字绑定 manifest 与冻结输入/);
+  assert.match(instructions, /单个文件内从 1 计数/);
+  assert.match(instructions, /相同 request_id 的 timeout/);
+  assert.match(instructions, /枚举所有已加载 method 与 marker occurrence/);
+  assert.throws(() => serviceDeveloperInstructions("relative"), (error) => error.code === "MACOS_CODEX_LUNA_SERVICE_WORKSPACE_INVALID");
 });
 
 test("server wrapper deterministically distinguishes route, logparse, diagnose, and review", () => {
@@ -75,6 +106,9 @@ test("server wrapper reports only allowlisted scalar error details", () => {
       id: 5,
       response_code: -32600,
       response_message: "invalid request",
+      codex_error_info: "serverOverloaded",
+      http_status_code: 503,
+      will_retry: true,
       item_type: "fileChange",
       cwd_matches: false,
       errors_count: 1,
@@ -84,7 +118,7 @@ test("server wrapper reports only allowlisted scalar error details", () => {
     },
   });
   const receipt = safeServiceError(error);
-  assert.deepEqual(receipt.details, { id: 5, response_code: -32600, response_message: "invalid request", item_type: "fileChange", cwd_matches: false, errors_count: 1, skills_errors: '[{"message":"permission denied"}]' });
+  assert.deepEqual(receipt.details, { id: 5, response_code: -32600, response_message: "invalid request", codex_error_info: "serverOverloaded", http_status_code: 503, will_retry: true, item_type: "fileChange", cwd_matches: false, errors_count: 1, skills_errors: '[{"message":"permission denied"}]' });
   assert.doesNotMatch(JSON.stringify(receipt), /must-not-escape/);
 });
 
@@ -136,6 +170,7 @@ test("server wrapper seals a service outcome draft before the Agent process exit
   fs.mkdirSync(path.join(workspace, "runtime", "tool-state"), { recursive: true });
   fs.mkdirSync(path.join(workspace, "inputs"), { recursive: true });
   fs.mkdirSync(path.join(workspace, "output"), { recursive: true });
+  fs.writeFileSync(path.join(workspace, "output", "job_outcome.draft.json"), "{}\n");
   fs.writeFileSync(finalizer, "#!/bin/sh\nprintf '{\"schema_version\":2}' > runtime/tool-state/agent-job-outcome-draft.finalized\n", { mode: 0o700 });
   const receipt = sealServiceOutcomeDraft({ phase: "ROUTE", workspaceRoot: workspace, finalizerEntry: finalizer });
   assert.equal(receipt.status, "PASS");
@@ -144,6 +179,35 @@ test("server wrapper seals a service outcome draft before the Agent process exit
   assert.deepEqual(sealServiceOutcomeDraft({ phase: "LOGPARSE", workspaceRoot: workspace, sourceRoot: root }), { required: false, invoked: false, status: "SKIP" });
   assert.deepEqual(sealServiceOutcomeDraft({ phase: "DIAGNOSE", workspaceRoot: workspace, sourceRoot: root }), { required: false, invoked: false, status: "SKIP" });
   assert.deepEqual(sealServiceOutcomeDraft({ phase: "REVIEW", workspaceRoot: workspace, sourceRoot: root }), { required: false, invoked: false, status: "SKIP" });
+});
+
+test("rejected ROUTE drafts retain secret-scanned failure evidence and a contract code", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "macos-luna-rejected-route-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const workspace = path.join(root, "workspace");
+  const evidence = path.join(root, "evidence");
+  const finalizer = path.join(root, "bin", "problem-locator-seal-outcome-draft");
+  fs.mkdirSync(path.dirname(finalizer), { recursive: true });
+  fs.mkdirSync(path.join(workspace, "runtime", "tool-state"), { recursive: true });
+  fs.mkdirSync(path.join(workspace, "output"), { recursive: true });
+  fs.writeFileSync(path.join(workspace, "output", "job_outcome.draft.json"), '{"schema_version":2,"unexpected":true}\n');
+  fs.writeFileSync(finalizer, "#!/bin/sh\nexit 2\n", { mode: 0o700 });
+  assert.throws(
+    () => sealServiceOutcomeDraft({ phase: "ROUTE", workspaceRoot: workspace, finalizerEntry: finalizer }),
+    (error) => error.code === "MACOS_CODEX_LUNA_SERVICE_DRAFT_REJECTED",
+  );
+  const receipt = persistRejectedServiceDraft({ phase: "ROUTE", workspaceRoot: workspace, evidenceRoot: evidence, canaries: ["secret-canary-value"] });
+  assert.equal(receipt.status, "PASS");
+  assert.equal(fs.readFileSync(path.join(evidence, "server-invocations", "route.rejected-draft.json"), "utf8"), '{"schema_version":2,"unexpected":true}\n');
+  assert.equal(JSON.parse(fs.readFileSync(path.join(evidence, "server-invocations", "route.rejected-draft-secret-scan.json"), "utf8")).status, "PASS");
+
+  const unsafeEvidence = path.join(root, "unsafe-evidence");
+  fs.writeFileSync(path.join(workspace, "output", "job_outcome.draft.json"), '{"value":"secret-canary-value"}\n');
+  assert.throws(
+    () => persistRejectedServiceDraft({ phase: "ROUTE", workspaceRoot: workspace, evidenceRoot: unsafeEvidence, canaries: ["secret-canary-value"] }),
+    (error) => error.code === "CODEX_LUNA_SECRET_LEAK",
+  );
+  assert.equal(fs.existsSync(unsafeEvidence), false);
 });
 
 test("server wrapper runs the one product-owned Logparse command without persisting broker credentials", (t) => {

@@ -33,11 +33,11 @@ test("E2E runner accepts only repository-owned Claude inputs and rejects Docker,
   }
 });
 
-test("E2E source freezes one client plus four ordered server receipts and no retry path", () => {
+test("E2E source freezes one client plus scenario-required ordered server receipts and no retry path", () => {
   const source = fs.readFileSync(path.join(ROOT, "runtime", "claude-deepseek-e2e-runner.mjs"), "utf8");
-  assert.match(source, /\["route", "logparse", "diagnose", "review"\]/);
+  assert.match(source, /expectedPhases\.slice\(1\)/);
   assert.match(source, /const invocations = \[client\.receipt, \.\.\.serverInvocations\]/);
-  assert.match(source, /auditClaudeInvocations\(invocations, \{ workflow: "e2e" \}\)/);
+  assert.match(source, /auditClaudeInvocations\(invocations, \{ workflow: "e2e", scenarioId: options\.scenario \}\)/);
   assert.equal(source.includes("automaticRetry"), false);
   assert.equal(source.includes("retryProcess"), false);
   assert.match(source, /auditMcpRecoveries\(client\.mcp\)/);
@@ -49,6 +49,28 @@ test("recoverable MCP errors reuse the original request ID exactly once in the s
   assert.deepEqual(auditMcpRecoveries([failed, corrected]).recoveries, [{ tool: failed.tool, code: "REVISION_CONFLICT", request_id: "req-submit", failed_ordinal: 1, corrected_ordinal: 3 }]);
   assert.throws(() => auditMcpRecoveries([failed, { ...corrected, arguments: { ...corrected.arguments, request_id: "new-request" } }]), (error) => error.code === "CLAUDE_DEEPSEEK_RECOVERY_REQUEST_ID_INVALID");
   assert.throws(() => auditMcpRecoveries([failed, corrected, { ...corrected, ordinal: 4 }]), (error) => error.code === "CLAUDE_DEEPSEEK_RECOVERY_REQUEST_ID_INVALID");
+});
+
+test("one empty get_case validation attempt permits only the immediate complete successful correction", () => {
+  const failed = { ordinal: 1, tool: "problem_locator_get_case", arguments: {}, result: { ok: false, data: null, error: { code: "VALIDATION_ERROR" } } };
+  const corrected = { ordinal: 2, tool: "problem_locator_get_case", arguments: { case_id: "case-id", wait_for_job_id: null, wait_seconds: 30 }, result: { ok: true, data: { case_view: {} }, error: null } };
+  assert.deepEqual(auditMcpRecoveries([failed, corrected]).recoveries, [{ tool: failed.tool, code: "EMPTY_GET_CASE_VALIDATION", request_id: null, failed_ordinal: 1, corrected_ordinal: 2 }]);
+  assert.throws(() => auditMcpRecoveries([failed, { ...corrected, ordinal: 3 }, { ordinal: 2, tool: "problem_locator_list_artifacts", arguments: { case_id: "case-id" }, result: { ok: true, data: { artifacts: [] }, error: null } }]), (error) => error.code === "CLAUDE_DEEPSEEK_RECOVERY_REQUEST_ID_INVALID");
+});
+
+test("one string-null get_case validation attempt permits only the immediate same-poll correction", () => {
+  const failed = {
+    ordinal: 1,
+    tool: "problem_locator_get_case",
+    arguments: { case_id: "case-id", wait_for_job_id: "null", wait_seconds: 0 },
+    result: { ok: false, data: null, error: { code: "VALIDATION_ERROR", retryable: false, details: [{ field: "wait_for_job_id", actual: "null" }] } },
+  };
+  const corrected = { ordinal: 2, tool: "problem_locator_get_case", arguments: { case_id: "case-id", wait_seconds: 0 }, result: { ok: true, data: { case_view: {} }, error: null } };
+  assert.deepEqual(auditMcpRecoveries([failed, corrected]).recoveries, [{ tool: failed.tool, code: "STRING_NULL_GET_CASE_VALIDATION", request_id: null, failed_ordinal: 1, corrected_ordinal: 2 }]);
+  assert.equal(auditMcpRecoveries([failed, { ...corrected, arguments: { ...corrected.arguments, wait_for_job_id: null } }]).status, "PASS");
+  assert.throws(() => auditMcpRecoveries([failed, { ...corrected, arguments: { ...corrected.arguments, wait_seconds: 30 } }]), (error) => error.code === "CLAUDE_DEEPSEEK_RECOVERY_REQUEST_ID_INVALID");
+  assert.throws(() => auditMcpRecoveries([{ ...failed, result: { ok: false, data: null, error: { code: "VALIDATION_ERROR", retryable: false, details: [{ field: "case_id", actual: "null" }] } } }, corrected]), (error) => error.code === "CLAUDE_DEEPSEEK_RECOVERY_ERROR_INVALID");
+  assert.throws(() => auditMcpRecoveries([failed, { ordinal: 2, tool: "problem_locator_list_artifacts", arguments: { case_id: "case-id" }, result: { ok: true, data: { artifacts: [] }, error: null } }, { ...corrected, ordinal: 3 }]), (error) => error.code === "CLAUDE_DEEPSEEK_RECOVERY_REQUEST_ID_INVALID");
 });
 
 test("client uses strict MCP, production Skill, exact Bash programs, and one fresh data root", () => {
@@ -65,6 +87,15 @@ test("client uses strict MCP, production Skill, exact Bash programs, and one fre
   assert.match(source, /denied_tool_attempts: client\.denied/);
   assert.match(source, /claude-deepseek-bash-policy\.mjs/);
   assert.match(source, /一条物理命令行/);
+  assert.match(source, /--max-time 60/);
+  assert.match(source, /不得再运行 stat -c、ls 或其他 Bash 探测/);
+  assert.match(source, /declared_size 必须是整数/);
+  assert.match(source, /这两个字段禁止传 null/);
+  assert.match(source, /不要先发送工具名再补参数/);
+  assert.match(source, /appendSystemPrompt: CLIENT_TOOL_INPUT_SYSTEM_PROMPT/);
+  assert.match(source, /本约束覆盖 Skill 中针对空 get_case 的通用更正建议/);
+  assert.match(source, /严禁传字符串 "null"/);
+  assert.match(source, /CLAUDE_DEEPSEEK_SERVICE_JOB_FAILED/);
   assert.match(source, /const dataRoot = path\.join\(workRoot, "data-root"\)/);
   assert.match(source, /treeBytes\(serviceEvidence\) \+ treeBytes\(serviceUsage\)/);
   assert.match(source, /TEST_FLOW_PROGRESS stage\.progress claude-deepseek/);

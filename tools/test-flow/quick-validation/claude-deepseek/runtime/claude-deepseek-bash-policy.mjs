@@ -17,12 +17,18 @@ function shellWords(command) {
 function curlContract(words, policy) {
   const headers = new Map();
   let method = null;
+  let maxTime = null;
   let uploadFile = null;
   let target = null;
   for (let index = 1; index < words.length; index += 1) {
     const word = words[index];
     if (["--silent", "--show-error", "--fail-with-body"].includes(word)) continue;
     if (word === "--request") { method = words[index += 1] ?? null; continue; }
+    if (word === "--max-time") {
+      if (maxTime !== null) return denied("curl --max-time must appear exactly once");
+      maxTime = words[index += 1] ?? null;
+      continue;
+    }
     if (word === "--upload-file") { uploadFile = words[index += 1] ?? null; continue; }
     if (word === "--header" || word === "-H") {
       const rendered = words[index += 1] ?? "";
@@ -36,7 +42,7 @@ function curlContract(words, policy) {
     if (/^https?:\/\//u.test(word) && target === null) { target = word; continue; }
     return denied("curl contains an unsupported option or argument");
   }
-  if (method !== "PUT" || uploadFile !== policy.archive_path || target === null) return denied("curl must be one PUT of the frozen archive");
+  if (method !== "PUT" || maxTime !== "60" || uploadFile !== policy.archive_path || target === null) return denied("curl must be one 60-second-bounded PUT of the frozen archive");
   let url;
   try { url = new URL(target); } catch { return denied("curl target is not a valid URL"); }
   const match = url.pathname.match(/^\/api\/v1\/attachments\/([A-Za-z0-9._-]+)\/content$/u);
