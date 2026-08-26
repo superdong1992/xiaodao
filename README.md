@@ -28,6 +28,8 @@ State、Job 和权威 Outcome 已硬切到 V7。Problem Locator 5.0.0 只接受�
 
 `wiki-to-diagnosis-skill` 直接从一份已评审 Wiki 生成 `SKILL.md`、`methods.json` 和独立可加载的 `references/*.md` 方法卡。`methods.json` 固定声明源 Wiki SHA-256、必需用户输入、必需附件、日志派生字段、共享参考和有序方法索引；`shared_references[0]` 固定绑定逐项逐序保留源 Wiki 机械日志模板的 `references/source-log-templates.md`，每个方法必须有正向 evidence markers。产品在包外提供 `registration-template.json`，因此生成 Agent 无权制造部署范围、运行时资产、Logparse 产品或 anchor 绑定。
 
+仓库另提供 [`.claude/skills/wiki-to-logparse-diagnosis-skill`](.claude/skills/wiki-to-logparse-diagnosis-skill)，用于生成局域网 Claude Code 直用的 Logparse 定位 Skill。它保留相同的 Wiki、方法卡、日志模板和 marker 完整性规则，但固定要求 `client_slot`、`client_process_name`、`server_slot`、`server_process_name`，并在输入齐全后先加载现装 `logparse-diagnose`。生成物直接回复定位摘要，同时用固定打包器交付 `result.txt` 与实际使用日志组成的扁平 `result.zip`。该直用产物不属于当前 Server 的 Methods registration，不能放入 `SKILL_DIR` 替代 `registration-template.json`；当前 `.agents/skills/wiki-to-diagnosis-skill` 和两阶段 Server 链路不受影响。
+
 Logparse 产品可以省略。省略时 Runtime 记录有效产品 `default`，Broker 不向上游强制传入 `--product`；只有非默认产品才显式传参。生成定位 Skill 时，作者只声明 Logparse 归档 requirement 的数量约束，不填写 Content-Type；上传时用户也只选择归档文件。平台按文件后缀确定内部 Content-Type：`.gz/.tar.gz/.tgz` 为 `application/gzip`，`.zip` 为 `application/zip`，`.tar` 为 `application/x-tar`。
 
 Agent 不直接产生权威 Outcome 或公开用户产物。SPECIALIZED DIAGNOSE 只能写 `output/method-diagnosis.draft.json`，REVIEW 只能写 `output/method-review.draft.json`；两者都不能写旧 `job_outcome.draft.json`、生成 Evidence/Artifact 资源或调用 Logparse。Agent 退出后，服务端验证 canonical Methods 草稿，重新对冻结日志做确定性 grounding，并生成带 `outcome_id`、时间和 `decision_audit` 的唯一权威 `output/job_outcome.json`。ROUTE 与 GENERIC 分支继续使用各自的隔离输出协议。
@@ -48,6 +50,8 @@ Agent 无权预先构造、摘要或替代这两项结果。Reviewer 使用盲�
 仓库测试统一从 [`tools/test-flow/README.md`](tools/test-flow/README.md) 进入；终态结构见 [`design/test-flow-architecture.md`](design/test-flow-architecture.md)。Dev 默认只跑受影响确定性测试和完整确定性套件，不调用真实模型；SameJob 已纳入确定性 Journey。Release 在 planning 时冻结 Git 可见工作树的不可变源码快照，不要求预先提交；它还要求当前平台的 built-in Client→Linux adapter、完整确定性/平台证明，以及从 GENESIS 和全新空 `DATA_ROOT` 开始的一条 no-mock CrossJob 旅程。
 
 每次运行的本地证据保存在 `.tmp/test-flow-evidence/<run-id>`。`verdict.json` 是唯一权威结论；缺失就是 `UNFINALIZED`。证据在复用前会按当前配置、密钥扫描器和事件合同重新审计，且不会自动删除。
+
+局域网直用元 Skill 的真实生成与诊断冒烟使用独立入口 [`tools/test-flow/quick-validation/claude-deepseek-lan-skill/run.sh`](tools/test-flow/quick-validation/claude-deepseek-lan-skill/run.sh)。该入口不接中央 Test Flow，独立 verdict 只证明对应 Fast E2E，不代表 Release 或当前 Server 链路通过。
 
 Problem Locator 是一个单实例故障诊断服务。它接收结构化问题，收集事实与附件，执行固定版本的路由、诊断和盲审任务，最终发布经过机器验证和独立复核的完成态 `USER_RESULT`，或发布说明无法可靠定论的 `INCONCLUSIVE` `USER_RESULT` JSON 与 `UNRESOLVED` 审计包。
 

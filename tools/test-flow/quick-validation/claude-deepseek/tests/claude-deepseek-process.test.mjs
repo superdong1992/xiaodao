@@ -30,6 +30,25 @@ test("controlled Claude environment drops ambient provider, proxy, and hook stat
   assert.equal(environment.CLAUDE_CONFIG_DIR, "/private/tmp/config");
 });
 
+test("controlled Claude environment prepends only explicit absolute PATH entries", () => {
+  const environment = controlledClaudeEnvironment({}, {
+    configRoot: "/private/tmp/config",
+    home: "/private/tmp/home",
+    temporary: "/private/tmp/tmp",
+    pathEntries: ["/private/tmp/contract-bin"],
+  });
+  assert.equal(environment.PATH, ["/private/tmp/contract-bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"].join(path.delimiter));
+  assert.throws(
+    () => controlledClaudeEnvironment({}, {
+      configRoot: "/private/tmp/config",
+      home: "/private/tmp/home",
+      temporary: "/private/tmp/tmp",
+      pathEntries: ["relative-bin"],
+    }),
+    /PATH additions/,
+  );
+});
+
 test("tool projection separates Skill, MCP and Bash without parsing narrative text", () => {
   const events = [
     { type: "assistant", message: { content: [

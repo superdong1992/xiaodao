@@ -1,0 +1,114 @@
+#!/usr/bin/python3
+from __future__ import annotations
+
+import argparse
+import json
+from pathlib import Path
+import re
+import shutil
+import sys
+
+
+EXPECTED_ARTIFACT_ID = "00000000-0000-4000-8000-000000000060"
+EXPECTED_PROBLEM_TIME = "2026-08-23T10:00:05.300Z"
+EXPECTED_ANCHORS = [
+    {
+        "label": "client",
+        "module": "rpc",
+        "slot": "1",
+        "process_name": "rpc_client",
+        "pid": None,
+    },
+    {
+        "label": "server",
+        "module": "rpc",
+        "slot": "2",
+        "process_name": "rpc_server",
+        "pid": None,
+    },
+]
+PROPOSAL_KEY_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
+
+
+def _write_json(path: Path, value: object) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True),
+        encoding="utf-8",
+    )
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("operation", choices=("target-logs",))
+    parser.add_argument("--request", required=True)
+    parser.add_argument("--result", required=True)
+    args = parser.parse_args(argv)
+    root = Path.cwd().resolve()
+    request_path = (root / args.request).resolve()
+    result_path = (root / args.result).resolve()
+    if root not in request_path.parents or root not in result_path.parents:
+        print("contract path escaped workspace", file=sys.stderr)
+        return 2
+    request_parts = request_path.relative_to(root).parts
+    result_parts = result_path.relative_to(root).parts
+    if (
+        len(request_parts) != 4
+        or len(result_parts) != 4
+        or request_parts[:2] != ("output", "proposals")
+        or result_parts[:2] != ("output", "proposals")
+        or request_parts[2] != result_parts[2]
+        or not PROPOSAL_KEY_PATTERN.fullmatch(request_parts[2])
+        or request_parts[3] != "request.json"
+        or result_parts[3] != "target_logs.json"
+    ):
+        print("request and result must use one output/proposals/<proposal_key> root", file=sys.stderr)
+        return 2
+    request = json.loads(request_path.read_text(encoding="utf-8"))
+    expected = {
+        "schema_version": 1,
+        "problem_time": EXPECTED_PROBLEM_TIME,
+        "anchors": EXPECTED_ANCHORS,
+        "artifact_id": EXPECTED_ARTIFACT_ID,
+    }
+    if request != expected:
+        _write_json(root / "runtime/broker-stub-audit.json", {"status": "FAIL", "request": request, "expected": expected})
+        print("request did not match the slot contract", file=sys.stderr)
+        return 3
+    sources = root / "runtime/stub-source-logs"
+    targets = result_path.parent / "target-logs"
+    targets.mkdir(parents=True, exist_ok=False)
+    shutil.copyfile(sources / "client.log", targets / "client.log")
+    shutil.copyfile(sources / "server.log", targets / "server.log")
+    relative_client = (targets / "client.log").relative_to(root).as_posix()
+    relative_server = (targets / "server.log").relative_to(root).as_posix()
+    result = {
+        "schema_version": 1,
+        "target_logs": [
+            {
+                "label": "client",
+                "module": "rpc",
+                "slot": "1",
+                "process_name": "rpc_client",
+                "pid": None,
+                "match_status": "exact",
+                "log_path": relative_client,
+            },
+            {
+                "label": "server",
+                "module": "rpc",
+                "slot": "2",
+                "process_name": "rpc_server",
+                "pid": None,
+                "match_status": "exact",
+                "log_path": relative_server,
+            },
+        ],
+    }
+    _write_json(result_path, result)
+    _write_json(root / "runtime/broker-stub-audit.json", {"status": "PASS", "operation": args.operation, "request": request, "result": result})
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

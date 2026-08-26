@@ -120,6 +120,11 @@ test("the Ubuntu wrapper delegates only to provider standalone Fast E2E entries"
   assert.doesNotMatch(launcher, /tools\/test-flow\/run\.sh/u);
   assert.match(launcher, /quick-validation\/codex-luna\/run\.sh/u);
   assert.match(launcher, /quick-validation\/claude-deepseek\/run\.sh/u);
+  assert.match(launcher, /quick-validation\/claude-deepseek-lan-skill\/run\.sh/u);
+  assert.match(launcher, /claude-deepseek-lan-skill:generation/u);
+  assert.match(launcher, /claude-deepseek-lan-skill:diagnosis/u);
+  assert.match(launcher, /--goal generation/u);
+  assert.match(launcher, /--goal diagnosis/u);
   assert.match(launcher, /--mode/u);
   assert.match(launcher, /--all-scenarios/u);
   assert.match(launcher, /container-suite\.mjs/u);
