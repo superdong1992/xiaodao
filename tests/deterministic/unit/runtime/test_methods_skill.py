@@ -652,7 +652,8 @@ def test_catalog_routes_registered_methods_skill_for_empty_partial_and_extra_fac
     assert '<<<METHODS_SKILL_FILE path="methods.json">>>' in rendered
     assert '<<<METHODS_SKILL_FILE path="references/slow-execution.md">>>' in rendered
     index = _skill_index_entry(resolved_asset, skill_ref)
-    assert index["registration_id"] == "test-timeout"
+    assert "registration_id" not in index
+    assert index["ref"] == skill_ref.model_dump(mode="json")
     assert index["required_user_inputs"] == [
         "problem_time",
         "client_process",

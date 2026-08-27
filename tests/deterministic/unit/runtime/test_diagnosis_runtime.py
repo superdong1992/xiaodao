@@ -70,7 +70,7 @@ from tests.deterministic.contracts.fakes import (
     InMemoryStateRepository,
 )
 from problem_locator.runtime.agent_backend import BackendExecution
-from problem_locator.runtime.catalog import VersionedAssetCatalog
+from problem_locator.runtime.catalog import BUILTIN_ASSET_ROOT, VersionedAssetCatalog
 from problem_locator.runtime.context_builder import ContextBuilder, ContextLimitExceeded
 from problem_locator.runtime.context_policy import RuntimeAssetResolver
 from problem_locator.runtime.diagnosis_runtime import (
@@ -428,6 +428,31 @@ def _job_from_catalog(catalog: VersionedAssetCatalog) -> Job:
     bindings = catalog.route_bindings()
     base.update(bindings.model_dump(mode="json"))
     return Job.model_validate(base)
+
+
+def test_route_skill_index_v2_exposes_only_the_complete_namespaced_ref(
+    tmp_path: Path,
+) -> None:
+    catalog = _make_route_catalog(tmp_path)
+    job = _job_from_catalog(catalog)
+    resolved = RuntimeAssetResolver(catalog).resolve_job(job)
+    assert resolved.skill_index_text is not None
+    index = json.loads(resolved.skill_index_text)
+
+    assert index["schema_version"] == 2
+    assert len(index["skills"]) == 1
+    skill = index["skills"][0]
+    assert "registration_id" not in skill
+    assert skill["ref"] == job.available_skill_refs[0].model_dump(mode="json")
+    assert skill["ref"]["id"] == "diagnosis-skill/manual-triage"
+
+    route_contract = (
+        BUILTIN_ASSET_ROOT / "output-contracts" / "route" / "output-contract.md"
+    ).read_text(encoding="utf-8")
+    assert "complete `ref` object is the only valid source" in route_contract
+    assert "never remove the `diagnosis-skill/` namespace" in route_contract
+    assert "exactly equal to" in route_contract
+    assert catalog.route_bindings().output_contract_ref.version == "3.0.0"
 
 
 def _restore_permissions(root: Path) -> None:

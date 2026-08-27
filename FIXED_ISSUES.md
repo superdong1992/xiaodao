@@ -1507,21 +1507,35 @@
 
 ## PL-FIX-040：局域网 Logparse 元 Skill 生成物无法注册，Fast E2E 绕过真实 MCP 与 Server
 
-- **状态**：已修复；是否验证通过以本条“最新 Test Flow verdict”为准。
+- **状态**：回归代码已修复；验证范围以本条“最新 Test Flow verdict”和“最新 Linux Fast E2E verdict”分别为准。
 - **症状**：`d13675d` 新增的元 Skill 只生成可在 Claude Code 本地直跑的 `SKILL.md`、
   `logparse.json` 和打包脚本，没有 Server 必需的 `registration-template.json`；因此产物不能放入 Linux
   Server `SKILL_DIR`，也无法参与 ROUTE。配套 Fast E2E 另建 provider，用仓库内 broker 合同桩直接跑
   生成物，并由生成物自行调用 Helper、broker 和 ZIP 打包器；它没有复现用户实际的
   `problem-locator-client -> HTTP MCP -> ROUTE -> LOGPARSE -> DIAGNOSE -> REVIEW -> result.zip`
-  链路，所以错误地把不可部署的产物判为可用。
+  链路，所以错误地把不可部署的产物判为可用。修复提交 `0b2f2e6` 部署到真实局域网后又暴露 ROUTE
+  回归：Agent 把 `SKILL_INDEX.skills[*].registration_id=diagnose-rpc-timeout` 写成
+  `payload.skill_ref.id`，而唯一可用身份实际是
+  `diagnosis-skill/diagnose-rpc-timeout`，Server 因 exact-ref 不匹配以 `OUTCOME_INVALID` 拒绝。
 - **受影响版本**：提交 `d13675d49c6b8e86a9ddb6f5eb209ca1c45090b8`（`feat: add LAN logparse
-  diagnosis meta skill`）。
+  diagnosis meta skill`）；首次重构提交 `0b2f2e667608637519fecc87cdd28b71eb943de4` 仍受 ROUTE 短 ID
+  歧义与 Fast E2E 错误安装业务 Skill 影响。
 - **根因**：把“局域网 Claude Code 直用”误解成客户端本地执行定位 Skill，混淆了客户端 Skill、
   Server registration、Methods package 和 Server 预处理 Helper 四层职责；测试又复制出一套
   `claude-deepseek-lan-skill` provider，以本地 broker 桩和自定义 ZIP 代替真实服务端链路，没有复用
   已有 `claude-deepseek` 用户旅程。首次重构后，独立审查又确认三个会污染真实结论的缺口：Claude
   E2E 服务端没有把当前 `sourceRoot` 注入 Python，中央 planner 对 `insufficient-evidence` 仍固定声明
   5 次调用，客户端审计也没有证明 `problem-locator-client` 确实加载；定向测试当时仍会假通过。
+  后续局域网证据确认，`SKILL_INDEX` 又同时暴露完整 `ref` 和短 `registration_id`，DeepSeek 将后者误作
+  VersionedRef ID。对应 Fast E2E 还把生成的业务 package 复制进 Server Claude 的 Agent Skill 目录，
+  并允许 ROUTE、DIAGNOSE、REVIEW 调用 `Skill(diagnose-rpc-timeout)`；测试环境因此比真实部署多出一条
+  非产品路径，虽然最终 exact-ref 审计严格，仍可能掩盖 Router 对双身份字段的依赖。移除该假路径后的
+  首次真实 E2E 又确认，Server wrapper 的非 LOGPARSE 写权限没有绑定 Job 工作区的绝对 `output/`
+  路径；Claude Code 在 `dontAsk` 模式下因此拒绝合法 draft。进一步修正路径值后确认，Claude Code
+  对实际 `Write` 工具使用 `Edit(...)` 权限类别，且权限语法以单 `/` 表示项目根、双 `//` 表示文件系统
+  绝对路径；`Write(...)` 或 `Edit(/run/...)` 都不会放行。权限失败后的模型还写入了 Claude 默认放行的
+  memory 目录，说明仅依赖默认权限不足以证明 Job 边界。runner 又先审计客户端 recovery/Bash、后检查
+  terminal Case，把真实 `BACKEND_EXIT_FAILED` 掩盖成无关的次生审计错误。
 - **不可回归行为**：元 Skill 必须生成完整 PRODUCTION registration 根目录；
   `registration-template.json` 与 `package/diagnose-*` 必须能被当前 Server loader 原样装载。
   `client_slot`、`client_process_name`、`server_slot`、`server_process_name` 必须是动态且必填的 USER_FACT；
@@ -1531,7 +1545,14 @@
   job-scoped broker 命令；Helper 加载失败、broker 失败或重试都必须停止。Fast E2E 只能复用现有
   `claude-deepseek` provider：同一客户端只装 `problem-locator-client`，经 HTTP MCP 触发精确 ROUTE，
   最后按服务端 descriptor 下载并独立校验 `result.zip`；不得再增加本地直跑 provider、broker 桩或
-  客户端自制 ZIP。
+  客户端自制 ZIP。ROUTE `SKILL_INDEX` 只能暴露完整 namespaced `ref`，不得同时暴露可被误作 ID 的短
+  `registration_id`；Router 必须逐字段复制同一个 `ref` 对象。Fast E2E 的 Server Agent 只能安装
+  `logparse-diagnose`，业务 package 只能由 Server Catalog 从 `SKILL_DIR` 加载并注入上下文，所有非
+  LOGPARSE 阶段都不得获得或调用 Agent Skill 工具。非 LOGPARSE Agent 的工具集合只能含 Read/Write；
+  权限规则必须按 Claude 双斜杠绝对路径语法，用 `Read(//<Job绝对路径>/**)` 与文件写入类别
+  `Edit(//<Job绝对路径>/output/**)` 精确绑定；wrapper 还必须独立拒绝文件工具报错、Job 外 Read 和
+  `output/` 外 Write，包括 Claude 自动放行的 memory 目录。terminal Server Job 失败必须先于
+  recovery、上传、下载和 Bash 审计报告，不能被次生错误覆盖。
 - **修复历史**：2026-08-27，删除 `claude-deepseek-lan-skill` provider、仓库内 broker 桩和元 Skill
   固定 packer；把元 Skill 改为生成完整 registration 与 Methods package，并让 validator 同时核对
   Server loader 限额、路径、角色、固定 module、`default` product、方法卡和禁止越权调用。Server
@@ -1589,7 +1610,22 @@
   容器挂载修正后的中央 Dev `run-20260826T194315Z-e94108c9` 已让 framework 与 repository 全部 PASS，
   随后在 `det.affected` 以 1014 项中的唯一失败封存：受控 fixture manifest 仍记录修改前
   `fake_agent.py` 的 size/SHA-256。同步更新该 canonical 完整性条目后再以新源码身份验证，不绕过
-  fixture 自校验。
+  fixture 自校验。2026-08-27，依据局域网真实失败的 ROUTE draft，移除 `SKILL_INDEX` 中重复的短
+  `registration_id`，将内部 index 升级为 v2，并把 ROUTE output contract 升级为 3.0.0，明确禁止删改
+  `diagnosis-skill/` namespace。Fast E2E 同步移除业务 package 的 Agent Skill 安装和非 LOGPARSE
+  `Skill` 工具，只保留 Server Catalog 注入的业务上下文与现装 `logparse-diagnose` Helper；exact-ref
+  拒绝规则保持不变，没有增加短 ID 兼容或 Server 自动补前缀。新 generation
+  `claude-deepseek-20260827T035724Z-a3bb328c` 为 PASS；随后完整 E2E
+  `claude-deepseek-20260827T040046Z-c8931d2b` 在 Router 已正确选择完整 ref 后封存为 FAIL，原始 trace
+  证明合法绝对路径 Write 被 `Write(/output/**)` 拒绝。该运行没有自动重试。修复改为按每个 Job 的
+  实际绝对路径生成规则。新源码 E2E `claude-deepseek-20260827T051755Z-e2dfe5d9` 再次封存为 FAIL，
+  证明 `Write(<绝对路径>/**)` 仍不是 Claude Code 的文件写入权限类别；同一 trace 中 Router 已生成正确
+  namespaced ref，但两次 Write 均被拒绝。修复改用 `Edit(<绝对output>/**)` 放行实际 Write，并把
+  terminal Case 检查前移到 recovery 与 Bash 审计之前。v3 E2E
+  `claude-deepseek-20260827T052451Z-bb76d4d1` 随后以正确的
+  `CLAUDE_DEEPSEEK_SERVICE_JOB_FAILED` 首错封存，证明错误优先级已生效，同时确认单斜杠仍被解释成
+  项目相对规则；模型另成功写入默认 memory 目录。修复最终复用 generation runner 已真实验证的双斜杠
+  绝对路径编码，并新增独立文件轨迹边界审计。三次失败均未自动重试。
 - **专项回归测试**：
   - `tests/deterministic/unit/integrations/test_lan_logparse_meta_skill.py` 中
     `test_valid_production_registration_passes`、`test_valid_production_registration_loads_in_server`、
@@ -1623,6 +1659,14 @@
   - `claude-deepseek-e2e-runner.test.mjs` 中空 `get_case` 只允许一次紧邻、完整、30 秒纠正的正反例，
     client prompt identity，以及“附件 preflight + 实际 DIAGNOSE”双 Job 的正反例；
     `framework.test.mjs` 核验该 identity 进入 standalone plan。
+  - `tests/deterministic/unit/runtime/test_diagnosis_runtime.py::test_route_skill_index_v2_exposes_only_the_complete_namespaced_ref`
+    直接复现短 `registration_id` 与完整 namespaced ref 同时暴露的歧义。
+  - Claude/DeepSeek `claude-deepseek-e2e-runner.test.mjs` 的 Server Agent Skill 集合正反例，以及
+    `claude-deepseek-service-wrapper.test.mjs` 的非 LOGPARSE 零 Skill 工具边界、Job 绝对工作区
+    双斜杠 `Read(...)`/`Edit(...)` 规则、禁止伪 `Write(...)` 权限规则、Write denial 和默认 memory
+    越界反例；`claude-deepseek-e2e-runner.test.mjs`
+    另以 terminal `FAILED` Case 直接锁定 `CLAUDE_DEEPSEEK_SERVICE_JOB_FAILED` 必须早于 recovery 和
+    Bash policy 审计。
 - **最新 Test Flow verdict**：最终 Dev `run-20260826T200500Z-f663eeb6` 为
   `PASS_WITH_WARNINGS`；functional、operation、verification 均为 `PASS`，performance 为
   `NOT_CALIBRATED`；验证源码快照
@@ -1633,7 +1677,21 @@
   `claude-deepseek-20260826T183253Z-3e225612` 和完整 MCP E2E
   `claude-deepseek-20260826T190333Z-5fd045f7` 均为 PASS、`retry_count=0`，只分别证明本次真实模型
   生成和 Fast E2E；本轮未运行 Release，不能外推为 Release 结论。本 verdict 引用元数据段不宣称
-  被其所引用的源码快照覆盖。
+  被其所引用的源码快照覆盖。该中央 verdict 早于本次 ROUTE 回归修复，不覆盖当前改动；用户明确要求
+  本轮不运行中央 Test Flow 或 Release。
+- **最新 Linux Fast E2E verdict**：`claude-deepseek-20260827T053547Z-2db93307` 为 `PASS`，plan SHA-256
+  为 `64b9c13a04cc7cf02e402c9d15dae32cd6de43bf3cd417714f06e4afe96708df`。运行前 Windows 与 WSL
+  ext4 副本独立核对的 Git 可见源码摘要为
+  `git-visible-worktree-v1:70cd2cdeff2ad625ddd7a9d7df0127ab12f45fb7d2189c37af8dbf9a5659e4e0`
+  （678 files）；standalone verdict 自身仍明确 `source_snapshot=false`。5/5 个 Claude Code 2.1.89 +
+  `deepseek-v4-flash[1m]` 进程完成，`retry_count=0`，总计 788,345 tokens、USD 1.634013。ROUTE 仅有
+  1 次成功 output Write，`denied=0`、`workspace_escape=false`，finalizer PASS；最终精确选择
+  `diagnosis-skill/rpc-timeout-methods-v1@1.0.0#e55ce3…c7ada`。Server Agent 只安装
+  `logparse-diagnose`，业务 Skill 未安装；LOGPARSE 恰好先加载一次 Helper、再调用一次 broker，无
+  fallback/retry。客户端下载并复核的 Server v3 `result.zip` 为 3400 字节、SHA-256
+  `4abbff61033adb75a2652d1d83c34bb4c097d7daac6da23b95c6b88ce50baebe`，含 `result.txt`、manifest
+  和两份实际使用日志。该 standalone verdict 只证明本次 Linux Fast E2E，不替代中央 Test Flow、
+  Release 或源码快照证明；本 verdict 引用元数据段不宣称被其所引用的测试字节覆盖。
 
 ## PL-FIX-041：去掉 Wiki 日志围栏的 text 标签后模板被静默丢失
 

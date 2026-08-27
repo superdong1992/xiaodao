@@ -95,7 +95,7 @@ _BUILTIN_SPECS = (
     _BuiltinSpec("context-policies/diagnose", AssetKind.CONTEXT_POLICY, "context-policy/diagnose"),
     _BuiltinSpec("context-policies/review", AssetKind.CONTEXT_POLICY, "context-policy/review"),
     _BuiltinSpec("context-policies/generic-locator", AssetKind.CONTEXT_POLICY, "context-policy/generic-locator"),
-    _BuiltinSpec("output-contracts/route", AssetKind.OUTPUT_CONTRACT, "output-contract/route", "2.0.0"),
+    _BuiltinSpec("output-contracts/route", AssetKind.OUTPUT_CONTRACT, "output-contract/route", "3.0.0"),
     _BuiltinSpec("output-contracts/diagnose", AssetKind.OUTPUT_CONTRACT, "output-contract/diagnose", "6.0.0"),
     _BuiltinSpec("output-contracts/review", AssetKind.OUTPUT_CONTRACT, "output-contract/review", "4.0.0"),
     _BuiltinSpec("output-contracts/generic-locator", AssetKind.OUTPUT_CONTRACT, "output-contract/generic-locator", "2.0.0"),

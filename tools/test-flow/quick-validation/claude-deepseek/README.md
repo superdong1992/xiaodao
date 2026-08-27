@@ -25,7 +25,7 @@ E2E 不自动生成 registration。默认单场景是 `api-execution-overrun`；
 
 确认计划后用相同参数移除 `--plan-only` 并加入 `--allow-real-model`。suite 与 Codex 使用相同九场景；`insufficient-evidence` 没有 REVIEW，共四个 Claude 进程，其余每例五个进程，总计 44 个进程。
 
-每例从空 `DATA_ROOT` 启动。客户端只安装 `problem-locator-client`，经 HTTP MCP 操作 Linux Server；同一个客户端模型在 `list_artifacts` 后按返回的 `download_url` 下载 `result.zip`，并核对 size、SHA-256 和 Server v3 ZIP 内容。Server LOGPARSE trace 必须证明先加载一次 `logparse-diagnose`，再执行一次 job-scoped broker；业务 Methods Skill 只消费冻结日志。
+每例从空 `DATA_ROOT` 启动。客户端只安装 `problem-locator-client`，经 HTTP MCP 操作 Linux Server；Server Agent 只安装 `logparse-diagnose`，不得把生成的业务 Methods package 安装到 Agent Skill 目录，也不得在 ROUTE、DIAGNOSE 或 REVIEW 中调用业务 Skill。业务 package 只能由 Server Catalog 从 `SKILL_DIR` 读取并注入冻结上下文。非 LOGPARSE Agent 只能读取当前 Job 工作区，并且只能写入该工作区的绝对 `output/` 目录。同一个客户端模型在 `list_artifacts` 后按返回的 `download_url` 下载 `result.zip`，并核对 size、SHA-256 和 Server v3 ZIP 内容。Server LOGPARSE trace 必须证明先加载一次 `logparse-diagnose`，再执行一次 job-scoped broker；业务 Methods Skill 只消费冻结日志。
 
 DIAGNOSE 和 REVIEW 的测试 wrapper 只记录 Agent 原始草稿的大小、SHA-256 与是否已经 canonical，绝不改写草稿；JSON 解析、schema 校验和 Canonical JSON 规范化必须由产品 Runtime 完成。Fast E2E 必须保留 `harness_normalized=false`，不得用测试代码替产品修正输出。
 

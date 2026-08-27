@@ -133,6 +133,24 @@ function copyTree(source, destination) {
   }
 }
 
+export function materializeServerAgentSkills({ sourceRoot, serverConfig }) {
+  const skillsRoot = path.join(path.resolve(serverConfig), "skills");
+  fs.mkdirSync(skillsRoot, { recursive: true, mode: 0o700 });
+  requireE2E(fs.readdirSync(skillsRoot).length === 0, "CLAUDE_DEEPSEEK_SERVER_SKILL_DIR_NOT_EMPTY", "Server Agent Skill directory must start empty");
+  const helperSource = path.join(path.resolve(sourceRoot), ".claude", "skills", "logparse-diagnose");
+  const helperTarget = path.join(skillsRoot, "logparse-diagnose");
+  copyTree(helperSource, helperTarget);
+  const installedSkillNames = fs.readdirSync(skillsRoot).sort();
+  requireE2E(canonicalJson(installedSkillNames) === canonicalJson(["logparse-diagnose"]), "CLAUDE_DEEPSEEK_SERVER_SKILL_SET_INVALID", "Server Agent must install only logparse-diagnose");
+  return {
+    schema_version: 1,
+    status: "PASS",
+    installed_skill_names: installedSkillNames,
+    business_skill_installed: false,
+    helper_tree_sha256: treeDigest(helperTarget, { directoryMode: 0o700 }),
+  };
+}
+
 function materializeRegistration({ skillDir, cache }) {
   const registrationRoot = path.join(skillDir, CLAUDE_DEEPSEEK_REGISTRATION_ID);
   copyTree(cache.registration_root, registrationRoot);
@@ -319,6 +337,12 @@ export function auditMcpRecoveries(calls) {
   return { schema_version: 1, status: "PASS", recoveries };
 }
 
+export function assertSuccessfulTerminalCase(finalCase) {
+  requireE2E(isPlainObject(finalCase) && TERMINAL_CASE_STATUSES.has(finalCase.status) && finalCase.active_job === null, "CLAUDE_DEEPSEEK_FINAL_CASE_INVALID", "Final Case is not terminal or retains an active Job");
+  requireE2E(finalCase.status !== "FAILED", "CLAUDE_DEEPSEEK_SERVICE_JOB_FAILED", "Service Job failed before the scenario workflow completed");
+  return finalCase;
+}
+
 function combineServerEvents(dfxRoot, destination) {
   const inputs = [path.join(dfxRoot, "debug.jsonl"), path.join(dfxRoot, "journey.jsonl")];
   const chunks = inputs.filter((input) => fs.existsSync(input)).map((input) => fs.readFileSync(input));
@@ -444,10 +468,9 @@ export async function runE2E(options, { ambient = process.env, onProgress = null
   const clientConfig = path.join(privateRoot, "client-config");
   const serverConfig = path.join(privateRoot, "server-config");
   fs.mkdirSync(path.join(clientConfig, "skills"), { recursive: true, mode: 0o700 });
-  fs.mkdirSync(path.join(serverConfig, "skills"), { recursive: true, mode: 0o700 });
   copyTree(path.join(sourceRoot, ".claude", "skills", "problem-locator-client"), path.join(clientConfig, "skills", "problem-locator-client"));
-  copyTree(path.join(sourceRoot, ".claude", "skills", "logparse-diagnose"), path.join(serverConfig, "skills", "logparse-diagnose"));
-  copyTree(cache.package_root, path.join(serverConfig, "skills", path.basename(cache.package_root)));
+  const serverAgentSkills = materializeServerAgentSkills({ sourceRoot, serverConfig });
+  requireE2E(serverAgentSkills.helper_tree_sha256 === helperIdentity.tree_sha256, "CLAUDE_DEEPSEEK_SERVER_HELPER_IDENTITY_MISMATCH", "Materialized Server Helper differs from the repository identity");
   const archivePath = path.join(clientWorkspace, "input", "logs.zip");
   const archive = writeDeterministicLogsZip({ clientLog: rawPaths.client_log, serverLog: rawPaths.server_log, destination: archivePath });
   const downloadPath = path.join(clientWorkspace, "output", "result.zip");
@@ -527,21 +550,19 @@ export async function runE2E(options, { ambient = process.env, onProgress = null
   requireE2E(client.records.every((record) => !CLIENT_DISALLOWED_TOOLS.includes(record.name) || record.is_error === true), "CLAUDE_DEEPSEEK_DISALLOWED_TOOL_EXECUTED", "A Client tool removed by disallowedTools executed successfully");
   requireE2E(client.denied.every((item) => item.executed === false && (item.name === "Bash" || CLIENT_DISALLOWED_TOOLS.includes(item.name))), "CLAUDE_DEEPSEEK_DENIED_TOOL_AUDIT_INVALID", "Client denied-tool evidence contains an unexpected tool or execution");
   const partitioned = partitionMcpCalls(client.mcp);
-  const recoveryAudit = auditMcpRecoveries(client.mcp);
-  const bashPolicyAudit = auditBashPolicyClaims(bashClaimRoot, { expectDownload: expectArchive });
-  requireE2E(recoveryAudit.recoveries.length === partitioned.recoveries.length, "CLAUDE_DEEPSEEK_RECOVERY_PROJECTION_MISMATCH", "Recovery audit differs from the MCP business-envelope partition");
   const mcpCalls = partitioned.successful;
+  const getCalls = mcpCalls.filter((call) => call.tool === "problem_locator_get_case");
+  const finalData = structuredMcpData(getCalls.at(-1));
+  const finalCase = assertSuccessfulTerminalCase(finalData?.case_view ?? finalData);
+  const recoveryAudit = auditMcpRecoveries(client.mcp);
+  requireE2E(recoveryAudit.recoveries.length === partitioned.recoveries.length, "CLAUDE_DEEPSEEK_RECOVERY_PROJECTION_MISMATCH", "Recovery audit differs from the MCP business-envelope partition");
+  const bashPolicyAudit = auditBashPolicyClaims(bashClaimRoot, { expectDownload: expectArchive });
   const prepareCall = mcpCalls.find((call) => call.tool === "problem_locator_prepare_attachment");
   const prepareData = structuredMcpData(prepareCall);
   const upload = prepareData.upload;
   requireE2E(upload?.method === "PUT" && upload.attachment_id && upload.url && isPlainObject(upload.required_headers), "CLAUDE_DEEPSEEK_UPLOAD_DESCRIPTOR_INVALID", "prepare_attachment did not return one UploadDescriptor");
   requireE2E(prepareCall.arguments.declared_size === archive.size && prepareCall.arguments.declared_sha256 === archive.sha256, "CLAUDE_DEEPSEEK_ATTACHMENT_DECLARATION_MISMATCH", "Client declaration differs from deterministic ZIP");
   requireE2E(validDescriptorUploadCommand({ commands: client.bash, upload, archivePath }), "CLAUDE_DEEPSEEK_UPLOAD_COMMAND_INVALID", "Attachment PUT command is not uniquely bound to the descriptor");
-  const getCalls = mcpCalls.filter((call) => call.tool === "problem_locator_get_case");
-  const finalData = structuredMcpData(getCalls.at(-1));
-  const finalCase = finalData?.case_view ?? finalData;
-  requireE2E(TERMINAL_CASE_STATUSES.has(finalCase.status) && finalCase.active_job === null, "CLAUDE_DEEPSEEK_FINAL_CASE_INVALID", "Final Case is not terminal or retains an active Job");
-  requireE2E(finalCase.status !== "FAILED", "CLAUDE_DEEPSEEK_SERVICE_JOB_FAILED", "Service Job failed before the scenario workflow completed");
   const artifactData = structuredMcpData(mcpCalls.filter((call) => call.tool === "problem_locator_list_artifacts").at(-1));
   const listArtifactsCall = mcpCalls.filter((call) => call.tool === "problem_locator_list_artifacts").at(-1);
   const artifactAudit = artifactConsistency(finalCase, artifactData, { expectArchive });
@@ -569,7 +590,7 @@ export async function runE2E(options, { ambient = process.env, onProgress = null
   const security = { ...secretScan({ roots: [evidenceRoot], settings: options.claudeSettings }), client_permission_profile: clientPermissionProfile, bash_policy: bashPolicyAudit, denied_tool_attempts: client.denied };
   writeJson(path.join(evidenceRoot, "scenario-oracle.json"), oracle);
   writeJson(path.join(evidenceRoot, "methods-package.json"), { schema_version: 2, status: "PASS", producer_identity: producer.producer_identity, registration_tree_sha256: cache.manifest.registration.tree_sha256, registration_identity: cache.manifest.registration });
-  writeJson(path.join(evidenceRoot, "claude-identity.json"), { schema_version: 1, status: "PASS", claude: identity, helper: helperIdentity });
+  writeJson(path.join(evidenceRoot, "claude-identity.json"), { schema_version: 1, status: "PASS", claude: identity, helper: helperIdentity, server_agent_skills: serverAgentSkills });
   writeJson(path.join(evidenceRoot, "model-invocations.json"), { schema_version: 1, status: "PASS", retry_policy: "NONE", invocations });
   writeJson(path.join(evidenceRoot, "model-usage.json"), modelAudit);
   writeJson(path.join(evidenceRoot, "mcp-tool-calls.json"), { ...mcpAudit, tools_listing: readiness.tools, calls: mcpCalls });

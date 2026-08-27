@@ -12,9 +12,11 @@ import {
   auditSpecializedRuntime,
   auditDownloadedResultArchive,
   auditClientSkillLoad,
+  assertSuccessfulTerminalCase,
   claudeClientPrompt,
   clientToolInputPolicyIdentity,
   materializeDefaultLogparseConfig,
+  materializeServerAgentSkills,
   serviceSourceEnvironment,
   materializeClientSettings,
   parseArguments,
@@ -51,6 +53,17 @@ test("E2E source freezes one client plus scenario-required ordered server receip
   assert.equal(source.includes("automaticRetry"), false);
   assert.equal(source.includes("retryProcess"), false);
   assert.match(source, /auditMcpRecoveries\(client\.mcp\)/);
+});
+
+test("a terminal Server Job failure is reported before recovery and transport audits", () => {
+  assert.throws(
+    () => assertSuccessfulTerminalCase({ status: "FAILED", active_job: null }),
+    (error) => error.code === "CLAUDE_DEEPSEEK_SERVICE_JOB_FAILED",
+  );
+  const source = fs.readFileSync(path.join(ROOT, "runtime", "claude-deepseek-e2e-runner.mjs"), "utf8");
+  const runSource = source.slice(source.indexOf("export async function runE2E"));
+  assert.ok(runSource.indexOf("assertSuccessfulTerminalCase(") < runSource.indexOf("auditMcpRecoveries("));
+  assert.ok(runSource.indexOf("assertSuccessfulTerminalCase(") < runSource.indexOf("auditBashPolicyClaims("));
 });
 
 test("recoverable MCP errors reuse the original request ID exactly once in the same Client ledger", () => {
@@ -121,11 +134,38 @@ test("client uses strict MCP, production Skill, exact Bash programs, and one fre
   assert.match(source, /problem-locator-seal-outcome-draft/);
   assert.match(source, /problem-locator-logparse/);
   assert.match(source, /copyTree\(cache\.registration_root, registrationRoot\)/);
+  assert.match(source, /materializeServerAgentSkills/);
+  assert.match(source, /server_agent_skills: serverAgentSkills/);
+  assert.equal(source.includes("copyTree(cache.package_root"), false);
   assert.equal(source.includes("registrationTemplate"), false);
   assert.equal(source.includes("Chrome"), false);
   assert.equal(source.includes("docker"), false);
   assert.equal(source.includes("restart"), false);
   assert.equal(source.includes("cross-job"), false);
+});
+
+test("Server Agent installs only logparse-diagnose and never the generated business package", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "claude-server-skills-"));
+  try {
+    const sourceRoot = path.join(root, "source");
+    const helper = path.join(sourceRoot, ".claude", "skills", "logparse-diagnose");
+    fs.mkdirSync(helper, { recursive: true });
+    fs.writeFileSync(path.join(helper, "SKILL.md"), "---\nname: logparse-diagnose\n---\n");
+    const serverConfig = path.join(root, "server-config");
+    const receipt = materializeServerAgentSkills({ sourceRoot, serverConfig });
+    assert.deepEqual(receipt.installed_skill_names, ["logparse-diagnose"]);
+    assert.equal(receipt.business_skill_installed, false);
+    assert.deepEqual(fs.readdirSync(path.join(serverConfig, "skills")), ["logparse-diagnose"]);
+
+    const dirtyConfig = path.join(root, "dirty-config");
+    fs.mkdirSync(path.join(dirtyConfig, "skills", "diagnose-rpc-timeout"), { recursive: true });
+    assert.throws(
+      () => materializeServerAgentSkills({ sourceRoot, serverConfig: dirtyConfig }),
+      (error) => error.code === "CLAUDE_DEEPSEEK_SERVER_SKILL_DIR_NOT_EMPTY",
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("service launcher receives the exact current mounted source root", () => {

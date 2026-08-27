@@ -6,11 +6,13 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import {
+  auditNonLogparseFileTrace,
   auditLogparseToolTrace,
   boundedServicePrompt,
   expectedLogparseCommand,
   parseArguments,
   safeServiceError,
+  serviceToolPolicy,
 } from "../runtime/claude-deepseek-service-wrapper.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -25,17 +27,58 @@ test("service wrapper accepts only frozen Claude/provider roots and no external 
 test("service gives Bash only to LOGPARSE for the single broker call", () => {
   const source = fs.readFileSync(path.join(ROOT, "runtime", "claude-deepseek-service-wrapper.mjs"), "utf8");
   assert.equal(source.includes("dangerously-skip-permissions"), false);
-  assert.match(source, /tools: logparsePhase \? \["Bash", "Skill"\] : \["Read", "Write", "Skill"\]/);
-  assert.match(source, /Read\(\/\*\*\)/);
-  assert.match(source, /Edit\(\/output\/\*\*\)/);
+  assert.match(source, /serviceToolPolicy\(\{ phase, workspaceRoot \}\)/);
+  assert.match(source, /tools: toolPolicy\.tools,\s+allowedTools: toolPolicy\.allowedTools,/u);
   assert.match(source, /allowToolErrors: !logparsePhase/);
   assert.match(source, /auditOnlyAllowedTools: \["Bash", "Glob"\]/);
-  assert.equal(source.includes('tools: ["Bash"'), false);
+  assert.equal(source.includes("Skill(diagnose-rpc-timeout)"), false);
+  assert.match(source, /CLAUDE_DEEPSEEK_SERVICE_BUSINESS_SKILL_LOADED/);
   assert.equal(source.includes("runServiceLogparseCommand"), false);
   assert.match(source, /Bash\(problem-locator-logparse:\*\)/);
   assert.match(source, /auditLogparseToolTrace/);
   assert.match(source, /finalizerEntry: path\.resolve\(values\["finalizer-entry"\]\)/);
   assert.match(source, /CLAUDE_DEEPSEEK_SERVICE_RETRY_FORBIDDEN/);
+});
+
+test("non-LOGPARSE permissions bind Read and Claude file edits to the absolute Job workspace", () => {
+  const workspaceRoot = path.resolve(os.tmpdir(), "claude-service-job");
+  const permissionPath = (value) => {
+    const resolved = path.resolve(value);
+    const drive = /^([A-Za-z]):[\\/](.*)$/u.exec(resolved);
+    const portable = drive ? `${drive[1]}/${drive[2].replaceAll("\\", "/")}` : resolved.replaceAll("\\", "/").replace(/^\/+/, "");
+    return `//${portable}`;
+  };
+  assert.deepEqual(serviceToolPolicy({ phase: "ROUTE", workspaceRoot }), {
+    tools: ["Read", "Write"],
+    allowedTools: [`Read(${permissionPath(workspaceRoot)}/**)`, `Edit(${permissionPath(path.join(workspaceRoot, "output"))}/**)`],
+  });
+  assert.deepEqual(serviceToolPolicy({ phase: "LOGPARSE", workspaceRoot }), {
+    tools: ["Bash", "Skill"],
+    allowedTools: ["Skill(logparse-diagnose)", "Bash(problem-locator-logparse:*)"],
+  });
+  assert.equal(serviceToolPolicy({ phase: "ROUTE", workspaceRoot }).allowedTools.includes("Edit(/output/**)"), false);
+  assert.equal(serviceToolPolicy({ phase: "ROUTE", workspaceRoot }).allowedTools.some((rule) => rule.startsWith("Write(")), false);
+});
+
+test("non-LOGPARSE file trace rejects denial and Claude's default memory write", () => {
+  const workspaceRoot = path.resolve(os.tmpdir(), "claude-service-trace");
+  const valid = {
+    records: [
+      { name: "Read", is_error: false, input: { file_path: path.join(workspaceRoot, "runtime", "job-context.json") } },
+      { name: "Write", is_error: false, input: { file_path: path.join(workspaceRoot, "output", "job_outcome.draft.json") } },
+    ],
+  };
+  assert.deepEqual(auditNonLogparseFileTrace({ phase: "ROUTE", result: valid, workspaceRoot }), {
+    schema_version: 1, required: true, status: "PASS", reads: 1, writes: 1, denied: 0, workspace_escape: false,
+  });
+  assert.throws(
+    () => auditNonLogparseFileTrace({ phase: "ROUTE", result: { records: [{ ...valid.records[1], is_error: true }] }, workspaceRoot }),
+    (error) => error.code === "CLAUDE_DEEPSEEK_SERVICE_FILE_TOOL_FAILED",
+  );
+  assert.throws(
+    () => auditNonLogparseFileTrace({ phase: "ROUTE", result: { records: [{ ...valid.records[1], input: { file_path: path.resolve(workspaceRoot, "..", "server-config", "memory", "_probe.md") } }] }, workspaceRoot }),
+    (error) => error.code === "CLAUDE_DEEPSEEK_SERVICE_FILE_SCOPE_INVALID",
+  );
 });
 
 test("service prompt closes repository reads and keeps Logparse inside the controlled LOGPARSE model", () => {
@@ -46,6 +89,7 @@ test("service prompt closes repository reads and keeps Logparse inside the contr
   assert.match(prompt, /natural Simplified Chinese/);
   assert.match(prompt, /无法确认具体贡献者/);
   assert.match(prompt, /harness runs only the fixed product finalizer/);
+  assert.doesNotMatch(prompt, /Skill\(diagnose-rpc-timeout\)/);
   assert.match(prompt, /frozen product prompt/);
   const review = boundedServicePrompt("REVIEW", "review prompt");
   assert.match(review, /copy every existing candidate limitation sentence verbatim/);

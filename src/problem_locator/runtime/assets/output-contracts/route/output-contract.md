@@ -24,6 +24,12 @@ For a `MATCHED` route, use `result_type=COMPLETED` and copy one compatible
 `result_type=NO_CAPABILITY` and `skill_ref=null`. ROUTE forbids `REROUTE`,
 `NEED_INPUT`, `NEED_ATTACHMENT`, and `INCONCLUSIVE`. `FAILED` requires a null
 payload and a non-null error; every non-failed draft requires `error=null`.
+The complete `ref` object is the only valid source for `skill_ref`: copy its
+`id`, `version`, and `content_hash` without shortening, deriving, or rewriting
+any field. In particular, never remove the `diagnosis-skill/` namespace from
+`ref.id`. Before sealing, verify that `payload.skill_ref` is exactly equal to
+one complete `SKILL_INDEX.skills[*].ref` object. Capability, summary, Skill
+name, and other descriptive text are never identity aliases.
 `SKILL_INDEX` contains every registered production Methods Skill whose immutable
 identity and package structure passed server validation. The Router, not a
 user-fact-name filter, decides whether one Skill semantically matches the frozen

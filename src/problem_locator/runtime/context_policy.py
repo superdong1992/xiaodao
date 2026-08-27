@@ -288,7 +288,6 @@ def _skill_index_entry(
     registration = specialized.registration
     return {
         "ref": expected_ref.model_dump(mode="json"),
-        "registration_id": registration.registration_id,
         "capability": registration.capability,
         "summary": registration.summary,
         "required_user_inputs": list(specialized.methods.required_user_inputs),
@@ -362,7 +361,7 @@ class RuntimeAssetResolver:
         if job.job_type is JobType.ROUTE:
             skill_index = canonical_json_bytes(
                 {
-                    "schema_version": 1,
+                    "schema_version": 2,
                     "skills": [
                         _skill_index_entry(resolved, ref)
                         for resolved, ref in zip(

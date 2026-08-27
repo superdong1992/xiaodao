@@ -109,6 +109,57 @@ export function auditLogparseToolTrace({ phase, prompt, result, workspaceRoot })
   return { schema_version: 1, required: true, status: "PASS", mode: "SERVER_PREPROCESS", helper_calls: 1, helper_tool_ordinal: 0, broker_calls: 1, broker_tool_ordinal: 1, operation: expected.operation, command_sha256: sha256Bytes(expected.command), direct_fallback: false, retry_count: 0 };
 }
 
+function claudeAbsolutePermission(value) {
+  const resolved = path.resolve(value);
+  if (/[\r\n*?]/u.test(resolved)) fail("CLAUDE_DEEPSEEK_SERVICE_WORKSPACE_PATH_INVALID", "Job workspace path cannot be represented safely in a Claude permission rule");
+  const drive = /^([A-Za-z]):[\\/](.*)$/u.exec(resolved);
+  const portable = drive ? `${drive[1]}/${drive[2].replaceAll("\\", "/")}` : resolved.split(path.sep).join("/").replace(/^\/+/, "");
+  return `//${portable.replaceAll("\\", "\\\\").replaceAll("(", "\\(").replaceAll(")", "\\)")}`;
+}
+
+export function serviceToolPolicy({ phase, workspaceRoot }) {
+  if (phase === "LOGPARSE") {
+    return {
+      tools: ["Bash", "Skill"],
+      allowedTools: ["Skill(logparse-diagnose)", "Bash(problem-locator-logparse:*)"],
+    };
+  }
+  const readableWorkspace = claudeAbsolutePermission(workspaceRoot);
+  const writableOutput = claudeAbsolutePermission(path.join(workspaceRoot, "output"));
+  return {
+    tools: ["Read", "Write"],
+    allowedTools: [`Read(${readableWorkspace}/**)`, `Edit(${writableOutput}/**)`],
+  };
+}
+
+function inside(root, candidate) {
+  const relative = path.relative(path.resolve(root), path.resolve(candidate));
+  return relative !== "" && relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
+}
+
+function resolveJobToolPath(workspaceRoot, value) {
+  if (typeof value !== "string" || !value || /[\r\n\0]/u.test(value)) fail("CLAUDE_DEEPSEEK_SERVICE_FILE_PATH_INVALID", "Server Agent file tool path is invalid");
+  const portable = value.replaceAll("\\", "/");
+  if (/^\/(?:inputs|runtime|output)\//u.test(portable)) return path.join(workspaceRoot, ...portable.slice(1).split("/"));
+  return path.isAbsolute(value) ? path.resolve(value) : path.resolve(workspaceRoot, value);
+}
+
+export function auditNonLogparseFileTrace({ phase, result, workspaceRoot }) {
+  if (phase === "LOGPARSE") return { schema_version: 1, required: false, status: "SKIP", reads: 0, writes: 0 };
+  if (!Array.isArray(result?.records) || result.records.length === 0) fail("CLAUDE_DEEPSEEK_SERVICE_FILE_TRACE_INVALID", "Non-LOGPARSE Agent must produce a bounded file-tool trace");
+  const outputRoot = path.join(workspaceRoot, "output");
+  let reads = 0;
+  let writes = 0;
+  for (const record of result.records) {
+    if (record?.is_error === true) fail("CLAUDE_DEEPSEEK_SERVICE_FILE_TOOL_FAILED", "Non-LOGPARSE Agent file tool failed or was denied");
+    const target = resolveJobToolPath(workspaceRoot, record?.input?.file_path);
+    if (record?.name === "Read" && inside(workspaceRoot, target)) reads += 1;
+    else if (record?.name === "Write" && inside(outputRoot, target)) writes += 1;
+    else fail("CLAUDE_DEEPSEEK_SERVICE_FILE_SCOPE_INVALID", "Non-LOGPARSE Agent file tool escaped the Job workspace boundary");
+  }
+  return { schema_version: 1, required: true, status: "PASS", reads, writes, denied: 0, workspace_escape: false };
+}
+
 export async function runServiceInvocation(values, { stdin = process.stdin, stdout = process.stdout, ambient = process.env } = {}) {
   const workspaceRoot = process.cwd();
   const prompt = await readPrompt(stdin);
@@ -129,9 +180,7 @@ export async function runServiceInvocation(values, { stdin = process.stdin, stdo
     try { metadata = fs.statSync(logparseEntry); } catch { fail("CLAUDE_DEEPSEEK_SERVICE_LOGPARSE_MISSING", "The job-scoped problem-locator-logparse entry is missing"); }
     if (path.basename(logparseEntry) !== "problem-locator-logparse" || !metadata.isFile() || (metadata.mode & 0o111) === 0) fail("CLAUDE_DEEPSEEK_SERVICE_LOGPARSE_INVALID", "The job-scoped broker entry is not the expected executable");
   }
-  const allowedTools = logparsePhase
-    ? ["Skill(logparse-diagnose)", "Bash(problem-locator-logparse:*)"]
-    : ["Read(/**)", "Edit(/output/**)", "Skill(diagnose-rpc-timeout)"];
+  const toolPolicy = serviceToolPolicy({ phase, workspaceRoot });
   const tracePath = path.join(traceRoot, `${phase.toLowerCase()}.stream-json.ndjson`);
   const result = await runClaudeProcess({
     claudeEntry: path.resolve(values["claude-entry"]),
@@ -140,8 +189,8 @@ export async function runServiceInvocation(values, { stdin = process.stdin, stdo
     prompt: boundedServicePrompt(phase, prompt),
     phase,
     invocationId: `${values["run-id"]}:server:${phase.toLowerCase()}`,
-    tools: logparsePhase ? ["Bash", "Skill"] : ["Read", "Write", "Skill"],
-    allowedTools,
+    tools: toolPolicy.tools,
+    allowedTools: toolPolicy.allowedTools,
     allowToolErrors: !logparsePhase,
     auditOnlyAllowedTools: ["Bash", "Glob"],
     maxTurns: CLAUDE_DEEPSEEK_E2E_MAX_TURNS,
@@ -154,6 +203,8 @@ export async function runServiceInvocation(values, { stdin = process.stdin, stdo
   }, { ambient, onProgress: () => stdout.write(`QUICK_VALIDATION_PROGRESS service-agent ${phase}\n`) });
   const baseHelperAudit = auditLogparseToolTrace({ phase, prompt, result, workspaceRoot });
   const helperAudit = logparsePhase ? { ...baseHelperAudit, broker_entry_sha256: sha256File(logparseEntry), stream_trace_sha256: sha256File(tracePath), tool_sequence_sha256: sha256Bytes(canonicalJson(result.records.map((item) => ({ ordinal: item.ordinal, name: item.name, input: item.input, is_error: item.is_error })))) } : baseHelperAudit;
+  const fileToolAudit = auditNonLogparseFileTrace({ phase, result, workspaceRoot });
+  if (!logparsePhase && result.skills.length !== 0) fail("CLAUDE_DEEPSEEK_SERVICE_BUSINESS_SKILL_LOADED", "ROUTE, DIAGNOSE, and REVIEW must use only Server-injected context and cannot load an Agent Skill");
   if (!logparsePhase && result.records.some((record) => record.name === "Bash" && record.is_error !== true)) fail("CLAUDE_DEEPSEEK_SERVICE_BASH_EXECUTED", "Non-LOGPARSE Claude process executed forbidden Bash");
   const methodsDraft = auditMethodsDraft({ phase, workspaceRoot });
   const outcomeSealer = sealServiceOutcomeDraft({ phase, workspaceRoot, finalizerEntry: path.resolve(values["finalizer-entry"]) });
@@ -161,6 +212,7 @@ export async function runServiceInvocation(values, { stdin = process.stdin, stdo
     ...result.receipt,
     logparse_runner: helperAudit.required ? { required: true, invoked: true, status: "PASS", operation: helperAudit.operation, executor: "claude-tool" } : { required: false, invoked: false, status: "SKIP" },
     helper_audit: helperAudit,
+    file_tool_audit: fileToolAudit,
     methods_draft: methodsDraft,
     outcome_sealer: outcomeSealer,
     broker_environment: { present: broker !== null, key_names: broker === null ? [] : Object.keys(broker).sort(), values_persisted: false },
