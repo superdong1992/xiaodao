@@ -55,6 +55,8 @@ from problem_locator.contracts.serialization import (
 )
 from problem_locator.diagnostics import log_event
 from problem_locator.integrations.agent_json import (
+    AgentJsonSurface,
+    normalize_agent_json_file,
     parse_agent_json_bytes,
     read_agent_json_file,
 )
@@ -1944,7 +1946,7 @@ def _read_method_agent_output(
     kind: ValidatedOutputKind,
     patterns: tuple[bytes, ...],
 ) -> ValidatedMethodDiagnosisDraft | ValidatedMethodReviewDraft:
-    """Read one canonical Methods draft without consulting the legacy envelope."""
+    """Validate and normalize one Methods draft without consulting legacy output."""
 
     workspace_root = (
         workspace.root if isinstance(workspace, PreparedWorkspace) else Path(workspace)
@@ -1992,12 +1994,8 @@ def _read_method_agent_output(
         )
         assert raw_draft_bytes is not None
         document = parse_agent_json_bytes(raw_draft_bytes)
-        if raw_draft_bytes != document.canonical_bytes:
-            failure_category = "method_draft_non_canonical"
-            diagnostic_reason = "Methods draft bytes are not Canonical JSON"
-            raise _InvalidOutput
         parsed = parser(document.value)
-        canonical_bytes = raw_draft_bytes
+        canonical_bytes = document.canonical_bytes
         _scan_bytes(canonical_bytes, patterns)
         _assert_snapshot_paths(initial)
         final_metadata = _lstat(workspace_root / relative_path)
@@ -2005,6 +2003,51 @@ def _read_method_agent_output(
             failure_category = "method_draft_stability"
             diagnostic_reason = "Methods draft changed during validation"
             raise _InvalidOutput
+        if raw_draft_bytes != canonical_bytes:
+            failure_category = "method_draft_normalization"
+            try:
+                normalized = normalize_agent_json_file(
+                    workspace_root / relative_path,
+                    surface=(
+                        AgentJsonSurface.METHOD_DIAGNOSIS_DRAFT
+                        if kind is ValidatedOutputKind.METHOD_DIAGNOSIS_DRAFT
+                        else AgentJsonSurface.METHOD_REVIEW_DRAFT
+                    ),
+                    max_bytes=job.resource_limits.workspace_bytes,
+                    validate=parser,
+                )
+            except (InvalidJsonBytesError, OSError, TypeError, ValueError) as exc:
+                diagnostic_reason = str(exc)
+                raise _InvalidOutput from exc
+            if normalized.canonical_bytes != canonical_bytes:
+                failure_category = "method_draft_stability"
+                diagnostic_reason = "Methods draft changed during normalization"
+                raise _InvalidOutput
+            normalized_snapshot = _snapshot_source(
+                workspace_root,
+                relative_path,
+                root_identity=root_identity,
+                boundary=output_boundary,
+            )
+            _, _, normalized_bytes, _ = _read_frozen_relative_file(
+                workspace_root,
+                relative_path,
+                capture=True,
+                root_identity=root_identity,
+                boundary=output_boundary,
+                max_bytes=job.resource_limits.workspace_bytes,
+            )
+            if normalized_bytes != canonical_bytes:
+                failure_category = "method_draft_stability"
+                diagnostic_reason = "Methods draft normalization bytes changed"
+                raise _InvalidOutput
+            _assert_snapshot_paths(normalized_snapshot)
+            final_metadata = _lstat(workspace_root / relative_path)
+            if _fingerprint(final_metadata) != normalized_snapshot.leaf_fingerprint:
+                failure_category = "method_draft_stability"
+                diagnostic_reason = "Methods draft changed after normalization"
+                raise _InvalidOutput
+            final_outcome_bytes = len(canonical_bytes)
     except _MissingOutcome:
         missing = True
         final_outcome_state = "missing"

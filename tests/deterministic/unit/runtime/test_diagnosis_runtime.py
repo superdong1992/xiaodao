@@ -2379,6 +2379,7 @@ class _MethodsTwoPassBackend:
         accept_request: bool = True,
         emit_claim: bool = True,
         noncanonical_draft: bool = False,
+        malformed_draft: bool = False,
         safety_note: str = "Timeout does not prove downstream cancellation.",
     ) -> None:
         self.factory = factory
@@ -2387,6 +2388,7 @@ class _MethodsTwoPassBackend:
         self.accept_request = accept_request
         self.emit_claim = emit_claim
         self.noncanonical_draft = noncanonical_draft
+        self.malformed_draft = malformed_draft
         self.safety_note = safety_note
         self.claim: LogparseParseClaim | None = None
         self.request_bytes: bytes | None = None
@@ -2592,11 +2594,15 @@ class _MethodsTwoPassBackend:
             "safety_notes": [self.safety_note],
         }
         canonical = canonical_json_bytes(value)
-        self.written_draft_bytes = (
-            json.dumps(value, ensure_ascii=False, indent=2).encode("utf-8") + b"\n"
-            if self.noncanonical_draft
-            else canonical
-        )
+        if self.malformed_draft:
+            self.written_draft_bytes = b'{"schema_version":'
+        elif self.noncanonical_draft:
+            self.written_draft_bytes = (
+                json.dumps(value, ensure_ascii=False, indent=2).encode("utf-8")
+                + b"\n"
+            )
+        else:
+            self.written_draft_bytes = canonical
         (workspace_root / "output/method-diagnosis.draft.json").write_bytes(
             self.written_draft_bytes
         )
@@ -2852,24 +2858,27 @@ def test_default_product_survives_compiler_and_workspace_manifest(
     assert "logparse_product" not in request
 
 
-class _NonCanonicalClaimingBackend(_MethodsTwoPassBackend):
+class _AgentJsonClaimingBackend(_MethodsTwoPassBackend):
     @property
-    def rejected_bytes(self) -> bytes | None:
+    def authored_bytes(self) -> bytes | None:
         return self.written_draft_bytes
 
 
-def _noncanonical_claiming_runtime(
+def _agent_json_claiming_runtime(
     tmp_path: Path,
     records: InMemoryExecutionRecordStore,
-) -> tuple[DiagnosisRuntime, Job, _NonCanonicalClaimingBackend]:
+    *,
+    malformed_draft: bool = False,
+) -> tuple[DiagnosisRuntime, Job, _AgentJsonClaimingBackend]:
     factory = FakeLogparseBrokerFactory()
     catalog = _logparse_catalog(tmp_path, factory)
     job, aggregate, resources = _claimed_logparse_job_state_and_resources(catalog)
-    backend = _NonCanonicalClaimingBackend(
+    backend = _AgentJsonClaimingBackend(
         factory,
         job,
         "completed",
-        noncanonical_draft=True,
+        noncanonical_draft=not malformed_draft,
+        malformed_draft=malformed_draft,
     )
     runtime = DiagnosisRuntime(
         state_repository=_StateView(aggregate),
@@ -2879,45 +2888,33 @@ def _noncanonical_claiming_runtime(
         execution_records=records,
         clock=_Clock(),
         id_generator=_Ids(),
-        workspace_manager=WorkspaceManager(tmp_path / "noncanonical-logparse-data"),
+        workspace_manager=WorkspaceManager(tmp_path / "agent-json-logparse-data"),
         backend=backend,  # type: ignore[arg-type]
     )
     return runtime, job, backend
 
 
-def test_noncanonical_outcome_is_preserved_and_archived_exactly(
+def test_pretty_methods_draft_is_normalized_before_validation_and_hashing(
     tmp_path: Path,
-    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    caplog.set_level(logging.INFO, logger="problem_locator.dfx")
     records = InMemoryExecutionRecordStore()
-    runtime, job, backend = _noncanonical_claiming_runtime(tmp_path, records)
+    runtime, job, backend = _agent_json_claiming_runtime(tmp_path, records)
 
     receipt = runtime.execute(job, InMemoryCancellationSignal())
 
-    assert receipt.job_outcome.error is not None
-    assert receipt.job_outcome.error.code is ErrorCode.OUTCOME_INVALID
-    assert backend.rejected_bytes is not None
+    assert receipt.job_outcome.error is None
+    assert backend.authored_bytes is not None
+    canonical = canonical_json_bytes(json.loads(backend.authored_bytes))
+    assert backend.authored_bytes != canonical
     workspace_root = Path(backend.calls[1]["workspace_root"])
     assert (workspace_root / "output/method-diagnosis.draft.json").read_bytes() == (
-        backend.rejected_bytes
+        canonical
     )
-    assert records.publish_rejected_agent_output_calls == [
-        (job.job_id, backend.rejected_bytes)
-    ]
-    archived = next(
-        record
-        for record in caplog.records
-        if getattr(record, "dfx_event", "") == "runtime.agent_output.archived"
-    )
-    assert archived.dfx_fields["failure_category"] == "method_draft_non_canonical"
-    assert archived.dfx_fields["archive_file_ref"] == (
-        f"jobs/{job.job_id}/agent_job_outcome.rejected.json"
-    )
-    assert archived.dfx_fields["archive_size"] == len(backend.rejected_bytes)
-    assert archived.dfx_fields["archive_sha256"] == hashlib.sha256(
-        backend.rejected_bytes
-    ).hexdigest()
+    assert records.read_audit_bytes(
+        job.job_id,
+        "method-diagnosis.draft.json",
+    ) == canonical
+    assert records.publish_rejected_agent_output_calls == []
 
 
 def test_rejected_output_archive_failure_preserves_primary_and_workspace(
@@ -2930,16 +2927,20 @@ def test_rejected_output_archive_failure_preserves_primary_and_workspace(
         "publish_rejected_agent_output_bytes",
         _application_port_error(ErrorCode.EXECUTION_RECORD_FAILED),
     )
-    runtime, job, backend = _noncanonical_claiming_runtime(tmp_path, records)
+    runtime, job, backend = _agent_json_claiming_runtime(
+        tmp_path,
+        records,
+        malformed_draft=True,
+    )
 
     receipt = runtime.execute(job, InMemoryCancellationSignal())
 
     assert receipt.job_outcome.error is not None
     assert receipt.job_outcome.error.code is ErrorCode.OUTCOME_INVALID
     workspace_root = Path(backend.calls[1]["workspace_root"])
-    assert backend.rejected_bytes is not None
+    assert backend.authored_bytes is not None
     assert (workspace_root / "output/method-diagnosis.draft.json").read_bytes() == (
-        backend.rejected_bytes
+        backend.authored_bytes
     )
     assert any(
         getattr(record, "dfx_event", "") == "runtime.agent_output.archive_failed"

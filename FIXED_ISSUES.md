@@ -1676,3 +1676,71 @@
   `claude-deepseek-20260826T183253Z-3e225612` 同为 PASS、`retry_count=0`，保留 6 条来源模板、3 张
   方法卡和 6 个 canonical marker；该 standalone verdict 不替代中央验证，也不外推为 Release。
   本 verdict 引用元数据段不宣称被其所引用的源码快照覆盖。
+
+## PL-FIX-042：Methods 草稿把等价 JSON 格式误判为无效结果
+
+- **状态**：代码已修复；是否验证通过以本条“最新 Test Flow verdict”为准。
+- **症状**：局域网真实定位已完成 Logparse 预处理和 Methods 分析，Agent 使用常见的
+  `json.dumps(data, indent=2)` 写出 schema 合法的 `method-diagnosis.draft.json`，服务端却在结果
+  校验阶段以 `OUTCOME_INVALID / method_draft_non_canonical` 拒绝。REVIEW 草稿使用相同读取路径，
+  也存在同一问题。
+- **受影响版本**：`5.0.0`，至少包括提交
+  `0b2f2e667608637519fecc87cdd28b71eb943de4` 的 Methods-only 输出协议。
+- **根因**：Methods output reader 虽然已使用 shared Agent JSON parser 拒绝 BOM、重复键、非有限
+  数字和非法 UTF-8，却又要求 Agent 原始字节与 Canonical JSON 完全相等，把服务端存储与 hash
+  规范错误地变成模型输出格式要求。配套 happy path 预先用 `canonical_json_bytes()` 构造理想输入，
+  唯一使用 `indent=2` 的旅程测试反而把拒绝行为固化成正确结果。Linux Fast E2E 的 Server wrapper
+  还在产品 Runtime 读取前调用 `canonicalizeMethodsDraft()` 改写 DIAGNOSE/REVIEW 草稿，使真实模型
+  即使写出 pretty JSON 也被测试代码提前修正，继续掩盖线上失败。
+- **不可回归行为**：DIAGNOSE 与 REVIEW 的 Agent 草稿只要是 schema 合法、无歧义的 UTF-8 JSON，
+  服务端就必须在 Agent 退出后完成稳定读取和 schema 校验，再原子改写为 Canonical JSON；审计记录、
+  source draft hash 和后续 finalization 只能使用规范化字节。UTF-8 BOM、重复键、NaN/Infinity、非法
+  UTF-8、schema 错误及读取期间内容漂移仍必须失败，失败原始字节不得被规范化或丢失。Fast E2E
+  wrapper 只能审计 Agent 原始草稿，必须保留 `harness_normalized=false`，不得解析后回写；真实链路要在
+  `authored_canonical=false` 时仍由产品 Runtime 完成 DIAGNOSE、REVIEW 和结果下载。
+- **修复历史**：2026-08-27，将 Methods DIAGNOSE/REVIEW 纳入 shared Agent JSON surface owner；
+  output reader 先按原始文件完成冻结读取、解析、schema 与稳定性校验，只对等价格式差异执行服务端
+  原子规范化，并再次核对规范化后的冻结字节。输出契约同步明确 Canonical JSON 编码由服务端负责。
+  首次 Linux Fast E2E 虽为 PASS，复核 `before_sha256/after_sha256` 后确认改写来自测试 wrapper，故不将
+  该结果作为产品修复证明；随后移除 Codex/Claude 共用 wrapper 的草稿改写，只保留原始字节审计。
+- **专项回归测试**：
+  - `tests/deterministic/unit/runtime/test_methods_output_pipeline.py::test_specialized_diagnosis_normalizes_pretty_methods_draft`
+  - 同文件 `test_review_normalizes_pretty_methods_draft_without_sealer` 和
+    `test_methods_draft_still_rejects_ambiguous_or_invalid_json`
+  - `tests/deterministic/unit/runtime/test_diagnosis_runtime.py::test_pretty_methods_draft_is_normalized_before_validation_and_hashing`
+  - `tests/deterministic/unit/integrations/test_agent_json.py::test_all_agent_json_surfaces_have_one_server_side_owner`
+  - `tools/test-flow/quick-validation/codex-luna/tests/macos-codex-luna-service-wrapper.test.mjs` 中
+    `server wrapper audits Methods drafts without normalizing product input`
+- **最新 Test Flow verdict**：中央 `dev.default` 尚无覆盖最终交付字节的 PASS verdict。Windows 尝试
+  `run-20260827T042259Z-85ea6f2d` 在 `framework.node-tests` 失败，pytest 未启动；WSL ext4 尝试
+  `run-20260827T044033Z-22fe4e66` 在同一 framework gate 命中 120 秒硬上限而 `BLOCKED`，也未进入
+  deterministic，且早于最后一次移除 Fast E2E wrapper 改写，均不得登记为修复已获正式 Test Flow
+  验证。开发期直接专项为 21 passed，相关 runtime 扩展回归为 174 passed、6 skipped；Linux 共享
+  wrapper 专项为 12/12 PASS。最终 Ubuntu 22.04 Claude Code `2.1.89` +
+  `deepseek-v4-flash[1m]` Fast E2E `claude-deepseek-20260827T044857Z-52269227` 为 PASS：5/5 个模型
+  进程、`retry_count=0`、833,289 total tokens、$1.626329；DIAGNOSE 与 REVIEW 均记录
+  `authored_canonical=false`、`harness_normalized=false`、`normalization_owner=product-runtime`，全部 Job
+  SUCCEEDED、公开 Case 为 RESOLVED，Server v3 `result.zip` 下载及双端日志校验 PASS。该 standalone
+  verdict 直接证明本次 Linux Fast E2E，不替代中央 Test Flow 或 Release；本元数据段本身不宣称被
+  上述运行覆盖。
+
+## PL-FIX-043：Methods marker 与日志行按大小写精确匹配
+
+- **状态**：代码已修复；是否验证通过以本条“最新 Test Flow verdict”为准。
+- **症状**：`methods.json` 声明 `API_COMPLETE` 时，冻结日志中的等价文本 `api_complete` 无法进入
+  marker scan；即使 Agent 引用了正确的完整日志行，grounding 仍以“marker 不在引用行中”拒绝。
+- **受影响版本**：`5.0.0`，至少包括提交
+  `0b2f2e667608637519fecc87cdd28b71eb943de4` 的 Methods grounding 实现。
+- **根因**：marker 预扫描和引用行复核分别直接使用 Python 大小写敏感的 `marker in line`，没有共享
+  明确的 marker 匹配语义。
+- **不可回归行为**：marker 与冻结日志行之间必须使用 Unicode `casefold()` 后的子串匹配；audit 仍
+  记录 `methods.json` 中声明的原始 marker。完整日志行、`identity_tokens`、`method_id`、`source_id`
+  和 REVIEW 证据身份继续精确匹配，不得因 marker 放宽而改变或规范化证据原文。
+- **修复历史**：2026-08-27，集中新增 `_marker_occurs()`，让全量 marker scan 与单条来源 grounding
+  复用同一套不区分大小写的匹配；不改 Logparse 目标选择、日志字节或其他证据身份规则。
+- **专项回归测试**：
+  - `tests/deterministic/unit/runtime/test_methods_skill.py::test_grounding_matches_declared_marker_without_case_sensitivity`
+- **最新 Test Flow verdict**：当前最终字节尚无中央 Test Flow PASS verdict，不登记为正式验证通过。
+  开发期相关确定性回归为 116 passed、1 skipped；新增大小写专项单独复跑为 1 passed，并同时确认
+  `identity_tokens` 仍区分大小写。按用户要求未运行任何真实模型；本元数据段本身不宣称被上述测试
+  覆盖。

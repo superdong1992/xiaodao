@@ -77,6 +77,12 @@ def test_all_agent_json_surfaces_have_one_server_side_owner() -> None:
     assert AGENT_JSON_SURFACE_OWNERS == {
         AgentJsonSurface.JOB_OUTCOME: "problem-locator-seal-outcome-draft",
         AgentJsonSurface.LOGPARSE_REQUEST: "problem-locator-logparse",
+        AgentJsonSurface.METHOD_DIAGNOSIS_DRAFT: (
+            "problem-locator-runtime-output-reader"
+        ),
+        AgentJsonSurface.METHOD_REVIEW_DRAFT: (
+            "problem-locator-runtime-output-reader"
+        ),
     }
 
 

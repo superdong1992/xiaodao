@@ -297,7 +297,7 @@ export function runServiceLogparseCommand({ phase, prompt, workspaceRoot, source
   return { required: true, invoked: true, status: "PASS", operation, request_path_sha256: sha256Bytes(requestPath), result_path_sha256: sha256Bytes(resultPath) };
 }
 
-export function canonicalizeMethodsDraft({ phase, workspaceRoot }) {
+export function auditMethodsDraft({ phase, workspaceRoot }) {
   const relativePath = phase === "DIAGNOSE"
     ? "output/method-diagnosis.draft.json"
     : phase === "REVIEW"
@@ -308,12 +308,25 @@ export function canonicalizeMethodsDraft({ phase, workspaceRoot }) {
   let metadata;
   try { metadata = fs.lstatSync(draftPath); } catch { fail("MACOS_CODEX_LUNA_METHODS_DRAFT_MISSING", "Methods draft is missing"); }
   if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.size > 2_000_000) fail("MACOS_CODEX_LUNA_METHODS_DRAFT_INVALID", "Methods draft is not a bounded ordinary file");
+  const authored = fs.readFileSync(draftPath);
   let value;
-  try { value = JSON.parse(fs.readFileSync(draftPath, "utf8")); } catch { fail("MACOS_CODEX_LUNA_METHODS_DRAFT_INVALID", "Methods draft is not valid JSON"); }
-  if (value === null || typeof value !== "object" || Array.isArray(value)) fail("MACOS_CODEX_LUNA_METHODS_DRAFT_INVALID", "Methods draft must be one JSON object");
-  const before = sha256Bytes(fs.readFileSync(draftPath));
-  fs.writeFileSync(draftPath, `${canonicalJson(value)}\n`, { encoding: "utf8", mode: 0o600 });
-  return { required: true, invoked: true, status: "PASS", relative_path: relativePath, before_sha256: before, after_sha256: sha256Bytes(fs.readFileSync(draftPath)) };
+  let parsed = true;
+  try { value = JSON.parse(authored.toString("utf8")); } catch { parsed = false; }
+  const canonical = parsed ? Buffer.from(`${canonicalJson(value)}\n`, "utf8") : null;
+  return {
+    required: true,
+    invoked: true,
+    status: "PASS",
+    relative_path: relativePath,
+    authored_size: authored.length,
+    authored_sha256: sha256Bytes(authored),
+    json_parse_status: canonical === null ? "INVALID" : "PASS",
+    canonical_size: canonical?.length ?? null,
+    canonical_sha256: canonical === null ? null : sha256Bytes(canonical),
+    authored_canonical: canonical === null ? null : authored.equals(canonical),
+    harness_normalized: false,
+    normalization_owner: "product-runtime",
+  };
 }
 
 export async function runServiceInvocation(values, { stdin = process.stdin, stdout = process.stdout, ambient = process.env } = {}) {
@@ -372,7 +385,7 @@ export async function runServiceInvocation(values, { stdin = process.stdin, stdo
   } finally {
     if (isolatedProject) removeLinuxServiceProject({ workspaceRoot, projectRoot });
   }
-  const methodsDraft = canonicalizeMethodsDraft({ phase, workspaceRoot });
+  const methodsDraft = auditMethodsDraft({ phase, workspaceRoot });
   const logparseRunner = runServiceLogparseCommand({ phase, prompt, workspaceRoot, logparseEntry: values["logparse-entry"], environment: controlled.environment });
   let outcomeSealer;
   try {

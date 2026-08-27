@@ -1,7 +1,10 @@
 # Methods diagnosis output contract
 
-This is a breaking, Methods-only output protocol. Write exactly one canonical
-UTF-8 JSON object to `output/method-diagnosis.draft.json`. Do not write
+This is a breaking, Methods-only output protocol. Write exactly one valid,
+unambiguous UTF-8 JSON object to `output/method-diagnosis.draft.json`. The Server
+validates the schema and atomically normalizes equivalent whitespace and key
+ordering before hashing or consuming the draft. A UTF-8 BOM, duplicate object
+key, non-finite number, invalid UTF-8, or invalid schema remains an error. Do not write
 `output/job_outcome.draft.json`, do not create proposal drafts, and do not run an
 outcome sealer.
 
@@ -57,5 +60,5 @@ Every `identity_tokens` value occurs in the cited source lines and the sorted pa
 `CONFIRMED` requires a confirmed method. `INSUFFICIENT` requires empty
 `confirmed_methods` and `evidence`. Do not infer an absent marker, invent a log
 line, widen a target, or use narrative, filenames, summaries, stdout, stderr, or
-prior output as evidence. Finish by atomically publishing only the canonical
-Methods draft named above.
+prior output as evidence. Finish by atomically publishing only the Methods draft
+named above; the Server owns its Canonical JSON encoding.

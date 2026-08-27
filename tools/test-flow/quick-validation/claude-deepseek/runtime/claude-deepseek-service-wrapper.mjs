@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 
 import { canonicalJson, sha256Bytes, sha256File } from "../../../lib/util.mjs";
 import {
-  canonicalizeMethodsDraft,
+  auditMethodsDraft,
   sealServiceOutcomeDraft,
   serverInvocationPhase,
 } from "../../codex-luna/runtime/macos-codex-luna-service-wrapper.mjs";
@@ -155,7 +155,7 @@ export async function runServiceInvocation(values, { stdin = process.stdin, stdo
   const baseHelperAudit = auditLogparseToolTrace({ phase, prompt, result, workspaceRoot });
   const helperAudit = logparsePhase ? { ...baseHelperAudit, broker_entry_sha256: sha256File(logparseEntry), stream_trace_sha256: sha256File(tracePath), tool_sequence_sha256: sha256Bytes(canonicalJson(result.records.map((item) => ({ ordinal: item.ordinal, name: item.name, input: item.input, is_error: item.is_error })))) } : baseHelperAudit;
   if (!logparsePhase && result.records.some((record) => record.name === "Bash" && record.is_error !== true)) fail("CLAUDE_DEEPSEEK_SERVICE_BASH_EXECUTED", "Non-LOGPARSE Claude process executed forbidden Bash");
-  const methodsDraft = canonicalizeMethodsDraft({ phase, workspaceRoot });
+  const methodsDraft = auditMethodsDraft({ phase, workspaceRoot });
   const outcomeSealer = sealServiceOutcomeDraft({ phase, workspaceRoot, finalizerEntry: path.resolve(values["finalizer-entry"]) });
   const receipt = {
     ...result.receipt,

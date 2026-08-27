@@ -31,12 +31,18 @@ class AgentJsonSurface(StrEnum):
 
     JOB_OUTCOME = "job_outcome"
     LOGPARSE_REQUEST = "logparse_request"
+    METHOD_DIAGNOSIS_DRAFT = "method_diagnosis_draft"
+    METHOD_REVIEW_DRAFT = "method_review_draft"
 
 
 AGENT_JSON_SURFACE_OWNERS: Mapping[AgentJsonSurface, str] = MappingProxyType(
     {
         AgentJsonSurface.JOB_OUTCOME: "problem-locator-seal-outcome-draft",
         AgentJsonSurface.LOGPARSE_REQUEST: "problem-locator-logparse",
+        AgentJsonSurface.METHOD_DIAGNOSIS_DRAFT: (
+            "problem-locator-runtime-output-reader"
+        ),
+        AgentJsonSurface.METHOD_REVIEW_DRAFT: "problem-locator-runtime-output-reader",
     }
 )
 

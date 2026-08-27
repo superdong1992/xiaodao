@@ -1,7 +1,10 @@
 # Methods review output contract
 
-This is a breaking, Methods-only REVIEW protocol. Write exactly one canonical
-UTF-8 JSON object to `output/method-review.draft.json`. Do not write
+This is a breaking, Methods-only REVIEW protocol. Write exactly one valid,
+unambiguous UTF-8 JSON object to `output/method-review.draft.json`. The Server
+validates the schema and atomically normalizes equivalent whitespace and key
+ordering before hashing or consuming the draft. A UTF-8 BOM, duplicate object
+key, non-finite number, invalid UTF-8, or invalid schema remains an error. Do not write
 `output/job_outcome.draft.json`, do not create proposals, and do not run an
 outcome sealer. Logparse is unavailable.
 
@@ -38,5 +41,5 @@ change identity, but changing their bytes does.
 
 A top-level `PASS` requires every finding to pass. `REJECT` requires at least one
 rejected finding. `NEED_MORE_EVIDENCE` requires at least one finding with that
-verdict. Finish by atomically publishing only the canonical Methods review draft
-named above.
+verdict. Finish by atomically publishing only the Methods review draft named
+above; the Server owns its Canonical JSON encoding.

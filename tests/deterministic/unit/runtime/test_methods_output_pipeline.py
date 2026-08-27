@@ -29,6 +29,7 @@ from problem_locator.runtime.methods_grounding import (
 )
 from problem_locator.runtime.methods_skill import load_specialized_skill_registration
 from problem_locator.runtime.output_reader import (
+    RejectedAgentOutputError,
     ValidatedMethodDiagnosisDraft,
     ValidatedMethodReviewDraft,
     read_agent_output,
@@ -126,7 +127,7 @@ def test_specialized_diagnosis_hard_cut_ignores_legacy_v6_envelope(
     assert captured.value.failure.code is ErrorCode.OUTCOME_MISSING
 
 
-def test_specialized_diagnosis_reads_only_canonical_methods_draft(
+def test_specialized_diagnosis_normalizes_pretty_methods_draft(
     tmp_path: Path,
 ) -> None:
     job = _contract("job-diagnose.json", Job)
@@ -141,19 +142,23 @@ def test_specialized_diagnosis_reads_only_canonical_methods_draft(
         "limitations": ["No positive marker is present."],
         "safety_notes": [],
     }
-    payload = canonical_json_bytes(value)
-    (tmp_path / "output/method-diagnosis.draft.json").write_bytes(payload)
+    canonical = canonical_json_bytes(value)
+    pretty = json.dumps(value, ensure_ascii=False, indent=2).encode("utf-8") + b"\n"
+    draft_path = tmp_path / "output/method-diagnosis.draft.json"
+    draft_path.write_bytes(pretty)
     # A malformed legacy envelope must be irrelevant to the selected protocol.
     (tmp_path / "output/job_outcome.draft.json").write_bytes(b"not-json")
 
     result = read_agent_output(tmp_path, job, manifest)
 
     assert isinstance(result, ValidatedMethodDiagnosisDraft)
-    assert result.canonical_bytes == payload
+    assert pretty != canonical
+    assert result.canonical_bytes == canonical
+    assert draft_path.read_bytes() == canonical
     assert result.draft.status == "INSUFFICIENT"
 
 
-def test_review_reads_exact_methods_review_path_without_sealer(tmp_path: Path) -> None:
+def test_review_normalizes_pretty_methods_draft_without_sealer(tmp_path: Path) -> None:
     job = _contract("job-review.json", Job)
     manifest = _contract(
         "workspace-input-manifest-review.json",
@@ -173,15 +178,47 @@ def test_review_reads_exact_methods_review_path_without_sealer(tmp_path: Path) -
         ],
         "limitations": [],
     }
-    payload = canonical_json_bytes(value)
-    (tmp_path / "output/method-review.draft.json").write_bytes(payload)
+    canonical = canonical_json_bytes(value)
+    pretty = json.dumps(value, ensure_ascii=False, indent=2).encode("utf-8") + b"\n"
+    draft_path = tmp_path / "output/method-review.draft.json"
+    draft_path.write_bytes(pretty)
 
     result = read_agent_output(tmp_path, job, manifest)
 
     assert isinstance(result, ValidatedMethodReviewDraft)
-    assert result.canonical_bytes == payload
+    assert pretty != canonical
+    assert result.canonical_bytes == canonical
+    assert draft_path.read_bytes() == canonical
     assert result.draft.findings[0].identity_tokens == ("request_id=42",)
     assert not (tmp_path / "runtime/tool-state/outcome-draft.finalized.json").exists()
+
+
+@pytest.mark.parametrize(
+    "invalid_payload",
+    [
+        b'\xef\xbb\xbf{"schema_version":1}',
+        b'{"schema_version":1,"schema_version":1}',
+        b'{"schema_version":NaN}',
+        b'{"schema_version":1}\xff',
+    ],
+)
+def test_methods_draft_still_rejects_ambiguous_or_invalid_json(
+    tmp_path: Path,
+    invalid_payload: bytes,
+) -> None:
+    job = _contract("job-diagnose.json", Job)
+    manifest = _contract("workspace-input-manifest.json", WorkspaceInputManifest)
+    _empty_workspace(tmp_path)
+    draft_path = tmp_path / "output/method-diagnosis.draft.json"
+    draft_path.write_bytes(invalid_payload)
+
+    with pytest.raises(RejectedAgentOutputError) as captured:
+        read_agent_output(tmp_path, job, manifest)
+
+    assert captured.value.failure.code is ErrorCode.OUTCOME_INVALID
+    assert captured.value.failure_category == "method_draft_schema"
+    assert captured.value.raw_outcome_bytes == invalid_payload
+    assert draft_path.read_bytes() == invalid_payload
 
 
 def test_workspace_freezes_minimal_methods_boundary_and_server_receipt(

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -6,7 +7,7 @@ import test from "node:test";
 
 import {
   controlledEnvironment,
-  canonicalizeMethodsDraft,
+  auditMethodsDraft,
   parseArguments,
   persistRejectedServiceDraft,
   publishLinuxServiceDraft,
@@ -233,17 +234,31 @@ test("server wrapper runs the one product-owned Logparse command without persist
   assert.doesNotMatch(JSON.stringify(receipt), /secret-canary|127\.0\.0\.1/);
 });
 
-test("server wrapper mechanically canonicalizes only Methods diagnosis and review drafts", (t) => {
+test("server wrapper audits Methods drafts without normalizing product input", (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "macos-luna-methods-draft-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const diagnosis = path.join(root, "output", "method-diagnosis.draft.json");
   fs.mkdirSync(path.dirname(diagnosis), { recursive: true });
-  fs.writeFileSync(diagnosis, '{\n  "z": 1,\n  "a": {"y": 2, "x": 3}\n}\n');
-  const receipt = canonicalizeMethodsDraft({ phase: "DIAGNOSE", workspaceRoot: root });
+  const authoredDiagnosis = '{\n  "z": 1,\n  "a": {"y": 2, "x": 3}\n}\n';
+  fs.writeFileSync(diagnosis, authoredDiagnosis);
+  const receipt = auditMethodsDraft({ phase: "DIAGNOSE", workspaceRoot: root });
   assert.equal(receipt.status, "PASS");
-  assert.equal(fs.readFileSync(diagnosis, "utf8"), '{"a":{"x":3,"y":2},"z":1}\n');
-  assert.deepEqual(canonicalizeMethodsDraft({ phase: "ROUTE", workspaceRoot: root }), { required: false, invoked: false, status: "SKIP" });
+  assert.equal(receipt.authored_canonical, false);
+  assert.equal(receipt.harness_normalized, false);
+  assert.equal(receipt.normalization_owner, "product-runtime");
+  assert.equal(receipt.authored_sha256, crypto.createHash("sha256").update(authoredDiagnosis).digest("hex"));
+  assert.equal(fs.readFileSync(diagnosis, "utf8"), authoredDiagnosis);
+  assert.deepEqual(auditMethodsDraft({ phase: "ROUTE", workspaceRoot: root }), { required: false, invoked: false, status: "SKIP" });
   const review = path.join(root, "output", "method-review.draft.json");
-  fs.writeFileSync(review, '{"verdict":"PASS","schema_version":1}\n');
-  assert.equal(canonicalizeMethodsDraft({ phase: "REVIEW", workspaceRoot: root }).status, "PASS");
+  const authoredReview = '{"schema_version":1,"verdict":"PASS"}\n';
+  fs.writeFileSync(review, authoredReview);
+  assert.equal(auditMethodsDraft({ phase: "REVIEW", workspaceRoot: root }).authored_canonical, true);
+  assert.equal(fs.readFileSync(review, "utf8"), authoredReview);
+
+  fs.writeFileSync(review, '{"schema_version":');
+  const invalid = auditMethodsDraft({ phase: "REVIEW", workspaceRoot: root });
+  assert.equal(invalid.json_parse_status, "INVALID");
+  assert.equal(invalid.canonical_sha256, null);
+  assert.equal(invalid.harness_normalized, false);
+  assert.equal(fs.readFileSync(review, "utf8"), '{"schema_version":');
 });

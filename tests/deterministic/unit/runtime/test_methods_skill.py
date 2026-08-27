@@ -403,6 +403,39 @@ def test_grounding_binds_exact_line_marker_identity_and_receipt(tmp_path: Path) 
     assert review.verdict == "PASS"
 
 
+def test_grounding_matches_declared_marker_without_case_sensitivity(
+    tmp_path: Path,
+) -> None:
+    skill = load_specialized_skill_registration(_write_registration(tmp_path / "skills"))
+    cited = "2026-08-23T10:00:05Z api_complete request_id=42 cost_us=6500000"
+    logs = (_target("server", f"noise\n{cited}\n"),)
+
+    receipt = scan_method_markers(skill=skill, target_logs=logs)
+    verified = verify_method_diagnosis(
+        skill=skill,
+        draft=_diagnosis(line=cited),
+        target_logs=logs,
+        logparse_receipt_sha256=RECEIPT_SHA256,
+        skill_load=receipt,
+    )
+
+    assert receipt.marker_hits == (("server", "API_COMPLETE", 2),)
+    assert receipt.loaded_method_ids == ("slow-execution",)
+    assert verified.draft.evidence[0].sources[0].line == cited
+    assert verified.draft.evidence[0].sources[0].marker == "API_COMPLETE"
+
+    changed_identity = _diagnosis(line=cited)
+    changed_identity["evidence"][0]["identity_tokens"] = ["REQUEST_ID=42"]
+    with pytest.raises(ValueError, match="same evidence"):
+        verify_method_diagnosis(
+            skill=skill,
+            draft=changed_identity,
+            target_logs=logs,
+            logparse_receipt_sha256=RECEIPT_SHA256,
+            skill_load=receipt,
+        )
+
+
 def test_grounded_methods_are_mapped_by_the_server_into_candidate_domain(
     tmp_path: Path,
 ) -> None:
