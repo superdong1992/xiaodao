@@ -161,6 +161,19 @@ def _validate_role_evaluation(
         raise ValueError("role evaluation does not exactly cover the state plan")
 
 
+def _validate_repair_attempt(
+    state: MethodStateV2,
+    evaluation: MethodRoleEvaluationV2,
+    *,
+    role: MethodEvaluationRoleV2,
+) -> None:
+    failures = getattr(state, f"{role.lower()}_protocol_failures")
+    expected_repair = failures == 1
+    if evaluation.repair_used != expected_repair:
+        expected = "repair" if expected_repair else "primary"
+        raise ValueError(f"{role} state expects a {expected} evaluation attempt")
+
+
 def start_method_state_v2(
     *,
     evaluation_id: str,
@@ -218,6 +231,7 @@ def accept_specialist_evaluation_v2(
 ) -> MethodStateV2:
     _pending_role(state, "SPECIALIST")
     _validate_role_evaluation(state, evaluation, role="SPECIALIST")
+    _validate_repair_attempt(state, evaluation, role="SPECIALIST")
     return _replace(
         state,
         status="REVIEWER_PENDING",
@@ -413,6 +427,7 @@ def finalize_reviewer_consensus_v2(
     if tuple(item.evaluation_ref for item in plan.evaluations) != state.evaluation_refs:
         raise ValueError("plan evaluation identities differ from the pending state")
     _validate_role_evaluation(state, reviewer_evaluation, role="REVIEWER")
+    _validate_repair_attempt(state, reviewer_evaluation, role="REVIEWER")
     if state.specialist_evaluation is None:
         raise ValueError("reviewer consensus requires specialist evaluation")
     _validate_consensus(

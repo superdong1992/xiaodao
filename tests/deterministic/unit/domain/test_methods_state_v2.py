@@ -24,6 +24,7 @@ from problem_locator.domain.methods_state_v2 import (
     start_method_state_v2,
 )
 from problem_locator.runtime.methods_evaluation_v2 import (
+    MethodEvaluationResponseError,
     evaluate_method_role_v2,
     resolve_method_consensus_v2,
 )
@@ -131,16 +132,21 @@ def _evaluations(
     plan,
     specialist_verdicts: tuple[str, str] = ("CONFIRMED", "REJECTED"),
     reviewer_verdicts: tuple[str, str] = ("CONFIRMED", "REJECTED"),
+    *,
+    specialist_attempt: str = "PRIMARY",
+    reviewer_attempt: str = "PRIMARY",
 ):
     specialist = evaluate_method_role_v2(
         role="SPECIALIST",
         plan=plan,
-        primary_response=_response(plan, specialist_verdicts, "specialist"),
+        response=_response(plan, specialist_verdicts, "specialist"),
+        attempt=specialist_attempt,  # type: ignore[arg-type]
     )
     reviewer = evaluate_method_role_v2(
         role="REVIEWER",
         plan=plan,
-        primary_response=_response(plan, reviewer_verdicts, "reviewer"),
+        response=_response(plan, reviewer_verdicts, "reviewer"),
+        attempt=reviewer_attempt,  # type: ignore[arg-type]
     )
     consensus = resolve_method_consensus_v2(
         plan=plan,
@@ -330,7 +336,11 @@ def test_each_role_gets_one_protocol_repair_then_exhausts(role: str) -> None:
         reason="The response shape is invalid.",
         evaluation_ref=evaluation_ref,
     )
-    specialist, reviewer, consensus = _evaluations(plan)
+    specialist, reviewer, consensus = _evaluations(
+        plan,
+        specialist_attempt="REPAIR" if role == "SPECIALIST" else "PRIMARY",
+        reviewer_attempt="REPAIR" if role == "REVIEWER" else "PRIMARY",
+    )
     repaired_terminal = (
         accept_specialist_evaluation_v2(state=first, evaluation=specialist)
         if role == "SPECIALIST"
@@ -356,6 +366,104 @@ def test_each_role_gets_one_protocol_repair_then_exhausts(role: str) -> None:
     assert second.status == "UNRESOLVED"
     assert second.reason_code == f"{role}_PROTOCOL_REPAIR_EXHAUSTED"
     assert second.diagnostic_evaluation_ref == evaluation_ref
+
+
+@pytest.mark.parametrize("role", ["SPECIALIST", "REVIEWER"])
+@pytest.mark.parametrize(
+    ("recorded_failure", "attempt"),
+    [(False, "REPAIR"), (True, "PRIMARY")],
+    ids=["repair-without-error", "primary-after-error"],
+)
+def test_role_acceptance_requires_attempt_to_match_state_repair_count(
+    role: str,
+    recorded_failure: bool,
+    attempt: str,
+) -> None:
+    plan = _plan()
+    state = _start(plan) if role == "SPECIALIST" else _reviewer_pending(plan)
+    if recorded_failure:
+        state = record_protocol_error_v2(
+            state=state,
+            role=role,  # type: ignore[arg-type]
+            reason="The primary response shape is invalid.",
+        )
+    specialist, reviewer, consensus = _evaluations(
+        plan,
+        specialist_attempt=attempt if role == "SPECIALIST" else "PRIMARY",
+        reviewer_attempt=attempt if role == "REVIEWER" else "PRIMARY",
+    )
+
+    with pytest.raises(ValueError, match=f"{role} state expects"):
+        if role == "SPECIALIST":
+            accept_specialist_evaluation_v2(state=state, evaluation=specialist)
+        else:
+            finalize_reviewer_consensus_v2(
+                state=state,
+                plan=plan,
+                reviewer_evaluation=reviewer,
+                consensus=consensus,
+            )
+
+
+def test_state_contract_rejects_persisted_repair_count_mismatch() -> None:
+    plan = _plan()
+    pending = _reviewer_pending(plan)
+    mutated = pending.model_copy(update={"specialist_protocol_failures": 1})
+
+    with pytest.raises(ValidationError, match="repair marker differs"):
+        MethodStateV2.model_validate(mutated.model_dump(mode="python"))
+
+
+@pytest.mark.parametrize("role", ["SPECIALIST", "REVIEWER"])
+def test_second_protocol_error_ends_role_before_a_third_response(role: str) -> None:
+    plan = _plan()
+    state = _start(plan) if role == "SPECIALIST" else _reviewer_pending(plan)
+
+    with pytest.raises(MethodEvaluationResponseError):
+        evaluate_method_role_v2(
+            role=role,  # type: ignore[arg-type]
+            plan=plan,
+            response={"invalid": "primary"},
+            attempt="PRIMARY",
+        )
+    first_failure = record_protocol_error_v2(
+        state=state,
+        role=role,  # type: ignore[arg-type]
+        reason="The primary response shape is invalid.",
+    )
+    with pytest.raises(MethodEvaluationResponseError):
+        evaluate_method_role_v2(
+            role=role,  # type: ignore[arg-type]
+            plan=plan,
+            response={"invalid": "repair"},
+            attempt="REPAIR",
+        )
+    exhausted = record_protocol_error_v2(
+        state=first_failure,
+        role=role,  # type: ignore[arg-type]
+        reason="The repaired response shape is still invalid.",
+    )
+    specialist, reviewer, consensus = _evaluations(
+        plan,
+        specialist_attempt="REPAIR" if role == "SPECIALIST" else "PRIMARY",
+        reviewer_attempt="REPAIR" if role == "REVIEWER" else "PRIMARY",
+    )
+
+    assert exhausted.status == "UNRESOLVED"
+    assert getattr(exhausted, f"{role.lower()}_protocol_failures") == 2
+    with pytest.raises(ValueError, match="state is not pending"):
+        if role == "SPECIALIST":
+            accept_specialist_evaluation_v2(
+                state=exhausted,
+                evaluation=specialist,
+            )
+        else:
+            finalize_reviewer_consensus_v2(
+                state=exhausted,
+                plan=plan,
+                reviewer_evaluation=reviewer,
+                consensus=consensus,
+            )
 
 
 @pytest.mark.parametrize(

@@ -124,12 +124,14 @@ def _context(
     specialist = evaluate_method_role_v2(
         role="SPECIALIST",
         plan=plan,
-        primary_response=response(specialist_verdicts, "specialist"),
+        response=response(specialist_verdicts, "specialist"),
+        attempt="PRIMARY",
     )
     reviewer = evaluate_method_role_v2(
         role="REVIEWER",
         plan=plan,
-        primary_response=response(reviewer_verdicts, "reviewer"),
+        response=response(reviewer_verdicts, "reviewer"),
+        attempt="PRIMARY",
     )
     consensus = resolve_method_consensus_v2(
         plan=plan,

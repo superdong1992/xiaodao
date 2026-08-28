@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import ValidationError
 
@@ -18,15 +18,10 @@ from problem_locator.contracts import (
 
 
 _OUTPUT_FIELDS = frozenset({"evaluation_ref", "verdict", "reason"})
-_NO_REPAIR = object()
 
 
 class MethodEvaluationResponseError(ValueError):
     """Raised when a model response violates the exact evaluation plan shape."""
-
-
-class MethodEvaluationRepairExhaustedError(MethodEvaluationResponseError):
-    """Raised after both the primary response and sole repair are invalid."""
 
 
 def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -111,48 +106,27 @@ def evaluate_method_role_v2(
     *,
     role: MethodEvaluationRoleV2,
     plan: MethodEvaluationPlanV2,
-    primary_response: object,
-    repair_response: object = _NO_REPAIR,
+    response: object,
+    attempt: Literal["PRIMARY", "REPAIR"],
 ) -> MethodRoleEvaluationV2:
-    """Validate primary output, consuming at most one supplied structural repair.
-
-    Both responses are values supplied by the caller.  This pure function never
-    invokes a model or Runtime callback.  A repair is ignored when the primary
-    response is already valid.
-    """
+    """Validate exactly one role response for one state-owned attempt."""
 
     if role not in {"SPECIALIST", "REVIEWER"}:
         raise ValueError("role must be SPECIALIST or REVIEWER")
     if not isinstance(plan, MethodEvaluationPlanV2):
         raise TypeError("plan must be MethodEvaluationPlanV2")
-    try:
-        evaluations = parse_method_evaluation_response_v2(
-            plan=plan,
-            response=primary_response,
-        )
-    except MethodEvaluationResponseError as primary_error:
-        if repair_response is _NO_REPAIR:
-            raise MethodEvaluationResponseError(
-                "primary model evaluation response is invalid and no repair was supplied"
-            ) from primary_error
-        try:
-            evaluations = parse_method_evaluation_response_v2(
-                plan=plan,
-                response=repair_response,
-            )
-        except MethodEvaluationResponseError as repair_error:
-            raise MethodEvaluationRepairExhaustedError(
-                "the sole structural repair is invalid; no further repair is allowed"
-            ) from repair_error
-        repair_used = True
-    else:
-        repair_used = False
+    if attempt not in {"PRIMARY", "REPAIR"}:
+        raise ValueError("attempt must be PRIMARY or REPAIR")
+    evaluations = parse_method_evaluation_response_v2(
+        plan=plan,
+        response=response,
+    )
 
     return MethodRoleEvaluationV2(
         role=role,
         plan_ref=plan.plan_ref,
         evaluations=evaluations,
-        repair_used=repair_used,
+        repair_used=attempt == "REPAIR",
     )
 
 
@@ -226,7 +200,6 @@ def resolve_method_consensus_v2(
 
 
 __all__ = [
-    "MethodEvaluationRepairExhaustedError",
     "MethodEvaluationResponseError",
     "evaluate_method_role_v2",
     "parse_method_evaluation_response_v2",

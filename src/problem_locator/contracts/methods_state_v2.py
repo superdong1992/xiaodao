@@ -194,6 +194,15 @@ class MethodStateV2(_MethodStateContract):
                 item.evaluation_ref for item in value.evaluations
             ) != self.evaluation_refs:
                 raise ValueError("role evaluation does not exactly cover state evaluations")
+            if value is not None:
+                failures = getattr(
+                    self,
+                    f"{expected_role.lower()}_protocol_failures",
+                )
+                if value.repair_used != (failures == 1):
+                    raise ValueError(
+                        "role evaluation repair marker differs from protocol failures"
+                    )
         if self.consensus is not None and self.consensus.plan_ref != self.plan_ref:
             raise ValueError("consensus differs from the state plan")
         if self.consensus is not None and any(

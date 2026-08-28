@@ -13,7 +13,6 @@ from problem_locator.runtime.methods_evidence_v2 import (
     scan_method_evidence_v2,
 )
 from problem_locator.runtime.methods_evaluation_v2 import (
-    MethodEvaluationRepairExhaustedError,
     MethodEvaluationResponseError,
     evaluate_method_role_v2,
     parse_method_evaluation_response_v2,
@@ -164,31 +163,48 @@ def test_response_rejects_non_array_or_ambiguous_json(response: object) -> None:
         parse_method_evaluation_response_v2(plan=_plan(), response=response)
 
 
-def test_each_role_may_consume_only_one_structural_repair() -> None:
+@pytest.mark.parametrize(
+    ("attempt", "repair_used"),
+    [("PRIMARY", False), ("REPAIR", True)],
+)
+def test_role_evaluation_parses_one_explicit_attempt(
+    attempt: str,
+    repair_used: bool,
+) -> None:
     plan = _plan()
-    valid = _response(plan)
 
-    repaired = evaluate_method_role_v2(
+    evaluation = evaluate_method_role_v2(
         role="SPECIALIST",
         plan=plan,
-        primary_response={"not": "an array"},
-        repair_response=valid,
-    )
-    primary_wins = evaluate_method_role_v2(
-        role="REVIEWER",
-        plan=plan,
-        primary_response=valid,
-        repair_response={"must": "remain unconsumed"},
+        response=_response(plan),
+        attempt=attempt,  # type: ignore[arg-type]
     )
 
-    assert repaired.repair_used is True
-    assert primary_wins.repair_used is False
-    with pytest.raises(MethodEvaluationRepairExhaustedError, match="no further repair"):
+    assert evaluation.repair_used is repair_used
+
+
+def test_role_evaluation_rejects_each_invalid_attempt_independently() -> None:
+    plan = _plan()
+
+    for attempt in ("PRIMARY", "REPAIR"):
+        with pytest.raises(MethodEvaluationResponseError):
+            evaluate_method_role_v2(
+                role="SPECIALIST",
+                plan=plan,
+                response={"not": "an array"},
+                attempt=attempt,  # type: ignore[arg-type]
+            )
+
+
+def test_role_evaluation_has_no_primary_plus_repair_fallback_api() -> None:
+    plan = _plan()
+
+    with pytest.raises(TypeError, match="primary_response"):
         evaluate_method_role_v2(
             role="SPECIALIST",
             plan=plan,
             primary_response={"not": "an array"},
-            repair_response={"still": "not an array"},
+            repair_response=_response(plan),
         )
 
 
@@ -201,20 +217,22 @@ def _roles(
         evaluate_method_role_v2(
             role="SPECIALIST",
             plan=plan,
-            primary_response=_response(
+            response=_response(
                 plan,
                 first_verdicts,
                 reason_prefix="diagnose-private-reason",
             ),
+            attempt="PRIMARY",
         ),
         evaluate_method_role_v2(
             role="REVIEWER",
             plan=plan,
-            primary_response=_response(
+            response=_response(
                 plan,
                 second_verdicts,
                 reason_prefix="review-private-reason",
             ),
+            attempt="PRIMARY",
         ),
     )
 
