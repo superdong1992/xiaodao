@@ -40,7 +40,7 @@ const VALUE_ARGUMENTS = new Set(["goal", "client", "claude-entry", "claude-setti
 
 const REQUIRED_EVIDENCE = Object.freeze({
   [METHODS_GOAL]: ["quick-codex-luna-contracts.tap", "quick-claude-methods-contracts.tap", "claude-identity.json", "model-invocations.json", "model-usage.json", "methods-package.json", "scenario-evaluation-audit.json", "security-audit.json", "adapter-receipt.json"],
-  [E2E_GOAL]: ["quick-claude-e2e-contracts.tap", "runtime-receipt.json", "methods-package.json", "claude-identity.json", "model-invocations.json", "model-usage.json", "model-cert-input.json", "adapter-receipt.json"],
+  [E2E_GOAL]: ["quick-claude-e2e-contracts.tap", "runtime-receipt.json", "methods-package.json", "claude-identity.json", "model-invocations.json", "model-usage.json", "model-cert-input.json", "model-cert.json", "adapter-receipt.json"],
 });
 
 class QuickValidationError extends Error {

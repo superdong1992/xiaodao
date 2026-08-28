@@ -54,7 +54,8 @@ wrapper 不改写草稿，`harness_normalized=false`。
 该路径不创建或消费 Candidate，不产生 `PARTIALLY_RESOLVED`，不下载 `result.zip`，也不读取
 Methods V1 grounding。它不运行 Client、浏览器、上传、CrossJob 或 Release。
 
-Gate 写出 `model-cert-input.json`。中央 Test Flow 用共享 validator 生成 `model-cert.json`，两者都绑定：
+Gate 先写 `model-cert-input.json`，再用共享 builder 在同一 evidence 根生成并复验
+`model-cert.json`。中央 Test Flow 之后若再次物化，必须得到完全相同的 canonical bytes。两者都绑定：
 
 - source snapshot 与 V8 contract manifest；
 - 同快照的 `core-verdict.json`；

@@ -7,7 +7,12 @@ import { fileURLToPath } from "node:url";
 import { materializeClaudeSettings } from "../../../lib/release-inputs.mjs";
 import { canonicalJson, sha256Bytes, sha256File } from "../../../lib/util.mjs";
 import { validateEvidenceV2CoreVerdict } from "../../../../validation/evidence-v2-core.mjs";
-import { validateEvidenceV2ModelCertInputSchema } from "../../../../validation/evidence-v2-certification.mjs";
+import {
+  EVIDENCE_V2_MODEL_CERT_FILENAME,
+  buildEvidenceV2ModelCert,
+  validateEvidenceV2ModelCert,
+  validateEvidenceV2ModelCertInputSchema,
+} from "../../../../validation/evidence-v2-certification.mjs";
 import {
   CLAUDE_DEEPSEEK_MODEL,
   assertRegistrationUnchanged,
@@ -51,6 +56,19 @@ function createEmptyRoot(root, label) {
 function writeJsonNew(filePath, value) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true, mode: 0o700 });
   fs.writeFileSync(filePath, canonicalJson(value), { encoding: "utf8", mode: 0o600, flag: "wx" });
+}
+
+export function materializeStandaloneModelCert(options, {
+  build = buildEvidenceV2ModelCert,
+  validate = validateEvidenceV2ModelCert,
+} = {}) {
+  const cert = build(options);
+  const certPath = path.join(options.certRoot, EVIDENCE_V2_MODEL_CERT_FILENAME);
+  writeJsonNew(certPath, cert);
+  const persisted = JSON.parse(fs.readFileSync(certPath, "utf8"));
+  validate(persisted, options);
+  requireCert(canonicalJson(persisted) === canonicalJson(cert), "CLAUDE_DEEPSEEK_MODEL_CERT_PERSISTENCE_MISMATCH", "Persisted model-cert.json differs from the shared builder output");
+  return persisted;
 }
 
 function normalizedUsage(value) {
@@ -346,6 +364,13 @@ export async function runE2E(options, { ambient = process.env, onProgress = null
   writeJsonNew(path.join(evidenceRoot, "model-invocations.json"), { schema_version: 1, status: "PASS", retry_policy: "ROLE_PROTOCOL_REPAIR_ONLY", invocations });
   writeJsonNew(path.join(evidenceRoot, "model-usage.json"), modelAudit);
   writeJsonNew(path.join(evidenceRoot, "model-cert-input.json"), modelCertInput);
+  const modelCert = materializeStandaloneModelCert({
+    certificationTarget: "P1",
+    sourceSnapshotDigest,
+    sourceRoot,
+    coreVerdictPath,
+    certRoot: evidenceRoot,
+  });
   const gate = {
     schema_version: 1,
     status: "PASS",
@@ -354,6 +379,7 @@ export async function runE2E(options, { ambient = process.env, onProgress = null
       core_binding: "PASS",
       registration_identity: "PASS",
       scenario_identity: scenarioAudit.status,
+      model_cert: modelCert.status,
       production_runtime: runtimeAudit.status,
       role_calls: modelAudit.status,
       methods_result: runtimeReceipt.methods_result_identity.status,
@@ -361,6 +387,7 @@ export async function runE2E(options, { ambient = process.env, onProgress = null
     model_calls: modelAudit.actual_call_count,
     repairs: modelAudit.repair_counts,
     model_cert_input_sha256: sha256Bytes(canonicalJson(modelCertInput)),
+    model_cert_sha256: sha256Bytes(canonicalJson(modelCert)),
   };
   writeJsonNew(path.join(evidenceRoot, "adapter-receipt.json"), gate);
   return gate;

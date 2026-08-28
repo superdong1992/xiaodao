@@ -69,6 +69,7 @@ test("Methods contract stage includes migrated Codex Gate before Claude Bootstra
   assert.match(source, /runDeterministicGates\(plan\.goal, deterministicRoot\)/);
   assert.ok(REQUIRED_EVIDENCE[METHODS_GOAL].includes("quick-codex-luna-contracts.tap"));
   assert.ok(REQUIRED_EVIDENCE[E2E_GOAL].includes("quick-claude-e2e-contracts.tap"));
+  assert.ok(REQUIRED_EVIDENCE[E2E_GOAL].includes("model-cert.json"));
 });
 
 test("provider deterministic Gates stay outside empty Methods and E2E runner roots until materialization", () => {
@@ -132,4 +133,19 @@ test("light Gate rejects missing evidence and wrong model-process cardinality", 
   const other = fs.mkdtempSync(path.join(os.tmpdir(), "claude-deepseek-gate-other-"));
   for (const name of REQUIRED_EVIDENCE[METHODS_GOAL]) fs.writeFileSync(path.join(other, name), name === "adapter-receipt.json" ? '{"status":"PASS"}\n' : name === "model-invocations.json" ? '{"invocations":[]}\n' : "{}\n");
   assert.equal(sealGate({ goal: METHODS_GOAL, mode: "generation", evidenceRoot: other, expectedCalls: 1 }).status, "FAIL");
+
+  const missingFinalCert = fs.mkdtempSync(path.join(os.tmpdir(), "claude-deepseek-gate-no-final-cert-"));
+  for (const name of REQUIRED_EVIDENCE[E2E_GOAL].filter((item) => item !== "model-cert.json")) {
+    const content = name === "adapter-receipt.json"
+      ? '{"status":"PASS"}\n'
+      : name === "model-invocations.json"
+        ? '{"invocations":[{},{}]}\n'
+        : name === "model-usage.json"
+          ? '{"aggregate":{}}\n'
+          : "{}\n";
+    fs.writeFileSync(path.join(missingFinalCert, name), content);
+  }
+  const missingReceipt = sealGate({ goal: E2E_GOAL, mode: "model-cert", evidenceRoot: missingFinalCert, expectedCalls: 2 });
+  assert.equal(missingReceipt.status, "FAIL");
+  assert.deepEqual(missingReceipt.missing_evidence, ["model-cert.json"]);
 });

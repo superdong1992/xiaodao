@@ -13,6 +13,7 @@ import {
   auditRuntimeAndInvocations,
   auditScenarioIdentity,
   buildModelCertInput,
+  materializeStandaloneModelCert,
   parseArguments,
   productionRuntimeArguments,
   safeE2EError,
@@ -123,6 +124,32 @@ test("P1 model-cert input binds provider revision, calls, usage, Core, and metho
     assert.equal(receipt.methods_result.status, "RESOLVED");
     assert.equal(validateEvidenceV2ModelCertInputSchema(receipt, { certificationTarget: "P1" }).scenario.registration_id, "rpc-timeout-methods-v1");
   } finally { fs.rmSync(sourceRoot, { recursive: true, force: true }); }
+});
+
+test("standalone writes and rereads the exact shared model-cert bytes once", () => {
+  const certRoot = fs.mkdtempSync(path.join(os.tmpdir(), "deepseek-final-cert-"));
+  try {
+    const options = { certificationTarget: "P1", sourceSnapshotDigest: "a".repeat(64), sourceRoot: "/source", coreVerdictPath: "/core", certRoot };
+    const built = { schema_version: 1, receipt_type: "evidence-v2-model-cert", status: "PASS", deterministic: true };
+    let validated = 0;
+    const result = materializeStandaloneModelCert(options, {
+      build(actual) { assert.deepEqual(actual, options); return built; },
+      validate(actual, actualOptions) { assert.deepEqual(actual, built); assert.deepEqual(actualOptions, options); validated += 1; return actual; },
+    });
+    assert.deepEqual(result, built);
+    assert.equal(validated, 1);
+    assert.equal(fs.readFileSync(path.join(certRoot, "model-cert.json"), "utf8"), canonicalJson(built));
+    assert.throws(() => materializeStandaloneModelCert(options, { build: () => built, validate: () => built }), (error) => error.code === "EEXIST");
+  } finally { fs.rmSync(certRoot, { recursive: true, force: true }); }
+});
+
+test("E2E writes adapter input before materializing the shared final cert", () => {
+  const source = fs.readFileSync(path.join(ROOT, "tools", "test-flow", "quick-validation", "claude-deepseek", "runtime", "claude-deepseek-e2e-runner.mjs"), "utf8");
+  const inputWrite = source.indexOf('writeJsonNew(path.join(evidenceRoot, "model-cert-input.json")');
+  const finalBuild = source.indexOf("const modelCert = materializeStandaloneModelCert", inputWrite);
+  assert.ok(inputWrite > 0 && finalBuild > inputWrite);
+  assert.match(source, /buildEvidenceV2ModelCert/u);
+  assert.match(source, /validateEvidenceV2ModelCert/u);
 });
 
 test("real Runtime invocation receives the validated registration and frozen release scenario", () => {
