@@ -14,6 +14,7 @@ from typing import Any, Literal
 from problem_locator.contracts.errors import ApplicationPortError
 from problem_locator.contracts.enums import (
     AttachmentStatus,
+    DiagnosisMode,
     ErrorCode,
     ExecutionStage,
     JobType,
@@ -29,6 +30,7 @@ from problem_locator.contracts.models import (
     JobOutcome,
     LogparseParseClaim,
     MaterializedPath,
+    MethodsReviewerInputV2,
     ResolvedLogparsePlanInput,
     ResourceRef,
     ReviewSubjectV2,
@@ -42,6 +44,10 @@ from problem_locator.contracts.models import (
     derive_attachment_filename_suffix,
     validate_workspace_manifest_for_job,
     workspace_attachment_relative_path,
+)
+from problem_locator.contracts.methods_v2 import (
+    MethodEvidenceGraphV2,
+    MethodEvaluationPlanV2,
 )
 from problem_locator.contracts.ports import ResourceStore
 from problem_locator.contracts.serialization import (
@@ -114,6 +120,21 @@ class FrozenMethodsWorkspaceInputs:
     receipt_bytes: bytes
     receipt_sha256: str
     target_logs: tuple[FrozenTargetLogV1, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class MethodsRoleWorkspaceReceiptV2:
+    """Canonical model-visible Methods V2 inputs published for one role."""
+
+    role: Literal["SPECIALIST", "REVIEWER"]
+    request_bytes: bytes
+    evidence_graph_bytes: bytes
+    evaluation_plan_bytes: bytes
+    request_sha256: str
+    evidence_graph_sha256: str
+    evaluation_plan_sha256: str
+    graph_ref: str
+    plan_ref: str
 
 
 def _safe_dir_fd_operations_supported() -> bool:
@@ -1038,6 +1059,104 @@ _METHODS_RECEIPT_CONTEXT_FIELDS = frozenset(
         "broker_audit_sha256",
     }
 )
+_METHODS_REQUEST_INPUT = "request.json"
+_METHODS_GRAPH_INPUT = "method-evidence-graph.json"
+_METHODS_PLAN_INPUT = "method-evaluation-plan.json"
+_METHODS_PREPROCESS_INPUTS = (
+    "target_logs.json",
+    "logparse-receipt.json",
+)
+
+
+def _methods_role_request_bytes_v2(job: Job) -> bytes:
+    snapshot = job.context_snapshot
+    specialized = (
+        job.job_type is JobType.DIAGNOSE
+        and job.diagnosis_mode is DiagnosisMode.SPECIALIZED
+    )
+    reviewer = job.job_type is JobType.REVIEW and job.methods_review_target is not None
+    if snapshot is None or not (specialized or reviewer):
+        raise ValueError("Methods V2 request requires a specialized role Job")
+    user_facts: list[dict[str, str]] = []
+    names: set[str] = set()
+    for item in snapshot.user_facts:
+        name = item.provenance.input_name
+        if name is None or name in names:
+            raise ValueError("Methods V2 user facts require unique input names")
+        names.add(name)
+        user_facts.append(
+            {
+                "name": name,
+                "value": item.statement,
+                "source_fact_id": item.item_id,
+            }
+        )
+    return canonical_json_bytes(
+        {
+            "schema_version": 2,
+            "job": {
+                "job_id": job.job_id,
+                "case_id": job.case_id,
+                "job_type": job.job_type.value,
+                "goal": job.goal,
+                "base_state_revision": job.base_state_revision,
+            },
+            "user_facts": user_facts,
+        }
+    )
+
+
+def _validate_methods_plan_for_job_v2(
+    job: Job,
+    plan: MethodEvaluationPlanV2,
+) -> None:
+    if not isinstance(plan, MethodEvaluationPlanV2) or job.skill_ref is None:
+        raise TypeError("Methods V2 Plan and pinned Skill are required")
+    if plan.skill_sha256 != job.skill_ref.content_hash:
+        raise ValueError("Methods V2 Plan does not match the Job Skill")
+    target = job.methods_review_target
+    if target is not None and (
+        target.plan_ref != plan.plan_ref
+        or target.graph_ref != plan.evidence_graph_ref
+        or target.skill_ref != job.skill_ref
+    ):
+        raise ValueError("Methods V2 Plan does not match the Review target")
+
+
+def _validate_methods_graph_plan_for_job_v2(
+    job: Job,
+    graph: MethodEvidenceGraphV2,
+    plan: MethodEvaluationPlanV2,
+) -> None:
+    if not isinstance(graph, MethodEvidenceGraphV2):
+        raise TypeError("Methods V2 Evidence Graph is required")
+    _validate_methods_plan_for_job_v2(job, plan)
+    planned_method_ids = tuple(item.method_id for item in plan.evaluations)
+    if (
+        graph.skill_sha256 != plan.skill_sha256
+        or graph.graph_ref != plan.evidence_graph_ref
+        or graph.loaded_method_ids != planned_method_ids
+    ):
+        raise ValueError("Methods V2 Graph and Plan do not describe one method set")
+
+
+def _remove_methods_preprocess_inputs(inputs_root: Path) -> None:
+    for name in _METHODS_PREPROCESS_INPUTS:
+        path = inputs_root / name
+        if not path.is_file():
+            raise ValueError("Methods preprocessing input is missing")
+        path.chmod(0o644)
+        path.unlink()
+    target_root = inputs_root / "target-logs"
+    if not target_root.is_dir():
+        raise ValueError("Methods target-log directory is missing")
+    target_root.chmod(0o755)
+    for path in target_root.iterdir():
+        if not path.is_file():
+            raise ValueError("Methods target-log input shape is invalid")
+        path.chmod(0o644)
+        path.unlink()
+    target_root.rmdir()
 
 
 class WorkspaceManager:
@@ -1054,6 +1173,7 @@ class WorkspaceManager:
         *,
         resolved_logparse_plan: ResolvedLogparsePlanInput | None = None,
         review_subject: ReviewSubjectV2 | None = None,
+        methods_evaluation_plan: MethodEvaluationPlanV2 | None = None,
         workspace_phase: Literal["logparse-preprocess"] | None = None,
     ) -> PreparedWorkspace:
         if aggregate.case.case_id != job.case_id or aggregate.jobs.get(job.job_id) != job:
@@ -1209,6 +1329,27 @@ class WorkspaceManager:
                 )
             )
 
+        methods_reviewer_input: MethodsReviewerInputV2 | None = None
+        if job.methods_review_target is not None:
+            if methods_evaluation_plan is None:
+                raise ValueError(
+                    "Methods V2 REVIEW Workspace requires its source Evaluation Plan"
+                )
+            _validate_methods_plan_for_job_v2(job, methods_evaluation_plan)
+            methods_reviewer_input = MethodsReviewerInputV2(
+                schema_version=2,
+                review_job_id=job.job_id,
+                case_id=job.case_id,
+                target=job.methods_review_target,
+                method_ids=tuple(
+                    item.method_id for item in methods_evaluation_plan.evaluations
+                ),
+            )
+        elif methods_evaluation_plan is not None:
+            raise ValueError(
+                "only a Methods V2 REVIEW Workspace accepts an Evaluation Plan"
+            )
+
         manifest = WorkspaceInputManifest(
             schema_version=2,
             job_id=job.job_id,
@@ -1219,11 +1360,17 @@ class WorkspaceManager:
             entries=entries,
             resolved_logparse_plan=resolved_logparse_plan,
             review_subject=review_subject,
+            methods_reviewer_input=methods_reviewer_input,
         )
         validate_workspace_manifest_for_job(manifest, job)
         manifest_bytes = canonical_json_bytes(manifest)
         try:
             _atomic_write(root / "inputs" / "manifest.json", manifest_bytes)
+            if methods_reviewer_input is not None:
+                _atomic_write(
+                    root / "inputs" / _METHODS_REQUEST_INPUT,
+                    _methods_role_request_bytes_v2(job),
+                )
         except OSError as exc:
             raise runtime_failure(
                 stage=ExecutionStage.WORKSPACE_PREPARE,
@@ -1431,6 +1578,124 @@ class WorkspaceManager:
         )
 
     @staticmethod
+    def publish_methods_specialist_inputs_v2(
+        workspace: PreparedWorkspace,
+        job: Job,
+        *,
+        evidence_graph: MethodEvidenceGraphV2,
+        evaluation_plan: MethodEvaluationPlanV2,
+    ) -> MethodsRoleWorkspaceReceiptV2:
+        """Replace preprocessing files with the Specialist's final model inputs."""
+
+        if not isinstance(workspace, PreparedWorkspace) or not isinstance(job, Job):
+            raise TypeError("workspace and job must be frozen production DTOs")
+        if (
+            job.job_type is not JobType.DIAGNOSE
+            or job.diagnosis_mode is not DiagnosisMode.SPECIALIZED
+        ):
+            raise ValueError("Methods Specialist inputs require a specialized DIAGNOSE Job")
+        validate_workspace_manifest_for_job(workspace.manifest, job)
+        _validate_methods_graph_plan_for_job_v2(job, evidence_graph, evaluation_plan)
+        return WorkspaceManager._publish_methods_role_inputs_v2(
+            workspace,
+            job,
+            role="SPECIALIST",
+            evidence_graph=evidence_graph,
+            evaluation_plan=evaluation_plan,
+            remove_preprocessing=True,
+        )
+
+    @staticmethod
+    def publish_methods_reviewer_inputs_v2(
+        workspace: PreparedWorkspace,
+        job: Job,
+        *,
+        evidence_graph: MethodEvidenceGraphV2,
+        evaluation_plan: MethodEvaluationPlanV2,
+    ) -> MethodsRoleWorkspaceReceiptV2:
+        """Publish source-record Graph/Plan into the Reviewer's own Workspace."""
+
+        if not isinstance(workspace, PreparedWorkspace) or not isinstance(job, Job):
+            raise TypeError("workspace and job must be frozen production DTOs")
+        if job.job_type is not JobType.REVIEW or job.methods_review_target is None:
+            raise ValueError("Methods Reviewer inputs require a Methods V2 REVIEW Job")
+        validate_workspace_manifest_for_job(workspace.manifest, job)
+        _validate_methods_graph_plan_for_job_v2(job, evidence_graph, evaluation_plan)
+        reviewer_input = workspace.manifest.methods_reviewer_input
+        if reviewer_input is None or reviewer_input.method_ids != tuple(
+            item.method_id for item in evaluation_plan.evaluations
+        ):
+            raise ValueError("Methods Reviewer manifest does not match its Plan")
+        return WorkspaceManager._publish_methods_role_inputs_v2(
+            workspace,
+            job,
+            role="REVIEWER",
+            evidence_graph=evidence_graph,
+            evaluation_plan=evaluation_plan,
+            remove_preprocessing=False,
+        )
+
+    @staticmethod
+    def _publish_methods_role_inputs_v2(
+        workspace: PreparedWorkspace,
+        job: Job,
+        *,
+        role: Literal["SPECIALIST", "REVIEWER"],
+        evidence_graph: MethodEvidenceGraphV2,
+        evaluation_plan: MethodEvaluationPlanV2,
+        remove_preprocessing: bool,
+    ) -> MethodsRoleWorkspaceReceiptV2:
+        inputs_root = workspace.root / "inputs"
+        request_bytes = _methods_role_request_bytes_v2(job)
+        graph_bytes = canonical_json_bytes(evidence_graph)
+        plan_bytes = canonical_json_bytes(evaluation_plan)
+        request_path = inputs_root / _METHODS_REQUEST_INPUT
+        graph_path = inputs_root / _METHODS_GRAPH_INPUT
+        plan_path = inputs_root / _METHODS_PLAN_INPUT
+        try:
+            metadata = inputs_root.stat(follow_symlinks=False)
+            if (
+                inputs_root.is_symlink()
+                or not stat.S_ISDIR(metadata.st_mode)
+                or _identity(metadata)
+                != (workspace.inputs_device, workspace.inputs_inode)
+            ):
+                raise _UnsafeWorkspaceError("workspace inputs identity changed")
+            if graph_path.exists() or plan_path.exists():
+                raise ValueError("Methods V2 role inputs already exist")
+            inputs_root.chmod(0o755)
+            if remove_preprocessing:
+                if not request_path.is_file():
+                    raise ValueError("Methods preprocessing request is missing")
+                request_path.chmod(0o644)
+                _atomic_write(request_path, request_bytes)
+                _remove_methods_preprocess_inputs(inputs_root)
+            elif request_path.read_bytes() != request_bytes:
+                raise ValueError("Methods Reviewer request does not match its own Job")
+            _atomic_write(graph_path, graph_bytes)
+            _atomic_write(plan_path, plan_bytes)
+        except (OSError, TypeError, ValueError, _UnsafeWorkspaceError) as exc:
+            raise runtime_failure(
+                stage=ExecutionStage.WORKSPACE_PREPARE,
+                code=ErrorCode.WORKSPACE_PREPARE_FAILED,
+                message="Methods V2 role inputs could not be published.",
+                retryable=True,
+            ) from exc
+        finally:
+            _set_inputs_read_only(inputs_root)
+        return MethodsRoleWorkspaceReceiptV2(
+            role=role,
+            request_bytes=request_bytes,
+            evidence_graph_bytes=graph_bytes,
+            evaluation_plan_bytes=plan_bytes,
+            request_sha256=bytes_sha256(request_bytes),
+            evidence_graph_sha256=bytes_sha256(graph_bytes),
+            evaluation_plan_sha256=bytes_sha256(plan_bytes),
+            graph_ref=evidence_graph.graph_ref,
+            plan_ref=evaluation_plan.plan_ref,
+        )
+
+    @staticmethod
     def write_logparse_preprocessing_request(
         workspace: PreparedWorkspace,
         *,
@@ -1477,6 +1742,10 @@ class WorkspaceManager:
     ) -> None:
         """Materialize the exact prior grounded diagnosis for blind Review."""
 
+        if workspace.manifest.methods_reviewer_input is not None:
+            raise ValueError(
+                "Methods V2 REVIEW forbids legacy Specialist diagnosis inputs"
+            )
         if not diagnosis_bytes or not grounding_audit_bytes:
             raise ValueError("Methods Review inputs must be non-empty")
         inputs_root = workspace.root / "inputs"
@@ -1811,6 +2080,7 @@ class WorkspaceManager:
 
 __all__ = [
     "FrozenMethodsWorkspaceInputs",
+    "MethodsRoleWorkspaceReceiptV2",
     "PreparedWorkspace",
     "WorkspaceManager",
     "inspect_file",
