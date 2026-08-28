@@ -16,6 +16,14 @@ VALIDATOR = (
     / "scripts"
     / "validate_generated_skill.py"
 )
+LAN_VALIDATOR = (
+    ROOT
+    / ".claude"
+    / "skills"
+    / "wiki-to-logparse-diagnosis-skill"
+    / "scripts"
+    / "validate_generated_skill.py"
+)
 
 
 def _load_validator() -> ModuleType:
@@ -26,6 +34,40 @@ def _load_validator() -> ModuleType:
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def _load_module(path: Path, name: str) -> ModuleType:
+    spec = importlib.util.spec_from_file_location(name, path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_two_generators_share_the_methods_v2_agent_surface() -> None:
+    package_validator = _load_validator()
+    registration_validator = _load_module(
+        LAN_VALIDATOR,
+        "_deterministic_registration_validator",
+    )
+
+    assert package_validator.REQUIRED_SKILL_PHRASES == (
+        registration_validator.REQUIRED_SKILL_PHRASES
+    )
+    assert package_validator.OBSOLETE_SKILL_FIELDS == (
+        registration_validator.OBSOLETE_SKILL_FIELDS
+    )
+
+    for contract in (
+        ROOT
+        / ".agents/skills/wiki-to-diagnosis-skill/references/output-contract.md",
+        ROOT
+        / ".claude/skills/wiki-to-logparse-diagnosis-skill/references/output-contract.md",
+    ):
+        text = contract.read_text(encoding="utf-8")
+        for phrase in package_validator.REQUIRED_SKILL_PHRASES:
+            assert phrase in text
+        assert "INSUFFICIENT_EVIDENCE" not in text
 
 
 def _write_package(
@@ -47,8 +89,9 @@ name: diagnose-rpc-timeout
 description: Diagnose one RPC timeout from frozen evidence.
 ---
 
-Read request.json and methods.json, then scan every target_logs entry without
-calling Logparse. Preserve identity_tokens and sources in every result.
+Read method-evidence-graph.json and method-evaluation-plan.json. Do not rescan
+logs. Evaluate every evaluation_ref in plan order and return only verdict and
+reason; use UNKNOWN when the evidence cannot decide the method rule.
 """,
         encoding="utf-8",
     )

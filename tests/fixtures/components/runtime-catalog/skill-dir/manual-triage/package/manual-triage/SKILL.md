@@ -5,4 +5,4 @@ description: Diagnose a service incident from frozen structured evidence without
 
 # Manual service triage
 
-Read `request.json` and `methods.json`, then scan every declared `target_logs` source for all positive markers. Do not invoke Logparse. Preserve complete `sources` and same-source `identity_tokens` in every finding.
+Read `method-evidence-graph.json` and `method-evaluation-plan.json`. Do not rescan evidence. Evaluate every `evaluation_ref` in plan order and return only `verdict` and `reason`; use `UNKNOWN` when the evidence cannot decide the method rule.

@@ -111,51 +111,52 @@ OPTIONAL_PID_SENTENCE = (
     "`client_pid` 和 `server_pid` 是可选事实；缺失时不请求补充，也不构成证据缺口。"
 )
 REQUIRED_SKILL_PHRASES = (
-    "request.json",
-    "methods.json",
-    "target_logs.json",
-    "target_logs[*].log_path",
-    "Logparse",
-    "identity_tokens",
-    "sources",
+    "method-evidence-graph.json",
+    "method-evaluation-plan.json",
+    "evaluation_ref",
+    "verdict",
+    "reason",
+    "UNKNOWN",
 )
+OBSOLETE_SKILL_FIELDS = ("target_logs", "identity_tokens", "sources")
 REQUIRED_SKILL_SEMANTICS = (
     (
-        "read only the frozen target log paths",
+        "consume only the server Evidence Graph and Evaluation Plan",
         re.compile(
-            r"(?:只|仅)(?:读取|分析).*target_logs\[\*\]\.log_path"
-            r"|(?:read|analyze) only.*target_logs\[\*\]\.log_path",
+            r"(?:只|仅)(?:消费|读取).*method-evidence-graph\.json.*method-evaluation-plan\.json"
+            r"|(?:consume|read) only.*method-evidence-graph\.json.*method-evaluation-plan\.json",
             re.IGNORECASE | re.DOTALL,
         ),
     ),
     (
-        "scan all positive evidence markers before selecting method cards",
+        "avoid rescanning evidence markers",
         re.compile(
-            r"(?:先|before).*(?:全部|所有|all|every).*(?:正向|positive).*(?:marker|标记)",
+            r"(?:不|不得|不要).*重新扫描.*(?:marker|标记)"
+            r"|(?:do not|must not).*(?:rescan).*(?:marker|evidence)",
             re.IGNORECASE | re.DOTALL,
         ),
     ),
     (
-        "avoid stopping after the first match",
+        "evaluate every plan reference in plan order",
         re.compile(
-            r"(?:不能|不得|不要).*(?:第一|首个).*(?:停止|短路)"
-            r"|(?:do not|must not).*(?:first).*(?:stop|short-circuit)",
+            r"(?:按|依照).*Evaluation Plan.*(?:顺序).*(?:全部|所有|每个).*evaluation_ref"
+            r"|(?:in).*Evaluation Plan.*(?:order).*(?:all|every).*evaluation_ref",
             re.IGNORECASE | re.DOTALL,
         ),
     ),
     (
-        "inspect all relevant calls",
+        "avoid stopping after the first confirmation",
         re.compile(
-            r"(?:全部|所有|每个).*(?:相关调用|调用范围)"
-            r"|(?:all|every).*(?:relevant )?(?:calls?|requests?)",
+            r"(?:不能|不得|不要).*(?:第一|首个).*(?:确认).*(?:停止|短路)"
+            r"|(?:do not|must not).*(?:first).*(?:confirmation).*(?:stop|short-circuit)",
             re.IGNORECASE | re.DOTALL,
         ),
     ),
     (
-        "report each independent event separately",
+        "return only evaluation_ref, verdict, and reason",
         re.compile(
-            r"(?:每个原因|每种原因).*(?:每次|每个).*(?:独立事件).*(?:分别|单独)"
-            r"|(?:each).*(?:independent event).*(?:separately)",
+            r"(?:只输出|仅输出).*evaluation_ref.*verdict.*reason"
+            r"|(?:only).*(?:output|return).*evaluation_ref.*verdict.*reason",
             re.IGNORECASE | re.DOTALL,
         ),
     ),
@@ -482,6 +483,14 @@ def _validate_business_skill(
     for phrase in REQUIRED_SKILL_PHRASES:
         if phrase not in text:
             errors.append(f"SKILL.md must mention {phrase}")
+    for obsolete_field in OBSOLETE_SKILL_FIELDS:
+        if re.search(
+            rf"(?<![A-Za-z0-9_]){re.escape(obsolete_field)}(?![A-Za-z0-9_])",
+            text,
+        ):
+            errors.append(
+                f"SKILL.md must not use the V1 runtime field {obsolete_field}"
+            )
     for label, pattern in REQUIRED_SKILL_SEMANTICS:
         if pattern.search(text) is None:
             errors.append(f"SKILL.md must require {label}")

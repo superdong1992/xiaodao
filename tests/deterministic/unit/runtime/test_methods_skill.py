@@ -69,8 +69,9 @@ description: Diagnose a test timeout from frozen evidence.
 
 # Test locator
 
-Read `request.json`, then `methods.json`, and scan every `target_logs` entry.
-Do not invoke Logparse. Return `sources` and same-line `identity_tokens`.
+Read `method-evidence-graph.json` and `method-evaluation-plan.json`. Do not
+rescan logs. Evaluate every `evaluation_ref` in plan order and return only
+`verdict` and `reason`; use `UNKNOWN` when the evidence cannot decide the rule.
 """,
         encoding="utf-8",
     )

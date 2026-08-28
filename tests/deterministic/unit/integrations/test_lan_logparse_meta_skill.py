@@ -80,12 +80,11 @@ description: 从 Server 冻结的双端日志中定位 RPC 超时原因。
 
 # RPC 超时定位
 
-读取 `request.json`、`methods.json` 和 `target_logs.json`。只读取
-`target_logs[*].log_path` 列出的冻结日志，不遍历其他路径。
+只消费 Server 写入的 `method-evidence-graph.json` 和
+`method-evaluation-plan.json`。不读取目标日志，也不重新扫描 marker。
 
-先扫描所有正向 marker，再按需读取方法卡；不得在第一个命中处停止。检查全部相关调用，只有证据
-足以关联同一次调用时才合并。每个原因、每次独立事件分别输出，使用 `sources` 保留完整日志原文，
-并使用同源 `identity_tokens` 保留事件身份。证据不足时说明观测限制和缺失证据。
+按 Evaluation Plan 顺序逐项评估全部 `evaluation_ref`，不能在第一个确认项后停止。每项只输出
+`evaluation_ref`、`verdict` 和 `reason`；证据无法决定时使用 `UNKNOWN`，并在 reason 中说明观测限制。
 
 Logparse 预处理、目标日志冻结、Review 和最终 Artifact 发布由 Server 完成；诊断阶段不重新执行这些操作。
 `client_pid` 和 `server_pid` 是可选事实；缺失时不请求补充，也不构成证据缺口。
@@ -111,7 +110,7 @@ def _method_card() -> str:
 日志缺失不能排除原因。
 
 ## 输出含义
-每个独立事件分别输出完整 sources 和同源 identity_tokens。
+Server 把全部独立事件绑定到 evaluation_ref；Agent 只返回该引用、verdict 和 reason。
 """
 
 

@@ -39,6 +39,15 @@ METHOD_KEYS = {"id", "title", "reference", "priority", "evidence_markers"}
 SOURCE_LOG_TEMPLATES_REFERENCE = "references/source-log-templates.md"
 SOURCE_IDENTITY_SCHEMA_VERSION = 2
 LOG_TEMPLATE_EXTRACTION_VERSION = 1
+REQUIRED_SKILL_PHRASES = (
+    "method-evidence-graph.json",
+    "method-evaluation-plan.json",
+    "evaluation_ref",
+    "verdict",
+    "reason",
+    "UNKNOWN",
+)
+OBSOLETE_SKILL_FIELDS = ("target_logs", "identity_tokens", "sources")
 
 
 def _ordinary(path: Path, label: str, errors: list[str]) -> bool:
@@ -240,16 +249,17 @@ def validate(skill_dir: Path, wiki: Path) -> dict[str, object]:
             errors.append(f"SKILL.md is not UTF-8: {exc}")
         else:
             frontmatter = _frontmatter(skill_text, errors)
-            for required_phrase in (
-                "request.json",
-                "methods.json",
-                "target_logs",
-                "Logparse",
-                "identity_tokens",
-                "sources",
-            ):
+            for required_phrase in REQUIRED_SKILL_PHRASES:
                 if required_phrase not in skill_text:
                     errors.append(f"SKILL.md must mention {required_phrase}")
+            for obsolete_field in OBSOLETE_SKILL_FIELDS:
+                if re.search(
+                    rf"(?<![A-Za-z0-9_]){re.escape(obsolete_field)}(?![A-Za-z0-9_])",
+                    skill_text,
+                ):
+                    errors.append(
+                        f"SKILL.md must not use the V1 runtime field {obsolete_field}"
+                    )
 
     manifest = _read_json(skill_dir / "methods.json", errors)
     wiki_bytes = wiki.read_bytes() if wiki.exists() else b""

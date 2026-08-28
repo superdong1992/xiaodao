@@ -1,64 +1,34 @@
-# Methods diagnosis output contract
+# Methods V2 Specialist output contract
 
-This is a breaking, Methods-only output protocol. Write exactly one valid,
-unambiguous UTF-8 JSON object to `output/method-diagnosis.draft.json`. The Server
-validates the schema and atomically normalizes equivalent whitespace and key
-ordering before hashing or consuming the draft. A UTF-8 BOM, duplicate object
-key, non-finite number, invalid UTF-8, or invalid schema remains an error. Do not write
-`output/job_outcome.draft.json`, do not create proposal drafts, and do not run an
-outcome sealer.
+Write exactly one UTF-8 JSON array to
+`output/method-diagnosis.draft.json`. The array itself is the document root. Do
+not wrap it in an object or Markdown and do not write
+`output/job_outcome.draft.json`.
 
-Logparse has already run in a separate product-owned pass and is unavailable in
-this pass. Read only these server-frozen inputs:
+The Server has already scanned the logs once. Use only the server-produced
+`inputs/method-evidence-graph.json`,
+`inputs/method-evaluation-plan.json`, and the pinned Methods package. Do not scan
+the logs again or rebuild evidence references.
 
-- `inputs/request.json`
-- `inputs/target_logs.json`
-- the `log_path` files listed by `inputs/target_logs.json`
-- `inputs/logparse-receipt.json`
-
-The receipt is server-owned. Do not copy its hash into the draft. Diagnose only
-with the pinned Methods package in `METHODS_SKILL_FILE` sections and the exact
-frozen target-log bytes. Scan every target log for every method's declared
-`evidence_markers`; do not stop after the first plausible match.
-
-The top-level object has exactly these fields:
+Return one item for every Evaluation Plan item, in exact plan order:
 
 ```json
-{
-  "schema_version": 1,
-  "status": "CONFIRMED",
-  "confirmed_methods": ["method_id"],
-  "candidate_methods": [],
-  "evidence": [
-    {
-      "method_id": "method_id",
-      "summary": "bounded evidence-based summary",
-      "identity_tokens": ["exact-token-from-cited-lines"],
-      "sources": [
-        {
-          "source_id": "server_source_id",
-          "line_number": 1,
-          "marker": "declared evidence marker",
-          "line": "exact complete frozen log line"
-        }
-      ]
-    }
-  ],
-  "limitations": [],
-  "safety_notes": []
-}
+[
+  {
+    "evaluation_ref": "eval-<server value>",
+    "verdict": "CONFIRMED",
+    "reason": "short method-rule evaluation"
+  }
+]
 ```
 
-Allowed `status` values are `CONFIRMED`, `PARTIAL`, and `INSUFFICIENT`.
-`confirmed_methods` and `candidate_methods` contain only IDs from `methods.json`
-and are disjoint. Every confirmed method has at least one evidence item; evidence
-may name only a confirmed method. Each source copies the exact `source_id`,
-one-based `line_number`, complete line, and a marker declared by that method.
-Every `identity_tokens` value occurs in the cited source lines and the sorted pair
-`(method_id, identity_tokens)` is unique.
+Every item has exactly `evaluation_ref`, `verdict`, and `reason`.
+`evaluation_ref` must equal the corresponding plan value. `verdict` is exactly
+one of `CONFIRMED`, `REJECTED`, or `UNKNOWN`. `reason` is non-empty and explains
+the rule decision without quoting markers, raw log text, line numbers, hashes, or
+identity values. Do not omit, add, duplicate, or reorder evaluations.
 
-`CONFIRMED` requires a confirmed method. `INSUFFICIENT` requires empty
-`confirmed_methods` and `evidence`. Do not infer an absent marker, invent a log
-line, widen a target, or use narrative, filenames, summaries, stdout, stderr, or
-prior output as evidence. Finish by atomically publishing only the Methods draft
-named above; the Server owns its Canonical JSON encoding.
+If the Server invokes this same SPECIALIST role once to repair a structure or
+coverage error, fix only the reported JSON shape, field set, plan coverage, plan
+order, exact reference, verdict enum, or empty reason. Keep the evaluation
+meaning unchanged. There is no second repair.

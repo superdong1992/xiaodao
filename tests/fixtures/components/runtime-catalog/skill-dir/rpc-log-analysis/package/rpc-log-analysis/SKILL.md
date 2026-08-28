@@ -5,4 +5,4 @@ description: Diagnose RPC timeout evidence from one frozen Logparse target set.
 
 # RPC timeout log analysis
 
-Read `request.json` and `methods.json`, scan every `target_logs` file for all positive markers, then use the matching method cards. Do not invoke Logparse during diagnosis. Preserve full `sources` and same-source `identity_tokens`.
+Read `method-evidence-graph.json` and `method-evaluation-plan.json`. Do not rescan logs. Evaluate every `evaluation_ref` in plan order and return only `verdict` and `reason`; use `UNKNOWN` when the evidence cannot decide the method rule.
