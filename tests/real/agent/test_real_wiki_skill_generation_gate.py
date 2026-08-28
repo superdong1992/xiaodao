@@ -7,6 +7,7 @@ import os
 import shutil
 import tempfile
 import threading
+from dataclasses import replace
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -182,16 +183,54 @@ def _gate_only_oracle_audit(
         expected["required_log_derived_fields"],
     )
 
-    marker_sets = [set(method.evidence_markers) for method in manifest.methods]
+    generated_methods = [
+        {
+            "method_id": method.id,
+            "markers": frozenset(method.evidence_markers),
+        }
+        for method in manifest.methods
+    ]
+    expected_marker_sets = expected["method_marker_sets"]
+    if len(generated_methods) != len(expected_marker_sets):
+        mismatches.append("method_count")
+
     method_marker_coverage: list[dict[str, Any]] = []
-    for required in expected["method_marker_sets"]:
-        markers = set(required["all_markers"])
-        covered = any(markers <= actual for actual in marker_sets)
+    mapped_method_ids: list[str] = []
+    for required in expected_marker_sets:
+        markers = frozenset(required["all_markers"])
+        matched_method_ids = [
+            generated["method_id"]
+            for generated in generated_methods
+            if generated["markers"] == markers
+        ]
+        covered = len(matched_method_ids) == 1
         method_marker_coverage.append(
-            {"semantic_id": required["semantic_id"], "covered": covered}
+            {
+                "semantic_id": required["semantic_id"],
+                "covered": covered,
+                "exact_match_count": len(matched_method_ids),
+                "matched_method_ids": matched_method_ids,
+            }
         )
         if not covered:
             mismatches.append(f"method_marker_set:{required['semantic_id']}")
+        else:
+            mapped_method_ids.append(matched_method_ids[0])
+
+    generated_method_ids = [item["method_id"] for item in generated_methods]
+    mapped_method_id_set = set(mapped_method_ids)
+    method_mapping_is_bijective = (
+        len(mapped_method_ids) == len(expected_marker_sets)
+        and len(mapped_method_id_set) == len(mapped_method_ids)
+        and mapped_method_id_set == set(generated_method_ids)
+    )
+    if not method_mapping_is_bijective:
+        mismatches.append("method_marker_mapping")
+    unmapped_method_ids = [
+        method_id
+        for method_id in generated_method_ids
+        if method_id not in mapped_method_id_set
+    ]
 
     shared_text = "\n".join(
         (package_root / relative).read_text(encoding="utf-8")
@@ -240,6 +279,10 @@ def _gate_only_oracle_audit(
     return {
         "status": "PASS" if not mismatches else "FAIL",
         "mismatches": mismatches,
+        "expected_method_count": len(expected_marker_sets),
+        "generated_method_count": len(generated_methods),
+        "method_mapping_is_bijective": method_mapping_is_bijective,
+        "unmapped_method_ids": unmapped_method_ids,
         "method_marker_coverage": method_marker_coverage,
         "missing_shared_marker_count": len(missing_shared_markers),
         "forbidden_path_count": len(forbidden_paths),
@@ -297,6 +340,188 @@ def _write_generated_skill_receipt(
             "combined_sha256": resolved.combined_sha256,
         },
     )
+
+
+def _gate_oracle_test_baseline(
+    tmp_path: Path,
+) -> tuple[Path, Any, dict[str, Any]]:
+    case_root = ROOT / "tests/cases/release/rpc-timeout-anonymized"
+    oracle = _load_object(case_root / "oracle.json")
+    expected = oracle["expected_package"]
+    package_root = tmp_path / expected["skill_name"]
+    references_root = package_root / "references"
+    references_root.mkdir(parents=True)
+    (package_root / "SKILL.md").write_text(
+        f"""---
+name: {expected['skill_name']}
+description: Test-only Methods package for the generation Gate oracle.
+---
+
+Read request.json, method-evidence-graph.json, and method-evaluation-plan.json.
+Return evaluation_ref, verdict, and reason for every item. Use UNKNOWN when
+the frozen evidence cannot decide a method.
+""",
+        encoding="utf-8",
+    )
+    methods: list[dict[str, Any]] = []
+    method_body = """# Test method
+
+## 适用条件
+Test-only condition.
+## 所需证据
+Frozen Evidence Graph entries.
+## 计算与判断
+Evaluate the declared markers.
+## 确认条件
+All declared conditions hold.
+## 未知边界
+Missing evidence remains UNKNOWN.
+## 输出含义
+Return one evaluation verdict.
+"""
+    for index, semantic in enumerate(expected["method_marker_sets"], start=1):
+        reference = f"references/method-{index}.md"
+        (package_root / reference).write_text(method_body, encoding="utf-8")
+        methods.append(
+            {
+                "id": f"method-{index}",
+                "title": f"Method {index}",
+                "reference": reference,
+                "priority": index,
+                "evidence_markers": list(semantic["all_markers"]),
+            }
+        )
+    shared_reference = "references/shared.md"
+    (package_root / shared_reference).write_text(
+        "# Shared\n\n" + "\n".join(expected["required_shared_markers"]) + "\n",
+        encoding="utf-8",
+    )
+    (package_root / "methods.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "skill_name": expected["skill_name"],
+                "source_wiki_sha256": expected["source_wiki_sha256"],
+                "required_user_inputs": expected["required_user_inputs"],
+                "required_artifacts": expected["required_artifacts"],
+                "log_derived_fields": expected["required_log_derived_fields"],
+                "shared_references": [shared_reference],
+                "methods": methods,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return package_root, load_methods_package(package_root), oracle
+
+
+def test_generation_gate_oracle_accepts_exact_one_to_one_package(
+    tmp_path: Path,
+) -> None:
+    package_root, manifest, oracle = _gate_oracle_test_baseline(tmp_path)
+
+    audit = _gate_only_oracle_audit(
+        package_root=package_root,
+        manifest=manifest,
+        oracle=oracle,
+    )
+
+    assert audit["status"] == "PASS"
+    assert audit["mismatches"] == []
+    assert audit["generated_method_count"] == audit["expected_method_count"] == 3
+    assert audit["method_mapping_is_bijective"] is True
+    assert audit["unmapped_method_ids"] == []
+    assert all(
+        item["exact_match_count"] == 1 and len(item["matched_method_ids"]) == 1
+        for item in audit["method_marker_coverage"]
+    )
+
+
+def test_generation_gate_oracle_rejects_extra_marker(tmp_path: Path) -> None:
+    package_root, manifest, oracle = _gate_oracle_test_baseline(tmp_path)
+    first = manifest.methods[0]
+    mutant = replace(
+        manifest,
+        methods=(
+            replace(
+                first,
+                evidence_markers=(*first.evidence_markers, "UNEXPECTED_MARKER"),
+            ),
+            *manifest.methods[1:],
+        ),
+    )
+
+    audit = _gate_only_oracle_audit(
+        package_root=package_root,
+        manifest=mutant,
+        oracle=oracle,
+    )
+
+    assert audit["status"] == "FAIL"
+    assert "method_marker_set:api_execution_overrun" in audit["mismatches"]
+    assert "method_marker_mapping" in audit["mismatches"]
+    assert audit["generated_method_count"] == audit["expected_method_count"]
+    assert audit["unmapped_method_ids"] == [first.id]
+
+
+def test_generation_gate_oracle_rejects_extra_method(tmp_path: Path) -> None:
+    package_root, manifest, oracle = _gate_oracle_test_baseline(tmp_path)
+    last = manifest.methods[-1]
+    mutant = replace(
+        manifest,
+        methods=(
+            *manifest.methods,
+            replace(
+                last,
+                id="unexpected-method",
+                title="Unexpected method",
+                reference="references/unexpected-method.md",
+                priority=len(manifest.methods) + 1,
+                evidence_markers=("UNEXPECTED_METHOD_MARKER",),
+            ),
+        ),
+    )
+
+    audit = _gate_only_oracle_audit(
+        package_root=package_root,
+        manifest=mutant,
+        oracle=oracle,
+    )
+
+    assert audit["status"] == "FAIL"
+    assert "method_count" in audit["mismatches"]
+    assert "method_marker_mapping" in audit["mismatches"]
+    assert audit["unmapped_method_ids"] == ["unexpected-method"]
+
+
+def test_generation_gate_oracle_rejects_duplicate_ambiguous_mapping(
+    tmp_path: Path,
+) -> None:
+    package_root, manifest, oracle = _gate_oracle_test_baseline(tmp_path)
+    first = manifest.methods[0]
+    second = manifest.methods[1]
+    mutant = replace(
+        manifest,
+        methods=(
+            replace(first, evidence_markers=second.evidence_markers),
+            *manifest.methods[1:],
+        ),
+    )
+
+    audit = _gate_only_oracle_audit(
+        package_root=package_root,
+        manifest=mutant,
+        oracle=oracle,
+    )
+
+    assert audit["status"] == "FAIL"
+    assert "method_marker_set:api_execution_overrun" in audit["mismatches"]
+    assert "method_marker_set:server_receive_queueing" in audit["mismatches"]
+    assert "method_marker_mapping" in audit["mismatches"]
+    assert audit["method_marker_coverage"][1]["exact_match_count"] == 2
+    assert audit["method_mapping_is_bijective"] is False
 
 
 def test_claude_2_1_89_pinned_model_generates_registered_methods_package(
