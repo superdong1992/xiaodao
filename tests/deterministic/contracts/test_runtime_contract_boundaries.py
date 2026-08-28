@@ -22,6 +22,8 @@ from problem_locator.contracts.errors import (
 )
 from problem_locator.contracts.limits import SPECIALIST_CONTEXT_BYTES
 from problem_locator.contracts.models import (
+    AgentJobOutcome,
+    AgentJobOutcomeDraftV2,
     ApplicationErrorDetail,
     BoundedContext,
     CandidateConclusion,
@@ -139,6 +141,38 @@ def test_workspace_manifest_and_parse_claim_forbid_extra_fields(
     model_type = SCHEMA_MODELS[schema_name]
     with pytest.raises(ValidationError):
         TypeAdapter(model_type).validate_python(payload)
+    with pytest.raises(JsonSchemaValidationError):
+        schema_validator(schema_name).validate(payload)
+
+
+@pytest.mark.parametrize(
+    ("fixture_name", "model_type", "schema_name"),
+    [
+        (
+            "agent-job-outcome-draft-failure.json",
+            AgentJobOutcomeDraftV2,
+            "agent-job-outcome-draft.schema.json",
+        ),
+        (
+            "agent-job-outcome-failure.json",
+            AgentJobOutcome,
+            "agent-job-outcome.schema.json",
+        ),
+    ],
+)
+def test_agent_failure_rejects_server_only_diagnostics_in_model_and_schema(
+    fixture_name: str,
+    model_type: type[AgentJobOutcomeDraftV2] | type[AgentJobOutcome],
+    schema_name: str,
+) -> None:
+    payload = load_json(FIXTURE_ROOT / "positive" / fixture_name)
+    payload["error"].update(
+        reason_code="METHOD_VALIDATION_FAILED",
+        diagnostic_id="00000000-0000-4000-8000-000000000777",
+    )
+
+    with pytest.raises(ValidationError):
+        model_type.model_validate(payload)
     with pytest.raises(JsonSchemaValidationError):
         schema_validator(schema_name).validate(payload)
 

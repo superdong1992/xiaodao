@@ -2057,12 +2057,23 @@ OUTCOME_REJECTION_CODES = frozenset(
 )
 
 
-class ExecutionFailure(ContractModel):
+class AgentExecutionFailure(ContractModel):
     stage: ExecutionStage
     code: ErrorCode
     message: NonEmptyText
     retryable: bool
     details: list[ApplicationErrorDetail]
+
+    @model_validator(mode="after")
+    def validate_retryability(self) -> AgentExecutionFailure:
+        from .errors import EXECUTION_FAILURE_RETRYABLE_CODES
+
+        if self.retryable and self.code not in EXECUTION_FAILURE_RETRYABLE_CODES:
+            raise ValueError("this ExecutionFailure code cannot be retryable")
+        return self
+
+
+class ExecutionFailure(AgentExecutionFailure):
     reason_code: MethodsValidationReasonCode | None = Field(
         default=None,
         description="Stable machine-readable reason for a classified Methods failure.",
@@ -2073,14 +2084,6 @@ class ExecutionFailure(ContractModel):
         description="Diagnostic UUID assigned to this classified Methods failure.",
         exclude_if=lambda value: value is None,
     )
-
-    @model_validator(mode="after")
-    def validate_retryability(self) -> ExecutionFailure:
-        from .errors import EXECUTION_FAILURE_RETRYABLE_CODES
-
-        if self.retryable and self.code not in EXECUTION_FAILURE_RETRYABLE_CODES:
-            raise ValueError("this ExecutionFailure code cannot be retryable")
-        return self
 
     @model_validator(mode="after")
     def validate_diagnostic(self) -> ExecutionFailure:
@@ -3110,7 +3113,7 @@ class AgentJobOutcomeDraftV2(ContractModel):
     consumed_evidence_refs: list[OpaqueId]
     proposed_evidence_drafts: list[AgentEvidenceProposalDraft]
     proposed_artifact_drafts: list[AgentArtifactProposalDraft]
-    error: ExecutionFailure | None
+    error: AgentExecutionFailure | None
     rule_claims: list[AgentRuleClaim]
 
     @model_validator(mode="after")
@@ -3170,7 +3173,7 @@ class AgentJobOutcome(ContractModel):
     consumed_evidence_refs: list[OpaqueId]
     proposed_evidence_drafts: list[AgentEvidenceProposalDraft]
     proposed_artifact_drafts: list[AgentArtifactProposalDraft]
-    error: ExecutionFailure | None
+    error: AgentExecutionFailure | None
     produced_at: UtcTimestamp
     decision_audit: DecisionAuditV2 | None = None
 
@@ -3288,7 +3291,7 @@ def _validate_outcome_shape(
     job_type: JobType,
     result_type: OutcomeResultType,
     payload: OutcomePayload | None,
-    error: ExecutionFailure | None,
+    error: AgentExecutionFailure | None,
 ) -> None:
     allowed = {
         JobType.ROUTE: {OutcomeResultType.COMPLETED, OutcomeResultType.NO_CAPABILITY, OutcomeResultType.FAILED},

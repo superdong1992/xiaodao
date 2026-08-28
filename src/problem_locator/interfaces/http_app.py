@@ -625,6 +625,9 @@ def _require_serialized_response_fields(schema: dict[str, Any]) -> None:
     """Reflect model_json's complete-field response serialization in OpenAPI."""
 
     component_schemas = schema["components"]["schemas"]
+    conditionally_omitted = {
+        "CaseFailure": frozenset({"reason_code", "diagnostic_id"}),
+    }
     pending: set[str] = set()
     for path_item in schema["paths"].values():
         for method, operation in path_item.items():
@@ -643,7 +646,10 @@ def _require_serialized_response_fields(schema: dict[str, Any]) -> None:
         component = component_schemas[schema_name]
         properties = component.get("properties", {})
         if component.get("type") == "object" and properties:
-            component["required"] = list(properties)
+            omitted = conditionally_omitted.get(schema_name, frozenset())
+            component["required"] = [
+                field_name for field_name in properties if field_name not in omitted
+            ]
         pending.update(_component_schema_refs(component) - visited)
 
 

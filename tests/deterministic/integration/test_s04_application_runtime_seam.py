@@ -1,12 +1,17 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 from pathlib import Path
 
+from fastapi.testclient import TestClient
+
+from problem_locator.application.queries import ApplicationQueryService
 from problem_locator.application.outcome_submission import OutcomeSubmissionService
 from problem_locator.application.preparation import runtime_bindings_from_job
 from problem_locator.contracts import (
+    CaseStatus,
     ContextSectionKind,
     Job,
     JobOutcome,
@@ -17,18 +22,30 @@ from problem_locator.contracts import (
     WorkspaceInputManifest,
     canonical_json_bytes,
 )
+from problem_locator.contracts.enums import MethodsValidationReasonCode
 from problem_locator.domain import DomainCoordinator, PureContextSnapshotProjector
+from problem_locator.interfaces.http_app import create_http_app
+from problem_locator.interfaces.mcp_server import McpAdapter
 from problem_locator.runtime.context_builder import ContextBuilder, ContextMaterials
 from tests.deterministic.contracts.fakes import (
     DeterministicIdGenerator,
     FakeAssetCatalog,
     FakeClock,
+    InMemoryCancellationSignal,
     InMemoryExecutionRecordStore,
     InMemoryPublicationCommitGuard,
     InMemoryResourceStore,
     InMemoryStateChangeNotifier,
     InMemoryStateRepository,
     RecordingDispatcher,
+)
+from tests.deterministic.unit.interfaces.fakes import (
+    FakeApplicationService,
+    FakeStateAdmin,
+)
+from tests.deterministic.unit.interfaces.helpers import readiness
+from tests.deterministic.unit.runtime.test_diagnosis_runtime import (
+    _public_fake_claiming_runtime,
 )
 from tests.v2_helpers import resolved_logparse_plan
 
@@ -179,3 +196,89 @@ def test_application_frozen_previous_outcome_is_visible_to_runtime_context() -> 
         if section.kind is ContextSectionKind.RESOURCE_MANIFEST
     )
     assert manifest_section.required is True
+
+
+def test_methods_failure_flows_from_runtime_to_state_mcp_and_rest(
+    tmp_path: Path,
+) -> None:
+    runtime, job, _, _, resources = _public_fake_claiming_runtime(
+        tmp_path / "runtime",
+        "invalid_marker",
+    )
+    runtime_receipt = runtime.execute(job, InMemoryCancellationSignal())
+    runtime_failure = runtime_receipt.job_outcome.error
+    assert runtime_failure is not None
+    assert runtime_failure.reason_code is (
+        MethodsValidationReasonCode.EVIDENCE_MARKER_NOT_INDEXED
+    )
+    assert runtime_failure.diagnostic_id is not None
+
+    aggregate = runtime._state_repository.aggregate
+    state_payload = json.loads((FIXTURES / "state.json").read_text())
+    state_payload["cases"] = {
+        job.case_id: aggregate.model_dump(mode="json"),
+    }
+    repository = InMemoryStateRepository(StateFile.model_validate(state_payload))
+    records = runtime._execution_records
+    assert isinstance(records, InMemoryExecutionRecordStore)
+    guard = InMemoryPublicationCommitGuard()
+    notifier = InMemoryStateChangeNotifier()
+    submission = OutcomeSubmissionService(
+        repository,
+        resources,
+        guard,
+        records,
+        DomainCoordinator(),
+        PureContextSnapshotProjector(),
+        FakeAssetCatalog(),
+        RecordingDispatcher(),
+        notifier,
+        FakeClock(FIXED_TIME),
+        DeterministicIdGenerator(seed="methods-failure-projection"),
+    )
+
+    applied = submission.submit_outcome(
+        runtime_receipt.job_outcome,
+        runtime_receipt.outcome_file_ref,
+    )
+
+    assert applied.disposition is OutcomeDisposition.APPLIED
+    query = ApplicationQueryService(repository, resources, notifier)
+    direct_view = query.get_case(job.case_id).case_view
+    assert direct_view.status is CaseStatus.FAILED
+    assert direct_view.failure is not None
+    assert direct_view.failure.reason_code is runtime_failure.reason_code
+    assert direct_view.failure.diagnostic_id == runtime_failure.diagnostic_id
+
+    mcp = McpAdapter(
+        FakeApplicationService(),
+        query,
+        public_base_url="http://127.0.0.1:18080",
+    )
+    mcp_result = asyncio.run(
+        mcp.call(
+            "problem_locator_get_case",
+            {
+                "case_id": job.case_id,
+                "wait_for_job_id": None,
+                "wait_seconds": 0,
+            },
+        )
+    )
+    app = create_http_app(
+        command_port=FakeApplicationService(),
+        query_port=query,
+        state_admin=FakeStateAdmin(readiness=readiness()),
+        public_base_url="http://127.0.0.1:18080",
+    )
+    with TestClient(app) as client:
+        rest_result = client.get(f"/api/v1/cases/{job.case_id}")
+
+    assert mcp_result["ok"] is True
+    mcp_failure = mcp_result["data"]["case_view"]["failure"]
+    rest_failure = rest_result.json()["data"]["case_view"]["failure"]
+    assert rest_result.status_code == 200
+    assert mcp_failure["reason_code"] == direct_view.failure.reason_code.value
+    assert rest_failure["reason_code"] == direct_view.failure.reason_code.value
+    assert mcp_failure["diagnostic_id"] == direct_view.failure.diagnostic_id
+    assert rest_failure["diagnostic_id"] == direct_view.failure.diagnostic_id

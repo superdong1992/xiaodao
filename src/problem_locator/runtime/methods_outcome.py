@@ -48,10 +48,12 @@ from problem_locator.contracts import (
     canonical_json_bytes,
     canonical_json_sha256,
 )
+from problem_locator.contracts.enums import MethodsValidationReasonCode
 
 from .authoritative_targets import AuthoritativeTargetSet
 from .methods_grounding import (
     MethodReviewV1,
+    MethodsValidationError,
     VerifiedMethodDiagnosisV1,
     marker_occurs,
 )
@@ -307,7 +309,10 @@ def _diagnosis_projection(
             binding = bindings_by_source[source.source_id]
             raw_line, text = _physical_line(captured.content, source.line_number)
             if text != source.line or not marker_occurs(source.marker, text):
-                raise ValueError("grounded Methods source changed before Outcome mapping")
+                raise MethodsValidationError(
+                    MethodsValidationReasonCode.EVIDENCE_SOURCE_CHANGED,
+                    "grounded Methods source changed before Outcome mapping",
+                )
             citations.append(
                 AgentEvidenceCitation(
                     evidence_binding=binding,

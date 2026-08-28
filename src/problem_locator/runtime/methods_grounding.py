@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import Any, Mapping, Sequence
 
+from problem_locator.contracts.enums import MethodsValidationReasonCode
+
 from .methods_skill import ResolvedSpecializedSkillV1
 
 
@@ -30,6 +32,18 @@ _EVIDENCE_FIELDS = frozenset({"method_id", "summary", "identity_tokens", "source
 _SOURCE_FIELDS = frozenset({"source_id", "line_number", "marker", "line"})
 _REVIEW_FIELDS = frozenset({"schema_version", "verdict", "findings", "limitations"})
 _REVIEW_FINDING_FIELDS = frozenset({"method_id", "identity_tokens", "verdict", "reason"})
+
+
+class MethodsValidationError(ValueError):
+    """One classified Methods validation failure owned by the Server."""
+
+    def __init__(
+        self,
+        reason_code: MethodsValidationReasonCode,
+        message: str,
+    ) -> None:
+        self.reason_code = reason_code
+        super().__init__(message)
 
 
 def _exact(value: Mapping[str, Any], expected: frozenset[str], label: str) -> None:
@@ -307,6 +321,11 @@ def verify_method_diagnosis(
     if skill_load != expected_skill_load:
         raise ValueError("injected Methods cards differ from the frozen marker scan")
     hit_method_ids = set(skill_load.loaded_method_ids)
+    if any(method_id not in hit_method_ids for method_id in diagnosis.confirmed_methods):
+        raise MethodsValidationError(
+            MethodsValidationReasonCode.CONFIRMED_MARKER_SCAN_MISS,
+            "confirmed method has no positive marker in the full target-log scan",
+        )
 
     evidence_method_ids: set[str] = set()
     evidence_identities: set[tuple[str, tuple[str, ...]]] = set()
@@ -338,16 +357,20 @@ def verify_method_diagnosis(
             if source.line != actual_line:
                 raise ValueError("evidence source line differs from the frozen log")
             if source.marker not in method.evidence_markers:
-                raise ValueError("evidence marker is not indexed by its method")
+                raise MethodsValidationError(
+                    MethodsValidationReasonCode.EVIDENCE_MARKER_NOT_INDEXED,
+                    "evidence marker is not indexed by its method",
+                )
             if not marker_occurs(source.marker, actual_line):
                 raise ValueError("evidence marker is absent from the cited line")
             cited_lines.append(actual_line)
         if any(not any(token in line for line in cited_lines) for token in item.identity_tokens):
             raise ValueError("identity_tokens must occur in the same evidence sources")
     if evidence_method_ids != set(diagnosis.confirmed_methods):
-        raise ValueError("every confirmed method must have grounded evidence")
-    if any(method_id not in hit_method_ids for method_id in diagnosis.confirmed_methods):
-        raise ValueError("confirmed method has no positive marker in the full target-log scan")
+        raise MethodsValidationError(
+            MethodsValidationReasonCode.CONFIRMED_EVIDENCE_MISSING,
+            "every confirmed method must have grounded evidence",
+        )
 
     audit = MethodGroundingAuditV1(
         schema_version=1,
@@ -451,6 +474,7 @@ __all__ = [
     "MethodDiagnosisDraftV1",
     "MethodEvidenceV1",
     "MethodGroundingAuditV1",
+    "MethodsValidationError",
     "MethodReviewFindingV1",
     "MethodReviewV1",
     "SkillLoadReceiptV1",

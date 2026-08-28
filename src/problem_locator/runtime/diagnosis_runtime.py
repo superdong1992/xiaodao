@@ -102,6 +102,7 @@ from .methods_grounding import (
     MethodGroundingAuditV1,
     MethodDiagnosisDraftV1,
     MethodReviewV1,
+    MethodsValidationError,
     SkillLoadReceiptV1,
     VerifiedMethodDiagnosisV1,
     scan_method_markers,
@@ -128,31 +129,14 @@ def _unexpected_failure() -> RuntimeExecutionError:
     )
 
 
-_METHOD_VALIDATION_REASON_CODES: dict[str, MethodsValidationReasonCode] = {
-    "evidence marker is not indexed by its method": (
-        MethodsValidationReasonCode.EVIDENCE_MARKER_NOT_INDEXED
-    ),
-    "every confirmed method must have grounded evidence": (
-        MethodsValidationReasonCode.CONFIRMED_EVIDENCE_MISSING
-    ),
-    "confirmed method has no positive marker in the full target-log scan": (
-        MethodsValidationReasonCode.CONFIRMED_MARKER_SCAN_MISS
-    ),
-    "grounded Methods source changed before Outcome mapping": (
-        MethodsValidationReasonCode.EVIDENCE_SOURCE_CHANGED
-    ),
-}
-
-
 def _method_validation_reason_code(
     error: TypeError | ValueError,
 ) -> MethodsValidationReasonCode:
     """Classify known Methods validation failures into a closed public reason set."""
 
-    return _METHOD_VALIDATION_REASON_CODES.get(
-        str(error),
-        MethodsValidationReasonCode.VALIDATION_FAILED,
-    )
+    if isinstance(error, MethodsValidationError):
+        return error.reason_code
+    return MethodsValidationReasonCode.VALIDATION_FAILED
 
 
 def _broker_failure(*, retryable: bool = True) -> ExecutionFailure:

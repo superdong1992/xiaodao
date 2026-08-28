@@ -8,6 +8,7 @@ import os
 import threading
 import shutil
 from collections.abc import Callable, Iterator
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -76,6 +77,7 @@ from problem_locator.runtime.context_builder import ContextBuilder, ContextLimit
 from problem_locator.runtime.context_policy import RuntimeAssetResolver
 from problem_locator.runtime.diagnosis_runtime import (
     DiagnosisRuntime,
+    MethodsPreprocessingExecution,
     _discard_unreferenced_staged,
     _method_validation_reason_code,
 )
@@ -2605,6 +2607,8 @@ class _MethodsTwoPassBackend:
                     "line": "rpc deadline exceeded request_id=42",
                 },
             )
+        if self.result == "invalid_marker":
+            sources[0]["marker"] = "rpc deadline"
         value = {
             "schema_version": 1,
             "status": "CONFIRMED",
@@ -3110,59 +3114,19 @@ def test_methods_two_pass_closes_broker_then_stages_grounded_result(
     assert records.publish_rejected_agent_output_calls == []
 
 
-@pytest.mark.parametrize(
-    ("message", "expected"),
-    [
-        (
-            "evidence marker is not indexed by its method",
-            MethodsValidationReasonCode.EVIDENCE_MARKER_NOT_INDEXED,
-        ),
-        (
-            "every confirmed method must have grounded evidence",
-            MethodsValidationReasonCode.CONFIRMED_EVIDENCE_MISSING,
-        ),
-        (
-            "confirmed method has no positive marker in the full target-log scan",
-            MethodsValidationReasonCode.CONFIRMED_MARKER_SCAN_MISS,
-        ),
-        (
-            "grounded Methods source changed before Outcome mapping",
-            MethodsValidationReasonCode.EVIDENCE_SOURCE_CHANGED,
-        ),
-        (
-            "some other validation failure",
-            MethodsValidationReasonCode.VALIDATION_FAILED,
-        ),
-    ],
-)
-def test_methods_validation_failures_use_stable_low_cardinality_reason_codes(
-    message: str,
-    expected: MethodsValidationReasonCode,
-) -> None:
-    assert _method_validation_reason_code(ValueError(message)) == expected
+def test_unclassified_methods_validation_uses_generic_reason_code() -> None:
+    assert _method_validation_reason_code(ValueError("unclassified")) is (
+        MethodsValidationReasonCode.VALIDATION_FAILED
+    )
 
 
 def test_methods_grounding_failure_publishes_reason_and_diagnostic_fields(
     tmp_path: Path,
 ) -> None:
-    runtime, job, _, backend, _ = _public_fake_claiming_runtime(
+    runtime, job, _, _, _ = _public_fake_claiming_runtime(
         tmp_path,
-        "completed",
+        "invalid_marker",
     )
-    original_run = backend._run_methods
-
-    def invalid_marker(kwargs: dict[str, Any]) -> BackendExecution:
-        result = original_run(kwargs)
-        draft_path = (
-            Path(kwargs["workspace_root"])
-            / "output/method-diagnosis.draft.json"
-        )
-        draft = json.loads(draft_path.read_bytes())
-        draft["evidence"][0]["sources"][0]["marker"] = "rpc deadline"
-        draft_path.write_bytes(canonical_json_bytes(draft))
-        return result
-
-    backend._run_methods = invalid_marker  # type: ignore[method-assign]
 
     receipt = runtime.execute(job, InMemoryCancellationSignal())
 
@@ -3187,6 +3151,43 @@ def test_methods_grounding_failure_publishes_reason_and_diagnostic_fields(
     assert (
         records.read_audit_bytes(job.job_id, "method-grounding-audit.json") is None
     )
+
+
+def test_methods_mapping_source_drift_publishes_specific_reason_code(
+    tmp_path: Path,
+) -> None:
+    runtime, job, _, _, _ = _public_fake_claiming_runtime(
+        tmp_path,
+        "completed",
+    )
+    original_preprocessing = runtime._run_methods_preprocessing
+
+    def drifted_preprocessing(**kwargs: Any) -> MethodsPreprocessingExecution:
+        result = original_preprocessing(**kwargs)
+        first, *remaining = result.validated.target_logs
+        drifted = replace(
+            first,
+            content=first.content.replace(
+                b"rpc deadline exceeded",
+                b"rpc deadline changed",
+            ),
+        )
+        return replace(
+            result,
+            validated=replace(
+                result.validated,
+                target_logs=(drifted, *remaining),
+            ),
+        )
+
+    runtime._run_methods_preprocessing = drifted_preprocessing  # type: ignore[method-assign]
+
+    receipt = runtime.execute(job, InMemoryCancellationSignal())
+
+    failure = receipt.job_outcome.error
+    assert failure is not None
+    assert failure.reason_code is MethodsValidationReasonCode.EVIDENCE_SOURCE_CHANGED
+    assert failure.diagnostic_id == "00000000-0000-4000-8000-000000000403"
 
 
 def test_methods_preprocess_prompt_declares_helper_before_one_broker_request(
