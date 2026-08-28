@@ -189,6 +189,59 @@ function claimInvocation(privateRoot, role, attempt) {
   return claim;
 }
 
+export function readModelCertInvocationReceipts(usageRoot) {
+  const root = path.resolve(usageRoot);
+  const order = [
+    ["SPECIALIST", "PRIMARY", "specialist-primary.json", true],
+    ["SPECIALIST", "REPAIR", "specialist-repair.json", false],
+    ["REVIEWER", "PRIMARY", "reviewer-primary.json", true],
+    ["REVIEWER", "REPAIR", "reviewer-repair.json", false],
+  ];
+  let names;
+  try {
+    names = fs.readdirSync(root).filter((name) => name.endsWith(".json")).sort();
+  } catch {
+    fail("CODEX_LUNA_MODEL_CERT_USAGE_ROOT_INVALID", "Model cert usage root is unavailable");
+  }
+  const allowed = new Set(order.map(([, , name]) => name));
+  requireWrapper(
+    names.every((name) => allowed.has(name)),
+    "CODEX_LUNA_MODEL_CERT_USAGE_FILE_UNEXPECTED",
+    "Model cert usage root contains an unexpected receipt",
+  );
+  const receipts = [];
+  for (const [role, attempt, name, required] of order) {
+    const receiptPath = path.join(root, name);
+    if (!fs.existsSync(receiptPath)) {
+      requireWrapper(!required, "CODEX_LUNA_MODEL_CERT_USAGE_RECEIPT_MISSING", "A required model role receipt is missing", { role, attempt });
+      continue;
+    }
+    let receipt;
+    try { receipt = JSON.parse(fs.readFileSync(receiptPath, "utf8")); } catch { fail("CODEX_LUNA_MODEL_CERT_USAGE_RECEIPT_INVALID", "Model role receipt is not valid JSON", { role, attempt }); }
+    requireWrapper(
+      receipt?.status === "PASS"
+        && receipt.provider === "openai-codex-app-server"
+        && receipt.model === CODEX_LUNA_MODEL
+        && receipt.reasoning_effort === CODEX_LUNA_REASONING_EFFORT
+        && receipt.role === role
+        && receipt.attempt === attempt
+        && receipt.repair === (attempt === "REPAIR")
+        && receipt.terminal === true,
+      "CODEX_LUNA_MODEL_CERT_USAGE_RECEIPT_INVALID",
+      "Model role receipt does not match its closed role identity",
+      { role, attempt },
+    );
+    receipts.push(receipt);
+  }
+  requireWrapper(
+    receipts.length >= CODEX_LUNA_MODEL_CERT_NORMAL_CALLS
+      && receipts.length <= CODEX_LUNA_MODEL_CERT_MAX_CALLS,
+    "CODEX_LUNA_MODEL_CERT_CALL_COUNT_INVALID",
+    "Model cert must contain two normal calls and no more than four calls",
+  );
+  return receipts;
+}
+
 function validateRoleWorkspace(workspaceRoot, parsed) {
   const root = path.resolve(workspaceRoot);
   const required = [
@@ -203,7 +256,9 @@ function validateRoleWorkspace(workspaceRoot, parsed) {
     requireWrapper(metadata.isFile() && !metadata.isSymbolicLink(), "CODEX_LUNA_MODEL_CERT_INPUT_INVALID", "Evidence V2 role input must be an ordinary file", { field: relative });
   }
   const output = path.join(root, ...parsed.output.split("/"));
-  requireWrapper(!fs.existsSync(output), "CODEX_LUNA_MODEL_CERT_OUTPUT_EXISTS", "Evidence V2 role output already exists before the model invocation", { role: parsed.role, attempt: parsed.attempt });
+  if (parsed.attempt === "PRIMARY") {
+    requireWrapper(!fs.existsSync(output), "CODEX_LUNA_MODEL_CERT_OUTPUT_EXISTS", "Evidence V2 primary role output already exists before the model invocation", { role: parsed.role, attempt: parsed.attempt });
+  }
   if (parsed.role === "REVIEWER") {
     requireWrapper(
       !fs.existsSync(path.join(root, "inputs", "method-diagnosis.json")),

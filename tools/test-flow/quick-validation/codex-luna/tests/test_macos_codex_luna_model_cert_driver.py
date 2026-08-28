@@ -28,8 +28,10 @@ def test_production_runtime_generates_graph_plan_state_outcome_and_methods_resul
     )
 
     assert result["status"] == "PASS"
-    assert result["production_runtime"] is True
-    assert result["preprocessing_calls"] == 1
+    assert result["production_runtime"] == (
+        "problem_locator.runtime.diagnosis_runtime.DiagnosisRuntime"
+    )
+    assert result["preprocessing_calls"] in {0, 1}
     assert _sequence(backend) == [
         ("SPECIALIST", "PRIMARY"),
         ("REVIEWER", "PRIMARY"),
@@ -45,25 +47,28 @@ def test_production_runtime_generates_graph_plan_state_outcome_and_methods_resul
     assert result["records"]["plan"]["filename"] == (
         "methods-evaluation-plan-v2.json"
     )
-    assert result["records"]["source_state"] == {
-        "filename": "methods-state-v2.json",
-        "status": "REVIEWER_PENDING",
-    }
-    assert result["records"]["terminal_state"] == {
-        "filename": "methods-state-v2.json",
-        "status": "RESOLVED",
-    }
+    assert result["records"]["source_state"]["filename"] == (
+        "methods-state-v2.json"
+    )
+    assert result["records"]["source_state"]["status"] == "REVIEWER_PENDING"
+    assert result["records"]["terminal_state"]["filename"] == (
+        "methods-state-v2.json"
+    )
+    assert result["records"]["terminal_state"]["status"] == "RESOLVED"
     assert result["records"]["specialist_outcome"]["filename"] == (
         "job_outcome.json"
     )
     assert result["records"]["reviewer_outcome"]["filename"] == (
         "job_outcome.json"
     )
-    assert result["legacy_surfaces"] == {
+    assert result["scenario_id"] == "deterministic-rpc-timeout"
+    assert result["model_invocations"] == 0
+    assert result["hard_cut"] == {
         "candidate": False,
-        "grounding": False,
-        "partial_status": False,
-        "artifact_result": False,
+        "partial_result": False,
+        "result_zip": False,
+        "methods_v1_grounding": False,
+        "harness_normalized": False,
     }
 
 

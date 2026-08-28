@@ -11,6 +11,7 @@ import {
   modelRoleDeveloperInstructions,
   parseEvidenceV2RolePrompt,
   parseModelCertWrapperArguments,
+  readModelCertInvocationReceipts,
   runModelRoleInvocation,
 } from "../runtime/macos-codex-luna-model-cert-wrapper.mjs";
 
@@ -139,4 +140,26 @@ test("Reviewer repair requires a claimed primary attempt", async (context) => {
     }),
     { code: "CODEX_LUNA_MODEL_CERT_REPAIR_WITHOUT_PRIMARY" },
   );
+});
+
+test("invocation collector preserves the only legal role order and rejects extra receipts", (context) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-luna-model-receipts-"));
+  context.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const base = {
+    schema_version: 1,
+    invocation_id: "run:specialist-primary",
+    provider: "openai-codex-app-server",
+    model: "gpt-5.6-luna",
+    reasoning_effort: "medium",
+    status: "PASS",
+    terminal: true,
+  };
+  const write = (name, role, attempt) => fs.writeFileSync(path.join(root, name), JSON.stringify({ ...base, invocation_id: `run:${role}:${attempt}`, role, attempt, repair: attempt === "REPAIR" }));
+  write("specialist-primary.json", "SPECIALIST", "PRIMARY");
+  write("reviewer-primary.json", "REVIEWER", "PRIMARY");
+  assert.deepEqual(readModelCertInvocationReceipts(root).map((item) => `${item.role}:${item.attempt}`), ["SPECIALIST:PRIMARY", "REVIEWER:PRIMARY"]);
+  write("specialist-repair.json", "SPECIALIST", "REPAIR");
+  assert.deepEqual(readModelCertInvocationReceipts(root).map((item) => `${item.role}:${item.attempt}`), ["SPECIALIST:PRIMARY", "SPECIALIST:REPAIR", "REVIEWER:PRIMARY"]);
+  fs.writeFileSync(path.join(root, "fifth.json"), "{}\n");
+  assert.throws(() => readModelCertInvocationReceipts(root), { code: "CODEX_LUNA_MODEL_CERT_USAGE_FILE_UNEXPECTED" });
 });

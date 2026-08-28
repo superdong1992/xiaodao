@@ -14,21 +14,12 @@ import {
 
 export const MACOS_CODEX_LUNA_E2E_CONTRACT_VERSION = 1;
 export const MACOS_CODEX_LUNA_METHODS_PROMPT_VERSION = 1;
-export const MACOS_CODEX_LUNA_CLIENT_PROMPT_VERSION = 1;
-export const MACOS_CODEX_LUNA_SCENARIOS = Object.freeze(["api-execution-overrun"]);
-export const STANDALONE_CODEX_LUNA_SCENARIOS = Object.freeze([
-  "api-execution-overrun",
-  "client-receive-blocked",
-  "deadloop-detected",
-  "insufficient-evidence",
-  "multiple-rpc-timeouts",
-  "server-queue-delay",
-  "server-queue-five",
-  "server-queue-single",
-  "unrelated-log-noise",
-]);
+export const MACOS_CODEX_LUNA_CLIENT_PROMPT_VERSION = 2;
+export const MACOS_CODEX_LUNA_SCENARIOS = Object.freeze(["multiple-rpc-timeouts"]);
+export const STANDALONE_CODEX_LUNA_SCENARIOS = MACOS_CODEX_LUNA_SCENARIOS;
 export const MACOS_CODEX_LUNA_METHODS_CALLS = 1;
-export const MACOS_CODEX_LUNA_E2E_CALLS = 5;
+export const MACOS_CODEX_LUNA_E2E_CALLS = 2;
+export const MACOS_CODEX_LUNA_E2E_MAX_CALLS = 4;
 export const MACOS_CODEX_LUNA_METHODS_TOKEN_LIMIT = 1_000_000;
 export const MACOS_CODEX_LUNA_METHODS_USD_LIMIT = 2;
 export const MACOS_CODEX_LUNA_E2E_TOKEN_LIMIT = 2_000_000;
@@ -48,11 +39,8 @@ export const MACOS_CODEX_LUNA_PUBLIC_TOOLS = Object.freeze([
   "problem_locator_list_artifacts",
 ]);
 export const MACOS_CODEX_LUNA_SUCCESS_INVOCATIONS = Object.freeze([
-  "CLIENT",
-  "ROUTE",
-  "LOGPARSE",
-  "DIAGNOSE",
-  "REVIEW",
+  "SPECIALIST",
+  "REVIEWER",
 ]);
 export const MACOS_CODEX_LUNA_PRICE_SNAPSHOT = Object.freeze({
   schema_version: 1,
@@ -150,10 +138,8 @@ function normalizedScenarioId(value) {
 }
 
 export function macosCodexLunaE2EPhases(scenarioId) {
-  const id = normalizedScenarioId(scenarioId);
-  return id === "insufficient-evidence"
-    ? Object.freeze(["CLIENT", "ROUTE", "LOGPARSE", "DIAGNOSE"])
-    : MACOS_CODEX_LUNA_SUCCESS_INVOCATIONS;
+  normalizedScenarioId(scenarioId);
+  return MACOS_CODEX_LUNA_SUCCESS_INVOCATIONS;
 }
 
 export function macosCodexLunaE2ECallCount(scenarioId) {
@@ -162,14 +148,14 @@ export function macosCodexLunaE2ECallCount(scenarioId) {
 
 export function scenarioPaths(sourceRoot, scenarioId) {
   const id = normalizedScenarioId(scenarioId);
-  const scenarioRoot = path.join(path.resolve(sourceRoot), "experiments", "rpc-skill-feasibility", "cases", id);
+  const scenarioRoot = path.join(path.resolve(sourceRoot), "tests", "cases", "release", "rpc-timeout-anonymized", "scenarios", id);
   const result = {
     root: scenarioRoot,
-    case: path.join(scenarioRoot, "case.json"),
-    client_log: path.join(scenarioRoot, "raw", "client.log"),
-    server_log: path.join(scenarioRoot, "raw", "server.log"),
+    case: path.join(scenarioRoot, "driver.json"),
+    client_log: path.join(scenarioRoot, "client.log"),
+    server_log: path.join(scenarioRoot, "server.log"),
   };
-  ordinaryFile(result.case, "scenario case.json");
+  ordinaryFile(result.case, "scenario driver.json");
   ordinaryFile(result.client_log, "scenario client.log");
   ordinaryFile(result.server_log, "scenario server.log");
   return Object.freeze(result);

@@ -13,6 +13,8 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shlex
+import shutil
 import sys
 from typing import Any, Literal
 
@@ -26,13 +28,18 @@ from problem_locator.application.outcome_submission import (  # noqa: E402
 )
 from problem_locator.application.queries import ApplicationQueryService  # noqa: E402
 from problem_locator.contracts import (  # noqa: E402
+    AssetKind,
+    Attachment,
+    AttachmentStatus,
     CaseAggregate,
     ExecutionLogSinks,
     Job,
     MethodEvaluationPlanV2,
     ResourceKind,
     ResourceRef,
+    ResolvedAsset,
     StateFile,
+    VersionedRef,
     canonical_json_bytes,
     parse_canonical_json_bytes,
 )
@@ -44,14 +51,19 @@ from problem_locator.runtime.agent_backend import (  # noqa: E402
     AgentBackend,
     BackendExecution,
 )
+from problem_locator.runtime.catalog import VersionedAssetCatalog  # noqa: E402
 from problem_locator.runtime.diagnosis_runtime import DiagnosisRuntime  # noqa: E402
 from problem_locator.runtime.methods_records_v2 import (  # noqa: E402
     METHODS_EVALUATION_PLAN_V2_FILENAME,
     METHODS_EVIDENCE_GRAPH_V2_FILENAME,
     METHODS_LIMITATIONS_V2_FILENAME,
     METHODS_STATE_V2_FILENAME,
+    method_prompt_filename_v2,
+    method_rejected_attempt_filename_v2,
     read_method_evaluation_plan_v2,
     read_method_evidence_graph_v2,
+    read_method_limitations_record_v2,
+    read_method_prompt_v2,
     read_method_state_v2,
 )
 from problem_locator.runtime.workspace import WorkspaceManager  # noqa: E402
@@ -68,14 +80,26 @@ from tests.deterministic.contracts.fakes import (  # noqa: E402
     RecordingDispatcher,
 )
 from tests.deterministic.unit.runtime.test_diagnosis_runtime import (  # noqa: E402
+    CATALOG_FIXTURES,
+    LOGPARSE_ROOT,
     _MethodsTwoPassBackend,
-    _claimed_logparse_job_state_and_resources,
-    _logparse_catalog,
+    _json,
+    _route_job,
 )
 
 
 Role = Literal["SPECIALIST", "REVIEWER"]
 Attempt = Literal["PRIMARY", "REPAIR"]
+
+
+class ModelCertRuntimeError(RuntimeError):
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+def _fail(code: str, message: str) -> None:
+    raise ModelCertRuntimeError(code, message)
 
 
 def _canonical_json(value: object) -> bytes:
@@ -85,6 +109,143 @@ def _canonical_json(value: object) -> bytes:
         sort_keys=True,
         separators=(",", ":"),
     ).encode("utf-8") + b"\n"
+
+
+def _file_identity(raw: bytes) -> dict[str, object]:
+    return {"size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}
+
+
+def _ordinary_empty_directory(root: Path, label: str) -> Path:
+    resolved = root.resolve()
+    if resolved.exists():
+        if not resolved.is_dir() or resolved.is_symlink() or any(resolved.iterdir()):
+            _fail(
+                "CODEX_LUNA_MODEL_CERT_RUNTIME_ROOT_NOT_EMPTY",
+                f"{label} must be an empty ordinary directory",
+            )
+    else:
+        resolved.mkdir(parents=True, mode=0o700)
+    return resolved
+
+
+def _copy_registration(registration_root: Path, skill_dir: Path) -> str:
+    try:
+        registration = json.loads(
+            (registration_root / "registration-template.json").read_bytes()
+        )
+    except (OSError, ValueError, TypeError) as exc:
+        raise ModelCertRuntimeError(
+            "CODEX_LUNA_MODEL_CERT_REGISTRATION_INVALID",
+            "The generated registration cannot be loaded by the model-cert Runtime",
+        ) from exc
+    registration_id = registration.get("registration_id")
+    if not isinstance(registration_id, str) or not registration_id:
+        _fail(
+            "CODEX_LUNA_MODEL_CERT_REGISTRATION_INVALID",
+            "The generated registration ID is invalid",
+        )
+    shutil.copytree(
+        registration_root,
+        skill_dir / registration_id,
+        symlinks=False,
+    )
+    return registration_id
+
+
+def _catalog(
+    work_root: Path,
+    registration_root: Path | None,
+    broker_factory: FakeLogparseBrokerFactory,
+) -> tuple[VersionedAssetCatalog, str]:
+    skill_dir = work_root / "skill-dir"
+    skill_dir.mkdir(mode=0o700)
+    if registration_root is None:
+        registration_id = "rpc-log-analysis"
+        shutil.copytree(
+            CATALOG_FIXTURES / "skill-dir" / registration_id,
+            skill_dir / registration_id,
+        )
+    else:
+        registration_id = _copy_registration(registration_root, skill_dir)
+    logparse_asset = ResolvedAsset(
+        ref=VersionedRef(
+            id="logparse-tool/codex-luna-model-cert-fixture",
+            version="1.0.0",
+            content_hash="f" * 64,
+        ),
+        asset_kind=AssetKind.LOGPARSE_TOOL,
+        root_path=str(LOGPARSE_ROOT),
+    )
+    return (
+        VersionedAssetCatalog(
+            skill_dir=skill_dir,
+            generic_skill_name="generic-problem-locator-smoke",
+            logparse_tool=logparse_asset,
+            logparse_broker_factory=broker_factory,
+        ),
+        registration_id,
+    )
+
+
+def _fact_values(
+    source_root: Path,
+    generated_registration: bool,
+) -> tuple[list[dict[str, Any]], dict[str, bytes]]:
+    if generated_registration:
+        scenario = (
+            source_root
+            / "tests/cases/release/rpc-timeout-anonymized/scenarios/multiple-rpc-timeouts"
+        )
+        driver = json.loads((scenario / "driver.json").read_bytes())
+        names = driver["initial_user_fact_names"]
+        values = driver["initial_user_fact_values"]
+        target_contents = {
+            "client": (scenario / "client.log").read_bytes(),
+            "server": (scenario / "server.log").read_bytes(),
+        }
+    else:
+        names = [
+            "caller_service",
+            "problem_time",
+            "client_slot",
+            "client_process_name",
+            "server_slot",
+            "server_process_name",
+            "server_service",
+            "rpc_method",
+        ]
+        values = [
+            "checkout-service",
+            "2026-07-31T00:00:00.000Z",
+            "client",
+            "checkout-service",
+            "server",
+            "inventory-service",
+            "inventory-service",
+            "ReserveStock",
+        ]
+        target_contents = {
+            "client": b"RPC DEADLINE EXCEEDED request_id=42\n",
+            "server": b"CONNECTION POOL WAIT request_id=42\n",
+        }
+    facts = []
+    for index, (name, value) in enumerate(zip(names, values, strict=True), start=1):
+        facts.append(
+            {
+                "item_id": f"00000000-0000-4000-8000-{index:012d}",
+                "statement": value,
+                "status": "ACTIVE",
+                "provenance": {
+                    "source_type": "USER_INPUT",
+                    "source_ref": "00000000-0000-4000-8000-000000000001",
+                    "input_name": name,
+                },
+                "evidence_refs": [],
+                "created_revision": 1,
+                "supersedes": [],
+            }
+        )
+    return facts, target_contents
 
 
 def _method_role(prompt: str) -> tuple[Role, Attempt]:
@@ -232,6 +393,78 @@ def _aligned_aggregate(job: Job, raw: CaseAggregate) -> CaseAggregate:
     return CaseAggregate.model_validate(value)
 
 
+def _running_job_and_state(
+    *,
+    source_root: Path,
+    catalog: VersionedAssetCatalog,
+    generated_registration: bool,
+    publication_guard: InMemoryPublicationCommitGuard,
+) -> tuple[Job, CaseAggregate, InMemoryResourceStore, dict[str, bytes]]:
+    skill_refs = [
+        ref
+        for ref in catalog.route_bindings().available_skill_refs
+        if ref.id.startswith("diagnosis-skill/")
+    ]
+    if len(skill_refs) != 1:
+        _fail(
+            "CODEX_LUNA_MODEL_CERT_SKILL_CARDINALITY_INVALID",
+            "Model-cert requires exactly one specialized registration",
+        )
+    facts, target_contents = _fact_values(source_root, generated_registration)
+    attachment_bytes = b"model-cert deterministic archive descriptor\n"
+    attachment_sha256 = hashlib.sha256(attachment_bytes).hexdigest()
+    attachment_id = "00000000-0000-4000-8000-000000000450"
+    payload = _route_job().model_dump(mode="json")
+    payload.update(catalog.diagnose_bindings(skill_refs[0]).model_dump(mode="json"))
+    payload.update(
+        {
+            "job_type": "DIAGNOSE",
+            "goal": "Run the frozen Evidence V2 Codex/Luna model-cert scenario.",
+            "status": "RUNNING",
+            "started_at": "2026-08-29T00:00:01.000Z",
+            "finished_at": None,
+            "runtime_epoch": "00000000-0000-4000-8000-000000000498",
+            "attachment_refs": [attachment_id],
+        }
+    )
+    payload["context_snapshot"]["user_facts"] = facts
+    job = Job.model_validate(payload)
+    storage_key = (
+        f"resources/cases/{job.case_id}/attachments/{attachment_id}/logs.zip"
+    )
+    attachment = Attachment(
+        attachment_id=attachment_id,
+        case_id=job.case_id,
+        status=AttachmentStatus.READY,
+        name="logs.zip",
+        content_type="application/zip",
+        declared_size=len(attachment_bytes),
+        declared_sha256=attachment_sha256,
+        size=len(attachment_bytes),
+        sha256=attachment_sha256,
+        storage_key=storage_key,
+        created_at="2026-08-29T00:00:00.000Z",
+        updated_at="2026-08-29T00:00:00.000Z",
+    )
+    state = StateFile.model_validate(_json("state.json"))
+    raw = next(iter(state.cases.values())).model_dump(mode="json")
+    raw["jobs"] = {job.job_id: job.model_dump(mode="json")}
+    raw["attachments"] = {attachment_id: attachment.model_dump(mode="json")}
+    aggregate = _aligned_aggregate(job, CaseAggregate.model_validate(raw))
+    resources = InMemoryResourceStore(publication_guard=publication_guard)
+    resources.seed_formal_resource(
+        ResourceRef(
+            resource_kind=ResourceKind.FILE,
+            storage_key=storage_key,
+            size=len(attachment_bytes),
+            sha256=attachment_sha256,
+        ),
+        state_reference_count=1,
+        payload=attachment_bytes,
+    )
+    return job, aggregate, resources, target_contents
+
+
 def _claim_active_review(repository: InMemoryStateRepository) -> Job:
     state = repository.read_snapshot()
     value = state.model_dump(mode="json")
@@ -265,31 +498,103 @@ def _pending_job(job: Job) -> Job:
     return Job.model_validate(value)
 
 
+def _prompt_receipts(
+    records: InMemoryExecutionRecordStore,
+    *,
+    specialist_job_id: str,
+    reviewer_job_id: str,
+) -> list[dict[str, object]]:
+    receipts: list[dict[str, object]] = []
+    for role, job_id in (
+        ("SPECIALIST", specialist_job_id),
+        ("REVIEWER", reviewer_job_id),
+    ):
+        for attempt in ("PRIMARY", "REPAIR"):
+            raw = read_method_prompt_v2(
+                records,
+                job_id=job_id,
+                role=role,  # type: ignore[arg-type]
+                attempt=attempt,  # type: ignore[arg-type]
+            )
+            if raw is None:
+                continue
+            rejected = records.read_audit_bytes(
+                job_id,
+                method_rejected_attempt_filename_v2(
+                    role=role,  # type: ignore[arg-type]
+                    attempt=attempt,  # type: ignore[arg-type]
+                ),
+            )
+            receipts.append(
+                {
+                    "role": role,
+                    "attempt": attempt,
+                    "job_id": job_id,
+                    "filename": method_prompt_filename_v2(
+                        role=role,  # type: ignore[arg-type]
+                        attempt=attempt,  # type: ignore[arg-type]
+                    ),
+                    "prompt": _file_identity(raw),
+                    "rejected_response": (
+                        None if rejected is None else _file_identity(rejected)
+                    ),
+                }
+            )
+    return receipts
+
+
+def _agent_command(options: argparse.Namespace) -> str:
+    wrapper = (
+        options.source_root
+        / "tools/test-flow/quick-validation/codex-luna/runtime"
+        / "macos-codex-luna-model-cert-wrapper.mjs"
+    )
+    arguments = [
+        str(options.node_entry),
+        str(wrapper),
+        "--codex-entry",
+        str(options.codex_entry),
+        "--auth-source",
+        str(options.auth_source),
+        "--skill-source",
+        str(options.skill_source),
+        "--expected-cli-version",
+        options.expected_cli_version,
+        "--private-root",
+        str(options.private_root),
+        "--evidence-root",
+        str(options.evidence_root),
+        "--usage-root",
+        str(options.usage_root),
+        "--run-id",
+        options.run_id,
+    ]
+    return shlex.join(arguments)
+
+
 def run_production_model_cert(
     *,
     work_root: Path,
     role_backend: AgentBackend | FakeModelRoleBackend,
+    source_root: Path = REPOSITORY_ROOT,
+    registration_root: Path | None = None,
+    execution_mode: Literal["deterministic-zero-model", "real-model"] = (
+        "deterministic-zero-model"
+    ),
 ) -> dict[str, object]:
-    work_root.mkdir(parents=True, exist_ok=False)
+    work_root = _ordinary_empty_directory(work_root, "model-cert work root")
     broker_factory = FakeLogparseBrokerFactory()
-    catalog = _logparse_catalog(work_root / "catalog", broker_factory)
-    source_job, raw_aggregate, _ = (
-        _claimed_logparse_job_state_and_resources(catalog)
-    )
-    aggregate = _aligned_aggregate(source_job, raw_aggregate)
     guard = InMemoryPublicationCommitGuard()
-    resources = InMemoryResourceStore(publication_guard=guard)
-    attachment = next(iter(aggregate.attachments.values()))
-    attachment_payload = b"request timed out while calling inventory\n"
-    resources.seed_formal_resource(
-        ResourceRef(
-            resource_kind=ResourceKind.FILE,
-            storage_key=attachment.storage_key,
-            size=attachment.size,
-            sha256=attachment.sha256,
-        ),
-        state_reference_count=1,
-        payload=attachment_payload,
+    catalog, registration_id = _catalog(
+        work_root,
+        registration_root,
+        broker_factory,
+    )
+    source_job, aggregate, resources, target_contents = _running_job_and_state(
+        source_root=source_root,
+        catalog=catalog,
+        generated_registration=registration_root is not None,
+        publication_guard=guard,
     )
     repository = InMemoryStateRepository(_state_with_aggregate(aggregate))
     records = InMemoryExecutionRecordStore()
@@ -299,6 +604,30 @@ def run_production_model_cert(
         source_job,
         "completed",
     )
+    preprocessor.target_contents = target_contents
+
+    def execute_preprocessing(
+        session: object,
+        operation: str,
+        request_path: str,
+        result_path: str,
+    ) -> None:
+        if (
+            operation != "parse-targets"
+            or request_path
+            != "output/proposals/methods-preprocess/request.json"
+            or result_path
+            != "output/proposals/methods-preprocess/target_logs.json"
+        ):
+            raise RuntimeError(
+                "Production preprocessing requested an unexpected broker operation"
+            )
+        preprocessor._run_preprocessing(  # noqa: SLF001 - test-flow fixture port
+            {"workspace_root": getattr(session, "workspace_root")}
+        )
+        return None
+
+    broker_factory.preprocessing_executor = execute_preprocessing
     backend = EvidenceV2CertBackend(
         preprocessor=preprocessor,
         role_backend=role_backend,
@@ -372,66 +701,177 @@ def run_production_model_cert(
         raise RuntimeError("Production query omitted terminal methods_result")
     graph = read_method_evidence_graph_v2(records, job_id=source_job.job_id)
     plan = read_method_evaluation_plan_v2(records, job_id=source_job.job_id)
+    limitations = read_method_limitations_record_v2(
+        records,
+        job_id=source_job.job_id,
+    )
     source_state = read_method_state_v2(records, job_id=source_job.job_id)
     terminal_state = read_method_state_v2(records, job_id=review_job.job_id)
-    if graph is None or plan is None or source_state is None or terminal_state is None:
+    if (
+        graph is None
+        or plan is None
+        or limitations is None
+        or source_state is None
+        or terminal_state is None
+    ):
         raise RuntimeError("Production execution records are incomplete")
+    if (
+        source_job.skill_ref is None
+        or source_job.skill_ref.content_hash != graph.skill_sha256
+        or graph.skill_sha256 != plan.skill_sha256
+        or graph.graph_ref != plan.evidence_graph_ref
+    ):
+        raise RuntimeError(
+            "Production Skill, Evidence Graph, and Evaluation Plan identities differ"
+        )
+    if (
+        methods_result.evidence_graph_ref != graph.graph_ref
+        or methods_result.plan_ref != plan.plan_ref
+    ):
+        raise RuntimeError(
+            "Public methods_result does not bind the production Graph and Plan"
+        )
+    prompts = _prompt_receipts(
+        records,
+        specialist_job_id=source_job.job_id,
+        reviewer_job_id=review_job.job_id,
+    )
     projection_bytes = canonical_json_bytes(methods_result)
-    invocation_records = getattr(role_backend, "invocations", None)
+    graph_bytes = canonical_json_bytes(graph)
+    plan_bytes = canonical_json_bytes(plan)
+    limitations_bytes = canonical_json_bytes(limitations)
+    source_state_bytes = canonical_json_bytes(source_state)
+    terminal_state_bytes = canonical_json_bytes(terminal_state)
+    specialist_outcome_bytes = canonical_json_bytes(
+        specialist_receipt.job_outcome
+    )
+    reviewer_outcome_bytes = canonical_json_bytes(reviewer_receipt.job_outcome)
+    actual_attempts = {
+        f"{item['role']}:{item['attempt']}"
+        for item in prompts
+    }
+    selected_registration = (
+        registration_root / "registration-template.json"
+        if registration_root is not None
+        else CATALOG_FIXTURES
+        / "skill-dir"
+        / registration_id
+        / "registration-template.json"
+    )
+    registration = json.loads(selected_registration.read_bytes())
+    if registration_root is not None:
+        driver = json.loads(
+            (
+                source_root
+                / "tests/cases/release/rpc-timeout-anonymized/scenarios"
+                / "multiple-rpc-timeouts/driver.json"
+            ).read_bytes()
+        )
+        user_inputs = {
+            "initial_user_fact_names": driver["initial_user_fact_names"],
+            "initial_user_fact_values": driver["initial_user_fact_values"],
+        }
+    else:
+        frozen_facts = source_job.context_snapshot.user_facts  # type: ignore[union-attr]
+        user_inputs = {
+            "initial_user_fact_names": [
+                item.provenance.input_name for item in frozen_facts
+            ],
+            "initial_user_fact_values": [item.statement for item in frozen_facts],
+        }
     result = {
         "schema_version": 1,
         "receipt_type": "codex-luna-evidence-v2-runtime-result",
         "status": "PASS",
-        "runtime_driver": "test-flow",
-        "production_runtime": True,
+        "execution_mode": execution_mode,
+        "runtime_driver": "codex-luna-model-cert-v1",
+        "production_runtime": (
+            "problem_locator.runtime.diagnosis_runtime.DiagnosisRuntime"
+        ),
+        "scenario_id": (
+            "multiple-rpc-timeouts"
+            if registration_root is not None
+            else "deterministic-rpc-timeout"
+        ),
+        "registration_id": registration_id,
+        "scenario": {
+            "scenario_id": "multiple-rpc-timeouts",
+            "source_wiki_sha256": registration["package"][
+                "source_wiki_sha256"
+            ],
+            "registration_id": registration_id,
+            "skill_content_sha256": source_job.skill_ref.content_hash,  # type: ignore[union-attr]
+            "user_inputs_sha256": hashlib.sha256(
+                canonical_json_bytes(user_inputs)
+            ).hexdigest(),
+            "sources": [
+                {
+                    "source_id": source.source_id,
+                    "content_sha256": source.content_sha256,
+                }
+                for source in graph.sources
+            ],
+            "evidence_graph": {
+                "ref": graph.graph_ref,
+                "canonical_sha256": hashlib.sha256(graph_bytes).hexdigest(),
+                "canonical_size": len(graph_bytes),
+            },
+            "evaluation_plan": {
+                "ref": plan.plan_ref,
+                "canonical_sha256": hashlib.sha256(plan_bytes).hexdigest(),
+                "canonical_size": len(plan_bytes),
+            },
+        },
         "logparse_mode": "deterministic-fixture",
         "preprocessing_calls": backend.preprocessing_calls,
-        "model_role_invocations": (
-            [
-                {
-                    key: value
-                    for key, value in item.items()
-                    if key != "workspace"
-                }
-                for item in invocation_records
-            ]
-            if isinstance(invocation_records, list)
-            else None
-        ),
+        "model_invocations": 0 if execution_mode == "deterministic-zero-model" else len(prompts),
+        "role_attempts": prompts,
+        "repair_counts": {
+            "specialist": int("SPECIALIST:REPAIR" in actual_attempts),
+            "reviewer": int("REVIEWER:REPAIR" in actual_attempts),
+        },
         "records": {
             "source_job_id": source_job.job_id,
             "terminal_job_id": review_job.job_id,
             "graph": {
                 "filename": METHODS_EVIDENCE_GRAPH_V2_FILENAME,
                 "ref": graph.graph_ref,
+                **_file_identity(graph_bytes),
             },
             "plan": {
                 "filename": METHODS_EVALUATION_PLAN_V2_FILENAME,
                 "ref": plan.plan_ref,
+                **_file_identity(plan_bytes),
             },
             "source_state": {
                 "filename": METHODS_STATE_V2_FILENAME,
                 "status": source_state.status,
+                **_file_identity(source_state_bytes),
             },
             "terminal_state": {
                 "filename": METHODS_STATE_V2_FILENAME,
                 "status": terminal_state.status,
+                **_file_identity(terminal_state_bytes),
             },
-            "limitations": {"filename": METHODS_LIMITATIONS_V2_FILENAME},
+            "limitations": {
+                "filename": METHODS_LIMITATIONS_V2_FILENAME,
+                **_file_identity(limitations_bytes),
+            },
             "specialist_outcome": {
                 "filename": "job_outcome.json",
                 "result_type": specialist_receipt.job_outcome.result_type.value,
+                **_file_identity(specialist_outcome_bytes),
             },
             "reviewer_outcome": {
                 "filename": "job_outcome.json",
                 "result_type": reviewer_receipt.job_outcome.result_type.value,
+                **_file_identity(reviewer_outcome_bytes),
             },
         },
         "public_case_status": terminal.case_view.status.value,
         "methods_result": methods_result.model_dump(mode="json"),
         "methods_result_identity": {
-            "canonical_sha256": hashlib.sha256(projection_bytes).hexdigest(),
-            "canonical_size": len(projection_bytes),
+            **_file_identity(projection_bytes),
             "case_id": methods_result.case_id,
             "source_job_id": methods_result.source_job_id,
             "result_ref": methods_result.result_ref,
@@ -441,55 +881,139 @@ def run_production_model_cert(
             "evidence_graph_ref": methods_result.evidence_graph_ref,
             "diagnostic_id": methods_result.diagnostic_id,
         },
-        "legacy_surfaces": {
+        "hard_cut": {
             "candidate": False,
-            "grounding": False,
-            "partial_status": False,
-            "artifact_result": False,
+            "partial_result": False,
+            "result_zip": False,
+            "methods_v1_grounding": False,
+            "harness_normalized": False,
         },
     }
     return result
 
 
-def _arguments(argv: list[str]) -> argparse.Namespace:
+def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--mode", choices=("fake", "real"), required=True)
+    parser.add_argument("--source-root", type=Path, required=True)
+    parser.add_argument("--registration-root", type=Path)
     parser.add_argument("--work-root", type=Path, required=True)
-    parser.add_argument("--output", type=Path, required=True)
-    mode = parser.add_mutually_exclusive_group(required=True)
-    mode.add_argument("--backend-command")
-    mode.add_argument("--fake-role-backend", action="store_true")
+    parser.add_argument("--receipt-path", type=Path, required=True)
+    parser.add_argument("--node-entry", type=Path)
+    parser.add_argument("--codex-entry", type=Path)
+    parser.add_argument("--auth-source", type=Path)
+    parser.add_argument("--skill-source", type=Path)
+    parser.add_argument("--expected-cli-version")
+    parser.add_argument("--private-root", type=Path)
+    parser.add_argument("--evidence-root", type=Path)
+    parser.add_argument("--usage-root", type=Path)
+    parser.add_argument("--run-id")
+    parser.add_argument("--fake-repair", action="store_true")
     parser.add_argument(
         "--fake-invalid-primary-role",
         choices=("SPECIALIST", "REVIEWER"),
         action="append",
         default=[],
     )
-    return parser.parse_args(argv)
+    return parser
+
+
+def _validated_options(argv: list[str]) -> argparse.Namespace:
+    options = _parser().parse_args(argv)
+    options.source_root = options.source_root.resolve()
+    options.work_root = options.work_root.resolve()
+    options.receipt_path = options.receipt_path.resolve()
+    if options.registration_root is not None:
+        options.registration_root = options.registration_root.resolve()
+    if options.mode == "real":
+        required = (
+            "registration_root",
+            "node_entry",
+            "codex_entry",
+            "auth_source",
+            "skill_source",
+            "expected_cli_version",
+            "private_root",
+            "evidence_root",
+            "usage_root",
+            "run_id",
+        )
+        if any(getattr(options, name) in (None, "") for name in required):
+            _fail(
+                "CODEX_LUNA_MODEL_CERT_REAL_INPUT_MISSING",
+                "Real model-cert Runtime inputs are incomplete",
+            )
+        for name in (
+            "node_entry",
+            "codex_entry",
+            "auth_source",
+            "skill_source",
+        ):
+            value = getattr(options, name).resolve()
+            if not value.is_file():
+                _fail(
+                    "CODEX_LUNA_MODEL_CERT_REAL_FILE_MISSING",
+                    f"{name} is unavailable",
+                )
+            setattr(options, name, value)
+        for name in ("private_root", "evidence_root", "usage_root"):
+            value = getattr(options, name).resolve()
+            if not value.is_dir():
+                _fail(
+                    "CODEX_LUNA_MODEL_CERT_REAL_DIRECTORY_MISSING",
+                    f"{name} is unavailable",
+                )
+            setattr(options, name, value)
+    return options
 
 
 def main(argv: list[str] | None = None) -> int:
-    values = _arguments(sys.argv[1:] if argv is None else argv)
-    if values.fake_role_backend:
-        role_backend: AgentBackend | FakeModelRoleBackend = FakeModelRoleBackend(
-            invalid_primary_roles=frozenset(values.fake_invalid_primary_role),
+    try:
+        values = _validated_options(sys.argv[1:] if argv is None else argv)
+        if values.mode == "fake":
+            invalid_roles = set(values.fake_invalid_primary_role)
+            if values.fake_repair:
+                invalid_roles.update(("SPECIALIST", "REVIEWER"))
+            role_backend: AgentBackend | FakeModelRoleBackend = (
+                FakeModelRoleBackend(
+                    invalid_primary_roles=frozenset(invalid_roles),
+                )
+            )
+            execution_mode: Literal["deterministic-zero-model", "real-model"] = (
+                "deterministic-zero-model"
+            )
+        else:
+            role_backend = AgentBackend(
+                _agent_command(values),
+                parent_environment=dict(os.environ),
+            )
+            execution_mode = "real-model"
+        result = run_production_model_cert(
+            work_root=values.work_root,
+            role_backend=role_backend,
+            source_root=values.source_root,
+            registration_root=values.registration_root,
+            execution_mode=execution_mode,
         )
-    else:
-        role_backend = AgentBackend(str(values.backend_command))
-    result = run_production_model_cert(
-        work_root=values.work_root.resolve(),
-        role_backend=role_backend,
-    )
-    values.output.parent.mkdir(parents=True, exist_ok=True)
-    values.output.write_bytes(_canonical_json(result))
-    sys.stdout.buffer.write(
-        _canonical_json(
-            {
-                "status": result["status"],
-                "output": os.fspath(values.output.resolve()),
-            }
-        )
-    )
-    return 0
+        raw = canonical_json_bytes(result)
+        values.receipt_path.parent.mkdir(parents=True, exist_ok=True)
+        with values.receipt_path.open("xb") as stream:
+            stream.write(raw)
+        sys.stdout.buffer.write(raw)
+        return 0
+    except BaseException as exc:
+        failure = {
+            "schema_version": 1,
+            "status": "FAIL",
+            "code": getattr(
+                exc,
+                "code",
+                "CODEX_LUNA_MODEL_CERT_RUNTIME_FAILED",
+            ),
+            "message": str(exc),
+        }
+        sys.stderr.buffer.write(canonical_json_bytes(failure))
+        return 1
 
 
 if __name__ == "__main__":
