@@ -563,3 +563,87 @@ def test_single_field_mutations_are_rejected_from_production_baseline(
             specialist,
             replace(materials, methods_method_cards=mutated_cards),
         )
+
+
+def test_fresh_restart_publishes_recorded_graph_plan_without_preprocess_inputs(
+    tmp_path: Path,
+) -> None:
+    (
+        catalog,
+        skill,
+        specialist,
+        _,
+        _,
+        source_graph,
+        source_plan,
+        _,
+    ) = _jobs(tmp_path / "source-run")
+    recorded_graph = parse_canonical_json_bytes(
+        canonical_json_bytes(source_graph),
+        model_type=MethodEvidenceGraphV2,
+    )
+    recorded_plan = parse_canonical_json_bytes(
+        canonical_json_bytes(source_plan),
+        model_type=MethodEvaluationPlanV2,
+    )
+
+    manager = WorkspaceManager(tmp_path / "restart-data")
+    fresh = manager.prepare(
+        specialist,
+        _aggregate(specialist),
+        _ResourceStore(),  # type: ignore[arg-type]
+    )
+    inputs = fresh.root / "inputs"
+    for category in ("attachments", "evidence", "artifacts", "outcomes"):
+        assert (inputs / category).exists()
+    for absent in (
+        "request.json",
+        "target_logs.json",
+        "logparse-receipt.json",
+        "target-logs",
+    ):
+        assert not (inputs / absent).exists()
+
+    receipt = manager.publish_methods_specialist_inputs_v2(
+        fresh,
+        specialist,
+        evidence_graph=recorded_graph,
+        evaluation_plan=recorded_plan,
+    )
+
+    assert {path.name for path in inputs.iterdir()} == {
+        "manifest.json",
+        "request.json",
+        "method-evidence-graph.json",
+        "method-evaluation-plan.json",
+    }
+    assert receipt.evidence_graph_bytes == canonical_json_bytes(recorded_graph)
+    assert receipt.evaluation_plan_bytes == canonical_json_bytes(recorded_plan)
+    assert receipt.workspace.manifest.entries == []
+    assert receipt.workspace.attachments == ()
+    assert receipt.workspace.evidence == ()
+    assert receipt.workspace.artifacts == ()
+    assert receipt.workspace.previous_outcomes == ()
+    request = parse_canonical_json_bytes(receipt.request_bytes)
+    assert request["job"]["job_id"] == specialist.job_id
+    assert request["user_facts"][0]["value"] == USER_FACT_VALUE
+
+    materials = RuntimeAssetResolver(catalog).resolve_job(specialist).bind_workspace(
+        receipt.workspace,
+        job=specialist,
+        methods_evidence_graph=recorded_graph,
+        methods_evaluation_plan=recorded_plan,
+    ).materials
+    context = ContextBuilder().build(specialist, materials)
+    assert recorded_graph.graph_ref in context.body
+    assert recorded_plan.plan_ref in context.body
+    assert skill.methods.methods[0].id in context.body
+    for private in (
+        PRIVATE_TARGET_SENTINEL,
+        PRIVATE_STATE_SENTINEL,
+        PRIVATE_CANDIDATE_SENTINEL,
+        PRIVATE_ATTACHMENT_SENTINEL.decode(),
+        PRIVATE_ARTIFACT_SENTINEL.decode(),
+        PRIVATE_EVIDENCE_SENTINEL.decode(),
+    ):
+        assert private not in context.body

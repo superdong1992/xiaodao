@@ -1710,11 +1710,21 @@ class WorkspaceManager:
                 raise ValueError("Methods V2 role inputs already exist")
             inputs_root.chmod(0o755)
             if remove_preprocessing:
-                if not request_path.is_file():
-                    raise ValueError("Methods preprocessing request is missing")
-                request_path.chmod(0o644)
-                _atomic_write(request_path, request_bytes)
-                _remove_methods_preprocess_inputs(inputs_root)
+                preprocess_paths = (
+                    request_path,
+                    inputs_root / "target_logs.json",
+                    inputs_root / "logparse-receipt.json",
+                    inputs_root / "target-logs",
+                )
+                present = tuple(path.exists() for path in preprocess_paths)
+                if any(present) and not all(present):
+                    raise ValueError("Methods preprocessing inputs are incomplete")
+                if all(present):
+                    request_path.chmod(0o644)
+                    _atomic_write(request_path, request_bytes)
+                    _remove_methods_preprocess_inputs(inputs_root)
+                else:
+                    _atomic_write(request_path, request_bytes)
                 _remove_methods_legacy_input_trees(inputs_root)
                 manifest_path.chmod(0o644)
                 _atomic_write(manifest_path, model_manifest_bytes)
