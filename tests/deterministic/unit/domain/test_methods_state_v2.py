@@ -11,6 +11,7 @@ from problem_locator.contracts import (
     MethodStateReasonCodeV2,
     MethodStateStatusV2,
     MethodStateV2,
+    method_state_ref_v2,
 )
 from problem_locator.domain.methods_state_v2 import (
     accept_specialist_evaluation_v2,
@@ -166,6 +167,44 @@ def _reviewer_pending(plan):
         state=_start(plan),
         evaluation=specialist,
     )
+
+
+def _resolved(plan):
+    specialist, reviewer, consensus = _evaluations(plan)
+    pending = accept_specialist_evaluation_v2(
+        state=_start(plan),
+        evaluation=specialist,
+    )
+    return finalize_reviewer_consensus_v2(
+        state=pending,
+        plan=plan,
+        reviewer_evaluation=reviewer,
+        consensus=consensus,
+    )
+
+
+def _with_recomputed_state_ref(
+    state: MethodStateV2,
+    **changes: object,
+) -> MethodStateV2:
+    mutated = state.model_copy(update=changes)
+    state_ref = method_state_ref_v2(
+        evaluation_id=mutated.evaluation_id,
+        plan_ref=mutated.plan_ref,
+        evaluation_refs=mutated.evaluation_refs,
+        status=mutated.status,
+        current_role=mutated.current_role,
+        specialist_protocol_failures=mutated.specialist_protocol_failures,
+        reviewer_protocol_failures=mutated.reviewer_protocol_failures,
+        specialist_evaluation=mutated.specialist_evaluation,
+        reviewer_evaluation=mutated.reviewer_evaluation,
+        consensus=mutated.consensus,
+        reason_code=mutated.reason_code,
+        diagnostic_id=mutated.diagnostic_id,
+        diagnostic_evaluation_ref=mutated.diagnostic_evaluation_ref,
+        reasons=mutated.reasons,
+    )
+    return mutated.model_copy(update={"state_ref": state_ref})
 
 
 def test_state_status_contract_is_exact_and_has_no_partial_terminal() -> None:
@@ -408,7 +447,43 @@ def test_role_acceptance_requires_attempt_to_match_state_repair_count(
 def test_state_contract_rejects_persisted_repair_count_mismatch() -> None:
     plan = _plan()
     pending = _reviewer_pending(plan)
-    mutated = pending.model_copy(update={"specialist_protocol_failures": 1})
+    mutated = _with_recomputed_state_ref(
+        pending,
+        specialist_protocol_failures=1,
+    )
+
+    with pytest.raises(ValidationError, match="repair marker differs"):
+        MethodStateV2.model_validate(mutated.model_dump(mode="python"))
+
+
+@pytest.mark.parametrize(
+    ("state_kind", "failure_field"),
+    [
+        ("REVIEWER_PENDING", "specialist_protocol_failures"),
+        ("INTERRUPTED", "specialist_protocol_failures"),
+        ("RESOLVED", "specialist_protocol_failures"),
+        ("RESOLVED", "reviewer_protocol_failures"),
+    ],
+    ids=[
+        "reviewer-pending-specialist",
+        "interrupted-specialist",
+        "resolved-specialist",
+        "resolved-reviewer",
+    ],
+)
+def test_accepted_evaluation_rejects_exact_failure_count_two(
+    state_kind: str,
+    failure_field: str,
+) -> None:
+    plan = _plan()
+    pending = _reviewer_pending(plan)
+    if state_kind == "REVIEWER_PENDING":
+        state = pending
+    elif state_kind == "INTERRUPTED":
+        state = interrupt_method_state_v2(state=pending)
+    else:
+        state = _resolved(plan)
+    mutated = _with_recomputed_state_ref(state, **{failure_field: 2})
 
     with pytest.raises(ValidationError, match="repair marker differs"):
         MethodStateV2.model_validate(mutated.model_dump(mode="python"))

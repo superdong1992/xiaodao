@@ -199,7 +199,8 @@ class MethodStateV2(_MethodStateContract):
                     self,
                     f"{expected_role.lower()}_protocol_failures",
                 )
-                if value.repair_used != (failures == 1):
+                expected_failures = 1 if value.repair_used else 0
+                if failures != expected_failures:
                     raise ValueError(
                         "role evaluation repair marker differs from protocol failures"
                     )
