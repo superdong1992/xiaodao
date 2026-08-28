@@ -10,7 +10,6 @@ import {
   CLAUDE_DEEPSEEK_CLI_SHA256,
   CLAUDE_DEEPSEEK_CLIENT_PROMPT_VERSION,
   CLAUDE_DEEPSEEK_CONTRACT_VERSION,
-  CLAUDE_DEEPSEEK_E2E_PHASES,
   CLAUDE_DEEPSEEK_MAX_OUTPUT_TOKENS,
   CLAUDE_DEEPSEEK_MODEL,
   CLAUDE_DEEPSEEK_MODEL_CERT_PHASES,
@@ -120,7 +119,9 @@ test("Claude identity constants freeze 2.1.89, CLI hash, DeepSeek model, and 64k
 test("Claude model cert owns one fixed production Runtime scenario and two normal calls", () => {
   assert.equal(CLAUDE_DEEPSEEK_MODEL_CERT_SCENARIO, "multiple-rpc-timeouts");
   assert.deepEqual(CLAUDE_DEEPSEEK_MODEL_CERT_PHASES, ["SPECIALIST", "REVIEWER"]);
-  assert.ok(CLAUDE_DEEPSEEK_SCENARIOS.includes("api-execution-overrun"));
+  assert.deepEqual(CLAUDE_DEEPSEEK_SCENARIOS, ["multiple-rpc-timeouts"]);
+  assert.deepEqual(claudeDeepseekE2EPhases(CLAUDE_DEEPSEEK_MODEL_CERT_SCENARIO), CLAUDE_DEEPSEEK_MODEL_CERT_PHASES);
+  assert.equal(claudeDeepseekE2ECallCount(CLAUDE_DEEPSEEK_MODEL_CERT_SCENARIO), 2);
 });
 
 test("registration producer identity includes settings and cache freezes the complete generated root", () => {
@@ -209,23 +210,23 @@ test("stream audit requires one init/result, pinned model, bounded turns, and al
 test("usage aggregation is cache-inclusive and enforces lifecycle-aware no-retry processes", () => {
   const methods = auditClaudeInvocations(invocations(["REGISTRATION_GENERATION"], "methods"), { workflow: "generation" });
   assert.equal(methods.aggregate.total_tokens, 20);
-  const e2e = auditClaudeInvocations(invocations(CLAUDE_DEEPSEEK_E2E_PHASES), { workflow: "e2e", scenarioId: "api-execution-overrun" });
-  assert.equal(e2e.aggregate.total_tokens, 100);
-  assert.deepEqual(aggregateClaudeUsage(invocations(["CLIENT", "ROUTE"])), {
+  const e2e = auditClaudeInvocations(invocations(CLAUDE_DEEPSEEK_MODEL_CERT_PHASES), { workflow: "e2e", scenarioId: CLAUDE_DEEPSEEK_MODEL_CERT_SCENARIO });
+  assert.equal(e2e.aggregate.total_tokens, 40);
+  assert.deepEqual(aggregateClaudeUsage(invocations(CLAUDE_DEEPSEEK_MODEL_CERT_PHASES)), {
     input_tokens: 20, output_tokens: 10, cache_creation_input_tokens: 6, cache_read_input_tokens: 4, total_tokens: 40, cost_usd: 0.02,
   });
-  assert.throws(() => auditClaudeInvocations(invocations(["SPECIALIST"]), { workflow: "e2e", scenarioId: "api-execution-overrun" }), (error) => error.code === "CLAUDE_DEEPSEEK_INVOCATION_COUNT_INVALID");
-  const retried = invocations(CLAUDE_DEEPSEEK_E2E_PHASES);
+  assert.throws(() => auditClaudeInvocations(invocations(["SPECIALIST"]), { workflow: "e2e", scenarioId: CLAUDE_DEEPSEEK_MODEL_CERT_SCENARIO }), (error) => error.code === "CLAUDE_DEEPSEEK_INVOCATION_COUNT_INVALID");
+  const retried = invocations(CLAUDE_DEEPSEEK_MODEL_CERT_PHASES);
   retried[1].retry = 1;
-  assert.throws(() => auditClaudeInvocations(retried, { workflow: "e2e", scenarioId: "api-execution-overrun" }), (error) => error.code === "CLAUDE_DEEPSEEK_INVOCATION_IDENTITY_INVALID");
-  const calibrated = invocations(CLAUDE_DEEPSEEK_E2E_PHASES);
-  [0.5, 0.5, 0.5, 0.5, 0.5].forEach((cost, index) => { calibrated[index].usage.cost_usd = cost; });
-  assert.equal(auditClaudeInvocations(calibrated, { workflow: "e2e", scenarioId: "api-execution-overrun" }).aggregate.cost_usd, 2.5);
-  calibrated[4].usage.cost_usd = 3;
-  assert.throws(() => auditClaudeInvocations(calibrated, { workflow: "e2e", scenarioId: "api-execution-overrun" }), (error) => error.code === "CLAUDE_DEEPSEEK_BUDGET_EXCEEDED");
-  const over = invocations(CLAUDE_DEEPSEEK_E2E_PHASES);
+  assert.throws(() => auditClaudeInvocations(retried, { workflow: "e2e", scenarioId: CLAUDE_DEEPSEEK_MODEL_CERT_SCENARIO }), (error) => error.code === "CLAUDE_DEEPSEEK_INVOCATION_IDENTITY_INVALID");
+  const calibrated = invocations(CLAUDE_DEEPSEEK_MODEL_CERT_PHASES);
+  [1.25, 1.25].forEach((cost, index) => { calibrated[index].usage.cost_usd = cost; });
+  assert.equal(auditClaudeInvocations(calibrated, { workflow: "e2e", scenarioId: CLAUDE_DEEPSEEK_MODEL_CERT_SCENARIO }).aggregate.cost_usd, 2.5);
+  calibrated[1].usage.cost_usd = 3;
+  assert.throws(() => auditClaudeInvocations(calibrated, { workflow: "e2e", scenarioId: CLAUDE_DEEPSEEK_MODEL_CERT_SCENARIO }), (error) => error.code === "CLAUDE_DEEPSEEK_BUDGET_EXCEEDED");
+  const over = invocations(CLAUDE_DEEPSEEK_MODEL_CERT_PHASES);
   over[0].usage.cache_read_input_tokens = 2_000_001;
-  assert.throws(() => auditClaudeInvocations(over, { workflow: "e2e", scenarioId: "api-execution-overrun" }), (error) => error.code === "CLAUDE_DEEPSEEK_BUDGET_EXCEEDED");
+  assert.throws(() => auditClaudeInvocations(over, { workflow: "e2e", scenarioId: CLAUDE_DEEPSEEK_MODEL_CERT_SCENARIO }), (error) => error.code === "CLAUDE_DEEPSEEK_BUDGET_EXCEEDED");
 });
 
 test("Evidence V2 model cert allows only S primary/repair then blind R primary/repair", () => {

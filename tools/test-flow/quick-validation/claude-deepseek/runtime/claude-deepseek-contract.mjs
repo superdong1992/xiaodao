@@ -24,7 +24,6 @@ import {
   buildDeterministicLogsZip,
   loadScenarioFacts,
   loadScenarioOracle,
-  STANDALONE_CODEX_LUNA_SCENARIOS,
   macosCodexLunaE2EPhases,
   mapScenarioToCreateCase as mapBaseScenarioToCreateCase,
   scenarioPaths,
@@ -57,10 +56,7 @@ export const CLAUDE_DEEPSEEK_CALL_WALL_SECONDS = 600;
 export const CLAUDE_DEEPSEEK_METHODS_WALL_SECONDS = 1_800;
 export const CLAUDE_DEEPSEEK_STAGE_WALL_SECONDS = 1_800;
 export const CLAUDE_DEEPSEEK_NO_PROGRESS_SECONDS = 300;
-// Kept only until the central planner switches its blocked legacy Stage to the
-// provider model-cert declaration. The runnable provider entry accepts only
-// CLAUDE_DEEPSEEK_MODEL_CERT_SCENARIO.
-export const CLAUDE_DEEPSEEK_SCENARIOS = Object.freeze([...STANDALONE_CODEX_LUNA_SCENARIOS]);
+export const CLAUDE_DEEPSEEK_SCENARIOS = Object.freeze([CLAUDE_DEEPSEEK_MODEL_CERT_SCENARIO]);
 export const CLAUDE_DEEPSEEK_REGISTRATION_ID = "rpc-timeout-methods-v1";
 export const CLAUDE_DEEPSEEK_SKILL_NAME = "diagnose-rpc-timeout";
 export const CLAUDE_DEEPSEEK_MODULE = "rpc";
