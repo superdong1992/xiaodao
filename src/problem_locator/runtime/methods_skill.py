@@ -315,12 +315,6 @@ def load_methods_package(
     ):
         if phrase not in skill_text:
             raise ValueError(f"SKILL.md must mention {phrase}")
-    for obsolete_field in ("target_logs", "identity_tokens", "sources"):
-        if re.search(
-            rf"(?<![A-Za-z0-9_]){re.escape(obsolete_field)}(?![A-Za-z0-9_])",
-            skill_text,
-        ):
-            raise ValueError(f"SKILL.md uses V1 runtime field {obsolete_field}")
 
     manifest, _ = _json_object(root / "methods.json", label="methods.json")
     _exact_fields(manifest, _METHODS_FIELDS, "methods.json")

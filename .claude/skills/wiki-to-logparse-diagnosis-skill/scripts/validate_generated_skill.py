@@ -118,7 +118,6 @@ REQUIRED_SKILL_PHRASES = (
     "reason",
     "UNKNOWN",
 )
-OBSOLETE_SKILL_FIELDS = ("target_logs", "identity_tokens", "sources")
 REQUIRED_SKILL_SEMANTICS = (
     (
         "consume only the server Evidence Graph and Evaluation Plan",
@@ -483,14 +482,6 @@ def _validate_business_skill(
     for phrase in REQUIRED_SKILL_PHRASES:
         if phrase not in text:
             errors.append(f"SKILL.md must mention {phrase}")
-    for obsolete_field in OBSOLETE_SKILL_FIELDS:
-        if re.search(
-            rf"(?<![A-Za-z0-9_]){re.escape(obsolete_field)}(?![A-Za-z0-9_])",
-            text,
-        ):
-            errors.append(
-                f"SKILL.md must not use the V1 runtime field {obsolete_field}"
-            )
     for label, pattern in REQUIRED_SKILL_SEMANTICS:
         if pattern.search(text) is None:
             errors.append(f"SKILL.md must require {label}")

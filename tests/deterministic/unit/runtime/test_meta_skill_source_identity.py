@@ -54,10 +54,6 @@ def test_two_generators_share_the_methods_v2_agent_surface() -> None:
     assert package_validator.REQUIRED_SKILL_PHRASES == (
         registration_validator.REQUIRED_SKILL_PHRASES
     )
-    assert package_validator.OBSOLETE_SKILL_FIELDS == (
-        registration_validator.OBSOLETE_SKILL_FIELDS
-    )
-
     for contract in (
         ROOT
         / ".agents/skills/wiki-to-diagnosis-skill/references/output-contract.md",
@@ -68,6 +64,8 @@ def test_two_generators_share_the_methods_v2_agent_surface() -> None:
         for phrase in package_validator.REQUIRED_SKILL_PHRASES:
             assert phrase in text
         assert "INSUFFICIENT_EVIDENCE" not in text
+        for old_json_field in ('"target_logs":', '"identity_tokens":', '"sources":'):
+            assert old_json_field not in text
 
 
 def _write_package(
@@ -92,6 +90,8 @@ description: Diagnose one RPC timeout from frozen evidence.
 Read method-evidence-graph.json and method-evaluation-plan.json. Do not rescan
 logs. Evaluate every evaluation_ref in plan order and return only verdict and
 reason; use UNKNOWN when the evidence cannot decide the method rule.
+Server-produced evidence sources may originate from target_logs and retain
+identity_tokens internally.
 """,
         encoding="utf-8",
     )

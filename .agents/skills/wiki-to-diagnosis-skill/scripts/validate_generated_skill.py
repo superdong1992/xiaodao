@@ -47,7 +47,6 @@ REQUIRED_SKILL_PHRASES = (
     "reason",
     "UNKNOWN",
 )
-OBSOLETE_SKILL_FIELDS = ("target_logs", "identity_tokens", "sources")
 
 
 def _ordinary(path: Path, label: str, errors: list[str]) -> bool:
@@ -252,14 +251,6 @@ def validate(skill_dir: Path, wiki: Path) -> dict[str, object]:
             for required_phrase in REQUIRED_SKILL_PHRASES:
                 if required_phrase not in skill_text:
                     errors.append(f"SKILL.md must mention {required_phrase}")
-            for obsolete_field in OBSOLETE_SKILL_FIELDS:
-                if re.search(
-                    rf"(?<![A-Za-z0-9_]){re.escape(obsolete_field)}(?![A-Za-z0-9_])",
-                    skill_text,
-                ):
-                    errors.append(
-                        f"SKILL.md must not use the V1 runtime field {obsolete_field}"
-                    )
 
     manifest = _read_json(skill_dir / "methods.json", errors)
     wiki_bytes = wiki.read_bytes() if wiki.exists() else b""

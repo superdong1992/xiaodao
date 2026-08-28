@@ -85,6 +85,7 @@ description: 从 Server 冻结的双端日志中定位 RPC 超时原因。
 
 按 Evaluation Plan 顺序逐项评估全部 `evaluation_ref`，不能在第一个确认项后停止。每项只输出
 `evaluation_ref`、`verdict` 和 `reason`；证据无法决定时使用 `UNKNOWN`，并在 reason 中说明观测限制。
+Server 生成的 evidence sources 可能来自 target_logs，并在内部保留 identity_tokens。
 
 Logparse 预处理、目标日志冻结、Review 和最终 Artifact 发布由 Server 完成；诊断阶段不重新执行这些操作。
 `client_pid` 和 `server_pid` 是可选事实；缺失时不请求补充，也不构成证据缺口。
