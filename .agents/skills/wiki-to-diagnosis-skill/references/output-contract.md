@@ -17,9 +17,11 @@
 ## SKILL.md
 
 - frontmatter 只要求 `name` 和 `description`；`name` 必须与目录名及 `methods.json.skill_name` 相同。
-- 入口保持简短，说明只消费 Server 生成的 `method-evidence-graph.json` 和
+- 入口保持简短，说明读取冻结 `request.json`、Server 生成的 `method-evidence-graph.json` 和
   `method-evaluation-plan.json`，并按需读取方法卡和共享引用。
-- 明确不读取目标日志、不重新扫描 marker，也不重新选择日志。
+- 明确方法规则需要用户输入时读取 `request.json` 中的冻结值。
+- 明确日志证据只能来自 Evidence Graph 和 Evaluation Plan；不读取目标日志、不重新扫描 marker，
+  也不重新选择日志。
 - 明确按 Evaluation Plan 顺序评估全部 `evaluation_ref`，不能在第一个确认项后停止。
 - 明确每项只输出 `evaluation_ref`、`verdict` 和 `reason`；`verdict` 只能是
   `CONFIRMED`、`REJECTED` 或 `UNKNOWN`。

@@ -80,8 +80,9 @@ description: 从 Server 冻结的双端日志中定位 RPC 超时原因。
 
 # RPC 超时定位
 
-只消费 Server 写入的 `method-evidence-graph.json` 和
-`method-evaluation-plan.json`。不读取目标日志，也不重新扫描 marker。
+读取冻结 `request.json`、Server 写入的 `method-evidence-graph.json` 和
+`method-evaluation-plan.json`。方法规则需要用户输入时读取 request 中的冻结值。日志证据只能来自
+Evidence Graph 和 Evaluation Plan；不读取目标日志，也不重新扫描 marker。
 
 按 Evaluation Plan 顺序逐项评估全部 `evaluation_ref`，不能在第一个确认项后停止。每项只输出
 `evaluation_ref`、`verdict` 和 `reason`；证据无法决定时使用 `UNKNOWN`，并在 reason 中说明观测限制。
@@ -333,6 +334,10 @@ def test_valid_production_registration_passes(tmp_path: Path) -> None:
     registration, wiki, identity = _write_valid_registration(tmp_path)
 
     result = _validate(registration, wiki, source_identity=identity)
+    skill_text = (
+        registration / "package/diagnose-rpc-timeout/SKILL.md"
+    ).read_text(encoding="utf-8")
+    methods = json.loads(_methods_path(registration).read_text(encoding="utf-8"))
 
     assert result["ok"] is True, result["errors"]
     assert result["registration_id"] == registration.name
@@ -341,6 +346,9 @@ def test_valid_production_registration_passes(tmp_path: Path) -> None:
     assert result["method_count"] == 1
     assert result["template_count"] == 2
     assert result["log_template_extraction_version"] == 2
+    assert methods["required_user_inputs"] == REQUIRED_INPUTS
+    assert "request.json" in skill_text
+    assert all(field in skill_text for field in ("evaluation_ref", "verdict", "reason"))
 
 
 def test_valid_production_registration_loads_in_server(tmp_path: Path) -> None:

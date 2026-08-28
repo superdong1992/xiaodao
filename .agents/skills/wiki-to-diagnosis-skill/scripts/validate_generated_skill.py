@@ -40,6 +40,7 @@ SOURCE_LOG_TEMPLATES_REFERENCE = "references/source-log-templates.md"
 SOURCE_IDENTITY_SCHEMA_VERSION = 2
 LOG_TEMPLATE_EXTRACTION_VERSION = 1
 REQUIRED_SKILL_PHRASES = (
+    "request.json",
     "method-evidence-graph.json",
     "method-evaluation-plan.json",
     "evaluation_ref",

@@ -48,9 +48,10 @@ registration root。生成物只包含产品 registration 和闭合 Methods pack
    去重或丢失模板。事件名本身不是 marker；例如 `API_COMPLETE service={service}` 对应
    `API_COMPLETE service=`，只写 `API_COMPLETE` 必须判为错误。
 7. Server 只扫描一次冻结日志，生成 `method-evidence-graph.json` 和
-   `method-evaluation-plan.json`。业务 `SKILL.md` 只说明如何按方法卡评估这两份输入，不读取目标日志、
-   不重新扫描 marker、不执行日志预处理，也不负责最终 Artifact 打包。业务入口必须逐字使用输出
-   合同给出的 Server 边界和 PID 可选说明，避免写入任何被禁用的本地运行标识。
+   `method-evaluation-plan.json`。冻结 `request.json` 继续提供方法规则所需的用户输入。业务
+   `SKILL.md` 只说明如何按方法卡评估这些输入；日志证据只能来自 Graph/Plan，不读取目标日志、
+   不重新扫描 marker、不执行日志预处理，也不负责最终 Artifact 打包。业务入口必须逐字使用
+   输出合同给出的 Server 边界和 PID 可选说明，避免写入任何被禁用的本地运行标识。
 8. 按 Evaluation Plan 顺序评估全部 `evaluation_ref`，不能在第一个确认项后停止。每项只输出
    `evaluation_ref`、`verdict` 和 `reason`，不回抄 marker、日志原文、行号、哈希或事件身份。
    日志缺失只能形成 Wiki 允许的 `UNKNOWN`，不能自动排除原因。

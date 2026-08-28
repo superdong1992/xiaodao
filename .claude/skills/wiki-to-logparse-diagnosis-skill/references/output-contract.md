@@ -119,8 +119,10 @@
 
 frontmatter 只包含 `name` 和 `description`。入口保持简短，并明确：
 
-1. 只消费 Server 写入的 `method-evidence-graph.json` 和 `method-evaluation-plan.json`。
-2. 不读取目标日志、不重新扫描 marker，也不重新选择日志。
+1. 读取冻结 `request.json`、Server 写入的 `method-evidence-graph.json` 和
+   `method-evaluation-plan.json`。
+2. 方法规则需要用户输入时读取 `request.json` 中的冻结值。日志证据只能来自 Evidence Graph 和
+   Evaluation Plan；不读取目标日志、不重新扫描 marker，也不重新选择日志。
 3. 按 Evaluation Plan 顺序评估全部 `evaluation_ref`；不能在第一个确认项后停止。
 4. 每项只输出 `evaluation_ref`、`verdict` 和 `reason`；`verdict` 只能是
    `CONFIRMED`、`REJECTED` 或 `UNKNOWN`。

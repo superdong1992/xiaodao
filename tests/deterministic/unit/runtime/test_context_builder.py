@@ -448,6 +448,7 @@ def test_production_output_contract_materializes_the_role_specific_protocol(
     assert b"do not write" in content.lower()
     if job_type is JobType.DIAGNOSE:
         assert b"output/method-diagnosis.draft.json" in content
+        assert b"inputs/request.json" in content
         assert b"inputs/method-evidence-graph.json" in content
         assert b"inputs/method-evaluation-plan.json" in content
         assert b"Every item has exactly `evaluation_ref`, `verdict`, and `reason`" in content
@@ -455,6 +456,7 @@ def test_production_output_contract_materializes_the_role_specific_protocol(
     else:
         assert job_type is JobType.REVIEW
         assert b"output/method-review.draft.json" in content
+        assert b"inputs/request.json" in content
         assert b"inputs/method-evidence-graph.json" in content
         assert b"inputs/method-evaluation-plan.json" in content
         assert b"SPECIALIST response, verdicts, reasons" in content

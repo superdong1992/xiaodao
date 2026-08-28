@@ -111,6 +111,7 @@ OPTIONAL_PID_SENTENCE = (
     "`client_pid` 和 `server_pid` 是可选事实；缺失时不请求补充，也不构成证据缺口。"
 )
 REQUIRED_SKILL_PHRASES = (
+    "request.json",
     "method-evidence-graph.json",
     "method-evaluation-plan.json",
     "evaluation_ref",
@@ -120,10 +121,18 @@ REQUIRED_SKILL_PHRASES = (
 )
 REQUIRED_SKILL_SEMANTICS = (
     (
-        "consume only the server Evidence Graph and Evaluation Plan",
+        "read the frozen request, Evidence Graph, and Evaluation Plan",
         re.compile(
-            r"(?:只|仅)(?:消费|读取).*method-evidence-graph\.json.*method-evaluation-plan\.json"
-            r"|(?:consume|read) only.*method-evidence-graph\.json.*method-evaluation-plan\.json",
+            r"(?:读取|消费).*request\.json.*method-evidence-graph\.json.*method-evaluation-plan\.json"
+            r"|(?:read|consume).*request\.json.*method-evidence-graph\.json.*method-evaluation-plan\.json",
+            re.IGNORECASE | re.DOTALL,
+        ),
+    ),
+    (
+        "use the Evidence Graph and Evaluation Plan as the only log evidence",
+        re.compile(
+            r"(?:日志证据).*(?:只能|仅能).*(?:Evidence Graph|证据图).*(?:Evaluation Plan|评估计划)"
+            r"|(?:log evidence).*(?:only).*(?:Evidence Graph).*(?:Evaluation Plan)",
             re.IGNORECASE | re.DOTALL,
         ),
     ),

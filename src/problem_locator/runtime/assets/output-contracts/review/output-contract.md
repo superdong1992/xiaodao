@@ -5,10 +5,14 @@ array itself is the document root. Do not wrap it in an object or Markdown and
 do not write `output/job_outcome.draft.json`.
 
 Blindly and independently evaluate only the server-produced
+`inputs/request.json` frozen user facts,
 `inputs/method-evidence-graph.json`,
-`inputs/method-evaluation-plan.json`, and the pinned Methods package. The
-SPECIALIST response, verdicts, reasons, session, and workspace are not inputs.
-Do not use `inputs/method-diagnosis.json` or any prior Specialist conclusion.
+`inputs/method-evaluation-plan.json`, and the pinned Methods package. Apply a
+request value only when the method rule names its required user input. Log
+evidence comes only from the Evidence Graph and Evaluation Plan; do not read or
+scan target logs. The SPECIALIST response, verdicts, reasons, session, and
+workspace are not inputs. Do not use `inputs/method-diagnosis.json` or any prior
+Specialist conclusion.
 
 Return one item for every Evaluation Plan item, in exact plan order:
 

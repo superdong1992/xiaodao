@@ -87,9 +87,11 @@ name: diagnose-rpc-timeout
 description: Diagnose one RPC timeout from frozen evidence.
 ---
 
-Read method-evidence-graph.json and method-evaluation-plan.json. Do not rescan
-logs. Evaluate every evaluation_ref in plan order and return only verdict and
-reason; use UNKNOWN when the evidence cannot decide the method rule.
+Read request.json, method-evidence-graph.json, and method-evaluation-plan.json.
+Use request values for declared inputs. Log evidence comes only from the
+Evidence Graph and Evaluation Plan; do not rescan logs. Evaluate every
+evaluation_ref in plan order and return only verdict and reason; use UNKNOWN
+when the evidence cannot decide the method rule.
 Server-produced evidence sources may originate from target_logs and retain
 identity_tokens internally.
 """,
@@ -191,6 +193,36 @@ def test_canonical_validator_independently_recomputes_source_wiki_identity(
     assert rejected["errors"] == [
         "source_wiki_sha256 does not match the supplied Wiki"
     ]
+
+
+def test_generated_v2_skill_reads_request_for_required_user_inputs(
+    tmp_path: Path,
+) -> None:
+    wiki = tmp_path / "wiki.md"
+    template = "RPC_TIMEOUT service={service} request_id={request_id}"
+    wiki_bytes = (
+        "# Authored Wiki\n\n"
+        "The service value is a required user input used by the rule.\n\n"
+        f"```text\n{template}\n```\n"
+    ).encode()
+    wiki.write_bytes(wiki_bytes)
+    package = _write_package(
+        tmp_path,
+        wiki_sha256=hashlib.sha256(wiki_bytes).hexdigest(),
+        required_user_inputs=["service"],
+        log_derived_fields=["request_id"],
+        evidence_marker="RPC_TIMEOUT service=",
+        reference_log_template=template,
+    )
+
+    result = _load_validator().validate(package, wiki)
+    skill_text = (package / "SKILL.md").read_text(encoding="utf-8")
+
+    assert result["ok"] is True
+    assert "request.json" in skill_text
+    assert "method-evidence-graph.json" in skill_text
+    assert "method-evaluation-plan.json" in skill_text
+    assert all(field in skill_text for field in ("evaluation_ref", "verdict", "reason"))
 
 
 def test_validator_requires_canonical_markers_and_named_field_order(

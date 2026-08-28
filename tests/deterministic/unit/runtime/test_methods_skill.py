@@ -69,9 +69,11 @@ description: Diagnose a test timeout from frozen evidence.
 
 # Test locator
 
-Read `method-evidence-graph.json` and `method-evaluation-plan.json`. Do not
-rescan logs. Evaluate every `evaluation_ref` in plan order and return only
-`verdict` and `reason`; use `UNKNOWN` when the evidence cannot decide the rule.
+Read `request.json`, `method-evidence-graph.json`, and
+`method-evaluation-plan.json`. Use request values for declared inputs. Log
+evidence comes only from the Evidence Graph and Evaluation Plan; do not rescan
+logs. Evaluate every `evaluation_ref` in plan order and return only `verdict`
+and `reason`; use `UNKNOWN` when the evidence cannot decide the rule.
 """,
         encoding="utf-8",
     )

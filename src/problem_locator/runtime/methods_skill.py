@@ -306,6 +306,7 @@ def load_methods_package(
         raise ValueError("SKILL.md must be UTF-8") from exc
     skill_name = _frontmatter_name(skill_text)
     for phrase in (
+        "request.json",
         "method-evidence-graph.json",
         "method-evaluation-plan.json",
         "evaluation_ref",

@@ -25,8 +25,9 @@ description: Convert an authored troubleshooting Wiki into one evidence-driven d
 6. 不能区分具体原因、但用于确认问题发生或关联目标请求的模板语义可以放入其他共享引用；无论如何，
    所有机械模板都必须逐字出现在固定模板清单文件中，不得因为它不是分支标记就从生成物中丢失。
 7. 为每张方法卡写清楚可机械执行的确认、排除和未知条件。Server 会把一次扫描得到的 Evidence Graph
-   和完整 Evaluation Plan 交给 Agent；生成的 Skill 只负责让 Agent 能按方法规则判断每个
-   `evaluation_ref`，不要求 Agent 回抄 marker、日志原文、行号、哈希或事件身份。
+   和完整 Evaluation Plan 交给 Agent；冻结 `request.json` 继续提供方法规则所需的用户输入。
+   生成的 Skill 只负责让 Agent 能按方法规则判断每个 `evaluation_ref`，不要求 Agent 回抄
+   marker、日志原文、行号、哈希或事件身份。
 8. 按用户指定的目录和名称生成一个 Skill。生成前先阅读 [输出合同](references/output-contract.md)，严格使用其中的文件结构和字段。
 9. 生成后运行本 Skill 的校验脚本。校验失败时只修正被报告的结构问题；不要借机改变 Wiki 语义。
 
@@ -48,10 +49,12 @@ description: Convert an authored troubleshooting Wiki into one evidence-driven d
 
 完整使用入口接收 Wiki 声明的用户参数和日志附件。运行器先完成 Logparse 预处理，再由 Server 扫描
 一次冻结日志，生成 `method-evidence-graph.json` 和 `method-evaluation-plan.json`。生成的定位 Skill
-在评估阶段遵守以下边界：
+在评估阶段同时读取冻结 `request.json`，并遵守以下边界：
 
+- `request.json` 提供 Wiki 声明的用户输入；方法规则需要某项输入时使用其冻结值。
 - `method-evidence-graph.json` 是本次评估的完整证据集合，`method-evaluation-plan.json` 是完整待判定清单。
-- 不读取目标日志，不重新扫描 marker，不重新选择生命周期、进程或日志路径。
+- 日志证据只能来自 Evidence Graph 和 Evaluation Plan；不读取目标日志，不重新扫描 marker，
+  不重新选择生命周期、进程或日志路径。
 - 按 Evaluation Plan 顺序逐项应用对应方法卡；不能在第一个确认项后停止。
 - 每个输出项只能包含 `evaluation_ref`、`verdict` 和 `reason`。`verdict` 只能是
   `CONFIRMED`、`REJECTED` 或 `UNKNOWN`。

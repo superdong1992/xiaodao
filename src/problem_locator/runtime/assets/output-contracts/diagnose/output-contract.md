@@ -6,9 +6,12 @@ not wrap it in an object or Markdown and do not write
 `output/job_outcome.draft.json`.
 
 The Server has already scanned the logs once. Use only the server-produced
+`inputs/request.json` frozen user facts,
 `inputs/method-evidence-graph.json`,
-`inputs/method-evaluation-plan.json`, and the pinned Methods package. Do not scan
-the logs again or rebuild evidence references.
+`inputs/method-evaluation-plan.json`, and the pinned Methods package. Apply a
+request value only when the method rule names its required user input. Log
+evidence comes only from the Evidence Graph and Evaluation Plan; do not read or
+scan target logs or rebuild evidence references.
 
 Return one item for every Evaluation Plan item, in exact plan order:
 

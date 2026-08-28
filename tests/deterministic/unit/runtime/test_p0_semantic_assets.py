@@ -106,7 +106,9 @@ def test_specialist_assets_require_methods_v2_evaluation_output() -> None:
     assert tool_meta["version"] == "4.0.0"
     assert "same configured model identity" in profile
     assert "SPECIALIST" in profile
+    assert "inputs/request.json" in profile
     assert "output/method-diagnosis.draft.json" in contract
+    assert "inputs/request.json" in contract
     assert "inputs/method-evidence-graph.json" in contract
     assert "inputs/method-evaluation-plan.json" in contract
     assert "evaluation_ref" in contract
@@ -130,8 +132,10 @@ def test_reviewer_assets_require_blind_methods_v2_evaluation() -> None:
     assert tool_meta["version"] == "3.0.0"
     assert "same configured model identity" in profile
     assert "REVIEWER" in profile
+    assert "inputs/request.json" in profile
     assert "SPECIALIST response, verdicts, reasons" in profile
     assert "output/method-review.draft.json" in contract
+    assert "inputs/request.json" in contract
     assert "inputs/method-evidence-graph.json" in contract
     assert "inputs/method-evaluation-plan.json" in contract
     assert "not inputs" in contract
