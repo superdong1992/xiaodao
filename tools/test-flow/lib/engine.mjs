@@ -21,6 +21,7 @@ import {
   validEnvironmentKeySummary,
 } from "../runtime-support/isolated-agent-env.mjs";
 import {
+  assertFlow,
   canonicalJson,
   readJson,
   redactError,
@@ -30,6 +31,19 @@ import {
   timestampForPath,
   writeJsonSync,
 } from "./util.mjs";
+
+export function validEvidenceV2CurrentAttemptCorePlan(plan) {
+  const requiresCurrentCore = plan?.stages?.some((stage) => [
+    "real.macos-codex-luna-e2e",
+    "real.macos-claude-deepseek-e2e",
+    "evidence-v2.release-verdict",
+  ].includes(stage.id));
+  if (!requiresCurrentCore) return true;
+  const core = plan.stages.find((stage) => stage.id === "deterministic.full");
+  return core?.decision === "RUN"
+    && core.reuse === null
+    && core.gates?.some((gate) => gate.id === "det.evidence-v2-core");
+}
 
 function runIdentifier() {
   return `run-${timestampForPath()}-${crypto.randomBytes(4).toString("hex")}`;
@@ -381,6 +395,11 @@ function notRunStage(stage, planStage) {
 
 export async function runFlow(repoRoot, options) {
   const built = buildRunPlan(repoRoot, options);
+  assertFlow(
+    validEvidenceV2CurrentAttemptCorePlan(built.plan),
+    "EVIDENCE_V2_CURRENT_ATTEMPT_CORE_REQUIRED",
+    "Evidence V2 provider certification requires Core evidence from the current attempt",
+  );
   if (options.planOnly) return { plan: built.plan, verdict: null, attemptRoot: null, exitCode: built.plan.admission.status === "ADMITTED" ? 0 : 2 };
 
   const runId = runIdentifier();

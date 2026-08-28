@@ -275,6 +275,12 @@ function filterReusableChain(selected, reusable, track) {
   }
 }
 
+export function freshStageIdsForTrack(stages, track, { requireCurrentAttemptCore = false } = {}) {
+  const fresh = new Set(stages.filter((stage) => stage.reuse[track] === "never").map((stage) => stage.id));
+  if (requireCurrentAttemptCore) fresh.add("deterministic.full");
+  return fresh;
+}
+
 function capForStage(stage, profile) {
   if (stage.id === "real.macos-codex-luna-methods") return profile.real_caps["codex.macos-methods"];
   if (stage.id === "real.macos-codex-luna-e2e") return profile.real_caps["codex.macos-e2e"];
@@ -563,7 +569,12 @@ export function buildRunPlan(repoRoot, options = {}) {
     performanceIdentities[stage.id] = performanceIdentity(stage, identity.producer_identity, config.policy.performance);
   }
 
-  const freshStageIds = new Set(config.stages.stages.filter((stage) => stage.reuse[track] === "never").map((stage) => stage.id));
+  const requireCurrentAttemptCore = closure.stages.some((stage) => [
+    "real.macos-codex-luna-e2e",
+    "real.macos-claude-deepseek-e2e",
+    "evidence-v2.release-verdict",
+  ].includes(stage.id));
+  const freshStageIds = freshStageIdsForTrack(config.stages.stages, track, { requireCurrentAttemptCore });
   const reusable = findReusableStages(history, stageIdentities, {
     track,
     freshStageIds,

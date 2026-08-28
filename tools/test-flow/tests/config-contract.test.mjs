@@ -100,6 +100,14 @@ test("provider certification runs its production Python driver before either rea
   }
 });
 
+test("Release Core evidence must be produced in the current attempt", () => {
+  const config = loadConfiguration(REPO_ROOT);
+  assert.equal(config.stages.stages.find((stage) => stage.id === "deterministic.full").reuse.release, "never");
+  assert.throws(() => withConfigMutation("stages.v2.json", (value) => {
+    value.stages.find((stage) => stage.id === "deterministic.full").reuse.release = "identity";
+  }, (root) => loadConfiguration(REPO_ROOT, root)), (error) => error.code === "CONFIG_EVIDENCE_V2_CORE_RELEASE_REUSE");
+});
+
 test("restoring legacy provider evidence fails configuration validation", () => {
   assert.throws(() => withConfigMutation("gates.v2.json", (value) => {
     value.gates["real.macos-codex-luna-e2e"].evidence = [

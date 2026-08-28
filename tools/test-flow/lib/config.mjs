@@ -555,6 +555,7 @@ function crossValidate(config) {
   const deterministicFull = config.stages.stages.find((stage) => stage.id === "deterministic.full");
   assertFlow(coreGate?.result_receipt === EVIDENCE_V2_CORE_RECEIPT, "CONFIG_EVIDENCE_V2_CORE_GATE", "det.evidence-v2-core is missing");
   assertFlow(deterministicFull?.gates.includes("det.evidence-v2-core"), "CONFIG_EVIDENCE_V2_CORE_STAGE", "det.evidence-v2-core must belong to deterministic.full");
+  assertFlow(deterministicFull?.reuse.release === "never", "CONFIG_EVIDENCE_V2_CORE_RELEASE_REUSE", "Release must produce Core evidence in the current attempt");
   const modelCertStages = config.stages.stages.filter((stage) => stage.gates.some(
     (gateId) => config.gates.gates[gateId]?.result_receipt === EVIDENCE_V2_MODEL_CERT_RECEIPT,
   ));

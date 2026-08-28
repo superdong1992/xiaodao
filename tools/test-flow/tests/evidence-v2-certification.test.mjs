@@ -7,6 +7,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import {
+  attachEvidenceV2ModelCert,
   executeGate,
   materializeEvidenceV2CoreVerdict,
   materializeEvidenceV2ModelCert,
@@ -384,6 +385,60 @@ test("shared Test Flow builders materialize P1, P2, and the final release verdic
     }), verdict);
   } finally {
     fs.rmSync(value.root, { recursive: true, force: true });
+  }
+});
+
+test("central attach validates the provider-owned model cert without rewriting it", () => {
+  const value = fixture();
+  try {
+    for (const target of ["P1", "P2"]) {
+      const cert = value.certs[target];
+      const before = fs.readFileSync(cert.certPath);
+      const result = attachEvidenceV2ModelCert({ status: "PASS" }, {
+        context: {
+          attemptRoot: value.artifactRoot,
+          sourceSnapshotDigest: SOURCE_DIGEST,
+          sourceSnapshotRoot: value.sourceRoot,
+        },
+        gate: { result_receipt: EVIDENCE_V2_MODEL_CERT_RECEIPT, certification_target: target },
+        gateRoot: cert.certRoot,
+      });
+      assert.equal(result.status, "PASS");
+      assert.equal(result.model_cert.certification_target, target);
+      assert.deepEqual(fs.readFileSync(cert.certPath), before);
+    }
+  } finally {
+    fs.rmSync(value.root, { recursive: true, force: true });
+  }
+});
+
+test("central attach rejects a missing or changed provider-owned model cert", () => {
+  for (const mutation of ["missing", "changed"]) {
+    const value = fixture();
+    try {
+      const cert = value.certs.P1;
+      if (mutation === "missing") fs.rmSync(cert.certPath);
+      else {
+        const changed = readJson(cert.certPath);
+        changed.model.revision = digest("changed-provider-cert");
+        fs.writeFileSync(cert.certPath, canonicalJson(changed));
+      }
+      const result = attachEvidenceV2ModelCert({ status: "PASS" }, {
+        context: {
+          attemptRoot: value.artifactRoot,
+          sourceSnapshotDigest: SOURCE_DIGEST,
+          sourceSnapshotRoot: value.sourceRoot,
+        },
+        gate: { result_receipt: EVIDENCE_V2_MODEL_CERT_RECEIPT, certification_target: "P1" },
+        gateRoot: cert.certRoot,
+      });
+      assert.equal(result.status, "ERROR");
+      assert.equal(result.failure_domain, "HARNESS");
+      if (mutation === "missing") assert.equal(result.code, "EVIDENCE_V2_MODEL_CERT_MISSING");
+      else assert.equal(result.code, "MODEL_CERT_ADAPTER_INPUT_MISMATCH");
+    } finally {
+      fs.rmSync(value.root, { recursive: true, force: true });
+    }
   }
 });
 

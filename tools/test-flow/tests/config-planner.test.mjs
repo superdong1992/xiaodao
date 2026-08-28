@@ -6,7 +6,8 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { loadConfiguration, topologicalStages } from "../lib/config.mjs";
-import { buildRunPlan, builtInAdapter, providerCertificationClient, releaseImageValidationMode, resolveClient, retryRequirement, supportedCodexLunaOrchestrator, supportedHostClientTopology } from "../lib/planner.mjs";
+import { findReusableStages } from "../lib/history.mjs";
+import { buildRunPlan, builtInAdapter, freshStageIdsForTrack, providerCertificationClient, releaseImageValidationMode, resolveClient, retryRequirement, supportedCodexLunaOrchestrator, supportedHostClientTopology } from "../lib/planner.mjs";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 
@@ -178,6 +179,35 @@ test("formal Evidence V2 certification exposes normal two-call and four-call rep
   assert.ok(["darwin-local-claude-deepseek-quick-validation", "sealed-ubuntu2204-container-claude-deepseek-quick-validation"].includes(built.plan.release_inputs.topology));
   assert.equal(built.plan.release_inputs.network_policy, "provider-plus-local-evidence-v2-runtime");
   assert.equal(built.plan.release_inputs.cross_job_adapter, null);
+});
+
+test("a reusable historical PASS cannot replace the current-attempt Release Core", () => {
+  const config = loadConfiguration(REPO_ROOT);
+  const fresh = freshStageIdsForTrack(config.stages.stages, "release", { requireCurrentAttemptCore: true });
+  assert.equal(fresh.has("deterministic.full"), true);
+  const identity = { producer_identity: "same-producer", proof_identity: "same-proof" };
+  const reusable = findReusableStages([{
+    attempt_root: path.join(os.tmpdir(), "historical-core-pass"),
+    verdict: {
+      run_id: "run-historical-core",
+      committed_at_utc: "2026-08-01T00:00:00.000Z",
+      evidence_reusable: true,
+      stages: [{ id: "deterministic.full", kind: "deterministic", status: "PASS", result_source: "EXECUTED", ...identity }],
+    },
+  }], { "deterministic.full": identity }, { track: "release", freshStageIds: fresh });
+  assert.equal(reusable.has("deterministic.full"), false);
+
+  const built = buildIsolatedRunPlan({
+    track: "release",
+    goal: "release.evidence-v2-certification",
+    client: process.platform === "linux" ? "linux" : "macos",
+    planOnly: true,
+    allowCodexPosthocBudget: true,
+  });
+  const core = built.plan.stages.find((stage) => stage.id === "deterministic.full");
+  assert.equal(core.decision, "RUN");
+  assert.equal(core.reuse, null);
+  assert.ok(core.gates.some((gate) => gate.id === "det.evidence-v2-core"));
 });
 
 test("provider certification uses Linux inside sealed Ubuntu and macOS on native Darwin", () => {

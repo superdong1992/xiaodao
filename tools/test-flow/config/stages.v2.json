@@ -42,7 +42,7 @@
       "identity_set": "deterministic",
       "timeout_seconds": 600,
       "progress_class": "local",
-      "reuse": {"dev": "identity", "release": "identity"},
+      "reuse": {"dev": "identity", "release": "never"},
       "platforms": ["windows", "macos", "linux"]
     },
     {

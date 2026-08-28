@@ -104,6 +104,7 @@ import {
   EVIDENCE_V2_MODEL_CERT_FILENAME,
   EVIDENCE_V2_MODEL_CERT_RECEIPT,
   EVIDENCE_V2_RELEASE_VERDICT_FILENAME,
+  validateEvidenceV2ModelCert,
 } from "../../validation/evidence-v2-certification.mjs";
 
 const LINUX_CLIENT_BROWSER_RUNNER_RELATIVE = "tools/test-flow/runtime-support/linux_client_browser_runner.py";
@@ -1150,19 +1151,25 @@ export function materializeEvidenceV2ReleaseVerdict({
   return verdict;
 }
 
-function attachEvidenceV2ModelCert(result, {
+export function attachEvidenceV2ModelCert(result, {
   context,
   gate,
   gateRoot: evidenceRoot,
 }) {
   if (result.status !== "PASS" || gate.result_receipt !== EVIDENCE_V2_MODEL_CERT_RECEIPT) return result;
+  const certPath = path.join(evidenceRoot, EVIDENCE_V2_MODEL_CERT_FILENAME);
+  if (!fs.existsSync(certPath)) {
+    return { ...result, status: "ERROR", failure_domain: "HARNESS", code: "EVIDENCE_V2_MODEL_CERT_MISSING" };
+  }
   try {
-    const modelCert = materializeEvidenceV2ModelCert({
+    const modelCert = JSON.parse(fs.readFileSync(certPath, "utf8"));
+    const coreVerdictPath = path.join(context.attemptRoot, ...EVIDENCE_V2_CORE_VERDICT_PATH.split("/"));
+    validateEvidenceV2ModelCert(modelCert, {
       certificationTarget: gate.certification_target,
       sourceSnapshotDigest: context.sourceSnapshotDigest,
-      sourceSnapshotRoot: context.sourceSnapshotRoot,
-      attemptRoot: context.attemptRoot,
-      gateRoot: evidenceRoot,
+      sourceRoot: context.sourceSnapshotRoot,
+      coreVerdictPath,
+      certRoot: evidenceRoot,
     });
     return { ...result, model_cert: modelCert };
   } catch (error) {
