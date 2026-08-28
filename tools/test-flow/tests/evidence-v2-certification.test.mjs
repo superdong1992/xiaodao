@@ -35,6 +35,8 @@ import {
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 const SOURCE_DIGEST = "a".repeat(64);
+const SCENARIO_GRAPH_REF = `graph-${"3".repeat(64)}`;
+const SCENARIO_PLAN_REF = `plan-${"2".repeat(64)}`;
 
 function clone(value) {
   return JSON.parse(JSON.stringify(value));
@@ -80,9 +82,33 @@ function methodsResult(target) {
     result_ref: `result-${hex.repeat(64)}`,
     evaluation_id: `00000000-0000-4000-8000-00000000002${hex}`,
     status: "RESOLVED",
-    plan_ref: `plan-${hex.repeat(64)}`,
-    evidence_graph_ref: `graph-${hex.repeat(64)}`,
+    plan_ref: SCENARIO_PLAN_REF,
+    evidence_graph_ref: SCENARIO_GRAPH_REF,
     diagnostic_id: `diag-${hex.repeat(64)}`,
+  };
+}
+
+function scenarioIdentity() {
+  return {
+    scenario_id: "multiple-rpc-timeouts",
+    source_wiki_sha256: digest("rpc-timeout-wiki"),
+    registration_id: "rpc-timeout-methods-v1",
+    skill_content_sha256: digest("registered-rpc-timeout-skill"),
+    user_inputs_sha256: digest("multiple-rpc-timeouts-user-inputs"),
+    sources: [
+      { source_id: "client", content_sha256: digest("multiple-rpc-timeouts-client.log") },
+      { source_id: "server", content_sha256: digest("multiple-rpc-timeouts-server.log") },
+    ],
+    evidence_graph: {
+      ref: SCENARIO_GRAPH_REF,
+      canonical_sha256: digest("multiple-rpc-timeouts-evidence-graph"),
+      canonical_size: 4096,
+    },
+    evaluation_plan: {
+      ref: SCENARIO_PLAN_REF,
+      canonical_sha256: digest("multiple-rpc-timeouts-evaluation-plan"),
+      canonical_size: 2048,
+    },
   };
 }
 
@@ -112,6 +138,7 @@ function modelInput({ target, manifestSha256, coreSha256 }) {
       path: EVIDENCE_V2_CORE_VERDICT_PATH,
       sha256: coreSha256,
     },
+    scenario: scenarioIdentity(),
     provider: target === "P1"
       ? { id: "deepseek", transport: "claude-code-compatible-api" }
       : { id: "openai", transport: "codex-app-server" },
@@ -275,6 +302,8 @@ test("shared Test Flow builders materialize P1, P2, and the final release verdic
     assert.deepEqual(verdict.model_certs.map((cert) => cert.certification_target), ["P1", "P2"]);
     assert.equal(verdict.core_verdict.sha256, value.certs.P1.cert.core_verdict.sha256);
     assert.equal(verdict.core_verdict.sha256, value.certs.P2.cert.core_verdict.sha256);
+    assert.deepEqual(verdict.scenario, value.certs.P1.cert.scenario);
+    assert.deepEqual(verdict.scenario, value.certs.P2.cert.scenario);
     assert.equal(validateEvidenceV2ReleaseVerdict(verdict, {
       sourceSnapshotDigest: SOURCE_DIGEST,
       sourceRoot: value.sourceRoot,
@@ -301,6 +330,11 @@ test("model certification rejects one-field identity, topology, usage, and resul
       (item) => { item.invocations[0].usage.total_tokens += 1; },
       (item) => { item.call_counts.specialist_repairs = 0; },
       (item) => { item.usage.output_tokens += 1; item.usage.total_tokens += 1; },
+      (item) => { item.scenario.scenario_id = "another-scenario"; },
+      (item) => { item.scenario.source_wiki_sha256 = "b".repeat(63); },
+      (item) => { item.scenario.sources[1].source_id = item.scenario.sources[0].source_id; },
+      (item) => { item.scenario.evidence_graph.ref = `graph-${"b".repeat(64)}`; },
+      (item) => { item.methods_result.plan_ref = `plan-${"b".repeat(64)}`; },
       (item) => { item.methods_result.result_ref = `result-${"b".repeat(63)}`; },
       (item) => { item.methods_result.canonical_sha256 = "b".repeat(63); },
       (item) => { item.unexpected = true; },
@@ -350,6 +384,46 @@ test("model certification rejects one-field identity, topology, usage, and resul
   }
 });
 
+test("release rejects individually valid P1 and P2 certs for different Skill or source bytes", () => {
+  const mutations = [
+    (item) => { item.scenario.skill_content_sha256 = digest("another-registered-skill"); },
+    (item) => { item.scenario.sources[0].content_sha256 = digest("another-client.log"); },
+  ];
+  for (const mutate of mutations) {
+    const value = fixture();
+    try {
+      const changedInput = readJson(value.certs.P2.inputPath);
+      mutate(changedInput);
+      fs.writeFileSync(value.certs.P2.inputPath, canonicalJson(changedInput));
+      fs.rmSync(value.certs.P2.certPath);
+      const changedCert = materializeEvidenceV2ModelCert({
+        certificationTarget: "P2",
+        sourceSnapshotDigest: SOURCE_DIGEST,
+        sourceSnapshotRoot: value.sourceRoot,
+        attemptRoot: value.artifactRoot,
+        gateRoot: value.certs.P2.certRoot,
+      });
+      assert.equal(validateEvidenceV2ModelCert(changedCert, {
+        certificationTarget: "P2",
+        sourceSnapshotDigest: SOURCE_DIGEST,
+        sourceRoot: value.sourceRoot,
+        coreVerdictPath: value.coreVerdictPath,
+        certRoot: value.certs.P2.certRoot,
+      }), changedCert);
+      assert.throws(() => buildEvidenceV2ReleaseVerdict({
+        sourceSnapshotDigest: SOURCE_DIGEST,
+        sourceRoot: value.sourceRoot,
+        artifactRoot: value.artifactRoot,
+        coreVerdictPath: value.coreVerdictPath,
+        p1ModelCertPath: value.certs.P1.certPath,
+        p2ModelCertPath: value.certs.P2.certPath,
+      }), (error) => error.code === "RELEASE_VERDICT_SCENARIO_MISMATCH");
+    } finally {
+      fs.rmSync(value.root, { recursive: true, force: true });
+    }
+  }
+});
+
 test("release verdict exists only for PASS Core plus one exact P1 and P2 certification", () => {
   const value = fixture();
   try {
@@ -376,6 +450,7 @@ test("release verdict exists only for PASS Core plus one exact P1 and P2 certifi
       (item) => { item.source_snapshot_digest = "b".repeat(64); },
       (item) => { item.contract_manifest.sha256 = "b".repeat(64); },
       (item) => { item.core_verdict.sha256 = "b".repeat(64); },
+      (item) => { item.scenario.skill_content_sha256 = "b".repeat(64); },
       (item) => { item.model_certs[0].sha256 = "b".repeat(64); },
       (item) => { item.model_certs[0].provider.id = "other"; },
       (item) => { item.model_certs[1].model.revision = "other"; },
@@ -420,6 +495,11 @@ test("JSON Schemas close every shared certification receipt root", () => {
   assert.equal(schemas["release-verdict.schema.json"].properties.status.const, "PASS");
   assert.equal(schemas["release-verdict.schema.json"].properties.model_certs.minItems, 2);
   assert.equal(schemas["release-verdict.schema.json"].properties.model_certs.maxItems, 2);
+  assert.equal(schemas["model-cert-input.schema.json"].$defs.scenario.additionalProperties, false);
+  assert.equal(schemas["model-cert-input.schema.json"].$defs.scenarioSource.additionalProperties, false);
+  assert.ok(schemas["model-cert-input.schema.json"].required.includes("scenario"));
+  assert.ok(schemas["model-cert.schema.json"].required.includes("scenario"));
+  assert.ok(schemas["release-verdict.schema.json"].required.includes("scenario"));
 });
 
 function readJson(filePath) {

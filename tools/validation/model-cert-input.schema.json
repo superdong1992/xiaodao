@@ -12,6 +12,7 @@
     "source_snapshot_digest",
     "contract_manifest",
     "core_verdict",
+    "scenario",
     "provider",
     "model",
     "execution_identity",
@@ -28,6 +29,7 @@
     "source_snapshot_digest": { "$ref": "#/$defs/sha256" },
     "contract_manifest": { "$ref": "#/$defs/manifestBinding" },
     "core_verdict": { "$ref": "#/$defs/coreBinding" },
+    "scenario": { "$ref": "#/$defs/scenario" },
     "provider": { "$ref": "#/$defs/provider" },
     "model": { "$ref": "#/$defs/model" },
     "execution_identity": { "$ref": "#/$defs/executionIdentity" },
@@ -123,6 +125,63 @@
       "properties": {
         "path": { "const": "payload/stages/deterministic.full/gates/det.evidence-v2-core/core-verdict.json" },
         "sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "scenario": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "scenario_id",
+        "source_wiki_sha256",
+        "registration_id",
+        "skill_content_sha256",
+        "user_inputs_sha256",
+        "sources",
+        "evidence_graph",
+        "evaluation_plan"
+      ],
+      "properties": {
+        "scenario_id": { "const": "multiple-rpc-timeouts" },
+        "source_wiki_sha256": { "$ref": "#/$defs/sha256" },
+        "registration_id": { "$ref": "#/$defs/nonEmpty" },
+        "skill_content_sha256": { "$ref": "#/$defs/sha256" },
+        "user_inputs_sha256": { "$ref": "#/$defs/sha256" },
+        "sources": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/scenarioSource" }
+        },
+        "evidence_graph": { "$ref": "#/$defs/evidenceGraphIdentity" },
+        "evaluation_plan": { "$ref": "#/$defs/evaluationPlanIdentity" }
+      }
+    },
+    "scenarioSource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source_id", "content_sha256"],
+      "properties": {
+        "source_id": { "$ref": "#/$defs/nonEmpty" },
+        "content_sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "evidenceGraphIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ref", "canonical_sha256", "canonical_size"],
+      "properties": {
+        "ref": { "type": "string", "pattern": "^graph-[a-f0-9]{64}$" },
+        "canonical_sha256": { "$ref": "#/$defs/sha256" },
+        "canonical_size": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "evaluationPlanIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ref", "canonical_sha256", "canonical_size"],
+      "properties": {
+        "ref": { "type": "string", "pattern": "^plan-[a-f0-9]{64}$" },
+        "canonical_sha256": { "$ref": "#/$defs/sha256" },
+        "canonical_size": { "type": "integer", "minimum": 1 }
       }
     },
     "provider": {

@@ -11,6 +11,7 @@
     "source_snapshot_digest",
     "contract_manifest",
     "core_verdict",
+    "scenario",
     "model_certs"
   ],
   "properties": {
@@ -20,6 +21,7 @@
     "source_snapshot_digest": { "$ref": "model-cert-input.schema.json#/$defs/sha256" },
     "contract_manifest": { "$ref": "model-cert-input.schema.json#/$defs/manifestBinding" },
     "core_verdict": { "$ref": "model-cert-input.schema.json#/$defs/coreBinding" },
+    "scenario": { "$ref": "model-cert-input.schema.json#/$defs/scenario" },
     "model_certs": {
       "type": "array",
       "prefixItems": [

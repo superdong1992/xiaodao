@@ -40,6 +40,7 @@ export const EVIDENCE_V2_MODEL_CERT_INPUT_RECEIPT = "evidence-v2-model-cert-inpu
 export const EVIDENCE_V2_MODEL_CERT_RECEIPT = "evidence-v2-model-cert";
 export const EVIDENCE_V2_RELEASE_VERDICT_RECEIPT = "evidence-v2-release-verdict";
 export const EVIDENCE_V2_CERTIFICATION_SCHEMA_VERSION = 1;
+export const EVIDENCE_V2_CERTIFICATION_SCENARIO_ID = "multiple-rpc-timeouts";
 export const EVIDENCE_V2_MODEL_CERT_INPUT_FILENAME = "model-cert-input.json";
 export const EVIDENCE_V2_MODEL_CERT_FILENAME = "model-cert.json";
 export const EVIDENCE_V2_RELEASE_VERDICT_FILENAME = "release-verdict.json";
@@ -221,6 +222,65 @@ function validateMethodsResult(value) {
   assertFlow(TERMINAL_STATUSES.has(value.status), "MODEL_CERT_METHODS_STATUS", "final methods_result status is invalid");
 }
 
+function validateScenario(value) {
+  exactKeys(
+    value,
+    [
+      "scenario_id",
+      "source_wiki_sha256",
+      "registration_id",
+      "skill_content_sha256",
+      "user_inputs_sha256",
+      "sources",
+      "evidence_graph",
+      "evaluation_plan",
+    ],
+    "MODEL_CERT_SCENARIO_FIELDS",
+    "model certification scenario identity",
+  );
+  assertFlow(
+    value.scenario_id === EVIDENCE_V2_CERTIFICATION_SCENARIO_ID,
+    "MODEL_CERT_SCENARIO_ID",
+    `model certification scenario must be ${EVIDENCE_V2_CERTIFICATION_SCENARIO_ID}`,
+  );
+  sha256(value.source_wiki_sha256, "MODEL_CERT_SCENARIO_WIKI_DIGEST", "scenario source Wiki digest");
+  nonEmptyString(value.registration_id, "MODEL_CERT_SCENARIO_REGISTRATION_ID", "scenario registration id");
+  sha256(value.skill_content_sha256, "MODEL_CERT_SCENARIO_SKILL_DIGEST", "scenario Skill content digest");
+  sha256(value.user_inputs_sha256, "MODEL_CERT_SCENARIO_USER_INPUTS_DIGEST", "scenario user inputs digest");
+  assertFlow(Array.isArray(value.sources) && value.sources.length > 0, "MODEL_CERT_SCENARIO_SOURCES", "scenario sources must be a non-empty ordered array");
+  value.sources.forEach((source, index) => {
+    exactKeys(source, ["source_id", "content_sha256"], "MODEL_CERT_SCENARIO_SOURCE_FIELDS", `scenario source ${index + 1}`);
+    nonEmptyString(source.source_id, "MODEL_CERT_SCENARIO_SOURCE_ID", `scenario source ${index + 1} id`);
+    sha256(source.content_sha256, "MODEL_CERT_SCENARIO_SOURCE_DIGEST", `scenario source ${index + 1} digest`);
+  });
+  assertFlow(
+    new Set(value.sources.map((source) => source.source_id)).size === value.sources.length,
+    "MODEL_CERT_SCENARIO_SOURCE_ID",
+    "scenario source ids must be unique",
+  );
+  exactKeys(value.evidence_graph, ["ref", "canonical_sha256", "canonical_size"], "MODEL_CERT_SCENARIO_GRAPH_FIELDS", "scenario Evidence Graph identity");
+  assertFlow(typeof value.evidence_graph.ref === "string" && GRAPH_REF.test(value.evidence_graph.ref), "MODEL_CERT_SCENARIO_GRAPH_REF", "scenario Evidence Graph ref is invalid");
+  sha256(value.evidence_graph.canonical_sha256, "MODEL_CERT_SCENARIO_GRAPH_DIGEST", "scenario Evidence Graph digest");
+  safeCount(value.evidence_graph.canonical_size, "MODEL_CERT_SCENARIO_GRAPH_SIZE", "scenario Evidence Graph size", { positive: true });
+  exactKeys(value.evaluation_plan, ["ref", "canonical_sha256", "canonical_size"], "MODEL_CERT_SCENARIO_PLAN_FIELDS", "scenario Evaluation Plan identity");
+  assertFlow(typeof value.evaluation_plan.ref === "string" && PLAN_REF.test(value.evaluation_plan.ref), "MODEL_CERT_SCENARIO_PLAN_REF", "scenario Evaluation Plan ref is invalid");
+  sha256(value.evaluation_plan.canonical_sha256, "MODEL_CERT_SCENARIO_PLAN_DIGEST", "scenario Evaluation Plan digest");
+  safeCount(value.evaluation_plan.canonical_size, "MODEL_CERT_SCENARIO_PLAN_SIZE", "scenario Evaluation Plan size", { positive: true });
+}
+
+function validateScenarioResultBinding(scenario, methodsResult) {
+  assertFlow(
+    methodsResult.evidence_graph_ref === scenario.evidence_graph.ref,
+    "MODEL_CERT_SCENARIO_GRAPH_RESULT_MISMATCH",
+    "final methods_result binds another Evidence Graph",
+  );
+  assertFlow(
+    methodsResult.plan_ref === scenario.evaluation_plan.ref,
+    "MODEL_CERT_SCENARIO_PLAN_RESULT_MISMATCH",
+    "final methods_result binds another Evaluation Plan",
+  );
+}
+
 function modelCertBodyFields(receiptType) {
   const fields = [
     "schema_version",
@@ -230,6 +290,7 @@ function modelCertBodyFields(receiptType) {
     "source_snapshot_digest",
     "contract_manifest",
     "core_verdict",
+    "scenario",
     "provider",
     "model",
     "execution_identity",
@@ -260,12 +321,14 @@ function validateModelCertBody(value, { receiptType, certificationTarget } = {})
     code: "MODEL_CERT_CORE",
     label: "Core verdict binding",
   });
+  validateScenario(value.scenario);
   validateProvider(value.provider);
   validateModel(value.model);
   validateTargetIdentity(value);
   validateExecutionIdentity(value.execution_identity);
   validateCalls(value.invocations, value.call_counts, value.usage);
   validateMethodsResult(value.methods_result);
+  validateScenarioResultBinding(value.scenario, value.methods_result);
   if (receiptType === EVIDENCE_V2_MODEL_CERT_RECEIPT) {
     validateFileBinding(value.adapter_input, {
       expectedPath: EVIDENCE_V2_MODEL_CERT_INPUT_FILENAME,
@@ -422,7 +485,7 @@ function validateModelCertBinding(value, target) {
 export function validateEvidenceV2ReleaseVerdictSchema(value) {
   exactKeys(
     value,
-    ["schema_version", "receipt_type", "status", "source_snapshot_digest", "contract_manifest", "core_verdict", "model_certs"],
+    ["schema_version", "receipt_type", "status", "source_snapshot_digest", "contract_manifest", "core_verdict", "scenario", "model_certs"],
     "RELEASE_VERDICT_FIELDS",
     "Evidence V2 release verdict",
   );
@@ -440,6 +503,7 @@ export function validateEvidenceV2ReleaseVerdictSchema(value) {
     code: "RELEASE_VERDICT_CORE",
     label: "release Core verdict binding",
   });
+  validateScenario(value.scenario);
   assertFlow(Array.isArray(value.model_certs) && value.model_certs.length === 2, "RELEASE_VERDICT_MODEL_CERTS", "release verdict requires exactly P1 and P2 model certifications");
   validateModelCertBinding(value.model_certs[0], "P1");
   validateModelCertBinding(value.model_certs[1], "P2");
@@ -471,6 +535,7 @@ export function validateEvidenceV2ReleaseVerdict(value, {
     });
     assertFlow(cert.core_verdict.sha256 === value.core_verdict.sha256, "RELEASE_VERDICT_CORE_MISMATCH", `${target} model certification binds another Core verdict`);
     assertFlow(cert.contract_manifest.sha256 === value.contract_manifest.sha256, "RELEASE_VERDICT_MANIFEST_MISMATCH", `${target} model certification binds another V8 contract manifest`);
+    assertFlow(canonicalJson(cert.scenario) === canonicalJson(value.scenario), "RELEASE_VERDICT_SCENARIO_MISMATCH", `${target} model certification binds another scenario`);
     assertFlow(canonicalJson(binding.provider) === canonicalJson(cert.provider), "RELEASE_VERDICT_PROVIDER_MISMATCH", `${target} provider identity differs from its model certification`);
     assertFlow(canonicalJson(binding.model) === canonicalJson(cert.model), "RELEASE_VERDICT_MODEL_MISMATCH", `${target} model identity differs from its model certification`);
     assertFlow(canonicalJson(binding.methods_result) === canonicalJson(cert.methods_result), "RELEASE_VERDICT_METHODS_RESULT_MISMATCH", `${target} methods_result identity differs from its model certification`);
@@ -495,6 +560,7 @@ export function buildEvidenceV2ReleaseVerdict({
   const coreRelativePath = relativeArtifactPath(artifactRoot, coreVerdictPath, "RELEASE_VERDICT_CORE_PATH");
   assertFlow(coreRelativePath === EVIDENCE_V2_CORE_VERDICT_PATH, "RELEASE_VERDICT_CORE_PATH", "release Core verdict path is not pinned");
   const certPaths = [p1ModelCertPath, p2ModelCertPath];
+  let scenario;
   const modelCerts = certPaths.map((certPath, index) => {
     const target = TARGETS[index];
     const cert = readJson(certPath);
@@ -505,6 +571,8 @@ export function buildEvidenceV2ReleaseVerdict({
       coreVerdictPath,
       certRoot: path.dirname(certPath),
     });
+    if (scenario === undefined) scenario = cert.scenario;
+    else assertFlow(canonicalJson(cert.scenario) === canonicalJson(scenario), "RELEASE_VERDICT_SCENARIO_MISMATCH", "P1 and P2 model certifications bind different scenarios");
     return {
       certification_target: target,
       path: relativeArtifactPath(artifactRoot, certPath, "RELEASE_VERDICT_MODEL_CERT_PATH"),
@@ -524,6 +592,7 @@ export function buildEvidenceV2ReleaseVerdict({
       path: EVIDENCE_V2_CORE_VERDICT_PATH,
       sha256: sha256File(coreVerdictPath),
     },
+    scenario,
     model_certs: modelCerts,
   };
   return validateEvidenceV2ReleaseVerdict(verdict, {
