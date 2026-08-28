@@ -41,16 +41,20 @@ test("WSL launcher keeps dependency cache read-only and formal evidence writable
   assert.match(source, /TEST_FLOW_QUICK_PYTHON=\/opt\/venvs\/xiaodao\/bin\/python/u);
 });
 
-test("WSL launcher runs as the invoking uid and verifies provider runtimes before certification", () => {
+test("WSL launcher reads the frozen runtime as root and transfers only the exact attempt to the invoking uid", () => {
   const source = fs.readFileSync(path.join(WSL_ROOT, "run.sh"), "utf8");
   assert.match(source, /host_uid=\$\(id -u\)/u);
   assert.match(source, /host_gid=\$\(id -g\)/u);
-  assert.match(source, /--user "\$host_uid:\$host_gid"/u);
-  assert.match(source, /--env HOME=\/home\/test-flow/u);
-  assert.doesNotMatch(source, /--user 0:0|\bchown\b/u);
+  assert.match(source, /--user 0:0/u);
+  assert.match(source, /--env HOME=\/root/u);
+  assert.match(source, /TEST_FLOW_HOST_UID=\$host_uid/u);
+  assert.match(source, /TEST_FLOW_HOST_GID=\$host_gid/u);
+  assert.match(source, /chown -R -- "\$TEST_FLOW_HOST_UID:\$TEST_FLOW_HOST_GID" "\$attempt_root"/u);
+  assert.doesNotMatch(source, /chown[^\n]*(?:\/cache|\$cache_root|\$repo_root|[" ]\/evidence[" ])/u);
   assert.match(source, /\/usr\/bin\/codex --version/u);
   assert.match(source, /\/opt\/venvs\/xiaodao\/bin\/python --version/u);
   assert.match(source, /node \/opt\/claude-cache\/package\/cli\.js --version/u);
+  assert.match(source, /test -r \/opt\/claude-cache\/cache-seal\.json/u);
   assert.match(source, /test -r \/run\/secrets\/codex-auth\.json/u);
   assert.match(source, /test -r \/run\/secrets\/claude-settings\.json/u);
   assert.match(source, /test -w \/evidence/u);
@@ -61,6 +65,7 @@ test("WSL launcher preserves the Test Flow exit and requires its exact verdict t
   assert.match(source, /container_status=\$\{PIPESTATUS\[0\]\}/u);
   assert.match(source, /attempt_root.*value\.attempt_root/u);
   assert.match(source, /attempt_name=\$\{attempt_root#\/evidence\/\}/u);
+  assert.match(source, /case "\$attempt_root" in \/evidence\/run-\*/u);
   assert.match(source, /host_attempt="\$evidence_root\/\$attempt_name"/u);
   assert.match(source, /test -r "\$host_attempt\/verdict\.json"/u);
   assert.match(source, /stat -c %u:%g "\$host_attempt\/verdict\.json"/u);

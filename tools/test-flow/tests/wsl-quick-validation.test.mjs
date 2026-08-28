@@ -108,8 +108,9 @@ test("the Ubuntu wrapper delegates only to the formal central certification entr
   assert.match(launcher, /--rm --init/u);
   assert.match(launcher, /host_uid=\$\(id -u\)/u);
   assert.match(launcher, /host_gid=\$\(id -g\)/u);
-  assert.match(launcher, /--user "\$host_uid:\$host_gid"/u);
-  assert.doesNotMatch(launcher, /--user 0:0|\bchown\b/u);
+  assert.match(launcher, /--user 0:0/u);
+  assert.match(launcher, /chown -R -- "\$TEST_FLOW_HOST_UID:\$TEST_FLOW_HOST_GID" "\$attempt_root"/u);
+  assert.doesNotMatch(launcher, /chown[^\n]*(?:\/cache|\$cache_root|\$repo_root|[" ]\/evidence[" ])/u);
   assert.match(launcher, /--read-only/u);
   assert.match(launcher, /--network bridge/u);
   assert.match(launcher, /\/private\/tmp:rw,exec,nosuid,nodev,mode=1777/u);

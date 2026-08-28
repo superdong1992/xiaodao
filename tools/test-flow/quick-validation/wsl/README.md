@@ -53,6 +53,6 @@ bash tools/test-flow/quick-validation/wsl/run.sh \
 --expected-evidence "哪些新证据可以证实或证伪该假设"
 ```
 
-wrapper 会把当前 WSL 用户的 uid/gid 原样传给容器，不再用 root 运行。正式认证前，它会先用同一身份做一次零模型预检，确认 Codex CLI、Claude CLI、Python、两份模型凭据和 `/evidence` 都可用。预检不会发起模型请求。
+冻结镜像中的 runtime seal 只允许 root 读取，因此 wrapper 会以 root 运行容器。正式认证前，它会先做一次零模型预检，确认 Codex CLI、Claude CLI、Python、runtime seal、两份模型凭据和 `/evidence` 都可用。预检不会发起模型请求。
 
-容器只读挂载仓库和 dependency cache；正式 Stage 的所有输出都写入可写的 `/evidence`。Skill generation 的 registration 位于当前 attempt，不会写回 cache，因此 cache 只读不会阻止认证。容器退出后，wrapper 还会检查当前 attempt 的 `verdict.json` 是否仍归调用用户所有且可读，并保留中央 Test Flow 的原始退出码。
+容器只读挂载仓库和 dependency cache；正式 Stage 的所有输出都写入可写的 `/evidence`。Skill generation 的 registration 位于当前 attempt，不会写回 cache，因此 cache 只读不会阻止认证。真实执行结束后，容器只接受中央结果中形如 `/evidence/<run-id>` 的单层 attempt 路径，并只对这个 attempt 递归设置宿主 WSL 用户的 uid/gid；不会修改 `/evidence` 根目录、cache 或仓库。外层 wrapper 随后检查该 attempt 的 `verdict.json` 是否归调用用户所有且可读，并保留中央 Test Flow 的原始退出码。`--plan-only` 不创建 attempt，也不会执行 `chown`。

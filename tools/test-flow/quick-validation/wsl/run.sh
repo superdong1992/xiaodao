@@ -6,21 +6,48 @@ repo_root=$(CDPATH= cd -- "$tool_root/../../../.." && pwd)
 
 if [[ ${1:-} == "--inside-container" ]]; then
   shift
-  exec bash "$repo_root/tools/test-flow/run.sh" \
-    --track release \
-    --goal release.evidence-v2-certification \
-    --client linux \
-    --scenario multiple-rpc-timeouts \
-    --resume fresh \
-    --repo-root "$repo_root" \
-    --evidence-root /evidence \
-    --claude-entry /opt/claude-cache/package/cli.js \
-    --claude-settings /run/secrets/claude-settings.json \
-    --codex-entry /usr/bin/codex \
-    --codex-auth /run/secrets/codex-auth.json \
-    --cache-root /cache \
-    --allow-codex-posthoc-budget \
+  flow_args=(
+    --track release
+    --goal release.evidence-v2-certification
+    --client linux
+    --scenario multiple-rpc-timeouts
+    --resume fresh
+    --repo-root "$repo_root"
+    --evidence-root /evidence
+    --claude-entry /opt/claude-cache/package/cli.js
+    --claude-settings /run/secrets/claude-settings.json
+    --codex-entry /usr/bin/codex
+    --codex-auth /run/secrets/codex-auth.json
+    --cache-root /cache
+    --allow-codex-posthoc-budget
     "$@"
+  )
+  test "$(id -u):$(id -g)" = "0:0" || { printf 'CONTAINER_ROOT_REQUIRED\n' >&2; exit 3; }
+  for argument in "$@"; do
+    if [[ $argument == "--plan-only" ]]; then
+      exec bash "$repo_root/tools/test-flow/run.sh" "${flow_args[@]}"
+    fi
+  done
+  [[ ${TEST_FLOW_HOST_UID:-} =~ ^[0-9]+$ ]] || { printf 'HOST_UID_INVALID\n' >&2; exit 3; }
+  [[ ${TEST_FLOW_HOST_GID:-} =~ ^[0-9]+$ ]] || { printf 'HOST_GID_INVALID\n' >&2; exit 3; }
+  flow_output=$(mktemp /tmp/pltf-ev2-central-output.XXXXXX)
+  trap 'rm -f -- "$flow_output"' EXIT
+  set +e
+  bash "$repo_root/tools/test-flow/run.sh" "${flow_args[@]}" | tee "$flow_output"
+  flow_status=${PIPESTATUS[0]}
+  set -e
+  attempt_root=$(node -e 'const fs = require("node:fs"); try { const value = JSON.parse(fs.readFileSync(process.argv[1], "utf8")); process.stdout.write(typeof value.attempt_root === "string" ? value.attempt_root : ""); } catch {}' "$flow_output")
+  if [[ -n $attempt_root ]]; then
+    attempt_name=${attempt_root#/evidence/}
+    case "$attempt_root" in /evidence/run-*) ;; *) printf 'ATTEMPT_ROOT_INVALID:%s\n' "$attempt_root" >&2; exit 3 ;; esac
+    case "$attempt_name" in ""|*/*) printf 'ATTEMPT_ROOT_INVALID:%s\n' "$attempt_root" >&2; exit 3 ;; esac
+    test -d "$attempt_root" && test -f "$attempt_root/verdict.json" || { printf 'AUTHORITATIVE_ATTEMPT_MISSING:%s\n' "$attempt_root" >&2; exit 3; }
+    chown -R -- "$TEST_FLOW_HOST_UID:$TEST_FLOW_HOST_GID" "$attempt_root" || { printf 'ATTEMPT_CHOWN_FAILED:%s\n' "$attempt_root" >&2; exit 3; }
+  elif ((flow_status == 0)); then
+    printf 'ATTEMPT_ROOT_MISSING\n' >&2
+    exit 3
+  fi
+  exit "$flow_status"
 fi
 
 cache_root=""
@@ -78,14 +105,13 @@ host_gid=$(id -g)
 container_name="pltf-ev2-release-$(date -u +%Y%m%dT%H%M%SZ)-$$"
 preflight_name="${container_name}-preflight"
 launcher_output=$(mktemp "${TMPDIR:-/tmp}/pltf-ev2-release-output.XXXXXX")
-owner_probe="$evidence_root/.test-flow-owner-probe-$container_name"
 
 cleanup() {
   local status=$?
   trap - EXIT
   docker stop --time 5 "$preflight_name" >/dev/null 2>&1 || true
   docker stop --time 5 "$container_name" >/dev/null 2>&1 || true
-  rm -f -- "$launcher_output" "$owner_probe"
+  rm -f -- "$launcher_output"
   exit "$status"
 }
 trap cleanup EXIT
@@ -96,11 +122,11 @@ forwarded=("${retry_args[@]}")
 [[ $plan_only != true ]] || forwarded+=(--plan-only)
 
 container_runtime=(
-  --pull never --platform linux/amd64 --user "$host_uid:$host_gid" --read-only
+  --pull never --platform linux/amd64 --user 0:0 --read-only
   --tmpfs /tmp:rw,exec,nosuid,nodev,mode=1777,size=536870912
   --tmpfs /private/tmp:rw,exec,nosuid,nodev,mode=1777,size=536870912
-  --tmpfs "/home/test-flow:rw,nosuid,nodev,mode=0700,uid=$host_uid,gid=$host_gid,size=268435456"
-  --tmpfs "/run/test-flow-scratch:rw,exec,nosuid,nodev,mode=0700,uid=$host_uid,gid=$host_gid,size=1073741824"
+  --tmpfs /root:rw,nosuid,nodev,mode=0700,size=268435456
+  --tmpfs /run/test-flow-scratch:rw,exec,nosuid,nodev,mode=0700,size=1073741824
   --mount "type=bind,src=$repo_root,dst=$repo_root,readonly"
   --mount "type=bind,src=$cache_root,dst=/cache,readonly"
   --mount "type=bind,src=$evidence_root,dst=/evidence"
@@ -108,7 +134,9 @@ container_runtime=(
   --mount "type=bind,src=$codex_auth,dst=/run/secrets/codex-auth.json,readonly"
   --mount "type=bind,src=$claude_settings,dst=/run/secrets/claude-settings.json,readonly"
   --security-opt seccomp=unconfined
-  --env HOME=/home/test-flow
+  --env HOME=/root
+  --env "TEST_FLOW_HOST_UID=$host_uid"
+  --env "TEST_FLOW_HOST_GID=$host_gid"
   --env TEST_FLOW_QUICK_UBUNTU2204_CONTAINER=1
   --env TEST_FLOW_QUICK_SCRATCH_ROOT=/run/test-flow-scratch
   --env TEST_FLOW_PYTHON=/opt/venvs/xiaodao/bin/python
@@ -120,13 +148,13 @@ container_runtime=(
 )
 
 docker run --rm --init --name "$preflight_name" --network none \
-  --env "TEST_FLOW_OWNER_PROBE=/evidence/$(basename "$owner_probe")" \
   "${container_runtime[@]}" "$image_id" \
   bash -ceu '
     test -x /usr/bin/codex
     /usr/bin/codex --version >/dev/null
     test -x /opt/venvs/xiaodao/bin/python
     /opt/venvs/xiaodao/bin/python --version >/dev/null
+    test -r /opt/claude-cache/cache-seal.json
     test -r /opt/claude-cache/package/cli.js
     node /opt/claude-cache/package/cli.js --version >/dev/null
     test -r /run/secrets/image-seal.json
@@ -134,9 +162,6 @@ docker run --rm --init --name "$preflight_name" --network none \
     test -r /run/secrets/claude-settings.json
     test -r /cache
     test -w /evidence
-    : > "$TEST_FLOW_OWNER_PROBE"
-    test -O "$TEST_FLOW_OWNER_PROBE"
-    rm -f -- "$TEST_FLOW_OWNER_PROBE"
   '
 
 set +e
