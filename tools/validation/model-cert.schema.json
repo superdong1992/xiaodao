@@ -1,0 +1,102 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xiaodao.local/schemas/evidence-v2/model-cert.schema.json",
+  "title": "Evidence V2 model certification",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "receipt_type",
+    "status",
+    "certification_target",
+    "source_snapshot_digest",
+    "contract_manifest",
+    "core_verdict",
+    "provider",
+    "model",
+    "execution_identity",
+    "invocations",
+    "call_counts",
+    "usage",
+    "methods_result",
+    "adapter_input"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "receipt_type": { "const": "evidence-v2-model-cert" },
+    "status": { "const": "PASS" },
+    "certification_target": { "enum": ["P1", "P2"] },
+    "source_snapshot_digest": { "$ref": "model-cert-input.schema.json#/$defs/sha256" },
+    "contract_manifest": { "$ref": "model-cert-input.schema.json#/$defs/manifestBinding" },
+    "core_verdict": { "$ref": "model-cert-input.schema.json#/$defs/coreBinding" },
+    "provider": { "$ref": "model-cert-input.schema.json#/$defs/provider" },
+    "model": { "$ref": "model-cert-input.schema.json#/$defs/model" },
+    "execution_identity": { "$ref": "model-cert-input.schema.json#/$defs/executionIdentity" },
+    "invocations": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 4,
+      "items": { "$ref": "model-cert-input.schema.json#/$defs/invocation" }
+    },
+    "call_counts": { "$ref": "model-cert-input.schema.json#/$defs/callCounts" },
+    "usage": { "$ref": "model-cert-input.schema.json#/$defs/usage" },
+    "methods_result": { "$ref": "model-cert-input.schema.json#/$defs/methodsResult" },
+    "adapter_input": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256"],
+      "properties": {
+        "path": { "const": "model-cert-input.json" },
+        "sha256": { "$ref": "model-cert-input.schema.json#/$defs/sha256" }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "certification_target": { "const": "P1" } },
+        "required": ["certification_target"]
+      },
+      "then": {
+        "properties": {
+          "provider": {
+            "properties": {
+              "id": { "const": "deepseek" },
+              "transport": { "const": "claude-code-compatible-api" }
+            }
+          },
+          "model": {
+            "properties": {
+              "id": { "const": "deepseek-v4-flash[1m]" },
+              "revision": { "$ref": "model-cert-input.schema.json#/$defs/sha256" },
+              "revision_source": { "const": "settings-fingerprint" }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { "certification_target": { "const": "P2" } },
+        "required": ["certification_target"]
+      },
+      "then": {
+        "properties": {
+          "provider": {
+            "properties": {
+              "id": { "const": "openai" },
+              "transport": { "const": "codex-app-server" }
+            }
+          },
+          "model": {
+            "properties": {
+              "id": { "const": "gpt-5.6-luna" },
+              "revision": { "$ref": "model-cert-input.schema.json#/$defs/sha256" },
+              "revision_source": { "const": "frozen-codex-cli-and-app-server-runtime-identity" }
+            }
+          }
+        }
+      }
+    }
+  ]
+}

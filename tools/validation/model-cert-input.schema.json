@@ -1,0 +1,250 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xiaodao.local/schemas/evidence-v2/model-cert-input.schema.json",
+  "title": "Evidence V2 model certification adapter input",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "receipt_type",
+    "status",
+    "certification_target",
+    "source_snapshot_digest",
+    "contract_manifest",
+    "core_verdict",
+    "provider",
+    "model",
+    "execution_identity",
+    "invocations",
+    "call_counts",
+    "usage",
+    "methods_result"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "receipt_type": { "const": "evidence-v2-model-cert-input" },
+    "status": { "const": "PASS" },
+    "certification_target": { "enum": ["P1", "P2"] },
+    "source_snapshot_digest": { "$ref": "#/$defs/sha256" },
+    "contract_manifest": { "$ref": "#/$defs/manifestBinding" },
+    "core_verdict": { "$ref": "#/$defs/coreBinding" },
+    "provider": { "$ref": "#/$defs/provider" },
+    "model": { "$ref": "#/$defs/model" },
+    "execution_identity": { "$ref": "#/$defs/executionIdentity" },
+    "invocations": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 4,
+      "items": { "$ref": "#/$defs/invocation" }
+    },
+    "call_counts": { "$ref": "#/$defs/callCounts" },
+    "usage": { "$ref": "#/$defs/usage" },
+    "methods_result": { "$ref": "#/$defs/methodsResult" }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "certification_target": { "const": "P1" } },
+        "required": ["certification_target"]
+      },
+      "then": {
+        "properties": {
+          "provider": {
+            "properties": {
+              "id": { "const": "deepseek" },
+              "transport": { "const": "claude-code-compatible-api" }
+            }
+          },
+          "model": {
+            "properties": {
+              "id": { "const": "deepseek-v4-flash[1m]" },
+              "revision": { "$ref": "#/$defs/sha256" },
+              "revision_source": { "const": "settings-fingerprint" }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { "certification_target": { "const": "P2" } },
+        "required": ["certification_target"]
+      },
+      "then": {
+        "properties": {
+          "provider": {
+            "properties": {
+              "id": { "const": "openai" },
+              "transport": { "const": "codex-app-server" }
+            }
+          },
+          "model": {
+            "properties": {
+              "id": { "const": "gpt-5.6-luna" },
+              "revision": { "$ref": "#/$defs/sha256" },
+              "revision_source": { "const": "frozen-codex-cli-and-app-server-runtime-identity" }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "nonEmpty": {
+      "type": "string",
+      "minLength": 1
+    },
+    "identityBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "sha256"],
+      "properties": {
+        "id": { "$ref": "#/$defs/nonEmpty" },
+        "sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "manifestBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256"],
+      "properties": {
+        "path": { "const": "schemas/v2/contract-manifest.json" },
+        "sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "coreBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256"],
+      "properties": {
+        "path": { "const": "payload/stages/deterministic.full/gates/det.evidence-v2-core/core-verdict.json" },
+        "sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "provider": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "transport"],
+      "properties": {
+        "id": { "$ref": "#/$defs/nonEmpty" },
+        "transport": { "$ref": "#/$defs/nonEmpty" }
+      }
+    },
+    "model": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "revision", "revision_source"],
+      "properties": {
+        "id": { "$ref": "#/$defs/nonEmpty" },
+        "revision": { "$ref": "#/$defs/nonEmpty" },
+        "revision_source": { "$ref": "#/$defs/nonEmpty" }
+      }
+    },
+    "executionIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["runtime", "prompt_policy", "profile", "tool_policy"],
+      "properties": {
+        "runtime": { "$ref": "#/$defs/identityBinding" },
+        "prompt_policy": { "$ref": "#/$defs/identityBinding" },
+        "profile": { "$ref": "#/$defs/identityBinding" },
+        "tool_policy": { "$ref": "#/$defs/identityBinding" }
+      }
+    },
+    "usage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "input_tokens",
+        "output_tokens",
+        "cache_creation_input_tokens",
+        "cache_read_input_tokens",
+        "total_tokens",
+        "cost_usd"
+      ],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "input_tokens": { "type": "integer", "minimum": 0 },
+        "output_tokens": { "type": "integer", "minimum": 0 },
+        "cache_creation_input_tokens": { "type": "integer", "minimum": 0 },
+        "cache_read_input_tokens": { "type": "integer", "minimum": 0 },
+        "total_tokens": { "type": "integer", "minimum": 0 },
+        "cost_usd": { "type": "number", "minimum": 0 }
+      }
+    },
+    "invocation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["invocation_id", "ordinal", "role", "attempt", "prompt", "usage"],
+      "properties": {
+        "invocation_id": { "$ref": "#/$defs/nonEmpty" },
+        "ordinal": { "type": "integer", "minimum": 1, "maximum": 4 },
+        "role": { "enum": ["SPECIALIST", "REVIEWER"] },
+        "attempt": { "enum": ["PRIMARY", "REPAIR"] },
+        "prompt": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["sha256", "size"],
+          "properties": {
+            "sha256": { "$ref": "#/$defs/sha256" },
+            "size": { "type": "integer", "minimum": 1 }
+          }
+        },
+        "usage": { "$ref": "#/$defs/usage" }
+      }
+    },
+    "callCounts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "total_calls",
+        "specialist_calls",
+        "reviewer_calls",
+        "specialist_repairs",
+        "reviewer_repairs",
+        "model_retries"
+      ],
+      "properties": {
+        "total_calls": { "type": "integer", "minimum": 2, "maximum": 4 },
+        "specialist_calls": { "type": "integer", "minimum": 1, "maximum": 2 },
+        "reviewer_calls": { "type": "integer", "minimum": 1, "maximum": 2 },
+        "specialist_repairs": { "type": "integer", "minimum": 0, "maximum": 1 },
+        "reviewer_repairs": { "type": "integer", "minimum": 0, "maximum": 1 },
+        "model_retries": { "const": 0 }
+      }
+    },
+    "methodsResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "canonical_sha256",
+        "canonical_size",
+        "case_id",
+        "source_job_id",
+        "result_ref",
+        "evaluation_id",
+        "status",
+        "plan_ref",
+        "evidence_graph_ref",
+        "diagnostic_id"
+      ],
+      "properties": {
+        "canonical_sha256": { "$ref": "#/$defs/sha256" },
+        "canonical_size": { "type": "integer", "minimum": 1 },
+        "case_id": { "type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$" },
+        "source_job_id": { "type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$" },
+        "result_ref": { "type": "string", "pattern": "^result-[a-f0-9]{64}$" },
+        "evaluation_id": { "type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$" },
+        "status": { "enum": ["RESOLVED", "UNRESOLVED", "FAILED"] },
+        "plan_ref": { "type": "string", "pattern": "^plan-[a-f0-9]{64}$" },
+        "evidence_graph_ref": { "type": "string", "pattern": "^graph-[a-f0-9]{64}$" },
+        "diagnostic_id": { "type": "string", "pattern": "^diag-[a-f0-9]{64}$" }
+      }
+    }
+  }
+}

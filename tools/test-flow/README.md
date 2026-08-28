@@ -24,6 +24,13 @@ JUnit 的 `core-verdict.json` 子收据；外层 `verdict.json` 仍是唯一权�
 Candidate、grounding、`PARTIALLY_RESOLVED` 或 `result.zip` 的真实定位 Stage 都以
 `EVIDENCE_V2_REAL_DIAGNOSIS_ADAPTER_UNMIGRATED` 在模型调用前阻止。
 
+P1 Claude/DeepSeek 和 P2 Codex/Luna Gate 已接入同一 `model-cert-input.json` → `model-cert.json`
+收据边界，并明确依赖 `deterministic.full`。adapter PASS 后由 Test Flow 统一复核 source snapshot、
+V8 manifest、Core verdict、调用/repair、usage、prompt/profile/tool policy 和最终
+`methods_result` 身份。当前 admission blocker 仍保留，因此这段接线只由零模型框架测试验证，
+不会启动 provider。`release-verdict.json` 的共享聚合器只接受 Core、P1、P2 三份 PASS 收据；本轮
+没有新增 combined Release Goal。
+
 ## Dev 确定性测试
 
 先看计划，再运行同一 Goal：

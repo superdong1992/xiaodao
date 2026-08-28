@@ -94,6 +94,14 @@ import {
   buildEvidenceV2CoreVerdict,
   EVIDENCE_V2_CORE_RECEIPT,
 } from "../../validation/evidence-v2-core.mjs";
+import {
+  buildEvidenceV2ModelCert,
+  buildEvidenceV2ReleaseVerdict,
+  EVIDENCE_V2_CORE_VERDICT_PATH,
+  EVIDENCE_V2_MODEL_CERT_FILENAME,
+  EVIDENCE_V2_MODEL_CERT_RECEIPT,
+  EVIDENCE_V2_RELEASE_VERDICT_FILENAME,
+} from "../../validation/evidence-v2-certification.mjs";
 
 const LINUX_CLIENT_BROWSER_RUNNER_RELATIVE = "tools/test-flow/runtime-support/linux_client_browser_runner.py";
 const LINUX_CLIENT_BROWSER_ARGUMENT_PROFILE = "chrome-headless-shell-for-testing-local-v1";
@@ -1046,6 +1054,77 @@ export function materializeEvidenceV2CoreVerdict({
   });
   writeJsonSync(path.join(evidenceRoot, "core-verdict.json"), verdict);
   return verdict;
+}
+
+export function materializeEvidenceV2ModelCert({
+  certificationTarget,
+  sourceSnapshotDigest,
+  sourceSnapshotRoot,
+  attemptRoot,
+  gateRoot: evidenceRoot,
+}) {
+  const coreVerdictPath = path.join(
+    attemptRoot,
+    ...EVIDENCE_V2_CORE_VERDICT_PATH.split("/"),
+  );
+  const cert = buildEvidenceV2ModelCert({
+    certificationTarget,
+    sourceSnapshotDigest,
+    sourceRoot: sourceSnapshotRoot,
+    coreVerdictPath,
+    certRoot: evidenceRoot,
+  });
+  writeJsonSync(path.join(evidenceRoot, EVIDENCE_V2_MODEL_CERT_FILENAME), cert);
+  return cert;
+}
+
+export function materializeEvidenceV2ReleaseVerdict({
+  sourceSnapshotDigest,
+  sourceSnapshotRoot,
+  artifactRoot,
+  coreVerdictPath,
+  p1ModelCertPath,
+  p2ModelCertPath,
+  outputRoot = artifactRoot,
+}) {
+  const verdict = buildEvidenceV2ReleaseVerdict({
+    sourceSnapshotDigest,
+    sourceRoot: sourceSnapshotRoot,
+    artifactRoot,
+    coreVerdictPath,
+    p1ModelCertPath,
+    p2ModelCertPath,
+  });
+  writeJsonSync(
+    path.join(outputRoot, EVIDENCE_V2_RELEASE_VERDICT_FILENAME),
+    verdict,
+  );
+  return verdict;
+}
+
+function attachEvidenceV2ModelCert(result, {
+  context,
+  gate,
+  gateRoot: evidenceRoot,
+}) {
+  if (result.status !== "PASS" || gate.result_receipt !== EVIDENCE_V2_MODEL_CERT_RECEIPT) return result;
+  try {
+    const modelCert = materializeEvidenceV2ModelCert({
+      certificationTarget: gate.certification_target,
+      sourceSnapshotDigest: context.sourceSnapshotDigest,
+      sourceSnapshotRoot: context.sourceSnapshotRoot,
+      attemptRoot: context.attemptRoot,
+      gateRoot: evidenceRoot,
+    });
+    return { ...result, model_cert: modelCert };
+  } catch (error) {
+    return {
+      ...result,
+      status: "ERROR",
+      failure_domain: "HARNESS",
+      code: error?.code ?? "EVIDENCE_V2_MODEL_CERT_INVALID",
+    };
+  }
 }
 
 export function evaluatePytestSummary(summary, { minPassed = 1, skipPolicy = "forbid-all-skipped" } = {}) {
@@ -3523,9 +3602,15 @@ export async function executeGate(context, stage, gateId, gate) {
     if (gate.adapter === "server-linux-capability") return serverLinuxCapability(scoped, stage, gate);
     if (gate.adapter === "codex-luna-methods") return codexLunaMethods(scoped, stage);
     if (gate.adapter === "macos-codex-luna-methods") return runMacosCodexLunaGate(scoped, stage, { workflow: "methods" });
-    if (gate.adapter === "macos-codex-luna-e2e") return runMacosCodexLunaGate(scoped, stage, { workflow: "e2e" });
+    if (gate.adapter === "macos-codex-luna-e2e") {
+      const result = await runMacosCodexLunaGate(scoped, stage, { workflow: "e2e" });
+      return attachEvidenceV2ModelCert(result, { context, gate, gateRoot: root });
+    }
     if (gate.adapter === "macos-claude-deepseek-methods") return runMacosClaudeDeepseekGate(scoped, stage, { workflow: "methods" });
-    if (gate.adapter === "macos-claude-deepseek-e2e") return runMacosClaudeDeepseekGate(scoped, stage, { workflow: "e2e" });
+    if (gate.adapter === "macos-claude-deepseek-e2e") {
+      const result = await runMacosClaudeDeepseekGate(scoped, stage, { workflow: "e2e" });
+      return attachEvidenceV2ModelCert(result, { context, gate, gateRoot: root });
+    }
   }
   if (gate.kind === "cross-job-adapter") return crossJob(scoped, stage);
   if (gate.kind === "observation" && gate.observation === "review-state-transition") return reviewObservation(scoped);

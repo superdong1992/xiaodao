@@ -11,6 +11,11 @@ import {
   EVIDENCE_V2_CORE_RECEIPT,
   EVIDENCE_V2_CORE_SELECTORS,
 } from "../../validation/evidence-v2-core.mjs";
+import {
+  EVIDENCE_V2_MODEL_CERT_FILENAME,
+  EVIDENCE_V2_MODEL_CERT_INPUT_FILENAME,
+  EVIDENCE_V2_MODEL_CERT_RECEIPT,
+} from "../../validation/evidence-v2-certification.mjs";
 
 const IDENTIFIER = /^[a-z0-9][a-z0-9.-]*$/;
 const PLATFORMS = new Set(["windows", "macos", "linux"]);
@@ -157,7 +162,7 @@ const GATE_FIELDS = {
   "node-test": ["kind", "test_files", "test_glob", "exclude", "min_passed", "evidence"],
   pytest: ["kind", "selectors", "selector_mode", "pytest_args", "environment_profile", "min_passed", "skip_policy", "runtime_profile", "evidence", "isolated_agent_invocations", "result_receipt"],
   "repository-check": ["kind", "check", "paths", "evidence"],
-  "capability-adapter": ["kind", "adapter", "runtime_profile", "required_claims", "evidence"],
+  "capability-adapter": ["kind", "adapter", "runtime_profile", "required_claims", "result_receipt", "certification_target", "evidence"],
   "cross-job-adapter": ["kind", "phase", "runtime_profile", "evidence_contract", "evidence"],
   observation: ["kind", "observation", "evidence_contract", "evidence"],
 };
@@ -242,6 +247,25 @@ function validateGates(gates) {
       assertFlow(CAPABILITY_ADAPTERS.has(gate.adapter), "CONFIG_CAPABILITY_ADAPTER", `${gateId} has untrusted adapter`);
       identifier(gate.runtime_profile, "CONFIG_GATE_RUNTIME", `${gateId} runtime profile`);
       if (gate.required_claims) stringArray(gate.required_claims, "CONFIG_CAPABILITY_CLAIMS", `${gateId}.required_claims`, { nonEmpty: true });
+      assertFlow(
+        (gate.result_receipt === undefined) === (gate.certification_target === undefined),
+        "CONFIG_MODEL_CERT_PAIR",
+        `${gateId} must declare result_receipt and certification_target together`,
+      );
+      if (gate.result_receipt !== undefined) {
+        assertFlow(gate.result_receipt === EVIDENCE_V2_MODEL_CERT_RECEIPT, "CONFIG_MODEL_CERT_RECEIPT", `${gateId} has an unsupported capability receipt`);
+        assertFlow(["P1", "P2"].includes(gate.certification_target), "CONFIG_MODEL_CERT_TARGET", `${gateId} has an invalid certification target`);
+        const expectedAdapter = gate.certification_target === "P1"
+          ? "macos-claude-deepseek-e2e"
+          : "macos-codex-luna-e2e";
+        assertFlow(gate.adapter === expectedAdapter, "CONFIG_MODEL_CERT_ADAPTER", `${gateId} certification target does not match its provider adapter`);
+        assertFlow(
+          gate.evidence.includes(EVIDENCE_V2_MODEL_CERT_INPUT_FILENAME)
+            && gate.evidence.includes(EVIDENCE_V2_MODEL_CERT_FILENAME),
+          "CONFIG_MODEL_CERT_EVIDENCE",
+          `${gateId} must retain the model certification input and receipt`,
+        );
+      }
     } else if (gate.kind === "cross-job-adapter") {
       assertFlow(CROSS_JOB_PHASES.has(gate.phase), "CONFIG_CROSS_JOB_PHASE", `${gateId} has invalid phase`);
       identifier(gate.runtime_profile, "CONFIG_GATE_RUNTIME", `${gateId} runtime profile`);
@@ -501,6 +525,11 @@ function crossValidate(config) {
   const deterministicFull = config.stages.stages.find((stage) => stage.id === "deterministic.full");
   assertFlow(coreGate?.result_receipt === EVIDENCE_V2_CORE_RECEIPT, "CONFIG_EVIDENCE_V2_CORE_GATE", "det.evidence-v2-core is missing");
   assertFlow(deterministicFull?.gates.includes("det.evidence-v2-core"), "CONFIG_EVIDENCE_V2_CORE_STAGE", "det.evidence-v2-core must belong to deterministic.full");
+  const modelCertStages = config.stages.stages.filter((stage) => stage.gates.some(
+    (gateId) => config.gates.gates[gateId]?.result_receipt === EVIDENCE_V2_MODEL_CERT_RECEIPT,
+  ));
+  assertFlow(modelCertStages.length === 2, "CONFIG_MODEL_CERT_STAGES", "Evidence V2 certification requires exactly P1 and P2 stages");
+  assertFlow(modelCertStages.every((stage) => stage.depends_on.includes("deterministic.full")), "CONFIG_MODEL_CERT_CORE_DEPENDENCY", "P1 and P2 must run only after the Evidence V2 Core stage");
   assertFlow(profileIds.has(config.policy.defaults.runtime_profile), "CONFIG_DEFAULT_RUNTIME_UNKNOWN", "Default runtime profile is unknown");
   for (const track of Object.values(config.policy.tracks)) assertFlow(Object.hasOwn(config.proofs.goals, track.default_goal), "CONFIG_TRACK_GOAL_UNKNOWN", `Unknown default goal ${track.default_goal}`);
 

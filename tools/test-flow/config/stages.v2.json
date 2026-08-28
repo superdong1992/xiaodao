@@ -142,7 +142,7 @@
     {
       "id": "real.macos-codex-luna-e2e",
       "kind": "capability",
-      "depends_on": [],
+      "depends_on": ["deterministic.full"],
       "gates": ["real.macos-codex-luna-e2e"],
       "identity_set": "macos-codex-luna-e2e",
       "timeout_seconds": 1800,
@@ -168,7 +168,7 @@
     {
       "id": "real.macos-claude-deepseek-e2e",
       "kind": "capability",
-      "depends_on": [],
+      "depends_on": ["deterministic.full"],
       "gates": ["quick.claude-deepseek-e2e.contracts", "real.macos-claude-deepseek-e2e"],
       "identity_set": "macos-claude-deepseek-e2e",
       "timeout_seconds": 1800,

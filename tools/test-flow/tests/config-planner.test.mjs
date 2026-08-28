@@ -158,7 +158,7 @@ test("Codex Luna goal cannot be mislabeled as a Linux Client proof", () => {
   assert.equal(built.plan.release_inputs.topology, "darwin-local-codex");
 });
 
-test("macOS Luna bootstrap and E2E are independent one-stage Dev goals with exact budgets and cache admission", () => {
+test("macOS Luna bootstrap stays independent while E2E requires the deterministic Core closure", () => {
   const methods = buildIsolatedRunPlan({
     track: "dev",
     goal: "dev.macos-codex-luna-methods",
@@ -187,10 +187,17 @@ test("macOS Luna bootstrap and E2E are independent one-stage Dev goals with exac
     allowCodexPosthocBudget: true,
     reason: "plan",
   }).plan;
-  assert.deepEqual(e2e.stages.map((stage) => stage.id), ["real.macos-codex-luna-e2e"]);
+  assert.deepEqual(e2e.stages.map((stage) => stage.id), [
+    "framework.self-test",
+    "repository.static",
+    "deterministic.affected",
+    "deterministic.full",
+    "real.macos-codex-luna-e2e",
+  ]);
   assert.equal(e2e.scenario, "api-execution-overrun");
-  assert.deepEqual(e2e.stages[0].invocation_caps[0].phases, ["CLIENT", "ROUTE", "LOGPARSE", "DIAGNOSE", "REVIEW"]);
-  assert.equal(e2e.stages[0].invocation_caps[0].per_call_hard_timeout_seconds, 600);
+  const e2eStage = e2e.stages.find((stage) => stage.id === "real.macos-codex-luna-e2e");
+  assert.deepEqual(e2eStage.invocation_caps[0].phases, ["CLIENT", "ROUTE", "LOGPARSE", "DIAGNOSE", "REVIEW"]);
+  assert.equal(e2eStage.invocation_caps[0].per_call_hard_timeout_seconds, 600);
   assert.equal(e2e.budget.posthoc_aggregate_limits.calls, 5);
   assert.equal(e2e.budget.posthoc_aggregate_limits.tokens, 2_000_000);
   assert.equal(e2e.budget.posthoc_aggregate_limits.equivalent_usd, 3);
@@ -219,10 +226,13 @@ test("central Claude E2E plan removes REVIEW and declares four calls for insuffi
   }).plan;
   const normal = build("api-execution-overrun");
   assert.ok(normal.admission.blockers.some((item) => item.code === "EVIDENCE_V2_REAL_DIAGNOSIS_ADAPTER_UNMIGRATED"));
-  assert.deepEqual(normal.stages[0].invocation_caps[0].phases, ["CLIENT", "ROUTE", "LOGPARSE", "DIAGNOSE", "REVIEW"]);
-  assert.equal(normal.stages[0].invocation_caps[0].max_count, 5);
+  const normalStage = normal.stages.find((stage) => stage.id === "real.macos-claude-deepseek-e2e");
+  assert.deepEqual(normalStage.invocation_caps[0].phases, ["CLIENT", "ROUTE", "LOGPARSE", "DIAGNOSE", "REVIEW"]);
+  assert.equal(normalStage.invocation_caps[0].max_count, 5);
   const insufficient = build("insufficient-evidence");
-  const declaration = insufficient.stages[0].invocation_caps[0];
+  const declaration = insufficient.stages.find(
+    (stage) => stage.id === "real.macos-claude-deepseek-e2e",
+  ).invocation_caps[0];
   assert.deepEqual(declaration.phases, ["CLIENT", "ROUTE", "LOGPARSE", "DIAGNOSE"]);
   assert.deepEqual([declaration.min_count, declaration.max_count], [4, 4]);
 });

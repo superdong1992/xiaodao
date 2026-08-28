@@ -182,7 +182,9 @@
       "kind": "capability-adapter",
       "adapter": "macos-codex-luna-e2e",
       "runtime_profile": "release",
-      "evidence": ["scenario-input.json", "scenario-oracle.json", "methods-package.json", "codex-identity.json", "model-invocations.json", "model-usage.json", "client-events.jsonl", "mcp-tool-calls.json", "attachment.json", "server-events.ndjson", "final-case.json", "artifact-index.json", "http-boundary-audit.json", "security-audit.json", "adapter-receipt.json"]
+      "result_receipt": "evidence-v2-model-cert",
+      "certification_target": "P2",
+      "evidence": ["scenario-input.json", "scenario-oracle.json", "methods-package.json", "codex-identity.json", "model-invocations.json", "model-usage.json", "client-events.jsonl", "mcp-tool-calls.json", "attachment.json", "server-events.ndjson", "final-case.json", "artifact-index.json", "http-boundary-audit.json", "security-audit.json", "adapter-receipt.json", "model-cert-input.json", "model-cert.json"]
     },
     "quick.codex-luna.contracts": {
       "kind": "node-test",
@@ -212,7 +214,9 @@
       "kind": "capability-adapter",
       "adapter": "macos-claude-deepseek-e2e",
       "runtime_profile": "release",
-      "evidence": ["scenario-input.json", "scenario-oracle.json", "methods-package.json", "claude-identity.json", "model-invocations.json", "model-usage.json", "client-events.jsonl", "client-skill.json", "mcp-tool-calls.json", "attachment.json", "server-events.ndjson", "server-lifecycle.json", "server-sealed-diagnosis.json", "final-case.json", "artifact-index.json", "artifact-download.json", "specialized-runtime.json", "logparse-config.json", "http-boundary-audit.json", "security-audit.json", "adapter-receipt.json"]
+      "result_receipt": "evidence-v2-model-cert",
+      "certification_target": "P1",
+      "evidence": ["scenario-input.json", "scenario-oracle.json", "methods-package.json", "claude-identity.json", "model-invocations.json", "model-usage.json", "client-events.jsonl", "client-skill.json", "mcp-tool-calls.json", "attachment.json", "server-events.ndjson", "server-lifecycle.json", "server-sealed-diagnosis.json", "final-case.json", "artifact-index.json", "artifact-download.json", "specialized-runtime.json", "logparse-config.json", "http-boundary-audit.json", "security-audit.json", "adapter-receipt.json", "model-cert-input.json", "model-cert.json"]
     },
     "real.logparse": {
       "kind": "pytest",
