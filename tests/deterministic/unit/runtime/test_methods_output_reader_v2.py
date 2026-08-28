@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import errno
 import hashlib
 import json
 from pathlib import Path
@@ -114,6 +115,37 @@ def test_missing_attempt_is_a_typed_protocol_error(tmp_path: Path) -> None:
         )
 
     assert caught.value.raw_response_bytes is None
+
+
+@pytest.mark.parametrize(
+    "filesystem_error",
+    [
+        PermissionError(errno.EACCES, "denied"),
+        OSError(errno.EIO, "read failure"),
+    ],
+    ids=["permission-error", "other-os-error"],
+)
+def test_real_filesystem_error_does_not_become_a_repairable_protocol_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    filesystem_error: OSError,
+) -> None:
+    plan = _plan(tmp_path)
+
+    def fail_stat(*_args: object, **_kwargs: object) -> object:
+        raise filesystem_error
+
+    monkeypatch.setattr(Path, "stat", fail_stat)
+
+    with pytest.raises(type(filesystem_error)) as caught:
+        read_method_role_attempt_v2(
+            tmp_path,
+            role="SPECIALIST",
+            plan=plan,
+            attempt="PRIMARY",
+        )
+
+    assert caught.value is filesystem_error
 
 
 @pytest.mark.parametrize(

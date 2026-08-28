@@ -918,8 +918,10 @@ def _lstat(path: Path, *, missing_outcome: bool = False) -> os.stat_result:
         if missing_outcome:
             raise _MissingOutcome from None
         raise _InvalidOutput from None
-    except OSError:
-        raise _InvalidOutput from None
+    except OSError as exc:
+        # Keep the real filesystem failure available to the Methods V2 reader.
+        # Other output protocols continue to classify it as ``_InvalidOutput``.
+        raise _InvalidOutput from exc
 
 
 def _validate_parent_directories(
@@ -2018,6 +2020,8 @@ def read_method_role_attempt_v2(
             max_bytes=max_bytes,
         )
     except _InvalidOutput as exc:
+        if isinstance(exc.__cause__, OSError):
+            raise exc.__cause__
         raise MethodEvaluationResponseError(
             f"{role} model evaluation response file is missing or unreadable",
         ) from exc
