@@ -229,6 +229,7 @@ def method_evidence_graph_ref_v2(
     hits: tuple[MethodEvidenceHitV2, ...],
     events: tuple[MethodEvidenceEventV2, ...],
     loaded_method_ids: tuple[str, ...],
+    limitations: tuple[str, ...] = (),
 ) -> str:
     return "graph-" + canonical_json_sha256(
         {
@@ -238,6 +239,7 @@ def method_evidence_graph_ref_v2(
             "hit_refs": [item.hit_ref for item in hits],
             "event_refs": [item.event_ref for item in events],
             "loaded_method_ids": list(loaded_method_ids),
+            "limitations": list(limitations),
         }
     )
 
@@ -249,6 +251,7 @@ class MethodEvidenceGraphV2(_MethodsV2Contract):
     hits: tuple[MethodEvidenceHitV2, ...]
     events: tuple[MethodEvidenceEventV2, ...]
     loaded_method_ids: tuple[MethodIdV2, ...]
+    limitations: tuple[NonEmptyText, ...] = ()
 
     @model_validator(mode="after")
     def validate_graph(self) -> "MethodEvidenceGraphV2":
@@ -323,6 +326,8 @@ class MethodEvidenceGraphV2(_MethodsV2Contract):
             raise ValueError("evidence events are not in deterministic business order")
         if len(self.loaded_method_ids) != len(set(self.loaded_method_ids)):
             raise ValueError("loaded_method_ids must be unique")
+        if len(self.limitations) != len(set(self.limitations)):
+            raise ValueError("evidence graph limitations must be unique")
         if set(self.loaded_method_ids) != {item.method_id for item in self.hits}:
             raise ValueError("loaded_method_ids must exactly cover methods with evidence hits")
         priority_by_method: dict[str, int] = {}
@@ -345,6 +350,7 @@ class MethodEvidenceGraphV2(_MethodsV2Contract):
             hits=self.hits,
             events=self.events,
             loaded_method_ids=self.loaded_method_ids,
+            limitations=self.limitations,
         )
         if self.graph_ref != expected:
             raise ValueError("graph_ref does not match the evidence graph")

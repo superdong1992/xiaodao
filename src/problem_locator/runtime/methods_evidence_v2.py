@@ -44,6 +44,7 @@ def scan_method_evidence_v2(
     *,
     skill: ResolvedSpecializedSkillV1,
     target_logs: Sequence[FrozenTargetLogV1],
+    limitations: Sequence[str] = (),
 ) -> MethodEvidenceGraphV2:
     """Scan each frozen log once and emit method-qualified evidence hits.
 
@@ -54,6 +55,14 @@ def scan_method_evidence_v2(
     if not isinstance(skill, ResolvedSpecializedSkillV1):
         raise TypeError("skill must be a resolved specialized Skill")
     logs = _validated_logs(target_logs)
+    if isinstance(limitations, (str, bytes)):
+        raise TypeError("limitations must be a sequence of strings")
+    frozen_limitations = tuple(dict.fromkeys(limitations))
+    if any(
+        not isinstance(item, str) or not item or item.isspace()
+        for item in frozen_limitations
+    ):
+        raise ValueError("limitations must contain non-blank strings")
 
     sources = tuple(
         sorted(
@@ -199,6 +208,7 @@ def scan_method_evidence_v2(
         hits=frozen_hits,
         events=frozen_events,
         loaded_method_ids=loaded_method_ids,
+        limitations=frozen_limitations,
     )
     return MethodEvidenceGraphV2(
         graph_ref=graph_ref,
@@ -207,6 +217,7 @@ def scan_method_evidence_v2(
         hits=frozen_hits,
         events=frozen_events,
         loaded_method_ids=loaded_method_ids,
+        limitations=frozen_limitations,
     )
 
 
