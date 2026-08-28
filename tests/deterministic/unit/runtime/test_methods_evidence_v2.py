@@ -7,9 +7,11 @@ from pathlib import Path
 import pytest
 
 from problem_locator.contracts import (
+    MethodEvidenceEventV2,
     MethodEvidenceGraphV2,
     MethodEvidenceHitV2,
     MethodEvidenceSourceV2,
+    method_evidence_event_ref_v2,
     method_evidence_graph_ref_v2,
     method_evidence_hit_ref_v2,
     method_evidence_source_ref_v2,
@@ -30,7 +32,10 @@ from problem_locator.runtime.methods_skill import (
 )
 
 
-def _skill(*methods: tuple[str, tuple[str, ...]]) -> ResolvedSpecializedSkillV1:
+def _skill(
+    *methods: tuple[str, tuple[str, ...]],
+    log_derived_fields: tuple[str, ...] = (),
+) -> ResolvedSpecializedSkillV1:
     role = RuntimeRoleBindingV1("profile", "tools", "policy", "output")
     cards = tuple(
         MethodCardV1(
@@ -63,7 +68,7 @@ def _skill(*methods: tuple[str, tuple[str, ...]]) -> ResolvedSpecializedSkillV1:
             source_wiki_sha256="1" * 64,
             required_user_inputs=(),
             required_artifacts=(),
-            log_derived_fields=(),
+            log_derived_fields=log_derived_fields,
             shared_references=(),
             methods=cards,
         ),
@@ -180,10 +185,24 @@ def test_plan_consumes_graph_refs_without_rematching_marker_text() -> None:
         marker="DECLARED_MARKER",
         line="this line does not contain the marker",
     )
+    event_ref = method_evidence_event_ref_v2(
+        method_id="first-method",
+        method_priority=1,
+        identity_tokens=(),
+        evidence_hit_refs=(hit_ref,),
+    )
+    event = MethodEvidenceEventV2(
+        event_ref=event_ref,
+        method_id="first-method",
+        method_priority=1,
+        identity_tokens=(),
+        evidence_hit_refs=(hit_ref,),
+    )
     graph_ref = method_evidence_graph_ref_v2(
         skill_sha256=skill.combined_sha256,
         sources=(source,),
         hits=(hit,),
+        events=(event,),
         loaded_method_ids=("first-method",),
     )
     graph = MethodEvidenceGraphV2(
@@ -191,12 +210,14 @@ def test_plan_consumes_graph_refs_without_rematching_marker_text() -> None:
         skill_sha256=skill.combined_sha256,
         sources=(source,),
         hits=(hit,),
+        events=(event,),
         loaded_method_ids=("first-method",),
     )
 
     plan = build_method_evaluation_plan_v2(skill=skill, evidence=graph)
 
     assert plan.evaluations[0].evidence_hit_refs == (hit_ref,)
+    assert plan.evaluations[0].evidence_event_refs == (event_ref,)
     assert plan.evaluations[0].evaluation_ref.startswith("eval-")
     assert plan.plan_ref.startswith("plan-")
 
@@ -251,7 +272,67 @@ def test_hits_and_plan_use_business_order_not_manifest_or_log_order() -> None:
     ] == [(1, "first-priority"), (2, "second-priority")]
 
 
-@pytest.mark.parametrize("mutation", ["missing-method", "missing-hit", "cross-method"])
+def test_request_identity_tokens_create_distinct_events_without_losing_hits() -> None:
+    skill = _skill(
+        ("request-method", ("REQUEST_DONE",)),
+        log_derived_fields=("request_id",),
+    )
+    graph = scan_method_evidence_v2(
+        skill=skill,
+        target_logs=(
+            _target(
+                "server",
+                "REQUEST_DONE request_id=req-1\n"
+                "REQUEST_DONE request_id=req-2\n"
+                "REQUEST_DONE request_id=req-1\n",
+            ),
+        ),
+    )
+
+    plan = build_method_evaluation_plan_v2(skill=skill, evidence=graph)
+
+    assert [item.identity_tokens for item in graph.events] == [
+        ("request_id=req-1",),
+        ("request_id=req-2",),
+    ]
+    assert [len(item.evidence_hit_refs) for item in graph.events] == [2, 1]
+    assert len(plan.evaluations) == 1
+    assert plan.evaluations[0].evidence_event_refs == tuple(
+        item.event_ref for item in graph.events
+    )
+    assert plan.evaluations[0].evidence_hit_refs == tuple(
+        item.hit_ref for item in graph.hits
+    )
+
+
+def test_hits_without_identity_tokens_each_form_their_own_event() -> None:
+    skill = _skill(
+        ("request-method", ("REQUEST_DONE",)),
+        log_derived_fields=("request_id",),
+    )
+
+    graph = scan_method_evidence_v2(
+        skill=skill,
+        target_logs=(_target("server", "REQUEST_DONE\nREQUEST_DONE\n"),),
+    )
+
+    assert len(graph.hits) == 2
+    assert len(graph.events) == 2
+    assert all(item.identity_tokens == () for item in graph.events)
+    assert [item.evidence_hit_refs for item in graph.events] == [
+        (graph.hits[0].hit_ref,),
+        (graph.hits[1].hit_ref,),
+    ]
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "missing-method",
+        "missing-hit",
+        "cross-method",
+    ],
+)
 def test_plan_graph_validation_rejects_incomplete_or_cross_method_refs(
     mutation: str,
 ) -> None:
@@ -279,4 +360,41 @@ def test_plan_graph_validation_rejects_incomplete_or_cross_method_refs(
         forged = plan.model_copy(update={"evaluations": (first, plan.evaluations[1])})
 
     with pytest.raises(ValueError):
+        validate_method_evaluation_plan_v2(evidence=graph, plan=forged)
+
+
+@pytest.mark.parametrize("mutation", ["omit-request-event", "merge-request-events"])
+def test_plan_graph_validation_rejects_omitted_or_merged_request_events(
+    mutation: str,
+) -> None:
+    skill = _skill(
+        ("request-method", ("REQUEST_DONE",)),
+        log_derived_fields=("request_id",),
+    )
+    graph = scan_method_evidence_v2(
+        skill=skill,
+        target_logs=(
+            _target(
+                "server",
+                "REQUEST_DONE request_id=req-1\nREQUEST_DONE request_id=req-2\n",
+            ),
+        ),
+    )
+    plan = build_method_evaluation_plan_v2(skill=skill, evidence=graph)
+    item = plan.evaluations[0]
+    if mutation == "omit-request-event":
+        event_refs = item.evidence_event_refs[:-1]
+    else:
+        event_refs = (
+            method_evidence_event_ref_v2(
+                method_id=item.method_id,
+                method_priority=item.method_priority,
+                identity_tokens=("request_id=req-1", "request_id=req-2"),
+                evidence_hit_refs=item.evidence_hit_refs,
+            ),
+        )
+    forged_item = item.model_copy(update={"evidence_event_refs": event_refs})
+    forged = plan.model_copy(update={"evaluations": (forged_item,)})
+
+    with pytest.raises(ValueError, match="evidence events"):
         validate_method_evaluation_plan_v2(evidence=graph, plan=forged)

@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
 
 from problem_locator.contracts import (
+    MethodEvidenceEventV2,
     MethodEvidenceGraphV2,
     MethodEvidenceHitV2,
     MethodEvidenceSourceV2,
@@ -12,6 +14,7 @@ from problem_locator.contracts import (
     MethodEvaluationPlanV2,
     method_evaluation_plan_ref_v2,
     method_evaluation_ref_v2,
+    method_evidence_event_ref_v2,
     method_evidence_graph_ref_v2,
     method_evidence_hit_ref_v2,
     method_evidence_source_ref_v2,
@@ -134,6 +137,54 @@ def scan_method_evidence_v2(
             ),
         )
     )
+    identity_patterns = tuple(
+        (
+            field,
+            re.compile(rf"(?<![A-Za-z0-9_])({re.escape(field)}=[^\s,;]+)"),
+        )
+        for field in skill.methods.log_derived_fields
+    )
+    identity_by_line: dict[tuple[str, int], tuple[str, ...]] = {}
+    event_groups: dict[
+        tuple[str, tuple[str, ...], str | None],
+        list[MethodEvidenceHitV2],
+    ] = {}
+    for hit in frozen_hits:
+        line_key = (hit.source_ref, hit.line_number)
+        identity_tokens = identity_by_line.get(line_key)
+        if identity_tokens is None:
+            identity_tokens = tuple(
+                match.group(1)
+                for _, pattern in identity_patterns
+                if (match := pattern.search(hit.line)) is not None
+            )
+            identity_by_line[line_key] = identity_tokens
+        # An unkeyed hit is deliberately its own event.  It must never merge
+        # with another line merely because both lack identity.
+        unkeyed_hit_ref = None if identity_tokens else hit.hit_ref
+        group_key = (hit.method_id, identity_tokens, unkeyed_hit_ref)
+        event_groups.setdefault(group_key, []).append(hit)
+
+    events: list[MethodEvidenceEventV2] = []
+    for (method_id, identity_tokens, _), event_hits in event_groups.items():
+        method_priority = event_hits[0].method_priority
+        evidence_hit_refs = tuple(item.hit_ref for item in event_hits)
+        event_ref = method_evidence_event_ref_v2(
+            method_id=method_id,
+            method_priority=method_priority,
+            identity_tokens=identity_tokens,
+            evidence_hit_refs=evidence_hit_refs,
+        )
+        events.append(
+            MethodEvidenceEventV2(
+                event_ref=event_ref,
+                method_id=method_id,
+                method_priority=method_priority,
+                identity_tokens=identity_tokens,
+                evidence_hit_refs=evidence_hit_refs,
+            )
+        )
+    frozen_events = tuple(events)
     loaded_method_ids = tuple(
         method.id
         for method in sorted(
@@ -146,6 +197,7 @@ def scan_method_evidence_v2(
         skill_sha256=skill.combined_sha256,
         sources=sources,
         hits=frozen_hits,
+        events=frozen_events,
         loaded_method_ids=loaded_method_ids,
     )
     return MethodEvidenceGraphV2(
@@ -153,6 +205,7 @@ def scan_method_evidence_v2(
         skill_sha256=skill.combined_sha256,
         sources=sources,
         hits=frozen_hits,
+        events=frozen_events,
         loaded_method_ids=loaded_method_ids,
     )
 
@@ -199,12 +252,16 @@ def build_method_evaluation_plan_v2(
     evaluations: list[MethodEvaluationPlanItemV2] = []
     for method_id in evidence.loaded_method_ids:
         method_priority = methods_by_id[method_id].priority
+        evidence_event_refs = tuple(
+            item.event_ref for item in evidence.events if item.method_id == method_id
+        )
         evidence_hit_refs = tuple(
             item.hit_ref for item in evidence.hits if item.method_id == method_id
         )
         evaluation_ref = method_evaluation_ref_v2(
             method_id=method_id,
             method_priority=method_priority,
+            evidence_event_refs=evidence_event_refs,
             evidence_hit_refs=evidence_hit_refs,
         )
         evaluations.append(
@@ -212,6 +269,7 @@ def build_method_evaluation_plan_v2(
                 evaluation_ref=evaluation_ref,
                 method_id=method_id,
                 method_priority=method_priority,
+                evidence_event_refs=evidence_event_refs,
                 evidence_hit_refs=evidence_hit_refs,
             )
         )
@@ -252,18 +310,32 @@ def validate_method_evaluation_plan_v2(
     if planned_method_ids != evidence.loaded_method_ids:
         raise ValueError("evaluation plan must contain each loaded method exactly once")
     all_planned_hit_refs: list[str] = []
+    all_planned_event_refs: list[str] = []
     for item in plan.evaluations:
+        method_events = tuple(
+            event for event in evidence.events if event.method_id == item.method_id
+        )
         method_hits = tuple(
             hit for hit in evidence.hits if hit.method_id == item.method_id
         )
         expected_hit_refs = tuple(hit.hit_ref for hit in method_hits)
+        expected_event_refs = tuple(event.event_ref for event in method_events)
+        if item.evidence_event_refs != expected_event_refs:
+            raise ValueError(
+                "evaluation plan must reference every and only its method evidence events"
+            )
         if item.evidence_hit_refs != expected_hit_refs:
             raise ValueError(
                 "evaluation plan must reference every and only its method evidence hits"
             )
         if any(hit.method_priority != item.method_priority for hit in method_hits):
             raise ValueError("evaluation priority differs from its evidence hits")
+        if any(event.method_priority != item.method_priority for event in method_events):
+            raise ValueError("evaluation priority differs from its evidence events")
+        all_planned_event_refs.extend(item.evidence_event_refs)
         all_planned_hit_refs.extend(item.evidence_hit_refs)
+    if tuple(all_planned_event_refs) != tuple(event.event_ref for event in evidence.events):
+        raise ValueError("evaluation plan does not exactly cover the evidence events")
     if tuple(all_planned_hit_refs) != tuple(hit.hit_ref for hit in evidence.hits):
         raise ValueError("evaluation plan does not exactly partition the evidence graph")
 

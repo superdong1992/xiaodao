@@ -36,6 +36,13 @@ MethodEvidenceTextV2: TypeAlias = Annotated[
     str,
     StringConstraints(min_length=1, strict=True),
 ]
+MethodEvidenceIdentityTokenV2: TypeAlias = Annotated[
+    str,
+    StringConstraints(
+        pattern=r"^[a-z][a-z0-9]*(?:_[a-z0-9]+)*=[^\s,;]+$",
+        strict=True,
+    ),
+]
 MethodEvidenceSourceRefV2: TypeAlias = Annotated[
     str,
     StringConstraints(pattern=r"^source-[0-9a-f]{64}$", strict=True),
@@ -47,6 +54,10 @@ MethodEvidenceHitRefV2: TypeAlias = Annotated[
 MethodEvidenceGraphRefV2: TypeAlias = Annotated[
     str,
     StringConstraints(pattern=r"^graph-[0-9a-f]{64}$", strict=True),
+]
+MethodEvidenceEventRefV2: TypeAlias = Annotated[
+    str,
+    StringConstraints(pattern=r"^event-[0-9a-f]{64}$", strict=True),
 ]
 MethodEvaluationRefV2: TypeAlias = Annotated[
     str,
@@ -153,11 +164,59 @@ class MethodEvidenceHitV2(_MethodsV2Contract):
         return self
 
 
+def method_evidence_event_ref_v2(
+    *,
+    method_id: str,
+    method_priority: int,
+    identity_tokens: tuple[str, ...],
+    evidence_hit_refs: tuple[str, ...],
+) -> str:
+    return "event-" + canonical_json_sha256(
+        {
+            "kind": "method-evidence-event-v2",
+            "method_id": method_id,
+            "method_priority": method_priority,
+            "identity_tokens": list(identity_tokens),
+            "evidence_hit_refs": list(evidence_hit_refs),
+        }
+    )
+
+
+class MethodEvidenceEventV2(_MethodsV2Contract):
+    event_ref: MethodEvidenceEventRefV2
+    method_id: MethodIdV2
+    method_priority: PositiveInt
+    identity_tokens: tuple[MethodEvidenceIdentityTokenV2, ...]
+    evidence_hit_refs: tuple[MethodEvidenceHitRefV2, ...]
+
+    @model_validator(mode="after")
+    def validate_event_ref(self) -> "MethodEvidenceEventV2":
+        if len(self.identity_tokens) != len(set(self.identity_tokens)):
+            raise ValueError("event identity_tokens must be unique")
+        identity_names = [item.split("=", 1)[0] for item in self.identity_tokens]
+        if len(identity_names) != len(set(identity_names)):
+            raise ValueError("an event may contain only one value for each identity field")
+        if not self.evidence_hit_refs or len(self.evidence_hit_refs) != len(
+            set(self.evidence_hit_refs)
+        ):
+            raise ValueError("an event must reference unique non-empty evidence hits")
+        expected = method_evidence_event_ref_v2(
+            method_id=self.method_id,
+            method_priority=self.method_priority,
+            identity_tokens=self.identity_tokens,
+            evidence_hit_refs=self.evidence_hit_refs,
+        )
+        if self.event_ref != expected:
+            raise ValueError("event_ref does not match the evidence event")
+        return self
+
+
 def method_evidence_graph_ref_v2(
     *,
     skill_sha256: str,
     sources: tuple[MethodEvidenceSourceV2, ...],
     hits: tuple[MethodEvidenceHitV2, ...],
+    events: tuple[MethodEvidenceEventV2, ...],
     loaded_method_ids: tuple[str, ...],
 ) -> str:
     return "graph-" + canonical_json_sha256(
@@ -166,6 +225,7 @@ def method_evidence_graph_ref_v2(
             "skill_sha256": skill_sha256,
             "source_refs": [item.source_ref for item in sources],
             "hit_refs": [item.hit_ref for item in hits],
+            "event_refs": [item.event_ref for item in events],
             "loaded_method_ids": list(loaded_method_ids),
         }
     )
@@ -176,6 +236,7 @@ class MethodEvidenceGraphV2(_MethodsV2Contract):
     skill_sha256: Sha256
     sources: tuple[MethodEvidenceSourceV2, ...]
     hits: tuple[MethodEvidenceHitV2, ...]
+    events: tuple[MethodEvidenceEventV2, ...]
     loaded_method_ids: tuple[MethodIdV2, ...]
 
     @model_validator(mode="after")
@@ -209,6 +270,46 @@ class MethodEvidenceGraphV2(_MethodsV2Contract):
         )
         if self.hits != expected_hit_order:
             raise ValueError("evidence hits are not in deterministic business order")
+        events_by_ref = {item.event_ref: item for item in self.events}
+        if len(events_by_ref) != len(self.events):
+            raise ValueError("evidence graph events must be unique")
+        hits_by_ref = {item.hit_ref: item for item in self.hits}
+        partitioned_hit_refs: list[str] = []
+        keyed_event_keys: set[tuple[str, tuple[str, ...]]] = set()
+        for event in self.events:
+            if event.identity_tokens:
+                event_key = (event.method_id, event.identity_tokens)
+                if event_key in keyed_event_keys:
+                    raise ValueError("one method identity may only produce one event")
+                keyed_event_keys.add(event_key)
+            elif len(event.evidence_hit_refs) != 1:
+                raise ValueError("an unkeyed evidence hit must be its own event")
+            event_hits = [hits_by_ref.get(item) for item in event.evidence_hit_refs]
+            if any(item is None for item in event_hits):
+                raise ValueError("every event hit must belong to the evidence graph")
+            if any(
+                item.method_id != event.method_id
+                or item.method_priority != event.method_priority
+                for item in event_hits
+                if item is not None
+            ):
+                raise ValueError("an event may only reference hits from its method")
+            partitioned_hit_refs.extend(event.evidence_hit_refs)
+        if sorted(partitioned_hit_refs) != sorted(hits_by_ref):
+            raise ValueError("evidence events must exactly partition all graph hits")
+        hit_order = {item.hit_ref: index for index, item in enumerate(self.hits)}
+        expected_event_order = tuple(
+            sorted(
+                self.events,
+                key=lambda item: (
+                    item.method_priority,
+                    item.method_id,
+                    min(hit_order[ref] for ref in item.evidence_hit_refs),
+                ),
+            )
+        )
+        if self.events != expected_event_order:
+            raise ValueError("evidence events are not in deterministic business order")
         if len(self.loaded_method_ids) != len(set(self.loaded_method_ids)):
             raise ValueError("loaded_method_ids must be unique")
         if set(self.loaded_method_ids) != {item.method_id for item in self.hits}:
@@ -231,6 +332,7 @@ class MethodEvidenceGraphV2(_MethodsV2Contract):
             skill_sha256=self.skill_sha256,
             sources=self.sources,
             hits=self.hits,
+            events=self.events,
             loaded_method_ids=self.loaded_method_ids,
         )
         if self.graph_ref != expected:
@@ -242,6 +344,7 @@ def method_evaluation_ref_v2(
     *,
     method_id: str,
     method_priority: int,
+    evidence_event_refs: tuple[str, ...],
     evidence_hit_refs: tuple[str, ...],
 ) -> str:
     return "eval-" + canonical_json_sha256(
@@ -249,6 +352,7 @@ def method_evaluation_ref_v2(
             "kind": "method-evaluation-v2",
             "method_id": method_id,
             "method_priority": method_priority,
+            "evidence_event_refs": list(evidence_event_refs),
             "evidence_hit_refs": list(evidence_hit_refs),
         }
     )
@@ -258,10 +362,15 @@ class MethodEvaluationPlanItemV2(_MethodsV2Contract):
     evaluation_ref: MethodEvaluationRefV2
     method_id: MethodIdV2
     method_priority: PositiveInt
+    evidence_event_refs: tuple[MethodEvidenceEventRefV2, ...]
     evidence_hit_refs: tuple[MethodEvidenceHitRefV2, ...]
 
     @model_validator(mode="after")
     def validate_evaluation_ref(self) -> "MethodEvaluationPlanItemV2":
+        if not self.evidence_event_refs or len(self.evidence_event_refs) != len(
+            set(self.evidence_event_refs)
+        ):
+            raise ValueError("an evaluation must reference unique non-empty evidence events")
         if not self.evidence_hit_refs or len(self.evidence_hit_refs) != len(
             set(self.evidence_hit_refs)
         ):
@@ -269,6 +378,7 @@ class MethodEvaluationPlanItemV2(_MethodsV2Contract):
         expected = method_evaluation_ref_v2(
             method_id=self.method_id,
             method_priority=self.method_priority,
+            evidence_event_refs=self.evidence_event_refs,
             evidence_hit_refs=self.evidence_hit_refs,
         )
         if self.evaluation_ref != expected:
@@ -367,8 +477,11 @@ __all__ = [
     "MethodConsensusV2",
     "MethodEvidenceGraphV2",
     "MethodEvidenceGraphRefV2",
+    "MethodEvidenceEventRefV2",
+    "MethodEvidenceEventV2",
     "MethodEvidenceHitV2",
     "MethodEvidenceHitRefV2",
+    "MethodEvidenceIdentityTokenV2",
     "MethodEvidenceSourceIdV2",
     "MethodEvidenceSourceRefV2",
     "MethodEvidenceSourceV2",
@@ -384,6 +497,7 @@ __all__ = [
     "method_evaluation_plan_ref_v2",
     "method_evaluation_ref_v2",
     "method_evidence_graph_ref_v2",
+    "method_evidence_event_ref_v2",
     "method_evidence_hit_ref_v2",
     "method_evidence_source_ref_v2",
 ]

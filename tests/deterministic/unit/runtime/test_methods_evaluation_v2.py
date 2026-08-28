@@ -28,15 +28,17 @@ def _plan() -> MethodEvaluationPlanV2:
             evaluation_ref=method_evaluation_ref_v2(
                 method_id=method_id,
                 method_priority=method_priority,
+                evidence_event_refs=(event_ref,),
                 evidence_hit_refs=(hit_ref,),
             ),
             method_id=method_id,
             method_priority=method_priority,
+            evidence_event_refs=(event_ref,),
             evidence_hit_refs=(hit_ref,),
         )
-        for method_priority, method_id, hit_ref in (
-            (1, "first-method", "hit-" + "3" * 64),
-            (2, "second-method", "hit-" + "4" * 64),
+        for method_priority, method_id, event_ref, hit_ref in (
+            (1, "first-method", "event-" + "5" * 64, "hit-" + "3" * 64),
+            (2, "second-method", "event-" + "6" * 64, "hit-" + "4" * 64),
         )
     )
     return MethodEvaluationPlanV2(
