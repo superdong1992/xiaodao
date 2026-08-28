@@ -28,6 +28,7 @@ from problem_locator.contracts.models import (
     JobInstructionPayload,
     JobOutcome,
     MethodsReviewMethodCardV2,
+    MethodsReviewTargetV2,
     MethodsReviewerInputV2,
     UserResultPayload,
     WorkspaceEvidenceInput,
@@ -42,6 +43,7 @@ from problem_locator.contracts.methods_v2 import (
     MethodEvaluationPlanV2,
 )
 from problem_locator.contracts.serialization import canonical_json_bytes, schema_bundle_bytes
+from problem_locator.runtime.methods_skill import ResolvedSpecializedSkillV1
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,6 +66,7 @@ class ContextMaterials:
     skill_index: str | None = None
     methods_evidence_graph: MethodEvidenceGraphV2 | None = None
     methods_evaluation_plan: MethodEvaluationPlanV2 | None = None
+    methods_skill: ResolvedSpecializedSkillV1 | None = None
     methods_method_cards: tuple[MethodsReviewMethodCardV2, ...] = ()
 
     def __post_init__(self) -> None:
@@ -81,6 +84,42 @@ class ContextLimitExceeded(ValueError):
         super().__init__(
             f"required context uses {observed} UTF-8 bytes; limit is {limit}"
         )
+
+
+def build_methods_review_method_cards_v2(
+    *,
+    skill: ResolvedSpecializedSkillV1,
+    target: MethodsReviewTargetV2,
+    plan: MethodEvaluationPlanV2,
+) -> tuple[MethodsReviewMethodCardV2, ...]:
+    """Read the exact planned method cards from the target's loaded Skill package."""
+
+    if not isinstance(skill, ResolvedSpecializedSkillV1):
+        raise TypeError("skill must be a loaded ResolvedSpecializedSkillV1")
+    if (
+        skill.combined_sha256 != target.skill_ref.content_hash
+        or plan.plan_ref != target.plan_ref
+        or plan.skill_sha256 != target.skill_ref.content_hash
+        or plan.evidence_graph_ref != target.graph_ref
+    ):
+        raise ValueError("Methods Review Skill/Plan does not match its target")
+    methods_by_id = skill.methods.method_by_id
+    cards: list[MethodsReviewMethodCardV2] = []
+    for item in plan.evaluations:
+        method = methods_by_id.get(item.method_id)
+        if method is None:
+            raise ValueError("Methods Review Plan references a method absent from its Skill")
+        try:
+            content = (skill.package_root / method.reference).read_bytes().decode("utf-8")
+        except (OSError, UnicodeError) as exc:
+            raise ValueError("Methods Review method card is unavailable as UTF-8") from exc
+        cards.append(
+            MethodsReviewMethodCardV2(
+                method_id=method.id,
+                content=content,
+            )
+        )
+    return tuple(cards)
 
 
 def build_methods_reviewer_manifest_v2(
@@ -524,6 +563,7 @@ class ContextBuilder:
             if (
                 materials.methods_evidence_graph is not None
                 or materials.methods_evaluation_plan is not None
+                or materials.methods_skill is not None
                 or materials.methods_method_cards
             ):
                 raise ValueError(
@@ -533,13 +573,25 @@ class ContextBuilder:
         reviewer_input = materials.manifest.methods_reviewer_input
         graph = materials.methods_evidence_graph
         plan = materials.methods_evaluation_plan
+        skill = materials.methods_skill
         cards = materials.methods_method_cards
-        if reviewer_input is None or graph is None or plan is None or not cards:
+        if (
+            reviewer_input is None
+            or graph is None
+            or plan is None
+            or skill is None
+            or not cards
+        ):
             raise ValueError(
                 "Methods V2 REVIEW context requires Graph, Plan, and method cards"
             )
         method_ids = tuple(item.method_id for item in cards)
         planned_method_ids = tuple(item.method_id for item in plan.evaluations)
+        expected_cards = build_methods_review_method_cards_v2(
+            skill=skill,
+            target=target,
+            plan=plan,
+        )
         if (
             reviewer_input.target != target
             or graph.graph_ref != target.graph_ref
@@ -549,6 +601,7 @@ class ContextBuilder:
             or plan.skill_sha256 != target.skill_ref.content_hash
             or reviewer_input.method_ids != planned_method_ids
             or method_ids != planned_method_ids
+            or cards != expected_cards
         ):
             raise ValueError(
                 "Methods V2 REVIEW context inputs do not match one Graph/Plan/Skill method set"
@@ -629,5 +682,6 @@ __all__ = [
     "ContextLimitExceeded",
     "ContextMaterials",
     "build_bounded_context",
+    "build_methods_review_method_cards_v2",
     "build_methods_reviewer_manifest_v2",
 ]

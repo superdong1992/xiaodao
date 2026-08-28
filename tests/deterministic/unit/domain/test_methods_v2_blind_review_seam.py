@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-from pathlib import Path
 
 import pytest
 
@@ -25,9 +24,7 @@ from problem_locator.contracts import (
     DiagnosisProvenanceType,
     JobOutcome,
     JobType,
-    MethodsReviewMethodCardV2,
     MethodsReviewerInputV2,
-    MethodsReviewTargetV2,
     ReviewOutcomeTriggerPayload,
     TriggerType,
     VersionedRef,
@@ -40,6 +37,7 @@ from problem_locator.domain import DomainCoordinator, PureContextSnapshotProject
 from problem_locator.runtime.context_builder import (
     ContextBuilder,
     ContextMaterials,
+    build_methods_review_method_cards_v2,
     build_methods_reviewer_manifest_v2,
 )
 from problem_locator.runtime.methods_evidence_v2 import (
@@ -48,14 +46,8 @@ from problem_locator.runtime.methods_evidence_v2 import (
 )
 from problem_locator.runtime.methods_grounding import FrozenTargetLogV1
 from problem_locator.runtime.methods_evaluation_v2 import evaluate_method_role_v2
-from problem_locator.runtime.methods_skill import (
-    MethodCardV1,
-    MethodsManifestV1,
-    PreprocessingBindingV1,
-    RegistrationTemplateV1,
-    ResolvedSpecializedSkillV1,
-    RuntimeRoleBindingV1,
-)
+from problem_locator.runtime.methods_skill import load_specialized_skill_registration
+from tests.deterministic.unit.runtime.test_methods_skill import _write_registration
 
 from ._builders import (
     continuation,
@@ -79,9 +71,14 @@ USER_FACT_ID = "00000000-0000-0000-0000-000000000074"
 USER_FACT_VALUE = "threshold=37"
 
 
-def _source_job():
+def _source_job(skill):
     source = diagnose_job()
     assert source.context_snapshot is not None
+    skill_ref = VersionedRef(
+        id=skill.registration_id,
+        version=skill.registration.version,
+        content_hash=skill.combined_sha256,
+    )
     snapshot_value = source.context_snapshot.model_dump(mode="python")
     snapshot_value["user_facts"] = [
         DiagnosisItem(
@@ -101,50 +98,19 @@ def _source_job():
     return rebuild(
         source,
         context_snapshot=ContextSnapshot.model_validate(snapshot_value),
+        skill_ref=skill_ref,
     )
 
 
-def _production_graph_and_plan():
-    source = _source_job()
-    assert source.skill_ref is not None
-    role = RuntimeRoleBindingV1("profile", "tools", "policy", "output")
-    method = MethodCardV1(
-        id="blind-method",
-        title="blind-method",
-        reference="references/blind-method.md",
-        priority=1,
-        evidence_markers=("BLIND_MARKER",),
+def _flow_inputs(tmp_path):
+    skill = load_specialized_skill_registration(
+        _write_registration(tmp_path / "skills")
     )
-    skill = ResolvedSpecializedSkillV1(
-        registration_root=Path("registration"),
-        package_root=Path("package"),
-        registration=RegistrationTemplateV1(
-            registration_id="blind-review-test",
-            version="1.0.0",
-            capability="test",
-            deployment_scope="PRODUCTION",
-            summary="test",
-            package_relative_path="package/blind-review-test",
-            skill_name="blind-review-test",
-            source_wiki_sha256="1" * 64,
-            diagnose=role,
-            review=role,
-            preprocessing=PreprocessingBindingV1(False, None, (), None),
-        ),
-        methods=MethodsManifestV1(
-            skill_name="blind-review-test",
-            source_wiki_sha256="1" * 64,
-            required_user_inputs=(),
-            required_artifacts=(),
-            log_derived_fields=(),
-            shared_references=(),
-            methods=(method,),
-        ),
-        registration_sha256="2" * 64,
-        package_tree_sha256="3" * 64,
-        combined_sha256=source.skill_ref.content_hash,
+    source = _source_job(skill)
+    content = (
+        b"API_COMPLETE request_id=req-1\n"
+        b"UNRELATED_POSITIVE request_id=req-2\n"
     )
-    content = b"BLIND_MARKER request_id=req-1\n"
     graph = scan_method_evidence_v2(
         skill=skill,
         target_logs=(
@@ -156,53 +122,44 @@ def _production_graph_and_plan():
             ),
         ),
     )
-    return graph, build_method_evaluation_plan_v2(skill=skill, evidence=graph)
+    plan = build_method_evaluation_plan_v2(skill=skill, evidence=graph)
+    return source, skill, graph, plan
 
 
-def _target() -> tuple[MethodsReviewTargetV2, object, object]:
-    source = _source_job()
-    graph, plan = _production_graph_and_plan()
+def _review_bindings(source):
     assert source.skill_ref is not None
-    return (
-        MethodsReviewTargetV2(
-            schema_version=2,
-            evaluation_id=EVALUATION_ID,
-            source_job_id=source.job_id,
-            graph_ref=graph.graph_ref,
-            plan_ref=plan.plan_ref,
+    return runtime_bindings(
+        rebuild(
+            review_job(),
             skill_ref=source.skill_ref,
-            reviewed_state_revision=source.base_state_revision,
-        ),
-        graph,
-        plan,
+        )
     )
 
 
-def _specialist_handoff() -> tuple[JobOutcome, object, object]:
-    target, graph, plan = _target()
-    source = _source_job()
+def _specialist_handoff(inputs) -> tuple[JobOutcome, object, object]:
+    source, _, graph, plan = inputs
     base = diagnosis_outcome()
     outcome = build_methods_specialist_handoff_outcome_v2(
         source,
         outcome_id=base.outcome_id,
-        evaluation_id=target.evaluation_id,
+        evaluation_id=EVALUATION_ID,
         graph=graph,
         plan=plan,
         produced_at=base.produced_at,
     )
-    assert outcome.methods_review_target == target
+    assert outcome.methods_review_target is not None
     return outcome, graph, plan
 
 
-def _plan_and_review_job():
-    source = _source_job()
+def _plan_and_review_job(inputs):
+    source, _, _, _ = inputs
     snapshot = snapshot_with_active(source)
-    outcome, graph, evaluation_plan = _specialist_handoff()
+    outcome, graph, evaluation_plan = _specialist_handoff(inputs)
     request = trigger(
         snapshot,
         trigger_type=TriggerType.DIAGNOSIS_OUTCOME,
         payload=DiagnosisOutcomeTriggerPayload(job_outcome=outcome),
-        bindings={JobType.REVIEW: runtime_bindings(review_job())},
+        bindings={JobType.REVIEW: _review_bindings(source)},
         continuation_resources=continuation(
             incoming_outcome_id=outcome.outcome_id,
             job=source,
@@ -235,8 +192,9 @@ def _plan_and_review_job():
     return snapshot, outcome, plan, state, job, graph, evaluation_plan
 
 
-def test_diagnose_creates_candidate_free_blind_review_job() -> None:
-    snapshot, outcome, plan, state, job, _, _ = _plan_and_review_job()
+def test_diagnose_creates_candidate_free_blind_review_job(tmp_path) -> None:
+    inputs = _flow_inputs(tmp_path)
+    snapshot, outcome, plan, state, job, _, _ = _plan_and_review_job(inputs)
 
     assert validate_transition_plan_for_outcome(plan, outcome) is plan
     assert plan.target_case_status is CaseStatus.REVIEWING
@@ -275,9 +233,16 @@ def test_diagnose_creates_candidate_free_blind_review_job() -> None:
     )
 
 
-def test_reviewer_context_receives_only_graph_plan_and_method_cards() -> None:
-    _, outcome, _, _, job, graph, plan = _plan_and_review_job()
+def test_reviewer_context_receives_only_graph_plan_and_method_cards(tmp_path) -> None:
+    inputs = _flow_inputs(tmp_path)
+    source, skill, _, _ = inputs
+    _, outcome, _, _, job, graph, plan = _plan_and_review_job(inputs)
     assert job.methods_review_target is not None
+    cards = build_methods_review_method_cards_v2(
+        skill=skill,
+        target=job.methods_review_target,
+        plan=plan,
+    )
     manifest = build_methods_reviewer_manifest_v2(
         job,
         method_ids=tuple(item.method_id for item in plan.evaluations),
@@ -292,15 +257,11 @@ def test_reviewer_context_receives_only_graph_plan_and_method_cards() -> None:
             manifest=manifest,
             previous_outcomes=(),
             evidence=(),
-            skill="same pinned Skill entry",
+            skill=(skill.package_root / "SKILL.md").read_text(encoding="utf-8"),
             methods_evidence_graph=graph,
             methods_evaluation_plan=plan,
-            methods_method_cards=(
-                MethodsReviewMethodCardV2(
-                    method_id="blind-method",
-                    content="BLIND_MARKER means the method must be evaluated.",
-                ),
-            ),
+            methods_skill=skill,
+            methods_method_cards=cards,
         ),
     )
 
@@ -309,17 +270,24 @@ def test_reviewer_context_receives_only_graph_plan_and_method_cards() -> None:
     assert "candidate_conclusion_id" not in context.body
     assert graph.graph_ref in context.body
     assert plan.plan_ref in context.body
-    assert "blind-method" in context.body
+    assert all(item.method_id in context.body for item in cards)
+    assert all(item.content.splitlines()[0] in context.body for item in cards)
     assert USER_FACT_VALUE in context.body
     assert "threshold_config" in context.body
     assert job.context_snapshot is not None
-    assert job.context_snapshot.user_facts == _source_job().context_snapshot.user_facts
+    assert job.context_snapshot.user_facts == source.context_snapshot.user_facts
     assert manifest.entries == []
     assert manifest.review_subject is None
 
 
-def test_methods_target_is_server_only_and_never_falls_back_to_candidate() -> None:
-    target, _, _ = _target()
+def test_methods_target_is_server_only_and_never_falls_back_to_candidate(
+    tmp_path,
+) -> None:
+    inputs = _flow_inputs(tmp_path)
+    source, _, _, _ = inputs
+    outcome, _, _ = _specialist_handoff(inputs)
+    assert outcome.methods_review_target is not None
+    target = outcome.methods_review_target
     agent_schema = AgentJobOutcome.model_json_schema()["properties"]
     assert "methods_review_target" not in agent_schema
     assert "methods_reviewer_result" not in agent_schema
@@ -329,21 +297,18 @@ def test_methods_target_is_server_only_and_never_falls_back_to_candidate() -> No
     with pytest.raises(ValueError, match="extra"):
         AgentJobOutcome.model_validate(agent_value)
 
-    outcome, _, _ = _specialist_handoff()
-    assert outcome.methods_review_target is not None
     without_target_value = outcome.model_dump(mode="python")
     without_target_value.pop("methods_review_target")
     with pytest.raises(ValueError, match="non-failed outcomes require a payload"):
         JobOutcome.model_validate(without_target_value)
 
-    source = _source_job()
     snapshot = snapshot_with_active(source)
     legacy_candidate_outcome = diagnosis_outcome()
     missing_target_request = trigger(
         snapshot,
         trigger_type=TriggerType.DIAGNOSIS_OUTCOME,
         payload=DiagnosisOutcomeTriggerPayload(job_outcome=legacy_candidate_outcome),
-        bindings={JobType.REVIEW: runtime_bindings(review_job())},
+        bindings={JobType.REVIEW: _review_bindings(source)},
         continuation_resources=continuation(
             incoming_outcome_id=legacy_candidate_outcome.outcome_id,
             job=source,
@@ -370,7 +335,7 @@ def test_methods_target_is_server_only_and_never_falls_back_to_candidate() -> No
         snapshot,
         trigger_type=TriggerType.DIAGNOSIS_OUTCOME,
         payload=DiagnosisOutcomeTriggerPayload(job_outcome=mutated),
-        bindings={JobType.REVIEW: runtime_bindings(review_job())},
+        bindings={JobType.REVIEW: _review_bindings(source)},
         continuation_resources=continuation(
             incoming_outcome_id=mutated.outcome_id,
             job=source,
@@ -384,8 +349,11 @@ def test_methods_target_is_server_only_and_never_falls_back_to_candidate() -> No
     assert "Methods V2" in result.message
 
 
-def test_server_can_express_reviewer_result_without_candidate_assessment() -> None:
-    _, _, _, state, job, _, plan = _plan_and_review_job()
+def test_server_can_express_reviewer_result_without_candidate_assessment(
+    tmp_path,
+) -> None:
+    inputs = _flow_inputs(tmp_path)
+    _, _, _, state, job, _, plan = _plan_and_review_job(inputs)
     assert job.methods_review_target is not None
     evaluation = evaluate_method_role_v2(
         role="REVIEWER",
@@ -432,8 +400,10 @@ def test_server_can_express_reviewer_result_without_candidate_assessment() -> No
     assert outcome.methods_reviewer_result.target == job.methods_review_target
 
 
-def test_single_field_mutations_break_target_manifest_and_method_set() -> None:
-    outcome, _, _ = _specialist_handoff()
+def test_single_field_mutations_break_target_manifest_and_method_set(tmp_path) -> None:
+    inputs = _flow_inputs(tmp_path)
+    _, skill, _, _ = inputs
+    outcome, _, _ = _specialist_handoff(inputs)
     assert outcome.methods_review_target is not None
     wrong_source = outcome.methods_review_target.model_copy(
         update={"source_job_id": "00000000-0000-0000-0000-000000000099"}
@@ -443,8 +413,9 @@ def test_single_field_mutations_break_target_manifest_and_method_set() -> None:
     with pytest.raises(ValueError, match="matching completed DIAGNOSE"):
         JobOutcome.model_validate(outcome_value)
 
-    _, _, _, _, job, graph, plan = _plan_and_review_job()
+    _, _, _, _, job, graph, plan = _plan_and_review_job(inputs)
     assert job.methods_review_target is not None
+    planned_method_ids = tuple(item.method_id for item in plan.evaluations)
     wrong_target = job.methods_review_target.model_copy(
         update={"evaluation_id": OTHER_EVALUATION_ID}
     )
@@ -462,7 +433,7 @@ def test_single_field_mutations_break_target_manifest_and_method_set() -> None:
             review_job_id=job.job_id,
             case_id=job.case_id,
             target=wrong_target,
-            method_ids=("blind-method",),
+            method_ids=planned_method_ids,
         ),
     )
     with pytest.raises(ValueError, match="must match"):
@@ -470,7 +441,43 @@ def test_single_field_mutations_break_target_manifest_and_method_set() -> None:
 
     valid_manifest = build_methods_reviewer_manifest_v2(
         job,
-        method_ids=("blind-method",),
+        method_ids=planned_method_ids,
+    )
+    wrong_digest_target = job.methods_review_target.model_copy(
+        update={
+            "skill_ref": job.methods_review_target.skill_ref.model_copy(
+                update={"content_hash": "e" * 64}
+            )
+        }
+    )
+    with pytest.raises(ValueError, match="does not match"):
+        build_methods_review_method_cards_v2(
+            skill=skill,
+            target=wrong_digest_target,
+            plan=plan,
+        )
+
+    wrong_method_item = plan.evaluations[0].model_copy(
+        update={"method_id": "missing-method"}
+    )
+    wrong_method_plan = plan.model_copy(
+        update={"evaluations": (wrong_method_item, *plan.evaluations[1:])}
+    )
+    with pytest.raises(ValueError, match="absent from its Skill"):
+        build_methods_review_method_cards_v2(
+            skill=skill,
+            target=job.methods_review_target,
+            plan=wrong_method_plan,
+        )
+
+    cards = build_methods_review_method_cards_v2(
+        skill=skill,
+        target=job.methods_review_target,
+        plan=plan,
+    )
+    mutated_cards = (
+        cards[0].model_copy(update={"content": cards[0].content + "\nmutated\n"}),
+        *cards[1:],
     )
     with pytest.raises(ValueError, match="method set"):
         ContextBuilder().build(
@@ -480,14 +487,10 @@ def test_single_field_mutations_break_target_manifest_and_method_set() -> None:
                 tool_bundle="reviewer tools",
                 output_contract="reviewer output contract",
                 manifest=valid_manifest,
-                skill="same pinned Skill entry",
+                skill=(skill.package_root / "SKILL.md").read_text(encoding="utf-8"),
                 methods_evidence_graph=graph,
                 methods_evaluation_plan=plan,
-                methods_method_cards=(
-                    MethodsReviewMethodCardV2(
-                        method_id="wrong-method",
-                        content="One mutated card ID.",
-                    ),
-                ),
+                methods_skill=skill,
+                methods_method_cards=mutated_cards,
             ),
         )
