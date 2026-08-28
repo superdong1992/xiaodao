@@ -93,6 +93,9 @@ Wiki `text` 日志模板使用 `{field_name}` 命名字段时，先按模板及�
   字节；模板以占位符开头时，使用占位符之间最长的非空字面片段（长度相同取最早者），同样只去除
   首尾空白。不得截短前缀、保留占位符或改选另一个片段。把能够独立确认该方法的每种正向日志类型
   都列入索引，避免只出现其中一种日志时无法加载方法卡。
+  例如，`API_COMPLETE service={service} api={api} ...` 的 marker 是
+  `API_COMPLETE service=`，不是 `API_COMPLETE`；`QUEUE_HISTORY print_time_ms={print_time_ms} ...`
+  的 marker 是 `QUEUE_HISTORY print_time_ms=`，不是 `QUEUE_HISTORY`。
 - 方法按 Wiki 给出的可能性或诊断顺序排列；不要把顺序解释成互斥。
 - 共同症状、失败入口或请求关联日志不是原因路由标记时，不必复制到每个方法；但必须在共享引用中保留 Wiki 原文的可搜索字面标记和字段含义。
 

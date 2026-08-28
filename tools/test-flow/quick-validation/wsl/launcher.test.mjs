@@ -72,6 +72,17 @@ test("WSL launcher preserves the Test Flow exit and requires its exact verdict t
   assert.match(source, /exit "\$container_status"/u);
 });
 
+test("WSL host extracts one exact attempt_root with awk and does not require host Node", () => {
+  const source = fs.readFileSync(path.join(WSL_ROOT, "run.sh"), "utf8");
+  const hostSource = source.slice(source.indexOf('cache_root=""'));
+  assert.match(hostSource, /attempt_root=\$\(awk/u);
+  assert.match(hostSource, /if \(count == 0\) exit 4/u);
+  assert.match(hostSource, /if \(count != 1 \|\| invalid == 1\) exit 5/u);
+  assert.match(hostSource, /ATTEMPT_ROOT_OUTPUT_INVALID/u);
+  assert.doesNotMatch(hostSource, /attempt_root=\$\(node\b/u);
+  assert.doesNotMatch(hostSource, /\bnode -e\b/u);
+});
+
 test("central certification closure owns Core, one generation, P1, P2 and release verdict", () => {
   const config = loadConfiguration(REPO_ROOT);
   const closure = resolveGoalClosure(config, {

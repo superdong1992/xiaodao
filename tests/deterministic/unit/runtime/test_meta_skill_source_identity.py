@@ -529,7 +529,7 @@ def test_release_semantic_oracle_matches_mechanical_wiki_extraction() -> None:
     expected = oracle["expected_package"]
     templates = validator._wiki_log_templates(wiki_text)
     named_fields = validator._wiki_named_log_fields(templates)
-    canonical_markers = set(validator._wiki_canonical_evidence_markers(templates))
+    canonical_markers = set(validator.canonical_evidence_markers(templates))
 
     assert expected["required_log_derived_fields"] == [
         field

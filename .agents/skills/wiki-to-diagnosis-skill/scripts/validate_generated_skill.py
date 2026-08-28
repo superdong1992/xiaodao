@@ -211,9 +211,11 @@ def _canonical_evidence_marker(template: str) -> str | None:
     return max(enumerate(literal_segments), key=lambda item: (len(item[1]), -item[0]))[1]
 
 
-def _wiki_canonical_evidence_markers(templates: list[str]) -> list[str]:
+def canonical_evidence_markers(log_templates: list[str]) -> list[str]:
+    """Return the ordered unique canonical markers for extracted log templates."""
+
     markers: list[str] = []
-    for template in templates:
+    for template in log_templates:
         marker = _canonical_evidence_marker(template)
         if marker is not None and marker not in markers:
             markers.append(marker)
@@ -263,7 +265,7 @@ def validate(skill_dir: Path, wiki: Path) -> dict[str, object]:
     wiki_sha256 = hashlib.sha256(wiki_bytes).hexdigest()
     wiki_templates = _wiki_log_templates(wiki_text)
     wiki_named_log_fields = _wiki_named_log_fields(wiki_templates)
-    wiki_canonical_markers = _wiki_canonical_evidence_markers(wiki_templates)
+    wiki_canonical_markers = canonical_evidence_markers(wiki_templates)
 
     method_count = 0
     marker_count = 0

@@ -173,7 +173,30 @@ container_status=${PIPESTATUS[0]}
 set -e
 
 if [[ $plan_only != true ]]; then
-  attempt_root=$(node -e 'const fs = require("node:fs"); try { const value = JSON.parse(fs.readFileSync(process.argv[1], "utf8")); process.stdout.write(typeof value.attempt_root === "string" ? value.attempt_root : ""); } catch {}' "$launcher_output")
+  set +e
+  attempt_root=$(awk '
+    /^[[:space:]]*"attempt_root"[[:space:]]*:/ {
+      count += 1
+      if ($0 !~ /^[[:space:]]*"attempt_root"[[:space:]]*:[[:space:]]*"\/evidence\/run-[^"]+"[[:space:]]*,?[[:space:]]*$/) {
+        invalid = 1
+        next
+      }
+      value = $0
+      sub(/^[[:space:]]*"attempt_root"[[:space:]]*:[[:space:]]*"/, "", value)
+      sub(/"[[:space:]]*,?[[:space:]]*$/, "", value)
+    }
+    END {
+      if (count == 0) exit 4
+      if (count != 1 || invalid == 1) exit 5
+      print value
+    }
+  ' "$launcher_output")
+  attempt_parse_status=$?
+  set -e
+  if ((attempt_parse_status != 0 && attempt_parse_status != 4)); then
+    printf 'ATTEMPT_ROOT_OUTPUT_INVALID\n' >&2
+    exit 3
+  fi
   if [[ -n $attempt_root ]]; then
     attempt_name=${attempt_root#/evidence/}
     case "$attempt_root:$attempt_name" in
