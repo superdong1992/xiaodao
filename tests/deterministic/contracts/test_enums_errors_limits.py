@@ -3,6 +3,9 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
+import pytest
+from pydantic import ValidationError
+
 from problem_locator.contracts import enums, limits
 from problem_locator.contracts.errors import (
     APPLICATION_ERROR_RETRYABLE_CODES,
@@ -106,6 +109,13 @@ ENUM_EXPECTATIONS = {
         "INTERRUPTED",
     ),
     "JobType": ("ROUTE", "DIAGNOSE", "REVIEW"),
+    "MethodsValidationReasonCode": (
+        "METHOD_EVIDENCE_MARKER_NOT_INDEXED",
+        "METHOD_CONFIRMED_EVIDENCE_MISSING",
+        "METHOD_CONFIRMED_MARKER_SCAN_MISS",
+        "METHOD_EVIDENCE_SOURCE_CHANGED",
+        "METHOD_VALIDATION_FAILED",
+    ),
     "OutcomeDisposition": ("APPLIED", "DUPLICATE", "STALE", "REJECTED"),
     "OutcomeResultType": (
         "COMPLETED",
@@ -339,6 +349,50 @@ def test_retryability_sets_do_not_grow_silently() -> None:
     assert {_code(code) for code in APPLICATION_ERROR_RETRYABLE_CODES} == (
         EXPECTED_APPLICATION_RETRYABLE
     )
+
+
+@pytest.mark.parametrize("model_name", ["ExecutionFailure", "CaseFailure"])
+@pytest.mark.parametrize(
+    ("reason_code", "diagnostic_id"),
+    [
+        (enums.MethodsValidationReasonCode.VALIDATION_FAILED, None),
+        (None, "00000000-0000-4000-8000-000000000777"),
+    ],
+)
+def test_methods_failure_reason_and_diagnostic_are_an_atomic_pair(
+    model_name: str,
+    reason_code: enums.MethodsValidationReasonCode | None,
+    diagnostic_id: str | None,
+) -> None:
+    from problem_locator.contracts.models import CaseFailure, ExecutionFailure
+
+    if model_name == "ExecutionFailure":
+        payload = {
+            "stage": enums.ExecutionStage.OUTCOME_VALIDATE,
+            "code": enums.ErrorCode.OUTCOME_INVALID,
+            "message": "Methods validation failed.",
+            "retryable": False,
+            "details": [],
+        }
+        model = ExecutionFailure
+    else:
+        payload = {
+            "code": enums.ErrorCode.OUTCOME_INVALID,
+            "message": "Methods validation failed.",
+            "source_job_id": None,
+            "source_outcome_id": None,
+            "occurred_at": "2026-07-31T00:00:00.000Z",
+        }
+        model = CaseFailure
+
+    with pytest.raises(ValidationError):
+        model.model_validate(
+            {
+                **payload,
+                "reason_code": reason_code,
+                "diagnostic_id": diagnostic_id,
+            }
+        )
 
 
 def test_resource_limits_are_the_frozen_v1_values() -> None:

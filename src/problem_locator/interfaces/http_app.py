@@ -477,6 +477,7 @@ _REST_FIELD_DESCRIPTIONS = {
     "declared_sha256": "Lowercase SHA-256 digest declared before upload.",
     "declared_size": "Exact byte length declared before upload.",
     "details": "Structured, safe diagnostic details; may be empty.",
+    "diagnostic_id": "Diagnostic UUID that correlates a classified failure across public results and execution records.",
     "diagnosis_mode": "Whether the Job uses a specialized or generic diagnosis path.",
     "diagnosis_state_revision": "Internal diagnosis-content revision; never use for REST write concurrency.",
     "dispatch_pending": "True when durable work exists but dispatch has not yet been confirmed.",

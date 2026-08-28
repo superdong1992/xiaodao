@@ -57,6 +57,7 @@ from problem_locator.contracts import (
     canonical_json_bytes,
     parse_canonical_json_bytes,
 )
+from problem_locator.contracts.enums import MethodsValidationReasonCode
 from problem_locator.diagnostics import bind_diagnostics
 from problem_locator.integrations.logparse import Anchor, ParseTargetsRequest
 from problem_locator.journey import configure_journey
@@ -76,6 +77,7 @@ from problem_locator.runtime.context_policy import RuntimeAssetResolver
 from problem_locator.runtime.diagnosis_runtime import (
     DiagnosisRuntime,
     _discard_unreferenced_staged,
+    _method_validation_reason_code,
 )
 from problem_locator.runtime.failures import RuntimeExecutionError, runtime_failure
 from problem_locator.runtime.generic_locator import (
@@ -151,6 +153,7 @@ class _Ids:
         values = {
             "job_outcome": "00000000-0000-4000-8000-000000000401",
             "execution_failure": "00000000-0000-4000-8000-000000000402",
+            "diagnostic": "00000000-0000-4000-8000-000000000403",
         }
         return values[kind]
 
@@ -3105,6 +3108,85 @@ def test_methods_two_pass_closes_broker_then_stages_grounded_result(
     records = runtime._execution_records
     assert isinstance(records, InMemoryExecutionRecordStore)
     assert records.publish_rejected_agent_output_calls == []
+
+
+@pytest.mark.parametrize(
+    ("message", "expected"),
+    [
+        (
+            "evidence marker is not indexed by its method",
+            MethodsValidationReasonCode.EVIDENCE_MARKER_NOT_INDEXED,
+        ),
+        (
+            "every confirmed method must have grounded evidence",
+            MethodsValidationReasonCode.CONFIRMED_EVIDENCE_MISSING,
+        ),
+        (
+            "confirmed method has no positive marker in the full target-log scan",
+            MethodsValidationReasonCode.CONFIRMED_MARKER_SCAN_MISS,
+        ),
+        (
+            "grounded Methods source changed before Outcome mapping",
+            MethodsValidationReasonCode.EVIDENCE_SOURCE_CHANGED,
+        ),
+        (
+            "some other validation failure",
+            MethodsValidationReasonCode.VALIDATION_FAILED,
+        ),
+    ],
+)
+def test_methods_validation_failures_use_stable_low_cardinality_reason_codes(
+    message: str,
+    expected: MethodsValidationReasonCode,
+) -> None:
+    assert _method_validation_reason_code(ValueError(message)) == expected
+
+
+def test_methods_grounding_failure_publishes_reason_and_diagnostic_fields(
+    tmp_path: Path,
+) -> None:
+    runtime, job, _, backend, _ = _public_fake_claiming_runtime(
+        tmp_path,
+        "completed",
+    )
+    original_run = backend._run_methods
+
+    def invalid_marker(kwargs: dict[str, Any]) -> BackendExecution:
+        result = original_run(kwargs)
+        draft_path = (
+            Path(kwargs["workspace_root"])
+            / "output/method-diagnosis.draft.json"
+        )
+        draft = json.loads(draft_path.read_bytes())
+        draft["evidence"][0]["sources"][0]["marker"] = "rpc deadline"
+        draft_path.write_bytes(canonical_json_bytes(draft))
+        return result
+
+    backend._run_methods = invalid_marker  # type: ignore[method-assign]
+
+    receipt = runtime.execute(job, InMemoryCancellationSignal())
+
+    failure = receipt.job_outcome.error
+    assert failure is not None
+    assert failure.code is ErrorCode.OUTCOME_INVALID
+    assert failure.details == []
+    assert (
+        failure.reason_code
+        is MethodsValidationReasonCode.EVIDENCE_MARKER_NOT_INDEXED
+    )
+    assert failure.diagnostic_id == "00000000-0000-4000-8000-000000000403"
+    records = runtime._execution_records
+    assert isinstance(records, InMemoryExecutionRecordStore)
+    persisted = json.loads(records.publish_outcome_calls[0][1])
+    assert persisted["error"]["reason_code"] == (
+        "METHOD_EVIDENCE_MARKER_NOT_INDEXED"
+    )
+    assert persisted["error"]["diagnostic_id"] == (
+        "00000000-0000-4000-8000-000000000403"
+    )
+    assert (
+        records.read_audit_bytes(job.job_id, "method-grounding-audit.json") is None
+    )
 
 
 def test_methods_preprocess_prompt_declares_helper_before_one_broker_request(

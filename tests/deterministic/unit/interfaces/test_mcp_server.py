@@ -33,9 +33,11 @@ from problem_locator.contracts.models import (
     ApplicationError,
     ApplicationErrorDetail,
     ArtifactSummary,
+    CaseFailure,
     CaseView,
     GenericResultV2,
 )
+from problem_locator.contracts.enums import MethodsValidationReasonCode
 from problem_locator.contracts.ports import (
     ApplicationCommandPort,
     ApplicationQueryPort,
@@ -178,6 +180,49 @@ def test_mcp_get_case_and_list_artifacts_preserve_generic_v2_report_contract() -
     assert public_artifact["sha256"] == artifact.sha256
     assert "storage_key" not in public_artifact
     assert "metadata" not in public_artifact
+
+
+def test_mcp_get_case_preserves_methods_failure_diagnostics() -> None:
+    diagnostic_id = "00000000-0000-4000-8000-000000000777"
+    payload = case_view().model_dump(mode="python")
+    payload.update(
+        status=CaseStatus.FAILED,
+        failure=CaseFailure(
+            code=ErrorCode.OUTCOME_INVALID,
+            message="Methods diagnosis draft is not grounded in the frozen inputs.",
+            source_job_id=JOB_ID,
+            source_outcome_id="00000000-0000-4000-8000-000000000005",
+            occurred_at=FIXED_TIME,
+            reason_code=(
+                MethodsValidationReasonCode.EVIDENCE_MARKER_NOT_INDEXED
+            ),
+            diagnostic_id=diagnostic_id,
+        ),
+    )
+    query = FakeQuery()
+    query.queue(
+        "get_case",
+        CaseQueryResponse(
+            case_view=CaseView.model_validate(payload),
+            wait_timed_out=False,
+        ),
+    )
+    adapter = McpAdapter(
+        FakeApplicationService(),
+        query,
+        public_base_url="http://127.0.0.1:8000",
+    )
+
+    result = asyncio.run(
+        adapter.call(
+            "problem_locator_get_case",
+            {"case_id": CASE_ID, "wait_for_job_id": None, "wait_seconds": 0},
+        )
+    )
+
+    failure = result["data"]["case_view"]["failure"]
+    assert failure["reason_code"] == "METHOD_EVIDENCE_MARKER_NOT_INDEXED"
+    assert failure["diagnostic_id"] == diagnostic_id
 
 
 def test_fake_application_service_replays_same_request_and_rejects_changed_payload() -> None:

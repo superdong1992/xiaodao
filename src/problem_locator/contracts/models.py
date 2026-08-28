@@ -48,6 +48,7 @@ from .enums import (
     GenericResultStatus,
     JobStatus,
     JobType,
+    MethodsValidationReasonCode,
     OutcomeDisposition,
     OutcomeResultType,
     RequirementKind,
@@ -843,6 +844,26 @@ class CaseFailure(ContractModel):
     source_job_id: OpaqueId | None
     source_outcome_id: OpaqueId | None
     occurred_at: UtcTimestamp
+    reason_code: MethodsValidationReasonCode | None = Field(
+        default=None,
+        description="Stable machine-readable reason for a classified Methods failure.",
+        exclude_if=lambda value: value is None,
+    )
+    diagnostic_id: OpaqueId | None = Field(
+        default=None,
+        description=(
+            "Diagnostic UUID that correlates the public failure with its execution record."
+        ),
+        exclude_if=lambda value: value is None,
+    )
+
+    @model_validator(mode="after")
+    def validate_diagnostic(self) -> CaseFailure:
+        if (self.reason_code is None) != (self.diagnostic_id is None):
+            raise ValueError(
+                "CaseFailure reason_code and diagnostic_id must be both null or both present"
+            )
+        return self
 
 
 class UnresolvedResultDraft(ContractModel):
@@ -2042,6 +2063,16 @@ class ExecutionFailure(ContractModel):
     message: NonEmptyText
     retryable: bool
     details: list[ApplicationErrorDetail]
+    reason_code: MethodsValidationReasonCode | None = Field(
+        default=None,
+        description="Stable machine-readable reason for a classified Methods failure.",
+        exclude_if=lambda value: value is None,
+    )
+    diagnostic_id: OpaqueId | None = Field(
+        default=None,
+        description="Diagnostic UUID assigned to this classified Methods failure.",
+        exclude_if=lambda value: value is None,
+    )
 
     @model_validator(mode="after")
     def validate_retryability(self) -> ExecutionFailure:
@@ -2049,6 +2080,14 @@ class ExecutionFailure(ContractModel):
 
         if self.retryable and self.code not in EXECUTION_FAILURE_RETRYABLE_CODES:
             raise ValueError("this ExecutionFailure code cannot be retryable")
+        return self
+
+    @model_validator(mode="after")
+    def validate_diagnostic(self) -> ExecutionFailure:
+        if (self.reason_code is None) != (self.diagnostic_id is None):
+            raise ValueError(
+                "ExecutionFailure reason_code and diagnostic_id must be both null or both present"
+            )
         return self
 
 

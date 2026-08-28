@@ -12,13 +12,18 @@ from problem_locator.contracts.commands import (
     CreateCase,
     SubmitSupplement,
 )
-from problem_locator.contracts.enums import ErrorCode
+from problem_locator.contracts.enums import (
+    CaseStatus,
+    ErrorCode,
+    MethodsValidationReasonCode,
+)
 from problem_locator.contracts.limits import (
     MAX_ATTACHMENT_BYTES,
     MAX_DESCRIPTION_UTF8_BYTES,
     MAX_USER_TEXT_UTF8_BYTES,
 )
 from problem_locator.contracts.serialization import canonical_json_bytes
+from problem_locator.contracts.models import CaseFailure, CaseView
 from problem_locator.interfaces.error_mapping import http_status_for
 from problem_locator.interfaces.http_app import create_http_app
 from problem_locator.interfaces.mcp_server import McpAdapter
@@ -218,6 +223,44 @@ def test_rest_and_mcp_map_create_and_supplement_to_identical_commands() -> None:
     assert mcp_supplement["ok"] is True
     assert command.calls[0] == command.calls[2]
     assert command.calls[1] == command.calls[3]
+
+
+def test_rest_get_case_preserves_methods_failure_diagnostics() -> None:
+    diagnostic_id = "00000000-0000-4000-8000-000000000777"
+    payload = case_view().model_dump(mode="python")
+    payload.update(
+        status=CaseStatus.FAILED,
+        failure=CaseFailure(
+            code=ErrorCode.OUTCOME_INVALID,
+            message="Methods diagnosis draft is not grounded in the frozen inputs.",
+            source_job_id=JOB_ID,
+            source_outcome_id="00000000-0000-4000-8000-000000000005",
+            occurred_at="2026-07-31T00:00:00.000Z",
+            reason_code=(
+                MethodsValidationReasonCode.EVIDENCE_MARKER_NOT_INDEXED
+            ),
+            diagnostic_id=diagnostic_id,
+        ),
+    )
+    query = FakeQuery()
+    query.queue(
+        "get_case",
+        CaseQueryResponse(
+            case_view=CaseView.model_validate(payload),
+            wait_timed_out=False,
+        ),
+    )
+    app = _app(query=query)
+
+    async def operation(client: httpx.AsyncClient):
+        return await client.get(f"/api/v1/cases/{CASE_ID}")
+
+    response = _run(app, operation)
+
+    assert response.status_code == 200
+    failure = response.json()["data"]["case_view"]["failure"]
+    assert failure["reason_code"] == "METHOD_EVIDENCE_MARKER_NOT_INDEXED"
+    assert failure["diagnostic_id"] == diagnostic_id
 
 
 def test_create_case_rejects_duplicate_nested_names_and_unknown_fields() -> None:

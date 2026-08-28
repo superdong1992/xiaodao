@@ -60,6 +60,7 @@ from problem_locator.contracts import (
     review_required_evidence_refs,
     validate_logparse_claim_for_job,
 )
+from problem_locator.contracts.enums import MethodsValidationReasonCode
 from problem_locator.diagnostics import log_event
 from problem_locator.integrations.logparse.requests import (
     Anchor,
@@ -124,6 +125,33 @@ def _unexpected_failure() -> RuntimeExecutionError:
         stage=ExecutionStage.OUTCOME_VALIDATE,
         code=ErrorCode.OUTCOME_INVALID,
         message="Runtime execution could not be validated safely.",
+    )
+
+
+_METHOD_VALIDATION_REASON_CODES: dict[str, MethodsValidationReasonCode] = {
+    "evidence marker is not indexed by its method": (
+        MethodsValidationReasonCode.EVIDENCE_MARKER_NOT_INDEXED
+    ),
+    "every confirmed method must have grounded evidence": (
+        MethodsValidationReasonCode.CONFIRMED_EVIDENCE_MISSING
+    ),
+    "confirmed method has no positive marker in the full target-log scan": (
+        MethodsValidationReasonCode.CONFIRMED_MARKER_SCAN_MISS
+    ),
+    "grounded Methods source changed before Outcome mapping": (
+        MethodsValidationReasonCode.EVIDENCE_SOURCE_CHANGED
+    ),
+}
+
+
+def _method_validation_reason_code(
+    error: TypeError | ValueError,
+) -> MethodsValidationReasonCode:
+    """Classify known Methods validation failures into a closed public reason set."""
+
+    return _METHOD_VALIDATION_REASON_CODES.get(
+        str(error),
+        MethodsValidationReasonCode.VALIDATION_FAILED,
     )
 
 
@@ -888,11 +916,21 @@ class DiagnosisRuntime:
                 )
                 for resource in mapped.proposal_resources:
                     resource.verify_unchanged()
-            except (TypeError, ValueError):
-                raise runtime_failure(
-                    stage=ExecutionStage.OUTCOME_VALIDATE,
-                    code=ErrorCode.OUTCOME_INVALID,
-                    message="Methods diagnosis draft is not grounded in the frozen inputs.",
+            except (TypeError, ValueError) as exc:
+                reason_code = _method_validation_reason_code(exc)
+                diagnostic_id = self._id_generator.new("diagnostic")
+                raise RuntimeExecutionError(
+                    ExecutionFailure(
+                        stage=ExecutionStage.OUTCOME_VALIDATE,
+                        code=ErrorCode.OUTCOME_INVALID,
+                        message=(
+                            "Methods diagnosis draft is not grounded in the frozen inputs."
+                        ),
+                        retryable=False,
+                        details=[],
+                        reason_code=reason_code,
+                        diagnostic_id=diagnostic_id,
+                    )
                 ) from None
             self._publish_audit_bytes(
                 job,

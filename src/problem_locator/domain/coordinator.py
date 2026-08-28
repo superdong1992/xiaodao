@@ -1766,6 +1766,8 @@ class DomainCoordinator:
                     source_job_id=job.job_id,
                     source_outcome_id=source_outcome_id,
                     occurred_at=trigger.occurred_at,
+                    reason_code=failure.reason_code,
+                    diagnostic_id=failure.diagnostic_id,
                 ),
             )
         return TransitionPlan(
