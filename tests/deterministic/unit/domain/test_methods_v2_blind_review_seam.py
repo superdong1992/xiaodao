@@ -13,6 +13,7 @@ from problem_locator.application.formalization import (
 from problem_locator.application.mutations import apply_transition_plan_to_case
 from problem_locator.contracts import (
     AgentJobOutcome,
+    AgentJobOutcomeDraftV2,
     ApplicationError,
     CaseSnapshot,
     CaseStatus,
@@ -34,6 +35,11 @@ from problem_locator.contracts import (
     validate_workspace_manifest_for_job,
 )
 from problem_locator.domain import DomainCoordinator, PureContextSnapshotProjector
+from problem_locator.domain.methods_state_v2 import (
+    accept_specialist_evaluation_v2,
+    finalize_reviewer_consensus_v2,
+    start_method_state_v2,
+)
 from problem_locator.runtime.context_builder import (
     ContextBuilder,
     ContextMaterials,
@@ -45,7 +51,14 @@ from problem_locator.runtime.methods_evidence_v2 import (
     scan_method_evidence_v2,
 )
 from problem_locator.runtime.methods_grounding import FrozenTargetLogV1
-from problem_locator.runtime.methods_evaluation_v2 import evaluate_method_role_v2
+from problem_locator.runtime.methods_evaluation_v2 import (
+    evaluate_method_role_v2,
+    resolve_method_consensus_v2,
+)
+from problem_locator.runtime.methods_outcome_v2 import (
+    build_method_terminal_result_v2,
+    project_method_terminal_result_v2,
+)
 from problem_locator.runtime.methods_skill import load_specialized_skill_registration
 from tests.deterministic.unit.runtime.test_methods_skill import _write_registration
 
@@ -80,6 +93,7 @@ def _source_job(skill):
         content_hash=skill.combined_sha256,
     )
     snapshot_value = source.context_snapshot.model_dump(mode="python")
+    snapshot_value["evidence_refs"] = []
     snapshot_value["user_facts"] = [
         DiagnosisItem(
             item_id=USER_FACT_ID,
@@ -99,6 +113,10 @@ def _source_job(skill):
         source,
         context_snapshot=ContextSnapshot.model_validate(snapshot_value),
         skill_ref=skill_ref,
+        evidence_refs=[],
+        attachment_refs=[],
+        previous_outcome_refs=[],
+        artifact_refs=[],
     )
 
 
@@ -291,9 +309,21 @@ def test_methods_target_is_server_only_and_never_falls_back_to_candidate(
     agent_schema = AgentJobOutcome.model_json_schema()["properties"]
     assert "methods_review_target" not in agent_schema
     assert "methods_reviewer_result" not in agent_schema
+    assert "methods_terminal_projection" not in agent_schema
+    assert (
+        "methods_terminal_projection"
+        not in AgentJobOutcomeDraftV2.model_json_schema()["properties"]
+    )
     agent = fixture(AgentJobOutcome, "agent-job-outcome-diagnosis.json")
     agent_value = agent.model_dump(mode="python")
     agent_value["methods_review_target"] = target.model_dump(mode="python")
+    with pytest.raises(ValueError, match="extra"):
+        AgentJobOutcome.model_validate(agent_value)
+    agent_value = agent.model_dump(mode="python")
+    agent_value["methods_terminal_projection"] = {
+        "schema_version": 2,
+        "result_ref": "result-" + "0" * 64,
+    }
     with pytest.raises(ValueError, match="extra"):
         AgentJobOutcome.model_validate(agent_value)
 
@@ -353,8 +383,21 @@ def test_server_can_express_reviewer_result_without_candidate_assessment(
     tmp_path,
 ) -> None:
     inputs = _flow_inputs(tmp_path)
-    _, _, _, state, job, _, plan = _plan_and_review_job(inputs)
+    _, _, _, state, job, graph, plan = _plan_and_review_job(inputs)
     assert job.methods_review_target is not None
+    specialist = evaluate_method_role_v2(
+        role="SPECIALIST",
+        plan=plan,
+        response=[
+            {
+                "evaluation_ref": item.evaluation_ref,
+                "verdict": "CONFIRMED",
+                "reason": f"private specialist reason {item.method_id}",
+            }
+            for item in plan.evaluations
+        ],
+        attempt="PRIMARY",
+    )
     evaluation = evaluate_method_role_v2(
         role="REVIEWER",
         plan=plan,
@@ -362,16 +405,43 @@ def test_server_can_express_reviewer_result_without_candidate_assessment(
             {
                 "evaluation_ref": item.evaluation_ref,
                 "verdict": "CONFIRMED",
-                "reason": f"reviewed {item.method_id}",
+                "reason": f"private reviewer reason {item.method_id}",
             }
             for item in plan.evaluations
         ],
         attempt="PRIMARY",
     )
+    pending = accept_specialist_evaluation_v2(
+        state=start_method_state_v2(
+            evaluation_id=EVALUATION_ID,
+            plan=plan,
+        ),
+        evaluation=specialist,
+    )
+    consensus = resolve_method_consensus_v2(
+        plan=plan,
+        first=specialist,
+        second=evaluation,
+    )
+    terminal_state = finalize_reviewer_consensus_v2(
+        state=pending,
+        plan=plan,
+        reviewer_evaluation=evaluation,
+        consensus=consensus,
+    )
+    terminal_result = build_method_terminal_result_v2(
+        state=terminal_state,
+        plan=plan,
+        evidence=graph,
+        limitations=("server limitation",),
+        reasons=("server terminal reason",),
+    )
+    terminal_projection = project_method_terminal_result_v2(terminal_result)
     outcome = build_methods_reviewer_outcome_v2(
         job,
         outcome_id=REVIEW_OUTCOME_ID,
         evaluation=evaluation,
+        terminal_projection=terminal_projection,
         produced_at="2026-07-31T00:03:30.000Z",
     )
     assert validate_outcome_for_job(job, outcome) is outcome
@@ -394,9 +464,19 @@ def test_server_can_express_reviewer_result_without_candidate_assessment(
 
     result = DomainCoordinator().plan(snapshot, request)
 
-    assert isinstance(result, ApplicationError)
-    assert "consensus terminal transition is not integrated" in result.message
+    assert not isinstance(result, ApplicationError)
+    assert result.target_case_status is CaseStatus.RESOLVED
+    assert result.methods_terminal_projection == terminal_projection
+    assert result.candidate_mutation is None
+    assert result.final_result_target is None
+    assert result.next_job_spec is None
     assert outcome.payload is None
+    assert outcome.methods_terminal_projection == terminal_projection
+    assert outcome.methods_terminal_projection.reasons == ("server terminal reason",)
+    serialized = outcome.model_dump_json()
+    assert "private specialist reason" not in serialized
+    assert "private reviewer reason" in serialized
+    assert "private reviewer reason" not in terminal_projection.model_dump_json()
     assert outcome.methods_reviewer_result.target == job.methods_review_target
 
 
