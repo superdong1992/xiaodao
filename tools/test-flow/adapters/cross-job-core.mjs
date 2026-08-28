@@ -1223,7 +1223,7 @@ export function parseClaudeStream(text, expectedCwd, { allowErrorTerminal = fals
         const toolName = block.name === "Skill" ? "Skill" : normalizedToolName(block.name);
         requireCondition(toolName !== null, "CLIENT_UNEXPECTED_TOOL", "FAIL", "CONTRACT");
         if (toolName !== "Skill") assertFlatInput(block.input);
-        const record = { ordinal: records.length, stream_ordinal: currentStreamOrdinal, tool_use_id: block.id, full_name: block.name, tool_name: toolName, input: block.input, result: null };
+        const record = { ordinal: records.length, stream_ordinal: currentStreamOrdinal, result_stream_ordinal: null, tool_use_id: block.id, full_name: block.name, tool_name: toolName, input: block.input, result: null };
         records.push(record);
         byId.set(block.id, record);
       }
@@ -1231,6 +1231,7 @@ export function parseClaudeStream(text, expectedCwd, { allowErrorTerminal = fals
         requireCondition(event.type === "user" && event.message?.role === "user", "CLIENT_TOOL_RESULT_ROLE");
         const record = byId.get(block.tool_use_id);
         requireCondition(record && record.result === null && block.is_error !== true, "CLIENT_TOOL_RESULT_ID");
+        record.result_stream_ordinal = currentStreamOrdinal;
         if (record.tool_name === "Skill") record.result = { skill_loaded: true };
         else {
           const raw = event.tool_use_result;
@@ -1431,41 +1432,37 @@ function openRequirementNames(view, kind) {
     .map((item) => item.name);
 }
 
-export function phaseOneUserMessage(releaseCase, archive) {
-  const problem = releaseCase.driver.problem;
-  const factLabels = {
-    problem_time: "问题时间",
-    client_process: "客户端进程",
-    server_process: "服务端进程",
-    service: "服务名",
-    api: "API 名",
-  };
+const PHASE_ONE_USER_MESSAGE = "订单 RPC 偶发超时，请定位原因；我有一份日志，可以在需要时提供。";
+
+const PHASE_FACT_LABELS = Object.freeze({
+  problem_time: "问题时间",
+  client_process: "客户端进程",
+  server_process: "服务端进程",
+  service: "服务名",
+  api: "API 名",
+});
+
+export function phaseOneUserMessage() {
+  return PHASE_ONE_USER_MESSAGE;
+}
+
+export function phaseTwoUserMessage(releaseCase, archive) {
   const facts = releaseCase.driver.initial_user_fact_names.map(
     (name, index) => {
-      requireCondition(Boolean(factLabels[name]), "PHASE1_USER_FACT_LABEL_MISSING", "FAIL", "CONTRACT");
-      return `- ${factLabels[name]}：${releaseCase.driver.initial_user_fact_values[index]}`;
+      requireCondition(Boolean(PHASE_FACT_LABELS[name]), "PHASE2_USER_FACT_LABEL_MISSING", "FAIL", "CONTRACT");
+      return `- ${PHASE_FACT_LABELS[name]}：${releaseCase.driver.initial_user_fact_values[index]}`;
     },
   );
   return [
-    "我遇到一个需要定位的问题。",
-    `问题描述：${problem.raw_problem_text}`,
-    `正常情况：${problem.expected_behavior}`,
-    `实际情况：${problem.actual_behavior}`,
-    `影响范围：${problem.scope}`,
-    `我希望确认：${problem.goals.join("；")}`,
-    `这次不需要处理：${problem.non_goals.join("；") || "无"}`,
-    `限制条件：${problem.constraints.join("；") || "无"}`,
-    `完成标准：${problem.completion_criteria.join("；")}`,
-    "我已经知道这些事实：",
+    "补充信息如下：",
     ...facts,
-    "这些信息都已经确认过，后面需要时可以直接采用，不用再问我。",
-    `我手头有日志文件 ${archive.name}，格式是 ${archive.content_type}，大小为 ${archive.size} 字节，SHA-256 是 ${archive.sha256}。`,
-    "请开始定位。如果需要上传这份日志，请先帮我拿到上传地址；拿到以后就停下，暂时不要上传。",
+    `日志文件：${archive.name}；格式：${archive.content_type}；大小：${archive.size} 字节；SHA-256：${archive.sha256}。`,
+    "请继续处理；需要日志时请先申请上传地址，拿到地址后先暂停。",
   ].join("\n");
 }
 
-function expectedCreateInput(releaseCase, requestId, archive) {
-  const rawProblemText = phaseOneUserMessage(releaseCase, archive);
+function expectedCreateInput(requestId) {
+  const rawProblemText = phaseOneUserMessage();
   return {
     request_id: requestId,
     raw_problem_text: rawProblemText,
@@ -1483,12 +1480,21 @@ function expectedCreateInput(releaseCase, requestId, archive) {
   };
 }
 
-export function phaseOnePrompt(releaseCase, archive) {
+export function phaseOnePrompt() {
   return `第一步请先加载 problem-locator-client Skill，调用 Skill 工具时使用 {"skill":"problem-locator-client"}。
 
-加载成功后，请处理下面这位用户的请求：
+加载成功后，请处理下面这位用户的新请求：
 
-${phaseOneUserMessage(releaseCase, archive)}`;
+${phaseOneUserMessage()}`;
+}
+
+export function phaseTwoPrompt(state, releaseCase, archive) {
+  requireCondition(UUID.test(state?.case_id ?? ""), "PHASE2_CASE_ID_INVALID", "FAIL", "CONTRACT");
+  return `第一步请先加载 problem-locator-client Skill，调用 Skill 工具时使用 {"skill":"problem-locator-client"}。
+
+这是同一问题的下一轮用户回复。请继续处理已经创建的 Case ${state.case_id}，先读取服务端的最新 Case 状态，再处理用户回复：
+
+${phaseTwoUserMessage(releaseCase, archive)}`;
 }
 
 export function assertPhaseOneCaseFirst(audit) {
@@ -1518,28 +1524,37 @@ export function assertPhaseOneCaseFirst(audit) {
   return true;
 }
 
-export function validatePhaseOne(audit, releaseCase, requestIds, archive, publicBaseUrl) {
+function openRequirements(view, kind) {
+  return (view?.pending_requirements ?? [])
+    .filter((item) => item.status === "OPEN" && item.kind === kind);
+}
+
+export function validatePhaseOne(audit, releaseCase, requestIds) {
   assertPhaseOneCaseFirst(audit);
   const records = audit.records;
-  const successful = records.filter((record) => record.result?.ok === true);
-  const create = successful.filter((record) => record.tool_name === "problem_locator_create_case");
-  const submits = successful.filter((record) => record.tool_name === "problem_locator_submit_supplement");
-  const gets = successful.filter((record) => record.tool_name === "problem_locator_get_case");
-  const prepare = successful.filter((record) => record.tool_name === "problem_locator_prepare_attachment");
-  requireCondition(create.length === 1 && submits.length === 1 && gets.length >= 2 && prepare.length === 1, "PHASE1_CALL_CARDINALITY", "FAIL", "CONTRACT");
-  requireCondition(records[0] === create[0], "PHASE1_CREATE_NOT_FIRST_BUSINESS_CALL", "FAIL", "CONTRACT");
-  requireCondition(records.at(-1) === prepare[0], "PHASE1_PREPARE_NOT_TERMINAL", "FAIL", "CONTRACT");
-  const generatedRequestIds = [create[0].input.request_id, submits[0].input.request_id, prepare[0].input.request_id];
+  requireCondition(records.every((record) => record.result?.ok === true), "PHASE1_MCP_CALL_FAILED", "FAIL", "CONTRACT");
+  const create = records.filter((record) => record.tool_name === "problem_locator_create_case");
+  const gets = records.filter((record) => record.tool_name === "problem_locator_get_case");
   requireCondition(
-    generatedRequestIds.every((value) => typeof value === "string" && value.length > 0)
-      && new Set(generatedRequestIds).size === generatedRequestIds.length,
-    "PHASE1_REQUEST_IDS_INVALID",
+    create.length === 1 && gets.length >= 1 && records.length === create.length + gets.length,
+    "PHASE1_CALL_CARDINALITY",
     "FAIL",
     "CONTRACT",
   );
-  const createInput = expectedCreateInput(releaseCase, create[0].input.request_id, archive);
+  requireCondition(records[0] === create[0], "PHASE1_CREATE_NOT_FIRST_BUSINESS_CALL", "FAIL", "CONTRACT");
+  const createRequestId = create[0].input.request_id;
+  requireCondition(typeof createRequestId === "string" && createRequestId.length > 0, "PHASE1_REQUEST_ID_INVALID", "FAIL", "CONTRACT");
+  const createInput = expectedCreateInput(createRequestId);
   exactKeys(create[0].input, Object.keys(createInput), "PHASE1_CREATE_INPUT_SHAPE");
-  requireCondition(canonicalJson(create[0].input) === canonicalJson(createInput) && !Object.hasOwn(create[0].input, "problem_spec"), "PHASE1_CREATE_INPUT", "FAIL", "CONTRACT");
+  requireCondition(
+    canonicalJson(create[0].input) === canonicalJson(createInput)
+      && create[0].input.initial_user_fact_names.length === 0
+      && create[0].input.initial_user_fact_values.length === 0
+      && !Object.hasOwn(create[0].input, "problem_spec"),
+    "PHASE1_CREATE_INPUT",
+    "FAIL",
+    "CONTRACT",
+  );
   const createdCaseId = successData(create[0]).business_receipt?.case_id;
   requireCondition(UUID.test(createdCaseId ?? ""), "PHASE1_CREATED_CASE_VIEW", "FAIL", "CONTRACT");
   requireCondition(
@@ -1548,71 +1563,220 @@ export function validatePhaseOne(audit, releaseCase, requestIds, archive, public
     "FAIL",
     "CONTRACT",
   );
-  const views = gets
-    .map((record) => ({ ordinal: record.ordinal, view: caseView(record) }))
-    .filter((entry) => entry.view?.case_id === createdCaseId);
-  const inputView = views.find((entry) => (
-    entry.ordinal > create[0].ordinal
-      && entry.ordinal < submits[0].ordinal
-      && entry.view.status === "WAITING_INPUT"
-      && canonicalJson(openRequirementNames(entry.view, "INPUT"))
-        === canonicalJson(releaseCase.driver.initial_user_fact_names)
-  ));
-  requireCondition(inputView, "PHASE1_INPUT_REQUIREMENTS_NOT_OBSERVED", "FAIL", "CONTRACT");
-  exactKeys(submits[0].input, ["request_id", "case_id", "expected_case_revision", "input_names", "input_values", "attachment_ids", "wait_seconds"], "PHASE1_INPUT_SUBMISSION_SHAPE");
+  const inputViews = gets
+    .map((record) => ({ record, view: caseView(record) }))
+    .filter(({ view }) => (
+      view?.case_id === createdCaseId
+        && view.status === "WAITING_INPUT"
+        && canonicalJson(openRequirementNames(view, "INPUT"))
+          === canonicalJson(releaseCase.driver.initial_user_fact_names)
+    ));
+  requireCondition(inputViews.length >= 1, "PHASE1_INPUT_REQUIREMENTS_NOT_OBSERVED", "FAIL", "CONTRACT");
+  const inputView = inputViews.at(-1);
+  requireCondition(records.at(-1) === inputView.record, "PHASE1_DID_NOT_STOP_AT_INPUT", "FAIL", "CONTRACT");
+  const requirements = openRequirements(inputView.view, "INPUT");
   requireCondition(
-    submits[0].input.case_id === createdCaseId
-      && submits[0].input.expected_case_revision === inputView.view.case_revision
-      && canonicalJson(submits[0].input.input_names) === canonicalJson(releaseCase.driver.initial_user_fact_names)
-      && canonicalJson(submits[0].input.input_values) === canonicalJson(releaseCase.driver.initial_user_fact_values)
-      && canonicalJson(submits[0].input.attachment_ids) === canonicalJson([])
-      && submits[0].input.wait_seconds === 0,
-    "PHASE1_INPUT_SUBMISSION",
+    requirements.length === releaseCase.driver.initial_user_fact_names.length
+      && requirements.every((item) => typeof item.prompt === "string" && item.prompt.trim().length > 0),
+    "PHASE1_INPUT_REQUIREMENT_PROMPTS_INVALID",
     "FAIL",
     "CONTRACT",
   );
-  const attachmentView = views.find((entry) => (
-    entry.ordinal > submits[0].ordinal
-      && entry.ordinal < prepare[0].ordinal
-      && entry.view.status === "WAITING_ATTACHMENT"
-      && canonicalJson(openRequirementNames(entry.view, "ATTACHMENT"))
-        === canonicalJson([releaseCase.skill.attachment_requirement])
+  requireCondition(
+    Number.isSafeInteger(inputView.record.result_stream_ordinal),
+    "PHASE1_INPUT_RESULT_ORDINAL_INVALID",
+    "FAIL",
+    "CONTRACT",
+  );
+  const questionsAfterResult = (audit.assistant_text_events ?? []).filter(
+    (event) => event.stream_ordinal > inputView.record.result_stream_ordinal
+      && event.text.trim().length > 0,
+  );
+  const questionText = questionsAfterResult.map((event) => event.text).join("\n");
+  requireCondition(
+    questionsAfterResult.length > 0
+      && requirements.every((item) => questionText.includes(item.prompt)),
+    "PHASE1_REQUIREMENTS_NOT_ASKED_AFTER_OBSERVATION",
+    "FAIL",
+    "CONTRACT",
+  );
+  const requestedBy = [...new Set(requirements.map((item) => item.requested_by_job_id))];
+  requireCondition(requestedBy.length === 1 && UUID.test(requestedBy[0] ?? ""), "PHASE1_REQUIREMENT_JOB_INVALID", "FAIL", "CONTRACT");
+  requireCondition(
+    inputView.view.selected_skill_ref?.id === releaseCase.skill.runtime_ref_id
+      && inputView.view.selected_skill_ref?.version === releaseCase.skill.version,
+    "PHASE1_SELECTED_SKILL",
+    "FAIL",
+    "CONTRACT",
+  );
+  return {
+    case_id: createdCaseId,
+    waiting_input_case_revision: inputView.view.case_revision,
+    input_requirements: requirements.map((item) => ({ name: item.name, prompt: item.prompt })),
+    methods_preflight_job_id: requestedBy[0],
+    selected_skill_ref: inputView.view.selected_skill_ref,
+    request_ids: {
+      ...requestIds,
+      create: createRequestId,
+    },
+  };
+}
+
+export function validatePhaseTwo(audit, state, releaseCase, requestIds, archive, publicBaseUrl) {
+  const records = audit.records;
+  requireCondition(records.every((record) => record.result?.ok === true), "PHASE2_MCP_CALL_FAILED", "FAIL", "CONTRACT");
+  const creates = records.filter((record) => record.tool_name === "problem_locator_create_case");
+  const submits = records.filter((record) => record.tool_name === "problem_locator_submit_supplement");
+  const gets = records.filter((record) => record.tool_name === "problem_locator_get_case");
+  const prepare = records.filter((record) => record.tool_name === "problem_locator_prepare_attachment");
+  requireCondition(
+    creates.length === 0 && submits.length === 1 && gets.length >= 2 && prepare.length === 1,
+    "PHASE2_CALL_CARDINALITY",
+    "FAIL",
+    "CONTRACT",
+  );
+  requireCondition(records[0] === gets[0], "PHASE2_GET_NOT_FIRST_BUSINESS_CALL", "FAIL", "CONTRACT");
+  requireCondition(records.at(-1) === prepare[0], "PHASE2_PREPARE_NOT_TERMINAL", "FAIL", "CONTRACT");
+  requireCondition(
+    gets.every((record) => canonicalJson(record.input) === canonicalJson(fixedGetCasePollInput(state.case_id))),
+    "PHASE2_GET_CASE_INPUT",
+    "FAIL",
+    "CONTRACT",
+  );
+  const expectedNames = state.input_requirements.map((item) => item.name);
+  const inputView = gets
+    .map((record) => ({ record, view: caseView(record) }))
+    .find(({ record, view }) => (
+      record.ordinal < submits[0].ordinal
+        && view?.case_id === state.case_id
+        && view.status === "WAITING_INPUT"
+        && canonicalJson(openRequirementNames(view, "INPUT")) === canonicalJson(expectedNames)
+    ));
+  requireCondition(inputView, "PHASE2_INPUT_REQUIREMENTS_NOT_REOBSERVED", "FAIL", "CONTRACT");
+  requireCondition(
+    inputView.view.case_revision === state.waiting_input_case_revision,
+    "PHASE2_INPUT_REVISION_DRIFT",
+    "FAIL",
+    "CONTRACT",
+  );
+  const currentRequirements = openRequirements(inputView.view, "INPUT");
+  requireCondition(
+    canonicalJson(currentRequirements.map((item) => ({ name: item.name, prompt: item.prompt })))
+      === canonicalJson(state.input_requirements),
+    "PHASE2_INPUT_REQUIREMENTS_DRIFT",
+    "FAIL",
+    "CONTRACT",
+  );
+  const expectedValuesByName = new Map(releaseCase.driver.initial_user_fact_names.map(
+    (name, index) => [name, releaseCase.driver.initial_user_fact_values[index]],
   ));
-  requireCondition(attachmentView, "PHASE1_ATTACHMENT_REQUIREMENT_NOT_OBSERVED", "FAIL", "CONTRACT");
-  exactKeys(prepare[0].input, ["request_id", "case_id", "expected_case_revision", "name", "content_type", "declared_size", "declared_sha256"], "PHASE1_PREPARE_INPUT_SHAPE");
-  requireCondition(prepare[0].input.case_id === createdCaseId && prepare[0].input.expected_case_revision === attachmentView.view.case_revision && prepare[0].input.name === archive.name && prepare[0].input.content_type === archive.content_type && prepare[0].input.declared_size === archive.size && prepare[0].input.declared_sha256 === archive.sha256, "PHASE1_PREPARE_INPUT", "FAIL", "CONTRACT");
+  const expectedValues = expectedNames.map((name) => expectedValuesByName.get(name));
+  requireCondition(expectedValues.every((value) => typeof value === "string"), "PHASE2_USER_ANSWER_MISSING", "FAIL", "CONTRACT");
+  exactKeys(submits[0].input, ["request_id", "case_id", "expected_case_revision", "input_names", "input_values", "attachment_ids", "wait_seconds"], "PHASE2_INPUT_SUBMISSION_SHAPE");
+  requireCondition(
+    submits[0].input.case_id === state.case_id
+      && submits[0].input.expected_case_revision === inputView.view.case_revision
+      && canonicalJson(submits[0].input.input_names) === canonicalJson(expectedNames)
+      && canonicalJson(submits[0].input.input_values) === canonicalJson(expectedValues)
+      && canonicalJson(submits[0].input.attachment_ids) === canonicalJson([])
+      && submits[0].input.wait_seconds === 0,
+    "PHASE2_INPUT_SUBMISSION",
+    "FAIL",
+    "CONTRACT",
+  );
+  const attachmentView = gets
+    .map((record) => ({ record, view: caseView(record) }))
+    .find(({ record, view }) => (
+      record.ordinal > submits[0].ordinal
+        && record.ordinal < prepare[0].ordinal
+        && view?.case_id === state.case_id
+        && view.status === "WAITING_ATTACHMENT"
+        && canonicalJson(openRequirementNames(view, "ATTACHMENT"))
+          === canonicalJson([releaseCase.skill.attachment_requirement])
+    ));
+  requireCondition(attachmentView, "PHASE2_ATTACHMENT_REQUIREMENT_NOT_OBSERVED", "FAIL", "CONTRACT");
+  exactKeys(prepare[0].input, ["request_id", "case_id", "expected_case_revision", "name", "content_type", "declared_size", "declared_sha256"], "PHASE2_PREPARE_INPUT_SHAPE");
+  requireCondition(
+    prepare[0].input.case_id === state.case_id
+      && prepare[0].input.expected_case_revision === attachmentView.view.case_revision
+      && prepare[0].input.name === archive.name
+      && prepare[0].input.content_type === archive.content_type
+      && prepare[0].input.declared_size === archive.size
+      && prepare[0].input.declared_sha256 === archive.sha256,
+    "PHASE2_PREPARE_INPUT",
+    "FAIL",
+    "CONTRACT",
+  );
+  const generatedRequestIds = [
+    state.request_ids.create,
+    submits[0].input.request_id,
+    prepare[0].input.request_id,
+  ];
+  requireCondition(
+    generatedRequestIds.every((value) => typeof value === "string" && value.length > 0)
+      && new Set(generatedRequestIds).size === generatedRequestIds.length,
+    "PHASE2_REQUEST_IDS_INVALID",
+    "FAIL",
+    "CONTRACT",
+  );
   const prepareData = successData(prepare[0]);
   const response = prepareData.application_response;
   const view = response?.case_view;
   const descriptor = prepareData.upload;
-  requireCondition(view?.status === "WAITING_ATTACHMENT" && UUID.test(view.case_id) && Number.isInteger(view.case_revision), "PHASE1_CASE_VIEW", "FAIL", "CONTRACT");
-  const attachmentRequirements = (view.pending_requirements ?? [])
-    .filter((item) => item.status === "OPEN" && item.kind === "ATTACHMENT");
   requireCondition(
-    canonicalJson(attachmentRequirements.map((item) => item.name)) === canonicalJson([releaseCase.skill.attachment_requirement])
-      && UUID.test(attachmentRequirements[0]?.requested_by_job_id ?? ""),
-    "PHASE1_ATTACHMENT_REQUIREMENT",
+    view?.status === "WAITING_ATTACHMENT"
+      && view.case_id === state.case_id
+      && Number.isInteger(view.case_revision),
+    "PHASE2_CASE_VIEW",
     "FAIL",
     "CONTRACT",
   );
-  requireCondition(view.selected_skill_ref?.id === releaseCase.skill.runtime_ref_id && view.selected_skill_ref?.version === releaseCase.skill.version, "PHASE1_SELECTED_SKILL", "FAIL", "CONTRACT");
-  exactKeys(descriptor, ["attachment_id", "method", "url", "required_headers", "max_bytes", "expires_at"], "PHASE1_UPLOAD_DESCRIPTOR_SHAPE");
-  requireCondition(UUID.test(descriptor.attachment_id) && descriptor.method === "PUT" && descriptor.url === `${publicBaseUrl}/api/v1/attachments/${descriptor.attachment_id}/content` && descriptor.max_bytes === MAX_ATTACHMENT_BYTES && descriptor.expires_at === null, "PHASE1_UPLOAD_DESCRIPTOR", "FAIL", "CONTRACT");
-  exactKeys(descriptor.required_headers, ["Content-Length", "Content-Type", "Idempotency-Key", "X-Content-SHA256"], "PHASE1_UPLOAD_HEADERS_SHAPE");
-  requireCondition(descriptor.required_headers["Content-Length"] === String(archive.size) && descriptor.required_headers["Content-Type"] === archive.content_type && descriptor.required_headers["Idempotency-Key"] === descriptor.attachment_id && descriptor.required_headers["X-Content-SHA256"] === archive.sha256, "PHASE1_UPLOAD_HEADERS", "FAIL", "CONTRACT");
+  const attachmentRequirements = openRequirements(view, "ATTACHMENT");
+  requireCondition(
+    canonicalJson(attachmentRequirements.map((item) => item.name))
+        === canonicalJson([releaseCase.skill.attachment_requirement])
+      && attachmentRequirements[0]?.requested_by_job_id === state.methods_preflight_job_id,
+    "PHASE2_ATTACHMENT_REQUIREMENT",
+    "FAIL",
+    "CONTRACT",
+  );
+  requireCondition(
+    view.selected_skill_ref?.id === releaseCase.skill.runtime_ref_id
+      && view.selected_skill_ref?.version === releaseCase.skill.version,
+    "PHASE2_SELECTED_SKILL",
+    "FAIL",
+    "CONTRACT",
+  );
+  exactKeys(descriptor, ["attachment_id", "method", "url", "required_headers", "max_bytes", "expires_at"], "PHASE2_UPLOAD_DESCRIPTOR_SHAPE");
+  requireCondition(
+    UUID.test(descriptor.attachment_id)
+      && descriptor.method === "PUT"
+      && descriptor.url === `${publicBaseUrl}/api/v1/attachments/${descriptor.attachment_id}/content`
+      && descriptor.max_bytes === MAX_ATTACHMENT_BYTES
+      && descriptor.expires_at === null,
+    "PHASE2_UPLOAD_DESCRIPTOR",
+    "FAIL",
+    "CONTRACT",
+  );
+  exactKeys(descriptor.required_headers, ["Content-Length", "Content-Type", "Idempotency-Key", "X-Content-SHA256"], "PHASE2_UPLOAD_HEADERS_SHAPE");
+  requireCondition(
+    descriptor.required_headers["Content-Length"] === String(archive.size)
+      && descriptor.required_headers["Content-Type"] === archive.content_type
+      && descriptor.required_headers["Idempotency-Key"] === descriptor.attachment_id
+      && descriptor.required_headers["X-Content-SHA256"] === archive.sha256,
+    "PHASE2_UPLOAD_HEADERS",
+    "FAIL",
+    "CONTRACT",
+  );
   return {
-    case_id: view.case_id,
     attachment_id: descriptor.attachment_id,
     prepared_case_revision: view.case_revision,
     prepare_expected_case_revision: prepare[0].input.expected_case_revision,
-    methods_preflight_job_id: attachmentRequirements[0].requested_by_job_id,
-    selected_skill_ref: view.selected_skill_ref,
     upload_descriptor: descriptor,
     request_ids: {
       ...requestIds,
-      create: create[0].input.request_id,
-      prepare: prepare[0].input.request_id,
       submit_inputs: submits[0].input.request_id,
+      prepare: prepare[0].input.request_id,
     },
   };
 }
@@ -1622,7 +1786,7 @@ async function uploadAttachment(configuration, state, stageRoot) {
   const archive = path.join(configuration.attemptRoot, "payload", state.archive.name);
   requireCondition(fs.existsSync(archive) && fs.statSync(archive).size === state.archive.size && sha256File(archive) === state.archive.sha256, "UPLOAD_FIXTURE_INVALID");
   requireCondition(descriptor.url === `${state.public_base_url}/api/v1/attachments/${state.attachment_id}/content`, "UPLOAD_URL_INVALID");
-  const flatCreate = expectedCreateInput(configuration.releaseCase, state.request_ids.create, state.archive);
+  const flatCreate = expectedCreateInput(state.request_ids.create);
   const problemKeys = ["statement", "expected_behavior", "actual_behavior", "scope", "goals", "non_goals", "constraints", "completion_criteria"];
   const createBody = {
     request_id: flatCreate.request_id,
@@ -3207,11 +3371,17 @@ async function execute(configuration) {
 
   if (configuration.stage === "journey.cross-job.route") {
     requireCondition(configuration.hardCaps !== null, "ROUTE_HARD_CAPS_MISSING", "BLOCKED", "INFRA");
-    const audit = await runClaude(configuration, state, configuration.stageRoot, "phase1", phaseOnePrompt(configuration.releaseCase, state.archive), configuration.hardCaps.max_turns, configuration.hardCaps.max_budget_usd);
-    const summary = validatePhaseOne(audit, configuration.releaseCase, state.request_ids, state.archive, state.public_base_url);
-    Object.assign(state, summary);
-    state.client_calls.push(...audit.records.map((record, index) => ({ phase: "phase1", ordinal: state.client_calls.length + index, tool_name: record.tool_name, input: record.input })));
-    addUsage(state, audit.usage);
+    const phaseOneAudit = await runClaude(configuration, state, configuration.stageRoot, "phase1", phaseOnePrompt(), configuration.hardCaps.max_turns, configuration.hardCaps.max_budget_usd);
+    const phaseOneSummary = validatePhaseOne(phaseOneAudit, configuration.releaseCase, state.request_ids);
+    Object.assign(state, phaseOneSummary);
+    state.client_calls.push(...phaseOneAudit.records.map((record, index) => ({ phase: "phase1", ordinal: state.client_calls.length + index, tool_name: record.tool_name, input: record.input })));
+    addUsage(state, phaseOneAudit.usage);
+    atomicState(configuration.statePath, state);
+    const phaseTwoAudit = await runClaude(configuration, state, configuration.stageRoot, "phase2", phaseTwoPrompt(state, configuration.releaseCase, state.archive), configuration.hardCaps.max_turns, configuration.hardCaps.max_budget_usd);
+    const phaseTwoSummary = validatePhaseTwo(phaseTwoAudit, state, configuration.releaseCase, state.request_ids, state.archive, state.public_base_url);
+    Object.assign(state, phaseTwoSummary);
+    state.client_calls.push(...phaseTwoAudit.records.map((record, index) => ({ phase: "phase2", ordinal: state.client_calls.length + index, tool_name: record.tool_name, input: record.input })));
+    addUsage(state, phaseTwoAudit.usage);
     atomicState(configuration.statePath, state);
     const correspondence = await stopService(configuration, state);
     const jobTypes = correspondence.service_invocations.map((invocation) => invocation.job_type).sort();
@@ -3232,8 +3402,12 @@ async function execute(configuration) {
       request_ids: Object.values(state.request_ids),
     });
     if (!configuration.terminalAfterStage) await startService(configuration, state, "upload");
-    const invocations = [clientInvocation(configuration, "route", audit, configuration.hardCaps), ...correspondence.service_invocations];
-    await stageReceipt(configuration, { status: "PASS", client_tool_calls: audit.records.length, server_tool_calls: correspondence.server_completed, checkpoint_ready: checkpoint.status === "PASS", invocations });
+    const invocations = [
+      clientInvocation(configuration, "route-intake", phaseOneAudit, configuration.hardCaps),
+      clientInvocation(configuration, "route-supplement", phaseTwoAudit, configuration.hardCaps),
+      ...correspondence.service_invocations,
+    ];
+    await stageReceipt(configuration, { status: "PASS", client_tool_calls: phaseOneAudit.records.length + phaseTwoAudit.records.length, server_tool_calls: correspondence.server_completed, checkpoint_ready: checkpoint.status === "PASS", invocations });
     return;
   }
 

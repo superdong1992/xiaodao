@@ -15,6 +15,8 @@ import {
   parseLinuxClientBrowserExecution,
   phaseOnePrompt,
   phaseOneUserMessage,
+  phaseTwoPrompt,
+  phaseTwoUserMessage,
   runCommandCapture,
   validRouteMethodsPreflightEvidence,
   validLinuxClientBrowserExecution,
@@ -22,12 +24,8 @@ import {
   validServiceAgentUsageReceipt,
   validSuccessfulInvocationReceipt,
   validatePhaseOne,
+  validatePhaseTwo,
 } from "../adapters/cross-job-core.mjs";
-import {
-  METHODS_V2_CAPTURED_FILES,
-  validateMethodsV2ExecutionRecords,
-  validateMethodsV2RestartSnapshot,
-} from "../lib/methods-oracle.mjs";
 import {
   crossJobBrowserCapabilityPolicy,
   crossJobBrowserFailureContract,
@@ -134,17 +132,22 @@ function phaseOnePromptFixture() {
     releaseCase: {
       driver: {
         problem: {
-          raw_problem_text: "订单服务的 Reserve RPC 在问题时间附近多次超时。",
-          expected_behavior: "客户端应在截止时间前收到响应。",
-          actual_behavior: "客户端超时后才收到响应。",
-          scope: "订单服务的客户端与服务端日志。",
-          goals: ["找出每次超时的原因。"],
-          non_goals: ["不补采日志。"],
-          constraints: ["只使用现有日志。"],
-          completion_criteria: ["给出有证据的原因。"],
+          raw_problem_text: "不应进入首轮消息：raw_problem_text",
+          expected_behavior: "不应进入首轮消息：expected_behavior",
+          actual_behavior: "不应进入首轮消息：actual_behavior",
+          scope: "不应进入首轮消息：scope",
+          goals: ["不应进入首轮消息：goals"],
+          non_goals: ["不应进入首轮消息：non_goals"],
+          constraints: ["不应进入首轮消息：constraints"],
+          completion_criteria: ["不应进入首轮消息：completion_criteria"],
         },
         initial_user_fact_names: ["problem_time", "client_process", "server_process", "service", "api"],
         initial_user_fact_values: ["2026-08-23 10:00:05", "rpc_client", "rpc_server", "svc_orders", "Reserve"],
+      },
+      skill: {
+        attachment_requirement: "log_archive",
+        runtime_ref_id: "diagnosis-skill/rpc-timeout-methods-v1",
+        version: "1.0.0",
       },
     },
     archive: {
@@ -174,24 +177,41 @@ test("Phase 1 rejects asking the user before creating the Case", () => {
   );
 });
 
-test("Phase 1 prompt leaves Case creation and requirement handling to the Client Skill", () => {
+test("the two Client prompts keep the sparse intake separate from the user's natural supplement", () => {
   const fixture = phaseOnePromptFixture();
-  const prompt = phaseOnePrompt(fixture.releaseCase, fixture.archive);
-  assert.match(prompt, /第一步请先加载 problem-locator-client Skill/u);
-  assert.match(prompt, /订单服务的 Reserve RPC/u);
-  assert.match(prompt, /问题时间：2026-08-23 10:00:05/u);
-  assert.match(prompt, /客户端进程：rpc_client/u);
-  assert.match(prompt, /服务端进程：rpc_server/u);
-  assert.match(prompt, /服务名：svc_orders/u);
-  assert.match(prompt, /API 名：Reserve/u);
-  assert.match(prompt, /logs\.zip/u);
-  assert.match(prompt, /拿到上传地址/u);
-  assert.doesNotMatch(prompt, /problem_locator_(?:create_case|get_case|prepare_attachment|submit_supplement)/u);
-  assert.doesNotMatch(prompt, /(?:request_id|wait_seconds|expected_case_revision|initial_user_fact_names|WAITING_INPUT|WAITING_ATTACHMENT)/u);
-  assert.doesNotMatch(prompt, /(?:problem_time|client_process|server_process|initial_user_fact_names|initial_user_fact_values)/u);
+  const firstPrompt = phaseOnePrompt();
+  const secondPrompt = phaseTwoPrompt(
+    { case_id: "00000000-0000-4000-8000-000000000101" },
+    fixture.releaseCase,
+    fixture.archive,
+  );
+  assert.match(firstPrompt, /第一步请先加载 problem-locator-client Skill/u);
+  assert.match(secondPrompt, /第一步请先加载 problem-locator-client Skill/u);
+  assert.equal(phaseOneUserMessage(), "订单 RPC 偶发超时，请定位原因；我有一份日志，可以在需要时提供。");
+  assert.match(secondPrompt, /问题时间：2026-08-23 10:00:05/u);
+  assert.match(secondPrompt, /客户端进程：rpc_client/u);
+  assert.match(secondPrompt, /服务端进程：rpc_server/u);
+  assert.match(secondPrompt, /服务名：svc_orders/u);
+  assert.match(secondPrompt, /API 名：Reserve/u);
+  assert.match(secondPrompt, /logs\.zip/u);
+  assert.match(secondPrompt, /拿到地址后先暂停/u);
+  assert.equal(firstPrompt.includes("2026-08-23 10:00:05"), false);
+  assert.equal(firstPrompt.includes("rpc_client"), false);
+  assert.equal(firstPrompt.includes("logs.zip"), false);
+  assert.equal(phaseTwoUserMessage(fixture.releaseCase, fixture.archive).includes("problem_time"), false);
+  for (const prompt of [firstPrompt, secondPrompt]) {
+    assert.doesNotMatch(prompt, /problem_locator_(?:create_case|get_case|prepare_attachment|submit_supplement)/u);
+    assert.doesNotMatch(prompt, /(?:request_id|wait_seconds|expected_case_revision|initial_user_fact_names|WAITING_INPUT|WAITING_ATTACHMENT)/u);
+    assert.doesNotMatch(prompt, /(?:problem_time|client_process|server_process|initial_user_fact_names|initial_user_fact_values)/u);
+    assert.doesNotMatch(prompt, /(?:正常情况|实际情况|影响范围|我希望确认|不需要处理|限制条件|完成标准|后面不用问)/u);
+    assert.doesNotMatch(prompt, /(?:expected_behavior|actual_behavior|scope|goals|non_goals|constraints|completion_criteria)/u);
+    for (const value of Object.values(fixture.releaseCase.driver.problem)) {
+      for (const item of Array.isArray(value) ? value : [value]) assert.equal(prompt.includes(item), false);
+    }
+  }
 });
 
-test("Phase 1 mechanically verifies create, returned requirements, supplied facts, and prepare", () => {
+function twoTurnClientFixture() {
   const fixture = phaseOnePromptFixture();
   const caseId = "00000000-0000-4000-8000-000000000101";
   const routeJobId = "00000000-0000-4000-8000-000000000102";
@@ -200,23 +220,27 @@ test("Phase 1 mechanically verifies create, returned requirements, supplied fact
   const createRequestId = "generated-create";
   const factsRequestId = "generated-facts";
   const prepareRequestId = "generated-prepare";
-  const rawProblemText = phaseOneUserMessage(fixture.releaseCase, fixture.archive);
+  const rawProblemText = phaseOneUserMessage();
   const inputRequirements = fixture.releaseCase.driver.initial_user_fact_names.map((name) => ({
     kind: "INPUT",
     name,
+    prompt: `请补充${name}。`,
     status: "OPEN",
+    requested_by_job_id: routeJobId,
   }));
   const attachmentRequirement = {
     kind: "ATTACHMENT",
     name: "log_archive",
+    prompt: "请提供日志。",
     status: "OPEN",
     requested_by_job_id: routeJobId,
   };
   const success = (data) => ({ ok: true, error: null, data });
-  const records = [
+  const phaseOneRecords = [
     {
       ordinal: 0,
       stream_ordinal: 2,
+      result_stream_ordinal: 3,
       tool_name: "problem_locator_create_case",
       input: {
         request_id: createRequestId,
@@ -238,13 +262,47 @@ test("Phase 1 mechanically verifies create, returned requirements, supplied fact
     {
       ordinal: 1,
       stream_ordinal: 4,
+      result_stream_ordinal: 5,
       tool_name: "problem_locator_get_case",
       input: { case_id: caseId, wait_for_job_id: null, wait_seconds: 30 },
-      result: success({ case_view: { case_id: caseId, case_revision: 2, status: "WAITING_INPUT", pending_requirements: inputRequirements } }),
+      result: success({
+        case_view: {
+          case_id: caseId,
+          case_revision: 2,
+          status: "WAITING_INPUT",
+          pending_requirements: inputRequirements,
+          selected_skill_ref: {
+            id: fixture.releaseCase.skill.runtime_ref_id,
+            version: fixture.releaseCase.skill.version,
+          },
+        },
+      }),
+    },
+  ];
+  const phaseTwoRecords = [
+    {
+      ordinal: 0,
+      stream_ordinal: 2,
+      result_stream_ordinal: 3,
+      tool_name: "problem_locator_get_case",
+      input: { case_id: caseId, wait_for_job_id: null, wait_seconds: 30 },
+      result: success({
+        case_view: {
+          case_id: caseId,
+          case_revision: 2,
+          status: "WAITING_INPUT",
+          pending_requirements: inputRequirements,
+          selected_skill_ref: {
+            id: fixture.releaseCase.skill.runtime_ref_id,
+            version: fixture.releaseCase.skill.version,
+          },
+        },
+      }),
     },
     {
-      ordinal: 2,
-      stream_ordinal: 6,
+      ordinal: 1,
+      stream_ordinal: 4,
+      result_stream_ordinal: 5,
       tool_name: "problem_locator_submit_supplement",
       input: {
         request_id: factsRequestId,
@@ -258,15 +316,24 @@ test("Phase 1 mechanically verifies create, returned requirements, supplied fact
       result: success({ business_receipt: { case_id: caseId } }),
     },
     {
-      ordinal: 3,
-      stream_ordinal: 8,
+      ordinal: 2,
+      stream_ordinal: 6,
+      result_stream_ordinal: 7,
       tool_name: "problem_locator_get_case",
       input: { case_id: caseId, wait_for_job_id: null, wait_seconds: 30 },
-      result: success({ case_view: { case_id: caseId, case_revision: 4, status: "WAITING_ATTACHMENT", pending_requirements: [attachmentRequirement] } }),
+      result: success({
+        case_view: {
+          case_id: caseId,
+          case_revision: 4,
+          status: "WAITING_ATTACHMENT",
+          pending_requirements: [attachmentRequirement],
+        },
+      }),
     },
     {
-      ordinal: 4,
-      stream_ordinal: 10,
+      ordinal: 3,
+      stream_ordinal: 8,
+      result_stream_ordinal: 9,
       tool_name: "problem_locator_prepare_attachment",
       input: {
         request_id: prepareRequestId,
@@ -284,7 +351,10 @@ test("Phase 1 mechanically verifies create, returned requirements, supplied fact
             case_revision: 5,
             status: "WAITING_ATTACHMENT",
             pending_requirements: [attachmentRequirement],
-            selected_skill_ref: { id: "diagnosis-skill/rpc-timeout-methods-v1", version: "1.0.0" },
+            selected_skill_ref: {
+              id: fixture.releaseCase.skill.runtime_ref_id,
+              version: fixture.releaseCase.skill.version,
+            },
           },
         },
         upload: {
@@ -303,25 +373,114 @@ test("Phase 1 mechanically verifies create, returned requirements, supplied fact
       }),
     },
   ];
-  fixture.releaseCase.skill = {
-    attachment_requirement: "log_archive",
-    runtime_ref_id: "diagnosis-skill/rpc-timeout-methods-v1",
-    version: "1.0.0",
-  };
-  const summary = validatePhaseOne(
-    { records, assistant_text_events: [] },
-    fixture.releaseCase,
-    { create: "planned-create", prepare: "planned-prepare", submit_inputs: "planned-facts", submit_attachment: "planned-attachment" },
-    fixture.archive,
+  return {
+    ...fixture,
+    caseId,
     publicBaseUrl,
+    inputRequirements,
+    phaseOneRecords,
+    phaseTwoRecords,
+    questionText: inputRequirements.map((item) => item.prompt).join("\n"),
+    requestIds: {
+      create: "planned-create",
+      prepare: "planned-prepare",
+      submit_inputs: "planned-facts",
+      submit_attachment: "planned-attachment",
+    },
+    actualRequestIds: { createRequestId, factsRequestId, prepareRequestId },
+  };
+}
+
+test("the real two-turn boundary creates first, asks returned requirements, then supplements the same Case", () => {
+  const fixture = twoTurnClientFixture();
+  const phaseOneSummary = validatePhaseOne(
+    {
+      records: fixture.phaseOneRecords,
+      assistant_text_events: [{ stream_ordinal: 6, text: fixture.questionText }],
+    },
+    fixture.releaseCase,
+    fixture.requestIds,
   );
-  assert.equal(summary.case_id, caseId);
-  assert.deepEqual(summary.request_ids, {
-    create: createRequestId,
-    prepare: prepareRequestId,
-    submit_inputs: factsRequestId,
-    submit_attachment: "planned-attachment",
+  assert.equal(phaseOneSummary.case_id, fixture.caseId);
+  assert.deepEqual(phaseOneSummary.request_ids, {
+    ...fixture.requestIds,
+    create: fixture.actualRequestIds.createRequestId,
   });
+  assert.deepEqual(
+    phaseOneSummary.input_requirements.map((item) => item.name),
+    fixture.releaseCase.driver.initial_user_fact_names,
+  );
+
+  const phaseTwoSummary = validatePhaseTwo(
+    { records: fixture.phaseTwoRecords, assistant_text_events: [] },
+    phaseOneSummary,
+    fixture.releaseCase,
+    phaseOneSummary.request_ids,
+    fixture.archive,
+    fixture.publicBaseUrl,
+  );
+  assert.equal(phaseTwoSummary.attachment_id, "00000000-0000-4000-8000-000000000103");
+  assert.deepEqual(phaseTwoSummary.request_ids, {
+    ...fixture.requestIds,
+    create: fixture.actualRequestIds.createRequestId,
+    submit_inputs: fixture.actualRequestIds.factsRequestId,
+    prepare: fixture.actualRequestIds.prepareRequestId,
+  });
+  assert.deepEqual(fixture.phaseOneRecords.map((item) => item.tool_name), [
+    "problem_locator_create_case",
+    "problem_locator_get_case",
+  ]);
+  assert.deepEqual(fixture.phaseTwoRecords.map((item) => item.tool_name), [
+    "problem_locator_get_case",
+    "problem_locator_submit_supplement",
+    "problem_locator_get_case",
+    "problem_locator_prepare_attachment",
+  ]);
+});
+
+test("the two-turn boundary rejects asking before observation and submitting before re-observation", () => {
+  const fixture = twoTurnClientFixture();
+  assert.throws(
+    () => validatePhaseOne(
+      { records: fixture.phaseOneRecords, assistant_text_events: [] },
+      fixture.releaseCase,
+      fixture.requestIds,
+    ),
+    (error) => error.code === "PHASE1_REQUIREMENTS_NOT_ASKED_AFTER_OBSERVATION",
+  );
+  assert.throws(
+    () => validatePhaseOne(
+      {
+        records: fixture.phaseOneRecords,
+        assistant_text_events: [{ stream_ordinal: 4, text: fixture.questionText }],
+      },
+      fixture.releaseCase,
+      fixture.requestIds,
+    ),
+    (error) => error.code === "PHASE1_REQUIREMENTS_NOT_ASKED_AFTER_OBSERVATION",
+  );
+
+  const phaseOneSummary = validatePhaseOne(
+    {
+      records: fixture.phaseOneRecords,
+      assistant_text_events: [{ stream_ordinal: 6, text: fixture.questionText }],
+    },
+    fixture.releaseCase,
+    fixture.requestIds,
+  );
+  const submittedWithoutObservation = clone(fixture.phaseTwoRecords);
+  submittedWithoutObservation[0].result.data.case_view.status = "RUNNING";
+  assert.throws(
+    () => validatePhaseTwo(
+      { records: submittedWithoutObservation, assistant_text_events: [] },
+      phaseOneSummary,
+      fixture.releaseCase,
+      phaseOneSummary.request_ids,
+      fixture.archive,
+      fixture.publicBaseUrl,
+    ),
+    (error) => error.code === "PHASE2_INPUT_REQUIREMENTS_NOT_REOBSERVED",
+  );
 });
 
 function successfulServiceInvocation(jobId = ROUTE_JOB_ID) {
@@ -850,363 +1009,6 @@ test("native CrossJob server inspect is exact and rejects state, image, label, s
     mutate(changed);
     assert.equal(validServerRuntimeInspection(changed), false);
   }
-});
-
-function v2Ref(prefix, kind, value) {
-  return `${prefix}-${sha256Bytes(canonicalJson({ kind, ...value }))}`;
-}
-
-function v2StateRef(state) {
-  return v2Ref("state", "method-state-v2", {
-    case_id: state.case_id,
-    source_job_id: state.source_job_id,
-    evaluation_id: state.evaluation_id,
-    plan_ref: state.plan_ref,
-    evaluation_refs: state.evaluation_refs,
-    status: state.status,
-    current_role: state.current_role,
-    specialist_protocol_failures: state.specialist_protocol_failures,
-    reviewer_protocol_failures: state.reviewer_protocol_failures,
-    specialist_evaluation: state.specialist_evaluation,
-    reviewer_evaluation: state.reviewer_evaluation,
-    consensus: state.consensus,
-    reason_code: state.reason_code,
-    diagnostic_id: state.diagnostic_id,
-    diagnostic_evaluation_ref: state.diagnostic_evaluation_ref,
-    reasons: state.reasons,
-  });
-}
-
-function methodsV2ContractFixture() {
-  const caseId = "00000000-0000-4000-8000-000000000101";
-  const sourceJobId = "00000000-0000-4000-8000-000000000102";
-  const reviewerJobId = "00000000-0000-4000-8000-000000000103";
-  const evaluationId = "00000000-0000-4000-8000-000000000104";
-  const skillSha256 = "a".repeat(64);
-  const skillRef = { id: "diagnosis-skill/methods-v2", version: "2.0.0", content_hash: skillSha256 };
-  const methodCards = [
-    { id: "first-method", priority: 1, evidence_markers: ["shared marker"] },
-    { id: "second-method", priority: 2, evidence_markers: ["shared marker"] },
-  ];
-  const source = {
-    source_id: "server",
-    relative_path: "inputs/target-logs/server.log",
-    content_sha256: "b".repeat(64),
-  };
-  source.source_ref = v2Ref("source", "method-evidence-source-v2", source);
-  const line = "SHARED MARKER request_id=42";
-  const hits = methodCards.map((method) => {
-    const value = {
-      method_id: method.id,
-      method_priority: method.priority,
-      marker_index: 1,
-      source_ref: source.source_ref,
-      source_id: source.source_id,
-      line_number: 1,
-      marker: "shared marker",
-      line,
-    };
-    return { hit_ref: v2Ref("hit", "method-evidence-hit-v2", value), ...value };
-  });
-  const events = hits.map((hit) => {
-    const value = {
-      method_id: hit.method_id,
-      method_priority: hit.method_priority,
-      identity_tokens: ["request_id=42"],
-      evidence_hit_refs: [hit.hit_ref],
-    };
-    return { event_ref: v2Ref("event", "method-evidence-event-v2", value), ...value };
-  });
-  const graphValue = {
-    skill_sha256: skillSha256,
-    source_refs: [source.source_ref],
-    hit_refs: hits.map((item) => item.hit_ref),
-    event_refs: events.map((item) => item.event_ref),
-    loaded_method_ids: methodCards.map((item) => item.id),
-    limitations: ["Only the frozen target was evaluated."],
-  };
-  const graph = {
-    events,
-    graph_ref: v2Ref("graph", "method-evidence-graph-v2", graphValue),
-    hits,
-    limitations: graphValue.limitations,
-    loaded_method_ids: graphValue.loaded_method_ids,
-    skill_sha256: skillSha256,
-    sources: [source],
-  };
-  const evaluations = methodCards.map((method, index) => {
-    const value = {
-      method_id: method.id,
-      method_priority: method.priority,
-      evidence_event_refs: [events[index].event_ref],
-      evidence_hit_refs: [hits[index].hit_ref],
-    };
-    return { evaluation_ref: v2Ref("eval", "method-evaluation-v2", value), ...value };
-  });
-  const planValue = {
-    skill_sha256: skillSha256,
-    evidence_graph_ref: graph.graph_ref,
-    evaluation_refs: evaluations.map((item) => item.evaluation_ref),
-  };
-  const plan = {
-    evaluations,
-    evidence_graph_ref: graph.graph_ref,
-    plan_ref: v2Ref("plan", "method-evaluation-plan-v2", planValue),
-    skill_sha256: skillSha256,
-  };
-  const limitationsValue = {
-    case_id: caseId,
-    source_job_id: sourceJobId,
-    evidence_graph_ref: graph.graph_ref,
-    plan_ref: plan.plan_ref,
-    limitations: graph.limitations,
-  };
-  const limitations = {
-    ...limitationsValue,
-    record_ref: v2Ref("limitations", "method-limitations-record-v2", limitationsValue),
-    schema_version: 2,
-  };
-  const roleItems = (prefix) => evaluations.map((item, index) => ({
-    evaluation_ref: item.evaluation_ref,
-    reason: `${prefix} reason ${index + 1}`,
-    verdict: index === 0 ? "CONFIRMED" : "REJECTED",
-  }));
-  const specialist = { evaluations: roleItems("specialist"), plan_ref: plan.plan_ref, repair_used: false, role: "SPECIALIST" };
-  const reviewer = { evaluations: roleItems("reviewer"), plan_ref: plan.plan_ref, repair_used: false, role: "REVIEWER" };
-  const sourceState = {
-    case_id: caseId,
-    consensus: null,
-    current_role: "REVIEWER",
-    diagnostic_evaluation_ref: null,
-    diagnostic_id: null,
-    evaluation_id: evaluationId,
-    evaluation_refs: evaluations.map((item) => item.evaluation_ref),
-    plan_ref: plan.plan_ref,
-    reason_code: null,
-    reasons: [],
-    reviewer_evaluation: null,
-    reviewer_protocol_failures: 0,
-    source_job_id: sourceJobId,
-    specialist_evaluation: specialist,
-    specialist_protocol_failures: 0,
-    status: "REVIEWER_PENDING",
-  };
-  sourceState.state_ref = v2StateRef(sourceState);
-  const confirmedEvaluationRefs = [evaluations[0].evaluation_ref];
-  const diagnosticId = v2Ref("diag", "method-diagnostic-v2", {
-    case_id: caseId,
-    source_job_id: sourceJobId,
-    evaluation_id: evaluationId,
-    plan_ref: plan.plan_ref,
-    status: "RESOLVED",
-    reason_code: null,
-    evaluation_ref: null,
-  });
-  const terminalState = {
-    ...sourceState,
-    consensus: {
-      confirmed_evaluation_refs: confirmedEvaluationRefs,
-      confirmed_method_ids: [methodCards[0].id],
-      plan_ref: plan.plan_ref,
-      status: "RESOLVED",
-    },
-    current_role: null,
-    diagnostic_id: diagnosticId,
-    reviewer_evaluation: reviewer,
-    status: "RESOLVED",
-  };
-  terminalState.state_ref = v2StateRef(terminalState);
-  const target = {
-    evaluation_id: evaluationId,
-    graph_ref: graph.graph_ref,
-    plan_ref: plan.plan_ref,
-    reviewed_state_revision: 1,
-    schema_version: 2,
-    skill_ref: skillRef,
-    source_job_id: sourceJobId,
-  };
-  const sourceJob = { case_id: caseId, diagnosis_mode: "SPECIALIZED", job_id: sourceJobId, job_type: "DIAGNOSE", skill_ref: skillRef };
-  const reviewerJob = {
-    case_id: caseId,
-    context_snapshot: { candidate_conclusion: null },
-    job_id: reviewerJobId,
-    job_type: "REVIEW",
-    methods_review_target: target,
-    review_target: null,
-    skill_ref: skillRef,
-  };
-  const sourceOutcome = {
-    case_id: caseId,
-    consumed_evidence_refs: [],
-    decision_audit: null,
-    error: null,
-    job_id: sourceJobId,
-    job_type: "DIAGNOSE",
-    methods_review_target: target,
-    payload: null,
-    proposed_artifacts: [],
-    proposed_evidence: [],
-    result_type: "COMPLETED",
-  };
-  const confirmedEventRefs = [events[0].event_ref];
-  const confirmedHitRefs = [hits[0].hit_ref];
-  const resultEvaluations = [{
-    evaluation_ref: evaluations[0].evaluation_ref,
-    method_id: evaluations[0].method_id,
-    evidence_event_refs: evaluations[0].evidence_event_refs,
-    evidence_hit_refs: evaluations[0].evidence_hit_refs,
-    verdict: "CONFIRMED",
-  }];
-  const resultRef = v2Ref("result", "method-terminal-result-v2", {
-    case_id: caseId,
-    source_job_id: sourceJobId,
-    terminal_job_id: reviewerJobId,
-    evaluation_id: evaluationId,
-    status: "RESOLVED",
-    plan_ref: plan.plan_ref,
-    evidence_graph_ref: graph.graph_ref,
-    reason_code: null,
-    diagnostic_id: diagnosticId,
-    diagnostic_evaluation_ref: null,
-    evaluations: resultEvaluations,
-    confirmed_evaluation_refs: confirmedEvaluationRefs,
-    confirmed_method_ids: [methodCards[0].id],
-    confirmed_event_refs: confirmedEventRefs,
-    confirmed_hit_refs: confirmedHitRefs,
-    limitations: graph.limitations,
-    reasons: [],
-  });
-  const publicMethodsResult = {
-    case_id: caseId,
-    confirmed_evaluation_refs: confirmedEvaluationRefs,
-    confirmed_event_refs: confirmedEventRefs,
-    confirmed_hit_refs: confirmedHitRefs,
-    confirmed_method_ids: [methodCards[0].id],
-    diagnostic_evaluation_ref: null,
-    diagnostic_id: diagnosticId,
-    evaluation_id: evaluationId,
-    evidence_graph_ref: graph.graph_ref,
-    limitations: graph.limitations,
-    plan_ref: plan.plan_ref,
-    reason_code: null,
-    reasons: [],
-    result_ref: resultRef,
-    schema_version: 2,
-    source_job_id: reviewerJobId,
-    status: "RESOLVED",
-  };
-  const reviewerOutcome = {
-    case_id: caseId,
-    consumed_evidence_refs: [],
-    decision_audit: null,
-    error: null,
-    job_id: reviewerJobId,
-    job_type: "REVIEW",
-    methods_reviewer_result: {
-      evaluations: reviewer.evaluations,
-      repair_used: false,
-      review_job_id: reviewerJobId,
-      role: "REVIEWER",
-      schema_version: 2,
-      target,
-    },
-    methods_terminal_projection: publicMethodsResult,
-    payload: null,
-    proposed_artifacts: [],
-    proposed_evidence: [],
-    result_type: "COMPLETED",
-  };
-  const values = {
-    source_job: sourceJob,
-    reviewer_job: reviewerJob,
-    evidence_graph: graph,
-    evaluation_plan: plan,
-    limitations,
-    source_state: sourceState,
-    source_outcome: sourceOutcome,
-    terminal_state: terminalState,
-    reviewer_outcome: reviewerOutcome,
-  };
-  return {
-    files: Object.fromEntries(Object.entries(values).map(([key, value]) => [key, jsonBytes(value)])),
-    expected: {
-      source_job_id: sourceJobId,
-      reviewer_job_id: reviewerJobId,
-      case_id: caseId,
-      skill_ref: skillRef,
-      source_ids: ["server"],
-      method_cards: methodCards,
-      loaded_method_ids: methodCards.map((item) => item.id),
-      confirmed_method_ids: [methodCards[0].id],
-      required_evidence_identities: [{ method_id: methodCards[0].id, marker: "shared marker", identity_tokens: ["request_id=42"] }],
-    },
-    invocations: [
-      { effective_model: "same-model", job_id: sourceJobId, job_type: "DIAGNOSE" },
-      { effective_model: "same-model", job_id: reviewerJobId, job_type: "REVIEW" },
-    ],
-    publicMethodsResult,
-  };
-}
-
-test("CrossJob Evidence V2 oracle verifies method-qualified Graph, complete Plan, blind consensus, and zero-artifact restart", () => {
-  const fixture = methodsV2ContractFixture();
-  const summary = validateMethodsV2ExecutionRecords(fixture);
-  assert.equal(summary.status, "PASS");
-  assert.equal(summary.evidence_hit_count, 2);
-  assert.equal(summary.evaluation_count, 2);
-  assert.deepEqual(summary.confirmed_method_ids, ["first-method"]);
-  assert.equal(summary.service_model_calls, 2);
-  assert.deepEqual(Object.keys(summary.record_sha256).sort(), Object.keys(METHODS_V2_CAPTURED_FILES).sort());
-  const caseView = {
-    case_id: summary.case_id,
-    status: "RESOLVED",
-    final_result: null,
-    unresolved_result: null,
-    generic_result: null,
-    generic_result_v2: null,
-    methods_result: fixture.publicMethodsResult,
-    artifacts: [],
-  };
-  assert.equal(validateMethodsV2RestartSnapshot({
-    caseView,
-    artifacts: [],
-    methodsSummary: summary,
-    restartedFiles: fixture.files,
-  }), true);
-});
-
-test("CrossJob Evidence V2 oracle rejects one-field shared-literal, role-output, and restart mutations", () => {
-  const fixture = methodsV2ContractFixture();
-  const missingQualifiedHit = { ...fixture, files: { ...fixture.files } };
-  const graph = JSON.parse(missingQualifiedHit.files.evidence_graph);
-  graph.hits.splice(1, 1);
-  missingQualifiedHit.files.evidence_graph = jsonBytes(graph);
-  assert.throws(
-    () => validateMethodsV2ExecutionRecords(missingQualifiedHit),
-    (error) => error.code === "METHODS_V2_GRAPH_METHOD_QUALIFICATION",
-  );
-
-  const extraRoleField = { ...fixture, files: { ...fixture.files } };
-  const terminal = JSON.parse(extraRoleField.files.terminal_state);
-  terminal.reviewer_evaluation.evaluations[0].marker = "shared marker";
-  extraRoleField.files.terminal_state = jsonBytes(terminal);
-  assert.throws(() => validateMethodsV2ExecutionRecords(extraRoleField));
-
-  const summary = validateMethodsV2ExecutionRecords(fixture);
-  const changedCase = {
-    case_id: summary.case_id,
-    status: "RESOLVED",
-    final_result: null,
-    unresolved_result: null,
-    generic_result: null,
-    generic_result_v2: null,
-    methods_result: { ...fixture.publicMethodsResult, result_ref: `result-${"f".repeat(64)}` },
-    artifacts: [],
-  };
-  assert.throws(
-    () => validateMethodsV2RestartSnapshot({ caseView: changedCase, artifacts: [], methodsSummary: summary, restartedFiles: fixture.files }),
-    (error) => error.code === "METHODS_V2_RESTART_CASE_MISMATCH",
-  );
 });
 
 function nativePassBoundary() {

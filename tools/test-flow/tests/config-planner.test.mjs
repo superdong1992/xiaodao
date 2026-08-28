@@ -83,13 +83,13 @@ test("Release is fresh, binds an immutable source snapshot and exposes exact per
   assert.equal(built.plan.resume, "fresh");
   assert.equal(built.options.crossJobAdapter, path.join(REPO_ROOT, "tools", "test-flow", "adapters", "macos-linux-release.mjs"));
   assert.deepEqual(built.plan.budget, {
-    estimated_tokens: 7700000,
-    sum_of_per_invocation_caps_usd: 28,
-    hard_cap_tokens: 12100000,
-    hard_cap_usd: 34,
-    normal_model_calls: 7,
+    estimated_tokens: 8100000,
+    sum_of_per_invocation_caps_usd: 31,
+    hard_cap_tokens: 12500000,
+    hard_cap_usd: 37,
+    normal_model_calls: 8,
     repair_model_calls_max: 2,
-    hard_max_model_calls: 9,
+    hard_max_model_calls: 10,
     cumulative_spending_cap: null,
     per_invocation_hard_enforced: true,
   });
@@ -105,7 +105,7 @@ test("Release is fresh, binds an immutable source snapshot and exposes exact per
   const diagnose = built.plan.stages.find((stage) => stage.id === "journey.cross-job.diagnose");
   const publish = built.plan.stages.find((stage) => stage.id === "journey.cross-job.publish-restart");
   assert.deepEqual(route.invocation_caps.map((entry) => [entry.class, entry.min_count, entry.max_count, entry.caps.max_total_tokens, entry.caps.max_budget_usd]), [
-    ["host-client", 1, 1, 400000, 3],
+    ["host-client", 2, 2, 400000, 3],
     ["server-agent", 1, 1, 2000000, 3],
   ]);
   assert.deepEqual(diagnose.invocation_caps.map((entry) => [entry.class, entry.min_count, entry.max_count, entry.caps.max_total_tokens, entry.caps.max_budget_usd]), [

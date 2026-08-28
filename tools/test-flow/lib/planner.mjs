@@ -356,7 +356,7 @@ function invocationCapsForStage(stage, profile, gates, {
     return [{ class: "isolated-agent", min_count: count, max_count: count, caps: cap }];
   }
   if (stage.id === "journey.cross-job.route") return [
-    { class: clientInvocationClass, execution_topology: clientExecutionTopology, min_count: 1, max_count: 1, caps: cap },
+    { class: clientInvocationClass, execution_topology: clientExecutionTopology, min_count: 2, max_count: 2, caps: cap },
     { class: "server-agent", min_count: 1, max_count: 1, caps: profile.real_caps.service_agent },
   ];
   if (stage.id === "journey.cross-job.diagnose") return [

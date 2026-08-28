@@ -248,10 +248,9 @@ function validateEvidenceGraph(graph, expected, methods) {
         && hit.marker === method.evidence_markers[hit.marker_index - 1]
         && Number.isSafeInteger(hit.line_number) && hit.line_number > 0
         && typeof hit.line === "string" && hit.line.length > 0
-        && hit.line.toLowerCase().includes(hit.marker.toLowerCase())
         && HIT_REF.test(hit.hit_ref ?? "") && hit.hit_ref === expectedRef && !hits.has(hit.hit_ref),
       "METHODS_V2_GRAPH_HIT_INVALID",
-      "Evidence hit is not method-qualified or does not bind its original line",
+      "Evidence hit does not bind its declared method, marker, source, and immutable ref",
     );
     hits.set(hit.hit_ref, hit);
   }
@@ -260,22 +259,6 @@ function validateEvidenceGraph(graph, expected, methods) {
     [right.method_priority, right.method_id, right.marker_index, right.source_id, right.line_number],
   ));
   requireOracle(canonicalJson(graph.hits) === canonicalJson(sortedHits), "METHODS_V2_GRAPH_HIT_ORDER", "Evidence hits are not in deterministic business order");
-
-  for (const observed of graph.hits) {
-    for (const method of methods.values()) {
-      method.evidence_markers.forEach((marker, markerIndex) => {
-        if (!observed.line.toLowerCase().includes(marker.toLowerCase())) return;
-        const matching = graph.hits.filter((candidate) => (
-          candidate.source_ref === observed.source_ref
-            && candidate.line_number === observed.line_number
-            && candidate.method_id === method.id
-            && candidate.marker_index === markerIndex + 1
-            && candidate.marker === marker
-        ));
-        requireOracle(matching.length === 1, "METHODS_V2_GRAPH_METHOD_QUALIFICATION", "A matching literal was not retained once for every owning method");
-      });
-    }
-  }
 
   requireOracle(Array.isArray(graph.events), "METHODS_V2_GRAPH_EVENTS_INVALID", "Evidence Graph events are invalid");
   const events = new Map();

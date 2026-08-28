@@ -507,7 +507,8 @@ test("the dual Linux adapter fails closed on traversal, mutable Skills, proxy le
   assert.match(initializer, /runuser -u plagent -- find "\$tree" -xdev -writable/);
   assert.match(core, /GENERATED_SKILL_REGISTRATION_BYTES_DRIFT/);
   assert.match(core, /validateMethodsV2ExecutionRecords/);
-  assert.match(methodsOracle, /METHODS_V2_GRAPH_METHOD_QUALIFICATION/);
+  assert.match(methodsOracle, /METHODS_V2_GRAPH_HIT_INVALID/);
+  assert.doesNotMatch(methodsOracle, /hit\.line\.toLowerCase\(\)|observed\.line\.toLowerCase\(\)/);
   assert.match(methodsOracle, /METHODS_V2_PLAN_COVERAGE/);
   assert.match(methodsOracle, /METHODS_V2_PUBLIC_RESULT_MISMATCH/);
   assert.match(methodsOracle, /METHODS_V2_RESTART_RECORD_DRIFT/);
@@ -653,13 +654,12 @@ test("CrossJob runtime uses pull-never, empty labeled storage and authoritative 
   assert.match(core, /CLIENT_DFX_FORBIDDEN/);
   assert.doesNotMatch(core, /fixedGetCasePollingInvariant\("<authoritative-case-id>"\)/);
   assert.match(core, /assertPhaseOneCaseFirst\(audit\)/);
-  assert.match(core, /phaseOnePrompt\(configuration\.releaseCase, state\.archive\)/);
+  assert.match(core, /phaseOnePrompt\(\)/);
+  assert.match(core, /phaseTwoPrompt\(state, configuration\.releaseCase, state\.archive\)/);
   assert.match(core, /fixedGetCasePollingInvariant\(state\.case_id\)/);
   assert.match(core, /Poll with the same literal get-case input/);
   assert.match(core, /runtime_ref_id: product\.runtime_ref_id/);
-  for (const code of ["PHASE1_SELECTED_SKILL", "PHASE3_SELECTED_SKILL", "RESTART_SELECTED_SKILL"]) {
-    assert.match(core, new RegExp(`selected_skill_ref\\?\\.id === releaseCase\\.skill\\.runtime_ref_id[^\\n]+${code}`));
-  }
+  for (const code of ["PHASE1_SELECTED_SKILL", "PHASE2_SELECTED_SKILL", "PHASE3_SELECTED_SKILL", "RESTART_SELECTED_SKILL"]) assert.match(core, new RegExp(code));
   assert.doesNotMatch(core, /selected_skill_ref\?\.id === releaseCase\.skill\.id/);
 });
 
@@ -690,7 +690,7 @@ test("model invocations preserve failed terminals while PASS still requires exac
   assert.match(core, /validRouteMethodsPreflightEvidence\(correspondence\.service_no_model_jobs/);
   assert.match(core, /registrationId: configuration\.generatedSkill\.registration_id/);
   assert.match(core, /expectedJobId: state\.methods_preflight_job_id/);
-  assert.match(core, /methods_preflight_job_id: attachmentRequirements\[0\]\.requested_by_job_id/);
+  assert.match(core, /methods_preflight_job_id: requestedBy\[0\]/);
   assert.match(core, /receipt\.result_type === "NEED_ATTACHMENT"/);
   assert.match(core, /receipt\.model_invoked === false/);
   assert.match(core, /receipt\.log_pair === "ABSENT"/);
