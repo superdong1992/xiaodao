@@ -30,9 +30,11 @@ grounding。
 
 确认计划中的 source snapshot、Core 收据、registration、模型身份、正常 2 次调用、4 次硬上限、
 token/cost 预算和 admission blocker 后，加入 `--allow-real-model` 并移除 `--plan-only` 才会调用模型。
-真实运行会在同一 evidence root 依次写出 `runtime-receipt.json`、`model-cert-input.json`、共享 builder
-复核后的 `model-cert.json`、provider 调用与 usage 收据、`adapter-receipt.json`，最后由 standalone
-`verdict.json` 封口。
+真实运行会在同一 evidence root 写出 9 个 production execution record、`methods-result-v2.json`、
+实际加载 registration 中逐字复制的 `methods.json`，以及 `scenario-oracle-receipt.json`。共享
+validator 会从 frozen release case 和这些原件重放完整 Methods V2 oracle，再生成
+`model-cert-input.json` 与 `model-cert.json`。provider 调用、usage、`runtime-receipt.json` 和
+`adapter-receipt.json` 也保留在同一根，最后由 standalone `verdict.json` 封口。
 
 Methods package 生成仍需先规划：
 

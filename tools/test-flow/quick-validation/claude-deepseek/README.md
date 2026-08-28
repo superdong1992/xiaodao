@@ -31,11 +31,14 @@ P1 只使用固定 `multiple-rpc-timeouts` 场景。调用方必须提供同一�
   --scenario multiple-rpc-timeouts \
   --source-snapshot-digest <sha256> \
   --core-verdict <core-gate-root>/core-verdict.json \
+  --registration-root <real.skill-generation registration root> \
   --plan-only
 ```
 
-规划结果会列出 provider/model/settings、registration cache、Core 绑定、正常调用数 2、调用硬上限 4、
-token/cost 和 admission blocker。审阅后才能移除 `--plan-only`，并加入 `--allow-real-model`。
+`--registration-root` 优先使用同一次 `real.skill-generation` 产出的 production registration；未显式
+提供时才使用 standalone cache。规划结果会在 `inputs.production_registration` 列出实际根路径、tree、
+template 和 `methods.json` 摘要，并列出 provider/model/settings、Core 绑定、正常调用数 2、调用硬上限
+4、token/cost 和 admission blocker。审阅后才能移除 `--plan-only`，并加入 `--allow-real-model`。
 
 认证驱动直接运行生产 `DiagnosisRuntime`：
 
@@ -65,6 +68,11 @@ Gate 先写 `model-cert-input.json`，再用共享 builder 在同一 evidence �
 - 固定场景的原始 Wiki、validated registration、生产 Skill content hash，以及 driver 原始初始输入；
 - 生产 Graph 的有序 sources 和 Graph/Plan canonical bytes identity；
 - 最终公开 `methods_result` 的 canonical identity。
+
+在写 model cert 前，production driver 会留下 source/reviewer Job、Graph、Plan、limitations、两份 state、
+两份 Outcome 共九个原始 execution record，同时留下 `methods-result-v2.json` 和实际加载的
+`methods.json`。`scenario-oracle-receipt.json` 只是这些原件的闭合索引；共享 validator 会重新读取原件
+并调用完整 Methods V2 oracle，不会信任 Runtime 自报的 `hard_cut` 或 PASS 布尔值。
 
 场景身份直接取生产 Runtime 生成的 Graph/Plan，并强制它们的 Skill hash 与当前
 `source_job.skill_ref.content_hash` 相同。`methods_result` 必须引用同一 Graph/Plan；测试侧不会重新匹配

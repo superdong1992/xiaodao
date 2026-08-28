@@ -75,7 +75,6 @@ function runtimeReceipt(invocations) {
     scenario: scenarioIdentity(),
     role_attempts: invocations.map((item) => ({ role: item.role, attempt: item.evaluation_attempt, prompt: { sha256: item.prompt.sha256, size: item.prompt.utf8_size } })),
     repair_counts: { specialist: invocations.some((item) => item.role === "SPECIALIST" && item.evaluation_attempt === "REPAIR") ? 1 : 0, reviewer: invocations.some((item) => item.role === "REVIEWER" && item.evaluation_attempt === "REPAIR") ? 1 : 0 },
-    hard_cut: { candidate: false, partial_result: false, result_zip: false, methods_v1_grounding: false, harness_normalized: false },
     methods_result_identity: { sha256: "e".repeat(64), size: 400, case_id: "00000000-0000-4000-8000-000000000001", source_job_id: "00000000-0000-4000-8000-000000000002", result_ref: `result-${"1".repeat(64)}`, evaluation_id: "00000000-0000-4000-8000-000000000003", status: "RESOLVED", plan_ref: `plan-${"2".repeat(64)}`, evidence_graph_ref: `graph-${"3".repeat(64)}`, diagnostic_id: `diag-${"4".repeat(64)}` },
     records: {},
   };
@@ -92,16 +91,13 @@ test("model-cert CLI requires source/Core bindings and rejects the former scenar
   assert.throws(() => parseArguments(missingCore), (error) => error.code === "CLAUDE_DEEPSEEK_MODEL_CERT_ARGUMENT_MISSING");
 });
 
-test("provider calls bind the exact production prompt sequence and Candidate-free result", () => {
+test("provider calls bind the exact production prompt sequence", () => {
   const invocations = [invocation("SPECIALIST", "PRIMARY", 1), invocation("REVIEWER", "PRIMARY", 2)];
   const receipt = runtimeReceipt(invocations);
   assert.equal(auditRuntimeAndInvocations(receipt, invocations).prompt_count, 2);
   const drifted = structuredClone(invocations);
   drifted[1].prompt.sha256 = "f".repeat(64);
   assert.throws(() => auditRuntimeAndInvocations(receipt, drifted), (error) => error.code === "CLAUDE_DEEPSEEK_RUNTIME_INVOCATION_IDENTITY_MISMATCH");
-  const legacy = structuredClone(receipt);
-  legacy.hard_cut.candidate = true;
-  assert.throws(() => auditRuntimeAndInvocations(legacy, invocations), (error) => error.code === "CLAUDE_DEEPSEEK_RUNTIME_HARD_CUT_INVALID");
 });
 
 test("P1 model-cert input binds provider revision, calls, usage, Core, and methods_result", () => {
@@ -112,12 +108,12 @@ test("P1 model-cert input binds provider revision, calls, usage, Core, and metho
     fs.mkdirSync(runtime, { recursive: true });
     fs.writeFileSync(path.join(runtime, "diagnosis_runtime.py"), "# production runtime\n");
     const receipt = buildModelCertInput({
-      sourceSnapshotDigest: "a".repeat(64), contractManifestSha256: "b".repeat(64), coreVerdictSha256: "c".repeat(64),
+      sourceSnapshotDigest: "a".repeat(64), contractManifestSha256: "b".repeat(64), coreVerdictSha256: "c".repeat(64), scenarioOracleSha256: "f".repeat(64),
       identity: { settings: { fingerprint: "d".repeat(64) }, cli: { version: "2.1.89" }, model: "deepseek-v4-flash[1m]", max_output_tokens: 64000 },
       invocations, usage: { input_tokens: 2, output_tokens: 2, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, total_tokens: 4, cost_usd: 0 },
       runtimeReceipt: runtimeReceipt(invocations), sourceRoot,
     });
-    assert.deepEqual(Object.keys(receipt).sort(), ["call_counts", "certification_target", "contract_manifest", "core_verdict", "execution_identity", "invocations", "methods_result", "model", "provider", "receipt_type", "scenario", "schema_version", "source_snapshot_digest", "status", "usage"].sort());
+    assert.deepEqual(Object.keys(receipt).sort(), ["call_counts", "certification_target", "contract_manifest", "core_verdict", "scenario_oracle", "execution_identity", "invocations", "methods_result", "model", "provider", "receipt_type", "scenario", "schema_version", "source_snapshot_digest", "status", "usage"].sort());
     assert.equal(receipt.certification_target, "P1");
     assert.equal(receipt.model.revision_source, "settings-fingerprint");
     assert.equal(receipt.call_counts.total_calls, 2);
@@ -203,9 +199,11 @@ test("provider-local zero-model driver proves the normal two calls and four-call
     for (const repair of [false, true]) {
       const caseRoot = path.join(root, repair ? "repair" : "normal");
       fs.mkdirSync(caseRoot);
-      const receipt = path.join(caseRoot, "receipt.json");
-      const args = [RUNTIME, "--mode", "fake", ...(repair ? ["--fake-repair"] : []), "--source-root", ROOT, "--work-root", path.join(caseRoot, "work"), "--receipt-path", receipt];
-      const result = spawnSync(process.env.TEST_FLOW_QUICK_PYTHON, args, { cwd: ROOT, env: process.env, encoding: "utf8", timeout: 120_000 });
+      const evidenceRoot = path.join(caseRoot, "evidence");
+      const receipt = path.join(evidenceRoot, "runtime-receipt.json");
+      const args = [RUNTIME, "--mode", "fake", ...(repair ? ["--fake-repair"] : []), "--source-root", ROOT, "--work-root", path.join(caseRoot, "work"), "--evidence-root", evidenceRoot, "--receipt-path", receipt];
+      const bootstrap = "import runpy,sys,types; mark=types.SimpleNamespace(parametrize=lambda *a,**k:(lambda f:f)); sys.modules['pytest']=types.SimpleNamespace(fixture=lambda f:f,mark=mark); script=sys.argv[1]; sys.argv=sys.argv[1:]; runpy.run_path(script,run_name='__main__')";
+      const result = spawnSync(process.env.TEST_FLOW_QUICK_PYTHON, ["-c", bootstrap, ...args], { cwd: ROOT, env: process.env, encoding: "utf8", timeout: 120_000 });
       assert.equal(result.status, 0, result.stderr);
       const value = JSON.parse(fs.readFileSync(receipt, "utf8"));
       assert.equal(value.production_runtime, "problem_locator.runtime.diagnosis_runtime.DiagnosisRuntime");
@@ -225,7 +223,14 @@ test("provider-local zero-model driver proves the normal two calls and four-call
       assert.equal(value.scenario.evidence_graph.ref, value.methods_result.evidence_graph_ref);
       assert.equal(value.scenario.evaluation_plan.ref, value.methods_result.plan_ref);
       assert.deepEqual(value.scenario.sources.map((item) => item.source_id), ["client", "server"]);
-      assert.deepEqual(value.hard_cut, { candidate: false, harness_normalized: false, methods_v1_grounding: false, partial_result: false, result_zip: false });
+      assert.equal(Object.hasOwn(value, "hard_cut"), false);
+      for (const name of [
+        "methods-source-job.json", "methods-reviewer-job.json",
+        "methods-evidence-graph-v2.json", "methods-evaluation-plan-v2.json",
+        "methods-limitations-v2.json", "methods-source-state-v2.json",
+        "methods-source-outcome-v2.json", "methods-terminal-state-v2.json",
+        "methods-reviewer-outcome-v2.json", "methods-result-v2.json", "methods.json",
+      ]) assert.equal(fs.existsSync(path.join(evidenceRoot, name)), true, name);
     }
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });

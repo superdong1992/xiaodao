@@ -36,6 +36,17 @@ P1、P2 provider adapter 只写同 Gate 目录下的 `model-cert-input.json`。T
 - cache-inclusive 汇总 usage；
 - 最终公开 `methods_result` 的 canonical 摘要、大小和稳定身份。
 
+两家 adapter 还必须把 production driver 产生的原始字节留在同一个 Gate 根：source/reviewer Job、
+Evidence Graph、Evaluation Plan、limitations、source/terminal state、两份 Outcome，共九个 execution
+record；另保留公开 `methods-result-v2.json`，以及 Runtime 实际加载 registration 中逐字复制的
+`methods.json`。`scenario-oracle-receipt.json` 绑定这些文件和 frozen release case/oracle。
+
+`validateEvidenceV2ModelCert(..., certRoot)` 不信任 receipt 的 `status`。每次验证都会从 `sourceRoot`
+重新读取 release case/oracle，从 `certRoot` 重新读取全部原件，按 provider role receipt 映射 source 与
+reviewer Job，再调用 `validateMethodsV2ExecutionRecords` 完整复核 method-qualified Graph、Plan 全覆盖、
+盲评共识、limitations、Outcome 和公开投影。删除任一原件、漏掉 evidence identity、改变 Graph/Plan、
+改变方法 marker，或两角色一致确认错误方法，都会让认证失败。
+
 场景摘要的 preimage 固定如下，provider 不得各自解释：
 
 - `source_wiki_sha256` 逐字取已加载 `methods.json` 绑定的原始 Wiki SHA-256；
@@ -74,11 +85,11 @@ settings fingerprint，`revision_source=settings-fingerprint`。P2 固定为 `op
 
 `buildEvidenceV2ReleaseVerdict` / `materializeEvidenceV2ReleaseVerdict` 只在同一 source snapshot、同一
 V8 manifest、同一 Core PASS、一个 P1 PASS 和一个 P2 PASS 全部一致时生成
-`release-verdict.json`。最终收据绑定 Core、两份 model cert、各自 provider/model/revision 以及各自
-`methods_result` 身份。release verdict 只公开一份共同的 `scenario`；聚合器会按 canonical JSON 逐字
+`release-verdict.json`。最终收据绑定 Core、两份 model cert、各自 provider/model/revision、各自
+scenario oracle binding 以及各自 `methods_result` 身份。release verdict 只公开一份共同的 `scenario`；聚合器会按 canonical JSON 逐字
 比对 P1、P2 的完整场景身份，并校验各自 `methods_result` 的 Graph/Plan ref。任一 Skill、日志 source、
 Graph 或 Plan 不同都不能聚合为 PASS。当前没有新增 combined Release Goal；零模型框架测试使用
 确定性 fake receipt 覆盖完整聚合和从合法 baseline 开始的单字段 mutation。
 
-P1/P2 adapter 仍在迁移。所有仍消费 Methods V1 定位产物的真实 Stage 继续在 planning 阶段返回
-`EVIDENCE_V2_REAL_DIAGNOSIS_ADAPTER_UNMIGRATED`，不会调用模型。
+P1/P2 model-cert Stage 都依赖同一次 `real.skill-generation` 和 `deterministic.full`，两家必须消费同一个
+production registration 根；任一依赖没有 PASS 时都不会生成 release verdict。

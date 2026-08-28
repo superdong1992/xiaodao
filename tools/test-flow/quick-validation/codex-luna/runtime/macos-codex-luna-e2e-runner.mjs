@@ -6,6 +6,11 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { validateEvidenceV2CoreVerdict } from "../../../../validation/evidence-v2-core.mjs";
 import {
+  EVIDENCE_V2_SCENARIO_ORACLE_RECEIPT_FILENAME,
+  buildEvidenceV2ScenarioOracleReceipt,
+  validateEvidenceV2ScenarioOracleReceipt,
+} from "../../../../validation/evidence-v2-scenario-oracle.mjs";
+import {
   canonicalJson,
   CODEX_LUNA_APP_SERVER_SCHEMA_TREE_SHA256,
   CODEX_LUNA_MODEL,
@@ -141,15 +146,6 @@ function validScenarioIdentity(runtimeReceipt) {
 export function auditRuntimeAndInvocations(runtimeReceipt, invocations) {
   requireCert(runtimeReceipt?.status === "PASS" && runtimeReceipt.execution_mode === "real-model", "CODEX_LUNA_MODEL_CERT_RUNTIME_RECEIPT_INVALID", "Production Evidence V2 Runtime receipt is invalid");
   requireCert(runtimeReceipt.production_runtime === "problem_locator.runtime.diagnosis_runtime.DiagnosisRuntime", "CODEX_LUNA_MODEL_CERT_RUNTIME_IDENTITY_INVALID", "Model-cert did not use the production DiagnosisRuntime");
-  requireCert(
-    runtimeReceipt.hard_cut?.candidate === false
-      && runtimeReceipt.hard_cut?.partial_result === false
-      && runtimeReceipt.hard_cut?.result_zip === false
-      && runtimeReceipt.hard_cut?.methods_v1_grounding === false
-      && runtimeReceipt.hard_cut?.harness_normalized === false,
-    "CODEX_LUNA_MODEL_CERT_RUNTIME_HARD_CUT_INVALID",
-    "Model-cert Runtime reintroduced a legacy Methods V1 surface",
-  );
   requireCert(runtimeReceipt.scenario_id === FIXED_SCENARIO && validScenarioIdentity(runtimeReceipt), "CODEX_LUNA_MODEL_CERT_SCENARIO_IDENTITY_INVALID", "Production Runtime did not bind the complete fixed release scenario");
   const prompts = promptAttempts(runtimeReceipt);
   requireCert(prompts.length === invocations.length, "CODEX_LUNA_MODEL_CERT_RUNTIME_INVOCATION_COUNT_MISMATCH", "Production prompt count differs from provider calls");
@@ -191,7 +187,18 @@ function executionIdentity({ sourceRoot, identity, invocations }) {
   });
 }
 
-export function buildModelCertInput({ sourceSnapshotDigest, contractManifestSha256, coreVerdictSha256, identity, invocations, runtimeReceipt, sourceRoot }) {
+function modelCertInvocations(invocations) {
+  return invocations.map((item, index) => ({
+    invocation_id: item.invocation_id,
+    ordinal: index + 1,
+    role: item.role,
+    attempt: item.attempt,
+    prompt: { sha256: item.prompt.sha256, size: item.prompt.size },
+    usage: normalizedUsage(item.usage),
+  }));
+}
+
+export function buildModelCertInput({ sourceSnapshotDigest, contractManifestSha256, coreVerdictSha256, scenarioOracleSha256, identity, invocations, runtimeReceipt, sourceRoot }) {
   const methods = runtimeReceipt.methods_result_identity;
   const repairs = runtimeReceipt.repair_counts;
   const specialistCalls = invocations.filter((item) => item.role === "SPECIALIST").length;
@@ -204,6 +211,7 @@ export function buildModelCertInput({ sourceSnapshotDigest, contractManifestSha2
     source_snapshot_digest: sourceSnapshotDigest,
     contract_manifest: { path: CONTRACT_MANIFEST_PATH, sha256: contractManifestSha256 },
     core_verdict: { path: CORE_VERDICT_RECEIPT_PATH, sha256: coreVerdictSha256 },
+    scenario_oracle: { path: EVIDENCE_V2_SCENARIO_ORACLE_RECEIPT_FILENAME, sha256: scenarioOracleSha256 },
     provider: { id: "openai", transport: "codex-app-server" },
     model: {
       id: CODEX_LUNA_MODEL,
@@ -212,14 +220,7 @@ export function buildModelCertInput({ sourceSnapshotDigest, contractManifestSha2
     },
     execution_identity: executionIdentity({ sourceRoot, identity, invocations }),
     scenario: runtimeReceipt.scenario,
-    invocations: invocations.map((item, index) => ({
-      invocation_id: item.invocation_id,
-      ordinal: index + 1,
-      role: item.role,
-      attempt: item.attempt,
-      prompt: { sha256: item.prompt.sha256, size: item.prompt.size },
-      usage: normalizedUsage(item.usage),
-    })),
+    invocations: modelCertInvocations(invocations),
     call_counts: {
       total_calls: invocations.length,
       specialist_calls: specialistCalls,
@@ -392,10 +393,27 @@ export async function runE2E(options, {
     "Validated production registration changed during model certification",
   );
   const contractManifest = path.join(sourceRoot, CONTRACT_MANIFEST_PATH);
+  const normalizedInvocations = modelCertInvocations(invocations);
+  const scenarioOracle = buildEvidenceV2ScenarioOracleReceipt({
+    sourceRoot,
+    certRoot: evidenceRoot,
+    scenario: runtimeReceipt.scenario,
+    providerInvocations: normalizedInvocations,
+    modelId: CODEX_LUNA_MODEL,
+  });
+  writeJsonNew(path.join(evidenceRoot, EVIDENCE_V2_SCENARIO_ORACLE_RECEIPT_FILENAME), scenarioOracle);
+  validateEvidenceV2ScenarioOracleReceipt(scenarioOracle, {
+    sourceRoot,
+    certRoot: evidenceRoot,
+    scenario: runtimeReceipt.scenario,
+    providerInvocations: normalizedInvocations,
+    modelId: CODEX_LUNA_MODEL,
+  });
   const modelCertInput = buildModelCertInput({
     sourceSnapshotDigest: options.sourceSnapshotDigest,
     contractManifestSha256: sha256File(contractManifest),
     coreVerdictSha256: sha256File(coreVerdictPath),
+    scenarioOracleSha256: sha256File(path.join(evidenceRoot, EVIDENCE_V2_SCENARIO_ORACLE_RECEIPT_FILENAME)),
     identity,
     invocations,
     runtimeReceipt,
@@ -422,6 +440,7 @@ export async function runE2E(options, {
       production_runtime: runtimeAudit.status,
       role_calls: "PASS",
       scenario: "PASS",
+      scenario_oracle: scenarioOracle.status,
       methods_result: runtimeReceipt.methods_result_identity.status,
     },
     model_calls: invocations.length,

@@ -36,6 +36,8 @@ test("Claude model-cert plan freezes normal two calls, one repair per role, and 
   assert.deepEqual(plan.scenarios, ["multiple-rpc-timeouts"]);
   assert.equal(plan.execution.expected_model_processes, 2);
   assert.equal(plan.execution.model_process_hard_cap, 4);
+  assert.equal(plan.execution.stage_wall_seconds, 2700);
+  assert.equal(plan.execution.per_process_wall_seconds, 600);
   assert.equal(plan.execution.per_scenario[0].model_process_hard_cap, 4);
   assert.equal(plan.execution.source_snapshot, true);
   assert.match(plan.inputs.provider_runtime.tree_sha256, /^[0-9a-f]{64}$/u);
@@ -44,6 +46,17 @@ test("Claude model-cert plan freezes normal two calls, one repair per role, and 
   assert.ok(plan.admission.blockers.some((item) => item.code === "CLAUDE_DEEPSEEK_SOURCE_SNAPSHOT_REQUIRED"));
   assert.ok(plan.admission.blockers.some((item) => item.code === "CLAUDE_DEEPSEEK_CORE_VERDICT_REQUIRED"));
   assert.equal(plan.admission.blockers.some((item) => item.code === "EVIDENCE_V2_REAL_DIAGNOSIS_ADAPTER_UNMIGRATED"), false);
+});
+
+test("P1 plan preserves a deferred shared registration root instead of falling back to cache", () => {
+  const registrationRoot = path.join(os.tmpdir(), "not-yet-generated-evidence-v2-registration");
+  const options = defaults(parseArguments(["--goal", E2E_GOAL, "--registration-root", registrationRoot, "--plan-only"]));
+  const plan = buildPlan(options);
+  assert.equal(plan.inputs.production_registration.source, "explicit-deferred");
+  assert.equal(plan.inputs.production_registration.registration_root, path.resolve(registrationRoot));
+  assert.equal(plan.inputs.production_registration.tree_sha256, null);
+  assert.ok(plan.admission.blockers.some((item) => item.code === "CLAUDE_DEEPSEEK_REGISTRATION_ROOT_MISSING"));
+  assert.equal(plan.admission.blockers.some((item) => item.code === "CLAUDE_DEEPSEEK_REGISTRATION_CACHE_REQUIRED"), false);
 });
 
 test("Claude Methods generation and cache verification do not inherit the E2E migration blocker", () => {
@@ -102,7 +115,7 @@ test("central engine marks only Claude Quick deterministic contract Gates as zer
   assert.match(source, /\["real\.macos-claude-deepseek-methods", "real\.macos-claude-deepseek-e2e"\]\.includes\(stage\.id\)/);
 });
 
-test("central Claude adapter and planner use the new meta Skill and complete registration cache", () => {
+test("central Claude generation keeps its meta Skill while model cert consumes the shared registration", () => {
   const actions = fs.readFileSync(path.join(ROOT, "..", "..", "lib", "actions.mjs"), "utf8");
   const actionStart = actions.indexOf("async function runMacosClaudeDeepseekGate");
   const actionEnd = actions.indexOf("\nasync function crossJob", actionStart);
@@ -118,7 +131,11 @@ test("central Claude adapter and planner use the new meta Skill and complete reg
   assert.match(claudeCache, /registration_tree_sha256/);
   assert.match(claudeCache, /runtime_ref/);
   assert.equal(claudeCache.includes("registrationTemplate"), false);
-  assert.match(planner, /registration_tree_digest: stage\.id === "real\.macos-claude-deepseek-e2e"/);
+  assert.match(claudeAction, /evidenceV2ProviderRuntimeInputs\(context\)/);
+  assert.match(claudeAction, /"--registration-root", providerInputs\.registrationRoot/);
+  const stages = JSON.parse(fs.readFileSync(path.join(ROOT, "..", "..", "config", "stages.v2.json"), "utf8"));
+  const modelCertStage = stages.stages.find((stage) => stage.id === "real.macos-claude-deepseek-e2e");
+  assert.ok(modelCertStage.depends_on.includes("real.skill-generation"));
 });
 
 test("light Gate rejects missing evidence and wrong model-process cardinality", () => {

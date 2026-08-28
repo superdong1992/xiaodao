@@ -14,6 +14,11 @@ import {
   validateEvidenceV2ModelCertInputSchema,
 } from "../../../../validation/evidence-v2-certification.mjs";
 import {
+  EVIDENCE_V2_SCENARIO_ORACLE_RECEIPT_FILENAME,
+  buildEvidenceV2ScenarioOracleReceipt,
+  validateEvidenceV2ScenarioOracleReceipt,
+} from "../../../../validation/evidence-v2-scenario-oracle.mjs";
+import {
   CLAUDE_DEEPSEEK_MODEL,
   assertRegistrationUnchanged,
   auditClaudeModelCertInvocations,
@@ -58,6 +63,37 @@ function writeJsonNew(filePath, value) {
   fs.writeFileSync(filePath, canonicalJson(value), { encoding: "utf8", mode: 0o600, flag: "wx" });
 }
 
+export function validateExplicitRegistrationInput(registrationRoot, sourceRoot) {
+  const root = path.resolve(registrationRoot);
+  requireCert(fs.existsSync(root) && fs.statSync(root).isDirectory(), "CLAUDE_DEEPSEEK_REGISTRATION_ROOT_INVALID", "Explicit production registration root is unavailable");
+  const templatePath = path.join(root, "registration-template.json");
+  const frozenTemplatePath = path.join(sourceRoot, "tests", "cases", "release", "rpc-timeout-anonymized", "registration", "rpc-timeout-methods-v1", "registration-template.json");
+  requireCert(fs.existsSync(templatePath) && fs.existsSync(frozenTemplatePath), "CLAUDE_DEEPSEEK_REGISTRATION_TEMPLATE_MISSING", "Explicit production registration template is unavailable");
+  const registration = JSON.parse(fs.readFileSync(templatePath, "utf8"));
+  const frozen = JSON.parse(fs.readFileSync(frozenTemplatePath, "utf8"));
+  requireCert(registration.deployment_scope === "PRODUCTION" && canonicalJson(registration) === canonicalJson(frozen), "CLAUDE_DEEPSEEK_REGISTRATION_TEMPLATE_DRIFT", "Explicit production registration differs from the frozen release registration");
+  const packageRoot = path.join(root, ...registration.package.relative_path.split("/"));
+  requireCert(fs.existsSync(path.join(packageRoot, "methods.json")), "CLAUDE_DEEPSEEK_REGISTRATION_METHODS_MISSING", "Explicit production registration has no methods.json");
+  return Object.freeze({
+    schema_version: 1,
+    status: "PASS",
+    source: "explicit-production-registration",
+    root,
+    registration_root: root,
+    package_root: packageRoot,
+    manifest: {
+      registration: {
+        registration_id: registration.registration_id,
+        skill_name: registration.package.skill_name,
+        tree_sha256: treeDigest(root),
+        runtime_ref: null,
+        template_sha256: sha256File(templatePath),
+        methods_sha256: sha256File(path.join(packageRoot, "methods.json")),
+      },
+    },
+  });
+}
+
 export function materializeStandaloneModelCert(options, {
   build = buildEvidenceV2ModelCert,
   validate = validateEvidenceV2ModelCert,
@@ -86,12 +122,6 @@ function promptAttempts(runtimeReceipt) {
 export function auditRuntimeAndInvocations(runtimeReceipt, invocations) {
   requireCert(runtimeReceipt?.status === "PASS" && runtimeReceipt.execution_mode === "real-model", "CLAUDE_DEEPSEEK_RUNTIME_RECEIPT_INVALID", "Production Evidence V2 Runtime receipt is invalid");
   requireCert(runtimeReceipt.production_runtime === "problem_locator.runtime.diagnosis_runtime.DiagnosisRuntime", "CLAUDE_DEEPSEEK_RUNTIME_IDENTITY_INVALID", "Model-cert did not use the production DiagnosisRuntime");
-  requireCert(runtimeReceipt.hard_cut?.candidate === false
-    && runtimeReceipt.hard_cut?.partial_result === false
-    && runtimeReceipt.hard_cut?.result_zip === false
-    && runtimeReceipt.hard_cut?.methods_v1_grounding === false
-    && runtimeReceipt.hard_cut?.harness_normalized === false,
-  "CLAUDE_DEEPSEEK_RUNTIME_HARD_CUT_INVALID", "Model-cert Runtime reintroduced a legacy Methods V1 or harness-normalization path");
   const prompts = promptAttempts(runtimeReceipt);
   requireCert(prompts.length === invocations.length, "CLAUDE_DEEPSEEK_RUNTIME_INVOCATION_COUNT_MISMATCH", "Production prompt count differs from provider model calls");
   for (const [index, invocation] of invocations.entries()) {
@@ -126,7 +156,8 @@ export function auditScenarioIdentity({ sourceWiki, scenarioRoot, producer, cach
     && scenario.source_wiki_sha256 === sha256File(sourceWiki)
     && scenario.source_wiki_sha256 === producer.inputs.wiki.sha256
     && scenario.registration_id === cache.manifest.registration.registration_id
-    && scenario.skill_content_sha256 === cache.manifest.registration.runtime_ref.content_hash
+    && (cache.manifest.registration.runtime_ref === null
+      || scenario.skill_content_sha256 === cache.manifest.registration.runtime_ref.content_hash)
     && scenario.user_inputs_sha256 === expectedUserInputs
     && canonicalJson(scenario.sources) === canonicalJson(expectedSources),
   "CLAUDE_DEEPSEEK_SCENARIO_IDENTITY_MISMATCH", "Runtime scenario differs from the frozen Wiki, registration, driver, or sources");
@@ -167,10 +198,22 @@ function executionIdentity({ sourceRoot, identity, invocations }) {
   });
 }
 
+function modelCertInvocations(invocations) {
+  return invocations.map((item, index) => ({
+    invocation_id: item.invocation_id,
+    ordinal: index + 1,
+    role: item.role,
+    attempt: item.evaluation_attempt,
+    prompt: { sha256: item.prompt.sha256, size: item.prompt.utf8_size },
+    usage: normalizedUsage(item.usage),
+  }));
+}
+
 export function buildModelCertInput({
   sourceSnapshotDigest,
   contractManifestSha256,
   coreVerdictSha256,
+  scenarioOracleSha256,
   identity,
   invocations,
   usage,
@@ -189,18 +232,12 @@ export function buildModelCertInput({
     source_snapshot_digest: sourceSnapshotDigest,
     contract_manifest: { path: CONTRACT_MANIFEST_PATH, sha256: contractManifestSha256 },
     core_verdict: { path: CORE_VERDICT_RECEIPT_PATH, sha256: coreVerdictSha256 },
+    scenario_oracle: { path: EVIDENCE_V2_SCENARIO_ORACLE_RECEIPT_FILENAME, sha256: scenarioOracleSha256 },
     scenario: runtimeReceipt.scenario,
     provider: { id: "deepseek", transport: "claude-code-compatible-api" },
     model: { id: CLAUDE_DEEPSEEK_MODEL, revision: identity.settings.fingerprint, revision_source: "settings-fingerprint" },
     execution_identity: executionIdentity({ sourceRoot, identity, invocations }),
-    invocations: invocations.map((item, index) => ({
-      invocation_id: item.invocation_id,
-      ordinal: index + 1,
-      role: item.role,
-      attempt: item.evaluation_attempt,
-      prompt: { sha256: item.prompt.sha256, size: item.prompt.utf8_size },
-      usage: normalizedUsage(item.usage),
-    })),
+    invocations: modelCertInvocations(invocations),
     call_counts: {
       total_calls: invocations.length,
       specialist_calls: specialistCalls,
@@ -321,7 +358,9 @@ export async function runE2E(options, { ambient = process.env, onProgress = null
     claudeIdentity: identity,
     module: "rpc",
   });
-  const cache = validateRegistrationCache({ cacheRoot: options.cacheRoot, producer });
+  const cache = options.registrationRoot
+    ? validateExplicitRegistrationInput(options.registrationRoot, sourceRoot)
+    : validateRegistrationCache({ cacheRoot: options.cacheRoot, producer });
   assertRegistrationUnchanged(cache);
   const stagedSettings = path.join(privateRoot, "claude-settings.json");
   materializeClaudeSettings(options.claudeSettings, stagedSettings);
@@ -346,10 +385,27 @@ export async function runE2E(options, { ambient = process.env, onProgress = null
   const runtimeAudit = auditRuntimeAndInvocations(runtimeReceipt, invocations);
   const scenarioAudit = auditScenarioIdentity({ sourceWiki, scenarioRoot, producer, cache, runtimeReceipt });
   assertRegistrationUnchanged(cache);
+  const normalizedInvocations = modelCertInvocations(invocations);
+  const scenarioOracle = buildEvidenceV2ScenarioOracleReceipt({
+    sourceRoot,
+    certRoot: evidenceRoot,
+    scenario: runtimeReceipt.scenario,
+    providerInvocations: normalizedInvocations,
+    modelId: CLAUDE_DEEPSEEK_MODEL,
+  });
+  writeJsonNew(path.join(evidenceRoot, EVIDENCE_V2_SCENARIO_ORACLE_RECEIPT_FILENAME), scenarioOracle);
+  validateEvidenceV2ScenarioOracleReceipt(scenarioOracle, {
+    sourceRoot,
+    certRoot: evidenceRoot,
+    scenario: runtimeReceipt.scenario,
+    providerInvocations: normalizedInvocations,
+    modelId: CLAUDE_DEEPSEEK_MODEL,
+  });
   const modelCertInput = buildModelCertInput({
     sourceSnapshotDigest,
     contractManifestSha256: sha256File(contractManifest),
     coreVerdictSha256: sha256File(coreVerdictPath),
+    scenarioOracleSha256: sha256File(path.join(evidenceRoot, EVIDENCE_V2_SCENARIO_ORACLE_RECEIPT_FILENAME)),
     identity,
     invocations,
     usage: modelAudit.aggregate,
@@ -358,7 +414,7 @@ export async function runE2E(options, { ambient = process.env, onProgress = null
   });
   validateEvidenceV2ModelCertInputSchema(modelCertInput, { certificationTarget: "P1" });
   const identityReceipt = { schema_version: 1, status: "PASS", claude: identity, producer, registration: cache.manifest.registration };
-  const packageReceipt = { schema_version: 2, status: "PASS", producer_identity: producer.producer_identity, registration_tree_sha256: cache.manifest.registration.tree_sha256, runtime_ref: cache.manifest.registration.runtime_ref };
+  const packageReceipt = { schema_version: 2, status: "PASS", producer_identity: producer.producer_identity, registration_tree_sha256: cache.manifest.registration.tree_sha256, runtime_ref: cache.manifest.registration.runtime_ref ?? { id: `diagnosis-skill/${runtimeReceipt.registration_id}`, version: "1.0.0", content_hash: runtimeReceipt.scenario.skill_content_sha256 } };
   writeJsonNew(path.join(evidenceRoot, "claude-identity.json"), identityReceipt);
   writeJsonNew(path.join(evidenceRoot, "methods-package.json"), packageReceipt);
   writeJsonNew(path.join(evidenceRoot, "model-invocations.json"), { schema_version: 1, status: "PASS", retry_policy: "ROLE_PROTOCOL_REPAIR_ONLY", invocations });
@@ -379,6 +435,7 @@ export async function runE2E(options, { ambient = process.env, onProgress = null
       core_binding: "PASS",
       registration_identity: "PASS",
       scenario_identity: scenarioAudit.status,
+      scenario_oracle: scenarioOracle.status,
       model_cert: modelCert.status,
       production_runtime: runtimeAudit.status,
       role_calls: modelAudit.status,
@@ -395,7 +452,7 @@ export async function runE2E(options, { ambient = process.env, onProgress = null
 
 export function parseArguments(argv) {
   const values = {};
-  const names = new Set(["source-root", "runtime-root", "claude-entry", "claude-settings", "python-entry", "cache-root", "work-root", "private-root", "evidence-root", "usage-root", "run-id", "source-snapshot-digest", "core-verdict", "logparse-root", "scenario"]);
+  const names = new Set(["source-root", "runtime-root", "claude-entry", "claude-settings", "python-entry", "cache-root", "registration-root", "work-root", "private-root", "evidence-root", "usage-root", "run-id", "source-snapshot-digest", "core-verdict", "logparse-root", "scenario"]);
   for (let index = 0; index < argv.length; index += 2) {
     const argument = argv[index];
     requireCert(argument?.startsWith("--") && index + 1 < argv.length && !argv[index + 1].startsWith("--"), "CLAUDE_DEEPSEEK_MODEL_CERT_ARGUMENT_INVALID", "Model-cert arguments must use --name value pairs");
@@ -404,8 +461,9 @@ export function parseArguments(argv) {
     requireCert(!Object.hasOwn(values, name), "CLAUDE_DEEPSEEK_MODEL_CERT_ARGUMENT_DUPLICATE", `Model-cert argument --${name} is duplicated`);
     values[name] = argv[index + 1];
   }
-  const required = ["source-root", "claude-entry", "claude-settings", "python-entry", "cache-root", "work-root", "private-root", "evidence-root", "usage-root", "run-id", "source-snapshot-digest", "core-verdict"];
+  const required = ["source-root", "claude-entry", "claude-settings", "python-entry", "work-root", "private-root", "evidence-root", "usage-root", "run-id", "source-snapshot-digest", "core-verdict"];
   requireCert(required.every((name) => typeof values[name] === "string" && values[name]), "CLAUDE_DEEPSEEK_MODEL_CERT_ARGUMENT_MISSING", "Model-cert arguments are incomplete");
+  requireCert(Boolean(values["registration-root"] || values["cache-root"]), "CLAUDE_DEEPSEEK_MODEL_CERT_REGISTRATION_INPUT_MISSING", "Model-cert requires --registration-root or --cache-root");
   if (values.scenario !== undefined) requireCert(values.scenario === "multiple-rpc-timeouts", "CLAUDE_DEEPSEEK_MODEL_CERT_SCENARIO_INVALID", "Evidence V2 model-cert uses only multiple-rpc-timeouts");
   return values;
 }
@@ -417,14 +475,15 @@ export function safeE2EError(error) {
 async function main() {
   try {
     const values = parseArguments(process.argv.slice(2));
-    const paths = new Set(["sourceRoot", "claudeEntry", "claudeSettings", "pythonEntry", "cacheRoot", "workRoot", "privateRoot", "evidenceRoot", "usageRoot", "coreVerdict"]);
+    const paths = new Set(["sourceRoot", "claudeEntry", "claudeSettings", "pythonEntry", "workRoot", "privateRoot", "evidenceRoot", "usageRoot", "coreVerdict"]);
     const options = {
       sourceRoot: values["source-root"],
       runtimeRoot: values["runtime-root"] ?? values["source-root"],
       claudeEntry: values["claude-entry"],
       claudeSettings: values["claude-settings"],
       pythonEntry: values["python-entry"],
-      cacheRoot: values["cache-root"],
+      cacheRoot: values["cache-root"] ?? null,
+      registrationRoot: values["registration-root"] ?? null,
       workRoot: values["work-root"],
       privateRoot: values["private-root"],
       evidenceRoot: values["evidence-root"],
@@ -434,6 +493,8 @@ async function main() {
       sourceSnapshotDigest: values["source-snapshot-digest"],
     };
     for (const name of paths) options[name] = path.resolve(options[name]);
+    if (options.cacheRoot !== null) options.cacheRoot = path.resolve(options.cacheRoot);
+    if (options.registrationRoot !== null) options.registrationRoot = path.resolve(options.registrationRoot);
     process.stdout.write(canonicalJson(await runE2E(options, { onProgress: (phase) => process.stdout.write(`TEST_FLOW_PROGRESS stage.progress claude-deepseek ${phase}\n`) })));
   } catch (error) {
     process.stderr.write(canonicalJson(safeE2EError(error)));

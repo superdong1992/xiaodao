@@ -46,7 +46,7 @@ const FLAGS = new Set(["plan-only", "allow-real-model", "all-scenarios", "help"]
 
 const REQUIRED_EVIDENCE = Object.freeze({
   methods: ["codex-identity.json", "model-invocations.json", "model-usage.json", "methods-package.json", "adapter-receipt.json"],
-  e2e: ["runtime-receipt.json", "methods-package.json", "codex-identity.json", "model-invocations.json", "model-usage.json", "model-cert-input.json", "model-cert.json", "adapter-receipt.json"],
+  e2e: ["runtime-receipt.json", "methods-package.json", "codex-identity.json", "model-invocations.json", "model-usage.json", "methods-source-job.json", "methods-reviewer-job.json", "methods-evidence-graph-v2.json", "methods-evaluation-plan-v2.json", "methods-limitations-v2.json", "methods-source-state-v2.json", "methods-source-outcome-v2.json", "methods-terminal-state-v2.json", "methods-reviewer-outcome-v2.json", "methods-result-v2.json", "methods.json", "scenario-oracle-receipt.json", "model-cert-input.json", "model-cert.json", "adapter-receipt.json"],
 });
 
 class LunaFlowError extends Error {
@@ -442,4 +442,4 @@ async function main() {
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) await main();
 
-export { defaults, evidenceManifest, lightVerdict };
+export { defaults, evidenceManifest, lightVerdict, REQUIRED_EVIDENCE };

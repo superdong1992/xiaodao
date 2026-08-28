@@ -96,7 +96,6 @@ function runtimeReceipt(invocations) {
       evidence_graph_ref: GRAPH_REF,
       diagnostic_id: `diag-${SHA("4")}`,
     },
-    hard_cut: { candidate: false, partial_result: false, result_zip: false, methods_v1_grounding: false, harness_normalized: false },
   };
 }
 
@@ -128,16 +127,13 @@ test("model-cert CLI requires source/Core/registration binding and one fixed sce
   assert.throws(() => parseArguments([...args.slice(0, registrationIndex), ...args.slice(registrationIndex + 2)]), { code: "CODEX_LUNA_MODEL_CERT_REGISTRATION_INPUT_MISSING" });
 });
 
-test("provider calls bind exact production prompts and reject legacy or scenario mutations", () => {
+test("provider calls bind exact production prompts and reject scenario mutations", () => {
   const invocations = [invocation("SPECIALIST", "PRIMARY", 1), invocation("REVIEWER", "PRIMARY", 2)];
   const receipt = runtimeReceipt(invocations);
   assert.equal(auditRuntimeAndInvocations(receipt, invocations).prompt_count, 2);
   const promptDrift = structuredClone(invocations);
   promptDrift[1].prompt.sha256 = SHA("7");
   assert.throws(() => auditRuntimeAndInvocations(receipt, promptDrift), { code: "CODEX_LUNA_MODEL_CERT_RUNTIME_INVOCATION_IDENTITY_MISMATCH" });
-  const legacy = structuredClone(receipt);
-  legacy.hard_cut.candidate = true;
-  assert.throws(() => auditRuntimeAndInvocations(legacy, invocations), { code: "CODEX_LUNA_MODEL_CERT_RUNTIME_HARD_CUT_INVALID" });
   const wrongScenario = structuredClone(receipt);
   wrongScenario.scenario.scenario_id = "other";
   assert.throws(() => auditRuntimeAndInvocations(wrongScenario, invocations), { code: "CODEX_LUNA_MODEL_CERT_SCENARIO_IDENTITY_INVALID" });
@@ -149,12 +145,13 @@ test("P2 model-cert input binds provider revision, scenario, calls, usage, Core 
     sourceSnapshotDigest: SHA("a"),
     contractManifestSha256: SHA("b"),
     coreVerdictSha256: SHA("c"),
+    scenarioOracleSha256: SHA("d"),
     identity: identity(),
     invocations,
     runtimeReceipt: runtimeReceipt(invocations),
     sourceRoot: REPO_ROOT,
   });
-  assert.deepEqual(Object.keys(receipt).sort(), ["call_counts", "certification_target", "contract_manifest", "core_verdict", "execution_identity", "invocations", "methods_result", "model", "provider", "receipt_type", "scenario", "schema_version", "source_snapshot_digest", "status", "usage"].sort());
+  assert.deepEqual(Object.keys(receipt).sort(), ["call_counts", "certification_target", "contract_manifest", "core_verdict", "scenario_oracle", "execution_identity", "invocations", "methods_result", "model", "provider", "receipt_type", "scenario", "schema_version", "source_snapshot_digest", "status", "usage"].sort());
   assert.equal(receipt.certification_target, "P2");
   assert.deepEqual(receipt.provider, { id: "openai", transport: "codex-app-server" });
   assert.equal(receipt.model.id, "gpt-5.6-luna");
@@ -166,7 +163,7 @@ test("P2 model-cert input binds provider revision, scenario, calls, usage, Core 
   assert.equal(validateEvidenceV2ModelCertInputSchema(receipt, { certificationTarget: "P2" }), receipt);
 });
 
-test("zero-model injected app-server path runs the complete provider entry and writes model-cert input", async (context) => {
+test("an injected provider receipt cannot mint a cert without production execution originals", async (context) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-luna-model-cert-entry-"));
   context.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const core = path.join(root, "core-verdict.json");
@@ -189,24 +186,16 @@ test("zero-model injected app-server path runs the complete provider entry and w
   };
   fs.mkdirSync(options.registrationRoot);
   const registration = { root: options.registrationRoot, source: "fake-app-server-registration", tree_sha256: treeDigest(options.registrationRoot) };
-  const gate = await runE2E(options, {
+  await assert.rejects(() => runE2E(options, {
     validateIdentity: () => identity(),
     validateCore: () => ({ status: "PASS" }),
     registrationInput: () => ({ registration, producer: null, cache: null }),
     runRuntime: async () => runtimeReceipt(invocations),
     readInvocations: () => invocations,
-    materializeModelCert: ({ evidenceRoot }) => {
-      const cert = { schema_version: 1, receipt_type: "evidence-v2-model-cert", status: "PASS" };
-      fs.writeFileSync(path.join(evidenceRoot, "model-cert.json"), `${JSON.stringify(cert)}\n`);
-      return cert;
-    },
-  });
-  assert.equal(gate.status, "PASS");
-  assert.equal(gate.model_calls, 2);
-  const input = JSON.parse(fs.readFileSync(path.join(options.evidenceRoot, "model-cert-input.json"), "utf8"));
-  assert.equal(input.certification_target, "P2");
-  assert.equal(input.scenario.scenario_id, "multiple-rpc-timeouts");
-  assert.deepEqual(fs.readdirSync(options.evidenceRoot).sort(), ["adapter-receipt.json", "codex-identity.json", "methods-package.json", "model-cert-input.json", "model-cert.json", "model-invocations.json", "model-usage.json"].sort());
+    materializeModelCert: () => { throw new Error("must not materialize"); },
+  }), (error) => error.code === "SCENARIO_ORACLE_METHODS_MISSING");
+  assert.equal(fs.existsSync(path.join(options.evidenceRoot, "model-cert-input.json")), false);
+  assert.equal(fs.existsSync(path.join(options.evidenceRoot, "model-cert.json")), false);
 });
 
 test("safe model-cert error exposes only one closed code and message", () => {

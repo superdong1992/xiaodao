@@ -10,6 +10,7 @@ import {
   defaults,
   lightVerdict,
   parseArguments,
+  REQUIRED_EVIDENCE,
   sealLightGate,
 } from "../run.mjs";
 
@@ -30,6 +31,7 @@ test("P2 plan freezes source/Core bindings, normal two calls and a four-call har
   assert.deepEqual(plan.scenarios, ["multiple-rpc-timeouts"]);
   assert.equal(plan.execution.expected_model_calls, 2);
   assert.equal(plan.execution.model_call_hard_cap, 4);
+  assert.equal(plan.execution.wall_timeout_seconds, 2700);
   assert.equal(plan.execution.per_scenario[0].model_call_hard_cap, 4);
   assert.equal(plan.execution.source_snapshot, true);
   assert.ok(plan.admission.blockers.some((item) => item.code === "LUNA_SOURCE_SNAPSHOT_REQUIRED"));
@@ -63,7 +65,7 @@ function writeEvidence(root, names, calls) {
 
 test("light Gate accepts P2 normal/repair counts and rejects a fifth call", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "macos-luna-light-gate-"));
-  const required = ["runtime-receipt.json", "methods-package.json", "codex-identity.json", "model-invocations.json", "model-usage.json", "model-cert-input.json", "model-cert.json", "adapter-receipt.json"];
+  const required = REQUIRED_EVIDENCE.e2e;
   const normal = path.join(root, "normal");
   writeEvidence(normal, required, 2);
   assert.equal(sealLightGate({ goal: "e2e", mode: "model-cert", evidenceRoot: normal, expectedCalls: 2 }).status, "PASS");
