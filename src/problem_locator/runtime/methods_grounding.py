@@ -218,7 +218,7 @@ class VerifiedMethodDiagnosisV1:
     audit: MethodGroundingAuditV1
 
 
-def _marker_occurs(marker: str, line: str) -> bool:
+def marker_occurs(marker: str, line: str) -> bool:
     """Match marker text without changing the frozen evidence bytes."""
 
     return marker.casefold() in line.casefold()
@@ -250,7 +250,7 @@ def scan_method_markers(
         for line_number, line in enumerate(target.lines, start=1):
             for method in skill.methods.methods:
                 for marker in method.evidence_markers:
-                    if _marker_occurs(marker, line):
+                    if marker_occurs(marker, line):
                         marker_hits.append((target.source_id, marker, line_number))
                         hit_method_ids.add(method.id)
     return SkillLoadReceiptV1(
@@ -339,7 +339,7 @@ def verify_method_diagnosis(
                 raise ValueError("evidence source line differs from the frozen log")
             if source.marker not in method.evidence_markers:
                 raise ValueError("evidence marker is not indexed by its method")
-            if not _marker_occurs(source.marker, actual_line):
+            if not marker_occurs(source.marker, actual_line):
                 raise ValueError("evidence marker is absent from the cited line")
             cited_lines.append(actual_line)
         if any(not any(token in line for line in cited_lines) for token in item.identity_tokens):
@@ -455,6 +455,7 @@ __all__ = [
     "MethodReviewV1",
     "SkillLoadReceiptV1",
     "VerifiedMethodDiagnosisV1",
+    "marker_occurs",
     "scan_method_markers",
     "verify_method_diagnosis",
     "verify_method_review",
