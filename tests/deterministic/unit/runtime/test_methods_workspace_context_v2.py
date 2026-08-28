@@ -341,7 +341,11 @@ def _jobs(tmp_path: Path):
             "broker_audit_sha256": "b" * 64,
         },
     )
-    graph = scan_method_evidence_v2(skill=skill, target_logs=frozen.target_logs)
+    graph = scan_method_evidence_v2(
+        skill=skill,
+        target_logs=frozen.target_logs,
+        limitations=("Only the frozen target set was evaluated.",),
+    )
     plan = build_method_evaluation_plan_v2(skill=skill, evidence=graph)
 
     review_value = _fixture("job-review.json", Job).model_dump(mode="json")
