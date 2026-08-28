@@ -6,19 +6,17 @@
 
 ## P0：Evidence V2 双 Provider model cert 与 Release
 
-- 零模型 Core 已接入 `deterministic.full`，但现有 CrossJob、Codex/Luna 直接定位和两套 provider
-  E2E 仍消费 Methods V1 的 grounding、Candidate、`PARTIALLY_RESOLVED` 或 `result.zip`。
-- 这些真实定位 Stage 当前统一由
-  `EVIDENCE_V2_REAL_DIAGNOSIS_ADAPTER_UNMIGRATED` 在 planning 阶段阻止。迁移完成前不得删除或绕过
-  blocker，也不得把旧 PASS/cache 当成 Evidence V2 认证。
+- 零模型 Core、CrossJob 和两套 provider adapter 已接入 Evidence V2；旧 Codex/Luna 直接 Methods V1
+  定位 Goal、Stage、Gate 和 action 路由已删除。正式结论仍须等待当前源码快照的真实 P1/P2 认证。
 - P1 Claude Code + DeepSeek 与 P2 Codex + Luna 必须各自运行生产 DiagnosisRuntime：服务端生成
   Graph/Plan，模型只提交 Specialist/Reviewer evaluation 数组，每角色最多一次 repair；正常调用数为
   2，硬上限为 4。
-- 两份 `model-cert.json` 必须绑定同一 source snapshot、V8 contract manifest 和
+- 两份 `model-cert.json` 必须绑定同一 attempt 中的 production registration、source snapshot、V8 contract manifest 和
   `core-verdict.json`，并记录 provider/model/revision、prompt/profile/tool policy、调用/repair 次数、
   usage 与最终 `methods_result` 身份。
-- 只有 Core、P1、P2 都通过后，才能生成 Evidence V2 `release-verdict.json`，迁移或移除旧
-  CrossJob V1 oracle，并恢复 `release.full`。
+- `release.evidence-v2-certification` 必须从同一 attempt 的 Core、P1、P2 生成
+  `release-verdict.json`。当前待办是完成 plan-only 审核、真实模型调用和最终权威 verdict；在此之前
+  不得登记为已修复。
 
 ## P0：Generic V2 最终集成与生产验收
 

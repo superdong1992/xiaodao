@@ -45,30 +45,20 @@ test("unknown configuration fields fail closed", () => {
   }, (root) => loadConfiguration(REPO_ROOT, root)), (error) => error.code === "CONFIG_GATE_FIELDS");
 });
 
-test("real diagnosis admission blockers use one explicit closed contract", () => {
+test("Evidence V2 provider and CrossJob diagnosis stages are schedulable and the V1 direct adapter is gone", () => {
   const config = loadConfiguration(REPO_ROOT);
-  const blockedStageIds = [
-    "real.codex-luna-methods",
+  const migratedStageIds = [
     "real.macos-codex-luna-e2e",
     "real.macos-claude-deepseek-e2e",
     "journey.cross-job.diagnose",
   ];
-  for (const stageId of blockedStageIds) {
-    assert.deepEqual(
-      config.stages.stages.find((stage) => stage.id === stageId).admission_blocker.code,
-      "EVIDENCE_V2_REAL_DIAGNOSIS_ADAPTER_UNMIGRATED",
-    );
-  }
-  for (const stageId of ["real.skill-generation", "real.macos-codex-luna-methods", "real.macos-claude-deepseek-methods"]) {
+  for (const stageId of migratedStageIds) {
     assert.equal(config.stages.stages.find((stage) => stage.id === stageId).admission_blocker, undefined);
   }
-
-  assert.throws(() => withConfigMutation("stages.v2.json", (value) => {
-    value.stages.find((stage) => stage.id === blockedStageIds[0]).admission_blocker.code = "legacy-v1";
-  }, (root) => loadConfiguration(REPO_ROOT, root)), (error) => error.code === "CONFIG_STAGE_ADMISSION_BLOCKER_CODE");
-  assert.throws(() => withConfigMutation("stages.v2.json", (value) => {
-    delete value.stages.find((stage) => stage.id === blockedStageIds[0]).admission_blocker.detail;
-  }, (root) => loadConfiguration(REPO_ROOT, root)), (error) => error.code === "CONFIG_STAGE_ADMISSION_BLOCKER_DETAIL");
+  assert.equal(config.stages.stages.some((stage) => stage.id === "real.codex-luna-methods"), false);
+  assert.equal(Object.hasOwn(config.gates.gates, "real.codex-luna.methods"), false);
+  assert.equal(Object.hasOwn(config.proofs.goals, "release.codex-luna-methods"), false);
+  assert.equal(Object.hasOwn(config.proofs.proofs, "proof.real-codex-luna-methods"), false);
 });
 
 test("Codex runtime profile must equal the executable/model contract constants", () => {
@@ -98,6 +88,31 @@ test("orphan Gates fail before admission", () => {
   }, (root) => loadConfiguration(REPO_ROOT, root)), (error) => error.code === "CONFIG_ORPHAN_GATE");
 });
 
+test("provider certification runs its production Python driver before either real-model Gate", () => {
+  const config = loadConfiguration(REPO_ROOT);
+  assert.equal(config.gates.gates["quick.claude-deepseek-e2e.contracts"].python_driver, true);
+  assert.deepEqual(config.gates.gates["quick.codex-luna.model-cert-driver"].selectors, [
+    "tools/test-flow/quick-validation/codex-luna/tests/test_macos_codex_luna_model_cert_driver.py",
+  ]);
+  for (const stageId of ["real.macos-claude-deepseek-e2e", "real.macos-codex-luna-e2e"]) {
+    const stage = config.stages.stages.find((item) => item.id === stageId);
+    assert.ok(stage.gates.indexOf(stageId) > 0);
+  }
+});
+
+test("restoring legacy provider evidence fails configuration validation", () => {
+  assert.throws(() => withConfigMutation("gates.v2.json", (value) => {
+    value.gates["real.macos-codex-luna-e2e"].evidence = [
+      "scenario-input.json",
+      "client-events.jsonl",
+      "mcp-tool-calls.json",
+      "artifact-index.json",
+      "model-cert-input.json",
+      "model-cert.json",
+    ];
+  }, (root) => loadConfiguration(REPO_ROOT, root)), (error) => error.code === "CONFIG_MODEL_CERT_EVIDENCE");
+});
+
 test("release.full has one isolated Wiki generation Gate followed by one fresh six-stage CrossJob closure without Codex coupling", () => {
   const config = loadConfiguration(REPO_ROOT);
   const expected = [
@@ -121,39 +136,28 @@ test("release.full has one isolated Wiki generation Gate followed by one fresh s
   }
 });
 
-test("Codex Luna is an independent Darwin Release goal and an explicit Dev real proof", () => {
+test("the formal Evidence V2 certification goal closes Core, one shared registration, P1, P2 and zero-model aggregation", () => {
   const config = loadConfiguration(REPO_ROOT);
   const release = resolveGoalClosure(config, {
-    goalId: "release.codex-luna-methods",
+    goalId: "release.evidence-v2-certification",
     track: "release",
-    client: "macos",
+    client: "linux",
   });
   assert.deepEqual(release.stages.map((stage) => stage.id), [
     "framework.self-test",
     "repository.static",
     "deterministic.affected",
     "deterministic.full",
-    "real.codex-luna-methods",
+    "real.skill-generation",
+    "real.macos-claude-deepseek-e2e",
+    "real.macos-codex-luna-e2e",
+    "evidence-v2.release-verdict",
   ]);
-  assert.equal(release.stages.some((stage) => stage.id === "real.skill-generation"), false);
   assert.equal(release.stages.some((stage) => stage.id.startsWith("journey.cross-job.")), false);
-
-  const crossJobDev = resolveGoalClosure(config, {
-    goalId: "dev.real",
-    track: "dev",
-    requestedStage: "journey.cross-job.environment",
-    client: "macos",
-  });
-  assert.equal(crossJobDev.stages.some((stage) => stage.id === "real.codex-luna-methods"), false);
-
-  const codexDev = resolveGoalClosure(config, {
-    goalId: "dev.real",
-    track: "dev",
-    requestedStage: "real.codex-luna-methods",
-    client: "macos",
-  });
-  assert.equal(codexDev.stages.at(-1).id, "real.codex-luna-methods");
-  assert.equal(codexDev.stages.some((stage) => stage.id === "real.skill-generation"), false);
+  const p1 = release.stages.find((stage) => stage.id === "real.macos-claude-deepseek-e2e");
+  const p2 = release.stages.find((stage) => stage.id === "real.macos-codex-luna-e2e");
+  assert.ok([p1, p2].every((stage) => stage.depends_on.includes("real.skill-generation")));
+  assert.ok([p1, p2].every((stage) => stage.platforms.includes("linux")));
 });
 
 test("repository Python compilation covers runtime support scripts used by Release", () => {

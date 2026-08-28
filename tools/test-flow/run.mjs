@@ -16,13 +16,13 @@ Usage:
 
 Core options:
   --track dev|release            Default: dev
-  --goal <proof-goal>            Includes macOS Codex/Luna and Claude/DeepSeek Quick Validation goals
+  --goal <proof-goal>            Includes provider package, P1/P2 model-cert and formal Evidence V2 certification goals
   --stage <stage-id>             Required by dev.real
   --plan-only                    Resolve proof, identity, reuse and admission only
   --client auto|windows|macos|linux
   --resume auto|fresh
   --allow-real-model             Required for a Dev real-model proof
-  --scenario <repository-id>     macOS Quick E2E scenario; default: api-execution-overrun
+  --scenario <repository-id>     Evidence V2 provider scenario; fixed to multiple-rpc-timeouts
 
 Structured retry/override intent:
   --reason <text>

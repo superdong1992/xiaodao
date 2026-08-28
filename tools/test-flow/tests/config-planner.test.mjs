@@ -6,7 +6,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { loadConfiguration, topologicalStages } from "../lib/config.mjs";
-import { buildRunPlan, builtInAdapter, releaseImageValidationMode, resolveClient, retryRequirement, supportedCodexLunaOrchestrator, supportedHostClientTopology } from "../lib/planner.mjs";
+import { buildRunPlan, builtInAdapter, providerCertificationClient, releaseImageValidationMode, resolveClient, retryRequirement, supportedCodexLunaOrchestrator, supportedHostClientTopology } from "../lib/planner.mjs";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 
@@ -46,6 +46,11 @@ test("Dev default selects the complete cheap deterministic closure and no model 
   assert.deepEqual(built.plan.budget, {
     estimated_tokens: 0,
     sum_of_per_invocation_caps_usd: 0,
+    hard_cap_tokens: 0,
+    hard_cap_usd: 0,
+    normal_model_calls: 0,
+    repair_model_calls_max: 0,
+    hard_max_model_calls: 0,
     cumulative_spending_cap: null,
     per_invocation_hard_enforced: true,
   });
@@ -67,7 +72,7 @@ test("Release is fresh, binds an immutable source snapshot and exposes exact per
   const built = buildIsolatedRunPlan({ track: "release", client: "macos", planOnly: true });
   assert.equal(built.plan.admission.status, "BLOCKED");
   const codes = built.plan.admission.blockers.map((blocker) => blocker.code);
-  assert.ok(codes.includes("EVIDENCE_V2_REAL_DIAGNOSIS_ADAPTER_UNMIGRATED"));
+  assert.equal(codes.includes("EVIDENCE_V2_REAL_DIAGNOSIS_ADAPTER_UNMIGRATED"), false);
   assert.ok(codes.includes("CLAUDE_ENTRY_REQUIRED"));
   assert.ok(codes.includes("CLAUDE_SETTINGS_REQUIRED"));
   assert.equal(codes.includes("RELEASE_SOURCE_DIRTY"), false);
@@ -77,8 +82,13 @@ test("Release is fresh, binds an immutable source snapshot and exposes exact per
   assert.equal(built.plan.resume, "fresh");
   assert.equal(built.options.crossJobAdapter, path.join(REPO_ROOT, "tools", "test-flow", "adapters", "macos-linux-release.mjs"));
   assert.deepEqual(built.plan.budget, {
-    estimated_tokens: 910000,
-    sum_of_per_invocation_caps_usd: 31,
+    estimated_tokens: 7700000,
+    sum_of_per_invocation_caps_usd: 28,
+    hard_cap_tokens: 12100000,
+    hard_cap_usd: 34,
+    normal_model_calls: 7,
+    repair_model_calls_max: 2,
+    hard_max_model_calls: 9,
     cumulative_spending_cap: null,
     per_invocation_hard_enforced: true,
   });
@@ -99,66 +109,88 @@ test("Release is fresh, binds an immutable source snapshot and exposes exact per
   ]);
   assert.deepEqual(diagnose.invocation_caps.map((entry) => [entry.class, entry.min_count, entry.max_count, entry.caps.max_total_tokens, entry.caps.max_budget_usd]), [
     ["host-client", 1, 1, 600000, 5],
-    ["server-agent", 3, 3, 2000000, 3],
+    ["server-agent", 2, 4, 2000000, 3],
   ]);
+  assert.deepEqual([diagnose.normal_model_calls, diagnose.repair_model_calls_max, diagnose.hard_max_model_calls], [3, 2, 5]);
+  assert.deepEqual(diagnose.normal_budget, { tokens: 4600000, cost_usd: 11 });
+  assert.deepEqual(diagnose.hard_budget, { tokens: 8600000, cost_usd: 17 });
   assert.deepEqual(publish.invocation_caps.map((entry) => [entry.class, entry.min_count, entry.max_count, entry.caps.max_budget_usd]), [
     ["host-client", 1, 1, 1],
   ]);
 });
 
-test("Codex posthoc aggregate budget requires an explicit acknowledgement and remains visible after acknowledgement", () => {
+test("formal Evidence V2 certification exposes normal two-call and four-call repair budgets", () => {
   const built = buildIsolatedRunPlan({
     track: "release",
-    goal: "release.codex-luna-methods",
-    client: "macos",
+    goal: "release.evidence-v2-certification",
+    client: process.platform === "linux" ? "linux" : "macos",
     planOnly: true,
     allowCodexPosthocBudget: true,
   });
   const blockerCodes = built.plan.admission.blockers.map((entry) => entry.code);
   const warningCodes = built.plan.admission.warnings.map((entry) => entry.code);
   assert.equal(blockerCodes.includes("CODEX_POSTHOC_BUDGET_ACK_REQUIRED"), false);
-  assert.ok(blockerCodes.includes("EVIDENCE_V2_REAL_DIAGNOSIS_ADAPTER_UNMIGRATED"));
   assert.ok(blockerCodes.includes("CODEX_RUNTIME_INVALID"));
   assert.deepEqual(warningCodes.filter((code) => code === "CODEX_POSTHOC_BUDGET_EXCEPTION"), ["CODEX_POSTHOC_BUDGET_EXCEPTION"]);
   assert.equal(built.plan.budget.posthoc_aggregate_limits.acknowledged, true);
   assert.equal(built.plan.budget.per_invocation_hard_enforced, false);
-  assert.deepEqual(built.plan.budget, {
-    estimated_tokens: 5000000,
-    sum_of_per_invocation_caps_usd: 10,
-    cumulative_spending_cap: null,
-    posthoc_aggregate_limits: {
-      exception_id: "PSE-CODEX-LUNA-POSTHOC-001",
-      calls: 10,
-      tokens: 5000000,
-      equivalent_usd: 10,
-      enforcement: "posthoc-terminal-aggregate",
-      acknowledged: true,
-    },
-    per_invocation_hard_enforced: false,
+  assert.deepEqual(
+    built.plan.stages
+      .filter((stage) => ["real.macos-codex-luna-e2e", "real.macos-claude-deepseek-e2e"].includes(stage.id))
+      .map((stage) => [stage.id, stage.normal_model_calls, stage.repair_model_calls_max, stage.hard_max_model_calls]),
+    [
+      ["real.macos-claude-deepseek-e2e", 2, 2, 4],
+      ["real.macos-codex-luna-e2e", 2, 2, 4],
+    ],
+  );
+  assert.deepEqual(built.plan.budget.posthoc_aggregate_limits, {
+    exception_id: "PSE-CODEX-LUNA-POSTHOC-001",
+    normal_calls: 2,
+    repair_calls_max: 2,
+    calls: 4,
+    tokens: 2000000,
+    equivalent_usd: 3,
+    enforcement: "posthoc-terminal-aggregate",
+    acknowledged: true,
   });
-  assert.equal(blockerCodes.includes("CLAUDE_ENTRY_REQUIRED"), false);
-  assert.equal(blockerCodes.includes("CLAUDE_SETTINGS_REQUIRED"), false);
+  assert.deepEqual({
+    estimated_tokens: built.plan.budget.estimated_tokens,
+    estimated_cost_usd: built.plan.budget.sum_of_per_invocation_caps_usd,
+    hard_cap_tokens: built.plan.budget.hard_cap_tokens,
+    hard_cap_usd: built.plan.budget.hard_cap_usd,
+    normal_model_calls: built.plan.budget.normal_model_calls,
+    repair_model_calls_max: built.plan.budget.repair_model_calls_max,
+    hard_max_model_calls: built.plan.budget.hard_max_model_calls,
+  }, {
+    estimated_tokens: 4_600_000,
+    estimated_cost_usd: 17,
+    hard_cap_tokens: 5_000_000,
+    hard_cap_usd: 17,
+    normal_model_calls: 5,
+    repair_model_calls_max: 4,
+    hard_max_model_calls: 9,
+  });
+  assert.ok(blockerCodes.includes("CLAUDE_ENTRY_REQUIRED"));
+  assert.ok(blockerCodes.includes("CLAUDE_SETTINGS_REQUIRED"));
   assert.equal(blockerCodes.includes("MCP_SOURCE_INVALID"), false);
   assert.equal(blockerCodes.includes("DOCKER_CONTEXT_REQUIRED"), false);
   assert.equal(blockerCodes.includes("CODEX_CLIENT_LABEL_INVALID"), false);
-  assert.equal(built.plan.release_inputs.topology, "darwin-local-codex");
-  assert.equal(built.plan.release_inputs.network_policy, "codex-app-server-provider-only-command-network-denied");
+  assert.ok(["darwin-local-claude-deepseek-quick-validation", "sealed-ubuntu2204-container-claude-deepseek-quick-validation"].includes(built.plan.release_inputs.topology));
+  assert.equal(built.plan.release_inputs.network_policy, "provider-plus-local-evidence-v2-runtime");
   assert.equal(built.plan.release_inputs.cross_job_adapter, null);
 });
 
-test("Codex Luna goal cannot be mislabeled as a Linux Client proof", () => {
-  const built = buildIsolatedRunPlan({
-    track: "release",
-    goal: "release.codex-luna-methods",
-    client: "linux",
-    planOnly: true,
-    allowCodexPosthocBudget: true,
-  });
-  assert.ok(built.plan.admission.blockers.some((entry) => entry.code === "CODEX_CLIENT_LABEL_INVALID"));
-  assert.equal(built.plan.release_inputs.topology, "darwin-local-codex");
+test("provider certification uses Linux inside sealed Ubuntu and macOS on native Darwin", () => {
+  assert.equal(providerCertificationClient("linux"), "linux");
+  assert.equal(providerCertificationClient("darwin"), "macos");
+  const config = loadConfiguration(REPO_ROOT);
+  for (const stageId of ["real.macos-codex-luna-e2e", "real.macos-claude-deepseek-e2e", "evidence-v2.release-verdict"]) {
+    const stage = config.stages.stages.find((item) => item.id === stageId);
+    assert.deepEqual(stage.platforms, ["macos", "linux"]);
+  }
 });
 
-test("macOS Luna bootstrap stays independent while E2E requires the deterministic Core closure", () => {
+test("Luna package generation stays independent while P2 uses Core plus the shared production registration", () => {
   const methods = buildIsolatedRunPlan({
     track: "dev",
     goal: "dev.macos-codex-luna-methods",
@@ -181,7 +213,7 @@ test("macOS Luna bootstrap stays independent while E2E requires the deterministi
     track: "dev",
     goal: "dev.macos-codex-luna-e2e",
     client: "macos",
-    scenario: "api-execution-overrun",
+    scenario: "multiple-rpc-timeouts",
     planOnly: true,
     allowRealModel: true,
     allowCodexPosthocBudget: true,
@@ -192,17 +224,24 @@ test("macOS Luna bootstrap stays independent while E2E requires the deterministi
     "repository.static",
     "deterministic.affected",
     "deterministic.full",
+    "real.skill-generation",
     "real.macos-codex-luna-e2e",
   ]);
-  assert.equal(e2e.scenario, "api-execution-overrun");
+  assert.equal(e2e.scenario, "multiple-rpc-timeouts");
   const e2eStage = e2e.stages.find((stage) => stage.id === "real.macos-codex-luna-e2e");
-  assert.deepEqual(e2eStage.invocation_caps[0].phases, ["CLIENT", "ROUTE", "LOGPARSE", "DIAGNOSE", "REVIEW"]);
+  assert.deepEqual(e2eStage.invocation_caps[0].phases, ["SPECIALIST:PRIMARY", "SPECIALIST:REPAIR?", "REVIEWER:PRIMARY", "REVIEWER:REPAIR?"]);
+  assert.deepEqual([e2eStage.invocation_caps[0].min_count, e2eStage.invocation_caps[0].max_count], [2, 4]);
+  assert.deepEqual([e2eStage.normal_model_calls, e2eStage.repair_model_calls_max, e2eStage.hard_max_model_calls], [2, 2, 4]);
   assert.equal(e2eStage.invocation_caps[0].per_call_hard_timeout_seconds, 600);
-  assert.equal(e2e.budget.posthoc_aggregate_limits.calls, 5);
+  assert.ok(e2eStage.timeout_seconds > e2eStage.invocation_caps[0].max_count * e2eStage.invocation_caps[0].per_call_hard_timeout_seconds);
+  assert.equal(e2e.budget.posthoc_aggregate_limits.normal_calls, 2);
+  assert.equal(e2e.budget.posthoc_aggregate_limits.repair_calls_max, 2);
+  assert.equal(e2e.budget.posthoc_aggregate_limits.calls, 4);
   assert.equal(e2e.budget.posthoc_aggregate_limits.tokens, 2_000_000);
   assert.equal(e2e.budget.posthoc_aggregate_limits.equivalent_usd, 3);
-  assert.ok(e2e.admission.blockers.some((item) => item.code === "EVIDENCE_V2_REAL_DIAGNOSIS_ADAPTER_UNMIGRATED"));
-  assert.ok(e2e.admission.blockers.some((item) => item.code === "MACOS_CODEX_LUNA_METHODS_CACHE_REQUIRED"));
+  assert.equal(e2e.admission.blockers.some((item) => item.code === "EVIDENCE_V2_REAL_DIAGNOSIS_ADAPTER_UNMIGRATED"), false);
+  assert.equal(e2e.admission.blockers.some((item) => item.code === "MACOS_CODEX_LUNA_METHODS_CACHE_REQUIRED"), false);
+  assert.deepEqual(e2eStage.gates.map((gate) => gate.id), ["quick.codex-luna.contracts", "quick.codex-luna.model-cert-driver", "real.macos-codex-luna-e2e"]);
 
   const invalid = buildIsolatedRunPlan({
     track: "dev",
@@ -214,30 +253,28 @@ test("macOS Luna bootstrap stays independent while E2E requires the deterministi
   assert.ok(invalid.admission.blockers.some((item) => item.code === "MACOS_CODEX_LUNA_SCENARIO_INVALID"));
 });
 
-test("central Claude E2E plan removes REVIEW and declares four calls for insufficient evidence", () => {
-  const build = (scenario) => buildIsolatedRunPlan({
+test("central P1 plan fixes the scenario and declares exactly the legal two-to-four call topology", () => {
+  const build = () => buildIsolatedRunPlan({
     track: "dev",
     goal: "dev.macos-claude-deepseek-e2e",
     client: "macos",
-    scenario,
+    scenario: "multiple-rpc-timeouts",
     planOnly: true,
     allowRealModel: true,
     reason: "plan",
   }).plan;
-  const normal = build("api-execution-overrun");
-  assert.ok(normal.admission.blockers.some((item) => item.code === "EVIDENCE_V2_REAL_DIAGNOSIS_ADAPTER_UNMIGRATED"));
+  const normal = build();
+  assert.equal(normal.admission.blockers.some((item) => item.code === "EVIDENCE_V2_REAL_DIAGNOSIS_ADAPTER_UNMIGRATED"), false);
   const normalStage = normal.stages.find((stage) => stage.id === "real.macos-claude-deepseek-e2e");
-  assert.deepEqual(normalStage.invocation_caps[0].phases, ["CLIENT", "ROUTE", "LOGPARSE", "DIAGNOSE", "REVIEW"]);
-  assert.equal(normalStage.invocation_caps[0].max_count, 5);
-  const insufficient = build("insufficient-evidence");
-  const declaration = insufficient.stages.find(
-    (stage) => stage.id === "real.macos-claude-deepseek-e2e",
-  ).invocation_caps[0];
-  assert.deepEqual(declaration.phases, ["CLIENT", "ROUTE", "LOGPARSE", "DIAGNOSE"]);
-  assert.deepEqual([declaration.min_count, declaration.max_count], [4, 4]);
+  const declaration = normalStage.invocation_caps[0];
+  assert.deepEqual(declaration.phases, ["SPECIALIST:PRIMARY", "SPECIALIST:REPAIR?", "REVIEWER:PRIMARY", "REVIEWER:REPAIR?"]);
+  assert.deepEqual([declaration.min_count, declaration.max_count, declaration.normal_count, declaration.repair_max_count], [2, 4, 2, 2]);
+  assert.deepEqual([normalStage.normal_model_calls, normalStage.repair_model_calls_max, normalStage.hard_max_model_calls], [2, 2, 4]);
+  assert.ok(normalStage.timeout_seconds > declaration.max_count * declaration.per_call_hard_timeout_seconds);
+  assert.equal(normalStage.gates.find((gate) => gate.id === "quick.claude-deepseek-e2e.contracts").required_evidence[0], "node-test.tap");
 });
 
-test("Dev CrossJob diagnosis closure is blocked before any legacy real Gate can run", () => {
+test("Dev CrossJob diagnosis uses the Evidence V2 two-to-four service-call contract", () => {
   const built = buildIsolatedRunPlan({
     track: "dev",
     goal: "dev.real",
@@ -245,10 +282,11 @@ test("Dev CrossJob diagnosis closure is blocked before any legacy real Gate can 
     client: "windows",
     planOnly: true,
     allowRealModel: true,
-    reason: "验证 Evidence V2 迁移阻断",
+    reason: "验证 Evidence V2 正式定位路径",
   });
-  const blocker = built.plan.admission.blockers.find((item) => item.code === "EVIDENCE_V2_REAL_DIAGNOSIS_ADAPTER_UNMIGRATED");
-  assert.equal(blocker?.stage_id, "journey.cross-job.diagnose");
+  assert.equal(built.plan.admission.blockers.some((item) => item.code === "EVIDENCE_V2_REAL_DIAGNOSIS_ADAPTER_UNMIGRATED"), false);
+  const declaration = built.plan.stages.find((stage) => stage.id === "journey.cross-job.diagnose").invocation_caps.find((item) => item.class === "server-agent");
+  assert.deepEqual([declaration.min_count, declaration.max_count, declaration.normal_count, declaration.repair_max_count], [2, 4, 2, 2]);
   assert.equal(built.plan.admission.status, "BLOCKED");
 });
 

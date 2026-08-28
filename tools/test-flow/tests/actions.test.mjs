@@ -7,7 +7,9 @@ import test from "node:test";
 
 import {
   collectIsolatedModelUsage,
+  evidenceV2ProviderRuntimeInputs,
   evaluatePytestSummary,
+  evaluateNodeTestSummary,
   frozenServerImageId,
   hostCapabilityProcessSpec,
   materializePytestSummary,
@@ -21,6 +23,7 @@ import {
   validCrossJobPassRuntimeBoundary,
   validCodexLunaPassBoundary,
   validClaudeDeepseekInvocationLedger,
+  validEvidenceV2ProviderInvocationLedger,
   validHostCapabilityReceipt,
   validServerRuntimeIdentity,
 } from "../lib/actions.mjs";
@@ -65,14 +68,44 @@ import {
   CODEX_LUNA_DISABLED_FEATURES,
 } from "../runtime-support/codex-luna-app-server.mjs";
 
-test("Claude E2E ledger must exactly match the scenario-specific planned phases", () => {
-  const phases = ["CLIENT", "ROUTE", "LOGPARSE", "DIAGNOSE"];
-  const planStage = { invocation_caps: [{ phases, min_count: 4, max_count: 4 }] };
-  const invocations = phases.map((phase) => ({ phase, status: "PASS", terminal: true }));
-  assert.equal(validClaudeDeepseekInvocationLedger(planStage, { status: "PASS", invocations }), true);
-  assert.equal(validClaudeDeepseekInvocationLedger(planStage, { status: "PASS", invocations: [...invocations, { phase: "REVIEW", status: "PASS", terminal: true }] }), false);
-  assert.equal(validClaudeDeepseekInvocationLedger(planStage, { status: "PASS", invocations: [invocations[0], invocations[2], invocations[1], invocations[3]] }), false);
-  assert.equal(validClaudeDeepseekInvocationLedger({ invocation_caps: [{ phases, min_count: 5, max_count: 5 }] }, { status: "PASS", invocations }), false);
+test("Evidence V2 provider ledgers allow only S:P,[S:R],R:P,[R:R] with two normal and four maximum calls", () => {
+  const phases = ["SPECIALIST:PRIMARY", "SPECIALIST:REPAIR?", "REVIEWER:PRIMARY", "REVIEWER:REPAIR?"];
+  const planStage = { invocation_caps: [{ class: "claude-deepseek-macos-e2e", phases, min_count: 2, max_count: 4, normal_count: 2, repair_max_count: 2 }] };
+  const invocation = (ordinal, role, evaluationAttempt) => ({ invocation_id: `call-${ordinal}`, role, evaluation_attempt: evaluationAttempt, status: "PASS", terminal: true });
+  const primary = [invocation(1, "SPECIALIST", "PRIMARY"), invocation(2, "REVIEWER", "PRIMARY")];
+  const repaired = [invocation(1, "SPECIALIST", "PRIMARY"), invocation(2, "SPECIALIST", "REPAIR"), invocation(3, "REVIEWER", "PRIMARY"), invocation(4, "REVIEWER", "REPAIR")];
+  assert.equal(validEvidenceV2ProviderInvocationLedger(planStage, { status: "PASS", invocations: primary }), true);
+  assert.equal(validClaudeDeepseekInvocationLedger(planStage, { status: "PASS", invocations: repaired }), true);
+  assert.equal(validEvidenceV2ProviderInvocationLedger(planStage, { status: "PASS", invocations: primary.map(({ evaluation_attempt: attempt, ...item }) => ({ ...item, attempt })) }), true);
+  assert.equal(validEvidenceV2ProviderInvocationLedger(planStage, { status: "PASS", invocations: [...repaired, invocation(5, "REVIEWER", "REPAIR")] }), false);
+  assert.equal(validEvidenceV2ProviderInvocationLedger(planStage, { status: "PASS", invocations: [invocation(1, "SPECIALIST", "PRIMARY"), invocation(2, "SPECIALIST", "REPAIR"), invocation(3, "SPECIALIST", "REPAIR"), invocation(4, "REVIEWER", "PRIMARY")] }), false);
+  assert.equal(validEvidenceV2ProviderInvocationLedger({ invocation_caps: [{ ...planStage.invocation_caps[0], max_count: 5 }] }, { status: "PASS", invocations: primary }), false);
+});
+
+test("P1 and P2 central actions resolve one same-attempt production registration and Core receipt", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "evidence-v2-provider-inputs-"));
+  try {
+    const gateRoot = path.join(root, "payload", "stages", "real.skill-generation", "gates", "real.agent.skill-generation");
+    const registrationRoot = path.join(gateRoot, "generated-skill", "rpc-timeout-methods-v1");
+    fs.mkdirSync(path.join(registrationRoot, "package"), { recursive: true });
+    fs.writeFileSync(path.join(registrationRoot, "registration-template.json"), "{}\n");
+    fs.writeFileSync(path.join(gateRoot, "generated-skill.json"), `${JSON.stringify({ schema_version: 1, status: "PASS", registration_id: "rpc-timeout-methods-v1" })}\n`);
+    const context = { attemptRoot: root, sourceSnapshotRoot: path.join(root, "source"), sourceSnapshotDigest: "a".repeat(64) };
+    const first = evidenceV2ProviderRuntimeInputs(context);
+    const second = evidenceV2ProviderRuntimeInputs(context);
+    assert.deepEqual(first, second);
+    assert.equal(first.registrationRoot, registrationRoot);
+    assert.equal(first.scenario, "multiple-rpc-timeouts");
+    assert.equal(first.coreVerdictPath, path.join(root, "payload", "stages", "deterministic.full", "gates", "det.evidence-v2-core", "core-verdict.json"));
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("P1 deterministic Gate cannot pass by skipping its production Python driver", () => {
+  const gate = { min_passed: 1, python_driver: true };
+  assert.deepEqual(evaluateNodeTestSummary({ tests: 2, passed: 2, failed: 0, skipped: 0 }, gate), { status: "PASS", failure_domain: null, code: null });
+  assert.deepEqual(evaluateNodeTestSummary({ tests: 2, passed: 1, failed: 0, skipped: 1 }, gate), { status: "FAIL", failure_domain: "HARNESS", code: "NODE_TEST_PYTHON_DRIVER_SKIPPED" });
 });
 
 function codexLunaFixtureGenerationPrompt() {

@@ -114,21 +114,6 @@
       "platforms": ["windows", "macos", "linux"]
     },
     {
-      "id": "real.codex-luna-methods",
-      "kind": "capability",
-      "depends_on": ["deterministic.full"],
-      "gates": ["real.codex-luna.methods"],
-      "identity_set": "real-codex-luna-methods",
-      "timeout_seconds": 8550,
-      "progress_class": "real",
-      "admission_blocker": {
-        "code": "EVIDENCE_V2_REAL_DIAGNOSIS_ADAPTER_UNMIGRATED",
-        "detail": "该阶段仍执行旧版 Methods V1 直接定位合同，无法生成 Evidence V2 模型认证。"
-      },
-      "reuse": {"dev": "identity", "release": "never"},
-      "platforms": ["windows", "macos", "linux"]
-    },
-    {
       "id": "real.macos-codex-luna-methods",
       "kind": "capability",
       "depends_on": [],
@@ -137,22 +122,18 @@
       "timeout_seconds": 1800,
       "progress_class": "real",
       "reuse": {"dev": "identity", "release": "never"},
-      "platforms": ["macos"]
+      "platforms": ["macos", "linux"]
     },
     {
       "id": "real.macos-codex-luna-e2e",
       "kind": "capability",
-      "depends_on": ["deterministic.full"],
-      "gates": ["real.macos-codex-luna-e2e"],
+      "depends_on": ["deterministic.full", "real.skill-generation"],
+      "gates": ["quick.codex-luna.contracts", "quick.codex-luna.model-cert-driver", "real.macos-codex-luna-e2e"],
       "identity_set": "macos-codex-luna-e2e",
-      "timeout_seconds": 1800,
+      "timeout_seconds": 2700,
       "progress_class": "real",
-      "admission_blocker": {
-        "code": "EVIDENCE_V2_REAL_DIAGNOSIS_ADAPTER_UNMIGRATED",
-        "detail": "该 provider E2E 阶段仍消费旧版 Methods V1 定位、grounding、Candidate 和 artifact 产物。"
-      },
       "reuse": {"dev": "never", "release": "never"},
-      "platforms": ["macos"]
+      "platforms": ["macos", "linux"]
     },
     {
       "id": "real.macos-claude-deepseek-methods",
@@ -163,22 +144,29 @@
       "timeout_seconds": 1800,
       "progress_class": "real",
       "reuse": {"dev": "identity", "release": "never"},
-      "platforms": ["macos"]
+      "platforms": ["macos", "linux"]
     },
     {
       "id": "real.macos-claude-deepseek-e2e",
       "kind": "capability",
-      "depends_on": ["deterministic.full"],
+      "depends_on": ["deterministic.full", "real.skill-generation"],
       "gates": ["quick.claude-deepseek-e2e.contracts", "real.macos-claude-deepseek-e2e"],
       "identity_set": "macos-claude-deepseek-e2e",
-      "timeout_seconds": 1800,
+      "timeout_seconds": 2700,
       "progress_class": "real",
-      "admission_blocker": {
-        "code": "EVIDENCE_V2_REAL_DIAGNOSIS_ADAPTER_UNMIGRATED",
-        "detail": "该 provider E2E 阶段仍消费旧版 Methods V1 定位、grounding、Candidate 和 result.zip 产物。"
-      },
       "reuse": {"dev": "never", "release": "never"},
-      "platforms": ["macos"]
+      "platforms": ["macos", "linux"]
+    },
+    {
+      "id": "evidence-v2.release-verdict",
+      "kind": "capability",
+      "depends_on": ["real.macos-claude-deepseek-e2e", "real.macos-codex-luna-e2e"],
+      "gates": ["evidence-v2.release-verdict"],
+      "identity_set": "evidence-v2-certification",
+      "timeout_seconds": 120,
+      "progress_class": "local",
+      "reuse": {"dev": "never", "release": "never"},
+      "platforms": ["macos", "linux"]
     },
     {
       "id": "real.route",
@@ -245,10 +233,6 @@
       "identity_set": "cross-job-diagnose",
       "timeout_seconds": 1200,
       "progress_class": "real",
-      "admission_blocker": {
-        "code": "EVIDENCE_V2_REAL_DIAGNOSIS_ADAPTER_UNMIGRATED",
-        "detail": "CrossJob 定位阶段仍校验 Methods V1 grounding、Candidate、部分解决和公共 artifact 合同。"
-      },
       "reuse": {"dev": "checkpoint-chain", "release": "never"},
       "checkpoint": null,
       "platforms": ["windows", "macos", "linux"]

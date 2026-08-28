@@ -59,11 +59,10 @@
       "real_caps": {
         "isolated": {"max_turns": 12, "max_total_tokens": 1000000, "max_budget_usd": 3, "hard_timeout_seconds": 900},
         "isolated.skill-generation": {"max_turns": 16, "max_total_tokens": 1000000, "max_output_tokens": 64000, "max_budget_usd": 10, "hard_timeout_seconds": 1800},
-        "codex.methods": {"max_turns": 1, "max_total_tokens": 5000000, "max_budget_usd": 10, "hard_timeout_seconds": 7200},
         "codex.macos-methods": {"max_turns": 1, "max_total_tokens": 1000000, "max_budget_usd": 2, "hard_timeout_seconds": 1800},
-        "codex.macos-e2e": {"max_turns": 5, "max_total_tokens": 2000000, "max_budget_usd": 3, "hard_timeout_seconds": 1800},
+        "codex.macos-e2e": {"max_turns": 5, "max_total_tokens": 2000000, "max_budget_usd": 3, "hard_timeout_seconds": 600},
         "claude.macos-methods": {"max_turns": 16, "max_total_tokens": 1000000, "max_output_tokens": 64000, "max_budget_usd": 10, "hard_timeout_seconds": 1800},
-        "claude.macos-e2e": {"max_turns": 50, "max_total_tokens": 2000000, "max_output_tokens": 64000, "max_budget_usd": 3, "hard_timeout_seconds": 1800},
+        "claude.macos-e2e": {"max_turns": 50, "max_total_tokens": 2000000, "max_output_tokens": 64000, "max_budget_usd": 4, "hard_timeout_seconds": 600},
         "service_agent": {"max_turns": 50, "max_total_tokens": 2000000, "max_budget_usd": 3, "hard_timeout_seconds": 600},
         "journey.route": {"max_turns": 50, "max_total_tokens": 400000, "max_budget_usd": 3, "hard_timeout_seconds": 1200},
         "journey.diagnose": {"max_turns": 50, "max_total_tokens": 600000, "max_budget_usd": 5, "hard_timeout_seconds": 1200},

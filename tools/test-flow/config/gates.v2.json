@@ -154,24 +154,6 @@
       "required_claims": ["linux-runtime", "installed-distribution", "native-startup", "process-tree-cleanup"],
       "evidence": ["server-linux-capability-result.json", "server-runtime-identity.json", "platform-server.xml"]
     },
-    "real.codex-luna.methods": {
-      "kind": "capability-adapter",
-      "adapter": "codex-luna-methods",
-      "runtime_profile": "release",
-      "evidence": [
-        "codex-luna-preprocessing.json",
-        "codex-luna-logparse-runtime.json",
-        "codex-luna-stage-inputs.json",
-        "codex-luna-call-manifest.json",
-        "codex-luna-consumer-audit.json",
-        "codex-luna-result.json",
-        "codex-luna-identity.json",
-        "codex-luna-invocations.json",
-        "codex-luna-usage.json",
-        "codex-luna-security-audit.json",
-        "codex-luna-skill.json"
-      ]
-    },
     "real.macos-codex-luna-methods": {
       "kind": "capability-adapter",
       "adapter": "macos-codex-luna-methods",
@@ -184,7 +166,15 @@
       "runtime_profile": "release",
       "result_receipt": "evidence-v2-model-cert",
       "certification_target": "P2",
-      "evidence": ["scenario-input.json", "scenario-oracle.json", "methods-package.json", "codex-identity.json", "model-invocations.json", "model-usage.json", "client-events.jsonl", "mcp-tool-calls.json", "attachment.json", "server-events.ndjson", "final-case.json", "artifact-index.json", "http-boundary-audit.json", "security-audit.json", "adapter-receipt.json", "model-cert-input.json", "model-cert.json"]
+      "evidence": ["runtime-receipt.json", "methods-package.json", "codex-identity.json", "model-invocations.json", "model-usage.json", "methods-source-job.json", "methods-reviewer-job.json", "methods-evidence-graph-v2.json", "methods-evaluation-plan-v2.json", "methods-limitations-v2.json", "methods-source-state-v2.json", "methods-source-outcome-v2.json", "methods-terminal-state-v2.json", "methods-reviewer-outcome-v2.json", "methods-result-v2.json", "methods.json", "scenario-oracle-receipt.json", "model-cert-input.json", "model-cert.json", "adapter-receipt.json"]
+    },
+    "quick.codex-luna.model-cert-driver": {
+      "kind": "pytest",
+      "selectors": ["tools/test-flow/quick-validation/codex-luna/tests/test_macos_codex_luna_model_cert_driver.py"],
+      "min_passed": 1,
+      "skip_policy": "forbid",
+      "runtime_profile": "python-test",
+      "evidence": ["pytest.xml", "pytest-summary.json"]
     },
     "quick.codex-luna.contracts": {
       "kind": "node-test",
@@ -202,6 +192,7 @@
       "kind": "node-test",
       "test_files": ["tools/test-flow/quick-validation/claude-deepseek/tests/claude-deepseek-contract.test.mjs", "tools/test-flow/quick-validation/claude-deepseek/tests/claude-deepseek-process.test.mjs", "tools/test-flow/quick-validation/claude-deepseek/tests/claude-deepseek-bash-policy.test.mjs", "tools/test-flow/quick-validation/claude-deepseek/tests/claude-deepseek-service-wrapper.test.mjs", "tools/test-flow/quick-validation/claude-deepseek/tests/claude-deepseek-e2e-runner.test.mjs"],
       "min_passed": 1,
+      "python_driver": true,
       "evidence": ["node-test.tap"]
     },
     "real.macos-claude-deepseek-methods": {
@@ -216,7 +207,13 @@
       "runtime_profile": "release",
       "result_receipt": "evidence-v2-model-cert",
       "certification_target": "P1",
-      "evidence": ["scenario-input.json", "scenario-oracle.json", "methods-package.json", "claude-identity.json", "model-invocations.json", "model-usage.json", "client-events.jsonl", "client-skill.json", "mcp-tool-calls.json", "attachment.json", "server-events.ndjson", "server-lifecycle.json", "server-sealed-diagnosis.json", "final-case.json", "artifact-index.json", "artifact-download.json", "specialized-runtime.json", "logparse-config.json", "http-boundary-audit.json", "security-audit.json", "adapter-receipt.json", "model-cert-input.json", "model-cert.json"]
+      "evidence": ["runtime-receipt.json", "methods-package.json", "claude-identity.json", "model-invocations.json", "model-usage.json", "methods-source-job.json", "methods-reviewer-job.json", "methods-evidence-graph-v2.json", "methods-evaluation-plan-v2.json", "methods-limitations-v2.json", "methods-source-state-v2.json", "methods-source-outcome-v2.json", "methods-terminal-state-v2.json", "methods-reviewer-outcome-v2.json", "methods-result-v2.json", "methods.json", "scenario-oracle-receipt.json", "model-cert-input.json", "model-cert.json", "adapter-receipt.json"]
+    },
+    "evidence-v2.release-verdict": {
+      "kind": "capability-adapter",
+      "adapter": "evidence-v2-release-verdict",
+      "runtime_profile": "release",
+      "evidence": ["release-verdict.json"]
     },
     "real.logparse": {
       "kind": "pytest",

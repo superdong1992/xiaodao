@@ -837,6 +837,31 @@ function generatedSkillBoundary(context) {
   return { ...receipt, generation_receipt_sha256: sha256File(receiptPath) };
 }
 
+function generatedProductionRegistrationRoot(context) {
+  const generated = generatedSkillBoundary(context);
+  const root = path.join(
+    context.attemptRoot,
+    "payload", "stages", "real.skill-generation", "gates", "real.agent.skill-generation",
+    "generated-skill", generated.registration_id,
+  );
+  const metadata = fs.statSync(root);
+  if (!metadata.isDirectory()) throw new Error("EVIDENCE_V2_SHARED_REGISTRATION_MISSING");
+  for (const name of ["registration-template.json", "package"]) {
+    if (!fs.existsSync(path.join(root, name))) throw new Error("EVIDENCE_V2_SHARED_REGISTRATION_INVALID");
+  }
+  return root;
+}
+
+export function evidenceV2ProviderRuntimeInputs(context) {
+  return Object.freeze({
+    scenario: "multiple-rpc-timeouts",
+    sourceRoot: context.sourceSnapshotRoot,
+    sourceSnapshotDigest: context.sourceSnapshotDigest,
+    coreVerdictPath: path.join(context.attemptRoot, ...EVIDENCE_V2_CORE_VERDICT_PATH.split("/")),
+    registrationRoot: generatedProductionRegistrationRoot(context),
+  });
+}
+
 function uniqueStrings(value, code) {
   if (!Array.isArray(value)
     || value.some((item) => typeof item !== "string" || item.length === 0)
@@ -1150,6 +1175,49 @@ function attachEvidenceV2ModelCert(result, {
   }
 }
 
+function evidenceV2ReleaseVerdict(context) {
+  const coreVerdictPath = path.join(context.attemptRoot, ...EVIDENCE_V2_CORE_VERDICT_PATH.split("/"));
+  const certPath = (stageId) => path.join(
+    context.attemptRoot,
+    "payload", "stages", stageId, "gates", stageId,
+    EVIDENCE_V2_MODEL_CERT_FILENAME,
+  );
+  try {
+    const verdict = materializeEvidenceV2ReleaseVerdict({
+      sourceSnapshotDigest: context.sourceSnapshotDigest,
+      sourceSnapshotRoot: context.sourceSnapshotRoot,
+      artifactRoot: context.attemptRoot,
+      coreVerdictPath,
+      p1ModelCertPath: certPath("real.macos-claude-deepseek-e2e"),
+      p2ModelCertPath: certPath("real.macos-codex-luna-e2e"),
+      outputRoot: context.gateRoot,
+    });
+    return {
+      status: "PASS",
+      failure_domain: null,
+      code: null,
+      elapsed_seconds: 0,
+      invocations: [],
+      usage_complete: true,
+      adapter_receipt: {
+        schema_version: verdict.schema_version,
+        receipt_type: verdict.receipt_type,
+        source_snapshot_digest: verdict.source_snapshot_digest,
+        model_cert_targets: verdict.model_certs.map((cert) => cert.certification_target),
+      },
+    };
+  } catch (error) {
+    return {
+      status: "ERROR",
+      failure_domain: "HARNESS",
+      code: error?.code ?? "EVIDENCE_V2_RELEASE_VERDICT_INVALID",
+      elapsed_seconds: 0,
+      invocations: [],
+      usage_complete: true,
+    };
+  }
+}
+
 export function evaluatePytestSummary(summary, { minPassed = 1, skipPolicy = "forbid-all-skipped" } = {}) {
   if (summary.executed === 0) return { status: "FAIL", failure_domain: "CONTRACT", code: "PYTEST_NO_EXECUTED_TESTS" };
   if (summary.passed < minPassed) return { status: "FAIL", failure_domain: "CONTRACT", code: "PYTEST_MIN_PASSED_NOT_MET" };
@@ -1382,9 +1450,27 @@ function parseTapSummary(filePath) {
   return { schema_version: 2, tests, passed, failed, skipped };
 }
 
+export function evaluateNodeTestSummary(summary, gate) {
+  if (summary.passed < gate.min_passed || summary.failed > 0) {
+    return { status: "FAIL", failure_domain: "HARNESS", code: "NODE_TEST_MIN_PASSED_NOT_MET" };
+  }
+  if (gate.python_driver === true && summary.skipped > 0) {
+    return { status: "FAIL", failure_domain: "HARNESS", code: "NODE_TEST_PYTHON_DRIVER_SKIPPED" };
+  }
+  return { status: "PASS", failure_domain: null, code: null };
+}
+
 async function nodeTestAction(context, stage, gate) {
   const files = nodeTestFiles(context.repoRoot, gate);
   if (files.length === 0) return { status: "ERROR", failure_domain: "HARNESS", code: "NODE_TEST_SELECTION_EMPTY", elapsed_seconds: 0 };
+  let environment = {};
+  if (gate.python_driver === true) {
+    const runtime = pythonRuntime(context.repoRoot);
+    if (runtime === null || runtime.interpreterPrefix.length !== 0) {
+      return { status: "BLOCKED", failure_domain: "INFRA", code: "NODE_TEST_PYTHON_DRIVER_MISSING", elapsed_seconds: 0 };
+    }
+    environment = { TEST_FLOW_QUICK_PYTHON: runtime.command };
+  }
   const result = await runProcess({
     repoRoot: context.repoRoot,
     attemptRoot: context.attemptRoot,
@@ -1392,6 +1478,7 @@ async function nodeTestAction(context, stage, gate) {
     command: process.execPath,
     args: ["--test", "--test-reporter=tap", ...files],
     cwd: context.repoRoot,
+    env: environment,
     hardTimeoutSeconds: stage.timeout_seconds,
     noProgressSeconds: null,
     rawLogLimitBytes: context.policies.raw_log_file_limit_bytes,
@@ -1408,8 +1495,8 @@ async function nodeTestAction(context, stage, gate) {
   try { summary = parseTapSummary(tapPath); } catch (error) {
     return { ...result, status: "ERROR", failure_domain: "HARNESS", code: error.message };
   }
-  if (summary.passed < gate.min_passed || summary.failed > 0) return { ...result, status: "FAIL", failure_domain: "HARNESS", code: "NODE_TEST_MIN_PASSED_NOT_MET", node_test: summary };
-  return { ...result, failure_domain: null, node_test: summary };
+  const evaluation = evaluateNodeTestSummary(summary, gate);
+  return { ...result, ...evaluation, node_test: summary };
 }
 
 async function repositoryCheck(context, stage, gate) {
@@ -3049,11 +3136,12 @@ function materializeMacosCodexInputs({ scratchRoot, codexEntry, codexAuth, plann
 }
 
 function macosCodexInvocationProjection(invocation, hardCaps, invocationClass) {
+  const workflow = `${invocation.role}:${invocation.attempt}`;
   return {
     schema_version: 3,
     invocation_id: invocation.invocation_id,
     class: invocationClass,
-    workflow: invocation.phase,
+    workflow,
     effective_model: invocation.model,
     effective_reasoning_effort: invocation.reasoning_effort,
     effective_caps: hardCaps,
@@ -3077,6 +3165,7 @@ async function runMacosCodexLunaGate(context, stage, { workflow }) {
   ensureDirectory(scratchRoot);
   let staged;
   let pythonEntry;
+  let providerInputs = null;
   try {
     staged = materializeMacosCodexInputs({
       scratchRoot,
@@ -3085,6 +3174,7 @@ async function runMacosCodexLunaGate(context, stage, { workflow }) {
       planned: context.plan.release_inputs?.codex,
     });
     pythonEntry = macosCodexPythonEntry(context.repoRoot);
+    if (workflow === "e2e") providerInputs = evidenceV2ProviderRuntimeInputs(context);
   } catch (error) {
     return { status: "BLOCKED", failure_domain: "INFRA", code: String(error?.message ?? "MACOS_CODEX_LUNA_INPUT_INVALID"), elapsed_seconds: 0 };
   }
@@ -3094,18 +3184,18 @@ async function runMacosCodexLunaGate(context, stage, { workflow }) {
     "--codex-entry", staged.stagedEntry,
     "--auth-source", staged.stagedAuth,
     "--python-entry", pythonEntry,
-    "--cache-root", context.options.cacheRoot ?? path.join(context.repoRoot, ".tmp", "test-flow-cache"),
     "--work-root", path.join(scratchRoot, "work"),
     "--private-root", path.join(scratchRoot, "private"),
     "--evidence-root", outputRoot,
     "--usage-root", usageRoot,
     "--run-id", path.basename(context.attemptRoot),
-    "--allow-posthoc-budget",
   ];
   const args = workflow === "methods"
     ? [
       runner,
       ...common,
+      "--cache-root", context.options.cacheRoot ?? path.join(context.repoRoot, ".tmp", "test-flow-cache"),
+      "--allow-posthoc-budget",
       "--meta-skill-root", path.join(context.sourceSnapshotRoot, ".agents", "skills", "wiki-to-diagnosis-skill"),
       "--wiki", releaseWikiPath(context.sourceSnapshotRoot),
       "--registration-template", path.join(context.sourceSnapshotRoot, "tests", "cases", "release", "rpc-timeout-anonymized", "registration", "rpc-timeout-methods-v1", "registration-template.json"),
@@ -3114,11 +3204,11 @@ async function runMacosCodexLunaGate(context, stage, { workflow }) {
     : [
       runner,
       ...common,
-      "--source-root", context.sourceSnapshotRoot,
-      "--logparse-root", context.options.logparseSource,
-      "--scenario", context.options.scenario ?? "api-execution-overrun",
-      "--client-skill", path.join(context.sourceSnapshotRoot, "tools", "test-flow", "quick-validation", "codex-luna", "fixtures", "client-skill", "problem-locator-client", "SKILL.md"),
-      "--service-skill", path.join(context.sourceSnapshotRoot, "tools", "test-flow", "quick-validation", "codex-luna", "fixtures", "service-skill", "problem-locator-service-agent", "SKILL.md"),
+      "--source-root", providerInputs.sourceRoot,
+      "--registration-root", providerInputs.registrationRoot,
+      "--source-snapshot-digest", providerInputs.sourceSnapshotDigest,
+      "--core-verdict", providerInputs.coreVerdictPath,
+      "--scenario", providerInputs.scenario,
     ];
   const result = await runProcess({
     repoRoot: context.repoRoot,
@@ -3144,8 +3234,10 @@ async function runMacosCodexLunaGate(context, stage, { workflow }) {
   } catch {
     return { ...result, status: "ERROR", failure_domain: "HARNESS", code: "MACOS_CODEX_LUNA_GATE_RECEIPT_INVALID" };
   }
-  const expectedCalls = context.planStage.invocation_caps.reduce((sum, declaration) => sum + declaration.max_count, 0);
-  if (gate.status !== "PASS" || invocationLedger.status !== "PASS" || invocationLedger.invocations?.length !== expectedCalls) {
+  const ledgerValid = workflow === "methods"
+    ? invocationLedger.status === "PASS" && invocationLedger.invocations?.length === context.planStage.invocation_caps.reduce((sum, declaration) => sum + declaration.max_count, 0)
+    : validEvidenceV2ProviderInvocationLedger(context.planStage, invocationLedger);
+  if (gate.status !== "PASS" || !ledgerValid) {
     return { ...result, status: "ERROR", failure_domain: "HARNESS", code: "MACOS_CODEX_LUNA_GATE_RECEIPT_INVALID" };
   }
   const invocationClass = workflow === "methods" ? "codex-luna-methods-bootstrap" : "codex-luna-macos-e2e";
@@ -3163,11 +3255,12 @@ async function runMacosCodexLunaGate(context, stage, { workflow }) {
 }
 
 function claudeDeepseekInvocationProjection(invocation, hardCaps, invocationClass) {
+  const attempt = invocation.evaluation_attempt ?? invocation.attempt;
   return {
     schema_version: 3,
     invocation_id: invocation.invocation_id,
     class: invocationClass,
-    workflow: invocation.phase,
+    workflow: `${invocation.role}:${attempt}`,
     effective_model: invocation.model,
     effective_caps: hardCaps,
     usage_complete: invocation.terminal === true,
@@ -3189,10 +3282,36 @@ function claudeDeepseekInvocationProjection(invocation, hardCaps, invocationClas
 
 export function validClaudeDeepseekInvocationLedger(planStage, ledger) {
   if (!Array.isArray(planStage?.invocation_caps) || ledger?.status !== "PASS" || !Array.isArray(ledger.invocations)) return false;
-  if (!planStage.invocation_caps.every((declaration) => Array.isArray(declaration.phases) && declaration.min_count === declaration.phases.length && declaration.max_count === declaration.phases.length)) return false;
-  const phases = planStage.invocation_caps.flatMap((declaration) => Array.isArray(declaration.phases) ? declaration.phases : []);
-  return ledger.invocations.length === phases.length
-    && ledger.invocations.every((invocation, index) => invocation?.status === "PASS" && invocation?.terminal === true && invocation.phase === phases[index]);
+  if (planStage.invocation_caps.length !== 1) return false;
+  const declaration = planStage.invocation_caps[0];
+  if (!Array.isArray(declaration.phases)) return false;
+  if (declaration.class === "claude-deepseek-registration-generation") {
+    return declaration.min_count === declaration.phases.length
+      && declaration.max_count === declaration.phases.length
+      && ledger.invocations.length === declaration.phases.length
+      && ledger.invocations.every((invocation, index) => invocation?.status === "PASS" && invocation?.terminal === true && invocation.phase === declaration.phases[index]);
+  }
+  return validEvidenceV2ProviderInvocationLedger(planStage, ledger);
+}
+
+export function validEvidenceV2ProviderInvocationLedger(planStage, ledger) {
+  if (!Array.isArray(planStage?.invocation_caps) || planStage.invocation_caps.length !== 1 || ledger?.status !== "PASS" || !Array.isArray(ledger.invocations)) return false;
+  const declaration = planStage.invocation_caps[0];
+  if (declaration.min_count !== 2 || declaration.max_count !== 4 || declaration.normal_count !== 2 || declaration.repair_max_count !== 2) return false;
+  if (ledger.invocations.length < declaration.min_count || ledger.invocations.length > declaration.max_count) return false;
+  const topology = ledger.invocations.map((invocation) => {
+    const attempt = invocation?.evaluation_attempt ?? invocation?.attempt;
+    return `${invocation?.role}:${attempt}`;
+  }).join(",");
+  const legal = new Set([
+    "SPECIALIST:PRIMARY,REVIEWER:PRIMARY",
+    "SPECIALIST:PRIMARY,SPECIALIST:REPAIR,REVIEWER:PRIMARY",
+    "SPECIALIST:PRIMARY,REVIEWER:PRIMARY,REVIEWER:REPAIR",
+    "SPECIALIST:PRIMARY,SPECIALIST:REPAIR,REVIEWER:PRIMARY,REVIEWER:REPAIR",
+  ]);
+  return legal.has(topology)
+    && new Set(ledger.invocations.map((invocation) => invocation?.invocation_id)).size === ledger.invocations.length
+    && ledger.invocations.every((invocation) => typeof invocation?.invocation_id === "string" && invocation.invocation_id.length > 0 && invocation?.status === "PASS" && invocation?.terminal === true);
 }
 
 async function runMacosClaudeDeepseekGate(context, stage, { workflow }) {
@@ -3200,7 +3319,11 @@ async function runMacosClaudeDeepseekGate(context, stage, { workflow }) {
   const scratchRoot = quickValidationScratchRoot(context, workflow === "methods" ? "macos-claude-deepseek-methods" : "macos-claude-deepseek-e2e");
   ensureDirectory(scratchRoot);
   let pythonEntry;
-  try { pythonEntry = macosCodexPythonEntry(context.repoRoot); }
+  let providerInputs = null;
+  try {
+    pythonEntry = macosCodexPythonEntry(context.repoRoot);
+    if (workflow === "e2e") providerInputs = evidenceV2ProviderRuntimeInputs(context);
+  }
   catch (error) { return { status: "BLOCKED", failure_domain: "INFRA", code: String(error?.message ?? "CLAUDE_DEEPSEEK_PYTHON_RUNTIME_MISSING"), elapsed_seconds: 0 }; }
   const usageRoot = path.join(context.attemptRoot, "payload", "model-usage", workflow === "methods" ? "macos-claude-deepseek-methods" : "macos-claude-deepseek-e2e");
   const runner = path.join(context.sourceSnapshotRoot, "tools", "test-flow", "quick-validation", "claude-deepseek", "runtime", workflow === "methods" ? "claude-deepseek-methods-runner.mjs" : "claude-deepseek-e2e-runner.mjs");
@@ -3227,9 +3350,11 @@ async function runMacosClaudeDeepseekGate(context, stage, { workflow }) {
     ...(context.planStage.invocation_caps.length === 0 ? ["--verify-cache-only"] : []),
   ] : [
     ...common,
-    "--runtime-root", context.repoRoot,
-    "--logparse-root", context.options.logparseSource,
-    "--scenario", context.options.scenario ?? "api-execution-overrun",
+    "--runtime-root", providerInputs.sourceRoot,
+    "--registration-root", providerInputs.registrationRoot,
+    "--source-snapshot-digest", providerInputs.sourceSnapshotDigest,
+    "--core-verdict", providerInputs.coreVerdictPath,
+    "--scenario", providerInputs.scenario,
   ];
   const result = await runProcess({
     repoRoot: context.repoRoot,
@@ -3623,7 +3748,6 @@ export async function executeGate(context, stage, gateId, gate) {
   if (gate.kind === "capability-adapter") {
     if (gate.adapter === "host-capability") return hostCapability(scoped, stage);
     if (gate.adapter === "server-linux-capability") return serverLinuxCapability(scoped, stage, gate);
-    if (gate.adapter === "codex-luna-methods") return codexLunaMethods(scoped, stage);
     if (gate.adapter === "macos-codex-luna-methods") return runMacosCodexLunaGate(scoped, stage, { workflow: "methods" });
     if (gate.adapter === "macos-codex-luna-e2e") {
       const result = await runMacosCodexLunaGate(scoped, stage, { workflow: "e2e" });
@@ -3634,6 +3758,7 @@ export async function executeGate(context, stage, gateId, gate) {
       const result = await runMacosClaudeDeepseekGate(scoped, stage, { workflow: "e2e" });
       return attachEvidenceV2ModelCert(result, { context, gate, gateRoot: root });
     }
+    if (gate.adapter === "evidence-v2-release-verdict") return evidenceV2ReleaseVerdict(scoped);
   }
   if (gate.kind === "cross-job-adapter") return crossJob(scoped, stage);
   if (gate.kind === "observation" && gate.observation === "review-state-transition") return reviewObservation(scoped);
