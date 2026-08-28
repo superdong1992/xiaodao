@@ -16,6 +16,7 @@ import {
   CLAUDE_DEEPSEEK_METHODS_USD_LIMIT,
   CLAUDE_DEEPSEEK_MODEL,
   CLAUDE_DEEPSEEK_NO_PROGRESS_SECONDS,
+  CLAUDE_DEEPSEEK_REGISTRATION_ID,
   assertRegistrationUnchanged,
   buildRegistrationProducerIdentity,
   registrationCachePath,
@@ -117,18 +118,19 @@ export function buildPlan(options) {
   const wiki = path.join(caseRoot, "input", "wiki.md");
   let identity = null;
   let producer = null;
-  let cache = { status: "UNKNOWN", code: null, path: null, registration_tree_sha256: null, runtime_ref: null };
+  let cache = { status: "UNKNOWN", code: null, path: null, registration_root: null, registration_tree_sha256: null, runtime_ref: null };
   if (blockers.length === 0) {
     try {
       identity = validateClaudeDeepseekIdentity(options.claudeEntry, options.claudeSettings);
       producer = buildRegistrationProducerIdentity({ wiki, metaSkillRoot, claudeIdentity: identity, module: CLAUDE_DEEPSEEK_MODULE });
       const cachePath = registrationCachePath(options.cacheRoot, producer.producer_identity);
+      const registrationRoot = path.join(cachePath, "registration", CLAUDE_DEEPSEEK_REGISTRATION_ID);
       try {
         const receipt = validateRegistrationCache({ cacheRoot: options.cacheRoot, producer });
         assertRegistrationUnchanged(receipt);
-        cache = { status: "PRESENT", code: null, path: cachePath, registration_tree_sha256: receipt.manifest.registration.tree_sha256, runtime_ref: receipt.manifest.registration.runtime_ref };
+        cache = { status: "PRESENT", code: null, path: cachePath, registration_root: receipt.registration_root, registration_tree_sha256: receipt.manifest.registration.tree_sha256, runtime_ref: receipt.manifest.registration.runtime_ref };
       } catch (error) {
-        cache = { status: fs.existsSync(cachePath) ? "INVALID" : "MISSING", code: error?.code ?? "CLAUDE_DEEPSEEK_CACHE_INVALID", path: cachePath, registration_tree_sha256: null, runtime_ref: null };
+        cache = { status: fs.existsSync(cachePath) ? "INVALID" : "MISSING", code: error?.code ?? "CLAUDE_DEEPSEEK_CACHE_INVALID", path: cachePath, registration_root: registrationRoot, registration_tree_sha256: null, runtime_ref: null };
       }
     } catch (error) { blockers.push({ code: error?.code ?? "CLAUDE_DEEPSEEK_IDENTITY_INVALID", detail: error?.message ?? "Claude identity is invalid" }); }
   }

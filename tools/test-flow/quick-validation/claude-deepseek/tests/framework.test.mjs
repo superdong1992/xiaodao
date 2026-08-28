@@ -39,6 +39,8 @@ test("Claude model-cert plan freezes normal two calls, one repair per role, and 
   assert.equal(plan.execution.per_scenario[0].model_process_hard_cap, 4);
   assert.equal(plan.execution.source_snapshot, true);
   assert.match(plan.inputs.provider_runtime.tree_sha256, /^[0-9a-f]{64}$/u);
+  assert.equal(Object.hasOwn(plan.inputs.registration_cache, "path"), true);
+  assert.equal(Object.hasOwn(plan.inputs.registration_cache, "registration_root"), true);
   assert.ok(plan.admission.blockers.some((item) => item.code === "CLAUDE_DEEPSEEK_SOURCE_SNAPSHOT_REQUIRED"));
   assert.ok(plan.admission.blockers.some((item) => item.code === "CLAUDE_DEEPSEEK_CORE_VERDICT_REQUIRED"));
   assert.equal(plan.admission.blockers.some((item) => item.code === "EVIDENCE_V2_REAL_DIAGNOSIS_ADAPTER_UNMIGRATED"), false);

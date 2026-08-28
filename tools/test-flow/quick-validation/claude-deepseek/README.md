@@ -14,7 +14,10 @@
   --plan-only
 ```
 
-该 Goal 只生成并校验完整 production registration cache，不执行诊断。
+该 Goal 只生成并校验完整 production registration cache，不执行诊断。计划中的
+`inputs.registration_cache.path` 是 producer cache 目录，`inputs.registration_cache.registration_root`
+是当前校验通过的完整 registration 根。P2 必须使用这里列出的同一个 `registration_root`，不能另行生成
+或改写 package。
 
 ## Evidence V2 P1 model cert
 
@@ -58,6 +61,12 @@ Gate 写出 `model-cert-input.json`。中央 Test Flow 用共享 validator 生�
 - DeepSeek provider/model/settings revision；
 - Runtime、prompt/profile/tool policy identity；
 - 每次角色调用、repair、四项 token usage 和费用；
+- 固定场景的原始 Wiki、validated registration、生产 Skill content hash，以及 driver 原始初始输入；
+- 生产 Graph 的有序 sources 和 Graph/Plan canonical bytes identity；
 - 最终公开 `methods_result` 的 canonical identity。
+
+场景身份直接取生产 Runtime 生成的 Graph/Plan，并强制它们的 Skill hash 与当前
+`source_job.skill_ref.content_hash` 相同。`methods_result` 必须引用同一 Graph/Plan；测试侧不会重新匹配
+日志 marker，也不会用 registration tree digest 冒充 Skill content hash。
 
 Standalone verdict 只证明这条 P1 快速认证路径，不能替代 `release.full`。

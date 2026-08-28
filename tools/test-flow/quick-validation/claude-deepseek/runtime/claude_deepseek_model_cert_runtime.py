@@ -17,6 +17,9 @@ _REPOSITORY_ROOT = Path(__file__).resolve().parents[5]
 sys.path.insert(0, str(_REPOSITORY_ROOT / "src"))
 sys.path.insert(0, str(_REPOSITORY_ROOT))
 
+_SCENARIO_ID = "multiple-rpc-timeouts"
+_RELEASE_CASE_RELATIVE = Path("tests/cases/release/rpc-timeout-anonymized")
+
 from problem_locator.application.outcome_submission import OutcomeSubmissionService
 from problem_locator.application.queries import ApplicationQueryService
 from problem_locator.contracts import (
@@ -84,6 +87,11 @@ def _fail(code: str, message: str) -> None:
 
 def _sha256(raw: bytes) -> str:
     return hashlib.sha256(raw).hexdigest()
+
+
+def _release_paths(source_root: Path) -> tuple[Path, Path]:
+    case_root = source_root / _RELEASE_CASE_RELATIVE
+    return case_root / "input/wiki.md", case_root / "scenarios" / _SCENARIO_ID
 
 
 def _ordinary_empty_directory(root: Path, label: str) -> Path:
@@ -202,15 +210,17 @@ def _catalog(
     )
 
 
-def _fact_values(source_root: Path, generated_registration: bool) -> tuple[list[dict[str, Any]], dict[str, bytes]]:
+def _fact_values(
+    scenario_root: Path,
+    generated_registration: bool,
+) -> tuple[list[dict[str, Any]], dict[str, bytes]]:
     if generated_registration:
-        scenario = source_root / "tests/cases/release/rpc-timeout-anonymized/scenarios/multiple-rpc-timeouts"
-        driver = json.loads((scenario / "driver.json").read_bytes())
+        driver = json.loads((scenario_root / "driver.json").read_bytes())
         names = driver["initial_user_fact_names"]
         values = driver["initial_user_fact_values"]
         target_contents = {
-            "client": (scenario / "client.log").read_bytes(),
-            "server": (scenario / "server.log").read_bytes(),
+            "client": (scenario_root / "client.log").read_bytes(),
+            "server": (scenario_root / "server.log").read_bytes(),
         }
     else:
         names = [
@@ -259,7 +269,7 @@ def _fact_values(source_root: Path, generated_registration: bool) -> tuple[list[
 
 def _running_job_and_state(
     *,
-    source_root: Path,
+    scenario_root: Path,
     catalog: VersionedAssetCatalog,
     generated_registration: bool,
     publication_guard: InMemoryPublicationCommitGuard,
@@ -271,7 +281,7 @@ def _running_job_and_state(
     ]
     if len(skill_refs) != 1:
         _fail("CLAUDE_DEEPSEEK_SKILL_CARDINALITY_INVALID", "Model-cert requires exactly one specialized registration")
-    facts, target_contents = _fact_values(source_root, generated_registration)
+    facts, target_contents = _fact_values(scenario_root, generated_registration)
     attachment_bytes = b"model-cert deterministic archive descriptor\n"
     attachment_sha256 = _sha256(attachment_bytes)
     attachment_id = "00000000-0000-4000-8000-000000000450"
@@ -426,6 +436,91 @@ def _file_identity(raw: bytes) -> dict[str, Any]:
     return {"size": len(raw), "sha256": _sha256(raw)}
 
 
+def _scenario_identity(
+    *,
+    source_wiki: Path,
+    scenario_root: Path,
+    registration_id: str,
+    source_job: Job,
+    graph: Any,
+    plan: Any,
+) -> dict[str, Any]:
+    try:
+        wiki_bytes = source_wiki.read_bytes()
+        driver = json.loads((scenario_root / "driver.json").read_bytes())
+    except (OSError, TypeError, ValueError) as exc:
+        raise ModelCertRuntimeError(
+            "CLAUDE_DEEPSEEK_SCENARIO_INPUT_INVALID",
+            "The frozen release Wiki or scenario driver is unavailable",
+        ) from exc
+    names = driver.get("initial_user_fact_names")
+    values = driver.get("initial_user_fact_values")
+    if (
+        driver.get("scenario_id") != _SCENARIO_ID
+        or not isinstance(names, list)
+        or not isinstance(values, list)
+        or len(names) != len(values)
+        or not all(isinstance(item, str) for item in [*names, *values])
+    ):
+        _fail(
+            "CLAUDE_DEEPSEEK_SCENARIO_DRIVER_INVALID",
+            "The release scenario driver does not expose its exact initial user inputs",
+        )
+    skill_ref = source_job.skill_ref
+    if skill_ref is None or skill_ref.id != f"diagnosis-skill/{registration_id}":
+        _fail(
+            "CLAUDE_DEEPSEEK_SCENARIO_SKILL_INVALID",
+            "The production Job does not bind the validated registration",
+        )
+    if (
+        graph.skill_sha256 != skill_ref.content_hash
+        or plan.skill_sha256 != skill_ref.content_hash
+        or plan.evidence_graph_ref != graph.graph_ref
+    ):
+        _fail(
+            "CLAUDE_DEEPSEEK_SCENARIO_GRAPH_PLAN_SKILL_MISMATCH",
+            "The production Graph, Plan, and registered Skill identities differ",
+        )
+    graph_bytes = canonical_json_bytes(graph)
+    plan_bytes = canonical_json_bytes(plan)
+    user_inputs_bytes = canonical_json_bytes(
+        {
+            "initial_user_fact_names": names,
+            "initial_user_fact_values": values,
+        }
+    )
+    sources = [
+        {
+            "source_id": item.source_id,
+            "content_sha256": item.content_sha256,
+        }
+        for item in graph.sources
+    ]
+    if not sources or len({item["source_id"] for item in sources}) != len(sources):
+        _fail(
+            "CLAUDE_DEEPSEEK_SCENARIO_SOURCES_INVALID",
+            "The production Evidence Graph sources are empty or duplicated",
+        )
+    return {
+        "scenario_id": _SCENARIO_ID,
+        "source_wiki_sha256": _sha256(wiki_bytes),
+        "registration_id": registration_id,
+        "skill_content_sha256": skill_ref.content_hash,
+        "user_inputs_sha256": _sha256(user_inputs_bytes),
+        "sources": sources,
+        "evidence_graph": {
+            "ref": graph.graph_ref,
+            "canonical_sha256": _sha256(graph_bytes),
+            "canonical_size": len(graph_bytes),
+        },
+        "evaluation_plan": {
+            "ref": plan.plan_ref,
+            "canonical_sha256": _sha256(plan_bytes),
+            "canonical_size": len(plan_bytes),
+        },
+    }
+
+
 def _prompt_receipts(
     records: InMemoryExecutionRecordStore,
     *,
@@ -478,7 +573,7 @@ def run(options: argparse.Namespace) -> dict[str, Any]:
         broker_factory,
     )
     source_job, aggregate, resources, target_contents = _running_job_and_state(
-        source_root=options.source_root,
+        scenario_root=options.scenario_root,
         catalog=catalog,
         generated_registration=options.registration_root is not None,
         publication_guard=publication_guard,
@@ -584,6 +679,22 @@ def run(options: argparse.Namespace) -> dict[str, Any]:
     reviewer_state = read_method_state_v2(records, job_id=review_job.job_id)
     if graph is None or plan is None or limitations is None or specialist_state is None or reviewer_state is None:
         _fail("CLAUDE_DEEPSEEK_PRODUCTION_RECORD_MISSING", "Production Runtime did not persist Graph, Plan, limitations, or Methods state")
+    scenario = _scenario_identity(
+        source_wiki=options.source_wiki,
+        scenario_root=options.scenario_root,
+        registration_id=registration_id,
+        source_job=source_job,
+        graph=graph,
+        plan=plan,
+    )
+    if (
+        methods_result["evidence_graph_ref"] != scenario["evidence_graph"]["ref"]
+        or methods_result["plan_ref"] != scenario["evaluation_plan"]["ref"]
+    ):
+        _fail(
+            "CLAUDE_DEEPSEEK_SCENARIO_RESULT_MISMATCH",
+            "The final methods_result binds another production Graph or Plan",
+        )
     prompts = _prompt_receipts(
         records,
         specialist_job_id=source_job.job_id,
@@ -612,8 +723,9 @@ def run(options: argparse.Namespace) -> dict[str, Any]:
         "execution_mode": "deterministic-zero-model" if options.mode == "fake" else "real-model",
         "production_runtime": "problem_locator.runtime.diagnosis_runtime.DiagnosisRuntime",
         "runtime_driver": "claude-deepseek-model-cert-v1",
-        "scenario_id": "multiple-rpc-timeouts" if options.registration_root is not None else "deterministic-rpc-timeout",
+        "scenario_id": _SCENARIO_ID,
         "registration_id": registration_id,
+        "scenario": scenario,
         "logparse_mode": "deterministic-fixture",
         "model_invocations": 0 if options.mode == "fake" else len(prompts),
         "role_attempts": prompts,
@@ -656,6 +768,8 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", choices=("fake", "real"), required=True)
     parser.add_argument("--source-root", type=Path, required=True)
+    parser.add_argument("--source-wiki", type=Path)
+    parser.add_argument("--scenario-root", type=Path)
     parser.add_argument("--registration-root", type=Path)
     parser.add_argument("--work-root", type=Path, required=True)
     parser.add_argument("--receipt-path", type=Path, required=True)
@@ -674,6 +788,25 @@ def _parser() -> argparse.ArgumentParser:
 def _validated_options() -> argparse.Namespace:
     options = _parser().parse_args()
     options.source_root = options.source_root.resolve()
+    default_wiki, default_scenario = _release_paths(options.source_root)
+    options.source_wiki = (
+        default_wiki if options.source_wiki is None else options.source_wiki.resolve()
+    )
+    options.scenario_root = (
+        default_scenario
+        if options.scenario_root is None
+        else options.scenario_root.resolve()
+    )
+    if not options.source_wiki.is_file():
+        _fail(
+            "CLAUDE_DEEPSEEK_SCENARIO_WIKI_MISSING",
+            "The frozen release scenario Wiki is unavailable",
+        )
+    if not options.scenario_root.is_dir():
+        _fail(
+            "CLAUDE_DEEPSEEK_SCENARIO_ROOT_MISSING",
+            "The frozen release scenario directory is unavailable",
+        )
     if options.registration_root is not None:
         options.registration_root = options.registration_root.resolve()
     if options.mode == "real":

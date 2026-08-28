@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { materializeClaudeSettings } from "../../../lib/release-inputs.mjs";
 import { canonicalJson, sha256Bytes, sha256File } from "../../../lib/util.mjs";
 import { validateEvidenceV2CoreVerdict } from "../../../../validation/evidence-v2-core.mjs";
+import { validateEvidenceV2ModelCertInputSchema } from "../../../../validation/evidence-v2-certification.mjs";
 import {
   CLAUDE_DEEPSEEK_MODEL,
   assertRegistrationUnchanged,
@@ -84,7 +85,41 @@ export function auditRuntimeAndInvocations(runtimeReceipt, invocations) {
     "CLAUDE_DEEPSEEK_RUNTIME_INVOCATION_IDENTITY_MISMATCH", "Provider call does not bind the exact production role prompt", { ordinal: index + 1 });
   }
   requireCert(runtimeReceipt.model_invocations === invocations.length, "CLAUDE_DEEPSEEK_RUNTIME_MODEL_COUNT_MISMATCH", "Runtime model count differs from provider receipts");
+  requireCert(runtimeReceipt.scenario?.evidence_graph?.ref === runtimeReceipt.methods_result_identity?.evidence_graph_ref
+    && runtimeReceipt.scenario?.evaluation_plan?.ref === runtimeReceipt.methods_result_identity?.plan_ref,
+  "CLAUDE_DEEPSEEK_RUNTIME_SCENARIO_RESULT_MISMATCH", "Runtime scenario identity differs from the final methods_result");
   return { schema_version: 1, status: "PASS", prompt_count: prompts.length, methods_result: runtimeReceipt.methods_result_identity, records: runtimeReceipt.records };
+}
+
+export function auditScenarioIdentity({ sourceWiki, scenarioRoot, producer, cache, runtimeReceipt }) {
+  const scenario = runtimeReceipt?.scenario;
+  const driver = JSON.parse(fs.readFileSync(path.join(scenarioRoot, "driver.json"), "utf8"));
+  const names = driver.initial_user_fact_names;
+  const values = driver.initial_user_fact_values;
+  const sourceIds = driver.attachment_anchor_names;
+  const sourceFiles = driver.attachment_files;
+  requireCert(driver.scenario_id === "multiple-rpc-timeouts"
+    && Array.isArray(names) && Array.isArray(values) && names.length === values.length
+    && Array.isArray(sourceIds) && Array.isArray(sourceFiles) && sourceIds.length > 0 && sourceIds.length === sourceFiles.length,
+  "CLAUDE_DEEPSEEK_SCENARIO_DRIVER_INVALID", "The frozen release scenario driver is invalid");
+  const expectedSources = sourceIds.map((sourceId, index) => ({ source_id: sourceId, content_sha256: sha256File(path.join(scenarioRoot, sourceFiles[index])) }));
+  const expectedUserInputs = sha256Bytes(canonicalJson({ initial_user_fact_names: names, initial_user_fact_values: values }));
+  requireCert(scenario?.scenario_id === "multiple-rpc-timeouts"
+    && scenario.source_wiki_sha256 === sha256File(sourceWiki)
+    && scenario.source_wiki_sha256 === producer.inputs.wiki.sha256
+    && scenario.registration_id === cache.manifest.registration.registration_id
+    && scenario.skill_content_sha256 === cache.manifest.registration.runtime_ref.content_hash
+    && scenario.user_inputs_sha256 === expectedUserInputs
+    && canonicalJson(scenario.sources) === canonicalJson(expectedSources),
+  "CLAUDE_DEEPSEEK_SCENARIO_IDENTITY_MISMATCH", "Runtime scenario differs from the frozen Wiki, registration, driver, or sources");
+  requireCert(scenario.evidence_graph?.ref === runtimeReceipt.methods_result_identity?.evidence_graph_ref
+    && scenario.evidence_graph?.canonical_sha256 === runtimeReceipt.records?.graph?.sha256
+    && scenario.evidence_graph?.canonical_size === runtimeReceipt.records?.graph?.size
+    && scenario.evaluation_plan?.ref === runtimeReceipt.methods_result_identity?.plan_ref
+    && scenario.evaluation_plan?.canonical_sha256 === runtimeReceipt.records?.plan?.sha256
+    && scenario.evaluation_plan?.canonical_size === runtimeReceipt.records?.plan?.size,
+  "CLAUDE_DEEPSEEK_SCENARIO_PRODUCTION_RECORD_MISMATCH", "Scenario Graph or Plan differs from the production execution record");
+  return { schema_version: 1, status: "PASS", scenario };
 }
 
 function executionIdentity({ sourceRoot, identity, invocations }) {
@@ -136,6 +171,7 @@ export function buildModelCertInput({
     source_snapshot_digest: sourceSnapshotDigest,
     contract_manifest: { path: CONTRACT_MANIFEST_PATH, sha256: contractManifestSha256 },
     core_verdict: { path: CORE_VERDICT_RECEIPT_PATH, sha256: coreVerdictSha256 },
+    scenario: runtimeReceipt.scenario,
     provider: { id: "deepseek", transport: "claude-code-compatible-api" },
     model: { id: CLAUDE_DEEPSEEK_MODEL, revision: identity.settings.fingerprint, revision_source: "settings-fingerprint" },
     execution_identity: executionIdentity({ sourceRoot, identity, invocations }),
@@ -191,14 +227,16 @@ function treeBytes(root) {
   return total;
 }
 
-async function runProductionRuntime(options, { ambient, onProgress }) {
+export function productionRuntimeArguments(options) {
   const script = path.join(options.sourceRoot, "tools", "test-flow", "quick-validation", "claude-deepseek", "runtime", "claude_deepseek_model_cert_runtime.py");
-  const receiptPath = path.join(options.evidenceRoot, "runtime-receipt.json");
   const runtimeWork = path.join(options.workRoot, "runtime-chain");
-  const args = [
+  const receiptPath = path.join(options.evidenceRoot, "runtime-receipt.json");
+  return [
     script,
     "--mode", "real",
     "--source-root", options.sourceRoot,
+    "--source-wiki", options.sourceWiki,
+    "--scenario-root", options.scenarioRoot,
     "--registration-root", options.registrationRoot,
     "--work-root", runtimeWork,
     "--receipt-path", receiptPath,
@@ -211,6 +249,11 @@ async function runProductionRuntime(options, { ambient, onProgress }) {
     "--usage-root", options.usageRoot,
     "--run-id", options.runId,
   ];
+}
+
+async function runProductionRuntime(options, { ambient, onProgress }) {
+  const receiptPath = path.join(options.evidenceRoot, "runtime-receipt.json");
+  const args = productionRuntimeArguments(options);
   const child = spawn(options.pythonEntry, args, {
     cwd: options.sourceRoot, env: pythonEnvironment(options.sourceRoot, ambient), stdio: ["ignore", "pipe", "pipe"],
   });
@@ -252,8 +295,10 @@ export async function runE2E(options, { ambient = process.env, onProgress = null
   const contractManifest = path.join(sourceRoot, ...CONTRACT_MANIFEST_PATH.split("/"));
   const identity = validateClaudeDeepseekIdentity(options.claudeEntry, options.claudeSettings);
   const caseRoot = path.join(sourceRoot, "tests", "cases", "release", "rpc-timeout-anonymized");
+  const sourceWiki = path.join(caseRoot, "input", "wiki.md");
+  const scenarioRoot = path.join(caseRoot, "scenarios", "multiple-rpc-timeouts");
   const producer = buildRegistrationProducerIdentity({
-    wiki: path.join(caseRoot, "input", "wiki.md"),
+    wiki: sourceWiki,
     metaSkillRoot: path.join(sourceRoot, ".claude", "skills", "wiki-to-logparse-diagnosis-skill"),
     claudeIdentity: identity,
     module: "rpc",
@@ -275,10 +320,13 @@ export async function runE2E(options, { ambient = process.env, onProgress = null
     stagedSettings,
     configRoot,
     registrationRoot: cache.registration_root,
+    sourceWiki,
+    scenarioRoot,
   }, { ambient, onProgress });
   const invocations = readRoleInvocationReceipts(usageRoot);
   const modelAudit = auditClaudeModelCertInvocations(invocations);
   const runtimeAudit = auditRuntimeAndInvocations(runtimeReceipt, invocations);
+  const scenarioAudit = auditScenarioIdentity({ sourceWiki, scenarioRoot, producer, cache, runtimeReceipt });
   assertRegistrationUnchanged(cache);
   const modelCertInput = buildModelCertInput({
     sourceSnapshotDigest,
@@ -290,6 +338,7 @@ export async function runE2E(options, { ambient = process.env, onProgress = null
     runtimeReceipt,
     sourceRoot,
   });
+  validateEvidenceV2ModelCertInputSchema(modelCertInput, { certificationTarget: "P1" });
   const identityReceipt = { schema_version: 1, status: "PASS", claude: identity, producer, registration: cache.manifest.registration };
   const packageReceipt = { schema_version: 2, status: "PASS", producer_identity: producer.producer_identity, registration_tree_sha256: cache.manifest.registration.tree_sha256, runtime_ref: cache.manifest.registration.runtime_ref };
   writeJsonNew(path.join(evidenceRoot, "claude-identity.json"), identityReceipt);
@@ -304,6 +353,7 @@ export async function runE2E(options, { ambient = process.env, onProgress = null
     checks: {
       core_binding: "PASS",
       registration_identity: "PASS",
+      scenario_identity: scenarioAudit.status,
       production_runtime: runtimeAudit.status,
       role_calls: modelAudit.status,
       methods_result: runtimeReceipt.methods_result_identity.status,
