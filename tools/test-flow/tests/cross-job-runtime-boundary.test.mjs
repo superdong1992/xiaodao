@@ -7,16 +7,21 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import {
+  assertPhaseOneCaseFirst,
   buildLinuxClientBrowserFailureReceipt,
   installGeneratedSkill,
   linuxClientUserIdentity,
+  parseClaudeStream,
   parseLinuxClientBrowserExecution,
+  phaseOnePrompt,
+  phaseOneUserMessage,
   runCommandCapture,
   validRouteMethodsPreflightEvidence,
   validLinuxClientBrowserExecution,
   validServerRuntimeInspection,
   validServiceAgentUsageReceipt,
   validSuccessfulInvocationReceipt,
+  validatePhaseOne,
 } from "../adapters/cross-job-core.mjs";
 import {
   METHODS_V2_CAPTURED_FILES,
@@ -32,7 +37,7 @@ import {
   validLinuxClientBrowserFailureReceipt,
   validMethodsV2OracleEvidence,
 } from "../lib/actions.mjs";
-import { packageTreeIdentity } from "../lib/release-inputs.mjs";
+import { packageTreeIdentity, RELEASE_MODEL } from "../lib/release-inputs.mjs";
 import { canonicalJson, sha256Bytes, sha256File } from "../lib/util.mjs";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
@@ -52,6 +57,272 @@ function resourceName(prefix, runId, suffix = "") {
 
 const ROUTE_JOB_ID = "00000000-0000-0000-0000-000000000001";
 const PREFLIGHT_JOB_ID = "00000000-0000-0000-0000-000000000002";
+
+const CLIENT_MCP_TOOLS = [
+  "problem_locator_create_case",
+  "problem_locator_prepare_attachment",
+  "problem_locator_submit_supplement",
+  "problem_locator_get_case",
+  "problem_locator_resume_case",
+  "problem_locator_cancel_case",
+  "problem_locator_list_artifacts",
+];
+
+function caseFirstStream({ questionBeforeCreate = null } = {}) {
+  const cwd = process.cwd();
+  const events = [
+    {
+      type: "system",
+      subtype: "init",
+      cwd,
+      model: RELEASE_MODEL,
+      permissionMode: "dontAsk",
+      tools: ["Skill", ...CLIENT_MCP_TOOLS.map((name) => `mcp__problem-locator__${name}`)],
+      mcp_servers: [{ name: "problem-locator", status: "connected" }],
+    },
+    {
+      type: "assistant",
+      message: {
+        role: "assistant",
+        content: [{ type: "tool_use", id: "skill-1", name: "Skill", input: { skill: "problem-locator-client" } }],
+      },
+    },
+    {
+      type: "user",
+      message: { role: "user", content: [{ type: "tool_result", tool_use_id: "skill-1", content: "loaded" }] },
+    },
+  ];
+  if (questionBeforeCreate !== null) {
+    events.push({
+      type: "assistant",
+      message: { role: "assistant", content: [{ type: "text", text: questionBeforeCreate }] },
+    });
+  }
+  events.push(
+    {
+      type: "assistant",
+      message: {
+        role: "assistant",
+        content: [{ type: "tool_use", id: "create-1", name: "mcp__problem-locator__problem_locator_create_case", input: { request_id: "case-first-request" } }],
+      },
+    },
+    {
+      type: "user",
+      tool_use_result: { structuredContent: { ok: true, error: null, data: {} } },
+      message: { role: "user", content: [{ type: "tool_result", tool_use_id: "create-1", content: "created" }] },
+    },
+    {
+      type: "result",
+      subtype: "success",
+      is_error: false,
+      result: "",
+      num_turns: 2,
+      total_cost_usd: 0,
+      usage: {
+        input_tokens: 1,
+        output_tokens: 1,
+        cache_creation_input_tokens: 0,
+        cache_read_input_tokens: 0,
+      },
+    },
+  );
+  return { cwd, text: events.map((event) => JSON.stringify(event)).join("\n") };
+}
+
+function phaseOnePromptFixture() {
+  return {
+    releaseCase: {
+      driver: {
+        problem: {
+          raw_problem_text: "订单服务的 Reserve RPC 在问题时间附近多次超时。",
+          expected_behavior: "客户端应在截止时间前收到响应。",
+          actual_behavior: "客户端超时后才收到响应。",
+          scope: "订单服务的客户端与服务端日志。",
+          goals: ["找出每次超时的原因。"],
+          non_goals: ["不补采日志。"],
+          constraints: ["只使用现有日志。"],
+          completion_criteria: ["给出有证据的原因。"],
+        },
+        initial_user_fact_names: ["problem_time", "client_process", "server_process", "service", "api"],
+        initial_user_fact_values: ["2026-08-23 10:00:05", "rpc_client", "rpc_server", "svc_orders", "Reserve"],
+      },
+    },
+    archive: {
+      name: "logs.zip",
+      content_type: "application/zip",
+      size: 1234,
+      sha256: "a".repeat(64),
+    },
+  };
+}
+
+test("Phase 1 accepts a direct Case creation with no preceding assistant prose", () => {
+  const stream = caseFirstStream();
+  const audit = parseClaudeStream(stream.text, stream.cwd);
+  assert.equal(assertPhaseOneCaseFirst(audit), true);
+  assert.deepEqual(audit.assistant_text_events, []);
+  assert.equal(audit.records[0].tool_name, "problem_locator_create_case");
+});
+
+test("Phase 1 rejects asking the user before creating the Case", () => {
+  const stream = caseFirstStream({ questionBeforeCreate: "请先补充问题时间和日志。" });
+  const audit = parseClaudeStream(stream.text, stream.cwd);
+  assert.equal(audit.assistant_text_events[0].text, "请先补充问题时间和日志。");
+  assert.throws(
+    () => assertPhaseOneCaseFirst(audit),
+    (error) => error.code === "PHASE1_PROSE_BEFORE_CREATE",
+  );
+});
+
+test("Phase 1 prompt leaves Case creation and requirement handling to the Client Skill", () => {
+  const fixture = phaseOnePromptFixture();
+  const prompt = phaseOnePrompt(fixture.releaseCase, fixture.archive);
+  assert.match(prompt, /第一步请先加载 problem-locator-client Skill/u);
+  assert.match(prompt, /订单服务的 Reserve RPC/u);
+  assert.match(prompt, /问题时间：2026-08-23 10:00:05/u);
+  assert.match(prompt, /客户端进程：rpc_client/u);
+  assert.match(prompt, /服务端进程：rpc_server/u);
+  assert.match(prompt, /服务名：svc_orders/u);
+  assert.match(prompt, /API 名：Reserve/u);
+  assert.match(prompt, /logs\.zip/u);
+  assert.match(prompt, /拿到上传地址/u);
+  assert.doesNotMatch(prompt, /problem_locator_(?:create_case|get_case|prepare_attachment|submit_supplement)/u);
+  assert.doesNotMatch(prompt, /(?:request_id|wait_seconds|expected_case_revision|initial_user_fact_names|WAITING_INPUT|WAITING_ATTACHMENT)/u);
+  assert.doesNotMatch(prompt, /(?:problem_time|client_process|server_process|initial_user_fact_names|initial_user_fact_values)/u);
+});
+
+test("Phase 1 mechanically verifies create, returned requirements, supplied facts, and prepare", () => {
+  const fixture = phaseOnePromptFixture();
+  const caseId = "00000000-0000-4000-8000-000000000101";
+  const routeJobId = "00000000-0000-4000-8000-000000000102";
+  const attachmentId = "00000000-0000-4000-8000-000000000103";
+  const publicBaseUrl = "http://127.0.0.1:8080";
+  const createRequestId = "generated-create";
+  const factsRequestId = "generated-facts";
+  const prepareRequestId = "generated-prepare";
+  const rawProblemText = phaseOneUserMessage(fixture.releaseCase, fixture.archive);
+  const inputRequirements = fixture.releaseCase.driver.initial_user_fact_names.map((name) => ({
+    kind: "INPUT",
+    name,
+    status: "OPEN",
+  }));
+  const attachmentRequirement = {
+    kind: "ATTACHMENT",
+    name: "log_archive",
+    status: "OPEN",
+    requested_by_job_id: routeJobId,
+  };
+  const success = (data) => ({ ok: true, error: null, data });
+  const records = [
+    {
+      ordinal: 0,
+      stream_ordinal: 2,
+      tool_name: "problem_locator_create_case",
+      input: {
+        request_id: createRequestId,
+        raw_problem_text: rawProblemText,
+        statement: rawProblemText,
+        expected_behavior: "用户未单独说明；以 raw_problem_text 为准。",
+        actual_behavior: rawProblemText,
+        scope: "仅定位 raw_problem_text 所述问题。",
+        goals: ["定位问题原因并给出结论。"],
+        non_goals: [],
+        constraints: [],
+        completion_criteria: ["给出基于证据的结论；证据不足时明确说明。"],
+        initial_user_fact_names: [],
+        initial_user_fact_values: [],
+        wait_seconds: 0,
+      },
+      result: success({ business_receipt: { case_id: caseId }, case_view: null }),
+    },
+    {
+      ordinal: 1,
+      stream_ordinal: 4,
+      tool_name: "problem_locator_get_case",
+      input: { case_id: caseId, wait_for_job_id: null, wait_seconds: 30 },
+      result: success({ case_view: { case_id: caseId, case_revision: 2, status: "WAITING_INPUT", pending_requirements: inputRequirements } }),
+    },
+    {
+      ordinal: 2,
+      stream_ordinal: 6,
+      tool_name: "problem_locator_submit_supplement",
+      input: {
+        request_id: factsRequestId,
+        case_id: caseId,
+        expected_case_revision: 2,
+        input_names: fixture.releaseCase.driver.initial_user_fact_names,
+        input_values: fixture.releaseCase.driver.initial_user_fact_values,
+        attachment_ids: [],
+        wait_seconds: 0,
+      },
+      result: success({ business_receipt: { case_id: caseId } }),
+    },
+    {
+      ordinal: 3,
+      stream_ordinal: 8,
+      tool_name: "problem_locator_get_case",
+      input: { case_id: caseId, wait_for_job_id: null, wait_seconds: 30 },
+      result: success({ case_view: { case_id: caseId, case_revision: 4, status: "WAITING_ATTACHMENT", pending_requirements: [attachmentRequirement] } }),
+    },
+    {
+      ordinal: 4,
+      stream_ordinal: 10,
+      tool_name: "problem_locator_prepare_attachment",
+      input: {
+        request_id: prepareRequestId,
+        case_id: caseId,
+        expected_case_revision: 4,
+        name: fixture.archive.name,
+        content_type: fixture.archive.content_type,
+        declared_size: fixture.archive.size,
+        declared_sha256: fixture.archive.sha256,
+      },
+      result: success({
+        application_response: {
+          case_view: {
+            case_id: caseId,
+            case_revision: 5,
+            status: "WAITING_ATTACHMENT",
+            pending_requirements: [attachmentRequirement],
+            selected_skill_ref: { id: "diagnosis-skill/rpc-timeout-methods-v1", version: "1.0.0" },
+          },
+        },
+        upload: {
+          attachment_id: attachmentId,
+          method: "PUT",
+          url: `${publicBaseUrl}/api/v1/attachments/${attachmentId}/content`,
+          required_headers: {
+            "Content-Length": String(fixture.archive.size),
+            "Content-Type": fixture.archive.content_type,
+            "Idempotency-Key": attachmentId,
+            "X-Content-SHA256": fixture.archive.sha256,
+          },
+          max_bytes: 2684354560,
+          expires_at: null,
+        },
+      }),
+    },
+  ];
+  fixture.releaseCase.skill = {
+    attachment_requirement: "log_archive",
+    runtime_ref_id: "diagnosis-skill/rpc-timeout-methods-v1",
+    version: "1.0.0",
+  };
+  const summary = validatePhaseOne(
+    { records, assistant_text_events: [] },
+    fixture.releaseCase,
+    { create: "planned-create", prepare: "planned-prepare", submit_inputs: "planned-facts", submit_attachment: "planned-attachment" },
+    fixture.archive,
+    publicBaseUrl,
+  );
+  assert.equal(summary.case_id, caseId);
+  assert.deepEqual(summary.request_ids, {
+    create: createRequestId,
+    prepare: prepareRequestId,
+    submit_inputs: factsRequestId,
+    submit_attachment: "planned-attachment",
+  });
+});
 
 function successfulServiceInvocation(jobId = ROUTE_JOB_ID) {
   return {

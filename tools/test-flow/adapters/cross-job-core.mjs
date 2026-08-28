@@ -29,7 +29,10 @@ import {
   validateClaudeDistribution,
 } from "../lib/release-inputs.mjs";
 import { extractCheckpointSourceArchive } from "../lib/checkpoint.mjs";
-import { fixedGetCasePollingInvariant } from "../lib/cross-job-polling.mjs";
+import {
+  fixedGetCasePollInput,
+  fixedGetCasePollingInvariant,
+} from "../lib/cross-job-polling.mjs";
 import {
   NEGATIVE_PROBE_VALIDATION_FIELDS,
   readRelayedEventPart,
@@ -1175,7 +1178,7 @@ function assertFlatInput(input) {
   }
 }
 
-function parseClaudeStream(text, expectedCwd, { allowErrorTerminal = false } = {}) {
+export function parseClaudeStream(text, expectedCwd, { allowErrorTerminal = false } = {}) {
   const events = text.split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
   const initEvents = events.filter((event) => event.type === "system" && event.subtype === "init");
   const results = events.filter((event) => event.type === "result");
@@ -1194,17 +1197,33 @@ function parseClaudeStream(text, expectedCwd, { allowErrorTerminal = false } = {
 
   const byId = new Map();
   const records = [];
+  const assistantTextEvents = [];
+  let streamOrdinal = 0;
   for (const event of events) {
     const content = event.message?.content;
     if (!Array.isArray(content)) continue;
     for (const block of content) {
+      const currentStreamOrdinal = streamOrdinal;
+      streamOrdinal += 1;
+      if (block?.type === "text" && event.type === "assistant") {
+        requireCondition(
+          event.message?.role === "assistant"
+            && typeof block.text === "string",
+          "CLIENT_ASSISTANT_TEXT_INVALID",
+        );
+        assistantTextEvents.push({
+          ordinal: assistantTextEvents.length,
+          stream_ordinal: currentStreamOrdinal,
+          text: block.text,
+        });
+      }
       if (block?.type === "tool_use") {
         requireCondition(event.type === "assistant" && event.message?.role === "assistant", "CLIENT_TOOL_USE_ROLE");
         requireCondition(typeof block.id === "string" && !byId.has(block.id), "CLIENT_TOOL_USE_ID");
         const toolName = block.name === "Skill" ? "Skill" : normalizedToolName(block.name);
         requireCondition(toolName !== null, "CLIENT_UNEXPECTED_TOOL", "FAIL", "CONTRACT");
         if (toolName !== "Skill") assertFlatInput(block.input);
-        const record = { ordinal: records.length, tool_use_id: block.id, full_name: block.name, tool_name: toolName, input: block.input, result: null };
+        const record = { ordinal: records.length, stream_ordinal: currentStreamOrdinal, tool_use_id: block.id, full_name: block.name, tool_name: toolName, input: block.input, result: null };
         records.push(record);
         byId.set(block.id, record);
       }
@@ -1243,6 +1262,7 @@ function parseClaudeStream(text, expectedCwd, { allowErrorTerminal = false } = {
     schema_version: 1,
     init: { cwd: init.cwd, effective_model: init.model, permission_mode: init.permissionMode, tools: init.tools, mcp_servers: servers },
     records: mcpRecords,
+    assistant_text_events: assistantTextEvents,
     usage,
     terminal: { subtype: terminal.subtype, is_error: terminal.is_error },
     turns: Number(terminal.num_turns),
@@ -1411,41 +1431,156 @@ function openRequirementNames(view, kind) {
     .map((item) => item.name);
 }
 
-function expectedCreateInput(releaseCase, requestIds) {
+export function phaseOneUserMessage(releaseCase, archive) {
+  const problem = releaseCase.driver.problem;
+  const factLabels = {
+    problem_time: "问题时间",
+    client_process: "客户端进程",
+    server_process: "服务端进程",
+    service: "服务名",
+    api: "API 名",
+  };
+  const facts = releaseCase.driver.initial_user_fact_names.map(
+    (name, index) => {
+      requireCondition(Boolean(factLabels[name]), "PHASE1_USER_FACT_LABEL_MISSING", "FAIL", "CONTRACT");
+      return `- ${factLabels[name]}：${releaseCase.driver.initial_user_fact_values[index]}`;
+    },
+  );
+  return [
+    "我遇到一个需要定位的问题。",
+    `问题描述：${problem.raw_problem_text}`,
+    `正常情况：${problem.expected_behavior}`,
+    `实际情况：${problem.actual_behavior}`,
+    `影响范围：${problem.scope}`,
+    `我希望确认：${problem.goals.join("；")}`,
+    `这次不需要处理：${problem.non_goals.join("；") || "无"}`,
+    `限制条件：${problem.constraints.join("；") || "无"}`,
+    `完成标准：${problem.completion_criteria.join("；")}`,
+    "我已经知道这些事实：",
+    ...facts,
+    "这些信息都已经确认过，后面需要时可以直接采用，不用再问我。",
+    `我手头有日志文件 ${archive.name}，格式是 ${archive.content_type}，大小为 ${archive.size} 字节，SHA-256 是 ${archive.sha256}。`,
+    "请开始定位。如果需要上传这份日志，请先帮我拿到上传地址；拿到以后就停下，暂时不要上传。",
+  ].join("\n");
+}
+
+function expectedCreateInput(releaseCase, requestId, archive) {
+  const rawProblemText = phaseOneUserMessage(releaseCase, archive);
   return {
-    request_id: requestIds.create,
-    ...releaseCase.driver.problem,
-    initial_user_fact_names: releaseCase.driver.initial_user_fact_names,
-    initial_user_fact_values: releaseCase.driver.initial_user_fact_values,
+    request_id: requestId,
+    raw_problem_text: rawProblemText,
+    statement: rawProblemText,
+    expected_behavior: "用户未单独说明；以 raw_problem_text 为准。",
+    actual_behavior: rawProblemText,
+    scope: "仅定位 raw_problem_text 所述问题。",
+    goals: ["定位问题原因并给出结论。"],
+    non_goals: [],
+    constraints: [],
+    completion_criteria: ["给出基于证据的结论；证据不足时明确说明。"],
+    initial_user_fact_names: [],
+    initial_user_fact_values: [],
     wait_seconds: 0,
   };
 }
 
-function phaseOnePrompt(releaseCase, requestIds, archive) {
-  const createInput = canonicalJson(expectedCreateInput(releaseCase, requestIds)).trimEnd();
-  return `Perform phase 1 of the controlled Problem Locator acceptance journey. Use only the Skill tool and the seven problem_locator Remote MCP tools. Treat MCP tool_result structured payloads as authoritative; do not infer state from prose.
+export function phaseOnePrompt(releaseCase, archive) {
+  return `第一步请先加载 problem-locator-client Skill，调用 Skill 工具时使用 {"skill":"problem-locator-client"}。
 
-0. Your first action MUST call the Skill tool with skill=problem-locator-client (exact input {"skill":"problem-locator-client"}). Until that Skill tool_result is received successfully, do not call any problem_locator MCP tool.
-1. Call problem_locator_create_case exactly once with this exact flat root input (do not send problem_spec or any nested object): ${createInput}
-${fixedGetCasePollingInvariant("<authoritative-case-id>")}
-2. Poll problem_locator_get_case with non-empty case_id input and wait_seconds 30 until status WAITING_ATTACHMENT has exactly the OPEN ATTACHMENT requirement ${JSON.stringify(releaseCase.skill.attachment_requirement)}. Use wait_seconds 30 on every poll; do not rapid-poll. The initial facts were already supplied to create_case, so do not resubmit them and do not accept WAITING_INPUT as the target state.
-3. Call problem_locator_prepare_attachment exactly once with request_id "${requestIds.prepare}", the latest revision, name ${JSON.stringify(archive.name)}, content_type ${JSON.stringify(archive.content_type)}, declared_size ${archive.size}, and declared_sha256 "${archive.sha256}". The call must contain exactly those seven required root properties and must never send nested input.
-4. Stop immediately after the successful prepare result. Do not upload, submit the attachment, or call another tool.`;
+加载成功后，请处理下面这位用户的请求：
+
+${phaseOneUserMessage(releaseCase, archive)}`;
 }
 
-function validatePhaseOne(audit, releaseCase, requestIds, archive, publicBaseUrl) {
+export function assertPhaseOneCaseFirst(audit) {
+  const firstBusinessCall = audit?.records?.[0];
+  requireCondition(
+    firstBusinessCall?.tool_name === "problem_locator_create_case",
+    "PHASE1_CREATE_NOT_FIRST_BUSINESS_CALL",
+    "FAIL",
+    "CONTRACT",
+  );
+  requireCondition(
+    Number.isSafeInteger(firstBusinessCall.stream_ordinal),
+    "PHASE1_CREATE_STREAM_ORDINAL_INVALID",
+    "FAIL",
+    "CONTRACT",
+  );
+  const preCreateProse = (audit.assistant_text_events ?? []).filter(
+    (event) => event.stream_ordinal < firstBusinessCall.stream_ordinal
+      && event.text.trim().length > 0,
+  );
+  requireCondition(
+    preCreateProse.length === 0,
+    "PHASE1_PROSE_BEFORE_CREATE",
+    "FAIL",
+    "CONTRACT",
+  );
+  return true;
+}
+
+export function validatePhaseOne(audit, releaseCase, requestIds, archive, publicBaseUrl) {
+  assertPhaseOneCaseFirst(audit);
   const records = audit.records;
   const successful = records.filter((record) => record.result?.ok === true);
   const create = successful.filter((record) => record.tool_name === "problem_locator_create_case");
-  const submit = successful.filter((record) => record.tool_name === "problem_locator_submit_supplement");
+  const submits = successful.filter((record) => record.tool_name === "problem_locator_submit_supplement");
+  const gets = successful.filter((record) => record.tool_name === "problem_locator_get_case");
   const prepare = successful.filter((record) => record.tool_name === "problem_locator_prepare_attachment");
-  requireCondition(create.length === 1 && submit.length === 0 && prepare.length === 1, "PHASE1_CALL_CARDINALITY", "FAIL", "CONTRACT");
+  requireCondition(create.length === 1 && submits.length === 1 && gets.length >= 2 && prepare.length === 1, "PHASE1_CALL_CARDINALITY", "FAIL", "CONTRACT");
+  requireCondition(records[0] === create[0], "PHASE1_CREATE_NOT_FIRST_BUSINESS_CALL", "FAIL", "CONTRACT");
   requireCondition(records.at(-1) === prepare[0], "PHASE1_PREPARE_NOT_TERMINAL", "FAIL", "CONTRACT");
-  const createInput = expectedCreateInput(releaseCase, requestIds);
+  const generatedRequestIds = [create[0].input.request_id, submits[0].input.request_id, prepare[0].input.request_id];
+  requireCondition(
+    generatedRequestIds.every((value) => typeof value === "string" && value.length > 0)
+      && new Set(generatedRequestIds).size === generatedRequestIds.length,
+    "PHASE1_REQUEST_IDS_INVALID",
+    "FAIL",
+    "CONTRACT",
+  );
+  const createInput = expectedCreateInput(releaseCase, create[0].input.request_id, archive);
   exactKeys(create[0].input, Object.keys(createInput), "PHASE1_CREATE_INPUT_SHAPE");
   requireCondition(canonicalJson(create[0].input) === canonicalJson(createInput) && !Object.hasOwn(create[0].input, "problem_spec"), "PHASE1_CREATE_INPUT", "FAIL", "CONTRACT");
+  const createdCaseId = successData(create[0]).business_receipt?.case_id;
+  requireCondition(UUID.test(createdCaseId ?? ""), "PHASE1_CREATED_CASE_VIEW", "FAIL", "CONTRACT");
+  requireCondition(
+    gets.every((record) => canonicalJson(record.input) === canonicalJson(fixedGetCasePollInput(createdCaseId))),
+    "PHASE1_GET_CASE_INPUT",
+    "FAIL",
+    "CONTRACT",
+  );
+  const views = gets
+    .map((record) => ({ ordinal: record.ordinal, view: caseView(record) }))
+    .filter((entry) => entry.view?.case_id === createdCaseId);
+  const inputView = views.find((entry) => (
+    entry.ordinal > create[0].ordinal
+      && entry.ordinal < submits[0].ordinal
+      && entry.view.status === "WAITING_INPUT"
+      && canonicalJson(openRequirementNames(entry.view, "INPUT"))
+        === canonicalJson(releaseCase.driver.initial_user_fact_names)
+  ));
+  requireCondition(inputView, "PHASE1_INPUT_REQUIREMENTS_NOT_OBSERVED", "FAIL", "CONTRACT");
+  exactKeys(submits[0].input, ["request_id", "case_id", "expected_case_revision", "input_names", "input_values", "attachment_ids", "wait_seconds"], "PHASE1_INPUT_SUBMISSION_SHAPE");
+  requireCondition(
+    submits[0].input.case_id === createdCaseId
+      && submits[0].input.expected_case_revision === inputView.view.case_revision
+      && canonicalJson(submits[0].input.input_names) === canonicalJson(releaseCase.driver.initial_user_fact_names)
+      && canonicalJson(submits[0].input.input_values) === canonicalJson(releaseCase.driver.initial_user_fact_values)
+      && canonicalJson(submits[0].input.attachment_ids) === canonicalJson([])
+      && submits[0].input.wait_seconds === 0,
+    "PHASE1_INPUT_SUBMISSION",
+    "FAIL",
+    "CONTRACT",
+  );
+  const attachmentView = views.find((entry) => (
+    entry.ordinal > submits[0].ordinal
+      && entry.ordinal < prepare[0].ordinal
+      && entry.view.status === "WAITING_ATTACHMENT"
+      && canonicalJson(openRequirementNames(entry.view, "ATTACHMENT"))
+        === canonicalJson([releaseCase.skill.attachment_requirement])
+  ));
+  requireCondition(attachmentView, "PHASE1_ATTACHMENT_REQUIREMENT_NOT_OBSERVED", "FAIL", "CONTRACT");
   exactKeys(prepare[0].input, ["request_id", "case_id", "expected_case_revision", "name", "content_type", "declared_size", "declared_sha256"], "PHASE1_PREPARE_INPUT_SHAPE");
-  requireCondition(prepare[0].input.request_id === requestIds.prepare && prepare[0].input.name === archive.name && prepare[0].input.content_type === archive.content_type && prepare[0].input.declared_size === archive.size && prepare[0].input.declared_sha256 === archive.sha256, "PHASE1_PREPARE_INPUT", "FAIL", "CONTRACT");
+  requireCondition(prepare[0].input.case_id === createdCaseId && prepare[0].input.expected_case_revision === attachmentView.view.case_revision && prepare[0].input.name === archive.name && prepare[0].input.content_type === archive.content_type && prepare[0].input.declared_size === archive.size && prepare[0].input.declared_sha256 === archive.sha256, "PHASE1_PREPARE_INPUT", "FAIL", "CONTRACT");
   const prepareData = successData(prepare[0]);
   const response = prepareData.application_response;
   const view = response?.case_view;
@@ -1465,7 +1600,6 @@ function validatePhaseOne(audit, releaseCase, requestIds, archive, publicBaseUrl
   requireCondition(UUID.test(descriptor.attachment_id) && descriptor.method === "PUT" && descriptor.url === `${publicBaseUrl}/api/v1/attachments/${descriptor.attachment_id}/content` && descriptor.max_bytes === MAX_ATTACHMENT_BYTES && descriptor.expires_at === null, "PHASE1_UPLOAD_DESCRIPTOR", "FAIL", "CONTRACT");
   exactKeys(descriptor.required_headers, ["Content-Length", "Content-Type", "Idempotency-Key", "X-Content-SHA256"], "PHASE1_UPLOAD_HEADERS_SHAPE");
   requireCondition(descriptor.required_headers["Content-Length"] === String(archive.size) && descriptor.required_headers["Content-Type"] === archive.content_type && descriptor.required_headers["Idempotency-Key"] === descriptor.attachment_id && descriptor.required_headers["X-Content-SHA256"] === archive.sha256, "PHASE1_UPLOAD_HEADERS", "FAIL", "CONTRACT");
-  requireCondition(!successful.some((record) => caseView(record)?.status === "WAITING_INPUT"), "PHASE1_INITIAL_FACT_REGRESSION", "FAIL", "CONTRACT");
   return {
     case_id: view.case_id,
     attachment_id: descriptor.attachment_id,
@@ -1474,6 +1608,12 @@ function validatePhaseOne(audit, releaseCase, requestIds, archive, publicBaseUrl
     methods_preflight_job_id: attachmentRequirements[0].requested_by_job_id,
     selected_skill_ref: view.selected_skill_ref,
     upload_descriptor: descriptor,
+    request_ids: {
+      ...requestIds,
+      create: create[0].input.request_id,
+      prepare: prepare[0].input.request_id,
+      submit_inputs: submits[0].input.request_id,
+    },
   };
 }
 
@@ -1482,7 +1622,7 @@ async function uploadAttachment(configuration, state, stageRoot) {
   const archive = path.join(configuration.attemptRoot, "payload", state.archive.name);
   requireCondition(fs.existsSync(archive) && fs.statSync(archive).size === state.archive.size && sha256File(archive) === state.archive.sha256, "UPLOAD_FIXTURE_INVALID");
   requireCondition(descriptor.url === `${state.public_base_url}/api/v1/attachments/${state.attachment_id}/content`, "UPLOAD_URL_INVALID");
-  const flatCreate = expectedCreateInput(configuration.releaseCase, state.request_ids);
+  const flatCreate = expectedCreateInput(configuration.releaseCase, state.request_ids.create, state.archive);
   const problemKeys = ["statement", "expected_behavior", "actual_behavior", "scope", "goals", "non_goals", "constraints", "completion_criteria"];
   const createBody = {
     request_id: flatCreate.request_id,
@@ -3067,7 +3207,7 @@ async function execute(configuration) {
 
   if (configuration.stage === "journey.cross-job.route") {
     requireCondition(configuration.hardCaps !== null, "ROUTE_HARD_CAPS_MISSING", "BLOCKED", "INFRA");
-    const audit = await runClaude(configuration, state, configuration.stageRoot, "phase1", phaseOnePrompt(configuration.releaseCase, state.request_ids, state.archive), configuration.hardCaps.max_turns, configuration.hardCaps.max_budget_usd);
+    const audit = await runClaude(configuration, state, configuration.stageRoot, "phase1", phaseOnePrompt(configuration.releaseCase, state.archive), configuration.hardCaps.max_turns, configuration.hardCaps.max_budget_usd);
     const summary = validatePhaseOne(audit, configuration.releaseCase, state.request_ids, state.archive, state.public_base_url);
     Object.assign(state, summary);
     state.client_calls.push(...audit.records.map((record, index) => ({ phase: "phase1", ordinal: state.client_calls.length + index, tool_name: record.tool_name, input: record.input })));

@@ -651,7 +651,9 @@ test("CrossJob runtime uses pull-never, empty labeled storage and authoritative 
   assert.match(core, /canonicalJson\(receipt\.validation_fields\) === canonicalJson\(NEGATIVE_PROBE_VALIDATION_FIELDS\)/);
   assert.match(core, /client_dfx_absent: true/);
   assert.match(core, /CLIENT_DFX_FORBIDDEN/);
-  assert.match(core, /fixedGetCasePollingInvariant\("<authoritative-case-id>"\)/);
+  assert.doesNotMatch(core, /fixedGetCasePollingInvariant\("<authoritative-case-id>"\)/);
+  assert.match(core, /assertPhaseOneCaseFirst\(audit\)/);
+  assert.match(core, /phaseOnePrompt\(configuration\.releaseCase, state\.archive\)/);
   assert.match(core, /fixedGetCasePollingInvariant\(state\.case_id\)/);
   assert.match(core, /Poll with the same literal get-case input/);
   assert.match(core, /runtime_ref_id: product\.runtime_ref_id/);
