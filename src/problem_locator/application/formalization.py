@@ -22,6 +22,8 @@ from problem_locator.contracts.enums import (
     CandidateStatus,
     DiagnosisMode,
     DiagnosisItemStatus,
+    ErrorCode,
+    ExecutionStage,
     FieldUpdateAction,
     JobStatus,
     JobType,
@@ -49,12 +51,14 @@ from problem_locator.contracts.models import (
     Evidence,
     EvidenceBinding,
     EvidenceProposal,
+    ExecutionFailure,
     Job,
     JobOutcome,
     JobSpec,
     MethodsReviewerEvaluationV2,
     MethodsReviewerResultV2,
     MethodsReviewTargetV2,
+    MethodsTerminalProjectionV2,
     PendingRequirement,
     PlannedResourceBinding,
     PlannedResourceTarget,
@@ -74,6 +78,47 @@ from problem_locator.contracts.serialization import canonical_json_sha256
 
 
 _T = TypeVar("_T")
+
+
+def _methods_terminal_result_type_v2(
+    terminal: MethodsTerminalProjectionV2,
+) -> OutcomeResultType:
+    return {
+        "RESOLVED": OutcomeResultType.COMPLETED,
+        "UNRESOLVED": OutcomeResultType.INCONCLUSIVE,
+        "FAILED": OutcomeResultType.FAILED,
+    }[terminal.status]
+
+
+def _methods_terminal_failure_v2(
+    terminal: MethodsTerminalProjectionV2,
+) -> ExecutionFailure | None:
+    if terminal.status != "FAILED":
+        return None
+    stage, code, message = {
+        "RESOURCE_SNAPSHOT_DRIFT": (
+            ExecutionStage.ASSET_RESOLUTION,
+            ErrorCode.ASSET_VERSION_UNAVAILABLE,
+            "The Evidence V2 resource snapshot changed before terminal application.",
+        ),
+        "SERVER_INVARIANT_VIOLATION": (
+            ExecutionStage.OUTCOME_VALIDATE,
+            ErrorCode.OUTCOME_INVALID,
+            "The Evidence V2 server invariant was violated.",
+        ),
+        "AUDIT_ARCHIVE_FAILED": (
+            ExecutionStage.EXECUTION_RECORD,
+            ErrorCode.EXECUTION_RECORD_FAILED,
+            "The Evidence V2 audit archive could not be completed.",
+        ),
+    }[terminal.reason_code]
+    return ExecutionFailure(
+        stage=stage,
+        code=code,
+        message=message,
+        retryable=False,
+        details=[],
+    )
 
 
 def build_methods_specialist_handoff_outcome_v2(
@@ -125,6 +170,7 @@ def build_methods_specialist_handoff_outcome_v2(
         decision_audit=None,
         methods_review_target=target,
         methods_reviewer_result=None,
+        methods_terminal_projection=None,
     )
 
 
@@ -132,36 +178,59 @@ def build_methods_reviewer_outcome_v2(
     review_job: Job,
     *,
     outcome_id: str,
-    evaluation: MethodRoleEvaluationV2,
+    evaluation: MethodRoleEvaluationV2 | None,
+    terminal_projection: MethodsTerminalProjectionV2,
     produced_at: str,
 ) -> JobOutcome:
-    """Create the server-only normalized Reviewer Outcome for later consensus."""
+    """Create the terminal server Outcome for one normalized blind Reviewer."""
 
     target = review_job.methods_review_target
+    requires_reviewer = terminal_projection.status == "RESOLVED" or (
+        terminal_projection.reason_code
+        in {
+            "SPECIALIST_REVIEWER_DISAGREEMENT",
+            "INCOMPLETE_EVALUATION",
+            "NO_CONFIRMED_METHOD",
+        }
+    )
     if (
         review_job.job_type is not JobType.REVIEW
         or target is None
         or review_job.review_target is not None
-        or evaluation.role != "REVIEWER"
-        or evaluation.plan_ref != target.plan_ref
+        or terminal_projection.evaluation_id != target.evaluation_id
+        or terminal_projection.plan_ref != target.plan_ref
+        or terminal_projection.evidence_graph_ref != target.graph_ref
+        or (
+            requires_reviewer
+            and (
+                evaluation is None
+                or evaluation.role != "REVIEWER"
+                or evaluation.plan_ref != target.plan_ref
+            )
+        )
+        or (not requires_reviewer and evaluation is not None)
     ):
         raise ValueError(
             "Methods V2 Reviewer Outcome requires the exact Candidate-free REVIEW Job and Plan"
         )
-    result = MethodsReviewerResultV2(
-        schema_version=2,
-        role="REVIEWER",
-        review_job_id=review_job.job_id,
-        target=target,
-        evaluations=tuple(
-            MethodsReviewerEvaluationV2(
-                evaluation_ref=item.evaluation_ref,
-                verdict=item.verdict,
-                reason=item.reason,
-            )
-            for item in evaluation.evaluations
-        ),
-        repair_used=evaluation.repair_used,
+    result = (
+        None
+        if evaluation is None
+        else MethodsReviewerResultV2(
+            schema_version=2,
+            role="REVIEWER",
+            review_job_id=review_job.job_id,
+            target=target,
+            evaluations=tuple(
+                MethodsReviewerEvaluationV2(
+                    evaluation_ref=item.evaluation_ref,
+                    verdict=item.verdict,
+                    reason=item.reason,
+                )
+                for item in evaluation.evaluations
+            ),
+            repair_used=evaluation.repair_used,
+        )
     )
     return JobOutcome(
         outcome_id=outcome_id,
@@ -169,16 +238,56 @@ def build_methods_reviewer_outcome_v2(
         case_id=review_job.case_id,
         job_type=JobType.REVIEW,
         base_state_revision=review_job.base_state_revision,
-        result_type=OutcomeResultType.COMPLETED,
+        result_type=_methods_terminal_result_type_v2(terminal_projection),
         payload=None,
         consumed_evidence_refs=[],
         proposed_evidence=[],
         proposed_artifacts=[],
-        error=None,
+        error=_methods_terminal_failure_v2(terminal_projection),
         produced_at=produced_at,
         decision_audit=None,
         methods_review_target=None,
         methods_reviewer_result=result,
+        methods_terminal_projection=terminal_projection,
+    )
+
+
+def build_methods_specialist_terminal_outcome_v2(
+    source_job: Job,
+    *,
+    outcome_id: str,
+    terminal_projection: MethodsTerminalProjectionV2,
+    produced_at: str,
+) -> JobOutcome:
+    """Create a Candidate-free early terminal Outcome for specialized DIAGNOSE."""
+
+    if (
+        source_job.job_type is not JobType.DIAGNOSE
+        or source_job.diagnosis_mode is not DiagnosisMode.SPECIALIZED
+        or source_job.skill_ref is None
+        or source_job.context_snapshot is None
+        or source_job.context_snapshot.candidate_conclusion is not None
+    ):
+        raise ValueError(
+            "Methods V2 terminal Outcome requires a Candidate-free specialized DIAGNOSE Job"
+        )
+    return JobOutcome(
+        outcome_id=outcome_id,
+        job_id=source_job.job_id,
+        case_id=source_job.case_id,
+        job_type=JobType.DIAGNOSE,
+        base_state_revision=source_job.base_state_revision,
+        result_type=_methods_terminal_result_type_v2(terminal_projection),
+        payload=None,
+        consumed_evidence_refs=[],
+        proposed_evidence=[],
+        proposed_artifacts=[],
+        error=_methods_terminal_failure_v2(terminal_projection),
+        produced_at=produced_at,
+        decision_audit=None,
+        methods_review_target=None,
+        methods_reviewer_result=None,
+        methods_terminal_projection=terminal_projection,
     )
 
 
@@ -1183,6 +1292,7 @@ __all__ = [
     "build_job",
     "build_methods_reviewer_outcome_v2",
     "build_methods_specialist_handoff_outcome_v2",
+    "build_methods_specialist_terminal_outcome_v2",
     "formalize_accepted_artifacts",
     "formalize_accepted_candidate",
     "formalize_accepted_evidence",

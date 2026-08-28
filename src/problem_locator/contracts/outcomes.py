@@ -302,6 +302,90 @@ def validate_outcome_for_job(
     if any(ref not in job_evidence for ref in outcome.consumed_evidence_refs):
         raise ValueError("consumed_evidence_refs must be fixed by the Job")
 
+    if isinstance(outcome, JobOutcome) and (
+        outcome.methods_review_target is not None
+        or outcome.methods_terminal_projection is not None
+    ):
+        if (
+            job.diagnosis_mode is DiagnosisMode.GENERIC
+            or job.context_snapshot is None
+            or job.context_snapshot.candidate_conclusion is not None
+            or outcome.payload is not None
+            or outcome.consumed_evidence_refs
+            or outcome.proposed_evidence
+            or outcome.proposed_artifacts
+            or outcome.decision_audit is not None
+        ):
+            raise ValueError(
+                "Methods V2 Job and Outcome must remain Candidate-free and resource-free"
+            )
+        if outcome.methods_review_target is not None:
+            target = outcome.methods_review_target
+            if (
+                job.job_type is not JobType.DIAGNOSE
+                or job.skill_ref != target.skill_ref
+                or job.job_id != target.source_job_id
+                or job.base_state_revision != target.reviewed_state_revision
+            ):
+                raise ValueError(
+                    "Methods V2 Specialist handoff must match its pinned DIAGNOSE Job"
+                )
+        else:
+            terminal = outcome.methods_terminal_projection
+            assert terminal is not None
+            if terminal.status == "UNRESOLVED":
+                allowed_reasons = (
+                    {
+                        "SPECIALIST_PROTOCOL_REPAIR_EXHAUSTED",
+                        "SPECIALIST_SEMANTIC_INVALID",
+                        "SPECIALIST_MODEL_EXECUTION_FAILED",
+                        "NO_MATCHING_METHOD_EVIDENCE",
+                    }
+                    if job.job_type is JobType.DIAGNOSE
+                    else {
+                        "REVIEWER_PROTOCOL_REPAIR_EXHAUSTED",
+                        "REVIEWER_SEMANTIC_INVALID",
+                        "REVIEWER_MODEL_EXECUTION_FAILED",
+                        "SPECIALIST_REVIEWER_DISAGREEMENT",
+                        "INCOMPLETE_EVALUATION",
+                        "NO_CONFIRMED_METHOD",
+                    }
+                )
+                if terminal.reason_code not in allowed_reasons:
+                    raise ValueError(
+                        "Methods V2 unresolved reason does not belong to the source Job stage"
+                    )
+            if job.job_type is JobType.REVIEW:
+                reviewer = outcome.methods_reviewer_result
+                target = job.methods_review_target
+                requires_reviewer = terminal.status == "RESOLVED" or (
+                    terminal.reason_code
+                    in {
+                        "SPECIALIST_REVIEWER_DISAGREEMENT",
+                        "INCOMPLETE_EVALUATION",
+                        "NO_CONFIRMED_METHOD",
+                    }
+                )
+                if (
+                    target is None
+                    or target.evaluation_id != terminal.evaluation_id
+                    or target.plan_ref != terminal.plan_ref
+                    or target.graph_ref != terminal.evidence_graph_ref
+                    or (
+                        requires_reviewer
+                        and (reviewer is None or reviewer.target != target)
+                    )
+                    or (not requires_reviewer and reviewer is not None)
+                ):
+                    raise ValueError(
+                        "Methods V2 terminal REVIEW Outcome must match its frozen review target"
+                    )
+            elif job.job_type is not JobType.DIAGNOSE:
+                raise ValueError(
+                    "Methods V2 terminal Outcome requires DIAGNOSE or REVIEW"
+                )
+        return outcome
+
     payload = outcome.payload
     if job.diagnosis_mode is DiagnosisMode.GENERIC:
         proposed_evidence = (
@@ -1020,6 +1104,25 @@ def validate_transition_plan_for_outcome(
         or plan.accepted_candidate_proposal_key is not None
     ):
         raise ValueError("only an APPLIED Outcome may accept proposals")
+
+    terminal = (
+        outcome.methods_terminal_projection
+        if isinstance(outcome, JobOutcome)
+        else None
+    )
+    if terminal is not None:
+        if (
+            plan.outcome_disposition is not OutcomeDisposition.APPLIED
+            or plan.methods_terminal_projection != terminal
+        ):
+            raise ValueError(
+                "Methods terminal TransitionPlan must bind the exact Outcome projection"
+            )
+        return plan
+    if plan.methods_terminal_projection is not None:
+        raise ValueError(
+            "only a Methods terminal Outcome may install its terminal projection"
+        )
 
     for key in accepted_evidence:
         artifact_key = evidence_by_key[key].source_binding.artifact_proposal_key

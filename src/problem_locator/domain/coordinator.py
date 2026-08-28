@@ -604,6 +604,8 @@ class DomainCoordinator:
         if outcome_error is not None:
             return outcome_error
         outcome = payload.job_outcome
+        if outcome.methods_terminal_projection is not None:
+            return self._methods_terminal_plan(snapshot, active, outcome, trigger)
         if outcome.result_type is OutcomeResultType.FAILED:
             assert outcome.error is not None
             return self._failure_plan(
@@ -996,6 +998,79 @@ class DomainCoordinator:
             reason="Apply semantic progress and continue diagnosis in a new Job.",
         )
 
+    def _methods_terminal_plan(
+        self,
+        snapshot: CaseSnapshot,
+        active: Job,
+        outcome: JobOutcome,
+        trigger: ValidatedTrigger,
+    ) -> CoordinatorPlanResult:
+        """Apply only the already-validated public Methods terminal projection."""
+
+        terminal = outcome.methods_terminal_projection
+        if terminal is None:
+            return _validation(
+                "Methods V2 terminal processing requires its server projection."
+            )
+        if (
+            snapshot.case.diagnosis_state.candidate_conclusion is not None
+            or active.context_snapshot is None
+            or active.context_snapshot.candidate_conclusion is not None
+            or (
+                active.job_type is JobType.DIAGNOSE
+                and active.diagnosis_mode is not DiagnosisMode.SPECIALIZED
+            )
+            or (
+                active.job_type is JobType.REVIEW
+                and active.methods_review_target is None
+            )
+        ):
+            return _validation(
+                "Methods V2 terminal transition must remain Candidate-free."
+            )
+        if terminal.status == "FAILED":
+            if outcome.error is None:
+                return _validation(
+                    "A failed Methods V2 terminal Outcome requires its mapped failure."
+                )
+            failure_plan = self._failure_plan(
+                active,
+                outcome.error,
+                trigger,
+                source_outcome_id=outcome.outcome_id,
+                disposition=OutcomeDisposition.APPLIED,
+            )
+            if isinstance(failure_plan, ApplicationError):
+                return failure_plan
+            values = failure_plan.model_dump(mode="python")
+            values["methods_terminal_projection"] = terminal
+            return TransitionPlan.model_validate(values)
+
+        target_status = (
+            CaseStatus.RESOLVED
+            if terminal.status == "RESOLVED"
+            else CaseStatus.UNRESOLVED
+        )
+        return TransitionPlan(
+            accepted_state_delta=_empty_delta(),
+            target_case_status=target_status,
+            job_updates=[
+                _job_update(active, JobStatus.SUCCEEDED, trigger.occurred_at)
+            ],
+            outcome_disposition=OutcomeDisposition.APPLIED,
+            accepted_evidence_proposal_keys=[],
+            accepted_artifact_proposal_keys=[],
+            accepted_candidate_proposal_key=None,
+            selected_skill_update=None,
+            case_failure_update=None,
+            candidate_mutation=None,
+            next_job_spec=None,
+            final_result_target=None,
+            methods_terminal_projection=terminal,
+            clear_active_job=True,
+            reason="Apply the Evidence V2 terminal projection without Candidate state.",
+        )
+
     def _review_outcome(
         self,
         snapshot: CaseSnapshot,
@@ -1010,6 +1085,8 @@ class DomainCoordinator:
         if outcome_error is not None:
             return outcome_error
         outcome = payload.job_outcome
+        if outcome.methods_terminal_projection is not None:
+            return self._methods_terminal_plan(snapshot, active, outcome, trigger)
         if outcome.result_type is OutcomeResultType.FAILED:
             assert outcome.error is not None
             return self._failure_plan(
@@ -1020,17 +1097,8 @@ class DomainCoordinator:
                 disposition=OutcomeDisposition.APPLIED,
             )
         if active.methods_review_target is not None:
-            reviewer_result = outcome.methods_reviewer_result
-            if (
-                reviewer_result is None
-                or reviewer_result.review_job_id != active.job_id
-                or reviewer_result.target != active.methods_review_target
-            ):
-                return _validation(
-                    "Methods V2 REVIEW Outcome must carry the exact server-owned Reviewer result."
-                )
             return _validation(
-                "Methods V2 Reviewer result is valid, but the V2 consensus terminal transition is not integrated."
+                "Methods V2 REVIEW Outcome requires its server terminal projection."
             )
         if outcome.proposed_evidence or any(
             proposal.artifact_kind is not ArtifactKind.USER_RESULT

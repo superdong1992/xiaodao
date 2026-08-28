@@ -10,6 +10,7 @@ from problem_locator.contracts import (
     MethodEvaluationPlanV2,
     MethodStateV2,
     MethodTerminalResultV2,
+    MethodsTerminalProjectionV2,
     method_terminal_result_ref_v2,
 )
 
@@ -154,4 +155,33 @@ def build_method_terminal_result_v2(
     )
 
 
-__all__ = ["build_method_terminal_result_v2"]
+def project_method_terminal_result_v2(
+    result: MethodTerminalResultV2,
+) -> MethodsTerminalProjectionV2:
+    """Mechanically remove private role material from a terminal result."""
+
+    if not isinstance(result, MethodTerminalResultV2):
+        raise TypeError("result must be MethodTerminalResultV2")
+    return MethodsTerminalProjectionV2(
+        schema_version=2,
+        result_ref=result.result_ref,
+        evaluation_id=result.evaluation_id,
+        status=result.status,
+        plan_ref=result.plan_ref,
+        evidence_graph_ref=result.evidence_graph_ref,
+        reason_code=result.reason_code,
+        diagnostic_id=result.diagnostic_id,
+        diagnostic_evaluation_ref=result.diagnostic_evaluation_ref,
+        confirmed_evaluation_refs=result.confirmed_evaluation_refs,
+        confirmed_method_ids=result.confirmed_method_ids,
+        confirmed_event_refs=result.confirmed_event_refs,
+        confirmed_hit_refs=result.confirmed_hit_refs,
+        limitations=result.limitations,
+        reasons=result.reasons,
+    )
+
+
+__all__ = [
+    "build_method_terminal_result_v2",
+    "project_method_terminal_result_v2",
+]
