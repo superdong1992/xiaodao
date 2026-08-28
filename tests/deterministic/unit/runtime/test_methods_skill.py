@@ -441,12 +441,12 @@ def test_grounding_rejects_marker_owned_only_by_another_method(
 ) -> None:
     skill = load_specialized_skill_registration(_write_registration(tmp_path / "skills"))
     cited = "2026-08-23T10:00:05Z unrelated_positive request_id=42"
-    logs = (_target("server", f"noise\n{cited}\n"),)
+    logs = (_target("server", f"API_COMPLETE request_id=99\n{cited}\n"),)
     draft = _diagnosis(line=cited)
     draft["evidence"][0]["sources"][0]["marker"] = "UNRELATED_POSITIVE"
     receipt = scan_method_markers(skill=skill, target_logs=logs)
 
-    assert receipt.loaded_method_ids == ("unrelated-method",)
+    assert receipt.loaded_method_ids == ("slow-execution", "unrelated-method")
     with pytest.raises(ValueError, match="not indexed by its method"):
         verify_method_diagnosis(
             skill=skill,
