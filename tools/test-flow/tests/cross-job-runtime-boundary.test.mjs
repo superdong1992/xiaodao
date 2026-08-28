@@ -19,8 +19,9 @@ import {
   validSuccessfulInvocationReceipt,
 } from "../adapters/cross-job-core.mjs";
 import {
-  validateMethodsGroundingExecutionRecord,
-  validateReleaseDiagnosisReport,
+  METHODS_V2_CAPTURED_FILES,
+  validateMethodsV2ExecutionRecords,
+  validateMethodsV2RestartSnapshot,
 } from "../lib/methods-oracle.mjs";
 import {
   crossJobBrowserCapabilityPolicy,
@@ -29,7 +30,7 @@ import {
   validCrossJobPassRuntimeBoundary,
   validCrossJobBrowserFailureBinding,
   validLinuxClientBrowserFailureReceipt,
-  validMethodsGroundingOracleEvidence,
+  validMethodsV2OracleEvidence,
 } from "../lib/actions.mjs";
 import { packageTreeIdentity } from "../lib/release-inputs.mjs";
 import { canonicalJson, sha256Bytes, sha256File } from "../lib/util.mjs";
@@ -580,390 +581,360 @@ test("native CrossJob server inspect is exact and rejects state, image, label, s
   }
 });
 
-function methodsGroundingFixture() {
-  const diagnosisJobId = "00000000-0000-4000-8000-000000000011";
-  const caseId = "00000000-0000-4000-8000-000000000001";
-  const registrationSha256 = "a".repeat(64);
-  const packageTreeSha256 = "b".repeat(64);
-  const combinedSha256 = "c".repeat(64);
-  const logparseReceiptBytes = jsonBytes({ schema_version: 1, status: "PASS" });
-  const skillRef = {
-    id: "diagnosis-skill/rpc-timeout-methods-v1",
-    version: "1.0.0",
-    content_hash: combinedSha256,
-  };
-  const job = {
-    job_id: diagnosisJobId,
-    case_id: caseId,
-    job_type: "DIAGNOSE",
-    diagnosis_mode: "SPECIALIZED",
-    logparse_product: "rpc-skill-feasibility",
-    skill_ref: skillRef,
-  };
-  const jobBytes = jsonBytes(job);
-  const auditBytes = jsonBytes({
-    schema_version: 1,
-    registration_id: "rpc-timeout-methods-v1",
-    registration_sha256: registrationSha256,
-    package_tree_sha256: packageTreeSha256,
-    combined_sha256: combinedSha256,
-    logparse_receipt_sha256: crypto.createHash("sha256").update(logparseReceiptBytes).digest("hex"),
-    status: "CONFIRMED",
-    confirmed_methods: ["api-overrun"],
-    evidence_count: 2,
-    checked_source_count: 2,
-    skill_load: {
-      package_tree_sha256: packageTreeSha256,
-      scanned_source_ids: ["client", "server"],
-      marker_hits: [["server", "API_COMPLETE", 1], ["server", "API_COMPLETE", 2]],
-      loaded_method_ids: ["api-overrun"],
-    },
+function v2Ref(prefix, kind, value) {
+  return `${prefix}-${sha256Bytes(canonicalJson({ kind, ...value }))}`;
+}
+
+function v2StateRef(state) {
+  return v2Ref("state", "method-state-v2", {
+    case_id: state.case_id,
+    source_job_id: state.source_job_id,
+    evaluation_id: state.evaluation_id,
+    plan_ref: state.plan_ref,
+    evaluation_refs: state.evaluation_refs,
+    status: state.status,
+    current_role: state.current_role,
+    specialist_protocol_failures: state.specialist_protocol_failures,
+    reviewer_protocol_failures: state.reviewer_protocol_failures,
+    specialist_evaluation: state.specialist_evaluation,
+    reviewer_evaluation: state.reviewer_evaluation,
+    consensus: state.consensus,
+    reason_code: state.reason_code,
+    diagnostic_id: state.diagnostic_id,
+    diagnostic_evaluation_ref: state.diagnostic_evaluation_ref,
+    reasons: state.reasons,
   });
-  const expected = {
-    diagnosis_job_id: diagnosisJobId,
-    case_id: caseId,
-    skill_ref: skillRef,
-    logparse_product: "rpc-skill-feasibility",
-    registration_id: "rpc-timeout-methods-v1",
-    registration_sha256: registrationSha256,
-    package_tree_sha256: packageTreeSha256,
-    combined_sha256: combinedSha256,
-    status: "CONFIRMED",
-    confirmed_methods: ["api-overrun"],
-    known_method_ids: ["api-overrun", "queue-delay"],
-    source_ids: ["client", "server"],
-    evidence_count: 2,
-  };
-  return { jobBytes, auditBytes, logparseReceiptBytes, expected };
 }
 
-test("CrossJob Methods status oracle reads the exact grounded execution record and fails on status or identity drift", () => {
-  const fixture = methodsGroundingFixture();
-  const validated = validateMethodsGroundingExecutionRecord(fixture);
-  assert.equal(validated.actual_methods_status, "CONFIRMED");
-  assert.equal(validated.expected_methods_status, "CONFIRMED");
-  assert.equal(validated.evidence_count, 2);
-
-  const wrongStatus = clone(JSON.parse(fixture.auditBytes));
-  wrongStatus.status = "PARTIAL";
-  assert.throws(
-    () => validateMethodsGroundingExecutionRecord({ ...fixture, auditBytes: jsonBytes(wrongStatus) }),
-    (error) => error.code === "METHODS_ORACLE_STATUS_MISMATCH",
-  );
-
-  const wrongJob = clone(JSON.parse(fixture.jobBytes));
-  wrongJob.skill_ref.content_hash = "d".repeat(64);
-  assert.throws(
-    () => validateMethodsGroundingExecutionRecord({ ...fixture, jobBytes: jsonBytes(wrongJob) }),
-    (error) => error.code === "METHODS_ORACLE_SKILL_REF_MISMATCH",
-  );
-
-  const nonCanonicalJob = Buffer.from(JSON.stringify(JSON.parse(fixture.jobBytes), null, 2), "utf8");
-  assert.throws(
-    () => validateMethodsGroundingExecutionRecord({ ...fixture, jobBytes: nonCanonicalJob }),
-    (error) => error.code === "METHODS_ORACLE_JSON_NON_CANONICAL",
-  );
-});
-
-function materializeMethodsConsumerFixture() {
-  const temporaryRoot = fs.existsSync("/private/tmp") ? "/private/tmp" : os.tmpdir();
-  const attemptRoot = fs.mkdtempSync(path.join(temporaryRoot, "test-flow-methods-consumer-"));
-  const generationGateRoot = path.join(
-    attemptRoot,
-    "payload", "stages", "real.skill-generation", "gates", "real.agent.skill-generation",
-  );
-  const registrationId = "rpc-timeout-methods-v1";
-  const skillName = "diagnose-rpc-timeout";
-  const registrationRoot = path.join(generationGateRoot, "generated-skill", registrationId);
-  const skillRoot = path.join(registrationRoot, "package", skillName);
-  fs.mkdirSync(path.join(skillRoot, "references"), { recursive: true });
-  fs.writeFileSync(path.join(skillRoot, "SKILL.md"), "# RPC timeout Methods\n", "utf8");
-  fs.writeFileSync(path.join(skillRoot, "references", "methods.md"), "# Methods\n", "utf8");
-  const sourceWikiSha256 = "eb39edf220d0eed91ae03eb712efd8974a5e5c82c3deed035c236a0d1bf28aab";
-  const methods = {
-    schema_version: 1,
-    skill_name: skillName,
-    source_wiki_sha256: sourceWikiSha256,
-    required_user_inputs: ["problem_time", "client_process", "server_process", "service", "api"],
-    required_artifacts: ["log_archive"],
-    log_derived_fields: [
-      "request_id", "client_send_us", "server_recv_us", "server_send_us", "client_now_us",
-      "start_us", "end_us", "cost_us", "print_time_ms", "ordinal", "queue_us", "timeout_ms",
-      "current_us", "request_us",
-    ],
-    methods: [
-      {
-        id: "api-execution-overrun",
-        evidence_markers: ["LATE_RESPONSE service=", "API_COMPLETE service=", "DEADLOOP_DETECTED service="],
-      },
-      {
-        id: "server-receive-queueing",
-        evidence_markers: ["LATE_RESPONSE service=", "QUEUE_HISTORY print_time_ms="],
-      },
-      {
-        id: "client-receive-blocked",
-        evidence_markers: ["LATE_RESPONSE service="],
-      },
-    ],
+function methodsV2ContractFixture() {
+  const caseId = "00000000-0000-4000-8000-000000000101";
+  const sourceJobId = "00000000-0000-4000-8000-000000000102";
+  const reviewerJobId = "00000000-0000-4000-8000-000000000103";
+  const evaluationId = "00000000-0000-4000-8000-000000000104";
+  const skillSha256 = "a".repeat(64);
+  const skillRef = { id: "diagnosis-skill/methods-v2", version: "2.0.0", content_hash: skillSha256 };
+  const methodCards = [
+    { id: "first-method", priority: 1, evidence_markers: ["shared marker"] },
+    { id: "second-method", priority: 2, evidence_markers: ["shared marker"] },
+  ];
+  const source = {
+    source_id: "server",
+    relative_path: "inputs/target-logs/server.log",
+    content_sha256: "b".repeat(64),
   };
-  fs.writeFileSync(path.join(skillRoot, "methods.json"), canonicalJson(methods), "utf8");
-  const registrationPath = path.join(registrationRoot, "registration-template.json");
-  fs.copyFileSync(
-    path.join(REPO_ROOT, "tests", "cases", "release", "rpc-timeout-anonymized", "registration", registrationId, "registration-template.json"),
-    registrationPath,
-  );
-
-  const packageIdentity = packageTreeIdentity(skillRoot);
-  assert.equal(packageIdentity.status, "PRESENT");
-  const packageEntries = packageIdentity.records
-    .filter((entry) => entry.kind === "file")
-    .map(({ path: entryPath, size, sha256 }) => ({ path: entryPath, size, sha256 }))
-    .sort((left, right) => left.path < right.path ? -1 : left.path > right.path ? 1 : 0);
-  const registrationSha256 = sha256File(registrationPath);
-  const packageTreeSha256 = sha256Bytes(canonicalJson({ version: 1, entries: packageEntries }));
-  const combinedSha256 = sha256Bytes(canonicalJson({
-    schema_version: 1,
-    registration_id: registrationId,
-    registration_sha256: registrationSha256,
-    package_tree_sha256: packageTreeSha256,
-  }));
-  const generatedSkill = {
-    registration_id: registrationId,
-    skill_name: skillName,
-    registration_sha256: registrationSha256,
-    package_tree_sha256: packageTreeSha256,
-    combined_sha256: combinedSha256,
-    source_wiki_sha256: sourceWikiSha256,
-  };
-
-  const stageRoot = path.join(attemptRoot, "payload", "stages", "journey.cross-job.diagnose");
-  fs.mkdirSync(stageRoot, { recursive: true });
-  const diagnosisJobId = "00000000-0000-4000-8000-000000000021";
-  const caseId = "00000000-0000-4000-8000-000000000022";
-  const skillRef = {
-    id: `diagnosis-skill/${registrationId}`,
-    version: "1.0.0",
-    content_hash: combinedSha256,
-  };
-  const logparseReceiptBytes = jsonBytes({ schema_version: 1, status: "PASS" });
-  const job = {
-    job_id: diagnosisJobId,
-    case_id: caseId,
-    job_type: "DIAGNOSE",
-    diagnosis_mode: "SPECIALIZED",
-    logparse_product: "rpc-skill-feasibility",
-    skill_ref: skillRef,
-  };
-  const jobBytes = jsonBytes(job);
-  const audit = {
-    schema_version: 1,
-    registration_id: registrationId,
-    registration_sha256: registrationSha256,
-    package_tree_sha256: packageTreeSha256,
-    combined_sha256: combinedSha256,
-    logparse_receipt_sha256: sha256Bytes(logparseReceiptBytes),
-    status: "CONFIRMED",
-    confirmed_methods: ["api-execution-overrun", "client-receive-blocked"],
-    evidence_count: 3,
-    checked_source_count: 2,
-    skill_load: {
-      package_tree_sha256: packageTreeSha256,
-      scanned_source_ids: ["client", "server"],
-      marker_hits: [
-        ["client", "LATE_RESPONSE", 1],
-        ["server", "API_COMPLETE", 1],
-        ["server", "API_COMPLETE", 2],
-      ],
-      loaded_method_ids: ["api-execution-overrun", "client-receive-blocked"],
-    },
-  };
-  const expected = {
-    diagnosis_job_id: diagnosisJobId,
-    case_id: caseId,
-    skill_ref: skillRef,
-    logparse_product: "rpc-skill-feasibility",
-    registration_id: registrationId,
-    registration_sha256: registrationSha256,
-    package_tree_sha256: packageTreeSha256,
-    combined_sha256: combinedSha256,
-    status: "CONFIRMED",
-    confirmed_methods: ["api-execution-overrun", "client-receive-blocked"],
-    known_method_ids: ["api-execution-overrun", "server-receive-queueing", "client-receive-blocked"],
-    source_ids: ["client", "server"],
-    evidence_count: 3,
-  };
-  const auditBytes = jsonBytes(audit);
-  const summary = validateMethodsGroundingExecutionRecord({ jobBytes, auditBytes, logparseReceiptBytes, expected });
-  fs.writeFileSync(path.join(stageRoot, "methods-diagnose-job.json"), jobBytes);
-  fs.writeFileSync(path.join(stageRoot, "methods-grounding-audit.json"), auditBytes);
-  fs.writeFileSync(path.join(stageRoot, "methods-logparse-receipt.json"), logparseReceiptBytes);
-  const receipt = {
-    methods_grounding: summary,
-    invocations: [
-      { job_type: "DIAGNOSE", job_id: diagnosisJobId },
-      { job_type: "DIAGNOSE", job_id: diagnosisJobId },
-      { job_type: "REVIEW", job_id: "00000000-0000-4000-8000-000000000023" },
-    ],
-  };
-  return {
-    attemptRoot,
-    context: { attemptRoot, repoRoot: REPO_ROOT },
-    generatedSkill,
-    receipt,
-    audit,
-    expected,
-    job,
-    logparseReceiptBytes,
-    methods,
-    methodsPath: path.join(skillRoot, "methods.json"),
-    stageRoot,
-  };
-}
-
-test("CrossJob Methods consumer re-derives method IDs from the generated package and rejects coherent unknown-method tampering", () => {
-  const fixture = materializeMethodsConsumerFixture();
-  try {
-    assert.equal(validMethodsGroundingOracleEvidence(fixture.context, fixture.receipt, fixture.generatedSkill), true);
-    const ambiguousJob = clone(fixture.receipt);
-    ambiguousJob.invocations[1].job_id = "00000000-0000-4000-8000-000000000024";
-    assert.equal(validMethodsGroundingOracleEvidence(fixture.context, ambiguousJob, fixture.generatedSkill), false);
-
-    const tamperedAudit = clone(fixture.audit);
-    tamperedAudit.confirmed_methods = ["unknown-method"];
-    tamperedAudit.skill_load.loaded_method_ids = ["unknown-method"];
-    const tamperedAuditBytes = jsonBytes(tamperedAudit);
-    fs.writeFileSync(path.join(fixture.stageRoot, "methods-grounding-audit.json"), tamperedAuditBytes);
-    const tamperedReceipt = clone(fixture.receipt);
-    tamperedReceipt.methods_grounding.confirmed_methods = ["unknown-method"];
-    tamperedReceipt.methods_grounding.audit_sha256 = sha256Bytes(tamperedAuditBytes);
-    assert.equal(validMethodsGroundingOracleEvidence(fixture.context, tamperedReceipt, fixture.generatedSkill), false);
-  } finally {
-    fs.rmSync(fixture.attemptRoot, { recursive: true, force: true });
-  }
-});
-
-function coherentlyRebindGeneratedMethods(fixture, changedMethods) {
-  fs.writeFileSync(fixture.methodsPath, jsonBytes(changedMethods));
-  const skillRoot = path.dirname(fixture.methodsPath);
-  const packageIdentity = packageTreeIdentity(skillRoot);
-  assert.equal(packageIdentity.status, "PRESENT");
-  const packageEntries = packageIdentity.records
-    .filter((entry) => entry.kind === "file")
-    .map(({ path: entryPath, size, sha256 }) => ({ path: entryPath, size, sha256 }))
-    .sort((left, right) => left.path < right.path ? -1 : left.path > right.path ? 1 : 0);
-  const packageTreeSha256 = sha256Bytes(canonicalJson({ version: 1, entries: packageEntries }));
-  const combinedSha256 = sha256Bytes(canonicalJson({
-    schema_version: 1,
-    registration_id: fixture.generatedSkill.registration_id,
-    registration_sha256: fixture.generatedSkill.registration_sha256,
-    package_tree_sha256: packageTreeSha256,
-  }));
-  const generatedSkill = {
-    ...fixture.generatedSkill,
-    package_tree_sha256: packageTreeSha256,
-    combined_sha256: combinedSha256,
-  };
-  const job = clone(fixture.job);
-  job.skill_ref.content_hash = combinedSha256;
-  const audit = clone(fixture.audit);
-  audit.package_tree_sha256 = packageTreeSha256;
-  audit.combined_sha256 = combinedSha256;
-  audit.skill_load.package_tree_sha256 = packageTreeSha256;
-  const expected = {
-    ...fixture.expected,
-    skill_ref: job.skill_ref,
-    package_tree_sha256: packageTreeSha256,
-    combined_sha256: combinedSha256,
-  };
-  const jobBytes = jsonBytes(job);
-  const auditBytes = jsonBytes(audit);
-  const summary = validateMethodsGroundingExecutionRecord({
-    jobBytes,
-    auditBytes,
-    logparseReceiptBytes: fixture.logparseReceiptBytes,
-    expected,
+  source.source_ref = v2Ref("source", "method-evidence-source-v2", source);
+  const line = "SHARED MARKER request_id=42";
+  const hits = methodCards.map((method) => {
+    const value = {
+      method_id: method.id,
+      method_priority: method.priority,
+      marker_index: 1,
+      source_ref: source.source_ref,
+      source_id: source.source_id,
+      line_number: 1,
+      marker: "shared marker",
+      line,
+    };
+    return { hit_ref: v2Ref("hit", "method-evidence-hit-v2", value), ...value };
   });
-  fs.writeFileSync(path.join(fixture.stageRoot, "methods-diagnose-job.json"), jobBytes);
-  fs.writeFileSync(path.join(fixture.stageRoot, "methods-grounding-audit.json"), auditBytes);
-  const receipt = { ...fixture.receipt, methods_grounding: summary };
-  return { generatedSkill, receipt };
-}
-
-test("CrossJob Methods consumer rejects a coherently rebound ordered-field mutation", () => {
-  const reordered = materializeMethodsConsumerFixture();
-  try {
-    const changedMethods = clone(reordered.methods);
-    changedMethods.required_user_inputs.reverse();
-    const changed = coherentlyRebindGeneratedMethods(reordered, changedMethods);
-    assert.equal(validMethodsGroundingOracleEvidence(reordered.context, changed.receipt, changed.generatedSkill), false);
-  } finally {
-    fs.rmSync(reordered.attemptRoot, { recursive: true, force: true });
-  }
-
-});
-
-function releaseReportFixture() {
-  const first = "API_COMPLETE service=svc_orders api=Reserve start_us=10000000 end_us=16500000";
-  const second = "API_COMPLETE service=svc_orders api=Reserve start_us=20000000 end_us=26800000";
-  const report = {
-    schema_version: 3,
-    status: "PARTIAL",
-    causal_factors: [{ factor_id: "api_overrun", required_rule_ids: ["event-1", "event-2"] }],
-    candidate_factors: [{ factor_id: "queue_delay", required_rule_ids: ["candidate-queue"] }],
-    excluded_factors: [],
-    verification_rules: [
-      { rule_id: "event-1", citations: [{ excerpt: first }] },
-      { rule_id: "event-2", citations: [{ excerpt: second }] },
-      { rule_id: "candidate-queue", citations: [] },
-    ],
-    completion_criteria_mapping: [
-      { criterion_index: 0, criterion: "split events", status: "PARTIALLY_SATISFIED" },
-      { criterion_index: 1, criterion: "retain gaps", status: "UNKNOWN" },
-    ],
-    recommendations: [],
-    safety_notes: ["RPC 超时不等于取消。"],
+  const events = hits.map((hit) => {
+    const value = {
+      method_id: hit.method_id,
+      method_priority: hit.method_priority,
+      identity_tokens: ["request_id=42"],
+      evidence_hit_refs: [hit.hit_ref],
+    };
+    return { event_ref: v2Ref("event", "method-evidence-event-v2", value), ...value };
+  });
+  const graphValue = {
+    skill_sha256: skillSha256,
+    source_refs: [source.source_ref],
+    hit_refs: hits.map((item) => item.hit_ref),
+    event_refs: events.map((item) => item.event_ref),
+    loaded_method_ids: methodCards.map((item) => item.id),
+    limitations: ["Only the frozen target was evaluated."],
   };
-  const expectation = {
-    report_status: "PARTIAL",
-    resolution_status: "PARTIAL",
-    causal_factor_ids: ["api_overrun"],
-    candidate_factor_ids: ["queue_delay"],
-    excluded_factor_ids: [],
-    required_evidence_identities: [
-      { factor_id: "api_overrun", marker: "API_COMPLETE", identity_tokens: ["start_us=10000000", "end_us=16500000"] },
-      { factor_id: "api_overrun", marker: "API_COMPLETE", identity_tokens: ["start_us=20000000", "end_us=26800000"] },
-    ],
-    forbidden_evidence_terms: ["ORACLE_FORBIDDEN"],
+  const graph = {
+    events,
+    graph_ref: v2Ref("graph", "method-evidence-graph-v2", graphValue),
+    hits,
+    limitations: graphValue.limitations,
+    loaded_method_ids: graphValue.loaded_method_ids,
+    skill_sha256: skillSha256,
+    sources: [source],
   };
-  return {
-    report,
-    expectation,
-    completionCriteria: ["split events", "retain gaps"],
-    requiredSafetyPhrases: ["超时不等于取消"],
+  const evaluations = methodCards.map((method, index) => {
+    const value = {
+      method_id: method.id,
+      method_priority: method.priority,
+      evidence_event_refs: [events[index].event_ref],
+      evidence_hit_refs: [hits[index].hit_ref],
+    };
+    return { evaluation_ref: v2Ref("eval", "method-evaluation-v2", value), ...value };
+  });
+  const planValue = {
+    skill_sha256: skillSha256,
+    evidence_graph_ref: graph.graph_ref,
+    evaluation_refs: evaluations.map((item) => item.evaluation_ref),
   };
-}
-
-test("CrossJob report oracle requires safety_notes placement and one verification rule per same-method event", () => {
-  const fixture = releaseReportFixture();
-  assert.equal(validateReleaseDiagnosisReport(fixture), true);
-
-  const misplacedSafety = clone(fixture);
-  misplacedSafety.report.recommendations = ["RPC 超时不等于取消。"];
-  misplacedSafety.report.safety_notes = ["Only the fixed scope was inspected."];
-  assert.throws(
-    () => validateReleaseDiagnosisReport(misplacedSafety),
-    (error) => error.code === "RESTART_RESULT_SAFETY_NOTES",
-  );
-
-  const mergedEvents = clone(fixture);
-  mergedEvents.report.causal_factors[0].required_rule_ids = ["merged-event"];
-  mergedEvents.report.verification_rules = [{
-    rule_id: "merged-event",
-    citations: [{ excerpt: `${fixture.report.verification_rules[0].citations[0].excerpt} ${fixture.report.verification_rules[1].citations[0].excerpt}` }],
+  const plan = {
+    evaluations,
+    evidence_graph_ref: graph.graph_ref,
+    plan_ref: v2Ref("plan", "method-evaluation-plan-v2", planValue),
+    skill_sha256: skillSha256,
+  };
+  const limitationsValue = {
+    case_id: caseId,
+    source_job_id: sourceJobId,
+    evidence_graph_ref: graph.graph_ref,
+    plan_ref: plan.plan_ref,
+    limitations: graph.limitations,
+  };
+  const limitations = {
+    ...limitationsValue,
+    record_ref: v2Ref("limitations", "method-limitations-record-v2", limitationsValue),
+    schema_version: 2,
+  };
+  const roleItems = (prefix) => evaluations.map((item, index) => ({
+    evaluation_ref: item.evaluation_ref,
+    reason: `${prefix} reason ${index + 1}`,
+    verdict: index === 0 ? "CONFIRMED" : "REJECTED",
+  }));
+  const specialist = { evaluations: roleItems("specialist"), plan_ref: plan.plan_ref, repair_used: false, role: "SPECIALIST" };
+  const reviewer = { evaluations: roleItems("reviewer"), plan_ref: plan.plan_ref, repair_used: false, role: "REVIEWER" };
+  const sourceState = {
+    case_id: caseId,
+    consensus: null,
+    current_role: "REVIEWER",
+    diagnostic_evaluation_ref: null,
+    diagnostic_id: null,
+    evaluation_id: evaluationId,
+    evaluation_refs: evaluations.map((item) => item.evaluation_ref),
+    plan_ref: plan.plan_ref,
+    reason_code: null,
+    reasons: [],
+    reviewer_evaluation: null,
+    reviewer_protocol_failures: 0,
+    source_job_id: sourceJobId,
+    specialist_evaluation: specialist,
+    specialist_protocol_failures: 0,
+    status: "REVIEWER_PENDING",
+  };
+  sourceState.state_ref = v2StateRef(sourceState);
+  const confirmedEvaluationRefs = [evaluations[0].evaluation_ref];
+  const diagnosticId = v2Ref("diag", "method-diagnostic-v2", {
+    case_id: caseId,
+    source_job_id: sourceJobId,
+    evaluation_id: evaluationId,
+    plan_ref: plan.plan_ref,
+    status: "RESOLVED",
+    reason_code: null,
+    evaluation_ref: null,
+  });
+  const terminalState = {
+    ...sourceState,
+    consensus: {
+      confirmed_evaluation_refs: confirmedEvaluationRefs,
+      confirmed_method_ids: [methodCards[0].id],
+      plan_ref: plan.plan_ref,
+      status: "RESOLVED",
+    },
+    current_role: null,
+    diagnostic_id: diagnosticId,
+    reviewer_evaluation: reviewer,
+    status: "RESOLVED",
+  };
+  terminalState.state_ref = v2StateRef(terminalState);
+  const target = {
+    evaluation_id: evaluationId,
+    graph_ref: graph.graph_ref,
+    plan_ref: plan.plan_ref,
+    reviewed_state_revision: 1,
+    schema_version: 2,
+    skill_ref: skillRef,
+    source_job_id: sourceJobId,
+  };
+  const sourceJob = { case_id: caseId, diagnosis_mode: "SPECIALIZED", job_id: sourceJobId, job_type: "DIAGNOSE", skill_ref: skillRef };
+  const reviewerJob = {
+    case_id: caseId,
+    context_snapshot: { candidate_conclusion: null },
+    job_id: reviewerJobId,
+    job_type: "REVIEW",
+    methods_review_target: target,
+    review_target: null,
+    skill_ref: skillRef,
+  };
+  const sourceOutcome = {
+    case_id: caseId,
+    consumed_evidence_refs: [],
+    decision_audit: null,
+    error: null,
+    job_id: sourceJobId,
+    job_type: "DIAGNOSE",
+    methods_review_target: target,
+    payload: null,
+    proposed_artifacts: [],
+    proposed_evidence: [],
+    result_type: "COMPLETED",
+  };
+  const confirmedEventRefs = [events[0].event_ref];
+  const confirmedHitRefs = [hits[0].hit_ref];
+  const resultEvaluations = [{
+    evaluation_ref: evaluations[0].evaluation_ref,
+    method_id: evaluations[0].method_id,
+    evidence_event_refs: evaluations[0].evidence_event_refs,
+    evidence_hit_refs: evaluations[0].evidence_hit_refs,
+    verdict: "CONFIRMED",
   }];
+  const resultRef = v2Ref("result", "method-terminal-result-v2", {
+    case_id: caseId,
+    source_job_id: sourceJobId,
+    terminal_job_id: reviewerJobId,
+    evaluation_id: evaluationId,
+    status: "RESOLVED",
+    plan_ref: plan.plan_ref,
+    evidence_graph_ref: graph.graph_ref,
+    reason_code: null,
+    diagnostic_id: diagnosticId,
+    diagnostic_evaluation_ref: null,
+    evaluations: resultEvaluations,
+    confirmed_evaluation_refs: confirmedEvaluationRefs,
+    confirmed_method_ids: [methodCards[0].id],
+    confirmed_event_refs: confirmedEventRefs,
+    confirmed_hit_refs: confirmedHitRefs,
+    limitations: graph.limitations,
+    reasons: [],
+  });
+  const publicMethodsResult = {
+    case_id: caseId,
+    confirmed_evaluation_refs: confirmedEvaluationRefs,
+    confirmed_event_refs: confirmedEventRefs,
+    confirmed_hit_refs: confirmedHitRefs,
+    confirmed_method_ids: [methodCards[0].id],
+    diagnostic_evaluation_ref: null,
+    diagnostic_id: diagnosticId,
+    evaluation_id: evaluationId,
+    evidence_graph_ref: graph.graph_ref,
+    limitations: graph.limitations,
+    plan_ref: plan.plan_ref,
+    reason_code: null,
+    reasons: [],
+    result_ref: resultRef,
+    schema_version: 2,
+    source_job_id: reviewerJobId,
+    status: "RESOLVED",
+  };
+  const reviewerOutcome = {
+    case_id: caseId,
+    consumed_evidence_refs: [],
+    decision_audit: null,
+    error: null,
+    job_id: reviewerJobId,
+    job_type: "REVIEW",
+    methods_reviewer_result: {
+      evaluations: reviewer.evaluations,
+      repair_used: false,
+      review_job_id: reviewerJobId,
+      role: "REVIEWER",
+      schema_version: 2,
+      target,
+    },
+    methods_terminal_projection: publicMethodsResult,
+    payload: null,
+    proposed_artifacts: [],
+    proposed_evidence: [],
+    result_type: "COMPLETED",
+  };
+  const values = {
+    source_job: sourceJob,
+    reviewer_job: reviewerJob,
+    evidence_graph: graph,
+    evaluation_plan: plan,
+    limitations,
+    source_state: sourceState,
+    source_outcome: sourceOutcome,
+    terminal_state: terminalState,
+    reviewer_outcome: reviewerOutcome,
+  };
+  return {
+    files: Object.fromEntries(Object.entries(values).map(([key, value]) => [key, jsonBytes(value)])),
+    expected: {
+      source_job_id: sourceJobId,
+      reviewer_job_id: reviewerJobId,
+      case_id: caseId,
+      skill_ref: skillRef,
+      source_ids: ["server"],
+      method_cards: methodCards,
+      loaded_method_ids: methodCards.map((item) => item.id),
+      confirmed_method_ids: [methodCards[0].id],
+      required_evidence_identities: [{ method_id: methodCards[0].id, marker: "shared marker", identity_tokens: ["request_id=42"] }],
+    },
+    invocations: [
+      { effective_model: "same-model", job_id: sourceJobId, job_type: "DIAGNOSE" },
+      { effective_model: "same-model", job_id: reviewerJobId, job_type: "REVIEW" },
+    ],
+    publicMethodsResult,
+  };
+}
+
+test("CrossJob Evidence V2 oracle verifies method-qualified Graph, complete Plan, blind consensus, and zero-artifact restart", () => {
+  const fixture = methodsV2ContractFixture();
+  const summary = validateMethodsV2ExecutionRecords(fixture);
+  assert.equal(summary.status, "PASS");
+  assert.equal(summary.evidence_hit_count, 2);
+  assert.equal(summary.evaluation_count, 2);
+  assert.deepEqual(summary.confirmed_method_ids, ["first-method"]);
+  assert.equal(summary.service_model_calls, 2);
+  assert.deepEqual(Object.keys(summary.record_sha256).sort(), Object.keys(METHODS_V2_CAPTURED_FILES).sort());
+  const caseView = {
+    case_id: summary.case_id,
+    status: "RESOLVED",
+    final_result: null,
+    unresolved_result: null,
+    generic_result: null,
+    generic_result_v2: null,
+    methods_result: fixture.publicMethodsResult,
+    artifacts: [],
+  };
+  assert.equal(validateMethodsV2RestartSnapshot({
+    caseView,
+    artifacts: [],
+    methodsSummary: summary,
+    restartedFiles: fixture.files,
+  }), true);
+});
+
+test("CrossJob Evidence V2 oracle rejects one-field shared-literal, role-output, and restart mutations", () => {
+  const fixture = methodsV2ContractFixture();
+  const missingQualifiedHit = { ...fixture, files: { ...fixture.files } };
+  const graph = JSON.parse(missingQualifiedHit.files.evidence_graph);
+  graph.hits.splice(1, 1);
+  missingQualifiedHit.files.evidence_graph = jsonBytes(graph);
   assert.throws(
-    () => validateReleaseDiagnosisReport(mergedEvents),
-    (error) => error.code === "RELEASE_RESULT_EVIDENCE_EVENT_COUNT",
+    () => validateMethodsV2ExecutionRecords(missingQualifiedHit),
+    (error) => error.code === "METHODS_V2_GRAPH_METHOD_QUALIFICATION",
+  );
+
+  const extraRoleField = { ...fixture, files: { ...fixture.files } };
+  const terminal = JSON.parse(extraRoleField.files.terminal_state);
+  terminal.reviewer_evaluation.evaluations[0].marker = "shared marker";
+  extraRoleField.files.terminal_state = jsonBytes(terminal);
+  assert.throws(() => validateMethodsV2ExecutionRecords(extraRoleField));
+
+  const summary = validateMethodsV2ExecutionRecords(fixture);
+  const changedCase = {
+    case_id: summary.case_id,
+    status: "RESOLVED",
+    final_result: null,
+    unresolved_result: null,
+    generic_result: null,
+    generic_result_v2: null,
+    methods_result: { ...fixture.publicMethodsResult, result_ref: `result-${"f".repeat(64)}` },
+    artifacts: [],
+  };
+  assert.throws(
+    () => validateMethodsV2RestartSnapshot({ caseView: changedCase, artifacts: [], methodsSummary: summary, restartedFiles: fixture.files }),
+    (error) => error.code === "METHODS_V2_RESTART_CASE_MISMATCH",
   );
 });
 

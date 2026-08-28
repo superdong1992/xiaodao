@@ -36,7 +36,10 @@ import {
   loadReleaseCaseInputs,
   loadReleaseCaseOracle,
 } from "./release-case.mjs";
-import { validateMethodsGroundingExecutionRecord } from "./methods-oracle.mjs";
+import {
+  METHODS_V2_CAPTURED_FILES,
+  validateMethodsV2ExecutionRecords,
+} from "./methods-oracle.mjs";
 import {
   buildIsolatedAgentEnvironment,
   ISOLATED_AGENT_CLAUDE_OUTPUT_TOKEN_KEY,
@@ -942,63 +945,83 @@ function generatedMethodsExpectation(context, generatedSkill, inputs, gateOracle
     throw new Error("GENERATED_METHODS_SET_DRIFT");
   }
 
-  const confirmedMethods = scenarioOracle.oracle.required_confirmed_marker_groups.map((group) => {
+  const mapMarkerGroups = (groups, label) => groups.map((group) => {
     const requiredMarkers = uniqueSortedStrings(group, "GENERATED_METHODS_CONFIRMED_MARKERS_INVALID");
     const candidates = generatedMethods.filter((entry) => requiredMarkers.every((marker) => (
       entry.markers.some((declared) => declared.includes(marker))
     )));
-    if (candidates.length === 0) throw new Error("GENERATED_METHODS_CONFIRMED_MAPPING_INVALID");
+    if (candidates.length === 0) throw new Error(`GENERATED_METHODS_${label}_MAPPING_INVALID`);
     const minimumMarkerCount = Math.min(...candidates.map((entry) => entry.markers.length));
     const minimal = candidates.filter((entry) => entry.markers.length === minimumMarkerCount);
-    if (minimal.length !== 1) throw new Error("GENERATED_METHODS_CONFIRMED_MAPPING_AMBIGUOUS");
+    if (minimal.length !== 1) throw new Error(`GENERATED_METHODS_${label}_MAPPING_AMBIGUOUS`);
     return minimal[0].method_id;
   });
+  const confirmedMethods = mapMarkerGroups(scenarioOracle.oracle.required_confirmed_marker_groups, "CONFIRMED");
+  mapMarkerGroups(scenarioOracle.oracle.required_candidate_marker_groups, "UNCONFIRMED");
   if (confirmedMethods.length !== new Set(confirmedMethods).size) {
     throw new Error("GENERATED_METHODS_CONFIRMED_MAPPING_DUPLICATE");
   }
-  return { confirmedMethods, knownMethodIds };
+  const methodCards = methods.methods
+    .map((method) => ({
+      id: method.id,
+      priority: method.priority,
+      evidence_markers: [...method.evidence_markers],
+    }))
+    .sort((left, right) => left.priority - right.priority || left.id.localeCompare(right.id));
+  const confirmedMethodSet = new Set(confirmedMethods);
+  const orderedConfirmedMethods = methodCards
+    .map((method) => method.id)
+    .filter((methodId) => confirmedMethodSet.has(methodId));
+  const requiredEvidenceIdentities = scenarioOracle.oracle.required_evidence_identities.map((identity) => ({
+    method_id: mapMarkerGroups([[identity.marker]], "EVIDENCE_IDENTITY")[0],
+    marker: identity.marker,
+    identity_tokens: uniqueSortedStrings(identity.identity_tokens, "GENERATED_METHODS_EVIDENCE_IDENTITY_INVALID"),
+  }));
+  if (requiredEvidenceIdentities.some((identity) => !confirmedMethods.includes(identity.method_id))) {
+    throw new Error("GENERATED_METHODS_EVIDENCE_IDENTITY_UNCONFIRMED");
+  }
+  return {
+    confirmedMethods: orderedConfirmedMethods,
+    methodCards,
+    requiredEvidenceIdentities,
+  };
 }
 
-export function validMethodsGroundingOracleEvidence(context, receipt, generatedSkill) {
+export function validMethodsV2OracleEvidence(context, receipt, generatedSkill) {
   try {
     const caseRoot = discoverReleaseCaseRoot(path.join(context.repoRoot, "tests", "cases", "release"));
     const inputs = loadReleaseCaseInputs(caseRoot);
     const gateOracle = loadReleaseCaseOracle(caseRoot);
     const scenario = inputs.scenarios.find((item) => item.scenario_id === inputs.journey_scenario);
     const scenarioOracle = gateOracle.scenarios.find((item) => item.scenario_id === inputs.journey_scenario);
-    if (!scenario || !scenarioOracle || typeof receipt?.methods_grounding?.diagnosis_job_id !== "string") return false;
-    const diagnosisJobIds = [...new Set((receipt.invocations ?? [])
-      .filter((invocation) => invocation?.job_type === "DIAGNOSE")
-      .map((invocation) => invocation?.job_id))];
-    if (diagnosisJobIds.length !== 1
-      || diagnosisJobIds[0] !== receipt.methods_grounding.diagnosis_job_id) return false;
+    if (!scenario || !scenarioOracle || receipt?.methods_v2?.schema_version !== 2) return false;
     const methodsExpectation = generatedMethodsExpectation(context, generatedSkill, inputs, gateOracle, scenarioOracle);
     const stageRoot = path.join(context.attemptRoot, "payload", "stages", "journey.cross-job.diagnose");
-    const validated = validateMethodsGroundingExecutionRecord({
-      jobBytes: fs.readFileSync(path.join(stageRoot, "methods-diagnose-job.json")),
-      auditBytes: fs.readFileSync(path.join(stageRoot, "methods-grounding-audit.json")),
-      logparseReceiptBytes: fs.readFileSync(path.join(stageRoot, "methods-logparse-receipt.json")),
+    const files = Object.fromEntries(Object.entries(METHODS_V2_CAPTURED_FILES).map(([key, filename]) => (
+      [key, fs.readFileSync(path.join(stageRoot, filename))]
+    )));
+    const reviewerOutcome = JSON.parse(files.reviewer_outcome.toString("utf8"));
+    const validated = validateMethodsV2ExecutionRecords({
+      files,
+      invocations: (receipt.invocations ?? []).filter((invocation) => ["DIAGNOSE", "REVIEW"].includes(invocation?.job_type)),
+      publicMethodsResult: reviewerOutcome.methods_terminal_projection,
       expected: {
-        diagnosis_job_id: receipt.methods_grounding.diagnosis_job_id,
-        case_id: receipt.methods_grounding.case_id,
+        source_job_id: receipt.methods_v2.source_job_id,
+        reviewer_job_id: receipt.methods_v2.reviewer_job_id,
+        case_id: receipt.methods_v2.case_id,
         skill_ref: {
           id: inputs.product_registration.runtime_ref_id,
           version: inputs.product_registration.version,
           content_hash: generatedSkill.combined_sha256,
         },
-        logparse_product: inputs.product_registration.logparse_product,
-        registration_id: generatedSkill.registration_id,
-        registration_sha256: generatedSkill.registration_sha256,
-        package_tree_sha256: generatedSkill.package_tree_sha256,
-        combined_sha256: generatedSkill.combined_sha256,
-        status: scenarioOracle.oracle.expected_status,
-        confirmed_methods: methodsExpectation.confirmedMethods,
-        known_method_ids: methodsExpectation.knownMethodIds,
-        source_ids: scenario.driver.attachment_anchor_names,
-        evidence_count: scenarioOracle.oracle.required_evidence_identities.length,
+        source_ids: [...scenario.driver.attachment_anchor_names].sort(),
+        method_cards: methodsExpectation.methodCards,
+        loaded_method_ids: methodsExpectation.methodCards.map((method) => method.id),
+        confirmed_method_ids: methodsExpectation.confirmedMethods,
+        required_evidence_identities: methodsExpectation.requiredEvidenceIdentities,
       },
     });
-    return sameIdentity(validated, receipt.methods_grounding);
+    return sameIdentity(validated, receipt.methods_v2);
   } catch {
     return false;
   }
@@ -3360,8 +3383,8 @@ async function crossJob(context, stage) {
   if (receipt.status === "PASS" && stage.id === "journey.cross-job.diagnose" && receipt.browser_api?.status !== "PASS") {
     return { ...result, status: "ERROR", failure_domain: "HARNESS", code: "CROSS_JOB_BROWSER_API_RECEIPT_INVALID" };
   }
-  if (receipt.status === "PASS" && stage.id === "journey.cross-job.diagnose" && !validMethodsGroundingOracleEvidence(context, receipt, generatedSkill)) {
-    return { ...result, status: "ERROR", failure_domain: "HARNESS", code: "CROSS_JOB_METHODS_ORACLE_EVIDENCE_INVALID" };
+  if (receipt.status === "PASS" && stage.id === "journey.cross-job.diagnose" && !validMethodsV2OracleEvidence(context, receipt, generatedSkill)) {
+    return { ...result, status: "ERROR", failure_domain: "HARNESS", code: "CROSS_JOB_METHODS_V2_ORACLE_EVIDENCE_INVALID" };
   }
   if (result.status === "ERROR") return { ...result, failure_domain: "HARNESS", code: result.termination?.trigger ?? "CROSS_JOB_EVIDENCE_ERROR" };
   if (result.status === "INCONCLUSIVE") return { ...result, failure_domain: "EXTERNAL", code: result.termination?.trigger ?? "EXTERNAL_INCONCLUSIVE" };
@@ -3389,7 +3412,7 @@ async function crossJob(context, stage) {
         browser_api: receipt.browser_api ?? null,
         browser_capability: receipt.browser_capability ?? null,
         browser_failure: receipt.browser_failure ?? null,
-        methods_grounding: receipt.methods_grounding ?? null,
+        methods_v2: receipt.methods_v2 ?? null,
       },
     };
   }
@@ -3411,7 +3434,7 @@ async function crossJob(context, stage) {
       browser_api: receipt.browser_api ?? null,
       browser_capability: receipt.browser_capability ?? null,
       browser_failure: receipt.browser_failure ?? null,
-      methods_grounding: receipt.methods_grounding ?? null,
+      methods_v2: receipt.methods_v2 ?? null,
       topology: receipt.topology,
       runtime_images: receipt.runtime_images,
       runtime_resources: receipt.runtime_resources,
