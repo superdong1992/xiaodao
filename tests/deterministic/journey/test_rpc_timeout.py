@@ -841,7 +841,6 @@ def test_rpc_timeout_methods_v2_is_one_durable_same_job_path(
     entered_records = _agent_records(agent_record)
     assert [item["phase"] for item in entered_records] == [
         "ROUTE",
-        "LOGPARSE_PREPROCESS",
         "METHODS_DIAGNOSE",
         "METHODS_REVIEW",
     ]

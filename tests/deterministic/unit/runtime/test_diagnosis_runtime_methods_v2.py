@@ -305,6 +305,22 @@ def _runtime(
     job, aggregate, resources = _claimed_logparse_job_state_and_resources(catalog)
     records = records or InMemoryExecutionRecordStore()
     backend = _EvidenceV2SpecialistBackend(factory, job, responses)
+
+    def execute_preprocessing(
+        session: object,
+        operation: str,
+        request_path: str,
+        result_path: str,
+    ) -> None:
+        assert operation == "parse-targets"
+        assert request_path == "output/proposals/methods-preprocess/request.json"
+        assert result_path == "output/proposals/methods-preprocess/target_logs.json"
+        backend._run_preprocessing(  # noqa: SLF001 - production-port test fixture
+            {"workspace_root": getattr(session, "workspace_root")}
+        )
+        return None
+
+    factory.preprocessing_executor = execute_preprocessing
     runtime = DiagnosisRuntime(
         state_repository=_StateView(aggregate),
         resource_store=resources,
@@ -559,17 +575,18 @@ def test_specialist_scans_once_hard_cuts_logs_and_publishes_handoff(
     receipt = runtime.execute(job, InMemoryCancellationSignal())
 
     assert calls == 1
-    assert len(backend.calls) == 2
+    assert len(backend.calls) == 1
     assert len(backend.role_prompts) == 1
-    preprocess_prompt = backend.calls[0]["prompt"]
-    helper_call = "Skill(logparse-diagnose)"
-    broker_call = "problem-locator-logparse parse-targets"
-    assert preprocess_prompt.count(helper_call) == 1
-    assert preprocess_prompt.count("problem-locator-logparse") == 1
-    assert preprocess_prompt.index(helper_call) < preprocess_prompt.index(broker_call)
-    assert "SERVER_PREPROCESS" in preprocess_prompt
-    assert "never retry" in preprocess_prompt
-    assert backend.session_closed_at_call == [False, True]
+    assert len(backend.factory.sessions) == 1
+    broker_session = backend.factory.sessions[0]
+    assert getattr(broker_session, "deterministic_execute_calls") == [
+        (
+            "parse-targets",
+            "output/proposals/methods-preprocess/request.json",
+            "output/proposals/methods-preprocess/target_logs.json",
+        )
+    ]
+    assert backend.session_closed_at_call == [True]
     assert backend.factory.sessions[0].closed is True  # type: ignore[attr-defined]
     assert records.read_audit_bytes(job.job_id, "logparse_broker_audit.json")
     assert receipt.job_outcome.result_type is OutcomeResultType.COMPLETED
@@ -598,7 +615,7 @@ def test_specialist_uses_one_repair_then_stops(
 
     receipt = runtime.execute(job, InMemoryCancellationSignal())
 
-    assert len(backend.calls) == 3
+    assert len(backend.calls) == 2
     assert len(backend.role_prompts) == 2
     assert receipt.job_outcome.result_type is OutcomeResultType.INCONCLUSIVE
     projection = receipt.job_outcome.methods_terminal_projection
@@ -637,7 +654,7 @@ def test_specialist_output_io_failure_is_failed_without_repair(
 
     receipt = runtime.execute(job, InMemoryCancellationSignal())
 
-    assert len(backend.calls) == 2
+    assert len(backend.calls) == 1
     projection = receipt.job_outcome.methods_terminal_projection
     assert receipt.job_outcome.result_type is OutcomeResultType.FAILED
     assert projection is not None
@@ -657,11 +674,11 @@ def test_specialist_preprocessing_requires_claim_and_matching_request(
     receipt = runtime.execute(job, InMemoryCancellationSignal())
 
     if accept_request:
-        assert len(backend.calls) == 1
+        assert len(backend.calls) == 0
         assert receipt.job_outcome.error is not None
         assert receipt.job_outcome.error.code is ErrorCode.LOGPARSE_OUTPUT_INVALID
     else:
-        assert len(backend.calls) == 2
+        assert len(backend.calls) == 1
         assert receipt.job_outcome.methods_review_target is not None
 
 
@@ -678,7 +695,7 @@ def test_specialist_private_reason_is_not_published_in_handoff(
     state = read_method_state_v2(records, job_id=job.job_id)
     assert state is not None and state.specialist_evaluation is not None
     assert state.specialist_evaluation.evaluations[0].reason == "contract-test-token-1"
-    workspace_root = Path(backend.calls[1]["workspace_root"])
+    workspace_root = Path(backend.calls[0]["workspace_root"])
     assert b"contract-test-token-1" in (
         workspace_root / "output/method-diagnosis.draft.json"
     ).read_bytes()
@@ -817,7 +834,7 @@ def test_specialist_restart_reuses_graph_and_runs_only_repair(
     with pytest.raises(KeyboardInterrupt, match="restart boundary"):
         first.execute(first_job, InMemoryCancellationSignal())
 
-    assert len(first_backend.calls) == 2
+    assert len(first_backend.calls) == 1
     assert read_method_rejected_attempt_v2(
         records,
         job_id=first_job.job_id,
@@ -866,7 +883,7 @@ def test_specialist_restart_rebuilds_missing_plan_from_recorded_graph(
     with pytest.raises(KeyboardInterrupt, match="restart boundary"):
         first.execute(first_job, InMemoryCancellationSignal())
 
-    assert len(first_backend.calls) == 1
+    assert len(first_backend.calls) == 0
     assert read_method_evidence_graph_v2(records, job_id=first_job.job_id) is not None
     assert read_method_evaluation_plan_v2(records, job_id=first_job.job_id) is None
 
@@ -1480,7 +1497,7 @@ def test_specialist_adopts_exact_audit_record_after_ambiguous_write(
     receipt = runtime.execute(job, InMemoryCancellationSignal())
 
     assert records.failed_once is True
-    assert len(backend.calls) == 2
+    assert len(backend.calls) == 1
     assert receipt.job_outcome.methods_review_target is not None
     assert receipt.job_outcome.methods_terminal_projection is None
     state = read_method_state_v2(records, job_id=job.job_id)
@@ -1517,7 +1534,7 @@ def test_unknown_backend_exception_is_server_invariant_not_audit_failure(
 
     receipt = runtime.execute(job, InMemoryCancellationSignal())
 
-    assert len(backend.calls) == 2
+    assert len(backend.calls) == 1
     projection = receipt.job_outcome.methods_terminal_projection
     assert projection is not None
     assert projection.status == "FAILED"
@@ -1531,7 +1548,7 @@ def test_model_execution_failure_is_unresolved_without_repair(
 
     receipt = runtime.execute(job, InMemoryCancellationSignal())
 
-    assert len(backend.calls) == 2
+    assert len(backend.calls) == 1
     assert receipt.job_outcome.result_type is OutcomeResultType.INCONCLUSIVE
     projection = receipt.job_outcome.methods_terminal_projection
     assert projection is not None
@@ -1547,7 +1564,7 @@ def test_cancellation_persists_interrupted_state_without_terminal_projection(
 
     receipt = runtime.execute(job, InMemoryCancellationSignal())
 
-    assert len(backend.calls) == 2
+    assert len(backend.calls) == 1
     assert receipt.job_outcome.methods_terminal_projection is None
     assert receipt.job_outcome.error is not None
     assert receipt.job_outcome.error.code is ErrorCode.BACKEND_CANCELLED

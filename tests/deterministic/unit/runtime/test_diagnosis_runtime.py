@@ -2438,10 +2438,14 @@ class _MethodsTwoPassBackend:
     def _close_sinks(kwargs: dict[str, Any]) -> None:
         _PublicFakeClaimingBackend._close_sinks(kwargs)
 
+    def _finish_preprocessing(self, kwargs: dict[str, Any]) -> None:
+        if "log_sinks" in kwargs:
+            self._close_sinks(kwargs)
+
     def _run_preprocessing(self, kwargs: dict[str, Any]) -> BackendExecution:
         workspace_root = Path(kwargs["workspace_root"])
         if self.result == "helper_load_failed":
-            self._close_sinks(kwargs)
+            self._finish_preprocessing(kwargs)
             raise runtime_failure(
                 stage=ExecutionStage.BACKEND_EXECUTE,
                 code=ErrorCode.BACKEND_EXIT_FAILED,
@@ -2571,7 +2575,7 @@ class _MethodsTwoPassBackend:
             canonical_json_bytes(result)
         )
 
-        self._close_sinks(kwargs)
+        self._finish_preprocessing(kwargs)
         if self.result == "timeout":
             raise _failure()
         if self.result == "failed":
@@ -2706,6 +2710,20 @@ def _public_fake_claiming_runtime(
         accept_request=accept_request,
         emit_claim=emit_claim,
     )
+
+    def execute_preprocessing(
+        session: object,
+        operation: str,
+        request_path: str,
+        result_path: str,
+    ) -> None:
+        del operation, request_path, result_path
+        backend._run_preprocessing(  # noqa: SLF001 - production-port test fixture
+            {"workspace_root": getattr(session, "workspace_root")}
+        )
+        return None
+
+    factory.preprocessing_executor = execute_preprocessing
     runtime = DiagnosisRuntime(
         state_repository=_StateView(aggregate),
         resource_store=resources,
@@ -2859,8 +2877,22 @@ def test_default_product_survives_compiler_and_workspace_manifest(
     backend = _MethodsTwoPassBackend(
         factory,
         job,
-        "helper_load_failed",
+        "failed",
     )
+
+    def execute_preprocessing(
+        session: object,
+        operation: str,
+        request_path: str,
+        result_path: str,
+    ) -> None:
+        del operation, request_path, result_path
+        backend._run_preprocessing(  # noqa: SLF001 - production-port test fixture
+            {"workspace_root": getattr(session, "workspace_root")}
+        )
+        return None
+
+    factory.preprocessing_executor = execute_preprocessing
     runtime = DiagnosisRuntime(
         state_repository=_StateView(aggregate),
         resource_store=resources,
@@ -2877,8 +2909,9 @@ def test_default_product_survives_compiler_and_workspace_manifest(
 
     assert job.logparse_product == "default"
     assert receipt.job_outcome.error is not None
-    assert receipt.job_outcome.error.code is ErrorCode.BACKEND_EXIT_FAILED
-    preprocessing_root = Path(backend.calls[0]["workspace_root"])
+    assert receipt.job_outcome.error.code is ErrorCode.LOGPARSE_FAILED
+    assert backend.calls == []
+    preprocessing_root = Path(factory.open_calls[0][1])
     manifest = parse_canonical_json_bytes(
         (preprocessing_root / "inputs/manifest.json").read_bytes(),
         WorkspaceInputManifest,
@@ -2930,70 +2963,29 @@ def _agent_json_claiming_runtime(
     return runtime, job, backend
 
 
-@pytest.mark.parametrize(
-    ("result", "expected_code"),
-    [
-        ("timeout", ErrorCode.BACKEND_TIMEOUT),
-        ("failed", ErrorCode.LOGPARSE_FAILED),
-    ],
-)
-def test_public_broker_fake_closes_claimed_timeout_and_failed_executions(
-    result: str,
-    expected_code: ErrorCode,
+def test_public_broker_fake_closes_claimed_failed_execution(
     tmp_path: Path,
 ) -> None:
     runtime, job, factory, backend, _ = _public_fake_claiming_runtime(
         tmp_path,
-        result,
+        "failed",
     )
 
     receipt = runtime.execute(job, InMemoryCancellationSignal())
 
     assert receipt.job_outcome.error is not None
-    assert receipt.job_outcome.error.code is expected_code
+    assert receipt.job_outcome.error.code is ErrorCode.LOGPARSE_FAILED
+    assert backend.calls == []
     assert backend.claim is not None
     assert backend.request_bytes is not None
     session = factory.sessions[0]
     assert session.closed is True  # type: ignore[attr-defined]
     assert session.close_calls == 1  # type: ignore[attr-defined]
     assert session.parse_request_bytes() == backend.request_bytes
-    if result == "timeout":
-        assert not any(
-            detail.field == "logparse_claim"
-            for detail in receipt.job_outcome.error.details
-        )
-
-
 def test_unclassified_methods_validation_uses_generic_reason_code() -> None:
     assert _method_validation_reason_code(ValueError("unclassified")) is (
         MethodsValidationReasonCode.VALIDATION_FAILED
     )
-
-
-def test_methods_helper_load_failure_never_reaches_broker_or_pass_b(
-    tmp_path: Path,
-) -> None:
-    # The fake models a terminal Helper-load failure; it does not claim to
-    # observe a real Claude Skill tool call. Fast E2E owns that trace proof.
-    runtime, job, factory, backend, _ = _public_fake_claiming_runtime(
-        tmp_path,
-        "helper_load_failed",
-    )
-
-    receipt = runtime.execute(job, InMemoryCancellationSignal())
-
-    assert receipt.job_outcome.error is not None
-    assert receipt.job_outcome.error.code is ErrorCode.BACKEND_EXIT_FAILED
-    assert len(backend.calls) == 1
-    assert len(factory.sessions) == 1
-    session = factory.sessions[0]
-    assert session.closed is True  # type: ignore[attr-defined]
-    assert session.close_calls == 1  # type: ignore[attr-defined]
-    assert session.parse_request_bytes() is None
-    records = runtime._execution_records
-    assert isinstance(records, InMemoryExecutionRecordStore)
-    assert records.read_audit_bytes(job.job_id, "logparse_broker_audit.json") is None
-    assert records.read_audit_bytes(job.job_id, "methods_target_logs.json") is None
 
 
 def test_methods_preprocessing_rejects_failed_operation_before_success(
@@ -3008,7 +3000,7 @@ def test_methods_preprocessing_rejects_failed_operation_before_success(
 
     assert receipt.job_outcome.error is not None
     assert receipt.job_outcome.error.code is ErrorCode.LOGPARSE_OUTPUT_INVALID
-    assert len(backend.calls) == 1
+    assert backend.calls == []
     session = factory.sessions[0]
     assert session.closed is True  # type: ignore[attr-defined]
     assert session.close_calls == 1  # type: ignore[attr-defined]
@@ -3074,107 +3066,6 @@ def test_logparse_broker_asset_failure_is_classified_before_evaluation(
     sinks = records.log_sinks[job.job_id]
     assert sinks.stdout.close_calls == 1  # type: ignore[attr-defined]
     assert sinks.stderr.close_calls == 1  # type: ignore[attr-defined]
-
-
-def test_broker_close_failure_preserves_possible_secret_output(
-    tmp_path: Path,
-) -> None:
-    factory = _RuntimeBrokerFactory(close_fails=True)
-    catalog = _logparse_catalog(tmp_path, factory)
-    job, aggregate, resources = _claimed_logparse_job_state_and_resources(catalog)
-    unsafe = _failed_logparse_agent_outcome(job).model_dump(mode="json")
-    unsafe["error"]["message"] = "runtime-test-token"
-    backend = _RuntimeBackend(
-        canonical_json_bytes(AgentJobOutcomeDraftV2.model_validate(unsafe))
-    )
-    records = InMemoryExecutionRecordStore()
-    runtime = DiagnosisRuntime(
-        state_repository=_StateView(aggregate),
-        resource_store=resources,
-        asset_catalog=catalog,
-        logparse_broker_factory=factory,
-        execution_records=records,
-        clock=_Clock(),
-        id_generator=_Ids(),
-        workspace_manager=WorkspaceManager(tmp_path / "close-secret-data"),
-        backend=backend,  # type: ignore[arg-type]
-    )
-
-    receipt = runtime.execute(job, InMemoryCancellationSignal())
-
-    assert receipt.job_outcome.error is not None
-    assert receipt.job_outcome.error.code is ErrorCode.LOGPARSE_FAILED
-    assert factory.session.events == ["close", "parse_request_bytes", "audit_bytes"]
-    workspace_root = factory.calls[0][1]
-    assert (workspace_root / "output/job_outcome.draft.json").is_file()
-    assert b"runtime-test-token" not in records.publish_outcome_calls[0][1]
-
-
-def test_backend_timeout_preserves_primary_when_claim_audit_fails(
-    tmp_path: Path,
-) -> None:
-    class TimeoutBackend:
-        def execute(self, **kwargs: Any) -> BackendExecution:
-            workspace_root = Path(kwargs["workspace_root"])
-            (workspace_root / "runtime/tool-state/unexpected-node").write_bytes(b"x")
-            raise _failure()
-
-    factory = _RuntimeBrokerFactory()
-    catalog = _logparse_catalog(tmp_path, factory)
-    job, aggregate, resources = _claimed_logparse_job_state_and_resources(catalog)
-    records = InMemoryExecutionRecordStore()
-    runtime = DiagnosisRuntime(
-        state_repository=_StateView(aggregate),
-        resource_store=resources,
-        asset_catalog=catalog,
-        logparse_broker_factory=factory,
-        execution_records=records,
-        clock=_Clock(),
-        id_generator=_Ids(),
-        workspace_manager=WorkspaceManager(tmp_path / "timeout-claim-data"),
-        backend=TimeoutBackend(),  # type: ignore[arg-type]
-    )
-
-    cancellation = InMemoryCancellationSignal()
-    receipt = runtime.execute(job, cancellation)
-
-    assert receipt.job_outcome.error is not None
-    assert receipt.job_outcome.error.code is ErrorCode.BACKEND_TIMEOUT
-    assert any(
-        detail.field == "logparse_claim" and detail.actual == "audit_failed"
-        for detail in receipt.job_outcome.error.details
-    )
-    assert factory.session.events == ["close", "parse_request_bytes", "audit_bytes"]
-    assert cancellation.is_cancelled() is False
-
-
-def test_successful_backend_audits_claim_before_reporting_missing_outcome(
-    tmp_path: Path,
-) -> None:
-    factory = _RuntimeBrokerFactory()
-    catalog = _logparse_catalog(tmp_path, factory)
-    job, aggregate, resources = _claimed_logparse_job_state_and_resources(catalog)
-    backend = _RuntimeBackend(
-        None,
-        tool_state_files={"unexpected-node": b"not a claim"},
-    )
-    runtime = DiagnosisRuntime(
-        state_repository=_StateView(aggregate),
-        resource_store=resources,
-        asset_catalog=catalog,
-        logparse_broker_factory=factory,
-        execution_records=InMemoryExecutionRecordStore(),
-        clock=_Clock(),
-        id_generator=_Ids(),
-        workspace_manager=WorkspaceManager(tmp_path / "missing-outcome-claim-data"),
-        backend=backend,  # type: ignore[arg-type]
-    )
-
-    receipt = runtime.execute(job, InMemoryCancellationSignal())
-
-    assert receipt.job_outcome.error is not None
-    assert receipt.job_outcome.error.code is ErrorCode.LOGPARSE_OUTPUT_INVALID
-    assert factory.session.events == ["close", "parse_request_bytes", "audit_bytes"]
 
 
 class _PostCloseAuditSession:

@@ -992,6 +992,7 @@ class DiagnosisRuntime:
                     assets=assets,
                     cancellation=cancellation,
                     shared_log_sinks=shared_log_sinks,
+                    deterministic=False,
                 )
                 methods_skill = self._resolved_methods_skill(assets)
                 methods_skill_load = scan_method_markers(
@@ -2331,6 +2332,7 @@ class DiagnosisRuntime:
                     assets=assets,
                     cancellation=cancellation,
                     shared_log_sinks=shared_log_sinks,
+                    deterministic=True,
                 )
                 limitations = self._methods_limitations_v2(preprocessing)
                 graph = scan_method_evidence_v2(
@@ -3712,6 +3714,7 @@ class DiagnosisRuntime:
         assets: ResolvedJobAssets,
         cancellation: CancellationSignal,
         shared_log_sinks: ExecutionLogSinks,
+        deterministic: bool,
     ) -> MethodsPreprocessingExecution:
         if self._logparse_broker_factory is None:
             raise runtime_failure(
@@ -3738,24 +3741,6 @@ class DiagnosisRuntime:
                 operation=operation,
             )
         )
-        prompt = (
-            "You are the product-owned Logparse preprocessing pass in "
-            "SERVER_PREPROCESS mode.\n"
-            "Your first action must be exactly one Skill tool call: "
-            "Skill(logparse-diagnose)\n"
-            "If that Helper is unavailable, rejected, or fails to load, stop "
-            "immediately. Do not invoke the broker directly or use any fallback.\n"
-            "Do not load or execute any other Skill, including the selected business "
-            "diagnosis Skill. Do not read the request, broker result, or target logs; "
-            "do not diagnose; and do not write a diagnosis or review draft.\n"
-            "Only after the Helper loads successfully, follow its SERVER_PREPROCESS "
-            "contract and run exactly this one job-scoped broker request:\n"
-            f"problem-locator-logparse {operation} --request {request_path} "
-            f"--result {result_path}\n"
-            "The Runtime prewrote the request path. Do not edit or replace it. Wait "
-            "for the one request to finish successfully, then exit without reading "
-            "the result. Any failure ends this pass; never retry.\n"
-        )
         tool_started = record_stage_started(
             ExecutionStage.TOOL_EXECUTE,
             data={"tool": "logparse", "pass": "PREPROCESS"},
@@ -3777,17 +3762,42 @@ class DiagnosisRuntime:
         accepted_request_bytes: bytes | None = None
         broker_audit_bytes: bytes | None = None
         try:
-            broker_environment = session.agent_environment()
-            secrets = tuple(broker_environment.values())
-            self._backend.execute(
-                prompt=prompt,
-                workspace_root=preprocessing_workspace.root,
-                cancellation=cancellation,
-                log_sinks=_borrow_log_sinks(shared_log_sinks),
-                resource_limits=job.resource_limits,
-                broker_environment=broker_environment,
-                test_limits=self._backend_test_limits,
-            )
+            if deterministic:
+                primary = session.execute_preprocessing(
+                    operation,
+                    request_path,
+                    result_path,
+                )
+            else:
+                prompt = (
+                    "You are the product-owned Logparse preprocessing pass in "
+                    "SERVER_PREPROCESS mode.\n"
+                    "Your first action must be exactly one Skill tool call: "
+                    "Skill(logparse-diagnose)\n"
+                    "If that Helper is unavailable, rejected, or fails to load, stop "
+                    "immediately. Do not invoke the broker directly or use any fallback.\n"
+                    "Do not load or execute any other Skill, including the selected business "
+                    "diagnosis Skill. Do not read the request, broker result, or target logs; "
+                    "do not diagnose; and do not write a diagnosis or review draft.\n"
+                    "Only after the Helper loads successfully, follow its SERVER_PREPROCESS "
+                    "contract and run exactly this one job-scoped broker request:\n"
+                    f"problem-locator-logparse {operation} --request {request_path} "
+                    f"--result {result_path}\n"
+                    "The Runtime prewrote the request path. Do not edit or replace it. Wait "
+                    "for the one request to finish successfully, then exit without reading "
+                    "the result. Any failure ends this pass; never retry.\n"
+                )
+                broker_environment = session.agent_environment()
+                secrets = tuple(broker_environment.values())
+                self._backend.execute(
+                    prompt=prompt,
+                    workspace_root=preprocessing_workspace.root,
+                    cancellation=cancellation,
+                    log_sinks=_borrow_log_sinks(shared_log_sinks),
+                    resource_limits=job.resource_limits,
+                    broker_environment=broker_environment,
+                    test_limits=self._backend_test_limits,
+                )
         except RuntimeExecutionError as exc:
             primary = exc.failure
         except Exception:

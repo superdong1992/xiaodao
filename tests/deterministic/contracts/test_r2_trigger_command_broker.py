@@ -160,6 +160,7 @@ def test_logparse_session_has_one_typed_parse_request_accessor() -> None:
         "agent_environment",
         "audit_bytes",
         "close",
+        "execute_preprocessing",
         "parse_request_bytes",
     }
     method = ports.LogparseBrokerSession.parse_request_bytes
