@@ -8,6 +8,8 @@ import pytest
 
 from problem_locator.contracts import (
     CaseAggregate,
+    ErrorCode,
+    ExecutionStage,
     Job,
     JobOutcome,
     MaterializedPath,
@@ -26,7 +28,16 @@ from problem_locator.runtime.methods_evidence_v2 import (
     build_method_evaluation_plan_v2,
     scan_method_evidence_v2,
 )
+from problem_locator.runtime.methods_records_v2 import (
+    publish_method_evaluation_plan_v2,
+    publish_method_evidence_graph_v2,
+    read_method_evaluation_plan_v2,
+    read_method_evidence_graph_v2,
+)
+from problem_locator.runtime.failures import RuntimeExecutionError
 from problem_locator.runtime.workspace import WorkspaceManager
+from problem_locator.storage.coordination import StorageCoordinationLock
+from problem_locator.storage.execution_records import FileExecutionRecordStore
 
 from tests.deterministic.unit.runtime.methods_v2_test_support import (
     load_test_methods_skill,
@@ -578,14 +589,40 @@ def test_fresh_restart_publishes_recorded_graph_plan_without_preprocess_inputs(
         source_plan,
         _,
     ) = _jobs(tmp_path / "source-run")
-    recorded_graph = parse_canonical_json_bytes(
-        canonical_json_bytes(source_graph),
-        model_type=MethodEvidenceGraphV2,
+    records_root = tmp_path / "execution-records"
+    records_root.mkdir()
+    records = FileExecutionRecordStore(
+        records_root,
+        StorageCoordinationLock(),
     )
-    recorded_plan = parse_canonical_json_bytes(
-        canonical_json_bytes(source_plan),
-        model_type=MethodEvaluationPlanV2,
+    graph_file_ref = publish_method_evidence_graph_v2(
+        records,
+        job_id=specialist.job_id,
+        graph=source_graph,
     )
+    plan_file_ref = publish_method_evaluation_plan_v2(
+        records,
+        job_id=specialist.job_id,
+        plan=source_plan,
+    )
+    assert graph_file_ref.relative_key.startswith(f"jobs/{specialist.job_id}/")
+    assert plan_file_ref.relative_key.startswith(f"jobs/{specialist.job_id}/")
+    recorded_graph = read_method_evidence_graph_v2(
+        records,
+        job_id=specialist.job_id,
+    )
+    recorded_plan = read_method_evaluation_plan_v2(
+        records,
+        job_id=specialist.job_id,
+    )
+    assert recorded_graph is not None
+    assert recorded_plan is not None
+    assert recorded_graph == source_graph
+    assert recorded_plan == source_plan
+    assert read_method_evidence_graph_v2(
+        records,
+        job_id="00000000-0000-0000-0000-000000000099",
+    ) is None
 
     manager = WorkspaceManager(tmp_path / "restart-data")
     fresh = manager.prepare(
@@ -647,3 +684,31 @@ def test_fresh_restart_publishes_recorded_graph_plan_without_preprocess_inputs(
         PRIVATE_EVIDENCE_SENTINEL.decode(),
     ):
         assert private not in context.body
+
+
+def test_specialist_publish_rejects_one_missing_preprocess_input(
+    tmp_path: Path,
+) -> None:
+    _, _, specialist, _, workspace, graph, plan, _ = _jobs(tmp_path)
+    inputs = workspace.root / "inputs"
+    missing = inputs / "logparse-receipt.json"
+    inputs.chmod(0o755)
+    missing.chmod(0o644)
+    missing.unlink()
+    inputs.chmod(0o555)
+
+    with pytest.raises(RuntimeExecutionError) as caught:
+        WorkspaceManager.publish_methods_specialist_inputs_v2(
+            workspace,
+            specialist,
+            evidence_graph=graph,
+            evaluation_plan=plan,
+        )
+
+    assert caught.value.failure.stage is ExecutionStage.WORKSPACE_PREPARE
+    assert caught.value.failure.code is ErrorCode.WORKSPACE_PREPARE_FAILED
+    assert (inputs / "request.json").exists()
+    assert (inputs / "target_logs.json").exists()
+    assert (inputs / "target-logs/server.log").exists()
+    for category in ("attachments", "evidence", "artifacts", "outcomes"):
+        assert (inputs / category).exists()
