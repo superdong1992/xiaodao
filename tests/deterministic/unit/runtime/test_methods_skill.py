@@ -304,6 +304,18 @@ def test_package_and_catalog_contract_reject_legacy_or_extra_files(tmp_path: Pat
         load_specialized_skill_registration(legacy)
 
 
+def test_production_loader_rejects_one_v1_runtime_field(tmp_path: Path) -> None:
+    package = _write_package(tmp_path)
+    skill_path = package / "SKILL.md"
+    valid_text = skill_path.read_text(encoding="utf-8")
+    assert load_methods_package(package).skill_name == package.name
+
+    skill_path.write_text(valid_text + "\nRead `target_logs` again.\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="uses V1 runtime field target_logs"):
+        load_methods_package(package)
+
+
 def test_marker_scan_loads_only_relevant_method_cards_before_context(
     tmp_path: Path,
 ) -> None:
