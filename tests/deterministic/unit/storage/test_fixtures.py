@@ -89,8 +89,8 @@ def test_valid_empty_v2_state_fixture_is_accepted() -> None:
     payload = parse_canonical_json_bytes(_fixture_bytes("state/valid-empty-v2.json"))
     _schema_validator(STATE_SCHEMA_PATH).validate(payload)
     state = StateFile.model_validate(payload)
-    assert state.schema_version == SCHEMA_VERSION == 7
-    assert state.contract_revision == CONTRACT_REVISION == "v7-contract-r1"
+    assert state.schema_version == SCHEMA_VERSION == 8
+    assert state.contract_revision == CONTRACT_REVISION == "v8-contract-r1"
     assert state.generation == 1
     assert state.runtime_epochs == []
     assert state.recovery_processing_records == {}

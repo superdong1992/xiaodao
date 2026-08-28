@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
@@ -11,12 +12,19 @@ from problem_locator.contracts import (
     ApplicationPortError,
     ExecutionRecordStore,
     InvalidJsonBytesError,
+    Job,
     MethodEvidenceGraphV2,
     MethodEvaluationPlanV2,
     MethodEvaluationRoleV2,
     MethodStateV2,
     OpaqueId,
     bytes_sha256,
+    canonical_json_bytes,
+)
+from problem_locator.domain.methods_state_v2 import (
+    record_protocol_error_v2,
+    resume_method_state_v2,
+    start_method_state_v2,
 )
 from problem_locator.integrations.agent_json import parse_agent_json_bytes
 
@@ -39,6 +47,7 @@ class MethodValidationReplayErrorCodeV2(StrEnum):
 
     RECORD_READ_FAILED = "RECORD_READ_FAILED"
     CORE_RECORD_INVALID = "CORE_RECORD_INVALID"
+    JOB_NOT_FOUND = "JOB_NOT_FOUND"
     STATE_NOT_FOUND = "STATE_NOT_FOUND"
     EVIDENCE_GRAPH_NOT_FOUND = "EVIDENCE_GRAPH_NOT_FOUND"
     EVALUATION_PLAN_NOT_FOUND = "EVALUATION_PLAN_NOT_FOUND"
@@ -147,6 +156,191 @@ def _read_required_core_record(
     return value
 
 
+def _read_optional_state(
+    records: ExecutionRecordStore,
+    *,
+    state_job_id: OpaqueId,
+    job_id: OpaqueId,
+    role: MethodEvaluationRoleV2,
+    attempt: MethodEvaluationAttemptV2,
+) -> MethodStateV2 | None:
+    try:
+        return read_method_state_v2(records, job_id=state_job_id)
+    except (ApplicationPortError, OSError) as exc:
+        raise _error(
+            MethodValidationReplayErrorCodeV2.RECORD_READ_FAILED,
+            "Evidence V2 replay could not read an execution record.",
+            job_id=job_id,
+            role=role,
+            attempt=attempt,
+        ) from exc
+    except (TypeError, ValueError) as exc:
+        raise _error(
+            MethodValidationReplayErrorCodeV2.CORE_RECORD_INVALID,
+            "Evidence V2 replay State is invalid.",
+            job_id=job_id,
+            role=role,
+            attempt=attempt,
+        ) from exc
+
+
+def _read_required_job(
+    records: ExecutionRecordStore,
+    *,
+    job_id: OpaqueId,
+    role: MethodEvaluationRoleV2,
+    attempt: MethodEvaluationAttemptV2,
+) -> Job:
+    try:
+        receipt = records.read_published_job(job_id)
+    except (ApplicationPortError, OSError) as exc:
+        raise _error(
+            MethodValidationReplayErrorCodeV2.RECORD_READ_FAILED,
+            "Evidence V2 replay could not read the immutable Job record.",
+            job_id=job_id,
+            role=role,
+            attempt=attempt,
+        ) from exc
+    except (TypeError, ValueError) as exc:
+        raise _error(
+            MethodValidationReplayErrorCodeV2.CORE_RECORD_INVALID,
+            "Evidence V2 replay Job is invalid.",
+            job_id=job_id,
+            role=role,
+            attempt=attempt,
+        ) from exc
+    if receipt is None:
+        raise _error(
+            MethodValidationReplayErrorCodeV2.JOB_NOT_FOUND,
+            "Evidence V2 replay Job was not found.",
+            job_id=job_id,
+            role=role,
+            attempt=attempt,
+        )
+    return receipt.job
+
+
+def _derived_evaluation_id(
+    *,
+    case_id: str,
+    source_job_id: str,
+    plan_ref: str,
+) -> str:
+    """Reproduce the frozen ``IdGenerator.derive`` identity without runtime I/O."""
+
+    name = canonical_json_bytes(
+        {
+            "kind": "methods_evaluation",
+            "parts": [case_id, source_job_id, plan_ref],
+        }
+    )[:-1].decode("utf-8")
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, name))
+
+
+def _workflow_mismatch(
+    message: str,
+    *,
+    job_id: OpaqueId,
+    role: MethodEvaluationRoleV2,
+    attempt: MethodEvaluationAttemptV2,
+) -> MethodValidationReplayErrorV2:
+    return _error(
+        MethodValidationReplayErrorCodeV2.WORKFLOW_MISMATCH,
+        message,
+        job_id=job_id,
+        role=role,
+        attempt=attempt,
+    )
+
+
+def _read_rejected_attempt(
+    records: ExecutionRecordStore,
+    *,
+    job_id: OpaqueId,
+    role: MethodEvaluationRoleV2,
+    attempt: MethodEvaluationAttemptV2,
+) -> bytes | None:
+    try:
+        raw_bytes = read_method_rejected_attempt_v2(
+            records,
+            job_id=job_id,
+            role=role,
+            attempt=attempt,
+        )
+    except (ApplicationPortError, OSError) as exc:
+        raise _error(
+            MethodValidationReplayErrorCodeV2.RECORD_READ_FAILED,
+            "Evidence V2 replay could not read the rejected attempt.",
+            job_id=job_id,
+            role=role,
+            attempt=attempt,
+        ) from exc
+    if raw_bytes is not None and type(raw_bytes) is not bytes:
+        raise _error(
+            MethodValidationReplayErrorCodeV2.CORE_RECORD_INVALID,
+            "The selected Evidence V2 rejected attempt is not exact bytes.",
+            job_id=job_id,
+            role=role,
+            attempt=attempt,
+        )
+    return raw_bytes
+
+
+def _apply_rejected_attempts(
+    *,
+    state: MethodStateV2,
+    primary: bytes | None,
+    repair: bytes | None,
+    job_id: OpaqueId,
+    role: MethodEvaluationRoleV2,
+    attempt: MethodEvaluationAttemptV2,
+) -> MethodStateV2:
+    if repair is not None and primary is None:
+        raise _workflow_mismatch(
+            f"A {role} repair rejection exists without its primary rejection.",
+            job_id=job_id,
+            role=role,
+            attempt=attempt,
+        )
+
+    rebuilt = state
+    recorded = (primary is not None, repair is not None)
+    for expected_failures, exists in enumerate(recorded):
+        if not exists:
+            continue
+        failures = getattr(rebuilt, f"{role.lower()}_protocol_failures")
+        if failures > expected_failures:
+            continue
+        if failures != expected_failures:
+            raise _workflow_mismatch(
+                f"The {role} rejected-attempt sequence differs from its State.",
+                job_id=job_id,
+                role=role,
+                attempt=attempt,
+            )
+        try:
+            rebuilt = record_protocol_error_v2(
+                state=rebuilt,
+                role=role,
+                reason=f"The persisted {role} response was rejected.",
+            )
+        except (TypeError, ValueError) as exc:
+            raise _workflow_mismatch(
+                f"The {role} rejected-attempt sequence cannot advance its State.",
+                job_id=job_id,
+                role=role,
+                attempt=attempt,
+            ) from exc
+    if getattr(rebuilt, f"{role.lower()}_protocol_failures") != sum(recorded):
+        raise _workflow_mismatch(
+            f"The {role} rejected-attempt sequence differs from its State.",
+            job_id=job_id,
+            role=role,
+            attempt=attempt,
+        )
+    return rebuilt
+
+
 def _validate_workflow(
     *,
     graph: MethodEvidenceGraphV2,
@@ -234,16 +428,32 @@ def replay_method_rejected_attempt_v2(
     if attempt not in {"PRIMARY", "REPAIR"}:
         raise ValueError("attempt must be PRIMARY or REPAIR")
 
-    state = _read_required_core_record(
-        lambda: read_method_state_v2(records, job_id=job_id),
-        missing_code=MethodValidationReplayErrorCodeV2.STATE_NOT_FOUND,
-        missing_message="Evidence V2 replay State was not found.",
-        invalid_message="Evidence V2 replay State is invalid.",
+    job = _read_required_job(
+        records,
         job_id=job_id,
         role=role,
         attempt=attempt,
     )
-    source_job_id = state.source_job_id
+    if role == "SPECIALIST":
+        if job.methods_review_target is not None:
+            raise _workflow_mismatch(
+                "Specialist replay requires a source diagnosis Job.",
+                job_id=job_id,
+                role=role,
+                attempt=attempt,
+            )
+        source_job_id = job_id
+    else:
+        target = job.methods_review_target
+        if target is None:
+            raise _workflow_mismatch(
+                "Reviewer replay requires a Methods review target.",
+                job_id=job_id,
+                role=role,
+                attempt=attempt,
+            )
+        source_job_id = target.source_job_id
+
     graph = _read_required_core_record(
         lambda: read_method_evidence_graph_v2(records, job_id=source_job_id),
         missing_code=(
@@ -264,30 +474,117 @@ def replay_method_rejected_attempt_v2(
         role=role,
         attempt=attempt,
     )
-    _validate_workflow(
-        graph=graph,
-        plan=plan,
-        state=state,
+    state = _read_optional_state(
+        records,
+        state_job_id=job_id,
         job_id=job_id,
         role=role,
         attempt=attempt,
     )
+    if state is None:
+        if role == "SPECIALIST":
+            if job.replacement_for_job_id is None:
+                state = start_method_state_v2(
+                    case_id=job.case_id,
+                    source_job_id=job_id,
+                    evaluation_id=_derived_evaluation_id(
+                        case_id=job.case_id,
+                        source_job_id=job_id,
+                        plan_ref=plan.plan_ref,
+                    ),
+                    plan=plan,
+                )
+            else:
+                predecessor_job_id = job.replacement_for_job_id
+                assert predecessor_job_id is not None
+                predecessor_state = _read_required_core_record(
+                    lambda: read_method_state_v2(
+                        records,
+                        job_id=predecessor_job_id,
+                    ),
+                    missing_code=MethodValidationReplayErrorCodeV2.STATE_NOT_FOUND,
+                    missing_message=(
+                        "Evidence V2 replacement predecessor State was not found."
+                    ),
+                    invalid_message=(
+                        "Evidence V2 replacement predecessor State is invalid."
+                    ),
+                    job_id=job_id,
+                    role=role,
+                    attempt=attempt,
+                )
+                try:
+                    state = resume_method_state_v2(
+                        state=predecessor_state,
+                        source_job_id=job_id,
+                    )
+                except (TypeError, ValueError) as exc:
+                    raise _workflow_mismatch(
+                        "Specialist replacement State is not resumable.",
+                        job_id=job_id,
+                        role=role,
+                        attempt=attempt,
+                    ) from exc
+        else:
+            state = _read_required_core_record(
+                lambda: read_method_state_v2(records, job_id=source_job_id),
+                missing_code=MethodValidationReplayErrorCodeV2.STATE_NOT_FOUND,
+                missing_message="Evidence V2 Reviewer source State was not found.",
+                invalid_message="Evidence V2 Reviewer source State is invalid.",
+                job_id=job_id,
+                role=role,
+                attempt=attempt,
+            )
 
-    try:
-        raw_bytes = read_method_rejected_attempt_v2(
-            records,
+    if state.case_id != job.case_id or state.source_job_id != source_job_id:
+        raise _workflow_mismatch(
+            "Evidence V2 replay Job and State do not describe one workflow.",
             job_id=job_id,
             role=role,
             attempt=attempt,
         )
-    except (ApplicationPortError, OSError) as exc:
-        raise _error(
-            MethodValidationReplayErrorCodeV2.RECORD_READ_FAILED,
-            "Evidence V2 replay could not read the rejected attempt.",
-            job_id=job_id,
-            role=role,
-            attempt=attempt,
-        ) from exc
+    if role == "SPECIALIST":
+        if job.replacement_for_job_id is None and state.evaluation_id != (
+            _derived_evaluation_id(
+                case_id=job.case_id,
+                source_job_id=job_id,
+                plan_ref=plan.plan_ref,
+            )
+        ):
+            raise _workflow_mismatch(
+                "Specialist replay State has a different evaluation identity.",
+                job_id=job_id,
+                role=role,
+                attempt=attempt,
+            )
+    else:
+        assert job.methods_review_target is not None
+        target = job.methods_review_target
+        if (
+            state.evaluation_id != target.evaluation_id
+            or target.graph_ref != graph.graph_ref
+            or target.plan_ref != plan.plan_ref
+        ):
+            raise _workflow_mismatch(
+                "Reviewer replay target differs from its source workflow.",
+                job_id=job_id,
+                role=role,
+                attempt=attempt,
+            )
+
+    primary = _read_rejected_attempt(
+        records,
+        job_id=job_id,
+        role=role,
+        attempt="PRIMARY",
+    )
+    repair = _read_rejected_attempt(
+        records,
+        job_id=job_id,
+        role=role,
+        attempt="REPAIR",
+    )
+    raw_bytes = primary if attempt == "PRIMARY" else repair
     if raw_bytes is None:
         raise _error(
             MethodValidationReplayErrorCodeV2.REJECTED_ATTEMPT_NOT_FOUND,
@@ -296,14 +593,22 @@ def replay_method_rejected_attempt_v2(
             role=role,
             attempt=attempt,
         )
-    if type(raw_bytes) is not bytes:
-        raise _error(
-            MethodValidationReplayErrorCodeV2.CORE_RECORD_INVALID,
-            "The selected Evidence V2 rejected attempt is not exact bytes.",
-            job_id=job_id,
-            role=role,
-            attempt=attempt,
-        )
+    state = _apply_rejected_attempts(
+        state=state,
+        primary=primary,
+        repair=repair,
+        job_id=job_id,
+        role=role,
+        attempt=attempt,
+    )
+    _validate_workflow(
+        graph=graph,
+        plan=plan,
+        state=state,
+        job_id=job_id,
+        role=role,
+        attempt=attempt,
+    )
 
     reason = _rejection_reason(
         raw_bytes,

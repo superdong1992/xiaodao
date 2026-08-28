@@ -7,6 +7,10 @@ import {
   CODEX_LUNA_MODEL,
   CODEX_LUNA_REASONING_EFFORT,
 } from "../runtime-support/codex-luna-contract.mjs";
+import {
+  EVIDENCE_V2_CORE_RECEIPT,
+  EVIDENCE_V2_CORE_SELECTORS,
+} from "../../validation/evidence-v2-core.mjs";
 
 const IDENTIFIER = /^[a-z0-9][a-z0-9.-]*$/;
 const PLATFORMS = new Set(["windows", "macos", "linux"]);
@@ -106,7 +110,7 @@ function validateStages(stages) {
   assertFlow(Array.isArray(stages.stages) && stages.stages.length > 0, "CONFIG_STAGES_EMPTY", "stages must be non-empty");
   const ids = new Set();
   for (const stage of stages.stages) {
-    exactKeys(stage, ["id", "kind", "depends_on", "gates", "identity_set", "real_cap_id", "estimated_tokens", "timeout_seconds", "progress_class", "reuse", "checkpoint", "platforms"], "CONFIG_STAGE_FIELDS", `stage ${stage?.id ?? "?"}`);
+    exactKeys(stage, ["id", "kind", "depends_on", "gates", "identity_set", "real_cap_id", "estimated_tokens", "timeout_seconds", "progress_class", "admission_blocker", "reuse", "checkpoint", "platforms"], "CONFIG_STAGE_FIELDS", `stage ${stage?.id ?? "?"}`);
     identifier(stage.id, "CONFIG_STAGE_ID", "stage id");
     assertFlow(!ids.has(stage.id), "CONFIG_STAGE_DUPLICATE", `Duplicate stage ${stage.id}`);
     ids.add(stage.id);
@@ -124,6 +128,16 @@ function validateStages(stages) {
     identifier(stage.identity_set, "CONFIG_STAGE_IDENTITY", `${stage.id} identity set`);
     positiveInteger(stage.timeout_seconds, "CONFIG_STAGE_TIMEOUT", `${stage.id}.timeout_seconds`);
     assertFlow(PROGRESS_CLASSES.has(stage.progress_class), "CONFIG_STAGE_PROGRESS", `${stage.id} has invalid progress_class`);
+    if (stage.admission_blocker !== undefined) {
+      exactKeys(stage.admission_blocker, ["code", "detail"], "CONFIG_STAGE_ADMISSION_BLOCKER_FIELDS", `${stage.id}.admission_blocker`);
+      assertFlow(
+        typeof stage.admission_blocker.code === "string"
+          && /^[A-Z][A-Z0-9_]*$/.test(stage.admission_blocker.code),
+        "CONFIG_STAGE_ADMISSION_BLOCKER_CODE",
+        `${stage.id}.admission_blocker.code 必须是大写错误码`,
+      );
+      nonEmptyString(stage.admission_blocker.detail, "CONFIG_STAGE_ADMISSION_BLOCKER_DETAIL", `${stage.id}.admission_blocker.detail`);
+    }
     exactKeys(stage.reuse, ["dev", "release"], "CONFIG_STAGE_REUSE_FIELDS", `${stage.id}.reuse`);
     assertFlow(REUSE_POLICIES.has(stage.reuse.dev) && REUSE_POLICIES.has(stage.reuse.release), "CONFIG_STAGE_REUSE", `${stage.id} has invalid reuse policy`);
     stringArray(stage.platforms, "CONFIG_STAGE_PLATFORMS", `${stage.id}.platforms`, { nonEmpty: true });
@@ -141,7 +155,7 @@ function validateStages(stages) {
 
 const GATE_FIELDS = {
   "node-test": ["kind", "test_files", "test_glob", "exclude", "min_passed", "evidence"],
-  pytest: ["kind", "selectors", "selector_mode", "pytest_args", "environment_profile", "min_passed", "skip_policy", "runtime_profile", "evidence", "isolated_agent_invocations"],
+  pytest: ["kind", "selectors", "selector_mode", "pytest_args", "environment_profile", "min_passed", "skip_policy", "runtime_profile", "evidence", "isolated_agent_invocations", "result_receipt"],
   "repository-check": ["kind", "check", "paths", "evidence"],
   "capability-adapter": ["kind", "adapter", "runtime_profile", "required_claims", "evidence"],
   "cross-job-adapter": ["kind", "phase", "runtime_profile", "evidence_contract", "evidence"],
@@ -201,6 +215,22 @@ function validateGates(gates) {
       if (isolatedAgentGate) assertFlow(gate.min_passed >= gate.isolated_agent_invocations, "CONFIG_PYTEST_INVOCATIONS", `${gateId} must prove at least every declared isolated Agent invocation`);
       assertFlow(PYTEST_SKIP_POLICIES.has(gate.skip_policy), "CONFIG_PYTEST_SKIP", `${gateId} has invalid skip policy`);
       identifier(gate.runtime_profile, "CONFIG_GATE_RUNTIME", `${gateId} runtime profile`);
+      if (gate.result_receipt !== undefined) {
+        assertFlow(gate.result_receipt === EVIDENCE_V2_CORE_RECEIPT, "CONFIG_PYTEST_RECEIPT", `${gateId} has an unsupported result receipt`);
+        assertFlow(gateId === "det.evidence-v2-core", "CONFIG_PYTEST_RECEIPT_SCOPE", "Evidence V2 Core receipt must be produced by det.evidence-v2-core");
+        assertFlow(
+          canonicalJson(gate.selectors) === canonicalJson(EVIDENCE_V2_CORE_SELECTORS),
+          "CONFIG_EVIDENCE_V2_CORE_SELECTORS",
+          "det.evidence-v2-core selectors do not match the frozen Core suite",
+        );
+        assertFlow(gate.environment_profile === undefined && gate.pytest_args === undefined, "CONFIG_EVIDENCE_V2_CORE_ZERO_MODEL", "det.evidence-v2-core must remain a plain deterministic pytest gate");
+        assertFlow(gate.skip_policy === "forbid", "CONFIG_EVIDENCE_V2_CORE_SKIP", "det.evidence-v2-core must reject skipped cases");
+        assertFlow(
+          canonicalJson(gate.evidence) === canonicalJson(["pytest.xml", "pytest-summary.json", "core-verdict.json"]),
+          "CONFIG_EVIDENCE_V2_CORE_EVIDENCE",
+          "det.evidence-v2-core evidence files do not match the Core receipt contract",
+        );
+      }
     } else if (gate.kind === "repository-check") {
       assertFlow(REPOSITORY_CHECKS.has(gate.check), "CONFIG_REPOSITORY_CHECK", `${gateId} has untrusted repository check`);
       if (gate.paths) {
@@ -467,6 +497,10 @@ function crossValidate(config) {
   for (const [gateId, gate] of Object.entries(config.gates.gates)) {
     if (gate.runtime_profile) assertFlow(profileIds.has(gate.runtime_profile), "CONFIG_GATE_RUNTIME_UNKNOWN", `${gateId} references unknown runtime profile ${gate.runtime_profile}`);
   }
+  const coreGate = config.gates.gates["det.evidence-v2-core"];
+  const deterministicFull = config.stages.stages.find((stage) => stage.id === "deterministic.full");
+  assertFlow(coreGate?.result_receipt === EVIDENCE_V2_CORE_RECEIPT, "CONFIG_EVIDENCE_V2_CORE_GATE", "det.evidence-v2-core is missing");
+  assertFlow(deterministicFull?.gates.includes("det.evidence-v2-core"), "CONFIG_EVIDENCE_V2_CORE_STAGE", "det.evidence-v2-core must belong to deterministic.full");
   assertFlow(profileIds.has(config.policy.defaults.runtime_profile), "CONFIG_DEFAULT_RUNTIME_UNKNOWN", "Default runtime profile is unknown");
   for (const track of Object.values(config.policy.tracks)) assertFlow(Object.hasOwn(config.proofs.goals, track.default_goal), "CONFIG_TRACK_GOAL_UNKNOWN", `Unknown default goal ${track.default_goal}`);
 

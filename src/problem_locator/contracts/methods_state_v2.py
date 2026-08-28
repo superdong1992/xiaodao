@@ -87,6 +87,30 @@ def method_diagnostic_id_v2(
     )
 
 
+def method_pre_evaluation_diagnostic_id_v2(
+    *,
+    case_id: str,
+    source_job_id: str,
+    reason_code: str,
+    source_stage: str,
+    source_error_code: str,
+) -> str:
+    """Derive one stable diagnostic ID before a Graph or Plan exists."""
+
+    if reason_code not in FAILED_METHOD_REASON_CODES_V2:
+        raise ValueError("pre-evaluation failure requires a FAILED reason code")
+    return "diag-" + canonical_json_sha256(
+        {
+            "kind": "method-pre-evaluation-diagnostic-v2",
+            "case_id": case_id,
+            "source_job_id": source_job_id,
+            "reason_code": reason_code,
+            "source_stage": source_stage,
+            "source_error_code": source_error_code,
+        }
+    )
+
+
 def _role_dump(value: MethodRoleEvaluationV2 | None) -> dict[str, object] | None:
     return None if value is None else value.model_dump(mode="json")
 
@@ -638,6 +662,7 @@ __all__ = [
     "MethodTerminalResultV2",
     "MethodTerminalStatusV2",
     "method_diagnostic_id_v2",
+    "method_pre_evaluation_diagnostic_id_v2",
     "method_state_ref_v2",
     "method_terminal_result_ref_v2",
     "project_method_terminal_result_v2",

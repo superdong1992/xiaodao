@@ -43,6 +43,8 @@ from problem_locator.contracts import (
     JobOutcome,
     JobStatus,
     JobType,
+    MethodEvaluationRoleV2,
+    OpaqueId,
     OutcomeDisposition,
     OutcomeReceipt,
     ResourceKind,
@@ -58,6 +60,11 @@ from problem_locator.entrypoints.settings import Settings
 from problem_locator.integrations.logparse import build_logparse_runtime
 from problem_locator.journey import configure_journey, record_journey_event
 from problem_locator.runtime.catalog import VersionedAssetCatalog
+from problem_locator.runtime.methods_records_v2 import MethodEvaluationAttemptV2
+from problem_locator.runtime.methods_replay_v2 import (
+    MethodValidationReplayReceiptV2,
+    replay_method_rejected_attempt_v2,
+)
 from problem_locator.storage.atomic import (
     finalize_read_only_file,
     finalize_read_only_tree,
@@ -65,6 +72,8 @@ from problem_locator.storage.atomic import (
     require_ordinary_file,
     require_real_directory,
 )
+from problem_locator.storage.coordination import StorageCoordinationLock
+from problem_locator.storage.execution_records import FileExecutionRecordStore
 from problem_locator.storage.layout import StorageLayout, UnsupportedDataFormatError
 from problem_locator.storage.paths import resource_path
 from problem_locator.storage.platform import FileInstanceLock, PlatformFileSync
@@ -83,6 +92,16 @@ class ReplayRequest:
     job_id: str
     mode: ReplayMode
     output_dir: Path
+
+
+@dataclass(frozen=True, slots=True)
+class MethodValidationReplayRequestV2:
+    """Select one persisted Methods V2 rejection for deterministic replay."""
+
+    data_root: Path
+    job_id: OpaqueId
+    role: MethodEvaluationRoleV2
+    attempt: MethodEvaluationAttemptV2
 
 
 class ReplayStageRecord(BaseModel):
@@ -107,7 +126,7 @@ class ReplayManifest(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
     schema_version: Literal[1]
-    state_schema_version: Literal[7]
+    state_schema_version: Literal[8]
     contract_revision: str
     replay_id: str
     mode: ReplayMode
@@ -483,7 +502,7 @@ def _decode_source_state(raw_bytes: bytes) -> StateFile:
     ):
         raise _fail(
             ErrorCode.STATE_SCHEMA_UNSUPPORTED,
-            "Replay accepts only the current State V7 contract.",
+            "Replay accepts only the current State V8 contract.",
             "SOURCE_STATE_SCHEMA_UNSUPPORTED",
         )
     try:
@@ -491,7 +510,7 @@ def _decode_source_state(raw_bytes: bytes) -> StateFile:
     except (TypeError, ValueError, ValidationError) as exc:
         raise _fail(
             ErrorCode.STATE_CORRUPT,
-            "Source State V7 violates its canonical contract.",
+            "Source State V8 violates its canonical contract.",
             "SOURCE_STATE_CORRUPT",
         ) from exc
 
@@ -949,7 +968,7 @@ def _source_target_outcome(
     if expected is not None and published != expected:
         raise _fail(
             ErrorCode.STATE_CORRUPT,
-            "The source target Outcome does not match State V7.",
+            "The source target Outcome does not match State V8.",
             "SOURCE_EXECUTION_RECORD_INVALID",
         )
     if (
@@ -1300,6 +1319,32 @@ def _require_completed_case_state(
         raise _fail(ErrorCode.OUTCOME_INVALID, message, stop_reason)
 
 
+def run_method_validation_replay_v2(
+    request: MethodValidationReplayRequestV2,
+) -> MethodValidationReplayReceiptV2:
+    """Replay one immutable rejection with the current production validator."""
+
+    if not isinstance(request, MethodValidationReplayRequestV2):
+        raise TypeError("request must be a MethodValidationReplayRequestV2")
+    data_root = Path(request.data_root)
+    if not data_root.is_absolute():
+        raise ValueError("DATA_ROOT must be an absolute path")
+    layout = StorageLayout.at(data_root)
+    layout.validate_v2_data_format()
+    require_real_directory(layout.data_root)
+    require_real_directory(layout.jobs)
+    records = FileExecutionRecordStore(
+        layout.data_root,
+        StorageCoordinationLock(),
+    )
+    return replay_method_rejected_attempt_v2(
+        records,
+        job_id=request.job_id,
+        role=request.role,
+        attempt=request.attempt,
+    )
+
+
 def run_replay_job(
     request: ReplayRequest,
     settings: Settings,
@@ -1543,6 +1588,7 @@ def run_replay_job(
 
 
 __all__ = [
+    "MethodValidationReplayRequestV2",
     "ReplayAssetDiff",
     "ReplayError",
     "ReplayManifest",
@@ -1550,6 +1596,7 @@ __all__ = [
     "ReplayRequest",
     "ReplayResult",
     "ReplayStageRecord",
+    "run_method_validation_replay_v2",
     "run_replay_job",
     "validate_replay_paths",
 ]

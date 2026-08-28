@@ -161,7 +161,9 @@ test("dual Linux Client container binds one writable HOME before its runtime pro
   assert.match(source.slice(end, source.indexOf("async function createFreshEnvironment", end)), /runtimeIdentity\.home_writable === true/);
 });
 
-test("captured commands wait for inherited stdout to close before sealing evidence", async () => {
+const posixRuntimeTest = process.platform === "win32" ? test.skip : test;
+
+posixRuntimeTest("captured commands wait for inherited stdout to close before sealing evidence", async () => {
   const child = `setTimeout(() => { process.stdout.write("late-tail"); }, 60);`;
   const parent = `const {spawn}=require("node:child_process");const child=spawn(process.execPath,["-e",${JSON.stringify(child)}],{stdio:["ignore",1,2]});child.unref();process.exit(0);`;
   const result = await runCommandCapture(process.execPath, ["-e", parent], { forward: false });

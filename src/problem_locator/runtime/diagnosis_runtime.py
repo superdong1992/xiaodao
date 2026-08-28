@@ -62,6 +62,7 @@ from problem_locator.contracts import (
     bytes_sha256,
     canonical_json_bytes,
     canonical_json_sha256,
+    method_pre_evaluation_diagnostic_id_v2,
     parse_canonical_json_bytes,
     review_required_evidence_refs,
     validate_outcome_for_job,
@@ -79,9 +80,11 @@ from problem_locator.domain.methods_state_v2 import (
     interrupt_method_state_v2,
     record_model_execution_failure_v2,
     record_protocol_error_v2,
+    resume_method_state_v2,
     start_method_state_v2,
 )
 from problem_locator.contracts.enums import MethodsValidationReasonCode
+from problem_locator.contracts.methods_reason_v2 import METHOD_PUBLIC_REASON_TEXT_V2
 from problem_locator.diagnostics import log_event
 from problem_locator.integrations.logparse.requests import (
     Anchor,
@@ -190,6 +193,64 @@ def _method_validation_reason_code(
     if isinstance(error, MethodsValidationError):
         return error.reason_code
     return MethodsValidationReasonCode.VALIDATION_FAILED
+
+
+def _classify_pre_evaluation_methods_failure_v2(
+    job: Job,
+    failure: ExecutionFailure,
+    execution_records: ExecutionRecordStore,
+) -> ExecutionFailure:
+    """Classify a Methods failure only while no complete Graph/Plan exists."""
+
+    if failure.reason_code is not None or failure.code is ErrorCode.BACKEND_CANCELLED:
+        return failure
+    try:
+        record_job_ids = [job.job_id]
+        if job.methods_review_target is not None:
+            record_job_ids.append(job.methods_review_target.source_job_id)
+        elif job.replacement_for_job_id is not None:
+            record_job_ids.append(job.replacement_for_job_id)
+        complete_plan_exists = any(
+            read_method_evidence_graph_v2(execution_records, job_id=record_job_id)
+            is not None
+            and read_method_evaluation_plan_v2(
+                execution_records,
+                job_id=record_job_id,
+            )
+            is not None
+            for record_job_id in dict.fromkeys(record_job_ids)
+        )
+    except Exception:
+        complete_plan_exists = False
+    if complete_plan_exists:
+        return failure
+    if (
+        failure.stage is ExecutionStage.EXECUTION_RECORD
+        or failure.code is ErrorCode.EXECUTION_RECORD_FAILED
+    ):
+        reason_code = "AUDIT_ARCHIVE_FAILED"
+    elif (
+        failure.stage is ExecutionStage.ASSET_RESOLUTION
+        or failure.code is ErrorCode.ASSET_VERSION_UNAVAILABLE
+    ):
+        reason_code = "RESOURCE_SNAPSHOT_DRIFT"
+    else:
+        reason_code = "SERVER_INVARIANT_VIOLATION"
+    return ExecutionFailure(
+        stage=failure.stage,
+        code=failure.code,
+        message=METHOD_PUBLIC_REASON_TEXT_V2[reason_code],
+        retryable=False,
+        details=list(failure.details),
+        reason_code=reason_code,
+        diagnostic_id=method_pre_evaluation_diagnostic_id_v2(
+            case_id=job.case_id,
+            source_job_id=job.job_id,
+            reason_code=reason_code,
+            source_stage=failure.stage.value,
+            source_error_code=failure.code.value,
+        ),
+    )
 
 
 def _broker_failure(*, retryable: bool = True) -> ExecutionFailure:
@@ -687,7 +748,13 @@ class DiagnosisRuntime:
         except Exception:
             failure = _unexpected_failure().failure
         assert failure is not None
-        if job.diagnosis_mode is DiagnosisMode.GENERIC and failure.retryable:
+        if _is_methods_v2_job(job):
+            failure = _classify_pre_evaluation_methods_failure_v2(
+                job,
+                failure,
+                self._execution_records,
+            )
+        elif job.diagnosis_mode is DiagnosisMode.GENERIC and failure.retryable:
             failure = ExecutionFailure(
                 stage=failure.stage,
                 code=failure.code,
@@ -1249,6 +1316,52 @@ class DiagnosisRuntime:
                 self._execution_records,
                 job_id=job.job_id,
             )
+            if target is None and job.replacement_for_job_id is not None:
+                predecessor_job_id = job.replacement_for_job_id
+                predecessor_graph = read_method_evidence_graph_v2(
+                    self._execution_records,
+                    job_id=predecessor_job_id,
+                )
+                predecessor_plan = read_method_evaluation_plan_v2(
+                    self._execution_records,
+                    job_id=predecessor_job_id,
+                )
+                predecessor_limitations = read_method_limitations_record_v2(
+                    self._execution_records,
+                    job_id=predecessor_job_id,
+                )
+                predecessor_state = read_method_state_v2(
+                    self._execution_records,
+                    job_id=predecessor_job_id,
+                )
+                graph = graph or predecessor_graph
+                plan = plan or predecessor_plan
+                limitations_record = limitations_record or predecessor_limitations
+                if current_state is None and predecessor_state is not None:
+                    current_state = resume_method_state_v2(
+                        state=predecessor_state,
+                        source_job_id=job.job_id,
+                    )
+                elif (
+                    current_state is not None
+                    and current_state.status == "INTERRUPTED"
+                ):
+                    current_state = resume_method_state_v2(
+                        state=current_state,
+                        source_job_id=job.job_id,
+                    )
+            elif target is not None and job.replacement_for_job_id is not None:
+                predecessor_state = read_method_state_v2(
+                    self._execution_records,
+                    job_id=job.replacement_for_job_id,
+                )
+                if current_state is None and predecessor_state is not None:
+                    current_state = resume_method_state_v2(state=predecessor_state)
+                elif (
+                    current_state is not None
+                    and current_state.status == "INTERRUPTED"
+                ):
+                    current_state = resume_method_state_v2(state=current_state)
             if graph is None or plan is None:
                 return None
             validate_method_evaluation_plan_v2(evidence=graph, plan=plan)
@@ -1269,10 +1382,24 @@ class DiagnosisRuntime:
                 if limitations_record is None
                 else limitations_record.limitations
             )
+            state = current_state or start_method_state_v2(
+                case_id=job.case_id,
+                source_job_id=(job.job_id if target is None else source_job_id),
+                evaluation_id=(
+                    target.evaluation_id
+                    if target is not None
+                    else self._id_generator.derive(
+                        "methods_evaluation",
+                        [job.case_id, job.job_id, plan.plan_ref],
+                    )
+                ),
+                plan=plan,
+            )
             if current_state is not None:
                 if (
                     current_state.case_id != job.case_id
-                    or current_state.source_job_id != source_job_id
+                    or current_state.source_job_id
+                    != (job.job_id if target is None else source_job_id)
                     or current_state.plan_ref != plan.plan_ref
                     or current_state.evaluation_refs
                     != tuple(item.evaluation_ref for item in plan.evaluations)
@@ -1301,20 +1428,48 @@ class DiagnosisRuntime:
                         limitations=limitations,
                         persist_state=False,
                     )
-                return None
-            state = start_method_state_v2(
-                case_id=job.case_id,
-                source_job_id=source_job_id,
-                evaluation_id=(
-                    target.evaluation_id
-                    if target is not None
-                    else self._id_generator.derive(
-                        "methods_evaluation",
-                        [job.case_id, job.job_id, plan.plan_ref],
+            if target is None and job.replacement_for_job_id is not None:
+                replacement_limitations = build_method_limitations_record_v2(
+                    case_id=job.case_id,
+                    source_job_id=job.job_id,
+                    graph=graph,
+                    plan=plan,
+                    limitations=limitations,
+                )
+                if (
+                    not self._commit_method_graph_v2(job_id=job.job_id, graph=graph)
+                    or not self._commit_method_plan_v2(job_id=job.job_id, plan=plan)
+                    or not self._commit_method_limitations_v2(
+                        job_id=job.job_id,
+                        record=replacement_limitations,
                     )
-                ),
-                plan=plan,
-            )
+                ):
+                    return self._fail_methods_terminal_v2(
+                        job=job,
+                        workspace=workspace,
+                        graph=graph,
+                        plan=plan,
+                        state=state,
+                        reason_code="AUDIT_ARCHIVE_FAILED",
+                        reason="The replacement Evidence V2 records could not be archived.",
+                        limitations=limitations,
+                    )
+            try:
+                self._inherit_method_rejections_v2(
+                    job=job,
+                    role=("SPECIALIST" if target is None else "REVIEWER"),
+                )
+            except _MethodAuditArchiveError:
+                return self._fail_methods_terminal_v2(
+                    job=job,
+                    workspace=workspace,
+                    graph=graph,
+                    plan=plan,
+                    state=state,
+                    reason_code="AUDIT_ARCHIVE_FAILED",
+                    reason="The replacement attempt records could not be archived.",
+                    limitations=limitations,
+                )
             return self._fail_methods_terminal_v2(
                 job=job,
                 workspace=workspace,
@@ -1593,6 +1748,38 @@ class DiagnosisRuntime:
                 return
             raise _MethodAuditArchiveError("method rejection archive failed") from None
 
+    def _inherit_method_rejections_v2(
+        self,
+        *,
+        job: Job,
+        role: MethodEvaluationRoleV2,
+    ) -> None:
+        source_job_id = job.replacement_for_job_id
+        if source_job_id is None:
+            return
+        attempts: tuple[MethodEvaluationAttemptV2, ...] = ("PRIMARY", "REPAIR")
+        for attempt in attempts:
+            try:
+                raw_bytes = read_method_rejected_attempt_v2(
+                    self._execution_records,
+                    job_id=source_job_id,
+                    role=role,
+                    attempt=attempt,
+                )
+            except (KeyboardInterrupt, SystemExit):
+                raise
+            except Exception:
+                raise _MethodAuditArchiveError(
+                    "method replacement rejection read failed"
+                ) from None
+            if raw_bytes is not None:
+                self._commit_method_rejection_v2(
+                    job_id=job.job_id,
+                    role=role,
+                    attempt=attempt,
+                    raw_bytes=raw_bytes,
+                )
+
     @staticmethod
     def _audit_failed_method_state_v2(state: MethodStateV2) -> MethodStateV2:
         if state.status == "FAILED" and state.reason_code == "AUDIT_ARCHIVE_FAILED":
@@ -1820,11 +2007,12 @@ class DiagnosisRuntime:
             )
         attempt_name: MethodEvaluationAttemptV2 = "PRIMARY"
         if primary_rejected is not None:
-            state = record_protocol_error_v2(
-                state=state,
-                role="SPECIALIST",
-                reason="The persisted primary Specialist response was rejected.",
-            )
+            if state.specialist_protocol_failures == 0:
+                state = record_protocol_error_v2(
+                    state=state,
+                    role="SPECIALIST",
+                    reason="The persisted primary Specialist response was rejected.",
+                )
             attempt_name = "REPAIR"
         if repair_rejected is not None:
             state = record_protocol_error_v2(
@@ -2022,6 +2210,53 @@ class DiagnosisRuntime:
                 self._execution_records,
                 job_id=job.job_id,
             )
+            stored_state = read_method_state_v2(
+                self._execution_records,
+                job_id=job.job_id,
+            )
+            record_source_job_id = job.job_id
+            if job.replacement_for_job_id is not None:
+                predecessor_job_id = job.replacement_for_job_id
+                predecessor_graph = read_method_evidence_graph_v2(
+                    self._execution_records,
+                    job_id=predecessor_job_id,
+                )
+                predecessor_plan = read_method_evaluation_plan_v2(
+                    self._execution_records,
+                    job_id=predecessor_job_id,
+                )
+                predecessor_limitations = read_method_limitations_record_v2(
+                    self._execution_records,
+                    job_id=predecessor_job_id,
+                )
+                predecessor_state = read_method_state_v2(
+                    self._execution_records,
+                    job_id=predecessor_job_id,
+                )
+                if stored_graph is None:
+                    stored_graph = predecessor_graph
+                elif (
+                    predecessor_graph is not None
+                    and stored_graph != predecessor_graph
+                ):
+                    raise ValueError("replacement Graph differs from its predecessor")
+                if stored_plan is None:
+                    stored_plan = predecessor_plan
+                elif predecessor_plan is not None and stored_plan != predecessor_plan:
+                    raise ValueError("replacement Plan differs from its predecessor")
+                if stored_limitations is None:
+                    stored_limitations = predecessor_limitations
+                    record_source_job_id = predecessor_job_id
+                if stored_state is None and predecessor_state is not None:
+                    stored_state = resume_method_state_v2(
+                        state=predecessor_state,
+                        source_job_id=job.job_id,
+                    )
+                elif stored_state is not None and stored_state.status == "INTERRUPTED":
+                    stored_state = resume_method_state_v2(
+                        state=stored_state,
+                        source_job_id=job.job_id,
+                    )
             if stored_graph is None and stored_plan is not None:
                 raise ValueError("Evidence V2 Plan exists without its Graph")
             recovered_records = stored_graph is not None
@@ -2037,7 +2272,7 @@ class DiagnosisRuntime:
                     raise ValueError("stored Evidence V2 Plan differs from its Graph")
                 if stored_limitations is not None and (
                     stored_limitations.case_id != job.case_id
-                    or stored_limitations.source_job_id != job.job_id
+                    or stored_limitations.source_job_id != record_source_job_id
                     or stored_limitations.evidence_graph_ref != stored_graph.graph_ref
                     or stored_limitations.plan_ref != stored_plan.plan_ref
                     or stored_limitations.limitations != stored_graph.limitations
@@ -2114,10 +2349,6 @@ class DiagnosisRuntime:
                 plan=plan,
                 limitations=limitations,
             )
-            stored_state = read_method_state_v2(
-                self._execution_records,
-                job_id=job.job_id,
-            )
             state = stored_state or start_method_state_v2(
                 case_id=job.case_id,
                 source_job_id=job.job_id,
@@ -2151,6 +2382,22 @@ class DiagnosisRuntime:
                     graph=graph,
                     plan=plan,
                     state=self._audit_failed_method_state_v2(state),
+                    limitations=limitations,
+                )
+            try:
+                self._inherit_method_rejections_v2(
+                    job=job,
+                    role="SPECIALIST",
+                )
+            except _MethodAuditArchiveError:
+                return self._fail_methods_terminal_v2(
+                    job=job,
+                    workspace=workspace,
+                    graph=graph,
+                    plan=plan,
+                    state=state,
+                    reason_code="AUDIT_ARCHIVE_FAILED",
+                    reason="The Specialist replacement records could not be archived.",
                     limitations=limitations,
                 )
 
@@ -2267,10 +2514,19 @@ class DiagnosisRuntime:
         target = job.methods_review_target
         if target is None:
             raise ValueError("Methods Reviewer Job has no target")
-        state = read_method_state_v2(
-            self._execution_records,
-            job_id=target.source_job_id,
-        )
+        state = None
+        if job.replacement_for_job_id is not None:
+            state = read_method_state_v2(
+                self._execution_records,
+                job_id=job.replacement_for_job_id,
+            )
+            if state is not None and state.status == "INTERRUPTED":
+                state = resume_method_state_v2(state=state)
+        if state is None:
+            state = read_method_state_v2(
+                self._execution_records,
+                job_id=target.source_job_id,
+            )
         expected_refs = tuple(item.evaluation_ref for item in plan.evaluations)
         if (
             state is None
@@ -2313,11 +2569,12 @@ class DiagnosisRuntime:
 
         if repair_rejected is not None:
             state = self._read_methods_reviewer_state_v2(job=job, plan=plan)
-            state = record_protocol_error_v2(
-                state=state,
-                role="REVIEWER",
-                reason="The persisted primary Reviewer response was rejected.",
-            )
+            if state.reviewer_protocol_failures == 0:
+                state = record_protocol_error_v2(
+                    state=state,
+                    role="REVIEWER",
+                    reason="The persisted primary Reviewer response was rejected.",
+                )
             state = record_protocol_error_v2(
                 state=state,
                 role="REVIEWER",
@@ -2359,7 +2616,10 @@ class DiagnosisRuntime:
                     # The source state is absent from the model context and is
                     # first read only after the blind attempt returns.
                     state = self._read_methods_reviewer_state_v2(job=job, plan=plan)
-                    if primary_rejected is not None:
+                    if (
+                        primary_rejected is not None
+                        and state.reviewer_protocol_failures == 0
+                    ):
                         state = record_protocol_error_v2(
                             state=state,
                             role="REVIEWER",
@@ -2633,6 +2893,23 @@ class DiagnosisRuntime:
                 "role": "REVIEWER",
             },
         )
+        try:
+            self._inherit_method_rejections_v2(
+                job=job,
+                role="REVIEWER",
+            )
+        except _MethodAuditArchiveError:
+            state = self._read_methods_reviewer_state_v2(job=job, plan=plan)
+            return self._fail_methods_terminal_v2(
+                job=job,
+                workspace=workspace,
+                graph=graph,
+                plan=plan,
+                state=state,
+                reason_code="AUDIT_ARCHIVE_FAILED",
+                reason="The Reviewer replacement records could not be archived.",
+                limitations=limitations,
+            )
 
         primary_record = read_method_rejected_attempt_v2(
             self._execution_records,

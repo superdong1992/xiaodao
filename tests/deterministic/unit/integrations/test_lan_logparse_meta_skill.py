@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -12,7 +13,12 @@ from problem_locator.runtime.methods_skill import load_specialized_skill_registr
 
 ROOT = Path(__file__).resolve().parents[4]
 META_SKILL = ROOT / ".claude/skills/wiki-to-logparse-diagnosis-skill"
-VALIDATOR_PATH = META_SKILL / "scripts/validate_generated_skill.py"
+VALIDATOR_PATH = Path(
+    os.environ.get(
+        "TEST_LAN_DIAGNOSIS_VALIDATOR",
+        META_SKILL / "scripts/validate_generated_skill.py",
+    )
+)
 
 
 def _load(path: Path, name: str):
@@ -93,14 +99,20 @@ Logparse 预处理、目标日志冻结、Review 和最终 Artifact 发布由 Se
 """
 
 
-def _method_card() -> str:
-    return """# API 执行时间过长
+def _method_card(
+    *,
+    title: str = "API 执行时间过长",
+    markers: tuple[str, ...] = ("API_COMPLETE service=", "QUEUE_DELAY service="),
+) -> str:
+    marker_lines = "\n".join(markers)
+    return f"""# {title}
 
 ## 适用条件
 目标 API 调用超时。
 
 ## 所需证据
-完整 API_COMPLETE 或 QUEUE_DELAY 日志。
+完整正向日志：
+{marker_lines}
 
 ## 计算与判断
 使用 Wiki 中的 cost_us 和 queue_us。
@@ -328,6 +340,47 @@ def test_validator_rejects_shortened_event_name_marker(tmp_path: Path) -> None:
         "method 1 evidence marker is not a canonical stable Wiki log marker: API_COMPLETE"
         in _errors(result)
     )
+
+
+def test_validator_rejects_marker_from_another_method_reference(
+    tmp_path: Path,
+) -> None:
+    registration, wiki, _ = _write_valid_registration(tmp_path)
+    methods_path = _methods_path(registration)
+    methods = json.loads(methods_path.read_text(encoding="utf-8"))
+    methods["methods"][0]["evidence_markers"] = ["API_COMPLETE service="]
+    methods["methods"].append(
+        {
+            "id": "queue-delay",
+            "title": "队列排队过长",
+            "reference": "references/queue-delay.md",
+            "priority": 2,
+            "evidence_markers": ["QUEUE_DELAY service="],
+        }
+    )
+    _write_json(methods_path, methods)
+    references = methods_path.parent / "references"
+    (references / "api-execution-slow.md").write_text(
+        _method_card(markers=("API_COMPLETE service=",)),
+        encoding="utf-8",
+    )
+    (references / "queue-delay.md").write_text(
+        _method_card(
+            title="队列排队过长",
+            markers=("QUEUE_DELAY service=",),
+        ),
+        encoding="utf-8",
+    )
+    assert _validate(registration, wiki)["ok"] is True
+
+    methods["methods"][0]["evidence_markers"] = ["QUEUE_DELAY service="]
+    _write_json(methods_path, methods)
+
+    rejected = _validate(registration, wiki)
+    assert rejected["ok"] is False
+    assert rejected["errors"] == [
+        "method 1 evidence marker is absent from its method reference: QUEUE_DELAY service="
+    ]
 
 
 def test_valid_production_registration_passes(tmp_path: Path) -> None:

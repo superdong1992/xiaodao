@@ -23,6 +23,7 @@ from problem_locator.contracts import (
     ExecutionFailure,
     JobStatus,
     JobType,
+    METHOD_PUBLIC_REASON_TEXT_V2,
     MethodsTerminalProjectionV2,
     MethodsValidationReasonCode,
     OutcomeResultType,
@@ -83,6 +84,7 @@ class _ReviewTerminalFlow:
     handoff_transition: object
     diagnosis_state: object
     review_job: object
+    graph: object
     plan: object
     terminal_state: object
     terminal_result: object
@@ -182,6 +184,7 @@ def _review_terminal(
         handoff_transition=handoff_transition,
         diagnosis_state=diagnosis_state,
         review_job=review_job,
+        graph=graph,
         plan=plan,
         terminal_state=terminal,
         terminal_result=terminal_result,
@@ -436,9 +439,14 @@ def test_specialist_early_terminal_maps_status_job_and_failure(
         assert outcome.result_type is OutcomeResultType.FAILED
         assert outcome.error is not None
         assert outcome.error.code is expected_error
+        assert outcome.error.message == METHOD_PUBLIC_REASON_TEXT_V2[reason_code]
         assert transition.case_failure_update is not None
         assert transition.case_failure_update.value is not None
         assert transition.case_failure_update.value.code is expected_error
+        assert (
+            transition.case_failure_update.value.message
+            == METHOD_PUBLIC_REASON_TEXT_V2[reason_code]
+        )
     else:
         assert outcome.result_type is OutcomeResultType.INCONCLUSIVE
         assert transition.case_failure_update is None

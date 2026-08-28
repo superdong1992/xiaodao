@@ -36,15 +36,23 @@ test("Codex suite plan freezes nine scenarios, 44 calls, and aggregate limits be
   assert.equal(plan.execution.equivalent_usd_cap, 27);
   assert.equal(plan.execution.wall_timeout_seconds, 16_200);
   assert.equal(plan.execution.per_scenario.find((item) => item.scenario_id === "insufficient-evidence").expected_model_calls, 4);
+  assert.ok(plan.admission.blockers.some((item) => item.code === "EVIDENCE_V2_REAL_DIAGNOSIS_ADAPTER_UNMIGRATED"));
 });
 
 test("blocked Codex suite writes one aggregate verdict and nine NOT_RUN results without a model", async () => {
   const runsRoot = fs.mkdtempSync(path.join(os.tmpdir(), "codex-suite-blocked-"));
-  const options = { ...defaults(parseArguments(["--goal", "e2e", "--all-scenarios"])), runsRoot };
-  const result = await executeSuite(options, buildPlan(options));
+  const options = { ...defaults(parseArguments(["--goal", "e2e", "--all-scenarios"])), runsRoot, allowRealModel: true };
+  const plan = buildPlan(options);
+  assert.ok(plan.admission.blockers.some((item) => item.code === "EVIDENCE_V2_REAL_DIAGNOSIS_ADAPTER_UNMIGRATED"));
+  const result = await executeSuite(options, plan);
   assert.equal(result.verdict.status, "BLOCKED");
   assert.equal(result.verdict.model_calls.actual, 0);
   assert.equal(result.verdict.scenarios.filter((item) => item.status === "NOT_RUN").length, 9);
+});
+
+test("Codex Methods generation and cache verification do not inherit the E2E migration blocker", () => {
+  const plan = buildPlan(defaults(parseArguments(["--goal", "methods", "--plan-only"])));
+  assert.equal(plan.admission.blockers.some((item) => item.code === "EVIDENCE_V2_REAL_DIAGNOSIS_ADAPTER_UNMIGRATED"), false);
 });
 
 function fakeCodexExecutor({ failureAt = null, failureCode = null, seen }) {

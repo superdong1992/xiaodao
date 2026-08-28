@@ -661,6 +661,24 @@ def test_interrupt_preserves_role_and_resume_returns_to_its_pending_state(role: 
     assert resumed.current_role == role
 
 
+def test_specialist_replacement_resume_rebinds_only_source_job_identity() -> None:
+    plan = _plan()
+    interrupted = interrupt_method_state_v2(state=_start(plan))
+    replacement_job_id = "00000000-0000-0000-0000-000000000099"
+
+    resumed = resume_method_state_v2(
+        state=interrupted,
+        source_job_id=replacement_job_id,
+    )
+
+    assert resumed.source_job_id == replacement_job_id
+    assert resumed.evaluation_id == interrupted.evaluation_id
+    assert resumed.plan_ref == interrupted.plan_ref
+    assert resumed.evaluation_refs == interrupted.evaluation_refs
+    assert resumed.specialist_protocol_failures == interrupted.specialist_protocol_failures
+    assert resumed.reviewer_protocol_failures == interrupted.reviewer_protocol_failures
+
+
 def test_state_contract_forbids_partially_resolved_single_field_mutation() -> None:
     plan = _plan()
     specialist, reviewer, consensus = _evaluations(plan)

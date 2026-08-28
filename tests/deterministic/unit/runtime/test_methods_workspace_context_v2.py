@@ -530,6 +530,16 @@ def test_role_workspaces_hard_cut_to_one_graph_plan_and_real_cards(
     assert '"role":"REVIEWER"' in reviewer_context.body
 
 
+def test_review_context_policy_declares_candidate_free_methods_v2() -> None:
+    policy = (
+        ROOT
+        / "src/problem_locator/runtime/assets/context-policies/review/policy.md"
+    ).read_text(encoding="utf-8")
+
+    assert "Methods V2 review remains Candidate-free" in policy
+    assert "Preserve the candidate," not in policy
+
+
 def test_single_field_mutations_are_rejected_from_production_baseline(
     tmp_path: Path,
 ) -> None:

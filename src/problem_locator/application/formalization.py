@@ -33,6 +33,7 @@ from problem_locator.contracts.enums import (
 )
 from problem_locator.contracts.methods_reason_v2 import (
     CONSENSUS_UNRESOLVED_REASON_CODES_V2,
+    METHOD_PUBLIC_REASON_TEXT_V2,
 )
 from problem_locator.contracts.methods_state_v2 import (
     MethodStateV2,
@@ -103,27 +104,25 @@ def _methods_terminal_failure_v2(
 ) -> ExecutionFailure | None:
     if terminal.status != "FAILED":
         return None
-    stage, code, message = {
+    assert terminal.reason_code is not None
+    stage, code = {
         "RESOURCE_SNAPSHOT_DRIFT": (
             ExecutionStage.ASSET_RESOLUTION,
             ErrorCode.ASSET_VERSION_UNAVAILABLE,
-            "The Evidence V2 resource snapshot changed before terminal application.",
         ),
         "SERVER_INVARIANT_VIOLATION": (
             ExecutionStage.OUTCOME_VALIDATE,
             ErrorCode.OUTCOME_INVALID,
-            "The Evidence V2 server invariant was violated.",
         ),
         "AUDIT_ARCHIVE_FAILED": (
             ExecutionStage.EXECUTION_RECORD,
             ErrorCode.EXECUTION_RECORD_FAILED,
-            "The Evidence V2 audit archive could not be completed.",
         ),
     }[terminal.reason_code]
     return ExecutionFailure(
         stage=stage,
         code=code,
-        message=message,
+        message=METHOD_PUBLIC_REASON_TEXT_V2[terminal.reason_code],
         retryable=False,
         details=[],
         reason_code=terminal.reason_code,

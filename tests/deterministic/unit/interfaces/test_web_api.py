@@ -619,6 +619,12 @@ def test_openapi_describes_every_parameter_and_reachable_model_field() -> None:
                     for field_name in expected_required
                     if field_name not in {"reason_code", "diagnostic_id"}
                 ]
+            if schema_name == "CaseView":
+                expected_required = [
+                    field_name
+                    for field_name in expected_required
+                    if field_name != "methods_result"
+                ]
             assert component["required"] == expected_required
 
 
@@ -638,6 +644,14 @@ def test_methods_failure_diagnostics_are_optional_in_rest_and_serialization() ->
     encoded = canonical_json_bytes(legacy_failure)
     assert b'"reason_code"' not in encoded
     assert b'"diagnostic_id"' not in encoded
+
+
+def test_nonterminal_methods_result_is_optional_in_rest_and_serialization() -> None:
+    case_view_schema = _app().openapi()["components"]["schemas"]["CaseView"]
+    assert "methods_result" not in set(case_view_schema["required"])
+
+    encoded = canonical_json_bytes(case_view())
+    assert b'"methods_result"' not in encoded
 
 
 def test_openapi_examples_validate_against_the_real_rest_dtos() -> None:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 from pathlib import Path
 
 from problem_locator.application.outcome_submission import OutcomeSubmissionService
@@ -13,7 +14,9 @@ from problem_locator.contracts import (
     validate_outcome_for_job,
 )
 from problem_locator.domain import DomainCoordinator, PureContextSnapshotProjector
+from problem_locator.journey import configure_journey
 from problem_locator.runtime.diagnosis_runtime import DiagnosisRuntime
+from problem_locator.runtime.methods_records_v2 import read_method_evidence_graph_v2
 from problem_locator.runtime.workspace import WorkspaceManager
 from tests.deterministic.contracts.fakes import (
     DeterministicIdGenerator,
@@ -39,6 +42,8 @@ from tests.deterministic.unit.runtime.test_diagnosis_runtime_methods_v2 import (
     _EvidenceV2ReviewerBackend,
     _EvidenceV2SpecialistBackend,
 )
+
+
 def _state_with_aggregate(aggregate) -> StateFile:
     value = _json("state.json")
     value["cases"] = {
@@ -104,7 +109,11 @@ def _claim_active_review(repository: InMemoryStateRepository) -> Job:
 
 def test_runtime_submission_reviewer_and_public_projection_are_one_v2_journey(
     tmp_path: Path,
+    request,
 ) -> None:
+    journey_stream = io.StringIO()
+    configure_journey(stream=journey_stream)
+    request.addfinalizer(configure_journey)
     broker_factory = FakeLogparseBrokerFactory()
     catalog = _logparse_catalog(tmp_path / "catalog", broker_factory)
     source_job, raw_aggregate, _ = _claimed_logparse_job_state_and_resources(catalog)
@@ -140,6 +149,10 @@ def test_runtime_submission_reviewer_and_public_projection_are_one_v2_journey(
         source_job,
         ("VALID",),
     )
+    specialist_backend.target_contents = {
+        "client": b"RPC DEADLINE EXCEEDED request_id=42\n",
+        "server": b"CONNECTION POOL WAIT request_id=42\n",
+    }
     specialist_backend.result = "confirmed_missing"
     specialist_runtime = DiagnosisRuntime(
         state_repository=repository,
@@ -162,6 +175,13 @@ def test_runtime_submission_reviewer_and_public_projection_are_one_v2_journey(
     )
     assert specialist_receipt.job_outcome.result_type.value == "COMPLETED"
     assert specialist_receipt.job_outcome.error is None
+    graph = read_method_evidence_graph_v2(records, job_id=source_job.job_id)
+    assert graph is not None
+    assert any(
+        hit.marker == "connection pool wait"
+        and hit.line == "CONNECTION POOL WAIT request_id=42"
+        for hit in graph.hits
+    )
     validate_outcome_for_job(
         source_job,
         specialist_receipt.job_outcome,
@@ -230,3 +250,7 @@ def test_runtime_submission_reviewer_and_public_projection_are_one_v2_journey(
     assert "specialist_evaluation" not in rest_view
     assert "private specialist reason" not in str(mcp_view)
     assert "private specialist reason" not in str(rest_view)
+    journey = journey_stream.getvalue()
+    assert "methods_reviewer_result" not in journey
+    assert "Independent blind review of the frozen plan." not in journey
+    assert mcp_result["diagnostic_id"] in journey

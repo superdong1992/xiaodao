@@ -45,6 +45,32 @@ test("unknown configuration fields fail closed", () => {
   }, (root) => loadConfiguration(REPO_ROOT, root)), (error) => error.code === "CONFIG_GATE_FIELDS");
 });
 
+test("real diagnosis admission blockers use one explicit closed contract", () => {
+  const config = loadConfiguration(REPO_ROOT);
+  const blockedStageIds = [
+    "real.codex-luna-methods",
+    "real.macos-codex-luna-e2e",
+    "real.macos-claude-deepseek-e2e",
+    "journey.cross-job.diagnose",
+  ];
+  for (const stageId of blockedStageIds) {
+    assert.deepEqual(
+      config.stages.stages.find((stage) => stage.id === stageId).admission_blocker.code,
+      "EVIDENCE_V2_REAL_DIAGNOSIS_ADAPTER_UNMIGRATED",
+    );
+  }
+  for (const stageId of ["real.skill-generation", "real.macos-codex-luna-methods", "real.macos-claude-deepseek-methods"]) {
+    assert.equal(config.stages.stages.find((stage) => stage.id === stageId).admission_blocker, undefined);
+  }
+
+  assert.throws(() => withConfigMutation("stages.v2.json", (value) => {
+    value.stages.find((stage) => stage.id === blockedStageIds[0]).admission_blocker.code = "legacy-v1";
+  }, (root) => loadConfiguration(REPO_ROOT, root)), (error) => error.code === "CONFIG_STAGE_ADMISSION_BLOCKER_CODE");
+  assert.throws(() => withConfigMutation("stages.v2.json", (value) => {
+    delete value.stages.find((stage) => stage.id === blockedStageIds[0]).admission_blocker.detail;
+  }, (root) => loadConfiguration(REPO_ROOT, root)), (error) => error.code === "CONFIG_STAGE_ADMISSION_BLOCKER_DETAIL");
+});
+
 test("Codex runtime profile must equal the executable/model contract constants", () => {
   const mutations = [
     ["version", "0.149.0-alpha.4.2", "CONFIG_RUNTIME_CODEX_VERSION"],

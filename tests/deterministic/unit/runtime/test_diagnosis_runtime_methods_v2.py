@@ -6,15 +6,21 @@ from typing import Any
 
 import pytest
 
+from problem_locator.application import build_application_service
 from problem_locator.contracts import (
+    CaseAggregate,
     ErrorCode,
     ExecutionLogSinks,
     ExecutionStage,
     Job,
+    JobStatus,
     MethodEvaluationPlanV2,
     OutcomeResultType,
+    ResumeCase,
+    StateFile,
     parse_canonical_json_bytes,
 )
+from problem_locator.domain import DomainCoordinator, PureContextSnapshotProjector
 from problem_locator.runtime.agent_backend import BackendExecution
 from problem_locator.runtime.diagnosis_runtime import DiagnosisRuntime
 from problem_locator.runtime.failures import runtime_failure
@@ -26,9 +32,11 @@ from problem_locator.runtime.methods_records_v2 import (
     publish_method_evaluation_plan_v2,
     publish_method_evidence_graph_v2,
     publish_method_limitations_record_v2,
+    publish_method_rejected_attempt_v2,
     publish_method_state_v2,
     read_method_evaluation_plan_v2,
     read_method_evidence_graph_v2,
+    read_method_limitations_record_v2,
     read_method_prompt_v2,
     read_method_rejected_attempt_v2,
     read_method_state_v2,
@@ -36,15 +44,24 @@ from problem_locator.runtime.methods_records_v2 import (
 )
 from problem_locator.domain.methods_state_v2 import (
     accept_specialist_evaluation_v2,
+    interrupt_method_state_v2,
+    record_protocol_error_v2,
+    resume_method_state_v2,
     start_method_state_v2,
 )
 from problem_locator.runtime.methods_evaluation_v2 import evaluate_method_role_v2
 from problem_locator.runtime.workspace import WorkspaceManager
 from tests.deterministic.contracts.fakes import (
     DeterministicIdGenerator,
+    FakeClock,
     FakeLogparseBrokerFactory,
+    InMemoryAttachmentUploadGuard,
     InMemoryCancellationSignal,
     InMemoryExecutionRecordStore,
+    InMemoryPublicationCommitGuard,
+    InMemoryStateChangeNotifier,
+    InMemoryStateRepository,
+    RecordingDispatcher,
 )
 from tests.deterministic.unit.runtime.test_diagnosis_runtime import (
     _Clock,
@@ -55,6 +72,7 @@ from tests.deterministic.unit.runtime.test_diagnosis_runtime import (
 )
 from tests.deterministic.unit.runtime.test_methods_workspace_context_v2 import (
     PRIVATE_STATE_SENTINEL,
+    _ResourceStore,
     _UnusedResourceStore,
     _aggregate,
     _jobs,
@@ -314,6 +332,121 @@ def _running(job: Job) -> Job:
     return Job.model_validate(value)
 
 
+def _interrupted_aggregate(
+    job: Job,
+    *,
+    source_job: Job | None = None,
+) -> CaseAggregate:
+    aggregate = _aggregate(job, source_job=source_job)
+    value = aggregate.model_dump(mode="json")
+    value["case"].update(
+        {
+            "active_job_id": None,
+            "status": "INTERRUPTED",
+            "case_revision": aggregate.case.case_revision + 1,
+            "updated_at": "2026-07-31T00:03:00.000Z",
+        }
+    )
+    value["jobs"][job.job_id].update(
+        {
+            "status": "INTERRUPTED",
+            "started_at": "2026-07-31T00:02:10.000Z",
+            "finished_at": "2026-07-31T00:03:00.000Z",
+            "runtime_epoch": "00000000-0000-0000-0000-000000000098",
+        }
+    )
+    return CaseAggregate.model_validate(value)
+
+
+def _interrupt_active_job(
+    aggregate: CaseAggregate,
+    job: Job,
+) -> CaseAggregate:
+    value = aggregate.model_dump(mode="json")
+    value["case"].update(
+        {
+            "active_job_id": None,
+            "status": "INTERRUPTED",
+            "case_revision": aggregate.case.case_revision + 1,
+            "updated_at": "2026-07-31T00:06:00.000Z",
+        }
+    )
+    value["jobs"][job.job_id].update(
+        {
+            "status": "INTERRUPTED",
+            "finished_at": "2026-07-31T00:06:00.000Z",
+        }
+    )
+    return CaseAggregate.model_validate(value)
+
+
+def _resume_and_claim_replacement(
+    *,
+    aggregate: CaseAggregate,
+    resources: object,
+    catalog: object,
+    records: InMemoryExecutionRecordStore,
+    replacement_job_id: str,
+) -> tuple[InMemoryStateRepository, Job]:
+    fixture = Path(__file__).resolve().parents[3] / "fixtures/contracts/positive/state.json"
+    base = parse_canonical_json_bytes(fixture.read_bytes(), StateFile)
+    repository = InMemoryStateRepository(
+        base.model_copy(
+            update={
+                "generation": base.generation + 1,
+                "cases": {aggregate.case.case_id: aggregate},
+            }
+        )
+    )
+    guard = InMemoryPublicationCommitGuard()
+    service = build_application_service(
+        repository=repository,
+        resource_store=resources,  # type: ignore[arg-type]
+        publication_guard=guard,
+        upload_guard=InMemoryAttachmentUploadGuard(),
+        execution_records=records,
+        coordinator=DomainCoordinator(),
+        projector=PureContextSnapshotProjector(),
+        asset_catalog=catalog,  # type: ignore[arg-type]
+        dispatcher=RecordingDispatcher(),
+        notifier=InMemoryStateChangeNotifier(),
+        clock=FakeClock("2026-07-31T00:04:00.000Z"),
+        ids=DeterministicIdGenerator(
+            scripted_ids={
+                "trigger": ["00000000-0000-0000-0000-000000000096"],
+                "job": [replacement_job_id],
+            }
+        ),
+    )
+    response = service.execute(
+        ResumeCase(
+            idempotency_key=f"resume-{replacement_job_id}",
+            case_id=aggregate.case.case_id,
+            expected_case_revision=aggregate.case.case_revision,
+            wait_seconds=0,
+        )
+    )
+    assert response.business_receipt.job_id == replacement_job_id
+    claim = service.claim_job(
+        replacement_job_id,
+        "00000000-0000-0000-0000-000000000097",
+    )
+    assert claim.claimed is True and claim.job is not None
+    assert claim.job.status is JobStatus.RUNNING
+    replaced_ids = {
+        item.replacement_for_job_id
+        for item in aggregate.jobs.values()
+        if item.replacement_for_job_id is not None
+    }
+    interrupted_ids = [
+        item.job_id
+        for item in aggregate.jobs.values()
+        if item.status is JobStatus.INTERRUPTED and item.job_id not in replaced_ids
+    ]
+    assert interrupted_ids == [claim.job.replacement_for_job_id]
+    return repository, claim.job
+
+
 def _review_runtime(
     tmp_path: Path,
     responses: tuple[object, ...],
@@ -409,6 +542,12 @@ def test_specialist_scans_once_hard_cuts_logs_and_publishes_handoff(
 
     production_scan = runtime_module.scan_method_evidence_v2
     calls = 0
+
+    def legacy_methods_v1(*args: Any, **kwargs: Any) -> None:
+        raise AssertionError("Evidence V2 must not enter Methods V1 grounding")
+
+    monkeypatch.setattr(runtime_module, "scan_method_markers", legacy_methods_v1)
+    monkeypatch.setattr(runtime_module, "verify_method_diagnosis", legacy_methods_v1)
 
     def counted_scan(**kwargs: Any):
         nonlocal calls
@@ -786,6 +925,404 @@ def test_reviewer_restart_runs_only_repair_and_reads_source_state_after_model(
     assert projection.limitations == ("Only the frozen target set was evaluated.",)
     state = read_method_state_v2(records, job_id=restart_job.job_id)
     assert state is not None and state.reviewer_evaluation is not None
+    assert state.reviewer_evaluation.repair_used is True
+
+
+def _specialist_replacement_source(tmp_path: Path):
+    catalog, _, specialist, _, _, graph, plan, _ = _jobs(tmp_path / "source")
+    source_value = specialist.model_dump(mode="json")
+    source_value["previous_outcome_refs"] = []
+    source_value["context_snapshot"]["candidate_conclusion"] = None
+    source_job = _running(Job.model_validate(source_value))
+    aggregate = _interrupted_aggregate(source_job)
+    records = InMemoryExecutionRecordStore()
+    evaluation_id = "00000000-0000-0000-0000-000000000072"
+    interrupted = interrupt_method_state_v2(
+        state=record_protocol_error_v2(
+            state=start_method_state_v2(
+                case_id=source_job.case_id,
+                source_job_id=source_job.job_id,
+                evaluation_id=evaluation_id,
+                plan=plan,
+            ),
+            role="SPECIALIST",
+            reason="The primary Specialist response did not match the contract.",
+        )
+    )
+    publish_method_evidence_graph_v2(records, job_id=source_job.job_id, graph=graph)
+    publish_method_evaluation_plan_v2(records, job_id=source_job.job_id, plan=plan)
+    publish_method_limitations_record_v2(
+        records,
+        job_id=source_job.job_id,
+        record=build_method_limitations_record_v2(
+            case_id=source_job.case_id,
+            source_job_id=source_job.job_id,
+            graph=graph,
+            plan=plan,
+            limitations=graph.limitations,
+        ),
+    )
+    publish_method_rejected_attempt_v2(
+        records,
+        job_id=source_job.job_id,
+        role="SPECIALIST",
+        attempt="PRIMARY",
+        raw_bytes=b'{"invalid":true}',
+    )
+    publish_method_state_v2(records, job_id=source_job.job_id, state=interrupted)
+    return (
+        catalog,
+        source_job,
+        aggregate,
+        records,
+        graph,
+        plan,
+        evaluation_id,
+        _ResourceStore(),
+    )
+
+
+def test_specialist_replacement_resumes_old_repair_without_rescan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (
+        catalog,
+        _,
+        aggregate,
+        records,
+        graph,
+        plan,
+        evaluation_id,
+        resources,
+    ) = _specialist_replacement_source(tmp_path)
+
+    repository, replacement = _resume_and_claim_replacement(
+        aggregate=aggregate,
+        resources=resources,
+        catalog=catalog,
+        records=records,
+        replacement_job_id="00000000-0000-0000-0000-000000000073",
+    )
+    factory = FakeLogparseBrokerFactory()
+    backend = _EvidenceV2SpecialistBackend(factory, replacement, ("VALID",))
+    runtime = DiagnosisRuntime(
+        state_repository=repository,
+        resource_store=resources,  # type: ignore[arg-type]
+        asset_catalog=catalog,
+        logparse_broker_factory=factory,
+        execution_records=records,
+        clock=FakeClock("2026-07-31T00:05:00.000Z"),
+        id_generator=DeterministicIdGenerator(seed="specialist-replacement"),
+        workspace_manager=WorkspaceManager(tmp_path / "replacement"),
+        backend=backend,
+    )
+    from problem_locator.runtime import diagnosis_runtime as runtime_module
+
+    def forbidden_scan(**kwargs: Any):
+        del kwargs
+        raise AssertionError("replacement must reuse the predecessor Evidence Graph")
+
+    monkeypatch.setattr(runtime_module, "scan_method_evidence_v2", forbidden_scan)
+
+    receipt = runtime.execute(replacement, InMemoryCancellationSignal())
+
+    assert receipt.job_outcome.methods_review_target is not None, receipt.job_outcome.error
+    assert len(backend.calls) == 1
+    assert len(backend.role_prompts) == 1
+    assert read_method_evidence_graph_v2(records, job_id=replacement.job_id) == graph
+    assert read_method_evaluation_plan_v2(records, job_id=replacement.job_id) == plan
+    limitations = read_method_limitations_record_v2(
+        records,
+        job_id=replacement.job_id,
+    )
+    assert limitations is not None
+    assert limitations.limitations == graph.limitations
+    assert read_method_rejected_attempt_v2(
+        records,
+        job_id=replacement.job_id,
+        role="SPECIALIST",
+        attempt="PRIMARY",
+    ) == b'{"invalid":true}'
+    state = read_method_state_v2(records, job_id=replacement.job_id)
+    assert state is not None and state.specialist_evaluation is not None
+    assert state.source_job_id == replacement.job_id
+    assert state.evaluation_id == evaluation_id
+    assert state.specialist_protocol_failures == 1
+    assert state.specialist_evaluation.repair_used is True
+
+
+def test_specialist_replacement_resource_drift_keeps_old_evaluation_lineage(
+    tmp_path: Path,
+) -> None:
+    (
+        catalog,
+        _,
+        aggregate,
+        records,
+        graph,
+        plan,
+        evaluation_id,
+        resources,
+    ) = _specialist_replacement_source(tmp_path)
+    repository, replacement = _resume_and_claim_replacement(
+        aggregate=aggregate,
+        resources=resources,
+        catalog=catalog,
+        records=records,
+        replacement_job_id="00000000-0000-0000-0000-000000000075",
+    )
+    skill_file = next((tmp_path / "source" / "skills").rglob("SKILL.md"))
+    skill_file.write_text(
+        skill_file.read_text(encoding="utf-8") + "\nreplacement drift\n",
+        encoding="utf-8",
+    )
+    factory = FakeLogparseBrokerFactory()
+    backend = _EvidenceV2SpecialistBackend(factory, replacement, ("VALID",))
+    runtime = DiagnosisRuntime(
+        state_repository=repository,
+        resource_store=resources,  # type: ignore[arg-type]
+        asset_catalog=catalog,
+        logparse_broker_factory=factory,
+        execution_records=records,
+        clock=FakeClock("2026-07-31T00:05:00.000Z"),
+        id_generator=DeterministicIdGenerator(seed="specialist-replacement-drift"),
+        workspace_manager=WorkspaceManager(tmp_path / "replacement-drift"),
+        backend=backend,
+    )
+
+    receipt = runtime.execute(replacement, InMemoryCancellationSignal())
+
+    projection = receipt.job_outcome.methods_terminal_projection
+    assert projection is not None
+    assert projection.status == "FAILED"
+    assert projection.reason_code == "RESOURCE_SNAPSHOT_DRIFT"
+    assert projection.evaluation_id == evaluation_id
+    assert backend.calls == []
+    assert read_method_evidence_graph_v2(records, job_id=replacement.job_id) == graph
+    assert read_method_evaluation_plan_v2(records, job_id=replacement.job_id) == plan
+    assert read_method_rejected_attempt_v2(
+        records,
+        job_id=replacement.job_id,
+        role="SPECIALIST",
+        attempt="PRIMARY",
+    ) == b'{"invalid":true}'
+    state = read_method_state_v2(records, job_id=replacement.job_id)
+    assert state is not None
+    assert state.source_job_id == replacement.job_id
+    assert state.evaluation_id == evaluation_id
+    assert state.specialist_protocol_failures == 1
+
+
+def test_specialist_replacement_lineage_resumes_from_immediate_predecessor(
+    tmp_path: Path,
+) -> None:
+    (
+        catalog,
+        source_job,
+        aggregate,
+        records,
+        graph,
+        plan,
+        evaluation_id,
+        resources,
+    ) = _specialist_replacement_source(tmp_path)
+    first_repository, first_replacement = _resume_and_claim_replacement(
+        aggregate=aggregate,
+        resources=resources,
+        catalog=catalog,
+        records=records,
+        replacement_job_id="00000000-0000-0000-0000-000000000076",
+    )
+    source_state = read_method_state_v2(records, job_id=source_job.job_id)
+    assert source_state is not None
+    first_interrupted_state = interrupt_method_state_v2(
+        state=resume_method_state_v2(
+            state=source_state,
+            source_job_id=first_replacement.job_id,
+        )
+    )
+    publish_method_evidence_graph_v2(
+        records,
+        job_id=first_replacement.job_id,
+        graph=graph,
+    )
+    publish_method_evaluation_plan_v2(
+        records,
+        job_id=first_replacement.job_id,
+        plan=plan,
+    )
+    publish_method_limitations_record_v2(
+        records,
+        job_id=first_replacement.job_id,
+        record=build_method_limitations_record_v2(
+            case_id=first_replacement.case_id,
+            source_job_id=first_replacement.job_id,
+            graph=graph,
+            plan=plan,
+            limitations=graph.limitations,
+        ),
+    )
+    publish_method_rejected_attempt_v2(
+        records,
+        job_id=first_replacement.job_id,
+        role="SPECIALIST",
+        attempt="PRIMARY",
+        raw_bytes=b'{"invalid":true}',
+    )
+    publish_method_state_v2(
+        records,
+        job_id=first_replacement.job_id,
+        state=first_interrupted_state,
+    )
+    first_aggregate = _interrupt_active_job(
+        first_repository.read_case(first_replacement.case_id),
+        first_replacement,
+    )
+    second_repository, second_replacement = _resume_and_claim_replacement(
+        aggregate=first_aggregate,
+        resources=resources,
+        catalog=catalog,
+        records=records,
+        replacement_job_id="00000000-0000-0000-0000-000000000077",
+    )
+    factory = FakeLogparseBrokerFactory()
+    backend = _EvidenceV2SpecialistBackend(factory, second_replacement, ("VALID",))
+    runtime = DiagnosisRuntime(
+        state_repository=second_repository,
+        resource_store=resources,  # type: ignore[arg-type]
+        asset_catalog=catalog,
+        logparse_broker_factory=factory,
+        execution_records=records,
+        clock=FakeClock("2026-07-31T00:07:00.000Z"),
+        id_generator=DeterministicIdGenerator(seed="specialist-second-replacement"),
+        workspace_manager=WorkspaceManager(tmp_path / "second-replacement"),
+        backend=backend,
+    )
+
+    receipt = runtime.execute(second_replacement, InMemoryCancellationSignal())
+
+    assert receipt.job_outcome.methods_review_target is not None
+    assert len(backend.calls) == 1
+    state = read_method_state_v2(records, job_id=second_replacement.job_id)
+    assert state is not None and state.specialist_evaluation is not None
+    assert state.source_job_id == second_replacement.job_id
+    assert state.evaluation_id == evaluation_id
+    assert state.specialist_protocol_failures == 1
+    assert state.specialist_evaluation.repair_used is True
+
+
+def test_reviewer_replacement_inherits_old_rejection_and_interrupted_state(
+    tmp_path: Path,
+) -> None:
+    catalog, _, specialist, reviewer, _, graph, plan, _ = _jobs(tmp_path / "source")
+    source_job = _running(reviewer)
+    aggregate = _interrupted_aggregate(source_job, source_job=specialist)
+    records = InMemoryExecutionRecordStore()
+    target = source_job.methods_review_target
+    assert target is not None
+    specialist_evaluation = evaluate_method_role_v2(
+        role="SPECIALIST",
+        plan=plan,
+        response=[
+            {
+                "evaluation_ref": item.evaluation_ref,
+                "verdict": "CONFIRMED",
+                "reason": "private specialist reason",
+            }
+            for item in plan.evaluations
+        ],
+        attempt="PRIMARY",
+    )
+    reviewer_pending = accept_specialist_evaluation_v2(
+        state=start_method_state_v2(
+            case_id=source_job.case_id,
+            source_job_id=target.source_job_id,
+            evaluation_id=target.evaluation_id,
+            plan=plan,
+        ),
+        evaluation=specialist_evaluation,
+    )
+    interrupted = interrupt_method_state_v2(
+        state=record_protocol_error_v2(
+            state=reviewer_pending,
+            role="REVIEWER",
+            reason="The primary Reviewer response did not match the contract.",
+        )
+    )
+    publish_method_evidence_graph_v2(
+        records,
+        job_id=target.source_job_id,
+        graph=graph,
+    )
+    publish_method_evaluation_plan_v2(
+        records,
+        job_id=target.source_job_id,
+        plan=plan,
+    )
+    publish_method_limitations_record_v2(
+        records,
+        job_id=target.source_job_id,
+        record=build_method_limitations_record_v2(
+            case_id=source_job.case_id,
+            source_job_id=target.source_job_id,
+            graph=graph,
+            plan=plan,
+            limitations=graph.limitations,
+        ),
+    )
+    publish_method_state_v2(
+        records,
+        job_id=target.source_job_id,
+        state=reviewer_pending,
+    )
+    publish_method_rejected_attempt_v2(
+        records,
+        job_id=source_job.job_id,
+        role="REVIEWER",
+        attempt="PRIMARY",
+        raw_bytes=b'{"invalid":true}',
+    )
+    publish_method_state_v2(records, job_id=source_job.job_id, state=interrupted)
+
+    resources = _UnusedResourceStore()
+    repository, replacement = _resume_and_claim_replacement(
+        aggregate=aggregate,
+        resources=resources,
+        catalog=catalog,
+        records=records,
+        replacement_job_id="00000000-0000-0000-0000-000000000074",
+    )
+    events: list[str] = []
+    backend = _EvidenceV2ReviewerBackend(("VALID_CONFIRMED",), events)
+    runtime = DiagnosisRuntime(
+        state_repository=repository,
+        resource_store=resources,  # type: ignore[arg-type]
+        asset_catalog=catalog,
+        logparse_broker_factory=None,
+        execution_records=records,
+        clock=FakeClock("2026-07-31T00:05:00.000Z"),
+        id_generator=DeterministicIdGenerator(seed="reviewer-replacement"),
+        workspace_manager=WorkspaceManager(tmp_path / "replacement"),
+        backend=backend,
+    )
+
+    receipt = runtime.execute(replacement, InMemoryCancellationSignal())
+
+    projection = receipt.job_outcome.methods_terminal_projection
+    assert projection is not None and projection.status == "RESOLVED"
+    assert len(backend.calls) == 1
+    assert read_method_rejected_attempt_v2(
+        records,
+        job_id=replacement.job_id,
+        role="REVIEWER",
+        attempt="PRIMARY",
+    ) == b'{"invalid":true}'
+    state = read_method_state_v2(records, job_id=replacement.job_id)
+    assert state is not None and state.reviewer_evaluation is not None
+    assert state.source_job_id == target.source_job_id
+    assert state.evaluation_id == target.evaluation_id
+    assert state.reviewer_protocol_failures == 1
     assert state.reviewer_evaluation.repair_used is True
 
 

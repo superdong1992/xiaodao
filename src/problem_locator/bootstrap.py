@@ -52,6 +52,7 @@ from problem_locator.entrypoints.cli import CliHooks, main as cli_main, run_uvic
 from problem_locator.entrypoints.replay import (
     ReplayRequest,
     ReplayResult,
+    run_method_validation_replay_v2,
     run_replay_job as execute_replay_job,
 )
 from problem_locator.entrypoints.settings import Settings
@@ -1414,6 +1415,7 @@ def cli_hooks() -> CliHooks:
         app_factory=create_app,
         server_runner=_server_runner,
         replay_runner=run_replay_job,
+        method_validation_replay_runner=run_method_validation_replay_v2,
     )
 
 

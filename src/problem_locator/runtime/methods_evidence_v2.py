@@ -259,6 +259,13 @@ def build_method_evaluation_plan_v2(
         for item in evidence.hits
     ):
         raise ValueError("evidence hit method priority differs from the Skill")
+    for item in evidence.hits:
+        method_markers = methods_by_id[item.method_id].evidence_markers
+        if (
+            item.marker_index > len(method_markers)
+            or item.marker != method_markers[item.marker_index - 1]
+        ):
+            raise ValueError("evidence hit marker/index does not belong to its method")
 
     evaluations: list[MethodEvaluationPlanItemV2] = []
     for method_id in evidence.loaded_method_ids:

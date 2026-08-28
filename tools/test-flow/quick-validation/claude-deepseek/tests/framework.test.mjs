@@ -43,15 +43,23 @@ test("Claude suite plan freezes nine scenarios, 44 processes, and aggregate limi
   assert.equal(plan.inputs.client_prompt.version, 3);
   assert.match(plan.inputs.client_prompt.sha256, /^[0-9a-f]{64}$/u);
   assert.match(plan.inputs.provider_runtime.tree_sha256, /^[0-9a-f]{64}$/u);
+  assert.ok(plan.admission.blockers.some((item) => item.code === "EVIDENCE_V2_REAL_DIAGNOSIS_ADAPTER_UNMIGRATED"));
 });
 
 test("blocked Claude suite writes one aggregate verdict and nine NOT_RUN results without a model", async () => {
   const runsRoot = fs.mkdtempSync(path.join(os.tmpdir(), "claude-suite-blocked-"));
-  const options = { ...defaults(parseArguments(["--goal", E2E_GOAL, "--all-scenarios"])), runsRoot };
-  const result = await executeSuite(options, buildPlan(options));
+  const options = { ...defaults(parseArguments(["--goal", E2E_GOAL, "--all-scenarios"])), runsRoot, allowRealModel: true };
+  const plan = buildPlan(options);
+  assert.ok(plan.admission.blockers.some((item) => item.code === "EVIDENCE_V2_REAL_DIAGNOSIS_ADAPTER_UNMIGRATED"));
+  const result = await executeSuite(options, plan);
   assert.equal(result.verdict.status, "BLOCKED");
   assert.equal(result.verdict.model_processes.actual, 0);
   assert.equal(result.verdict.scenarios.filter((item) => item.status === "NOT_RUN").length, 9);
+});
+
+test("Claude Methods generation and cache verification do not inherit the E2E migration blocker", () => {
+  const plan = buildPlan(defaults(parseArguments(["--goal", METHODS_GOAL, "--plan-only"])));
+  assert.equal(plan.admission.blockers.some((item) => item.code === "EVIDENCE_V2_REAL_DIAGNOSIS_ADAPTER_UNMIGRATED"), false);
 });
 
 function fakeClaudeExecutor({ failureAt = null, failureCode = null, seen }) {

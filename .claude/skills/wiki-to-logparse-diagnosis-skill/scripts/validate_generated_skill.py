@@ -627,6 +627,7 @@ def _validate_methods(
     wiki_markers = _wiki_canonical_evidence_markers(wiki_templates)
     method_ids: set[str] = set()
     method_references: set[str] = set()
+    marker_bindings: list[tuple[int, str, list[str]]] = []
     priorities: list[int] = []
     marker_count = 0
     for index, method in enumerate(methods, start=1):
@@ -682,6 +683,8 @@ def _validate_methods(
                 errors.append(
                     f"method {index} evidence marker is not a canonical stable Wiki log marker: {marker}"
                 )
+        if reference is not None and reference != SOURCE_LOG_TEMPLATES_REFERENCE:
+            marker_bindings.append((index, reference, markers))
     result["marker_count"] = marker_count
     if priorities != list(range(1, len(methods) + 1)):
         errors.append("method priorities must be unique and consecutive from 1")
@@ -712,6 +715,15 @@ def _validate_methods(
                 for heading in METHOD_HEADINGS:
                     if heading not in text:
                         errors.append(f"{reference} is missing heading: {heading}")
+        for index, reference, markers in marker_bindings:
+            method_text = reference_texts.get(reference)
+            if method_text is None:
+                continue
+            for marker in markers:
+                if marker not in method_text:
+                    errors.append(
+                        f"method {index} evidence marker is absent from its method reference: {marker}"
+                    )
         if reference_texts.get(SOURCE_LOG_TEMPLATES_REFERENCE) != _render_source_log_templates(
             wiki_templates
         ):

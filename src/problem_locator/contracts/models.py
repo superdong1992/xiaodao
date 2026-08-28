@@ -1,4 +1,4 @@
-"""Pydantic models for the frozen Problem Locator V7 public contract.
+"""Pydantic models for the frozen Problem Locator V8 public contract.
 
 The module deliberately keeps all wire/persistence DTO definitions in one place;
 ``commands``, ``outcomes`` and ``errors`` provide responsibility-oriented exports.
@@ -4874,7 +4874,14 @@ class TransitionPlan(ContractModel):
                     raise ValueError(
                         "Methods V2 REVIEW transition must be Candidate-free and accept no legacy resources"
                     )
-                if not any(
+                methods_replacement = (
+                    self.next_job_spec.replacement_for_job_id is not None
+                )
+                if methods_replacement and self.job_updates:
+                    raise ValueError(
+                        "Methods V2 REVIEW replacement cannot complete another Job"
+                    )
+                if not methods_replacement and not any(
                     update.job_id == methods_target.source_job_id
                     and update.target_status is JobStatus.SUCCEEDED
                     for update in self.job_updates
@@ -5600,7 +5607,7 @@ class CaseAggregate(ContractModel):
 
 
 class StateFile(ContractModel):
-    schema_version: Literal[7]
+    schema_version: Literal[8]
     contract_revision: Literal[CONTRACT_REVISION]
     generation: NonNegativeInt
     installation_id: OpaqueId
@@ -6623,8 +6630,8 @@ class StateExportResource(ContractModel):
 
 
 class StateExport(ContractModel):
-    export_schema_version: Literal[7]
-    schema_version: Literal[7]
+    export_schema_version: Literal[8]
+    schema_version: Literal[8]
     contract_revision: Literal[CONTRACT_REVISION]
     source_generation: NonNegativeInt
     installation_id: OpaqueId
@@ -6693,7 +6700,7 @@ class ContractManifestEntry(ContractModel):
 
 
 class ContractManifest(ContractModel):
-    schema_version: Literal[7]
+    schema_version: Literal[8]
     contract_revision: Literal[CONTRACT_REVISION]
     generator_version: NonEmptyText
     files: list[ContractManifestEntry]

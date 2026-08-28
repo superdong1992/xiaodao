@@ -44,6 +44,7 @@ from problem_locator.contracts import (
     LogparseBrokerError,
     LogparseParseClaim,
     MaterializedPath,
+    METHOD_PUBLIC_REASON_TEXT_V2,
     OutcomeResultType,
     ResolvedAsset,
     ResourceKind,
@@ -56,6 +57,7 @@ from problem_locator.contracts import (
     VersionedRef,
     WorkspaceInputManifest,
     canonical_json_bytes,
+    method_pre_evaluation_diagnostic_id_v2,
     parse_canonical_json_bytes,
 )
 from problem_locator.contracts.enums import MethodsValidationReasonCode
@@ -1736,7 +1738,7 @@ def test_materialize_port_errors_use_the_r2_typed_code_without_text_matching(
     assert captured.value.failure.code is port_code
 
 
-def test_materialized_file_may_use_s02_read_only_hard_link(
+def test_materialized_file_rejects_read_only_hard_link(
     tmp_path: Path,
 ) -> None:
     payload = b"immutable attachment bytes\n"
@@ -1763,10 +1765,12 @@ def test_materialized_file_may_use_s02_read_only_hard_link(
 
     destination = tmp_path / "workspace/inputs/attachment/payload"
 
-    _verify_materialized(Store(), reference, destination)  # type: ignore[arg-type]
+    with pytest.raises(RuntimeExecutionError) as captured:
+        _verify_materialized(Store(), reference, destination)  # type: ignore[arg-type]
 
-    assert destination.read_bytes() == payload
-    assert destination.stat().st_ino == source.stat().st_ino
+    assert captured.value.failure.stage is ExecutionStage.WORKSPACE_PREPARE
+    assert captured.value.failure.code is ErrorCode.PATH_VIOLATION
+    assert captured.value.failure.retryable is False
     assert destination.stat().st_nlink == 2
 
 
@@ -2425,6 +2429,10 @@ class _MethodsTwoPassBackend:
         self.written_draft_bytes: bytes | None = None
         self.calls: list[dict[str, Any]] = []
         self.session_closed_at_call: list[bool | None] = []
+        self.target_contents = {
+            "client": b"rpc deadline exceeded request_id=42\n",
+            "server": b"connection pool wait request_id=42\n",
+        }
 
     @staticmethod
     def _close_sinks(kwargs: dict[str, Any]) -> None:
@@ -2477,11 +2485,7 @@ class _MethodsTwoPassBackend:
         )
         task_root = proposal_root / "task-0001"
         (task_root / "targets").mkdir(parents=True)
-        target_contents = {
-            "client": b"rpc deadline exceeded request_id=42\n",
-            "server": b"connection pool wait request_id=42\n",
-        }
-        for label, content in target_contents.items():
+        for label, content in self.target_contents.items():
             (task_root / f"targets/{label}.log").write_bytes(content)
         (task_root / "parse_manifest.json").write_bytes(
             canonical_json_bytes(
@@ -3014,7 +3018,7 @@ def test_methods_preprocessing_rejects_failed_operation_before_success(
     assert records.read_audit_bytes(job.job_id, "methods_target_logs.json") is None
 
 
-def test_logparse_broker_error_is_preserved_as_asset_failure(
+def test_logparse_broker_asset_failure_is_classified_before_evaluation(
     tmp_path: Path,
 ) -> None:
     failure = ExecutionFailure(
@@ -3042,7 +3046,29 @@ def test_logparse_broker_error_is_preserved_as_asset_failure(
 
     receipt = runtime.execute(job, InMemoryCancellationSignal())
 
-    assert receipt.job_outcome.error == failure
+    error = receipt.job_outcome.error
+    assert error is not None
+    assert error.stage is failure.stage
+    assert error.code is failure.code
+    assert error.details == failure.details
+    assert error.retryable is False
+    assert error.reason_code == "RESOURCE_SNAPSHOT_DRIFT"
+    assert error.message == METHOD_PUBLIC_REASON_TEXT_V2[error.reason_code]
+    assert error.diagnostic_id == method_pre_evaluation_diagnostic_id_v2(
+        case_id=job.case_id,
+        source_job_id=job.job_id,
+        reason_code=error.reason_code,
+        source_stage=failure.stage.value,
+        source_error_code=failure.code.value,
+    )
+    assert (
+        records.read_audit_bytes(job.job_id, "methods-evidence-graph-v2.json")
+        is None
+    )
+    assert (
+        records.read_audit_bytes(job.job_id, "methods-evaluation-plan-v2.json")
+        is None
+    )
     assert len(factory.calls) == 1
     assert set(records.log_sinks) == {job.job_id}
     sinks = records.log_sinks[job.job_id]

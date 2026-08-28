@@ -508,10 +508,20 @@ def interrupt_method_state_v2(*, state: MethodStateV2) -> MethodStateV2:
     return _replace(state, status="INTERRUPTED")
 
 
-def resume_method_state_v2(*, state: MethodStateV2) -> MethodStateV2:
+def resume_method_state_v2(
+    *,
+    state: MethodStateV2,
+    source_job_id: str | None = None,
+) -> MethodStateV2:
     if state.status != "INTERRUPTED" or state.current_role is None:
         raise ValueError("only an interrupted role may resume")
-    return _replace(state, status=f"{state.current_role}_PENDING")
+    return _replace(
+        state,
+        source_job_id=(
+            state.source_job_id if source_job_id is None else source_job_id
+        ),
+        status=f"{state.current_role}_PENDING",
+    )
 
 
 __all__ = [

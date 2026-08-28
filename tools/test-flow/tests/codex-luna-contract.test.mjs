@@ -433,9 +433,9 @@ test("isolated child environment strips credentials and redirects HOME and CODEX
     LANG: "C.UTF-8",
     HOME: "/private/home",
     CODEX_HOME: "/private/codex-home",
-    TMPDIR: "/private/home/tmp",
-    TMP: "/private/home/tmp",
-    TEMP: "/private/home/tmp",
+    TMPDIR: path.join("/private/home", "tmp"),
+    TMP: path.join("/private/home", "tmp"),
+    TEMP: path.join("/private/home", "tmp"),
     NO_COLOR: "1",
     PYTHONDONTWRITEBYTECODE: "1",
     PYTHONNOUSERSITE: "1",
@@ -575,7 +575,9 @@ test("preprocessed receipt and source-line diagnosis evidence are mechanically g
   }
 });
 
-test("Codex Luna preprocessing CLI produces nine one-parse/two-query receipts", () => {
+const posixRuntimeTest = process.platform === "win32" ? test.skip : test;
+
+posixRuntimeTest("Codex Luna preprocessing CLI produces nine one-parse/two-query receipts", () => {
   const root = temporaryRoot("codex-luna-prepare-");
   try {
     const caseRoot = path.join(root, "fixture", "cases");

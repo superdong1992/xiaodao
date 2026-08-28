@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import stat
 from collections.abc import Callable
 from pathlib import Path
 
@@ -510,11 +511,11 @@ def test_reader_open_file_strictly_validates_bytes_kind_and_read_only(
         reader.open_file(directory_ref)
 
 
-def test_reader_materializes_file_at_fixed_workspace_path_by_hardlink(
+def test_reader_materializes_file_at_fixed_workspace_path_as_isolated_copy(
     tmp_path: Path,
 ) -> None:
     layout = _layout(tmp_path)
-    source, ref = _formal_file(layout, b"hard link", read_only=True)
+    source, ref = _formal_file(layout, b"isolated copy", read_only=True)
     sync = DurableRecordingFileSync()
     reader = FormalResourceReader(layout, sync)
     destination = (
@@ -528,16 +529,46 @@ def test_reader_materializes_file_at_fixed_workspace_path_by_hardlink(
 
     assert reader.materialize(ref, destination) == destination
 
-    assert destination.read_bytes() == b"hard link"
-    assert destination.stat().st_ino == source.stat().st_ino
+    assert destination.read_bytes() == b"isolated copy"
+    assert destination.stat().st_ino != source.stat().st_ino
     assert is_read_only(destination)
     assert sync.calls("sync_directory")[-1].path == destination.parent
     # Exact bytes at the frozen destination are an idempotent adoption.  This
     # lets a retry close a prior chmod/fsync/parent-sync durability boundary.
     assert reader.materialize(ref, destination) == destination
-    assert destination.stat().st_ino == source.stat().st_ino
+    assert destination.stat().st_ino != source.stat().st_ino
     with pytest.raises(ValueError, match="frozen workspace"):
         reader.materialize(ref, layout.workspaces / JOB_ID / "inputs" / "wrong")
+
+
+def test_reader_file_materialization_never_attempts_a_hardlink(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    layout = _layout(tmp_path)
+    source, ref = _formal_file(layout, b"independent workspace bytes", read_only=True)
+    destination = (
+        layout.workspaces
+        / JOB_ID
+        / "inputs"
+        / "evidence"
+        / RESOURCE_ID
+        / "payload"
+    )
+
+    def forbidden_hardlink(*args: object, **kwargs: object) -> None:
+        raise AssertionError("workspace materialization must not call os.link")
+
+    monkeypatch.setattr(resource_files.os, "link", forbidden_hardlink)
+
+    FormalResourceReader(layout, DurableRecordingFileSync()).materialize(
+        ref,
+        destination,
+    )
+
+    assert destination.read_bytes() == b"independent workspace bytes"
+    assert destination.stat().st_ino != source.stat().st_ino
+    assert is_read_only(destination)
 
 
 def test_reader_materializes_one_resource_into_main_and_logparse_workspaces(
@@ -557,11 +588,13 @@ def test_reader_materializes_one_resource_into_main_and_logparse_workspaces(
 
     assert main_destination.read_bytes() == b"two-pass resource"
     assert logparse_destination.read_bytes() == b"two-pass resource"
-    assert {
-        source.stat().st_ino,
-        main_destination.stat().st_ino,
-        logparse_destination.stat().st_ino,
-    } == {source.stat().st_ino}
+    assert len(
+        {
+            source.stat().st_ino,
+            main_destination.stat().st_ino,
+            logparse_destination.stat().st_ino,
+        }
+    ) == 3
 
 
 @pytest.mark.parametrize(
@@ -642,7 +675,7 @@ def test_reader_materializes_attachment_file_at_exact_archive_workspace_path(
     assert reader.materialize(ref, destination) == destination
 
     assert destination.read_bytes() == b"opaque attachment archive bytes"
-    assert destination.stat().st_ino == source.stat().st_ino
+    assert destination.stat().st_ino != source.stat().st_ino
     assert destination.name == f"payload{'' if suffix is None else suffix.value}"
     assert is_read_only(destination)
     assert ref.storage_key.endswith(f"/attachments/{RESOURCE_ID}/payload")
@@ -683,7 +716,6 @@ def test_reader_rejects_attachment_path_traversal_and_suffix_drift(
 
 def test_attachment_archive_copy_uses_private_temp_and_retries_atomically(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     layout = _layout(tmp_path)
     source, ref = _formal_file(
@@ -711,11 +743,6 @@ def test_attachment_archive_copy_uses_private_temp_and_retries_atomically(
         temp_token_factory=lambda: "archive-copy-retry",
     )
 
-    def unavailable_hardlink(*args: object, **kwargs: object) -> None:
-        raise OSError("cross-device")
-
-    monkeypatch.setattr(resource_files.os, "link", unavailable_hardlink)
-
     with pytest.raises(OSError, match="replace failure"):
         reader.materialize(ref, destination)
     assert not destination.exists()
@@ -736,7 +763,7 @@ def test_attachment_archive_copy_uses_private_temp_and_retries_atomically(
         ("sync_directory", 5),
     ],
 )
-def test_reader_materialization_finalize_failure_is_retried_by_adoption(
+def test_reader_materialization_finalize_failure_is_atomic_and_retries(
     tmp_path: Path,
     operation: str,
     occurrence: int,
@@ -762,38 +789,58 @@ def test_reader_materialization_finalize_failure_is_retried_by_adoption(
     with pytest.raises(OSError, match="durability failure"):
         reader.materialize(ref, destination)
 
-    assert destination.read_bytes() == b"retry materialization"
+    if operation == "sync_directory":
+        assert destination.read_bytes() == b"retry materialization"
+    else:
+        assert not destination.exists()
     assert reader.materialize(ref, destination) == destination
     assert is_read_only(destination)
 
 
-def test_reader_falls_back_to_copy_when_hardlink_is_unavailable(
+def test_reader_isolates_attachment_even_when_hardlinks_are_available(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     layout = _layout(tmp_path)
-    source, ref = _formal_file(layout, b"copied", read_only=True)
+    source, ref = _formal_file(
+        layout,
+        b"copied attachment",
+        category="attachments",
+        read_only=True,
+    )
     sync = DurableRecordingFileSync()
     reader = FormalResourceReader(layout, sync)
     destination = (
         layout.workspaces
         / JOB_ID
         / "inputs"
-        / "evidence"
+        / "attachments"
         / RESOURCE_ID
         / "payload"
     )
-    def unavailable_hardlink(*args: object, **kwargs: object) -> None:
-        raise OSError("cross-device")
-
-    monkeypatch.setattr(resource_files.os, "link", unavailable_hardlink)
+    probe_source = tmp_path / "hardlink-probe-source"
+    probe_link = tmp_path / "hardlink-probe-link"
+    probe_source.write_bytes(b"probe")
+    try:
+        os.link(probe_source, probe_link)
+    except OSError:
+        pytest.skip("test filesystem does not support hard links")
+    assert probe_link.stat().st_ino == probe_source.stat().st_ino
+    probe_link.unlink()
 
     reader.materialize(ref, destination)
 
-    assert destination.read_bytes() == b"copied"
+    formal_mode = stat.S_IMODE(source.stat().st_mode)
+    assert destination.read_bytes() == b"copied attachment"
     assert destination.stat().st_ino != source.stat().st_ino
     assert is_read_only(destination)
     assert sync.count("sync_file") >= 2
+
+    destination.chmod(0o644)
+    destination.unlink()
+
+    assert stat.S_IMODE(source.stat().st_mode) == formal_mode
+    with reader.open_file(ref) as stream:
+        assert stream.read(len(b"copied attachment") + 1) == b"copied attachment"
 
 
 def test_reader_file_partial_copy_never_claims_final_name_and_retry_succeeds(
@@ -818,9 +865,6 @@ def test_reader_file_partial_copy_never_claims_final_name_and_retry_succeeds(
     real_copy = resource_files.copy_binary_stream
     failed = False
 
-    def unavailable_hardlink(*args: object, **kwargs: object) -> None:
-        raise OSError("cross-device")
-
     def fail_first_copy(*args: object, **kwargs: object):
         nonlocal failed
         if not failed:
@@ -829,7 +873,6 @@ def test_reader_file_partial_copy_never_claims_final_name_and_retry_succeeds(
             raise OSError("injected mid-copy failure")
         return real_copy(*args, **kwargs)
 
-    monkeypatch.setattr(resource_files.os, "link", unavailable_hardlink)
     monkeypatch.setattr(resource_files, "copy_binary_stream", fail_first_copy)
 
     with pytest.raises(OSError, match="mid-copy"):

@@ -978,13 +978,10 @@ def _verify_materialized(
             message="ResourceStore materialized outside the requested path.",
         )
     if resource_ref.resource_kind is ResourceKind.FILE:
-        # S02 may use a hard link for trusted immutable input materialization.
-        # Agent-created outputs are inspected through a separate strict path
-        # that continues to require a single-link ordinary file.
-        actual_size, actual_sha256 = inspect_file(
-            destination,
-            allow_hardlinks=True,
-        )
+        # Every workspace file is an isolated copy.  Sharing an inode with the
+        # formal resource would let workspace cleanup change authoritative
+        # file permissions.
+        actual_size, actual_sha256 = inspect_file(destination)
     else:
         actual_size, actual_sha256, _ = inspect_tree(destination)
     if actual_size != resource_ref.size:

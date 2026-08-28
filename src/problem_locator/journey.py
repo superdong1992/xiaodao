@@ -17,6 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from problem_locator.contracts.enums import ExecutionStage, JobType
 from problem_locator.contracts.models import (
     ExecutionFailure,
+    JobOutcome,
     NonEmptyText,
     OpaqueId,
     UtcTimestamp,
@@ -71,6 +72,28 @@ def journey_json_value(value: Any, *, seen: set[int] | None = None) -> Any:
         return str(value)
     if isinstance(value, bytes):
         return {"bytes": len(value), "sha256_not_computed": True}
+    if isinstance(value, JobOutcome) and (
+        value.methods_review_target is not None
+        or value.methods_terminal_projection is not None
+    ):
+        public_methods_outcome: dict[str, Any] = {
+            "outcome_id": value.outcome_id,
+            "job_id": value.job_id,
+            "case_id": value.case_id,
+            "job_type": value.job_type,
+            "base_state_revision": value.base_state_revision,
+            "result_type": value.result_type,
+            "produced_at": value.produced_at,
+        }
+        if value.methods_review_target is not None:
+            public_methods_outcome["methods_review_target"] = (
+                value.methods_review_target
+            )
+        if value.methods_terminal_projection is not None:
+            public_methods_outcome["methods_terminal_projection"] = (
+                value.methods_terminal_projection
+            )
+        return journey_json_value(public_methods_outcome, seen=seen)
     if hasattr(value, "model_dump"):
         return journey_json_value(value.model_dump(mode="json"), seen=seen)
 

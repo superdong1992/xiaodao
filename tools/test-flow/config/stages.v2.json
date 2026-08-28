@@ -7,7 +7,7 @@
       "depends_on": [],
       "gates": ["framework.config", "framework.node-tests", "docs.current"],
       "identity_set": "framework",
-      "timeout_seconds": 120,
+      "timeout_seconds": 300,
       "progress_class": "local",
       "reuse": {"dev": "identity", "release": "never"},
       "platforms": ["windows", "macos", "linux"]
@@ -38,7 +38,7 @@
       "id": "deterministic.full",
       "kind": "deterministic",
       "depends_on": ["deterministic.affected"],
-      "gates": ["det.contracts", "det.unit", "det.integration", "det.journey.same-job"],
+      "gates": ["det.evidence-v2-core", "det.contracts", "det.unit", "det.integration", "det.journey.same-job"],
       "identity_set": "deterministic",
       "timeout_seconds": 600,
       "progress_class": "local",
@@ -121,6 +121,10 @@
       "identity_set": "real-codex-luna-methods",
       "timeout_seconds": 8550,
       "progress_class": "real",
+      "admission_blocker": {
+        "code": "EVIDENCE_V2_REAL_DIAGNOSIS_ADAPTER_UNMIGRATED",
+        "detail": "该阶段仍执行旧版 Methods V1 直接定位合同，无法生成 Evidence V2 模型认证。"
+      },
       "reuse": {"dev": "identity", "release": "never"},
       "platforms": ["windows", "macos", "linux"]
     },
@@ -143,6 +147,10 @@
       "identity_set": "macos-codex-luna-e2e",
       "timeout_seconds": 1800,
       "progress_class": "real",
+      "admission_blocker": {
+        "code": "EVIDENCE_V2_REAL_DIAGNOSIS_ADAPTER_UNMIGRATED",
+        "detail": "该 provider E2E 阶段仍消费旧版 Methods V1 定位、grounding、Candidate 和 artifact 产物。"
+      },
       "reuse": {"dev": "never", "release": "never"},
       "platforms": ["macos"]
     },
@@ -165,6 +173,10 @@
       "identity_set": "macos-claude-deepseek-e2e",
       "timeout_seconds": 1800,
       "progress_class": "real",
+      "admission_blocker": {
+        "code": "EVIDENCE_V2_REAL_DIAGNOSIS_ADAPTER_UNMIGRATED",
+        "detail": "该 provider E2E 阶段仍消费旧版 Methods V1 定位、grounding、Candidate 和 result.zip 产物。"
+      },
       "reuse": {"dev": "never", "release": "never"},
       "platforms": ["macos"]
     },
@@ -233,6 +245,10 @@
       "identity_set": "cross-job-diagnose",
       "timeout_seconds": 1200,
       "progress_class": "real",
+      "admission_blocker": {
+        "code": "EVIDENCE_V2_REAL_DIAGNOSIS_ADAPTER_UNMIGRATED",
+        "detail": "CrossJob 定位阶段仍校验 Methods V1 grounding、Candidate、部分解决和公共 artifact 合同。"
+      },
       "reuse": {"dev": "checkpoint-chain", "release": "never"},
       "checkpoint": null,
       "platforms": ["windows", "macos", "linux"]

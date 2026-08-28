@@ -7,7 +7,14 @@ from pathlib import Path
 import pytest
 
 import problem_locator.runtime.methods_evidence_v2 as methods_evidence_v2
-from problem_locator.contracts import MethodEvidenceGraphV2, method_evidence_event_ref_v2
+from problem_locator.contracts import (
+    MethodEvidenceEventV2,
+    MethodEvidenceGraphV2,
+    MethodEvidenceHitV2,
+    method_evidence_event_ref_v2,
+    method_evidence_graph_ref_v2,
+    method_evidence_hit_ref_v2,
+)
 from problem_locator.runtime.methods_evidence_v2 import (
     build_method_evaluation_plan_v2,
     scan_method_evidence_v2,
@@ -169,6 +176,76 @@ def test_plan_consumes_production_graph_refs_without_rescanning_logs(
     )
     assert plan.evaluations[0].evaluation_ref.startswith("eval-")
     assert plan.plan_ref.startswith("plan-")
+
+
+def test_plan_rejects_rehashed_hit_bound_to_another_methods_marker_index() -> None:
+    skill = _skill(
+        ("first-method", ("UNUSED", "FIRST")),
+        ("second-method", ("SECOND",)),
+    )
+    graph = scan_method_evidence_v2(
+        skill=skill,
+        target_logs=(_target("server", "FIRST SECOND\n"),),
+    )
+    first_hit, second_hit = graph.hits
+
+    forged_hit_ref = method_evidence_hit_ref_v2(
+        method_id=first_hit.method_id,
+        method_priority=first_hit.method_priority,
+        marker_index=second_hit.marker_index,
+        source_ref=first_hit.source_ref,
+        source_id=first_hit.source_id,
+        line_number=first_hit.line_number,
+        marker=second_hit.marker,
+        line=first_hit.line,
+    )
+    forged_hit = MethodEvidenceHitV2(
+        hit_ref=forged_hit_ref,
+        method_id=first_hit.method_id,
+        method_priority=first_hit.method_priority,
+        marker_index=second_hit.marker_index,
+        source_ref=first_hit.source_ref,
+        source_id=first_hit.source_id,
+        line_number=first_hit.line_number,
+        marker=second_hit.marker,
+        line=first_hit.line,
+    )
+    first_event = graph.events[0]
+    forged_event_ref = method_evidence_event_ref_v2(
+        method_id=first_event.method_id,
+        method_priority=first_event.method_priority,
+        identity_tokens=first_event.identity_tokens,
+        evidence_hit_refs=(forged_hit_ref,),
+    )
+    forged_event = MethodEvidenceEventV2(
+        event_ref=forged_event_ref,
+        method_id=first_event.method_id,
+        method_priority=first_event.method_priority,
+        identity_tokens=first_event.identity_tokens,
+        evidence_hit_refs=(forged_hit_ref,),
+    )
+    forged_hits = (forged_hit, second_hit)
+    forged_events = (forged_event, graph.events[1])
+    forged_graph_ref = method_evidence_graph_ref_v2(
+        skill_sha256=graph.skill_sha256,
+        sources=graph.sources,
+        hits=forged_hits,
+        events=forged_events,
+        loaded_method_ids=graph.loaded_method_ids,
+        limitations=graph.limitations,
+    )
+    forged_graph = MethodEvidenceGraphV2(
+        graph_ref=forged_graph_ref,
+        skill_sha256=graph.skill_sha256,
+        sources=graph.sources,
+        hits=forged_hits,
+        events=forged_events,
+        loaded_method_ids=graph.loaded_method_ids,
+        limitations=graph.limitations,
+    )
+
+    with pytest.raises(ValueError, match="marker/index does not belong to its method"):
+        build_method_evaluation_plan_v2(skill=skill, evidence=forged_graph)
 
 
 def test_evidence_refs_are_stable_for_the_same_frozen_inputs() -> None:

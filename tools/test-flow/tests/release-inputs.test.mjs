@@ -419,10 +419,10 @@ test("the Dockerfile has no hidden version defaults and cache preparation suppli
   assert.doesNotMatch(clientDockerfile, /\/opt\/chrome-for-testing\/chrome/);
 
   const cache = releaseCachePaths(TOOL_ROOT, path.join(os.tmpdir(), "release-cache-root"));
-  assert.match(cache.chromeHeadlessShellRoot, /chrome-headless-shell-for-testing\/152\.0\.7977\.54\/linux64$/);
-  assert.match(cache.chromeHeadlessShellArchive, /chrome-headless-shell-linux64-152\.0\.7977\.54\.zip$/);
-  assert.match(cache.chromeHeadlessShellDistribution, /chrome-headless-shell-linux64$/);
-  assert.match(cache.chromeHeadlessShellExecutable, /chrome-headless-shell-linux64\/chrome-headless-shell$/);
+  assert.match(cache.chromeHeadlessShellRoot.replaceAll(path.sep, "/"), /chrome-headless-shell-for-testing\/152\.0\.7977\.54\/linux64$/);
+  assert.match(cache.chromeHeadlessShellArchive.replaceAll(path.sep, "/"), /chrome-headless-shell-linux64-152\.0\.7977\.54\.zip$/);
+  assert.match(cache.chromeHeadlessShellDistribution.replaceAll(path.sep, "/"), /chrome-headless-shell-linux64$/);
+  assert.match(cache.chromeHeadlessShellExecutable.replaceAll(path.sep, "/"), /chrome-headless-shell-linux64\/chrome-headless-shell$/);
   assert.equal(Object.hasOwn(cache, "chromeRoot"), false);
   assert.equal(Object.hasOwn(cache, "chromeExecutable"), false);
   assert.equal(validateChromeHeadlessShellCache(cache).code, "CHROME_HEADLESS_SHELL_CACHE_FILE_MISSING");

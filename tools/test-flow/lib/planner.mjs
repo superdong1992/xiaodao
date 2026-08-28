@@ -574,6 +574,15 @@ export function buildRunPlan(repoRoot, options = {}) {
 
   const blockers = [];
   const warnings = [];
+  for (const stage of closure.stages) {
+    if (stage.admission_blocker !== undefined) {
+      blockers.push({
+        code: stage.admission_blocker.code,
+        detail: stage.admission_blocker.detail,
+        stage_id: stage.id,
+      });
+    }
+  }
   const containsReal = closure.stages.some((stage) => ["isolated-real", "real-journey"].includes(stage.kind) || stage.id === "real.codex-luna-methods" || macosCodexStage(stage) || claudeDeepseekStage(stage));
   if (!source.available) blockers.push({ code: "GIT_REQUIRED", detail: "A Git worktree is required to enumerate the source snapshot." });
   if (trackConfig.requires_source_snapshot && !sourceSnapshot.digest) blockers.push({ code: "SOURCE_SNAPSHOT_REQUIRED", detail: "The Git-visible worktree could not be frozen into an exact source snapshot." });

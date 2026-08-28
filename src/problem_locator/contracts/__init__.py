@@ -1,7 +1,7 @@
-"""Frozen Problem Locator V7 public contract package.
+"""Frozen Problem Locator V8 public contract package.
 
 All later implementation slices import public vocabulary from this package.
-The schema registry is the single source used to generate the ten frozen
+The schema registry is the single source used to generate the twenty frozen
 ``schemas/v2/*.schema.json`` documents.
 """
 
@@ -32,9 +32,20 @@ from .models import (
     Job,
     JobOutcome,
     LogparseParseClaim,
+    MethodsReviewerResultV2,
+    MethodsTerminalProjectionV2,
     StateFile,
     UserResultPayloadV3,
     WorkspaceInputManifest,
+)
+from .methods_state_v2 import MethodStateV2, MethodTerminalResultV2
+from .methods_v2 import (
+    MethodConsensusV2,
+    MethodEvidenceGraphV2,
+    MethodEvaluationOutputItemV2,
+    MethodEvaluationPlanV2,
+    MethodLimitationsRecordV2,
+    MethodRoleEvaluationV2,
 )
 
 
@@ -47,6 +58,18 @@ SCHEMA_MODELS: Final[Mapping[str, Any]] = MappingProxyType(
         "job-outcome.schema.json": JobOutcome,
         "job.schema.json": Job,
         "logparse-parse-claim.schema.json": LogparseParseClaim,
+        "method-consensus.schema.json": MethodConsensusV2,
+        "method-evaluation-plan.schema.json": MethodEvaluationPlanV2,
+        "method-evaluation-response.schema.json": tuple[
+            MethodEvaluationOutputItemV2, ...
+        ],
+        "method-evidence-graph.schema.json": MethodEvidenceGraphV2,
+        "method-limitations-record.schema.json": MethodLimitationsRecordV2,
+        "method-role-evaluation.schema.json": MethodRoleEvaluationV2,
+        "method-state.schema.json": MethodStateV2,
+        "method-terminal-result.schema.json": MethodTerminalResultV2,
+        "methods-reviewer-result.schema.json": MethodsReviewerResultV2,
+        "methods-terminal-projection.schema.json": MethodsTerminalProjectionV2,
         "state.schema.json": StateFile,
         "user-result.schema.json": UserResultPayloadV3,
         "workspace-input-manifest.schema.json": WorkspaceInputManifest,

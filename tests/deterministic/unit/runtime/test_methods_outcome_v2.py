@@ -326,7 +326,7 @@ def test_no_matching_evidence_result_exposes_only_server_reason() -> None:
     assert result.reason_code == "NO_MATCHING_METHOD_EVIDENCE"
     assert result.evaluations == ()
     assert result.confirmed_evaluation_refs == ()
-    assert result.reasons == ("No loaded method has matching evidence.",)
+    assert result.reasons == ("当前日志中没有匹配任何已加载方法的证据。",)
 
 
 def test_same_plan_has_distinct_result_identity_per_evaluation() -> None:
@@ -379,7 +379,7 @@ def test_failed_result_clears_confirmed_refs_even_after_resolved_consensus() -> 
     assert result.confirmed_hit_refs == ()
     assert result.evaluations == ()
     assert result.reasons == (
-        "The evaluation audit archive could not be completed.",
+        "评估审计记录未能完整归档。",
     )
 
 

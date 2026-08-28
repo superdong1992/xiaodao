@@ -12,6 +12,14 @@ import sys
 import time
 from types import ModuleType
 
+import pytest
+
+
+pytestmark = pytest.mark.skipif(
+    sys.platform != "linux",
+    reason="the Linux Client browser runner requires POSIX process groups",
+)
+
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[4]
 RUNNER = (

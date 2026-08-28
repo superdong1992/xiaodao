@@ -48,6 +48,10 @@ const E2E_GOAL = "dev.macos-claude-deepseek-e2e";
 const GOALS = new Set([METHODS_GOAL, E2E_GOAL]);
 const FLAGS = new Set(["plan-only", "allow-real-model", "all-scenarios", "help"]);
 const VALUE_ARGUMENTS = new Set(["goal", "client", "claude-entry", "claude-settings", "cache-root", "runs-root", "python-entry", "logparse-source", "scenario", "reason", "hypothesis", "expected-evidence"]);
+const EVIDENCE_V2_REAL_DIAGNOSIS_BLOCKER = Object.freeze({
+  code: "EVIDENCE_V2_REAL_DIAGNOSIS_ADAPTER_UNMIGRATED",
+  detail: "Standalone Claude/DeepSeek E2E 仍消费旧版 Methods V1 定位和 result.zip 产物，迁移完成前禁止调用真实模型。",
+});
 
 const REQUIRED_EVIDENCE = Object.freeze({
   [METHODS_GOAL]: ["quick-codex-luna-contracts.tap", "quick-claude-methods-contracts.tap", "claude-identity.json", "model-invocations.json", "model-usage.json", "methods-package.json", "scenario-evaluation-audit.json", "security-audit.json", "adapter-receipt.json"],
@@ -151,6 +155,7 @@ export function buildPlan(options) {
     ? options.allScenarios ? [...CLAUDE_DEEPSEEK_SCENARIOS] : [options.scenario]
     : [];
   if (options.goal === E2E_GOAL) {
+    blockers.push(EVIDENCE_V2_REAL_DIAGNOSIS_BLOCKER);
     requiredDirectory(options.logparseRoot, "CLAUDE_DEEPSEEK_LOGPARSE_MISSING", "Logparse source", blockers);
     requiredFile(sourceLogparseConfig, "CLAUDE_DEEPSEEK_LOGPARSE_CONFIG_MISSING", "repository Logparse config", blockers);
     requiredDirectory(helperRoot, "CLAUDE_DEEPSEEK_HELPER_MISSING", "Server logparse-diagnose Helper", blockers);

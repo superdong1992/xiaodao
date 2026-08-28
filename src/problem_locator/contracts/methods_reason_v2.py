@@ -63,36 +63,36 @@ FAILED_METHOD_REASON_CODES_V2 = frozenset(
 METHOD_PUBLIC_REASON_TEXT_V2: Mapping[str, str] = MappingProxyType(
     {
         "SPECIALIST_PROTOCOL_REPAIR_EXHAUSTED": (
-            "The Specialist response remained structurally invalid after one repair."
+            "Specialist 的输出修复一次后仍不符合结构要求。"
         ),
         "REVIEWER_PROTOCOL_REPAIR_EXHAUSTED": (
-            "The Reviewer response remained structurally invalid after one repair."
+            "Reviewer 的输出修复一次后仍不符合结构要求。"
         ),
         "SPECIALIST_SEMANTIC_INVALID": (
-            "The Specialist evaluation did not satisfy the evaluation contract."
+            "Specialist 的评估结果不符合评估规则。"
         ),
         "REVIEWER_SEMANTIC_INVALID": (
-            "The Reviewer evaluation did not satisfy the evaluation contract."
+            "Reviewer 的评估结果不符合评估规则。"
         ),
         "SPECIALIST_MODEL_EXECUTION_FAILED": (
-            "The Specialist evaluation could not be completed."
+            "Specialist 评估未能完成。"
         ),
         "REVIEWER_MODEL_EXECUTION_FAILED": (
-            "The Reviewer evaluation could not be completed."
+            "Reviewer 评估未能完成。"
         ),
         "SPECIALIST_REVIEWER_DISAGREEMENT": (
-            "Specialist and Reviewer verdicts disagree."
+            "Specialist 与 Reviewer 的判定不一致。"
         ),
-        "INCOMPLETE_EVALUATION": "At least one evaluation remains UNKNOWN.",
-        "NO_CONFIRMED_METHOD": "No method received a CONFIRMED consensus verdict.",
-        "NO_MATCHING_METHOD_EVIDENCE": "No loaded method has matching evidence.",
+        "INCOMPLETE_EVALUATION": "至少一项评估结果仍为 UNKNOWN。",
+        "NO_CONFIRMED_METHOD": "没有任何方法获得双方一致的 CONFIRMED 判定。",
+        "NO_MATCHING_METHOD_EVIDENCE": "当前日志中没有匹配任何已加载方法的证据。",
         "RESOURCE_SNAPSHOT_DRIFT": (
-            "The frozen resource snapshot changed before evaluation completed."
+            "评估完成前，冻结的资源快照已发生变化。"
         ),
         "SERVER_INVARIANT_VIOLATION": (
-            "The server could not preserve the Evidence V2 evaluation invariant."
+            "服务端未能保持 Evidence V2 的评估约束。"
         ),
-        "AUDIT_ARCHIVE_FAILED": "The evaluation audit archive could not be completed.",
+        "AUDIT_ARCHIVE_FAILED": "评估审计记录未能完整归档。",
     }
 )
 
