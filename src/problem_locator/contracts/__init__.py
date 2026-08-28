@@ -10,7 +10,18 @@ from __future__ import annotations
 from types import MappingProxyType
 from typing import Any, Final, Mapping
 
-from . import commands, enums, errors, limits, methods_v2, models, outcomes, ports, serialization
+from . import (
+    commands,
+    enums,
+    errors,
+    limits,
+    methods_state_v2,
+    methods_v2,
+    models,
+    outcomes,
+    ports,
+    serialization,
+)
 from .limits import CONTRACT_REVISION, GENERATOR_VERSION, SCHEMA_VERSION
 from .models import (
     AgentJobOutcome,
@@ -47,6 +58,7 @@ _PUBLIC_MODULES = (
     enums,
     errors,
     limits,
+    methods_state_v2,
     methods_v2,
     models,
     outcomes,
@@ -68,6 +80,7 @@ __all__ = sorted(
         "enums",
         "errors",
         "limits",
+        "methods_state_v2",
         "methods_v2",
         "models",
         "outcomes",
