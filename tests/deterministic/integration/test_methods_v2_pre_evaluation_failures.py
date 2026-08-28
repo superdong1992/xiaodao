@@ -160,6 +160,22 @@ def _pre_evaluation_runtime(
     catalog = _logparse_catalog(tmp_path, factory)
     job, aggregate, resources = _claimed_logparse_job_state_and_resources(catalog)
     backend = _EvidenceV2SpecialistBackend(factory, job, ("VALID",))
+
+    def execute_preprocessing(
+        session: object,
+        operation: str,
+        request_path: str,
+        result_path: str,
+    ) -> None:
+        assert operation == "parse-targets"
+        assert request_path == "output/proposals/methods-preprocess/request.json"
+        assert result_path == "output/proposals/methods-preprocess/target_logs.json"
+        backend._run_preprocessing(  # noqa: SLF001 - production-port test fixture
+            {"workspace_root": getattr(session, "workspace_root")}
+        )
+        return None
+
+    factory.preprocessing_executor = execute_preprocessing
     records: InMemoryExecutionRecordStore
     records = (
         _RejectFirstLogOpenRecords()
@@ -235,7 +251,7 @@ def test_pre_evaluation_failure_reaches_case_mcp_and_rest_without_fake_graph(
     )
     assert outcome.error.diagnostic_id == expected_diagnostic_id
     assert outcome.error.message == METHOD_PUBLIC_REASON_TEXT_V2[reason_code]
-    assert len(backend.calls) == (1 if failure_point == "logparse" else 0)
+    assert backend.calls == []
 
     direct, mcp_view, rest_view = _submit_and_query(aggregate, outcome)
 

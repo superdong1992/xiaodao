@@ -154,6 +154,22 @@ def test_runtime_submission_reviewer_and_public_projection_are_one_v2_journey(
         "server": b"CONNECTION POOL WAIT request_id=42\n",
     }
     specialist_backend.result = "confirmed_missing"
+
+    def execute_preprocessing(
+        session: object,
+        operation: str,
+        request_path: str,
+        result_path: str,
+    ) -> None:
+        assert operation == "parse-targets"
+        assert request_path == "output/proposals/methods-preprocess/request.json"
+        assert result_path == "output/proposals/methods-preprocess/target_logs.json"
+        specialist_backend._run_preprocessing(  # noqa: SLF001 - production-port test fixture
+            {"workspace_root": getattr(session, "workspace_root")}
+        )
+        return None
+
+    broker_factory.preprocessing_executor = execute_preprocessing
     specialist_runtime = DiagnosisRuntime(
         state_repository=repository,
         resource_store=resources,
