@@ -23,6 +23,15 @@ _OUTPUT_FIELDS = frozenset({"evaluation_ref", "verdict", "reason"})
 class MethodEvaluationResponseError(ValueError):
     """Raised when a model response violates the exact evaluation plan shape."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        raw_response_bytes: bytes | None = None,
+    ) -> None:
+        self.raw_response_bytes = raw_response_bytes
+        super().__init__(message)
+
 
 def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     value: dict[str, Any] = {}
