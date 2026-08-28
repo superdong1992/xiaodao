@@ -20,6 +20,7 @@ from pydantic import (
     ConfigDict,
     Field,
     StringConstraints,
+    StrictBool,
     field_validator,
     model_serializer,
     model_validator,
@@ -85,6 +86,10 @@ NAME_PATTERN = r"^[a-z][a-z0-9_]{0,63}$"
 SKILL_NAME_PATTERN = r"^[a-z0-9]+(?:-[a-z0-9]+)*$"
 FORMAT_ID_PATTERN = r"^[a-z][a-z0-9.\-]{0,63}$"
 GIT_OBJECT_PATTERN = r"^[0-9a-f]{40,64}$"
+METHOD_EVIDENCE_GRAPH_REF_V2_PATTERN = r"^graph-[0-9a-f]{64}$"
+METHOD_EVALUATION_PLAN_REF_V2_PATTERN = r"^plan-[0-9a-f]{64}$"
+METHOD_EVALUATION_REF_V2_PATTERN = r"^eval-[0-9a-f]{64}$"
+METHOD_ID_V2_PATTERN = r"^[a-z0-9]+(?:-[a-z0-9]+)*$"
 
 
 def _utf8_nonblank(value: str, *, max_bytes: int = MAX_USER_TEXT_UTF8_BYTES) -> str:
@@ -595,6 +600,65 @@ class CandidateTarget(ContractModel):
     candidate_content_hash: Sha256
 
 
+class MethodsReviewTargetV2(ContractModel):
+    """Server-created identity for one Candidate-free blind Methods review."""
+
+    schema_version: Literal[2]
+    evaluation_id: OpaqueId
+    source_job_id: OpaqueId
+    graph_ref: Annotated[
+        str,
+        StringConstraints(pattern=METHOD_EVIDENCE_GRAPH_REF_V2_PATTERN, strict=True),
+    ]
+    plan_ref: Annotated[
+        str,
+        StringConstraints(pattern=METHOD_EVALUATION_PLAN_REF_V2_PATTERN, strict=True),
+    ]
+    skill_ref: VersionedRef
+    reviewed_state_revision: PositiveInt
+    request_json: NonEmptyText
+
+    @field_validator("request_json")
+    @classmethod
+    def validate_canonical_request(cls, value: str) -> str:
+        try:
+            decoded = json.loads(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Methods request_json must contain JSON") from exc
+        if not isinstance(decoded, dict) or _canonical_json_bytes(decoded).decode(
+            "utf-8"
+        ) != value:
+            raise ValueError("Methods request_json must be one canonical JSON object")
+        return value
+
+
+class MethodsReviewerEvaluationV2(ContractModel):
+    evaluation_ref: Annotated[
+        str,
+        StringConstraints(pattern=METHOD_EVALUATION_REF_V2_PATTERN, strict=True),
+    ]
+    verdict: Literal["CONFIRMED", "REJECTED", "UNKNOWN"]
+    reason: NonEmptyText
+
+
+class MethodsReviewerResultV2(ContractModel):
+    """Server-owned normalized Reviewer result; never accepted from Agent output."""
+
+    schema_version: Literal[2]
+    role: Literal["REVIEWER"]
+    review_job_id: OpaqueId
+    target: MethodsReviewTargetV2
+    evaluations: Annotated[tuple[MethodsReviewerEvaluationV2, ...], Field(min_length=1)]
+    repair_used: StrictBool
+
+    @model_validator(mode="after")
+    def validate_evaluation_refs(self) -> "MethodsReviewerResultV2":
+        refs = [item.evaluation_ref for item in self.evaluations]
+        if len(refs) != len(set(refs)):
+            raise ValueError("Methods Reviewer evaluation refs must be unique")
+        return self
+
+
 class CandidateConclusion(ContractModel):
     conclusion_id: OpaqueId
     revision: PositiveInt
@@ -1081,8 +1145,10 @@ class Case(ContractModel):
             raise ValueError("generic results are valid only for a generic terminal Case")
         if self.status is CaseStatus.REVIEWING:
             candidate = self.diagnosis_state.candidate_conclusion
-            if candidate is None or candidate.status is not CandidateStatus.REVIEWING:
-                raise ValueError("REVIEWING cases require the current REVIEWING candidate")
+            if candidate is not None and candidate.status is not CandidateStatus.REVIEWING:
+                raise ValueError(
+                    "a Candidate present on a REVIEWING case must itself be REVIEWING"
+                )
         if self.status in {CaseStatus.RUNNING, CaseStatus.REVIEWING} and self.active_job_id is None:
             raise ValueError("RUNNING and REVIEWING cases require active_job_id")
         if self.status in {
@@ -1123,6 +1189,10 @@ class Job(ContractModel):
     logparse_tool_ref: VersionedRef | None
     logparse_product: NonEmptyText | None
     review_target: CandidateTarget | None
+    methods_review_target: MethodsReviewTargetV2 | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
     replacement_for_job_id: OpaqueId | None
     resource_limits: ResourceLimits
     created_at: UtcTimestamp
@@ -1186,31 +1256,60 @@ class Job(ContractModel):
         ):
             raise ValueError("only DIAGNOSE jobs may carry diagnosis-mode fields")
         if self.job_type is JobType.ROUTE:
-            if self.review_target is not None:
-                raise ValueError("ROUTE jobs forbid skill_ref/review_target")
+            if self.review_target is not None or self.methods_review_target is not None:
+                raise ValueError("ROUTE jobs forbid review targets")
         elif self.job_type is JobType.DIAGNOSE:
-            if self.review_target is not None:
-                raise ValueError("DIAGNOSE jobs require skill_ref and forbid review_target")
+            if self.review_target is not None or self.methods_review_target is not None:
+                raise ValueError("DIAGNOSE jobs forbid review targets")
         else:
-            if self.review_target is None or self.logparse_tool_ref is not None:
-                raise ValueError("REVIEW jobs require review_target and forbid logparse")
-            assert self.context_snapshot is not None
-            candidate = self.context_snapshot.candidate_conclusion
-            if candidate is None or candidate.status is not CandidateStatus.REVIEWING:
-                raise ValueError("REVIEW snapshot requires a REVIEWING candidate")
-            if (
-                candidate.conclusion_id != self.review_target.candidate_conclusion_id
-                or candidate.revision != self.review_target.candidate_revision
-                or candidate.content_hash != self.review_target.candidate_content_hash
-            ):
-                raise ValueError("review_target must match the snapshot candidate")
-            if any(
-                ref not in self.evidence_refs
-                for ref in review_required_evidence_refs(candidate)
-            ):
+            if (self.review_target is None) == (self.methods_review_target is None):
                 raise ValueError(
-                    "REVIEW jobs must include every required candidate Evidence reference"
+                    "REVIEW jobs require exactly one Candidate or Methods V2 target"
                 )
+            if self.logparse_tool_ref is not None:
+                raise ValueError("REVIEW jobs forbid logparse")
+            assert self.context_snapshot is not None
+            if self.methods_review_target is not None:
+                target = self.methods_review_target
+                if self.context_snapshot.candidate_conclusion is not None:
+                    raise ValueError("Methods V2 REVIEW jobs forbid Candidate state")
+                if any(
+                    (
+                        self.evidence_refs,
+                        self.attachment_refs,
+                        self.previous_outcome_refs,
+                        self.artifact_refs,
+                    )
+                ):
+                    raise ValueError(
+                        "Methods V2 REVIEW jobs forbid legacy resource and Outcome inputs"
+                    )
+                if (
+                    target.skill_ref != self.skill_ref
+                    or target.reviewed_state_revision != self.base_state_revision
+                    or target.source_job_id == self.job_id
+                ):
+                    raise ValueError(
+                        "Methods V2 review target must match Job skill/state and a distinct source Job"
+                    )
+            else:
+                candidate = self.context_snapshot.candidate_conclusion
+                if candidate is None or candidate.status is not CandidateStatus.REVIEWING:
+                    raise ValueError("REVIEW snapshot requires a REVIEWING candidate")
+                assert self.review_target is not None
+                if (
+                    candidate.conclusion_id != self.review_target.candidate_conclusion_id
+                    or candidate.revision != self.review_target.candidate_revision
+                    or candidate.content_hash != self.review_target.candidate_content_hash
+                ):
+                    raise ValueError("review_target must match the snapshot candidate")
+                if any(
+                    ref not in self.evidence_refs
+                    for ref in review_required_evidence_refs(candidate)
+                ):
+                    raise ValueError(
+                        "REVIEW jobs must include every required candidate Evidence reference"
+                    )
         _validate_role_bindings(
             self.job_type,
             diagnosis_mode=self.diagnosis_mode,
@@ -1896,6 +1995,41 @@ class ReviewSubjectV2(ContractModel):
         return self
 
 
+class MethodsReviewMethodCardV2(ContractModel):
+    """One exact method card selected from the target's pinned Skill package."""
+
+    method_id: Annotated[
+        str,
+        StringConstraints(pattern=METHOD_ID_V2_PATTERN, strict=True),
+    ]
+    content: NonEmptyText
+
+
+class MethodsReviewerInputV2(ContractModel):
+    """Reviewer-visible identity only; Specialist conclusions are intentionally absent."""
+
+    schema_version: Literal[2]
+    review_job_id: OpaqueId
+    case_id: OpaqueId
+    target: MethodsReviewTargetV2
+    method_ids: Annotated[
+        tuple[
+            Annotated[
+                str,
+                StringConstraints(pattern=METHOD_ID_V2_PATTERN, strict=True),
+            ],
+            ...,
+        ],
+        Field(min_length=1),
+    ]
+
+    @model_validator(mode="after")
+    def validate_method_ids(self) -> "MethodsReviewerInputV2":
+        if len(self.method_ids) != len(set(self.method_ids)):
+            raise ValueError("Methods Reviewer method_ids must be unique")
+        return self
+
+
 class WorkspaceInputManifest(ContractModel):
     schema_version: Literal[2]
     job_id: OpaqueId
@@ -1906,6 +2040,10 @@ class WorkspaceInputManifest(ContractModel):
     entries: list[WorkspaceInputEntry]
     resolved_logparse_plan: ResolvedLogparsePlanInput | None = None
     review_subject: ReviewSubjectV2 | None = None
+    methods_reviewer_input: MethodsReviewerInputV2 | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
 
     @model_validator(mode="after")
     def validate_manifest(self) -> WorkspaceInputManifest:
@@ -1920,13 +2058,28 @@ class WorkspaceInputManifest(ContractModel):
             raise ValueError(
                 "resolved_logparse_plan requires logparse bindings"
             )
-        if (self.job_type is JobType.REVIEW) != (self.review_subject is not None):
-            raise ValueError("REVIEW manifests require exactly one review_subject")
+        reviewer_input_count = int(self.review_subject is not None) + int(
+            self.methods_reviewer_input is not None
+        )
+        if self.job_type is JobType.REVIEW:
+            if reviewer_input_count != 1:
+                raise ValueError(
+                    "REVIEW manifests require exactly one legacy or Methods V2 reviewer input"
+                )
+        elif reviewer_input_count:
+            raise ValueError("only REVIEW manifests may carry reviewer inputs")
         if self.review_subject is not None and (
             self.review_subject.review_job_id != self.job_id
             or self.review_subject.case_id != self.case_id
         ):
             raise ValueError("review_subject identity must match the Workspace manifest")
+        if self.methods_reviewer_input is not None and (
+            self.methods_reviewer_input.review_job_id != self.job_id
+            or self.methods_reviewer_input.case_id != self.case_id
+        ):
+            raise ValueError(
+                "Methods reviewer input identity must match the Workspace manifest"
+            )
         order = {"ATTACHMENT": 0, "EVIDENCE": 1, "ARTIFACT": 2, "PREVIOUS_OUTCOME": 3}
         kinds = [order[entry.input_kind] for entry in self.entries]
         if kinds != sorted(kinds):
@@ -1994,6 +2147,18 @@ def validate_workspace_manifest_for_job(
             raise ValueError(
                 "Workspace review_subject Evidence must be a stable Job Evidence subsequence"
             )
+    if manifest.methods_reviewer_input is not None:
+        reviewer_input = manifest.methods_reviewer_input
+        if (
+            job.methods_review_target is None
+            or job.review_target is not None
+            or reviewer_input.target != job.methods_review_target
+        ):
+            raise ValueError(
+                "Workspace Methods reviewer input must match its Candidate-free REVIEW Job"
+            )
+    elif job.methods_review_target is not None:
+        raise ValueError("Methods V2 REVIEW Job requires Methods reviewer input")
     if manifest.resolved_logparse_plan is not None:
         plan = manifest.resolved_logparse_plan
         if plan.attachment_id is not None and plan.attachment_id not in job.attachment_refs:
@@ -3230,10 +3395,53 @@ class JobOutcome(ContractModel):
     error: ExecutionFailure | None
     produced_at: UtcTimestamp
     decision_audit: DecisionAuditV2 | None = None
+    methods_review_target: MethodsReviewTargetV2 | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
+    methods_reviewer_result: MethodsReviewerResultV2 | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
 
     @model_validator(mode="after")
     def validate_outcome(self) -> JobOutcome:
-        _validate_outcome_shape(self.job_type, self.result_type, self.payload, self.error)
+        if self.methods_review_target is not None:
+            target = self.methods_review_target
+            if (
+                self.job_type is not JobType.DIAGNOSE
+                or self.result_type is not OutcomeResultType.COMPLETED
+                or self.payload is not None
+                or self.error is not None
+                or target.source_job_id != self.job_id
+                or target.reviewed_state_revision != self.base_state_revision
+            ):
+                raise ValueError(
+                    "Methods V2 review target requires one matching completed DIAGNOSE Outcome"
+                )
+        elif self.methods_reviewer_result is None:
+            _validate_outcome_shape(
+                self.job_type, self.result_type, self.payload, self.error
+            )
+        elif (
+            self.job_type is not JobType.REVIEW
+            or self.result_type is not OutcomeResultType.COMPLETED
+            or self.payload is not None
+            or self.error is not None
+            or self.methods_reviewer_result.review_job_id != self.job_id
+            or self.methods_reviewer_result.target.reviewed_state_revision
+            != self.base_state_revision
+        ):
+            raise ValueError(
+                "Methods V2 Reviewer result requires one matching completed REVIEW Outcome"
+            )
+        if (
+            self.methods_review_target is not None
+            and self.methods_reviewer_result is not None
+        ):
+            raise ValueError(
+                "Specialist handoff and Reviewer result are mutually exclusive"
+            )
         _unique(self.consumed_evidence_refs, "consumed_evidence_refs")
         if isinstance(
             self.payload, (GenericDiagnosisOutcome, GenericDiagnosisOutcomeV2)
@@ -3284,6 +3492,25 @@ class JobOutcome(ContractModel):
         _validate_effective_resolution_gate(
             self.result_type, self.payload, self.decision_audit
         )
+        if self.methods_review_target is not None:
+            if (
+                self.consumed_evidence_refs
+                or self.proposed_evidence
+                or self.proposed_artifacts
+                or self.decision_audit is not None
+            ):
+                raise ValueError(
+                    "Methods V2 Specialist handoff must not carry legacy resources or audit"
+                )
+        if self.methods_reviewer_result is not None and (
+            self.consumed_evidence_refs
+            or self.proposed_evidence
+            or self.proposed_artifacts
+            or self.decision_audit is not None
+        ):
+            raise ValueError(
+                "Methods V2 Reviewer result must not carry legacy resources or audit"
+            )
         return self
 
 
@@ -3356,6 +3583,14 @@ def _validate_decision_audit_binding(
     outcome: AgentJobOutcome | JobOutcome,
     audit: DecisionAuditV2 | None,
 ) -> None:
+    methods_v2_handoff = (
+        isinstance(outcome, JobOutcome)
+        and outcome.methods_review_target is not None
+    )
+    methods_v2_review = (
+        isinstance(outcome, JobOutcome)
+        and outcome.methods_reviewer_result is not None
+    )
     waiting_for_user_material = (
         isinstance(outcome.payload, DiagnosisOutcome)
         and outcome.result_type
@@ -3365,6 +3600,8 @@ def _validate_decision_audit_binding(
         outcome.result_type is not OutcomeResultType.FAILED
         and isinstance(outcome.payload, (DiagnosisOutcome, ReviewAssessment))
         and not waiting_for_user_material
+        and not methods_v2_handoff
+        and not methods_v2_review
     )
     if requires_audit != (audit is not None):
         if waiting_for_user_material:
@@ -3377,6 +3614,8 @@ def _validate_decision_audit_binding(
         )
     if audit is None:
         return
+    if methods_v2_handoff or methods_v2_review:
+        raise ValueError("Methods V2 Outcomes forbid a legacy decision audit")
     if (
         audit.job_id != outcome.job_id
         or audit.case_id != outcome.case_id
@@ -3688,6 +3927,24 @@ class CaseSnapshot(ContractModel):
             raise ValueError("active_job must resolve case.active_job_id")
         if self.active_job is not None and self.active_job.case_id != self.case.case_id:
             raise ValueError("active_job belongs to a different case")
+        if self.case.status is CaseStatus.REVIEWING:
+            active = self.active_job
+            if active is None or active.job_type is not JobType.REVIEW:
+                raise ValueError("REVIEWING snapshot requires an active REVIEW Job")
+            candidate = self.case.diagnosis_state.candidate_conclusion
+            if active.methods_review_target is not None:
+                if candidate is not None or active.review_target is not None:
+                    raise ValueError(
+                        "Methods V2 REVIEWING snapshot must remain Candidate-free"
+                    )
+            elif (
+                candidate is None
+                or candidate.status is not CandidateStatus.REVIEWING
+                or active.review_target is None
+            ):
+                raise ValueError(
+                    "legacy REVIEWING snapshot requires its REVIEWING Candidate target"
+                )
         if self.resume_source_job is not None:
             if self.case.status is not CaseStatus.INTERRUPTED:
                 raise ValueError("resume_source_job is only valid for INTERRUPTED cases")
@@ -3802,6 +4059,10 @@ class JobSpec(ContractModel):
     logparse_tool_ref: VersionedRef | None
     logparse_product: NonEmptyText | None
     review_target_binding: ReviewTargetBinding | None
+    methods_review_target: MethodsReviewTargetV2 | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
     replacement_for_job_id: OpaqueId | None
     resource_limits: ResourceLimits
 
@@ -3857,13 +4118,46 @@ class JobSpec(ContractModel):
         ):
             raise ValueError("only DIAGNOSE JobSpec may carry diagnosis-mode fields")
         if self.job_type is JobType.ROUTE:
-            if self.review_target_binding is not None:
-                raise ValueError("ROUTE JobSpec forbids skill/review target")
+            if (
+                self.review_target_binding is not None
+                or self.methods_review_target is not None
+            ):
+                raise ValueError("ROUTE JobSpec forbids review targets")
         elif self.job_type is JobType.DIAGNOSE:
-            if self.review_target_binding is not None:
-                raise ValueError("DIAGNOSE JobSpec requires skill_ref and forbids review target")
-        elif self.review_target_binding is None or self.logparse_tool_ref is not None:
-            raise ValueError("REVIEW JobSpec requires review target and forbids logparse")
+            if (
+                self.review_target_binding is not None
+                or self.methods_review_target is not None
+            ):
+                raise ValueError("DIAGNOSE JobSpec forbids review targets")
+        else:
+            if (self.review_target_binding is None) == (
+                self.methods_review_target is None
+            ):
+                raise ValueError(
+                    "REVIEW JobSpec requires exactly one Candidate or Methods V2 target"
+                )
+            if self.logparse_tool_ref is not None:
+                raise ValueError("REVIEW JobSpec forbids logparse")
+            if self.methods_review_target is not None:
+                target = self.methods_review_target
+                if any(
+                    (
+                        self.evidence_bindings,
+                        self.attachment_refs,
+                        self.previous_outcome_refs,
+                        self.artifact_bindings,
+                    )
+                ):
+                    raise ValueError(
+                        "Methods V2 REVIEW JobSpec forbids legacy resource and Outcome inputs"
+                    )
+                if (
+                    target.skill_ref != self.skill_ref
+                    or target.reviewed_state_revision != self.target_state_revision
+                ):
+                    raise ValueError(
+                        "Methods V2 review target must match JobSpec skill and state"
+                    )
         _validate_role_bindings(
             self.job_type,
             diagnosis_mode=self.diagnosis_mode,
@@ -4247,6 +4541,26 @@ class TransitionPlan(ContractModel):
                     raise ValueError(
                         "next REVIEW Job cannot bind an unaccepted candidate proposal"
                     )
+            methods_target = self.next_job_spec.methods_review_target
+            if methods_target is not None:
+                if (
+                    self.target_case_status is not CaseStatus.REVIEWING
+                    or self.accepted_candidate_proposal_key is not None
+                    or self.candidate_mutation is not None
+                    or self.accepted_evidence_proposal_keys
+                    or self.accepted_artifact_proposal_keys
+                ):
+                    raise ValueError(
+                        "Methods V2 REVIEW transition must be Candidate-free and accept no legacy resources"
+                    )
+                if not any(
+                    update.job_id == methods_target.source_job_id
+                    and update.target_status is JobStatus.SUCCEEDED
+                    for update in self.job_updates
+                ):
+                    raise ValueError(
+                        "Methods V2 REVIEW transition must complete its exact source Job"
+                    )
         return self
 
 
@@ -4447,6 +4761,20 @@ class CaseAggregate(ContractModel):
             if self.case.status is CaseStatus.REVIEWING:
                 if active_job.job_type is not JobType.REVIEW:
                     raise ValueError("REVIEWING Case must point to a REVIEW Job")
+                candidate = self.case.diagnosis_state.candidate_conclusion
+                if active_job.methods_review_target is not None:
+                    if candidate is not None or active_job.review_target is not None:
+                        raise ValueError(
+                            "Methods V2 REVIEWING Case must remain Candidate-free"
+                        )
+                elif (
+                    candidate is None
+                    or candidate.status is not CandidateStatus.REVIEWING
+                    or active_job.review_target is None
+                ):
+                    raise ValueError(
+                        "legacy REVIEWING Case requires its REVIEWING Candidate target"
+                    )
             elif self.case.status is CaseStatus.RUNNING and active_job.job_type is JobType.REVIEW:
                 raise ValueError("RUNNING Case must point to a ROUTE or DIAGNOSE Job")
 
@@ -4514,6 +4842,19 @@ class CaseAggregate(ContractModel):
 
         replacement_sources: list[str] = []
         for job in self.jobs.values():
+            if job.methods_review_target is not None:
+                target = job.methods_review_target
+                source_job = self.jobs.get(target.source_job_id)
+                if (
+                    source_job is None
+                    or source_job.job_type is not JobType.DIAGNOSE
+                    or source_job.status is not JobStatus.SUCCEEDED
+                    or source_job.skill_ref != target.skill_ref
+                    or source_job.base_state_revision != target.reviewed_state_revision
+                ):
+                    raise ValueError(
+                        "Methods V2 REVIEW target must resolve its exact completed DIAGNOSE source"
+                    )
             if (
                 job.diagnosis_mode is DiagnosisMode.GENERIC
                 and job.generic_problem_text != self.case.raw_problem_text

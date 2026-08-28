@@ -24,6 +24,8 @@ from problem_locator.contracts.enums import (
     DiagnosisItemStatus,
     FieldUpdateAction,
     JobStatus,
+    JobType,
+    OutcomeResultType,
     RequirementStatus,
     ResourceType,
 )
@@ -48,7 +50,11 @@ from problem_locator.contracts.models import (
     EvidenceBinding,
     EvidenceProposal,
     Job,
+    JobOutcome,
     JobSpec,
+    MethodsReviewerEvaluationV2,
+    MethodsReviewerResultV2,
+    MethodsReviewTargetV2,
     PendingRequirement,
     PlannedResourceBinding,
     PlannedResourceTarget,
@@ -57,12 +63,125 @@ from problem_locator.contracts.models import (
     SelectedSkillUpdate,
     VersionedRef,
 )
+from problem_locator.contracts.methods_v2 import (
+    MethodEvidenceGraphV2,
+    MethodEvaluationPlanV2,
+    MethodRoleEvaluationV2,
+)
 from problem_locator.contracts.outcomes import apply_problem_spec_patch
 from problem_locator.contracts.ports import ContextSnapshotProjector
 from problem_locator.contracts.serialization import canonical_json_sha256
 
 
 _T = TypeVar("_T")
+
+
+def build_methods_specialist_handoff_outcome_v2(
+    source_job: Job,
+    *,
+    outcome_id: str,
+    evaluation_id: str,
+    graph: MethodEvidenceGraphV2,
+    plan: MethodEvaluationPlanV2,
+    request_json: str,
+    produced_at: str,
+) -> JobOutcome:
+    """Create the server-only Candidate-free handoff after Specialist evaluation."""
+
+    if (
+        source_job.job_type is not JobType.DIAGNOSE
+        or source_job.diagnosis_mode is not DiagnosisMode.SPECIALIZED
+        or source_job.skill_ref is None
+        or source_job.context_snapshot is None
+    ):
+        raise ValueError("Methods V2 handoff requires a specialized DIAGNOSE Job")
+    if (
+        graph.skill_sha256 != source_job.skill_ref.content_hash
+        or plan.skill_sha256 != source_job.skill_ref.content_hash
+        or plan.evidence_graph_ref != graph.graph_ref
+    ):
+        raise ValueError("Methods V2 handoff Graph/Plan must match the pinned Job Skill")
+    target = MethodsReviewTargetV2(
+        schema_version=2,
+        evaluation_id=evaluation_id,
+        source_job_id=source_job.job_id,
+        graph_ref=graph.graph_ref,
+        plan_ref=plan.plan_ref,
+        skill_ref=source_job.skill_ref,
+        reviewed_state_revision=source_job.base_state_revision,
+        request_json=request_json,
+    )
+    return JobOutcome(
+        outcome_id=outcome_id,
+        job_id=source_job.job_id,
+        case_id=source_job.case_id,
+        job_type=JobType.DIAGNOSE,
+        base_state_revision=source_job.base_state_revision,
+        result_type=OutcomeResultType.COMPLETED,
+        payload=None,
+        consumed_evidence_refs=[],
+        proposed_evidence=[],
+        proposed_artifacts=[],
+        error=None,
+        produced_at=produced_at,
+        decision_audit=None,
+        methods_review_target=target,
+        methods_reviewer_result=None,
+    )
+
+
+def build_methods_reviewer_outcome_v2(
+    review_job: Job,
+    *,
+    outcome_id: str,
+    evaluation: MethodRoleEvaluationV2,
+    produced_at: str,
+) -> JobOutcome:
+    """Create the server-only normalized Reviewer Outcome for later consensus."""
+
+    target = review_job.methods_review_target
+    if (
+        review_job.job_type is not JobType.REVIEW
+        or target is None
+        or review_job.review_target is not None
+        or evaluation.role != "REVIEWER"
+        or evaluation.plan_ref != target.plan_ref
+    ):
+        raise ValueError(
+            "Methods V2 Reviewer Outcome requires the exact Candidate-free REVIEW Job and Plan"
+        )
+    result = MethodsReviewerResultV2(
+        schema_version=2,
+        role="REVIEWER",
+        review_job_id=review_job.job_id,
+        target=target,
+        evaluations=tuple(
+            MethodsReviewerEvaluationV2(
+                evaluation_ref=item.evaluation_ref,
+                verdict=item.verdict,
+                reason=item.reason,
+            )
+            for item in evaluation.evaluations
+        ),
+        repair_used=evaluation.repair_used,
+    )
+    return JobOutcome(
+        outcome_id=outcome_id,
+        job_id=review_job.job_id,
+        case_id=review_job.case_id,
+        job_type=JobType.REVIEW,
+        base_state_revision=review_job.base_state_revision,
+        result_type=OutcomeResultType.COMPLETED,
+        payload=None,
+        consumed_evidence_refs=[],
+        proposed_evidence=[],
+        proposed_artifacts=[],
+        error=None,
+        produced_at=produced_at,
+        decision_audit=None,
+        methods_review_target=None,
+        methods_reviewer_result=result,
+    )
 
 
 def _stable_unique(values: Sequence[_T]) -> list[_T]:
@@ -1044,6 +1163,11 @@ def build_job(
         logparse_tool_ref=spec.logparse_tool_ref,
         logparse_product=spec.logparse_product,
         review_target=review_target,
+        methods_review_target=(
+            None
+            if spec.methods_review_target is None
+            else spec.methods_review_target.model_copy(deep=True)
+        ),
         replacement_for_job_id=spec.replacement_for_job_id,
         resource_limits=spec.resource_limits,
         created_at=created_at,
@@ -1059,6 +1183,8 @@ __all__ = [
     "apply_diagnosis_state_delta",
     "apply_selected_skill_update",
     "build_job",
+    "build_methods_reviewer_outcome_v2",
+    "build_methods_specialist_handoff_outcome_v2",
     "formalize_accepted_artifacts",
     "formalize_accepted_candidate",
     "formalize_accepted_evidence",
