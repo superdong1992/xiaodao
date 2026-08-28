@@ -343,6 +343,26 @@ def _validate_evidence_manifest(
             raise ValueError("Workspace manifest Evidence resource metadata drifted")
 
 
+def _validate_methods_specialist_manifest(
+    job: Job,
+    manifest: WorkspaceInputManifest,
+) -> None:
+    if (
+        job.job_type is not JobType.DIAGNOSE
+        or job.diagnosis_mode is not DiagnosisMode.SPECIALIZED
+        or manifest.job_id != job.job_id
+        or manifest.case_id != job.case_id
+        or manifest.job_type is not job.job_type
+        or manifest.logparse_tool_ref != job.logparse_tool_ref
+        or manifest.logparse_product != job.logparse_product
+        or manifest.entries
+        or manifest.resolved_logparse_plan is not None
+        or manifest.review_subject is not None
+        or manifest.methods_reviewer_input is not None
+    ):
+        raise ValueError("Methods V2 Specialist manifest is not model-minimal")
+
+
 def _previous_outcome_bytes(
     outcomes: tuple[JobOutcome, ...],
     manifest: WorkspaceInputManifest,
@@ -380,7 +400,11 @@ class ContextBuilder:
         if not isinstance(materials.manifest, WorkspaceInputManifest):
             raise TypeError("manifest must be the frozen S00 WorkspaceInputManifest DTO")
 
-        validate_workspace_manifest_for_job(materials.manifest, job)
+        methods_v2 = materials.methods_evidence_graph is not None
+        if methods_v2 and job.methods_review_target is None:
+            _validate_methods_specialist_manifest(job, materials.manifest)
+        else:
+            validate_workspace_manifest_for_job(materials.manifest, job)
         self._validate_role_materials(job, materials)
         self._validate_order_and_ownership(job, materials)
         _validate_evidence_manifest(materials.evidence, materials.manifest)
@@ -399,7 +423,6 @@ class ContextBuilder:
             job,
         )
         context_snapshot = job.context_snapshot
-        methods_v2 = materials.methods_evidence_graph is not None
         if methods_v2 or job.job_type is JobType.REVIEW:
             # Methods V2 roles receive their own immutable user facts without
             # Candidate or intermediate diagnosis state.  Graph/Plan carry the
@@ -700,8 +723,14 @@ class ContextBuilder:
 
     @staticmethod
     def _validate_order_and_ownership(job: Job, materials: ContextMaterials) -> None:
-        expected_previous = () if job.job_type is JobType.REVIEW else tuple(
-            job.previous_outcome_refs
+        methods_specialist = (
+            materials.methods_evidence_graph is not None
+            and job.methods_review_target is None
+        )
+        expected_previous = (
+            ()
+            if job.job_type is JobType.REVIEW or methods_specialist
+            else tuple(job.previous_outcome_refs)
         )
         if tuple(outcome.outcome_id for outcome in materials.previous_outcomes) != expected_previous:
             raise ValueError(
@@ -709,9 +738,8 @@ class ContextBuilder:
             )
         if any(outcome.case_id != job.case_id for outcome in materials.previous_outcomes):
             raise ValueError("previous outcomes must belong to the Job Case")
-        if tuple(item.evidence_id for item in materials.evidence) != tuple(
-            job.evidence_refs
-        ):
+        expected_evidence = () if methods_specialist else tuple(job.evidence_refs)
+        if tuple(item.evidence_id for item in materials.evidence) != expected_evidence:
             raise ValueError("Evidence must follow Job.evidence_refs")
         if any(item.case_id != job.case_id for item in materials.evidence):
             raise ValueError("Evidence must belong to the Job Case")

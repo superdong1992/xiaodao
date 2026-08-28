@@ -7,7 +7,7 @@ import os
 import re
 import stat
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Literal
 
@@ -135,6 +135,7 @@ class MethodsRoleWorkspaceReceiptV2:
     evaluation_plan_sha256: str
     graph_ref: str
     plan_ref: str
+    workspace: PreparedWorkspace
 
 
 def _safe_dir_fd_operations_supported() -> bool:
@@ -1159,6 +1160,43 @@ def _remove_methods_preprocess_inputs(inputs_root: Path) -> None:
     target_root.rmdir()
 
 
+def _remove_methods_legacy_input_trees(inputs_root: Path) -> None:
+    for name in ("attachments", "evidence", "artifacts", "outcomes"):
+        root = inputs_root / name
+        if not root.exists():
+            continue
+        if not root.is_dir():
+            raise ValueError("Methods legacy input root is not a directory")
+        root.chmod(0o755)
+        for path in sorted(
+            root.rglob("*"),
+            key=lambda item: len(item.parts),
+            reverse=True,
+        ):
+            if path.is_dir():
+                path.chmod(0o755)
+                path.rmdir()
+            else:
+                path.chmod(0o644)
+                path.unlink()
+        root.rmdir()
+
+
+def _methods_specialist_manifest_v2(job: Job) -> WorkspaceInputManifest:
+    return WorkspaceInputManifest(
+        schema_version=2,
+        job_id=job.job_id,
+        case_id=job.case_id,
+        job_type=job.job_type,
+        logparse_tool_ref=job.logparse_tool_ref,
+        logparse_product=job.logparse_product,
+        entries=[],
+        resolved_logparse_plan=None,
+        review_subject=None,
+        methods_reviewer_input=None,
+    )
+
+
 class WorkspaceManager:
     """Create and verify the fixed workspace tree for exactly one Job."""
 
@@ -1649,9 +1687,16 @@ class WorkspaceManager:
         request_bytes = _methods_role_request_bytes_v2(job)
         graph_bytes = canonical_json_bytes(evidence_graph)
         plan_bytes = canonical_json_bytes(evaluation_plan)
+        model_manifest = (
+            _methods_specialist_manifest_v2(job)
+            if remove_preprocessing
+            else workspace.manifest
+        )
+        model_manifest_bytes = canonical_json_bytes(model_manifest)
         request_path = inputs_root / _METHODS_REQUEST_INPUT
         graph_path = inputs_root / _METHODS_GRAPH_INPUT
         plan_path = inputs_root / _METHODS_PLAN_INPUT
+        manifest_path = inputs_root / "manifest.json"
         try:
             metadata = inputs_root.stat(follow_symlinks=False)
             if (
@@ -1670,6 +1715,9 @@ class WorkspaceManager:
                 request_path.chmod(0o644)
                 _atomic_write(request_path, request_bytes)
                 _remove_methods_preprocess_inputs(inputs_root)
+                _remove_methods_legacy_input_trees(inputs_root)
+                manifest_path.chmod(0o644)
+                _atomic_write(manifest_path, model_manifest_bytes)
             elif request_path.read_bytes() != request_bytes:
                 raise ValueError("Methods Reviewer request does not match its own Job")
             _atomic_write(graph_path, graph_bytes)
@@ -1683,6 +1731,17 @@ class WorkspaceManager:
             ) from exc
         finally:
             _set_inputs_read_only(inputs_root)
+        model_workspace = replace(
+            workspace,
+            manifest=model_manifest,
+            manifest_bytes=model_manifest_bytes,
+            attachments=() if remove_preprocessing else workspace.attachments,
+            evidence=() if remove_preprocessing else workspace.evidence,
+            artifacts=() if remove_preprocessing else workspace.artifacts,
+            previous_outcomes=(
+                () if remove_preprocessing else workspace.previous_outcomes
+            ),
+        )
         return MethodsRoleWorkspaceReceiptV2(
             role=role,
             request_bytes=request_bytes,
@@ -1693,6 +1752,7 @@ class WorkspaceManager:
             evaluation_plan_sha256=bytes_sha256(plan_bytes),
             graph_ref=evidence_graph.graph_ref,
             plan_ref=evaluation_plan.plan_ref,
+            workspace=model_workspace,
         )
 
     @staticmethod
