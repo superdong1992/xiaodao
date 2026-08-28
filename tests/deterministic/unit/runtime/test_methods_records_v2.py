@@ -45,6 +45,7 @@ from tests.deterministic.unit.runtime.methods_v2_test_support import (
 
 JOB_ID = "00000000-0000-0000-0000-000000000071"
 EVALUATION_ID = "00000000-0000-0000-0000-000000000072"
+CASE_ID = "00000000-0000-0000-0000-000000000073"
 
 
 def _runtime_values(tmp_path: Path):
@@ -62,7 +63,12 @@ def _runtime_values(tmp_path: Path):
     )
     graph = scan_method_evidence_v2(skill=skill, target_logs=(target,))
     plan = build_method_evaluation_plan_v2(skill=skill, evidence=graph)
-    state = start_method_state_v2(evaluation_id=EVALUATION_ID, plan=plan)
+    state = start_method_state_v2(
+        case_id=CASE_ID,
+        source_job_id=JOB_ID,
+        evaluation_id=EVALUATION_ID,
+        plan=plan,
+    )
     return graph, plan, state
 
 
