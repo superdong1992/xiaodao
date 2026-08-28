@@ -6,16 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from problem_locator.contracts import (
-    MethodEvidenceEventV2,
-    MethodEvidenceGraphV2,
-    MethodEvidenceHitV2,
-    MethodEvidenceSourceV2,
-    method_evidence_event_ref_v2,
-    method_evidence_graph_ref_v2,
-    method_evidence_hit_ref_v2,
-    method_evidence_source_ref_v2,
-)
+import problem_locator.runtime.methods_evidence_v2 as methods_evidence_v2
+from problem_locator.contracts import MethodEvidenceGraphV2, method_evidence_event_ref_v2
 from problem_locator.runtime.methods_evidence_v2 import (
     build_method_evaluation_plan_v2,
     scan_method_evidence_v2,
@@ -150,74 +142,31 @@ def test_complete_plan_has_every_loaded_method_and_all_of_its_hits() -> None:
     assert len(plan.evaluations[1].evidence_hit_refs) == 2
 
 
-def test_plan_consumes_graph_refs_without_rematching_marker_text() -> None:
+def test_plan_consumes_production_graph_refs_without_rescanning_logs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     skill = _skill(("first-method", ("DECLARED_MARKER",)))
-    target = _target("server", "this line does not contain the marker\n")
-    source_ref = method_evidence_source_ref_v2(
-        source_id=target.source_id,
-        relative_path=target.relative_path,
-        content_sha256=target.content_sha256,
-    )
-    source = MethodEvidenceSourceV2(
-        source_ref=source_ref,
-        source_id=target.source_id,
-        relative_path=target.relative_path,
-        content_sha256=target.content_sha256,
-    )
-    hit_ref = method_evidence_hit_ref_v2(
-        method_id="first-method",
-        method_priority=1,
-        marker_index=1,
-        source_ref=source_ref,
-        source_id="server",
-        line_number=1,
-        marker="DECLARED_MARKER",
-        line="this line does not contain the marker",
-    )
-    hit = MethodEvidenceHitV2(
-        hit_ref=hit_ref,
-        method_id="first-method",
-        method_priority=1,
-        marker_index=1,
-        source_ref=source_ref,
-        source_id="server",
-        line_number=1,
-        marker="DECLARED_MARKER",
-        line="this line does not contain the marker",
-    )
-    event_ref = method_evidence_event_ref_v2(
-        method_id="first-method",
-        method_priority=1,
-        identity_tokens=(),
-        evidence_hit_refs=(hit_ref,),
-    )
-    event = MethodEvidenceEventV2(
-        event_ref=event_ref,
-        method_id="first-method",
-        method_priority=1,
-        identity_tokens=(),
-        evidence_hit_refs=(hit_ref,),
-    )
-    graph_ref = method_evidence_graph_ref_v2(
-        skill_sha256=skill.combined_sha256,
-        sources=(source,),
-        hits=(hit,),
-        events=(event,),
-        loaded_method_ids=("first-method",),
-    )
-    graph = MethodEvidenceGraphV2(
-        graph_ref=graph_ref,
-        skill_sha256=skill.combined_sha256,
-        sources=(source,),
-        hits=(hit,),
-        events=(event,),
-        loaded_method_ids=("first-method",),
+    graph = methods_evidence_v2.scan_method_evidence_v2(
+        skill=skill,
+        target_logs=(_target("server", "DECLARED_MARKER request_id=req-1\n"),),
     )
 
-    plan = build_method_evaluation_plan_v2(skill=skill, evidence=graph)
+    def fail_if_rescanned(*args: object, **kwargs: object) -> None:
+        raise AssertionError(f"plan builder crossed the scan boundary: {args!r} {kwargs!r}")
 
-    assert plan.evaluations[0].evidence_hit_refs == (hit_ref,)
-    assert plan.evaluations[0].evidence_event_refs == (event_ref,)
+    monkeypatch.setattr(methods_evidence_v2, "scan_method_evidence_v2", fail_if_rescanned)
+    monkeypatch.setattr(methods_evidence_v2, "_validated_logs", fail_if_rescanned)
+    plan = methods_evidence_v2.build_method_evaluation_plan_v2(
+        skill=skill,
+        evidence=graph,
+    )
+
+    assert plan.evaluations[0].evidence_hit_refs == tuple(
+        item.hit_ref for item in graph.hits
+    )
+    assert plan.evaluations[0].evidence_event_refs == tuple(
+        item.event_ref for item in graph.events
+    )
     assert plan.evaluations[0].evaluation_ref.startswith("eval-")
     assert plan.plan_ref.startswith("plan-")
 

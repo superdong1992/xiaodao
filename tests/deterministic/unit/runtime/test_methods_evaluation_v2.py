@@ -1,15 +1,16 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
+from pathlib import Path
 
 import pytest
 
-from problem_locator.contracts import (
-    MethodEvaluationPlanItemV2,
-    MethodEvaluationPlanV2,
-    method_evaluation_plan_ref_v2,
-    method_evaluation_ref_v2,
+from problem_locator.contracts import MethodEvaluationPlanV2
+from problem_locator.runtime.methods_evidence_v2 import (
+    build_method_evaluation_plan_v2,
+    scan_method_evidence_v2,
 )
 from problem_locator.runtime.methods_evaluation_v2 import (
     MethodEvaluationRepairExhaustedError,
@@ -18,39 +19,85 @@ from problem_locator.runtime.methods_evaluation_v2 import (
     parse_method_evaluation_response_v2,
     resolve_method_consensus_v2,
 )
+from problem_locator.runtime.methods_grounding import FrozenTargetLogV1
+from problem_locator.runtime.methods_skill import (
+    MethodCardV1,
+    MethodsManifestV1,
+    PreprocessingBindingV1,
+    RegistrationTemplateV1,
+    ResolvedSpecializedSkillV1,
+    RuntimeRoleBindingV1,
+)
+
+
+def _skill() -> ResolvedSpecializedSkillV1:
+    role = RuntimeRoleBindingV1("profile", "tools", "policy", "output")
+    methods = tuple(
+        MethodCardV1(
+            id=method_id,
+            title=method_id,
+            reference=f"references/{method_id}.md",
+            priority=priority,
+            evidence_markers=(marker,),
+        )
+        for priority, method_id, marker in (
+            (1, "first-method", "FIRST_MARKER"),
+            (2, "second-method", "SECOND_MARKER"),
+        )
+    )
+    return ResolvedSpecializedSkillV1(
+        registration_root=Path("registration"),
+        package_root=Path("package"),
+        registration=RegistrationTemplateV1(
+            registration_id="evaluation-test",
+            version="1.0.0",
+            capability="test",
+            deployment_scope="PRODUCTION",
+            summary="test",
+            package_relative_path="package/evaluation-test",
+            skill_name="evaluation-test",
+            source_wiki_sha256="1" * 64,
+            diagnose=role,
+            review=role,
+            preprocessing=PreprocessingBindingV1(False, None, (), None),
+        ),
+        methods=MethodsManifestV1(
+            skill_name="evaluation-test",
+            source_wiki_sha256="1" * 64,
+            required_user_inputs=(),
+            required_artifacts=(),
+            log_derived_fields=("request_id",),
+            shared_references=(),
+            methods=methods,
+        ),
+        registration_sha256="2" * 64,
+        package_tree_sha256="3" * 64,
+        combined_sha256="4" * 64,
+    )
+
+
+def _target(text: str) -> FrozenTargetLogV1:
+    content = text.encode("utf-8")
+    return FrozenTargetLogV1(
+        source_id="server",
+        relative_path="logs/server.log",
+        content_sha256=hashlib.sha256(content).hexdigest(),
+        content=content,
+    )
 
 
 def _plan() -> MethodEvaluationPlanV2:
-    skill_sha256 = "1" * 64
-    graph_ref = "graph-" + "2" * 64
-    evaluations = tuple(
-        MethodEvaluationPlanItemV2(
-            evaluation_ref=method_evaluation_ref_v2(
-                method_id=method_id,
-                method_priority=method_priority,
-                evidence_event_refs=(event_ref,),
-                evidence_hit_refs=(hit_ref,),
+    skill = _skill()
+    graph = scan_method_evidence_v2(
+        skill=skill,
+        target_logs=(
+            _target(
+                "FIRST_MARKER request_id=req-1\n"
+                "SECOND_MARKER request_id=req-2\n"
             ),
-            method_id=method_id,
-            method_priority=method_priority,
-            evidence_event_refs=(event_ref,),
-            evidence_hit_refs=(hit_ref,),
-        )
-        for method_priority, method_id, event_ref, hit_ref in (
-            (1, "first-method", "event-" + "5" * 64, "hit-" + "3" * 64),
-            (2, "second-method", "event-" + "6" * 64, "hit-" + "4" * 64),
-        )
-    )
-    return MethodEvaluationPlanV2(
-        plan_ref=method_evaluation_plan_ref_v2(
-            skill_sha256=skill_sha256,
-            evidence_graph_ref=graph_ref,
-            evaluations=evaluations,
         ),
-        skill_sha256=skill_sha256,
-        evidence_graph_ref=graph_ref,
-        evaluations=evaluations,
     )
+    return build_method_evaluation_plan_v2(skill=skill, evidence=graph)
 
 
 def _response(
