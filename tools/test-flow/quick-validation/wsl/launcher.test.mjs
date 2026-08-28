@@ -41,6 +41,32 @@ test("WSL launcher keeps dependency cache read-only and formal evidence writable
   assert.match(source, /TEST_FLOW_QUICK_PYTHON=\/opt\/venvs\/xiaodao\/bin\/python/u);
 });
 
+test("WSL launcher runs as the invoking uid and verifies provider runtimes before certification", () => {
+  const source = fs.readFileSync(path.join(WSL_ROOT, "run.sh"), "utf8");
+  assert.match(source, /host_uid=\$\(id -u\)/u);
+  assert.match(source, /host_gid=\$\(id -g\)/u);
+  assert.match(source, /--user "\$host_uid:\$host_gid"/u);
+  assert.match(source, /--env HOME=\/home\/test-flow/u);
+  assert.doesNotMatch(source, /--user 0:0|\bchown\b/u);
+  assert.match(source, /\/usr\/bin\/codex --version/u);
+  assert.match(source, /\/opt\/venvs\/xiaodao\/bin\/python --version/u);
+  assert.match(source, /node \/opt\/claude-cache\/package\/cli\.js --version/u);
+  assert.match(source, /test -r \/run\/secrets\/codex-auth\.json/u);
+  assert.match(source, /test -r \/run\/secrets\/claude-settings\.json/u);
+  assert.match(source, /test -w \/evidence/u);
+});
+
+test("WSL launcher preserves the Test Flow exit and requires its exact verdict to remain caller-readable", () => {
+  const source = fs.readFileSync(path.join(WSL_ROOT, "run.sh"), "utf8");
+  assert.match(source, /container_status=\$\{PIPESTATUS\[0\]\}/u);
+  assert.match(source, /attempt_root.*value\.attempt_root/u);
+  assert.match(source, /attempt_name=\$\{attempt_root#\/evidence\/\}/u);
+  assert.match(source, /host_attempt="\$evidence_root\/\$attempt_name"/u);
+  assert.match(source, /test -r "\$host_attempt\/verdict\.json"/u);
+  assert.match(source, /stat -c %u:%g "\$host_attempt\/verdict\.json"/u);
+  assert.match(source, /exit "\$container_status"/u);
+});
+
 test("central certification closure owns Core, one generation, P1, P2 and release verdict", () => {
   const config = loadConfiguration(REPO_ROOT);
   const closure = resolveGoalClosure(config, {

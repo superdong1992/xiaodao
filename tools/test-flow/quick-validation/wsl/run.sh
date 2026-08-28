@@ -73,12 +73,19 @@ test "$(docker image inspect "$image_id" --format '{{.Id}}')" = "$image_id" || {
 test "$(docker image inspect "$image_id" --format '{{index .Config.Labels "problem-locator.quick.container"}}')" = "ubuntu22.04-central-v1" || { printf 'IMAGE_PROFILE_INVALID\n' >&2; exit 2; }
 
 mkdir -p -m 700 "$evidence_root"
+host_uid=$(id -u)
+host_gid=$(id -g)
 container_name="pltf-ev2-release-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+preflight_name="${container_name}-preflight"
+launcher_output=$(mktemp "${TMPDIR:-/tmp}/pltf-ev2-release-output.XXXXXX")
+owner_probe="$evidence_root/.test-flow-owner-probe-$container_name"
 
 cleanup() {
   local status=$?
   trap - EXIT
+  docker stop --time 5 "$preflight_name" >/dev/null 2>&1 || true
   docker stop --time 5 "$container_name" >/dev/null 2>&1 || true
+  rm -f -- "$launcher_output" "$owner_probe"
   exit "$status"
 }
 trap cleanup EXIT
@@ -88,26 +95,74 @@ trap 'exit 143' TERM
 forwarded=("${retry_args[@]}")
 [[ $plan_only != true ]] || forwarded+=(--plan-only)
 
+container_runtime=(
+  --pull never --platform linux/amd64 --user "$host_uid:$host_gid" --read-only
+  --tmpfs /tmp:rw,exec,nosuid,nodev,mode=1777,size=536870912
+  --tmpfs /private/tmp:rw,exec,nosuid,nodev,mode=1777,size=536870912
+  --tmpfs "/home/test-flow:rw,nosuid,nodev,mode=0700,uid=$host_uid,gid=$host_gid,size=268435456"
+  --tmpfs "/run/test-flow-scratch:rw,exec,nosuid,nodev,mode=0700,uid=$host_uid,gid=$host_gid,size=1073741824"
+  --mount "type=bind,src=$repo_root,dst=$repo_root,readonly"
+  --mount "type=bind,src=$cache_root,dst=/cache,readonly"
+  --mount "type=bind,src=$evidence_root,dst=/evidence"
+  --mount "type=bind,src=$seal,dst=/run/secrets/image-seal.json,readonly"
+  --mount "type=bind,src=$codex_auth,dst=/run/secrets/codex-auth.json,readonly"
+  --mount "type=bind,src=$claude_settings,dst=/run/secrets/claude-settings.json,readonly"
+  --security-opt seccomp=unconfined
+  --env HOME=/home/test-flow
+  --env TEST_FLOW_QUICK_UBUNTU2204_CONTAINER=1
+  --env TEST_FLOW_QUICK_SCRATCH_ROOT=/run/test-flow-scratch
+  --env TEST_FLOW_PYTHON=/opt/venvs/xiaodao/bin/python
+  --env TEST_FLOW_QUICK_PYTHON=/opt/venvs/xiaodao/bin/python
+  --env GIT_CONFIG_COUNT=1
+  --env GIT_CONFIG_KEY_0=safe.directory
+  --env "GIT_CONFIG_VALUE_0=$repo_root"
+  --workdir "$repo_root"
+)
+
+docker run --rm --init --name "$preflight_name" --network none \
+  --env "TEST_FLOW_OWNER_PROBE=/evidence/$(basename "$owner_probe")" \
+  "${container_runtime[@]}" "$image_id" \
+  bash -ceu '
+    test -x /usr/bin/codex
+    /usr/bin/codex --version >/dev/null
+    test -x /opt/venvs/xiaodao/bin/python
+    /opt/venvs/xiaodao/bin/python --version >/dev/null
+    test -r /opt/claude-cache/package/cli.js
+    node /opt/claude-cache/package/cli.js --version >/dev/null
+    test -r /run/secrets/image-seal.json
+    test -r /run/secrets/codex-auth.json
+    test -r /run/secrets/claude-settings.json
+    test -r /cache
+    test -w /evidence
+    : > "$TEST_FLOW_OWNER_PROBE"
+    test -O "$TEST_FLOW_OWNER_PROBE"
+    rm -f -- "$TEST_FLOW_OWNER_PROBE"
+  '
+
+set +e
 docker run --rm --init --name "$container_name" \
   --label "problem-locator.test-flow.container-run=$container_name" \
-  --pull never --platform linux/amd64 --user 0:0 --read-only --network bridge \
-  --tmpfs /tmp:rw,exec,nosuid,nodev,mode=1777,size=536870912 \
-  --tmpfs /private/tmp:rw,exec,nosuid,nodev,mode=1777,size=536870912 \
-  --tmpfs /root:rw,nosuid,nodev,mode=0700,size=268435456 \
-  --tmpfs /run/test-flow-scratch:rw,exec,nosuid,nodev,mode=0700,size=1073741824 \
-  --mount "type=bind,src=$repo_root,dst=$repo_root,readonly" \
-  --mount "type=bind,src=$cache_root,dst=/cache,readonly" \
-  --mount "type=bind,src=$evidence_root,dst=/evidence" \
-  --mount "type=bind,src=$seal,dst=/run/secrets/image-seal.json,readonly" \
-  --mount "type=bind,src=$codex_auth,dst=/run/secrets/codex-auth.json,readonly" \
-  --mount "type=bind,src=$claude_settings,dst=/run/secrets/claude-settings.json,readonly" \
-  --security-opt seccomp=unconfined \
-  --env TEST_FLOW_QUICK_UBUNTU2204_CONTAINER=1 \
-  --env TEST_FLOW_QUICK_SCRATCH_ROOT=/run/test-flow-scratch \
-  --env TEST_FLOW_PYTHON=/opt/venvs/xiaodao/bin/python \
-  --env TEST_FLOW_QUICK_PYTHON=/opt/venvs/xiaodao/bin/python \
-  --env GIT_CONFIG_COUNT=1 \
-  --env GIT_CONFIG_KEY_0=safe.directory \
-  --env "GIT_CONFIG_VALUE_0=$repo_root" \
-  --workdir "$repo_root" "$image_id" \
-  bash "$tool_root/run.sh" --inside-container "${forwarded[@]}"
+  --network bridge "${container_runtime[@]}" "$image_id" \
+  bash "$tool_root/run.sh" --inside-container "${forwarded[@]}" | tee "$launcher_output"
+container_status=${PIPESTATUS[0]}
+set -e
+
+if [[ $plan_only != true ]]; then
+  attempt_root=$(node -e 'const fs = require("node:fs"); try { const value = JSON.parse(fs.readFileSync(process.argv[1], "utf8")); process.stdout.write(typeof value.attempt_root === "string" ? value.attempt_root : ""); } catch {}' "$launcher_output")
+  if [[ -n $attempt_root ]]; then
+    attempt_name=${attempt_root#/evidence/}
+    case "$attempt_root:$attempt_name" in
+      /evidence/*:run-*/*|/evidence/*:*/*|/evidence/:*) printf 'ATTEMPT_ROOT_INVALID:%s\n' "$attempt_root" >&2; exit 3 ;;
+      /evidence/run-*:run-*) ;;
+      *) printf 'ATTEMPT_ROOT_INVALID:%s\n' "$attempt_root" >&2; exit 3 ;;
+    esac
+    host_attempt="$evidence_root/$attempt_name"
+    test -r "$host_attempt/verdict.json" || { printf 'VERDICT_NOT_READABLE:%s\n' "$host_attempt/verdict.json" >&2; exit 3; }
+    test "$(stat -c %u:%g "$host_attempt/verdict.json")" = "$host_uid:$host_gid" || { printf 'VERDICT_OWNER_MISMATCH:%s\n' "$host_attempt/verdict.json" >&2; exit 3; }
+  elif ((container_status == 0)); then
+    printf 'ATTEMPT_ROOT_MISSING\n' >&2
+    exit 3
+  fi
+fi
+
+exit "$container_status"

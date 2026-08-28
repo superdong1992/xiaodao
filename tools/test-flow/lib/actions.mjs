@@ -3144,6 +3144,7 @@ function materializeMacosCodexInputs({ scratchRoot, codexEntry, codexAuth, plann
 
 function macosCodexInvocationProjection(invocation, hardCaps, invocationClass) {
   const workflow = `${invocation.role}:${invocation.attempt}`;
+  const usage = normalizeCodexUsage(invocation.usage);
   return {
     schema_version: 3,
     invocation_id: invocation.invocation_id,
@@ -3153,7 +3154,7 @@ function macosCodexInvocationProjection(invocation, hardCaps, invocationClass) {
     effective_reasoning_effort: invocation.reasoning_effort,
     effective_caps: hardCaps,
     usage_complete: invocation.terminal === true,
-    usage: codexUsage(invocation.usage),
+    usage: codexUsage(usage),
     turns: 1,
     terminal: { subtype: "success", is_error: false, event: "turn.completed", thread_id: invocation.thread_id ?? null },
     wrapper_outcome: { schema_version: 1, status: invocation.status, code: null },
@@ -3232,7 +3233,18 @@ async function runMacosCodexLunaGate(context, stage, { workflow }) {
     pollMilliseconds: context.policies.poll_milliseconds,
     progressAllowlistVersion: context.policies.progress_allowlist_version,
   });
-  if (result.status !== "PASS") return { ...result, failure_domain: result.status === "ERROR" ? "HARNESS" : "CONTRACT", code: result.termination?.trigger ?? "MACOS_CODEX_LUNA_RUNNER_FAILED" };
+  if (result.status !== "PASS") {
+    return providerRunnerFailureResult({
+      provider: "codex-luna",
+      result,
+      attemptRoot: context.attemptRoot,
+      outputRoot,
+      usageRoot,
+      planStage: context.planStage,
+      invocationClass: workflow === "methods" ? "codex-luna-methods-bootstrap" : "codex-luna-macos-e2e",
+      fallbackCode: "MACOS_CODEX_LUNA_RUNNER_FAILED",
+    });
+  }
   let gate;
   let invocationLedger;
   try {
@@ -3321,6 +3333,192 @@ export function validEvidenceV2ProviderInvocationLedger(planStage, ledger) {
     && ledger.invocations.every((invocation) => typeof invocation?.invocation_id === "string" && invocation.invocation_id.length > 0 && invocation?.status === "PASS" && invocation?.terminal === true);
 }
 
+const PROVIDER_ROLE_RECEIPTS = Object.freeze([
+  Object.freeze({ name: "specialist-primary.json", role: "SPECIALIST", attempt: "PRIMARY" }),
+  Object.freeze({ name: "specialist-repair.json", role: "SPECIALIST", attempt: "REPAIR" }),
+  Object.freeze({ name: "reviewer-primary.json", role: "REVIEWER", attempt: "PRIMARY" }),
+  Object.freeze({ name: "reviewer-repair.json", role: "REVIEWER", attempt: "REPAIR" }),
+]);
+
+const PROVIDER_ROLE_SEQUENCE_PREFIXES = new Set([
+  "SPECIALIST:PRIMARY",
+  "SPECIALIST:PRIMARY,SPECIALIST:REPAIR",
+  "SPECIALIST:PRIMARY,REVIEWER:PRIMARY",
+  "SPECIALIST:PRIMARY,SPECIALIST:REPAIR,REVIEWER:PRIMARY",
+  "SPECIALIST:PRIMARY,REVIEWER:PRIMARY,REVIEWER:REPAIR",
+  "SPECIALIST:PRIMARY,SPECIALIST:REPAIR,REVIEWER:PRIMARY,REVIEWER:REPAIR",
+]);
+
+function exactAttemptPath(attemptRoot, relativePath) {
+  if (typeof relativePath !== "string" || relativePath.length === 0 || path.isAbsolute(relativePath)) return null;
+  const root = path.resolve(attemptRoot);
+  const target = path.resolve(root, ...relativePath.split("/"));
+  return target.startsWith(`${root}${path.sep}`) ? target : null;
+}
+
+export function providerRunnerFailureCode({ result, attemptRoot, fallbackCode }) {
+  if (typeof result?.termination?.trigger === "string" && result.termination.trigger.length > 0) {
+    return result.termination.trigger;
+  }
+  if (result?.stderr_truncated === true) return fallbackCode;
+  const stderrPath = exactAttemptPath(attemptRoot, result?.stderr_path);
+  if (stderrPath === null || !fs.existsSync(stderrPath)) return fallbackCode;
+  try {
+    const parsed = JSON.parse(fs.readFileSync(stderrPath, "utf8").trim());
+    const keys = Object.keys(parsed ?? {}).sort();
+    if (keys.join("\0") !== ["code", "message", "schema_version", "status"].join("\0")) return fallbackCode;
+    if (parsed.schema_version !== 1 || parsed.status !== "FAIL") return fallbackCode;
+    if (!/^[A-Z][A-Z0-9_]*$/u.test(parsed.code ?? "") || typeof parsed.message !== "string" || parsed.message.length === 0) return fallbackCode;
+    return parsed.code;
+  } catch {
+    return fallbackCode;
+  }
+}
+
+function providerInvocationAttempt(invocation) {
+  return invocation?.evaluation_attempt ?? invocation?.attempt;
+}
+
+function validProviderInvocationReceipt(invocation, expected, provider) {
+  if (invocation?.schema_version !== 1
+    || invocation.status !== "PASS"
+    || invocation.terminal !== true
+    || invocation.role !== expected.role
+    || providerInvocationAttempt(invocation) !== expected.attempt
+    || typeof invocation.invocation_id !== "string"
+    || invocation.invocation_id.length === 0) return false;
+  if (provider === "codex-luna") {
+    try {
+      normalizeCodexUsage(invocation.usage);
+      return invocation.provider === "openai-codex-app-server"
+        && invocation.attempt === expected.attempt
+        && invocation.repair === (expected.attempt === "REPAIR");
+    } catch {
+      return false;
+    }
+  }
+  return invocation.evaluation_attempt === expected.attempt && isCompleteUsage(invocation.usage);
+}
+
+function validProviderInvocationSequence(invocations) {
+  if (!Array.isArray(invocations) || invocations.length === 0 || invocations.length > PROVIDER_ROLE_RECEIPTS.length) return false;
+  if (new Set(invocations.map((item) => item.invocation_id)).size !== invocations.length) return false;
+  const sequence = invocations.map((item) => `${item.role}:${providerInvocationAttempt(item)}`).join(",");
+  return PROVIDER_ROLE_SEQUENCE_PREFIXES.has(sequence);
+}
+
+function readJsonOrNull(filePath) {
+  try {
+    return JSON.parse(fs.readFileSync(filePath, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+function readProviderRoleReceipts(usageRoot, provider) {
+  if (!fs.existsSync(usageRoot)) return [];
+  const actualNames = fs.readdirSync(usageRoot).filter((name) => name.endsWith(".json")).sort();
+  const allowedNames = new Set(PROVIDER_ROLE_RECEIPTS.map((item) => item.name));
+  if (actualNames.some((name) => !allowedNames.has(name))) return [];
+  const receipts = [];
+  for (const expected of PROVIDER_ROLE_RECEIPTS) {
+    const receiptPath = path.join(usageRoot, expected.name);
+    if (!fs.existsSync(receiptPath)) continue;
+    const receipt = readJsonOrNull(receiptPath);
+    if (!validProviderInvocationReceipt(receipt, expected, provider)) return [];
+    receipts.push(receipt);
+  }
+  return validProviderInvocationSequence(receipts) ? receipts : [];
+}
+
+function modelUsageAggregate(outputRoot) {
+  const receiptPath = path.join(outputRoot, "model-usage.json");
+  if (!fs.existsSync(receiptPath)) return { present: false, usage: null };
+  const receipt = readJsonOrNull(receiptPath);
+  const aggregate = receipt?.aggregate;
+  return { present: true, usage: isCompleteUsage(aggregate) ? aggregate : null };
+}
+
+function sameUsage(left, right) {
+  return isCompleteUsage(left)
+    && isCompleteUsage(right)
+    && canonicalJson(left) === canonicalJson(right);
+}
+
+function providerAggregateMatches(provider, aggregate, projected) {
+  if (!isCompleteUsage(aggregate) || !isCompleteUsage(projected)) return false;
+  if (provider !== "codex-luna") return sameUsage(aggregate, projected);
+  return [
+    "input_tokens",
+    "output_tokens",
+    "cache_creation_input_tokens",
+    "cache_read_input_tokens",
+    "total_tokens",
+  ].every((field) => aggregate[field] === projected[field]);
+}
+
+export function collectProviderFailureObservability({
+  provider,
+  result,
+  outputRoot,
+  usageRoot,
+  planStage,
+  invocationClass,
+}) {
+  const projection = provider === "codex-luna" ? macosCodexInvocationProjection : claudeDeepseekInvocationProjection;
+  let rawInvocations = [];
+  const ledgerPath = path.join(outputRoot, "model-invocations.json");
+  if (fs.existsSync(ledgerPath)) {
+    const ledger = readJsonOrNull(ledgerPath);
+    if (validEvidenceV2ProviderInvocationLedger(planStage, ledger)) rawInvocations = ledger.invocations;
+  }
+  if (rawInvocations.length === 0) rawInvocations = readProviderRoleReceipts(usageRoot, provider);
+  const invocations = rawInvocations.map((invocation) => projection(invocation, planStage.hard_caps, invocationClass));
+  const projectedUsage = invocations.length > 0 && invocations.every((invocation) => invocation.usage_complete === true && isCompleteUsage(invocation.usage))
+    ? sumUsage(invocations.map((invocation) => invocation.usage))
+    : null;
+  const aggregate = modelUsageAggregate(outputRoot);
+  if (projectedUsage !== null) {
+    return {
+      invocations,
+      usage: projectedUsage,
+      usage_complete: aggregate.present && providerAggregateMatches(provider, aggregate.usage, projectedUsage),
+    };
+  }
+  if (aggregate.usage !== null) return { invocations: [], usage: aggregate.usage, usage_complete: false };
+  return {
+    invocations: [],
+    usage: isCompleteUsage(result?.usage) ? result.usage : undefined,
+    usage_complete: false,
+  };
+}
+
+export function providerRunnerFailureResult({
+  provider,
+  result,
+  attemptRoot,
+  outputRoot,
+  usageRoot,
+  planStage,
+  invocationClass,
+  fallbackCode,
+}) {
+  const observed = collectProviderFailureObservability({
+    provider,
+    result,
+    outputRoot,
+    usageRoot,
+    planStage,
+    invocationClass,
+  });
+  return {
+    ...result,
+    failure_domain: result.status === "ERROR" ? "HARNESS" : "CONTRACT",
+    code: providerRunnerFailureCode({ result, attemptRoot, fallbackCode }),
+    ...observed,
+  };
+}
+
 async function runMacosClaudeDeepseekGate(context, stage, { workflow }) {
   const outputRoot = gateRoot(context, stage);
   const scratchRoot = quickValidationScratchRoot(context, workflow === "methods" ? "macos-claude-deepseek-methods" : "macos-claude-deepseek-e2e");
@@ -3378,7 +3576,18 @@ async function runMacosClaudeDeepseekGate(context, stage, { workflow }) {
     pollMilliseconds: context.policies.poll_milliseconds,
     progressAllowlistVersion: context.policies.progress_allowlist_version,
   });
-  if (result.status !== "PASS") return { ...result, failure_domain: result.status === "ERROR" ? "HARNESS" : "CONTRACT", code: result.termination?.trigger ?? "CLAUDE_DEEPSEEK_RUNNER_FAILED" };
+  if (result.status !== "PASS") {
+    return providerRunnerFailureResult({
+      provider: "claude-deepseek",
+      result,
+      attemptRoot: context.attemptRoot,
+      outputRoot,
+      usageRoot,
+      planStage: context.planStage,
+      invocationClass: workflow === "methods" ? "claude-deepseek-registration-generation" : "claude-deepseek-macos-e2e",
+      fallbackCode: "CLAUDE_DEEPSEEK_RUNNER_FAILED",
+    });
+  }
   let gate;
   let ledger;
   try {

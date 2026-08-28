@@ -53,4 +53,6 @@ bash tools/test-flow/quick-validation/wsl/run.sh \
 --expected-evidence "哪些新证据可以证实或证伪该假设"
 ```
 
-容器只读挂载仓库和 dependency cache；正式 Stage 的所有输出都写入可写的 `/evidence`。Skill generation 的 registration 位于当前 attempt，不会写回 cache，因此 cache 只读不会阻止认证。
+wrapper 会把当前 WSL 用户的 uid/gid 原样传给容器，不再用 root 运行。正式认证前，它会先用同一身份做一次零模型预检，确认 Codex CLI、Claude CLI、Python、两份模型凭据和 `/evidence` 都可用。预检不会发起模型请求。
+
+容器只读挂载仓库和 dependency cache；正式 Stage 的所有输出都写入可写的 `/evidence`。Skill generation 的 registration 位于当前 attempt，不会写回 cache，因此 cache 只读不会阻止认证。容器退出后，wrapper 还会检查当前 attempt 的 `verdict.json` 是否仍归调用用户所有且可读，并保留中央 Test Flow 的原始退出码。

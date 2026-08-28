@@ -6,6 +6,7 @@ import path from "node:path";
 import test from "node:test";
 
 import {
+  collectProviderFailureObservability,
   collectIsolatedModelUsage,
   evidenceV2ProviderRuntimeInputs,
   evaluatePytestSummary,
@@ -16,6 +17,8 @@ import {
   parseJUnitSummary,
   planAffectedSelection,
   probeLoopbackCapability,
+  providerRunnerFailureCode,
+  providerRunnerFailureResult,
   pytestBaseTempPath,
   pytestScratchBoundary,
   serverCapabilityTerminationResult,
@@ -80,6 +83,144 @@ test("Evidence V2 provider ledgers allow only S:P,[S:R],R:P,[R:R] with two norma
   assert.equal(validEvidenceV2ProviderInvocationLedger(planStage, { status: "PASS", invocations: [...repaired, invocation(5, "REVIEWER", "REPAIR")] }), false);
   assert.equal(validEvidenceV2ProviderInvocationLedger(planStage, { status: "PASS", invocations: [invocation(1, "SPECIALIST", "PRIMARY"), invocation(2, "SPECIALIST", "REPAIR"), invocation(3, "SPECIALIST", "REPAIR"), invocation(4, "REVIEWER", "PRIMARY")] }), false);
   assert.equal(validEvidenceV2ProviderInvocationLedger({ invocation_caps: [{ ...planStage.invocation_caps[0], max_count: 5 }] }, { status: "PASS", invocations: primary }), false);
+});
+
+function evidenceV2ProviderPlanStage(invocationClass) {
+  return {
+    invocation_caps: [{
+      class: invocationClass,
+      phases: ["SPECIALIST:PRIMARY", "SPECIALIST:REPAIR?", "REVIEWER:PRIMARY", "REVIEWER:REPAIR?"],
+      min_count: 2,
+      max_count: 4,
+      normal_count: 2,
+      repair_max_count: 2,
+    }],
+    hard_caps: { max_turns: 10, max_total_tokens: 1000, max_budget_usd: 1, hard_timeout_seconds: 600 },
+  };
+}
+
+test("P1 and P2 central actions preserve each runner's closed failure code", (context) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "provider-runner-failure-code-"));
+  context.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const logs = path.join(root, "payload", "logs");
+  fs.mkdirSync(logs, { recursive: true });
+  for (const fixture of [
+    { provider: "claude-deepseek", code: "CLAUDE_DEEPSEEK_SCENARIO_ORACLE_MISMATCH", fallback: "CLAUDE_DEEPSEEK_RUNNER_FAILED", invocationClass: "claude-deepseek-macos-e2e" },
+    { provider: "codex-luna", code: "CODEX_LUNA_MODEL_CERT_METHODS_RESULT_INVALID", fallback: "MACOS_CODEX_LUNA_RUNNER_FAILED", invocationClass: "codex-luna-macos-e2e" },
+  ]) {
+    const stderrPath = path.join(logs, `${fixture.provider}.stderr.log`);
+    fs.writeFileSync(stderrPath, canonicalJson({ schema_version: 1, status: "FAIL", code: fixture.code, message: "semantic validation failed" }));
+    const result = { status: "FAIL", stderr_path: path.relative(root, stderrPath).split(path.sep).join("/"), stderr_truncated: false, termination: null };
+    const observed = providerRunnerFailureResult({
+      provider: fixture.provider,
+      result,
+      attemptRoot: root,
+      outputRoot: path.join(root, "evidence", fixture.provider),
+      usageRoot: path.join(root, "usage", fixture.provider),
+      planStage: evidenceV2ProviderPlanStage(fixture.invocationClass),
+      invocationClass: fixture.invocationClass,
+      fallbackCode: fixture.fallback,
+    });
+    assert.equal(observed.code, fixture.code);
+    assert.equal(observed.status, "FAIL");
+    assert.equal(observed.usage_complete, false);
+  }
+});
+
+test("termination wins over runner stderr and malformed stderr uses the generic code", (context) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "provider-runner-failure-priority-"));
+  context.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const stderrPath = path.join(root, "stderr.log");
+  fs.writeFileSync(stderrPath, `${canonicalJson({ schema_version: 1, status: "FAIL", code: "RUNNER_CODE", message: "failed" })}extra\n`);
+  const result = { stderr_path: "stderr.log", stderr_truncated: false, termination: null };
+  assert.equal(providerRunnerFailureCode({ result, attemptRoot: root, fallbackCode: "GENERIC_RUNNER_FAILED" }), "GENERIC_RUNNER_FAILED");
+  assert.equal(providerRunnerFailureCode({ result: { ...result, termination: { trigger: "HARD_TIMEOUT" } }, attemptRoot: root, fallbackCode: "GENERIC_RUNNER_FAILED" }), "HARD_TIMEOUT");
+});
+
+function providerRoleReceipt(provider, role, attempt, ordinal) {
+  const base = {
+    schema_version: 1,
+    invocation_id: `run:${provider}:${ordinal}`,
+    role,
+    status: "PASS",
+    terminal: true,
+    model: provider === "codex-luna" ? "gpt-5.6-luna" : "deepseek-v4-flash[1m]",
+  };
+  if (provider === "codex-luna") {
+    return {
+      ...base,
+      provider: "openai-codex-app-server",
+      reasoning_effort: "medium",
+      attempt,
+      repair: attempt === "REPAIR",
+      usage: { input_tokens: 10 * ordinal, cached_input_tokens: 0, cache_write_input_tokens: 0, output_tokens: 5 * ordinal, reasoning_output_tokens: 0, total_tokens: 15 * ordinal },
+    };
+  }
+  return {
+    ...base,
+    evaluation_attempt: attempt,
+    turns: 1,
+    usage: { schema_version: 1, input_tokens: 10 * ordinal, output_tokens: 5 * ordinal, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, total_tokens: 15 * ordinal, cost_usd: 0.01 * ordinal },
+  };
+}
+
+test("P1 and P2 failures retain two completed role calls and require a matching aggregate before marking usage complete", (context) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "provider-failure-usage-"));
+  context.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  for (const fixture of [
+    { provider: "claude-deepseek", invocationClass: "claude-deepseek-macos-e2e" },
+    { provider: "codex-luna", invocationClass: "codex-luna-macos-e2e" },
+  ]) {
+    const outputRoot = path.join(root, fixture.provider, "evidence");
+    const usageRoot = path.join(root, fixture.provider, "usage");
+    fs.mkdirSync(outputRoot, { recursive: true });
+    fs.mkdirSync(usageRoot, { recursive: true });
+    fs.writeFileSync(path.join(usageRoot, "specialist-primary.json"), canonicalJson(providerRoleReceipt(fixture.provider, "SPECIALIST", "PRIMARY", 1)));
+    fs.writeFileSync(path.join(usageRoot, "reviewer-primary.json"), canonicalJson(providerRoleReceipt(fixture.provider, "REVIEWER", "PRIMARY", 2)));
+    const observed = collectProviderFailureObservability({
+      provider: fixture.provider,
+      result: { status: "FAIL" },
+      outputRoot,
+      usageRoot,
+      planStage: evidenceV2ProviderPlanStage(fixture.invocationClass),
+      invocationClass: fixture.invocationClass,
+    });
+    assert.equal(observed.invocations.length, 2, fixture.provider);
+    assert.equal(observed.usage.total_tokens, 45, fixture.provider);
+    assert.equal(observed.usage_complete, false, fixture.provider);
+    const runnerAggregate = fixture.provider === "codex-luna"
+      ? { ...observed.usage, cost_usd: 0.000024 }
+      : observed.usage;
+    fs.writeFileSync(path.join(outputRoot, "model-usage.json"), canonicalJson({ schema_version: 1, status: "PASS", aggregate: runnerAggregate }));
+    const complete = collectProviderFailureObservability({
+      provider: fixture.provider,
+      result: { status: "FAIL" },
+      outputRoot,
+      usageRoot,
+      planStage: evidenceV2ProviderPlanStage(fixture.invocationClass),
+      invocationClass: fixture.invocationClass,
+    });
+    assert.equal(complete.invocations.length, 2, fixture.provider);
+    assert.equal(complete.usage.total_tokens, 45, fixture.provider);
+    assert.equal(complete.usage_complete, true, fixture.provider);
+  }
+});
+
+test("provider failure without a role ledger keeps process usage explicitly incomplete", (context) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "provider-failure-usage-missing-"));
+  context.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const processUsage = { schema_version: 1, input_tokens: 7, output_tokens: 3, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, total_tokens: 10, cost_usd: 0.02 };
+  const observed = collectProviderFailureObservability({
+    provider: "claude-deepseek",
+    result: { status: "FAIL", usage: processUsage },
+    outputRoot: path.join(root, "evidence"),
+    usageRoot: path.join(root, "usage"),
+    planStage: evidenceV2ProviderPlanStage("claude-deepseek-macos-e2e"),
+    invocationClass: "claude-deepseek-macos-e2e",
+  });
+  assert.deepEqual(observed.invocations, []);
+  assert.deepEqual(observed.usage, processUsage);
+  assert.equal(observed.usage_complete, false);
 });
 
 test("P1 and P2 central actions resolve one same-attempt production registration and Core receipt", () => {
