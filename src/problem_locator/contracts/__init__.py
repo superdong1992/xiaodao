@@ -10,7 +10,7 @@ from __future__ import annotations
 from types import MappingProxyType
 from typing import Any, Final, Mapping
 
-from . import commands, enums, errors, limits, models, outcomes, ports, serialization
+from . import commands, enums, errors, limits, methods_v2, models, outcomes, ports, serialization
 from .limits import CONTRACT_REVISION, GENERATOR_VERSION, SCHEMA_VERSION
 from .models import (
     AgentJobOutcome,
@@ -42,7 +42,17 @@ SCHEMA_MODELS: Final[Mapping[str, Any]] = MappingProxyType(
 )
 
 
-_PUBLIC_MODULES = (commands, enums, errors, limits, models, outcomes, ports, serialization)
+_PUBLIC_MODULES = (
+    commands,
+    enums,
+    errors,
+    limits,
+    methods_v2,
+    models,
+    outcomes,
+    ports,
+    serialization,
+)
 for _module in _PUBLIC_MODULES:
     for _name in getattr(_module, "__all__", ()):
         if _name not in {"BaseModel", "StrEnum"}:
@@ -58,6 +68,7 @@ __all__ = sorted(
         "enums",
         "errors",
         "limits",
+        "methods_v2",
         "models",
         "outcomes",
         "ports",
