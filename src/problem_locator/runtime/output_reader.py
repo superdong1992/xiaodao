@@ -17,7 +17,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, BinaryIO, Iterator, TypeAlias
+from typing import Any, BinaryIO, Iterator, Literal, TypeAlias
 
 from pydantic import ValidationError
 
@@ -30,6 +30,12 @@ from problem_locator.contracts.enums import (
     JobType,
     OutcomeResultType,
     ResourceKind,
+)
+from problem_locator.contracts.limits import JOB_WORKSPACE_BYTES
+from problem_locator.contracts.methods_v2 import (
+    MethodEvaluationPlanV2,
+    MethodEvaluationRoleV2,
+    MethodRoleEvaluationV2,
 )
 from problem_locator.contracts.models import (
     AgentArtifactProposalDraft,
@@ -67,6 +73,10 @@ from .authoritative_targets import (
     validated_successful_broker_record,
 )
 from .failures import RuntimeExecutionError, runtime_failure
+from .methods_evaluation_v2 import (
+    MethodEvaluationResponseError,
+    evaluate_method_role_v2,
+)
 from .methods_grounding import MethodDiagnosisDraftV1, MethodReviewV1
 from .outcome_finalizer import (
     DRAFT_FINALIZATION_MARKER_NAME,
@@ -436,6 +446,15 @@ class ValidatedMethodReviewDraft:
         init=False,
     )
     draft: MethodReviewV1
+    canonical_bytes: bytes
+
+
+@dataclass(frozen=True, slots=True)
+class ValidatedMethodRoleAttemptV2:
+    """One Methods V2 role attempt plus its exact and normalized response bytes."""
+
+    evaluation: MethodRoleEvaluationV2
+    raw_bytes: bytes
     canonical_bytes: bytes
 
 
@@ -899,8 +918,10 @@ def _lstat(path: Path, *, missing_outcome: bool = False) -> os.stat_result:
         if missing_outcome:
             raise _MissingOutcome from None
         raise _InvalidOutput from None
-    except OSError:
-        raise _InvalidOutput from None
+    except OSError as exc:
+        # Keep the real filesystem failure available to the Methods V2 reader.
+        # Other output protocols continue to classify it as ``_InvalidOutput``.
+        raise _InvalidOutput from exc
 
 
 def _validate_parent_directories(
@@ -1937,6 +1958,101 @@ def _method_output_protocol(
     return None
 
 
+_METHOD_ROLE_OUTPUT_PATHS_V2: dict[MethodEvaluationRoleV2, str] = {
+    "SPECIALIST": "output/method-diagnosis.draft.json",
+    "REVIEWER": "output/method-review.draft.json",
+}
+
+
+def read_method_role_attempt_v2(
+    workspace: PreparedWorkspace | Path,
+    *,
+    role: MethodEvaluationRoleV2,
+    plan: MethodEvaluationPlanV2,
+    attempt: Literal["PRIMARY", "REPAIR"],
+    max_bytes: int = JOB_WORKSPACE_BYTES,
+) -> ValidatedMethodRoleAttemptV2:
+    """Read and validate one fixed-path Methods V2 model attempt.
+
+    This boundary does not choose whether to repair.  It returns one validated
+    attempt, or a ``MethodEvaluationResponseError`` carrying the exact bytes
+    (when a file was readable) so the Runtime can archive that rejected attempt.
+    """
+
+    if role not in _METHOD_ROLE_OUTPUT_PATHS_V2:
+        raise ValueError("role must be SPECIALIST or REVIEWER")
+    if not isinstance(plan, MethodEvaluationPlanV2):
+        raise TypeError("plan must be MethodEvaluationPlanV2")
+    if attempt not in {"PRIMARY", "REPAIR"}:
+        raise ValueError("attempt must be PRIMARY or REPAIR")
+    if (
+        not isinstance(max_bytes, int)
+        or isinstance(max_bytes, bool)
+        or max_bytes <= 0
+    ):
+        raise ValueError("max_bytes must be a positive integer")
+
+    workspace_root = (
+        workspace.root if isinstance(workspace, PreparedWorkspace) else Path(workspace)
+    )
+    relative_path = _METHOD_ROLE_OUTPUT_PATHS_V2[role]
+    raw_bytes: bytes | None = None
+    try:
+        root_identity = (
+            (workspace.root_device, workspace.root_inode)
+            if isinstance(workspace, PreparedWorkspace)
+            else None
+        )
+        output_identity = (
+            (workspace.output_device, workspace.output_inode)
+            if isinstance(workspace, PreparedWorkspace)
+            else None
+        )
+        _, _, raw_bytes, _ = _read_frozen_relative_file(
+            workspace_root,
+            relative_path,
+            capture=True,
+            root_identity=root_identity,
+            boundary=_FrozenReadBoundary(
+                top_level=_WorkspaceTopLevel.OUTPUT,
+                identity=output_identity,
+            ),
+            max_bytes=max_bytes,
+        )
+    except _InvalidOutput as exc:
+        if isinstance(exc.__cause__, OSError):
+            raise exc.__cause__
+        raise MethodEvaluationResponseError(
+            f"{role} model evaluation response file is missing or unreadable",
+        ) from exc
+    assert raw_bytes is not None
+    try:
+        document = parse_agent_json_bytes(raw_bytes)
+    except InvalidJsonBytesError as exc:
+        raise MethodEvaluationResponseError(
+            f"{role} model evaluation response is not valid UTF-8 JSON",
+            raw_response_bytes=raw_bytes,
+        ) from exc
+
+    try:
+        evaluation = evaluate_method_role_v2(
+            role=role,
+            plan=plan,
+            response=document.value,
+            attempt=attempt,
+        )
+    except MethodEvaluationResponseError as exc:
+        raise MethodEvaluationResponseError(
+            str(exc),
+            raw_response_bytes=raw_bytes,
+        ) from exc
+    return ValidatedMethodRoleAttemptV2(
+        evaluation=evaluation,
+        raw_bytes=raw_bytes,
+        canonical_bytes=document.canonical_bytes,
+    )
+
+
 def _read_method_agent_output(
     workspace: PreparedWorkspace | Path,
     job: Job,
@@ -2284,11 +2400,13 @@ __all__ = [
     "ValidatedAgentDraftOutput",
     "ValidatedAgentOutput",
     "ValidatedMethodDiagnosisDraft",
+    "ValidatedMethodRoleAttemptV2",
     "ValidatedMethodReviewDraft",
     "ValidatedMethodsPreprocessing",
     "ValidatedOutputKind",
     "ValidatedProposalResource",
     "RejectedAgentOutputError",
     "read_agent_output",
+    "read_method_role_attempt_v2",
     "read_methods_preprocessing",
 ]

@@ -305,7 +305,15 @@ def load_methods_package(
     except UnicodeDecodeError as exc:
         raise ValueError("SKILL.md must be UTF-8") from exc
     skill_name = _frontmatter_name(skill_text)
-    for phrase in ("request.json", "methods.json", "target_logs", "Logparse", "identity_tokens", "sources"):
+    for phrase in (
+        "request.json",
+        "method-evidence-graph.json",
+        "method-evaluation-plan.json",
+        "evaluation_ref",
+        "verdict",
+        "reason",
+        "UNKNOWN",
+    ):
         if phrase not in skill_text:
             raise ValueError(f"SKILL.md must mention {phrase}")
 

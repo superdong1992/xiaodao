@@ -281,6 +281,31 @@ def test_skill_creates_case_before_requesting_missing_details() -> None:
     assert create_request.actual_behavior == raw_problem_text
 
 
+def test_skill_presents_methods_v2_without_waiting_for_an_artifact() -> None:
+    skill = _skill_text()
+    section = skill[
+        skill.index("### Present a terminal Methods V2 result") :
+        skill.index("## Submit requested facts")
+    ]
+
+    assert "present that object directly" in section
+    assert "Methods V2 has no downloadable result Artifact" in section
+    assert "do not call\n`problem_locator_list_artifacts`" in section
+    for field_name in (
+        "status",
+        "reason_code",
+        "diagnostic_id",
+        "confirmed_method_ids",
+        "confirmed_event_refs",
+        "confirmed_hit_refs",
+        "limitations",
+        "reasons",
+    ):
+        assert f"`{field_name}`" in section
+    assert "Do not invent a narrative root cause" in section
+    assert "absent before a Methods evaluation reaches a terminal state" in section
+
+
 def test_create_case_uses_one_stable_generated_request_id() -> None:
     response = application_response(with_case_view=False)
     mcp = FakeMcpClient([envelope(response)])

@@ -184,6 +184,25 @@ For a legacy terminal Case containing `generic_result`, preserve the V1 behavior
 and present its `conclusion` and `root_cause_analysis`. Do not describe a V1 result
 as a native Markdown report. V1 and V2 fields must never both be present.
 
+### Present a terminal Methods V2 result
+
+When a terminal Case contains `methods_result`, present that object directly.
+Methods V2 has no downloadable result Artifact, so do not call
+`problem_locator_list_artifacts` or wait for `result.zip` before reporting the
+terminal result.
+
+Always show `status`, `diagnostic_id`, and `limitations`. For `RESOLVED`, show
+`confirmed_method_ids`, `confirmed_event_refs`, and `confirmed_hit_refs`; its
+`reason_code` is null. For `UNRESOLVED` or `FAILED`, show `reason_code`,
+`diagnostic_id`, `reasons`, and `limitations`; the confirmed-reference arrays are
+empty. Preserve the server text exactly. Do not invent a narrative root cause,
+re-run marker matching, or expose Specialist or Reviewer evaluation text.
+
+`methods_result` is absent before a Methods evaluation reaches a terminal state.
+Its absence on a non-terminal Case is not a protocol error. A terminal Methods
+result is mutually exclusive with `generic_result`, `generic_result_v2`,
+`final_result`, and `unresolved_result`.
+
 ## Submit requested facts
 
 Read only the OPEN requirements from the latest Case view. Ask using each requirement's exact prompt. If there are no OPEN requirements, ask nothing. Put each exact requirement name in `input_names` and its answer at the same index in `input_values`, then call `problem_locator_submit_supplement` with a new stable `request_id`, the latest revision, and any READY `attachment_ids`. The arrays must have equal lengths and unique names. Preserve values exactly; do not trim, normalize, or invent missing facts.

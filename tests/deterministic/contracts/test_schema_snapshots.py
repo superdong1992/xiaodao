@@ -27,6 +27,16 @@ EXPECTED_SCHEMA_NAMES = {
     "job-outcome.schema.json",
     "job.schema.json",
     "logparse-parse-claim.schema.json",
+    "method-consensus.schema.json",
+    "method-evaluation-plan.schema.json",
+    "method-evaluation-response.schema.json",
+    "method-evidence-graph.schema.json",
+    "method-limitations-record.schema.json",
+    "method-role-evaluation.schema.json",
+    "method-state.schema.json",
+    "method-terminal-result.schema.json",
+    "methods-reviewer-result.schema.json",
+    "methods-terminal-projection.schema.json",
     "state.schema.json",
     "user-result.schema.json",
     "workspace-input-manifest.schema.json",
@@ -45,9 +55,9 @@ def _walk_json(value: Any) -> Iterator[Any]:
 
 def test_schema_registry_is_the_exact_frozen_public_set() -> None:
     assert set(SCHEMA_MODELS) == EXPECTED_SCHEMA_NAMES
-    assert SCHEMA_VERSION == 7
-    assert CONTRACT_REVISION == "v7-contract-r1"
-    assert GENERATOR_VERSION == "7"
+    assert SCHEMA_VERSION == 8
+    assert CONTRACT_REVISION == "v8-contract-r1"
+    assert GENERATOR_VERSION == "8"
 
 
 def test_generated_schema_snapshots_are_byte_stable() -> None:
@@ -91,7 +101,7 @@ def test_contract_manifest_covers_the_exact_frozen_inputs() -> None:
         "generator_version",
         "schema_version",
     }
-    assert manifest["schema_version"] == 7
+    assert manifest["schema_version"] == 8
     assert manifest["contract_revision"] == CONTRACT_REVISION
     assert manifest["generator_version"] == GENERATOR_VERSION
 

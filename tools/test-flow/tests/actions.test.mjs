@@ -186,8 +186,8 @@ function passingCodexLunaBoundary() {
   const privateRoot = "/attempt/scratch/codex-luna-methods/private";
   const generationWorkspace = `${workRoot}/generation`;
   const diagnosisWorkspaces = Array.from({ length: 9 }, (_, index) => `${workRoot}/diagnoses/scenario-${index + 1}`);
-  const generationWorkspacePathSha256 = digest(generationWorkspace);
-  const diagnosisWorkspacePathSha256 = diagnosisWorkspaces.map((workspace) => digest(workspace));
+  const generationWorkspacePathSha256 = digest(path.resolve(generationWorkspace));
+  const diagnosisWorkspacePathSha256 = diagnosisWorkspaces.map((workspace) => digest(path.resolve(workspace)));
   const forbiddenReadPathSha256 = [
     digest("/snapshot/AGENTS.md"),
     digest("/snapshot/experiments/rpc-skill-feasibility/cases/api-execution-overrun/raw/client.log"),
@@ -365,10 +365,10 @@ function passingCodexLunaBoundary() {
       account_plan_type: "plus",
       permission_profile_id: profile.profile_id,
       invocation_mode: profile.invocation_mode,
-      workspace_root_sha256: digest(workspace),
+      workspace_root_sha256: digest(profile.workspace_root),
       intended_skill_name: profile.skill_name,
-      intended_skill_path_sha256: digest(skillPath),
-      codex_home_sha256: digest(codexHome),
+      intended_skill_path_sha256: digest(profile.skill_path),
+      codex_home_sha256: profile.codex_home_sha256,
       disabled_system_skill_path_sha256s: profile.disabled_system_skill_paths.map((entry) => digest(entry)),
       instruction_source_path_sha256s: [digest(skillPath)],
       thread_id: threadId,
@@ -441,7 +441,7 @@ function passingCodexLunaBoundary() {
         status: "PASS",
         profile_id: profile.profile_id,
         profile_sha256: profile.config_sha256,
-        workspace_path_sha256: digest(workspace),
+        workspace_path_sha256: digest(profile.workspace_root),
         workspace_read: "PASS",
         workspace_write: generation ? "ALLOWED" : "DENIED",
         command_network: { status: "DENIED", endpoint: "ipv4-loopback-listener", exit_code: 1 },
@@ -461,7 +461,7 @@ function passingCodexLunaBoundary() {
         schema_version: 1,
         status: "PASS",
         relative_path: `calls/${ordinal}/codex-home`,
-        path_sha256: digest(codexHome),
+        path_sha256: digest(profile.codex_home),
         config_sha256: profile.config_sha256,
         tree_sha256: codexHomeTreeSha256,
         manifest: codexHomeManifest,

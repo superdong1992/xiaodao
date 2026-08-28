@@ -48,6 +48,10 @@ const FRAMEWORK_ID = "macos-codex-luna-fast-e2e";
 const FRAMEWORK_VERSION = 1;
 const GOALS = new Set(["methods", "e2e"]);
 const FLAGS = new Set(["plan-only", "allow-real-model", "all-scenarios", "help"]);
+const EVIDENCE_V2_REAL_DIAGNOSIS_BLOCKER = Object.freeze({
+  code: "EVIDENCE_V2_REAL_DIAGNOSIS_ADAPTER_UNMIGRATED",
+  detail: "Standalone Codex/Luna E2E 仍消费旧版 Methods V1 定位产物，迁移完成前禁止调用真实模型。",
+});
 
 const REQUIRED_EVIDENCE = Object.freeze({
   methods: ["codex-identity.json", "model-invocations.json", "model-usage.json", "methods-package.json", "adapter-receipt.json"],
@@ -194,6 +198,7 @@ export function buildPlan(options) {
     ? options.allScenarios ? [...STANDALONE_CODEX_LUNA_SCENARIOS] : [options.scenario]
     : [];
   if (options.goal === "e2e") {
+    blockers.push(EVIDENCE_V2_REAL_DIAGNOSIS_BLOCKER);
     requiredDirectory(options.logparseRoot, "LUNA_LOGPARSE_MISSING", "Logparse source", blockers);
     for (const scenario of scenarios) {
       try { scenarioPaths(REPO_ROOT, scenario); } catch (error) { blockers.push({ code: error?.code ?? "LUNA_SCENARIO_INVALID", detail: error?.message ?? `Scenario inputs are invalid: ${scenario}` }); }

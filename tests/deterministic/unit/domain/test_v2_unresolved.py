@@ -14,7 +14,6 @@ from problem_locator.contracts import (
     CandidateStatus,
     Case,
     CaseStatus,
-    DiagnosisOutcomeTriggerPayload,
     DiagnosisItem,
     DiagnosisItemStatus,
     DiagnosisProvenance,
@@ -22,7 +21,6 @@ from problem_locator.contracts import (
     DiagnosisState,
     Job,
     JobOutcome,
-    OutcomeResultType,
     PendingRequirement,
     RequirementKind,
     RequirementStatus,
@@ -166,49 +164,6 @@ def _review_outcome(job: Job, verdict: ReviewVerdict) -> JobOutcome:
             unresolved_user_result_proposal(job).model_dump(mode="python")
         ]
     return JobOutcome.model_validate(payload)
-
-
-def test_diagnosis_inconclusive_terminates_unresolved_without_candidate() -> None:
-    job = _job("job-diagnose.json")
-    payload = _json("job-outcome-diagnosis.json")
-    diagnosis = payload["payload"]
-    assert isinstance(diagnosis, dict)
-    diagnosis["candidate_conclusion_draft"] = None
-    diagnosis["recommended_next_step"] = "Check the supplied time and create a new Case."
-    payload["proposed_artifacts"] = [
-        unresolved_user_result_proposal(job).model_dump(mode="python")
-    ]
-    payload["result_type"] = OutcomeResultType.INCONCLUSIVE.value
-    payload["decision_audit"] = _decision_audit(
-        job,
-        claim="FAIL",
-        server_status="VERIFIED_FAIL",
-    )
-    outcome = JobOutcome.model_validate(payload)
-    snapshot = snapshot_with_active(job)
-    request = trigger(
-        snapshot,
-        trigger_type=TriggerType.DIAGNOSIS_OUTCOME,
-        payload=DiagnosisOutcomeTriggerPayload(job_outcome=outcome),
-        continuation_resources=continuation(
-            incoming_outcome_id=outcome.outcome_id,
-            job=job,
-        ),
-        occurred_at=outcome.produced_at,
-    )
-
-    plan = DomainCoordinator().plan(snapshot, request)
-
-    assert plan.target_case_status is CaseStatus.UNRESOLVED
-    assert plan.next_job_spec is None
-    assert plan.accepted_candidate_proposal_key is None
-    assert plan.unresolved_result_draft is not None
-    assert plan.unresolved_result_draft.user_result_proposal_key == "user_result"
-    assert plan.accepted_artifact_proposal_keys == ["user_result"]
-    assert (
-        plan.unresolved_result_draft.reason_code
-        is UnresolvedReasonCode.MECHANICAL_VERIFICATION_FAILED
-    )
 
 
 def test_review_rejects_candidate_and_does_not_start_diagnosis() -> None:

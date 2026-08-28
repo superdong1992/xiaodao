@@ -3,18 +3,33 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import os
 from pathlib import Path
 from types import ModuleType
 
 
 ROOT = Path(__file__).resolve().parents[4]
-VALIDATOR = (
-    ROOT
-    / ".agents"
-    / "skills"
-    / "wiki-to-diagnosis-skill"
-    / "scripts"
-    / "validate_generated_skill.py"
+VALIDATOR = Path(
+    os.environ.get(
+        "TEST_WIKI_DIAGNOSIS_VALIDATOR",
+        ROOT
+        / ".agents"
+        / "skills"
+        / "wiki-to-diagnosis-skill"
+        / "scripts"
+        / "validate_generated_skill.py",
+    )
+)
+LAN_VALIDATOR = Path(
+    os.environ.get(
+        "TEST_LAN_DIAGNOSIS_VALIDATOR",
+        ROOT
+        / ".claude"
+        / "skills"
+        / "wiki-to-logparse-diagnosis-skill"
+        / "scripts"
+        / "validate_generated_skill.py",
+    )
 )
 
 
@@ -26,6 +41,38 @@ def _load_validator() -> ModuleType:
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def _load_module(path: Path, name: str) -> ModuleType:
+    spec = importlib.util.spec_from_file_location(name, path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_two_generators_share_the_methods_v2_agent_surface() -> None:
+    package_validator = _load_validator()
+    registration_validator = _load_module(
+        LAN_VALIDATOR,
+        "_deterministic_registration_validator",
+    )
+
+    assert package_validator.REQUIRED_SKILL_PHRASES == (
+        registration_validator.REQUIRED_SKILL_PHRASES
+    )
+    for contract in (
+        ROOT
+        / ".agents/skills/wiki-to-diagnosis-skill/references/output-contract.md",
+        ROOT
+        / ".claude/skills/wiki-to-logparse-diagnosis-skill/references/output-contract.md",
+    ):
+        text = contract.read_text(encoding="utf-8")
+        for phrase in package_validator.REQUIRED_SKILL_PHRASES:
+            assert phrase in text
+        assert "INSUFFICIENT_EVIDENCE" not in text
+        for old_json_field in ('"target_logs":', '"identity_tokens":', '"sources":'):
+            assert old_json_field not in text
 
 
 def _write_package(
@@ -47,8 +94,13 @@ name: diagnose-rpc-timeout
 description: Diagnose one RPC timeout from frozen evidence.
 ---
 
-Read request.json and methods.json, then scan every target_logs entry without
-calling Logparse. Preserve identity_tokens and sources in every result.
+Read request.json, method-evidence-graph.json, and method-evaluation-plan.json.
+Use request values for declared inputs. Log evidence comes only from the
+Evidence Graph and Evaluation Plan; do not rescan logs. Evaluate every
+evaluation_ref in plan order and return only verdict and reason; use UNKNOWN
+when the evidence cannot decide the method rule.
+Server-produced evidence sources may originate from target_logs and retain
+identity_tokens internally.
 """,
         encoding="utf-8",
     )
@@ -150,6 +202,36 @@ def test_canonical_validator_independently_recomputes_source_wiki_identity(
     ]
 
 
+def test_generated_v2_skill_reads_request_for_required_user_inputs(
+    tmp_path: Path,
+) -> None:
+    wiki = tmp_path / "wiki.md"
+    template = "RPC_TIMEOUT service={service} request_id={request_id}"
+    wiki_bytes = (
+        "# Authored Wiki\n\n"
+        "The service value is a required user input used by the rule.\n\n"
+        f"```text\n{template}\n```\n"
+    ).encode()
+    wiki.write_bytes(wiki_bytes)
+    package = _write_package(
+        tmp_path,
+        wiki_sha256=hashlib.sha256(wiki_bytes).hexdigest(),
+        required_user_inputs=["service"],
+        log_derived_fields=["request_id"],
+        evidence_marker="RPC_TIMEOUT service=",
+        reference_log_template=template,
+    )
+
+    result = _load_validator().validate(package, wiki)
+    skill_text = (package / "SKILL.md").read_text(encoding="utf-8")
+
+    assert result["ok"] is True
+    assert "request.json" in skill_text
+    assert "method-evidence-graph.json" in skill_text
+    assert "method-evaluation-plan.json" in skill_text
+    assert all(field in skill_text for field in ("evaluation_ref", "verdict", "reason"))
+
+
 def test_validator_requires_canonical_markers_and_named_field_order(
     tmp_path: Path,
 ) -> None:
@@ -204,6 +286,63 @@ RPC timeout is caused by the following positive log.
     assert shortened["ok"] is False
     assert shortened["errors"] == [
         "method 1 evidence marker is not a canonical stable Wiki log marker: RPC_TIMEOUT"
+    ]
+
+
+def test_validator_rejects_marker_from_another_method_reference(
+    tmp_path: Path,
+) -> None:
+    wiki = tmp_path / "wiki.md"
+    templates = ["FIRST id={first_id}", "SECOND id={second_id}"]
+    wiki_bytes = (
+        "# Authored Wiki\n\n```text\n" + "\n".join(templates) + "\n```\n"
+    ).encode("utf-8")
+    wiki.write_bytes(wiki_bytes)
+    package = _write_package(
+        tmp_path,
+        wiki_sha256=hashlib.sha256(wiki_bytes).hexdigest(),
+        log_derived_fields=["first_id", "second_id"],
+        evidence_marker="FIRST id=",
+        reference_log_template=templates[0],
+        source_log_templates=templates,
+    )
+    methods_path = package / "methods.json"
+    manifest = json.loads(methods_path.read_text(encoding="utf-8"))
+    manifest["methods"].append(
+        {
+            "id": "second-method",
+            "title": "Second method",
+            "reference": "references/second-method.md",
+            "priority": 2,
+            "evidence_markers": ["SECOND id="],
+        }
+    )
+    methods_path.write_text(
+        json.dumps(manifest, ensure_ascii=False, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    first_reference = (package / "references/rpc-timeout.md").read_text(
+        encoding="utf-8"
+    )
+    (package / "references/second-method.md").write_text(
+        first_reference.replace("# RPC timeout", "# Second method", 1).replace(
+            templates[0], templates[1]
+        ),
+        encoding="utf-8",
+    )
+    validator = _load_validator()
+    assert validator.validate(package, wiki)["ok"] is True
+
+    manifest["methods"][0]["evidence_markers"] = ["SECOND id="]
+    methods_path.write_text(
+        json.dumps(manifest, ensure_ascii=False, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+    rejected = validator.validate(package, wiki)
+    assert rejected["ok"] is False
+    assert rejected["errors"] == [
+        "method 1 evidence marker is absent from its method reference: SECOND id="
     ]
 
 

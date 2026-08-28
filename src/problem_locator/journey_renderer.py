@@ -541,6 +541,58 @@ def _candidate_statement(data: dict[str, Any]) -> str | None:
     return None
 
 
+def _methods_terminal_projection(data: dict[str, Any]) -> dict[str, Any] | None:
+    projections = (
+        _nested(data, "case_view", "methods_result"),
+        _nested(data, "outcome", "methods_terminal_projection"),
+        _nested(data, "to_case", "methods_result"),
+        data.get("methods_result"),
+        data.get("methods_terminal_projection"),
+    )
+    for projection in projections:
+        if isinstance(projection, dict) and projection.get("schema_version") == 2:
+            return projection
+    return None
+
+
+def _methods_values(projection: dict[str, Any], field: str) -> list[str]:
+    values = projection.get(field)
+    if not isinstance(values, list):
+        return []
+    return [value for value in values if isinstance(value, str) and value]
+
+
+def _methods_conclusion(projection: dict[str, Any]) -> str:
+    if projection.get("status") == "RESOLVED":
+        method_ids = _methods_values(projection, "confirmed_method_ids")
+        return f"已确认方法：{'、'.join(method_ids)}"
+    reasons = _methods_values(projection, "reasons")
+    if reasons:
+        return "；".join(reasons)
+    return f"未形成已确认原因（{projection.get('reason_code', 'UNKNOWN')}）"
+
+
+def _methods_brief_lines(projection: dict[str, Any]) -> list[str]:
+    reason_code = projection.get("reason_code")
+    values = (
+        ("已确认方法", _methods_values(projection, "confirmed_method_ids")),
+        ("已确认事件", _methods_values(projection, "confirmed_event_refs")),
+        ("已确认命中", _methods_values(projection, "confirmed_hit_refs")),
+        ("限制", _methods_values(projection, "limitations")),
+        ("公开说明", _methods_values(projection, "reasons")),
+    )
+    result = [
+        f"Methods V2 状态: {projection.get('status', 'UNKNOWN')}",
+        f"原因码: {reason_code if isinstance(reason_code, str) else '无'}",
+        f"诊断 ID: {projection.get('diagnostic_id', 'UNKNOWN')}",
+    ]
+    result.extend(
+        f"{label}: {'、'.join(items) if items else '无'}"
+        for label, items in values
+    )
+    return result
+
+
 def _brief_milestone(line: JourneyLine) -> str | None:
     event = line.event
     data = event.data
@@ -567,6 +619,12 @@ def _brief_milestone(line: JourneyLine) -> str | None:
         return "用户取消 Case"
     if event.event == "job.outcome.applied":
         result_type = _nested(data, "outcome", "result_type") or "UNKNOWN"
+        methods_terminal = _methods_terminal_projection(data)
+        if methods_terminal is not None:
+            status = methods_terminal.get("status", "UNKNOWN")
+            reason = methods_terminal.get("reason_code")
+            suffix = f"，reason_code={reason}" if isinstance(reason, str) else ""
+            return f"Methods V2 Outcome 已应用：{status}{suffix}"
         if event.job_type == "ROUTE":
             skill = _skill_text(data) or "未匹配 Skill"
             confidence = _nested(data, "outcome", "payload", "confidence")
@@ -654,13 +712,28 @@ def render_brief(case_id: str, lines: tuple[JourneyLine, ...]) -> str:
         for line in lines
         if (milestone := _brief_milestone(line)) is not None
     ]
-    conclusion = next(
+    methods_terminal = next(
+        (
+            projection
+            for line in reversed(lines)
+            if (
+                projection := _methods_terminal_projection(line.event.data)
+            ) is not None
+        ),
+        None,
+    )
+    legacy_conclusion = next(
         (
             statement
             for line in reversed(lines)
             if (statement := _candidate_statement(line.event.data)) is not None
         ),
         None,
+    )
+    conclusion = (
+        _methods_conclusion(methods_terminal)
+        if methods_terminal is not None
+        else legacy_conclusion
     )
     result = [
         "Problem Locator 服务端端到端简略日志",
@@ -683,6 +756,12 @@ def render_brief(case_id: str, lines: tuple[JourneyLine, ...]) -> str:
             "",
             f"{'最终结论' if terminal and status in {'RESOLVED', 'PARTIALLY_RESOLVED'} else '当前发现'}: "
             f"{conclusion or '尚未形成可记录的结论'}",
+        ]
+    )
+    if methods_terminal is not None:
+        result.extend(_methods_brief_lines(methods_terminal))
+    result.extend(
+        [
             f"待补充/阻塞: {_pending_text(lines)}",
             f"失败信息: {_latest_failure(lines)}",
         ]

@@ -69,8 +69,11 @@ description: Diagnose a test timeout from frozen evidence.
 
 # Test locator
 
-Read `request.json`, then `methods.json`, and scan every `target_logs` entry.
-Do not invoke Logparse. Return `sources` and same-line `identity_tokens`.
+Read `request.json`, `method-evidence-graph.json`, and
+`method-evaluation-plan.json`. Use request values for declared inputs. Log
+evidence comes only from the Evidence Graph and Evaluation Plan; do not rescan
+logs. Evaluate every `evaluation_ref` in plan order and return only `verdict`
+and `reason`; use `UNKNOWN` when the evidence cannot decide the rule.
 """,
         encoding="utf-8",
     )
@@ -303,6 +306,20 @@ def test_package_and_catalog_contract_reject_legacy_or_extra_files(tmp_path: Pat
         load_specialized_skill_registration(legacy)
 
 
+def test_production_loader_allows_v2_prose_that_mentions_v1_words(tmp_path: Path) -> None:
+    package = _write_package(tmp_path)
+    skill_path = package / "SKILL.md"
+    valid_text = skill_path.read_text(encoding="utf-8")
+    skill_path.write_text(
+        valid_text
+        + "\nServer-produced evidence sources may originate from target_logs and "
+        "retain identity_tokens internally.\n",
+        encoding="utf-8",
+    )
+
+    assert load_methods_package(package).skill_name == package.name
+
+
 def test_marker_scan_loads_only_relevant_method_cards_before_context(
     tmp_path: Path,
 ) -> None:
@@ -436,11 +453,62 @@ def test_grounding_matches_declared_marker_without_case_sensitivity(
         )
 
 
+def test_grounding_rejects_marker_owned_only_by_another_method(
+    tmp_path: Path,
+) -> None:
+    skill = load_specialized_skill_registration(_write_registration(tmp_path / "skills"))
+    cited = "2026-08-23T10:00:05Z unrelated_positive request_id=42"
+    logs = (_target("server", f"API_COMPLETE request_id=99\n{cited}\n"),)
+    draft = _diagnosis(line=cited)
+    draft["evidence"][0]["sources"][0]["marker"] = "UNRELATED_POSITIVE"
+    receipt = scan_method_markers(skill=skill, target_logs=logs)
+
+    assert receipt.loaded_method_ids == ("slow-execution", "unrelated-method")
+    with pytest.raises(ValueError, match="not indexed by its method"):
+        verify_method_diagnosis(
+            skill=skill,
+            draft=draft,
+            target_logs=logs,
+            logparse_receipt_sha256=RECEIPT_SHA256,
+            skill_load=receipt,
+        )
+
+
+def test_grounding_allows_a_literal_shared_by_multiple_methods(
+    tmp_path: Path,
+) -> None:
+    registration = _write_registration(tmp_path / "skills")
+    methods_path = registration / "package/diagnose-test-timeout/methods.json"
+    methods_value = json.loads(methods_path.read_text(encoding="utf-8"))
+    methods_value["methods"][1]["evidence_markers"] = ["API_COMPLETE"]
+    _write_json(methods_path, methods_value)
+    skill = load_specialized_skill_registration(registration)
+    cited = "2026-08-23T10:00:05Z api_complete request_id=42"
+    logs = (_target("server", f"noise\n{cited}\n"),)
+    receipt = scan_method_markers(skill=skill, target_logs=logs)
+
+    verified = verify_method_diagnosis(
+        skill=skill,
+        draft=_diagnosis(line=cited),
+        target_logs=logs,
+        logparse_receipt_sha256=RECEIPT_SHA256,
+        skill_load=receipt,
+    )
+
+    assert receipt.loaded_method_ids == ("slow-execution", "unrelated-method")
+    assert receipt.marker_hits == (
+        ("server", "API_COMPLETE", 2),
+        ("server", "API_COMPLETE", 2),
+    )
+    assert verified.draft.confirmed_methods == ("slow-execution",)
+    assert verified.draft.evidence[0].sources[0].marker == "API_COMPLETE"
+
+
 def test_grounded_methods_are_mapped_by_the_server_into_candidate_domain(
     tmp_path: Path,
 ) -> None:
     skill = load_specialized_skill_registration(_write_registration(tmp_path / "skills"))
-    cited = "2026-08-23T10:00:05Z API_COMPLETE request_id=42 cost_us=6500000"
+    cited = "2026-08-23T10:00:05Z api_complete request_id=42 cost_us=6500000"
     content = f"noise\n{cited}\n".encode("utf-8")
     frozen = _target("caller", content.decode("utf-8"))
     diagnosis_value = _diagnosis(line=cited)
@@ -451,13 +519,18 @@ def test_grounded_methods_are_mapped_by_the_server_into_candidate_domain(
         "A timeout does not prove that downstream execution was cancelled."
     ]
     diagnosis_value["evidence"][0]["sources"][0]["source_id"] = "caller"
+    skill_load = scan_method_markers(skill=skill, target_logs=(frozen,))
     verified = verify_method_diagnosis(
         skill=skill,
         draft=diagnosis_value,
         target_logs=(frozen,),
         logparse_receipt_sha256=RECEIPT_SHA256,
-        skill_load=scan_method_markers(skill=skill, target_logs=(frozen,)),
+        skill_load=skill_load,
     )
+
+    assert skill_load.marker_hits == (("caller", "API_COMPLETE", 2),)
+    assert skill_load.loaded_method_ids == ("slow-execution",)
+    assert verified.draft.evidence[0].sources[0].marker == "API_COMPLETE"
 
     repository_root = Path(__file__).resolve().parents[4]
     job = parse_canonical_json_bytes(
@@ -542,7 +615,7 @@ def test_grounded_methods_are_mapped_by_the_server_into_candidate_domain(
     assert mapped.draft.proposed_evidence_drafts[0].source_binding.existing_source_ref == artifact_id
     assert mapped.draft.payload.limitations == diagnosis_value["limitations"]
     assert mapped.draft.payload.safety_notes == diagnosis_value["safety_notes"]
-    assert b'"raw_line":"2026-08-23T10:00:05Z API_COMPLETE request_id=42' in (
+    assert b'"raw_line":"2026-08-23T10:00:05Z api_complete request_id=42' in (
         mapped.verification.decision_evidence_bytes
     )
     bundle = build_server_result_bundle(

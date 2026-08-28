@@ -112,50 +112,59 @@ OPTIONAL_PID_SENTENCE = (
 )
 REQUIRED_SKILL_PHRASES = (
     "request.json",
-    "methods.json",
-    "target_logs.json",
-    "target_logs[*].log_path",
-    "Logparse",
-    "identity_tokens",
-    "sources",
+    "method-evidence-graph.json",
+    "method-evaluation-plan.json",
+    "evaluation_ref",
+    "verdict",
+    "reason",
+    "UNKNOWN",
 )
 REQUIRED_SKILL_SEMANTICS = (
     (
-        "read only the frozen target log paths",
+        "read the frozen request, Evidence Graph, and Evaluation Plan",
         re.compile(
-            r"(?:只|仅)(?:读取|分析).*target_logs\[\*\]\.log_path"
-            r"|(?:read|analyze) only.*target_logs\[\*\]\.log_path",
+            r"(?:读取|消费).*request\.json.*method-evidence-graph\.json.*method-evaluation-plan\.json"
+            r"|(?:read|consume).*request\.json.*method-evidence-graph\.json.*method-evaluation-plan\.json",
             re.IGNORECASE | re.DOTALL,
         ),
     ),
     (
-        "scan all positive evidence markers before selecting method cards",
+        "use the Evidence Graph and Evaluation Plan as the only log evidence",
         re.compile(
-            r"(?:先|before).*(?:全部|所有|all|every).*(?:正向|positive).*(?:marker|标记)",
+            r"(?:日志证据).*(?:只能|仅能).*(?:Evidence Graph|证据图).*(?:Evaluation Plan|评估计划)"
+            r"|(?:log evidence).*(?:only).*(?:Evidence Graph).*(?:Evaluation Plan)",
             re.IGNORECASE | re.DOTALL,
         ),
     ),
     (
-        "avoid stopping after the first match",
+        "avoid rescanning evidence markers",
         re.compile(
-            r"(?:不能|不得|不要).*(?:第一|首个).*(?:停止|短路)"
-            r"|(?:do not|must not).*(?:first).*(?:stop|short-circuit)",
+            r"(?:不|不得|不要).*重新扫描.*(?:marker|标记)"
+            r"|(?:do not|must not).*(?:rescan).*(?:marker|evidence)",
             re.IGNORECASE | re.DOTALL,
         ),
     ),
     (
-        "inspect all relevant calls",
+        "evaluate every plan reference in plan order",
         re.compile(
-            r"(?:全部|所有|每个).*(?:相关调用|调用范围)"
-            r"|(?:all|every).*(?:relevant )?(?:calls?|requests?)",
+            r"(?:按|依照).*Evaluation Plan.*(?:顺序).*(?:全部|所有|每个).*evaluation_ref"
+            r"|(?:in).*Evaluation Plan.*(?:order).*(?:all|every).*evaluation_ref",
             re.IGNORECASE | re.DOTALL,
         ),
     ),
     (
-        "report each independent event separately",
+        "avoid stopping after the first confirmation",
         re.compile(
-            r"(?:每个原因|每种原因).*(?:每次|每个).*(?:独立事件).*(?:分别|单独)"
-            r"|(?:each).*(?:independent event).*(?:separately)",
+            r"(?:不能|不得|不要).*(?:第一|首个).*(?:确认).*(?:停止|短路)"
+            r"|(?:do not|must not).*(?:first).*(?:confirmation).*(?:stop|short-circuit)",
+            re.IGNORECASE | re.DOTALL,
+        ),
+    ),
+    (
+        "return only evaluation_ref, verdict, and reason",
+        re.compile(
+            r"(?:只输出|仅输出).*evaluation_ref.*verdict.*reason"
+            r"|(?:only).*(?:output|return).*evaluation_ref.*verdict.*reason",
             re.IGNORECASE | re.DOTALL,
         ),
     ),
@@ -618,6 +627,7 @@ def _validate_methods(
     wiki_markers = _wiki_canonical_evidence_markers(wiki_templates)
     method_ids: set[str] = set()
     method_references: set[str] = set()
+    marker_bindings: list[tuple[int, str, list[str]]] = []
     priorities: list[int] = []
     marker_count = 0
     for index, method in enumerate(methods, start=1):
@@ -673,6 +683,8 @@ def _validate_methods(
                 errors.append(
                     f"method {index} evidence marker is not a canonical stable Wiki log marker: {marker}"
                 )
+        if reference is not None and reference != SOURCE_LOG_TEMPLATES_REFERENCE:
+            marker_bindings.append((index, reference, markers))
     result["marker_count"] = marker_count
     if priorities != list(range(1, len(methods) + 1)):
         errors.append("method priorities must be unique and consecutive from 1")
@@ -703,6 +715,15 @@ def _validate_methods(
                 for heading in METHOD_HEADINGS:
                     if heading not in text:
                         errors.append(f"{reference} is missing heading: {heading}")
+        for index, reference, markers in marker_bindings:
+            method_text = reference_texts.get(reference)
+            if method_text is None:
+                continue
+            for marker in markers:
+                if marker not in method_text:
+                    errors.append(
+                        f"method {index} evidence marker is absent from its method reference: {marker}"
+                    )
         if reference_texts.get(SOURCE_LOG_TEMPLATES_REFERENCE) != _render_source_log_templates(
             wiki_templates
         ):

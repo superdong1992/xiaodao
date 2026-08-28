@@ -13,6 +13,9 @@ from problem_locator.journey_renderer import (
     load_journey,
     render_journey,
 )
+from tests.deterministic.unit.domain.test_methods_v2_terminal_bridge import (
+    _review_terminal,
+)
 
 
 CASE_ID = "00000000-0000-4000-8000-000000000101"
@@ -133,6 +136,76 @@ def test_render_journey_generates_detailed_and_nonterminal_brief_snapshots(
     repeated = render_journey(log_dir, CASE_ID)
     assert Path(repeated.detailed_log).read_bytes() == first_detailed
     assert Path(repeated.brief_log).read_bytes() == first_brief
+
+
+@pytest.mark.parametrize(
+    ("reviewer_verdicts", "expected_status", "expected_reason"),
+    [
+        (("CONFIRMED", "REJECTED"), "RESOLVED", None),
+        (
+            ("REJECTED", "REJECTED"),
+            "UNRESOLVED",
+            "SPECIALIST_REVIEWER_DISAGREEMENT",
+        ),
+    ],
+)
+def test_methods_v2_terminal_projection_is_rendered_from_production_outcome(
+    tmp_path: Path,
+    reviewer_verdicts: tuple[str, ...],
+    expected_status: str,
+    expected_reason: str | None,
+) -> None:
+    flow = _review_terminal(
+        tmp_path / "flow",
+        specialist_verdicts=("CONFIRMED", "REJECTED"),
+        reviewer_verdicts=reviewer_verdicts,
+    )
+    projection = flow.projection.model_dump(mode="json")
+    log_dir = tmp_path / "logs"
+    _write(
+        log_dir,
+        [
+            _event(
+                1,
+                "case.created",
+                data={"problem_spec": {"statement": "库存 RPC 超时"}},
+            ),
+            _event(
+                2,
+                "job.outcome.applied",
+                job_id=flow.review_job.job_id,
+                job_type="REVIEW",
+                outcome_id=flow.outcome.outcome_id,
+                data={
+                    "outcome": {
+                        "result_type": "COMPLETED",
+                        "methods_terminal_projection": projection,
+                    },
+                    "case_view": {
+                        "status": expected_status,
+                        "methods_result": projection,
+                    },
+                },
+            ),
+        ],
+    )
+
+    receipt = render_journey(log_dir, CASE_ID)
+    brief = Path(receipt.brief_log).read_text(encoding="utf-8")
+
+    assert receipt.case_status == expected_status
+    assert f"Methods V2 状态: {expected_status}" in brief
+    assert f"诊断 ID: {projection['diagnostic_id']}" in brief
+    assert "限制: server-observed limitation" in brief
+    assert "尚未形成可记录的结论" not in brief
+    if expected_reason is None:
+        assert "原因码: 无" in brief
+        assert f"已确认方法: {projection['confirmed_method_ids'][0]}" in brief
+        assert projection["confirmed_event_refs"][0] in brief
+        assert projection["confirmed_hit_refs"][0] in brief
+    else:
+        assert f"原因码: {expected_reason}" in brief
+        assert projection["reasons"][0] in brief
 
 
 def test_unknown_event_is_visible_without_becoming_a_business_milestone(

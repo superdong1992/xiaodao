@@ -10,12 +10,14 @@ import pytest
 
 from problem_locator.contracts import (
     AgentArtifactProposalDraft,
+    AgentExecutionFailure,
     AgentJobOutcome,
     ApplicationError,
     ApplicationErrorDetail,
     ApplicationPortError,
     ArtifactKind,
     ErrorCode,
+    ExecutionFailure,
     ExecutionStage,
     Job,
     LogparseParseClaim,
@@ -209,6 +211,25 @@ def _stage(
         claim=claim,
         parse_request_bytes=parse_request_bytes,
     )
+
+
+def test_agent_failure_is_upgraded_only_at_server_job_outcome_boundary() -> None:
+    job, manifest = _route_inputs()
+    agent = AgentJobOutcome.model_validate(
+        _fixture_payload("agent-job-outcome-failure.json")
+    )
+    assert type(agent.error) is AgentExecutionFailure
+
+    staged = _stage(
+        job=job,
+        manifest=manifest,
+        validated=_validated([], outcome=agent),
+        store=InMemoryResourceStore(),
+    )
+
+    assert type(staged.outcome.error) is ExecutionFailure
+    assert staged.outcome.error.reason_code is None
+    assert staged.outcome.error.diagnostic_id is None
 
 
 def _detail() -> ApplicationErrorDetail:

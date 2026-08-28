@@ -17,12 +17,16 @@
 ## SKILL.md
 
 - frontmatter 只要求 `name` 和 `description`；`name` 必须与目录名及 `methods.json.skill_name` 相同。
-- 入口保持简短，说明 `request.json`、共同诊断流程、按需读取引用的规则和结果边界。
-- 明确只读取冻结的 `target_logs[*].log_path`，不调用 Logparse，不遍历其他日志。
-- 明确读取 `methods.json` 后先扫描全部正向标记，不能在第一个命中处分支短路。
-- 明确检查输入范围内全部相关调用；只有证据足以证明属于同一次调用时才合并发现。
-- 明确每个原因、每次独立事件分别输出证据；每条证据使用 `sources` 引用冻结日志原文，并使用 `identity_tokens` 保留来源中的事件身份字面量。
-- 结果必须保留证据不足、观测限制及 Wiki 中的安全提醒。
+- 入口保持简短，说明读取冻结 `request.json`、Server 生成的 `method-evidence-graph.json` 和
+  `method-evaluation-plan.json`，并按需读取方法卡和共享引用。
+- 明确方法规则需要用户输入时读取 `request.json` 中的冻结值。
+- 明确日志证据只能来自 Evidence Graph 和 Evaluation Plan；不读取目标日志、不重新扫描 marker，
+  也不重新选择日志。
+- 明确按 Evaluation Plan 顺序评估全部 `evaluation_ref`，不能在第一个确认项后停止。
+- 明确每项只输出 `evaluation_ref`、`verdict` 和 `reason`；`verdict` 只能是
+  `CONFIRMED`、`REJECTED` 或 `UNKNOWN`。
+- `reason` 只概括方法规则判断，不回抄 marker、日志原文、行号、哈希或事件身份。
+- 证据不足或受 Wiki 观测限制影响时使用 `UNKNOWN`，并在 `reason` 中说明边界。
 
 ## methods.json
 
@@ -128,22 +132,19 @@ Wiki `text` 日志模板使用 `{field_name}` 命名字段时，先按模板及�
 
 如果 Wiki 说明某条日志只有在对应阈值或条件已经满足时才会打印，把观测到该日志写入“确认条件”，不能只称为补充证据。
 
-“输出含义”必须说明：同一方法命中多个独立事件时分别输出；每条输出保留完整来源日志和来自来源的身份字面量，不能只给计算摘要。
+“输出含义”必须说明：Server 会把同一方法的全部独立事件绑定到该方法的 `evaluation_ref`；Agent
+只返回该引用、判定和简短原因，不复制任何证据字段。
 
-## 运行结果证据
+## Methods V2 评估输出
 
-运行结果的每条 `evidence` 对应一个方法在一次独立事件上的发现，包含：
+运行结果是一个根 JSON 数组，顺序与 `method-evaluation-plan.json` 完全一致。每项只能包含：
 
-- `method_id`：方法 ID。
-- `summary`：计算和结论摘要。
-- `identity_tokens`：一个或多个从本条证据引用日志中原样摘取的非空字面量，用来关联或区分事件。
-- `sources`：一个或多个日志来源；每项包含来源标识、日志标记和一整条冻结日志原文。
+- `evaluation_ref`：逐字复制对应计划项的引用。
+- `verdict`：`CONFIRMED`、`REJECTED` 或 `UNKNOWN`。
+- `reason`：非空的规则判断摘要。
 
-完整日志原文是事实证据，摘要不是。每个 `identity_tokens` 值必须能在本条证据的某个来源原文中找到。
-优先使用 Wiki 明确赋予关联含义的字段。原文使用命名字段时，token 必须包含原样字段名和值，不能把
-字段绑定缩减成裸值；没有命名形式时，才使用日志中可区分事件的时间边界、序号或其他原文字面量。
-若不同来源没有共同的可靠身份字面量，不得合并为同一条证据；分别输出，并把不能关联写入限制说明。
-候选方法没有正向日志时只进入候选或限制说明，不得为它编造 `evidence`。
+不得增加、遗漏、重复或重排计划项。不得输出 `method_id`、marker、日志原文、行号、哈希、
+`identity_tokens` 或其他证据字段。Server 负责保存 Evidence Graph 并把引用映射到最终结果。
 
 ## 固定源日志模板引用
 
@@ -176,4 +177,5 @@ Wiki `text` 日志模板使用 `{field_name}` 命名字段时，先按模板及�
 
 不要在共享引用中增加 Wiki 未提供的阈值或经验结论。
 
-当目标日志包含多次相关调用时，逐项保留所有满足正向确认条件的发现。使用日志已有的请求标识或时间字段区分调用；证据不足以证明属于同一次调用时不得强行合并。
+当 Evidence Graph 中同一方法包含多次相关调用时，按方法卡规则评估该计划项覆盖的全部事件；
+证据不足以证明事件关系时返回 `UNKNOWN`，不得自行重组 Evidence Graph。

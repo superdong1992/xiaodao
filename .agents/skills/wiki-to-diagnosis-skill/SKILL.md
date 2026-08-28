@@ -24,7 +24,10 @@ description: Convert an authored troubleshooting Wiki into one evidence-driven d
    不得自行截短、改选片段、重排、去重或丢失模板。
 6. 不能区分具体原因、但用于确认问题发生或关联目标请求的模板语义可以放入其他共享引用；无论如何，
    所有机械模板都必须逐字出现在固定模板清单文件中，不得因为它不是分支标记就从生成物中丢失。
-7. 为运行结果定义可追溯证据：每个原因、每次独立事件分别输出，保留实际使用的冻结日志原文和来自这些原文的身份字面量。
+7. 为每张方法卡写清楚可机械执行的确认、排除和未知条件。Server 会把一次扫描得到的 Evidence Graph
+   和完整 Evaluation Plan 交给 Agent；冻结 `request.json` 继续提供方法规则所需的用户输入。
+   生成的 Skill 只负责让 Agent 能按方法规则判断每个 `evaluation_ref`，不要求 Agent 回抄
+   marker、日志原文、行号、哈希或事件身份。
 8. 按用户指定的目录和名称生成一个 Skill。生成前先阅读 [输出合同](references/output-contract.md)，严格使用其中的文件结构和字段。
 9. 生成后运行本 Skill 的校验脚本。校验失败时只修正被报告的结构问题；不要借机改变 Wiki 语义。
 
@@ -44,16 +47,18 @@ description: Convert an authored troubleshooting Wiki into one evidence-driven d
 
 ## 运行时边界
 
-完整使用入口接收 Wiki 声明的用户参数和日志附件。运行器先用其中与日志选择有关的输入完成一次 Logparse 预处理；生成的定位 Skill 在诊断阶段消费 `request.json`、已经冻结的 Logparse `target_logs` 和 receipt：
+完整使用入口接收 Wiki 声明的用户参数和日志附件。运行器先完成 Logparse 预处理，再由 Server 扫描
+一次冻结日志，生成 `method-evidence-graph.json` 和 `method-evaluation-plan.json`。生成的定位 Skill
+在评估阶段同时读取冻结 `request.json`，并遵守以下边界：
 
-- `request.json` 保留用户参数和已消费日志附件的身份；不得要求用户补充 `log_derived_fields` 中的字段。
-- 只读取 `target_logs[*].log_path` 明确列出的日志。
-- 不调用 Logparse，不遍历解析目录，不重新选择生命周期、进程或日志路径。
-- 先读取 `methods.json`，扫描所有目标日志中的证据标记，再只加载相关方法卡和共享引用。
-- 检查输入范围内全部相关事件。每条结果证据使用 `sources` 原样引用所用冻结日志，并使用 `identity_tokens` 保留这些日志中能够关联或区分事件的字面量。
-- `identity_tokens` 只能来自同一结果证据的 `sources`；没有可靠关联时不得合并来源，分别输出并说明关联限制。
-- 原文以命名字段表达身份时，`identity_tokens` 必须原样保留字段名和值，不能只摘取裸值；只有原文没有命名形式时才使用其他可区分字面量。
-- 没有足够正向证据时返回证据不足，并明确缺失证据可能受到 Wiki 所述观测策略影响。
+- `request.json` 提供 Wiki 声明的用户输入；方法规则需要某项输入时使用其冻结值。
+- `method-evidence-graph.json` 是本次评估的完整证据集合，`method-evaluation-plan.json` 是完整待判定清单。
+- 日志证据只能来自 Evidence Graph 和 Evaluation Plan；不读取目标日志，不重新扫描 marker，
+  不重新选择生命周期、进程或日志路径。
+- 按 Evaluation Plan 顺序逐项应用对应方法卡；不能在第一个确认项后停止。
+- 每个输出项只能包含 `evaluation_ref`、`verdict` 和 `reason`。`verdict` 只能是
+  `CONFIRMED`、`REJECTED` 或 `UNKNOWN`。
+- 没有足够证据时返回 `UNKNOWN`，并在 `reason` 中说明 Wiki 给出的观测限制；不补写 Wiki 未提供的事实。
 
 ## 校验
 

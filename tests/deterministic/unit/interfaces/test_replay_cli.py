@@ -30,10 +30,12 @@ from problem_locator.contracts import (
 )
 from problem_locator.contracts.errors import (
     CLI_EXIT_CONFIG_OR_STATE_CORRUPT,
+    CLI_EXIT_REQUEST_OR_STATE_CONFLICT,
     CLI_EXIT_SUCCESS,
 )
+from problem_locator.bootstrap import main as production_cli_main
 from problem_locator.application.preparation import fixed_asset_refs
-from problem_locator.entrypoints.cli import CliHooks, main
+from problem_locator.entrypoints.cli import CliHooks, _parser, main
 import problem_locator.entrypoints.replay as replay_module
 from problem_locator.entrypoints.replay import (
     ReplayError,
@@ -53,8 +55,22 @@ from problem_locator.entrypoints.replay import (
     validate_replay_paths,
 )
 from problem_locator.entrypoints.settings import Settings
-from problem_locator.storage.layout import DATA_FORMAT_MARKER_BYTES
+from problem_locator.domain.methods_state_v2 import record_protocol_error_v2
+from problem_locator.runtime import methods_evidence_v2
+from problem_locator.runtime.agent_backend import AgentBackend
+from problem_locator.runtime.methods_records_v2 import (
+    publish_method_evaluation_plan_v2,
+    publish_method_evidence_graph_v2,
+    publish_method_rejected_attempt_v2,
+)
+from problem_locator.storage.coordination import (
+    InProcessPublicationCommitGuard,
+    StorageCoordinationLock,
+)
+from problem_locator.storage.execution_records import FileExecutionRecordStore
+from problem_locator.storage.layout import DATA_FORMAT_MARKER_BYTES, StorageLayout
 from problem_locator.storage.platform import PlatformFileSync
+from tests.deterministic.unit.runtime.test_methods_replay_v2 import _production_values
 
 
 JOB_ID = "00000000-0000-4000-8000-000000000111"
@@ -83,12 +99,13 @@ def _settings(tmp_path: Path) -> Settings:
     )
 
 
-def _hooks(replay_runner) -> CliHooks:
+def _hooks(replay_runner, *, method_validation_replay_runner=None) -> CliHooks:
     return CliHooks(
         state_admin_factory=lambda _path: None,
         app_factory=lambda _settings: None,
         server_runner=lambda _app, _host, _port, _workers: None,
         replay_runner=replay_runner,
+        method_validation_replay_runner=method_validation_replay_runner,
     )
 
 
@@ -175,6 +192,194 @@ def test_replay_cli_requires_explicit_replay_composition(tmp_path: Path) -> None
     assert json.loads(stderr.getvalue())["code"] == ErrorCode.CONFIG_INVALID.value
 
 
+def test_methods_validation_replay_cli_freezes_chinese_help_and_request_error() -> None:
+    assert (
+        "使用当前校验器重放一条已持久化的 Methods V2 被拒响应"
+        in _parser().format_help()
+    )
+    stderr = io.BytesIO()
+
+    exit_code = main(
+        [
+            "replay-method-rejection",
+            "--data-root",
+            "relative-data",
+            "--job-id",
+            JOB_ID,
+            "--role",
+            "SPECIALIST",
+            "--attempt",
+            "PRIMARY",
+        ],
+        hooks=_hooks(
+            None,
+            method_validation_replay_runner=lambda _request: None,
+        ),
+        stdout=io.BytesIO(),
+        stderr=stderr,
+    )
+
+    assert exit_code == CLI_EXIT_REQUEST_OR_STATE_CONFLICT
+    assert json.loads(stderr.getvalue())["message"] == (
+        "Methods V2 校验重放请求无效。"
+    )
+
+
+def _methods_replay_data_root(
+    tmp_path: Path,
+) -> tuple[Path, Job, bytes, str, str, str]:
+    specialist, _, graph, plan, initial_state = _production_values(
+        tmp_path / "inputs"
+    )
+    data_root = tmp_path / "data"
+    layout = StorageLayout.at(data_root)
+    layout.initialize_v2_data_root()
+    coordination = StorageCoordinationLock()
+    records = FileExecutionRecordStore(data_root, coordination)
+    with InProcessPublicationCommitGuard(coordination).acquire():
+        records.publish_job(specialist)
+    publish_method_evidence_graph_v2(
+        records,
+        job_id=specialist.job_id,
+        graph=graph,
+    )
+    publish_method_evaluation_plan_v2(
+        records,
+        job_id=specialist.job_id,
+        plan=plan,
+    )
+    raw_response = b"not-json\n"
+    publish_method_rejected_attempt_v2(
+        records,
+        job_id=specialist.job_id,
+        role="SPECIALIST",
+        attempt="PRIMARY",
+        raw_bytes=raw_response,
+    )
+    expected_state = record_protocol_error_v2(
+        state=initial_state,
+        role="SPECIALIST",
+        reason="The persisted SPECIALIST response was rejected.",
+    )
+    return (
+        data_root,
+        specialist,
+        raw_response,
+        graph.graph_ref,
+        plan.plan_ref,
+        expected_state.state_ref,
+    )
+
+
+def _tree_bytes(root: Path) -> dict[str, bytes]:
+    return {
+        path.relative_to(root).as_posix(): path.read_bytes()
+        for path in root.rglob("*")
+        if path.is_file()
+    }
+
+
+def test_production_cli_replays_real_rejection_without_scanner_model_or_writes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    (
+        data_root,
+        specialist,
+        raw_response,
+        graph_ref,
+        plan_ref,
+        state_ref,
+    ) = _methods_replay_data_root(tmp_path)
+    source_before = _tree_bytes(data_root)
+
+    def unexpected_call(*_args, **_kwargs):
+        raise AssertionError("validation-only replay cannot scan or call a model")
+
+    monkeypatch.setattr(
+        methods_evidence_v2,
+        "scan_method_evidence_v2",
+        unexpected_call,
+    )
+    monkeypatch.setattr(AgentBackend, "execute", unexpected_call)
+    stdout = io.BytesIO()
+    stderr = io.BytesIO()
+
+    exit_code = production_cli_main(
+        [
+            "replay-method-rejection",
+            "--data-root",
+            str(data_root),
+            "--job-id",
+            specialist.job_id,
+            "--role",
+            "SPECIALIST",
+            "--attempt",
+            "PRIMARY",
+        ],
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+    assert exit_code == CLI_EXIT_SUCCESS
+    assert stderr.getvalue() == b""
+    assert json.loads(stdout.getvalue()) == {
+        "schema_version": 1,
+        "status": "REJECTION_REPRODUCED",
+        "job_id": specialist.job_id,
+        "source_job_id": specialist.job_id,
+        "role": "SPECIALIST",
+        "attempt": "PRIMARY",
+        "graph_ref": graph_ref,
+        "plan_ref": plan_ref,
+        "state_ref": state_ref,
+        "raw_response_sha256": hashlib.sha256(raw_response).hexdigest(),
+        "raw_response_size": len(raw_response),
+        "rejection_reason": (
+            "SPECIALIST model evaluation response is not valid UTF-8 JSON"
+        ),
+    }
+    assert _tree_bytes(data_root) == source_before
+
+
+def test_production_cli_returns_stable_typed_error_for_missing_attempt(
+    tmp_path: Path,
+) -> None:
+    data_root, specialist, _, _, _, _ = _methods_replay_data_root(tmp_path)
+    source_before = _tree_bytes(data_root)
+    stdout = io.BytesIO()
+    stderr = io.BytesIO()
+
+    exit_code = production_cli_main(
+        [
+            "replay-method-rejection",
+            "--data-root",
+            str(data_root),
+            "--job-id",
+            specialist.job_id,
+            "--role",
+            "SPECIALIST",
+            "--attempt",
+            "REPAIR",
+        ],
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+    assert exit_code == CLI_EXIT_REQUEST_OR_STATE_CONFLICT
+    assert stdout.getvalue() == b""
+    assert json.loads(stderr.getvalue()) == {
+        "schema_version": 1,
+        "status": "ERROR",
+        "code": "REJECTED_ATTEMPT_NOT_FOUND",
+        "message": "找不到指定的 Evidence V2 被拒响应。",
+        "job_id": specialist.job_id,
+        "role": "SPECIALIST",
+        "attempt": "REPAIR",
+    }
+    assert _tree_bytes(data_root) == source_before
+
+
 @pytest.mark.parametrize(
     "payload",
     [
@@ -187,6 +392,19 @@ def test_source_state_hard_cut_reports_schema_unsupported(payload: dict[str, obj
         _decode_source_state(
             (json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n").encode()
         )
+
+    assert caught.value.error.code is ErrorCode.STATE_SCHEMA_UNSUPPORTED
+    assert caught.value.stop_reason == "SOURCE_STATE_SCHEMA_UNSUPPORTED"
+
+
+def test_source_state_hard_cut_rejects_v7_mutated_from_current_baseline() -> None:
+    payload = json.loads(
+        Path("tests/fixtures/contracts/positive/state.json").read_bytes()
+    )
+    payload["schema_version"] = 7
+
+    with pytest.raises(ReplayError) as caught:
+        _decode_source_state(canonical_json_bytes(payload))
 
     assert caught.value.error.code is ErrorCode.STATE_SCHEMA_UNSUPPORTED
     assert caught.value.stop_reason == "SOURCE_STATE_SCHEMA_UNSUPPORTED"
@@ -317,9 +535,15 @@ def test_replay_document_parent_sync_failure_rolls_back_complete_link(
     assert list(tmp_path.glob(f".{destination.name}.*.tmp")) == []
 
 
-def test_v4_state_contract_is_the_replay_hard_cut() -> None:
-    assert SCHEMA_VERSION == 7
-    assert CONTRACT_REVISION == "v7-contract-r1"
+def test_v8_state_contract_is_the_replay_hard_cut() -> None:
+    assert SCHEMA_VERSION == 8
+    assert CONTRACT_REVISION == "v8-contract-r1"
+    assert ReplayManifest.model_fields["state_schema_version"].annotation is not None
+    assert ReplayManifest.model_json_schema()["properties"]["state_schema_version"] == {
+        "const": 8,
+        "title": "State Schema Version",
+        "type": "integer",
+    }
 
 
 def test_replay_projection_and_output_root_share_the_current_state_boundary(

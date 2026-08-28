@@ -50,6 +50,7 @@ test("Dev default selects the complete cheap deterministic closure and no model 
     per_invocation_hard_enforced: true,
   });
   assert.ok(built.plan.stages.every((stage) => stage.invocation_caps.length === 0));
+  assert.equal(built.plan.stages[0].timeout_seconds, 300);
 });
 
 test("Dev real requires one selected proof, explicit opt-in and a reason", () => {
@@ -66,6 +67,7 @@ test("Release is fresh, binds an immutable source snapshot and exposes exact per
   const built = buildIsolatedRunPlan({ track: "release", client: "macos", planOnly: true });
   assert.equal(built.plan.admission.status, "BLOCKED");
   const codes = built.plan.admission.blockers.map((blocker) => blocker.code);
+  assert.ok(codes.includes("EVIDENCE_V2_REAL_DIAGNOSIS_ADAPTER_UNMIGRATED"));
   assert.ok(codes.includes("CLAUDE_ENTRY_REQUIRED"));
   assert.ok(codes.includes("CLAUDE_SETTINGS_REQUIRED"));
   assert.equal(codes.includes("RELEASE_SOURCE_DIRTY"), false);
@@ -115,6 +117,7 @@ test("Codex posthoc aggregate budget requires an explicit acknowledgement and re
   const blockerCodes = built.plan.admission.blockers.map((entry) => entry.code);
   const warningCodes = built.plan.admission.warnings.map((entry) => entry.code);
   assert.equal(blockerCodes.includes("CODEX_POSTHOC_BUDGET_ACK_REQUIRED"), false);
+  assert.ok(blockerCodes.includes("EVIDENCE_V2_REAL_DIAGNOSIS_ADAPTER_UNMIGRATED"));
   assert.ok(blockerCodes.includes("CODEX_RUNTIME_INVALID"));
   assert.deepEqual(warningCodes.filter((code) => code === "CODEX_POSTHOC_BUDGET_EXCEPTION"), ["CODEX_POSTHOC_BUDGET_EXCEPTION"]);
   assert.equal(built.plan.budget.posthoc_aggregate_limits.acknowledged, true);
@@ -172,6 +175,7 @@ test("macOS Luna bootstrap and E2E are independent one-stage Dev goals with exac
   assert.equal(methods.budget.posthoc_aggregate_limits.calls, 1);
   assert.equal(methods.budget.posthoc_aggregate_limits.tokens, 1_000_000);
   assert.equal(methods.budget.posthoc_aggregate_limits.equivalent_usd, 2);
+  assert.equal(methods.admission.blockers.some((item) => item.code === "EVIDENCE_V2_REAL_DIAGNOSIS_ADAPTER_UNMIGRATED"), false);
 
   const e2e = buildIsolatedRunPlan({
     track: "dev",
@@ -190,6 +194,7 @@ test("macOS Luna bootstrap and E2E are independent one-stage Dev goals with exac
   assert.equal(e2e.budget.posthoc_aggregate_limits.calls, 5);
   assert.equal(e2e.budget.posthoc_aggregate_limits.tokens, 2_000_000);
   assert.equal(e2e.budget.posthoc_aggregate_limits.equivalent_usd, 3);
+  assert.ok(e2e.admission.blockers.some((item) => item.code === "EVIDENCE_V2_REAL_DIAGNOSIS_ADAPTER_UNMIGRATED"));
   assert.ok(e2e.admission.blockers.some((item) => item.code === "MACOS_CODEX_LUNA_METHODS_CACHE_REQUIRED"));
 
   const invalid = buildIsolatedRunPlan({
@@ -213,12 +218,28 @@ test("central Claude E2E plan removes REVIEW and declares four calls for insuffi
     reason: "plan",
   }).plan;
   const normal = build("api-execution-overrun");
+  assert.ok(normal.admission.blockers.some((item) => item.code === "EVIDENCE_V2_REAL_DIAGNOSIS_ADAPTER_UNMIGRATED"));
   assert.deepEqual(normal.stages[0].invocation_caps[0].phases, ["CLIENT", "ROUTE", "LOGPARSE", "DIAGNOSE", "REVIEW"]);
   assert.equal(normal.stages[0].invocation_caps[0].max_count, 5);
   const insufficient = build("insufficient-evidence");
   const declaration = insufficient.stages[0].invocation_caps[0];
   assert.deepEqual(declaration.phases, ["CLIENT", "ROUTE", "LOGPARSE", "DIAGNOSE"]);
   assert.deepEqual([declaration.min_count, declaration.max_count], [4, 4]);
+});
+
+test("Dev CrossJob diagnosis closure is blocked before any legacy real Gate can run", () => {
+  const built = buildIsolatedRunPlan({
+    track: "dev",
+    goal: "dev.real",
+    stage: "journey.cross-job.diagnose",
+    client: "windows",
+    planOnly: true,
+    allowRealModel: true,
+    reason: "验证 Evidence V2 迁移阻断",
+  });
+  const blocker = built.plan.admission.blockers.find((item) => item.code === "EVIDENCE_V2_REAL_DIAGNOSIS_ADAPTER_UNMIGRATED");
+  assert.equal(blocker?.stage_id, "journey.cross-job.diagnose");
+  assert.equal(built.plan.admission.status, "BLOCKED");
 });
 
 test("all supported Clients resolve to repository-owned first-party adapters", () => {

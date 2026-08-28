@@ -1,4 +1,4 @@
-"""Pydantic models for the frozen Problem Locator V7 public contract.
+"""Pydantic models for the frozen Problem Locator V8 public contract.
 
 The module deliberately keeps all wire/persistence DTO definitions in one place;
 ``commands``, ``outcomes`` and ``errors`` provide responsibility-oriented exports.
@@ -20,6 +20,7 @@ from pydantic import (
     ConfigDict,
     Field,
     StringConstraints,
+    StrictBool,
     field_validator,
     model_serializer,
     model_validator,
@@ -48,6 +49,7 @@ from .enums import (
     GenericResultStatus,
     JobStatus,
     JobType,
+    MethodsValidationReasonCode,
     OutcomeDisposition,
     OutcomeResultType,
     RequirementKind,
@@ -74,6 +76,13 @@ from .limits import (
     SCHEMA_VERSION,
     default_resource_limits,
 )
+from .methods_reason_v2 import (
+    CONSENSUS_UNRESOLVED_REASON_CODES_V2,
+    FAILED_METHOD_REASON_CODES_V2,
+    METHOD_PUBLIC_REASON_TEXT_V2,
+    UNRESOLVED_METHOD_REASON_CODES_V2,
+    MethodsTerminalReasonCodeV2,
+)
 
 
 UUID_PATTERN = r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
@@ -84,6 +93,14 @@ NAME_PATTERN = r"^[a-z][a-z0-9_]{0,63}$"
 SKILL_NAME_PATTERN = r"^[a-z0-9]+(?:-[a-z0-9]+)*$"
 FORMAT_ID_PATTERN = r"^[a-z][a-z0-9.\-]{0,63}$"
 GIT_OBJECT_PATTERN = r"^[0-9a-f]{40,64}$"
+METHOD_EVIDENCE_GRAPH_REF_V2_PATTERN = r"^graph-[0-9a-f]{64}$"
+METHOD_EVALUATION_PLAN_REF_V2_PATTERN = r"^plan-[0-9a-f]{64}$"
+METHOD_EVALUATION_REF_V2_PATTERN = r"^eval-[0-9a-f]{64}$"
+METHOD_EVIDENCE_EVENT_REF_V2_PATTERN = r"^event-[0-9a-f]{64}$"
+METHOD_EVIDENCE_HIT_REF_V2_PATTERN = r"^hit-[0-9a-f]{64}$"
+METHOD_TERMINAL_RESULT_REF_V2_PATTERN = r"^result-[0-9a-f]{64}$"
+METHOD_DIAGNOSTIC_ID_V2_PATTERN = r"^diag-[0-9a-f]{64}$"
+METHOD_ID_V2_PATTERN = r"^[a-z0-9]+(?:-[a-z0-9]+)*$"
 
 
 def _utf8_nonblank(value: str, *, max_bytes: int = MAX_USER_TEXT_UTF8_BYTES) -> str:
@@ -594,6 +611,244 @@ class CandidateTarget(ContractModel):
     candidate_content_hash: Sha256
 
 
+class MethodsReviewTargetV2(ContractModel):
+    """Server-created identity for one Candidate-free blind Methods review."""
+
+    schema_version: Literal[2]
+    evaluation_id: OpaqueId
+    source_job_id: OpaqueId
+    graph_ref: Annotated[
+        str,
+        StringConstraints(pattern=METHOD_EVIDENCE_GRAPH_REF_V2_PATTERN, strict=True),
+    ]
+    plan_ref: Annotated[
+        str,
+        StringConstraints(pattern=METHOD_EVALUATION_PLAN_REF_V2_PATTERN, strict=True),
+    ]
+    skill_ref: VersionedRef
+    reviewed_state_revision: PositiveInt
+
+
+class MethodsReviewerEvaluationV2(ContractModel):
+    evaluation_ref: Annotated[
+        str,
+        StringConstraints(pattern=METHOD_EVALUATION_REF_V2_PATTERN, strict=True),
+    ]
+    verdict: Literal["CONFIRMED", "REJECTED", "UNKNOWN"]
+    reason: NonEmptyText
+
+
+class MethodsReviewerResultV2(ContractModel):
+    """Server-owned normalized Reviewer result; never accepted from Agent output."""
+
+    schema_version: Literal[2]
+    role: Literal["REVIEWER"]
+    review_job_id: OpaqueId
+    target: MethodsReviewTargetV2
+    evaluations: Annotated[tuple[MethodsReviewerEvaluationV2, ...], Field(min_length=1)]
+    repair_used: StrictBool
+
+    @model_validator(mode="after")
+    def validate_evaluation_refs(self) -> "MethodsReviewerResultV2":
+        refs = [item.evaluation_ref for item in self.evaluations]
+        if len(refs) != len(set(refs)):
+            raise ValueError("Methods Reviewer evaluation refs must be unique")
+        return self
+
+
+MethodsTerminalStatusV2: TypeAlias = Literal["RESOLVED", "UNRESOLVED", "FAILED"]
+MethodsDiagnosticIdV2: TypeAlias = Annotated[
+    str,
+    StringConstraints(pattern=METHOD_DIAGNOSTIC_ID_V2_PATTERN, strict=True),
+]
+
+
+class MethodsTerminalProjectionV2(ContractModel):
+    """Public server projection of one Evidence V2 terminal result.
+
+    This deliberately contains only stable terminal identities and mechanically
+    confirmed refs.  Specialist and Reviewer drafts, verdict arrays, and their
+    free-form reasons are not part of the public Case contract.
+    """
+
+    schema_version: Literal[2]
+    case_id: OpaqueId
+    source_job_id: OpaqueId
+    result_ref: Annotated[
+        str,
+        StringConstraints(pattern=METHOD_TERMINAL_RESULT_REF_V2_PATTERN, strict=True),
+    ]
+    evaluation_id: OpaqueId
+    status: MethodsTerminalStatusV2
+    plan_ref: Annotated[
+        str,
+        StringConstraints(pattern=METHOD_EVALUATION_PLAN_REF_V2_PATTERN, strict=True),
+    ]
+    evidence_graph_ref: Annotated[
+        str,
+        StringConstraints(pattern=METHOD_EVIDENCE_GRAPH_REF_V2_PATTERN, strict=True),
+    ]
+    reason_code: MethodsTerminalReasonCodeV2 | None
+    diagnostic_id: MethodsDiagnosticIdV2
+    diagnostic_evaluation_ref: Annotated[
+        str,
+        StringConstraints(pattern=METHOD_EVALUATION_REF_V2_PATTERN, strict=True),
+    ] | None
+    confirmed_evaluation_refs: tuple[
+        Annotated[
+            str,
+            StringConstraints(pattern=METHOD_EVALUATION_REF_V2_PATTERN, strict=True),
+        ],
+        ...,
+    ]
+    confirmed_method_ids: tuple[
+        Annotated[
+            str,
+            StringConstraints(pattern=METHOD_ID_V2_PATTERN, strict=True),
+        ],
+        ...,
+    ]
+    confirmed_event_refs: tuple[
+        Annotated[
+            str,
+            StringConstraints(pattern=METHOD_EVIDENCE_EVENT_REF_V2_PATTERN, strict=True),
+        ],
+        ...,
+    ]
+    confirmed_hit_refs: tuple[
+        Annotated[
+            str,
+            StringConstraints(pattern=METHOD_EVIDENCE_HIT_REF_V2_PATTERN, strict=True),
+        ],
+        ...,
+    ]
+    limitations: tuple[NonEmptyText, ...]
+    reasons: tuple[NonEmptyText, ...]
+
+    @model_validator(mode="after")
+    def validate_terminal_projection(self) -> "MethodsTerminalProjectionV2":
+        for values, label in (
+            (self.confirmed_evaluation_refs, "confirmed evaluation refs"),
+            (self.confirmed_method_ids, "confirmed method IDs"),
+            (self.confirmed_event_refs, "confirmed event refs"),
+            (self.confirmed_hit_refs, "confirmed hit refs"),
+            (self.limitations, "limitations"),
+            (self.reasons, "terminal reasons"),
+        ):
+            if len(values) != len(set(values)):
+                raise ValueError(f"Methods terminal {label} must be unique")
+        if len(self.confirmed_evaluation_refs) != len(self.confirmed_method_ids):
+            raise ValueError(
+                "Methods terminal confirmed evaluation and method refs must align"
+            )
+        confirmed = (
+            self.confirmed_evaluation_refs,
+            self.confirmed_method_ids,
+            self.confirmed_event_refs,
+            self.confirmed_hit_refs,
+        )
+        if self.status == "RESOLVED":
+            if (
+                self.reason_code is not None
+                or any(not values for values in confirmed)
+                or self.reasons
+            ):
+                raise ValueError(
+                    "resolved Methods terminal projection requires confirmed refs and no reason"
+                )
+        else:
+            if any(confirmed):
+                raise ValueError(
+                    "non-resolved Methods terminal projection must clear confirmed refs"
+                )
+            allowed_reasons = (
+                UNRESOLVED_METHOD_REASON_CODES_V2
+                if self.status == "UNRESOLVED"
+                else FAILED_METHOD_REASON_CODES_V2
+            )
+            if self.reason_code not in allowed_reasons:
+                raise ValueError(
+                    "Methods terminal reason code does not match its terminal status"
+                )
+            if self.reasons != (METHOD_PUBLIC_REASON_TEXT_V2[self.reason_code],):
+                raise ValueError(
+                    "Methods terminal projection must use the fixed public reason text"
+                )
+        return self
+
+
+def validate_methods_reviewer_terminal_v2(
+    reviewer: MethodsReviewerResultV2 | None,
+    terminal: MethodsTerminalProjectionV2,
+    *,
+    review_job_id: str,
+    reviewed_state_revision: int,
+    expected_target: MethodsReviewTargetV2 | None,
+) -> None:
+    """Validate the sole mechanical Reviewer-result/terminal relationship."""
+
+    requires_reviewer = terminal.status == "RESOLVED" or (
+        terminal.reason_code in CONSENSUS_UNRESOLVED_REASON_CODES_V2
+    )
+    target = expected_target or (None if reviewer is None else reviewer.target)
+    if (
+        terminal.source_job_id != review_job_id
+        or (expected_target is not None and target is None)
+        or (
+            target is not None
+            and (
+                target.evaluation_id != terminal.evaluation_id
+                or target.plan_ref != terminal.plan_ref
+                or target.graph_ref != terminal.evidence_graph_ref
+                or target.reviewed_state_revision != reviewed_state_revision
+            )
+        )
+        or (requires_reviewer and reviewer is None)
+        or (not requires_reviewer and reviewer is not None)
+    ):
+        raise ValueError(
+            "Methods V2 terminal REVIEW Outcome must match its frozen review target"
+        )
+    if reviewer is None:
+        return
+    assert target is not None
+    if reviewer.review_job_id != review_job_id or reviewer.target != target:
+        raise ValueError(
+            "Methods V2 terminal REVIEW Outcome must bind its Reviewer result"
+        )
+    reviewer_verdicts = tuple(
+        (item.evaluation_ref, item.verdict) for item in reviewer.evaluations
+    )
+    if terminal.status == "RESOLVED":
+        reviewer_confirmed = tuple(
+            evaluation_ref
+            for evaluation_ref, verdict in reviewer_verdicts
+            if verdict == "CONFIRMED"
+        )
+        if reviewer_confirmed != terminal.confirmed_evaluation_refs or any(
+            verdict == "UNKNOWN" for _, verdict in reviewer_verdicts
+        ):
+            raise ValueError(
+                "resolved Methods Reviewer verdicts differ from confirmed refs"
+            )
+    elif terminal.reason_code == "NO_CONFIRMED_METHOD" and any(
+        verdict != "REJECTED" for _, verdict in reviewer_verdicts
+    ):
+        raise ValueError(
+            "NO_CONFIRMED_METHOD requires all Reviewer verdicts REJECTED"
+        )
+    elif terminal.reason_code == "INCOMPLETE_EVALUATION" and all(
+        verdict != "UNKNOWN" for _, verdict in reviewer_verdicts
+    ):
+        raise ValueError(
+            "INCOMPLETE_EVALUATION requires an UNKNOWN Reviewer verdict"
+        )
+    elif terminal.reason_code == "SPECIALIST_REVIEWER_DISAGREEMENT" and any(
+        verdict == "UNKNOWN" for _, verdict in reviewer_verdicts
+    ):
+        raise ValueError("disagreement Reviewer result must not contain UNKNOWN")
+
+
 class CandidateConclusion(ContractModel):
     conclusion_id: OpaqueId
     revision: PositiveInt
@@ -837,12 +1092,54 @@ class ContextSnapshot(ContractModel):
         return self
 
 
+def _validate_server_failure_diagnostic(
+    reason_code: MethodsValidationReasonCode | MethodsTerminalReasonCodeV2 | None,
+    diagnostic_id: str | None,
+) -> None:
+    if (reason_code is None) != (diagnostic_id is None):
+        raise ValueError(
+            "failure reason_code and diagnostic_id must be both null or both present"
+        )
+    if reason_code is None:
+        return
+    if isinstance(reason_code, MethodsValidationReasonCode):
+        if re.fullmatch(UUID_PATTERN, diagnostic_id or "") is None:
+            raise ValueError(
+                "legacy Methods validation reason requires a UUID diagnostic_id"
+            )
+        return
+    if (
+        reason_code not in FAILED_METHOD_REASON_CODES_V2
+        or re.fullmatch(METHOD_DIAGNOSTIC_ID_V2_PATTERN, diagnostic_id or "") is None
+    ):
+        raise ValueError(
+            "Evidence V2 failure requires a FAILED reason and diag-* diagnostic_id"
+        )
+
+
 class CaseFailure(ContractModel):
     code: ErrorCode
     message: NonEmptyText
     source_job_id: OpaqueId | None
     source_outcome_id: OpaqueId | None
     occurred_at: UtcTimestamp
+    reason_code: MethodsValidationReasonCode | MethodsTerminalReasonCodeV2 | None = Field(
+        default=None,
+        description="Stable machine-readable reason for a classified Methods failure.",
+        exclude_if=lambda value: value is None,
+    )
+    diagnostic_id: OpaqueId | MethodsDiagnosticIdV2 | None = Field(
+        default=None,
+        description=(
+            "Diagnostic identifier that correlates the public failure with its execution record."
+        ),
+        exclude_if=lambda value: value is None,
+    )
+
+    @model_validator(mode="after")
+    def validate_diagnostic(self) -> CaseFailure:
+        _validate_server_failure_diagnostic(self.reason_code, self.diagnostic_id)
+        return self
 
 
 class UnresolvedResultDraft(ContractModel):
@@ -991,6 +1288,10 @@ class Case(ContractModel):
     unresolved_result: UnresolvedResult | None = None
     generic_result: GenericResult | None = None
     generic_result_v2: GenericResultV2 | None = None
+    methods_result: MethodsTerminalProjectionV2 | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
     failure: CaseFailure | None
     created_at: UtcTimestamp
     updated_at: UtcTimestamp
@@ -1002,6 +1303,24 @@ class Case(ContractModel):
         if self.generic_result is not None and self.generic_result_v2 is not None:
             raise ValueError("V1 and V2 generic results are mutually exclusive")
         generic_result = self.generic_result or self.generic_result_v2
+        methods_terminal = self.methods_result
+        if methods_terminal is not None:
+            if (
+                methods_terminal.case_id != self.case_id
+                or self.status is not CaseStatus(methods_terminal.status)
+            ):
+                raise ValueError(
+                    "Methods result identity/status must equal its Case"
+                )
+            if (
+                generic_result is not None
+                or self.final_result is not None
+                or self.unresolved_result is not None
+                or self.diagnosis_state.candidate_conclusion is not None
+            ):
+                raise ValueError(
+                    "Methods terminal Case forbids legacy results and Candidate state"
+                )
         if generic_result is not None:
             expected_status = CaseStatus(generic_result.status.value)
             if self.status is not expected_status:
@@ -1023,18 +1342,22 @@ class Case(ContractModel):
         }:
             pass
         if self.status in {CaseStatus.RESOLVED, CaseStatus.PARTIALLY_RESOLVED}:
-            if generic_result is None and (
+            if generic_result is None and methods_terminal is None and (
                 self.final_result is None
                 or self.final_result.status is not CandidateStatus.ACCEPTED
             ):
                 raise ValueError("resolved cases require an ACCEPTED final_result")
-            if generic_result is None and (
+            if generic_result is None and methods_terminal is None and (
                 self.diagnosis_state.candidate_conclusion != self.final_result
             ):
                 raise ValueError(
                     "RESOLVED final_result must equal the current DiagnosisState candidate"
                 )
-            if generic_result is None and self.final_result is not None:
+            if (
+                generic_result is None
+                and methods_terminal is None
+                and self.final_result is not None
+            ):
                 expected = (
                     DiagnosisResolutionStatus.COMPLETE
                     if self.status is CaseStatus.RESOLVED
@@ -1047,7 +1370,11 @@ class Case(ContractModel):
         elif self.final_result is not None:
             raise ValueError("non-resolved cases must have final_result=null")
         if self.status is CaseStatus.UNRESOLVED:
-            if generic_result is None and self.unresolved_result is None:
+            if (
+                generic_result is None
+                and methods_terminal is None
+                and self.unresolved_result is None
+            ):
                 raise ValueError("UNRESOLVED cases require unresolved_result")
             if self.failure is not None:
                 raise ValueError("UNRESOLVED cases forbid failure")
@@ -1060,8 +1387,10 @@ class Case(ContractModel):
             raise ValueError("generic results are valid only for a generic terminal Case")
         if self.status is CaseStatus.REVIEWING:
             candidate = self.diagnosis_state.candidate_conclusion
-            if candidate is None or candidate.status is not CandidateStatus.REVIEWING:
-                raise ValueError("REVIEWING cases require the current REVIEWING candidate")
+            if candidate is not None and candidate.status is not CandidateStatus.REVIEWING:
+                raise ValueError(
+                    "a Candidate present on a REVIEWING case must itself be REVIEWING"
+                )
         if self.status in {CaseStatus.RUNNING, CaseStatus.REVIEWING} and self.active_job_id is None:
             raise ValueError("RUNNING and REVIEWING cases require active_job_id")
         if self.status in {
@@ -1102,6 +1431,10 @@ class Job(ContractModel):
     logparse_tool_ref: VersionedRef | None
     logparse_product: NonEmptyText | None
     review_target: CandidateTarget | None
+    methods_review_target: MethodsReviewTargetV2 | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
     replacement_for_job_id: OpaqueId | None
     resource_limits: ResourceLimits
     created_at: UtcTimestamp
@@ -1165,31 +1498,60 @@ class Job(ContractModel):
         ):
             raise ValueError("only DIAGNOSE jobs may carry diagnosis-mode fields")
         if self.job_type is JobType.ROUTE:
-            if self.review_target is not None:
-                raise ValueError("ROUTE jobs forbid skill_ref/review_target")
+            if self.review_target is not None or self.methods_review_target is not None:
+                raise ValueError("ROUTE jobs forbid review targets")
         elif self.job_type is JobType.DIAGNOSE:
-            if self.review_target is not None:
-                raise ValueError("DIAGNOSE jobs require skill_ref and forbid review_target")
+            if self.review_target is not None or self.methods_review_target is not None:
+                raise ValueError("DIAGNOSE jobs forbid review targets")
         else:
-            if self.review_target is None or self.logparse_tool_ref is not None:
-                raise ValueError("REVIEW jobs require review_target and forbid logparse")
-            assert self.context_snapshot is not None
-            candidate = self.context_snapshot.candidate_conclusion
-            if candidate is None or candidate.status is not CandidateStatus.REVIEWING:
-                raise ValueError("REVIEW snapshot requires a REVIEWING candidate")
-            if (
-                candidate.conclusion_id != self.review_target.candidate_conclusion_id
-                or candidate.revision != self.review_target.candidate_revision
-                or candidate.content_hash != self.review_target.candidate_content_hash
-            ):
-                raise ValueError("review_target must match the snapshot candidate")
-            if any(
-                ref not in self.evidence_refs
-                for ref in review_required_evidence_refs(candidate)
-            ):
+            if (self.review_target is None) == (self.methods_review_target is None):
                 raise ValueError(
-                    "REVIEW jobs must include every required candidate Evidence reference"
+                    "REVIEW jobs require exactly one Candidate or Methods V2 target"
                 )
+            if self.logparse_tool_ref is not None:
+                raise ValueError("REVIEW jobs forbid logparse")
+            assert self.context_snapshot is not None
+            if self.methods_review_target is not None:
+                target = self.methods_review_target
+                if self.context_snapshot.candidate_conclusion is not None:
+                    raise ValueError("Methods V2 REVIEW jobs forbid Candidate state")
+                if any(
+                    (
+                        self.evidence_refs,
+                        self.attachment_refs,
+                        self.previous_outcome_refs,
+                        self.artifact_refs,
+                    )
+                ):
+                    raise ValueError(
+                        "Methods V2 REVIEW jobs forbid legacy resource and Outcome inputs"
+                    )
+                if (
+                    target.skill_ref != self.skill_ref
+                    or target.reviewed_state_revision != self.base_state_revision
+                    or target.source_job_id == self.job_id
+                ):
+                    raise ValueError(
+                        "Methods V2 review target must match Job skill/state and a distinct source Job"
+                    )
+            else:
+                candidate = self.context_snapshot.candidate_conclusion
+                if candidate is None or candidate.status is not CandidateStatus.REVIEWING:
+                    raise ValueError("REVIEW snapshot requires a REVIEWING candidate")
+                assert self.review_target is not None
+                if (
+                    candidate.conclusion_id != self.review_target.candidate_conclusion_id
+                    or candidate.revision != self.review_target.candidate_revision
+                    or candidate.content_hash != self.review_target.candidate_content_hash
+                ):
+                    raise ValueError("review_target must match the snapshot candidate")
+                if any(
+                    ref not in self.evidence_refs
+                    for ref in review_required_evidence_refs(candidate)
+                ):
+                    raise ValueError(
+                        "REVIEW jobs must include every required candidate Evidence reference"
+                    )
         _validate_role_bindings(
             self.job_type,
             diagnosis_mode=self.diagnosis_mode,
@@ -1875,6 +2237,41 @@ class ReviewSubjectV2(ContractModel):
         return self
 
 
+class MethodsReviewMethodCardV2(ContractModel):
+    """One exact method card selected from the target's pinned Skill package."""
+
+    method_id: Annotated[
+        str,
+        StringConstraints(pattern=METHOD_ID_V2_PATTERN, strict=True),
+    ]
+    content: NonEmptyText
+
+
+class MethodsReviewerInputV2(ContractModel):
+    """Reviewer-visible identity only; Specialist conclusions are intentionally absent."""
+
+    schema_version: Literal[2]
+    review_job_id: OpaqueId
+    case_id: OpaqueId
+    target: MethodsReviewTargetV2
+    method_ids: Annotated[
+        tuple[
+            Annotated[
+                str,
+                StringConstraints(pattern=METHOD_ID_V2_PATTERN, strict=True),
+            ],
+            ...,
+        ],
+        Field(min_length=1),
+    ]
+
+    @model_validator(mode="after")
+    def validate_method_ids(self) -> "MethodsReviewerInputV2":
+        if len(self.method_ids) != len(set(self.method_ids)):
+            raise ValueError("Methods Reviewer method_ids must be unique")
+        return self
+
+
 class WorkspaceInputManifest(ContractModel):
     schema_version: Literal[2]
     job_id: OpaqueId
@@ -1885,6 +2282,10 @@ class WorkspaceInputManifest(ContractModel):
     entries: list[WorkspaceInputEntry]
     resolved_logparse_plan: ResolvedLogparsePlanInput | None = None
     review_subject: ReviewSubjectV2 | None = None
+    methods_reviewer_input: MethodsReviewerInputV2 | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
 
     @model_validator(mode="after")
     def validate_manifest(self) -> WorkspaceInputManifest:
@@ -1899,13 +2300,28 @@ class WorkspaceInputManifest(ContractModel):
             raise ValueError(
                 "resolved_logparse_plan requires logparse bindings"
             )
-        if (self.job_type is JobType.REVIEW) != (self.review_subject is not None):
-            raise ValueError("REVIEW manifests require exactly one review_subject")
+        reviewer_input_count = int(self.review_subject is not None) + int(
+            self.methods_reviewer_input is not None
+        )
+        if self.job_type is JobType.REVIEW:
+            if reviewer_input_count != 1:
+                raise ValueError(
+                    "REVIEW manifests require exactly one legacy or Methods V2 reviewer input"
+                )
+        elif reviewer_input_count:
+            raise ValueError("only REVIEW manifests may carry reviewer inputs")
         if self.review_subject is not None and (
             self.review_subject.review_job_id != self.job_id
             or self.review_subject.case_id != self.case_id
         ):
             raise ValueError("review_subject identity must match the Workspace manifest")
+        if self.methods_reviewer_input is not None and (
+            self.methods_reviewer_input.review_job_id != self.job_id
+            or self.methods_reviewer_input.case_id != self.case_id
+        ):
+            raise ValueError(
+                "Methods reviewer input identity must match the Workspace manifest"
+            )
         order = {"ATTACHMENT": 0, "EVIDENCE": 1, "ARTIFACT": 2, "PREVIOUS_OUTCOME": 3}
         kinds = [order[entry.input_kind] for entry in self.entries]
         if kinds != sorted(kinds):
@@ -1973,6 +2389,18 @@ def validate_workspace_manifest_for_job(
             raise ValueError(
                 "Workspace review_subject Evidence must be a stable Job Evidence subsequence"
             )
+    if manifest.methods_reviewer_input is not None:
+        reviewer_input = manifest.methods_reviewer_input
+        if (
+            job.methods_review_target is None
+            or job.review_target is not None
+            or reviewer_input.target != job.methods_review_target
+        ):
+            raise ValueError(
+                "Workspace Methods reviewer input must match its Candidate-free REVIEW Job"
+            )
+    elif job.methods_review_target is not None:
+        raise ValueError("Methods V2 REVIEW Job requires Methods reviewer input")
     if manifest.resolved_logparse_plan is not None:
         plan = manifest.resolved_logparse_plan
         if plan.attachment_id is not None and plan.attachment_id not in job.attachment_refs:
@@ -2036,7 +2464,7 @@ OUTCOME_REJECTION_CODES = frozenset(
 )
 
 
-class ExecutionFailure(ContractModel):
+class AgentExecutionFailure(ContractModel):
     stage: ExecutionStage
     code: ErrorCode
     message: NonEmptyText
@@ -2044,11 +2472,29 @@ class ExecutionFailure(ContractModel):
     details: list[ApplicationErrorDetail]
 
     @model_validator(mode="after")
-    def validate_retryability(self) -> ExecutionFailure:
+    def validate_retryability(self) -> AgentExecutionFailure:
         from .errors import EXECUTION_FAILURE_RETRYABLE_CODES
 
         if self.retryable and self.code not in EXECUTION_FAILURE_RETRYABLE_CODES:
             raise ValueError("this ExecutionFailure code cannot be retryable")
+        return self
+
+
+class ExecutionFailure(AgentExecutionFailure):
+    reason_code: MethodsValidationReasonCode | MethodsTerminalReasonCodeV2 | None = Field(
+        default=None,
+        description="Stable machine-readable reason for a classified Methods failure.",
+        exclude_if=lambda value: value is None,
+    )
+    diagnostic_id: OpaqueId | MethodsDiagnosticIdV2 | None = Field(
+        default=None,
+        description="Diagnostic identifier assigned to this classified Methods failure.",
+        exclude_if=lambda value: value is None,
+    )
+
+    @model_validator(mode="after")
+    def validate_diagnostic(self) -> ExecutionFailure:
+        _validate_server_failure_diagnostic(self.reason_code, self.diagnostic_id)
         return self
 
 
@@ -3071,7 +3517,7 @@ class AgentJobOutcomeDraftV2(ContractModel):
     consumed_evidence_refs: list[OpaqueId]
     proposed_evidence_drafts: list[AgentEvidenceProposalDraft]
     proposed_artifact_drafts: list[AgentArtifactProposalDraft]
-    error: ExecutionFailure | None
+    error: AgentExecutionFailure | None
     rule_claims: list[AgentRuleClaim]
 
     @model_validator(mode="after")
@@ -3131,7 +3577,7 @@ class AgentJobOutcome(ContractModel):
     consumed_evidence_refs: list[OpaqueId]
     proposed_evidence_drafts: list[AgentEvidenceProposalDraft]
     proposed_artifact_drafts: list[AgentArtifactProposalDraft]
-    error: ExecutionFailure | None
+    error: AgentExecutionFailure | None
     produced_at: UtcTimestamp
     decision_audit: DecisionAuditV2 | None = None
 
@@ -3188,11 +3634,110 @@ class JobOutcome(ContractModel):
     error: ExecutionFailure | None
     produced_at: UtcTimestamp
     decision_audit: DecisionAuditV2 | None = None
+    methods_review_target: MethodsReviewTargetV2 | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
+    methods_reviewer_result: MethodsReviewerResultV2 | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
+    methods_terminal_projection: MethodsTerminalProjectionV2 | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
 
     @model_validator(mode="after")
     def validate_outcome(self) -> JobOutcome:
-        _validate_outcome_shape(self.job_type, self.result_type, self.payload, self.error)
+        methods_handoff = self.methods_review_target is not None
+        methods_reviewer = self.methods_reviewer_result is not None
+        methods_terminal = self.methods_terminal_projection
+        if methods_handoff:
+            target = self.methods_review_target
+            assert target is not None
+            if (
+                self.job_type is not JobType.DIAGNOSE
+                or self.result_type is not OutcomeResultType.COMPLETED
+                or self.payload is not None
+                or self.error is not None
+                or methods_reviewer
+                or methods_terminal is not None
+                or target.source_job_id != self.job_id
+                or target.reviewed_state_revision != self.base_state_revision
+            ):
+                raise ValueError(
+                    "Methods V2 review target requires one matching completed DIAGNOSE Outcome"
+                )
+        elif methods_terminal is not None:
+            expected_result_type = {
+                "RESOLVED": OutcomeResultType.COMPLETED,
+                "UNRESOLVED": OutcomeResultType.INCONCLUSIVE,
+                "FAILED": OutcomeResultType.FAILED,
+            }[methods_terminal.status]
+            if (
+                self.job_type not in {JobType.DIAGNOSE, JobType.REVIEW}
+                or methods_terminal.case_id != self.case_id
+                or methods_terminal.source_job_id != self.job_id
+                or self.result_type is not expected_result_type
+                or self.payload is not None
+            ):
+                raise ValueError(
+                    "Methods V2 terminal projection must match its DIAGNOSE/REVIEW Outcome status"
+                )
+            if methods_terminal.status == "FAILED":
+                expected_error_code = {
+                    "RESOURCE_SNAPSHOT_DRIFT": ErrorCode.ASSET_VERSION_UNAVAILABLE,
+                    "SERVER_INVARIANT_VIOLATION": ErrorCode.OUTCOME_INVALID,
+                    "AUDIT_ARCHIVE_FAILED": ErrorCode.EXECUTION_RECORD_FAILED,
+                }[methods_terminal.reason_code]
+                if (
+                    self.error is None
+                    or self.error.code is not expected_error_code
+                    or self.error.retryable
+                    or self.error.reason_code != methods_terminal.reason_code
+                    or self.error.diagnostic_id != methods_terminal.diagnostic_id
+                ):
+                    raise ValueError(
+                        "failed Methods V2 terminal Outcome has the wrong execution failure"
+                    )
+            elif self.error is not None:
+                raise ValueError(
+                    "non-failed Methods V2 terminal Outcome must not carry an error"
+                )
+            if self.job_type is JobType.DIAGNOSE:
+                if methods_terminal.status == "RESOLVED" or methods_reviewer:
+                    raise ValueError(
+                        "Methods V2 DIAGNOSE terminal Outcome must be early and unresolved or failed"
+                    )
+            else:
+                validate_methods_reviewer_terminal_v2(
+                    self.methods_reviewer_result,
+                    methods_terminal,
+                    review_job_id=self.job_id,
+                    reviewed_state_revision=self.base_state_revision,
+                    expected_target=None,
+                )
+        elif not methods_reviewer:
+            _validate_outcome_shape(
+                self.job_type, self.result_type, self.payload, self.error
+            )
+        else:
+            raise ValueError(
+                "Methods V2 Reviewer result requires a terminal projection"
+            )
         _unique(self.consumed_evidence_refs, "consumed_evidence_refs")
+        methods_server_outcome = methods_handoff or methods_terminal is not None
+        if methods_server_outcome:
+            if (
+                self.consumed_evidence_refs
+                or self.proposed_evidence
+                or self.proposed_artifacts
+                or self.decision_audit is not None
+            ):
+                raise ValueError(
+                    "Methods V2 server Outcome must not carry legacy resources or audit"
+                )
+            return self
         if isinstance(
             self.payload, (GenericDiagnosisOutcome, GenericDiagnosisOutcomeV2)
         ) and (
@@ -3249,7 +3794,7 @@ def _validate_outcome_shape(
     job_type: JobType,
     result_type: OutcomeResultType,
     payload: OutcomePayload | None,
-    error: ExecutionFailure | None,
+    error: AgentExecutionFailure | None,
 ) -> None:
     allowed = {
         JobType.ROUTE: {OutcomeResultType.COMPLETED, OutcomeResultType.NO_CAPABILITY, OutcomeResultType.FAILED},
@@ -3314,6 +3859,14 @@ def _validate_decision_audit_binding(
     outcome: AgentJobOutcome | JobOutcome,
     audit: DecisionAuditV2 | None,
 ) -> None:
+    methods_v2_handoff = (
+        isinstance(outcome, JobOutcome)
+        and outcome.methods_review_target is not None
+    )
+    methods_v2_review = (
+        isinstance(outcome, JobOutcome)
+        and outcome.methods_reviewer_result is not None
+    )
     waiting_for_user_material = (
         isinstance(outcome.payload, DiagnosisOutcome)
         and outcome.result_type
@@ -3323,6 +3876,8 @@ def _validate_decision_audit_binding(
         outcome.result_type is not OutcomeResultType.FAILED
         and isinstance(outcome.payload, (DiagnosisOutcome, ReviewAssessment))
         and not waiting_for_user_material
+        and not methods_v2_handoff
+        and not methods_v2_review
     )
     if requires_audit != (audit is not None):
         if waiting_for_user_material:
@@ -3335,6 +3890,8 @@ def _validate_decision_audit_binding(
         )
     if audit is None:
         return
+    if methods_v2_handoff or methods_v2_review:
+        raise ValueError("Methods V2 Outcomes forbid a legacy decision audit")
     if (
         audit.job_id != outcome.job_id
         or audit.case_id != outcome.case_id
@@ -3646,6 +4203,24 @@ class CaseSnapshot(ContractModel):
             raise ValueError("active_job must resolve case.active_job_id")
         if self.active_job is not None and self.active_job.case_id != self.case.case_id:
             raise ValueError("active_job belongs to a different case")
+        if self.case.status is CaseStatus.REVIEWING:
+            active = self.active_job
+            if active is None or active.job_type is not JobType.REVIEW:
+                raise ValueError("REVIEWING snapshot requires an active REVIEW Job")
+            candidate = self.case.diagnosis_state.candidate_conclusion
+            if active.methods_review_target is not None:
+                if candidate is not None or active.review_target is not None:
+                    raise ValueError(
+                        "Methods V2 REVIEWING snapshot must remain Candidate-free"
+                    )
+            elif (
+                candidate is None
+                or candidate.status is not CandidateStatus.REVIEWING
+                or active.review_target is None
+            ):
+                raise ValueError(
+                    "legacy REVIEWING snapshot requires its REVIEWING Candidate target"
+                )
         if self.resume_source_job is not None:
             if self.case.status is not CaseStatus.INTERRUPTED:
                 raise ValueError("resume_source_job is only valid for INTERRUPTED cases")
@@ -3760,6 +4335,10 @@ class JobSpec(ContractModel):
     logparse_tool_ref: VersionedRef | None
     logparse_product: NonEmptyText | None
     review_target_binding: ReviewTargetBinding | None
+    methods_review_target: MethodsReviewTargetV2 | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
     replacement_for_job_id: OpaqueId | None
     resource_limits: ResourceLimits
 
@@ -3815,13 +4394,46 @@ class JobSpec(ContractModel):
         ):
             raise ValueError("only DIAGNOSE JobSpec may carry diagnosis-mode fields")
         if self.job_type is JobType.ROUTE:
-            if self.review_target_binding is not None:
-                raise ValueError("ROUTE JobSpec forbids skill/review target")
+            if (
+                self.review_target_binding is not None
+                or self.methods_review_target is not None
+            ):
+                raise ValueError("ROUTE JobSpec forbids review targets")
         elif self.job_type is JobType.DIAGNOSE:
-            if self.review_target_binding is not None:
-                raise ValueError("DIAGNOSE JobSpec requires skill_ref and forbids review target")
-        elif self.review_target_binding is None or self.logparse_tool_ref is not None:
-            raise ValueError("REVIEW JobSpec requires review target and forbids logparse")
+            if (
+                self.review_target_binding is not None
+                or self.methods_review_target is not None
+            ):
+                raise ValueError("DIAGNOSE JobSpec forbids review targets")
+        else:
+            if (self.review_target_binding is None) == (
+                self.methods_review_target is None
+            ):
+                raise ValueError(
+                    "REVIEW JobSpec requires exactly one Candidate or Methods V2 target"
+                )
+            if self.logparse_tool_ref is not None:
+                raise ValueError("REVIEW JobSpec forbids logparse")
+            if self.methods_review_target is not None:
+                target = self.methods_review_target
+                if any(
+                    (
+                        self.evidence_bindings,
+                        self.attachment_refs,
+                        self.previous_outcome_refs,
+                        self.artifact_bindings,
+                    )
+                ):
+                    raise ValueError(
+                        "Methods V2 REVIEW JobSpec forbids legacy resource and Outcome inputs"
+                    )
+                if (
+                    target.skill_ref != self.skill_ref
+                    or target.reviewed_state_revision != self.target_state_revision
+                ):
+                    raise ValueError(
+                        "Methods V2 review target must match JobSpec skill and state"
+                    )
         _validate_role_bindings(
             self.job_type,
             diagnosis_mode=self.diagnosis_mode,
@@ -4087,6 +4699,10 @@ class TransitionPlan(ContractModel):
     unresolved_result_draft: UnresolvedResultDraft | None = None
     generic_result: GenericResult | None = None
     generic_result_v2_draft: GenericResultV2Draft | None = None
+    methods_terminal_projection: MethodsTerminalProjectionV2 | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
     clear_active_job: bool
     reason: NonEmptyText
 
@@ -4108,6 +4724,43 @@ class TransitionPlan(ContractModel):
         ):
             raise ValueError("V1 and V2 generic plan results are mutually exclusive")
         generic_result = self.generic_result or self.generic_result_v2_draft
+        methods_terminal = self.methods_terminal_projection
+        if methods_terminal is not None:
+            delta = self.accepted_state_delta
+            delta_is_empty = delta.problem_spec_patch is None and not any(
+                (
+                    delta.add_user_facts,
+                    delta.proposed_facts,
+                    delta.add_active_hypotheses,
+                    delta.update_hypotheses,
+                    delta.reject_hypotheses,
+                    delta.add_open_questions,
+                    delta.resolve_questions,
+                    delta.add_pending_requirements,
+                    delta.fulfill_requirements,
+                    delta.add_evidence_bindings,
+                )
+            )
+            if self.target_case_status is not CaseStatus(methods_terminal.status):
+                raise ValueError(
+                    "Methods terminal projection status must equal the planned Case status"
+                )
+            if (
+                not delta_is_empty
+                or generic_result is not None
+                or self.unresolved_result_draft is not None
+                or self.accepted_evidence_proposal_keys
+                or self.accepted_artifact_proposal_keys
+                or self.accepted_candidate_proposal_key is not None
+                or self.candidate_mutation is not None
+                or self.next_job_spec is not None
+                or self.final_result_target is not None
+                or not self.clear_active_job
+                or self.outcome_disposition is not OutcomeDisposition.APPLIED
+            ):
+                raise ValueError(
+                    "Methods terminal plans must be Candidate-free terminal projections"
+                )
         if generic_result is not None:
             expected_status = CaseStatus(generic_result.status.value)
             if self.target_case_status is not expected_status:
@@ -4133,7 +4786,11 @@ class TransitionPlan(ContractModel):
             ):
                 raise ValueError("generic terminal plans must clear selected_skill_ref")
         if self.target_case_status is CaseStatus.UNRESOLVED:
-            if self.unresolved_result_draft is None and generic_result is None:
+            if (
+                self.unresolved_result_draft is None
+                and generic_result is None
+                and methods_terminal is None
+            ):
                 raise ValueError(
                     "UNRESOLVED plans require an unresolved or generic result"
                 )
@@ -4204,6 +4861,33 @@ class TransitionPlan(ContractModel):
                 elif review_binding.accepted_candidate_proposal_key is not None:
                     raise ValueError(
                         "next REVIEW Job cannot bind an unaccepted candidate proposal"
+                    )
+            methods_target = self.next_job_spec.methods_review_target
+            if methods_target is not None:
+                if (
+                    self.target_case_status is not CaseStatus.REVIEWING
+                    or self.accepted_candidate_proposal_key is not None
+                    or self.candidate_mutation is not None
+                    or self.accepted_evidence_proposal_keys
+                    or self.accepted_artifact_proposal_keys
+                ):
+                    raise ValueError(
+                        "Methods V2 REVIEW transition must be Candidate-free and accept no legacy resources"
+                    )
+                methods_replacement = (
+                    self.next_job_spec.replacement_for_job_id is not None
+                )
+                if methods_replacement and self.job_updates:
+                    raise ValueError(
+                        "Methods V2 REVIEW replacement cannot complete another Job"
+                    )
+                if not methods_replacement and not any(
+                    update.job_id == methods_target.source_job_id
+                    and update.target_status is JobStatus.SUCCEEDED
+                    for update in self.job_updates
+                ):
+                    raise ValueError(
+                        "Methods V2 REVIEW transition must complete its exact source Job"
                     )
         return self
 
@@ -4405,6 +5089,20 @@ class CaseAggregate(ContractModel):
             if self.case.status is CaseStatus.REVIEWING:
                 if active_job.job_type is not JobType.REVIEW:
                     raise ValueError("REVIEWING Case must point to a REVIEW Job")
+                candidate = self.case.diagnosis_state.candidate_conclusion
+                if active_job.methods_review_target is not None:
+                    if candidate is not None or active_job.review_target is not None:
+                        raise ValueError(
+                            "Methods V2 REVIEWING Case must remain Candidate-free"
+                        )
+                elif (
+                    candidate is None
+                    or candidate.status is not CandidateStatus.REVIEWING
+                    or active_job.review_target is None
+                ):
+                    raise ValueError(
+                        "legacy REVIEWING Case requires its REVIEWING Candidate target"
+                    )
             elif self.case.status is CaseStatus.RUNNING and active_job.job_type is JobType.REVIEW:
                 raise ValueError("RUNNING Case must point to a ROUTE or DIAGNOSE Job")
 
@@ -4472,6 +5170,19 @@ class CaseAggregate(ContractModel):
 
         replacement_sources: list[str] = []
         for job in self.jobs.values():
+            if job.methods_review_target is not None:
+                target = job.methods_review_target
+                source_job = self.jobs.get(target.source_job_id)
+                if (
+                    source_job is None
+                    or source_job.job_type is not JobType.DIAGNOSE
+                    or source_job.status is not JobStatus.SUCCEEDED
+                    or source_job.skill_ref != target.skill_ref
+                    or source_job.base_state_revision != target.reviewed_state_revision
+                ):
+                    raise ValueError(
+                        "Methods V2 REVIEW target must resolve its exact completed DIAGNOSE source"
+                    )
             if (
                 job.diagnosis_mode is DiagnosisMode.GENERIC
                 and job.generic_problem_text != self.case.raw_problem_text
@@ -4636,6 +5347,68 @@ class CaseAggregate(ContractModel):
             if job is None or job.runtime_epoch != failure_record.runtime_epoch:
                 raise ValueError("ExecutionFailureRecord must match its Job runtime epoch")
 
+        methods_terminal = self.case.methods_result
+        if methods_terminal is not None:
+            matching_outcomes = [
+                outcome
+                for outcome in self.outcomes.values()
+                if outcome.methods_terminal_projection == methods_terminal
+                and self.outcome_processing_records[outcome.outcome_id].disposition
+                is OutcomeDisposition.APPLIED
+            ]
+            if len(matching_outcomes) != 1:
+                raise ValueError(
+                    "Methods terminal Case must bind exactly one saved terminal Outcome"
+                )
+            source_outcome = matching_outcomes[0]
+            source_job = self.jobs.get(source_outcome.job_id)
+            processing = self.outcome_processing_records.get(
+                source_outcome.outcome_id
+            )
+            expected_job_status = (
+                JobStatus.FAILED
+                if methods_terminal.status == "FAILED"
+                else JobStatus.SUCCEEDED
+            )
+            if (
+                source_job is None
+                or methods_terminal.case_id != self.case.case_id
+                or methods_terminal.source_job_id != source_job.job_id
+                or source_job.status is not expected_job_status
+                or source_job.job_type not in {JobType.DIAGNOSE, JobType.REVIEW}
+                or source_outcome.case_id != self.case.case_id
+                or processing is None
+                or processing.disposition is not OutcomeDisposition.APPLIED
+                or processing.accepted_evidence_ids
+                or processing.accepted_artifact_ids
+                or processing.generated_artifact_ids
+                or processing.created_job_id is not None
+                or self.case.diagnosis_state.candidate_conclusion is not None
+                or any(
+                    artifact.kind
+                    in {
+                        ArtifactKind.USER_RESULT,
+                        ArtifactKind.USER_RESULT_ARCHIVE,
+                    }
+                    for artifact in self.artifacts.values()
+                )
+            ):
+                raise ValueError(
+                    "Methods terminal Case must bind its applied resource-free source Outcome"
+                )
+            if methods_terminal.status == "FAILED":
+                failure = self.case.failure
+                if (
+                    failure is None
+                    or source_outcome.error is None
+                    or failure.code is not source_outcome.error.code
+                    or failure.source_job_id != source_job.job_id
+                    or failure.source_outcome_id != source_outcome.outcome_id
+                ):
+                    raise ValueError(
+                        "failed Methods terminal Case must bind its mapped CaseFailure"
+                    )
+
         if self.case.generic_result is not None:
             generic = self.case.generic_result
             source_job = self.jobs.get(generic.source_job_id)
@@ -4750,7 +5523,11 @@ class CaseAggregate(ContractModel):
         if self.case.status in {
             CaseStatus.RESOLVED,
             CaseStatus.PARTIALLY_RESOLVED,
-        } and self.case.generic_result is None and self.case.generic_result_v2 is None:
+        } and (
+            self.case.generic_result is None
+            and self.case.generic_result_v2 is None
+            and methods_terminal is None
+        ):
             assert self.case.final_result is not None
             producing_job = self.jobs.get(
                 self.case.final_result.proposed_by_job_id
@@ -4780,6 +5557,7 @@ class CaseAggregate(ContractModel):
             self.case.status is CaseStatus.UNRESOLVED
             and self.case.generic_result is None
             and self.case.generic_result_v2 is None
+            and methods_terminal is None
         ):
             assert self.case.unresolved_result is not None
             unresolved = self.case.unresolved_result
@@ -4829,7 +5607,7 @@ class CaseAggregate(ContractModel):
 
 
 class StateFile(ContractModel):
-    schema_version: Literal[7]
+    schema_version: Literal[8]
     contract_revision: Literal[CONTRACT_REVISION]
     generation: NonNegativeInt
     installation_id: OpaqueId
@@ -5101,6 +5879,10 @@ class CaseView(ContractModel):
     unresolved_result: UnresolvedResult | None = None
     generic_result: GenericResult | None = None
     generic_result_v2: GenericResultV2 | None = None
+    methods_result: MethodsTerminalProjectionV2 | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
     failure: CaseFailure | None
     artifacts: list[ArtifactSummary]
     created_at: UtcTimestamp
@@ -5113,6 +5895,23 @@ class CaseView(ContractModel):
         if self.generic_result is not None and self.generic_result_v2 is not None:
             raise ValueError("V1 and V2 generic CaseView results are mutually exclusive")
         generic_result = self.generic_result or self.generic_result_v2
+        methods_terminal = self.methods_result
+        if methods_terminal is not None:
+            if (
+                methods_terminal.case_id != self.case_id
+                or self.status is not CaseStatus(methods_terminal.status)
+            ):
+                raise ValueError(
+                    "Methods result identity/status must equal its CaseView"
+                )
+            if (
+                generic_result is not None
+                or self.final_result is not None
+                or self.unresolved_result is not None
+            ):
+                raise ValueError(
+                    "Methods terminal CaseView forbids legacy result projections"
+                )
         if generic_result is not None:
             if self.status is not CaseStatus(generic_result.status.value):
                 raise ValueError("generic result status must equal CaseView status")
@@ -5123,12 +5922,16 @@ class CaseView(ContractModel):
             ):
                 raise ValueError("generic CaseView forbids specialized result fields")
         if self.status in {CaseStatus.RESOLVED, CaseStatus.PARTIALLY_RESOLVED}:
-            if generic_result is None and (
+            if generic_result is None and methods_terminal is None and (
                 self.final_result is None
                 or self.final_result.status is not CandidateStatus.ACCEPTED
             ):
                 raise ValueError("resolved case views require an ACCEPTED final result")
-            if generic_result is None and self.final_result is not None:
+            if (
+                generic_result is None
+                and methods_terminal is None
+                and self.final_result is not None
+            ):
                 expected = (
                     DiagnosisResolutionStatus.COMPLETE
                     if self.status is CaseStatus.RESOLVED
@@ -5141,7 +5944,11 @@ class CaseView(ContractModel):
         elif self.final_result is not None:
             raise ValueError("non-resolved case views must have final_result=null")
         if self.status is CaseStatus.UNRESOLVED:
-            if generic_result is None and self.unresolved_result is None:
+            if (
+                generic_result is None
+                and methods_terminal is None
+                and self.unresolved_result is None
+            ):
                 raise ValueError("UNRESOLVED case views require unresolved_result")
         elif self.unresolved_result is not None:
             raise ValueError("only UNRESOLVED case views may carry unresolved_result")
@@ -5210,7 +6017,7 @@ class CaseView(ContractModel):
         if self.status in {
             CaseStatus.RESOLVED,
             CaseStatus.PARTIALLY_RESOLVED,
-        } and generic_result is None:
+        } and generic_result is None and methods_terminal is None:
             assert self.final_result is not None
             if len(user_results) != 1 or (
                 user_results[0].created_by_job_id != self.final_result.proposed_by_job_id
@@ -5225,7 +6032,11 @@ class CaseView(ContractModel):
                 raise ValueError(
                     "resolved CaseView requires the accepted candidate's USER_RESULT_ARCHIVE"
                 )
-        elif self.status is CaseStatus.UNRESOLVED and generic_result is None:
+        elif (
+            self.status is CaseStatus.UNRESOLVED
+            and generic_result is None
+            and methods_terminal is None
+        ):
             assert self.unresolved_result is not None
             if (
                 len(user_results) != 1
@@ -5257,7 +6068,11 @@ class CaseView(ContractModel):
             for artifact in self.artifacts
             if artifact.kind is ArtifactKind.AUDIT_BUNDLE
         ]
-        if self.status is CaseStatus.UNRESOLVED and generic_result is None:
+        if (
+            self.status is CaseStatus.UNRESOLVED
+            and generic_result is None
+            and methods_terminal is None
+        ):
             assert self.unresolved_result is not None
             if (
                 len(audit_bundles) != 1
@@ -5815,8 +6630,8 @@ class StateExportResource(ContractModel):
 
 
 class StateExport(ContractModel):
-    export_schema_version: Literal[7]
-    schema_version: Literal[7]
+    export_schema_version: Literal[8]
+    schema_version: Literal[8]
     contract_revision: Literal[CONTRACT_REVISION]
     source_generation: NonNegativeInt
     installation_id: OpaqueId
@@ -5885,7 +6700,7 @@ class ContractManifestEntry(ContractModel):
 
 
 class ContractManifest(ContractModel):
-    schema_version: Literal[7]
+    schema_version: Literal[8]
     contract_revision: Literal[CONTRACT_REVISION]
     generator_version: NonEmptyText
     files: list[ContractManifestEntry]
@@ -6011,6 +6826,9 @@ __all__ = [model.__name__ for model in _CONTRACT_MODEL_TYPES] + [
     "DescriptionText",
     "EvidenceLocator",
     "JsonPointer",
+    "MethodsDiagnosticIdV2",
+    "MethodsTerminalReasonCodeV2",
+    "MethodsTerminalStatusV2",
     "NonEmptyText",
     "NonNegativeInt",
     "OpaqueId",
@@ -6036,6 +6854,7 @@ __all__ = [model.__name__ for model in _CONTRACT_MODEL_TYPES] + [
     "finalize_generic_result_v2",
     "finalize_unresolved_result",
     "validate_job_instruction_for_job",
+    "validate_methods_reviewer_terminal_v2",
     "review_required_evidence_refs",
     "validate_workspace_manifest_for_job",
     "workspace_attachment_relative_path",

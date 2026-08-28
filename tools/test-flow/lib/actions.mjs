@@ -90,6 +90,10 @@ import {
   CLAUDE_DEEPSEEK_E2E_CALLS,
   CLAUDE_DEEPSEEK_METHODS_CALLS,
 } from "../quick-validation/claude-deepseek/runtime/claude-deepseek-contract.mjs";
+import {
+  buildEvidenceV2CoreVerdict,
+  EVIDENCE_V2_CORE_RECEIPT,
+} from "../../validation/evidence-v2-core.mjs";
 
 const LINUX_CLIENT_BROWSER_RUNNER_RELATIVE = "tools/test-flow/runtime-support/linux_client_browser_runner.py";
 const LINUX_CLIENT_BROWSER_ARGUMENT_PROFILE = "chrome-headless-shell-for-testing-local-v1";
@@ -1028,6 +1032,20 @@ export function materializePytestSummary(stageEvidence) {
   const summary = parseJUnitSummary(junitPath);
   writeJsonSync(path.join(stageEvidence, "pytest-summary.json"), summary);
   return summary;
+}
+
+export function materializeEvidenceV2CoreVerdict({
+  sourceSnapshotDigest,
+  sourceSnapshotRoot,
+  gateRoot: evidenceRoot,
+}) {
+  const verdict = buildEvidenceV2CoreVerdict({
+    sourceSnapshotDigest,
+    sourceRoot: sourceSnapshotRoot,
+    gateRoot: evidenceRoot,
+  });
+  writeJsonSync(path.join(evidenceRoot, "core-verdict.json"), verdict);
+  return verdict;
 }
 
 export function evaluatePytestSummary(summary, { minPassed = 1, skipPolicy = "forbid-all-skipped" } = {}) {
@@ -3461,7 +3479,7 @@ export async function executeGate(context, stage, gateId, gate) {
       if (prepared.error) return { status: "BLOCKED", failure_domain: "INFRA", code: prepared.error, elapsed_seconds: 0 };
       environment = prepared.env;
     }
-    const result = await pytestAction(scoped, stage, selectors, {
+    let result = await pytestAction(scoped, stage, selectors, {
       extra: gate.pytest_args ?? [],
       env: environment,
       real: Boolean(gate.environment_profile),
@@ -3470,6 +3488,23 @@ export async function executeGate(context, stage, gateId, gate) {
       selection,
       isolatedAgent: Boolean(gate.environment_profile && gate.environment_profile !== "real-logparse"),
     });
+    if (result.status === "PASS" && gate.result_receipt === EVIDENCE_V2_CORE_RECEIPT) {
+      try {
+        const coreVerdict = materializeEvidenceV2CoreVerdict({
+          sourceSnapshotDigest: context.sourceSnapshotDigest,
+          sourceSnapshotRoot: context.sourceSnapshotRoot,
+          gateRoot: root,
+        });
+        result = { ...result, core_verdict: coreVerdict };
+      } catch (error) {
+        result = {
+          ...result,
+          status: "ERROR",
+          failure_domain: "HARNESS",
+          code: error?.code ?? "EVIDENCE_V2_CORE_RECEIPT_INVALID",
+        };
+      }
+    }
     if (gate.environment_profile && gate.environment_profile !== "real-logparse") {
       try {
         const modelUsage = collectIsolatedModelUsage(scoped, gate.environment_profile);

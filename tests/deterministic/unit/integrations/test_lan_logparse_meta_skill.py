@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -12,7 +13,12 @@ from problem_locator.runtime.methods_skill import load_specialized_skill_registr
 
 ROOT = Path(__file__).resolve().parents[4]
 META_SKILL = ROOT / ".claude/skills/wiki-to-logparse-diagnosis-skill"
-VALIDATOR_PATH = META_SKILL / "scripts/validate_generated_skill.py"
+VALIDATOR_PATH = Path(
+    os.environ.get(
+        "TEST_LAN_DIAGNOSIS_VALIDATOR",
+        META_SKILL / "scripts/validate_generated_skill.py",
+    )
+)
 
 
 def _load(path: Path, name: str):
@@ -80,26 +86,33 @@ description: 从 Server 冻结的双端日志中定位 RPC 超时原因。
 
 # RPC 超时定位
 
-读取 `request.json`、`methods.json` 和 `target_logs.json`。只读取
-`target_logs[*].log_path` 列出的冻结日志，不遍历其他路径。
+读取冻结 `request.json`、Server 写入的 `method-evidence-graph.json` 和
+`method-evaluation-plan.json`。方法规则需要用户输入时读取 request 中的冻结值。日志证据只能来自
+Evidence Graph 和 Evaluation Plan；不读取目标日志，也不重新扫描 marker。
 
-先扫描所有正向 marker，再按需读取方法卡；不得在第一个命中处停止。检查全部相关调用，只有证据
-足以关联同一次调用时才合并。每个原因、每次独立事件分别输出，使用 `sources` 保留完整日志原文，
-并使用同源 `identity_tokens` 保留事件身份。证据不足时说明观测限制和缺失证据。
+按 Evaluation Plan 顺序逐项评估全部 `evaluation_ref`，不能在第一个确认项后停止。每项只输出
+`evaluation_ref`、`verdict` 和 `reason`；证据无法决定时使用 `UNKNOWN`，并在 reason 中说明观测限制。
+Server 生成的 evidence sources 可能来自 target_logs，并在内部保留 identity_tokens。
 
 Logparse 预处理、目标日志冻结、Review 和最终 Artifact 发布由 Server 完成；诊断阶段不重新执行这些操作。
 `client_pid` 和 `server_pid` 是可选事实；缺失时不请求补充，也不构成证据缺口。
 """
 
 
-def _method_card() -> str:
-    return """# API 执行时间过长
+def _method_card(
+    *,
+    title: str = "API 执行时间过长",
+    markers: tuple[str, ...] = ("API_COMPLETE service=", "QUEUE_DELAY service="),
+) -> str:
+    marker_lines = "\n".join(markers)
+    return f"""# {title}
 
 ## 适用条件
 目标 API 调用超时。
 
 ## 所需证据
-完整 API_COMPLETE 或 QUEUE_DELAY 日志。
+完整正向日志：
+{marker_lines}
 
 ## 计算与判断
 使用 Wiki 中的 cost_us 和 queue_us。
@@ -111,7 +124,7 @@ def _method_card() -> str:
 日志缺失不能排除原因。
 
 ## 输出含义
-每个独立事件分别输出完整 sources 和同源 identity_tokens。
+Server 把全部独立事件绑定到 evaluation_ref；Agent 只返回该引用、verdict 和 reason。
 """
 
 
@@ -329,10 +342,55 @@ def test_validator_rejects_shortened_event_name_marker(tmp_path: Path) -> None:
     )
 
 
+def test_validator_rejects_marker_from_another_method_reference(
+    tmp_path: Path,
+) -> None:
+    registration, wiki, _ = _write_valid_registration(tmp_path)
+    methods_path = _methods_path(registration)
+    methods = json.loads(methods_path.read_text(encoding="utf-8"))
+    methods["methods"][0]["evidence_markers"] = ["API_COMPLETE service="]
+    methods["methods"].append(
+        {
+            "id": "queue-delay",
+            "title": "队列排队过长",
+            "reference": "references/queue-delay.md",
+            "priority": 2,
+            "evidence_markers": ["QUEUE_DELAY service="],
+        }
+    )
+    _write_json(methods_path, methods)
+    references = methods_path.parent / "references"
+    (references / "api-execution-slow.md").write_text(
+        _method_card(markers=("API_COMPLETE service=",)),
+        encoding="utf-8",
+    )
+    (references / "queue-delay.md").write_text(
+        _method_card(
+            title="队列排队过长",
+            markers=("QUEUE_DELAY service=",),
+        ),
+        encoding="utf-8",
+    )
+    assert _validate(registration, wiki)["ok"] is True
+
+    methods["methods"][0]["evidence_markers"] = ["QUEUE_DELAY service="]
+    _write_json(methods_path, methods)
+
+    rejected = _validate(registration, wiki)
+    assert rejected["ok"] is False
+    assert rejected["errors"] == [
+        "method 1 evidence marker is absent from its method reference: QUEUE_DELAY service="
+    ]
+
+
 def test_valid_production_registration_passes(tmp_path: Path) -> None:
     registration, wiki, identity = _write_valid_registration(tmp_path)
 
     result = _validate(registration, wiki, source_identity=identity)
+    skill_text = (
+        registration / "package/diagnose-rpc-timeout/SKILL.md"
+    ).read_text(encoding="utf-8")
+    methods = json.loads(_methods_path(registration).read_text(encoding="utf-8"))
 
     assert result["ok"] is True, result["errors"]
     assert result["registration_id"] == registration.name
@@ -341,6 +399,9 @@ def test_valid_production_registration_passes(tmp_path: Path) -> None:
     assert result["method_count"] == 1
     assert result["template_count"] == 2
     assert result["log_template_extraction_version"] == 2
+    assert methods["required_user_inputs"] == REQUIRED_INPUTS
+    assert "request.json" in skill_text
+    assert all(field in skill_text for field in ("evaluation_ref", "verdict", "reason"))
 
 
 def test_valid_production_registration_loads_in_server(tmp_path: Path) -> None:

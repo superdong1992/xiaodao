@@ -477,6 +477,8 @@ _REST_FIELD_DESCRIPTIONS = {
     "declared_sha256": "Lowercase SHA-256 digest declared before upload.",
     "declared_size": "Exact byte length declared before upload.",
     "details": "Structured, safe diagnostic details; may be empty.",
+    "diagnostic_id": "Stable identifier that correlates the related terminal result or failure across public results and execution records.",
+    "diagnostic_evaluation_ref": "Evaluation reference associated with the terminal diagnostic, or null.",
     "diagnosis_mode": "Whether the Job uses a specialized or generic diagnosis path.",
     "diagnosis_state_revision": "Internal diagnosis-content revision; never use for REST write concurrency.",
     "dispatch_pending": "True when durable work exists but dispatch has not yet been confirmed.",
@@ -484,6 +486,8 @@ _REST_FIELD_DESCRIPTIONS = {
     "downloadable": "Whether the artifact has externally downloadable immutable bytes.",
     "error": "Structured error for failures; null for successful envelopes.",
     "evidence_refs": "UUIDs of evidence records supporting this statement.",
+    "evidence_graph_ref": "Stable reference of the server-produced Evidence Graph.",
+    "evaluation_id": "Stable identifier shared by the Specialist and Reviewer Jobs.",
     "excluded_factors": "Investigated factors excluded by the available evidence.",
     "expected": "Expected value or state associated with the error detail.",
     "expected_behavior": "Behavior that should occur when the system works correctly.",
@@ -514,6 +518,7 @@ _REST_FIELD_DESCRIPTIONS = {
     "max_bytes": "Maximum accepted attachment size in bytes for this API version.",
     "max_count": "Maximum number of attachments accepted for this requirement.",
     "max_utf8_bytes": "Maximum UTF-8 byte length accepted for the input value.",
+    "methods_result": "Public Evidence V2 terminal result, present only after a Methods evaluation reaches a terminal state.",
     "message": "Safe human-readable status or error message.",
     "method": "HTTP method required for the reserved upload.",
     "min_count": "Minimum number of attachments required.",
@@ -534,12 +539,13 @@ _REST_FIELD_DESCRIPTIONS = {
     "pending_requirements": "Input and attachment requirements, including open and fulfilled entries.",
     "primary_resource_id": "UUID of the primary resource created or changed by the write.",
     "problem_spec": "Structured scope, goals, constraints, and completion criteria.",
+    "plan_ref": "Stable reference of the complete Methods Evaluation Plan.",
     "prompt": "Human-readable instruction shown when collecting this requirement.",
     "proposed_by_job_id": "UUID of the Job that proposed the conclusion.",
     "provenance": "Origin metadata for a diagnosis item.",
     "raw_problem_text": "Original human-readable problem statement retained with the Case.",
     "ready": "True only when every required service subsystem is ready.",
-    "reason_code": "Stable reason explaining why the Case is unresolved.",
+    "reason_code": "Stable code explaining an unresolved or failed result.",
     "recommended_next_step": "Suggested user action after an unresolved result.",
     "request_id": "Client-generated idempotency key for one logical write.",
     "requested_by_job_id": "UUID of the Job that requested this information.",
@@ -548,6 +554,7 @@ _REST_FIELD_DESCRIPTIONS = {
     "required_rule_ids": "Rule identifiers that establish this causal factor.",
     "requirement_id": "Canonical lowercase UUID of a requirement.",
     "resolution_status": "Whether the conclusion completely or partially resolves the problem.",
+    "result_ref": "Stable reference of the server-produced Methods terminal result.",
     "resource_id": "Canonical lowercase UUID of the resource associated with an error.",
     "resource_kind": "Whether the resource represents a file or directory.",
     "resource_ref": "Safe resource reference associated with an error detail.",
@@ -556,7 +563,14 @@ _REST_FIELD_DESCRIPTIONS = {
     "revision": "Positive revision number of versioned content.",
     "role": "Causal role assigned to the factor.",
     "root_cause_analysis": "Human-readable reasoning supporting a generic result.",
+    "confirmed_evaluation_refs": "Evaluation references confirmed by both isolated roles.",
+    "confirmed_method_ids": "Method identifiers confirmed by both isolated roles.",
+    "confirmed_event_refs": "Evidence event references attached to confirmed evaluations.",
+    "confirmed_hit_refs": "Evidence hit references attached to confirmed evaluations.",
+    "limitations": "Known limits inherited from the frozen evidence collection.",
+    "reasons": "Fixed server-owned explanations for the terminal state.",
     "scope": "System boundary within which the diagnosis should operate.",
+    "schema_version": "Wire schema version of this nested result object.",
     "selected_skill_ref": "Versioned specialized diagnosis capability selected for the Case, or null.",
     "sha256": "Lowercase SHA-256 digest of the complete immutable resource bytes.",
     "size": "Exact resource size in bytes.",
@@ -624,6 +638,10 @@ def _require_serialized_response_fields(schema: dict[str, Any]) -> None:
     """Reflect model_json's complete-field response serialization in OpenAPI."""
 
     component_schemas = schema["components"]["schemas"]
+    conditionally_omitted = {
+        "CaseFailure": frozenset({"reason_code", "diagnostic_id"}),
+        "CaseView": frozenset({"methods_result"}),
+    }
     pending: set[str] = set()
     for path_item in schema["paths"].values():
         for method, operation in path_item.items():
@@ -642,7 +660,10 @@ def _require_serialized_response_fields(schema: dict[str, Any]) -> None:
         component = component_schemas[schema_name]
         properties = component.get("properties", {})
         if component.get("type") == "object" and properties:
-            component["required"] = list(properties)
+            omitted = conditionally_omitted.get(schema_name, frozenset())
+            component["required"] = [
+                field_name for field_name in properties if field_name not in omitted
+            ]
         pending.update(_component_schema_refs(component) - visited)
 
 

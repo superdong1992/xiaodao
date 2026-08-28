@@ -36,10 +36,16 @@ import {
 } from "../runtime-support/codex-luna-contract.mjs";
 
 const PINNED_CODEX = "/Applications/ChatGPT.app/Contents/Resources/codex";
-const WORKSPACE = "/private/tmp/test-flow-codex-luna/invocation";
-const SKILL = `${WORKSPACE}/.agents/skills/diagnose-rpc-timeout/SKILL.md`;
-const CODEX_HOME = "/private/tmp/test-flow-codex-luna/codex-home";
-const SHELL_HOME = `${WORKSPACE}/.shell-home`;
+const WORKSPACE = path.resolve("/private/tmp/test-flow-codex-luna/invocation");
+const SKILL = path.join(
+  WORKSPACE,
+  ".agents",
+  "skills",
+  "diagnose-rpc-timeout",
+  "SKILL.md",
+);
+const CODEX_HOME = path.resolve("/private/tmp/test-flow-codex-luna/codex-home");
+const SHELL_HOME = path.join(WORKSPACE, ".shell-home");
 const THREAD_ID = "0198-thread-one";
 const TURN_ID = "0198-turn-one";
 const SECRET = "secret-access-token-value-that-must-never-leak";
@@ -283,13 +289,18 @@ test("isolated config uses only a named least-privilege profile and binds one ab
   assert.match(generation.config_toml, /\[permissions\.test-flow-codex-luna-generation\.filesystem\.":workspace_roots"\]\n"\." = "write"/);
   assert.match(diagnosis.config_toml, /\[permissions\.test-flow-codex-luna-diagnosis\.filesystem\.":workspace_roots"\]\n"\." = "read"/);
   assert.match(generation.config_toml, /\[permissions\.test-flow-codex-luna-generation\.network\]\nenabled = false/);
-  assert.match(generation.config_toml, /\[\[skills\.config\]\]\npath = "\/private\/tmp\/test-flow-codex-luna\/invocation\/\.agents\/skills\/diagnose-rpc-timeout\/SKILL\.md"\nenabled = true/);
+  assert.ok(generation.config_toml.includes(
+    `[[skills.config]]\npath = ${JSON.stringify(SKILL)}\nenabled = true`,
+  ));
   for (const name of CODEX_LUNA_SYSTEM_SKILL_NAMES) {
-    const configuredPath = systemSkillPath(name).replaceAll("/", "\\/").replaceAll(".", "\\.");
-    assert.match(generation.config_toml, new RegExp(`\\[\\[skills\\.config\\]\\]\\npath = "${configuredPath}"\\nenabled = false`));
+    assert.ok(generation.config_toml.includes(
+      `[[skills.config]]\npath = ${JSON.stringify(systemSkillPath(name))}\nenabled = false`,
+    ));
   }
   assert.match(generation.config_toml, /\[shell_environment_policy\]\ninherit = "none"\nignore_default_excludes = false/);
-  assert.match(generation.config_toml, /\[shell_environment_policy\.set\]\nPATH = "\/usr\/bin:\/bin:\/usr\/sbin:\/sbin"\nLANG = "C\.UTF-8"\nHOME = "\/private\/tmp\/test-flow-codex-luna\/invocation\/\.shell-home"\nPYTHONDONTWRITEBYTECODE = "1"\nPYTHONNOUSERSITE = "1"/);
+  assert.ok(generation.config_toml.includes(
+    `[shell_environment_policy.set]\nPATH = "/usr/bin:/bin:/usr/sbin:/sbin"\nLANG = "C.UTF-8"\nHOME = ${JSON.stringify(SHELL_HOME)}\nPYTHONDONTWRITEBYTECODE = "1"\nPYTHONNOUSERSITE = "1"`,
+  ));
   assert.equal(generation.shell_environment.codex_home_forwarded, false);
   assert.deepEqual(generation.shell_environment.keys, ["PATH", "LANG", "HOME", "PYTHONDONTWRITEBYTECODE", "PYTHONNOUSERSITE"]);
   assert.doesNotMatch(generation.config_toml, /CODEX_HOME|\[tools\]/);
@@ -310,7 +321,7 @@ test("isolated config uses only a named least-privilege profile and binds one ab
     (error) => error.code === "CODEX_LUNA_APP_SERVER_SKILL_OUTSIDE_WORKSPACE",
   );
   const servicePrivateSkill = path.join(CODEX_HOME, "skills", "service-skill", "SKILL.md");
-  const servicePrivateHome = "/private/tmp/test-flow-codex-luna/service-shell-home";
+  const servicePrivateHome = path.resolve("/private/tmp/test-flow-codex-luna/service-shell-home");
   const serviceProfile = buildCodexLunaIsolatedConfig({ workspaceRoot: WORKSPACE, skillPath: servicePrivateSkill, codexHome: CODEX_HOME, shellHome: servicePrivateHome, mode: "service" });
   assert.equal(serviceProfile.skill_path, servicePrivateSkill);
   assert.equal(serviceProfile.shell_home, servicePrivateHome);

@@ -39,6 +39,15 @@ METHOD_KEYS = {"id", "title", "reference", "priority", "evidence_markers"}
 SOURCE_LOG_TEMPLATES_REFERENCE = "references/source-log-templates.md"
 SOURCE_IDENTITY_SCHEMA_VERSION = 2
 LOG_TEMPLATE_EXTRACTION_VERSION = 1
+REQUIRED_SKILL_PHRASES = (
+    "request.json",
+    "method-evidence-graph.json",
+    "method-evaluation-plan.json",
+    "evaluation_ref",
+    "verdict",
+    "reason",
+    "UNKNOWN",
+)
 
 
 def _ordinary(path: Path, label: str, errors: list[str]) -> bool:
@@ -240,14 +249,7 @@ def validate(skill_dir: Path, wiki: Path) -> dict[str, object]:
             errors.append(f"SKILL.md is not UTF-8: {exc}")
         else:
             frontmatter = _frontmatter(skill_text, errors)
-            for required_phrase in (
-                "request.json",
-                "methods.json",
-                "target_logs",
-                "Logparse",
-                "identity_tokens",
-                "sources",
-            ):
+            for required_phrase in REQUIRED_SKILL_PHRASES:
                 if required_phrase not in skill_text:
                     errors.append(f"SKILL.md must mention {required_phrase}")
 
@@ -327,6 +329,7 @@ def validate(skill_dir: Path, wiki: Path) -> dict[str, object]:
         ids: set[str] = set()
         priorities: list[int] = []
         method_references: set[str] = set()
+        marker_bindings: list[tuple[int, str, list[str]]] = []
         for index, method in enumerate(methods, start=1):
             if not isinstance(method, dict) or set(method) != METHOD_KEYS:
                 errors.append(f"method {index} keys do not match the methods package contract")
@@ -377,6 +380,8 @@ def validate(skill_dir: Path, wiki: Path) -> dict[str, object]:
                     errors.append(
                         f"method {index} evidence marker is not a canonical stable Wiki log marker: {marker}"
                     )
+            if reference is not None and reference != SOURCE_LOG_TEMPLATES_REFERENCE:
+                marker_bindings.append((index, reference, markers))
         if priorities != list(range(1, method_count + 1)):
             errors.append("method priorities must be unique and consecutive from 1")
 
@@ -403,6 +408,15 @@ def validate(skill_dir: Path, wiki: Path) -> dict[str, object]:
                     for heading in METHOD_HEADINGS:
                         if heading not in text:
                             errors.append(f"{reference} is missing heading: {heading}")
+            for index, reference, markers in marker_bindings:
+                method_text = reference_texts.get(reference)
+                if method_text is None:
+                    continue
+                for marker in markers:
+                    if marker not in method_text:
+                        errors.append(
+                            f"method {index} evidence marker is absent from its method reference: {marker}"
+                        )
             if reference_texts.get(SOURCE_LOG_TEMPLATES_REFERENCE) != _render_source_log_templates(
                 wiki_templates
             ):

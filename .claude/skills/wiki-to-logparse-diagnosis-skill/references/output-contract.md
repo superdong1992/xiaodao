@@ -119,13 +119,15 @@
 
 frontmatter 只包含 `name` 和 `description`。入口保持简短，并明确：
 
-1. 读取 Server 写入的 `request.json`、`methods.json` 和 `target_logs.json`。
-2. 只读取 `target_logs[*].log_path` 明确列出的冻结日志，不遍历目录、不猜路径、不重新选择日志。
-3. 先扫描所有方法的正向 marker，再只加载相关方法卡和共享引用；不能在第一个命中处停止。
-4. 检查输入范围内全部相关调用。只有证据足以证明属于同一次调用时才合并发现。
-5. 每个原因、每次独立事件分别输出证据。每条证据用 `sources` 保存完整冻结日志原文，并用
-   `identity_tokens` 保存同一来源中的事件身份字面量。
-6. 保留证据不足、观测限制和 Wiki 的安全提醒。
+1. 读取冻结 `request.json`、Server 写入的 `method-evidence-graph.json` 和
+   `method-evaluation-plan.json`。
+2. 方法规则需要用户输入时读取 `request.json` 中的冻结值。日志证据只能来自 Evidence Graph 和
+   Evaluation Plan；不读取目标日志、不重新扫描 marker，也不重新选择日志。
+3. 按 Evaluation Plan 顺序评估全部 `evaluation_ref`；不能在第一个确认项后停止。
+4. 每项只输出 `evaluation_ref`、`verdict` 和 `reason`；`verdict` 只能是
+   `CONFIRMED`、`REJECTED` 或 `UNKNOWN`。
+5. `reason` 只概括方法规则判断，不回抄 marker、日志原文、行号、哈希或事件身份。
+6. 证据不足或受 Wiki 观测限制影响时使用 `UNKNOWN`，并在 `reason` 中说明边界。
 
 业务 `SKILL.md` 必须逐字包含以下两句，不改写，也不要补入具体命令名或文件名：
 
@@ -276,8 +278,8 @@ source identity 使用以下闭合结构：
 证据上；日志缺失策略放在“未知边界”。如果某条日志只在阈值或条件已经满足时打印，观测到该日志
 本身就是确认条件。
 
-“输出含义”必须说明：同一方法命中多个独立事件时分别输出；每条输出保留完整 `sources` 和来自
-这些来源的 `identity_tokens`。不同来源没有可靠共同身份时不得强行合并。
+“输出含义”必须说明：Server 会把同一方法的全部独立事件绑定到该方法的 `evaluation_ref`；Agent
+只返回该引用、判定和简短原因，不复制任何证据字段。证据不足以判断事件关系时返回 `UNKNOWN`。
 
 其他共享引用只放多个方法共同遵守的 Wiki 内容，例如输入含义、证据作用域、共同症状、观测限制
 和安全提醒。不要增加 Wiki 没有提供的阈值或经验结论。

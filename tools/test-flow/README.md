@@ -10,13 +10,19 @@
 | `dev.default` | `dev` | 框架自测、仓库静态检查、受影响确定性测试和完整确定性测试；不调用真实模型 |
 | `dev.real` | `dev` | 在 `dev.default` 闭包之外，显式选择一个真实 Proof/Stage |
 | `dev.macos-codex-luna-methods` | `dev` | macOS arm64 上用一次 Codex CLI + gpt-5.6-luna 调用生成、校验并按完整 producer identity 冻结 Methods package |
-| `dev.macos-codex-luna-e2e` | `dev` | macOS arm64 上运行一个 fresh `DATA_ROOT` 的 Codex/Luna Streamable HTTP MCP 单场景冒烟；不含 Docker、浏览器或业务 REST |
+| `dev.macos-codex-luna-e2e` | `dev` | 旧 Methods V1 E2E；Evidence V2 adapter 完成前在 planning 阶段阻止 |
 | `dev.macos-claude-deepseek-methods` | `dev` | 先运行迁移后的 Codex 与 Claude 快测合同，再用 Claude Code 2.1.89 + DeepSeek 生成、校验并原子冻结完整 production registration cache |
-| `dev.macos-claude-deepseek-e2e` | `dev` | 从空 `DATA_ROOT` 运行 CLIENT/ROUTE/LOGPARSE/DIAGNOSE/REVIEW 五进程 Claude MCP 冒烟；验证 Helper→broker、精确 specialized route 和客户端 Artifact 下载，不进入 CrossJob |
-| `release.full` | `release` | 不可变源码快照上的完整发布证明；包含平台能力和从空数据根开始的 fresh CrossJob |
-| `release.codex-luna-methods` | `release` | 同一不可变源码快照上的独立 Codex CLI + gpt-5.6-luna Methods 探索验证；不属于产品 CrossJob 闭包 |
+| `dev.macos-claude-deepseek-e2e` | `dev` | 旧 Methods V1 E2E；Evidence V2 adapter 完成前在 planning 阶段阻止 |
+| `release.full` | `release` | 目标发布闭包；当前因 CrossJob Diagnose 仍消费 Methods V1 而显式阻止 |
+| `release.codex-luna-methods` | `release` | 旧 Methods V1 独立定位流；Evidence V2 model-cert adapter 完成前显式阻止 |
 
 Windows、macOS 和显式 Linux Client 都有仓库内置 adapter。`--client auto` 在当前主机上选择对应 adapter；所有 Client 都通过 HTTP 直连 Linux Server。adapter 不是任意命令扩展点，调用方不能注入外部执行器。host-client 的 Web API 正式浏览器证明要求当前稳定版 Google Chrome，可通过 `TEST_FLOW_CHROME` 指定绝对可执行文件路径；Darwin 上显式 Linux Client 则只使用冻结在 Client image 中的官方 Chrome Headless Shell，不读取宿主浏览器。planning 会先在无网络临时容器中完成零模型 DOM smoke，CrossJob environment 再用正式 source-owned runner 做 loopback DOM roundtrip。
+
+当前只有 `dev.default` 能为 Evidence V2 生成正式零模型结论。它在 `deterministic.full` 内运行
+`det.evidence-v2-core`，并生成绑定 source snapshot、V8 contract manifest、固定 Core 用例和
+JUnit 的 `core-verdict.json` 子收据；外层 `verdict.json` 仍是唯一权威结论。所有仍消费
+Candidate、grounding、`PARTIALLY_RESOLVED` 或 `result.zip` 的真实定位 Stage 都以
+`EVIDENCE_V2_REAL_DIAGNOSIS_ADAPTER_UNMIGRATED` 在模型调用前阻止。
 
 ## Dev 确定性测试
 
@@ -61,10 +67,12 @@ Windows pytest 默认在仓库 `.tmp/p` 与系统临时目录中选择物理路�
 
 这三个字段是可审计的重试合同，不允许盲重试。
 
-## macOS Codex/Luna 快速 E2E
+## macOS Codex/Luna Methods cache 与暂停的 E2E
 
-这两条 Dev Goal 有意相互独立。Methods Goal 恰好执行一次真实调用并把校验后的 package 写入
-`<cache-root>/codex-luna-methods/<producer-identity>/`；E2E Goal 不会自动 bootstrap，缺少精确缓存时会在 planning 阶段阻断。首个且当前唯一可选场景是 `api-execution-overrun`。
+Methods Goal 仍可恰好执行一次真实调用并把校验后的 package 写入
+`<cache-root>/codex-luna-methods/<producer-identity>/`。它只生成 package，不执行定位。
+旧 E2E Goal 仍消费 Methods V1 产物，因此无论缓存是否存在都会在 planning 阶段阻止；不要移除
+`--plan-only` 尝试运行。
 
 先审阅 Methods 计划；确认后移除 `--plan-only` 才会发生一次真实调用：
 
@@ -82,7 +90,7 @@ Windows pytest 默认在仓库 `.tmp/p` 与系统临时目录中选择物理路�
   --plan-only
 ```
 
-Methods verdict 为 PASS 且缓存身份匹配后，再审阅 E2E 计划；确认后移除 `--plan-only` 才会执行恰好 5 次真实调用（Client、ROUTE、Logparse、DIAGNOSE、REVIEW），不自动 retry：
+以下命令只用于确认 E2E blocker，不会调用模型：
 
 ```sh
 ./tools/test-flow/run.sh \
@@ -100,9 +108,10 @@ Methods verdict 为 PASS 且缓存身份匹配后，再审阅 E2E 计划；确�
   --plan-only
 ```
 
-Methods/E2E 的 hard caps 分别为 1/5 次调用、1,000,000/2,000,000 token、2/3 USD 等价估算和 30 分钟 Stage；单次调用最多 10 分钟，180 秒无语义进展即失败。E2E 只允许 `/mcp` transport 和 `UploadDescriptor` 指定的一次 PUT；Case 操作、终态读取和产物列表都必须经公开 MCP 工具完成。
+Methods generation 的现有 hard cap 仍生效。E2E 的旧预算只保留作迁移输入，blocker 移除前不会
+产生调用或费用。
 
-## Release
+## Release（Evidence V2 adapter 迁移前暂停）
 
 Release planning 会冻结当前 Git 可见工作树的 exact source snapshot；工作树可以尚未提交。tracked 文件使用当前字节，未忽略的 untracked 文件也会进入清单，ignored 文件不会进入。运行期间任何源码漂移都会使 verdict 成为 `ERROR`。先准备由
 [`config/runtime-profiles.v2.json`](config/runtime-profiles.v2.json) 冻结的 Claude、uv 和 Linux base image 缓存；准备阶段可以联网，正式 Release 使用已封存缓存且不拉取镜像：
@@ -114,7 +123,8 @@ node tools/test-flow/prepare-release-cache.mjs \
   --docker-context colima
 ```
 
-然后把 `PROFILE_VERSION` 替换为该配置中的 `claude.version`，用完全相同的输入先规划、再执行：
+然后把 `PROFILE_VERSION` 替换为该配置中的 `claude.version`。当前只运行 plan-only 核对显式
+blocker；不要执行第二条真实命令：
 
 ```sh
 ./tools/test-flow/run.sh \
@@ -129,18 +139,6 @@ node tools/test-flow/prepare-release-cache.mjs \
   --docker-context colima \
   --cache-root /absolute/path/to/test-flow-cache \
   --plan-only
-
-./tools/test-flow/run.sh \
-  --track release \
-  --goal release.full \
-  --client macos \
-  --resume fresh \
-  --logparse-source /absolute/path/to/logparse \
-  --mcp-source /absolute/path/to/problem-locator-mcp \
-  --claude-entry /absolute/path/to/test-flow-cache/claude/PROFILE_VERSION/package/cli.js \
-  --claude-settings /absolute/path/to/claude/settings.json \
-  --docker-context colima \
-  --cache-root /absolute/path/to/test-flow-cache
 ```
 
 Windows 使用 `--client windows`，显式 Linux Client 使用 `--client linux`；两者不接受 macOS 的 Docker context。仓库拥有三种 adapter 的相同 Gate receipt 合同，但一次 Release 只证明 verdict 中记录的实际平台、source snapshot digest 和全部输入身份，不能外推成未执行平台的真实 PASS。
@@ -151,36 +149,12 @@ Release 从 GENESIS 和新的空 `DATA_ROOT` 开始，不复用业务 checkpoint
 
 正式用例的日志归档不是假设外部 Logparse 已预装业务产品配置。容器初始化会从已审阅 Diagnosis Skill 的 `logparse_product`、anchors 和 journey driver 机械生成独立的只读运行时配置，并把每份原始附件无损投影为当前 Logparse loose-diagnostic 输入；初始化阶段先用冻结 Logparse 提交完成一次无模型 smoke parse，逐一证明 module/slot/process anchor 可解析。配置摘要、归档投影版本和归档摘要写入 Release case 与容器收据，服务只使用该独立配置，外部 Logparse Git 快照仍保持未修改。
 
-## Codex Luna Methods 独立 Release
+## Codex Luna Methods 独立 Release（暂停）
 
-这条工程化验证只支持 Darwin arm64 orchestrator，使用冻结的 Codex CLI、外置 ChatGPT token、`gpt-5.6-luna` 和 `medium` reasoning。每次调用都启动新的 `codex app-server --stdio`、ephemeral thread 和唯一 turn；父进程从冻结的 auth source 读取 access token/account id，只通过 `account/login/start` 写入子进程 stdin，活动 `CODEX_HOME` 不含 `auth.json`，刷新请求一律 fail closed。模型只能使用显式启用的仓库 Skill 和 `shell_command`，单层 named permission profile 将根目录设为 deny、最小系统路径设为 read、生成 workspace 设为 write/诊断 workspace 设为 read，并关闭 command network；provider 网络只属于 app-server 父进程。
-
-它直接生成一个 Methods 包，再让九个隔离诊断调用复用完全相同的包字节；不会启动 Linux Server、MCP、Docker 或 Claude Code，也不会成为 `release.full` 或 CrossJob 的依赖。每个调用的脱敏 JSONL、profile bytes、schema tree、raw/terminal usage 对账、独立 consumer 重审、无凭据扫描和 durable generated package 都进入 Gate 证据。先规划并检查十次调用、5,000,000 token、API 等价 10 USD 的聚合上限和 admission：
-
-```sh
-./tools/test-flow/run.sh \
-  --track release \
-  --goal release.codex-luna-methods \
-  --client macos \
-  --resume fresh \
-  --logparse-source /absolute/path/to/logparse \
-  --codex-entry /Applications/ChatGPT.app/Contents/Resources/codex \
-  --codex-auth /absolute/path/to/.codex/auth.json \
-  --allow-codex-posthoc-budget \
-  --plan-only
-
-./tools/test-flow/run.sh \
-  --track release \
-  --goal release.codex-luna-methods \
-  --client macos \
-  --resume fresh \
-  --logparse-source /absolute/path/to/logparse \
-  --codex-entry /Applications/ChatGPT.app/Contents/Resources/codex \
-  --codex-auth /absolute/path/to/.codex/auth.json \
-  --allow-codex-posthoc-budget
-```
-
-`--allow-codex-posthoc-budget` 是显式例外确认：Codex CLI 没有本框架可用的调用前 token/USD 硬停止接口，所以这些聚合上限是每个 terminal receipt 和最终 verdict 的阻断性后验校验，不是预防性花费控制。产品 Linux→Linux `release.full` 与本 goal 产生两个独立权威 verdict；要同时宣称两条测试流通过，二者必须绑定相同 source snapshot digest。
+`release.codex-luna-methods` 仍让模型直接生成 Methods V1 diagnosis，没有经过生产 Evidence Graph、
+Evaluation Plan、Specialist/Reviewer Runtime 和 `methods_result`。它当前只允许 plan-only，并返回
+`EVIDENCE_V2_REAL_DIAGNOSIS_ADAPTER_UNMIGRATED`；不得用预算确认参数绕过 blocker。P2 必须改成
+绑定 Core 子收据的生产 Runtime model cert 后才能恢复。
 
 ## 预算、超时与性能
 
@@ -212,8 +186,8 @@ validator 仍从原始 Wiki 独立重算，Test Flow 不会事后修改生成包
 模型不可见的语义 oracle 验证包，再在包外复制产品 registration template，形成 CrossJob 消费的注册目录。
 validator 会机械重算固定模板文件的精确字节、命名日志字段的首次出现顺序与每种日志模板的 canonical
 stable marker；语义 oracle 只能在该机械合同上检查原因分组与覆盖，不能另设未公开的 marker 拼写或
-遗漏 Wiki 命名字段。独立 Codex/Luna generation workspace 会物化同一 v2 identity 与固定引用合同，
-但仍保持一次生成加九次诊断的十次调用边界。
+遗漏 Wiki 命名字段。独立 Codex/Luna generation workspace 仍可用于 package cache；旧的一次生成加
+九次直接 diagnosis 流已被 admission blocker 禁止，Evidence V2 model cert 不得复用该路径。
 
 所有 pytest 包装的真实 isolated Agent Gate 还使用版本化的
 `isolated-agent-env-allowlist-v3` 环境策略。pytest 只继承跨平台启动所需的

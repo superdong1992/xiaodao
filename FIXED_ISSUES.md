@@ -1,6 +1,6 @@
 # 已修复问题台账
 
-更新时间：2026-08-25
+更新时间：2026-08-28
 
 本文件记录已经在当前工作区验证、修复并由专项回归测试保护的问题。活跃待办仍只写入
 [`TODO.md`](TODO.md)；同一问题再次回归时更新原条目，不另建一个缺少历史关联的条目。
@@ -1765,7 +1765,6 @@
   - `tests/deterministic/unit/runtime/test_methods_output_pipeline.py::test_specialized_diagnosis_normalizes_pretty_methods_draft`
   - 同文件 `test_review_normalizes_pretty_methods_draft_without_sealer` 和
     `test_methods_draft_still_rejects_ambiguous_or_invalid_json`
-  - `tests/deterministic/unit/runtime/test_diagnosis_runtime.py::test_pretty_methods_draft_is_normalized_before_validation_and_hashing`
   - `tests/deterministic/unit/integrations/test_agent_json.py::test_all_agent_json_surfaces_have_one_server_side_owner`
   - `tools/test-flow/quick-validation/codex-luna/tests/macos-codex-luna-service-wrapper.test.mjs` 中
     `server wrapper audits Methods drafts without normalizing product input`
@@ -1782,23 +1781,191 @@
   verdict 直接证明本次 Linux Fast E2E，不替代中央 Test Flow 或 Release；本元数据段本身不宣称被
   上述运行覆盖。
 
-## PL-FIX-043：Methods marker 与日志行按大小写精确匹配
+  2026-08-28 的前置中央 Dev `run-20260828T110620Z-25ef1b05` 为
+  `PASS_WITH_WARNINGS`，已经覆盖移除 wrapper 规范化后的产品实现；最终台账快照的 verdict 元数据
+  将在本轮复验后追加。
+  **最终复验元数据**：Dev `run-20260828T112351Z-3d7ee53b` 为 `PASS`；functional、operation、
+  verification 均为 `PASS`，源码快照
+  `git-visible-worktree-v1:b3f3ff6e28d9e1cccee712d8f617d470501aa97a53d662b49222b5a6d7d85968`
+  （718 files）。本 verdict 元数据行本身不宣称被其引用的快照覆盖。
 
-- **状态**：代码已修复；是否验证通过以本条“最新 Test Flow verdict”为准。
+## PL-FIX-043：Methods marker 大小写语义在多阶段校验中不一致
+
+- **状态**：已按 Evidence V2 单次扫描合同再次修复；是否验证通过以本条“最新 Test Flow verdict”为准。
 - **症状**：`methods.json` 声明 `API_COMPLETE` 时，冻结日志中的等价文本 `api_complete` 无法进入
-  marker scan；即使 Agent 引用了正确的完整日志行，grounding 仍以“marker 不在引用行中”拒绝。
+  marker scan；旧修复只改了部分比较后，预处理可以命中，但后续 receipt 或 grounding 仍可能按原始
+  大小写重新匹配并拒绝同一证据。
 - **受影响版本**：`5.0.0`，至少包括提交
-  `0b2f2e667608637519fecc87cdd28b71eb943de4` 的 Methods grounding 实现。
-- **根因**：marker 预扫描和引用行复核分别直接使用 Python 大小写敏感的 `marker in line`，没有共享
-  明确的 marker 匹配语义。
-- **不可回归行为**：marker 与冻结日志行之间必须使用 Unicode `casefold()` 后的子串匹配；audit 仍
-  记录 `methods.json` 中声明的原始 marker。完整日志行、`identity_tokens`、`method_id`、`source_id`
-  和 REVIEW 证据身份继续精确匹配，不得因 marker 放宽而改变或规范化证据原文。
+  `0b2f2e667608637519fecc87cdd28b71eb943de4` 的 Methods grounding，以及后续仍传递完整
+  `SkillLoadReceipt` 的 Evidence V1 路径。
+- **根因**：scan、receipt 比较和 grounding 都把 marker 文本当作可再次验证的身份，分别实现匹配；
+  大小写规则只要有一处不同，同一证据就会在后续阶段翻转结果。
+- **不可回归行为**：服务端只能在生成 Evidence Graph 时扫描一次，并使用 Unicode `casefold()` 判断
+  marker 是否出现；Graph 保留方法声明的原始 marker 和冻结日志原文。后续 Plan、Specialist、Reviewer
+  与 Outcome 只消费稳定 ref，不得重新匹配 marker、日志行或恢复完整 receipt 比较。
 - **修复历史**：2026-08-27，集中新增 `_marker_occurs()`，让全量 marker scan 与单条来源 grounding
-  复用同一套不区分大小写的匹配；不改 Logparse 目标选择、日志字节或其他证据身份规则。
+  复用不区分大小写的匹配。2026-08-28 升级到 Evidence V2 后，删除下游 marker 重匹配：casefold
+  只发生在唯一 scanner 内，完整链路从 uppercase 日志一直到 Case、MCP 和 REST Outcome。
 - **专项回归测试**：
-  - `tests/deterministic/unit/runtime/test_methods_skill.py::test_grounding_matches_declared_marker_without_case_sensitivity`
-- **最新 Test Flow verdict**：当前最终字节尚无中央 Test Flow PASS verdict，不登记为正式验证通过。
-  开发期相关确定性回归为 116 passed、1 skipped；新增大小写专项单独复跑为 1 passed，并同时确认
-  `identity_tokens` 仍区分大小写。按用户要求未运行任何真实模型；本元数据段本身不宣称被上述测试
-  覆盖。
+  - `tests/deterministic/unit/runtime/test_methods_evidence_v2.py::test_scan_casefolds_but_preserves_declared_marker_and_frozen_line`
+  - 同文件 `test_plan_consumes_production_graph_refs_without_rescanning_logs`
+  - `tests/deterministic/integration/test_methods_v2_runtime_journey.py::test_runtime_submission_reviewer_and_public_projection_are_one_v2_journey`
+  - `tests/deterministic/integration/test_evidence_v2_source_mutations.py::test_source_overlay_mutant_is_killed_by_exact_regression_test`
+- **最新 Test Flow verdict**：前置 Dev `run-20260828T110620Z-25ef1b05` 为
+  `PASS_WITH_WARNINGS`，Evidence V2 Core 106/106 PASS，`model_invocations=0`；验证实现快照
+  `git-visible-worktree-v1:f6db8bd7eaaacb4680b927db9b37a0d01adebc1aefb189cad8e919695d1e298e`
+  （718 files）。该运行早于本次台账正文，最终台账快照的 verdict 元数据将在复验后追加。
+  **最终复验元数据**：Dev `run-20260828T112351Z-3d7ee53b` 为 `PASS`，绑定源码快照
+  `git-visible-worktree-v1:b3f3ff6e28d9e1cccee712d8f617d470501aa97a53d662b49222b5a6d7d85968`
+  （718 files）；复用 Gate 均通过当前 re-audit。本元数据行本身不宣称被该快照覆盖。
+
+## PL-FIX-044：Evidence 校验可跨 method 借 marker、重复比对 receipt 且失败原因不可见
+
+- **状态**：已按 Evidence V2 / State V8 破坏性合同修复；是否验证通过以本条“最新 Test Flow verdict”为准。
+- **症状**：一张方法卡可以借用另一张方法卡中存在的相同 literal marker；预处理生成的
+  `SkillLoadReceipt` 在后续被全对象比较，使同一证据因大小写或排序差异被拒绝；校验失败后公共 Case
+  只显示笼统错误，无法知道是 Specialist、Reviewer、资源漂移、服务端约束还是审计归档失败。
+- **受影响版本**：`5.0.0` 的 Methods V7 / Evidence V1 定位链路，实施基线 `06fd82e`。
+- **根因**：marker、日志行、receipt 和模型输出在多个阶段重复承载同一身份，校验器反复从文本重建
+  关系；marker 只做全包级存在性检查，没有绑定当前 method。旧测试又常用手写的“可信” Evidence、
+  Audit 和 Outcome，只覆盖单 method、同大小写和理想 JSON，无法复现真实用户入口。
+- **不可回归行为**：每个 hit 必须绑定 `(method_id, marker_index, marker)`，marker 必须来自当前 method；
+  服务端只扫描一次并生成完整 method-qualified Graph 和 Plan。模型只返回
+  `evaluation_ref + verdict + reason`；Specialist 与盲评 Reviewer 各最多一次 repair。公共 Case/MCP/REST
+  必须返回稳定 reason code 和 diagnostic ID；Graph/Plan 前失败使用 `failure`，已进入评估的终态使用
+  `methods_result`。正向测试只能由生产代码生成 Graph、Plan、Outcome 和公开投影，负向测试必须从合法
+  基线只改一个字段。
+- **修复历史**：2026-08-28 硬切 Methods V2、State V8 和 Review V2，建立单次 scanner、Evidence
+  Graph、Evaluation Plan、角色隔离、盲评 consensus、13 个公开 reason 与确定性 diagnostic ID；两套
+  generator validator 同步检查 method 自有 marker。Core 固定 55 个生产 selector，并用 7 个
+  source-overlay mutant 证明删掉关键校验、恢复下游匹配、允许第三次调用或恢复 hardlink 时测试必然失败。
+- **专项回归测试**：
+  - `tests/deterministic/unit/runtime/test_methods_evidence_v2.py::test_plan_rejects_rehashed_hit_bound_to_another_methods_marker_index`
+  - `tests/deterministic/unit/runtime/test_meta_skill_source_identity.py::test_validator_rejects_marker_from_another_method_reference`
+  - `tests/deterministic/unit/integrations/test_lan_logparse_meta_skill.py::test_validator_rejects_marker_from_another_method_reference`
+  - `tests/deterministic/integration/test_methods_v2_terminal_submission.py::test_each_role_failure_reason_reaches_case_mcp_and_rest`
+  - 同文件 `test_consensus_terminal_projection_survives_submission_mcp_and_rest` 和
+    `test_each_failed_terminal_reason_reaches_case_mcp_and_rest`
+  - `tests/deterministic/integration/test_methods_v2_pre_evaluation_failures.py::test_pre_evaluation_failure_reaches_case_mcp_and_rest_without_fake_graph`
+  - `tests/deterministic/unit/runtime/test_methods_outcome_v2.py::test_outcome_mapping_does_not_rescan_or_read_marker_line`
+  - `tests/deterministic/integration/test_evidence_v2_source_mutations.py::test_source_overlay_mutant_is_killed_by_exact_regression_test`
+- **最新 Test Flow verdict**：前置 Dev `run-20260828T110620Z-25ef1b05` 为
+  `PASS_WITH_WARNINGS`；Core 55 selectors / 106 tests 全部 PASS，合同 601/601、unit 1893 passed/68
+  skipped、integration 66/66、SameJob 3/3，模型调用与 token/cost 均为 0。该运行覆盖实现字节但早于
+  本次台账正文，最终元数据将在复验后追加。
+  **最终复验元数据**：Dev `run-20260828T112351Z-3d7ee53b` 为 `PASS`；functional、operation、
+  verification 均为 `PASS`，绑定源码快照
+  `git-visible-worktree-v1:b3f3ff6e28d9e1cccee712d8f617d470501aa97a53d662b49222b5a6d7d85968`
+  （718 files）。本元数据行本身不宣称被该快照覆盖。
+
+## PL-FIX-045：Client 在创建 Case 前自行推测并追问问题细节
+
+- **状态**：客户端合同与确定性生产入口已修复；真实 Client model-cert 待 V2 adapter 迁移后执行。
+- **症状**：用户已经给出问题描述，Client 仍在调用 `problem_locator_create_case` 前根据文本和 Skill
+  自行推测“还缺哪些信息”，先连续追问一批字段；实际服务端 requirements 尚未生成，提问内容可能与
+  Case 建立后的权威需求不同。
+- **受影响版本**：Evidence V2 之前的 `problem-locator-client` 交互说明与旧真实旅程。
+- **根因**：客户端说明把“帮助整理问题描述”和“决定服务端缺失输入”混成一步，测试只检查工具文本或
+  理想调用，没有从真实 create → requirements → supplement 入口约束首个业务动作。
+- **不可回归行为**：只要用户提供了可创建 Case 的问题描述，Client 的首个业务动作必须是
+  `problem_locator_create_case`；建案前不得按 Wiki、Skill 或模型猜测补充项。建案后只能询问 Case 返回的
+  OPEN requirements，并用服务端名称原样提交。Methods V2 终态直接展示 `methods_result`，不得等待
+  `result.zip` 或自行重写证据结论。
+- **修复历史**：2026-08-28 重写 Client Skill 的 intake 和终态展示规则；SameJob 旅程改为真实
+  create、requirements、supplement、单次 Logparse、Specialist、Reviewer、Outcome 和 restart 链路。
+- **专项回归测试**：
+  - `tests/deterministic/unit/interfaces/test_client_access_skill.py::test_skill_creates_case_before_requesting_missing_details`
+  - 同文件 `test_skill_presents_methods_v2_without_waiting_for_an_artifact`
+  - `tests/deterministic/journey/test_rpc_timeout.py::test_rpc_timeout_methods_v2_is_one_durable_same_job_path`
+- **最新 Test Flow verdict**：前置 Dev `run-20260828T110620Z-25ef1b05` 的确定性闭包为
+  `PASS_WITH_WARNINGS`，SameJob 3/3 PASS，模型调用为 0。该 verdict 证明客户端合同和服务入口，不证明
+  尚未迁移的真实 Client 模型行为；P1/P2 model-cert 仍被
+  `EVIDENCE_V2_REAL_DIAGNOSIS_ADAPTER_UNMIGRATED` 阻断。
+  **最终复验元数据**：Dev `run-20260828T112351Z-3d7ee53b` 为 `PASS`，源码快照
+  `git-visible-worktree-v1:b3f3ff6e28d9e1cccee712d8f617d470501aa97a53d662b49222b5a6d7d85968`
+  （718 files）；真实 Client model-cert 仍未执行。本元数据行本身不宣称被该快照覆盖。
+
+## PL-FIX-046：Workspace hardlink 清理会改变正式附件权限并破坏后续读取
+
+- **状态**：已修复；是否验证通过以本条“最新 Test Flow verdict”为准。
+- **症状**：FILE materialization 使用 hardlink 时，Workspace 清理阶段对副本执行 chmod，实际会修改
+  formal resource 的同一 inode；之后 State 或附件读取可能以权限错误失败，表面看起来像随机恢复故障。
+- **受影响版本**：实施基线 `06fd82e` 的 `FormalResourceReader` FILE materialization。
+- **根因**：实现把“内容不可变”等同于“共享 inode 不会产生副作用”，忽略清理和只读收口仍会修改
+  inode metadata；旧测试还明确把接受 hardlink 当成正确行为。
+- **不可回归行为**：所有 Workspace FILE 必须是独立副本，复制完成后校验 size/hash、设为只读并原子
+  发布；Runtime 与 Logparse Workspace 必须拒绝 `st_nlink != 1` 的文件。清理 Workspace 不得改变
+  formal resource 的字节、inode 或权限。
+- **修复历史**：2026-08-28 删除 FILE hardlink 快路径，统一使用临时副本与原子 replace；同步把旧的
+  “允许 hardlink”测试迁移为明确拒绝，并加入禁止调用 `os.link` 的非平台跳过回归和 mutation。
+- **专项回归测试**：
+  - `tests/deterministic/unit/storage/test_resource_files.py::test_reader_materializes_file_at_fixed_workspace_path_as_isolated_copy`
+  - 同文件 `test_reader_file_materialization_never_attempts_a_hardlink` 和
+    `test_reader_isolates_attachment_even_when_hardlinks_are_available`
+  - `tests/deterministic/unit/runtime/test_diagnosis_runtime.py::test_materialized_file_rejects_read_only_hard_link`
+  - `tests/deterministic/unit/integrations/test_logparse_workspace.py::test_bind_attachment_rejects_shared_inode_materialization`
+- **最新 Test Flow verdict**：前置 Dev `run-20260828T110620Z-25ef1b05` 为
+  `PASS_WITH_WARNINGS`，相关 Core 和 unit Gate 均 PASS。该运行早于本次台账正文，最终元数据将在复验后
+  追加。
+  **最终复验元数据**：Dev `run-20260828T112351Z-3d7ee53b` 为 `PASS`，源码快照
+  `git-visible-worktree-v1:b3f3ff6e28d9e1cccee712d8f617d470501aa97a53d662b49222b5a6d7d85968`
+  （718 files）；复用 Gate 当前 re-audit 为 PASS。本元数据行本身不宣称被该快照覆盖。
+
+## PL-FIX-047：replacement 恢复会重扫日志、重置 repair，拒绝记录先落盘时又无法 replay
+
+- **状态**：已修复；是否验证通过以本条“最新 Test Flow verdict”为准。
+- **症状**：旧 epoch 的 Methods Job 被标为 `INTERRUPTED` 后，`ResumeCase` 创建新 job_id；Runtime 只按
+  新 ID 读取记录，导致重新 Logparse/scan、生成新 evaluation identity 并重置 repair 次数。若 rejected
+  attempt 已归档而 State checkpoint 尚未写入，validation-only replay 又直接报 `STATE_NOT_FOUND`。
+- **受影响版本**：Evidence V2 初版恢复与 replay 实现。
+- **根因**：replacement Job 没有沿 `replacement_for_job_id` 读取直接前驱闭包；replay 把可派生 State
+  当成必备记录，没有按 PRIMARY → REPAIR 的 append-only 拒绝序列机械推进状态。
+- **不可回归行为**：Specialist replacement 必须复用前驱 Graph、Plan、limitations、evaluation ID、
+  rejected attempts 和 repair 额度，只把 `source_job_id` 绑定到新 Job，且不得再次 Logparse/scan；Reviewer
+  replacement 必须保留 Specialist source lineage。replay 在 State 缺失时必须从 immutable Job、Graph、
+  Plan、source handoff State 和拒绝序列重建，只读执行当前 parser，不写 State、不扫描、不调用模型。
+- **修复历史**：2026-08-28 增加 direct-predecessor 与多跳 replacement 恢复、拒绝记录继承和一次性
+  repair 续跑；replay 支持 State crash window，并接入正式只读 CLI：
+  `python -m problem_locator replay-method-rejection`。
+- **专项回归测试**：
+  - `tests/deterministic/unit/runtime/test_diagnosis_runtime_methods_v2.py::test_specialist_replacement_resumes_old_repair_without_rescan`
+  - 同文件 `test_reviewer_replacement_inherits_old_rejection_and_interrupted_state`、
+    `test_specialist_restart_reuses_graph_and_runs_only_repair` 和
+    `test_reviewer_restart_runs_only_repair_and_reads_source_state_after_model`
+  - 同文件 `test_specialist_replacement_lineage_resumes_from_immediate_predecessor`
+  - `tests/deterministic/unit/runtime/test_methods_replay_v2.py::test_real_store_replays_specialist_primary_rejection_without_rescanning`
+  - 同文件 `test_real_store_replays_reviewer_repair_from_legal_rejection_sequence`
+  - `tests/deterministic/unit/interfaces/test_replay_cli.py::test_production_cli_replays_real_rejection_without_scanner_model_or_writes`
+- **最新 Test Flow verdict**：前置 Dev `run-20260828T110620Z-25ef1b05` 为
+  `PASS_WITH_WARNINGS`，上述恢复、replay kernel 和正式 CLI 均进入 Core 106/106 PASS；最终台账快照的
+  verdict 元数据将在复验后追加。
+  **最终复验元数据**：Dev `run-20260828T112351Z-3d7ee53b` 为 `PASS`，源码快照
+  `git-visible-worktree-v1:b3f3ff6e28d9e1cccee712d8f617d470501aa97a53d662b49222b5a6d7d85968`
+  （718 files）；复用 Gate 当前 re-audit 为 PASS。本元数据行本身不宣称被该快照覆盖。
+
+## PL-FIX-048：冻结源码快照中的 framework Node Gate 冷启动超过旧硬上限
+
+- **状态**：已修复；是否验证通过以本条“最新 Test Flow verdict”为准。
+- **症状**：工作树直接运行同一 Node 测试集约 15 秒，但正式 Test Flow 在无 `.git` 的冻结源码快照中
+  首次命中 120 秒硬上限，产生 `BLOCKED / NODE_TEST_FAILED`；第二次把上限暂调到 180 秒后，
+  `framework.node-tests` Gate 以 178.5 秒通过，但整个 run 随后因 `UV_REQUIRED` 仍为 `BLOCKED`，且
+  Node Gate 只剩 1.5 秒余量。
+- **受影响版本**：`framework.self-test.timeout_seconds=120` 的 Test Flow V2 配置。
+- **根因**：planner 和 source-snapshot 自检在物化快照中重复计算仓库身份，Windows 冷文件缓存下明显
+  慢于普通工作树；Stage 上限仍按旧测试规模设置。
+- **不可回归行为**：framework Node Gate 仍必须有有限硬上限，但要覆盖当前冻结快照的实测冷启动；
+  超时不得被改写为测试 PASS，TAP 不完整时仍必须 `BLOCKED`。本轮固定为 300 秒，不改变产品 Runtime、
+  模型预算或其他 Stage 上限。
+- **修复历史**：2026-08-28 先用权威 run
+  `run-20260828T104408Z-460e3190` 复现 120 秒硬超时，再在相同 digest 的手动物化快照中复跑；根据
+  `run-20260828T105520Z-f2beebdb` 的 178.5 秒实测将上限固定为 300 秒。
+- **专项回归测试**：
+  - `tools/test-flow/tests/config-planner.test.mjs` 中
+    `Dev default selects the complete cheap deterministic closure and no model budget`
+  - 正式 Test Flow 的 `framework.node-tests` Gate 必须生成完整 TAP 并为 PASS。
+- **最新 Test Flow verdict**：前置 Dev `run-20260828T110620Z-25ef1b05` 在 300 秒合同下为
+  `PASS_WITH_WARNINGS`，`framework.node-tests` 178.29 秒 PASS；该运行早于本次台账正文，最终元数据
+  将在复验后追加。
+  **最终复验元数据**：Dev `run-20260828T112351Z-3d7ee53b` 为 `PASS`，源码快照
+  `git-visible-worktree-v1:b3f3ff6e28d9e1cccee712d8f617d470501aa97a53d662b49222b5a6d7d85968`
+  （718 files）；framework reuse 的当前 re-audit 为 PASS。本元数据行本身不宣称被该快照覆盖。

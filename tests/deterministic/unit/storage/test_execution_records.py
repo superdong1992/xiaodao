@@ -581,6 +581,7 @@ def test_rejected_agent_output_replace_failure_leaves_no_partial_file(
         "method-review.draft.json",
         "logparse_broker_audit.json",
         "method-grounding-audit.json",
+        "methods-limitations-v2.json",
         "methods_logparse_receipt.json",
         "methods_preflight.json",
         "methods_request.json",

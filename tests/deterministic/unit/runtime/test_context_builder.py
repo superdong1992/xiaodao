@@ -445,19 +445,22 @@ def test_production_output_contract_materializes_the_role_specific_protocol(
     assert content == production_contract.encode("utf-8")
     assert b"<<<BEGIN S00 AGENT JOB OUTCOME DRAFT SCHEMA>>>" not in content
     assert b"output/job_outcome.draft.json" in content
-    assert b"Do not write" in content
+    assert b"do not write" in content.lower()
     if job_type is JobType.DIAGNOSE:
         assert b"output/method-diagnosis.draft.json" in content
-        assert b'"limitations": []' in content
-        assert b'"safety_notes": []' in content
-        assert b"Scan every target log for every method" in content
-        assert b"Logparse has already run" in content
+        assert b"inputs/request.json" in content
+        assert b"inputs/method-evidence-graph.json" in content
+        assert b"inputs/method-evaluation-plan.json" in content
+        assert b"Every item has exactly `evaluation_ref`, `verdict`, and `reason`" in content
+        assert b"Server has already scanned the logs once" in content
     else:
         assert job_type is JobType.REVIEW
         assert b"output/method-review.draft.json" in content
-        assert b"inputs/method-grounding-audit.json" in content
-        assert b"exact set of" in content
-        assert b"Logparse is unavailable" in content
+        assert b"inputs/request.json" in content
+        assert b"inputs/method-evidence-graph.json" in content
+        assert b"inputs/method-evaluation-plan.json" in content
+        assert b"SPECIALIST response, verdicts, reasons" in content
+        assert b"not inputs" in content
 
 
 def test_previous_outcome_is_full_canonical_dto_and_manifest_hash_is_checked() -> None:

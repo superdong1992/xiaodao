@@ -18,6 +18,7 @@ from problem_locator.contracts.limits import (
     MAX_DESCRIPTION_UTF8_BYTES,
     MAX_USER_TEXT_UTF8_BYTES,
 )
+from problem_locator.contracts.models import CaseFailure
 from problem_locator.contracts.serialization import canonical_json_bytes
 from problem_locator.interfaces.error_mapping import http_status_for
 from problem_locator.interfaces.http_app import create_http_app
@@ -611,7 +612,46 @@ def test_openapi_describes_every_parameter_and_reachable_model_field() -> None:
         collect_refs(component)
         properties = component.get("properties", {})
         if component.get("type") == "object" and properties:
-            assert component["required"] == list(properties)
+            expected_required = list(properties)
+            if schema_name == "CaseFailure":
+                expected_required = [
+                    field_name
+                    for field_name in expected_required
+                    if field_name not in {"reason_code", "diagnostic_id"}
+                ]
+            if schema_name == "CaseView":
+                expected_required = [
+                    field_name
+                    for field_name in expected_required
+                    if field_name != "methods_result"
+                ]
+            assert component["required"] == expected_required
+
+
+def test_methods_failure_diagnostics_are_optional_in_rest_and_serialization() -> None:
+    case_failure_schema = _app().openapi()["components"]["schemas"]["CaseFailure"]
+    required = set(case_failure_schema["required"])
+    assert "reason_code" not in required
+    assert "diagnostic_id" not in required
+
+    legacy_failure = CaseFailure(
+        code=ErrorCode.OUTCOME_INVALID,
+        message="Outcome validation failed.",
+        source_job_id=JOB_ID,
+        source_outcome_id=None,
+        occurred_at="2026-07-31T00:00:00.000Z",
+    )
+    encoded = canonical_json_bytes(legacy_failure)
+    assert b'"reason_code"' not in encoded
+    assert b'"diagnostic_id"' not in encoded
+
+
+def test_nonterminal_methods_result_is_optional_in_rest_and_serialization() -> None:
+    case_view_schema = _app().openapi()["components"]["schemas"]["CaseView"]
+    assert "methods_result" not in set(case_view_schema["required"])
+
+    encoded = canonical_json_bytes(case_view())
+    assert b'"methods_result"' not in encoded
 
 
 def test_openapi_examples_validate_against_the_real_rest_dtos() -> None:

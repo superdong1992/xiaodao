@@ -9,8 +9,9 @@ import { ISOLATED_AGENT_OUTPUT_CAP_ENFORCEMENT } from "../runtime-support/isolat
 import { SKILL_GENERATION_TRACE_SCHEMA_VERSION } from "../runtime-support/isolated-agent-tool-audit.mjs";
 
 const WRAPPER = path.resolve("tools/test-flow/runtime-support/isolated-agent-wrapper.mjs");
+const posixRuntimeTest = process.platform === "win32" ? test.skip : test;
 
-test("a failed model terminal persists complete usage without changing the failure exit", () => {
+posixRuntimeTest("a failed model terminal persists complete usage without changing the failure exit", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "isolated-agent-terminal-"));
   try {
     const usageRoot = path.join(root, "usage");
@@ -73,7 +74,7 @@ process.exitCode = 1;
   }
 });
 
-test("a successful terminal accepts the planned turn boundary and rejects the next turn", () => {
+posixRuntimeTest("a successful terminal accepts the planned turn boundary and rejects the next turn", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "isolated-agent-turn-cap-"));
   try {
     const fakeClaude = path.join(root, "fake-claude.mjs");
@@ -124,7 +125,7 @@ console.log(JSON.stringify({
   }
 });
 
-test("a failed Skill trace writes the strict nested audit schema without raw tool data", () => {
+posixRuntimeTest("a failed Skill trace writes the strict nested audit schema without raw tool data", () => {
   const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "isolated-agent-skill-trace-")));
   try {
     const workspace = path.join(root, "workspace");
@@ -197,7 +198,7 @@ console.log(JSON.stringify({
   }
 });
 
-test("a planned output token cap is injected only into the Claude child and sealed in the receipt", () => {
+posixRuntimeTest("a planned output token cap is injected only into the Claude child and sealed in the receipt", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "isolated-agent-output-cap-"));
   try {
     const usageRoot = path.join(root, "usage");
@@ -248,7 +249,7 @@ console.log(JSON.stringify({
   }
 });
 
-test("terminal modelUsage is not required as a request-cap echo", () => {
+posixRuntimeTest("terminal modelUsage is not required as a request-cap echo", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "isolated-agent-output-cap-unproved-"));
   try {
     const usageRoot = path.join(root, "usage");
@@ -291,7 +292,7 @@ console.log(JSON.stringify({
   }
 });
 
-test("the wrapper rejects an output token cap above its pinned runtime upper limit", () => {
+posixRuntimeTest("the wrapper rejects an output token cap above its pinned runtime upper limit", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "isolated-agent-output-cap-invalid-"));
   try {
     const result = spawnSync(process.execPath, [

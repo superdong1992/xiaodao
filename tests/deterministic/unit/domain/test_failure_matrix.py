@@ -4,6 +4,8 @@ import pytest
 
 from problem_locator.contracts import (
     ApplicationError,
+    Case,
+    CaseStatus,
     ErrorCode,
     DiagnosisOutcomeTriggerPayload,
     ExecutionFailedTriggerPayload,
@@ -16,6 +18,9 @@ from problem_locator.contracts import (
     TriggerType,
     validate_transition_plan_for_outcome,
 )
+from problem_locator.application.formalization import apply_case_failure_update
+from problem_locator.application.projection import project_case_components
+from problem_locator.contracts.enums import MethodsValidationReasonCode
 from problem_locator.domain import DomainCoordinator
 
 from ._builders import (
@@ -118,6 +123,64 @@ def test_non_execution_error_code_is_rejected_by_the_domain_boundary() -> None:
     assert isinstance(result, ApplicationError)
     assert result.code is ErrorCode.VALIDATION_ERROR
     assert result.retryable is False
+
+
+def test_methods_failure_contract_reaches_the_public_case_projection() -> None:
+    source = route_job()
+    snapshot = snapshot_with_active(source)
+    diagnostic_id = "00000000-0000-4000-8000-000000000777"
+    failure = ExecutionFailure(
+        stage=ExecutionStage.OUTCOME_VALIDATE,
+        code=ErrorCode.OUTCOME_INVALID,
+        message="Methods diagnosis draft is not grounded in the frozen inputs.",
+        retryable=False,
+        details=[],
+        reason_code=MethodsValidationReasonCode.CONFIRMED_EVIDENCE_MISSING,
+        diagnostic_id=diagnostic_id,
+    )
+    request = trigger(
+        snapshot,
+        trigger_type=TriggerType.EXECUTION_FAILED,
+        payload=ExecutionFailedTriggerPayload(
+            source_job_id=snapshot.active_job.job_id,
+            source_outcome_id=None,
+            execution_failure=failure,
+        ),
+    )
+
+    plan = DomainCoordinator().plan(snapshot, request)
+
+    assert not isinstance(plan, ApplicationError)
+    assert plan.case_failure_update is not None
+    case_failure = plan.case_failure_update.value
+    assert case_failure is not None
+    assert (
+        case_failure.reason_code
+        is MethodsValidationReasonCode.CONFIRMED_EVIDENCE_MISSING
+    )
+    assert case_failure.diagnostic_id == diagnostic_id
+    applied_failure = apply_case_failure_update(
+        snapshot.case.failure,
+        plan.case_failure_update,
+    )
+    assert applied_failure == case_failure
+    failed_case = Case.model_validate(
+        {
+            **snapshot.case.model_dump(mode="python"),
+            "status": CaseStatus.FAILED,
+            "case_revision": snapshot.case.case_revision + 1,
+            "active_job_id": None,
+            "failure": applied_failure,
+            "updated_at": request.occurred_at,
+        }
+    )
+    view = project_case_components(failed_case, None, [])
+    assert view.failure is not None
+    assert (
+        view.failure.reason_code
+        is MethodsValidationReasonCode.CONFIRMED_EVIDENCE_MISSING
+    )
+    assert view.failure.diagnostic_id == diagnostic_id
 
 
 @pytest.mark.parametrize(

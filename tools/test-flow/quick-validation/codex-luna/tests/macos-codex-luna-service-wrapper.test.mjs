@@ -21,6 +21,10 @@ import {
   stageLinuxServiceProject,
 } from "../runtime/macos-codex-luna-service-wrapper.mjs";
 
+const POSIX_EXECUTABLE_FIXTURE = process.platform === "win32"
+  ? "该用例需要 POSIX 可执行文件语义"
+  : false;
+
 test("service Skill keeps missing registered artifacts in the post-route requirement flow", () => {
   const skill = fs.readFileSync(path.join(process.cwd(), "tools", "test-flow", "quick-validation", "codex-luna", "fixtures", "service-skill", "problem-locator-service-agent", "SKILL.md"), "utf8");
   assert.match(skill, /required_artifacts.*later DIAGNOSE job can request/);
@@ -162,7 +166,7 @@ test("Linux service project contains Codex metadata without changing the product
   assert.deepEqual(fs.readdirSync(path.join(workspace, "runtime")).sort(), ["context.txt", "tool-state"]);
 });
 
-test("server wrapper seals a service outcome draft before the Agent process exits", (t) => {
+test("server wrapper seals a service outcome draft before the Agent process exits", { skip: POSIX_EXECUTABLE_FIXTURE }, (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "macos-luna-sealer-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const finalizer = path.join(root, ".venv", "bin", "problem-locator-seal-outcome-draft");
@@ -182,11 +186,10 @@ test("server wrapper seals a service outcome draft before the Agent process exit
   assert.deepEqual(sealServiceOutcomeDraft({ phase: "REVIEW", workspaceRoot: workspace, sourceRoot: root }), { required: false, invoked: false, status: "SKIP" });
 });
 
-test("rejected ROUTE drafts retain secret-scanned failure evidence and a contract code", (t) => {
+test("ROUTE finalizer rejection returns a contract code", { skip: POSIX_EXECUTABLE_FIXTURE }, (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "macos-luna-rejected-route-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const workspace = path.join(root, "workspace");
-  const evidence = path.join(root, "evidence");
   const finalizer = path.join(root, "bin", "problem-locator-seal-outcome-draft");
   fs.mkdirSync(path.dirname(finalizer), { recursive: true });
   fs.mkdirSync(path.join(workspace, "runtime", "tool-state"), { recursive: true });
@@ -197,6 +200,16 @@ test("rejected ROUTE drafts retain secret-scanned failure evidence and a contrac
     () => sealServiceOutcomeDraft({ phase: "ROUTE", workspaceRoot: workspace, finalizerEntry: finalizer }),
     (error) => error.code === "MACOS_CODEX_LUNA_SERVICE_DRAFT_REJECTED",
   );
+});
+
+test("rejected ROUTE drafts retain secret-scanned failure evidence", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "macos-luna-rejected-route-evidence-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const workspace = path.join(root, "workspace");
+  const evidence = path.join(root, "evidence");
+  fs.mkdirSync(path.join(workspace, "output"), { recursive: true });
+  fs.writeFileSync(path.join(workspace, "output", "job_outcome.draft.json"), '{"schema_version":2,"unexpected":true}\n');
+
   const receipt = persistRejectedServiceDraft({ phase: "ROUTE", workspaceRoot: workspace, evidenceRoot: evidence, canaries: ["secret-canary-value"] });
   assert.equal(receipt.status, "PASS");
   assert.equal(fs.readFileSync(path.join(evidence, "server-invocations", "route.rejected-draft.json"), "utf8"), '{"schema_version":2,"unexpected":true}\n');
@@ -211,7 +224,7 @@ test("rejected ROUTE drafts retain secret-scanned failure evidence and a contrac
   assert.equal(fs.existsSync(unsafeEvidence), false);
 });
 
-test("server wrapper runs the one product-owned Logparse command without persisting broker credentials", (t) => {
+test("server wrapper runs the one product-owned Logparse command without persisting broker credentials", { skip: POSIX_EXECUTABLE_FIXTURE }, (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "macos-luna-logparse-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const command = path.join(root, ".venv", "bin", "problem-locator-logparse");

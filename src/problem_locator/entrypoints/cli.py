@@ -33,10 +33,20 @@ from problem_locator.journey_renderer import (
     JourneySourceError,
     render_journey,
 )
-
 from problem_locator.interfaces.error_mapping import cli_exit_for, validation_error
+from problem_locator.runtime.methods_replay_v2 import (
+    MethodValidationReplayErrorCodeV2,
+    MethodValidationReplayErrorV2,
+    MethodValidationReplayReceiptV2,
+)
 
-from .replay import ReplayError, ReplayMode, ReplayRequest, ReplayResult
+from .replay import (
+    MethodValidationReplayRequestV2,
+    ReplayError,
+    ReplayMode,
+    ReplayRequest,
+    ReplayResult,
+)
 from .settings import Settings, SettingsError
 
 
@@ -56,9 +66,45 @@ class CliHooks:
     server_runner: Callable[[Any, str, int, int], None]
     atomic_writer: Callable[[Path, bytes], None] | None = None
     replay_runner: Callable[[ReplayRequest, Settings], ReplayResult] | None = None
+    method_validation_replay_runner: (
+        Callable[
+            [MethodValidationReplayRequestV2],
+            MethodValidationReplayReceiptV2,
+        ]
+        | None
+    ) = None
 
 
 _DEFAULT_HOOKS: CliHooks | None = None
+
+
+_METHOD_VALIDATION_REPLAY_ERROR_MESSAGES = {
+    MethodValidationReplayErrorCodeV2.RECORD_READ_FAILED: (
+        "读取 Evidence V2 执行记录失败。"
+    ),
+    MethodValidationReplayErrorCodeV2.CORE_RECORD_INVALID: (
+        "Evidence V2 核心记录无效。"
+    ),
+    MethodValidationReplayErrorCodeV2.JOB_NOT_FOUND: "找不到指定的 Job。",
+    MethodValidationReplayErrorCodeV2.STATE_NOT_FOUND: (
+        "找不到校验重放所需的 Methods V2 State。"
+    ),
+    MethodValidationReplayErrorCodeV2.EVIDENCE_GRAPH_NOT_FOUND: (
+        "找不到校验重放所需的 Evidence Graph。"
+    ),
+    MethodValidationReplayErrorCodeV2.EVALUATION_PLAN_NOT_FOUND: (
+        "找不到校验重放所需的 Evaluation Plan。"
+    ),
+    MethodValidationReplayErrorCodeV2.WORKFLOW_MISMATCH: (
+        "已保存的 Evidence V2 记录不属于同一定位流程。"
+    ),
+    MethodValidationReplayErrorCodeV2.REJECTED_ATTEMPT_NOT_FOUND: (
+        "找不到指定的 Evidence V2 被拒响应。"
+    ),
+    MethodValidationReplayErrorCodeV2.REJECTION_NOT_REPRODUCED: (
+        "当前校验器无法复现这条响应原先的拒绝结果。"
+    ),
+}
 
 
 def set_default_hooks(hooks: CliHooks) -> None:
@@ -116,7 +162,7 @@ def _parser() -> argparse.ArgumentParser:
 
     replay = subcommands.add_parser(
         "replay-job",
-        help="replay one State V7 Job in a new isolated installation",
+        help="replay one State V8 Job in a new isolated installation",
     )
     replay.add_argument("--source-data-root", type=Path, required=True)
     replay.add_argument("--job-id", required=True)
@@ -128,6 +174,23 @@ def _parser() -> argparse.ArgumentParser:
     replay.add_argument("--output-dir", type=Path, required=True)
     replay.add_argument("--env-file", type=Path)
     replay.add_argument("--skill-dir", type=Path)
+
+    method_validation_replay = subcommands.add_parser(
+        "replay-method-rejection",
+        help="使用当前校验器重放一条已持久化的 Methods V2 被拒响应",
+    )
+    method_validation_replay.add_argument("--data-root", type=Path, required=True)
+    method_validation_replay.add_argument("--job-id", required=True)
+    method_validation_replay.add_argument(
+        "--role",
+        choices=("SPECIALIST", "REVIEWER"),
+        required=True,
+    )
+    method_validation_replay.add_argument(
+        "--attempt",
+        choices=("PRIMARY", "REPAIR"),
+        required=True,
+    )
     return parser
 
 
@@ -269,6 +332,77 @@ def _replay_job_command(
     return CLI_EXIT_SUCCESS if result.success else CLI_EXIT_RUNTIME_FAILURE
 
 
+def _method_validation_replay_command(
+    arguments: argparse.Namespace,
+    hooks: CliHooks,
+    *,
+    output: BinaryIO,
+    errors: BinaryIO,
+) -> int:
+    runner = hooks.method_validation_replay_runner
+    if runner is None:
+        _write_error(
+            errors,
+            _config_error("Methods V2 校验重放功能尚未配置。"),
+        )
+        return CLI_EXIT_CONFIG_OR_STATE_CORRUPT
+    try:
+        job_id = TypeAdapter(OpaqueId).validate_python(arguments.job_id, strict=True)
+        data_root = Path(arguments.data_root)
+        if not data_root.is_absolute():
+            raise ValueError("data-root must be absolute")
+        request = MethodValidationReplayRequestV2(
+            data_root=data_root,
+            job_id=job_id,
+            role=arguments.role,
+            attempt=arguments.attempt,
+        )
+        receipt = runner(request)
+    except MethodValidationReplayErrorV2 as exc:
+        errors.write(
+            canonical_json_bytes(
+                {
+                    "schema_version": 1,
+                    "status": "ERROR",
+                    "code": exc.code.value,
+                    "message": _METHOD_VALIDATION_REPLAY_ERROR_MESSAGES[exc.code],
+                    "job_id": exc.job_id,
+                    "role": exc.role,
+                    "attempt": exc.attempt,
+                }
+            )
+        )
+        errors.flush()
+        if exc.code is MethodValidationReplayErrorCodeV2.RECORD_READ_FAILED:
+            return CLI_EXIT_RUNTIME_FAILURE
+        if exc.code is MethodValidationReplayErrorCodeV2.CORE_RECORD_INVALID:
+            return CLI_EXIT_CONFIG_OR_STATE_CORRUPT
+        return CLI_EXIT_REQUEST_OR_STATE_CONFLICT
+    except ApplicationPortError as exc:
+        _write_error(errors, exc.error)
+        return cli_exit_for(exc.error)
+    except (OSError, TypeError, ValueError, ValidationError):
+        _write_error(
+            errors,
+            _request_error("Methods V2 校验重放请求无效。"),
+        )
+        return CLI_EXIT_REQUEST_OR_STATE_CONFLICT
+    except Exception:
+        _write_error(
+            errors,
+            _runtime_error("Methods V2 校验重放执行失败。"),
+        )
+        return CLI_EXIT_RUNTIME_FAILURE
+
+    payload = TypeAdapter(MethodValidationReplayReceiptV2).dump_python(
+        receipt,
+        mode="json",
+    )
+    output.write(canonical_json_bytes({"schema_version": 1, **payload}))
+    output.flush()
+    return CLI_EXIT_SUCCESS
+
+
 def _atomic_write(output: Path, data: bytes) -> None:
     parent = output.parent
     descriptor, temporary_name = tempfile.mkstemp(
@@ -330,6 +464,14 @@ def main(
 
     if arguments.command == "replay-job":
         return _replay_job_command(
+            arguments,
+            active_hooks,
+            output=output,
+            errors=errors,
+        )
+
+    if arguments.command == "replay-method-rejection":
+        return _method_validation_replay_command(
             arguments,
             active_hooks,
             output=output,

@@ -51,6 +51,7 @@ from problem_locator.contracts import (
     JobSpec,
     JobStatus,
     JobType,
+    MethodsReviewTargetV2,
     OldEpochTriggerPayload,
     OutcomeDisposition,
     OutcomeResultType,
@@ -603,6 +604,8 @@ class DomainCoordinator:
         if outcome_error is not None:
             return outcome_error
         outcome = payload.job_outcome
+        if outcome.methods_terminal_projection is not None:
+            return self._methods_terminal_plan(snapshot, active, outcome, trigger)
         if outcome.result_type is OutcomeResultType.FAILED:
             assert outcome.error is not None
             return self._failure_plan(
@@ -679,6 +682,60 @@ class DomainCoordinator:
             )
         if active.diagnosis_mode is not DiagnosisMode.SPECIALIZED:
             return _validation("A DIAGNOSE Job must have a frozen diagnosis mode.")
+        methods_review_target = outcome.methods_review_target
+        if methods_review_target is None and outcome.result_type not in {
+            OutcomeResultType.NEED_INPUT,
+            OutcomeResultType.NEED_ATTACHMENT,
+        }:
+            return _validation(
+                "Methods V2 specialized diagnosis requires a server-created review target after preflight."
+            )
+        if methods_review_target is not None:
+            if (
+                active.skill_ref is None
+                or methods_review_target.source_job_id != active.job_id
+                or methods_review_target.skill_ref != active.skill_ref
+                or methods_review_target.reviewed_state_revision
+                != snapshot.case.diagnosis_state.revision
+            ):
+                return _validation(
+                    "Methods V2 Specialist handoff does not match the active Job skill/state."
+                )
+            next_job = self._job_spec(
+                trigger,
+                JobType.REVIEW,
+                target_state_revision=snapshot.case.diagnosis_state.revision,
+                goal=_REVIEW_GOAL,
+                evidence_bindings=[],
+                attachment_refs=[],
+                previous_outcome_refs=[],
+                artifact_bindings=[],
+                selected_skill_ref=snapshot.case.selected_skill_ref,
+                methods_review_target=methods_review_target,
+            )
+            if isinstance(next_job, ApplicationError):
+                return next_job
+            return TransitionPlan(
+                accepted_state_delta=_empty_delta(),
+                target_case_status=CaseStatus.REVIEWING,
+                job_updates=[
+                    _job_update(active, JobStatus.SUCCEEDED, trigger.occurred_at)
+                ],
+                outcome_disposition=OutcomeDisposition.APPLIED,
+                accepted_evidence_proposal_keys=[],
+                accepted_artifact_proposal_keys=[],
+                accepted_candidate_proposal_key=None,
+                selected_skill_update=None,
+                case_failure_update=None,
+                candidate_mutation=None,
+                next_job_spec=next_job,
+                final_result_target=None,
+                clear_active_job=True,
+                reason=(
+                    "Complete the Methods V2 Specialist Job and start a Candidate-free "
+                    "blind REVIEW Job."
+                ),
+            )
         diagnosis = outcome.payload
         assert isinstance(diagnosis, DiagnosisOutcome)
         candidate = diagnosis.candidate_conclusion_draft
@@ -941,6 +998,79 @@ class DomainCoordinator:
             reason="Apply semantic progress and continue diagnosis in a new Job.",
         )
 
+    def _methods_terminal_plan(
+        self,
+        snapshot: CaseSnapshot,
+        active: Job,
+        outcome: JobOutcome,
+        trigger: ValidatedTrigger,
+    ) -> CoordinatorPlanResult:
+        """Apply only the already-validated public Methods terminal projection."""
+
+        terminal = outcome.methods_terminal_projection
+        if terminal is None:
+            return _validation(
+                "Methods V2 terminal processing requires its server projection."
+            )
+        if (
+            snapshot.case.diagnosis_state.candidate_conclusion is not None
+            or active.context_snapshot is None
+            or active.context_snapshot.candidate_conclusion is not None
+            or (
+                active.job_type is JobType.DIAGNOSE
+                and active.diagnosis_mode is not DiagnosisMode.SPECIALIZED
+            )
+            or (
+                active.job_type is JobType.REVIEW
+                and active.methods_review_target is None
+            )
+        ):
+            return _validation(
+                "Methods V2 terminal transition must remain Candidate-free."
+            )
+        if terminal.status == "FAILED":
+            if outcome.error is None:
+                return _validation(
+                    "A failed Methods V2 terminal Outcome requires its mapped failure."
+                )
+            failure_plan = self._failure_plan(
+                active,
+                outcome.error,
+                trigger,
+                source_outcome_id=outcome.outcome_id,
+                disposition=OutcomeDisposition.APPLIED,
+            )
+            if isinstance(failure_plan, ApplicationError):
+                return failure_plan
+            values = failure_plan.model_dump(mode="python")
+            values["methods_terminal_projection"] = terminal
+            return TransitionPlan.model_validate(values)
+
+        target_status = (
+            CaseStatus.RESOLVED
+            if terminal.status == "RESOLVED"
+            else CaseStatus.UNRESOLVED
+        )
+        return TransitionPlan(
+            accepted_state_delta=_empty_delta(),
+            target_case_status=target_status,
+            job_updates=[
+                _job_update(active, JobStatus.SUCCEEDED, trigger.occurred_at)
+            ],
+            outcome_disposition=OutcomeDisposition.APPLIED,
+            accepted_evidence_proposal_keys=[],
+            accepted_artifact_proposal_keys=[],
+            accepted_candidate_proposal_key=None,
+            selected_skill_update=None,
+            case_failure_update=None,
+            candidate_mutation=None,
+            next_job_spec=None,
+            final_result_target=None,
+            methods_terminal_projection=terminal,
+            clear_active_job=True,
+            reason="Apply the Evidence V2 terminal projection without Candidate state.",
+        )
+
     def _review_outcome(
         self,
         snapshot: CaseSnapshot,
@@ -955,13 +1085,8 @@ class DomainCoordinator:
         if outcome_error is not None:
             return outcome_error
         outcome = payload.job_outcome
-        if outcome.proposed_evidence or any(
-            proposal.artifact_kind is not ArtifactKind.USER_RESULT
-            for proposal in outcome.proposed_artifacts
-        ):
-            return _validation(
-                "REVIEW Outcomes may contain only the server-generated USER_RESULT."
-            )
+        if outcome.methods_terminal_projection is not None:
+            return self._methods_terminal_plan(snapshot, active, outcome, trigger)
         if outcome.result_type is OutcomeResultType.FAILED:
             assert outcome.error is not None
             return self._failure_plan(
@@ -970,6 +1095,17 @@ class DomainCoordinator:
                 trigger,
                 source_outcome_id=outcome.outcome_id,
                 disposition=OutcomeDisposition.APPLIED,
+            )
+        if active.methods_review_target is not None:
+            return _validation(
+                "Methods V2 REVIEW Outcome requires its server terminal projection."
+            )
+        if outcome.proposed_evidence or any(
+            proposal.artifact_kind is not ArtifactKind.USER_RESULT
+            for proposal in outcome.proposed_artifacts
+        ):
+            return _validation(
+                "REVIEW Outcomes may contain only the server-generated USER_RESULT."
             )
         assessment = outcome.payload
         assert isinstance(assessment, ReviewAssessment)
@@ -1497,19 +1633,25 @@ class DomainCoordinator:
                 "The interrupted source Job does not match the Case selected Skill."
             )
         if source.job_type is JobType.REVIEW:
-            target = source.review_target
-            candidate = snapshot.case.diagnosis_state.candidate_conclusion
-            if (
-                target is None
-                or candidate is None
-                or candidate.status is not CandidateStatus.REVIEWING
-                or candidate.conclusion_id != target.candidate_conclusion_id
-                or candidate.revision != target.candidate_revision
-                or candidate.content_hash != target.candidate_content_hash
-            ):
-                return _validation(
-                    "The interrupted REVIEW target no longer matches the current Candidate."
-                )
+            if source.methods_review_target is not None:
+                if snapshot.case.diagnosis_state.candidate_conclusion is not None:
+                    return _validation(
+                        "An interrupted Methods V2 REVIEW must remain Candidate-free."
+                    )
+            else:
+                target = source.review_target
+                candidate = snapshot.case.diagnosis_state.candidate_conclusion
+                if (
+                    target is None
+                    or candidate is None
+                    or candidate.status is not CandidateStatus.REVIEWING
+                    or candidate.conclusion_id != target.candidate_conclusion_id
+                    or candidate.revision != target.candidate_revision
+                    or candidate.content_hash != target.candidate_content_hash
+                ):
+                    return _validation(
+                        "The interrupted REVIEW target no longer matches the current Candidate."
+                    )
         binding = trigger.runtime_bindings_by_job_type.get(source.job_type)
         if binding is None or binding != _runtime_from_job(source):
             return _validation(
@@ -1534,6 +1676,7 @@ class DomainCoordinator:
             artifact_bindings=_existing_bindings(source.artifact_refs),
             selected_skill_ref=source.skill_ref,
             review_target_binding=review_binding,
+            methods_review_target=source.methods_review_target,
             replacement_for_job_id=source.job_id,
             generic_problem_text=source.generic_problem_text,
         )
@@ -1766,6 +1909,8 @@ class DomainCoordinator:
                     source_job_id=job.job_id,
                     source_outcome_id=source_outcome_id,
                     occurred_at=trigger.occurred_at,
+                    reason_code=failure.reason_code,
+                    diagnostic_id=failure.diagnostic_id,
                 ),
             )
         return TransitionPlan(
@@ -1877,6 +2022,7 @@ class DomainCoordinator:
         artifact_bindings: list[PlannedResourceBinding],
         selected_skill_ref: VersionedRef | None,
         review_target_binding: ReviewTargetBinding | None = None,
+        methods_review_target: MethodsReviewTargetV2 | None = None,
         replacement_for_job_id: str | None = None,
         generic_problem_text: str | None = None,
     ) -> JobSpec | ApplicationError:
@@ -1930,6 +2076,7 @@ class DomainCoordinator:
             logparse_tool_ref=bindings.logparse_tool_ref,
             logparse_product=bindings.logparse_product,
             review_target_binding=review_target_binding,
+            methods_review_target=methods_review_target,
             replacement_for_job_id=replacement_for_job_id,
             resource_limits=bindings.resource_limits,
         )
