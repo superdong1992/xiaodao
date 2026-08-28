@@ -46,6 +46,8 @@ from problem_locator.runtime.methods_skill import (
 
 EVALUATION_ID = "00000000-0000-0000-0000-000000000091"
 SECOND_EVALUATION_ID = "00000000-0000-0000-0000-000000000092"
+CASE_ID = "00000000-0000-0000-0000-000000000001"
+SOURCE_JOB_ID = "00000000-0000-0000-0000-000000000010"
 
 
 def _skill() -> ResolvedSpecializedSkillV1:
@@ -158,7 +160,12 @@ def _evaluations(
 
 
 def _start(plan, *, evaluation_id: str = EVALUATION_ID):
-    return start_method_state_v2(evaluation_id=evaluation_id, plan=plan)
+    return start_method_state_v2(
+        case_id=CASE_ID,
+        source_job_id=SOURCE_JOB_ID,
+        evaluation_id=evaluation_id,
+        plan=plan,
+    )
 
 
 def _reviewer_pending(plan):
@@ -189,6 +196,8 @@ def _with_recomputed_state_ref(
 ) -> MethodStateV2:
     mutated = state.model_copy(update=changes)
     state_ref = method_state_ref_v2(
+        case_id=mutated.case_id,
+        source_job_id=mutated.source_job_id,
         evaluation_id=mutated.evaluation_id,
         plan_ref=mutated.plan_ref,
         evaluation_refs=mutated.evaluation_refs,
@@ -216,6 +225,28 @@ def test_state_status_contract_is_exact_and_has_no_partial_terminal() -> None:
         "FAILED",
         "INTERRUPTED",
     }
+
+
+def test_workflow_identity_changes_state_and_diagnostic_refs() -> None:
+    plan = _plan()
+    first = fail_method_state_v2(
+        state=_start(plan),
+        reason_code="SERVER_INVARIANT_VIOLATION",
+        reason="private first workflow detail",
+    )
+    second = fail_method_state_v2(
+        state=start_method_state_v2(
+            case_id="00000000-0000-0000-0000-000000000002",
+            source_job_id="00000000-0000-0000-0000-000000000020",
+            evaluation_id=EVALUATION_ID,
+            plan=plan,
+        ),
+        reason_code="SERVER_INVARIANT_VIOLATION",
+        reason="private second workflow detail",
+    )
+
+    assert first.state_ref != second.state_ref
+    assert first.diagnostic_id != second.diagnostic_id
 
 
 def test_state_reason_code_contract_is_exact() -> None:
@@ -267,7 +298,7 @@ def test_state_reason_code_contract_is_exact() -> None:
             ("UNKNOWN", "REJECTED"),
             ("REJECTED", "REJECTED"),
             "UNRESOLVED",
-            "INCOMPLETE_EVALUATION",
+            "SPECIALIST_REVIEWER_DISAGREEMENT",
         ),
         (
             ("REJECTED", "REJECTED"),

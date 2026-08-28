@@ -23,6 +23,11 @@ from .enums import (
     RouteKind,
     TriggerType,
 )
+from .methods_reason_v2 import (
+    CONSENSUS_UNRESOLVED_REASON_CODES_V2,
+    REVIEWER_UNRESOLVED_REASON_CODES_V2,
+    SPECIALIST_UNRESOLVED_REASON_CODES_V2,
+)
 from .models import (
     AgentArtifactProposalDraft,
     AgentEvidenceProposalDraft,
@@ -83,6 +88,7 @@ from .models import (
     WorkspaceInputManifest,
     review_required_evidence_refs,
     validate_workspace_manifest_for_job,
+    validate_methods_reviewer_terminal_v2,
 )
 from .serialization import parse_canonical_json_bytes
 
@@ -333,53 +339,44 @@ def validate_outcome_for_job(
         else:
             terminal = outcome.methods_terminal_projection
             assert terminal is not None
+            if (
+                terminal.case_id != outcome.case_id
+                or terminal.source_job_id != outcome.job_id
+            ):
+                raise ValueError(
+                    "Methods V2 terminal identity must match its Outcome and Job"
+                )
+            if terminal.status == "FAILED" and (
+                outcome.error is None
+                or outcome.error.reason_code != terminal.reason_code
+                or outcome.error.diagnostic_id != terminal.diagnostic_id
+            ):
+                raise ValueError(
+                    "Methods V2 terminal failure must retain reason and diagnostic identity"
+                )
             if terminal.status == "UNRESOLVED":
                 allowed_reasons = (
-                    {
-                        "SPECIALIST_PROTOCOL_REPAIR_EXHAUSTED",
-                        "SPECIALIST_SEMANTIC_INVALID",
-                        "SPECIALIST_MODEL_EXECUTION_FAILED",
-                        "NO_MATCHING_METHOD_EVIDENCE",
-                    }
+                    SPECIALIST_UNRESOLVED_REASON_CODES_V2
                     if job.job_type is JobType.DIAGNOSE
-                    else {
-                        "REVIEWER_PROTOCOL_REPAIR_EXHAUSTED",
-                        "REVIEWER_SEMANTIC_INVALID",
-                        "REVIEWER_MODEL_EXECUTION_FAILED",
-                        "SPECIALIST_REVIEWER_DISAGREEMENT",
-                        "INCOMPLETE_EVALUATION",
-                        "NO_CONFIRMED_METHOD",
-                    }
+                    else REVIEWER_UNRESOLVED_REASON_CODES_V2
+                    | CONSENSUS_UNRESOLVED_REASON_CODES_V2
                 )
                 if terminal.reason_code not in allowed_reasons:
                     raise ValueError(
                         "Methods V2 unresolved reason does not belong to the source Job stage"
                     )
             if job.job_type is JobType.REVIEW:
-                reviewer = outcome.methods_reviewer_result
-                target = job.methods_review_target
-                requires_reviewer = terminal.status == "RESOLVED" or (
-                    terminal.reason_code
-                    in {
-                        "SPECIALIST_REVIEWER_DISAGREEMENT",
-                        "INCOMPLETE_EVALUATION",
-                        "NO_CONFIRMED_METHOD",
-                    }
+                validate_methods_reviewer_terminal_v2(
+                    outcome.methods_reviewer_result,
+                    terminal,
+                    review_job_id=job.job_id,
+                    reviewed_state_revision=job.base_state_revision,
+                    expected_target=job.methods_review_target,
                 )
-                if (
-                    target is None
-                    or target.evaluation_id != terminal.evaluation_id
-                    or target.plan_ref != terminal.plan_ref
-                    or target.graph_ref != terminal.evidence_graph_ref
-                    or (
-                        requires_reviewer
-                        and (reviewer is None or reviewer.target != target)
-                    )
-                    or (not requires_reviewer and reviewer is not None)
-                ):
-                    raise ValueError(
-                        "Methods V2 terminal REVIEW Outcome must match its frozen review target"
-                    )
+            elif terminal.status == "RESOLVED":
+                raise ValueError(
+                    "Methods V2 DIAGNOSE terminal Outcome cannot bypass Reviewer consensus"
+                )
             elif job.job_type is not JobType.DIAGNOSE:
                 raise ValueError(
                     "Methods V2 terminal Outcome requires DIAGNOSE or REVIEW"

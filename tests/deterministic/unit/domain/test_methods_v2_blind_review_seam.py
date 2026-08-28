@@ -57,7 +57,6 @@ from problem_locator.runtime.methods_evaluation_v2 import (
 )
 from problem_locator.runtime.methods_outcome_v2 import (
     build_method_terminal_result_v2,
-    project_method_terminal_result_v2,
 )
 from problem_locator.runtime.methods_skill import load_specialized_skill_registration
 from tests.deterministic.unit.runtime.test_methods_skill import _write_registration
@@ -157,10 +156,32 @@ def _review_bindings(source):
 def _specialist_handoff(inputs) -> tuple[JobOutcome, object, object]:
     source, _, graph, plan = inputs
     base = diagnosis_outcome()
+    specialist = evaluate_method_role_v2(
+        role="SPECIALIST",
+        plan=plan,
+        response=[
+            {
+                "evaluation_ref": item.evaluation_ref,
+                "verdict": "CONFIRMED",
+                "reason": f"private specialist handoff reason {item.method_id}",
+            }
+            for item in plan.evaluations
+        ],
+        attempt="PRIMARY",
+    )
+    pending_state = accept_specialist_evaluation_v2(
+        state=start_method_state_v2(
+            case_id=source.case_id,
+            source_job_id=source.job_id,
+            evaluation_id=EVALUATION_ID,
+            plan=plan,
+        ),
+        evaluation=specialist,
+    )
     outcome = build_methods_specialist_handoff_outcome_v2(
         source,
         outcome_id=base.outcome_id,
-        evaluation_id=EVALUATION_ID,
+        pending_state=pending_state,
         graph=graph,
         plan=plan,
         produced_at=base.produced_at,
@@ -413,6 +434,8 @@ def test_server_can_express_reviewer_result_without_candidate_assessment(
     )
     pending = accept_specialist_evaluation_v2(
         state=start_method_state_v2(
+            case_id=inputs[0].case_id,
+            source_job_id=inputs[0].job_id,
             evaluation_id=EVALUATION_ID,
             plan=plan,
         ),
@@ -433,17 +456,20 @@ def test_server_can_express_reviewer_result_without_candidate_assessment(
         state=terminal_state,
         plan=plan,
         evidence=graph,
+        terminal_job_id=job.job_id,
         limitations=("server limitation",),
-        reasons=("server terminal reason",),
+        reasons=(),
     )
-    terminal_projection = project_method_terminal_result_v2(terminal_result)
     outcome = build_methods_reviewer_outcome_v2(
         job,
         outcome_id=REVIEW_OUTCOME_ID,
-        evaluation=evaluation,
-        terminal_projection=terminal_projection,
+        terminal_state=terminal_state,
+        terminal_result=terminal_result,
+        plan=plan,
         produced_at="2026-07-31T00:03:30.000Z",
     )
+    assert outcome.methods_terminal_projection is not None
+    terminal_projection = outcome.methods_terminal_projection
     assert validate_outcome_for_job(job, outcome) is outcome
 
     snapshot = snapshot_with_active(
@@ -472,7 +498,7 @@ def test_server_can_express_reviewer_result_without_candidate_assessment(
     assert result.next_job_spec is None
     assert outcome.payload is None
     assert outcome.methods_terminal_projection == terminal_projection
-    assert outcome.methods_terminal_projection.reasons == ("server terminal reason",)
+    assert outcome.methods_terminal_projection.reasons == ()
     serialized = outcome.model_dump_json()
     assert "private specialist reason" not in serialized
     assert "private reviewer reason" in serialized

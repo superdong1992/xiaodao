@@ -7,7 +7,10 @@ import pytest
 from pydantic import ValidationError
 
 import problem_locator.runtime.methods_evidence_v2 as methods_evidence_v2
-from problem_locator.contracts import MethodEvidenceHitV2
+from problem_locator.contracts import (
+    MethodEvidenceHitV2,
+    project_method_terminal_result_v2,
+)
 from problem_locator.domain.methods_state_v2 import (
     accept_specialist_evaluation_v2,
     fail_method_state_v2,
@@ -37,6 +40,8 @@ from problem_locator.runtime.methods_skill import (
 
 EVALUATION_ID = "00000000-0000-0000-0000-000000000091"
 SECOND_EVALUATION_ID = "00000000-0000-0000-0000-000000000092"
+CASE_ID = "00000000-0000-0000-0000-000000000001"
+SOURCE_JOB_ID = "00000000-0000-0000-0000-000000000010"
 
 
 def _skill() -> ResolvedSpecializedSkillV1:
@@ -139,7 +144,12 @@ def _context(
         second=reviewer,
     )
     reviewer_pending = accept_specialist_evaluation_v2(
-        state=start_method_state_v2(evaluation_id=evaluation_id, plan=plan),
+        state=start_method_state_v2(
+            case_id=CASE_ID,
+            source_job_id=SOURCE_JOB_ID,
+            evaluation_id=evaluation_id,
+            plan=plan,
+        ),
         evaluation=specialist,
     )
     state = finalize_reviewer_consensus_v2(
@@ -151,22 +161,22 @@ def _context(
     return graph, plan, consensus, state
 
 
-def test_resolved_result_maps_only_consensus_confirmed_refs_and_preserves_text() -> None:
+def test_resolved_result_maps_only_consensus_confirmed_refs_and_limitations() -> None:
     graph, plan, consensus, state = _context()
 
     result = build_method_terminal_result_v2(
         state=state,
         plan=plan,
         evidence=graph,
+        terminal_job_id=SOURCE_JOB_ID,
         limitations=("Only the frozen target logs were evaluated.",),
-        reasons=("Both roles completed the exact evaluation plan.",),
     )
     repeated = build_method_terminal_result_v2(
         state=state,
         plan=plan,
         evidence=graph,
+        terminal_job_id=SOURCE_JOB_ID,
         limitations=("Only the frozen target logs were evaluated.",),
-        reasons=("Both roles completed the exact evaluation plan.",),
     )
 
     assert repeated == result
@@ -178,11 +188,88 @@ def test_resolved_result_maps_only_consensus_confirmed_refs_and_preserves_text()
     assert result.confirmed_event_refs == plan.evaluations[0].evidence_event_refs
     assert result.confirmed_hit_refs == plan.evaluations[0].evidence_hit_refs
     assert result.limitations == ("Only the frozen target logs were evaluated.",)
-    assert "Both roles completed the exact evaluation plan." in result.reasons
+    assert result.reasons == ()
     assert len(result.evaluations) == 1
     assert result.evaluations[0].verdict == "CONFIRMED"
     assert result.diagnostic_id.startswith("diag-")
     assert all(item.evaluation_ref.startswith("eval-") for item in result.evaluations)
+
+
+def test_terminal_result_rejects_extra_free_form_reason() -> None:
+    graph, plan, _, state = _context()
+
+    with pytest.raises(ValueError, match="production state"):
+        build_method_terminal_result_v2(
+            state=state,
+            plan=plan,
+            evidence=graph,
+            terminal_job_id=SOURCE_JOB_ID,
+            reasons=("private model summary must not escape",),
+        )
+
+
+def test_terminal_result_ref_includes_case_source_and_terminal_job_identity() -> None:
+    graph, plan, _, _ = _context()
+    first = fail_method_state_v2(
+        state=start_method_state_v2(
+            case_id=CASE_ID,
+            source_job_id=SOURCE_JOB_ID,
+            evaluation_id=EVALUATION_ID,
+            plan=plan,
+        ),
+        reason_code="SERVER_INVARIANT_VIOLATION",
+        reason="private first workflow detail",
+    )
+    second = fail_method_state_v2(
+        state=start_method_state_v2(
+            case_id="00000000-0000-0000-0000-000000000002",
+            source_job_id="00000000-0000-0000-0000-000000000020",
+            evaluation_id=EVALUATION_ID,
+            plan=plan,
+        ),
+        reason_code="SERVER_INVARIANT_VIOLATION",
+        reason="private second workflow detail",
+    )
+
+    first_result = build_method_terminal_result_v2(
+        state=first,
+        plan=plan,
+        evidence=graph,
+        terminal_job_id=SOURCE_JOB_ID,
+    )
+    second_result = build_method_terminal_result_v2(
+        state=second,
+        plan=plan,
+        evidence=graph,
+        terminal_job_id=SOURCE_JOB_ID,
+    )
+    other_terminal_result = build_method_terminal_result_v2(
+        state=first,
+        plan=plan,
+        evidence=graph,
+        terminal_job_id="00000000-0000-0000-0000-000000000030",
+    )
+
+    assert first_result.result_ref != second_result.result_ref
+    assert first_result.diagnostic_id != second_result.diagnostic_id
+    assert first_result.result_ref != other_terminal_result.result_ref
+    assert first_result.diagnostic_id == other_terminal_result.diagnostic_id
+
+
+def test_projection_revalidates_single_field_hit_ref_mutation() -> None:
+    graph, plan, _, state = _context()
+    result = build_method_terminal_result_v2(
+        state=state,
+        plan=plan,
+        evidence=graph,
+        terminal_job_id=SOURCE_JOB_ID,
+    )
+    mutated = result.model_copy(
+        update={"confirmed_hit_refs": ("hit-" + "f" * 64,)}
+    )
+
+    with pytest.raises(ValidationError, match="result_ref|confirmed"):
+        project_method_terminal_result_v2(mutated)
 
 
 def test_unresolved_result_clears_every_confirmed_ref() -> None:
@@ -195,6 +282,7 @@ def test_unresolved_result_clears_every_confirmed_ref() -> None:
         state=state,
         plan=plan,
         evidence=graph,
+        terminal_job_id=SOURCE_JOB_ID,
         limitations=("No method was confirmed.",),
     )
 
@@ -220,12 +308,18 @@ def test_no_matching_evidence_result_exposes_only_server_reason() -> None:
     )
     graph = scan_method_evidence_v2(skill=skill, target_logs=(target,))
     plan = build_method_evaluation_plan_v2(skill=skill, evidence=graph)
-    state = start_method_state_v2(evaluation_id=EVALUATION_ID, plan=plan)
+    state = start_method_state_v2(
+        case_id=CASE_ID,
+        source_job_id=SOURCE_JOB_ID,
+        evaluation_id=EVALUATION_ID,
+        plan=plan,
+    )
 
     result = build_method_terminal_result_v2(
         state=state,
         plan=plan,
         evidence=graph,
+        terminal_job_id=SOURCE_JOB_ID,
     )
 
     assert result.status == "UNRESOLVED"
@@ -246,11 +340,13 @@ def test_same_plan_has_distinct_result_identity_per_evaluation() -> None:
         state=first_state,
         plan=first_plan,
         evidence=first_graph,
+        terminal_job_id=SOURCE_JOB_ID,
     )
     second = build_method_terminal_result_v2(
         state=second_state,
         plan=second_plan,
         evidence=second_graph,
+        terminal_job_id=SOURCE_JOB_ID,
     )
 
     assert first.plan_ref == second.plan_ref
@@ -272,6 +368,7 @@ def test_failed_result_clears_confirmed_refs_even_after_resolved_consensus() -> 
         state=failed,
         plan=plan,
         evidence=graph,
+        terminal_job_id=SOURCE_JOB_ID,
     )
 
     assert result.status == "FAILED"
@@ -281,7 +378,9 @@ def test_failed_result_clears_confirmed_refs_even_after_resolved_consensus() -> 
     assert result.confirmed_event_refs == ()
     assert result.confirmed_hit_refs == ()
     assert result.evaluations == ()
-    assert "The terminal archive could not be persisted." in result.reasons
+    assert result.reasons == (
+        "The evaluation audit archive could not be completed.",
+    )
 
 
 def test_outcome_mapping_does_not_rescan_or_read_marker_line(
@@ -307,6 +406,7 @@ def test_outcome_mapping_does_not_rescan_or_read_marker_line(
         state=state,
         plan=plan,
         evidence=graph,
+        terminal_job_id=SOURCE_JOB_ID,
     )
 
     assert result.status == "RESOLVED"
@@ -315,7 +415,12 @@ def test_outcome_mapping_does_not_rescan_or_read_marker_line(
 def test_interrupted_state_does_not_generate_terminal_result() -> None:
     graph, plan, _, _ = _context()
     interrupted = interrupt_method_state_v2(
-        state=start_method_state_v2(evaluation_id=EVALUATION_ID, plan=plan)
+        state=start_method_state_v2(
+            case_id=CASE_ID,
+            source_job_id=SOURCE_JOB_ID,
+            evaluation_id=EVALUATION_ID,
+            plan=plan,
+        )
     )
 
     with pytest.raises(ValueError, match="terminal result requires"):
@@ -323,6 +428,7 @@ def test_interrupted_state_does_not_generate_terminal_result() -> None:
             state=interrupted,
             plan=plan,
             evidence=graph,
+            terminal_job_id=SOURCE_JOB_ID,
         )
 
 
@@ -335,4 +441,5 @@ def test_single_field_state_mutation_cannot_publish_unresolved_result() -> None:
             state=mutated,
             plan=plan,
             evidence=graph,
+            terminal_job_id=SOURCE_JOB_ID,
         )

@@ -6,18 +6,30 @@ from typing import Annotated, Literal, TypeAlias
 
 from pydantic import ConfigDict, Field, StringConstraints, model_validator
 
+from .methods_reason_v2 import (
+    FAILED_METHOD_REASON_CODES_V2,
+    METHOD_PUBLIC_REASON_TEXT_V2,
+    UNRESOLVED_METHOD_REASON_CODES_V2,
+    MethodStateReasonCodeV2,
+)
 from .methods_v2 import (
     MethodConsensusV2,
     MethodEvidenceEventRefV2,
     MethodEvidenceGraphRefV2,
     MethodEvidenceHitRefV2,
+    MethodEvaluationPlanV2,
     MethodEvaluationPlanRefV2,
     MethodEvaluationRefV2,
     MethodEvaluationRoleV2,
     MethodIdV2,
     MethodRoleEvaluationV2,
 )
-from .models import ContractModel, NonEmptyText, OpaqueId
+from .models import (
+    ContractModel,
+    MethodsTerminalProjectionV2,
+    NonEmptyText,
+    OpaqueId,
+)
 from .serialization import canonical_json_sha256
 
 
@@ -30,21 +42,6 @@ MethodStateStatusV2: TypeAlias = Literal[
     "INTERRUPTED",
 ]
 MethodTerminalStatusV2: TypeAlias = Literal["RESOLVED", "UNRESOLVED", "FAILED"]
-MethodStateReasonCodeV2: TypeAlias = Literal[
-    "SPECIALIST_PROTOCOL_REPAIR_EXHAUSTED",
-    "REVIEWER_PROTOCOL_REPAIR_EXHAUSTED",
-    "SPECIALIST_SEMANTIC_INVALID",
-    "REVIEWER_SEMANTIC_INVALID",
-    "SPECIALIST_MODEL_EXECUTION_FAILED",
-    "REVIEWER_MODEL_EXECUTION_FAILED",
-    "SPECIALIST_REVIEWER_DISAGREEMENT",
-    "INCOMPLETE_EVALUATION",
-    "NO_CONFIRMED_METHOD",
-    "NO_MATCHING_METHOD_EVIDENCE",
-    "RESOURCE_SNAPSHOT_DRIFT",
-    "SERVER_INVARIANT_VIOLATION",
-    "AUDIT_ARCHIVE_FAILED",
-]
 MethodStateRefV2: TypeAlias = Annotated[
     str,
     StringConstraints(pattern=r"^state-[0-9a-f]{64}$", strict=True),
@@ -62,35 +59,14 @@ MethodProtocolFailureCountV2: TypeAlias = Annotated[
     Field(ge=0, le=2, strict=True),
 ]
 
-_UNRESOLVED_REASONS = frozenset(
-    {
-        "SPECIALIST_PROTOCOL_REPAIR_EXHAUSTED",
-        "REVIEWER_PROTOCOL_REPAIR_EXHAUSTED",
-        "SPECIALIST_SEMANTIC_INVALID",
-        "REVIEWER_SEMANTIC_INVALID",
-        "SPECIALIST_MODEL_EXECUTION_FAILED",
-        "REVIEWER_MODEL_EXECUTION_FAILED",
-        "SPECIALIST_REVIEWER_DISAGREEMENT",
-        "INCOMPLETE_EVALUATION",
-        "NO_CONFIRMED_METHOD",
-        "NO_MATCHING_METHOD_EVIDENCE",
-    }
-)
-_FAILED_REASONS = frozenset(
-    {
-        "RESOURCE_SNAPSHOT_DRIFT",
-        "SERVER_INVARIANT_VIOLATION",
-        "AUDIT_ARCHIVE_FAILED",
-    }
-)
-
-
 class _MethodStateContract(ContractModel):
     model_config = ConfigDict(frozen=True)
 
 
 def method_diagnostic_id_v2(
     *,
+    case_id: str,
+    source_job_id: str,
     evaluation_id: str,
     plan_ref: str,
     status: str,
@@ -100,6 +76,8 @@ def method_diagnostic_id_v2(
     return "diag-" + canonical_json_sha256(
         {
             "kind": "method-diagnostic-v2",
+            "case_id": case_id,
+            "source_job_id": source_job_id,
             "evaluation_id": evaluation_id,
             "plan_ref": plan_ref,
             "status": status,
@@ -119,6 +97,8 @@ def _consensus_dump(value: MethodConsensusV2 | None) -> dict[str, object] | None
 
 def method_state_ref_v2(
     *,
+    case_id: str,
+    source_job_id: str,
     evaluation_id: str,
     plan_ref: str,
     evaluation_refs: tuple[str, ...],
@@ -137,6 +117,8 @@ def method_state_ref_v2(
     return "state-" + canonical_json_sha256(
         {
             "kind": "method-state-v2",
+            "case_id": case_id,
+            "source_job_id": source_job_id,
             "evaluation_id": evaluation_id,
             "plan_ref": plan_ref,
             "evaluation_refs": list(evaluation_refs),
@@ -157,6 +139,8 @@ def method_state_ref_v2(
 
 class MethodStateV2(_MethodStateContract):
     state_ref: MethodStateRefV2
+    case_id: OpaqueId
+    source_job_id: OpaqueId
     evaluation_id: OpaqueId
     plan_ref: MethodEvaluationPlanRefV2
     evaluation_refs: tuple[MethodEvaluationRefV2, ...]
@@ -285,12 +269,21 @@ class MethodStateV2(_MethodStateContract):
                 ):
                     raise ValueError("resolved state requires complete resolved consensus")
             elif self.status == "UNRESOLVED":
-                if self.reason_code not in _UNRESOLVED_REASONS:
+                if self.reason_code not in UNRESOLVED_METHOD_REASON_CODES_V2:
                     raise ValueError("unresolved state reason code is invalid")
                 if self.consensus is not None and self.consensus.status != "UNRESOLVED":
                     raise ValueError("unresolved state cannot retain resolved consensus")
-            elif self.status == "FAILED" and self.reason_code not in _FAILED_REASONS:
+            elif (
+                self.status == "FAILED"
+                and self.reason_code not in FAILED_METHOD_REASON_CODES_V2
+            ):
                 raise ValueError("failed state reason code is invalid")
+            if self.status in {"UNRESOLVED", "FAILED"} and self.reasons != (
+                METHOD_PUBLIC_REASON_TEXT_V2[self.reason_code],
+            ):
+                raise ValueError(
+                    "terminal state reasons must use the fixed public reason text"
+                )
             if self.reason_code == "SPECIALIST_PROTOCOL_REPAIR_EXHAUSTED" and (
                 self.specialist_protocol_failures != 2
             ):
@@ -302,6 +295,8 @@ class MethodStateV2(_MethodStateContract):
 
         if self.diagnostic_id is not None:
             expected_diagnostic = method_diagnostic_id_v2(
+                case_id=self.case_id,
+                source_job_id=self.source_job_id,
                 evaluation_id=self.evaluation_id,
                 plan_ref=self.plan_ref,
                 status=self.status,
@@ -312,6 +307,8 @@ class MethodStateV2(_MethodStateContract):
                 raise ValueError("diagnostic_id does not match the state diagnosis")
 
         expected = method_state_ref_v2(
+            case_id=self.case_id,
+            source_job_id=self.source_job_id,
             evaluation_id=self.evaluation_id,
             plan_ref=self.plan_ref,
             evaluation_refs=self.evaluation_refs,
@@ -354,6 +351,9 @@ class MethodConfirmedEvaluationV2(_MethodStateContract):
 
 def method_terminal_result_ref_v2(
     *,
+    case_id: str,
+    source_job_id: str,
+    terminal_job_id: str,
     evaluation_id: str,
     status: str,
     plan_ref: str,
@@ -372,6 +372,9 @@ def method_terminal_result_ref_v2(
     return "result-" + canonical_json_sha256(
         {
             "kind": "method-terminal-result-v2",
+            "case_id": case_id,
+            "source_job_id": source_job_id,
+            "terminal_job_id": terminal_job_id,
             "evaluation_id": evaluation_id,
             "status": status,
             "plan_ref": plan_ref,
@@ -392,6 +395,9 @@ def method_terminal_result_ref_v2(
 
 class MethodTerminalResultV2(_MethodStateContract):
     result_ref: MethodTerminalResultRefV2
+    case_id: OpaqueId
+    source_job_id: OpaqueId
+    terminal_job_id: OpaqueId
     evaluation_id: OpaqueId
     status: MethodTerminalStatusV2
     plan_ref: MethodEvaluationPlanRefV2
@@ -425,6 +431,8 @@ class MethodTerminalResultV2(_MethodStateContract):
         if len(self.confirmed_evaluation_refs) != len(self.confirmed_method_ids):
             raise ValueError("confirmed evaluation and method refs must align")
         expected_diagnostic = method_diagnostic_id_v2(
+            case_id=self.case_id,
+            source_job_id=self.source_job_id,
             evaluation_id=self.evaluation_id,
             plan_ref=self.plan_ref,
             status=self.status,
@@ -465,11 +473,20 @@ class MethodTerminalResultV2(_MethodStateContract):
                 raise ValueError(
                     "unresolved and failed results must clear evaluations and confirmed refs"
                 )
-            if self.status == "UNRESOLVED" and self.reason_code not in _UNRESOLVED_REASONS:
+            if (
+                self.status == "UNRESOLVED"
+                and self.reason_code not in UNRESOLVED_METHOD_REASON_CODES_V2
+            ):
                 raise ValueError("unresolved result reason code is invalid")
-            if self.status == "FAILED" and self.reason_code not in _FAILED_REASONS:
+            if (
+                self.status == "FAILED"
+                and self.reason_code not in FAILED_METHOD_REASON_CODES_V2
+            ):
                 raise ValueError("failed result reason code is invalid")
         expected = method_terminal_result_ref_v2(
+            case_id=self.case_id,
+            source_job_id=self.source_job_id,
+            terminal_job_id=self.terminal_job_id,
             evaluation_id=self.evaluation_id,
             status=self.status,
             plan_ref=self.plan_ref,
@@ -490,6 +507,125 @@ class MethodTerminalResultV2(_MethodStateContract):
         return self
 
 
+def validate_method_terminal_result_v2(
+    state: MethodStateV2,
+    result: MethodTerminalResultV2,
+    plan: MethodEvaluationPlanV2,
+) -> MethodTerminalResultV2:
+    """Revalidate and bind one terminal result to its exact state and Plan."""
+
+    validated_state = MethodStateV2.model_validate(
+        state.model_dump(mode="python")
+    )
+    validated_result = MethodTerminalResultV2.model_validate(
+        result.model_dump(mode="python")
+    )
+    validated_plan = MethodEvaluationPlanV2.model_validate(
+        plan.model_dump(mode="python")
+    )
+    planned_refs = tuple(
+        item.evaluation_ref for item in validated_plan.evaluations
+    )
+    if (
+        validated_state.evaluation_refs != planned_refs
+        or validated_state.plan_ref != validated_plan.plan_ref
+        or validated_result.case_id != validated_state.case_id
+        or validated_result.source_job_id != validated_state.source_job_id
+        or validated_result.evaluation_id != validated_state.evaluation_id
+        or validated_result.status != validated_state.status
+        or validated_result.plan_ref != validated_plan.plan_ref
+        or validated_result.evidence_graph_ref
+        != validated_plan.evidence_graph_ref
+        or validated_result.reason_code != validated_state.reason_code
+        or validated_result.diagnostic_id != validated_state.diagnostic_id
+        or validated_result.diagnostic_evaluation_ref
+        != validated_state.diagnostic_evaluation_ref
+        or validated_result.reasons != validated_state.reasons
+    ):
+        raise ValueError("Methods terminal result differs from its production state and Plan")
+    if validated_state.status != "RESOLVED":
+        return validated_result
+
+    consensus = validated_state.consensus
+    if consensus is None or consensus.status != "RESOLVED":
+        raise ValueError("resolved terminal result requires resolved state consensus")
+    by_ref = {
+        item.evaluation_ref: item for item in validated_plan.evaluations
+    }
+    try:
+        confirmed_plan = tuple(
+            by_ref[evaluation_ref]
+            for evaluation_ref in consensus.confirmed_evaluation_refs
+        )
+    except KeyError as exc:
+        raise ValueError(
+            "resolved state consensus references an evaluation outside the Plan"
+        ) from exc
+    expected_evaluations = tuple(
+        MethodConfirmedEvaluationV2(
+            evaluation_ref=item.evaluation_ref,
+            method_id=item.method_id,
+            evidence_event_refs=item.evidence_event_refs,
+            evidence_hit_refs=item.evidence_hit_refs,
+            verdict="CONFIRMED",
+        )
+        for item in confirmed_plan
+    )
+    expected_event_refs = tuple(
+        dict.fromkeys(
+            ref for item in confirmed_plan for ref in item.evidence_event_refs
+        )
+    )
+    expected_hit_refs = tuple(
+        dict.fromkeys(
+            ref for item in confirmed_plan for ref in item.evidence_hit_refs
+        )
+    )
+    if (
+        validated_result.evaluations != expected_evaluations
+        or validated_result.confirmed_evaluation_refs
+        != consensus.confirmed_evaluation_refs
+        or validated_result.confirmed_method_ids != consensus.confirmed_method_ids
+        or validated_result.confirmed_event_refs != expected_event_refs
+        or validated_result.confirmed_hit_refs != expected_hit_refs
+    ):
+        raise ValueError(
+            "resolved Methods terminal result differs from its exact consensus evidence"
+        )
+    return validated_result
+
+
+def project_method_terminal_result_v2(
+    result: MethodTerminalResultV2,
+) -> MethodsTerminalProjectionV2:
+    """Mechanically remove private role material and bind the source Job."""
+
+    if not isinstance(result, MethodTerminalResultV2):
+        raise TypeError("result must be MethodTerminalResultV2")
+    validated_result = MethodTerminalResultV2.model_validate(
+        result.model_dump(mode="python")
+    )
+    return MethodsTerminalProjectionV2(
+        schema_version=2,
+        case_id=validated_result.case_id,
+        source_job_id=validated_result.terminal_job_id,
+        result_ref=validated_result.result_ref,
+        evaluation_id=validated_result.evaluation_id,
+        status=validated_result.status,
+        plan_ref=validated_result.plan_ref,
+        evidence_graph_ref=validated_result.evidence_graph_ref,
+        reason_code=validated_result.reason_code,
+        diagnostic_id=validated_result.diagnostic_id,
+        diagnostic_evaluation_ref=validated_result.diagnostic_evaluation_ref,
+        confirmed_evaluation_refs=validated_result.confirmed_evaluation_refs,
+        confirmed_method_ids=validated_result.confirmed_method_ids,
+        confirmed_event_refs=validated_result.confirmed_event_refs,
+        confirmed_hit_refs=validated_result.confirmed_hit_refs,
+        limitations=validated_result.limitations,
+        reasons=validated_result.reasons,
+    )
+
+
 __all__ = [
     "MethodDiagnosticIdV2",
     "MethodConfirmedEvaluationV2",
@@ -504,4 +640,6 @@ __all__ = [
     "method_diagnostic_id_v2",
     "method_state_ref_v2",
     "method_terminal_result_ref_v2",
+    "project_method_terminal_result_v2",
+    "validate_method_terminal_result_v2",
 ]

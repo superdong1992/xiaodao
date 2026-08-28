@@ -20,13 +20,16 @@ from problem_locator.contracts import (
     CaseStatus,
     DiagnosisOutcomeTriggerPayload,
     ErrorCode,
+    ExecutionFailure,
     JobStatus,
     JobType,
     MethodsTerminalProjectionV2,
+    MethodsValidationReasonCode,
     OutcomeResultType,
     ReviewOutcomeTriggerPayload,
     TriggerType,
     validate_outcome_for_job,
+    validate_methods_reviewer_terminal_v2,
     validate_transition_plan_for_outcome,
 )
 from problem_locator.domain import DomainCoordinator
@@ -50,13 +53,11 @@ from problem_locator.runtime.methods_evidence_v2 import (
 from problem_locator.runtime.methods_grounding import FrozenTargetLogV1
 from problem_locator.runtime.methods_outcome_v2 import (
     build_method_terminal_result_v2,
-    project_method_terminal_result_v2,
 )
 
 from ._builders import (
     continuation,
     rebuild,
-    review_outcome,
     snapshot_with_active,
     trigger,
 )
@@ -69,6 +70,9 @@ from .test_methods_v2_blind_review_seam import (
 
 
 EARLY_OUTCOME_ID = "00000000-0000-0000-0000-000000000081"
+OTHER_CASE_ID = "00000000-0000-0000-0000-000000000083"
+OTHER_JOB_ID = "00000000-0000-0000-0000-000000000084"
+PRIVATE_REASON_SENTINEL = "PRIVATE_ROLE_REASON_MUST_NOT_BE_PUBLIC_7f3c9d"
 
 
 @dataclass(frozen=True)
@@ -81,6 +85,7 @@ class _ReviewTerminalFlow:
     review_job: object
     plan: object
     terminal_state: object
+    terminal_result: object
     projection: MethodsTerminalProjectionV2
     outcome: object
 
@@ -104,15 +109,15 @@ def _role(plan, role: str, verdicts: tuple[str, ...]):
     )
 
 
-def _terminal_projection(state, plan, graph):
-    result = build_method_terminal_result_v2(
+def _terminal_result(state, plan, graph, *, terminal_job_id: str):
+    return build_method_terminal_result_v2(
         state=state,
         plan=plan,
         evidence=graph,
+        terminal_job_id=terminal_job_id,
         limitations=("server-observed limitation",),
-        reasons=("server terminal summary",),
+        reasons=(),
     )
-    return project_method_terminal_result_v2(result)
 
 
 def _review_terminal(
@@ -135,7 +140,12 @@ def _review_terminal(
     specialist = _role(plan, "SPECIALIST", specialist_verdicts)
     reviewer = _role(plan, "REVIEWER", reviewer_verdicts)
     pending = accept_specialist_evaluation_v2(
-        state=start_method_state_v2(evaluation_id=EVALUATION_ID, plan=plan),
+        state=start_method_state_v2(
+            case_id=source.case_id,
+            source_job_id=source.job_id,
+            evaluation_id=EVALUATION_ID,
+            plan=plan,
+        ),
         evaluation=specialist,
     )
     consensus = resolve_method_consensus_v2(
@@ -149,14 +159,22 @@ def _review_terminal(
         reviewer_evaluation=reviewer,
         consensus=consensus,
     )
-    projection = _terminal_projection(terminal, plan, graph)
+    terminal_result = _terminal_result(
+        terminal,
+        plan,
+        graph,
+        terminal_job_id=review_job.job_id,
+    )
     outcome = build_methods_reviewer_outcome_v2(
         review_job,
         outcome_id=REVIEW_OUTCOME_ID,
-        evaluation=reviewer,
-        terminal_projection=projection,
+        terminal_state=terminal,
+        terminal_result=terminal_result,
+        plan=plan,
         produced_at="2026-07-31T00:03:30.000Z",
     )
+    assert outcome.methods_terminal_projection is not None
+    projection = outcome.methods_terminal_projection
     return _ReviewTerminalFlow(
         source=source,
         handoff_snapshot=handoff_snapshot,
@@ -166,6 +184,7 @@ def _review_terminal(
         review_job=review_job,
         plan=plan,
         terminal_state=terminal,
+        terminal_result=terminal_result,
         projection=projection,
         outcome=outcome,
     )
@@ -216,6 +235,9 @@ def test_production_consensus_reaches_candidate_free_case_projection(
     assert projection.status == status
     assert projection.reason_code == reason_code
     assert projection.schema_version == 2
+    assert terminal.source_job_id == flow.source.job_id
+    assert projection.source_job_id == job.job_id
+    assert projection.case_id == job.case_id
     assert all("private" not in reason for reason in projection.reasons)
     assert "private" not in projection.model_dump_json()
     assert validate_outcome_for_job(job, outcome) is outcome
@@ -288,53 +310,72 @@ def _target_without_match() -> FrozenTargetLogV1:
 
 def _specialist_terminal(tmp_path, reason_code: str):
     source, skill, graph, plan = _flow_inputs(tmp_path)
-    state = start_method_state_v2(evaluation_id=EVALUATION_ID, plan=plan)
+    state = start_method_state_v2(
+        case_id=source.case_id,
+        source_job_id=source.job_id,
+        evaluation_id=EVALUATION_ID,
+        plan=plan,
+    )
     if reason_code == "NO_MATCHING_METHOD_EVIDENCE":
         graph = scan_method_evidence_v2(
             skill=skill,
             target_logs=(_target_without_match(),),
         )
         plan = build_method_evaluation_plan_v2(skill=skill, evidence=graph)
-        state = start_method_state_v2(evaluation_id=EVALUATION_ID, plan=plan)
+        state = start_method_state_v2(
+            case_id=source.case_id,
+            source_job_id=source.job_id,
+            evaluation_id=EVALUATION_ID,
+            plan=plan,
+        )
     elif reason_code == "SPECIALIST_PROTOCOL_REPAIR_EXHAUSTED":
         state = record_protocol_error_v2(
             state=state,
             role="SPECIALIST",
-            reason="primary response has invalid structure",
+            reason=PRIVATE_REASON_SENTINEL,
         )
         state = record_protocol_error_v2(
             state=state,
             role="SPECIALIST",
-            reason="repair response has invalid structure",
+            reason=PRIVATE_REASON_SENTINEL,
         )
     elif reason_code == "SPECIALIST_SEMANTIC_INVALID":
         state = record_semantic_invalid_v2(
             state=state,
             role="SPECIALIST",
-            reason="semantic evaluation is invalid",
+            reason=PRIVATE_REASON_SENTINEL,
             evaluation_ref=plan.evaluations[0].evaluation_ref,
         )
     elif reason_code == "SPECIALIST_MODEL_EXECUTION_FAILED":
         state = record_model_execution_failure_v2(
             state=state,
             role="SPECIALIST",
-            reason="model execution did not return a usable response",
+            reason=PRIVATE_REASON_SENTINEL,
             evaluation_ref=plan.evaluations[0].evaluation_ref,
         )
     else:
         state = fail_method_state_v2(
             state=state,
             reason_code=reason_code,
-            reason=f"terminal infrastructure failure: {reason_code}",
+            reason=PRIVATE_REASON_SENTINEL,
         )
-    projection = _terminal_projection(state, plan, graph)
+    terminal_result = _terminal_result(
+        state,
+        plan,
+        graph,
+        terminal_job_id=source.job_id,
+    )
     outcome = build_methods_specialist_terminal_outcome_v2(
         source,
         outcome_id=EARLY_OUTCOME_ID,
-        terminal_projection=projection,
+        terminal_state=state,
+        terminal_result=terminal_result,
+        plan=plan,
         produced_at="2026-07-31T00:03:20.000Z",
     )
-    return source, state, projection, outcome
+    assert outcome.methods_terminal_projection is not None
+    projection = outcome.methods_terminal_projection
+    return source, state, plan, terminal_result, projection, outcome
 
 
 @pytest.mark.parametrize(
@@ -353,7 +394,7 @@ def test_specialist_early_terminal_maps_status_job_and_failure(
     tmp_path,
     reason_code,
 ) -> None:
-    source, state, projection, outcome = _specialist_terminal(
+    source, state, _, terminal_result, projection, outcome = _specialist_terminal(
         tmp_path,
         reason_code,
     )
@@ -376,6 +417,9 @@ def test_specialist_early_terminal_maps_status_job_and_failure(
     assert transition.next_job_spec is None
     assert transition.accepted_artifact_proposal_keys == []
     assert transition.accepted_evidence_proposal_keys == []
+    assert PRIVATE_REASON_SENTINEL not in state.model_dump_json()
+    assert PRIVATE_REASON_SENTINEL not in terminal_result.model_dump_json()
+    assert PRIVATE_REASON_SENTINEL not in projection.model_dump_json()
     expected_failed = state.status == "FAILED"
     assert transition.target_case_status is (
         CaseStatus.FAILED if expected_failed else CaseStatus.UNRESOLVED
@@ -399,6 +443,21 @@ def test_specialist_early_terminal_maps_status_job_and_failure(
         assert outcome.result_type is OutcomeResultType.INCONCLUSIVE
         assert transition.case_failure_update is None
 
+    target_state = apply_diagnosis_state_delta(
+        snapshot.case.diagnosis_state,
+        transition.accepted_state_delta,
+        evidence_ids_by_proposal_key={},
+    )
+    case = apply_transition_plan_to_case(
+        snapshot.case,
+        transition,
+        target_state,
+        created_job=None,
+        processed_at=outcome.produced_at,
+    )
+    view = project_case_components(case, None, [])
+    assert PRIVATE_REASON_SENTINEL not in view.model_dump_json()
+
 
 @pytest.mark.parametrize(
     "reason_code",
@@ -416,53 +475,70 @@ def test_reviewer_early_terminal_requires_no_fabricated_reviewer_result(
     reason_code,
 ) -> None:
     inputs = _flow_inputs(tmp_path)
+    source = inputs[0]
     _, _, _, diagnosis_state, job, graph, plan = _plan_and_review_job(inputs)
     specialist = _role(plan, "SPECIALIST", ("CONFIRMED", "REJECTED"))
     state = accept_specialist_evaluation_v2(
-        state=start_method_state_v2(evaluation_id=EVALUATION_ID, plan=plan),
+        state=start_method_state_v2(
+            case_id=source.case_id,
+            source_job_id=source.job_id,
+            evaluation_id=EVALUATION_ID,
+            plan=plan,
+        ),
         evaluation=specialist,
     )
     if reason_code == "REVIEWER_PROTOCOL_REPAIR_EXHAUSTED":
         state = record_protocol_error_v2(
             state=state,
             role="REVIEWER",
-            reason="primary Reviewer response has invalid structure",
+            reason=PRIVATE_REASON_SENTINEL,
         )
         state = record_protocol_error_v2(
             state=state,
             role="REVIEWER",
-            reason="repair Reviewer response has invalid structure",
+            reason=PRIVATE_REASON_SENTINEL,
         )
     elif reason_code == "REVIEWER_SEMANTIC_INVALID":
         state = record_semantic_invalid_v2(
             state=state,
             role="REVIEWER",
-            reason="Reviewer semantic evaluation is invalid",
+            reason=PRIVATE_REASON_SENTINEL,
             evaluation_ref=plan.evaluations[0].evaluation_ref,
         )
     elif reason_code == "REVIEWER_MODEL_EXECUTION_FAILED":
         state = record_model_execution_failure_v2(
             state=state,
             role="REVIEWER",
-            reason="Reviewer model execution failed",
+            reason=PRIVATE_REASON_SENTINEL,
             evaluation_ref=plan.evaluations[0].evaluation_ref,
         )
     else:
         state = fail_method_state_v2(
             state=state,
             reason_code=reason_code,
-            reason=f"Reviewer terminal infrastructure failure: {reason_code}",
+            reason=PRIVATE_REASON_SENTINEL,
         )
-    projection = _terminal_projection(state, plan, graph)
+    terminal_result = _terminal_result(
+        state,
+        plan,
+        graph,
+        terminal_job_id=job.job_id,
+    )
     outcome = build_methods_reviewer_outcome_v2(
         job,
         outcome_id=REVIEW_OUTCOME_ID,
-        evaluation=None,
-        terminal_projection=projection,
+        terminal_state=state,
+        terminal_result=terminal_result,
+        plan=plan,
         produced_at="2026-07-31T00:03:30.000Z",
     )
+    assert outcome.methods_terminal_projection is not None
+    projection = outcome.methods_terminal_projection
     assert outcome.methods_reviewer_result is None
     assert validate_outcome_for_job(job, outcome) is outcome
+    assert PRIVATE_REASON_SENTINEL not in state.model_dump_json()
+    assert PRIVATE_REASON_SENTINEL not in terminal_result.model_dump_json()
+    assert PRIVATE_REASON_SENTINEL not in projection.model_dump_json()
     snapshot = snapshot_with_active(
         job,
         status=CaseStatus.REVIEWING,
@@ -505,21 +581,19 @@ def test_reviewer_early_terminal_requires_no_fabricated_reviewer_result(
     assert view.final_result is None
     assert view.unresolved_result is None
     assert view.artifacts == []
+    assert PRIVATE_REASON_SENTINEL not in view.model_dump_json()
 
 
 def test_unresolved_reason_must_belong_to_source_job_stage(tmp_path) -> None:
-    source, _, projection, _ = _specialist_terminal(
+    source, _, _, _, projection, legal_outcome = _specialist_terminal(
         tmp_path,
         "NO_MATCHING_METHOD_EVIDENCE",
     )
-    value = projection.model_dump(mode="python")
-    value["reason_code"] = "REVIEWER_PROTOCOL_REPAIR_EXHAUSTED"
-    wrong_stage = MethodsTerminalProjectionV2.model_validate(value)
-    outcome = build_methods_specialist_terminal_outcome_v2(
-        source,
-        outcome_id=EARLY_OUTCOME_ID,
-        terminal_projection=wrong_stage,
-        produced_at="2026-07-31T00:03:20.000Z",
+    wrong_stage = projection.model_copy(
+        update={"reason_code": "REVIEWER_PROTOCOL_REPAIR_EXHAUSTED"}
+    )
+    outcome = legal_outcome.model_copy(
+        update={"methods_terminal_projection": wrong_stage}
     )
     with pytest.raises(ValueError, match="source Job stage"):
         validate_outcome_for_job(source, outcome)
@@ -535,44 +609,385 @@ def test_specialist_early_terminal_cannot_resolve_without_reviewer(tmp_path) -> 
         build_methods_specialist_terminal_outcome_v2(
             flow.source,
             outcome_id=EARLY_OUTCOME_ID,
-            terminal_projection=flow.projection,
+            terminal_state=flow.terminal_state,
+            terminal_result=flow.terminal_result,
+            plan=flow.plan,
             produced_at="2026-07-31T00:03:20.000Z",
         )
+
+
+@pytest.mark.parametrize(
+    (
+        "specialist_verdicts",
+        "reviewer_verdicts",
+        "mutated_verdict",
+        "message",
+    ),
+    [
+        (
+            ("CONFIRMED", "REJECTED"),
+            ("CONFIRMED", "REJECTED"),
+            "REJECTED",
+            "confirmed refs",
+        ),
+        (
+            ("CONFIRMED", "REJECTED"),
+            ("REJECTED", "REJECTED"),
+            "UNKNOWN",
+            "must not contain UNKNOWN",
+        ),
+        (
+            ("UNKNOWN", "REJECTED"),
+            ("UNKNOWN", "REJECTED"),
+            "REJECTED",
+            "requires an UNKNOWN",
+        ),
+        (
+            ("REJECTED", "REJECTED"),
+            ("REJECTED", "REJECTED"),
+            "CONFIRMED",
+            "all Reviewer verdicts REJECTED",
+        ),
+    ],
+)
+def test_reviewer_verdict_relation_is_identical_at_both_validation_entries(
+    tmp_path,
+    specialist_verdicts,
+    reviewer_verdicts,
+    mutated_verdict,
+    message,
+) -> None:
+    flow = _review_terminal(
+        tmp_path,
+        specialist_verdicts=specialist_verdicts,
+        reviewer_verdicts=reviewer_verdicts,
+    )
+    reviewer = flow.outcome.methods_reviewer_result
+    assert reviewer is not None
+    mutated_item = reviewer.evaluations[0].model_copy(
+        update={"verdict": mutated_verdict}
+    )
+    mutated_reviewer = reviewer.model_copy(
+        update={"evaluations": (mutated_item, *reviewer.evaluations[1:])}
+    )
+    with pytest.raises(ValueError, match=message):
+        validate_methods_reviewer_terminal_v2(
+            mutated_reviewer,
+            flow.projection,
+            review_job_id=flow.review_job.job_id,
+            reviewed_state_revision=flow.review_job.base_state_revision,
+            expected_target=flow.review_job.methods_review_target,
+        )
+
+    value = flow.outcome.model_dump(mode="python")
+    value["methods_reviewer_result"] = mutated_reviewer
+    with pytest.raises(ValueError, match=message):
+        type(flow.outcome).model_validate(value)
+
+    bypassed = flow.outcome.model_copy(
+        update={"methods_reviewer_result": mutated_reviewer}
+    )
+    with pytest.raises(ValueError, match=message):
+        validate_outcome_for_job(flow.review_job, bypassed)
+
+
+def test_reviewer_factory_binds_terminal_result_to_exact_production_state(
+    tmp_path,
+) -> None:
+    first = _review_terminal(
+        tmp_path / "first",
+        specialist_verdicts=("CONFIRMED", "REJECTED"),
+        reviewer_verdicts=("CONFIRMED", "REJECTED"),
+    )
+    second = _review_terminal(
+        tmp_path / "second",
+        specialist_verdicts=("CONFIRMED", "REJECTED"),
+        reviewer_verdicts=("REJECTED", "REJECTED"),
+    )
+    with pytest.raises(ValueError, match="production state|result_ref"):
+        build_methods_reviewer_outcome_v2(
+            first.review_job,
+            outcome_id=REVIEW_OUTCOME_ID,
+            terminal_state=second.terminal_state,
+            terminal_result=first.terminal_result,
+            plan=first.plan,
+            produced_at="2026-07-31T00:03:30.000Z",
+        )
+
+
+def test_reviewer_factory_rejects_production_result_from_another_plan(
+    tmp_path,
+) -> None:
+    flow = _review_terminal(
+        tmp_path / "original",
+        specialist_verdicts=("CONFIRMED", "REJECTED"),
+        reviewer_verdicts=("CONFIRMED", "REJECTED"),
+    )
+    _, skill, _, _ = _flow_inputs(tmp_path / "other")
+    content = (
+        b"API_COMPLETE request_id=req-other\n"
+        b"UNRELATED_POSITIVE request_id=req-2\n"
+    )
+    other_graph = scan_method_evidence_v2(
+        skill=skill,
+        target_logs=(
+            FrozenTargetLogV1(
+                source_id="server",
+                relative_path="logs/server.log",
+                content_sha256=hashlib.sha256(content).hexdigest(),
+                content=content,
+            ),
+        ),
+    )
+    other_plan = build_method_evaluation_plan_v2(
+        skill=skill,
+        evidence=other_graph,
+    )
+    other_specialist = _role(
+        other_plan,
+        "SPECIALIST",
+        ("CONFIRMED", "REJECTED"),
+    )
+    other_reviewer = _role(
+        other_plan,
+        "REVIEWER",
+        ("CONFIRMED", "REJECTED"),
+    )
+    other_pending = accept_specialist_evaluation_v2(
+        state=start_method_state_v2(
+            case_id=flow.source.case_id,
+            source_job_id=flow.source.job_id,
+            evaluation_id=EVALUATION_ID,
+            plan=other_plan,
+        ),
+        evaluation=other_specialist,
+    )
+    other_terminal = finalize_reviewer_consensus_v2(
+        state=other_pending,
+        plan=other_plan,
+        reviewer_evaluation=other_reviewer,
+        consensus=resolve_method_consensus_v2(
+            plan=other_plan,
+            first=other_specialist,
+            second=other_reviewer,
+        ),
+    )
+    other_result = build_method_terminal_result_v2(
+        state=other_terminal,
+        plan=other_plan,
+        evidence=other_graph,
+        terminal_job_id=flow.review_job.job_id,
+    )
+    assert other_result.plan_ref != flow.terminal_result.plan_ref
+
+    with pytest.raises(ValueError, match="production state and Plan"):
+        build_methods_reviewer_outcome_v2(
+            flow.review_job,
+            outcome_id=REVIEW_OUTCOME_ID,
+            terminal_state=other_terminal,
+            terminal_result=other_result,
+            plan=flow.plan,
+            produced_at="2026-07-31T00:03:30.000Z",
+        )
+
+
+def test_server_factory_rejects_extra_free_form_terminal_reason(tmp_path) -> None:
+    flow = _review_terminal(
+        tmp_path,
+        specialist_verdicts=("CONFIRMED", "REJECTED"),
+        reviewer_verdicts=("CONFIRMED", "REJECTED"),
+    )
+    mutated_result = flow.terminal_result.model_copy(
+        update={"reasons": (PRIVATE_REASON_SENTINEL,)}
+    )
+    with pytest.raises(ValueError, match="production state|result_ref"):
+        build_methods_reviewer_outcome_v2(
+            flow.review_job,
+            outcome_id=REVIEW_OUTCOME_ID,
+            terminal_state=flow.terminal_state,
+            terminal_result=mutated_result,
+            plan=flow.plan,
+            produced_at="2026-07-31T00:03:30.000Z",
+        )
+
+
+@pytest.mark.parametrize(
+    ("field_name", "mutated_ref"),
+    [
+        ("confirmed_event_refs", "event-" + "f" * 64),
+        ("confirmed_hit_refs", "hit-" + "f" * 64),
+    ],
+)
+def test_factory_revalidates_terminal_event_and_hit_mapping(
+    tmp_path,
+    field_name: str,
+    mutated_ref: str,
+) -> None:
+    flow = _review_terminal(
+        tmp_path,
+        specialist_verdicts=("CONFIRMED", "REJECTED"),
+        reviewer_verdicts=("CONFIRMED", "REJECTED"),
+    )
+    mutated_result = flow.terminal_result.model_copy(
+        update={field_name: (mutated_ref,)}
+    )
+    with pytest.raises(ValueError, match="resolved|result_ref"):
+        build_methods_reviewer_outcome_v2(
+            flow.review_job,
+            outcome_id=REVIEW_OUTCOME_ID,
+            terminal_state=flow.terminal_state,
+            terminal_result=mutated_result,
+            plan=flow.plan,
+            produced_at="2026-07-31T00:03:30.000Z",
+        )
+
+
+def test_factory_revalidates_plan_model_copy(tmp_path) -> None:
+    flow = _review_terminal(
+        tmp_path,
+        specialist_verdicts=("CONFIRMED", "REJECTED"),
+        reviewer_verdicts=("CONFIRMED", "REJECTED"),
+    )
+    mutated_plan = flow.plan.model_copy(
+        update={"evidence_graph_ref": "graph-" + "f" * 64}
+    )
+
+    with pytest.raises(ValueError, match="plan_ref"):
+        build_methods_reviewer_outcome_v2(
+            flow.review_job,
+            outcome_id=REVIEW_OUTCOME_ID,
+            terminal_state=flow.terminal_state,
+            terminal_result=flow.terminal_result,
+            plan=mutated_plan,
+            produced_at="2026-07-31T00:03:30.000Z",
+        )
+
+
+def test_terminal_workflow_identity_rejects_cross_case_reuse(tmp_path) -> None:
+    (
+        source,
+        state,
+        plan,
+        terminal_result,
+        projection,
+        legal_outcome,
+    ) = _specialist_terminal(
+        tmp_path,
+        "NO_MATCHING_METHOD_EVIDENCE",
+    )
+    foreign_case_job = rebuild(
+        source,
+        case_id=OTHER_CASE_ID,
+    )
+    with pytest.raises(ValueError, match="different Case|early terminal"):
+        build_methods_specialist_terminal_outcome_v2(
+            foreign_case_job,
+            outcome_id=EARLY_OUTCOME_ID,
+            terminal_state=state,
+            terminal_result=terminal_result,
+            plan=plan,
+            produced_at="2026-07-31T00:03:20.000Z",
+        )
+
+    foreign_source_job = rebuild(source, job_id=OTHER_JOB_ID)
+    with pytest.raises(ValueError, match="early terminal"):
+        build_methods_specialist_terminal_outcome_v2(
+            foreign_source_job,
+            outcome_id=EARLY_OUTCOME_ID,
+            terminal_state=state,
+            terminal_result=terminal_result,
+            plan=plan,
+            produced_at="2026-07-31T00:03:20.000Z",
+        )
+
+    value = legal_outcome.model_dump(mode="python")
+    value["methods_terminal_projection"] = projection.model_copy(
+        update={"case_id": OTHER_CASE_ID}
+    )
+    with pytest.raises(ValueError, match="match its DIAGNOSE/REVIEW Outcome"):
+        type(legal_outcome).model_validate(value)
+
+    value = legal_outcome.model_dump(mode="python")
+    value["methods_terminal_projection"] = projection.model_copy(
+        update={"source_job_id": OTHER_JOB_ID}
+    )
+    with pytest.raises(ValueError, match="match its DIAGNOSE/REVIEW Outcome"):
+        type(legal_outcome).model_validate(value)
+
+
+def test_reviewer_terminal_result_cannot_rebind_to_another_review_job(
+    tmp_path,
+) -> None:
+    flow = _review_terminal(
+        tmp_path,
+        specialist_verdicts=("CONFIRMED", "REJECTED"),
+        reviewer_verdicts=("CONFIRMED", "REJECTED"),
+    )
+    other_review_job = rebuild(flow.review_job, job_id=OTHER_JOB_ID)
+    with pytest.raises(ValueError, match="Candidate-free REVIEW Job"):
+        build_methods_reviewer_outcome_v2(
+            other_review_job,
+            outcome_id=REVIEW_OUTCOME_ID,
+            terminal_state=flow.terminal_state,
+            terminal_result=flow.terminal_result,
+            plan=flow.plan,
+            produced_at="2026-07-31T00:03:30.000Z",
+        )
+
+
+def test_failure_reason_and_diagnostic_types_cannot_cross_contracts(tmp_path) -> None:
+    _, _, _, _, _, outcome = _specialist_terminal(
+        tmp_path,
+        "RESOURCE_SNAPSHOT_DRIFT",
+    )
+    assert outcome.error is not None
+    value = outcome.error.model_dump(mode="python")
+    value["reason_code"] = "SPECIALIST_SEMANTIC_INVALID"
+    with pytest.raises(ValueError, match="FAILED reason"):
+        ExecutionFailure.model_validate(value)
+
+    value = outcome.error.model_dump(mode="python")
+    value["diagnostic_id"] = "00000000-0000-0000-0000-000000000099"
+    with pytest.raises(ValueError, match=r"diag-\*"):
+        ExecutionFailure.model_validate(value)
+
+    value = outcome.error.model_dump(mode="python")
+    value["reason_code"] = MethodsValidationReasonCode.VALIDATION_FAILED
+    with pytest.raises(ValueError, match="UUID diagnostic_id"):
+        ExecutionFailure.model_validate(value)
 
 
 def test_methods_review_missing_terminal_projection_never_falls_back_to_candidate(
     tmp_path,
 ) -> None:
-    inputs = _flow_inputs(tmp_path)
-    _, _, _, state, job, _, _ = _plan_and_review_job(inputs)
-    legacy_baseline = review_outcome()
-    assert legacy_baseline.decision_audit is not None
-    legacy_audit = rebuild(
-        legacy_baseline.decision_audit,
-        job_id=job.job_id,
-        case_id=job.case_id,
-    )
-    legacy = rebuild(
-        legacy_baseline,
-        job_id=job.job_id,
-        case_id=job.case_id,
-        base_state_revision=job.base_state_revision,
-        decision_audit=legacy_audit,
+    flow = _review_terminal(
+        tmp_path,
+        specialist_verdicts=("CONFIRMED", "REJECTED"),
+        reviewer_verdicts=("CONFIRMED", "REJECTED"),
     )
     snapshot = snapshot_with_active(
-        job,
+        flow.review_job,
         status=CaseStatus.REVIEWING,
-        state=state,
+        state=flow.diagnosis_state,
     )
-    request = trigger(
+    legal_request = trigger(
         snapshot,
         trigger_type=TriggerType.REVIEW_OUTCOME,
-        payload=ReviewOutcomeTriggerPayload(job_outcome=legacy),
+        payload=ReviewOutcomeTriggerPayload(job_outcome=flow.outcome),
         continuation_resources=continuation(
-            incoming_outcome_id=legacy.outcome_id,
-            job=job,
+            incoming_outcome_id=flow.outcome.outcome_id,
+            job=flow.review_job,
         ),
-        occurred_at=legacy.produced_at,
+        occurred_at=flow.outcome.produced_at,
+    )
+    without_projection = flow.outcome.model_copy(
+        update={"methods_terminal_projection": None}
+    )
+    mutated_payload = legal_request.payload.model_copy(
+        update={"job_outcome": without_projection}
+    )
+    request = legal_request.model_copy(
+        update={"payload": mutated_payload}
     )
     result = DomainCoordinator().plan(snapshot, request)
     assert isinstance(result, ApplicationError)

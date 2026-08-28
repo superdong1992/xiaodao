@@ -31,6 +31,15 @@ from problem_locator.contracts.enums import (
     RequirementStatus,
     ResourceType,
 )
+from problem_locator.contracts.methods_reason_v2 import (
+    CONSENSUS_UNRESOLVED_REASON_CODES_V2,
+)
+from problem_locator.contracts.methods_state_v2 import (
+    MethodStateV2,
+    MethodTerminalResultV2,
+    project_method_terminal_result_v2,
+    validate_method_terminal_result_v2,
+)
 from problem_locator.contracts.models import (
     Artifact,
     ArtifactProposal,
@@ -70,7 +79,6 @@ from problem_locator.contracts.models import (
 from problem_locator.contracts.methods_v2 import (
     MethodEvidenceGraphV2,
     MethodEvaluationPlanV2,
-    MethodRoleEvaluationV2,
 )
 from problem_locator.contracts.outcomes import apply_problem_spec_patch
 from problem_locator.contracts.ports import ContextSnapshotProjector
@@ -118,6 +126,8 @@ def _methods_terminal_failure_v2(
         message=message,
         retryable=False,
         details=[],
+        reason_code=terminal.reason_code,
+        diagnostic_id=terminal.diagnostic_id,
     )
 
 
@@ -125,7 +135,7 @@ def build_methods_specialist_handoff_outcome_v2(
     source_job: Job,
     *,
     outcome_id: str,
-    evaluation_id: str,
+    pending_state: MethodStateV2,
     graph: MethodEvidenceGraphV2,
     plan: MethodEvaluationPlanV2,
     produced_at: str,
@@ -137,17 +147,23 @@ def build_methods_specialist_handoff_outcome_v2(
         or source_job.diagnosis_mode is not DiagnosisMode.SPECIALIZED
         or source_job.skill_ref is None
         or source_job.context_snapshot is None
+        or pending_state.status != "REVIEWER_PENDING"
+        or pending_state.case_id != source_job.case_id
+        or pending_state.source_job_id != source_job.job_id
     ):
         raise ValueError("Methods V2 handoff requires a specialized DIAGNOSE Job")
     if (
         graph.skill_sha256 != source_job.skill_ref.content_hash
         or plan.skill_sha256 != source_job.skill_ref.content_hash
         or plan.evidence_graph_ref != graph.graph_ref
+        or pending_state.plan_ref != plan.plan_ref
+        or pending_state.evaluation_refs
+        != tuple(item.evaluation_ref for item in plan.evaluations)
     ):
         raise ValueError("Methods V2 handoff Graph/Plan must match the pinned Job Skill")
     target = MethodsReviewTargetV2(
         schema_version=2,
-        evaluation_id=evaluation_id,
+        evaluation_id=pending_state.evaluation_id,
         source_job_id=source_job.job_id,
         graph_ref=graph.graph_ref,
         plan_ref=plan.plan_ref,
@@ -178,21 +194,22 @@ def build_methods_reviewer_outcome_v2(
     review_job: Job,
     *,
     outcome_id: str,
-    evaluation: MethodRoleEvaluationV2 | None,
-    terminal_projection: MethodsTerminalProjectionV2,
+    terminal_state: MethodStateV2,
+    terminal_result: MethodTerminalResultV2,
+    plan: MethodEvaluationPlanV2,
     produced_at: str,
 ) -> JobOutcome:
     """Create the terminal server Outcome for one normalized blind Reviewer."""
 
+    validate_method_terminal_result_v2(terminal_state, terminal_result, plan)
     target = review_job.methods_review_target
-    requires_reviewer = terminal_projection.status == "RESOLVED" or (
-        terminal_projection.reason_code
-        in {
-            "SPECIALIST_REVIEWER_DISAGREEMENT",
-            "INCOMPLETE_EVALUATION",
-            "NO_CONFIRMED_METHOD",
-        }
+    terminal_projection = project_method_terminal_result_v2(
+        terminal_result,
     )
+    requires_reviewer = terminal_result.status == "RESOLVED" or (
+        terminal_result.reason_code in CONSENSUS_UNRESOLVED_REASON_CODES_V2
+    )
+    evaluation = terminal_state.reviewer_evaluation if requires_reviewer else None
     if (
         review_job.job_type is not JobType.REVIEW
         or target is None
@@ -200,6 +217,9 @@ def build_methods_reviewer_outcome_v2(
         or terminal_projection.evaluation_id != target.evaluation_id
         or terminal_projection.plan_ref != target.plan_ref
         or terminal_projection.evidence_graph_ref != target.graph_ref
+        or terminal_state.case_id != review_job.case_id
+        or terminal_state.source_job_id != target.source_job_id
+        or terminal_result.terminal_job_id != review_job.job_id
         or (
             requires_reviewer
             and (
@@ -208,7 +228,6 @@ def build_methods_reviewer_outcome_v2(
                 or evaluation.plan_ref != target.plan_ref
             )
         )
-        or (not requires_reviewer and evaluation is not None)
     ):
         raise ValueError(
             "Methods V2 Reviewer Outcome requires the exact Candidate-free REVIEW Job and Plan"
@@ -256,20 +275,30 @@ def build_methods_specialist_terminal_outcome_v2(
     source_job: Job,
     *,
     outcome_id: str,
-    terminal_projection: MethodsTerminalProjectionV2,
+    terminal_state: MethodStateV2,
+    terminal_result: MethodTerminalResultV2,
+    plan: MethodEvaluationPlanV2,
     produced_at: str,
 ) -> JobOutcome:
     """Create a Candidate-free early terminal Outcome for specialized DIAGNOSE."""
 
+    validate_method_terminal_result_v2(terminal_state, terminal_result, plan)
+    terminal_projection = project_method_terminal_result_v2(
+        terminal_result,
+    )
     if (
         source_job.job_type is not JobType.DIAGNOSE
         or source_job.diagnosis_mode is not DiagnosisMode.SPECIALIZED
         or source_job.skill_ref is None
         or source_job.context_snapshot is None
         or source_job.context_snapshot.candidate_conclusion is not None
+        or terminal_state.case_id != source_job.case_id
+        or terminal_state.source_job_id != source_job.job_id
+        or terminal_result.terminal_job_id != source_job.job_id
+        or terminal_result.status == "RESOLVED"
     ):
         raise ValueError(
-            "Methods V2 terminal Outcome requires a Candidate-free specialized DIAGNOSE Job"
+            "Methods V2 early terminal Outcome requires a Candidate-free specialized DIAGNOSE Job"
         )
     return JobOutcome(
         outcome_id=outcome_id,

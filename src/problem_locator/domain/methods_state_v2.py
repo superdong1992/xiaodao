@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from problem_locator.contracts import (
+    FAILED_METHOD_REASON_CODES_V2,
+    METHOD_PUBLIC_REASON_TEXT_V2,
     MethodConsensusV2,
     MethodEvaluationPlanV2,
     MethodEvaluationRefV2,
@@ -15,34 +17,16 @@ from problem_locator.contracts import (
 )
 
 
-_FAILED_REASONS = frozenset(
-    {
-        "RESOURCE_SNAPSHOT_DRIFT",
-        "SERVER_INVARIANT_VIOLATION",
-        "AUDIT_ARCHIVE_FAILED",
-    }
-)
-_CONSENSUS_REASONS = {
-    "SPECIALIST_REVIEWER_DISAGREEMENT": (
-        "Specialist and reviewer verdicts disagree."
-    ),
-    "INCOMPLETE_EVALUATION": "At least one evaluation remains UNKNOWN.",
-    "NO_CONFIRMED_METHOD": "No method received a CONFIRMED consensus verdict.",
-}
-
-
 def _nonblank(value: str, *, label: str) -> str:
     if not isinstance(value, str) or not value or value.isspace():
         raise ValueError(f"{label} must be non-blank text")
     return value
 
 
-def _unique(values: tuple[str, ...]) -> tuple[str, ...]:
-    return tuple(dict.fromkeys(values))
-
-
 def _make_state(
     *,
+    case_id: str,
+    source_job_id: str,
     evaluation_id: str,
     plan_ref: str,
     evaluation_refs: tuple[str, ...],
@@ -59,6 +43,8 @@ def _make_state(
     reasons: tuple[str, ...],
 ) -> MethodStateV2:
     state_ref = method_state_ref_v2(
+        case_id=case_id,
+        source_job_id=source_job_id,
         evaluation_id=evaluation_id,
         plan_ref=plan_ref,
         evaluation_refs=evaluation_refs,
@@ -76,6 +62,8 @@ def _make_state(
     )
     return MethodStateV2(
         state_ref=state_ref,
+        case_id=case_id,
+        source_job_id=source_job_id,
         evaluation_id=evaluation_id,
         plan_ref=plan_ref,
         evaluation_refs=evaluation_refs,
@@ -97,6 +85,8 @@ def _replace(state: MethodStateV2, **changes: object) -> MethodStateV2:
     if not isinstance(state, MethodStateV2):
         raise TypeError("state must be MethodStateV2")
     values = {
+        "case_id": state.case_id,
+        "source_job_id": state.source_job_id,
         "evaluation_id": state.evaluation_id,
         "plan_ref": state.plan_ref,
         "evaluation_refs": state.evaluation_refs,
@@ -124,6 +114,8 @@ def _diagnostic(
     evaluation_ref: str | None,
 ) -> str:
     return method_diagnostic_id_v2(
+        case_id=state.case_id,
+        source_job_id=state.source_job_id,
         evaluation_id=state.evaluation_id,
         plan_ref=state.plan_ref,
         status=status,
@@ -176,6 +168,8 @@ def _validate_repair_attempt(
 
 def start_method_state_v2(
     *,
+    case_id: str,
+    source_job_id: str,
     evaluation_id: str,
     plan: MethodEvaluationPlanV2,
 ) -> MethodStateV2:
@@ -184,6 +178,8 @@ def start_method_state_v2(
     evaluation_refs = tuple(item.evaluation_ref for item in plan.evaluations)
     if evaluation_refs:
         return _make_state(
+            case_id=case_id,
+            source_job_id=source_job_id,
             evaluation_id=evaluation_id,
             plan_ref=plan.plan_ref,
             evaluation_refs=evaluation_refs,
@@ -201,6 +197,8 @@ def start_method_state_v2(
         )
     reason_code = "NO_MATCHING_METHOD_EVIDENCE"
     return _make_state(
+        case_id=case_id,
+        source_job_id=source_job_id,
         evaluation_id=evaluation_id,
         plan_ref=plan.plan_ref,
         evaluation_refs=(),
@@ -213,6 +211,8 @@ def start_method_state_v2(
         consensus=None,
         reason_code=reason_code,
         diagnostic_id=method_diagnostic_id_v2(
+            case_id=case_id,
+            source_job_id=source_job_id,
             evaluation_id=evaluation_id,
             plan_ref=plan.plan_ref,
             status="UNRESOLVED",
@@ -220,7 +220,7 @@ def start_method_state_v2(
             evaluation_ref=None,
         ),
         diagnostic_evaluation_ref=None,
-        reasons=("No loaded method has matching evidence.",),
+        reasons=(METHOD_PUBLIC_REASON_TEXT_V2[reason_code],),
     )
 
 
@@ -273,7 +273,7 @@ def record_protocol_error_v2(
                 evaluation_ref=bound_ref,
             ),
             "diagnostic_evaluation_ref": bound_ref,
-            "reasons": (reason,),
+            "reasons": (METHOD_PUBLIC_REASON_TEXT_V2[reason_code],),
         },
     )
 
@@ -287,7 +287,7 @@ def _unresolve_role_failure(
     evaluation_ref: MethodEvaluationRefV2 | None,
 ) -> MethodStateV2:
     _pending_role(state, role)
-    detail = _nonblank(reason, label="role failure reason")
+    _nonblank(reason, label="role failure reason")
     bound_ref = _evaluation_ref(state, evaluation_ref)
     return _replace(
         state,
@@ -301,7 +301,7 @@ def _unresolve_role_failure(
             evaluation_ref=bound_ref,
         ),
         diagnostic_evaluation_ref=bound_ref,
-        reasons=(detail,),
+        reasons=(METHOD_PUBLIC_REASON_TEXT_V2[reason_code],),
     )
 
 
@@ -346,9 +346,9 @@ def _consensus_reason(
     )
     unknown = next(
         (
-            first.evaluation_ref
+            second.evaluation_ref
             for first, second in pairs
-            if first.verdict == "UNKNOWN" or second.verdict == "UNKNOWN"
+            if second.verdict == "UNKNOWN"
         ),
         None,
     )
@@ -471,7 +471,7 @@ def finalize_reviewer_consensus_v2(
             evaluation_ref=evaluation_ref,
         ),
         diagnostic_evaluation_ref=evaluation_ref,
-        reasons=(_CONSENSUS_REASONS[reason_code],),
+        reasons=(METHOD_PUBLIC_REASON_TEXT_V2[reason_code],),
     )
 
 
@@ -482,9 +482,9 @@ def fail_method_state_v2(
     reason: str,
     evaluation_ref: MethodEvaluationRefV2 | None = None,
 ) -> MethodStateV2:
-    if reason_code not in _FAILED_REASONS:
+    if reason_code not in FAILED_METHOD_REASON_CODES_V2:
         raise ValueError("only resource drift, server invariant, or archive failure may fail")
-    detail = _nonblank(reason, label="failure reason")
+    _nonblank(reason, label="failure reason")
     bound_ref = _evaluation_ref(state, evaluation_ref)
     return _replace(
         state,
@@ -498,7 +498,7 @@ def fail_method_state_v2(
             evaluation_ref=bound_ref,
         ),
         diagnostic_evaluation_ref=bound_ref,
-        reasons=_unique((*state.reasons, detail)),
+        reasons=(METHOD_PUBLIC_REASON_TEXT_V2[reason_code],),
     )
 
 

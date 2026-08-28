@@ -100,7 +100,10 @@ def _running_review_state(
 
 
 def _running_specialist_failure_state(tmp_path, reason_code: str):
-    source, _, projection, outcome = _specialist_terminal(tmp_path, reason_code)
+    source, _, _, _, projection, outcome = _specialist_terminal(
+        tmp_path,
+        reason_code,
+    )
     assert source.context_snapshot is not None
     source = rebuild(
         source,
@@ -183,9 +186,13 @@ def _public_protocol_projections(query, case_id: str):
         rest_result = client.get(f"/api/v1/cases/{case_id}")
     assert mcp_result["ok"] is True
     assert rest_result.status_code == 200
+    mcp_view = mcp_result["data"]["case_view"]
+    rest_view = rest_result.json()["data"]["case_view"]
     return (
-        mcp_result["data"]["case_view"]["methods_result"],
-        rest_result.json()["data"]["case_view"]["methods_result"],
+        mcp_view["methods_result"],
+        rest_view["methods_result"],
+        mcp_view,
+        rest_view,
     )
 
 
@@ -254,7 +261,7 @@ def test_consensus_terminal_projection_survives_submission_mcp_and_rest(
     assert aggregate.jobs[outcome.job_id].status is JobStatus.SUCCEEDED
     assert aggregate.outcomes[outcome.outcome_id].methods_reviewer_result is not None
 
-    mcp_projection, rest_projection = _public_protocol_projections(
+    mcp_projection, rest_projection, _, _ = _public_protocol_projections(
         query,
         outcome.case_id,
     )
@@ -292,10 +299,17 @@ def test_each_failed_terminal_reason_reaches_case_mcp_and_rest(
     assert view.methods_result == projection
     assert view.methods_result.reason_code == reason_code
     assert view.failure is not None
+    assert view.failure.reason_code == reason_code
+    assert view.failure.diagnostic_id == projection.diagnostic_id
     assert view.artifacts == []
     assert repository.read_snapshot().cases[outcome.case_id].artifacts == {}
 
-    mcp_projection, rest_projection = _public_protocol_projections(
+    (
+        mcp_projection,
+        rest_projection,
+        mcp_view,
+        rest_view,
+    ) = _public_protocol_projections(
         query,
         outcome.case_id,
     )
@@ -304,3 +318,7 @@ def test_each_failed_terminal_reason_reaches_case_mcp_and_rest(
     assert mcp_projection["diagnostic_id"] == projection.diagnostic_id
     assert mcp_projection["reasons"] == list(projection.reasons)
     assert "evaluations" not in mcp_projection
+    assert mcp_view["failure"]["reason_code"] == reason_code
+    assert rest_view["failure"]["reason_code"] == reason_code
+    assert mcp_view["failure"]["diagnostic_id"] == projection.diagnostic_id
+    assert rest_view["failure"]["diagnostic_id"] == projection.diagnostic_id

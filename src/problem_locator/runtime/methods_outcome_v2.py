@@ -10,8 +10,9 @@ from problem_locator.contracts import (
     MethodEvaluationPlanV2,
     MethodStateV2,
     MethodTerminalResultV2,
-    MethodsTerminalProjectionV2,
     method_terminal_result_ref_v2,
+    project_method_terminal_result_v2,
+    validate_method_terminal_result_v2,
 )
 
 from .methods_evidence_v2 import validate_method_evaluation_plan_v2
@@ -35,6 +36,7 @@ def build_method_terminal_result_v2(
     state: MethodStateV2,
     plan: MethodEvaluationPlanV2,
     evidence: MethodEvidenceGraphV2,
+    terminal_job_id: str,
     limitations: Sequence[str] = (),
     reasons: Sequence[str] = (),
 ) -> MethodTerminalResultV2:
@@ -121,6 +123,9 @@ def build_method_terminal_result_v2(
         (*state.reasons, *_text(reasons, label="reasons"))
     )
     result_ref = method_terminal_result_ref_v2(
+        case_id=state.case_id,
+        source_job_id=state.source_job_id,
+        terminal_job_id=terminal_job_id,
         evaluation_id=state.evaluation_id,
         status=state.status,
         plan_ref=plan.plan_ref,
@@ -136,8 +141,11 @@ def build_method_terminal_result_v2(
         limitations=frozen_limitations,
         reasons=frozen_reasons,
     )
-    return MethodTerminalResultV2(
+    result = MethodTerminalResultV2(
         result_ref=result_ref,
+        case_id=state.case_id,
+        source_job_id=state.source_job_id,
+        terminal_job_id=terminal_job_id,
         evaluation_id=state.evaluation_id,
         status=state.status,
         plan_ref=plan.plan_ref,
@@ -153,32 +161,7 @@ def build_method_terminal_result_v2(
         limitations=frozen_limitations,
         reasons=frozen_reasons,
     )
-
-
-def project_method_terminal_result_v2(
-    result: MethodTerminalResultV2,
-) -> MethodsTerminalProjectionV2:
-    """Mechanically remove private role material from a terminal result."""
-
-    if not isinstance(result, MethodTerminalResultV2):
-        raise TypeError("result must be MethodTerminalResultV2")
-    return MethodsTerminalProjectionV2(
-        schema_version=2,
-        result_ref=result.result_ref,
-        evaluation_id=result.evaluation_id,
-        status=result.status,
-        plan_ref=result.plan_ref,
-        evidence_graph_ref=result.evidence_graph_ref,
-        reason_code=result.reason_code,
-        diagnostic_id=result.diagnostic_id,
-        diagnostic_evaluation_ref=result.diagnostic_evaluation_ref,
-        confirmed_evaluation_refs=result.confirmed_evaluation_refs,
-        confirmed_method_ids=result.confirmed_method_ids,
-        confirmed_event_refs=result.confirmed_event_refs,
-        confirmed_hit_refs=result.confirmed_hit_refs,
-        limitations=result.limitations,
-        reasons=result.reasons,
-    )
+    return validate_method_terminal_result_v2(state, result, plan)
 
 
 __all__ = [
