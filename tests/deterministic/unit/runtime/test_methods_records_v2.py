@@ -22,16 +22,20 @@ from problem_locator.runtime.methods_grounding import FrozenTargetLogV1
 from problem_locator.runtime.methods_records_v2 import (
     METHODS_EVALUATION_PLAN_V2_FILENAME,
     METHODS_EVIDENCE_GRAPH_V2_FILENAME,
+    METHODS_LIMITATIONS_V2_FILENAME,
     METHODS_STATE_V2_FILENAME,
+    build_method_limitations_record_v2,
     method_prompt_filename_v2,
     method_rejected_attempt_filename_v2,
     publish_method_evaluation_plan_v2,
     publish_method_evidence_graph_v2,
+    publish_method_limitations_record_v2,
     publish_method_prompt_v2,
     publish_method_rejected_attempt_v2,
     publish_method_state_v2,
     read_method_evaluation_plan_v2,
     read_method_evidence_graph_v2,
+    read_method_limitations_record_v2,
     read_method_prompt_v2,
     read_method_rejected_attempt_v2,
     read_method_state_v2,
@@ -46,6 +50,7 @@ from tests.deterministic.unit.runtime.methods_v2_test_support import (
 JOB_ID = "00000000-0000-0000-0000-000000000071"
 EVALUATION_ID = "00000000-0000-0000-0000-000000000072"
 CASE_ID = "00000000-0000-0000-0000-000000000073"
+REVIEW_JOB_ID = "00000000-0000-0000-0000-000000000074"
 
 
 def _runtime_values(tmp_path: Path):
@@ -218,3 +223,77 @@ def test_typed_read_rejects_one_field_mutated_from_a_production_graph(
         read_method_evidence_graph_v2(records, job_id=JOB_ID)
 
     assert parse_canonical_json_bytes(mutated)["graph_ref"] == graph.graph_ref
+
+
+def test_real_store_freezes_deduplicated_limitations_for_the_reviewer_job(
+    tmp_path: Path,
+) -> None:
+    graph, plan, _ = _runtime_values(tmp_path)
+    records = _store(tmp_path)
+    record = build_method_limitations_record_v2(
+        case_id=CASE_ID,
+        source_job_id=JOB_ID,
+        graph=graph,
+        plan=plan,
+        limitations=(
+            "Only the frozen server log was evaluated.",
+            "Only the frozen server log was evaluated.",
+            "No client log was supplied.",
+        ),
+    )
+
+    ref = publish_method_limitations_record_v2(
+        records,
+        job_id=JOB_ID,
+        record=record,
+    )
+    reviewer_read = read_method_limitations_record_v2(
+        records,
+        job_id=JOB_ID,
+    )
+
+    assert record.limitations == (
+        "Only the frozen server log was evaluated.",
+        "No client log was supplied.",
+    )
+    assert ref.relative_key.endswith(METHODS_LIMITATIONS_V2_FILENAME)
+    assert reviewer_read == record
+    assert records.read_audit_bytes(
+        JOB_ID,
+        METHODS_LIMITATIONS_V2_FILENAME,
+    ) == canonical_json_bytes(record)
+    assert publish_method_limitations_record_v2(
+        records,
+        job_id=JOB_ID,
+        record=record,
+    ) == ref
+    with pytest.raises(ValueError, match="source Job"):
+        publish_method_limitations_record_v2(
+            records,
+            job_id=REVIEW_JOB_ID,
+            record=record,
+        )
+
+
+def test_limitations_read_rejects_one_field_mutated_from_production_record(
+    tmp_path: Path,
+) -> None:
+    graph, plan, _ = _runtime_values(tmp_path)
+    record = build_method_limitations_record_v2(
+        case_id=CASE_ID,
+        source_job_id=JOB_ID,
+        graph=graph,
+        plan=plan,
+        limitations=("Only the frozen server log was evaluated.",),
+    )
+    value = record.model_dump(mode="json")
+    value["limitations"].append(value["limitations"][0])
+    records = _store(tmp_path)
+    records.publish_audit_bytes(
+        JOB_ID,
+        METHODS_LIMITATIONS_V2_FILENAME,
+        canonical_json_bytes(value),
+    )
+
+    with pytest.raises(ValidationError):
+        read_method_limitations_record_v2(records, job_id=JOB_ID)

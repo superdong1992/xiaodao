@@ -10,7 +10,14 @@ from typing import Annotated, Literal, TypeAlias
 
 from pydantic import ConfigDict, StrictBool, StringConstraints, model_validator
 
-from .models import ContractModel, NonEmptyText, PositiveInt, RelativePosixPath, Sha256
+from .models import (
+    ContractModel,
+    NonEmptyText,
+    OpaqueId,
+    PositiveInt,
+    RelativePosixPath,
+    Sha256,
+)
 from .serialization import canonical_json_sha256
 
 
@@ -66,6 +73,10 @@ MethodEvaluationRefV2: TypeAlias = Annotated[
 MethodEvaluationPlanRefV2: TypeAlias = Annotated[
     str,
     StringConstraints(pattern=r"^plan-[0-9a-f]{64}$", strict=True),
+]
+MethodLimitationsRecordRefV2: TypeAlias = Annotated[
+    str,
+    StringConstraints(pattern=r"^limitations-[0-9a-f]{64}$", strict=True),
 ]
 MethodEvaluationRoleV2: TypeAlias = Literal["SPECIALIST", "REVIEWER"]
 MethodEvaluationVerdictV2: TypeAlias = Literal["CONFIRMED", "REJECTED", "UNKNOWN"]
@@ -434,6 +445,53 @@ class MethodEvaluationPlanV2(_MethodsV2Contract):
         return self
 
 
+def method_limitations_record_ref_v2(
+    *,
+    case_id: str,
+    source_job_id: str,
+    evidence_graph_ref: str,
+    plan_ref: str,
+    limitations: tuple[str, ...],
+) -> str:
+    return "limitations-" + canonical_json_sha256(
+        {
+            "kind": "method-limitations-record-v2",
+            "case_id": case_id,
+            "source_job_id": source_job_id,
+            "evidence_graph_ref": evidence_graph_ref,
+            "plan_ref": plan_ref,
+            "limitations": list(limitations),
+        }
+    )
+
+
+class MethodLimitationsRecordV2(_MethodsV2Contract):
+    """Server-owned limitations shared by both role Jobs."""
+
+    schema_version: Literal[2]
+    record_ref: MethodLimitationsRecordRefV2
+    case_id: OpaqueId
+    source_job_id: OpaqueId
+    evidence_graph_ref: MethodEvidenceGraphRefV2
+    plan_ref: MethodEvaluationPlanRefV2
+    limitations: tuple[NonEmptyText, ...]
+
+    @model_validator(mode="after")
+    def validate_record(self) -> "MethodLimitationsRecordV2":
+        if len(self.limitations) != len(set(self.limitations)):
+            raise ValueError("method limitations must be unique")
+        expected = method_limitations_record_ref_v2(
+            case_id=self.case_id,
+            source_job_id=self.source_job_id,
+            evidence_graph_ref=self.evidence_graph_ref,
+            plan_ref=self.plan_ref,
+            limitations=self.limitations,
+        )
+        if self.record_ref != expected:
+            raise ValueError("record_ref does not match the method limitations")
+        return self
+
+
 class MethodEvaluationOutputItemV2(_MethodsV2Contract):
     """The exact object shape accepted from one model evaluation response."""
 
@@ -493,6 +551,8 @@ __all__ = [
     "MethodEvaluationRoleV2",
     "MethodEvaluationVerdictV2",
     "MethodIdV2",
+    "MethodLimitationsRecordRefV2",
+    "MethodLimitationsRecordV2",
     "MethodRoleEvaluationV2",
     "method_evaluation_plan_ref_v2",
     "method_evaluation_ref_v2",
@@ -500,4 +560,5 @@ __all__ = [
     "method_evidence_event_ref_v2",
     "method_evidence_hit_ref_v2",
     "method_evidence_source_ref_v2",
+    "method_limitations_record_ref_v2",
 ]

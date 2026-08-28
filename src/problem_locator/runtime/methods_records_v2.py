@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from types import MappingProxyType
 from typing import Literal, Mapping, TypeVar
 
@@ -13,17 +14,22 @@ from problem_locator.contracts import (
     MethodEvidenceGraphV2,
     MethodEvaluationPlanV2,
     MethodEvaluationRoleV2,
+    MethodLimitationsRecordV2,
     MethodStateV2,
     OpaqueId,
     canonical_json_bytes,
+    method_limitations_record_ref_v2,
     parse_canonical_json_bytes,
 )
+
+from .methods_evidence_v2 import validate_method_evaluation_plan_v2
 
 
 MethodEvaluationAttemptV2 = Literal["PRIMARY", "REPAIR"]
 
 METHODS_EVIDENCE_GRAPH_V2_FILENAME = "methods-evidence-graph-v2.json"
 METHODS_EVALUATION_PLAN_V2_FILENAME = "methods-evaluation-plan-v2.json"
+METHODS_LIMITATIONS_V2_FILENAME = "methods-limitations-v2.json"
 METHODS_STATE_V2_FILENAME = "methods-state-v2.json"
 
 _PROMPT_FILENAMES: Mapping[
@@ -166,6 +172,73 @@ def read_method_evaluation_plan_v2(
     )
 
 
+def build_method_limitations_record_v2(
+    *,
+    case_id: OpaqueId,
+    source_job_id: OpaqueId,
+    graph: MethodEvidenceGraphV2,
+    plan: MethodEvaluationPlanV2,
+    limitations: Sequence[str] = (),
+) -> MethodLimitationsRecordV2:
+    """Freeze one de-duplicated limitations record for both role Jobs."""
+
+    if isinstance(limitations, (str, bytes)):
+        raise TypeError("limitations must be a sequence of strings")
+    validate_method_evaluation_plan_v2(evidence=graph, plan=plan)
+    frozen = tuple(dict.fromkeys(limitations))
+    record_ref = method_limitations_record_ref_v2(
+        case_id=case_id,
+        source_job_id=source_job_id,
+        evidence_graph_ref=graph.graph_ref,
+        plan_ref=plan.plan_ref,
+        limitations=frozen,
+    )
+    return MethodLimitationsRecordV2(
+        schema_version=2,
+        record_ref=record_ref,
+        case_id=case_id,
+        source_job_id=source_job_id,
+        evidence_graph_ref=graph.graph_ref,
+        plan_ref=plan.plan_ref,
+        limitations=frozen,
+    )
+
+
+def publish_method_limitations_record_v2(
+    records: ExecutionRecordStore,
+    *,
+    job_id: OpaqueId,
+    record: MethodLimitationsRecordV2,
+) -> ExecutionFileRef:
+    if not isinstance(record, MethodLimitationsRecordV2):
+        raise TypeError("record must be MethodLimitationsRecordV2")
+    if record.source_job_id != job_id:
+        raise ValueError("method limitations must be stored under their source Job")
+    return _publish_contract(
+        records,
+        job_id=job_id,
+        filename=METHODS_LIMITATIONS_V2_FILENAME,
+        value=record,
+        model_type=MethodLimitationsRecordV2,
+    )
+
+
+def read_method_limitations_record_v2(
+    records: ExecutionRecordStore,
+    *,
+    job_id: OpaqueId,
+) -> MethodLimitationsRecordV2 | None:
+    record = _read_contract(
+        records,
+        job_id=job_id,
+        filename=METHODS_LIMITATIONS_V2_FILENAME,
+        model_type=MethodLimitationsRecordV2,
+    )
+    if record is not None and record.source_job_id != job_id:
+        raise ValueError("method limitations belong to a different source Job")
+    return record
+
+
 def publish_method_state_v2(
     records: ExecutionRecordStore,
     *,
@@ -257,17 +330,21 @@ def read_method_rejected_attempt_v2(
 __all__ = [
     "METHODS_EVALUATION_PLAN_V2_FILENAME",
     "METHODS_EVIDENCE_GRAPH_V2_FILENAME",
+    "METHODS_LIMITATIONS_V2_FILENAME",
     "METHODS_STATE_V2_FILENAME",
     "MethodEvaluationAttemptV2",
+    "build_method_limitations_record_v2",
     "method_prompt_filename_v2",
     "method_rejected_attempt_filename_v2",
     "publish_method_evaluation_plan_v2",
     "publish_method_evidence_graph_v2",
+    "publish_method_limitations_record_v2",
     "publish_method_prompt_v2",
     "publish_method_rejected_attempt_v2",
     "publish_method_state_v2",
     "read_method_evaluation_plan_v2",
     "read_method_evidence_graph_v2",
+    "read_method_limitations_record_v2",
     "read_method_prompt_v2",
     "read_method_rejected_attempt_v2",
     "read_method_state_v2",

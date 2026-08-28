@@ -85,6 +85,7 @@ _AUDIT_FILENAMES = frozenset(
         "method-grounding-audit.json",
         "methods-evidence-graph-v2.json",
         "methods-evaluation-plan-v2.json",
+        "methods-limitations-v2.json",
         "methods_logparse_receipt.json",
         "methods_preflight.json",
         "methods_request.json",
