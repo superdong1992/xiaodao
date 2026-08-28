@@ -603,6 +603,30 @@ def run(options: argparse.Namespace) -> dict[str, Any]:
         specialist_role,
         target_contents,
     )
+
+    def execute_preprocessing(
+        session: object,
+        operation: str,
+        request_path: str,
+        result_path: str,
+    ) -> None:
+        if (
+            operation != "parse-targets"
+            or request_path
+            != "output/proposals/methods-preprocess/request.json"
+            or result_path
+            != "output/proposals/methods-preprocess/target_logs.json"
+        ):
+            _fail(
+                "CLAUDE_DEEPSEEK_PREPROCESSING_PORT_INVALID",
+                "The deterministic Logparse port received an unexpected request",
+            )
+        specialist_backend._run_preprocessing(  # noqa: SLF001 - deterministic fixture
+            {"workspace_root": getattr(session, "workspace_root")}
+        )
+        return None
+
+    broker_factory.preprocessing_executor = execute_preprocessing
     specialist_runtime = DiagnosisRuntime(
         state_repository=repository,
         resource_store=resources,
