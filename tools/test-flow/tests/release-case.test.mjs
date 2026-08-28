@@ -89,6 +89,7 @@ test("v2 loader exposes only Wiki, registration, driver, and frozen attachments"
 
   assert.equal(verified.manifest.schema_version, 2);
   assert.equal(loaded.journey_scenario, "multiple-rpc-timeouts");
+  assert.equal(inputs.registration_template.deployment_scope, "PRODUCTION");
   assert.equal(inputs.product_registration.registration_id, "rpc-timeout-methods-v1");
   assert.equal(inputs.product_registration.runtime_ref_id, "diagnosis-skill/rpc-timeout-methods-v1");
   assert.equal(inputs.product_registration.skill_name, "diagnose-rpc-timeout");

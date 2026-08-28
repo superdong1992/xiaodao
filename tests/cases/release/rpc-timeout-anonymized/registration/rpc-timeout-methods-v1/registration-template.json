@@ -3,7 +3,7 @@
   "registration_id": "rpc-timeout-methods-v1",
   "version": "1.0.0",
   "capability": "Diagnose RPC timeouts from frozen client and server logs using authored evidence methods.",
-  "deployment_scope": "TEST_ONLY",
+  "deployment_scope": "PRODUCTION",
   "summary": "Release-only product registration for the Wiki-derived RPC timeout Methods Skill.",
   "package": {
     "relative_path": "package/diagnose-rpc-timeout",

@@ -37,13 +37,14 @@
     "baseCert": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["certification_target", "path", "sha256", "provider", "model", "methods_result"],
+      "required": ["certification_target", "path", "sha256", "provider", "model", "scenario_oracle", "methods_result"],
       "properties": {
         "certification_target": { "enum": ["P1", "P2"] },
         "path": { "type": "string", "minLength": 1 },
         "sha256": { "$ref": "model-cert-input.schema.json#/$defs/sha256" },
         "provider": { "$ref": "model-cert-input.schema.json#/$defs/provider" },
         "model": { "$ref": "model-cert-input.schema.json#/$defs/model" },
+        "scenario_oracle": { "$ref": "model-cert-input.schema.json#/$defs/scenarioOracleBinding" },
         "methods_result": { "$ref": "model-cert-input.schema.json#/$defs/methodsResult" }
       }
     },

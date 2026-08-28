@@ -12,6 +12,7 @@
     "source_snapshot_digest",
     "contract_manifest",
     "core_verdict",
+    "scenario_oracle",
     "scenario",
     "provider",
     "model",
@@ -29,6 +30,7 @@
     "source_snapshot_digest": { "$ref": "#/$defs/sha256" },
     "contract_manifest": { "$ref": "#/$defs/manifestBinding" },
     "core_verdict": { "$ref": "#/$defs/coreBinding" },
+    "scenario_oracle": { "$ref": "#/$defs/scenarioOracleBinding" },
     "scenario": { "$ref": "#/$defs/scenario" },
     "provider": { "$ref": "#/$defs/provider" },
     "model": { "$ref": "#/$defs/model" },
@@ -124,6 +126,15 @@
       "required": ["path", "sha256"],
       "properties": {
         "path": { "const": "payload/stages/deterministic.full/gates/det.evidence-v2-core/core-verdict.json" },
+        "sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "scenarioOracleBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256"],
+      "properties": {
+        "path": { "const": "scenario-oracle-receipt.json" },
         "sha256": { "$ref": "#/$defs/sha256" }
       }
     },

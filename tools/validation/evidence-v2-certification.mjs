@@ -12,6 +12,11 @@ import {
   EVIDENCE_V2_CORE_MANIFEST_PATH,
   validateEvidenceV2CoreVerdict,
 } from "./evidence-v2-core.mjs";
+import {
+  EVIDENCE_V2_PUBLIC_METHODS_RESULT_FILENAME,
+  EVIDENCE_V2_SCENARIO_ORACLE_RECEIPT_FILENAME,
+  validateEvidenceV2ScenarioOracleReceipt,
+} from "./evidence-v2-scenario-oracle.mjs";
 
 const SHA256 = /^[a-f0-9]{64}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -290,6 +295,7 @@ function modelCertBodyFields(receiptType) {
     "source_snapshot_digest",
     "contract_manifest",
     "core_verdict",
+    "scenario_oracle",
     "scenario",
     "provider",
     "model",
@@ -320,6 +326,11 @@ function validateModelCertBody(value, { receiptType, certificationTarget } = {})
     expectedPath: EVIDENCE_V2_CORE_VERDICT_PATH,
     code: "MODEL_CERT_CORE",
     label: "Core verdict binding",
+  });
+  validateFileBinding(value.scenario_oracle, {
+    expectedPath: EVIDENCE_V2_SCENARIO_ORACLE_RECEIPT_FILENAME,
+    code: "MODEL_CERT_SCENARIO_ORACLE",
+    label: "replayable scenario oracle binding",
   });
   validateScenario(value.scenario);
   validateProvider(value.provider);
@@ -391,10 +402,45 @@ export function validateEvidenceV2ModelCertInput(value, {
   sourceSnapshotDigest,
   sourceRoot,
   coreVerdictPath,
+  certRoot,
 } = {}) {
   validateEvidenceV2ModelCertInputSchema(value, { certificationTarget });
   validateCoreAndSource(value, { sourceSnapshotDigest, sourceRoot, coreVerdictPath });
+  if (certRoot !== undefined) replayScenarioOracle(value, { sourceRoot, certRoot });
   return value;
+}
+
+function replayScenarioOracle(value, { sourceRoot, certRoot }) {
+  assertFlow(typeof certRoot === "string" && path.isAbsolute(certRoot), "MODEL_CERT_ROOT", "model certification root must be absolute");
+  const receiptPath = path.join(certRoot, EVIDENCE_V2_SCENARIO_ORACLE_RECEIPT_FILENAME);
+  requireFile(receiptPath, "MODEL_CERT_SCENARIO_ORACLE_MISSING", "scenario oracle receipt");
+  assertFlow(value.scenario_oracle.sha256 === sha256File(receiptPath), "MODEL_CERT_SCENARIO_ORACLE_MISMATCH", "scenario oracle receipt digest differs from the model certification");
+  const receipt = readJson(receiptPath);
+  validateEvidenceV2ScenarioOracleReceipt(receipt, {
+    sourceRoot,
+    certRoot,
+    scenario: value.scenario,
+    providerInvocations: value.invocations,
+    modelId: value.model.id,
+  });
+  const summary = receipt.summary;
+  const publicPath = path.join(certRoot, EVIDENCE_V2_PUBLIC_METHODS_RESULT_FILENAME);
+  requireFile(publicPath, "MODEL_CERT_METHODS_RESULT_MISSING", "public methods_result");
+  assertFlow(
+    value.methods_result.canonical_sha256 === sha256File(publicPath)
+      && value.methods_result.canonical_size === fs.statSync(publicPath).size
+      && value.methods_result.case_id === summary.case_id
+      && value.methods_result.source_job_id === summary.reviewer_job_id
+      && value.methods_result.result_ref === summary.result_ref
+      && value.methods_result.evaluation_id === summary.evaluation_id
+      && value.methods_result.status === "RESOLVED"
+      && value.methods_result.plan_ref === summary.plan_ref
+      && value.methods_result.evidence_graph_ref === summary.graph_ref
+      && value.methods_result.diagnostic_id === summary.diagnostic_id,
+    "MODEL_CERT_SCENARIO_ORACLE_RESULT_MISMATCH",
+    "model certification methods_result differs from the replayed scenario oracle",
+  );
+  return receipt;
 }
 
 export function validateEvidenceV2ModelCert(value, {
@@ -415,6 +461,7 @@ export function validateEvidenceV2ModelCert(value, {
     sourceSnapshotDigest,
     sourceRoot,
     coreVerdictPath,
+    certRoot,
   });
   assertFlow(canonicalJson(inputProjection(value)) === canonicalJson(input), "MODEL_CERT_ADAPTER_INPUT_MISMATCH", "model certification differs from its exact adapter input");
   return value;
@@ -436,6 +483,7 @@ export function buildEvidenceV2ModelCert({
     sourceSnapshotDigest,
     sourceRoot,
     coreVerdictPath,
+    certRoot,
   });
   const cert = {
     ...input,
@@ -465,7 +513,7 @@ function relativeArtifactPath(artifactRoot, filePath, code) {
 function validateModelCertBinding(value, target) {
   exactKeys(
     value,
-    ["certification_target", "path", "sha256", "provider", "model", "methods_result"],
+    ["certification_target", "path", "sha256", "provider", "model", "scenario_oracle", "methods_result"],
     "RELEASE_VERDICT_MODEL_CERT_FIELDS",
     `release ${target} model certification binding`,
   );
@@ -480,6 +528,11 @@ function validateModelCertBinding(value, target) {
     model: value.model,
   });
   validateMethodsResult(value.methods_result);
+  validateFileBinding(value.scenario_oracle, {
+    expectedPath: EVIDENCE_V2_SCENARIO_ORACLE_RECEIPT_FILENAME,
+    code: "RELEASE_VERDICT_SCENARIO_ORACLE",
+    label: `${target} scenario oracle binding`,
+  });
 }
 
 export function validateEvidenceV2ReleaseVerdictSchema(value) {
@@ -538,6 +591,7 @@ export function validateEvidenceV2ReleaseVerdict(value, {
     assertFlow(canonicalJson(cert.scenario) === canonicalJson(value.scenario), "RELEASE_VERDICT_SCENARIO_MISMATCH", `${target} model certification binds another scenario`);
     assertFlow(canonicalJson(binding.provider) === canonicalJson(cert.provider), "RELEASE_VERDICT_PROVIDER_MISMATCH", `${target} provider identity differs from its model certification`);
     assertFlow(canonicalJson(binding.model) === canonicalJson(cert.model), "RELEASE_VERDICT_MODEL_MISMATCH", `${target} model identity differs from its model certification`);
+    assertFlow(canonicalJson(binding.scenario_oracle) === canonicalJson(cert.scenario_oracle), "RELEASE_VERDICT_SCENARIO_ORACLE_MISMATCH", `${target} scenario oracle binding differs from its model certification`);
     assertFlow(canonicalJson(binding.methods_result) === canonicalJson(cert.methods_result), "RELEASE_VERDICT_METHODS_RESULT_MISMATCH", `${target} methods_result identity differs from its model certification`);
   }
   return value;
@@ -579,6 +633,7 @@ export function buildEvidenceV2ReleaseVerdict({
       sha256: sha256File(certPath),
       provider: cert.provider,
       model: cert.model,
+      scenario_oracle: cert.scenario_oracle,
       methods_result: cert.methods_result,
     };
   });

@@ -91,6 +91,20 @@ from tests.deterministic.unit.runtime.test_diagnosis_runtime import (  # noqa: E
 Role = Literal["SPECIALIST", "REVIEWER"]
 Attempt = Literal["PRIMARY", "REPAIR"]
 
+_CAPTURED_EVIDENCE_FILENAMES = {
+    "source_job": "methods-source-job.json",
+    "reviewer_job": "methods-reviewer-job.json",
+    "evidence_graph": "methods-evidence-graph-v2.json",
+    "evaluation_plan": "methods-evaluation-plan-v2.json",
+    "limitations": "methods-limitations-v2.json",
+    "source_state": "methods-source-state-v2.json",
+    "source_outcome": "methods-source-outcome-v2.json",
+    "terminal_state": "methods-terminal-state-v2.json",
+    "reviewer_outcome": "methods-reviewer-outcome-v2.json",
+}
+_PUBLIC_METHODS_RESULT_FILENAME = "methods-result-v2.json"
+_LOADED_METHODS_FILENAME = "methods.json"
+
 
 class ModelCertRuntimeError(RuntimeError):
     def __init__(self, code: str, message: str) -> None:
@@ -113,6 +127,25 @@ def _canonical_json(value: object) -> bytes:
 
 def _file_identity(raw: bytes) -> dict[str, object]:
     return {"size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}
+
+
+def _write_new_bytes(root: Path, filename: str, raw: bytes) -> None:
+    root.mkdir(parents=True, exist_ok=True)
+    with (root / filename).open("xb") as stream:
+        stream.write(raw)
+
+
+def _required_record_bytes(
+    records: InMemoryExecutionRecordStore,
+    job_id: str,
+    filename: str,
+) -> bytes:
+    raw = records.read_audit_bytes(job_id, filename)
+    if raw is None:
+        raise RuntimeError(
+            f"Production execution record is missing: {job_id}/{filename}"
+        )
+    return raw
 
 
 def _ordinary_empty_directory(root: Path, label: str) -> Path:
@@ -279,8 +312,10 @@ class FakeModelRoleBackend:
         self,
         *,
         invalid_primary_roles: frozenset[Role] = frozenset(),
+        rejected_method_ids: frozenset[str] = frozenset(),
     ) -> None:
         self.invalid_primary_roles = invalid_primary_roles
+        self.rejected_method_ids = rejected_method_ids
         self.invocations: list[dict[str, object]] = []
 
     def execute(self, **kwargs: Any) -> BackendExecution:
@@ -312,7 +347,11 @@ class FakeModelRoleBackend:
             response = [
                 {
                     "evaluation_ref": item.evaluation_ref,
-                    "verdict": "CONFIRMED",
+                    "verdict": (
+                        "REJECTED"
+                        if item.method_id in self.rejected_method_ids
+                        else "CONFIRMED"
+                    ),
                     "reason": (
                         "The frozen Evidence V2 evaluation satisfies the method."
                         if role == "SPECIALIST"
@@ -578,6 +617,7 @@ def run_production_model_cert(
     role_backend: AgentBackend | FakeModelRoleBackend,
     source_root: Path = REPOSITORY_ROOT,
     registration_root: Path | None = None,
+    evidence_root: Path | None = None,
     execution_mode: Literal["deterministic-zero-model", "real-model"] = (
         "deterministic-zero-model"
     ),
@@ -590,6 +630,7 @@ def run_production_model_cert(
         registration_root,
         broker_factory,
     )
+    loaded_registration_root = work_root / "skill-dir" / registration_id
     source_job, aggregate, resources, target_contents = _running_job_and_state(
         source_root=source_root,
         catalog=catalog,
@@ -737,15 +778,60 @@ def run_production_model_cert(
         reviewer_job_id=review_job.job_id,
     )
     projection_bytes = canonical_json_bytes(methods_result)
-    graph_bytes = canonical_json_bytes(graph)
-    plan_bytes = canonical_json_bytes(plan)
-    limitations_bytes = canonical_json_bytes(limitations)
-    source_state_bytes = canonical_json_bytes(source_state)
-    terminal_state_bytes = canonical_json_bytes(terminal_state)
-    specialist_outcome_bytes = canonical_json_bytes(
-        specialist_receipt.job_outcome
+    captured_files = {
+        "source_job": _required_record_bytes(records, source_job.job_id, "job.json"),
+        "reviewer_job": _required_record_bytes(records, review_job.job_id, "job.json"),
+        "evidence_graph": _required_record_bytes(
+            records, source_job.job_id, METHODS_EVIDENCE_GRAPH_V2_FILENAME
+        ),
+        "evaluation_plan": _required_record_bytes(
+            records, source_job.job_id, METHODS_EVALUATION_PLAN_V2_FILENAME
+        ),
+        "limitations": _required_record_bytes(
+            records, source_job.job_id, METHODS_LIMITATIONS_V2_FILENAME
+        ),
+        "source_state": _required_record_bytes(
+            records, source_job.job_id, METHODS_STATE_V2_FILENAME
+        ),
+        "source_outcome": _required_record_bytes(
+            records, source_job.job_id, "job_outcome.json"
+        ),
+        "terminal_state": _required_record_bytes(
+            records, review_job.job_id, METHODS_STATE_V2_FILENAME
+        ),
+        "reviewer_outcome": _required_record_bytes(
+            records, review_job.job_id, "job_outcome.json"
+        ),
+    }
+    graph_bytes = captured_files["evidence_graph"]
+    plan_bytes = captured_files["evaluation_plan"]
+    limitations_bytes = captured_files["limitations"]
+    source_state_bytes = captured_files["source_state"]
+    terminal_state_bytes = captured_files["terminal_state"]
+    specialist_outcome_bytes = captured_files["source_outcome"]
+    reviewer_outcome_bytes = captured_files["reviewer_outcome"]
+    loaded_registration = json.loads(
+        (loaded_registration_root / "registration-template.json").read_bytes()
     )
-    reviewer_outcome_bytes = canonical_json_bytes(reviewer_receipt.job_outcome)
+    loaded_methods_path = (
+        loaded_registration_root
+        / Path(loaded_registration["package"]["relative_path"])
+        / _LOADED_METHODS_FILENAME
+    )
+    loaded_methods_bytes = loaded_methods_path.read_bytes()
+    capture_root = evidence_root or (work_root / "model-cert-evidence")
+    for key, filename in _CAPTURED_EVIDENCE_FILENAMES.items():
+        _write_new_bytes(capture_root, filename, captured_files[key])
+    _write_new_bytes(
+        capture_root,
+        _PUBLIC_METHODS_RESULT_FILENAME,
+        projection_bytes,
+    )
+    _write_new_bytes(
+        capture_root,
+        _LOADED_METHODS_FILENAME,
+        loaded_methods_bytes,
+    )
     actual_attempts = {
         f"{item['role']}:{item['attempt']}"
         for item in prompts
@@ -831,6 +917,14 @@ def run_production_model_cert(
             "reviewer": int("REVIEWER:REPAIR" in actual_attempts),
         },
         "records": {
+            "source_job": {
+                "filename": _CAPTURED_EVIDENCE_FILENAMES["source_job"],
+                **_file_identity(captured_files["source_job"]),
+            },
+            "reviewer_job": {
+                "filename": _CAPTURED_EVIDENCE_FILENAMES["reviewer_job"],
+                **_file_identity(captured_files["reviewer_job"]),
+            },
             "source_job_id": source_job.job_id,
             "terminal_job_id": review_job.job_id,
             "graph": {
@@ -881,12 +975,20 @@ def run_production_model_cert(
             "evidence_graph_ref": methods_result.evidence_graph_ref,
             "diagnostic_id": methods_result.diagnostic_id,
         },
-        "hard_cut": {
-            "candidate": False,
-            "partial_result": False,
-            "result_zip": False,
-            "methods_v1_grounding": False,
-            "harness_normalized": False,
+        "captured_execution_files": {
+            key: {
+                "filename": filename,
+                **_file_identity(captured_files[key]),
+            }
+            for key, filename in _CAPTURED_EVIDENCE_FILENAMES.items()
+        },
+        "captured_public_methods_result": {
+            "filename": _PUBLIC_METHODS_RESULT_FILENAME,
+            **_file_identity(projection_bytes),
+        },
+        "captured_loaded_methods": {
+            "filename": _LOADED_METHODS_FILENAME,
+            **_file_identity(loaded_methods_bytes),
         },
     }
     return result
@@ -912,6 +1014,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--fake-invalid-primary-role",
         choices=("SPECIALIST", "REVIEWER"),
+        action="append",
+        default=[],
+    )
+    parser.add_argument(
+        "--fake-rejected-method-id",
         action="append",
         default=[],
     )
@@ -977,6 +1084,9 @@ def main(argv: list[str] | None = None) -> int:
             role_backend: AgentBackend | FakeModelRoleBackend = (
                 FakeModelRoleBackend(
                     invalid_primary_roles=frozenset(invalid_roles),
+                    rejected_method_ids=frozenset(
+                        values.fake_rejected_method_id
+                    ),
                 )
             )
             execution_mode: Literal["deterministic-zero-model", "real-model"] = (
@@ -993,6 +1103,7 @@ def main(argv: list[str] | None = None) -> int:
             role_backend=role_backend,
             source_root=values.source_root,
             registration_root=values.registration_root,
+            evidence_root=values.evidence_root,
             execution_mode=execution_mode,
         )
         raw = canonical_json_bytes(result)
