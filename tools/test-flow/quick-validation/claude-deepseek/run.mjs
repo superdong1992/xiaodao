@@ -16,28 +16,16 @@ import {
   CLAUDE_DEEPSEEK_METHODS_USD_LIMIT,
   CLAUDE_DEEPSEEK_MODEL,
   CLAUDE_DEEPSEEK_NO_PROGRESS_SECONDS,
-  CLAUDE_DEEPSEEK_SCENARIOS,
   assertRegistrationUnchanged,
   buildRegistrationProducerIdentity,
-  claudeDeepseekE2ECallCount,
   registrationCachePath,
-  scenarioPaths,
   treeDigest,
   validateClaudeDeepseekIdentity,
   validateRegistrationCache,
 } from "./runtime/claude-deepseek-contract.mjs";
-import { clientToolInputPolicyIdentity, runE2E } from "./runtime/claude-deepseek-e2e-runner.mjs";
+import { runE2E } from "./runtime/claude-deepseek-e2e-runner.mjs";
 import { runMethodsBootstrap, verifyMethodsCacheOnly } from "./runtime/claude-deepseek-methods-runner.mjs";
-import {
-  aggregateUsage,
-  expectedSuiteCalls,
-  failureDomain,
-  scenarioDecision,
-  scenarioVerdictReference,
-  standaloneScenarioRoots,
-  standalonePlatform,
-  suiteStatus,
-} from "../standalone-suite.mjs";
+import { failureDomain, standaloneScenarioRoots, standalonePlatform } from "../standalone-suite.mjs";
 
 const SCRIPT_ROOT = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(SCRIPT_ROOT, "..", "..", "..", "..");
@@ -47,15 +35,11 @@ const METHODS_GOAL = "dev.macos-claude-deepseek-methods";
 const E2E_GOAL = "dev.macos-claude-deepseek-e2e";
 const GOALS = new Set([METHODS_GOAL, E2E_GOAL]);
 const FLAGS = new Set(["plan-only", "allow-real-model", "all-scenarios", "help"]);
-const VALUE_ARGUMENTS = new Set(["goal", "client", "claude-entry", "claude-settings", "cache-root", "runs-root", "python-entry", "logparse-source", "scenario", "reason", "hypothesis", "expected-evidence"]);
-const EVIDENCE_V2_REAL_DIAGNOSIS_BLOCKER = Object.freeze({
-  code: "EVIDENCE_V2_REAL_DIAGNOSIS_ADAPTER_UNMIGRATED",
-  detail: "Standalone Claude/DeepSeek E2E 仍消费旧版 Methods V1 定位和 result.zip 产物，迁移完成前禁止调用真实模型。",
-});
+const VALUE_ARGUMENTS = new Set(["goal", "client", "claude-entry", "claude-settings", "cache-root", "runs-root", "python-entry", "scenario", "source-snapshot-digest", "core-verdict", "reason", "hypothesis", "expected-evidence"]);
 
 const REQUIRED_EVIDENCE = Object.freeze({
   [METHODS_GOAL]: ["quick-codex-luna-contracts.tap", "quick-claude-methods-contracts.tap", "claude-identity.json", "model-invocations.json", "model-usage.json", "methods-package.json", "scenario-evaluation-audit.json", "security-audit.json", "adapter-receipt.json"],
-  [E2E_GOAL]: ["quick-claude-e2e-contracts.tap", "scenario-input.json", "scenario-oracle.json", "methods-package.json", "claude-identity.json", "model-invocations.json", "model-usage.json", "client-events.jsonl", "client-skill.json", "mcp-tool-calls.json", "attachment.json", "server-events.ndjson", "server-lifecycle.json", "server-sealed-diagnosis.json", "final-case.json", "artifact-index.json", "artifact-download.json", "specialized-runtime.json", "logparse-config.json", "http-boundary-audit.json", "security-audit.json", "adapter-receipt.json"],
+  [E2E_GOAL]: ["quick-claude-e2e-contracts.tap", "runtime-receipt.json", "methods-package.json", "claude-identity.json", "model-invocations.json", "model-usage.json", "model-cert-input.json", "adapter-receipt.json"],
 });
 
 class QuickValidationError extends Error {
@@ -80,9 +64,8 @@ export function parseArguments(argv) {
   if (values.help === true) return values;
   if (!GOALS.has(values.goal)) fail("CLAUDE_DEEPSEEK_GOAL_INVALID", `--goal must be ${METHODS_GOAL} or ${E2E_GOAL}`);
   if ((values.client ?? "macos") !== "macos") fail("CLAUDE_DEEPSEEK_CLIENT_INVALID", "Claude/DeepSeek Quick Validation supports --client macos only");
-  if (values.scenario !== undefined && !CLAUDE_DEEPSEEK_SCENARIOS.includes(values.scenario)) fail("CLAUDE_DEEPSEEK_SCENARIO_INVALID", "--scenario is outside the repository-owned matrix");
-  if (values["all-scenarios"] === true && values.scenario !== undefined) fail("CLAUDE_DEEPSEEK_SCENARIO_SELECTION_CONFLICT", "--all-scenarios and --scenario are mutually exclusive");
-  if (values["all-scenarios"] === true && values.goal !== E2E_GOAL) fail("CLAUDE_DEEPSEEK_SUITE_GOAL_INVALID", `--all-scenarios requires --goal ${E2E_GOAL}`);
+  if (values["all-scenarios"] === true) fail("CLAUDE_DEEPSEEK_MODEL_CERT_SUITE_FORBIDDEN", "Evidence V2 model-cert uses one fixed production Runtime scenario");
+  if (values.scenario !== undefined && values.scenario !== "multiple-rpc-timeouts") fail("CLAUDE_DEEPSEEK_SCENARIO_INVALID", "Evidence V2 model-cert uses only multiple-rpc-timeouts");
   return values;
 }
 
@@ -92,15 +75,16 @@ export function defaults(values, environment = process.env) {
     client: values.client ?? "macos",
     planOnly: values["plan-only"] === true,
     allowRealModel: values["allow-real-model"] === true,
-    allScenarios: values["all-scenarios"] === true,
+    allScenarios: false,
     claudeEntry: path.resolve(values["claude-entry"] ?? path.join(REPO_ROOT, ".tmp", "test-flow-cache", "claude", "2.1.89", "package", "cli.js")),
     claudeSettings: path.resolve(values["claude-settings"] ?? path.join(REPO_ROOT, ".tmp", "test-flow-release", "settings.json")),
     cacheRoot: path.resolve(values["cache-root"] ?? path.join(REPO_ROOT, ".tmp", "quick-validation", "claude-deepseek", "cache")),
     runsRoot: path.resolve(values["runs-root"] ?? path.join(REPO_ROOT, ".tmp", "quick-validation", "claude-deepseek", "runs")),
     scratchRoot: environment.TEST_FLOW_QUICK_SCRATCH_ROOT ? path.resolve(environment.TEST_FLOW_QUICK_SCRATCH_ROOT) : null,
     pythonEntry: path.resolve(values["python-entry"] ?? path.join(REPO_ROOT, ".venv", "bin", "python")),
-    logparseRoot: path.resolve(values["logparse-source"] ?? path.join(environment.HOME ?? "", "Documents", "Codex", "2026-06-29-github-issue-locator-logparse", "logparse")),
-    scenario: values.scenario ?? "api-execution-overrun",
+    scenario: values.scenario ?? "multiple-rpc-timeouts",
+    sourceSnapshotDigest: values["source-snapshot-digest"] ?? null,
+    coreVerdict: values["core-verdict"] ? path.resolve(values["core-verdict"]) : null,
     retryContext: { reason: values.reason ?? null, hypothesis: values.hypothesis ?? null, expected_evidence: values["expected-evidence"] ?? null },
   };
 }
@@ -131,9 +115,6 @@ export function buildPlan(options) {
   const caseRoot = path.join(REPO_ROOT, "tests", "cases", "release", "rpc-timeout-anonymized");
   const metaSkillRoot = path.join(REPO_ROOT, ".claude", "skills", "wiki-to-logparse-diagnosis-skill");
   const wiki = path.join(caseRoot, "input", "wiki.md");
-  const sourceLogparseConfig = path.join(REPO_ROOT, "experiments", "rpc-skill-feasibility", "logparse-config.json");
-  const helperRoot = path.join(REPO_ROOT, ".claude", "skills", "logparse-diagnose");
-  const brokerEntry = path.join(path.dirname(options.pythonEntry), "problem-locator-logparse");
   let identity = null;
   let producer = null;
   let cache = { status: "UNKNOWN", code: null, path: null, registration_tree_sha256: null, runtime_ref: null };
@@ -151,43 +132,27 @@ export function buildPlan(options) {
       }
     } catch (error) { blockers.push({ code: error?.code ?? "CLAUDE_DEEPSEEK_IDENTITY_INVALID", detail: error?.message ?? "Claude identity is invalid" }); }
   }
-  const scenarios = options.goal === E2E_GOAL
-    ? options.allScenarios ? [...CLAUDE_DEEPSEEK_SCENARIOS] : [options.scenario]
-    : [];
+  const scenarios = options.goal === E2E_GOAL ? ["multiple-rpc-timeouts"] : [];
   if (options.goal === E2E_GOAL) {
-    blockers.push(EVIDENCE_V2_REAL_DIAGNOSIS_BLOCKER);
-    requiredDirectory(options.logparseRoot, "CLAUDE_DEEPSEEK_LOGPARSE_MISSING", "Logparse source", blockers);
-    requiredFile(sourceLogparseConfig, "CLAUDE_DEEPSEEK_LOGPARSE_CONFIG_MISSING", "repository Logparse config", blockers);
-    requiredDirectory(helperRoot, "CLAUDE_DEEPSEEK_HELPER_MISSING", "Server logparse-diagnose Helper", blockers);
-    requiredFile(brokerEntry, "CLAUDE_DEEPSEEK_BROKER_ENTRY_MISSING", "job-scoped problem-locator-logparse entry", blockers);
-    for (const scenario of scenarios) {
-      try { scenarioPaths(REPO_ROOT, scenario); } catch (error) { blockers.push({ code: error?.code ?? "CLAUDE_DEEPSEEK_SCENARIO_INVALID", detail: error?.message ?? `Scenario is invalid: ${scenario}` }); }
-    }
+    if (!/^[a-f0-9]{64}$/u.test(options.sourceSnapshotDigest ?? "")) blockers.push({ code: "CLAUDE_DEEPSEEK_SOURCE_SNAPSHOT_REQUIRED", detail: "Evidence V2 model-cert requires the active source snapshot digest" });
+    if (options.coreVerdict === null) blockers.push({ code: "CLAUDE_DEEPSEEK_CORE_VERDICT_REQUIRED", detail: "Evidence V2 model-cert requires the matching Core verdict" });
+    else requiredFile(options.coreVerdict, "CLAUDE_DEEPSEEK_CORE_VERDICT_MISSING", "Evidence V2 Core verdict", blockers);
     if (cache.status !== "PRESENT") blockers.push({ code: "CLAUDE_DEEPSEEK_REGISTRATION_CACHE_REQUIRED", detail: `E2E requires the exact generated registration cache (${cache.code ?? cache.status})` });
   }
-  const helperIdentity = options.goal === E2E_GOAL && fs.existsSync(helperRoot) ? { name: "logparse-diagnose", tree_sha256: treeDigest(helperRoot, { directoryMode: 0o700 }) } : null;
   const providerRuntimeIdentity = { tree_sha256: treeDigest(path.join(SCRIPT_ROOT, "runtime"), { directoryMode: 0o700 }) };
-  let logparseConfig = null;
-  if (options.goal === E2E_GOAL && fs.existsSync(sourceLogparseConfig)) {
-    try {
-      const config = JSON.parse(fs.readFileSync(sourceLogparseConfig, "utf8"));
-      const product = config.products?.["rpc-skill-feasibility"];
-      if (config.schema_version !== 2 || product === null || typeof product !== "object" || Array.isArray(product)) throw new Error("invalid-config");
-      logparseConfig = { materialization_version: 1, source_sha256: sha256File(sourceLogparseConfig), product: "default", module: CLAUDE_DEEPSEEK_MODULE, product_bytes_sha256: sha256Bytes(canonicalJson(product)) };
-    } catch { blockers.push({ code: "CLAUDE_DEEPSEEK_LOGPARSE_CONFIG_INVALID", detail: "Repository Logparse config cannot materialize the default product" }); }
-  }
   if (options.goal === METHODS_GOAL && cache.status === "INVALID") blockers.push({ code: "CLAUDE_DEEPSEEK_REGISTRATION_CACHE_INVALID", detail: `Exact producer path exists but is invalid (${cache.code})` });
-  const mode = options.goal === METHODS_GOAL ? (cache.status === "PRESENT" ? "cache-verification" : "generation") : options.allScenarios ? "e2e-suite" : "e2e";
-  const expectedCalls = mode === "cache-verification" ? 0 : options.goal === METHODS_GOAL ? CLAUDE_DEEPSEEK_METHODS_CALLS : expectedSuiteCalls(scenarios, claudeDeepseekE2ECallCount);
+  const mode = options.goal === METHODS_GOAL ? (cache.status === "PRESENT" ? "cache-verification" : "generation") : "model-cert";
+  const expectedCalls = mode === "cache-verification" ? 0 : options.goal === METHODS_GOAL ? CLAUDE_DEEPSEEK_METHODS_CALLS : 2;
   const core = {
     schema_version: 1, framework: FRAMEWORK_ID, framework_version: FRAMEWORK_VERSION, goal: options.goal, mode, scenario: options.goal === E2E_GOAL && !options.allScenarios ? options.scenario : null, scenarios,
     execution: {
-      entry: "tools/test-flow/quick-validation/claude-deepseek/run.mjs", old_cross_job: false, old_test_flow_orchestrator: false, source_snapshot: false, history_reuse: false, automatic_model_retry: false,
+      entry: "tools/test-flow/quick-validation/claude-deepseek/run.mjs", old_cross_job: false, old_test_flow_orchestrator: false, source_snapshot: options.goal === E2E_GOAL, history_reuse: false, automatic_model_retry: false,
       platform, expected_model_processes: expectedCalls, model: CLAUDE_DEEPSEEK_MODEL, token_cap: options.goal === METHODS_GOAL ? CLAUDE_DEEPSEEK_METHODS_TOKEN_LIMIT : CLAUDE_DEEPSEEK_E2E_TOKEN_LIMIT * scenarios.length, usd_cap: options.goal === METHODS_GOAL ? CLAUDE_DEEPSEEK_METHODS_USD_LIMIT : CLAUDE_DEEPSEEK_E2E_USD_LIMIT * scenarios.length,
-      per_scenario: scenarios.map((scenario) => ({ scenario_id: scenario, expected_model_processes: claudeDeepseekE2ECallCount(scenario), token_cap: CLAUDE_DEEPSEEK_E2E_TOKEN_LIMIT, usd_cap: CLAUDE_DEEPSEEK_E2E_USD_LIMIT })),
+      model_process_hard_cap: options.goal === E2E_GOAL ? 4 : expectedCalls,
+      per_scenario: scenarios.map((scenario) => ({ scenario_id: scenario, expected_model_processes: 2, model_process_hard_cap: 4, token_cap: CLAUDE_DEEPSEEK_E2E_TOKEN_LIMIT, usd_cap: CLAUDE_DEEPSEEK_E2E_USD_LIMIT })),
       stage_wall_seconds: options.goal === E2E_GOAL ? CLAUDE_DEEPSEEK_STAGE_WALL_SECONDS * scenarios.length : CLAUDE_DEEPSEEK_STAGE_WALL_SECONDS, per_process_wall_seconds: options.goal === METHODS_GOAL ? 1800 : 600, no_progress_seconds: CLAUDE_DEEPSEEK_NO_PROGRESS_SECONDS, docker: false, browser: false, restart: false,
     },
-    inputs: { repository_root: REPO_ROOT, scratch_root: options.scratchRoot, provider_runtime: providerRuntimeIdentity, client: options.client, client_prompt: options.goal === E2E_GOAL ? clientToolInputPolicyIdentity() : null, claude: identity, producer, registration_cache: cache, helper: helperIdentity, module: CLAUDE_DEEPSEEK_MODULE, python_entry: options.pythonEntry, broker_entry: options.goal === E2E_GOAL && fs.existsSync(brokerEntry) ? { path: brokerEntry, sha256: sha256File(brokerEntry) } : null, logparse_root: options.goal === E2E_GOAL ? options.logparseRoot : null, logparse_config: logparseConfig, retry_context: options.retryContext },
+    inputs: { repository_root: REPO_ROOT, source_snapshot_digest: options.sourceSnapshotDigest, core_verdict: options.coreVerdict, scratch_root: options.scratchRoot, provider_runtime: providerRuntimeIdentity, client: options.client, claude: identity, producer, registration_cache: cache, module: CLAUDE_DEEPSEEK_MODULE, python_entry: options.pythonEntry, retry_context: options.retryContext },
     contracts: options.goal === METHODS_GOAL ? ["quick.codex-luna.contracts", "quick.claude-deepseek.methods.contracts"] : ["quick.claude-deepseek.e2e.contracts"],
     evidence: REQUIRED_EVIDENCE[options.goal],
     admission: { status: blockers.length === 0 ? "READY" : "BLOCKED", blockers },
@@ -211,7 +176,7 @@ function runDeterministicGates(goal, evidenceRoot) {
     const codexTests = fs.readdirSync(path.join(REPO_ROOT, "tools", "test-flow", "quick-validation", "codex-luna", "tests")).filter((name) => name.endsWith(".test.mjs")).map((name) => path.join("tools", "test-flow", "quick-validation", "codex-luna", "tests", name));
     runContracts(codexTests, path.join(evidenceRoot, "quick-codex-luna-contracts.tap"));
     runContracts(["tools/test-flow/quick-validation/claude-deepseek/tests/claude-deepseek-contract.test.mjs", "tools/test-flow/quick-validation/claude-deepseek/tests/claude-deepseek-process.test.mjs", "tools/test-flow/quick-validation/claude-deepseek/tests/claude-deepseek-methods-runner.test.mjs"], path.join(evidenceRoot, "quick-claude-methods-contracts.tap"));
-  } else runContracts(["tools/test-flow/quick-validation/standalone-suite.test.mjs", "tools/test-flow/quick-validation/claude-deepseek/tests/claude-deepseek-contract.test.mjs", "tools/test-flow/quick-validation/claude-deepseek/tests/claude-deepseek-process.test.mjs", "tools/test-flow/quick-validation/claude-deepseek/tests/claude-deepseek-bash-policy.test.mjs", "tools/test-flow/quick-validation/claude-deepseek/tests/claude-deepseek-service-wrapper.test.mjs", "tools/test-flow/quick-validation/claude-deepseek/tests/claude-deepseek-e2e-runner.test.mjs"], path.join(evidenceRoot, "quick-claude-e2e-contracts.tap"));
+  } else runContracts(["tools/test-flow/quick-validation/claude-deepseek/tests/claude-deepseek-contract.test.mjs", "tools/test-flow/quick-validation/claude-deepseek/tests/claude-deepseek-process.test.mjs", "tools/test-flow/quick-validation/claude-deepseek/tests/claude-deepseek-bash-policy.test.mjs", "tools/test-flow/quick-validation/claude-deepseek/tests/claude-deepseek-service-wrapper.test.mjs", "tools/test-flow/quick-validation/claude-deepseek/tests/claude-deepseek-e2e-runner.test.mjs"], path.join(evidenceRoot, "quick-claude-e2e-contracts.tap"));
 }
 
 export function deterministicGateRoot({ goal, evidenceRoot, scratchRunRoot }) {
@@ -266,7 +231,10 @@ export function sealGate({ goal, mode, evidenceRoot, expectedCalls, failure = nu
   if (names.has("model-invocations.json")) actualCalls = JSON.parse(fs.readFileSync(path.join(evidenceRoot, "model-invocations.json"), "utf8")).invocations?.length ?? null;
   if (names.has("model-usage.json")) usage = JSON.parse(fs.readFileSync(path.join(evidenceRoot, "model-usage.json"), "utf8")).aggregate ?? null;
   const adapterPass = names.has("adapter-receipt.json") && JSON.parse(fs.readFileSync(path.join(evidenceRoot, "adapter-receipt.json"), "utf8")).status === "PASS";
-  const receipt = { schema_version: 1, framework: FRAMEWORK_ID, goal, mode, status: failure === null && missing.length === 0 && actualCalls === expectedCalls && adapterPass ? "PASS" : "FAIL", expected_model_processes: expectedCalls, actual_model_processes: actualCalls, retry_count: 0, missing_evidence: missing, usage, failure, evidence: manifest };
+  const callCountPass = goal === E2E_GOAL
+    ? Number.isSafeInteger(actualCalls) && actualCalls >= 2 && actualCalls <= 4
+    : actualCalls === expectedCalls;
+  const receipt = { schema_version: 1, framework: FRAMEWORK_ID, goal, mode, status: failure === null && missing.length === 0 && callCountPass && adapterPass ? "PASS" : "FAIL", expected_model_processes: expectedCalls, model_process_hard_cap: goal === E2E_GOAL ? 4 : expectedCalls, actual_model_processes: actualCalls, retry_count: 0, missing_evidence: missing, usage, failure, evidence: manifest };
   writeJsonExclusive(path.join(evidenceRoot, "gate-receipt.json"), receipt);
   return receipt;
 }
@@ -277,25 +245,6 @@ function writeJsonExclusive(filePath, value) {
 }
 
 function safeFailure(error) { return { code: error?.code ?? "CLAUDE_DEEPSEEK_UNEXPECTED", message: error?.message ?? String(error) }; }
-
-function scenarioPlan(plan, scenario) {
-  const core = {
-    ...plan,
-    mode: "e2e",
-    scenario,
-    scenarios: [scenario],
-    execution: {
-      ...plan.execution,
-      expected_model_processes: claudeDeepseekE2ECallCount(scenario),
-      token_cap: CLAUDE_DEEPSEEK_E2E_TOKEN_LIMIT,
-      usd_cap: CLAUDE_DEEPSEEK_E2E_USD_LIMIT,
-      per_scenario: [{ scenario_id: scenario, expected_model_processes: claudeDeepseekE2ECallCount(scenario), token_cap: CLAUDE_DEEPSEEK_E2E_TOKEN_LIMIT, usd_cap: CLAUDE_DEEPSEEK_E2E_USD_LIMIT }],
-      stage_wall_seconds: CLAUDE_DEEPSEEK_STAGE_WALL_SECONDS,
-    },
-  };
-  delete core.plan_sha256;
-  return { ...core, plan_sha256: sha256Bytes(canonicalJson(core)) };
-}
 
 async function executeOne(options, plan, {
   id = runId(),
@@ -328,7 +277,7 @@ async function executeOne(options, plan, {
       if (plan.goal === METHODS_GOAL) {
         const methodOptions = { ...common, metaSkillRoot: path.join(REPO_ROOT, ".claude", "skills", "wiki-to-logparse-diagnosis-skill"), wiki: path.join(caseRoot, "input", "wiki.md"), oracle: path.join(caseRoot, "oracle.json"), module: CLAUDE_DEEPSEEK_MODULE };
         if (plan.mode === "cache-verification") verifyMethodsCacheOnly(methodOptions); else await runMethodsBootstrap(methodOptions);
-      } else await runE2E({ ...common, logparseRoot: options.logparseRoot, scenario: options.scenario });
+      } else await runE2E({ ...common, sourceSnapshotDigest: options.sourceSnapshotDigest, coreVerdict: options.coreVerdict, scenario: options.scenario });
     } catch (error) { failure = safeFailure(error); }
   }
   if (deterministicRoot !== null && deterministicRoot !== evidenceRoot) {
@@ -342,91 +291,11 @@ async function executeOne(options, plan, {
   return { verdict, runRoot, exitCode: verdict.status === "PASS" ? 0 : verdict.status === "BLOCKED" ? 2 : 1 };
 }
 
-export async function executeSuite(options, plan, {
-  executeOneImpl = executeOne,
-  runDeterministicGatesImpl = runDeterministicGates,
-} = {}) {
-  const id = runId().replace(/^claude-deepseek-/, "claude-deepseek-suite-");
-  const runRoot = path.join(options.runsRoot, id);
-  const preflightRoot = path.join(runRoot, "evidence", "preflight");
-  fs.mkdirSync(preflightRoot, { recursive: true, mode: 0o700 });
-  writeJsonExclusive(path.join(runRoot, "plan.json"), plan);
-  const startedAt = new Date().toISOString();
-  const references = [];
-  let engineeringFailure = null;
-  let blockedFailure = null;
-  let unsealedScenario = null;
-  if (plan.admission.status !== "READY") blockedFailure = { code: "CLAUDE_DEEPSEEK_PLAN_BLOCKED", blockers: plan.admission.blockers };
-  else if (!options.allowRealModel) blockedFailure = { code: "CLAUDE_DEEPSEEK_REAL_MODEL_OPT_IN_REQUIRED", message: "Execution with Claude processes requires --allow-real-model" };
-  else {
-    try { runDeterministicGatesImpl(E2E_GOAL, preflightRoot); }
-    catch (error) { engineeringFailure = safeFailure(error); }
-  }
-
-  if (blockedFailure === null && engineeringFailure === null) {
-    fs.mkdirSync(path.join(runRoot, "scenarios"), { mode: 0o700 });
-    const childEvidence = REQUIRED_EVIDENCE[E2E_GOAL].filter((name) => !name.endsWith(".tap"));
-    for (const scenario of plan.scenarios) {
-      let child;
-      let reference;
-      try {
-        child = await executeOneImpl({ ...options, scenario, allScenarios: false }, scenarioPlan(plan, scenario), {
-          id: `${id}-${scenario}`,
-          runRoot: path.join(runRoot, "scenarios", scenario),
-          runContractsFirst: false,
-          requiredEvidence: childEvidence,
-        });
-        reference = scenarioVerdictReference({ suiteRoot: runRoot, scenario, verdict: child.verdict, sha256File, modelField: "model_processes" });
-      } catch (error) {
-        const failure = safeFailure(error);
-        engineeringFailure = { scenario_id: scenario, ...failure };
-        unsealedScenario = { scenario_id: scenario, status: "ERROR", failure_domain: "ENGINEERING", model_processes: null, usage: null, failure, verdict: null };
-        break;
-      }
-      references.push(reference);
-      if (child.verdict.status === "PASS") continue;
-      const decision = scenarioDecision(child.verdict);
-      references.at(-1).failure_domain = decision.failure_domain;
-      if (decision.stop) {
-        engineeringFailure = { scenario_id: scenario, ...(child.verdict.failure ?? { code: "CLAUDE_DEEPSEEK_SCENARIO_ENGINEERING_FAILURE" }) };
-        break;
-      }
-    }
-  }
-
-  const completed = new Set(references.map((item) => item.scenario_id));
-  const referencesByScenario = new Map(references.map((item) => [item.scenario_id, item]));
-  const scenarioResults = plan.scenarios.map((scenario) => referencesByScenario.get(scenario)
-    ?? (unsealedScenario?.scenario_id === scenario
-      ? unsealedScenario
-      : { scenario_id: scenario, status: "NOT_RUN", failure_domain: null, model_processes: null, usage: null, failure: null, verdict: null }));
-  const attemptedCount = completed.size + (unsealedScenario === null ? 0 : 1);
-  const status = suiteStatus({ blocked: blockedFailure !== null, engineeringFailure, references, expectedCount: plan.scenarios.length });
-  const actualCalls = references.reduce((sum, item) => sum + (Number.isSafeInteger(item.model_processes?.actual) ? item.model_processes.actual : 0), 0);
-  const finishedAt = new Date().toISOString();
-  const verdict = {
-    schema_version: 1, framework: FRAMEWORK_ID, framework_version: FRAMEWORK_VERSION, run_id: id, goal: plan.goal, mode: "e2e-suite", scenario: null,
-    scenario_order: plan.scenarios, status, started_at_utc: startedAt, finished_at_utc: finishedAt, elapsed_seconds: (Date.parse(finishedAt) - Date.parse(startedAt)) / 1000,
-    plan_sha256: plan.plan_sha256, source_snapshot: false, old_cross_job_finalization: false,
-    model_processes: { expected: plan.execution.expected_model_processes, actual: actualCalls, retry_count: 0 }, usage: aggregateUsage(references.map((item) => item.usage)),
-    preflight_evidence: evidenceManifest(preflightRoot),
-    summary: { expected: plan.scenarios.length, completed: references.length, attempted: attemptedCount, passed: references.filter((item) => item.status === "PASS").length, failed: references.filter((item) => item.status === "FAIL").length, errored: unsealedScenario === null ? 0 : 1, not_run: plan.scenarios.length - attemptedCount },
-    scenarios: scenarioResults, failure: blockedFailure ?? engineeringFailure, failure_domain: blockedFailure !== null ? "ADMISSION" : engineeringFailure !== null ? "ENGINEERING" : null,
-    stop_reason: blockedFailure !== null
-      ? { domain: "ADMISSION", failure: blockedFailure }
-      : engineeringFailure !== null
-        ? { domain: "ENGINEERING", failure: engineeringFailure }
-        : null,
-  };
-  writeJsonExclusive(path.join(runRoot, "verdict.json"), verdict);
-  return { verdict, runRoot, exitCode: status === "PASS" ? 0 : status === "BLOCKED" ? 2 : 1 };
-}
-
 export async function execute(options, plan) {
-  return options.allScenarios ? executeSuite(options, plan) : executeOne(options, plan);
+  return executeOne(options, plan);
 }
 
-function usage() { return `Usage:\n  ./tools/test-flow/quick-validation/claude-deepseek/run.sh --goal ${METHODS_GOAL} [--plan-only] [--allow-real-model]\n  ./tools/test-flow/quick-validation/claude-deepseek/run.sh --goal ${E2E_GOAL} --logparse-source <path> (--scenario <repository-id> | --all-scenarios) [--plan-only] [--allow-real-model]\n`; }
+function usage() { return `Usage:\n  ./tools/test-flow/quick-validation/claude-deepseek/run.sh --goal ${METHODS_GOAL} [--plan-only] [--allow-real-model]\n  ./tools/test-flow/quick-validation/claude-deepseek/run.sh --goal ${E2E_GOAL} --scenario multiple-rpc-timeouts --source-snapshot-digest <sha256> --core-verdict <path> [--plan-only] [--allow-real-model]\n`; }
 
 async function main() {
   try {

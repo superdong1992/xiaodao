@@ -12,7 +12,6 @@ import {
   buildPlan,
   defaults,
   deterministicGateRoot,
-  executeSuite,
   materializeDeterministicGateEvidence,
   parseArguments,
   sealGate,
@@ -20,116 +19,34 @@ import {
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
-test("standalone entry exposes only the two Claude/DeepSeek Fast E2E goals and the nine-scenario suite", () => {
+test("standalone entry keeps Methods generation and exposes one Evidence V2 model-cert scenario", () => {
   assert.equal(parseArguments(["--goal", METHODS_GOAL]).goal, METHODS_GOAL);
-  assert.equal(parseArguments(["--goal", E2E_GOAL, "--scenario", "api-execution-overrun"]).goal, E2E_GOAL);
-  assert.equal(parseArguments(["--goal", E2E_GOAL, "--all-scenarios"])["all-scenarios"], true);
-  assert.throws(() => parseArguments(["--goal", E2E_GOAL, "--all-scenarios", "--scenario", "api-execution-overrun"]), (error) => error.code === "CLAUDE_DEEPSEEK_SCENARIO_SELECTION_CONFLICT");
+  assert.equal(parseArguments(["--goal", E2E_GOAL, "--scenario", "multiple-rpc-timeouts"]).goal, E2E_GOAL);
+  assert.throws(() => parseArguments(["--goal", E2E_GOAL, "--all-scenarios"]), (error) => error.code === "CLAUDE_DEEPSEEK_MODEL_CERT_SUITE_FORBIDDEN");
+  assert.throws(() => parseArguments(["--goal", E2E_GOAL, "--scenario", "api-execution-overrun"]), (error) => error.code === "CLAUDE_DEEPSEEK_SCENARIO_INVALID");
   assert.throws(() => parseArguments(["--goal", "release.full"]), (error) => error.code === "CLAUDE_DEEPSEEK_GOAL_INVALID");
   assert.throws(() => parseArguments(["--goal", E2E_GOAL, "--client", "linux"]), (error) => error.code === "CLAUDE_DEEPSEEK_CLIENT_INVALID");
   assert.throws(() => parseArguments(["--goal", E2E_GOAL, "--docker-context", "colima"]), (error) => error.code === "CLAUDE_DEEPSEEK_ARGUMENT_UNKNOWN");
 });
 
-test("Claude suite plan freezes nine scenarios, 44 processes, and aggregate limits before admission", () => {
-  const options = defaults(parseArguments(["--goal", E2E_GOAL, "--all-scenarios", "--plan-only"]));
+test("Claude model-cert plan freezes normal two calls, one repair per role, and Core bindings", () => {
+  const options = defaults(parseArguments(["--goal", E2E_GOAL, "--scenario", "multiple-rpc-timeouts", "--plan-only"]));
   const plan = buildPlan(options);
-  assert.equal(plan.mode, "e2e-suite");
-  assert.equal(plan.scenarios.length, 9);
-  assert.equal(plan.execution.expected_model_processes, 44);
-  assert.equal(plan.execution.token_cap, 18_000_000);
-  assert.equal(plan.execution.usd_cap, 36);
-  assert.equal(plan.execution.stage_wall_seconds, 16_200);
-  assert.equal(plan.execution.per_scenario.find((item) => item.scenario_id === "insufficient-evidence").expected_model_processes, 4);
-  assert.equal(plan.inputs.client_prompt.version, 3);
-  assert.match(plan.inputs.client_prompt.sha256, /^[0-9a-f]{64}$/u);
+  assert.equal(plan.mode, "model-cert");
+  assert.deepEqual(plan.scenarios, ["multiple-rpc-timeouts"]);
+  assert.equal(plan.execution.expected_model_processes, 2);
+  assert.equal(plan.execution.model_process_hard_cap, 4);
+  assert.equal(plan.execution.per_scenario[0].model_process_hard_cap, 4);
+  assert.equal(plan.execution.source_snapshot, true);
   assert.match(plan.inputs.provider_runtime.tree_sha256, /^[0-9a-f]{64}$/u);
-  assert.ok(plan.admission.blockers.some((item) => item.code === "EVIDENCE_V2_REAL_DIAGNOSIS_ADAPTER_UNMIGRATED"));
-});
-
-test("blocked Claude suite writes one aggregate verdict and nine NOT_RUN results without a model", async () => {
-  const runsRoot = fs.mkdtempSync(path.join(os.tmpdir(), "claude-suite-blocked-"));
-  const options = { ...defaults(parseArguments(["--goal", E2E_GOAL, "--all-scenarios"])), runsRoot, allowRealModel: true };
-  const plan = buildPlan(options);
-  assert.ok(plan.admission.blockers.some((item) => item.code === "EVIDENCE_V2_REAL_DIAGNOSIS_ADAPTER_UNMIGRATED"));
-  const result = await executeSuite(options, plan);
-  assert.equal(result.verdict.status, "BLOCKED");
-  assert.equal(result.verdict.model_processes.actual, 0);
-  assert.equal(result.verdict.scenarios.filter((item) => item.status === "NOT_RUN").length, 9);
+  assert.ok(plan.admission.blockers.some((item) => item.code === "CLAUDE_DEEPSEEK_SOURCE_SNAPSHOT_REQUIRED"));
+  assert.ok(plan.admission.blockers.some((item) => item.code === "CLAUDE_DEEPSEEK_CORE_VERDICT_REQUIRED"));
+  assert.equal(plan.admission.blockers.some((item) => item.code === "EVIDENCE_V2_REAL_DIAGNOSIS_ADAPTER_UNMIGRATED"), false);
 });
 
 test("Claude Methods generation and cache verification do not inherit the E2E migration blocker", () => {
   const plan = buildPlan(defaults(parseArguments(["--goal", METHODS_GOAL, "--plan-only"])));
   assert.equal(plan.admission.blockers.some((item) => item.code === "EVIDENCE_V2_REAL_DIAGNOSIS_ADAPTER_UNMIGRATED"), false);
-});
-
-function fakeClaudeExecutor({ failureAt = null, failureCode = null, seen }) {
-  return async (options, childPlan, { runRoot }) => {
-    seen.push({ scenario: options.scenario, runRoot, usageRoot: path.join(runRoot, "usage"), evidenceRoot: path.join(runRoot, "evidence") });
-    fs.mkdirSync(runRoot, { recursive: true });
-    const failed = options.scenario === failureAt;
-    const actual = childPlan.execution.expected_model_processes;
-    const verdict = {
-      status: failed ? "FAIL" : "PASS",
-      model_processes: { expected: actual, actual, retry_count: 0 },
-      usage: { input_tokens: actual * 10, cost_usd: actual / 100 },
-      failure: failed ? { code: failureCode, message: "closed fixture failure" } : null,
-      failure_domain: null,
-    };
-    fs.writeFileSync(path.join(runRoot, "verdict.json"), JSON.stringify(verdict));
-    return { verdict, runRoot, exitCode: failed ? 1 : 0 };
-  };
-}
-
-function claudePreflightFixture(_goal, evidenceRoot) {
-  fs.writeFileSync(path.join(evidenceRoot, "quick-claude-e2e-contracts.tap"), "fixture preflight\n");
-}
-
-test("Claude suite continues after a contract failure and aggregates all nine child verdicts", async () => {
-  const runsRoot = fs.mkdtempSync(path.join(os.tmpdir(), "claude-suite-contract-"));
-  const options = { ...defaults(parseArguments(["--goal", E2E_GOAL, "--all-scenarios"])), runsRoot, allowRealModel: true };
-  const plan = { ...buildPlan(options), admission: { status: "READY", blockers: [] } };
-  const seen = [];
-  const result = await executeSuite(options, plan, {
-    executeOneImpl: fakeClaudeExecutor({ failureAt: plan.scenarios[0], failureCode: "MACOS_CODEX_LUNA_EXPECTED_TERM_MISSING", seen }),
-    runDeterministicGatesImpl: claudePreflightFixture,
-  });
-  assert.equal(result.verdict.status, "FAIL");
-  assert.equal(result.verdict.stop_reason, null);
-  assert.deepEqual(seen.map((item) => item.scenario), plan.scenarios);
-  assert.equal(new Set(seen.map((item) => item.runRoot)).size, 9);
-  assert.equal(result.verdict.scenarios[0].failure_domain, "CONTRACT");
-  assert.equal(result.verdict.model_processes.actual, result.verdict.scenarios.reduce((sum, item) => sum + item.model_processes.actual, 0));
-  assert.equal(result.verdict.usage.input_tokens, result.verdict.scenarios.reduce((sum, item) => sum + item.usage.input_tokens, 0));
-  assert.equal(result.verdict.summary.completed, 9);
-  assert.equal(result.verdict.summary.not_run, 0);
-});
-
-test("Claude suite stops immediately after an engineering failure and marks the remainder NOT_RUN", async () => {
-  const runsRoot = fs.mkdtempSync(path.join(os.tmpdir(), "claude-suite-engineering-"));
-  const options = { ...defaults(parseArguments(["--goal", E2E_GOAL, "--all-scenarios"])), runsRoot, allowRealModel: true };
-  const plan = { ...buildPlan(options), admission: { status: "READY", blockers: [] } };
-  const seen = [];
-  const passExecutor = fakeClaudeExecutor({ seen });
-  const result = await executeSuite(options, plan, {
-    async executeOneImpl(childOptions, childPlan, executionOptions) {
-      if (childOptions.scenario === plan.scenarios[1]) {
-        seen.push({ scenario: childOptions.scenario, runRoot: executionOptions.runRoot });
-        throw Object.assign(new Error("closed fixture runner failure"), { code: "CLAUDE_DEEPSEEK_E2E_RUNNER_FAILED" });
-      }
-      return passExecutor(childOptions, childPlan, executionOptions);
-    },
-    runDeterministicGatesImpl: claudePreflightFixture,
-  });
-  assert.equal(result.verdict.status, "ERROR");
-  assert.deepEqual(seen.map((item) => item.scenario), plan.scenarios.slice(0, 2));
-  assert.equal(result.verdict.summary.completed, 1);
-  assert.equal(result.verdict.summary.attempted, 2);
-  assert.equal(result.verdict.summary.not_run, 7);
-  assert.equal(result.verdict.scenarios[1].status, "ERROR");
-  assert.equal(result.verdict.scenarios[2].status, "NOT_RUN");
-  assert.equal(result.verdict.stop_reason.domain, "ENGINEERING");
-  assert.equal(result.verdict.stop_reason.failure.scenario_id, plan.scenarios[1]);
-  assert.equal(fs.existsSync(path.join(result.runRoot, "verdict.json")), true);
 });
 
 test("standalone entry does not import old CrossJob, Docker, browser, restart, or old Test Flow finalization", () => {

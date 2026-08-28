@@ -7,13 +7,14 @@ import test from "node:test";
 
 import { canonicalJson } from "../../../lib/util.mjs";
 import {
-  CLAUDE_DEEPSEEK_BASH_PROGRAMS,
   CLAUDE_DEEPSEEK_CLI_SHA256,
   CLAUDE_DEEPSEEK_CLIENT_PROMPT_VERSION,
   CLAUDE_DEEPSEEK_CONTRACT_VERSION,
   CLAUDE_DEEPSEEK_E2E_PHASES,
   CLAUDE_DEEPSEEK_MAX_OUTPUT_TOKENS,
   CLAUDE_DEEPSEEK_MODEL,
+  CLAUDE_DEEPSEEK_MODEL_CERT_PHASES,
+  CLAUDE_DEEPSEEK_MODEL_CERT_SCENARIO,
   CLAUDE_DEEPSEEK_NO_PROGRESS_SECONDS,
   CLAUDE_DEEPSEEK_PUBLIC_TOOLS,
   CLAUDE_DEEPSEEK_SCENARIOS,
@@ -21,14 +22,12 @@ import {
   aggregateClaudeUsage,
   assertRegistrationUnchanged,
   auditClaudeInvocations,
+  auditClaudeModelCertInvocations,
   auditClaudeStream,
-  auditClientBash,
   buildRegistrationCacheManifest,
   buildRegistrationProducerIdentity,
   claudeDeepseekE2ECallCount,
   claudeDeepseekE2EPhases,
-  loadScenarioFacts,
-  mapScenarioToCreateCase,
   publishRegistrationCacheAtomically,
   registrationCachePath,
   validateRegistrationCache,
@@ -114,27 +113,14 @@ test("Claude identity constants freeze 2.1.89, CLI hash, DeepSeek model, and 64k
   assert.equal(CLAUDE_DEEPSEEK_CLI_SHA256, "a9950ef6407fdc750bddb673852485500387e524a99d42385cb81e7d17128e01");
   assert.equal(CLAUDE_DEEPSEEK_MODEL, "deepseek-v4-flash[1m]");
   assert.equal(CLAUDE_DEEPSEEK_MAX_OUTPUT_TOKENS, 64_000);
-  assert.deepEqual(CLAUDE_DEEPSEEK_E2E_PHASES, ["CLIENT", "ROUTE", "LOGPARSE", "DIAGNOSE", "REVIEW"]);
-  assert.equal(CLAUDE_DEEPSEEK_PUBLIC_TOOLS.length, 7);
+  assert.deepEqual(CLAUDE_DEEPSEEK_MODEL_CERT_PHASES, ["SPECIALIST", "REVIEWER"]);
+  assert.deepEqual(CLAUDE_DEEPSEEK_PUBLIC_TOOLS, []);
 });
 
-test("Claude standalone owns the same nine scenarios with lifecycle-aware call counts", () => {
-  assert.equal(CLAUDE_DEEPSEEK_SCENARIOS.length, 9);
-  assert.deepEqual(claudeDeepseekE2EPhases("insufficient-evidence"), ["CLIENT", "ROUTE", "LOGPARSE", "DIAGNOSE"]);
-  assert.equal(claudeDeepseekE2ECallCount("insufficient-evidence"), 4);
-  for (const scenario of CLAUDE_DEEPSEEK_SCENARIOS.filter((item) => item !== "insufficient-evidence")) assert.equal(claudeDeepseekE2ECallCount(scenario), 5, scenario);
-});
-
-test("Claude mapper publishes both slots and stable process-name USER_FACT ids", () => {
-  const casePath = path.resolve("experiments", "rpc-skill-feasibility", "cases", "api-execution-overrun", "case.json");
-  const mapped = mapScenarioToCreateCase(loadScenarioFacts(casePath, "api-execution-overrun"));
-  assert.deepEqual(mapped.initial_user_fact_names, ["problem_time", "client_slot", "client_process_name", "server_slot", "server_process_name", "service", "api"]);
-  assert.deepEqual(mapped.initial_user_fact_values.slice(1, 5), ["1", "rpc_client", "1", "rpc_server"]);
-  for (const scenario of CLAUDE_DEEPSEEK_SCENARIOS) {
-    const facts = loadScenarioFacts(path.resolve("experiments", "rpc-skill-feasibility", "cases", scenario, "case.json"), scenario);
-    assert.equal(facts.client_slot, "1", scenario);
-    assert.equal(facts.server_slot, "1", scenario);
-  }
+test("Claude model cert owns one fixed production Runtime scenario and two normal calls", () => {
+  assert.equal(CLAUDE_DEEPSEEK_MODEL_CERT_SCENARIO, "multiple-rpc-timeouts");
+  assert.deepEqual(CLAUDE_DEEPSEEK_MODEL_CERT_PHASES, ["SPECIALIST", "REVIEWER"]);
+  assert.ok(CLAUDE_DEEPSEEK_SCENARIOS.includes("api-execution-overrun"));
 });
 
 test("registration producer identity includes settings and cache freezes the complete generated root", () => {
@@ -225,49 +211,36 @@ test("usage aggregation is cache-inclusive and enforces lifecycle-aware no-retry
   assert.equal(methods.aggregate.total_tokens, 20);
   const e2e = auditClaudeInvocations(invocations(CLAUDE_DEEPSEEK_E2E_PHASES), { workflow: "e2e", scenarioId: "api-execution-overrun" });
   assert.equal(e2e.aggregate.total_tokens, 100);
-  assert.equal(auditClaudeInvocations(invocations(["CLIENT", "ROUTE", "LOGPARSE", "DIAGNOSE"]), { workflow: "e2e", scenarioId: "insufficient-evidence" }).aggregate.total_tokens, 80);
   assert.deepEqual(aggregateClaudeUsage(invocations(["CLIENT", "ROUTE"])), {
     input_tokens: 20, output_tokens: 10, cache_creation_input_tokens: 6, cache_read_input_tokens: 4, total_tokens: 40, cost_usd: 0.02,
   });
-  assert.throws(() => auditClaudeInvocations(invocations(["CLIENT", "ROUTE", "DIAGNOSE", "REVIEW"]), { workflow: "e2e", scenarioId: "api-execution-overrun" }), (error) => error.code === "CLAUDE_DEEPSEEK_INVOCATION_COUNT_INVALID");
+  assert.throws(() => auditClaudeInvocations(invocations(["SPECIALIST"]), { workflow: "e2e", scenarioId: "api-execution-overrun" }), (error) => error.code === "CLAUDE_DEEPSEEK_INVOCATION_COUNT_INVALID");
   const retried = invocations(CLAUDE_DEEPSEEK_E2E_PHASES);
-  retried[2].retry = 1;
+  retried[1].retry = 1;
   assert.throws(() => auditClaudeInvocations(retried, { workflow: "e2e", scenarioId: "api-execution-overrun" }), (error) => error.code === "CLAUDE_DEEPSEEK_INVOCATION_IDENTITY_INVALID");
   const calibrated = invocations(CLAUDE_DEEPSEEK_E2E_PHASES);
-  [1.019079, 0.203663, 0.091923, 0.872387, 1.093734].forEach((cost, index) => { calibrated[index].usage.cost_usd = cost; });
-  assert.equal(auditClaudeInvocations(calibrated, { workflow: "e2e", scenarioId: "api-execution-overrun" }).aggregate.cost_usd, 3.280786);
-  calibrated[4].usage.cost_usd = 2;
+  [0.5, 0.5, 0.5, 0.5, 0.5].forEach((cost, index) => { calibrated[index].usage.cost_usd = cost; });
+  assert.equal(auditClaudeInvocations(calibrated, { workflow: "e2e", scenarioId: "api-execution-overrun" }).aggregate.cost_usd, 2.5);
+  calibrated[4].usage.cost_usd = 3;
   assert.throws(() => auditClaudeInvocations(calibrated, { workflow: "e2e", scenarioId: "api-execution-overrun" }), (error) => error.code === "CLAUDE_DEEPSEEK_BUDGET_EXCEEDED");
   const over = invocations(CLAUDE_DEEPSEEK_E2E_PHASES);
   over[0].usage.cache_read_input_tokens = 2_000_001;
   assert.throws(() => auditClaudeInvocations(over, { workflow: "e2e", scenarioId: "api-execution-overrun" }), (error) => error.code === "CLAUDE_DEEPSEEK_BUDGET_EXCEEDED");
 });
 
-test("Bash audit permits the exact upload sequence and descriptor-bound result download", () => {
-  const archivePath = "/private/tmp/client/input/logs.zip";
-  const archive = { size: 42, sha256: "a".repeat(64) };
-  const descriptor = {
-    url: "http://127.0.0.1:8123/uploads/token",
-    required_headers: { "Content-Type": "application/zip", "Content-Length": "42", "X-Content-SHA256": "a".repeat(64), "Idempotency-Key": "attachment" },
-  };
-  const headers = Object.entries(descriptor.required_headers).flatMap(([name, value]) => ["-H", `'${name}: ${value}'`]).join(" ");
-  const commands = [
-    { command: `/usr/bin/openssl dgst -sha256 ${archivePath}`, status: "completed", exit_code: 0, stdout: `SHA2-256(${archivePath})= ${archive.sha256}\n` },
-    { command: `/usr/bin/stat -f %z ${archivePath}`, status: "completed", exit_code: 0, stdout: "42\n" },
-    { command: `/usr/bin/curl --request PUT ${headers} --upload-file ${archivePath} '${descriptor.url}'`, status: "completed", exit_code: 0, stdout: "" },
-  ];
-  assert.deepEqual(auditClientBash(commands, { archivePath, archive, descriptor }).programs, CLAUDE_DEEPSEEK_BASH_PROGRAMS);
-  assert.throws(() => auditClientBash([...commands, commands[2]], { archivePath, archive, descriptor }), (error) => error.code === "CLAUDE_DEEPSEEK_BASH_CARDINALITY_INVALID");
-  const chained = structuredClone(commands);
-  chained[0].command += " ; uname -a";
-  assert.throws(() => auditClientBash(chained, { archivePath, archive, descriptor }), (error) => error.code === "CLAUDE_DEEPSEEK_BASH_SYNTAX_FORBIDDEN");
-  const resultPath = "/private/tmp/client/output/result.zip";
-  const artifact = { size: 99, sha256: "b".repeat(64), download_url: "http://127.0.0.1:8123/api/v1/artifacts/00000000-0000-0000-0000-000000000010/content?case_id=00000000-0000-0000-0000-000000000001" };
-  const downloaded = [
-    ...commands,
-    { command: `/usr/bin/curl --silent --show-error --fail-with-body --max-time 60 --request GET --output '${resultPath}' '${artifact.download_url}'`, status: "completed", exit_code: 0, stdout: "" },
-    { command: `/usr/bin/stat -f %z '${resultPath}'`, status: "completed", exit_code: 0, stdout: "99\n" },
-    { command: `/usr/bin/openssl dgst -sha256 '${resultPath}'`, status: "completed", exit_code: 0, stdout: `${artifact.sha256}\n` },
-  ];
-  assert.equal(auditClientBash(downloaded, { archivePath, archive, descriptor, download: { path: resultPath, artifact } }).download_count, 1);
+test("Evidence V2 model cert allows only S primary/repair then blind R primary/repair", () => {
+  const roleInvocation = (role, evaluationAttempt) => ({
+    ...invocations([role])[0],
+    role,
+    evaluation_attempt: evaluationAttempt,
+    role_call_ordinal: evaluationAttempt === "PRIMARY" ? 1 : 2,
+    workspace_audit: { status: "PASS", harness_normalized: false },
+    tool_policy: { shell: false, network: false },
+  });
+  const normal = [roleInvocation("SPECIALIST", "PRIMARY"), roleInvocation("REVIEWER", "PRIMARY")];
+  assert.deepEqual(auditClaudeModelCertInvocations(normal).repair_counts, { specialist: 0, reviewer: 0 });
+  const repaired = [roleInvocation("SPECIALIST", "PRIMARY"), roleInvocation("SPECIALIST", "REPAIR"), roleInvocation("REVIEWER", "PRIMARY"), roleInvocation("REVIEWER", "REPAIR")];
+  assert.equal(auditClaudeModelCertInvocations(repaired).actual_call_count, 4);
+  assert.throws(() => auditClaudeModelCertInvocations([...normal, roleInvocation("SPECIALIST", "REPAIR")]), (error) => error.code === "CLAUDE_DEEPSEEK_MODEL_CERT_SEQUENCE_INVALID");
+  assert.throws(() => auditClaudeModelCertInvocations([...repaired, roleInvocation("REVIEWER", "REPAIR")]), (error) => error.code === "CLAUDE_DEEPSEEK_MODEL_CERT_CALL_COUNT_INVALID");
 });

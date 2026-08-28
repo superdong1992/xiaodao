@@ -1,34 +1,63 @@
-# Claude/DeepSeek Standalone Fast E2E
+# Claude Code + DeepSeek 快速验证
 
-该流程冻结 Claude Code `2.1.89`、官方 `cli.js` SHA-256、env-only settings fingerprint 和 `deepseek-v4-flash[1m]`。它不执行中央 CrossJob、浏览器、重启或业务 REST，支持原生 macOS arm64 和密封 Ubuntu 22.04 Linux/x64 容器。
+该入口冻结 Claude Code `2.1.89`、官方 `cli.js` SHA-256、env-only settings fingerprint 和
+`deepseek-v4-flash[1m]`。Methods package 生成与 Evidence V2 模型认证是两个独立 Goal。
 
-先独立规划，并用一次真实模型调用生成完整 registration cache（包含 `registration-template.json` 和 `package/`，固定 `module=rpc`）：
+## 生成 Methods registration cache
+
+先看计划；确认后移除 `--plan-only` 并显式允许真实模型：
 
 ```bash
 ./tools/test-flow/quick-validation/claude-deepseek/run.sh \
   --goal dev.macos-claude-deepseek-methods \
-  --client macos --plan-only
+  --client macos \
+  --plan-only
 ```
 
-E2E 不自动生成 registration。默认单场景是 `api-execution-overrun`；也可以显式选择单场景或运行九场景 suite：
+该 Goal 只生成并校验完整 production registration cache，不执行诊断。
+
+## Evidence V2 P1 model cert
+
+P1 只使用固定 `multiple-rpc-timeouts` 场景。调用方必须提供同一源码快照的 digest，以及该快照
+已经通过的 `core-verdict.json`：
 
 ```bash
 ./tools/test-flow/quick-validation/claude-deepseek/run.sh \
-  --goal dev.macos-claude-deepseek-e2e --client macos \
-  --logparse-source /absolute/logparse --plan-only
-
-./tools/test-flow/quick-validation/claude-deepseek/run.sh \
-  --goal dev.macos-claude-deepseek-e2e --client macos \
-  --logparse-source /absolute/logparse \
-  --all-scenarios --plan-only
+  --goal dev.macos-claude-deepseek-e2e \
+  --client macos \
+  --scenario multiple-rpc-timeouts \
+  --source-snapshot-digest <sha256> \
+  --core-verdict <core-gate-root>/core-verdict.json \
+  --plan-only
 ```
 
-确认计划后用相同参数移除 `--plan-only` 并加入 `--allow-real-model`。suite 与 Codex 使用相同九场景；`insufficient-evidence` 没有 REVIEW，共四个 Claude 进程，其余每例五个进程，总计 44 个进程。
+规划结果会列出 provider/model/settings、registration cache、Core 绑定、正常调用数 2、调用硬上限 4、
+token/cost 和 admission blocker。审阅后才能移除 `--plan-only`，并加入 `--allow-real-model`。
 
-每例从空 `DATA_ROOT` 启动。客户端只安装 `problem-locator-client`，经 HTTP MCP 操作 Linux Server；Server Agent 只安装 `logparse-diagnose`，不得把生成的业务 Methods package 安装到 Agent Skill 目录，也不得在 ROUTE、DIAGNOSE 或 REVIEW 中调用业务 Skill。业务 package 只能由 Server Catalog 从 `SKILL_DIR` 读取并注入冻结上下文。非 LOGPARSE Agent 只能读取当前 Job 工作区，并且只能写入该工作区的绝对 `output/` 目录。同一个客户端模型在 `list_artifacts` 后按返回的 `download_url` 下载 `result.zip`，并核对 size、SHA-256 和 Server v3 ZIP 内容。Server LOGPARSE trace 必须证明先加载一次 `logparse-diagnose`，再执行一次 job-scoped broker；业务 Methods Skill 只消费冻结日志。
+认证驱动直接运行生产 `DiagnosisRuntime`：
 
-DIAGNOSE 和 REVIEW 的测试 wrapper 只记录 Agent 原始草稿的大小、SHA-256 与是否已经 canonical，绝不改写草稿；JSON 解析、schema 校验和 Canonical JSON 规范化必须由产品 Runtime 完成。Fast E2E 必须保留 `harness_normalized=false`，不得用测试代码替产品修正输出。
+1. 固定 Logparse fixture 完成一次确定性预处理；
+2. 服务端生成 `methods-evidence-graph-v2.json` 和 `methods-evaluation-plan-v2.json`；
+3. Specialist 只读取 request、Graph、Plan 和方法卡，写
+   `output/method-diagnosis.draft.json`；
+4. 生产 `OutcomeSubmissionService` 创建独立盲评 REVIEW Job；
+5. Reviewer 只读取自己的冻结上下文，写 `output/method-review.draft.json`；
+6. 生产 Runtime 机械共识并发布 Case 的 `methods_result`。
 
-suite 根 `verdict.json` 绑定九份子 verdict、模型进程数和聚合 usage；业务/oracle 失败继续，工程失败停止，无自动重试。Standalone 结论只证明对应 Fast E2E，不等同于中央 Test Flow 或 Release。
+两个角色都只提交 `evaluation_ref + verdict + reason` 根数组。正常各调用一次；某角色第一次发生
+JSON 结构或 Plan 覆盖错误时，只允许一次 repair。每角色最多两次，总上限四次，没有模型重试。
+wrapper 不改写草稿，`harness_normalized=false`。
 
-以上停止语义适用于 provider 原生串行 suite。经 `wsl/run.sh --all-scenarios` 执行时，wrapper 会在共同 plan 和确定性预检通过后同时启动九个容器，每个容器只调用本入口的一个 `--scenario`；九个容器结束后再生成 WSL 聚合 verdict。
+该路径不创建或消费 Candidate，不产生 `PARTIALLY_RESOLVED`，不下载 `result.zip`，也不读取
+Methods V1 grounding。它不运行 Client、浏览器、上传、CrossJob 或 Release。
+
+Gate 写出 `model-cert-input.json`。中央 Test Flow 用共享 validator 生成 `model-cert.json`，两者都绑定：
+
+- source snapshot 与 V8 contract manifest；
+- 同快照的 `core-verdict.json`；
+- DeepSeek provider/model/settings revision；
+- Runtime、prompt/profile/tool policy identity；
+- 每次角色调用、repair、四项 token usage 和费用；
+- 最终公开 `methods_result` 的 canonical identity。
+
+Standalone verdict 只证明这条 P1 快速认证路径，不能替代 `release.full`。

@@ -42,6 +42,10 @@ export const CLAUDE_DEEPSEEK_METHODS_PROMPT_VERSION = 3;
 export const CLAUDE_DEEPSEEK_CLIENT_PROMPT_VERSION = 3;
 export const CLAUDE_DEEPSEEK_METHODS_CALLS = 1;
 export const CLAUDE_DEEPSEEK_E2E_CALLS = 5;
+export const CLAUDE_DEEPSEEK_MODEL_CERT_NORMAL_CALLS = 2;
+export const CLAUDE_DEEPSEEK_MODEL_CERT_MAX_CALLS = 4;
+export const CLAUDE_DEEPSEEK_MODEL_CERT_SCENARIO = "multiple-rpc-timeouts";
+export const CLAUDE_DEEPSEEK_MODEL_CERT_PHASES = Object.freeze(["SPECIALIST", "REVIEWER"]);
 export const CLAUDE_DEEPSEEK_METHODS_TOKEN_LIMIT = 1_000_000;
 export const CLAUDE_DEEPSEEK_METHODS_USD_LIMIT = 10;
 export const CLAUDE_DEEPSEEK_E2E_TOKEN_LIMIT = 2_000_000;
@@ -53,25 +57,18 @@ export const CLAUDE_DEEPSEEK_CALL_WALL_SECONDS = 600;
 export const CLAUDE_DEEPSEEK_METHODS_WALL_SECONDS = 1_800;
 export const CLAUDE_DEEPSEEK_STAGE_WALL_SECONDS = 1_800;
 export const CLAUDE_DEEPSEEK_NO_PROGRESS_SECONDS = 300;
+// Kept only until the central planner switches its blocked legacy Stage to the
+// provider model-cert declaration. The runnable provider entry accepts only
+// CLAUDE_DEEPSEEK_MODEL_CERT_SCENARIO.
 export const CLAUDE_DEEPSEEK_SCENARIOS = Object.freeze([...STANDALONE_CODEX_LUNA_SCENARIOS]);
 export const CLAUDE_DEEPSEEK_REGISTRATION_ID = "rpc-timeout-methods-v1";
 export const CLAUDE_DEEPSEEK_SKILL_NAME = "diagnose-rpc-timeout";
 export const CLAUDE_DEEPSEEK_MODULE = "rpc";
-export const CLAUDE_DEEPSEEK_PUBLIC_TOOLS = Object.freeze([
-  "problem_locator_create_case",
-  "problem_locator_prepare_attachment",
-  "problem_locator_submit_supplement",
-  "problem_locator_get_case",
-  "problem_locator_resume_case",
-  "problem_locator_cancel_case",
-  "problem_locator_list_artifacts",
-]);
+export const CLAUDE_DEEPSEEK_PUBLIC_TOOLS = Object.freeze([]);
 export const CLAUDE_DEEPSEEK_E2E_PHASES = Object.freeze([
   "CLIENT", "ROUTE", "LOGPARSE", "DIAGNOSE", "REVIEW",
 ]);
-export const CLAUDE_DEEPSEEK_BASH_PROGRAMS = Object.freeze([
-  "/usr/bin/openssl", "/usr/bin/stat", "/usr/bin/curl",
-]);
+export const CLAUDE_DEEPSEEK_BASH_PROGRAMS = Object.freeze([]);
 
 export class ClaudeDeepseekContractError extends Error {
   constructor(code, message, details = {}) {
@@ -375,6 +372,78 @@ export function auditClaudeInvocations(invocations, { workflow, scenarioId = nul
   const aggregate = aggregateClaudeUsage(invocations);
   requireContract(aggregate.total_tokens <= tokenLimit && aggregate.cost_usd <= costLimit, "CLAUDE_DEEPSEEK_BUDGET_EXCEEDED", "Aggregate Claude usage exceeded the Goal cap", { token_limit: tokenLimit, cost_limit: costLimit });
   return { schema_version: 1, status: "PASS", workflow, expected_phases: phases, retry_count: 0, token_formula: "input_tokens+output_tokens+cache_creation_input_tokens+cache_read_input_tokens", aggregate };
+}
+
+export function auditClaudeModelCertInvocations(invocations) {
+  requireContract(
+    Array.isArray(invocations)
+      && invocations.length >= CLAUDE_DEEPSEEK_MODEL_CERT_NORMAL_CALLS
+      && invocations.length <= CLAUDE_DEEPSEEK_MODEL_CERT_MAX_CALLS,
+    "CLAUDE_DEEPSEEK_MODEL_CERT_CALL_COUNT_INVALID",
+    "Evidence V2 model-cert must use two normal role calls and at most one repair per role",
+    { actual: invocations?.length ?? null },
+  );
+  const attempts = invocations.map((item) => `${item?.role}:${item?.evaluation_attempt}`);
+  const legal = [
+    ["SPECIALIST:PRIMARY", "REVIEWER:PRIMARY"],
+    ["SPECIALIST:PRIMARY", "SPECIALIST:REPAIR", "REVIEWER:PRIMARY"],
+    ["SPECIALIST:PRIMARY", "REVIEWER:PRIMARY", "REVIEWER:REPAIR"],
+    ["SPECIALIST:PRIMARY", "SPECIALIST:REPAIR", "REVIEWER:PRIMARY", "REVIEWER:REPAIR"],
+  ];
+  requireContract(
+    legal.some((sequence) => canonicalJson(sequence) === canonicalJson(attempts)),
+    "CLAUDE_DEEPSEEK_MODEL_CERT_SEQUENCE_INVALID",
+    "Evidence V2 model-cert role calls are out of order or exceed the repair allowance",
+    { attempts },
+  );
+  for (const item of invocations) {
+    requireContract(
+      item.phase === item.role
+        && ["SPECIALIST", "REVIEWER"].includes(item.role)
+        && ["PRIMARY", "REPAIR"].includes(item.evaluation_attempt)
+        && item.role_call_ordinal === (item.evaluation_attempt === "PRIMARY" ? 1 : 2)
+        && item.model === CLAUDE_DEEPSEEK_MODEL
+        && item.attempt === 1
+        && item.retry === 0
+        && item.status === "PASS"
+        && item.terminal === true
+        && Number.isSafeInteger(item.turns)
+        && item.turns > 0
+        && item.turns <= CLAUDE_DEEPSEEK_E2E_MAX_TURNS
+        && item.wall_timeout_seconds === CLAUDE_DEEPSEEK_CALL_WALL_SECONDS
+        && item.workspace_audit?.status === "PASS"
+        && item.workspace_audit?.harness_normalized === false
+        && item.tool_policy?.shell === false
+        && item.tool_policy?.network === false,
+      "CLAUDE_DEEPSEEK_MODEL_CERT_INVOCATION_INVALID",
+      "Evidence V2 model-cert invocation identity or role boundary drifted",
+      { role: item?.role ?? null, evaluation_attempt: item?.evaluation_attempt ?? null },
+    );
+    normalizedUsage(item.usage);
+  }
+  const aggregate = aggregateClaudeUsage(invocations);
+  requireContract(
+    aggregate.total_tokens <= CLAUDE_DEEPSEEK_E2E_TOKEN_LIMIT
+      && aggregate.cost_usd <= CLAUDE_DEEPSEEK_E2E_USD_LIMIT,
+    "CLAUDE_DEEPSEEK_BUDGET_EXCEEDED",
+    "Evidence V2 model-cert usage exceeded its aggregate cap",
+    { token_limit: CLAUDE_DEEPSEEK_E2E_TOKEN_LIMIT, cost_limit: CLAUDE_DEEPSEEK_E2E_USD_LIMIT },
+  );
+  return Object.freeze({
+    schema_version: 1,
+    status: "PASS",
+    workflow: "evidence-v2-model-cert",
+    normal_call_count: CLAUDE_DEEPSEEK_MODEL_CERT_NORMAL_CALLS,
+    hard_call_cap: CLAUDE_DEEPSEEK_MODEL_CERT_MAX_CALLS,
+    actual_call_count: invocations.length,
+    repair_counts: {
+      specialist: attempts.includes("SPECIALIST:REPAIR") ? 1 : 0,
+      reviewer: attempts.includes("REVIEWER:REPAIR") ? 1 : 0,
+    },
+    retry_count: 0,
+    token_formula: "input_tokens+output_tokens+cache_creation_input_tokens+cache_read_input_tokens",
+    aggregate,
+  });
 }
 
 function streamToolUses(events) {
