@@ -32,7 +32,6 @@ from problem_locator.contracts import (
     TriggerType,
     VersionedRef,
     WorkspaceInputManifest,
-    canonical_json_bytes,
     validate_transition_plan_for_outcome,
     validate_outcome_for_job,
     validate_workspace_manifest_for_job,
@@ -105,29 +104,6 @@ def _source_job():
     )
 
 
-def _request_json() -> str:
-    source = _source_job()
-    fact = source.context_snapshot.user_facts[0]
-    return canonical_json_bytes(
-        {
-            "schema_version": 1,
-            "job_id": source.job_id,
-            "case_id": source.case_id,
-            "registration_id": "blind-review-test",
-            "skill_name": "blind-review-test",
-            "source_wiki_sha256": "1" * 64,
-            "user_inputs": [
-                {
-                    "name": fact.provenance.input_name,
-                    "value": fact.statement,
-                    "source_fact_id": fact.item_id,
-                }
-            ],
-            "consumed_artifacts": [],
-        }
-    ).decode("utf-8")
-
-
 def _production_graph_and_plan():
     source = _source_job()
     assert source.skill_ref is not None
@@ -196,7 +172,6 @@ def _target() -> tuple[MethodsReviewTargetV2, object, object]:
             plan_ref=plan.plan_ref,
             skill_ref=source.skill_ref,
             reviewed_state_revision=source.base_state_revision,
-            request_json=_request_json(),
         ),
         graph,
         plan,
@@ -213,7 +188,6 @@ def _specialist_handoff() -> tuple[JobOutcome, object, object]:
         evaluation_id=target.evaluation_id,
         graph=graph,
         plan=plan,
-        request_json=_request_json(),
         produced_at=base.produced_at,
     )
     assert outcome.methods_review_target == target
@@ -338,7 +312,8 @@ def test_reviewer_context_receives_only_graph_plan_and_method_cards() -> None:
     assert "blind-method" in context.body
     assert USER_FACT_VALUE in context.body
     assert "threshold_config" in context.body
-    assert job.methods_review_target.request_json == _request_json()
+    assert job.context_snapshot is not None
+    assert job.context_snapshot.user_facts == _source_job().context_snapshot.user_facts
     assert manifest.entries == []
     assert manifest.review_subject is None
 
@@ -356,6 +331,32 @@ def test_methods_target_is_server_only_and_never_falls_back_to_candidate() -> No
 
     outcome, _, _ = _specialist_handoff()
     assert outcome.methods_review_target is not None
+    without_target_value = outcome.model_dump(mode="python")
+    without_target_value.pop("methods_review_target")
+    with pytest.raises(ValueError, match="non-failed outcomes require a payload"):
+        JobOutcome.model_validate(without_target_value)
+
+    source = _source_job()
+    snapshot = snapshot_with_active(source)
+    legacy_candidate_outcome = diagnosis_outcome()
+    missing_target_request = trigger(
+        snapshot,
+        trigger_type=TriggerType.DIAGNOSIS_OUTCOME,
+        payload=DiagnosisOutcomeTriggerPayload(job_outcome=legacy_candidate_outcome),
+        bindings={JobType.REVIEW: runtime_bindings(review_job())},
+        continuation_resources=continuation(
+            incoming_outcome_id=legacy_candidate_outcome.outcome_id,
+            job=source,
+        ),
+        occurred_at=legacy_candidate_outcome.produced_at,
+    )
+    missing_target_result = DomainCoordinator().plan(
+        snapshot,
+        missing_target_request,
+    )
+    assert isinstance(missing_target_result, ApplicationError)
+    assert "requires a server-created review target" in missing_target_result.message
+
     mismatched_skill = VersionedRef(
         id=outcome.methods_review_target.skill_ref.id,
         version=outcome.methods_review_target.skill_ref.version,
@@ -365,8 +366,6 @@ def test_methods_target_is_server_only_and_never_falls_back_to_candidate() -> No
         update={"skill_ref": mismatched_skill}
     )
     mutated = outcome.model_copy(update={"methods_review_target": mutated_target})
-    source = _source_job()
-    snapshot = snapshot_with_active(source)
     request = trigger(
         snapshot,
         trigger_type=TriggerType.DIAGNOSIS_OUTCOME,

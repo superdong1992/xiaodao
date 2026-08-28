@@ -681,6 +681,13 @@ class DomainCoordinator:
         if active.diagnosis_mode is not DiagnosisMode.SPECIALIZED:
             return _validation("A DIAGNOSE Job must have a frozen diagnosis mode.")
         methods_review_target = outcome.methods_review_target
+        if methods_review_target is None and outcome.result_type not in {
+            OutcomeResultType.NEED_INPUT,
+            OutcomeResultType.NEED_ATTACHMENT,
+        }:
+            return _validation(
+                "Methods V2 specialized diagnosis requires a server-created review target after preflight."
+            )
         if methods_review_target is not None:
             if (
                 active.skill_ref is None

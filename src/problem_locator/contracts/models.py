@@ -616,20 +616,6 @@ class MethodsReviewTargetV2(ContractModel):
     ]
     skill_ref: VersionedRef
     reviewed_state_revision: PositiveInt
-    request_json: NonEmptyText
-
-    @field_validator("request_json")
-    @classmethod
-    def validate_canonical_request(cls, value: str) -> str:
-        try:
-            decoded = json.loads(value)
-        except (TypeError, ValueError) as exc:
-            raise ValueError("Methods request_json must contain JSON") from exc
-        if not isinstance(decoded, dict) or _canonical_json_bytes(decoded).decode(
-            "utf-8"
-        ) != value:
-            raise ValueError("Methods request_json must be one canonical JSON object")
-        return value
 
 
 class MethodsReviewerEvaluationV2(ContractModel):

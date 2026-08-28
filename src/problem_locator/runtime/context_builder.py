@@ -10,7 +10,6 @@ is passed here; the exact same canonical manifest bytes become the final
 from __future__ import annotations
 
 import hashlib
-import json
 from dataclasses import dataclass
 
 from problem_locator.contracts.enums import (
@@ -395,10 +394,7 @@ class ContextBuilder:
                     )
                 review_content: object = {
                     "schema_version": 2,
-                    "target": reviewer_input.target.model_dump(
-                        mode="json", exclude={"request_json"}
-                    ),
-                    "request": json.loads(reviewer_input.target.request_json),
+                    "target": reviewer_input.target.model_dump(mode="json"),
                     "evidence_graph": graph.model_dump(mode="json"),
                     "evaluation_plan": plan.model_dump(mode="json"),
                     "method_cards": [

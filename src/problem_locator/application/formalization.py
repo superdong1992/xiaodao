@@ -83,7 +83,6 @@ def build_methods_specialist_handoff_outcome_v2(
     evaluation_id: str,
     graph: MethodEvidenceGraphV2,
     plan: MethodEvaluationPlanV2,
-    request_json: str,
     produced_at: str,
 ) -> JobOutcome:
     """Create the server-only Candidate-free handoff after Specialist evaluation."""
@@ -109,7 +108,6 @@ def build_methods_specialist_handoff_outcome_v2(
         plan_ref=plan.plan_ref,
         skill_ref=source_job.skill_ref,
         reviewed_state_revision=source_job.base_state_revision,
-        request_json=request_json,
     )
     return JobOutcome(
         outcome_id=outcome_id,
