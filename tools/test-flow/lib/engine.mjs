@@ -5,6 +5,7 @@ import { executeGate } from "./actions.mjs";
 import { createCheckpoint, restoreCheckpoint } from "./checkpoint.mjs";
 import { createAttempt, finalizeAttempt } from "./evidence.mjs";
 import { EventWriter } from "./events.mjs";
+import { projectCandidateFailureDiagnostic } from "./failure-diagnostic.mjs";
 import { failureFingerprint, performanceSamples } from "./history.mjs";
 import { buildRunPlan } from "./planner.mjs";
 import { ResourceRegistry } from "./resources.mjs";
@@ -705,6 +706,7 @@ export async function runFlow(repoRoot, options) {
 
   const proofs = proofResults(plan, stageResults);
   const failure = firstFailure(stageResults);
+  const failureDiagnostic = projectCandidateFailureDiagnostic({ attemptRoot, stages: stageResults });
   const functional = plan.admission.status === "ADMITTED" ? functionalProofStatus(proofs) : "INCONCLUSIVE";
   const performance = performanceStatus(stageResults);
   const candidate = {
@@ -717,6 +719,7 @@ export async function runFlow(repoRoot, options) {
     operation_status: operationStatus === "ERROR" ? "ERROR" : plan.admission.status === "ADMITTED" ? "PASS" : "BLOCKED",
     failure_domain: failure?.failure_domain ?? (plan.admission.status === "ADMITTED" ? null : "INFRA"),
     failure_fingerprint: failure ? failureFingerprint({ stageId: failure.id, identity: failure, failureDomain: failure.failure_domain, code: failure.code }) : null,
+    failure_diagnostic: functional === "PASS" ? null : failureDiagnostic,
     proofs,
     stages: stageResults,
     gates: stageResults.flatMap((stage) => (stage.gates ?? []).map((gate) => ({ stage_id: stage.id, ...gate }))),

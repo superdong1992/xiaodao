@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xiaodao.local/schemas/test-flow/failure-diagnostic-v1.schema.json",
+  "title": "Test Flow verified Evidence V2 failure diagnostic",
+  "type": ["object", "null"],
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "certification_target",
+    "code",
+    "reason_code",
+    "reason",
+    "diagnostic_id",
+    "evaluation_ref"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "certification_target": { "enum": ["P1", "P2"] },
+    "code": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]*$" },
+    "reason_code": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]*$" },
+    "reason": { "type": "string", "minLength": 1 },
+    "diagnostic_id": { "type": "string", "pattern": "^diag-[a-f0-9]{64}$" },
+    "evaluation_ref": {
+      "oneOf": [
+        { "type": "null" },
+        { "type": "string", "pattern": "^eval-[a-f0-9]{64}$" }
+      ]
+    }
+  }
+}
