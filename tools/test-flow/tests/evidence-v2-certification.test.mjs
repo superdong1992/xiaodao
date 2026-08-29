@@ -252,7 +252,7 @@ function executeProductionBundleAttempt(
   writeReleaseRegistration(registrationRoot, sourceRoot, { includeCompleteTemplates });
   const script = runtimeScript ?? path.join(REPO_ROOT, "tools", "test-flow", "quick-validation", "codex-luna", "runtime", "macos_codex_luna_model_cert_driver.py");
   const receiptPath = path.join(evidenceRoot, "runtime-receipt.json");
-  const bootstrap = "import runpy,sys,types; mark=types.SimpleNamespace(parametrize=lambda *a,**k:(lambda f:f)); sys.modules['pytest']=types.SimpleNamespace(fixture=lambda f:f,mark=mark); script=sys.argv[1]; sys.argv=sys.argv[1:]; runpy.run_path(script,run_name='__main__')";
+  const bootstrap = "import importlib.util,runpy,sys,types; mark=types.SimpleNamespace(parametrize=lambda *a,**k:(lambda f:f)); sys.modules['pytest']=types.SimpleNamespace(fixture=lambda f:f,mark=mark); importlib.util.find_spec('problem_locator') is None or __import__('problem_locator.runtime.methods_evidence_v2'); script=sys.argv[1]; sys.argv=sys.argv[1:]; runpy.run_path(script,run_name='__main__')";
   const python = pythonRuntime();
   const result = spawnSync(python.command, [
     ...python.prefix, "-c", bootstrap,
@@ -467,6 +467,24 @@ test("production Graph mechanically proves the explicit resolved Release verdict
   assert.equal(receipt.summary.evaluation_count, 3);
 });
 
+test("production event grouping keeps request 501 and decoy 502 distinct", () => {
+  const production = productionBundle();
+  const receipt = buildScenarioReceipt({
+    evidenceRoot: production.evidenceRoot,
+    runtimeReceipt: production.runtimeReceipt,
+  });
+  assert.equal(receipt.status, "PASS");
+});
+
+test("production event grouping keeps both non-target API calls distinct", () => {
+  const production = productionBundle();
+  const receipt = buildScenarioReceipt({
+    evidenceRoot: production.evidenceRoot,
+    runtimeReceipt: production.runtimeReceipt,
+  });
+  assert.equal(receipt.status, "PASS");
+});
+
 test("production loader rejects a marker-only generated method card", () => {
   const attempt = executeProductionBundleAttempt(REPO_ROOT, {
     includeCompleteTemplates: false,
@@ -496,6 +514,52 @@ test("CrossJob action accepts the same production Graph semantic proof as provid
     fs.rmSync(value.attemptRoot, { recursive: true, force: true });
   }
 });
+
+function assertSharedOracleRejectsProductionMutation(mutation, baselineSummary) {
+  const value = executeMutatedProduction(mutation.change);
+  let crossJobValue = null;
+  try {
+    mutation.check?.(value.bundle.evidenceRoot);
+    let methodsSummary = baselineSummary;
+    let genericPassed = false;
+    try {
+      methodsSummary = genericMethodsSummary({
+        sourceRoot: value.sourceRoot,
+        evidenceRoot: value.bundle.evidenceRoot,
+      });
+      genericPassed = true;
+    } catch {
+      // Missing frozen identities may be rejected by the upstream fixture
+      // gate before the shared semantic oracle evaluates method conditions.
+    }
+    if (mutation.genericMustPass) assert.equal(genericPassed, true);
+    crossJobValue = crossJobOracleFixture({
+      sourceRoot: value.sourceRoot,
+      bundle: value.bundle,
+      methodsSummary,
+    });
+    assert.equal(
+      validMethodsV2OracleEvidence(
+        crossJobValue.context,
+        crossJobValue.receipt,
+        crossJobValue.generatedSkill,
+      ),
+      false,
+    );
+    assert.throws(
+      () => buildScenarioReceipt({
+        sourceRoot: value.sourceRoot,
+        evidenceRoot: value.bundle.evidenceRoot,
+        runtimeReceipt: value.bundle.runtimeReceipt,
+      }),
+      (error) => error.code === mutation.code,
+    );
+  } finally {
+    if (crossJobValue !== null) fs.rmSync(crossJobValue.attemptRoot, { recursive: true, force: true });
+    fs.rmSync(value.bundle.root, { recursive: true, force: true });
+    fs.rmSync(value.sourceRoot, { recursive: true, force: true });
+  }
+}
 
 test("provider and CrossJob shared oracle reject raw-log mutations after a fresh production Runtime scan", () => {
   const mutations = [
@@ -587,82 +651,44 @@ test("provider and CrossJob shared oracle reject raw-log mutations after a fresh
       },
       code: "RELEASE_CASE_EVIDENCE_NOT_UNIQUE",
     },
-    {
-      change: (caseRoot) => {
-        const target = path.join(caseRoot, "scenarios", "multiple-rpc-timeouts", "server.log");
-        const lines = fs.readFileSync(target, "utf8").split(/\r?\n/);
-        const first = lines.find((line) => line.includes("start_us=10000000"));
-        const secondIndex = lines.findIndex((line) => line.includes("start_us=20000000"));
-        assert.ok(first && secondIndex >= 0);
-        lines[secondIndex] = first;
-        fs.writeFileSync(target, lines.join("\n"));
-      },
-      check: (evidenceRoot) => {
-        const methods = JSON.parse(fs.readFileSync(path.join(evidenceRoot, "methods.json"), "utf8"));
-        const apiMethodId = methods.methods.find((method) => method.priority === 1).id;
-        const graph = JSON.parse(fs.readFileSync(path.join(evidenceRoot, "methods-evidence-graph-v2.json"), "utf8"));
-        const apiHitRefs = new Set(graph.hits.filter((hit) => (
-          hit.method_id === apiMethodId && hit.marker === "API_COMPLETE service="
-        )).map((hit) => hit.hit_ref));
-        const apiEvents = graph.events.filter((event) => (
-          event.method_id === apiMethodId && event.evidence_hit_refs.some((ref) => apiHitRefs.has(ref))
-        ));
-        assert.equal(apiHitRefs.size, 2);
-        assert.equal(apiEvents.length, 1);
-      },
-      code: "RELEASE_CASE_EVIDENCE_NOT_UNIQUE",
-    },
   ];
   const baselineSummary = buildScenarioReceipt({
     evidenceRoot: productionBundle().evidenceRoot,
     runtimeReceipt: productionBundle().runtimeReceipt,
   }).summary;
-  for (const mutation of mutations) {
-    const value = executeMutatedProduction(mutation.change);
-    let crossJobValue = null;
-    try {
-      mutation.check?.(value.bundle.evidenceRoot);
-      let methodsSummary = baselineSummary;
-      let genericPassed = false;
-      try {
-        methodsSummary = genericMethodsSummary({
-          sourceRoot: value.sourceRoot,
-          evidenceRoot: value.bundle.evidenceRoot,
-        });
-        genericPassed = true;
-      } catch {
-        // The shared semantic oracle is stricter than the generic structural
-        // oracle for timeout and queue-threshold mutations.  Missing frozen
-        // identities may already make the generic oracle fail.
-      }
-      if (mutation.genericMustPass) assert.equal(genericPassed, true);
-      crossJobValue = crossJobOracleFixture({
-        sourceRoot: value.sourceRoot,
-        bundle: value.bundle,
-        methodsSummary,
-      });
-      assert.equal(
-        validMethodsV2OracleEvidence(
-          crossJobValue.context,
-          crossJobValue.receipt,
-          crossJobValue.generatedSkill,
-        ),
-        false,
-      );
-      assert.throws(
-        () => buildScenarioReceipt({
-          sourceRoot: value.sourceRoot,
-          evidenceRoot: value.bundle.evidenceRoot,
-          runtimeReceipt: value.bundle.runtimeReceipt,
-        }),
-        (error) => error.code === mutation.code,
-      );
-    } finally {
-      if (crossJobValue !== null) fs.rmSync(crossJobValue.attemptRoot, { recursive: true, force: true });
-      fs.rmSync(value.bundle.root, { recursive: true, force: true });
-      fs.rmSync(value.sourceRoot, { recursive: true, force: true });
-    }
-  }
+  for (const mutation of mutations) assertSharedOracleRejectsProductionMutation(mutation, baselineSummary);
+});
+
+test("duplicate API raw log is rejected by the upstream frozen-identity gate", () => {
+  const baselineSummary = buildScenarioReceipt({
+    evidenceRoot: productionBundle().evidenceRoot,
+    runtimeReceipt: productionBundle().runtimeReceipt,
+  }).summary;
+  assertSharedOracleRejectsProductionMutation({
+    change: (caseRoot) => {
+      const target = path.join(caseRoot, "scenarios", "multiple-rpc-timeouts", "server.log");
+      const lines = fs.readFileSync(target, "utf8").split(/\r?\n/);
+      const first = lines.find((line) => line.includes("start_us=10000000"));
+      const secondIndex = lines.findIndex((line) => line.includes("start_us=20000000"));
+      assert.ok(first && secondIndex >= 0);
+      lines[secondIndex] = first;
+      fs.writeFileSync(target, lines.join("\n"));
+    },
+    check: (evidenceRoot) => {
+      const methods = JSON.parse(fs.readFileSync(path.join(evidenceRoot, "methods.json"), "utf8"));
+      const apiMethodId = methods.methods.find((method) => method.priority === 1).id;
+      const graph = JSON.parse(fs.readFileSync(path.join(evidenceRoot, "methods-evidence-graph-v2.json"), "utf8"));
+      const apiHitRefs = new Set(graph.hits.filter((hit) => (
+        hit.method_id === apiMethodId && hit.marker === "API_COMPLETE service="
+      )).map((hit) => hit.hit_ref));
+      const apiEvents = graph.events.filter((event) => (
+        event.method_id === apiMethodId && event.evidence_hit_refs.some((ref) => apiHitRefs.has(ref))
+      ));
+      assert.equal(apiHitRefs.size, 2);
+      assert.equal(apiEvents.length, 1);
+    },
+    code: "RELEASE_CASE_EVIDENCE_NOT_UNIQUE",
+  }, baselineSummary);
 });
 
 test("scenario oracle rejects a generated package that leaves timeout evidence shared-only", () => {

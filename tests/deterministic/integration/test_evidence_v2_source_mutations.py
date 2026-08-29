@@ -25,9 +25,59 @@ class SourceMutation:
     expected_failures: int
     source_root: str = "src"
     environment_key: str | None = None
+    runner: str = "pytest"
+    expected_error_code: str | None = None
 
 
 MUTATIONS = (
+    SourceMutation(
+        name="late-response-request-event-grouping",
+        source_path="problem_locator/runtime/methods_evidence_v2.py",
+        original=(
+            "        group_key = (hit.method_id, identity_tokens, unkeyed_hit_ref)\n"
+        ),
+        replacement=(
+            "        group_key = (\n"
+            "            hit.method_id,\n"
+            "            (\n"
+            "                (\"request_id=ignored\",)\n"
+            "                if hit.marker == \"LATE_RESPONSE service=\"\n"
+            "                else identity_tokens\n"
+            "            ),\n"
+            "            unkeyed_hit_ref,\n"
+            "        )\n"
+        ),
+        selector=(
+            "production event grouping keeps request 501 and decoy 502 distinct"
+        ),
+        expected_failures=1,
+        runner="node",
+        expected_error_code="SCENARIO_ORACLE_REQUEST_EVENTS_MERGED",
+    ),
+    SourceMutation(
+        name="api-complete-event-grouping",
+        source_path="problem_locator/runtime/methods_evidence_v2.py",
+        original=(
+            "        group_key = (hit.method_id, identity_tokens, unkeyed_hit_ref)\n"
+        ),
+        replacement=(
+            "        group_key = (\n"
+            "            hit.method_id,\n"
+            "            (\n"
+            "                (\"service=svc_inventory\", \"api=List\")\n"
+            "                if hit.marker == \"API_COMPLETE service=\"\n"
+            "                else identity_tokens\n"
+            "            ),\n"
+            "            unkeyed_hit_ref,\n"
+            "        )\n"
+        ),
+        selector=(
+            "production event grouping keeps both non-target API calls distinct"
+        ),
+        expected_failures=1,
+        runner="node",
+        expected_error_code="SCENARIO_ORACLE_API_EVENTS_MERGED",
+    ),
     SourceMutation(
         name="cross-method-marker-index",
         source_path="problem_locator/runtime/methods_evidence_v2.py",
@@ -230,12 +280,6 @@ def _run_exact_regression_test(
     overlay_environment: dict[str, str],
     mutation: SourceMutation,
 ) -> subprocess.CompletedProcess[str]:
-    pytest_config = tmp_path / "pytest.ini"
-    pytest_config.write_text(
-        "[pytest]\naddopts = --strict-config --strict-markers\n",
-        encoding="utf-8",
-        newline="\n",
-    )
     environment = os.environ.copy()
     python_path = [str(overlay_src)]
     if existing := environment.get("PYTHONPATH"):
@@ -249,6 +293,42 @@ def _run_exact_regression_test(
             "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
             **overlay_environment,
         }
+    )
+    if mutation.runner == "node":
+        node_entry = environment.get("TEST_FLOW_NODE") or shutil.which(
+            "node",
+            path=environment.get("PATH"),
+        )
+        assert node_entry is not None, "Node.js is required for source-overlay tests"
+        environment["TEST_FLOW_QUICK_PYTHON"] = sys.executable
+        return subprocess.run(
+            [
+                node_entry,
+                "--test",
+                "--test-reporter=tap",
+                "--test-name-pattern",
+                f"^{re.escape(mutation.selector)}$",
+                str(
+                    REPO_ROOT
+                    / "tools/test-flow/tests/evidence-v2-certification.test.mjs"
+                ),
+            ],
+            cwd=REPO_ROOT,
+            env=environment,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=180,
+            check=False,
+        )
+
+    assert mutation.runner == "pytest", f"unknown mutation runner: {mutation.runner}"
+    pytest_config = tmp_path / "pytest.ini"
+    pytest_config.write_text(
+        "[pytest]\naddopts = --strict-config --strict-markers\n",
+        encoding="utf-8",
+        newline="\n",
     )
     return subprocess.run(
         [
@@ -292,6 +372,17 @@ def test_source_overlay_mutant_is_killed_by_exact_regression_test(
         mutation=mutation,
     )
     output = f"{completed.stdout}\n{completed.stderr}".replace("\\", "/")
+    if mutation.runner == "node":
+        assert completed.returncode == 1, output
+        assert mutation.expected_failures == 1
+        assert mutation.expected_error_code is not None
+        assert mutation.expected_error_code in output, output
+        assert mutation.selector in output, output
+        assert "# fail 1" in output, output
+        assert "MODULE_NOT_FOUND" not in output, output
+        assert "SyntaxError" not in output, output
+        return
+
     failed_lines = re.findall(r"(?m)^FAILED\s+(.+)$", output)
     target_test_name = mutation.selector.split("::", 1)[1]
 
