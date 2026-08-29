@@ -305,6 +305,27 @@ function safeOutboundReceipt(message) {
   };
 }
 
+function terminalUsageObservation(messages) {
+  const update = [...messages].reverse().find((message) => (
+    message?.method === "thread/tokenUsage/updated"
+  ));
+  const total = update?.params?.tokenUsage?.total;
+  const fields = [
+    ["input_tokens", "inputTokens"],
+    ["cached_input_tokens", "cachedInputTokens"],
+    ["cache_write_input_tokens", "cacheWriteInputTokens"],
+    ["output_tokens", "outputTokens"],
+    ["reasoning_output_tokens", "reasoningOutputTokens"],
+    ["total_tokens", "totalTokens"],
+  ];
+  if (!isPlainObject(total)
+    || fields.some(([, source]) => !Number.isSafeInteger(total[source]) || total[source] < 0)
+    || total.totalTokens !== total.inputTokens + total.outputTokens
+    || total.cachedInputTokens > total.inputTokens
+    || total.reasoningOutputTokens > total.outputTokens) return null;
+  return Object.fromEntries(fields.map(([target, source]) => [target, total[source]]));
+}
+
 function terminateProcessGroup(child) {
   if (child.exitCode !== null || child.signalCode !== null) return;
   try {
@@ -767,6 +788,10 @@ export async function runCodexLunaAppServerCall({
   clearTimeout(noProgressTimer);
   if (stdoutPending.trim().length > 0 && !fatalError) fatalError = new CodexLunaAppServerRuntimeError("CODEX_LUNA_APP_SERVER_JSONL_TRUNCATED", "Codex app-server ended with a partial JSONL frame");
   if (fatalError) {
+    const observedUsage = terminalUsageObservation(persistedInbound);
+    if (observedUsage !== null) {
+      fatalError.details = { ...(fatalError.details ?? {}), usage: observedUsage };
+    }
     if (["CODEX_LUNA_APP_SERVER_WALL_TIMEOUT", "CODEX_LUNA_APP_SERVER_NO_PROGRESS_TIMEOUT", "CODEX_LUNA_APP_SERVER_ERROR_NOTIFICATION", "CODEX_LUNA_APP_SERVER_RAW_SHELL_FUNCTION_REJECTED", "CODEX_LUNA_APP_SERVER_COMMAND_WORKSPACE_INVALID", "CODEX_LUNA_APP_SERVER_MCP_CALL_LIMIT"].includes(fatalError.code) && persistedInbound.length > 0) {
       persistTranscript(tracePath, persistedInbound);
     }

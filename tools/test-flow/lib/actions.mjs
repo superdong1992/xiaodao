@@ -3169,7 +3169,9 @@ function materializeMacosCodexInputs({ scratchRoot, codexEntry, codexAuth, plann
 
 function macosCodexInvocationProjection(invocation, hardCaps, invocationClass) {
   const workflow = `${invocation.role}:${invocation.attempt}`;
-  const usage = normalizeCodexUsage(invocation.usage);
+  let usage = null;
+  try { usage = normalizeCodexUsage(invocation.usage); } catch {}
+  const failed = invocation.status === "FAIL";
   return {
     schema_version: 3,
     invocation_id: invocation.invocation_id,
@@ -3178,11 +3180,11 @@ function macosCodexInvocationProjection(invocation, hardCaps, invocationClass) {
     effective_model: invocation.model,
     effective_reasoning_effort: invocation.reasoning_effort,
     effective_caps: hardCaps,
-    usage_complete: invocation.terminal === true,
-    usage: codexUsage(usage),
+    usage_complete: invocation.terminal === true && usage !== null,
+    usage: usage === null ? undefined : codexUsage(usage),
     turns: 1,
-    terminal: { subtype: "success", is_error: false, event: "turn.completed", thread_id: invocation.thread_id ?? null },
-    wrapper_outcome: { schema_version: 1, status: invocation.status, code: null },
+    terminal: { subtype: failed ? "error" : "success", is_error: failed, event: failed ? "turn.failed" : "turn.completed", thread_id: invocation.thread_id ?? null },
+    wrapper_outcome: { schema_version: 1, status: invocation.status, code: invocation.failure_code ?? null },
     hard_cap_enforcement: {
       calls: "exact-no-retry",
       wall: "wrapper-process-watchdog",
@@ -3300,6 +3302,8 @@ async function runMacosCodexLunaGate(context, stage, { workflow }) {
 
 function claudeDeepseekInvocationProjection(invocation, hardCaps, invocationClass) {
   const attempt = invocation.evaluation_attempt ?? invocation.attempt;
+  const failed = invocation.status === "FAIL";
+  const usageComplete = invocation.terminal === true && isCompleteUsage(invocation.usage);
   return {
     schema_version: 3,
     invocation_id: invocation.invocation_id,
@@ -3307,12 +3311,12 @@ function claudeDeepseekInvocationProjection(invocation, hardCaps, invocationClas
     workflow: `${invocation.role}:${attempt}`,
     effective_model: invocation.model,
     effective_caps: hardCaps,
-    usage_complete: invocation.terminal === true,
-    usage: invocation.usage,
+    usage_complete: usageComplete,
+    usage: usageComplete ? invocation.usage : undefined,
     environment_policy: invocation.environment_policy,
     turns: invocation.turns,
-    terminal: { subtype: "success", is_error: false },
-    wrapper_outcome: { schema_version: 1, status: invocation.status, code: null },
+    terminal: { subtype: failed ? "error" : "success", is_error: failed },
+    wrapper_outcome: { schema_version: 1, status: invocation.status, code: invocation.failure_code ?? null },
     hard_cap_enforcement: {
       turns: "claude-cli",
       cost_usd: "claude-cli",
@@ -3406,7 +3410,7 @@ function providerInvocationAttempt(invocation) {
 
 function validProviderInvocationReceipt(invocation, expected, provider) {
   if (invocation?.schema_version !== 1
-    || invocation.status !== "PASS"
+    || !["PASS", "FAIL"].includes(invocation.status)
     || invocation.terminal !== true
     || invocation.role !== expected.role
     || providerInvocationAttempt(invocation) !== expected.attempt
@@ -3414,22 +3418,26 @@ function validProviderInvocationReceipt(invocation, expected, provider) {
     || invocation.invocation_id.length === 0) return false;
   if (provider === "codex-luna") {
     try {
-      normalizeCodexUsage(invocation.usage);
-      return invocation.provider === "openai-codex-app-server"
+      if (invocation.usage !== null && invocation.usage !== undefined) normalizeCodexUsage(invocation.usage);
+      return (invocation.status === "FAIL" || (invocation.usage !== null && invocation.usage !== undefined))
+        && invocation.provider === "openai-codex-app-server"
         && invocation.attempt === expected.attempt
         && invocation.repair === (expected.attempt === "REPAIR");
     } catch {
       return false;
     }
   }
-  return invocation.evaluation_attempt === expected.attempt && isCompleteUsage(invocation.usage);
+  return invocation.evaluation_attempt === expected.attempt
+    && (invocation.status === "FAIL" || isCompleteUsage(invocation.usage))
+    && (invocation.usage === null || invocation.usage === undefined || isCompleteUsage(invocation.usage));
 }
 
 function validProviderInvocationSequence(invocations) {
   if (!Array.isArray(invocations) || invocations.length === 0 || invocations.length > PROVIDER_ROLE_RECEIPTS.length) return false;
   if (new Set(invocations.map((item) => item.invocation_id)).size !== invocations.length) return false;
   const sequence = invocations.map((item) => `${item.role}:${providerInvocationAttempt(item)}`).join(",");
-  return PROVIDER_ROLE_SEQUENCE_PREFIXES.has(sequence);
+  return PROVIDER_ROLE_SEQUENCE_PREFIXES.has(sequence)
+    && invocations.slice(0, -1).every((item) => item.status === "PASS");
 }
 
 function readJsonOrNull(filePath) {
@@ -3458,10 +3466,14 @@ function readProviderRoleReceipts(usageRoot, provider) {
 
 function modelUsageAggregate(outputRoot) {
   const receiptPath = path.join(outputRoot, "model-usage.json");
-  if (!fs.existsSync(receiptPath)) return { present: false, usage: null };
+  if (!fs.existsSync(receiptPath)) return { present: false, complete: false, usage: null };
   const receipt = readJsonOrNull(receiptPath);
   const aggregate = receipt?.aggregate;
-  return { present: true, usage: isCompleteUsage(aggregate) ? aggregate : null };
+  return {
+    present: true,
+    complete: receipt?.usage_complete === true,
+    usage: isCompleteUsage(aggregate) ? aggregate : null,
+  };
 }
 
 export function collectProviderFailureReceipts({ provider, outputRoot }) {
@@ -3529,10 +3541,12 @@ export function collectProviderFailureObservability({
 }) {
   const projection = provider === "codex-luna" ? macosCodexInvocationProjection : claudeDeepseekInvocationProjection;
   let rawInvocations = [];
+  let explicitZeroCallLedger = false;
   const ledgerPath = path.join(outputRoot, "model-invocations.json");
   if (fs.existsSync(ledgerPath)) {
     const ledger = readJsonOrNull(ledgerPath);
     if (validEvidenceV2ProviderInvocationLedger(planStage, ledger)) rawInvocations = ledger.invocations;
+    else if (ledger?.status === "FAIL" && Array.isArray(ledger.invocations) && ledger.invocations.length === 0) explicitZeroCallLedger = true;
   }
   if (rawInvocations.length === 0) rawInvocations = readProviderRoleReceipts(usageRoot, provider);
   const invocations = rawInvocations.map((invocation) => projection(invocation, planStage.hard_caps, invocationClass));
@@ -3547,7 +3561,13 @@ export function collectProviderFailureObservability({
       usage_complete: aggregate.present && providerAggregateMatches(provider, aggregate.usage, projectedUsage),
     };
   }
-  if (aggregate.usage !== null) return { invocations: [], usage: aggregate.usage, usage_complete: false };
+  if (aggregate.usage !== null) {
+    return {
+      invocations: [],
+      usage: aggregate.usage,
+      usage_complete: explicitZeroCallLedger && aggregate.complete,
+    };
+  }
   return {
     invocations: [],
     usage: isCompleteUsage(result?.usage) ? result.usage : undefined,

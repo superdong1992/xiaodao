@@ -67,6 +67,35 @@ function parseJsonLines(bytes) {
   catch { fail("CLAUDE_DEEPSEEK_STREAM_JSON_INVALID", "Claude stdout is not valid stream-json JSONL"); }
 }
 
+function terminalObservation(bytes) {
+  let events;
+  try {
+    events = bytes.toString("utf8").split(/\r?\n/u).filter(Boolean).map((line) => JSON.parse(line));
+  } catch {
+    return null;
+  }
+  const terminal = events.at(-1);
+  if (terminal?.type !== "result") return null;
+  const fields = ["input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"];
+  const costUsd = terminal.total_cost_usd ?? terminal.cost_usd;
+  const complete = fields.every((field) => Number.isSafeInteger(terminal.usage?.[field]) && terminal.usage[field] >= 0)
+    && Number.isFinite(costUsd)
+    && costUsd >= 0;
+  const usage = complete ? {
+    schema_version: 1,
+    ...Object.fromEntries(fields.map((field) => [field, terminal.usage[field]])),
+    total_tokens: fields.reduce((sum, field) => sum + terminal.usage[field], 0),
+    cost_usd: Math.round(costUsd * 1_000_000) / 1_000_000,
+  } : null;
+  return {
+    terminal: true,
+    subtype: terminal.subtype ?? null,
+    is_error: terminal.is_error === true,
+    turns: Number.isSafeInteger(terminal.num_turns) ? terminal.num_turns : 0,
+    usage,
+  };
+}
+
 function walkToolBlocks(events, { allowToolErrors = false } = {}) {
   const uses = new Map();
   const ordered = [];
@@ -197,11 +226,18 @@ export async function runClaudeProcess(options, { ambient = process.env, onProgr
   const stderrBytes = Buffer.concat(stderr);
   if (options.tracePath) writeNew(options.tracePath, stdoutBytes);
   if (options.stderrPath) writeNew(options.stderrPath, stderrBytes);
-  requireProcess(!timedOut, "CLAUDE_DEEPSEEK_PROCESS_TIMEOUT", "Claude process exceeded its wall timeout");
-  requireProcess(!noProgressTimedOut, "CLAUDE_DEEPSEEK_PROCESS_NO_PROGRESS", `Claude process made no semantic stream progress for ${options.noProgressSeconds} seconds`);
-  requireProcess(exit.code === 0 && exit.signal === null, "CLAUDE_DEEPSEEK_PROCESS_FAILED", "Claude process exited unsuccessfully", { exit_code: exit.code, signal: exit.signal });
+  const observedTerminal = terminalObservation(stdoutBytes);
+  if (timedOut) fail("CLAUDE_DEEPSEEK_PROCESS_TIMEOUT", "Claude process exceeded its wall timeout", { terminal: observedTerminal });
+  if (noProgressTimedOut) fail("CLAUDE_DEEPSEEK_PROCESS_NO_PROGRESS", `Claude process made no semantic stream progress for ${options.noProgressSeconds} seconds`, { terminal: observedTerminal });
+  if (exit.code !== 0 || exit.signal !== null) fail("CLAUDE_DEEPSEEK_PROCESS_FAILED", "Claude process exited unsuccessfully", { exit_code: exit.code, signal: exit.signal, terminal: observedTerminal });
   const events = parseJsonLines(stdoutBytes);
-  const stream = auditClaudeStream(events, { phase: options.phase, allowedTools: [...options.tools, ...options.allowedTools, ...(options.auditOnlyAllowedTools ?? [])], maxTurns: options.maxTurns, wallTimeoutSeconds: options.wallTimeoutSeconds });
+  let stream;
+  try {
+    stream = auditClaudeStream(events, { phase: options.phase, allowedTools: [...options.tools, ...options.allowedTools, ...(options.auditOnlyAllowedTools ?? [])], maxTurns: options.maxTurns, wallTimeoutSeconds: options.wallTimeoutSeconds });
+  } catch (error) {
+    error.details = { ...(error?.details ?? {}), terminal: observedTerminal };
+    throw error;
+  }
   const projected = projectClaudeTools(events, { allowToolErrors: options.allowToolErrors === true });
   const receipt = {
     schema_version: 1,

@@ -8,6 +8,7 @@ import {
   CLAUDE_DEEPSEEK_CALL_WALL_SECONDS,
   CLAUDE_DEEPSEEK_E2E_MAX_TURNS,
   CLAUDE_DEEPSEEK_E2E_USD_LIMIT,
+  CLAUDE_DEEPSEEK_MODEL,
   CLAUDE_DEEPSEEK_NO_PROGRESS_SECONDS,
 } from "./claude-deepseek-contract.mjs";
 import { runClaudeProcess } from "./claude-deepseek-process.mjs";
@@ -235,51 +236,92 @@ export async function runServiceInvocation(values, {
   fs.mkdirSync(traceRoot, { recursive: true, mode: 0o700 });
   const progressPath = path.join(traceRoot, `${key}.progress`);
   fs.writeFileSync(progressPath, "", { encoding: "utf8", mode: 0o600, flag: "wx" });
-  const result = await runClaude({
-    claudeEntry: path.resolve(values["claude-entry"]),
-    settings: path.resolve(values.settings),
-    cwd: workspaceRoot,
-    prompt,
-    phase: parsed.role,
-    invocationId: `${values["run-id"]}:${key}`,
-    tools: policy.tools,
-    allowedTools: policy.allowed_tools,
-    disallowedTools: ["Bash", "Glob", "Grep", "Skill"],
-    auditOnlyAllowedTools: ["Bash", "Glob", "Grep", "Skill"],
-    maxTurns: CLAUDE_DEEPSEEK_E2E_MAX_TURNS,
-    maxBudgetUsd: CLAUDE_DEEPSEEK_E2E_USD_LIMIT / 4,
-    wallTimeoutSeconds: CLAUDE_DEEPSEEK_CALL_WALL_SECONDS,
-    noProgressSeconds: CLAUDE_DEEPSEEK_NO_PROGRESS_SECONDS,
-    tracePath: path.join(traceRoot, `${key}.stream-json.ndjson`),
-    stderrPath: path.join(traceRoot, `${key}.stderr.txt`),
-    environment: {
-      configRoot: path.resolve(values["config-root"]),
-      ...privateEnvironment(claim),
-    },
-  }, { ambient, onProgress: () => {
-    fs.appendFileSync(progressPath, ".\n", { encoding: "utf8" });
-    stdout.write(`TEST_FLOW_PROGRESS stage.progress claude-deepseek ${key}\n`);
-  } });
-  requireWrapper(result.skills.length === 0 && result.bash.length === 0 && result.mcp.length === 0, "CLAUDE_DEEPSEEK_ROLE_NON_FILE_TOOL", "Evidence V2 role attempted a Skill, shell, or MCP call");
-  requireWrapper(result.denied.every((item) => item.executed === false), "CLAUDE_DEEPSEEK_ROLE_DENIED_EXECUTION", "A denied Evidence V2 role tool executed");
-  const workspaceAudit = auditRoleWorkspace({ workspaceRoot, roleSpec, processResult: result });
-  const receipt = Object.freeze({
-    ...result.receipt,
-    role: parsed.role,
-    evaluation_attempt: parsed.attempt,
-    role_call_ordinal: parsed.attempt === "PRIMARY" ? 1 : 2,
-    prompt: {
-      sha256: sha256Bytes(prompt),
-      utf8_size: Buffer.byteLength(prompt, "utf8"),
-    },
-    tool_policy: policy,
-    workspace_audit: workspaceAudit,
-  });
-  writeJsonNew(path.join(path.resolve(values["usage-root"]), `${key}.json`), receipt);
-  writeJsonNew(path.join(traceRoot, `${key}.receipt.json`), receipt);
-  const terminal = result.events.at(-1);
-  stdout.write(`${String(terminal?.result ?? "")}\n`);
-  return receipt;
+  const startedAtUtc = new Date().toISOString();
+  let result = null;
+  try {
+    result = await runClaude({
+      claudeEntry: path.resolve(values["claude-entry"]),
+      settings: path.resolve(values.settings),
+      cwd: workspaceRoot,
+      prompt,
+      phase: parsed.role,
+      invocationId: `${values["run-id"]}:${key}`,
+      tools: policy.tools,
+      allowedTools: policy.allowed_tools,
+      disallowedTools: ["Bash", "Glob", "Grep", "Skill"],
+      auditOnlyAllowedTools: ["Bash", "Glob", "Grep", "Skill"],
+      maxTurns: CLAUDE_DEEPSEEK_E2E_MAX_TURNS,
+      maxBudgetUsd: CLAUDE_DEEPSEEK_E2E_USD_LIMIT / 4,
+      wallTimeoutSeconds: CLAUDE_DEEPSEEK_CALL_WALL_SECONDS,
+      noProgressSeconds: CLAUDE_DEEPSEEK_NO_PROGRESS_SECONDS,
+      tracePath: path.join(traceRoot, `${key}.stream-json.ndjson`),
+      stderrPath: path.join(traceRoot, `${key}.stderr.txt`),
+      environment: {
+        configRoot: path.resolve(values["config-root"]),
+        ...privateEnvironment(claim),
+      },
+    }, { ambient, onProgress: () => {
+      fs.appendFileSync(progressPath, ".\n", { encoding: "utf8" });
+      stdout.write(`TEST_FLOW_PROGRESS stage.progress claude-deepseek ${key}\n`);
+    } });
+    requireWrapper(result.skills.length === 0 && result.bash.length === 0 && result.mcp.length === 0, "CLAUDE_DEEPSEEK_ROLE_NON_FILE_TOOL", "Evidence V2 role attempted a Skill, shell, or MCP call");
+    requireWrapper(result.denied.every((item) => item.executed === false), "CLAUDE_DEEPSEEK_ROLE_DENIED_EXECUTION", "A denied Evidence V2 role tool executed");
+    const workspaceAudit = auditRoleWorkspace({ workspaceRoot, roleSpec, processResult: result });
+    const receipt = Object.freeze({
+      ...result.receipt,
+      workflow: `${parsed.role}:${parsed.attempt}`,
+      role: parsed.role,
+      evaluation_attempt: parsed.attempt,
+      role_call_ordinal: parsed.attempt === "PRIMARY" ? 1 : 2,
+      prompt: {
+        sha256: sha256Bytes(prompt),
+        utf8_size: Buffer.byteLength(prompt, "utf8"),
+      },
+      tool_policy: policy,
+      workspace_audit: workspaceAudit,
+      usage_complete: true,
+      failure_code: null,
+    });
+    writeJsonNew(path.join(path.resolve(values["usage-root"]), `${key}.json`), receipt);
+    writeJsonNew(path.join(traceRoot, `${key}.receipt.json`), receipt);
+    const terminal = result.events.at(-1);
+    stdout.write(`${String(terminal?.result ?? "")}\n`);
+    return receipt;
+  } catch (error) {
+    const observed = error?.details?.terminal ?? null;
+    const usage = result?.receipt?.usage ?? observed?.usage ?? null;
+    const receipt = Object.freeze({
+      schema_version: 1,
+      invocation_id: `${values["run-id"]}:${key}`,
+      phase: parsed.role,
+      model: result?.receipt?.model ?? CLAUDE_DEEPSEEK_MODEL,
+      attempt: 1,
+      retry: 0,
+      status: "FAIL",
+      terminal: true,
+      started_at_utc: result?.receipt?.started_at_utc ?? startedAtUtc,
+      finished_at_utc: new Date().toISOString(),
+      turns: result?.receipt?.turns ?? observed?.turns ?? 0,
+      wall_timeout_seconds: CLAUDE_DEEPSEEK_CALL_WALL_SECONDS,
+      workflow: `${parsed.role}:${parsed.attempt}`,
+      role: parsed.role,
+      evaluation_attempt: parsed.attempt,
+      role_call_ordinal: parsed.attempt === "PRIMARY" ? 1 : 2,
+      prompt: {
+        sha256: sha256Bytes(prompt),
+        utf8_size: Buffer.byteLength(prompt, "utf8"),
+      },
+      tool_policy: policy,
+      workspace_audit: null,
+      environment_policy: result?.receipt?.environment_policy ?? null,
+      usage_complete: usage !== null,
+      usage,
+      failure_code: typeof error?.code === "string" ? error.code : "CLAUDE_DEEPSEEK_MODEL_CALL_FAILED",
+    });
+    writeJsonNew(path.join(path.resolve(values["usage-root"]), `${key}.json`), receipt);
+    writeJsonNew(path.join(traceRoot, `${key}.receipt.json`), receipt);
+    throw error;
+  }
 }
 
 export function readRoleInvocationReceipts(usageRoot) {

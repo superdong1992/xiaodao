@@ -140,3 +140,58 @@ process.stdin.on("end", () => {
   assert.equal(fs.readFileSync(tracePath, "utf8").trim().split("\n").length, 4);
   assert.equal(JSON.parse(fs.readFileSync(receiptPath, "utf8")).phase, "METHODS_BOOTSTRAP");
 });
+
+test("failed process exposes provider terminal usage to the role wrapper", async (context) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "claude-deepseek-process-failure-"));
+  context.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const fake = path.join(root, "fake-cli.js");
+  const settings = path.join(root, "settings.json");
+  const cwd = path.join(root, "workspace");
+  const configRoot = path.join(root, "config");
+  const home = path.join(root, "home");
+  const temporary = path.join(root, "tmp");
+  for (const directory of [cwd, configRoot, home, temporary]) fs.mkdirSync(directory);
+  fs.writeFileSync(settings, "{}\n");
+  fs.writeFileSync(fake, `
+process.stdin.resume();
+process.stdin.on("end", () => {
+  process.stdout.write(JSON.stringify({type:"system",subtype:"init",model:"deepseek-v4-flash[1m]",cwd:process.cwd(),permissionMode:"dontAsk",tools:["Read"]})+"\\n");
+  process.stdout.write(JSON.stringify({type:"result",subtype:"error",is_error:true,num_turns:1,usage:{input_tokens:11,output_tokens:4,cache_creation_input_tokens:2,cache_read_input_tokens:1},total_cost_usd:0.02})+"\\n");
+  process.exitCode = 7;
+});
+`);
+  await assert.rejects(
+    runClaudeProcess({
+      claudeEntry: fake,
+      settings,
+      cwd,
+      prompt: "read",
+      phase: "SPECIALIST",
+      invocationId: "run:specialist-primary",
+      tools: ["Read"],
+      allowedTools: [],
+      maxTurns: 10,
+      maxBudgetUsd: 1,
+      wallTimeoutSeconds: 30,
+      noProgressSeconds: 5,
+      tracePath: path.join(root, "trace.ndjson"),
+      environment: { configRoot, home, temporary },
+    }, { ambient: {} }),
+    (error) => {
+      assert.equal(error.code, "CLAUDE_DEEPSEEK_PROCESS_FAILED");
+      assert.equal(error.details.terminal.terminal, true);
+      assert.equal(error.details.terminal.is_error, true);
+      assert.equal(error.details.terminal.turns, 1);
+      assert.deepEqual(error.details.terminal.usage, {
+        schema_version: 1,
+        input_tokens: 11,
+        output_tokens: 4,
+        cache_creation_input_tokens: 2,
+        cache_read_input_tokens: 1,
+        total_tokens: 18,
+        cost_usd: 0.02,
+      });
+      return true;
+    },
+  );
+});

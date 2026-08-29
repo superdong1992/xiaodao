@@ -10,6 +10,7 @@ import {
   claimRoleAttempt,
   parseArguments,
   parseMethodsRolePrompt,
+  readRoleInvocationReceipts,
   roleToolPolicy,
   runServiceInvocation,
 } from "../runtime/claude-deepseek-service-wrapper.mjs";
@@ -116,5 +117,44 @@ test("wrapper preserves the raw evaluation array and records the exact productio
     assert.equal(fs.readFileSync(output, "utf8"), content);
     assert.equal(fs.readFileSync(path.join(root, "evidence", "model-role-invocations", "specialist-primary.progress"), "utf8"), ".\n");
     assert.match(Buffer.concat(chunks).toString("utf8"), /done/u);
+  } finally { process.chdir(previous); fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("failed provider invocation writes one closed role receipt with terminal usage", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "deepseek-role-failure-"));
+  const previous = process.cwd();
+  try {
+    workspace(root);
+    process.chdir(root);
+    const values = {
+      "claude-entry": path.join(root, "cli.js"), settings: path.join(root, "settings.json"), "config-root": path.join(root, "config"),
+      "private-root": path.join(root, "private"), "evidence-root": path.join(root, "evidence"), "usage-root": path.join(root, "usage"), "run-id": "run",
+    };
+    for (const target of [values["claude-entry"], values.settings]) fs.writeFileSync(target, "fixture");
+    fs.mkdirSync(values["config-root"]);
+    const error = new Error("provider failed");
+    error.code = "CLAUDE_DEEPSEEK_PROCESS_FAILED";
+    error.details = {
+      terminal: {
+        turns: 1,
+        usage: { schema_version: 1, input_tokens: 11, output_tokens: 3, cache_creation_input_tokens: 0, cache_read_input_tokens: 2, total_tokens: 16, cost_usd: 0.01 },
+      },
+    };
+    await assert.rejects(runServiceInvocation(values, {
+      stdin: Readable.from([prompt("Specialist", "primary evaluation")]),
+      stdout: new Writable({ write(_chunk, _encoding, callback) { callback(); } }),
+      runClaude: async () => { throw error; },
+    }), { code: "CLAUDE_DEEPSEEK_PROCESS_FAILED" });
+    const [receipt] = readRoleInvocationReceipts(values["usage-root"]);
+    assert.equal(receipt.status, "FAIL");
+    assert.equal(receipt.workflow, "SPECIALIST:PRIMARY");
+    assert.equal(receipt.role, "SPECIALIST");
+    assert.equal(receipt.evaluation_attempt, "PRIMARY");
+    assert.equal(receipt.failure_code, "CLAUDE_DEEPSEEK_PROCESS_FAILED");
+    assert.equal(receipt.usage_complete, true);
+    assert.equal(receipt.usage.total_tokens, 16);
+    assert.equal(receipt.wall_timeout_seconds, 600);
+    assert.ok(Date.parse(receipt.finished_at_utc) >= Date.parse(receipt.started_at_utc));
+    assert.deepEqual(receipt, JSON.parse(fs.readFileSync(path.join(values["evidence-root"], "model-role-invocations", "specialist-primary.receipt.json"), "utf8")));
   } finally { process.chdir(previous); fs.rmSync(root, { recursive: true, force: true }); }
 });

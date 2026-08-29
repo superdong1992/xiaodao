@@ -142,6 +142,36 @@ test("Reviewer repair requires a claimed primary attempt", async (context) => {
   );
 });
 
+test("failed app-server invocation writes one closed role receipt with terminal usage", async (context) => {
+  const { root, workspace, values } = fixture();
+  const previous = process.cwd();
+  process.chdir(workspace);
+  context.after(() => process.chdir(previous));
+  context.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const error = new Error("provider failed");
+  error.code = "CODEX_LUNA_APP_SERVER_ERROR_NOTIFICATION";
+  error.details = {
+    usage: { input_tokens: 12, cached_input_tokens: 2, cache_write_input_tokens: 0, output_tokens: 4, reasoning_output_tokens: 1, total_tokens: 16 },
+    thread_id: "thread-failed",
+    turn_id: "turn-failed",
+  };
+  await assert.rejects(runModelRoleInvocation(values, {
+    stdin: Readable.from([SPECIALIST_PROMPT]),
+    stdout: new Writable({ write(_chunk, _encoding, callback) { callback(); } }),
+    ambient: {},
+    runAppServerCall: async () => { throw error; },
+  }), { code: "CODEX_LUNA_APP_SERVER_ERROR_NOTIFICATION" });
+  const [receipt] = readModelCertInvocationReceipts(values["usage-root"], { allowFailurePrefix: true });
+  assert.equal(receipt.status, "FAIL");
+  assert.equal(receipt.workflow, "SPECIALIST:PRIMARY");
+  assert.equal(receipt.role, "SPECIALIST");
+  assert.equal(receipt.attempt, "PRIMARY");
+  assert.equal(receipt.failure_code, "CODEX_LUNA_APP_SERVER_ERROR_NOTIFICATION");
+  assert.equal(receipt.usage_complete, true);
+  assert.equal(receipt.usage.total_tokens, 16);
+  assert.deepEqual(receipt, JSON.parse(fs.readFileSync(path.join(values["evidence-root"], "model-invocations", "specialist-primary.receipt.json"), "utf8")));
+});
+
 test("invocation collector preserves the only legal role order and rejects extra receipts", (context) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-luna-model-receipts-"));
   context.after(() => fs.rmSync(root, { recursive: true, force: true }));

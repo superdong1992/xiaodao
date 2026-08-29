@@ -189,7 +189,7 @@ function claimInvocation(privateRoot, role, attempt) {
   return claim;
 }
 
-export function readModelCertInvocationReceipts(usageRoot) {
+export function readModelCertInvocationReceipts(usageRoot, { allowFailurePrefix = false } = {}) {
   const root = path.resolve(usageRoot);
   const order = [
     ["SPECIALIST", "PRIMARY", "specialist-primary.json", true],
@@ -213,13 +213,13 @@ export function readModelCertInvocationReceipts(usageRoot) {
   for (const [role, attempt, name, required] of order) {
     const receiptPath = path.join(root, name);
     if (!fs.existsSync(receiptPath)) {
-      requireWrapper(!required, "CODEX_LUNA_MODEL_CERT_USAGE_RECEIPT_MISSING", "A required model role receipt is missing", { role, attempt });
+      requireWrapper(allowFailurePrefix || !required, "CODEX_LUNA_MODEL_CERT_USAGE_RECEIPT_MISSING", "A required model role receipt is missing", { role, attempt });
       continue;
     }
     let receipt;
     try { receipt = JSON.parse(fs.readFileSync(receiptPath, "utf8")); } catch { fail("CODEX_LUNA_MODEL_CERT_USAGE_RECEIPT_INVALID", "Model role receipt is not valid JSON", { role, attempt }); }
     requireWrapper(
-      receipt?.status === "PASS"
+      ["PASS", "FAIL"].includes(receipt?.status)
         && receipt.provider === "openai-codex-app-server"
         && receipt.model === CODEX_LUNA_MODEL
         && receipt.reasoning_effort === CODEX_LUNA_REASONING_EFFORT
@@ -233,12 +233,32 @@ export function readModelCertInvocationReceipts(usageRoot) {
     );
     receipts.push(receipt);
   }
+  const sequence = receipts.map((receipt) => `${receipt.role}:${receipt.attempt}`).join(",");
+  const legalPrefixes = new Set([
+    "SPECIALIST:PRIMARY",
+    "SPECIALIST:PRIMARY,SPECIALIST:REPAIR",
+    "SPECIALIST:PRIMARY,REVIEWER:PRIMARY",
+    "SPECIALIST:PRIMARY,SPECIALIST:REPAIR,REVIEWER:PRIMARY",
+    "SPECIALIST:PRIMARY,REVIEWER:PRIMARY,REVIEWER:REPAIR",
+    "SPECIALIST:PRIMARY,SPECIALIST:REPAIR,REVIEWER:PRIMARY,REVIEWER:REPAIR",
+  ]);
+  if (allowFailurePrefix) {
+    requireWrapper(
+      receipts.length === 0
+        || (legalPrefixes.has(sequence)
+          && receipts.slice(0, -1).every((receipt) => receipt.status === "PASS")),
+      "CODEX_LUNA_MODEL_CERT_CALL_SEQUENCE_INVALID",
+      "Model role failure receipts are not one legal invocation prefix",
+    );
+    return receipts;
+  }
   requireWrapper(
     receipts.length >= CODEX_LUNA_MODEL_CERT_NORMAL_CALLS
       && receipts.length <= CODEX_LUNA_MODEL_CERT_MAX_CALLS,
     "CODEX_LUNA_MODEL_CERT_CALL_COUNT_INVALID",
     "Model cert must contain two normal calls and no more than four calls",
   );
+  requireWrapper(receipts.every((receipt) => receipt.status === "PASS"), "CODEX_LUNA_MODEL_CERT_USAGE_RECEIPT_INVALID", "Successful model certification requires only successful role calls");
   return receipts;
 }
 
@@ -321,75 +341,117 @@ export async function runModelRoleInvocation(values, {
   const traceRoot = path.join(path.resolve(values["evidence-root"]), "model-invocations");
   fs.mkdirSync(traceRoot, { recursive: true, mode: 0o700 });
   const startedAtUtc = new Date().toISOString();
-  const trace = await runAppServerCall({
-    codexEntry: path.resolve(values["codex-entry"]),
-    auth,
-    environment: controlledEnvironment(ambient),
-    workspaceRoot: workspace.root,
-    skillPath: path.resolve(values["skill-source"]),
-    mode: "service",
-    developerInstructions: modelRoleDeveloperInstructions(workspace.root, parsed),
-    prompt,
-    outputSchema: null,
-    callRoot: path.join(claim, "app-server"),
-    privateRoot: path.resolve(values["private-root"]),
-    tracePath: path.join(traceRoot, `${prefix}.jsonl`),
-    stderrPath: path.join(traceRoot, `${prefix}.stderr.txt`),
-    finalPath: path.join(traceRoot, `${prefix}.final.txt`),
-    forbiddenReadPaths: [path.resolve(values["auth-source"]), path.resolve(values["skill-source"])],
-    wallSeconds: MACOS_CODEX_LUNA_CALL_WALL_SECONDS,
-    noProgressSeconds: MACOS_CODEX_LUNA_NO_PROGRESS_SECONDS,
-    shellHome: path.join(claim, "shell-home"),
-    expectedCliVersion: values["expected-cli-version"],
-    onProgress: () => stdout.write(`TEST_FLOW_PROGRESS model-cert ${parsed.role.toLowerCase()} ${parsed.attempt.toLowerCase()}\n`),
-  });
-  const output = auditRoleOutput(workspace.output, parsed);
-  const finishedAtUtc = new Date().toISOString();
-  const receipt = {
-    schema_version: 1,
-    wrapper_version: CODEX_LUNA_MODEL_CERT_WRAPPER_VERSION,
-    invocation_id: `${values["run-id"]}:codex-luna:${prefix}`,
-    provider: "openai-codex-app-server",
-    model: CODEX_LUNA_MODEL,
-    model_revision: CODEX_LUNA_MODEL,
-    reasoning_effort: CODEX_LUNA_REASONING_EFFORT,
-    role: parsed.role,
-    attempt: parsed.attempt,
-    repair: parsed.attempt === "REPAIR",
-    status: "PASS",
-    terminal: true,
-    started_at_utc: startedAtUtc,
-    finished_at_utc: finishedAtUtc,
-    prompt: {
-      sha256: sha256Bytes(prompt),
-      size: Buffer.byteLength(prompt, "utf8"),
-      production_role_marker: true,
-    },
-    profile: {
-      permission_profile_id: trace.app_server.permission_profile_id,
-      config_sha256: trace.app_server.codex_home.config_sha256,
-      developer_instructions_sha256: trace.app_server.developer_instructions.sha256,
-    },
-    tool_policy: {
-      invocation_mode: trace.app_server.invocation_mode,
-      mcp_tool_call_count: trace.app_server.turn.mcp_tool_call_count,
-      command_count: trace.command_receipts.length,
-      output_normalized: false,
-    },
-    output,
-    usage: trace.usage,
-    thread_id: trace.thread_id,
-    turn_id: trace.turn_id,
-  };
-  requireWrapper(
-    isPlainObject(receipt.usage) && receipt.tool_policy.mcp_tool_call_count === 0,
-    "CODEX_LUNA_MODEL_CERT_TRACE_INVALID",
-    "Codex app-server did not return one closed Evidence V2 role receipt",
-  );
-  writeJsonExclusive(path.join(path.resolve(values["usage-root"]), `${prefix}.json`), receipt);
-  writeJsonExclusive(path.join(traceRoot, `${prefix}.receipt.json`), receipt);
-  stdout.write(`${canonicalJson({ status: "PASS", role: parsed.role, attempt: parsed.attempt })}\n`);
-  return receipt;
+  let trace = null;
+  try {
+    trace = await runAppServerCall({
+      codexEntry: path.resolve(values["codex-entry"]),
+      auth,
+      environment: controlledEnvironment(ambient),
+      workspaceRoot: workspace.root,
+      skillPath: path.resolve(values["skill-source"]),
+      mode: "service",
+      developerInstructions: modelRoleDeveloperInstructions(workspace.root, parsed),
+      prompt,
+      outputSchema: null,
+      callRoot: path.join(claim, "app-server"),
+      privateRoot: path.resolve(values["private-root"]),
+      tracePath: path.join(traceRoot, `${prefix}.jsonl`),
+      stderrPath: path.join(traceRoot, `${prefix}.stderr.txt`),
+      finalPath: path.join(traceRoot, `${prefix}.final.txt`),
+      forbiddenReadPaths: [path.resolve(values["auth-source"]), path.resolve(values["skill-source"])],
+      wallSeconds: MACOS_CODEX_LUNA_CALL_WALL_SECONDS,
+      noProgressSeconds: MACOS_CODEX_LUNA_NO_PROGRESS_SECONDS,
+      shellHome: path.join(claim, "shell-home"),
+      expectedCliVersion: values["expected-cli-version"],
+      onProgress: () => stdout.write(`TEST_FLOW_PROGRESS model-cert ${parsed.role.toLowerCase()} ${parsed.attempt.toLowerCase()}\n`),
+    });
+    const output = auditRoleOutput(workspace.output, parsed);
+    const receipt = {
+      schema_version: 1,
+      wrapper_version: CODEX_LUNA_MODEL_CERT_WRAPPER_VERSION,
+      invocation_id: `${values["run-id"]}:codex-luna:${prefix}`,
+      provider: "openai-codex-app-server",
+      model: CODEX_LUNA_MODEL,
+      model_revision: CODEX_LUNA_MODEL,
+      reasoning_effort: CODEX_LUNA_REASONING_EFFORT,
+      workflow: `${parsed.role}:${parsed.attempt}`,
+      role: parsed.role,
+      attempt: parsed.attempt,
+      repair: parsed.attempt === "REPAIR",
+      status: "PASS",
+      terminal: true,
+      started_at_utc: startedAtUtc,
+      finished_at_utc: new Date().toISOString(),
+      prompt: {
+        sha256: sha256Bytes(prompt),
+        size: Buffer.byteLength(prompt, "utf8"),
+        production_role_marker: true,
+      },
+      profile: {
+        permission_profile_id: trace.app_server.permission_profile_id,
+        config_sha256: trace.app_server.codex_home.config_sha256,
+        developer_instructions_sha256: trace.app_server.developer_instructions.sha256,
+      },
+      tool_policy: {
+        invocation_mode: trace.app_server.invocation_mode,
+        mcp_tool_call_count: trace.app_server.turn.mcp_tool_call_count,
+        command_count: trace.command_receipts.length,
+        output_normalized: false,
+      },
+      output,
+      usage_complete: true,
+      usage: trace.usage,
+      failure_code: null,
+      thread_id: trace.thread_id,
+      turn_id: trace.turn_id,
+    };
+    requireWrapper(
+      isPlainObject(receipt.usage) && receipt.tool_policy.mcp_tool_call_count === 0,
+      "CODEX_LUNA_MODEL_CERT_TRACE_INVALID",
+      "Codex app-server did not return one closed Evidence V2 role receipt",
+    );
+    writeJsonExclusive(path.join(path.resolve(values["usage-root"]), `${prefix}.json`), receipt);
+    writeJsonExclusive(path.join(traceRoot, `${prefix}.receipt.json`), receipt);
+    stdout.write(`${canonicalJson({ status: "PASS", role: parsed.role, attempt: parsed.attempt })}\n`);
+    return receipt;
+  } catch (error) {
+    const usage = isPlainObject(trace?.usage)
+      ? trace.usage
+      : (isPlainObject(error?.details?.usage) ? error.details.usage : null);
+    const receipt = {
+      schema_version: 1,
+      wrapper_version: CODEX_LUNA_MODEL_CERT_WRAPPER_VERSION,
+      invocation_id: `${values["run-id"]}:codex-luna:${prefix}`,
+      provider: "openai-codex-app-server",
+      model: CODEX_LUNA_MODEL,
+      model_revision: CODEX_LUNA_MODEL,
+      reasoning_effort: CODEX_LUNA_REASONING_EFFORT,
+      workflow: `${parsed.role}:${parsed.attempt}`,
+      role: parsed.role,
+      attempt: parsed.attempt,
+      repair: parsed.attempt === "REPAIR",
+      status: "FAIL",
+      terminal: true,
+      started_at_utc: startedAtUtc,
+      finished_at_utc: new Date().toISOString(),
+      prompt: {
+        sha256: sha256Bytes(prompt),
+        size: Buffer.byteLength(prompt, "utf8"),
+        production_role_marker: true,
+      },
+      profile: null,
+      tool_policy: null,
+      output: null,
+      usage_complete: usage !== null,
+      usage,
+      failure_code: typeof error?.code === "string" ? error.code : "CODEX_LUNA_MODEL_CERT_CALL_FAILED",
+      thread_id: error?.details?.thread_id ?? null,
+      turn_id: error?.details?.turn_id ?? null,
+    };
+    writeJsonExclusive(path.join(path.resolve(values["usage-root"]), `${prefix}.json`), receipt);
+    writeJsonExclusive(path.join(traceRoot, `${prefix}.receipt.json`), receipt);
+    throw error;
+  }
 }
 
 function safeError(error) {

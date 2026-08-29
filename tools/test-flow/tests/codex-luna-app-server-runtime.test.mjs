@@ -229,6 +229,11 @@ lines.on("line", (line) => {
       send({ method: "error", params: { threadId, turnId, error: { message: "private provider detail", additionalDetails: "private additional detail", codexErrorInfo: "serverOverloaded" }, willRetry: false } });
       return;
     }
+    if (fakeMode === "error-after-usage") {
+      send({ method: "thread/tokenUsage/updated", params: { threadId, turnId, tokenUsage: { total: usage, last: usage, modelContextWindow: 400000 } } });
+      send({ method: "error", params: { threadId, turnId, error: { message: "provider failed after usage", codexErrorInfo: "internalServerError" }, willRetry: false } });
+      return;
+    }
     if (fakeMode === "retrying-error-notification") {
       send({ method: "error", params: { threadId, turnId, error: { message: "private transient detail", additionalDetails: null, codexErrorInfo: { responseStreamDisconnected: { httpStatusCode: 503 } } }, willRetry: true } });
     }
@@ -545,6 +550,25 @@ posixRuntimeTest("a terminal error notification persists only official closed fi
   assert.doesNotMatch(trace, /private provider detail/);
   assert.doesNotMatch(trace, /private additional detail/);
   assert.match(trace, /error_receipt/);
+});
+
+posixRuntimeTest("a failed provider turn retains its terminal usage", async (t) => {
+  const fixture = makeFixture(t, "error-after-usage");
+  await assert.rejects(
+    runCodexLunaAppServerCall(fixture.options),
+    (error) => {
+      assert.equal(error.code, "CODEX_LUNA_APP_SERVER_ERROR_NOTIFICATION");
+      assert.deepEqual(error.details.usage, {
+        input_tokens: 11,
+        cached_input_tokens: 3,
+        cache_write_input_tokens: 0,
+        output_tokens: 6,
+        reasoning_output_tokens: 2,
+        total_tokens: 17,
+      });
+      return true;
+    },
+  );
 });
 
 posixRuntimeTest("an explicitly retryable error notification remains in the audited turn and does not abort", async (t) => {

@@ -210,6 +210,105 @@ test("P1 and P2 failures retain two completed role calls and require a matching 
   }
 });
 
+test("P1 and P2 central actions retain the terminal failed call and its usage", (context) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "provider-failed-call-usage-"));
+  context.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  for (const fixture of [
+    { provider: "claude-deepseek", invocationClass: "claude-deepseek-macos-e2e", code: "CLAUDE_DEEPSEEK_PROCESS_FAILED" },
+    { provider: "codex-luna", invocationClass: "codex-luna-macos-e2e", code: "CODEX_LUNA_APP_SERVER_ERROR_NOTIFICATION" },
+  ]) {
+    const outputRoot = path.join(root, fixture.provider, "evidence");
+    const usageRoot = path.join(root, fixture.provider, "usage");
+    fs.mkdirSync(outputRoot, { recursive: true });
+    fs.mkdirSync(usageRoot, { recursive: true });
+    const failed = {
+      ...providerRoleReceipt(fixture.provider, "SPECIALIST", "PRIMARY", 1),
+      status: "FAIL",
+      failure_code: fixture.code,
+    };
+    fs.writeFileSync(path.join(usageRoot, "specialist-primary.json"), canonicalJson(failed));
+    const first = collectProviderFailureObservability({
+      provider: fixture.provider,
+      result: { status: "FAIL" },
+      outputRoot,
+      usageRoot,
+      planStage: evidenceV2ProviderPlanStage(fixture.invocationClass),
+      invocationClass: fixture.invocationClass,
+    });
+    assert.equal(first.invocations.length, 1, fixture.provider);
+    assert.equal(first.invocations[0].wrapper_outcome.status, "FAIL", fixture.provider);
+    assert.equal(first.invocations[0].wrapper_outcome.code, fixture.code, fixture.provider);
+    assert.equal(first.invocations[0].terminal.is_error, true, fixture.provider);
+    assert.equal(first.usage.total_tokens, 15, fixture.provider);
+    assert.equal(first.usage_complete, false, fixture.provider);
+
+    const runnerAggregate = fixture.provider === "codex-luna"
+      ? { ...first.usage, cost_usd: 0.000008 }
+      : first.usage;
+    fs.writeFileSync(path.join(outputRoot, "model-usage.json"), canonicalJson({
+      schema_version: 1,
+      status: "FAIL",
+      usage_complete: true,
+      aggregate: runnerAggregate,
+    }));
+    const complete = collectProviderFailureObservability({
+      provider: fixture.provider,
+      result: { status: "FAIL" },
+      outputRoot,
+      usageRoot,
+      planStage: evidenceV2ProviderPlanStage(fixture.invocationClass),
+      invocationClass: fixture.invocationClass,
+    });
+    assert.equal(complete.invocations.length, 1, fixture.provider);
+    assert.equal(complete.usage.total_tokens, 15, fixture.provider);
+    assert.equal(complete.usage_complete, true, fixture.provider);
+  }
+});
+
+test("a zero-call production terminal preserves complete zero usage", (context) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "provider-zero-call-usage-"));
+  context.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  for (const fixture of [
+    { provider: "claude-deepseek", invocationClass: "claude-deepseek-macos-e2e" },
+    { provider: "codex-luna", invocationClass: "codex-luna-macos-e2e" },
+  ]) {
+    const outputRoot = path.join(root, fixture.provider);
+    fs.mkdirSync(outputRoot, { recursive: true });
+    const zeroUsage = {
+      schema_version: 1,
+      input_tokens: 0,
+      output_tokens: 0,
+      cache_creation_input_tokens: 0,
+      cache_read_input_tokens: 0,
+      total_tokens: 0,
+      cost_usd: 0,
+    };
+    fs.writeFileSync(path.join(outputRoot, "model-invocations.json"), canonicalJson({
+      schema_version: 1,
+      status: "FAIL",
+      retry_policy: "ROLE_PROTOCOL_REPAIR_ONLY",
+      invocations: [],
+    }));
+    fs.writeFileSync(path.join(outputRoot, "model-usage.json"), canonicalJson({
+      schema_version: 1,
+      status: "FAIL",
+      usage_complete: true,
+      aggregate: zeroUsage,
+    }));
+    const observed = collectProviderFailureObservability({
+      provider: fixture.provider,
+      result: { status: "FAIL" },
+      outputRoot,
+      usageRoot: path.join(root, `${fixture.provider}-usage`),
+      planStage: evidenceV2ProviderPlanStage(fixture.invocationClass),
+      invocationClass: fixture.invocationClass,
+    });
+    assert.deepEqual(observed.invocations, [], fixture.provider);
+    assert.equal(observed.usage.total_tokens, 0, fixture.provider);
+    assert.equal(observed.usage_complete, true, fixture.provider);
+  }
+});
+
 test("provider failure exposes the production terminal adapter, runtime receipt and complete usage", (context) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "provider-terminal-failure-"));
   context.after(() => fs.rmSync(root, { recursive: true, force: true }));
