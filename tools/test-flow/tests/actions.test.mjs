@@ -168,6 +168,24 @@ function providerRoleReceipt(provider, role, attempt, ordinal) {
   };
 }
 
+function writeZeroCallRuntimeReceipt(outputRoot, {
+  reasonCode = "NO_MATCHING_METHOD_EVIDENCE",
+  modelInvocations = 0,
+} = {}) {
+  fs.writeFileSync(path.join(outputRoot, "runtime-receipt.json"), canonicalJson({
+    schema_version: 1,
+    status: "PASS",
+    execution_mode: "real-model",
+    production_runtime: "problem_locator.runtime.diagnosis_runtime.DiagnosisRuntime",
+    model_invocations: modelInvocations,
+    role_attempts: [],
+    methods_result: {
+      status: "UNRESOLVED",
+      reason_code: reasonCode,
+    },
+  }));
+}
+
 test("P1 and P2 failures retain two completed role calls and require a matching aggregate before marking usage complete", (context) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "provider-failure-usage-"));
   context.after(() => fs.rmSync(root, { recursive: true, force: true }));
@@ -265,6 +283,61 @@ test("P1 and P2 central actions retain the terminal failed call and its usage", 
   }
 });
 
+test("P1 and P2 retain a legal failed prefix when the terminal call has no usage", (context) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "provider-failed-call-partial-usage-"));
+  context.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  for (const fixture of [
+    { provider: "claude-deepseek", invocationClass: "claude-deepseek-macos-e2e", code: "CLAUDE_DEEPSEEK_PROCESS_FAILED" },
+    { provider: "codex-luna", invocationClass: "codex-luna-macos-e2e", code: "CODEX_LUNA_APP_SERVER_ERROR_NOTIFICATION" },
+  ]) {
+    const outputRoot = path.join(root, fixture.provider, "evidence");
+    const usageRoot = path.join(root, fixture.provider, "usage");
+    fs.mkdirSync(outputRoot, { recursive: true });
+    fs.mkdirSync(usageRoot, { recursive: true });
+    fs.writeFileSync(
+      path.join(usageRoot, "specialist-primary.json"),
+      canonicalJson(providerRoleReceipt(fixture.provider, "SPECIALIST", "PRIMARY", 1)),
+    );
+    fs.writeFileSync(path.join(usageRoot, "reviewer-primary.json"), canonicalJson({
+      ...providerRoleReceipt(fixture.provider, "REVIEWER", "PRIMARY", 2),
+      status: "FAIL",
+      usage_complete: false,
+      usage: null,
+      failure_code: fixture.code,
+    }));
+    const observed = collectProviderFailureObservability({
+      provider: fixture.provider,
+      result: { status: "FAIL" },
+      outputRoot,
+      usageRoot,
+      planStage: evidenceV2ProviderPlanStage(fixture.invocationClass),
+      invocationClass: fixture.invocationClass,
+    });
+    assert.equal(observed.invocations.length, 2, fixture.provider);
+    assert.equal(observed.invocations[0].usage_complete, true, fixture.provider);
+    assert.equal(observed.invocations[1].usage_complete, false, fixture.provider);
+    assert.equal(observed.invocations[1].wrapper_outcome.status, "FAIL", fixture.provider);
+    assert.equal(observed.invocations[1].wrapper_outcome.code, fixture.code, fixture.provider);
+    assert.equal(observed.usage.total_tokens, 15, fixture.provider);
+    assert.equal(observed.usage_complete, false, fixture.provider);
+
+    const gate = providerRunnerFailureResult({
+      provider: fixture.provider,
+      result: { status: "FAIL", termination: null, stderr_truncated: false },
+      attemptRoot: root,
+      outputRoot,
+      usageRoot,
+      planStage: evidenceV2ProviderPlanStage(fixture.invocationClass),
+      invocationClass: fixture.invocationClass,
+      fallbackCode: "PROVIDER_RUNNER_FAILED",
+    });
+    assert.equal(gate.status, "FAIL", fixture.provider);
+    assert.equal(gate.invocations.length, 2, fixture.provider);
+    assert.equal(gate.usage.total_tokens, 15, fixture.provider);
+    assert.equal(gate.usage_complete, false, fixture.provider);
+  }
+});
+
 test("a zero-call production terminal preserves complete zero usage", (context) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "provider-zero-call-usage-"));
   context.after(() => fs.rmSync(root, { recursive: true, force: true }));
@@ -289,6 +362,7 @@ test("a zero-call production terminal preserves complete zero usage", (context) 
       retry_policy: "ROLE_PROTOCOL_REPAIR_ONLY",
       invocations: [],
     }));
+    writeZeroCallRuntimeReceipt(outputRoot);
     fs.writeFileSync(path.join(outputRoot, "model-usage.json"), canonicalJson({
       schema_version: 1,
       status: "FAIL",
@@ -306,6 +380,42 @@ test("a zero-call production terminal preserves complete zero usage", (context) 
     assert.deepEqual(observed.invocations, [], fixture.provider);
     assert.equal(observed.usage.total_tokens, 0, fixture.provider);
     assert.equal(observed.usage_complete, true, fixture.provider);
+
+    const nonzeroUsage = { ...zeroUsage, input_tokens: 1, total_tokens: 1 };
+    fs.writeFileSync(path.join(outputRoot, "model-usage.json"), canonicalJson({
+      schema_version: 1,
+      status: "FAIL",
+      usage_complete: true,
+      aggregate: nonzeroUsage,
+    }));
+    const nonzero = collectProviderFailureObservability({
+      provider: fixture.provider,
+      result: { status: "FAIL" },
+      outputRoot,
+      usageRoot: path.join(root, `${fixture.provider}-usage`),
+      planStage: evidenceV2ProviderPlanStage(fixture.invocationClass),
+      invocationClass: fixture.invocationClass,
+    });
+    assert.equal(nonzero.usage.total_tokens, 1, fixture.provider);
+    assert.equal(nonzero.usage_complete, false, fixture.provider);
+
+    fs.writeFileSync(path.join(outputRoot, "model-usage.json"), canonicalJson({
+      schema_version: 1,
+      status: "FAIL",
+      usage_complete: true,
+      aggregate: zeroUsage,
+    }));
+    writeZeroCallRuntimeReceipt(outputRoot, { reasonCode: "SPECIALIST_MODEL_EXECUTION_FAILED" });
+    const wrongReason = collectProviderFailureObservability({
+      provider: fixture.provider,
+      result: { status: "FAIL" },
+      outputRoot,
+      usageRoot: path.join(root, `${fixture.provider}-usage`),
+      planStage: evidenceV2ProviderPlanStage(fixture.invocationClass),
+      invocationClass: fixture.invocationClass,
+    });
+    assert.equal(wrongReason.usage.total_tokens, 0, fixture.provider);
+    assert.equal(wrongReason.usage_complete, false, fixture.provider);
   }
 });
 

@@ -30,7 +30,7 @@ import {
   packageTreeIdentity,
   sameDockerRuntimeIdentity,
 } from "./release-inputs.mjs";
-import { isCompleteUsage, sumUsage, TOKEN_USAGE_FORMULA } from "./usage.mjs";
+import { isCompleteUsage, sumUsage, TOKEN_USAGE_FORMULA, zeroUsage } from "./usage.mjs";
 import {
   discoverReleaseCaseRoot,
   loadReleaseCaseInputs,
@@ -3466,14 +3466,37 @@ function readProviderRoleReceipts(usageRoot, provider) {
 
 function modelUsageAggregate(outputRoot) {
   const receiptPath = path.join(outputRoot, "model-usage.json");
-  if (!fs.existsSync(receiptPath)) return { present: false, complete: false, usage: null };
+  if (!fs.existsSync(receiptPath)) return { present: false, complete: false, failure_ledger: false, usage: null };
   const receipt = readJsonOrNull(receiptPath);
   const aggregate = receipt?.aggregate;
   return {
     present: true,
     complete: receipt?.usage_complete === true,
+    failure_ledger: canonicalJson(Object.keys(receipt ?? {}).sort()) === canonicalJson([
+      "aggregate", "schema_version", "status", "usage_complete",
+    ]) && receipt.schema_version === 1 && receipt.status === "FAIL",
     usage: isCompleteUsage(aggregate) ? aggregate : null,
   };
+}
+
+function validExplicitZeroCallLedger(outputRoot, ledger) {
+  if (canonicalJson(Object.keys(ledger ?? {}).sort()) !== canonicalJson([
+    "invocations", "retry_policy", "schema_version", "status",
+  ])) return false;
+  if (ledger.schema_version !== 1
+    || ledger.status !== "FAIL"
+    || ledger.retry_policy !== "ROLE_PROTOCOL_REPAIR_ONLY"
+    || !Array.isArray(ledger.invocations)
+    || ledger.invocations.length !== 0) return false;
+  const runtimeReceipt = readJsonOrNull(path.join(outputRoot, "runtime-receipt.json"));
+  return runtimeReceipt?.status === "PASS"
+    && runtimeReceipt.execution_mode === "real-model"
+    && runtimeReceipt.production_runtime === "problem_locator.runtime.diagnosis_runtime.DiagnosisRuntime"
+    && runtimeReceipt.model_invocations === 0
+    && Array.isArray(runtimeReceipt.role_attempts)
+    && runtimeReceipt.role_attempts.length === 0
+    && runtimeReceipt.methods_result?.status === "UNRESOLVED"
+    && runtimeReceipt.methods_result?.reason_code === "NO_MATCHING_METHOD_EVIDENCE";
 }
 
 export function collectProviderFailureReceipts({ provider, outputRoot }) {
@@ -3546,13 +3569,17 @@ export function collectProviderFailureObservability({
   if (fs.existsSync(ledgerPath)) {
     const ledger = readJsonOrNull(ledgerPath);
     if (validEvidenceV2ProviderInvocationLedger(planStage, ledger)) rawInvocations = ledger.invocations;
-    else if (ledger?.status === "FAIL" && Array.isArray(ledger.invocations) && ledger.invocations.length === 0) explicitZeroCallLedger = true;
+    else if (validExplicitZeroCallLedger(outputRoot, ledger)) explicitZeroCallLedger = true;
   }
   if (rawInvocations.length === 0) rawInvocations = readProviderRoleReceipts(usageRoot, provider);
   const invocations = rawInvocations.map((invocation) => projection(invocation, planStage.hard_caps, invocationClass));
-  const projectedUsage = invocations.length > 0 && invocations.every((invocation) => invocation.usage_complete === true && isCompleteUsage(invocation.usage))
-    ? sumUsage(invocations.map((invocation) => invocation.usage))
+  const knownInvocationUsage = invocations
+    .filter((invocation) => invocation.usage_complete === true && isCompleteUsage(invocation.usage))
+    .map((invocation) => invocation.usage);
+  const projectedUsage = knownInvocationUsage.length === invocations.length && invocations.length > 0
+    ? sumUsage(knownInvocationUsage)
     : null;
+  const knownPartialUsage = knownInvocationUsage.length > 0 ? sumUsage(knownInvocationUsage) : null;
   const aggregate = modelUsageAggregate(outputRoot);
   if (projectedUsage !== null) {
     return {
@@ -3561,11 +3588,21 @@ export function collectProviderFailureObservability({
       usage_complete: aggregate.present && providerAggregateMatches(provider, aggregate.usage, projectedUsage),
     };
   }
+  if (invocations.length > 0) {
+    return {
+      invocations,
+      usage: knownPartialUsage ?? aggregate.usage ?? (isCompleteUsage(result?.usage) ? result.usage : undefined),
+      usage_complete: false,
+    };
+  }
   if (aggregate.usage !== null) {
     return {
       invocations: [],
       usage: aggregate.usage,
-      usage_complete: explicitZeroCallLedger && aggregate.complete,
+      usage_complete: explicitZeroCallLedger
+        && aggregate.complete
+        && aggregate.failure_ledger
+        && sameUsage(aggregate.usage, zeroUsage()),
     };
   }
   return {
