@@ -383,6 +383,40 @@ def test_validator_rejects_marker_from_another_method_reference(
     ]
 
 
+def test_validator_rejects_shared_only_prerequisite_and_marker_order(
+    tmp_path: Path,
+) -> None:
+    registration, wiki, _ = _write_valid_registration(tmp_path)
+    methods_path = _methods_path(registration)
+    methods = json.loads(methods_path.read_text(encoding="utf-8"))
+    methods["methods"][0]["evidence_markers"] = ["API_COMPLETE service="]
+    _write_json(methods_path, methods)
+
+    shared_only = _validate(registration, wiki)
+
+    assert shared_only["errors"] == [
+        "method 1 的 method reference 含有未被 evidence_markers 索引的 "
+        "canonical marker: QUEUE_DELAY service="
+    ]
+
+    methods["methods"][0]["evidence_markers"] = [
+        "QUEUE_DELAY service=",
+        "API_COMPLETE service=",
+    ]
+    _write_json(methods_path, methods)
+    wrong_order = _validate(registration, wiki)
+    assert wrong_order["errors"] == [
+        "method 1 的 evidence_markers 必须按 source template 顺序排列"
+    ]
+
+    methods["methods"][0]["evidence_markers"] = [
+        "API_COMPLETE service=",
+        "QUEUE_DELAY service=",
+    ]
+    _write_json(methods_path, methods)
+    assert _validate(registration, wiki)["ok"] is True
+
+
 def test_valid_production_registration_passes(tmp_path: Path) -> None:
     registration, wiki, identity = _write_valid_registration(tmp_path)
 

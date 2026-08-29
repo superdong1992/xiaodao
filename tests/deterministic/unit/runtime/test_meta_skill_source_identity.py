@@ -346,6 +346,71 @@ def test_validator_rejects_marker_from_another_method_reference(
     ]
 
 
+def test_validator_rejects_shared_only_prerequisite_and_marker_order(
+    tmp_path: Path,
+) -> None:
+    validator = _load_validator()
+    templates = [
+        "CAUSE id={cause_id}",
+        "REQUEST_TIMEOUT request_id={request_id} timeout_ms={timeout_ms}",
+    ]
+    wiki = tmp_path / "wiki.md"
+    wiki_bytes = (
+        "# Authored Wiki\n\nThe method needs both logs.\n\n```text\n"
+        + "\n".join(templates)
+        + "\n```\n"
+    ).encode("utf-8")
+    wiki.write_bytes(wiki_bytes)
+    package = _write_package(
+        tmp_path,
+        wiki_sha256=hashlib.sha256(wiki_bytes).hexdigest(),
+        log_derived_fields=["cause_id", "request_id", "timeout_ms"],
+        evidence_marker="CAUSE id=",
+        reference_log_template=templates[0],
+        source_log_templates=templates,
+    )
+    reference = package / "references/rpc-timeout.md"
+    reference.write_text(
+        reference.read_text(encoding="utf-8").replace(
+            templates[0],
+            "\n".join(templates),
+        ),
+        encoding="utf-8",
+    )
+
+    shared_only = validator.validate(package, wiki)
+
+    assert shared_only["errors"] == [
+        "method 1 的 method reference 含有未被 evidence_markers 索引的 "
+        "canonical marker: REQUEST_TIMEOUT request_id="
+    ]
+
+    methods_path = package / "methods.json"
+    manifest = json.loads(methods_path.read_text(encoding="utf-8"))
+    manifest["methods"][0]["evidence_markers"] = [
+        "REQUEST_TIMEOUT request_id=",
+        "CAUSE id=",
+    ]
+    methods_path.write_text(
+        json.dumps(manifest, ensure_ascii=False, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    wrong_order = validator.validate(package, wiki)
+    assert wrong_order["errors"] == [
+        "method 1 的 evidence_markers 必须按 source template 顺序排列"
+    ]
+
+    manifest["methods"][0]["evidence_markers"] = [
+        "CAUSE id=",
+        "REQUEST_TIMEOUT request_id=",
+    ]
+    methods_path.write_text(
+        json.dumps(manifest, ensure_ascii=False, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    assert validator.validate(package, wiki)["ok"] is True
+
+
 def test_canonical_marker_fallback_uses_longest_literal_and_first_tie() -> None:
     validator = _load_validator()
     assert (

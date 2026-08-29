@@ -129,7 +129,7 @@ MUTATIONS = (
         expected_failures=1,
     ),
     SourceMutation(
-        name="package-validator-marker-ownership",
+        name="package-validator-marker-closure",
         source_path=(
             ".agents/skills/wiki-to-diagnosis-skill/scripts/"
             "validate_generated_skill.py"
@@ -139,23 +139,25 @@ MUTATIONS = (
             "                method_text = reference_texts.get(reference)\n"
             "                if method_text is None:\n"
             "                    continue\n"
-            "                for marker in markers:\n"
-            "                    if marker not in method_text:\n"
-            "                        errors.append(\n"
-            "                            f\"method {index} evidence marker is absent from its method reference: {marker}\"\n"
-            "                        )\n"
+            "                _validate_method_marker_closure(\n"
+            "                    index=index,\n"
+            "                    markers=markers,\n"
+            "                    method_text=method_text,\n"
+            "                    wiki_markers=wiki_canonical_markers,\n"
+            "                    errors=errors,\n"
+            "                )\n"
         ),
         replacement="",
         selector=(
             "tests/deterministic/unit/runtime/test_meta_skill_source_identity.py::"
-            "test_validator_rejects_marker_from_another_method_reference"
+            "test_validator_rejects_shared_only_prerequisite_and_marker_order"
         ),
         expected_failures=1,
         source_root="repo",
         environment_key="TEST_WIKI_DIAGNOSIS_VALIDATOR",
     ),
     SourceMutation(
-        name="registration-validator-marker-ownership",
+        name="registration-validator-marker-closure",
         source_path=(
             ".claude/skills/wiki-to-logparse-diagnosis-skill/scripts/"
             "validate_generated_skill.py"
@@ -165,16 +167,18 @@ MUTATIONS = (
             "            method_text = reference_texts.get(reference)\n"
             "            if method_text is None:\n"
             "                continue\n"
-            "            for marker in markers:\n"
-            "                if marker not in method_text:\n"
-            "                    errors.append(\n"
-            "                        f\"method {index} evidence marker is absent from its method reference: {marker}\"\n"
-            "                    )\n"
+            "            _validate_method_marker_closure(\n"
+            "                index=index,\n"
+            "                markers=markers,\n"
+            "                method_text=method_text,\n"
+            "                wiki_markers=wiki_markers,\n"
+            "                errors=errors,\n"
+            "            )\n"
         ),
         replacement="",
         selector=(
             "tests/deterministic/unit/integrations/test_lan_logparse_meta_skill.py::"
-            "test_validator_rejects_marker_from_another_method_reference"
+            "test_validator_rejects_shared_only_prerequisite_and_marker_order"
         ),
         expected_failures=1,
         source_root="repo",

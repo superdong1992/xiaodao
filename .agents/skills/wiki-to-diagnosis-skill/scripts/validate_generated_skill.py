@@ -222,6 +222,35 @@ def canonical_evidence_markers(log_templates: list[str]) -> list[str]:
     return markers
 
 
+def _validate_method_marker_closure(
+    *,
+    index: int,
+    markers: list[str],
+    method_text: str,
+    wiki_markers: list[str],
+    errors: list[str],
+) -> None:
+    absent = [marker for marker in markers if marker not in method_text]
+    for marker in absent:
+        errors.append(
+            f"method {index} evidence marker is absent from its method reference: {marker}"
+        )
+    if absent or not markers or any(marker not in wiki_markers for marker in markers):
+        return
+
+    expected = [marker for marker in wiki_markers if marker in method_text]
+    missing = [marker for marker in expected if marker not in markers]
+    if missing:
+        errors.append(
+            f"method {index} 的 method reference 含有未被 evidence_markers 索引的 "
+            f"canonical marker: {', '.join(missing)}"
+        )
+    elif markers != expected:
+        errors.append(
+            f"method {index} 的 evidence_markers 必须按 source template 顺序排列"
+        )
+
+
 def validate(skill_dir: Path, wiki: Path) -> dict[str, object]:
     errors: list[str] = []
     skill_dir = skill_dir.resolve()
@@ -414,11 +443,13 @@ def validate(skill_dir: Path, wiki: Path) -> dict[str, object]:
                 method_text = reference_texts.get(reference)
                 if method_text is None:
                     continue
-                for marker in markers:
-                    if marker not in method_text:
-                        errors.append(
-                            f"method {index} evidence marker is absent from its method reference: {marker}"
-                        )
+                _validate_method_marker_closure(
+                    index=index,
+                    markers=markers,
+                    method_text=method_text,
+                    wiki_markers=wiki_canonical_markers,
+                    errors=errors,
+                )
             if reference_texts.get(SOURCE_LOG_TEMPLATES_REFERENCE) != _render_source_log_templates(
                 wiki_templates
             ):
