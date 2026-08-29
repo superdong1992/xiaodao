@@ -48,7 +48,8 @@ registration root。生成物只包含产品 registration 和闭合 Methods pack
    去重或丢失模板。事件名本身不是 marker；例如 `API_COMPLETE service={service}` 对应
    `API_COMPLETE service=`，只写 `API_COMPLETE` 必须判为错误。
    每个方法的 marker 还必须覆盖该方法确认、排除、计算和关联目标请求时实际需要读取的全部日志；
-   共同日志的解释可以共享，但不能只留在共享引用而不进入适用方法的索引。
+   共同日志的解释可以共享，但不能只留在共享引用而不进入适用方法的索引。每个适用方法都要在
+   “所需证据”段逐字列出完整模板；其他段落中的 marker 字样不算模板归属。
 7. Server 只扫描一次冻结日志，生成 `method-evidence-graph.json` 和
    `method-evaluation-plan.json`。冻结 `request.json` 继续提供方法规则所需的用户输入。业务
    `SKILL.md` 只说明如何按方法卡评估这些输入；日志证据只能来自 Graph/Plan，不读取目标日志、

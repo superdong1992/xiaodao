@@ -25,6 +25,7 @@ _KEBAB = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*\Z")
 _SNAKE = re.compile(r"[a-z][a-z0-9]*(?:_[a-z0-9]+)*\Z")
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _SEMVER = re.compile(r"0|[1-9][0-9]*(?:\.(?:0|[1-9][0-9]*)){2}(?:[-+][0-9A-Za-z.-]+)?\Z")
+_LOG_PLACEHOLDER_PATTERN = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}|%[A-Za-z]")
 _METHOD_HEADINGS = (
     "## 适用条件",
     "## 所需证据",
@@ -33,6 +34,7 @@ _METHOD_HEADINGS = (
     "## 未知边界",
     "## 输出含义",
 )
+_SOURCE_LOG_TEMPLATES_REFERENCE = "references/source-log-templates.md"
 _PACKAGE_ROOT_ENTRIES = frozenset({"SKILL.md", "methods.json", "references"})
 _METHODS_FIELDS = frozenset(
     {
@@ -199,6 +201,129 @@ def _frontmatter_name(text: str) -> str:
     return fields["name"]
 
 
+def _canonical_evidence_marker(template: str) -> str | None:
+    matches = list(_LOG_PLACEHOLDER_PATTERN.finditer(template))
+    if not matches:
+        return template.strip() or None
+    prefix = template[: matches[0].start()].strip()
+    if prefix:
+        return prefix
+    literal_segments = [
+        segment.strip()
+        for segment in (
+            *(
+                template[left.end() : right.start()]
+                for left, right in zip(matches, matches[1:])
+            ),
+            template[matches[-1].end() :],
+        )
+        if segment.strip()
+    ]
+    if not literal_segments:
+        return None
+    return max(
+        enumerate(literal_segments),
+        key=lambda item: (len(item[1]), -item[0]),
+    )[1]
+
+
+def _parse_source_log_templates(text: str) -> tuple[str, ...]:
+    prefix = "# Source log templates\n\n```text\n"
+    suffix = "\n```\n"
+    if not text.startswith(prefix) or not text.endswith(suffix):
+        raise ValueError(
+            "references/source-log-templates.md must use the fixed template inventory format"
+        )
+    body = text[len(prefix) : -len(suffix)]
+    templates = () if not body else tuple(body.split("\n"))
+    if any(not template.strip() for template in templates):
+        raise ValueError(
+            "references/source-log-templates.md must contain non-empty source templates"
+        )
+    rendered = prefix + "\n".join(templates) + suffix
+    if text != rendered:
+        raise ValueError(
+            "references/source-log-templates.md must use the fixed template inventory format"
+        )
+    return templates
+
+
+def _required_evidence_section(method_text: str) -> str:
+    heading = re.search(r"(?m)^## 所需证据[ \t]*\r?$", method_text)
+    if heading is None:
+        return ""
+    start = heading.end()
+    next_heading = re.search(r"(?m)^## [^\r\n]+[ \t]*\r?$", method_text[start:])
+    end = len(method_text) if next_heading is None else start + next_heading.start()
+    return method_text[start:end]
+
+
+def _expected_method_markers(
+    method_text: str,
+    source_templates: tuple[str, ...],
+) -> tuple[str, ...]:
+    required_evidence = _required_evidence_section(method_text)
+    expected: list[str] = []
+    for template in source_templates:
+        if not _contains_complete_template(required_evidence, template):
+            continue
+        marker = _canonical_evidence_marker(template)
+        if marker is not None and marker not in expected:
+            expected.append(marker)
+    return tuple(expected)
+
+
+def _contains_complete_template(section: str, template: str) -> bool:
+    inline = f"`{template}`"
+    for line in section.splitlines():
+        if inline in line:
+            return True
+        candidate = line.strip()
+        candidate = re.sub(r"^(?:[-*+]|[0-9]+[.)])[ \t]+", "", candidate)
+        if candidate == template:
+            return True
+    return False
+
+
+def _validate_method_marker_closure(
+    *,
+    index: int,
+    method: MethodCardV1,
+    method_text: str,
+    source_templates: tuple[str, ...],
+) -> None:
+    source_markers = {
+        marker
+        for template in source_templates
+        if (marker := _canonical_evidence_marker(template)) is not None
+    }
+    invalid = [marker for marker in method.evidence_markers if marker not in source_markers]
+    if invalid:
+        raise ValueError(
+            f"method {index} evidence marker is not canonical in "
+            f"references/source-log-templates.md: {invalid[0]}"
+        )
+    expected = _expected_method_markers(method_text, source_templates)
+    unrepresented = [
+        marker for marker in method.evidence_markers if marker not in expected
+    ]
+    if unrepresented:
+        raise ValueError(
+            f"method {index} evidence marker has no complete source template in "
+            f"its required evidence section: {unrepresented[0]}"
+        )
+    missing = [marker for marker in expected if marker not in method.evidence_markers]
+    if missing:
+        raise ValueError(
+            f"method {index} required evidence contains an unindexed canonical marker: "
+            f"{missing[0]}"
+        )
+    if method.evidence_markers != expected:
+        raise ValueError(
+            f"method {index} evidence_markers must follow source template order"
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class MethodCardV1:
     id: str
@@ -358,6 +483,10 @@ def load_methods_package(
     )
     if len(shared) != len(set(shared)):
         raise ValueError("shared_references must be unique")
+    if not shared or shared[0] != _SOURCE_LOG_TEMPLATES_REFERENCE:
+        raise ValueError(
+            "shared_references must start with references/source-log-templates.md"
+        )
 
     raw_methods = manifest["methods"]
     if not isinstance(raw_methods, list) or not raw_methods or len(raw_methods) > 100:
@@ -421,6 +550,16 @@ def load_methods_package(
     actual_references = {f"references/{item.name}" for item in reference_nodes}
     if actual_references != expected_references:
         raise ValueError("references directory must exactly match methods.json")
+    try:
+        source_template_text = _ordinary_file(
+            root / _SOURCE_LOG_TEMPLATES_REFERENCE,
+            label=_SOURCE_LOG_TEMPLATES_REFERENCE,
+        ).decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
+    except UnicodeDecodeError as exc:
+        raise ValueError(
+            "references/source-log-templates.md must be UTF-8"
+        ) from exc
+    source_templates = _parse_source_log_templates(source_template_text)
     for index, method in enumerate(methods, start=1):
         try:
             text = _ordinary_file(root / method.reference, label=method.reference).decode("utf-8")
@@ -429,11 +568,12 @@ def load_methods_package(
         for heading in _METHOD_HEADINGS:
             if heading not in text:
                 raise ValueError(f"{method.reference} is missing heading {heading}")
-        for marker in method.evidence_markers:
-            if marker not in text:
-                raise ValueError(
-                    f"method {index} evidence marker is absent from its method reference: {marker}"
-                )
+        _validate_method_marker_closure(
+            index=index,
+            method=method,
+            method_text=text,
+            source_templates=source_templates,
+        )
     for reference in shared:
         try:
             _ordinary_file(root / reference, label=reference).decode("utf-8")

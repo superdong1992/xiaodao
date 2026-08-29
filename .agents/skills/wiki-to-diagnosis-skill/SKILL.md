@@ -26,7 +26,8 @@ description: Convert an authored troubleshooting Wiki into one evidence-driven d
 6. 不能区分具体原因、但用于确认问题发生或关联目标请求的模板语义可以放入其他共享引用；无论如何，
    所有机械模板都必须逐字出现在固定模板清单文件中。只要某个方法会使用该日志是否出现、日志字段
    或与其他日志的关联来得出判定，就必须同时把 canonical marker 按源模板顺序写入该方法的
-   `evidence_markers`，并在该方法卡中列出。共享解释不能替代方法索引。
+   `evidence_markers`，并把对应完整模板逐字写入该方法卡的“所需证据”段。其他段落中的 marker
+   字样或共享解释都不能替代方法索引。
 7. 为每张方法卡写清楚可机械执行的确认、排除和未知条件。Server 会把一次扫描得到的 Evidence Graph
    和完整 Evaluation Plan 交给 Agent；冻结 `request.json` 继续提供方法规则所需的用户输入。
    生成的 Skill 只负责让 Agent 能按方法规则判断每个 `evaluation_ref`，不要求 Agent 回抄
@@ -48,7 +49,8 @@ description: Convert an authored troubleshooting Wiki into one evidence-driven d
 - 方法卡可以引用共享边界，但不能依赖未列入 `methods.json` 的隐藏文件。
 - Wiki 给出的每种稳定日志模板都必须在 `references/source-log-templates.md` 中按源顺序完整保留。
   `evidence_markers` 不只承担原因路由，还必须让 Evidence Graph 收齐该方法判断、计算、排除和请求关联
-  所需的日志。共同日志可以共享解释，但凡方法会读取其出现情况或字段，就要在每个适用方法中索引。
+  所需的日志。共同日志可以共享解释，但凡方法会读取其出现情况或字段，就要在每个适用方法的
+  “所需证据”中逐字列出完整模板，并在该方法中索引。
 
 ## 运行时边界
 

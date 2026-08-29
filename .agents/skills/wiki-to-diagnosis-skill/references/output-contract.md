@@ -91,9 +91,10 @@ Wiki `text` 日志模板使用 `{field_name}` 命名字段时，先按模板及�
 - `evidence_markers` 必须覆盖该方法在确认、排除、计算和关联目标请求时需要读取的全部日志模板，不只
   包含直接表示原因的日志。使用 Wiki 日志模板机械提取的 canonical stable marker，保持大小写。模板在第一个
   `{field}` 或 `%x` 占位符前存在非空字面前缀时，marker 必须是该完整前缀去除首尾空白后的精确
-  字节；模板以占位符开头时，使用占位符之间最长的非空字面片段（长度相同取最早者），同样只去除
-  首尾空白。不得截短前缀、保留占位符或改选另一个片段。每个 marker 必须出现在当前方法卡中；当前
-  方法卡中出现的每个 canonical marker 也必须被索引。`evidence_markers` 按
+  字节；模板以占位符开头时，使用占位符之间或最后一个占位符之后最长的非空字面片段（长度相同取
+  最早者），同样只去除首尾空白。不得截短前缀、保留占位符或改选另一个片段。每个 marker 必须在当前方法卡的“所需
+  证据”段对应至少一条逐字完整的源模板；该段逐字出现的每条源模板所派生的 canonical marker
+  也必须被索引。其他段落中的 marker 子串不参与闭包。`evidence_markers` 按
   `references/source-log-templates.md` 的源模板顺序排列。
   例如，`API_COMPLETE service={service} api={api} ...` 的 marker 是
   `API_COMPLETE service=`，不是 `API_COMPLETE`；`QUEUE_HISTORY print_time_ms={print_time_ms} ...`
@@ -140,7 +141,9 @@ Wiki `text` 日志模板使用 `{field_name}` 命名字段时，先按模板及�
 
 “所需证据”必须列出该方法判断、计算、排除或关联目标请求时会读取的每种完整日志模板，包括共同
 症状和请求关联日志。对应 canonical marker 必须与 `evidence_markers` 双向一致，并按固定源模板
-清单顺序排列。共享引用可以承载共同字段含义和观测边界，但不能替代这里的方法归属和索引。
+清单顺序排列。validator 只在“所需证据”段查找逐字完整模板；仅写 marker 子串、在其他段落提到
+marker，或只把模板放入共享引用，都不能建立闭包。共享引用可以承载共同字段含义和观测边界，但
+不能替代这里的方法归属和索引。
 
 如果 Wiki 说明某条日志只有在对应阈值或条件已经满足时才会打印，把观测到该日志写入“确认条件”，不能只称为补充证据。
 

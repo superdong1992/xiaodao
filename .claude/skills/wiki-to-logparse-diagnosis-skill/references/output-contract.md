@@ -211,14 +211,15 @@ Wiki 的同义输入按以下规则合并：
 - 每种方法至少有一个 canonical stable marker，且 `evidence_markers` 必须覆盖该方法在确认、排除、
   计算和关联目标请求时需要读取的全部日志模板，不只包含直接表示原因的日志。模板在第一个 `{field}` 或 `%x`
   占位符前存在非空字面前缀时，marker 是该完整前缀去除首尾空白后的精确字节；模板以占位符开头
-  时，只在相邻占位符之间选择最长的非空字面片段，长度相同取最早者；最后一个占位符之后的
-  suffix 不是候选。保持大小写，不得截短、改选其他片段、保留占位符或使用整条模板。模板只有
-  一个开头占位符、后面再无占位符时，没有 canonical marker。
+  时，在相邻占位符之间和最后一个占位符之后选择最长的非空字面片段，长度相同取最早者。保持
+  大小写，不得截短、改选其他片段、保留占位符或使用整条模板。模板只有占位符、没有任何稳定
+  字面片段时，没有 canonical marker。
 - 事件名或日志类型缩写不等于 canonical marker。例如模板
   `API_COMPLETE service={service} api={api}` 的 marker 必须精确为 `API_COMPLETE service=`；
   `API_COMPLETE`、`API_COMPLETE service` 和整条模板都无效。写 `methods.json` 前先机械算出合法
   marker 清单，`evidence_markers` 中的每一项都必须逐字取自该清单。
-- 每个 marker 必须出现在当前方法卡中；当前方法卡中出现的每个 canonical marker 也必须被索引。
+- 每个 marker 必须在当前方法卡的“所需证据”段对应至少一条逐字完整的源模板；该段逐字出现的
+  每条源模板所派生的 canonical marker 也必须被索引。其他段落中的 marker 子串不参与闭包。
   `evidence_markers` 按 `references/source-log-templates.md` 的源模板顺序排列。
 - 同一模板被多个方法用于确认、排除、计算或请求关联时，把 marker 列入每个适用方法。共同日志的
   字段含义和观测边界可以只写一次共享引用，但共享解释不能替代方法索引；只存在于共享引用的 marker
@@ -284,7 +285,9 @@ source identity 使用以下闭合结构：
 
 “所需证据”必须列出该方法判断、计算、排除或关联目标请求时会读取的每种完整日志模板，包括共同
 症状和请求关联日志。对应 canonical marker 必须与 `evidence_markers` 双向一致，并按固定源模板
-清单顺序排列。共享引用可以承载共同字段含义和观测边界，但不能替代这里的方法归属和索引。
+清单顺序排列。validator 只在“所需证据”段查找逐字完整模板；仅写 marker 子串、在其他段落提到
+marker，或只把模板放入共享引用，都不能建立闭包。共享引用可以承载共同字段含义和观测边界，但
+不能替代这里的方法归属和索引。
 
 “输出含义”必须说明：Server 会把同一方法的全部独立事件绑定到该方法的 `evaluation_ref`；Agent
 只返回该引用、判定和简短原因，不复制任何证据字段。证据不足以判断事件关系时返回 `UNKNOWN`。

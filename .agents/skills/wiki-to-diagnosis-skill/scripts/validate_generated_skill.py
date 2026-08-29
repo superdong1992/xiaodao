@@ -195,15 +195,21 @@ def _wiki_named_log_fields(templates: list[str]) -> list[str]:
 
 
 def _canonical_evidence_marker(template: str) -> str | None:
-    match = LOG_PLACEHOLDER_PATTERN.search(template)
-    if match is None:
+    matches = list(LOG_PLACEHOLDER_PATTERN.finditer(template))
+    if not matches:
         return template.strip() or None
-    prefix = template[: match.start()].strip()
+    prefix = template[: matches[0].start()].strip()
     if prefix:
         return prefix
     literal_segments = [
         segment.strip()
-        for segment in LOG_PLACEHOLDER_PATTERN.split(template)[::2]
+        for segment in (
+            *(
+                template[left.end() : right.start()]
+                for left, right in zip(matches, matches[1:])
+            ),
+            template[matches[-1].end() :],
+        )
         if segment.strip()
     ]
     if not literal_segments:
@@ -222,27 +228,66 @@ def canonical_evidence_markers(log_templates: list[str]) -> list[str]:
     return markers
 
 
+def _required_evidence_section(method_text: str) -> str:
+    heading = re.search(r"(?m)^## 所需证据[ \t]*\r?$", method_text)
+    if heading is None:
+        return ""
+    start = heading.end()
+    next_heading = re.search(r"(?m)^## [^\r\n]+[ \t]*\r?$", method_text[start:])
+    end = len(method_text) if next_heading is None else start + next_heading.start()
+    return method_text[start:end]
+
+
+def _expected_method_markers(
+    method_text: str,
+    wiki_templates: list[str],
+) -> list[str]:
+    required_evidence = _required_evidence_section(method_text)
+    expected: list[str] = []
+    for template in wiki_templates:
+        if not _contains_complete_template(required_evidence, template):
+            continue
+        marker = _canonical_evidence_marker(template)
+        if marker is not None and marker not in expected:
+            expected.append(marker)
+    return expected
+
+
+def _contains_complete_template(section: str, template: str) -> bool:
+    inline = f"`{template}`"
+    for line in section.splitlines():
+        if inline in line:
+            return True
+        candidate = line.strip()
+        candidate = re.sub(r"^(?:[-*+]|[0-9]+[.)])[ \t]+", "", candidate)
+        if candidate == template:
+            return True
+    return False
+
+
 def _validate_method_marker_closure(
     *,
     index: int,
     markers: list[str],
     method_text: str,
-    wiki_markers: list[str],
+    wiki_templates: list[str],
     errors: list[str],
 ) -> None:
-    absent = [marker for marker in markers if marker not in method_text]
-    for marker in absent:
-        errors.append(
-            f"method {index} evidence marker is absent from its method reference: {marker}"
-        )
-    if absent or not markers or any(marker not in wiki_markers for marker in markers):
+    wiki_markers = canonical_evidence_markers(wiki_templates)
+    if not markers or any(marker not in wiki_markers for marker in markers):
         return
-
-    expected = [marker for marker in wiki_markers if marker in method_text]
+    expected = _expected_method_markers(method_text, wiki_templates)
+    unrepresented = [marker for marker in markers if marker not in expected]
+    for marker in unrepresented:
+        errors.append(
+            f"method {index} 的 evidence marker 在“所需证据”中没有对应的完整 Wiki 日志模板: {marker}"
+        )
+    if unrepresented:
+        return
     missing = [marker for marker in expected if marker not in markers]
     if missing:
         errors.append(
-            f"method {index} 的 method reference 含有未被 evidence_markers 索引的 "
+            f"method {index} 的“所需证据”含有未被 evidence_markers 索引的 "
             f"canonical marker: {', '.join(missing)}"
         )
     elif markers != expected:
@@ -447,7 +492,7 @@ def validate(skill_dir: Path, wiki: Path) -> dict[str, object]:
                     index=index,
                     markers=markers,
                     method_text=method_text,
-                    wiki_markers=wiki_canonical_markers,
+                    wiki_templates=wiki_templates,
                     errors=errors,
                 )
             if reference_texts.get(SOURCE_LOG_TEMPLATES_REFERENCE) != _render_source_log_templates(
