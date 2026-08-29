@@ -517,7 +517,8 @@ def test_generation_validator_rejects_all_observed_shorthand_markers(
     manifest = json.loads(methods_path.read_text(encoding="utf-8"))
     for method in manifest["methods"]:
         method["evidence_markers"] = [
-            shorthand_by_marker[marker] for marker in method["evidence_markers"]
+            shorthand_by_marker.get(marker, marker)
+            for marker in method["evidence_markers"]
         ]
     methods_path.write_text(
         json.dumps(manifest, ensure_ascii=False, sort_keys=True) + "\n",
