@@ -509,6 +509,7 @@ def test_role_workspaces_hard_cut_to_one_graph_plan_and_real_cards(
 
     for context in (specialist_context, reviewer_context):
         assert USER_FACT_VALUE in context.body
+        assert '"user_facts"' in context.body
         assert graph.graph_ref in context.body
         assert plan.plan_ref in context.body
         assert skill.methods.methods[0].id in context.body
@@ -522,6 +523,19 @@ def test_role_workspaces_hard_cut_to_one_graph_plan_and_real_cards(
         assert PRIVATE_ATTACHMENT_SENTINEL.decode() not in context.body
         assert PRIVATE_ARTIFACT_SENTINEL.decode() not in context.body
         assert PRIVATE_EVIDENCE_SENTINEL.decode() not in context.body
+        assert specialist.context_snapshot.problem_spec.statement not in context.body
+        assert '"problem_spec"' not in context.body
+        for state_field in (
+            "diagnosis_state_revision",
+            "confirmed_facts",
+            "active_hypotheses",
+            "rejected_hypotheses",
+            "open_questions",
+            "pending_requirements",
+            "evidence_refs",
+            "candidate_conclusion",
+        ):
+            assert f'"{state_field}"' not in context.body
         assert "target_logs_path" not in context.body
         assert "inputs/target_logs.json" not in context.body
         assert "inputs/logparse-receipt.json" not in context.body

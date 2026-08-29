@@ -422,32 +422,39 @@ class ContextBuilder:
             ),
             job,
         )
-        context_snapshot = job.context_snapshot
-        if methods_v2 or job.job_type is JobType.REVIEW:
-            # Methods V2 roles receive their own immutable user facts without
-            # Candidate or intermediate diagnosis state.  Graph/Plan carry the
-            # only log evidence used by either model role.
-            hidden: dict[str, object] = {
-                "confirmed_facts": [],
-                "active_hypotheses": [],
-                "rejected_hypotheses": [],
-                "open_questions": [],
-            }
-            if methods_v2 or job.methods_review_target is not None:
-                hidden.update(
+        frozen_snapshot = job.context_snapshot
+        if methods_v2:
+            # Methods V2 model roles need only the declared user inputs.  The
+            # Case ProblemSpec and all intermediate diagnosis state stay on the
+            # server; Graph/Plan carry the complete log-derived evidence.
+            context_snapshot: object = {
+                "schema_version": 2,
+                "user_facts": [
                     {
-                        "pending_requirements": [],
-                        "evidence_refs": [],
-                        "candidate_conclusion": None,
+                        "name": item.provenance.input_name,
+                        "value": item.statement,
+                        "source_fact_id": item.item_id,
+                    }
+                    for item in frozen_snapshot.user_facts
+                ],
+            }
+            open_requirements = []
+        else:
+            context_snapshot = frozen_snapshot
+            if job.job_type is JobType.REVIEW:
+                context_snapshot = context_snapshot.model_copy(
+                    update={
+                        "confirmed_facts": [],
+                        "active_hypotheses": [],
+                        "rejected_hypotheses": [],
+                        "open_questions": [],
                     }
                 )
-            context_snapshot = context_snapshot.model_copy(update=hidden)
-
-        open_requirements = [
-            requirement
-            for requirement in context_snapshot.pending_requirements
-            if requirement.status is RequirementStatus.OPEN
-        ]
+            open_requirements = [
+                requirement
+                for requirement in context_snapshot.pending_requirements
+                if requirement.status is RequirementStatus.OPEN
+            ]
 
         prefix = [
             _SectionDraft(

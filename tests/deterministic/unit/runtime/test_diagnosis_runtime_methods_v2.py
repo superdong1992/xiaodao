@@ -79,6 +79,22 @@ from tests.deterministic.unit.runtime.test_methods_workspace_context_v2 import (
 )
 
 
+def _assert_model_minimal_methods_prompt(prompt: str) -> None:
+    assert '"user_facts"' in prompt
+    assert '"problem_spec"' not in prompt
+    for state_field in (
+        "diagnosis_state_revision",
+        "confirmed_facts",
+        "active_hypotheses",
+        "rejected_hypotheses",
+        "open_questions",
+        "pending_requirements",
+        "evidence_refs",
+        "candidate_conclusion",
+    ):
+        assert f'"{state_field}"' not in prompt
+
+
 class _EvidenceV2SpecialistBackend(_MethodsTwoPassBackend):
     def __init__(
         self,
@@ -116,6 +132,7 @@ class _EvidenceV2SpecialistBackend(_MethodsTwoPassBackend):
         assert request["user_facts"]
         prompt = kwargs["prompt"]
         self.role_prompts.append(prompt)
+        _assert_model_minimal_methods_prompt(prompt)
         assert "Evidence Graph" in prompt
         assert "evaluation_ref" in prompt
 
@@ -241,6 +258,7 @@ class _EvidenceV2ReviewerBackend:
         self.events.append("backend")
         prompt = kwargs["prompt"]
         self.prompts.append(prompt)
+        _assert_model_minimal_methods_prompt(prompt)
         assert PRIVATE_STATE_SENTINEL not in prompt
         assert "private specialist reason" not in prompt
         assert "specialist_evaluation" not in prompt
