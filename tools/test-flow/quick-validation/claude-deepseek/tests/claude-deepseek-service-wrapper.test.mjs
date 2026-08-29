@@ -6,6 +6,7 @@ import { Readable, Writable } from "node:stream";
 import test from "node:test";
 
 import { ISOLATED_AGENT_ENV_POLICY_VERSION, environmentKeySummary } from "../../../runtime-support/isolated-agent-env.mjs";
+import { validateClaudeDeepseekRoleReceipt } from "../runtime/claude-deepseek-contract.mjs";
 
 import {
   auditRoleWorkspace,
@@ -131,14 +132,15 @@ test("role workspace accepts Write then Read of its own draft and rejects other 
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
-test("tool policy exposes Read/Write only and binds one role draft", () => {
+test("role exposes Read/Write tools but grants its Write through the Edit permission category", () => {
   const root = path.resolve("role-workspace");
   const policy = roleToolPolicy({ workspaceRoot: root, output: "output/method-review.draft.json" });
   assert.deepEqual(policy.tools, ["Read", "Write"]);
   assert.equal(policy.allowed_tools.length, 3);
   assert.match(policy.allowed_tools[0], /^Read\(.+\/inputs\/\*\*\)$/u);
   assert.match(policy.allowed_tools[1], /^Read\(.+\/output\/method-review\.draft\.json\)$/u);
-  assert.match(policy.allowed_tools[2], /^Write\(.+\/output\/method-review\.draft\.json\)$/u);
+  assert.match(policy.allowed_tools[2], /^Edit\(.+\/output\/method-review\.draft\.json\)$/u);
+  assert.doesNotMatch(policy.allowed_tools[2], /^Write\(/u);
   assert.equal(policy.readable_scope, "job-workspace-inputs-and-role-draft");
   assert.equal(policy.shell, false);
   assert.equal(policy.network, false);
@@ -458,6 +460,68 @@ test("failed provider invocation writes one closed role receipt with terminal us
     assert.equal(receipt.wall_timeout_seconds, 600);
     assert.ok(Date.parse(receipt.finished_at_utc) >= Date.parse(receipt.started_at_utc));
     assert.deepEqual(receipt, JSON.parse(fs.readFileSync(path.join(values["evidence-root"], "model-role-invocations", "specialist-primary.receipt.json"), "utf8")));
+  } finally { process.chdir(previous); fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("a denied tool result preserves the successful provider terminal in the failed role receipt", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "deepseek-role-denied-tool-terminal-"));
+  const previous = process.cwd();
+  try {
+    workspace(root);
+    process.chdir(root);
+    const values = {
+      "claude-entry": path.join(root, "cli.js"), settings: path.join(root, "settings.json"), "config-root": path.join(root, "config"),
+      "private-root": path.join(root, "private"), "evidence-root": path.join(root, "evidence"), "usage-root": path.join(root, "usage"), "run-id": "run",
+    };
+    fs.writeFileSync(values.settings, "{}\n");
+    fs.writeFileSync(values["claude-entry"], `
+process.stdin.resume();
+process.stdin.on("end", () => {
+  const output = require("node:path").join(process.cwd(), "output", "method-diagnosis.draft.json");
+  const events = [
+    {type:"system",subtype:"init",model:"deepseek-v4-flash[1m]",cwd:process.cwd(),permissionMode:"dontAsk",tools:["Read","Write"]},
+    {type:"assistant",message:{role:"assistant",content:[{type:"tool_use",id:"write",name:"Write",input:{file_path:output,content:"[]"}}]}},
+    {type:"user",message:{role:"user",content:[{type:"tool_result",tool_use_id:"write",is_error:true,content:"permission denied"}]},tool_use_result:{error:"permission denied"}},
+    {
+      type:"result",subtype:"success",is_error:false,num_turns:2,stop_reason:"end_turn",total_cost_usd:0.387648,
+      usage:{input_tokens:32930,output_tokens:8390,cache_creation_input_tokens:0,cache_read_input_tokens:26496},
+      modelUsage:{"deepseek-v4-flash[1m]":{inputTokens:32930,outputTokens:8390,cacheCreationInputTokens:0,cacheReadInputTokens:26496,costUSD:0.387648}}
+    },
+  ];
+  for (const event of events) process.stdout.write(JSON.stringify(event)+"\\n");
+});
+`);
+    fs.mkdirSync(values["config-root"]);
+    await assert.rejects(runServiceInvocation(values, {
+      stdin: Readable.from([prompt("Specialist", "primary evaluation")]),
+      stdout: new Writable({ write(_chunk, _encoding, callback) { callback(); } }),
+    }), { code: "CLAUDE_DEEPSEEK_TOOL_RESULT_ERROR" });
+    const [receipt] = readRoleInvocationReceipts(values["usage-root"]);
+    assert.equal(receipt.status, "FAIL");
+    assert.equal(receipt.failure_code, "CLAUDE_DEEPSEEK_TOOL_RESULT_ERROR");
+    assert.equal(receipt.turns, 2);
+    assert.equal(receipt.usage_complete, true);
+    assert.deepEqual(receipt.usage, {
+      schema_version: 1,
+      input_tokens: 32930,
+      output_tokens: 8390,
+      cache_creation_input_tokens: 0,
+      cache_read_input_tokens: 26496,
+      total_tokens: 67816,
+      cost_usd: 0.387648,
+    });
+    assert.deepEqual(receipt.provider_terminal, {
+      subtype: "success",
+      is_error: false,
+      stop_reason: "end_turn",
+      exit_code: 0,
+      signal: null,
+    });
+    assert.equal(validateClaudeDeepseekRoleReceipt(receipt, {
+      expectedRole: "SPECIALIST",
+      expectedAttempt: "PRIMARY",
+      priorCostUsd: 0,
+    }), receipt);
   } finally { process.chdir(previous); fs.rmSync(root, { recursive: true, force: true }); }
 });
 

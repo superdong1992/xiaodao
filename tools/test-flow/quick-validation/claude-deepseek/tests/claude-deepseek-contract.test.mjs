@@ -242,7 +242,7 @@ test("Evidence V2 model cert allows only S primary/repair then blind R primary/r
     const policy = {
       schema_version: 1,
       tools: ["Read", "Write"],
-      allowed_tools: ["Read(//workspace/inputs/**)", `Read(//workspace/${output})`, `Write(//workspace/${output})`],
+      allowed_tools: ["Read(//workspace/inputs/**)", `Read(//workspace/${output})`, `Edit(//workspace/${output})`],
       readable_scope: "job-workspace-inputs-and-role-draft",
       writable_scope: output,
       network: false,
@@ -297,6 +297,14 @@ test("Evidence V2 model cert allows only S primary/repair then blind R primary/r
   };
   const normal = [roleInvocation("SPECIALIST", "PRIMARY"), roleInvocation("REVIEWER", "PRIMARY")];
   assert.deepEqual(auditClaudeModelCertInvocations(normal).repair_counts, { specialist: 0, reviewer: 0 });
+  assert.deepEqual(normal[0].tool_policy.tools, ["Read", "Write"]);
+  assert.match(normal[0].tool_policy.allowed_tools[2], /^Edit\(/u);
+  const wrongPermissionCategory = structuredClone(normal);
+  wrongPermissionCategory[0].tool_policy.allowed_tools[2] = "Write(//workspace/output/method-diagnosis.draft.json)";
+  const wrongPermissionCore = { ...wrongPermissionCategory[0].tool_policy };
+  delete wrongPermissionCore.sha256;
+  wrongPermissionCategory[0].tool_policy.sha256 = crypto.createHash("sha256").update(canonicalJson(wrongPermissionCore)).digest("hex");
+  assert.throws(() => auditClaudeModelCertInvocations(wrongPermissionCategory), (error) => error.code === "CLAUDE_DEEPSEEK_ROLE_RECEIPT_TOOL_POLICY_INVALID");
   const repaired = [roleInvocation("SPECIALIST", "PRIMARY"), roleInvocation("SPECIALIST", "REPAIR"), roleInvocation("REVIEWER", "PRIMARY"), roleInvocation("REVIEWER", "REPAIR")];
   assert.equal(auditClaudeModelCertInvocations(repaired).actual_call_count, 4);
   assert.equal(auditClaudeModelCertInvocations(repaired).aggregate.cost_usd, 0.04);

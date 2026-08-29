@@ -443,7 +443,7 @@ function validRoleToolPolicy(value, role) {
     && value.allowed_tools.every((item) => typeof item === "string" && item.length > 0)
     && value.allowed_tools[0].startsWith("Read(")
     && value.allowed_tools[1].startsWith("Read(")
-    && value.allowed_tools[2].startsWith("Write(")
+    && value.allowed_tools[2].startsWith("Edit(")
     && value.readable_scope === "job-workspace-inputs-and-role-draft"
     && value.writable_scope === output
     && value.network === false

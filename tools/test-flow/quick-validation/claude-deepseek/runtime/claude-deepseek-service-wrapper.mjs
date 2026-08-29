@@ -210,7 +210,9 @@ export function roleToolPolicy({ workspaceRoot, output }) {
   const policy = {
     schema_version: 1,
     tools: ["Read", "Write"],
-    allowed_tools: [`Read(${inputs}/**)`, `Read(${outputFile})`, `Write(${outputFile})`],
+    // Claude Code emits file creation as Write, while its permission matcher
+    // authorizes that tool with the Edit(path) permission category.
+    allowed_tools: [`Read(${inputs}/**)`, `Read(${outputFile})`, `Edit(${outputFile})`],
     readable_scope: "job-workspace-inputs-and-role-draft",
     writable_scope: output,
     network: false,

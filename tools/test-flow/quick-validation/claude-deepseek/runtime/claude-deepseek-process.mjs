@@ -252,7 +252,13 @@ export async function runClaudeProcess(options, { ambient = process.env, onProgr
     error.details = { ...(error?.details ?? {}), ...processDetails };
     throw error;
   }
-  const projected = projectClaudeTools(events, { allowToolErrors: options.allowToolErrors === true });
+  let projected;
+  try {
+    projected = projectClaudeTools(events, { allowToolErrors: options.allowToolErrors === true });
+  } catch (error) {
+    error.details = { ...(error?.details ?? {}), ...processDetails };
+    throw error;
+  }
   const receipt = {
     schema_version: 1,
     invocation_id: options.invocationId,
