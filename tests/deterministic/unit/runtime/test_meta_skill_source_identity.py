@@ -457,6 +457,49 @@ def test_validator_requires_complete_template_in_required_evidence_section(
     ]
 
 
+def test_validator_rejects_fake_reordered_and_duplicate_method_headings(
+    tmp_path: Path,
+) -> None:
+    template = "RPC_TIMEOUT request_id={request_id} timeout_ms={timeout_ms}"
+    mutations = {
+        "fenced": lambda text: f"```text\n{text}```\n",
+        "commented": lambda text: f"<!--\n{text}-->\n",
+        "reordered": lambda text: text.replace(
+            "## 适用条件", "## TEMP", 1
+        ).replace("## 所需证据", "## 适用条件", 1).replace(
+            "## TEMP", "## 所需证据", 1
+        ),
+        "duplicate": lambda text: text.replace(
+            "## 计算与判断", "## 所需证据\nDuplicate.\n## 计算与判断", 1
+        ),
+    }
+    for label, mutation in mutations.items():
+        root = tmp_path / label
+        wiki = root / "wiki.md"
+        wiki.parent.mkdir(parents=True)
+        wiki_bytes = f"# Wiki\n\n```text\n{template}\n```\n".encode("utf-8")
+        wiki.write_bytes(wiki_bytes)
+        package = _write_package(
+            root,
+            wiki_sha256=hashlib.sha256(wiki_bytes).hexdigest(),
+            log_derived_fields=["request_id", "timeout_ms"],
+            evidence_marker="RPC_TIMEOUT request_id=",
+            reference_log_template=template,
+        )
+        reference = package / "references/rpc-timeout.md"
+        reference.write_text(
+            mutation(reference.read_text(encoding="utf-8")),
+            encoding="utf-8",
+        )
+
+        rejected = _load_validator().validate(package, wiki)
+
+        assert (
+            "references/rpc-timeout.md must contain each fixed method heading "
+            "exactly once in order"
+        ) in rejected["errors"]
+
+
 def test_source_identity_v2_mechanically_preserves_template_order_and_duplicates() -> None:
     validator = _load_validator()
     wiki_bytes = (

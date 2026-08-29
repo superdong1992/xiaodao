@@ -248,14 +248,82 @@ def _parse_source_log_templates(text: str) -> tuple[str, ...]:
     return templates
 
 
+def _outside_html_comments(line: str, in_comment: bool) -> tuple[str, bool]:
+    visible = list(line)
+    cursor = 0
+    while cursor < len(line):
+        if in_comment:
+            closing = line.find("-->", cursor)
+            end = len(line) if closing < 0 else closing + 3
+            visible[cursor:end] = " " * (end - cursor)
+            cursor = end
+            if closing < 0:
+                break
+            in_comment = False
+            continue
+        opening = line.find("<!--", cursor)
+        if opening < 0:
+            break
+        closing = line.find("-->", opening + 4)
+        end = len(line) if closing < 0 else closing + 3
+        visible[opening:end] = " " * (end - opening)
+        cursor = end
+        in_comment = closing < 0
+    return "".join(visible), in_comment
+
+
+def _method_h2_sections(method_text: str) -> list[tuple[str, str]]:
+    headings: list[tuple[str, int, int]] = []
+    in_comment = False
+    fence_character: str | None = None
+    fence_length = 0
+    offset = 0
+    for line in method_text.splitlines(keepends=True):
+        line_without_ending = line.rstrip("\r\n")
+        if fence_character is not None:
+            closing = re.fullmatch(
+                rf"[ ]{{0,3}}{re.escape(fence_character)}{{{fence_length},}}[ \t]*",
+                line_without_ending,
+            )
+            if closing is not None:
+                fence_character = None
+                fence_length = 0
+            offset += len(line)
+            continue
+        visible, in_comment = _outside_html_comments(line_without_ending, in_comment)
+        fence = re.match(r"[ ]{0,3}(`{3,}|~{3,})", visible)
+        if fence is not None:
+            fence_character = fence.group(1)[0]
+            fence_length = len(fence.group(1))
+            offset += len(line)
+            continue
+        heading = re.fullmatch(r"[ ]{0,3}##[ \t]+(.+?)[ \t]*", visible)
+        if heading is not None:
+            headings.append((heading.group(1), offset, offset + len(line)))
+        offset += len(line)
+    sections: list[tuple[str, str]] = []
+    for index, (title, _, body_start) in enumerate(headings):
+        body_end = len(method_text) if index + 1 == len(headings) else headings[index + 1][1]
+        sections.append((title, method_text[body_start:body_end]))
+    return sections
+
+
 def _required_evidence_section(method_text: str) -> str:
-    heading = re.search(r"(?m)^## 所需证据[ \t]*\r?$", method_text)
-    if heading is None:
-        return ""
-    start = heading.end()
-    next_heading = re.search(r"(?m)^## [^\r\n]+[ \t]*\r?$", method_text[start:])
-    end = len(method_text) if next_heading is None else start + next_heading.start()
-    return method_text[start:end]
+    for title, body in _method_h2_sections(method_text):
+        if title == "所需证据":
+            return body
+    return ""
+
+
+def _validate_method_headings(method_text: str, *, reference: str) -> None:
+    fixed_titles = tuple(heading.removeprefix("## ") for heading in _METHOD_HEADINGS)
+    observed = tuple(
+        title for title, _ in _method_h2_sections(method_text) if title in fixed_titles
+    )
+    if observed != fixed_titles:
+        raise ValueError(
+            f"{reference} must contain each fixed method heading exactly once in order"
+        )
 
 
 def _expected_method_markers(
@@ -565,9 +633,7 @@ def load_methods_package(
             text = _ordinary_file(root / method.reference, label=method.reference).decode("utf-8")
         except UnicodeDecodeError as exc:
             raise ValueError(f"{method.reference} must be UTF-8") from exc
-        for heading in _METHOD_HEADINGS:
-            if heading not in text:
-                raise ValueError(f"{method.reference} is missing heading {heading}")
+        _validate_method_headings(text, reference=method.reference)
         _validate_method_marker_closure(
             index=index,
             method=method,

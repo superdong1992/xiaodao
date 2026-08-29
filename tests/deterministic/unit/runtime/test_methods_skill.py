@@ -457,6 +457,64 @@ def test_package_loader_derives_marker_from_stable_suffix_after_placeholder(
     )
 
 
+def test_required_evidence_keeps_raw_fenced_template_body(tmp_path: Path) -> None:
+    package = _write_package(tmp_path)
+    reference = package / "references/slow-execution.md"
+    reference.write_text(
+        reference.read_text(encoding="utf-8").replace(
+            "`API_COMPLETE%s`",
+            "```text\nAPI_COMPLETE%s\n```",
+            1,
+        ),
+        encoding="utf-8",
+    )
+
+    assert load_methods_package(package).methods[0].evidence_markers == (
+        "API_COMPLETE",
+    )
+
+
+@pytest.mark.parametrize(
+    ("mutation", "label"),
+    [
+        (lambda text: f"```text\n{text}```\n", "fenced fake headings"),
+        (lambda text: f"<!--\n{text}-->\n", "commented fake headings"),
+        (
+            lambda text: text.replace("## 适用条件", "## TEMP", 1)
+            .replace("## 所需证据", "## 适用条件", 1)
+            .replace("## TEMP", "## 所需证据", 1),
+            "out-of-order headings",
+        ),
+        (
+            lambda text: text.replace(
+                "## 计算与判断", "## 所需证据\nDuplicate section.\n\n## 计算与判断", 1
+            ),
+            "duplicate heading",
+        ),
+    ],
+)
+def test_direct_skill_dir_rejects_noncanonical_method_heading_structure(
+    tmp_path: Path,
+    mutation: Any,
+    label: str,
+) -> None:
+    registration = _write_registration(tmp_path / label)
+    reference = (
+        registration
+        / "package/diagnose-test-timeout/references/slow-execution.md"
+    )
+    reference.write_text(
+        mutation(reference.read_text(encoding="utf-8")),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="must contain each fixed method heading exactly once in order",
+    ):
+        load_specialized_skill_registration(registration)
+
+
 def test_production_loader_allows_v2_prose_that_mentions_v1_words(tmp_path: Path) -> None:
     package = _write_package(tmp_path)
     skill_path = package / "SKILL.md"

@@ -452,6 +452,41 @@ def test_validator_requires_complete_template_in_required_evidence_section(
     ]
 
 
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda text: f"```text\n{text}```\n",
+        lambda text: f"<!--\n{text}-->\n",
+        lambda text: text.replace("## 适用条件", "## TEMP", 1)
+        .replace("## 所需证据", "## 适用条件", 1)
+        .replace("## TEMP", "## 所需证据", 1),
+        lambda text: text.replace(
+            "## 计算与判断", "## 所需证据\n重复段。\n## 计算与判断", 1
+        ),
+    ],
+)
+def test_validator_rejects_fake_reordered_and_duplicate_method_headings(
+    tmp_path: Path,
+    mutation,
+) -> None:
+    registration, wiki, _ = _write_valid_registration(tmp_path)
+    reference = (
+        registration
+        / "package/diagnose-rpc-timeout/references/api-execution-slow.md"
+    )
+    reference.write_text(
+        mutation(reference.read_text(encoding="utf-8")),
+        encoding="utf-8",
+    )
+
+    rejected = _validate(registration, wiki)
+
+    assert (
+        "references/api-execution-slow.md must contain each fixed method heading "
+        "exactly once in order"
+    ) in rejected["errors"]
+
+
 def test_valid_production_registration_passes(tmp_path: Path) -> None:
     registration, wiki, identity = _write_valid_registration(tmp_path)
 
