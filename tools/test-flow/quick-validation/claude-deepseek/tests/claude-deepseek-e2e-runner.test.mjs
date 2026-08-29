@@ -14,6 +14,7 @@ import {
   auditScenarioIdentity,
   buildModelCertInput,
   materializeStandaloneModelCert,
+  materializeProviderTerminalFailure,
   parseArguments,
   productionRuntimeArguments,
   safeE2EError,
@@ -233,6 +234,63 @@ test("provider-local zero-model driver proves the normal two calls and four-call
       ]) assert.equal(fs.existsSync(path.join(evidenceRoot, name)), true, name);
     }
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("provider-local production Runtime archives a disagreement as UNRESOLVED", { skip: !process.env.TEST_FLOW_QUICK_PYTHON }, () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "deepseek-cert-disagreement-"));
+  try {
+    const evidenceRoot = path.join(root, "evidence");
+    const receiptPath = path.join(evidenceRoot, "runtime-receipt.json");
+    const args = [
+      RUNTIME,
+      "--mode", "fake",
+      "--fake-reviewer-rejected-method-id", "rpc-call-timeout",
+      "--source-root", ROOT,
+      "--work-root", path.join(root, "work"),
+      "--evidence-root", evidenceRoot,
+      "--receipt-path", receiptPath,
+    ];
+    const bootstrap = "import runpy,sys,types; mark=types.SimpleNamespace(parametrize=lambda *a,**k:(lambda f:f)); sys.modules['pytest']=types.SimpleNamespace(fixture=lambda f:f,mark=mark); script=sys.argv[1]; sys.argv=sys.argv[1:]; runpy.run_path(script,run_name='__main__')";
+    const result = spawnSync(process.env.TEST_FLOW_QUICK_PYTHON, ["-c", bootstrap, ...args], { cwd: ROOT, env: process.env, encoding: "utf8", timeout: 120_000 });
+    assert.equal(result.status, 0, result.stderr);
+    const receipt = JSON.parse(fs.readFileSync(receiptPath, "utf8"));
+    assert.equal(receipt.status, "PASS");
+    assert.equal(receipt.methods_result.status, "UNRESOLVED");
+    assert.equal(receipt.methods_result.reason_code, "SPECIALIST_REVIEWER_DISAGREEMENT");
+    assert.match(receipt.methods_result.diagnostic_id, /^diag-[a-f0-9]{64}$/u);
+    assert.match(receipt.methods_result.diagnostic_evaluation_ref, /^eval-[a-f0-9]{64}$/u);
+    assert.equal(receipt.methods_result.reasons.length, 1);
+    assert.match(receipt.methods_result.reasons[0], /Specialist.*Reviewer/u);
+    for (const name of [
+      "runtime-receipt.json", "methods-evidence-graph-v2.json", "methods-evaluation-plan-v2.json",
+      "methods-source-state-v2.json", "methods-source-outcome-v2.json",
+      "methods-terminal-state-v2.json", "methods-reviewer-outcome-v2.json", "methods-result-v2.json",
+    ]) assert.equal(fs.existsSync(path.join(evidenceRoot, name)), true, name);
+    assert.equal(fs.existsSync(path.join(evidenceRoot, "model-cert.json")), false);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("P1 failure adapter exposes the production reason and diagnostic without minting a cert", (context) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "deepseek-terminal-failure-"));
+  context.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const methodsResult = {
+    status: "UNRESOLVED",
+    reason_code: "SPECIALIST_REVIEWER_DISAGREEMENT",
+    reasons: ["Specialist 与 Reviewer 的判定不一致。"],
+    diagnostic_id: `diag-${"a".repeat(64)}`,
+    diagnostic_evaluation_ref: `eval-${"b".repeat(64)}`,
+  };
+  const receipt = materializeProviderTerminalFailure({ methods_result: methodsResult }, root, {
+    modelCalls: 2,
+    repairs: { specialist: 0, reviewer: 0 },
+  });
+  assert.equal(receipt.code, methodsResult.reason_code);
+  assert.equal(receipt.reason, methodsResult.reasons[0]);
+  assert.equal(receipt.diagnostic_id, methodsResult.diagnostic_id);
+  assert.equal(receipt.evaluation_ref, methodsResult.diagnostic_evaluation_ref);
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(root, "adapter-receipt.json"), "utf8")), receipt);
+  assert.equal(fs.existsSync(path.join(root, "model-cert.json")), false);
+  assert.equal(safeE2EError({ code: receipt.code, message: receipt.reason }).code, "SPECIALIST_REVIEWER_DISAGREEMENT");
 });
 
 test("safe model-cert error exposes only a closed code and message", () => {

@@ -10,10 +10,12 @@ import { validateEvidenceV2ModelCertInputSchema } from "../../../../validation/e
 import {
   auditRuntimeAndInvocations,
   buildModelCertInput,
+  materializeProviderTerminalFailure,
   parseArguments,
   runE2E,
   safeE2EError,
 } from "../runtime/macos-codex-luna-e2e-runner.mjs";
+import { materializeProviderTerminalFailure as materializeP1TerminalFailure } from "../../claude-deepseek/runtime/claude-deepseek-e2e-runner.mjs";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "..", "..");
 const SHA = (character) => character.repeat(64);
@@ -96,6 +98,7 @@ function runtimeReceipt(invocations) {
       evidence_graph_ref: GRAPH_REF,
       diagnostic_id: `diag-${SHA("4")}`,
     },
+    methods_result: { status: "RESOLVED" },
   };
 }
 
@@ -196,6 +199,82 @@ test("an injected provider receipt cannot mint a cert without production executi
   }), (error) => error.code === "SCENARIO_ORACLE_METHODS_MISSING");
   assert.equal(fs.existsSync(path.join(options.evidenceRoot, "model-cert-input.json")), false);
   assert.equal(fs.existsSync(path.join(options.evidenceRoot, "model-cert.json")), false);
+});
+
+test("P1 and P2 failure adapters expose the same production terminal diagnostic", (context) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "provider-terminal-alignment-"));
+  context.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const methodsResult = {
+    status: "UNRESOLVED",
+    reason_code: "SPECIALIST_REVIEWER_DISAGREEMENT",
+    reasons: ["Specialist 与 Reviewer 的判定不一致。"],
+    diagnostic_id: `diag-${SHA("a")}`,
+    diagnostic_evaluation_ref: `eval-${SHA("b")}`,
+  };
+  const options = { modelCalls: 2, repairs: { specialist: 0, reviewer: 0 } };
+  const p1 = materializeP1TerminalFailure({ methods_result: methodsResult }, path.join(root, "p1"), options);
+  const p2 = materializeProviderTerminalFailure({ methods_result: methodsResult }, path.join(root, "p2"), options);
+  const withoutTarget = ({ certification_target: _target, ...value }) => value;
+  assert.deepEqual(withoutTarget(p1), withoutTarget(p2));
+  assert.equal(p1.code, methodsResult.reason_code);
+  assert.equal(p2.diagnostic_id, methodsResult.diagnostic_id);
+  assert.equal(p2.evaluation_ref, methodsResult.diagnostic_evaluation_ref);
+});
+
+test("P2 writes failure evidence and preserves the production reason without minting a cert", async (context) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-luna-terminal-failure-"));
+  context.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const core = path.join(root, "core-verdict.json");
+  fs.writeFileSync(core, "{}\n");
+  const invocations = [invocation("SPECIALIST", "PRIMARY", 1), invocation("REVIEWER", "PRIMARY", 2)];
+  const runtime = runtimeReceipt(invocations);
+  runtime.methods_result_identity.status = "UNRESOLVED";
+  runtime.methods_result = {
+    status: "UNRESOLVED",
+    reason_code: "SPECIALIST_REVIEWER_DISAGREEMENT",
+    reasons: ["Specialist 与 Reviewer 的判定不一致。"],
+    diagnostic_id: `diag-${SHA("a")}`,
+    diagnostic_evaluation_ref: `eval-${SHA("b")}`,
+  };
+  const options = {
+    sourceRoot: REPO_ROOT,
+    codexEntry: path.join(root, "codex"),
+    authSource: path.join(root, "auth.json"),
+    pythonEntry: path.join(root, "python"),
+    cacheRoot: null,
+    registrationRoot: path.join(root, "registration"),
+    workRoot: path.join(root, "work"),
+    privateRoot: path.join(root, "private"),
+    evidenceRoot: path.join(root, "evidence"),
+    usageRoot: path.join(root, "usage"),
+    runId: "run",
+    sourceSnapshotDigest: SHA("a"),
+    coreVerdict: core,
+  };
+  fs.mkdirSync(options.registrationRoot);
+  const registration = { root: options.registrationRoot, source: "fake-app-server-registration", tree_sha256: treeDigest(options.registrationRoot) };
+  await assert.rejects(() => runE2E(options, {
+    validateIdentity: () => identity(),
+    validateCore: () => ({ status: "PASS" }),
+    registrationInput: () => ({ registration, producer: null, cache: null }),
+    runRuntime: async (runtimeOptions) => {
+      fs.writeFileSync(path.join(runtimeOptions.evidenceRoot, "runtime-receipt.json"), JSON.stringify(runtime));
+      return runtime;
+    },
+    readInvocations: () => invocations,
+    materializeModelCert: () => { throw new Error("must not materialize"); },
+  }), (error) => error.code === "SPECIALIST_REVIEWER_DISAGREEMENT");
+  const adapter = JSON.parse(fs.readFileSync(path.join(options.evidenceRoot, "adapter-receipt.json"), "utf8"));
+  assert.equal(adapter.code, "SPECIALIST_REVIEWER_DISAGREEMENT");
+  assert.equal(adapter.reason, runtime.methods_result.reasons[0]);
+  assert.equal(adapter.diagnostic_id, runtime.methods_result.diagnostic_id);
+  assert.equal(adapter.evaluation_ref, runtime.methods_result.diagnostic_evaluation_ref);
+  for (const name of ["runtime-receipt.json", "model-invocations.json", "model-usage.json", "adapter-receipt.json"]) {
+    assert.equal(fs.existsSync(path.join(options.evidenceRoot, name)), true, name);
+  }
+  assert.equal(fs.existsSync(path.join(options.evidenceRoot, "model-cert-input.json")), false);
+  assert.equal(fs.existsSync(path.join(options.evidenceRoot, "model-cert.json")), false);
+  assert.equal(safeE2EError({ code: adapter.code, message: adapter.reason }).code, "SPECIALIST_REVIEWER_DISAGREEMENT");
 });
 
 test("safe model-cert error exposes only one closed code and message", () => {

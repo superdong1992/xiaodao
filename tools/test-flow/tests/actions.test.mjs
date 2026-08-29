@@ -6,9 +6,11 @@ import path from "node:path";
 import test from "node:test";
 
 import {
+  collectProviderFailureReceipts,
   collectProviderFailureObservability,
   collectIsolatedModelUsage,
   evidenceV2ProviderRuntimeInputs,
+  exactGeneratedEvidenceMarker,
   evaluatePytestSummary,
   evaluateNodeTestSummary,
   frozenServerImageId,
@@ -29,7 +31,9 @@ import {
   validEvidenceV2ProviderInvocationLedger,
   validHostCapabilityReceipt,
   validServerRuntimeIdentity,
+  validateGeneratedMethodsScenarioOracle,
 } from "../lib/actions.mjs";
+import { projectEvidenceV2ProviderTerminalFailure } from "../runtime-support/evidence-v2-provider-terminal.mjs";
 import {
   RELEASE_CLAUDE_CLI_SHA256,
   RELEASE_CLAUDE_VERSION_OUTPUT,
@@ -206,6 +210,77 @@ test("P1 and P2 failures retain two completed role calls and require a matching 
   }
 });
 
+test("provider failure exposes the production terminal adapter, runtime receipt and complete usage", (context) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "provider-terminal-failure-"));
+  context.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  for (const fixture of [
+    { provider: "claude-deepseek", target: "P1", invocationClass: "claude-deepseek-macos-e2e", fallback: "CLAUDE_DEEPSEEK_RUNNER_FAILED" },
+    { provider: "codex-luna", target: "P2", invocationClass: "codex-luna-macos-e2e", fallback: "MACOS_CODEX_LUNA_RUNNER_FAILED" },
+  ]) {
+    const attemptRoot = path.join(root, fixture.provider);
+    const outputRoot = path.join(attemptRoot, "evidence");
+    const usageRoot = path.join(attemptRoot, "usage");
+    const logsRoot = path.join(attemptRoot, "payload", "logs");
+    fs.mkdirSync(outputRoot, { recursive: true });
+    fs.mkdirSync(usageRoot, { recursive: true });
+    fs.mkdirSync(logsRoot, { recursive: true });
+    const methodsResult = {
+      status: "UNRESOLVED",
+      reason_code: "SPECIALIST_REVIEWER_DISAGREEMENT",
+      reasons: ["Specialist 与 Reviewer 的判定不一致。"],
+      diagnostic_id: `diag-${"a".repeat(64)}`,
+      diagnostic_evaluation_ref: `eval-${"b".repeat(64)}`,
+    };
+    const runtimeReceipt = {
+      schema_version: 1,
+      status: "PASS",
+      production_runtime: "problem_locator.runtime.diagnosis_runtime.DiagnosisRuntime",
+      methods_result: methodsResult,
+    };
+    const adapter = {
+      ...projectEvidenceV2ProviderTerminalFailure({ certificationTarget: fixture.target, methodsResult }),
+      model_calls: 2,
+      repairs: { specialist: 0, reviewer: 0 },
+    };
+    fs.writeFileSync(path.join(outputRoot, "runtime-receipt.json"), canonicalJson(runtimeReceipt));
+    fs.writeFileSync(path.join(outputRoot, "adapter-receipt.json"), canonicalJson(adapter));
+    fs.writeFileSync(path.join(usageRoot, "specialist-primary.json"), canonicalJson(providerRoleReceipt(fixture.provider, "SPECIALIST", "PRIMARY", 1)));
+    fs.writeFileSync(path.join(usageRoot, "reviewer-primary.json"), canonicalJson(providerRoleReceipt(fixture.provider, "REVIEWER", "PRIMARY", 2)));
+    const first = collectProviderFailureObservability({
+      provider: fixture.provider,
+      result: { status: "FAIL" },
+      outputRoot,
+      usageRoot,
+      planStage: evidenceV2ProviderPlanStage(fixture.invocationClass),
+      invocationClass: fixture.invocationClass,
+    });
+    const runnerAggregate = fixture.provider === "codex-luna"
+      ? { ...first.usage, cost_usd: 0.000024 }
+      : first.usage;
+    fs.writeFileSync(path.join(outputRoot, "model-usage.json"), canonicalJson({ schema_version: 1, status: "PASS", aggregate: runnerAggregate }));
+    const stderrPath = path.join(logsRoot, "runner.stderr.log");
+    fs.writeFileSync(stderrPath, canonicalJson({ schema_version: 1, status: "FAIL", code: methodsResult.reason_code, message: methodsResult.reasons[0] }));
+    const observed = providerRunnerFailureResult({
+      provider: fixture.provider,
+      result: { status: "FAIL", stderr_path: path.relative(attemptRoot, stderrPath).split(path.sep).join("/"), stderr_truncated: false, termination: null },
+      attemptRoot,
+      outputRoot,
+      usageRoot,
+      planStage: evidenceV2ProviderPlanStage(fixture.invocationClass),
+      invocationClass: fixture.invocationClass,
+      fallbackCode: fixture.fallback,
+    });
+    assert.equal(observed.code, "SPECIALIST_REVIEWER_DISAGREEMENT", fixture.provider);
+    assert.equal(observed.usage_complete, true, fixture.provider);
+    assert.equal(observed.adapter_receipt.reason_code, methodsResult.reason_code, fixture.provider);
+    assert.equal(observed.adapter_receipt.diagnostic_id, methodsResult.diagnostic_id, fixture.provider);
+    assert.equal(observed.adapter_receipt.evaluation_ref, methodsResult.diagnostic_evaluation_ref, fixture.provider);
+    assert.equal(observed.adapter_receipt.runtime_receipt.path, "runtime-receipt.json", fixture.provider);
+    assert.equal(observed.runtime_receipt.methods_result.status, "UNRESOLVED", fixture.provider);
+    assert.deepEqual(collectProviderFailureReceipts({ provider: fixture.provider, outputRoot }).adapter_receipt, observed.adapter_receipt);
+  }
+});
+
 test("provider failure without a role ledger keeps process usage explicitly incomplete", (context) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "provider-failure-usage-missing-"));
   context.after(() => fs.rmSync(root, { recursive: true, force: true }));
@@ -241,6 +316,26 @@ test("P1 and P2 central actions resolve one same-attempt production registration
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("generated Methods scenario mapping requires RESOLVED, no candidates, and exact markers", () => {
+  const valid = {
+    oracle: {
+      expected_status: "RESOLVED",
+      required_candidate_marker_groups: [],
+    },
+  };
+  assert.equal(validateGeneratedMethodsScenarioOracle(valid), valid.oracle);
+  assert.throws(
+    () => validateGeneratedMethodsScenarioOracle({ oracle: { ...valid.oracle, expected_status: "CONFIRMED" } }),
+    /GENERATED_METHODS_SCENARIO_STATUS_INVALID/,
+  );
+  assert.throws(
+    () => validateGeneratedMethodsScenarioOracle({ oracle: { ...valid.oracle, required_candidate_marker_groups: [["QUEUE_HISTORY print_time_ms="]] } }),
+    /GENERATED_METHODS_CANDIDATE_MARKERS_FORBIDDEN/,
+  );
+  assert.equal(exactGeneratedEvidenceMarker("API_COMPLETE service=", "API_COMPLETE service="), true);
+  assert.equal(exactGeneratedEvidenceMarker("API_COMPLETE service=", "API_COMPLETE"), false);
 });
 
 test("P1 deterministic Gate cannot pass by skipping its production Python driver", () => {

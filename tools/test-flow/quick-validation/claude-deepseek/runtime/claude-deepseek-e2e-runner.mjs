@@ -18,6 +18,7 @@ import {
   buildEvidenceV2ScenarioOracleReceipt,
   validateEvidenceV2ScenarioOracleReceipt,
 } from "../../../../validation/evidence-v2-scenario-oracle.mjs";
+import { projectEvidenceV2ProviderTerminalFailure } from "../../../runtime-support/evidence-v2-provider-terminal.mjs";
 import {
   CLAUDE_DEEPSEEK_MODEL,
   assertRegistrationUnchanged,
@@ -61,6 +62,24 @@ function createEmptyRoot(root, label) {
 function writeJsonNew(filePath, value) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true, mode: 0o700 });
   fs.writeFileSync(filePath, canonicalJson(value), { encoding: "utf8", mode: 0o600, flag: "wx" });
+}
+
+export function materializeProviderTerminalFailure(runtimeReceipt, evidenceRoot, {
+  modelCalls,
+  repairs,
+} = {}) {
+  const failure = projectEvidenceV2ProviderTerminalFailure({
+    certificationTarget: "P1",
+    methodsResult: runtimeReceipt?.methods_result,
+  });
+  if (failure === null) return null;
+  const receipt = Object.freeze({
+    ...failure,
+    model_calls: modelCalls,
+    repairs,
+  });
+  writeJsonNew(path.join(evidenceRoot, "adapter-receipt.json"), receipt);
+  return receipt;
 }
 
 export function validateExplicitRegistrationInput(registrationRoot, sourceRoot) {
@@ -385,6 +404,22 @@ export async function runE2E(options, { ambient = process.env, onProgress = null
   const runtimeAudit = auditRuntimeAndInvocations(runtimeReceipt, invocations);
   const scenarioAudit = auditScenarioIdentity({ sourceWiki, scenarioRoot, producer, cache, runtimeReceipt });
   assertRegistrationUnchanged(cache);
+  const identityReceipt = { schema_version: 1, status: "PASS", claude: identity, producer, registration: cache.manifest.registration };
+  const packageReceipt = { schema_version: 2, status: "PASS", producer_identity: producer.producer_identity, registration_tree_sha256: cache.manifest.registration.tree_sha256, runtime_ref: cache.manifest.registration.runtime_ref ?? { id: `diagnosis-skill/${runtimeReceipt.registration_id}`, version: "1.0.0", content_hash: runtimeReceipt.scenario.skill_content_sha256 } };
+  writeJsonNew(path.join(evidenceRoot, "claude-identity.json"), identityReceipt);
+  writeJsonNew(path.join(evidenceRoot, "methods-package.json"), packageReceipt);
+  writeJsonNew(path.join(evidenceRoot, "model-invocations.json"), { schema_version: 1, status: "PASS", retry_policy: "ROLE_PROTOCOL_REPAIR_ONLY", invocations });
+  writeJsonNew(path.join(evidenceRoot, "model-usage.json"), modelAudit);
+  const terminalFailure = materializeProviderTerminalFailure(runtimeReceipt, evidenceRoot, {
+    modelCalls: modelAudit.actual_call_count,
+    repairs: modelAudit.repair_counts,
+  });
+  if (terminalFailure !== null) {
+    fail(terminalFailure.code, terminalFailure.reason, {
+      diagnostic_id: terminalFailure.diagnostic_id,
+      evaluation_ref: terminalFailure.evaluation_ref,
+    });
+  }
   const normalizedInvocations = modelCertInvocations(invocations);
   const scenarioOracle = buildEvidenceV2ScenarioOracleReceipt({
     sourceRoot,
@@ -413,12 +448,6 @@ export async function runE2E(options, { ambient = process.env, onProgress = null
     sourceRoot,
   });
   validateEvidenceV2ModelCertInputSchema(modelCertInput, { certificationTarget: "P1" });
-  const identityReceipt = { schema_version: 1, status: "PASS", claude: identity, producer, registration: cache.manifest.registration };
-  const packageReceipt = { schema_version: 2, status: "PASS", producer_identity: producer.producer_identity, registration_tree_sha256: cache.manifest.registration.tree_sha256, runtime_ref: cache.manifest.registration.runtime_ref ?? { id: `diagnosis-skill/${runtimeReceipt.registration_id}`, version: "1.0.0", content_hash: runtimeReceipt.scenario.skill_content_sha256 } };
-  writeJsonNew(path.join(evidenceRoot, "claude-identity.json"), identityReceipt);
-  writeJsonNew(path.join(evidenceRoot, "methods-package.json"), packageReceipt);
-  writeJsonNew(path.join(evidenceRoot, "model-invocations.json"), { schema_version: 1, status: "PASS", retry_policy: "ROLE_PROTOCOL_REPAIR_ONLY", invocations });
-  writeJsonNew(path.join(evidenceRoot, "model-usage.json"), modelAudit);
   writeJsonNew(path.join(evidenceRoot, "model-cert-input.json"), modelCertInput);
   const modelCert = materializeStandaloneModelCert({
     certificationTarget: "P1",

@@ -20,6 +20,7 @@ import {
   treeDigest,
   validateCodexLunaIdentity,
 } from "../../../runtime-support/codex-luna-contract.mjs";
+import { projectEvidenceV2ProviderTerminalFailure } from "../../../runtime-support/evidence-v2-provider-terminal.mjs";
 import {
   assertMethodsPackageUnchanged,
   buildMethodsProducerIdentity,
@@ -61,6 +62,24 @@ function createEmptyRoot(root, label) {
 function writeJsonNew(filePath, value) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true, mode: 0o700 });
   fs.writeFileSync(filePath, `${canonicalJson(value)}\n`, { encoding: "utf8", mode: 0o600, flag: "wx" });
+}
+
+export function materializeProviderTerminalFailure(runtimeReceipt, evidenceRoot, {
+  modelCalls,
+  repairs,
+} = {}) {
+  const failure = projectEvidenceV2ProviderTerminalFailure({
+    certificationTarget: "P2",
+    methodsResult: runtimeReceipt?.methods_result,
+  });
+  if (failure === null) return null;
+  const receipt = Object.freeze({
+    ...failure,
+    model_calls: modelCalls,
+    repairs,
+  });
+  writeJsonNew(path.join(evidenceRoot, "adapter-receipt.json"), receipt);
+  return receipt;
 }
 
 function copyPlainTree(sourceRoot, destinationRoot) {
@@ -162,7 +181,6 @@ export function auditRuntimeAndInvocations(runtimeReceipt, invocations) {
     );
   }
   requireCert(runtimeReceipt.model_invocations === invocations.length, "CODEX_LUNA_MODEL_CERT_RUNTIME_MODEL_COUNT_MISMATCH", "Runtime model count differs from provider receipts");
-  requireCert(runtimeReceipt.methods_result_identity?.status === "RESOLVED", "CODEX_LUNA_MODEL_CERT_METHODS_RESULT_INVALID", "Production Runtime did not publish one resolved methods_result");
   return Object.freeze({ schema_version: 1, status: "PASS", prompt_count: prompts.length, records: runtimeReceipt.records });
 }
 
@@ -393,6 +411,20 @@ export async function runE2E(options, {
     "Validated production registration changed during model certification",
   );
   const contractManifest = path.join(sourceRoot, CONTRACT_MANIFEST_PATH);
+  writeJsonNew(path.join(evidenceRoot, "codex-identity.json"), { schema_version: 1, status: "PASS", codex: identity, producer: resolved.producer, registration: resolved.registration });
+  writeJsonNew(path.join(evidenceRoot, "methods-package.json"), { schema_version: 2, status: "PASS", registration_source: resolved.registration.source, registration_tree_sha256: resolved.registration.tree_sha256, registration_id: runtimeReceipt.registration_id, skill_content_sha256: runtimeReceipt.scenario.skill_content_sha256 });
+  writeJsonNew(path.join(evidenceRoot, "model-invocations.json"), { schema_version: 1, status: "PASS", retry_policy: "ROLE_PROTOCOL_REPAIR_ONLY", invocations });
+  writeJsonNew(path.join(evidenceRoot, "model-usage.json"), { schema_version: 1, status: "PASS", aggregate: aggregateUsage(invocations) });
+  const terminalFailure = materializeProviderTerminalFailure(runtimeReceipt, evidenceRoot, {
+    modelCalls: invocations.length,
+    repairs: runtimeReceipt.repair_counts,
+  });
+  if (terminalFailure !== null) {
+    fail(terminalFailure.code, terminalFailure.reason, {
+      diagnostic_id: terminalFailure.diagnostic_id,
+      evaluation_ref: terminalFailure.evaluation_ref,
+    });
+  }
   const normalizedInvocations = modelCertInvocations(invocations);
   const scenarioOracle = buildEvidenceV2ScenarioOracleReceipt({
     sourceRoot,
@@ -419,10 +451,6 @@ export async function runE2E(options, {
     runtimeReceipt,
     sourceRoot,
   });
-  writeJsonNew(path.join(evidenceRoot, "codex-identity.json"), { schema_version: 1, status: "PASS", codex: identity, producer: resolved.producer, registration: resolved.registration });
-  writeJsonNew(path.join(evidenceRoot, "methods-package.json"), { schema_version: 2, status: "PASS", registration_source: resolved.registration.source, registration_tree_sha256: resolved.registration.tree_sha256, registration_id: runtimeReceipt.registration_id, skill_content_sha256: runtimeReceipt.scenario.skill_content_sha256 });
-  writeJsonNew(path.join(evidenceRoot, "model-invocations.json"), { schema_version: 1, status: "PASS", retry_policy: "ROLE_PROTOCOL_REPAIR_ONLY", invocations });
-  writeJsonNew(path.join(evidenceRoot, "model-usage.json"), { schema_version: 1, status: "PASS", aggregate: aggregateUsage(invocations) });
   writeJsonNew(path.join(evidenceRoot, "model-cert-input.json"), modelCertInput);
   const modelCert = await materializeModelCert({
     sourceRoot,

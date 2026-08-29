@@ -644,16 +644,22 @@ def run(options: argparse.Namespace) -> dict[str, Any]:
     )
     records.publish_job(Job.model_validate(pending))
     if options.mode == "fake":
-        rejected_method_ids = frozenset(options.fake_rejected_method_id)
+        shared_rejected_method_ids = frozenset(options.fake_rejected_method_id)
         specialist_role = _FakeRoleBackend(
             "SPECIALIST",
             repair=options.fake_repair,
-            rejected_method_ids=rejected_method_ids,
+            rejected_method_ids=(
+                shared_rejected_method_ids
+                | frozenset(options.fake_specialist_rejected_method_id)
+            ),
         )
         reviewer_role = _FakeRoleBackend(
             "REVIEWER",
             repair=options.fake_repair,
-            rejected_method_ids=rejected_method_ids,
+            rejected_method_ids=(
+                shared_rejected_method_ids
+                | frozenset(options.fake_reviewer_rejected_method_id)
+            ),
         )
     else:
         command = _agent_command(options)
@@ -743,7 +749,7 @@ def run(options: argparse.Namespace) -> dict[str, Any]:
         review_job,
         InMemoryCancellationSignal(),
     )
-    terminal = submission.submit_outcome(
+    submission.submit_outcome(
         reviewer_receipt.job_outcome,
         reviewer_receipt.outcome_file_ref,
     )
@@ -753,8 +759,6 @@ def run(options: argparse.Namespace) -> dict[str, Any]:
     if methods_projection is None:
         _fail("CLAUDE_DEEPSEEK_METHODS_RESULT_MISSING", "The public Case has no Evidence V2 methods_result")
     methods_result = methods_projection.model_dump(mode="json")
-    if terminal.case_view.status.value != "RESOLVED" or methods_result.get("status") != "RESOLVED":
-        _fail("CLAUDE_DEEPSEEK_CONSENSUS_NOT_RESOLVED", "Specialist and blind Reviewer did not produce one resolved Evidence V2 consensus")
     encoded_public = canonical_json_bytes(public_view)
     if any(term in encoded_public for term in (b"specialist_evaluation", b"reviewer_evaluation", b"candidate_conclusion")):
         _fail("CLAUDE_DEEPSEEK_PRIVATE_RESULT_LEAK", "Public Methods result leaked private role or Candidate state")
@@ -915,6 +919,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--run-id")
     parser.add_argument("--fake-repair", action="store_true")
     parser.add_argument("--fake-rejected-method-id", action="append", default=[])
+    parser.add_argument(
+        "--fake-specialist-rejected-method-id", action="append", default=[]
+    )
+    parser.add_argument(
+        "--fake-reviewer-rejected-method-id", action="append", default=[]
+    )
     return parser
 
 

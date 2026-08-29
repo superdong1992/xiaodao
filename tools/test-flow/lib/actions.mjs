@@ -51,6 +51,7 @@ import {
   SKILL_GENERATION_TRACE_SCHEMA_VERSION,
   validSkillGenerationTraceAuditReceipt,
 } from "../runtime-support/isolated-agent-tool-audit.mjs";
+import { projectEvidenceV2ProviderTerminalFailure } from "../runtime-support/evidence-v2-provider-terminal.mjs";
 import {
   auditNoSecretLeak,
   buildPosthocBudgetReceipt,
@@ -888,6 +889,21 @@ function exactDirectory(directory, expectedNames) {
   }
 }
 
+export function validateGeneratedMethodsScenarioOracle(scenarioOracle) {
+  if (scenarioOracle?.oracle?.expected_status !== "RESOLVED") {
+    throw new Error("GENERATED_METHODS_SCENARIO_STATUS_INVALID");
+  }
+  if (!Array.isArray(scenarioOracle.oracle.required_candidate_marker_groups)
+    || scenarioOracle.oracle.required_candidate_marker_groups.length !== 0) {
+    throw new Error("GENERATED_METHODS_CANDIDATE_MARKERS_FORBIDDEN");
+  }
+  return scenarioOracle.oracle;
+}
+
+export function exactGeneratedEvidenceMarker(declared, required) {
+  return declared === required;
+}
+
 function generatedMethodsExpectation(context, generatedSkill, inputs, gateOracle, scenarioOracle) {
   const componentId = /^[a-z0-9][a-z0-9-]{0,127}$/;
   if (!componentId.test(generatedSkill?.registration_id ?? "") || !componentId.test(generatedSkill?.skill_name ?? "")) {
@@ -970,11 +986,12 @@ function generatedMethodsExpectation(context, generatedSkill, inputs, gateOracle
     || new Set(generatedMethods.map((entry) => entry.method_id)).size !== methods.methods.length) {
     throw new Error("GENERATED_METHODS_SET_DRIFT");
   }
+  validateGeneratedMethodsScenarioOracle(scenarioOracle);
 
   const mapMarkerGroups = (groups, label) => groups.map((group) => {
     const requiredMarkers = uniqueSortedStrings(group, "GENERATED_METHODS_CONFIRMED_MARKERS_INVALID");
     const candidates = generatedMethods.filter((entry) => requiredMarkers.every((marker) => (
-      entry.markers.some((declared) => declared.includes(marker))
+      entry.markers.some((declared) => exactGeneratedEvidenceMarker(declared, marker))
     )));
     if (candidates.length === 0) throw new Error(`GENERATED_METHODS_${label}_MAPPING_INVALID`);
     const minimumMarkerCount = Math.min(...candidates.map((entry) => entry.markers.length));
@@ -3439,6 +3456,43 @@ function modelUsageAggregate(outputRoot) {
   return { present: true, usage: isCompleteUsage(aggregate) ? aggregate : null };
 }
 
+export function collectProviderFailureReceipts({ provider, outputRoot }) {
+  const adapterPath = path.join(outputRoot, "adapter-receipt.json");
+  const runtimePath = path.join(outputRoot, "runtime-receipt.json");
+  if (!fs.existsSync(adapterPath) || !fs.existsSync(runtimePath)) return {};
+  const adapter = readJsonOrNull(adapterPath);
+  const runtimeReceipt = readJsonOrNull(runtimePath);
+  const certificationTarget = provider === "claude-deepseek" ? "P1" : "P2";
+  let expected;
+  try {
+    expected = projectEvidenceV2ProviderTerminalFailure({
+      certificationTarget,
+      methodsResult: runtimeReceipt?.methods_result,
+    });
+  } catch {
+    return {};
+  }
+  if (
+    expected === null
+    || runtimeReceipt?.status !== "PASS"
+    || runtimeReceipt.production_runtime !== "problem_locator.runtime.diagnosis_runtime.DiagnosisRuntime"
+    || Object.entries(expected).some(([key, value]) => canonicalJson(adapter?.[key]) !== canonicalJson(value))
+  ) return {};
+  return {
+    adapter_receipt: {
+      ...adapter,
+      runtime_receipt: {
+        path: "runtime-receipt.json",
+        sha256: sha256File(runtimePath),
+        status: runtimeReceipt.status,
+        production_runtime: runtimeReceipt.production_runtime,
+        methods_status: runtimeReceipt.methods_result.status,
+      },
+    },
+    runtime_receipt: runtimeReceipt,
+  };
+}
+
 function sameUsage(left, right) {
   return isCompleteUsage(left)
     && isCompleteUsage(right)
@@ -3511,11 +3565,13 @@ export function providerRunnerFailureResult({
     planStage,
     invocationClass,
   });
+  const receipts = collectProviderFailureReceipts({ provider, outputRoot });
   return {
     ...result,
     failure_domain: result.status === "ERROR" ? "HARNESS" : "CONTRACT",
     code: providerRunnerFailureCode({ result, attemptRoot, fallbackCode }),
     ...observed,
+    ...receipts,
   };
 }
 
