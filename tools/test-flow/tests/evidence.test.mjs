@@ -3,6 +3,7 @@ import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { Readable, Writable } from "node:stream";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
@@ -17,23 +18,52 @@ import { allowedEmptyEventFiles, createAttempt, finalizeAttempt, recoverStageAud
 import { EventWriter } from "../lib/events.mjs";
 import { FAILURE_DIAGNOSTIC_FIELDS, projectCandidateFailureDiagnostic, validFailureDiagnostic } from "../lib/failure-diagnostic.mjs";
 import { zeroUsage } from "../lib/usage.mjs";
-import { canonicalJson, removeTreeWritable, resolvePythonTestRuntime, sha256Bytes, sha256File, writeJsonSync } from "../lib/util.mjs";
+import { canonicalJson, removeTreeWritable, resolveCommand, sha256Bytes, sha256File, writeJsonSync } from "../lib/util.mjs";
 import {
   materializeProviderTerminalFailure as materializeP1TerminalFailure,
   safeE2EError as safeP1Error,
 } from "../quick-validation/claude-deepseek/runtime/claude-deepseek-e2e-runner.mjs";
+import { runServiceInvocation as runP1ServiceInvocation } from "../quick-validation/claude-deepseek/runtime/claude-deepseek-service-wrapper.mjs";
 import {
   materializeProviderTerminalFailure as materializeP2TerminalFailure,
   safeE2EError as safeP2Error,
 } from "../quick-validation/codex-luna/runtime/macos-codex-luna-e2e-runner.mjs";
+import { runModelRoleInvocation as runP2ModelRoleInvocation } from "../quick-validation/codex-luna/runtime/macos-codex-luna-model-cert-wrapper.mjs";
 
 const TOOL_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const REPO_ROOT = path.resolve(TOOL_ROOT, "..", "..");
-const P1_RUNTIME = path.join(TOOL_ROOT, "quick-validation", "claude-deepseek", "runtime", "claude_deepseek_model_cert_runtime.py");
+const PRODUCTION_RUNTIME_DRIVER = path.join(TOOL_ROOT, "quick-validation", "codex-luna", "runtime", "macos_codex_luna_model_cert_driver.py");
 const RELEASE_CASE_ROOT = path.join(REPO_ROOT, "tests", "cases", "release", "rpc-timeout-anonymized");
-const PYTHON_RUNTIME = resolvePythonTestRuntime(REPO_ROOT);
 const STATUS_POLICY = { pass: 0, pass_with_warnings: 0, fail: 1, blocked: 2, error: 3 };
 const ZERO_USAGE = zeroUsage();
+
+function python312Executable(candidate) {
+  if (!candidate) return null;
+  const executable = path.isAbsolute(candidate) ? path.resolve(candidate) : resolveCommand(candidate);
+  if (executable === null || !fs.existsSync(executable) || !fs.statSync(executable).isFile()) return null;
+  const probe = spawnSync(executable, ["-c", "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"], {
+    cwd: REPO_ROOT,
+    env: process.env,
+    encoding: "utf8",
+  });
+  return probe.status === 0 && probe.stdout.trim() === "3.12"
+    ? { command: executable, interpreterPrefix: [] }
+    : null;
+}
+
+function productionDriverPython() {
+  if (process.env.TEST_FLOW_PYTHON) return python312Executable(process.env.TEST_FLOW_PYTHON);
+  if (process.platform !== "win32") return null;
+  return python312Executable(path.join(
+    os.homedir(), ".cache", "codex-runtimes", "codex-primary-runtime",
+    "dependencies", "python", "python.exe",
+  ));
+}
+
+const PRODUCTION_DRIVER_PYTHON = productionDriverPython();
+const PRODUCTION_DRIVER_SKIP = PRODUCTION_DRIVER_PYTHON === null
+  && process.platform !== "win32"
+  && !process.env.TEST_FLOW_PYTHON;
 
 function closeMinimalStream(attemptRoot, runId) {
   const writer = new EventWriter({ attemptRoot, runId, producerId: "orchestrator", producerType: "orchestrator" });
@@ -142,6 +172,18 @@ function providerPlanStage(provider) {
   };
 }
 
+function providerPrompt() {
+  return [
+    "frozen context",
+    "<<<METHODS_EVIDENCE_V2_ROLE>>>",
+    "Role: Specialist. Attempt: primary evaluation.",
+    "Write one JSON root array whose items contain only evaluation_ref, verdict, and reason.",
+    "Write only output/method-diagnosis.draft.json.",
+    "<<<END METHODS_EVIDENCE_V2_ROLE>>>",
+    "",
+  ].join("\n");
+}
+
 function writeReleaseRegistrationInput(root) {
   const registrationSource = path.join(RELEASE_CASE_ROOT, "registration", "rpc-timeout-methods-v1", "registration-template.json");
   const wiki = fs.readFileSync(path.join(RELEASE_CASE_ROOT, "input", "wiki.md"), "utf8");
@@ -205,65 +247,181 @@ function writeReleaseRegistrationInput(root) {
   fs.writeFileSync(path.join(references, "shared-boundaries.md"), "RPC 超时不等于取消。\n");
 }
 
-function runProductionFailureRuntime({ attemptRoot, gateRoot, usageRoot, testRoot }) {
-  assert.notEqual(PYTHON_RUNTIME, null, "Python 3.12 test runtime is required for the production failure fixture");
-  const receiptPath = path.join(gateRoot, "runtime-receipt.json");
-  const registrationRoot = path.join(testRoot, "registration");
-  const configRoot = path.join(testRoot, "config");
-  const privateRoot = path.join(testRoot, "private");
-  const settingsPath = path.join(testRoot, "settings.json");
-  const fakeClaudeEntry = path.join(testRoot, "fake-claude-cli.mjs");
+function runProductionFailureRuntime({ gateRoot }) {
+  assert.notEqual(PRODUCTION_DRIVER_PYTHON, null, "Python 3.12 is required for the production failure fixture");
+  const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ev2-runtime-"));
+  const runtimeEvidenceRoot = path.join(fixtureRoot, "evidence");
+  const receiptPath = path.join(runtimeEvidenceRoot, "runtime-receipt.json");
+  const registrationRoot = path.join(fixtureRoot, "registration");
   writeReleaseRegistrationInput(registrationRoot);
-  fs.mkdirSync(configRoot, { recursive: true });
-  fs.mkdirSync(privateRoot, { recursive: true });
-  fs.writeFileSync(settingsPath, "{}\n");
-  fs.writeFileSync(fakeClaudeEntry, [
-    "process.stdin.resume();",
-    "process.stdin.on('end', () => {",
-    "  const terminal = {",
-    "    type: 'result',",
-    "    subtype: 'error_max_budget_usd',",
-    "    is_error: true,",
-    "    num_turns: 1,",
-    "    stop_reason: 'tool_use',",
-    "    total_cost_usd: 1.047635,",
-    "    usage: { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },",
-    "    modelUsage: {",
-    "      'deepseek-v4-flash[1m]': { inputTokens: 23302, outputTokens: 37245, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, costUSD: 1.047635 }",
-    "    },",
-    "    errors: ['Reached maximum budget'],",
-    "  };",
-    "  process.stdout.write(`${JSON.stringify(terminal)}\\n`);",
-    "  process.exitCode = 1;",
-    "});",
-    "",
-  ].join("\n"));
-  const bootstrap = "import runpy,sys,types; mark=types.SimpleNamespace(parametrize=lambda *a,**k:(lambda f:f)); sys.modules['pytest']=types.SimpleNamespace(fixture=lambda f:f,mark=mark); script=sys.argv[1]; sys.argv=sys.argv[1:]; runpy.run_path(script,run_name='__main__')";
-  const result = spawnSync(PYTHON_RUNTIME.command, [
-    ...PYTHON_RUNTIME.interpreterPrefix,
-    "-c", bootstrap,
-    P1_RUNTIME,
-    "--mode", "real",
-    "--source-root", REPO_ROOT,
-    "--registration-root", registrationRoot,
-    "--work-root", path.join(testRoot, "runtime-work"),
-    "--node-entry", process.execPath,
-    "--claude-entry", fakeClaudeEntry,
-    "--claude-settings", settingsPath,
-    "--config-root", configRoot,
-    "--private-root", privateRoot,
-    "--evidence-root", gateRoot,
-    "--usage-root", usageRoot,
-    "--run-id", path.basename(attemptRoot),
-    "--receipt-path", receiptPath,
-  ], { cwd: REPO_ROOT, env: process.env, encoding: "utf8", timeout: 120_000 });
-  assert.equal(result.status, 0, result.stderr);
-  return JSON.parse(fs.readFileSync(receiptPath, "utf8"));
+  const bootstrap = [
+    "import runpy,sys,types",
+    "from pathlib import Path",
+    "mark=types.SimpleNamespace(parametrize=lambda *a,**k:(lambda f:f))",
+    "sys.modules['pytest']=types.SimpleNamespace(fixture=lambda f:f,mark=mark)",
+    "module=runpy.run_path(sys.argv[1])",
+    "backend=module['FakeModelRoleBackend'](model_failure_roles=frozenset(('SPECIALIST',)))",
+    "receipt=module['run_production_model_cert'](work_root=Path(sys.argv[4]),role_backend=backend,source_root=Path(sys.argv[2]),registration_root=Path(sys.argv[3]),evidence_root=Path(sys.argv[5]),execution_mode='real-model')",
+    "Path(sys.argv[6]).write_bytes(module['canonical_json_bytes'](receipt))",
+  ].join(";");
+  try {
+    const result = spawnSync(PRODUCTION_DRIVER_PYTHON.command, [
+      ...PRODUCTION_DRIVER_PYTHON.interpreterPrefix,
+      "-c", bootstrap,
+      PRODUCTION_RUNTIME_DRIVER,
+      REPO_ROOT,
+      registrationRoot,
+      path.join(fixtureRoot, "work"),
+      runtimeEvidenceRoot,
+      receiptPath,
+    ], { cwd: REPO_ROOT, env: process.env, encoding: "utf8", timeout: 120_000 });
+    assert.equal(result.status, 0, result.stderr);
+    const receipt = JSON.parse(fs.readFileSync(receiptPath, "utf8"));
+    for (const name of fs.readdirSync(runtimeEvidenceRoot)) {
+      const source = path.join(runtimeEvidenceRoot, name);
+      if (fs.statSync(source).isFile()) fs.copyFileSync(source, path.join(gateRoot, name));
+    }
+    return receipt;
+  } finally {
+    fs.rmSync(fixtureRoot, { recursive: true, force: true });
+  }
+}
+
+async function writeP1RoleFailure({ attemptRoot, gateRoot, usageRoot, testRoot }) {
+  const workspace = path.join(testRoot, "deepseek-provider-workspace");
+  const values = {
+    "claude-entry": path.join(testRoot, "fake-claude-entry"),
+    settings: path.join(testRoot, "claude-settings.json"),
+    "config-root": path.join(testRoot, "claude-config"),
+    "private-root": path.join(testRoot, "claude-private"),
+    "evidence-root": gateRoot,
+    "usage-root": usageRoot,
+    "run-id": path.basename(attemptRoot),
+  };
+  fs.mkdirSync(workspace, { recursive: true });
+  fs.mkdirSync(values["config-root"], { recursive: true });
+  fs.mkdirSync(values["private-root"], { recursive: true });
+  fs.writeFileSync(values["claude-entry"], "fixture\n");
+  fs.writeFileSync(values.settings, "{}\n");
+  const error = new Error("raw DeepSeek provider budget terminal");
+  error.code = "CLAUDE_DEEPSEEK_MAX_BUDGET_EXCEEDED";
+  error.details = {
+    exit_code: 1,
+    signal: null,
+    terminal: {
+      subtype: "error_max_budget_usd",
+      is_error: true,
+      stop_reason: "tool_use",
+      turns: 1,
+      usage: {
+        schema_version: 1,
+        input_tokens: 23_302,
+        output_tokens: 37_245,
+        cache_creation_input_tokens: 0,
+        cache_read_input_tokens: 0,
+        total_tokens: 60_547,
+        cost_usd: 1.047635,
+      },
+    },
+  };
+  const previous = process.cwd();
+  try {
+    process.chdir(workspace);
+    await assert.rejects(runP1ServiceInvocation(values, {
+      stdin: Readable.from([providerPrompt()]),
+      stdout: new Writable({ write(_chunk, _encoding, callback) { callback(); } }),
+      runClaude: async () => { throw error; },
+    }), { code: error.code });
+  } finally {
+    process.chdir(previous);
+  }
+}
+
+async function writeP2RoleFailure({ attemptRoot, gateRoot, usageRoot, testRoot }) {
+  const workspace = path.join(testRoot, "codex-provider-workspace");
+  const inputs = path.join(workspace, "inputs");
+  const values = {
+    "codex-entry": path.join(testRoot, "fake-codex"),
+    "auth-source": path.join(testRoot, "codex-auth.json"),
+    "skill-source": path.join(testRoot, "codex-evaluator-SKILL.md"),
+    "expected-cli-version": "0.149.0-alpha.4.1",
+    "private-root": path.join(testRoot, "codex-private"),
+    "evidence-root": gateRoot,
+    "usage-root": usageRoot,
+    "run-id": path.basename(attemptRoot),
+  };
+  fs.mkdirSync(inputs, { recursive: true });
+  fs.mkdirSync(values["private-root"], { recursive: true });
+  for (const name of ["request.json", "method-evidence-graph.json", "method-evaluation-plan.json"]) {
+    fs.writeFileSync(path.join(inputs, name), "{}\n");
+  }
+  fs.writeFileSync(values["codex-entry"], "fixture\n");
+  fs.writeFileSync(values["skill-source"], "---\nname: codex-luna-evidence-v2-evaluator\ndescription: fixture\n---\n");
+  fs.writeFileSync(values["auth-source"], `${JSON.stringify({
+    auth_mode: "chatgpt",
+    OPENAI_API_KEY: null,
+    tokens: {
+      access_token: "fixture-access-token",
+      refresh_token: "fixture-refresh-token",
+      id_token: "fixture-id-token",
+      account_id: "fixture-account-id",
+    },
+  })}\n`);
+  const error = new Error("raw Codex provider terminal");
+  error.code = "CODEX_LUNA_APP_SERVER_ERROR_NOTIFICATION";
+  error.details = {
+    usage: {
+      input_tokens: 12,
+      cached_input_tokens: 2,
+      cache_write_input_tokens: 0,
+      output_tokens: 4,
+      reasoning_output_tokens: 1,
+      total_tokens: 16,
+    },
+    thread_id: "thread-failed",
+    turn_id: "turn-failed",
+  };
+  const previous = process.cwd();
+  try {
+    process.chdir(workspace);
+    await assert.rejects(runP2ModelRoleInvocation(values, {
+      stdin: Readable.from([providerPrompt()]),
+      stdout: new Writable({ write(_chunk, _encoding, callback) { callback(); } }),
+      ambient: {},
+      runAppServerCall: async () => { throw error; },
+    }), { code: error.code });
+  } finally {
+    process.chdir(previous);
+  }
+}
+
+function closeP1FixtureInvocation(invocation, { posthocBudgetFailure = false } = {}) {
+  assert.equal(invocation?.schema_version, 3, "P1 production failure must expose one projected invocation");
+  if (posthocBudgetFailure) {
+    return {
+      ...invocation,
+      terminal: { subtype: "success", is_error: false, stop_reason: "end_turn", exit_code: 0, signal: null },
+      wrapper_outcome: { schema_version: 1, status: "FAIL", code: "CALL_BUDGET_EXCEEDED" },
+    };
+  }
+  if (Object.keys(invocation.terminal ?? {}).sort().join(",") === "exit_code,is_error,signal,stop_reason,subtype") return invocation;
+  return {
+    ...invocation,
+    terminal: {
+      subtype: invocation.terminal?.subtype === "error" ? "error_max_budget_usd" : invocation.terminal?.subtype,
+      is_error: invocation.terminal?.is_error === true,
+      stop_reason: "tool_use",
+      exit_code: 1,
+      signal: null,
+    },
+  };
 }
 
 async function writeEvidenceV2FailureStage(attemptRoot, {
   certificationTarget = "P1",
   includeEvidence = true,
+  p1PosthocBudgetFailure = false,
+  dropProviderInvocations = false,
 } = {}) {
   const provider = certificationTarget === "P1" ? "claude-deepseek" : "codex-luna";
   const stageId = certificationTarget === "P1" ? "real.macos-claude-deepseek-e2e" : "real.macos-codex-luna-e2e";
@@ -273,10 +431,12 @@ async function writeEvidenceV2FailureStage(attemptRoot, {
   const usageRoot = path.join(attemptRoot, "payload", "model-usage", `${provider}-e2e`);
   fs.mkdirSync(gateRoot, { recursive: true });
   fs.mkdirSync(usageRoot, { recursive: true });
-  const runtime = runProductionFailureRuntime({ attemptRoot, gateRoot, usageRoot, testRoot });
+  const runtime = runProductionFailureRuntime({ gateRoot });
   const materialize = certificationTarget === "P1" ? materializeP1TerminalFailure : materializeP2TerminalFailure;
   const safeError = certificationTarget === "P1" ? safeP1Error : safeP2Error;
   materialize(runtime, gateRoot, { modelCalls: runtime.model_invocations, repairs: runtime.repair_counts });
+  if (certificationTarget === "P1") await writeP1RoleFailure({ attemptRoot, gateRoot, usageRoot, testRoot });
+  else await writeP2RoleFailure({ attemptRoot, gateRoot, usageRoot, testRoot });
 
   const logRoot = path.join(attemptRoot, "payload", "logs");
   fs.mkdirSync(logRoot, { recursive: true });
@@ -286,7 +446,7 @@ async function writeEvidenceV2FailureStage(attemptRoot, {
     message: runtime.methods_result.reasons[0],
   })));
   const planStage = providerPlanStage(provider);
-  const actionResult = providerRunnerFailureResult({
+  let actionResult = providerRunnerFailureResult({
     provider,
     result: {
       status: "FAIL",
@@ -304,6 +464,17 @@ async function writeEvidenceV2FailureStage(attemptRoot, {
     invocationClass: provider === "claude-deepseek" ? "claude-deepseek-macos-e2e" : "codex-luna-macos-e2e",
     fallbackCode: provider === "claude-deepseek" ? "CLAUDE_DEEPSEEK_RUNNER_FAILED" : "MACOS_CODEX_LUNA_RUNNER_FAILED",
   });
+  if (certificationTarget === "P1") {
+    actionResult = {
+      ...actionResult,
+      invocations: actionResult.invocations.map((invocation, index) => (
+        index === actionResult.invocations.length - 1
+          ? closeP1FixtureInvocation(invocation, { posthocBudgetFailure: p1PosthocBudgetFailure })
+          : invocation
+      )),
+    };
+  }
+  if (dropProviderInvocations) actionResult = { ...actionResult, invocations: [] };
   const stage = { id: stageId, kind: "capability" };
   const gatePlan = {
     id: gateId,
@@ -489,6 +660,8 @@ async function createFinalized(evidenceRoot, runId, {
   certificationTarget = "P1",
   includeFailureEvidence = true,
   ordinaryBefore = null,
+  p1PosthocBudgetFailure = false,
+  dropProviderInvocations = false,
   resourceStatus = "PASS",
   mutateBeforeFinalize = null,
 } = {}) {
@@ -497,7 +670,12 @@ async function createFinalized(evidenceRoot, runId, {
   const stage = reusedFrom
     ? writeReusedStage(attemptRoot, reusedFrom.runId, reusedFrom.stageDigest)
     : evidenceV2Failure
-      ? await writeEvidenceV2FailureStage(attemptRoot, { certificationTarget, includeEvidence: includeFailureEvidence })
+      ? await writeEvidenceV2FailureStage(attemptRoot, {
+        certificationTarget,
+        includeEvidence: includeFailureEvidence,
+        p1PosthocBudgetFailure,
+        dropProviderInvocations,
+      })
       : writeExecutedStage(attemptRoot);
   const stages = ordinaryBefore === null ? [stage] : [writeOrdinaryStage(attemptRoot, ordinaryBefore), stage];
   const candidate = writePlanAndBuildCandidate(attemptRoot, runId, stages);
@@ -544,7 +722,7 @@ test("cleanup failure commits overall ERROR and cannot remain reusable", async (
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
-test("a verified Evidence V2 terminal failure is directly visible in the authoritative verdict", { skip: PYTHON_RUNTIME === null }, async () => {
+test("a verified Evidence V2 terminal failure is directly visible in the authoritative verdict", { skip: PRODUCTION_DRIVER_SKIP }, async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "test-flow-failure-diagnostic-"));
   try {
     const result = await createFinalized(root, "run-20260810T000001Z-d1a60001", { evidenceV2Failure: true });
@@ -558,6 +736,8 @@ test("a verified Evidence V2 terminal failure is directly visible in the authori
     const runtimeReceipt = JSON.parse(fs.readFileSync(path.join(path.dirname(path.join(result.attemptRoot, result.verdict.gates[0].receipt_path)), "runtime-receipt.json"), "utf8"));
     const providerFailure = gateReceipt.model_invocations.at(-1);
     assert.equal(runtimeReceipt.execution_mode, "real-model");
+    assert.equal(gateReceipt.model_invocations.length, runtimeReceipt.model_invocations);
+    assert.equal(gateReceipt.model_invocations.length, gateReceipt.assertions.adapter.model_calls);
     assert.equal(providerFailure.wrapper_outcome.status, "FAIL");
     assert.equal(providerFailure.terminal.is_error, true);
     assert.deepEqual(Object.fromEntries(Object.entries(diagnostic).filter(([key]) => !key.startsWith("provider_"))), {
@@ -597,7 +777,35 @@ test("a verified Evidence V2 terminal failure is directly visible in the authori
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
-test("a verified P2 terminal failure projects the same public diagnostic contract", { skip: PYTHON_RUNTIME === null }, async () => {
+test("a closed provider success remains visible when the wrapper rejects post-hoc budget", { skip: PRODUCTION_DRIVER_SKIP }, async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "test-flow-posthoc-provider-diagnostic-"));
+  try {
+    const result = await createFinalized(root, "run-20260810T000001Z-d1a60008", {
+      evidenceV2Failure: true,
+      p1PosthocBudgetFailure: true,
+    });
+    const gateReceipt = JSON.parse(fs.readFileSync(path.join(result.attemptRoot, result.verdict.gates[0].receipt_path), "utf8"));
+    const invocation = gateReceipt.model_invocations.at(-1);
+    assert.deepEqual(invocation.terminal, {
+      subtype: "success",
+      is_error: false,
+      stop_reason: "end_turn",
+      exit_code: 0,
+      signal: null,
+    });
+    assert.deepEqual(invocation.wrapper_outcome, {
+      schema_version: 1,
+      status: "FAIL",
+      code: "CALL_BUDGET_EXCEEDED",
+    });
+    assert.equal(result.verdict.failure_diagnostic?.provider_code, "CALL_BUDGET_EXCEEDED");
+    assert.equal(result.verdict.failure_diagnostic?.provider_subtype, "success");
+    assert.equal(result.verdict.overall, "FAIL");
+    assert.equal(verifyVerdict(result.attemptRoot).status, "PASS");
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("a verified P2 terminal failure projects the same public diagnostic contract", { skip: PRODUCTION_DRIVER_SKIP }, async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "test-flow-p2-failure-diagnostic-"));
   try {
     const result = await createFinalized(root, "run-20260810T000001Z-d1a60003", {
@@ -608,13 +816,37 @@ test("a verified P2 terminal failure projects the same public diagnostic contrac
     assert.equal(result.verdict.failure_diagnostic?.certification_target, "P2", fs.readFileSync(path.join(result.attemptRoot, result.verdict.gates[0].receipt_path), "utf8"));
     assert.equal(result.verdict.failure_diagnostic.reason_code, "SPECIALIST_MODEL_EXECUTION_FAILED");
     assert.match(result.verdict.failure_diagnostic.diagnostic_id, /^diag-[a-f0-9]{64}$/u);
-    assert.equal(result.verdict.failure_diagnostic.provider_code, null);
-    assert.equal(result.verdict.failure_diagnostic.provider_subtype, null);
+    const gateReceipt = JSON.parse(fs.readFileSync(path.join(result.attemptRoot, result.verdict.gates[0].receipt_path), "utf8"));
+    const runtimeReceipt = JSON.parse(fs.readFileSync(path.join(path.dirname(path.join(result.attemptRoot, result.verdict.gates[0].receipt_path)), "runtime-receipt.json"), "utf8"));
+    const providerFailure = gateReceipt.model_invocations.at(-1);
+    assert.equal(gateReceipt.model_invocations.length, 1);
+    assert.equal(gateReceipt.model_invocations.length, runtimeReceipt.model_invocations);
+    assert.equal(gateReceipt.model_invocations.length, gateReceipt.assertions.adapter.model_calls);
+    assert.equal(providerFailure.effective_model, "gpt-5.6-luna");
+    assert.equal(providerFailure.wrapper_outcome.status, "FAIL");
+    assert.equal(result.verdict.failure_diagnostic.provider_code, providerFailure.wrapper_outcome.code);
+    assert.equal(result.verdict.failure_diagnostic.provider_subtype, providerFailure.terminal.subtype);
     assert.equal(verifyVerdict(result.attemptRoot).status, "PASS", JSON.stringify(verifyVerdict(result.attemptRoot)));
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
-test("legacy adapter files outside the current Gate evidence index cannot populate the diagnostic", { skip: PYTHON_RUNTIME === null }, async () => {
+test("a P2 Gate cannot project a diagnostic after dropping its production provider invocation", { skip: PRODUCTION_DRIVER_SKIP }, async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "test-flow-p2-invocation-mismatch-"));
+  try {
+    const result = await createFinalized(root, "run-20260810T000001Z-d1a60009", {
+      evidenceV2Failure: true,
+      certificationTarget: "P2",
+      dropProviderInvocations: true,
+    });
+    const gateReceipt = JSON.parse(fs.readFileSync(path.join(result.attemptRoot, result.verdict.gates[0].receipt_path), "utf8"));
+    assert.equal(gateReceipt.assertions.adapter.model_calls, 1);
+    assert.equal(gateReceipt.model_invocations.length, 0);
+    assert.equal(result.verdict.failure_diagnostic, null);
+    assert.equal(verifyVerdict(result.attemptRoot).status, "PASS");
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("legacy adapter files outside the current Gate evidence index cannot populate the diagnostic", { skip: PRODUCTION_DRIVER_SKIP }, async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "test-flow-unlisted-failure-diagnostic-"));
   try {
     for (const [index, certificationTarget] of ["P1", "P2"].entries()) {
@@ -634,7 +866,7 @@ test("legacy adapter files outside the current Gate evidence index cannot popula
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
-test("an earlier ordinary failure prevents a later provider diagnostic from becoming authoritative", { skip: PYTHON_RUNTIME === null }, async () => {
+test("an earlier ordinary failure prevents a later provider diagnostic from becoming authoritative", { skip: PRODUCTION_DRIVER_SKIP }, async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "test-flow-earlier-failure-diagnostic-"));
   try {
     for (const [index, certificationTarget] of ["P1", "P2"].entries()) {
@@ -651,7 +883,7 @@ test("an earlier ordinary failure prevents a later provider diagnostic from beco
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
-test("stage order and Gate digest drift clear the diagnostic and fail receipt verification", { skip: PYTHON_RUNTIME === null }, async () => {
+test("stage order and Gate digest drift clear the diagnostic and fail receipt verification", { skip: PRODUCTION_DRIVER_SKIP }, async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "test-flow-failure-diagnostic-drift-"));
   try {
     const reordered = await createFinalized(root, "run-20260810T000001Z-d1a60006", {
@@ -673,7 +905,7 @@ test("stage order and Gate digest drift clear the diagnostic and fail receipt ve
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
-test("an unverified Evidence V2 adapter/runtime pair cannot populate the verdict diagnostic", { skip: PYTHON_RUNTIME === null }, async () => {
+test("an unverified Evidence V2 adapter/runtime pair cannot populate the verdict diagnostic", { skip: PRODUCTION_DRIVER_SKIP }, async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "test-flow-unverified-failure-diagnostic-"));
   try {
     const result = await createFinalized(root, "run-20260810T000001Z-d1a60002", {

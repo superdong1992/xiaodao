@@ -703,6 +703,7 @@ export async function runFlow(repoRoot, options) {
           stageOperationFailure = { code: "CHECKPOINT_SEAL_FAILED", failure_domain: "HARNESS", error: redactError(error) };
         }
       }
+      const elapsedSeconds = Math.round(gateResults.reduce((sum, gate) => sum + Number(gate.elapsed_seconds ?? 0), 0) * 1000) / 1000;
       let performance = { status: "NOT_MEASURED", baseline: null, consecutive_significant_regressions: 0, reason: null };
       if (status === "PASS") {
         performance = adjudicateStagePerformance({

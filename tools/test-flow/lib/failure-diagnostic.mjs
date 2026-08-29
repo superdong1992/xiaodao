@@ -8,6 +8,14 @@ const PRODUCTION_RUNTIME = "problem_locator.runtime.diagnosis_runtime.DiagnosisR
 const DIAGNOSTIC_ID = /^diag-[a-f0-9]{64}$/u;
 const EVALUATION_REF = /^eval-[a-f0-9]{64}$/u;
 const REASON_CODE = /^[A-Z][A-Z0-9_]*$/u;
+const PROVIDER_WORKFLOW_PREFIXES = new Set([
+  "SPECIALIST:PRIMARY",
+  "SPECIALIST:PRIMARY,SPECIALIST:REPAIR",
+  "SPECIALIST:PRIMARY,REVIEWER:PRIMARY",
+  "SPECIALIST:PRIMARY,SPECIALIST:REPAIR,REVIEWER:PRIMARY",
+  "SPECIALIST:PRIMARY,REVIEWER:PRIMARY,REVIEWER:REPAIR",
+  "SPECIALIST:PRIMARY,SPECIALIST:REPAIR,REVIEWER:PRIMARY,REVIEWER:REPAIR",
+]);
 
 export const FAILURE_DIAGNOSTIC_SCHEMA_VERSION = 1;
 export const FAILURE_DIAGNOSTIC_FIELDS = Object.freeze([
@@ -54,25 +62,47 @@ export function validFailureDiagnostic(value) {
         && value.provider_subtype.length > 0));
 }
 
-function providerFailure(invocations) {
-  if (!Array.isArray(invocations) || invocations.length === 0) return null;
-  for (let index = invocations.length - 1; index >= 0; index -= 1) {
-    const invocation = invocations[index];
+function validP1Terminal(value) {
+  return exactKeys(value, ["subtype", "is_error", "stop_reason", "exit_code", "signal"])
+    && typeof value.subtype === "string"
+    && value.subtype.length > 0
+    && typeof value.is_error === "boolean"
+    && (value.stop_reason === null || typeof value.stop_reason === "string")
+    && (value.exit_code === null || (Number.isSafeInteger(value.exit_code) && value.exit_code >= 0))
+    && (value.signal === null || (typeof value.signal === "string" && value.signal.length > 0))
+    && (value.is_error ? value.subtype !== "success" : value.subtype === "success")
+    && (value.is_error
+      ? (value.exit_code !== 0 || value.signal !== null)
+      : value.exit_code === 0 && value.signal === null);
+}
+
+function validP2Terminal(value) {
+  return exactKeys(value, ["subtype", "is_error", "event", "thread_id"])
+    && typeof value.is_error === "boolean"
+    && (value.thread_id === null || (typeof value.thread_id === "string" && value.thread_id.length > 0))
+    && (value.is_error
+      ? value.subtype === "error" && value.event === "turn.failed"
+      : value.subtype === "success" && value.event === "turn.completed");
+}
+
+function providerFailure(invocations, certificationTarget) {
+  if (!Array.isArray(invocations)) return null;
+  if (invocations.length === 0) return { code: null, subtype: null };
+  const workflow = invocations.map((invocation) => invocation?.workflow).join(",");
+  if (!PROVIDER_WORKFLOW_PREFIXES.has(workflow)) return null;
+  const terminalValidator = certificationTarget === "P1" ? validP1Terminal : validP2Terminal;
+  for (const [index, invocation] of invocations.entries()) {
     const outcome = invocation?.wrapper_outcome;
-    const terminal = invocation?.terminal;
-    if (invocation?.schema_version === 3
-      && outcome?.schema_version === 1
-      && outcome.status === "FAIL"
-      && typeof outcome.code === "string"
-      && REASON_CODE.test(outcome.code)
-      && terminal !== null
-      && typeof terminal === "object"
-      && !Array.isArray(terminal)
-      && terminal.is_error === true
-      && typeof terminal.subtype === "string"
-      && terminal.subtype.length > 0) return { code: outcome.code, subtype: terminal.subtype };
+    if (invocation?.schema_version !== 3
+      || !terminalValidator(invocation.terminal)
+      || outcome?.schema_version !== 1
+      || !["PASS", "FAIL"].includes(outcome.status)
+      || (index < invocations.length - 1 && (outcome.status !== "PASS" || outcome.code !== null))) return null;
   }
-  return null;
+  const outcome = invocations.at(-1).wrapper_outcome;
+  const terminal = invocations.at(-1).terminal;
+  if (outcome.status !== "FAIL" || typeof outcome.code !== "string" || !REASON_CODE.test(outcome.code)) return null;
+  return { code: outcome.code, subtype: terminal.subtype };
 }
 
 function validRepairs(value) {
@@ -151,7 +181,7 @@ function projectGateFailureDiagnostic({ attemptRoot, stageId, gateSummary }) {
     "model_calls", "repairs",
   ];
   const methods = runtime?.methods_result;
-  const provider = providerFailure(gateReceipt.model_invocations);
+  const provider = providerFailure(gateReceipt.model_invocations, adapter?.certification_target);
   const diagnostic = {
     schema_version: FAILURE_DIAGNOSTIC_SCHEMA_VERSION,
     certification_target: adapter?.certification_target,
@@ -171,12 +201,15 @@ function projectGateFailureDiagnostic({ attemptRoot, stageId, gateSummary }) {
     || !["UNRESOLVED", "FAILED"].includes(adapter.methods_status)
     || !Number.isSafeInteger(adapter.model_calls)
     || adapter.model_calls < 0
+    || !Array.isArray(gateReceipt.model_invocations)
+    || gateReceipt.model_invocations.length !== adapter.model_calls
+    || runtime?.model_invocations !== adapter.model_calls
+    || provider === null
     || !validRepairs(adapter.repairs)
     || !validFailureDiagnostic(diagnostic)
     || runtime?.status !== "PASS"
     || runtime.execution_mode !== "real-model"
     || runtime.production_runtime !== PRODUCTION_RUNTIME
-    || runtime.model_invocations !== adapter.model_calls
     || canonicalJson(runtime.repair_counts) !== canonicalJson(adapter.repairs)
     || methods?.status !== adapter.methods_status
     || methods.reason_code !== adapter.reason_code
