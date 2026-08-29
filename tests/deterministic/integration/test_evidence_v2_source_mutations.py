@@ -301,6 +301,7 @@ def _run_exact_regression_test(
         )
         assert node_entry is not None, "Node.js is required for source-overlay tests"
         environment["TEST_FLOW_QUICK_PYTHON"] = sys.executable
+        environment["TEST_EVIDENCE_V2_SOURCE_OVERLAY"] = "1"
         return subprocess.run(
             [
                 node_entry,

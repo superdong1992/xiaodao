@@ -252,7 +252,7 @@ function executeProductionBundleAttempt(
   writeReleaseRegistration(registrationRoot, sourceRoot, { includeCompleteTemplates });
   const script = runtimeScript ?? path.join(REPO_ROOT, "tools", "test-flow", "quick-validation", "codex-luna", "runtime", "macos_codex_luna_model_cert_driver.py");
   const receiptPath = path.join(evidenceRoot, "runtime-receipt.json");
-  const bootstrap = "import importlib.util,runpy,sys,types; mark=types.SimpleNamespace(parametrize=lambda *a,**k:(lambda f:f)); sys.modules['pytest']=types.SimpleNamespace(fixture=lambda f:f,mark=mark); importlib.util.find_spec('problem_locator') is None or __import__('problem_locator.runtime.methods_evidence_v2'); script=sys.argv[1]; sys.argv=sys.argv[1:]; runpy.run_path(script,run_name='__main__')";
+  const bootstrap = "import os,runpy,sys,types; mark=types.SimpleNamespace(parametrize=lambda *a,**k:(lambda f:f)); sys.modules['pytest']=types.SimpleNamespace(fixture=lambda f:f,mark=mark); os.environ.get('TEST_EVIDENCE_V2_SOURCE_OVERLAY') != '1' or __import__('problem_locator.runtime.methods_evidence_v2'); script=sys.argv[1]; sys.argv=sys.argv[1:]; runpy.run_path(script,run_name='__main__')";
   const python = pythonRuntime();
   const result = spawnSync(python.command, [
     ...python.prefix, "-c", bootstrap,
