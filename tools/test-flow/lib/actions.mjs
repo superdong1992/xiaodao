@@ -896,9 +896,15 @@ export function validateGeneratedMethodsScenarioOracle(scenarioOracle) {
   if (scenarioOracle?.oracle?.expected_status !== "RESOLVED") {
     throw new Error("GENERATED_METHODS_SCENARIO_STATUS_INVALID");
   }
-  if (!Array.isArray(scenarioOracle.oracle.required_candidate_marker_groups)
-    || scenarioOracle.oracle.required_candidate_marker_groups.length !== 0) {
-    throw new Error("GENERATED_METHODS_CANDIDATE_MARKERS_FORBIDDEN");
+  const verdicts = scenarioOracle.oracle.expected_method_verdicts;
+  if (!Array.isArray(verdicts) || verdicts.length === 0
+    || verdicts.some((item) => item === null || typeof item !== "object" || Array.isArray(item)
+      || canonicalJson(Object.keys(item).sort()) !== canonicalJson(["semantic_id", "verdict"])
+      || typeof item.semantic_id !== "string" || item.semantic_id.length === 0
+      || !["CONFIRMED", "REJECTED"].includes(item.verdict))
+    || verdicts.length !== new Set(verdicts.map((item) => item.semantic_id)).size
+    || !verdicts.some((item) => item.verdict === "CONFIRMED")) {
+    throw new Error("GENERATED_METHODS_METHOD_VERDICTS_INVALID");
   }
   return scenarioOracle.oracle;
 }
@@ -983,7 +989,7 @@ function generatedMethodsExpectation(context, generatedSkill, inputs, gateOracle
       canonicalJson(uniqueSortedStrings(method?.evidence_markers, "GENERATED_METHODS_MARKERS_INVALID")) === canonicalJson(semanticMarkers)
     ));
     if (matches.length !== 1) throw new Error("GENERATED_METHODS_SEMANTIC_MAPPING_INVALID");
-    return { markers: semanticMarkers, method_id: matches[0].id };
+    return { semantic_id: semantic.semantic_id, markers: semanticMarkers, method_id: matches[0].id };
   });
   if (generatedMethods.length !== methods.methods.length
     || new Set(generatedMethods.map((entry) => entry.method_id)).size !== methods.methods.length) {
@@ -991,22 +997,13 @@ function generatedMethodsExpectation(context, generatedSkill, inputs, gateOracle
   }
   validateGeneratedMethodsScenarioOracle(scenarioOracle);
 
-  const mapMarkerGroups = (groups, label) => groups.map((group) => {
-    const requiredMarkers = uniqueSortedStrings(group, "GENERATED_METHODS_CONFIRMED_MARKERS_INVALID");
-    const candidates = generatedMethods.filter((entry) => requiredMarkers.every((marker) => (
-      entry.markers.some((declared) => exactGeneratedEvidenceMarker(declared, marker))
-    )));
-    if (candidates.length === 0) throw new Error(`GENERATED_METHODS_${label}_MAPPING_INVALID`);
-    const minimumMarkerCount = Math.min(...candidates.map((entry) => entry.markers.length));
-    const minimal = candidates.filter((entry) => entry.markers.length === minimumMarkerCount);
-    if (minimal.length !== 1) throw new Error(`GENERATED_METHODS_${label}_MAPPING_AMBIGUOUS`);
-    return minimal[0].method_id;
+  const generatedBySemanticId = new Map(generatedMethods.map((entry) => [entry.semantic_id, entry]));
+  const semanticVerdicts = scenarioOracle.oracle.expected_method_verdicts.map((item) => {
+    const entry = generatedBySemanticId.get(item.semantic_id);
+    if (!entry) throw new Error("GENERATED_METHODS_METHOD_VERDICT_MAPPING_INVALID");
+    return { method_id: entry.method_id, verdict: item.verdict };
   });
-  const confirmedMethods = mapMarkerGroups(scenarioOracle.oracle.required_confirmed_marker_groups, "CONFIRMED");
-  mapMarkerGroups(scenarioOracle.oracle.required_candidate_marker_groups, "UNCONFIRMED");
-  if (confirmedMethods.length !== new Set(confirmedMethods).size) {
-    throw new Error("GENERATED_METHODS_CONFIRMED_MAPPING_DUPLICATE");
-  }
+  if (semanticVerdicts.length !== generatedMethods.length) throw new Error("GENERATED_METHODS_METHOD_VERDICT_COVERAGE_INVALID");
   const methodCards = methods.methods
     .map((method) => ({
       id: method.id,
@@ -1014,20 +1011,23 @@ function generatedMethodsExpectation(context, generatedSkill, inputs, gateOracle
       evidence_markers: [...method.evidence_markers],
     }))
     .sort((left, right) => left.priority - right.priority || left.id.localeCompare(right.id));
-  const confirmedMethodSet = new Set(confirmedMethods);
-  const orderedConfirmedMethods = methodCards
-    .map((method) => method.id)
-    .filter((methodId) => confirmedMethodSet.has(methodId));
-  const requiredEvidenceIdentities = scenarioOracle.oracle.required_evidence_identities.map((identity) => ({
-    method_id: mapMarkerGroups([[identity.marker]], "EVIDENCE_IDENTITY")[0],
-    marker: identity.marker,
-    identity_tokens: uniqueSortedStrings(identity.identity_tokens, "GENERATED_METHODS_EVIDENCE_IDENTITY_INVALID"),
-  }));
-  if (requiredEvidenceIdentities.some((identity) => !confirmedMethods.includes(identity.method_id))) {
-    throw new Error("GENERATED_METHODS_EVIDENCE_IDENTITY_UNCONFIRMED");
-  }
+  const verdictByMethodId = new Map(semanticVerdicts.map((item) => [item.method_id, item.verdict]));
+  const methodVerdicts = methodCards.map((method) => ({ method_id: method.id, verdict: verdictByMethodId.get(method.id) }));
+  const orderedConfirmedMethods = methodVerdicts.filter((item) => item.verdict === "CONFIRMED").map((item) => item.method_id);
+  const requiredEvidenceIdentities = scenarioOracle.oracle.required_evidence_identities.map((identity) => {
+    const entry = generatedBySemanticId.get(identity.semantic_id);
+    if (!entry || !entry.markers.some((marker) => exactGeneratedEvidenceMarker(marker, identity.marker))) {
+      throw new Error("GENERATED_METHODS_EVIDENCE_IDENTITY_MAPPING_INVALID");
+    }
+    return {
+      method_id: entry.method_id,
+      marker: identity.marker,
+      identity_tokens: uniqueSortedStrings(identity.identity_tokens, "GENERATED_METHODS_EVIDENCE_IDENTITY_INVALID"),
+    };
+  });
   return {
     confirmedMethods: orderedConfirmedMethods,
+    methodVerdicts,
     methodCards,
     methods,
     requiredEvidenceIdentities,
@@ -1070,6 +1070,7 @@ export function validMethodsV2OracleEvidence(context, receipt, generatedSkill) {
         source_ids: [...scenario.driver.attachment_anchor_names].sort(),
         method_cards: methodsExpectation.methodCards,
         loaded_method_ids: methodsExpectation.methodCards.map((method) => method.id),
+        method_verdicts: methodsExpectation.methodVerdicts,
         confirmed_method_ids: methodsExpectation.confirmedMethods,
         required_evidence_identities: methodsExpectation.requiredEvidenceIdentities,
       },

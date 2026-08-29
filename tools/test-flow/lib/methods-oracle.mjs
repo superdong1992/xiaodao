@@ -182,6 +182,29 @@ function expectedMethodMap(expected) {
     "METHODS_V2_EXPECTATION_INVALID",
     "Expected confirmed method IDs are invalid",
   );
+  if (expected.method_verdicts !== undefined) {
+    requireOracle(
+      Array.isArray(expected.method_verdicts) && expected.method_verdicts.length === ordered.length,
+      "METHODS_V2_EXPECTATION_INVALID",
+      "Expected method verdicts must exactly cover the method cards",
+    );
+    const expectedVerdicts = expected.method_verdicts.map((item) => {
+      exactKeys(item, ["method_id", "verdict"], "METHODS_V2_EXPECTATION_INVALID", "Expected method verdict");
+      requireOracle(
+        methods.has(item.method_id) && ["CONFIRMED", "REJECTED"].includes(item.verdict),
+        "METHODS_V2_EXPECTATION_INVALID",
+        "Expected resolved method verdict is invalid",
+      );
+      return item;
+    });
+    requireOracle(
+      canonicalJson(expectedVerdicts.map((item) => item.method_id)) === canonicalJson(ordered.map((item) => item.id))
+        && canonicalJson(expectedVerdicts.filter((item) => item.verdict === "CONFIRMED").map((item) => item.method_id))
+          === canonicalJson(expected.confirmed_method_ids),
+      "METHODS_V2_EXPECTATION_INVALID",
+      "Expected method verdict order or confirmed subset is invalid",
+    );
+  }
   requireOracle(Array.isArray(expected.required_evidence_identities), "METHODS_V2_EXPECTATION_INVALID", "Expected evidence identities are invalid");
   for (const identity of expected.required_evidence_identities) {
     exactKeys(identity, ["identity_tokens", "marker", "method_id"], "METHODS_V2_EXPECTATION_INVALID", "Expected evidence identity");
@@ -514,6 +537,17 @@ function validateJobAndOutcomes({ sourceJob, reviewerJob, sourceOutcome, reviewe
   const confirmedRefs = confirmed.map((item) => item.evaluation_ref);
   const byRef = new Map(plan.evaluations.map((item) => [item.evaluation_ref, item]));
   const confirmedMethods = confirmedRefs.map((ref) => byRef.get(ref).method_id);
+  if (expected.method_verdicts !== undefined) {
+    const actualVerdicts = terminalSpecialist.evaluations.map((item) => ({
+      method_id: byRef.get(item.evaluation_ref).method_id,
+      verdict: item.verdict,
+    }));
+    requireOracle(
+      canonicalJson(actualVerdicts) === canonicalJson(expected.method_verdicts),
+      "METHODS_V2_METHOD_VERDICTS_MISMATCH",
+      "Specialist and Reviewer verdicts differ from the explicit semantic oracle",
+    );
+  }
   requireOracle(
     terminalState.status === "RESOLVED" && terminalState.current_role === null
       && terminalState.reason_code === null && terminalState.diagnostic_evaluation_ref === null

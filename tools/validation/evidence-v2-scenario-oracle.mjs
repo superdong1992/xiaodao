@@ -122,22 +122,6 @@ function methodSemanticMapping(methods, expectedPackage) {
   return generated;
 }
 
-function mapMarkerGroups(groups, generated, code) {
-  const selected = groups.map((group) => {
-    const markers = uniqueSortedStrings(group, code, "release marker group");
-    const candidates = generated.filter((entry) => markers.every((marker) => (
-      entry.markers.some((declared) => declared === marker)
-    )));
-    assertFlow(candidates.length > 0, code, "release marker group does not map to a copied method card");
-    const minimumMarkerCount = Math.min(...candidates.map((entry) => entry.markers.length));
-    const minimal = candidates.filter((entry) => entry.markers.length === minimumMarkerCount);
-    assertFlow(minimal.length === 1, `${code}_AMBIGUOUS`, "release marker group maps ambiguously");
-    return minimal[0].method.id;
-  });
-  assertFlow(selected.length === new Set(selected).size, `${code}_DUPLICATE`, "release marker groups map to duplicate methods");
-  return selected;
-}
-
 function buildMethodsExpectation({ methods, inputs, gateOracle, scenarioOracle }) {
   const generated = methodSemanticMapping(methods, gateOracle.semantic_oracle.expected_package);
   assertFlow(
@@ -146,30 +130,41 @@ function buildMethodsExpectation({ methods, inputs, gateOracle, scenarioOracle }
     "Evidence V2 model certification requires a resolved scenario",
   );
   assertFlow(
-    scenarioOracle.required_candidate_marker_groups.length === 0,
-    "SCENARIO_ORACLE_CANDIDATES_PRESENT",
-    "A resolved Evidence V2 scenario cannot retain candidate methods",
+    Array.isArray(scenarioOracle.expected_method_verdicts)
+      && scenarioOracle.expected_method_verdicts.length === generated.length,
+    "SCENARIO_ORACLE_METHOD_VERDICTS",
+    "Resolved Evidence V2 scenario must define every semantic method verdict",
   );
-  const confirmed = mapMarkerGroups(
-    scenarioOracle.required_confirmed_marker_groups,
-    generated,
-    "SCENARIO_ORACLE_CONFIRMED_MAPPING",
-  );
-  const candidate = mapMarkerGroups(
-    scenarioOracle.required_candidate_marker_groups,
-    generated,
-    "SCENARIO_ORACLE_CANDIDATE_MAPPING",
-  );
-  assertFlow(candidate.length === 0, "SCENARIO_ORACLE_CANDIDATES_PRESENT", "Resolved scenario candidate mapping must be empty");
-  const requiredEvidenceIdentities = scenarioOracle.required_evidence_identities.map((identity) => {
-    const [methodId] = mapMarkerGroups(
-      [[identity.marker]],
-      generated,
-      "SCENARIO_ORACLE_EVIDENCE_IDENTITY_MAPPING",
+  const verdictBySemanticId = new Map();
+  for (const item of scenarioOracle.expected_method_verdicts) {
+    assertFlow(
+      item !== null && typeof item === "object" && !Array.isArray(item)
+        && Object.keys(item).sort().join("\0") === ["semantic_id", "verdict"].join("\0")
+        && ["CONFIRMED", "REJECTED"].includes(item.verdict)
+        && !verdictBySemanticId.has(item.semantic_id),
+      "SCENARIO_ORACLE_METHOD_VERDICTS",
+      "Resolved Evidence V2 method verdict is invalid",
     );
-    assertFlow(confirmed.includes(methodId), "SCENARIO_ORACLE_EVIDENCE_METHOD_UNCONFIRMED", "required evidence maps to an unconfirmed method");
+    verdictBySemanticId.set(item.semantic_id, item.verdict);
+  }
+  assertFlow(
+    generated.every((entry) => verdictBySemanticId.has(entry.semantic_id))
+      && [...verdictBySemanticId.keys()].every((semanticId) => generated.some((entry) => entry.semantic_id === semanticId)),
+    "SCENARIO_ORACLE_METHOD_VERDICT_COVERAGE",
+    "Resolved Evidence V2 method verdicts differ from the generated semantic method set",
+  );
+  const requiredEvidenceIdentities = scenarioOracle.required_evidence_identities.map((identity) => {
+    const entry = semanticMethod(
+      generated,
+      identity.semantic_id,
+    );
+    assertFlow(
+      entry.markers.includes(identity.marker),
+      "SCENARIO_ORACLE_EVIDENCE_IDENTITY_MAPPING",
+      "required evidence marker is not owned by its semantic method",
+    );
     return {
-      method_id: methodId,
+      method_id: entry.method.id,
       marker: identity.marker,
       identity_tokens: uniqueSortedStrings(identity.identity_tokens, "SCENARIO_ORACLE_EVIDENCE_TOKENS", "release evidence identity tokens"),
     };
@@ -179,18 +174,25 @@ function buildMethodsExpectation({ methods, inputs, gateOracle, scenarioOracle }
     priority: method.priority,
     evidence_markers: [...method.evidence_markers],
   })).sort((left, right) => left.priority - right.priority || (left.id < right.id ? -1 : left.id > right.id ? 1 : 0));
-  const confirmedSet = new Set(confirmed);
-  const confirmedMethodIds = methodCards.map((method) => method.id).filter((methodId) => confirmedSet.has(methodId));
+  const semanticByMethodId = new Map(generated.map((entry) => [entry.method.id, entry.semantic_id]));
+  const methodVerdicts = methodCards.map((method) => ({
+    method_id: method.id,
+    verdict: verdictBySemanticId.get(semanticByMethodId.get(method.id)),
+  }));
+  const confirmedMethodIds = methodVerdicts
+    .filter((item) => item.verdict === "CONFIRMED")
+    .map((item) => item.method_id);
   assertFlow(
-    confirmedMethodIds.length === generated.length,
+    confirmedMethodIds.length > 0,
     "SCENARIO_ORACLE_CONFIRMED_COVERAGE",
-    "The resolved Release scenario must mechanically confirm every generated method",
+    "The resolved Release scenario must mechanically confirm at least one generated method",
   );
   return {
     generated,
     expected: {
       method_cards: methodCards,
       loaded_method_ids: methodCards.map((method) => method.id),
+      method_verdicts: methodVerdicts,
       confirmed_method_ids: confirmedMethodIds,
       required_evidence_identities: requiredEvidenceIdentities,
       source_ids: [...inputs.scenarios.find((item) => item.scenario_id === inputs.journey_scenario).driver.attachment_anchor_names].sort(),
@@ -285,27 +287,44 @@ function validateFrozenGraphLines(graph, selected) {
 }
 
 function validateRequestTimeoutEvidence({ graph, generated, timeoutExpectation, target }) {
+  assertFlow(
+    timeoutExpectation.decoy_service !== target.service || timeoutExpectation.decoy_api !== target.api,
+    "SCENARIO_ORACLE_DECOY_TARGET_COLLISION",
+    "The decoy timeout must use a different service or API from the target",
+  );
   let linkedTimeout = null;
   for (const entry of generated) {
+    const qualified = methodHits(graph, entry, timeoutExpectation.marker).map((hit) => {
+      const match = /Context=([^\s]+) rpc ([^\s]+) call unsuccess, reqid\((\d+)\), timeout (\d+)\)?$/.exec(hit.line);
+      assertFlow(match !== null, "SCENARIO_ORACLE_LINKED_TIMEOUT_INVALID", "Qualified client timeout evidence has an invalid shape");
+      return {
+        hit,
+        service: match[1],
+        api: match[2],
+        requestId: match[3],
+        timeoutMs: Number(match[4]),
+      };
+    });
     const linked = exactOne(
-      methodHits(graph, entry, timeoutExpectation.marker),
+      qualified.filter((item) => item.service === target.service && item.api === target.api
+        && item.requestId === timeoutExpectation.request_id),
       "SCENARIO_ORACLE_LINKED_TIMEOUT_MISSING",
       "Each timeout-dependent method must receive the request-id-qualified timeout hit",
     );
-    const linkedMatch = /Context=([^\s]+) rpc ([^\s]+) call unsuccess, reqid\((\d+)\), timeout (\d+)\)?$/.exec(linked.line);
-    assertFlow(linkedMatch !== null, "SCENARIO_ORACLE_LINKED_TIMEOUT_INVALID", "Qualified client timeout evidence has an invalid shape");
-    const [, service, api, requestId, timeoutText] = linkedMatch;
-    const timeoutMs = Number(timeoutText);
-    assertFlow(
-      service === target.service && api === target.api
-        && requestId === timeoutExpectation.request_id
-        && timeoutMs === timeoutExpectation.timeout_ms,
-      "SCENARIO_ORACLE_LINKED_TIMEOUT_MISMATCH",
-      "The target request does not bind the exact frozen timeout",
+    const decoy = exactOne(
+      qualified.filter((item) => item.service === timeoutExpectation.decoy_service
+        && item.api === timeoutExpectation.decoy_api
+        && item.requestId === timeoutExpectation.decoy_request_id),
+      "SCENARIO_ORACLE_DECOY_TIMEOUT_MISSING",
+      "Each timeout-dependent method must retain the distinct decoy timeout",
     );
-    linkedTimeout ??= { hit: linked, requestId, timeoutMs };
+    assertFlow(linked.timeoutMs === timeoutExpectation.timeout_ms, "SCENARIO_ORACLE_LINKED_TIMEOUT_MISMATCH", "The target request does not bind the exact frozen timeout");
+    assertFlow(decoy.timeoutMs === timeoutExpectation.decoy_timeout_ms, "SCENARIO_ORACLE_DECOY_TIMEOUT_MISMATCH", "The decoy request does not bind its exact frozen timeout");
+    assertFlow(qualified.length === 2, "SCENARIO_ORACLE_LINKED_TIMEOUT_COUNT", "Each method must retain exactly the target and decoy qualified timeouts");
+    assertFlow(linked.hit.hit_ref !== decoy.hit.hit_ref, "SCENARIO_ORACLE_TIMEOUT_EVENTS_MERGED", "Target and decoy timeout hits must remain independent");
+    linkedTimeout ??= { hit: linked.hit, requestId: linked.requestId, timeoutMs: linked.timeoutMs };
     assertFlow(
-      linkedTimeout.requestId === requestId && linkedTimeout.timeoutMs === timeoutMs,
+      linkedTimeout.requestId === linked.requestId && linkedTimeout.timeoutMs === linked.timeoutMs,
       "SCENARIO_ORACLE_LINKED_TIMEOUT_METHOD_DRIFT",
       "Method-qualified timeout hits disagree",
     );
@@ -325,28 +344,52 @@ function validateRequestTimeoutEvidence({ graph, generated, timeoutExpectation, 
       "The unlinked timeout evidence changed or was incorrectly associated with the target request",
     );
     assertFlow(
-      linked.hit_ref !== unlinked.hit_ref,
+      linked.hit.hit_ref !== unlinked.hit_ref && decoy.hit.hit_ref !== unlinked.hit_ref,
       "SCENARIO_ORACLE_TIMEOUT_EVENTS_MERGED",
-      "Qualified and unlinked timeout evidence must remain independent hits",
+      "Target, decoy, and unlinked timeout evidence must remain independent hits",
     );
   }
   return linkedTimeout;
 }
 
-function validateClientSegments({ graph, generated, linkedTimeout, target }) {
-  const method = semanticMethod(generated, "client_receive_blocked");
-  const hit = exactOne(
-    methodHits(graph, method, "LATE_RESPONSE service="),
-    "SCENARIO_ORACLE_LATE_RESPONSE_MISSING",
-    "Client receive blocking requires exactly one target late-response hit",
-  );
-  const fields = lineFields(hit.line);
-  assertFlow(
-    fields.service === target.service && fields.api === target.api
-      && fields.request_id === linkedTimeout.requestId,
-    "SCENARIO_ORACLE_LATE_RESPONSE_TARGET_MISMATCH",
-    "Late-response evidence does not belong to the target request",
-  );
+function validateClientSegments({ graph, generated, linkedTimeout, target, timeoutExpectation }) {
+  let targetLine = null;
+  let clientMethodHit = null;
+  for (const method of generated) {
+    const hits = methodHits(graph, method, "LATE_RESPONSE service=");
+    assertFlow(hits.length === 2, "SCENARIO_ORACLE_LATE_RESPONSE_COUNT", "Each method must retain exactly the target and decoy late responses");
+    const parsed = hits.map((hit) => ({ hit, fields: lineFields(hit.line) }));
+    const targetLate = exactOne(
+      parsed.filter((item) => item.fields.service === target.service && item.fields.api === target.api
+        && item.fields.request_id === linkedTimeout.requestId),
+      "SCENARIO_ORACLE_LATE_RESPONSE_MISSING",
+      "Each method requires exactly one target late-response hit",
+    );
+    const decoyLate = exactOne(
+      parsed.filter((item) => item.fields.service === timeoutExpectation.decoy_service
+        && item.fields.api === timeoutExpectation.decoy_api
+        && item.fields.request_id === timeoutExpectation.decoy_request_id),
+      "SCENARIO_ORACLE_DECOY_LATE_RESPONSE_MISSING",
+      "Each method requires exactly one distinct decoy late-response hit",
+    );
+    const events = [targetLate, decoyLate].map((item) => exactOne(
+      graph.events.filter((event) => event.method_id === method.method.id && event.evidence_hit_refs.includes(item.hit.hit_ref)),
+      "SCENARIO_ORACLE_LATE_RESPONSE_EVENT_MISSING",
+      "Each late-response hit must belong to one production Evidence event",
+    ));
+    assertFlow(events[0].event_ref !== events[1].event_ref, "SCENARIO_ORACLE_REQUEST_EVENTS_MERGED", "Target and decoy requests must remain independent Evidence events");
+    assertFlow(
+      events[0].identity_tokens.includes(`request_id=${linkedTimeout.requestId}`)
+        && events[1].identity_tokens.includes(`request_id=${timeoutExpectation.decoy_request_id}`),
+      "SCENARIO_ORACLE_REQUEST_EVENT_IDENTITY",
+      "Target and decoy Evidence events do not retain their request identities",
+    );
+    targetLine ??= targetLate.hit.line;
+    assertFlow(targetLate.hit.line === targetLine, "SCENARIO_ORACLE_LATE_RESPONSE_METHOD_DRIFT", "Method-qualified target late responses disagree");
+    if (method.semantic_id === "client_receive_blocked") clientMethodHit = targetLate;
+  }
+  assertFlow(clientMethodHit !== null, "SCENARIO_ORACLE_LATE_RESPONSE_MISSING", "Client receive method target late response is missing");
+  const fields = clientMethodHit.fields;
   const clientSend = integerField(fields, "client_send_us", "SCENARIO_ORACLE_LATE_RESPONSE_FIELDS");
   const serverRecv = integerField(fields, "server_recv_us", "SCENARIO_ORACLE_LATE_RESPONSE_FIELDS");
   const serverSend = integerField(fields, "server_send_us", "SCENARIO_ORACLE_LATE_RESPONSE_FIELDS");
@@ -360,10 +403,11 @@ function validateClientSegments({ graph, generated, linkedTimeout, target }) {
     serverQueueUs >= 0 && serverExecutionUs >= 0 && clientQueueUs >= 0
       && endToEndUs > timeoutUs
       && serverExecutionUs < timeoutUs
-      && clientQueueUs > serverQueueUs,
-    "SCENARIO_ORACLE_CLIENT_SEGMENTS_NOT_CONFIRMED",
-    "Frozen late-response segments do not confirm client receive blocking",
+      && serverQueueUs > clientQueueUs,
+    "SCENARIO_ORACLE_CLIENT_SEGMENTS_NOT_REJECTED",
+    "Frozen target segments do not mechanically reject client receive blocking",
   );
+  return { clientSend, serverRecv, serverSend, clientNow, serverQueueUs, serverExecutionUs, clientQueueUs, endToEndUs };
 }
 
 function validateApiCompleteEvents({ graph, generated, target }) {
@@ -377,10 +421,10 @@ function validateApiCompleteEvents({ graph, generated, target }) {
     const endUs = integerField(fields, "end_us", "SCENARIO_ORACLE_API_FIELDS");
     const costUs = integerField(fields, "cost_us", "SCENARIO_ORACLE_API_FIELDS");
     assertFlow(
-      fields.service === target.service && fields.api === target.api
+      (fields.service !== target.service || fields.api !== target.api)
         && endUs > startUs && costUs === endUs - startUs,
       "SCENARIO_ORACLE_API_EVENT_INVALID",
-      "API completion evidence does not satisfy the frozen execution invariant",
+      "API completion decoy is target-bound or violates the frozen execution invariant",
     );
     const event = exactOne(
       graph.events.filter((item) => item.method_id === method.method.id && item.evidence_hit_refs.includes(hit.hit_ref)),
@@ -392,7 +436,7 @@ function validateApiCompleteEvents({ graph, generated, target }) {
   assertFlow(new Set(eventRefs).size === 2, "SCENARIO_ORACLE_API_EVENTS_MERGED", "Independent API completion calls were merged into one Evidence event");
 }
 
-function validateQueueHistory({ graph, generated, target }) {
+function validateQueueHistory({ graph, generated, target, linkedTimeout, segments }) {
   const method = semanticMethod(generated, "server_receive_queueing");
   const hits = methodHits(graph, method, "QUEUE_HISTORY print_time_ms=");
   assertFlow(hits.length === 2, "SCENARIO_ORACLE_QUEUE_HISTORY_COUNT", "Release scenario must retain one two-record queue-history group");
@@ -423,6 +467,7 @@ function validateQueueHistory({ graph, generated, target }) {
   const targetRecord = records.at(-1);
   assertFlow(
     targetRecord.fields.service === target.service && targetRecord.fields.api === target.api
+      && targetRecord.timeoutMs === linkedTimeout.timeoutMs
       && targetRecord.costUs + targetRecord.queueUs > targetRecord.timeoutMs * 1000
       && targetRecord.costUs < targetRecord.timeoutMs * 1000,
     "SCENARIO_ORACLE_QUEUE_TARGET_NOT_CONFIRMED",
@@ -430,17 +475,36 @@ function validateQueueHistory({ graph, generated, target }) {
   );
   const targetExecutionStartUs = targetRecord.endUs - targetRecord.costUs;
   const targetQueueStartUs = targetExecutionStartUs - targetRecord.queueUs;
+  assertFlow(
+    targetRecord.endUs === segments.serverSend
+      && targetExecutionStartUs === segments.serverRecv
+      && targetQueueStartUs === segments.clientSend
+      && targetRecord.costUs === segments.serverExecutionUs
+      && targetRecord.queueUs === segments.serverQueueUs,
+    "SCENARIO_ORACLE_QUEUE_LATE_RESPONSE_MISMATCH",
+    "Queue-history target does not align with the request-qualified late-response interval",
+  );
   const contributors = records.slice(0, -1).filter((prior) => {
     const priorExecutionStartUs = prior.endUs - prior.costUs;
     const overlapUs = Math.min(prior.endUs, targetExecutionStartUs)
       - Math.max(priorExecutionStartUs, targetQueueStartUs);
     return overlapUs > 0;
   });
+  assertFlow(
+    records.slice(0, -1).every((prior) => prior.fields.service !== target.service || prior.fields.api !== target.api),
+    "SCENARIO_ORACLE_QUEUE_PRIOR_TARGET_COLLISION",
+    "Queue-history prior records must remain distinct from the target service and API",
+  );
   assertFlow(contributors.length > 0, "SCENARIO_ORACLE_QUEUE_CONTRIBUTOR_MISSING", "Queue-history group has no overlapping prior contributor");
 }
 
-function validateReleaseScenarioSemantics({ graph, selected, generated, scenarioOracle, publicMethodsResult }) {
+function validateReleaseScenarioSemantics({ graph, selected, generated, expected, scenarioOracle, publicMethodsResult }) {
   assertFlow(publicMethodsResult.status === scenarioOracle.expected_status, "SCENARIO_ORACLE_PUBLIC_STATUS", "Public Methods status differs from the Release scenario oracle");
+  assertFlow(
+    canonicalJson(publicMethodsResult.confirmed_method_ids) === canonicalJson(expected.confirmed_method_ids),
+    "SCENARIO_ORACLE_PUBLIC_CONFIRMED_METHODS",
+    "Public confirmed methods differ from the explicit semantic verdict oracle",
+  );
   validateFrozenGraphLines(graph, selected);
   const facts = Object.fromEntries(selected.driver.initial_user_fact_names.map((name, index) => [
     name,
@@ -453,9 +517,9 @@ function validateReleaseScenarioSemantics({ graph, selected, generated, scenario
     timeoutExpectation: scenarioOracle.required_request_timeout,
     target,
   });
-  validateClientSegments({ graph, generated, linkedTimeout, target });
+  const segments = validateClientSegments({ graph, generated, linkedTimeout, target, timeoutExpectation: scenarioOracle.required_request_timeout });
   validateApiCompleteEvents({ graph, generated, target });
-  validateQueueHistory({ graph, generated, target });
+  validateQueueHistory({ graph, generated, target, linkedTimeout, segments });
 }
 
 export function buildEvidenceV2ReleaseScenarioExpectation({ sourceRoot, methods }) {
@@ -496,6 +560,7 @@ export function validateEvidenceV2ReleaseScenarioGraph({
     graph,
     selected: expectation.selected,
     generated: expectation.generated,
+    expected: expectation.expected,
     scenarioOracle: expectation.scenario_oracle,
     publicMethodsResult,
   });

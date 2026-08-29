@@ -279,22 +279,6 @@ function sortedStrings(value, code) {
   return [...value].sort();
 }
 
-function mapOracleMarkerGroups(groups, generatedMethods, code) {
-  const selected = groups.map((group) => {
-    const markers = sortedStrings(group, code);
-    const candidates = generatedMethods.filter((entry) => markers.every((marker) => (
-      entry.semantic_markers.some((declared) => declared === marker)
-    )));
-    requireCondition(candidates.length > 0, code, "FAIL", "CONTRACT");
-    const minimumMarkerCount = Math.min(...candidates.map((entry) => entry.semantic_markers.length));
-    const minimal = candidates.filter((entry) => entry.semantic_markers.length === minimumMarkerCount);
-    requireCondition(minimal.length === 1, `${code}_AMBIGUOUS`, "FAIL", "CONTRACT");
-    return minimal[0].method.id;
-  });
-  requireCondition(selected.length === new Set(selected).size, `${code}_DUPLICATE`, "FAIL", "CONTRACT");
-  return selected;
-}
-
 function selectedReleaseCase(repoRoot, generatedSkill) {
   const root = discoverReleaseCaseRoot(path.join(repoRoot, "tests", "cases", "release"));
   const inputs = loadReleaseCaseInputs(root);
@@ -349,19 +333,18 @@ function selectedReleaseCase(repoRoot, generatedSkill) {
   });
   requireCondition(generatedMethods.length === methods.methods.length && new Set(generatedMethods.map((entry) => entry.method.id)).size === methods.methods.length, "GENERATED_SKILL_METHOD_SET_DRIFT", "FAIL", "CONTRACT");
   requireCondition(scenarioOracle.oracle.expected_status === "RESOLVED", "RELEASE_CASE_EXPECTED_STATUS_INVALID", "FAIL", "CONTRACT");
-  requireCondition(scenarioOracle.oracle.required_candidate_marker_groups.length === 0, "RELEASE_CASE_CANDIDATES_PRESENT", "FAIL", "CONTRACT");
-  const confirmedMethodIds = mapOracleMarkerGroups(scenarioOracle.oracle.required_confirmed_marker_groups, generatedMethods, "RELEASE_CASE_CONFIRMED_METHOD_MAPPING");
-  mapOracleMarkerGroups(scenarioOracle.oracle.required_candidate_marker_groups, generatedMethods, "RELEASE_CASE_UNCONFIRMED_METHOD_MAPPING");
+  const generatedBySemanticId = new Map(generatedMethods.map((entry) => [entry.semantic_id, entry]));
+  const semanticVerdicts = scenarioOracle.oracle.expected_method_verdicts.map((item) => {
+    const entry = generatedBySemanticId.get(item.semantic_id);
+    requireCondition(entry && ["CONFIRMED", "REJECTED"].includes(item.verdict), "RELEASE_CASE_METHOD_VERDICT_MAPPING_INVALID", "FAIL", "CONTRACT");
+    return { method_id: entry.method.id, verdict: item.verdict };
+  });
+  requireCondition(semanticVerdicts.length === generatedMethods.length, "RELEASE_CASE_METHOD_VERDICT_COVERAGE_INVALID", "FAIL", "CONTRACT");
   const requiredEvidenceIdentities = scenarioOracle.oracle.required_evidence_identities.map((identity) => {
-    const [mappedMethodId] = mapOracleMarkerGroups([[identity.marker]], generatedMethods, "RELEASE_CASE_EVIDENCE_IDENTITY_MAPPING");
-    requireCondition(
-      confirmedMethodIds.includes(mappedMethodId),
-      "RELEASE_CASE_EVIDENCE_IDENTITY_METHOD_UNCONFIRMED",
-      "FAIL",
-      "CONTRACT",
-    );
+    const entry = generatedBySemanticId.get(identity.semantic_id);
+    requireCondition(entry && entry.semantic_markers.includes(identity.marker), "RELEASE_CASE_EVIDENCE_IDENTITY_MAPPING", "FAIL", "CONTRACT");
     return {
-      method_id: mappedMethodId,
+      method_id: entry.method.id,
       marker: identity.marker,
       identity_tokens: sortedStrings(identity.identity_tokens, "RELEASE_CASE_EVIDENCE_IDENTITY_TOKENS_INVALID"),
     };
@@ -373,10 +356,9 @@ function selectedReleaseCase(repoRoot, generatedSkill) {
       evidence_markers: [...method.evidence_markers],
     }))
     .sort((left, right) => left.priority - right.priority || left.id.localeCompare(right.id));
-  const confirmedMethodSet = new Set(confirmedMethodIds);
-  const orderedConfirmedMethodIds = methodCards
-    .map((method) => method.id)
-    .filter((methodId) => confirmedMethodSet.has(methodId));
+  const verdictByMethodId = new Map(semanticVerdicts.map((item) => [item.method_id, item.verdict]));
+  const methodVerdicts = methodCards.map((method) => ({ method_id: method.id, verdict: verdictByMethodId.get(method.id) }));
+  const orderedConfirmedMethodIds = methodVerdicts.filter((item) => item.verdict === "CONFIRMED").map((item) => item.method_id);
   return {
     root,
     case_id: inputs.case_id,
@@ -397,6 +379,7 @@ function selectedReleaseCase(repoRoot, generatedSkill) {
       case_status: scenarioOracle.oracle.expected_status,
       method_cards: methodCards,
       loaded_method_ids: methodCards.map((method) => method.id),
+      method_verdicts: methodVerdicts,
       confirmed_method_ids: orderedConfirmedMethodIds,
       required_evidence_identities: requiredEvidenceIdentities,
     },
@@ -3026,6 +3009,7 @@ function methodsV2Expected(configuration, state, sourceJobId, reviewerJobId) {
     source_ids: [...configuration.releaseCase.driver.attachment_anchor_names].sort(),
     method_cards: configuration.releaseCase.result_expectation.method_cards,
     loaded_method_ids: configuration.releaseCase.result_expectation.loaded_method_ids,
+    method_verdicts: configuration.releaseCase.result_expectation.method_verdicts,
     confirmed_method_ids: configuration.releaseCase.result_expectation.confirmed_method_ids,
     required_evidence_identities: configuration.releaseCase.result_expectation.required_evidence_identities,
   };

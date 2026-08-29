@@ -18,12 +18,14 @@ const ANCHOR_FIELDS = ["label", "module", "pid", "process_name", "slot"];
 const SEMANTIC_ORACLE_FIELDS = ["author_note_markers_forbidden_in_product", "business_canaries", "expected_package", "oracle_visibility", "schema_version"];
 const EXPECTED_PACKAGE_FIELDS = ["forbidden_paths", "method_marker_sets", "required_artifacts", "required_log_derived_fields", "required_shared_markers", "required_user_inputs", "skill_name", "source_wiki_sha256"];
 const METHOD_MARKER_SET_FIELDS = ["all_markers", "semantic_id"];
-const SCENARIO_ORACLE_FIELDS = ["expected_status", "forbidden_evidence_terms", "oracle_visibility", "required_candidate_marker_groups", "required_confirmed_marker_groups", "required_evidence_identities", "required_request_timeout", "scenario_id", "schema_version"];
-const EVIDENCE_IDENTITY_FIELDS = ["identity_tokens", "marker"];
-const REQUEST_TIMEOUT_FIELDS = ["marker", "request_id", "timeout_ms", "unlinked_marker", "unlinked_timeout_ms"];
+const SCENARIO_ORACLE_FIELDS = ["expected_method_verdicts", "expected_status", "forbidden_evidence_terms", "oracle_visibility", "required_evidence_identities", "required_request_timeout", "scenario_id", "schema_version"];
+const METHOD_VERDICT_FIELDS = ["semantic_id", "verdict"];
+const EVIDENCE_IDENTITY_FIELDS = ["identity_tokens", "marker", "semantic_id"];
+const REQUEST_TIMEOUT_FIELDS = ["decoy_api", "decoy_request_id", "decoy_service", "decoy_timeout_ms", "marker", "request_id", "timeout_ms", "unlinked_marker", "unlinked_timeout_ms"];
 const MANIFEST_FIELDS = ["files", "owner_spec", "root", "schema_version"];
 const MANIFEST_FILE_FIELDS = ["path", "purpose", "schema_ref", "sha256", "size"];
 const ALLOWED_ACTIONS = new Set(["methods_skill_generation", "specialized_diagnosis"]);
+const RESOLVED_VERDICTS = new Set(["CONFIRMED", "REJECTED"]);
 const REGISTRATION_ID = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const USER_FACT = /^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$/;
 const SHA256 = /^[0-9a-f]{64}$/;
@@ -43,11 +45,6 @@ function safeRelative(value, code = "RELEASE_CASE_PATH_INVALID") {
 
 function stringArray(value, code, label, { nonempty = false, pattern = null, unique = true } = {}) {
   assertFlow(Array.isArray(value) && (!nonempty || value.length > 0) && value.every((item) => typeof item === "string" && item.length > 0 && (!pattern || pattern.test(item))) && (!unique || value.length === new Set(value).size), code, `${label} must contain valid strings`);
-  return value;
-}
-
-function markerGroups(value, code, label) {
-  assertFlow(Array.isArray(value) && value.every((group) => Array.isArray(group) && group.length > 0 && group.every((item) => typeof item === "string" && item.length > 0) && group.length === new Set(group).size), code, `${label} must contain non-empty marker groups`);
   return value;
 }
 
@@ -298,10 +295,17 @@ function loadScenarioOracle(scenario, loaded) {
   assertFlow(oracle.schema_version === 2 && oracle.oracle_visibility === "GATE_ONLY", "RELEASE_CASE_SCENARIO_ORACLE_VERSION", "Release scenario oracle metadata is invalid");
   assertFlow(oracle.scenario_id === scenario.scenario_id, "RELEASE_CASE_SCENARIO_ORACLE_ID", "Release scenario oracle id is inconsistent");
   assertFlow(oracle.expected_status === "RESOLVED", "RELEASE_CASE_SCENARIO_STATUS", "Evidence V2 Release scenarios must expect RESOLVED");
-  const confirmedGroups = markerGroups(oracle.required_confirmed_marker_groups, "RELEASE_CASE_CONFIRMED_MARKERS", "Release confirmed marker groups");
-  const candidateGroups = markerGroups(oracle.required_candidate_marker_groups, "RELEASE_CASE_CANDIDATE_MARKERS", "Release candidate marker groups");
-  assertFlow(confirmedGroups.length > 0, "RELEASE_CASE_CONFIRMED_MARKERS", "Resolved Release scenarios must confirm at least one method");
-  assertFlow(candidateGroups.length === 0, "RELEASE_CASE_CANDIDATE_MARKERS", "Resolved Evidence V2 Release scenarios cannot retain candidate methods");
+  assertFlow(Array.isArray(oracle.expected_method_verdicts) && oracle.expected_method_verdicts.length > 0, "RELEASE_CASE_METHOD_VERDICTS", "Release method verdicts must be a non-empty array");
+  const verdictSemanticIds = [];
+  let confirmedMethods = 0;
+  for (const item of oracle.expected_method_verdicts) {
+    exactKeys(item, METHOD_VERDICT_FIELDS, "RELEASE_CASE_METHOD_VERDICT_FIELDS", "Release method verdict");
+    assertFlow(typeof item.semantic_id === "string" && USER_FACT.test(item.semantic_id) && RESOLVED_VERDICTS.has(item.verdict), "RELEASE_CASE_METHOD_VERDICT_INVALID", "Release method verdict is invalid");
+    verdictSemanticIds.push(item.semantic_id);
+    if (item.verdict === "CONFIRMED") confirmedMethods += 1;
+  }
+  assertFlow(verdictSemanticIds.length === new Set(verdictSemanticIds).size, "RELEASE_CASE_METHOD_VERDICT_DUPLICATE", "Release method verdict semantic IDs must be unique");
+  assertFlow(confirmedMethods > 0, "RELEASE_CASE_METHOD_VERDICTS", "Resolved Release scenarios must confirm at least one method");
   exactKeys(oracle.required_request_timeout, REQUEST_TIMEOUT_FIELDS, "RELEASE_CASE_REQUEST_TIMEOUT_FIELDS", "Release request timeout expectation");
   const timeout = oracle.required_request_timeout;
   assertFlow(
@@ -310,7 +314,13 @@ function loadScenarioOracle(scenario, loaded) {
       && timeout.marker !== timeout.unlinked_marker
       && typeof timeout.request_id === "string" && timeout.request_id.length > 0
       && Number.isSafeInteger(timeout.timeout_ms) && timeout.timeout_ms > 0
-      && Number.isSafeInteger(timeout.unlinked_timeout_ms) && timeout.unlinked_timeout_ms > 0,
+      && Number.isSafeInteger(timeout.unlinked_timeout_ms) && timeout.unlinked_timeout_ms > 0
+      && timeout.unlinked_timeout_ms === timeout.timeout_ms
+      && typeof timeout.decoy_service === "string" && timeout.decoy_service.length > 0
+      && typeof timeout.decoy_api === "string" && timeout.decoy_api.length > 0
+      && typeof timeout.decoy_request_id === "string" && timeout.decoy_request_id.length > 0
+      && timeout.decoy_request_id !== timeout.request_id
+      && Number.isSafeInteger(timeout.decoy_timeout_ms) && timeout.decoy_timeout_ms > 0,
     "RELEASE_CASE_REQUEST_TIMEOUT_INVALID",
     "Release request timeout expectation is invalid",
   );
@@ -324,6 +334,7 @@ function loadScenarioOracle(scenario, loaded) {
   const claimedOccurrences = new Set();
   for (const identity of oracle.required_evidence_identities) {
     exactKeys(identity, EVIDENCE_IDENTITY_FIELDS, "RELEASE_CASE_EVIDENCE_IDENTITY_FIELDS", "Release evidence identity");
+    assertFlow(typeof identity.semantic_id === "string" && USER_FACT.test(identity.semantic_id), "RELEASE_CASE_EVIDENCE_SEMANTIC_ID", "Release evidence semantic ID is invalid");
     assertFlow(typeof identity.marker === "string" && identity.marker.length > 0, "RELEASE_CASE_EVIDENCE_MARKER", "Release evidence marker is invalid");
     stringArray(identity.identity_tokens, "RELEASE_CASE_EVIDENCE_TOKENS", "Release evidence identity tokens", { nonempty: true });
     const matches = attachmentLines.filter((item) => item.line.includes(identity.marker)
@@ -344,9 +355,11 @@ export function loadReleaseCaseOracle(caseRoot) {
   );
   const scenarios = loaded.scenarios.map((scenario) => {
     const oracle = loadScenarioOracle(scenario, loaded);
+    const expectedSemanticIds = semanticOracle.expected_package.method_marker_sets.map((item) => item.semantic_id).sort();
+    const verdictSemanticIds = oracle.expected_method_verdicts.map((item) => item.semantic_id).sort();
+    assertFlow(canonicalJson(verdictSemanticIds) === canonicalJson(expectedSemanticIds), "RELEASE_CASE_METHOD_VERDICT_COVERAGE", "Release method verdicts must exactly cover the semantic method set");
+    assertFlow(oracle.required_evidence_identities.every((identity) => expectedSemanticIds.includes(identity.semantic_id)), "RELEASE_CASE_EVIDENCE_SEMANTIC_ID", "Release evidence identity names an unknown semantic method");
     for (const marker of [
-      ...oracle.required_confirmed_marker_groups.flat(),
-      ...oracle.required_candidate_marker_groups.flat(),
       ...oracle.required_evidence_identities.map((identity) => identity.marker),
       oracle.required_request_timeout.marker,
       oracle.required_request_timeout.unlinked_marker,

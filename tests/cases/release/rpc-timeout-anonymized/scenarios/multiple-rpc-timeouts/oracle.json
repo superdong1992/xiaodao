@@ -3,21 +3,29 @@
   "oracle_visibility": "GATE_ONLY",
   "scenario_id": "multiple-rpc-timeouts",
   "expected_status": "RESOLVED",
-  "required_confirmed_marker_groups": [["API_COMPLETE service="], ["LATE_RESPONSE service="], ["QUEUE_HISTORY print_time_ms="]],
-  "required_candidate_marker_groups": [],
+  "expected_method_verdicts": [
+    {"semantic_id": "api_execution_overrun", "verdict": "REJECTED"},
+    {"semantic_id": "server_receive_queueing", "verdict": "CONFIRMED"},
+    {"semantic_id": "client_receive_blocked", "verdict": "REJECTED"}
+  ],
   "required_request_timeout": {
     "marker": "call unsuccess, reqid(",
     "request_id": "501",
     "timeout_ms": 3000,
     "unlinked_marker": "rpc call",
-    "unlinked_timeout_ms": 5000
+    "unlinked_timeout_ms": 3000,
+    "decoy_service": "svc_catalog",
+    "decoy_api": "Refresh",
+    "decoy_request_id": "502",
+    "decoy_timeout_ms": 5000
   },
   "required_evidence_identities": [
-    {"marker": "LATE_RESPONSE service=", "identity_tokens": ["request_id=501"]},
-    {"marker": "API_COMPLETE service=", "identity_tokens": ["start_us=10000000", "end_us=16500000"]},
-    {"marker": "API_COMPLETE service=", "identity_tokens": ["start_us=20000000", "end_us=26800000"]},
-    {"marker": "QUEUE_HISTORY print_time_ms=", "identity_tokens": ["print_time_ms=12000", "ordinal=first"]},
-    {"marker": "QUEUE_HISTORY print_time_ms=", "identity_tokens": ["print_time_ms=12500", "ordinal=second"]}
+    {"semantic_id": "client_receive_blocked", "marker": "LATE_RESPONSE service=", "identity_tokens": ["request_id=501"]},
+    {"semantic_id": "client_receive_blocked", "marker": "LATE_RESPONSE service=", "identity_tokens": ["request_id=502"]},
+    {"semantic_id": "api_execution_overrun", "marker": "API_COMPLETE service=", "identity_tokens": ["start_us=10000000", "end_us=16500000"]},
+    {"semantic_id": "api_execution_overrun", "marker": "API_COMPLETE service=", "identity_tokens": ["start_us=20000000", "end_us=26800000"]},
+    {"semantic_id": "server_receive_queueing", "marker": "QUEUE_HISTORY print_time_ms=", "identity_tokens": ["print_time_ms=6200", "ordinal=first"]},
+    {"semantic_id": "server_receive_queueing", "marker": "QUEUE_HISTORY print_time_ms=", "identity_tokens": ["print_time_ms=6300", "ordinal=second"]}
   ],
   "forbidden_evidence_terms": []
 }
