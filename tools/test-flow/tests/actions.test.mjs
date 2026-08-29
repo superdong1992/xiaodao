@@ -88,6 +88,19 @@ test("Evidence V2 provider ledgers allow only S:P,[S:R],R:P,[R:R] with two norma
   ];
   assert.equal(validEvidenceV2ProviderInvocationLedger(planStage, { status: "PASS", invocations: primary }), true);
   assert.equal(validClaudeDeepseekInvocationLedger(planStage, { status: "PASS", invocations: deepseekRepaired }), true);
+  const setTotalTokens = (invocation, totalTokens) => {
+    invocation.usage.input_tokens = totalTokens;
+    invocation.usage.output_tokens = 0;
+    invocation.usage.cache_creation_input_tokens = 0;
+    invocation.usage.cache_read_input_tokens = 0;
+    invocation.usage.total_tokens = totalTokens;
+  };
+  const normalAggregateOverCap = structuredClone([deepseekRepaired[0], deepseekRepaired[2]]);
+  normalAggregateOverCap.forEach((invocation) => setTotalTokens(invocation, 1_000_001));
+  assert.equal(validClaudeDeepseekInvocationLedger(planStage, { status: "PASS", invocations: normalAggregateOverCap }), false);
+  const repairAggregateOverCap = structuredClone(deepseekRepaired);
+  repairAggregateOverCap.forEach((invocation, index) => setTotalTokens(invocation, index === 0 ? 500_001 : 500_000));
+  assert.equal(validClaudeDeepseekInvocationLedger(planStage, { status: "PASS", invocations: repairAggregateOverCap }), false);
   const budgetExtra = structuredClone(deepseekRepaired);
   budgetExtra[0].budget.extra = true;
   assert.equal(validClaudeDeepseekInvocationLedger(planStage, { status: "PASS", invocations: budgetExtra }), false);

@@ -92,7 +92,6 @@ import {
 } from "../runtime-support/codex-luna-app-server.mjs";
 import {
   CLAUDE_DEEPSEEK_E2E_CALLS,
-  CLAUDE_DEEPSEEK_E2E_USD_LIMIT,
   CLAUDE_DEEPSEEK_METHODS_CALLS,
   CLAUDE_DEEPSEEK_MODEL_CERT_ROLE_POOL_USD,
   validateClaudeDeepseekRoleReceipt,
@@ -3358,7 +3357,7 @@ export function validClaudeDeepseekInvocationLedger(planStage, ledger) {
       role: invocation.role,
       attempt: providerInvocationAttempt(invocation),
     }, "claude-deepseek", planStage.hard_caps))
-    && validDeepseekReceiptSequence(ledger.invocations);
+    && validDeepseekReceiptSequence(ledger.invocations, planStage.hard_caps);
 }
 
 export function validEvidenceV2ProviderInvocationLedger(planStage, ledger) {
@@ -3431,10 +3430,11 @@ function roundedUsd(value) {
   return Math.round(value * 1_000_000) / 1_000_000;
 }
 
-function validDeepseekReceiptSequence(invocations) {
+function validDeepseekReceiptSequence(invocations, planCaps) {
   const primaryCost = {};
   const roleCost = { SPECIALIST: 0, REVIEWER: 0 };
   let totalCost = 0;
+  let totalTokens = 0;
   for (const invocation of invocations) {
     const attempt = providerInvocationAttempt(invocation);
     const usage = isCompleteUsage(invocation.usage) ? invocation.usage : null;
@@ -3444,10 +3444,16 @@ function validDeepseekReceiptSequence(invocations) {
     if (usage !== null) {
       roleCost[invocation.role] = roundedUsd(roleCost[invocation.role] + usage.cost_usd);
       totalCost = roundedUsd(totalCost + usage.cost_usd);
+      totalTokens += usage.total_tokens;
     }
     if (invocation.status === "PASS" && roleCost[invocation.role] > CLAUDE_DEEPSEEK_MODEL_CERT_ROLE_POOL_USD) return false;
   }
-  return !invocations.every((invocation) => invocation.status === "PASS") || totalCost <= CLAUDE_DEEPSEEK_E2E_USD_LIMIT;
+  return !invocations.every((invocation) => invocation.status === "PASS") || (
+    Number.isSafeInteger(planCaps?.max_total_tokens)
+      && Number.isFinite(planCaps?.max_budget_usd)
+      && totalTokens <= planCaps.max_total_tokens
+      && totalCost <= planCaps.max_budget_usd
+  );
 }
 
 function validProviderInvocationReceipt(invocation, expected, provider, planCaps = null) {
@@ -3512,7 +3518,7 @@ function readProviderRoleReceipts(usageRoot, provider, planCaps = null) {
     receipts.push(receipt);
   }
   return validProviderInvocationSequence(receipts)
-    && (provider !== "claude-deepseek" || validDeepseekReceiptSequence(receipts))
+    && (provider !== "claude-deepseek" || validDeepseekReceiptSequence(receipts, planCaps))
     ? receipts
     : [];
 }
