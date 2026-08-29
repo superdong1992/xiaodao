@@ -329,6 +329,14 @@ export async function runServiceInvocation(values, {
   } catch (error) {
     const observed = error?.details?.terminal ?? null;
     const usage = result?.receipt?.usage ?? observed?.usage ?? null;
+    const hasProcessExit = Object.hasOwn(error?.details ?? {}, "exit_code") || Object.hasOwn(error?.details ?? {}, "signal");
+    const providerTerminal = observed === null && !hasProcessExit ? null : Object.freeze({
+      subtype: observed?.subtype ?? null,
+      is_error: observed?.is_error ?? null,
+      stop_reason: observed?.stop_reason ?? null,
+      exit_code: error?.details?.exit_code ?? null,
+      signal: error?.details?.signal ?? null,
+    });
     const receipt = Object.freeze({
       schema_version: 1,
       invocation_id: `${values["run-id"]}:${key}`,
@@ -355,6 +363,7 @@ export async function runServiceInvocation(values, {
       tool_policy: policy,
       workspace_audit: null,
       environment_policy: result?.receipt?.environment_policy ?? null,
+      provider_terminal: providerTerminal,
       usage_complete: usage !== null,
       usage,
       failure_code: typeof error?.code === "string" ? error.code : "CLAUDE_DEEPSEEK_MODEL_CALL_FAILED",

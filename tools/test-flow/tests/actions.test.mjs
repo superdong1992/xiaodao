@@ -283,6 +283,74 @@ test("P1 and P2 central actions retain the terminal failed call and its usage", 
   }
 });
 
+test("P1 central projection preserves the real DeepSeek budget terminal and matches recovered usage", (context) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "deepseek-real-budget-terminal-"));
+  context.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const outputRoot = path.join(root, "evidence");
+  const usageRoot = path.join(root, "usage");
+  fs.mkdirSync(outputRoot, { recursive: true });
+  fs.mkdirSync(usageRoot, { recursive: true });
+  const usage = {
+    schema_version: 1,
+    input_tokens: 23302,
+    output_tokens: 37245,
+    cache_creation_input_tokens: 0,
+    cache_read_input_tokens: 0,
+    total_tokens: 60547,
+    cost_usd: 1.047635,
+  };
+  fs.writeFileSync(path.join(usageRoot, "specialist-primary.json"), canonicalJson({
+    ...providerRoleReceipt("claude-deepseek", "SPECIALIST", "PRIMARY", 1),
+    status: "FAIL",
+    usage,
+    usage_complete: true,
+    failure_code: "CLAUDE_DEEPSEEK_MAX_BUDGET_EXCEEDED",
+    provider_terminal: {
+      subtype: "error_max_budget_usd",
+      is_error: true,
+      stop_reason: "tool_use",
+      exit_code: 1,
+      signal: null,
+    },
+    budget: {
+      schema_version: 1,
+      stage_cap_usd: 4,
+      role: "SPECIALIST",
+      role_pool_usd: 2,
+      prior_cost_usd: 0,
+      effective_call_cap_usd: 2,
+    },
+  }));
+  fs.writeFileSync(path.join(outputRoot, "model-usage.json"), canonicalJson({
+    schema_version: 1,
+    status: "FAIL",
+    usage_complete: true,
+    aggregate: usage,
+  }));
+  const planStage = evidenceV2ProviderPlanStage("claude-deepseek-macos-e2e");
+  planStage.hard_caps = { ...planStage.hard_caps, max_budget_usd: 4, max_total_tokens: 2_000_000 };
+  const observed = collectProviderFailureObservability({
+    provider: "claude-deepseek",
+    result: { status: "FAIL" },
+    outputRoot,
+    usageRoot,
+    planStage,
+    invocationClass: "claude-deepseek-macos-e2e",
+  });
+  assert.equal(observed.usage_complete, true);
+  assert.deepEqual(observed.usage, usage);
+  assert.equal(observed.invocations.length, 1);
+  assert.deepEqual(observed.invocations[0].terminal, {
+    subtype: "error_max_budget_usd",
+    is_error: true,
+    stop_reason: "tool_use",
+    exit_code: 1,
+    signal: null,
+  });
+  assert.equal(observed.invocations[0].wrapper_outcome.code, "CLAUDE_DEEPSEEK_MAX_BUDGET_EXCEEDED");
+  assert.equal(observed.invocations[0].provider_budget.effective_call_cap_usd, 2);
+});
+
 test("P1 and P2 retain a legal failed prefix when the terminal call has no usage", (context) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "provider-failed-call-partial-usage-"));
   context.after(() => fs.rmSync(root, { recursive: true, force: true }));

@@ -261,7 +261,12 @@ test("failed provider invocation writes one closed role receipt with terminal us
     const error = new Error("provider failed");
     error.code = "CLAUDE_DEEPSEEK_PROCESS_FAILED";
     error.details = {
+      exit_code: 7,
+      signal: null,
       terminal: {
+        subtype: "error",
+        is_error: true,
+        stop_reason: "end_turn",
         turns: 1,
         usage: { schema_version: 1, input_tokens: 11, output_tokens: 3, cache_creation_input_tokens: 0, cache_read_input_tokens: 2, total_tokens: 16, cost_usd: 0.01 },
       },
@@ -279,8 +284,60 @@ test("failed provider invocation writes one closed role receipt with terminal us
     assert.equal(receipt.failure_code, "CLAUDE_DEEPSEEK_PROCESS_FAILED");
     assert.equal(receipt.usage_complete, true);
     assert.equal(receipt.usage.total_tokens, 16);
+    assert.deepEqual(receipt.provider_terminal, {
+      subtype: "error",
+      is_error: true,
+      stop_reason: "end_turn",
+      exit_code: 7,
+      signal: null,
+    });
     assert.equal(receipt.wall_timeout_seconds, 600);
     assert.ok(Date.parse(receipt.finished_at_utc) >= Date.parse(receipt.started_at_utc));
     assert.deepEqual(receipt, JSON.parse(fs.readFileSync(path.join(values["evidence-root"], "model-role-invocations", "specialist-primary.receipt.json"), "utf8")));
+  } finally { process.chdir(previous); fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("budget terminal details survive in the closed role receipt", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "deepseek-role-budget-terminal-"));
+  const previous = process.cwd();
+  try {
+    workspace(root);
+    process.chdir(root);
+    const values = {
+      "claude-entry": path.join(root, "cli.js"), settings: path.join(root, "settings.json"), "config-root": path.join(root, "config"),
+      "private-root": path.join(root, "private"), "evidence-root": path.join(root, "evidence"), "usage-root": path.join(root, "usage"), "run-id": "run",
+    };
+    for (const target of [values["claude-entry"], values.settings]) fs.writeFileSync(target, "fixture");
+    fs.mkdirSync(values["config-root"]);
+    const error = new Error("budget exhausted");
+    error.code = "CLAUDE_DEEPSEEK_MAX_BUDGET_EXCEEDED";
+    error.details = {
+      exit_code: 1,
+      signal: null,
+      terminal: {
+        subtype: "error_max_budget_usd",
+        is_error: true,
+        stop_reason: "tool_use",
+        turns: 1,
+        usage: { schema_version: 1, input_tokens: 23302, output_tokens: 37245, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, total_tokens: 60547, cost_usd: 1.047635 },
+      },
+    };
+    await assert.rejects(runServiceInvocation(values, {
+      stdin: Readable.from([prompt("Specialist", "primary evaluation")]),
+      stdout: new Writable({ write(_chunk, _encoding, callback) { callback(); } }),
+      runClaude: async () => { throw error; },
+    }), { code: "CLAUDE_DEEPSEEK_MAX_BUDGET_EXCEEDED" });
+    const [receipt] = readRoleInvocationReceipts(values["usage-root"]);
+    assert.equal(receipt.failure_code, "CLAUDE_DEEPSEEK_MAX_BUDGET_EXCEEDED");
+    assert.equal(receipt.usage_complete, true);
+    assert.equal(receipt.usage.total_tokens, 60547);
+    assert.deepEqual(receipt.provider_terminal, {
+      subtype: "error_max_budget_usd",
+      is_error: true,
+      stop_reason: "tool_use",
+      exit_code: 1,
+      signal: null,
+    });
+    assert.equal(receipt.budget.effective_call_cap_usd, 2);
   } finally { process.chdir(previous); fs.rmSync(root, { recursive: true, force: true }); }
 });

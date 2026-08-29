@@ -3304,6 +3304,16 @@ function claudeDeepseekInvocationProjection(invocation, hardCaps, invocationClas
   const attempt = invocation.evaluation_attempt ?? invocation.attempt;
   const failed = invocation.status === "FAIL";
   const usageComplete = invocation.terminal === true && isCompleteUsage(invocation.usage);
+  const observedTerminal = invocation.provider_terminal;
+  const terminal = observedTerminal !== null && typeof observedTerminal === "object"
+    ? {
+        subtype: typeof observedTerminal.subtype === "string" ? observedTerminal.subtype : (failed ? "error" : "success"),
+        is_error: typeof observedTerminal.is_error === "boolean" ? observedTerminal.is_error : failed,
+        stop_reason: observedTerminal.stop_reason ?? null,
+        exit_code: observedTerminal.exit_code ?? null,
+        signal: observedTerminal.signal ?? null,
+      }
+    : { subtype: failed ? "error" : "success", is_error: failed };
   return {
     schema_version: 3,
     invocation_id: invocation.invocation_id,
@@ -3315,7 +3325,8 @@ function claudeDeepseekInvocationProjection(invocation, hardCaps, invocationClas
     usage: usageComplete ? invocation.usage : undefined,
     environment_policy: invocation.environment_policy,
     turns: invocation.turns,
-    terminal: { subtype: failed ? "error" : "success", is_error: failed },
+    terminal,
+    provider_budget: invocation.budget ?? null,
     wrapper_outcome: { schema_version: 1, status: invocation.status, code: invocation.failure_code ?? null },
     hard_cap_enforcement: {
       turns: "claude-cli",

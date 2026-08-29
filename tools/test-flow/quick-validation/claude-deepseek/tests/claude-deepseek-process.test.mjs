@@ -195,3 +195,104 @@ process.stdin.on("end", () => {
     },
   );
 });
+
+test("budget failure restores the real DeepSeek modelUsage totals and terminal cause", async (context) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "claude-deepseek-real-budget-terminal-"));
+  context.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const fake = path.join(root, "fake-cli.js");
+  const settings = path.join(root, "settings.json");
+  const cwd = path.join(root, "workspace");
+  const configRoot = path.join(root, "config");
+  const home = path.join(root, "home");
+  const temporary = path.join(root, "tmp");
+  for (const directory of [cwd, configRoot, home, temporary]) fs.mkdirSync(directory);
+  fs.writeFileSync(settings, "{}\n");
+  fs.writeFileSync(fake, `
+process.stdin.resume();
+process.stdin.on("end", () => {
+  process.stdout.write(JSON.stringify({type:"system",subtype:"init",model:"deepseek-v4-flash[1m]",cwd:process.cwd(),permissionMode:"dontAsk",tools:["Read","Write"]})+"\\n");
+  process.stdout.write(JSON.stringify({
+    type:"result",subtype:"error_max_budget_usd",is_error:true,num_turns:1,stop_reason:"tool_use",
+    total_cost_usd:1.047635,
+    usage:{input_tokens:0,output_tokens:0,cache_creation_input_tokens:0,cache_read_input_tokens:0},
+    modelUsage:{"deepseek-v4-flash[1m]":{inputTokens:23302,outputTokens:37245,cacheReadInputTokens:0,cacheCreationInputTokens:0,costUSD:1.047635}},
+    errors:["Reached maximum budget ($1)"]
+  })+"\\n");
+  process.exitCode = 7;
+});
+`);
+  await assert.rejects(
+    runClaudeProcess({
+      claudeEntry: fake,
+      settings,
+      cwd,
+      prompt: "evaluate",
+      phase: "SPECIALIST",
+      invocationId: "run:specialist-primary",
+      tools: ["Read", "Write"],
+      allowedTools: [],
+      maxTurns: 50,
+      maxBudgetUsd: 1,
+      wallTimeoutSeconds: 600,
+      noProgressSeconds: 300,
+      tracePath: path.join(root, "trace.ndjson"),
+      environment: { configRoot, home, temporary },
+    }, { ambient: {} }),
+    (error) => {
+      assert.equal(error.code, "CLAUDE_DEEPSEEK_MAX_BUDGET_EXCEEDED");
+      assert.equal(error.details.exit_code, 7);
+      assert.equal(error.details.signal, null);
+      assert.equal(error.details.terminal.subtype, "error_max_budget_usd");
+      assert.equal(error.details.terminal.stop_reason, "tool_use");
+      assert.equal(error.details.terminal.usage_complete, true);
+      assert.deepEqual(error.details.terminal.usage, {
+        schema_version: 1,
+        input_tokens: 23302,
+        output_tokens: 37245,
+        cache_creation_input_tokens: 0,
+        cache_read_input_tokens: 0,
+        total_tokens: 60547,
+        cost_usd: 1.047635,
+      });
+      return true;
+    },
+  );
+});
+
+test("conflicting non-zero terminal usage sources remain incomplete", async (context) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "claude-deepseek-conflicting-terminal-"));
+  context.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const fake = path.join(root, "fake-cli.js");
+  const settings = path.join(root, "settings.json");
+  const cwd = path.join(root, "workspace");
+  const configRoot = path.join(root, "config");
+  const home = path.join(root, "home");
+  const temporary = path.join(root, "tmp");
+  for (const directory of [cwd, configRoot, home, temporary]) fs.mkdirSync(directory);
+  fs.writeFileSync(settings, "{}\n");
+  fs.writeFileSync(fake, `
+process.stdin.resume();
+process.stdin.on("end", () => {
+  process.stdout.write(JSON.stringify({type:"system",subtype:"init",model:"deepseek-v4-flash[1m]",cwd:process.cwd(),permissionMode:"dontAsk",tools:["Read"]})+"\\n");
+  process.stdout.write(JSON.stringify({
+    type:"result",subtype:"error",is_error:true,num_turns:1,total_cost_usd:0.02,
+    usage:{input_tokens:11,output_tokens:4,cache_creation_input_tokens:0,cache_read_input_tokens:0},
+    modelUsage:{"deepseek-v4-flash[1m]":{inputTokens:12,outputTokens:4,cacheReadInputTokens:0,cacheCreationInputTokens:0,costUSD:0.02}}
+  })+"\\n");
+  process.exitCode = 7;
+});
+`);
+  await assert.rejects(
+    runClaudeProcess({
+      claudeEntry: fake, settings, cwd, prompt: "evaluate", phase: "SPECIALIST", invocationId: "run:specialist-primary",
+      tools: ["Read"], allowedTools: [], maxTurns: 10, maxBudgetUsd: 1, wallTimeoutSeconds: 30, noProgressSeconds: 5,
+      environment: { configRoot, home, temporary },
+    }, { ambient: {} }),
+    (error) => {
+      assert.equal(error.code, "CLAUDE_DEEPSEEK_PROCESS_FAILED");
+      assert.equal(error.details.terminal.usage_complete, false);
+      assert.equal(error.details.terminal.usage, null);
+      return true;
+    },
+  );
+});

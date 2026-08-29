@@ -67,6 +67,56 @@ function parseJsonLines(bytes) {
   catch { fail("CLAUDE_DEEPSEEK_STREAM_JSON_INVALID", "Claude stdout is not valid stream-json JSONL"); }
 }
 
+const TERMINAL_USAGE_FIELDS = ["input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"];
+
+function terminalUsageCandidate(values, costUsd) {
+  if (!TERMINAL_USAGE_FIELDS.every((field) => Number.isSafeInteger(values[field]) && values[field] >= 0)
+    || !Number.isFinite(costUsd)
+    || costUsd < 0) return null;
+  return {
+    schema_version: 1,
+    ...Object.fromEntries(TERMINAL_USAGE_FIELDS.map((field) => [field, values[field]])),
+    total_tokens: TERMINAL_USAGE_FIELDS.reduce((sum, field) => sum + values[field], 0),
+    cost_usd: Math.round(costUsd * 1_000_000) / 1_000_000,
+  };
+}
+
+function topLevelTerminalUsage(terminal) {
+  return terminalUsageCandidate(
+    Object.fromEntries(TERMINAL_USAGE_FIELDS.map((field) => [field, terminal.usage?.[field]])),
+    terminal.total_cost_usd ?? terminal.cost_usd,
+  );
+}
+
+function modelTerminalUsage(terminal) {
+  if (terminal.modelUsage === undefined) return { present: false, usage: null };
+  if (!isPlainObject(terminal.modelUsage)) return { present: true, usage: null };
+  const entries = Object.entries(terminal.modelUsage);
+  if (entries.length !== 1 || entries[0][0] !== CLAUDE_DEEPSEEK_MODEL || !isPlainObject(entries[0][1])) return { present: true, usage: null };
+  const value = entries[0][1];
+  return {
+    present: true,
+    usage: terminalUsageCandidate({
+      input_tokens: value.inputTokens,
+      output_tokens: value.outputTokens,
+      cache_creation_input_tokens: value.cacheCreationInputTokens,
+      cache_read_input_tokens: value.cacheReadInputTokens,
+    }, value.costUSD),
+  };
+}
+
+function resolvedTerminalUsage(terminal) {
+  const topLevel = topLevelTerminalUsage(terminal);
+  const model = modelTerminalUsage(terminal);
+  if (!model.present) return topLevel;
+  if (model.usage === null) return null;
+  if (topLevel === null || canonicalJson(topLevel) === canonicalJson(model.usage)) return model.usage;
+  const costsMatch = topLevel.cost_usd === model.usage.cost_usd;
+  if (costsMatch && topLevel.total_tokens === 0 && model.usage.total_tokens > 0) return model.usage;
+  if (costsMatch && model.usage.total_tokens === 0 && topLevel.total_tokens > 0) return topLevel;
+  return null;
+}
+
 function terminalObservation(bytes) {
   let events;
   try {
@@ -76,22 +126,14 @@ function terminalObservation(bytes) {
   }
   const terminal = events.at(-1);
   if (terminal?.type !== "result") return null;
-  const fields = ["input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"];
-  const costUsd = terminal.total_cost_usd ?? terminal.cost_usd;
-  const complete = fields.every((field) => Number.isSafeInteger(terminal.usage?.[field]) && terminal.usage[field] >= 0)
-    && Number.isFinite(costUsd)
-    && costUsd >= 0;
-  const usage = complete ? {
-    schema_version: 1,
-    ...Object.fromEntries(fields.map((field) => [field, terminal.usage[field]])),
-    total_tokens: fields.reduce((sum, field) => sum + terminal.usage[field], 0),
-    cost_usd: Math.round(costUsd * 1_000_000) / 1_000_000,
-  } : null;
+  const usage = resolvedTerminalUsage(terminal);
   return {
     terminal: true,
     subtype: terminal.subtype ?? null,
     is_error: terminal.is_error === true,
+    stop_reason: terminal.stop_reason ?? null,
     turns: Number.isSafeInteger(terminal.num_turns) ? terminal.num_turns : 0,
+    usage_complete: usage !== null,
     usage,
   };
 }
@@ -227,15 +269,24 @@ export async function runClaudeProcess(options, { ambient = process.env, onProgr
   if (options.tracePath) writeNew(options.tracePath, stdoutBytes);
   if (options.stderrPath) writeNew(options.stderrPath, stderrBytes);
   const observedTerminal = terminalObservation(stdoutBytes);
-  if (timedOut) fail("CLAUDE_DEEPSEEK_PROCESS_TIMEOUT", "Claude process exceeded its wall timeout", { terminal: observedTerminal });
-  if (noProgressTimedOut) fail("CLAUDE_DEEPSEEK_PROCESS_NO_PROGRESS", `Claude process made no semantic stream progress for ${options.noProgressSeconds} seconds`, { terminal: observedTerminal });
-  if (exit.code !== 0 || exit.signal !== null) fail("CLAUDE_DEEPSEEK_PROCESS_FAILED", "Claude process exited unsuccessfully", { exit_code: exit.code, signal: exit.signal, terminal: observedTerminal });
-  const events = parseJsonLines(stdoutBytes);
+  const processDetails = { exit_code: exit.code, signal: exit.signal, terminal: observedTerminal };
+  if (timedOut) fail("CLAUDE_DEEPSEEK_PROCESS_TIMEOUT", "Claude process exceeded its wall timeout", processDetails);
+  if (noProgressTimedOut) fail("CLAUDE_DEEPSEEK_PROCESS_NO_PROGRESS", `Claude process made no semantic stream progress for ${options.noProgressSeconds} seconds`, processDetails);
+  if (exit.code !== 0 || exit.signal !== null) {
+    const code = observedTerminal?.subtype === "error_max_budget_usd" ? "CLAUDE_DEEPSEEK_MAX_BUDGET_EXCEEDED" : "CLAUDE_DEEPSEEK_PROCESS_FAILED";
+    fail(code, "Claude process exited unsuccessfully", processDetails);
+  }
+  let events;
+  try { events = parseJsonLines(stdoutBytes); }
+  catch (error) {
+    error.details = { ...(error?.details ?? {}), ...processDetails };
+    throw error;
+  }
   let stream;
   try {
     stream = auditClaudeStream(events, { phase: options.phase, allowedTools: [...options.tools, ...options.allowedTools, ...(options.auditOnlyAllowedTools ?? [])], maxTurns: options.maxTurns, wallTimeoutSeconds: options.wallTimeoutSeconds });
   } catch (error) {
-    error.details = { ...(error?.details ?? {}), terminal: observedTerminal };
+    error.details = { ...(error?.details ?? {}), ...processDetails };
     throw error;
   }
   const projected = projectClaudeTools(events, { allowToolErrors: options.allowToolErrors === true });
@@ -255,6 +306,13 @@ export async function runClaudeProcess(options, { ambient = process.env, onProgr
     max_turns: options.maxTurns,
     max_budget_usd: options.maxBudgetUsd,
     max_output_tokens: CLAUDE_DEEPSEEK_MAX_OUTPUT_TOKENS,
+    provider_terminal: {
+      subtype: observedTerminal?.subtype ?? null,
+      is_error: observedTerminal?.is_error ?? null,
+      stop_reason: observedTerminal?.stop_reason ?? null,
+      exit_code: exit.code,
+      signal: exit.signal,
+    },
     appended_system_prompt: options.appendSystemPrompt ? { sha256: sha256Bytes(options.appendSystemPrompt), utf8_size: Buffer.byteLength(options.appendSystemPrompt, "utf8") } : null,
     environment_policy: {
       schema_version: 1,
