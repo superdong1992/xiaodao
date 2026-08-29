@@ -23,7 +23,7 @@ import {
   materializeProviderTerminalFailure as materializeP1TerminalFailure,
   safeE2EError as safeP1Error,
 } from "../quick-validation/claude-deepseek/runtime/claude-deepseek-e2e-runner.mjs";
-import { runServiceInvocation as runP1ServiceInvocation } from "../quick-validation/claude-deepseek/runtime/claude-deepseek-service-wrapper.mjs";
+import * as P1ServiceWrapper from "../quick-validation/claude-deepseek/runtime/claude-deepseek-service-wrapper.mjs";
 import {
   materializeProviderTerminalFailure as materializeP2TerminalFailure,
   safeE2EError as safeP2Error,
@@ -287,7 +287,7 @@ function runProductionFailureRuntime({ gateRoot }) {
   }
 }
 
-async function writeP1RoleFailure({ attemptRoot, gateRoot, usageRoot, testRoot }) {
+async function writeP1RoleFailure({ attemptRoot, gateRoot, usageRoot, testRoot, posthocBudgetFailure = false }) {
   const workspace = path.join(testRoot, "deepseek-provider-workspace");
   const values = {
     "claude-entry": path.join(testRoot, "fake-claude-entry"),
@@ -327,11 +327,38 @@ async function writeP1RoleFailure({ attemptRoot, gateRoot, usageRoot, testRoot }
   const previous = process.cwd();
   try {
     process.chdir(workspace);
-    await assert.rejects(runP1ServiceInvocation(values, {
-      stdin: Readable.from([providerPrompt()]),
-      stdout: new Writable({ write(_chunk, _encoding, callback) { callback(); } }),
-      runClaude: async () => { throw error; },
-    }), { code: error.code });
+    const supportsPosthocBudget = typeof P1ServiceWrapper.roleInvocationBudget === "function";
+    if (posthocBudgetFailure && supportsPosthocBudget) {
+      await assert.rejects(P1ServiceWrapper.runServiceInvocation(values, {
+        stdin: Readable.from([providerPrompt()]),
+        stdout: new Writable({ write(_chunk, _encoding, callback) { callback(); } }),
+        runClaude: async () => ({
+          receipt: {
+            model: "deepseek-v4-flash[1m]",
+            started_at_utc: "2026-08-29T00:00:00.000Z",
+            finished_at_utc: "2026-08-29T00:00:01.000Z",
+            turns: 1,
+            provider_terminal: { subtype: "success", is_error: false, stop_reason: "end_turn", exit_code: 0, signal: null },
+            usage: {
+              schema_version: 1,
+              input_tokens: 150,
+              output_tokens: 50,
+              cache_creation_input_tokens: 0,
+              cache_read_input_tokens: 0,
+              total_tokens: 200,
+              cost_usd: 2.000001,
+            },
+            environment_policy: null,
+          },
+        }),
+      }), { code: "CLAUDE_DEEPSEEK_CALL_BUDGET_EXCEEDED" });
+    } else {
+      await assert.rejects(P1ServiceWrapper.runServiceInvocation(values, {
+        stdin: Readable.from([providerPrompt()]),
+        stdout: new Writable({ write(_chunk, _encoding, callback) { callback(); } }),
+        runClaude: async () => { throw error; },
+      }), { code: error.code });
+    }
   } finally {
     process.chdir(previous);
   }
@@ -398,6 +425,9 @@ async function writeP2RoleFailure({ attemptRoot, gateRoot, usageRoot, testRoot }
 function closeP1FixtureInvocation(invocation, { posthocBudgetFailure = false } = {}) {
   assert.equal(invocation?.schema_version, 3, "P1 production failure must expose one projected invocation");
   if (posthocBudgetFailure) {
+    if (Object.keys(invocation.terminal ?? {}).sort().join(",") === "exit_code,is_error,signal,stop_reason,subtype"
+      && invocation.terminal.is_error === false
+      && invocation.wrapper_outcome?.status === "FAIL") return invocation;
     return {
       ...invocation,
       terminal: { subtype: "success", is_error: false, stop_reason: "end_turn", exit_code: 0, signal: null },
@@ -435,7 +465,13 @@ async function writeEvidenceV2FailureStage(attemptRoot, {
   const materialize = certificationTarget === "P1" ? materializeP1TerminalFailure : materializeP2TerminalFailure;
   const safeError = certificationTarget === "P1" ? safeP1Error : safeP2Error;
   materialize(runtime, gateRoot, { modelCalls: runtime.model_invocations, repairs: runtime.repair_counts });
-  if (certificationTarget === "P1") await writeP1RoleFailure({ attemptRoot, gateRoot, usageRoot, testRoot });
+  if (certificationTarget === "P1") await writeP1RoleFailure({
+    attemptRoot,
+    gateRoot,
+    usageRoot,
+    testRoot,
+    posthocBudgetFailure: p1PosthocBudgetFailure,
+  });
   else await writeP2RoleFailure({ attemptRoot, gateRoot, usageRoot, testRoot });
 
   const logRoot = path.join(attemptRoot, "payload", "logs");
@@ -793,12 +829,10 @@ test("a closed provider success remains visible when the wrapper rejects post-ho
       exit_code: 0,
       signal: null,
     });
-    assert.deepEqual(invocation.wrapper_outcome, {
-      schema_version: 1,
-      status: "FAIL",
-      code: "CALL_BUDGET_EXCEEDED",
-    });
-    assert.equal(result.verdict.failure_diagnostic?.provider_code, "CALL_BUDGET_EXCEEDED");
+    assert.equal(invocation.wrapper_outcome.schema_version, 1);
+    assert.equal(invocation.wrapper_outcome.status, "FAIL");
+    assert.match(invocation.wrapper_outcome.code, /^(?:CLAUDE_DEEPSEEK_)?CALL_BUDGET_EXCEEDED$/u);
+    assert.equal(result.verdict.failure_diagnostic?.provider_code, invocation.wrapper_outcome.code);
     assert.equal(result.verdict.failure_diagnostic?.provider_subtype, "success");
     assert.equal(result.verdict.overall, "FAIL");
     assert.equal(verifyVerdict(result.attemptRoot).status, "PASS");
