@@ -61,7 +61,7 @@ const readline = require("node:readline");
 
 let args = process.argv.slice(2);
 const fakeMode = process.env.FAKE_CODEX_MODE || "success";
-const profileMode = fakeMode === "generation-apply-patch" ? "generation" : ["late-mcp-notification", "mcp-call-limit"].includes(fakeMode) ? "client" : "diagnosis";
+const profileMode = fakeMode === "generation-apply-patch" ? "generation" : ["late-mcp-notification", "mcp-call-limit", "coalesced-mcp-call-limit"].includes(fakeMode) ? "client" : "diagnosis";
 const skillPath = process.env.FAKE_CODEX_SKILL;
 
 if (args[0] === "-C") {
@@ -89,6 +89,7 @@ if (args[0] === "sandbox") {
 if (args[0] !== "app-server" || args[1] !== "--stdio") process.exit(64);
 
 const send = (value) => process.stdout.write(JSON.stringify(value) + "\n");
+const sendBatch = (values) => process.stdout.write(values.map((value) => JSON.stringify(value)).join("\n") + "\n");
 const threadId = "fake-thread-0001";
 const turnId = "fake-turn-0001";
 const usage = {
@@ -219,8 +220,32 @@ lines.on("line", (line) => {
     return;
   }
   if (message.method === "turn/start") {
-    send({ id: message.id, result: { turn: turn("inProgress") } });
-    send({ method: "turn/started", params: { threadId, turn: turn("inProgress") } });
+    const turnStartResponse = { id: message.id, result: { turn: turn("inProgress") } };
+    const turnStartedNotification = { method: "turn/started", params: { threadId, turn: turn("inProgress") } };
+    if (fakeMode === "coalesced-mcp-call-limit") {
+      sendBatch([
+        turnStartResponse,
+        turnStartedNotification,
+        ...Array.from({ length: 3 }, (_, offset) => ({
+          method: "item/started",
+          params: {
+            threadId,
+            turnId,
+            item: {
+              type: "mcpToolCall",
+              id: "mcp-" + (offset + 1),
+              server: "problem-locator",
+              tool: "problem_locator_get_case",
+              status: "inProgress",
+              arguments: { case_id: "case-one", wait_seconds: 30 },
+            },
+          },
+        })),
+      ]);
+      return;
+    }
+    send(turnStartResponse);
+    send(turnStartedNotification);
     if (fakeMode === "wall-timeout") {
       send({ method: "item/started", params: { threadId, turnId, item: { type: "agentMessage", id: "partial-message", text: "", phase: "commentary" } } });
       return;
@@ -277,7 +302,7 @@ lines.on("line", (line) => {
 `;
 
 function makeFixture(t, fakeMode = "success") {
-  const invocationMode = fakeMode === "generation-apply-patch" ? "generation" : ["late-mcp-notification", "mcp-call-limit"].includes(fakeMode) ? "client" : "diagnosis";
+  const invocationMode = fakeMode === "generation-apply-patch" ? "generation" : ["late-mcp-notification", "mcp-call-limit", "coalesced-mcp-call-limit"].includes(fakeMode) ? "client" : "diagnosis";
   const root = fs.mkdtempSync(path.join(fs.existsSync("/private/tmp") ? "/private/tmp" : os.tmpdir(), "codex-luna-runtime-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const workspaceRoot = path.join(root, "workspace");
@@ -532,6 +557,19 @@ posixRuntimeTest("a bounded client MCP call count stops tight polling before the
   const trace = fs.readFileSync(fixture.tracePath, "utf8");
   assert.equal(trace.trim().split("\n").filter((line) => JSON.parse(line).message?.params?.item?.type === "mcpToolCall").length, 3);
   assert.equal(fs.readFileSync(fixture.stderrPath, "utf8"), "[Test Flow withheld app-server stderr after a failed secret/protocol boundary.]\n");
+});
+
+posixRuntimeTest("a coalesced turn response and MCP limit failure settle without a late notification waiter", { timeout: 3_000 }, async (t) => {
+  const fixture = makeFixture(t, "coalesced-mcp-call-limit");
+  fixture.options.maxMcpToolCalls = 2;
+  fixture.options.wallSeconds = 1;
+  fixture.options.noProgressSeconds = 1;
+  await assert.rejects(
+    runCodexLunaAppServerCall(fixture.options),
+    (error) => error.code === "CODEX_LUNA_APP_SERVER_MCP_CALL_LIMIT"
+      && error.details.limit === 2
+      && error.details.observed === 3,
+  );
 });
 
 posixRuntimeTest("a terminal error notification persists only official closed fields and a receipt", async (t) => {

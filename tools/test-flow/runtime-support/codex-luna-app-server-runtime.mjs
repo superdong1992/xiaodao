@@ -720,6 +720,7 @@ export async function runCodexLunaAppServerCall({
     try { send(message); } catch (error) { pendingResponses.delete(key); reject(error); }
   });
   const waitNotification = (method, predicate) => {
+    if (fatalError) return Promise.reject(fatalError);
     const existing = inbound.find((message) => message?.method === method && predicate(message.params));
     if (existing) return Promise.resolve(existing.params);
     return new Promise((resolve, reject) => notificationWaiters.push({ method, predicate, resolve, reject }));
