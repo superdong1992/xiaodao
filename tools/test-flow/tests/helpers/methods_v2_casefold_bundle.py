@@ -122,7 +122,7 @@ Return only evaluation_ref, verdict, and reason; UNKNOWN is allowed.
     card = "\n\n".join(
         (
             "## 适用条件\n固定 Unicode casefold 用例。",
-            "## 所需证据\n使用冻结的 method marker。",
+            f"## 所需证据\n使用冻结的 method marker `{MARKER}`。",
             "## 计算与判断\n按 Evidence Graph 判断。",
             "## 确认条件\n存在绑定到当前 method 的证据。",
             "## 未知边界\n证据不足时返回 UNKNOWN。",
