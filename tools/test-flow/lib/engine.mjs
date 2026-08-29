@@ -127,6 +127,56 @@ function firstFailure(stages) {
   return null;
 }
 
+export function buildRunCandidate({
+  attemptRoot,
+  runId,
+  plan,
+  stageResults,
+  operationStatus,
+  sourceSnapshotVerification,
+  preFinalizationResourceReceipt,
+}) {
+  const proofs = proofResults(plan, stageResults);
+  const failure = firstFailure(stageResults);
+  const failureDiagnostic = projectCandidateFailureDiagnostic({ attemptRoot, stages: stageResults });
+  const functional = plan.admission.status === "ADMITTED" ? functionalProofStatus(proofs) : "INCONCLUSIVE";
+  return {
+    schema_version: 2,
+    run_id: runId,
+    track: plan.track,
+    goal: plan.goal,
+    functional_status: functional,
+    performance_status: performanceStatus(stageResults),
+    operation_status: operationStatus === "ERROR" ? "ERROR" : plan.admission.status === "ADMITTED" ? "PASS" : "BLOCKED",
+    failure_domain: failure?.failure_domain ?? (plan.admission.status === "ADMITTED" ? null : "INFRA"),
+    failure_fingerprint: failure ? failureFingerprint({ stageId: failure.id, identity: failure, failureDomain: failure.failure_domain, code: failure.code }) : null,
+    failure_diagnostic: functional === "PASS" ? null : failureDiagnostic,
+    proofs,
+    stages: stageResults,
+    gates: stageResults.flatMap((stage) => (stage.gates ?? []).map((gate) => ({ stage_id: stage.id, ...gate }))),
+    source: {
+      base_commit: plan.source.base_commit,
+      branch: plan.source.branch,
+      worktree_clean_at_start: plan.source.worktree_clean,
+      snapshot: plan.source.snapshot,
+      baseline: plan.source.baseline,
+      verification: sourceSnapshotVerification,
+    },
+    config_digests: plan.config_digests,
+    config_bundle_digest: plan.config_bundle_digest,
+    runtime_profile: plan.runtime_profile,
+    runtime_profile_digest: plan.runtime_profile_digest,
+    plan_fingerprint: plan.plan_fingerprint,
+    policy_digest: plan.config_digests.policy,
+    status_policy: plan.policies.status,
+    lineage: { ...plan.lineage, fresh_admission: stageResults.find((stage) => stage.id === "journey.cross-job.environment")?.gates?.[0]?.fresh_admission ?? null },
+    admission: plan.admission,
+    pre_finalization_resource_receipt: preFinalizationResourceReceipt,
+    usage: sumUsage(stageResults.map((stage) => stage.usage)),
+    candidate_input_digest: sha256Bytes(canonicalJson({ run_id: runId, plan_fingerprint: plan.plan_fingerprint, proofs, stages: stageResults.map((stage) => ({ id: stage.id, digest: stage.stage_receipt_digest })) })),
+  };
+}
+
 function evidenceRecord(filePath, attemptRoot) {
   const metadata = fs.statSync(filePath);
   return {
@@ -251,7 +301,7 @@ export function applyHardCaps({ result, planStage, expectedModel }) {
   return { ...result, usage_complete: true, effective_caps: null, invocations: actual };
 }
 
-function writeGateReceipt({ attemptRoot, stage, gatePlan, actionResult, evidence, planStage }) {
+export function writeGateReceipt({ attemptRoot, stage, gatePlan, actionResult, evidence, planStage }) {
   const gateRoot = path.join(attemptRoot, "payload", "stages", stage.id, "gates", gatePlan.id);
   const receiptPath = path.join(gateRoot, "gate-receipt.json");
   const receipt = {
@@ -363,7 +413,7 @@ function restoreReusableCheckpoint({ attemptRoot, pending, currentStageId }) {
   };
 }
 
-function writeStageReceipt(attemptRoot, result) {
+export function writeStageReceipt(attemptRoot, result) {
   const receiptPath = path.join(attemptRoot, "payload", "stages", result.id, "stage-receipt.json");
   writeJsonSync(receiptPath, result);
   return {
@@ -371,6 +421,71 @@ function writeStageReceipt(attemptRoot, result) {
     stage_receipt_path: path.relative(attemptRoot, receiptPath).split(path.sep).join("/"),
     stage_receipt_digest: sha256File(receiptPath),
   };
+}
+
+function publicGateSummary(gate) {
+  return {
+    id: gate.id,
+    kind: gate.gate_kind,
+    status: gate.status,
+    code: gate.code,
+    failure_domain: gate.failure_domain,
+    gate_identity: gate.gate_identity,
+    definition_digest: gate.definition_digest,
+    evidence_contract: gate.evidence_contract,
+    runtime_profile: gate.runtime_profile,
+    runtime_profile_digest: gate.runtime_profile_digest,
+    receipt_path: gate.receipt_path,
+    receipt_digest: gate.receipt_digest,
+    elapsed_seconds: gate.elapsed_seconds,
+    usage: gate.usage,
+    usage_complete: gate.usage_complete,
+    effective_caps: gate.effective_caps,
+    model_invocations: gate.model_invocations,
+    fresh_admission: gate.fresh_admission,
+    evidence: gate.evidence,
+  };
+}
+
+export function writeExecutedStageReceipt({
+  attemptRoot,
+  stage,
+  planStage,
+  gateResults,
+  status = functionalStageStatus(gateResults),
+  stageOperationFailure = null,
+  performance = { status: "NOT_MEASURED", reason: null, baseline: null, consecutive_significant_regressions: 0 },
+  checkpoint = null,
+  restoredCheckpoint = null,
+}) {
+  const firstGateFailure = gateResults.find((gate) => !["PASS", "NOT_REQUIRED"].includes(gate.status));
+  return writeStageReceipt(attemptRoot, {
+    schema_version: 2,
+    id: stage.id,
+    kind: stage.kind,
+    status,
+    code: stageOperationFailure?.code ?? firstGateFailure?.code ?? null,
+    failure_domain: stageOperationFailure?.failure_domain ?? firstGateFailure?.failure_domain ?? null,
+    operation_failure: stageOperationFailure,
+    result_source: "EXECUTED",
+    producer_identity: planStage.producer_identity,
+    proof_identity: planStage.proof_identity,
+    performance_identity: planStage.performance_identity,
+    performance_status: performance.status,
+    performance_reason: performance.reason,
+    performance_baseline: performance.baseline,
+    consecutive_significant_regressions: performance.consecutive_significant_regressions,
+    elapsed_seconds: Math.round(gateResults.reduce((sum, gate) => sum + Number(gate.elapsed_seconds ?? 0), 0) * 1000) / 1000,
+    usage: sumUsage(gateResults.map((gate) => gate.usage)),
+    gates: gateResults.map(publicGateSummary),
+    checkpoint,
+    restored_checkpoint: restoredCheckpoint ? {
+      checkpoint_id: restoredCheckpoint.checkpoint_id,
+      source_run_id: restoredCheckpoint.source_run_id,
+      receipt_path: restoredCheckpoint.receipt_path,
+      receipt_digest: restoredCheckpoint.receipt_digest,
+    } : null,
+  });
 }
 
 function notRunStage(stage, planStage) {
@@ -588,8 +703,6 @@ export async function runFlow(repoRoot, options) {
           stageOperationFailure = { code: "CHECKPOINT_SEAL_FAILED", failure_domain: "HARNESS", error: redactError(error) };
         }
       }
-      const elapsedSeconds = Math.round(gateResults.reduce((sum, gate) => sum + Number(gate.elapsed_seconds ?? 0), 0) * 1000) / 1000;
-      const usage = sumUsage(gateResults.map((gate) => gate.usage));
       let performance = { status: "NOT_MEASURED", baseline: null, consecutive_significant_regressions: 0, reason: null };
       if (status === "PASS") {
         performance = adjudicateStagePerformance({
@@ -601,53 +714,16 @@ export async function runFlow(repoRoot, options) {
           priorConsecutiveSlow: priorConsecutiveSlow(built.history, stage.id, planStage.performance_identity),
         });
       }
-      const firstGateFailure = gateResults.find((gate) => !["PASS", "NOT_REQUIRED"].includes(gate.status));
-      const result = writeStageReceipt(attemptRoot, {
-        schema_version: 2,
-        id: stage.id,
-        kind: stage.kind,
+      const result = writeExecutedStageReceipt({
+        attemptRoot,
+        stage,
+        planStage,
+        gateResults,
         status,
-        code: stageOperationFailure?.code ?? firstGateFailure?.code ?? null,
-        failure_domain: stageOperationFailure?.failure_domain ?? firstGateFailure?.failure_domain ?? null,
-        operation_failure: stageOperationFailure,
-        result_source: "EXECUTED",
-        producer_identity: planStage.producer_identity,
-        proof_identity: planStage.proof_identity,
-        performance_identity: planStage.performance_identity,
-        performance_status: performance.status,
-        performance_reason: performance.reason,
-        performance_baseline: performance.baseline,
-        consecutive_significant_regressions: performance.consecutive_significant_regressions,
-        elapsed_seconds: elapsedSeconds,
-        usage,
-        gates: gateResults.map((gate) => ({
-          id: gate.id,
-          kind: gate.gate_kind,
-          status: gate.status,
-          code: gate.code,
-          failure_domain: gate.failure_domain,
-          gate_identity: gate.gate_identity,
-          definition_digest: gate.definition_digest,
-          evidence_contract: gate.evidence_contract,
-          runtime_profile: gate.runtime_profile,
-          runtime_profile_digest: gate.runtime_profile_digest,
-          receipt_path: gate.receipt_path,
-          receipt_digest: gate.receipt_digest,
-          elapsed_seconds: gate.elapsed_seconds,
-          usage: gate.usage,
-          usage_complete: gate.usage_complete,
-          effective_caps: gate.effective_caps,
-          model_invocations: gate.model_invocations,
-          fresh_admission: gate.fresh_admission,
-          evidence: gate.evidence,
-        })),
+        stageOperationFailure,
+        performance,
         checkpoint,
-        restored_checkpoint: restoredCheckpoint ? {
-          checkpoint_id: restoredCheckpoint.checkpoint_id,
-          source_run_id: restoredCheckpoint.source_run_id,
-          receipt_path: restoredCheckpoint.receipt_path,
-          receipt_digest: restoredCheckpoint.receipt_digest,
-        } : null,
+        restoredCheckpoint,
       });
       stageResults.push(result);
       if (!["PASS", "NOT_REQUIRED"].includes(result.status) || result.performance_status === "FAIL") {
@@ -704,46 +780,15 @@ export async function runFlow(repoRoot, options) {
     }
   }
 
-  const proofs = proofResults(plan, stageResults);
-  const failure = firstFailure(stageResults);
-  const failureDiagnostic = projectCandidateFailureDiagnostic({ attemptRoot, stages: stageResults });
-  const functional = plan.admission.status === "ADMITTED" ? functionalProofStatus(proofs) : "INCONCLUSIVE";
-  const performance = performanceStatus(stageResults);
-  const candidate = {
-    schema_version: 2,
-    run_id: runId,
-    track: plan.track,
-    goal: plan.goal,
-    functional_status: functional,
-    performance_status: performance,
-    operation_status: operationStatus === "ERROR" ? "ERROR" : plan.admission.status === "ADMITTED" ? "PASS" : "BLOCKED",
-    failure_domain: failure?.failure_domain ?? (plan.admission.status === "ADMITTED" ? null : "INFRA"),
-    failure_fingerprint: failure ? failureFingerprint({ stageId: failure.id, identity: failure, failureDomain: failure.failure_domain, code: failure.code }) : null,
-    failure_diagnostic: functional === "PASS" ? null : failureDiagnostic,
-    proofs,
-    stages: stageResults,
-    gates: stageResults.flatMap((stage) => (stage.gates ?? []).map((gate) => ({ stage_id: stage.id, ...gate }))),
-    source: {
-      base_commit: plan.source.base_commit,
-      branch: plan.source.branch,
-      worktree_clean_at_start: plan.source.worktree_clean,
-      snapshot: plan.source.snapshot,
-      baseline: plan.source.baseline,
-      verification: sourceSnapshotVerification,
-    },
-    config_digests: plan.config_digests,
-    config_bundle_digest: plan.config_bundle_digest,
-    runtime_profile: plan.runtime_profile,
-    runtime_profile_digest: plan.runtime_profile_digest,
-    plan_fingerprint: plan.plan_fingerprint,
-    policy_digest: plan.config_digests.policy,
-    status_policy: plan.policies.status,
-    lineage: { ...plan.lineage, fresh_admission: stageResults.find((stage) => stage.id === "journey.cross-job.environment")?.gates?.[0]?.fresh_admission ?? null },
-    admission: plan.admission,
-    pre_finalization_resource_receipt: preFinalizationResourceReceipt,
-    usage: sumUsage(stageResults.map((stage) => stage.usage)),
-    candidate_input_digest: sha256Bytes(canonicalJson({ run_id: runId, plan_fingerprint: plan.plan_fingerprint, proofs, stages: stageResults.map((stage) => ({ id: stage.id, digest: stage.stage_receipt_digest })) })),
-  };
+  const candidate = buildRunCandidate({
+    attemptRoot,
+    runId,
+    plan,
+    stageResults,
+    operationStatus,
+    sourceSnapshotVerification,
+    preFinalizationResourceReceipt,
+  });
   const verdict = await finalizeAttempt({
     attemptRoot,
     candidate,

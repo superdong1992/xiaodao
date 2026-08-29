@@ -11,7 +11,9 @@
     "reason_code",
     "reason",
     "diagnostic_id",
-    "evaluation_ref"
+    "evaluation_ref",
+    "provider_code",
+    "provider_subtype"
   ],
   "properties": {
     "schema_version": { "const": 1 },
@@ -25,6 +27,32 @@
         { "type": "null" },
         { "type": "string", "pattern": "^eval-[a-f0-9]{64}$" }
       ]
+    },
+    "provider_code": {
+      "oneOf": [
+        { "type": "null" },
+        { "type": "string", "pattern": "^[A-Z][A-Z0-9_]*$" }
+      ]
+    },
+    "provider_subtype": {
+      "oneOf": [
+        { "type": "null" },
+        { "type": "string", "minLength": 1 }
+      ]
     }
-  }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "provider_code": { "type": "null" } },
+        "required": ["provider_code"]
+      },
+      "then": {
+        "properties": { "provider_subtype": { "type": "null" } }
+      },
+      "else": {
+        "properties": { "provider_subtype": { "type": "string", "minLength": 1 } }
+      }
+    }
+  ]
 }

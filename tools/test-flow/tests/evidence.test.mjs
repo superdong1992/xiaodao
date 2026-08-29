@@ -6,14 +6,32 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { providerRunnerFailureResult } from "../lib/actions.mjs";
+import {
+  applyGateEvidenceContract,
+  buildRunCandidate,
+  writeExecutedStageReceipt,
+  writeGateReceipt,
+} from "../lib/engine.mjs";
 import { allowedEmptyEventFiles, createAttempt, finalizeAttempt, recoverStageAuditProgress, requiredEventFiles, verifyVerdict } from "../lib/evidence.mjs";
 import { EventWriter } from "../lib/events.mjs";
 import { FAILURE_DIAGNOSTIC_FIELDS, projectCandidateFailureDiagnostic, validFailureDiagnostic } from "../lib/failure-diagnostic.mjs";
 import { zeroUsage } from "../lib/usage.mjs";
-import { canonicalJson, removeTreeWritable, sha256Bytes, sha256File, writeJsonSync } from "../lib/util.mjs";
-import { projectEvidenceV2ProviderTerminalFailure } from "../runtime-support/evidence-v2-provider-terminal.mjs";
+import { canonicalJson, removeTreeWritable, resolvePythonTestRuntime, sha256Bytes, sha256File, writeJsonSync } from "../lib/util.mjs";
+import {
+  materializeProviderTerminalFailure as materializeP1TerminalFailure,
+  safeE2EError as safeP1Error,
+} from "../quick-validation/claude-deepseek/runtime/claude-deepseek-e2e-runner.mjs";
+import {
+  materializeProviderTerminalFailure as materializeP2TerminalFailure,
+  safeE2EError as safeP2Error,
+} from "../quick-validation/codex-luna/runtime/macos-codex-luna-e2e-runner.mjs";
 
 const TOOL_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = path.resolve(TOOL_ROOT, "..", "..");
+const P1_RUNTIME = path.join(TOOL_ROOT, "quick-validation", "claude-deepseek", "runtime", "claude_deepseek_model_cert_runtime.py");
+const RELEASE_CASE_ROOT = path.join(REPO_ROOT, "tests", "cases", "release", "rpc-timeout-anonymized");
+const PYTHON_RUNTIME = resolvePythonTestRuntime(REPO_ROOT);
 const STATUS_POLICY = { pass: 0, pass_with_warnings: 0, fail: 1, blocked: 2, error: 3 };
 const ZERO_USAGE = zeroUsage();
 
@@ -105,134 +123,231 @@ function writeExecutedStage(attemptRoot) {
   };
 }
 
-function writeEvidenceV2FailureStage(attemptRoot) {
-  const stageId = "real.macos-claude-deepseek-e2e";
-  const gateId = stageId;
-  const gateRoot = path.join(attemptRoot, "payload", "stages", stageId, "gates", gateId);
-  fs.mkdirSync(gateRoot, { recursive: true });
-  const reasonCode = "SPECIALIST_MODEL_EXECUTION_FAILED";
-  const diagnosticId = "diag-0cccc4d9c41c155c1085b8705fc4414ec01620a34776722afbc781fe7220839f";
-  const reason = "Specialist 评估未能完成。";
-  const repairs = { reviewer: 0, specialist: 0 };
-  const methodsResult = {
-    status: "UNRESOLVED",
-    reason_code: reasonCode,
-    reasons: [reason],
-    diagnostic_id: diagnosticId,
-    diagnostic_evaluation_ref: null,
-  };
-  const runtime = {
-    schema_version: 1,
-    status: "PASS",
-    execution_mode: "real-model",
-    production_runtime: "problem_locator.runtime.diagnosis_runtime.DiagnosisRuntime",
-    model_invocations: 1,
-    repair_counts: repairs,
-    methods_result: methodsResult,
-  };
-  const adapter = {
-    ...projectEvidenceV2ProviderTerminalFailure({ certificationTarget: "P1", methodsResult }),
-    model_calls: runtime.model_invocations,
-    repairs,
-  };
-  const adapterPath = path.join(gateRoot, "adapter-receipt.json");
-  const runtimePath = path.join(gateRoot, "runtime-receipt.json");
-  writeJsonSync(adapterPath, adapter);
-  writeJsonSync(runtimePath, runtime);
-  const evidence = [adapterPath, runtimePath].map((filePath) => ({
-    path: path.relative(attemptRoot, filePath).split(path.sep).join("/"),
-    size: fs.statSync(filePath).size,
-    sha256: sha256File(filePath),
-  }));
-  const receiptPath = path.join(gateRoot, "gate-receipt.json");
-  writeJsonSync(receiptPath, {
-    schema_version: 2,
-    stage_id: stageId,
-    gate_id: gateId,
-    gate_kind: "capability-adapter",
-    gate_identity: "gate-identity-evidence-v2",
-    definition_digest: "gate-definition-evidence-v2",
-    evidence_contract: null,
-    runtime_profile: "release",
-    runtime_profile_digest: "runtime-release-a",
-    result_source: "EXECUTED",
-    status: "FAIL",
-    code: reasonCode,
-    failure_domain: "CONTRACT",
-    elapsed_seconds: 1,
-    usage: ZERO_USAGE,
-    usage_complete: true,
-    effective_caps: null,
-    model_invocations: [],
-    fresh_admission: null,
-    evidence,
-    execution: { exit_code: 1, signal: null, termination: null, stdout_path: null, stderr_path: null },
-    assertions: {
-      pytest: null,
-      node_test: null,
-      selection: null,
-      adapter: {
-        ...adapter,
-        runtime_receipt: {
-          path: "runtime-receipt.json",
-          sha256: sha256File(runtimePath),
-          status: "PASS",
-          production_runtime: runtime.production_runtime,
-          methods_status: adapter.methods_status,
-        },
-      },
-    },
-  });
-  const gate = {
-    id: gateId,
-    kind: "capability-adapter",
-    status: "FAIL",
-    code: reasonCode,
-    failure_domain: "CONTRACT",
-    gate_identity: "gate-identity-evidence-v2",
-    definition_digest: "gate-definition-evidence-v2",
-    evidence_contract: null,
-    runtime_profile: "release",
-    runtime_profile_digest: "runtime-release-a",
-    receipt_path: path.relative(attemptRoot, receiptPath).split(path.sep).join("/"),
-    receipt_digest: sha256File(receiptPath),
-    elapsed_seconds: 1,
-    usage: ZERO_USAGE,
-    usage_complete: true,
-    effective_caps: null,
-    model_invocations: [],
-    fresh_admission: null,
-    evidence,
-  };
-  const stageReceipt = {
-    schema_version: 2,
-    id: stageId,
-    kind: "capability",
-    status: "FAIL",
-    code: reasonCode,
-    failure_domain: "CONTRACT",
-    operation_failure: null,
-    result_source: "EXECUTED",
-    producer_identity: "producer-evidence-v2",
-    proof_identity: "proof-evidence-v2",
-    performance_identity: "performance-evidence-v2",
-    performance_status: "NOT_MEASURED",
-    performance_reason: null,
-    performance_baseline: null,
-    consecutive_significant_regressions: 0,
-    elapsed_seconds: 1,
-    usage: ZERO_USAGE,
-    gates: [gate],
-    checkpoint: null,
-    restored_checkpoint: null,
-  };
-  const stagePath = path.join(attemptRoot, "payload", "stages", stageId, "stage-receipt.json");
-  writeJsonSync(stagePath, stageReceipt);
+function providerPlanStage(provider) {
   return {
-    ...stageReceipt,
-    stage_receipt_path: path.relative(attemptRoot, stagePath).split(path.sep).join("/"),
-    stage_receipt_digest: sha256File(stagePath),
+    hard_caps: { hard_timeout_seconds: 600, max_budget_usd: 4, max_output_tokens: 64_000, max_total_tokens: 2_000_000, max_turns: 50 },
+    invocation_caps: [{
+      aggregate: true,
+      caps: { hard_timeout_seconds: 600, max_budget_usd: 4, max_output_tokens: 64_000, max_total_tokens: 2_000_000, max_turns: 50 },
+      class: provider === "claude-deepseek" ? "claude-deepseek-macos-e2e" : "codex-luna-macos-e2e",
+      max_count: 4,
+      min_count: 2,
+      normal_count: 2,
+      repair_max_count: 2,
+      phases: ["SPECIALIST:PRIMARY", "SPECIALIST:REPAIR?", "REVIEWER:PRIMARY", "REVIEWER:REPAIR?"],
+    }],
+    producer_identity: `producer-${provider}`,
+    proof_identity: `proof-${provider}`,
+    performance_identity: `performance-${provider}`,
   };
+}
+
+function writeReleaseRegistrationInput(root) {
+  const registrationSource = path.join(RELEASE_CASE_ROOT, "registration", "rpc-timeout-methods-v1", "registration-template.json");
+  const wiki = fs.readFileSync(path.join(RELEASE_CASE_ROOT, "input", "wiki.md"), "utf8");
+  const expected = JSON.parse(fs.readFileSync(path.join(RELEASE_CASE_ROOT, "oracle.json"), "utf8")).expected_package;
+  const packageRoot = path.join(root, "package", "diagnose-rpc-timeout");
+  const references = path.join(packageRoot, "references");
+  fs.mkdirSync(references, { recursive: true });
+  fs.copyFileSync(registrationSource, path.join(root, "registration-template.json"));
+  const methodSpecs = [
+    ["api-execution-slow", "API 执行时间过长", "api-execution-slow.md"],
+    ["server-queueing", "服务端收包排队", "server-queueing.md"],
+    ["client-receive-blocked", "客户端收包线程阻塞", "client-receive-blocked.md"],
+  ];
+  const methods = {
+    schema_version: 1,
+    skill_name: expected.skill_name,
+    source_wiki_sha256: expected.source_wiki_sha256,
+    required_user_inputs: expected.required_user_inputs,
+    required_artifacts: expected.required_artifacts,
+    log_derived_fields: expected.required_log_derived_fields,
+    shared_references: ["references/source-log-templates.md", "references/shared-boundaries.md"],
+    methods: methodSpecs.map(([id, title, filename], index) => ({
+      id,
+      title,
+      reference: `references/${filename}`,
+      priority: index + 1,
+      evidence_markers: expected.method_marker_sets[index].all_markers,
+    })),
+  };
+  fs.writeFileSync(path.join(packageRoot, "methods.json"), `${JSON.stringify(methods, null, 2)}\n`);
+  fs.writeFileSync(path.join(packageRoot, "SKILL.md"), "---\nname: diagnose-rpc-timeout\ndescription: Test-owned production Runtime fixture.\n---\n\nRead request.json, method-evidence-graph.json, and method-evaluation-plan.json. Return only evaluation_ref, verdict, and reason; UNKNOWN is allowed.\n");
+  const templates = [];
+  let inFence = false;
+  for (const rawLine of wiki.split(/\r?\n/u)) {
+    const line = rawLine.trim();
+    if (line === "```text") { inFence = true; continue; }
+    if (line === "```" && inFence) { inFence = false; continue; }
+    if (inFence && line) templates.push(line);
+  }
+  for (const method of methods.methods) {
+    const matchedMarkers = [];
+    const selected = templates.filter((template) => {
+      const matches = method.evidence_markers.filter((marker) => template.includes(marker));
+      assert.ok(matches.length <= 1, `expected at most one canonical marker for ${template}`);
+      if (matches.length === 0) return false;
+      matchedMarkers.push(matches[0]);
+      return true;
+    });
+    assert.deepEqual(matchedMarkers, method.evidence_markers, `method ${method.id} markers must follow source template order`);
+    const card = [
+      "## 适用条件\n固定 Release 用例。",
+      `## 所需证据\n${selected.map((template) => `- \`${template}\``).join("\n")}`,
+      "## 计算与判断\n按冻结 Evidence Graph 中的完整方法证据计算。",
+      "## 确认条件\n满足方法规则时确认。",
+      "## 未知边界\n必要证据缺失时返回 UNKNOWN。",
+      "## 输出含义\n输出 evaluation verdict。",
+    ].join("\n\n");
+    fs.writeFileSync(path.join(packageRoot, method.reference), `${card}\n`);
+  }
+  fs.writeFileSync(path.join(references, "source-log-templates.md"), `# Source log templates\n\n\`\`\`text\n${templates.join("\n")}\n\`\`\`\n`);
+  fs.writeFileSync(path.join(references, "shared-boundaries.md"), "RPC 超时不等于取消。\n");
+}
+
+function runProductionFailureRuntime({ attemptRoot, gateRoot, usageRoot, testRoot }) {
+  assert.notEqual(PYTHON_RUNTIME, null, "Python 3.12 test runtime is required for the production failure fixture");
+  const receiptPath = path.join(gateRoot, "runtime-receipt.json");
+  const registrationRoot = path.join(testRoot, "registration");
+  const configRoot = path.join(testRoot, "config");
+  const privateRoot = path.join(testRoot, "private");
+  const settingsPath = path.join(testRoot, "settings.json");
+  const fakeClaudeEntry = path.join(testRoot, "fake-claude-cli.mjs");
+  writeReleaseRegistrationInput(registrationRoot);
+  fs.mkdirSync(configRoot, { recursive: true });
+  fs.mkdirSync(privateRoot, { recursive: true });
+  fs.writeFileSync(settingsPath, "{}\n");
+  fs.writeFileSync(fakeClaudeEntry, [
+    "process.stdin.resume();",
+    "process.stdin.on('end', () => {",
+    "  const terminal = {",
+    "    type: 'result',",
+    "    subtype: 'error_max_budget_usd',",
+    "    is_error: true,",
+    "    num_turns: 1,",
+    "    stop_reason: 'tool_use',",
+    "    total_cost_usd: 1.047635,",
+    "    usage: { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },",
+    "    modelUsage: {",
+    "      'deepseek-v4-flash[1m]': { inputTokens: 23302, outputTokens: 37245, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, costUSD: 1.047635 }",
+    "    },",
+    "    errors: ['Reached maximum budget'],",
+    "  };",
+    "  process.stdout.write(`${JSON.stringify(terminal)}\\n`);",
+    "  process.exitCode = 1;",
+    "});",
+    "",
+  ].join("\n"));
+  const bootstrap = "import runpy,sys,types; mark=types.SimpleNamespace(parametrize=lambda *a,**k:(lambda f:f)); sys.modules['pytest']=types.SimpleNamespace(fixture=lambda f:f,mark=mark); script=sys.argv[1]; sys.argv=sys.argv[1:]; runpy.run_path(script,run_name='__main__')";
+  const result = spawnSync(PYTHON_RUNTIME.command, [
+    ...PYTHON_RUNTIME.interpreterPrefix,
+    "-c", bootstrap,
+    P1_RUNTIME,
+    "--mode", "real",
+    "--source-root", REPO_ROOT,
+    "--registration-root", registrationRoot,
+    "--work-root", path.join(testRoot, "runtime-work"),
+    "--node-entry", process.execPath,
+    "--claude-entry", fakeClaudeEntry,
+    "--claude-settings", settingsPath,
+    "--config-root", configRoot,
+    "--private-root", privateRoot,
+    "--evidence-root", gateRoot,
+    "--usage-root", usageRoot,
+    "--run-id", path.basename(attemptRoot),
+    "--receipt-path", receiptPath,
+  ], { cwd: REPO_ROOT, env: process.env, encoding: "utf8", timeout: 120_000 });
+  assert.equal(result.status, 0, result.stderr);
+  return JSON.parse(fs.readFileSync(receiptPath, "utf8"));
+}
+
+async function writeEvidenceV2FailureStage(attemptRoot, {
+  certificationTarget = "P1",
+  includeEvidence = true,
+} = {}) {
+  const provider = certificationTarget === "P1" ? "claude-deepseek" : "codex-luna";
+  const stageId = certificationTarget === "P1" ? "real.macos-claude-deepseek-e2e" : "real.macos-codex-luna-e2e";
+  const gateId = stageId;
+  const testRoot = path.join(attemptRoot, "fixture-inputs", certificationTarget.toLowerCase());
+  const gateRoot = path.join(attemptRoot, "payload", "stages", stageId, "gates", gateId);
+  const usageRoot = path.join(attemptRoot, "payload", "model-usage", `${provider}-e2e`);
+  fs.mkdirSync(gateRoot, { recursive: true });
+  fs.mkdirSync(usageRoot, { recursive: true });
+  const runtime = runProductionFailureRuntime({ attemptRoot, gateRoot, usageRoot, testRoot });
+  const materialize = certificationTarget === "P1" ? materializeP1TerminalFailure : materializeP2TerminalFailure;
+  const safeError = certificationTarget === "P1" ? safeP1Error : safeP2Error;
+  materialize(runtime, gateRoot, { modelCalls: runtime.model_invocations, repairs: runtime.repair_counts });
+
+  const logRoot = path.join(attemptRoot, "payload", "logs");
+  fs.mkdirSync(logRoot, { recursive: true });
+  const stderrPath = path.join(logRoot, `${stageId}--${gateId}.stderr.log`);
+  fs.writeFileSync(stderrPath, canonicalJson(safeError({
+    code: runtime.methods_result.reason_code,
+    message: runtime.methods_result.reasons[0],
+  })));
+  const planStage = providerPlanStage(provider);
+  const actionResult = providerRunnerFailureResult({
+    provider,
+    result: {
+      status: "FAIL",
+      elapsed_seconds: 1,
+      exit_code: 1,
+      signal: null,
+      termination: null,
+      stderr_truncated: false,
+      stderr_path: path.relative(attemptRoot, stderrPath).split(path.sep).join("/"),
+    },
+    attemptRoot,
+    outputRoot: gateRoot,
+    usageRoot,
+    planStage,
+    invocationClass: provider === "claude-deepseek" ? "claude-deepseek-macos-e2e" : "codex-luna-macos-e2e",
+    fallbackCode: provider === "claude-deepseek" ? "CLAUDE_DEEPSEEK_RUNNER_FAILED" : "MACOS_CODEX_LUNA_RUNNER_FAILED",
+  });
+  const stage = { id: stageId, kind: "capability" };
+  const gatePlan = {
+    id: gateId,
+    gate_identity: `gate-identity-${certificationTarget.toLowerCase()}`,
+    definition_digest: `gate-definition-${certificationTarget.toLowerCase()}`,
+    evidence_contract: null,
+    runtime_profile: "release",
+    runtime_profile_digest: "runtime-release-a",
+  };
+  const gate = { evidence: includeEvidence ? ["runtime-receipt.json", "adapter-receipt.json"] : [] };
+  const contracted = applyGateEvidenceContract({ actionResult, gate, gatePlan, stage, attemptRoot });
+  const gateReceipt = writeGateReceipt({ attemptRoot, stage, gatePlan, actionResult: contracted.result, evidence: contracted.evidence, planStage });
+  return writeExecutedStageReceipt({ attemptRoot, stage, planStage, gateResults: [gateReceipt] });
+}
+
+function writeOrdinaryStage(attemptRoot, status) {
+  const stage = { id: `ordinary.${status.toLowerCase()}`, kind: "deterministic" };
+  const gatePlan = {
+    id: `${stage.id}.gate`,
+    gate_identity: `${stage.id}-gate-identity`,
+    definition_digest: `${stage.id}-gate-definition`,
+    evidence_contract: null,
+    runtime_profile: null,
+    runtime_profile_digest: null,
+  };
+  const planStage = {
+    invocation_caps: [],
+    producer_identity: `${stage.id}-producer`,
+    proof_identity: `${stage.id}-proof`,
+    performance_identity: `${stage.id}-performance`,
+  };
+  const actionResult = status === "PASS"
+    ? { status: "PASS", code: null, failure_domain: null, elapsed_seconds: 0, usage_complete: true, invocations: [] }
+    : { status: "FAIL", code: "ORDINARY_PRODUCT_FAILURE", failure_domain: "PRODUCT", elapsed_seconds: 0, usage_complete: true, invocations: [] };
+  const gateReceipt = writeGateReceipt({ attemptRoot, stage, gatePlan, actionResult, evidence: [], planStage });
+  return writeExecutedStageReceipt({
+    attemptRoot,
+    stage,
+    planStage,
+    gateResults: [gateReceipt],
+    performance: status === "PASS"
+      ? { status: "PASS", reason: null, baseline: null, consecutive_significant_regressions: 0 }
+      : undefined,
+  });
 }
 
 function writeReusedStage(attemptRoot, sourceRunId, sourceStageDigest) {
@@ -265,18 +380,13 @@ function writeReusedStage(attemptRoot, sourceRunId, sourceStageDigest) {
   };
 }
 
-function writePlanAndCandidate(attemptRoot, runId, stage) {
-  const proofStatus = stage.status === "ERROR"
-    ? "ERROR"
-    : stage.status === "FAIL"
-      ? "FAIL"
-      : ["PASS", "NOT_REQUIRED"].includes(stage.status) ? "PASS" : "INCONCLUSIVE";
+function writePlanAndBuildCandidate(attemptRoot, runId, stageInput) {
+  const stages = Array.isArray(stageInput) ? stageInput : [stageInput];
   const proof = {
-    id: "proof.deterministic-full",
+    id: "proof.test-flow",
     acceptance: "all",
-    stages: [{ id: stage.id, status: stage.status }],
+    stages: stages.map((stage) => stage.id),
     proof_definition_digest: "proof-definition-a",
-    status: proofStatus,
   };
   const admission = { status: "ADMITTED", blockers: [], warnings: [] };
   const configDigests = {
@@ -303,14 +413,6 @@ function writePlanAndCandidate(attemptRoot, runId, stage) {
     worktree: { status: "PASS", expected_digest: sourceManifest.digest, observed_digest: sourceManifest.digest },
     materialized: { status: "PASS", expected_digest: sourceManifest.digest, observed_digest: sourceManifest.digest },
   };
-  const plannedGate = stage.gates[0] ?? {
-    id: "det.unit",
-    gate_identity: "gate-identity-a",
-    definition_digest: "gate-definition-a",
-    evidence_contract: null,
-    runtime_profile: "python-test",
-    runtime_profile_digest: "runtime-python-a",
-  };
   const planCore = {
     schema_version: 2,
     track: "dev",
@@ -324,23 +426,37 @@ function writePlanAndCandidate(attemptRoot, runId, stage) {
     source: { available: true, base_commit: "a".repeat(40), branch: "codex/test", worktree_clean: false, snapshot: sourceSnapshot, baseline: { source: "explicit", commit: "b".repeat(40) }, changed_files: [] },
     release_inputs: null,
     lineage: { root: "AUTO", initial_data_root: "TRACK_POLICY", checkpoint_reuse: "CONFIGURED_PER_STAGE" },
-    proofs: [{ id: proof.id, acceptance: proof.acceptance, stages: [stage.id], proof_definition_digest: proof.proof_definition_digest }],
-    stages: [{
-      id: stage.id,
-      producer_identity: stage.producer_identity,
-      proof_identity: stage.proof_identity,
-      performance_identity: stage.performance_identity,
-      decision: stage.result_source === "REUSED" ? "REUSE" : "RUN",
-      gates: [{
-        id: plannedGate.id,
-        gate_identity: plannedGate.gate_identity,
-        definition_digest: plannedGate.definition_digest,
-        evidence_contract: plannedGate.evidence_contract,
-        required_evidence: [],
-        runtime_profile: plannedGate.runtime_profile,
-        runtime_profile_digest: plannedGate.runtime_profile_digest,
-      }],
-    }],
+    proofs: [proof],
+    stages: stages.map((stage) => {
+      const provider = stage.id === "real.macos-claude-deepseek-e2e"
+        ? "claude-deepseek"
+        : stage.id === "real.macos-codex-luna-e2e" ? "codex-luna" : null;
+      const plannedGates = stage.gates.length > 0 ? stage.gates : [{
+        id: "det.unit",
+        gate_identity: "gate-identity-a",
+        definition_digest: "gate-definition-a",
+        evidence_contract: null,
+        runtime_profile: "python-test",
+        runtime_profile_digest: "runtime-python-a",
+      }];
+      return {
+        id: stage.id,
+        producer_identity: stage.producer_identity,
+        proof_identity: stage.proof_identity,
+        performance_identity: stage.performance_identity,
+        decision: stage.result_source === "REUSED" ? "REUSE" : "RUN",
+        invocation_caps: provider === null ? [] : providerPlanStage(provider).invocation_caps,
+        gates: plannedGates.map((gate) => ({
+          id: gate.id,
+          gate_identity: gate.gate_identity,
+          definition_digest: gate.definition_digest,
+          evidence_contract: gate.evidence_contract,
+          required_evidence: [],
+          runtime_profile: gate.runtime_profile,
+          runtime_profile_digest: gate.runtime_profile_digest,
+        })),
+      };
+    }),
     admission,
     retry: { recommendation: "RUN", reason: null, previous_run_id: null, stage_id: null, previous_code: null },
     intent: { reason: null, hypothesis: null, expected_evidence: null },
@@ -356,57 +472,23 @@ function writePlanAndCandidate(attemptRoot, runId, stage) {
   });
   writeJsonSync(path.join(attemptRoot, "payload", "source", "source-snapshot.json"), sourceManifest);
   writeJsonSync(path.join(attemptRoot, "payload", "source", "source-snapshot-verification.json"), sourceVerification);
-  const gates = stage.gates.map((gate) => ({ stage_id: stage.id, ...gate }));
-  const functionalStatus = proofStatus === "FAIL" ? "FAIL" : proofStatus === "PASS" ? "PASS" : "INCONCLUSIVE";
-  const firstFailedGate = stage.gates.find((gate) => !["PASS", "NOT_REQUIRED"].includes(gate.status)) ?? null;
-  const candidate = {
-    schema_version: 2,
-    run_id: runId,
-    track: "dev",
-    goal: "dev.default",
-    functional_status: functionalStatus,
-    performance_status: stage.performance_status === "PASS" ? "PASS" : "NOT_RUN",
-    operation_status: "PASS",
-    failure_domain: firstFailedGate?.failure_domain ?? null,
-    failure_fingerprint: firstFailedGate === null ? null : JSON.stringify({
-      stage_id: stage.id,
-      producer_identity: stage.producer_identity,
-      proof_identity: stage.proof_identity,
-      failure_domain: firstFailedGate.failure_domain,
-      code: firstFailedGate.code,
-    }),
-    failure_diagnostic: functionalStatus === "PASS"
-      ? null
-      : projectCandidateFailureDiagnostic({ attemptRoot, stages: [stage] }),
-    proofs: [proof],
-    stages: [stage],
-    gates,
-    source: { base_commit: "a".repeat(40), branch: "codex/test", worktree_clean_at_start: false, snapshot: sourceSnapshot, baseline: { source: "explicit", commit: "b".repeat(40) }, verification: sourceVerification },
-    config_digests: configDigests,
-    config_bundle_digest: "config-bundle-a",
-    runtime_profile: "release",
-    runtime_profile_digest: "runtime-release-a",
-    plan_fingerprint: planFingerprint,
-    policy_digest: "config-policy",
-    status_policy: STATUS_POLICY,
-    lineage: { root: "AUTO" },
-    admission,
-    pre_finalization_resource_receipt: null,
-    usage: ZERO_USAGE,
-    candidate_input_digest: "pending",
-  };
-  candidate.candidate_input_digest = sha256Bytes(canonicalJson({
-    run_id: runId,
-    plan_fingerprint: planFingerprint,
-    proofs: candidate.proofs,
-    stages: [{ id: stage.id, digest: stage.stage_receipt_digest }],
-  }));
-  return candidate;
+  return buildRunCandidate({
+    attemptRoot,
+    runId,
+    plan: { ...planCore, plan_fingerprint: planFingerprint, run_id: runId },
+    stageResults: stages,
+    operationStatus: "PASS",
+    sourceSnapshotVerification: sourceVerification,
+    preFinalizationResourceReceipt: null,
+  });
 }
 
 async function createFinalized(evidenceRoot, runId, {
   reusedFrom = null,
   evidenceV2Failure = false,
+  certificationTarget = "P1",
+  includeFailureEvidence = true,
+  ordinaryBefore = null,
   resourceStatus = "PASS",
   mutateBeforeFinalize = null,
 } = {}) {
@@ -414,9 +496,12 @@ async function createFinalized(evidenceRoot, runId, {
   closeMinimalStream(attemptRoot, runId);
   const stage = reusedFrom
     ? writeReusedStage(attemptRoot, reusedFrom.runId, reusedFrom.stageDigest)
-    : evidenceV2Failure ? writeEvidenceV2FailureStage(attemptRoot) : writeExecutedStage(attemptRoot);
-  const candidate = writePlanAndCandidate(attemptRoot, runId, stage);
-  mutateBeforeFinalize?.({ attemptRoot, candidate, stage });
+    : evidenceV2Failure
+      ? await writeEvidenceV2FailureStage(attemptRoot, { certificationTarget, includeEvidence: includeFailureEvidence })
+      : writeExecutedStage(attemptRoot);
+  const stages = ordinaryBefore === null ? [stage] : [writeOrdinaryStage(attemptRoot, ordinaryBefore), stage];
+  const candidate = writePlanAndBuildCandidate(attemptRoot, runId, stages);
+  mutateBeforeFinalize?.({ attemptRoot, candidate, stage, stages });
   const verdict = await finalizeAttempt({
     attemptRoot,
     candidate,
@@ -459,35 +544,136 @@ test("cleanup failure commits overall ERROR and cannot remain reusable", async (
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
-test("a verified Evidence V2 terminal failure is directly visible in the authoritative verdict", async () => {
+test("a verified Evidence V2 terminal failure is directly visible in the authoritative verdict", { skip: PYTHON_RUNTIME === null }, async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "test-flow-failure-diagnostic-"));
   try {
     const result = await createFinalized(root, "run-20260810T000001Z-d1a60001", { evidenceV2Failure: true });
-    assert.equal(result.verdict.overall, "FAIL");
+    assert.equal(result.verdict.overall, "FAIL", fs.readFileSync(path.join(result.attemptRoot, "payload", "receipt-audit.json"), "utf8"));
     assert.equal(result.verdict.functional_status, "FAIL");
     assert.equal(result.verdict.failure_domain, "CONTRACT");
     assert.match(result.verdict.failure_fingerprint, /SPECIALIST_MODEL_EXECUTION_FAILED/u);
-    assert.deepEqual(result.verdict.failure_diagnostic, {
+    const diagnostic = result.verdict.failure_diagnostic;
+    assert.notEqual(diagnostic, null, fs.readFileSync(path.join(result.attemptRoot, result.verdict.gates[0].receipt_path), "utf8"));
+    const gateReceipt = JSON.parse(fs.readFileSync(path.join(result.attemptRoot, result.verdict.gates[0].receipt_path), "utf8"));
+    const runtimeReceipt = JSON.parse(fs.readFileSync(path.join(path.dirname(path.join(result.attemptRoot, result.verdict.gates[0].receipt_path)), "runtime-receipt.json"), "utf8"));
+    const providerFailure = gateReceipt.model_invocations.at(-1);
+    assert.equal(runtimeReceipt.execution_mode, "real-model");
+    assert.equal(providerFailure.wrapper_outcome.status, "FAIL");
+    assert.equal(providerFailure.terminal.is_error, true);
+    assert.deepEqual(Object.fromEntries(Object.entries(diagnostic).filter(([key]) => !key.startsWith("provider_"))), {
       schema_version: 1,
       certification_target: "P1",
       code: "SPECIALIST_MODEL_EXECUTION_FAILED",
       reason_code: "SPECIALIST_MODEL_EXECUTION_FAILED",
       reason: "Specialist 评估未能完成。",
-      diagnostic_id: "diag-0cccc4d9c41c155c1085b8705fc4414ec01620a34776722afbc781fe7220839f",
+      diagnostic_id: runtimeReceipt.methods_result.diagnostic_id,
       evaluation_ref: null,
     });
-    assert.equal(validFailureDiagnostic(result.verdict.failure_diagnostic), true);
+    assert.equal(diagnostic.provider_code, providerFailure.wrapper_outcome.code);
+    assert.equal(diagnostic.provider_subtype, providerFailure.terminal.subtype);
+    assert.equal(validFailureDiagnostic(diagnostic), true);
     assert.equal(verifyVerdict(result.attemptRoot).status, "PASS");
 
     const verdictPath = path.join(result.attemptRoot, "verdict.json");
-    const changed = JSON.parse(fs.readFileSync(verdictPath, "utf8"));
+    const original = JSON.parse(fs.readFileSync(verdictPath, "utf8"));
+    const changed = structuredClone(original);
     changed.failure_diagnostic.diagnostic_id = `diag-${"b".repeat(64)}`;
     fs.writeFileSync(verdictPath, canonicalJson(changed), "utf8");
+    assert.equal(verifyVerdict(result.attemptRoot).status, "INVALID");
+    fs.writeFileSync(verdictPath, canonicalJson(original), "utf8");
+    const providerChanged = structuredClone(original);
+    providerChanged.failure_diagnostic.provider_code = original.failure_diagnostic.provider_code === "CLAUDE_DEEPSEEK_PROCESS_FAILED"
+      ? "CLAUDE_DEEPSEEK_MAX_BUDGET_EXCEEDED"
+      : "CLAUDE_DEEPSEEK_PROCESS_FAILED";
+    fs.writeFileSync(verdictPath, canonicalJson(providerChanged), "utf8");
+    assert.equal(verifyVerdict(result.attemptRoot).status, "INVALID");
+    fs.writeFileSync(verdictPath, canonicalJson(original), "utf8");
+    const subtypeChanged = structuredClone(original);
+    subtypeChanged.failure_diagnostic.provider_subtype = original.failure_diagnostic.provider_subtype === "different_error"
+      ? "another_error"
+      : "different_error";
+    fs.writeFileSync(verdictPath, canonicalJson(subtypeChanged), "utf8");
     assert.equal(verifyVerdict(result.attemptRoot).status, "INVALID");
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
-test("an unverified Evidence V2 adapter/runtime pair cannot populate the verdict diagnostic", async () => {
+test("a verified P2 terminal failure projects the same public diagnostic contract", { skip: PYTHON_RUNTIME === null }, async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "test-flow-p2-failure-diagnostic-"));
+  try {
+    const result = await createFinalized(root, "run-20260810T000001Z-d1a60003", {
+      evidenceV2Failure: true,
+      certificationTarget: "P2",
+    });
+    assert.equal(result.verdict.overall, "FAIL");
+    assert.equal(result.verdict.failure_diagnostic?.certification_target, "P2", fs.readFileSync(path.join(result.attemptRoot, result.verdict.gates[0].receipt_path), "utf8"));
+    assert.equal(result.verdict.failure_diagnostic.reason_code, "SPECIALIST_MODEL_EXECUTION_FAILED");
+    assert.match(result.verdict.failure_diagnostic.diagnostic_id, /^diag-[a-f0-9]{64}$/u);
+    assert.equal(result.verdict.failure_diagnostic.provider_code, null);
+    assert.equal(result.verdict.failure_diagnostic.provider_subtype, null);
+    assert.equal(verifyVerdict(result.attemptRoot).status, "PASS", JSON.stringify(verifyVerdict(result.attemptRoot)));
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("legacy adapter files outside the current Gate evidence index cannot populate the diagnostic", { skip: PYTHON_RUNTIME === null }, async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "test-flow-unlisted-failure-diagnostic-"));
+  try {
+    for (const [index, certificationTarget] of ["P1", "P2"].entries()) {
+      const result = await createFinalized(root, `run-20260810T000001Z-d1a6001${index}`, {
+        evidenceV2Failure: true,
+        certificationTarget,
+        includeFailureEvidence: false,
+      });
+      const stageId = certificationTarget === "P1" ? "real.macos-claude-deepseek-e2e" : "real.macos-codex-luna-e2e";
+      const gateRoot = path.join(result.attemptRoot, "payload", "stages", stageId, "gates", stageId);
+      assert.equal(fs.existsSync(path.join(gateRoot, "adapter-receipt.json")), true);
+      assert.equal(fs.existsSync(path.join(gateRoot, "runtime-receipt.json")), true);
+      assert.deepEqual(result.verdict.gates[0].evidence, []);
+      assert.equal(result.verdict.failure_diagnostic, null);
+      assert.equal(verifyVerdict(result.attemptRoot).status, "PASS", JSON.stringify(verifyVerdict(result.attemptRoot)));
+    }
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("an earlier ordinary failure prevents a later provider diagnostic from becoming authoritative", { skip: PYTHON_RUNTIME === null }, async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "test-flow-earlier-failure-diagnostic-"));
+  try {
+    for (const [index, certificationTarget] of ["P1", "P2"].entries()) {
+      const result = await createFinalized(root, `run-20260810T000001Z-d1a6002${index}`, {
+        evidenceV2Failure: true,
+        certificationTarget,
+        ordinaryBefore: "FAIL",
+      });
+      assert.equal(result.verdict.stages[0].code, "ORDINARY_PRODUCT_FAILURE");
+      assert.equal(result.verdict.failure_diagnostic, null);
+      assert.match(result.verdict.failure_fingerprint, /ORDINARY_PRODUCT_FAILURE/u);
+      assert.equal(verifyVerdict(result.attemptRoot).status, "PASS");
+    }
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("stage order and Gate digest drift clear the diagnostic and fail receipt verification", { skip: PYTHON_RUNTIME === null }, async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "test-flow-failure-diagnostic-drift-"));
+  try {
+    const reordered = await createFinalized(root, "run-20260810T000001Z-d1a60006", {
+      evidenceV2Failure: true,
+      ordinaryBefore: "PASS",
+      mutateBeforeFinalize: ({ candidate }) => { candidate.stages.reverse(); },
+    });
+    assert.equal(reordered.verdict.failure_diagnostic, null);
+    assert.equal(reordered.verdict.verification_status, "FAIL");
+    assert.equal(verifyVerdict(reordered.attemptRoot).status, "INVALID");
+
+    const digestDrift = await createFinalized(root, "run-20260810T000001Z-d1a60007", {
+      evidenceV2Failure: true,
+      mutateBeforeFinalize: ({ candidate }) => { candidate.stages[0].gates[0].receipt_digest = "f".repeat(64); },
+    });
+    assert.equal(digestDrift.verdict.failure_diagnostic, null);
+    assert.equal(digestDrift.verdict.verification_status, "FAIL");
+    assert.equal(verifyVerdict(digestDrift.attemptRoot).status, "INVALID");
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("an unverified Evidence V2 adapter/runtime pair cannot populate the verdict diagnostic", { skip: PYTHON_RUNTIME === null }, async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "test-flow-unverified-failure-diagnostic-"));
   try {
     const result = await createFinalized(root, "run-20260810T000001Z-d1a60002", {
@@ -518,6 +704,21 @@ test("the failure diagnostic JSON Schema and runtime validator close the same fi
   assert.deepEqual(Object.keys(schema.properties).sort(), [...FAILURE_DIAGNOSTIC_FIELDS].sort());
   assert.equal(schema.properties.certification_target.enum.join(","), "P1,P2");
   assert.equal(schema.properties.evaluation_ref.oneOf.some((item) => item.type === "null"), true);
+  const valid = {
+    schema_version: 1,
+    certification_target: "P1",
+    code: "SPECIALIST_MODEL_EXECUTION_FAILED",
+    reason_code: "SPECIALIST_MODEL_EXECUTION_FAILED",
+    reason: "Specialist 评估未能完成。",
+    diagnostic_id: `diag-${"a".repeat(64)}`,
+    evaluation_ref: null,
+    provider_code: "CLAUDE_DEEPSEEK_PROCESS_FAILED",
+    provider_subtype: "error",
+  };
+  assert.equal(validFailureDiagnostic(valid), true);
+  assert.equal(validFailureDiagnostic({ ...valid, provider_code: null }), false);
+  assert.equal(validFailureDiagnostic({ ...valid, provider_subtype: null }), false);
+  assert.equal(validFailureDiagnostic({ ...valid, provider_code: null, provider_subtype: null }), true);
   assert.equal(projectCandidateFailureDiagnostic({
     attemptRoot: os.tmpdir(),
     stages: [{
@@ -536,7 +737,7 @@ test("secret evidence is preserved but never reusable", async () => {
     const attemptRoot = createAttempt({ evidenceRoot: root, runId: "run-20260810T000002Z-cccccccc" });
     closeMinimalStream(attemptRoot, path.basename(attemptRoot));
     const stage = writeExecutedStage(attemptRoot);
-    const candidate = writePlanAndCandidate(attemptRoot, path.basename(attemptRoot), stage);
+    const candidate = writePlanAndBuildCandidate(attemptRoot, path.basename(attemptRoot), stage);
     fs.writeFileSync(path.join(attemptRoot, "payload", "logs", "leak.log"), "sk-ant-abcdefghijklmnopqrstuv\n");
     const verdict = await finalizeAttempt({
       attemptRoot,

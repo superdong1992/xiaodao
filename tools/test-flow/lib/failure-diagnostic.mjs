@@ -18,6 +18,8 @@ export const FAILURE_DIAGNOSTIC_FIELDS = Object.freeze([
   "reason",
   "diagnostic_id",
   "evaluation_ref",
+  "provider_code",
+  "provider_subtype",
 ]);
 
 const TARGET_GATE = Object.freeze({
@@ -44,7 +46,33 @@ export function validFailureDiagnostic(value) {
     && typeof value.diagnostic_id === "string"
     && DIAGNOSTIC_ID.test(value.diagnostic_id)
     && (value.evaluation_ref === null
-      || (typeof value.evaluation_ref === "string" && EVALUATION_REF.test(value.evaluation_ref)));
+      || (typeof value.evaluation_ref === "string" && EVALUATION_REF.test(value.evaluation_ref)))
+    && ((value.provider_code === null && value.provider_subtype === null)
+      || (typeof value.provider_code === "string"
+        && REASON_CODE.test(value.provider_code)
+        && typeof value.provider_subtype === "string"
+        && value.provider_subtype.length > 0));
+}
+
+function providerFailure(invocations) {
+  if (!Array.isArray(invocations) || invocations.length === 0) return null;
+  for (let index = invocations.length - 1; index >= 0; index -= 1) {
+    const invocation = invocations[index];
+    const outcome = invocation?.wrapper_outcome;
+    const terminal = invocation?.terminal;
+    if (invocation?.schema_version === 3
+      && outcome?.schema_version === 1
+      && outcome.status === "FAIL"
+      && typeof outcome.code === "string"
+      && REASON_CODE.test(outcome.code)
+      && terminal !== null
+      && typeof terminal === "object"
+      && !Array.isArray(terminal)
+      && terminal.is_error === true
+      && typeof terminal.subtype === "string"
+      && terminal.subtype.length > 0) return { code: outcome.code, subtype: terminal.subtype };
+  }
+  return null;
 }
 
 function validRepairs(value) {
@@ -123,6 +151,7 @@ function projectGateFailureDiagnostic({ attemptRoot, stageId, gateSummary }) {
     "model_calls", "repairs",
   ];
   const methods = runtime?.methods_result;
+  const provider = providerFailure(gateReceipt.model_invocations);
   const diagnostic = {
     schema_version: FAILURE_DIAGNOSTIC_SCHEMA_VERSION,
     certification_target: adapter?.certification_target,
@@ -131,6 +160,8 @@ function projectGateFailureDiagnostic({ attemptRoot, stageId, gateSummary }) {
     reason: adapter?.reason,
     diagnostic_id: adapter?.diagnostic_id,
     evaluation_ref: adapter?.evaluation_ref,
+    provider_code: provider?.code ?? null,
+    provider_subtype: provider?.subtype ?? null,
   };
   if (!exactKeys(adapter, expectedAdapterKeys)
     || adapter.schema_version !== 1
