@@ -99,7 +99,7 @@ test("each role receives one primary and at most one repair with a four-call tot
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
-test("role workspace contains Graph and Plan but no raw logs and accepts one exact Write", () => {
+test("role workspace accepts Write then Read of its own draft and rejects other output reads", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "deepseek-role-workspace-"));
   try {
     workspace(root);
@@ -112,9 +112,20 @@ test("role workspace contains Graph and Plan but no raw logs and accepts one exa
       processResult: { records: [
         { name: "Read", is_error: false, input: { file_path: path.join(root, "inputs", "method-evaluation-plan.json") } },
         { name: "Write", is_error: false, input: { file_path: output, content } },
+        { name: "Read", is_error: false, input: { file_path: output } },
       ] },
     });
     assert.equal(receipt.harness_normalized, false);
+    assert.equal(receipt.reads, 2);
+    assert.throws(() => auditRoleWorkspace({
+      workspaceRoot: root,
+      roleSpec: { role: "SPECIALIST", attempt: "PRIMARY", output: "output/method-diagnosis.draft.json" },
+      processResult: { records: [
+        { name: "Read", is_error: false, input: { file_path: path.join(root, "inputs", "method-evaluation-plan.json") } },
+        { name: "Write", is_error: false, input: { file_path: output, content } },
+        { name: "Read", is_error: false, input: { file_path: path.join(root, "output", "method-review.draft.json") } },
+      ] },
+    }), (error) => error.code === "CLAUDE_DEEPSEEK_ROLE_TOOL_SCOPE_INVALID");
     fs.mkdirSync(path.join(root, "inputs", "target-logs"));
     assert.throws(() => auditRoleWorkspace({ workspaceRoot: root, roleSpec: { role: "SPECIALIST", attempt: "PRIMARY", output: "output/method-diagnosis.draft.json" }, processResult: { records: [] } }), (error) => error.code === "CLAUDE_DEEPSEEK_ROLE_INPUT_LEAK");
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
@@ -124,6 +135,11 @@ test("tool policy exposes Read/Write only and binds one role draft", () => {
   const root = path.resolve("role-workspace");
   const policy = roleToolPolicy({ workspaceRoot: root, output: "output/method-review.draft.json" });
   assert.deepEqual(policy.tools, ["Read", "Write"]);
+  assert.equal(policy.allowed_tools.length, 3);
+  assert.match(policy.allowed_tools[0], /^Read\(.+\/inputs\/\*\*\)$/u);
+  assert.match(policy.allowed_tools[1], /^Read\(.+\/output\/method-review\.draft\.json\)$/u);
+  assert.match(policy.allowed_tools[2], /^Write\(.+\/output\/method-review\.draft\.json\)$/u);
+  assert.equal(policy.readable_scope, "job-workspace-inputs-and-role-draft");
   assert.equal(policy.shell, false);
   assert.equal(policy.network, false);
   assert.equal(policy.writable_scope, "output/method-review.draft.json");
@@ -207,6 +223,9 @@ test("Specialist and Reviewer each own a two-dollar pool and repairs consume onl
             records: [
               { name: "Read", is_error: false, input: { file_path: path.join(work, "inputs", "method-evaluation-plan.json") } },
               { name: "Write", is_error: false, input: { file_path: output, content } },
+              ...(role === "REVIEWER"
+                ? [{ name: "Read", is_error: false, input: { file_path: output } }]
+                : []),
             ],
             skills: [], bash: [], mcp: [], denied: [], events: [{ type: "result", result: "done" }],
           };

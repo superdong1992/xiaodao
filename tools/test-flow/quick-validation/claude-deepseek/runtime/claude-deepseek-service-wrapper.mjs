@@ -210,8 +210,8 @@ export function roleToolPolicy({ workspaceRoot, output }) {
   const policy = {
     schema_version: 1,
     tools: ["Read", "Write"],
-    allowed_tools: [`Read(${inputs}/**)`, `Edit(${outputFile})`],
-    readable_scope: "job-workspace-inputs",
+    allowed_tools: [`Read(${inputs}/**)`, `Read(${outputFile})`, `Write(${outputFile})`],
+    readable_scope: "job-workspace-inputs-and-role-draft",
     writable_scope: output,
     network: false,
     shell: false,
@@ -251,7 +251,7 @@ export function auditRoleWorkspace({ workspaceRoot, roleSpec, processResult }) {
   for (const record of processResult.records) {
     requireWrapper(record?.is_error !== true, "CLAUDE_DEEPSEEK_ROLE_TOOL_FAILED", "Evidence V2 role file tool failed or was denied");
     const target = resolveToolPath(workspaceRoot, record?.input?.file_path);
-    if (record.name === "Read" && inside(inputs, target)) reads += 1;
+    if (record.name === "Read" && (inside(inputs, target) || target === expectedOutput)) reads += 1;
     else if (record.name === "Write" && inside(outputRoot, target) && target === expectedOutput && typeof record.input?.content === "string") writes.push(record);
     else fail("CLAUDE_DEEPSEEK_ROLE_TOOL_SCOPE_INVALID", "Evidence V2 role used a tool or path outside its frozen Read/Write policy");
   }

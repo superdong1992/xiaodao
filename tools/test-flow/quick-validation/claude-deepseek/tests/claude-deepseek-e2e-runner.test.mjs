@@ -45,7 +45,7 @@ function invocation(role, attempt, ordinal) {
     wall_timeout_seconds: 600,
     prompt: { sha256: String(ordinal).repeat(64), utf8_size: 100 + ordinal },
     usage: usage(),
-    tool_policy: { tools: ["Read", "Write"], readable_scope: "job-workspace-inputs", writable_scope: role === "SPECIALIST" ? "output/method-diagnosis.draft.json" : "output/method-review.draft.json", network: false, shell: false, skill_loading: false },
+    tool_policy: { tools: ["Read", "Write"], readable_scope: "job-workspace-inputs-and-role-draft", writable_scope: role === "SPECIALIST" ? "output/method-diagnosis.draft.json" : "output/method-review.draft.json", network: false, shell: false, skill_loading: false },
     workspace_audit: { status: "PASS", harness_normalized: false },
   };
 }

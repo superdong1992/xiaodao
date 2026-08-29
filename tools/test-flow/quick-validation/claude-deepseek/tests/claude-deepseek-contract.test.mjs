@@ -242,8 +242,8 @@ test("Evidence V2 model cert allows only S primary/repair then blind R primary/r
     const policy = {
       schema_version: 1,
       tools: ["Read", "Write"],
-      allowed_tools: ["Read(//workspace/inputs/**)", `Edit(//workspace/${output})`],
-      readable_scope: "job-workspace-inputs",
+      allowed_tools: ["Read(//workspace/inputs/**)", `Read(//workspace/${output})`, `Write(//workspace/${output})`],
+      readable_scope: "job-workspace-inputs-and-role-draft",
       writable_scope: output,
       network: false,
       shell: false,
