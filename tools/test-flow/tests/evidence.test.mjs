@@ -3,9 +3,8 @@ import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { Readable, Writable } from "node:stream";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { providerRunnerFailureResult } from "../lib/actions.mjs";
 import {
@@ -23,12 +22,10 @@ import {
   materializeProviderTerminalFailure as materializeP1TerminalFailure,
   safeE2EError as safeP1Error,
 } from "../quick-validation/claude-deepseek/runtime/claude-deepseek-e2e-runner.mjs";
-import * as P1ServiceWrapper from "../quick-validation/claude-deepseek/runtime/claude-deepseek-service-wrapper.mjs";
 import {
   materializeProviderTerminalFailure as materializeP2TerminalFailure,
   safeE2EError as safeP2Error,
 } from "../quick-validation/codex-luna/runtime/macos-codex-luna-e2e-runner.mjs";
-import { runModelRoleInvocation as runP2ModelRoleInvocation } from "../quick-validation/codex-luna/runtime/macos-codex-luna-model-cert-wrapper.mjs";
 
 const TOOL_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const REPO_ROOT = path.resolve(TOOL_ROOT, "..", "..");
@@ -51,19 +48,28 @@ function python312Executable(candidate) {
     : null;
 }
 
-function productionDriverPython() {
-  if (process.env.TEST_FLOW_PYTHON) return python312Executable(process.env.TEST_FLOW_PYTHON);
-  if (process.platform !== "win32") return null;
-  return python312Executable(path.join(
-    os.homedir(), ".cache", "codex-runtimes", "codex-primary-runtime",
-    "dependencies", "python", "python.exe",
-  ));
+function productionDriverCandidate(environment = process.env, platform = process.platform, exists = fs.existsSync) {
+  if (environment.TEST_FLOW_PYTHON) return environment.TEST_FLOW_PYTHON;
+  if (environment.TEST_FLOW_QUICK_PYTHON) return environment.TEST_FLOW_QUICK_PYTHON;
+  if (platform === "linux") {
+    const sealed = "/opt/venvs/xiaodao/bin/python";
+    return exists(sealed) ? sealed : null;
+  }
+  if (platform === "win32") {
+    const bundled = path.join(
+      os.homedir(), ".cache", "codex-runtimes", "codex-primary-runtime",
+      "dependencies", "python", "python.exe",
+    );
+    return exists(bundled) ? bundled : null;
+  }
+  return null;
 }
 
-const PRODUCTION_DRIVER_PYTHON = productionDriverPython();
+const PRODUCTION_DRIVER_PYTHON = python312Executable(productionDriverCandidate());
 const PRODUCTION_DRIVER_SKIP = PRODUCTION_DRIVER_PYTHON === null
-  && process.platform !== "win32"
-  && !process.env.TEST_FLOW_PYTHON;
+  && process.platform === "darwin"
+  && !process.env.TEST_FLOW_PYTHON
+  && !process.env.TEST_FLOW_QUICK_PYTHON;
 
 function closeMinimalStream(attemptRoot, runId) {
   const writer = new EventWriter({ attemptRoot, runId, producerId: "orchestrator", producerType: "orchestrator" });
@@ -172,18 +178,6 @@ function providerPlanStage(provider) {
   };
 }
 
-function providerPrompt() {
-  return [
-    "frozen context",
-    "<<<METHODS_EVIDENCE_V2_ROLE>>>",
-    "Role: Specialist. Attempt: primary evaluation.",
-    "Write one JSON root array whose items contain only evaluation_ref, verdict, and reason.",
-    "Write only output/method-diagnosis.draft.json.",
-    "<<<END METHODS_EVIDENCE_V2_ROLE>>>",
-    "",
-  ].join("\n");
-}
-
 function writeReleaseRegistrationInput(root) {
   const registrationSource = path.join(RELEASE_CASE_ROOT, "registration", "rpc-timeout-methods-v1", "registration-template.json");
   const wiki = fs.readFileSync(path.join(RELEASE_CASE_ROOT, "input", "wiki.md"), "utf8");
@@ -247,23 +241,127 @@ function writeReleaseRegistrationInput(root) {
   fs.writeFileSync(path.join(references, "shared-boundaries.md"), "RPC 超时不等于取消。\n");
 }
 
-function runProductionFailureRuntime({ gateRoot }) {
+function writeProviderServiceFixture({ fixtureRoot, provider, runId, posthocBudgetFailure }) {
+  const evidenceRoot = path.join(fixtureRoot, "evidence");
+  const usageRoot = path.join(fixtureRoot, "usage");
+  const privateRoot = path.join(fixtureRoot, "private");
+  const helperPath = path.join(fixtureRoot, "provider-service.mjs");
+  const configPath = path.join(fixtureRoot, "provider-config.json");
+  fs.mkdirSync(evidenceRoot, { recursive: true });
+  fs.mkdirSync(usageRoot, { recursive: true });
+  fs.mkdirSync(privateRoot, { recursive: true });
+  let values;
+  let wrapperPath;
+  let helper;
+  if (provider === "claude-deepseek") {
+    wrapperPath = path.join(TOOL_ROOT, "quick-validation", "claude-deepseek", "runtime", "claude-deepseek-service-wrapper.mjs");
+    values = {
+      "claude-entry": path.join(fixtureRoot, "fake-claude-entry"),
+      settings: path.join(fixtureRoot, "claude-settings.json"),
+      "config-root": path.join(fixtureRoot, "claude-config"),
+      "private-root": privateRoot,
+      "evidence-root": evidenceRoot,
+      "usage-root": usageRoot,
+      "run-id": runId,
+    };
+    fs.mkdirSync(values["config-root"], { recursive: true });
+    fs.writeFileSync(values["claude-entry"], "fixture\n");
+    fs.writeFileSync(values.settings, "{}\n");
+    helper = [
+      `import * as wrapper from ${JSON.stringify(pathToFileURL(wrapperPath).href)};`,
+      "import fs from 'node:fs';",
+      "const config=JSON.parse(fs.readFileSync(process.argv[2],'utf8'));",
+      "const values=config.values;",
+      "const rawError=new Error('raw DeepSeek provider budget terminal');",
+      "rawError.code='CLAUDE_DEEPSEEK_MAX_BUDGET_EXCEEDED';",
+      "rawError.details={exit_code:1,signal:null,terminal:{subtype:'error_max_budget_usd',is_error:true,stop_reason:'tool_use',turns:1,usage:{schema_version:1,input_tokens:23302,output_tokens:37245,cache_creation_input_tokens:0,cache_read_input_tokens:0,total_tokens:60547,cost_usd:1.047635}}};",
+      "const posthoc=config.posthocBudgetFailure&&typeof wrapper.roleInvocationBudget==='function';",
+      "const runClaude=posthoc?async()=>({receipt:{model:'deepseek-v4-flash[1m]',started_at_utc:'2026-08-29T00:00:00.000Z',finished_at_utc:'2026-08-29T00:00:01.000Z',turns:1,provider_terminal:{subtype:'success',is_error:false,stop_reason:'end_turn',exit_code:0,signal:null},usage:{schema_version:1,input_tokens:150,output_tokens:50,cache_creation_input_tokens:0,cache_read_input_tokens:0,total_tokens:200,cost_usd:2.000001},environment_policy:null}}):async()=>{throw rawError;};",
+      "try{await wrapper.runServiceInvocation(values,{runClaude});process.exitCode=0;}catch(error){process.stderr.write(JSON.stringify({code:error?.code??'PROVIDER_FIXTURE_FAILED'})+'\\n');process.exitCode=1;}",
+      "",
+    ].join("\n");
+  } else {
+    wrapperPath = path.join(TOOL_ROOT, "quick-validation", "codex-luna", "runtime", "macos-codex-luna-model-cert-wrapper.mjs");
+    values = {
+      "codex-entry": path.join(fixtureRoot, "fake-codex"),
+      "auth-source": path.join(fixtureRoot, "codex-auth.json"),
+      "skill-source": path.join(fixtureRoot, "codex-evaluator-SKILL.md"),
+      "expected-cli-version": "0.149.0-alpha.4.1",
+      "private-root": privateRoot,
+      "evidence-root": evidenceRoot,
+      "usage-root": usageRoot,
+      "run-id": runId,
+    };
+    fs.writeFileSync(values["codex-entry"], "fixture\n");
+    fs.writeFileSync(values["skill-source"], "---\nname: codex-luna-evidence-v2-evaluator\ndescription: fixture\n---\n");
+    fs.writeFileSync(values["auth-source"], `${JSON.stringify({
+      auth_mode: "chatgpt",
+      OPENAI_API_KEY: null,
+      tokens: {
+        access_token: "fixture-access-token",
+        refresh_token: "fixture-refresh-token",
+        id_token: "fixture-id-token",
+        account_id: "fixture-account-id",
+      },
+    })}\n`);
+    helper = [
+      `import * as wrapper from ${JSON.stringify(pathToFileURL(wrapperPath).href)};`,
+      "import fs from 'node:fs';",
+      "const config=JSON.parse(fs.readFileSync(process.argv[2],'utf8'));",
+      "const rawError=new Error('raw Codex provider terminal');",
+      "rawError.code='CODEX_LUNA_APP_SERVER_ERROR_NOTIFICATION';",
+      "rawError.details={usage:{input_tokens:12,cached_input_tokens:2,cache_write_input_tokens:0,output_tokens:4,reasoning_output_tokens:1,total_tokens:16},thread_id:'thread-failed',turn_id:'turn-failed'};",
+      "try{await wrapper.runModelRoleInvocation(config.values,{ambient:{},runAppServerCall:async()=>{throw rawError;}});process.exitCode=0;}catch(error){process.stderr.write(JSON.stringify({code:error?.code??'PROVIDER_FIXTURE_FAILED'})+'\\n');process.exitCode=1;}",
+      "",
+    ].join("\n");
+  }
+  fs.writeFileSync(helperPath, helper);
+  fs.writeFileSync(configPath, canonicalJson({ values, posthocBudgetFailure }));
+  const commandPath = path.join(fixtureRoot, "provider-command.json");
+  fs.writeFileSync(commandPath, canonicalJson([process.execPath, helperPath, configPath]));
+  return { evidenceRoot, usageRoot, commandPath };
+}
+
+function runProductionFailureRuntime({ attemptRoot, gateRoot, usageRoot, provider, posthocBudgetFailure }) {
   assert.notEqual(PRODUCTION_DRIVER_PYTHON, null, "Python 3.12 is required for the production failure fixture");
   const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ev2-runtime-"));
-  const runtimeEvidenceRoot = path.join(fixtureRoot, "evidence");
-  const receiptPath = path.join(runtimeEvidenceRoot, "runtime-receipt.json");
+  const receiptPath = path.join(fixtureRoot, "evidence", "runtime-receipt.json");
   const registrationRoot = path.join(fixtureRoot, "registration");
   writeReleaseRegistrationInput(registrationRoot);
+  const service = writeProviderServiceFixture({
+    fixtureRoot,
+    provider,
+    runId: path.basename(attemptRoot),
+    posthocBudgetFailure,
+  });
   const bootstrap = [
-    "import runpy,sys,types",
+    "import json,os,runpy,subprocess,sys,traceback,types",
     "from pathlib import Path",
     "mark=types.SimpleNamespace(parametrize=lambda *a,**k:(lambda f:f))",
     "sys.modules['pytest']=types.SimpleNamespace(fixture=lambda f:f,mark=mark)",
     "module=runpy.run_path(sys.argv[1])",
-    "backend=module['FakeModelRoleBackend'](model_failure_roles=frozenset(('SPECIALIST',)))",
+    "command=json.loads(Path(sys.argv[7]).read_text(encoding='utf-8'))",
+    "class ServiceSubprocessBackend:",
+    "    def execute(self,**kwargs):",
+    "        try:",
+    "            return self._execute(**kwargs)",
+    "        except BaseException:",
+    "            Path(sys.argv[8]).write_text(traceback.format_exc(),encoding='utf-8')",
+    "            raise",
+    "    def _execute(self,**kwargs):",
+    "        result=subprocess.run(command,input=str(kwargs['prompt']).encode('utf-8'),cwd=os.fspath(kwargs['workspace_root']),env=dict(os.environ),stdout=subprocess.PIPE,stderr=subprocess.PIPE,check=False)",
+    "        if result.stdout:",
+    "            kwargs['log_sinks'].stdout.write(result.stdout)",
+    "        if result.stderr:",
+    "            kwargs['log_sinks'].stderr.write(result.stderr)",
+    "        module['_close_sinks'](kwargs['log_sinks'])",
+    "        if result.returncode!=0:",
+    "            raise module['runtime_failure'](stage=module['ExecutionStage'].BACKEND_EXECUTE,code=module['ErrorCode'].BACKEND_EXIT_FAILED,message='provider service fixture failed')",
+    "        return module['BackendExecution'](returncode=0,stdout_stderr_bytes=len(result.stdout)+len(result.stderr),workspace_bytes=0,elapsed_seconds=0.01)",
+    "backend=ServiceSubprocessBackend()",
     "receipt=module['run_production_model_cert'](work_root=Path(sys.argv[4]),role_backend=backend,source_root=Path(sys.argv[2]),registration_root=Path(sys.argv[3]),evidence_root=Path(sys.argv[5]),execution_mode='real-model')",
     "Path(sys.argv[6]).write_bytes(module['canonical_json_bytes'](receipt))",
-  ].join(";");
+  ].join("\n");
   try {
     const result = spawnSync(PRODUCTION_DRIVER_PYTHON.command, [
       ...PRODUCTION_DRIVER_PYTHON.interpreterPrefix,
@@ -272,179 +370,29 @@ function runProductionFailureRuntime({ gateRoot }) {
       REPO_ROOT,
       registrationRoot,
       path.join(fixtureRoot, "work"),
-      runtimeEvidenceRoot,
+      service.evidenceRoot,
       receiptPath,
+      service.commandPath,
+      path.join(fixtureRoot, "backend-error.txt"),
     ], { cwd: REPO_ROOT, env: process.env, encoding: "utf8", timeout: 120_000 });
     assert.equal(result.status, 0, result.stderr);
     const receipt = JSON.parse(fs.readFileSync(receiptPath, "utf8"));
-    for (const name of fs.readdirSync(runtimeEvidenceRoot)) {
-      const source = path.join(runtimeEvidenceRoot, name);
+    if (receipt.methods_result?.reason_code === "SERVER_INVARIANT_VIOLATION") {
+      const debugPath = path.join(fixtureRoot, "backend-error.txt");
+      assert.fail(fs.existsSync(debugPath) ? fs.readFileSync(debugPath, "utf8") : "provider backend violated a server invariant without an exception trace");
+    }
+    for (const name of fs.readdirSync(service.evidenceRoot)) {
+      const source = path.join(service.evidenceRoot, name);
       if (fs.statSync(source).isFile()) fs.copyFileSync(source, path.join(gateRoot, name));
+    }
+    for (const name of fs.readdirSync(service.usageRoot)) {
+      const source = path.join(service.usageRoot, name);
+      if (fs.statSync(source).isFile()) fs.copyFileSync(source, path.join(usageRoot, name));
     }
     return receipt;
   } finally {
     fs.rmSync(fixtureRoot, { recursive: true, force: true });
   }
-}
-
-async function writeP1RoleFailure({ attemptRoot, gateRoot, usageRoot, testRoot, posthocBudgetFailure = false }) {
-  const workspace = path.join(testRoot, "deepseek-provider-workspace");
-  const values = {
-    "claude-entry": path.join(testRoot, "fake-claude-entry"),
-    settings: path.join(testRoot, "claude-settings.json"),
-    "config-root": path.join(testRoot, "claude-config"),
-    "private-root": path.join(testRoot, "claude-private"),
-    "evidence-root": gateRoot,
-    "usage-root": usageRoot,
-    "run-id": path.basename(attemptRoot),
-  };
-  fs.mkdirSync(workspace, { recursive: true });
-  fs.mkdirSync(values["config-root"], { recursive: true });
-  fs.mkdirSync(values["private-root"], { recursive: true });
-  fs.writeFileSync(values["claude-entry"], "fixture\n");
-  fs.writeFileSync(values.settings, "{}\n");
-  const error = new Error("raw DeepSeek provider budget terminal");
-  error.code = "CLAUDE_DEEPSEEK_MAX_BUDGET_EXCEEDED";
-  error.details = {
-    exit_code: 1,
-    signal: null,
-    terminal: {
-      subtype: "error_max_budget_usd",
-      is_error: true,
-      stop_reason: "tool_use",
-      turns: 1,
-      usage: {
-        schema_version: 1,
-        input_tokens: 23_302,
-        output_tokens: 37_245,
-        cache_creation_input_tokens: 0,
-        cache_read_input_tokens: 0,
-        total_tokens: 60_547,
-        cost_usd: 1.047635,
-      },
-    },
-  };
-  const previous = process.cwd();
-  try {
-    process.chdir(workspace);
-    const supportsPosthocBudget = typeof P1ServiceWrapper.roleInvocationBudget === "function";
-    if (posthocBudgetFailure && supportsPosthocBudget) {
-      await assert.rejects(P1ServiceWrapper.runServiceInvocation(values, {
-        stdin: Readable.from([providerPrompt()]),
-        stdout: new Writable({ write(_chunk, _encoding, callback) { callback(); } }),
-        runClaude: async () => ({
-          receipt: {
-            model: "deepseek-v4-flash[1m]",
-            started_at_utc: "2026-08-29T00:00:00.000Z",
-            finished_at_utc: "2026-08-29T00:00:01.000Z",
-            turns: 1,
-            provider_terminal: { subtype: "success", is_error: false, stop_reason: "end_turn", exit_code: 0, signal: null },
-            usage: {
-              schema_version: 1,
-              input_tokens: 150,
-              output_tokens: 50,
-              cache_creation_input_tokens: 0,
-              cache_read_input_tokens: 0,
-              total_tokens: 200,
-              cost_usd: 2.000001,
-            },
-            environment_policy: null,
-          },
-        }),
-      }), { code: "CLAUDE_DEEPSEEK_CALL_BUDGET_EXCEEDED" });
-    } else {
-      await assert.rejects(P1ServiceWrapper.runServiceInvocation(values, {
-        stdin: Readable.from([providerPrompt()]),
-        stdout: new Writable({ write(_chunk, _encoding, callback) { callback(); } }),
-        runClaude: async () => { throw error; },
-      }), { code: error.code });
-    }
-  } finally {
-    process.chdir(previous);
-  }
-}
-
-async function writeP2RoleFailure({ attemptRoot, gateRoot, usageRoot, testRoot }) {
-  const workspace = path.join(testRoot, "codex-provider-workspace");
-  const inputs = path.join(workspace, "inputs");
-  const values = {
-    "codex-entry": path.join(testRoot, "fake-codex"),
-    "auth-source": path.join(testRoot, "codex-auth.json"),
-    "skill-source": path.join(testRoot, "codex-evaluator-SKILL.md"),
-    "expected-cli-version": "0.149.0-alpha.4.1",
-    "private-root": path.join(testRoot, "codex-private"),
-    "evidence-root": gateRoot,
-    "usage-root": usageRoot,
-    "run-id": path.basename(attemptRoot),
-  };
-  fs.mkdirSync(inputs, { recursive: true });
-  fs.mkdirSync(values["private-root"], { recursive: true });
-  for (const name of ["request.json", "method-evidence-graph.json", "method-evaluation-plan.json"]) {
-    fs.writeFileSync(path.join(inputs, name), "{}\n");
-  }
-  fs.writeFileSync(values["codex-entry"], "fixture\n");
-  fs.writeFileSync(values["skill-source"], "---\nname: codex-luna-evidence-v2-evaluator\ndescription: fixture\n---\n");
-  fs.writeFileSync(values["auth-source"], `${JSON.stringify({
-    auth_mode: "chatgpt",
-    OPENAI_API_KEY: null,
-    tokens: {
-      access_token: "fixture-access-token",
-      refresh_token: "fixture-refresh-token",
-      id_token: "fixture-id-token",
-      account_id: "fixture-account-id",
-    },
-  })}\n`);
-  const error = new Error("raw Codex provider terminal");
-  error.code = "CODEX_LUNA_APP_SERVER_ERROR_NOTIFICATION";
-  error.details = {
-    usage: {
-      input_tokens: 12,
-      cached_input_tokens: 2,
-      cache_write_input_tokens: 0,
-      output_tokens: 4,
-      reasoning_output_tokens: 1,
-      total_tokens: 16,
-    },
-    thread_id: "thread-failed",
-    turn_id: "turn-failed",
-  };
-  const previous = process.cwd();
-  try {
-    process.chdir(workspace);
-    await assert.rejects(runP2ModelRoleInvocation(values, {
-      stdin: Readable.from([providerPrompt()]),
-      stdout: new Writable({ write(_chunk, _encoding, callback) { callback(); } }),
-      ambient: {},
-      runAppServerCall: async () => { throw error; },
-    }), { code: error.code });
-  } finally {
-    process.chdir(previous);
-  }
-}
-
-function closeP1FixtureInvocation(invocation, { posthocBudgetFailure = false } = {}) {
-  assert.equal(invocation?.schema_version, 3, "P1 production failure must expose one projected invocation");
-  if (posthocBudgetFailure) {
-    if (Object.keys(invocation.terminal ?? {}).sort().join(",") === "exit_code,is_error,signal,stop_reason,subtype"
-      && invocation.terminal.is_error === false
-      && invocation.wrapper_outcome?.status === "FAIL") return invocation;
-    return {
-      ...invocation,
-      terminal: { subtype: "success", is_error: false, stop_reason: "end_turn", exit_code: 0, signal: null },
-      wrapper_outcome: { schema_version: 1, status: "FAIL", code: "CALL_BUDGET_EXCEEDED" },
-    };
-  }
-  if (Object.keys(invocation.terminal ?? {}).sort().join(",") === "exit_code,is_error,signal,stop_reason,subtype") return invocation;
-  return {
-    ...invocation,
-    terminal: {
-      subtype: invocation.terminal?.subtype === "error" ? "error_max_budget_usd" : invocation.terminal?.subtype,
-      is_error: invocation.terminal?.is_error === true,
-      stop_reason: "tool_use",
-      exit_code: 1,
-      signal: null,
-    },
-  };
 }
 
 async function writeEvidenceV2FailureStage(attemptRoot, {
@@ -456,23 +404,20 @@ async function writeEvidenceV2FailureStage(attemptRoot, {
   const provider = certificationTarget === "P1" ? "claude-deepseek" : "codex-luna";
   const stageId = certificationTarget === "P1" ? "real.macos-claude-deepseek-e2e" : "real.macos-codex-luna-e2e";
   const gateId = stageId;
-  const testRoot = path.join(attemptRoot, "fixture-inputs", certificationTarget.toLowerCase());
   const gateRoot = path.join(attemptRoot, "payload", "stages", stageId, "gates", gateId);
   const usageRoot = path.join(attemptRoot, "payload", "model-usage", `${provider}-e2e`);
   fs.mkdirSync(gateRoot, { recursive: true });
   fs.mkdirSync(usageRoot, { recursive: true });
-  const runtime = runProductionFailureRuntime({ gateRoot });
-  const materialize = certificationTarget === "P1" ? materializeP1TerminalFailure : materializeP2TerminalFailure;
-  const safeError = certificationTarget === "P1" ? safeP1Error : safeP2Error;
-  materialize(runtime, gateRoot, { modelCalls: runtime.model_invocations, repairs: runtime.repair_counts });
-  if (certificationTarget === "P1") await writeP1RoleFailure({
+  const runtime = runProductionFailureRuntime({
     attemptRoot,
     gateRoot,
     usageRoot,
-    testRoot,
+    provider,
     posthocBudgetFailure: p1PosthocBudgetFailure,
   });
-  else await writeP2RoleFailure({ attemptRoot, gateRoot, usageRoot, testRoot });
+  const materialize = certificationTarget === "P1" ? materializeP1TerminalFailure : materializeP2TerminalFailure;
+  const safeError = certificationTarget === "P1" ? safeP1Error : safeP2Error;
+  materialize(runtime, gateRoot, { modelCalls: runtime.model_invocations, repairs: runtime.repair_counts });
 
   const logRoot = path.join(attemptRoot, "payload", "logs");
   fs.mkdirSync(logRoot, { recursive: true });
@@ -500,16 +445,6 @@ async function writeEvidenceV2FailureStage(attemptRoot, {
     invocationClass: provider === "claude-deepseek" ? "claude-deepseek-macos-e2e" : "codex-luna-macos-e2e",
     fallbackCode: provider === "claude-deepseek" ? "CLAUDE_DEEPSEEK_RUNNER_FAILED" : "MACOS_CODEX_LUNA_RUNNER_FAILED",
   });
-  if (certificationTarget === "P1") {
-    actionResult = {
-      ...actionResult,
-      invocations: actionResult.invocations.map((invocation, index) => (
-        index === actionResult.invocations.length - 1
-          ? closeP1FixtureInvocation(invocation, { posthocBudgetFailure: p1PosthocBudgetFailure })
-          : invocation
-      )),
-    };
-  }
   if (dropProviderInvocations) actionResult = { ...actionResult, invocations: [] };
   const stage = { id: stageId, kind: "capability" };
   const gatePlan = {
@@ -732,6 +667,23 @@ async function createFinalized(evidenceRoot, runId, {
   return { attemptRoot, verdict, stage };
 }
 
+function assertProviderRuntimeCausality({ attemptRoot, provider, runtimeReceipt, gateReceipt }) {
+  const roleReceipt = JSON.parse(fs.readFileSync(path.join(
+    attemptRoot,
+    "payload", "model-usage", `${provider}-e2e`, "specialist-primary.json",
+  ), "utf8"));
+  assert.equal(runtimeReceipt.model_invocations, 1);
+  assert.equal(runtimeReceipt.role_attempts.length, 1);
+  assert.equal(gateReceipt.model_invocations.length, 1);
+  assert.equal(roleReceipt.role, runtimeReceipt.role_attempts[0].role);
+  assert.equal(roleReceipt.evaluation_attempt ?? roleReceipt.attempt, runtimeReceipt.role_attempts[0].attempt);
+  assert.equal(roleReceipt.workflow, gateReceipt.model_invocations[0].workflow);
+  assert.equal(roleReceipt.prompt.sha256, runtimeReceipt.role_attempts[0].prompt.sha256);
+  assert.equal(roleReceipt.prompt.size ?? roleReceipt.prompt.utf8_size, runtimeReceipt.role_attempts[0].prompt.size);
+  assert.equal(roleReceipt.invocation_id, gateReceipt.model_invocations[0].invocation_id);
+  return roleReceipt;
+}
+
 test("a fully sealed v2 candidate verifies and binds plan, Proof, Stage and Gate receipts", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "test-flow-evidence-valid-"));
   try {
@@ -758,6 +710,15 @@ test("cleanup failure commits overall ERROR and cannot remain reusable", async (
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
+test("production driver discovery does not skip Release Linux without framework env injection", () => {
+  const sealed = "/opt/venvs/xiaodao/bin/python";
+  assert.equal(productionDriverCandidate({ TEST_FLOW_PYTHON: "/formal/python", TEST_FLOW_QUICK_PYTHON: "/quick/python" }, "linux", () => true), "/formal/python");
+  assert.equal(productionDriverCandidate({ TEST_FLOW_QUICK_PYTHON: "/quick/python" }, "linux", () => true), "/quick/python");
+  assert.equal(productionDriverCandidate({}, "linux", (candidate) => candidate === sealed), sealed);
+  assert.equal(productionDriverCandidate({}, "darwin", () => false), null);
+  if (process.platform === "linux") assert.equal(PRODUCTION_DRIVER_SKIP, false);
+});
+
 test("a verified Evidence V2 terminal failure is directly visible in the authoritative verdict", { skip: PRODUCTION_DRIVER_SKIP }, async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "test-flow-failure-diagnostic-"));
   try {
@@ -771,6 +732,12 @@ test("a verified Evidence V2 terminal failure is directly visible in the authori
     const gateReceipt = JSON.parse(fs.readFileSync(path.join(result.attemptRoot, result.verdict.gates[0].receipt_path), "utf8"));
     const runtimeReceipt = JSON.parse(fs.readFileSync(path.join(path.dirname(path.join(result.attemptRoot, result.verdict.gates[0].receipt_path)), "runtime-receipt.json"), "utf8"));
     const providerFailure = gateReceipt.model_invocations.at(-1);
+    assertProviderRuntimeCausality({
+      attemptRoot: result.attemptRoot,
+      provider: "claude-deepseek",
+      runtimeReceipt,
+      gateReceipt,
+    });
     assert.equal(runtimeReceipt.execution_mode, "real-model");
     assert.equal(gateReceipt.model_invocations.length, runtimeReceipt.model_invocations);
     assert.equal(gateReceipt.model_invocations.length, gateReceipt.assertions.adapter.model_calls);
@@ -821,7 +788,14 @@ test("a closed provider success remains visible when the wrapper rejects post-ho
       p1PosthocBudgetFailure: true,
     });
     const gateReceipt = JSON.parse(fs.readFileSync(path.join(result.attemptRoot, result.verdict.gates[0].receipt_path), "utf8"));
+    const runtimeReceipt = JSON.parse(fs.readFileSync(path.join(path.dirname(path.join(result.attemptRoot, result.verdict.gates[0].receipt_path)), "runtime-receipt.json"), "utf8"));
     const invocation = gateReceipt.model_invocations.at(-1);
+    assertProviderRuntimeCausality({
+      attemptRoot: result.attemptRoot,
+      provider: "claude-deepseek",
+      runtimeReceipt,
+      gateReceipt,
+    });
     assert.deepEqual(invocation.terminal, {
       subtype: "success",
       is_error: false,
@@ -853,6 +827,12 @@ test("a verified P2 terminal failure projects the same public diagnostic contrac
     const gateReceipt = JSON.parse(fs.readFileSync(path.join(result.attemptRoot, result.verdict.gates[0].receipt_path), "utf8"));
     const runtimeReceipt = JSON.parse(fs.readFileSync(path.join(path.dirname(path.join(result.attemptRoot, result.verdict.gates[0].receipt_path)), "runtime-receipt.json"), "utf8"));
     const providerFailure = gateReceipt.model_invocations.at(-1);
+    assertProviderRuntimeCausality({
+      attemptRoot: result.attemptRoot,
+      provider: "codex-luna",
+      runtimeReceipt,
+      gateReceipt,
+    });
     assert.equal(gateReceipt.model_invocations.length, 1);
     assert.equal(gateReceipt.model_invocations.length, runtimeReceipt.model_invocations);
     assert.equal(gateReceipt.model_invocations.length, gateReceipt.assertions.adapter.model_calls);
