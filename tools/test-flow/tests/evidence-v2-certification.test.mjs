@@ -171,7 +171,11 @@ function pythonRuntime() {
   return { command: bundled, prefix: [] };
 }
 
-function writeReleaseRegistration(root, sourceRoot = REPO_ROOT) {
+function writeReleaseRegistration(
+  root,
+  sourceRoot = REPO_ROOT,
+  { includeCompleteTemplates = true } = {},
+) {
   const caseRoot = path.join(sourceRoot, RELEASE_CASE_RELATIVE);
   const registrationPath = path.join(caseRoot, "registration", "rpc-timeout-methods-v1", "registration-template.json");
   const wiki = fs.readFileSync(path.join(caseRoot, "input", "wiki.md"), "utf8");
@@ -204,16 +208,26 @@ function writeReleaseRegistration(root, sourceRoot = REPO_ROOT) {
     if (line === "```" && inTextFence) { inTextFence = false; continue; }
     if (inTextFence && line) templates.push(line);
   }
-  const templateForMarker = (marker) => {
-    const matches = templates.filter((template) => template.includes(marker));
-    assert.equal(matches.length, 1, `expected one Wiki template for ${marker}`);
-    return matches[0];
+  const templatesForMethod = (method) => {
+    const matchedMarkers = [];
+    const selected = templates.filter((template) => {
+      const matches = method.evidence_markers.filter((marker) => template.includes(marker));
+      assert.ok(matches.length <= 1, `expected at most one canonical marker for ${template}`);
+      if (matches.length === 0) return false;
+      matchedMarkers.push(matches[0]);
+      return true;
+    });
+    assert.deepEqual(
+      matchedMarkers,
+      method.evidence_markers,
+      `method ${method.id} markers must follow source template order`,
+    );
+    return selected;
   };
   for (const method of methods.methods) {
-    const evidenceLines = method.evidence_markers.flatMap((marker) => [
-      `- canonical marker: ${marker}`,
-      `- Wiki template: ${templateForMarker(marker)}`,
-    ]).join("\n");
+    const evidenceLines = includeCompleteTemplates
+      ? templatesForMethod(method).map((template) => `- \`${template}\``).join("\n")
+      : method.evidence_markers.map((marker) => `- canonical marker: ${marker}`).join("\n");
     const card = [
       "## 适用条件\n固定 Release 用例。",
       `## 所需证据\n${evidenceLines}`,
@@ -228,11 +242,14 @@ function writeReleaseRegistration(root, sourceRoot = REPO_ROOT) {
   fs.writeFileSync(path.join(references, "shared-boundaries.md"), "RPC 超时不等于取消。\n");
 }
 
-function executeProductionBundle(sourceRoot = REPO_ROOT) {
+function executeProductionBundleAttempt(
+  sourceRoot = REPO_ROOT,
+  { includeCompleteTemplates = true } = {},
+) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "evidence-v2-production-cert-"));
   const registrationRoot = path.join(root, "registration");
   const evidenceRoot = path.join(root, "evidence");
-  writeReleaseRegistration(registrationRoot, sourceRoot);
+  writeReleaseRegistration(registrationRoot, sourceRoot, { includeCompleteTemplates });
   const script = path.join(REPO_ROOT, "tools", "test-flow", "quick-validation", "codex-luna", "runtime", "macos_codex_luna_model_cert_driver.py");
   const receiptPath = path.join(evidenceRoot, "runtime-receipt.json");
   const bootstrap = "import runpy,sys,types; mark=types.SimpleNamespace(parametrize=lambda *a,**k:(lambda f:f)); sys.modules['pytest']=types.SimpleNamespace(fixture=lambda f:f,mark=mark); script=sys.argv[1]; sys.argv=sys.argv[1:]; runpy.run_path(script,run_name='__main__')";
@@ -247,6 +264,12 @@ function executeProductionBundle(sourceRoot = REPO_ROOT) {
     "--receipt-path", receiptPath,
     "--evidence-root", evidenceRoot,
   ], { cwd: REPO_ROOT, env: process.env, encoding: "utf8", timeout: 120_000 });
+  return { root, evidenceRoot, receiptPath, result };
+}
+
+function executeProductionBundle(sourceRoot = REPO_ROOT) {
+  const attempt = executeProductionBundleAttempt(sourceRoot);
+  const { root, evidenceRoot, receiptPath, result } = attempt;
   assert.equal(result.status, 0, result.stderr);
   return { root, evidenceRoot, runtimeReceipt: JSON.parse(fs.readFileSync(receiptPath, "utf8")) };
 }
@@ -419,6 +442,23 @@ test("production Graph mechanically proves every resolved Release method without
   assert.equal(receipt.summary.status, "PASS");
   assert.equal(receipt.summary.confirmed_method_ids.length, 3);
   assert.equal(receipt.summary.evaluation_count, 3);
+});
+
+test("production loader rejects a marker-only generated method card", () => {
+  const attempt = executeProductionBundleAttempt(REPO_ROOT, {
+    includeCompleteTemplates: false,
+  });
+  try {
+    assert.notEqual(attempt.result.status, 0);
+    const failure = JSON.parse(attempt.result.stderr.trim());
+    assert.equal(failure.code, "CODEX_LUNA_MODEL_CERT_RUNTIME_FAILED");
+    assert.equal(
+      failure.message,
+      "method 1 evidence marker has no complete source template in its required evidence section: rpc call",
+    );
+  } finally {
+    fs.rmSync(attempt.root, { recursive: true, force: true });
+  }
 });
 
 test("CrossJob action accepts the same production Graph semantic proof as provider certification", () => {
