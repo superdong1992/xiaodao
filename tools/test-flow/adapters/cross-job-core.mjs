@@ -283,7 +283,7 @@ function mapOracleMarkerGroups(groups, generatedMethods, code) {
   const selected = groups.map((group) => {
     const markers = sortedStrings(group, code);
     const candidates = generatedMethods.filter((entry) => markers.every((marker) => (
-      entry.semantic_markers.some((declared) => declared.includes(marker))
+      entry.semantic_markers.some((declared) => declared === marker)
     )));
     requireCondition(candidates.length > 0, code, "FAIL", "CONTRACT");
     const minimumMarkerCount = Math.min(...candidates.map((entry) => entry.semantic_markers.length));
@@ -348,6 +348,8 @@ function selectedReleaseCase(repoRoot, generatedSkill) {
     return { semantic_id: semantic.semantic_id, semantic_markers: semanticMarkers, method: matches[0] };
   });
   requireCondition(generatedMethods.length === methods.methods.length && new Set(generatedMethods.map((entry) => entry.method.id)).size === methods.methods.length, "GENERATED_SKILL_METHOD_SET_DRIFT", "FAIL", "CONTRACT");
+  requireCondition(scenarioOracle.oracle.expected_status === "RESOLVED", "RELEASE_CASE_EXPECTED_STATUS_INVALID", "FAIL", "CONTRACT");
+  requireCondition(scenarioOracle.oracle.required_candidate_marker_groups.length === 0, "RELEASE_CASE_CANDIDATES_PRESENT", "FAIL", "CONTRACT");
   const confirmedMethodIds = mapOracleMarkerGroups(scenarioOracle.oracle.required_confirmed_marker_groups, generatedMethods, "RELEASE_CASE_CONFIRMED_METHOD_MAPPING");
   mapOracleMarkerGroups(scenarioOracle.oracle.required_candidate_marker_groups, generatedMethods, "RELEASE_CASE_UNCONFIRMED_METHOD_MAPPING");
   const requiredEvidenceIdentities = scenarioOracle.oracle.required_evidence_identities.map((identity) => {
@@ -392,7 +394,7 @@ function selectedReleaseCase(repoRoot, generatedSkill) {
       attachment_requirement: product.attachment_requirement,
     },
     result_expectation: {
-      case_status: "RESOLVED",
+      case_status: scenarioOracle.oracle.expected_status,
       method_cards: methodCards,
       loaded_method_ids: methodCards.map((method) => method.id),
       confirmed_method_ids: orderedConfirmedMethodIds,

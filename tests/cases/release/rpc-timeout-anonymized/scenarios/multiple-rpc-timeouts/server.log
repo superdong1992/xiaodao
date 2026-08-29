@@ -1,2 +1,4 @@
+2026-08-23T10:00:05.700000+08:00 RPC Service=feasibility; Slot=1; CPU-Id=0; ProcessName=rpc_server; Context=QUEUE_HISTORY print_time_ms=12000 ordinal=first service=svc_catalog api=Refresh end_us=13000000 cost_us=3000000 queue_us=0 timeout_ms=3000)
+2026-08-23T10:00:05.800000+08:00 RPC Service=feasibility; Slot=1; CPU-Id=0; ProcessName=rpc_server; Context=QUEUE_HISTORY print_time_ms=12500 ordinal=second service=svc_orders api=Reserve end_us=15000000 cost_us=1000000 queue_us=4000000 timeout_ms=3000)
 2026-08-23T10:00:06.000000+08:00 RPC Service=feasibility; Slot=1; CPU-Id=0; ProcessName=rpc_server; Context=API_COMPLETE service=svc_orders api=Reserve start_us=10000000 end_us=16500000 cost_us=6500000)
 2026-08-23T10:00:07.000000+08:00 RPC Service=feasibility; Slot=1; CPU-Id=0; ProcessName=rpc_server; Context=API_COMPLETE service=svc_orders api=Reserve start_us=20000000 end_us=26800000 cost_us=6800000)

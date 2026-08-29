@@ -43,6 +43,7 @@ import {
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 const SOURCE_DIGEST = "a".repeat(64);
+const RELEASE_CASE_RELATIVE = path.join("tests", "cases", "release", "rpc-timeout-anonymized");
 
 function clone(value) {
   return JSON.parse(JSON.stringify(value));
@@ -163,9 +164,10 @@ function pythonRuntime() {
   return { command: bundled, prefix: [] };
 }
 
-function writeReleaseRegistration(root) {
-  const caseRoot = path.join(REPO_ROOT, "tests", "cases", "release", "rpc-timeout-anonymized");
+function writeReleaseRegistration(root, sourceRoot = REPO_ROOT) {
+  const caseRoot = path.join(sourceRoot, RELEASE_CASE_RELATIVE);
   const registration = JSON.parse(fs.readFileSync(path.join(caseRoot, "registration", "rpc-timeout-methods-v1", "registration-template.json"), "utf8"));
+  const wiki = fs.readFileSync(path.join(caseRoot, "input", "wiki.md"), "utf8");
   const packageRoot = path.join(root, "package", "diagnose-rpc-timeout");
   const references = path.join(packageRoot, "references");
   fs.mkdirSync(references, { recursive: true });
@@ -178,7 +180,7 @@ function writeReleaseRegistration(root) {
     required_user_inputs: expected.required_user_inputs,
     required_artifacts: expected.required_artifacts,
     log_derived_fields: expected.required_log_derived_fields,
-    shared_references: ["references/shared-boundaries.md"],
+    shared_references: ["references/source-log-templates.md", "references/shared-boundaries.md"],
     methods: [
       { id: "api-execution-slow", title: "API 执行时间过长", reference: "references/api-execution-slow.md", priority: 1, evidence_markers: expected.method_marker_sets[0].all_markers },
       { id: "server-queueing", title: "服务端收包排队", reference: "references/server-queueing.md", priority: 2, evidence_markers: expected.method_marker_sets[1].all_markers },
@@ -187,17 +189,43 @@ function writeReleaseRegistration(root) {
   };
   fs.writeFileSync(path.join(packageRoot, "methods.json"), `${JSON.stringify(methods, null, 2)}\n`);
   fs.writeFileSync(path.join(packageRoot, "SKILL.md"), "---\nname: diagnose-rpc-timeout\ndescription: Test-owned production Runtime fixture.\n---\n\nRead request.json, method-evidence-graph.json, and method-evaluation-plan.json. Return only evaluation_ref, verdict, and reason; UNKNOWN is allowed.\n");
-  const card = ["## 适用条件\n固定用例。", "## 所需证据\n使用方法 marker。", "## 计算与判断\n按冻结 Evidence Graph 判断。", "## 确认条件\n存在正向证据。", "## 未知边界\n证据不足时 UNKNOWN。", "## 输出含义\n输出 evaluation verdict。"].join("\n\n");
-  for (const name of ["api-execution-slow.md", "server-queueing.md", "client-receive-blocked.md"]) fs.writeFileSync(path.join(references, name), `${card}\n`);
+  const templates = [];
+  let inTextFence = false;
+  for (const rawLine of wiki.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (line === "```text") { inTextFence = true; continue; }
+    if (line === "```" && inTextFence) { inTextFence = false; continue; }
+    if (inTextFence && line) templates.push(line);
+  }
+  const templateForMarker = (marker) => {
+    const matches = templates.filter((template) => template.includes(marker));
+    assert.equal(matches.length, 1, `expected one Wiki template for ${marker}`);
+    return matches[0];
+  };
+  for (const method of methods.methods) {
+    const evidenceLines = method.evidence_markers.flatMap((marker) => [
+      `- canonical marker: ${marker}`,
+      `- Wiki template: ${templateForMarker(marker)}`,
+    ]).join("\n");
+    const card = [
+      "## 适用条件\n固定 Release 用例。",
+      `## 所需证据\n${evidenceLines}`,
+      "## 计算与判断\n按冻结 Evidence Graph 中的完整方法证据计算。",
+      "## 确认条件\n场景机械 oracle 会根据请求超时、晚响应分段、API 完成事件和排队历史分别确认。",
+      "## 未知边界\n任一必要方法证据缺失时返回 UNKNOWN。",
+      "## 输出含义\n输出 evaluation verdict。",
+    ].join("\n\n");
+    fs.writeFileSync(path.join(packageRoot, method.reference), `${card}\n`);
+  }
+  fs.writeFileSync(path.join(references, "source-log-templates.md"), `# Source log templates\n\n\`\`\`text\n${templates.join("\n")}\n\`\`\`\n`);
   fs.writeFileSync(path.join(references, "shared-boundaries.md"), "RPC 超时不等于取消。\n");
 }
 
-function productionBundle() {
-  if (productionTemplate !== null) return productionTemplate;
+function executeProductionBundle(sourceRoot = REPO_ROOT) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "evidence-v2-production-cert-"));
   const registrationRoot = path.join(root, "registration");
   const evidenceRoot = path.join(root, "evidence");
-  writeReleaseRegistration(registrationRoot);
+  writeReleaseRegistration(registrationRoot, sourceRoot);
   const script = path.join(REPO_ROOT, "tools", "test-flow", "quick-validation", "codex-luna", "runtime", "macos_codex_luna_model_cert_driver.py");
   const receiptPath = path.join(evidenceRoot, "runtime-receipt.json");
   const bootstrap = "import runpy,sys,types; mark=types.SimpleNamespace(parametrize=lambda *a,**k:(lambda f:f)); sys.modules['pytest']=types.SimpleNamespace(fixture=lambda f:f,mark=mark); script=sys.argv[1]; sys.argv=sys.argv[1:]; runpy.run_path(script,run_name='__main__')";
@@ -206,20 +234,214 @@ function productionBundle() {
     ...python.prefix, "-c", bootstrap,
     script,
     "--mode", "fake",
-    "--source-root", REPO_ROOT,
+    "--source-root", sourceRoot,
     "--registration-root", registrationRoot,
     "--work-root", path.join(root, "work"),
     "--receipt-path", receiptPath,
     "--evidence-root", evidenceRoot,
-    "--fake-rejected-method-id", "server-queueing",
   ], { cwd: REPO_ROOT, env: process.env, encoding: "utf8", timeout: 120_000 });
   assert.equal(result.status, 0, result.stderr);
-  productionTemplate = { root, evidenceRoot, runtimeReceipt: JSON.parse(fs.readFileSync(receiptPath, "utf8")) };
+  return { root, evidenceRoot, runtimeReceipt: JSON.parse(fs.readFileSync(receiptPath, "utf8")) };
+}
+
+function productionBundle() {
+  if (productionTemplate === null) productionTemplate = executeProductionBundle();
   return productionTemplate;
+}
+
+function releaseCaseFiles(caseRoot) {
+  const files = [];
+  const visit = (directory) => {
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+      const absolute = path.join(directory, entry.name);
+      if (entry.isDirectory()) visit(absolute);
+      else if (entry.isFile() && entry.name !== "fixture-manifest.json") files.push(absolute);
+    }
+  };
+  visit(caseRoot);
+  return files.sort();
+}
+
+function refreshReleaseManifest(caseRoot) {
+  const manifestPath = path.join(caseRoot, "fixture-manifest.json");
+  const previous = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+  const previousByPath = new Map(previous.files.map((entry) => [entry.path, entry]));
+  const files = releaseCaseFiles(caseRoot).map((absolute) => {
+    const relative = path.relative(caseRoot, absolute).split(path.sep).join("/");
+    return {
+      path: relative,
+      purpose: previousByPath.get(relative)?.purpose ?? `Mutated Release fixture ${relative}.`,
+      schema_ref: null,
+      sha256: sha256File(absolute),
+      size: fs.statSync(absolute).size,
+    };
+  });
+  fs.writeFileSync(manifestPath, canonicalJson({
+    schema_version: 2,
+    owner_spec: "METHODS_SKILL_RELEASE_CASE",
+    root: previous.root,
+    files,
+  }));
+}
+
+function executeMutatedProduction(change) {
+  const sourceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "evidence-v2-semantic-source-"));
+  const caseRoot = path.join(sourceRoot, RELEASE_CASE_RELATIVE);
+  fs.mkdirSync(path.dirname(caseRoot), { recursive: true });
+  fs.cpSync(path.join(REPO_ROOT, RELEASE_CASE_RELATIVE), caseRoot, { recursive: true });
+  change(caseRoot);
+  refreshReleaseManifest(caseRoot);
+  return { sourceRoot, bundle: executeProductionBundle(sourceRoot) };
+}
+
+function copiedProductionEvidence(change) {
+  const baseline = productionBundle();
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "evidence-v2-semantic-records-"));
+  const evidenceRoot = path.join(root, "evidence");
+  fs.cpSync(baseline.evidenceRoot, evidenceRoot, { recursive: true });
+  change(evidenceRoot);
+  return { root, evidenceRoot, runtimeReceipt: baseline.runtimeReceipt };
+}
+
+function buildScenarioReceipt({ sourceRoot = REPO_ROOT, evidenceRoot, runtimeReceipt }) {
+  return buildEvidenceV2ScenarioOracleReceipt({
+    sourceRoot,
+    certRoot: evidenceRoot,
+    scenario: runtimeReceipt.scenario,
+    providerInvocations: [{ role: "SPECIALIST" }, { role: "REVIEWER" }],
+    modelId: "zero-model-role-double",
+  });
+}
+
+function runtimeReceiptWithReboundGraph(runtimeReceipt, evidenceRoot) {
+  const changed = clone(runtimeReceipt);
+  const graphPath = path.join(evidenceRoot, "methods-evidence-graph-v2.json");
+  changed.scenario.evidence_graph.canonical_sha256 = sha256File(graphPath);
+  changed.scenario.evidence_graph.canonical_size = fs.statSync(graphPath).size;
+  return changed;
 }
 
 test.after(() => {
   if (productionTemplate !== null) fs.rmSync(productionTemplate.root, { recursive: true, force: true });
+});
+
+test("production Graph mechanically proves every resolved Release method without model semantics", () => {
+  const production = productionBundle();
+  const receipt = buildScenarioReceipt({
+    evidenceRoot: production.evidenceRoot,
+    runtimeReceipt: production.runtimeReceipt,
+  });
+  assert.equal(receipt.status, "PASS");
+  assert.equal(receipt.summary.status, "PASS");
+  assert.equal(receipt.summary.confirmed_method_ids.length, 3);
+  assert.equal(receipt.summary.evaluation_count, 3);
+});
+
+test("scenario oracle rejects missing or changed request timeout and a non-qualifying queue target from fresh production Graphs", () => {
+  const mutations = [
+    {
+      change: (caseRoot) => {
+        const target = path.join(caseRoot, "scenarios", "multiple-rpc-timeouts", "client.log");
+        const lines = fs.readFileSync(target, "utf8").split(/\r?\n/)
+          .filter((line) => !line.includes("reqid(501), timeout 3000"));
+        fs.writeFileSync(target, lines.join("\n"));
+      },
+      code: "SCENARIO_ORACLE_LINKED_TIMEOUT_MISSING",
+    },
+    {
+      change: (caseRoot) => {
+        const target = path.join(caseRoot, "scenarios", "multiple-rpc-timeouts", "client.log");
+        const text = fs.readFileSync(target, "utf8");
+        fs.writeFileSync(target, text.replace("reqid(501), timeout 3000", "reqid(501), timeout 5000"));
+      },
+      code: "SCENARIO_ORACLE_LINKED_TIMEOUT_MISMATCH",
+    },
+    {
+      change: (caseRoot) => {
+        const target = path.join(caseRoot, "scenarios", "multiple-rpc-timeouts", "server.log");
+        const lines = fs.readFileSync(target, "utf8").split(/\r?\n/).map((line) => (
+          line.includes("ordinal=second") ? line.replace("timeout_ms=3000", "timeout_ms=5000") : line
+        ));
+        fs.writeFileSync(target, lines.join("\n"));
+      },
+      code: "SCENARIO_ORACLE_QUEUE_TARGET_NOT_CONFIRMED",
+    },
+  ];
+  for (const mutation of mutations) {
+    const value = executeMutatedProduction(mutation.change);
+    try {
+      assert.throws(
+        () => buildScenarioReceipt({
+          sourceRoot: value.sourceRoot,
+          evidenceRoot: value.bundle.evidenceRoot,
+          runtimeReceipt: value.bundle.runtimeReceipt,
+        }),
+        (error) => error.code === mutation.code,
+      );
+    } finally {
+      fs.rmSync(value.bundle.root, { recursive: true, force: true });
+      fs.rmSync(value.sourceRoot, { recursive: true, force: true });
+    }
+  }
+});
+
+test("scenario oracle rejects shared-only timeout coverage, missing queue evidence, and merged API events", () => {
+  const mutations = [
+    {
+      change: (evidenceRoot) => {
+        const target = path.join(evidenceRoot, "methods.json");
+        const methods = JSON.parse(fs.readFileSync(target, "utf8"));
+        methods.methods.find((method) => method.priority === 3).evidence_markers = methods.methods
+          .find((method) => method.priority === 3).evidence_markers
+          .filter((marker) => marker !== "call unsuccess, reqid(");
+        fs.writeFileSync(target, canonicalJson(methods));
+      },
+      code: "SCENARIO_ORACLE_METHOD_SEMANTIC_MAPPING",
+      rebindGraph: false,
+    },
+    {
+      change: (evidenceRoot) => {
+        const target = path.join(evidenceRoot, "methods-evidence-graph-v2.json");
+        const graph = JSON.parse(fs.readFileSync(target, "utf8"));
+        graph.hits = graph.hits.filter((hit) => !(
+          hit.marker === "QUEUE_HISTORY print_time_ms=" && hit.line.includes("ordinal=second")
+        ));
+        fs.writeFileSync(target, canonicalJson(graph));
+      },
+      code: "SCENARIO_ORACLE_QUEUE_HISTORY_COUNT",
+      rebindGraph: true,
+    },
+    {
+      change: (evidenceRoot) => {
+        const methods = JSON.parse(fs.readFileSync(path.join(evidenceRoot, "methods.json"), "utf8"));
+        const apiMethodId = methods.methods.find((method) => method.priority === 1).id;
+        const target = path.join(evidenceRoot, "methods-evidence-graph-v2.json");
+        const graph = JSON.parse(fs.readFileSync(target, "utf8"));
+        const apiEvents = graph.events.filter((event) => event.method_id === apiMethodId
+          && event.evidence_hit_refs.some((ref) => graph.hits.some((hit) => hit.hit_ref === ref && hit.marker === "API_COMPLETE service=")));
+        assert.equal(apiEvents.length, 2);
+        apiEvents[0].evidence_hit_refs = [...apiEvents[0].evidence_hit_refs, ...apiEvents[1].evidence_hit_refs];
+        graph.events = graph.events.filter((event) => event.event_ref !== apiEvents[1].event_ref);
+        fs.writeFileSync(target, canonicalJson(graph));
+      },
+      code: "SCENARIO_ORACLE_API_EVENTS_MERGED",
+      rebindGraph: true,
+    },
+  ];
+  for (const mutation of mutations) {
+    const value = copiedProductionEvidence(mutation.change);
+    try {
+      const runtimeReceipt = mutation.rebindGraph
+        ? runtimeReceiptWithReboundGraph(value.runtimeReceipt, value.evidenceRoot)
+        : value.runtimeReceipt;
+      assert.throws(
+        () => buildScenarioReceipt({ evidenceRoot: value.evidenceRoot, runtimeReceipt }),
+        (error) => error.code === mutation.code,
+      );
+    } finally {
+      fs.rmSync(value.root, { recursive: true, force: true });
+    }
+  }
 });
 
 function fixture() {

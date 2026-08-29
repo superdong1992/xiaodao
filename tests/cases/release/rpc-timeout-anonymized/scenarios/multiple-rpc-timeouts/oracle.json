@@ -2,13 +2,22 @@
   "schema_version": 2,
   "oracle_visibility": "GATE_ONLY",
   "scenario_id": "multiple-rpc-timeouts",
-  "expected_status": "CONFIRMED",
-  "required_confirmed_marker_groups": [["API_COMPLETE"], ["LATE_RESPONSE"]],
-  "required_candidate_marker_groups": [["QUEUE_HISTORY"]],
+  "expected_status": "RESOLVED",
+  "required_confirmed_marker_groups": [["API_COMPLETE service="], ["LATE_RESPONSE service="], ["QUEUE_HISTORY print_time_ms="]],
+  "required_candidate_marker_groups": [],
+  "required_request_timeout": {
+    "marker": "call unsuccess, reqid(",
+    "request_id": "501",
+    "timeout_ms": 3000,
+    "unlinked_marker": "rpc call",
+    "unlinked_timeout_ms": 5000
+  },
   "required_evidence_identities": [
-    {"marker": "LATE_RESPONSE", "identity_tokens": ["request_id=501"]},
-    {"marker": "API_COMPLETE", "identity_tokens": ["start_us=10000000", "end_us=16500000"]},
-    {"marker": "API_COMPLETE", "identity_tokens": ["start_us=20000000", "end_us=26800000"]}
+    {"marker": "LATE_RESPONSE service=", "identity_tokens": ["request_id=501"]},
+    {"marker": "API_COMPLETE service=", "identity_tokens": ["start_us=10000000", "end_us=16500000"]},
+    {"marker": "API_COMPLETE service=", "identity_tokens": ["start_us=20000000", "end_us=26800000"]},
+    {"marker": "QUEUE_HISTORY print_time_ms=", "identity_tokens": ["print_time_ms=12000", "ordinal=first"]},
+    {"marker": "QUEUE_HISTORY print_time_ms=", "identity_tokens": ["print_time_ms=12500", "ordinal=second"]}
   ],
   "forbidden_evidence_terms": [],
   "required_safety_phrases": ["超时不等于取消"]

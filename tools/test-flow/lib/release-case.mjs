@@ -18,8 +18,9 @@ const ANCHOR_FIELDS = ["label", "module", "pid", "process_name", "slot"];
 const SEMANTIC_ORACLE_FIELDS = ["author_note_markers_forbidden_in_product", "business_canaries", "expected_package", "oracle_visibility", "schema_version"];
 const EXPECTED_PACKAGE_FIELDS = ["forbidden_paths", "method_marker_sets", "required_artifacts", "required_log_derived_fields", "required_shared_markers", "required_user_inputs", "skill_name", "source_wiki_sha256"];
 const METHOD_MARKER_SET_FIELDS = ["all_markers", "semantic_id"];
-const SCENARIO_ORACLE_FIELDS = ["expected_status", "forbidden_evidence_terms", "oracle_visibility", "required_candidate_marker_groups", "required_confirmed_marker_groups", "required_evidence_identities", "required_safety_phrases", "scenario_id", "schema_version"];
+const SCENARIO_ORACLE_FIELDS = ["expected_status", "forbidden_evidence_terms", "oracle_visibility", "required_candidate_marker_groups", "required_confirmed_marker_groups", "required_evidence_identities", "required_request_timeout", "required_safety_phrases", "scenario_id", "schema_version"];
 const EVIDENCE_IDENTITY_FIELDS = ["identity_tokens", "marker"];
+const REQUEST_TIMEOUT_FIELDS = ["marker", "request_id", "timeout_ms", "unlinked_marker", "unlinked_timeout_ms"];
 const MANIFEST_FIELDS = ["files", "owner_spec", "root", "schema_version"];
 const MANIFEST_FILE_FIELDS = ["path", "purpose", "schema_ref", "sha256", "size"];
 const ALLOWED_ACTIONS = new Set(["methods_skill_generation", "specialized_diagnosis"]);
@@ -296,9 +297,23 @@ function loadScenarioOracle(scenario, loaded) {
   exactKeys(oracle, SCENARIO_ORACLE_FIELDS, "RELEASE_CASE_SCENARIO_ORACLE_FIELDS", "Release scenario oracle");
   assertFlow(oracle.schema_version === 2 && oracle.oracle_visibility === "GATE_ONLY", "RELEASE_CASE_SCENARIO_ORACLE_VERSION", "Release scenario oracle metadata is invalid");
   assertFlow(oracle.scenario_id === scenario.scenario_id, "RELEASE_CASE_SCENARIO_ORACLE_ID", "Release scenario oracle id is inconsistent");
-  assertFlow(["CONFIRMED", "PARTIAL", "INSUFFICIENT"].includes(oracle.expected_status), "RELEASE_CASE_SCENARIO_STATUS", "Release scenario expected status is invalid");
-  markerGroups(oracle.required_confirmed_marker_groups, "RELEASE_CASE_CONFIRMED_MARKERS", "Release confirmed marker groups");
-  markerGroups(oracle.required_candidate_marker_groups, "RELEASE_CASE_CANDIDATE_MARKERS", "Release candidate marker groups");
+  assertFlow(oracle.expected_status === "RESOLVED", "RELEASE_CASE_SCENARIO_STATUS", "Evidence V2 Release scenarios must expect RESOLVED");
+  const confirmedGroups = markerGroups(oracle.required_confirmed_marker_groups, "RELEASE_CASE_CONFIRMED_MARKERS", "Release confirmed marker groups");
+  const candidateGroups = markerGroups(oracle.required_candidate_marker_groups, "RELEASE_CASE_CANDIDATE_MARKERS", "Release candidate marker groups");
+  assertFlow(confirmedGroups.length > 0, "RELEASE_CASE_CONFIRMED_MARKERS", "Resolved Release scenarios must confirm at least one method");
+  assertFlow(candidateGroups.length === 0, "RELEASE_CASE_CANDIDATE_MARKERS", "Resolved Evidence V2 Release scenarios cannot retain candidate methods");
+  exactKeys(oracle.required_request_timeout, REQUEST_TIMEOUT_FIELDS, "RELEASE_CASE_REQUEST_TIMEOUT_FIELDS", "Release request timeout expectation");
+  const timeout = oracle.required_request_timeout;
+  assertFlow(
+    typeof timeout.marker === "string" && timeout.marker.length > 0
+      && typeof timeout.unlinked_marker === "string" && timeout.unlinked_marker.length > 0
+      && timeout.marker !== timeout.unlinked_marker
+      && typeof timeout.request_id === "string" && timeout.request_id.length > 0
+      && Number.isSafeInteger(timeout.timeout_ms) && timeout.timeout_ms > 0
+      && Number.isSafeInteger(timeout.unlinked_timeout_ms) && timeout.unlinked_timeout_ms > 0,
+    "RELEASE_CASE_REQUEST_TIMEOUT_INVALID",
+    "Release request timeout expectation is invalid",
+  );
   stringArray(oracle.forbidden_evidence_terms, "RELEASE_CASE_FORBIDDEN_EVIDENCE", "Release forbidden evidence terms");
   stringArray(oracle.required_safety_phrases, "RELEASE_CASE_SAFETY_PHRASES", "Release required safety phrases", { nonempty: true });
   assertFlow(Array.isArray(oracle.required_evidence_identities), "RELEASE_CASE_EVIDENCE_IDENTITIES", "Release evidence identities must be an array");
@@ -325,11 +340,27 @@ function loadScenarioOracle(scenario, loaded) {
 export function loadReleaseCaseOracle(caseRoot) {
   const loaded = loadReleaseCase(caseRoot);
   const semanticOracle = loadSemanticOracle(loaded);
+  const canonicalMethodMarkers = new Set(
+    semanticOracle.expected_package.method_marker_sets.flatMap((item) => item.all_markers),
+  );
+  const scenarios = loaded.scenarios.map((scenario) => {
+    const oracle = loadScenarioOracle(scenario, loaded);
+    for (const marker of [
+      ...oracle.required_confirmed_marker_groups.flat(),
+      ...oracle.required_candidate_marker_groups.flat(),
+      ...oracle.required_evidence_identities.map((identity) => identity.marker),
+      oracle.required_request_timeout.marker,
+      oracle.required_request_timeout.unlinked_marker,
+    ]) {
+      assertFlow(canonicalMethodMarkers.has(marker), "RELEASE_CASE_SCENARIO_MARKER_NOT_CANONICAL", `Release scenario marker is not an exact method marker: ${marker}`);
+    }
+    return { scenario_id: scenario.scenario_id, oracle };
+  });
   for (const scenario of loaded.scenarios) {
     const driver = readJson(scenario.driver_path);
     assertFlow(canonicalJson([...driver.initial_user_fact_names].sort()) === canonicalJson([...semanticOracle.expected_package.required_user_inputs].sort()), "RELEASE_CASE_DRIVER_INPUT_COVERAGE", "Release driver inputs must exactly cover the expected Methods user inputs");
   }
-  return { case_id: loaded.case_id, semantic_oracle: semanticOracle, scenarios: loaded.scenarios.map((scenario) => ({ scenario_id: scenario.scenario_id, oracle: loadScenarioOracle(scenario, loaded) })) };
+  return { case_id: loaded.case_id, semantic_oracle: semanticOracle, scenarios };
 }
 
 export function releaseCaseDigests(caseRoot) {

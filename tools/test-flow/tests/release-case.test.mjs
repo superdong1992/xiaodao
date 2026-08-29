@@ -100,9 +100,17 @@ test("v2 loader exposes only Wiki, registration, driver, and frozen attachments"
   assert.equal(Object.hasOwn(inputs.scenarios[0], "oracle"), false);
   assert.equal(oracle.semantic_oracle.oracle_visibility, "GATE_ONLY");
   assert.equal(oracle.scenarios[0].oracle.oracle_visibility, "GATE_ONLY");
-  assert.equal(oracle.scenarios[0].oracle.expected_status, "CONFIRMED");
+  assert.equal(oracle.scenarios[0].oracle.expected_status, "RESOLVED");
+  assert.deepEqual(oracle.scenarios[0].oracle.required_candidate_marker_groups, []);
+  assert.deepEqual(oracle.scenarios[0].oracle.required_request_timeout, {
+    marker: "call unsuccess, reqid(",
+    request_id: "501",
+    timeout_ms: 3000,
+    unlinked_marker: "rpc call",
+    unlinked_timeout_ms: 5000,
+  });
   const repeatedMethodEvents = oracle.scenarios[0].oracle.required_evidence_identities
-    .filter((identity) => identity.marker === "API_COMPLETE");
+    .filter((identity) => identity.marker === "API_COMPLETE service=");
   assert.equal(repeatedMethodEvents.length, 2);
   assert.notDeepEqual(repeatedMethodEvents[0].identity_tokens, repeatedMethodEvents[1].identity_tokens);
   assert.match(inputs.wiki, /LATE_RESPONSE service=/);
@@ -210,7 +218,7 @@ test("scenario evidence identities must resolve to distinct frozen log events", 
   const root = cloneCase("methods-release-event-identity-");
   const oraclePath = path.join(root, "scenarios", "multiple-rpc-timeouts", "oracle.json");
   const oracle = JSON.parse(fs.readFileSync(oraclePath, "utf8"));
-  const apiIdentities = oracle.required_evidence_identities.filter((identity) => identity.marker === "API_COMPLETE");
+  const apiIdentities = oracle.required_evidence_identities.filter((identity) => identity.marker === "API_COMPLETE service=");
   assert.equal(apiIdentities.length, 2);
   apiIdentities[1].identity_tokens = [...apiIdentities[0].identity_tokens];
   fs.writeFileSync(oraclePath, canonicalJson(oracle), "utf8");
@@ -219,6 +227,32 @@ test("scenario evidence identities must resolve to distinct frozen log events", 
     () => loadReleaseCaseOracle(root),
     /evidence identities must name distinct frozen log events/,
   );
+});
+
+test("Evidence V2 scenario oracle hard-cuts RESOLVED, empty candidates, and exact canonical markers", () => {
+  const mutations = [
+    {
+      change: (oracle) => { oracle.expected_status = "CONFIRMED"; },
+      expected: /must expect RESOLVED/,
+    },
+    {
+      change: (oracle) => { oracle.required_candidate_marker_groups = [["QUEUE_HISTORY print_time_ms="]]; },
+      expected: /cannot retain candidate methods/,
+    },
+    {
+      change: (oracle) => { oracle.required_confirmed_marker_groups[0] = ["API_COMPLETE"]; },
+      expected: /not an exact method marker/,
+    },
+  ];
+  for (const { change, expected } of mutations) {
+    const root = cloneCase("methods-release-v2-oracle-");
+    const oraclePath = path.join(root, "scenarios", "multiple-rpc-timeouts", "oracle.json");
+    const oracle = JSON.parse(fs.readFileSync(oraclePath, "utf8"));
+    change(oracle);
+    fs.writeFileSync(oraclePath, canonicalJson(oracle), "utf8");
+    refreshManifest(root);
+    assert.throws(() => loadReleaseCaseOracle(root), expected);
+  }
 });
 
 test("gate-only business canaries do not leak into product, Skills, adapters, or non-case tests", () => {
