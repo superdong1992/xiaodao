@@ -11,6 +11,7 @@ import {
   CLAUDE_DEEPSEEK_MAX_OUTPUT_TOKENS,
   CLAUDE_DEEPSEEK_MODEL,
   auditClaudeStream,
+  resolvedTerminalUsage,
 } from "./claude-deepseek-contract.mjs";
 
 export class ClaudeDeepseekProcessError extends Error {
@@ -65,69 +66,6 @@ export function controlledClaudeEnvironment(ambient, { configRoot, home, tempora
 function parseJsonLines(bytes) {
   try { return bytes.toString("utf8").split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line)); }
   catch { fail("CLAUDE_DEEPSEEK_STREAM_JSON_INVALID", "Claude stdout is not valid stream-json JSONL"); }
-}
-
-const TERMINAL_USAGE_FIELDS = ["input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"];
-
-function terminalUsageCandidate(values, costUsd) {
-  if (!TERMINAL_USAGE_FIELDS.every((field) => Number.isSafeInteger(values[field]) && values[field] >= 0)
-    || !Number.isFinite(costUsd)
-    || costUsd < 0) return null;
-  return {
-    schema_version: 1,
-    ...Object.fromEntries(TERMINAL_USAGE_FIELDS.map((field) => [field, values[field]])),
-    total_tokens: TERMINAL_USAGE_FIELDS.reduce((sum, field) => sum + values[field], 0),
-    cost_usd: Math.round(costUsd * 1_000_000) / 1_000_000,
-  };
-}
-
-function topLevelTerminalCost(terminal) {
-  const values = ["total_cost_usd", "cost_usd"]
-    .filter((field) => Object.hasOwn(terminal, field))
-    .map((field) => terminal[field]);
-  if (values.length === 0) return { present: false, cost_usd: null };
-  if (values.some((value) => !Number.isFinite(value) || value < 0)) return { present: true, cost_usd: null };
-  const costs = values.map((value) => Math.round(value * 1_000_000) / 1_000_000);
-  if (new Set(costs).size !== 1) return { present: true, cost_usd: null };
-  return { present: true, cost_usd: costs[0] };
-}
-
-function topLevelTerminalUsage(terminal, topLevelCost) {
-  return terminalUsageCandidate(
-    Object.fromEntries(TERMINAL_USAGE_FIELDS.map((field) => [field, terminal.usage?.[field]])),
-    topLevelCost.cost_usd,
-  );
-}
-
-function modelTerminalUsage(terminal) {
-  if (terminal.modelUsage === undefined) return { present: false, usage: null };
-  if (!isPlainObject(terminal.modelUsage)) return { present: true, usage: null };
-  const entries = Object.entries(terminal.modelUsage);
-  if (entries.length !== 1 || entries[0][0] !== CLAUDE_DEEPSEEK_MODEL || !isPlainObject(entries[0][1])) return { present: true, usage: null };
-  const value = entries[0][1];
-  return {
-    present: true,
-    usage: terminalUsageCandidate({
-      input_tokens: value.inputTokens,
-      output_tokens: value.outputTokens,
-      cache_creation_input_tokens: value.cacheCreationInputTokens,
-      cache_read_input_tokens: value.cacheReadInputTokens,
-    }, value.costUSD),
-  };
-}
-
-function resolvedTerminalUsage(terminal) {
-  const topLevelCost = topLevelTerminalCost(terminal);
-  const topLevel = topLevelTerminalUsage(terminal, topLevelCost);
-  const model = modelTerminalUsage(terminal);
-  if (!model.present) return topLevel;
-  if (model.usage === null) return null;
-  if (topLevelCost.present && (topLevelCost.cost_usd === null || topLevelCost.cost_usd !== model.usage.cost_usd)) return null;
-  if (topLevel === null || canonicalJson(topLevel) === canonicalJson(model.usage)) return model.usage;
-  const costsMatch = topLevel.cost_usd === model.usage.cost_usd;
-  if (costsMatch && topLevel.total_tokens === 0 && model.usage.total_tokens > 0) return model.usage;
-  if (costsMatch && model.usage.total_tokens === 0 && topLevel.total_tokens > 0) return topLevel;
-  return null;
 }
 
 function terminalObservation(bytes) {

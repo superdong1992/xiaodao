@@ -94,8 +94,8 @@ import {
   CLAUDE_DEEPSEEK_E2E_CALLS,
   CLAUDE_DEEPSEEK_E2E_USD_LIMIT,
   CLAUDE_DEEPSEEK_METHODS_CALLS,
-  CLAUDE_DEEPSEEK_MODEL_CERT_BUDGET_ENFORCEMENT,
   CLAUDE_DEEPSEEK_MODEL_CERT_ROLE_POOL_USD,
+  validateClaudeDeepseekRoleReceipt,
 } from "../quick-validation/claude-deepseek/runtime/claude-deepseek-contract.mjs";
 import {
   buildEvidenceV2CoreVerdict,
@@ -3357,7 +3357,7 @@ export function validClaudeDeepseekInvocationLedger(planStage, ledger) {
     && ledger.invocations.every((invocation) => validProviderInvocationReceipt(invocation, {
       role: invocation.role,
       attempt: providerInvocationAttempt(invocation),
-    }, "claude-deepseek"))
+    }, "claude-deepseek", planStage.hard_caps))
     && validDeepseekReceiptSequence(ledger.invocations);
 }
 
@@ -3427,44 +3427,8 @@ function providerInvocationAttempt(invocation) {
   return invocation?.evaluation_attempt ?? invocation?.attempt;
 }
 
-const DEEPSEEK_BUDGET_FIELDS = Object.freeze([
-  "schema_version", "stage_cap_usd", "role", "role_pool_usd", "prior_cost_usd",
-  "effective_call_cap_usd", "enforcement",
-]);
-const DEEPSEEK_PROVIDER_TERMINAL_FIELDS = Object.freeze([
-  "subtype", "is_error", "stop_reason", "exit_code", "signal",
-]);
-
 function roundedUsd(value) {
   return Math.round(value * 1_000_000) / 1_000_000;
-}
-
-function validDeepseekBudget(value, { role, attempt }) {
-  if (!exactObjectKeys(value, DEEPSEEK_BUDGET_FIELDS)
-    || value.schema_version !== 1
-    || value.stage_cap_usd !== CLAUDE_DEEPSEEK_E2E_USD_LIMIT
-    || value.role !== role
-    || value.role_pool_usd !== CLAUDE_DEEPSEEK_MODEL_CERT_ROLE_POOL_USD
-    || !Number.isFinite(value.prior_cost_usd)
-    || value.prior_cost_usd < 0
-    || value.prior_cost_usd > CLAUDE_DEEPSEEK_MODEL_CERT_ROLE_POOL_USD
-    || value.effective_call_cap_usd !== Math.max(0, roundedUsd(CLAUDE_DEEPSEEK_MODEL_CERT_ROLE_POOL_USD - value.prior_cost_usd))
-    || value.enforcement !== CLAUDE_DEEPSEEK_MODEL_CERT_BUDGET_ENFORCEMENT) return false;
-  return attempt !== "PRIMARY" || value.prior_cost_usd === 0;
-}
-
-function validDeepseekProviderTerminal(value) {
-  return exactObjectKeys(value, DEEPSEEK_PROVIDER_TERMINAL_FIELDS)
-    && typeof value.subtype === "string"
-    && value.subtype.length > 0
-    && typeof value.is_error === "boolean"
-    && (value.stop_reason === null || typeof value.stop_reason === "string")
-    && (value.exit_code === null || (Number.isSafeInteger(value.exit_code) && value.exit_code >= 0))
-    && (value.signal === null || (typeof value.signal === "string" && value.signal.length > 0))
-    && (value.is_error ? value.subtype !== "success" : value.subtype === "success")
-    && (value.is_error
-      ? (value.exit_code !== 0 || value.signal !== null)
-      : value.exit_code === 0 && value.signal === null);
 }
 
 function validDeepseekReceiptSequence(invocations) {
@@ -3486,7 +3450,7 @@ function validDeepseekReceiptSequence(invocations) {
   return !invocations.every((invocation) => invocation.status === "PASS") || totalCost <= CLAUDE_DEEPSEEK_E2E_USD_LIMIT;
 }
 
-function validProviderInvocationReceipt(invocation, expected, provider) {
+function validProviderInvocationReceipt(invocation, expected, provider, planCaps = null) {
   if (invocation?.schema_version !== 1
     || !["PASS", "FAIL"].includes(invocation.status)
     || invocation.terminal !== true
@@ -3505,23 +3469,17 @@ function validProviderInvocationReceipt(invocation, expected, provider) {
       return false;
     }
   }
-  const usageComplete = isCompleteUsage(invocation.usage);
-  const providerTerminal = invocation.provider_terminal;
-  return invocation.evaluation_attempt === expected.attempt
-    && invocation.phase === expected.role
-    && invocation.workflow === `${expected.role}:${expected.attempt}`
-    && invocation.role_call_ordinal === (expected.attempt === "PRIMARY" ? 1 : 2)
-    && invocation.attempt === 1
-    && invocation.retry === 0
-    && invocation.max_budget_usd === invocation.budget?.effective_call_cap_usd
-    && validDeepseekBudget(invocation.budget, expected)
-    && invocation.usage_complete === usageComplete
-    && (invocation.status === "PASS" ? usageComplete && invocation.failure_code === null : /^[A-Z][A-Z0-9_]*$/u.test(invocation.failure_code ?? ""))
-    && (invocation.status !== "PASS" || invocation.usage.cost_usd <= invocation.budget.effective_call_cap_usd)
-    && (providerTerminal === null || invocation.budget.effective_call_cap_usd > 0)
-    && (providerTerminal === null
-      ? invocation.status === "FAIL" && !usageComplete
-      : validDeepseekProviderTerminal(providerTerminal));
+  if (planCaps === null) return false;
+  try {
+    validateClaudeDeepseekRoleReceipt(invocation, {
+      planCaps,
+      expectedRole: expected.role,
+      expectedAttempt: expected.attempt,
+    });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function validProviderInvocationSequence(invocations) {
@@ -3540,7 +3498,7 @@ function readJsonOrNull(filePath) {
   }
 }
 
-function readProviderRoleReceipts(usageRoot, provider) {
+function readProviderRoleReceipts(usageRoot, provider, planCaps = null) {
   if (!fs.existsSync(usageRoot)) return [];
   const actualNames = fs.readdirSync(usageRoot).filter((name) => name.endsWith(".json")).sort();
   const allowedNames = new Set(PROVIDER_ROLE_RECEIPTS.map((item) => item.name));
@@ -3550,7 +3508,7 @@ function readProviderRoleReceipts(usageRoot, provider) {
     const receiptPath = path.join(usageRoot, expected.name);
     if (!fs.existsSync(receiptPath)) continue;
     const receipt = readJsonOrNull(receiptPath);
-    if (!validProviderInvocationReceipt(receipt, expected, provider)) return [];
+    if (!validProviderInvocationReceipt(receipt, expected, provider, planCaps)) return [];
     receipts.push(receipt);
   }
   return validProviderInvocationSequence(receipts)
@@ -3663,10 +3621,13 @@ export function collectProviderFailureObservability({
   const ledgerPath = path.join(outputRoot, "model-invocations.json");
   if (fs.existsSync(ledgerPath)) {
     const ledger = readJsonOrNull(ledgerPath);
-    if (validEvidenceV2ProviderInvocationLedger(planStage, ledger)) rawInvocations = ledger.invocations;
+    const ledgerValid = provider === "claude-deepseek"
+      ? validClaudeDeepseekInvocationLedger(planStage, ledger)
+      : validEvidenceV2ProviderInvocationLedger(planStage, ledger);
+    if (ledgerValid) rawInvocations = ledger.invocations;
     else if (validExplicitZeroCallLedger(outputRoot, ledger)) explicitZeroCallLedger = true;
   }
-  if (rawInvocations.length === 0) rawInvocations = readProviderRoleReceipts(usageRoot, provider);
+  if (rawInvocations.length === 0) rawInvocations = readProviderRoleReceipts(usageRoot, provider, planStage.hard_caps);
   const invocations = rawInvocations.map((invocation) => projection(invocation, planStage.hard_caps, invocationClass));
   const knownInvocationUsage = invocations
     .filter((invocation) => invocation.usage_complete === true && isCompleteUsage(invocation.usage))

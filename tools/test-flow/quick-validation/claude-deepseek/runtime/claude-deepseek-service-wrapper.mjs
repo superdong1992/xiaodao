@@ -9,10 +9,13 @@ import {
   CLAUDE_DEEPSEEK_CALL_WALL_SECONDS,
   CLAUDE_DEEPSEEK_E2E_MAX_TURNS,
   CLAUDE_DEEPSEEK_E2E_USD_LIMIT,
+  CLAUDE_DEEPSEEK_MAX_OUTPUT_TOKENS,
   CLAUDE_DEEPSEEK_MODEL_CERT_BUDGET_ENFORCEMENT,
+  CLAUDE_DEEPSEEK_MODEL_CERT_PLAN_CAPS,
   CLAUDE_DEEPSEEK_MODEL_CERT_ROLE_POOL_USD,
   CLAUDE_DEEPSEEK_MODEL,
   CLAUDE_DEEPSEEK_NO_PROGRESS_SECONDS,
+  validateClaudeDeepseekRoleReceipt,
 } from "./claude-deepseek-contract.mjs";
 import { runClaudeProcess } from "./claude-deepseek-process.mjs";
 
@@ -369,6 +372,12 @@ export async function runServiceInvocation(values, {
       usage_complete: true,
       failure_code: null,
     });
+    validateClaudeDeepseekRoleReceipt(receipt, {
+      planCaps: CLAUDE_DEEPSEEK_MODEL_CERT_PLAN_CAPS,
+      expectedRole: parsed.role,
+      expectedAttempt: parsed.attempt,
+      priorCostUsd: budget.prior_cost_usd,
+    });
     writeJsonNew(path.join(path.resolve(values["usage-root"]), `${key}.json`), receipt);
     writeJsonNew(path.join(traceRoot, `${key}.receipt.json`), receipt);
     const terminal = result.events.at(-1);
@@ -401,12 +410,16 @@ export async function runServiceInvocation(values, {
       finished_at_utc: new Date().toISOString(),
       turns: result?.receipt?.turns ?? observed?.turns ?? 0,
       wall_timeout_seconds: CLAUDE_DEEPSEEK_CALL_WALL_SECONDS,
+      max_turns: CLAUDE_DEEPSEEK_E2E_MAX_TURNS,
+      max_output_tokens: CLAUDE_DEEPSEEK_MAX_OUTPUT_TOKENS,
+      appended_system_prompt: null,
       workflow: `${parsed.role}:${parsed.attempt}`,
       role: parsed.role,
       evaluation_attempt: parsed.attempt,
       role_call_ordinal: parsed.attempt === "PRIMARY" ? 1 : 2,
       max_budget_usd: budget?.effective_call_cap_usd ?? null,
       budget,
+      disallowed_tools: ["Bash", "Glob", "Grep", "Skill"],
       prompt: {
         sha256: sha256Bytes(prompt),
         utf8_size: Buffer.byteLength(prompt, "utf8"),

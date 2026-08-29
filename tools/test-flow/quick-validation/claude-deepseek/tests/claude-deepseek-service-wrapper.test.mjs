@@ -5,6 +5,8 @@ import path from "node:path";
 import { Readable, Writable } from "node:stream";
 import test from "node:test";
 
+import { ISOLATED_AGENT_ENV_POLICY_VERSION, environmentKeySummary } from "../../../runtime-support/isolated-agent-env.mjs";
+
 import {
   auditRoleWorkspace,
   claimRoleAttempt,
@@ -34,6 +36,43 @@ const SUCCESS_PROVIDER_TERMINAL = Object.freeze({
   exit_code: 0,
   signal: null,
 });
+
+const TEST_ENVIRONMENT_POLICY = Object.freeze({
+  schema_version: 1,
+  version: ISOLATED_AGENT_ENV_POLICY_VERSION,
+  provider_auth_source: "audited-settings-file",
+  inbound: environmentKeySummary({ PATH: "/bin" }),
+  claude_process: environmentKeySummary({ PATH: "/bin" }),
+});
+
+function successfulProcessReceipt(options, role, costUsd = 0) {
+  return {
+    schema_version: 1,
+    invocation_id: options.invocationId,
+    phase: role,
+    model: "deepseek-v4-flash[1m]",
+    attempt: 1,
+    retry: 0,
+    status: "PASS",
+    terminal: true,
+    turns: 1,
+    started_at_utc: "2026-08-29T00:00:00.000Z",
+    finished_at_utc: "2026-08-29T00:00:01.000Z",
+    wall_timeout_seconds: 600,
+    max_turns: 50,
+    max_budget_usd: options.maxBudgetUsd,
+    max_output_tokens: 64_000,
+    appended_system_prompt: null,
+    environment_policy: TEST_ENVIRONMENT_POLICY,
+    provider_terminal: SUCCESS_PROVIDER_TERMINAL,
+    usage: { schema_version: 1, input_tokens: 10, output_tokens: 5, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, total_tokens: 15, cost_usd: costUsd },
+    tool_count: 2,
+    denied_tool_attempt_count: 0,
+    disallowed_tools: ["Bash", "Glob", "Grep", "Skill"],
+    mcp_call_count: 0,
+    bash_call_count: 0,
+  };
+}
 
 test("model-cert wrapper accepts only its frozen provider inputs", () => {
   const argv = ["--claude-entry", "/cli.js", "--settings", "/settings.json", "--config-root", "/config", "--private-root", "/private", "--evidence-root", "/evidence", "--usage-root", "/usage", "--run-id", "run"];
@@ -115,7 +154,7 @@ test("wrapper preserves the raw evaluation array and records the exact productio
         hooks.onProgress();
         fs.writeFileSync(output, content);
         return {
-          receipt: { schema_version: 1, invocation_id: options.invocationId, phase: "SPECIALIST", model: "deepseek-v4-flash[1m]", attempt: 1, retry: 0, status: "PASS", terminal: true, turns: 1, wall_timeout_seconds: 600, provider_terminal: SUCCESS_PROVIDER_TERMINAL, usage: { input_tokens: 1, output_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, cost_usd: 0 } },
+          receipt: successfulProcessReceipt(options, "SPECIALIST"),
           records: [{ name: "Read", is_error: false, input: { file_path: path.join(root, "inputs", "method-evaluation-plan.json") } }, { name: "Write", is_error: false, input: { file_path: output, content } }],
           skills: [], bash: [], mcp: [], denied: [], events: [{ type: "result", result: "done" }],
         };
@@ -164,14 +203,7 @@ test("Specialist and Reviewer each own a two-dollar pool and repairs consume onl
           observedCaps.push({ key, cap: options.maxBudgetUsd });
           fs.writeFileSync(output, content);
           return {
-            receipt: {
-              schema_version: 1, invocation_id: options.invocationId, phase: role, model: "deepseek-v4-flash[1m]",
-              attempt: 1, retry: 0, status: "PASS", terminal: true, turns: 1,
-              started_at_utc: "2026-08-29T00:00:00.000Z", finished_at_utc: "2026-08-29T00:00:01.000Z",
-              wall_timeout_seconds: 600,
-              provider_terminal: SUCCESS_PROVIDER_TERMINAL,
-              usage: { schema_version: 1, input_tokens: 10, output_tokens: 5, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, total_tokens: 15, cost_usd: costUsd },
-            },
+            receipt: successfulProcessReceipt(options, role, costUsd),
             records: [
               { name: "Read", is_error: false, input: { file_path: path.join(work, "inputs", "method-evaluation-plan.json") } },
               { name: "Write", is_error: false, input: { file_path: output, content } },
@@ -222,13 +254,7 @@ test("a repair with no role-pool balance closes before invoking the provider", a
       runClaude: async (options) => {
         fs.writeFileSync(output, content);
         return {
-          receipt: {
-            schema_version: 1, invocation_id: options.invocationId, phase: "SPECIALIST", model: "deepseek-v4-flash[1m]",
-            attempt: 1, retry: 0, status: "PASS", terminal: true, turns: 1,
-            started_at_utc: "2026-08-29T00:00:00.000Z", finished_at_utc: "2026-08-29T00:00:01.000Z", wall_timeout_seconds: 600,
-            provider_terminal: SUCCESS_PROVIDER_TERMINAL,
-            usage: { schema_version: 1, input_tokens: 10, output_tokens: 5, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, total_tokens: 15, cost_usd: 2 },
-          },
+          receipt: successfulProcessReceipt(options, "SPECIALIST", 2),
           records: [
             { name: "Read", is_error: false, input: { file_path: path.join(primaryWork, "inputs", "method-evaluation-plan.json") } },
             { name: "Write", is_error: false, input: { file_path: output, content } },
@@ -267,30 +293,68 @@ test("a successful CLI terminal that slightly exceeds its threshold becomes one 
       "claude-entry": path.join(root, "cli.js"), settings: path.join(root, "settings.json"), "config-root": path.join(root, "config"),
       "private-root": path.join(root, "private"), "evidence-root": path.join(root, "evidence"), "usage-root": path.join(root, "usage"), "run-id": "run",
     };
-    for (const target of [values["claude-entry"], values.settings]) fs.writeFileSync(target, "fixture");
+    fs.writeFileSync(values.settings, "{}\n");
+    fs.writeFileSync(values["claude-entry"], `
+process.stdin.resume();
+process.stdin.on("end", () => {
+  process.stdout.write(JSON.stringify({type:"system",subtype:"init",model:"deepseek-v4-flash[1m]",cwd:process.cwd(),permissionMode:"dontAsk",tools:["Read","Write"]})+"\\n");
+  process.stdout.write(JSON.stringify({
+    type:"result",subtype:"success",is_error:false,num_turns:1,stop_reason:"end_turn",total_cost_usd:2.000001,
+    usage:{input_tokens:0,output_tokens:0,cache_creation_input_tokens:0,cache_read_input_tokens:0},
+    modelUsage:{"deepseek-v4-flash[1m]":{inputTokens:150,outputTokens:50,cacheReadInputTokens:0,cacheCreationInputTokens:0,costUSD:2.000001}}
+  })+"\\n");
+});
+`);
     fs.mkdirSync(values["config-root"]);
     await assert.rejects(runServiceInvocation(values, {
       stdin: Readable.from([prompt("Specialist", "primary evaluation")]),
       stdout: new Writable({ write(_chunk, _encoding, callback) { callback(); } }),
-      runClaude: async (options) => ({
-        receipt: {
-          schema_version: 1, invocation_id: options.invocationId, phase: "SPECIALIST", model: "deepseek-v4-flash[1m]",
-          attempt: 1, retry: 0, status: "PASS", terminal: true, turns: 1,
-          started_at_utc: "2026-08-29T00:00:00.000Z", finished_at_utc: "2026-08-29T00:00:01.000Z", wall_timeout_seconds: 600,
-          provider_terminal: SUCCESS_PROVIDER_TERMINAL,
-          usage: { schema_version: 1, input_tokens: 10, output_tokens: 5, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, total_tokens: 15, cost_usd: 2.000001 },
-        },
-        records: [], skills: [], bash: [], mcp: [], denied: [], events: [{ type: "result", result: "done" }],
-      }),
     }), { code: "CLAUDE_DEEPSEEK_CALL_BUDGET_EXCEEDED" });
     const [receipt] = readRoleInvocationReceipts(values["usage-root"]);
     assert.equal(receipt.status, "FAIL");
     assert.equal(receipt.failure_code, "CLAUDE_DEEPSEEK_CALL_BUDGET_EXCEEDED");
     assert.equal(receipt.usage.cost_usd, 2.000001);
+    assert.equal(receipt.usage.total_tokens, 200);
     assert.equal(receipt.usage_complete, true);
     assert.equal(receipt.budget.effective_call_cap_usd, 2);
-    assert.deepEqual(receipt.provider_terminal, SUCCESS_PROVIDER_TERMINAL);
+    assert.deepEqual(receipt.provider_terminal, { ...SUCCESS_PROVIDER_TERMINAL, stop_reason: "end_turn" });
     assert.equal(fs.existsSync(path.join(root, "evidence", "model-cert.json")), false);
+  } finally { process.chdir(previous); fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("a successful CLI terminal with two non-zero token sources in conflict closes as usage-invalid", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "deepseek-role-success-usage-conflict-"));
+  const previous = process.cwd();
+  try {
+    workspace(root);
+    process.chdir(root);
+    const values = {
+      "claude-entry": path.join(root, "cli.js"), settings: path.join(root, "settings.json"), "config-root": path.join(root, "config"),
+      "private-root": path.join(root, "private"), "evidence-root": path.join(root, "evidence"), "usage-root": path.join(root, "usage"), "run-id": "run",
+    };
+    fs.writeFileSync(values.settings, "{}\n");
+    fs.writeFileSync(values["claude-entry"], `
+process.stdin.resume();
+process.stdin.on("end", () => {
+  process.stdout.write(JSON.stringify({type:"system",subtype:"init",model:"deepseek-v4-flash[1m]",cwd:process.cwd(),permissionMode:"dontAsk",tools:["Read","Write"]})+"\\n");
+  process.stdout.write(JSON.stringify({
+    type:"result",subtype:"success",is_error:false,num_turns:1,stop_reason:"end_turn",total_cost_usd:1,
+    usage:{input_tokens:10,output_tokens:5,cache_creation_input_tokens:0,cache_read_input_tokens:0},
+    modelUsage:{"deepseek-v4-flash[1m]":{inputTokens:11,outputTokens:5,cacheReadInputTokens:0,cacheCreationInputTokens:0,costUSD:1}}
+  })+"\\n");
+});
+`);
+    fs.mkdirSync(values["config-root"]);
+    await assert.rejects(runServiceInvocation(values, {
+      stdin: Readable.from([prompt("Specialist", "primary evaluation")]),
+      stdout: new Writable({ write(_chunk, _encoding, callback) { callback(); } }),
+    }), { code: "CLAUDE_DEEPSEEK_TERMINAL_USAGE_INVALID" });
+    const [receipt] = readRoleInvocationReceipts(values["usage-root"]);
+    assert.equal(receipt.status, "FAIL");
+    assert.equal(receipt.failure_code, "CLAUDE_DEEPSEEK_TERMINAL_USAGE_INVALID");
+    assert.equal(receipt.usage, null);
+    assert.equal(receipt.usage_complete, false);
+    assert.deepEqual(receipt.provider_terminal, { ...SUCCESS_PROVIDER_TERMINAL, stop_reason: "end_turn" });
   } finally { process.chdir(previous); fs.rmSync(root, { recursive: true, force: true }); }
 });
 

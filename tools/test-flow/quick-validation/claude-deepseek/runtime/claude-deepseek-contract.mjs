@@ -15,6 +15,10 @@ import {
 } from "../../../lib/release-inputs.mjs";
 import { canonicalJson, sha256Bytes, sha256File } from "../../../lib/util.mjs";
 import {
+  ISOLATED_AGENT_ENV_POLICY_VERSION,
+  validEnvironmentKeySummary,
+} from "../../../runtime-support/isolated-agent-env.mjs";
+import {
   auditFlatMcpInputSchema,
   auditHttpBoundary,
   auditListedMcpTools,
@@ -309,11 +313,271 @@ export function assertRegistrationUnchanged(cacheReceipt) {
   return { schema_version: 1, status: "PASS", tree_sha256: current };
 }
 
+const CLAUDE_TERMINAL_USAGE_FIELDS = ["input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"];
+
+function terminalUsageCandidate(values, costUsd) {
+  if (!CLAUDE_TERMINAL_USAGE_FIELDS.every((field) => Number.isSafeInteger(values[field]) && values[field] >= 0)
+    || !Number.isFinite(costUsd)
+    || costUsd < 0) return null;
+  return {
+    schema_version: 1,
+    ...Object.fromEntries(CLAUDE_TERMINAL_USAGE_FIELDS.map((field) => [field, values[field]])),
+    total_tokens: CLAUDE_TERMINAL_USAGE_FIELDS.reduce((sum, field) => sum + values[field], 0),
+    cost_usd: Math.round(costUsd * 1_000_000) / 1_000_000,
+  };
+}
+
+function topLevelTerminalCost(terminal) {
+  const values = ["total_cost_usd", "cost_usd"]
+    .filter((field) => Object.hasOwn(terminal, field))
+    .map((field) => terminal[field]);
+  if (values.length === 0) return { present: false, cost_usd: null };
+  if (values.some((value) => !Number.isFinite(value) || value < 0)) return { present: true, cost_usd: null };
+  const costs = values.map((value) => Math.round(value * 1_000_000) / 1_000_000);
+  if (new Set(costs).size !== 1) return { present: true, cost_usd: null };
+  return { present: true, cost_usd: costs[0] };
+}
+
+function modelTerminalUsage(terminal) {
+  if (terminal.modelUsage === undefined) return { present: false, usage: null };
+  if (!isPlainObject(terminal.modelUsage)) return { present: true, usage: null };
+  const entries = Object.entries(terminal.modelUsage);
+  if (entries.length !== 1 || entries[0][0] !== CLAUDE_DEEPSEEK_MODEL || !isPlainObject(entries[0][1])) return { present: true, usage: null };
+  const value = entries[0][1];
+  return {
+    present: true,
+    usage: terminalUsageCandidate({
+      input_tokens: value.inputTokens,
+      output_tokens: value.outputTokens,
+      cache_creation_input_tokens: value.cacheCreationInputTokens,
+      cache_read_input_tokens: value.cacheReadInputTokens,
+    }, value.costUSD),
+  };
+}
+
+export function resolvedTerminalUsage(terminal) {
+  if (!isPlainObject(terminal)) return null;
+  const topLevelCost = topLevelTerminalCost(terminal);
+  const topLevel = terminalUsageCandidate(
+    Object.fromEntries(CLAUDE_TERMINAL_USAGE_FIELDS.map((field) => [field, terminal.usage?.[field]])),
+    topLevelCost.cost_usd,
+  );
+  const model = modelTerminalUsage(terminal);
+  if (!model.present) return topLevel;
+  if (model.usage === null) return null;
+  if (topLevelCost.present && (topLevelCost.cost_usd === null || topLevelCost.cost_usd !== model.usage.cost_usd)) return null;
+  if (topLevel === null || canonicalJson(topLevel) === canonicalJson(model.usage)) return model.usage;
+  const costsMatch = topLevel.cost_usd === model.usage.cost_usd;
+  if (costsMatch && topLevel.total_tokens === 0 && model.usage.total_tokens > 0) return model.usage;
+  if (costsMatch && model.usage.total_tokens === 0 && topLevel.total_tokens > 0) return topLevel;
+  return null;
+}
+
 function normalizedUsage(value) {
-  const fields = ["input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"];
+  const fields = CLAUDE_TERMINAL_USAGE_FIELDS;
   requireContract(isPlainObject(value) && fields.every((key) => Number.isSafeInteger(value[key]) && value[key] >= 0), "CLAUDE_DEEPSEEK_TERMINAL_USAGE_INVALID", "Claude terminal usage is incomplete");
   requireContract(Number.isFinite(value.cost_usd) && value.cost_usd >= 0, "CLAUDE_DEEPSEEK_TERMINAL_USAGE_INVALID", "Claude terminal cost is incomplete");
   return { schema_version: 1, ...Object.fromEntries(fields.map((key) => [key, value[key]])), total_tokens: fields.reduce((sum, key) => sum + value[key], 0), cost_usd: Math.round(value.cost_usd * 1_000_000) / 1_000_000 };
+}
+
+const ROLE_RECEIPT_COMMON_FIELDS = Object.freeze([
+  "schema_version", "invocation_id", "phase", "model", "attempt", "retry", "status", "terminal",
+  "started_at_utc", "finished_at_utc", "turns", "wall_timeout_seconds", "max_turns", "max_budget_usd",
+  "max_output_tokens", "appended_system_prompt", "workflow", "role", "evaluation_attempt", "role_call_ordinal",
+  "budget", "prompt", "tool_policy", "workspace_audit", "environment_policy", "provider_terminal",
+  "usage_complete", "usage", "failure_code", "disallowed_tools",
+]);
+const ROLE_RECEIPT_SUCCESS_FIELDS = Object.freeze([
+  ...ROLE_RECEIPT_COMMON_FIELDS,
+  "tool_count", "denied_tool_attempt_count", "mcp_call_count", "bash_call_count",
+]);
+const ROLE_BUDGET_FIELDS = Object.freeze([
+  "schema_version", "stage_cap_usd", "role", "role_pool_usd", "prior_cost_usd",
+  "effective_call_cap_usd", "enforcement",
+]);
+const ROLE_PROVIDER_TERMINAL_FIELDS = Object.freeze(["subtype", "is_error", "stop_reason", "exit_code", "signal"]);
+const ROLE_TOOL_POLICY_FIELDS = Object.freeze([
+  "schema_version", "tools", "allowed_tools", "readable_scope", "writable_scope", "network", "shell", "skill_loading", "sha256",
+]);
+const ROLE_WORKSPACE_AUDIT_FIELDS = Object.freeze([
+  "schema_version", "status", "role", "attempt", "reads", "writes", "output_path", "output_size", "output_sha256", "harness_normalized",
+]);
+
+export const CLAUDE_DEEPSEEK_MODEL_CERT_PLAN_CAPS = Object.freeze({
+  max_turns: CLAUDE_DEEPSEEK_E2E_MAX_TURNS,
+  max_total_tokens: CLAUDE_DEEPSEEK_E2E_TOKEN_LIMIT,
+  max_output_tokens: CLAUDE_DEEPSEEK_MAX_OUTPUT_TOKENS,
+  max_budget_usd: CLAUDE_DEEPSEEK_E2E_USD_LIMIT,
+  hard_timeout_seconds: CLAUDE_DEEPSEEK_CALL_WALL_SECONDS,
+});
+
+function validRoleProviderTerminal(value) {
+  return exactKeys(value, ROLE_PROVIDER_TERMINAL_FIELDS)
+    && typeof value.subtype === "string"
+    && value.subtype.length > 0
+    && typeof value.is_error === "boolean"
+    && (value.stop_reason === null || typeof value.stop_reason === "string")
+    && (value.exit_code === null || (Number.isSafeInteger(value.exit_code) && value.exit_code >= 0))
+    && (value.signal === null || (typeof value.signal === "string" && value.signal.length > 0))
+    && (value.is_error ? value.subtype !== "success" : value.subtype === "success")
+    && (value.is_error ? (value.exit_code !== 0 || value.signal !== null) : value.exit_code === 0 && value.signal === null);
+}
+
+function validRoleEnvironmentPolicy(value) {
+  return exactKeys(value, ["schema_version", "version", "provider_auth_source", "inbound", "claude_process"])
+    && value.schema_version === 1
+    && value.version === ISOLATED_AGENT_ENV_POLICY_VERSION
+    && value.provider_auth_source === "audited-settings-file"
+    && validEnvironmentKeySummary(value.inbound)
+    && validEnvironmentKeySummary(value.claude_process);
+}
+
+function validRoleToolPolicy(value, role) {
+  if (!exactKeys(value, ROLE_TOOL_POLICY_FIELDS)) return false;
+  const { sha256, ...core } = value;
+  const output = role === "SPECIALIST" ? "output/method-diagnosis.draft.json" : "output/method-review.draft.json";
+  return value.schema_version === 1
+    && canonicalJson(value.tools) === canonicalJson(["Read", "Write"])
+    && Array.isArray(value.allowed_tools)
+    && value.allowed_tools.length === 2
+    && value.allowed_tools.every((item) => typeof item === "string" && item.length > 0)
+    && value.allowed_tools[0].startsWith("Read(")
+    && value.allowed_tools[1].startsWith("Edit(")
+    && value.readable_scope === "job-workspace-inputs"
+    && value.writable_scope === output
+    && value.network === false
+    && value.shell === false
+    && value.skill_loading === false
+    && /^[a-f0-9]{64}$/u.test(sha256 ?? "")
+    && sha256 === sha256Bytes(canonicalJson(core));
+}
+
+function validRoleWorkspaceAudit(value, role, evaluationAttempt) {
+  const output = role === "SPECIALIST" ? "output/method-diagnosis.draft.json" : "output/method-review.draft.json";
+  return exactKeys(value, ROLE_WORKSPACE_AUDIT_FIELDS)
+    && value.schema_version === 1
+    && value.status === "PASS"
+    && value.role === role
+    && value.attempt === evaluationAttempt
+    && Number.isSafeInteger(value.reads)
+    && value.reads >= 0
+    && value.writes === 1
+    && value.output_path === output
+    && Number.isSafeInteger(value.output_size)
+    && value.output_size >= 0
+    && /^[a-f0-9]{64}$/u.test(value.output_sha256 ?? "")
+    && value.harness_normalized === false;
+}
+
+export function validateClaudeDeepseekRoleReceipt(receipt, {
+  planCaps = CLAUDE_DEEPSEEK_MODEL_CERT_PLAN_CAPS,
+  expectedRole = null,
+  expectedAttempt = null,
+  priorCostUsd = null,
+} = {}) {
+  const success = receipt?.status === "PASS";
+  requireContract(
+    exactKeys(receipt, success ? ROLE_RECEIPT_SUCCESS_FIELDS : ROLE_RECEIPT_COMMON_FIELDS),
+    "CLAUDE_DEEPSEEK_ROLE_RECEIPT_FIELDS_INVALID",
+    "Evidence V2 role receipt fields are not closed",
+  );
+  const role = receipt.role;
+  const evaluationAttempt = receipt.evaluation_attempt;
+  requireContract(
+    receipt.schema_version === 1
+      && ["PASS", "FAIL"].includes(receipt.status)
+      && ["SPECIALIST", "REVIEWER"].includes(role)
+      && ["PRIMARY", "REPAIR"].includes(evaluationAttempt)
+      && (expectedRole === null || role === expectedRole)
+      && (expectedAttempt === null || evaluationAttempt === expectedAttempt)
+      && receipt.phase === role
+      && receipt.workflow === `${role}:${evaluationAttempt}`
+      && receipt.role_call_ordinal === (evaluationAttempt === "PRIMARY" ? 1 : 2)
+      && receipt.model === CLAUDE_DEEPSEEK_MODEL
+      && receipt.attempt === 1
+      && receipt.retry === 0
+      && receipt.terminal === true
+      && Number.isSafeInteger(receipt.turns)
+      && receipt.turns >= (success ? 1 : 0)
+      && receipt.turns <= planCaps.max_turns
+      && receipt.max_turns === planCaps.max_turns
+      && receipt.wall_timeout_seconds === planCaps.hard_timeout_seconds
+      && receipt.max_output_tokens === planCaps.max_output_tokens
+      && receipt.appended_system_prompt === null
+      && Array.isArray(receipt.disallowed_tools)
+      && canonicalJson(receipt.disallowed_tools) === canonicalJson(["Bash", "Glob", "Grep", "Skill"])
+      && typeof receipt.invocation_id === "string"
+      && receipt.invocation_id.length > 0,
+    "CLAUDE_DEEPSEEK_ROLE_RECEIPT_IDENTITY_INVALID",
+    "Evidence V2 role receipt identity, model, turn, or cap fields are invalid",
+  );
+  const started = Date.parse(receipt.started_at_utc);
+  const finished = Date.parse(receipt.finished_at_utc);
+  requireContract(Number.isFinite(started) && Number.isFinite(finished) && finished >= started, "CLAUDE_DEEPSEEK_ROLE_RECEIPT_TIME_INVALID", "Evidence V2 role receipt timestamps are invalid");
+  requireContract(
+    exactKeys(receipt.prompt, ["sha256", "utf8_size"])
+      && /^[a-f0-9]{64}$/u.test(receipt.prompt.sha256 ?? "")
+      && Number.isSafeInteger(receipt.prompt.utf8_size)
+      && receipt.prompt.utf8_size > 0,
+    "CLAUDE_DEEPSEEK_ROLE_RECEIPT_PROMPT_INVALID",
+    "Evidence V2 role prompt receipt is invalid",
+  );
+  requireContract(validRoleToolPolicy(receipt.tool_policy, role), "CLAUDE_DEEPSEEK_ROLE_RECEIPT_TOOL_POLICY_INVALID", "Evidence V2 role tool policy receipt is invalid");
+  const budgetPrior = priorCostUsd === null ? receipt.budget?.prior_cost_usd : priorCostUsd;
+  const expectedEffective = Number.isFinite(budgetPrior)
+    ? Math.max(0, Math.round((CLAUDE_DEEPSEEK_MODEL_CERT_ROLE_POOL_USD - budgetPrior) * 1_000_000) / 1_000_000)
+    : null;
+  requireContract(
+    exactKeys(receipt.budget, ROLE_BUDGET_FIELDS)
+      && receipt.budget.schema_version === 1
+      && receipt.budget.stage_cap_usd === planCaps.max_budget_usd
+      && receipt.budget.role === role
+      && receipt.budget.role_pool_usd === CLAUDE_DEEPSEEK_MODEL_CERT_ROLE_POOL_USD
+      && receipt.budget.prior_cost_usd === budgetPrior
+      && receipt.budget.effective_call_cap_usd === expectedEffective
+      && receipt.budget.enforcement === CLAUDE_DEEPSEEK_MODEL_CERT_BUDGET_ENFORCEMENT
+      && receipt.max_budget_usd === expectedEffective,
+    "CLAUDE_DEEPSEEK_ROLE_RECEIPT_BUDGET_INVALID",
+    "Evidence V2 role budget receipt is invalid",
+  );
+  const usage = receipt.usage === null ? null : normalizedUsage(receipt.usage);
+  requireContract(receipt.usage === null || (
+    exactKeys(receipt.usage, [
+      "schema_version", "input_tokens", "output_tokens", "cache_creation_input_tokens",
+      "cache_read_input_tokens", "total_tokens", "cost_usd",
+    ])
+      && receipt.usage.schema_version === 1
+      && canonicalJson(receipt.usage) === canonicalJson(usage)
+  ), "CLAUDE_DEEPSEEK_ROLE_RECEIPT_USAGE_INVALID", "Evidence V2 role usage fields are not closed");
+  requireContract(receipt.usage_complete === (usage !== null), "CLAUDE_DEEPSEEK_ROLE_RECEIPT_USAGE_INVALID", "Evidence V2 role usage completeness is inconsistent");
+  requireContract(receipt.provider_terminal === null || validRoleProviderTerminal(receipt.provider_terminal), "CLAUDE_DEEPSEEK_ROLE_RECEIPT_TERMINAL_INVALID", "Evidence V2 role provider terminal is invalid");
+  if (success) {
+    requireContract(
+      usage !== null && usage.cost_usd <= expectedEffective,
+      "CLAUDE_DEEPSEEK_ROLE_RECEIPT_BUDGET_INVALID",
+      "Evidence V2 successful role usage exceeded its effective call cap",
+    );
+    requireContract(receipt.failure_code === null
+      && usage.total_tokens <= planCaps.max_total_tokens
+      && receipt.provider_terminal?.subtype === "success"
+      && receipt.provider_terminal.is_error === false
+      && validRoleEnvironmentPolicy(receipt.environment_policy)
+      && validRoleWorkspaceAudit(receipt.workspace_audit, role, evaluationAttempt)
+      && Number.isSafeInteger(receipt.tool_count)
+      && receipt.tool_count > 0
+      && Number.isSafeInteger(receipt.denied_tool_attempt_count)
+      && receipt.denied_tool_attempt_count >= 0
+      && receipt.mcp_call_count === 0
+      && receipt.bash_call_count === 0,
+    "CLAUDE_DEEPSEEK_ROLE_RECEIPT_SUCCESS_INVALID", "Evidence V2 successful role receipt is incomplete or exceeded a cap");
+  } else {
+    requireContract(/^[A-Z][A-Z0-9_]*$/u.test(receipt.failure_code ?? "")
+      && receipt.workspace_audit === null
+      && (receipt.environment_policy === null || validRoleEnvironmentPolicy(receipt.environment_policy))
+      && (receipt.provider_terminal !== null || usage === null),
+    "CLAUDE_DEEPSEEK_ROLE_RECEIPT_FAILURE_INVALID", "Evidence V2 failed role receipt is inconsistent");
+  }
+  return receipt;
 }
 
 export function aggregateClaudeUsage(invocations) {
@@ -402,52 +666,21 @@ export function auditClaudeModelCertInvocations(invocations) {
   const roleCosts = { SPECIALIST: 0, REVIEWER: 0 };
   const primaryCosts = {};
   for (const item of invocations) {
-    requireContract(
-      item.phase === item.role
-        && ["SPECIALIST", "REVIEWER"].includes(item.role)
-        && ["PRIMARY", "REPAIR"].includes(item.evaluation_attempt)
-        && item.role_call_ordinal === (item.evaluation_attempt === "PRIMARY" ? 1 : 2)
-        && item.model === CLAUDE_DEEPSEEK_MODEL
-        && item.attempt === 1
-        && item.retry === 0
-        && item.status === "PASS"
-        && item.terminal === true
-        && Number.isSafeInteger(item.turns)
-        && item.turns > 0
-        && item.turns <= CLAUDE_DEEPSEEK_E2E_MAX_TURNS
-        && item.wall_timeout_seconds === CLAUDE_DEEPSEEK_CALL_WALL_SECONDS
-        && item.workspace_audit?.status === "PASS"
-        && item.workspace_audit?.harness_normalized === false
-        && item.tool_policy?.shell === false
-        && item.tool_policy?.network === false,
-      "CLAUDE_DEEPSEEK_MODEL_CERT_INVOCATION_INVALID",
-      "Evidence V2 model-cert invocation identity or role boundary drifted",
-      { role: item?.role ?? null, evaluation_attempt: item?.evaluation_attempt ?? null },
-    );
-    const usage = normalizedUsage(item.usage);
     const priorCostUsd = item.evaluation_attempt === "PRIMARY" ? 0 : primaryCosts[item.role];
-    const effectiveCallCapUsd = Number.isFinite(priorCostUsd)
-      ? Math.max(0, Math.round((CLAUDE_DEEPSEEK_MODEL_CERT_ROLE_POOL_USD - priorCostUsd) * 1_000_000) / 1_000_000)
-      : null;
-    requireContract(
-      exactKeys(item.budget, [
-        "schema_version", "stage_cap_usd", "role", "role_pool_usd", "prior_cost_usd",
-        "effective_call_cap_usd", "enforcement",
-      ])
-        && item.budget.schema_version === 1
-        && item.budget.stage_cap_usd === CLAUDE_DEEPSEEK_E2E_USD_LIMIT
-        && item.budget.role === item.role
-        && item.budget.role_pool_usd === CLAUDE_DEEPSEEK_MODEL_CERT_ROLE_POOL_USD
-        && item.budget.prior_cost_usd === priorCostUsd
-        && item.budget.effective_call_cap_usd === effectiveCallCapUsd
-        && item.budget.enforcement === CLAUDE_DEEPSEEK_MODEL_CERT_BUDGET_ENFORCEMENT
-        && item.max_budget_usd === effectiveCallCapUsd
-        && effectiveCallCapUsd > 0
-        && usage.cost_usd <= effectiveCallCapUsd,
-      "CLAUDE_DEEPSEEK_MODEL_CERT_BUDGET_RECEIPT_INVALID",
-      "Evidence V2 model-cert invocation budget receipt is invalid or terminal cost exceeded its effective call cap",
-      { role: item?.role ?? null, evaluation_attempt: item?.evaluation_attempt ?? null },
-    );
+    try {
+      validateClaudeDeepseekRoleReceipt(item, {
+        planCaps: CLAUDE_DEEPSEEK_MODEL_CERT_PLAN_CAPS,
+        expectedRole: item.role,
+        expectedAttempt: item.evaluation_attempt,
+        priorCostUsd,
+      });
+    } catch (error) {
+      if (error?.code === "CLAUDE_DEEPSEEK_ROLE_RECEIPT_BUDGET_INVALID") {
+        fail("CLAUDE_DEEPSEEK_MODEL_CERT_BUDGET_RECEIPT_INVALID", "Evidence V2 model-cert role budget receipt is invalid", { role: item?.role ?? null });
+      }
+      throw error;
+    }
+    const usage = normalizedUsage(item.usage);
     if (item.evaluation_attempt === "PRIMARY") primaryCosts[item.role] = usage.cost_usd;
     roleCosts[item.role] = Math.round((roleCosts[item.role] + usage.cost_usd) * 1_000_000) / 1_000_000;
     requireContract(
@@ -515,13 +748,8 @@ export function auditClaudeStream(events, { phase, allowedTools, maxTurns, wallT
   };
   events.forEach(visitDenied);
   requireContract(tools.every((item) => allowed.has(item.name) || deniedToolIds.has(item.id)), "CLAUDE_DEEPSEEK_STREAM_TOOL_FORBIDDEN", "Claude used a tool outside the phase allowlist");
-  const usage = normalizedUsage({
-    input_tokens: result.usage?.input_tokens,
-    output_tokens: result.usage?.output_tokens,
-    cache_creation_input_tokens: result.usage?.cache_creation_input_tokens,
-    cache_read_input_tokens: result.usage?.cache_read_input_tokens,
-    cost_usd: result.total_cost_usd ?? result.cost_usd,
-  });
+  const usage = resolvedTerminalUsage(result);
+  requireContract(usage !== null, "CLAUDE_DEEPSEEK_TERMINAL_USAGE_INVALID", "Claude terminal usage sources are incomplete or inconsistent");
   return { schema_version: 1, status: "PASS", phase, model: init[0].model, turns: result.num_turns, wall_timeout_seconds: wallTimeoutSeconds, usage, tools };
 }
 

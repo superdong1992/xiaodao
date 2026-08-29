@@ -6,6 +6,7 @@ import path from "node:path";
 import test from "node:test";
 
 import { canonicalJson } from "../../../lib/util.mjs";
+import { ISOLATED_AGENT_ENV_POLICY_VERSION, environmentKeySummary } from "../../../runtime-support/isolated-agent-env.mjs";
 import {
   CLAUDE_DEEPSEEK_CLI_SHA256,
   CLAUDE_DEEPSEEK_CLIENT_PROMPT_VERSION,
@@ -237,12 +238,31 @@ test("Evidence V2 model cert allows only S primary/repair then blind R primary/r
   const roleInvocation = (role, evaluationAttempt) => {
     const priorCostUsd = evaluationAttempt === "PRIMARY" ? 0 : 0.01;
     const effectiveCallCapUsd = 2 - priorCostUsd;
+    const output = role === "SPECIALIST" ? "output/method-diagnosis.draft.json" : "output/method-review.draft.json";
+    const policy = {
+      schema_version: 1,
+      tools: ["Read", "Write"],
+      allowed_tools: ["Read(//workspace/inputs/**)", `Edit(//workspace/${output})`],
+      readable_scope: "job-workspace-inputs",
+      writable_scope: output,
+      network: false,
+      shell: false,
+      skill_loading: false,
+    };
+    const rawUsage = usage();
     return {
       ...invocations([role])[0],
+      schema_version: 1,
+      invocation_id: `run:${role.toLowerCase()}:${evaluationAttempt.toLowerCase()}`,
+      usage: { schema_version: 1, ...rawUsage, total_tokens: 20 },
       role,
       evaluation_attempt: evaluationAttempt,
       role_call_ordinal: evaluationAttempt === "PRIMARY" ? 1 : 2,
       max_budget_usd: effectiveCallCapUsd,
+      max_turns: 50,
+      max_output_tokens: 64_000,
+      appended_system_prompt: null,
+      workflow: `${role}:${evaluationAttempt}`,
       budget: {
         schema_version: 1,
         stage_cap_usd: 4,
@@ -252,8 +272,27 @@ test("Evidence V2 model cert allows only S primary/repair then blind R primary/r
         effective_call_cap_usd: effectiveCallCapUsd,
         enforcement: CLAUDE_DEEPSEEK_MODEL_CERT_BUDGET_ENFORCEMENT,
       },
-      workspace_audit: { status: "PASS", harness_normalized: false },
-      tool_policy: { shell: false, network: false },
+      prompt: { sha256: "a".repeat(64), utf8_size: 10 },
+      environment_policy: {
+        schema_version: 1,
+        version: ISOLATED_AGENT_ENV_POLICY_VERSION,
+        provider_auth_source: "audited-settings-file",
+        inbound: environmentKeySummary({ PATH: "/bin" }),
+        claude_process: environmentKeySummary({ PATH: "/bin" }),
+      },
+      provider_terminal: { subtype: "success", is_error: false, stop_reason: null, exit_code: 0, signal: null },
+      workspace_audit: {
+        schema_version: 1, status: "PASS", role, attempt: evaluationAttempt, reads: 1, writes: 1,
+        output_path: output, output_size: 10, output_sha256: "b".repeat(64), harness_normalized: false,
+      },
+      tool_policy: { ...policy, sha256: crypto.createHash("sha256").update(canonicalJson(policy)).digest("hex") },
+      usage_complete: true,
+      failure_code: null,
+      disallowed_tools: ["Bash", "Glob", "Grep", "Skill"],
+      tool_count: 2,
+      denied_tool_attempt_count: 0,
+      mcp_call_count: 0,
+      bash_call_count: 0,
     };
   };
   const normal = [roleInvocation("SPECIALIST", "PRIMARY"), roleInvocation("REVIEWER", "PRIMARY")];

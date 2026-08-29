@@ -76,8 +76,7 @@ import {
 } from "../runtime-support/codex-luna-app-server.mjs";
 
 test("Evidence V2 provider ledgers allow only S:P,[S:R],R:P,[R:R] with two normal and four maximum calls", () => {
-  const phases = ["SPECIALIST:PRIMARY", "SPECIALIST:REPAIR?", "REVIEWER:PRIMARY", "REVIEWER:REPAIR?"];
-  const planStage = { invocation_caps: [{ class: "claude-deepseek-macos-e2e", phases, min_count: 2, max_count: 4, normal_count: 2, repair_max_count: 2 }] };
+  const planStage = evidenceV2ProviderPlanStage("claude-deepseek-macos-e2e");
   const invocation = (ordinal, role, evaluationAttempt) => ({ invocation_id: `call-${ordinal}`, role, evaluation_attempt: evaluationAttempt, status: "PASS", terminal: true });
   const primary = [invocation(1, "SPECIALIST", "PRIMARY"), invocation(2, "REVIEWER", "PRIMARY")];
   const repaired = [invocation(1, "SPECIALIST", "PRIMARY"), invocation(2, "SPECIALIST", "REPAIR"), invocation(3, "REVIEWER", "PRIMARY"), invocation(4, "REVIEWER", "REPAIR")];
@@ -103,6 +102,34 @@ test("Evidence V2 provider ledgers allow only S:P,[S:R],R:P,[R:R] with two norma
   const overCallCap = structuredClone(deepseekRepaired);
   overCallCap[0].usage.cost_usd = 2.000001;
   assert.equal(validClaudeDeepseekInvocationLedger(planStage, { status: "PASS", invocations: overCallCap }), false);
+  for (const mutate of [
+    (value) => { value.model = "WRONG_MODEL"; },
+    (value) => { value.turns = 51; },
+    (value) => { value.workspace_audit = null; },
+    (value) => {
+      value.tool_policy.network = true;
+      const core = { ...value.tool_policy };
+      delete core.sha256;
+      value.tool_policy.sha256 = crypto.createHash("sha256").update(canonicalJson(core)).digest("hex");
+    },
+    (value) => {
+      value.tool_policy.shell = true;
+      const core = { ...value.tool_policy };
+      delete core.sha256;
+      value.tool_policy.sha256 = crypto.createHash("sha256").update(canonicalJson(core)).digest("hex");
+    },
+    (value) => {
+      value.started_at_utc = "2026-08-29T00:00:02.000Z";
+      value.finished_at_utc = "2026-08-29T00:00:01.000Z";
+    },
+  ]) {
+    const changed = structuredClone(deepseekRepaired);
+    mutate(changed[0]);
+    assert.equal(validClaudeDeepseekInvocationLedger(planStage, { status: "PASS", invocations: changed }), false);
+  }
+  const mismatchedPlanCap = structuredClone(planStage);
+  mismatchedPlanCap.hard_caps.max_budget_usd = 5;
+  assert.equal(validClaudeDeepseekInvocationLedger(mismatchedPlanCap, { status: "PASS", invocations: deepseekRepaired }), false);
   assert.equal(validEvidenceV2ProviderInvocationLedger(planStage, { status: "PASS", invocations: primary.map(({ evaluation_attempt: attempt, ...item }) => ({ ...item, attempt })) }), true);
   assert.equal(validEvidenceV2ProviderInvocationLedger(planStage, { status: "PASS", invocations: [...repaired, invocation(5, "REVIEWER", "REPAIR")] }), false);
   assert.equal(validEvidenceV2ProviderInvocationLedger(planStage, { status: "PASS", invocations: [invocation(1, "SPECIALIST", "PRIMARY"), invocation(2, "SPECIALIST", "REPAIR"), invocation(3, "SPECIALIST", "REPAIR"), invocation(4, "REVIEWER", "PRIMARY")] }), false);
@@ -110,6 +137,7 @@ test("Evidence V2 provider ledgers allow only S:P,[S:R],R:P,[R:R] with two norma
 });
 
 function evidenceV2ProviderPlanStage(invocationClass) {
+  const deepseek = invocationClass === "claude-deepseek-macos-e2e";
   return {
     invocation_caps: [{
       class: invocationClass,
@@ -119,7 +147,9 @@ function evidenceV2ProviderPlanStage(invocationClass) {
       normal_count: 2,
       repair_max_count: 2,
     }],
-    hard_caps: { max_turns: 10, max_total_tokens: 1000, max_budget_usd: 1, hard_timeout_seconds: 600 },
+    hard_caps: deepseek
+      ? { max_turns: 50, max_total_tokens: 2_000_000, max_output_tokens: 64_000, max_budget_usd: 4, hard_timeout_seconds: 600 }
+      : { max_turns: 10, max_total_tokens: 1000, max_budget_usd: 1, hard_timeout_seconds: 600 },
   };
 }
 
@@ -180,6 +210,19 @@ function providerRoleReceipt(provider, role, attempt, ordinal, priorCostUsd = 0)
       usage: { input_tokens: 10 * ordinal, cached_input_tokens: 0, cache_write_input_tokens: 0, output_tokens: 5 * ordinal, reasoning_output_tokens: 0, total_tokens: 15 * ordinal },
     };
   }
+  const output = role === "SPECIALIST"
+    ? "output/method-diagnosis.draft.json"
+    : "output/method-review.draft.json";
+  const toolPolicy = {
+    schema_version: 1,
+    tools: ["Read", "Write"],
+    allowed_tools: ["Read(//workspace/inputs/**)", `Edit(//workspace/${output})`],
+    readable_scope: "job-workspace-inputs",
+    writable_scope: output,
+    network: false,
+    shell: false,
+    skill_loading: false,
+  };
   return {
     ...base,
     phase: role,
@@ -189,7 +232,13 @@ function providerRoleReceipt(provider, role, attempt, ordinal, priorCostUsd = 0)
     role_call_ordinal: attempt === "PRIMARY" ? 1 : 2,
     workflow: `${role}:${attempt}`,
     turns: 1,
+    started_at_utc: "2026-08-29T00:00:00.000Z",
+    finished_at_utc: "2026-08-29T00:00:01.000Z",
+    wall_timeout_seconds: 600,
+    max_turns: 50,
     max_budget_usd: 2 - priorCostUsd,
+    max_output_tokens: 64_000,
+    appended_system_prompt: null,
     budget: {
       schema_version: 1,
       stage_cap_usd: 4,
@@ -199,11 +248,68 @@ function providerRoleReceipt(provider, role, attempt, ordinal, priorCostUsd = 0)
       effective_call_cap_usd: 2 - priorCostUsd,
       enforcement: "claude-cli-threshold+terminal-posthoc-release-cap",
     },
+    prompt: { sha256: "a".repeat(64), utf8_size: 10 },
+    tool_policy: {
+      ...toolPolicy,
+      sha256: crypto.createHash("sha256").update(canonicalJson(toolPolicy)).digest("hex"),
+    },
+    workspace_audit: {
+      schema_version: 1,
+      status: "PASS",
+      role,
+      attempt,
+      reads: 1,
+      writes: 1,
+      output_path: output,
+      output_size: 10,
+      output_sha256: "b".repeat(64),
+      harness_normalized: false,
+    },
+    environment_policy: {
+      schema_version: 1,
+      version: ISOLATED_AGENT_ENV_POLICY_VERSION,
+      provider_auth_source: "audited-settings-file",
+      inbound: environmentKeySummary({ PATH: "/bin" }),
+      claude_process: environmentKeySummary({ PATH: "/bin" }),
+    },
     provider_terminal: { subtype: "success", is_error: false, stop_reason: null, exit_code: 0, signal: null },
     usage_complete: true,
     failure_code: null,
     usage: { schema_version: 1, input_tokens: 10 * ordinal, output_tokens: 5 * ordinal, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, total_tokens: 15 * ordinal, cost_usd: 0.01 * ordinal },
+    disallowed_tools: ["Bash", "Glob", "Grep", "Skill"],
+    tool_count: 2,
+    denied_tool_attempt_count: 0,
+    mcp_call_count: 0,
+    bash_call_count: 0,
   };
+}
+
+function failedProviderRoleReceipt(provider, role, attempt, ordinal, {
+  failureCode,
+  priorCostUsd = 0,
+  usage = undefined,
+  providerTerminal = undefined,
+} = {}) {
+  const receipt = {
+    ...providerRoleReceipt(provider, role, attempt, ordinal, priorCostUsd),
+    status: "FAIL",
+    failure_code: failureCode,
+  };
+  if (usage !== undefined) {
+    receipt.usage = usage;
+    receipt.usage_complete = receipt.usage !== null;
+  }
+  if (provider === "codex-luna") return receipt;
+  receipt.workspace_audit = null;
+  receipt.provider_terminal = providerTerminal === undefined
+    ? { subtype: "error", is_error: true, stop_reason: null, exit_code: 1, signal: null }
+    : providerTerminal;
+  receipt.usage_complete = receipt.usage !== null;
+  delete receipt.tool_count;
+  delete receipt.denied_tool_attempt_count;
+  delete receipt.mcp_call_count;
+  delete receipt.bash_call_count;
+  return receipt;
 }
 
 function writeZeroCallRuntimeReceipt(outputRoot, {
@@ -277,14 +383,9 @@ test("P1 and P2 central actions retain the terminal failed call and its usage", 
     const usageRoot = path.join(root, fixture.provider, "usage");
     fs.mkdirSync(outputRoot, { recursive: true });
     fs.mkdirSync(usageRoot, { recursive: true });
-    const failed = {
-      ...providerRoleReceipt(fixture.provider, "SPECIALIST", "PRIMARY", 1),
-      status: "FAIL",
-      failure_code: fixture.code,
-      ...(fixture.provider === "claude-deepseek" ? {
-        provider_terminal: { subtype: "error", is_error: true, stop_reason: null, exit_code: 1, signal: null },
-      } : {}),
-    };
+    const failed = failedProviderRoleReceipt(fixture.provider, "SPECIALIST", "PRIMARY", 1, {
+      failureCode: fixture.code,
+    });
     fs.writeFileSync(path.join(usageRoot, "specialist-primary.json"), canonicalJson(failed));
     const first = collectProviderFailureObservability({
       provider: fixture.provider,
@@ -341,29 +442,17 @@ test("P1 central projection preserves the real DeepSeek budget terminal and matc
     cost_usd: 1.047635,
   };
   const roleReceiptPath = path.join(usageRoot, "specialist-primary.json");
-  const validRoleReceipt = {
-    ...providerRoleReceipt("claude-deepseek", "SPECIALIST", "PRIMARY", 1),
-    status: "FAIL",
+  const validRoleReceipt = failedProviderRoleReceipt("claude-deepseek", "SPECIALIST", "PRIMARY", 1, {
+    failureCode: "CLAUDE_DEEPSEEK_MAX_BUDGET_EXCEEDED",
     usage,
-    usage_complete: true,
-    failure_code: "CLAUDE_DEEPSEEK_MAX_BUDGET_EXCEEDED",
-    provider_terminal: {
+    providerTerminal: {
       subtype: "error_max_budget_usd",
       is_error: true,
       stop_reason: "tool_use",
       exit_code: 1,
       signal: null,
     },
-    budget: {
-      schema_version: 1,
-      stage_cap_usd: 4,
-      role: "SPECIALIST",
-      role_pool_usd: 2,
-      prior_cost_usd: 0,
-      effective_call_cap_usd: 2,
-      enforcement: "claude-cli-threshold+terminal-posthoc-release-cap",
-    },
-  };
+  });
   fs.writeFileSync(roleReceiptPath, canonicalJson(validRoleReceipt));
   fs.writeFileSync(path.join(outputRoot, "model-usage.json"), canonicalJson({
     schema_version: 1,
@@ -431,14 +520,13 @@ test("P1 and P2 retain a legal failed prefix when the terminal call has no usage
       path.join(usageRoot, "specialist-primary.json"),
       canonicalJson(providerRoleReceipt(fixture.provider, "SPECIALIST", "PRIMARY", 1)),
     );
-    fs.writeFileSync(path.join(usageRoot, "reviewer-primary.json"), canonicalJson({
-      ...providerRoleReceipt(fixture.provider, "REVIEWER", "PRIMARY", 2),
-      status: "FAIL",
-      usage_complete: false,
-      usage: null,
-      failure_code: fixture.code,
-      ...(fixture.provider === "claude-deepseek" ? { provider_terminal: null } : {}),
-    }));
+    fs.writeFileSync(path.join(usageRoot, "reviewer-primary.json"), canonicalJson(
+      failedProviderRoleReceipt(fixture.provider, "REVIEWER", "PRIMARY", 2, {
+        failureCode: fixture.code,
+        usage: null,
+        ...(fixture.provider === "claude-deepseek" ? { providerTerminal: null } : {}),
+      }),
+    ));
     const observed = collectProviderFailureObservability({
       provider: fixture.provider,
       result: { status: "FAIL" },
