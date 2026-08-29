@@ -50,6 +50,7 @@ export const CLAUDE_DEEPSEEK_METHODS_USD_LIMIT = 10;
 export const CLAUDE_DEEPSEEK_E2E_TOKEN_LIMIT = 2_000_000;
 export const CLAUDE_DEEPSEEK_E2E_USD_LIMIT = 4;
 export const CLAUDE_DEEPSEEK_MODEL_CERT_ROLE_POOL_USD = CLAUDE_DEEPSEEK_E2E_USD_LIMIT / CLAUDE_DEEPSEEK_MODEL_CERT_NORMAL_CALLS;
+export const CLAUDE_DEEPSEEK_MODEL_CERT_BUDGET_ENFORCEMENT = "claude-cli-threshold+terminal-posthoc-release-cap";
 export const CLAUDE_DEEPSEEK_METHODS_MAX_TURNS = 16;
 export const CLAUDE_DEEPSEEK_E2E_MAX_TURNS = 50;
 export const CLAUDE_DEEPSEEK_MAX_OUTPUT_TOKENS = 64_000;
@@ -88,6 +89,11 @@ function isPlainObject(value) {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
   const prototype = Object.getPrototypeOf(value);
   return prototype === Object.prototype || prototype === null;
+}
+
+function exactKeys(value, keys) {
+  return isPlainObject(value)
+    && canonicalJson(Object.keys(value).sort()) === canonicalJson([...keys].sort());
 }
 
 function ordinaryFile(filePath, label) {
@@ -393,6 +399,8 @@ export function auditClaudeModelCertInvocations(invocations) {
     "Evidence V2 model-cert role calls are out of order or exceed the repair allowance",
     { attempts },
   );
+  const roleCosts = { SPECIALIST: 0, REVIEWER: 0 };
+  const primaryCosts = {};
   for (const item of invocations) {
     requireContract(
       item.phase === item.role
@@ -416,7 +424,38 @@ export function auditClaudeModelCertInvocations(invocations) {
       "Evidence V2 model-cert invocation identity or role boundary drifted",
       { role: item?.role ?? null, evaluation_attempt: item?.evaluation_attempt ?? null },
     );
-    normalizedUsage(item.usage);
+    const usage = normalizedUsage(item.usage);
+    const priorCostUsd = item.evaluation_attempt === "PRIMARY" ? 0 : primaryCosts[item.role];
+    const effectiveCallCapUsd = Number.isFinite(priorCostUsd)
+      ? Math.max(0, Math.round((CLAUDE_DEEPSEEK_MODEL_CERT_ROLE_POOL_USD - priorCostUsd) * 1_000_000) / 1_000_000)
+      : null;
+    requireContract(
+      exactKeys(item.budget, [
+        "schema_version", "stage_cap_usd", "role", "role_pool_usd", "prior_cost_usd",
+        "effective_call_cap_usd", "enforcement",
+      ])
+        && item.budget.schema_version === 1
+        && item.budget.stage_cap_usd === CLAUDE_DEEPSEEK_E2E_USD_LIMIT
+        && item.budget.role === item.role
+        && item.budget.role_pool_usd === CLAUDE_DEEPSEEK_MODEL_CERT_ROLE_POOL_USD
+        && item.budget.prior_cost_usd === priorCostUsd
+        && item.budget.effective_call_cap_usd === effectiveCallCapUsd
+        && item.budget.enforcement === CLAUDE_DEEPSEEK_MODEL_CERT_BUDGET_ENFORCEMENT
+        && item.max_budget_usd === effectiveCallCapUsd
+        && effectiveCallCapUsd > 0
+        && usage.cost_usd <= effectiveCallCapUsd,
+      "CLAUDE_DEEPSEEK_MODEL_CERT_BUDGET_RECEIPT_INVALID",
+      "Evidence V2 model-cert invocation budget receipt is invalid or terminal cost exceeded its effective call cap",
+      { role: item?.role ?? null, evaluation_attempt: item?.evaluation_attempt ?? null },
+    );
+    if (item.evaluation_attempt === "PRIMARY") primaryCosts[item.role] = usage.cost_usd;
+    roleCosts[item.role] = Math.round((roleCosts[item.role] + usage.cost_usd) * 1_000_000) / 1_000_000;
+    requireContract(
+      roleCosts[item.role] <= CLAUDE_DEEPSEEK_MODEL_CERT_ROLE_POOL_USD,
+      "CLAUDE_DEEPSEEK_MODEL_CERT_ROLE_BUDGET_EXCEEDED",
+      "Evidence V2 model-cert role usage exceeded its two-dollar pool",
+      { role: item.role },
+    );
   }
   const aggregate = aggregateClaudeUsage(invocations);
   requireContract(

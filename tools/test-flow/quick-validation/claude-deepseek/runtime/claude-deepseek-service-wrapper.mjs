@@ -9,6 +9,7 @@ import {
   CLAUDE_DEEPSEEK_CALL_WALL_SECONDS,
   CLAUDE_DEEPSEEK_E2E_MAX_TURNS,
   CLAUDE_DEEPSEEK_E2E_USD_LIMIT,
+  CLAUDE_DEEPSEEK_MODEL_CERT_BUDGET_ENFORCEMENT,
   CLAUDE_DEEPSEEK_MODEL_CERT_ROLE_POOL_USD,
   CLAUDE_DEEPSEEK_MODEL,
   CLAUDE_DEEPSEEK_NO_PROGRESS_SECONDS,
@@ -118,6 +119,28 @@ function roundedUsd(value) {
   return Math.round(value * 1_000_000) / 1_000_000;
 }
 
+function exactKeys(value, keys) {
+  return value !== null
+    && typeof value === "object"
+    && !Array.isArray(value)
+    && canonicalJson(Object.keys(value).sort()) === canonicalJson([...keys].sort());
+}
+
+function normalizedUsageOrNull(value) {
+  try { return aggregateClaudeUsage([{ usage: value }]); }
+  catch { return null; }
+}
+
+function closedProviderTerminal(value) {
+  if (!exactKeys(value, ["subtype", "is_error", "stop_reason", "exit_code", "signal"])) return null;
+  if (typeof value.subtype !== "string"
+    || typeof value.is_error !== "boolean"
+    || (value.stop_reason !== null && typeof value.stop_reason !== "string")
+    || (value.exit_code !== null && !Number.isSafeInteger(value.exit_code))
+    || (value.signal !== null && typeof value.signal !== "string")) return null;
+  return Object.freeze({ ...value });
+}
+
 export function roleInvocationBudget(usageRoot, role, attempt) {
   requireWrapper(Object.hasOwn(ROLE_SPEC, role) && ["PRIMARY", "REPAIR"].includes(attempt), "CLAUDE_DEEPSEEK_ROLE_BUDGET_IDENTITY_INVALID", "Evidence V2 role budget identity is invalid");
   let priorCostUsd = 0;
@@ -143,6 +166,7 @@ export function roleInvocationBudget(usageRoot, role, attempt) {
     role_pool_usd: CLAUDE_DEEPSEEK_MODEL_CERT_ROLE_POOL_USD,
     prior_cost_usd: priorCostUsd,
     effective_call_cap_usd: effectiveCallCapUsd,
+    enforcement: CLAUDE_DEEPSEEK_MODEL_CERT_BUDGET_ENFORCEMENT,
   });
 }
 
@@ -263,19 +287,24 @@ export async function runServiceInvocation(values, {
   const prompt = await readPrompt(stdin);
   const parsed = parseMethodsRolePrompt(prompt);
   const roleSpec = { ...parsed, role: parsed.role };
-  const claim = claimRoleAttempt(values["private-root"], parsed.role, parsed.attempt);
   const policy = roleToolPolicy({ workspaceRoot, output: parsed.output });
   const key = attemptKey(parsed.role, parsed.attempt);
   const traceRoot = path.join(path.resolve(values["evidence-root"]), "model-role-invocations");
   fs.mkdirSync(traceRoot, { recursive: true, mode: 0o700 });
   const progressPath = path.join(traceRoot, `${key}.progress`);
-  fs.writeFileSync(progressPath, "", { encoding: "utf8", mode: 0o600, flag: "wx" });
   const startedAtUtc = new Date().toISOString();
   let result = null;
   let budget = null;
+  let claim = null;
   try {
+    claim = claimRoleAttempt(values["private-root"], parsed.role, parsed.attempt);
     budget = roleInvocationBudget(values["usage-root"], parsed.role, parsed.attempt);
     requireWrapper(budget.effective_call_cap_usd > 0, "CLAUDE_DEEPSEEK_ROLE_BUDGET_EXHAUSTED", `${parsed.role} exhausted its model-cert role budget`);
+    try { fs.writeFileSync(progressPath, "", { encoding: "utf8", mode: 0o600, flag: "wx" }); }
+    catch (error) {
+      if (error?.code === "EEXIST") fail("CLAUDE_DEEPSEEK_ROLE_PROGRESS_EXISTS", `${parsed.role} ${parsed.attempt} progress receipt already exists`);
+      throw error;
+    }
     result = await runClaude({
       claudeEntry: path.resolve(values["claude-entry"]),
       settings: path.resolve(values.settings),
@@ -301,6 +330,22 @@ export async function runServiceInvocation(values, {
       fs.appendFileSync(progressPath, ".\n", { encoding: "utf8" });
       stdout.write(`TEST_FLOW_PROGRESS stage.progress claude-deepseek ${key}\n`);
     } });
+    const terminalUsage = normalizedUsageOrNull(result?.receipt?.usage);
+    requireWrapper(terminalUsage !== null, "CLAUDE_DEEPSEEK_ROLE_USAGE_INVALID", "Evidence V2 role terminal usage is incomplete");
+    requireWrapper(
+      terminalUsage.cost_usd <= budget.effective_call_cap_usd,
+      "CLAUDE_DEEPSEEK_CALL_BUDGET_EXCEEDED",
+      "Evidence V2 role terminal cost exceeded its effective Claude CLI threshold",
+    );
+    const providerTerminal = closedProviderTerminal(result?.receipt?.provider_terminal);
+    requireWrapper(
+      providerTerminal?.subtype === "success"
+        && providerTerminal.is_error === false
+        && providerTerminal.exit_code === 0
+        && providerTerminal.signal === null,
+      "CLAUDE_DEEPSEEK_ROLE_TERMINAL_INVALID",
+      "Evidence V2 role provider terminal is not one closed successful process result",
+    );
     requireWrapper(result.skills.length === 0 && result.bash.length === 0 && result.mcp.length === 0, "CLAUDE_DEEPSEEK_ROLE_NON_FILE_TOOL", "Evidence V2 role attempted a Skill, shell, or MCP call");
     requireWrapper(result.denied.every((item) => item.executed === false), "CLAUDE_DEEPSEEK_ROLE_DENIED_EXECUTION", "A denied Evidence V2 role tool executed");
     const workspaceAudit = auditRoleWorkspace({ workspaceRoot, roleSpec, processResult: result });
@@ -312,6 +357,8 @@ export async function runServiceInvocation(values, {
       role_call_ordinal: parsed.attempt === "PRIMARY" ? 1 : 2,
       max_budget_usd: budget.effective_call_cap_usd,
       budget,
+      provider_terminal: providerTerminal,
+      usage: terminalUsage,
       prompt: {
         sha256: sha256Bytes(prompt),
         utf8_size: Buffer.byteLength(prompt, "utf8"),
@@ -327,16 +374,19 @@ export async function runServiceInvocation(values, {
     stdout.write(`${String(terminal?.result ?? "")}\n`);
     return receipt;
   } catch (error) {
+    if (claim === null) throw error;
     const observed = error?.details?.terminal ?? null;
-    const usage = result?.receipt?.usage ?? observed?.usage ?? null;
+    const usage = normalizedUsageOrNull(result?.receipt?.usage ?? observed?.usage ?? null);
     const hasProcessExit = Object.hasOwn(error?.details ?? {}, "exit_code") || Object.hasOwn(error?.details ?? {}, "signal");
-    const providerTerminal = observed === null && !hasProcessExit ? null : Object.freeze({
-      subtype: observed?.subtype ?? null,
-      is_error: observed?.is_error ?? null,
-      stop_reason: observed?.stop_reason ?? null,
-      exit_code: error?.details?.exit_code ?? null,
-      signal: error?.details?.signal ?? null,
-    });
+    const providerTerminal = closedProviderTerminal(result?.receipt?.provider_terminal) ?? (
+      observed === null && !hasProcessExit ? null : closedProviderTerminal({
+        subtype: observed?.subtype ?? null,
+        is_error: observed?.is_error ?? null,
+        stop_reason: observed?.stop_reason ?? null,
+        exit_code: error?.details?.exit_code ?? null,
+        signal: error?.details?.signal ?? null,
+      })
+    );
     const receipt = Object.freeze({
       schema_version: 1,
       invocation_id: `${values["run-id"]}:${key}`,

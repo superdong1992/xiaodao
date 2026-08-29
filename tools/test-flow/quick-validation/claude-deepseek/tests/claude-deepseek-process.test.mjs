@@ -296,3 +296,69 @@ process.stdin.on("end", () => {
     },
   );
 });
+
+test("missing top-level tokens cannot hide an independent cost_usd conflict", async (context) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "claude-deepseek-missing-token-cost-conflict-"));
+  context.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const fake = path.join(root, "fake-cli.js");
+  const settings = path.join(root, "settings.json");
+  const cwd = path.join(root, "workspace");
+  const configRoot = path.join(root, "config");
+  const home = path.join(root, "home");
+  const temporary = path.join(root, "tmp");
+  for (const directory of [cwd, configRoot, home, temporary]) fs.mkdirSync(directory);
+  fs.writeFileSync(settings, "{}\n");
+  fs.writeFileSync(fake, `
+process.stdin.resume();
+process.stdin.on("end", () => {
+  process.stdout.write(JSON.stringify({type:"system",subtype:"init",model:"deepseek-v4-flash[1m]",cwd:process.cwd(),permissionMode:"dontAsk",tools:["Read"]})+"\\n");
+  process.stdout.write(JSON.stringify({
+    type:"result",subtype:"error",is_error:true,num_turns:1,cost_usd:0.03,
+    usage:{input_tokens:11,cache_creation_input_tokens:0,cache_read_input_tokens:0},
+    modelUsage:{"deepseek-v4-flash[1m]":{inputTokens:11,outputTokens:4,cacheReadInputTokens:0,cacheCreationInputTokens:0,costUSD:0.02}}
+  })+"\\n");
+  process.exitCode = 7;
+});
+`);
+  await assert.rejects(
+    runClaudeProcess({
+      claudeEntry: fake, settings, cwd, prompt: "evaluate", phase: "SPECIALIST", invocationId: "run:specialist-primary",
+      tools: ["Read"], allowedTools: [], maxTurns: 10, maxBudgetUsd: 1, wallTimeoutSeconds: 30, noProgressSeconds: 5,
+      environment: { configRoot, home, temporary },
+    }, { ambient: {} }),
+    (error) => {
+      assert.equal(error.code, "CLAUDE_DEEPSEEK_PROCESS_FAILED");
+      assert.equal(error.details.terminal.usage_complete, false);
+      assert.equal(error.details.terminal.usage, null);
+      return true;
+    },
+  );
+});
+
+test("a progress persistence callback failure rejects the claimed provider process", async (context) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "claude-deepseek-progress-callback-"));
+  context.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const fake = path.join(root, "fake-cli.js");
+  const settings = path.join(root, "settings.json");
+  const cwd = path.join(root, "workspace");
+  const configRoot = path.join(root, "config");
+  const home = path.join(root, "home");
+  const temporary = path.join(root, "tmp");
+  for (const directory of [cwd, configRoot, home, temporary]) fs.mkdirSync(directory);
+  fs.writeFileSync(settings, "{}\n");
+  fs.writeFileSync(fake, `
+process.stdin.resume();
+process.stdin.on("end", () => {
+  process.stdout.write(JSON.stringify({type:"system",subtype:"init",model:"deepseek-v4-flash[1m]",cwd:process.cwd(),permissionMode:"dontAsk",tools:["Read"]})+"\\n");
+  setTimeout(() => process.exit(0), 1000);
+});
+`);
+  await assert.rejects(
+    runClaudeProcess({
+      claudeEntry: fake, settings, cwd, prompt: "evaluate", phase: "SPECIALIST", invocationId: "run:specialist-primary",
+      tools: ["Read"], allowedTools: [], maxTurns: 10, maxBudgetUsd: 1, wallTimeoutSeconds: 30, noProgressSeconds: 5,
+      environment: { configRoot, home, temporary },
+    }, { ambient: {}, onProgress: () => { throw new Error("progress persistence failed"); } }),
+    (error) => error.code === "CLAUDE_DEEPSEEK_PROGRESS_CALLBACK_FAILED",
+  );
+});

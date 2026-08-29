@@ -12,6 +12,7 @@ import {
   CLAUDE_DEEPSEEK_CONTRACT_VERSION,
   CLAUDE_DEEPSEEK_MAX_OUTPUT_TOKENS,
   CLAUDE_DEEPSEEK_MODEL,
+  CLAUDE_DEEPSEEK_MODEL_CERT_BUDGET_ENFORCEMENT,
   CLAUDE_DEEPSEEK_MODEL_CERT_PHASES,
   CLAUDE_DEEPSEEK_MODEL_CERT_ROLE_POOL_USD,
   CLAUDE_DEEPSEEK_MODEL_CERT_SCENARIO,
@@ -114,6 +115,7 @@ test("Claude identity constants freeze 2.1.89, CLI hash, DeepSeek model, and 64k
   assert.equal(CLAUDE_DEEPSEEK_MODEL, "deepseek-v4-flash[1m]");
   assert.equal(CLAUDE_DEEPSEEK_MAX_OUTPUT_TOKENS, 64_000);
   assert.equal(CLAUDE_DEEPSEEK_MODEL_CERT_ROLE_POOL_USD, 2);
+  assert.equal(CLAUDE_DEEPSEEK_MODEL_CERT_BUDGET_ENFORCEMENT, "claude-cli-threshold+terminal-posthoc-release-cap");
   assert.deepEqual(CLAUDE_DEEPSEEK_MODEL_CERT_PHASES, ["SPECIALIST", "REVIEWER"]);
   assert.deepEqual(CLAUDE_DEEPSEEK_PUBLIC_TOOLS, []);
 });
@@ -232,18 +234,41 @@ test("usage aggregation is cache-inclusive and enforces lifecycle-aware no-retry
 });
 
 test("Evidence V2 model cert allows only S primary/repair then blind R primary/repair", () => {
-  const roleInvocation = (role, evaluationAttempt) => ({
-    ...invocations([role])[0],
-    role,
-    evaluation_attempt: evaluationAttempt,
-    role_call_ordinal: evaluationAttempt === "PRIMARY" ? 1 : 2,
-    workspace_audit: { status: "PASS", harness_normalized: false },
-    tool_policy: { shell: false, network: false },
-  });
+  const roleInvocation = (role, evaluationAttempt) => {
+    const priorCostUsd = evaluationAttempt === "PRIMARY" ? 0 : 0.01;
+    const effectiveCallCapUsd = 2 - priorCostUsd;
+    return {
+      ...invocations([role])[0],
+      role,
+      evaluation_attempt: evaluationAttempt,
+      role_call_ordinal: evaluationAttempt === "PRIMARY" ? 1 : 2,
+      max_budget_usd: effectiveCallCapUsd,
+      budget: {
+        schema_version: 1,
+        stage_cap_usd: 4,
+        role,
+        role_pool_usd: 2,
+        prior_cost_usd: priorCostUsd,
+        effective_call_cap_usd: effectiveCallCapUsd,
+        enforcement: CLAUDE_DEEPSEEK_MODEL_CERT_BUDGET_ENFORCEMENT,
+      },
+      workspace_audit: { status: "PASS", harness_normalized: false },
+      tool_policy: { shell: false, network: false },
+    };
+  };
   const normal = [roleInvocation("SPECIALIST", "PRIMARY"), roleInvocation("REVIEWER", "PRIMARY")];
   assert.deepEqual(auditClaudeModelCertInvocations(normal).repair_counts, { specialist: 0, reviewer: 0 });
   const repaired = [roleInvocation("SPECIALIST", "PRIMARY"), roleInvocation("SPECIALIST", "REPAIR"), roleInvocation("REVIEWER", "PRIMARY"), roleInvocation("REVIEWER", "REPAIR")];
   assert.equal(auditClaudeModelCertInvocations(repaired).actual_call_count, 4);
+  assert.equal(auditClaudeModelCertInvocations(repaired).aggregate.cost_usd, 0.04);
+  const overCallCap = structuredClone(normal);
+  overCallCap[0].usage.cost_usd = 2.000001;
+  assert.throws(() => auditClaudeModelCertInvocations(overCallCap), (error) => error.code === "CLAUDE_DEEPSEEK_MODEL_CERT_BUDGET_RECEIPT_INVALID");
+  const wrongRepairRemainder = structuredClone(repaired);
+  wrongRepairRemainder[1].budget.prior_cost_usd = 0;
+  wrongRepairRemainder[1].budget.effective_call_cap_usd = 2;
+  wrongRepairRemainder[1].max_budget_usd = 2;
+  assert.throws(() => auditClaudeModelCertInvocations(wrongRepairRemainder), (error) => error.code === "CLAUDE_DEEPSEEK_MODEL_CERT_BUDGET_RECEIPT_INVALID");
   assert.throws(() => auditClaudeModelCertInvocations([...normal, roleInvocation("SPECIALIST", "REPAIR")]), (error) => error.code === "CLAUDE_DEEPSEEK_MODEL_CERT_SEQUENCE_INVALID");
   assert.throws(() => auditClaudeModelCertInvocations([...repaired, roleInvocation("REVIEWER", "REPAIR")]), (error) => error.code === "CLAUDE_DEEPSEEK_MODEL_CERT_CALL_COUNT_INVALID");
 });

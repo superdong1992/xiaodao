@@ -81,10 +81,21 @@ function terminalUsageCandidate(values, costUsd) {
   };
 }
 
-function topLevelTerminalUsage(terminal) {
+function topLevelTerminalCost(terminal) {
+  const values = ["total_cost_usd", "cost_usd"]
+    .filter((field) => Object.hasOwn(terminal, field))
+    .map((field) => terminal[field]);
+  if (values.length === 0) return { present: false, cost_usd: null };
+  if (values.some((value) => !Number.isFinite(value) || value < 0)) return { present: true, cost_usd: null };
+  const costs = values.map((value) => Math.round(value * 1_000_000) / 1_000_000);
+  if (new Set(costs).size !== 1) return { present: true, cost_usd: null };
+  return { present: true, cost_usd: costs[0] };
+}
+
+function topLevelTerminalUsage(terminal, topLevelCost) {
   return terminalUsageCandidate(
     Object.fromEntries(TERMINAL_USAGE_FIELDS.map((field) => [field, terminal.usage?.[field]])),
-    terminal.total_cost_usd ?? terminal.cost_usd,
+    topLevelCost.cost_usd,
   );
 }
 
@@ -106,10 +117,12 @@ function modelTerminalUsage(terminal) {
 }
 
 function resolvedTerminalUsage(terminal) {
-  const topLevel = topLevelTerminalUsage(terminal);
+  const topLevelCost = topLevelTerminalCost(terminal);
+  const topLevel = topLevelTerminalUsage(terminal, topLevelCost);
   const model = modelTerminalUsage(terminal);
   if (!model.present) return topLevel;
   if (model.usage === null) return null;
+  if (topLevelCost.present && (topLevelCost.cost_usd === null || topLevelCost.cost_usd !== model.usage.cost_usd)) return null;
   if (topLevel === null || canonicalJson(topLevel) === canonicalJson(model.usage)) return model.usage;
   const costsMatch = topLevel.cost_usd === model.usage.cost_usd;
   if (costsMatch && topLevel.total_tokens === 0 && model.usage.total_tokens > 0) return model.usage;
@@ -242,6 +255,7 @@ export async function runClaudeProcess(options, { ambient = process.env, onProgr
   const stderr = [];
   let timedOut = false;
   let noProgressTimedOut = false;
+  let progressCallbackFailed = false;
   let lastProgress = Date.now();
   const exit = await new Promise((resolve, reject) => {
     const child = spawn(process.execPath, args, { cwd: options.cwd, env: environment, stdio: ["pipe", "pipe", "pipe"] });
@@ -258,7 +272,17 @@ export async function runClaudeProcess(options, { ambient = process.env, onProgr
     }, 1_000);
     hard.unref();
     progress.unref();
-    child.stdout.on("data", (chunk) => { stdout.push(chunk); lastProgress = Date.now(); onProgress?.(options.phase); });
+    child.stdout.on("data", (chunk) => {
+      stdout.push(chunk);
+      lastProgress = Date.now();
+      if (progressCallbackFailed) return;
+      try { onProgress?.(options.phase); }
+      catch {
+        progressCallbackFailed = true;
+        child.kill("SIGTERM");
+        setTimeout(() => child.exitCode === null && child.kill("SIGKILL"), 5_000).unref();
+      }
+    });
     child.stderr.on("data", (chunk) => { stderr.push(chunk); });
     child.once("error", (error) => { clearTimeout(hard); clearInterval(progress); reject(error); });
     child.once("exit", (code, signal) => { clearTimeout(hard); clearInterval(progress); resolve({ code, signal }); });
@@ -270,6 +294,7 @@ export async function runClaudeProcess(options, { ambient = process.env, onProgr
   if (options.stderrPath) writeNew(options.stderrPath, stderrBytes);
   const observedTerminal = terminalObservation(stdoutBytes);
   const processDetails = { exit_code: exit.code, signal: exit.signal, terminal: observedTerminal };
+  if (progressCallbackFailed) fail("CLAUDE_DEEPSEEK_PROGRESS_CALLBACK_FAILED", "Claude process progress receipt could not be persisted", processDetails);
   if (timedOut) fail("CLAUDE_DEEPSEEK_PROCESS_TIMEOUT", "Claude process exceeded its wall timeout", processDetails);
   if (noProgressTimedOut) fail("CLAUDE_DEEPSEEK_PROCESS_NO_PROGRESS", `Claude process made no semantic stream progress for ${options.noProgressSeconds} seconds`, processDetails);
   if (exit.code !== 0 || exit.signal !== null) {

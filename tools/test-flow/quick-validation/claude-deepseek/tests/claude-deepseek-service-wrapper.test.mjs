@@ -27,6 +27,14 @@ function workspace(root) {
   for (const name of ["request.json", "method-evidence-graph.json", "method-evaluation-plan.json"]) fs.writeFileSync(path.join(inputs, name), "{}\n");
 }
 
+const SUCCESS_PROVIDER_TERMINAL = Object.freeze({
+  subtype: "success",
+  is_error: false,
+  stop_reason: null,
+  exit_code: 0,
+  signal: null,
+});
+
 test("model-cert wrapper accepts only its frozen provider inputs", () => {
   const argv = ["--claude-entry", "/cli.js", "--settings", "/settings.json", "--config-root", "/config", "--private-root", "/private", "--evidence-root", "/evidence", "--usage-root", "/usage", "--run-id", "run"];
   assert.equal(parseArguments(argv)["run-id"], "run");
@@ -107,7 +115,7 @@ test("wrapper preserves the raw evaluation array and records the exact productio
         hooks.onProgress();
         fs.writeFileSync(output, content);
         return {
-          receipt: { schema_version: 1, invocation_id: options.invocationId, phase: "SPECIALIST", model: "deepseek-v4-flash[1m]", attempt: 1, retry: 0, status: "PASS", terminal: true, turns: 1, wall_timeout_seconds: 600, usage: { input_tokens: 1, output_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, cost_usd: 0 } },
+          receipt: { schema_version: 1, invocation_id: options.invocationId, phase: "SPECIALIST", model: "deepseek-v4-flash[1m]", attempt: 1, retry: 0, status: "PASS", terminal: true, turns: 1, wall_timeout_seconds: 600, provider_terminal: SUCCESS_PROVIDER_TERMINAL, usage: { input_tokens: 1, output_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, cost_usd: 0 } },
           records: [{ name: "Read", is_error: false, input: { file_path: path.join(root, "inputs", "method-evaluation-plan.json") } }, { name: "Write", is_error: false, input: { file_path: output, content } }],
           skills: [], bash: [], mcp: [], denied: [], events: [{ type: "result", result: "done" }],
         };
@@ -121,6 +129,7 @@ test("wrapper preserves the raw evaluation array and records the exact productio
       role_pool_usd: 2,
       prior_cost_usd: 0,
       effective_call_cap_usd: 2,
+      enforcement: "claude-cli-threshold+terminal-posthoc-release-cap",
     });
     assert.equal(receipt.max_budget_usd, 2);
     assert.equal(receipt.prompt.utf8_size, Buffer.byteLength(rawPrompt));
@@ -160,6 +169,7 @@ test("Specialist and Reviewer each own a two-dollar pool and repairs consume onl
               attempt: 1, retry: 0, status: "PASS", terminal: true, turns: 1,
               started_at_utc: "2026-08-29T00:00:00.000Z", finished_at_utc: "2026-08-29T00:00:01.000Z",
               wall_timeout_seconds: 600,
+              provider_terminal: SUCCESS_PROVIDER_TERMINAL,
               usage: { schema_version: 1, input_tokens: 10, output_tokens: 5, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, total_tokens: 15, cost_usd: costUsd },
             },
             records: [
@@ -216,6 +226,7 @@ test("a repair with no role-pool balance closes before invoking the provider", a
             schema_version: 1, invocation_id: options.invocationId, phase: "SPECIALIST", model: "deepseek-v4-flash[1m]",
             attempt: 1, retry: 0, status: "PASS", terminal: true, turns: 1,
             started_at_utc: "2026-08-29T00:00:00.000Z", finished_at_utc: "2026-08-29T00:00:01.000Z", wall_timeout_seconds: 600,
+            provider_terminal: SUCCESS_PROVIDER_TERMINAL,
             usage: { schema_version: 1, input_tokens: 10, output_tokens: 5, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, total_tokens: 15, cost_usd: 2 },
           },
           records: [
@@ -243,6 +254,76 @@ test("a repair with no role-pool balance closes before invoking the provider", a
     assert.equal(receipts[1].budget.prior_cost_usd, 2);
     assert.equal(receipts[1].budget.effective_call_cap_usd, 0);
     assert.equal(receipts[1].usage_complete, false);
+  } finally { process.chdir(previous); fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("a successful CLI terminal that slightly exceeds its threshold becomes one closed failed call", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "deepseek-role-posthoc-overage-"));
+  const previous = process.cwd();
+  try {
+    workspace(root);
+    process.chdir(root);
+    const values = {
+      "claude-entry": path.join(root, "cli.js"), settings: path.join(root, "settings.json"), "config-root": path.join(root, "config"),
+      "private-root": path.join(root, "private"), "evidence-root": path.join(root, "evidence"), "usage-root": path.join(root, "usage"), "run-id": "run",
+    };
+    for (const target of [values["claude-entry"], values.settings]) fs.writeFileSync(target, "fixture");
+    fs.mkdirSync(values["config-root"]);
+    await assert.rejects(runServiceInvocation(values, {
+      stdin: Readable.from([prompt("Specialist", "primary evaluation")]),
+      stdout: new Writable({ write(_chunk, _encoding, callback) { callback(); } }),
+      runClaude: async (options) => ({
+        receipt: {
+          schema_version: 1, invocation_id: options.invocationId, phase: "SPECIALIST", model: "deepseek-v4-flash[1m]",
+          attempt: 1, retry: 0, status: "PASS", terminal: true, turns: 1,
+          started_at_utc: "2026-08-29T00:00:00.000Z", finished_at_utc: "2026-08-29T00:00:01.000Z", wall_timeout_seconds: 600,
+          provider_terminal: SUCCESS_PROVIDER_TERMINAL,
+          usage: { schema_version: 1, input_tokens: 10, output_tokens: 5, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, total_tokens: 15, cost_usd: 2.000001 },
+        },
+        records: [], skills: [], bash: [], mcp: [], denied: [], events: [{ type: "result", result: "done" }],
+      }),
+    }), { code: "CLAUDE_DEEPSEEK_CALL_BUDGET_EXCEEDED" });
+    const [receipt] = readRoleInvocationReceipts(values["usage-root"]);
+    assert.equal(receipt.status, "FAIL");
+    assert.equal(receipt.failure_code, "CLAUDE_DEEPSEEK_CALL_BUDGET_EXCEEDED");
+    assert.equal(receipt.usage.cost_usd, 2.000001);
+    assert.equal(receipt.usage_complete, true);
+    assert.equal(receipt.budget.effective_call_cap_usd, 2);
+    assert.deepEqual(receipt.provider_terminal, SUCCESS_PROVIDER_TERMINAL);
+    assert.equal(fs.existsSync(path.join(root, "evidence", "model-cert.json")), false);
+  } finally { process.chdir(previous); fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("an existing progress file after claim still produces one closed failed receipt", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "deepseek-role-progress-conflict-"));
+  const previous = process.cwd();
+  try {
+    workspace(root);
+    process.chdir(root);
+    const values = {
+      "claude-entry": path.join(root, "cli.js"), settings: path.join(root, "settings.json"), "config-root": path.join(root, "config"),
+      "private-root": path.join(root, "private"), "evidence-root": path.join(root, "evidence"), "usage-root": path.join(root, "usage"), "run-id": "run",
+    };
+    for (const target of [values["claude-entry"], values.settings]) fs.writeFileSync(target, "fixture");
+    fs.mkdirSync(values["config-root"]);
+    const traceRoot = path.join(values["evidence-root"], "model-role-invocations");
+    fs.mkdirSync(traceRoot, { recursive: true });
+    fs.writeFileSync(path.join(traceRoot, "specialist-primary.progress"), "existing\n");
+    let providerCalled = false;
+    await assert.rejects(runServiceInvocation(values, {
+      stdin: Readable.from([prompt("Specialist", "primary evaluation")]),
+      stdout: new Writable({ write(_chunk, _encoding, callback) { callback(); } }),
+      runClaude: async () => { providerCalled = true; },
+    }), { code: "CLAUDE_DEEPSEEK_ROLE_PROGRESS_EXISTS" });
+    assert.equal(providerCalled, false);
+    const [receipt] = readRoleInvocationReceipts(values["usage-root"]);
+    assert.equal(receipt.status, "FAIL");
+    assert.equal(receipt.failure_code, "CLAUDE_DEEPSEEK_ROLE_PROGRESS_EXISTS");
+    assert.equal(receipt.usage, null);
+    assert.equal(receipt.provider_terminal, null);
+    assert.equal(receipt.budget.effective_call_cap_usd, 2);
+    assert.equal(fs.existsSync(path.join(values["private-root"], "model-role-claims", "specialist-primary")), true);
+    assert.deepEqual(receipt, JSON.parse(fs.readFileSync(path.join(traceRoot, "specialist-primary.receipt.json"), "utf8")));
   } finally { process.chdir(previous); fs.rmSync(root, { recursive: true, force: true }); }
 });
 
