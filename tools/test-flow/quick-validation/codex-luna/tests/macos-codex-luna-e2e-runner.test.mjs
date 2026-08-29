@@ -204,21 +204,89 @@ test("an injected provider receipt cannot mint a cert without production executi
 test("P1 and P2 failure adapters expose the same production terminal diagnostic", (context) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "provider-terminal-alignment-"));
   context.after(() => fs.rmSync(root, { recursive: true, force: true }));
-  const methodsResult = {
+  const fixtures = [
+    ["SPECIALIST_PROTOCOL_REPAIR_EXHAUSTED", "UNRESOLVED", 2, `eval-${SHA("1")}`],
+    ["SPECIALIST_MODEL_EXECUTION_FAILED", "UNRESOLVED", 1, `eval-${SHA("2")}`],
+    ["NO_MATCHING_METHOD_EVIDENCE", "UNRESOLVED", 0, null],
+    ["REVIEWER_MODEL_EXECUTION_FAILED", "UNRESOLVED", 2, `eval-${SHA("3")}`],
+    ["SERVER_INVARIANT_VIOLATION", "FAILED", 0, null],
+  ];
+  const withoutTarget = ({ certification_target: _target, ...value }) => value;
+  for (const [reasonCode, status, modelCalls, evaluationRef] of fixtures) {
+    const methodsResult = {
+      status,
+      reason_code: reasonCode,
+      reasons: [`${reasonCode} public reason`],
+      diagnostic_id: `diag-${SHA(String(modelCalls + 4))}`,
+      diagnostic_evaluation_ref: evaluationRef,
+    };
+    const options = { modelCalls, repairs: { specialist: modelCalls === 2 && reasonCode.startsWith("SPECIALIST_") ? 1 : 0, reviewer: 0 } };
+    const p1 = materializeP1TerminalFailure({ methods_result: methodsResult }, path.join(root, `p1-${reasonCode}`), options);
+    const p2 = materializeProviderTerminalFailure({ methods_result: methodsResult }, path.join(root, `p2-${reasonCode}`), options);
+    assert.deepEqual(withoutTarget(p1), withoutTarget(p2), reasonCode);
+    assert.equal(p1.code, reasonCode);
+    assert.equal(p2.diagnostic_id, methodsResult.diagnostic_id);
+    assert.equal(p2.evaluation_ref, evaluationRef);
+  }
+});
+
+test("P2 projects an early production terminal before complete-audit requirements", async (context) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-luna-early-terminal-"));
+  context.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const core = path.join(root, "core-verdict.json");
+  fs.writeFileSync(core, "{}\n");
+  const failedInvocation = {
+    ...invocation("SPECIALIST", "PRIMARY", 1),
+    status: "FAIL",
+    profile: null,
+    tool_policy: null,
+    output: null,
+    failure_code: "CODEX_LUNA_APP_SERVER_ERROR_NOTIFICATION",
+  };
+  const runtime = runtimeReceipt([failedInvocation]);
+  runtime.methods_result_identity.status = "UNRESOLVED";
+  runtime.methods_result = {
     status: "UNRESOLVED",
-    reason_code: "SPECIALIST_REVIEWER_DISAGREEMENT",
-    reasons: ["Specialist 与 Reviewer 的判定不一致。"],
+    reason_code: "SPECIALIST_MODEL_EXECUTION_FAILED",
+    reasons: ["Specialist 评估未能完成。"],
     diagnostic_id: `diag-${SHA("a")}`,
     diagnostic_evaluation_ref: `eval-${SHA("b")}`,
   };
-  const options = { modelCalls: 2, repairs: { specialist: 0, reviewer: 0 } };
-  const p1 = materializeP1TerminalFailure({ methods_result: methodsResult }, path.join(root, "p1"), options);
-  const p2 = materializeProviderTerminalFailure({ methods_result: methodsResult }, path.join(root, "p2"), options);
-  const withoutTarget = ({ certification_target: _target, ...value }) => value;
-  assert.deepEqual(withoutTarget(p1), withoutTarget(p2));
-  assert.equal(p1.code, methodsResult.reason_code);
-  assert.equal(p2.diagnostic_id, methodsResult.diagnostic_id);
-  assert.equal(p2.evaluation_ref, methodsResult.diagnostic_evaluation_ref);
+  const options = {
+    sourceRoot: REPO_ROOT,
+    codexEntry: path.join(root, "codex"),
+    authSource: path.join(root, "auth.json"),
+    pythonEntry: path.join(root, "python"),
+    cacheRoot: null,
+    registrationRoot: path.join(root, "registration"),
+    workRoot: path.join(root, "work"),
+    privateRoot: path.join(root, "private"),
+    evidenceRoot: path.join(root, "evidence"),
+    usageRoot: path.join(root, "usage"),
+    runId: "run",
+    sourceSnapshotDigest: SHA("a"),
+    coreVerdict: core,
+  };
+  fs.mkdirSync(options.registrationRoot);
+  const registration = { root: options.registrationRoot, source: "fake-app-server-registration", tree_sha256: treeDigest(options.registrationRoot) };
+  await assert.rejects(() => runE2E(options, {
+    validateIdentity: () => identity(),
+    validateCore: () => ({ status: "PASS" }),
+    registrationInput: () => ({ registration, producer: null, cache: null }),
+    runRuntime: async (runtimeOptions) => {
+      fs.writeFileSync(path.join(runtimeOptions.evidenceRoot, "runtime-receipt.json"), JSON.stringify(runtime));
+      return runtime;
+    },
+    readInvocations: () => [failedInvocation],
+    materializeModelCert: () => { throw new Error("must not materialize"); },
+  }), (error) => error.code === "SPECIALIST_MODEL_EXECUTION_FAILED");
+  const adapter = JSON.parse(fs.readFileSync(path.join(options.evidenceRoot, "adapter-receipt.json"), "utf8"));
+  assert.equal(adapter.code, "SPECIALIST_MODEL_EXECUTION_FAILED");
+  assert.equal(adapter.diagnostic_id, runtime.methods_result.diagnostic_id);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(options.evidenceRoot, "model-invocations.json"), "utf8")).status, "FAIL");
+  assert.equal(JSON.parse(fs.readFileSync(path.join(options.evidenceRoot, "model-usage.json"), "utf8")).status, "FAIL");
+  assert.equal(fs.existsSync(path.join(options.evidenceRoot, "model-cert-input.json")), false);
+  assert.equal(fs.existsSync(path.join(options.evidenceRoot, "model-cert.json")), false);
 });
 
 test("P2 writes failure evidence and preserves the production reason without minting a cert", async (context) => {

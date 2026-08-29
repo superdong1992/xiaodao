@@ -21,6 +21,7 @@ import {
 import { projectEvidenceV2ProviderTerminalFailure } from "../../../runtime-support/evidence-v2-provider-terminal.mjs";
 import {
   CLAUDE_DEEPSEEK_MODEL,
+  aggregateClaudeUsage,
   assertRegistrationUnchanged,
   auditClaudeModelCertInvocations,
   buildRegistrationProducerIdentity,
@@ -80,6 +81,24 @@ export function materializeProviderTerminalFailure(runtimeReceipt, evidenceRoot,
   });
   writeJsonNew(path.join(evidenceRoot, "adapter-receipt.json"), receipt);
   return receipt;
+}
+
+function failedModelUsage(invocations) {
+  try {
+    return {
+      schema_version: 1,
+      status: "FAIL",
+      usage_complete: true,
+      aggregate: aggregateClaudeUsage(invocations),
+    };
+  } catch {
+    return {
+      schema_version: 1,
+      status: "FAIL",
+      usage_complete: false,
+      aggregate: null,
+    };
+  }
 }
 
 export function validateExplicitRegistrationInput(registrationRoot, sourceRoot) {
@@ -400,6 +419,26 @@ export async function runE2E(options, { ambient = process.env, onProgress = null
     scenarioRoot,
   }, { ambient, onProgress });
   const invocations = readRoleInvocationReceipts(usageRoot);
+  const terminalFailure = projectEvidenceV2ProviderTerminalFailure({
+    certificationTarget: "P1",
+    methodsResult: runtimeReceipt?.methods_result,
+  });
+  if (terminalFailure !== null) {
+    const identityReceipt = { schema_version: 1, status: "PASS", claude: identity, producer, registration: cache.manifest.registration };
+    const packageReceipt = { schema_version: 2, status: "PASS", producer_identity: producer.producer_identity, registration_tree_sha256: cache.manifest.registration.tree_sha256, runtime_ref: cache.manifest.registration.runtime_ref ?? { id: `diagnosis-skill/${runtimeReceipt.registration_id}`, version: "1.0.0", content_hash: runtimeReceipt.scenario.skill_content_sha256 } };
+    writeJsonNew(path.join(evidenceRoot, "claude-identity.json"), identityReceipt);
+    writeJsonNew(path.join(evidenceRoot, "methods-package.json"), packageReceipt);
+    writeJsonNew(path.join(evidenceRoot, "model-invocations.json"), { schema_version: 1, status: "FAIL", retry_policy: "ROLE_PROTOCOL_REPAIR_ONLY", invocations });
+    writeJsonNew(path.join(evidenceRoot, "model-usage.json"), failedModelUsage(invocations));
+    const failureReceipt = materializeProviderTerminalFailure(runtimeReceipt, evidenceRoot, {
+      modelCalls: invocations.length,
+      repairs: runtimeReceipt.repair_counts,
+    });
+    fail(failureReceipt.code, failureReceipt.reason, {
+      diagnostic_id: failureReceipt.diagnostic_id,
+      evaluation_ref: failureReceipt.evaluation_ref,
+    });
+  }
   const modelAudit = auditClaudeModelCertInvocations(invocations);
   const runtimeAudit = auditRuntimeAndInvocations(runtimeReceipt, invocations);
   const scenarioAudit = auditScenarioIdentity({ sourceWiki, scenarioRoot, producer, cache, runtimeReceipt });
@@ -410,16 +449,6 @@ export async function runE2E(options, { ambient = process.env, onProgress = null
   writeJsonNew(path.join(evidenceRoot, "methods-package.json"), packageReceipt);
   writeJsonNew(path.join(evidenceRoot, "model-invocations.json"), { schema_version: 1, status: "PASS", retry_policy: "ROLE_PROTOCOL_REPAIR_ONLY", invocations });
   writeJsonNew(path.join(evidenceRoot, "model-usage.json"), modelAudit);
-  const terminalFailure = materializeProviderTerminalFailure(runtimeReceipt, evidenceRoot, {
-    modelCalls: modelAudit.actual_call_count,
-    repairs: modelAudit.repair_counts,
-  });
-  if (terminalFailure !== null) {
-    fail(terminalFailure.code, terminalFailure.reason, {
-      diagnostic_id: terminalFailure.diagnostic_id,
-      evaluation_ref: terminalFailure.evaluation_ref,
-    });
-  }
   const normalizedInvocations = modelCertInvocations(invocations);
   const scenarioOracle = buildEvidenceV2ScenarioOracleReceipt({
     sourceRoot,

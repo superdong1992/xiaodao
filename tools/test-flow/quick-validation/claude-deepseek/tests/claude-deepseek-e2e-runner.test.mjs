@@ -270,6 +270,44 @@ test("provider-local production Runtime archives a disagreement as UNRESOLVED", 
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
+test("provider-local production Runtime archives every legal early terminal", { skip: !process.env.TEST_FLOW_QUICK_PYTHON }, () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "deepseek-cert-early-terminal-"));
+  try {
+    const fixtures = [
+      { name: "specialist-protocol", args: ["--fake-protocol-exhausted-role", "SPECIALIST"], status: "UNRESOLVED", reason: "SPECIALIST_PROTOCOL_REPAIR_EXHAUSTED", calls: 2 },
+      { name: "specialist-model", args: ["--fake-model-failure-role", "SPECIALIST"], status: "UNRESOLVED", reason: "SPECIALIST_MODEL_EXECUTION_FAILED", calls: 1 },
+      { name: "no-evidence", args: ["--fake-no-matching-evidence"], status: "UNRESOLVED", reason: "NO_MATCHING_METHOD_EVIDENCE", calls: 0 },
+      { name: "reviewer-model", args: ["--fake-model-failure-role", "REVIEWER"], status: "UNRESOLVED", reason: "REVIEWER_MODEL_EXECUTION_FAILED", calls: 2 },
+      { name: "specialist-failed", args: ["--fake-server-invariant-role", "SPECIALIST"], status: "FAILED", reason: "SERVER_INVARIANT_VIOLATION", calls: 1 },
+    ];
+    const bootstrap = "import runpy,sys,types; mark=types.SimpleNamespace(parametrize=lambda *a,**k:(lambda f:f)); sys.modules['pytest']=types.SimpleNamespace(fixture=lambda f:f,mark=mark); script=sys.argv[1]; sys.argv=sys.argv[1:]; runpy.run_path(script,run_name='__main__')";
+    for (const fixture of fixtures) {
+      const caseRoot = path.join(root, fixture.name);
+      const evidenceRoot = path.join(caseRoot, "evidence");
+      const receiptPath = path.join(evidenceRoot, "runtime-receipt.json");
+      fs.mkdirSync(caseRoot);
+      const args = [RUNTIME, "--mode", "fake", ...fixture.args, "--source-root", ROOT, "--work-root", path.join(caseRoot, "work"), "--evidence-root", evidenceRoot, "--receipt-path", receiptPath];
+      const result = spawnSync(process.env.TEST_FLOW_QUICK_PYTHON, ["-c", bootstrap, ...args], { cwd: ROOT, env: process.env, encoding: "utf8", timeout: 120_000 });
+      assert.equal(result.status, 0, `${fixture.name}: ${result.stderr}`);
+      const receipt = JSON.parse(fs.readFileSync(receiptPath, "utf8"));
+      assert.equal(receipt.status, "PASS", fixture.name);
+      assert.equal(receipt.methods_result.status, fixture.status, fixture.name);
+      assert.equal(receipt.methods_result.reason_code, fixture.reason, fixture.name);
+      assert.match(receipt.methods_result.diagnostic_id, /^diag-[a-f0-9]{64}$/u, fixture.name);
+      assert.equal(receipt.role_attempts.length, fixture.calls, fixture.name);
+      assert.equal(fs.existsSync(path.join(evidenceRoot, "methods-evidence-graph-v2.json")), true, fixture.name);
+      assert.equal(fs.existsSync(path.join(evidenceRoot, "methods-evaluation-plan-v2.json")), true, fixture.name);
+      assert.equal(fs.existsSync(path.join(evidenceRoot, "methods-source-state-v2.json")), true, fixture.name);
+      assert.equal(fs.existsSync(path.join(evidenceRoot, "methods-source-outcome-v2.json")), true, fixture.name);
+      assert.equal(fs.existsSync(path.join(evidenceRoot, "methods-result-v2.json")), true, fixture.name);
+      assert.equal(fs.existsSync(path.join(evidenceRoot, "model-cert.json")), false, fixture.name);
+      if (fixture.name !== "reviewer-model") {
+        assert.equal(Object.hasOwn(receipt.records, "reviewer_job"), false, fixture.name);
+      }
+    }
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
 test("P1 failure adapter exposes the production reason and diagnostic without minting a cert", (context) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "deepseek-terminal-failure-"));
   context.after(() => fs.rmSync(root, { recursive: true, force: true }));

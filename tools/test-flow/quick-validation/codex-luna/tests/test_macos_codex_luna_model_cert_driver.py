@@ -259,6 +259,102 @@ def test_production_runtime_allows_one_repair_per_role_and_four_calls_total(
     assert len(backend.invocations) == 4
 
 
+def test_production_runtime_archives_every_legal_early_terminal(
+    tmp_path: Path,
+) -> None:
+    fixtures = [
+        (
+            "specialist-protocol",
+            FakeModelRoleBackend(
+                protocol_exhausted_roles=frozenset({"SPECIALIST"})
+            ),
+            "SPECIALIST_PROTOCOL_REPAIR_EXHAUSTED",
+            "UNRESOLVED",
+            [
+                ("SPECIALIST", "PRIMARY"),
+                ("SPECIALIST", "REPAIR"),
+            ],
+            False,
+        ),
+        (
+            "specialist-model",
+            FakeModelRoleBackend(
+                model_failure_roles=frozenset({"SPECIALIST"})
+            ),
+            "SPECIALIST_MODEL_EXECUTION_FAILED",
+            "UNRESOLVED",
+            [("SPECIALIST", "PRIMARY")],
+            False,
+        ),
+        (
+            "no-evidence",
+            FakeModelRoleBackend(no_matching_evidence=True),
+            "NO_MATCHING_METHOD_EVIDENCE",
+            "UNRESOLVED",
+            [],
+            False,
+        ),
+        (
+            "reviewer-model",
+            FakeModelRoleBackend(
+                model_failure_roles=frozenset({"REVIEWER"})
+            ),
+            "REVIEWER_MODEL_EXECUTION_FAILED",
+            "UNRESOLVED",
+            [
+                ("SPECIALIST", "PRIMARY"),
+                ("REVIEWER", "PRIMARY"),
+            ],
+            True,
+        ),
+        (
+            "specialist-failed",
+            FakeModelRoleBackend(
+                invariant_failure_roles=frozenset({"SPECIALIST"})
+            ),
+            "SERVER_INVARIANT_VIOLATION",
+            "FAILED",
+            [("SPECIALIST", "PRIMARY")],
+            False,
+        ),
+    ]
+    for (
+        name,
+        backend,
+        reason_code,
+        methods_status,
+        expected_attempts,
+        has_reviewer,
+    ) in fixtures:
+        evidence_root = tmp_path / name / "evidence"
+        result = run_production_model_cert(
+            work_root=tmp_path / name / "work",
+            evidence_root=evidence_root,
+            role_backend=backend,
+        )
+
+        assert result["status"] == "PASS", name
+        assert result["public_case_status"] == methods_status, name
+        assert result["methods_result"]["status"] == methods_status, name
+        assert result["methods_result"]["reason_code"] == reason_code, name
+        assert result["methods_result"]["diagnostic_id"].startswith("diag-"), name
+        assert _sequence(backend) == expected_attempts, name
+        assert len(result["role_attempts"]) == len(expected_attempts), name
+        assert ("reviewer_job" in result["records"]) is has_reviewer, name
+        assert ("reviewer_outcome" in result["records"]) is has_reviewer, name
+        assert ("terminal_state" in result["records"]) is has_reviewer, name
+        for filename in (
+            "methods-evidence-graph-v2.json",
+            "methods-evaluation-plan-v2.json",
+            "methods-limitations-v2.json",
+            "methods-source-state-v2.json",
+            "methods-source-outcome-v2.json",
+            "methods-result-v2.json",
+        ):
+            assert (evidence_root / filename).is_file(), (name, filename)
+        assert not (evidence_root / "model-cert.json").exists(), name
+
+
 def test_production_bundle_passes_replayable_semantic_oracle_and_mutations_fail(
     tmp_path: Path,
 ) -> None:

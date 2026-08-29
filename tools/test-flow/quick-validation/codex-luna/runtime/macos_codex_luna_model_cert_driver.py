@@ -32,7 +32,9 @@ from problem_locator.contracts import (  # noqa: E402
     Attachment,
     AttachmentStatus,
     CaseAggregate,
+    ErrorCode,
     ExecutionLogSinks,
+    ExecutionStage,
     Job,
     MethodEvaluationPlanV2,
     ResourceKind,
@@ -53,6 +55,7 @@ from problem_locator.runtime.agent_backend import (  # noqa: E402
 )
 from problem_locator.runtime.catalog import VersionedAssetCatalog  # noqa: E402
 from problem_locator.runtime.diagnosis_runtime import DiagnosisRuntime  # noqa: E402
+from problem_locator.runtime.failures import runtime_failure  # noqa: E402
 from problem_locator.runtime.methods_records_v2 import (  # noqa: E402
     METHODS_EVALUATION_PLAN_V2_FILENAME,
     METHODS_EVIDENCE_GRAPH_V2_FILENAME,
@@ -313,9 +316,17 @@ class FakeModelRoleBackend:
         *,
         invalid_primary_roles: frozenset[Role] = frozenset(),
         rejected_method_ids: frozenset[str] = frozenset(),
+        protocol_exhausted_roles: frozenset[Role] = frozenset(),
+        model_failure_roles: frozenset[Role] = frozenset(),
+        invariant_failure_roles: frozenset[Role] = frozenset(),
+        no_matching_evidence: bool = False,
     ) -> None:
         self.invalid_primary_roles = invalid_primary_roles
         self.rejected_method_ids = rejected_method_ids
+        self.protocol_exhausted_roles = protocol_exhausted_roles
+        self.model_failure_roles = model_failure_roles
+        self.invariant_failure_roles = invariant_failure_roles
+        self.no_matching_evidence = no_matching_evidence
         self.invocations: list[dict[str, object]] = []
 
     def execute(self, **kwargs: Any) -> BackendExecution:
@@ -341,7 +352,19 @@ class FakeModelRoleBackend:
             if role == "SPECIALIST"
             else workspace / "output/method-review.draft.json"
         )
-        if attempt == "PRIMARY" and role in self.invalid_primary_roles:
+        if role in self.model_failure_roles:
+            _close_sinks(kwargs["log_sinks"])
+            raise runtime_failure(
+                stage=ExecutionStage.BACKEND_EXECUTE,
+                code=ErrorCode.BACKEND_EXIT_FAILED,
+                message="injected model execution failure",
+            )
+        if role in self.invariant_failure_roles:
+            _close_sinks(kwargs["log_sinks"])
+            raise TypeError("injected backend invariant failure")
+        if role in self.protocol_exhausted_roles or (
+            attempt == "PRIMARY" and role in self.invalid_primary_roles
+        ):
             response: object = {"invalid": "production parser must reject this root"}
         else:
             response = [
@@ -541,13 +564,13 @@ def _prompt_receipts(
     records: InMemoryExecutionRecordStore,
     *,
     specialist_job_id: str,
-    reviewer_job_id: str,
+    reviewer_job_id: str | None,
 ) -> list[dict[str, object]]:
     receipts: list[dict[str, object]] = []
-    for role, job_id in (
-        ("SPECIALIST", specialist_job_id),
-        ("REVIEWER", reviewer_job_id),
-    ):
+    jobs = [("SPECIALIST", specialist_job_id)]
+    if reviewer_job_id is not None:
+        jobs.append(("REVIEWER", reviewer_job_id))
+    for role, job_id in jobs:
         for attempt in ("PRIMARY", "REPAIR"):
             raw = read_method_prompt_v2(
                 records,
@@ -646,6 +669,10 @@ def run_production_model_cert(
         "completed",
     )
     preprocessor.target_contents = target_contents
+    if getattr(role_backend, "no_matching_evidence", False):
+        preprocessor.target_contents = {
+            label: b"no matching method evidence\n" for label in target_contents
+        }
 
     def execute_preprocessing(
         session: object,
@@ -688,13 +715,6 @@ def run_production_model_cert(
         source_job,
         InMemoryCancellationSignal(),
     )
-    if specialist_receipt.job_outcome.methods_review_target is None:
-        raise RuntimeError(
-            "Specialist did not produce the production Reviewer handoff: "
-            f"result_type={specialist_receipt.job_outcome.result_type.value}; "
-            f"error={specialist_receipt.job_outcome.error}"
-        )
-
     notifier = InMemoryStateChangeNotifier()
     submission = OutcomeSubmissionService(
         repository,
@@ -713,33 +733,57 @@ def run_production_model_cert(
         specialist_receipt.job_outcome,
         specialist_receipt.outcome_file_ref,
     )
-    if handoff.case_view.active_job is None:
-        raise RuntimeError("Production submission did not expose the Reviewer Job")
-    review_job = _claim_active_review(repository)
-    reviewer_runtime = DiagnosisRuntime(
-        state_repository=repository,
-        resource_store=resources,
-        asset_catalog=catalog,
-        logparse_broker_factory=None,
-        execution_records=records,
-        clock=FakeClock("2026-08-29T00:05:00.000Z"),
-        id_generator=DeterministicIdGenerator(seed="p2-model-cert-reviewer"),
-        workspace_manager=WorkspaceManager(work_root / "reviewer-runtime"),
-        backend=backend,
-    )
-    reviewer_receipt = reviewer_runtime.execute(
-        review_job,
-        InMemoryCancellationSignal(),
-    )
-    terminal = submission.submit_outcome(
-        reviewer_receipt.job_outcome,
-        reviewer_receipt.outcome_file_ref,
-    )
+    if handoff.disposition.value != "APPLIED":
+        raise RuntimeError(
+            "Production Specialist Outcome was not applied: "
+            f"disposition={handoff.disposition.value}"
+        )
+    review_job = None
+    reviewer_receipt = None
+    terminal = handoff
+    if specialist_receipt.job_outcome.methods_review_target is not None:
+        if handoff.case_view.active_job is None:
+            raise RuntimeError("Production submission did not expose the Reviewer Job")
+        review_job = _claim_active_review(repository)
+        reviewer_runtime = DiagnosisRuntime(
+            state_repository=repository,
+            resource_store=resources,
+            asset_catalog=catalog,
+            logparse_broker_factory=None,
+            execution_records=records,
+            clock=FakeClock("2026-08-29T00:05:00.000Z"),
+            id_generator=DeterministicIdGenerator(seed="p2-model-cert-reviewer"),
+            workspace_manager=WorkspaceManager(work_root / "reviewer-runtime"),
+            backend=backend,
+        )
+        reviewer_receipt = reviewer_runtime.execute(
+            review_job,
+            InMemoryCancellationSignal(),
+        )
+        terminal = submission.submit_outcome(
+            reviewer_receipt.job_outcome,
+            reviewer_receipt.outcome_file_ref,
+        )
+        if terminal.disposition.value != "APPLIED":
+            raise RuntimeError(
+                "Production Reviewer Outcome was not applied: "
+                f"disposition={terminal.disposition.value}"
+            )
     query = ApplicationQueryService(repository, resources, notifier)
     public_case = query.get_case(source_job.case_id).case_view
     methods_result = public_case.methods_result
     if methods_result is None:
-        raise RuntimeError("Production query omitted terminal methods_result")
+        raise RuntimeError(
+            "Production query omitted terminal methods_result: "
+            f"specialist_result={specialist_receipt.job_outcome.result_type.value}; "
+            f"specialist_error={specialist_receipt.job_outcome.error.code.value if specialist_receipt.job_outcome.error is not None else None}; "
+            f"specialist_terminal={specialist_receipt.job_outcome.methods_terminal_projection is not None}; "
+            f"specialist_review={specialist_receipt.job_outcome.methods_review_target is not None}; "
+            f"submission={handoff.disposition.value}; "
+            f"submitted_status={handoff.case_view.status.value if handoff.case_view is not None else None}; "
+            f"submitted_methods={handoff.case_view.methods_result is not None if handoff.case_view is not None else None}; "
+            f"queried_status={public_case.status.value}"
+        )
     graph = read_method_evidence_graph_v2(records, job_id=source_job.job_id)
     plan = read_method_evaluation_plan_v2(records, job_id=source_job.job_id)
     limitations = read_method_limitations_record_v2(
@@ -747,7 +791,8 @@ def run_production_model_cert(
         job_id=source_job.job_id,
     )
     source_state = read_method_state_v2(records, job_id=source_job.job_id)
-    terminal_state = read_method_state_v2(records, job_id=review_job.job_id)
+    terminal_job_id = source_job.job_id if review_job is None else review_job.job_id
+    terminal_state = read_method_state_v2(records, job_id=terminal_job_id)
     if (
         graph is None
         or plan is None
@@ -775,12 +820,11 @@ def run_production_model_cert(
     prompts = _prompt_receipts(
         records,
         specialist_job_id=source_job.job_id,
-        reviewer_job_id=review_job.job_id,
+        reviewer_job_id=None if review_job is None else review_job.job_id,
     )
     projection_bytes = canonical_json_bytes(methods_result)
     captured_files = {
         "source_job": _required_record_bytes(records, source_job.job_id, "job.json"),
-        "reviewer_job": _required_record_bytes(records, review_job.job_id, "job.json"),
         "evidence_graph": _required_record_bytes(
             records, source_job.job_id, METHODS_EVIDENCE_GRAPH_V2_FILENAME
         ),
@@ -796,20 +840,26 @@ def run_production_model_cert(
         "source_outcome": _required_record_bytes(
             records, source_job.job_id, "job_outcome.json"
         ),
-        "terminal_state": _required_record_bytes(
-            records, review_job.job_id, METHODS_STATE_V2_FILENAME
-        ),
-        "reviewer_outcome": _required_record_bytes(
-            records, review_job.job_id, "job_outcome.json"
-        ),
     }
+    if review_job is not None:
+        captured_files.update(
+            {
+                "reviewer_job": _required_record_bytes(
+                    records, review_job.job_id, "job.json"
+                ),
+                "terminal_state": _required_record_bytes(
+                    records, review_job.job_id, METHODS_STATE_V2_FILENAME
+                ),
+                "reviewer_outcome": _required_record_bytes(
+                    records, review_job.job_id, "job_outcome.json"
+                ),
+            }
+        )
     graph_bytes = captured_files["evidence_graph"]
     plan_bytes = captured_files["evaluation_plan"]
     limitations_bytes = captured_files["limitations"]
     source_state_bytes = captured_files["source_state"]
-    terminal_state_bytes = captured_files["terminal_state"]
     specialist_outcome_bytes = captured_files["source_outcome"]
-    reviewer_outcome_bytes = captured_files["reviewer_outcome"]
     loaded_registration = json.loads(
         (loaded_registration_root / "registration-template.json").read_bytes()
     )
@@ -820,8 +870,8 @@ def run_production_model_cert(
     )
     loaded_methods_bytes = loaded_methods_path.read_bytes()
     capture_root = evidence_root or (work_root / "model-cert-evidence")
-    for key, filename in _CAPTURED_EVIDENCE_FILENAMES.items():
-        _write_new_bytes(capture_root, filename, captured_files[key])
+    for key, raw in captured_files.items():
+        _write_new_bytes(capture_root, _CAPTURED_EVIDENCE_FILENAMES[key], raw)
     _write_new_bytes(
         capture_root,
         _PUBLIC_METHODS_RESULT_FILENAME,
@@ -865,6 +915,57 @@ def run_production_model_cert(
             ],
             "initial_user_fact_values": [item.statement for item in frozen_facts],
         }
+    record_receipts: dict[str, object] = {
+        "source_job": {
+            "filename": _CAPTURED_EVIDENCE_FILENAMES["source_job"],
+            **_file_identity(captured_files["source_job"]),
+        },
+        "source_job_id": source_job.job_id,
+        "terminal_job_id": terminal_job_id,
+        "graph": {
+            "filename": METHODS_EVIDENCE_GRAPH_V2_FILENAME,
+            "ref": graph.graph_ref,
+            **_file_identity(graph_bytes),
+        },
+        "plan": {
+            "filename": METHODS_EVALUATION_PLAN_V2_FILENAME,
+            "ref": plan.plan_ref,
+            **_file_identity(plan_bytes),
+        },
+        "source_state": {
+            "filename": METHODS_STATE_V2_FILENAME,
+            "status": source_state.status,
+            **_file_identity(source_state_bytes),
+        },
+        "limitations": {
+            "filename": METHODS_LIMITATIONS_V2_FILENAME,
+            **_file_identity(limitations_bytes),
+        },
+        "specialist_outcome": {
+            "filename": "job_outcome.json",
+            "result_type": specialist_receipt.job_outcome.result_type.value,
+            **_file_identity(specialist_outcome_bytes),
+        },
+    }
+    if review_job is not None and reviewer_receipt is not None:
+        record_receipts.update(
+            {
+                "reviewer_job": {
+                    "filename": _CAPTURED_EVIDENCE_FILENAMES["reviewer_job"],
+                    **_file_identity(captured_files["reviewer_job"]),
+                },
+                "terminal_state": {
+                    "filename": METHODS_STATE_V2_FILENAME,
+                    "status": terminal_state.status,
+                    **_file_identity(captured_files["terminal_state"]),
+                },
+                "reviewer_outcome": {
+                    "filename": "job_outcome.json",
+                    "result_type": reviewer_receipt.job_outcome.result_type.value,
+                    **_file_identity(captured_files["reviewer_outcome"]),
+                },
+            }
+        )
     result = {
         "schema_version": 1,
         "receipt_type": "codex-luna-evidence-v2-runtime-result",
@@ -916,52 +1017,7 @@ def run_production_model_cert(
             "specialist": int("SPECIALIST:REPAIR" in actual_attempts),
             "reviewer": int("REVIEWER:REPAIR" in actual_attempts),
         },
-        "records": {
-            "source_job": {
-                "filename": _CAPTURED_EVIDENCE_FILENAMES["source_job"],
-                **_file_identity(captured_files["source_job"]),
-            },
-            "reviewer_job": {
-                "filename": _CAPTURED_EVIDENCE_FILENAMES["reviewer_job"],
-                **_file_identity(captured_files["reviewer_job"]),
-            },
-            "source_job_id": source_job.job_id,
-            "terminal_job_id": review_job.job_id,
-            "graph": {
-                "filename": METHODS_EVIDENCE_GRAPH_V2_FILENAME,
-                "ref": graph.graph_ref,
-                **_file_identity(graph_bytes),
-            },
-            "plan": {
-                "filename": METHODS_EVALUATION_PLAN_V2_FILENAME,
-                "ref": plan.plan_ref,
-                **_file_identity(plan_bytes),
-            },
-            "source_state": {
-                "filename": METHODS_STATE_V2_FILENAME,
-                "status": source_state.status,
-                **_file_identity(source_state_bytes),
-            },
-            "terminal_state": {
-                "filename": METHODS_STATE_V2_FILENAME,
-                "status": terminal_state.status,
-                **_file_identity(terminal_state_bytes),
-            },
-            "limitations": {
-                "filename": METHODS_LIMITATIONS_V2_FILENAME,
-                **_file_identity(limitations_bytes),
-            },
-            "specialist_outcome": {
-                "filename": "job_outcome.json",
-                "result_type": specialist_receipt.job_outcome.result_type.value,
-                **_file_identity(specialist_outcome_bytes),
-            },
-            "reviewer_outcome": {
-                "filename": "job_outcome.json",
-                "result_type": reviewer_receipt.job_outcome.result_type.value,
-                **_file_identity(reviewer_outcome_bytes),
-            },
-        },
+        "records": record_receipts,
         "public_case_status": terminal.case_view.status.value,
         "methods_result": methods_result.model_dump(mode="json"),
         "methods_result_identity": {
@@ -977,10 +1033,10 @@ def run_production_model_cert(
         },
         "captured_execution_files": {
             key: {
-                "filename": filename,
-                **_file_identity(captured_files[key]),
+                "filename": _CAPTURED_EVIDENCE_FILENAMES[key],
+                **_file_identity(raw),
             }
-            for key, filename in _CAPTURED_EVIDENCE_FILENAMES.items()
+            for key, raw in captured_files.items()
         },
         "captured_public_methods_result": {
             "filename": _PUBLIC_METHODS_RESULT_FILENAME,
@@ -1017,6 +1073,25 @@ def _parser() -> argparse.ArgumentParser:
         action="append",
         default=[],
     )
+    parser.add_argument(
+        "--fake-protocol-exhausted-role",
+        choices=("SPECIALIST", "REVIEWER"),
+        action="append",
+        default=[],
+    )
+    parser.add_argument(
+        "--fake-model-failure-role",
+        choices=("SPECIALIST", "REVIEWER"),
+        action="append",
+        default=[],
+    )
+    parser.add_argument(
+        "--fake-server-invariant-role",
+        choices=("SPECIALIST", "REVIEWER"),
+        action="append",
+        default=[],
+    )
+    parser.add_argument("--fake-no-matching-evidence", action="store_true")
     parser.add_argument(
         "--fake-rejected-method-id",
         action="append",
@@ -1087,6 +1162,16 @@ def main(argv: list[str] | None = None) -> int:
                     rejected_method_ids=frozenset(
                         values.fake_rejected_method_id
                     ),
+                    protocol_exhausted_roles=frozenset(
+                        values.fake_protocol_exhausted_role
+                    ),
+                    model_failure_roles=frozenset(
+                        values.fake_model_failure_role
+                    ),
+                    invariant_failure_roles=frozenset(
+                        values.fake_server_invariant_role
+                    ),
+                    no_matching_evidence=values.fake_no_matching_evidence,
                 )
             )
             execution_mode: Literal["deterministic-zero-model", "real-model"] = (

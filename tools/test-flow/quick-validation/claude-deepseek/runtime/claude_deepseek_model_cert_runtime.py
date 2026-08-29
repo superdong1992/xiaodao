@@ -40,6 +40,8 @@ from problem_locator.contracts import (
     Attachment,
     AttachmentStatus,
     CaseAggregate,
+    ErrorCode,
+    ExecutionStage,
     Job,
     ResourceKind,
     ResourceRef,
@@ -53,6 +55,7 @@ from problem_locator.domain import DomainCoordinator, PureContextSnapshotProject
 from problem_locator.runtime.agent_backend import AgentBackend, BackendExecution
 from problem_locator.runtime.catalog import VersionedAssetCatalog
 from problem_locator.runtime.diagnosis_runtime import DiagnosisRuntime
+from problem_locator.runtime.failures import runtime_failure
 from problem_locator.runtime.methods_records_v2 import (
     METHODS_EVALUATION_PLAN_V2_FILENAME,
     METHODS_EVIDENCE_GRAPH_V2_FILENAME,
@@ -388,10 +391,16 @@ class _FakeRoleBackend:
         *,
         repair: bool,
         rejected_method_ids: frozenset[str],
+        protocol_exhausted: bool = False,
+        model_failure: bool = False,
+        invariant_failure: bool = False,
     ) -> None:
         self.role = role
         self.repair = repair
         self.rejected_method_ids = rejected_method_ids
+        self.protocol_exhausted = protocol_exhausted
+        self.model_failure = model_failure
+        self.invariant_failure = invariant_failure
         self.calls = 0
 
     def execute(self, **kwargs: Any) -> BackendExecution:
@@ -402,7 +411,17 @@ class _FakeRoleBackend:
             if self.role == "SPECIALIST"
             else workspace_root / "output/method-review.draft.json"
         )
-        value: Any = {"invalid": True} if self.repair and self.calls == 1 else _valid_role_output(
+        if self.model_failure:
+            _close_sinks(kwargs)
+            raise runtime_failure(
+                stage=ExecutionStage.BACKEND_EXECUTE,
+                code=ErrorCode.BACKEND_EXIT_FAILED,
+                message="injected model execution failure",
+            )
+        if self.invariant_failure:
+            _close_sinks(kwargs)
+            raise TypeError("injected backend invariant failure")
+        value: Any = {"invalid": True} if self.protocol_exhausted or (self.repair and self.calls == 1) else _valid_role_output(
             workspace_root,
             self.role,
             self.rejected_method_ids,
@@ -577,10 +596,13 @@ def _prompt_receipts(
     records: InMemoryExecutionRecordStore,
     *,
     specialist_job_id: str,
-    reviewer_job_id: str,
+    reviewer_job_id: str | None,
 ) -> list[dict[str, Any]]:
     receipts = []
-    for role, job_id in (("SPECIALIST", specialist_job_id), ("REVIEWER", reviewer_job_id)):
+    jobs = [("SPECIALIST", specialist_job_id)]
+    if reviewer_job_id is not None:
+        jobs.append(("REVIEWER", reviewer_job_id))
+    for role, job_id in jobs:
         for attempt in ("PRIMARY", "REPAIR"):
             raw = read_method_prompt_v2(
                 records,
@@ -652,6 +674,9 @@ def run(options: argparse.Namespace) -> dict[str, Any]:
                 shared_rejected_method_ids
                 | frozenset(options.fake_specialist_rejected_method_id)
             ),
+            protocol_exhausted="SPECIALIST" in options.fake_protocol_exhausted_role,
+            model_failure="SPECIALIST" in options.fake_model_failure_role,
+            invariant_failure="SPECIALIST" in options.fake_server_invariant_role,
         )
         reviewer_role = _FakeRoleBackend(
             "REVIEWER",
@@ -660,6 +685,9 @@ def run(options: argparse.Namespace) -> dict[str, Any]:
                 shared_rejected_method_ids
                 | frozenset(options.fake_reviewer_rejected_method_id)
             ),
+            protocol_exhausted="REVIEWER" in options.fake_protocol_exhausted_role,
+            model_failure="REVIEWER" in options.fake_model_failure_role,
+            invariant_failure="REVIEWER" in options.fake_server_invariant_role,
         )
     else:
         command = _agent_command(options)
@@ -671,6 +699,10 @@ def run(options: argparse.Namespace) -> dict[str, Any]:
         specialist_role,
         target_contents,
     )
+    if options.fake_no_matching_evidence and options.mode == "fake":
+        specialist_backend.target_contents = {
+            label: b"no matching method evidence\n" for label in target_contents
+        }
 
     def execute_preprocessing(
         session: object,
@@ -710,8 +742,6 @@ def run(options: argparse.Namespace) -> dict[str, Any]:
         source_job,
         InMemoryCancellationSignal(),
     )
-    if specialist_receipt.job_outcome.methods_review_target is None:
-        _fail("CLAUDE_DEEPSEEK_SPECIALIST_NOT_ACCEPTED", "Production Runtime did not create an Evidence V2 Reviewer handoff")
     dispatcher = RecordingDispatcher()
     notifier = InMemoryStateChangeNotifier()
     submission = OutcomeSubmissionService(
@@ -733,26 +763,34 @@ def run(options: argparse.Namespace) -> dict[str, Any]:
     )
     if handoff.disposition.value != "APPLIED":
         _fail("CLAUDE_DEEPSEEK_SPECIALIST_SUBMISSION_FAILED", "Specialist Evidence V2 Outcome was not applied")
-    review_job = _claim_active_review(repository)
-    reviewer_runtime = DiagnosisRuntime(
-        state_repository=repository,
-        resource_store=resources,
-        asset_catalog=catalog,
-        logparse_broker_factory=None,
-        execution_records=records,
-        clock=FakeClock("2026-08-29T00:05:00.000Z"),
-        id_generator=DeterministicIdGenerator(seed="claude-deepseek-cert-reviewer"),
-        workspace_manager=WorkspaceManager(runtime_root / "reviewer"),
-        backend=_ReviewerBackend(reviewer_role),
-    )
-    reviewer_receipt = reviewer_runtime.execute(
-        review_job,
-        InMemoryCancellationSignal(),
-    )
-    submission.submit_outcome(
-        reviewer_receipt.job_outcome,
-        reviewer_receipt.outcome_file_ref,
-    )
+    review_job = None
+    reviewer_receipt = None
+    if specialist_receipt.job_outcome.methods_review_target is not None:
+        review_job = _claim_active_review(repository)
+        reviewer_runtime = DiagnosisRuntime(
+            state_repository=repository,
+            resource_store=resources,
+            asset_catalog=catalog,
+            logparse_broker_factory=None,
+            execution_records=records,
+            clock=FakeClock("2026-08-29T00:05:00.000Z"),
+            id_generator=DeterministicIdGenerator(seed="claude-deepseek-cert-reviewer"),
+            workspace_manager=WorkspaceManager(runtime_root / "reviewer"),
+            backend=_ReviewerBackend(reviewer_role),
+        )
+        reviewer_receipt = reviewer_runtime.execute(
+            review_job,
+            InMemoryCancellationSignal(),
+        )
+        reviewer_terminal = submission.submit_outcome(
+            reviewer_receipt.job_outcome,
+            reviewer_receipt.outcome_file_ref,
+        )
+        if reviewer_terminal.disposition.value != "APPLIED":
+            _fail(
+                "CLAUDE_DEEPSEEK_REVIEWER_SUBMISSION_FAILED",
+                "Reviewer Evidence V2 Outcome was not applied",
+            )
     query = ApplicationQueryService(repository, resources, notifier)
     public_view = query.get_case(source_job.case_id).case_view
     methods_projection = public_view.methods_result
@@ -766,8 +804,9 @@ def run(options: argparse.Namespace) -> dict[str, Any]:
     plan = read_method_evaluation_plan_v2(records, job_id=source_job.job_id)
     limitations = read_method_limitations_record_v2(records, job_id=source_job.job_id)
     specialist_state = read_method_state_v2(records, job_id=source_job.job_id)
-    reviewer_state = read_method_state_v2(records, job_id=review_job.job_id)
-    if graph is None or plan is None or limitations is None or specialist_state is None or reviewer_state is None:
+    terminal_job_id = source_job.job_id if review_job is None else review_job.job_id
+    terminal_state = read_method_state_v2(records, job_id=terminal_job_id)
+    if graph is None or plan is None or limitations is None or specialist_state is None or terminal_state is None:
         _fail("CLAUDE_DEEPSEEK_PRODUCTION_RECORD_MISSING", "Production Runtime did not persist Graph, Plan, limitations, or Methods state")
     scenario = _scenario_identity(
         source_wiki=options.source_wiki,
@@ -788,21 +827,23 @@ def run(options: argparse.Namespace) -> dict[str, Any]:
     prompts = _prompt_receipts(
         records,
         specialist_job_id=source_job.job_id,
-        reviewer_job_id=review_job.job_id,
+        reviewer_job_id=None if review_job is None else review_job.job_id,
     )
-    expected_attempts = [
-        "SPECIALIST:PRIMARY",
-        *( ["SPECIALIST:REPAIR"] if options.fake_repair and options.mode == "fake" else [] ),
-        "REVIEWER:PRIMARY",
-        *( ["REVIEWER:REPAIR"] if options.fake_repair and options.mode == "fake" else [] ),
-    ]
     actual_attempts = [f"{item['role']}:{item['attempt']}" for item in prompts]
-    if options.mode == "fake" and actual_attempts != expected_attempts:
+    legal_attempts = {
+        (),
+        ("SPECIALIST:PRIMARY",),
+        ("SPECIALIST:PRIMARY", "SPECIALIST:REPAIR"),
+        ("SPECIALIST:PRIMARY", "REVIEWER:PRIMARY"),
+        ("SPECIALIST:PRIMARY", "SPECIALIST:REPAIR", "REVIEWER:PRIMARY"),
+        ("SPECIALIST:PRIMARY", "REVIEWER:PRIMARY", "REVIEWER:REPAIR"),
+        ("SPECIALIST:PRIMARY", "SPECIALIST:REPAIR", "REVIEWER:PRIMARY", "REVIEWER:REPAIR"),
+    }
+    if options.mode == "fake" and tuple(actual_attempts) not in legal_attempts:
         _fail("CLAUDE_DEEPSEEK_FAKE_ATTEMPT_MISMATCH", "Deterministic role attempts did not follow the production repair state machine")
     methods_bytes = canonical_json_bytes(methods_result)
     captured_files = {
         "source_job": _required_record_bytes(records, source_job.job_id, "job.json"),
-        "reviewer_job": _required_record_bytes(records, review_job.job_id, "job.json"),
         "evidence_graph": _required_record_bytes(
             records, source_job.job_id, METHODS_EVIDENCE_GRAPH_V2_FILENAME
         ),
@@ -818,20 +859,26 @@ def run(options: argparse.Namespace) -> dict[str, Any]:
         "source_outcome": _required_record_bytes(
             records, source_job.job_id, "job_outcome.json"
         ),
-        "terminal_state": _required_record_bytes(
-            records, review_job.job_id, METHODS_STATE_V2_FILENAME
-        ),
-        "reviewer_outcome": _required_record_bytes(
-            records, review_job.job_id, "job_outcome.json"
-        ),
     }
+    if review_job is not None:
+        captured_files.update(
+            {
+                "reviewer_job": _required_record_bytes(
+                    records, review_job.job_id, "job.json"
+                ),
+                "terminal_state": _required_record_bytes(
+                    records, review_job.job_id, METHODS_STATE_V2_FILENAME
+                ),
+                "reviewer_outcome": _required_record_bytes(
+                    records, review_job.job_id, "job_outcome.json"
+                ),
+            }
+        )
     graph_bytes = captured_files["evidence_graph"]
     plan_bytes = captured_files["evaluation_plan"]
     limitations_bytes = captured_files["limitations"]
     specialist_state_bytes = captured_files["source_state"]
-    reviewer_state_bytes = captured_files["terminal_state"]
     specialist_outcome_bytes = captured_files["source_outcome"]
-    reviewer_outcome_bytes = captured_files["reviewer_outcome"]
     loaded_registration = json.loads(
         (loaded_registration_root / "registration-template.json").read_bytes()
     )
@@ -842,10 +889,28 @@ def run(options: argparse.Namespace) -> dict[str, Any]:
     )
     loaded_methods_bytes = loaded_methods_path.read_bytes()
     capture_root = options.evidence_root or (work_root / "model-cert-evidence")
-    for key, filename in _CAPTURED_EVIDENCE_FILENAMES.items():
-        _write_new_bytes(capture_root, filename, captured_files[key])
+    for key, raw in captured_files.items():
+        _write_new_bytes(capture_root, _CAPTURED_EVIDENCE_FILENAMES[key], raw)
     _write_new_bytes(capture_root, _PUBLIC_METHODS_RESULT_FILENAME, methods_bytes)
     _write_new_bytes(capture_root, _LOADED_METHODS_FILENAME, loaded_methods_bytes)
+    record_receipts = {
+        "source_job": {"filename": _CAPTURED_EVIDENCE_FILENAMES["source_job"], **_file_identity(captured_files["source_job"])},
+        "graph": {"filename": METHODS_EVIDENCE_GRAPH_V2_FILENAME, **_file_identity(graph_bytes)},
+        "plan": {"filename": METHODS_EVALUATION_PLAN_V2_FILENAME, **_file_identity(plan_bytes)},
+        "limitations": {"filename": METHODS_LIMITATIONS_V2_FILENAME, **_file_identity(limitations_bytes)},
+        "specialist_state": {"filename": METHODS_STATE_V2_FILENAME, **_file_identity(specialist_state_bytes)},
+        "specialist_outcome": {"filename": "job_outcome.json", **_file_identity(specialist_outcome_bytes)},
+        "source_job_id": source_job.job_id,
+        "terminal_job_id": terminal_job_id,
+    }
+    if review_job is not None and reviewer_receipt is not None:
+        record_receipts.update(
+            {
+                "reviewer_job": {"filename": _CAPTURED_EVIDENCE_FILENAMES["reviewer_job"], **_file_identity(captured_files["reviewer_job"])},
+                "reviewer_state": {"filename": METHODS_STATE_V2_FILENAME, **_file_identity(captured_files["terminal_state"])},
+                "reviewer_outcome": {"filename": "job_outcome.json", **_file_identity(captured_files["reviewer_outcome"])},
+            }
+        )
     return {
         "schema_version": 1,
         "status": "PASS",
@@ -862,17 +927,7 @@ def run(options: argparse.Namespace) -> dict[str, Any]:
             "specialist": int("SPECIALIST:REPAIR" in actual_attempts),
             "reviewer": int("REVIEWER:REPAIR" in actual_attempts),
         },
-        "records": {
-            "source_job": {"filename": _CAPTURED_EVIDENCE_FILENAMES["source_job"], **_file_identity(captured_files["source_job"])},
-            "reviewer_job": {"filename": _CAPTURED_EVIDENCE_FILENAMES["reviewer_job"], **_file_identity(captured_files["reviewer_job"])},
-            "graph": {"filename": METHODS_EVIDENCE_GRAPH_V2_FILENAME, **_file_identity(graph_bytes)},
-            "plan": {"filename": METHODS_EVALUATION_PLAN_V2_FILENAME, **_file_identity(plan_bytes)},
-            "limitations": {"filename": METHODS_LIMITATIONS_V2_FILENAME, **_file_identity(limitations_bytes)},
-            "specialist_state": {"filename": METHODS_STATE_V2_FILENAME, **_file_identity(specialist_state_bytes)},
-            "reviewer_state": {"filename": METHODS_STATE_V2_FILENAME, **_file_identity(reviewer_state_bytes)},
-            "specialist_outcome": {"filename": "job_outcome.json", **_file_identity(specialist_outcome_bytes)},
-            "reviewer_outcome": {"filename": "job_outcome.json", **_file_identity(reviewer_outcome_bytes)},
-        },
+        "records": record_receipts,
         "methods_result": methods_result,
         "methods_result_identity": {
             **_file_identity(methods_bytes),
@@ -886,8 +941,8 @@ def run(options: argparse.Namespace) -> dict[str, Any]:
             "diagnostic_id": methods_result["diagnostic_id"],
         },
         "captured_execution_files": {
-            key: {"filename": filename, **_file_identity(captured_files[key])}
-            for key, filename in _CAPTURED_EVIDENCE_FILENAMES.items()
+            key: {"filename": _CAPTURED_EVIDENCE_FILENAMES[key], **_file_identity(raw)}
+            for key, raw in captured_files.items()
         },
         "captured_public_methods_result": {
             "filename": _PUBLIC_METHODS_RESULT_FILENAME,
@@ -925,6 +980,25 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--fake-reviewer-rejected-method-id", action="append", default=[]
     )
+    parser.add_argument(
+        "--fake-protocol-exhausted-role",
+        choices=("SPECIALIST", "REVIEWER"),
+        action="append",
+        default=[],
+    )
+    parser.add_argument(
+        "--fake-model-failure-role",
+        choices=("SPECIALIST", "REVIEWER"),
+        action="append",
+        default=[],
+    )
+    parser.add_argument(
+        "--fake-server-invariant-role",
+        choices=("SPECIALIST", "REVIEWER"),
+        action="append",
+        default=[],
+    )
+    parser.add_argument("--fake-no-matching-evidence", action="store_true")
     return parser
 
 
