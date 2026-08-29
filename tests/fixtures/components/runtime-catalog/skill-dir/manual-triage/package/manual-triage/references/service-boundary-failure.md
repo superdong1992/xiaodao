@@ -6,6 +6,8 @@ The frozen structured evidence contains `SERVICE_FACT`.
 ## 所需证据
 Use only the frozen source containing the marker.
 
+`SERVICE_FACT`
+
 ## 计算与判断
 Compare the named service boundary with the requested time.
 

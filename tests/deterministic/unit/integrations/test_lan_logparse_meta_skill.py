@@ -102,9 +102,9 @@ Logparse 预处理、目标日志冻结、Review 和最终 Artifact 发布由 Se
 def _method_card(
     *,
     title: str = "API 执行时间过长",
-    markers: tuple[str, ...] = ("API_COMPLETE service=", "QUEUE_DELAY service="),
+    templates: tuple[str, ...] = tuple(SOURCE_TEMPLATES),
 ) -> str:
-    marker_lines = "\n".join(markers)
+    template_lines = "\n".join(templates)
     return f"""# {title}
 
 ## 适用条件
@@ -112,7 +112,7 @@ def _method_card(
 
 ## 所需证据
 完整正向日志：
-{marker_lines}
+{template_lines}
 
 ## 计算与判断
 使用 Wiki 中的 cost_us 和 queue_us。
@@ -305,6 +305,14 @@ def _replace_wiki_templates(
         + "\n```\n",
         encoding="utf-8",
     )
+    method_reference = (
+        registration
+        / "package/diagnose-rpc-timeout/references/api-execution-slow.md"
+    )
+    method_reference.write_text(
+        _method_card(templates=tuple(templates)),
+        encoding="utf-8",
+    )
 
 
 def test_source_identity_v2_extracts_text_and_bare_fences() -> None:
@@ -317,14 +325,17 @@ def test_source_identity_v2_extracts_text_and_bare_fences() -> None:
     assert identity["log_templates"] == SOURCE_TEMPLATES
 
 
-def test_marker_starting_with_placeholder_ignores_trailing_suffix() -> None:
+def test_marker_starting_with_placeholder_keeps_stable_trailing_suffix() -> None:
     assert (
         validator._canonical_evidence_marker(
             "{request_id} between={value} trailing-suffix-is-much-longer"
         )
-        == "between="
+        == "trailing-suffix-is-much-longer"
     )
-    assert validator._canonical_evidence_marker("{request_id} trailing-only") is None
+    assert (
+        validator._canonical_evidence_marker("{request_id} trailing-only")
+        == "trailing-only"
+    )
 
 
 def test_validator_rejects_shortened_event_name_marker(tmp_path: Path) -> None:
@@ -361,13 +372,13 @@ def test_validator_rejects_marker_from_another_method_reference(
     _write_json(methods_path, methods)
     references = methods_path.parent / "references"
     (references / "api-execution-slow.md").write_text(
-        _method_card(markers=("API_COMPLETE service=",)),
+        _method_card(templates=(SOURCE_TEMPLATES[0],)),
         encoding="utf-8",
     )
     (references / "queue-delay.md").write_text(
         _method_card(
             title="队列排队过长",
-            markers=("QUEUE_DELAY service=",),
+            templates=(SOURCE_TEMPLATES[1],),
         ),
         encoding="utf-8",
     )
@@ -379,7 +390,8 @@ def test_validator_rejects_marker_from_another_method_reference(
     rejected = _validate(registration, wiki)
     assert rejected["ok"] is False
     assert rejected["errors"] == [
-        "method 1 evidence marker is absent from its method reference: QUEUE_DELAY service="
+        "method 1 的 evidence marker 在“所需证据”中没有对应的完整 Wiki 日志模板: "
+        "QUEUE_DELAY service="
     ]
 
 
@@ -395,7 +407,7 @@ def test_validator_rejects_shared_only_prerequisite_and_marker_order(
     shared_only = _validate(registration, wiki)
 
     assert shared_only["errors"] == [
-        "method 1 的 method reference 含有未被 evidence_markers 索引的 "
+        "method 1 的“所需证据”含有未被 evidence_markers 索引的 "
         "canonical marker: QUEUE_DELAY service="
     ]
 
@@ -415,6 +427,29 @@ def test_validator_rejects_shared_only_prerequisite_and_marker_order(
     ]
     _write_json(methods_path, methods)
     assert _validate(registration, wiki)["ok"] is True
+
+
+def test_validator_requires_complete_template_in_required_evidence_section(
+    tmp_path: Path,
+) -> None:
+    registration, wiki, _ = _write_valid_registration(tmp_path)
+    reference = (
+        registration
+        / "package/diagnose-rpc-timeout/references/api-execution-slow.md"
+    )
+    reference.write_text(
+        reference.read_text(encoding="utf-8")
+        .replace(SOURCE_TEMPLATES[0], "API_COMPLETE service=")
+        .replace("## 计算与判断", f"## 计算与判断\n{SOURCE_TEMPLATES[0]}"),
+        encoding="utf-8",
+    )
+
+    rejected = _validate(registration, wiki)
+
+    assert rejected["errors"] == [
+        "method 1 的 evidence marker 在“所需证据”中没有对应的完整 Wiki 日志模板: "
+        "API_COMPLETE service="
+    ]
 
 
 def test_valid_production_registration_passes(tmp_path: Path) -> None:

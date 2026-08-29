@@ -7,6 +7,10 @@ The client emits `rpc deadline exceeded` and the correlated server log emits
 ## 所需证据
 Use both frozen client and server target logs.
 
+`rpc deadline exceeded`
+
+`connection pool wait`
+
 ## 计算与判断
 Correlate the request identity and declared problem time.
 

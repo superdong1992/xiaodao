@@ -40,6 +40,10 @@ NON_CANONICAL_EVENT_NAMES = (
     "LATE_RESPONSE",
     "QUEUE_HISTORY",
 )
+RELEASE_TIMEOUT_TEMPLATES = (
+    "rpc call %s:%s timeout limit %u recv no response",
+    "%s rpc %s call unsuccess, reqid(%u), timeout %u",
+)
 
 
 class _Signal:
@@ -113,6 +117,8 @@ def _generation_prompt(
 Your first action must call the Skill tool with exactly {{"skill":"wiki-to-diagnosis-skill"}}. After that call succeeds, read inputs/wiki.md and runtime/source-wiki-identity.json in full. The closed source identity v2 was generated mechanically from the exact Wiki bytes before this invocation. Copy its `sha256` value verbatim into methods.json as `source_wiki_sha256`; use its `log_templates` as the complete, ordered, duplicate-preserving checklist for `references/source-log-templates.md`; never calculate, guess, normalize, reorder, deduplicate, or replace those values. The Wiki remains the only source of business meaning. From the Skill result, take the exact absolute `Base directory for this skill:` and read only its linked references/output-contract.md in full. Do not read clarifications, repository files, registration metadata, tests, oracles, validators, or any other path. Do not call Bash, Edit, Glob, Grep, or any tool other than the available Skill, Read, and Write tools. Do not call any tool with missing or invalid input.
 
 The Gate mechanically derived this ordered canonical marker checklist from source identity `log_templates` with the same function used by the canonical validator: {checklist_json}. Every item in methods.json `evidence_markers` must be copied byte-for-byte from this checklist. The checklist does not assign markers to methods and adds no business meaning; use the authored Wiki to choose which listed markers belong to each cause. Do not invent, shorten, or extend a marker. These bare event names are shorthand, not valid markers unless the exact whole string itself appears in the checklist: {shorthand_json}.
+
+Before writing, perform a per-method prerequisite-closure self-check: list every complete Wiki log template that the method reads to confirm, reject, calculate, or associate the target request; put each exact template in that method card's `## 所需证据` section; derive the method's `evidence_markers` from precisely those templates in source-identity order. A marker mention outside `## 所需证据`, or a template present only in a shared reference, does not satisfy this closure. In this release Wiki, all three authored causes depend on both exact client timeout templates `rpc call %s:%s timeout limit %u recv no response` and `%s rpc %s call unsuccess, reqid(%u), timeout %u`; therefore every one of the three method cards must include both complete templates under `## 所需证据` and index both canonical markers.
 
 Generate the complete package directly under output/{requested_skill_name}. Its files must be exactly output/{requested_skill_name}/SKILL.md, output/{requested_skill_name}/methods.json, and the output-contract references, including the mandatory output/{requested_skill_name}/references/source-log-templates.md. Put that fixed reference first in methods.json `shared_references` and never use it as a method reference. Do not emit GenerationSpec, diagnosis-skill.json, registration metadata, copied Wiki, README, scripts, or tests. Use exactly one successful Write call per final package file, with both file_path and complete non-empty content in the same call. Finish every required Read before the first Write; before writing, check every source identity `log_templates` item against the complete fixed-reference content one-for-one and in order. After writing starts, perform only the contiguous sequence of package Write calls. Never overwrite a path, never write outside this one package, and stop after the final Write succeeds.
 
@@ -403,16 +409,27 @@ the frozen evidence cannot decide a method.
         encoding="utf-8",
     )
     methods: list[dict[str, Any]] = []
+    source_templates = list(source_identity["log_templates"])
     for index, semantic in enumerate(expected["method_marker_sets"], start=1):
         reference = f"references/method-{index}.md"
-        marker_text = "\n".join(semantic["all_markers"])
+        method_markers = set(semantic["all_markers"])
+        method_templates = [
+            template
+            for template in source_templates
+            if validator._canonical_evidence_marker(template) in method_markers
+        ]
+        assert {
+            validator._canonical_evidence_marker(template)
+            for template in method_templates
+        } == method_markers
+        template_text = "\n".join(method_templates)
         (package_root / reference).write_text(
             f"""# Test method
 
 ## 适用条件
 Test-only condition.
 ## 所需证据
-{marker_text}
+{template_text}
 ## 计算与判断
 Evaluate the declared markers.
 ## 确认条件
@@ -493,6 +510,9 @@ def test_generation_prompt_uses_validator_canonical_marker_checklist() -> None:
         ensure_ascii=False,
         separators=(",", ":"),
     ) in prompt
+    assert all(template in prompt for template in RELEASE_TIMEOUT_TEMPLATES)
+    assert "all three authored causes depend on both exact client timeout templates" in prompt
+    assert "per-method prerequisite-closure self-check" in prompt
     contract = (META_SKILL_ROOT / "references/output-contract.md").read_text(
         encoding="utf-8"
     )
@@ -535,6 +555,35 @@ def test_generation_validator_rejects_all_observed_shorthand_markers(
         "method 2 evidence marker is not a canonical stable Wiki log marker: LATE_RESPONSE",
         "method 2 evidence marker is not a canonical stable Wiki log marker: QUEUE_HISTORY",
         "method 3 evidence marker is not a canonical stable Wiki log marker: LATE_RESPONSE",
+    ]
+
+
+def test_generation_validator_rejects_marker_without_complete_timeout_template(
+    tmp_path: Path,
+) -> None:
+    package_root, manifest, _ = _gate_oracle_test_baseline(tmp_path)
+    validator = _load_validator()
+    wiki = ROOT / "tests/cases/release/rpc-timeout-anonymized/input/wiki.md"
+    method = manifest.methods[0]
+    timeout_template = RELEASE_TIMEOUT_TEMPLATES[0]
+    timeout_marker = validator._canonical_evidence_marker(timeout_template)
+    assert timeout_marker in method.evidence_markers
+    reference = package_root / method.reference
+    reference.write_text(
+        reference.read_text(encoding="utf-8").replace(
+            timeout_template,
+            timeout_marker,
+            1,
+        ),
+        encoding="utf-8",
+    )
+
+    result = validator.validate(package_root, wiki)
+
+    assert result["ok"] is False
+    assert result["errors"] == [
+        "method 1 的 evidence marker 在“所需证据”中没有对应的完整 Wiki 日志模板: "
+        f"{timeout_marker}"
     ]
 
 

@@ -83,7 +83,7 @@ and `reason`; use `UNKNOWN` when the evidence cannot decide the rule.
 Use for the requested operation.
 
 ## 所需证据
-`API_COMPLETE`
+`API_COMPLETE%s`
 
 ## 计算与判断
 Use the stated timestamps.
@@ -100,8 +100,15 @@ Keep each event separate with its raw line and identity.
     (references / "slow-execution.md").write_text(card, encoding="utf-8")
     (references / "unrelated-method.md").write_text(
         card.replace("# Slow execution", "# Unrelated method").replace(
-            "`API_COMPLETE`", "`UNRELATED_POSITIVE`"
+            "`API_COMPLETE%s`", "`UNRELATED_POSITIVE%s`"
         ),
+        encoding="utf-8",
+    )
+    (references / "source-log-templates.md").write_text(
+        "# Source log templates\n\n```text\n"
+        "API_COMPLETE%s\n"
+        "UNRELATED_POSITIVE%s\n"
+        "```\n",
         encoding="utf-8",
     )
     (references / "shared-boundaries.md").write_text(
@@ -120,7 +127,10 @@ Keep each event separate with its raw line and identity.
             ],
             "required_artifacts": ["log_archive"],
             "log_derived_fields": ["request_id"],
-            "shared_references": ["references/shared-boundaries.md"],
+            "shared_references": [
+                "references/source-log-templates.md",
+                "references/shared-boundaries.md",
+            ],
             "methods": [
                 {
                     "id": "slow-execution",
@@ -318,11 +328,133 @@ def test_package_loader_rejects_marker_absent_from_current_method_reference(
     with pytest.raises(
         ValueError,
         match=(
-            "method 1 evidence marker is absent from its method reference: "
+            "method 1 evidence marker has no complete source template in "
+            "its required evidence section: "
             "UNRELATED_POSITIVE"
         ),
     ):
         load_methods_package(package)
+
+
+def test_package_loader_rejects_marker_substring_without_complete_template(
+    tmp_path: Path,
+) -> None:
+    package = _write_package(tmp_path)
+    reference = package / "references/slow-execution.md"
+    reference.write_text(
+        reference.read_text(encoding="utf-8")
+        .replace("`API_COMPLETE%s`", "`API_COMPLETE`")
+        .replace("## 计算与判断", "## 计算与判断\n`API_COMPLETE%s`"),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="no complete source template"):
+        load_methods_package(package)
+
+
+def test_package_loader_rejects_shortened_canonical_marker(tmp_path: Path) -> None:
+    package = _write_package(tmp_path)
+    methods_path = package / "methods.json"
+    methods = json.loads(methods_path.read_text(encoding="utf-8"))
+    methods["methods"][0]["evidence_markers"] = ["API"]
+    _write_json(methods_path, methods)
+
+    with pytest.raises(ValueError, match="is not canonical"):
+        load_methods_package(package)
+
+
+def test_package_loader_rejects_marker_order_that_differs_from_source_templates(
+    tmp_path: Path,
+) -> None:
+    package = _write_package(tmp_path)
+    reference = package / "references/slow-execution.md"
+    reference.write_text(
+        reference.read_text(encoding="utf-8").replace(
+            "`API_COMPLETE%s`",
+            "`API_COMPLETE%s`\n`UNRELATED_POSITIVE%s`",
+        ),
+        encoding="utf-8",
+    )
+    methods_path = package / "methods.json"
+    methods = json.loads(methods_path.read_text(encoding="utf-8"))
+    methods["methods"][0]["evidence_markers"] = [
+        "UNRELATED_POSITIVE",
+        "API_COMPLETE",
+    ]
+    _write_json(methods_path, methods)
+
+    with pytest.raises(ValueError, match="must follow source template order"):
+        load_methods_package(package)
+
+
+def test_package_loader_rejects_shared_only_prerequisite(tmp_path: Path) -> None:
+    package = _write_package(tmp_path)
+    methods_path = package / "methods.json"
+    methods = json.loads(methods_path.read_text(encoding="utf-8"))
+    methods["methods"][0]["evidence_markers"] = [
+        "API_COMPLETE",
+        "UNRELATED_POSITIVE",
+    ]
+    _write_json(methods_path, methods)
+
+    with pytest.raises(ValueError, match="no complete source template"):
+        load_methods_package(package)
+
+
+def test_package_loader_rejects_unindexed_complete_template(tmp_path: Path) -> None:
+    package = _write_package(tmp_path)
+    reference = package / "references/slow-execution.md"
+    reference.write_text(
+        reference.read_text(encoding="utf-8").replace(
+            "`API_COMPLETE%s`",
+            "`API_COMPLETE%s`\n`UNRELATED_POSITIVE%s`",
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="unindexed canonical marker"):
+        load_methods_package(package)
+
+
+def test_package_loader_requires_fixed_template_inventory_first(tmp_path: Path) -> None:
+    package = _write_package(tmp_path)
+    methods_path = package / "methods.json"
+    methods = json.loads(methods_path.read_text(encoding="utf-8"))
+    methods["shared_references"].reverse()
+    _write_json(methods_path, methods)
+
+    with pytest.raises(ValueError, match="must start with references/source-log-templates.md"):
+        load_methods_package(package)
+
+
+def test_package_loader_derives_marker_from_stable_suffix_after_placeholder(
+    tmp_path: Path,
+) -> None:
+    package = _write_package(tmp_path)
+    source = package / "references/source-log-templates.md"
+    source.write_text(
+        source.read_text(encoding="utf-8").replace(
+            "API_COMPLETE%s",
+            "{request_id} trailing-only",
+        ),
+        encoding="utf-8",
+    )
+    reference = package / "references/slow-execution.md"
+    reference.write_text(
+        reference.read_text(encoding="utf-8").replace(
+            "API_COMPLETE%s",
+            "{request_id} trailing-only",
+        ),
+        encoding="utf-8",
+    )
+    methods_path = package / "methods.json"
+    methods = json.loads(methods_path.read_text(encoding="utf-8"))
+    methods["methods"][0]["evidence_markers"] = ["trailing-only"]
+    _write_json(methods_path, methods)
+
+    assert load_methods_package(package).methods[0].evidence_markers == (
+        "trailing-only",
+    )
 
 
 def test_production_loader_allows_v2_prose_that_mentions_v1_words(tmp_path: Path) -> None:
@@ -507,8 +639,8 @@ def test_grounding_allows_a_literal_shared_by_multiple_methods(
     )
     second_reference.write_text(
         second_reference.read_text(encoding="utf-8").replace(
-            "`UNRELATED_POSITIVE`",
-            "`API_COMPLETE`",
+            "`UNRELATED_POSITIVE%s`",
+            "`API_COMPLETE%s`",
         ),
         encoding="utf-8",
     )

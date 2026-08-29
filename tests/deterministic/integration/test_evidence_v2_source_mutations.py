@@ -143,7 +143,7 @@ MUTATIONS = (
             "                    index=index,\n"
             "                    markers=markers,\n"
             "                    method_text=method_text,\n"
-            "                    wiki_markers=wiki_canonical_markers,\n"
+            "                    wiki_templates=wiki_templates,\n"
             "                    errors=errors,\n"
             "                )\n"
         ),
@@ -171,7 +171,7 @@ MUTATIONS = (
             "                index=index,\n"
             "                markers=markers,\n"
             "                method_text=method_text,\n"
-            "                wiki_markers=wiki_markers,\n"
+            "                wiki_templates=wiki_templates,\n"
             "                errors=errors,\n"
             "            )\n"
         ),

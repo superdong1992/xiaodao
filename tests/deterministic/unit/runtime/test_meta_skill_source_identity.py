@@ -342,7 +342,8 @@ def test_validator_rejects_marker_from_another_method_reference(
     rejected = validator.validate(package, wiki)
     assert rejected["ok"] is False
     assert rejected["errors"] == [
-        "method 1 evidence marker is absent from its method reference: SECOND id="
+        "method 1 的 evidence marker 在“所需证据”中没有对应的完整 Wiki 日志模板: "
+        "SECOND id="
     ]
 
 
@@ -381,7 +382,7 @@ def test_validator_rejects_shared_only_prerequisite_and_marker_order(
     shared_only = validator.validate(package, wiki)
 
     assert shared_only["errors"] == [
-        "method 1 的 method reference 含有未被 evidence_markers 索引的 "
+        "method 1 的“所需证据”含有未被 evidence_markers 索引的 "
         "canonical marker: REQUEST_TIMEOUT request_id="
     ]
 
@@ -420,6 +421,40 @@ def test_canonical_marker_fallback_uses_longest_literal_and_first_tie() -> None:
         == "call unsuccess, reqid("
     )
     assert validator._canonical_evidence_marker("%s alpha %u bravo %s") == "alpha"
+    assert (
+        validator._canonical_evidence_marker("{request_id} trailing-only")
+        == "trailing-only"
+    )
+
+
+def test_validator_requires_complete_template_in_required_evidence_section(
+    tmp_path: Path,
+) -> None:
+    template = "RPC_TIMEOUT request_id={request_id} timeout_ms={timeout_ms}"
+    wiki = tmp_path / "wiki.md"
+    wiki_bytes = f"# Wiki\n\n```text\n{template}\n```\n".encode("utf-8")
+    wiki.write_bytes(wiki_bytes)
+    package = _write_package(
+        tmp_path,
+        wiki_sha256=hashlib.sha256(wiki_bytes).hexdigest(),
+        log_derived_fields=["request_id", "timeout_ms"],
+        evidence_marker="RPC_TIMEOUT request_id=",
+        reference_log_template=template,
+    )
+    reference = package / "references/rpc-timeout.md"
+    reference.write_text(
+        reference.read_text(encoding="utf-8")
+        .replace(template, "RPC_TIMEOUT request_id=")
+        .replace("## 计算与判断", f"## 计算与判断\n{template}"),
+        encoding="utf-8",
+    )
+
+    rejected = _load_validator().validate(package, wiki)
+
+    assert rejected["errors"] == [
+        "method 1 的 evidence marker 在“所需证据”中没有对应的完整 Wiki 日志模板: "
+        "RPC_TIMEOUT request_id="
+    ]
 
 
 def test_source_identity_v2_mechanically_preserves_template_order_and_duplicates() -> None:

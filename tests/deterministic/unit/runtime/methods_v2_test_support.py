@@ -82,6 +82,12 @@ Return one verdict and reason for the evaluation reference.
                 "evidence_markers": [marker],
             }
         )
+    (references / "source-log-templates.md").write_text(
+        "# Source log templates\n\n```text\n"
+        + "\n".join(marker for _, marker in methods)
+        + "\n```\n",
+        encoding="utf-8",
+    )
     _write_json(
         package_root / "methods.json",
         {
@@ -91,7 +97,7 @@ Return one verdict and reason for the evaluation reference.
             "required_user_inputs": [],
             "required_artifacts": [],
             "log_derived_fields": ["request_id"],
-            "shared_references": [],
+            "shared_references": ["references/source-log-templates.md"],
             "methods": cards,
         },
     )
