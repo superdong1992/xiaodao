@@ -81,8 +81,28 @@ test("Evidence V2 provider ledgers allow only S:P,[S:R],R:P,[R:R] with two norma
   const invocation = (ordinal, role, evaluationAttempt) => ({ invocation_id: `call-${ordinal}`, role, evaluation_attempt: evaluationAttempt, status: "PASS", terminal: true });
   const primary = [invocation(1, "SPECIALIST", "PRIMARY"), invocation(2, "REVIEWER", "PRIMARY")];
   const repaired = [invocation(1, "SPECIALIST", "PRIMARY"), invocation(2, "SPECIALIST", "REPAIR"), invocation(3, "REVIEWER", "PRIMARY"), invocation(4, "REVIEWER", "REPAIR")];
+  const deepseekRepaired = [
+    providerRoleReceipt("claude-deepseek", "SPECIALIST", "PRIMARY", 1),
+    providerRoleReceipt("claude-deepseek", "SPECIALIST", "REPAIR", 2, 0.01),
+    providerRoleReceipt("claude-deepseek", "REVIEWER", "PRIMARY", 3),
+    providerRoleReceipt("claude-deepseek", "REVIEWER", "REPAIR", 4, 0.03),
+  ];
   assert.equal(validEvidenceV2ProviderInvocationLedger(planStage, { status: "PASS", invocations: primary }), true);
-  assert.equal(validClaudeDeepseekInvocationLedger(planStage, { status: "PASS", invocations: repaired }), true);
+  assert.equal(validClaudeDeepseekInvocationLedger(planStage, { status: "PASS", invocations: deepseekRepaired }), true);
+  const budgetExtra = structuredClone(deepseekRepaired);
+  budgetExtra[0].budget.extra = true;
+  assert.equal(validClaudeDeepseekInvocationLedger(planStage, { status: "PASS", invocations: budgetExtra }), false);
+  const wrongPrior = structuredClone(deepseekRepaired);
+  wrongPrior[1].budget.prior_cost_usd = 0;
+  wrongPrior[1].budget.effective_call_cap_usd = 2;
+  wrongPrior[1].max_budget_usd = 2;
+  assert.equal(validClaudeDeepseekInvocationLedger(planStage, { status: "PASS", invocations: wrongPrior }), false);
+  const nestedTerminal = structuredClone(deepseekRepaired);
+  nestedTerminal[0].provider_terminal.stop_reason = { nested: true };
+  assert.equal(validClaudeDeepseekInvocationLedger(planStage, { status: "PASS", invocations: nestedTerminal }), false);
+  const overCallCap = structuredClone(deepseekRepaired);
+  overCallCap[0].usage.cost_usd = 2.000001;
+  assert.equal(validClaudeDeepseekInvocationLedger(planStage, { status: "PASS", invocations: overCallCap }), false);
   assert.equal(validEvidenceV2ProviderInvocationLedger(planStage, { status: "PASS", invocations: primary.map(({ evaluation_attempt: attempt, ...item }) => ({ ...item, attempt })) }), true);
   assert.equal(validEvidenceV2ProviderInvocationLedger(planStage, { status: "PASS", invocations: [...repaired, invocation(5, "REVIEWER", "REPAIR")] }), false);
   assert.equal(validEvidenceV2ProviderInvocationLedger(planStage, { status: "PASS", invocations: [invocation(1, "SPECIALIST", "PRIMARY"), invocation(2, "SPECIALIST", "REPAIR"), invocation(3, "SPECIALIST", "REPAIR"), invocation(4, "REVIEWER", "PRIMARY")] }), false);
@@ -141,7 +161,7 @@ test("termination wins over runner stderr and malformed stderr uses the generic 
   assert.equal(providerRunnerFailureCode({ result: { ...result, termination: { trigger: "HARD_TIMEOUT" } }, attemptRoot: root, fallbackCode: "GENERIC_RUNNER_FAILED" }), "HARD_TIMEOUT");
 });
 
-function providerRoleReceipt(provider, role, attempt, ordinal) {
+function providerRoleReceipt(provider, role, attempt, ordinal, priorCostUsd = 0) {
   const base = {
     schema_version: 1,
     invocation_id: `run:${provider}:${ordinal}`,
@@ -162,8 +182,26 @@ function providerRoleReceipt(provider, role, attempt, ordinal) {
   }
   return {
     ...base,
+    phase: role,
+    attempt: 1,
+    retry: 0,
     evaluation_attempt: attempt,
+    role_call_ordinal: attempt === "PRIMARY" ? 1 : 2,
+    workflow: `${role}:${attempt}`,
     turns: 1,
+    max_budget_usd: 2 - priorCostUsd,
+    budget: {
+      schema_version: 1,
+      stage_cap_usd: 4,
+      role,
+      role_pool_usd: 2,
+      prior_cost_usd: priorCostUsd,
+      effective_call_cap_usd: 2 - priorCostUsd,
+      enforcement: "claude-cli-threshold+terminal-posthoc-release-cap",
+    },
+    provider_terminal: { subtype: "success", is_error: false, stop_reason: null, exit_code: 0, signal: null },
+    usage_complete: true,
+    failure_code: null,
     usage: { schema_version: 1, input_tokens: 10 * ordinal, output_tokens: 5 * ordinal, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, total_tokens: 15 * ordinal, cost_usd: 0.01 * ordinal },
   };
 }
@@ -243,6 +281,9 @@ test("P1 and P2 central actions retain the terminal failed call and its usage", 
       ...providerRoleReceipt(fixture.provider, "SPECIALIST", "PRIMARY", 1),
       status: "FAIL",
       failure_code: fixture.code,
+      ...(fixture.provider === "claude-deepseek" ? {
+        provider_terminal: { subtype: "error", is_error: true, stop_reason: null, exit_code: 1, signal: null },
+      } : {}),
     };
     fs.writeFileSync(path.join(usageRoot, "specialist-primary.json"), canonicalJson(failed));
     const first = collectProviderFailureObservability({
@@ -299,7 +340,8 @@ test("P1 central projection preserves the real DeepSeek budget terminal and matc
     total_tokens: 60547,
     cost_usd: 1.047635,
   };
-  fs.writeFileSync(path.join(usageRoot, "specialist-primary.json"), canonicalJson({
+  const roleReceiptPath = path.join(usageRoot, "specialist-primary.json");
+  const validRoleReceipt = {
     ...providerRoleReceipt("claude-deepseek", "SPECIALIST", "PRIMARY", 1),
     status: "FAIL",
     usage,
@@ -319,8 +361,10 @@ test("P1 central projection preserves the real DeepSeek budget terminal and matc
       role_pool_usd: 2,
       prior_cost_usd: 0,
       effective_call_cap_usd: 2,
+      enforcement: "claude-cli-threshold+terminal-posthoc-release-cap",
     },
-  }));
+  };
+  fs.writeFileSync(roleReceiptPath, canonicalJson(validRoleReceipt));
   fs.writeFileSync(path.join(outputRoot, "model-usage.json"), canonicalJson({
     schema_version: 1,
     status: "FAIL",
@@ -349,6 +393,27 @@ test("P1 central projection preserves the real DeepSeek budget terminal and matc
   });
   assert.equal(observed.invocations[0].wrapper_outcome.code, "CLAUDE_DEEPSEEK_MAX_BUDGET_EXCEEDED");
   assert.equal(observed.invocations[0].provider_budget.effective_call_cap_usd, 2);
+  for (const mutate of [
+    (value) => { value.budget.extra = true; },
+    (value) => { value.budget.role = "REVIEWER"; },
+    (value) => { value.provider_terminal.stop_reason = { nested: true }; },
+    (value) => { value.provider_terminal.is_error = false; },
+    (value) => { value.usage_complete = false; },
+  ]) {
+    const changed = structuredClone(validRoleReceipt);
+    mutate(changed);
+    fs.writeFileSync(roleReceiptPath, canonicalJson(changed));
+    const rejected = collectProviderFailureObservability({
+      provider: "claude-deepseek",
+      result: { status: "FAIL" },
+      outputRoot,
+      usageRoot,
+      planStage,
+      invocationClass: "claude-deepseek-macos-e2e",
+    });
+    assert.equal(rejected.invocations.length, 0);
+    assert.equal(rejected.usage_complete, false);
+  }
 });
 
 test("P1 and P2 retain a legal failed prefix when the terminal call has no usage", (context) => {
@@ -372,6 +437,7 @@ test("P1 and P2 retain a legal failed prefix when the terminal call has no usage
       usage_complete: false,
       usage: null,
       failure_code: fixture.code,
+      ...(fixture.provider === "claude-deepseek" ? { provider_terminal: null } : {}),
     }));
     const observed = collectProviderFailureObservability({
       provider: fixture.provider,

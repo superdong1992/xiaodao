@@ -92,7 +92,10 @@ import {
 } from "../runtime-support/codex-luna-app-server.mjs";
 import {
   CLAUDE_DEEPSEEK_E2E_CALLS,
+  CLAUDE_DEEPSEEK_E2E_USD_LIMIT,
   CLAUDE_DEEPSEEK_METHODS_CALLS,
+  CLAUDE_DEEPSEEK_MODEL_CERT_BUDGET_ENFORCEMENT,
+  CLAUDE_DEEPSEEK_MODEL_CERT_ROLE_POOL_USD,
 } from "../quick-validation/claude-deepseek/runtime/claude-deepseek-contract.mjs";
 import {
   buildEvidenceV2CoreVerdict,
@@ -3350,7 +3353,12 @@ export function validClaudeDeepseekInvocationLedger(planStage, ledger) {
       && ledger.invocations.length === declaration.phases.length
       && ledger.invocations.every((invocation, index) => invocation?.status === "PASS" && invocation?.terminal === true && invocation.phase === declaration.phases[index]);
   }
-  return validEvidenceV2ProviderInvocationLedger(planStage, ledger);
+  return validEvidenceV2ProviderInvocationLedger(planStage, ledger)
+    && ledger.invocations.every((invocation) => validProviderInvocationReceipt(invocation, {
+      role: invocation.role,
+      attempt: providerInvocationAttempt(invocation),
+    }, "claude-deepseek"))
+    && validDeepseekReceiptSequence(ledger.invocations);
 }
 
 export function validEvidenceV2ProviderInvocationLedger(planStage, ledger) {
@@ -3419,6 +3427,65 @@ function providerInvocationAttempt(invocation) {
   return invocation?.evaluation_attempt ?? invocation?.attempt;
 }
 
+const DEEPSEEK_BUDGET_FIELDS = Object.freeze([
+  "schema_version", "stage_cap_usd", "role", "role_pool_usd", "prior_cost_usd",
+  "effective_call_cap_usd", "enforcement",
+]);
+const DEEPSEEK_PROVIDER_TERMINAL_FIELDS = Object.freeze([
+  "subtype", "is_error", "stop_reason", "exit_code", "signal",
+]);
+
+function roundedUsd(value) {
+  return Math.round(value * 1_000_000) / 1_000_000;
+}
+
+function validDeepseekBudget(value, { role, attempt }) {
+  if (!exactObjectKeys(value, DEEPSEEK_BUDGET_FIELDS)
+    || value.schema_version !== 1
+    || value.stage_cap_usd !== CLAUDE_DEEPSEEK_E2E_USD_LIMIT
+    || value.role !== role
+    || value.role_pool_usd !== CLAUDE_DEEPSEEK_MODEL_CERT_ROLE_POOL_USD
+    || !Number.isFinite(value.prior_cost_usd)
+    || value.prior_cost_usd < 0
+    || value.prior_cost_usd > CLAUDE_DEEPSEEK_MODEL_CERT_ROLE_POOL_USD
+    || value.effective_call_cap_usd !== Math.max(0, roundedUsd(CLAUDE_DEEPSEEK_MODEL_CERT_ROLE_POOL_USD - value.prior_cost_usd))
+    || value.enforcement !== CLAUDE_DEEPSEEK_MODEL_CERT_BUDGET_ENFORCEMENT) return false;
+  return attempt !== "PRIMARY" || value.prior_cost_usd === 0;
+}
+
+function validDeepseekProviderTerminal(value) {
+  return exactObjectKeys(value, DEEPSEEK_PROVIDER_TERMINAL_FIELDS)
+    && typeof value.subtype === "string"
+    && value.subtype.length > 0
+    && typeof value.is_error === "boolean"
+    && (value.stop_reason === null || typeof value.stop_reason === "string")
+    && (value.exit_code === null || (Number.isSafeInteger(value.exit_code) && value.exit_code >= 0))
+    && (value.signal === null || (typeof value.signal === "string" && value.signal.length > 0))
+    && (value.is_error ? value.subtype !== "success" : value.subtype === "success")
+    && (value.is_error
+      ? (value.exit_code !== 0 || value.signal !== null)
+      : value.exit_code === 0 && value.signal === null);
+}
+
+function validDeepseekReceiptSequence(invocations) {
+  const primaryCost = {};
+  const roleCost = { SPECIALIST: 0, REVIEWER: 0 };
+  let totalCost = 0;
+  for (const invocation of invocations) {
+    const attempt = providerInvocationAttempt(invocation);
+    const usage = isCompleteUsage(invocation.usage) ? invocation.usage : null;
+    const expectedPrior = attempt === "PRIMARY" ? 0 : primaryCost[invocation.role];
+    if (!Number.isFinite(expectedPrior) || invocation.budget.prior_cost_usd !== expectedPrior) return false;
+    if (attempt === "PRIMARY" && usage !== null) primaryCost[invocation.role] = usage.cost_usd;
+    if (usage !== null) {
+      roleCost[invocation.role] = roundedUsd(roleCost[invocation.role] + usage.cost_usd);
+      totalCost = roundedUsd(totalCost + usage.cost_usd);
+    }
+    if (invocation.status === "PASS" && roleCost[invocation.role] > CLAUDE_DEEPSEEK_MODEL_CERT_ROLE_POOL_USD) return false;
+  }
+  return !invocations.every((invocation) => invocation.status === "PASS") || totalCost <= CLAUDE_DEEPSEEK_E2E_USD_LIMIT;
+}
+
 function validProviderInvocationReceipt(invocation, expected, provider) {
   if (invocation?.schema_version !== 1
     || !["PASS", "FAIL"].includes(invocation.status)
@@ -3438,9 +3505,23 @@ function validProviderInvocationReceipt(invocation, expected, provider) {
       return false;
     }
   }
+  const usageComplete = isCompleteUsage(invocation.usage);
+  const providerTerminal = invocation.provider_terminal;
   return invocation.evaluation_attempt === expected.attempt
-    && (invocation.status === "FAIL" || isCompleteUsage(invocation.usage))
-    && (invocation.usage === null || invocation.usage === undefined || isCompleteUsage(invocation.usage));
+    && invocation.phase === expected.role
+    && invocation.workflow === `${expected.role}:${expected.attempt}`
+    && invocation.role_call_ordinal === (expected.attempt === "PRIMARY" ? 1 : 2)
+    && invocation.attempt === 1
+    && invocation.retry === 0
+    && invocation.max_budget_usd === invocation.budget?.effective_call_cap_usd
+    && validDeepseekBudget(invocation.budget, expected)
+    && invocation.usage_complete === usageComplete
+    && (invocation.status === "PASS" ? usageComplete && invocation.failure_code === null : /^[A-Z][A-Z0-9_]*$/u.test(invocation.failure_code ?? ""))
+    && (invocation.status !== "PASS" || invocation.usage.cost_usd <= invocation.budget.effective_call_cap_usd)
+    && (providerTerminal === null || invocation.budget.effective_call_cap_usd > 0)
+    && (providerTerminal === null
+      ? invocation.status === "FAIL" && !usageComplete
+      : validDeepseekProviderTerminal(providerTerminal));
 }
 
 function validProviderInvocationSequence(invocations) {
@@ -3472,7 +3553,10 @@ function readProviderRoleReceipts(usageRoot, provider) {
     if (!validProviderInvocationReceipt(receipt, expected, provider)) return [];
     receipts.push(receipt);
   }
-  return validProviderInvocationSequence(receipts) ? receipts : [];
+  return validProviderInvocationSequence(receipts)
+    && (provider !== "claude-deepseek" || validDeepseekReceiptSequence(receipts))
+    ? receipts
+    : [];
 }
 
 function modelUsageAggregate(outputRoot) {

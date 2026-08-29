@@ -134,10 +134,11 @@ function normalizedUsageOrNull(value) {
 function closedProviderTerminal(value) {
   if (!exactKeys(value, ["subtype", "is_error", "stop_reason", "exit_code", "signal"])) return null;
   if (typeof value.subtype !== "string"
+    || value.subtype.length === 0
     || typeof value.is_error !== "boolean"
     || (value.stop_reason !== null && typeof value.stop_reason !== "string")
-    || (value.exit_code !== null && !Number.isSafeInteger(value.exit_code))
-    || (value.signal !== null && typeof value.signal !== "string")) return null;
+    || (value.exit_code !== null && (!Number.isSafeInteger(value.exit_code) || value.exit_code < 0))
+    || (value.signal !== null && (typeof value.signal !== "string" || value.signal.length === 0))) return null;
   return Object.freeze({ ...value });
 }
 
