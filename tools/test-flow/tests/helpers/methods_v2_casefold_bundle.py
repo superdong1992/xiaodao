@@ -1,7 +1,8 @@
 """Build a complete Methods V2 record bundle with the production Runtime.
 
 The fixture deliberately uses a Unicode casefold pair that JavaScript
-``toLowerCase`` cannot reproduce: marker ``Straße`` and log line ``STRASSE``.
+``toLowerCase`` cannot reproduce: marker prefix ``Straße`` and log line
+prefix ``STRASSE``.
 The hand-authored package and log are untrusted test inputs; Graph, Plan,
 State, Outcome, and the public result all come from production code.
 """
@@ -37,7 +38,8 @@ import macos_codex_luna_model_cert_driver as runtime_driver  # noqa: E402
 
 
 METHOD_ID = "casefold-method"
-MARKER = "Straße"
+SOURCE_LOG_TEMPLATE = "Straße request_id={request_id}"
+MARKER = "Straße request_id="
 LINE = "STRASSE request_id=42"
 
 
@@ -94,7 +96,10 @@ def _registration(root: Path) -> Path:
             ],
             "required_artifacts": ["log_archive"],
             "log_derived_fields": ["request_id"],
-            "shared_references": ["references/shared-boundaries.md"],
+            "shared_references": [
+                "references/source-log-templates.md",
+                "references/shared-boundaries.md",
+            ],
             "methods": [
                 {
                     "id": METHOD_ID,
@@ -122,7 +127,7 @@ Return only evaluation_ref, verdict, and reason; UNKNOWN is allowed.
     card = "\n\n".join(
         (
             "## 适用条件\n固定 Unicode casefold 用例。",
-            f"## 所需证据\n使用冻结的 method marker `{MARKER}`。",
+            f"## 所需证据\n- `{SOURCE_LOG_TEMPLATE}`",
             "## 计算与判断\n按 Evidence Graph 判断。",
             "## 确认条件\n存在绑定到当前 method 的证据。",
             "## 未知边界\n证据不足时返回 UNKNOWN。",
@@ -130,6 +135,11 @@ Return only evaluation_ref, verdict, and reason; UNKNOWN is allowed.
         )
     )
     (references / "casefold-method.md").write_text(f"{card}\n", encoding="utf-8")
+    (references / "source-log-templates.md").write_text(
+        "# Source log templates\n\n"
+        f"```text\n{SOURCE_LOG_TEMPLATE}\n```\n",
+        encoding="utf-8",
+    )
     (references / "shared-boundaries.md").write_text(
         "Evidence matching is owned by the production scanner.\n",
         encoding="utf-8",

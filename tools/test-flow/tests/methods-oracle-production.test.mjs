@@ -54,6 +54,10 @@ function productionBundle() {
   ]));
   productionTemplate = {
     root,
+    status: manifest.status,
+    inputProvenance: manifest.input_provenance,
+    productionRuntime: manifest.production_runtime,
+    preprocessingCalls: manifest.preprocessing_calls,
     fixture: {
       files,
       expected: manifest.expected,
@@ -84,11 +88,20 @@ test.after(() => {
 });
 
 test("Methods V2 replay accepts the production scanner's Straße to STRASSE casefold Graph", () => {
-  const fixture = productionBundle().fixture;
+  const production = productionBundle();
+  assert.equal(production.status, "PASS");
+  assert.equal(production.inputProvenance, "hand-authored-untrusted-package-and-log");
+  assert.equal(
+    production.productionRuntime,
+    "problem_locator.runtime.diagnosis_runtime.DiagnosisRuntime",
+  );
+  assert.equal(production.preprocessingCalls, 0);
+  const fixture = production.fixture;
   const graph = JSON.parse(fixture.files.evidence_graph.toString("utf8"));
   assert.equal(graph.hits.length, 1);
-  assert.equal(graph.hits[0].marker, "Straße");
+  assert.equal(graph.hits[0].marker, "Straße request_id=");
   assert.equal(graph.hits[0].line, "STRASSE request_id=42");
+  assert.notEqual(graph.hits[0].marker.toLowerCase(), "strasse request_id=");
   assert.equal(graph.hits[0].method_id, "casefold-method");
   assert.equal(graph.hits[0].marker_index, 1);
 
@@ -118,7 +131,12 @@ test("Methods V2 replay accepts the production scanner's Straße to STRASSE case
 });
 
 test("Methods V2 replay rejects one-field mutations of a production-generated bundle", () => {
-  const baseline = productionBundle().fixture;
+  const production = productionBundle();
+  assert.equal(
+    production.productionRuntime,
+    "problem_locator.runtime.diagnosis_runtime.DiagnosisRuntime",
+  );
+  const baseline = production.fixture;
 
   const wrongMarkerIndex = copyFixture(baseline);
   mutateRecord(wrongMarkerIndex, "evidence_graph", (graph) => { graph.hits[0].marker_index = 2; });
