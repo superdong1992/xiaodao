@@ -107,6 +107,7 @@ import {
   EVIDENCE_V2_RELEASE_VERDICT_FILENAME,
   validateEvidenceV2ModelCert,
 } from "../../validation/evidence-v2-certification.mjs";
+import { validateEvidenceV2ReleaseScenarioGraph } from "../../validation/evidence-v2-scenario-oracle.mjs";
 
 const LINUX_CLIENT_BROWSER_RUNNER_RELATIVE = "tools/test-flow/runtime-support/linux_client_browser_runner.py";
 const LINUX_CLIENT_BROWSER_ARGUMENT_PROFILE = "chrome-headless-shell-for-testing-local-v1";
@@ -1026,6 +1027,7 @@ function generatedMethodsExpectation(context, generatedSkill, inputs, gateOracle
   return {
     confirmedMethods: orderedConfirmedMethods,
     methodCards,
+    methods,
     requiredEvidenceIdentities,
   };
 }
@@ -1044,6 +1046,12 @@ export function validMethodsV2OracleEvidence(context, receipt, generatedSkill) {
       [key, fs.readFileSync(path.join(stageRoot, filename))]
     )));
     const reviewerOutcome = JSON.parse(files.reviewer_outcome.toString("utf8"));
+    validateEvidenceV2ReleaseScenarioGraph({
+      sourceRoot: context.repoRoot,
+      methods: methodsExpectation.methods,
+      graph: JSON.parse(files.evidence_graph.toString("utf8")),
+      publicMethodsResult: reviewerOutcome.methods_terminal_projection,
+    });
     const validated = validateMethodsV2ExecutionRecords({
       files,
       invocations: (receipt.invocations ?? []).filter((invocation) => ["DIAGNOSE", "REVIEW"].includes(invocation?.job_type)),

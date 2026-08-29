@@ -458,6 +458,53 @@ function validateReleaseScenarioSemantics({ graph, selected, generated, scenario
   validateQueueHistory({ graph, generated, target });
 }
 
+export function buildEvidenceV2ReleaseScenarioExpectation({ sourceRoot, methods }) {
+  assertFlow(typeof sourceRoot === "string" && path.isAbsolute(sourceRoot), "SCENARIO_ORACLE_SOURCE_ROOT", "source root must be absolute");
+  assertFlow(methods !== null && typeof methods === "object" && !Array.isArray(methods), "SCENARIO_ORACLE_METHODS_FIELDS", "copied methods.json must be an object");
+  const caseRoot = discoverReleaseCaseRoot(path.join(sourceRoot, "tests", "cases", "release"));
+  const inputs = loadReleaseCaseInputs(caseRoot);
+  const gateOracle = loadReleaseCaseOracle(caseRoot);
+  const scenarioOracleEntry = gateOracle.scenarios.find((item) => item.scenario_id === inputs.journey_scenario);
+  assertFlow(scenarioOracleEntry, "SCENARIO_ORACLE_RELEASE_ORACLE_MISSING", "frozen release scenario oracle is missing");
+  const selected = inputs.scenarios.find((item) => item.scenario_id === inputs.journey_scenario);
+  assertFlow(selected, "SCENARIO_ORACLE_RELEASE_SCENARIO_MISSING", "frozen release scenario is missing");
+  const methodsExpectation = buildMethodsExpectation({
+    methods,
+    inputs,
+    gateOracle,
+    scenarioOracle: scenarioOracleEntry.oracle,
+  });
+  return {
+    scenario_id: selected.scenario_id,
+    selected,
+    scenario_oracle: scenarioOracleEntry.oracle,
+    generated: methodsExpectation.generated,
+    expected: methodsExpectation.expected,
+  };
+}
+
+export function validateEvidenceV2ReleaseScenarioGraph({
+  sourceRoot,
+  methods,
+  graph,
+  publicMethodsResult,
+}) {
+  assertFlow(graph !== null && typeof graph === "object" && !Array.isArray(graph), "SCENARIO_ORACLE_GRAPH_FIELDS", "production Evidence Graph must be an object");
+  assertFlow(publicMethodsResult !== null && typeof publicMethodsResult === "object" && !Array.isArray(publicMethodsResult), "SCENARIO_ORACLE_PUBLIC_RESULT_FIELDS", "public methods_result must be an object");
+  const expectation = buildEvidenceV2ReleaseScenarioExpectation({ sourceRoot, methods });
+  validateReleaseScenarioSemantics({
+    graph,
+    selected: expectation.selected,
+    generated: expectation.generated,
+    scenarioOracle: expectation.scenario_oracle,
+    publicMethodsResult,
+  });
+  return {
+    scenario_id: expectation.scenario_id,
+    expected: expectation.expected,
+  };
+}
+
 function invocationProjection(providerInvocations, modelId, sourceJob, reviewerJob) {
   assertFlow(Array.isArray(providerInvocations), "SCENARIO_ORACLE_PROVIDER_INVOCATIONS", "provider role receipts are missing");
   return providerInvocations.map((invocation) => ({
@@ -512,17 +559,10 @@ export function buildEvidenceV2ScenarioOracleReceipt({
     "production Jobs do not bind the frozen product registration",
   );
   const frozenScenario = validateScenarioAgainstFrozenSource({ scenario, inputs, caseRoot, files, publicMethodsResult, sourceJob });
-  const methodsExpectation = buildMethodsExpectation({
+  const scenarioValidation = validateEvidenceV2ReleaseScenarioGraph({
+    sourceRoot,
     methods,
-    inputs,
-    gateOracle,
-    scenarioOracle: scenarioOracleEntry.oracle,
-  });
-  validateReleaseScenarioSemantics({
     graph: frozenScenario.graph,
-    selected: frozenScenario.selected,
-    generated: methodsExpectation.generated,
-    scenarioOracle: scenarioOracleEntry.oracle,
     publicMethodsResult,
   });
   const summary = validateMethodsV2ExecutionRecords({
@@ -532,7 +572,7 @@ export function buildEvidenceV2ScenarioOracleReceipt({
       reviewer_job_id: reviewerJob.job_id,
       case_id: sourceJob.case_id,
       skill_ref: sourceJob.skill_ref,
-      ...methodsExpectation.expected,
+      ...scenarioValidation.expected,
     },
     invocations: invocationProjection(providerInvocations, modelId, sourceJob, reviewerJob),
     publicMethodsResult,

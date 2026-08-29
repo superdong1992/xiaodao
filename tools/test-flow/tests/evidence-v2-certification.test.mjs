@@ -12,8 +12,14 @@ import {
   materializeEvidenceV2CoreVerdict,
   materializeEvidenceV2ModelCert,
   materializeEvidenceV2ReleaseVerdict,
+  validMethodsV2OracleEvidence,
 } from "../lib/actions.mjs";
 import { loadConfiguration } from "../lib/config.mjs";
+import {
+  METHODS_V2_CAPTURED_FILES,
+  validateMethodsV2ExecutionRecords,
+} from "../lib/methods-oracle.mjs";
+import { packageTreeIdentity } from "../lib/release-inputs.mjs";
 import { sumUsage } from "../lib/usage.mjs";
 import {
   canonicalJson,
@@ -38,6 +44,7 @@ import {
 } from "../../validation/evidence-v2-certification.mjs";
 import {
   EVIDENCE_V2_SCENARIO_ORACLE_RECEIPT_FILENAME,
+  buildEvidenceV2ReleaseScenarioExpectation,
   buildEvidenceV2ScenarioOracleReceipt,
 } from "../../validation/evidence-v2-scenario-oracle.mjs";
 
@@ -166,12 +173,12 @@ function pythonRuntime() {
 
 function writeReleaseRegistration(root, sourceRoot = REPO_ROOT) {
   const caseRoot = path.join(sourceRoot, RELEASE_CASE_RELATIVE);
-  const registration = JSON.parse(fs.readFileSync(path.join(caseRoot, "registration", "rpc-timeout-methods-v1", "registration-template.json"), "utf8"));
+  const registrationPath = path.join(caseRoot, "registration", "rpc-timeout-methods-v1", "registration-template.json");
   const wiki = fs.readFileSync(path.join(caseRoot, "input", "wiki.md"), "utf8");
   const packageRoot = path.join(root, "package", "diagnose-rpc-timeout");
   const references = path.join(packageRoot, "references");
   fs.mkdirSync(references, { recursive: true });
-  fs.writeFileSync(path.join(root, "registration-template.json"), `${JSON.stringify(registration, null, 2)}\n`);
+  fs.copyFileSync(registrationPath, path.join(root, "registration-template.json"));
   const expected = JSON.parse(fs.readFileSync(path.join(caseRoot, "oracle.json"), "utf8")).expected_package;
   const methods = {
     schema_version: 1,
@@ -313,12 +320,89 @@ function buildScenarioReceipt({ sourceRoot = REPO_ROOT, evidenceRoot, runtimeRec
   });
 }
 
-function runtimeReceiptWithReboundGraph(runtimeReceipt, evidenceRoot) {
-  const changed = clone(runtimeReceipt);
-  const graphPath = path.join(evidenceRoot, "methods-evidence-graph-v2.json");
-  changed.scenario.evidence_graph.canonical_sha256 = sha256File(graphPath);
-  changed.scenario.evidence_graph.canonical_size = fs.statSync(graphPath).size;
-  return changed;
+function genericMethodsSummary({ sourceRoot = REPO_ROOT, evidenceRoot }) {
+  const methods = JSON.parse(fs.readFileSync(path.join(evidenceRoot, "methods.json"), "utf8"));
+  const expectation = buildEvidenceV2ReleaseScenarioExpectation({ sourceRoot, methods });
+  const files = Object.fromEntries(Object.entries(METHODS_V2_CAPTURED_FILES).map(([key, filename]) => [
+    key,
+    fs.readFileSync(path.join(evidenceRoot, filename)),
+  ]));
+  const sourceJob = JSON.parse(files.source_job.toString("utf8"));
+  const reviewerJob = JSON.parse(files.reviewer_job.toString("utf8"));
+  const publicMethodsResult = JSON.parse(fs.readFileSync(path.join(evidenceRoot, "methods-result-v2.json"), "utf8"));
+  return validateMethodsV2ExecutionRecords({
+    files,
+    expected: {
+      source_job_id: sourceJob.job_id,
+      reviewer_job_id: reviewerJob.job_id,
+      case_id: sourceJob.case_id,
+      skill_ref: sourceJob.skill_ref,
+      ...expectation.expected,
+    },
+    invocations: [
+      { job_id: sourceJob.job_id, job_type: "DIAGNOSE", effective_model: "zero-model-role-double" },
+      { job_id: reviewerJob.job_id, job_type: "REVIEW", effective_model: "zero-model-role-double" },
+    ],
+    publicMethodsResult,
+  });
+}
+
+function crossJobOracleFixture({ sourceRoot = REPO_ROOT, bundle, methodsSummary = null }) {
+  const attemptRoot = fs.mkdtempSync(path.join(os.tmpdir(), "evidence-v2-cross-job-oracle-"));
+  const registrationId = "rpc-timeout-methods-v1";
+  const skillName = "diagnose-rpc-timeout";
+  const generatedRoot = path.join(
+    attemptRoot,
+    "payload", "stages", "real.skill-generation", "gates", "real.agent.skill-generation",
+    "generated-skill", registrationId,
+  );
+  fs.mkdirSync(path.dirname(generatedRoot), { recursive: true });
+  fs.cpSync(path.join(bundle.root, "registration"), generatedRoot, { recursive: true });
+  const packageRoot = path.join(generatedRoot, "package", skillName);
+  const packageIdentity = packageTreeIdentity(packageRoot);
+  assert.equal(packageIdentity.status, "PRESENT");
+  const packageEntries = packageIdentity.records
+    .filter((entry) => entry.kind === "file")
+    .map(({ path: entryPath, size, sha256 }) => ({ path: entryPath, size, sha256 }))
+    .sort((left, right) => left.path < right.path ? -1 : left.path > right.path ? 1 : 0);
+  const registrationSha256 = sha256File(path.join(generatedRoot, "registration-template.json"));
+  const packageTreeSha256 = sha256Bytes(canonicalJson({ version: 1, entries: packageEntries }));
+  const combinedSha256 = sha256Bytes(canonicalJson({
+    schema_version: 1,
+    registration_id: registrationId,
+    registration_sha256: registrationSha256,
+    package_tree_sha256: packageTreeSha256,
+  }));
+  const stageRoot = path.join(attemptRoot, "payload", "stages", "journey.cross-job.diagnose");
+  fs.mkdirSync(stageRoot, { recursive: true });
+  for (const name of fs.readdirSync(bundle.evidenceRoot)) {
+    const source = path.join(bundle.evidenceRoot, name);
+    if (fs.statSync(source).isFile()) fs.copyFileSync(source, path.join(stageRoot, name));
+  }
+  const summary = methodsSummary ?? buildScenarioReceipt({
+    sourceRoot,
+    evidenceRoot: bundle.evidenceRoot,
+    runtimeReceipt: bundle.runtimeReceipt,
+  }).summary;
+  return {
+    attemptRoot,
+    context: { attemptRoot, repoRoot: sourceRoot },
+    generatedSkill: {
+      registration_id: registrationId,
+      skill_name: skillName,
+      source_wiki_sha256: sha256File(path.join(sourceRoot, RELEASE_CASE_RELATIVE, "input", "wiki.md")),
+      registration_sha256: registrationSha256,
+      package_tree_sha256: packageTreeSha256,
+      combined_sha256: combinedSha256,
+    },
+    receipt: {
+      methods_v2: summary,
+      invocations: [
+        { job_id: summary.source_job_id, job_type: "DIAGNOSE", effective_model: "zero-model-role-double" },
+        { job_id: summary.reviewer_job_id, job_type: "REVIEW", effective_model: "zero-model-role-double" },
+      ],
+    },
+  };
 }
 
 test.after(() => {
@@ -337,7 +421,20 @@ test("production Graph mechanically proves every resolved Release method without
   assert.equal(receipt.summary.evaluation_count, 3);
 });
 
-test("scenario oracle rejects missing or changed request timeout and a non-qualifying queue target from fresh production Graphs", () => {
+test("CrossJob action accepts the same production Graph semantic proof as provider certification", () => {
+  const production = productionBundle();
+  const value = crossJobOracleFixture({ bundle: production });
+  try {
+    assert.equal(
+      validMethodsV2OracleEvidence(value.context, value.receipt, value.generatedSkill),
+      true,
+    );
+  } finally {
+    fs.rmSync(value.attemptRoot, { recursive: true, force: true });
+  }
+});
+
+test("provider and CrossJob shared oracle reject raw-log mutations after a fresh production Runtime scan", () => {
   const mutations = [
     {
       change: (caseRoot) => {
@@ -347,6 +444,7 @@ test("scenario oracle rejects missing or changed request timeout and a non-quali
         fs.writeFileSync(target, lines.join("\n"));
       },
       code: "SCENARIO_ORACLE_LINKED_TIMEOUT_MISSING",
+      genericMustPass: true,
     },
     {
       change: (caseRoot) => {
@@ -355,6 +453,7 @@ test("scenario oracle rejects missing or changed request timeout and a non-quali
         fs.writeFileSync(target, text.replace("reqid(501), timeout 3000", "reqid(501), timeout 5000"));
       },
       code: "SCENARIO_ORACLE_LINKED_TIMEOUT_MISMATCH",
+      genericMustPass: true,
     },
     {
       change: (caseRoot) => {
@@ -365,11 +464,83 @@ test("scenario oracle rejects missing or changed request timeout and a non-quali
         fs.writeFileSync(target, lines.join("\n"));
       },
       code: "SCENARIO_ORACLE_QUEUE_TARGET_NOT_CONFIRMED",
+      genericMustPass: true,
+    },
+    {
+      change: (caseRoot) => {
+        const target = path.join(caseRoot, "scenarios", "multiple-rpc-timeouts", "server.log");
+        const lines = fs.readFileSync(target, "utf8").split(/\r?\n/)
+          .filter((line) => !line.includes("ordinal=second"));
+        fs.writeFileSync(target, lines.join("\n"));
+      },
+      check: (evidenceRoot) => {
+        const graph = JSON.parse(fs.readFileSync(path.join(evidenceRoot, "methods-evidence-graph-v2.json"), "utf8"));
+        assert.equal(graph.hits.filter((hit) => hit.marker === "QUEUE_HISTORY print_time_ms=").length, 1);
+      },
+      code: "RELEASE_CASE_EVIDENCE_NOT_UNIQUE",
+    },
+    {
+      change: (caseRoot) => {
+        const target = path.join(caseRoot, "scenarios", "multiple-rpc-timeouts", "server.log");
+        const lines = fs.readFileSync(target, "utf8").split(/\r?\n/);
+        const first = lines.find((line) => line.includes("start_us=10000000"));
+        const secondIndex = lines.findIndex((line) => line.includes("start_us=20000000"));
+        assert.ok(first && secondIndex >= 0);
+        lines[secondIndex] = first;
+        fs.writeFileSync(target, lines.join("\n"));
+      },
+      check: (evidenceRoot) => {
+        const methods = JSON.parse(fs.readFileSync(path.join(evidenceRoot, "methods.json"), "utf8"));
+        const apiMethodId = methods.methods.find((method) => method.priority === 1).id;
+        const graph = JSON.parse(fs.readFileSync(path.join(evidenceRoot, "methods-evidence-graph-v2.json"), "utf8"));
+        const apiHitRefs = new Set(graph.hits.filter((hit) => (
+          hit.method_id === apiMethodId && hit.marker === "API_COMPLETE service="
+        )).map((hit) => hit.hit_ref));
+        const apiEvents = graph.events.filter((event) => (
+          event.method_id === apiMethodId && event.evidence_hit_refs.some((ref) => apiHitRefs.has(ref))
+        ));
+        assert.equal(apiHitRefs.size, 2);
+        assert.equal(apiEvents.length, 1);
+      },
+      code: "RELEASE_CASE_EVIDENCE_NOT_UNIQUE",
     },
   ];
+  const baselineSummary = buildScenarioReceipt({
+    evidenceRoot: productionBundle().evidenceRoot,
+    runtimeReceipt: productionBundle().runtimeReceipt,
+  }).summary;
   for (const mutation of mutations) {
     const value = executeMutatedProduction(mutation.change);
+    let crossJobValue = null;
     try {
+      mutation.check?.(value.bundle.evidenceRoot);
+      let methodsSummary = baselineSummary;
+      let genericPassed = false;
+      try {
+        methodsSummary = genericMethodsSummary({
+          sourceRoot: value.sourceRoot,
+          evidenceRoot: value.bundle.evidenceRoot,
+        });
+        genericPassed = true;
+      } catch {
+        // The shared semantic oracle is stricter than the generic structural
+        // oracle for timeout and queue-threshold mutations.  Missing frozen
+        // identities may already make the generic oracle fail.
+      }
+      if (mutation.genericMustPass) assert.equal(genericPassed, true);
+      crossJobValue = crossJobOracleFixture({
+        sourceRoot: value.sourceRoot,
+        bundle: value.bundle,
+        methodsSummary,
+      });
+      assert.equal(
+        validMethodsV2OracleEvidence(
+          crossJobValue.context,
+          crossJobValue.receipt,
+          crossJobValue.generatedSkill,
+        ),
+        false,
+      );
       assert.throws(
         () => buildScenarioReceipt({
           sourceRoot: value.sourceRoot,
@@ -379,13 +550,14 @@ test("scenario oracle rejects missing or changed request timeout and a non-quali
         (error) => error.code === mutation.code,
       );
     } finally {
+      if (crossJobValue !== null) fs.rmSync(crossJobValue.attemptRoot, { recursive: true, force: true });
       fs.rmSync(value.bundle.root, { recursive: true, force: true });
       fs.rmSync(value.sourceRoot, { recursive: true, force: true });
     }
   }
 });
 
-test("scenario oracle rejects shared-only timeout coverage, missing queue evidence, and merged API events", () => {
+test("scenario oracle rejects a generated package that leaves timeout evidence shared-only", () => {
   const mutations = [
     {
       change: (evidenceRoot) => {
@@ -397,45 +569,13 @@ test("scenario oracle rejects shared-only timeout coverage, missing queue eviden
         fs.writeFileSync(target, canonicalJson(methods));
       },
       code: "SCENARIO_ORACLE_METHOD_SEMANTIC_MAPPING",
-      rebindGraph: false,
-    },
-    {
-      change: (evidenceRoot) => {
-        const target = path.join(evidenceRoot, "methods-evidence-graph-v2.json");
-        const graph = JSON.parse(fs.readFileSync(target, "utf8"));
-        graph.hits = graph.hits.filter((hit) => !(
-          hit.marker === "QUEUE_HISTORY print_time_ms=" && hit.line.includes("ordinal=second")
-        ));
-        fs.writeFileSync(target, canonicalJson(graph));
-      },
-      code: "SCENARIO_ORACLE_QUEUE_HISTORY_COUNT",
-      rebindGraph: true,
-    },
-    {
-      change: (evidenceRoot) => {
-        const methods = JSON.parse(fs.readFileSync(path.join(evidenceRoot, "methods.json"), "utf8"));
-        const apiMethodId = methods.methods.find((method) => method.priority === 1).id;
-        const target = path.join(evidenceRoot, "methods-evidence-graph-v2.json");
-        const graph = JSON.parse(fs.readFileSync(target, "utf8"));
-        const apiEvents = graph.events.filter((event) => event.method_id === apiMethodId
-          && event.evidence_hit_refs.some((ref) => graph.hits.some((hit) => hit.hit_ref === ref && hit.marker === "API_COMPLETE service=")));
-        assert.equal(apiEvents.length, 2);
-        apiEvents[0].evidence_hit_refs = [...apiEvents[0].evidence_hit_refs, ...apiEvents[1].evidence_hit_refs];
-        graph.events = graph.events.filter((event) => event.event_ref !== apiEvents[1].event_ref);
-        fs.writeFileSync(target, canonicalJson(graph));
-      },
-      code: "SCENARIO_ORACLE_API_EVENTS_MERGED",
-      rebindGraph: true,
     },
   ];
   for (const mutation of mutations) {
     const value = copiedProductionEvidence(mutation.change);
     try {
-      const runtimeReceipt = mutation.rebindGraph
-        ? runtimeReceiptWithReboundGraph(value.runtimeReceipt, value.evidenceRoot)
-        : value.runtimeReceipt;
       assert.throws(
-        () => buildScenarioReceipt({ evidenceRoot: value.evidenceRoot, runtimeReceipt }),
+        () => buildScenarioReceipt({ evidenceRoot: value.evidenceRoot, runtimeReceipt: value.runtimeReceipt }),
         (error) => error.code === mutation.code,
       );
     } finally {

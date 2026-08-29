@@ -117,6 +117,8 @@ test("v2 loader exposes only Wiki, registration, driver, and frozen attachments"
   assert.deepEqual(inputs.scenarios[0].driver.initial_user_fact_names, ["problem_time", "client_process", "server_process", "service", "api"]);
   assert.deepEqual(inputs.scenarios[0].driver.supplement_input_names, []);
   assert.deepEqual(inputs.scenarios[0].attachment_paths.map((value) => path.basename(value)), ["client.log", "server.log"]);
+  assert.equal(inputs.scenarios[0].driver.problem.completion_criteria.some((item) => item.includes("超时不等于取消")), false);
+  assert.equal(Object.hasOwn(oracle.scenarios[0].oracle, "required_safety_phrases"), false);
 });
 
 test("registration and semantic oracle bind the same Wiki and Methods package", () => {
@@ -242,6 +244,10 @@ test("Evidence V2 scenario oracle hard-cuts RESOLVED, empty candidates, and exac
     {
       change: (oracle) => { oracle.required_confirmed_marker_groups[0] = ["API_COMPLETE"]; },
       expected: /not an exact method marker/,
+    },
+    {
+      change: (oracle) => { oracle.required_safety_phrases = ["超时不等于取消"]; },
+      expected: /fields are invalid/,
     },
   ];
   for (const { change, expected } of mutations) {
