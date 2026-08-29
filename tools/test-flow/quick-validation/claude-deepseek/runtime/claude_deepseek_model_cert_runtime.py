@@ -375,9 +375,17 @@ def _valid_role_output(
                 else "CONFIRMED"
             ),
             "reason": (
-                "冻结 Evidence Graph 满足该方法卡。"
-                if role == "SPECIALIST"
-                else "盲评确认冻结 Graph 与 Plan 支持该结论。"
+                (
+                    "冻结 Evidence Graph 不满足该方法的确认条件。"
+                    if role == "SPECIALIST"
+                    else "盲评确认冻结 Graph 与 Plan 不满足该方法的确认条件。"
+                )
+                if item["method_id"] in rejected_method_ids
+                else (
+                    "冻结 Evidence Graph 满足该方法卡。"
+                    if role == "SPECIALIST"
+                    else "盲评确认冻结 Graph 与 Plan 支持该结论。"
+                )
             ),
         }
         for item in evaluations

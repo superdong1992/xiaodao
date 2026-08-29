@@ -762,11 +762,14 @@ test("P1 and P2 central actions resolve one same-attempt production registration
   }
 });
 
-test("generated Methods scenario mapping requires RESOLVED, no candidates, and exact markers", () => {
+test("generated Methods scenario mapping requires RESOLVED, explicit verdicts, and exact markers", () => {
   const valid = {
     oracle: {
       expected_status: "RESOLVED",
-      required_candidate_marker_groups: [],
+      expected_method_verdicts: [
+        { semantic_id: "api_execution_overrun", verdict: "REJECTED" },
+        { semantic_id: "server_receive_queueing", verdict: "CONFIRMED" },
+      ],
     },
   };
   assert.equal(validateGeneratedMethodsScenarioOracle(valid), valid.oracle);
@@ -775,8 +778,8 @@ test("generated Methods scenario mapping requires RESOLVED, no candidates, and e
     /GENERATED_METHODS_SCENARIO_STATUS_INVALID/,
   );
   assert.throws(
-    () => validateGeneratedMethodsScenarioOracle({ oracle: { ...valid.oracle, required_candidate_marker_groups: [["QUEUE_HISTORY print_time_ms="]] } }),
-    /GENERATED_METHODS_CANDIDATE_MARKERS_FORBIDDEN/,
+    () => validateGeneratedMethodsScenarioOracle({ oracle: { ...valid.oracle, expected_method_verdicts: [{ semantic_id: "api_execution_overrun", verdict: "UNKNOWN" }] } }),
+    /GENERATED_METHODS_METHOD_VERDICTS_INVALID/,
   );
   assert.equal(exactGeneratedEvidenceMarker("API_COMPLETE service=", "API_COMPLETE service="), true);
   assert.equal(exactGeneratedEvidenceMarker("API_COMPLETE service=", "API_COMPLETE"), false);

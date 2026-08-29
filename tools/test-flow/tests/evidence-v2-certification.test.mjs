@@ -244,13 +244,13 @@ function writeReleaseRegistration(
 
 function executeProductionBundleAttempt(
   sourceRoot = REPO_ROOT,
-  { includeCompleteTemplates = true } = {},
+  { includeCompleteTemplates = true, runtimeScript = null } = {},
 ) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "evidence-v2-production-cert-"));
   const registrationRoot = path.join(root, "registration");
   const evidenceRoot = path.join(root, "evidence");
   writeReleaseRegistration(registrationRoot, sourceRoot, { includeCompleteTemplates });
-  const script = path.join(REPO_ROOT, "tools", "test-flow", "quick-validation", "codex-luna", "runtime", "macos_codex_luna_model_cert_driver.py");
+  const script = runtimeScript ?? path.join(REPO_ROOT, "tools", "test-flow", "quick-validation", "codex-luna", "runtime", "macos_codex_luna_model_cert_driver.py");
   const receiptPath = path.join(evidenceRoot, "runtime-receipt.json");
   const bootstrap = "import runpy,sys,types; mark=types.SimpleNamespace(parametrize=lambda *a,**k:(lambda f:f)); sys.modules['pytest']=types.SimpleNamespace(fixture=lambda f:f,mark=mark); script=sys.argv[1]; sys.argv=sys.argv[1:]; runpy.run_path(script,run_name='__main__')";
   const python = pythonRuntime();
@@ -258,6 +258,8 @@ function executeProductionBundleAttempt(
     ...python.prefix, "-c", bootstrap,
     script,
     "--mode", "fake",
+    "--fake-rejected-method-id", "api-execution-slow",
+    "--fake-rejected-method-id", "client-receive-blocked",
     "--source-root", sourceRoot,
     "--registration-root", registrationRoot,
     "--work-root", path.join(root, "work"),
@@ -432,7 +434,28 @@ test.after(() => {
   if (productionTemplate !== null) fs.rmSync(productionTemplate.root, { recursive: true, force: true });
 });
 
-test("production Graph mechanically proves every resolved Release method without model semantics", () => {
+test("DeepSeek and Luna fake provider baselines use the same explicit plan-order verdicts", () => {
+  const drivers = [
+    path.join(REPO_ROOT, "tools", "test-flow", "quick-validation", "claude-deepseek", "runtime", "claude_deepseek_model_cert_runtime.py"),
+    path.join(REPO_ROOT, "tools", "test-flow", "quick-validation", "codex-luna", "runtime", "macos_codex_luna_model_cert_driver.py"),
+  ];
+  for (const runtimeScript of drivers) {
+    const attempt = executeProductionBundleAttempt(REPO_ROOT, { runtimeScript });
+    try {
+      assert.equal(attempt.result.status, 0, attempt.result.stderr);
+      const sourceState = JSON.parse(fs.readFileSync(path.join(attempt.evidenceRoot, "methods-source-state-v2.json"), "utf8"));
+      const terminalState = JSON.parse(fs.readFileSync(path.join(attempt.evidenceRoot, "methods-terminal-state-v2.json"), "utf8"));
+      const expected = ["REJECTED", "CONFIRMED", "REJECTED"];
+      assert.deepEqual(sourceState.specialist_evaluation.evaluations.map((item) => item.verdict), expected);
+      assert.deepEqual(terminalState.reviewer_evaluation.evaluations.map((item) => item.verdict), expected);
+      assert.deepEqual(terminalState.consensus.confirmed_method_ids, ["server-queueing"]);
+    } finally {
+      fs.rmSync(attempt.root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("production Graph mechanically proves the explicit resolved Release verdicts without model semantics", () => {
   const production = productionBundle();
   const receipt = buildScenarioReceipt({
     evidenceRoot: production.evidenceRoot,
@@ -440,7 +463,7 @@ test("production Graph mechanically proves every resolved Release method without
   });
   assert.equal(receipt.status, "PASS");
   assert.equal(receipt.summary.status, "PASS");
-  assert.equal(receipt.summary.confirmed_method_ids.length, 3);
+  assert.deepEqual(receipt.summary.confirmed_method_ids, ["server-queueing"]);
   assert.equal(receipt.summary.evaluation_count, 3);
 });
 
@@ -504,6 +527,51 @@ test("provider and CrossJob shared oracle reject raw-log mutations after a fresh
         fs.writeFileSync(target, lines.join("\n"));
       },
       code: "SCENARIO_ORACLE_QUEUE_TARGET_NOT_CONFIRMED",
+      genericMustPass: true,
+    },
+    {
+      change: (caseRoot) => {
+        const target = path.join(caseRoot, "scenarios", "multiple-rpc-timeouts", "server.log");
+        const text = fs.readFileSync(target, "utf8");
+        fs.writeFileSync(target, text.replace("ordinal=second service=svc_orders api=Reserve end_us=6000000", "ordinal=second service=svc_orders api=Reserve end_us=6500000"));
+      },
+      code: "SCENARIO_ORACLE_QUEUE_LATE_RESPONSE_MISMATCH",
+      genericMustPass: true,
+    },
+    {
+      change: (caseRoot) => {
+        const target = path.join(caseRoot, "scenarios", "multiple-rpc-timeouts", "server.log");
+        const text = fs.readFileSync(target, "utf8");
+        fs.writeFileSync(target, text.replace("ordinal=first service=svc_catalog api=Refresh end_us=5000000", "ordinal=first service=svc_catalog api=Refresh end_us=1000000"));
+      },
+      code: "SCENARIO_ORACLE_QUEUE_CONTRIBUTOR_MISSING",
+      genericMustPass: true,
+    },
+    {
+      change: (caseRoot) => {
+        const target = path.join(caseRoot, "scenarios", "multiple-rpc-timeouts", "client.log");
+        const text = fs.readFileSync(target, "utf8");
+        fs.writeFileSync(target, text.replace("request_id=501 client_send_us=1000000 server_recv_us=5000000 server_send_us=6000000 client_now_us=6100000", "request_id=501 client_send_us=1000000 server_recv_us=5000000 server_send_us=6000000 client_now_us=11000000"));
+      },
+      code: "SCENARIO_ORACLE_CLIENT_SEGMENTS_NOT_REJECTED",
+      genericMustPass: true,
+    },
+    {
+      change: (caseRoot) => {
+        const target = path.join(caseRoot, "scenarios", "multiple-rpc-timeouts", "client.log");
+        const text = fs.readFileSync(target, "utf8");
+        fs.writeFileSync(target, text.replace("request_id=501 client_send_us=1000000 server_recv_us=5000000", "request_id=501 client_send_us=1000000 server_recv_us=2000000"));
+      },
+      code: "SCENARIO_ORACLE_CLIENT_SEGMENTS_NOT_REJECTED",
+      genericMustPass: true,
+    },
+    {
+      change: (caseRoot) => {
+        const target = path.join(caseRoot, "scenarios", "multiple-rpc-timeouts", "server.log");
+        const text = fs.readFileSync(target, "utf8");
+        fs.writeFileSync(target, text.replace("API_COMPLETE service=svc_inventory api=List start_us=10000000", "API_COMPLETE service=svc_orders api=Reserve start_us=10000000"));
+      },
+      code: "SCENARIO_ORACLE_API_EVENT_INVALID",
       genericMustPass: true,
     },
     {

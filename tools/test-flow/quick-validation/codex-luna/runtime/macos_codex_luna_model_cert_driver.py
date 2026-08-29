@@ -376,9 +376,17 @@ class FakeModelRoleBackend:
                         else "CONFIRMED"
                     ),
                     "reason": (
-                        "The frozen Evidence V2 evaluation satisfies the method."
-                        if role == "SPECIALIST"
-                        else "Independent blind review confirms the frozen evaluation."
+                        (
+                            "冻结 Evidence Graph 不满足该方法的确认条件。"
+                            if role == "SPECIALIST"
+                            else "盲评确认冻结 Graph 与 Plan 不满足该方法的确认条件。"
+                        )
+                        if item.method_id in self.rejected_method_ids
+                        else (
+                            "冻结 Evidence Graph 满足该方法卡。"
+                            if role == "SPECIALIST"
+                            else "盲评确认冻结 Graph 与 Plan 支持该结论。"
+                        )
                     ),
                 }
                 for item in plan.evaluations

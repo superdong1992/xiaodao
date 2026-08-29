@@ -101,13 +101,17 @@ test("v2 loader exposes only Wiki, registration, driver, and frozen attachments"
   assert.equal(oracle.semantic_oracle.oracle_visibility, "GATE_ONLY");
   assert.equal(oracle.scenarios[0].oracle.oracle_visibility, "GATE_ONLY");
   assert.equal(oracle.scenarios[0].oracle.expected_status, "RESOLVED");
-  assert.deepEqual(oracle.scenarios[0].oracle.required_candidate_marker_groups, []);
+  assert.deepEqual(oracle.scenarios[0].oracle.expected_method_verdicts.map((item) => item.verdict), ["REJECTED", "CONFIRMED", "REJECTED"]);
   assert.deepEqual(oracle.scenarios[0].oracle.required_request_timeout, {
     marker: "call unsuccess, reqid(",
     request_id: "501",
     timeout_ms: 3000,
     unlinked_marker: "rpc call",
-    unlinked_timeout_ms: 5000,
+    unlinked_timeout_ms: 3000,
+    decoy_service: "svc_catalog",
+    decoy_api: "Refresh",
+    decoy_request_id: "502",
+    decoy_timeout_ms: 5000,
   });
   const repeatedMethodEvents = oracle.scenarios[0].oracle.required_evidence_identities
     .filter((identity) => identity.marker === "API_COMPLETE service=");
@@ -231,18 +235,18 @@ test("scenario evidence identities must resolve to distinct frozen log events", 
   );
 });
 
-test("Evidence V2 scenario oracle hard-cuts RESOLVED, empty candidates, and exact canonical markers", () => {
+test("Evidence V2 scenario oracle hard-cuts RESOLVED, exact semantic verdicts, and canonical markers", () => {
   const mutations = [
     {
       change: (oracle) => { oracle.expected_status = "CONFIRMED"; },
       expected: /must expect RESOLVED/,
     },
     {
-      change: (oracle) => { oracle.required_candidate_marker_groups = [["QUEUE_HISTORY print_time_ms="]]; },
-      expected: /cannot retain candidate methods/,
+      change: (oracle) => { oracle.expected_method_verdicts[0].verdict = "UNKNOWN"; },
+      expected: /method verdict is invalid/,
     },
     {
-      change: (oracle) => { oracle.required_confirmed_marker_groups[0] = ["API_COMPLETE"]; },
+      change: (oracle) => { oracle.required_evidence_identities[0].marker = "LATE_RESPONSE"; },
       expected: /not an exact method marker/,
     },
     {
