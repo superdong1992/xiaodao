@@ -421,7 +421,7 @@ def load_methods_package(
     actual_references = {f"references/{item.name}" for item in reference_nodes}
     if actual_references != expected_references:
         raise ValueError("references directory must exactly match methods.json")
-    for method in methods:
+    for index, method in enumerate(methods, start=1):
         try:
             text = _ordinary_file(root / method.reference, label=method.reference).decode("utf-8")
         except UnicodeDecodeError as exc:
@@ -429,6 +429,11 @@ def load_methods_package(
         for heading in _METHOD_HEADINGS:
             if heading not in text:
                 raise ValueError(f"{method.reference} is missing heading {heading}")
+        for marker in method.evidence_markers:
+            if marker not in text:
+                raise ValueError(
+                    f"method {index} evidence marker is absent from its method reference: {marker}"
+                )
     for reference in shared:
         try:
             _ordinary_file(root / reference, label=reference).decode("utf-8")

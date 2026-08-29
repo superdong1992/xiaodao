@@ -306,6 +306,25 @@ def test_package_and_catalog_contract_reject_legacy_or_extra_files(tmp_path: Pat
         load_specialized_skill_registration(legacy)
 
 
+def test_package_loader_rejects_marker_absent_from_current_method_reference(
+    tmp_path: Path,
+) -> None:
+    package = _write_package(tmp_path)
+    methods_path = package / "methods.json"
+    methods = json.loads(methods_path.read_text(encoding="utf-8"))
+    methods["methods"][0]["evidence_markers"] = ["UNRELATED_POSITIVE"]
+    _write_json(methods_path, methods)
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            "method 1 evidence marker is absent from its method reference: "
+            "UNRELATED_POSITIVE"
+        ),
+    ):
+        load_methods_package(package)
+
+
 def test_production_loader_allows_v2_prose_that_mentions_v1_words(tmp_path: Path) -> None:
     package = _write_package(tmp_path)
     skill_path = package / "SKILL.md"
@@ -482,6 +501,17 @@ def test_grounding_allows_a_literal_shared_by_multiple_methods(
     methods_value = json.loads(methods_path.read_text(encoding="utf-8"))
     methods_value["methods"][1]["evidence_markers"] = ["API_COMPLETE"]
     _write_json(methods_path, methods_value)
+    second_reference = (
+        registration
+        / "package/diagnose-test-timeout/references/unrelated-method.md"
+    )
+    second_reference.write_text(
+        second_reference.read_text(encoding="utf-8").replace(
+            "`UNRELATED_POSITIVE`",
+            "`API_COMPLETE`",
+        ),
+        encoding="utf-8",
+    )
     skill = load_specialized_skill_registration(registration)
     cited = "2026-08-23T10:00:05Z api_complete request_id=42"
     logs = (_target("server", f"noise\n{cited}\n"),)
