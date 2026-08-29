@@ -40,10 +40,6 @@ NON_CANONICAL_EVENT_NAMES = (
     "LATE_RESPONSE",
     "QUEUE_HISTORY",
 )
-RELEASE_TIMEOUT_TEMPLATES = (
-    "rpc call %s:%s timeout limit %u recv no response",
-    "%s rpc %s call unsuccess, reqid(%u), timeout %u",
-)
 
 
 class _Signal:
@@ -118,7 +114,7 @@ Your first action must call the Skill tool with exactly {{"skill":"wiki-to-diagn
 
 The Gate mechanically derived this ordered canonical marker checklist from source identity `log_templates` with the same function used by the canonical validator: {checklist_json}. Every item in methods.json `evidence_markers` must be copied byte-for-byte from this checklist. The checklist does not assign markers to methods and adds no business meaning; use the authored Wiki to choose which listed markers belong to each cause. Do not invent, shorten, or extend a marker. These bare event names are shorthand, not valid markers unless the exact whole string itself appears in the checklist: {shorthand_json}.
 
-Before writing, perform a per-method prerequisite-closure self-check: list every complete Wiki log template that the method reads to confirm, reject, calculate, or associate the target request; put each exact template in that method card's `## 所需证据` section; derive the method's `evidence_markers` from precisely those templates in source-identity order. A marker mention outside `## 所需证据`, or a template present only in a shared reference, does not satisfy this closure. In this release Wiki, all three authored causes depend on both exact client timeout templates `rpc call %s:%s timeout limit %u recv no response` and `%s rpc %s call unsuccess, reqid(%u), timeout %u`; therefore every one of the three method cards must include both complete templates under `## 所需证据` and index both canonical markers.
+Before writing, perform a per-method prerequisite-closure self-check: list every complete Wiki log template that the method reads to confirm, reject, calculate, or associate the target request; put each exact template in that method card's `## 所需证据` section; derive the method's `evidence_markers` from precisely those templates in source-identity order. A marker mention outside `## 所需证据`, or a template present only in a shared reference, does not satisfy this closure. Derive every template-to-method assignment only from the authored Wiki; this prompt does not provide or imply the expected assignment.
 
 Generate the complete package directly under output/{requested_skill_name}. Its files must be exactly output/{requested_skill_name}/SKILL.md, output/{requested_skill_name}/methods.json, and the output-contract references, including the mandatory output/{requested_skill_name}/references/source-log-templates.md. Put that fixed reference first in methods.json `shared_references` and never use it as a method reference. Do not emit GenerationSpec, diagnosis-skill.json, registration metadata, copied Wiki, README, scripts, or tests. Use exactly one successful Write call per final package file, with both file_path and complete non-empty content in the same call. Finish every required Read before the first Write; before writing, check every source identity `log_templates` item against the complete fixed-reference content one-for-one and in order. After writing starts, perform only the contiguous sequence of package Write calls. Never overwrite a path, never write outside this one package, and stop after the final Write succeeds.
 
@@ -510,9 +506,9 @@ def test_generation_prompt_uses_validator_canonical_marker_checklist() -> None:
         ensure_ascii=False,
         separators=(",", ":"),
     ) in prompt
-    assert all(template in prompt for template in RELEASE_TIMEOUT_TEMPLATES)
-    assert "all three authored causes depend on both exact client timeout templates" in prompt
     assert "per-method prerequisite-closure self-check" in prompt
+    assert "this prompt does not provide or imply the expected assignment" in prompt
+    assert all(template not in prompt for template in source_identity["log_templates"])
     contract = (META_SKILL_ROOT / "references/output-contract.md").read_text(
         encoding="utf-8"
     )
@@ -565,7 +561,15 @@ def test_generation_validator_rejects_marker_without_complete_timeout_template(
     validator = _load_validator()
     wiki = ROOT / "tests/cases/release/rpc-timeout-anonymized/input/wiki.md"
     method = manifest.methods[0]
-    timeout_template = RELEASE_TIMEOUT_TEMPLATES[0]
+    source_identity = validator.build_source_wiki_identity(
+        wiki.read_bytes(),
+        "inputs/wiki.md",
+    )
+    timeout_template = next(
+        template
+        for template in source_identity["log_templates"]
+        if validator._canonical_evidence_marker(template) in method.evidence_markers
+    )
     timeout_marker = validator._canonical_evidence_marker(timeout_template)
     assert timeout_marker in method.evidence_markers
     reference = package_root / method.reference
