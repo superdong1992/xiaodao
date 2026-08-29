@@ -49,6 +49,7 @@ export const CLAUDE_DEEPSEEK_METHODS_TOKEN_LIMIT = 1_000_000;
 export const CLAUDE_DEEPSEEK_METHODS_USD_LIMIT = 10;
 export const CLAUDE_DEEPSEEK_E2E_TOKEN_LIMIT = 2_000_000;
 export const CLAUDE_DEEPSEEK_E2E_USD_LIMIT = 4;
+export const CLAUDE_DEEPSEEK_MODEL_CERT_ROLE_POOL_USD = CLAUDE_DEEPSEEK_E2E_USD_LIMIT / CLAUDE_DEEPSEEK_MODEL_CERT_NORMAL_CALLS;
 export const CLAUDE_DEEPSEEK_METHODS_MAX_TURNS = 16;
 export const CLAUDE_DEEPSEEK_E2E_MAX_TURNS = 50;
 export const CLAUDE_DEEPSEEK_MAX_OUTPUT_TOKENS = 64_000;
@@ -311,7 +312,7 @@ function normalizedUsage(value) {
 
 export function aggregateClaudeUsage(invocations) {
   requireContract(Array.isArray(invocations), "CLAUDE_DEEPSEEK_INVOCATIONS_INVALID", "Invocation ledger must be an array");
-  const aggregate = { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, total_tokens: 0, cost_usd: 0 };
+  const aggregate = { schema_version: 1, input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, total_tokens: 0, cost_usd: 0 };
   for (const invocation of invocations) {
     const usage = normalizedUsage(invocation?.usage);
     for (const key of ["input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "total_tokens"]) aggregate[key] += usage[key];

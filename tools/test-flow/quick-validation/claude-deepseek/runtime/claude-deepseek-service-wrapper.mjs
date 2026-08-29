@@ -5,9 +5,11 @@ import { fileURLToPath } from "node:url";
 
 import { canonicalJson, sha256Bytes } from "../../../lib/util.mjs";
 import {
+  aggregateClaudeUsage,
   CLAUDE_DEEPSEEK_CALL_WALL_SECONDS,
   CLAUDE_DEEPSEEK_E2E_MAX_TURNS,
   CLAUDE_DEEPSEEK_E2E_USD_LIMIT,
+  CLAUDE_DEEPSEEK_MODEL_CERT_ROLE_POOL_USD,
   CLAUDE_DEEPSEEK_MODEL,
   CLAUDE_DEEPSEEK_NO_PROGRESS_SECONDS,
 } from "./claude-deepseek-contract.mjs";
@@ -110,6 +112,38 @@ function writeJsonNew(filePath, value) {
 
 function attemptKey(role, attempt) {
   return `${role.toLowerCase()}-${attempt.toLowerCase()}`;
+}
+
+function roundedUsd(value) {
+  return Math.round(value * 1_000_000) / 1_000_000;
+}
+
+export function roleInvocationBudget(usageRoot, role, attempt) {
+  requireWrapper(Object.hasOwn(ROLE_SPEC, role) && ["PRIMARY", "REPAIR"].includes(attempt), "CLAUDE_DEEPSEEK_ROLE_BUDGET_IDENTITY_INVALID", "Evidence V2 role budget identity is invalid");
+  let priorCostUsd = 0;
+  if (attempt === "REPAIR") {
+    const primaryPath = path.join(path.resolve(usageRoot), `${attemptKey(role, "PRIMARY")}.json`);
+    requireWrapper(fs.existsSync(primaryPath), "CLAUDE_DEEPSEEK_ROLE_BUDGET_PRIMARY_MISSING", `${role} repair has no archived primary usage`);
+    const primary = JSON.parse(fs.readFileSync(primaryPath, "utf8"));
+    requireWrapper(
+      primary?.role === role
+        && primary?.evaluation_attempt === "PRIMARY"
+        && primary?.status === "PASS"
+        && primary?.usage_complete === true,
+      "CLAUDE_DEEPSEEK_ROLE_BUDGET_PRIMARY_INVALID",
+      `${role} primary usage receipt is not eligible for repair budgeting`,
+    );
+    priorCostUsd = aggregateClaudeUsage([primary]).cost_usd;
+  }
+  const effectiveCallCapUsd = Math.max(0, roundedUsd(CLAUDE_DEEPSEEK_MODEL_CERT_ROLE_POOL_USD - priorCostUsd));
+  return Object.freeze({
+    schema_version: 1,
+    stage_cap_usd: CLAUDE_DEEPSEEK_E2E_USD_LIMIT,
+    role,
+    role_pool_usd: CLAUDE_DEEPSEEK_MODEL_CERT_ROLE_POOL_USD,
+    prior_cost_usd: priorCostUsd,
+    effective_call_cap_usd: effectiveCallCapUsd,
+  });
 }
 
 export function claimRoleAttempt(privateRoot, role, attempt) {
@@ -238,7 +272,10 @@ export async function runServiceInvocation(values, {
   fs.writeFileSync(progressPath, "", { encoding: "utf8", mode: 0o600, flag: "wx" });
   const startedAtUtc = new Date().toISOString();
   let result = null;
+  let budget = null;
   try {
+    budget = roleInvocationBudget(values["usage-root"], parsed.role, parsed.attempt);
+    requireWrapper(budget.effective_call_cap_usd > 0, "CLAUDE_DEEPSEEK_ROLE_BUDGET_EXHAUSTED", `${parsed.role} exhausted its model-cert role budget`);
     result = await runClaude({
       claudeEntry: path.resolve(values["claude-entry"]),
       settings: path.resolve(values.settings),
@@ -251,7 +288,7 @@ export async function runServiceInvocation(values, {
       disallowedTools: ["Bash", "Glob", "Grep", "Skill"],
       auditOnlyAllowedTools: ["Bash", "Glob", "Grep", "Skill"],
       maxTurns: CLAUDE_DEEPSEEK_E2E_MAX_TURNS,
-      maxBudgetUsd: CLAUDE_DEEPSEEK_E2E_USD_LIMIT / 4,
+      maxBudgetUsd: budget.effective_call_cap_usd,
       wallTimeoutSeconds: CLAUDE_DEEPSEEK_CALL_WALL_SECONDS,
       noProgressSeconds: CLAUDE_DEEPSEEK_NO_PROGRESS_SECONDS,
       tracePath: path.join(traceRoot, `${key}.stream-json.ndjson`),
@@ -273,6 +310,8 @@ export async function runServiceInvocation(values, {
       role: parsed.role,
       evaluation_attempt: parsed.attempt,
       role_call_ordinal: parsed.attempt === "PRIMARY" ? 1 : 2,
+      max_budget_usd: budget.effective_call_cap_usd,
+      budget,
       prompt: {
         sha256: sha256Bytes(prompt),
         utf8_size: Buffer.byteLength(prompt, "utf8"),
@@ -307,6 +346,8 @@ export async function runServiceInvocation(values, {
       role: parsed.role,
       evaluation_attempt: parsed.attempt,
       role_call_ordinal: parsed.attempt === "PRIMARY" ? 1 : 2,
+      max_budget_usd: budget?.effective_call_cap_usd ?? null,
+      budget,
       prompt: {
         sha256: sha256Bytes(prompt),
         utf8_size: Buffer.byteLength(prompt, "utf8"),

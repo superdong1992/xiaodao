@@ -13,6 +13,7 @@ import {
   CLAUDE_DEEPSEEK_MAX_OUTPUT_TOKENS,
   CLAUDE_DEEPSEEK_MODEL,
   CLAUDE_DEEPSEEK_MODEL_CERT_PHASES,
+  CLAUDE_DEEPSEEK_MODEL_CERT_ROLE_POOL_USD,
   CLAUDE_DEEPSEEK_MODEL_CERT_SCENARIO,
   CLAUDE_DEEPSEEK_NO_PROGRESS_SECONDS,
   CLAUDE_DEEPSEEK_PUBLIC_TOOLS,
@@ -112,6 +113,7 @@ test("Claude identity constants freeze 2.1.89, CLI hash, DeepSeek model, and 64k
   assert.equal(CLAUDE_DEEPSEEK_CLI_SHA256, "a9950ef6407fdc750bddb673852485500387e524a99d42385cb81e7d17128e01");
   assert.equal(CLAUDE_DEEPSEEK_MODEL, "deepseek-v4-flash[1m]");
   assert.equal(CLAUDE_DEEPSEEK_MAX_OUTPUT_TOKENS, 64_000);
+  assert.equal(CLAUDE_DEEPSEEK_MODEL_CERT_ROLE_POOL_USD, 2);
   assert.deepEqual(CLAUDE_DEEPSEEK_MODEL_CERT_PHASES, ["SPECIALIST", "REVIEWER"]);
   assert.deepEqual(CLAUDE_DEEPSEEK_PUBLIC_TOOLS, []);
 });
@@ -213,7 +215,7 @@ test("usage aggregation is cache-inclusive and enforces lifecycle-aware no-retry
   const e2e = auditClaudeInvocations(invocations(CLAUDE_DEEPSEEK_MODEL_CERT_PHASES), { workflow: "e2e", scenarioId: CLAUDE_DEEPSEEK_MODEL_CERT_SCENARIO });
   assert.equal(e2e.aggregate.total_tokens, 40);
   assert.deepEqual(aggregateClaudeUsage(invocations(CLAUDE_DEEPSEEK_MODEL_CERT_PHASES)), {
-    input_tokens: 20, output_tokens: 10, cache_creation_input_tokens: 6, cache_read_input_tokens: 4, total_tokens: 40, cost_usd: 0.02,
+    schema_version: 1, input_tokens: 20, output_tokens: 10, cache_creation_input_tokens: 6, cache_read_input_tokens: 4, total_tokens: 40, cost_usd: 0.02,
   });
   assert.throws(() => auditClaudeInvocations(invocations(["SPECIALIST"]), { workflow: "e2e", scenarioId: CLAUDE_DEEPSEEK_MODEL_CERT_SCENARIO }), (error) => error.code === "CLAUDE_DEEPSEEK_INVOCATION_COUNT_INVALID");
   const retried = invocations(CLAUDE_DEEPSEEK_MODEL_CERT_PHASES);

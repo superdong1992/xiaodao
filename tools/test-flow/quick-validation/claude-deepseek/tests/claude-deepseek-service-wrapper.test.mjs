@@ -103,6 +103,7 @@ test("wrapper preserves the raw evaluation array and records the exact productio
     const receipt = await runServiceInvocation(values, {
       stdin: Readable.from([rawPrompt]), stdout,
       runClaude: async (options, hooks) => {
+        assert.equal(options.maxBudgetUsd, 2);
         hooks.onProgress();
         fs.writeFileSync(output, content);
         return {
@@ -113,10 +114,135 @@ test("wrapper preserves the raw evaluation array and records the exact productio
       },
     });
     assert.equal(receipt.workspace_audit.output_sha256, receipt.workspace_audit.output_sha256);
+    assert.deepEqual(receipt.budget, {
+      schema_version: 1,
+      stage_cap_usd: 4,
+      role: "SPECIALIST",
+      role_pool_usd: 2,
+      prior_cost_usd: 0,
+      effective_call_cap_usd: 2,
+    });
+    assert.equal(receipt.max_budget_usd, 2);
     assert.equal(receipt.prompt.utf8_size, Buffer.byteLength(rawPrompt));
     assert.equal(fs.readFileSync(output, "utf8"), content);
     assert.equal(fs.readFileSync(path.join(root, "evidence", "model-role-invocations", "specialist-primary.progress"), "utf8"), ".\n");
     assert.match(Buffer.concat(chunks).toString("utf8"), /done/u);
+  } finally { process.chdir(previous); fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("Specialist and Reviewer each own a two-dollar pool and repairs consume only the role remainder", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "deepseek-role-budgets-"));
+  const previous = process.cwd();
+  try {
+    const values = {
+      "claude-entry": path.join(root, "cli.js"), settings: path.join(root, "settings.json"), "config-root": path.join(root, "config"),
+      "private-root": path.join(root, "private"), "evidence-root": path.join(root, "evidence"), "usage-root": path.join(root, "usage"), "run-id": "run",
+    };
+    for (const target of [values["claude-entry"], values.settings]) fs.writeFileSync(target, "fixture");
+    fs.mkdirSync(values["config-root"]);
+    const observedCaps = [];
+    const invoke = async (label, attemptText, key, costUsd) => {
+      const role = label === "Specialist" ? "SPECIALIST" : "REVIEWER";
+      const work = path.join(root, "workspaces", key);
+      workspace(work);
+      process.chdir(work);
+      const output = path.join(work, "output", role === "SPECIALIST" ? "method-diagnosis.draft.json" : "method-review.draft.json");
+      const content = '[{"evaluation_ref":"eval-a","verdict":"CONFIRMED","reason":"ok"}]';
+      return runServiceInvocation(values, {
+        stdin: Readable.from([prompt(label, attemptText)]),
+        stdout: new Writable({ write(_chunk, _encoding, callback) { callback(); } }),
+        runClaude: async (options) => {
+          observedCaps.push({ key, cap: options.maxBudgetUsd });
+          fs.writeFileSync(output, content);
+          return {
+            receipt: {
+              schema_version: 1, invocation_id: options.invocationId, phase: role, model: "deepseek-v4-flash[1m]",
+              attempt: 1, retry: 0, status: "PASS", terminal: true, turns: 1,
+              started_at_utc: "2026-08-29T00:00:00.000Z", finished_at_utc: "2026-08-29T00:00:01.000Z",
+              wall_timeout_seconds: 600,
+              usage: { schema_version: 1, input_tokens: 10, output_tokens: 5, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, total_tokens: 15, cost_usd: costUsd },
+            },
+            records: [
+              { name: "Read", is_error: false, input: { file_path: path.join(work, "inputs", "method-evaluation-plan.json") } },
+              { name: "Write", is_error: false, input: { file_path: output, content } },
+            ],
+            skills: [], bash: [], mcp: [], denied: [], events: [{ type: "result", result: "done" }],
+          };
+        },
+      });
+    };
+    const specialistPrimary = await invoke("Specialist", "primary evaluation", "specialist-primary", 1.25);
+    const specialistRepair = await invoke("Specialist", "only repair", "specialist-repair", 0.5);
+    const reviewerPrimary = await invoke("Reviewer", "primary evaluation", "reviewer-primary", 0.75);
+    const reviewerRepair = await invoke("Reviewer", "only repair", "reviewer-repair", 1);
+    assert.deepEqual(observedCaps, [
+      { key: "specialist-primary", cap: 2 },
+      { key: "specialist-repair", cap: 0.75 },
+      { key: "reviewer-primary", cap: 2 },
+      { key: "reviewer-repair", cap: 1.25 },
+    ]);
+    assert.equal(specialistPrimary.budget.prior_cost_usd, 0);
+    assert.equal(specialistRepair.budget.prior_cost_usd, 1.25);
+    assert.equal(reviewerPrimary.budget.prior_cost_usd, 0);
+    assert.equal(reviewerRepair.budget.prior_cost_usd, 0.75);
+    assert.equal(specialistPrimary.usage.cost_usd + specialistRepair.budget.effective_call_cap_usd, 2);
+    assert.equal(reviewerPrimary.usage.cost_usd + reviewerRepair.budget.effective_call_cap_usd, 2);
+    assert.equal(readRoleInvocationReceipts(values["usage-root"]).reduce((sum, item) => sum + item.usage.cost_usd, 0), 3.5);
+  } finally { process.chdir(previous); fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("a repair with no role-pool balance closes before invoking the provider", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "deepseek-role-budget-empty-"));
+  const previous = process.cwd();
+  try {
+    const values = {
+      "claude-entry": path.join(root, "cli.js"), settings: path.join(root, "settings.json"), "config-root": path.join(root, "config"),
+      "private-root": path.join(root, "private"), "evidence-root": path.join(root, "evidence"), "usage-root": path.join(root, "usage"), "run-id": "run",
+    };
+    for (const target of [values["claude-entry"], values.settings]) fs.writeFileSync(target, "fixture");
+    fs.mkdirSync(values["config-root"]);
+    const primaryWork = path.join(root, "primary");
+    workspace(primaryWork);
+    process.chdir(primaryWork);
+    const output = path.join(primaryWork, "output", "method-diagnosis.draft.json");
+    const content = '[{"evaluation_ref":"eval-a","verdict":"UNKNOWN","reason":"unknown"}]';
+    await runServiceInvocation(values, {
+      stdin: Readable.from([prompt("Specialist", "primary evaluation")]),
+      stdout: new Writable({ write(_chunk, _encoding, callback) { callback(); } }),
+      runClaude: async (options) => {
+        fs.writeFileSync(output, content);
+        return {
+          receipt: {
+            schema_version: 1, invocation_id: options.invocationId, phase: "SPECIALIST", model: "deepseek-v4-flash[1m]",
+            attempt: 1, retry: 0, status: "PASS", terminal: true, turns: 1,
+            started_at_utc: "2026-08-29T00:00:00.000Z", finished_at_utc: "2026-08-29T00:00:01.000Z", wall_timeout_seconds: 600,
+            usage: { schema_version: 1, input_tokens: 10, output_tokens: 5, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, total_tokens: 15, cost_usd: 2 },
+          },
+          records: [
+            { name: "Read", is_error: false, input: { file_path: path.join(primaryWork, "inputs", "method-evaluation-plan.json") } },
+            { name: "Write", is_error: false, input: { file_path: output, content } },
+          ],
+          skills: [], bash: [], mcp: [], denied: [], events: [{ type: "result", result: "done" }],
+        };
+      },
+    });
+    const repairWork = path.join(root, "repair");
+    workspace(repairWork);
+    process.chdir(repairWork);
+    let providerCalled = false;
+    await assert.rejects(runServiceInvocation(values, {
+      stdin: Readable.from([prompt("Specialist", "only repair")]),
+      stdout: new Writable({ write(_chunk, _encoding, callback) { callback(); } }),
+      runClaude: async () => { providerCalled = true; },
+    }), { code: "CLAUDE_DEEPSEEK_ROLE_BUDGET_EXHAUSTED" });
+    assert.equal(providerCalled, false);
+    const receipts = readRoleInvocationReceipts(values["usage-root"]);
+    assert.equal(receipts.length, 2);
+    assert.equal(receipts[1].status, "FAIL");
+    assert.equal(receipts[1].failure_code, "CLAUDE_DEEPSEEK_ROLE_BUDGET_EXHAUSTED");
+    assert.equal(receipts[1].budget.prior_cost_usd, 2);
+    assert.equal(receipts[1].budget.effective_call_cap_usd, 0);
+    assert.equal(receipts[1].usage_complete, false);
   } finally { process.chdir(previous); fs.rmSync(root, { recursive: true, force: true }); }
 });
 
