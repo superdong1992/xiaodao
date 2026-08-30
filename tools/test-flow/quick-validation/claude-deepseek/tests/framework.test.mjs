@@ -63,6 +63,9 @@ test("Fast E2E plan freezes nine historical scenarios with a 16/32 model-process
   assert.equal(plan.execution.source_snapshot, false);
   assert.equal(plan.inputs.source_snapshot_digest, null);
   assert.equal(plan.inputs.core_verdict, null);
+  assert.equal(plan.inputs.producer, null);
+  assert.equal(plan.inputs.registration_cache.status, "NOT_REQUIRED");
+  assert.ok(plan.admission.blockers.some((item) => item.code === "CLAUDE_DEEPSEEK_FAST_E2E_REGISTRATION_ROOT_REQUIRED"));
   const insufficient = plan.execution.per_scenario.find((item) => item.scenario_id === "insufficient-evidence");
   assert.equal(insufficient.expected_model_processes, 0);
   assert.equal(insufficient.model_process_hard_cap, 0);

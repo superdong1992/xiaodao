@@ -78,6 +78,7 @@ from problem_locator.domain.methods_state_v2 import (
     fail_method_state_v2,
     finalize_reviewer_consensus_v2,
     interrupt_method_state_v2,
+    method_consensus_subreason_v2,
     record_model_execution_failure_v2,
     record_protocol_error_v2,
     resume_method_state_v2,
@@ -183,6 +184,80 @@ def _unexpected_failure() -> RuntimeExecutionError:
 
 class _MethodAuditArchiveError(RuntimeError):
     """One fixed Evidence V2 execution record could not be committed."""
+
+
+METHODS_CONSENSUS_ATTRIBUTION_V2_FILENAME = (
+    "methods-consensus-attribution-v2.json"
+)
+
+
+def _methods_consensus_attribution_bytes_v2(
+    *,
+    job: Job,
+    graph: MethodEvidenceGraphV2,
+    plan: MethodEvaluationPlanV2,
+    state: MethodStateV2,
+    package_method_count: int,
+) -> bytes:
+    if job.job_type is not JobType.REVIEW or job.methods_review_target is None:
+        raise ValueError("consensus attribution requires a Methods Reviewer Job")
+    if state.status not in {"RESOLVED", "UNRESOLVED", "FAILED"}:
+        raise ValueError("consensus attribution requires a terminal Methods state")
+    if (
+        state.case_id != job.case_id
+        or state.source_job_id != job.methods_review_target.source_job_id
+        or state.plan_ref != plan.plan_ref
+        or plan.evidence_graph_ref != graph.graph_ref
+    ):
+        raise ValueError("consensus attribution inputs do not share one identity")
+    if (
+        type(package_method_count) is not int
+        or package_method_count < 1
+        or package_method_count < len(graph.loaded_method_ids)
+    ):
+        raise ValueError("package method count is inconsistent with the Evidence Graph")
+
+    consensus_observed = (
+        state.specialist_evaluation is not None
+        and state.reviewer_evaluation is not None
+        and state.consensus is not None
+    )
+    consensus_subreason = None
+    if state.status == "UNRESOLVED" and consensus_observed:
+        consensus_subreason = method_consensus_subreason_v2(
+            state.specialist_evaluation,  # type: ignore[arg-type]
+            state.reviewer_evaluation,  # type: ignore[arg-type]
+        )
+
+    return canonical_json_bytes(
+        {
+            "schema_version": 1,
+            "record_type": "methods-consensus-attribution-v2",
+            "case_id": job.case_id,
+            "job_id": job.job_id,
+            "source_job_id": state.source_job_id,
+            "evaluation_id": state.evaluation_id,
+            "evidence_graph_ref": graph.graph_ref,
+            "plan_ref": plan.plan_ref,
+            "skill_sha256": graph.skill_sha256,
+            "terminal_status": state.status,
+            "reason_code": state.reason_code,
+            "attribution_stage": (
+                "CONSENSUS" if consensus_observed else "PRE_CONSENSUS_TERMINAL"
+            ),
+            "consensus_subreason": consensus_subreason,
+            "evaluation_count": len(plan.evaluations),
+            "evaluation_event_counts": [
+                {
+                    "evaluation_ref": item.evaluation_ref,
+                    "event_count": len(item.evidence_event_refs),
+                }
+                for item in plan.evaluations
+            ],
+            "activated_method_count": len(graph.loaded_method_ids),
+            "package_method_count": package_method_count,
+        }
+    )
 
 
 def _method_validation_reason_code(
@@ -1689,6 +1764,45 @@ class DiagnosisRuntime:
             except Exception:
                 return False
 
+    def _commit_methods_consensus_attribution_v2(
+        self,
+        *,
+        job: Job,
+        graph: MethodEvidenceGraphV2,
+        plan: MethodEvaluationPlanV2,
+        state: MethodStateV2,
+        package_method_count: int,
+    ) -> None:
+        payload = _methods_consensus_attribution_bytes_v2(
+            job=job,
+            graph=graph,
+            plan=plan,
+            state=state,
+            package_method_count=package_method_count,
+        )
+        try:
+            self._execution_records.publish_audit_bytes(
+                job.job_id,
+                METHODS_CONSENSUS_ATTRIBUTION_V2_FILENAME,
+                payload,
+            )
+            return
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except Exception:
+            try:
+                committed = self._execution_records.read_audit_bytes(
+                    job.job_id,
+                    METHODS_CONSENSUS_ATTRIBUTION_V2_FILENAME,
+                )
+            except Exception:
+                committed = None
+            if committed == payload:
+                return
+            raise _MethodAuditArchiveError(
+                "method consensus attribution archive failed"
+            ) from None
+
     def _commit_method_prompt_v2(
         self,
         *,
@@ -2561,6 +2675,7 @@ class DiagnosisRuntime:
         context: BoundedContext,
         graph: MethodEvidenceGraphV2,
         plan: MethodEvaluationPlanV2,
+        package_method_count: int,
         primary_rejected: bytes | None,
         repair_rejected: bytes | None,
         cancellation: CancellationSignal,
@@ -2744,6 +2859,24 @@ class DiagnosisRuntime:
                         state=state,
                         reason_code="SERVER_INVARIANT_VIOLATION",
                         reason="The Reviewer evaluation could not be resolved mechanically.",
+                    )
+                try:
+                    self._commit_methods_consensus_attribution_v2(
+                        job=job,
+                        graph=graph,
+                        plan=plan,
+                        state=terminal_state,
+                        package_method_count=package_method_count,
+                    )
+                except _MethodAuditArchiveError:
+                    return self._fail_methods_terminal_v2(
+                        job=job,
+                        workspace=workspace,
+                        graph=graph,
+                        plan=plan,
+                        state=state,
+                        reason_code="AUDIT_ARCHIVE_FAILED",
+                        reason="The consensus attribution could not be archived.",
                     )
                 return self._finish_methods_terminal_v2(
                     job=job,
@@ -2939,6 +3072,7 @@ class DiagnosisRuntime:
             context=context,
             graph=graph,
             plan=plan,
+            package_method_count=len(skill.methods.methods),
             primary_rejected=primary_record,
             repair_rejected=repair_record,
             cancellation=cancellation,

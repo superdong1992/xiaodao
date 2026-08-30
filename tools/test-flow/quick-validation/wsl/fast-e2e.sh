@@ -19,6 +19,7 @@ if [[ ${1:-} == "--inside-container" ]]; then
         --codex-auth /run/secrets/codex-auth.json
         --python-entry /opt/venvs/xiaodao/bin/python
         --cache-root /cache
+        --registration-root /registration
         --runs-root /evidence
       )
       ;;
@@ -31,6 +32,7 @@ if [[ ${1:-} == "--inside-container" ]]; then
         --claude-settings /run/secrets/claude-settings.json
         --python-entry /opt/venvs/xiaodao/bin/python
         --cache-root /cache
+        --registration-root /registration
         --runs-root /evidence
       )
       ;;
@@ -42,6 +44,7 @@ fi
 mode=""
 provider=""
 cache_root=""
+registration_root=""
 evidence_root=""
 codex_auth=""
 claude_settings=""
@@ -63,6 +66,7 @@ while (($#)); do
       shift 2
       ;;
     --cache-root) cache_root=$2; shift 2 ;;
+    --registration-root) registration_root=$2; shift 2 ;;
     --evidence-root) evidence_root=$2; shift 2 ;;
     --codex-auth) codex_auth=$2; shift 2 ;;
     --claude-settings) claude_settings=$2; shift 2 ;;
@@ -89,8 +93,9 @@ done
 [[ $mode == "fast-e2e" ]] || { printf 'FAST_E2E_MODE_REQUIRED\n' >&2; exit 2; }
 case "$provider" in codex-luna|claude-deepseek) ;; *) printf 'PROVIDER_REQUIRED\n' >&2; exit 2 ;; esac
 test -n "$cache_root" || { printf 'CACHE_ROOT_REQUIRED\n' >&2; exit 2; }
+test -n "$registration_root" || { printf 'REGISTRATION_ROOT_REQUIRED\n' >&2; exit 2; }
 test -n "$evidence_root" || { printf 'EVIDENCE_ROOT_REQUIRED\n' >&2; exit 2; }
-case "$cache_root:$evidence_root" in /*:/*) ;; *) printf 'ABSOLUTE_OUTPUT_PATHS_REQUIRED\n' >&2; exit 2 ;; esac
+case "$cache_root:$registration_root:$evidence_root" in /*:/*:/*) ;; *) printf 'ABSOLUTE_INPUT_OUTPUT_PATHS_REQUIRED\n' >&2; exit 2 ;; esac
 case "$provider" in
   codex-luna)
     test -n "$codex_auth" || { printf 'CODEX_AUTH_REQUIRED\n' >&2; exit 2; }
@@ -107,6 +112,7 @@ test "$(stat -f -c %T "$repo_root")" = "ext2/ext3" || { printf 'EXT4_REPO_REQUIR
 command -v docker >/dev/null || { printf 'DOCKER_REQUIRED\n' >&2; exit 2; }
 test "$(docker version --format '{{.Server.Os}}/{{.Server.Arch}}')" = "linux/amd64" || { printf 'DOCKER_LINUX_AMD64_REQUIRED\n' >&2; exit 2; }
 test -d "$cache_root" || { printf 'CACHE_ROOT_MISSING\n' >&2; exit 2; }
+test -d "$registration_root" || { printf 'REGISTRATION_ROOT_MISSING\n' >&2; exit 2; }
 case "$provider" in
   codex-luna) test -f "$codex_auth" || { printf 'CODEX_AUTH_MISSING\n' >&2; exit 2; } ;;
   claude-deepseek) test -f "$claude_settings" || { printf 'CLAUDE_SETTINGS_MISSING\n' >&2; exit 2; } ;;
@@ -144,6 +150,7 @@ trap 'exit 143' TERM
 provider_mounts=(
   --mount "type=bind,src=$repo_root,dst=$repo_root,readonly"
   --mount "type=bind,src=$cache_root,dst=/cache,readonly"
+  --mount "type=bind,src=$registration_root,dst=/registration,readonly"
   --mount "type=bind,src=$seal,dst=/run/secrets/image-seal.json,readonly"
 )
 provider_security=()
@@ -227,6 +234,7 @@ preflight_checks=(
   '/opt/venvs/xiaodao/bin/python --version >/dev/null'
   'test -r /run/secrets/image-seal.json'
   'test -r /cache'
+  'test -r /registration/registration-template.json'
   'test -w /evidence'
 )
 case "$provider" in

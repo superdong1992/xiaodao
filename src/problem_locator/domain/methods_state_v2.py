@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from problem_locator.contracts import (
     FAILED_METHOD_REASON_CODES_V2,
     METHOD_PUBLIC_REASON_TEXT_V2,
@@ -15,6 +17,14 @@ from problem_locator.contracts import (
     method_diagnostic_id_v2,
     method_state_ref_v2,
 )
+
+
+MethodConsensusSubreasonV2 = Literal[
+    "UNKNOWN_PRESENT",
+    "VERDICT_MISMATCH",
+    "EVIDENCE_SET_MISMATCH",
+    "NO_CONFIRMED",
+]
 
 
 def _nonblank(value: str, *, label: str) -> str:
@@ -374,6 +384,33 @@ def _consensus_reason(
     )
 
 
+def method_consensus_subreason_v2(
+    specialist: MethodRoleEvaluationV2,
+    reviewer: MethodRoleEvaluationV2,
+) -> MethodConsensusSubreasonV2:
+    """Classify one unresolved consensus without changing its public reason."""
+
+    pairs = tuple(
+        zip(specialist.evaluations, reviewer.evaluations, strict=True)
+    )
+    if any(
+        first.verdict == "UNKNOWN" or second.verdict == "UNKNOWN"
+        for first, second in pairs
+    ):
+        return "UNKNOWN_PRESENT"
+    if any(first.verdict != second.verdict for first, second in pairs):
+        return "VERDICT_MISMATCH"
+    if any(
+        frozenset(first.supporting_event_refs)
+        != frozenset(second.supporting_event_refs)
+        for first, second in pairs
+    ):
+        return "EVIDENCE_SET_MISMATCH"
+    if any(first.verdict == "CONFIRMED" for first, _ in pairs):
+        raise ValueError("resolved role evaluations have no unresolved subreason")
+    return "NO_CONFIRMED"
+
+
 def _validate_consensus(
     *,
     plan: MethodEvaluationPlanV2,
@@ -541,10 +578,12 @@ def resume_method_state_v2(
 
 
 __all__ = [
+    "MethodConsensusSubreasonV2",
     "accept_specialist_evaluation_v2",
     "fail_method_state_v2",
     "finalize_reviewer_consensus_v2",
     "interrupt_method_state_v2",
+    "method_consensus_subreason_v2",
     "record_model_execution_failure_v2",
     "record_protocol_error_v2",
     "record_semantic_invalid_v2",

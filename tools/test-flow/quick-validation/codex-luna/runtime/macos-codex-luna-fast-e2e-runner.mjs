@@ -10,10 +10,7 @@ import {
 import {
   MACOS_CODEX_LUNA_PRICE_SNAPSHOT,
 } from "./macos-codex-luna-e2e-contract.mjs";
-import {
-  defaultRegistrationInput,
-  runProductionRuntime,
-} from "./macos-codex-luna-e2e-runner.mjs";
+import { runProductionRuntime } from "./macos-codex-luna-e2e-runner.mjs";
 import { readModelCertInvocationReceipts } from "./macos-codex-luna-model-cert-wrapper.mjs";
 import {
   FAST_E2E_MARKER_TO_METHOD,
@@ -61,6 +58,30 @@ function writeJsonNew(filePath, value) {
 
 function readJson(filePath) {
   return JSON.parse(fs.readFileSync(filePath, "utf8"));
+}
+
+function explicitFastRegistrationInput({ options }) {
+  requireFast(
+    typeof options.registrationRoot === "string" && options.registrationRoot.length > 0,
+    "CODEX_LUNA_FAST_E2E_REGISTRATION_ROOT_REQUIRED",
+    "Fast E2E requires one explicit production registration root",
+  );
+  const root = path.resolve(options.registrationRoot);
+  const metadata = fs.lstatSync(root);
+  requireFast(
+    metadata.isDirectory() && !metadata.isSymbolicLink(),
+    "CODEX_LUNA_FAST_E2E_REGISTRATION_INVALID",
+    "Fast E2E production registration must be a plain directory",
+  );
+  return {
+    registration: {
+      root,
+      source: "external-validated-production-registration",
+      tree_sha256: treeDigest(root),
+    },
+    producer: null,
+    cache: null,
+  };
 }
 
 function aggregateUsage(invocations) {
@@ -291,7 +312,7 @@ export async function runFastE2E(options, {
   ambient = process.env,
   onProgress = null,
   validateIdentity = validateCodexLunaIdentity,
-  registrationInput = defaultRegistrationInput,
+  registrationInput = explicitFastRegistrationInput,
   runRuntime = runProductionRuntime,
   readInvocations = readModelCertInvocationReceipts,
 } = {}) {

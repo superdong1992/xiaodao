@@ -73,6 +73,8 @@ test("Fast E2E plan uses the nine historical inputs without Core or source snaps
   assert.equal(plan.admission.blockers.some((item) => item.code === "LUNA_CORE_VERDICT_REQUIRED"), false);
   assert.equal(plan.inputs.source_snapshot_digest, null);
   assert.equal(plan.inputs.core_verdict, null);
+  assert.equal(plan.inputs.methods_cache.status, "NOT_REQUIRED");
+  assert.ok(plan.admission.blockers.some((item) => item.code === "LUNA_FAST_E2E_REGISTRATION_ROOT_REQUIRED"));
 });
 
 test("Fast evidence requires Reviewer records except on the zero-evaluation scenario", () => {

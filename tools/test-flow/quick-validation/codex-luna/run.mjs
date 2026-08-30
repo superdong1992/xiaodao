@@ -208,19 +208,25 @@ export function buildPlan(options) {
   requiredFile(options.authSource, "LUNA_AUTH_MISSING", "Codex auth source", blockers);
   requiredFile(options.pythonEntry, "LUNA_PYTHON_MISSING", "validator/service Python", blockers);
 
-  const metaSkillRoot = path.join(REPO_ROOT, ".agents", "skills", "wiki-to-diagnosis-skill");
-  const releaseCaseRoot = path.join(REPO_ROOT, "tests", "cases", "release", "rpc-timeout-anonymized");
-  const wiki = path.join(releaseCaseRoot, "input", "wiki.md");
-  const registrationTemplate = path.join(releaseCaseRoot, "registration", "rpc-timeout-methods-v1", "registration-template.json");
   let codexIdentity = null;
   let producer = null;
-  let cache = { status: "UNKNOWN", code: null, path: null, package_tree_sha256: null };
+  let cache = options.goal === "fast-e2e"
+    ? { status: "NOT_REQUIRED", code: null, path: null, package_tree_sha256: null }
+    : { status: "UNKNOWN", code: null, path: null, package_tree_sha256: null };
   if (blockers.length === 0) {
     try {
       codexIdentity = validateCodexLunaIdentity(options.codexEntry, options.authSource);
-      producer = buildMethodsProducerIdentity({ wiki, metaSkillRoot, registrationTemplate, codexIdentity });
-      if (options.goal === "methods" || options.registrationRoot === null) {
+      if (options.goal !== "fast-e2e") {
+        const metaSkillRoot = path.join(REPO_ROOT, ".agents", "skills", "wiki-to-diagnosis-skill");
+        const releaseCaseRoot = path.join(REPO_ROOT, "tests", "cases", "release", "rpc-timeout-anonymized");
+        const wiki = path.join(releaseCaseRoot, "input", "wiki.md");
+        const registrationTemplate = path.join(releaseCaseRoot, "registration", "rpc-timeout-methods-v1", "registration-template.json");
+        producer = buildMethodsProducerIdentity({ wiki, metaSkillRoot, registrationTemplate, codexIdentity });
+      }
+      if (options.goal === "methods" || (options.goal === "e2e" && options.registrationRoot === null)) {
         const cachePath = methodsCachePath(options.cacheRoot, producer.producer_identity);
+        const releaseCaseRoot = path.join(REPO_ROOT, "tests", "cases", "release", "rpc-timeout-anonymized");
+        const registrationTemplate = path.join(releaseCaseRoot, "registration", "rpc-timeout-methods-v1", "registration-template.json");
         try {
           const receipt = validateMethodsCache({ cacheRoot: options.cacheRoot, producer, registrationTemplate });
           assertMethodsPackageUnchanged(receipt);
@@ -266,7 +272,7 @@ export function buildPlan(options) {
         blockers.push({ code: "LUNA_SCENARIO_INVALID", detail: error?.message ?? `Fast E2E scenario is invalid: ${scenario}` });
       }
     }
-    if (options.registrationRoot === null && cache.status !== "PRESENT") blockers.push({ code: "LUNA_REGISTRATION_INPUT_REQUIRED", detail: `Fast E2E requires --registration-root or the exact Methods cache (${cache.code ?? cache.status})` });
+    if (options.registrationRoot === null) blockers.push({ code: "LUNA_FAST_E2E_REGISTRATION_ROOT_REQUIRED", detail: "Fast E2E requires --registration-root for one validated production registration" });
   }
   if (options.goal === "methods" && cache.status === "INVALID") blockers.push({ code: "LUNA_METHODS_CACHE_INVALID", detail: `Exact cache exists but is invalid (${cache.code})` });
 
@@ -626,7 +632,7 @@ export async function execute(options, plan) {
 }
 
 function usage() {
-  return `Usage:\n  ./tools/test-flow/quick-validation/codex-luna/run.sh --goal methods [--plan-only] [--allow-real-model]\n  ./tools/test-flow/quick-validation/codex-luna/run.sh --goal fast-e2e (--scenario <historical-scenario> | --all-scenarios) (--registration-root <path> | --cache-root <path>) [--plan-only] [--allow-real-model]\n  ./tools/test-flow/quick-validation/codex-luna/run.sh --goal e2e --scenario multiple-rpc-timeouts --source-snapshot-digest <sha256> --core-verdict <path> (--registration-root <path> | --cache-root <path>) [--plan-only] [--allow-real-model]\n\nFast E2E writes lightweight standalone verdicts. The e2e goal remains the formal P2 model-cert probe.\n`;
+  return `Usage:\n  ./tools/test-flow/quick-validation/codex-luna/run.sh --goal methods [--plan-only] [--allow-real-model]\n  ./tools/test-flow/quick-validation/codex-luna/run.sh --goal fast-e2e (--scenario <historical-scenario> | --all-scenarios) --registration-root <path> [--plan-only] [--allow-real-model]\n  ./tools/test-flow/quick-validation/codex-luna/run.sh --goal e2e --scenario multiple-rpc-timeouts --source-snapshot-digest <sha256> --core-verdict <path> (--registration-root <path> | --cache-root <path>) [--plan-only] [--allow-real-model]\n\nFast E2E writes lightweight standalone verdicts. The e2e goal remains the formal P2 model-cert probe.\n`;
 }
 
 async function main() {

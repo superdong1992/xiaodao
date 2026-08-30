@@ -89,7 +89,6 @@ MUTATIONS = (
             "            or item.marker != method_markers[item.marker_index - 1]\n"
             "        ):\n"
             "            raise ValueError(\"evidence hit marker/index does not belong to its method\")\n"
-            "\n"
         ),
         replacement="",
         selector=(
@@ -140,7 +139,6 @@ MUTATIONS = (
             "            or item.marker != method_markers[item.marker_index - 1]\n"
             "        ):\n"
             "            raise ValueError(\"evidence hit marker/index does not belong to its method\")\n"
-            "\n"
         ),
         replacement=(
             "    for item in evidence.hits:\n"
@@ -152,7 +150,6 @@ MUTATIONS = (
             "            raise ValueError(\"evidence hit marker/index does not belong to its method\")\n"
             "    if any(item.marker not in item.line for item in evidence.hits):\n"
             "        raise ValueError(\"mutant restored downstream marker matching\")\n"
-            "\n"
         ),
         selector=(
             "tests/deterministic/integration/test_methods_v2_runtime_journey.py::"

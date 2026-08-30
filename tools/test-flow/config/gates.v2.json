@@ -85,7 +85,7 @@
         "tests/deterministic/unit/runtime/test_diagnosis_runtime_methods_v2.py::test_reviewer_rebuilds_missing_limitations_record_from_graph",
         "tests/deterministic/unit/runtime/test_diagnosis_runtime_methods_v2.py::test_terminal_contract_is_validated_before_state_commit",
         "tests/deterministic/unit/runtime/test_diagnosis_runtime_methods_v2.py::test_cancellation_persists_interrupted_state_without_terminal_projection",
-        "tests/deterministic/unit/runtime/test_methods_outcome_v2.py::test_outcome_mapping_does_not_rescan_or_read_marker_line",
+        "tests/deterministic/unit/runtime/test_methods_outcome_v2.py::test_outcome_mapping_does_not_rescan_evidence",
         "tests/deterministic/unit/runtime/test_methods_replay_v2.py::test_real_store_replays_specialist_primary_rejection_without_rescanning",
         "tests/deterministic/unit/runtime/test_methods_replay_v2.py::test_real_store_replays_reviewer_repair_from_legal_rejection_sequence",
         "tests/deterministic/unit/runtime/test_methods_workspace_context_v2.py::test_role_workspaces_hard_cut_to_one_graph_plan_and_real_cards",

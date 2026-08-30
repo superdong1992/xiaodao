@@ -22,15 +22,19 @@ _SCENARIO_ID = "multiple-rpc-timeouts"
 _RELEASE_CASE_RELATIVE = Path("tests/cases/release/rpc-timeout-anonymized")
 _HISTORICAL_FACT_KEYS = (
     "problem_time",
+    "client_slot",
     "client_process",
+    "server_slot",
     "server_process",
     "service",
     "api",
 )
 _HISTORICAL_FACT_NAMES = (
     "problem_time",
-    "client_process",
-    "server_process",
+    "client_slot",
+    "client_process_name",
+    "server_slot",
+    "server_process_name",
     "service",
     "api",
 )
@@ -608,7 +612,8 @@ def _required_record_bytes(
 
 def _scenario_identity(
     *,
-    source_wiki: Path,
+    source_wiki: Path | None,
+    registered_source_wiki_sha256: str,
     scenario_root: Path,
     scenario_id: str,
     registration_id: str,
@@ -617,13 +622,34 @@ def _scenario_identity(
     plan: Any,
 ) -> dict[str, Any]:
     try:
-        wiki_bytes = source_wiki.read_bytes()
         names, values, _ = _declared_scenario_inputs(scenario_root, scenario_id)
     except (OSError, TypeError, ValueError) as exc:
         raise ModelCertRuntimeError(
             "CLAUDE_DEEPSEEK_SCENARIO_INPUT_INVALID",
-            "The frozen Wiki or scenario inputs are unavailable",
+            "The frozen scenario inputs are unavailable",
         ) from exc
+    if not (
+        isinstance(registered_source_wiki_sha256, str)
+        and len(registered_source_wiki_sha256) == 64
+        and all(char in "0123456789abcdef" for char in registered_source_wiki_sha256)
+    ):
+        _fail(
+            "CLAUDE_DEEPSEEK_SCENARIO_WIKI_IDENTITY_INVALID",
+            "The loaded production registration has no valid source Wiki identity",
+        )
+    if source_wiki is not None:
+        try:
+            source_wiki_sha256 = _sha256(source_wiki.read_bytes())
+        except OSError as exc:
+            raise ModelCertRuntimeError(
+                "CLAUDE_DEEPSEEK_SCENARIO_INPUT_INVALID",
+                "The frozen certification Wiki is unavailable",
+            ) from exc
+        if source_wiki_sha256 != registered_source_wiki_sha256:
+            _fail(
+                "CLAUDE_DEEPSEEK_SCENARIO_WIKI_IDENTITY_MISMATCH",
+                "The certification Wiki differs from the loaded production registration",
+            )
     if (
         not isinstance(names, list)
         or not isinstance(values, list)
@@ -671,7 +697,7 @@ def _scenario_identity(
         )
     return {
         "scenario_id": scenario_id,
-        "source_wiki_sha256": _sha256(wiki_bytes),
+        "source_wiki_sha256": registered_source_wiki_sha256,
         "registration_id": registration_id,
         "skill_content_sha256": skill_ref.content_hash,
         "user_inputs_sha256": _sha256(user_inputs_bytes),
@@ -744,6 +770,16 @@ def run(options: argparse.Namespace) -> dict[str, Any]:
         broker_factory,
     )
     loaded_registration_root = work_root / "skill-dir" / registration_id
+    loaded_registration = json.loads(
+        (loaded_registration_root / "registration-template.json").read_bytes()
+    )
+    loaded_methods_path = (
+        loaded_registration_root
+        / Path(loaded_registration["package"]["relative_path"])
+        / _LOADED_METHODS_FILENAME
+    )
+    loaded_methods_bytes = loaded_methods_path.read_bytes()
+    loaded_methods = json.loads(loaded_methods_bytes)
     source_job, aggregate, resources, target_contents = _running_job_and_state(
         scenario_root=options.scenario_root,
         scenario_id=options.scenario_id,
@@ -908,6 +944,7 @@ def run(options: argparse.Namespace) -> dict[str, Any]:
         _fail("CLAUDE_DEEPSEEK_PRODUCTION_RECORD_MISSING", "Production Runtime did not persist Graph, Plan, limitations, or Methods state")
     scenario = _scenario_identity(
         source_wiki=options.source_wiki,
+        registered_source_wiki_sha256=loaded_methods.get("source_wiki_sha256"),
         scenario_root=options.scenario_root,
         scenario_id=options.scenario_id,
         registration_id=registration_id,
@@ -978,15 +1015,6 @@ def run(options: argparse.Namespace) -> dict[str, Any]:
     limitations_bytes = captured_files["limitations"]
     specialist_state_bytes = captured_files["source_state"]
     specialist_outcome_bytes = captured_files["source_outcome"]
-    loaded_registration = json.loads(
-        (loaded_registration_root / "registration-template.json").read_bytes()
-    )
-    loaded_methods_path = (
-        loaded_registration_root
-        / Path(loaded_registration["package"]["relative_path"])
-        / _LOADED_METHODS_FILENAME
-    )
-    loaded_methods_bytes = loaded_methods_path.read_bytes()
     capture_root = options.evidence_root or (work_root / "model-cert-evidence")
     for key, raw in captured_files.items():
         _write_new_bytes(capture_root, _CAPTURED_EVIDENCE_FILENAMES[key], raw)
@@ -1105,9 +1133,9 @@ def _parser() -> argparse.ArgumentParser:
 def _validated_options() -> argparse.Namespace:
     options = _parser().parse_args()
     options.source_root = options.source_root.resolve()
-    default_wiki, default_scenario = _release_paths(options.source_root)
+    _, default_scenario = _release_paths(options.source_root)
     options.source_wiki = (
-        default_wiki if options.source_wiki is None else options.source_wiki.resolve()
+        None if options.source_wiki is None else options.source_wiki.resolve()
     )
     options.scenario_root = (
         default_scenario
@@ -1126,10 +1154,10 @@ def _validated_options() -> argparse.Namespace:
             "CLAUDE_DEEPSEEK_SCENARIO_ID_INVALID",
             "The scenario ID must use lowercase letters, digits, and hyphens",
         )
-    if not options.source_wiki.is_file():
+    if options.source_wiki is not None and not options.source_wiki.is_file():
         _fail(
             "CLAUDE_DEEPSEEK_SCENARIO_WIKI_MISSING",
-            "The frozen release scenario Wiki is unavailable",
+            "The frozen certification Wiki is unavailable",
         )
     if not options.scenario_root.is_dir():
         _fail(

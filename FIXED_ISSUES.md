@@ -1847,7 +1847,7 @@
   - 同文件 `test_consensus_terminal_projection_survives_submission_mcp_and_rest` 和
     `test_each_failed_terminal_reason_reaches_case_mcp_and_rest`
   - `tests/deterministic/integration/test_methods_v2_pre_evaluation_failures.py::test_pre_evaluation_failure_reaches_case_mcp_and_rest_without_fake_graph`
-  - `tests/deterministic/unit/runtime/test_methods_outcome_v2.py::test_outcome_mapping_does_not_rescan_or_read_marker_line`
+  - `tests/deterministic/unit/runtime/test_methods_outcome_v2.py::test_outcome_mapping_does_not_rescan_evidence`
   - `tests/deterministic/integration/test_evidence_v2_source_mutations.py::test_source_overlay_mutant_is_killed_by_exact_regression_test`
 - **最新 Test Flow verdict**：前置 Dev `run-20260828T110620Z-25ef1b05` 为
   `PASS_WITH_WARNINGS`；Core 55 selectors / 106 tests 全部 PASS，合同 601/601、unit 1893 passed/68
@@ -1969,3 +1969,62 @@
   **最终复验元数据**：Dev `run-20260828T112351Z-3d7ee53b` 为 `PASS`，源码快照
   `git-visible-worktree-v1:b3f3ff6e28d9e1cccee712d8f617d470501aa97a53d662b49222b5a6d7d85968`
   （718 files）；framework reuse 的当前 re-audit 为 PASS。本元数据行本身不宣称被该快照覆盖。
+
+## PL-FIX-049：Evidence V2 Fast E2E 迁移残留自证 oracle、旧 registration 输入与失效基线
+
+- **状态**：已修复；验证结论以本条最终复验元数据为准。
+- **症状**：Fast E2E 虽已切到生产 Graph/Plan 与 Specialist/Reviewer，但 Codex 的零模型正测仍从
+  `case.json` 的 `expected_branch_markers`、`expected_terms` 和 evidence identity 反向配置 Fake role
+  输出；两个 provider 的 `unrelated-log-noise` Gate 都有禁止噪声检查，却没有直接负例。Claude Fast
+  又把历史 `client_process/server_process` 原样提交给要求
+  `client_slot/client_process_name/server_slot/server_process_name` 的 production registration。Fast planner
+  还会读取 Release Wiki 并允许从 Methods cache 猜 registration。迁移 checkpoint 同时留下 Graph 加参
+  后的 helper 解包、source mutation anchor、合同 manifest 和 SameJob fixture manifest 漂移，使
+  `deterministic.full` 无法形成可信基线。
+- **受影响版本**：`5.0.0`，Evidence V2 Fast E2E checkpoint
+  `2009355dfd3582cb4ce09792272cbaa63778c9ea`。
+- **根因**：Fast 场景、provider planner、production Runtime driver 与零模型证明在一次大迁移中各自
+  演进，没有统一冻结“历史输入只作为输入、oracle 只做事后裁决、registration 必须显式提供”的边界；
+  核心 Graph 校验已经完成，但测试仍保留旧函数形状、旧 fixture identity 和依赖 marker 文本的哨兵。
+- **不可回归行为**：Fast E2E 必须直接读取九个历史 `case.json` 和原始日志，但不得把任何
+  `expected_*` 或 `forbidden_*` 字段送进 role 输出生成逻辑。Claude 历史 slot/process 必须映射到
+  production 用户事实名。Fast 必须显式接收一份已验证 production registration，不读取 Release Wiki，
+  也不从 Methods cache 推导 registration；WSL 场景容器只读挂载该目录并在模型调用前检查
+  `registration-template.json`。`unrelated-log-noise` 一旦把噪声 event/hit 纳入 confirmed evidence，
+  provider Gate 必须失败。核心共识继续只固定“两侧 event 集合不相交 → UNRESOLVED”，不新增“部分
+  重叠 → UNRESOLVED”合同。
+- **修复历史**：2026-08-30，先复核确认 formalization 三个入口和 event→hit 精确校验已经携带同一
+  Graph，四个现有 noise 单测也已覆盖核心语义，因此没有重复修改核心层。随后移除 Fast Runtime 的
+  Release Wiki 参数，改由实际加载 registration 的 `source_wiki_sha256` 提供场景身份；修正 Claude
+  七个历史用户事实的 production 映射；两套 planner 与 WSL wrapper 改为显式 registration；Codex
+  正测不再读取历史 oracle 配置 Fake role。同步修复迁移造成的 helper、mutation anchor、fixture 和
+  contract manifest 漂移。
+- **专项回归测试**：
+  - `tools/test-flow/quick-validation/codex-luna/tests/macos-codex-luna-fast-e2e-runner.test.mjs` 中
+    `unrelated-log-noise fails when confirmed evidence includes a noise event` 与
+    `Fast runner has no Release fixture or Methods cache dependency`
+  - `tools/test-flow/quick-validation/claude-deepseek/tests/claude-deepseek-fast-e2e-runner.test.mjs` 中
+    `Runtime driver parameterization reads the historical case and raw logs`、
+    `unrelated-log-noise fails when confirmed evidence includes a noise event` 与
+    `Fast runner does not import the Core, Release oracle, or model-cert builder`
+  - `tools/test-flow/quick-validation/codex-luna/tests/test_macos_codex_luna_model_cert_driver.py::test_fast_e2e_runtime_uses_production_v2_records_without_oracle_feedback`
+  - 同文件 `test_fast_e2e_oracle_accepts_a_result_not_derived_from_its_expectation` 与
+    `test_fast_e2e_oracle_rejects_confirmed_unrelated_noise`
+  - `tests/deterministic/integration/test_methods_v2_runtime_journey.py::test_runtime_submission_reviewer_and_public_projection_are_one_v2_journey`
+  - `tests/deterministic/integration/test_methods_v2_terminal_submission.py::test_each_failed_terminal_reason_reaches_case_mcp_and_rest`
+  - `tests/deterministic/integration/test_evidence_v2_source_mutations.py::test_source_overlay_mutant_is_killed_by_exact_regression_test`
+  - `tests/deterministic/unit/runtime/test_methods_outcome_v2.py::test_outcome_mapping_does_not_rescan_evidence`
+  - `tests/deterministic/contracts/test_schema_snapshots.py::test_contract_manifest_covers_the_exact_frozen_inputs`
+  - `tests/deterministic/journey/test_rpc_timeout.py::test_rpc_timeout_fixture_manifest_is_schema_valid_and_exhaustive`
+- **最新 Test Flow verdict**：首次权威复现 `run-20260830T092923Z-5c87d24a` 为 `FAIL`：
+  `deterministic.full` 的 Core、contracts、unit、integration、SameJob 分别直接暴露上述 11、1、1、10、1
+  个失败，源码快照为
+  `git-visible-worktree-v1:09e272af362aaf60bb4c9b537088492650fc38081fda43c941d7b7846fc94995`
+  （745 files）。修正后的对应专项为 28/28 PASS；最终权威复验元数据将在通过后追加。
+  **最终复验元数据**：Dev `run-20260830T093950Z-93fff624` 为 `PASS_WITH_WARNINGS`，仅缺性能基线；
+  `deterministic.full` 为干净 `PASS`：Core 108/108、contracts 602/602、unit 1942 passed/68 skipped、
+  integration 68/68、SameJob 3/3，全部 Gate 的 failure/error 为 0，模型调用为 0。Core 绑定
+  `contract-manifest.json` SHA-256
+  `b41d74d70b8d6e1441ea1aee384f4f50ec7753adea8b7eb1a4cb5be38048fcdb`，源码快照为
+  `git-visible-worktree-v1:5c9cf39747e1d0f02e4ebced9c26eb8c08298c4d2fd463d378858ad433a47459`
+  （745 files）。本元数据行本身不宣称被其引用的快照覆盖。

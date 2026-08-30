@@ -153,7 +153,6 @@ def test_runtime_submission_reviewer_and_public_projection_are_one_v2_journey(
         "client": b"RPC DEADLINE EXCEEDED request_id=42\n",
         "server": b"CONNECTION POOL WAIT request_id=42\n",
     }
-    specialist_backend.result = "confirmed_missing"
 
     def execute_preprocessing(
         session: object,
@@ -261,7 +260,7 @@ def test_runtime_submission_reviewer_and_public_projection_are_one_v2_journey(
     assert mcp_result == rest_result
     assert mcp_result["status"] == "RESOLVED"
     assert mcp_result["confirmed_method_ids"]
-    assert mcp_result["limitations"] == ["Synthetic missing client target."]
+    assert mcp_result["limitations"] == []
     assert "specialist_evaluation" not in mcp_view
     assert "specialist_evaluation" not in rest_view
     assert "private specialist reason" not in str(mcp_view)

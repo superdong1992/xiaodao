@@ -232,6 +232,23 @@ hash、identity token、hit ref 或任何证据 receipt。服务端只接受与 
 `diagnostic_id` 和公共原因文本。Methods V2 只有 `RESOLVED`、`UNRESOLVED`、`FAILED`
 三种终态，不产生 `PARTIALLY_RESOLVED`。
 
+Reviewer 完成机械共识后，Runtime 还会在该 Job 的 execution records 中写入一次不可变的
+`methods-consensus-attribution-v2.json`。它只用于内部分析，记录公开 reason code、evaluation
+数量、每项 event 数、激活方法数、package 总方法数，以及下列一个内部子因：
+
+- 任一侧出现 `UNKNOWN`：`UNKNOWN_PRESENT`；
+- 两侧 verdict 不同：`VERDICT_MISMATCH`；
+- verdict 全同但所选 event 集合不同：`EVIDENCE_SET_MISMATCH`；
+- 两侧完全一致但没有 `CONFIRMED`：`NO_CONFIRMED`。
+
+子因分类会同时检查 Specialist 和 Reviewer，但不改变现有公开 reason code 或共识判定。
+当前公开原因分类仍保留既有不对称：`_consensus_reason` 只把 Reviewer 侧 `UNKNOWN` 映射为
+`INCOMPLETE_EVALUATION`；若只有 Specialist 侧为 `UNKNOWN`，公开原因仍可能是
+`SPECIALIST_REVIEWER_DISAGREEMENT`，内部子因则稳定记录为 `UNKNOWN_PRESENT`。本轮只观测，
+不借此调整裁决语义。只读工具 `tools/methods-consensus-attribution-report.py` 从
+`methods-state-v2.json` 汇总全部公开终态原因，再从归因文件汇总共识子因和规模分布。
+归因字段不得进入 MCP、REST、Case 或 `MethodsTerminalProjectionV2`。
+
 若资源解析、Workspace、Logparse 预处理或 execution-record 在 Graph/Plan 生成前失败，
 服务端没有合法的 plan、graph 或 evaluation identity，因此不得构造
 `MethodsTerminalProjectionV2`。这种 Case 直接以 `FAILED` 收口，`methods_result` 缺省，

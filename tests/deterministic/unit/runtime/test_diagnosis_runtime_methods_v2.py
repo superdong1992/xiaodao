@@ -22,7 +22,10 @@ from problem_locator.contracts import (
 )
 from problem_locator.domain import DomainCoordinator, PureContextSnapshotProjector
 from problem_locator.runtime.agent_backend import BackendExecution
-from problem_locator.runtime.diagnosis_runtime import DiagnosisRuntime
+from problem_locator.runtime.diagnosis_runtime import (
+    METHODS_CONSENSUS_ATTRIBUTION_V2_FILENAME,
+    DiagnosisRuntime,
+)
 from problem_locator.runtime.failures import runtime_failure
 from problem_locator.runtime.methods_records_v2 import (
     METHODS_EVALUATION_PLAN_V2_FILENAME,
@@ -250,6 +253,13 @@ class _RejectLimitationsArchiveRecords(_ObservedRecords):
         return super().read_audit_bytes(job_id, filename)
 
 
+class _RejectConsensusAttributionRecords(_ObservedRecords):
+    def publish_audit_bytes(self, job_id: str, filename: str, raw_bytes: bytes):
+        if filename == METHODS_CONSENSUS_ATTRIBUTION_V2_FILENAME:
+            raise OSError("injected consensus attribution archive failure")
+        return super().publish_audit_bytes(job_id, filename, raw_bytes)
+
+
 class _EvidenceV2ReviewerBackend:
     def __init__(self, responses: tuple[object, ...], events: list[str]) -> None:
         self.responses = list(responses)
@@ -280,12 +290,20 @@ class _EvidenceV2ReviewerBackend:
             )
         if isinstance(response, str) and response.startswith("VALID_"):
             verdict = response.removeprefix("VALID_")
+            event_selection = "ALL"
+            if verdict == "CONFIRMED_LAST_EVENT":
+                verdict = "CONFIRMED"
+                event_selection = "LAST"
             response = [
                 {
                     "evaluation_ref": item.evaluation_ref,
                     "verdict": verdict,
                     "supporting_event_refs": (
-                        list(item.evidence_event_refs)
+                        (
+                            [item.evidence_event_refs[-1]]
+                            if event_selection == "LAST"
+                            else list(item.evidence_event_refs)
+                        )
                         if verdict == "CONFIRMED"
                         else []
                     ),
@@ -497,6 +515,10 @@ def _review_runtime(
     records: _ObservedRecords | None = None,
     workspace_name: str = "review-runtime-data",
     include_limitations: bool = True,
+    specialist_verdict: str = "CONFIRMED",
+    specialist_event_selection: str = "ALL",
+    methods: tuple[tuple[str, str], ...] = (("slow-execution", "API_COMPLETE"),),
+    target_bytes: bytes | None = None,
 ) -> tuple[
     DiagnosisRuntime,
     Job,
@@ -504,7 +526,11 @@ def _review_runtime(
     _ObservedRecords,
     list[str],
 ]:
-    catalog, _, specialist, reviewer, _, graph, plan, _ = _jobs(tmp_path)
+    catalog, _, specialist, reviewer, _, graph, plan, _ = _jobs(
+        tmp_path,
+        methods=methods,
+        target_bytes=target_bytes,
+    )
     reviewer = _running(reviewer)
     aggregate = _aggregate(reviewer, source_job=specialist)
     events: list[str] = [] if records is None else records.events
@@ -515,8 +541,16 @@ def _review_runtime(
         response=[
             {
                 "evaluation_ref": item.evaluation_ref,
-                "verdict": "CONFIRMED",
-                "supporting_event_refs": list(item.evidence_event_refs),
+                "verdict": specialist_verdict,
+                "supporting_event_refs": (
+                    (
+                        [item.evidence_event_refs[0]]
+                        if specialist_event_selection == "FIRST"
+                        else list(item.evidence_event_refs)
+                    )
+                    if specialist_verdict == "CONFIRMED"
+                    else []
+                ),
                 "reason": "private specialist reason",
             }
             for item in plan.evaluations
@@ -756,6 +790,15 @@ def test_reviewer_is_blind_and_reads_pending_state_after_model(
     assert terminal_state.status == "RESOLVED"
     assert terminal_state.reviewer_evaluation is not None
     assert "private specialist reason" not in backend.prompts[0]
+    attribution_bytes = records.read_audit_bytes(
+        job.job_id,
+        METHODS_CONSENSUS_ATTRIBUTION_V2_FILENAME,
+    )
+    assert attribution_bytes is not None
+    attribution = parse_canonical_json_bytes(attribution_bytes)
+    assert attribution["terminal_status"] == "RESOLVED"
+    assert attribution["reason_code"] is None
+    assert attribution["consensus_subreason"] is None
 
 
 @pytest.mark.parametrize(
@@ -781,6 +824,149 @@ def test_reviewer_disagreement_and_unknown_are_unresolved(
     assert projection.status == "UNRESOLVED"
     assert projection.reason_code == reason_code
     assert projection.limitations == ("Only the frozen target set was evaluated.",)
+
+
+@pytest.mark.parametrize(
+    (
+        "specialist_verdict",
+        "specialist_event_selection",
+        "reviewer_response",
+        "public_reason_code",
+        "consensus_subreason",
+    ),
+    [
+        (
+            "CONFIRMED",
+            "ALL",
+            "VALID_UNKNOWN",
+            "INCOMPLETE_EVALUATION",
+            "UNKNOWN_PRESENT",
+        ),
+        (
+            "CONFIRMED",
+            "ALL",
+            "VALID_REJECTED",
+            "SPECIALIST_REVIEWER_DISAGREEMENT",
+            "VERDICT_MISMATCH",
+        ),
+        (
+            "CONFIRMED",
+            "FIRST",
+            "VALID_CONFIRMED_LAST_EVENT",
+            "SPECIALIST_REVIEWER_DISAGREEMENT",
+            "EVIDENCE_SET_MISMATCH",
+        ),
+        (
+            "REJECTED",
+            "ALL",
+            "VALID_REJECTED",
+            "NO_CONFIRMED_METHOD",
+            "NO_CONFIRMED",
+        ),
+    ],
+)
+def test_reviewer_execution_record_distinguishes_consensus_subreasons(
+    tmp_path: Path,
+    specialist_verdict: str,
+    specialist_event_selection: str,
+    reviewer_response: str,
+    public_reason_code: str,
+    consensus_subreason: str,
+) -> None:
+    target_bytes = (
+        b"API_COMPLETE request_id=req-1\n"
+        b"API_COMPLETE request_id=req-2\n"
+    )
+    runtime, job, _, records, _ = _review_runtime(
+        tmp_path,
+        (reviewer_response,),
+        specialist_verdict=specialist_verdict,
+        specialist_event_selection=specialist_event_selection,
+        methods=(
+            ("slow-execution", "API_COMPLETE"),
+            ("inactive-method", "NEVER_SEEN"),
+        ),
+        target_bytes=target_bytes,
+    )
+
+    receipt = runtime.execute(job, InMemoryCancellationSignal())
+
+    projection = receipt.job_outcome.methods_terminal_projection
+    assert projection is not None
+    assert projection.status == "UNRESOLVED"
+    assert projection.reason_code == public_reason_code
+    assert "consensus_subreason" not in projection.model_dump(mode="json")
+    attribution_bytes = records.read_audit_bytes(
+        job.job_id,
+        METHODS_CONSENSUS_ATTRIBUTION_V2_FILENAME,
+    )
+    assert attribution_bytes is not None
+    attribution = parse_canonical_json_bytes(attribution_bytes)
+    assert attribution["terminal_status"] == "UNRESOLVED"
+    assert attribution["reason_code"] == public_reason_code
+    assert attribution["consensus_subreason"] == consensus_subreason
+    assert attribution["evaluation_count"] == 1
+    assert attribution["evaluation_event_counts"] == [
+        {
+            "evaluation_ref": attribution["evaluation_event_counts"][0][
+                "evaluation_ref"
+            ],
+            "event_count": 2,
+        }
+    ]
+    assert attribution["activated_method_count"] == 1
+    assert attribution["package_method_count"] == 2
+    published_outcome = records.publish_outcome_calls[0][1]
+    assert b"consensus_subreason" not in published_outcome
+
+
+def test_specialist_unknown_is_attributed_without_changing_public_reason(
+    tmp_path: Path,
+) -> None:
+    runtime, job, _, records, _ = _review_runtime(
+        tmp_path,
+        ("VALID_REJECTED",),
+        specialist_verdict="UNKNOWN",
+    )
+
+    receipt = runtime.execute(job, InMemoryCancellationSignal())
+
+    projection = receipt.job_outcome.methods_terminal_projection
+    assert projection is not None
+    assert projection.reason_code == "SPECIALIST_REVIEWER_DISAGREEMENT"
+    attribution_bytes = records.read_audit_bytes(
+        job.job_id,
+        METHODS_CONSENSUS_ATTRIBUTION_V2_FILENAME,
+    )
+    assert attribution_bytes is not None
+    attribution = parse_canonical_json_bytes(attribution_bytes)
+    assert attribution["reason_code"] == "SPECIALIST_REVIEWER_DISAGREEMENT"
+    assert attribution["consensus_subreason"] == "UNKNOWN_PRESENT"
+
+
+def test_reviewer_attribution_archive_failure_is_not_silently_lost(
+    tmp_path: Path,
+) -> None:
+    _, _, specialist, _, _, _, _, _ = _jobs(tmp_path / "preview")
+    events: list[str] = []
+    records = _RejectConsensusAttributionRecords(events, specialist.job_id)
+    runtime, job, backend, _, _ = _review_runtime(
+        tmp_path / "runtime",
+        ("VALID_CONFIRMED",),
+        records=records,
+    )
+
+    receipt = runtime.execute(job, InMemoryCancellationSignal())
+
+    assert len(backend.calls) == 1
+    projection = receipt.job_outcome.methods_terminal_projection
+    assert projection is not None
+    assert projection.status == "FAILED"
+    assert projection.reason_code == "AUDIT_ARCHIVE_FAILED"
+    assert records.read_audit_bytes(
+        job.job_id,
+        METHODS_CONSENSUS_ATTRIBUTION_V2_FILENAME,
+    ) is None
 
 
 def test_reviewer_uses_at_most_one_repair(

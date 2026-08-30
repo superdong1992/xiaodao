@@ -188,7 +188,7 @@ def _running_reviewer_reason_state(tmp_path, reason_code: str):
 
 
 def _running_specialist_failure_state(tmp_path, reason_code: str):
-    source, _, _, _, projection, outcome = _specialist_terminal(
+    source, _, _, _, _, projection, outcome = _specialist_terminal(
         tmp_path,
         reason_code,
     )

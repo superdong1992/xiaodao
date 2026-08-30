@@ -167,25 +167,29 @@ export function buildPlan(options) {
   requiredFile(options.claudeEntry, "CLAUDE_DEEPSEEK_CLI_MISSING", "Claude Code cli.js", blockers);
   requiredFile(options.claudeSettings, "CLAUDE_DEEPSEEK_SETTINGS_MISSING", "audited Claude settings", blockers);
   requiredFile(options.pythonEntry, "CLAUDE_DEEPSEEK_PYTHON_MISSING", "validator/service Python", blockers);
-  const caseRoot = path.join(REPO_ROOT, "tests", "cases", "release", "rpc-timeout-anonymized");
-  const metaSkillRoot = path.join(REPO_ROOT, ".claude", "skills", "wiki-to-logparse-diagnosis-skill");
-  const wiki = path.join(caseRoot, "input", "wiki.md");
   let identity = null;
   let producer = null;
-  let cache = { status: "UNKNOWN", code: null, path: null, registration_root: null, registration_tree_sha256: null, runtime_ref: null };
+  let cache = options.goal === FAST_E2E_GOAL
+    ? { status: "NOT_REQUIRED", code: null, path: null, registration_root: null, registration_tree_sha256: null, runtime_ref: null }
+    : { status: "UNKNOWN", code: null, path: null, registration_root: null, registration_tree_sha256: null, runtime_ref: null };
   let explicitRegistration = null;
   if (blockers.length === 0) {
     try {
       identity = validateClaudeDeepseekIdentity(options.claudeEntry, options.claudeSettings);
-      producer = buildRegistrationProducerIdentity({ wiki, metaSkillRoot, claudeIdentity: identity, module: CLAUDE_DEEPSEEK_MODULE });
-      const cachePath = registrationCachePath(options.cacheRoot, producer.producer_identity);
-      const registrationRoot = path.join(cachePath, "registration", CLAUDE_DEEPSEEK_REGISTRATION_ID);
-      try {
-        const receipt = validateRegistrationCache({ cacheRoot: options.cacheRoot, producer });
-        assertRegistrationUnchanged(receipt);
-        cache = { status: "PRESENT", code: null, path: cachePath, registration_root: receipt.registration_root, registration_tree_sha256: receipt.manifest.registration.tree_sha256, runtime_ref: receipt.manifest.registration.runtime_ref };
-      } catch (error) {
-        cache = { status: fs.existsSync(cachePath) ? "INVALID" : "MISSING", code: error?.code ?? "CLAUDE_DEEPSEEK_CACHE_INVALID", path: cachePath, registration_root: registrationRoot, registration_tree_sha256: null, runtime_ref: null };
+      if (options.goal !== FAST_E2E_GOAL) {
+        const caseRoot = path.join(REPO_ROOT, "tests", "cases", "release", "rpc-timeout-anonymized");
+        const metaSkillRoot = path.join(REPO_ROOT, ".claude", "skills", "wiki-to-logparse-diagnosis-skill");
+        const wiki = path.join(caseRoot, "input", "wiki.md");
+        producer = buildRegistrationProducerIdentity({ wiki, metaSkillRoot, claudeIdentity: identity, module: CLAUDE_DEEPSEEK_MODULE });
+        const cachePath = registrationCachePath(options.cacheRoot, producer.producer_identity);
+        const registrationRoot = path.join(cachePath, "registration", CLAUDE_DEEPSEEK_REGISTRATION_ID);
+        try {
+          const receipt = validateRegistrationCache({ cacheRoot: options.cacheRoot, producer });
+          assertRegistrationUnchanged(receipt);
+          cache = { status: "PRESENT", code: null, path: cachePath, registration_root: receipt.registration_root, registration_tree_sha256: receipt.manifest.registration.tree_sha256, runtime_ref: receipt.manifest.registration.runtime_ref };
+        } catch (error) {
+          cache = { status: fs.existsSync(cachePath) ? "INVALID" : "MISSING", code: error?.code ?? "CLAUDE_DEEPSEEK_CACHE_INVALID", path: cachePath, registration_root: registrationRoot, registration_tree_sha256: null, runtime_ref: null };
+        }
       }
     } catch (error) { blockers.push({ code: error?.code ?? "CLAUDE_DEEPSEEK_IDENTITY_INVALID", detail: error?.message ?? "Claude identity is invalid" }); }
   }
@@ -238,7 +242,7 @@ export function buildPlan(options) {
         blockers.push({ code: "CLAUDE_DEEPSEEK_SCENARIO_INVALID", detail: error?.message ?? `Fast E2E scenario is invalid: ${scenario}` });
       }
     }
-    if (options.registrationRoot === null && cache.status !== "PRESENT") blockers.push({ code: "CLAUDE_DEEPSEEK_REGISTRATION_CACHE_REQUIRED", detail: `Fast E2E requires --registration-root or the exact generated registration cache (${cache.code ?? cache.status})` });
+    if (options.registrationRoot === null) blockers.push({ code: "CLAUDE_DEEPSEEK_FAST_E2E_REGISTRATION_ROOT_REQUIRED", detail: "Fast E2E requires --registration-root for one validated production registration" });
   }
   const providerRuntimeIdentity = { tree_sha256: treeDigest(path.join(SCRIPT_ROOT, "runtime"), { directoryMode: 0o700 }) };
   if (options.goal === METHODS_GOAL && cache.status === "INVALID") blockers.push({ code: "CLAUDE_DEEPSEEK_REGISTRATION_CACHE_INVALID", detail: `Exact producer path exists but is invalid (${cache.code})` });
@@ -270,7 +274,7 @@ export function buildPlan(options) {
       per_scenario: scenarios.map((scenario) => ({ scenario_id: scenario, expected_model_processes: scenarioCallCount(options.goal, scenario), model_process_hard_cap: scenarioCallHardCap(options.goal, scenario), token_cap: scenarioTokenCap(options.goal, scenario), usd_cap: scenarioUsdCap(options.goal, scenario) })),
       stage_wall_seconds: [E2E_GOAL, FAST_E2E_GOAL].includes(options.goal) ? CLAUDE_DEEPSEEK_STAGE_WALL_SECONDS * scenarios.length : CLAUDE_DEEPSEEK_STAGE_WALL_SECONDS, per_process_wall_seconds: options.goal === METHODS_GOAL ? 1800 : 600, no_progress_seconds: CLAUDE_DEEPSEEK_NO_PROGRESS_SECONDS, docker: false, browser: false, restart: false,
     },
-    inputs: { repository_root: REPO_ROOT, source_snapshot_digest: options.goal === E2E_GOAL ? options.sourceSnapshotDigest : null, core_verdict: options.goal === E2E_GOAL ? options.coreVerdict : null, scratch_root: options.scratchRoot, provider_runtime: providerRuntimeIdentity, client: options.client, claude: identity, producer, production_registration: explicitRegistration ?? { source: "standalone-cache", registration_root: cache.registration_root, registration_id: CLAUDE_DEEPSEEK_REGISTRATION_ID, skill_name: null, tree_sha256: cache.registration_tree_sha256, template_sha256: null, methods_sha256: null }, registration_cache: cache, module: CLAUDE_DEEPSEEK_MODULE, python_entry: options.pythonEntry, retry_context: options.retryContext },
+    inputs: { repository_root: REPO_ROOT, source_snapshot_digest: options.goal === E2E_GOAL ? options.sourceSnapshotDigest : null, core_verdict: options.goal === E2E_GOAL ? options.coreVerdict : null, scratch_root: options.scratchRoot, provider_runtime: providerRuntimeIdentity, client: options.client, claude: identity, producer, production_registration: explicitRegistration ?? { source: options.goal === FAST_E2E_GOAL ? "explicit-required" : "standalone-cache", registration_root: cache.registration_root, registration_id: CLAUDE_DEEPSEEK_REGISTRATION_ID, skill_name: null, tree_sha256: cache.registration_tree_sha256, template_sha256: null, methods_sha256: null }, registration_cache: cache, module: CLAUDE_DEEPSEEK_MODULE, python_entry: options.pythonEntry, retry_context: options.retryContext },
     contracts: options.goal === METHODS_GOAL ? ["quick.codex-luna.contracts", "quick.claude-deepseek.methods.contracts"] : options.goal === FAST_E2E_GOAL ? ["quick.claude-deepseek.fast-e2e.contracts"] : ["quick.claude-deepseek.e2e.contracts"],
     evidence: REQUIRED_EVIDENCE[options.goal],
     admission: { status: blockers.length === 0 ? "READY" : "BLOCKED", blockers },
@@ -571,7 +575,7 @@ export async function execute(options, plan) {
   return plan.mode === "fast-e2e-suite" ? executeFastSuite(options, plan) : executeOne(options, plan);
 }
 
-function usage() { return `Usage:\n  ./tools/test-flow/quick-validation/claude-deepseek/run.sh --goal ${METHODS_GOAL} [--plan-only] [--allow-real-model]\n  ./tools/test-flow/quick-validation/claude-deepseek/run.sh --goal ${FAST_E2E_GOAL} (--scenario <historical-scenario> | --all-scenarios) (--registration-root <path> | --cache-root <path>) [--plan-only] [--allow-real-model]\n  ./tools/test-flow/quick-validation/claude-deepseek/run.sh --goal ${E2E_GOAL} --registration-root <path> --scenario multiple-rpc-timeouts --source-snapshot-digest <sha256> --core-verdict <path> [--plan-only] [--allow-real-model]\n`; }
+function usage() { return `Usage:\n  ./tools/test-flow/quick-validation/claude-deepseek/run.sh --goal ${METHODS_GOAL} [--plan-only] [--allow-real-model]\n  ./tools/test-flow/quick-validation/claude-deepseek/run.sh --goal ${FAST_E2E_GOAL} (--scenario <historical-scenario> | --all-scenarios) --registration-root <path> [--plan-only] [--allow-real-model]\n  ./tools/test-flow/quick-validation/claude-deepseek/run.sh --goal ${E2E_GOAL} --registration-root <path> --scenario multiple-rpc-timeouts --source-snapshot-digest <sha256> --core-verdict <path> [--plan-only] [--allow-real-model]\n`; }
 
 async function main() {
   try {

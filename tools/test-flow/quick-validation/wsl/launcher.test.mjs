@@ -74,11 +74,14 @@ test("Fast E2E launches the frozen nine scenarios in isolated sibling containers
   assert.match(source, /--tmpfs \/run\/test-flow-scratch/u);
 });
 
-test("Fast E2E mounts only the selected provider credential and returns its suite to the caller", () => {
+test("Fast E2E mounts the selected credential and explicit production registration", () => {
   const source = fs.readFileSync(path.join(WSL_ROOT, "fast-e2e.sh"), "utf8");
   assert.match(source, /src=\$codex_auth,dst=\/run\/secrets\/codex-auth\.json,readonly/u);
   assert.match(source, /src=\$claude_settings,dst=\/run\/secrets\/claude-settings\.json,readonly/u);
   assert.match(source, /src=\$cache_root,dst=\/cache,readonly/u);
+  assert.match(source, /src=\$registration_root,dst=\/registration,readonly/u);
+  assert.match(source, /--registration-root \/registration/u);
+  assert.match(source, /test -r \/registration\/registration-template\.json/u);
   assert.match(source, /src=\$repo_root,dst=\$repo_root,readonly/u);
   assert.match(source, /chown -R -- "\$TEST_FLOW_HOST_UID:\$TEST_FLOW_HOST_GID" \/suite/u);
   assert.doesNotMatch(source, /chown[^\n]*(?:\/cache|\$cache_root|\$repo_root|[" ]\/evidence[" ])/u);

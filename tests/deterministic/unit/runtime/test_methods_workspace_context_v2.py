@@ -262,12 +262,17 @@ def _user_fact() -> dict[str, object]:
     }
 
 
-def _jobs(tmp_path: Path):
+def _jobs(
+    tmp_path: Path,
+    *,
+    methods: tuple[tuple[str, str], ...] = (("slow-execution", "API_COMPLETE"),),
+    target_bytes: bytes | None = None,
+):
     skills_root = tmp_path / "skills"
     skill = load_test_methods_skill(
         skills_root,
         name="workspace-context-v2",
-        methods=(("slow-execution", "API_COMPLETE"),),
+        methods=methods,
     )
     catalog = VersionedAssetCatalog(
         skill_dir=skills_root,
@@ -312,11 +317,12 @@ def _jobs(tmp_path: Path):
     specialist_value["context_snapshot"] = snapshot_value
     specialist = Job.model_validate(specialist_value)
 
-    target_bytes = (
-        b"API_COMPLETE request_id=req-1\n"
-        + PRIVATE_TARGET_SENTINEL.encode("utf-8")
-        + b"\n"
-    )
+    if target_bytes is None:
+        target_bytes = (
+            b"API_COMPLETE request_id=req-1\n"
+            + PRIVATE_TARGET_SENTINEL.encode("utf-8")
+            + b"\n"
+        )
     specialist_manager = WorkspaceManager(tmp_path / "specialist-data")
     specialist_workspace = specialist_manager.prepare(
         specialist,

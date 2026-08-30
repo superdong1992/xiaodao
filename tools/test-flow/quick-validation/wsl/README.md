@@ -54,6 +54,7 @@ bash tools/test-flow/quick-validation/wsl/run.sh \
   --mode fast-e2e \
   --provider codex-luna \
   --cache-root /home/xiaodao/quick-validation/cache \
+  --registration-root /path/to/generated/production-registration \
   --evidence-root /home/xiaodao/quick-validation/evidence/fast-e2e/codex-luna \
   --codex-auth /home/xiaodao/quick-validation/secrets/codex-auth.json \
   --plan-only
@@ -68,6 +69,7 @@ bash tools/test-flow/quick-validation/wsl/run.sh \
   --mode fast-e2e \
   --provider claude-deepseek \
   --cache-root /home/xiaodao/quick-validation/cache \
+  --registration-root /path/to/generated/production-registration \
   --evidence-root /home/xiaodao/quick-validation/evidence/fast-e2e/claude-deepseek \
   --claude-settings /home/xiaodao/quick-validation/secrets/claude-settings.json \
   --plan-only
@@ -75,7 +77,9 @@ bash tools/test-flow/quick-validation/wsl/run.sh \
 
 确认计划后，同样移除 `--plan-only` 并加入 `--allow-real-model`。
 
-Fast 模式只要求所选 provider 的凭据。wrapper 会在容器内调用对应的 standalone 入口：
+Fast 模式只要求所选 provider 的凭据，并要求显式传入一份已经生成、校验通过的 production
+registration。它不会根据 Release Wiki 推导 producer identity，也不会从生成缓存中猜测 registration。
+wrapper 会把该目录只读挂载到场景容器，并调用对应的 standalone 入口：
 
 ```text
 quick-validation/<provider>/run.sh --goal fast-e2e --all-scenarios --plan-only
@@ -109,7 +113,7 @@ quick-validation/<provider>/run.sh --goal fast-e2e --all-scenarios --plan-only
 
 九个场景容器并行启动。它们分别拥有独立的进程、网络、`/tmp`、`/private/tmp`、`/root`、scratch、服务端数据根和 evidence 子根。仓库、生成结果 cache、image seal 和所选 provider 凭据以只读方式挂载。
 
-结果写入：
+依赖 cache 只用于冻结镜像和 CLI/runtime 依赖，不再提供 Fast E2E 的 registration。结果写入：
 
 ```text
 <evidence-root>/wsl-<provider>-fast-e2e-<run-id>/

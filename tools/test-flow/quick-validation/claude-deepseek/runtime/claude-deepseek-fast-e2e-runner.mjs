@@ -115,7 +115,6 @@ export function productionRuntimeArguments(options) {
     ),
     "--mode", "real",
     "--source-root", options.sourceRoot,
-    "--source-wiki", options.sourceWiki,
     "--scenario-root", options.scenarioRoot,
     "--scenario-id", options.scenario,
     "--registration-root", options.registrationRoot,
@@ -411,16 +410,10 @@ export async function runFastE2E(options, {
   materializeClaudeSettings(options.claudeSettings, stagedSettings);
   const configRoot = path.join(privateRoot, "claude-config");
   fs.mkdirSync(configRoot, { mode: 0o700 });
-  const sourceWiki = path.join(
-    sourceRoot,
-    "tests/cases/release/rpc-timeout-anonymized/input/wiki.md",
-  );
-
   onProgress?.("production-runtime");
   const runtimeReceipt = await runRuntime({
     ...options,
     sourceRoot,
-    sourceWiki,
     scenarioRoot: scenario.root,
     workRoot,
     privateRoot,

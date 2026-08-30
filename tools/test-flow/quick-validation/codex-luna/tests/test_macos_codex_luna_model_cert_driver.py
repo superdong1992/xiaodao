@@ -298,19 +298,12 @@ UNKNOWN is allowed.
     return root
 
 
-def test_fast_e2e_oracle_uses_production_v2_records_for_all_confirmed_scenarios(
+def test_fast_e2e_runtime_uses_production_v2_records_without_oracle_feedback(
     tmp_path: Path,
 ) -> None:
     source_root = Path(__file__).resolve().parents[5]
     cases_root = source_root / "experiments/rpc-skill-feasibility/cases"
     registration_root = _release_registration(tmp_path)
-    branch_method_ids = {
-        "API_COMPLETE": "api-execution-slow",
-        "DEADLOOP_DETECTED": "api-execution-slow",
-        "QUEUE_HISTORY": "server-queueing",
-        "LATE_RESPONSE": "client-receive-blocked",
-    }
-    method_ids = frozenset(branch_method_ids.values())
     scenario_ids = (
         "api-execution-overrun",
         "client-receive-blocked",
@@ -322,23 +315,8 @@ def test_fast_e2e_oracle_uses_production_v2_records_for_all_confirmed_scenarios(
         "unrelated-log-noise",
     )
     for index, scenario_id in enumerate(scenario_ids):
-        historical = json.loads(
-            (cases_root / scenario_id / "case.json").read_bytes()
-        )
-        confirmed = frozenset(
-            branch_method_ids[marker]
-            for marker in historical["expected_branch_markers"]
-        )
         evidence_root = tmp_path / f"e{index}"
-        backend = FakeModelRoleBackend(
-            rejected_method_ids=method_ids - confirmed,
-            supporting_identity_tokens_by_method=(
-                {"client-receive-blocked": ("request_id=601",)}
-                if scenario_id == "unrelated-log-noise"
-                else None
-            ),
-            confirmed_reason_terms=tuple(historical["expected_terms"]),
-        )
+        backend = FakeModelRoleBackend()
         runtime_receipt = run_production_model_cert(
             work_root=tmp_path / f"w{index}",
             evidence_root=evidence_root,
@@ -347,14 +325,76 @@ def test_fast_e2e_oracle_uses_production_v2_records_for_all_confirmed_scenarios(
             scenario_id=scenario_id,
             role_backend=backend,
         )
-        completed = _audit_fast_e2e(
-            source_root=source_root,
-            evidence_root=evidence_root,
-            scenario_id=scenario_id,
-            runtime_receipt=runtime_receipt,
+        assert runtime_receipt["status"] == "PASS"
+        assert runtime_receipt["scenario_id"] == scenario_id
+        assert runtime_receipt["records"]["graph"]["filename"] == (
+            "methods-evidence-graph-v2.json"
         )
-        assert completed.returncode == 0, completed.stderr
-        assert json.loads(completed.stdout)["status"] == "PASS"
+        assert runtime_receipt["records"]["plan"]["filename"] == (
+            "methods-evaluation-plan-v2.json"
+        )
+
+
+def test_fast_e2e_oracle_accepts_a_result_not_derived_from_its_expectation(
+    tmp_path: Path,
+) -> None:
+    source_root = Path(__file__).resolve().parents[5]
+    scenario_id = "api-execution-overrun"
+    evidence_root = tmp_path / "evidence"
+    runtime_receipt = run_production_model_cert(
+        work_root=tmp_path / "work",
+        evidence_root=evidence_root,
+        registration_root=_release_registration(tmp_path),
+        scenario_root=(
+            source_root / "experiments/rpc-skill-feasibility/cases" / scenario_id
+        ),
+        scenario_id=scenario_id,
+        role_backend=FakeModelRoleBackend(),
+    )
+
+    completed = _audit_fast_e2e(
+        source_root=source_root,
+        evidence_root=evidence_root,
+        scenario_id=scenario_id,
+        runtime_receipt=runtime_receipt,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads(completed.stdout)["status"] == "PASS"
+
+
+def test_fast_e2e_oracle_rejects_confirmed_unrelated_noise(
+    tmp_path: Path,
+) -> None:
+    source_root = Path(__file__).resolve().parents[5]
+    scenario_id = "unrelated-log-noise"
+    evidence_root = tmp_path / "evidence"
+    runtime_receipt = run_production_model_cert(
+        work_root=tmp_path / "work",
+        evidence_root=evidence_root,
+        registration_root=_release_registration(tmp_path),
+        scenario_root=(
+            source_root / "experiments/rpc-skill-feasibility/cases" / scenario_id
+        ),
+        scenario_id=scenario_id,
+        role_backend=FakeModelRoleBackend(
+            rejected_method_ids=frozenset(
+                {"api-execution-slow", "server-queueing"}
+            )
+        ),
+    )
+
+    completed = _audit_fast_e2e(
+        source_root=source_root,
+        evidence_root=evidence_root,
+        scenario_id=scenario_id,
+        runtime_receipt=runtime_receipt,
+    )
+
+    assert completed.returncode == 1
+    assert json.loads(completed.stderr)["code"] == (
+        "MACOS_CODEX_LUNA_FORBIDDEN_TERM_PRESENT"
+    )
 
 
 def test_historical_insufficient_evidence_terminates_without_a_role_call(

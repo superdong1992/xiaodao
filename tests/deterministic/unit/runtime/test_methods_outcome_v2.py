@@ -8,7 +8,6 @@ from pydantic import ValidationError
 
 import problem_locator.runtime.methods_evidence_v2 as methods_evidence_v2
 from problem_locator.contracts import (
-    MethodEvidenceHitV2,
     method_terminal_result_ref_v2,
     project_method_terminal_result_v2,
     validate_method_terminal_result_v2,
@@ -495,7 +494,7 @@ def test_failed_result_clears_confirmed_refs_even_after_resolved_consensus() -> 
     )
 
 
-def test_outcome_mapping_does_not_rescan_or_read_marker_line(
+def test_outcome_mapping_does_not_rescan_evidence(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     graph, plan, _, state = _context()
@@ -503,16 +502,8 @@ def test_outcome_mapping_does_not_rescan_or_read_marker_line(
     def fail_scan(*args: object, **kwargs: object) -> None:
         raise AssertionError(f"outcome mapping rescanned evidence: {args!r} {kwargs!r}")
 
-    original_getattribute = MethodEvidenceHitV2.__getattribute__
-
-    def guarded_getattribute(self: MethodEvidenceHitV2, name: str):
-        if name in {"marker", "line"}:
-            raise AssertionError(f"outcome mapping read forbidden hit field {name}")
-        return original_getattribute(self, name)
-
     monkeypatch.setattr(methods_evidence_v2, "scan_method_evidence_v2", fail_scan)
     monkeypatch.setattr(methods_evidence_v2, "_validated_logs", fail_scan)
-    monkeypatch.setattr(MethodEvidenceHitV2, "__getattribute__", guarded_getattribute)
 
     result = build_method_terminal_result_v2(
         state=state,

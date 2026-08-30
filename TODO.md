@@ -1,6 +1,6 @@
 # TODO
 
-更新时间：2026-08-28
+更新时间：2026-08-30
 
 本文件是仓库活跃待办的唯一清单。已完成事项由代码、当前设计与 Git 历史证明，不在这里保留关闭项。
 
@@ -30,6 +30,21 @@
 - 分支激活条件必须由 Skill 显式声明、可机读，并写入审计与 replay 输入；不得由 Agent 临时发明分支、用空字符串或隐藏默认值冒充未提供参数，也不得依赖客户端 Hook 修正语义。
 - 条件参数若已作为初始 USER_FACT 提供，应直接固定并复用，不得重复询问；若未提供，分支激活后才创建一次可补充的 OPEN requirement。
 - 生成器、manifest/合同、Catalog、Coordinator、服务端验证器和正反向测试必须共同覆盖“命中分支才询问、未命中分支不询问且不阻塞”。
+
+## P1：Evidence V2 UNRESOLVED 真实归因基线
+
+- Runtime 已具备内部共识归因记录：保留公开 reason code，并把共识型 `UNRESOLVED` 细分为
+  `UNKNOWN_PRESENT`、`VERDICT_MISMATCH`、`EVIDENCE_SET_MISMATCH` 和 `NO_CONFIRMED`；同时记录
+  evaluation 数、每项 event 数、激活方法数和 package 总方法数。归因数据只存在于 execution
+  records，不进入 MCP、REST、Case 或 `MethodsTerminalProjectionV2`。
+- `tools/methods-consensus-attribution-report.py` 会从 `methods-state-v2.json` 统计全部公开终态原因，
+  并从 `methods-consensus-attribution-v2.json` 统计共识子因和规模分布。当前确定性验收样本刻意让
+  四个子因各出现 1 次，因此样本内各占 25%；这是覆盖证明，不是生产流量结论，不能据此放松共识
+  或实施部分重叠 event 的新语义。
+- 下一步要在 P1/P2 真实模型认证或同身份生产运行中收集新的 execution records，再按 reason、子因、
+  N、每项 event 数和激活率联合判断主因。若 `EVIDENCE_SET_MISMATCH` 主导，再单独评估证据交集规则；
+  若 `INCOMPLETE_EVALUATION`、`NO_MATCHING_METHOD_EVIDENCE` 或 `*_SEMANTIC_INVALID` 主导，则分别处理
+  UNKNOWN 全局门、marker 激活精度或模型输出合同，不能用放松共识替代。
 
 ## P1：日志抑制、限流与采样规则
 
