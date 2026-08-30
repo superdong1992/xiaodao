@@ -30,13 +30,16 @@ import {
   packageTreeIdentity,
   sameDockerRuntimeIdentity,
 } from "./release-inputs.mjs";
-import { isCompleteUsage, sumUsage, TOKEN_USAGE_FORMULA } from "./usage.mjs";
+import { isCompleteUsage, sumUsage, TOKEN_USAGE_FORMULA, zeroUsage } from "./usage.mjs";
 import {
   discoverReleaseCaseRoot,
   loadReleaseCaseInputs,
   loadReleaseCaseOracle,
 } from "./release-case.mjs";
-import { validateMethodsGroundingExecutionRecord } from "./methods-oracle.mjs";
+import {
+  METHODS_V2_CAPTURED_FILES,
+  validateMethodsV2ExecutionRecords,
+} from "./methods-oracle.mjs";
 import {
   buildIsolatedAgentEnvironment,
   ISOLATED_AGENT_CLAUDE_OUTPUT_TOKEN_KEY,
@@ -48,6 +51,7 @@ import {
   SKILL_GENERATION_TRACE_SCHEMA_VERSION,
   validSkillGenerationTraceAuditReceipt,
 } from "../runtime-support/isolated-agent-tool-audit.mjs";
+import { projectEvidenceV2ProviderTerminalFailure } from "../runtime-support/evidence-v2-provider-terminal.mjs";
 import {
   auditNoSecretLeak,
   buildPosthocBudgetReceipt,
@@ -89,7 +93,23 @@ import {
 import {
   CLAUDE_DEEPSEEK_E2E_CALLS,
   CLAUDE_DEEPSEEK_METHODS_CALLS,
+  CLAUDE_DEEPSEEK_MODEL_CERT_ROLE_POOL_USD,
+  validateClaudeDeepseekRoleReceipt,
 } from "../quick-validation/claude-deepseek/runtime/claude-deepseek-contract.mjs";
+import {
+  buildEvidenceV2CoreVerdict,
+  EVIDENCE_V2_CORE_RECEIPT,
+} from "../../validation/evidence-v2-core.mjs";
+import {
+  buildEvidenceV2ModelCert,
+  buildEvidenceV2ReleaseVerdict,
+  EVIDENCE_V2_CORE_VERDICT_PATH,
+  EVIDENCE_V2_MODEL_CERT_FILENAME,
+  EVIDENCE_V2_MODEL_CERT_RECEIPT,
+  EVIDENCE_V2_RELEASE_VERDICT_FILENAME,
+  validateEvidenceV2ModelCert,
+} from "../../validation/evidence-v2-certification.mjs";
+import { validateEvidenceV2ReleaseScenarioGraph } from "../../validation/evidence-v2-scenario-oracle.mjs";
 
 const LINUX_CLIENT_BROWSER_RUNNER_RELATIVE = "tools/test-flow/runtime-support/linux_client_browser_runner.py";
 const LINUX_CLIENT_BROWSER_ARGUMENT_PROFILE = "chrome-headless-shell-for-testing-local-v1";
@@ -822,6 +842,31 @@ function generatedSkillBoundary(context) {
   return { ...receipt, generation_receipt_sha256: sha256File(receiptPath) };
 }
 
+function generatedProductionRegistrationRoot(context) {
+  const generated = generatedSkillBoundary(context);
+  const root = path.join(
+    context.attemptRoot,
+    "payload", "stages", "real.skill-generation", "gates", "real.agent.skill-generation",
+    "generated-skill", generated.registration_id,
+  );
+  const metadata = fs.statSync(root);
+  if (!metadata.isDirectory()) throw new Error("EVIDENCE_V2_SHARED_REGISTRATION_MISSING");
+  for (const name of ["registration-template.json", "package"]) {
+    if (!fs.existsSync(path.join(root, name))) throw new Error("EVIDENCE_V2_SHARED_REGISTRATION_INVALID");
+  }
+  return root;
+}
+
+export function evidenceV2ProviderRuntimeInputs(context) {
+  return Object.freeze({
+    scenario: "multiple-rpc-timeouts",
+    sourceRoot: context.sourceSnapshotRoot,
+    sourceSnapshotDigest: context.sourceSnapshotDigest,
+    coreVerdictPath: path.join(context.attemptRoot, ...EVIDENCE_V2_CORE_VERDICT_PATH.split("/")),
+    registrationRoot: generatedProductionRegistrationRoot(context),
+  });
+}
+
 function uniqueStrings(value, code) {
   if (!Array.isArray(value)
     || value.some((item) => typeof item !== "string" || item.length === 0)
@@ -832,6 +877,16 @@ function uniqueStrings(value, code) {
 function uniqueSortedStrings(value, code) {
   uniqueStrings(value, code);
   return [...value].sort();
+}
+
+function orderedSubsequence(values, sequence) {
+  let cursor = 0;
+  for (const value of values) {
+    const index = sequence.indexOf(value, cursor);
+    if (index < 0) return false;
+    cursor = index + 1;
+  }
+  return true;
 }
 
 function exactDirectory(directory, expectedNames) {
@@ -845,6 +900,27 @@ function exactDirectory(directory, expectedNames) {
   if (!samePath || canonicalJson(fs.readdirSync(directory).sort()) !== canonicalJson([...expectedNames].sort())) {
     throw new Error("GENERATED_METHODS_DIRECTORY_INVALID");
   }
+}
+
+export function validateGeneratedMethodsScenarioOracle(scenarioOracle) {
+  if (scenarioOracle?.oracle?.expected_status !== "RESOLVED") {
+    throw new Error("GENERATED_METHODS_SCENARIO_STATUS_INVALID");
+  }
+  const verdicts = scenarioOracle.oracle.expected_method_verdicts;
+  if (!Array.isArray(verdicts) || verdicts.length === 0
+    || verdicts.some((item) => item === null || typeof item !== "object" || Array.isArray(item)
+      || canonicalJson(Object.keys(item).sort()) !== canonicalJson(["semantic_id", "verdict"])
+      || typeof item.semantic_id !== "string" || item.semantic_id.length === 0
+      || !["CONFIRMED", "REJECTED"].includes(item.verdict))
+    || verdicts.length !== new Set(verdicts.map((item) => item.semantic_id)).size
+    || !verdicts.some((item) => item.verdict === "CONFIRMED")) {
+    throw new Error("GENERATED_METHODS_METHOD_VERDICTS_INVALID");
+  }
+  return scenarioOracle.oracle;
+}
+
+export function exactGeneratedEvidenceMarker(declared, required) {
+  return declared === required;
 }
 
 function generatedMethodsExpectation(context, generatedSkill, inputs, gateOracle, scenarioOracle) {
@@ -913,80 +989,128 @@ function generatedMethodsExpectation(context, generatedSkill, inputs, gateOracle
     || methods.methods.length === 0) {
     throw new Error("GENERATED_METHODS_DOCUMENT_INVALID");
   }
+  const methodFields = ["activation_markers", "evidence_markers", "id", "priority", "reference", "title"];
+  methods.methods.forEach((method, index) => {
+    if (method === null || typeof method !== "object" || Array.isArray(method)
+      || canonicalJson(Object.keys(method).sort()) !== canonicalJson(methodFields)
+      || !componentId.test(method.id ?? "")
+      || typeof method.title !== "string" || method.title.trim().length === 0
+      || typeof method.reference !== "string" || !method.reference.startsWith("references/")
+      || !Number.isSafeInteger(method.priority) || method.priority !== index + 1) {
+      throw new Error("GENERATED_METHODS_METHOD_FIELDS_INVALID");
+    }
+    const evidenceMarkers = uniqueStrings(method.evidence_markers, "GENERATED_METHODS_MARKERS_INVALID");
+    const activationMarkers = uniqueStrings(method.activation_markers, "GENERATED_METHODS_ACTIVATION_MARKERS_INVALID");
+    if (evidenceMarkers.length === 0 || activationMarkers.length === 0
+      || !orderedSubsequence(activationMarkers, evidenceMarkers)) {
+      throw new Error("GENERATED_METHODS_ACTIVATION_MARKERS_INVALID");
+    }
+  });
   const knownMethodIds = methods.methods.map((method) => method?.id);
   uniqueSortedStrings(knownMethodIds, "GENERATED_METHODS_IDS_INVALID");
   if (knownMethodIds.some((methodId) => !componentId.test(methodId))) throw new Error("GENERATED_METHODS_IDS_INVALID");
 
   const generatedMethods = expectedPackage.method_marker_sets.map((semantic) => {
     const semanticMarkers = uniqueSortedStrings(semantic.all_markers, "GENERATED_METHODS_ORACLE_MARKERS_INVALID");
+    const semanticActivationMarkers = uniqueStrings(semantic.activation_markers, "GENERATED_METHODS_ORACLE_ACTIVATION_MARKERS_INVALID");
     const matches = methods.methods.filter((method) => (
       canonicalJson(uniqueSortedStrings(method?.evidence_markers, "GENERATED_METHODS_MARKERS_INVALID")) === canonicalJson(semanticMarkers)
+      && canonicalJson(method.activation_markers) === canonicalJson(semanticActivationMarkers)
     ));
     if (matches.length !== 1) throw new Error("GENERATED_METHODS_SEMANTIC_MAPPING_INVALID");
-    return { markers: semanticMarkers, method_id: matches[0].id };
+    return {
+      semantic_id: semantic.semantic_id,
+      markers: semanticMarkers,
+      activation_markers: semanticActivationMarkers,
+      method_id: matches[0].id,
+    };
   });
   if (generatedMethods.length !== methods.methods.length
     || new Set(generatedMethods.map((entry) => entry.method_id)).size !== methods.methods.length) {
     throw new Error("GENERATED_METHODS_SET_DRIFT");
   }
+  validateGeneratedMethodsScenarioOracle(scenarioOracle);
 
-  const confirmedMethods = scenarioOracle.oracle.required_confirmed_marker_groups.map((group) => {
-    const requiredMarkers = uniqueSortedStrings(group, "GENERATED_METHODS_CONFIRMED_MARKERS_INVALID");
-    const candidates = generatedMethods.filter((entry) => requiredMarkers.every((marker) => (
-      entry.markers.some((declared) => declared.includes(marker))
-    )));
-    if (candidates.length === 0) throw new Error("GENERATED_METHODS_CONFIRMED_MAPPING_INVALID");
-    const minimumMarkerCount = Math.min(...candidates.map((entry) => entry.markers.length));
-    const minimal = candidates.filter((entry) => entry.markers.length === minimumMarkerCount);
-    if (minimal.length !== 1) throw new Error("GENERATED_METHODS_CONFIRMED_MAPPING_AMBIGUOUS");
-    return minimal[0].method_id;
+  const generatedBySemanticId = new Map(generatedMethods.map((entry) => [entry.semantic_id, entry]));
+  const semanticVerdicts = scenarioOracle.oracle.expected_method_verdicts.map((item) => {
+    const entry = generatedBySemanticId.get(item.semantic_id);
+    if (!entry) throw new Error("GENERATED_METHODS_METHOD_VERDICT_MAPPING_INVALID");
+    return { method_id: entry.method_id, verdict: item.verdict };
   });
-  if (confirmedMethods.length !== new Set(confirmedMethods).size) {
-    throw new Error("GENERATED_METHODS_CONFIRMED_MAPPING_DUPLICATE");
-  }
-  return { confirmedMethods, knownMethodIds };
+  if (semanticVerdicts.length !== generatedMethods.length) throw new Error("GENERATED_METHODS_METHOD_VERDICT_COVERAGE_INVALID");
+  const methodCards = methods.methods
+    .map((method) => ({
+      id: method.id,
+      priority: method.priority,
+      evidence_markers: [...method.evidence_markers],
+      activation_markers: [...method.activation_markers],
+    }))
+    .sort((left, right) => left.priority - right.priority || left.id.localeCompare(right.id));
+  const verdictByMethodId = new Map(semanticVerdicts.map((item) => [item.method_id, item.verdict]));
+  const methodVerdicts = methodCards.map((method) => ({ method_id: method.id, verdict: verdictByMethodId.get(method.id) }));
+  const orderedConfirmedMethods = methodVerdicts.filter((item) => item.verdict === "CONFIRMED").map((item) => item.method_id);
+  const requiredEvidenceIdentities = scenarioOracle.oracle.required_evidence_identities.map((identity) => {
+    const entry = generatedBySemanticId.get(identity.semantic_id);
+    if (!entry || !entry.markers.some((marker) => exactGeneratedEvidenceMarker(marker, identity.marker))) {
+      throw new Error("GENERATED_METHODS_EVIDENCE_IDENTITY_MAPPING_INVALID");
+    }
+    return {
+      method_id: entry.method_id,
+      marker: identity.marker,
+      identity_tokens: uniqueSortedStrings(identity.identity_tokens, "GENERATED_METHODS_EVIDENCE_IDENTITY_INVALID"),
+    };
+  });
+  return {
+    confirmedMethods: orderedConfirmedMethods,
+    methodVerdicts,
+    methodCards,
+    methods,
+    requiredEvidenceIdentities,
+  };
 }
 
-export function validMethodsGroundingOracleEvidence(context, receipt, generatedSkill) {
+export function validMethodsV2OracleEvidence(context, receipt, generatedSkill) {
   try {
     const caseRoot = discoverReleaseCaseRoot(path.join(context.repoRoot, "tests", "cases", "release"));
     const inputs = loadReleaseCaseInputs(caseRoot);
     const gateOracle = loadReleaseCaseOracle(caseRoot);
     const scenario = inputs.scenarios.find((item) => item.scenario_id === inputs.journey_scenario);
     const scenarioOracle = gateOracle.scenarios.find((item) => item.scenario_id === inputs.journey_scenario);
-    if (!scenario || !scenarioOracle || typeof receipt?.methods_grounding?.diagnosis_job_id !== "string") return false;
-    const diagnosisJobIds = [...new Set((receipt.invocations ?? [])
-      .filter((invocation) => invocation?.job_type === "DIAGNOSE")
-      .map((invocation) => invocation?.job_id))];
-    if (diagnosisJobIds.length !== 1
-      || diagnosisJobIds[0] !== receipt.methods_grounding.diagnosis_job_id) return false;
+    if (!scenario || !scenarioOracle || receipt?.methods_v2?.schema_version !== 2) return false;
     const methodsExpectation = generatedMethodsExpectation(context, generatedSkill, inputs, gateOracle, scenarioOracle);
     const stageRoot = path.join(context.attemptRoot, "payload", "stages", "journey.cross-job.diagnose");
-    const validated = validateMethodsGroundingExecutionRecord({
-      jobBytes: fs.readFileSync(path.join(stageRoot, "methods-diagnose-job.json")),
-      auditBytes: fs.readFileSync(path.join(stageRoot, "methods-grounding-audit.json")),
-      logparseReceiptBytes: fs.readFileSync(path.join(stageRoot, "methods-logparse-receipt.json")),
+    const files = Object.fromEntries(Object.entries(METHODS_V2_CAPTURED_FILES).map(([key, filename]) => (
+      [key, fs.readFileSync(path.join(stageRoot, filename))]
+    )));
+    const reviewerOutcome = JSON.parse(files.reviewer_outcome.toString("utf8"));
+    validateEvidenceV2ReleaseScenarioGraph({
+      sourceRoot: context.repoRoot,
+      methods: methodsExpectation.methods,
+      graph: JSON.parse(files.evidence_graph.toString("utf8")),
+      publicMethodsResult: reviewerOutcome.methods_terminal_projection,
+    });
+    const validated = validateMethodsV2ExecutionRecords({
+      files,
+      invocations: (receipt.invocations ?? []).filter((invocation) => ["DIAGNOSE", "REVIEW"].includes(invocation?.job_type)),
+      publicMethodsResult: reviewerOutcome.methods_terminal_projection,
       expected: {
-        diagnosis_job_id: receipt.methods_grounding.diagnosis_job_id,
-        case_id: receipt.methods_grounding.case_id,
+        source_job_id: receipt.methods_v2.source_job_id,
+        reviewer_job_id: receipt.methods_v2.reviewer_job_id,
+        case_id: receipt.methods_v2.case_id,
         skill_ref: {
           id: inputs.product_registration.runtime_ref_id,
           version: inputs.product_registration.version,
           content_hash: generatedSkill.combined_sha256,
         },
-        logparse_product: inputs.product_registration.logparse_product,
-        registration_id: generatedSkill.registration_id,
-        registration_sha256: generatedSkill.registration_sha256,
-        package_tree_sha256: generatedSkill.package_tree_sha256,
-        combined_sha256: generatedSkill.combined_sha256,
-        status: scenarioOracle.oracle.expected_status,
-        confirmed_methods: methodsExpectation.confirmedMethods,
-        known_method_ids: methodsExpectation.knownMethodIds,
-        source_ids: scenario.driver.attachment_anchor_names,
-        evidence_count: scenarioOracle.oracle.required_evidence_identities.length,
+        source_ids: [...scenario.driver.attachment_anchor_names].sort(),
+        method_cards: methodsExpectation.methodCards,
+        loaded_method_ids: methodsExpectation.methodCards.map((method) => method.id),
+        method_verdicts: methodsExpectation.methodVerdicts,
+        confirmed_method_ids: methodsExpectation.confirmedMethods,
+        required_evidence_identities: methodsExpectation.requiredEvidenceIdentities,
       },
     });
-    return sameIdentity(validated, receipt.methods_grounding);
+    return sameIdentity(validated, receipt.methods_v2);
   } catch {
     return false;
   }
@@ -1028,6 +1152,140 @@ export function materializePytestSummary(stageEvidence) {
   const summary = parseJUnitSummary(junitPath);
   writeJsonSync(path.join(stageEvidence, "pytest-summary.json"), summary);
   return summary;
+}
+
+export function materializeEvidenceV2CoreVerdict({
+  sourceSnapshotDigest,
+  sourceSnapshotRoot,
+  gateRoot: evidenceRoot,
+}) {
+  const verdict = buildEvidenceV2CoreVerdict({
+    sourceSnapshotDigest,
+    sourceRoot: sourceSnapshotRoot,
+    gateRoot: evidenceRoot,
+  });
+  writeJsonSync(path.join(evidenceRoot, "core-verdict.json"), verdict);
+  return verdict;
+}
+
+export function materializeEvidenceV2ModelCert({
+  certificationTarget,
+  sourceSnapshotDigest,
+  sourceSnapshotRoot,
+  attemptRoot,
+  gateRoot: evidenceRoot,
+}) {
+  const coreVerdictPath = path.join(
+    attemptRoot,
+    ...EVIDENCE_V2_CORE_VERDICT_PATH.split("/"),
+  );
+  const cert = buildEvidenceV2ModelCert({
+    certificationTarget,
+    sourceSnapshotDigest,
+    sourceRoot: sourceSnapshotRoot,
+    coreVerdictPath,
+    certRoot: evidenceRoot,
+  });
+  writeJsonSync(path.join(evidenceRoot, EVIDENCE_V2_MODEL_CERT_FILENAME), cert);
+  return cert;
+}
+
+export function materializeEvidenceV2ReleaseVerdict({
+  sourceSnapshotDigest,
+  sourceSnapshotRoot,
+  artifactRoot,
+  coreVerdictPath,
+  p1ModelCertPath,
+  p2ModelCertPath,
+  outputRoot = artifactRoot,
+}) {
+  const verdict = buildEvidenceV2ReleaseVerdict({
+    sourceSnapshotDigest,
+    sourceRoot: sourceSnapshotRoot,
+    artifactRoot,
+    coreVerdictPath,
+    p1ModelCertPath,
+    p2ModelCertPath,
+  });
+  writeJsonSync(
+    path.join(outputRoot, EVIDENCE_V2_RELEASE_VERDICT_FILENAME),
+    verdict,
+  );
+  return verdict;
+}
+
+export function attachEvidenceV2ModelCert(result, {
+  context,
+  gate,
+  gateRoot: evidenceRoot,
+}) {
+  if (result.status !== "PASS" || gate.result_receipt !== EVIDENCE_V2_MODEL_CERT_RECEIPT) return result;
+  const certPath = path.join(evidenceRoot, EVIDENCE_V2_MODEL_CERT_FILENAME);
+  if (!fs.existsSync(certPath)) {
+    return { ...result, status: "ERROR", failure_domain: "HARNESS", code: "EVIDENCE_V2_MODEL_CERT_MISSING" };
+  }
+  try {
+    const modelCert = JSON.parse(fs.readFileSync(certPath, "utf8"));
+    const coreVerdictPath = path.join(context.attemptRoot, ...EVIDENCE_V2_CORE_VERDICT_PATH.split("/"));
+    validateEvidenceV2ModelCert(modelCert, {
+      certificationTarget: gate.certification_target,
+      sourceSnapshotDigest: context.sourceSnapshotDigest,
+      sourceRoot: context.sourceSnapshotRoot,
+      coreVerdictPath,
+      certRoot: evidenceRoot,
+    });
+    return { ...result, model_cert: modelCert };
+  } catch (error) {
+    return {
+      ...result,
+      status: "ERROR",
+      failure_domain: "HARNESS",
+      code: error?.code ?? "EVIDENCE_V2_MODEL_CERT_INVALID",
+    };
+  }
+}
+
+function evidenceV2ReleaseVerdict(context) {
+  const coreVerdictPath = path.join(context.attemptRoot, ...EVIDENCE_V2_CORE_VERDICT_PATH.split("/"));
+  const certPath = (stageId) => path.join(
+    context.attemptRoot,
+    "payload", "stages", stageId, "gates", stageId,
+    EVIDENCE_V2_MODEL_CERT_FILENAME,
+  );
+  try {
+    const verdict = materializeEvidenceV2ReleaseVerdict({
+      sourceSnapshotDigest: context.sourceSnapshotDigest,
+      sourceSnapshotRoot: context.sourceSnapshotRoot,
+      artifactRoot: context.attemptRoot,
+      coreVerdictPath,
+      p1ModelCertPath: certPath("real.macos-claude-deepseek-e2e"),
+      p2ModelCertPath: certPath("real.macos-codex-luna-e2e"),
+      outputRoot: context.gateRoot,
+    });
+    return {
+      status: "PASS",
+      failure_domain: null,
+      code: null,
+      elapsed_seconds: 0,
+      invocations: [],
+      usage_complete: true,
+      adapter_receipt: {
+        schema_version: verdict.schema_version,
+        receipt_type: verdict.receipt_type,
+        source_snapshot_digest: verdict.source_snapshot_digest,
+        model_cert_targets: verdict.model_certs.map((cert) => cert.certification_target),
+      },
+    };
+  } catch (error) {
+    return {
+      status: "ERROR",
+      failure_domain: "HARNESS",
+      code: error?.code ?? "EVIDENCE_V2_RELEASE_VERDICT_INVALID",
+      elapsed_seconds: 0,
+      invocations: [],
+      usage_complete: true,
+    };
+  }
 }
 
 export function evaluatePytestSummary(summary, { minPassed = 1, skipPolicy = "forbid-all-skipped" } = {}) {
@@ -1262,9 +1520,27 @@ function parseTapSummary(filePath) {
   return { schema_version: 2, tests, passed, failed, skipped };
 }
 
+export function evaluateNodeTestSummary(summary, gate) {
+  if (summary.passed < gate.min_passed || summary.failed > 0) {
+    return { status: "FAIL", failure_domain: "HARNESS", code: "NODE_TEST_MIN_PASSED_NOT_MET" };
+  }
+  if (gate.python_driver === true && summary.skipped > 0) {
+    return { status: "FAIL", failure_domain: "HARNESS", code: "NODE_TEST_PYTHON_DRIVER_SKIPPED" };
+  }
+  return { status: "PASS", failure_domain: null, code: null };
+}
+
 async function nodeTestAction(context, stage, gate) {
   const files = nodeTestFiles(context.repoRoot, gate);
   if (files.length === 0) return { status: "ERROR", failure_domain: "HARNESS", code: "NODE_TEST_SELECTION_EMPTY", elapsed_seconds: 0 };
+  let environment = {};
+  if (gate.python_driver === true) {
+    const runtime = pythonRuntime(context.repoRoot);
+    if (runtime === null || runtime.interpreterPrefix.length !== 0) {
+      return { status: "BLOCKED", failure_domain: "INFRA", code: "NODE_TEST_PYTHON_DRIVER_MISSING", elapsed_seconds: 0 };
+    }
+    environment = { TEST_FLOW_QUICK_PYTHON: runtime.command };
+  }
   const result = await runProcess({
     repoRoot: context.repoRoot,
     attemptRoot: context.attemptRoot,
@@ -1272,6 +1548,7 @@ async function nodeTestAction(context, stage, gate) {
     command: process.execPath,
     args: ["--test", "--test-reporter=tap", ...files],
     cwd: context.repoRoot,
+    env: environment,
     hardTimeoutSeconds: stage.timeout_seconds,
     noProgressSeconds: null,
     rawLogLimitBytes: context.policies.raw_log_file_limit_bytes,
@@ -1288,8 +1565,8 @@ async function nodeTestAction(context, stage, gate) {
   try { summary = parseTapSummary(tapPath); } catch (error) {
     return { ...result, status: "ERROR", failure_domain: "HARNESS", code: error.message };
   }
-  if (summary.passed < gate.min_passed || summary.failed > 0) return { ...result, status: "FAIL", failure_domain: "HARNESS", code: "NODE_TEST_MIN_PASSED_NOT_MET", node_test: summary };
-  return { ...result, failure_domain: null, node_test: summary };
+  const evaluation = evaluateNodeTestSummary(summary, gate);
+  return { ...result, ...evaluation, node_test: summary };
 }
 
 async function repositoryCheck(context, stage, gate) {
@@ -2172,6 +2449,13 @@ export function validCodexLunaPassBoundary(bundle, expected) {
     && skill.validator.runtime_policy === "exact-planned-logparse-python-isolated-pre-and-post-v1"
     && Array.isArray(skill.method_ids)
     && skill.method_ids.length > 0
+    && Array.isArray(skill.method_activation_markers)
+    && skill.method_activation_markers.length === skill.method_ids.length
+    && sameIdentity(skill.method_activation_markers.map((item) => item?.method_id), skill.method_ids)
+    && skill.method_activation_markers.every((item) => exactObjectKeys(item, ["method_id", "activation_markers"])
+      && Array.isArray(item.activation_markers) && item.activation_markers.length > 0
+      && item.activation_markers.every((marker) => typeof marker === "string" && marker.length > 0)
+      && item.activation_markers.length === new Set(item.activation_markers).size)
     && skill.durable_package?.path === "generated-skill"
     && skill.durable_package?.tree_sha256 === generatedPackage?.tree_sha256
     && sameIdentity(skill.durable_package?.manifest, generatedPackage?.files);
@@ -2929,19 +3213,23 @@ function materializeMacosCodexInputs({ scratchRoot, codexEntry, codexAuth, plann
 }
 
 function macosCodexInvocationProjection(invocation, hardCaps, invocationClass) {
+  const workflow = `${invocation.role}:${invocation.attempt}`;
+  let usage = null;
+  try { usage = normalizeCodexUsage(invocation.usage); } catch {}
+  const failed = invocation.status === "FAIL";
   return {
     schema_version: 3,
     invocation_id: invocation.invocation_id,
     class: invocationClass,
-    workflow: invocation.phase,
+    workflow,
     effective_model: invocation.model,
     effective_reasoning_effort: invocation.reasoning_effort,
     effective_caps: hardCaps,
-    usage_complete: invocation.terminal === true,
-    usage: codexUsage(invocation.usage),
+    usage_complete: invocation.terminal === true && usage !== null,
+    usage: usage === null ? undefined : codexUsage(usage),
     turns: 1,
-    terminal: { subtype: "success", is_error: false, event: "turn.completed", thread_id: invocation.thread_id ?? null },
-    wrapper_outcome: { schema_version: 1, status: invocation.status, code: null },
+    terminal: { subtype: failed ? "error" : "success", is_error: failed, event: failed ? "turn.failed" : "turn.completed", thread_id: invocation.thread_id ?? null },
+    wrapper_outcome: { schema_version: 1, status: invocation.status, code: invocation.failure_code ?? null },
     hard_cap_enforcement: {
       calls: "exact-no-retry",
       wall: "wrapper-process-watchdog",
@@ -2957,6 +3245,7 @@ async function runMacosCodexLunaGate(context, stage, { workflow }) {
   ensureDirectory(scratchRoot);
   let staged;
   let pythonEntry;
+  let providerInputs = null;
   try {
     staged = materializeMacosCodexInputs({
       scratchRoot,
@@ -2965,6 +3254,7 @@ async function runMacosCodexLunaGate(context, stage, { workflow }) {
       planned: context.plan.release_inputs?.codex,
     });
     pythonEntry = macosCodexPythonEntry(context.repoRoot);
+    if (workflow === "e2e") providerInputs = evidenceV2ProviderRuntimeInputs(context);
   } catch (error) {
     return { status: "BLOCKED", failure_domain: "INFRA", code: String(error?.message ?? "MACOS_CODEX_LUNA_INPUT_INVALID"), elapsed_seconds: 0 };
   }
@@ -2974,18 +3264,18 @@ async function runMacosCodexLunaGate(context, stage, { workflow }) {
     "--codex-entry", staged.stagedEntry,
     "--auth-source", staged.stagedAuth,
     "--python-entry", pythonEntry,
-    "--cache-root", context.options.cacheRoot ?? path.join(context.repoRoot, ".tmp", "test-flow-cache"),
     "--work-root", path.join(scratchRoot, "work"),
     "--private-root", path.join(scratchRoot, "private"),
     "--evidence-root", outputRoot,
     "--usage-root", usageRoot,
     "--run-id", path.basename(context.attemptRoot),
-    "--allow-posthoc-budget",
   ];
   const args = workflow === "methods"
     ? [
       runner,
       ...common,
+      "--cache-root", context.options.cacheRoot ?? path.join(context.repoRoot, ".tmp", "test-flow-cache"),
+      "--allow-posthoc-budget",
       "--meta-skill-root", path.join(context.sourceSnapshotRoot, ".agents", "skills", "wiki-to-diagnosis-skill"),
       "--wiki", releaseWikiPath(context.sourceSnapshotRoot),
       "--registration-template", path.join(context.sourceSnapshotRoot, "tests", "cases", "release", "rpc-timeout-anonymized", "registration", "rpc-timeout-methods-v1", "registration-template.json"),
@@ -2994,11 +3284,11 @@ async function runMacosCodexLunaGate(context, stage, { workflow }) {
     : [
       runner,
       ...common,
-      "--source-root", context.sourceSnapshotRoot,
-      "--logparse-root", context.options.logparseSource,
-      "--scenario", context.options.scenario ?? "api-execution-overrun",
-      "--client-skill", path.join(context.sourceSnapshotRoot, "tools", "test-flow", "quick-validation", "codex-luna", "fixtures", "client-skill", "problem-locator-client", "SKILL.md"),
-      "--service-skill", path.join(context.sourceSnapshotRoot, "tools", "test-flow", "quick-validation", "codex-luna", "fixtures", "service-skill", "problem-locator-service-agent", "SKILL.md"),
+      "--source-root", providerInputs.sourceRoot,
+      "--registration-root", providerInputs.registrationRoot,
+      "--source-snapshot-digest", providerInputs.sourceSnapshotDigest,
+      "--core-verdict", providerInputs.coreVerdictPath,
+      "--scenario", providerInputs.scenario,
     ];
   const result = await runProcess({
     repoRoot: context.repoRoot,
@@ -3015,7 +3305,18 @@ async function runMacosCodexLunaGate(context, stage, { workflow }) {
     pollMilliseconds: context.policies.poll_milliseconds,
     progressAllowlistVersion: context.policies.progress_allowlist_version,
   });
-  if (result.status !== "PASS") return { ...result, failure_domain: result.status === "ERROR" ? "HARNESS" : "CONTRACT", code: result.termination?.trigger ?? "MACOS_CODEX_LUNA_RUNNER_FAILED" };
+  if (result.status !== "PASS") {
+    return providerRunnerFailureResult({
+      provider: "codex-luna",
+      result,
+      attemptRoot: context.attemptRoot,
+      outputRoot,
+      usageRoot,
+      planStage: context.planStage,
+      invocationClass: workflow === "methods" ? "codex-luna-methods-bootstrap" : "codex-luna-macos-e2e",
+      fallbackCode: "MACOS_CODEX_LUNA_RUNNER_FAILED",
+    });
+  }
   let gate;
   let invocationLedger;
   try {
@@ -3024,8 +3325,10 @@ async function runMacosCodexLunaGate(context, stage, { workflow }) {
   } catch {
     return { ...result, status: "ERROR", failure_domain: "HARNESS", code: "MACOS_CODEX_LUNA_GATE_RECEIPT_INVALID" };
   }
-  const expectedCalls = context.planStage.invocation_caps.reduce((sum, declaration) => sum + declaration.max_count, 0);
-  if (gate.status !== "PASS" || invocationLedger.status !== "PASS" || invocationLedger.invocations?.length !== expectedCalls) {
+  const ledgerValid = workflow === "methods"
+    ? invocationLedger.status === "PASS" && invocationLedger.invocations?.length === context.planStage.invocation_caps.reduce((sum, declaration) => sum + declaration.max_count, 0)
+    : validEvidenceV2ProviderInvocationLedger(context.planStage, invocationLedger);
+  if (gate.status !== "PASS" || !ledgerValid) {
     return { ...result, status: "ERROR", failure_domain: "HARNESS", code: "MACOS_CODEX_LUNA_GATE_RECEIPT_INVALID" };
   }
   const invocationClass = workflow === "methods" ? "codex-luna-methods-bootstrap" : "codex-luna-macos-e2e";
@@ -3043,19 +3346,33 @@ async function runMacosCodexLunaGate(context, stage, { workflow }) {
 }
 
 function claudeDeepseekInvocationProjection(invocation, hardCaps, invocationClass) {
+  const attempt = invocation.evaluation_attempt ?? invocation.attempt;
+  const failed = invocation.status === "FAIL";
+  const usageComplete = invocation.terminal === true && isCompleteUsage(invocation.usage);
+  const observedTerminal = invocation.provider_terminal;
+  const terminal = observedTerminal !== null && typeof observedTerminal === "object"
+    ? {
+        subtype: typeof observedTerminal.subtype === "string" ? observedTerminal.subtype : (failed ? "error" : "success"),
+        is_error: typeof observedTerminal.is_error === "boolean" ? observedTerminal.is_error : failed,
+        stop_reason: observedTerminal.stop_reason ?? null,
+        exit_code: observedTerminal.exit_code ?? null,
+        signal: observedTerminal.signal ?? null,
+      }
+    : { subtype: failed ? "error" : "success", is_error: failed };
   return {
     schema_version: 3,
     invocation_id: invocation.invocation_id,
     class: invocationClass,
-    workflow: invocation.phase,
+    workflow: `${invocation.role}:${attempt}`,
     effective_model: invocation.model,
     effective_caps: hardCaps,
-    usage_complete: invocation.terminal === true,
-    usage: invocation.usage,
+    usage_complete: usageComplete,
+    usage: usageComplete ? invocation.usage : undefined,
     environment_policy: invocation.environment_policy,
     turns: invocation.turns,
-    terminal: { subtype: "success", is_error: false },
-    wrapper_outcome: { schema_version: 1, status: invocation.status, code: null },
+    terminal,
+    provider_budget: invocation.budget ?? null,
+    wrapper_outcome: { schema_version: 1, status: invocation.status, code: invocation.failure_code ?? null },
     hard_cap_enforcement: {
       turns: "claude-cli",
       cost_usd: "claude-cli",
@@ -3069,10 +3386,363 @@ function claudeDeepseekInvocationProjection(invocation, hardCaps, invocationClas
 
 export function validClaudeDeepseekInvocationLedger(planStage, ledger) {
   if (!Array.isArray(planStage?.invocation_caps) || ledger?.status !== "PASS" || !Array.isArray(ledger.invocations)) return false;
-  if (!planStage.invocation_caps.every((declaration) => Array.isArray(declaration.phases) && declaration.min_count === declaration.phases.length && declaration.max_count === declaration.phases.length)) return false;
-  const phases = planStage.invocation_caps.flatMap((declaration) => Array.isArray(declaration.phases) ? declaration.phases : []);
-  return ledger.invocations.length === phases.length
-    && ledger.invocations.every((invocation, index) => invocation?.status === "PASS" && invocation?.terminal === true && invocation.phase === phases[index]);
+  if (planStage.invocation_caps.length !== 1) return false;
+  const declaration = planStage.invocation_caps[0];
+  if (!Array.isArray(declaration.phases)) return false;
+  if (declaration.class === "claude-deepseek-registration-generation") {
+    return declaration.min_count === declaration.phases.length
+      && declaration.max_count === declaration.phases.length
+      && ledger.invocations.length === declaration.phases.length
+      && ledger.invocations.every((invocation, index) => invocation?.status === "PASS" && invocation?.terminal === true && invocation.phase === declaration.phases[index]);
+  }
+  return validEvidenceV2ProviderInvocationLedger(planStage, ledger)
+    && ledger.invocations.every((invocation) => validProviderInvocationReceipt(invocation, {
+      role: invocation.role,
+      attempt: providerInvocationAttempt(invocation),
+    }, "claude-deepseek", planStage.hard_caps))
+    && validDeepseekReceiptSequence(ledger.invocations, planStage.hard_caps);
+}
+
+export function validEvidenceV2ProviderInvocationLedger(planStage, ledger) {
+  if (!Array.isArray(planStage?.invocation_caps) || planStage.invocation_caps.length !== 1 || ledger?.status !== "PASS" || !Array.isArray(ledger.invocations)) return false;
+  const declaration = planStage.invocation_caps[0];
+  if (declaration.min_count !== 2 || declaration.max_count !== 4 || declaration.normal_count !== 2 || declaration.repair_max_count !== 2) return false;
+  if (ledger.invocations.length < declaration.min_count || ledger.invocations.length > declaration.max_count) return false;
+  const topology = ledger.invocations.map((invocation) => {
+    const attempt = invocation?.evaluation_attempt ?? invocation?.attempt;
+    return `${invocation?.role}:${attempt}`;
+  }).join(",");
+  const legal = new Set([
+    "SPECIALIST:PRIMARY,REVIEWER:PRIMARY",
+    "SPECIALIST:PRIMARY,SPECIALIST:REPAIR,REVIEWER:PRIMARY",
+    "SPECIALIST:PRIMARY,REVIEWER:PRIMARY,REVIEWER:REPAIR",
+    "SPECIALIST:PRIMARY,SPECIALIST:REPAIR,REVIEWER:PRIMARY,REVIEWER:REPAIR",
+  ]);
+  return legal.has(topology)
+    && new Set(ledger.invocations.map((invocation) => invocation?.invocation_id)).size === ledger.invocations.length
+    && ledger.invocations.every((invocation) => typeof invocation?.invocation_id === "string" && invocation.invocation_id.length > 0 && invocation?.status === "PASS" && invocation?.terminal === true);
+}
+
+const PROVIDER_ROLE_RECEIPTS = Object.freeze([
+  Object.freeze({ name: "specialist-primary.json", role: "SPECIALIST", attempt: "PRIMARY" }),
+  Object.freeze({ name: "specialist-repair.json", role: "SPECIALIST", attempt: "REPAIR" }),
+  Object.freeze({ name: "reviewer-primary.json", role: "REVIEWER", attempt: "PRIMARY" }),
+  Object.freeze({ name: "reviewer-repair.json", role: "REVIEWER", attempt: "REPAIR" }),
+]);
+
+const PROVIDER_ROLE_SEQUENCE_PREFIXES = new Set([
+  "SPECIALIST:PRIMARY",
+  "SPECIALIST:PRIMARY,SPECIALIST:REPAIR",
+  "SPECIALIST:PRIMARY,REVIEWER:PRIMARY",
+  "SPECIALIST:PRIMARY,SPECIALIST:REPAIR,REVIEWER:PRIMARY",
+  "SPECIALIST:PRIMARY,REVIEWER:PRIMARY,REVIEWER:REPAIR",
+  "SPECIALIST:PRIMARY,SPECIALIST:REPAIR,REVIEWER:PRIMARY,REVIEWER:REPAIR",
+]);
+
+function exactAttemptPath(attemptRoot, relativePath) {
+  if (typeof relativePath !== "string" || relativePath.length === 0 || path.isAbsolute(relativePath)) return null;
+  const root = path.resolve(attemptRoot);
+  const target = path.resolve(root, ...relativePath.split("/"));
+  return target.startsWith(`${root}${path.sep}`) ? target : null;
+}
+
+export function providerRunnerFailureCode({ result, attemptRoot, fallbackCode }) {
+  if (typeof result?.termination?.trigger === "string" && result.termination.trigger.length > 0) {
+    return result.termination.trigger;
+  }
+  if (result?.stderr_truncated === true) return fallbackCode;
+  const stderrPath = exactAttemptPath(attemptRoot, result?.stderr_path);
+  if (stderrPath === null || !fs.existsSync(stderrPath)) return fallbackCode;
+  try {
+    const parsed = JSON.parse(fs.readFileSync(stderrPath, "utf8").trim());
+    const keys = Object.keys(parsed ?? {}).sort();
+    if (keys.join("\0") !== ["code", "message", "schema_version", "status"].join("\0")) return fallbackCode;
+    if (parsed.schema_version !== 1 || parsed.status !== "FAIL") return fallbackCode;
+    if (!/^[A-Z][A-Z0-9_]*$/u.test(parsed.code ?? "") || typeof parsed.message !== "string" || parsed.message.length === 0) return fallbackCode;
+    return parsed.code;
+  } catch {
+    return fallbackCode;
+  }
+}
+
+function providerInvocationAttempt(invocation) {
+  return invocation?.evaluation_attempt ?? invocation?.attempt;
+}
+
+function roundedUsd(value) {
+  return Math.round(value * 1_000_000) / 1_000_000;
+}
+
+function validDeepseekReceiptSequence(invocations, planCaps) {
+  const primaryCost = {};
+  const roleCost = { SPECIALIST: 0, REVIEWER: 0 };
+  let totalCost = 0;
+  let totalTokens = 0;
+  for (const invocation of invocations) {
+    const attempt = providerInvocationAttempt(invocation);
+    const usage = isCompleteUsage(invocation.usage) ? invocation.usage : null;
+    const expectedPrior = attempt === "PRIMARY" ? 0 : primaryCost[invocation.role];
+    if (!Number.isFinite(expectedPrior) || invocation.budget.prior_cost_usd !== expectedPrior) return false;
+    if (attempt === "PRIMARY" && usage !== null) primaryCost[invocation.role] = usage.cost_usd;
+    if (usage !== null) {
+      roleCost[invocation.role] = roundedUsd(roleCost[invocation.role] + usage.cost_usd);
+      totalCost = roundedUsd(totalCost + usage.cost_usd);
+      totalTokens += usage.total_tokens;
+    }
+    if (invocation.status === "PASS" && roleCost[invocation.role] > CLAUDE_DEEPSEEK_MODEL_CERT_ROLE_POOL_USD) return false;
+  }
+  return !invocations.every((invocation) => invocation.status === "PASS") || (
+    Number.isSafeInteger(planCaps?.max_total_tokens)
+      && Number.isFinite(planCaps?.max_budget_usd)
+      && totalTokens <= planCaps.max_total_tokens
+      && totalCost <= planCaps.max_budget_usd
+  );
+}
+
+function validProviderInvocationReceipt(invocation, expected, provider, planCaps = null) {
+  if (invocation?.schema_version !== 1
+    || !["PASS", "FAIL"].includes(invocation.status)
+    || invocation.terminal !== true
+    || invocation.role !== expected.role
+    || providerInvocationAttempt(invocation) !== expected.attempt
+    || typeof invocation.invocation_id !== "string"
+    || invocation.invocation_id.length === 0) return false;
+  if (provider === "codex-luna") {
+    try {
+      if (invocation.usage !== null && invocation.usage !== undefined) normalizeCodexUsage(invocation.usage);
+      return (invocation.status === "FAIL" || (invocation.usage !== null && invocation.usage !== undefined))
+        && invocation.provider === "openai-codex-app-server"
+        && invocation.attempt === expected.attempt
+        && invocation.repair === (expected.attempt === "REPAIR");
+    } catch {
+      return false;
+    }
+  }
+  if (planCaps === null) return false;
+  try {
+    validateClaudeDeepseekRoleReceipt(invocation, {
+      planCaps,
+      expectedRole: expected.role,
+      expectedAttempt: expected.attempt,
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function validProviderInvocationSequence(invocations) {
+  if (!Array.isArray(invocations) || invocations.length === 0 || invocations.length > PROVIDER_ROLE_RECEIPTS.length) return false;
+  if (new Set(invocations.map((item) => item.invocation_id)).size !== invocations.length) return false;
+  const sequence = invocations.map((item) => `${item.role}:${providerInvocationAttempt(item)}`).join(",");
+  return PROVIDER_ROLE_SEQUENCE_PREFIXES.has(sequence)
+    && invocations.slice(0, -1).every((item) => item.status === "PASS");
+}
+
+function readJsonOrNull(filePath) {
+  try {
+    return JSON.parse(fs.readFileSync(filePath, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+function readProviderRoleReceipts(usageRoot, provider, planCaps = null) {
+  if (!fs.existsSync(usageRoot)) return [];
+  const actualNames = fs.readdirSync(usageRoot).filter((name) => name.endsWith(".json")).sort();
+  const allowedNames = new Set(PROVIDER_ROLE_RECEIPTS.map((item) => item.name));
+  if (actualNames.some((name) => !allowedNames.has(name))) return [];
+  const receipts = [];
+  for (const expected of PROVIDER_ROLE_RECEIPTS) {
+    const receiptPath = path.join(usageRoot, expected.name);
+    if (!fs.existsSync(receiptPath)) continue;
+    const receipt = readJsonOrNull(receiptPath);
+    if (!validProviderInvocationReceipt(receipt, expected, provider, planCaps)) return [];
+    receipts.push(receipt);
+  }
+  return validProviderInvocationSequence(receipts)
+    && (provider !== "claude-deepseek" || validDeepseekReceiptSequence(receipts, planCaps))
+    ? receipts
+    : [];
+}
+
+function modelUsageAggregate(outputRoot) {
+  const receiptPath = path.join(outputRoot, "model-usage.json");
+  if (!fs.existsSync(receiptPath)) return { present: false, complete: false, failure_ledger: false, usage: null };
+  const receipt = readJsonOrNull(receiptPath);
+  const aggregate = receipt?.aggregate;
+  return {
+    present: true,
+    complete: receipt?.usage_complete === true,
+    failure_ledger: canonicalJson(Object.keys(receipt ?? {}).sort()) === canonicalJson([
+      "aggregate", "schema_version", "status", "usage_complete",
+    ]) && receipt.schema_version === 1 && receipt.status === "FAIL",
+    usage: isCompleteUsage(aggregate) ? aggregate : null,
+  };
+}
+
+function validExplicitZeroCallLedger(outputRoot, ledger) {
+  if (canonicalJson(Object.keys(ledger ?? {}).sort()) !== canonicalJson([
+    "invocations", "retry_policy", "schema_version", "status",
+  ])) return false;
+  if (ledger.schema_version !== 1
+    || ledger.status !== "FAIL"
+    || ledger.retry_policy !== "ROLE_PROTOCOL_REPAIR_ONLY"
+    || !Array.isArray(ledger.invocations)
+    || ledger.invocations.length !== 0) return false;
+  const runtimeReceipt = readJsonOrNull(path.join(outputRoot, "runtime-receipt.json"));
+  return runtimeReceipt?.status === "PASS"
+    && runtimeReceipt.execution_mode === "real-model"
+    && runtimeReceipt.production_runtime === "problem_locator.runtime.diagnosis_runtime.DiagnosisRuntime"
+    && runtimeReceipt.model_invocations === 0
+    && Array.isArray(runtimeReceipt.role_attempts)
+    && runtimeReceipt.role_attempts.length === 0
+    && runtimeReceipt.methods_result?.status === "UNRESOLVED"
+    && runtimeReceipt.methods_result?.reason_code === "NO_MATCHING_METHOD_EVIDENCE";
+}
+
+export function collectProviderFailureReceipts({ provider, outputRoot }) {
+  const adapterPath = path.join(outputRoot, "adapter-receipt.json");
+  const runtimePath = path.join(outputRoot, "runtime-receipt.json");
+  if (!fs.existsSync(adapterPath) || !fs.existsSync(runtimePath)) return {};
+  const adapter = readJsonOrNull(adapterPath);
+  const runtimeReceipt = readJsonOrNull(runtimePath);
+  const certificationTarget = provider === "claude-deepseek" ? "P1" : "P2";
+  let expected;
+  try {
+    expected = projectEvidenceV2ProviderTerminalFailure({
+      certificationTarget,
+      methodsResult: runtimeReceipt?.methods_result,
+    });
+  } catch {
+    return {};
+  }
+  if (
+    expected === null
+    || runtimeReceipt?.status !== "PASS"
+    || runtimeReceipt.production_runtime !== "problem_locator.runtime.diagnosis_runtime.DiagnosisRuntime"
+    || Object.entries(expected).some(([key, value]) => canonicalJson(adapter?.[key]) !== canonicalJson(value))
+  ) return {};
+  return {
+    adapter_receipt: {
+      ...adapter,
+      runtime_receipt: {
+        path: "runtime-receipt.json",
+        sha256: sha256File(runtimePath),
+        status: runtimeReceipt.status,
+        production_runtime: runtimeReceipt.production_runtime,
+        methods_status: runtimeReceipt.methods_result.status,
+      },
+    },
+    runtime_receipt: runtimeReceipt,
+  };
+}
+
+function sameUsage(left, right) {
+  return isCompleteUsage(left)
+    && isCompleteUsage(right)
+    && canonicalJson(left) === canonicalJson(right);
+}
+
+function providerAggregateMatches(provider, aggregate, projected) {
+  if (!isCompleteUsage(aggregate) || !isCompleteUsage(projected)) return false;
+  if (provider !== "codex-luna") return sameUsage(aggregate, projected);
+  return [
+    "input_tokens",
+    "output_tokens",
+    "cache_creation_input_tokens",
+    "cache_read_input_tokens",
+    "total_tokens",
+  ].every((field) => aggregate[field] === projected[field]);
+}
+
+export function collectProviderFailureObservability({
+  provider,
+  result,
+  outputRoot,
+  usageRoot,
+  planStage,
+  invocationClass,
+}) {
+  const projection = provider === "codex-luna" ? macosCodexInvocationProjection : claudeDeepseekInvocationProjection;
+  let rawInvocations = [];
+  let explicitZeroCallLedger = false;
+  const ledgerPath = path.join(outputRoot, "model-invocations.json");
+  if (fs.existsSync(ledgerPath)) {
+    const ledger = readJsonOrNull(ledgerPath);
+    const ledgerValid = provider === "claude-deepseek"
+      ? validClaudeDeepseekInvocationLedger(planStage, ledger)
+      : validEvidenceV2ProviderInvocationLedger(planStage, ledger);
+    if (ledgerValid) rawInvocations = ledger.invocations;
+    else if (validExplicitZeroCallLedger(outputRoot, ledger)) explicitZeroCallLedger = true;
+  }
+  if (rawInvocations.length === 0) rawInvocations = readProviderRoleReceipts(usageRoot, provider, planStage.hard_caps);
+  const invocations = rawInvocations.map((invocation) => projection(invocation, planStage.hard_caps, invocationClass));
+  const knownInvocationUsage = invocations
+    .filter((invocation) => invocation.usage_complete === true && isCompleteUsage(invocation.usage))
+    .map((invocation) => invocation.usage);
+  const projectedUsage = knownInvocationUsage.length === invocations.length && invocations.length > 0
+    ? sumUsage(knownInvocationUsage)
+    : null;
+  const knownPartialUsage = knownInvocationUsage.length > 0 ? sumUsage(knownInvocationUsage) : null;
+  const aggregate = modelUsageAggregate(outputRoot);
+  if (projectedUsage !== null) {
+    return {
+      invocations,
+      usage: projectedUsage,
+      usage_complete: aggregate.present && providerAggregateMatches(provider, aggregate.usage, projectedUsage),
+    };
+  }
+  if (invocations.length > 0) {
+    return {
+      invocations,
+      usage: knownPartialUsage ?? aggregate.usage ?? (isCompleteUsage(result?.usage) ? result.usage : undefined),
+      usage_complete: false,
+    };
+  }
+  if (aggregate.usage !== null) {
+    return {
+      invocations: [],
+      usage: aggregate.usage,
+      usage_complete: explicitZeroCallLedger
+        && aggregate.complete
+        && aggregate.failure_ledger
+        && sameUsage(aggregate.usage, zeroUsage()),
+    };
+  }
+  return {
+    invocations: [],
+    usage: isCompleteUsage(result?.usage) ? result.usage : undefined,
+    usage_complete: false,
+  };
+}
+
+export function providerRunnerFailureResult({
+  provider,
+  result,
+  attemptRoot,
+  outputRoot,
+  usageRoot,
+  planStage,
+  invocationClass,
+  fallbackCode,
+}) {
+  const observed = collectProviderFailureObservability({
+    provider,
+    result,
+    outputRoot,
+    usageRoot,
+    planStage,
+    invocationClass,
+  });
+  const receipts = collectProviderFailureReceipts({ provider, outputRoot });
+  return {
+    ...result,
+    failure_domain: result.status === "ERROR" ? "HARNESS" : "CONTRACT",
+    code: providerRunnerFailureCode({ result, attemptRoot, fallbackCode }),
+    ...observed,
+    ...receipts,
+  };
 }
 
 async function runMacosClaudeDeepseekGate(context, stage, { workflow }) {
@@ -3080,7 +3750,11 @@ async function runMacosClaudeDeepseekGate(context, stage, { workflow }) {
   const scratchRoot = quickValidationScratchRoot(context, workflow === "methods" ? "macos-claude-deepseek-methods" : "macos-claude-deepseek-e2e");
   ensureDirectory(scratchRoot);
   let pythonEntry;
-  try { pythonEntry = macosCodexPythonEntry(context.repoRoot); }
+  let providerInputs = null;
+  try {
+    pythonEntry = macosCodexPythonEntry(context.repoRoot);
+    if (workflow === "e2e") providerInputs = evidenceV2ProviderRuntimeInputs(context);
+  }
   catch (error) { return { status: "BLOCKED", failure_domain: "INFRA", code: String(error?.message ?? "CLAUDE_DEEPSEEK_PYTHON_RUNTIME_MISSING"), elapsed_seconds: 0 }; }
   const usageRoot = path.join(context.attemptRoot, "payload", "model-usage", workflow === "methods" ? "macos-claude-deepseek-methods" : "macos-claude-deepseek-e2e");
   const runner = path.join(context.sourceSnapshotRoot, "tools", "test-flow", "quick-validation", "claude-deepseek", "runtime", workflow === "methods" ? "claude-deepseek-methods-runner.mjs" : "claude-deepseek-e2e-runner.mjs");
@@ -3107,9 +3781,11 @@ async function runMacosClaudeDeepseekGate(context, stage, { workflow }) {
     ...(context.planStage.invocation_caps.length === 0 ? ["--verify-cache-only"] : []),
   ] : [
     ...common,
-    "--runtime-root", context.repoRoot,
-    "--logparse-root", context.options.logparseSource,
-    "--scenario", context.options.scenario ?? "api-execution-overrun",
+    "--runtime-root", providerInputs.sourceRoot,
+    "--registration-root", providerInputs.registrationRoot,
+    "--source-snapshot-digest", providerInputs.sourceSnapshotDigest,
+    "--core-verdict", providerInputs.coreVerdictPath,
+    "--scenario", providerInputs.scenario,
   ];
   const result = await runProcess({
     repoRoot: context.repoRoot,
@@ -3126,7 +3802,18 @@ async function runMacosClaudeDeepseekGate(context, stage, { workflow }) {
     pollMilliseconds: context.policies.poll_milliseconds,
     progressAllowlistVersion: context.policies.progress_allowlist_version,
   });
-  if (result.status !== "PASS") return { ...result, failure_domain: result.status === "ERROR" ? "HARNESS" : "CONTRACT", code: result.termination?.trigger ?? "CLAUDE_DEEPSEEK_RUNNER_FAILED" };
+  if (result.status !== "PASS") {
+    return providerRunnerFailureResult({
+      provider: "claude-deepseek",
+      result,
+      attemptRoot: context.attemptRoot,
+      outputRoot,
+      usageRoot,
+      planStage: context.planStage,
+      invocationClass: workflow === "methods" ? "claude-deepseek-registration-generation" : "claude-deepseek-macos-e2e",
+      fallbackCode: "CLAUDE_DEEPSEEK_RUNNER_FAILED",
+    });
+  }
   let gate;
   let ledger;
   try {
@@ -3263,8 +3950,8 @@ async function crossJob(context, stage) {
   if (receipt.status === "PASS" && stage.id === "journey.cross-job.diagnose" && receipt.browser_api?.status !== "PASS") {
     return { ...result, status: "ERROR", failure_domain: "HARNESS", code: "CROSS_JOB_BROWSER_API_RECEIPT_INVALID" };
   }
-  if (receipt.status === "PASS" && stage.id === "journey.cross-job.diagnose" && !validMethodsGroundingOracleEvidence(context, receipt, generatedSkill)) {
-    return { ...result, status: "ERROR", failure_domain: "HARNESS", code: "CROSS_JOB_METHODS_ORACLE_EVIDENCE_INVALID" };
+  if (receipt.status === "PASS" && stage.id === "journey.cross-job.diagnose" && !validMethodsV2OracleEvidence(context, receipt, generatedSkill)) {
+    return { ...result, status: "ERROR", failure_domain: "HARNESS", code: "CROSS_JOB_METHODS_V2_ORACLE_EVIDENCE_INVALID" };
   }
   if (result.status === "ERROR") return { ...result, failure_domain: "HARNESS", code: result.termination?.trigger ?? "CROSS_JOB_EVIDENCE_ERROR" };
   if (result.status === "INCONCLUSIVE") return { ...result, failure_domain: "EXTERNAL", code: result.termination?.trigger ?? "EXTERNAL_INCONCLUSIVE" };
@@ -3292,7 +3979,7 @@ async function crossJob(context, stage) {
         browser_api: receipt.browser_api ?? null,
         browser_capability: receipt.browser_capability ?? null,
         browser_failure: receipt.browser_failure ?? null,
-        methods_grounding: receipt.methods_grounding ?? null,
+        methods_v2: receipt.methods_v2 ?? null,
       },
     };
   }
@@ -3314,7 +4001,7 @@ async function crossJob(context, stage) {
       browser_api: receipt.browser_api ?? null,
       browser_capability: receipt.browser_capability ?? null,
       browser_failure: receipt.browser_failure ?? null,
-      methods_grounding: receipt.methods_grounding ?? null,
+      methods_v2: receipt.methods_v2 ?? null,
       topology: receipt.topology,
       runtime_images: receipt.runtime_images,
       runtime_resources: receipt.runtime_resources,
@@ -3461,7 +4148,7 @@ export async function executeGate(context, stage, gateId, gate) {
       if (prepared.error) return { status: "BLOCKED", failure_domain: "INFRA", code: prepared.error, elapsed_seconds: 0 };
       environment = prepared.env;
     }
-    const result = await pytestAction(scoped, stage, selectors, {
+    let result = await pytestAction(scoped, stage, selectors, {
       extra: gate.pytest_args ?? [],
       env: environment,
       real: Boolean(gate.environment_profile),
@@ -3470,6 +4157,23 @@ export async function executeGate(context, stage, gateId, gate) {
       selection,
       isolatedAgent: Boolean(gate.environment_profile && gate.environment_profile !== "real-logparse"),
     });
+    if (result.status === "PASS" && gate.result_receipt === EVIDENCE_V2_CORE_RECEIPT) {
+      try {
+        const coreVerdict = materializeEvidenceV2CoreVerdict({
+          sourceSnapshotDigest: context.sourceSnapshotDigest,
+          sourceSnapshotRoot: context.sourceSnapshotRoot,
+          gateRoot: root,
+        });
+        result = { ...result, core_verdict: coreVerdict };
+      } catch (error) {
+        result = {
+          ...result,
+          status: "ERROR",
+          failure_domain: "HARNESS",
+          code: error?.code ?? "EVIDENCE_V2_CORE_RECEIPT_INVALID",
+        };
+      }
+    }
     if (gate.environment_profile && gate.environment_profile !== "real-logparse") {
       try {
         const modelUsage = collectIsolatedModelUsage(scoped, gate.environment_profile);
@@ -3486,11 +4190,17 @@ export async function executeGate(context, stage, gateId, gate) {
   if (gate.kind === "capability-adapter") {
     if (gate.adapter === "host-capability") return hostCapability(scoped, stage);
     if (gate.adapter === "server-linux-capability") return serverLinuxCapability(scoped, stage, gate);
-    if (gate.adapter === "codex-luna-methods") return codexLunaMethods(scoped, stage);
     if (gate.adapter === "macos-codex-luna-methods") return runMacosCodexLunaGate(scoped, stage, { workflow: "methods" });
-    if (gate.adapter === "macos-codex-luna-e2e") return runMacosCodexLunaGate(scoped, stage, { workflow: "e2e" });
+    if (gate.adapter === "macos-codex-luna-e2e") {
+      const result = await runMacosCodexLunaGate(scoped, stage, { workflow: "e2e" });
+      return attachEvidenceV2ModelCert(result, { context, gate, gateRoot: root });
+    }
     if (gate.adapter === "macos-claude-deepseek-methods") return runMacosClaudeDeepseekGate(scoped, stage, { workflow: "methods" });
-    if (gate.adapter === "macos-claude-deepseek-e2e") return runMacosClaudeDeepseekGate(scoped, stage, { workflow: "e2e" });
+    if (gate.adapter === "macos-claude-deepseek-e2e") {
+      const result = await runMacosClaudeDeepseekGate(scoped, stage, { workflow: "e2e" });
+      return attachEvidenceV2ModelCert(result, { context, gate, gateRoot: root });
+    }
+    if (gate.adapter === "evidence-v2-release-verdict") return evidenceV2ReleaseVerdict(scoped);
   }
   if (gate.kind === "cross-job-adapter") return crossJob(scoped, stage);
   if (gate.kind === "observation" && gate.observation === "review-state-transition") return reviewObservation(scoped);

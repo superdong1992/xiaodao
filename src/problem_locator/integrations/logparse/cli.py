@@ -7,7 +7,6 @@ import base64
 import http.client
 import json
 import os
-import secrets
 import stat
 import sys
 from pathlib import Path
@@ -25,7 +24,11 @@ from problem_locator.integrations.agent_json import (
     normalize_agent_json_file,
 )
 
-from .paths import resolve_workspace_path, validate_proposal_io_paths
+from .paths import (
+    atomic_write_broker_result,
+    resolve_workspace_path,
+    validate_proposal_io_paths,
+)
 from .requests import BrokerEnvelope, ParseTargetsRequest, TargetLogsRequest
 
 
@@ -149,47 +152,6 @@ def _invoke_broker(
     return result, None
 
 
-def _atomic_write_result(target: Path, payload: bytes) -> None:
-    parent = target.parent
-    parent_metadata = parent.stat(follow_symlinks=False)
-    if not stat.S_ISDIR(parent_metadata.st_mode):
-        raise ValueError("broker result parent is invalid")
-    try:
-        target_metadata = target.lstat()
-    except FileNotFoundError:
-        target_metadata = None
-    if target_metadata is not None and not stat.S_ISREG(target_metadata.st_mode):
-        raise ValueError("broker result target is invalid")
-
-    temporary: Path | None = None
-    try:
-        for _attempt in range(16):
-            candidate = parent / f".target_logs.{secrets.token_hex(16)}.tmp"
-            try:
-                descriptor = os.open(
-                    candidate,
-                    os.O_WRONLY | os.O_CREAT | os.O_EXCL,
-                    0o600,
-                )
-            except FileExistsError:
-                continue
-            temporary = candidate
-            with os.fdopen(descriptor, "wb") as stream:
-                stream.write(payload)
-                stream.flush()
-                os.fsync(stream.fileno())
-            os.replace(temporary, target)
-            temporary = None
-            return
-        raise OSError("cannot reserve a broker result temporary file")
-    finally:
-        if temporary is not None:
-            try:
-                temporary.unlink()
-            except FileNotFoundError:
-                pass
-
-
 def run(
     operation: str,
     request_path: str,
@@ -215,10 +177,10 @@ def run(
     )
     result_bytes, failure = _invoke_broker(endpoint, token, envelope)
     if failure is not None:
-        _atomic_write_result(result_file, canonical_json_bytes(failure))
+        atomic_write_broker_result(result_file, canonical_json_bytes(failure))
         return failure
     assert result_bytes is not None
-    _atomic_write_result(result_file, result_bytes)
+    atomic_write_broker_result(result_file, result_bytes)
     return None
 
 

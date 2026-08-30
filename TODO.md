@@ -1,8 +1,22 @@
 # TODO
 
-更新时间：2026-08-25
+更新时间：2026-08-28
 
 本文件是仓库活跃待办的唯一清单。已完成事项由代码、当前设计与 Git 历史证明，不在这里保留关闭项。
+
+## P0：Evidence V2 双 Provider model cert 与 Release
+
+- 零模型 Core、CrossJob 和两套 provider adapter 已接入 Evidence V2；旧 Codex/Luna 直接 Methods V1
+  定位 Goal、Stage、Gate 和 action 路由已删除。正式结论仍须等待当前源码快照的真实 P1/P2 认证。
+- P1 Claude Code + DeepSeek 与 P2 Codex + Luna 必须各自运行生产 DiagnosisRuntime：服务端生成
+  Graph/Plan，模型只提交 Specialist/Reviewer evaluation 数组，每角色最多一次 repair；正常调用数为
+  2，硬上限为 4。
+- 两份 `model-cert.json` 必须绑定同一 attempt 中的 production registration、source snapshot、V8 contract manifest 和
+  `core-verdict.json`，并记录 provider/model/revision、prompt/profile/tool policy、调用/repair 次数、
+  usage 与最终 `methods_result` 身份。
+- `release.evidence-v2-certification` 必须从同一 attempt 的 Core、P1、P2 生成
+  `release-verdict.json`。当前待办是完成 plan-only 审核、真实模型调用和最终权威 verdict；在此之前
+  不得登记为已修复。
 
 ## P0：Generic V2 最终集成与生产验收
 

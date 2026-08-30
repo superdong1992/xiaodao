@@ -43,6 +43,7 @@ export const SKILL_GENERATION_TRACE_CODES = Object.freeze({
   WRITE_PATH_INVALID: "SKILL_TRACE_WRITE_PATH_INVALID",
   WRITE_CONTENT_MISMATCH: "SKILL_TRACE_WRITE_CONTENT_MISMATCH",
   OUTPUT_TREE_INVALID: "SKILL_TRACE_OUTPUT_TREE_INVALID",
+  METHODS_CONTRACT_INVALID: "SKILL_TRACE_METHODS_CONTRACT_INVALID",
 });
 
 export class SkillGenerationTraceAuditError extends Error {
@@ -67,7 +68,7 @@ const REQUIRED_RECEIPT_READS = Object.freeze([
 const SKILL_NAME = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const REFERENCE_NAME = /^[a-z0-9]+(?:-[a-z0-9]+)*\.md$/;
 
-export const SKILL_GENERATION_TRACE_SCHEMA_VERSION = 5;
+export const SKILL_GENERATION_TRACE_SCHEMA_VERSION = 6;
 
 function fail(code, message, details = {}) {
   throw new SkillGenerationTraceAuditError(code, message, details);
@@ -86,6 +87,23 @@ function isPlainObject(value) {
 function exactKeys(value, expected) {
   return isPlainObject(value)
     && Object.keys(value).sort().join("\0") === [...expected].sort().join("\0");
+}
+
+function uniqueNonEmptyStrings(value) {
+  return Array.isArray(value)
+    && value.length > 0
+    && value.every((item) => typeof item === "string" && item.length > 0)
+    && value.length === new Set(value).size;
+}
+
+function orderedSubsequence(values, sequence) {
+  let cursor = 0;
+  for (const value of values) {
+    const index = sequence.indexOf(value, cursor);
+    if (index < 0) return false;
+    cursor = index + 1;
+  }
+  return true;
 }
 
 function canonicalJson(value) {
@@ -487,10 +505,29 @@ function inspectOutputPackage(workspaceRoot, skillName, writes, sourceIdentity) 
   );
   requireAudit(
     Array.isArray(methods.methods)
+      && methods.methods.length > 0
       && methods.methods.every((method) => isPlainObject(method) && method.reference !== SOURCE_LOG_TEMPLATES_REFERENCE),
     SKILL_GENERATION_TRACE_CODES.SOURCE_LOG_TEMPLATES_INVALID,
     `${SOURCE_LOG_TEMPLATES_REFERENCE} must not be used as a method reference`,
   );
+  const methodIds = new Set();
+  for (const [index, method] of methods.methods.entries()) {
+    requireAudit(
+      exactKeys(method, ["activation_markers", "evidence_markers", "id", "priority", "reference", "title"])
+        && SKILL_NAME.test(method.id ?? "") && !methodIds.has(method.id)
+        && typeof method.title === "string" && method.title.trim().length > 0
+        && typeof method.reference === "string" && method.reference.startsWith("references/")
+        && method.reference !== SOURCE_LOG_TEMPLATES_REFERENCE
+        && Number.isSafeInteger(method.priority) && method.priority === index + 1
+        && uniqueNonEmptyStrings(method.evidence_markers)
+        && uniqueNonEmptyStrings(method.activation_markers)
+        && orderedSubsequence(method.activation_markers, method.evidence_markers),
+      SKILL_GENERATION_TRACE_CODES.METHODS_CONTRACT_INVALID,
+      "Generated methods.json method fields and activation markers are invalid",
+      { method_index: index },
+    );
+    methodIds.add(method.id);
+  }
   const sourceLogTemplatesRelative = `output/${skillName}/${SOURCE_LOG_TEMPLATES_REFERENCE}`;
   const sourceLogTemplatesFile = files.find((file) => file.path === `workspace/${sourceLogTemplatesRelative}`);
   requireAudit(
@@ -510,6 +547,11 @@ function inspectOutputPackage(workspaceRoot, skillName, writes, sourceIdentity) 
       root: `workspace/output/${skillName}`,
       file_count: files.length,
       files,
+      method_marker_sets: methods.methods.map((method) => ({
+        method_id: method.id,
+        evidence_markers: [...method.evidence_markers],
+        activation_markers: [...method.activation_markers],
+      })),
       content_tree_sha256: sha256Bytes(canonicalJson({ version: 1, files: files.map(({ path: filePath, size_bytes, sha256 }) => ({ path: filePath, size_bytes, sha256 })) })),
     },
     sourceLogTemplates: {
@@ -565,7 +607,7 @@ export function validSkillGenerationTraceAuditReceipt(value) {
   const expectedObserved = readRecords.map((record) => ({ ordinal: record.ordinal, path: record.path }));
   if (JSON.stringify(value.observed_reads) !== JSON.stringify(expectedObserved)) return false;
   const packageValue = value.package;
-  if (!exactKeys(packageValue, ["skill_name", "root", "file_count", "files", "content_tree_sha256"])
+  if (!exactKeys(packageValue, ["skill_name", "root", "file_count", "files", "method_marker_sets", "content_tree_sha256"])
     || !SKILL_NAME.test(packageValue.skill_name ?? "")
     || packageValue.root !== `workspace/output/${packageValue.skill_name}`
     || !Array.isArray(packageValue.files)
@@ -578,6 +620,13 @@ export function validSkillGenerationTraceAuditReceipt(value) {
     || packageValue.files.filter((file) => file.path === `${packageValue.root}/methods.json`).length !== 1
     || !packageValue.files.some((file) => file.path.startsWith(`${packageValue.root}/references/`))
     || !/^[a-f0-9]{64}$/.test(packageValue.content_tree_sha256 ?? "")) return false;
+  if (!Array.isArray(packageValue.method_marker_sets) || packageValue.method_marker_sets.length === 0
+    || !packageValue.method_marker_sets.every((item) => exactKeys(item, ["activation_markers", "evidence_markers", "method_id"])
+      && SKILL_NAME.test(item.method_id ?? "")
+      && uniqueNonEmptyStrings(item.evidence_markers)
+      && uniqueNonEmptyStrings(item.activation_markers)
+      && orderedSubsequence(item.activation_markers, item.evidence_markers))
+    || new Set(packageValue.method_marker_sets.map((item) => item.method_id)).size !== packageValue.method_marker_sets.length) return false;
   const expectedDigest = sha256Bytes(canonicalJson({ version: 1, files: packageValue.files.map(({ path: filePath, size_bytes, sha256 }) => ({ path: filePath, size_bytes, sha256 })) }));
   if (packageValue.content_tree_sha256 !== expectedDigest) return false;
   if (!writeRecords.every((record) => packageValue.files.some((file) => file.path === record.path && file.write_ordinal === record.ordinal))) return false;

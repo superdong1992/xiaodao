@@ -1,8 +1,15 @@
-# Ubuntu 22.04 Standalone Fast E2E
+# Ubuntu 22.04 验证入口
 
-该 wrapper 在 WSL2 Ubuntu 22.04 的密封 Linux/x64 容器中运行 provider standalone Fast E2E。它不调用中央 `tools/test-flow/run.sh`，也不创建 Goal/Proof/Stage/Gate。
+这个目录提供两套互不混用的 WSL2 Ubuntu 22.04/Linux x64 容器入口：
 
-镜像仍从冻结本地缓存构建：
+- 不传 `--mode` 时，行为保持不变：运行中央 Test Flow 的正式 Evidence V2 Release 认证。
+- 显式传入 `--mode fast-e2e --provider codex-luna|claude-deepseek` 时，运行 provider standalone Fast E2E 九场景套件。
+
+Fast E2E 不接中央 Goal、Proof、Stage 或 Gate，不生成 Release verdict，也不能外推成正式发布结论。
+
+## 准备镜像
+
+两种模式使用同一份冻结镜像：
 
 ```bash
 bash tools/test-flow/quick-validation/wsl/prepare-image.sh \
@@ -11,41 +18,116 @@ bash tools/test-flow/quick-validation/wsl/prepare-image.sh \
   --logparse-source /home/xiaodao/quick-validation/src/logparse
 ```
 
-Codex 九场景计划：
+## 默认正式 Release
+
+不传 `--mode` 时，wrapper 仍调用：
+
+```text
+tools/test-flow/run.sh
+  -> release.evidence-v2-certification
+  -> Core
+  -> production Skill generation
+  -> P1 DeepSeek model-cert
+  -> P2 GPT/Luna model-cert
+  -> release-verdict.json
+```
+
+先看计划：
 
 ```bash
 bash tools/test-flow/quick-validation/wsl/run.sh \
-  --provider codex-luna --mode e2e --all-scenarios \
   --cache-root /home/xiaodao/quick-validation/cache \
-  --evidence-root /home/xiaodao/quick-validation/evidence/standalone-fast-e2e/codex-luna \
+  --evidence-root /home/xiaodao/quick-validation/evidence/evidence-v2-release \
+  --codex-auth /home/xiaodao/quick-validation/secrets/codex-auth.json \
+  --claude-settings /home/xiaodao/quick-validation/secrets/claude-settings.json \
+  --plan-only
+```
+
+正式结论仍以中央 attempt 的 `verdict.json` 和 `release-verdict.json` 为准。默认分支仍要求两份 provider 凭据，也继续从空数据根运行正式 Release。
+
+## Codex/Luna Fast E2E
+
+先看九场景计划：
+
+```bash
+bash tools/test-flow/quick-validation/wsl/run.sh \
+  --mode fast-e2e \
+  --provider codex-luna \
+  --cache-root /home/xiaodao/quick-validation/cache \
+  --evidence-root /home/xiaodao/quick-validation/evidence/fast-e2e/codex-luna \
   --codex-auth /home/xiaodao/quick-validation/secrets/codex-auth.json \
   --plan-only
 ```
 
-Claude 九场景计划：
+确认计划后，使用相同参数移除 `--plan-only`，再加入 `--allow-real-model`。
+
+## Claude/DeepSeek Fast E2E
 
 ```bash
 bash tools/test-flow/quick-validation/wsl/run.sh \
-  --provider claude-deepseek --mode e2e --all-scenarios \
+  --mode fast-e2e \
+  --provider claude-deepseek \
   --cache-root /home/xiaodao/quick-validation/cache \
-  --evidence-root /home/xiaodao/quick-validation/evidence/standalone-fast-e2e/claude-deepseek \
+  --evidence-root /home/xiaodao/quick-validation/evidence/fast-e2e/claude-deepseek \
   --claude-settings /home/xiaodao/quick-validation/secrets/claude-settings.json \
   --plan-only
 ```
 
-完整 registration cache 缺失时，使用同一 `claude-deepseek` provider 的 `--mode generation` 单独规划和执行。真实 E2E 必须先检查 plan；确认后移除 `--plan-only` 并加入 `--allow-real-model`。
+确认计划后，同样移除 `--plan-only` 并加入 `--allow-real-model`。
 
-```bash
-bash tools/test-flow/quick-validation/wsl/run.sh \
-  --provider claude-deepseek --mode generation \
-  --cache-root /home/xiaodao/quick-validation/cache \
-  --evidence-root /home/xiaodao/quick-validation/evidence/standalone-fast-e2e/claude-deepseek-generation \
-  --claude-settings /home/xiaodao/quick-validation/secrets/claude-settings.json \
-  --plan-only
+Fast 模式只要求所选 provider 的凭据。wrapper 会在容器内调用对应的 standalone 入口：
+
+```text
+quick-validation/<provider>/run.sh --goal fast-e2e --all-scenarios --plan-only
 ```
 
-`--all-scenarios` 由 wrapper 在容器层展开：先用 provider 的九场景 planner 做一次零模型规划，再运行一次共享确定性预检；全部通过后，同时启动九个 Docker 容器。每个容器只执行一个 provider `--scenario`，拥有独立的 PID/网络命名空间、`/tmp`、`/private/tmp`、`/root`、`/run/test-flow-scratch`、服务端口、`DATA_ROOT` 和 evidence 子根。仓库、Methods cache、image seal 和 provider credential 只以受控 bind mount 共享。
+这一步只读取并核验九场景计划，不调用模型。真实执行时，wrapper 把计划展开成九个相互隔离的容器；每个容器再以 `--goal fast-e2e --scenario <id>` 运行一个场景。
 
-持久化结果写到 `<evidence-root>/wsl-<provider>-suite-<run-id>/`：九份权威子结论位于 `scenarios/<scenario>/verdict.json`，根 `verdict.json` 按冻结顺序重算调用数和 usage。合同失败不影响其他已启动容器；工程失败也不强杀同伴，待九个已启动容器封存后把根状态置为 `ERROR`。suite 不自动重试。
+## Fast E2E 调用边界
 
-wrapper 在启动容器前核验冻结 image seal 和镜像 ID，容器内 planner 再核验 marker、Ubuntu 22.04 系统身份、挂载的 image seal 和独立 tmpfs scratch。可执行的 work/private 放在临时 scratch，evidence、usage 和 verdict 才写入持久化目录，避免把 Linux sandbox workspace 放进 evidence bind mount。容器使用只读仓库、独立可写 cache/evidence、provider 专属只读凭据、只读根文件系统和 Docker init。Codex 单独启用现有 `seccomp=unconfined`，不增加 privileged、capability、Docker socket、host PID 或 host network。Claude E2E 以只读方式消费 generation cache。每个场景的服务端仍从空数据根启动，凭据不得进入证据。
+九场景顺序固定为：
+
+1. `api-execution-overrun`
+2. `client-receive-blocked`
+3. `deadloop-detected`
+4. `insufficient-evidence`
+5. `multiple-rpc-timeouts`
+6. `server-queue-delay`
+7. `server-queue-five`
+8. `server-queue-single`
+9. `unrelated-log-noise`
+
+调用预算不是九例统一乘法：
+
+- `insufficient-evidence` 在机械预处理后没有属于任何 cause method 的证据，因此模型调用数必须为 0，硬上限也是 0。
+- 其余八例正常调用 2 次，每例最多 4 次。
+- 九例合计正常调用 16 次，硬上限 32 次。
+
+这个 0 调用边界会直接检查 evidence marker ownership。公共 timeout marker 不能把 `insufficient-evidence` 错误加载到任意 cause method，也不能触发 Specialist 或 Reviewer。
+
+## 容器与结果
+
+九个场景容器并行启动。它们分别拥有独立的进程、网络、`/tmp`、`/private/tmp`、`/root`、scratch、服务端数据根和 evidence 子根。仓库、生成结果 cache、image seal 和所选 provider 凭据以只读方式挂载。
+
+结果写入：
+
+```text
+<evidence-root>/wsl-<provider>-fast-e2e-<run-id>/
+  plan.json
+  verdict.json
+  scenarios/<scenario>/verdict.json
+  evidence/container-runtime/<scenario>/stdout.txt
+  evidence/container-runtime/<scenario>/stderr.txt
+```
+
+根 `verdict.json` 只做机械聚合：按冻结顺序引用九份 standalone verdict，重算实际调用数和 usage，并核对每个容器的退出码。它明确记录 `goal=fast-e2e`、`source_snapshot=false` 和 `release_verdict=false`。
+
+一个场景出现合同失败时，已经启动的其他八个场景仍会跑完。容器丢失、verdict 身份不匹配、调用数越界或退出码不一致会把根状态置为 `ERROR`。suite 不自动重试。
+
+同一失败身份再次运行时，可以附带：
+
+```bash
+--reason "为什么值得再次运行" \
+--hypothesis "这次变化应解决什么" \
+--expected-evidence "哪些新证据可以证实或证伪该假设"
+```

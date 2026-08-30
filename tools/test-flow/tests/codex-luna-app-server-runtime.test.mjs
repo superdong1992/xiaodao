@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
 import {
   auditCodexLunaRuntimeSecrets,
@@ -13,9 +14,10 @@ import {
 import { codexLunaAppServerCliVersion } from "../runtime-support/codex-luna-contract.mjs";
 
 const RUNTIME_SOURCE = path.resolve(
-  path.dirname(new URL(import.meta.url).pathname),
+  path.dirname(fileURLToPath(import.meta.url)),
   "../runtime-support/codex-luna-app-server-runtime.mjs",
 );
+const posixRuntimeTest = process.platform === "win32" ? test.skip : test;
 const SYSTEM_SKILLS = [
   "imagegen",
   "openai-docs",
@@ -45,7 +47,7 @@ test("service Skill installation binds the declared Skill name instead of its st
   const installed = installServiceSkillInCodexHome(codexHome, source);
   assert.equal(installed, path.join(codexHome, "skills", "declared-service-skill", "SKILL.md"));
   assert.equal(fs.readFileSync(installed, "utf8"), fs.readFileSync(source, "utf8"));
-  assert.equal(fs.lstatSync(installed).mode & 0o777, 0o400);
+  assert.equal(fs.lstatSync(installed).mode & 0o777, process.platform === "win32" ? 0o444 : 0o400);
   assert.throws(
     () => installServiceSkillInCodexHome(codexHome, source),
     (error) => error.code === "EEXIST",
@@ -59,7 +61,7 @@ const readline = require("node:readline");
 
 let args = process.argv.slice(2);
 const fakeMode = process.env.FAKE_CODEX_MODE || "success";
-const profileMode = fakeMode === "generation-apply-patch" ? "generation" : ["late-mcp-notification", "mcp-call-limit"].includes(fakeMode) ? "client" : "diagnosis";
+const profileMode = fakeMode === "generation-apply-patch" ? "generation" : ["late-mcp-notification", "mcp-call-limit", "coalesced-mcp-call-limit"].includes(fakeMode) ? "client" : "diagnosis";
 const skillPath = process.env.FAKE_CODEX_SKILL;
 
 if (args[0] === "-C") {
@@ -87,6 +89,7 @@ if (args[0] === "sandbox") {
 if (args[0] !== "app-server" || args[1] !== "--stdio") process.exit(64);
 
 const send = (value) => process.stdout.write(JSON.stringify(value) + "\n");
+const sendBatch = (values) => process.stdout.write(values.map((value) => JSON.stringify(value)).join("\n") + "\n");
 const threadId = "fake-thread-0001";
 const turnId = "fake-turn-0001";
 const usage = {
@@ -203,7 +206,7 @@ lines.on("line", (line) => {
         modelProvider: "openai",
         serviceTier: null,
         cwd,
-        runtimeWorkspaceRoots: [],
+        runtimeWorkspaceRoots: [cwd],
         instructionSources: [],
         approvalPolicy: "never",
         approvalsReviewer: "user",
@@ -217,14 +220,43 @@ lines.on("line", (line) => {
     return;
   }
   if (message.method === "turn/start") {
-    send({ id: message.id, result: { turn: turn("inProgress") } });
-    send({ method: "turn/started", params: { threadId, turn: turn("inProgress") } });
+    const turnStartResponse = { id: message.id, result: { turn: turn("inProgress") } };
+    const turnStartedNotification = { method: "turn/started", params: { threadId, turn: turn("inProgress") } };
+    if (fakeMode === "coalesced-mcp-call-limit") {
+      sendBatch([
+        turnStartResponse,
+        turnStartedNotification,
+        ...Array.from({ length: 3 }, (_, offset) => ({
+          method: "item/started",
+          params: {
+            threadId,
+            turnId,
+            item: {
+              type: "mcpToolCall",
+              id: "mcp-" + (offset + 1),
+              server: "problem-locator",
+              tool: "problem_locator_get_case",
+              status: "inProgress",
+              arguments: { case_id: "case-one", wait_seconds: 30 },
+            },
+          },
+        })),
+      ]);
+      return;
+    }
+    send(turnStartResponse);
+    send(turnStartedNotification);
     if (fakeMode === "wall-timeout") {
       send({ method: "item/started", params: { threadId, turnId, item: { type: "agentMessage", id: "partial-message", text: "", phase: "commentary" } } });
       return;
     }
     if (fakeMode === "error-notification") {
       send({ method: "error", params: { threadId, turnId, error: { message: "private provider detail", additionalDetails: "private additional detail", codexErrorInfo: "serverOverloaded" }, willRetry: false } });
+      return;
+    }
+    if (fakeMode === "error-after-usage") {
+      send({ method: "thread/tokenUsage/updated", params: { threadId, turnId, tokenUsage: { total: usage, last: usage, modelContextWindow: 400000 } } });
+      send({ method: "error", params: { threadId, turnId, error: { message: "provider failed after usage", codexErrorInfo: "internalServerError" }, willRetry: false } });
       return;
     }
     if (fakeMode === "retrying-error-notification") {
@@ -270,7 +302,7 @@ lines.on("line", (line) => {
 `;
 
 function makeFixture(t, fakeMode = "success") {
-  const invocationMode = fakeMode === "generation-apply-patch" ? "generation" : ["late-mcp-notification", "mcp-call-limit"].includes(fakeMode) ? "client" : "diagnosis";
+  const invocationMode = fakeMode === "generation-apply-patch" ? "generation" : ["late-mcp-notification", "mcp-call-limit", "coalesced-mcp-call-limit"].includes(fakeMode) ? "client" : "diagnosis";
   const root = fs.mkdtempSync(path.join(fs.existsSync("/private/tmp") ? "/private/tmp" : os.tmpdir(), "codex-luna-runtime-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const workspaceRoot = path.join(root, "workspace");
@@ -386,7 +418,7 @@ test("sandbox permission probes do not apply unsupported global strict-config", 
   assert.doesNotMatch(implementation, /strict-config/);
 });
 
-test("fake app-server proves preflight, cleanup, sanitized trace, final, usage, and no auth.json", async (t) => {
+posixRuntimeTest("fake app-server proves preflight, cleanup, sanitized trace, final, usage, and no auth.json", async (t) => {
   const fixture = makeFixture(t);
   const result = await runCodexLunaAppServerCall(fixture.options);
 
@@ -404,6 +436,16 @@ test("fake app-server proves preflight, cleanup, sanitized trace, final, usage, 
   });
   assert.equal(result.process.exit_code, 0);
   assert.equal(result.app_server.status, "PASS");
+  assert.equal(
+    result.app_server.permission_profile.id,
+    `test-flow-codex-luna-${fixture.options.mode}`,
+  );
+  assert.equal(
+    result.app_server.permission_profile.invocation_mode,
+    fixture.options.mode,
+  );
+  assert.equal(Object.hasOwn(result.app_server, "permission_profile_id"), false);
+  assert.equal(Object.hasOwn(result.app_server, "invocation_mode"), false);
   assert.deepEqual(result.app_server.arguments.slice(0, 3), ["-C", "<WORKSPACE_ROOT>", "app-server"]);
   assert.equal(result.app_server.mcp_tool_call_limit, null);
   assert.equal(result.app_server.developer_instructions.utf8_size, Buffer.byteLength(DEVELOPER_INSTRUCTIONS, "utf8"));
@@ -449,7 +491,7 @@ test("fake app-server proves preflight, cleanup, sanitized trace, final, usage, 
   assert.ok(scan.scanned_files > 0);
 });
 
-test("generation Code Mode persists only paired exec identity and hashed source, output, and nested file diff receipts", async (t) => {
+posixRuntimeTest("generation Code Mode persists only paired exec identity and hashed source, output, and nested file diff receipts", async (t) => {
   const fixture = makeFixture(t, "generation-apply-patch");
   const result = await runCodexLunaAppServerCall(fixture.options);
 
@@ -472,7 +514,7 @@ test("generation Code Mode persists only paired exec identity and hashed source,
   assert.match(fileChange.message.params.item.changes[0].diff_receipt.redacted_sha256, /^[a-f0-9]{64}$/);
 });
 
-test("a server-initiated request fails closed and persists no credential", async (t) => {
+posixRuntimeTest("a server-initiated request fails closed and persists no credential", async (t) => {
   const fixture = makeFixture(t, "server-request");
   await assert.rejects(
     runCodexLunaAppServerCall(fixture.options),
@@ -485,7 +527,7 @@ test("a server-initiated request fails closed and persists no credential", async
   assert.equal(fs.existsSync(path.join(fixture.callRoot, "codex-home", "auth.json")), false);
 });
 
-test("a credential echo fails closed before transcript persistence", async (t) => {
+posixRuntimeTest("a credential echo fails closed before transcript persistence", async (t) => {
   const fixture = makeFixture(t, "credential-echo");
   await assert.rejects(
     runCodexLunaAppServerCall(fixture.options),
@@ -499,7 +541,7 @@ test("a credential echo fails closed before transcript persistence", async (t) =
   assert.equal(fs.existsSync(path.join(fixture.callRoot, "codex-home", "auth.json")), false);
 });
 
-test("a wall timeout persists only the sanitized partial transcript", async (t) => {
+posixRuntimeTest("a wall timeout persists only the sanitized partial transcript", async (t) => {
   const fixture = makeFixture(t, "wall-timeout");
   fixture.options.wallSeconds = 1;
   fixture.options.noProgressSeconds = 5;
@@ -513,7 +555,7 @@ test("a wall timeout persists only the sanitized partial transcript", async (t) 
   assert.equal(fs.readFileSync(fixture.stderrPath, "utf8"), "[Test Flow withheld app-server stderr after a failed secret/protocol boundary.]\n");
 });
 
-test("a bounded client MCP call count stops tight polling before the stdout boundary", async (t) => {
+posixRuntimeTest("a bounded client MCP call count stops tight polling before the stdout boundary", async (t) => {
   const fixture = makeFixture(t, "mcp-call-limit");
   fixture.options.maxMcpToolCalls = 2;
   await assert.rejects(
@@ -527,7 +569,20 @@ test("a bounded client MCP call count stops tight polling before the stdout boun
   assert.equal(fs.readFileSync(fixture.stderrPath, "utf8"), "[Test Flow withheld app-server stderr after a failed secret/protocol boundary.]\n");
 });
 
-test("a terminal error notification persists only official closed fields and a receipt", async (t) => {
+posixRuntimeTest("a coalesced turn response and MCP limit failure settle without a late notification waiter", { timeout: 3_000 }, async (t) => {
+  const fixture = makeFixture(t, "coalesced-mcp-call-limit");
+  fixture.options.maxMcpToolCalls = 2;
+  fixture.options.wallSeconds = 1;
+  fixture.options.noProgressSeconds = 1;
+  await assert.rejects(
+    runCodexLunaAppServerCall(fixture.options),
+    (error) => error.code === "CODEX_LUNA_APP_SERVER_MCP_CALL_LIMIT"
+      && error.details.limit === 2
+      && error.details.observed === 3,
+  );
+});
+
+posixRuntimeTest("a terminal error notification persists only official closed fields and a receipt", async (t) => {
   const fixture = makeFixture(t, "error-notification");
   await assert.rejects(
     runCodexLunaAppServerCall(fixture.options),
@@ -545,7 +600,26 @@ test("a terminal error notification persists only official closed fields and a r
   assert.match(trace, /error_receipt/);
 });
 
-test("an explicitly retryable error notification remains in the audited turn and does not abort", async (t) => {
+posixRuntimeTest("a failed provider turn retains its terminal usage", async (t) => {
+  const fixture = makeFixture(t, "error-after-usage");
+  await assert.rejects(
+    runCodexLunaAppServerCall(fixture.options),
+    (error) => {
+      assert.equal(error.code, "CODEX_LUNA_APP_SERVER_ERROR_NOTIFICATION");
+      assert.deepEqual(error.details.usage, {
+        input_tokens: 11,
+        cached_input_tokens: 3,
+        cache_write_input_tokens: 0,
+        output_tokens: 6,
+        reasoning_output_tokens: 2,
+        total_tokens: 17,
+      });
+      return true;
+    },
+  );
+});
+
+posixRuntimeTest("an explicitly retryable error notification remains in the audited turn and does not abort", async (t) => {
   const fixture = makeFixture(t, "retrying-error-notification");
   const result = await runCodexLunaAppServerCall(fixture.options);
   assert.equal(result.process.exit_code, 0);
@@ -560,7 +634,7 @@ test("an explicitly retryable error notification remains in the audited turn and
   assert.doesNotMatch(trace, /private transient detail/);
 });
 
-test("a rejected raw shell function persists its closed name in the sanitized trace", async (t) => {
+posixRuntimeTest("a rejected raw shell function persists its closed name in the sanitized trace", async (t) => {
   const fixture = makeFixture(t, "wrong-raw-function");
   await assert.rejects(
     runCodexLunaAppServerCall(fixture.options),
@@ -571,7 +645,7 @@ test("a rejected raw shell function persists its closed name in the sanitized tr
   for (const secret of [ACCESS_TOKEN, REFRESH_TOKEN, ID_TOKEN, ACCOUNT_ID]) assert.doesNotMatch(trace, new RegExp(secret));
 });
 
-test("an App Server response failure retains its request id, code, and message", async (t) => {
+posixRuntimeTest("an App Server response failure retains its request id, code, and message", async (t) => {
   const fixture = makeFixture(t, "response-error");
   await assert.rejects(
     runCodexLunaAppServerCall(fixture.options),
@@ -582,14 +656,14 @@ test("an App Server response failure retains its request id, code, and message",
   );
 });
 
-test("client cleanup ignores informational MCP Server lifecycle notifications", async (t) => {
+posixRuntimeTest("client cleanup ignores informational MCP Server lifecycle notifications", async (t) => {
   const fixture = makeFixture(t, "late-mcp-notification");
   const result = await runCodexLunaAppServerCall(fixture.options);
   assert.equal(result.app_server.cleanup.status, "PASS");
   assert.equal(result.process.exit_code, 0);
 });
 
-test("service invocation may place shell HOME in an existing writable workspace subtree", async (t) => {
+posixRuntimeTest("service invocation may place shell HOME in an existing writable workspace subtree", async (t) => {
   const fixture = makeFixture(t);
   const writableParent = path.join(fixture.workspaceRoot, "runtime", "tool-state", "service");
   fs.mkdirSync(writableParent, { recursive: true });

@@ -28,10 +28,10 @@ RPC_REGISTRATION_SHA256 = (
     "a1f8f59d5c3904ed545c5ae54b4d9a3b5e80e80bdd74e4cc51dff2b7adb8bcde"
 )
 RPC_PACKAGE_TREE_SHA256 = (
-    "d4002ab1ae9bfaf49a5db4f84a9932e9a0918de55b6248175b4f25a6873ffd3c"
+    "0eabfe88313233bbe774a07cfbea15ea0fce88a694bb6f2fa6efdbf2427c87b4"
 )
 RPC_COMBINED_SHA256 = (
-    "c456d5b74889f3c4ddbebd483867abe5bc258feea9c274045feda6f9dea2ce07"
+    "c498e5232fefa55e6c9815d7f5796c487de8cd7f10f7e5de91f0026cda0f56ab"
 )
 
 

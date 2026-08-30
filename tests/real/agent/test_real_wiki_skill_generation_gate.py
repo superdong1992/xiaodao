@@ -7,6 +7,7 @@ import os
 import shutil
 import tempfile
 import threading
+from dataclasses import replace
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -33,6 +34,16 @@ META_SKILL_ROOT = ROOT / ".agents/skills/wiki-to-diagnosis-skill"
 VALIDATOR_PATH = META_SKILL_ROOT / "scripts/validate_generated_skill.py"
 SCENARIO_AUDIT_FILE = "scenario-evaluation-audit.json"
 SOURCE_WIKI_IDENTITY_FILE = "source-wiki-identity.json"
+NON_CANONICAL_EVENT_NAMES = (
+    "API_COMPLETE",
+    "DEADLOOP_DETECTED",
+    "LATE_RESPONSE",
+    "QUEUE_HISTORY",
+)
+RPC_TIMEOUT_CONTEXT_MARKERS = (
+    "rpc call",
+    "call unsuccess, reqid(",
+)
 
 
 class _Signal:
@@ -83,6 +94,36 @@ def _load_validator() -> ModuleType:
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def _generation_prompt(
+    *,
+    requested_skill_name: str,
+    canonical_marker_checklist: list[str],
+) -> str:
+    assert canonical_marker_checklist
+    checklist_json = json.dumps(
+        canonical_marker_checklist,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    shorthand_json = json.dumps(
+        list(NON_CANONICAL_EVENT_NAMES),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return f"""Use the wiki-to-diagnosis-skill Skill to convert inputs/wiki.md into one Methods Skill named {requested_skill_name}.
+
+Your first action must call the Skill tool with exactly {{"skill":"wiki-to-diagnosis-skill"}}. After that call succeeds, read inputs/wiki.md and runtime/source-wiki-identity.json in full. The closed source identity v2 was generated mechanically from the exact Wiki bytes before this invocation. Copy its `sha256` value verbatim into methods.json as `source_wiki_sha256`; use its `log_templates` as the complete, ordered, duplicate-preserving checklist for `references/source-log-templates.md`; never calculate, guess, normalize, reorder, deduplicate, or replace those values. The Wiki remains the only source of business meaning. From the Skill result, take the exact absolute `Base directory for this skill:` and read only its linked references/output-contract.md in full. Do not read clarifications, repository files, registration metadata, tests, oracles, validators, or any other path. Do not call Bash, Edit, Glob, Grep, or any tool other than the available Skill, Read, and Write tools. Do not call any tool with missing or invalid input.
+
+The Gate mechanically derived this ordered canonical marker checklist from source identity `log_templates` with the same function used by the canonical validator: {checklist_json}. Every item in methods.json `evidence_markers` and `activation_markers` must be copied byte-for-byte from this checklist. The checklist does not assign markers to methods and adds no business meaning; use the authored Wiki to choose which listed markers belong to each cause. Do not invent, shorten, or extend a marker. These bare event names are shorthand, not valid markers unless the exact whole string itself appears in the checklist: {shorthand_json}.
+
+Before writing, perform a per-method prerequisite-closure self-check: list every complete Wiki log template that the method reads to confirm, reject, calculate, or associate the target request; put each exact template in that method card's `## 所需证据` section; derive the method's `evidence_markers` from precisely those templates in source-identity order. Then select a non-empty, unique, ordered `activation_markers` subsequence containing only markers whose appearance makes that method worth evaluating. Activation starts an evaluation; it does not by itself confirm the cause. The two public RPC timeout/failure markers are context only and must not appear in `activation_markers`. The same literal may appear in multiple methods' activation lists when the Wiki makes each method worth evaluating. A marker mention outside `## 所需证据`, or a template present only in a shared reference, does not satisfy this closure. Derive every template-to-method assignment only from the authored Wiki; this prompt does not provide or imply the expected assignment.
+
+Generate the complete package directly under output/{requested_skill_name}. Its files must be exactly output/{requested_skill_name}/SKILL.md, output/{requested_skill_name}/methods.json, and the output-contract references, including the mandatory output/{requested_skill_name}/references/source-log-templates.md. Put that fixed reference first in methods.json `shared_references` and never use it as a method reference. Do not emit GenerationSpec, diagnosis-skill.json, registration metadata, copied Wiki, README, scripts, or tests. Use exactly one successful Write call per final package file, with both file_path and complete non-empty content in the same call. Finish every required Read before the first Write; before writing, check every source identity `log_templates` item against the complete fixed-reference content one-for-one and in order. After writing starts, perform only the contiguous sequence of package Write calls. Never overwrite a path, never write outside this one package, and stop after the final Write succeeds.
+
+Preserve the authored Wiki literally where the loaded output contract requires exact log templates, markers, fields, thresholds, units, safety meaning, and observation boundaries. Do not add author experience or infer defaults. The Gate will run the meta Skill's canonical validator after generation; do not attempt to read or invoke it yourself. Do not include package JSON or Markdown in the final response.
+"""
 
 
 def _release_case_root() -> Path:
@@ -182,16 +223,65 @@ def _gate_only_oracle_audit(
         expected["required_log_derived_fields"],
     )
 
-    marker_sets = [set(method.evidence_markers) for method in manifest.methods]
+    generated_methods = [
+        {
+            "method_id": method.id,
+            "markers": frozenset(method.evidence_markers),
+            "activation_markers": tuple(method.activation_markers),
+        }
+        for method in manifest.methods
+    ]
+    expected_marker_sets = expected["method_marker_sets"]
+    if len(generated_methods) != len(expected_marker_sets):
+        mismatches.append("method_count")
+
     method_marker_coverage: list[dict[str, Any]] = []
-    for required in expected["method_marker_sets"]:
-        markers = set(required["all_markers"])
-        covered = any(markers <= actual for actual in marker_sets)
+    mapped_method_ids: list[str] = []
+    for required in expected_marker_sets:
+        markers = frozenset(required["all_markers"])
+        matched_method_ids = [
+            generated["method_id"]
+            for generated in generated_methods
+            if generated["markers"] == markers
+        ]
+        covered = len(matched_method_ids) == 1
         method_marker_coverage.append(
-            {"semantic_id": required["semantic_id"], "covered": covered}
+            {
+                "semantic_id": required["semantic_id"],
+                "covered": covered,
+                "exact_match_count": len(matched_method_ids),
+                "matched_method_ids": matched_method_ids,
+            }
         )
         if not covered:
             mismatches.append(f"method_marker_set:{required['semantic_id']}")
+        else:
+            mapped_method_ids.append(matched_method_ids[0])
+
+    generated_method_ids = [item["method_id"] for item in generated_methods]
+    mapped_method_id_set = set(mapped_method_ids)
+    method_mapping_is_bijective = (
+        len(mapped_method_ids) == len(expected_marker_sets)
+        and len(mapped_method_id_set) == len(mapped_method_ids)
+        and mapped_method_id_set == set(generated_method_ids)
+    )
+    if not method_mapping_is_bijective:
+        mismatches.append("method_marker_mapping")
+    unmapped_method_ids = [
+        method_id
+        for method_id in generated_method_ids
+        if method_id not in mapped_method_id_set
+    ]
+    context_activated_method_ids = [
+        generated["method_id"]
+        for generated in generated_methods
+        if any(
+            marker in RPC_TIMEOUT_CONTEXT_MARKERS
+            for marker in generated["activation_markers"]
+        )
+    ]
+    if context_activated_method_ids:
+        mismatches.append("rpc_timeout_context_activation")
 
     shared_text = "\n".join(
         (package_root / relative).read_text(encoding="utf-8")
@@ -240,7 +330,12 @@ def _gate_only_oracle_audit(
     return {
         "status": "PASS" if not mismatches else "FAIL",
         "mismatches": mismatches,
+        "expected_method_count": len(expected_marker_sets),
+        "generated_method_count": len(generated_methods),
+        "method_mapping_is_bijective": method_mapping_is_bijective,
+        "unmapped_method_ids": unmapped_method_ids,
         "method_marker_coverage": method_marker_coverage,
+        "rpc_timeout_context_activation_method_ids": context_activated_method_ids,
         "missing_shared_marker_count": len(missing_shared_markers),
         "forbidden_path_count": len(forbidden_paths),
         "forbidden_note_marker_count": len(forbidden_note_markers),
@@ -299,6 +394,371 @@ def _write_generated_skill_receipt(
     )
 
 
+def _gate_oracle_test_baseline(
+    tmp_path: Path,
+) -> tuple[Path, Any, dict[str, Any]]:
+    case_root = ROOT / "tests/cases/release/rpc-timeout-anonymized"
+    oracle = _load_object(case_root / "oracle.json")
+    expected = oracle["expected_package"]
+    validator = _load_validator()
+    source_identity = validator.build_source_wiki_identity(
+        (case_root / "input/wiki.md").read_bytes(),
+        "inputs/wiki.md",
+    )
+    package_root = tmp_path / expected["skill_name"]
+    references_root = package_root / "references"
+    references_root.mkdir(parents=True)
+    (package_root / "SKILL.md").write_text(
+        f"""---
+name: {expected['skill_name']}
+description: Test-only Methods package for the generation Gate oracle.
+---
+
+Read request.json, method-evidence-graph.json, and method-evaluation-plan.json.
+Return evaluation_ref, verdict, supporting_event_refs, and reason for every
+item. Use UNKNOWN when the frozen evidence cannot decide a method.
+""",
+        encoding="utf-8",
+    )
+    methods: list[dict[str, Any]] = []
+    source_templates = list(source_identity["log_templates"])
+    for index, semantic in enumerate(expected["method_marker_sets"], start=1):
+        reference = f"references/method-{index}.md"
+        method_markers = set(semantic["all_markers"])
+        method_templates = [
+            template
+            for template in source_templates
+            if validator._canonical_evidence_marker(template) in method_markers
+        ]
+        assert {
+            validator._canonical_evidence_marker(template)
+            for template in method_templates
+        } == method_markers
+        template_text = "\n".join(method_templates)
+        (package_root / reference).write_text(
+            f"""# Test method
+
+## 适用条件
+Test-only condition.
+## 所需证据
+{template_text}
+## 计算与判断
+Evaluate the declared markers.
+## 确认条件
+All declared conditions hold.
+## 未知边界
+Missing evidence remains UNKNOWN.
+## 输出含义
+Return one evaluation verdict.
+""",
+            encoding="utf-8",
+        )
+        methods.append(
+            {
+                "id": f"method-{index}",
+                "title": f"Method {index}",
+                "reference": reference,
+                "priority": index,
+                "evidence_markers": list(semantic["all_markers"]),
+                "activation_markers": [
+                    marker
+                    for marker in semantic["all_markers"]
+                    if marker not in RPC_TIMEOUT_CONTEXT_MARKERS
+                ],
+            }
+        )
+    shared_reference = "references/source-log-templates.md"
+    (package_root / shared_reference).write_text(
+        validator._render_source_log_templates(source_identity["log_templates"]),
+        encoding="utf-8",
+    )
+    (package_root / "methods.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "skill_name": expected["skill_name"],
+                "source_wiki_sha256": expected["source_wiki_sha256"],
+                "required_user_inputs": expected["required_user_inputs"],
+                "required_artifacts": expected["required_artifacts"],
+                "log_derived_fields": expected["required_log_derived_fields"],
+                "shared_references": [shared_reference],
+                "methods": methods,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return package_root, load_methods_package(package_root), oracle
+
+
+def test_generation_prompt_uses_validator_canonical_marker_checklist() -> None:
+    validator = _load_validator()
+    wiki_bytes = (
+        ROOT / "tests/cases/release/rpc-timeout-anonymized/input/wiki.md"
+    ).read_bytes()
+    source_identity = validator.build_source_wiki_identity(
+        wiki_bytes,
+        "inputs/wiki.md",
+    )
+
+    checklist = validator.canonical_evidence_markers(
+        source_identity["log_templates"]
+    )
+    expected = [
+        "rpc call",
+        "call unsuccess, reqid(",
+        "LATE_RESPONSE service=",
+        "API_COMPLETE service=",
+        "QUEUE_HISTORY print_time_ms=",
+        "DEADLOOP_DETECTED service=",
+    ]
+    prompt = _generation_prompt(
+        requested_skill_name="diagnose-rpc-timeout",
+        canonical_marker_checklist=checklist,
+    )
+
+    assert checklist == expected
+    assert json.dumps(expected, ensure_ascii=False, separators=(",", ":")) in prompt
+    assert all(shorthand not in checklist for shorthand in NON_CANONICAL_EVENT_NAMES)
+    assert json.dumps(
+        list(NON_CANONICAL_EVENT_NAMES),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ) in prompt
+    assert "per-method prerequisite-closure self-check" in prompt
+    assert "context only and must not appear in `activation_markers`" in prompt
+    assert "The same literal may appear in multiple methods' activation lists" in prompt
+    assert "this prompt does not provide or imply the expected assignment" in prompt
+    assert all(template not in prompt for template in source_identity["log_templates"])
+    contract = (META_SKILL_ROOT / "references/output-contract.md").read_text(
+        encoding="utf-8"
+    )
+    assert "`API_COMPLETE service=`，不是 `API_COMPLETE`" in contract
+    assert "`QUEUE_HISTORY print_time_ms=`，不是 `QUEUE_HISTORY`" in contract
+
+
+def test_generation_validator_rejects_all_observed_shorthand_markers(
+    tmp_path: Path,
+) -> None:
+    package_root, _, _ = _gate_oracle_test_baseline(tmp_path)
+    validator = _load_validator()
+    wiki = ROOT / "tests/cases/release/rpc-timeout-anonymized/input/wiki.md"
+    assert validator.validate(package_root, wiki)["ok"] is True
+    shorthand_by_marker = {
+        "API_COMPLETE service=": "API_COMPLETE",
+        "DEADLOOP_DETECTED service=": "DEADLOOP_DETECTED",
+        "LATE_RESPONSE service=": "LATE_RESPONSE",
+        "QUEUE_HISTORY print_time_ms=": "QUEUE_HISTORY",
+    }
+    methods_path = package_root / "methods.json"
+    manifest = json.loads(methods_path.read_text(encoding="utf-8"))
+    for method in manifest["methods"]:
+        method["evidence_markers"] = [
+            shorthand_by_marker.get(marker, marker)
+            for marker in method["evidence_markers"]
+        ]
+        method["activation_markers"] = [
+            shorthand_by_marker.get(marker, marker)
+            for marker in method["activation_markers"]
+        ]
+    methods_path.write_text(
+        json.dumps(manifest, ensure_ascii=False, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+    result = validator.validate(package_root, wiki)
+
+    assert result["ok"] is False
+    assert result["errors"] == [
+        "method 1 evidence marker is not a canonical stable Wiki log marker: LATE_RESPONSE",
+        "method 1 evidence marker is not a canonical stable Wiki log marker: API_COMPLETE",
+        "method 1 evidence marker is not a canonical stable Wiki log marker: DEADLOOP_DETECTED",
+        "method 2 evidence marker is not a canonical stable Wiki log marker: LATE_RESPONSE",
+        "method 2 evidence marker is not a canonical stable Wiki log marker: QUEUE_HISTORY",
+        "method 3 evidence marker is not a canonical stable Wiki log marker: LATE_RESPONSE",
+    ]
+
+
+def test_generation_validator_rejects_marker_without_complete_timeout_template(
+    tmp_path: Path,
+) -> None:
+    package_root, manifest, _ = _gate_oracle_test_baseline(tmp_path)
+    validator = _load_validator()
+    wiki = ROOT / "tests/cases/release/rpc-timeout-anonymized/input/wiki.md"
+    method = manifest.methods[0]
+    source_identity = validator.build_source_wiki_identity(
+        wiki.read_bytes(),
+        "inputs/wiki.md",
+    )
+    timeout_template = next(
+        template
+        for template in source_identity["log_templates"]
+        if validator._canonical_evidence_marker(template) in method.evidence_markers
+    )
+    timeout_marker = validator._canonical_evidence_marker(timeout_template)
+    assert timeout_marker in method.evidence_markers
+    reference = package_root / method.reference
+    reference.write_text(
+        reference.read_text(encoding="utf-8").replace(
+            timeout_template,
+            timeout_marker,
+            1,
+        ),
+        encoding="utf-8",
+    )
+
+    result = validator.validate(package_root, wiki)
+
+    assert result["ok"] is False
+    assert result["errors"] == [
+        "method 1 的 evidence marker 在“所需证据”中没有对应的完整 Wiki 日志模板: "
+        f"{timeout_marker}"
+    ]
+
+
+def test_generation_gate_oracle_accepts_exact_one_to_one_package(
+    tmp_path: Path,
+) -> None:
+    package_root, manifest, oracle = _gate_oracle_test_baseline(tmp_path)
+    validator = _load_validator()
+    wiki = ROOT / "tests/cases/release/rpc-timeout-anonymized/input/wiki.md"
+
+    audit = _gate_only_oracle_audit(
+        package_root=package_root,
+        manifest=manifest,
+        oracle=oracle,
+    )
+
+    assert validator.validate(package_root, wiki)["ok"] is True
+    assert audit["status"] == "PASS"
+    assert audit["mismatches"] == []
+    assert audit["generated_method_count"] == audit["expected_method_count"] == 3
+    assert audit["method_mapping_is_bijective"] is True
+    assert audit["unmapped_method_ids"] == []
+    assert audit["rpc_timeout_context_activation_method_ids"] == []
+    assert all(
+        item["exact_match_count"] == 1 and len(item["matched_method_ids"]) == 1
+        for item in audit["method_marker_coverage"]
+    )
+
+
+def test_generation_gate_oracle_rejects_public_timeout_as_activation(
+    tmp_path: Path,
+) -> None:
+    package_root, manifest, oracle = _gate_oracle_test_baseline(tmp_path)
+    first = manifest.methods[0]
+    mutant = replace(
+        manifest,
+        methods=(
+            replace(
+                first,
+                activation_markers=(
+                    first.evidence_markers[0],
+                    *first.activation_markers,
+                ),
+            ),
+            *manifest.methods[1:],
+        ),
+    )
+
+    audit = _gate_only_oracle_audit(
+        package_root=package_root,
+        manifest=mutant,
+        oracle=oracle,
+    )
+
+    assert audit["status"] == "FAIL"
+    assert "rpc_timeout_context_activation" in audit["mismatches"]
+    assert audit["rpc_timeout_context_activation_method_ids"] == [first.id]
+
+
+def test_generation_gate_oracle_rejects_extra_marker(tmp_path: Path) -> None:
+    package_root, manifest, oracle = _gate_oracle_test_baseline(tmp_path)
+    first = manifest.methods[0]
+    mutant = replace(
+        manifest,
+        methods=(
+            replace(
+                first,
+                evidence_markers=(*first.evidence_markers, "UNEXPECTED_MARKER"),
+            ),
+            *manifest.methods[1:],
+        ),
+    )
+
+    audit = _gate_only_oracle_audit(
+        package_root=package_root,
+        manifest=mutant,
+        oracle=oracle,
+    )
+
+    assert audit["status"] == "FAIL"
+    assert "method_marker_set:api_execution_overrun" in audit["mismatches"]
+    assert "method_marker_mapping" in audit["mismatches"]
+    assert audit["generated_method_count"] == audit["expected_method_count"]
+    assert audit["unmapped_method_ids"] == [first.id]
+
+
+def test_generation_gate_oracle_rejects_extra_method(tmp_path: Path) -> None:
+    package_root, manifest, oracle = _gate_oracle_test_baseline(tmp_path)
+    last = manifest.methods[-1]
+    mutant = replace(
+        manifest,
+        methods=(
+            *manifest.methods,
+            replace(
+                last,
+                id="unexpected-method",
+                title="Unexpected method",
+                reference="references/unexpected-method.md",
+                priority=len(manifest.methods) + 1,
+                evidence_markers=("UNEXPECTED_METHOD_MARKER",),
+            ),
+        ),
+    )
+
+    audit = _gate_only_oracle_audit(
+        package_root=package_root,
+        manifest=mutant,
+        oracle=oracle,
+    )
+
+    assert audit["status"] == "FAIL"
+    assert "method_count" in audit["mismatches"]
+    assert "method_marker_mapping" in audit["mismatches"]
+    assert audit["unmapped_method_ids"] == ["unexpected-method"]
+
+
+def test_generation_gate_oracle_rejects_duplicate_ambiguous_mapping(
+    tmp_path: Path,
+) -> None:
+    package_root, manifest, oracle = _gate_oracle_test_baseline(tmp_path)
+    first = manifest.methods[0]
+    second = manifest.methods[1]
+    mutant = replace(
+        manifest,
+        methods=(
+            replace(first, evidence_markers=second.evidence_markers),
+            *manifest.methods[1:],
+        ),
+    )
+
+    audit = _gate_only_oracle_audit(
+        package_root=package_root,
+        manifest=mutant,
+        oracle=oracle,
+    )
+
+    assert audit["status"] == "FAIL"
+    assert "method_marker_set:api_execution_overrun" in audit["mismatches"]
+    assert "method_marker_set:server_receive_queueing" in audit["mismatches"]
+    assert "method_marker_mapping" in audit["mismatches"]
+    assert audit["method_marker_coverage"][1]["exact_match_count"] == 2
+    assert audit["method_mapping_is_bijective"] is False
+
+
 def test_claude_2_1_89_pinned_model_generates_registered_methods_package(
     isolated_agent_workspace_root: Path,
 ) -> None:
@@ -333,6 +793,9 @@ def test_claude_2_1_89_pinned_model_generates_registered_methods_package(
     )
     assert source_identity["schema_version"] == 2
     assert source_identity["sha256"] == wiki_sha256
+    canonical_marker_checklist = validator.canonical_evidence_markers(
+        source_identity["log_templates"]
+    )
     (inputs / "wiki.md").write_bytes(wiki_bytes)
     _write_new(
         runtime / SOURCE_WIKI_IDENTITY_FILE,
@@ -341,14 +804,10 @@ def test_claude_2_1_89_pinned_model_generates_registered_methods_package(
 
     stdout = _Sink()
     stderr = _Sink()
-    prompt = f"""Use the wiki-to-diagnosis-skill Skill to convert inputs/wiki.md into one Methods Skill named {requested_skill_name}.
-
-Your first action must call the Skill tool with exactly {{"skill":"wiki-to-diagnosis-skill"}}. After that call succeeds, read inputs/wiki.md and runtime/source-wiki-identity.json in full. The closed source identity v2 was generated mechanically from the exact Wiki bytes before this invocation. Copy its `sha256` value verbatim into methods.json as `source_wiki_sha256`; use its `log_templates` as the complete, ordered, duplicate-preserving checklist for `references/source-log-templates.md`; never calculate, guess, normalize, reorder, deduplicate, or replace those values. The Wiki remains the only source of business meaning. From the Skill result, take the exact absolute `Base directory for this skill:` and read only its linked references/output-contract.md in full. Do not read clarifications, repository files, registration metadata, tests, oracles, validators, or any other path. Do not call Bash, Edit, Glob, Grep, or any tool other than the available Skill, Read, and Write tools. Do not call any tool with missing or invalid input.
-
-Generate the complete package directly under output/{requested_skill_name}. Its files must be exactly output/{requested_skill_name}/SKILL.md, output/{requested_skill_name}/methods.json, and the output-contract references, including the mandatory output/{requested_skill_name}/references/source-log-templates.md. Put that fixed reference first in methods.json `shared_references` and never use it as a method reference. Do not emit GenerationSpec, diagnosis-skill.json, registration metadata, copied Wiki, README, scripts, or tests. Use exactly one successful Write call per final package file, with both file_path and complete non-empty content in the same call. Finish every required Read before the first Write; before writing, check every source identity `log_templates` item against the complete fixed-reference content one-for-one and in order. After writing starts, perform only the contiguous sequence of package Write calls. Never overwrite a path, never write outside this one package, and stop after the final Write succeeds.
-
-Preserve the authored Wiki literally where the loaded output contract requires exact log templates, markers, fields, thresholds, units, safety meaning, and observation boundaries. Do not add author experience or infer defaults. The Gate will run the meta Skill's canonical validator after generation; do not attempt to read or invoke it yourself. Do not include package JSON or Markdown in the final response.
-"""
+    prompt = _generation_prompt(
+        requested_skill_name=requested_skill_name,
+        canonical_marker_checklist=canonical_marker_checklist,
+    )
     try:
         execution = AgentBackend(command).execute(
             prompt=prompt,

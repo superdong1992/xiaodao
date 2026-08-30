@@ -29,7 +29,10 @@ import {
   validateClaudeDistribution,
 } from "../lib/release-inputs.mjs";
 import { extractCheckpointSourceArchive } from "../lib/checkpoint.mjs";
-import { fixedGetCasePollingInvariant } from "../lib/cross-job-polling.mjs";
+import {
+  fixedGetCasePollInput,
+  fixedGetCasePollingInvariant,
+} from "../lib/cross-job-polling.mjs";
 import {
   NEGATIVE_PROBE_VALIDATION_FIELDS,
   readRelayedEventPart,
@@ -44,8 +47,9 @@ import {
 } from "../lib/release-case.mjs";
 import { verifyMaterializedSourceSnapshot } from "../lib/source-snapshot.mjs";
 import {
-  validateMethodsGroundingExecutionRecord,
-  validateReleaseDiagnosisReport,
+  METHODS_V2_CAPTURED_FILES,
+  validateMethodsV2ExecutionRecords,
+  validateMethodsV2RestartSnapshot,
 } from "../lib/methods-oracle.mjs";
 import {
   isCompleteUsage,
@@ -270,30 +274,19 @@ function validateGeneratedSkillRoot(rootPath, attemptRoot) {
   };
 }
 
-function factorId(methodId) {
-  requireCondition(/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(methodId ?? ""), "GENERATED_SKILL_METHOD_ID_INVALID", "FAIL", "CONTRACT");
-  return methodId.replaceAll("-", "_");
-}
-
 function sortedStrings(value, code) {
   requireCondition(Array.isArray(value) && value.every((item) => typeof item === "string" && item.length > 0) && value.length === new Set(value).size, code, "FAIL", "CONTRACT");
   return [...value].sort();
 }
 
-function mapOracleMarkerGroups(groups, generatedMethods, code) {
-  const selected = groups.map((group) => {
-    const markers = sortedStrings(group, code);
-    const candidates = generatedMethods.filter((entry) => markers.every((marker) => (
-      entry.semantic_markers.some((declared) => declared.includes(marker))
-    )));
-    requireCondition(candidates.length > 0, code, "FAIL", "CONTRACT");
-    const minimumMarkerCount = Math.min(...candidates.map((entry) => entry.semantic_markers.length));
-    const minimal = candidates.filter((entry) => entry.semantic_markers.length === minimumMarkerCount);
-    requireCondition(minimal.length === 1, `${code}_AMBIGUOUS`, "FAIL", "CONTRACT");
-    return minimal[0].method.id;
-  });
-  requireCondition(selected.length === new Set(selected).size, `${code}_DUPLICATE`, "FAIL", "CONTRACT");
-  return selected;
+function orderedSubsequence(values, sequence) {
+  let cursor = 0;
+  for (const value of values) {
+    const index = sequence.indexOf(value, cursor);
+    if (index < 0) return false;
+    cursor = index + 1;
+  }
+  return true;
 }
 
 function selectedReleaseCase(repoRoot, generatedSkill) {
@@ -338,38 +331,76 @@ function selectedReleaseCase(repoRoot, generatedSkill) {
     "FAIL",
     "CONTRACT",
   );
+  const methodFields = ["activation_markers", "evidence_markers", "id", "priority", "reference", "title"];
+  methods.methods.forEach((method, index) => {
+    requireCondition(
+      method !== null && typeof method === "object" && !Array.isArray(method)
+        && canonicalJson(Object.keys(method).sort()) === canonicalJson(methodFields)
+        && /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(method.id ?? "")
+        && typeof method.title === "string" && method.title.trim().length > 0
+        && typeof method.reference === "string" && method.reference.startsWith("references/")
+        && Number.isSafeInteger(method.priority) && method.priority === index + 1,
+      "GENERATED_SKILL_METHOD_FIELDS_INVALID",
+      "FAIL",
+      "CONTRACT",
+    );
+    const evidenceMarkers = sortedStrings(method.evidence_markers, "GENERATED_SKILL_METHOD_MARKERS_INVALID");
+    const activationMarkers = sortedStrings(method.activation_markers, "GENERATED_SKILL_METHOD_ACTIVATION_MARKERS_INVALID");
+    requireCondition(
+      evidenceMarkers.length > 0 && activationMarkers.length > 0
+        && orderedSubsequence(method.activation_markers, method.evidence_markers),
+      "GENERATED_SKILL_METHOD_ACTIVATION_MARKERS_INVALID",
+      "FAIL",
+      "CONTRACT",
+    );
+  });
   const methodIds = methods.methods.map((method) => method.id);
   requireCondition(methodIds.length === new Set(methodIds).size, "GENERATED_SKILL_METHOD_IDS_DUPLICATE", "FAIL", "CONTRACT");
   const generatedMethods = gateOracle.semantic_oracle.expected_package.method_marker_sets.map((semantic) => {
     const semanticMarkers = sortedStrings(semantic.all_markers, "RELEASE_CASE_METHOD_MARKERS_INVALID");
+    const semanticActivationMarkers = sortedStrings(semantic.activation_markers, "RELEASE_CASE_METHOD_ACTIVATION_MARKERS_INVALID");
+    requireCondition(semanticActivationMarkers.length > 0, "RELEASE_CASE_METHOD_ACTIVATION_MARKERS_INVALID", "FAIL", "CONTRACT");
     const matches = methods.methods.filter((method) => (
       canonicalJson(sortedStrings(method.evidence_markers, "GENERATED_SKILL_METHOD_MARKERS_INVALID")) === canonicalJson(semanticMarkers)
+      && canonicalJson(method.activation_markers) === canonicalJson(semantic.activation_markers)
     ));
     requireCondition(matches.length === 1, "GENERATED_SKILL_METHOD_SEMANTIC_MAPPING_INVALID", "FAIL", "CONTRACT");
-    return { semantic_id: semantic.semantic_id, semantic_markers: semanticMarkers, method: matches[0] };
+    return {
+      semantic_id: semantic.semantic_id,
+      semantic_markers: semanticMarkers,
+      activation_markers: [...semantic.activation_markers],
+      method: matches[0],
+    };
   });
   requireCondition(generatedMethods.length === methods.methods.length && new Set(generatedMethods.map((entry) => entry.method.id)).size === methods.methods.length, "GENERATED_SKILL_METHOD_SET_DRIFT", "FAIL", "CONTRACT");
-  const confirmedMethodIds = mapOracleMarkerGroups(scenarioOracle.oracle.required_confirmed_marker_groups, generatedMethods, "RELEASE_CASE_CONFIRMED_METHOD_MAPPING");
-  const candidateMethodIds = mapOracleMarkerGroups(scenarioOracle.oracle.required_candidate_marker_groups, generatedMethods, "RELEASE_CASE_CANDIDATE_METHOD_MAPPING");
-  const causalFactorIds = confirmedMethodIds.map(factorId);
-  const candidateFactorIds = candidateMethodIds.map(factorId);
-  requireCondition(causalFactorIds.every((item) => !candidateFactorIds.includes(item)), "RELEASE_CASE_FACTOR_CLASS_OVERLAP", "FAIL", "CONTRACT");
+  requireCondition(scenarioOracle.oracle.expected_status === "RESOLVED", "RELEASE_CASE_EXPECTED_STATUS_INVALID", "FAIL", "CONTRACT");
+  const generatedBySemanticId = new Map(generatedMethods.map((entry) => [entry.semantic_id, entry]));
+  const semanticVerdicts = scenarioOracle.oracle.expected_method_verdicts.map((item) => {
+    const entry = generatedBySemanticId.get(item.semantic_id);
+    requireCondition(entry && ["CONFIRMED", "REJECTED"].includes(item.verdict), "RELEASE_CASE_METHOD_VERDICT_MAPPING_INVALID", "FAIL", "CONTRACT");
+    return { method_id: entry.method.id, verdict: item.verdict };
+  });
+  requireCondition(semanticVerdicts.length === generatedMethods.length, "RELEASE_CASE_METHOD_VERDICT_COVERAGE_INVALID", "FAIL", "CONTRACT");
   const requiredEvidenceIdentities = scenarioOracle.oracle.required_evidence_identities.map((identity) => {
-    const [mappedMethodId] = mapOracleMarkerGroups([[identity.marker]], generatedMethods, "RELEASE_CASE_EVIDENCE_IDENTITY_MAPPING");
-    const mappedFactorId = factorId(mappedMethodId);
-    requireCondition(
-      [...causalFactorIds, ...candidateFactorIds].includes(mappedFactorId),
-      "RELEASE_CASE_EVIDENCE_IDENTITY_FACTOR_UNCLASSIFIED",
-      "FAIL",
-      "CONTRACT",
-    );
+    const entry = generatedBySemanticId.get(identity.semantic_id);
+    requireCondition(entry && entry.semantic_markers.includes(identity.marker), "RELEASE_CASE_EVIDENCE_IDENTITY_MAPPING", "FAIL", "CONTRACT");
     return {
-      factor_id: mappedFactorId,
+      method_id: entry.method.id,
       marker: identity.marker,
       identity_tokens: sortedStrings(identity.identity_tokens, "RELEASE_CASE_EVIDENCE_IDENTITY_TOKENS_INVALID"),
     };
   });
-  const resolutionStatus = candidateFactorIds.length > 0 ? "PARTIAL" : "COMPLETE";
+  const methodCards = generatedMethods
+    .map(({ method }) => ({
+      id: method.id,
+      priority: method.priority,
+      evidence_markers: [...method.evidence_markers],
+      activation_markers: [...method.activation_markers],
+    }))
+    .sort((left, right) => left.priority - right.priority || left.id.localeCompare(right.id));
+  const verdictByMethodId = new Map(semanticVerdicts.map((item) => [item.method_id, item.verdict]));
+  const methodVerdicts = methodCards.map((method) => ({ method_id: method.id, verdict: verdictByMethodId.get(method.id) }));
+  const orderedConfirmedMethodIds = methodVerdicts.filter((item) => item.verdict === "CONFIRMED").map((item) => item.method_id);
   return {
     root,
     case_id: inputs.case_id,
@@ -387,17 +418,12 @@ function selectedReleaseCase(repoRoot, generatedSkill) {
       attachment_requirement: product.attachment_requirement,
     },
     result_expectation: {
-      expected_methods_status: scenarioOracle.oracle.expected_status,
-      case_status: resolutionStatus === "COMPLETE" ? "RESOLVED" : "PARTIALLY_RESOLVED",
-      resolution_status: resolutionStatus,
-      report_status: resolutionStatus === "COMPLETE" ? "COMPLETED" : "PARTIAL",
-      confirmed_method_ids: confirmedMethodIds,
-      candidate_method_ids: candidateMethodIds,
-      causal_factor_ids: causalFactorIds,
-      candidate_factor_ids: candidateFactorIds,
-      excluded_factor_ids: [],
+      case_status: scenarioOracle.oracle.expected_status,
+      method_cards: methodCards,
+      loaded_method_ids: methodCards.map((method) => method.id),
+      method_verdicts: methodVerdicts,
+      confirmed_method_ids: orderedConfirmedMethodIds,
       required_evidence_identities: requiredEvidenceIdentities,
-      forbidden_evidence_terms: sortedStrings(scenarioOracle.oracle.forbidden_evidence_terms, "RELEASE_CASE_FORBIDDEN_EVIDENCE_TERMS_INVALID"),
     },
     input_digest: digests.input_digest,
     oracle_digest: digests.oracle_digest,
@@ -1179,7 +1205,7 @@ function assertFlatInput(input) {
   }
 }
 
-function parseClaudeStream(text, expectedCwd, { allowErrorTerminal = false } = {}) {
+export function parseClaudeStream(text, expectedCwd, { allowErrorTerminal = false } = {}) {
   const events = text.split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
   const initEvents = events.filter((event) => event.type === "system" && event.subtype === "init");
   const results = events.filter((event) => event.type === "result");
@@ -1198,17 +1224,33 @@ function parseClaudeStream(text, expectedCwd, { allowErrorTerminal = false } = {
 
   const byId = new Map();
   const records = [];
+  const assistantTextEvents = [];
+  let streamOrdinal = 0;
   for (const event of events) {
     const content = event.message?.content;
     if (!Array.isArray(content)) continue;
     for (const block of content) {
+      const currentStreamOrdinal = streamOrdinal;
+      streamOrdinal += 1;
+      if (block?.type === "text" && event.type === "assistant") {
+        requireCondition(
+          event.message?.role === "assistant"
+            && typeof block.text === "string",
+          "CLIENT_ASSISTANT_TEXT_INVALID",
+        );
+        assistantTextEvents.push({
+          ordinal: assistantTextEvents.length,
+          stream_ordinal: currentStreamOrdinal,
+          text: block.text,
+        });
+      }
       if (block?.type === "tool_use") {
         requireCondition(event.type === "assistant" && event.message?.role === "assistant", "CLIENT_TOOL_USE_ROLE");
         requireCondition(typeof block.id === "string" && !byId.has(block.id), "CLIENT_TOOL_USE_ID");
         const toolName = block.name === "Skill" ? "Skill" : normalizedToolName(block.name);
         requireCondition(toolName !== null, "CLIENT_UNEXPECTED_TOOL", "FAIL", "CONTRACT");
         if (toolName !== "Skill") assertFlatInput(block.input);
-        const record = { ordinal: records.length, tool_use_id: block.id, full_name: block.name, tool_name: toolName, input: block.input, result: null };
+        const record = { ordinal: records.length, stream_ordinal: currentStreamOrdinal, result_stream_ordinal: null, tool_use_id: block.id, full_name: block.name, tool_name: toolName, input: block.input, result: null };
         records.push(record);
         byId.set(block.id, record);
       }
@@ -1216,6 +1258,7 @@ function parseClaudeStream(text, expectedCwd, { allowErrorTerminal = false } = {
         requireCondition(event.type === "user" && event.message?.role === "user", "CLIENT_TOOL_RESULT_ROLE");
         const record = byId.get(block.tool_use_id);
         requireCondition(record && record.result === null && block.is_error !== true, "CLIENT_TOOL_RESULT_ID");
+        record.result_stream_ordinal = currentStreamOrdinal;
         if (record.tool_name === "Skill") record.result = { skill_loaded: true };
         else {
           const raw = event.tool_use_result;
@@ -1247,6 +1290,7 @@ function parseClaudeStream(text, expectedCwd, { allowErrorTerminal = false } = {
     schema_version: 1,
     init: { cwd: init.cwd, effective_model: init.model, permission_mode: init.permissionMode, tools: init.tools, mcp_servers: servers },
     records: mcpRecords,
+    assistant_text_events: assistantTextEvents,
     usage,
     terminal: { subtype: terminal.subtype, is_error: terminal.is_error },
     turns: Number(terminal.num_turns),
@@ -1415,69 +1459,352 @@ function openRequirementNames(view, kind) {
     .map((item) => item.name);
 }
 
-function expectedCreateInput(releaseCase, requestIds) {
+const PHASE_ONE_USER_MESSAGE = "订单 RPC 偶发超时，请定位原因；我有一份日志，可以在需要时提供。";
+
+const PHASE_FACT_LABELS = Object.freeze({
+  problem_time: "问题时间",
+  client_process: "客户端进程",
+  server_process: "服务端进程",
+  service: "服务名",
+  api: "API 名",
+});
+
+export function phaseOneUserMessage() {
+  return PHASE_ONE_USER_MESSAGE;
+}
+
+export function phaseTwoUserMessage(releaseCase, archive) {
+  const facts = releaseCase.driver.initial_user_fact_names.map(
+    (name, index) => {
+      requireCondition(Boolean(PHASE_FACT_LABELS[name]), "PHASE2_USER_FACT_LABEL_MISSING", "FAIL", "CONTRACT");
+      return `- ${PHASE_FACT_LABELS[name]}：${releaseCase.driver.initial_user_fact_values[index]}`;
+    },
+  );
+  return [
+    "补充信息如下：",
+    ...facts,
+    `日志文件：${archive.name}；格式：${archive.content_type}；大小：${archive.size} 字节；SHA-256：${archive.sha256}。`,
+    "请继续处理；需要日志时请先申请上传地址，拿到地址后先暂停。",
+  ].join("\n");
+}
+
+function expectedCreateInput(requestId) {
+  const rawProblemText = phaseOneUserMessage();
   return {
-    request_id: requestIds.create,
-    ...releaseCase.driver.problem,
-    initial_user_fact_names: releaseCase.driver.initial_user_fact_names,
-    initial_user_fact_values: releaseCase.driver.initial_user_fact_values,
+    request_id: requestId,
+    raw_problem_text: rawProblemText,
+    statement: rawProblemText,
+    expected_behavior: "用户未单独说明；以 raw_problem_text 为准。",
+    actual_behavior: rawProblemText,
+    scope: "仅定位 raw_problem_text 所述问题。",
+    goals: ["定位问题原因并给出结论。"],
+    non_goals: [],
+    constraints: [],
+    completion_criteria: ["给出基于证据的结论；证据不足时明确说明。"],
+    initial_user_fact_names: [],
+    initial_user_fact_values: [],
     wait_seconds: 0,
   };
 }
 
-function phaseOnePrompt(releaseCase, requestIds, archive) {
-  const createInput = canonicalJson(expectedCreateInput(releaseCase, requestIds)).trimEnd();
-  return `Perform phase 1 of the controlled Problem Locator acceptance journey. Use only the Skill tool and the seven problem_locator Remote MCP tools. Treat MCP tool_result structured payloads as authoritative; do not infer state from prose.
+export function phaseOnePrompt() {
+  return `第一步请先加载 problem-locator-client Skill，调用 Skill 工具时使用 {"skill":"problem-locator-client"}。
 
-0. Your first action MUST call the Skill tool with skill=problem-locator-client (exact input {"skill":"problem-locator-client"}). Until that Skill tool_result is received successfully, do not call any problem_locator MCP tool.
-1. Call problem_locator_create_case exactly once with this exact flat root input (do not send problem_spec or any nested object): ${createInput}
-${fixedGetCasePollingInvariant("<authoritative-case-id>")}
-2. Poll problem_locator_get_case with non-empty case_id input and wait_seconds 30 until status WAITING_ATTACHMENT has exactly the OPEN ATTACHMENT requirement ${JSON.stringify(releaseCase.skill.attachment_requirement)}. Use wait_seconds 30 on every poll; do not rapid-poll. The initial facts were already supplied to create_case, so do not resubmit them and do not accept WAITING_INPUT as the target state.
-3. Call problem_locator_prepare_attachment exactly once with request_id "${requestIds.prepare}", the latest revision, name ${JSON.stringify(archive.name)}, content_type ${JSON.stringify(archive.content_type)}, declared_size ${archive.size}, and declared_sha256 "${archive.sha256}". The call must contain exactly those seven required root properties and must never send nested input.
-4. Stop immediately after the successful prepare result. Do not upload, submit the attachment, or call another tool.`;
+加载成功后，请处理下面这位用户的新请求：
+
+${phaseOneUserMessage()}`;
 }
 
-function validatePhaseOne(audit, releaseCase, requestIds, archive, publicBaseUrl) {
+export function phaseTwoPrompt(state, releaseCase, archive) {
+  requireCondition(UUID.test(state?.case_id ?? ""), "PHASE2_CASE_ID_INVALID", "FAIL", "CONTRACT");
+  return `第一步请先加载 problem-locator-client Skill，调用 Skill 工具时使用 {"skill":"problem-locator-client"}。
+
+这是同一问题的下一轮用户回复。请继续处理已经创建的 Case ${state.case_id}，先读取服务端的最新 Case 状态，再处理用户回复：
+
+${phaseTwoUserMessage(releaseCase, archive)}`;
+}
+
+export function assertPhaseOneCaseFirst(audit) {
+  const firstBusinessCall = audit?.records?.[0];
+  requireCondition(
+    firstBusinessCall?.tool_name === "problem_locator_create_case",
+    "PHASE1_CREATE_NOT_FIRST_BUSINESS_CALL",
+    "FAIL",
+    "CONTRACT",
+  );
+  requireCondition(
+    Number.isSafeInteger(firstBusinessCall.stream_ordinal),
+    "PHASE1_CREATE_STREAM_ORDINAL_INVALID",
+    "FAIL",
+    "CONTRACT",
+  );
+  const preCreateProse = (audit.assistant_text_events ?? []).filter(
+    (event) => event.stream_ordinal < firstBusinessCall.stream_ordinal
+      && event.text.trim().length > 0,
+  );
+  requireCondition(
+    preCreateProse.length === 0,
+    "PHASE1_PROSE_BEFORE_CREATE",
+    "FAIL",
+    "CONTRACT",
+  );
+  return true;
+}
+
+function openRequirements(view, kind) {
+  return (view?.pending_requirements ?? [])
+    .filter((item) => item.status === "OPEN" && item.kind === kind);
+}
+
+export function validatePhaseOne(audit, releaseCase, requestIds) {
+  assertPhaseOneCaseFirst(audit);
   const records = audit.records;
-  const successful = records.filter((record) => record.result?.ok === true);
-  const create = successful.filter((record) => record.tool_name === "problem_locator_create_case");
-  const submit = successful.filter((record) => record.tool_name === "problem_locator_submit_supplement");
-  const prepare = successful.filter((record) => record.tool_name === "problem_locator_prepare_attachment");
-  requireCondition(create.length === 1 && submit.length === 0 && prepare.length === 1, "PHASE1_CALL_CARDINALITY", "FAIL", "CONTRACT");
-  requireCondition(records.at(-1) === prepare[0], "PHASE1_PREPARE_NOT_TERMINAL", "FAIL", "CONTRACT");
-  const createInput = expectedCreateInput(releaseCase, requestIds);
+  requireCondition(records.every((record) => record.result?.ok === true), "PHASE1_MCP_CALL_FAILED", "FAIL", "CONTRACT");
+  const create = records.filter((record) => record.tool_name === "problem_locator_create_case");
+  const gets = records.filter((record) => record.tool_name === "problem_locator_get_case");
+  requireCondition(
+    create.length === 1 && gets.length >= 1 && records.length === create.length + gets.length,
+    "PHASE1_CALL_CARDINALITY",
+    "FAIL",
+    "CONTRACT",
+  );
+  requireCondition(records[0] === create[0], "PHASE1_CREATE_NOT_FIRST_BUSINESS_CALL", "FAIL", "CONTRACT");
+  const createRequestId = create[0].input.request_id;
+  requireCondition(typeof createRequestId === "string" && createRequestId.length > 0, "PHASE1_REQUEST_ID_INVALID", "FAIL", "CONTRACT");
+  const createInput = expectedCreateInput(createRequestId);
   exactKeys(create[0].input, Object.keys(createInput), "PHASE1_CREATE_INPUT_SHAPE");
-  requireCondition(canonicalJson(create[0].input) === canonicalJson(createInput) && !Object.hasOwn(create[0].input, "problem_spec"), "PHASE1_CREATE_INPUT", "FAIL", "CONTRACT");
-  exactKeys(prepare[0].input, ["request_id", "case_id", "expected_case_revision", "name", "content_type", "declared_size", "declared_sha256"], "PHASE1_PREPARE_INPUT_SHAPE");
-  requireCondition(prepare[0].input.request_id === requestIds.prepare && prepare[0].input.name === archive.name && prepare[0].input.content_type === archive.content_type && prepare[0].input.declared_size === archive.size && prepare[0].input.declared_sha256 === archive.sha256, "PHASE1_PREPARE_INPUT", "FAIL", "CONTRACT");
+  requireCondition(
+    canonicalJson(create[0].input) === canonicalJson(createInput)
+      && create[0].input.initial_user_fact_names.length === 0
+      && create[0].input.initial_user_fact_values.length === 0
+      && !Object.hasOwn(create[0].input, "problem_spec"),
+    "PHASE1_CREATE_INPUT",
+    "FAIL",
+    "CONTRACT",
+  );
+  const createdCaseId = successData(create[0]).business_receipt?.case_id;
+  requireCondition(UUID.test(createdCaseId ?? ""), "PHASE1_CREATED_CASE_VIEW", "FAIL", "CONTRACT");
+  requireCondition(
+    gets.every((record) => canonicalJson(record.input) === canonicalJson(fixedGetCasePollInput(createdCaseId))),
+    "PHASE1_GET_CASE_INPUT",
+    "FAIL",
+    "CONTRACT",
+  );
+  const inputViews = gets
+    .map((record) => ({ record, view: caseView(record) }))
+    .filter(({ view }) => (
+      view?.case_id === createdCaseId
+        && view.status === "WAITING_INPUT"
+        && canonicalJson(openRequirementNames(view, "INPUT"))
+          === canonicalJson(releaseCase.driver.initial_user_fact_names)
+    ));
+  requireCondition(inputViews.length >= 1, "PHASE1_INPUT_REQUIREMENTS_NOT_OBSERVED", "FAIL", "CONTRACT");
+  const inputView = inputViews.at(-1);
+  requireCondition(records.at(-1) === inputView.record, "PHASE1_DID_NOT_STOP_AT_INPUT", "FAIL", "CONTRACT");
+  const requirements = openRequirements(inputView.view, "INPUT");
+  requireCondition(
+    requirements.length === releaseCase.driver.initial_user_fact_names.length
+      && requirements.every((item) => typeof item.prompt === "string" && item.prompt.trim().length > 0),
+    "PHASE1_INPUT_REQUIREMENT_PROMPTS_INVALID",
+    "FAIL",
+    "CONTRACT",
+  );
+  requireCondition(
+    Number.isSafeInteger(inputView.record.result_stream_ordinal),
+    "PHASE1_INPUT_RESULT_ORDINAL_INVALID",
+    "FAIL",
+    "CONTRACT",
+  );
+  const questionsAfterResult = (audit.assistant_text_events ?? []).filter(
+    (event) => event.stream_ordinal > inputView.record.result_stream_ordinal
+      && event.text.trim().length > 0,
+  );
+  const questionText = questionsAfterResult.map((event) => event.text).join("\n");
+  requireCondition(
+    questionsAfterResult.length > 0
+      && requirements.every((item) => questionText.includes(item.prompt)),
+    "PHASE1_REQUIREMENTS_NOT_ASKED_AFTER_OBSERVATION",
+    "FAIL",
+    "CONTRACT",
+  );
+  const requestedBy = [...new Set(requirements.map((item) => item.requested_by_job_id))];
+  requireCondition(requestedBy.length === 1 && UUID.test(requestedBy[0] ?? ""), "PHASE1_REQUIREMENT_JOB_INVALID", "FAIL", "CONTRACT");
+  requireCondition(
+    inputView.view.selected_skill_ref?.id === releaseCase.skill.runtime_ref_id
+      && inputView.view.selected_skill_ref?.version === releaseCase.skill.version,
+    "PHASE1_SELECTED_SKILL",
+    "FAIL",
+    "CONTRACT",
+  );
+  return {
+    case_id: createdCaseId,
+    waiting_input_case_revision: inputView.view.case_revision,
+    input_requirements: requirements.map((item) => ({ name: item.name, prompt: item.prompt })),
+    methods_preflight_job_id: requestedBy[0],
+    selected_skill_ref: inputView.view.selected_skill_ref,
+    request_ids: {
+      ...requestIds,
+      create: createRequestId,
+    },
+  };
+}
+
+export function validatePhaseTwo(audit, state, releaseCase, requestIds, archive, publicBaseUrl) {
+  const records = audit.records;
+  requireCondition(records.every((record) => record.result?.ok === true), "PHASE2_MCP_CALL_FAILED", "FAIL", "CONTRACT");
+  const creates = records.filter((record) => record.tool_name === "problem_locator_create_case");
+  const submits = records.filter((record) => record.tool_name === "problem_locator_submit_supplement");
+  const gets = records.filter((record) => record.tool_name === "problem_locator_get_case");
+  const prepare = records.filter((record) => record.tool_name === "problem_locator_prepare_attachment");
+  requireCondition(
+    creates.length === 0 && submits.length === 1 && gets.length >= 2 && prepare.length === 1,
+    "PHASE2_CALL_CARDINALITY",
+    "FAIL",
+    "CONTRACT",
+  );
+  requireCondition(records[0] === gets[0], "PHASE2_GET_NOT_FIRST_BUSINESS_CALL", "FAIL", "CONTRACT");
+  requireCondition(records.at(-1) === prepare[0], "PHASE2_PREPARE_NOT_TERMINAL", "FAIL", "CONTRACT");
+  requireCondition(
+    gets.every((record) => canonicalJson(record.input) === canonicalJson(fixedGetCasePollInput(state.case_id))),
+    "PHASE2_GET_CASE_INPUT",
+    "FAIL",
+    "CONTRACT",
+  );
+  const expectedNames = state.input_requirements.map((item) => item.name);
+  const inputView = gets
+    .map((record) => ({ record, view: caseView(record) }))
+    .find(({ record, view }) => (
+      record.ordinal < submits[0].ordinal
+        && view?.case_id === state.case_id
+        && view.status === "WAITING_INPUT"
+        && canonicalJson(openRequirementNames(view, "INPUT")) === canonicalJson(expectedNames)
+    ));
+  requireCondition(inputView, "PHASE2_INPUT_REQUIREMENTS_NOT_REOBSERVED", "FAIL", "CONTRACT");
+  requireCondition(
+    inputView.view.case_revision === state.waiting_input_case_revision,
+    "PHASE2_INPUT_REVISION_DRIFT",
+    "FAIL",
+    "CONTRACT",
+  );
+  const currentRequirements = openRequirements(inputView.view, "INPUT");
+  requireCondition(
+    canonicalJson(currentRequirements.map((item) => ({ name: item.name, prompt: item.prompt })))
+      === canonicalJson(state.input_requirements),
+    "PHASE2_INPUT_REQUIREMENTS_DRIFT",
+    "FAIL",
+    "CONTRACT",
+  );
+  const expectedValuesByName = new Map(releaseCase.driver.initial_user_fact_names.map(
+    (name, index) => [name, releaseCase.driver.initial_user_fact_values[index]],
+  ));
+  const expectedValues = expectedNames.map((name) => expectedValuesByName.get(name));
+  requireCondition(expectedValues.every((value) => typeof value === "string"), "PHASE2_USER_ANSWER_MISSING", "FAIL", "CONTRACT");
+  exactKeys(submits[0].input, ["request_id", "case_id", "expected_case_revision", "input_names", "input_values", "attachment_ids", "wait_seconds"], "PHASE2_INPUT_SUBMISSION_SHAPE");
+  requireCondition(
+    submits[0].input.case_id === state.case_id
+      && submits[0].input.expected_case_revision === inputView.view.case_revision
+      && canonicalJson(submits[0].input.input_names) === canonicalJson(expectedNames)
+      && canonicalJson(submits[0].input.input_values) === canonicalJson(expectedValues)
+      && canonicalJson(submits[0].input.attachment_ids) === canonicalJson([])
+      && submits[0].input.wait_seconds === 0,
+    "PHASE2_INPUT_SUBMISSION",
+    "FAIL",
+    "CONTRACT",
+  );
+  const attachmentView = gets
+    .map((record) => ({ record, view: caseView(record) }))
+    .find(({ record, view }) => (
+      record.ordinal > submits[0].ordinal
+        && record.ordinal < prepare[0].ordinal
+        && view?.case_id === state.case_id
+        && view.status === "WAITING_ATTACHMENT"
+        && canonicalJson(openRequirementNames(view, "ATTACHMENT"))
+          === canonicalJson([releaseCase.skill.attachment_requirement])
+    ));
+  requireCondition(attachmentView, "PHASE2_ATTACHMENT_REQUIREMENT_NOT_OBSERVED", "FAIL", "CONTRACT");
+  exactKeys(prepare[0].input, ["request_id", "case_id", "expected_case_revision", "name", "content_type", "declared_size", "declared_sha256"], "PHASE2_PREPARE_INPUT_SHAPE");
+  requireCondition(
+    prepare[0].input.case_id === state.case_id
+      && prepare[0].input.expected_case_revision === attachmentView.view.case_revision
+      && prepare[0].input.name === archive.name
+      && prepare[0].input.content_type === archive.content_type
+      && prepare[0].input.declared_size === archive.size
+      && prepare[0].input.declared_sha256 === archive.sha256,
+    "PHASE2_PREPARE_INPUT",
+    "FAIL",
+    "CONTRACT",
+  );
+  const generatedRequestIds = [
+    state.request_ids.create,
+    submits[0].input.request_id,
+    prepare[0].input.request_id,
+  ];
+  requireCondition(
+    generatedRequestIds.every((value) => typeof value === "string" && value.length > 0)
+      && new Set(generatedRequestIds).size === generatedRequestIds.length,
+    "PHASE2_REQUEST_IDS_INVALID",
+    "FAIL",
+    "CONTRACT",
+  );
   const prepareData = successData(prepare[0]);
   const response = prepareData.application_response;
   const view = response?.case_view;
   const descriptor = prepareData.upload;
-  requireCondition(view?.status === "WAITING_ATTACHMENT" && UUID.test(view.case_id) && Number.isInteger(view.case_revision), "PHASE1_CASE_VIEW", "FAIL", "CONTRACT");
-  const attachmentRequirements = (view.pending_requirements ?? [])
-    .filter((item) => item.status === "OPEN" && item.kind === "ATTACHMENT");
   requireCondition(
-    canonicalJson(attachmentRequirements.map((item) => item.name)) === canonicalJson([releaseCase.skill.attachment_requirement])
-      && UUID.test(attachmentRequirements[0]?.requested_by_job_id ?? ""),
-    "PHASE1_ATTACHMENT_REQUIREMENT",
+    view?.status === "WAITING_ATTACHMENT"
+      && view.case_id === state.case_id
+      && Number.isInteger(view.case_revision),
+    "PHASE2_CASE_VIEW",
     "FAIL",
     "CONTRACT",
   );
-  requireCondition(view.selected_skill_ref?.id === releaseCase.skill.runtime_ref_id && view.selected_skill_ref?.version === releaseCase.skill.version, "PHASE1_SELECTED_SKILL", "FAIL", "CONTRACT");
-  exactKeys(descriptor, ["attachment_id", "method", "url", "required_headers", "max_bytes", "expires_at"], "PHASE1_UPLOAD_DESCRIPTOR_SHAPE");
-  requireCondition(UUID.test(descriptor.attachment_id) && descriptor.method === "PUT" && descriptor.url === `${publicBaseUrl}/api/v1/attachments/${descriptor.attachment_id}/content` && descriptor.max_bytes === MAX_ATTACHMENT_BYTES && descriptor.expires_at === null, "PHASE1_UPLOAD_DESCRIPTOR", "FAIL", "CONTRACT");
-  exactKeys(descriptor.required_headers, ["Content-Length", "Content-Type", "Idempotency-Key", "X-Content-SHA256"], "PHASE1_UPLOAD_HEADERS_SHAPE");
-  requireCondition(descriptor.required_headers["Content-Length"] === String(archive.size) && descriptor.required_headers["Content-Type"] === archive.content_type && descriptor.required_headers["Idempotency-Key"] === descriptor.attachment_id && descriptor.required_headers["X-Content-SHA256"] === archive.sha256, "PHASE1_UPLOAD_HEADERS", "FAIL", "CONTRACT");
-  requireCondition(!successful.some((record) => caseView(record)?.status === "WAITING_INPUT"), "PHASE1_INITIAL_FACT_REGRESSION", "FAIL", "CONTRACT");
+  const attachmentRequirements = openRequirements(view, "ATTACHMENT");
+  requireCondition(
+    canonicalJson(attachmentRequirements.map((item) => item.name))
+        === canonicalJson([releaseCase.skill.attachment_requirement])
+      && attachmentRequirements[0]?.requested_by_job_id === state.methods_preflight_job_id,
+    "PHASE2_ATTACHMENT_REQUIREMENT",
+    "FAIL",
+    "CONTRACT",
+  );
+  requireCondition(
+    view.selected_skill_ref?.id === releaseCase.skill.runtime_ref_id
+      && view.selected_skill_ref?.version === releaseCase.skill.version,
+    "PHASE2_SELECTED_SKILL",
+    "FAIL",
+    "CONTRACT",
+  );
+  exactKeys(descriptor, ["attachment_id", "method", "url", "required_headers", "max_bytes", "expires_at"], "PHASE2_UPLOAD_DESCRIPTOR_SHAPE");
+  requireCondition(
+    UUID.test(descriptor.attachment_id)
+      && descriptor.method === "PUT"
+      && descriptor.url === `${publicBaseUrl}/api/v1/attachments/${descriptor.attachment_id}/content`
+      && descriptor.max_bytes === MAX_ATTACHMENT_BYTES
+      && descriptor.expires_at === null,
+    "PHASE2_UPLOAD_DESCRIPTOR",
+    "FAIL",
+    "CONTRACT",
+  );
+  exactKeys(descriptor.required_headers, ["Content-Length", "Content-Type", "Idempotency-Key", "X-Content-SHA256"], "PHASE2_UPLOAD_HEADERS_SHAPE");
+  requireCondition(
+    descriptor.required_headers["Content-Length"] === String(archive.size)
+      && descriptor.required_headers["Content-Type"] === archive.content_type
+      && descriptor.required_headers["Idempotency-Key"] === descriptor.attachment_id
+      && descriptor.required_headers["X-Content-SHA256"] === archive.sha256,
+    "PHASE2_UPLOAD_HEADERS",
+    "FAIL",
+    "CONTRACT",
+  );
   return {
-    case_id: view.case_id,
     attachment_id: descriptor.attachment_id,
     prepared_case_revision: view.case_revision,
     prepare_expected_case_revision: prepare[0].input.expected_case_revision,
-    methods_preflight_job_id: attachmentRequirements[0].requested_by_job_id,
-    selected_skill_ref: view.selected_skill_ref,
     upload_descriptor: descriptor,
+    request_ids: {
+      ...requestIds,
+      submit_inputs: submits[0].input.request_id,
+      prepare: prepare[0].input.request_id,
+    },
   };
 }
 
@@ -1486,7 +1813,7 @@ async function uploadAttachment(configuration, state, stageRoot) {
   const archive = path.join(configuration.attemptRoot, "payload", state.archive.name);
   requireCondition(fs.existsSync(archive) && fs.statSync(archive).size === state.archive.size && sha256File(archive) === state.archive.sha256, "UPLOAD_FIXTURE_INVALID");
   requireCondition(descriptor.url === `${state.public_base_url}/api/v1/attachments/${state.attachment_id}/content`, "UPLOAD_URL_INVALID");
-  const flatCreate = expectedCreateInput(configuration.releaseCase, state.request_ids);
+  const flatCreate = expectedCreateInput(state.request_ids.create);
   const problemKeys = ["statement", "expected_behavior", "actual_behavior", "scope", "goals", "non_goals", "constraints", "completion_criteria"];
   const createBody = {
     request_id: flatCreate.request_id,
@@ -1652,7 +1979,7 @@ function phaseThreePrompt(state, releaseCase) {
 0. First call Skill with exact input {"skill":"problem-locator-client"}; do not call MCP before it succeeds.
 1. Call problem_locator_submit_supplement exactly once with request_id "${state.request_ids.submit_attachment}", case_id "${state.case_id}", expected_case_revision ${state.case_revision}, input_names [], input_values [], attachment_ids ["${state.attachment_id}"], wait_seconds 0.
 ${fixedGetCasePollingInvariant(state.case_id)}
-${supplement} Poll with the same literal get-case input. Observe REVIEWING, then continue unchanged until a terminal case status with final_result.status ACCEPTED. Use wait_seconds 30 on every poll, do not rapid-poll, and do not skip REVIEWING.
+${supplement} Poll with the same literal get-case input. Observe REVIEWING, then continue unchanged until status RESOLVED with methods_result.status RESOLVED. Use wait_seconds 30 on every poll, do not rapid-poll, and do not skip REVIEWING.
 5. Call problem_locator_list_artifacts exactly once for this Case and stop. Do not call another tool.`;
 }
 
@@ -1678,27 +2005,27 @@ function validatePhaseThree(audit, state, releaseCase) {
   }
   const reviewing = views.find((entry) => entry.ordinal > terminalPredecessor.ordinal && entry.view.status === "REVIEWING");
   const resolved = [...views].reverse().find((entry) => entry.ordinal > (reviewing?.ordinal ?? Infinity) && entry.view.status === releaseCase.result_expectation.case_status);
-  requireCondition(reviewing && resolved && resolved.view.final_result?.status === "ACCEPTED", "PHASE3_REVIEW_RESOLUTION", "FAIL", "CONTRACT");
-  requireCondition(resolved.view.final_result?.resolution_status === releaseCase.result_expectation.resolution_status, "PHASE3_RESOLUTION_STATUS", "FAIL", "CONTRACT");
+  requireCondition(
+    reviewing && resolved && resolved.view.methods_result?.schema_version === 2
+      && resolved.view.methods_result.status === "RESOLVED"
+      && resolved.view.final_result === null && resolved.view.unresolved_result === null
+      && resolved.view.generic_result === null && resolved.view.generic_result_v2 === null,
+    "PHASE3_METHODS_V2_RESOLUTION",
+    "FAIL",
+    "CONTRACT",
+  );
   requireCondition(resolved.view.selected_skill_ref?.id === releaseCase.skill.runtime_ref_id && resolved.view.selected_skill_ref?.version === releaseCase.skill.version, "PHASE3_SELECTED_SKILL", "FAIL", "CONTRACT");
   const listData = successData(lists[0]);
   const artifacts = listData.artifacts;
-  requireCondition(Array.isArray(artifacts) && artifacts.length === 2, "PHASE3_ARTIFACT_COUNT", "FAIL", "CONTRACT");
-  const publicArtifact = artifacts.find((artifact) => artifact.kind === "USER_RESULT" && artifact.name === "diagnosis-result.json");
-  const publicArchive = artifacts.find((artifact) => artifact.kind === "USER_RESULT_ARCHIVE" && artifact.name === "result.zip");
-  for (const artifact of [publicArtifact, publicArchive]) {
-    requireCondition(UUID.test(artifact?.artifact_id ?? "") && Number.isInteger(artifact?.size) && artifact.size > 0 && SHA256.test(artifact?.sha256 ?? "") && artifact.download_url === `${state.public_base_url}/api/v1/artifacts/${artifact.artifact_id}/content?case_id=${state.case_id}`, "PHASE3_ARTIFACT_INVALID", "FAIL", "CONTRACT");
-  }
+  requireCondition(Array.isArray(artifacts) && artifacts.length === 0 && Array.isArray(resolved.view.artifacts) && resolved.view.artifacts.length === 0, "PHASE3_METHODS_V2_ARTIFACTS_PRESENT", "FAIL", "CONTRACT");
   return {
     case_id: state.case_id,
     attachment_id: state.attachment_id,
     resolved_case_revision: resolved.view.case_revision,
     diagnosis_state_revision: resolved.view.diagnosis_state_revision,
     selected_skill_ref: resolved.view.selected_skill_ref,
-    final_result: resolved.view.final_result,
+    methods_result: resolved.view.methods_result,
     observed_statuses: views.map((entry) => entry.view.status),
-    public_artifact: publicArtifact,
-    public_result_archive: publicArchive,
     rest_supplements: submits.map((record) => ({
       request_id: record.input.request_id,
       expected_case_revision: record.input.expected_case_revision,
@@ -1710,7 +2037,6 @@ function validatePhaseThree(audit, state, releaseCase) {
 }
 
 async function verifyResolvedWebApi(configuration, state, summary, stageRoot) {
-  const expectedArtifacts = [summary.public_artifact, summary.public_result_archive];
   const page = `<!doctype html><html><head><meta charset="utf-8"><title>PENDING</title></head><body><script>
 const configuration = ${scriptJson({
     caseUrl: `${state.public_base_url}/api/v1/cases/${state.case_id}`,
@@ -1731,10 +2057,6 @@ async function jsonRequest(url, options = {}) {
   try { envelope = JSON.parse(text); } catch {}
   return { status: response.status, envelope, correlation_id: response.headers.get("x-problem-locator-correlation-id") };
 }
-async function digest(bytes) {
-  const value = await crypto.subtle.digest("SHA-256", bytes);
-  return [...new Uint8Array(value)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
-}
 (async () => {
   const supplements = [];
   for (const body of configuration.supplements) {
@@ -1746,21 +2068,7 @@ async function digest(bytes) {
   }
   const query = await jsonRequest(configuration.caseUrl + "?wait_seconds=30");
   const artifacts = await jsonRequest(configuration.artifactsUrl);
-  const downloads = [];
-  for (const artifact of artifacts.envelope?.data?.artifacts ?? []) {
-    const response = await fetch(artifact.download_url);
-    const bytes = await response.arrayBuffer();
-    downloads.push({
-      artifact_id: artifact.artifact_id,
-      status: response.status,
-      size: bytes.byteLength,
-      sha256: await digest(bytes),
-      header_sha256: response.headers.get("x-content-sha256"),
-      header_length: response.headers.get("content-length"),
-      correlation_id: response.headers.get("x-problem-locator-correlation-id"),
-    });
-  }
-  document.documentElement.dataset.result = encoded({ ok: true, supplements, query, artifacts, downloads });
+  document.documentElement.dataset.result = encoded({ ok: true, supplements, query, artifacts });
   document.title = "DONE";
 })().catch((error) => {
   document.documentElement.dataset.result = encoded({ ok: false, error: String(error?.stack ?? error) });
@@ -1771,15 +2079,21 @@ async function digest(bytes) {
   if (result.ok !== true && typeof failBrowser === "function") failBrowser("CHROME_RESOLVED-API_EXECUTION_FAILED");
   requireCondition(result.ok === true, "CHROME_RESOLVED_API_EXECUTION_FAILED", "FAIL", "BROWSER");
   requireCondition(Array.isArray(result.supplements) && result.supplements.length === summary.rest_supplements.length && result.supplements.every((item) => item.status === 200 && item.envelope?.ok === true && typeof item.correlation_id === "string"), "CHROME_SUPPLEMENT_REPLAY_INVALID", "FAIL", "CONTRACT");
-  requireCondition(result.query?.status === 200 && result.query.envelope?.data?.case_view?.case_id === state.case_id && result.query.envelope?.data?.case_view?.case_revision === summary.resolved_case_revision && result.query.envelope?.data?.wait_timed_out === false, "CHROME_TERMINAL_QUERY_INVALID", "FAIL", "CONTRACT");
+  const restView = result.query?.envelope?.data?.case_view;
+  requireCondition(
+    result.query?.status === 200 && restView?.case_id === state.case_id
+      && restView.case_revision === summary.resolved_case_revision
+      && result.query.envelope?.data?.wait_timed_out === false
+      && restView.status === "RESOLVED"
+      && canonicalJson(restView.methods_result) === canonicalJson(summary.methods_result)
+      && restView.final_result === null && restView.unresolved_result === null
+      && restView.generic_result === null && restView.generic_result_v2 === null,
+    "CHROME_TERMINAL_QUERY_INVALID",
+    "FAIL",
+    "CONTRACT",
+  );
   const listed = result.artifacts?.envelope?.data?.artifacts;
-  requireCondition(result.artifacts?.status === 200 && Array.isArray(listed) && listed.length === expectedArtifacts.length, "CHROME_ARTIFACT_LIST_INVALID", "FAIL", "CONTRACT");
-  for (const expected of expectedArtifacts) {
-    const listedArtifact = listed.find((item) => item.artifact_id === expected.artifact_id);
-    const download = result.downloads?.find((item) => item.artifact_id === expected.artifact_id);
-    requireCondition(listedArtifact?.size === expected.size && listedArtifact?.sha256 === expected.sha256 && listedArtifact?.download_url === expected.download_url, "CHROME_ARTIFACT_VIEW_MISMATCH", "FAIL", "CONTRACT");
-    requireCondition(download?.status === 200 && download.size === expected.size && download.sha256 === expected.sha256 && download.header_sha256 === expected.sha256 && download.header_length === String(expected.size) && typeof download.correlation_id === "string", "CHROME_ARTIFACT_DOWNLOAD_MISMATCH", "FAIL", "CONTRACT");
-  }
+  requireCondition(result.artifacts?.status === 200 && Array.isArray(listed) && listed.length === 0, "CHROME_METHODS_V2_ARTIFACT_LIST_INVALID", "FAIL", "CONTRACT");
   const receipt = {
     schema_version: 1,
     status: "PASS",
@@ -1787,11 +2101,11 @@ async function digest(bytes) {
     origin: browserOrigin,
     target_origin: new URL(state.public_base_url).origin,
     cross_origin: browserOrigin !== new URL(state.public_base_url).origin,
-    operations: ["submit_supplement", "get_case", "list_artifacts", "download_artifact"],
+    operations: ["submit_supplement", "get_case", "list_artifacts"],
     supplement_replays: result.supplements.length,
-    artifacts_verified: expectedArtifacts.length,
+    methods_result_sha256: sha256Bytes(canonicalJson(summary.methods_result)),
+    artifacts_verified: 0,
     correlation_header_exposed: true,
-    content_headers_exposed: true,
   };
   writeNew(path.join(stageRoot, "chrome-resolved-api.json"), receipt);
   return receipt;
@@ -1810,73 +2124,10 @@ function validateRestart(audit, state, releaseCase) {
   requireCondition(records.length === 2 && records[0].tool_name === "problem_locator_get_case" && records[1].tool_name === "problem_locator_list_artifacts", "RESTART_CALL_SEQUENCE", "FAIL", "CONTRACT");
   const view = caseView(records[0]);
   const artifacts = successData(records[1]).artifacts;
-  requireCondition(view?.case_id === state.case_id && view.status === releaseCase.result_expectation.case_status && view.case_revision === state.resolved_case_revision && view.final_result?.status === "ACCEPTED" && view.final_result?.resolution_status === releaseCase.result_expectation.resolution_status, "RESTART_CASE_MISMATCH", "FAIL", "CONTRACT");
+  requireCondition(view?.case_id === state.case_id && view.status === releaseCase.result_expectation.case_status && view.case_revision === state.resolved_case_revision, "RESTART_CASE_MISMATCH", "FAIL", "CONTRACT");
   requireCondition(view.selected_skill_ref?.id === releaseCase.skill.runtime_ref_id && view.selected_skill_ref?.version === releaseCase.skill.version, "RESTART_SELECTED_SKILL", "FAIL", "CONTRACT");
-  requireCondition(Array.isArray(artifacts) && artifacts.length === 2, "RESTART_ARTIFACT_COUNT", "FAIL", "CONTRACT");
-  for (const expected of [state.public_artifact, state.public_result_archive]) {
-    const actual = artifacts.find((artifact) => artifact.artifact_id === expected.artifact_id);
-    requireCondition(actual && actual.sha256 === expected.sha256 && actual.size === expected.size && actual.kind === expected.kind, "RESTART_ARTIFACT_MISMATCH", "FAIL", "CONTRACT");
-  }
+  requireCondition(Array.isArray(artifacts) && artifacts.length === 0, "RESTART_METHODS_V2_ARTIFACTS_PRESENT", "FAIL", "CONTRACT");
   return { case_view: view, artifacts };
-}
-
-async function downloadArtifacts(configuration, state, stageRoot) {
-  for (const [label, artifact] of [["diagnosis-result", state.public_artifact], ["result-archive", state.public_result_archive]]) {
-    const startedAtUtc = new Date().toISOString();
-    const started = process.hrtime.bigint();
-    let httpStatus;
-    let bytes;
-    if (configuration.topology === DUAL_LINUX_TOPOLOGY) {
-      const runtime = ensureClientRuntime(configuration, state);
-      const downloadRoot = path.join(runtime.runtimeRoot, "downloads", configuration.stage);
-      ensureDirectory(downloadRoot);
-      const target = path.join(downloadRoot, label);
-      const containerTarget = `/client-runtime/downloads/${configuration.stage}/${label}`;
-      const transfer = await run("docker", dockerArgs(configuration.dockerContext, [
-        "exec", state.client_container,
-        "curl", "--noproxy", "*", "--fail", "--silent", "--show-error", "--max-time", "60",
-        "--output", containerTarget,
-        "--write-out", "%{http_code}",
-        "--", artifact.download_url,
-      ]), { forward: false });
-      httpStatus = Number(transfer.stdout.trim());
-      requireCondition(transfer.status === 0 && fs.existsSync(target), `RESTART_DOWNLOAD_${label.toUpperCase().replaceAll("-", "_")}`, "FAIL", "PRODUCT");
-      bytes = fs.readFileSync(target);
-    } else {
-      const response = await fetch(artifact.download_url, { signal: AbortSignal.timeout(60_000) });
-      httpStatus = response.status;
-      bytes = Buffer.from(await response.arrayBuffer());
-    }
-    writeNew(path.join(stageRoot, `restart-${label}.timing.json`), {
-      schema_version: 2,
-      span: configuration.topology === DUAL_LINUX_TOPOLOGY ? "linux-client-container.http-download" : "host.http-download",
-      clock_domain: configuration.topology === DUAL_LINUX_TOPOLOGY ? "linux-client-container" : `${configuration.client}-host`,
-      started_at_utc: startedAtUtc,
-      finished_at_utc: new Date().toISOString(),
-      duration_ms: Math.round(Number(process.hrtime.bigint() - started) / 1_000_000),
-      response_bytes: bytes.length,
-      http_status: httpStatus,
-      retries: 0,
-      timed_out: false,
-    });
-    requireCondition(httpStatus === 200 && bytes.length === artifact.size && sha256Bytes(bytes) === artifact.sha256, `RESTART_DOWNLOAD_${label.toUpperCase().replaceAll("-", "_")}`, "FAIL", "PRODUCT");
-    if (artifact.content_type === "application/json") {
-      const report = JSON.parse(bytes.toString("utf8"));
-      try {
-        validateReleaseDiagnosisReport({
-          report,
-          expectation: configuration.releaseCase.result_expectation,
-          completionCriteria: configuration.releaseCase.driver.problem.completion_criteria,
-          requiredSafetyPhrases: configuration.releaseCase.oracle.required_safety_phrases,
-        });
-      } catch (error) {
-        throw new StageError(error?.code ?? "RESTART_RESULT_INVALID", "FAIL", "CONTRACT");
-      }
-    }
-    if (artifact.content_type === "application/zip") requireCondition(bytes.subarray(0, 2).toString("binary") === "PK", "RESTART_ARCHIVE_FORMAT", "FAIL", "CONTRACT");
-    fs.writeFileSync(path.join(stageRoot, `restart-${label}.${artifact.content_type === "application/json" ? "json" : "zip"}`), bytes, { flag: "wx", mode: 0o600 });
-    process.stdout.write("TEST_FLOW_PROGRESS request.completed\n");
-  }
 }
 
 function indexEventParts(configuration, state, mode, indexLabel = null) {
@@ -2590,7 +2841,7 @@ async function createCheckpointSource(configuration, state, continuation) {
     try { fs.rmSync(archiveHostPath, { force: true }); } catch {}
   }
   const adapterContinuation = {
-    adapter_state_schema_version: 4,
+    adapter_state_schema_version: 5,
     adapter_case_input_digest: state.release_case?.input_digest ?? null,
     adapter_case_scenario_id: state.release_case?.scenario_id ?? null,
     adapter_case_skill_id: state.release_case?.skill_id ?? null,
@@ -2614,20 +2865,8 @@ async function createCheckpointSource(configuration, state, continuation) {
     adapter_upload_content_type: state.upload_descriptor?.required_headers?.["Content-Type"] ?? null,
     adapter_upload_idempotency_key: state.upload_descriptor?.required_headers?.["Idempotency-Key"] ?? null,
     adapter_upload_sha256: state.upload_descriptor?.required_headers?.["X-Content-SHA256"] ?? null,
-    adapter_public_artifact_id: state.public_artifact?.artifact_id ?? null,
-    adapter_public_artifact_kind: state.public_artifact?.kind ?? null,
-    adapter_public_artifact_name: state.public_artifact?.name ?? null,
-    adapter_public_artifact_content_type: state.public_artifact?.content_type ?? null,
-    adapter_public_artifact_size: state.public_artifact?.size ?? null,
-    adapter_public_artifact_sha256: state.public_artifact?.sha256 ?? null,
-    adapter_public_artifact_created_at: state.public_artifact?.created_at ?? null,
-    adapter_public_archive_id: state.public_result_archive?.artifact_id ?? null,
-    adapter_public_archive_kind: state.public_result_archive?.kind ?? null,
-    adapter_public_archive_name: state.public_result_archive?.name ?? null,
-    adapter_public_archive_content_type: state.public_result_archive?.content_type ?? null,
-    adapter_public_archive_size: state.public_result_archive?.size ?? null,
-    adapter_public_archive_sha256: state.public_result_archive?.sha256 ?? null,
-    adapter_public_archive_created_at: state.public_result_archive?.created_at ?? null,
+    adapter_methods_result_json: state.methods_result ? canonicalJson(state.methods_result) : null,
+    adapter_methods_v2_json: state.methods_v2 ? canonicalJson(state.methods_v2) : null,
   };
   requireCondition(Object.values(adapterContinuation).every((value) => value === null || ["string", "number", "boolean"].includes(typeof value) || (Array.isArray(value) && value.every((entry) => entry === null || ["string", "number", "boolean"].includes(typeof entry)))), "CHECKPOINT_CONTINUATION_NOT_FLAT");
   writeNew(checkpointPath, {
@@ -2767,65 +3006,105 @@ async function auditServiceAgentUsage(configuration, state, instance) {
   return { invocations: receipt.invocations, noModelJobs: receipt.no_model_jobs };
 }
 
-async function captureMethodsGroundingOracle(configuration, state, serviceInvocations) {
-  const diagnosisJobIds = [...new Set(serviceInvocations
+const METHODS_V2_EXECUTION_SOURCES = Object.freeze({
+  source_job: ["SOURCE", "job.json"],
+  reviewer_job: ["REVIEWER", "job.json"],
+  evidence_graph: ["SOURCE", "methods-evidence-graph-v2.json"],
+  evaluation_plan: ["SOURCE", "methods-evaluation-plan-v2.json"],
+  limitations: ["SOURCE", "methods-limitations-v2.json"],
+  source_state: ["SOURCE", "methods-state-v2.json"],
+  source_outcome: ["SOURCE", "job_outcome.json"],
+  terminal_state: ["REVIEWER", "methods-state-v2.json"],
+  reviewer_outcome: ["REVIEWER", "job_outcome.json"],
+});
+
+async function captureMethodsV2Files(configuration, state, { sourceJobId, reviewerJobId, prefix = "" }) {
+  const captured = {};
+  for (const [key, [owner, sourceName]] of Object.entries(METHODS_V2_EXECUTION_SOURCES)) {
+    const jobId = owner === "SOURCE" ? sourceJobId : reviewerJobId;
+    const destinationName = `${prefix}${METHODS_V2_CAPTURED_FILES[key]}`;
+    const destination = path.join(configuration.stageRoot, destinationName);
+    requireCondition(!fs.existsSync(destination), "METHODS_V2_ORACLE_CAPTURE_ALREADY_EXISTS");
+    const copied = await run("docker", dockerArgs(configuration.dockerContext, [
+      "cp",
+      `${state.active_container}:/var/lib/problem-locator/jobs/${jobId}/${sourceName}`,
+      destination,
+    ]), { forward: false });
+    requireCondition(copied.status === 0, "METHODS_V2_EXECUTION_RECORD_MISSING", "FAIL", "CONTRACT");
+    const metadata = fs.lstatSync(destination);
+    requireCondition(metadata.isFile() && !metadata.isSymbolicLink() && metadata.nlink === 1 && metadata.size > 0, "METHODS_V2_EXECUTION_RECORD_INVALID", "FAIL", "CONTRACT");
+    captured[key] = fs.readFileSync(destination);
+  }
+  return captured;
+}
+
+function methodsV2Expected(configuration, state, sourceJobId, reviewerJobId) {
+  return {
+    source_job_id: sourceJobId,
+    reviewer_job_id: reviewerJobId,
+    case_id: state.case_id,
+    skill_ref: {
+      id: configuration.releaseCase.skill.runtime_ref_id,
+      version: configuration.releaseCase.skill.version,
+      content_hash: configuration.releaseCase.skill.content_hash,
+    },
+    source_ids: [...configuration.releaseCase.driver.attachment_anchor_names].sort(),
+    method_cards: configuration.releaseCase.result_expectation.method_cards,
+    loaded_method_ids: configuration.releaseCase.result_expectation.loaded_method_ids,
+    method_verdicts: configuration.releaseCase.result_expectation.method_verdicts,
+    confirmed_method_ids: configuration.releaseCase.result_expectation.confirmed_method_ids,
+    required_evidence_identities: configuration.releaseCase.result_expectation.required_evidence_identities,
+  };
+}
+
+async function captureMethodsV2Oracle(configuration, state, serviceInvocations) {
+  const sourceJobIds = [...new Set(serviceInvocations
     .filter((invocation) => invocation.job_type === "DIAGNOSE")
     .map((invocation) => invocation.job_id))];
+  const reviewerJobIds = [...new Set(serviceInvocations
+    .filter((invocation) => invocation.job_type === "REVIEW")
+    .map((invocation) => invocation.job_id))];
   requireCondition(
-    diagnosisJobIds.length === 1 && UUID.test(diagnosisJobIds[0] ?? ""),
-    "METHODS_ORACLE_DIAGNOSE_JOB_ID_INVALID",
+    sourceJobIds.length === 1 && reviewerJobIds.length === 1
+      && UUID.test(sourceJobIds[0] ?? "") && UUID.test(reviewerJobIds[0] ?? ""),
+    "METHODS_V2_ROLE_JOB_IDENTITY_INVALID",
     "FAIL",
     "CONTRACT",
   );
-  const diagnosisJobId = diagnosisJobIds[0];
-  const files = [
-    ["job.json", "methods-diagnose-job.json"],
-    ["method-grounding-audit.json", "methods-grounding-audit.json"],
-    ["methods_logparse_receipt.json", "methods-logparse-receipt.json"],
-  ];
-  for (const [sourceName, destinationName] of files) {
-    const destination = path.join(configuration.stageRoot, destinationName);
-    requireCondition(!fs.existsSync(destination), "METHODS_ORACLE_CAPTURE_ALREADY_EXISTS");
-    const copied = await run("docker", dockerArgs(configuration.dockerContext, [
-      "cp",
-      `${state.active_container}:/var/lib/problem-locator/jobs/${diagnosisJobId}/${sourceName}`,
-      destination,
-    ]), { forward: false });
-    requireCondition(copied.status === 0, "METHODS_ORACLE_EXECUTION_RECORD_MISSING", "FAIL", "CONTRACT");
-    const metadata = fs.lstatSync(destination);
-    requireCondition(metadata.isFile() && !metadata.isSymbolicLink() && metadata.nlink === 1 && metadata.size > 0, "METHODS_ORACLE_CAPTURE_INVALID", "FAIL", "CONTRACT");
-  }
+  const sourceJobId = sourceJobIds[0];
+  const reviewerJobId = reviewerJobIds[0];
+  const files = await captureMethodsV2Files(configuration, state, { sourceJobId, reviewerJobId });
   let summary;
   try {
-    summary = validateMethodsGroundingExecutionRecord({
-      jobBytes: fs.readFileSync(path.join(configuration.stageRoot, "methods-diagnose-job.json")),
-      auditBytes: fs.readFileSync(path.join(configuration.stageRoot, "methods-grounding-audit.json")),
-      logparseReceiptBytes: fs.readFileSync(path.join(configuration.stageRoot, "methods-logparse-receipt.json")),
-      expected: {
-        diagnosis_job_id: diagnosisJobId,
-        case_id: state.case_id,
-        skill_ref: {
-          id: configuration.releaseCase.skill.runtime_ref_id,
-          version: configuration.releaseCase.skill.version,
-          content_hash: configuration.releaseCase.skill.content_hash,
-        },
-        logparse_product: configuration.releaseCase.logparse_product,
-        registration_id: configuration.generatedSkill.registration_id,
-        registration_sha256: configuration.generatedSkill.registration_sha256,
-        package_tree_sha256: configuration.generatedSkill.package_tree_sha256,
-        combined_sha256: configuration.generatedSkill.combined_sha256,
-        status: configuration.releaseCase.result_expectation.expected_methods_status,
-        confirmed_methods: configuration.releaseCase.result_expectation.confirmed_method_ids,
-        known_method_ids: configuration.generatedSkill.methods.methods.map((method) => method.id),
-        source_ids: configuration.releaseCase.driver.attachment_anchor_names,
-        evidence_count: configuration.releaseCase.result_expectation.required_evidence_identities.length,
-      },
+    summary = validateMethodsV2ExecutionRecords({
+      files,
+      expected: methodsV2Expected(configuration, state, sourceJobId, reviewerJobId),
+      invocations: serviceInvocations,
+      publicMethodsResult: state.methods_result,
     });
   } catch (error) {
-    throw new StageError(error?.code ?? "METHODS_ORACLE_VALIDATION_FAILED", "FAIL", "CONTRACT");
+    throw new StageError(error?.code ?? "METHODS_V2_ORACLE_VALIDATION_FAILED", "FAIL", "CONTRACT");
   }
-  writeNew(path.join(configuration.stageRoot, "methods-grounding-oracle.json"), summary);
+  writeNew(path.join(configuration.stageRoot, "methods-v2-oracle.json"), summary);
   return summary;
+}
+
+async function verifyRestartMethodsV2(configuration, state, restartView) {
+  const restartedFiles = await captureMethodsV2Files(configuration, state, {
+    sourceJobId: state.methods_v2.source_job_id,
+    reviewerJobId: state.methods_v2.reviewer_job_id,
+    prefix: "restart-",
+  });
+  try {
+    validateMethodsV2RestartSnapshot({
+      caseView: restartView.case_view,
+      artifacts: restartView.artifacts,
+      methodsSummary: state.methods_v2,
+      restartedFiles,
+    });
+  } catch (error) {
+    throw new StageError(error?.code ?? "METHODS_V2_RESTART_VALIDATION_FAILED", "FAIL", "CONTRACT");
+  }
 }
 
 async function verifyRuntimeResources(configuration, state) {
@@ -2964,21 +3243,6 @@ async function stageReceipt(configuration, value) {
   });
 }
 
-function restoredArtifact(continuation, prefix, publicBaseUrl, caseId) {
-  const artifactId = continuation[`${prefix}_id`];
-  if (!artifactId) return null;
-  return {
-    artifact_id: artifactId,
-    kind: continuation[`${prefix}_kind`],
-    name: continuation[`${prefix}_name`],
-    content_type: continuation[`${prefix}_content_type`],
-    size: continuation[`${prefix}_size`],
-    sha256: continuation[`${prefix}_sha256`],
-    created_at: continuation[`${prefix}_created_at`],
-    download_url: `${publicBaseUrl}/api/v1/artifacts/${artifactId}/content?case_id=${caseId}`,
-  };
-}
-
 async function applyRestoredCheckpoint(configuration, state) {
   requireCondition(configuration.track === "dev", "CHECKPOINT_RESTORE_RELEASE_FORBIDDEN", "BLOCKED", "INFRA");
   requireCondition(configuration.restoredDataRoot && configuration.restoredContinuation && configuration.restoredCheckpointId, "CHECKPOINT_RESTORE_INPUT_MISSING");
@@ -2987,10 +3251,12 @@ async function applyRestoredCheckpoint(configuration, state) {
     continuation?.schema_version === 1
       && continuation.release_eligible === false
       && continuation.next_stage === configuration.stage
-      && continuation.adapter_state_schema_version === 4
+      && continuation.adapter_state_schema_version === 5
       && continuation.adapter_case_input_digest === configuration.releaseCase.input_digest
       && continuation.adapter_case_scenario_id === configuration.releaseCase.scenario_id
-      && continuation.adapter_case_skill_id === configuration.releaseCase.skill.id,
+      && continuation.adapter_case_skill_id === configuration.releaseCase.skill.id
+      && (continuation.adapter_methods_result_json === null || typeof continuation.adapter_methods_result_json === "string")
+      && (continuation.adapter_methods_v2_json === null || typeof continuation.adapter_methods_v2_json === "string"),
     "CHECKPOINT_CONTINUATION_INVALID",
   );
   if (state.current_instance) {
@@ -3051,8 +3317,12 @@ async function applyRestoredCheckpoint(configuration, state) {
       expires_at: continuation.adapter_upload_expires_at,
     };
   }
-  state.public_artifact = restoredArtifact(continuation, "adapter_public_artifact", state.public_base_url, caseId);
-  state.public_result_archive = restoredArtifact(continuation, "adapter_public_archive", state.public_base_url, caseId);
+  state.methods_result = continuation.adapter_methods_result_json === null
+    ? null
+    : JSON.parse(continuation.adapter_methods_result_json);
+  state.methods_v2 = continuation.adapter_methods_v2_json === null
+    ? null
+    : JSON.parse(continuation.adapter_methods_v2_json);
   atomicState(configuration.statePath, state);
   if (configuration.stage === "journey.cross-job.upload") await startService(configuration, state, "upload");
   else if (configuration.stage === "journey.cross-job.diagnose") await startService(configuration, state, "diagnose");
@@ -3129,11 +3399,17 @@ async function execute(configuration) {
 
   if (configuration.stage === "journey.cross-job.route") {
     requireCondition(configuration.hardCaps !== null, "ROUTE_HARD_CAPS_MISSING", "BLOCKED", "INFRA");
-    const audit = await runClaude(configuration, state, configuration.stageRoot, "phase1", phaseOnePrompt(configuration.releaseCase, state.request_ids, state.archive), configuration.hardCaps.max_turns, configuration.hardCaps.max_budget_usd);
-    const summary = validatePhaseOne(audit, configuration.releaseCase, state.request_ids, state.archive, state.public_base_url);
-    Object.assign(state, summary);
-    state.client_calls.push(...audit.records.map((record, index) => ({ phase: "phase1", ordinal: state.client_calls.length + index, tool_name: record.tool_name, input: record.input })));
-    addUsage(state, audit.usage);
+    const phaseOneAudit = await runClaude(configuration, state, configuration.stageRoot, "phase1", phaseOnePrompt(), configuration.hardCaps.max_turns, configuration.hardCaps.max_budget_usd);
+    const phaseOneSummary = validatePhaseOne(phaseOneAudit, configuration.releaseCase, state.request_ids);
+    Object.assign(state, phaseOneSummary);
+    state.client_calls.push(...phaseOneAudit.records.map((record, index) => ({ phase: "phase1", ordinal: state.client_calls.length + index, tool_name: record.tool_name, input: record.input })));
+    addUsage(state, phaseOneAudit.usage);
+    atomicState(configuration.statePath, state);
+    const phaseTwoAudit = await runClaude(configuration, state, configuration.stageRoot, "phase2", phaseTwoPrompt(state, configuration.releaseCase, state.archive), configuration.hardCaps.max_turns, configuration.hardCaps.max_budget_usd);
+    const phaseTwoSummary = validatePhaseTwo(phaseTwoAudit, state, configuration.releaseCase, state.request_ids, state.archive, state.public_base_url);
+    Object.assign(state, phaseTwoSummary);
+    state.client_calls.push(...phaseTwoAudit.records.map((record, index) => ({ phase: "phase2", ordinal: state.client_calls.length + index, tool_name: record.tool_name, input: record.input })));
+    addUsage(state, phaseTwoAudit.usage);
     atomicState(configuration.statePath, state);
     const correspondence = await stopService(configuration, state);
     const jobTypes = correspondence.service_invocations.map((invocation) => invocation.job_type).sort();
@@ -3154,8 +3430,12 @@ async function execute(configuration) {
       request_ids: Object.values(state.request_ids),
     });
     if (!configuration.terminalAfterStage) await startService(configuration, state, "upload");
-    const invocations = [clientInvocation(configuration, "route", audit, configuration.hardCaps), ...correspondence.service_invocations];
-    await stageReceipt(configuration, { status: "PASS", client_tool_calls: audit.records.length, server_tool_calls: correspondence.server_completed, checkpoint_ready: checkpoint.status === "PASS", invocations });
+    const invocations = [
+      clientInvocation(configuration, "route-intake", phaseOneAudit, configuration.hardCaps),
+      clientInvocation(configuration, "route-supplement", phaseTwoAudit, configuration.hardCaps),
+      ...correspondence.service_invocations,
+    ];
+    await stageReceipt(configuration, { status: "PASS", client_tool_calls: phaseOneAudit.records.length + phaseTwoAudit.records.length, server_tool_calls: correspondence.server_completed, checkpoint_ready: checkpoint.status === "PASS", invocations });
     return;
   }
 
@@ -3193,29 +3473,36 @@ async function execute(configuration) {
     addUsage(state, audit.usage);
     atomicState(configuration.statePath, state);
     const correspondence = await stopService(configuration, state);
-    const jobTypes = correspondence.service_invocations.map((invocation) => invocation.job_type).sort();
+    const diagnoseCalls = correspondence.service_invocations.filter((invocation) => invocation.job_type === "DIAGNOSE");
+    const reviewCalls = correspondence.service_invocations.filter((invocation) => invocation.job_type === "REVIEW");
     requireCondition(
-      JSON.stringify(jobTypes) === JSON.stringify(["DIAGNOSE", "DIAGNOSE", "REVIEW"]),
-      "DIAGNOSE_SERVICE_AGENT_INVOCATIONS",
+      correspondence.service_invocations.length === diagnoseCalls.length + reviewCalls.length
+        && diagnoseCalls.length >= 1 && diagnoseCalls.length <= 2
+        && reviewCalls.length >= 1 && reviewCalls.length <= 2
+        && correspondence.service_invocations.length >= 2 && correspondence.service_invocations.length <= 4,
+      "METHODS_V2_SERVICE_AGENT_INVOCATIONS",
       "FAIL",
       "CONTRACT",
     );
     requireCondition(correspondence.service_no_model_jobs.length === 0, "DIAGNOSE_UNEXPECTED_PREFLIGHT_ACTIVITY", "FAIL", "CONTRACT");
-    const methodsGrounding = await captureMethodsGroundingOracle(
+    const methodsV2 = await captureMethodsV2Oracle(
       configuration,
       state,
       correspondence.service_invocations,
     );
+    state.methods_v2 = methodsV2;
+    atomicState(configuration.statePath, state);
     const checkpoint = await createCheckpointSource(configuration, state, {
       case_id: state.case_id,
       attachment_id: state.attachment_id,
       resolved_case_revision: state.resolved_case_revision,
-      public_artifact_id: state.public_artifact.artifact_id,
-      public_archive_id: state.public_result_archive.artifact_id,
+      methods_result_ref: state.methods_result.result_ref,
+      methods_source_job_id: methodsV2.source_job_id,
+      methods_reviewer_job_id: methodsV2.reviewer_job_id,
       observed_statuses: state.observed_statuses,
     });
     const invocations = [clientInvocation(configuration, "diagnose", audit, configuration.hardCaps), ...correspondence.service_invocations];
-    await stageReceipt(configuration, { status: "PASS", client_tool_calls: audit.records.length, server_tool_calls: correspondence.server_completed, checkpoint_ready: checkpoint.status === "PASS", browser_api: browserApi, methods_grounding: methodsGrounding, invocations });
+    await stageReceipt(configuration, { status: "PASS", client_tool_calls: audit.records.length, server_tool_calls: correspondence.server_completed, checkpoint_ready: checkpoint.status === "PASS", browser_api: browserApi, methods_v2: methodsV2, invocations });
     return;
   }
 
@@ -3230,19 +3517,20 @@ async function execute(configuration) {
     await startService(configuration, state, "restart", { allowEmptyJourney: true });
     requireCondition(configuration.hardCaps !== null, "PUBLISH_RESTART_HARD_CAPS_MISSING", "BLOCKED", "INFRA");
     const audit = await runClaude(configuration, state, configuration.stageRoot, "restart", restartPrompt(state), configuration.hardCaps.max_turns, configuration.hardCaps.max_budget_usd);
-    validateRestart(audit, state, configuration.releaseCase);
+    const restartView = validateRestart(audit, state, configuration.releaseCase);
     state.client_calls.push(...audit.records.map((record, index) => ({ phase: "restart", ordinal: state.client_calls.length + index, tool_name: record.tool_name, input: record.input })));
     addUsage(state, audit.usage);
     atomicState(configuration.statePath, state);
-    await downloadArtifacts(configuration, state, configuration.stageRoot);
+    await verifyRestartMethodsV2(configuration, state, restartView);
     const correspondence = await stopService(configuration, state);
     requireCondition(correspondence.service_invocations.length === 0, "RESTART_UNEXPECTED_MODEL_INVOCATION", "FAIL", "CONTRACT");
     requireCondition(correspondence.service_no_model_jobs.length === 0, "RESTART_UNEXPECTED_PREFLIGHT_ACTIVITY", "FAIL", "CONTRACT");
     const checkpoint = await createCheckpointSource(configuration, state, {
       case_id: state.case_id,
       resolved_case_revision: state.resolved_case_revision,
-      public_artifact_id: state.public_artifact.artifact_id,
-      public_archive_id: state.public_result_archive.artifact_id,
+      methods_result_ref: state.methods_result.result_ref,
+      methods_source_job_id: state.methods_v2.source_job_id,
+      methods_reviewer_job_id: state.methods_v2.reviewer_job_id,
       restart_verified: true,
     });
     writeNew(path.join(configuration.stageRoot, "client-server-correspondence.json"), { schema_version: 1, ...correspondence });

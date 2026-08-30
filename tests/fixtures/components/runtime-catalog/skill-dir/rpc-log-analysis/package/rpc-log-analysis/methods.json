@@ -5,14 +5,15 @@
   "required_user_inputs": ["problem_time", "client_slot", "client_process_name", "server_slot", "server_process_name", "caller_service", "server_service", "rpc_method"],
   "required_artifacts": ["log_archive"],
   "log_derived_fields": ["request_id"],
-  "shared_references": ["references/shared-boundaries.md"],
+  "shared_references": ["references/source-log-templates.md", "references/shared-boundaries.md"],
   "methods": [
     {
       "id": "rpc-call-timeout",
       "title": "RPC call timeout",
       "reference": "references/rpc-call-timeout.md",
       "priority": 1,
-      "evidence_markers": ["rpc deadline exceeded", "connection pool wait"]
+      "evidence_markers": ["rpc deadline exceeded", "connection pool wait"],
+      "activation_markers": ["rpc deadline exceeded"]
     }
   ]
 }

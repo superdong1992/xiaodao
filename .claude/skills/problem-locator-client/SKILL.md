@@ -7,6 +7,23 @@ description: Operate a current Problem Locator 2.0 diagnosis case through its se
 
 Treat the service as the authority for every Case, revision, requirement, Job, and Artifact. Use Remote MCP for structured control and HTTP only for file bytes.
 
+## Create the Case before asking diagnosis questions
+
+When the user provides a non-empty description of a new problem, call
+`problem_locator_create_case` as the first business action. Do not first ask for
+logs, timestamps, environment details, reproduction steps, expected behavior,
+or any other missing diagnosis detail.
+
+Copy the complete original message to `raw_problem_text`. Use the same text for
+`statement` and `actual_behavior`, and use the fixed neutral values in the
+`problem_locator_create_case` example below for the other ProblemSpec fields.
+Set both initial fact arrays to `[]`. Do not infer initial facts or requirements
+from the description.
+
+After the Case exists, ask only for OPEN requirements returned by the latest
+Case view. Use each requirement's exact prompt. If there are no OPEN
+requirements, do not invent a follow-up question.
+
 ## Connect directly to the remote MCP server
 
 Configure Claude Code from [references/client-mcp-config.json](references/client-mcp-config.json) so it connects directly to the controlled-network HTTP endpoint ending in `/mcp`. Windows and macOS use their native Claude Code by default; a Linux Client is used only when explicitly selected. A client does not install the `problem-locator` package, run a local MCP server or proxy, or install Problem Locator Hooks. Keep the configured server key exactly `problem-locator`. If the machine has `HTTP_PROXY` or `HTTPS_PROXY`, add only the remote MCP host or IP to `NO_PROXY`; do not disable the corporate proxy globally.
@@ -36,17 +53,17 @@ Use only the following flat argument shapes:
 ```json
 {
   "request_id": "<stable-request-id>",
-  "raw_problem_text": "<the user's complete original problem text>",
-  "statement": "<problem statement>",
-  "expected_behavior": "<expected behavior>",
-  "actual_behavior": "<actual behavior>",
-  "scope": "<diagnosis scope>",
-  "goals": ["<goal>"],
+  "raw_problem_text": "<raw_problem_text>",
+  "statement": "<raw_problem_text>",
+  "expected_behavior": "用户未单独说明；以 raw_problem_text 为准。",
+  "actual_behavior": "<raw_problem_text>",
+  "scope": "仅定位 raw_problem_text 所述问题。",
+  "goals": ["定位问题原因并给出结论。"],
   "non_goals": [],
   "constraints": [],
-  "completion_criteria": ["<criterion>"],
-  "initial_user_fact_names": ["<requirement_name>"],
-  "initial_user_fact_values": ["<exact string value>"],
+  "completion_criteria": ["给出基于证据的结论；证据不足时明确说明。"],
+  "initial_user_fact_names": [],
+  "initial_user_fact_values": [],
   "wait_seconds": 0
 }
 ```
@@ -146,8 +163,8 @@ After every write response, show the durable business receipt first. When `case_
 
 ## Create or inspect a Case
 
-1. Copy the user's complete original problem description into `raw_problem_text` without trimming or normalization, then build all eight flat problem fields without a revision.
-2. Call `problem_locator_create_case` with a fresh stable `request_id`.
+1. Copy the user's complete original problem description into `raw_problem_text` without trimming or normalization. Do not ask a question first.
+2. Build the eight flat ProblemSpec fields from the fixed create example above and call `problem_locator_create_case` with a fresh stable `request_id` as the first business action.
 3. Poll or finitely wait with `problem_locator_get_case`; never create a replacement Case merely because waiting timed out.
 
 Use `problem_locator_resume_case` only for a persisted pending or interrupted Case. Use `problem_locator_submit_supplement` for a waiting Case. Use `problem_locator_cancel_case` only after confirming the current revision with the user when cancellation is not already explicit.
@@ -167,9 +184,28 @@ For a legacy terminal Case containing `generic_result`, preserve the V1 behavior
 and present its `conclusion` and `root_cause_analysis`. Do not describe a V1 result
 as a native Markdown report. V1 and V2 fields must never both be present.
 
+### Present a terminal Methods V2 result
+
+When a terminal Case contains `methods_result`, present that object directly.
+Methods V2 has no downloadable result Artifact, so do not call
+`problem_locator_list_artifacts` or wait for `result.zip` before reporting the
+terminal result.
+
+Always show `status`, `diagnostic_id`, and `limitations`. For `RESOLVED`, show
+`confirmed_method_ids`, `confirmed_event_refs`, and `confirmed_hit_refs`; its
+`reason_code` is null. For `UNRESOLVED` or `FAILED`, show `reason_code`,
+`diagnostic_id`, `reasons`, and `limitations`; the confirmed-reference arrays are
+empty. Preserve the server text exactly. Do not invent a narrative root cause,
+re-run marker matching, or expose Specialist or Reviewer evaluation text.
+
+`methods_result` is absent before a Methods evaluation reaches a terminal state.
+Its absence on a non-terminal Case is not a protocol error. A terminal Methods
+result is mutually exclusive with `generic_result`, `generic_result_v2`,
+`final_result`, and `unresolved_result`.
+
 ## Submit requested facts
 
-Read the open requirements from the latest Case view. Put each exact requirement name in `input_names` and its answer at the same index in `input_values`, then call `problem_locator_submit_supplement` with a new stable `request_id`, the latest revision, and any READY `attachment_ids`. The arrays must have equal lengths and unique names. Preserve values exactly; do not trim, normalize, or invent missing facts.
+Read only the OPEN requirements from the latest Case view. Ask using each requirement's exact prompt. If there are no OPEN requirements, ask nothing. Put each exact requirement name in `input_names` and its answer at the same index in `input_values`, then call `problem_locator_submit_supplement` with a new stable `request_id`, the latest revision, and any READY `attachment_ids`. The arrays must have equal lengths and unique names. Preserve values exactly; do not trim, normalize, or invent missing facts.
 
 On `REVISION_CONFLICT`, call `problem_locator_get_case`, review the new state, update `expected_case_revision`, and retry the same logical submission without changing its stable request ID. Do not retry an `IDEMPOTENCY_CONFLICT` as if it were a revision conflict.
 

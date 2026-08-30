@@ -82,6 +82,12 @@ def _positive_state() -> StateFile:
     return StateFile.model_validate(_load_json("state.json"))
 
 
+def _state_bytes_with_schema_version(schema_version: int) -> bytes:
+    payload = _load_json("state.json")
+    payload["schema_version"] = schema_version
+    return canonical_json_bytes(payload)
+
+
 def _empty_mutation(**updates: object) -> StateMutation:
     payload: dict[str, object] = {
         "upsert_case": None,
@@ -186,8 +192,8 @@ def test_empty_directory_initializes_generation_one_canonical_state(
 
     snapshot = repository.read_snapshot()
     assert isinstance(repository, StateRepository)
-    assert snapshot.schema_version == SCHEMA_VERSION == 7
-    assert snapshot.contract_revision == CONTRACT_REVISION == "v7-contract-r1"
+    assert snapshot.schema_version == SCHEMA_VERSION == 8
+    assert snapshot.contract_revision == CONTRACT_REVISION == "v8-contract-r1"
     assert snapshot.generation == 1
     assert snapshot.created_at == INITIAL_TIME
     assert snapshot.updated_at == INITIAL_TIME
@@ -207,6 +213,10 @@ def test_empty_directory_initializes_generation_one_canonical_state(
     ("payload", "expected_code"),
     [
         (b'{"truncated":\n', ErrorCode.STATE_CORRUPT),
+        (
+            _state_bytes_with_schema_version(7),
+            ErrorCode.STATE_SCHEMA_UNSUPPORTED,
+        ),
         (
             canonical_json_bytes(
                 {

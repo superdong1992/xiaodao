@@ -62,7 +62,14 @@ METHODS_ROOT_KEYS = {
     "shared_references",
     "methods",
 }
-METHOD_KEYS = {"id", "title", "reference", "priority", "evidence_markers"}
+METHOD_KEYS = {
+    "id",
+    "title",
+    "reference",
+    "priority",
+    "evidence_markers",
+    "activation_markers",
+}
 SOURCE_IDENTITY_KEYS = {
     "algorithm",
     "log_template_extraction_version",
@@ -112,51 +119,66 @@ OPTIONAL_PID_SENTENCE = (
 )
 REQUIRED_SKILL_PHRASES = (
     "request.json",
-    "methods.json",
-    "target_logs.json",
-    "target_logs[*].log_path",
-    "Logparse",
-    "identity_tokens",
-    "sources",
+    "method-evidence-graph.json",
+    "method-evaluation-plan.json",
+    "evaluation_ref",
+    "verdict",
+    "supporting_event_refs",
+    "reason",
+    "UNKNOWN",
 )
 REQUIRED_SKILL_SEMANTICS = (
     (
-        "read only the frozen target log paths",
+        "read the frozen request, Evidence Graph, and Evaluation Plan",
         re.compile(
-            r"(?:只|仅)(?:读取|分析).*target_logs\[\*\]\.log_path"
-            r"|(?:read|analyze) only.*target_logs\[\*\]\.log_path",
+            r"(?:读取|消费).*request\.json.*method-evidence-graph\.json.*method-evaluation-plan\.json"
+            r"|(?:read|consume).*request\.json.*method-evidence-graph\.json.*method-evaluation-plan\.json",
             re.IGNORECASE | re.DOTALL,
         ),
     ),
     (
-        "scan all positive evidence markers before selecting method cards",
+        "use the Evidence Graph and Evaluation Plan as the only log evidence",
         re.compile(
-            r"(?:先|before).*(?:全部|所有|all|every).*(?:正向|positive).*(?:marker|标记)",
+            r"(?:日志证据).*(?:只能|仅能).*(?:Evidence Graph|证据图).*(?:Evaluation Plan|评估计划)"
+            r"|(?:log evidence).*(?:only).*(?:Evidence Graph).*(?:Evaluation Plan)",
             re.IGNORECASE | re.DOTALL,
         ),
     ),
     (
-        "avoid stopping after the first match",
+        "avoid rescanning evidence markers",
         re.compile(
-            r"(?:不能|不得|不要).*(?:第一|首个).*(?:停止|短路)"
-            r"|(?:do not|must not).*(?:first).*(?:stop|short-circuit)",
+            r"(?:不|不得|不要).*重新扫描.*(?:marker|标记)"
+            r"|(?:do not|must not).*(?:rescan).*(?:marker|evidence)",
             re.IGNORECASE | re.DOTALL,
         ),
     ),
     (
-        "inspect all relevant calls",
+        "evaluate every plan reference in plan order",
         re.compile(
-            r"(?:全部|所有|每个).*(?:相关调用|调用范围)"
-            r"|(?:all|every).*(?:relevant )?(?:calls?|requests?)",
+            r"(?:按|依照).*Evaluation Plan.*(?:顺序).*(?:全部|所有|每个).*evaluation_ref"
+            r"|(?:in).*Evaluation Plan.*(?:order).*(?:all|every).*evaluation_ref",
             re.IGNORECASE | re.DOTALL,
         ),
     ),
     (
-        "report each independent event separately",
+        "avoid stopping after the first confirmation",
         re.compile(
-            r"(?:每个原因|每种原因).*(?:每次|每个).*(?:独立事件).*(?:分别|单独)"
-            r"|(?:each).*(?:independent event).*(?:separately)",
+            r"(?:不能|不得|不要).*(?:第一|首个).*(?:确认).*(?:停止|短路)"
+            r"|(?:do not|must not).*(?:first).*(?:confirmation).*(?:stop|short-circuit)",
             re.IGNORECASE | re.DOTALL,
+        ),
+    ),
+    (
+        "return only evaluation_ref, verdict, supporting_event_refs, and reason",
+        re.compile(
+            r"(?:只输出|仅输出|只能包含|仅包含|只包含|"
+            r"(?:only\s+(?:output|return|contain|contains))|"
+            r"(?:(?:output|return|contain|contains)\s+only))"
+            r"[\s\S]{0,512}?evaluation_ref"
+            r"[\s\S]{0,256}?verdict"
+            r"[\s\S]{0,256}?supporting_event_refs"
+            r"[\s\S]{0,256}?reason",
+            re.IGNORECASE,
         ),
     ),
 )
@@ -410,9 +432,15 @@ def _canonical_evidence_marker(template: str) -> str | None:
     if prefix:
         return prefix
     literal_segments = [
-        template[left.end() : right.start()].strip()
-        for left, right in zip(matches, matches[1:])
-        if template[left.end() : right.start()].strip()
+        segment.strip()
+        for segment in (
+            *(
+                template[left.end() : right.start()]
+                for left, right in zip(matches, matches[1:])
+            ),
+            template[matches[-1].end() :],
+        )
+        if segment.strip()
     ]
     if not literal_segments:
         return None
@@ -426,6 +454,150 @@ def _wiki_canonical_evidence_markers(templates: list[str]) -> list[str]:
         if marker is not None and marker not in markers:
             markers.append(marker)
     return markers
+
+
+def _is_ordered_subsequence(candidate: list[str], sequence: list[str]) -> bool:
+    cursor = 0
+    for marker in candidate:
+        while cursor < len(sequence) and sequence[cursor] != marker:
+            cursor += 1
+        if cursor == len(sequence):
+            return False
+        cursor += 1
+    return True
+
+
+def _outside_html_comments(line: str, in_comment: bool) -> tuple[str, bool]:
+    visible = list(line)
+    cursor = 0
+    while cursor < len(line):
+        if in_comment:
+            closing = line.find("-->", cursor)
+            end = len(line) if closing < 0 else closing + 3
+            visible[cursor:end] = " " * (end - cursor)
+            cursor = end
+            if closing < 0:
+                break
+            in_comment = False
+            continue
+        opening = line.find("<!--", cursor)
+        if opening < 0:
+            break
+        closing = line.find("-->", opening + 4)
+        end = len(line) if closing < 0 else closing + 3
+        visible[opening:end] = " " * (end - opening)
+        cursor = end
+        in_comment = closing < 0
+    return "".join(visible), in_comment
+
+
+def _method_h2_sections(method_text: str) -> list[tuple[str, str]]:
+    headings: list[tuple[str, int, int]] = []
+    in_comment = False
+    fence_character: str | None = None
+    fence_length = 0
+    offset = 0
+    for line in method_text.splitlines(keepends=True):
+        line_without_ending = line.rstrip("\r\n")
+        if fence_character is not None:
+            closing = re.fullmatch(
+                rf"[ ]{{0,3}}{re.escape(fence_character)}{{{fence_length},}}[ \t]*",
+                line_without_ending,
+            )
+            if closing is not None:
+                fence_character = None
+                fence_length = 0
+            offset += len(line)
+            continue
+        visible, in_comment = _outside_html_comments(line_without_ending, in_comment)
+        fence = re.match(r"[ ]{0,3}(`{3,}|~{3,})", visible)
+        if fence is not None:
+            fence_character = fence.group(1)[0]
+            fence_length = len(fence.group(1))
+            offset += len(line)
+            continue
+        heading = re.fullmatch(r"[ ]{0,3}##[ \t]+(.+?)[ \t]*", visible)
+        if heading is not None:
+            headings.append((heading.group(1), offset, offset + len(line)))
+        offset += len(line)
+    sections: list[tuple[str, str]] = []
+    for index, (title, _, body_start) in enumerate(headings):
+        body_end = len(method_text) if index + 1 == len(headings) else headings[index + 1][1]
+        sections.append((title, method_text[body_start:body_end]))
+    return sections
+
+
+def _required_evidence_section(method_text: str) -> str:
+    for title, body in _method_h2_sections(method_text):
+        if title == "所需证据":
+            return body
+    return ""
+
+
+def _valid_method_headings(method_text: str) -> bool:
+    fixed_titles = tuple(heading.removeprefix("## ") for heading in METHOD_HEADINGS)
+    observed = tuple(
+        title for title, _ in _method_h2_sections(method_text) if title in fixed_titles
+    )
+    return observed == fixed_titles
+
+
+def _expected_method_markers(
+    method_text: str,
+    wiki_templates: list[str],
+) -> list[str]:
+    required_evidence = _required_evidence_section(method_text)
+    expected: list[str] = []
+    for template in wiki_templates:
+        if not _contains_complete_template(required_evidence, template):
+            continue
+        marker = _canonical_evidence_marker(template)
+        if marker is not None and marker not in expected:
+            expected.append(marker)
+    return expected
+
+
+def _contains_complete_template(section: str, template: str) -> bool:
+    inline = f"`{template}`"
+    for line in section.splitlines():
+        if inline in line:
+            return True
+        candidate = line.strip()
+        candidate = re.sub(r"^(?:[-*+]|[0-9]+[.)])[ \t]+", "", candidate)
+        if candidate == template:
+            return True
+    return False
+
+
+def _validate_method_marker_closure(
+    *,
+    index: int,
+    markers: list[str],
+    method_text: str,
+    wiki_templates: list[str],
+    errors: list[str],
+) -> None:
+    wiki_markers = _wiki_canonical_evidence_markers(wiki_templates)
+    if not markers or any(marker not in wiki_markers for marker in markers):
+        return
+    expected = _expected_method_markers(method_text, wiki_templates)
+    unrepresented = [marker for marker in markers if marker not in expected]
+    for marker in unrepresented:
+        errors.append(
+            f"method {index} 的 evidence marker 在“所需证据”中没有对应的完整 Wiki 日志模板: {marker}"
+        )
+    if unrepresented:
+        return
+    missing = [marker for marker in expected if marker not in markers]
+    if missing:
+        errors.append(
+            f"method {index} 的“所需证据”含有未被 evidence_markers 索引的 "
+            f"canonical marker: {', '.join(missing)}"
+        )
+    elif markers != expected:
+        errors.append(
+            f"method {index} 的 evidence_markers 必须按 source template 顺序排列"
+        )
 
 
 def _validate_source_identity(
@@ -618,6 +790,7 @@ def _validate_methods(
     wiki_markers = _wiki_canonical_evidence_markers(wiki_templates)
     method_ids: set[str] = set()
     method_references: set[str] = set()
+    marker_bindings: list[tuple[int, str, list[str]]] = []
     priorities: list[int] = []
     marker_count = 0
     for index, method in enumerate(methods, start=1):
@@ -673,6 +846,28 @@ def _validate_methods(
                 errors.append(
                     f"method {index} evidence marker is not a canonical stable Wiki log marker: {marker}"
                 )
+        activation_markers = method.get("activation_markers")
+        if (
+            not isinstance(activation_markers, list)
+            or not activation_markers
+            or len(activation_markers) > 100
+            or any(
+                not isinstance(marker, str)
+                or not marker
+                or "\n" in marker
+                or "\r" in marker
+                or len(marker.encode("utf-8")) > 1024
+                for marker in activation_markers
+            )
+            or len(activation_markers) != len(set(activation_markers))
+        ):
+            errors.append(f"method {index} activation_markers are invalid")
+        elif not _is_ordered_subsequence(activation_markers, markers):
+            errors.append(
+                f"method {index} activation_markers must be an ordered subsequence of evidence_markers"
+            )
+        if reference is not None and reference != SOURCE_LOG_TEMPLATES_REFERENCE:
+            marker_bindings.append((index, reference, markers))
     result["marker_count"] = marker_count
     if priorities != list(range(1, len(methods) + 1)):
         errors.append("method priorities must be unique and consecutive from 1")
@@ -699,10 +894,21 @@ def _validate_methods(
                 errors.append(f"{reference} is not UTF-8: {exc}")
                 continue
             reference_texts[reference] = text
-            if reference in method_references:
-                for heading in METHOD_HEADINGS:
-                    if heading not in text:
-                        errors.append(f"{reference} is missing heading: {heading}")
+            if reference in method_references and not _valid_method_headings(text):
+                errors.append(
+                    f"{reference} must contain each fixed method heading exactly once in order"
+                )
+        for index, reference, markers in marker_bindings:
+            method_text = reference_texts.get(reference)
+            if method_text is None:
+                continue
+            _validate_method_marker_closure(
+                index=index,
+                markers=markers,
+                method_text=method_text,
+                wiki_templates=wiki_templates,
+                errors=errors,
+            )
         if reference_texts.get(SOURCE_LOG_TEMPLATES_REFERENCE) != _render_source_log_templates(
             wiki_templates
         ):

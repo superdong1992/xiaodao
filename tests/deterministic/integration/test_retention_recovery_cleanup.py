@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import stat
 import threading
@@ -12,14 +13,13 @@ from problem_locator.application import build_application_service
 from problem_locator.application.mutations import build_state_mutation
 from problem_locator.application.preparation import runtime_bindings_from_job
 from problem_locator.contracts import (
-    ArtifactKind,
+    Attachment,
     AttachmentEvidenceLocator,
-    CandidateStatus,
+    AttachmentStatus,
+    CreateCase,
     Evidence,
     EvidenceSourceType,
     Job,
-    JobStatus,
-    OutcomeDisposition,
     ResourceKind,
     ResourceType,
     canonical_json_bytes,
@@ -29,13 +29,13 @@ from problem_locator.contracts.limits import (
     PROPOSAL_STAGING_RETENTION_SECONDS,
 )
 from problem_locator.domain import DomainCoordinator, PureContextSnapshotProjector
+from problem_locator.storage.atomic import is_reparse_point
 from problem_locator.storage.coordination import (
     AttachmentUploadRegistry,
     InProcessAttachmentUploadGuard,
     InProcessPublicationCommitGuard,
     StorageCoordinationLock,
 )
-from problem_locator.storage.atomic import is_reparse_point
 from problem_locator.storage.execution_records import FileExecutionRecordStore
 from problem_locator.storage.layout import StorageLayout
 from problem_locator.storage.paths import proposal_stage_path
@@ -53,19 +53,37 @@ from tests.deterministic.contracts.fakes import (
     InMemoryStateChangeNotifier,
     RecordingDispatcher,
 )
-from tests.deterministic.integration.test_s03_r12_r14_persistence_seam import (
-    CASE_ID,
-    _available_assets,
-    _candidate_outcome_with_real_resources,
-    _fixture,
-    _publish_attachment,
-    _seed_diagnosis_state,
-)
 
 
-APP_ID_SEED = "s08-retention-applied-application"
+ROOT = Path(__file__).resolve().parents[3]
+ROUTE_JOB_FIXTURE = ROOT / "tests/fixtures/contracts/positive/job-route.json"
+CASE_ID = "00000000-0000-0000-0000-000000000001"
+TRIGGER_ID = "00000000-0000-0000-0000-000000000896"
+ROUTE_JOB_ID = "00000000-0000-0000-0000-000000000897"
+ATTACHMENT_ID = "00000000-0000-0000-0000-000000000892"
+FORMAL_EVIDENCE_ID = "00000000-0000-0000-0000-000000000893"
+RACE_EVIDENCE_ID = "00000000-0000-0000-0000-000000000894"
+ORPHAN_JOB_ID = "00000000-0000-0000-0000-000000000895"
 CLEANUP_NOW = "2026-08-10T12:00:00.000Z"
-RACE_EVIDENCE_ID = "00000000-0000-0000-0000-000000000891"
+
+
+def _create_case_command() -> CreateCase:
+    return CreateCase(
+        idempotency_key="retention-reachable-route",
+        raw_problem_text="Payment to inventory RPC times out",
+        problem_spec={
+            "statement": "Payment to inventory RPC times out",
+            "expected_behavior": "The inventory RPC returns successfully",
+            "actual_behavior": "The payment service observes a timeout",
+            "scope": "payment-service to inventory-service",
+            "goals": ["Locate the evidence-backed cause"],
+            "non_goals": [],
+            "constraints": [],
+            "completion_criteria": ["A terminal diagnosis is available"],
+        },
+        initial_user_facts=[],
+        wait_seconds=0,
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -98,7 +116,7 @@ def _adapt_no_follow_chmod_for_plain_windows_fixtures(
 
 
 class _MoveBarrier:
-    """Pause one candidate immediately before the real mover takes the lock."""
+    """Pause one candidate before the real mover acquires the shared lock."""
 
     def __init__(self, delegate: QuarantineMover, target: Path) -> None:
         self.delegate = delegate
@@ -129,28 +147,58 @@ def _set_expired(path: Path, retention_seconds: int) -> None:
     if os.utime in os.supports_follow_symlinks:
         os.utime(path, ns=timestamps, follow_symlinks=False)
         return
-    # Windows does not expose no-follow utime. These fixtures age plain nodes,
-    # so prove that precondition before using the supported call shape.
     assert not path.is_symlink()
     os.utime(path, ns=timestamps)
 
 
-def _path_bytes(path: Path) -> dict[str, bytes]:
-    if path.is_file():
-        return {".": path.read_bytes()}
-    return {
-        item.relative_to(path).as_posix(): item.read_bytes()
-        for item in sorted(path.rglob("*"))
-        if item.is_file()
-    }
+def _publish_file(
+    resources: FileResourceStore,
+    guard: InProcessPublicationCommitGuard,
+    *,
+    owner_job_id: str,
+    proposal_key: str,
+    resource_type: ResourceType,
+    resource_id: str,
+    body: bytes,
+    upload_guard: InProcessAttachmentUploadGuard | None = None,
+):
+    if resource_type is ResourceType.ATTACHMENT:
+        assert upload_guard is not None
+        with upload_guard.acquire(resource_id) as upload_lease:
+            staged = resources.stage_attachment(
+                resource_id,
+                upload_lease,
+                InMemoryBinaryStream(body),
+            )
+            target = resources.plan_target(
+                CASE_ID,
+                resource_type,
+                resource_id,
+                ResourceKind.FILE,
+                staged.size,
+                staged.sha256,
+            )
+            with guard.acquire():
+                published = resources.publish(staged, target.final_storage_key)
+        return staged, published
+    staged = resources.stage_file(owner_job_id, proposal_key, InMemoryBinaryStream(body))
+    target = resources.plan_target(
+        CASE_ID,
+        resource_type,
+        resource_id,
+        ResourceKind.FILE,
+        staged.size,
+        staged.sha256,
+    )
+    with guard.acquire():
+        published = resources.publish(staged, target.final_storage_key)
+    return staged, published
 
 
-def test_applied_candidate_stages_expire_without_deleting_formal_state(
+def test_reachable_route_state_retention_cleanup_and_commit_race(
     tmp_path: Path,
 ) -> None:
-    # Quarantine preserves the original staging hierarchy below another UUID.
-    # Keep that doubled path below the legacy Windows directory-path limit.
-    data_root = tmp_path.parent / "r" if os.name == "nt" else tmp_path / "data"
+    data_root = tmp_path / "data"
     layout = StorageLayout.at(data_root)
     layout.initialize_v2_data_root()
     lock = StorageCoordinationLock()
@@ -159,50 +207,29 @@ def test_applied_candidate_stages_expire_without_deleting_formal_state(
     upload_guard = InProcessAttachmentUploadGuard(attachment_registry)
     file_sync = PlatformFileSync()
     replacer = PlatformReplaceOperation()
-    resource_ids = DeterministicIdGenerator(seed="s08-retention-resources")
     resources = FileResourceStore(
         layout,
         lock,
         attachment_registry,
-        resource_ids,
+        DeterministicIdGenerator(seed="retention-route-resources"),
         file_sync=file_sync,
         replacer=replacer,
     )
-    attachment = _publish_attachment(resources, publication_guard, upload_guard)
-    state, source = _seed_diagnosis_state(attachment)
-    records = FileExecutionRecordStore(
-        data_root,
-        lock,
-        file_sync,
-        replacer,
-        temp_token_factory=lambda: "retention-record-temp",
-    )
-    with publication_guard.acquire():
-        records.publish_job(source)
-    layout.state.write_bytes(canonical_json_bytes(state))
+    records = FileExecutionRecordStore(data_root, lock, file_sync, replacer)
     clock = FakeClock("2026-07-31T00:01:00.000Z")
     repository = JsonFileStateRepository(
         data_root,
         lock,
         clock,
-        DeterministicIdGenerator(seed="s08-retention-state"),
+        DeterministicIdGenerator(seed="retention-route-state"),
         file_sync=file_sync,
         replacer=replacer,
         execution_record_store=records,
     )
-    review_template = Job.model_validate(_fixture("job-review.json"))
-    assert source.skill_ref is not None
-    catalog = FakeAssetCatalog(
-        assets=_available_assets(source, review_template),
-        review={
-            (
-                source.skill_ref.id,
-                source.skill_ref.version,
-                source.skill_ref.content_hash,
-            ): runtime_bindings_from_job(review_template)
-        },
+    route_template = Job.model_validate_json(
+        ROUTE_JOB_FIXTURE.read_text(encoding="utf-8")
     )
-    application = build_application_service(
+    service = build_application_service(
         repository=repository,
         resource_store=resources,
         publication_guard=publication_guard,
@@ -210,224 +237,159 @@ def test_applied_candidate_stages_expire_without_deleting_formal_state(
         execution_records=records,
         coordinator=DomainCoordinator(),
         projector=PureContextSnapshotProjector(),
-        asset_catalog=catalog,
+        asset_catalog=FakeAssetCatalog(
+            route=runtime_bindings_from_job(route_template)
+        ),
         dispatcher=RecordingDispatcher(),
         notifier=InMemoryStateChangeNotifier(),
         clock=clock,
-        ids=DeterministicIdGenerator(seed=APP_ID_SEED),
+        ids=DeterministicIdGenerator(
+            scripted_ids={
+                "case": [CASE_ID],
+                "trigger": [TRIGGER_ID],
+                "job": [ROUTE_JOB_ID],
+            }
+        ),
     )
+    created = service.execute(_create_case_command())
+    assert created.business_receipt.case_id == CASE_ID
+    assert created.business_receipt.job_id == ROUTE_JOB_ID
+    aggregate = repository.read_snapshot().cases[CASE_ID]
+    route_job_id = aggregate.case.active_job_id
+    assert route_job_id == ROUTE_JOB_ID
+    route_job = aggregate.jobs[route_job_id]
 
-    claim = application.claim_job(
-        source.job_id,
-        "00000000-0000-0000-0000-000000000890",
-    )
-    assert claim.claimed is True and claim.job is not None
-    outcome, result_bytes = _candidate_outcome_with_real_resources(
+    attachment_body = b"reachable route attachment\n"
+    _, attachment_ref = _publish_file(
         resources,
-        claim.job,
-        attachment,
-        tmp_path,
+        publication_guard,
+        owner_job_id=route_job_id,
+        proposal_key="formal_attachment",
+        resource_type=ResourceType.ATTACHMENT,
+        resource_id=ATTACHMENT_ID,
+        body=attachment_body,
+        upload_guard=upload_guard,
+    )
+    attachment = Attachment(
+        attachment_id=ATTACHMENT_ID,
+        case_id=CASE_ID,
+        status=AttachmentStatus.READY,
+        name="route-input.zip",
+        content_type="application/zip",
+        declared_size=len(attachment_body),
+        declared_sha256=hashlib.sha256(attachment_body).hexdigest(),
+        size=attachment_ref.size,
+        sha256=attachment_ref.sha256,
+        storage_key=attachment_ref.storage_key,
+        created_at="2026-07-31T00:02:00.000Z",
+        updated_at="2026-07-31T00:02:00.000Z",
+    )
+    formal_body = b"formal evidence retained by state\n"
+    _, formal_ref = _publish_file(
+        resources,
+        publication_guard,
+        owner_job_id=route_job_id,
+        proposal_key="formal_evidence",
+        resource_type=ResourceType.EVIDENCE,
+        resource_id=FORMAL_EVIDENCE_ID,
+        body=formal_body,
+    )
+    formal_evidence = Evidence(
+        evidence_id=FORMAL_EVIDENCE_ID,
+        case_id=CASE_ID,
+        source_type=EvidenceSourceType.ATTACHMENT,
+        source_ref=ATTACHMENT_ID,
+        locator=AttachmentEvidenceLocator(
+            kind="ATTACHMENT",
+            byte_start=0,
+            byte_end_exclusive=1,
+        ),
+        summary="A reachable route attachment has retained evidence bytes.",
+        collected_at="2026-07-31T00:02:00.000Z",
+        content_hash=formal_ref.sha256,
+        resource_ref=formal_ref,
+    )
+    snapshot = repository.read_snapshot()
+    repository.commit(
+        snapshot.generation,
+        None,
+        build_state_mutation(
+            upsert_attachments=[attachment],
+            insert_evidence=[formal_evidence],
+        ),
     )
 
-    # Prepublish each deterministic target from a different real stage.  S03
-    # must then formally adopt these targets while leaving the Outcome's
-    # original marker and payload/tree available for retention cleanup.
-    application_ids = DeterministicIdGenerator(seed=APP_ID_SEED)
-    installation_id = repository.read_snapshot().installation_id
-    for proposal in outcome.proposed_artifacts:
-        artifact_id = application_ids.derive(
-            "artifact",
-            [
-                installation_id,
-                outcome.case_id,
-                outcome.outcome_id,
-                proposal.proposal_key,
-            ],
-        )
-        target = resources.plan_target(
-            outcome.case_id,
-            ResourceType.ARTIFACT,
-            artifact_id,
-            proposal.resource_kind,
-            proposal.size,
-            proposal.sha256,
-        )
-        if proposal.artifact_kind in {
-            ArtifactKind.USER_RESULT,
-            ArtifactKind.USER_RESULT_ARCHIVE,
-        }:
-            result_payload = result_bytes[proposal.artifact_kind]
-            prepublished_stage = resources.stage_file(
-                source.job_id,
-                f"prepublish_{proposal.proposal_key}",
-                InMemoryBinaryStream(result_payload),
-                expected_size=proposal.size,
-                expected_sha256=proposal.sha256,
-            )
-        else:
-            assert proposal.artifact_kind is ArtifactKind.LOGPARSE_RUN
-            prepublished_stage = resources.stage_tree(
-                source.job_id,
-                f"prepublish_{proposal.proposal_key}",
-                tmp_path / "logparse-result",
-                expected_manifest_hash=proposal.sha256,
-            )
-        assert prepublished_stage.resource_kind is proposal.resource_kind
-        assert prepublished_stage.size == proposal.size
-        assert prepublished_stage.sha256 == proposal.sha256
-        with publication_guard.acquire():
-            published = resources.publish(
-                prepublished_stage,
-                target.final_storage_key,
-            )
-        assert published.storage_key == target.final_storage_key
-
-    outcome_ref = records.publish_outcome_bytes(
-        source.job_id,
-        canonical_json_bytes(outcome),
+    orphan_stage = resources.stage_file(
+        ORPHAN_JOB_ID,
+        "expired_unreferenced_stage",
+        InMemoryBinaryStream(b"obsolete staged bytes\n"),
     )
-    clock.set("2026-07-31T00:05:00.000Z")
-    receipt = application.submit_outcome(outcome, outcome_ref)
-    assert receipt.disposition is OutcomeDisposition.APPLIED
-    durable_outcome = records.read_published_outcome(source.job_id)
-    assert durable_outcome is not None
-    assert durable_outcome.outcome_file_ref == outcome_ref
-    assert durable_outcome.job_outcome == outcome
-
-    before = repository.read_snapshot()
-    aggregate = before.cases[CASE_ID]
-    processing = aggregate.outcome_processing_records[outcome.outcome_id]
-    assert processing.disposition is OutcomeDisposition.APPLIED
-    assert aggregate.jobs[source.job_id].status is JobStatus.SUCCEEDED
-    next_job_id = processing.created_job_id
-    assert next_job_id is not None
-    assert aggregate.jobs[next_job_id].status is JobStatus.PENDING
-    candidate = aggregate.case.diagnosis_state.candidate_conclusion
-    assert candidate is not None and candidate.status is CandidateStatus.REVIEWING
-    assert set(processing.accepted_artifact_ids) == set(aggregate.artifacts)
-    assert set(processing.accepted_evidence_ids) <= set(aggregate.evidence)
-    accepted_evidence = aggregate.evidence[processing.accepted_evidence_ids[0]]
-    assert accepted_evidence.source_type is EvidenceSourceType.LOGPARSE
-
-    original_stage_paths = {
-        proposal.proposal_key: proposal_stage_path(
-            data_root,
-            proposal.staged_resource_ref.owner_job_id,
-            proposal.staged_resource_ref.proposal_key,
-        )
-        for proposal in outcome.proposed_artifacts
-    }
-    for proposal in outcome.proposed_artifacts:
-        stage_path = original_stage_paths[proposal.proposal_key]
-        content_name = (
-            "tree" if proposal.resource_kind is ResourceKind.DIRECTORY else "payload"
-        )
-        assert (stage_path / "staged.json").is_file()
-        assert (stage_path / content_name).exists()
-
+    orphan_stage_path = proposal_stage_path(
+        data_root,
+        orphan_stage.owner_job_id,
+        orphan_stage.proposal_key,
+    )
+    _set_expired(
+        orphan_stage_path / "staged.json",
+        PROPOSAL_STAGING_RETENTION_SECONDS,
+    )
     formal_paths = {
-        artifact_id: data_root / artifact.storage_key
-        for artifact_id, artifact in aggregate.artifacts.items()
+        data_root / attachment_ref.storage_key,
+        data_root / formal_ref.storage_key,
     }
-    formal_bytes = {
-        artifact_id: _path_bytes(path)
-        for artifact_id, path in formal_paths.items()
-    }
-    next_job_path = layout.jobs / next_job_id
-    next_job_bytes = (next_job_path / "job.json").read_bytes()
-    published_next_job = records.read_published_job(next_job_id)
-    assert published_next_job is not None
-    assert next_job_bytes == canonical_json_bytes(
-        published_next_job.job
-    )
-
-    all_stage_paths = {
-        path
-        for owner in layout.proposals.iterdir()
-        for path in owner.iterdir()
-    }
-    assert set(original_stage_paths.values()) <= all_stage_paths
-    for stage_path in all_stage_paths:
-        _set_expired(
-            stage_path / "staged.json",
-            PROPOSAL_STAGING_RETENTION_SECONDS,
-        )
-    for path in [*formal_paths.values(), data_root / attachment.storage_key]:
+    for path in formal_paths:
         _set_expired(path.parent, ORPHAN_RESOURCE_RETENTION_SECONDS)
-    for job_id in (source.job_id, next_job_id):
-        _set_expired(layout.jobs / job_id, ORPHAN_RESOURCE_RETENTION_SECONDS)
+    route_job_path = layout.jobs / route_job_id
+    _set_expired(route_job_path, ORPHAN_RESOURCE_RETENTION_SECONDS)
 
-    delete_failures: list[tuple[Path, BaseException]] = []
+    before_cleanup = repository.read_snapshot()
     cleaner = StorageRetentionCleaner(
         layout,
         lock,
         repository,
         resources,
         records,
-        DeterministicIdGenerator(seed="s08-retention-cleanup"),
+        DeterministicIdGenerator(seed="retention-route-cleanup"),
         RetentionScanner(layout, FakeClock(CLEANUP_NOW)),
         QuarantineMover(layout, lock, file_sync, replacer),
         resources.stage_registry,
         attachment_registry,
-        on_delete_failure=lambda path, error: delete_failures.append((path, error)),
     )
-    result = cleaner.run_once()
+    cleanup = cleaner.run_once()
 
-    assert result.interrupted is False
-    assert result.failed_deletions == (), delete_failures
-    assert len(result.quarantined) >= len(all_stage_paths)
-    assert len(result.deleted) >= len(all_stage_paths)
-    assert all(not path.exists() for path in all_stage_paths)
-    assert set(formal_paths.values()) <= set(result.skipped)
-    assert next_job_path in result.skipped
-    assert layout.jobs / source.job_id in result.skipped
-    after = repository.read_snapshot()
-    assert after == before
-    after_aggregate = after.cases[CASE_ID]
-    assert after_aggregate.case.diagnosis_state.candidate_conclusion == candidate
-    assert after_aggregate.evidence == aggregate.evidence
-    assert after_aggregate.artifacts == aggregate.artifacts
-    assert after_aggregate.jobs[next_job_id] == aggregate.jobs[next_job_id]
-    for artifact_id, path in formal_paths.items():
-        assert path.exists()
-        assert _path_bytes(path) == formal_bytes[artifact_id]
-    assert next_job_path.is_dir()
-    assert (next_job_path / "job.json").read_bytes() == next_job_bytes
+    assert cleanup.interrupted is False
+    assert cleanup.failed_deletions == ()
+    assert not orphan_stage_path.exists()
+    assert formal_paths <= set(cleanup.skipped)
+    assert route_job_path in cleanup.skipped
+    assert repository.read_snapshot() == before_cleanup
+    assert all(path.exists() for path in formal_paths)
+    assert (route_job_path / "job.json").read_bytes() == canonical_json_bytes(route_job)
 
-    # Now pause a second real cleanup pass after discovery but immediately
-    # before QuarantineMover takes the shared lock.  A real repository commit
-    # that wins that lock must make the previously orphaned resource ineligible
-    # when the mover revalidates it.
-    race_bytes = b"resource becomes referenced while cleanup is waiting\n"
-    race_stage = resources.stage_file(
-        next_job_id,
-        "cleanup_commit_race_evidence",
-        InMemoryBinaryStream(race_bytes),
+    race_body = b"resource becomes referenced while cleanup is waiting\n"
+    _, race_ref = _publish_file(
+        resources,
+        publication_guard,
+        owner_job_id=route_job_id,
+        proposal_key="cleanup_commit_race_evidence",
+        resource_type=ResourceType.EVIDENCE,
+        resource_id=RACE_EVIDENCE_ID,
+        body=race_body,
     )
-    race_target = resources.plan_target(
-        CASE_ID,
-        ResourceType.EVIDENCE,
-        RACE_EVIDENCE_ID,
-        race_stage.resource_kind,
-        race_stage.size,
-        race_stage.sha256,
-    )
-    with publication_guard.acquire():
-        race_ref = resources.publish(race_stage, race_target.final_storage_key)
     race_path = data_root / race_ref.storage_key
     _set_expired(race_path.parent, ORPHAN_RESOURCE_RETENTION_SECONDS)
     race_evidence = Evidence(
         evidence_id=RACE_EVIDENCE_ID,
         case_id=CASE_ID,
         source_type=EvidenceSourceType.ATTACHMENT,
-        source_ref=attachment.attachment_id,
+        source_ref=ATTACHMENT_ID,
         locator=AttachmentEvidenceLocator(
             kind="ATTACHMENT",
             byte_start=0,
             byte_end_exclusive=1,
         ),
-        summary="The attachment materialization is retained by the winning commit.",
-        collected_at="2026-07-31T00:06:00.000Z",
+        summary="The winning state commit retains this evidence resource.",
+        collected_at="2026-07-31T00:03:00.000Z",
         content_hash=race_ref.sha256,
         resource_ref=race_ref,
     )
@@ -441,7 +403,7 @@ def test_applied_candidate_stages_expire_without_deleting_formal_state(
         repository,
         resources,
         records,
-        DeterministicIdGenerator(seed="s08-retention-race-cleanup"),
+        DeterministicIdGenerator(seed="retention-route-race-cleanup"),
         RetentionScanner(layout, FakeClock(CLEANUP_NOW)),
         mover_barrier,
         resources.stage_registry,

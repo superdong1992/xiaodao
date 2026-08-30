@@ -7,21 +7,25 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import {
+  assertPhaseOneCaseFirst,
   buildLinuxClientBrowserFailureReceipt,
   installGeneratedSkill,
   linuxClientUserIdentity,
+  parseClaudeStream,
   parseLinuxClientBrowserExecution,
+  phaseOnePrompt,
+  phaseOneUserMessage,
+  phaseTwoPrompt,
+  phaseTwoUserMessage,
   runCommandCapture,
   validRouteMethodsPreflightEvidence,
   validLinuxClientBrowserExecution,
   validServerRuntimeInspection,
   validServiceAgentUsageReceipt,
   validSuccessfulInvocationReceipt,
+  validatePhaseOne,
+  validatePhaseTwo,
 } from "../adapters/cross-job-core.mjs";
-import {
-  validateMethodsGroundingExecutionRecord,
-  validateReleaseDiagnosisReport,
-} from "../lib/methods-oracle.mjs";
 import {
   crossJobBrowserCapabilityPolicy,
   crossJobBrowserFailureContract,
@@ -29,9 +33,9 @@ import {
   validCrossJobPassRuntimeBoundary,
   validCrossJobBrowserFailureBinding,
   validLinuxClientBrowserFailureReceipt,
-  validMethodsGroundingOracleEvidence,
+  validMethodsV2OracleEvidence,
 } from "../lib/actions.mjs";
-import { packageTreeIdentity } from "../lib/release-inputs.mjs";
+import { packageTreeIdentity, RELEASE_MODEL } from "../lib/release-inputs.mjs";
 import { canonicalJson, sha256Bytes, sha256File } from "../lib/util.mjs";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
@@ -51,6 +55,433 @@ function resourceName(prefix, runId, suffix = "") {
 
 const ROUTE_JOB_ID = "00000000-0000-0000-0000-000000000001";
 const PREFLIGHT_JOB_ID = "00000000-0000-0000-0000-000000000002";
+
+const CLIENT_MCP_TOOLS = [
+  "problem_locator_create_case",
+  "problem_locator_prepare_attachment",
+  "problem_locator_submit_supplement",
+  "problem_locator_get_case",
+  "problem_locator_resume_case",
+  "problem_locator_cancel_case",
+  "problem_locator_list_artifacts",
+];
+
+function caseFirstStream({ questionBeforeCreate = null } = {}) {
+  const cwd = process.cwd();
+  const events = [
+    {
+      type: "system",
+      subtype: "init",
+      cwd,
+      model: RELEASE_MODEL,
+      permissionMode: "dontAsk",
+      tools: ["Skill", ...CLIENT_MCP_TOOLS.map((name) => `mcp__problem-locator__${name}`)],
+      mcp_servers: [{ name: "problem-locator", status: "connected" }],
+    },
+    {
+      type: "assistant",
+      message: {
+        role: "assistant",
+        content: [{ type: "tool_use", id: "skill-1", name: "Skill", input: { skill: "problem-locator-client" } }],
+      },
+    },
+    {
+      type: "user",
+      message: { role: "user", content: [{ type: "tool_result", tool_use_id: "skill-1", content: "loaded" }] },
+    },
+  ];
+  if (questionBeforeCreate !== null) {
+    events.push({
+      type: "assistant",
+      message: { role: "assistant", content: [{ type: "text", text: questionBeforeCreate }] },
+    });
+  }
+  events.push(
+    {
+      type: "assistant",
+      message: {
+        role: "assistant",
+        content: [{ type: "tool_use", id: "create-1", name: "mcp__problem-locator__problem_locator_create_case", input: { request_id: "case-first-request" } }],
+      },
+    },
+    {
+      type: "user",
+      tool_use_result: { structuredContent: { ok: true, error: null, data: {} } },
+      message: { role: "user", content: [{ type: "tool_result", tool_use_id: "create-1", content: "created" }] },
+    },
+    {
+      type: "result",
+      subtype: "success",
+      is_error: false,
+      result: "",
+      num_turns: 2,
+      total_cost_usd: 0,
+      usage: {
+        input_tokens: 1,
+        output_tokens: 1,
+        cache_creation_input_tokens: 0,
+        cache_read_input_tokens: 0,
+      },
+    },
+  );
+  return { cwd, text: events.map((event) => JSON.stringify(event)).join("\n") };
+}
+
+function phaseOnePromptFixture() {
+  return {
+    releaseCase: {
+      driver: {
+        problem: {
+          raw_problem_text: "不应进入首轮消息：raw_problem_text",
+          expected_behavior: "不应进入首轮消息：expected_behavior",
+          actual_behavior: "不应进入首轮消息：actual_behavior",
+          scope: "不应进入首轮消息：scope",
+          goals: ["不应进入首轮消息：goals"],
+          non_goals: ["不应进入首轮消息：non_goals"],
+          constraints: ["不应进入首轮消息：constraints"],
+          completion_criteria: ["不应进入首轮消息：completion_criteria"],
+        },
+        initial_user_fact_names: ["problem_time", "client_process", "server_process", "service", "api"],
+        initial_user_fact_values: ["2026-08-23 10:00:05", "rpc_client", "rpc_server", "svc_orders", "Reserve"],
+      },
+      skill: {
+        attachment_requirement: "log_archive",
+        runtime_ref_id: "diagnosis-skill/rpc-timeout-methods-v1",
+        version: "1.0.0",
+      },
+    },
+    archive: {
+      name: "logs.zip",
+      content_type: "application/zip",
+      size: 1234,
+      sha256: "a".repeat(64),
+    },
+  };
+}
+
+test("Phase 1 accepts a direct Case creation with no preceding assistant prose", () => {
+  const stream = caseFirstStream();
+  const audit = parseClaudeStream(stream.text, stream.cwd);
+  assert.equal(assertPhaseOneCaseFirst(audit), true);
+  assert.deepEqual(audit.assistant_text_events, []);
+  assert.equal(audit.records[0].tool_name, "problem_locator_create_case");
+});
+
+test("Phase 1 rejects asking the user before creating the Case", () => {
+  const stream = caseFirstStream({ questionBeforeCreate: "请先补充问题时间和日志。" });
+  const audit = parseClaudeStream(stream.text, stream.cwd);
+  assert.equal(audit.assistant_text_events[0].text, "请先补充问题时间和日志。");
+  assert.throws(
+    () => assertPhaseOneCaseFirst(audit),
+    (error) => error.code === "PHASE1_PROSE_BEFORE_CREATE",
+  );
+});
+
+test("the two Client prompts keep the sparse intake separate from the user's natural supplement", () => {
+  const fixture = phaseOnePromptFixture();
+  const firstPrompt = phaseOnePrompt();
+  const secondPrompt = phaseTwoPrompt(
+    { case_id: "00000000-0000-4000-8000-000000000101" },
+    fixture.releaseCase,
+    fixture.archive,
+  );
+  assert.match(firstPrompt, /第一步请先加载 problem-locator-client Skill/u);
+  assert.match(secondPrompt, /第一步请先加载 problem-locator-client Skill/u);
+  assert.equal(phaseOneUserMessage(), "订单 RPC 偶发超时，请定位原因；我有一份日志，可以在需要时提供。");
+  assert.match(secondPrompt, /问题时间：2026-08-23 10:00:05/u);
+  assert.match(secondPrompt, /客户端进程：rpc_client/u);
+  assert.match(secondPrompt, /服务端进程：rpc_server/u);
+  assert.match(secondPrompt, /服务名：svc_orders/u);
+  assert.match(secondPrompt, /API 名：Reserve/u);
+  assert.match(secondPrompt, /logs\.zip/u);
+  assert.match(secondPrompt, /拿到地址后先暂停/u);
+  assert.equal(firstPrompt.includes("2026-08-23 10:00:05"), false);
+  assert.equal(firstPrompt.includes("rpc_client"), false);
+  assert.equal(firstPrompt.includes("logs.zip"), false);
+  assert.equal(phaseTwoUserMessage(fixture.releaseCase, fixture.archive).includes("problem_time"), false);
+  for (const prompt of [firstPrompt, secondPrompt]) {
+    assert.doesNotMatch(prompt, /problem_locator_(?:create_case|get_case|prepare_attachment|submit_supplement)/u);
+    assert.doesNotMatch(prompt, /(?:request_id|wait_seconds|expected_case_revision|initial_user_fact_names|WAITING_INPUT|WAITING_ATTACHMENT)/u);
+    assert.doesNotMatch(prompt, /(?:problem_time|client_process|server_process|initial_user_fact_names|initial_user_fact_values)/u);
+    assert.doesNotMatch(prompt, /(?:正常情况|实际情况|影响范围|我希望确认|不需要处理|限制条件|完成标准|后面不用问)/u);
+    assert.doesNotMatch(prompt, /(?:expected_behavior|actual_behavior|scope|goals|non_goals|constraints|completion_criteria)/u);
+    for (const value of Object.values(fixture.releaseCase.driver.problem)) {
+      for (const item of Array.isArray(value) ? value : [value]) assert.equal(prompt.includes(item), false);
+    }
+  }
+});
+
+function twoTurnClientFixture() {
+  const fixture = phaseOnePromptFixture();
+  const caseId = "00000000-0000-4000-8000-000000000101";
+  const routeJobId = "00000000-0000-4000-8000-000000000102";
+  const attachmentId = "00000000-0000-4000-8000-000000000103";
+  const publicBaseUrl = "http://127.0.0.1:8080";
+  const createRequestId = "generated-create";
+  const factsRequestId = "generated-facts";
+  const prepareRequestId = "generated-prepare";
+  const rawProblemText = phaseOneUserMessage();
+  const inputRequirements = fixture.releaseCase.driver.initial_user_fact_names.map((name) => ({
+    kind: "INPUT",
+    name,
+    prompt: `请补充${name}。`,
+    status: "OPEN",
+    requested_by_job_id: routeJobId,
+  }));
+  const attachmentRequirement = {
+    kind: "ATTACHMENT",
+    name: "log_archive",
+    prompt: "请提供日志。",
+    status: "OPEN",
+    requested_by_job_id: routeJobId,
+  };
+  const success = (data) => ({ ok: true, error: null, data });
+  const phaseOneRecords = [
+    {
+      ordinal: 0,
+      stream_ordinal: 2,
+      result_stream_ordinal: 3,
+      tool_name: "problem_locator_create_case",
+      input: {
+        request_id: createRequestId,
+        raw_problem_text: rawProblemText,
+        statement: rawProblemText,
+        expected_behavior: "用户未单独说明；以 raw_problem_text 为准。",
+        actual_behavior: rawProblemText,
+        scope: "仅定位 raw_problem_text 所述问题。",
+        goals: ["定位问题原因并给出结论。"],
+        non_goals: [],
+        constraints: [],
+        completion_criteria: ["给出基于证据的结论；证据不足时明确说明。"],
+        initial_user_fact_names: [],
+        initial_user_fact_values: [],
+        wait_seconds: 0,
+      },
+      result: success({ business_receipt: { case_id: caseId }, case_view: null }),
+    },
+    {
+      ordinal: 1,
+      stream_ordinal: 4,
+      result_stream_ordinal: 5,
+      tool_name: "problem_locator_get_case",
+      input: { case_id: caseId, wait_for_job_id: null, wait_seconds: 30 },
+      result: success({
+        case_view: {
+          case_id: caseId,
+          case_revision: 2,
+          status: "WAITING_INPUT",
+          pending_requirements: inputRequirements,
+          selected_skill_ref: {
+            id: fixture.releaseCase.skill.runtime_ref_id,
+            version: fixture.releaseCase.skill.version,
+          },
+        },
+      }),
+    },
+  ];
+  const phaseTwoRecords = [
+    {
+      ordinal: 0,
+      stream_ordinal: 2,
+      result_stream_ordinal: 3,
+      tool_name: "problem_locator_get_case",
+      input: { case_id: caseId, wait_for_job_id: null, wait_seconds: 30 },
+      result: success({
+        case_view: {
+          case_id: caseId,
+          case_revision: 2,
+          status: "WAITING_INPUT",
+          pending_requirements: inputRequirements,
+          selected_skill_ref: {
+            id: fixture.releaseCase.skill.runtime_ref_id,
+            version: fixture.releaseCase.skill.version,
+          },
+        },
+      }),
+    },
+    {
+      ordinal: 1,
+      stream_ordinal: 4,
+      result_stream_ordinal: 5,
+      tool_name: "problem_locator_submit_supplement",
+      input: {
+        request_id: factsRequestId,
+        case_id: caseId,
+        expected_case_revision: 2,
+        input_names: fixture.releaseCase.driver.initial_user_fact_names,
+        input_values: fixture.releaseCase.driver.initial_user_fact_values,
+        attachment_ids: [],
+        wait_seconds: 0,
+      },
+      result: success({ business_receipt: { case_id: caseId } }),
+    },
+    {
+      ordinal: 2,
+      stream_ordinal: 6,
+      result_stream_ordinal: 7,
+      tool_name: "problem_locator_get_case",
+      input: { case_id: caseId, wait_for_job_id: null, wait_seconds: 30 },
+      result: success({
+        case_view: {
+          case_id: caseId,
+          case_revision: 4,
+          status: "WAITING_ATTACHMENT",
+          pending_requirements: [attachmentRequirement],
+        },
+      }),
+    },
+    {
+      ordinal: 3,
+      stream_ordinal: 8,
+      result_stream_ordinal: 9,
+      tool_name: "problem_locator_prepare_attachment",
+      input: {
+        request_id: prepareRequestId,
+        case_id: caseId,
+        expected_case_revision: 4,
+        name: fixture.archive.name,
+        content_type: fixture.archive.content_type,
+        declared_size: fixture.archive.size,
+        declared_sha256: fixture.archive.sha256,
+      },
+      result: success({
+        application_response: {
+          case_view: {
+            case_id: caseId,
+            case_revision: 5,
+            status: "WAITING_ATTACHMENT",
+            pending_requirements: [attachmentRequirement],
+            selected_skill_ref: {
+              id: fixture.releaseCase.skill.runtime_ref_id,
+              version: fixture.releaseCase.skill.version,
+            },
+          },
+        },
+        upload: {
+          attachment_id: attachmentId,
+          method: "PUT",
+          url: `${publicBaseUrl}/api/v1/attachments/${attachmentId}/content`,
+          required_headers: {
+            "Content-Length": String(fixture.archive.size),
+            "Content-Type": fixture.archive.content_type,
+            "Idempotency-Key": attachmentId,
+            "X-Content-SHA256": fixture.archive.sha256,
+          },
+          max_bytes: 2684354560,
+          expires_at: null,
+        },
+      }),
+    },
+  ];
+  return {
+    ...fixture,
+    caseId,
+    publicBaseUrl,
+    inputRequirements,
+    phaseOneRecords,
+    phaseTwoRecords,
+    questionText: inputRequirements.map((item) => item.prompt).join("\n"),
+    requestIds: {
+      create: "planned-create",
+      prepare: "planned-prepare",
+      submit_inputs: "planned-facts",
+      submit_attachment: "planned-attachment",
+    },
+    actualRequestIds: { createRequestId, factsRequestId, prepareRequestId },
+  };
+}
+
+test("the real two-turn boundary creates first, asks returned requirements, then supplements the same Case", () => {
+  const fixture = twoTurnClientFixture();
+  const phaseOneSummary = validatePhaseOne(
+    {
+      records: fixture.phaseOneRecords,
+      assistant_text_events: [{ stream_ordinal: 6, text: fixture.questionText }],
+    },
+    fixture.releaseCase,
+    fixture.requestIds,
+  );
+  assert.equal(phaseOneSummary.case_id, fixture.caseId);
+  assert.deepEqual(phaseOneSummary.request_ids, {
+    ...fixture.requestIds,
+    create: fixture.actualRequestIds.createRequestId,
+  });
+  assert.deepEqual(
+    phaseOneSummary.input_requirements.map((item) => item.name),
+    fixture.releaseCase.driver.initial_user_fact_names,
+  );
+
+  const phaseTwoSummary = validatePhaseTwo(
+    { records: fixture.phaseTwoRecords, assistant_text_events: [] },
+    phaseOneSummary,
+    fixture.releaseCase,
+    phaseOneSummary.request_ids,
+    fixture.archive,
+    fixture.publicBaseUrl,
+  );
+  assert.equal(phaseTwoSummary.attachment_id, "00000000-0000-4000-8000-000000000103");
+  assert.deepEqual(phaseTwoSummary.request_ids, {
+    ...fixture.requestIds,
+    create: fixture.actualRequestIds.createRequestId,
+    submit_inputs: fixture.actualRequestIds.factsRequestId,
+    prepare: fixture.actualRequestIds.prepareRequestId,
+  });
+  assert.deepEqual(fixture.phaseOneRecords.map((item) => item.tool_name), [
+    "problem_locator_create_case",
+    "problem_locator_get_case",
+  ]);
+  assert.deepEqual(fixture.phaseTwoRecords.map((item) => item.tool_name), [
+    "problem_locator_get_case",
+    "problem_locator_submit_supplement",
+    "problem_locator_get_case",
+    "problem_locator_prepare_attachment",
+  ]);
+});
+
+test("the two-turn boundary rejects asking before observation and submitting before re-observation", () => {
+  const fixture = twoTurnClientFixture();
+  assert.throws(
+    () => validatePhaseOne(
+      { records: fixture.phaseOneRecords, assistant_text_events: [] },
+      fixture.releaseCase,
+      fixture.requestIds,
+    ),
+    (error) => error.code === "PHASE1_REQUIREMENTS_NOT_ASKED_AFTER_OBSERVATION",
+  );
+  assert.throws(
+    () => validatePhaseOne(
+      {
+        records: fixture.phaseOneRecords,
+        assistant_text_events: [{ stream_ordinal: 4, text: fixture.questionText }],
+      },
+      fixture.releaseCase,
+      fixture.requestIds,
+    ),
+    (error) => error.code === "PHASE1_REQUIREMENTS_NOT_ASKED_AFTER_OBSERVATION",
+  );
+
+  const phaseOneSummary = validatePhaseOne(
+    {
+      records: fixture.phaseOneRecords,
+      assistant_text_events: [{ stream_ordinal: 6, text: fixture.questionText }],
+    },
+    fixture.releaseCase,
+    fixture.requestIds,
+  );
+  const submittedWithoutObservation = clone(fixture.phaseTwoRecords);
+  submittedWithoutObservation[0].result.data.case_view.status = "RUNNING";
+  assert.throws(
+    () => validatePhaseTwo(
+      { records: submittedWithoutObservation, assistant_text_events: [] },
+      phaseOneSummary,
+      fixture.releaseCase,
+      phaseOneSummary.request_ids,
+      fixture.archive,
+      fixture.publicBaseUrl,
+    ),
+    (error) => error.code === "PHASE2_INPUT_REQUIREMENTS_NOT_REOBSERVED",
+  );
+});
 
 function successfulServiceInvocation(jobId = ROUTE_JOB_ID) {
   return {
@@ -161,7 +592,9 @@ test("dual Linux Client container binds one writable HOME before its runtime pro
   assert.match(source.slice(end, source.indexOf("async function createFreshEnvironment", end)), /runtimeIdentity\.home_writable === true/);
 });
 
-test("captured commands wait for inherited stdout to close before sealing evidence", async () => {
+const posixRuntimeTest = process.platform === "win32" ? test.skip : test;
+
+posixRuntimeTest("captured commands wait for inherited stdout to close before sealing evidence", async () => {
   const child = `setTimeout(() => { process.stdout.write("late-tail"); }, 60);`;
   const parent = `const {spawn}=require("node:child_process");const child=spawn(process.execPath,["-e",${JSON.stringify(child)}],{stdio:["ignore",1,2]});child.unref();process.exit(0);`;
   const result = await runCommandCapture(process.execPath, ["-e", parent], { forward: false });
@@ -576,393 +1009,6 @@ test("native CrossJob server inspect is exact and rejects state, image, label, s
     mutate(changed);
     assert.equal(validServerRuntimeInspection(changed), false);
   }
-});
-
-function methodsGroundingFixture() {
-  const diagnosisJobId = "00000000-0000-4000-8000-000000000011";
-  const caseId = "00000000-0000-4000-8000-000000000001";
-  const registrationSha256 = "a".repeat(64);
-  const packageTreeSha256 = "b".repeat(64);
-  const combinedSha256 = "c".repeat(64);
-  const logparseReceiptBytes = jsonBytes({ schema_version: 1, status: "PASS" });
-  const skillRef = {
-    id: "diagnosis-skill/rpc-timeout-methods-v1",
-    version: "1.0.0",
-    content_hash: combinedSha256,
-  };
-  const job = {
-    job_id: diagnosisJobId,
-    case_id: caseId,
-    job_type: "DIAGNOSE",
-    diagnosis_mode: "SPECIALIZED",
-    logparse_product: "rpc-skill-feasibility",
-    skill_ref: skillRef,
-  };
-  const jobBytes = jsonBytes(job);
-  const auditBytes = jsonBytes({
-    schema_version: 1,
-    registration_id: "rpc-timeout-methods-v1",
-    registration_sha256: registrationSha256,
-    package_tree_sha256: packageTreeSha256,
-    combined_sha256: combinedSha256,
-    logparse_receipt_sha256: crypto.createHash("sha256").update(logparseReceiptBytes).digest("hex"),
-    status: "CONFIRMED",
-    confirmed_methods: ["api-overrun"],
-    evidence_count: 2,
-    checked_source_count: 2,
-    skill_load: {
-      package_tree_sha256: packageTreeSha256,
-      scanned_source_ids: ["client", "server"],
-      marker_hits: [["server", "API_COMPLETE", 1], ["server", "API_COMPLETE", 2]],
-      loaded_method_ids: ["api-overrun"],
-    },
-  });
-  const expected = {
-    diagnosis_job_id: diagnosisJobId,
-    case_id: caseId,
-    skill_ref: skillRef,
-    logparse_product: "rpc-skill-feasibility",
-    registration_id: "rpc-timeout-methods-v1",
-    registration_sha256: registrationSha256,
-    package_tree_sha256: packageTreeSha256,
-    combined_sha256: combinedSha256,
-    status: "CONFIRMED",
-    confirmed_methods: ["api-overrun"],
-    known_method_ids: ["api-overrun", "queue-delay"],
-    source_ids: ["client", "server"],
-    evidence_count: 2,
-  };
-  return { jobBytes, auditBytes, logparseReceiptBytes, expected };
-}
-
-test("CrossJob Methods status oracle reads the exact grounded execution record and fails on status or identity drift", () => {
-  const fixture = methodsGroundingFixture();
-  const validated = validateMethodsGroundingExecutionRecord(fixture);
-  assert.equal(validated.actual_methods_status, "CONFIRMED");
-  assert.equal(validated.expected_methods_status, "CONFIRMED");
-  assert.equal(validated.evidence_count, 2);
-
-  const wrongStatus = clone(JSON.parse(fixture.auditBytes));
-  wrongStatus.status = "PARTIAL";
-  assert.throws(
-    () => validateMethodsGroundingExecutionRecord({ ...fixture, auditBytes: jsonBytes(wrongStatus) }),
-    (error) => error.code === "METHODS_ORACLE_STATUS_MISMATCH",
-  );
-
-  const wrongJob = clone(JSON.parse(fixture.jobBytes));
-  wrongJob.skill_ref.content_hash = "d".repeat(64);
-  assert.throws(
-    () => validateMethodsGroundingExecutionRecord({ ...fixture, jobBytes: jsonBytes(wrongJob) }),
-    (error) => error.code === "METHODS_ORACLE_SKILL_REF_MISMATCH",
-  );
-
-  const nonCanonicalJob = Buffer.from(JSON.stringify(JSON.parse(fixture.jobBytes), null, 2), "utf8");
-  assert.throws(
-    () => validateMethodsGroundingExecutionRecord({ ...fixture, jobBytes: nonCanonicalJob }),
-    (error) => error.code === "METHODS_ORACLE_JSON_NON_CANONICAL",
-  );
-});
-
-function materializeMethodsConsumerFixture() {
-  const temporaryRoot = fs.existsSync("/private/tmp") ? "/private/tmp" : os.tmpdir();
-  const attemptRoot = fs.mkdtempSync(path.join(temporaryRoot, "test-flow-methods-consumer-"));
-  const generationGateRoot = path.join(
-    attemptRoot,
-    "payload", "stages", "real.skill-generation", "gates", "real.agent.skill-generation",
-  );
-  const registrationId = "rpc-timeout-methods-v1";
-  const skillName = "diagnose-rpc-timeout";
-  const registrationRoot = path.join(generationGateRoot, "generated-skill", registrationId);
-  const skillRoot = path.join(registrationRoot, "package", skillName);
-  fs.mkdirSync(path.join(skillRoot, "references"), { recursive: true });
-  fs.writeFileSync(path.join(skillRoot, "SKILL.md"), "# RPC timeout Methods\n", "utf8");
-  fs.writeFileSync(path.join(skillRoot, "references", "methods.md"), "# Methods\n", "utf8");
-  const sourceWikiSha256 = "eb39edf220d0eed91ae03eb712efd8974a5e5c82c3deed035c236a0d1bf28aab";
-  const methods = {
-    schema_version: 1,
-    skill_name: skillName,
-    source_wiki_sha256: sourceWikiSha256,
-    required_user_inputs: ["problem_time", "client_process", "server_process", "service", "api"],
-    required_artifacts: ["log_archive"],
-    log_derived_fields: [
-      "request_id", "client_send_us", "server_recv_us", "server_send_us", "client_now_us",
-      "start_us", "end_us", "cost_us", "print_time_ms", "ordinal", "queue_us", "timeout_ms",
-      "current_us", "request_us",
-    ],
-    methods: [
-      {
-        id: "api-execution-overrun",
-        evidence_markers: ["LATE_RESPONSE service=", "API_COMPLETE service=", "DEADLOOP_DETECTED service="],
-      },
-      {
-        id: "server-receive-queueing",
-        evidence_markers: ["LATE_RESPONSE service=", "QUEUE_HISTORY print_time_ms="],
-      },
-      {
-        id: "client-receive-blocked",
-        evidence_markers: ["LATE_RESPONSE service="],
-      },
-    ],
-  };
-  fs.writeFileSync(path.join(skillRoot, "methods.json"), canonicalJson(methods), "utf8");
-  const registrationPath = path.join(registrationRoot, "registration-template.json");
-  fs.copyFileSync(
-    path.join(REPO_ROOT, "tests", "cases", "release", "rpc-timeout-anonymized", "registration", registrationId, "registration-template.json"),
-    registrationPath,
-  );
-
-  const packageIdentity = packageTreeIdentity(skillRoot);
-  assert.equal(packageIdentity.status, "PRESENT");
-  const packageEntries = packageIdentity.records
-    .filter((entry) => entry.kind === "file")
-    .map(({ path: entryPath, size, sha256 }) => ({ path: entryPath, size, sha256 }))
-    .sort((left, right) => left.path < right.path ? -1 : left.path > right.path ? 1 : 0);
-  const registrationSha256 = sha256File(registrationPath);
-  const packageTreeSha256 = sha256Bytes(canonicalJson({ version: 1, entries: packageEntries }));
-  const combinedSha256 = sha256Bytes(canonicalJson({
-    schema_version: 1,
-    registration_id: registrationId,
-    registration_sha256: registrationSha256,
-    package_tree_sha256: packageTreeSha256,
-  }));
-  const generatedSkill = {
-    registration_id: registrationId,
-    skill_name: skillName,
-    registration_sha256: registrationSha256,
-    package_tree_sha256: packageTreeSha256,
-    combined_sha256: combinedSha256,
-    source_wiki_sha256: sourceWikiSha256,
-  };
-
-  const stageRoot = path.join(attemptRoot, "payload", "stages", "journey.cross-job.diagnose");
-  fs.mkdirSync(stageRoot, { recursive: true });
-  const diagnosisJobId = "00000000-0000-4000-8000-000000000021";
-  const caseId = "00000000-0000-4000-8000-000000000022";
-  const skillRef = {
-    id: `diagnosis-skill/${registrationId}`,
-    version: "1.0.0",
-    content_hash: combinedSha256,
-  };
-  const logparseReceiptBytes = jsonBytes({ schema_version: 1, status: "PASS" });
-  const job = {
-    job_id: diagnosisJobId,
-    case_id: caseId,
-    job_type: "DIAGNOSE",
-    diagnosis_mode: "SPECIALIZED",
-    logparse_product: "rpc-skill-feasibility",
-    skill_ref: skillRef,
-  };
-  const jobBytes = jsonBytes(job);
-  const audit = {
-    schema_version: 1,
-    registration_id: registrationId,
-    registration_sha256: registrationSha256,
-    package_tree_sha256: packageTreeSha256,
-    combined_sha256: combinedSha256,
-    logparse_receipt_sha256: sha256Bytes(logparseReceiptBytes),
-    status: "CONFIRMED",
-    confirmed_methods: ["api-execution-overrun", "client-receive-blocked"],
-    evidence_count: 3,
-    checked_source_count: 2,
-    skill_load: {
-      package_tree_sha256: packageTreeSha256,
-      scanned_source_ids: ["client", "server"],
-      marker_hits: [
-        ["client", "LATE_RESPONSE", 1],
-        ["server", "API_COMPLETE", 1],
-        ["server", "API_COMPLETE", 2],
-      ],
-      loaded_method_ids: ["api-execution-overrun", "client-receive-blocked"],
-    },
-  };
-  const expected = {
-    diagnosis_job_id: diagnosisJobId,
-    case_id: caseId,
-    skill_ref: skillRef,
-    logparse_product: "rpc-skill-feasibility",
-    registration_id: registrationId,
-    registration_sha256: registrationSha256,
-    package_tree_sha256: packageTreeSha256,
-    combined_sha256: combinedSha256,
-    status: "CONFIRMED",
-    confirmed_methods: ["api-execution-overrun", "client-receive-blocked"],
-    known_method_ids: ["api-execution-overrun", "server-receive-queueing", "client-receive-blocked"],
-    source_ids: ["client", "server"],
-    evidence_count: 3,
-  };
-  const auditBytes = jsonBytes(audit);
-  const summary = validateMethodsGroundingExecutionRecord({ jobBytes, auditBytes, logparseReceiptBytes, expected });
-  fs.writeFileSync(path.join(stageRoot, "methods-diagnose-job.json"), jobBytes);
-  fs.writeFileSync(path.join(stageRoot, "methods-grounding-audit.json"), auditBytes);
-  fs.writeFileSync(path.join(stageRoot, "methods-logparse-receipt.json"), logparseReceiptBytes);
-  const receipt = {
-    methods_grounding: summary,
-    invocations: [
-      { job_type: "DIAGNOSE", job_id: diagnosisJobId },
-      { job_type: "DIAGNOSE", job_id: diagnosisJobId },
-      { job_type: "REVIEW", job_id: "00000000-0000-4000-8000-000000000023" },
-    ],
-  };
-  return {
-    attemptRoot,
-    context: { attemptRoot, repoRoot: REPO_ROOT },
-    generatedSkill,
-    receipt,
-    audit,
-    expected,
-    job,
-    logparseReceiptBytes,
-    methods,
-    methodsPath: path.join(skillRoot, "methods.json"),
-    stageRoot,
-  };
-}
-
-test("CrossJob Methods consumer re-derives method IDs from the generated package and rejects coherent unknown-method tampering", () => {
-  const fixture = materializeMethodsConsumerFixture();
-  try {
-    assert.equal(validMethodsGroundingOracleEvidence(fixture.context, fixture.receipt, fixture.generatedSkill), true);
-    const ambiguousJob = clone(fixture.receipt);
-    ambiguousJob.invocations[1].job_id = "00000000-0000-4000-8000-000000000024";
-    assert.equal(validMethodsGroundingOracleEvidence(fixture.context, ambiguousJob, fixture.generatedSkill), false);
-
-    const tamperedAudit = clone(fixture.audit);
-    tamperedAudit.confirmed_methods = ["unknown-method"];
-    tamperedAudit.skill_load.loaded_method_ids = ["unknown-method"];
-    const tamperedAuditBytes = jsonBytes(tamperedAudit);
-    fs.writeFileSync(path.join(fixture.stageRoot, "methods-grounding-audit.json"), tamperedAuditBytes);
-    const tamperedReceipt = clone(fixture.receipt);
-    tamperedReceipt.methods_grounding.confirmed_methods = ["unknown-method"];
-    tamperedReceipt.methods_grounding.audit_sha256 = sha256Bytes(tamperedAuditBytes);
-    assert.equal(validMethodsGroundingOracleEvidence(fixture.context, tamperedReceipt, fixture.generatedSkill), false);
-  } finally {
-    fs.rmSync(fixture.attemptRoot, { recursive: true, force: true });
-  }
-});
-
-function coherentlyRebindGeneratedMethods(fixture, changedMethods) {
-  fs.writeFileSync(fixture.methodsPath, jsonBytes(changedMethods));
-  const skillRoot = path.dirname(fixture.methodsPath);
-  const packageIdentity = packageTreeIdentity(skillRoot);
-  assert.equal(packageIdentity.status, "PRESENT");
-  const packageEntries = packageIdentity.records
-    .filter((entry) => entry.kind === "file")
-    .map(({ path: entryPath, size, sha256 }) => ({ path: entryPath, size, sha256 }))
-    .sort((left, right) => left.path < right.path ? -1 : left.path > right.path ? 1 : 0);
-  const packageTreeSha256 = sha256Bytes(canonicalJson({ version: 1, entries: packageEntries }));
-  const combinedSha256 = sha256Bytes(canonicalJson({
-    schema_version: 1,
-    registration_id: fixture.generatedSkill.registration_id,
-    registration_sha256: fixture.generatedSkill.registration_sha256,
-    package_tree_sha256: packageTreeSha256,
-  }));
-  const generatedSkill = {
-    ...fixture.generatedSkill,
-    package_tree_sha256: packageTreeSha256,
-    combined_sha256: combinedSha256,
-  };
-  const job = clone(fixture.job);
-  job.skill_ref.content_hash = combinedSha256;
-  const audit = clone(fixture.audit);
-  audit.package_tree_sha256 = packageTreeSha256;
-  audit.combined_sha256 = combinedSha256;
-  audit.skill_load.package_tree_sha256 = packageTreeSha256;
-  const expected = {
-    ...fixture.expected,
-    skill_ref: job.skill_ref,
-    package_tree_sha256: packageTreeSha256,
-    combined_sha256: combinedSha256,
-  };
-  const jobBytes = jsonBytes(job);
-  const auditBytes = jsonBytes(audit);
-  const summary = validateMethodsGroundingExecutionRecord({
-    jobBytes,
-    auditBytes,
-    logparseReceiptBytes: fixture.logparseReceiptBytes,
-    expected,
-  });
-  fs.writeFileSync(path.join(fixture.stageRoot, "methods-diagnose-job.json"), jobBytes);
-  fs.writeFileSync(path.join(fixture.stageRoot, "methods-grounding-audit.json"), auditBytes);
-  const receipt = { ...fixture.receipt, methods_grounding: summary };
-  return { generatedSkill, receipt };
-}
-
-test("CrossJob Methods consumer rejects a coherently rebound ordered-field mutation", () => {
-  const reordered = materializeMethodsConsumerFixture();
-  try {
-    const changedMethods = clone(reordered.methods);
-    changedMethods.required_user_inputs.reverse();
-    const changed = coherentlyRebindGeneratedMethods(reordered, changedMethods);
-    assert.equal(validMethodsGroundingOracleEvidence(reordered.context, changed.receipt, changed.generatedSkill), false);
-  } finally {
-    fs.rmSync(reordered.attemptRoot, { recursive: true, force: true });
-  }
-
-});
-
-function releaseReportFixture() {
-  const first = "API_COMPLETE service=svc_orders api=Reserve start_us=10000000 end_us=16500000";
-  const second = "API_COMPLETE service=svc_orders api=Reserve start_us=20000000 end_us=26800000";
-  const report = {
-    schema_version: 3,
-    status: "PARTIAL",
-    causal_factors: [{ factor_id: "api_overrun", required_rule_ids: ["event-1", "event-2"] }],
-    candidate_factors: [{ factor_id: "queue_delay", required_rule_ids: ["candidate-queue"] }],
-    excluded_factors: [],
-    verification_rules: [
-      { rule_id: "event-1", citations: [{ excerpt: first }] },
-      { rule_id: "event-2", citations: [{ excerpt: second }] },
-      { rule_id: "candidate-queue", citations: [] },
-    ],
-    completion_criteria_mapping: [
-      { criterion_index: 0, criterion: "split events", status: "PARTIALLY_SATISFIED" },
-      { criterion_index: 1, criterion: "retain gaps", status: "UNKNOWN" },
-    ],
-    recommendations: [],
-    safety_notes: ["RPC 超时不等于取消。"],
-  };
-  const expectation = {
-    report_status: "PARTIAL",
-    resolution_status: "PARTIAL",
-    causal_factor_ids: ["api_overrun"],
-    candidate_factor_ids: ["queue_delay"],
-    excluded_factor_ids: [],
-    required_evidence_identities: [
-      { factor_id: "api_overrun", marker: "API_COMPLETE", identity_tokens: ["start_us=10000000", "end_us=16500000"] },
-      { factor_id: "api_overrun", marker: "API_COMPLETE", identity_tokens: ["start_us=20000000", "end_us=26800000"] },
-    ],
-    forbidden_evidence_terms: ["ORACLE_FORBIDDEN"],
-  };
-  return {
-    report,
-    expectation,
-    completionCriteria: ["split events", "retain gaps"],
-    requiredSafetyPhrases: ["超时不等于取消"],
-  };
-}
-
-test("CrossJob report oracle requires safety_notes placement and one verification rule per same-method event", () => {
-  const fixture = releaseReportFixture();
-  assert.equal(validateReleaseDiagnosisReport(fixture), true);
-
-  const misplacedSafety = clone(fixture);
-  misplacedSafety.report.recommendations = ["RPC 超时不等于取消。"];
-  misplacedSafety.report.safety_notes = ["Only the fixed scope was inspected."];
-  assert.throws(
-    () => validateReleaseDiagnosisReport(misplacedSafety),
-    (error) => error.code === "RESTART_RESULT_SAFETY_NOTES",
-  );
-
-  const mergedEvents = clone(fixture);
-  mergedEvents.report.causal_factors[0].required_rule_ids = ["merged-event"];
-  mergedEvents.report.verification_rules = [{
-    rule_id: "merged-event",
-    citations: [{ excerpt: `${fixture.report.verification_rules[0].citations[0].excerpt} ${fixture.report.verification_rules[1].citations[0].excerpt}` }],
-  }];
-  assert.throws(
-    () => validateReleaseDiagnosisReport(mergedEvents),
-    (error) => error.code === "RELEASE_RESULT_EVIDENCE_EVENT_COUNT",
-  );
 });
 
 function nativePassBoundary() {

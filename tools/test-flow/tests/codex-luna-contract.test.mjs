@@ -36,6 +36,7 @@ import {
   environmentAudit,
   generationPrompt,
   parseArguments,
+  rpcBranchMapping,
   safeEnvironment,
   validateDiagnosis,
   validatePreprocessedCase,
@@ -322,18 +323,31 @@ test("methods-v1 package verifier rejects v6 and seals the exact tree", () => {
       required_artifacts: ["log_archive"],
       log_derived_fields: [],
       shared_references: ["references/source-log-templates.md"],
-      methods: [{ id: "cause", title: "Cause", reference: "references/cause.md", priority: 1, evidence_markers: ["MARKER"] }],
+      methods: [{ id: "cause", title: "Cause", reference: "references/cause.md", priority: 1, evidence_markers: ["MARKER", "SECOND"], activation_markers: ["MARKER"] }],
     });
     const receipt = verifyMethodsV1Package(skill, sourceWikiIdentity);
     assert.equal(receipt.tree_sha256, treeDigest(skill));
+    assert.deepEqual(receipt.method_activation_markers, [
+      { method_id: "cause", activation_markers: ["MARKER"] },
+    ]);
+    const methodsPath = path.join(skill, "methods.json");
+    const methods = JSON.parse(fs.readFileSync(methodsPath, "utf8"));
+    for (const activationMarkers of [[], ["MARKER", "MARKER"], ["SECOND", "MARKER"], ["MISSING"]]) {
+      methods.methods[0].activation_markers = activationMarkers;
+      writeJson(methodsPath, methods);
+      assert.throws(
+        () => verifyMethodsV1Package(skill, sourceWikiIdentity),
+        (error) => error.code === "CODEX_LUNA_METHOD_ACTIVATION_MARKERS_INVALID",
+      );
+    }
+    methods.methods[0].activation_markers = ["MARKER"];
+    writeJson(methodsPath, methods);
     fs.writeFileSync(path.join(skill, "references", "source-log-templates.md"), "# Source log templates\n\n```text\nMARKER id={other}\n```\n");
     assert.throws(
       () => verifyMethodsV1Package(skill, sourceWikiIdentity),
       (error) => error.code === "CODEX_LUNA_TEMPLATE_REFERENCE_INVALID",
     );
     fs.writeFileSync(path.join(skill, "references", "source-log-templates.md"), buildCodexLunaSourceLogTemplatesBytes(sourceWikiIdentity.log_templates));
-    const methodsPath = path.join(skill, "methods.json");
-    const methods = JSON.parse(fs.readFileSync(methodsPath, "utf8"));
     methods.methods[0].reference = "references/source-log-templates.md";
     writeJson(methodsPath, methods);
     assert.throws(
@@ -350,6 +364,39 @@ test("methods-v1 package verifier rejects v6 and seals the exact tree", () => {
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("RPC branch mapping uses activation markers and permits one literal across methods", () => {
+  const methods = [
+    {
+      id: "api",
+      evidence_markers: ["rpc call", "LATE_RESPONSE service=", "API_COMPLETE service=", "DEADLOOP_DETECTED service="],
+      activation_markers: ["LATE_RESPONSE service=", "API_COMPLETE service=", "DEADLOOP_DETECTED service="],
+    },
+    {
+      id: "server",
+      evidence_markers: ["rpc call", "LATE_RESPONSE service=", "QUEUE_HISTORY print_time_ms="],
+      activation_markers: ["LATE_RESPONSE service=", "QUEUE_HISTORY print_time_ms="],
+    },
+    {
+      id: "client",
+      evidence_markers: ["rpc call", "LATE_RESPONSE service="],
+      activation_markers: ["LATE_RESPONSE service="],
+    },
+  ];
+  assert.deepEqual(rpcBranchMapping({ methods }), {
+    API_COMPLETE: "api",
+    DEADLOOP_DETECTED: "api",
+    QUEUE_HISTORY: "server",
+    LATE_RESPONSE: "client",
+  });
+
+  const contextOnly = structuredClone(methods);
+  contextOnly[0].activation_markers = ["rpc call"];
+  assert.throws(
+    () => rpcBranchMapping({ methods: contextOnly }),
+    (error) => error.code === "CODEX_LUNA_BRANCH_MAPPING_INVALID",
+  );
 });
 
 test("auth and ambient secrets cannot enter evidence", () => {
@@ -433,9 +480,9 @@ test("isolated child environment strips credentials and redirects HOME and CODEX
     LANG: "C.UTF-8",
     HOME: "/private/home",
     CODEX_HOME: "/private/codex-home",
-    TMPDIR: "/private/home/tmp",
-    TMP: "/private/home/tmp",
-    TEMP: "/private/home/tmp",
+    TMPDIR: path.join("/private/home", "tmp"),
+    TMP: path.join("/private/home", "tmp"),
+    TEMP: path.join("/private/home", "tmp"),
     NO_COLOR: "1",
     PYTHONDONTWRITEBYTECODE: "1",
     PYTHONNOUSERSITE: "1",
@@ -575,7 +622,9 @@ test("preprocessed receipt and source-line diagnosis evidence are mechanically g
   }
 });
 
-test("Codex Luna preprocessing CLI produces nine one-parse/two-query receipts", () => {
+const posixRuntimeTest = process.platform === "win32" ? test.skip : test;
+
+posixRuntimeTest("Codex Luna preprocessing CLI produces nine one-parse/two-query receipts", () => {
   const root = temporaryRoot("codex-luna-prepare-");
   try {
     const caseRoot = path.join(root, "fixture", "cases");

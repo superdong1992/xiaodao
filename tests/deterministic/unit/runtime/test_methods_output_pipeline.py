@@ -16,18 +16,26 @@ from problem_locator.contracts import (
     canonical_json_sha256,
     parse_canonical_json_bytes,
 )
+from problem_locator.contracts.enums import MethodsValidationReasonCode
 from problem_locator.runtime.diagnosis_runtime import (
     DiagnosisRuntime,
     _methods_user_input_projection,
 )
 from problem_locator.runtime.failures import RuntimeExecutionError
 from problem_locator.runtime.methods_grounding import (
+    FrozenTargetLogV1,
     MethodDiagnosisDraftV1,
     MethodGroundingAuditV1,
+    MethodsValidationError,
     SkillLoadReceiptV1,
     VerifiedMethodDiagnosisV1,
+    scan_method_markers,
+    verify_method_diagnosis,
 )
-from problem_locator.runtime.methods_skill import load_specialized_skill_registration
+from problem_locator.runtime.methods_skill import (
+    ResolvedSpecializedSkillV1,
+    load_specialized_skill_registration,
+)
 from problem_locator.runtime.output_reader import (
     RejectedAgentOutputError,
     ValidatedMethodDiagnosisDraft,
@@ -50,6 +58,145 @@ def _contract(name: str, model: type[Job] | type[WorkspaceInputManifest]):
     return parse_canonical_json_bytes(
         (CONTRACT_FIXTURES / name).read_bytes(),
         model_type=model,
+    )
+
+
+def _target_log(content: bytes) -> FrozenTargetLogV1:
+    return FrozenTargetLogV1(
+        source_id="client",
+        relative_path="inputs/target-logs/client.log",
+        content_sha256=bytes_sha256(content),
+        content=content,
+    )
+
+
+def _verified_input(
+    *,
+    marker: str = "rpc deadline exceeded",
+) -> tuple[
+    ResolvedSpecializedSkillV1,
+    FrozenTargetLogV1,
+    SkillLoadReceiptV1,
+    MethodDiagnosisDraftV1,
+]:
+    skill = load_specialized_skill_registration(RUNTIME_SKILL)
+    line = "rpc deadline exceeded request_id=42"
+    target = _target_log((line + "\n").encode("utf-8"))
+    skill_load = scan_method_markers(skill=skill, target_logs=(target,))
+    draft = MethodDiagnosisDraftV1.from_mapping(
+        {
+            "schema_version": 1,
+            "status": "CONFIRMED",
+            "confirmed_methods": ["rpc-call-timeout"],
+            "candidate_methods": [],
+            "evidence": [
+                {
+                    "method_id": "rpc-call-timeout",
+                    "summary": "The frozen client line contains the timeout marker.",
+                    "identity_tokens": ["request_id=42"],
+                    "sources": [
+                        {
+                            "source_id": "client",
+                            "line_number": 1,
+                            "marker": marker,
+                            "line": line,
+                        }
+                    ],
+                }
+            ],
+            "limitations": [],
+            "safety_notes": [],
+        }
+    )
+    return skill, target, skill_load, draft
+
+
+def test_verify_method_diagnosis_classifies_marker_not_indexed() -> None:
+    skill, target, skill_load, draft = _verified_input(marker="rpc deadline")
+
+    with pytest.raises(MethodsValidationError) as captured:
+        verify_method_diagnosis(
+            skill=skill,
+            draft=draft,
+            target_logs=(target,),
+            logparse_receipt_sha256="a" * 64,
+            skill_load=skill_load,
+        )
+
+    assert (
+        captured.value.reason_code
+        is MethodsValidationReasonCode.EVIDENCE_MARKER_NOT_INDEXED
+    )
+
+
+def test_verify_method_diagnosis_classifies_confirmed_evidence_missing() -> None:
+    skill, target, skill_load, draft = _verified_input()
+    missing = MethodDiagnosisDraftV1(
+        status=draft.status,
+        confirmed_methods=draft.confirmed_methods,
+        candidate_methods=draft.candidate_methods,
+        evidence=(),
+        limitations=draft.limitations,
+        safety_notes=draft.safety_notes,
+    )
+
+    with pytest.raises(MethodsValidationError) as captured:
+        verify_method_diagnosis(
+            skill=skill,
+            draft=missing,
+            target_logs=(target,),
+            logparse_receipt_sha256="a" * 64,
+            skill_load=skill_load,
+        )
+
+    assert (
+        captured.value.reason_code
+        is MethodsValidationReasonCode.CONFIRMED_EVIDENCE_MISSING
+    )
+
+
+def test_verify_method_diagnosis_classifies_full_scan_miss() -> None:
+    skill = load_specialized_skill_registration(RUNTIME_SKILL)
+    target = _target_log(b"unrelated log line\n")
+    skill_load = scan_method_markers(skill=skill, target_logs=(target,))
+    draft = MethodDiagnosisDraftV1.from_mapping(
+        {
+            "schema_version": 1,
+            "status": "CONFIRMED",
+            "confirmed_methods": ["rpc-call-timeout"],
+            "candidate_methods": [],
+            "evidence": [
+                {
+                    "method_id": "rpc-call-timeout",
+                    "summary": "The claim requires a positive full-log marker scan.",
+                    "identity_tokens": ["unrelated"],
+                    "sources": [
+                        {
+                            "source_id": "client",
+                            "line_number": 1,
+                            "marker": "rpc deadline exceeded",
+                            "line": "unrelated log line",
+                        }
+                    ],
+                }
+            ],
+            "limitations": [],
+            "safety_notes": [],
+        }
+    )
+
+    with pytest.raises(MethodsValidationError) as captured:
+        verify_method_diagnosis(
+            skill=skill,
+            draft=draft,
+            target_logs=(target,),
+            logparse_receipt_sha256="a" * 64,
+            skill_load=skill_load,
+        )
+
+    assert (
+        captured.value.reason_code
+        is MethodsValidationReasonCode.CONFIRMED_MARKER_SCAN_MISS
     )
 
 

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import test from "node:test";
 
 import {
@@ -35,11 +35,18 @@ import {
   CODEX_LUNA_REASONING_EFFORT,
 } from "../runtime-support/codex-luna-contract.mjs";
 
-const PINNED_CODEX = "/Applications/ChatGPT.app/Contents/Resources/codex";
-const WORKSPACE = "/private/tmp/test-flow-codex-luna/invocation";
-const SKILL = `${WORKSPACE}/.agents/skills/diagnose-rpc-timeout/SKILL.md`;
-const CODEX_HOME = "/private/tmp/test-flow-codex-luna/codex-home";
-const SHELL_HOME = `${WORKSPACE}/.shell-home`;
+const PINNED_CODEX = process.env.TEST_FLOW_PINNED_CODEX
+  ?? "/Applications/ChatGPT.app/Contents/Resources/codex";
+const WORKSPACE = path.resolve("/private/tmp/test-flow-codex-luna/invocation");
+const SKILL = path.join(
+  WORKSPACE,
+  ".agents",
+  "skills",
+  "diagnose-rpc-timeout",
+  "SKILL.md",
+);
+const CODEX_HOME = path.resolve("/private/tmp/test-flow-codex-luna/codex-home");
+const SHELL_HOME = path.join(WORKSPACE, ".shell-home");
 const THREAD_ID = "0198-thread-one";
 const TURN_ID = "0198-turn-one";
 const SECRET = "secret-access-token-value-that-must-never-leak";
@@ -173,7 +180,7 @@ function transcript() {
         modelProvider: "openai",
         serviceTier: null,
         cwd: WORKSPACE,
-        runtimeWorkspaceRoots: [],
+        runtimeWorkspaceRoots: [WORKSPACE],
         instructionSources: [],
         approvalPolicy: "never",
         approvalsReviewer: "user",
@@ -283,13 +290,18 @@ test("isolated config uses only a named least-privilege profile and binds one ab
   assert.match(generation.config_toml, /\[permissions\.test-flow-codex-luna-generation\.filesystem\.":workspace_roots"\]\n"\." = "write"/);
   assert.match(diagnosis.config_toml, /\[permissions\.test-flow-codex-luna-diagnosis\.filesystem\.":workspace_roots"\]\n"\." = "read"/);
   assert.match(generation.config_toml, /\[permissions\.test-flow-codex-luna-generation\.network\]\nenabled = false/);
-  assert.match(generation.config_toml, /\[\[skills\.config\]\]\npath = "\/private\/tmp\/test-flow-codex-luna\/invocation\/\.agents\/skills\/diagnose-rpc-timeout\/SKILL\.md"\nenabled = true/);
+  assert.ok(generation.config_toml.includes(
+    `[[skills.config]]\npath = ${JSON.stringify(SKILL)}\nenabled = true`,
+  ));
   for (const name of CODEX_LUNA_SYSTEM_SKILL_NAMES) {
-    const configuredPath = systemSkillPath(name).replaceAll("/", "\\/").replaceAll(".", "\\.");
-    assert.match(generation.config_toml, new RegExp(`\\[\\[skills\\.config\\]\\]\\npath = "${configuredPath}"\\nenabled = false`));
+    assert.ok(generation.config_toml.includes(
+      `[[skills.config]]\npath = ${JSON.stringify(systemSkillPath(name))}\nenabled = false`,
+    ));
   }
   assert.match(generation.config_toml, /\[shell_environment_policy\]\ninherit = "none"\nignore_default_excludes = false/);
-  assert.match(generation.config_toml, /\[shell_environment_policy\.set\]\nPATH = "\/usr\/bin:\/bin:\/usr\/sbin:\/sbin"\nLANG = "C\.UTF-8"\nHOME = "\/private\/tmp\/test-flow-codex-luna\/invocation\/\.shell-home"\nPYTHONDONTWRITEBYTECODE = "1"\nPYTHONNOUSERSITE = "1"/);
+  assert.ok(generation.config_toml.includes(
+    `[shell_environment_policy.set]\nPATH = "/usr/bin:/bin:/usr/sbin:/sbin"\nLANG = "C.UTF-8"\nHOME = ${JSON.stringify(SHELL_HOME)}\nPYTHONDONTWRITEBYTECODE = "1"\nPYTHONNOUSERSITE = "1"`,
+  ));
   assert.equal(generation.shell_environment.codex_home_forwarded, false);
   assert.deepEqual(generation.shell_environment.keys, ["PATH", "LANG", "HOME", "PYTHONDONTWRITEBYTECODE", "PYTHONNOUSERSITE"]);
   assert.doesNotMatch(generation.config_toml, /CODEX_HOME|\[tools\]/);
@@ -310,7 +322,7 @@ test("isolated config uses only a named least-privilege profile and binds one ab
     (error) => error.code === "CODEX_LUNA_APP_SERVER_SKILL_OUTSIDE_WORKSPACE",
   );
   const servicePrivateSkill = path.join(CODEX_HOME, "skills", "service-skill", "SKILL.md");
-  const servicePrivateHome = "/private/tmp/test-flow-codex-luna/service-shell-home";
+  const servicePrivateHome = path.resolve("/private/tmp/test-flow-codex-luna/service-shell-home");
   const serviceProfile = buildCodexLunaIsolatedConfig({ workspaceRoot: WORKSPACE, skillPath: servicePrivateSkill, codexHome: CODEX_HOME, shellHome: servicePrivateHome, mode: "service" });
   assert.equal(serviceProfile.skill_path, servicePrivateSkill);
   assert.equal(serviceProfile.shell_home, servicePrivateHome);
@@ -392,7 +404,7 @@ test("client transcript tolerates informational MCP Server lifecycle notificatio
   );
 });
 
-test("request builders select external auth, an empty runtime-root list, and no legacy sandbox field", () => {
+test("request builders bind the exact runtime workspace root and no legacy sandbox field", () => {
   const initialize = buildCodexLunaInitializeRequest();
   assert.equal(initialize.method, "initialize");
   assert.equal(initialize.params.capabilities.experimentalApi, true);
@@ -437,7 +449,7 @@ test("request builders select external auth, an empty runtime-root list, and no 
   const thread = buildCodexLunaThreadStartRequest({ workspaceRoot: WORKSPACE, mode: "generation", developerInstructions: "Use the configured skill." });
   assert.equal(thread.params.model, CODEX_LUNA_MODEL);
   assert.equal(thread.params.allowProviderModelFallback, false);
-  assert.deepEqual(thread.params.runtimeWorkspaceRoots, []);
+  assert.deepEqual(thread.params.runtimeWorkspaceRoots, [WORKSPACE]);
   assert.equal(Object.hasOwn(thread.params, "environments"), false);
   assert.equal(thread.params.permissions, codexLunaPermissionProfileId("generation"));
   assert.equal(thread.params.approvalPolicy, "never");
@@ -454,7 +466,7 @@ test("request builders select external auth, an empty runtime-root list, and no 
     { type: "text", text: "Diagnose.", text_elements: [] },
   ]);
   assert.equal(Object.hasOwn(turnRequest.params, "environments"), false);
-  assert.deepEqual(turnRequest.params.runtimeWorkspaceRoots, []);
+  assert.deepEqual(turnRequest.params.runtimeWorkspaceRoots, [WORKSPACE]);
   assert.equal(turnRequest.params.permissions, codexLunaPermissionProfileId("diagnosis"));
   assert.equal(turnRequest.params.model, CODEX_LUNA_MODEL);
   assert.equal(turnRequest.params.effort, CODEX_LUNA_REASONING_EFFORT);
@@ -969,7 +981,9 @@ test("thread response persistence, provider, sandbox, reviewer, and instruction-
     ["network projection", (response) => { response.sandbox.networkAccess = true; }, "CODEX_LUNA_APP_SERVER_SANDBOX_PROJECTION_INVALID"],
     ["reviewer", (response) => { response.approvalsReviewer = "guardian"; }, "CODEX_LUNA_APP_SERVER_APPROVAL_REVIEWER_INVALID"],
     ["multi-agent", (response) => { response.multiAgentMode = "auto"; }, "CODEX_LUNA_APP_SERVER_MULTI_AGENT_BOUNDARY_INVALID"],
-    ["runtime roots", (response) => { response.runtimeWorkspaceRoots = [WORKSPACE]; }, "CODEX_LUNA_APP_SERVER_WORKSPACE_BINDING_INVALID"],
+    ["empty runtime roots", (response) => { response.runtimeWorkspaceRoots = []; }, "CODEX_LUNA_APP_SERVER_WORKSPACE_BINDING_INVALID"],
+    ["extra runtime root", (response) => { response.runtimeWorkspaceRoots = [WORKSPACE, "/private/tmp/outside"]; }, "CODEX_LUNA_APP_SERVER_WORKSPACE_BINDING_INVALID"],
+    ["drifted runtime root", (response) => { response.runtimeWorkspaceRoots = ["/private/tmp/outside"]; }, "CODEX_LUNA_APP_SERVER_WORKSPACE_BINDING_INVALID"],
     ["outside instruction source", (response) => { response.instructionSources = ["/private/tmp/outside/AGENTS.md"]; }, "CODEX_LUNA_APP_SERVER_INSTRUCTION_SOURCES_INVALID"],
   ];
   for (const [name, mutate, code, field] of cases) {
@@ -1041,10 +1055,14 @@ test("evidence includes exact profile bytes and protocol identity without creden
 });
 
 test("pinned app-server accepts and reports the strict profile and skill boundary without auth or a model turn", {
-  skip: process.platform !== "darwin" || !fs.existsSync(PINNED_CODEX),
+  skip: (process.platform !== "darwin" && !process.env.TEST_FLOW_PINNED_CODEX)
+    || !fs.existsSync(PINNED_CODEX),
 }, async () => {
   const inheritedSkill = path.join(process.cwd(), ".agents", "skills", "wiki-to-diagnosis-skill", "SKILL.md");
-  const tempParent = fs.existsSync(inheritedSkill) ? path.join(process.cwd(), ".tmp") : (fs.existsSync("/private/tmp") ? "/private/tmp" : os.tmpdir());
+  const tempParent = process.env.TEST_FLOW_APP_SERVER_TEST_TMP
+    ?? (fs.existsSync(inheritedSkill) && process.platform === "darwin"
+      ? path.join(process.cwd(), ".tmp")
+      : (fs.existsSync("/private/tmp") ? "/private/tmp" : os.tmpdir()));
   fs.mkdirSync(tempParent, { recursive: true });
   const root = fs.mkdtempSync(path.join(tempParent, "codex-app-server-profile-"));
   let child = null;
@@ -1052,11 +1070,14 @@ test("pinned app-server accepts and reports the strict profile and skill boundar
     const codexHome = path.join(root, "codex-home");
     const home = path.join(root, "home");
     const workspace = path.join(root, "workspace");
-    const shellHome = path.join(workspace, ".shell-home");
+    const shellHome = path.join(root, "shell-home");
     const skill = path.join(codexHome, "skills", "test-skill", "SKILL.md");
     fs.mkdirSync(codexHome, { recursive: true, mode: 0o700 });
     fs.mkdirSync(home, { recursive: true, mode: 0o700 });
     fs.mkdirSync(shellHome, { recursive: true, mode: 0o700 });
+    fs.mkdirSync(path.join(workspace, "inputs"), { recursive: true, mode: 0o700 });
+    fs.mkdirSync(path.join(workspace, "output"), { mode: 0o700 });
+    fs.writeFileSync(path.join(workspace, "inputs", "probe.txt"), "workspace-root-bound\n", { mode: 0o600 });
     fs.mkdirSync(path.dirname(skill), { recursive: true, mode: 0o700 });
     fs.writeFileSync(skill, "---\nname: test-skill\ndescription: protocol-only test\n---\n", { mode: 0o600 });
     for (const name of CODEX_LUNA_SYSTEM_SKILL_NAMES) {
@@ -1073,7 +1094,32 @@ test("pinned app-server accepts and reports the strict profile and skill boundar
       disabledSkillPaths: fs.existsSync(inheritedSkill) ? [inheritedSkill] : [],
     });
     fs.writeFileSync(path.join(codexHome, "config.toml"), profile.config_toml, { mode: 0o600 });
-    child = spawn(PINNED_CODEX, buildCodexLunaAppServerArguments({ workspaceRoot }), {
+    fs.chmodSync(workspace, 0o500);
+    let sandboxProbe;
+    try {
+      sandboxProbe = spawnSync(PINNED_CODEX, [
+        "sandbox",
+        "-P", profile.profile_id,
+        "-C", workspace,
+        "--",
+        "/bin/cp", "inputs/probe.txt", "output/probe.txt",
+      ], {
+        cwd: workspace,
+        env: {
+          HOME: home,
+          CODEX_HOME: codexHome,
+          PATH: "/usr/bin:/bin:/usr/sbin:/sbin",
+          TMPDIR: root,
+          NO_COLOR: "1",
+        },
+        encoding: "utf8",
+      });
+    } finally {
+      fs.chmodSync(workspace, 0o700);
+    }
+    assert.equal(sandboxProbe.status, 0, sandboxProbe.stderr);
+    assert.equal(fs.readFileSync(path.join(workspace, "output", "probe.txt"), "utf8"), "workspace-root-bound\n");
+    child = spawn(PINNED_CODEX, buildCodexLunaAppServerArguments({ workspaceRoot: workspace }), {
       cwd: workspace,
       env: {
         HOME: home,
@@ -1135,16 +1181,21 @@ test("pinned app-server accepts and reports the strict profile and skill boundar
     child.stdin.write(`${JSON.stringify(buildCodexLunaInitializedNotification())}\n`);
     const permissionProfiles = await request(buildCodexLunaPermissionProfileListRequest({ workspaceRoot: workspace }));
     const listedSkills = await request(buildCodexLunaSkillsListRequest({ workspaceRoot: workspace }));
+    const started = await request(buildCodexLunaThreadStartRequest({ workspaceRoot: workspace, mode: "service" }));
     child.stdin.end();
     const exit = await closed;
     clearTimeout(timeout);
     assert.deepEqual(exit, { code: 0, signal: null }, stderr);
     assert.equal(initialized.codexHome, codexHome);
     assert.ok(permissionProfiles.data.some((entry) => entry.id === profile.profile_id && entry.allowed === true));
+    assert.equal(started.thread.cwd, workspace);
+    assert.deepEqual(started.runtimeWorkspaceRoots, [workspace]);
     const cwdSkills = listedSkills.data.find((entry) => entry.cwd === workspace);
     assert.deepEqual(cwdSkills?.errors, []);
     assert.ok(cwdSkills?.skills.some((entry) => entry.name === "test-skill" && entry.path === skill && entry.enabled === true));
-    if (fs.existsSync(inheritedSkill)) assert.ok(cwdSkills?.skills.some((entry) => entry.path === inheritedSkill && entry.enabled === false));
+    if (process.platform === "darwin" && fs.existsSync(inheritedSkill)) {
+      assert.ok(cwdSkills?.skills.some((entry) => entry.path === inheritedSkill && entry.enabled === false));
+    }
     for (const name of CODEX_LUNA_SYSTEM_SKILL_NAMES) {
       assert.ok(cwdSkills?.skills.some((entry) => entry.name === name && entry.path === systemSkillPath(name, codexHome) && entry.enabled === false));
     }

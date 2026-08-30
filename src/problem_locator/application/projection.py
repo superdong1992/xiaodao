@@ -154,6 +154,7 @@ def project_case_components(
         unresolved_result=case.unresolved_result,
         generic_result=case.generic_result,
         generic_result_v2=case.generic_result_v2,
+        methods_result=case.methods_result,
         failure=case.failure,
         artifacts=project_artifact_summaries(case, artifacts),
         created_at=case.created_at,

@@ -84,8 +84,8 @@ class _SkillDescriptor:
 
 _BUILTIN_SPECS = (
     _BuiltinSpec("profiles/router", AssetKind.AGENT_PROFILE, "agent-profile/router"),
-    _BuiltinSpec("profiles/specialist", AssetKind.AGENT_PROFILE, "agent-profile/specialist", "3.0.0"),
-    _BuiltinSpec("profiles/reviewer", AssetKind.AGENT_PROFILE, "agent-profile/reviewer", "3.0.0"),
+    _BuiltinSpec("profiles/specialist", AssetKind.AGENT_PROFILE, "agent-profile/specialist", "5.0.0"),
+    _BuiltinSpec("profiles/reviewer", AssetKind.AGENT_PROFILE, "agent-profile/reviewer", "5.0.0"),
     _BuiltinSpec("profiles/generic-locator", AssetKind.AGENT_PROFILE, "agent-profile/generic-locator", "2.0.0"),
     _BuiltinSpec("tool-bundles/router", AssetKind.TOOL_BUNDLE, "tool-bundle/router", "2.0.0"),
     _BuiltinSpec("tool-bundles/diagnose", AssetKind.TOOL_BUNDLE, "tool-bundle/diagnose", "4.0.0"),
@@ -96,8 +96,8 @@ _BUILTIN_SPECS = (
     _BuiltinSpec("context-policies/review", AssetKind.CONTEXT_POLICY, "context-policy/review"),
     _BuiltinSpec("context-policies/generic-locator", AssetKind.CONTEXT_POLICY, "context-policy/generic-locator"),
     _BuiltinSpec("output-contracts/route", AssetKind.OUTPUT_CONTRACT, "output-contract/route", "3.0.0"),
-    _BuiltinSpec("output-contracts/diagnose", AssetKind.OUTPUT_CONTRACT, "output-contract/diagnose", "6.0.0"),
-    _BuiltinSpec("output-contracts/review", AssetKind.OUTPUT_CONTRACT, "output-contract/review", "4.0.0"),
+    _BuiltinSpec("output-contracts/diagnose", AssetKind.OUTPUT_CONTRACT, "output-contract/diagnose", "8.0.0"),
+    _BuiltinSpec("output-contracts/review", AssetKind.OUTPUT_CONTRACT, "output-contract/review", "8.0.0"),
     _BuiltinSpec("output-contracts/generic-locator", AssetKind.OUTPUT_CONTRACT, "output-contract/generic-locator", "2.0.0"),
 )
 _BUILTIN_SPECS_BY_ID = {item.asset_id: item for item in _BUILTIN_SPECS}

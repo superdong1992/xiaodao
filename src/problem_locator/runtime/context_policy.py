@@ -24,9 +24,17 @@ from problem_locator.contracts import (
     VersionedRef,
     canonical_json_bytes,
 )
+from problem_locator.contracts.methods_v2 import (
+    MethodEvidenceGraphV2,
+    MethodEvaluationPlanV2,
+)
 
 from .catalog import hash_product_directory
-from .context_builder import ContextMaterials
+from .context_builder import (
+    ContextMaterials,
+    build_methods_review_method_cards_v2,
+    build_methods_specialist_method_cards_v2,
+)
 from .failures import runtime_failure
 from .methods_skill import load_specialized_skill_registration
 from .workspace import PreparedWorkspace
@@ -67,11 +75,43 @@ class ResolvedJobAssets:
         self,
         workspace: PreparedWorkspace,
         *,
+        job: Job | None = None,
         loaded_method_ids: Sequence[str] | None = None,
+        methods_evidence_graph: MethodEvidenceGraphV2 | None = None,
+        methods_evaluation_plan: MethodEvaluationPlanV2 | None = None,
     ) -> ResolvedContextAssets:
         """Attach only the already-frozen Workspace view to context materials."""
 
         skill_text = self.skill_text
+        methods_skill = None
+        method_cards = ()
+        if (methods_evidence_graph is None) != (methods_evaluation_plan is None):
+            raise ValueError("Methods V2 Graph and Plan must be supplied together")
+        if methods_evidence_graph is not None:
+            if job is None or self.skill is None or methods_evaluation_plan is None:
+                raise ValueError("Methods V2 context binding requires its Job and Skill")
+            planned_method_ids = tuple(
+                item.method_id for item in methods_evaluation_plan.evaluations
+            )
+            if loaded_method_ids is not None and tuple(loaded_method_ids) != planned_method_ids:
+                raise ValueError("loaded_method_ids must match the Evaluation Plan")
+            loaded_method_ids = planned_method_ids
+            methods_skill = load_specialized_skill_registration(
+                Path(self.skill.root_path)
+            )
+            if job.methods_review_target is None:
+                method_cards = build_methods_specialist_method_cards_v2(
+                    skill=methods_skill,
+                    job=job,
+                    graph=methods_evidence_graph,
+                    plan=methods_evaluation_plan,
+                )
+            else:
+                method_cards = build_methods_review_method_cards_v2(
+                    skill=methods_skill,
+                    target=job.methods_review_target,
+                    plan=methods_evaluation_plan,
+                )
         if loaded_method_ids is not None:
             if self.skill is None:
                 raise _invalid_asset() from None
@@ -94,6 +134,10 @@ class ResolvedJobAssets:
                 else workspace.previous_outcomes
             ),
             evidence=workspace.evidence,
+            methods_evidence_graph=methods_evidence_graph,
+            methods_evaluation_plan=methods_evaluation_plan,
+            methods_skill=methods_skill,
+            methods_method_cards=method_cards,
         )
         return ResolvedContextAssets(
             profile=self.profile,

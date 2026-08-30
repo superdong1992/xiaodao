@@ -37,6 +37,12 @@ from problem_locator.contracts import (
     LogparseBrokerFactory,
     LogparseBrokerSession,
     LogparseParseClaim,
+    MethodEvidenceGraphV2,
+    MethodEvaluationPlanV2,
+    MethodEvaluationRoleV2,
+    MethodLimitationsRecordV2,
+    MethodRoleEvaluationV2,
+    MethodStateV2,
     MechanicalFact,
     PendingRequirement,
     RequirementKind,
@@ -56,10 +62,29 @@ from problem_locator.contracts import (
     bytes_sha256,
     canonical_json_bytes,
     canonical_json_sha256,
+    method_pre_evaluation_diagnostic_id_v2,
     parse_canonical_json_bytes,
     review_required_evidence_refs,
+    validate_outcome_for_job,
     validate_logparse_claim_for_job,
 )
+from problem_locator.application.formalization import (
+    build_methods_reviewer_outcome_v2,
+    build_methods_specialist_handoff_outcome_v2,
+    build_methods_specialist_terminal_outcome_v2,
+)
+from problem_locator.domain.methods_state_v2 import (
+    accept_specialist_evaluation_v2,
+    fail_method_state_v2,
+    finalize_reviewer_consensus_v2,
+    interrupt_method_state_v2,
+    record_model_execution_failure_v2,
+    record_protocol_error_v2,
+    resume_method_state_v2,
+    start_method_state_v2,
+)
+from problem_locator.contracts.enums import MethodsValidationReasonCode
+from problem_locator.contracts.methods_reason_v2 import METHOD_PUBLIC_REASON_TEXT_V2
 from problem_locator.diagnostics import log_event
 from problem_locator.integrations.logparse.requests import (
     Anchor,
@@ -87,9 +112,37 @@ from .output_reader import (
     ValidatedMethodDiagnosisDraft,
     ValidatedMethodReviewDraft,
     ValidatedMethodsPreprocessing,
+    ValidatedMethodRoleAttemptV2,
     ValidatedProposalResource,
     read_agent_output,
+    read_method_role_attempt_v2,
     read_methods_preprocessing,
+)
+from .methods_evaluation_v2 import (
+    MethodEvaluationResponseError,
+    resolve_method_consensus_v2,
+)
+from .methods_evidence_v2 import (
+    build_method_evaluation_plan_v2,
+    scan_method_evidence_v2,
+    validate_method_evaluation_plan_v2,
+)
+from .methods_outcome_v2 import build_method_terminal_result_v2
+from .methods_records_v2 import (
+    MethodEvaluationAttemptV2,
+    build_method_limitations_record_v2,
+    publish_method_evaluation_plan_v2,
+    publish_method_evidence_graph_v2,
+    publish_method_limitations_record_v2,
+    publish_method_prompt_v2,
+    publish_method_rejected_attempt_v2,
+    publish_method_state_v2,
+    read_method_evaluation_plan_v2,
+    read_method_evidence_graph_v2,
+    read_method_limitations_record_v2,
+    read_method_prompt_v2,
+    read_method_rejected_attempt_v2,
+    read_method_state_v2,
 )
 from .methods_outcome import map_verified_methods_draft
 from .proposal_stager import discard_staged, stage_validated_output
@@ -101,6 +154,7 @@ from .methods_grounding import (
     MethodGroundingAuditV1,
     MethodDiagnosisDraftV1,
     MethodReviewV1,
+    MethodsValidationError,
     SkillLoadReceiptV1,
     VerifiedMethodDiagnosisV1,
     scan_method_markers,
@@ -124,6 +178,78 @@ def _unexpected_failure() -> RuntimeExecutionError:
         stage=ExecutionStage.OUTCOME_VALIDATE,
         code=ErrorCode.OUTCOME_INVALID,
         message="Runtime execution could not be validated safely.",
+    )
+
+
+class _MethodAuditArchiveError(RuntimeError):
+    """One fixed Evidence V2 execution record could not be committed."""
+
+
+def _method_validation_reason_code(
+    error: TypeError | ValueError,
+) -> MethodsValidationReasonCode:
+    """Classify known Methods validation failures into a closed public reason set."""
+
+    if isinstance(error, MethodsValidationError):
+        return error.reason_code
+    return MethodsValidationReasonCode.VALIDATION_FAILED
+
+
+def _classify_pre_evaluation_methods_failure_v2(
+    job: Job,
+    failure: ExecutionFailure,
+    execution_records: ExecutionRecordStore,
+) -> ExecutionFailure:
+    """Classify a Methods failure only while no complete Graph/Plan exists."""
+
+    if failure.reason_code is not None or failure.code is ErrorCode.BACKEND_CANCELLED:
+        return failure
+    try:
+        record_job_ids = [job.job_id]
+        if job.methods_review_target is not None:
+            record_job_ids.append(job.methods_review_target.source_job_id)
+        elif job.replacement_for_job_id is not None:
+            record_job_ids.append(job.replacement_for_job_id)
+        complete_plan_exists = any(
+            read_method_evidence_graph_v2(execution_records, job_id=record_job_id)
+            is not None
+            and read_method_evaluation_plan_v2(
+                execution_records,
+                job_id=record_job_id,
+            )
+            is not None
+            for record_job_id in dict.fromkeys(record_job_ids)
+        )
+    except Exception:
+        complete_plan_exists = False
+    if complete_plan_exists:
+        return failure
+    if (
+        failure.stage is ExecutionStage.EXECUTION_RECORD
+        or failure.code is ErrorCode.EXECUTION_RECORD_FAILED
+    ):
+        reason_code = "AUDIT_ARCHIVE_FAILED"
+    elif (
+        failure.stage is ExecutionStage.ASSET_RESOLUTION
+        or failure.code is ErrorCode.ASSET_VERSION_UNAVAILABLE
+    ):
+        reason_code = "RESOURCE_SNAPSHOT_DRIFT"
+    else:
+        reason_code = "SERVER_INVARIANT_VIOLATION"
+    return ExecutionFailure(
+        stage=failure.stage,
+        code=failure.code,
+        message=METHOD_PUBLIC_REASON_TEXT_V2[reason_code],
+        retryable=False,
+        details=list(failure.details),
+        reason_code=reason_code,
+        diagnostic_id=method_pre_evaluation_diagnostic_id_v2(
+            case_id=job.case_id,
+            source_job_id=job.job_id,
+            reason_code=reason_code,
+            source_stage=failure.stage.value,
+            source_error_code=failure.code.value,
+        ),
     )
 
 
@@ -242,6 +368,59 @@ class MethodsUserInputProjection:
     active_required_names: tuple[str, ...]
     input_templates: dict[str, dict[str, Any]]
     log_archive_template: dict[str, Any]
+
+
+def _is_methods_v2_job(job: Job) -> bool:
+    """Return whether the frozen Job belongs to the hard-cut Evidence V2 path."""
+
+    return (
+        job.job_type is JobType.DIAGNOSE
+        and job.diagnosis_mode is DiagnosisMode.SPECIALIZED
+    ) or (
+        job.job_type is JobType.REVIEW
+        and job.methods_review_target is not None
+    )
+
+
+def _method_role_prompt_v2(
+    *,
+    context: BoundedContext,
+    role: MethodEvaluationRoleV2,
+    attempt: MethodEvaluationAttemptV2,
+) -> str:
+    output_path = (
+        "output/method-diagnosis.draft.json"
+        if role == "SPECIALIST"
+        else "output/method-review.draft.json"
+    )
+    role_text = "Specialist" if role == "SPECIALIST" else "Reviewer"
+    attempt_text = "primary evaluation" if attempt == "PRIMARY" else "only repair"
+    repair = ""
+    if attempt == "REPAIR":
+        repair = (
+            "\nThe previous response failed only the required JSON structure or exact "
+            "evaluation coverage. Produce the complete response again. This is the only "
+            "repair attempt. Every item must again contain exactly evaluation_ref, "
+            "verdict, supporting_event_refs, and reason. Do not omit, add, reorder, or "
+            "rename any evaluation_ref or invent any event reference."
+        )
+    return (
+        context.body
+        + "\n\n<<<METHODS_EVIDENCE_V2_ROLE>>>\n"
+        + f"Role: {role_text}. Attempt: {attempt_text}.\n"
+        + "Use only the frozen request, Evidence Graph, Evaluation Plan, and method cards "
+        + "provided in this Job context. Evaluate every evaluation_ref independently and "
+        + "in exact plan order. Write one JSON root array whose items contain only "
+        + "evaluation_ref, verdict, supporting_event_refs, and reason. For CONFIRMED, "
+        + "supporting_event_refs must be a non-empty subset of the current Evaluation "
+        + "Plan item's evidence_event_refs in plan order. For REJECTED or UNKNOWN, it "
+        + "must be an empty array. Select only those server-issued event refs; do not "
+        + "copy or invent markers, log text, line numbers, hashes, identity fields, hit "
+        + "refs, or any other evidence fields.\n"
+        + f"Write only {output_path}."
+        + repair
+        + "\n<<<END METHODS_EVIDENCE_V2_ROLE>>>\n"
+    )
 
 
 def _binding_user_fact_name(binding: object) -> str | None:
@@ -575,7 +754,13 @@ class DiagnosisRuntime:
         except Exception:
             failure = _unexpected_failure().failure
         assert failure is not None
-        if job.diagnosis_mode is DiagnosisMode.GENERIC and failure.retryable:
+        if _is_methods_v2_job(job):
+            failure = _classify_pre_evaluation_methods_failure_v2(
+                job,
+                failure,
+                self._execution_records,
+            )
+        elif job.diagnosis_mode is DiagnosisMode.GENERIC and failure.retryable:
             failure = ExecutionFailure(
                 stage=failure.stage,
                 code=failure.code,
@@ -612,7 +797,23 @@ class DiagnosisRuntime:
         cancellation: CancellationSignal,
     ) -> RuntimeExecutionReceipt:
         resolving = record_stage_started(ExecutionStage.ASSET_RESOLUTION)
-        assets = self._resolve_assets(job)
+        try:
+            assets = self._resolve_assets(job)
+        except RuntimeExecutionError as exc:
+            if _is_methods_v2_job(job):
+                aggregate = self._read_case(job)
+                recovered = self._publish_methods_resource_drift_v2(
+                    job=job,
+                    aggregate=aggregate,
+                )
+                if recovered is not None:
+                    record_stage_completed(
+                        ExecutionStage.ASSET_RESOLUTION,
+                        resolving,
+                        data={"methods_v2_resource_drift": True},
+                    )
+                    return recovered
+            raise exc
         record_stage_completed(
             ExecutionStage.ASSET_RESOLUTION,
             resolving,
@@ -665,6 +866,13 @@ class DiagnosisRuntime:
         if job.job_type is JobType.ROUTE and not job.available_skill_refs:
             return self._publish_no_capability(job)
         aggregate = self._read_case(job)
+        if _is_methods_v2_job(job):
+            return self._execute_methods_v2(
+                job=job,
+                aggregate=aggregate,
+                assets=assets,
+                cancellation=cancellation,
+            )
         prior_methods_diagnosis: VerifiedMethodDiagnosisV1 | None = None
         prior_methods_diagnosis_bytes: bytes | None = None
         prior_methods_audit_bytes: bytes | None = None
@@ -790,6 +998,7 @@ class DiagnosisRuntime:
                     assets=assets,
                     cancellation=cancellation,
                     shared_log_sinks=shared_log_sinks,
+                    deterministic=False,
                 )
                 methods_skill = self._resolved_methods_skill(assets)
                 methods_skill_load = scan_method_markers(
@@ -888,11 +1097,21 @@ class DiagnosisRuntime:
                 )
                 for resource in mapped.proposal_resources:
                     resource.verify_unchanged()
-            except (TypeError, ValueError):
-                raise runtime_failure(
-                    stage=ExecutionStage.OUTCOME_VALIDATE,
-                    code=ErrorCode.OUTCOME_INVALID,
-                    message="Methods diagnosis draft is not grounded in the frozen inputs.",
+            except (TypeError, ValueError) as exc:
+                reason_code = _method_validation_reason_code(exc)
+                diagnostic_id = self._id_generator.new("diagnostic")
+                raise RuntimeExecutionError(
+                    ExecutionFailure(
+                        stage=ExecutionStage.OUTCOME_VALIDATE,
+                        code=ErrorCode.OUTCOME_INVALID,
+                        message=(
+                            "Methods diagnosis draft is not grounded in the frozen inputs."
+                        ),
+                        retryable=False,
+                        details=[],
+                        reason_code=reason_code,
+                        diagnostic_id=diagnostic_id,
+                    )
                 ) from None
             self._publish_audit_bytes(
                 job,
@@ -1079,6 +1298,1651 @@ class DiagnosisRuntime:
             )
         return receipt
 
+    def _publish_methods_resource_drift_v2(
+        self,
+        *,
+        job: Job,
+        aggregate: CaseAggregate,
+    ) -> RuntimeExecutionReceipt | None:
+        target = job.methods_review_target
+        source_job_id = job.job_id if target is None else target.source_job_id
+        try:
+            graph = read_method_evidence_graph_v2(
+                self._execution_records,
+                job_id=source_job_id,
+            )
+            plan = read_method_evaluation_plan_v2(
+                self._execution_records,
+                job_id=source_job_id,
+            )
+            limitations_record = read_method_limitations_record_v2(
+                self._execution_records,
+                job_id=source_job_id,
+            )
+            current_state = read_method_state_v2(
+                self._execution_records,
+                job_id=job.job_id,
+            )
+            if target is None and job.replacement_for_job_id is not None:
+                predecessor_job_id = job.replacement_for_job_id
+                predecessor_graph = read_method_evidence_graph_v2(
+                    self._execution_records,
+                    job_id=predecessor_job_id,
+                )
+                predecessor_plan = read_method_evaluation_plan_v2(
+                    self._execution_records,
+                    job_id=predecessor_job_id,
+                )
+                predecessor_limitations = read_method_limitations_record_v2(
+                    self._execution_records,
+                    job_id=predecessor_job_id,
+                )
+                predecessor_state = read_method_state_v2(
+                    self._execution_records,
+                    job_id=predecessor_job_id,
+                )
+                graph = graph or predecessor_graph
+                plan = plan or predecessor_plan
+                limitations_record = limitations_record or predecessor_limitations
+                if current_state is None and predecessor_state is not None:
+                    current_state = resume_method_state_v2(
+                        state=predecessor_state,
+                        source_job_id=job.job_id,
+                    )
+                elif (
+                    current_state is not None
+                    and current_state.status == "INTERRUPTED"
+                ):
+                    current_state = resume_method_state_v2(
+                        state=current_state,
+                        source_job_id=job.job_id,
+                    )
+            elif target is not None and job.replacement_for_job_id is not None:
+                predecessor_state = read_method_state_v2(
+                    self._execution_records,
+                    job_id=job.replacement_for_job_id,
+                )
+                if current_state is None and predecessor_state is not None:
+                    current_state = resume_method_state_v2(state=predecessor_state)
+                elif (
+                    current_state is not None
+                    and current_state.status == "INTERRUPTED"
+                ):
+                    current_state = resume_method_state_v2(state=current_state)
+            if graph is None or plan is None:
+                return None
+            validate_method_evaluation_plan_v2(evidence=graph, plan=plan)
+            if target is not None and (
+                target.graph_ref != graph.graph_ref
+                or target.plan_ref != plan.plan_ref
+                or target.evaluation_id is None
+            ):
+                return None
+            workspace = self._workspace_manager.prepare(
+                job,
+                aggregate,
+                self._resource_store,
+                methods_evaluation_plan=(plan if target is not None else None),
+            )
+            limitations = (
+                graph.limitations
+                if limitations_record is None
+                else limitations_record.limitations
+            )
+            state = current_state or start_method_state_v2(
+                case_id=job.case_id,
+                source_job_id=(job.job_id if target is None else source_job_id),
+                evaluation_id=(
+                    target.evaluation_id
+                    if target is not None
+                    else self._id_generator.derive(
+                        "methods_evaluation",
+                        [job.case_id, job.job_id, plan.plan_ref],
+                    )
+                ),
+                plan=plan,
+            )
+            if current_state is not None:
+                if (
+                    current_state.case_id != job.case_id
+                    or current_state.source_job_id
+                    != (job.job_id if target is None else source_job_id)
+                    or current_state.plan_ref != plan.plan_ref
+                    or current_state.evaluation_refs
+                    != tuple(item.evaluation_ref for item in plan.evaluations)
+                ):
+                    return None
+                if (
+                    job.job_type is JobType.DIAGNOSE
+                    and current_state.status == "REVIEWER_PENDING"
+                ):
+                    return self._finish_methods_specialist_handoff_v2(
+                        job=job,
+                        workspace=workspace,
+                        graph=graph,
+                        plan=plan,
+                        state=current_state,
+                        evaluation=None,
+                        limitations=limitations,
+                    )
+                if current_state.status in {"RESOLVED", "UNRESOLVED", "FAILED"}:
+                    return self._finish_methods_terminal_v2(
+                        job=job,
+                        workspace=workspace,
+                        graph=graph,
+                        plan=plan,
+                        state=current_state,
+                        limitations=limitations,
+                        persist_state=False,
+                    )
+            if target is None and job.replacement_for_job_id is not None:
+                replacement_limitations = build_method_limitations_record_v2(
+                    case_id=job.case_id,
+                    source_job_id=job.job_id,
+                    graph=graph,
+                    plan=plan,
+                    limitations=limitations,
+                )
+                if (
+                    not self._commit_method_graph_v2(job_id=job.job_id, graph=graph)
+                    or not self._commit_method_plan_v2(job_id=job.job_id, plan=plan)
+                    or not self._commit_method_limitations_v2(
+                        job_id=job.job_id,
+                        record=replacement_limitations,
+                    )
+                ):
+                    return self._fail_methods_terminal_v2(
+                        job=job,
+                        workspace=workspace,
+                        graph=graph,
+                        plan=plan,
+                        state=state,
+                        reason_code="AUDIT_ARCHIVE_FAILED",
+                        reason="The replacement Evidence V2 records could not be archived.",
+                        limitations=limitations,
+                    )
+            try:
+                self._inherit_method_rejections_v2(
+                    job=job,
+                    role=("SPECIALIST" if target is None else "REVIEWER"),
+                )
+            except _MethodAuditArchiveError:
+                return self._fail_methods_terminal_v2(
+                    job=job,
+                    workspace=workspace,
+                    graph=graph,
+                    plan=plan,
+                    state=state,
+                    reason_code="AUDIT_ARCHIVE_FAILED",
+                    reason="The replacement attempt records could not be archived.",
+                    limitations=limitations,
+                )
+            return self._fail_methods_terminal_v2(
+                job=job,
+                workspace=workspace,
+                graph=graph,
+                plan=plan,
+                state=state,
+                reason_code="RESOURCE_SNAPSHOT_DRIFT",
+                reason="The pinned Evidence V2 Skill resource changed.",
+                limitations=limitations,
+            )
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except Exception:
+            return None
+
+    def _execute_methods_v2(
+        self,
+        *,
+        job: Job,
+        aggregate: CaseAggregate,
+        assets: ResolvedJobAssets,
+        cancellation: CancellationSignal,
+    ) -> RuntimeExecutionReceipt:
+        try:
+            existing = self._execution_records.read_published_outcome(job.job_id)
+        except ApplicationPortError as exc:
+            raise runtime_failure(
+                stage=ExecutionStage.EXECUTION_RECORD,
+                code=ErrorCode.EXECUTION_RECORD_FAILED,
+                message="The existing Evidence V2 Outcome could not be read.",
+                retryable=True,
+                details=exc.error.details,
+            ) from None
+        if existing is not None:
+            validate_outcome_for_job(job, existing.job_outcome, aggregate)
+            return existing
+        if (
+            job.job_type is JobType.DIAGNOSE
+            and job.diagnosis_mode is DiagnosisMode.SPECIALIZED
+        ):
+            return self._execute_methods_specialist_v2(
+                job=job,
+                aggregate=aggregate,
+                assets=assets,
+                cancellation=cancellation,
+            )
+        if job.job_type is JobType.REVIEW and job.methods_review_target is not None:
+            return self._execute_methods_reviewer_v2(
+                job=job,
+                aggregate=aggregate,
+                assets=assets,
+                cancellation=cancellation,
+            )
+        raise _unexpected_failure()
+
+    @staticmethod
+    def _resolved_methods_logparse_plan_v2(
+        job: Job,
+        aggregate: CaseAggregate,
+        assets: ResolvedJobAssets,
+    ) -> ResolvedLogparsePlanInput:
+        try:
+            broker_plan = compile_resolved_logparse_plan(job, aggregate, assets)
+        except ResolvedLogparsePlanNotReady as exc:
+            raise ValueError(
+                "complete Methods preflight inputs did not resolve a Logparse plan"
+            ) from exc
+        if broker_plan is None:
+            raise ValueError("Evidence V2 diagnosis requires one resolved Logparse plan")
+        return ResolvedLogparsePlanInput(
+            schema_version=2,
+            attachment_id=broker_plan.attachment_id,
+            artifact_id=broker_plan.artifact_id,
+            problem_time=broker_plan.problem_time,
+            anchors=[
+                ResolvedLogparseAnchor(
+                    label=item.label,
+                    module=item.module,
+                    slot=item.slot,
+                    process_name=item.process_name,
+                    pid=item.pid,
+                )
+                for item in broker_plan.anchors
+            ],
+        )
+
+    def _publish_methods_server_outcome_v2(
+        self,
+        *,
+        job: Job,
+        outcome: JobOutcome,
+        workspace: PreparedWorkspace,
+    ) -> RuntimeExecutionReceipt:
+        publishing = record_stage_started(
+            ExecutionStage.EXECUTION_RECORD,
+            data={"operation": "publish_methods_v2_outcome"},
+        )
+        try:
+            receipt = self._publisher.publish_success(
+                job,
+                outcome,
+                workspace.manifest,
+            )
+        except (TypeError, ValueError):
+            raise _unexpected_failure() from None
+        record_stage_completed(
+            ExecutionStage.EXECUTION_RECORD,
+            publishing,
+            data={
+                "operation": "publish_methods_v2_outcome",
+                "outcome_file_ref": receipt.outcome_file_ref,
+            },
+        )
+        self._record_produced_outcome(receipt)
+        return receipt
+
+    def _commit_method_graph_v2(
+        self,
+        *,
+        job_id: str,
+        graph: MethodEvidenceGraphV2,
+    ) -> bool:
+        try:
+            publish_method_evidence_graph_v2(
+                self._execution_records,
+                job_id=job_id,
+                graph=graph,
+            )
+            return True
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except Exception:
+            try:
+                return read_method_evidence_graph_v2(
+                    self._execution_records,
+                    job_id=job_id,
+                ) == graph
+            except Exception:
+                return False
+
+    def _commit_method_plan_v2(
+        self,
+        *,
+        job_id: str,
+        plan: MethodEvaluationPlanV2,
+    ) -> bool:
+        try:
+            publish_method_evaluation_plan_v2(
+                self._execution_records,
+                job_id=job_id,
+                plan=plan,
+            )
+            return True
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except Exception:
+            try:
+                return read_method_evaluation_plan_v2(
+                    self._execution_records,
+                    job_id=job_id,
+                ) == plan
+            except Exception:
+                return False
+
+    def _commit_method_limitations_v2(
+        self,
+        *,
+        job_id: str,
+        record: MethodLimitationsRecordV2,
+    ) -> bool:
+        try:
+            publish_method_limitations_record_v2(
+                self._execution_records,
+                job_id=job_id,
+                record=record,
+            )
+            return True
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except Exception:
+            try:
+                return read_method_limitations_record_v2(
+                    self._execution_records,
+                    job_id=job_id,
+                ) == record
+            except Exception:
+                return False
+
+    def _commit_method_state_v2(
+        self,
+        *,
+        job_id: str,
+        state: MethodStateV2,
+    ) -> bool:
+        try:
+            publish_method_state_v2(
+                self._execution_records,
+                job_id=job_id,
+                state=state,
+            )
+            return True
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except Exception:
+            try:
+                return read_method_state_v2(
+                    self._execution_records,
+                    job_id=job_id,
+                ) == state
+            except Exception:
+                return False
+
+    def _commit_method_prompt_v2(
+        self,
+        *,
+        job_id: str,
+        role: MethodEvaluationRoleV2,
+        attempt: MethodEvaluationAttemptV2,
+        prompt_bytes: bytes,
+    ) -> None:
+        try:
+            publish_method_prompt_v2(
+                self._execution_records,
+                job_id=job_id,
+                role=role,
+                attempt=attempt,
+                prompt_bytes=prompt_bytes,
+            )
+            return
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except Exception:
+            try:
+                committed = read_method_prompt_v2(
+                    self._execution_records,
+                    job_id=job_id,
+                    role=role,
+                    attempt=attempt,
+                )
+            except Exception:
+                committed = None
+            if committed == prompt_bytes:
+                return
+            raise _MethodAuditArchiveError("method prompt archive failed") from None
+
+    def _commit_method_rejection_v2(
+        self,
+        *,
+        job_id: str,
+        role: MethodEvaluationRoleV2,
+        attempt: MethodEvaluationAttemptV2,
+        raw_bytes: bytes,
+    ) -> None:
+        try:
+            publish_method_rejected_attempt_v2(
+                self._execution_records,
+                job_id=job_id,
+                role=role,
+                attempt=attempt,
+                raw_bytes=raw_bytes,
+            )
+            return
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except Exception:
+            try:
+                committed = read_method_rejected_attempt_v2(
+                    self._execution_records,
+                    job_id=job_id,
+                    role=role,
+                    attempt=attempt,
+                )
+            except Exception:
+                committed = None
+            if committed == raw_bytes:
+                return
+            raise _MethodAuditArchiveError("method rejection archive failed") from None
+
+    def _inherit_method_rejections_v2(
+        self,
+        *,
+        job: Job,
+        role: MethodEvaluationRoleV2,
+    ) -> None:
+        source_job_id = job.replacement_for_job_id
+        if source_job_id is None:
+            return
+        attempts: tuple[MethodEvaluationAttemptV2, ...] = ("PRIMARY", "REPAIR")
+        for attempt in attempts:
+            try:
+                raw_bytes = read_method_rejected_attempt_v2(
+                    self._execution_records,
+                    job_id=source_job_id,
+                    role=role,
+                    attempt=attempt,
+                )
+            except (KeyboardInterrupt, SystemExit):
+                raise
+            except Exception:
+                raise _MethodAuditArchiveError(
+                    "method replacement rejection read failed"
+                ) from None
+            if raw_bytes is not None:
+                self._commit_method_rejection_v2(
+                    job_id=job.job_id,
+                    role=role,
+                    attempt=attempt,
+                    raw_bytes=raw_bytes,
+                )
+
+    @staticmethod
+    def _audit_failed_method_state_v2(state: MethodStateV2) -> MethodStateV2:
+        if state.status == "FAILED" and state.reason_code == "AUDIT_ARCHIVE_FAILED":
+            return state
+        return fail_method_state_v2(
+            state=state,
+            reason_code="AUDIT_ARCHIVE_FAILED",
+            reason="The Evidence V2 audit record could not be committed.",
+        )
+
+    def _finish_methods_terminal_v2(
+        self,
+        *,
+        job: Job,
+        workspace: PreparedWorkspace,
+        graph: MethodEvidenceGraphV2,
+        plan: MethodEvaluationPlanV2,
+        state: MethodStateV2,
+        limitations: tuple[str, ...] | None = None,
+        persist_state: bool = True,
+    ) -> RuntimeExecutionReceipt:
+        if limitations is None:
+            limitations = ()
+            target = job.methods_review_target
+            if target is not None:
+                record = read_method_limitations_record_v2(
+                    self._execution_records,
+                    job_id=target.source_job_id,
+                )
+                if (
+                    record is not None
+                    and record.case_id == job.case_id
+                    and record.evidence_graph_ref == graph.graph_ref
+                    and record.plan_ref == plan.plan_ref
+                ):
+                    limitations = record.limitations
+        terminal_state = state
+        outcome_id = self._id_generator.new("job_outcome")
+        produced_at = self._clock.now()
+
+        def build_outcome(value: MethodStateV2) -> JobOutcome:
+            terminal_result = build_method_terminal_result_v2(
+                state=value,
+                plan=plan,
+                evidence=graph,
+                terminal_job_id=job.job_id,
+                limitations=limitations,
+            )
+            if job.job_type is JobType.REVIEW:
+                return build_methods_reviewer_outcome_v2(
+                    job,
+                    outcome_id=outcome_id,
+                    terminal_state=value,
+                    terminal_result=terminal_result,
+                    plan=plan,
+                    evidence=graph,
+                    produced_at=produced_at,
+                )
+            return build_methods_specialist_terminal_outcome_v2(
+                job,
+                outcome_id=outcome_id,
+                terminal_state=value,
+                terminal_result=terminal_result,
+                plan=plan,
+                evidence=graph,
+                produced_at=produced_at,
+            )
+
+        # Validate the complete terminal DTO chain before committing its immutable state.
+        outcome = build_outcome(terminal_state)
+        if persist_state and not self._commit_method_state_v2(
+            job_id=job.job_id,
+            state=terminal_state,
+        ):
+            terminal_state = self._audit_failed_method_state_v2(terminal_state)
+            outcome = build_outcome(terminal_state)
+            self._commit_method_state_v2(
+                job_id=job.job_id,
+                state=terminal_state,
+            )
+        return self._publish_methods_server_outcome_v2(
+            job=job,
+            outcome=outcome,
+            workspace=workspace,
+        )
+
+    def _fail_methods_terminal_v2(
+        self,
+        *,
+        job: Job,
+        workspace: PreparedWorkspace,
+        graph: MethodEvidenceGraphV2,
+        plan: MethodEvaluationPlanV2,
+        state: MethodStateV2,
+        reason_code: str,
+        reason: str,
+        limitations: tuple[str, ...] | None = None,
+    ) -> RuntimeExecutionReceipt:
+        failed = fail_method_state_v2(
+            state=state,
+            reason_code=reason_code,  # type: ignore[arg-type]
+            reason=reason,
+        )
+        return self._finish_methods_terminal_v2(
+            job=job,
+            workspace=workspace,
+            graph=graph,
+            plan=plan,
+            state=failed,
+            limitations=limitations,
+        )
+
+    def _run_method_role_attempt_v2(
+        self,
+        *,
+        job: Job,
+        workspace: PreparedWorkspace,
+        context: BoundedContext,
+        role: MethodEvaluationRoleV2,
+        plan: MethodEvaluationPlanV2,
+        attempt: MethodEvaluationAttemptV2,
+        cancellation: CancellationSignal,
+        log_sinks: ExecutionLogSinks,
+    ) -> ValidatedMethodRoleAttemptV2:
+        prompt = _method_role_prompt_v2(
+            context=context,
+            role=role,
+            attempt=attempt,
+        )
+        self._commit_method_prompt_v2(
+            job_id=job.job_id,
+            role=role,
+            attempt=attempt,
+            prompt_bytes=prompt.encode("utf-8"),
+        )
+        self._backend.execute(
+            prompt=prompt,
+            workspace_root=workspace.root,
+            cancellation=cancellation,
+            log_sinks=_borrow_log_sinks(log_sinks),
+            resource_limits=job.resource_limits,
+            broker_environment=None,
+            test_limits=self._backend_test_limits,
+        )
+        return read_method_role_attempt_v2(
+            workspace,
+            role=role,
+            plan=plan,
+            attempt=attempt,
+        )
+
+    def _archive_method_rejection_v2(
+        self,
+        *,
+        job: Job,
+        role: MethodEvaluationRoleV2,
+        attempt: MethodEvaluationAttemptV2,
+        error: MethodEvaluationResponseError,
+    ) -> None:
+        self._commit_method_rejection_v2(
+            job_id=job.job_id,
+            role=role,
+            attempt=attempt,
+            raw_bytes=error.raw_response_bytes or b"",
+        )
+
+    def _interrupt_methods_state_v2(
+        self,
+        *,
+        job: Job,
+        state: MethodStateV2,
+    ) -> None:
+        interrupted = interrupt_method_state_v2(state=state)
+        if not self._commit_method_state_v2(
+            job_id=job.job_id,
+            state=interrupted,
+        ):
+            raise _MethodAuditArchiveError("interrupted method state archive failed")
+
+    @staticmethod
+    def _methods_limitations_v2(
+        preprocessing: MethodsPreprocessingExecution,
+    ) -> tuple[str, ...]:
+        return tuple(
+            dict.fromkeys(
+                caveat
+                for target in preprocessing.validated.authoritative_targets.targets
+                for caveat in target.caveats
+            )
+        )
+
+    def _evaluate_methods_specialist_v2(
+        self,
+        *,
+        job: Job,
+        workspace: PreparedWorkspace,
+        context: BoundedContext,
+        graph: MethodEvidenceGraphV2,
+        plan: MethodEvaluationPlanV2,
+        state: MethodStateV2,
+        limitations: tuple[str, ...],
+        cancellation: CancellationSignal,
+        log_sinks: ExecutionLogSinks,
+    ) -> tuple[MethodStateV2, MethodRoleEvaluationV2] | RuntimeExecutionReceipt:
+        primary_rejected = read_method_rejected_attempt_v2(
+            self._execution_records,
+            job_id=job.job_id,
+            role="SPECIALIST",
+            attempt="PRIMARY",
+        )
+        repair_rejected = read_method_rejected_attempt_v2(
+            self._execution_records,
+            job_id=job.job_id,
+            role="SPECIALIST",
+            attempt="REPAIR",
+        )
+        if repair_rejected is not None and primary_rejected is None:
+            return self._fail_methods_terminal_v2(
+                job=job,
+                workspace=workspace,
+                graph=graph,
+                plan=plan,
+                state=state,
+                reason_code="SERVER_INVARIANT_VIOLATION",
+                reason="A Specialist repair record exists without its primary rejection.",
+                limitations=limitations,
+            )
+        attempt_name: MethodEvaluationAttemptV2 = "PRIMARY"
+        if primary_rejected is not None:
+            if state.specialist_protocol_failures == 0:
+                state = record_protocol_error_v2(
+                    state=state,
+                    role="SPECIALIST",
+                    reason="The persisted primary Specialist response was rejected.",
+                )
+            attempt_name = "REPAIR"
+        if repair_rejected is not None:
+            state = record_protocol_error_v2(
+                state=state,
+                role="SPECIALIST",
+                reason="The persisted Specialist repair response was rejected.",
+            )
+            return self._finish_methods_terminal_v2(
+                job=job,
+                workspace=workspace,
+                graph=graph,
+                plan=plan,
+                state=state,
+                limitations=limitations,
+            )
+
+        while True:
+            try:
+                validated = self._run_method_role_attempt_v2(
+                    job=job,
+                    workspace=workspace,
+                    context=context,
+                    role="SPECIALIST",
+                    plan=plan,
+                    attempt=attempt_name,
+                    cancellation=cancellation,
+                    log_sinks=log_sinks,
+                )
+                return state, validated.evaluation
+            except MethodEvaluationResponseError as exc:
+                try:
+                    self._archive_method_rejection_v2(
+                        job=job,
+                        role="SPECIALIST",
+                        attempt=attempt_name,
+                        error=exc,
+                    )
+                except Exception:
+                    return self._fail_methods_terminal_v2(
+                        job=job,
+                        workspace=workspace,
+                        graph=graph,
+                        plan=plan,
+                        state=state,
+                        reason_code="AUDIT_ARCHIVE_FAILED",
+                        reason="The rejected Specialist response could not be archived.",
+                        limitations=limitations,
+                    )
+                state = record_protocol_error_v2(
+                    state=state,
+                    role="SPECIALIST",
+                    reason=str(exc),
+                )
+                if state.status == "UNRESOLVED":
+                    return self._finish_methods_terminal_v2(
+                        job=job,
+                        workspace=workspace,
+                        graph=graph,
+                        plan=plan,
+                        state=state,
+                        limitations=limitations,
+                    )
+                attempt_name = "REPAIR"
+            except RuntimeExecutionError as exc:
+                if exc.failure.code is ErrorCode.BACKEND_CANCELLED:
+                    self._interrupt_methods_state_v2(job=job, state=state)
+                    raise
+                state = record_model_execution_failure_v2(
+                    state=state,
+                    role="SPECIALIST",
+                    reason=exc.failure.message,
+                )
+                return self._finish_methods_terminal_v2(
+                    job=job,
+                    workspace=workspace,
+                    graph=graph,
+                    plan=plan,
+                    state=state,
+                    limitations=limitations,
+                )
+            except OSError:
+                return self._fail_methods_terminal_v2(
+                    job=job,
+                    workspace=workspace,
+                    graph=graph,
+                    plan=plan,
+                    state=state,
+                    reason_code="SERVER_INVARIANT_VIOLATION",
+                    reason="The Specialist output could not be read.",
+                    limitations=limitations,
+                )
+
+            except _MethodAuditArchiveError:
+                return self._fail_methods_terminal_v2(
+                    job=job,
+                    workspace=workspace,
+                    graph=graph,
+                    plan=plan,
+                    state=state,
+                    reason_code="AUDIT_ARCHIVE_FAILED",
+                    reason="The Specialist prompt could not be archived.",
+                    limitations=limitations,
+                )
+            except (KeyboardInterrupt, SystemExit):
+                raise
+            except Exception:
+                return self._fail_methods_terminal_v2(
+                    job=job,
+                    workspace=workspace,
+                    graph=graph,
+                    plan=plan,
+                    state=state,
+                    reason_code="SERVER_INVARIANT_VIOLATION",
+                    reason="The Specialist execution violated a server invariant.",
+                    limitations=limitations,
+                )
+
+    def _finish_methods_specialist_handoff_v2(
+        self,
+        *,
+        job: Job,
+        workspace: PreparedWorkspace,
+        graph: MethodEvidenceGraphV2,
+        plan: MethodEvaluationPlanV2,
+        state: MethodStateV2,
+        evaluation: MethodRoleEvaluationV2 | None,
+        limitations: tuple[str, ...],
+    ) -> RuntimeExecutionReceipt:
+        try:
+            pending_state = (
+                state
+                if state.status == "REVIEWER_PENDING" and evaluation is None
+                else accept_specialist_evaluation_v2(
+                    state=state,
+                    evaluation=evaluation,  # type: ignore[arg-type]
+                )
+            )
+            outcome = build_methods_specialist_handoff_outcome_v2(
+                job,
+                outcome_id=self._id_generator.new("job_outcome"),
+                pending_state=pending_state,
+                graph=graph,
+                plan=plan,
+                produced_at=self._clock.now(),
+            )
+        except (TypeError, ValueError):
+            return self._fail_methods_terminal_v2(
+                job=job,
+                workspace=workspace,
+                graph=graph,
+                plan=plan,
+                state=state,
+                reason_code="SERVER_INVARIANT_VIOLATION",
+                reason="The Specialist evaluation could not enter Reviewer handoff.",
+                limitations=limitations,
+            )
+        if not self._commit_method_state_v2(
+            job_id=job.job_id,
+            state=pending_state,
+        ):
+            return self._finish_methods_terminal_v2(
+                job=job,
+                workspace=workspace,
+                graph=graph,
+                plan=plan,
+                state=self._audit_failed_method_state_v2(pending_state),
+                limitations=limitations,
+                persist_state=False,
+            )
+        return self._publish_methods_server_outcome_v2(
+            job=job,
+            outcome=outcome,
+            workspace=workspace,
+        )
+
+    def _execute_methods_specialist_v2(
+        self,
+        *,
+        job: Job,
+        aggregate: CaseAggregate,
+        assets: ResolvedJobAssets,
+        cancellation: CancellationSignal,
+    ) -> RuntimeExecutionReceipt:
+        try:
+            skill = self._resolved_methods_skill(assets)
+            stored_graph = read_method_evidence_graph_v2(
+                self._execution_records,
+                job_id=job.job_id,
+            )
+            stored_plan = read_method_evaluation_plan_v2(
+                self._execution_records,
+                job_id=job.job_id,
+            )
+            stored_limitations = read_method_limitations_record_v2(
+                self._execution_records,
+                job_id=job.job_id,
+            )
+            stored_state = read_method_state_v2(
+                self._execution_records,
+                job_id=job.job_id,
+            )
+            record_source_job_id = job.job_id
+            if job.replacement_for_job_id is not None:
+                predecessor_job_id = job.replacement_for_job_id
+                predecessor_graph = read_method_evidence_graph_v2(
+                    self._execution_records,
+                    job_id=predecessor_job_id,
+                )
+                predecessor_plan = read_method_evaluation_plan_v2(
+                    self._execution_records,
+                    job_id=predecessor_job_id,
+                )
+                predecessor_limitations = read_method_limitations_record_v2(
+                    self._execution_records,
+                    job_id=predecessor_job_id,
+                )
+                predecessor_state = read_method_state_v2(
+                    self._execution_records,
+                    job_id=predecessor_job_id,
+                )
+                if stored_graph is None:
+                    stored_graph = predecessor_graph
+                elif (
+                    predecessor_graph is not None
+                    and stored_graph != predecessor_graph
+                ):
+                    raise ValueError("replacement Graph differs from its predecessor")
+                if stored_plan is None:
+                    stored_plan = predecessor_plan
+                elif predecessor_plan is not None and stored_plan != predecessor_plan:
+                    raise ValueError("replacement Plan differs from its predecessor")
+                if stored_limitations is None:
+                    stored_limitations = predecessor_limitations
+                    record_source_job_id = predecessor_job_id
+                if stored_state is None and predecessor_state is not None:
+                    stored_state = resume_method_state_v2(
+                        state=predecessor_state,
+                        source_job_id=job.job_id,
+                    )
+                elif stored_state is not None and stored_state.status == "INTERRUPTED":
+                    stored_state = resume_method_state_v2(
+                        state=stored_state,
+                        source_job_id=job.job_id,
+                    )
+            if stored_graph is None and stored_plan is not None:
+                raise ValueError("Evidence V2 Plan exists without its Graph")
+            recovered_records = stored_graph is not None
+            if recovered_records:
+                assert stored_graph is not None
+                expected_plan = build_method_evaluation_plan_v2(
+                    skill=skill,
+                    evidence=stored_graph,
+                )
+                if stored_plan is None:
+                    stored_plan = expected_plan
+                elif stored_plan != expected_plan:
+                    raise ValueError("stored Evidence V2 Plan differs from its Graph")
+                if stored_limitations is not None and (
+                    stored_limitations.case_id != job.case_id
+                    or stored_limitations.source_job_id != record_source_job_id
+                    or stored_limitations.evidence_graph_ref != stored_graph.graph_ref
+                    or stored_limitations.plan_ref != stored_plan.plan_ref
+                    or stored_limitations.limitations != stored_graph.limitations
+                ):
+                    raise ValueError("stored limitations differ from the Graph and Plan")
+                resolved_logparse_plan = None
+            else:
+                preflight = _methods_preflight_state(job, aggregate, skill)
+                if preflight.missing_user_inputs or preflight.missing_log_archive:
+                    return self._publish_methods_preflight(
+                        job,
+                        aggregate,
+                        skill,
+                        preflight=preflight,
+                    )
+                resolved_logparse_plan = self._resolved_methods_logparse_plan_v2(
+                    job,
+                    aggregate,
+                    assets,
+                )
+        except (OSError, TypeError, ValueError):
+            raise runtime_failure(
+                stage=ExecutionStage.ASSET_RESOLUTION,
+                code=ErrorCode.ASSET_VERSION_UNAVAILABLE,
+                message="The pinned Skill could not produce Evidence V2 inputs.",
+            ) from None
+
+        preparing = record_stage_started(ExecutionStage.WORKSPACE_PREPARE)
+        workspace = self._workspace_manager.prepare(
+            job,
+            aggregate,
+            self._resource_store,
+            resolved_logparse_plan=resolved_logparse_plan,
+        )
+        record_stage_completed(
+            ExecutionStage.WORKSPACE_PREPARE,
+            preparing,
+            data={
+                "workspace_root": workspace.root,
+                "manifest_bytes": len(workspace.manifest_bytes),
+                "role": "SPECIALIST",
+            },
+        )
+
+        with self._shared_backend_log_sinks(job) as shared_log_sinks:
+            if recovered_records:
+                assert stored_graph is not None and stored_plan is not None
+                graph = stored_graph
+                plan = stored_plan
+                limitations = graph.limitations
+            else:
+                preprocessing = self._run_methods_preprocessing(
+                    job=job,
+                    aggregate=aggregate,
+                    main_workspace=workspace,
+                    assets=assets,
+                    cancellation=cancellation,
+                    shared_log_sinks=shared_log_sinks,
+                    deterministic=True,
+                )
+                limitations = self._methods_limitations_v2(preprocessing)
+                graph = scan_method_evidence_v2(
+                    skill=skill,
+                    target_logs=preprocessing.frozen.target_logs,
+                    limitations=limitations,
+                )
+                plan = build_method_evaluation_plan_v2(
+                    skill=skill,
+                    evidence=graph,
+                )
+            limitations_record = build_method_limitations_record_v2(
+                case_id=job.case_id,
+                source_job_id=job.job_id,
+                graph=graph,
+                plan=plan,
+                limitations=limitations,
+            )
+            state = stored_state or start_method_state_v2(
+                case_id=job.case_id,
+                source_job_id=job.job_id,
+                evaluation_id=self._id_generator.derive(
+                    "methods_evaluation",
+                    [job.case_id, job.job_id, plan.plan_ref],
+                ),
+                plan=plan,
+            )
+            if (
+                state.case_id != job.case_id
+                or state.source_job_id != job.job_id
+                or state.plan_ref != plan.plan_ref
+                or state.evaluation_refs
+                != tuple(item.evaluation_ref for item in plan.evaluations)
+            ):
+                raise ValueError("stored Evidence V2 state differs from its Job and Plan")
+            if not self._commit_method_graph_v2(
+                job_id=job.job_id,
+                graph=graph,
+            ) or not self._commit_method_plan_v2(
+                job_id=job.job_id,
+                plan=plan,
+            ) or not self._commit_method_limitations_v2(
+                job_id=job.job_id,
+                record=limitations_record,
+            ):
+                return self._finish_methods_terminal_v2(
+                    job=job,
+                    workspace=workspace,
+                    graph=graph,
+                    plan=plan,
+                    state=self._audit_failed_method_state_v2(state),
+                    limitations=limitations,
+                )
+            try:
+                self._inherit_method_rejections_v2(
+                    job=job,
+                    role="SPECIALIST",
+                )
+            except _MethodAuditArchiveError:
+                return self._fail_methods_terminal_v2(
+                    job=job,
+                    workspace=workspace,
+                    graph=graph,
+                    plan=plan,
+                    state=state,
+                    reason_code="AUDIT_ARCHIVE_FAILED",
+                    reason="The Specialist replacement records could not be archived.",
+                    limitations=limitations,
+                )
+
+            if state.status in {"UNRESOLVED", "FAILED"}:
+                return self._finish_methods_terminal_v2(
+                    job=job,
+                    workspace=workspace,
+                    graph=graph,
+                    plan=plan,
+                    state=state,
+                    limitations=limitations,
+                )
+            if state.status == "REVIEWER_PENDING":
+                return self._finish_methods_specialist_handoff_v2(
+                    job=job,
+                    workspace=workspace,
+                    graph=graph,
+                    plan=plan,
+                    state=state,
+                    evaluation=None,
+                    limitations=limitations,
+                )
+            if state.status != "SPECIALIST_PENDING":
+                return self._fail_methods_terminal_v2(
+                    job=job,
+                    workspace=workspace,
+                    graph=graph,
+                    plan=plan,
+                    state=state,
+                    reason_code="SERVER_INVARIANT_VIOLATION",
+                    reason="The stored Specialist state is not resumable.",
+                    limitations=limitations,
+                )
+
+            try:
+                role_workspace = self._workspace_manager.publish_methods_specialist_inputs_v2(
+                    workspace,
+                    job,
+                    evidence_graph=graph,
+                    evaluation_plan=plan,
+                ).workspace
+                workspace = role_workspace
+                resolved = assets.bind_workspace(
+                    workspace,
+                    job=job,
+                    loaded_method_ids=graph.loaded_method_ids,
+                    methods_evidence_graph=graph,
+                    methods_evaluation_plan=plan,
+                )
+                context = self._materialize_context(
+                    job,
+                    workspace,
+                    resolved.materials,
+                )
+            except RuntimeExecutionError as exc:
+                reason_code = (
+                    "AUDIT_ARCHIVE_FAILED"
+                    if exc.failure.code is ErrorCode.EXECUTION_RECORD_FAILED
+                    else "SERVER_INVARIANT_VIOLATION"
+                )
+                return self._fail_methods_terminal_v2(
+                    job=job,
+                    workspace=workspace,
+                    graph=graph,
+                    plan=plan,
+                    state=state,
+                    reason_code=reason_code,
+                    reason=exc.failure.message,
+                    limitations=limitations,
+                )
+            except (KeyboardInterrupt, SystemExit):
+                raise
+            except Exception:
+                return self._fail_methods_terminal_v2(
+                    job=job,
+                    workspace=workspace,
+                    graph=graph,
+                    plan=plan,
+                    state=state,
+                    reason_code="SERVER_INVARIANT_VIOLATION",
+                    reason="The Specialist workspace could not be materialized.",
+                    limitations=limitations,
+                )
+
+            evaluated = self._evaluate_methods_specialist_v2(
+                job=job,
+                workspace=workspace,
+                context=context,
+                graph=graph,
+                plan=plan,
+                state=state,
+                limitations=limitations,
+                cancellation=cancellation,
+                log_sinks=shared_log_sinks,
+            )
+            if isinstance(evaluated, RuntimeExecutionReceipt):
+                return evaluated
+            evaluated_state, evaluation = evaluated
+            return self._finish_methods_specialist_handoff_v2(
+                job=job,
+                workspace=workspace,
+                graph=graph,
+                plan=plan,
+                state=evaluated_state,
+                evaluation=evaluation,
+                limitations=limitations,
+            )
+    def _read_methods_reviewer_state_v2(
+        self,
+        *,
+        job: Job,
+        plan: MethodEvaluationPlanV2,
+    ) -> MethodStateV2:
+        target = job.methods_review_target
+        if target is None:
+            raise ValueError("Methods Reviewer Job has no target")
+        state = None
+        if job.replacement_for_job_id is not None:
+            state = read_method_state_v2(
+                self._execution_records,
+                job_id=job.replacement_for_job_id,
+            )
+            if state is not None and state.status == "INTERRUPTED":
+                state = resume_method_state_v2(state=state)
+        if state is None:
+            state = read_method_state_v2(
+                self._execution_records,
+                job_id=target.source_job_id,
+            )
+        expected_refs = tuple(item.evaluation_ref for item in plan.evaluations)
+        if (
+            state is None
+            or state.status != "REVIEWER_PENDING"
+            or state.current_role != "REVIEWER"
+            or state.case_id != job.case_id
+            or state.source_job_id != target.source_job_id
+            or state.evaluation_id != target.evaluation_id
+            or state.plan_ref != plan.plan_ref
+            or state.evaluation_refs != expected_refs
+            or state.specialist_evaluation is None
+            or state.reviewer_evaluation is not None
+        ):
+            raise ValueError("Methods Reviewer source state is not the exact pending handoff")
+        return state
+
+    def _evaluate_methods_reviewer_v2(
+        self,
+        *,
+        job: Job,
+        workspace: PreparedWorkspace,
+        context: BoundedContext,
+        graph: MethodEvidenceGraphV2,
+        plan: MethodEvaluationPlanV2,
+        primary_rejected: bytes | None,
+        repair_rejected: bytes | None,
+        cancellation: CancellationSignal,
+    ) -> RuntimeExecutionReceipt:
+        if repair_rejected is not None and primary_rejected is None:
+            state = self._read_methods_reviewer_state_v2(job=job, plan=plan)
+            return self._fail_methods_terminal_v2(
+                job=job,
+                workspace=workspace,
+                graph=graph,
+                plan=plan,
+                state=state,
+                reason_code="SERVER_INVARIANT_VIOLATION",
+                reason="A Reviewer repair record exists without its primary rejection.",
+            )
+
+        if repair_rejected is not None:
+            state = self._read_methods_reviewer_state_v2(job=job, plan=plan)
+            if state.reviewer_protocol_failures == 0:
+                state = record_protocol_error_v2(
+                    state=state,
+                    role="REVIEWER",
+                    reason="The persisted primary Reviewer response was rejected.",
+                )
+            state = record_protocol_error_v2(
+                state=state,
+                role="REVIEWER",
+                reason="The persisted Reviewer repair response was rejected.",
+            )
+            return self._finish_methods_terminal_v2(
+                job=job,
+                workspace=workspace,
+                graph=graph,
+                plan=plan,
+                state=state,
+            )
+
+        attempt_name: MethodEvaluationAttemptV2 = (
+            "REPAIR" if primary_rejected is not None else "PRIMARY"
+        )
+        state: MethodStateV2 | None = None
+        with self._shared_backend_log_sinks(job) as log_sinks:
+            while True:
+                validated: ValidatedMethodRoleAttemptV2 | None = None
+                attempt_error: BaseException | None = None
+                try:
+                    validated = self._run_method_role_attempt_v2(
+                        job=job,
+                        workspace=workspace,
+                        context=context,
+                        role="REVIEWER",
+                        plan=plan,
+                        attempt=attempt_name,
+                        cancellation=cancellation,
+                        log_sinks=log_sinks,
+                    )
+                except (KeyboardInterrupt, SystemExit):
+                    raise
+                except BaseException as exc:
+                    attempt_error = exc
+
+                if state is None:
+                    # The source state is absent from the model context and is
+                    # first read only after the blind attempt returns.
+                    state = self._read_methods_reviewer_state_v2(job=job, plan=plan)
+                    if (
+                        primary_rejected is not None
+                        and state.reviewer_protocol_failures == 0
+                    ):
+                        state = record_protocol_error_v2(
+                            state=state,
+                            role="REVIEWER",
+                            reason=(
+                                "The persisted primary Reviewer response was rejected."
+                            ),
+                        )
+
+                if isinstance(attempt_error, MethodEvaluationResponseError):
+                    try:
+                        self._archive_method_rejection_v2(
+                            job=job,
+                            role="REVIEWER",
+                            attempt=attempt_name,
+                            error=attempt_error,
+                        )
+                    except _MethodAuditArchiveError:
+                        return self._fail_methods_terminal_v2(
+                            job=job,
+                            workspace=workspace,
+                            graph=graph,
+                            plan=plan,
+                            state=state,
+                            reason_code="AUDIT_ARCHIVE_FAILED",
+                            reason="The rejected Reviewer response could not be archived.",
+                        )
+                    state = record_protocol_error_v2(
+                        state=state,
+                        role="REVIEWER",
+                        reason=str(attempt_error),
+                    )
+                    if state.status == "UNRESOLVED":
+                        return self._finish_methods_terminal_v2(
+                            job=job,
+                            workspace=workspace,
+                            graph=graph,
+                            plan=plan,
+                            state=state,
+                        )
+                    attempt_name = "REPAIR"
+                    continue
+                if isinstance(attempt_error, RuntimeExecutionError):
+                    if attempt_error.failure.code is ErrorCode.BACKEND_CANCELLED:
+                        self._interrupt_methods_state_v2(job=job, state=state)
+                        raise attempt_error
+                    state = record_model_execution_failure_v2(
+                        state=state,
+                        role="REVIEWER",
+                        reason=attempt_error.failure.message,
+                    )
+                    return self._finish_methods_terminal_v2(
+                        job=job,
+                        workspace=workspace,
+                        graph=graph,
+                        plan=plan,
+                        state=state,
+                    )
+                if isinstance(attempt_error, OSError):
+                    return self._fail_methods_terminal_v2(
+                        job=job,
+                        workspace=workspace,
+                        graph=graph,
+                        plan=plan,
+                        state=state,
+                        reason_code="SERVER_INVARIANT_VIOLATION",
+                        reason="The Reviewer output could not be read.",
+                    )
+                if isinstance(attempt_error, _MethodAuditArchiveError):
+                    return self._fail_methods_terminal_v2(
+                        job=job,
+                        workspace=workspace,
+                        graph=graph,
+                        plan=plan,
+                        state=state,
+                        reason_code="AUDIT_ARCHIVE_FAILED",
+                        reason="The Reviewer prompt could not be archived.",
+                    )
+                if attempt_error is not None:
+                    return self._fail_methods_terminal_v2(
+                        job=job,
+                        workspace=workspace,
+                        graph=graph,
+                        plan=plan,
+                        state=state,
+                        reason_code="SERVER_INVARIANT_VIOLATION",
+                        reason="The Reviewer execution violated a server invariant.",
+                    )
+
+                assert (
+                    validated is not None
+                    and state is not None
+                    and state.specialist_evaluation is not None
+                )
+                try:
+                    consensus = resolve_method_consensus_v2(
+                        plan=plan,
+                        first=state.specialist_evaluation,
+                        second=validated.evaluation,
+                    )
+                    terminal_state = finalize_reviewer_consensus_v2(
+                        state=state,
+                        plan=plan,
+                        reviewer_evaluation=validated.evaluation,
+                        consensus=consensus,
+                    )
+                except (TypeError, ValueError):
+                    return self._fail_methods_terminal_v2(
+                        job=job,
+                        workspace=workspace,
+                        graph=graph,
+                        plan=plan,
+                        state=state,
+                        reason_code="SERVER_INVARIANT_VIOLATION",
+                        reason="The Reviewer evaluation could not be resolved mechanically.",
+                    )
+                return self._finish_methods_terminal_v2(
+                    job=job,
+                    workspace=workspace,
+                    graph=graph,
+                    plan=plan,
+                    state=terminal_state,
+                )
+    def _execute_methods_reviewer_v2(
+        self,
+        *,
+        job: Job,
+        aggregate: CaseAggregate,
+        assets: ResolvedJobAssets,
+        cancellation: CancellationSignal,
+    ) -> RuntimeExecutionReceipt:
+        target = job.methods_review_target
+        assert target is not None
+        try:
+            graph = read_method_evidence_graph_v2(
+                self._execution_records,
+                job_id=target.source_job_id,
+            )
+            plan = read_method_evaluation_plan_v2(
+                self._execution_records,
+                job_id=target.source_job_id,
+            )
+            limitations_record = read_method_limitations_record_v2(
+                self._execution_records,
+                job_id=target.source_job_id,
+            )
+            skill = self._resolved_methods_skill(assets)
+            if (
+                graph is None
+                or plan is None
+                or graph.graph_ref != target.graph_ref
+                or plan.plan_ref != target.plan_ref
+                or plan.evidence_graph_ref != graph.graph_ref
+                or graph.skill_sha256 != target.skill_ref.content_hash
+                or plan.skill_sha256 != target.skill_ref.content_hash
+                or skill.combined_sha256 != target.skill_ref.content_hash
+                or (
+                    limitations_record is not None
+                    and (
+                        limitations_record.case_id != job.case_id
+                        or limitations_record.source_job_id != target.source_job_id
+                        or limitations_record.evidence_graph_ref != graph.graph_ref
+                        or limitations_record.plan_ref != plan.plan_ref
+                        or limitations_record.limitations != graph.limitations
+                    )
+                )
+            ):
+                raise ValueError("Reviewer Graph, Plan, target, and pinned Skill differ")
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except Exception:
+            raise runtime_failure(
+                stage=ExecutionStage.ASSET_RESOLUTION,
+                code=ErrorCode.ASSET_VERSION_UNAVAILABLE,
+                message="The Reviewer source Graph or Plan is unavailable.",
+            ) from None
+
+        if limitations_record is None:
+            limitations_record = build_method_limitations_record_v2(
+                case_id=job.case_id,
+                source_job_id=target.source_job_id,
+                graph=graph,
+                plan=plan,
+                limitations=graph.limitations,
+            )
+        limitations_committed = self._commit_method_limitations_v2(
+            job_id=target.source_job_id,
+            record=limitations_record,
+        )
+
+        preparing = record_stage_started(ExecutionStage.WORKSPACE_PREPARE)
+        workspace = self._workspace_manager.prepare(
+            job,
+            aggregate,
+            self._resource_store,
+            methods_evaluation_plan=plan,
+        )
+        if not limitations_committed:
+            state = self._read_methods_reviewer_state_v2(job=job, plan=plan)
+            return self._fail_methods_terminal_v2(
+                job=job,
+                workspace=workspace,
+                graph=graph,
+                plan=plan,
+                state=state,
+                reason_code="AUDIT_ARCHIVE_FAILED",
+                reason="The source limitations record is unavailable.",
+            )
+        limitations = limitations_record.limitations
+        stored_terminal = read_method_state_v2(
+            self._execution_records,
+            job_id=job.job_id,
+        )
+        if stored_terminal is not None:
+            if (
+                stored_terminal.case_id != job.case_id
+                or stored_terminal.source_job_id != target.source_job_id
+                or stored_terminal.evaluation_id != target.evaluation_id
+                or stored_terminal.plan_ref != plan.plan_ref
+                or stored_terminal.status not in {"RESOLVED", "UNRESOLVED", "FAILED"}
+            ):
+                raise runtime_failure(
+                    stage=ExecutionStage.OUTCOME_VALIDATE,
+                    code=ErrorCode.OUTCOME_INVALID,
+                    message="The stored Reviewer terminal state is inconsistent.",
+                )
+            return self._finish_methods_terminal_v2(
+                job=job,
+                workspace=workspace,
+                graph=graph,
+                plan=plan,
+                state=stored_terminal,
+                limitations=limitations,
+                persist_state=False,
+            )
+        try:
+            role_workspace = self._workspace_manager.publish_methods_reviewer_inputs_v2(
+                workspace,
+                job,
+                evidence_graph=graph,
+                evaluation_plan=plan,
+            ).workspace
+            workspace = role_workspace
+            resolved = assets.bind_workspace(
+                workspace,
+                job=job,
+                loaded_method_ids=graph.loaded_method_ids,
+                methods_evidence_graph=graph,
+                methods_evaluation_plan=plan,
+            )
+            context = self._materialize_context(
+                job,
+                workspace,
+                resolved.materials,
+            )
+        except RuntimeExecutionError:
+            raise
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except Exception:
+            raise runtime_failure(
+                stage=ExecutionStage.WORKSPACE_PREPARE,
+                code=ErrorCode.WORKSPACE_PREPARE_FAILED,
+                message="The Reviewer Evidence V2 workspace could not be prepared.",
+            ) from None
+        record_stage_completed(
+            ExecutionStage.WORKSPACE_PREPARE,
+            preparing,
+            data={
+                "workspace_root": workspace.root,
+                "manifest_bytes": len(workspace.manifest_bytes),
+                "role": "REVIEWER",
+            },
+        )
+        try:
+            self._inherit_method_rejections_v2(
+                job=job,
+                role="REVIEWER",
+            )
+        except _MethodAuditArchiveError:
+            state = self._read_methods_reviewer_state_v2(job=job, plan=plan)
+            return self._fail_methods_terminal_v2(
+                job=job,
+                workspace=workspace,
+                graph=graph,
+                plan=plan,
+                state=state,
+                reason_code="AUDIT_ARCHIVE_FAILED",
+                reason="The Reviewer replacement records could not be archived.",
+                limitations=limitations,
+            )
+
+        primary_record = read_method_rejected_attempt_v2(
+            self._execution_records,
+            job_id=job.job_id,
+            role="REVIEWER",
+            attempt="PRIMARY",
+        )
+        repair_record = read_method_rejected_attempt_v2(
+            self._execution_records,
+            job_id=job.job_id,
+            role="REVIEWER",
+            attempt="REPAIR",
+        )
+        return self._evaluate_methods_reviewer_v2(
+            job=job,
+            workspace=workspace,
+            context=context,
+            graph=graph,
+            plan=plan,
+            primary_rejected=primary_record,
+            repair_rejected=repair_record,
+            cancellation=cancellation,
+        )
     def _publish_methods_preflight(
         self,
         job: Job,
@@ -1858,6 +3722,7 @@ class DiagnosisRuntime:
         assets: ResolvedJobAssets,
         cancellation: CancellationSignal,
         shared_log_sinks: ExecutionLogSinks,
+        deterministic: bool,
     ) -> MethodsPreprocessingExecution:
         if self._logparse_broker_factory is None:
             raise runtime_failure(
@@ -1884,24 +3749,6 @@ class DiagnosisRuntime:
                 operation=operation,
             )
         )
-        prompt = (
-            "You are the product-owned Logparse preprocessing pass in "
-            "SERVER_PREPROCESS mode.\n"
-            "Your first action must be exactly one Skill tool call: "
-            "Skill(logparse-diagnose)\n"
-            "If that Helper is unavailable, rejected, or fails to load, stop "
-            "immediately. Do not invoke the broker directly or use any fallback.\n"
-            "Do not load or execute any other Skill, including the selected business "
-            "diagnosis Skill. Do not read the request, broker result, or target logs; "
-            "do not diagnose; and do not write a diagnosis or review draft.\n"
-            "Only after the Helper loads successfully, follow its SERVER_PREPROCESS "
-            "contract and run exactly this one job-scoped broker request:\n"
-            f"problem-locator-logparse {operation} --request {request_path} "
-            f"--result {result_path}\n"
-            "The Runtime prewrote the request path. Do not edit or replace it. Wait "
-            "for the one request to finish successfully, then exit without reading "
-            "the result. Any failure ends this pass; never retry.\n"
-        )
         tool_started = record_stage_started(
             ExecutionStage.TOOL_EXECUTE,
             data={"tool": "logparse", "pass": "PREPROCESS"},
@@ -1923,17 +3770,42 @@ class DiagnosisRuntime:
         accepted_request_bytes: bytes | None = None
         broker_audit_bytes: bytes | None = None
         try:
-            broker_environment = session.agent_environment()
-            secrets = tuple(broker_environment.values())
-            self._backend.execute(
-                prompt=prompt,
-                workspace_root=preprocessing_workspace.root,
-                cancellation=cancellation,
-                log_sinks=_borrow_log_sinks(shared_log_sinks),
-                resource_limits=job.resource_limits,
-                broker_environment=broker_environment,
-                test_limits=self._backend_test_limits,
-            )
+            if deterministic:
+                primary = session.execute_preprocessing(
+                    operation,
+                    request_path,
+                    result_path,
+                )
+            else:
+                prompt = (
+                    "You are the product-owned Logparse preprocessing pass in "
+                    "SERVER_PREPROCESS mode.\n"
+                    "Your first action must be exactly one Skill tool call: "
+                    "Skill(logparse-diagnose)\n"
+                    "If that Helper is unavailable, rejected, or fails to load, stop "
+                    "immediately. Do not invoke the broker directly or use any fallback.\n"
+                    "Do not load or execute any other Skill, including the selected business "
+                    "diagnosis Skill. Do not read the request, broker result, or target logs; "
+                    "do not diagnose; and do not write a diagnosis or review draft.\n"
+                    "Only after the Helper loads successfully, follow its SERVER_PREPROCESS "
+                    "contract and run exactly this one job-scoped broker request:\n"
+                    f"problem-locator-logparse {operation} --request {request_path} "
+                    f"--result {result_path}\n"
+                    "The Runtime prewrote the request path. Do not edit or replace it. Wait "
+                    "for the one request to finish successfully, then exit without reading "
+                    "the result. Any failure ends this pass; never retry.\n"
+                )
+                broker_environment = session.agent_environment()
+                secrets = tuple(broker_environment.values())
+                self._backend.execute(
+                    prompt=prompt,
+                    workspace_root=preprocessing_workspace.root,
+                    cancellation=cancellation,
+                    log_sinks=_borrow_log_sinks(shared_log_sinks),
+                    resource_limits=job.resource_limits,
+                    broker_environment=broker_environment,
+                    test_limits=self._backend_test_limits,
+                )
         except RuntimeExecutionError as exc:
             primary = exc.failure
         except Exception:

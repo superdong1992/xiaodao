@@ -506,7 +506,7 @@ function stringArray(value, label, { nonEmpty = false } = {}) {
 }
 
 function rpcBranchMapping(manifest) {
-  const markerSet = (method) => new Set(method.evidence_markers);
+  const markerSet = (method) => new Set(method.activation_markers);
   const includes = (method, marker) => [...markerSet(method)].some((value) => value === marker || value.startsWith(`${marker} `));
   const api = manifest.methods.filter((method) => includes(method, "API_COMPLETE") && includes(method, "DEADLOOP_DETECTED"));
   const queue = manifest.methods.filter((method) => includes(method, "QUEUE_HISTORY"));
@@ -969,6 +969,7 @@ export async function runCodexLunaExploration(options, { ambientEnvironment = pr
       generation_scope_audit: generationScopeAudit,
       validator: validatorReceipt,
       method_ids: packageContract.method_ids,
+      method_activation_markers: packageContract.method_activation_markers,
       branch_mapping: branchMapping,
       durable_package: {
         path: "generated-skill",
@@ -1163,6 +1164,7 @@ export {
   environmentAudit,
   loadCases,
   parseArguments,
+  rpcBranchMapping,
   safeEnvironment,
   generationPrompt,
   validateDiagnosis,

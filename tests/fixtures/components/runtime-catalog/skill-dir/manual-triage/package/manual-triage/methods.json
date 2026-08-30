@@ -5,14 +5,15 @@
   "required_user_inputs": ["problem_time"],
   "required_artifacts": [],
   "log_derived_fields": [],
-  "shared_references": ["references/shared-boundaries.md"],
+  "shared_references": ["references/source-log-templates.md", "references/shared-boundaries.md"],
   "methods": [
     {
       "id": "service-boundary-failure",
       "title": "Service boundary failure",
       "reference": "references/service-boundary-failure.md",
       "priority": 1,
-      "evidence_markers": ["SERVICE_FACT"]
+      "evidence_markers": ["SERVICE_FACT"],
+      "activation_markers": ["SERVICE_FACT"]
     }
   ]
 }

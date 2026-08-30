@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { applyHardCaps, validOutputTokenCapEvidence as engineValidOutputTokenCapEvidence } from "../lib/engine.mjs";
+import { applyHardCaps, validEvidenceV2CurrentAttemptCorePlan, validOutputTokenCapEvidence as engineValidOutputTokenCapEvidence } from "../lib/engine.mjs";
 import { validOutputTokenCapEvidence as evidenceValidOutputTokenCapEvidence } from "../lib/evidence.mjs";
 import { normalizeUsage, TOKEN_USAGE_FORMULA } from "../lib/usage.mjs";
 import {
@@ -56,6 +56,19 @@ function adjudicate(usage) {
     expectedModel: "test-model",
   });
 }
+
+test("engine requires current-attempt Core before any Evidence V2 provider stage", () => {
+  const plan = {
+    stages: [
+      { id: "deterministic.full", decision: "RUN", reuse: null, gates: [{ id: "det.evidence-v2-core" }] },
+      { id: "real.macos-claude-deepseek-e2e", decision: "RUN", reuse: null, gates: [] },
+    ],
+  };
+  assert.equal(validEvidenceV2CurrentAttemptCorePlan(plan), true);
+  assert.equal(validEvidenceV2CurrentAttemptCorePlan({ ...plan, stages: [{ ...plan.stages[0], decision: "REUSE", reuse: { run_id: "old" } }, plan.stages[1]] }), false);
+  assert.equal(validEvidenceV2CurrentAttemptCorePlan({ ...plan, stages: [{ ...plan.stages[0], gates: [] }, plan.stages[1]] }), false);
+  assert.equal(validEvidenceV2CurrentAttemptCorePlan({ stages: [{ id: "deterministic.full", decision: "REUSE", gates: [] }] }), true);
+});
 
 test("model hard token cap includes cache creation and cache reads", () => {
   const result = adjudicate(normalizeUsage({

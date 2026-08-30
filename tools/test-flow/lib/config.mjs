@@ -7,6 +7,22 @@ import {
   CODEX_LUNA_MODEL,
   CODEX_LUNA_REASONING_EFFORT,
 } from "../runtime-support/codex-luna-contract.mjs";
+import {
+  EVIDENCE_V2_CORE_RECEIPT,
+  EVIDENCE_V2_CORE_SELECTORS,
+} from "../../validation/evidence-v2-core.mjs";
+import {
+  EVIDENCE_V2_MODEL_CERT_FILENAME,
+  EVIDENCE_V2_MODEL_CERT_INPUT_FILENAME,
+  EVIDENCE_V2_MODEL_CERT_RECEIPT,
+  EVIDENCE_V2_RELEASE_VERDICT_FILENAME,
+} from "../../validation/evidence-v2-certification.mjs";
+import {
+  EVIDENCE_V2_LOADED_METHODS_FILENAME,
+  EVIDENCE_V2_PUBLIC_METHODS_RESULT_FILENAME,
+  EVIDENCE_V2_SCENARIO_ORACLE_RECEIPT_FILENAME,
+} from "../../validation/evidence-v2-scenario-oracle.mjs";
+import { METHODS_V2_CAPTURED_FILES } from "./methods-oracle.mjs";
 
 const IDENTIFIER = /^[a-z0-9][a-z0-9.-]*$/;
 const PLATFORMS = new Set(["windows", "macos", "linux"]);
@@ -16,7 +32,7 @@ const REUSE_POLICIES = new Set(["never", "identity", "checkpoint-chain"]);
 const PROGRESS_CLASSES = new Set(["local", "external", "real"]);
 const PYTEST_SKIP_POLICIES = new Set(["forbid", "forbid-all-skipped", "allow-explicit"]);
 const REPOSITORY_CHECKS = new Set(["python-compileall", "uv-lock", "git-diff-check"]);
-const CAPABILITY_ADAPTERS = new Set(["host-capability", "server-linux-capability", "codex-luna-methods", "macos-codex-luna-methods", "macos-codex-luna-e2e", "macos-claude-deepseek-methods", "macos-claude-deepseek-e2e"]);
+const CAPABILITY_ADAPTERS = new Set(["host-capability", "server-linux-capability", "macos-codex-luna-methods", "macos-codex-luna-e2e", "macos-claude-deepseek-methods", "macos-claude-deepseek-e2e", "evidence-v2-release-verdict"]);
 const CROSS_JOB_PHASES = new Set(["environment", "route", "upload", "diagnose", "publish-restart"]);
 const OBSERVATIONS = new Set(["review-state-transition"]);
 const ENVIRONMENT_PROFILES = new Set(["real-logparse", "real-agent-backend", "real-generic-locator", "real-skill-generation", "real-route", "real-review"]);
@@ -106,7 +122,7 @@ function validateStages(stages) {
   assertFlow(Array.isArray(stages.stages) && stages.stages.length > 0, "CONFIG_STAGES_EMPTY", "stages must be non-empty");
   const ids = new Set();
   for (const stage of stages.stages) {
-    exactKeys(stage, ["id", "kind", "depends_on", "gates", "identity_set", "real_cap_id", "estimated_tokens", "timeout_seconds", "progress_class", "reuse", "checkpoint", "platforms"], "CONFIG_STAGE_FIELDS", `stage ${stage?.id ?? "?"}`);
+    exactKeys(stage, ["id", "kind", "depends_on", "gates", "identity_set", "real_cap_id", "estimated_tokens", "timeout_seconds", "progress_class", "admission_blocker", "reuse", "checkpoint", "platforms"], "CONFIG_STAGE_FIELDS", `stage ${stage?.id ?? "?"}`);
     identifier(stage.id, "CONFIG_STAGE_ID", "stage id");
     assertFlow(!ids.has(stage.id), "CONFIG_STAGE_DUPLICATE", `Duplicate stage ${stage.id}`);
     ids.add(stage.id);
@@ -124,6 +140,16 @@ function validateStages(stages) {
     identifier(stage.identity_set, "CONFIG_STAGE_IDENTITY", `${stage.id} identity set`);
     positiveInteger(stage.timeout_seconds, "CONFIG_STAGE_TIMEOUT", `${stage.id}.timeout_seconds`);
     assertFlow(PROGRESS_CLASSES.has(stage.progress_class), "CONFIG_STAGE_PROGRESS", `${stage.id} has invalid progress_class`);
+    if (stage.admission_blocker !== undefined) {
+      exactKeys(stage.admission_blocker, ["code", "detail"], "CONFIG_STAGE_ADMISSION_BLOCKER_FIELDS", `${stage.id}.admission_blocker`);
+      assertFlow(
+        typeof stage.admission_blocker.code === "string"
+          && /^[A-Z][A-Z0-9_]*$/.test(stage.admission_blocker.code),
+        "CONFIG_STAGE_ADMISSION_BLOCKER_CODE",
+        `${stage.id}.admission_blocker.code 必须是大写错误码`,
+      );
+      nonEmptyString(stage.admission_blocker.detail, "CONFIG_STAGE_ADMISSION_BLOCKER_DETAIL", `${stage.id}.admission_blocker.detail`);
+    }
     exactKeys(stage.reuse, ["dev", "release"], "CONFIG_STAGE_REUSE_FIELDS", `${stage.id}.reuse`);
     assertFlow(REUSE_POLICIES.has(stage.reuse.dev) && REUSE_POLICIES.has(stage.reuse.release), "CONFIG_STAGE_REUSE", `${stage.id} has invalid reuse policy`);
     stringArray(stage.platforms, "CONFIG_STAGE_PLATFORMS", `${stage.id}.platforms`, { nonEmpty: true });
@@ -140,10 +166,10 @@ function validateStages(stages) {
 }
 
 const GATE_FIELDS = {
-  "node-test": ["kind", "test_files", "test_glob", "exclude", "min_passed", "evidence"],
-  pytest: ["kind", "selectors", "selector_mode", "pytest_args", "environment_profile", "min_passed", "skip_policy", "runtime_profile", "evidence", "isolated_agent_invocations"],
+  "node-test": ["kind", "test_files", "test_glob", "exclude", "min_passed", "python_driver", "evidence"],
+  pytest: ["kind", "selectors", "selector_mode", "pytest_args", "environment_profile", "min_passed", "skip_policy", "runtime_profile", "evidence", "isolated_agent_invocations", "result_receipt"],
   "repository-check": ["kind", "check", "paths", "evidence"],
-  "capability-adapter": ["kind", "adapter", "runtime_profile", "required_claims", "evidence"],
+  "capability-adapter": ["kind", "adapter", "runtime_profile", "required_claims", "result_receipt", "certification_target", "evidence"],
   "cross-job-adapter": ["kind", "phase", "runtime_profile", "evidence_contract", "evidence"],
   observation: ["kind", "observation", "evidence_contract", "evidence"],
 };
@@ -182,6 +208,9 @@ function validateGates(gates) {
         stringArray(gate.exclude, "CONFIG_NODE_TEST_EXCLUDE", `${gateId}.exclude`);
         gate.exclude.forEach((entry) => relativePath(entry, "CONFIG_NODE_TEST_PATH", `${gateId} excluded file`));
       }
+      if (gate.python_driver !== undefined) {
+        assertFlow(gate.python_driver === true, "CONFIG_NODE_TEST_PYTHON_DRIVER", `${gateId}.python_driver must be true when declared`);
+      }
       positiveInteger(gate.min_passed, "CONFIG_NODE_TEST_MIN", `${gateId}.min_passed`);
     } else if (gate.kind === "pytest") {
       assertFlow(Boolean(gate.selectors) !== Boolean(gate.selector_mode), "CONFIG_PYTEST_SELECTOR", `${gateId} must define selectors or selector_mode`);
@@ -201,6 +230,22 @@ function validateGates(gates) {
       if (isolatedAgentGate) assertFlow(gate.min_passed >= gate.isolated_agent_invocations, "CONFIG_PYTEST_INVOCATIONS", `${gateId} must prove at least every declared isolated Agent invocation`);
       assertFlow(PYTEST_SKIP_POLICIES.has(gate.skip_policy), "CONFIG_PYTEST_SKIP", `${gateId} has invalid skip policy`);
       identifier(gate.runtime_profile, "CONFIG_GATE_RUNTIME", `${gateId} runtime profile`);
+      if (gate.result_receipt !== undefined) {
+        assertFlow(gate.result_receipt === EVIDENCE_V2_CORE_RECEIPT, "CONFIG_PYTEST_RECEIPT", `${gateId} has an unsupported result receipt`);
+        assertFlow(gateId === "det.evidence-v2-core", "CONFIG_PYTEST_RECEIPT_SCOPE", "Evidence V2 Core receipt must be produced by det.evidence-v2-core");
+        assertFlow(
+          canonicalJson(gate.selectors) === canonicalJson(EVIDENCE_V2_CORE_SELECTORS),
+          "CONFIG_EVIDENCE_V2_CORE_SELECTORS",
+          "det.evidence-v2-core selectors do not match the frozen Core suite",
+        );
+        assertFlow(gate.environment_profile === undefined && gate.pytest_args === undefined, "CONFIG_EVIDENCE_V2_CORE_ZERO_MODEL", "det.evidence-v2-core must remain a plain deterministic pytest gate");
+        assertFlow(gate.skip_policy === "forbid", "CONFIG_EVIDENCE_V2_CORE_SKIP", "det.evidence-v2-core must reject skipped cases");
+        assertFlow(
+          canonicalJson(gate.evidence) === canonicalJson(["pytest.xml", "pytest-summary.json", "core-verdict.json"]),
+          "CONFIG_EVIDENCE_V2_CORE_EVIDENCE",
+          "det.evidence-v2-core evidence files do not match the Core receipt contract",
+        );
+      }
     } else if (gate.kind === "repository-check") {
       assertFlow(REPOSITORY_CHECKS.has(gate.check), "CONFIG_REPOSITORY_CHECK", `${gateId} has untrusted repository check`);
       if (gate.paths) {
@@ -212,6 +257,45 @@ function validateGates(gates) {
       assertFlow(CAPABILITY_ADAPTERS.has(gate.adapter), "CONFIG_CAPABILITY_ADAPTER", `${gateId} has untrusted adapter`);
       identifier(gate.runtime_profile, "CONFIG_GATE_RUNTIME", `${gateId} runtime profile`);
       if (gate.required_claims) stringArray(gate.required_claims, "CONFIG_CAPABILITY_CLAIMS", `${gateId}.required_claims`, { nonEmpty: true });
+      assertFlow(
+        (gate.result_receipt === undefined) === (gate.certification_target === undefined),
+        "CONFIG_MODEL_CERT_PAIR",
+        `${gateId} must declare result_receipt and certification_target together`,
+      );
+      if (gate.result_receipt !== undefined) {
+        assertFlow(gate.result_receipt === EVIDENCE_V2_MODEL_CERT_RECEIPT, "CONFIG_MODEL_CERT_RECEIPT", `${gateId} has an unsupported capability receipt`);
+        assertFlow(["P1", "P2"].includes(gate.certification_target), "CONFIG_MODEL_CERT_TARGET", `${gateId} has an invalid certification target`);
+        const expectedAdapter = gate.certification_target === "P1"
+          ? "macos-claude-deepseek-e2e"
+          : "macos-codex-luna-e2e";
+        assertFlow(gate.adapter === expectedAdapter, "CONFIG_MODEL_CERT_ADAPTER", `${gateId} certification target does not match its provider adapter`);
+        const identityFilename = gate.certification_target === "P1" ? "claude-identity.json" : "codex-identity.json";
+        const expectedEvidence = [
+          "runtime-receipt.json",
+          "methods-package.json",
+          identityFilename,
+          "model-invocations.json",
+          "model-usage.json",
+          ...Object.values(METHODS_V2_CAPTURED_FILES),
+          EVIDENCE_V2_PUBLIC_METHODS_RESULT_FILENAME,
+          EVIDENCE_V2_LOADED_METHODS_FILENAME,
+          EVIDENCE_V2_SCENARIO_ORACLE_RECEIPT_FILENAME,
+          EVIDENCE_V2_MODEL_CERT_INPUT_FILENAME,
+          EVIDENCE_V2_MODEL_CERT_FILENAME,
+          "adapter-receipt.json",
+        ];
+        assertFlow(
+          canonicalJson(gate.evidence) === canonicalJson(expectedEvidence),
+          "CONFIG_MODEL_CERT_EVIDENCE",
+          `${gateId} evidence files do not match the Evidence V2 provider receipt`,
+        );
+      } else if (gate.adapter === "evidence-v2-release-verdict") {
+        assertFlow(
+          canonicalJson(gate.evidence) === canonicalJson([EVIDENCE_V2_RELEASE_VERDICT_FILENAME]),
+          "CONFIG_RELEASE_VERDICT_EVIDENCE",
+          `${gateId} must retain exactly the Evidence V2 release verdict`,
+        );
+      }
     } else if (gate.kind === "cross-job-adapter") {
       assertFlow(CROSS_JOB_PHASES.has(gate.phase), "CONFIG_CROSS_JOB_PHASE", `${gateId} has invalid phase`);
       identifier(gate.runtime_profile, "CONFIG_GATE_RUNTIME", `${gateId} runtime profile`);
@@ -362,7 +446,7 @@ function validateRuntimeProfiles(runtimeProfiles) {
     for (const [name, commit] of Object.entries(profile.external_sources)) assertFlow(/^[a-f0-9]{40}$/.test(commit), "CONFIG_RUNTIME_EXTERNAL_COMMIT", `${profileId}.external_sources.${name} must be a commit SHA`);
     stringArray(profile.settings_environment_allowlist, "CONFIG_RUNTIME_SETTINGS_ENV", `${profileId}.settings_environment_allowlist`, { nonEmpty: true });
     assertFlow(canonicalJson([...profile.settings_environment_allowlist].sort()) === canonicalJson([...RELEASE_SETTINGS_ENVIRONMENT].sort()), "CONFIG_RUNTIME_SETTINGS_ENV", `${profileId} has an unsupported settings environment allowlist`);
-    exactKeys(profile.real_caps, ["isolated", "isolated.skill-generation", "codex.methods", "codex.macos-methods", "codex.macos-e2e", "claude.macos-methods", "claude.macos-e2e", "service_agent", "journey.route", "journey.diagnose", "journey.publish-restart"], "CONFIG_RUNTIME_CAPS_FIELDS", `${profileId}.real_caps`);
+    exactKeys(profile.real_caps, ["isolated", "isolated.skill-generation", "codex.macos-methods", "codex.macos-e2e", "claude.macos-methods", "claude.macos-e2e", "service_agent", "journey.route", "journey.diagnose", "journey.publish-restart"], "CONFIG_RUNTIME_CAPS_FIELDS", `${profileId}.real_caps`);
     for (const [capId, cap] of Object.entries(profile.real_caps)) {
       exactKeys(cap, ["max_turns", "max_total_tokens", "max_output_tokens", "max_budget_usd", "hard_timeout_seconds"], "CONFIG_RUNTIME_CAP_FIELDS", `${profileId}.real_caps.${capId}`);
       positiveInteger(cap.max_turns, "CONFIG_RUNTIME_MAX_TURNS", `${capId}.max_turns`);
@@ -467,6 +551,26 @@ function crossValidate(config) {
   for (const [gateId, gate] of Object.entries(config.gates.gates)) {
     if (gate.runtime_profile) assertFlow(profileIds.has(gate.runtime_profile), "CONFIG_GATE_RUNTIME_UNKNOWN", `${gateId} references unknown runtime profile ${gate.runtime_profile}`);
   }
+  const coreGate = config.gates.gates["det.evidence-v2-core"];
+  const deterministicFull = config.stages.stages.find((stage) => stage.id === "deterministic.full");
+  assertFlow(coreGate?.result_receipt === EVIDENCE_V2_CORE_RECEIPT, "CONFIG_EVIDENCE_V2_CORE_GATE", "det.evidence-v2-core is missing");
+  assertFlow(deterministicFull?.gates.includes("det.evidence-v2-core"), "CONFIG_EVIDENCE_V2_CORE_STAGE", "det.evidence-v2-core must belong to deterministic.full");
+  assertFlow(deterministicFull?.reuse.release === "never", "CONFIG_EVIDENCE_V2_CORE_RELEASE_REUSE", "Release must produce Core evidence in the current attempt");
+  const modelCertStages = config.stages.stages.filter((stage) => stage.gates.some(
+    (gateId) => config.gates.gates[gateId]?.result_receipt === EVIDENCE_V2_MODEL_CERT_RECEIPT,
+  ));
+  assertFlow(modelCertStages.length === 2, "CONFIG_MODEL_CERT_STAGES", "Evidence V2 certification requires exactly P1 and P2 stages");
+  assertFlow(modelCertStages.every((stage) => stage.depends_on.includes("deterministic.full")), "CONFIG_MODEL_CERT_CORE_DEPENDENCY", "P1 and P2 must run only after the Evidence V2 Core stage");
+  assertFlow(modelCertStages.every((stage) => stage.depends_on.includes("real.skill-generation")), "CONFIG_MODEL_CERT_REGISTRATION_DEPENDENCY", "P1 and P2 must consume the same production registration from real.skill-generation");
+  const releaseVerdictGate = config.gates.gates["evidence-v2.release-verdict"];
+  const releaseVerdictStage = config.stages.stages.find((stage) => stage.gates.includes("evidence-v2.release-verdict"));
+  assertFlow(releaseVerdictGate?.adapter === "evidence-v2-release-verdict", "CONFIG_RELEASE_VERDICT_GATE", "Evidence V2 release verdict Gate is missing");
+  assertFlow(
+    releaseVerdictStage?.depends_on.includes("real.macos-claude-deepseek-e2e")
+      && releaseVerdictStage?.depends_on.includes("real.macos-codex-luna-e2e"),
+    "CONFIG_RELEASE_VERDICT_DEPENDENCIES",
+    "Evidence V2 release verdict must consume P1 and P2 from the same attempt",
+  );
   assertFlow(profileIds.has(config.policy.defaults.runtime_profile), "CONFIG_DEFAULT_RUNTIME_UNKNOWN", "Default runtime profile is unknown");
   for (const track of Object.values(config.policy.tracks)) assertFlow(Object.hasOwn(config.proofs.goals, track.default_goal), "CONFIG_TRACK_GOAL_UNKNOWN", `Unknown default goal ${track.default_goal}`);
 

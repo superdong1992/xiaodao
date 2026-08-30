@@ -11,6 +11,7 @@ import {
   CLAUDE_DEEPSEEK_MAX_OUTPUT_TOKENS,
   CLAUDE_DEEPSEEK_MODEL,
   auditClaudeStream,
+  resolvedTerminalUsage,
 } from "./claude-deepseek-contract.mjs";
 
 export class ClaudeDeepseekProcessError extends Error {
@@ -65,6 +66,27 @@ export function controlledClaudeEnvironment(ambient, { configRoot, home, tempora
 function parseJsonLines(bytes) {
   try { return bytes.toString("utf8").split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line)); }
   catch { fail("CLAUDE_DEEPSEEK_STREAM_JSON_INVALID", "Claude stdout is not valid stream-json JSONL"); }
+}
+
+function terminalObservation(bytes) {
+  let events;
+  try {
+    events = bytes.toString("utf8").split(/\r?\n/u).filter(Boolean).map((line) => JSON.parse(line));
+  } catch {
+    return null;
+  }
+  const terminal = events.at(-1);
+  if (terminal?.type !== "result") return null;
+  const usage = resolvedTerminalUsage(terminal);
+  return {
+    terminal: true,
+    subtype: terminal.subtype ?? null,
+    is_error: terminal.is_error === true,
+    stop_reason: terminal.stop_reason ?? null,
+    turns: Number.isSafeInteger(terminal.num_turns) ? terminal.num_turns : 0,
+    usage_complete: usage !== null,
+    usage,
+  };
 }
 
 function walkToolBlocks(events, { allowToolErrors = false } = {}) {
@@ -171,6 +193,7 @@ export async function runClaudeProcess(options, { ambient = process.env, onProgr
   const stderr = [];
   let timedOut = false;
   let noProgressTimedOut = false;
+  let progressCallbackFailed = false;
   let lastProgress = Date.now();
   const exit = await new Promise((resolve, reject) => {
     const child = spawn(process.execPath, args, { cwd: options.cwd, env: environment, stdio: ["pipe", "pipe", "pipe"] });
@@ -187,7 +210,17 @@ export async function runClaudeProcess(options, { ambient = process.env, onProgr
     }, 1_000);
     hard.unref();
     progress.unref();
-    child.stdout.on("data", (chunk) => { stdout.push(chunk); lastProgress = Date.now(); onProgress?.(options.phase); });
+    child.stdout.on("data", (chunk) => {
+      stdout.push(chunk);
+      lastProgress = Date.now();
+      if (progressCallbackFailed) return;
+      try { onProgress?.(options.phase); }
+      catch {
+        progressCallbackFailed = true;
+        child.kill("SIGTERM");
+        setTimeout(() => child.exitCode === null && child.kill("SIGKILL"), 5_000).unref();
+      }
+    });
     child.stderr.on("data", (chunk) => { stderr.push(chunk); });
     child.once("error", (error) => { clearTimeout(hard); clearInterval(progress); reject(error); });
     child.once("exit", (code, signal) => { clearTimeout(hard); clearInterval(progress); resolve({ code, signal }); });
@@ -197,12 +230,35 @@ export async function runClaudeProcess(options, { ambient = process.env, onProgr
   const stderrBytes = Buffer.concat(stderr);
   if (options.tracePath) writeNew(options.tracePath, stdoutBytes);
   if (options.stderrPath) writeNew(options.stderrPath, stderrBytes);
-  requireProcess(!timedOut, "CLAUDE_DEEPSEEK_PROCESS_TIMEOUT", "Claude process exceeded its wall timeout");
-  requireProcess(!noProgressTimedOut, "CLAUDE_DEEPSEEK_PROCESS_NO_PROGRESS", `Claude process made no semantic stream progress for ${options.noProgressSeconds} seconds`);
-  requireProcess(exit.code === 0 && exit.signal === null, "CLAUDE_DEEPSEEK_PROCESS_FAILED", "Claude process exited unsuccessfully", { exit_code: exit.code, signal: exit.signal });
-  const events = parseJsonLines(stdoutBytes);
-  const stream = auditClaudeStream(events, { phase: options.phase, allowedTools: [...options.tools, ...options.allowedTools, ...(options.auditOnlyAllowedTools ?? [])], maxTurns: options.maxTurns, wallTimeoutSeconds: options.wallTimeoutSeconds });
-  const projected = projectClaudeTools(events, { allowToolErrors: options.allowToolErrors === true });
+  const observedTerminal = terminalObservation(stdoutBytes);
+  const processDetails = { exit_code: exit.code, signal: exit.signal, terminal: observedTerminal };
+  if (progressCallbackFailed) fail("CLAUDE_DEEPSEEK_PROGRESS_CALLBACK_FAILED", "Claude process progress receipt could not be persisted", processDetails);
+  if (timedOut) fail("CLAUDE_DEEPSEEK_PROCESS_TIMEOUT", "Claude process exceeded its wall timeout", processDetails);
+  if (noProgressTimedOut) fail("CLAUDE_DEEPSEEK_PROCESS_NO_PROGRESS", `Claude process made no semantic stream progress for ${options.noProgressSeconds} seconds`, processDetails);
+  if (exit.code !== 0 || exit.signal !== null) {
+    const code = observedTerminal?.subtype === "error_max_budget_usd" ? "CLAUDE_DEEPSEEK_MAX_BUDGET_EXCEEDED" : "CLAUDE_DEEPSEEK_PROCESS_FAILED";
+    fail(code, "Claude process exited unsuccessfully", processDetails);
+  }
+  let events;
+  try { events = parseJsonLines(stdoutBytes); }
+  catch (error) {
+    error.details = { ...(error?.details ?? {}), ...processDetails };
+    throw error;
+  }
+  let stream;
+  try {
+    stream = auditClaudeStream(events, { phase: options.phase, allowedTools: [...options.tools, ...options.allowedTools, ...(options.auditOnlyAllowedTools ?? [])], maxTurns: options.maxTurns, wallTimeoutSeconds: options.wallTimeoutSeconds });
+  } catch (error) {
+    error.details = { ...(error?.details ?? {}), ...processDetails };
+    throw error;
+  }
+  let projected;
+  try {
+    projected = projectClaudeTools(events, { allowToolErrors: options.allowToolErrors === true });
+  } catch (error) {
+    error.details = { ...(error?.details ?? {}), ...processDetails };
+    throw error;
+  }
   const receipt = {
     schema_version: 1,
     invocation_id: options.invocationId,
@@ -219,6 +275,13 @@ export async function runClaudeProcess(options, { ambient = process.env, onProgr
     max_turns: options.maxTurns,
     max_budget_usd: options.maxBudgetUsd,
     max_output_tokens: CLAUDE_DEEPSEEK_MAX_OUTPUT_TOKENS,
+    provider_terminal: {
+      subtype: observedTerminal?.subtype ?? null,
+      is_error: observedTerminal?.is_error ?? null,
+      stop_reason: observedTerminal?.stop_reason ?? null,
+      exit_code: exit.code,
+      signal: exit.signal,
+    },
     appended_system_prompt: options.appendSystemPrompt ? { sha256: sha256Bytes(options.appendSystemPrompt), utf8_size: Buffer.byteLength(options.appendSystemPrompt, "utf8") } : null,
     environment_policy: {
       schema_version: 1,

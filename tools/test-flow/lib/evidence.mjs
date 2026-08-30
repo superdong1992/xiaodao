@@ -10,6 +10,7 @@ import {
   writeJsonSync,
 } from "./util.mjs";
 import { buildWaterfallSummary, readRelayedEventPart, validateEventFile } from "./events.mjs";
+import { projectCandidateFailureDiagnostic, validFailureDiagnostic } from "./failure-diagnostic.mjs";
 import { classifyRun } from "./status.mjs";
 import {
   ISOLATED_AGENT_ENV_POLICY_VERSION,
@@ -280,7 +281,7 @@ function comparableGate(gate) {
 
 const CANDIDATE_FIELDS = Object.freeze([
   "schema_version", "run_id", "track", "goal", "functional_status", "performance_status",
-  "operation_status", "failure_domain", "failure_fingerprint", "proofs", "stages", "gates",
+  "operation_status", "failure_domain", "failure_fingerprint", "failure_diagnostic", "proofs", "stages", "gates",
   "source", "config_digests", "config_bundle_digest", "runtime_profile",
   "runtime_profile_digest", "plan_fingerprint", "policy_digest", "status_policy", "lineage",
   "admission", "pre_finalization_resource_receipt", "usage", "candidate_input_digest",
@@ -575,6 +576,16 @@ function auditCandidateReceipts(attemptRoot, candidate) {
     ? "FAIL"
     : (candidate.proofs ?? []).every((proof) => proof.status === "PASS") ? "PASS" : "INCONCLUSIVE";
   if (functional !== candidate.functional_status) failures.push({ code: "FUNCTIONAL_AGGREGATION_INVALID" });
+  const expectedFailureDiagnostic = projectCandidateFailureDiagnostic({ attemptRoot, stages: candidate.stages });
+  if (candidate.failure_diagnostic !== null && !validFailureDiagnostic(candidate.failure_diagnostic)) {
+    failures.push({ code: "FAILURE_DIAGNOSTIC_SHAPE_INVALID" });
+  }
+  if (candidate.functional_status === "PASS" && candidate.failure_diagnostic !== null) {
+    failures.push({ code: "PASS_FAILURE_DIAGNOSTIC_UNEXPECTED" });
+  }
+  if (canonicalJson(candidate.failure_diagnostic) !== canonicalJson(expectedFailureDiagnostic)) {
+    failures.push({ code: "FAILURE_DIAGNOSTIC_RECEIPT_MISMATCH" });
+  }
   const performanceValues = (candidate.stages ?? []).map((stage) => stage.performance_status);
   const performance = performanceValues.includes("FAIL") ? "FAIL"
     : performanceValues.includes("SLOW") ? "SLOW"
@@ -631,6 +642,7 @@ function buildVerdict({ candidate, payloadSeal, streams, waterfall, scan, resour
     exit_code: classification.exit_code,
     failure_domain: failureDomain,
     failure_fingerprint: candidate.failure_fingerprint ?? null,
+    failure_diagnostic: receiptAudit.status === "PASS" ? candidate.failure_diagnostic ?? null : null,
     evidence_reusable: scan.status === "PASS" && metaScan.status === "PASS" && payloadSeal.status === "PASS" && streams.status === "PASS" && waterfall.status === "PASS" && receiptAudit.status === "PASS" && resourceReceipt.status === "PASS",
     proofs: candidate.proofs,
     stages: candidate.stages,

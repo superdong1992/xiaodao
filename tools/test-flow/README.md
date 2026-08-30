@@ -9,14 +9,28 @@
 | --- | --- | --- |
 | `dev.default` | `dev` | 框架自测、仓库静态检查、受影响确定性测试和完整确定性测试；不调用真实模型 |
 | `dev.real` | `dev` | 在 `dev.default` 闭包之外，显式选择一个真实 Proof/Stage |
-| `dev.macos-codex-luna-methods` | `dev` | macOS arm64 上用一次 Codex CLI + gpt-5.6-luna 调用生成、校验并按完整 producer identity 冻结 Methods package |
-| `dev.macos-codex-luna-e2e` | `dev` | macOS arm64 上运行一个 fresh `DATA_ROOT` 的 Codex/Luna Streamable HTTP MCP 单场景冒烟；不含 Docker、浏览器或业务 REST |
+| `dev.macos-codex-luna-methods` | `dev` | 原生 macOS 或密封 Ubuntu 22.04 中，用一次 Codex CLI + gpt-5.6-luna 调用生成并冻结 Methods package |
+| `dev.macos-codex-luna-e2e` | `dev` | P2：用共同的 production registration、Core 收据和固定用例运行 Codex/Luna Evidence V2 model cert |
 | `dev.macos-claude-deepseek-methods` | `dev` | 先运行迁移后的 Codex 与 Claude 快测合同，再用 Claude Code 2.1.89 + DeepSeek 生成、校验并原子冻结完整 production registration cache |
-| `dev.macos-claude-deepseek-e2e` | `dev` | 从空 `DATA_ROOT` 运行 CLIENT/ROUTE/LOGPARSE/DIAGNOSE/REVIEW 五进程 Claude MCP 冒烟；验证 Helper→broker、精确 specialized route 和客户端 Artifact 下载，不进入 CrossJob |
-| `release.full` | `release` | 不可变源码快照上的完整发布证明；包含平台能力和从空数据根开始的 fresh CrossJob |
-| `release.codex-luna-methods` | `release` | 同一不可变源码快照上的独立 Codex CLI + gpt-5.6-luna Methods 探索验证；不属于产品 CrossJob 闭包 |
+| `dev.macos-claude-deepseek-e2e` | `dev` | P1：用共同的 production registration、Core 收据和固定用例运行 Claude/DeepSeek Evidence V2 model cert |
+| `release.full` | `release` | 从空数据根运行生产 CrossJob 定位与重启闭包 |
+| `release.evidence-v2-certification` | `release` | 同一 attempt 内完成 Core、一次 production registration、P1、P2，并用零模型 Gate 生成 `release-verdict.json` |
 
 Windows、macOS 和显式 Linux Client 都有仓库内置 adapter。`--client auto` 在当前主机上选择对应 adapter；所有 Client 都通过 HTTP 直连 Linux Server。adapter 不是任意命令扩展点，调用方不能注入外部执行器。host-client 的 Web API 正式浏览器证明要求当前稳定版 Google Chrome，可通过 `TEST_FLOW_CHROME` 指定绝对可执行文件路径；Darwin 上显式 Linux Client 则只使用冻结在 Client image 中的官方 Chrome Headless Shell，不读取宿主浏览器。planning 会先在无网络临时容器中完成零模型 DOM smoke，CrossJob environment 再用正式 source-owned runner 做 loopback DOM roundtrip。
+
+`dev.default` 在 `deterministic.full` 内运行
+`det.evidence-v2-core`，并生成绑定 source snapshot、V8 contract manifest、固定 Core 用例和
+JUnit 的 `core-verdict.json` 子收据；外层 `verdict.json` 仍是唯一权威结论。Release 认证始终在
+当前 attempt 重新运行 `deterministic.full`，不会复用历史 Core Stage。
+
+P1 Claude/DeepSeek 和 P2 Codex/Luna Gate 已接入同一 `model-cert-input.json` → `model-cert.json`
+收据边界，并明确依赖 `deterministic.full` 和同一 attempt 的 `real.skill-generation`。provider runner
+是 `model-cert.json` 的唯一写入方；中央 action 只读取并按当前 source/Core 完整复核，绝不二次创建
+或改写该文件。adapter PASS 后由 Test Flow 统一复核 source snapshot、
+V8 manifest、Core verdict、调用/repair、usage、prompt/profile/tool policy 和最终
+`methods_result` 身份。两家模型都只能读取服务端生成的 Evidence Graph、Evaluation Plan 和方法卡；
+正常各调用两次，每个角色最多修复一次，总上限四次。`release-verdict.json` 聚合器只接受同一
+attempt、同一 source snapshot、同一 Core 和同一 production registration 的 P1/P2 PASS 收据。
 
 ## Dev 确定性测试
 
@@ -61,10 +75,12 @@ Windows pytest 默认在仓库 `.tmp/p` 与系统临时目录中选择物理路�
 
 这三个字段是可审计的重试合同，不允许盲重试。
 
-## macOS Codex/Luna 快速 E2E
+## Provider package 与 Evidence V2 model cert
 
-这两条 Dev Goal 有意相互独立。Methods Goal 恰好执行一次真实调用并把校验后的 package 写入
-`<cache-root>/codex-luna-methods/<producer-identity>/`；E2E Goal 不会自动 bootstrap，缺少精确缓存时会在 planning 阶段阻断。首个且当前唯一可选场景是 `api-execution-overrun`。
+Methods Goal 仍可恰好执行一次真实调用并把校验后的 package 写入
+`<cache-root>/codex-luna-methods/<producer-identity>/`。它只生成 package，不执行定位。
+这个 cache 只服务独立的 package-generation Goal。P1、P2 model cert 不从各自 cache 拼出
+registration，而是共同消费当前 attempt 中 `real.skill-generation` 生成并验证的 production registration。
 
 先审阅 Methods 计划；确认后移除 `--plan-only` 才会发生一次真实调用：
 
@@ -82,25 +98,29 @@ Windows pytest 默认在仓库 `.tmp/p` 与系统临时目录中选择物理路�
   --plan-only
 ```
 
-Methods verdict 为 PASS 且缓存身份匹配后，再审阅 E2E 计划；确认后移除 `--plan-only` 才会执行恰好 5 次真实调用（Client、ROUTE、Logparse、DIAGNOSE、REVIEW），不自动 retry：
+P2 计划必须同时显示一次 Skill generation、两个正常评估调用、每角色最多一次 repair，以及四次
+provider 调用的硬上限。原生 macOS 使用 `--client macos`；Windows 主机上的密封 Ubuntu 22.04
+入口使用 `--client linux`：
 
 ```sh
 ./tools/test-flow/run.sh \
   --track dev \
   --goal dev.macos-codex-luna-e2e \
   --client macos \
-  --scenario api-execution-overrun \
-  --logparse-source /absolute/path/to/logparse \
+  --scenario multiple-rpc-timeouts \
+  --claude-entry /absolute/path/to/claude-code/package/cli.js \
+  --claude-settings /absolute/path/to/claude/settings.json \
   --codex-entry /Applications/ChatGPT.app/Contents/Resources/codex \
   --codex-auth /absolute/path/to/.codex/auth.json \
   --cache-root /absolute/path/to/test-flow-cache \
   --allow-codex-posthoc-budget \
   --allow-real-model \
-  --reason "运行已审阅 Methods cache 的本机 MCP 冒烟" \
+  --reason "运行 P2 Evidence V2 model cert" \
   --plan-only
 ```
 
-Methods/E2E 的 hard caps 分别为 1/5 次调用、1,000,000/2,000,000 token、2/3 USD 等价估算和 30 分钟 Stage；单次调用最多 10 分钟，180 秒无语义进展即失败。E2E 只允许 `/mcp` transport 和 `UploadDescriptor` 指定的一次 PUT；Case 操作、终态读取和产物列表都必须经公开 MCP 工具完成。
+确认计划中的身份、正常调用数、repair 上限、token 和费用预算后，移除 `--plan-only` 才会调用模型。
+P1 使用 `dev.macos-claude-deepseek-e2e`，固定 scenario 和 production registration 规则相同。
 
 ## Release
 
@@ -114,7 +134,7 @@ node tools/test-flow/prepare-release-cache.mjs \
   --docker-context colima
 ```
 
-然后把 `PROFILE_VERSION` 替换为该配置中的 `claude.version`，用完全相同的输入先规划、再执行：
+然后把 `PROFILE_VERSION` 替换为该配置中的 `claude.version`。先运行 plan-only，再执行相同参数：
 
 ```sh
 ./tools/test-flow/run.sh \
@@ -129,18 +149,6 @@ node tools/test-flow/prepare-release-cache.mjs \
   --docker-context colima \
   --cache-root /absolute/path/to/test-flow-cache \
   --plan-only
-
-./tools/test-flow/run.sh \
-  --track release \
-  --goal release.full \
-  --client macos \
-  --resume fresh \
-  --logparse-source /absolute/path/to/logparse \
-  --mcp-source /absolute/path/to/problem-locator-mcp \
-  --claude-entry /absolute/path/to/test-flow-cache/claude/PROFILE_VERSION/package/cli.js \
-  --claude-settings /absolute/path/to/claude/settings.json \
-  --docker-context colima \
-  --cache-root /absolute/path/to/test-flow-cache
 ```
 
 Windows 使用 `--client windows`，显式 Linux Client 使用 `--client linux`；两者不接受 macOS 的 Docker context。仓库拥有三种 adapter 的相同 Gate receipt 合同，但一次 Release 只证明 verdict 中记录的实际平台、source snapshot digest 和全部输入身份，不能外推成未执行平台的真实 PASS。
@@ -151,40 +159,41 @@ Release 从 GENESIS 和新的空 `DATA_ROOT` 开始，不复用业务 checkpoint
 
 正式用例的日志归档不是假设外部 Logparse 已预装业务产品配置。容器初始化会从已审阅 Diagnosis Skill 的 `logparse_product`、anchors 和 journey driver 机械生成独立的只读运行时配置，并把每份原始附件无损投影为当前 Logparse loose-diagnostic 输入；初始化阶段先用冻结 Logparse 提交完成一次无模型 smoke parse，逐一证明 module/slot/process anchor 可解析。配置摘要、归档投影版本和归档摘要写入 Release case 与容器收据，服务只使用该独立配置，外部 Logparse Git 快照仍保持未修改。
 
-## Codex Luna Methods 独立 Release
+## Evidence V2 双 Provider 正式认证
 
-这条工程化验证只支持 Darwin arm64 orchestrator，使用冻结的 Codex CLI、外置 ChatGPT token、`gpt-5.6-luna` 和 `medium` reasoning。每次调用都启动新的 `codex app-server --stdio`、ephemeral thread 和唯一 turn；父进程从冻结的 auth source 读取 access token/account id，只通过 `account/login/start` 写入子进程 stdin，活动 `CODEX_HOME` 不含 `auth.json`，刷新请求一律 fail closed。模型只能使用显式启用的仓库 Skill 和 `shell_command`，单层 named permission profile 将根目录设为 deny、最小系统路径设为 read、生成 workspace 设为 write/诊断 workspace 设为 read，并关闭 command network；provider 网络只属于 app-server 父进程。
-
-它直接生成一个 Methods 包，再让九个隔离诊断调用复用完全相同的包字节；不会启动 Linux Server、MCP、Docker 或 Claude Code，也不会成为 `release.full` 或 CrossJob 的依赖。每个调用的脱敏 JSONL、profile bytes、schema tree、raw/terminal usage 对账、独立 consumer 重审、无凭据扫描和 durable generated package 都进入 Gate 证据。先规划并检查十次调用、5,000,000 token、API 等价 10 USD 的聚合上限和 admission：
+Windows 主机在密封 Ubuntu 22.04 WSL 入口中运行以下 Goal。它会在同一 attempt 中先完成 Core 和
+一次 production registration，再依次运行 P1、P2，最后由零模型 Gate 写出
+`release-verdict.json`：
 
 ```sh
 ./tools/test-flow/run.sh \
   --track release \
-  --goal release.codex-luna-methods \
-  --client macos \
+  --goal release.evidence-v2-certification \
+  --client linux \
+  --scenario multiple-rpc-timeouts \
   --resume fresh \
-  --logparse-source /absolute/path/to/logparse \
-  --codex-entry /Applications/ChatGPT.app/Contents/Resources/codex \
+  --claude-entry /absolute/path/to/test-flow-cache/claude/PROFILE_VERSION/package/cli.js \
+  --claude-settings /absolute/path/to/claude/settings.json \
+  --codex-entry /usr/bin/codex \
   --codex-auth /absolute/path/to/.codex/auth.json \
+  --cache-root /absolute/path/to/test-flow-cache \
   --allow-codex-posthoc-budget \
   --plan-only
-
-./tools/test-flow/run.sh \
-  --track release \
-  --goal release.codex-luna-methods \
-  --client macos \
-  --resume fresh \
-  --logparse-source /absolute/path/to/logparse \
-  --codex-entry /Applications/ChatGPT.app/Contents/Resources/codex \
-  --codex-auth /absolute/path/to/.codex/auth.json \
-  --allow-codex-posthoc-budget
 ```
 
-`--allow-codex-posthoc-budget` 是显式例外确认：Codex CLI 没有本框架可用的调用前 token/USD 硬停止接口，所以这些聚合上限是每个 terminal receipt 和最终 verdict 的阻断性后验校验，不是预防性花费控制。产品 Linux→Linux `release.full` 与本 goal 产生两个独立权威 verdict；要同时宣称两条测试流通过，二者必须绑定相同 source snapshot digest。
+计划必须显示 P1、P2 各自正常两次调用、最多两次 repair、四次硬上限，以及聚合 Stage 的零模型
+调用数。只有 `core-verdict.json`、两份 `model-cert.json` 和最终 `release-verdict.json` 都属于当前
+attempt，正式认证才成立。
 
 ## 预算、超时与性能
 
-真实 Gate 的计划列出模型、turn/token/USD/time 上限和预计成本。cap 可由 Stage 显式选择；未选择时使用该类 Gate 的默认 cap，因此某个长耗时工作流可以获得独立上限而不放大其他真实 Gate。turn、USD 与进程时限由执行器或 provider 强制；token 上限还会由终端 receipt 复核，usage 缺失或超限不能 PASS。模型 usage 使用版本化的 cache-inclusive 合同，逐项记录 `input_tokens`、`output_tokens`、`cache_creation_input_tokens` 与 `cache_read_input_tokens`，并强制 `total_tokens = input_tokens + output_tokens + cache_creation_input_tokens + cache_read_input_tokens`。四个分项任一缺失、总数不一致或总数超过 `max_total_tokens` 时，`usage_complete` 不得为真且 Gate 不能 PASS；Gate、Stage 与最终 verdict 的累计值沿用同一公式。plan 中的 token estimate 是非阻断 planning 数，不能替代硬上限；Methods Skill generation 当前按已执行样本估算 600,000 cache-inclusive tokens，而 16 turns、1,000,000 total tokens、$10 与 1800 秒仍是实际阻断 cap。Skill-generation 另外声明 `max_output_tokens=64000`：它是每次模型请求的输出上限，不是整次 Agent 调用的累计输出量。该上限由身份绑定的 wrapper 参数、只注入 Claude 子进程的 `CLAUDE_CODE_MAX_OUTPUT_TOKENS`、固定 Claude CLI 上限校验及密封 runtime 实现共同证明；终态 `modelUsage.maxOutputTokens` 在固定 Claude Code 版本中只是静态模型档位默认值，不是实际请求 `max_tokens` 的回显，不进入 cap 证明。结构完整的失败终态也会先持久化实际 terminal usage，再保持原 Gate 失败；缺少合法终态时不得把零调用误报为完整 usage。
+真实 Gate 的计划列出模型、turn/token/USD/time 上限和预计成本。每个 Stage 还明确列出
+`normal_model_calls`、`repair_model_calls_max`、`hard_max_model_calls`、`normal_budget` 和
+`hard_budget`，不会再把正常路径与 repair 上限混成一个数字。turn、USD 与进程时限由执行器或
+provider 强制；token 上限还会由终端 receipt 复核，usage 缺失或超限不能 PASS。模型 usage 使用
+版本化的 cache-inclusive 合同，逐项记录 `input_tokens`、`output_tokens`、
+`cache_creation_input_tokens` 与 `cache_read_input_tokens`，并强制
+`total_tokens = input_tokens + output_tokens + cache_creation_input_tokens + cache_read_input_tokens`。
 
 只有直接向编排器输出 allowlist 语义事件的 adapter 才启用无进展计时。pytest 包装的真实 Agent Gate
 会捕获内部模型流，编排器无法把该流当成可信的实时进度，因此明确禁用无进展计时；模型 wrapper 的
@@ -212,8 +221,8 @@ validator 仍从原始 Wiki 独立重算，Test Flow 不会事后修改生成包
 模型不可见的语义 oracle 验证包，再在包外复制产品 registration template，形成 CrossJob 消费的注册目录。
 validator 会机械重算固定模板文件的精确字节、命名日志字段的首次出现顺序与每种日志模板的 canonical
 stable marker；语义 oracle 只能在该机械合同上检查原因分组与覆盖，不能另设未公开的 marker 拼写或
-遗漏 Wiki 命名字段。独立 Codex/Luna generation workspace 会物化同一 v2 identity 与固定引用合同，
-但仍保持一次生成加九次诊断的十次调用边界。
+遗漏 Wiki 命名字段。独立 Codex/Luna generation workspace 仍可用于 package cache；已删除旧的一次
+生成加九次直接 diagnosis Goal，Evidence V2 model cert 不复用该路径。
 
 所有 pytest 包装的真实 isolated Agent Gate 还使用版本化的
 `isolated-agent-env-allowlist-v3` 环境策略。pytest 只继承跨平台启动所需的

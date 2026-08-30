@@ -2019,17 +2019,31 @@ class FakeAssetCatalog:
 
 
 class _FakeLogparseBrokerSession:
-    def __init__(self, endpoint: str, token: str, job_id: str) -> None:
+    def __init__(
+        self,
+        endpoint: str,
+        token: str,
+        job_id: str,
+        workspace_root: Path,
+        preprocessing_executor: Callable[
+            ["_FakeLogparseBrokerSession", str, str, str],
+            ExecutionFailure | None,
+        ]
+        | None,
+    ) -> None:
         if not endpoint or not token:
             raise ValueError("broker endpoint and token must be non-empty")
         self.endpoint = endpoint
         self.token = token
         self.job_id = job_id
+        self.workspace_root = Path(workspace_root)
+        self.preprocessing_executor = preprocessing_executor
         self.closed = False
         self.token_valid = True
         self.close_calls = 0
         self.live_children = 0
         self._accepted_parse_request_bytes: bytes | None = None
+        self.deterministic_execute_calls: list[tuple[str, str, str]] = []
         self._lock = threading.Lock()
 
     def agent_environment(self) -> dict[str, str]:
@@ -2044,6 +2058,23 @@ class _FakeLogparseBrokerSession:
     def parse_request_bytes(self) -> bytes | None:
         with self._lock:
             return self._accepted_parse_request_bytes
+
+    def execute_preprocessing(
+        self,
+        operation: str,
+        request_path: str,
+        result_path: str,
+    ) -> ExecutionFailure | None:
+        with self._lock:
+            if self.closed:
+                raise RuntimeError("logparse broker session is closed")
+            self.deterministic_execute_calls.append(
+                (operation, request_path, result_path)
+            )
+            executor = self.preprocessing_executor
+        if executor is None:
+            raise RuntimeError("fake deterministic Logparse executor is not configured")
+        return executor(self, operation, request_path, result_path)
 
     def audit_bytes(self) -> bytes:
         with self._lock:
@@ -2090,8 +2121,14 @@ class FakeLogparseBrokerFactory:
             LogparseBrokerSession,
         ]
         | None = None,
+        preprocessing_executor: Callable[
+            [_FakeLogparseBrokerSession, str, str, str],
+            ExecutionFailure | None,
+        ]
+        | None = None,
     ) -> None:
         self.opener = opener
+        self.preprocessing_executor = preprocessing_executor
         self.open_calls: list[
             tuple[Job, Path, WorkspaceInputManifest, CancellationSignal]
         ] = []
@@ -2116,6 +2153,8 @@ class FakeLogparseBrokerFactory:
                 f"inmemory://problem-locator/logparse/{job.job_id}/{ordinal}",
                 f"contract-test-token-{ordinal}",
                 job.job_id,
+                workspace_root,
+                self.preprocessing_executor,
             )
         self.sessions.append(session)
         return session

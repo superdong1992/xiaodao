@@ -156,7 +156,7 @@ export function methodsPrompt({ registrationId = CLAUDE_DEEPSEEK_REGISTRATION_ID
 
 Your first action must call the Skill tool with exactly {"skill":"wiki-to-logparse-diagnosis-skill"}. After that succeeds, read inputs/wiki.md and runtime/source-wiki-identity.json in full. Copy identity.sha256 verbatim into the package methods.json and use identity.log_templates as the complete ordered duplicate-preserving checklist for references/source-log-templates.md. Read only the linked references/output-contract.md from the Skill base directory. Do not read repository files, registrations, tests, validators, or oracles. Use only Skill, Read, and Write.
 
-Every methods.json evidence_markers item must be copied byte-for-byte from this canonical stable marker allowlist: ${JSON.stringify(canonicalMarkers)}. Bare or shortened event names such as API_COMPLETE, DEADLOOP_DETECTED, LATE_RESPONSE, and QUEUE_HISTORY are invalid unless that exact whole string appears in the allowlist. Do not invent, shorten, or extend a marker. Decide which allowed markers apply to each Wiki cause from the authored Wiki; the allowlist does not assign markers to methods.
+Every methods.json evidence_markers and activation_markers item must be copied byte-for-byte from this canonical stable marker allowlist: ${JSON.stringify(canonicalMarkers)}. Bare or shortened event names such as API_COMPLETE, DEADLOOP_DETECTED, LATE_RESPONSE, and QUEUE_HISTORY are invalid unless that exact whole string appears in the allowlist. Do not invent, shorten, or extend a marker. evidence_markers must include every log used to judge the method. activation_markers must be the ordered evidence_markers subset whose presence makes that method worth evaluating; a marker may activate more than one method, and activation alone does not mean CONFIRMED. Generic timeout/failure lines that only establish request context must not activate a method. Decide both lists from the authored Wiki; the allowlist does not assign markers to methods.
 
 Generate the complete registration directly under output/${registrationId}. Its root entries must be exactly registration-template.json and package; package must contain exactly ${CLAUDE_DEEPSEEK_SKILL_NAME} with SKILL.md, methods.json, and required references including references/source-log-templates.md. The registration must use deployment_scope PRODUCTION, version 1.0.0, logparse_product default, module ${module}, and USER_FACT bindings for both slot/process/pid anchors. The generated Methods Skill consumes only the Server-frozen request.json, target_logs.json, receipt, and listed logs; it must not call Skill(logparse-diagnose), the broker, Logparse, or a ZIP packer. Finish all Reads before the first Write, use exactly one successful Write per final file, keep Writes contiguous, never overwrite, never write outside that registration, and stop after the final Write. The authored Wiki is the only source of business meaning. Do not include generated JSON or Markdown in the final response.`;
 }
@@ -250,13 +250,21 @@ export function auditMethodsOracle({ registrationRoot, oraclePath }) {
   equal("required_user_inputs", manifest.required_user_inputs, ["problem_time", "client_slot", "client_process_name", "server_slot", "server_process_name", "client_pid", "server_pid", ...wikiInputs]);
   equal("required_artifacts", manifest.required_artifacts, expected.required_artifacts);
   equal("log_derived_fields", manifest.log_derived_fields, expected.required_log_derived_fields);
-  const markerSets = (manifest.methods ?? []).map((method) => new Set(method.evidence_markers ?? []));
+  const markerSets = (manifest.methods ?? []).map((method) => ({
+    evidence: new Set(method.evidence_markers ?? []),
+    activation: method.activation_markers ?? [],
+  }));
   if (markerSets.length !== expected.method_marker_sets.length) mismatches.push("method_count");
   const oneToOne = (expectedIndex, used) => {
     if (expectedIndex === expected.method_marker_sets.length) return true;
     const required = expected.method_marker_sets[expectedIndex];
     for (const [actualIndex, actual] of markerSets.entries()) {
-      if (used.has(actualIndex) || actual.size !== required.all_markers.length || !required.all_markers.every((marker) => actual.has(marker))) continue;
+      if (
+        used.has(actualIndex)
+        || actual.evidence.size !== required.all_markers.length
+        || !required.all_markers.every((marker) => actual.evidence.has(marker))
+        || canonicalJson(actual.activation) !== canonicalJson(required.activation_markers)
+      ) continue;
       used.add(actualIndex);
       if (oneToOne(expectedIndex + 1, used)) return true;
       used.delete(actualIndex);

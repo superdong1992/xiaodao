@@ -94,6 +94,23 @@ function safeInteger(value) {
   return Number.isSafeInteger(value) && value >= 0;
 }
 
+function uniqueNonEmptyStrings(value) {
+  return Array.isArray(value)
+    && value.length > 0
+    && value.every((item) => typeof item === "string" && item.length > 0)
+    && value.length === new Set(value).size;
+}
+
+function orderedSubsequence(values, sequence) {
+  let cursor = 0;
+  for (const value of values) {
+    const index = sequence.indexOf(value, cursor);
+    if (index < 0) return false;
+    cursor = index + 1;
+  }
+  return true;
+}
+
 function roundMoney(value) {
   return Math.ceil((value - Number.EPSILON) * 1_000_000) / 1_000_000;
 }
@@ -637,12 +654,26 @@ export function verifyMethodsV1Package(skillRoot, sourceWikiIdentity) {
   requireContract(Array.isArray(manifest.methods) && manifest.methods.length > 0, "CODEX_LUNA_METHODS_EMPTY", "Generated methods-v1 package must contain at least one method");
   const methodIds = new Set();
   for (const method of manifest.methods) {
-    requireContract(isPlainObject(method) && Object.keys(method).sort().join("\0") === ["id", "title", "reference", "priority", "evidence_markers"].sort().join("\0"), "CODEX_LUNA_METHOD_INVALID", "Generated method does not match methods-v1");
+    requireContract(isPlainObject(method) && Object.keys(method).sort().join("\0") === ["id", "title", "reference", "priority", "evidence_markers", "activation_markers"].sort().join("\0"), "CODEX_LUNA_METHOD_INVALID", "Generated method does not match methods-v1");
     requireContract(typeof method.id === "string" && !methodIds.has(method.id), "CODEX_LUNA_METHOD_ID_INVALID", "Generated method IDs must be non-empty and unique");
     requireContract(method.reference !== CODEX_LUNA_SOURCE_LOG_TEMPLATES_REFERENCE, "CODEX_LUNA_TEMPLATE_REFERENCE_INVALID", "Source log templates reference must remain shared-only and cannot be a method reference");
     methodIds.add(method.id);
-    requireContract(Array.isArray(method.evidence_markers) && method.evidence_markers.length > 0, "CODEX_LUNA_METHOD_MARKERS_INVALID", "Every generated method must expose positive evidence markers");
+    requireContract(uniqueNonEmptyStrings(method.evidence_markers), "CODEX_LUNA_METHOD_MARKERS_INVALID", "Every generated method must expose unique positive evidence markers");
+    requireContract(
+      uniqueNonEmptyStrings(method.activation_markers)
+        && orderedSubsequence(method.activation_markers, method.evidence_markers),
+      "CODEX_LUNA_METHOD_ACTIVATION_MARKERS_INVALID",
+      "Every generated method must expose unique activation markers in evidence-marker order",
+    );
     ordinaryFile(path.join(skillRoot, ...String(method.reference).split("/")), `method reference ${method.reference}`);
   }
-  return { manifest, method_ids: [...methodIds], tree_sha256: treeDigest(skillRoot) };
+  return {
+    manifest,
+    method_ids: [...methodIds],
+    method_activation_markers: manifest.methods.map((method) => ({
+      method_id: method.id,
+      activation_markers: [...method.activation_markers],
+    })),
+    tree_sha256: treeDigest(skillRoot),
+  };
 }

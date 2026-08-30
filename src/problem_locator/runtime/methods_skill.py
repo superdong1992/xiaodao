@@ -25,6 +25,17 @@ _KEBAB = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*\Z")
 _SNAKE = re.compile(r"[a-z][a-z0-9]*(?:_[a-z0-9]+)*\Z")
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _SEMVER = re.compile(r"0|[1-9][0-9]*(?:\.(?:0|[1-9][0-9]*)){2}(?:[-+][0-9A-Za-z.-]+)?\Z")
+_LOG_PLACEHOLDER_PATTERN = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}|%[A-Za-z]")
+_METHOD_OUTPUT_CONTRACT_PATTERN = re.compile(
+    r"(?:只输出|仅输出|只能包含|仅包含|只包含|"
+    r"(?:only\s+(?:output|return|contain|contains))|"
+    r"(?:(?:output|return|contain|contains)\s+only))"
+    r"[\s\S]{0,512}?evaluation_ref"
+    r"[\s\S]{0,256}?verdict"
+    r"[\s\S]{0,256}?supporting_event_refs"
+    r"[\s\S]{0,256}?reason",
+    re.IGNORECASE,
+)
 _METHOD_HEADINGS = (
     "## 适用条件",
     "## 所需证据",
@@ -33,6 +44,7 @@ _METHOD_HEADINGS = (
     "## 未知边界",
     "## 输出含义",
 )
+_SOURCE_LOG_TEMPLATES_REFERENCE = "references/source-log-templates.md"
 _PACKAGE_ROOT_ENTRIES = frozenset({"SKILL.md", "methods.json", "references"})
 _METHODS_FIELDS = frozenset(
     {
@@ -47,7 +59,14 @@ _METHODS_FIELDS = frozenset(
     }
 )
 _METHOD_FIELDS = frozenset(
-    {"id", "title", "reference", "priority", "evidence_markers"}
+    {
+        "id",
+        "title",
+        "reference",
+        "priority",
+        "evidence_markers",
+        "activation_markers",
+    }
 )
 _REGISTRATION_FIELDS = frozenset(
     {
@@ -199,6 +218,197 @@ def _frontmatter_name(text: str) -> str:
     return fields["name"]
 
 
+def _canonical_evidence_marker(template: str) -> str | None:
+    matches = list(_LOG_PLACEHOLDER_PATTERN.finditer(template))
+    if not matches:
+        return template.strip() or None
+    prefix = template[: matches[0].start()].strip()
+    if prefix:
+        return prefix
+    literal_segments = [
+        segment.strip()
+        for segment in (
+            *(
+                template[left.end() : right.start()]
+                for left, right in zip(matches, matches[1:])
+            ),
+            template[matches[-1].end() :],
+        )
+        if segment.strip()
+    ]
+    if not literal_segments:
+        return None
+    return max(
+        enumerate(literal_segments),
+        key=lambda item: (len(item[1]), -item[0]),
+    )[1]
+
+
+def _parse_source_log_templates(text: str) -> tuple[str, ...]:
+    prefix = "# Source log templates\n\n```text\n"
+    suffix = "\n```\n"
+    if not text.startswith(prefix) or not text.endswith(suffix):
+        raise ValueError(
+            "references/source-log-templates.md must use the fixed template inventory format"
+        )
+    body = text[len(prefix) : -len(suffix)]
+    templates = () if not body else tuple(body.split("\n"))
+    if any(not template.strip() for template in templates):
+        raise ValueError(
+            "references/source-log-templates.md must contain non-empty source templates"
+        )
+    rendered = prefix + "\n".join(templates) + suffix
+    if text != rendered:
+        raise ValueError(
+            "references/source-log-templates.md must use the fixed template inventory format"
+        )
+    return templates
+
+
+def _outside_html_comments(line: str, in_comment: bool) -> tuple[str, bool]:
+    visible = list(line)
+    cursor = 0
+    while cursor < len(line):
+        if in_comment:
+            closing = line.find("-->", cursor)
+            end = len(line) if closing < 0 else closing + 3
+            visible[cursor:end] = " " * (end - cursor)
+            cursor = end
+            if closing < 0:
+                break
+            in_comment = False
+            continue
+        opening = line.find("<!--", cursor)
+        if opening < 0:
+            break
+        closing = line.find("-->", opening + 4)
+        end = len(line) if closing < 0 else closing + 3
+        visible[opening:end] = " " * (end - opening)
+        cursor = end
+        in_comment = closing < 0
+    return "".join(visible), in_comment
+
+
+def _method_h2_sections(method_text: str) -> list[tuple[str, str]]:
+    headings: list[tuple[str, int, int]] = []
+    in_comment = False
+    fence_character: str | None = None
+    fence_length = 0
+    offset = 0
+    for line in method_text.splitlines(keepends=True):
+        line_without_ending = line.rstrip("\r\n")
+        if fence_character is not None:
+            closing = re.fullmatch(
+                rf"[ ]{{0,3}}{re.escape(fence_character)}{{{fence_length},}}[ \t]*",
+                line_without_ending,
+            )
+            if closing is not None:
+                fence_character = None
+                fence_length = 0
+            offset += len(line)
+            continue
+        visible, in_comment = _outside_html_comments(line_without_ending, in_comment)
+        fence = re.match(r"[ ]{0,3}(`{3,}|~{3,})", visible)
+        if fence is not None:
+            fence_character = fence.group(1)[0]
+            fence_length = len(fence.group(1))
+            offset += len(line)
+            continue
+        heading = re.fullmatch(r"[ ]{0,3}##[ \t]+(.+?)[ \t]*", visible)
+        if heading is not None:
+            headings.append((heading.group(1), offset, offset + len(line)))
+        offset += len(line)
+    sections: list[tuple[str, str]] = []
+    for index, (title, _, body_start) in enumerate(headings):
+        body_end = len(method_text) if index + 1 == len(headings) else headings[index + 1][1]
+        sections.append((title, method_text[body_start:body_end]))
+    return sections
+
+
+def _required_evidence_section(method_text: str) -> str:
+    for title, body in _method_h2_sections(method_text):
+        if title == "所需证据":
+            return body
+    return ""
+
+
+def _validate_method_headings(method_text: str, *, reference: str) -> None:
+    fixed_titles = tuple(heading.removeprefix("## ") for heading in _METHOD_HEADINGS)
+    observed = tuple(
+        title for title, _ in _method_h2_sections(method_text) if title in fixed_titles
+    )
+    if observed != fixed_titles:
+        raise ValueError(
+            f"{reference} must contain each fixed method heading exactly once in order"
+        )
+
+
+def _expected_method_markers(
+    method_text: str,
+    source_templates: tuple[str, ...],
+) -> tuple[str, ...]:
+    required_evidence = _required_evidence_section(method_text)
+    expected: list[str] = []
+    for template in source_templates:
+        if not _contains_complete_template(required_evidence, template):
+            continue
+        marker = _canonical_evidence_marker(template)
+        if marker is not None and marker not in expected:
+            expected.append(marker)
+    return tuple(expected)
+
+
+def _contains_complete_template(section: str, template: str) -> bool:
+    inline = f"`{template}`"
+    for line in section.splitlines():
+        if inline in line:
+            return True
+        candidate = line.strip()
+        candidate = re.sub(r"^(?:[-*+]|[0-9]+[.)])[ \t]+", "", candidate)
+        if candidate == template:
+            return True
+    return False
+
+
+def _validate_method_marker_closure(
+    *,
+    index: int,
+    method: MethodCardV1,
+    method_text: str,
+    source_templates: tuple[str, ...],
+) -> None:
+    source_markers = {
+        marker
+        for template in source_templates
+        if (marker := _canonical_evidence_marker(template)) is not None
+    }
+    invalid = [marker for marker in method.evidence_markers if marker not in source_markers]
+    if invalid:
+        raise ValueError(
+            f"method {index} evidence marker is not canonical in "
+            f"references/source-log-templates.md: {invalid[0]}"
+        )
+    expected = _expected_method_markers(method_text, source_templates)
+    unrepresented = [
+        marker for marker in method.evidence_markers if marker not in expected
+    ]
+    if unrepresented:
+        raise ValueError(
+            f"method {index} evidence marker has no complete source template in "
+            f"its required evidence section: {unrepresented[0]}"
+        )
+    missing = [marker for marker in expected if marker not in method.evidence_markers]
+    if missing:
+        raise ValueError(
+            f"method {index} required evidence contains an unindexed canonical marker: "
+            f"{missing[0]}"
+        )
+    if method.evidence_markers != expected:
+        raise ValueError(
+            f"method {index} evidence_markers must follow source template order"
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class MethodCardV1:
     id: str
@@ -206,6 +416,7 @@ class MethodCardV1:
     reference: str
     priority: int
     evidence_markers: tuple[str, ...]
+    activation_markers: tuple[str, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -305,9 +516,22 @@ def load_methods_package(
     except UnicodeDecodeError as exc:
         raise ValueError("SKILL.md must be UTF-8") from exc
     skill_name = _frontmatter_name(skill_text)
-    for phrase in ("request.json", "methods.json", "target_logs", "Logparse", "identity_tokens", "sources"):
+    for phrase in (
+        "request.json",
+        "method-evidence-graph.json",
+        "method-evaluation-plan.json",
+        "evaluation_ref",
+        "verdict",
+        "supporting_event_refs",
+        "reason",
+        "UNKNOWN",
+    ):
         if phrase not in skill_text:
             raise ValueError(f"SKILL.md must mention {phrase}")
+    if _METHOD_OUTPUT_CONTRACT_PATTERN.search(skill_text) is None:
+        raise ValueError(
+            "SKILL.md must state the exact four-field Methods evaluation output"
+        )
 
     manifest, _ = _json_object(root / "methods.json", label="methods.json")
     _exact_fields(manifest, _METHODS_FIELDS, "methods.json")
@@ -350,6 +574,10 @@ def load_methods_package(
     )
     if len(shared) != len(set(shared)):
         raise ValueError("shared_references must be unique")
+    if not shared or shared[0] != _SOURCE_LOG_TEMPLATES_REFERENCE:
+        raise ValueError(
+            "shared_references must start with references/source-log-templates.md"
+        )
 
     raw_methods = manifest["methods"]
     if not isinstance(raw_methods, list) or not raw_methods or len(raw_methods) > 100:
@@ -397,6 +625,33 @@ def load_methods_package(
             or len(markers) != len(set(markers))
         ):
             raise ValueError(f"methods[{index}].evidence_markers are invalid")
+        activation_markers = raw_method["activation_markers"]
+        if (
+            not isinstance(activation_markers, list)
+            or not activation_markers
+            or len(activation_markers) > 100
+            or any(
+                not isinstance(marker, str)
+                or not marker
+                or "\n" in marker
+                or "\r" in marker
+                or len(marker.encode("utf-8")) > 1024
+                for marker in activation_markers
+            )
+            or len(activation_markers) != len(set(activation_markers))
+        ):
+            raise ValueError(f"methods[{index}].activation_markers are invalid")
+        activation_positions = tuple(
+            markers.index(marker) if marker in markers else -1
+            for marker in activation_markers
+        )
+        if -1 in activation_positions or activation_positions != tuple(
+            sorted(activation_positions)
+        ):
+            raise ValueError(
+                f"methods[{index}].activation_markers must be an "
+                "order-preserving subsequence of evidence_markers"
+            )
         methods.append(
             MethodCardV1(
                 id=method_id,
@@ -404,6 +659,7 @@ def load_methods_package(
                 reference=reference,
                 priority=priority,
                 evidence_markers=tuple(markers),
+                activation_markers=tuple(activation_markers),
             )
         )
     if priorities != list(range(1, len(methods) + 1)):
@@ -413,14 +669,28 @@ def load_methods_package(
     actual_references = {f"references/{item.name}" for item in reference_nodes}
     if actual_references != expected_references:
         raise ValueError("references directory must exactly match methods.json")
-    for method in methods:
+    try:
+        source_template_text = _ordinary_file(
+            root / _SOURCE_LOG_TEMPLATES_REFERENCE,
+            label=_SOURCE_LOG_TEMPLATES_REFERENCE,
+        ).decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
+    except UnicodeDecodeError as exc:
+        raise ValueError(
+            "references/source-log-templates.md must be UTF-8"
+        ) from exc
+    source_templates = _parse_source_log_templates(source_template_text)
+    for index, method in enumerate(methods, start=1):
         try:
             text = _ordinary_file(root / method.reference, label=method.reference).decode("utf-8")
         except UnicodeDecodeError as exc:
             raise ValueError(f"{method.reference} must be UTF-8") from exc
-        for heading in _METHOD_HEADINGS:
-            if heading not in text:
-                raise ValueError(f"{method.reference} is missing heading {heading}")
+        _validate_method_headings(text, reference=method.reference)
+        _validate_method_marker_closure(
+            index=index,
+            method=method,
+            method_text=text,
+            source_templates=source_templates,
+        )
     for reference in shared:
         try:
             _ordinary_file(root / reference, label=reference).decode("utf-8")

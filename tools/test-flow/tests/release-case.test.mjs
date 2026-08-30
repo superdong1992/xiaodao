@@ -89,6 +89,7 @@ test("v2 loader exposes only Wiki, registration, driver, and frozen attachments"
 
   assert.equal(verified.manifest.schema_version, 2);
   assert.equal(loaded.journey_scenario, "multiple-rpc-timeouts");
+  assert.equal(inputs.registration_template.deployment_scope, "PRODUCTION");
   assert.equal(inputs.product_registration.registration_id, "rpc-timeout-methods-v1");
   assert.equal(inputs.product_registration.runtime_ref_id, "diagnosis-skill/rpc-timeout-methods-v1");
   assert.equal(inputs.product_registration.skill_name, "diagnose-rpc-timeout");
@@ -98,16 +99,44 @@ test("v2 loader exposes only Wiki, registration, driver, and frozen attachments"
   assert.equal(Object.hasOwn(inputs, "semantic_oracle"), false);
   assert.equal(Object.hasOwn(inputs.scenarios[0], "oracle"), false);
   assert.equal(oracle.semantic_oracle.oracle_visibility, "GATE_ONLY");
+  assert.deepEqual(
+    oracle.semantic_oracle.expected_package.method_marker_sets.map((item) => item.activation_markers),
+    [
+      ["LATE_RESPONSE service=", "API_COMPLETE service=", "DEADLOOP_DETECTED service="],
+      ["LATE_RESPONSE service=", "QUEUE_HISTORY print_time_ms="],
+      ["LATE_RESPONSE service="],
+    ],
+  );
+  assert.equal(
+    oracle.semantic_oracle.expected_package.method_marker_sets
+      .flatMap((item) => item.activation_markers)
+      .some((marker) => marker === "rpc call" || marker === "call unsuccess, reqid("),
+    false,
+  );
   assert.equal(oracle.scenarios[0].oracle.oracle_visibility, "GATE_ONLY");
-  assert.equal(oracle.scenarios[0].oracle.expected_status, "CONFIRMED");
+  assert.equal(oracle.scenarios[0].oracle.expected_status, "RESOLVED");
+  assert.deepEqual(oracle.scenarios[0].oracle.expected_method_verdicts.map((item) => item.verdict), ["REJECTED", "CONFIRMED", "REJECTED"]);
+  assert.deepEqual(oracle.scenarios[0].oracle.required_request_timeout, {
+    marker: "call unsuccess, reqid(",
+    request_id: "501",
+    timeout_ms: 3000,
+    unlinked_marker: "rpc call",
+    unlinked_timeout_ms: 3000,
+    decoy_service: "svc_catalog",
+    decoy_api: "Refresh",
+    decoy_request_id: "502",
+    decoy_timeout_ms: 5000,
+  });
   const repeatedMethodEvents = oracle.scenarios[0].oracle.required_evidence_identities
-    .filter((identity) => identity.marker === "API_COMPLETE");
+    .filter((identity) => identity.marker === "API_COMPLETE service=");
   assert.equal(repeatedMethodEvents.length, 2);
   assert.notDeepEqual(repeatedMethodEvents[0].identity_tokens, repeatedMethodEvents[1].identity_tokens);
   assert.match(inputs.wiki, /LATE_RESPONSE service=/);
   assert.deepEqual(inputs.scenarios[0].driver.initial_user_fact_names, ["problem_time", "client_process", "server_process", "service", "api"]);
   assert.deepEqual(inputs.scenarios[0].driver.supplement_input_names, []);
   assert.deepEqual(inputs.scenarios[0].attachment_paths.map((value) => path.basename(value)), ["client.log", "server.log"]);
+  assert.equal(inputs.scenarios[0].driver.problem.completion_criteria.some((item) => item.includes("超时不等于取消")), false);
+  assert.equal(Object.hasOwn(oracle.scenarios[0].oracle, "required_safety_phrases"), false);
 });
 
 test("registration and semantic oracle bind the same Wiki and Methods package", () => {
@@ -120,6 +149,37 @@ test("registration and semantic oracle bind the same Wiki and Methods package", 
   assert.equal(expected.method_marker_sets.length, 3);
   for (const item of expected.method_marker_sets) {
     for (const marker of item.all_markers) assert.equal(inputs.wiki.includes(marker), true);
+    let cursor = 0;
+    for (const marker of item.activation_markers) {
+      const index = item.all_markers.indexOf(marker, cursor);
+      assert.notEqual(index, -1);
+      cursor = index + 1;
+    }
+  }
+});
+
+test("release semantic oracle requires ordered per-method activation marker subsequences", async (context) => {
+  const cases = [
+    ["missing", (item) => { delete item.activation_markers; }, /expected method marker set fields are invalid/i],
+    ["empty", (item) => { item.activation_markers = []; }, /activation markers must contain valid strings/i],
+    ["duplicate", (item) => { item.activation_markers = ["LATE_RESPONSE service=", "LATE_RESPONSE service="]; }, /activation markers must contain valid strings/i],
+    ["non-member", (item) => { item.activation_markers = ["NOT_A_METHOD_MARKER"]; }, /ordered subsequence/i],
+    ["reordered", (item) => { item.activation_markers = ["API_COMPLETE service=", "LATE_RESPONSE service="]; }, /ordered subsequence/i],
+  ];
+  for (const [name, mutate, expectedError] of cases) {
+    await context.test(name, () => {
+      const root = cloneCase("methods-release-activation-");
+      try {
+        const oraclePath = path.join(root, "oracle.json");
+        const oracle = JSON.parse(fs.readFileSync(oraclePath, "utf8"));
+        mutate(oracle.expected_package.method_marker_sets[0]);
+        fs.writeFileSync(oraclePath, canonicalJson(oracle), "utf8");
+        refreshManifest(root);
+        assert.throws(() => loadReleaseCaseOracle(root), expectedError);
+      } finally {
+        fs.rmSync(path.dirname(root), { recursive: true, force: true });
+      }
+    });
   }
 });
 
@@ -209,7 +269,7 @@ test("scenario evidence identities must resolve to distinct frozen log events", 
   const root = cloneCase("methods-release-event-identity-");
   const oraclePath = path.join(root, "scenarios", "multiple-rpc-timeouts", "oracle.json");
   const oracle = JSON.parse(fs.readFileSync(oraclePath, "utf8"));
-  const apiIdentities = oracle.required_evidence_identities.filter((identity) => identity.marker === "API_COMPLETE");
+  const apiIdentities = oracle.required_evidence_identities.filter((identity) => identity.marker === "API_COMPLETE service=");
   assert.equal(apiIdentities.length, 2);
   apiIdentities[1].identity_tokens = [...apiIdentities[0].identity_tokens];
   fs.writeFileSync(oraclePath, canonicalJson(oracle), "utf8");
@@ -218,6 +278,36 @@ test("scenario evidence identities must resolve to distinct frozen log events", 
     () => loadReleaseCaseOracle(root),
     /evidence identities must name distinct frozen log events/,
   );
+});
+
+test("Evidence V2 scenario oracle hard-cuts RESOLVED, exact semantic verdicts, and canonical markers", () => {
+  const mutations = [
+    {
+      change: (oracle) => { oracle.expected_status = "CONFIRMED"; },
+      expected: /must expect RESOLVED/,
+    },
+    {
+      change: (oracle) => { oracle.expected_method_verdicts[0].verdict = "UNKNOWN"; },
+      expected: /method verdict is invalid/,
+    },
+    {
+      change: (oracle) => { oracle.required_evidence_identities[0].marker = "LATE_RESPONSE"; },
+      expected: /not an exact method marker/,
+    },
+    {
+      change: (oracle) => { oracle.required_safety_phrases = ["超时不等于取消"]; },
+      expected: /fields are invalid/,
+    },
+  ];
+  for (const { change, expected } of mutations) {
+    const root = cloneCase("methods-release-v2-oracle-");
+    const oraclePath = path.join(root, "scenarios", "multiple-rpc-timeouts", "oracle.json");
+    const oracle = JSON.parse(fs.readFileSync(oraclePath, "utf8"));
+    change(oracle);
+    fs.writeFileSync(oraclePath, canonicalJson(oracle), "utf8");
+    refreshManifest(root);
+    assert.throws(() => loadReleaseCaseOracle(root), expected);
+  }
 });
 
 test("gate-only business canaries do not leak into product, Skills, adapters, or non-case tests", () => {

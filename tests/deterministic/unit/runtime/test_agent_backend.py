@@ -942,6 +942,10 @@ def test_workspace_measurement_fails_safely_on_identity_swap(
     assert probe_calls >= 2
 
 
+@pytest.mark.skipif(
+    sys.platform != "linux",
+    reason="the production Agent backend runs on Linux and relies on stable inode identity",
+)
 def test_workspace_identity_failure_reports_content_free_root_shape(
     tmp_path: Path,
 ) -> None:

@@ -413,7 +413,7 @@ def test_attachment_entry_rejects_content_type_suffix_matrix_drift(
         )
 
 
-def test_bind_attachment_accepts_s02_read_only_hardlink_materialization(
+def test_bind_attachment_rejects_shared_inode_materialization(
     tmp_path: Path,
 ) -> None:
     workspace = tmp_path / "workspace"
@@ -428,10 +428,9 @@ def test_bind_attachment_accepts_s02_read_only_hardlink_materialization(
     except OSError:
         pytest.skip("hard links are unavailable on this platform")
 
-    bound = bind_attachment(workspace, manifest, ATTACHMENT_ID)
-
-    assert bound.path == path.resolve()
     assert path.stat().st_nlink == 2
+    with pytest.raises(ValueError, match="bounded read-only plain file"):
+        bind_attachment(workspace, manifest, ATTACHMENT_ID)
 
 
 @pytest.mark.parametrize("fault", ["writable", "symlink", "drift"])

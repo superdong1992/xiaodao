@@ -419,10 +419,10 @@ test("the Dockerfile has no hidden version defaults and cache preparation suppli
   assert.doesNotMatch(clientDockerfile, /\/opt\/chrome-for-testing\/chrome/);
 
   const cache = releaseCachePaths(TOOL_ROOT, path.join(os.tmpdir(), "release-cache-root"));
-  assert.match(cache.chromeHeadlessShellRoot, /chrome-headless-shell-for-testing\/152\.0\.7977\.54\/linux64$/);
-  assert.match(cache.chromeHeadlessShellArchive, /chrome-headless-shell-linux64-152\.0\.7977\.54\.zip$/);
-  assert.match(cache.chromeHeadlessShellDistribution, /chrome-headless-shell-linux64$/);
-  assert.match(cache.chromeHeadlessShellExecutable, /chrome-headless-shell-linux64\/chrome-headless-shell$/);
+  assert.match(cache.chromeHeadlessShellRoot.replaceAll(path.sep, "/"), /chrome-headless-shell-for-testing\/152\.0\.7977\.54\/linux64$/);
+  assert.match(cache.chromeHeadlessShellArchive.replaceAll(path.sep, "/"), /chrome-headless-shell-linux64-152\.0\.7977\.54\.zip$/);
+  assert.match(cache.chromeHeadlessShellDistribution.replaceAll(path.sep, "/"), /chrome-headless-shell-linux64$/);
+  assert.match(cache.chromeHeadlessShellExecutable.replaceAll(path.sep, "/"), /chrome-headless-shell-linux64\/chrome-headless-shell$/);
   assert.equal(Object.hasOwn(cache, "chromeRoot"), false);
   assert.equal(Object.hasOwn(cache, "chromeExecutable"), false);
   assert.equal(validateChromeHeadlessShellCache(cache).code, "CHROME_HEADLESS_SHELL_CACHE_FILE_MISSING");
@@ -455,7 +455,7 @@ test("the first-party adapter matrix is thin, platform-bound and shares one core
   assert.match(core, /configuration\.client === configuration\.expectedClient/);
   assert.match(core, /runChromePage/);
   assert.match(core, /content_length_control: "user-agent"/);
-  assert.match(core, /CHROME_ARTIFACT_DOWNLOAD_MISMATCH/);
+  assert.match(core, /CHROME_METHODS_V2_ARTIFACT_LIST_INVALID/);
   assert.match(core, /CHROME_IDENTITY_DRIFT/);
   assert.match(core, /"--network-alias", "problem-locator-client"/);
   assert.match(core, /"--network-alias", "problem-locator-server"/);
@@ -465,10 +465,14 @@ test("the first-party adapter matrix is thin, platform-bound and shares one core
   assert.match(core, /RELEASE_CLIENT_IMAGE_IDENTITY_INVALID/);
   assert.match(core, /GENERATED_SKILL_ROOT_REQUIRED/);
   assert.match(core, /dst=\/run\/generated-specialized-skill,readonly/);
+  assert.doesNotMatch(core, /PARTIALLY_RESOLVED|result\.zip|diagnosis-result\.json|method-grounding-audit|methods_grounding|public_result_archive/);
   const actions = fs.readFileSync(path.join(TOOL_ROOT, "lib", "actions.mjs"), "utf8");
   assert.match(actions, /--chrome-version/);
   assert.match(actions, /CROSS_JOB_BROWSER_UPLOAD_RECEIPT_INVALID/);
   assert.match(actions, /CROSS_JOB_BROWSER_API_RECEIPT_INVALID/);
+  assert.match(actions, /validMethodsV2OracleEvidence/);
+  assert.match(actions, /CROSS_JOB_METHODS_V2_ORACLE_EVIDENCE_INVALID/);
+  assert.doesNotMatch(actions, /methods_grounding|validMethodsGroundingOracleEvidence/);
 });
 
 test("the dual Linux adapter fails closed on traversal, mutable Skills, proxy leakage and runtime replacement", () => {
@@ -498,15 +502,16 @@ test("the dual Linux adapter fails closed on traversal, mutable Skills, proxy le
   assert.match(core, /runtimeIdentity\.claude_cli_sha256 === RELEASE_CLAUDE_CLI_SHA256/);
   assert.match(core, /runtimeIdentity\.headless_shell_sha256 === RELEASE_CHROME_HEADLESS_SHELL_EXECUTABLE_SHA256/);
   assert.match(core, /"NO_PROXY=problem-locator-server,problem-locator-client,127\.0\.0\.1,localhost"/);
-  assert.match(core, /"curl", "--noproxy", "\*"/);
+  assert.match(core, /artifacts_verified: 0/);
   assert.match(initializer, /find \/opt\/e2e-skills -xdev -perm \/022/);
   assert.match(initializer, /runuser -u plagent -- find "\$tree" -xdev -writable/);
   assert.match(core, /GENERATED_SKILL_REGISTRATION_BYTES_DRIFT/);
-  assert.match(core, /validateReleaseDiagnosisReport/);
-  assert.match(methodsOracle, /RELEASE_RESULT_EVIDENCE_IDENTITY/);
-  assert.match(methodsOracle, /RELEASE_RESULT_EVIDENCE_EVENT_MERGED/);
-  assert.match(methodsOracle, /RESTART_RESULT_FORBIDDEN_EVIDENCE/);
-  assert.match(methodsOracle, /requiredSafetyPhrases\.every/);
+  assert.match(core, /validateMethodsV2ExecutionRecords/);
+  assert.match(methodsOracle, /METHODS_V2_GRAPH_HIT_INVALID/);
+  assert.doesNotMatch(methodsOracle, /hit\.line\.toLowerCase\(\)|observed\.line\.toLowerCase\(\)/);
+  assert.match(methodsOracle, /METHODS_V2_PLAN_COVERAGE/);
+  assert.match(methodsOracle, /METHODS_V2_PUBLIC_RESULT_MISMATCH/);
+  assert.match(methodsOracle, /METHODS_V2_RESTART_RECORD_DRIFT/);
 
   const attemptRoot = fs.mkdtempSync(path.join(os.tmpdir(), "test-flow-stage-traversal-"));
   try {
@@ -555,7 +560,7 @@ test("active runtime support is explicit and the historical harness closure is g
   const expected = [
     "audit_service_agent_usage.py", "checkpoint-temporary.mjs", "export-checkpoint.sh",
     "codex-luna-app-server-runtime.mjs", "codex-luna-app-server.mjs", "codex-luna-contract.mjs", "codex-luna-diagnosis.schema.json", "codex-luna-exploration-runner.mjs", "codex-luna-prepare.py",
-    "initialize-container.sh", "isolated-agent-env.mjs", "isolated-agent-tool-audit.mjs", "isolated-agent-wrapper.mjs", "linux_client_browser_runner.py",
+    "evidence-v2-provider-terminal.mjs", "initialize-container.sh", "isolated-agent-env.mjs", "isolated-agent-tool-audit.mjs", "isolated-agent-wrapper.mjs", "linux_client_browser_runner.py",
     "prepare_claude_settings.py",
     "prepare_nonroot_settings.py", "prepare_release_case.py", "relay_service_journey.py",
     "server_dfx_probe.py", "service-supervisor.sh", "stop-service.sh", "test_service_launcher.py",
@@ -647,13 +652,14 @@ test("CrossJob runtime uses pull-never, empty labeled storage and authoritative 
   assert.match(core, /canonicalJson\(receipt\.validation_fields\) === canonicalJson\(NEGATIVE_PROBE_VALIDATION_FIELDS\)/);
   assert.match(core, /client_dfx_absent: true/);
   assert.match(core, /CLIENT_DFX_FORBIDDEN/);
-  assert.match(core, /fixedGetCasePollingInvariant\("<authoritative-case-id>"\)/);
+  assert.doesNotMatch(core, /fixedGetCasePollingInvariant\("<authoritative-case-id>"\)/);
+  assert.match(core, /assertPhaseOneCaseFirst\(audit\)/);
+  assert.match(core, /phaseOnePrompt\(\)/);
+  assert.match(core, /phaseTwoPrompt\(state, configuration\.releaseCase, state\.archive\)/);
   assert.match(core, /fixedGetCasePollingInvariant\(state\.case_id\)/);
   assert.match(core, /Poll with the same literal get-case input/);
   assert.match(core, /runtime_ref_id: product\.runtime_ref_id/);
-  for (const code of ["PHASE1_SELECTED_SKILL", "PHASE3_SELECTED_SKILL", "RESTART_SELECTED_SKILL"]) {
-    assert.match(core, new RegExp(`selected_skill_ref\\?\\.id === releaseCase\\.skill\\.runtime_ref_id[^\\n]+${code}`));
-  }
+  for (const code of ["PHASE1_SELECTED_SKILL", "PHASE2_SELECTED_SKILL", "PHASE3_SELECTED_SKILL", "RESTART_SELECTED_SKILL"]) assert.match(core, new RegExp(code));
   assert.doesNotMatch(core, /selected_skill_ref\?\.id === releaseCase\.skill\.id/);
 });
 
@@ -684,14 +690,16 @@ test("model invocations preserve failed terminals while PASS still requires exac
   assert.match(core, /validRouteMethodsPreflightEvidence\(correspondence\.service_no_model_jobs/);
   assert.match(core, /registrationId: configuration\.generatedSkill\.registration_id/);
   assert.match(core, /expectedJobId: state\.methods_preflight_job_id/);
-  assert.match(core, /methods_preflight_job_id: attachmentRequirements\[0\]\.requested_by_job_id/);
+  assert.match(core, /methods_preflight_job_id: requestedBy\[0\]/);
   assert.match(core, /receipt\.result_type === "NEED_ATTACHMENT"/);
   assert.match(core, /receipt\.model_invoked === false/);
   assert.match(core, /receipt\.log_pair === "ABSENT"/);
   assert.match(core, /receipt\.job_sha256/);
   assert.match(core, /receipt\.job_outcome_sha256/);
   assert.match(core, /receipt\.methods_preflight_sha256/);
-  assert.match(core, /JSON\.stringify\(jobTypes\) === JSON\.stringify\(\["DIAGNOSE", "DIAGNOSE", "REVIEW"\]\)/);
+  assert.match(core, /correspondence\.service_invocations\.length >= 2 && correspondence\.service_invocations\.length <= 4/);
+  assert.match(core, /diagnoseCalls\.length >= 1 && diagnoseCalls\.length <= 2/);
+  assert.match(core, /reviewCalls\.length >= 1 && reviewCalls\.length <= 2/);
   assert.match(core, /DIAGNOSE_UNEXPECTED_PREFLIGHT_ACTIVITY/);
   assert.match(isolated, /WRAPPER_MODEL_CAP_EXCEEDED/);
   assert.match(isolated, /cache_creation_input_tokens/);

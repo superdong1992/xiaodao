@@ -14,6 +14,7 @@ from dataclasses import dataclass
 
 from problem_locator.contracts.enums import (
     ContextSectionKind,
+    DiagnosisMode,
     JobType,
     RequirementStatus,
     ResourceKind,
@@ -27,6 +28,9 @@ from problem_locator.contracts.models import (
     Job,
     JobInstructionPayload,
     JobOutcome,
+    MethodsReviewMethodCardV2,
+    MethodsReviewTargetV2,
+    MethodsReviewerInputV2,
     UserResultPayload,
     WorkspaceEvidenceInput,
     WorkspaceInputManifest,
@@ -35,7 +39,12 @@ from problem_locator.contracts.models import (
     validate_job_instruction_for_job,
     validate_workspace_manifest_for_job,
 )
+from problem_locator.contracts.methods_v2 import (
+    MethodEvidenceGraphV2,
+    MethodEvaluationPlanV2,
+)
 from problem_locator.contracts.serialization import canonical_json_bytes, schema_bundle_bytes
+from problem_locator.runtime.methods_skill import ResolvedSpecializedSkillV1
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,10 +65,15 @@ class ContextMaterials:
     evidence: tuple[Evidence, ...] = ()
     skill: str | None = None
     skill_index: str | None = None
+    methods_evidence_graph: MethodEvidenceGraphV2 | None = None
+    methods_evaluation_plan: MethodEvaluationPlanV2 | None = None
+    methods_skill: ResolvedSpecializedSkillV1 | None = None
+    methods_method_cards: tuple[MethodsReviewMethodCardV2, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "previous_outcomes", tuple(self.previous_outcomes))
         object.__setattr__(self, "evidence", tuple(self.evidence))
+        object.__setattr__(self, "methods_method_cards", tuple(self.methods_method_cards))
 
 
 class ContextLimitExceeded(ValueError):
@@ -71,6 +85,112 @@ class ContextLimitExceeded(ValueError):
         super().__init__(
             f"required context uses {observed} UTF-8 bytes; limit is {limit}"
         )
+
+
+def _build_methods_method_cards_v2(
+    *,
+    skill: ResolvedSpecializedSkillV1,
+    plan: MethodEvaluationPlanV2,
+) -> tuple[MethodsReviewMethodCardV2, ...]:
+    """Read exact planned method cards from one production-resolved Skill."""
+
+    if not isinstance(skill, ResolvedSpecializedSkillV1):
+        raise TypeError("skill must be a loaded ResolvedSpecializedSkillV1")
+    if skill.combined_sha256 != plan.skill_sha256:
+        raise ValueError("Methods Skill does not match the Evaluation Plan")
+    methods_by_id = skill.methods.method_by_id
+    cards: list[MethodsReviewMethodCardV2] = []
+    for item in plan.evaluations:
+        method = methods_by_id.get(item.method_id)
+        if method is None:
+            raise ValueError("Methods Review Plan references a method absent from its Skill")
+        try:
+            content = (skill.package_root / method.reference).read_bytes().decode("utf-8")
+        except (OSError, UnicodeError) as exc:
+            raise ValueError("Methods Review method card is unavailable as UTF-8") from exc
+        cards.append(
+            MethodsReviewMethodCardV2(
+                method_id=method.id,
+                content=content,
+            )
+        )
+    return tuple(cards)
+
+
+def build_methods_specialist_method_cards_v2(
+    *,
+    skill: ResolvedSpecializedSkillV1,
+    job: Job,
+    graph: MethodEvidenceGraphV2,
+    plan: MethodEvaluationPlanV2,
+) -> tuple[MethodsReviewMethodCardV2, ...]:
+    """Resolve and validate cards for one specialized DIAGNOSE role."""
+
+    if (
+        job.job_type is not JobType.DIAGNOSE
+        or job.diagnosis_mode is not DiagnosisMode.SPECIALIZED
+        or job.skill_ref is None
+        or skill.combined_sha256 != job.skill_ref.content_hash
+        or graph.skill_sha256 != job.skill_ref.content_hash
+        or plan.skill_sha256 != job.skill_ref.content_hash
+        or plan.evidence_graph_ref != graph.graph_ref
+        or graph.loaded_method_ids
+        != tuple(item.method_id for item in plan.evaluations)
+    ):
+        raise ValueError("Methods Specialist Skill/Graph/Plan do not match its Job")
+    return _build_methods_method_cards_v2(skill=skill, plan=plan)
+
+
+def build_methods_review_method_cards_v2(
+    *,
+    skill: ResolvedSpecializedSkillV1,
+    target: MethodsReviewTargetV2,
+    plan: MethodEvaluationPlanV2,
+) -> tuple[MethodsReviewMethodCardV2, ...]:
+    """Resolve and validate cards for one blind REVIEW role."""
+
+    if (
+        skill.combined_sha256 != target.skill_ref.content_hash
+        or plan.plan_ref != target.plan_ref
+        or plan.skill_sha256 != target.skill_ref.content_hash
+        or plan.evidence_graph_ref != target.graph_ref
+    ):
+        raise ValueError("Methods Review Skill/Plan does not match its target")
+    return _build_methods_method_cards_v2(skill=skill, plan=plan)
+
+
+def build_methods_reviewer_manifest_v2(
+    job: Job,
+    *,
+    method_ids: tuple[str, ...],
+) -> WorkspaceInputManifest:
+    """Build the Candidate-free manifest seam for one Methods V2 REVIEW Job."""
+
+    target = job.methods_review_target
+    if (
+        job.job_type is not JobType.REVIEW
+        or target is None
+        or job.review_target is not None
+    ):
+        raise ValueError("Methods Reviewer manifest requires a Candidate-free REVIEW Job")
+    return WorkspaceInputManifest(
+        schema_version=2,
+        job_id=job.job_id,
+        case_id=job.case_id,
+        job_type=JobType.REVIEW,
+        logparse_tool_ref=None,
+        logparse_product=None,
+        entries=[],
+        resolved_logparse_plan=None,
+        review_subject=None,
+        methods_reviewer_input=MethodsReviewerInputV2(
+            schema_version=2,
+            review_job_id=job.job_id,
+            case_id=job.case_id,
+            target=target,
+            method_ids=method_ids,
+        ),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -223,6 +343,26 @@ def _validate_evidence_manifest(
             raise ValueError("Workspace manifest Evidence resource metadata drifted")
 
 
+def _validate_methods_specialist_manifest(
+    job: Job,
+    manifest: WorkspaceInputManifest,
+) -> None:
+    if (
+        job.job_type is not JobType.DIAGNOSE
+        or job.diagnosis_mode is not DiagnosisMode.SPECIALIZED
+        or manifest.job_id != job.job_id
+        or manifest.case_id != job.case_id
+        or manifest.job_type is not job.job_type
+        or manifest.logparse_tool_ref != job.logparse_tool_ref
+        or manifest.logparse_product != job.logparse_product
+        or manifest.entries
+        or manifest.resolved_logparse_plan is not None
+        or manifest.review_subject is not None
+        or manifest.methods_reviewer_input is not None
+    ):
+        raise ValueError("Methods V2 Specialist manifest is not model-minimal")
+
+
 def _previous_outcome_bytes(
     outcomes: tuple[JobOutcome, ...],
     manifest: WorkspaceInputManifest,
@@ -260,7 +400,11 @@ class ContextBuilder:
         if not isinstance(materials.manifest, WorkspaceInputManifest):
             raise TypeError("manifest must be the frozen S00 WorkspaceInputManifest DTO")
 
-        validate_workspace_manifest_for_job(materials.manifest, job)
+        methods_v2 = materials.methods_evidence_graph is not None
+        if methods_v2 and job.methods_review_target is None:
+            _validate_methods_specialist_manifest(job, materials.manifest)
+        else:
+            validate_workspace_manifest_for_job(materials.manifest, job)
         self._validate_role_materials(job, materials)
         self._validate_order_and_ownership(job, materials)
         _validate_evidence_manifest(materials.evidence, materials.manifest)
@@ -278,26 +422,39 @@ class ContextBuilder:
             ),
             job,
         )
-        open_requirements = [
-            requirement
-            for requirement in job.context_snapshot.pending_requirements
-            if requirement.status is RequirementStatus.OPEN
-        ]
-
-        context_snapshot = job.context_snapshot
-        if job.job_type is JobType.REVIEW:
-            # Independent review receives the immutable user facts and fixed
-            # Candidate, but not the Specialist's intermediate narrative or
-            # hypotheses.  Verified mechanical facts arrive separately in the
-            # server-built ReviewSubject below.
-            context_snapshot = context_snapshot.model_copy(
-                update={
-                    "confirmed_facts": [],
-                    "active_hypotheses": [],
-                    "rejected_hypotheses": [],
-                    "open_questions": [],
-                }
-            )
+        frozen_snapshot = job.context_snapshot
+        if methods_v2:
+            # Methods V2 model roles need only the declared user inputs.  The
+            # Case ProblemSpec and all intermediate diagnosis state stay on the
+            # server; Graph/Plan carry the complete log-derived evidence.
+            context_snapshot: object = {
+                "schema_version": 2,
+                "user_facts": [
+                    {
+                        "name": item.provenance.input_name,
+                        "value": item.statement,
+                        "source_fact_id": item.item_id,
+                    }
+                    for item in frozen_snapshot.user_facts
+                ],
+            }
+            open_requirements = []
+        else:
+            context_snapshot = frozen_snapshot
+            if job.job_type is JobType.REVIEW:
+                context_snapshot = context_snapshot.model_copy(
+                    update={
+                        "confirmed_facts": [],
+                        "active_hypotheses": [],
+                        "rejected_hypotheses": [],
+                        "open_questions": [],
+                    }
+                )
+            open_requirements = [
+                requirement
+                for requirement in context_snapshot.pending_requirements
+                if requirement.status is RequirementStatus.OPEN
+            ]
 
         prefix = [
             _SectionDraft(
@@ -332,18 +489,64 @@ class ContextBuilder:
                 True,
             ),
         ]
-        if job.job_type is JobType.REVIEW:
-            review_subject = materials.manifest.review_subject
-            if review_subject is None:
-                raise ValueError("REVIEW context requires its server-built subject")
+        if methods_v2:
+            graph = materials.methods_evidence_graph
+            plan = materials.methods_evaluation_plan
+            assert graph is not None and plan is not None
+            if job.methods_review_target is not None:
+                reviewer_input = materials.manifest.methods_reviewer_input
+                if reviewer_input is None:
+                    raise ValueError("Methods V2 REVIEW context requires its target")
+                role = "REVIEWER"
+                role_identity: dict[str, object] = {
+                    "target": reviewer_input.target.model_dump(mode="json"),
+                }
+                role_source_refs = (reviewer_input.target.evaluation_id,)
+                section_kind = ContextSectionKind.REVIEW_TARGET
+            else:
+                role = "SPECIALIST"
+                role_identity = {"job_id": job.job_id, "case_id": job.case_id}
+                role_source_refs = (job.job_id,)
+                section_kind = ContextSectionKind.EVIDENCE
+            role_content: object = {
+                "schema_version": 2,
+                "role": role,
+                **role_identity,
+                "request_path": "inputs/request.json",
+                "evidence_graph_path": "inputs/method-evidence-graph.json",
+                "evaluation_plan_path": "inputs/method-evaluation-plan.json",
+                "evidence_graph": graph.model_dump(mode="json"),
+                "evaluation_plan": plan.model_dump(mode="json"),
+                "method_cards": [
+                    item.model_dump(mode="json")
+                    for item in materials.methods_method_cards
+                ],
+            }
             prefix.append(
                 _SectionDraft(
-                    ContextSectionKind.REVIEW_TARGET,
-                    _json_section(review_subject),
-                    (review_subject.candidate.conclusion_id,),
+                    section_kind,
+                    _json_section(role_content),
+                    role_source_refs,
                     True,
                 )
             )
+        elif job.job_type is JobType.REVIEW:
+            if job.methods_review_target is not None:
+                raise ValueError("Methods V2 REVIEW context requires Graph and Plan")
+            else:
+                review_subject = materials.manifest.review_subject
+                if review_subject is None:
+                    raise ValueError("REVIEW context requires its server-built subject")
+                review_content = review_subject
+                review_source_refs = (review_subject.candidate.conclusion_id,)
+                prefix.append(
+                    _SectionDraft(
+                        ContextSectionKind.REVIEW_TARGET,
+                        _json_section(review_content),
+                        review_source_refs,
+                        True,
+                    )
+                )
         output_contract = _SectionDraft(
             ContextSectionKind.OUTPUT_CONTRACT,
             _output_contract_bytes(materials.output_contract),
@@ -444,11 +647,97 @@ class ContextBuilder:
             return
         if materials.skill is None or materials.skill_index is not None:
             raise ValueError("DIAGNOSE/REVIEW context requires only skill")
+        target = job.methods_review_target
+        has_methods_v2 = any(
+            (
+                materials.methods_evidence_graph is not None,
+                materials.methods_evaluation_plan is not None,
+                materials.methods_skill is not None,
+                bool(materials.methods_method_cards),
+            )
+        )
+        if target is None:
+            if not has_methods_v2:
+                return
+            graph = materials.methods_evidence_graph
+            plan = materials.methods_evaluation_plan
+            skill = materials.methods_skill
+            cards = materials.methods_method_cards
+            if (
+                job.job_type is not JobType.DIAGNOSE
+                or job.diagnosis_mode is not DiagnosisMode.SPECIALIZED
+                or graph is None
+                or plan is None
+                or skill is None
+                or not cards
+            ):
+                raise ValueError(
+                    "Methods V2 Specialist context requires Graph, Plan, and method cards"
+                )
+            expected_cards = build_methods_specialist_method_cards_v2(
+                skill=skill,
+                job=job,
+                graph=graph,
+                plan=plan,
+            )
+            if cards != expected_cards:
+                raise ValueError(
+                    "Methods V2 Specialist context inputs do not match one "
+                    "Graph/Plan/Skill method set"
+                )
+            return
+        if not has_methods_v2:
+            raise ValueError(
+                "Methods V2 REVIEW context requires Graph, Plan, and method cards"
+            )
+        reviewer_input = materials.manifest.methods_reviewer_input
+        graph = materials.methods_evidence_graph
+        plan = materials.methods_evaluation_plan
+        skill = materials.methods_skill
+        cards = materials.methods_method_cards
+        if (
+            reviewer_input is None
+            or graph is None
+            or plan is None
+            or skill is None
+            or not cards
+        ):
+            raise ValueError(
+                "Methods V2 REVIEW context requires Graph, Plan, and method cards"
+            )
+        method_ids = tuple(item.method_id for item in cards)
+        planned_method_ids = tuple(item.method_id for item in plan.evaluations)
+        expected_cards = build_methods_review_method_cards_v2(
+            skill=skill,
+            target=target,
+            plan=plan,
+        )
+        if (
+            reviewer_input.target != target
+            or graph.graph_ref != target.graph_ref
+            or plan.plan_ref != target.plan_ref
+            or plan.evidence_graph_ref != graph.graph_ref
+            or graph.skill_sha256 != target.skill_ref.content_hash
+            or plan.skill_sha256 != target.skill_ref.content_hash
+            or reviewer_input.method_ids != planned_method_ids
+            or graph.loaded_method_ids != planned_method_ids
+            or method_ids != planned_method_ids
+            or cards != expected_cards
+        ):
+            raise ValueError(
+                "Methods V2 REVIEW context inputs do not match one Graph/Plan/Skill method set"
+            )
 
     @staticmethod
     def _validate_order_and_ownership(job: Job, materials: ContextMaterials) -> None:
-        expected_previous = () if job.job_type is JobType.REVIEW else tuple(
-            job.previous_outcome_refs
+        methods_specialist = (
+            materials.methods_evidence_graph is not None
+            and job.methods_review_target is None
+        )
+        expected_previous = (
+            ()
+            if job.job_type is JobType.REVIEW or methods_specialist
+            else tuple(job.previous_outcome_refs)
         )
         if tuple(outcome.outcome_id for outcome in materials.previous_outcomes) != expected_previous:
             raise ValueError(
@@ -456,9 +745,8 @@ class ContextBuilder:
             )
         if any(outcome.case_id != job.case_id for outcome in materials.previous_outcomes):
             raise ValueError("previous outcomes must belong to the Job Case")
-        if tuple(item.evidence_id for item in materials.evidence) != tuple(
-            job.evidence_refs
-        ):
+        expected_evidence = () if methods_specialist else tuple(job.evidence_refs)
+        if tuple(item.evidence_id for item in materials.evidence) != expected_evidence:
             raise ValueError("Evidence must follow Job.evidence_refs")
         if any(item.case_id != job.case_id for item in materials.evidence):
             raise ValueError("Evidence must belong to the Job Case")
@@ -484,6 +772,8 @@ class ContextBuilder:
     @staticmethod
     def _required_evidence_ids(job: Job) -> frozenset[str]:
         if job.job_type is not JobType.REVIEW:
+            return frozenset()
+        if job.methods_review_target is not None:
             return frozenset()
         candidate = job.context_snapshot.candidate_conclusion
         if candidate is None:
@@ -518,4 +808,7 @@ __all__ = [
     "ContextLimitExceeded",
     "ContextMaterials",
     "build_bounded_context",
+    "build_methods_review_method_cards_v2",
+    "build_methods_reviewer_manifest_v2",
+    "build_methods_specialist_method_cards_v2",
 ]

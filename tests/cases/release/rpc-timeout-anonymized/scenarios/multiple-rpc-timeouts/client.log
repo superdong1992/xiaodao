@@ -1,3 +1,5 @@
 2026-08-23T10:00:05.000000+08:00 RPC Service=feasibility; Slot=1; CPU-Id=0; ProcessName=rpc_client; Context=svc_orders rpc Reserve call unsuccess, reqid(501), timeout 3000)
-2026-08-23T10:00:05.200000+08:00 RPC Service=feasibility; Slot=1; CPU-Id=0; ProcessName=rpc_client; Context=rpc call svc_orders:Reserve timeout limit 5000 recv no response)
-2026-08-23T10:00:05.500000+08:00 RPC Service=feasibility; Slot=1; CPU-Id=0; ProcessName=rpc_client; Context=LATE_RESPONSE service=svc_orders api=Reserve request_id=501 client_send_us=1000000 server_recv_us=1100000 server_send_us=2100000 client_now_us=5500000)
+2026-08-23T10:00:05.100000+08:00 RPC Service=feasibility; Slot=1; CPU-Id=0; ProcessName=rpc_client; Context=svc_catalog rpc Refresh call unsuccess, reqid(502), timeout 5000)
+2026-08-23T10:00:05.200000+08:00 RPC Service=feasibility; Slot=1; CPU-Id=0; ProcessName=rpc_client; Context=rpc call svc_orders:Reserve timeout limit 3000 recv no response)
+2026-08-23T10:00:05.400000+08:00 RPC Service=feasibility; Slot=1; CPU-Id=0; ProcessName=rpc_client; Context=LATE_RESPONSE service=svc_catalog api=Refresh request_id=502 client_send_us=7000000 server_recv_us=7100000 server_send_us=7200000 client_now_us=12500000)
+2026-08-23T10:00:05.500000+08:00 RPC Service=feasibility; Slot=1; CPU-Id=0; ProcessName=rpc_client; Context=LATE_RESPONSE service=svc_orders api=Reserve request_id=501 client_send_us=1000000 server_recv_us=5000000 server_send_us=6000000 client_now_us=6100000)

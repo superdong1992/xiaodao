@@ -18,7 +18,6 @@ from problem_locator.contracts import (
     ExecutionStage,
     JobStatus,
     OutcomeResultType,
-    ProblemSpecPatch,
     ReviewOutcomeTriggerPayload,
     ResourceKind,
     RouteOutcomeTriggerPayload,
@@ -202,17 +201,12 @@ def _semantic_rejection_case(case_name: str):
 
     source = diagnose_job()
     base = diagnosis_outcome()
-    patch = (
-        ProblemSpecPatch(statement="Diagnose a different stable problem target.")
-        if case_name == "diagnosis_new_case"
-        else None
-    )
     outcome = rebuild(
         base,
         result_type=OutcomeResultType.COMPLETED,
         payload=DiagnosisOutcome(
             findings=[],
-            state_delta=_empty_delta(problem_spec_patch=patch),
+            state_delta=_empty_delta(),
             requested_input=[],
             requested_attachments=[],
             candidate_conclusion_draft=None,
@@ -226,11 +220,7 @@ def _semantic_rejection_case(case_name: str):
         TriggerType.DIAGNOSIS_OUTCOME,
         DiagnosisOutcomeTriggerPayload(job_outcome=outcome),
         outcome,
-        (
-            ErrorCode.NEW_CASE_REQUIRED
-            if case_name == "diagnosis_new_case"
-            else ErrorCode.VALIDATION_ERROR
-        ),
+        ErrorCode.VALIDATION_ERROR,
     )
 
 
@@ -261,7 +251,6 @@ def test_r3_trigger_specific_coordinator_error_sets_are_consumed_exactly() -> No
     [
         "route_validation",
         "diagnosis_validation",
-        "diagnosis_new_case",
         "review_validation",
     ],
 )

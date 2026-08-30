@@ -119,13 +119,16 @@
 
 frontmatter 只包含 `name` 和 `description`。入口保持简短，并明确：
 
-1. 读取 Server 写入的 `request.json`、`methods.json` 和 `target_logs.json`。
-2. 只读取 `target_logs[*].log_path` 明确列出的冻结日志，不遍历目录、不猜路径、不重新选择日志。
-3. 先扫描所有方法的正向 marker，再只加载相关方法卡和共享引用；不能在第一个命中处停止。
-4. 检查输入范围内全部相关调用。只有证据足以证明属于同一次调用时才合并发现。
-5. 每个原因、每次独立事件分别输出证据。每条证据用 `sources` 保存完整冻结日志原文，并用
-   `identity_tokens` 保存同一来源中的事件身份字面量。
-6. 保留证据不足、观测限制和 Wiki 的安全提醒。
+1. 读取冻结 `request.json`、Server 写入的 `method-evidence-graph.json` 和
+   `method-evaluation-plan.json`。
+2. 方法规则需要用户输入时读取 `request.json` 中的冻结值。日志证据只能来自 Evidence Graph 和
+   Evaluation Plan；不读取目标日志、不重新扫描 marker，也不重新选择日志。
+3. 按 Evaluation Plan 顺序评估全部 `evaluation_ref`；不能在第一个确认项后停止。
+4. 每项只输出 `evaluation_ref`、`verdict`、`supporting_event_refs` 和 `reason`。
+   `CONFIRMED` 必须按计划顺序选择当前 evaluation 的非空 event ref 子集；`REJECTED` 或
+   `UNKNOWN` 必须使用空数组。
+5. `reason` 只概括方法规则判断，不回抄 marker、日志原文、行号、哈希或事件身份。
+6. 证据不足或受 Wiki 观测限制影响时使用 `UNKNOWN`，并在 `reason` 中说明边界。
 
 业务 `SKILL.md` 必须逐字包含以下两句，不改写，也不要补入具体命令名或文件名：
 
@@ -168,7 +171,8 @@ Logparse 预处理、目标日志冻结、Review 和最终 Artifact 发布由 Se
       "title": "<简短标题>",
       "reference": "references/<method-id>.md",
       "priority": 1,
-      "evidence_markers": ["<Wiki 模板中的稳定字面子串>"]
+      "evidence_markers": ["<Wiki 模板中的稳定字面子串>"],
+      "activation_markers": ["<evidence_markers 中的保序激活子集>"]
     }
   ]
 }
@@ -203,20 +207,30 @@ Wiki 的同义输入按以下规则合并：
 - `shared_references[0]` 固定为 `references/source-log-templates.md`。
 - 方法 ID、引用和 priority 唯一；priority 按数组顺序从 1 连续递增。
 - `required_user_inputs`、`required_artifacts`、`log_derived_fields` 各自最多 200 项；methods 最多
-  100 项；每个方法最多 100 个 marker。marker 必须非空、不得换行，UTF-8 编码后不得超过
+  100 项；每个方法的两组 marker 各自最多 100 个。marker 必须非空、不得换行，UTF-8 编码后不得超过
   1024 字节。
 - Wiki 明确列出原因时，每个原因对应一个方法。同一原因的不同观测阶段合并在同一张方法卡中。
-- 每种可独立确认的方法至少有一个 canonical stable marker。模板在第一个 `{field}` 或 `%x`
+- 每种方法至少有一个 canonical stable marker，且 `evidence_markers` 必须覆盖该方法在确认、排除、
+  计算和关联目标请求时需要读取的全部日志模板，不只包含直接表示原因的日志。模板在第一个 `{field}` 或 `%x`
   占位符前存在非空字面前缀时，marker 是该完整前缀去除首尾空白后的精确字节；模板以占位符开头
-  时，只在相邻占位符之间选择最长的非空字面片段，长度相同取最早者；最后一个占位符之后的
-  suffix 不是候选。保持大小写，不得截短、改选其他片段、保留占位符或使用整条模板。模板只有
-  一个开头占位符、后面再无占位符时，没有 canonical marker。
+  时，在相邻占位符之间和最后一个占位符之后选择最长的非空字面片段，长度相同取最早者。保持
+  大小写，不得截短、改选其他片段、保留占位符或使用整条模板。模板只有占位符、没有任何稳定
+  字面片段时，没有 canonical marker。
 - 事件名或日志类型缩写不等于 canonical marker。例如模板
   `API_COMPLETE service={service} api={api}` 的 marker 必须精确为 `API_COMPLETE service=`；
   `API_COMPLETE`、`API_COMPLETE service` 和整条模板都无效。写 `methods.json` 前先机械算出合法
   marker 清单，`evidence_markers` 中的每一项都必须逐字取自该清单。
-- 同一正向模板能够独立确认多个原因时，把 marker 列入每个适用方法。共同症状不必复制到每个
-  方法，但完整模板仍必须保存在固定共享引用中。
+- 每个 marker 必须在当前方法卡的“所需证据”段对应至少一条逐字完整的源模板；该段逐字出现的
+  每条源模板所派生的 canonical marker 也必须被索引。其他段落中的 marker 子串不参与闭包。
+  `evidence_markers` 按 `references/source-log-templates.md` 的源模板顺序排列。
+- 同一模板被多个方法用于确认、排除、计算或请求关联时，把 marker 列入每个适用方法。共同日志的
+  字段含义和观测边界可以只写一次共享引用，但共享解释不能替代方法索引；只存在于共享引用的 marker
+  不会进入该方法的 Evidence Graph。
+- `activation_markers` 必填、非空且组内唯一，并且必须是当前方法 `evidence_markers` 的保序子序列。
+  它只列“出现后值得为该方法创建 evaluation”的 marker；activation 命中不表示单条日志已经确认
+  原因，Agent 仍须使用完整 Evidence Graph 和方法卡作出判定。公共症状只能作为 context，不能用于
+  激活所有原因；公共 RPC timeout 日志只能放在 `evidence_markers` 中作为判断上下文。同一 literal
+  确实会触发多个方法时，可以分别出现在这些方法的 `activation_markers` 中。
 - 不能用日志缺失排除受抑制、限流或采样影响的原因。
 
 ## source identity v2 与固定模板清单
@@ -276,11 +290,23 @@ source identity 使用以下闭合结构：
 证据上；日志缺失策略放在“未知边界”。如果某条日志只在阈值或条件已经满足时打印，观测到该日志
 本身就是确认条件。
 
-“输出含义”必须说明：同一方法命中多个独立事件时分别输出；每条输出保留完整 `sources` 和来自
-这些来源的 `identity_tokens`。不同来源没有可靠共同身份时不得强行合并。
+“所需证据”必须列出该方法判断、计算、排除或关联目标请求时会读取的每种完整日志模板，包括共同
+症状和请求关联日志。对应 canonical marker 必须与 `evidence_markers` 双向一致，并按固定源模板
+清单顺序排列。validator 只在“所需证据”段查找逐字完整模板；仅写 marker 子串、在其他段落提到
+marker，或只把模板放入共享引用，都不能建立闭包。共享引用可以承载共同字段含义和观测边界，但
+不能替代这里的方法归属和索引。
 
-其他共享引用只放多个方法共同遵守的 Wiki 内容，例如输入含义、证据作用域、共同症状、观测限制
-和安全提醒。不要增加 Wiki 没有提供的阈值或经验结论。
+`activation_markers` 不改变“所需证据”闭包，也不要求另建方法卡段落。它只从已经闭合的
+`evidence_markers` 中选择触发项；未入选 activation 的 marker 仍会作为已激活 evaluation 的上下文。
+
+“输出含义”必须说明：Server 会把同一方法的全部独立事件绑定到该方法的 `evaluation_ref`；Agent
+返回该引用、判定、从当前计划项选择的 `supporting_event_refs` 和简短原因。Agent 不复制 marker、
+日志原文、行号、哈希、identity token 或 hit ref；Server 从双方一致选择的 event ref 机械派生 hit。
+证据不足以判断事件关系时返回 `UNKNOWN`。
+
+其他共享引用只放多个方法共同遵守的 Wiki 内容，例如输入含义、证据作用域、共同日志的字段含义、
+观测限制和安全提醒。方法实际读取的日志模板仍须在相应方法卡与索引中列出。不要增加 Wiki 没有
+提供的阈值或经验结论。
 
 ## validator 执行责任
 

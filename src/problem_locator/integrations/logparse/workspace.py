@@ -144,10 +144,9 @@ def bind_attachment(
         raise ValueError("parse request attachment is not fixed by this Workspace manifest")
     entry = matches[0]
     path = resolve_workspace_path(workspace_root, entry.relative_path, must_exist=True)
-    # S02 may materialize immutable file resources by hard link or copy.  S07
-    # never creates such a link; it only accepts the exact manifest path after
-    # revalidating read-only mode, size, hash, and read stability.
-    size, digest = _sha256_file(path, allow_hardlinks=True)
+    # Workspace inputs are isolated copies, so the Logparse boundary requires
+    # a single-link file as well as the frozen mode, size, hash, and bytes.
+    size, digest = _sha256_file(path)
     if size != entry.size or digest != entry.sha256:
         raise ValueError("materialized Attachment differs from its frozen manifest entry")
     return BoundAttachment(entry=entry, path=path)

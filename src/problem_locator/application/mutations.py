@@ -101,7 +101,8 @@ def apply_transition_plan_to_case(
     if plan.generic_result is not None and generic_result_v2 is not None:
         raise ValueError("V1 and V2 generic results are mutually exclusive")
     generic_result = plan.generic_result or generic_result_v2
-    if generic_result is None and (
+    methods_terminal = plan.methods_terminal_projection
+    if generic_result is None and methods_terminal is None and (
         (plan.target_case_status is CaseStatus.UNRESOLVED)
         != (unresolved_result is not None)
     ):
@@ -110,6 +111,14 @@ def apply_transition_plan_to_case(
         )
     if generic_result is not None and unresolved_result is not None:
         raise ValueError("generic terminal plans forbid unresolved_result")
+    if methods_terminal is not None and (
+        unresolved_result is not None
+        or generic_result is not None
+        or target_diagnosis_state.candidate_conclusion is not None
+    ):
+        raise ValueError(
+            "Methods terminal transition must remain Candidate-free and use no legacy result"
+        )
     if created_job is not None:
         if (
             created_job.case_id != current.case_id
@@ -137,6 +146,7 @@ def apply_transition_plan_to_case(
         unresolved_result=unresolved_result,
         generic_result=plan.generic_result,
         generic_result_v2=generic_result_v2,
+        methods_result=methods_terminal,
         failure=apply_case_failure_update(
             current.failure,
             plan.case_failure_update,

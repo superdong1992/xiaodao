@@ -51,7 +51,11 @@ from .outputs import (
     inspect_controlled_run,
     normalize_target_result,
 )
-from .paths import resolve_workspace_path, validate_proposal_io_paths
+from .paths import (
+    atomic_write_broker_result,
+    resolve_workspace_path,
+    validate_proposal_io_paths,
+)
 from .process import ProcessResult, SubprocessExecutor, terminate_process_tree
 from .requests import (
     Anchor,
@@ -420,6 +424,37 @@ class PinnedLogparseBrokerSession:
             host, port = self._server.server_address[:2]
             endpoint = f"http://{host}:{port}{self._path}"
             return {_ENDPOINT_ENV: endpoint, _TOKEN_ENV: self._token}
+
+    def execute_preprocessing(
+        self,
+        operation: str,
+        request_path: str,
+        result_path: str,
+    ) -> ExecutionFailure | None:
+        """Execute the Runtime-owned Methods preprocessing request directly."""
+
+        request_bytes = _read_exact_request(self._workspace_root, request_path)
+        envelope = BrokerEnvelope(
+            schema_version=1,
+            operation=operation,
+            request_path=request_path,
+            result_path=result_path,
+            request_base64=base64.b64encode(request_bytes).decode("ascii"),
+        )
+        with self._operation_lock:
+            status, result_bytes = self._dispatch(canonical_json_bytes(envelope))
+        result_file = resolve_workspace_path(
+            self._workspace_root,
+            result_path,
+            must_exist=False,
+        )
+        atomic_write_broker_result(result_file, result_bytes)
+        if status == HTTPStatus.OK:
+            return None
+        try:
+            return parse_canonical_json_bytes(result_bytes, ExecutionFailure)
+        except ValueError as exc:
+            raise RuntimeError("logparse broker rejected the request") from exc
 
     def parse_request_bytes(self) -> bytes | None:
         with self._state_lock:

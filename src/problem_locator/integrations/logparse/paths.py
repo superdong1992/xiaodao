@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import secrets
 import stat
 from pathlib import Path, PurePosixPath
 
@@ -84,7 +85,51 @@ def validate_proposal_io_paths(
     return request_parts[2]
 
 
+def atomic_write_broker_result(target: Path, payload: bytes) -> None:
+    """Publish one broker result with the same semantics for both callers."""
+
+    parent = target.parent
+    parent_metadata = parent.stat(follow_symlinks=False)
+    if not stat.S_ISDIR(parent_metadata.st_mode):
+        raise ValueError("broker result parent is invalid")
+    try:
+        target_metadata = target.lstat()
+    except FileNotFoundError:
+        target_metadata = None
+    if target_metadata is not None and not stat.S_ISREG(target_metadata.st_mode):
+        raise ValueError("broker result target is invalid")
+
+    temporary: Path | None = None
+    try:
+        for _attempt in range(16):
+            candidate = parent / f".target_logs.{secrets.token_hex(16)}.tmp"
+            try:
+                descriptor = os.open(
+                    candidate,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                    0o600,
+                )
+            except FileExistsError:
+                continue
+            temporary = candidate
+            with os.fdopen(descriptor, "wb") as stream:
+                stream.write(payload)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, target)
+            temporary = None
+            return
+        raise OSError("cannot reserve a broker result temporary file")
+    finally:
+        if temporary is not None:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
+
+
 __all__ = [
+    "atomic_write_broker_result",
     "resolve_workspace_path",
     "validate_proposal_io_paths",
     "validate_relative_path",

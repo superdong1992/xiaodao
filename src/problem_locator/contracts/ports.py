@@ -115,6 +115,13 @@ class LogparseBrokerSession(Protocol):
 
     def agent_environment(self) -> dict[str, str]: ...
 
+    def execute_preprocessing(
+        self,
+        operation: str,
+        request_path: str,
+        result_path: str,
+    ) -> ExecutionFailure | None: ...
+
     def parse_request_bytes(self) -> bytes | None: ...
 
     def audit_bytes(self) -> bytes: ...

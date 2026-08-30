@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -12,7 +13,12 @@ from problem_locator.runtime.methods_skill import load_specialized_skill_registr
 
 ROOT = Path(__file__).resolve().parents[4]
 META_SKILL = ROOT / ".claude/skills/wiki-to-logparse-diagnosis-skill"
-VALIDATOR_PATH = META_SKILL / "scripts/validate_generated_skill.py"
+VALIDATOR_PATH = Path(
+    os.environ.get(
+        "TEST_LAN_DIAGNOSIS_VALIDATOR",
+        META_SKILL / "scripts/validate_generated_skill.py",
+    )
+)
 
 
 def _load(path: Path, name: str):
@@ -80,26 +86,34 @@ description: 从 Server 冻结的双端日志中定位 RPC 超时原因。
 
 # RPC 超时定位
 
-读取 `request.json`、`methods.json` 和 `target_logs.json`。只读取
-`target_logs[*].log_path` 列出的冻结日志，不遍历其他路径。
+读取冻结 `request.json`、Server 写入的 `method-evidence-graph.json` 和
+`method-evaluation-plan.json`。方法规则需要用户输入时读取 request 中的冻结值。日志证据只能来自
+Evidence Graph 和 Evaluation Plan；不读取目标日志，也不重新扫描 marker。
 
-先扫描所有正向 marker，再按需读取方法卡；不得在第一个命中处停止。检查全部相关调用，只有证据
-足以关联同一次调用时才合并。每个原因、每次独立事件分别输出，使用 `sources` 保留完整日志原文，
-并使用同源 `identity_tokens` 保留事件身份。证据不足时说明观测限制和缺失证据。
+按 Evaluation Plan 顺序逐项评估全部 `evaluation_ref`，不能在第一个确认项后停止。每项只输出
+`evaluation_ref`、`verdict`、`supporting_event_refs` 和 `reason`；证据无法决定时使用 `UNKNOWN`，
+并在 reason 中说明观测限制。
+Server 生成的 evidence sources 可能来自 target_logs，并在内部保留 identity_tokens。
 
 Logparse 预处理、目标日志冻结、Review 和最终 Artifact 发布由 Server 完成；诊断阶段不重新执行这些操作。
 `client_pid` 和 `server_pid` 是可选事实；缺失时不请求补充，也不构成证据缺口。
 """
 
 
-def _method_card() -> str:
-    return """# API 执行时间过长
+def _method_card(
+    *,
+    title: str = "API 执行时间过长",
+    templates: tuple[str, ...] = tuple(SOURCE_TEMPLATES),
+) -> str:
+    template_lines = "\n".join(templates)
+    return f"""# {title}
 
 ## 适用条件
 目标 API 调用超时。
 
 ## 所需证据
-完整 API_COMPLETE 或 QUEUE_DELAY 日志。
+完整正向日志：
+{template_lines}
 
 ## 计算与判断
 使用 Wiki 中的 cost_us 和 queue_us。
@@ -111,7 +125,8 @@ def _method_card() -> str:
 日志缺失不能排除原因。
 
 ## 输出含义
-每个独立事件分别输出完整 sources 和同源 identity_tokens。
+Server 把全部独立事件绑定到 evaluation_ref；Agent 返回该引用、verdict、所选
+supporting_event_refs 和 reason。
 """
 
 
@@ -211,6 +226,7 @@ def _write_valid_registration(tmp_path: Path) -> tuple[Path, Path, Path]:
                         "API_COMPLETE service=",
                         "QUEUE_DELAY service=",
                     ],
+                    "activation_markers": ["API_COMPLETE service="],
                 }
             ],
         },
@@ -278,6 +294,7 @@ def _replace_wiki_templates(
     methods["source_wiki_sha256"] = wiki_sha256
     methods["log_derived_fields"] = log_derived_fields
     methods["methods"][0]["evidence_markers"] = markers
+    methods["methods"][0]["activation_markers"] = markers[:1]
     _write_json(_methods_path(registration), methods)
     payload = json.loads(_registration_path(registration).read_text(encoding="utf-8"))
     payload["package"]["source_wiki_sha256"] = wiki_sha256
@@ -292,6 +309,14 @@ def _replace_wiki_templates(
         + "\n```\n",
         encoding="utf-8",
     )
+    method_reference = (
+        registration
+        / "package/diagnose-rpc-timeout/references/api-execution-slow.md"
+    )
+    method_reference.write_text(
+        _method_card(templates=tuple(templates)),
+        encoding="utf-8",
+    )
 
 
 def test_source_identity_v2_extracts_text_and_bare_fences() -> None:
@@ -304,20 +329,24 @@ def test_source_identity_v2_extracts_text_and_bare_fences() -> None:
     assert identity["log_templates"] == SOURCE_TEMPLATES
 
 
-def test_marker_starting_with_placeholder_ignores_trailing_suffix() -> None:
+def test_marker_starting_with_placeholder_keeps_stable_trailing_suffix() -> None:
     assert (
         validator._canonical_evidence_marker(
             "{request_id} between={value} trailing-suffix-is-much-longer"
         )
-        == "between="
+        == "trailing-suffix-is-much-longer"
     )
-    assert validator._canonical_evidence_marker("{request_id} trailing-only") is None
+    assert (
+        validator._canonical_evidence_marker("{request_id} trailing-only")
+        == "trailing-only"
+    )
 
 
 def test_validator_rejects_shortened_event_name_marker(tmp_path: Path) -> None:
     registration, wiki, _ = _write_valid_registration(tmp_path)
     methods = json.loads(_methods_path(registration).read_text(encoding="utf-8"))
     methods["methods"][0]["evidence_markers"] = ["API_COMPLETE"]
+    methods["methods"][0]["activation_markers"] = ["API_COMPLETE"]
     _write_json(_methods_path(registration), methods)
 
     result = _validate(registration, wiki)
@@ -329,10 +358,199 @@ def test_validator_rejects_shortened_event_name_marker(tmp_path: Path) -> None:
     )
 
 
+def test_validator_rejects_marker_from_another_method_reference(
+    tmp_path: Path,
+) -> None:
+    registration, wiki, _ = _write_valid_registration(tmp_path)
+    methods_path = _methods_path(registration)
+    methods = json.loads(methods_path.read_text(encoding="utf-8"))
+    methods["methods"][0]["evidence_markers"] = ["API_COMPLETE service="]
+    methods["methods"].append(
+        {
+            "id": "queue-delay",
+            "title": "队列排队过长",
+            "reference": "references/queue-delay.md",
+            "priority": 2,
+            "evidence_markers": ["QUEUE_DELAY service="],
+            "activation_markers": ["QUEUE_DELAY service="],
+        }
+    )
+    _write_json(methods_path, methods)
+    references = methods_path.parent / "references"
+    (references / "api-execution-slow.md").write_text(
+        _method_card(templates=(SOURCE_TEMPLATES[0],)),
+        encoding="utf-8",
+    )
+    (references / "queue-delay.md").write_text(
+        _method_card(
+            title="队列排队过长",
+            templates=(SOURCE_TEMPLATES[1],),
+        ),
+        encoding="utf-8",
+    )
+    assert _validate(registration, wiki)["ok"] is True
+
+    methods["methods"][0]["evidence_markers"] = ["QUEUE_DELAY service="]
+    methods["methods"][0]["activation_markers"] = ["QUEUE_DELAY service="]
+    _write_json(methods_path, methods)
+
+    rejected = _validate(registration, wiki)
+    assert rejected["ok"] is False
+    assert rejected["errors"] == [
+        "method 1 的 evidence marker 在“所需证据”中没有对应的完整 Wiki 日志模板: "
+        "QUEUE_DELAY service="
+    ]
+
+
+@pytest.mark.parametrize(
+    ("activation_markers", "message"),
+    (
+        ([], "method 1 activation_markers are invalid"),
+        (
+            ["API_COMPLETE service=", "API_COMPLETE service="],
+            "method 1 activation_markers are invalid",
+        ),
+        (
+            ["NOT_IN_EVIDENCE"],
+            "method 1 activation_markers must be an ordered subsequence of evidence_markers",
+        ),
+        (
+            ["QUEUE_DELAY service=", "API_COMPLETE service="],
+            "method 1 activation_markers must be an ordered subsequence of evidence_markers",
+        ),
+    ),
+)
+def test_validator_rejects_invalid_activation_markers(
+    tmp_path: Path,
+    activation_markers: list[str],
+    message: str,
+) -> None:
+    registration, wiki, _ = _write_valid_registration(tmp_path)
+    methods = json.loads(_methods_path(registration).read_text(encoding="utf-8"))
+    methods["methods"][0]["activation_markers"] = activation_markers
+    _write_json(_methods_path(registration), methods)
+
+    result = _validate(registration, wiki)
+
+    assert result["ok"] is False
+    assert message in result["errors"]
+
+
+def test_validator_requires_activation_markers_field(tmp_path: Path) -> None:
+    registration, wiki, _ = _write_valid_registration(tmp_path)
+    methods = json.loads(_methods_path(registration).read_text(encoding="utf-8"))
+    del methods["methods"][0]["activation_markers"]
+    _write_json(_methods_path(registration), methods)
+
+    result = _validate(registration, wiki)
+
+    assert result["ok"] is False
+    assert (
+        "method 1 keys do not match the Methods package contract"
+        in result["errors"]
+    )
+
+
+def test_validator_rejects_shared_only_prerequisite_and_marker_order(
+    tmp_path: Path,
+) -> None:
+    registration, wiki, _ = _write_valid_registration(tmp_path)
+    methods_path = _methods_path(registration)
+    methods = json.loads(methods_path.read_text(encoding="utf-8"))
+    methods["methods"][0]["evidence_markers"] = ["API_COMPLETE service="]
+    _write_json(methods_path, methods)
+
+    shared_only = _validate(registration, wiki)
+
+    assert shared_only["errors"] == [
+        "method 1 的“所需证据”含有未被 evidence_markers 索引的 "
+        "canonical marker: QUEUE_DELAY service="
+    ]
+
+    methods["methods"][0]["evidence_markers"] = [
+        "QUEUE_DELAY service=",
+        "API_COMPLETE service=",
+    ]
+    _write_json(methods_path, methods)
+    wrong_order = _validate(registration, wiki)
+    assert wrong_order["errors"] == [
+        "method 1 的 evidence_markers 必须按 source template 顺序排列"
+    ]
+
+    methods["methods"][0]["evidence_markers"] = [
+        "API_COMPLETE service=",
+        "QUEUE_DELAY service=",
+    ]
+    _write_json(methods_path, methods)
+    assert _validate(registration, wiki)["ok"] is True
+
+
+def test_validator_requires_complete_template_in_required_evidence_section(
+    tmp_path: Path,
+) -> None:
+    registration, wiki, _ = _write_valid_registration(tmp_path)
+    reference = (
+        registration
+        / "package/diagnose-rpc-timeout/references/api-execution-slow.md"
+    )
+    reference.write_text(
+        reference.read_text(encoding="utf-8")
+        .replace(SOURCE_TEMPLATES[0], "API_COMPLETE service=")
+        .replace("## 计算与判断", f"## 计算与判断\n{SOURCE_TEMPLATES[0]}"),
+        encoding="utf-8",
+    )
+
+    rejected = _validate(registration, wiki)
+
+    assert rejected["errors"] == [
+        "method 1 的 evidence marker 在“所需证据”中没有对应的完整 Wiki 日志模板: "
+        "API_COMPLETE service="
+    ]
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda text: f"```text\n{text}```\n",
+        lambda text: f"<!--\n{text}-->\n",
+        lambda text: text.replace("## 适用条件", "## TEMP", 1)
+        .replace("## 所需证据", "## 适用条件", 1)
+        .replace("## TEMP", "## 所需证据", 1),
+        lambda text: text.replace(
+            "## 计算与判断", "## 所需证据\n重复段。\n## 计算与判断", 1
+        ),
+    ],
+)
+def test_validator_rejects_fake_reordered_and_duplicate_method_headings(
+    tmp_path: Path,
+    mutation,
+) -> None:
+    registration, wiki, _ = _write_valid_registration(tmp_path)
+    reference = (
+        registration
+        / "package/diagnose-rpc-timeout/references/api-execution-slow.md"
+    )
+    reference.write_text(
+        mutation(reference.read_text(encoding="utf-8")),
+        encoding="utf-8",
+    )
+
+    rejected = _validate(registration, wiki)
+
+    assert (
+        "references/api-execution-slow.md must contain each fixed method heading "
+        "exactly once in order"
+    ) in rejected["errors"]
+
+
 def test_valid_production_registration_passes(tmp_path: Path) -> None:
     registration, wiki, identity = _write_valid_registration(tmp_path)
 
     result = _validate(registration, wiki, source_identity=identity)
+    skill_text = (
+        registration / "package/diagnose-rpc-timeout/SKILL.md"
+    ).read_text(encoding="utf-8")
+    methods = json.loads(_methods_path(registration).read_text(encoding="utf-8"))
 
     assert result["ok"] is True, result["errors"]
     assert result["registration_id"] == registration.name
@@ -341,6 +559,15 @@ def test_valid_production_registration_passes(tmp_path: Path) -> None:
     assert result["method_count"] == 1
     assert result["template_count"] == 2
     assert result["log_template_extraction_version"] == 2
+    assert methods["required_user_inputs"] == REQUIRED_INPUTS
+    assert methods["methods"][0]["activation_markers"] == [
+        "API_COMPLETE service="
+    ]
+    assert "request.json" in skill_text
+    assert all(
+        field in skill_text
+        for field in ("evaluation_ref", "verdict", "supporting_event_refs", "reason")
+    )
 
 
 def test_valid_production_registration_loads_in_server(tmp_path: Path) -> None:
@@ -676,6 +903,7 @@ def test_validator_rejects_method_array_above_server_limit(tmp_path: Path) -> No
                 "reference": reference,
                 "priority": index,
                 "evidence_markers": ["API_COMPLETE service="],
+                "activation_markers": ["API_COMPLETE service="],
             }
         )
         (package / reference).write_text(_method_card(), encoding="utf-8")

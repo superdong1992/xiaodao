@@ -583,40 +583,30 @@ class FormalResourceReader:
 
         if not destination_exists:
             if resource_ref.resource_kind is ResourceKind.FILE:
+                temporary = self._new_materialization_temp(destination)
                 try:
-                    os.link(source, destination, follow_symlinks=False)
-                except OSError:
-                    # FileExistsError may mean an identical concurrent attempt
-                    # already published the complete destination.  Adopt it;
-                    # every other hard-link failure falls back to an isolated
-                    # temp copy so a short write never poisons the final name.
+                    with FileBinaryStream(source) as stream:
+                        copy_binary_stream(
+                            stream,
+                            temporary,
+                            file_sync=self._file_sync,
+                            byte_limit=resource_ref.size,
+                        )
+                    observed = hash_file(temporary)
+                    if (
+                        observed.size != resource_ref.size
+                        or observed.sha256 != resource_ref.sha256
+                    ):
+                        raise OSError(
+                            "temporary materialized bytes differ from ResourceRef"
+                        )
+                    finalize_read_only_file(temporary, self._file_sync)
+                    self._replacer.replace(temporary, destination)
+                finally:
                     try:
-                        destination.lstat()
-                    except FileNotFoundError:
-                        temporary = self._new_materialization_temp(destination)
-                        try:
-                            with FileBinaryStream(source) as stream:
-                                copy_binary_stream(
-                                    stream,
-                                    temporary,
-                                    file_sync=self._file_sync,
-                                    byte_limit=resource_ref.size,
-                                )
-                            observed = hash_file(temporary)
-                            if (
-                                observed.size != resource_ref.size
-                                or observed.sha256 != resource_ref.sha256
-                            ):
-                                raise OSError(
-                                    "temporary materialized bytes differ from ResourceRef"
-                                )
-                            finalize_read_only_file(temporary, self._file_sync)
-                            self._replacer.replace(temporary, destination)
-                        finally:
-                            try:
-                                self._discard_materialization_temp(temporary)
-                            except (OSError, ValueError):
-                                pass
+                        self._discard_materialization_temp(temporary)
+                    except (OSError, ValueError):
+                        pass
             else:
                 assert source_tree is not None
                 temporary = self._new_materialization_temp(destination)

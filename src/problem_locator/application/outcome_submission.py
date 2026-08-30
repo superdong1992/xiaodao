@@ -1768,6 +1768,12 @@ def _expected_next_job_type(
             return JobType.ROUTE
         if (
             outcome.result_type is OutcomeResultType.COMPLETED
+            and outcome.methods_review_target is not None
+            and job.skill_ref is not None
+        ):
+            return JobType.REVIEW
+        if (
+            outcome.result_type is OutcomeResultType.COMPLETED
             and isinstance(payload, DiagnosisOutcome)
             and job.skill_ref is not None
         ):

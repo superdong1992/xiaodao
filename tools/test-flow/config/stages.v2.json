@@ -7,7 +7,7 @@
       "depends_on": [],
       "gates": ["framework.config", "framework.node-tests", "docs.current"],
       "identity_set": "framework",
-      "timeout_seconds": 120,
+      "timeout_seconds": 300,
       "progress_class": "local",
       "reuse": {"dev": "identity", "release": "never"},
       "platforms": ["windows", "macos", "linux"]
@@ -38,11 +38,11 @@
       "id": "deterministic.full",
       "kind": "deterministic",
       "depends_on": ["deterministic.affected"],
-      "gates": ["det.contracts", "det.unit", "det.integration", "det.journey.same-job"],
+      "gates": ["det.evidence-v2-core", "det.contracts", "det.unit", "det.integration", "det.journey.same-job"],
       "identity_set": "deterministic",
       "timeout_seconds": 600,
       "progress_class": "local",
-      "reuse": {"dev": "identity", "release": "identity"},
+      "reuse": {"dev": "identity", "release": "never"},
       "platforms": ["windows", "macos", "linux"]
     },
     {
@@ -114,17 +114,6 @@
       "platforms": ["windows", "macos", "linux"]
     },
     {
-      "id": "real.codex-luna-methods",
-      "kind": "capability",
-      "depends_on": ["deterministic.full"],
-      "gates": ["real.codex-luna.methods"],
-      "identity_set": "real-codex-luna-methods",
-      "timeout_seconds": 8550,
-      "progress_class": "real",
-      "reuse": {"dev": "identity", "release": "never"},
-      "platforms": ["windows", "macos", "linux"]
-    },
-    {
       "id": "real.macos-codex-luna-methods",
       "kind": "capability",
       "depends_on": [],
@@ -133,18 +122,18 @@
       "timeout_seconds": 1800,
       "progress_class": "real",
       "reuse": {"dev": "identity", "release": "never"},
-      "platforms": ["macos"]
+      "platforms": ["macos", "linux"]
     },
     {
       "id": "real.macos-codex-luna-e2e",
       "kind": "capability",
-      "depends_on": [],
-      "gates": ["real.macos-codex-luna-e2e"],
+      "depends_on": ["deterministic.full", "real.skill-generation"],
+      "gates": ["quick.codex-luna.contracts", "quick.codex-luna.model-cert-driver", "real.macos-codex-luna-e2e"],
       "identity_set": "macos-codex-luna-e2e",
-      "timeout_seconds": 1800,
+      "timeout_seconds": 2700,
       "progress_class": "real",
       "reuse": {"dev": "never", "release": "never"},
-      "platforms": ["macos"]
+      "platforms": ["macos", "linux"]
     },
     {
       "id": "real.macos-claude-deepseek-methods",
@@ -155,18 +144,29 @@
       "timeout_seconds": 1800,
       "progress_class": "real",
       "reuse": {"dev": "identity", "release": "never"},
-      "platforms": ["macos"]
+      "platforms": ["macos", "linux"]
     },
     {
       "id": "real.macos-claude-deepseek-e2e",
       "kind": "capability",
-      "depends_on": [],
+      "depends_on": ["deterministic.full", "real.skill-generation"],
       "gates": ["quick.claude-deepseek-e2e.contracts", "real.macos-claude-deepseek-e2e"],
       "identity_set": "macos-claude-deepseek-e2e",
-      "timeout_seconds": 1800,
+      "timeout_seconds": 2700,
       "progress_class": "real",
       "reuse": {"dev": "never", "release": "never"},
-      "platforms": ["macos"]
+      "platforms": ["macos", "linux"]
+    },
+    {
+      "id": "evidence-v2.release-verdict",
+      "kind": "capability",
+      "depends_on": ["real.macos-claude-deepseek-e2e", "real.macos-codex-luna-e2e"],
+      "gates": ["evidence-v2.release-verdict"],
+      "identity_set": "evidence-v2-certification",
+      "timeout_seconds": 120,
+      "progress_class": "local",
+      "reuse": {"dev": "never", "release": "never"},
+      "platforms": ["macos", "linux"]
     },
     {
       "id": "real.route",

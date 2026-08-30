@@ -14,6 +14,7 @@ from problem_locator.contracts import (
     ArtifactProposal,
     ErrorCode,
     EvidenceProposal,
+    ExecutionFailure,
     ExecutionStage,
     Job,
     JobOutcome,
@@ -337,7 +338,13 @@ def stage_validated_output(
             consumed_evidence_refs=agent.consumed_evidence_refs,
             proposed_evidence=proposed_evidence,
             proposed_artifacts=proposed_artifacts,
-            error=agent.error,
+            error=(
+                None
+                if agent.error is None
+                else ExecutionFailure.model_validate(
+                    agent.error.model_dump(mode="python")
+                )
+            ),
             produced_at=agent.produced_at,
             decision_audit=agent.decision_audit,
         )

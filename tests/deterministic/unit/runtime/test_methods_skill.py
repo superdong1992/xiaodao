@@ -69,8 +69,12 @@ description: Diagnose a test timeout from frozen evidence.
 
 # Test locator
 
-Read `request.json`, then `methods.json`, and scan every `target_logs` entry.
-Do not invoke Logparse. Return `sources` and same-line `identity_tokens`.
+Read `request.json`, `method-evidence-graph.json`, and
+`method-evaluation-plan.json`. Use request values for declared inputs. Log
+evidence comes only from the Evidence Graph and Evaluation Plan; do not rescan
+logs. Evaluate every `evaluation_ref` in plan order and return only
+`evaluation_ref`, `verdict`, `supporting_event_refs`, and `reason`; use
+`UNKNOWN` when the evidence cannot decide the rule.
 """,
         encoding="utf-8",
     )
@@ -80,7 +84,7 @@ Do not invoke Logparse. Return `sources` and same-line `identity_tokens`.
 Use for the requested operation.
 
 ## 所需证据
-`API_COMPLETE`
+`API_COMPLETE%s`
 
 ## 计算与判断
 Use the stated timestamps.
@@ -97,8 +101,15 @@ Keep each event separate with its raw line and identity.
     (references / "slow-execution.md").write_text(card, encoding="utf-8")
     (references / "unrelated-method.md").write_text(
         card.replace("# Slow execution", "# Unrelated method").replace(
-            "`API_COMPLETE`", "`UNRELATED_POSITIVE`"
+            "`API_COMPLETE%s`", "`UNRELATED_POSITIVE%s`"
         ),
+        encoding="utf-8",
+    )
+    (references / "source-log-templates.md").write_text(
+        "# Source log templates\n\n```text\n"
+        "API_COMPLETE%s\n"
+        "UNRELATED_POSITIVE%s\n"
+        "```\n",
         encoding="utf-8",
     )
     (references / "shared-boundaries.md").write_text(
@@ -117,7 +128,10 @@ Keep each event separate with its raw line and identity.
             ],
             "required_artifacts": ["log_archive"],
             "log_derived_fields": ["request_id"],
-            "shared_references": ["references/shared-boundaries.md"],
+            "shared_references": [
+                "references/source-log-templates.md",
+                "references/shared-boundaries.md",
+            ],
             "methods": [
                 {
                     "id": "slow-execution",
@@ -125,6 +139,7 @@ Keep each event separate with its raw line and identity.
                     "reference": "references/slow-execution.md",
                     "priority": 1,
                     "evidence_markers": ["API_COMPLETE"],
+                    "activation_markers": ["API_COMPLETE"],
                 },
                 {
                     "id": "unrelated-method",
@@ -132,6 +147,7 @@ Keep each event separate with its raw line and identity.
                     "reference": "references/unrelated-method.md",
                     "priority": 2,
                     "evidence_markers": ["UNRELATED_POSITIVE"],
+                    "activation_markers": ["UNRELATED_POSITIVE"],
                 }
             ],
         },
@@ -303,6 +319,310 @@ def test_package_and_catalog_contract_reject_legacy_or_extra_files(tmp_path: Pat
         load_specialized_skill_registration(legacy)
 
 
+def test_package_loader_requires_activation_markers_for_every_method(
+    tmp_path: Path,
+) -> None:
+    package = _write_package(tmp_path)
+    methods_path = package / "methods.json"
+    methods = json.loads(methods_path.read_text(encoding="utf-8"))
+    del methods["methods"][0]["activation_markers"]
+    _write_json(methods_path, methods)
+
+    with pytest.raises(ValueError, match="missing=.*activation_markers"):
+        load_methods_package(package)
+
+
+@pytest.mark.parametrize("activation_markers", [[], ["API_COMPLETE", "API_COMPLETE"]])
+def test_package_loader_rejects_empty_or_duplicate_activation_markers(
+    tmp_path: Path,
+    activation_markers: list[str],
+) -> None:
+    package = _write_package(tmp_path)
+    methods_path = package / "methods.json"
+    methods = json.loads(methods_path.read_text(encoding="utf-8"))
+    methods["methods"][0]["activation_markers"] = activation_markers
+    _write_json(methods_path, methods)
+
+    with pytest.raises(ValueError, match="activation_markers are invalid"):
+        load_methods_package(package)
+
+
+@pytest.mark.parametrize(
+    "activation_markers",
+    [
+        ["UNKNOWN_MARKER"],
+        ["UNRELATED_POSITIVE", "API_COMPLETE"],
+    ],
+)
+def test_package_loader_rejects_activation_markers_that_are_not_an_ordered_subsequence(
+    tmp_path: Path,
+    activation_markers: list[str],
+) -> None:
+    package = _write_package(tmp_path)
+    reference = package / "references/slow-execution.md"
+    reference.write_text(
+        reference.read_text(encoding="utf-8").replace(
+            "`API_COMPLETE%s`",
+            "`API_COMPLETE%s`\n`UNRELATED_POSITIVE%s`",
+        ),
+        encoding="utf-8",
+    )
+    methods_path = package / "methods.json"
+    methods = json.loads(methods_path.read_text(encoding="utf-8"))
+    methods["methods"][0]["evidence_markers"] = [
+        "API_COMPLETE",
+        "UNRELATED_POSITIVE",
+    ]
+    methods["methods"][0]["activation_markers"] = activation_markers
+    _write_json(methods_path, methods)
+
+    with pytest.raises(ValueError, match="order-preserving subsequence"):
+        load_methods_package(package)
+
+
+def test_package_loader_accepts_activation_subsequence_and_cross_method_literal(
+    tmp_path: Path,
+) -> None:
+    package = _write_package(tmp_path)
+    reference = package / "references/slow-execution.md"
+    reference.write_text(
+        reference.read_text(encoding="utf-8").replace(
+            "`API_COMPLETE%s`",
+            "`API_COMPLETE%s`\n`UNRELATED_POSITIVE%s`",
+        ),
+        encoding="utf-8",
+    )
+    methods_path = package / "methods.json"
+    methods = json.loads(methods_path.read_text(encoding="utf-8"))
+    methods["methods"][0]["evidence_markers"] = [
+        "API_COMPLETE",
+        "UNRELATED_POSITIVE",
+    ]
+    methods["methods"][0]["activation_markers"] = ["UNRELATED_POSITIVE"]
+    _write_json(methods_path, methods)
+
+    loaded = load_methods_package(package)
+
+    assert loaded.methods[0].activation_markers == ("UNRELATED_POSITIVE",)
+    assert loaded.methods[1].activation_markers == ("UNRELATED_POSITIVE",)
+
+
+def test_package_loader_rejects_marker_absent_from_current_method_reference(
+    tmp_path: Path,
+) -> None:
+    package = _write_package(tmp_path)
+    methods_path = package / "methods.json"
+    methods = json.loads(methods_path.read_text(encoding="utf-8"))
+    methods["methods"][0]["evidence_markers"] = ["UNRELATED_POSITIVE"]
+    methods["methods"][0]["activation_markers"] = ["UNRELATED_POSITIVE"]
+    _write_json(methods_path, methods)
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            "method 1 evidence marker has no complete source template in "
+            "its required evidence section: "
+            "UNRELATED_POSITIVE"
+        ),
+    ):
+        load_methods_package(package)
+
+
+def test_package_loader_rejects_marker_substring_without_complete_template(
+    tmp_path: Path,
+) -> None:
+    package = _write_package(tmp_path)
+    reference = package / "references/slow-execution.md"
+    reference.write_text(
+        reference.read_text(encoding="utf-8")
+        .replace("`API_COMPLETE%s`", "`API_COMPLETE`")
+        .replace("## 计算与判断", "## 计算与判断\n`API_COMPLETE%s`"),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="no complete source template"):
+        load_methods_package(package)
+
+
+def test_package_loader_rejects_shortened_canonical_marker(tmp_path: Path) -> None:
+    package = _write_package(tmp_path)
+    methods_path = package / "methods.json"
+    methods = json.loads(methods_path.read_text(encoding="utf-8"))
+    methods["methods"][0]["evidence_markers"] = ["API"]
+    methods["methods"][0]["activation_markers"] = ["API"]
+    _write_json(methods_path, methods)
+
+    with pytest.raises(ValueError, match="is not canonical"):
+        load_methods_package(package)
+
+
+def test_package_loader_rejects_marker_order_that_differs_from_source_templates(
+    tmp_path: Path,
+) -> None:
+    package = _write_package(tmp_path)
+    reference = package / "references/slow-execution.md"
+    reference.write_text(
+        reference.read_text(encoding="utf-8").replace(
+            "`API_COMPLETE%s`",
+            "`API_COMPLETE%s`\n`UNRELATED_POSITIVE%s`",
+        ),
+        encoding="utf-8",
+    )
+    methods_path = package / "methods.json"
+    methods = json.loads(methods_path.read_text(encoding="utf-8"))
+    methods["methods"][0]["evidence_markers"] = [
+        "UNRELATED_POSITIVE",
+        "API_COMPLETE",
+    ]
+    _write_json(methods_path, methods)
+
+    with pytest.raises(ValueError, match="must follow source template order"):
+        load_methods_package(package)
+
+
+def test_package_loader_rejects_shared_only_prerequisite(tmp_path: Path) -> None:
+    package = _write_package(tmp_path)
+    methods_path = package / "methods.json"
+    methods = json.loads(methods_path.read_text(encoding="utf-8"))
+    methods["methods"][0]["evidence_markers"] = [
+        "API_COMPLETE",
+        "UNRELATED_POSITIVE",
+    ]
+    _write_json(methods_path, methods)
+
+    with pytest.raises(ValueError, match="no complete source template"):
+        load_methods_package(package)
+
+
+def test_package_loader_rejects_unindexed_complete_template(tmp_path: Path) -> None:
+    package = _write_package(tmp_path)
+    reference = package / "references/slow-execution.md"
+    reference.write_text(
+        reference.read_text(encoding="utf-8").replace(
+            "`API_COMPLETE%s`",
+            "`API_COMPLETE%s`\n`UNRELATED_POSITIVE%s`",
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="unindexed canonical marker"):
+        load_methods_package(package)
+
+
+def test_package_loader_requires_fixed_template_inventory_first(tmp_path: Path) -> None:
+    package = _write_package(tmp_path)
+    methods_path = package / "methods.json"
+    methods = json.loads(methods_path.read_text(encoding="utf-8"))
+    methods["shared_references"].reverse()
+    _write_json(methods_path, methods)
+
+    with pytest.raises(ValueError, match="must start with references/source-log-templates.md"):
+        load_methods_package(package)
+
+
+def test_package_loader_derives_marker_from_stable_suffix_after_placeholder(
+    tmp_path: Path,
+) -> None:
+    package = _write_package(tmp_path)
+    source = package / "references/source-log-templates.md"
+    source.write_text(
+        source.read_text(encoding="utf-8").replace(
+            "API_COMPLETE%s",
+            "{request_id} trailing-only",
+        ),
+        encoding="utf-8",
+    )
+    reference = package / "references/slow-execution.md"
+    reference.write_text(
+        reference.read_text(encoding="utf-8").replace(
+            "API_COMPLETE%s",
+            "{request_id} trailing-only",
+        ),
+        encoding="utf-8",
+    )
+    methods_path = package / "methods.json"
+    methods = json.loads(methods_path.read_text(encoding="utf-8"))
+    methods["methods"][0]["evidence_markers"] = ["trailing-only"]
+    methods["methods"][0]["activation_markers"] = ["trailing-only"]
+    _write_json(methods_path, methods)
+
+    assert load_methods_package(package).methods[0].evidence_markers == (
+        "trailing-only",
+    )
+
+
+def test_required_evidence_keeps_raw_fenced_template_body(tmp_path: Path) -> None:
+    package = _write_package(tmp_path)
+    reference = package / "references/slow-execution.md"
+    reference.write_text(
+        reference.read_text(encoding="utf-8").replace(
+            "`API_COMPLETE%s`",
+            "```text\nAPI_COMPLETE%s\n```",
+            1,
+        ),
+        encoding="utf-8",
+    )
+
+    assert load_methods_package(package).methods[0].evidence_markers == (
+        "API_COMPLETE",
+    )
+
+
+@pytest.mark.parametrize(
+    ("mutation", "label"),
+    [
+        (lambda text: f"```text\n{text}```\n", "fenced fake headings"),
+        (lambda text: f"<!--\n{text}-->\n", "commented fake headings"),
+        (
+            lambda text: text.replace("## 适用条件", "## TEMP", 1)
+            .replace("## 所需证据", "## 适用条件", 1)
+            .replace("## TEMP", "## 所需证据", 1),
+            "out-of-order headings",
+        ),
+        (
+            lambda text: text.replace(
+                "## 计算与判断", "## 所需证据\nDuplicate section.\n\n## 计算与判断", 1
+            ),
+            "duplicate heading",
+        ),
+    ],
+)
+def test_direct_skill_dir_rejects_noncanonical_method_heading_structure(
+    tmp_path: Path,
+    mutation: Any,
+    label: str,
+) -> None:
+    registration = _write_registration(tmp_path / label)
+    reference = (
+        registration
+        / "package/diagnose-test-timeout/references/slow-execution.md"
+    )
+    reference.write_text(
+        mutation(reference.read_text(encoding="utf-8")),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="must contain each fixed method heading exactly once in order",
+    ):
+        load_specialized_skill_registration(registration)
+
+
+def test_production_loader_allows_v2_prose_that_mentions_v1_words(tmp_path: Path) -> None:
+    package = _write_package(tmp_path)
+    skill_path = package / "SKILL.md"
+    valid_text = skill_path.read_text(encoding="utf-8")
+    skill_path.write_text(
+        valid_text
+        + "\nServer-produced evidence sources may originate from target_logs and "
+        "retain identity_tokens internally.\n",
+        encoding="utf-8",
+    )
+
+    assert load_methods_package(package).skill_name == package.name
+
+
 def test_marker_scan_loads_only_relevant_method_cards_before_context(
     tmp_path: Path,
 ) -> None:
@@ -436,11 +756,74 @@ def test_grounding_matches_declared_marker_without_case_sensitivity(
         )
 
 
+def test_grounding_rejects_marker_owned_only_by_another_method(
+    tmp_path: Path,
+) -> None:
+    skill = load_specialized_skill_registration(_write_registration(tmp_path / "skills"))
+    cited = "2026-08-23T10:00:05Z unrelated_positive request_id=42"
+    logs = (_target("server", f"API_COMPLETE request_id=99\n{cited}\n"),)
+    draft = _diagnosis(line=cited)
+    draft["evidence"][0]["sources"][0]["marker"] = "UNRELATED_POSITIVE"
+    receipt = scan_method_markers(skill=skill, target_logs=logs)
+
+    assert receipt.loaded_method_ids == ("slow-execution", "unrelated-method")
+    with pytest.raises(ValueError, match="not indexed by its method"):
+        verify_method_diagnosis(
+            skill=skill,
+            draft=draft,
+            target_logs=logs,
+            logparse_receipt_sha256=RECEIPT_SHA256,
+            skill_load=receipt,
+        )
+
+
+def test_grounding_allows_a_literal_shared_by_multiple_methods(
+    tmp_path: Path,
+) -> None:
+    registration = _write_registration(tmp_path / "skills")
+    methods_path = registration / "package/diagnose-test-timeout/methods.json"
+    methods_value = json.loads(methods_path.read_text(encoding="utf-8"))
+    methods_value["methods"][1]["evidence_markers"] = ["API_COMPLETE"]
+    methods_value["methods"][1]["activation_markers"] = ["API_COMPLETE"]
+    _write_json(methods_path, methods_value)
+    second_reference = (
+        registration
+        / "package/diagnose-test-timeout/references/unrelated-method.md"
+    )
+    second_reference.write_text(
+        second_reference.read_text(encoding="utf-8").replace(
+            "`UNRELATED_POSITIVE%s`",
+            "`API_COMPLETE%s`",
+        ),
+        encoding="utf-8",
+    )
+    skill = load_specialized_skill_registration(registration)
+    cited = "2026-08-23T10:00:05Z api_complete request_id=42"
+    logs = (_target("server", f"noise\n{cited}\n"),)
+    receipt = scan_method_markers(skill=skill, target_logs=logs)
+
+    verified = verify_method_diagnosis(
+        skill=skill,
+        draft=_diagnosis(line=cited),
+        target_logs=logs,
+        logparse_receipt_sha256=RECEIPT_SHA256,
+        skill_load=receipt,
+    )
+
+    assert receipt.loaded_method_ids == ("slow-execution", "unrelated-method")
+    assert receipt.marker_hits == (
+        ("server", "API_COMPLETE", 2),
+        ("server", "API_COMPLETE", 2),
+    )
+    assert verified.draft.confirmed_methods == ("slow-execution",)
+    assert verified.draft.evidence[0].sources[0].marker == "API_COMPLETE"
+
+
 def test_grounded_methods_are_mapped_by_the_server_into_candidate_domain(
     tmp_path: Path,
 ) -> None:
     skill = load_specialized_skill_registration(_write_registration(tmp_path / "skills"))
-    cited = "2026-08-23T10:00:05Z API_COMPLETE request_id=42 cost_us=6500000"
+    cited = "2026-08-23T10:00:05Z api_complete request_id=42 cost_us=6500000"
     content = f"noise\n{cited}\n".encode("utf-8")
     frozen = _target("caller", content.decode("utf-8"))
     diagnosis_value = _diagnosis(line=cited)
@@ -451,13 +834,18 @@ def test_grounded_methods_are_mapped_by_the_server_into_candidate_domain(
         "A timeout does not prove that downstream execution was cancelled."
     ]
     diagnosis_value["evidence"][0]["sources"][0]["source_id"] = "caller"
+    skill_load = scan_method_markers(skill=skill, target_logs=(frozen,))
     verified = verify_method_diagnosis(
         skill=skill,
         draft=diagnosis_value,
         target_logs=(frozen,),
         logparse_receipt_sha256=RECEIPT_SHA256,
-        skill_load=scan_method_markers(skill=skill, target_logs=(frozen,)),
+        skill_load=skill_load,
     )
+
+    assert skill_load.marker_hits == (("caller", "API_COMPLETE", 2),)
+    assert skill_load.loaded_method_ids == ("slow-execution",)
+    assert verified.draft.evidence[0].sources[0].marker == "API_COMPLETE"
 
     repository_root = Path(__file__).resolve().parents[4]
     job = parse_canonical_json_bytes(
@@ -542,7 +930,7 @@ def test_grounded_methods_are_mapped_by_the_server_into_candidate_domain(
     assert mapped.draft.proposed_evidence_drafts[0].source_binding.existing_source_ref == artifact_id
     assert mapped.draft.payload.limitations == diagnosis_value["limitations"]
     assert mapped.draft.payload.safety_notes == diagnosis_value["safety_notes"]
-    assert b'"raw_line":"2026-08-23T10:00:05Z API_COMPLETE request_id=42' in (
+    assert b'"raw_line":"2026-08-23T10:00:05Z api_complete request_id=42' in (
         mapped.verification.decision_evidence_bytes
     )
     bundle = build_server_result_bundle(

@@ -21,6 +21,7 @@ from problem_locator.interfaces.client_access import (
     ClientProtocolError,
     SystemCurl,
 )
+from problem_locator.interfaces.mcp_server import CreateCaseRequest
 from tests.deterministic.unit.interfaces.fakes import (
     FakeCurl,
     FakeMcpClient,
@@ -41,6 +42,25 @@ from tests.deterministic.unit.interfaces.helpers import (
 
 REQUEST_1 = "10000000-0000-0000-0000-000000000001"
 REQUEST_2 = "10000000-0000-0000-0000-000000000002"
+
+
+def _skill_text() -> str:
+    return (
+        Path(__file__).parents[4]
+        / ".claude"
+        / "skills"
+        / "problem-locator-client"
+        / "SKILL.md"
+    ).read_text(encoding="utf-8")
+
+
+def _json_example_after(skill: str, marker: str) -> dict[str, object]:
+    marker_offset = skill.index(marker)
+    fence_start = skill.index("```json", marker_offset) + len("```json")
+    fence_end = skill.index("```", fence_start)
+    value = json.loads(skill[fence_start:fence_end])
+    assert isinstance(value, dict)
+    return value
 
 
 class _GeneratedPipe:
@@ -147,13 +167,7 @@ def _upload_descriptor(
 
 
 def test_skill_document_names_tools_and_safety_invariants() -> None:
-    skill = (
-        Path(__file__).parents[4]
-        / ".claude"
-        / "skills"
-        / "problem-locator-client"
-        / "SKILL.md"
-    ).read_text(encoding="utf-8")
+    skill = _skill_text()
     tool_names = (
         "problem_locator_create_case",
         "problem_locator_prepare_attachment",
@@ -181,10 +195,10 @@ def test_skill_document_names_tools_and_safety_invariants() -> None:
     assert '"input_values": ["order-1"]' in skill
     assert "`name` and `declared_size`" in skill
     assert "`attachment_name` or `declared_byte_count`" in skill
-    assert '"statement": "<problem statement>"' in skill
-    assert '"raw_problem_text": "<the user\'s complete original problem text>"' in skill
-    assert '"initial_user_fact_names": ["<requirement_name>"]' in skill
-    assert '"initial_user_fact_values": ["<exact string value>"]' in skill
+    assert '"statement": "<raw_problem_text>"' in skill
+    assert '"raw_problem_text": "<raw_problem_text>"' in skill
+    assert '"initial_user_fact_names": []' in skill
+    assert '"initial_user_fact_values": []' in skill
     assert '"problem_spec": {' not in skill
     assert '"wait_for_job_id": null' in skill
     assert "Only `declared_size`, `declared_sha256`, and `wait_for_job_id`" in skill
@@ -237,6 +251,59 @@ def test_skill_document_names_tools_and_safety_invariants() -> None:
     assert "client.hook.tool.started" not in readme
     assert "服务端日志不需要安装额外组件" in readme
     assert "tail -f /var/log/problem-locator/debug.jsonl" in readme
+
+
+def test_skill_creates_case_before_requesting_missing_details() -> None:
+    skill = _skill_text()
+    create_section = skill[
+        skill.index("## Create the Case before asking diagnosis questions") :
+        skill.index("## Connect directly to the remote MCP server")
+    ]
+    assert "call\n`problem_locator_create_case` as the first business action" in create_section
+    assert "Do not first ask" in create_section
+    assert "ask only for OPEN requirements returned by the latest\nCase view" in create_section
+
+    request = _json_example_after(skill, "`problem_locator_create_case`:")
+    raw_problem_text = "订单接口偶发超时，需要定位原因。"
+    assert request["raw_problem_text"] == "<raw_problem_text>"
+    assert request["statement"] == "<raw_problem_text>"
+    assert request["actual_behavior"] == "<raw_problem_text>"
+    assert request["initial_user_fact_names"] == []
+    assert request["initial_user_fact_values"] == []
+
+    materialized_request = {
+        name: (raw_problem_text if value == "<raw_problem_text>" else value)
+        for name, value in request.items()
+    }
+    create_request = CreateCaseRequest.model_validate(materialized_request)
+    assert create_request.raw_problem_text == raw_problem_text
+    assert create_request.statement == raw_problem_text
+    assert create_request.actual_behavior == raw_problem_text
+
+
+def test_skill_presents_methods_v2_without_waiting_for_an_artifact() -> None:
+    skill = _skill_text()
+    section = skill[
+        skill.index("### Present a terminal Methods V2 result") :
+        skill.index("## Submit requested facts")
+    ]
+
+    assert "present that object directly" in section
+    assert "Methods V2 has no downloadable result Artifact" in section
+    assert "do not call\n`problem_locator_list_artifacts`" in section
+    for field_name in (
+        "status",
+        "reason_code",
+        "diagnostic_id",
+        "confirmed_method_ids",
+        "confirmed_event_refs",
+        "confirmed_hit_refs",
+        "limitations",
+        "reasons",
+    ):
+        assert f"`{field_name}`" in section
+    assert "Do not invent a narrative root cause" in section
+    assert "absent before a Methods evaluation reaches a terminal state" in section
 
 
 def test_create_case_uses_one_stable_generated_request_id() -> None:

@@ -1,34 +1,115 @@
-# Claude/DeepSeek Standalone Fast E2E
+# Claude Code + DeepSeek 快速验证
 
-该流程冻结 Claude Code `2.1.89`、官方 `cli.js` SHA-256、env-only settings fingerprint 和 `deepseek-v4-flash[1m]`。它不执行中央 CrossJob、浏览器、重启或业务 REST，支持原生 macOS arm64 和密封 Ubuntu 22.04 Linux/x64 容器。
+该入口冻结 Claude Code `2.1.89`、官方 `cli.js` SHA-256、env-only settings fingerprint 和
+`deepseek-v4-flash[1m]`。该入口有三个互不替代的 Goal：Methods registration 生成、历史场景
+Fast E2E、Evidence V2 P1 model cert。
 
-先独立规划，并用一次真实模型调用生成完整 registration cache（包含 `registration-template.json` 和 `package/`，固定 `module=rpc`）：
+## 生成 Methods registration cache
+
+先看计划；确认后移除 `--plan-only` 并显式允许真实模型：
 
 ```bash
 ./tools/test-flow/quick-validation/claude-deepseek/run.sh \
   --goal dev.macos-claude-deepseek-methods \
-  --client macos --plan-only
+  --client macos \
+  --plan-only
 ```
 
-E2E 不自动生成 registration。默认单场景是 `api-execution-overrun`；也可以显式选择单场景或运行九场景 suite：
+该 Goal 只生成并校验完整 production registration cache，不执行诊断。计划中的
+`inputs.registration_cache.path` 是 producer cache 目录，`inputs.registration_cache.registration_root`
+是当前校验通过的完整 registration 根。P2 必须使用这里列出的同一个 `registration_root`，不能另行生成
+或改写 package。
+
+## 历史九场景 Fast E2E
+
+Fast E2E 直接把 `experiments/rpc-skill-feasibility/cases/**` 中冻结的 `case.json` 和双端原始日志
+交给生产 `DiagnosisRuntime`。它验证四个基础场景和五个能力探针，不读取 Release 的同名场景：
+
+```text
+api-execution-overrun      client-receive-blocked
+deadloop-detected          insufficient-evidence
+multiple-rpc-timeouts      server-queue-delay
+server-queue-five          server-queue-single
+unrelated-log-noise
+```
+
+先查看全部场景计划：
 
 ```bash
 ./tools/test-flow/quick-validation/claude-deepseek/run.sh \
-  --goal dev.macos-claude-deepseek-e2e --client macos \
-  --logparse-source /absolute/logparse --plan-only
-
-./tools/test-flow/quick-validation/claude-deepseek/run.sh \
-  --goal dev.macos-claude-deepseek-e2e --client macos \
-  --logparse-source /absolute/logparse \
-  --all-scenarios --plan-only
+  --goal fast-e2e \
+  --all-scenarios \
+  --registration-root <generated production registration> \
+  --plan-only
 ```
 
-确认计划后用相同参数移除 `--plan-only` 并加入 `--allow-real-model`。suite 与 Codex 使用相同九场景；`insufficient-evidence` 没有 REVIEW，共四个 Claude 进程，其余每例五个进程，总计 44 个进程。
+也可以把 `--all-scenarios` 换成 `--scenario <id>` 调试单例。`insufficient-evidence` 必须在服务端
+发现没有 cause evaluation 后直接 `UNRESOLVED`，模型调用数和硬上限都是 0；其余八例正常各调用
+Specialist、Reviewer 一次，每个角色最多 repair 一次。完整矩阵正常 16 次、硬上限 32 次调用。
 
-每例从空 `DATA_ROOT` 启动。客户端只安装 `problem-locator-client`，经 HTTP MCP 操作 Linux Server；Server Agent 只安装 `logparse-diagnose`，不得把生成的业务 Methods package 安装到 Agent Skill 目录，也不得在 ROUTE、DIAGNOSE 或 REVIEW 中调用业务 Skill。业务 package 只能由 Server Catalog 从 `SKILL_DIR` 读取并注入冻结上下文。非 LOGPARSE Agent 只能读取当前 Job 工作区，并且只能写入该工作区的绝对 `output/` 目录。同一个客户端模型在 `list_artifacts` 后按返回的 `download_url` 下载 `result.zip`，并核对 size、SHA-256 和 Server v3 ZIP 内容。Server LOGPARSE trace 必须证明先加载一次 `logparse-diagnose`，再执行一次 job-scoped broker；业务 Methods Skill 只消费冻结日志。
+Fast E2E 不要求 source snapshot 或 Core verdict，不生成 `model-cert-input.json`、`model-cert.json` 或
+Release verdict。每个场景有独立轻量 verdict；历史 oracle 不进入模型上下文。oracle 或模型能力失败
+会封存该场景并继续矩阵，Runtime、provider 或证据落盘等工程失败才停止后续场景。该结论只说明九个
+冻结场景下的定位能力边界。
 
-DIAGNOSE 和 REVIEW 的测试 wrapper 只记录 Agent 原始草稿的大小、SHA-256 与是否已经 canonical，绝不改写草稿；JSON 解析、schema 校验和 Canonical JSON 规范化必须由产品 Runtime 完成。Fast E2E 必须保留 `harness_normalized=false`，不得用测试代码替产品修正输出。
+## Evidence V2 P1 model cert
 
-suite 根 `verdict.json` 绑定九份子 verdict、模型进程数和聚合 usage；业务/oracle 失败继续，工程失败停止，无自动重试。Standalone 结论只证明对应 Fast E2E，不等同于中央 Test Flow 或 Release。
+P1 只使用固定 `multiple-rpc-timeouts` 场景。调用方必须提供同一源码快照的 digest，以及该快照
+已经通过的 `core-verdict.json`：
 
-以上停止语义适用于 provider 原生串行 suite。经 `wsl/run.sh --all-scenarios` 执行时，wrapper 会在共同 plan 和确定性预检通过后同时启动九个容器，每个容器只调用本入口的一个 `--scenario`；九个容器结束后再生成 WSL 聚合 verdict。
+```bash
+./tools/test-flow/quick-validation/claude-deepseek/run.sh \
+  --goal dev.macos-claude-deepseek-e2e \
+  --client macos \
+  --scenario multiple-rpc-timeouts \
+  --source-snapshot-digest <sha256> \
+  --core-verdict <core-gate-root>/core-verdict.json \
+  --registration-root <real.skill-generation registration root> \
+  --plan-only
+```
+
+`--registration-root` 优先使用同一次 `real.skill-generation` 产出的 production registration；未显式
+提供时才使用 standalone cache。规划结果会在 `inputs.production_registration` 列出实际根路径、tree、
+template 和 `methods.json` 摘要，并列出 provider/model/settings、Core 绑定、正常调用数 2、调用硬上限
+4、token/cost 和 admission blocker。审阅后才能移除 `--plan-only`，并加入 `--allow-real-model`。
+
+认证驱动直接运行生产 `DiagnosisRuntime`：
+
+1. 固定 Logparse fixture 完成一次确定性预处理；
+2. 服务端生成 `methods-evidence-graph-v2.json` 和 `methods-evaluation-plan-v2.json`；
+3. Specialist 只读取 request、Graph、Plan 和方法卡，写
+   `output/method-diagnosis.draft.json`；
+4. 生产 `OutcomeSubmissionService` 创建独立盲评 REVIEW Job；
+5. Reviewer 只读取自己的冻结上下文，写 `output/method-review.draft.json`；
+6. 生产 Runtime 机械共识并发布 Case 的 `methods_result`。
+
+两个角色都只提交 `evaluation_ref + verdict + supporting_event_refs + reason` 根数组。确认项只选
+当前计划项中的有序 event ref 子集。正常各调用一次；某角色第一次发生
+JSON 结构或 Plan 覆盖错误时，只允许一次 repair。每角色最多两次，总上限四次，没有模型重试。
+wrapper 不改写草稿，`harness_normalized=false`。
+
+该路径不创建或消费 Candidate，不产生 `PARTIALLY_RESOLVED`，不下载 `result.zip`，也不读取
+Methods V1 grounding。它不运行 Client、浏览器、上传、CrossJob 或 Release。
+
+Gate 先写 `model-cert-input.json`，再用共享 builder 在同一 evidence 根生成并复验
+`model-cert.json`。中央 Test Flow 之后若再次物化，必须得到完全相同的 canonical bytes。两者都绑定：
+
+- source snapshot 与 V8 contract manifest；
+- 同快照的 `core-verdict.json`；
+- DeepSeek provider/model/settings revision；
+- Runtime、prompt/profile/tool policy identity；
+- 每次角色调用、repair、四项 token usage 和费用；
+- 固定场景的原始 Wiki、validated registration、生产 Skill content hash，以及 driver 原始初始输入；
+- 生产 Graph 的有序 sources 和 Graph/Plan canonical bytes identity；
+- 最终公开 `methods_result` 的 canonical identity。
+
+在写 model cert 前，production driver 会留下 source/reviewer Job、Graph、Plan、limitations、两份 state、
+两份 Outcome 共九个原始 execution record，同时留下 `methods-result-v2.json` 和实际加载的
+`methods.json`。`scenario-oracle-receipt.json` 只是这些原件的闭合索引；共享 validator 会重新读取原件
+并调用完整 Methods V2 oracle，不会信任 Runtime 自报的 `hard_cut` 或 PASS 布尔值。
+
+场景身份直接取生产 Runtime 生成的 Graph/Plan，并强制它们的 Skill hash 与当前
+`source_job.skill_ref.content_hash` 相同。`methods_result` 必须引用同一 Graph/Plan；测试侧不会重新匹配
+日志 marker，也不会用 registration tree digest 冒充 Skill content hash。
+
+Standalone verdict 只证明这条 P1 快速认证路径，不能替代 `release.full`。

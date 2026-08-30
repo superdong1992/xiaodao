@@ -1,34 +1,65 @@
-# Codex Luna Standalone Fast E2E
+# Codex/Luna 快速验证
 
-该轻量工程独立于中央 `tools/test-flow` 编排器，只复用 Codex App Server、MCP 和 Methods 协议实现。它不读取 Goal/Proof/Stage/Gate，不创建完整 Git 源码快照，不查询历史 verdict，也不进入中央 finalization。
+本入口保留三个互不替代的目标：
 
-原始 credential 不得进入 prompt、计划、证据或 verdict；内存登录、零认证文件持久化和 secret scan 仍是必需边界。支持原生 macOS arm64，以及 `wsl/run.sh` 创建的密封 Ubuntu 22.04 Linux/x64 容器。
+- `methods`：用一次 Codex + `gpt-5.6-luna`/medium 调用生成并冻结 Methods package；
+- `fast-e2e`：使用历史九场景快速验证定位能力和能力边界；
+- `e2e`：运行生产 Evidence V2 `DiagnosisRuntime`，为 P2 生成 model cert。
 
-Methods 先规划再执行：
+`fast-e2e` 直接读取 `experiments/rpc-skill-feasibility/cases/**` 中已讨论并冻结的九个场景，
+不读取同名 Release fixture。它复用生产 `DiagnosisRuntime`、Evidence Graph、Evaluation Plan、
+Specialist 和盲评 Reviewer；八个有 cause evidence 的场景正常 2 次调用、repair 后最多 4 次，
+`insufficient-evidence` 必须由服务端零模型结束。九场景合计正常 16 次、硬上限 32 次。它不要求 Core verdict 或
+source snapshot，也不生成 `model-cert.json`。运行前先查看计划：
+
+```bash
+./tools/test-flow/quick-validation/codex-luna/run.sh \
+  --goal fast-e2e \
+  --all-scenarios \
+  --registration-root <path/to/validated-registration> \
+  --plan-only
+```
+
+单场景调试可把 `--all-scenarios` 换成 `--scenario <scenario-id>`。只有确认计划后才加入
+`--allow-real-model`。九场景能力或 oracle 失败会封存该场景并继续；运行环境、provider 或输入损坏等
+工程失败才停止后续场景。
+
+`e2e` 固定使用 `multiple-rpc-timeouts`。生产 Runtime 从同一份已验证 registration、release
+`driver.json`、`client.log` 和 `server.log` 生成 Evidence Graph 与 Evaluation Plan。模型只提交
+Specialist 和盲评 Reviewer 的 evaluation 数组。正常调用数为 2；每个角色首次协议错误时最多 repair
+一次，总上限为 4。该路径不读取 Candidate、`PARTIALLY_RESOLVED`、`result.zip` 或 Methods V1
+grounding。
+
+先查看计划：
+
+```bash
+./tools/test-flow/quick-validation/codex-luna/run.sh \
+  --goal e2e \
+  --scenario multiple-rpc-timeouts \
+  --source-snapshot-digest <sha256> \
+  --core-verdict <path/to/core-verdict.json> \
+  --registration-root <path/to/validated-registration> \
+  --plan-only
+```
+
+`--registration-root` 应优先指向 P1/正式 skill-generation 已验证的同一 production registration，
+从而让 P1、P2 绑定完全相同的 Wiki、Skill、用户输入、日志、Graph 和 Plan。独立调试也可改传
+`--cache-root`，消费当前 Codex Methods producer identity 的冻结 package；该 fallback 不会重新调用
+生成模型。
+
+确认计划中的 source snapshot、Core 收据、registration、模型身份、正常 2 次调用、4 次硬上限、
+token/cost 预算和 admission blocker 后，加入 `--allow-real-model` 并移除 `--plan-only` 才会调用模型。
+真实运行会在同一 evidence root 写出 9 个 production execution record、`methods-result-v2.json`、
+实际加载 registration 中逐字复制的 `methods.json`，以及 `scenario-oracle-receipt.json`。共享
+validator 会从 frozen release case 和这些原件重放完整 Methods V2 oracle，再生成
+`model-cert-input.json` 与 `model-cert.json`。provider 调用、usage、`runtime-receipt.json` 和
+`adapter-receipt.json` 也保留在同一根，最后由 standalone `verdict.json` 封口。
+
+Methods package 生成仍需先规划：
 
 ```bash
 ./tools/test-flow/quick-validation/codex-luna/run.sh --goal methods --plan-only
-./tools/test-flow/quick-validation/codex-luna/run.sh --goal methods --allow-real-model
 ```
 
-单场景调试：
-
-```bash
-./tools/test-flow/quick-validation/codex-luna/run.sh \
-  --goal e2e --scenario api-execution-overrun \
-  --logparse-root /absolute/logparse --plan-only
-```
-
-九场景 suite：
-
-```bash
-./tools/test-flow/quick-validation/codex-luna/run.sh \
-  --goal e2e --all-scenarios \
-  --logparse-root /absolute/logparse --plan-only
-```
-
-确认计划后用相同参数移除 `--plan-only` 并加入 `--allow-real-model`。suite 固定执行 `api-execution-overrun`、`client-receive-blocked`、`deadloop-detected`、`insufficient-evidence`、`multiple-rpc-timeouts`、`server-queue-delay`、`server-queue-five`、`server-queue-single`、`unrelated-log-noise`。其中 `insufficient-evidence` 为四阶段，其余为五阶段，总计 44 次模型调用。
-
-每个场景使用独立空 `DATA_ROOT`。suite 根 `verdict.json` 聚合九份 `scenarios/<id>/verdict.json`；业务/oracle 失败继续，工程失败停止，真实模型不自动重试。Methods cache 缺失或身份漂移时在首个模型调用前阻断。
-
-以上停止语义适用于 provider 原生串行 suite。经 `wsl/run.sh --all-scenarios` 执行时，wrapper 会在共同 plan 和确定性预检通过后同时启动九个容器，每个容器只调用本入口的一个 `--scenario`；九个容器结束后再生成 WSL 聚合 verdict。
+standalone verdict 只证明它声明的快速路径，不能替代中央 Test Flow、Release verdict 或物理局域网
+验收。原始 credential 不得进入 prompt、计划、证据或 verdict。
