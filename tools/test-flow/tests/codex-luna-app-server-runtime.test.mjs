@@ -206,7 +206,7 @@ lines.on("line", (line) => {
         modelProvider: "openai",
         serviceTier: null,
         cwd,
-        runtimeWorkspaceRoots: [],
+        runtimeWorkspaceRoots: [cwd],
         instructionSources: [],
         approvalPolicy: "never",
         approvalsReviewer: "user",
@@ -436,6 +436,16 @@ posixRuntimeTest("fake app-server proves preflight, cleanup, sanitized trace, fi
   });
   assert.equal(result.process.exit_code, 0);
   assert.equal(result.app_server.status, "PASS");
+  assert.equal(
+    result.app_server.permission_profile.id,
+    `test-flow-codex-luna-${fixture.options.mode}`,
+  );
+  assert.equal(
+    result.app_server.permission_profile.invocation_mode,
+    fixture.options.mode,
+  );
+  assert.equal(Object.hasOwn(result.app_server, "permission_profile_id"), false);
+  assert.equal(Object.hasOwn(result.app_server, "invocation_mode"), false);
   assert.deepEqual(result.app_server.arguments.slice(0, 3), ["-C", "<WORKSPACE_ROOT>", "app-server"]);
   assert.equal(result.app_server.mcp_tool_call_limit, null);
   assert.equal(result.app_server.developer_instructions.utf8_size, Buffer.byteLength(DEVELOPER_INSTRUCTIONS, "utf8"));

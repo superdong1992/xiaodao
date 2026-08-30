@@ -301,7 +301,7 @@ function treeBytes(root) {
   return total;
 }
 
-async function runProductionRuntime(options, { ambient, onProgress }) {
+export async function runProductionRuntime(options, { ambient, onProgress }) {
   const script = path.join(options.sourceRoot, "tools/test-flow/quick-validation/codex-luna/runtime/macos_codex_luna_model_cert_driver.py");
   const receiptPath = path.join(options.evidenceRoot, "runtime-receipt.json");
   const args = [
@@ -321,6 +321,12 @@ async function runProductionRuntime(options, { ambient, onProgress }) {
     "--usage-root", options.usageRoot,
     "--run-id", options.runId,
   ];
+  if (options.scenarioRoot) {
+    args.push(
+      "--scenario-root", options.scenarioRoot,
+      "--scenario-id", options.scenario,
+    );
+  }
   const child = spawn(options.pythonEntry, args, { cwd: options.sourceRoot, env: pythonEnvironment(options.sourceRoot, ambient), stdio: ["ignore", "pipe", "pipe"] });
   const stderr = [];
   child.stderr.on("data", (chunk) => stderr.push(Buffer.from(chunk)));
@@ -352,7 +358,7 @@ function materializeCachedRegistration({ workRoot, cache, registrationTemplate }
   return { root: destination, source: "codex-methods-cache", tree_sha256: treeDigest(destination) };
 }
 
-function defaultRegistrationInput({ options, sourceRoot, workRoot, identity }) {
+export function defaultRegistrationInput({ options, sourceRoot, workRoot, identity }) {
   if (options.registrationRoot) {
     const root = path.resolve(options.registrationRoot);
     requireCert(fs.statSync(root).isDirectory(), "CODEX_LUNA_MODEL_CERT_REGISTRATION_INVALID", "External production registration is unavailable");

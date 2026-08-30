@@ -400,7 +400,9 @@ def _method_role_prompt_v2(
         repair = (
             "\nThe previous response failed only the required JSON structure or exact "
             "evaluation coverage. Produce the complete response again. This is the only "
-            "repair attempt; do not omit, add, reorder, or rename any evaluation_ref."
+            "repair attempt. Every item must again contain exactly evaluation_ref, "
+            "verdict, supporting_event_refs, and reason. Do not omit, add, reorder, or "
+            "rename any evaluation_ref or invent any event reference."
         )
     return (
         context.body
@@ -409,8 +411,12 @@ def _method_role_prompt_v2(
         + "Use only the frozen request, Evidence Graph, Evaluation Plan, and method cards "
         + "provided in this Job context. Evaluate every evaluation_ref independently and "
         + "in exact plan order. Write one JSON root array whose items contain only "
-        + "evaluation_ref, verdict, and reason. Do not copy markers, log lines, line "
-        + "numbers, hashes, or identity fields into the response.\n"
+        + "evaluation_ref, verdict, supporting_event_refs, and reason. For CONFIRMED, "
+        + "supporting_event_refs must be a non-empty subset of the current Evaluation "
+        + "Plan item's evidence_event_refs in plan order. For REJECTED or UNKNOWN, it "
+        + "must be an empty array. Select only those server-issued event refs; do not "
+        + "copy or invent markers, log text, line numbers, hashes, identity fields, hit "
+        + "refs, or any other evidence fields.\n"
         + f"Write only {output_path}."
         + repair
         + "\n<<<END METHODS_EVIDENCE_V2_ROLE>>>\n"
@@ -1836,6 +1842,7 @@ class DiagnosisRuntime:
                     terminal_state=value,
                     terminal_result=terminal_result,
                     plan=plan,
+                    evidence=graph,
                     produced_at=produced_at,
                 )
             return build_methods_specialist_terminal_outcome_v2(
@@ -1844,6 +1851,7 @@ class DiagnosisRuntime:
                 terminal_state=value,
                 terminal_result=terminal_result,
                 plan=plan,
+                evidence=graph,
                 produced_at=produced_at,
             )
 

@@ -135,6 +135,9 @@ class _EvidenceV2SpecialistBackend(_MethodsTwoPassBackend):
         _assert_model_minimal_methods_prompt(prompt)
         assert "Evidence Graph" in prompt
         assert "evaluation_ref" in prompt
+        assert "supporting_event_refs" in prompt
+        assert "evidence_event_refs" in prompt
+        assert "hit refs" in prompt
 
         response = self.responses.pop(0)
         if response == "RAISE_TYPE_ERROR":
@@ -161,6 +164,7 @@ class _EvidenceV2SpecialistBackend(_MethodsTwoPassBackend):
                 {
                     "evaluation_ref": item.evaluation_ref,
                     "verdict": "CONFIRMED",
+                    "supporting_event_refs": list(item.evidence_event_refs),
                     "reason": (
                         "contract-test-token-1"
                         if response == "VALID_SECRET"
@@ -280,6 +284,11 @@ class _EvidenceV2ReviewerBackend:
                 {
                     "evaluation_ref": item.evaluation_ref,
                     "verdict": verdict,
+                    "supporting_event_refs": (
+                        list(item.evidence_event_refs)
+                        if verdict == "CONFIRMED"
+                        else []
+                    ),
                     "reason": "Independent blind review of the frozen plan.",
                 }
                 for item in plan.evaluations
@@ -507,6 +516,7 @@ def _review_runtime(
             {
                 "evaluation_ref": item.evaluation_ref,
                 "verdict": "CONFIRMED",
+                "supporting_event_refs": list(item.evidence_event_refs),
                 "reason": "private specialist reason",
             }
             for item in plan.evaluations
@@ -635,6 +645,10 @@ def test_specialist_uses_one_repair_then_stops(
 
     assert len(backend.calls) == 2
     assert len(backend.role_prompts) == 2
+    assert "supporting_event_refs" in backend.role_prompts[1]
+    assert "Every item must again contain exactly evaluation_ref, verdict, " in (
+        backend.role_prompts[1]
+    )
     assert receipt.job_outcome.result_type is OutcomeResultType.INCONCLUSIVE
     projection = receipt.job_outcome.methods_terminal_projection
     assert projection is not None
@@ -1263,6 +1277,7 @@ def test_reviewer_replacement_inherits_old_rejection_and_interrupted_state(
             {
                 "evaluation_ref": item.evaluation_ref,
                 "verdict": "CONFIRMED",
+                "supporting_event_refs": list(item.evidence_event_refs),
                 "reason": "private specialist reason",
             }
             for item in plan.evaluations

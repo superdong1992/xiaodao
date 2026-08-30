@@ -193,13 +193,13 @@ function writeReleaseRegistration(
     log_derived_fields: expected.required_log_derived_fields,
     shared_references: ["references/source-log-templates.md", "references/shared-boundaries.md"],
     methods: [
-      { id: "api-execution-slow", title: "API 执行时间过长", reference: "references/api-execution-slow.md", priority: 1, evidence_markers: expected.method_marker_sets[0].all_markers },
-      { id: "server-queueing", title: "服务端收包排队", reference: "references/server-queueing.md", priority: 2, evidence_markers: expected.method_marker_sets[1].all_markers },
-      { id: "client-receive-blocked", title: "客户端收包线程阻塞", reference: "references/client-receive-blocked.md", priority: 3, evidence_markers: expected.method_marker_sets[2].all_markers },
+      { id: "api-execution-slow", title: "API 执行时间过长", reference: "references/api-execution-slow.md", priority: 1, evidence_markers: expected.method_marker_sets[0].all_markers, activation_markers: expected.method_marker_sets[0].activation_markers },
+      { id: "server-queueing", title: "服务端收包排队", reference: "references/server-queueing.md", priority: 2, evidence_markers: expected.method_marker_sets[1].all_markers, activation_markers: expected.method_marker_sets[1].activation_markers },
+      { id: "client-receive-blocked", title: "客户端收包线程阻塞", reference: "references/client-receive-blocked.md", priority: 3, evidence_markers: expected.method_marker_sets[2].all_markers, activation_markers: expected.method_marker_sets[2].activation_markers },
     ],
   };
   fs.writeFileSync(path.join(packageRoot, "methods.json"), `${JSON.stringify(methods, null, 2)}\n`);
-  fs.writeFileSync(path.join(packageRoot, "SKILL.md"), "---\nname: diagnose-rpc-timeout\ndescription: Test-owned production Runtime fixture.\n---\n\nRead request.json, method-evidence-graph.json, and method-evaluation-plan.json. Return only evaluation_ref, verdict, and reason; UNKNOWN is allowed.\n");
+  fs.writeFileSync(path.join(packageRoot, "SKILL.md"), "---\nname: diagnose-rpc-timeout\ndescription: Test-owned production Runtime fixture.\n---\n\nRead request.json, method-evidence-graph.json, and method-evaluation-plan.json. Return only evaluation_ref, verdict, supporting_event_refs, and reason; UNKNOWN is allowed.\n");
   const templates = [];
   let inTextFence = false;
   for (const rawLine of wiki.split(/\r?\n/)) {
@@ -465,6 +465,14 @@ test("production Graph mechanically proves the explicit resolved Release verdict
   assert.equal(receipt.summary.status, "PASS");
   assert.deepEqual(receipt.summary.confirmed_method_ids, ["server-queueing"]);
   assert.equal(receipt.summary.evaluation_count, 3);
+  const methods = JSON.parse(fs.readFileSync(path.join(production.evidenceRoot, "methods.json"), "utf8"));
+  assert.equal(
+    receipt.summary.method_activation_markers_sha256,
+    sha256Bytes(canonicalJson(methods.methods.map((method) => ({
+      method_id: method.id,
+      activation_markers: method.activation_markers,
+    })))),
+  );
 });
 
 test("production event grouping keeps request 501 and decoy 502 distinct", () => {
@@ -707,6 +715,47 @@ test("scenario oracle rejects a generated package that leaves timeout evidence s
   ];
   for (const mutation of mutations) {
     const value = copiedProductionEvidence(mutation.change);
+    try {
+      assert.throws(
+        () => buildScenarioReceipt({ evidenceRoot: value.evidenceRoot, runtimeReceipt: value.runtimeReceipt }),
+        (error) => error.code === mutation.code,
+      );
+    } finally {
+      fs.rmSync(value.root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("scenario oracle binds exact ordered activation markers from the Release package", () => {
+  const mutations = [
+    {
+      change: (method) => { delete method.activation_markers; },
+      code: "SCENARIO_ORACLE_METHOD_FIELDS",
+    },
+    {
+      change: (method) => { method.activation_markers = []; },
+      code: "SCENARIO_ORACLE_METHOD_INVALID",
+    },
+    {
+      change: (method) => { method.activation_markers = ["LATE_RESPONSE service=", "LATE_RESPONSE service="]; },
+      code: "SCENARIO_ORACLE_METHOD_ACTIVATION_MARKERS",
+    },
+    {
+      change: (method) => { method.activation_markers = ["API_COMPLETE service=", "LATE_RESPONSE service="]; },
+      code: "SCENARIO_ORACLE_METHOD_INVALID",
+    },
+    {
+      change: (method) => { method.activation_markers = ["API_COMPLETE service=", "DEADLOOP_DETECTED service="]; },
+      code: "SCENARIO_ORACLE_METHOD_SEMANTIC_MAPPING",
+    },
+  ];
+  for (const mutation of mutations) {
+    const value = copiedProductionEvidence((evidenceRoot) => {
+      const target = path.join(evidenceRoot, "methods.json");
+      const methods = JSON.parse(fs.readFileSync(target, "utf8"));
+      mutation.change(methods.methods.find((method) => method.priority === 1));
+      fs.writeFileSync(target, canonicalJson(methods));
+    });
     try {
       assert.throws(
         () => buildScenarioReceipt({ evidenceRoot: value.evidenceRoot, runtimeReceipt: value.runtimeReceipt }),

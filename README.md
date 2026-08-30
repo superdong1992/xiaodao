@@ -12,9 +12,9 @@
 | Methods package | `SKILL.md` + `methods.json@1` + `references/*.md` |
 | Product registration | `registration-template.json@1` |
 | Methods evaluation protocol | `Evidence V2` |
-| ROUTE / DIAGNOSE / REVIEW output contract | `3.0.0` / `7.0.0` / `5.0.0` |
+| ROUTE / DIAGNOSE / REVIEW output contract | `3.0.0` / `8.0.0` / `8.0.0` |
 | GENERIC output contract / profile | `2.0.0` / `2.0.0` |
-| Specialist / Reviewer profile | `4.0.0` / `4.0.0` |
+| Specialist / Reviewer profile | `5.0.0` / `5.0.0` |
 | Router / Diagnose / Review tool bundle | `2.0.0` / `4.0.0` / `3.0.0` |
 
 State、Job 和权威 Outcome 已硬切到 V8。Problem Locator 5.0.0 只接受路径尚不存在或目录完全为空的全新 `DATA_ROOT`，首次启动会写入 canonical `data-format.json`；已有非空但无 marker、使用旧 marker 或 marker 被篡改的目录都会启动失败，服务不会迁移、改写或删除其中任何内容。升级前必须先备份旧目录，再使用新的 `DATA_ROOT`；需要保留的 V1/V2/V3/V4/V5/V6/V7 State、Job 或 Outcome 只能作为只读历史材料另行处理。
@@ -24,9 +24,9 @@ State、Job 和权威 Outcome 已硬切到 V8。Problem Locator 5.0.0 只接受�
 - 产品注册只声明路由、必需用户输入/附件、Logparse 产品与 anchor，以及 DIAGNOSE/REVIEW 的内置运行时绑定。
 - `.agents` 下的 Wiki 元 Skill 只生成闭合的 Methods package；`.claude` 下的局域网部署元 Skill 生成完整的生产 registration root，并在其 `package/` 中放置同一 Methods package。两者都不生成 GenerationSpec、`diagnosis-skill.json` 或验证合同。
 - 产品拥有的 Logparse 预处理在独立 Workspace 中加载一次现装 `logparse-diagnose`，由 Helper 完成唯一一次 broker parse/reuse。服务端读取冻结目标日志，并且只扫描一次。
-- 服务端从单次扫描结果生成 method-qualified Evidence Graph 和完整 Evaluation Plan。Specialist 与 Reviewer 只读取请求、Graph、Plan 和精确方法卡，各自提交 `evaluation_ref + verdict + reason`；最终状态由服务端共识裁决产生。
+- 服务端从单次扫描结果生成 method-qualified Evidence Graph 和完整 Evaluation Plan。Specialist 与 Reviewer 只读取请求、Graph、Plan 和精确方法卡，各自提交 `evaluation_ref + verdict + supporting_event_refs + reason`；最终状态由服务端共识裁决产生。
 
-`.agents/skills/wiki-to-diagnosis-skill` 直接从一份已评审 Wiki 生成 `SKILL.md`、`methods.json` 和独立可加载的 `references/*.md` 方法卡。`methods.json` 固定声明源 Wiki SHA-256、必需用户输入、必需附件、日志派生字段、共享参考和有序方法索引；`shared_references[0]` 固定绑定逐项逐序保留源 Wiki 机械日志模板的 `references/source-log-templates.md`，每个方法必须有正向 evidence markers。该入口仍由产品在包外提供 registration，供 Evidence V2 定位链路使用。
+`.agents/skills/wiki-to-diagnosis-skill` 直接从一份已评审 Wiki 生成 `SKILL.md`、`methods.json` 和独立可加载的 `references/*.md` 方法卡。`methods.json` 固定声明源 Wiki SHA-256、必需用户输入、必需附件、日志派生字段、共享参考和有序方法索引；`shared_references[0]` 固定绑定逐项逐序保留源 Wiki 机械日志模板的 `references/source-log-templates.md`。每个方法用 `evidence_markers` 收齐判断所需日志，并用其保序子集 `activation_markers` 声明何时值得创建 evaluation。该入口仍由产品在包外提供 registration，供 Evidence V2 定位链路使用。
 
 仓库另提供 [`.claude/skills/wiki-to-logparse-diagnosis-skill`](.claude/skills/wiki-to-logparse-diagnosis-skill)，用于在局域网 Claude Code 中从 Wiki 生成可直接部署到 Linux Server `SKILL_DIR` 的完整 registration root。生成物包含 `registration-template.json` 与闭合 Methods package，固定要求 `client_slot`、`client_process_name`、`server_slot`、`server_process_name`，双端共用作者确认的 module，PID 仅在用户主动提供时使用。客户端不会加载这个业务 Skill，也不会在本地调用 Logparse；它只使用 `$problem-locator-client` 经 HTTP MCP 提交 Case。Server 完成 ROUTE、Helper 驱动的 Logparse 预处理、Methods 诊断、Review 和权威结果打包。
 
@@ -34,8 +34,9 @@ Logparse 产品可以省略。省略时 Runtime 记录有效产品 `default`，B
 
 Agent 不直接产生权威 Outcome 或公开用户产物。SPECIALIZED DIAGNOSE 和 REVIEW 都只能写一个
 JSON 根数组；数组按 Evaluation Plan 顺序精确覆盖全部 evaluation，每项只有
-`evaluation_ref`、`verdict` 和 `reason`。模型不回抄 marker、日志原文、行号、哈希或 identity，
-也不能创建 Evidence、Candidate、Artifact、requirement 或权威 Outcome。
+  `evaluation_ref`、`verdict`、`supporting_event_refs` 和 `reason`。`CONFIRMED` 只能按计划顺序选择
+  当前 evaluation 的非空 event ref 子集；其他 verdict 使用空数组。模型不回抄 marker、日志原文、
+  行号、哈希、identity 或 hit ref，也不能创建 Evidence、Candidate、Artifact、requirement 或权威 Outcome。
 
 Specialist 与 Reviewer 使用隔离的 Job、Workspace 和上下文。Reviewer 在模型调用结束前看不到
 Specialist 的输出。每个角色首次发生结构或覆盖错误时最多执行一次受限 repair。两次 verdict
@@ -354,19 +355,20 @@ SPECIALIZED 定位使用 Evidence V2。服务端负责证据提取、引用和�
 1. Case 创建后，服务端根据已安装 Methods package 返回缺失的 requirements。客户端不得在
    建案前自行猜测或追问；已有问题描述时先调用 `problem_locator_create_case`。
 2. 输入齐备后，Logparse 预处理只运行一次。服务端随后只扫描一次冻结日志，按
-   `(method_id, marker)` 生成 method-qualified Evidence Graph，并一次性生成完整且有序的
-   Evaluation Plan。后续映射只使用稳定 ref，不再重新匹配 marker。
+   `(method_id, marker)` 收集 method-qualified hit。只有命中当前方法自己的 `activation_markers`
+   才加载该方法；加载后保留它的全部上下文 hit，并一次性生成完整且有序的 Evaluation Plan。
+   后续映射只使用稳定 ref，不再重新匹配 marker。
 3. Specialist 在独立 Job、Workspace 和上下文中读取 `request.json`、Evidence Graph、
    Evaluation Plan 与精确固定的方法卡。它只能提交根 JSON 数组；每项只有
-   `evaluation_ref`、`verdict` 和 `reason`，不回抄 marker、日志原文、行号、哈希或
-   identity。
+   `evaluation_ref`、`verdict`、`supporting_event_refs` 和 `reason`。确认时只能选择当前计划项中的
+   有序 event ref 子集，不回抄 marker、日志原文、行号、哈希、identity 或 hit ref。
 4. Reviewer 使用同一模型身份，但运行在另一个完全隔离的 Job、Workspace 和上下文中。
    它读取同一份 Graph、Plan 和方法卡，盲评全部 evaluation；模型调用完成前看不到
    Specialist 的 verdict、reason 或状态。
 5. 每个角色首次出现结构或覆盖错误时，最多再调用一次受限 repair。每次被拒绝的响应和精确
    prompt 都追加写入 execution records；重启会从已持久化阶段继续，绝不会产生第三次调用。
 
-服务端逐项比较两次评估。全部 evaluation 精确覆盖、两者 verdict 一致，并且至少有一个
+服务端逐项比较两次评估。全部 evaluation 精确覆盖、两者 verdict 与 supporting event refs 一致，并且至少有一个
 `CONFIRMED` 时，Case 才进入 `RESOLVED`。分歧、`UNKNOWN`、没有确认原因或 repair 耗尽都进入
 `UNRESOLVED`。资源漂移、服务端不变量破坏或审计归档失败进入 `FAILED`；取消执行记为
 `INTERRUPTED`。Methods V2 不产生 `PARTIALLY_RESOLVED`，也不创建 Candidate 或旧版

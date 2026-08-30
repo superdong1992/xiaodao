@@ -91,7 +91,8 @@ description: 从 Server 冻结的双端日志中定位 RPC 超时原因。
 Evidence Graph 和 Evaluation Plan；不读取目标日志，也不重新扫描 marker。
 
 按 Evaluation Plan 顺序逐项评估全部 `evaluation_ref`，不能在第一个确认项后停止。每项只输出
-`evaluation_ref`、`verdict` 和 `reason`；证据无法决定时使用 `UNKNOWN`，并在 reason 中说明观测限制。
+`evaluation_ref`、`verdict`、`supporting_event_refs` 和 `reason`；证据无法决定时使用 `UNKNOWN`，
+并在 reason 中说明观测限制。
 Server 生成的 evidence sources 可能来自 target_logs，并在内部保留 identity_tokens。
 
 Logparse 预处理、目标日志冻结、Review 和最终 Artifact 发布由 Server 完成；诊断阶段不重新执行这些操作。
@@ -124,7 +125,8 @@ def _method_card(
 日志缺失不能排除原因。
 
 ## 输出含义
-Server 把全部独立事件绑定到 evaluation_ref；Agent 只返回该引用、verdict 和 reason。
+Server 把全部独立事件绑定到 evaluation_ref；Agent 返回该引用、verdict、所选
+supporting_event_refs 和 reason。
 """
 
 
@@ -224,6 +226,7 @@ def _write_valid_registration(tmp_path: Path) -> tuple[Path, Path, Path]:
                         "API_COMPLETE service=",
                         "QUEUE_DELAY service=",
                     ],
+                    "activation_markers": ["API_COMPLETE service="],
                 }
             ],
         },
@@ -291,6 +294,7 @@ def _replace_wiki_templates(
     methods["source_wiki_sha256"] = wiki_sha256
     methods["log_derived_fields"] = log_derived_fields
     methods["methods"][0]["evidence_markers"] = markers
+    methods["methods"][0]["activation_markers"] = markers[:1]
     _write_json(_methods_path(registration), methods)
     payload = json.loads(_registration_path(registration).read_text(encoding="utf-8"))
     payload["package"]["source_wiki_sha256"] = wiki_sha256
@@ -342,6 +346,7 @@ def test_validator_rejects_shortened_event_name_marker(tmp_path: Path) -> None:
     registration, wiki, _ = _write_valid_registration(tmp_path)
     methods = json.loads(_methods_path(registration).read_text(encoding="utf-8"))
     methods["methods"][0]["evidence_markers"] = ["API_COMPLETE"]
+    methods["methods"][0]["activation_markers"] = ["API_COMPLETE"]
     _write_json(_methods_path(registration), methods)
 
     result = _validate(registration, wiki)
@@ -367,6 +372,7 @@ def test_validator_rejects_marker_from_another_method_reference(
             "reference": "references/queue-delay.md",
             "priority": 2,
             "evidence_markers": ["QUEUE_DELAY service="],
+            "activation_markers": ["QUEUE_DELAY service="],
         }
     )
     _write_json(methods_path, methods)
@@ -385,6 +391,7 @@ def test_validator_rejects_marker_from_another_method_reference(
     assert _validate(registration, wiki)["ok"] is True
 
     methods["methods"][0]["evidence_markers"] = ["QUEUE_DELAY service="]
+    methods["methods"][0]["activation_markers"] = ["QUEUE_DELAY service="]
     _write_json(methods_path, methods)
 
     rejected = _validate(registration, wiki)
@@ -393,6 +400,55 @@ def test_validator_rejects_marker_from_another_method_reference(
         "method 1 的 evidence marker 在“所需证据”中没有对应的完整 Wiki 日志模板: "
         "QUEUE_DELAY service="
     ]
+
+
+@pytest.mark.parametrize(
+    ("activation_markers", "message"),
+    (
+        ([], "method 1 activation_markers are invalid"),
+        (
+            ["API_COMPLETE service=", "API_COMPLETE service="],
+            "method 1 activation_markers are invalid",
+        ),
+        (
+            ["NOT_IN_EVIDENCE"],
+            "method 1 activation_markers must be an ordered subsequence of evidence_markers",
+        ),
+        (
+            ["QUEUE_DELAY service=", "API_COMPLETE service="],
+            "method 1 activation_markers must be an ordered subsequence of evidence_markers",
+        ),
+    ),
+)
+def test_validator_rejects_invalid_activation_markers(
+    tmp_path: Path,
+    activation_markers: list[str],
+    message: str,
+) -> None:
+    registration, wiki, _ = _write_valid_registration(tmp_path)
+    methods = json.loads(_methods_path(registration).read_text(encoding="utf-8"))
+    methods["methods"][0]["activation_markers"] = activation_markers
+    _write_json(_methods_path(registration), methods)
+
+    result = _validate(registration, wiki)
+
+    assert result["ok"] is False
+    assert message in result["errors"]
+
+
+def test_validator_requires_activation_markers_field(tmp_path: Path) -> None:
+    registration, wiki, _ = _write_valid_registration(tmp_path)
+    methods = json.loads(_methods_path(registration).read_text(encoding="utf-8"))
+    del methods["methods"][0]["activation_markers"]
+    _write_json(_methods_path(registration), methods)
+
+    result = _validate(registration, wiki)
+
+    assert result["ok"] is False
+    assert (
+        "method 1 keys do not match the Methods package contract"
+        in result["errors"]
+    )
 
 
 def test_validator_rejects_shared_only_prerequisite_and_marker_order(
@@ -504,8 +560,14 @@ def test_valid_production_registration_passes(tmp_path: Path) -> None:
     assert result["template_count"] == 2
     assert result["log_template_extraction_version"] == 2
     assert methods["required_user_inputs"] == REQUIRED_INPUTS
+    assert methods["methods"][0]["activation_markers"] == [
+        "API_COMPLETE service="
+    ]
     assert "request.json" in skill_text
-    assert all(field in skill_text for field in ("evaluation_ref", "verdict", "reason"))
+    assert all(
+        field in skill_text
+        for field in ("evaluation_ref", "verdict", "supporting_event_refs", "reason")
+    )
 
 
 def test_valid_production_registration_loads_in_server(tmp_path: Path) -> None:
@@ -841,6 +903,7 @@ def test_validator_rejects_method_array_above_server_limit(tmp_path: Path) -> No
                 "reference": reference,
                 "priority": index,
                 "evidence_markers": ["API_COMPLETE service="],
+                "activation_markers": ["API_COMPLETE service="],
             }
         )
         (package / reference).write_text(_method_card(), encoding="utf-8")

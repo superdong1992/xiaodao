@@ -451,7 +451,11 @@ def test_production_output_contract_materializes_the_role_specific_protocol(
         assert b"inputs/request.json" in content
         assert b"inputs/method-evidence-graph.json" in content
         assert b"inputs/method-evaluation-plan.json" in content
-        assert b"Every item has exactly `evaluation_ref`, `verdict`, and `reason`" in content
+        assert (
+            b"Every item has exactly `evaluation_ref`, `verdict`, `supporting_event_refs`, and"
+            in content
+        )
+        assert b"Do not return hit refs" in content
         assert b"Server has already scanned the logs once" in content
     else:
         assert job_type is JobType.REVIEW

@@ -69,8 +69,8 @@ package 根目录只能有这三类条目。`methods.json@1` 使用 exact-key �
 - Wiki 明确要求的 `required_user_inputs` 和 `required_artifacts`；
 - 只能从日志中获得的 `log_derived_fields`；
 - 共享参考卡和有序方法索引；
-- 每种方法的独立 Markdown 卡和一组来自 Wiki 原文的正向
-  `evidence_markers`。
+- 每种方法的独立 Markdown 卡、覆盖判断上下文的 `evidence_markers`，以及其中负责触发评估的
+  `activation_markers` 保序子集。
 
 每张方法卡固定包含适用条件、所需证据、计算与判断、确认条件、未知边界和
 输出含义。相同原因的不同日志类型不拆成多个方法；多个原因可同时成立时，
@@ -81,10 +81,11 @@ marker 的所有权属于声明它的方法。即使两个方法声明了相同�
 分别生成带各自 `method_id` 和 `marker_index` 的命中；后续 Plan 只能把命中分配给
 所属方法，不能因为 marker 文本相同而跨方法复用。
 
-package-only 生成合同把两处原本可能由模型自由改写的表面表示机械化：`log_derived_fields` 按 Wiki `text`
+package-only 生成合同把原本可能由模型自由改写的表面表示机械化：`log_derived_fields` 按 Wiki `text`
 日志模板中命名占位符的首次出现顺序收集并排除用户输入；`evidence_markers` 使用第一个占位符前的
 完整稳定字面前缀（模板以占位符开头时使用最长稳定片段）。canonical validator 与 gate-only oracle
-必须遵循同一规则，因此不能用语义相近但字节不同的 marker，也不能让 oracle 漏掉日志命名字段。
+必须遵循同一规则；`activation_markers` 则必须是非空、唯一的保序子集。它只表示该方法值得评估，
+不表示单条命中足以确认原因。相同 literal 可以在多个方法中负责激活。
 
 元 Skill 自带的 validator 校验目录、字段、frontmatter、Wiki hash、引用、方法卡标题和
 原文 marker，但不代替场景诊断。局域网部署元 Skill 还校验完整 registration、固定运行时
@@ -152,23 +153,25 @@ Outcome。
 ### Evidence Graph 与 Evaluation Plan
 
 服务端对每份冻结目标日志只解码和逐行扫描一次。在这一处完成所有 marker 的
-`casefold` 匹配，同时保留 marker 原文和命中行原文。扫描结果直接生成
+`casefold` 匹配，同时保留 marker 原文和命中行原文。扫描结束后，只保留至少命中一个自身
+`activation_markers` 的方法；该方法在同一次扫描中得到的全部上下文命中都会保留。结果直接生成
 method-qualified Evidence Graph：
 
 - source 绑定 `source_id`、相对路径和内容 SHA-256；
 - hit 绑定 `method_id`、方法优先级、`marker_index`、source、行号、marker 和原始行；
 - event 只在同一方法内按日志派生身份字段分组；没有身份字段的命中各自成为独立事件；
-- `loaded_method_ids` 精确等于有命中的方法，并按方法优先级和 ID 排序；
+- `loaded_method_ids` 精确等于有 activation 命中的方法，并按方法优先级和 ID 排序；
 - Logparse 的观测 caveat 去重后写入 Graph 的 `limitations`。
 
 因此，同一 marker 字面量属于不同方法时会生成不同的 hit；不同方法、不同请求或
 无法可靠关联的事件不会因为文本相同被错误合并。
 
-服务端随后只消费 Graph 中的 ref，生成完整 Evaluation Plan。每个已加载方法恰好有
+服务端随后只消费 Graph 中的 ref，生成完整 Evaluation Plan。每个已加载方法必须至少保留一个
+activation hit，并且恰好有
 一个 `evaluation_ref`，并精确覆盖该方法的全部 event/hit；整份 Plan 必须完整分区
 Graph。这个阶段不再读取原始行、不重新匹配 marker，也不全量比较由模型回抄的
 `SkillLoadReceiptV1`；Evidence V2 根本不把这份 V1 receipt 带入评估链路。没有任何
-方法命中时，服务端直接进入 `UNRESOLVED`，不启动 Specialist。
+方法被激活时，服务端直接进入 `UNRESOLVED`，不启动 Specialist。
 
 ## Specialist 与 Reviewer 隔离评估
 
@@ -191,18 +194,20 @@ Specialist 先独立评估完整 Plan。其结果通过服务端生成的
 输出每个 evaluation。每项只能包含：
 
 ```json
-{
-  "evaluation_ref": "eval-...",
-  "verdict": "CONFIRMED",
-  "reason": "角色对该 evaluation 的判断理由"
-}
+  {
+    "evaluation_ref": "eval-...",
+    "verdict": "CONFIRMED",
+    "supporting_event_refs": ["event-..."],
+    "reason": "角色对该 evaluation 的判断理由"
+  }
 ```
 
 `verdict` 的合法值只有 `CONFIRMED`、`REJECTED` 和 `UNKNOWN`。
 
-模型不回抄 `method_id`、marker、日志原文、行号、hash、identity token、event/hit ref
-或任何证据 receipt。服务端只接受与 Plan 数量、顺序和 `evaluation_ref` 完全一致的
-数组。
+`CONFIRMED` 必须按 Plan 顺序选择当前 evaluation 的非空 `supporting_event_refs` 子集；
+`REJECTED` 或 `UNKNOWN` 必须使用空数组。模型不回抄 `method_id`、marker、日志原文、行号、
+hash、identity token、hit ref 或任何证据 receipt。服务端只接受与 Plan 数量、顺序和
+`evaluation_ref` 完全一致的数组。
 
 每个角色第一次出现 JSON 结构或 Plan 覆盖错误时，最多获得一次 repair。repair 仍使用
 同一份 Graph、Plan 和方法卡，只提示重新提交完整数组；第二次仍不合格就进入
@@ -211,7 +216,7 @@ Specialist 先独立评估完整 Plan。其结果通过服务端生成的
 
 ## 共识与状态真值
 
-服务端裁决只比较两个角色逐项提交的 `(evaluation_ref, verdict)`，不比较自由文本
+服务端裁决只比较两个角色逐项提交的 `(evaluation_ref, verdict, supporting_event_refs)`，不比较自由文本
 `reason`：
 
 | 条件 | Methods 状态 |
@@ -222,7 +227,7 @@ Specialist 先独立评估完整 Plan。其结果通过服务端生成的
 | 冻结资源漂移、服务端不变量破坏或审计归档失败 | `FAILED` |
 | 角色执行被取消 | `INTERRUPTED`，保留待执行角色，不发布终态投影 |
 
-`RESOLVED` 只发布两次评估共同确认的 evaluation、method、event 和 hit ref。
+`RESOLVED` 只发布两次评估共同确认的 evaluation、method、所选 event，以及由所选 event 机械派生的 hit ref。
 `UNRESOLVED` 与 `FAILED` 必须清空全部 confirmed ref，并发布固定 reason code、
 `diagnostic_id` 和公共原因文本。Methods V2 只有 `RESOLVED`、`UNRESOLVED`、`FAILED`
 三种终态，不产生 `PARTIALLY_RESOLVED`。
@@ -310,10 +315,12 @@ ROUTE、LOGPARSE、DIAGNOSE、REVIEW 和 `methods_result` 投影。它的 standa
 - registration 与 package 的三层 hash 身份在 Catalog、Job、generation receipt 和 Test Flow 中一致。
 - Client 收到问题描述后先创建 Case；只有建案后的服务端 no-plan preflight 可以返回
   `MISSING_ONLY` requirements，模型不能在建案前自行追问。
-- 材料齐备后只运行一次服务端日志扫描。Graph 的每个 hit 都属于当前 method，Plan 精确覆盖
-  全部 Graph event/hit；后续流程只按 ref 映射，不再扫描日志或匹配 marker。
+- 材料齐备后只运行一次服务端日志扫描。只有自身 activation marker 命中的 method 才进入 Graph，
+  且它的全部上下文 hit 都会保留；Plan 精确覆盖全部 Graph event/hit。后续流程只按 ref 映射，
+  不再扫描日志或匹配 marker。
 - Specialist 与 Reviewer 使用隔离 Job、Workspace 和上下文，Reviewer 在提交盲评前看不到
-  Specialist 结论；两个角色都只提交完整的 `evaluation_ref + verdict + reason` 数组。
+  Specialist 结论；两个角色都只提交完整的
+  `evaluation_ref + verdict + supporting_event_refs + reason` 数组。
 - 每个角色最多一次 repair，重启不能增加调用次数；两次评估逐项一致、无 `UNKNOWN` 且至少
   确认一个方法时才 `RESOLVED`，其余业务不可定论进入 `UNRESOLVED`。
 - Methods V2 不生成 Candidate、`DecisionAuditV2` 或 `PARTIALLY_RESOLVED`；只有资源漂移、

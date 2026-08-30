@@ -196,11 +196,17 @@ def build_methods_reviewer_outcome_v2(
     terminal_state: MethodStateV2,
     terminal_result: MethodTerminalResultV2,
     plan: MethodEvaluationPlanV2,
+    evidence: MethodEvidenceGraphV2,
     produced_at: str,
 ) -> JobOutcome:
     """Create the terminal server Outcome for one normalized blind Reviewer."""
 
-    validate_method_terminal_result_v2(terminal_state, terminal_result, plan)
+    validate_method_terminal_result_v2(
+        terminal_state,
+        terminal_result,
+        plan,
+        evidence=evidence,
+    )
     target = review_job.methods_review_target
     terminal_projection = project_method_terminal_result_v2(
         terminal_result,
@@ -243,6 +249,7 @@ def build_methods_reviewer_outcome_v2(
                 MethodsReviewerEvaluationV2(
                     evaluation_ref=item.evaluation_ref,
                     verdict=item.verdict,
+                    supporting_event_refs=item.supporting_event_refs,
                     reason=item.reason,
                 )
                 for item in evaluation.evaluations
@@ -277,11 +284,17 @@ def build_methods_specialist_terminal_outcome_v2(
     terminal_state: MethodStateV2,
     terminal_result: MethodTerminalResultV2,
     plan: MethodEvaluationPlanV2,
+    evidence: MethodEvidenceGraphV2,
     produced_at: str,
 ) -> JobOutcome:
     """Create a Candidate-free early terminal Outcome for specialized DIAGNOSE."""
 
-    validate_method_terminal_result_v2(terminal_state, terminal_result, plan)
+    validate_method_terminal_result_v2(
+        terminal_state,
+        terminal_result,
+        plan,
+        evidence=evidence,
+    )
     terminal_projection = project_method_terminal_result_v2(
         terminal_result,
     )

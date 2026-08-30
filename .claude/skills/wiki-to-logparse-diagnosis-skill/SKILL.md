@@ -50,14 +50,21 @@ registration root。生成物只包含产品 registration 和闭合 Methods pack
    每个方法的 marker 还必须覆盖该方法确认、排除、计算和关联目标请求时实际需要读取的全部日志；
    共同日志的解释可以共享，但不能只留在共享引用而不进入适用方法的索引。每个适用方法都要在
    “所需证据”段逐字列出完整模板；其他段落中的 marker 字样不算模板归属。
+   完成 `evidence_markers` 后，再从中选择非空、唯一且保持原顺序的 `activation_markers`。activation
+   只表示 marker 出现后值得为该方法创建 evaluation，不代表单条日志足以确认原因。公共症状和公共
+   RPC timeout 日志只能作为 context，不能用来激活所有方法；同一 literal 确实会触发多个方法时，
+   可以分别写入这些方法的 `activation_markers`。
 7. Server 只扫描一次冻结日志，生成 `method-evidence-graph.json` 和
-   `method-evaluation-plan.json`。冻结 `request.json` 继续提供方法规则所需的用户输入。业务
+   `method-evaluation-plan.json`。只有命中方法的 `activation_markers` 时才创建该方法的 evaluation，
+   但 Evidence Graph 仍保留该方法全部 `evidence_markers` 命中的上下文。冻结 `request.json` 继续提供方法规则所需的用户输入。业务
    `SKILL.md` 只说明如何按方法卡评估这些输入；日志证据只能来自 Graph/Plan，不读取目标日志、
    不重新扫描 marker、不执行日志预处理，也不负责最终 Artifact 打包。业务入口必须逐字使用
    输出合同给出的 Server 边界和 PID 可选说明，避免写入任何被禁用的本地运行标识。
 8. 按 Evaluation Plan 顺序评估全部 `evaluation_ref`，不能在第一个确认项后停止。每项只输出
-   `evaluation_ref`、`verdict` 和 `reason`，不回抄 marker、日志原文、行号、哈希或事件身份。
-   日志缺失只能形成 Wiki 允许的 `UNKNOWN`，不能自动排除原因。
+   `evaluation_ref`、`verdict`、`supporting_event_refs` 和 `reason`。`CONFIRMED` 必须按计划顺序
+   选择当前 evaluation 的非空 event ref 子集；`REJECTED` 或 `UNKNOWN` 必须使用空数组。不得回抄
+   marker、日志原文、行号、哈希、事件身份字段或 hit ref。日志缺失只能形成 Wiki 允许的
+   `UNKNOWN`，不能自动排除原因。
 
 ## 校验
 

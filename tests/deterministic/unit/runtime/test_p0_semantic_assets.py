@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from problem_locator.contracts import MethodEvaluationPlanV2
+from problem_locator.runtime.catalog import _BUILTIN_SPECS_BY_ID
 from problem_locator.runtime.methods_evaluation_v2 import (
     MethodEvaluationResponseError,
     parse_method_evaluation_response_v2,
@@ -74,6 +75,7 @@ def _production_plan() -> MethodEvaluationPlanV2:
                     reference="references/timeout.md",
                     priority=1,
                     evidence_markers=("TIMEOUT",),
+                    activation_markers=("TIMEOUT",),
                 ),
             ),
         ),
@@ -96,13 +98,25 @@ def _production_plan() -> MethodEvaluationPlanV2:
     return build_method_evaluation_plan_v2(skill=skill, evidence=graph)
 
 
+def test_methods_v2_asset_versions_match_the_builtin_catalog() -> None:
+    expected = {
+        "agent-profile/specialist": "5.0.0",
+        "agent-profile/reviewer": "5.0.0",
+        "output-contract/diagnose": "8.0.0",
+        "output-contract/review": "8.0.0",
+    }
+
+    for asset_id, version in expected.items():
+        assert _BUILTIN_SPECS_BY_ID[asset_id].version == version
+
+
 def test_specialist_assets_require_methods_v2_evaluation_output() -> None:
     profile_meta, profile = _asset("profiles/specialist")
     contract_meta, contract = _asset("output-contracts/diagnose")
     tool_meta, tool_bundle = _asset("tool-bundles/diagnose")
 
-    assert profile_meta["version"] == "4.0.0"
-    assert contract_meta["version"] == "7.0.0"
+    assert profile_meta["version"] == "5.0.0"
+    assert contract_meta["version"] == "8.0.0"
     assert tool_meta["version"] == "4.0.0"
     assert "same configured model identity" in profile
     assert "SPECIALIST" in profile
@@ -112,6 +126,10 @@ def test_specialist_assets_require_methods_v2_evaluation_output() -> None:
     assert "inputs/method-evidence-graph.json" in contract
     assert "inputs/method-evaluation-plan.json" in contract
     assert "evaluation_ref" in contract
+    assert "supporting_event_refs" in contract
+    assert "evidence_event_refs" in contract
+    assert "Do not return hit refs" in contract
+    assert "four fields" in profile
     assert "CONFIRMED" in contract
     assert "REJECTED" in contract
     assert "UNKNOWN" in contract
@@ -127,8 +145,8 @@ def test_reviewer_assets_require_blind_methods_v2_evaluation() -> None:
     contract_meta, contract = _asset("output-contracts/review")
     tool_meta, tool_bundle = _asset("tool-bundles/review")
 
-    assert profile_meta["version"] == "4.0.0"
-    assert contract_meta["version"] == "5.0.0"
+    assert profile_meta["version"] == "5.0.0"
+    assert contract_meta["version"] == "8.0.0"
     assert tool_meta["version"] == "3.0.0"
     assert "same configured model identity" in profile
     assert "REVIEWER" in profile
@@ -140,6 +158,10 @@ def test_reviewer_assets_require_blind_methods_v2_evaluation() -> None:
     assert "inputs/method-evaluation-plan.json" in contract
     assert "not inputs" in contract
     assert "Do not use `inputs/method-diagnosis.json`" in contract
+    assert "supporting_event_refs" in contract
+    assert "evidence_event_refs" in contract
+    assert "Do not return hit refs" in contract
+    assert "four fields" in profile
     assert "There is no second repair" in contract
     assert "INSUFFICIENT_EVIDENCE" not in contract
     assert "problem-locator-logparse" not in tool_bundle
@@ -152,6 +174,7 @@ def test_asset_response_shape_is_accepted_by_production_v2_parser() -> None:
         {
             "evaluation_ref": item.evaluation_ref,
             "verdict": "CONFIRMED",
+            "supporting_event_refs": list(item.evidence_event_refs),
             "reason": "The method confirmation rule is satisfied.",
         }
         for item in plan.evaluations
@@ -164,7 +187,7 @@ def test_asset_response_shape_is_accepted_by_production_v2_parser() -> None:
     )
     assert all(
         set(item.model_dump(mode="json"))
-        == {"evaluation_ref", "verdict", "reason"}
+        == {"evaluation_ref", "verdict", "supporting_event_refs", "reason"}
         for item in parsed
     )
 
@@ -175,6 +198,7 @@ def test_asset_response_rejects_one_added_field_from_production_baseline() -> No
         {
             "evaluation_ref": item.evaluation_ref,
             "verdict": "CONFIRMED",
+            "supporting_event_refs": list(item.evidence_event_refs),
             "reason": "The method confirmation rule is satisfied.",
         }
         for item in plan.evaluations

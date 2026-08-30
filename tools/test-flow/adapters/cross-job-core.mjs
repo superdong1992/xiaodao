@@ -279,6 +279,16 @@ function sortedStrings(value, code) {
   return [...value].sort();
 }
 
+function orderedSubsequence(values, sequence) {
+  let cursor = 0;
+  for (const value of values) {
+    const index = sequence.indexOf(value, cursor);
+    if (index < 0) return false;
+    cursor = index + 1;
+  }
+  return true;
+}
+
 function selectedReleaseCase(repoRoot, generatedSkill) {
   const root = discoverReleaseCaseRoot(path.join(repoRoot, "tests", "cases", "release"));
   const inputs = loadReleaseCaseInputs(root);
@@ -321,15 +331,46 @@ function selectedReleaseCase(repoRoot, generatedSkill) {
     "FAIL",
     "CONTRACT",
   );
+  const methodFields = ["activation_markers", "evidence_markers", "id", "priority", "reference", "title"];
+  methods.methods.forEach((method, index) => {
+    requireCondition(
+      method !== null && typeof method === "object" && !Array.isArray(method)
+        && canonicalJson(Object.keys(method).sort()) === canonicalJson(methodFields)
+        && /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(method.id ?? "")
+        && typeof method.title === "string" && method.title.trim().length > 0
+        && typeof method.reference === "string" && method.reference.startsWith("references/")
+        && Number.isSafeInteger(method.priority) && method.priority === index + 1,
+      "GENERATED_SKILL_METHOD_FIELDS_INVALID",
+      "FAIL",
+      "CONTRACT",
+    );
+    const evidenceMarkers = sortedStrings(method.evidence_markers, "GENERATED_SKILL_METHOD_MARKERS_INVALID");
+    const activationMarkers = sortedStrings(method.activation_markers, "GENERATED_SKILL_METHOD_ACTIVATION_MARKERS_INVALID");
+    requireCondition(
+      evidenceMarkers.length > 0 && activationMarkers.length > 0
+        && orderedSubsequence(method.activation_markers, method.evidence_markers),
+      "GENERATED_SKILL_METHOD_ACTIVATION_MARKERS_INVALID",
+      "FAIL",
+      "CONTRACT",
+    );
+  });
   const methodIds = methods.methods.map((method) => method.id);
   requireCondition(methodIds.length === new Set(methodIds).size, "GENERATED_SKILL_METHOD_IDS_DUPLICATE", "FAIL", "CONTRACT");
   const generatedMethods = gateOracle.semantic_oracle.expected_package.method_marker_sets.map((semantic) => {
     const semanticMarkers = sortedStrings(semantic.all_markers, "RELEASE_CASE_METHOD_MARKERS_INVALID");
+    const semanticActivationMarkers = sortedStrings(semantic.activation_markers, "RELEASE_CASE_METHOD_ACTIVATION_MARKERS_INVALID");
+    requireCondition(semanticActivationMarkers.length > 0, "RELEASE_CASE_METHOD_ACTIVATION_MARKERS_INVALID", "FAIL", "CONTRACT");
     const matches = methods.methods.filter((method) => (
       canonicalJson(sortedStrings(method.evidence_markers, "GENERATED_SKILL_METHOD_MARKERS_INVALID")) === canonicalJson(semanticMarkers)
+      && canonicalJson(method.activation_markers) === canonicalJson(semantic.activation_markers)
     ));
     requireCondition(matches.length === 1, "GENERATED_SKILL_METHOD_SEMANTIC_MAPPING_INVALID", "FAIL", "CONTRACT");
-    return { semantic_id: semantic.semantic_id, semantic_markers: semanticMarkers, method: matches[0] };
+    return {
+      semantic_id: semantic.semantic_id,
+      semantic_markers: semanticMarkers,
+      activation_markers: [...semantic.activation_markers],
+      method: matches[0],
+    };
   });
   requireCondition(generatedMethods.length === methods.methods.length && new Set(generatedMethods.map((entry) => entry.method.id)).size === methods.methods.length, "GENERATED_SKILL_METHOD_SET_DRIFT", "FAIL", "CONTRACT");
   requireCondition(scenarioOracle.oracle.expected_status === "RESOLVED", "RELEASE_CASE_EXPECTED_STATUS_INVALID", "FAIL", "CONTRACT");
@@ -354,6 +395,7 @@ function selectedReleaseCase(repoRoot, generatedSkill) {
       id: method.id,
       priority: method.priority,
       evidence_markers: [...method.evidence_markers],
+      activation_markers: [...method.activation_markers],
     }))
     .sort((left, right) => left.priority - right.priority || left.id.localeCompare(right.id));
   const verdictByMethodId = new Map(semanticVerdicts.map((item) => [item.method_id, item.verdict]));

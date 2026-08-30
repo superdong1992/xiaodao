@@ -580,7 +580,7 @@ export function buildCodexLunaThreadStartRequest({
     model: CODEX_LUNA_MODEL,
     allowProviderModelFallback: false,
     cwd: root,
-    runtimeWorkspaceRoots: [],
+    runtimeWorkspaceRoots: [root],
     approvalPolicy: "never",
     approvalsReviewer: "user",
     permissions: profileId,
@@ -618,7 +618,7 @@ export function buildCodexLunaTurnStartRequest({
       { type: "text", text: prompt, text_elements: [] },
     ],
     cwd: root,
-    runtimeWorkspaceRoots: [],
+    runtimeWorkspaceRoots: [root],
     approvalPolicy: "never",
     approvalsReviewer: "user",
     permissions: codexLunaPermissionProfileId(normalizedModeValue),
@@ -1063,7 +1063,13 @@ export function parseCodexLunaAppServerTranscript(transcript, {
   requireAppServer(threadStart.thread?.id === threadId && threadStarted.message.params.thread?.id === threadId, "CODEX_LUNA_APP_SERVER_THREAD_BINDING_INVALID", "Thread response and notifications disagree");
   requireAppServer(threadStart.model === CODEX_LUNA_MODEL && threadStart.reasoningEffort === CODEX_LUNA_REASONING_EFFORT && threadStart.modelProvider === "openai", "CODEX_LUNA_APP_SERVER_MODEL_IDENTITY_INVALID", "Thread did not use the pinned OpenAI model and reasoning effort");
   requireAppServer(threadStart.cwd === expectedRoot, "CODEX_LUNA_APP_SERVER_WORKSPACE_BINDING_INVALID", "Thread cwd differs from the invocation workspace");
-  requireAppServer(Array.isArray(threadStart.runtimeWorkspaceRoots) && threadStart.runtimeWorkspaceRoots.length === 0, "CODEX_LUNA_APP_SERVER_WORKSPACE_BINDING_INVALID", "Thread runtime workspace roots must remain empty; the custom profile owns the explicit root");
+  requireAppServer(
+    Array.isArray(threadStart.runtimeWorkspaceRoots)
+      && threadStart.runtimeWorkspaceRoots.length === 1
+      && threadStart.runtimeWorkspaceRoots[0] === expectedRoot,
+    "CODEX_LUNA_APP_SERVER_WORKSPACE_BINDING_INVALID",
+    "Thread runtime workspace roots must contain only the invocation workspace",
+  );
   requireAppServer(Array.isArray(threadStart.instructionSources), "CODEX_LUNA_APP_SERVER_INSTRUCTION_SOURCES_INVALID", "Thread instructionSources must be an array");
   const instructionSources = [...new Set(threadStart.instructionSources)];
   requireAppServer(instructionSources.length === threadStart.instructionSources.length && instructionSources.every((source) => isNonEmptyString(source) && path.isAbsolute(source) && pathIsInside(expectedRoot, path.resolve(source))), "CODEX_LUNA_APP_SERVER_INSTRUCTION_SOURCES_INVALID", "Thread instruction sources must be unique absolute paths inside the invocation workspace");

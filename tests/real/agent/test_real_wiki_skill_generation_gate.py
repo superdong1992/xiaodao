@@ -40,6 +40,10 @@ NON_CANONICAL_EVENT_NAMES = (
     "LATE_RESPONSE",
     "QUEUE_HISTORY",
 )
+RPC_TIMEOUT_CONTEXT_MARKERS = (
+    "rpc call",
+    "call unsuccess, reqid(",
+)
 
 
 class _Signal:
@@ -112,9 +116,9 @@ def _generation_prompt(
 
 Your first action must call the Skill tool with exactly {{"skill":"wiki-to-diagnosis-skill"}}. After that call succeeds, read inputs/wiki.md and runtime/source-wiki-identity.json in full. The closed source identity v2 was generated mechanically from the exact Wiki bytes before this invocation. Copy its `sha256` value verbatim into methods.json as `source_wiki_sha256`; use its `log_templates` as the complete, ordered, duplicate-preserving checklist for `references/source-log-templates.md`; never calculate, guess, normalize, reorder, deduplicate, or replace those values. The Wiki remains the only source of business meaning. From the Skill result, take the exact absolute `Base directory for this skill:` and read only its linked references/output-contract.md in full. Do not read clarifications, repository files, registration metadata, tests, oracles, validators, or any other path. Do not call Bash, Edit, Glob, Grep, or any tool other than the available Skill, Read, and Write tools. Do not call any tool with missing or invalid input.
 
-The Gate mechanically derived this ordered canonical marker checklist from source identity `log_templates` with the same function used by the canonical validator: {checklist_json}. Every item in methods.json `evidence_markers` must be copied byte-for-byte from this checklist. The checklist does not assign markers to methods and adds no business meaning; use the authored Wiki to choose which listed markers belong to each cause. Do not invent, shorten, or extend a marker. These bare event names are shorthand, not valid markers unless the exact whole string itself appears in the checklist: {shorthand_json}.
+The Gate mechanically derived this ordered canonical marker checklist from source identity `log_templates` with the same function used by the canonical validator: {checklist_json}. Every item in methods.json `evidence_markers` and `activation_markers` must be copied byte-for-byte from this checklist. The checklist does not assign markers to methods and adds no business meaning; use the authored Wiki to choose which listed markers belong to each cause. Do not invent, shorten, or extend a marker. These bare event names are shorthand, not valid markers unless the exact whole string itself appears in the checklist: {shorthand_json}.
 
-Before writing, perform a per-method prerequisite-closure self-check: list every complete Wiki log template that the method reads to confirm, reject, calculate, or associate the target request; put each exact template in that method card's `## 所需证据` section; derive the method's `evidence_markers` from precisely those templates in source-identity order. A marker mention outside `## 所需证据`, or a template present only in a shared reference, does not satisfy this closure. Derive every template-to-method assignment only from the authored Wiki; this prompt does not provide or imply the expected assignment.
+Before writing, perform a per-method prerequisite-closure self-check: list every complete Wiki log template that the method reads to confirm, reject, calculate, or associate the target request; put each exact template in that method card's `## 所需证据` section; derive the method's `evidence_markers` from precisely those templates in source-identity order. Then select a non-empty, unique, ordered `activation_markers` subsequence containing only markers whose appearance makes that method worth evaluating. Activation starts an evaluation; it does not by itself confirm the cause. The two public RPC timeout/failure markers are context only and must not appear in `activation_markers`. The same literal may appear in multiple methods' activation lists when the Wiki makes each method worth evaluating. A marker mention outside `## 所需证据`, or a template present only in a shared reference, does not satisfy this closure. Derive every template-to-method assignment only from the authored Wiki; this prompt does not provide or imply the expected assignment.
 
 Generate the complete package directly under output/{requested_skill_name}. Its files must be exactly output/{requested_skill_name}/SKILL.md, output/{requested_skill_name}/methods.json, and the output-contract references, including the mandatory output/{requested_skill_name}/references/source-log-templates.md. Put that fixed reference first in methods.json `shared_references` and never use it as a method reference. Do not emit GenerationSpec, diagnosis-skill.json, registration metadata, copied Wiki, README, scripts, or tests. Use exactly one successful Write call per final package file, with both file_path and complete non-empty content in the same call. Finish every required Read before the first Write; before writing, check every source identity `log_templates` item against the complete fixed-reference content one-for-one and in order. After writing starts, perform only the contiguous sequence of package Write calls. Never overwrite a path, never write outside this one package, and stop after the final Write succeeds.
 
@@ -223,6 +227,7 @@ def _gate_only_oracle_audit(
         {
             "method_id": method.id,
             "markers": frozenset(method.evidence_markers),
+            "activation_markers": tuple(method.activation_markers),
         }
         for method in manifest.methods
     ]
@@ -267,6 +272,16 @@ def _gate_only_oracle_audit(
         for method_id in generated_method_ids
         if method_id not in mapped_method_id_set
     ]
+    context_activated_method_ids = [
+        generated["method_id"]
+        for generated in generated_methods
+        if any(
+            marker in RPC_TIMEOUT_CONTEXT_MARKERS
+            for marker in generated["activation_markers"]
+        )
+    ]
+    if context_activated_method_ids:
+        mismatches.append("rpc_timeout_context_activation")
 
     shared_text = "\n".join(
         (package_root / relative).read_text(encoding="utf-8")
@@ -320,6 +335,7 @@ def _gate_only_oracle_audit(
         "method_mapping_is_bijective": method_mapping_is_bijective,
         "unmapped_method_ids": unmapped_method_ids,
         "method_marker_coverage": method_marker_coverage,
+        "rpc_timeout_context_activation_method_ids": context_activated_method_ids,
         "missing_shared_marker_count": len(missing_shared_markers),
         "forbidden_path_count": len(forbidden_paths),
         "forbidden_note_marker_count": len(forbidden_note_markers),
@@ -399,8 +415,8 @@ description: Test-only Methods package for the generation Gate oracle.
 ---
 
 Read request.json, method-evidence-graph.json, and method-evaluation-plan.json.
-Return evaluation_ref, verdict, and reason for every item. Use UNKNOWN when
-the frozen evidence cannot decide a method.
+Return evaluation_ref, verdict, supporting_event_refs, and reason for every
+item. Use UNKNOWN when the frozen evidence cannot decide a method.
 """,
         encoding="utf-8",
     )
@@ -444,6 +460,11 @@ Return one evaluation verdict.
                 "reference": reference,
                 "priority": index,
                 "evidence_markers": list(semantic["all_markers"]),
+                "activation_markers": [
+                    marker
+                    for marker in semantic["all_markers"]
+                    if marker not in RPC_TIMEOUT_CONTEXT_MARKERS
+                ],
             }
         )
     shared_reference = "references/source-log-templates.md"
@@ -507,6 +528,8 @@ def test_generation_prompt_uses_validator_canonical_marker_checklist() -> None:
         separators=(",", ":"),
     ) in prompt
     assert "per-method prerequisite-closure self-check" in prompt
+    assert "context only and must not appear in `activation_markers`" in prompt
+    assert "The same literal may appear in multiple methods' activation lists" in prompt
     assert "this prompt does not provide or imply the expected assignment" in prompt
     assert all(template not in prompt for template in source_identity["log_templates"])
     contract = (META_SKILL_ROOT / "references/output-contract.md").read_text(
@@ -535,6 +558,10 @@ def test_generation_validator_rejects_all_observed_shorthand_markers(
         method["evidence_markers"] = [
             shorthand_by_marker.get(marker, marker)
             for marker in method["evidence_markers"]
+        ]
+        method["activation_markers"] = [
+            shorthand_by_marker.get(marker, marker)
+            for marker in method["activation_markers"]
         ]
     methods_path.write_text(
         json.dumps(manifest, ensure_ascii=False, sort_keys=True) + "\n",
@@ -610,10 +637,41 @@ def test_generation_gate_oracle_accepts_exact_one_to_one_package(
     assert audit["generated_method_count"] == audit["expected_method_count"] == 3
     assert audit["method_mapping_is_bijective"] is True
     assert audit["unmapped_method_ids"] == []
+    assert audit["rpc_timeout_context_activation_method_ids"] == []
     assert all(
         item["exact_match_count"] == 1 and len(item["matched_method_ids"]) == 1
         for item in audit["method_marker_coverage"]
     )
+
+
+def test_generation_gate_oracle_rejects_public_timeout_as_activation(
+    tmp_path: Path,
+) -> None:
+    package_root, manifest, oracle = _gate_oracle_test_baseline(tmp_path)
+    first = manifest.methods[0]
+    mutant = replace(
+        manifest,
+        methods=(
+            replace(
+                first,
+                activation_markers=(
+                    first.evidence_markers[0],
+                    *first.activation_markers,
+                ),
+            ),
+            *manifest.methods[1:],
+        ),
+    )
+
+    audit = _gate_only_oracle_audit(
+        package_root=package_root,
+        manifest=mutant,
+        oracle=oracle,
+    )
+
+    assert audit["status"] == "FAIL"
+    assert "rpc_timeout_context_activation" in audit["mismatches"]
+    assert audit["rpc_timeout_context_activation_method_ids"] == [first.id]
 
 
 def test_generation_gate_oracle_rejects_extra_marker(tmp_path: Path) -> None:

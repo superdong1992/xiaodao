@@ -35,16 +35,34 @@ ROOT_KEYS = {
     "shared_references",
     "methods",
 }
-METHOD_KEYS = {"id", "title", "reference", "priority", "evidence_markers"}
+METHOD_KEYS = {
+    "id",
+    "title",
+    "reference",
+    "priority",
+    "evidence_markers",
+    "activation_markers",
+}
 SOURCE_LOG_TEMPLATES_REFERENCE = "references/source-log-templates.md"
 SOURCE_IDENTITY_SCHEMA_VERSION = 2
 LOG_TEMPLATE_EXTRACTION_VERSION = 1
+METHOD_OUTPUT_CONTRACT_PATTERN = re.compile(
+    r"(?:只输出|仅输出|只能包含|仅包含|只包含|"
+    r"(?:only\s+(?:output|return|contain|contains))|"
+    r"(?:(?:output|return|contain|contains)\s+only))"
+    r"[\s\S]{0,512}?evaluation_ref"
+    r"[\s\S]{0,256}?verdict"
+    r"[\s\S]{0,256}?supporting_event_refs"
+    r"[\s\S]{0,256}?reason",
+    re.IGNORECASE,
+)
 REQUIRED_SKILL_PHRASES = (
     "request.json",
     "method-evidence-graph.json",
     "method-evaluation-plan.json",
     "evaluation_ref",
     "verdict",
+    "supporting_event_refs",
     "reason",
     "UNKNOWN",
 )
@@ -228,6 +246,17 @@ def canonical_evidence_markers(log_templates: list[str]) -> list[str]:
     return markers
 
 
+def _is_ordered_subsequence(candidate: list[str], sequence: list[str]) -> bool:
+    cursor = 0
+    for marker in candidate:
+        while cursor < len(sequence) and sequence[cursor] != marker:
+            cursor += 1
+        if cursor == len(sequence):
+            return False
+        cursor += 1
+    return True
+
+
 def _outside_html_comments(line: str, in_comment: bool) -> tuple[str, bool]:
     visible = list(line)
     cursor = 0
@@ -393,6 +422,10 @@ def validate(skill_dir: Path, wiki: Path) -> dict[str, object]:
             for required_phrase in REQUIRED_SKILL_PHRASES:
                 if required_phrase not in skill_text:
                     errors.append(f"SKILL.md must mention {required_phrase}")
+            if METHOD_OUTPUT_CONTRACT_PATTERN.search(skill_text) is None:
+                errors.append(
+                    "SKILL.md must state the exact four-field Methods evaluation output"
+                )
 
     manifest = _read_json(skill_dir / "methods.json", errors)
     wiki_bytes = wiki.read_bytes() if wiki.exists() else b""
@@ -521,6 +554,21 @@ def validate(skill_dir: Path, wiki: Path) -> dict[str, object]:
                     errors.append(
                         f"method {index} evidence marker is not a canonical stable Wiki log marker: {marker}"
                     )
+            activation_markers = method.get("activation_markers")
+            if (
+                not isinstance(activation_markers, list)
+                or not activation_markers
+                or any(
+                    not isinstance(marker, str) or not marker
+                    for marker in activation_markers
+                )
+                or len(activation_markers) != len(set(activation_markers))
+            ):
+                errors.append(f"method {index} activation_markers are invalid")
+            elif not _is_ordered_subsequence(activation_markers, markers):
+                errors.append(
+                    f"method {index} activation_markers must be an ordered subsequence of evidence_markers"
+                )
             if reference is not None and reference != SOURCE_LOG_TEMPLATES_REFERENCE:
                 marker_bindings.append((index, reference, markers))
         if priorities != list(range(1, method_count + 1)):

@@ -61,6 +61,8 @@ def test_two_generators_share_the_methods_v2_agent_surface() -> None:
     assert package_validator.REQUIRED_SKILL_PHRASES == (
         registration_validator.REQUIRED_SKILL_PHRASES
     )
+    assert package_validator.METHOD_KEYS == registration_validator.METHOD_KEYS
+    assert "activation_markers" in package_validator.METHOD_KEYS
     for contract in (
         ROOT
         / ".agents/skills/wiki-to-diagnosis-skill/references/output-contract.md",
@@ -70,6 +72,8 @@ def test_two_generators_share_the_methods_v2_agent_surface() -> None:
         text = contract.read_text(encoding="utf-8")
         for phrase in package_validator.REQUIRED_SKILL_PHRASES:
             assert phrase in text
+        assert "`activation_markers` 必填、非空且组内唯一" in text
+        assert "公共 RPC timeout 日志只能放在 `evidence_markers`" in text
         assert "INSUFFICIENT_EVIDENCE" not in text
         for old_json_field in ('"target_logs":', '"identity_tokens":', '"sources":'):
             assert old_json_field not in text
@@ -82,6 +86,7 @@ def _write_package(
     required_user_inputs: list[str] | None = None,
     log_derived_fields: list[str] | None = None,
     evidence_marker: str = "RPC timeout",
+    activation_marker: str | None = None,
     reference_log_template: str | None = None,
     source_log_templates: list[str] | None = None,
 ) -> Path:
@@ -97,8 +102,9 @@ description: Diagnose one RPC timeout from frozen evidence.
 Read request.json, method-evidence-graph.json, and method-evaluation-plan.json.
 Use request values for declared inputs. Log evidence comes only from the
 Evidence Graph and Evaluation Plan; do not rescan logs. Evaluate every
-evaluation_ref in plan order and return only verdict and reason; use UNKNOWN
-when the evidence cannot decide the method rule.
+evaluation_ref in plan order and return only evaluation_ref, verdict,
+supporting_event_refs, and reason; use UNKNOWN when the evidence cannot decide
+the method rule.
 Server-produced evidence sources may originate from target_logs and retain
 identity_tokens internally.
 """,
@@ -126,6 +132,9 @@ identity_tokens internally.
                         "reference": "references/rpc-timeout.md",
                         "priority": 1,
                         "evidence_markers": [evidence_marker],
+                        "activation_markers": [
+                            activation_marker or evidence_marker
+                        ],
                     }
                 ],
             },
@@ -229,7 +238,10 @@ def test_generated_v2_skill_reads_request_for_required_user_inputs(
     assert "request.json" in skill_text
     assert "method-evidence-graph.json" in skill_text
     assert "method-evaluation-plan.json" in skill_text
-    assert all(field in skill_text for field in ("evaluation_ref", "verdict", "reason"))
+    assert all(
+        field in skill_text
+        for field in ("evaluation_ref", "verdict", "supporting_event_refs", "reason")
+    )
 
 
 def test_validator_requires_canonical_markers_and_named_field_order(
@@ -278,6 +290,7 @@ RPC timeout is caused by the following positive log.
 
     manifest["log_derived_fields"] = ["request_id", "elapsed_us"]
     manifest["methods"][0]["evidence_markers"] = ["RPC_TIMEOUT"]
+    manifest["methods"][0]["activation_markers"] = ["RPC_TIMEOUT"]
     manifest_path.write_text(
         json.dumps(manifest, ensure_ascii=False, sort_keys=True) + "\n",
         encoding="utf-8",
@@ -315,6 +328,7 @@ def test_validator_rejects_marker_from_another_method_reference(
             "reference": "references/second-method.md",
             "priority": 2,
             "evidence_markers": ["SECOND id="],
+            "activation_markers": ["SECOND id="],
         }
     )
     methods_path.write_text(
@@ -334,6 +348,7 @@ def test_validator_rejects_marker_from_another_method_reference(
     assert validator.validate(package, wiki)["ok"] is True
 
     manifest["methods"][0]["evidence_markers"] = ["SECOND id="]
+    manifest["methods"][0]["activation_markers"] = ["SECOND id="]
     methods_path.write_text(
         json.dumps(manifest, ensure_ascii=False, sort_keys=True) + "\n",
         encoding="utf-8",
@@ -345,6 +360,92 @@ def test_validator_rejects_marker_from_another_method_reference(
         "method 1 的 evidence marker 在“所需证据”中没有对应的完整 Wiki 日志模板: "
         "SECOND id="
     ]
+
+
+def test_validator_requires_activation_marker_order_and_allows_cross_method_literal(
+    tmp_path: Path,
+) -> None:
+    templates = ["FIRST id={first_id}", "SECOND id={second_id}"]
+    wiki = tmp_path / "wiki.md"
+    wiki_bytes = (
+        "# Authored Wiki\n\n```text\n" + "\n".join(templates) + "\n```\n"
+    ).encode("utf-8")
+    wiki.write_bytes(wiki_bytes)
+    package = _write_package(
+        tmp_path,
+        wiki_sha256=hashlib.sha256(wiki_bytes).hexdigest(),
+        log_derived_fields=["first_id", "second_id"],
+        evidence_marker="FIRST id=",
+        reference_log_template=templates[0],
+        source_log_templates=templates,
+    )
+    methods_path = package / "methods.json"
+    manifest = json.loads(methods_path.read_text(encoding="utf-8"))
+    manifest["methods"][0]["evidence_markers"] = ["FIRST id=", "SECOND id="]
+    manifest["methods"][0]["activation_markers"] = ["SECOND id="]
+    reference = package / "references/rpc-timeout.md"
+    reference.write_text(
+        reference.read_text(encoding="utf-8").replace(
+            templates[0], "\n".join(templates)
+        ),
+        encoding="utf-8",
+    )
+    manifest["methods"].append(
+        {
+            "id": "shared-activation",
+            "title": "Shared activation",
+            "reference": "references/shared-activation.md",
+            "priority": 2,
+            "evidence_markers": ["SECOND id="],
+            "activation_markers": ["SECOND id="],
+        }
+    )
+    (package / "references/shared-activation.md").write_text(
+        reference.read_text(encoding="utf-8")
+        .replace("# RPC timeout", "# Shared activation", 1)
+        .replace(f"{templates[0]}\n", "", 1),
+        encoding="utf-8",
+    )
+    methods_path.write_text(
+        json.dumps(manifest, ensure_ascii=False, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    validator = _load_validator()
+
+    assert validator.validate(package, wiki)["ok"] is True
+
+    for activation_markers, expected_error in (
+        ([], "method 1 activation_markers are invalid"),
+        (["SECOND id=", "SECOND id="], "method 1 activation_markers are invalid"),
+        (
+            ["NOT_IN_EVIDENCE"],
+            "method 1 activation_markers must be an ordered subsequence of evidence_markers",
+        ),
+        (
+            ["SECOND id=", "FIRST id="],
+            "method 1 activation_markers must be an ordered subsequence of evidence_markers",
+        ),
+    ):
+        manifest["methods"][0]["activation_markers"] = activation_markers
+        methods_path.write_text(
+            json.dumps(manifest, ensure_ascii=False, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        rejected = validator.validate(package, wiki)
+        assert rejected["ok"] is False
+        assert expected_error in rejected["errors"]
+
+    del manifest["methods"][0]["activation_markers"]
+    methods_path.write_text(
+        json.dumps(manifest, ensure_ascii=False, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    missing = validator.validate(package, wiki)
+    assert missing["ok"] is False
+    assert (
+        "method 1 keys do not match the methods package contract"
+        in missing["errors"]
+    )
 
 
 def test_validator_rejects_shared_only_prerequisite_and_marker_order(

@@ -635,7 +635,24 @@ class MethodsReviewerEvaluationV2(ContractModel):
         StringConstraints(pattern=METHOD_EVALUATION_REF_V2_PATTERN, strict=True),
     ]
     verdict: Literal["CONFIRMED", "REJECTED", "UNKNOWN"]
+    supporting_event_refs: tuple[
+        Annotated[
+            str,
+            StringConstraints(pattern=METHOD_EVIDENCE_EVENT_REF_V2_PATTERN, strict=True),
+        ],
+        ...,
+    ]
     reason: NonEmptyText
+
+    @model_validator(mode="after")
+    def validate_supporting_events(self) -> "MethodsReviewerEvaluationV2":
+        if len(self.supporting_event_refs) != len(set(self.supporting_event_refs)):
+            raise ValueError("Methods Reviewer supporting event refs must be unique")
+        if self.verdict == "CONFIRMED" and not self.supporting_event_refs:
+            raise ValueError("confirmed Methods Reviewer evaluation requires events")
+        if self.verdict != "CONFIRMED" and self.supporting_event_refs:
+            raise ValueError("non-confirmed Methods Reviewer evaluation must clear events")
+        return self
 
 
 class MethodsReviewerResultV2(ContractModel):
@@ -817,34 +834,43 @@ def validate_methods_reviewer_terminal_v2(
             "Methods V2 terminal REVIEW Outcome must bind its Reviewer result"
         )
     reviewer_verdicts = tuple(
-        (item.evaluation_ref, item.verdict) for item in reviewer.evaluations
+        (item.evaluation_ref, item.verdict, item.supporting_event_refs)
+        for item in reviewer.evaluations
     )
     if terminal.status == "RESOLVED":
         reviewer_confirmed = tuple(
             evaluation_ref
-            for evaluation_ref, verdict in reviewer_verdicts
+            for evaluation_ref, verdict, _ in reviewer_verdicts
             if verdict == "CONFIRMED"
         )
-        if reviewer_confirmed != terminal.confirmed_evaluation_refs or any(
-            verdict == "UNKNOWN" for _, verdict in reviewer_verdicts
+        reviewer_events = tuple(
+            event_ref
+            for _, verdict, event_refs in reviewer_verdicts
+            if verdict == "CONFIRMED"
+            for event_ref in event_refs
+        )
+        if (
+            reviewer_confirmed != terminal.confirmed_evaluation_refs
+            or reviewer_events != terminal.confirmed_event_refs
+            or any(verdict == "UNKNOWN" for _, verdict, _ in reviewer_verdicts)
         ):
             raise ValueError(
-                "resolved Methods Reviewer verdicts differ from confirmed refs"
+                "resolved Methods Reviewer verdicts or events differ from confirmed refs"
             )
     elif terminal.reason_code == "NO_CONFIRMED_METHOD" and any(
-        verdict != "REJECTED" for _, verdict in reviewer_verdicts
+        verdict != "REJECTED" for _, verdict, _ in reviewer_verdicts
     ):
         raise ValueError(
             "NO_CONFIRMED_METHOD requires all Reviewer verdicts REJECTED"
         )
     elif terminal.reason_code == "INCOMPLETE_EVALUATION" and all(
-        verdict != "UNKNOWN" for _, verdict in reviewer_verdicts
+        verdict != "UNKNOWN" for _, verdict, _ in reviewer_verdicts
     ):
         raise ValueError(
             "INCOMPLETE_EVALUATION requires an UNKNOWN Reviewer verdict"
         )
     elif terminal.reason_code == "SPECIALIST_REVIEWER_DISAGREEMENT" and any(
-        verdict == "UNKNOWN" for _, verdict in reviewer_verdicts
+        verdict == "UNKNOWN" for _, verdict, _ in reviewer_verdicts
     ):
         raise ValueError("disagreement Reviewer result must not contain UNKNOWN")
 

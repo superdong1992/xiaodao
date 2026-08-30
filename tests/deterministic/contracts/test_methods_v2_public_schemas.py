@@ -118,11 +118,14 @@ def _role_response(
     *,
     role: str,
     verdicts: tuple[str, ...],
-) -> list[dict[str, str]]:
+) -> list[dict[str, object]]:
     return [
         {
             "evaluation_ref": item.evaluation_ref,
             "verdict": verdict,
+            "supporting_event_refs": (
+                list(item.evidence_event_refs) if verdict == "CONFIRMED" else []
+            ),
             "reason": f"private {role.lower()} reason {index}",
         }
         for index, (item, verdict) in enumerate(
@@ -208,6 +211,7 @@ def production_chain(
         terminal_state=terminal_state,
         terminal_result=terminal_result,
         plan=plan,
+        evidence=graph,
         produced_at="2026-07-31T00:03:30.000Z",
     )
     assert outcome.methods_reviewer_result is not None

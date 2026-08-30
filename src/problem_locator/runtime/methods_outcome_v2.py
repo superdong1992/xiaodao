@@ -59,6 +59,7 @@ def build_method_terminal_result_v2(
 
     known_event_refs = {item.event_ref for item in evidence.events}
     known_hit_refs = {item.hit_ref for item in evidence.hits}
+    event_by_ref = {item.event_ref: item for item in evidence.events}
     plan_by_ref = {item.evaluation_ref: item for item in plan.evaluations}
     for evaluation_ref in planned_refs:
         planned = plan_by_ref[evaluation_ref]
@@ -88,30 +89,70 @@ def build_method_terminal_result_v2(
         )
         if actual_method_ids != confirmed_method_ids:
             raise ValueError("consensus method identities differ from the plan")
+        specialist = state.specialist_evaluation
+        reviewer = state.reviewer_evaluation
+        if specialist is None or reviewer is None:
+            raise ValueError("resolved result requires both role evaluations")
+        specialist_by_ref = {
+            item.evaluation_ref: item for item in specialist.evaluations
+        }
+        reviewer_by_ref = {
+            item.evaluation_ref: item for item in reviewer.evaluations
+        }
+        selected_by_ref = {
+            evaluation_ref: specialist_by_ref[evaluation_ref].supporting_event_refs
+            for evaluation_ref in confirmed_evaluation_refs
+        }
+        if any(
+            reviewer_by_ref[evaluation_ref].supporting_event_refs
+            != selected_by_ref[evaluation_ref]
+            for evaluation_ref in confirmed_evaluation_refs
+        ):
+            raise ValueError("resolved role evaluations select different evidence events")
+        flattened_selected_event_refs = _unique(
+            tuple(
+                event_ref
+                for evaluation_ref in confirmed_evaluation_refs
+                for event_ref in selected_by_ref[evaluation_ref]
+            )
+        )
+        if flattened_selected_event_refs != state.consensus.confirmed_event_refs:
+            raise ValueError("consensus event refs differ from selected evidence events")
+        for item in confirmed_items:
+            if item is None:
+                continue
+            selected = selected_by_ref[item.evaluation_ref]
+            if any(event_ref not in item.evidence_event_refs for event_ref in selected):
+                raise ValueError(
+                    "selected evidence event lies outside its planned evaluation"
+                )
+            if any(
+                event_by_ref[event_ref].method_id != item.method_id
+                for event_ref in selected
+            ):
+                raise ValueError("selected evidence event belongs to another method")
         evaluations = tuple(
             MethodConfirmedEvaluationV2(
                 evaluation_ref=item.evaluation_ref,
                 method_id=item.method_id,
-                evidence_event_refs=item.evidence_event_refs,
-                evidence_hit_refs=item.evidence_hit_refs,
+                evidence_event_refs=selected_by_ref[item.evaluation_ref],
+                evidence_hit_refs=_unique(
+                    tuple(
+                        hit_ref
+                        for event_ref in selected_by_ref[item.evaluation_ref]
+                        for hit_ref in event_by_ref[event_ref].evidence_hit_refs
+                    )
+                ),
                 verdict="CONFIRMED",
             )
             for item in confirmed_items
             if item is not None
         )
-        confirmed_event_refs = _unique(
-            tuple(
-                ref
-                for item in confirmed_items
-                if item is not None
-                for ref in item.evidence_event_refs
-            )
-        )
+        confirmed_event_refs = flattened_selected_event_refs
         confirmed_hit_refs = _unique(
             tuple(
                 ref
-                for item in confirmed_items
-                if item is not None
+                for item in evaluations
                 for ref in item.evidence_hit_refs
             )
         )
@@ -161,7 +202,12 @@ def build_method_terminal_result_v2(
         limitations=frozen_limitations,
         reasons=frozen_reasons,
     )
-    return validate_method_terminal_result_v2(state, result, plan)
+    return validate_method_terminal_result_v2(
+        state,
+        result,
+        plan,
+        evidence=evidence,
+    )
 
 
 __all__ = [

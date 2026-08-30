@@ -503,7 +503,20 @@ class MethodEvaluationOutputItemV2(_MethodsV2Contract):
 
     evaluation_ref: MethodEvaluationRefV2
     verdict: MethodEvaluationVerdictV2
+    supporting_event_refs: tuple[MethodEvidenceEventRefV2, ...]
     reason: NonEmptyText
+
+    @model_validator(mode="after")
+    def validate_supporting_events(self) -> "MethodEvaluationOutputItemV2":
+        if len(self.supporting_event_refs) != len(set(self.supporting_event_refs)):
+            raise ValueError("supporting_event_refs must be unique")
+        if self.verdict == "CONFIRMED" and not self.supporting_event_refs:
+            raise ValueError("a confirmed evaluation requires supporting_event_refs")
+        if self.verdict != "CONFIRMED" and self.supporting_event_refs:
+            raise ValueError(
+                "a rejected or unknown evaluation must not publish supporting_event_refs"
+            )
+        return self
 
 
 class MethodRoleEvaluationV2(_MethodsV2Contract):
@@ -518,6 +531,7 @@ class MethodConsensusV2(_MethodsV2Contract):
     status: MethodConsensusStatusV2
     confirmed_evaluation_refs: tuple[MethodEvaluationRefV2, ...]
     confirmed_method_ids: tuple[MethodIdV2, ...]
+    confirmed_event_refs: tuple[MethodEvidenceEventRefV2, ...]
 
     @model_validator(mode="after")
     def validate_confirmed_mapping(self) -> "MethodConsensusV2":
@@ -527,12 +541,22 @@ class MethodConsensusV2(_MethodsV2Contract):
             raise ValueError("confirmed evaluation refs must be unique")
         if len(self.confirmed_method_ids) != len(set(self.confirmed_method_ids)):
             raise ValueError("confirmed method ids must be unique")
+        if len(self.confirmed_event_refs) != len(set(self.confirmed_event_refs)):
+            raise ValueError("confirmed event refs must be unique")
         if self.status == "UNRESOLVED" and (
-            self.confirmed_evaluation_refs or self.confirmed_method_ids
+            self.confirmed_evaluation_refs
+            or self.confirmed_method_ids
+            or self.confirmed_event_refs
         ):
-            raise ValueError("an unresolved consensus must not publish confirmed methods")
-        if self.status == "RESOLVED" and not self.confirmed_evaluation_refs:
-            raise ValueError("a resolved consensus requires at least one confirmed method")
+            raise ValueError(
+                "an unresolved consensus must not publish confirmed methods or events"
+            )
+        if self.status == "RESOLVED" and (
+            not self.confirmed_evaluation_refs or not self.confirmed_event_refs
+        ):
+            raise ValueError(
+                "a resolved consensus requires at least one confirmed method and event"
+            )
         return self
 
 

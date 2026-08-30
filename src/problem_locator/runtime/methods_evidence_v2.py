@@ -84,7 +84,14 @@ def scan_method_evidence_v2(
     )
     source_ref_by_id = {item.source_id: item.source_ref for item in sources}
     indexed_markers = tuple(
-        (method.priority, method.id, marker_index, marker, marker.casefold())
+        (
+            method.priority,
+            method.id,
+            marker_index,
+            marker,
+            marker.casefold(),
+            marker in method.activation_markers,
+        )
         for method in sorted(
             skill.methods.methods,
             key=lambda item: (item.priority, item.id),
@@ -93,7 +100,7 @@ def scan_method_evidence_v2(
     )
 
     hits: list[MethodEvidenceHitV2] = []
-    hit_method_ids: set[str] = set()
+    activated_method_ids: set[str] = set()
     for target in logs:
         # Decode and split once per source, then walk every line exactly once.
         lines = target.content.decode("utf-8").splitlines()
@@ -106,6 +113,7 @@ def scan_method_evidence_v2(
                 marker_index,
                 marker,
                 folded_marker,
+                is_activation_marker,
             ) in indexed_markers:
                 if folded_marker not in folded_line:
                     continue
@@ -132,11 +140,16 @@ def scan_method_evidence_v2(
                         line=line,
                     )
                 )
-                hit_method_ids.add(method_id)
+                if is_activation_marker:
+                    activated_method_ids.add(method_id)
 
     frozen_hits = tuple(
         sorted(
-            hits,
+            (
+                hit
+                for hit in hits
+                if hit.method_id in activated_method_ids
+            ),
             key=lambda item: (
                 item.method_priority,
                 item.method_id,
@@ -200,7 +213,7 @@ def scan_method_evidence_v2(
             skill.methods.methods,
             key=lambda item: (item.priority, item.id),
         )
-        if method.id in hit_method_ids
+        if method.id in activated_method_ids
     )
     graph_ref = method_evidence_graph_ref_v2(
         skill_sha256=skill.combined_sha256,
@@ -266,6 +279,15 @@ def build_method_evaluation_plan_v2(
             or item.marker != method_markers[item.marker_index - 1]
         ):
             raise ValueError("evidence hit marker/index does not belong to its method")
+    for method_id in evidence.loaded_method_ids:
+        activation_markers = methods_by_id[method_id].activation_markers
+        if not any(
+            item.method_id == method_id and item.marker in activation_markers
+            for item in evidence.hits
+        ):
+            raise ValueError(
+                "evidence graph loaded method has no activation marker hit"
+            )
 
     evaluations: list[MethodEvaluationPlanItemV2] = []
     for method_id in evidence.loaded_method_ids:

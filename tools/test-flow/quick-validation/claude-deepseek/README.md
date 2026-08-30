@@ -1,7 +1,8 @@
 # Claude Code + DeepSeek 快速验证
 
 该入口冻结 Claude Code `2.1.89`、官方 `cli.js` SHA-256、env-only settings fingerprint 和
-`deepseek-v4-flash[1m]`。Methods package 生成与 Evidence V2 模型认证是两个独立 Goal。
+`deepseek-v4-flash[1m]`。该入口有三个互不替代的 Goal：Methods registration 生成、历史场景
+Fast E2E、Evidence V2 P1 model cert。
 
 ## 生成 Methods registration cache
 
@@ -18,6 +19,38 @@
 `inputs.registration_cache.path` 是 producer cache 目录，`inputs.registration_cache.registration_root`
 是当前校验通过的完整 registration 根。P2 必须使用这里列出的同一个 `registration_root`，不能另行生成
 或改写 package。
+
+## 历史九场景 Fast E2E
+
+Fast E2E 直接把 `experiments/rpc-skill-feasibility/cases/**` 中冻结的 `case.json` 和双端原始日志
+交给生产 `DiagnosisRuntime`。它验证四个基础场景和五个能力探针，不读取 Release 的同名场景：
+
+```text
+api-execution-overrun      client-receive-blocked
+deadloop-detected          insufficient-evidence
+multiple-rpc-timeouts      server-queue-delay
+server-queue-five          server-queue-single
+unrelated-log-noise
+```
+
+先查看全部场景计划：
+
+```bash
+./tools/test-flow/quick-validation/claude-deepseek/run.sh \
+  --goal fast-e2e \
+  --all-scenarios \
+  --registration-root <generated production registration> \
+  --plan-only
+```
+
+也可以把 `--all-scenarios` 换成 `--scenario <id>` 调试单例。`insufficient-evidence` 必须在服务端
+发现没有 cause evaluation 后直接 `UNRESOLVED`，模型调用数和硬上限都是 0；其余八例正常各调用
+Specialist、Reviewer 一次，每个角色最多 repair 一次。完整矩阵正常 16 次、硬上限 32 次调用。
+
+Fast E2E 不要求 source snapshot 或 Core verdict，不生成 `model-cert-input.json`、`model-cert.json` 或
+Release verdict。每个场景有独立轻量 verdict；历史 oracle 不进入模型上下文。oracle 或模型能力失败
+会封存该场景并继续矩阵，Runtime、provider 或证据落盘等工程失败才停止后续场景。该结论只说明九个
+冻结场景下的定位能力边界。
 
 ## Evidence V2 P1 model cert
 
@@ -50,7 +83,8 @@ template 和 `methods.json` 摘要，并列出 provider/model/settings、Core �
 5. Reviewer 只读取自己的冻结上下文，写 `output/method-review.draft.json`；
 6. 生产 Runtime 机械共识并发布 Case 的 `methods_result`。
 
-两个角色都只提交 `evaluation_ref + verdict + reason` 根数组。正常各调用一次；某角色第一次发生
+两个角色都只提交 `evaluation_ref + verdict + supporting_event_refs + reason` 根数组。确认项只选
+当前计划项中的有序 event ref 子集。正常各调用一次；某角色第一次发生
 JSON 结构或 Plan 覆盖错误时，只允许一次 repair。每角色最多两次，总上限四次，没有模型重试。
 wrapper 不改写草稿，`harness_normalized=false`。
 

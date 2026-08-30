@@ -20,18 +20,25 @@ Return one item for every Evaluation Plan item, in exact plan order:
   {
     "evaluation_ref": "eval-<server value>",
     "verdict": "CONFIRMED",
+    "supporting_event_refs": ["event-<server value>"],
     "reason": "short method-rule evaluation"
   }
 ]
 ```
 
-Every item has exactly `evaluation_ref`, `verdict`, and `reason`.
-`evaluation_ref` must equal the corresponding plan value. `verdict` is exactly
-one of `CONFIRMED`, `REJECTED`, or `UNKNOWN`. `reason` is non-empty and explains
-the rule decision without quoting markers, raw log text, line numbers, hashes, or
-identity values. Do not omit, add, duplicate, or reorder evaluations.
+Every item has exactly `evaluation_ref`, `verdict`, `supporting_event_refs`, and
+`reason`. `evaluation_ref` must equal the corresponding plan value. `verdict` is
+exactly one of `CONFIRMED`, `REJECTED`, or `UNKNOWN`. For `CONFIRMED`,
+`supporting_event_refs` is a non-empty subset of that plan item's
+`evidence_event_refs`, retaining their plan order. For `REJECTED` or `UNKNOWN`,
+it is an empty array. Select only exact event refs issued in the Evaluation Plan.
+Do not return hit refs and do not copy or invent markers, raw log text, line
+numbers, hashes, identity values, or any other evidence fields. `reason` is
+non-empty and explains the rule decision without quoting those fields. Do not
+omit, add, duplicate, or reorder evaluations.
 
 If the Server invokes this same SPECIALIST role once to repair a structure or
 coverage error, fix only the reported JSON shape, field set, plan coverage, plan
-order, exact reference, verdict enum, or empty reason. Keep the evaluation
-meaning unchanged. There is no second repair.
+order, exact evaluation or event reference, supporting-event relation, verdict
+enum, or empty reason. Return the same four fields for every item. Keep the
+evaluation meaning unchanged. There is no second repair.

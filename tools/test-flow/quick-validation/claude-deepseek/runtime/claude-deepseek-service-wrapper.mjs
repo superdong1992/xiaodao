@@ -105,7 +105,7 @@ export function parseMethodsRolePrompt(prompt) {
   const attempt = roleMatch[2] === "primary evaluation" ? "PRIMARY" : "REPAIR";
   const expectedOutput = ROLE_SPEC[role].output;
   requireWrapper(prompt.includes(`Write only ${expectedOutput}.`), "CLAUDE_DEEPSEEK_ROLE_OUTPUT_INVALID", "Evidence V2 role prompt does not bind its one output draft");
-  requireWrapper(prompt.includes("evaluation_ref, verdict, and reason"), "CLAUDE_DEEPSEEK_ROLE_CONTRACT_INVALID", "Evidence V2 evaluation array contract is missing");
+  requireWrapper(prompt.includes("evaluation_ref, verdict, supporting_event_refs, and reason"), "CLAUDE_DEEPSEEK_ROLE_CONTRACT_INVALID", "Evidence V2 evaluation array contract is missing");
   return Object.freeze({ role, attempt, output: expectedOutput });
 }
 

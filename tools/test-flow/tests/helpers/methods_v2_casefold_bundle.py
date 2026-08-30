@@ -107,6 +107,7 @@ def _registration(root: Path) -> Path:
                     "reference": "references/casefold-method.md",
                     "priority": 1,
                     "evidence_markers": [MARKER],
+                    "activation_markers": [MARKER],
                 }
             ],
         },
@@ -120,7 +121,8 @@ description: Untrusted test input consumed by the production Runtime for Unicode
 # Unicode casefold diagnosis
 
 Read request.json, method-evidence-graph.json, and method-evaluation-plan.json.
-Return only evaluation_ref, verdict, and reason; UNKNOWN is allowed.
+Return only evaluation_ref, verdict, supporting_event_refs, and reason;
+UNKNOWN is allowed.
 """,
         encoding="utf-8",
     )
@@ -150,12 +152,27 @@ Return only evaluation_ref, verdict, and reason; UNKNOWN is allowed.
 def _casefold_fact_values(
     source_root: Path,
     generated_registration: bool,
-) -> tuple[list[dict[str, object]], dict[str, bytes]]:
-    facts, _ = _ORIGINAL_FACT_VALUES(source_root, generated_registration)
-    return facts, {
-        "client": f"{LINE}\n".encode("utf-8"),
-        "server": b"no matching marker request_id=99\n",
-    }
+    scenario_root: Path | None = None,
+) -> tuple[
+    list[dict[str, object]],
+    dict[str, bytes],
+    str,
+    dict[str, list[str]],
+]:
+    facts, _, scenario_id, user_inputs = _ORIGINAL_FACT_VALUES(
+        source_root,
+        generated_registration,
+        scenario_root,
+    )
+    return (
+        facts,
+        {
+            "client": f"{LINE}\n".encode("utf-8"),
+            "server": b"no matching marker request_id=99\n",
+        },
+        scenario_id,
+        user_inputs,
+    )
 
 
 _ORIGINAL_FACT_VALUES = runtime_driver._fact_values
@@ -207,6 +224,7 @@ def build_bundle(output_root: Path) -> dict[str, object]:
                 "id": method["id"],
                 "priority": method["priority"],
                 "evidence_markers": method["evidence_markers"],
+                "activation_markers": method["activation_markers"],
             }
             for method in methods["methods"]
         ],

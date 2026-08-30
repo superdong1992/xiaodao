@@ -63,7 +63,14 @@ const PACKAGE_FILES = Object.freeze({
     schema_version: 1,
     skill_name: SKILL,
     shared_references: [SOURCE_LOG_TEMPLATES_REFERENCE, "references/shared-boundaries.md"],
-    methods: [{ reference: "references/api-overrun.md" }],
+    methods: [{
+      id: "api-overrun",
+      title: "API overrun",
+      reference: "references/api-overrun.md",
+      priority: 1,
+      evidence_markers: ["API_COMPLETE service=", "%s rpc timeout"],
+      activation_markers: ["API_COMPLETE service="],
+    }],
   })}\n`,
   [`output/${SKILL}/references/api-overrun.md`]: "# API overrun\n",
   [`output/${SKILL}/references/shared-boundaries.md`]: "# Shared boundaries\n",
@@ -155,7 +162,7 @@ function absolutePermissionRule(filePath) {
   return `Read(//${portable.replaceAll("\\", "\\\\").replaceAll("(", "\\(").replaceAll(")", "\\)")})`;
 }
 
-test("audits one strict multi-file Methods package and emits a closed v5 receipt", () => {
+test("audits one strict multi-file Methods package and emits a closed v6 receipt", () => {
   const fixture = arrangeValid();
   try {
     const receipt = auditSkillGenerationTrace(fixture);
@@ -163,6 +170,11 @@ test("audits one strict multi-file Methods package and emits a closed v5 receipt
     assert.equal(receipt.status, "PASS");
     assert.equal(receipt.package.skill_name, SKILL);
     assert.equal(receipt.package.file_count, Object.keys(PACKAGE_FILES).length);
+    assert.deepEqual(receipt.package.method_marker_sets, [{
+      method_id: "api-overrun",
+      evidence_markers: ["API_COMPLETE service=", "%s rpc timeout"],
+      activation_markers: ["API_COMPLETE service="],
+    }]);
     assert.deepEqual(receipt.required_reads, [
       "workspace/inputs/wiki.md",
       "workspace/runtime/source-wiki-identity.json",
@@ -183,11 +195,39 @@ test("audits one strict multi-file Methods package and emits a closed v5 receipt
     tampered.package.files[0].sha256 = "0".repeat(64);
     assert.equal(validSkillGenerationTraceAuditReceipt(tampered), false);
 
+    const tamperedActivation = structuredClone(receipt);
+    tamperedActivation.package.method_marker_sets[0].activation_markers = ["%s rpc timeout", "API_COMPLETE service="];
+    assert.equal(validSkillGenerationTraceAuditReceipt(tamperedActivation), false);
+
     const legacy = structuredClone(receipt);
     legacy.schema_version = 4;
     assert.equal(validSkillGenerationTraceAuditReceipt(legacy), false);
   } finally {
     fs.rmSync(fixture.parent, { recursive: true, force: true });
+  }
+});
+
+test("rejects missing, empty, duplicate, non-member, and reordered activation markers", async (context) => {
+  const cases = [
+    ["missing", (method) => { delete method.activation_markers; }],
+    ["empty", (method) => { method.activation_markers = []; }],
+    ["duplicate", (method) => { method.activation_markers = ["API_COMPLETE service=", "API_COMPLETE service="]; }],
+    ["non-member", (method) => { method.activation_markers = ["INVENTED"]; }],
+    ["reordered", (method) => { method.activation_markers = ["%s rpc timeout", "API_COMPLETE service="]; }],
+  ];
+  for (const [name, mutate] of cases) {
+    await context.test(name, () => {
+      const fixture = arrangeValid();
+      try {
+        const relative = `output/${SKILL}/methods.json`;
+        const methods = JSON.parse(PACKAGE_FILES[relative]);
+        mutate(methods.methods[0]);
+        replacePackageContent(fixture, relative, `${JSON.stringify(methods)}\n`);
+        errorCode(() => auditSkillGenerationTrace(fixture), CODES.METHODS_CONTRACT_INVALID);
+      } finally {
+        fs.rmSync(fixture.parent, { recursive: true, force: true });
+      }
+    });
   }
 });
 

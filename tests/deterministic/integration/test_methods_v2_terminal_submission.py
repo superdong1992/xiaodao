@@ -176,6 +176,7 @@ def _running_reviewer_reason_state(tmp_path, reason_code: str):
         terminal_state=state,
         terminal_result=terminal_result,
         plan=flow.plan,
+        evidence=flow.graph,
         produced_at="2026-07-31T00:03:40.000Z",
     )
     assert outcome.methods_terminal_projection is not None

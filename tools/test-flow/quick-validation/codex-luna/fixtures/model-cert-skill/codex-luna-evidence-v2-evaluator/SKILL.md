@@ -15,6 +15,8 @@ Write exactly one file named by the prompt:
 - Reviewer: `output/method-review.draft.json`
 
 The file root is a JSON array in Evaluation Plan order. Every item contains
-only `evaluation_ref`, `verdict`, and `reason`. Do not create Evidence,
-Candidate, Artifact, grounding, partial results, or an Outcome. Do not read any
-file outside the current workspace.
+only `evaluation_ref`, `verdict`, `supporting_event_refs`, and `reason`.
+For `CONFIRMED`, select a non-empty ordered subset of the current evaluation's
+event refs. For `REJECTED` or `UNKNOWN`, use an empty array. Do not create
+Evidence, Candidate, Artifact, grounding, partial results, or an Outcome. Do
+not read any file outside the current workspace.

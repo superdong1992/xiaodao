@@ -8,7 +8,8 @@ The fixture deliberately implements the production protocol split:
   invocation.
 * Specialist and Reviewer receive the same server-generated Evaluation Plan
   in isolated workspaces.
-* Each role writes only a complete ``evaluation_ref/verdict/reason`` array.
+* Each role writes only a complete
+  ``evaluation_ref/verdict/supporting_event_refs/reason`` array.
 
 It never reads target logs, reconstructs Evidence, or invokes Logparse from a
 Methods role.
@@ -125,7 +126,7 @@ def _route(instruction: dict[str, Any], context: str) -> None:
     )
 
 
-def _evaluation_response(*, verdict: str, reason: str) -> list[dict[str, str]]:
+def _evaluation_response(*, verdict: str, reason: str) -> list[dict[str, object]]:
     plan_bytes = Path("inputs/method-evaluation-plan.json").read_bytes()
     plan = parse_canonical_json_bytes(plan_bytes, MethodEvaluationPlanV2)
     if canonical_json_bytes(plan) != plan_bytes:
@@ -134,6 +135,9 @@ def _evaluation_response(*, verdict: str, reason: str) -> list[dict[str, str]]:
         {
             "evaluation_ref": item.evaluation_ref,
             "verdict": verdict,
+            "supporting_event_refs": (
+                list(item.evidence_event_refs) if verdict == "CONFIRMED" else []
+            ),
             "reason": reason,
         }
         for item in plan.evaluations

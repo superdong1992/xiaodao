@@ -23,8 +23,9 @@
 - 明确日志证据只能来自 Evidence Graph 和 Evaluation Plan；不读取目标日志、不重新扫描 marker，
   也不重新选择日志。
 - 明确按 Evaluation Plan 顺序评估全部 `evaluation_ref`，不能在第一个确认项后停止。
-- 明确每项只输出 `evaluation_ref`、`verdict` 和 `reason`；`verdict` 只能是
-  `CONFIRMED`、`REJECTED` 或 `UNKNOWN`。
+- 明确每项只输出 `evaluation_ref`、`verdict`、`supporting_event_refs` 和 `reason`。
+  `CONFIRMED` 必须按计划顺序选择当前 evaluation 的非空 event ref 子集；`REJECTED` 或
+  `UNKNOWN` 必须使用空数组。
 - `reason` 只概括方法规则判断，不回抄 marker、日志原文、行号、哈希或事件身份。
 - 证据不足或受 Wiki 观测限制影响时使用 `UNKNOWN`，并在 `reason` 中说明边界。
 
@@ -50,7 +51,8 @@
       "title": "<short title>",
       "reference": "references/<method-id>.md",
       "priority": 1,
-      "evidence_markers": ["<literal substring present in the Wiki>"]
+      "evidence_markers": ["<literal substring present in the Wiki>"],
+      "activation_markers": ["<ordered activation marker from evidence_markers>"]
     }
   ]
 }
@@ -99,6 +101,11 @@ Wiki `text` 日志模板使用 `{field_name}` 命名字段时，先按模板及�
   例如，`API_COMPLETE service={service} api={api} ...` 的 marker 是
   `API_COMPLETE service=`，不是 `API_COMPLETE`；`QUEUE_HISTORY print_time_ms={print_time_ms} ...`
   的 marker 是 `QUEUE_HISTORY print_time_ms=`，不是 `QUEUE_HISTORY`。
+- `activation_markers` 必填、非空且组内唯一，并且必须是当前方法 `evidence_markers` 的保序子序列。
+  它只列“出现后值得为该方法创建 evaluation”的 marker。activation 命中不表示单条日志足以确认
+  原因；Agent 仍须读取完整 Evidence Graph，并按方法卡判断。公共症状只能作为 context，不能用于
+  激活所有原因；公共 RPC timeout 日志只能放在 `evidence_markers` 中作为判断上下文。同一 literal
+  如果确实会触发多个方法，可以分别出现在这些方法的 `activation_markers` 中。
 - 方法按 Wiki 给出的可能性或诊断顺序排列；不要把顺序解释成互斥。
 - 共同症状、失败入口或请求关联日志的解释可以只写一次共享引用；但只要某个方法会根据该日志是否
   出现、其中的字段或它与其他日志的关联作出判定，就必须把 canonical marker 写入该方法的
@@ -145,10 +152,14 @@ Wiki `text` 日志模板使用 `{field_name}` 命名字段时，先按模板及�
 marker，或只把模板放入共享引用，都不能建立闭包。共享引用可以承载共同字段含义和观测边界，但
 不能替代这里的方法归属和索引。
 
+`activation_markers` 不改变“所需证据”闭包，也不要求另建方法卡段落。它只从已经闭合的
+`evidence_markers` 中选择触发项；未入选 activation 的 marker 仍会作为已激活 evaluation 的上下文。
+
 如果 Wiki 说明某条日志只有在对应阈值或条件已经满足时才会打印，把观测到该日志写入“确认条件”，不能只称为补充证据。
 
 “输出含义”必须说明：Server 会把同一方法的全部独立事件绑定到该方法的 `evaluation_ref`；Agent
-只返回该引用、判定和简短原因，不复制任何证据字段。
+返回该引用、判定、从当前计划项选择的 `supporting_event_refs` 和简短原因。Agent 不复制 marker、
+日志原文、行号、哈希、identity token 或 hit ref；Server 从双方一致选择的 event ref 机械派生 hit。
 
 ## Methods V2 评估输出
 
@@ -156,10 +167,13 @@ marker，或只把模板放入共享引用，都不能建立闭包。共享引�
 
 - `evaluation_ref`：逐字复制对应计划项的引用。
 - `verdict`：`CONFIRMED`、`REJECTED` 或 `UNKNOWN`。
+- `supporting_event_refs`：`CONFIRMED` 时按计划顺序选择当前 evaluation 的非空 event ref 子集；
+  `REJECTED` 或 `UNKNOWN` 时使用空数组。
 - `reason`：非空的规则判断摘要。
 
 不得增加、遗漏、重复或重排计划项。不得输出 `method_id`、marker、日志原文、行号、哈希、
-`identity_tokens` 或其他证据字段。Server 负责保存 Evidence Graph 并把引用映射到最终结果。
+`identity_tokens`、hit ref 或其他证据字段。Server 负责保存 Evidence Graph，并把双方一致选择的
+event ref 映射到最终结果。
 
 ## 固定源日志模板引用
 

@@ -18,7 +18,7 @@ import {
 const WSL_ROOT = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(WSL_ROOT, "..", "..", "..", "..");
 
-test("WSL launcher delegates the fixed Evidence V2 certification to the central Test Flow", () => {
+test("WSL launcher keeps the default fixed Evidence V2 certification on the central Test Flow", () => {
   const source = fs.readFileSync(path.join(WSL_ROOT, "run.sh"), "utf8");
   assert.match(source, /tools\/test-flow\/run\.sh/u);
   assert.match(source, /--track release/u);
@@ -29,6 +29,59 @@ test("WSL launcher delegates the fixed Evidence V2 certification to the central 
   assert.match(source, /--allow-codex-posthoc-budget/u);
   assert.doesNotMatch(source, /--all-scenarios|NINE_ISOLATED_CONTAINERS|container-suite\.mjs/u);
   assert.doesNotMatch(source, /quick-validation\/claude-deepseek\/run\.sh|quick-validation\/codex-luna\/run\.sh/u);
+});
+
+test("explicit fast-e2e mode leaves the default Release branch before central orchestration", () => {
+  const source = fs.readFileSync(path.join(WSL_ROOT, "run.sh"), "utf8");
+  const dispatch = source.indexOf('argument == "fast-e2e"');
+  const central = source.indexOf('tools/test-flow/run.sh');
+  assert.notEqual(dispatch, -1);
+  assert.notEqual(central, -1);
+  assert.ok(dispatch < central);
+  assert.match(source, /exec bash "\$tool_root\/fast-e2e\.sh" "\$@"/u);
+});
+
+test("Fast E2E calls provider standalone planners and never calls a central Goal", () => {
+  const source = fs.readFileSync(path.join(WSL_ROOT, "fast-e2e.sh"), "utf8");
+  assert.match(source, /quick-validation\/codex-luna\/run\.sh/u);
+  assert.match(source, /quick-validation\/claude-deepseek\/run\.sh/u);
+  assert.match(source, /--goal fast-e2e/u);
+  assert.match(source, /--all-scenarios --plan-only/u);
+  assert.match(source, /--scenario "\$scenario_id" --allow-real-model/u);
+  assert.doesNotMatch(source, /tools\/test-flow\/run\.sh/u);
+  assert.doesNotMatch(source, /release\.evidence-v2-certification|release-verdict\.json/u);
+});
+
+test("Fast E2E launches the frozen nine scenarios in isolated sibling containers", () => {
+  const source = fs.readFileSync(path.join(WSL_ROOT, "fast-e2e.sh"), "utf8");
+  for (const scenario of [
+    "api-execution-overrun",
+    "client-receive-blocked",
+    "deadloop-detected",
+    "insufficient-evidence",
+    "multiple-rpc-timeouts",
+    "server-queue-delay",
+    "server-queue-five",
+    "server-queue-single",
+    "unrelated-log-noise",
+  ]) {
+    assert.match(source, new RegExp(`^  ${scenario}$`, "mu"), scenario);
+  }
+  assert.match(source, /run_scenario_container "\$scenario_id" "\$scenario_container" &/u);
+  assert.match(source, /for child_pid in "\$\{pids\[@\]\}"/u);
+  assert.match(source, /node "\$tool_root\/container-suite\.mjs"/u);
+  assert.match(source, /--network bridge/u);
+  assert.match(source, /--tmpfs \/run\/test-flow-scratch/u);
+});
+
+test("Fast E2E mounts only the selected provider credential and returns its suite to the caller", () => {
+  const source = fs.readFileSync(path.join(WSL_ROOT, "fast-e2e.sh"), "utf8");
+  assert.match(source, /src=\$codex_auth,dst=\/run\/secrets\/codex-auth\.json,readonly/u);
+  assert.match(source, /src=\$claude_settings,dst=\/run\/secrets\/claude-settings\.json,readonly/u);
+  assert.match(source, /src=\$cache_root,dst=\/cache,readonly/u);
+  assert.match(source, /src=\$repo_root,dst=\$repo_root,readonly/u);
+  assert.match(source, /chown -R -- "\$TEST_FLOW_HOST_UID:\$TEST_FLOW_HOST_GID" \/suite/u);
+  assert.doesNotMatch(source, /chown[^\n]*(?:\/cache|\$cache_root|\$repo_root|[" ]\/evidence[" ])/u);
 });
 
 test("WSL launcher keeps dependency cache read-only and formal evidence writable", () => {
@@ -107,7 +160,7 @@ test("provider call contracts remain generation 1, P1 2/4 and P2 2/4", () => {
 });
 
 test("container shell sources are LF-only", () => {
-  for (const name of ["prepare-image.sh", "run.sh"]) {
+  for (const name of ["prepare-image.sh", "run.sh", "fast-e2e.sh"]) {
     assert.doesNotMatch(fs.readFileSync(path.join(WSL_ROOT, name), "utf8"), /\r/u, name);
   }
 });

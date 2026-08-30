@@ -879,6 +879,16 @@ function uniqueSortedStrings(value, code) {
   return [...value].sort();
 }
 
+function orderedSubsequence(values, sequence) {
+  let cursor = 0;
+  for (const value of values) {
+    const index = sequence.indexOf(value, cursor);
+    if (index < 0) return false;
+    cursor = index + 1;
+  }
+  return true;
+}
+
 function exactDirectory(directory, expectedNames) {
   const metadata = fs.lstatSync(directory);
   if (!metadata.isDirectory() || metadata.isSymbolicLink()) throw new Error("GENERATED_METHODS_DIRECTORY_INVALID");
@@ -979,17 +989,41 @@ function generatedMethodsExpectation(context, generatedSkill, inputs, gateOracle
     || methods.methods.length === 0) {
     throw new Error("GENERATED_METHODS_DOCUMENT_INVALID");
   }
+  const methodFields = ["activation_markers", "evidence_markers", "id", "priority", "reference", "title"];
+  methods.methods.forEach((method, index) => {
+    if (method === null || typeof method !== "object" || Array.isArray(method)
+      || canonicalJson(Object.keys(method).sort()) !== canonicalJson(methodFields)
+      || !componentId.test(method.id ?? "")
+      || typeof method.title !== "string" || method.title.trim().length === 0
+      || typeof method.reference !== "string" || !method.reference.startsWith("references/")
+      || !Number.isSafeInteger(method.priority) || method.priority !== index + 1) {
+      throw new Error("GENERATED_METHODS_METHOD_FIELDS_INVALID");
+    }
+    const evidenceMarkers = uniqueStrings(method.evidence_markers, "GENERATED_METHODS_MARKERS_INVALID");
+    const activationMarkers = uniqueStrings(method.activation_markers, "GENERATED_METHODS_ACTIVATION_MARKERS_INVALID");
+    if (evidenceMarkers.length === 0 || activationMarkers.length === 0
+      || !orderedSubsequence(activationMarkers, evidenceMarkers)) {
+      throw new Error("GENERATED_METHODS_ACTIVATION_MARKERS_INVALID");
+    }
+  });
   const knownMethodIds = methods.methods.map((method) => method?.id);
   uniqueSortedStrings(knownMethodIds, "GENERATED_METHODS_IDS_INVALID");
   if (knownMethodIds.some((methodId) => !componentId.test(methodId))) throw new Error("GENERATED_METHODS_IDS_INVALID");
 
   const generatedMethods = expectedPackage.method_marker_sets.map((semantic) => {
     const semanticMarkers = uniqueSortedStrings(semantic.all_markers, "GENERATED_METHODS_ORACLE_MARKERS_INVALID");
+    const semanticActivationMarkers = uniqueStrings(semantic.activation_markers, "GENERATED_METHODS_ORACLE_ACTIVATION_MARKERS_INVALID");
     const matches = methods.methods.filter((method) => (
       canonicalJson(uniqueSortedStrings(method?.evidence_markers, "GENERATED_METHODS_MARKERS_INVALID")) === canonicalJson(semanticMarkers)
+      && canonicalJson(method.activation_markers) === canonicalJson(semanticActivationMarkers)
     ));
     if (matches.length !== 1) throw new Error("GENERATED_METHODS_SEMANTIC_MAPPING_INVALID");
-    return { semantic_id: semantic.semantic_id, markers: semanticMarkers, method_id: matches[0].id };
+    return {
+      semantic_id: semantic.semantic_id,
+      markers: semanticMarkers,
+      activation_markers: semanticActivationMarkers,
+      method_id: matches[0].id,
+    };
   });
   if (generatedMethods.length !== methods.methods.length
     || new Set(generatedMethods.map((entry) => entry.method_id)).size !== methods.methods.length) {
@@ -1009,6 +1043,7 @@ function generatedMethodsExpectation(context, generatedSkill, inputs, gateOracle
       id: method.id,
       priority: method.priority,
       evidence_markers: [...method.evidence_markers],
+      activation_markers: [...method.activation_markers],
     }))
     .sort((left, right) => left.priority - right.priority || left.id.localeCompare(right.id));
   const verdictByMethodId = new Map(semanticVerdicts.map((item) => [item.method_id, item.verdict]));
@@ -2414,6 +2449,13 @@ export function validCodexLunaPassBoundary(bundle, expected) {
     && skill.validator.runtime_policy === "exact-planned-logparse-python-isolated-pre-and-post-v1"
     && Array.isArray(skill.method_ids)
     && skill.method_ids.length > 0
+    && Array.isArray(skill.method_activation_markers)
+    && skill.method_activation_markers.length === skill.method_ids.length
+    && sameIdentity(skill.method_activation_markers.map((item) => item?.method_id), skill.method_ids)
+    && skill.method_activation_markers.every((item) => exactObjectKeys(item, ["method_id", "activation_markers"])
+      && Array.isArray(item.activation_markers) && item.activation_markers.length > 0
+      && item.activation_markers.every((marker) => typeof marker === "string" && marker.length > 0)
+      && item.activation_markers.length === new Set(item.activation_markers).size)
     && skill.durable_package?.path === "generated-skill"
     && skill.durable_package?.tree_sha256 === generatedPackage?.tree_sha256
     && sameIdentity(skill.durable_package?.manifest, generatedPackage?.files);

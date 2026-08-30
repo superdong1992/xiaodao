@@ -13,12 +13,130 @@ sys.path.insert(0, str(RUNTIME_ROOT))
 
 from macos_codex_luna_model_cert_driver import (  # noqa: E402
     FakeModelRoleBackend,
+    _fact_values,
     run_production_model_cert,
 )
 
 
+def test_historical_fast_e2e_input_uses_original_scenario_bytes() -> None:
+    source_root = Path(__file__).resolve().parents[5]
+    scenario_root = (
+        source_root
+        / "experiments/rpc-skill-feasibility/cases/multiple-rpc-timeouts"
+    )
+    facts, targets, scenario_id, user_inputs = _fact_values(
+        source_root,
+        True,
+        scenario_root,
+    )
+
+    assert scenario_id == "multiple-rpc-timeouts"
+    assert user_inputs["initial_user_fact_names"] == [
+        "problem_time",
+        "client_process",
+        "server_process",
+        "service",
+        "api",
+    ]
+    assert user_inputs["initial_user_fact_values"][-2:] == [
+        "svc_orders",
+        "Reserve",
+    ]
+    assert user_inputs["initial_user_fact_values"][0] == (
+        "2026-08-23T02:00:05.300Z"
+    )
+    assert len(facts) == len(user_inputs["initial_user_fact_names"])
+    assert b"request_id=501" in targets["client"]
+    assert b"svc_catalog" not in targets["client"]
+    assert targets["server"].count(b"API_COMPLETE service=svc_orders") == 2
+
+
+def test_historical_fast_e2e_input_rejects_a_mismatched_scenario_id(
+    tmp_path: Path,
+) -> None:
+    source_root = Path(__file__).resolve().parents[5]
+    source = source_root / "experiments/rpc-skill-feasibility/cases/api-execution-overrun"
+    scenario_root = tmp_path / "wrong-name"
+    shutil.copytree(source, scenario_root)
+
+    backend = FakeModelRoleBackend(
+        rejected_method_ids=frozenset({"server-queueing", "client-receive-blocked"})
+    )
+    try:
+        run_production_model_cert(
+            work_root=tmp_path / "work",
+            evidence_root=tmp_path / "evidence",
+            registration_root=_release_registration(tmp_path),
+            scenario_root=scenario_root,
+            scenario_id="client-receive-blocked",
+            role_backend=backend,
+        )
+    except RuntimeError as exc:
+        assert getattr(exc, "code", None) == (
+            "CODEX_LUNA_FAST_E2E_SCENARIO_ID_MISMATCH"
+        )
+    else:
+        raise AssertionError("mismatched historical scenario ID was accepted")
+
+
 def _sequence(backend: FakeModelRoleBackend) -> list[tuple[object, object]]:
     return [(item["role"], item["attempt"]) for item in backend.invocations]
+
+
+def _audit_fast_e2e(
+    *,
+    source_root: Path,
+    evidence_root: Path,
+    scenario_id: str,
+    runtime_receipt: dict[str, object],
+) -> subprocess.CompletedProcess[str]:
+    receipt_path = evidence_root.parent / f"{scenario_id}-runtime.json"
+    receipt_path.write_text(
+        json.dumps(runtime_receipt, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    script = r"""
+import fs from "node:fs";
+import { pathToFileURL } from "node:url";
+const [modulePath, sourceRoot, evidenceRoot, scenarioId, receiptPath] = process.argv.slice(1);
+const runner = await import(pathToFileURL(modulePath).href);
+try {
+  const result = runner.auditOracle({
+    sourceRoot,
+    evidenceRoot,
+    scenarioId,
+    runtimeReceipt: JSON.parse(fs.readFileSync(receiptPath, "utf8")),
+  });
+  process.stdout.write(JSON.stringify(result));
+} catch (error) {
+  process.stderr.write(JSON.stringify({ code: error.code, message: error.message, details: error.details }));
+  process.exitCode = 1;
+}
+"""
+    node = shutil.which("node")
+    assert node is not None
+    return subprocess.run(
+        [
+            node,
+            "--input-type=module",
+            "--eval",
+            script,
+            str(
+                source_root
+                / "tools/test-flow/quick-validation/codex-luna/runtime"
+                / "macos-codex-luna-fast-e2e-runner.mjs"
+            ),
+            str(source_root),
+            str(evidence_root),
+            scenario_id,
+            str(receipt_path),
+        ],
+        cwd=source_root,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
 
 
 def _release_registration(tmp_path: Path) -> Path:
@@ -71,7 +189,10 @@ def _release_registration(tmp_path: Path) -> Path:
             "current_us",
             "request_us",
         ],
-        "shared_references": ["references/shared-boundaries.md"],
+        "shared_references": [
+            "references/source-log-templates.md",
+            "references/shared-boundaries.md",
+        ],
         "methods": [
             {
                 "id": "api-execution-slow",
@@ -79,6 +200,13 @@ def _release_registration(tmp_path: Path) -> Path:
                 "reference": "references/api-execution-slow.md",
                 "priority": 1,
                 "evidence_markers": [
+                    "rpc call",
+                    "call unsuccess, reqid(",
+                    "LATE_RESPONSE service=",
+                    "API_COMPLETE service=",
+                    "DEADLOOP_DETECTED service=",
+                ],
+                "activation_markers": [
                     "LATE_RESPONSE service=",
                     "API_COMPLETE service=",
                     "DEADLOOP_DETECTED service=",
@@ -90,6 +218,12 @@ def _release_registration(tmp_path: Path) -> Path:
                 "reference": "references/server-queueing.md",
                 "priority": 2,
                 "evidence_markers": [
+                    "rpc call",
+                    "call unsuccess, reqid(",
+                    "LATE_RESPONSE service=",
+                    "QUEUE_HISTORY print_time_ms=",
+                ],
+                "activation_markers": [
                     "LATE_RESPONSE service=",
                     "QUEUE_HISTORY print_time_ms=",
                 ],
@@ -99,7 +233,12 @@ def _release_registration(tmp_path: Path) -> Path:
                 "title": "客户端收包线程阻塞",
                 "reference": "references/client-receive-blocked.md",
                 "priority": 3,
-                "evidence_markers": ["LATE_RESPONSE service="],
+                "evidence_markers": [
+                    "rpc call",
+                    "call unsuccess, reqid(",
+                    "LATE_RESPONSE service=",
+                ],
+                "activation_markers": ["LATE_RESPONSE service="],
             },
         ],
     }
@@ -116,31 +255,132 @@ description: Test-owned release registration consumed by the production Runtime.
 # RPC timeout diagnosis
 
 Read request.json, method-evidence-graph.json, and method-evaluation-plan.json.
-Return only evaluation_ref, verdict, and reason; UNKNOWN is allowed.
+Return only evaluation_ref, verdict, supporting_event_refs, and reason;
+UNKNOWN is allowed.
 """,
         encoding="utf-8",
     )
-    headings = "\n\n".join(
-        (
-            "## 适用条件\n固定用例。",
-            "## 所需证据\n使用方法 marker。",
-            "## 计算与判断\n按冻结 Evidence Graph 判断。",
-            "## 确认条件\n存在正向证据。",
-            "## 未知边界\n证据不足时 UNKNOWN。",
-            "## 输出含义\n输出 evaluation verdict。",
-        )
+    source_templates = [
+        "rpc call",
+        "call unsuccess, reqid(",
+        "LATE_RESPONSE service=",
+        "API_COMPLETE service=",
+        "DEADLOOP_DETECTED service=",
+        "QUEUE_HISTORY print_time_ms=",
+    ]
+    (references / "source-log-templates.md").write_text(
+        "# Source log templates\n\n```text\n"
+        + "\n".join(source_templates)
+        + "\n```\n",
+        encoding="utf-8",
     )
-    for name in (
-        "api-execution-slow.md",
-        "server-queueing.md",
-        "client-receive-blocked.md",
-    ):
+    method_templates = {
+        "api-execution-slow.md": source_templates[:5],
+        "server-queueing.md": [*source_templates[:3], source_templates[5]],
+        "client-receive-blocked.md": source_templates[:3],
+    }
+    for name, templates in method_templates.items():
+        headings = "\n\n".join(
+            (
+                "## 适用条件\n固定用例。",
+                "## 所需证据\n" + "\n".join(f"- `{item}`" for item in templates),
+                "## 计算与判断\n按冻结 Evidence Graph 判断。",
+                "## 确认条件\n存在正向证据。",
+                "## 未知边界\n证据不足时 UNKNOWN。",
+                "## 输出含义\n输出 evaluation verdict。",
+            )
+        )
         (references / name).write_text(headings + "\n", encoding="utf-8")
     (references / "shared-boundaries.md").write_text(
         "RPC 超时不等于取消。\n",
         encoding="utf-8",
     )
     return root
+
+
+def test_fast_e2e_oracle_uses_production_v2_records_for_all_confirmed_scenarios(
+    tmp_path: Path,
+) -> None:
+    source_root = Path(__file__).resolve().parents[5]
+    cases_root = source_root / "experiments/rpc-skill-feasibility/cases"
+    registration_root = _release_registration(tmp_path)
+    branch_method_ids = {
+        "API_COMPLETE": "api-execution-slow",
+        "DEADLOOP_DETECTED": "api-execution-slow",
+        "QUEUE_HISTORY": "server-queueing",
+        "LATE_RESPONSE": "client-receive-blocked",
+    }
+    method_ids = frozenset(branch_method_ids.values())
+    scenario_ids = (
+        "api-execution-overrun",
+        "client-receive-blocked",
+        "deadloop-detected",
+        "multiple-rpc-timeouts",
+        "server-queue-delay",
+        "server-queue-five",
+        "server-queue-single",
+        "unrelated-log-noise",
+    )
+    for index, scenario_id in enumerate(scenario_ids):
+        historical = json.loads(
+            (cases_root / scenario_id / "case.json").read_bytes()
+        )
+        confirmed = frozenset(
+            branch_method_ids[marker]
+            for marker in historical["expected_branch_markers"]
+        )
+        evidence_root = tmp_path / f"e{index}"
+        backend = FakeModelRoleBackend(
+            rejected_method_ids=method_ids - confirmed,
+            supporting_identity_tokens_by_method=(
+                {"client-receive-blocked": ("request_id=601",)}
+                if scenario_id == "unrelated-log-noise"
+                else None
+            ),
+            confirmed_reason_terms=tuple(historical["expected_terms"]),
+        )
+        runtime_receipt = run_production_model_cert(
+            work_root=tmp_path / f"w{index}",
+            evidence_root=evidence_root,
+            registration_root=registration_root,
+            scenario_root=cases_root / scenario_id,
+            scenario_id=scenario_id,
+            role_backend=backend,
+        )
+        completed = _audit_fast_e2e(
+            source_root=source_root,
+            evidence_root=evidence_root,
+            scenario_id=scenario_id,
+            runtime_receipt=runtime_receipt,
+        )
+        assert completed.returncode == 0, completed.stderr
+        assert json.loads(completed.stdout)["status"] == "PASS"
+
+
+def test_historical_insufficient_evidence_terminates_without_a_role_call(
+    tmp_path: Path,
+) -> None:
+    source_root = Path(__file__).resolve().parents[5]
+    scenario_id = "insufficient-evidence"
+    backend = FakeModelRoleBackend()
+
+    result = run_production_model_cert(
+        work_root=tmp_path / "work",
+        evidence_root=tmp_path / "evidence",
+        registration_root=_release_registration(tmp_path),
+        scenario_root=(
+            source_root / "experiments/rpc-skill-feasibility/cases" / scenario_id
+        ),
+        scenario_id=scenario_id,
+        role_backend=backend,
+    )
+
+    assert backend.invocations == []
+    assert result["role_attempts"] == []
+    assert result["methods_result"]["status"] == "UNRESOLVED"
+    assert result["methods_result"]["reason_code"] == (
+        "NO_MATCHING_METHOD_EVIDENCE"
+    )
 
 
 def test_production_runtime_generates_graph_plan_state_outcome_and_methods_result(

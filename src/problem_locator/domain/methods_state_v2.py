@@ -358,7 +358,10 @@ def _consensus_reason(
         (
             first.evaluation_ref
             for first, second in pairs
-            if first.verdict != second.verdict
+            if (
+                first.verdict != second.verdict
+                or first.supporting_event_refs != second.supporting_event_refs
+            )
         ),
         None,
     )
@@ -381,10 +384,12 @@ def _validate_consensus(
     if not isinstance(consensus, MethodConsensusV2) or consensus.plan_ref != plan.plan_ref:
         raise ValueError("consensus differs from the pending plan")
     specialist_blind = tuple(
-        (item.evaluation_ref, item.verdict) for item in specialist.evaluations
+        (item.evaluation_ref, item.verdict, item.supporting_event_refs)
+        for item in specialist.evaluations
     )
     reviewer_blind = tuple(
-        (item.evaluation_ref, item.verdict) for item in reviewer.evaluations
+        (item.evaluation_ref, item.verdict, item.supporting_event_refs)
+        for item in reviewer.evaluations
     )
     verdicts = tuple(item.verdict for item in specialist.evaluations)
     resolved = (
@@ -406,10 +411,21 @@ def _validate_consensus(
         item.evaluation_ref: item.method_id for item in plan.evaluations
     }
     expected_methods = tuple(method_by_ref[item] for item in expected_refs)
+    expected_event_refs = (
+        tuple(
+            event_ref
+            for item in specialist.evaluations
+            if item.verdict == "CONFIRMED"
+            for event_ref in item.supporting_event_refs
+        )
+        if resolved
+        else ()
+    )
     if (
         consensus.status != expected_status
         or consensus.confirmed_evaluation_refs != expected_refs
         or consensus.confirmed_method_ids != expected_methods
+        or consensus.confirmed_event_refs != expected_event_refs
     ):
         raise ValueError("consensus differs from the two role evaluations")
 

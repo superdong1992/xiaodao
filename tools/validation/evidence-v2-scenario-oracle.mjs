@@ -30,12 +30,12 @@ const METHODS_ROOT_FIELDS = Object.freeze([
   "source_wiki_sha256",
 ]);
 const METHOD_FIELDS = Object.freeze([
-  "evidence_markers", "id", "priority", "reference", "title",
+  "activation_markers", "evidence_markers", "id", "priority", "reference", "title",
 ]);
 const SUMMARY_FIELDS = Object.freeze([
   "case_id", "confirmed_method_ids", "diagnostic_id", "evaluation_count",
   "evaluation_id", "evidence_event_count", "evidence_hit_count", "graph_ref",
-  "plan_ref", "public_methods_result_sha256", "record_sha256",
+  "method_activation_markers_sha256", "plan_ref", "public_methods_result_sha256", "record_sha256",
   "result_ref", "reviewer_job_id", "reviewer_repair_used", "schema_version",
   "service_model_calls", "source_job_id", "specialist_repair_used", "status",
 ]);
@@ -54,14 +54,28 @@ function exactKeys(value, expected, code, label) {
   );
 }
 
-function uniqueSortedStrings(value, code, label) {
+function uniqueStrings(value, code, label) {
   assertFlow(
     Array.isArray(value) && value.every((item) => typeof item === "string" && item.length > 0)
       && value.length === new Set(value).size,
     code,
     `${label} must contain unique non-empty strings`,
   );
-  return [...value].sort();
+  return [...value];
+}
+
+function uniqueSortedStrings(value, code, label) {
+  return uniqueStrings(value, code, label).sort();
+}
+
+function orderedSubsequence(values, sequence) {
+  let cursor = 0;
+  for (const value of values) {
+    const index = sequence.indexOf(value, cursor);
+    if (index < 0) return false;
+    cursor = index + 1;
+  }
+  return true;
 }
 
 function requireFile(root, relative, code, label) {
@@ -94,12 +108,15 @@ function methodSemanticMapping(methods, expectedPackage) {
   const methodIds = new Set();
   methods.methods.forEach((method, index) => {
     exactKeys(method, METHOD_FIELDS, "SCENARIO_ORACLE_METHOD_FIELDS", `Methods method ${index + 1}`);
+    const evidenceMarkers = uniqueStrings(method.evidence_markers, "SCENARIO_ORACLE_METHOD_MARKERS", `Methods method ${index + 1} markers`);
+    const activationMarkers = uniqueStrings(method.activation_markers, "SCENARIO_ORACLE_METHOD_ACTIVATION_MARKERS", `Methods method ${index + 1} activation markers`);
     assertFlow(
       typeof method.id === "string" && method.id.length > 0 && !methodIds.has(method.id)
         && Number.isSafeInteger(method.priority) && method.priority === index + 1
         && typeof method.title === "string" && method.title.trim().length > 0
         && typeof method.reference === "string" && method.reference.startsWith("references/")
-        && uniqueSortedStrings(method.evidence_markers, "SCENARIO_ORACLE_METHOD_MARKERS", `Methods method ${index + 1} markers`).length > 0,
+        && evidenceMarkers.length > 0 && activationMarkers.length > 0
+        && orderedSubsequence(activationMarkers, evidenceMarkers),
       "SCENARIO_ORACLE_METHOD_INVALID",
       "copied methods.json contains an invalid method card",
     );
@@ -107,12 +124,19 @@ function methodSemanticMapping(methods, expectedPackage) {
   });
   const generated = expectedPackage.method_marker_sets.map((semantic) => {
     const semanticMarkers = uniqueSortedStrings(semantic.all_markers, "SCENARIO_ORACLE_EXPECTED_MARKERS", "release semantic markers");
+    const semanticActivationMarkers = uniqueStrings(semantic.activation_markers, "SCENARIO_ORACLE_EXPECTED_ACTIVATION_MARKERS", "release semantic activation markers");
     const matches = methods.methods.filter((method) => (
       canonicalJson(uniqueSortedStrings(method.evidence_markers, "SCENARIO_ORACLE_METHOD_MARKERS", "Methods markers"))
         === canonicalJson(semanticMarkers)
+      && canonicalJson(method.activation_markers) === canonicalJson(semanticActivationMarkers)
     ));
     assertFlow(matches.length === 1, "SCENARIO_ORACLE_METHOD_SEMANTIC_MAPPING", "release semantic method does not map to exactly one copied method card");
-    return { semantic_id: semantic.semantic_id, markers: semanticMarkers, method: matches[0] };
+    return {
+      semantic_id: semantic.semantic_id,
+      markers: semanticMarkers,
+      activation_markers: semanticActivationMarkers,
+      method: matches[0],
+    };
   });
   assertFlow(
     generated.length === methods.methods.length && new Set(generated.map((item) => item.method.id)).size === methods.methods.length,
@@ -173,6 +197,7 @@ function buildMethodsExpectation({ methods, inputs, gateOracle, scenarioOracle }
     id: method.id,
     priority: method.priority,
     evidence_markers: [...method.evidence_markers],
+    activation_markers: [...method.activation_markers],
   })).sort((left, right) => left.priority - right.priority || (left.id < right.id ? -1 : left.id > right.id ? 1 : 0));
   const semanticByMethodId = new Map(generated.map((entry) => [entry.method.id, entry.semantic_id]));
   const methodVerdicts = methodCards.map((method) => ({

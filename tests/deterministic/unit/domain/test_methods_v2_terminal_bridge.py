@@ -29,6 +29,7 @@ from problem_locator.contracts import (
     OutcomeResultType,
     ReviewOutcomeTriggerPayload,
     TriggerType,
+    method_terminal_result_ref_v2,
     validate_outcome_for_job,
     validate_methods_reviewer_terminal_v2,
     validate_transition_plan_for_outcome,
@@ -100,6 +101,11 @@ def _role(plan, role: str, verdicts: tuple[str, ...]):
             {
                 "evaluation_ref": item.evaluation_ref,
                 "verdict": verdict,
+                "supporting_event_refs": (
+                    list(item.evidence_event_refs)
+                    if verdict == "CONFIRMED"
+                    else []
+                ),
                 "reason": f"private {role.lower()} reason {index}",
             }
             for index, (item, verdict) in enumerate(
@@ -120,6 +126,30 @@ def _terminal_result(state, plan, graph, *, terminal_job_id: str):
         limitations=("server-observed limitation",),
         reasons=(),
     )
+
+
+def _with_recomputed_result_ref(result, **changes: object):
+    mutated = result.model_copy(update=changes)
+    result_ref = method_terminal_result_ref_v2(
+        case_id=mutated.case_id,
+        source_job_id=mutated.source_job_id,
+        terminal_job_id=mutated.terminal_job_id,
+        evaluation_id=mutated.evaluation_id,
+        status=mutated.status,
+        plan_ref=mutated.plan_ref,
+        evidence_graph_ref=mutated.evidence_graph_ref,
+        reason_code=mutated.reason_code,
+        diagnostic_id=mutated.diagnostic_id,
+        diagnostic_evaluation_ref=mutated.diagnostic_evaluation_ref,
+        evaluations=mutated.evaluations,
+        confirmed_evaluation_refs=mutated.confirmed_evaluation_refs,
+        confirmed_method_ids=mutated.confirmed_method_ids,
+        confirmed_event_refs=mutated.confirmed_event_refs,
+        confirmed_hit_refs=mutated.confirmed_hit_refs,
+        limitations=mutated.limitations,
+        reasons=mutated.reasons,
+    )
+    return mutated.model_copy(update={"result_ref": result_ref})
 
 
 def _review_terminal(
@@ -173,6 +203,7 @@ def _review_terminal(
         terminal_state=terminal,
         terminal_result=terminal_result,
         plan=plan,
+        evidence=graph,
         produced_at="2026-07-31T00:03:30.000Z",
     )
     assert outcome.methods_terminal_projection is not None
@@ -374,11 +405,12 @@ def _specialist_terminal(tmp_path, reason_code: str):
         terminal_state=state,
         terminal_result=terminal_result,
         plan=plan,
+        evidence=graph,
         produced_at="2026-07-31T00:03:20.000Z",
     )
     assert outcome.methods_terminal_projection is not None
     projection = outcome.methods_terminal_projection
-    return source, state, plan, terminal_result, projection, outcome
+    return source, state, graph, plan, terminal_result, projection, outcome
 
 
 @pytest.mark.parametrize(
@@ -397,7 +429,7 @@ def test_specialist_early_terminal_maps_status_job_and_failure(
     tmp_path,
     reason_code,
 ) -> None:
-    source, state, _, terminal_result, projection, outcome = _specialist_terminal(
+    source, state, _, _, terminal_result, projection, outcome = _specialist_terminal(
         tmp_path,
         reason_code,
     )
@@ -538,6 +570,7 @@ def test_reviewer_early_terminal_requires_no_fabricated_reviewer_result(
         terminal_state=state,
         terminal_result=terminal_result,
         plan=plan,
+        evidence=graph,
         produced_at="2026-07-31T00:03:30.000Z",
     )
     assert outcome.methods_terminal_projection is not None
@@ -593,7 +626,7 @@ def test_reviewer_early_terminal_requires_no_fabricated_reviewer_result(
 
 
 def test_unresolved_reason_must_belong_to_source_job_stage(tmp_path) -> None:
-    source, _, _, _, projection, legal_outcome = _specialist_terminal(
+    source, _, _, _, _, projection, legal_outcome = _specialist_terminal(
         tmp_path,
         "NO_MATCHING_METHOD_EVIDENCE",
     )
@@ -620,6 +653,7 @@ def test_specialist_early_terminal_cannot_resolve_without_reviewer(tmp_path) -> 
             terminal_state=flow.terminal_state,
             terminal_result=flow.terminal_result,
             plan=flow.plan,
+            evidence=flow.graph,
             produced_at="2026-07-31T00:03:20.000Z",
         )
 
@@ -719,6 +753,7 @@ def test_reviewer_factory_binds_terminal_result_to_exact_production_state(
             terminal_state=second.terminal_state,
             terminal_result=first.terminal_result,
             plan=first.plan,
+            evidence=first.graph,
             produced_at="2026-07-31T00:03:30.000Z",
         )
 
@@ -795,6 +830,7 @@ def test_reviewer_factory_rejects_production_result_from_another_plan(
             terminal_state=other_terminal,
             terminal_result=other_result,
             plan=flow.plan,
+            evidence=flow.graph,
             produced_at="2026-07-31T00:03:30.000Z",
         )
 
@@ -815,6 +851,7 @@ def test_server_factory_rejects_extra_free_form_terminal_reason(tmp_path) -> Non
             terminal_state=flow.terminal_state,
             terminal_result=mutated_result,
             plan=flow.plan,
+            evidence=flow.graph,
             produced_at="2026-07-31T00:03:30.000Z",
         )
 
@@ -846,6 +883,100 @@ def test_factory_revalidates_terminal_event_and_hit_mapping(
             terminal_state=flow.terminal_state,
             terminal_result=mutated_result,
             plan=flow.plan,
+            evidence=flow.graph,
+            produced_at="2026-07-31T00:03:30.000Z",
+        )
+
+
+def test_reviewer_factory_rejects_hit_from_unselected_event(tmp_path) -> None:
+    source, skill, _, _ = _flow_inputs(tmp_path)
+    content = (
+        b"API_COMPLETE request_id=req-target\n"
+        b"API_COMPLETE request_id=req-noise\n"
+        b"UNRELATED_POSITIVE request_id=req-other\n"
+    )
+    graph = scan_method_evidence_v2(
+        skill=skill,
+        target_logs=(
+            FrozenTargetLogV1(
+                source_id="server",
+                relative_path="logs/server.log",
+                content_sha256=hashlib.sha256(content).hexdigest(),
+                content=content,
+            ),
+        ),
+    )
+    plan = build_method_evaluation_plan_v2(skill=skill, evidence=graph)
+    _, _, _, _, review_job, _, _ = _plan_and_review_job(
+        (source, skill, graph, plan)
+    )
+    selected_event_ref, noise_event_ref = plan.evaluations[0].evidence_event_refs
+
+    def selected_role(role: str):
+        return evaluate_method_role_v2(
+            role=role,
+            plan=plan,
+            response=[
+                {
+                    "evaluation_ref": item.evaluation_ref,
+                    "verdict": "CONFIRMED" if index == 0 else "REJECTED",
+                    "supporting_event_refs": (
+                        [selected_event_ref] if index == 0 else []
+                    ),
+                    "reason": f"private {role.lower()} reason {index}",
+                }
+                for index, item in enumerate(plan.evaluations)
+            ],
+            attempt="PRIMARY",
+        )
+
+    specialist = selected_role("SPECIALIST")
+    reviewer = selected_role("REVIEWER")
+    pending = accept_specialist_evaluation_v2(
+        state=start_method_state_v2(
+            case_id=source.case_id,
+            source_job_id=source.job_id,
+            evaluation_id=EVALUATION_ID,
+            plan=plan,
+        ),
+        evaluation=specialist,
+    )
+    terminal_state = finalize_reviewer_consensus_v2(
+        state=pending,
+        plan=plan,
+        reviewer_evaluation=reviewer,
+        consensus=resolve_method_consensus_v2(
+            plan=plan,
+            first=specialist,
+            second=reviewer,
+        ),
+    )
+    terminal_result = _terminal_result(
+        terminal_state,
+        plan,
+        graph,
+        terminal_job_id=review_job.job_id,
+    )
+    noise_event = next(
+        item for item in graph.events if item.event_ref == noise_event_ref
+    )
+    forged_evaluation = terminal_result.evaluations[0].model_copy(
+        update={"evidence_hit_refs": noise_event.evidence_hit_refs}
+    )
+    forged_result = _with_recomputed_result_ref(
+        terminal_result,
+        evaluations=(forged_evaluation,),
+        confirmed_hit_refs=noise_event.evidence_hit_refs,
+    )
+
+    with pytest.raises(ValueError, match="exact consensus evidence"):
+        build_methods_reviewer_outcome_v2(
+            review_job,
+            outcome_id=REVIEW_OUTCOME_ID,
+            terminal_state=terminal_state,
+            terminal_result=forged_result,
+            plan=plan,
+            evidence=graph,
             produced_at="2026-07-31T00:03:30.000Z",
         )
 
@@ -867,6 +998,7 @@ def test_factory_revalidates_plan_model_copy(tmp_path) -> None:
             terminal_state=flow.terminal_state,
             terminal_result=flow.terminal_result,
             plan=mutated_plan,
+            evidence=flow.graph,
             produced_at="2026-07-31T00:03:30.000Z",
         )
 
@@ -875,6 +1007,7 @@ def test_terminal_workflow_identity_rejects_cross_case_reuse(tmp_path) -> None:
     (
         source,
         state,
+        graph,
         plan,
         terminal_result,
         projection,
@@ -894,6 +1027,7 @@ def test_terminal_workflow_identity_rejects_cross_case_reuse(tmp_path) -> None:
             terminal_state=state,
             terminal_result=terminal_result,
             plan=plan,
+            evidence=graph,
             produced_at="2026-07-31T00:03:20.000Z",
         )
 
@@ -905,6 +1039,7 @@ def test_terminal_workflow_identity_rejects_cross_case_reuse(tmp_path) -> None:
             terminal_state=state,
             terminal_result=terminal_result,
             plan=plan,
+            evidence=graph,
             produced_at="2026-07-31T00:03:20.000Z",
         )
 
@@ -939,12 +1074,13 @@ def test_reviewer_terminal_result_cannot_rebind_to_another_review_job(
             terminal_state=flow.terminal_state,
             terminal_result=flow.terminal_result,
             plan=flow.plan,
+            evidence=flow.graph,
             produced_at="2026-07-31T00:03:30.000Z",
         )
 
 
 def test_failure_reason_and_diagnostic_types_cannot_cross_contracts(tmp_path) -> None:
-    _, _, _, _, _, outcome = _specialist_terminal(
+    _, _, _, _, _, _, outcome = _specialist_terminal(
         tmp_path,
         "RESOURCE_SNAPSHOT_DRIFT",
     )

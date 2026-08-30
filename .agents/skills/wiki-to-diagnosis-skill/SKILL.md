@@ -28,12 +28,17 @@ description: Convert an authored troubleshooting Wiki into one evidence-driven d
    或与其他日志的关联来得出判定，就必须同时把 canonical marker 按源模板顺序写入该方法的
    `evidence_markers`，并把对应完整模板逐字写入该方法卡的“所需证据”段。其他段落中的 marker
    字样或共享解释都不能替代方法索引。
-7. 为每张方法卡写清楚可机械执行的确认、排除和未知条件。Server 会把一次扫描得到的 Evidence Graph
+7. 完成 `evidence_markers` 后，再从中选择非空、唯一且保持原顺序的 `activation_markers`。只选择
+   “一旦出现，就值得为该方法创建 evaluation”的 marker。activation 命中只触发评估，不表示单条
+   日志必然确认原因；公共症状只能作为判断上下文，不能用来激活所有方法。公共 RPC timeout 日志也
+   只能放在 `evidence_markers` 中作为 context。同一 literal 如果确实会触发多个方法，可以分别写入
+   这些方法的 `activation_markers`。
+8. 为每张方法卡写清楚可机械执行的确认、排除和未知条件。Server 会把一次扫描得到的 Evidence Graph
    和完整 Evaluation Plan 交给 Agent；冻结 `request.json` 继续提供方法规则所需的用户输入。
-   生成的 Skill 只负责让 Agent 能按方法规则判断每个 `evaluation_ref`，不要求 Agent 回抄
-   marker、日志原文、行号、哈希或事件身份。
-8. 按用户指定的目录和名称生成一个 Skill。生成前先阅读 [输出合同](references/output-contract.md)，严格使用其中的文件结构和字段。
-9. 生成后运行本 Skill 的校验脚本。校验失败时只修正被报告的结构问题；不要借机改变 Wiki 语义。
+   生成的 Skill 只负责让 Agent 能按方法规则判断每个 `evaluation_ref`，并从当前计划项选择
+   `supporting_event_refs`；不要求 Agent 回抄 marker、日志原文、行号、哈希、事件身份字段或 hit ref。
+9. 按用户指定的目录和名称生成一个 Skill。生成前先阅读 [输出合同](references/output-contract.md)，严格使用其中的文件结构和字段。
+10. 生成后运行本 Skill 的校验脚本。校验失败时只修正被报告的结构问题；不要借机改变 Wiki 语义。
 
 ## 拆分原则
 
@@ -51,11 +56,15 @@ description: Convert an authored troubleshooting Wiki into one evidence-driven d
   `evidence_markers` 不只承担原因路由，还必须让 Evidence Graph 收齐该方法判断、计算、排除和请求关联
   所需的日志。共同日志可以共享解释，但凡方法会读取其出现情况或字段，就要在每个适用方法的
   “所需证据”中逐字列出完整模板，并在该方法中索引。
+- `activation_markers` 只控制是否为方法创建 evaluation，不缩减 `evidence_markers` 收集的上下文，
+  也不能作为确认条件的替代品。
 
 ## 运行时边界
 
 完整使用入口接收 Wiki 声明的用户参数和日志附件。运行器先完成 Logparse 预处理，再由 Server 扫描
-一次冻结日志，生成 `method-evidence-graph.json` 和 `method-evaluation-plan.json`。生成的定位 Skill
+一次冻结日志；只有命中方法的 `activation_markers` 时才创建该方法的 evaluation，同时保留该方法
+全部 `evidence_markers` 命中的上下文，生成 `method-evidence-graph.json` 和
+`method-evaluation-plan.json`。生成的定位 Skill
 在评估阶段同时读取冻结 `request.json`，并遵守以下边界：
 
 - `request.json` 提供 Wiki 声明的用户输入；方法规则需要某项输入时使用其冻结值。
@@ -63,8 +72,9 @@ description: Convert an authored troubleshooting Wiki into one evidence-driven d
 - 日志证据只能来自 Evidence Graph 和 Evaluation Plan；不读取目标日志，不重新扫描 marker，
   不重新选择生命周期、进程或日志路径。
 - 按 Evaluation Plan 顺序逐项应用对应方法卡；不能在第一个确认项后停止。
-- 每个输出项只能包含 `evaluation_ref`、`verdict` 和 `reason`。`verdict` 只能是
-  `CONFIRMED`、`REJECTED` 或 `UNKNOWN`。
+- 每个输出项只能包含 `evaluation_ref`、`verdict`、`supporting_event_refs` 和 `reason`。
+  `CONFIRMED` 必须按计划顺序选择当前 evaluation 的非空 event ref 子集；`REJECTED` 或
+  `UNKNOWN` 必须使用空数组。
 - 没有足够证据时返回 `UNKNOWN`，并在 `reason` 中说明 Wiki 给出的观测限制；不补写 Wiki 未提供的事实。
 
 ## 校验

@@ -52,6 +52,8 @@ test("generation prompt requires the meta Skill first and a complete registratio
   assert.match(prompt, /must not call Skill\(logparse-diagnose\)/);
   assert.match(prompt, /\["API_COMPLETE service=","LATE_RESPONSE service="\]/);
   assert.match(prompt, /Bare or shortened event names/);
+  assert.match(prompt, /activation_markers/);
+  assert.match(prompt, /must not activate a method/);
   assert.equal(prompt.toLowerCase().includes("oracle.json"), false);
 });
 
@@ -73,7 +75,7 @@ test("gate-only oracle validates production-shaped Methods bytes and rejects can
   const oraclePath = path.join(REPO, "tests", "cases", "release", "rpc-timeout-anonymized", "oracle.json");
   const oracle = JSON.parse(fs.readFileSync(oraclePath, "utf8"));
   const expected = oracle.expected_package;
-  const methods = expected.method_marker_sets.map((item, index) => ({ id: `method-${index}`, title: item.semantic_id, reference: `references/method-${index}.md`, priority: index + 1, evidence_markers: item.all_markers }));
+  const methods = expected.method_marker_sets.map((item, index) => ({ id: `method-${index}`, title: item.semantic_id, reference: `references/method-${index}.md`, priority: index + 1, evidence_markers: item.all_markers, activation_markers: item.activation_markers }));
   const manifest = {
     schema_version: 1,
     skill_name: expected.skill_name,
@@ -95,6 +97,12 @@ test("gate-only oracle validates production-shaped Methods bytes and rejects can
   merged.methods[1].evidence_markers = everyMarker;
   merged.methods[2].evidence_markers = everyMarker;
   fs.writeFileSync(path.join(packageRoot, "methods.json"), `${JSON.stringify(merged)}\n`);
+  assert.throws(() => auditMethodsOracle({ registrationRoot, oraclePath }), (error) => error.code === "CLAUDE_DEEPSEEK_METHODS_ORACLE_MISMATCH");
+  const wrongActivation = structuredClone(manifest);
+  wrongActivation.methods[0].activation_markers = [
+    wrongActivation.methods[0].evidence_markers[0],
+  ];
+  fs.writeFileSync(path.join(packageRoot, "methods.json"), `${JSON.stringify(wrongActivation)}\n`);
   assert.throws(() => auditMethodsOracle({ registrationRoot, oraclePath }), (error) => error.code === "CLAUDE_DEEPSEEK_METHODS_ORACLE_MISMATCH");
   fs.writeFileSync(path.join(packageRoot, "methods.json"), `${JSON.stringify(manifest)}\n`);
   fs.writeFileSync(path.join(packageRoot, "references", "source-log-templates.md"), expected.required_shared_markers.join("\n"));

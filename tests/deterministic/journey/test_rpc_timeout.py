@@ -834,7 +834,11 @@ def test_rpc_timeout_methods_v2_is_one_durable_same_job_path(
     assert [item["evaluation_ref"] for item in specialist_draft] == [
         item.evaluation_ref for item in plan.evaluations
     ]
-    assert all(set(item) == {"evaluation_ref", "verdict", "reason"} for item in specialist_draft)
+    assert all(
+        set(item)
+        == {"evaluation_ref", "verdict", "supporting_event_refs", "reason"}
+        for item in specialist_draft
+    )
     assert all(item["verdict"] == "CONFIRMED" for item in specialist_draft)
     _assert_logparse_record(logparse_record, expected_target_count=2)
 
@@ -877,7 +881,11 @@ def test_rpc_timeout_methods_v2_is_one_durable_same_job_path(
     assert [item["evaluation_ref"] for item in reviewer_draft] == [
         item.evaluation_ref for item in plan.evaluations
     ]
-    assert all(set(item) == {"evaluation_ref", "verdict", "reason"} for item in reviewer_draft)
+    assert all(
+        set(item)
+        == {"evaluation_ref", "verdict", "supporting_event_refs", "reason"}
+        for item in reviewer_draft
+    )
     assert all(item["verdict"] == "CONFIRMED" for item in reviewer_draft)
 
     stack.shutdown()

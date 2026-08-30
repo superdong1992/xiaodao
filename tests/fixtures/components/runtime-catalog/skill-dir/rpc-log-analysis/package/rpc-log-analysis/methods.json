@@ -12,7 +12,8 @@
       "title": "RPC call timeout",
       "reference": "references/rpc-call-timeout.md",
       "priority": 1,
-      "evidence_markers": ["rpc deadline exceeded", "connection pool wait"]
+      "evidence_markers": ["rpc deadline exceeded", "connection pool wait"],
+      "activation_markers": ["rpc deadline exceeded"]
     }
   ]
 }

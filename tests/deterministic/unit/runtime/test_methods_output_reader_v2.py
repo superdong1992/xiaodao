@@ -52,6 +52,9 @@ def _response(plan):
         {
             "evaluation_ref": item.evaluation_ref,
             "verdict": verdict,
+            "supporting_event_refs": (
+                list(item.evidence_event_refs) if verdict == "CONFIRMED" else []
+            ),
             "reason": f"reason-{index}",
         }
         for index, (item, verdict) in enumerate(
@@ -103,6 +106,10 @@ def test_reads_each_role_attempt_from_its_fixed_path(
         item.evaluation_ref for item in result.evaluation.evaluations
     )
     assert actual_refs == tuple(item.evaluation_ref for item in plan.evaluations)
+    assert result.evaluation.evaluations[0].supporting_event_refs == (
+        plan.evaluations[0].evidence_event_refs
+    )
+    assert result.evaluation.evaluations[1].supporting_event_refs == ()
 
 
 def test_missing_attempt_is_a_typed_protocol_error(tmp_path: Path) -> None:

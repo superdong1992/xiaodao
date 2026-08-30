@@ -58,6 +58,7 @@ def _valid_response(plan):
         {
             "evaluation_ref": item.evaluation_ref,
             "verdict": "CONFIRMED",
+            "supporting_event_refs": list(item.evidence_event_refs),
             "reason": "The frozen event supports this method.",
         }
         for item in plan.evaluations

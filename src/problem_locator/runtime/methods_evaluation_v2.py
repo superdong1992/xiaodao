@@ -17,7 +17,9 @@ from problem_locator.contracts import (
 )
 
 
-_OUTPUT_FIELDS = frozenset({"evaluation_ref", "verdict", "reason"})
+_OUTPUT_FIELDS = frozenset(
+    {"evaluation_ref", "verdict", "supporting_event_refs", "reason"}
+)
 
 
 class MethodEvaluationResponseError(ValueError):
@@ -95,7 +97,7 @@ def parse_method_evaluation_response_v2(
             if not isinstance(raw_item, Mapping) or set(raw_item) != _OUTPUT_FIELDS:
                 raise MethodEvaluationResponseError(
                     f"model evaluation item {index} must contain only "
-                    "evaluation_ref, verdict, and reason"
+                    "evaluation_ref, verdict, supporting_event_refs, and reason"
                 )
             try:
                 item = MethodEvaluationOutputItemV2.model_validate(dict(raw_item))
@@ -106,6 +108,21 @@ def parse_method_evaluation_response_v2(
         if item.evaluation_ref != planned.evaluation_ref:
             raise MethodEvaluationResponseError(
                 "model evaluation response must use exact plan order and coverage"
+            )
+        planned_event_refs = planned.evidence_event_refs
+        if any(ref not in planned_event_refs for ref in item.supporting_event_refs):
+            raise MethodEvaluationResponseError(
+                f"model evaluation item {index} supporting_event_refs must belong "
+                "to its planned evaluation"
+            )
+        supporting_ref_set = set(item.supporting_event_refs)
+        expected_supporting_order = tuple(
+            ref for ref in planned_event_refs if ref in supporting_ref_set
+        )
+        if item.supporting_event_refs != expected_supporting_order:
+            raise MethodEvaluationResponseError(
+                f"model evaluation item {index} supporting_event_refs must retain "
+                "the planned event order"
             )
         parsed.append(item)
     return tuple(parsed)
@@ -150,6 +167,29 @@ def _validate_role_coverage(
     actual_refs = tuple(item.evaluation_ref for item in evaluation.evaluations)
     if actual_refs != expected_refs:
         raise ValueError("role evaluation must retain exact plan order and coverage")
+    for item, planned in zip(
+        evaluation.evaluations,
+        plan.evaluations,
+        strict=True,
+    ):
+        if any(
+            ref not in planned.evidence_event_refs
+            for ref in item.supporting_event_refs
+        ):
+            raise ValueError(
+                "role evaluation supporting_event_refs must belong to their "
+                "planned evaluation"
+            )
+        supporting_ref_set = set(item.supporting_event_refs)
+        expected_supporting_order = tuple(
+            ref
+            for ref in planned.evidence_event_refs
+            if ref in supporting_ref_set
+        )
+        if item.supporting_event_refs != expected_supporting_order:
+            raise ValueError(
+                "role evaluation supporting_event_refs must retain planned event order"
+            )
 
 
 def resolve_method_consensus_v2(
@@ -158,7 +198,7 @@ def resolve_method_consensus_v2(
     first: MethodRoleEvaluationV2,
     second: MethodRoleEvaluationV2,
 ) -> MethodConsensusV2:
-    """Resolve two blind roles using only ``evaluation_ref`` and ``verdict``."""
+    """Resolve two blind roles using refs and verdicts, without comparing reasons."""
 
     if not isinstance(plan, MethodEvaluationPlanV2):
         raise TypeError("plan must be MethodEvaluationPlanV2")
@@ -172,10 +212,12 @@ def resolve_method_consensus_v2(
     _validate_role_coverage(plan=plan, evaluation=second)
 
     first_blind = tuple(
-        (item.evaluation_ref, item.verdict) for item in first.evaluations
+        (item.evaluation_ref, item.verdict, item.supporting_event_refs)
+        for item in first.evaluations
     )
     second_blind = tuple(
-        (item.evaluation_ref, item.verdict) for item in second.evaluations
+        (item.evaluation_ref, item.verdict, item.supporting_event_refs)
+        for item in second.evaluations
     )
     verdicts = tuple(item.verdict for item in first.evaluations)
     resolved = (
@@ -189,10 +231,15 @@ def resolve_method_consensus_v2(
             status="UNRESOLVED",
             confirmed_evaluation_refs=(),
             confirmed_method_ids=(),
+            confirmed_event_refs=(),
         )
 
     confirmed_pairs = tuple(
-        (planned.evaluation_ref, planned.method_id)
+        (
+            planned.evaluation_ref,
+            planned.method_id,
+            evaluated.supporting_event_refs,
+        )
         for planned, evaluated in zip(
             plan.evaluations,
             first.evaluations,
@@ -205,6 +252,11 @@ def resolve_method_consensus_v2(
         status="RESOLVED",
         confirmed_evaluation_refs=tuple(item[0] for item in confirmed_pairs),
         confirmed_method_ids=tuple(item[1] for item in confirmed_pairs),
+        confirmed_event_refs=tuple(
+            event_ref
+            for _, _, supporting_event_refs in confirmed_pairs
+            for event_ref in supporting_event_refs
+        ),
     )
 
 

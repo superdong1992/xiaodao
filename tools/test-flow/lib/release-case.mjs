@@ -17,7 +17,7 @@ const PLAN_FIELDS = ["anchors", "attachment_requirement", "problem_time_binding"
 const ANCHOR_FIELDS = ["label", "module", "pid", "process_name", "slot"];
 const SEMANTIC_ORACLE_FIELDS = ["author_note_markers_forbidden_in_product", "business_canaries", "expected_package", "oracle_visibility", "schema_version"];
 const EXPECTED_PACKAGE_FIELDS = ["forbidden_paths", "method_marker_sets", "required_artifacts", "required_log_derived_fields", "required_shared_markers", "required_user_inputs", "skill_name", "source_wiki_sha256"];
-const METHOD_MARKER_SET_FIELDS = ["all_markers", "semantic_id"];
+const METHOD_MARKER_SET_FIELDS = ["activation_markers", "all_markers", "semantic_id"];
 const SCENARIO_ORACLE_FIELDS = ["expected_method_verdicts", "expected_status", "forbidden_evidence_terms", "oracle_visibility", "required_evidence_identities", "required_request_timeout", "scenario_id", "schema_version"];
 const METHOD_VERDICT_FIELDS = ["semantic_id", "verdict"];
 const EVIDENCE_IDENTITY_FIELDS = ["identity_tokens", "marker", "semantic_id"];
@@ -46,6 +46,16 @@ function safeRelative(value, code = "RELEASE_CASE_PATH_INVALID") {
 function stringArray(value, code, label, { nonempty = false, pattern = null, unique = true } = {}) {
   assertFlow(Array.isArray(value) && (!nonempty || value.length > 0) && value.every((item) => typeof item === "string" && item.length > 0 && (!pattern || pattern.test(item))) && (!unique || value.length === new Set(value).size), code, `${label} must contain valid strings`);
   return value;
+}
+
+function orderedSubsequence(values, sequence) {
+  let cursor = 0;
+  for (const value of values) {
+    const index = sequence.indexOf(value, cursor);
+    if (index < 0) return false;
+    cursor = index + 1;
+  }
+  return true;
 }
 
 function pathIdentity(absolute) {
@@ -279,6 +289,12 @@ function loadSemanticOracle(loaded) {
     exactKeys(item, METHOD_MARKER_SET_FIELDS, "RELEASE_CASE_EXPECTED_METHOD_FIELDS", "Release expected method marker set");
     assertFlow(typeof item.semantic_id === "string" && USER_FACT.test(item.semantic_id), "RELEASE_CASE_EXPECTED_METHOD_ID", "Release expected semantic method id is invalid");
     stringArray(item.all_markers, "RELEASE_CASE_EXPECTED_METHOD_MARKERS", "Release expected method markers", { nonempty: true });
+    stringArray(item.activation_markers, "RELEASE_CASE_EXPECTED_METHOD_ACTIVATION_MARKERS", "Release expected method activation markers", { nonempty: true });
+    assertFlow(
+      orderedSubsequence(item.activation_markers, item.all_markers),
+      "RELEASE_CASE_EXPECTED_METHOD_ACTIVATION_ORDER",
+      "Release expected method activation markers must be an ordered subsequence of all markers",
+    );
     semanticIds.push(item.semantic_id);
   }
   assertFlow(semanticIds.length === new Set(semanticIds).size, "RELEASE_CASE_EXPECTED_METHOD_ID", "Release expected semantic method ids must be unique");

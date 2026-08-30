@@ -12,7 +12,8 @@
       "title": "Service boundary failure",
       "reference": "references/service-boundary-failure.md",
       "priority": 1,
-      "evidence_markers": ["SERVICE_FACT"]
+      "evidence_markers": ["SERVICE_FACT"],
+      "activation_markers": ["SERVICE_FACT"]
     }
   ]
 }

@@ -11,7 +11,7 @@ import {
   validateMethodsV2ExecutionRecords,
   validateMethodsV2RestartSnapshot,
 } from "../lib/methods-oracle.mjs";
-import { canonicalJson, resolvePythonTestRuntime } from "../lib/util.mjs";
+import { canonicalJson, resolvePythonTestRuntime, sha256Bytes } from "../lib/util.mjs";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 
@@ -110,6 +110,10 @@ test("Methods V2 replay accepts the production scanner's Straße to STRASSE case
   assert.deepEqual(summary.confirmed_method_ids, ["casefold-method"]);
   assert.equal(summary.evidence_hit_count, 1);
   assert.equal(summary.evaluation_count, 1);
+  assert.equal(
+    summary.method_activation_markers_sha256,
+    sha256Bytes(canonicalJson([{ method_id: "casefold-method", activation_markers: ["Straße request_id="] }])),
+  );
   assert.deepEqual(Object.keys(summary.record_sha256).sort(), Object.keys(METHODS_V2_CAPTURED_FILES).sort());
 
   const caseView = {
@@ -150,6 +154,32 @@ test("Methods V2 replay rejects one-field mutations of a production-generated bu
   assert.throws(
     () => validateMethodsV2ExecutionRecords(wrongMethod),
     (error) => error.code === "METHODS_V2_GRAPH_HIT_INVALID",
+  );
+
+  for (const mutate of [
+    (card) => { delete card.activation_markers; },
+    (card) => { card.activation_markers = []; },
+    (card) => { card.activation_markers = [card.evidence_markers[0], card.evidence_markers[0]]; },
+    (card) => { card.activation_markers = ["NOT_A_MARKER"]; },
+    (card) => {
+      card.evidence_markers.push("SECOND_MARKER");
+      card.activation_markers = ["SECOND_MARKER", card.evidence_markers[0]];
+    },
+  ]) {
+    const invalidActivation = copyFixture(baseline);
+    mutate(invalidActivation.expected.method_cards[0]);
+    assert.throws(
+      () => validateMethodsV2ExecutionRecords(invalidActivation),
+      (error) => error.code === "METHODS_V2_EXPECTATION_INVALID",
+    );
+  }
+
+  const noActivationHit = copyFixture(baseline);
+  noActivationHit.expected.method_cards[0].evidence_markers.push("UNSEEN_ACTIVATION");
+  noActivationHit.expected.method_cards[0].activation_markers = ["UNSEEN_ACTIVATION"];
+  assert.throws(
+    () => validateMethodsV2ExecutionRecords(noActivationHit),
+    (error) => error.code === "METHODS_V2_GRAPH_METHOD_ACTIVATION_MISSING",
   );
 
   const wrongPlan = copyFixture(baseline);

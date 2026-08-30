@@ -34,8 +34,10 @@ from problem_locator.runtime.methods_skill import (
 def _skill(
     *methods: tuple[str, tuple[str, ...]],
     log_derived_fields: tuple[str, ...] = (),
+    activation_markers_by_method: dict[str, tuple[str, ...]] | None = None,
 ) -> ResolvedSpecializedSkillV1:
     role = RuntimeRoleBindingV1("profile", "tools", "policy", "output")
+    activation_markers_by_method = activation_markers_by_method or {}
     cards = tuple(
         MethodCardV1(
             id=method_id,
@@ -43,6 +45,7 @@ def _skill(
             reference=f"references/{method_id}.md",
             priority=index,
             evidence_markers=markers,
+            activation_markers=activation_markers_by_method.get(method_id, markers),
         )
         for index, (method_id, markers) in enumerate(methods, start=1)
     )
@@ -120,6 +123,76 @@ def test_scan_casefolds_but_preserves_declared_marker_and_frozen_line() -> None:
     assert len(graph.hits) == 1
     assert graph.hits[0].marker == "Straße"
     assert graph.hits[0].line == "STRASSE request=42"
+
+
+def test_context_marker_alone_does_not_activate_method() -> None:
+    skill = _skill(
+        ("context-method", ("ACTIVATION_MARKER", "CONTEXT_MARKER")),
+        activation_markers_by_method={
+            "context-method": ("ACTIVATION_MARKER",),
+        },
+    )
+
+    graph = scan_method_evidence_v2(
+        skill=skill,
+        target_logs=(_target("server", "CONTEXT_MARKER request=42\n"),),
+    )
+
+    assert graph.loaded_method_ids == ()
+    assert graph.hits == ()
+    assert graph.events == ()
+
+
+def test_activation_hit_keeps_all_method_hits_from_the_single_scan() -> None:
+    skill = _skill(
+        (
+            "context-method",
+            ("ACTIVATION_MARKER", "BEFORE_CONTEXT", "AFTER_CONTEXT"),
+        ),
+        activation_markers_by_method={
+            "context-method": ("ACTIVATION_MARKER",),
+        },
+    )
+
+    graph = scan_method_evidence_v2(
+        skill=skill,
+        target_logs=(
+            _target(
+                "server",
+                "BEFORE_CONTEXT request=42\n"
+                "ACTIVATION_MARKER request=42\n"
+                "AFTER_CONTEXT request=42\n",
+            ),
+        ),
+    )
+
+    assert graph.loaded_method_ids == ("context-method",)
+    assert [item.marker for item in graph.hits] == [
+        "ACTIVATION_MARKER",
+        "BEFORE_CONTEXT",
+        "AFTER_CONTEXT",
+    ]
+
+
+def test_shared_literal_activates_only_methods_that_declare_it_for_activation() -> None:
+    skill = _skill(
+        ("context-only", ("CONTEXT_ACTIVATION", "SHARED_LITERAL")),
+        ("shared-activation", ("SHARED_LITERAL",)),
+        activation_markers_by_method={
+            "context-only": ("CONTEXT_ACTIVATION",),
+            "shared-activation": ("SHARED_LITERAL",),
+        },
+    )
+
+    graph = scan_method_evidence_v2(
+        skill=skill,
+        target_logs=(_target("server", "SHARED_LITERAL request=42\n"),),
+    )
+
+    assert graph.loaded_method_ids == ("shared-activation",)
+    assert [(item.method_id, item.marker) for item in graph.hits] == [
+        ("shared-activation", "SHARED_LITERAL"),
+    ]
 
 
 def test_complete_plan_has_every_loaded_method_and_all_of_its_hits() -> None:
@@ -245,6 +318,22 @@ def test_plan_rejects_rehashed_hit_bound_to_another_methods_marker_index() -> No
     )
 
     with pytest.raises(ValueError, match="marker/index does not belong to its method"):
+        build_method_evaluation_plan_v2(skill=skill, evidence=forged_graph)
+
+
+def test_plan_rejects_loaded_method_without_activation_hit() -> None:
+    skill = _skill(
+        ("first-method", ("ACTIVATION", "CONTEXT")),
+        activation_markers_by_method={"first-method": ("ACTIVATION",)},
+    )
+    graph = scan_method_evidence_v2(
+        skill=skill,
+        target_logs=(_target("server", "ACTIVATION CONTEXT\n"),),
+    )
+    context_hit = next(item for item in graph.hits if item.marker == "CONTEXT")
+    forged_graph = graph.model_copy(update={"hits": (context_hit,)})
+
+    with pytest.raises(ValueError, match="has no activation marker hit"):
         build_method_evaluation_plan_v2(skill=skill, evidence=forged_graph)
 
 

@@ -163,6 +163,7 @@ def _specialist_handoff(inputs) -> tuple[JobOutcome, object, object]:
             {
                 "evaluation_ref": item.evaluation_ref,
                 "verdict": "CONFIRMED",
+                "supporting_event_refs": list(item.evidence_event_refs),
                 "reason": f"private specialist handoff reason {item.method_id}",
             }
             for item in plan.evaluations
@@ -413,6 +414,7 @@ def test_server_can_express_reviewer_result_without_candidate_assessment(
             {
                 "evaluation_ref": item.evaluation_ref,
                 "verdict": "CONFIRMED",
+                "supporting_event_refs": list(item.evidence_event_refs),
                 "reason": f"private specialist reason {item.method_id}",
             }
             for item in plan.evaluations
@@ -426,6 +428,7 @@ def test_server_can_express_reviewer_result_without_candidate_assessment(
             {
                 "evaluation_ref": item.evaluation_ref,
                 "verdict": "CONFIRMED",
+                "supporting_event_refs": list(item.evidence_event_refs),
                 "reason": f"private reviewer reason {item.method_id}",
             }
             for item in plan.evaluations
@@ -466,6 +469,7 @@ def test_server_can_express_reviewer_result_without_candidate_assessment(
         terminal_state=terminal_state,
         terminal_result=terminal_result,
         plan=plan,
+        evidence=graph,
         produced_at="2026-07-31T00:03:30.000Z",
     )
     assert outcome.methods_terminal_projection is not None

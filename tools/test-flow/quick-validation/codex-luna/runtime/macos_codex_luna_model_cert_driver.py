@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the production Evidence V2 Methods chain for the Codex/Luna cert.
+"""Run the production Evidence V2 Methods chain for model cert or Fast E2E.
 
 The driver owns only test inputs and in-memory Ports.  Graph, Plan, role
 validation, protocol repair, consensus, State, Outcome, and the public
@@ -9,6 +9,7 @@ validation, protocol repair, consensus, State, Outcome, and the public
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
 import hashlib
 import json
 import os
@@ -226,20 +227,60 @@ def _catalog(
 def _fact_values(
     source_root: Path,
     generated_registration: bool,
-) -> tuple[list[dict[str, Any]], dict[str, bytes]]:
+    scenario_root: Path | None = None,
+) -> tuple[
+    list[dict[str, Any]],
+    dict[str, bytes],
+    str,
+    dict[str, list[str]],
+]:
     if generated_registration:
-        scenario = (
+        scenario = scenario_root or (
             source_root
             / "tests/cases/release/rpc-timeout-anonymized/scenarios/multiple-rpc-timeouts"
         )
-        driver = json.loads((scenario / "driver.json").read_bytes())
-        names = driver["initial_user_fact_names"]
-        values = driver["initial_user_fact_values"]
+        if (scenario / "driver.json").is_file():
+            driver = json.loads((scenario / "driver.json").read_bytes())
+            scenario_id = driver["scenario_id"]
+            names = driver["initial_user_fact_names"]
+            values = driver["initial_user_fact_values"]
+            client_log = scenario / "client.log"
+            server_log = scenario / "server.log"
+        elif (scenario / "case.json").is_file():
+            driver = json.loads((scenario / "case.json").read_bytes())
+            scenario_id = driver["scenario_id"]
+            names = [
+                name
+                for name in (
+                    "problem_time",
+                    "client_process",
+                    "server_process",
+                    "service",
+                    "api",
+                )
+                if name in driver
+            ]
+            values = [str(driver[name]) for name in names]
+            problem_time_index = names.index("problem_time")
+            values[problem_time_index] = (
+                datetime.fromisoformat(values[problem_time_index])
+                .astimezone(timezone.utc)
+                .isoformat(timespec="milliseconds")
+                .replace("+00:00", "Z")
+            )
+            client_log = scenario / "raw/client.log"
+            server_log = scenario / "raw/server.log"
+        else:
+            _fail(
+                "CODEX_LUNA_FAST_E2E_SCENARIO_INPUT_MISSING",
+                "Scenario must contain driver.json or historical case.json",
+            )
         target_contents = {
-            "client": (scenario / "client.log").read_bytes(),
-            "server": (scenario / "server.log").read_bytes(),
+            "client": client_log.read_bytes(),
+            "server": server_log.read_bytes(),
         }
     else:
+        scenario_id = "deterministic-rpc-timeout"
         names = [
             "caller_service",
             "problem_time",
@@ -281,7 +322,15 @@ def _fact_values(
                 "supersedes": [],
             }
         )
-    return facts, target_contents
+    return (
+        facts,
+        target_contents,
+        scenario_id,
+        {
+            "initial_user_fact_names": list(names),
+            "initial_user_fact_values": list(values),
+        },
+    )
 
 
 def _method_role(prompt: str) -> tuple[Role, Attempt]:
@@ -320,6 +369,8 @@ class FakeModelRoleBackend:
         model_failure_roles: frozenset[Role] = frozenset(),
         invariant_failure_roles: frozenset[Role] = frozenset(),
         no_matching_evidence: bool = False,
+        supporting_identity_tokens_by_method: dict[str, tuple[str, ...]] | None = None,
+        confirmed_reason_terms: tuple[str, ...] = (),
     ) -> None:
         self.invalid_primary_roles = invalid_primary_roles
         self.rejected_method_ids = rejected_method_ids
@@ -327,6 +378,10 @@ class FakeModelRoleBackend:
         self.model_failure_roles = model_failure_roles
         self.invariant_failure_roles = invariant_failure_roles
         self.no_matching_evidence = no_matching_evidence
+        self.supporting_identity_tokens_by_method = (
+            supporting_identity_tokens_by_method or {}
+        )
+        self.confirmed_reason_terms = confirmed_reason_terms
         self.invocations: list[dict[str, object]] = []
 
     def execute(self, **kwargs: Any) -> BackendExecution:
@@ -337,6 +392,12 @@ class FakeModelRoleBackend:
             (workspace / "inputs/method-evaluation-plan.json").read_bytes(),
             MethodEvaluationPlanV2,
         )
+        graph = parse_canonical_json_bytes(
+            (workspace / "inputs/method-evidence-graph.json").read_bytes()
+        )
+        events_by_ref = {
+            event["event_ref"]: event for event in graph["events"]
+        }
         self.invocations.append(
             {
                 "ordinal": len(self.invocations) + 1,
@@ -375,6 +436,22 @@ class FakeModelRoleBackend:
                         if item.method_id in self.rejected_method_ids
                         else "CONFIRMED"
                     ),
+                    "supporting_event_refs": (
+                        []
+                        if item.method_id in self.rejected_method_ids
+                        else [
+                            event_ref
+                            for event_ref in item.evidence_event_refs
+                            if all(
+                                token
+                                in events_by_ref[event_ref]["identity_tokens"]
+                                for token in self.supporting_identity_tokens_by_method.get(
+                                    item.method_id,
+                                    (),
+                                )
+                            )
+                        ]
+                    ),
                     "reason": (
                         (
                             "冻结 Evidence Graph 不满足该方法的确认条件。"
@@ -382,10 +459,15 @@ class FakeModelRoleBackend:
                             else "盲评确认冻结 Graph 与 Plan 不满足该方法的确认条件。"
                         )
                         if item.method_id in self.rejected_method_ids
-                        else (
-                            "冻结 Evidence Graph 满足该方法卡。"
-                            if role == "SPECIALIST"
-                            else "盲评确认冻结 Graph 与 Plan 支持该结论。"
+                        else " ".join(
+                            (
+                                (
+                                    "冻结 Evidence Graph 满足该方法卡。"
+                                    if role == "SPECIALIST"
+                                    else "盲评确认冻结 Graph 与 Plan 支持该结论。"
+                                ),
+                                *self.confirmed_reason_terms,
+                            )
                         )
                     ),
                 }
@@ -469,7 +551,15 @@ def _running_job_and_state(
     catalog: VersionedAssetCatalog,
     generated_registration: bool,
     publication_guard: InMemoryPublicationCommitGuard,
-) -> tuple[Job, CaseAggregate, InMemoryResourceStore, dict[str, bytes]]:
+    scenario_root: Path | None = None,
+) -> tuple[
+    Job,
+    CaseAggregate,
+    InMemoryResourceStore,
+    dict[str, bytes],
+    str,
+    dict[str, list[str]],
+]:
     skill_refs = [
         ref
         for ref in catalog.route_bindings().available_skill_refs
@@ -480,7 +570,11 @@ def _running_job_and_state(
             "CODEX_LUNA_MODEL_CERT_SKILL_CARDINALITY_INVALID",
             "Model-cert requires exactly one specialized registration",
         )
-    facts, target_contents = _fact_values(source_root, generated_registration)
+    facts, target_contents, scenario_id, user_inputs = _fact_values(
+        source_root,
+        generated_registration,
+        scenario_root,
+    )
     attachment_bytes = b"model-cert deterministic archive descriptor\n"
     attachment_sha256 = hashlib.sha256(attachment_bytes).hexdigest()
     attachment_id = "00000000-0000-4000-8000-000000000450"
@@ -532,7 +626,14 @@ def _running_job_and_state(
         state_reference_count=1,
         payload=attachment_bytes,
     )
-    return job, aggregate, resources, target_contents
+    return (
+        job,
+        aggregate,
+        resources,
+        target_contents,
+        scenario_id,
+        user_inputs,
+    )
 
 
 def _claim_active_review(repository: InMemoryStateRepository) -> Job:
@@ -648,6 +749,8 @@ def run_production_model_cert(
     role_backend: AgentBackend | FakeModelRoleBackend,
     source_root: Path = REPOSITORY_ROOT,
     registration_root: Path | None = None,
+    scenario_root: Path | None = None,
+    scenario_id: str | None = None,
     evidence_root: Path | None = None,
     execution_mode: Literal["deterministic-zero-model", "real-model"] = (
         "deterministic-zero-model"
@@ -662,12 +765,25 @@ def run_production_model_cert(
         broker_factory,
     )
     loaded_registration_root = work_root / "skill-dir" / registration_id
-    source_job, aggregate, resources, target_contents = _running_job_and_state(
+    (
+        source_job,
+        aggregate,
+        resources,
+        target_contents,
+        loaded_scenario_id,
+        user_inputs,
+    ) = _running_job_and_state(
         source_root=source_root,
         catalog=catalog,
         generated_registration=registration_root is not None,
         publication_guard=guard,
+        scenario_root=scenario_root,
     )
+    if scenario_id is not None and scenario_id != loaded_scenario_id:
+        _fail(
+            "CODEX_LUNA_FAST_E2E_SCENARIO_ID_MISMATCH",
+            "Scenario ID differs from its frozen input",
+        )
     repository = InMemoryStateRepository(_state_with_aggregate(aggregate))
     records = InMemoryExecutionRecordStore()
     records.publish_job(_pending_job(source_job))
@@ -785,6 +901,7 @@ def run_production_model_cert(
             "Production query omitted terminal methods_result: "
             f"specialist_result={specialist_receipt.job_outcome.result_type.value}; "
             f"specialist_error={specialist_receipt.job_outcome.error.code.value if specialist_receipt.job_outcome.error is not None else None}; "
+            f"specialist_error_details={specialist_receipt.job_outcome.error.details if specialist_receipt.job_outcome.error is not None else None}; "
             f"specialist_terminal={specialist_receipt.job_outcome.methods_terminal_projection is not None}; "
             f"specialist_review={specialist_receipt.job_outcome.methods_review_target is not None}; "
             f"submission={handoff.disposition.value}; "
@@ -903,19 +1020,7 @@ def run_production_model_cert(
         / "registration-template.json"
     )
     registration = json.loads(selected_registration.read_bytes())
-    if registration_root is not None:
-        driver = json.loads(
-            (
-                source_root
-                / "tests/cases/release/rpc-timeout-anonymized/scenarios"
-                / "multiple-rpc-timeouts/driver.json"
-            ).read_bytes()
-        )
-        user_inputs = {
-            "initial_user_fact_names": driver["initial_user_fact_names"],
-            "initial_user_fact_values": driver["initial_user_fact_values"],
-        }
-    else:
+    if registration_root is None:
         frozen_facts = source_job.context_snapshot.user_facts  # type: ignore[union-attr]
         user_inputs = {
             "initial_user_fact_names": [
@@ -983,14 +1088,10 @@ def run_production_model_cert(
         "production_runtime": (
             "problem_locator.runtime.diagnosis_runtime.DiagnosisRuntime"
         ),
-        "scenario_id": (
-            "multiple-rpc-timeouts"
-            if registration_root is not None
-            else "deterministic-rpc-timeout"
-        ),
+        "scenario_id": loaded_scenario_id,
         "registration_id": registration_id,
         "scenario": {
-            "scenario_id": "multiple-rpc-timeouts",
+            "scenario_id": loaded_scenario_id,
             "source_wiki_sha256": registration["package"][
                 "source_wiki_sha256"
             ],
@@ -1063,6 +1164,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--mode", choices=("fake", "real"), required=True)
     parser.add_argument("--source-root", type=Path, required=True)
     parser.add_argument("--registration-root", type=Path)
+    parser.add_argument("--scenario-root", type=Path)
+    parser.add_argument("--scenario-id")
     parser.add_argument("--work-root", type=Path, required=True)
     parser.add_argument("--receipt-path", type=Path, required=True)
     parser.add_argument("--node-entry", type=Path)
@@ -1115,6 +1218,13 @@ def _validated_options(argv: list[str]) -> argparse.Namespace:
     options.receipt_path = options.receipt_path.resolve()
     if options.registration_root is not None:
         options.registration_root = options.registration_root.resolve()
+    if options.scenario_root is not None:
+        options.scenario_root = options.scenario_root.resolve()
+        if not options.scenario_root.is_dir():
+            _fail(
+                "CODEX_LUNA_FAST_E2E_SCENARIO_ROOT_MISSING",
+                "Scenario root is unavailable",
+            )
     if options.mode == "real":
         required = (
             "registration_root",
@@ -1196,6 +1306,8 @@ def main(argv: list[str] | None = None) -> int:
             role_backend=role_backend,
             source_root=values.source_root,
             registration_root=values.registration_root,
+            scenario_root=values.scenario_root,
+            scenario_id=values.scenario_id,
             evidence_root=values.evidence_root,
             execution_mode=execution_mode,
         )

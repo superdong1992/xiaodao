@@ -9,7 +9,9 @@ from pydantic import ValidationError
 import problem_locator.runtime.methods_evidence_v2 as methods_evidence_v2
 from problem_locator.contracts import (
     MethodEvidenceHitV2,
+    method_terminal_result_ref_v2,
     project_method_terminal_result_v2,
+    validate_method_terminal_result_v2,
 )
 from problem_locator.domain.methods_state_v2 import (
     accept_specialist_evaluation_v2,
@@ -53,6 +55,7 @@ def _skill() -> ResolvedSpecializedSkillV1:
             reference=f"references/{method_id}.md",
             priority=priority,
             evidence_markers=(marker,),
+            activation_markers=(marker,),
         )
         for priority, method_id, marker in (
             (1, "first-method", "FIRST_MARKER"),
@@ -90,10 +93,15 @@ def _skill() -> ResolvedSpecializedSkillV1:
     )
 
 
-def _target() -> FrozenTargetLogV1:
+def _target(*, repeated_first: bool = False) -> FrozenTargetLogV1:
     content = (
         b"FIRST_MARKER request_id=req-1\n"
-        b"SECOND_MARKER request_id=req-2\n"
+        + (
+            b"FIRST_MARKER request_id=req-noise\n"
+            if repeated_first
+            else b""
+        )
+        + b"SECOND_MARKER request_id=req-2\n"
     )
     return FrozenTargetLogV1(
         source_id="server",
@@ -108,9 +116,14 @@ def _context(
     reviewer_verdicts: tuple[str, str] = ("CONFIRMED", "REJECTED"),
     *,
     evaluation_id: str = EVALUATION_ID,
+    repeated_first: bool = False,
+    first_event_index: int | None = None,
 ):
     skill = _skill()
-    graph = scan_method_evidence_v2(skill=skill, target_logs=(_target(),))
+    graph = scan_method_evidence_v2(
+        skill=skill,
+        target_logs=(_target(repeated_first=repeated_first),),
+    )
     plan = build_method_evaluation_plan_v2(skill=skill, evidence=graph)
 
     def response(verdicts: tuple[str, str], prefix: str):
@@ -118,6 +131,17 @@ def _context(
             {
                 "evaluation_ref": item.evaluation_ref,
                 "verdict": verdict,
+                "supporting_event_refs": (
+                    [item.evidence_event_refs[first_event_index]]
+                    if (
+                        verdict == "CONFIRMED"
+                        and index == 1
+                        and first_event_index is not None
+                    )
+                    else list(item.evidence_event_refs)
+                    if verdict == "CONFIRMED"
+                    else []
+                ),
                 "reason": f"{prefix}-{index}",
             }
             for index, (item, verdict) in enumerate(
@@ -161,6 +185,30 @@ def _context(
     return graph, plan, consensus, state
 
 
+def _with_recomputed_result_ref(result, **changes: object):
+    mutated = result.model_copy(update=changes)
+    result_ref = method_terminal_result_ref_v2(
+        case_id=mutated.case_id,
+        source_job_id=mutated.source_job_id,
+        terminal_job_id=mutated.terminal_job_id,
+        evaluation_id=mutated.evaluation_id,
+        status=mutated.status,
+        plan_ref=mutated.plan_ref,
+        evidence_graph_ref=mutated.evidence_graph_ref,
+        reason_code=mutated.reason_code,
+        diagnostic_id=mutated.diagnostic_id,
+        diagnostic_evaluation_ref=mutated.diagnostic_evaluation_ref,
+        evaluations=mutated.evaluations,
+        confirmed_evaluation_refs=mutated.confirmed_evaluation_refs,
+        confirmed_method_ids=mutated.confirmed_method_ids,
+        confirmed_event_refs=mutated.confirmed_event_refs,
+        confirmed_hit_refs=mutated.confirmed_hit_refs,
+        limitations=mutated.limitations,
+        reasons=mutated.reasons,
+    )
+    return mutated.model_copy(update={"result_ref": result_ref})
+
+
 def test_resolved_result_maps_only_consensus_confirmed_refs_and_limitations() -> None:
     graph, plan, consensus, state = _context()
 
@@ -193,6 +241,70 @@ def test_resolved_result_maps_only_consensus_confirmed_refs_and_limitations() ->
     assert result.evaluations[0].verdict == "CONFIRMED"
     assert result.diagnostic_id.startswith("diag-")
     assert all(item.evaluation_ref.startswith("eval-") for item in result.evaluations)
+
+
+def test_resolved_result_uses_only_selected_events_and_their_graph_hits() -> None:
+    graph, plan, consensus, state = _context(
+        repeated_first=True,
+        first_event_index=0,
+    )
+    selected_ref = plan.evaluations[0].evidence_event_refs[0]
+    noise_ref = plan.evaluations[0].evidence_event_refs[1]
+    event_by_ref = {item.event_ref: item for item in graph.events}
+
+    result = build_method_terminal_result_v2(
+        state=state,
+        plan=plan,
+        evidence=graph,
+        terminal_job_id=SOURCE_JOB_ID,
+    )
+
+    assert consensus.confirmed_event_refs == (selected_ref,)
+    assert result.confirmed_event_refs == (selected_ref,)
+    assert result.confirmed_hit_refs == event_by_ref[selected_ref].evidence_hit_refs
+    assert result.evaluations[0].evidence_event_refs == (selected_ref,)
+    assert (
+        result.evaluations[0].evidence_hit_refs
+        == event_by_ref[selected_ref].evidence_hit_refs
+    )
+    assert noise_ref not in result.confirmed_event_refs
+    assert all(
+        hit_ref not in result.confirmed_hit_refs
+        for hit_ref in event_by_ref[noise_ref].evidence_hit_refs
+    )
+
+
+def test_graph_validation_rejects_hits_from_an_unselected_event() -> None:
+    graph, plan, _, state = _context(
+        repeated_first=True,
+        first_event_index=0,
+    )
+    result = build_method_terminal_result_v2(
+        state=state,
+        plan=plan,
+        evidence=graph,
+        terminal_job_id=SOURCE_JOB_ID,
+    )
+    noise_event_ref = plan.evaluations[0].evidence_event_refs[1]
+    noise_event = next(
+        item for item in graph.events if item.event_ref == noise_event_ref
+    )
+    forged_evaluation = result.evaluations[0].model_copy(
+        update={"evidence_hit_refs": noise_event.evidence_hit_refs}
+    )
+    forged = _with_recomputed_result_ref(
+        result,
+        evaluations=(forged_evaluation,),
+        confirmed_hit_refs=noise_event.evidence_hit_refs,
+    )
+
+    with pytest.raises(ValueError, match="exact consensus evidence"):
+        validate_method_terminal_result_v2(
+            state,
+            forged,
+            plan,
+            evidence=graph,
+        )
 
 
 def test_terminal_result_rejects_extra_free_form_reason() -> None:

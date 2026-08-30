@@ -72,8 +72,9 @@ description: Diagnose a test timeout from frozen evidence.
 Read `request.json`, `method-evidence-graph.json`, and
 `method-evaluation-plan.json`. Use request values for declared inputs. Log
 evidence comes only from the Evidence Graph and Evaluation Plan; do not rescan
-logs. Evaluate every `evaluation_ref` in plan order and return only `verdict`
-and `reason`; use `UNKNOWN` when the evidence cannot decide the rule.
+logs. Evaluate every `evaluation_ref` in plan order and return only
+`evaluation_ref`, `verdict`, `supporting_event_refs`, and `reason`; use
+`UNKNOWN` when the evidence cannot decide the rule.
 """,
         encoding="utf-8",
     )
@@ -138,6 +139,7 @@ Keep each event separate with its raw line and identity.
                     "reference": "references/slow-execution.md",
                     "priority": 1,
                     "evidence_markers": ["API_COMPLETE"],
+                    "activation_markers": ["API_COMPLETE"],
                 },
                 {
                     "id": "unrelated-method",
@@ -145,6 +147,7 @@ Keep each event separate with its raw line and identity.
                     "reference": "references/unrelated-method.md",
                     "priority": 2,
                     "evidence_markers": ["UNRELATED_POSITIVE"],
+                    "activation_markers": ["UNRELATED_POSITIVE"],
                 }
             ],
         },
@@ -316,6 +319,94 @@ def test_package_and_catalog_contract_reject_legacy_or_extra_files(tmp_path: Pat
         load_specialized_skill_registration(legacy)
 
 
+def test_package_loader_requires_activation_markers_for_every_method(
+    tmp_path: Path,
+) -> None:
+    package = _write_package(tmp_path)
+    methods_path = package / "methods.json"
+    methods = json.loads(methods_path.read_text(encoding="utf-8"))
+    del methods["methods"][0]["activation_markers"]
+    _write_json(methods_path, methods)
+
+    with pytest.raises(ValueError, match="missing=.*activation_markers"):
+        load_methods_package(package)
+
+
+@pytest.mark.parametrize("activation_markers", [[], ["API_COMPLETE", "API_COMPLETE"]])
+def test_package_loader_rejects_empty_or_duplicate_activation_markers(
+    tmp_path: Path,
+    activation_markers: list[str],
+) -> None:
+    package = _write_package(tmp_path)
+    methods_path = package / "methods.json"
+    methods = json.loads(methods_path.read_text(encoding="utf-8"))
+    methods["methods"][0]["activation_markers"] = activation_markers
+    _write_json(methods_path, methods)
+
+    with pytest.raises(ValueError, match="activation_markers are invalid"):
+        load_methods_package(package)
+
+
+@pytest.mark.parametrize(
+    "activation_markers",
+    [
+        ["UNKNOWN_MARKER"],
+        ["UNRELATED_POSITIVE", "API_COMPLETE"],
+    ],
+)
+def test_package_loader_rejects_activation_markers_that_are_not_an_ordered_subsequence(
+    tmp_path: Path,
+    activation_markers: list[str],
+) -> None:
+    package = _write_package(tmp_path)
+    reference = package / "references/slow-execution.md"
+    reference.write_text(
+        reference.read_text(encoding="utf-8").replace(
+            "`API_COMPLETE%s`",
+            "`API_COMPLETE%s`\n`UNRELATED_POSITIVE%s`",
+        ),
+        encoding="utf-8",
+    )
+    methods_path = package / "methods.json"
+    methods = json.loads(methods_path.read_text(encoding="utf-8"))
+    methods["methods"][0]["evidence_markers"] = [
+        "API_COMPLETE",
+        "UNRELATED_POSITIVE",
+    ]
+    methods["methods"][0]["activation_markers"] = activation_markers
+    _write_json(methods_path, methods)
+
+    with pytest.raises(ValueError, match="order-preserving subsequence"):
+        load_methods_package(package)
+
+
+def test_package_loader_accepts_activation_subsequence_and_cross_method_literal(
+    tmp_path: Path,
+) -> None:
+    package = _write_package(tmp_path)
+    reference = package / "references/slow-execution.md"
+    reference.write_text(
+        reference.read_text(encoding="utf-8").replace(
+            "`API_COMPLETE%s`",
+            "`API_COMPLETE%s`\n`UNRELATED_POSITIVE%s`",
+        ),
+        encoding="utf-8",
+    )
+    methods_path = package / "methods.json"
+    methods = json.loads(methods_path.read_text(encoding="utf-8"))
+    methods["methods"][0]["evidence_markers"] = [
+        "API_COMPLETE",
+        "UNRELATED_POSITIVE",
+    ]
+    methods["methods"][0]["activation_markers"] = ["UNRELATED_POSITIVE"]
+    _write_json(methods_path, methods)
+
+    loaded = load_methods_package(package)
+
+    assert loaded.methods[0].activation_markers == ("UNRELATED_POSITIVE",)
+    assert loaded.methods[1].activation_markers == ("UNRELATED_POSITIVE",)
+
+
 def test_package_loader_rejects_marker_absent_from_current_method_reference(
     tmp_path: Path,
 ) -> None:
@@ -323,6 +414,7 @@ def test_package_loader_rejects_marker_absent_from_current_method_reference(
     methods_path = package / "methods.json"
     methods = json.loads(methods_path.read_text(encoding="utf-8"))
     methods["methods"][0]["evidence_markers"] = ["UNRELATED_POSITIVE"]
+    methods["methods"][0]["activation_markers"] = ["UNRELATED_POSITIVE"]
     _write_json(methods_path, methods)
 
     with pytest.raises(
@@ -357,6 +449,7 @@ def test_package_loader_rejects_shortened_canonical_marker(tmp_path: Path) -> No
     methods_path = package / "methods.json"
     methods = json.loads(methods_path.read_text(encoding="utf-8"))
     methods["methods"][0]["evidence_markers"] = ["API"]
+    methods["methods"][0]["activation_markers"] = ["API"]
     _write_json(methods_path, methods)
 
     with pytest.raises(ValueError, match="is not canonical"):
@@ -450,6 +543,7 @@ def test_package_loader_derives_marker_from_stable_suffix_after_placeholder(
     methods_path = package / "methods.json"
     methods = json.loads(methods_path.read_text(encoding="utf-8"))
     methods["methods"][0]["evidence_markers"] = ["trailing-only"]
+    methods["methods"][0]["activation_markers"] = ["trailing-only"]
     _write_json(methods_path, methods)
 
     assert load_methods_package(package).methods[0].evidence_markers == (
@@ -690,6 +784,7 @@ def test_grounding_allows_a_literal_shared_by_multiple_methods(
     methods_path = registration / "package/diagnose-test-timeout/methods.json"
     methods_value = json.loads(methods_path.read_text(encoding="utf-8"))
     methods_value["methods"][1]["evidence_markers"] = ["API_COMPLETE"]
+    methods_value["methods"][1]["activation_markers"] = ["API_COMPLETE"]
     _write_json(methods_path, methods_value)
     second_reference = (
         registration

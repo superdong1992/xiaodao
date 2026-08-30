@@ -10,15 +10,18 @@
     "method_marker_sets": [
       {
         "semantic_id": "api_execution_overrun",
-        "all_markers": ["rpc call", "call unsuccess, reqid(", "LATE_RESPONSE service=", "API_COMPLETE service=", "DEADLOOP_DETECTED service="]
+        "all_markers": ["rpc call", "call unsuccess, reqid(", "LATE_RESPONSE service=", "API_COMPLETE service=", "DEADLOOP_DETECTED service="],
+        "activation_markers": ["LATE_RESPONSE service=", "API_COMPLETE service=", "DEADLOOP_DETECTED service="]
       },
       {
         "semantic_id": "server_receive_queueing",
-        "all_markers": ["rpc call", "call unsuccess, reqid(", "LATE_RESPONSE service=", "QUEUE_HISTORY print_time_ms="]
+        "all_markers": ["rpc call", "call unsuccess, reqid(", "LATE_RESPONSE service=", "QUEUE_HISTORY print_time_ms="],
+        "activation_markers": ["LATE_RESPONSE service=", "QUEUE_HISTORY print_time_ms="]
       },
       {
         "semantic_id": "client_receive_blocked",
-        "all_markers": ["rpc call", "call unsuccess, reqid(", "LATE_RESPONSE service="]
+        "all_markers": ["rpc call", "call unsuccess, reqid(", "LATE_RESPONSE service="],
+        "activation_markers": ["LATE_RESPONSE service="]
       }
     ],
     "required_shared_markers": [

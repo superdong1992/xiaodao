@@ -4,6 +4,14 @@ set -euo pipefail
 tool_root=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repo_root=$(CDPATH= cd -- "$tool_root/../../../.." && pwd)
 
+previous_argument=""
+for argument in "$@"; do
+  if [[ $previous_argument == "--mode" && $argument == "fast-e2e" ]]; then
+    exec bash "$tool_root/fast-e2e.sh" "$@"
+  fi
+  previous_argument=$argument
+done
+
 if [[ ${1:-} == "--inside-container" ]]; then
   shift
   flow_args=(

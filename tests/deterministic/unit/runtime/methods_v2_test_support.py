@@ -42,8 +42,9 @@ description: Diagnose test evidence with an exact evaluation plan.
 Read `request.json`, `method-evidence-graph.json`, and
 `method-evaluation-plan.json`. Use request values for declared inputs. Log
 evidence comes only from the Evidence Graph and Evaluation Plan; do not rescan
-logs. Evaluate every `evaluation_ref` in plan order and return only `verdict`
-and `reason`; use `UNKNOWN` when the evidence cannot decide the rule.
+logs. Evaluate every `evaluation_ref` in plan order and return only
+`evaluation_ref`, `verdict`, `supporting_event_refs`, and `reason`; use
+`UNKNOWN` when the evidence cannot decide the rule.
 """,
         encoding="utf-8",
     )
@@ -69,7 +70,8 @@ The positive marker is present.
 Missing evidence leaves the verdict unknown.
 
 ## 输出含义
-Return one verdict and reason for the evaluation reference.
+Return one verdict, the selected supporting event refs, and one reason for the
+evaluation reference.
 """,
             encoding="utf-8",
         )
@@ -80,6 +82,7 @@ Return one verdict and reason for the evaluation reference.
                 "reference": reference,
                 "priority": priority,
                 "evidence_markers": [marker],
+                "activation_markers": [marker],
             }
         )
     (references / "source-log-templates.md").write_text(

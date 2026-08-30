@@ -7,26 +7,125 @@ import { fileURLToPath } from "node:url";
 
 import {
   E2E_GOAL,
+  FAST_E2E_GOAL,
   METHODS_GOAL,
   REQUIRED_EVIDENCE,
   buildPlan,
   defaults,
   deterministicGateRoot,
+  executeFastSuite,
   materializeDeterministicGateEvidence,
   parseArguments,
+  safeFailure,
   sealGate,
 } from "../run.mjs";
+import { FAST_E2E_SCENARIOS } from "../../fast-e2e-scenarios.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
-test("standalone entry keeps Methods generation and exposes one Evidence V2 model-cert scenario", () => {
+test("standalone entry separates the historical Fast E2E matrix from the fixed model-cert scenario", () => {
   assert.equal(parseArguments(["--goal", METHODS_GOAL]).goal, METHODS_GOAL);
   assert.equal(parseArguments(["--goal", E2E_GOAL, "--scenario", "multiple-rpc-timeouts"]).goal, E2E_GOAL);
+  assert.equal(parseArguments(["--goal", FAST_E2E_GOAL, "--scenario", "api-execution-overrun"]).goal, FAST_E2E_GOAL);
+  assert.equal(parseArguments(["--goal", FAST_E2E_GOAL, "--all-scenarios"])["all-scenarios"], true);
   assert.throws(() => parseArguments(["--goal", E2E_GOAL, "--all-scenarios"]), (error) => error.code === "CLAUDE_DEEPSEEK_MODEL_CERT_SUITE_FORBIDDEN");
   assert.throws(() => parseArguments(["--goal", E2E_GOAL, "--scenario", "api-execution-overrun"]), (error) => error.code === "CLAUDE_DEEPSEEK_SCENARIO_INVALID");
+  assert.throws(() => parseArguments(["--goal", FAST_E2E_GOAL, "--scenario", "invented-scenario"]), (error) => error.code === "CLAUDE_DEEPSEEK_SCENARIO_INVALID");
+  assert.throws(() => parseArguments(["--goal", FAST_E2E_GOAL, "--all-scenarios", "--scenario", "api-execution-overrun"]), (error) => error.code === "CLAUDE_DEEPSEEK_SCENARIO_SELECTION_CONFLICT");
   assert.throws(() => parseArguments(["--goal", "release.full"]), (error) => error.code === "CLAUDE_DEEPSEEK_GOAL_INVALID");
   assert.throws(() => parseArguments(["--goal", E2E_GOAL, "--client", "linux"]), (error) => error.code === "CLAUDE_DEEPSEEK_CLIENT_INVALID");
   assert.throws(() => parseArguments(["--goal", E2E_GOAL, "--docker-context", "colima"]), (error) => error.code === "CLAUDE_DEEPSEEK_ARGUMENT_UNKNOWN");
+});
+
+test("Fast failure receipts retain Runtime stderr and oracle comparison details", () => {
+  const error = new Error("runtime failed");
+  error.code = "CLAUDE_DEEPSEEK_PRODUCTION_RUNTIME_FAILED";
+  error.reason_code = "SERVER_INVARIANT_VIOLATION";
+  error.diagnostic_id = "diag-example";
+  error.details = { stderr: "trace", expected: ["601"], actual: ["999"] };
+  assert.deepEqual(safeFailure(error), {
+    code: error.code,
+    message: error.message,
+    reason_code: error.reason_code,
+    diagnostic_id: error.diagnostic_id,
+    details: error.details,
+  });
+});
+
+test("Fast E2E plan freezes nine historical scenarios with a 16/32 model-process boundary", () => {
+  const plan = buildPlan(defaults(parseArguments(["--goal", FAST_E2E_GOAL, "--all-scenarios", "--plan-only"])));
+  assert.equal(plan.mode, "fast-e2e-suite");
+  assert.deepEqual(plan.scenarios, FAST_E2E_SCENARIOS);
+  assert.equal(plan.execution.expected_model_processes, 16);
+  assert.equal(plan.execution.model_process_hard_cap, 32);
+  assert.equal(plan.execution.token_cap, 16_000_000);
+  assert.equal(plan.execution.usd_cap, 32);
+  assert.equal(plan.execution.source_snapshot, false);
+  assert.equal(plan.inputs.source_snapshot_digest, null);
+  assert.equal(plan.inputs.core_verdict, null);
+  const insufficient = plan.execution.per_scenario.find((item) => item.scenario_id === "insufficient-evidence");
+  assert.equal(insufficient.expected_model_processes, 0);
+  assert.equal(insufficient.model_process_hard_cap, 0);
+  assert.equal(insufficient.token_cap, 0);
+  assert.equal(insufficient.usd_cap, 0);
+  assert.equal(plan.execution.per_scenario.filter((item) => item.expected_model_processes === 2).length, 8);
+  assert.equal(plan.admission.blockers.some((item) => item.code === "CLAUDE_DEEPSEEK_SOURCE_SNAPSHOT_REQUIRED"), false);
+  assert.equal(plan.admission.blockers.some((item) => item.code === "CLAUDE_DEEPSEEK_CORE_VERDICT_REQUIRED"), false);
+  assert.equal(REQUIRED_EVIDENCE[FAST_E2E_GOAL].includes("model-cert.json"), false);
+  assert.equal(REQUIRED_EVIDENCE[FAST_E2E_GOAL].includes("fast-e2e-oracle.json"), true);
+});
+
+test("Fast E2E suite continues after an oracle failure and stops after an engineering failure", async (context) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "claude-fast-suite-"));
+  context.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const plan = {
+    schema_version: 1,
+    framework: "macos-claude-deepseek-quick-validation",
+    framework_version: 1,
+    goal: FAST_E2E_GOAL,
+    mode: "fast-e2e-suite",
+    scenario: null,
+    scenarios: [...FAST_E2E_SCENARIOS],
+    execution: {
+      expected_model_processes: 16,
+      model_process_hard_cap: 32,
+      per_scenario: [],
+    },
+    inputs: {},
+    evidence: [],
+    admission: { status: "READY", blockers: [] },
+    plan_sha256: "a".repeat(64),
+  };
+  const options = { runsRoot: root, allowRealModel: true };
+  const child = (failureCode) => async (_options, childPlan, { runRoot }) => {
+    fs.mkdirSync(runRoot, { recursive: true });
+    const failed = childPlan.scenario === FAST_E2E_SCENARIOS[0];
+    const verdict = {
+      status: failed ? "FAIL" : "PASS",
+      failure: failed ? { code: failureCode } : null,
+      model_processes: { expected: 2, actual: 2, retry_count: 0 },
+      usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2, cost_usd: 0 },
+    };
+    fs.writeFileSync(path.join(runRoot, "verdict.json"), JSON.stringify(verdict));
+    return { verdict, runRoot, exitCode: failed ? 1 : 0 };
+  };
+  const contract = await executeFastSuite(options, plan, {
+    executeOneImpl: child("CLAUDE_DEEPSEEK_PUBLIC_STATUS_MISMATCH"),
+    runDeterministicGatesImpl() {},
+  });
+  assert.equal(contract.verdict.status, "FAIL");
+  assert.equal(contract.verdict.summary.completed, 9);
+  assert.equal(contract.verdict.summary.not_run, 0);
+
+  const engineeringRoot = fs.mkdtempSync(path.join(os.tmpdir(), "claude-fast-engineering-"));
+  const engineering = await executeFastSuite({ ...options, runsRoot: engineeringRoot }, plan, {
+    executeOneImpl: child("CLAUDE_DEEPSEEK_FAST_E2E_RUNTIME_FAILED"),
+    runDeterministicGatesImpl() {},
+  });
+  fs.rmSync(engineeringRoot, { recursive: true, force: true });
+  assert.equal(engineering.verdict.status, "ERROR");
+  assert.equal(engineering.verdict.summary.completed, 1);
+  assert.equal(engineering.verdict.summary.not_run, 8);
 });
 
 test("Claude model-cert plan freezes normal two calls, one repair per role, and Core bindings", () => {

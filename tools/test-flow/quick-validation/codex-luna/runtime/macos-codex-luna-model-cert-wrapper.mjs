@@ -17,6 +17,10 @@ import {
   MACOS_CODEX_LUNA_CALL_WALL_SECONDS,
   MACOS_CODEX_LUNA_NO_PROGRESS_SECONDS,
 } from "./macos-codex-luna-e2e-contract.mjs";
+import {
+  removeLinuxServiceProject,
+  stageLinuxServiceProject,
+} from "./macos-codex-luna-service-wrapper.mjs";
 
 const MODULE_PATH = fileURLToPath(import.meta.url);
 const MAX_PROMPT_BYTES = 4 * 1024 * 1024;
@@ -311,6 +315,77 @@ function auditRoleOutput(output, parsed) {
   };
 }
 
+function publishLinuxRoleOutput({ workspaceRoot, projectRoot, parsed }) {
+  const source = path.join(projectRoot, ...parsed.output.split("/"));
+  const destination = path.join(workspaceRoot, ...parsed.output.split("/"));
+  auditRoleOutput(source, parsed);
+  if (parsed.attempt === "PRIMARY") {
+    requireWrapper(
+      !fs.existsSync(destination),
+      "CODEX_LUNA_MODEL_CERT_OUTPUT_EXISTS",
+      "Evidence V2 primary role output already exists before Linux project publication",
+      { role: parsed.role, attempt: parsed.attempt },
+    );
+    fs.copyFileSync(source, destination, fs.constants.COPYFILE_EXCL);
+  } else {
+    if (fs.existsSync(destination)) {
+      const metadata = fs.lstatSync(destination);
+      requireWrapper(
+        metadata.isFile() && !metadata.isSymbolicLink(),
+        "CODEX_LUNA_MODEL_CERT_OUTPUT_INVALID",
+        "Evidence V2 primary role output is not replaceable by its repair",
+        { role: parsed.role, attempt: parsed.attempt },
+      );
+    }
+    fs.copyFileSync(source, destination);
+  }
+  fs.chmodSync(destination, 0o600);
+}
+
+function clearLinuxProjectRoleOutput(projectRoot, parsed) {
+  const output = path.join(projectRoot, ...parsed.output.split("/"));
+  if (!fs.existsSync(output)) return;
+  const metadata = fs.lstatSync(output);
+  requireWrapper(
+    metadata.isFile() && !metadata.isSymbolicLink(),
+    "CODEX_LUNA_MODEL_CERT_OUTPUT_INVALID",
+    "Linux role project contains an invalid inherited output",
+    { role: parsed.role, attempt: parsed.attempt },
+  );
+  fs.rmSync(output);
+}
+
+function completedTraceProfile(trace) {
+  if (
+    !isPlainObject(trace?.app_server)
+    || !isPlainObject(trace.app_server.permission_profile)
+    || typeof trace.app_server.permission_profile.id !== "string"
+    || typeof trace.app_server.codex_home?.config_sha256 !== "string"
+    || typeof trace.app_server.developer_instructions?.sha256 !== "string"
+  ) return null;
+  return {
+    permission_profile_id: trace.app_server.permission_profile.id,
+    config_sha256: trace.app_server.codex_home.config_sha256,
+    developer_instructions_sha256: trace.app_server.developer_instructions.sha256,
+  };
+}
+
+function completedTraceToolPolicy(trace) {
+  if (
+    !isPlainObject(trace?.app_server)
+    || !isPlainObject(trace.app_server.permission_profile)
+    || typeof trace.app_server.permission_profile.invocation_mode !== "string"
+    || !Number.isSafeInteger(trace.app_server.turn?.mcp_tool_call_count)
+    || !Array.isArray(trace.command_receipts)
+  ) return null;
+  return {
+    invocation_mode: trace.app_server.permission_profile.invocation_mode,
+    mcp_tool_call_count: trace.app_server.turn.mcp_tool_call_count,
+    command_count: trace.command_receipts.length,
+    output_normalized: false,
+  };
+}
+
 function controlledEnvironment(ambient) {
   const environment = {};
   for (const key of ["LANG", "LC_ALL", "LC_CTYPE", "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS"]) {
@@ -323,7 +398,7 @@ function controlledEnvironment(ambient) {
 
 export function modelRoleDeveloperInstructions(workspaceRoot, parsed) {
   const root = path.resolve(workspaceRoot);
-  return `这是 Evidence V2 ${ROLE_CONFIG[parsed.role].label} 的生产评估调用。唯一工作目录是 ${JSON.stringify(root)}。先读取 inputs/request.json、inputs/method-evidence-graph.json、inputs/method-evaluation-plan.json 和 prompt 指定的方法卡，再按 Evaluation Plan 原顺序评估全部 evaluation_ref。只写 ${parsed.output}，根必须是 JSON 数组；每项只能包含 evaluation_ref、verdict、reason。不得生成 Evidence、Candidate、Artifact、grounding、PARTIAL 或权威 Outcome，也不得读取工作区外文件。`;
+  return `这是 Evidence V2 ${ROLE_CONFIG[parsed.role].label} 的生产评估调用。唯一工作目录是 ${JSON.stringify(root)}。先读取 inputs/request.json、inputs/method-evidence-graph.json、inputs/method-evaluation-plan.json 和 prompt 指定的方法卡，再按 Evaluation Plan 原顺序评估全部 evaluation_ref。只写 ${parsed.output}，根必须是 JSON 数组；每项只能包含 evaluation_ref、verdict、supporting_event_refs、reason。CONFIRMED 必须按计划顺序选择当前 evaluation 的非空 event ref 子集；REJECTED 或 UNKNOWN 必须使用空数组。不得生成 Evidence、Candidate、Artifact、grounding、PARTIAL 或权威 Outcome，也不得读取工作区外文件。`;
 }
 
 export async function runModelRoleInvocation(values, {
@@ -343,29 +418,52 @@ export async function runModelRoleInvocation(values, {
   const startedAtUtc = new Date().toISOString();
   let trace = null;
   try {
-    trace = await runAppServerCall({
-      codexEntry: path.resolve(values["codex-entry"]),
-      auth,
-      environment: controlledEnvironment(ambient),
-      workspaceRoot: workspace.root,
-      skillPath: path.resolve(values["skill-source"]),
-      mode: "service",
-      developerInstructions: modelRoleDeveloperInstructions(workspace.root, parsed),
-      prompt,
-      outputSchema: null,
-      callRoot: path.join(claim, "app-server"),
-      privateRoot: path.resolve(values["private-root"]),
-      tracePath: path.join(traceRoot, `${prefix}.jsonl`),
-      stderrPath: path.join(traceRoot, `${prefix}.stderr.txt`),
-      finalPath: path.join(traceRoot, `${prefix}.final.txt`),
-      forbiddenReadPaths: [path.resolve(values["auth-source"]), path.resolve(values["skill-source"])],
-      wallSeconds: MACOS_CODEX_LUNA_CALL_WALL_SECONDS,
-      noProgressSeconds: MACOS_CODEX_LUNA_NO_PROGRESS_SECONDS,
-      shellHome: path.join(claim, "shell-home"),
-      expectedCliVersion: values["expected-cli-version"],
-      onProgress: () => stdout.write(`TEST_FLOW_PROGRESS model-cert ${parsed.role.toLowerCase()} ${parsed.attempt.toLowerCase()}\n`),
-    });
+    const isolatedProject = process.platform === "linux";
+    const projectRoot = isolatedProject
+      ? stageLinuxServiceProject(workspace.root)
+      : workspace.root;
+    try {
+      if (isolatedProject) clearLinuxProjectRoleOutput(projectRoot, parsed);
+      trace = await runAppServerCall({
+        codexEntry: path.resolve(values["codex-entry"]),
+        auth,
+        environment: controlledEnvironment(ambient),
+        workspaceRoot: projectRoot,
+        skillPath: path.resolve(values["skill-source"]),
+        mode: "service",
+        developerInstructions: modelRoleDeveloperInstructions(projectRoot, parsed),
+        prompt,
+        outputSchema: null,
+        callRoot: path.join(claim, "app-server"),
+        privateRoot: path.resolve(values["private-root"]),
+        tracePath: path.join(traceRoot, `${prefix}.jsonl`),
+        stderrPath: path.join(traceRoot, `${prefix}.stderr.txt`),
+        finalPath: path.join(traceRoot, `${prefix}.final.txt`),
+        forbiddenReadPaths: [path.resolve(values["auth-source"]), path.resolve(values["skill-source"])],
+        wallSeconds: MACOS_CODEX_LUNA_CALL_WALL_SECONDS,
+        noProgressSeconds: MACOS_CODEX_LUNA_NO_PROGRESS_SECONDS,
+        shellHome: path.join(claim, "shell-home"),
+        expectedCliVersion: values["expected-cli-version"],
+        onProgress: () => stdout.write(`TEST_FLOW_PROGRESS model-cert ${parsed.role.toLowerCase()} ${parsed.attempt.toLowerCase()}\n`),
+      });
+      if (isolatedProject) {
+        publishLinuxRoleOutput({
+          workspaceRoot: workspace.root,
+          projectRoot,
+          parsed,
+        });
+      }
+    } finally {
+      if (isolatedProject) {
+        removeLinuxServiceProject({
+          workspaceRoot: workspace.root,
+          projectRoot,
+        });
+      }
+    }
     const output = auditRoleOutput(workspace.output, parsed);
+    const profile = completedTraceProfile(trace);
+    const toolPolicy = completedTraceToolPolicy(trace);
     const receipt = {
       schema_version: 1,
       wrapper_version: CODEX_LUNA_MODEL_CERT_WRAPPER_VERSION,
@@ -387,17 +485,8 @@ export async function runModelRoleInvocation(values, {
         size: Buffer.byteLength(prompt, "utf8"),
         production_role_marker: true,
       },
-      profile: {
-        permission_profile_id: trace.app_server.permission_profile_id,
-        config_sha256: trace.app_server.codex_home.config_sha256,
-        developer_instructions_sha256: trace.app_server.developer_instructions.sha256,
-      },
-      tool_policy: {
-        invocation_mode: trace.app_server.invocation_mode,
-        mcp_tool_call_count: trace.app_server.turn.mcp_tool_call_count,
-        command_count: trace.command_receipts.length,
-        output_normalized: false,
-      },
+      profile,
+      tool_policy: toolPolicy,
       output,
       usage_complete: true,
       usage: trace.usage,
@@ -406,7 +495,14 @@ export async function runModelRoleInvocation(values, {
       turn_id: trace.turn_id,
     };
     requireWrapper(
-      isPlainObject(receipt.usage) && receipt.tool_policy.mcp_tool_call_count === 0,
+      isPlainObject(receipt.usage)
+        && isPlainObject(receipt.profile)
+        && isPlainObject(receipt.tool_policy)
+        && receipt.tool_policy.mcp_tool_call_count === 0
+        && typeof receipt.thread_id === "string"
+        && receipt.thread_id.length > 0
+        && typeof receipt.turn_id === "string"
+        && receipt.turn_id.length > 0,
       "CODEX_LUNA_MODEL_CERT_TRACE_INVALID",
       "Codex app-server did not return one closed Evidence V2 role receipt",
     );
@@ -418,6 +514,8 @@ export async function runModelRoleInvocation(values, {
     const usage = isPlainObject(trace?.usage)
       ? trace.usage
       : (isPlainObject(error?.details?.usage) ? error.details.usage : null);
+    const profile = completedTraceProfile(trace);
+    const toolPolicy = completedTraceToolPolicy(trace);
     const receipt = {
       schema_version: 1,
       wrapper_version: CODEX_LUNA_MODEL_CERT_WRAPPER_VERSION,
@@ -439,14 +537,14 @@ export async function runModelRoleInvocation(values, {
         size: Buffer.byteLength(prompt, "utf8"),
         production_role_marker: true,
       },
-      profile: null,
-      tool_policy: null,
+      profile,
+      tool_policy: toolPolicy,
       output: null,
       usage_complete: usage !== null,
       usage,
       failure_code: typeof error?.code === "string" ? error.code : "CODEX_LUNA_MODEL_CERT_CALL_FAILED",
-      thread_id: error?.details?.thread_id ?? null,
-      turn_id: error?.details?.turn_id ?? null,
+      thread_id: trace?.thread_id ?? error?.details?.thread_id ?? null,
+      turn_id: trace?.turn_id ?? error?.details?.turn_id ?? null,
     };
     writeJsonExclusive(path.join(path.resolve(values["usage-root"]), `${prefix}.json`), receipt);
     writeJsonExclusive(path.join(traceRoot, `${prefix}.receipt.json`), receipt);

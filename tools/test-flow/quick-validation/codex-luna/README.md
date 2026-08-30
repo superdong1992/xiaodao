@@ -1,9 +1,28 @@
 # Codex/Luna 快速验证
 
-本入口保留两个互不替代的目标：
+本入口保留三个互不替代的目标：
 
 - `methods`：用一次 Codex + `gpt-5.6-luna`/medium 调用生成并冻结 Methods package；
+- `fast-e2e`：使用历史九场景快速验证定位能力和能力边界；
 - `e2e`：运行生产 Evidence V2 `DiagnosisRuntime`，为 P2 生成 model cert。
+
+`fast-e2e` 直接读取 `experiments/rpc-skill-feasibility/cases/**` 中已讨论并冻结的九个场景，
+不读取同名 Release fixture。它复用生产 `DiagnosisRuntime`、Evidence Graph、Evaluation Plan、
+Specialist 和盲评 Reviewer；八个有 cause evidence 的场景正常 2 次调用、repair 后最多 4 次，
+`insufficient-evidence` 必须由服务端零模型结束。九场景合计正常 16 次、硬上限 32 次。它不要求 Core verdict 或
+source snapshot，也不生成 `model-cert.json`。运行前先查看计划：
+
+```bash
+./tools/test-flow/quick-validation/codex-luna/run.sh \
+  --goal fast-e2e \
+  --all-scenarios \
+  --registration-root <path/to/validated-registration> \
+  --plan-only
+```
+
+单场景调试可把 `--all-scenarios` 换成 `--scenario <scenario-id>`。只有确认计划后才加入
+`--allow-real-model`。九场景能力或 oracle 失败会封存该场景并继续；运行环境、provider 或输入损坏等
+工程失败才停止后续场景。
 
 `e2e` 固定使用 `multiple-rpc-timeouts`。生产 Runtime 从同一份已验证 registration、release
 `driver.json`、`client.log` 和 `server.log` 生成 Evidence Graph 与 Evaluation Plan。模型只提交

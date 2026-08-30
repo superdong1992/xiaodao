@@ -8,6 +8,7 @@ import pytest
 from pydantic import ValidationError
 
 from problem_locator.contracts import (
+    MethodConsensusV2,
     MethodStateReasonCodeV2,
     MethodStateStatusV2,
     MethodStateV2,
@@ -59,6 +60,7 @@ def _skill() -> ResolvedSpecializedSkillV1:
             reference=f"references/{method_id}.md",
             priority=priority,
             evidence_markers=(marker,),
+            activation_markers=(marker,),
         )
         for priority, method_id, marker in (
             (1, "first-method", "FIRST_MARKER"),
@@ -106,10 +108,18 @@ def _target(text: str) -> FrozenTargetLogV1:
     )
 
 
-def _plan(*, matching: bool = True):
+def _plan(*, matching: bool = True, repeated_first: bool = False):
     skill = _skill()
     text = (
-        "FIRST_MARKER request_id=req-1\nSECOND_MARKER request_id=req-2\n"
+        (
+            "FIRST_MARKER request_id=req-1\n"
+            + (
+                "FIRST_MARKER request_id=req-noise\n"
+                if repeated_first
+                else ""
+            )
+            + "SECOND_MARKER request_id=req-2\n"
+        )
         if matching
         else "no matching evidence\n"
     )
@@ -117,11 +127,30 @@ def _plan(*, matching: bool = True):
     return build_method_evaluation_plan_v2(skill=skill, evidence=graph)
 
 
-def _response(plan, verdicts: tuple[str, str], prefix: str):
+def _response(
+    plan,
+    verdicts: tuple[str, str],
+    prefix: str,
+    *,
+    first_event_index: int | None = None,
+):
     return [
         {
             "evaluation_ref": item.evaluation_ref,
             "verdict": verdict,
+            "supporting_event_refs": (
+                [
+                    item.evidence_event_refs[first_event_index]
+                ]
+                if (
+                    verdict == "CONFIRMED"
+                    and index == 1
+                    and first_event_index is not None
+                )
+                else list(item.evidence_event_refs)
+                if verdict == "CONFIRMED"
+                else []
+            ),
             "reason": f"{prefix}-{index}",
         }
         for index, (item, verdict) in enumerate(
@@ -138,17 +167,29 @@ def _evaluations(
     *,
     specialist_attempt: str = "PRIMARY",
     reviewer_attempt: str = "PRIMARY",
+    specialist_first_event_index: int | None = None,
+    reviewer_first_event_index: int | None = None,
 ):
     specialist = evaluate_method_role_v2(
         role="SPECIALIST",
         plan=plan,
-        response=_response(plan, specialist_verdicts, "specialist"),
+        response=_response(
+            plan,
+            specialist_verdicts,
+            "specialist",
+            first_event_index=specialist_first_event_index,
+        ),
         attempt=specialist_attempt,  # type: ignore[arg-type]
     )
     reviewer = evaluate_method_role_v2(
         role="REVIEWER",
         plan=plan,
-        response=_response(plan, reviewer_verdicts, "reviewer"),
+        response=_response(
+            plan,
+            reviewer_verdicts,
+            "reviewer",
+            first_event_index=reviewer_first_event_index,
+        ),
         attempt=reviewer_attempt,  # type: ignore[arg-type]
     )
     consensus = resolve_method_consensus_v2(
@@ -336,6 +377,90 @@ def test_consensus_truth_table_drives_terminal_state(
     assert terminal.reason_code == reason_code
     assert terminal.diagnostic_id is not None
     assert "PARTIALLY_RESOLVED" not in terminal.status
+
+
+def test_supporting_event_disagreement_is_not_resolved() -> None:
+    plan = _plan(repeated_first=True)
+    specialist, reviewer, consensus = _evaluations(
+        plan,
+        specialist_first_event_index=0,
+        reviewer_first_event_index=1,
+    )
+    pending = accept_specialist_evaluation_v2(
+        state=_start(plan),
+        evaluation=specialist,
+    )
+
+    terminal = finalize_reviewer_consensus_v2(
+        state=pending,
+        plan=plan,
+        reviewer_evaluation=reviewer,
+        consensus=consensus,
+    )
+
+    assert terminal.status == "UNRESOLVED"
+    assert terminal.reason_code == "SPECIALIST_REVIEWER_DISAGREEMENT"
+    assert terminal.consensus is not None
+    assert terminal.consensus.confirmed_event_refs == ()
+
+
+def test_state_machine_rejects_forged_resolved_consensus_when_event_refs_differ() -> None:
+    plan = _plan(repeated_first=True)
+    specialist, reviewer, _ = _evaluations(
+        plan,
+        specialist_first_event_index=0,
+        reviewer_first_event_index=1,
+    )
+    forged = MethodConsensusV2(
+        plan_ref=plan.plan_ref,
+        status="RESOLVED",
+        confirmed_evaluation_refs=(plan.evaluations[0].evaluation_ref,),
+        confirmed_method_ids=(plan.evaluations[0].method_id,),
+        confirmed_event_refs=specialist.evaluations[0].supporting_event_refs,
+    )
+
+    with pytest.raises(ValueError, match="consensus differs"):
+        finalize_reviewer_consensus_v2(
+            state=accept_specialist_evaluation_v2(
+                state=_start(plan),
+                evaluation=specialist,
+            ),
+            plan=plan,
+            reviewer_evaluation=reviewer,
+            consensus=forged,
+        )
+
+
+def test_state_contract_binds_consensus_to_selected_event_refs() -> None:
+    plan = _plan(repeated_first=True)
+    specialist, reviewer, consensus = _evaluations(
+        plan,
+        specialist_first_event_index=0,
+        reviewer_first_event_index=0,
+    )
+    terminal = finalize_reviewer_consensus_v2(
+        state=accept_specialist_evaluation_v2(
+            state=_start(plan),
+            evaluation=specialist,
+        ),
+        plan=plan,
+        reviewer_evaluation=reviewer,
+        consensus=consensus,
+    )
+    forged_consensus = consensus.model_copy(
+        update={
+            "confirmed_event_refs": (
+                plan.evaluations[0].evidence_event_refs[1],
+            )
+        }
+    )
+    mutated = _with_recomputed_state_ref(
+        terminal,
+        consensus=forged_consensus,
+    )
+
+    with pytest.raises(ValidationError, match="consensus event refs"):
+        MethodStateV2.model_validate(mutated.model_dump(mode="python"))
 
 
 def test_no_matching_method_evidence_is_immediately_unresolved() -> None:

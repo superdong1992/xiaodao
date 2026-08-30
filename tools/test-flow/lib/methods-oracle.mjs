@@ -41,9 +41,11 @@ const STATE_FIELDS = Object.freeze([
   "specialist_protocol_failures", "state_ref", "status",
 ]);
 const ROLE_FIELDS = Object.freeze(["evaluations", "plan_ref", "repair_used", "role"]);
-const ROLE_ITEM_FIELDS = Object.freeze(["evaluation_ref", "reason", "verdict"]);
+const ROLE_ITEM_FIELDS = Object.freeze([
+  "evaluation_ref", "reason", "supporting_event_refs", "verdict",
+]);
 const CONSENSUS_FIELDS = Object.freeze([
-  "confirmed_evaluation_refs", "confirmed_method_ids", "plan_ref", "status",
+  "confirmed_evaluation_refs", "confirmed_event_refs", "confirmed_method_ids", "plan_ref", "status",
 ]);
 const PUBLIC_RESULT_FIELDS = Object.freeze([
   "case_id", "confirmed_evaluation_refs", "confirmed_event_refs", "confirmed_hit_refs",
@@ -100,6 +102,16 @@ function uniqueStrings(value, { nonempty = false, pattern = null } = {}) {
     && value.length === new Set(value).size;
 }
 
+function orderedSubsequence(values, sequence) {
+  let cursor = 0;
+  for (const value of values) {
+    const index = sequence.indexOf(value, cursor);
+    if (index < 0) return false;
+    cursor = index + 1;
+  }
+  return true;
+}
+
 function bytes(value, label) {
   if (Buffer.isBuffer(value)) return value;
   if (value instanceof Uint8Array) return Buffer.from(value);
@@ -152,10 +164,13 @@ function expectedMethodMap(expected) {
   requireOracle(Array.isArray(expected.method_cards) && expected.method_cards.length > 0, "METHODS_V2_EXPECTATION_INVALID", "Expected method cards are missing");
   const methods = new Map();
   for (const card of expected.method_cards) {
-    exactKeys(card, ["evidence_markers", "id", "priority"], "METHODS_V2_EXPECTATION_INVALID", "Expected method card");
+    exactKeys(card, ["activation_markers", "evidence_markers", "id", "priority"], "METHODS_V2_EXPECTATION_INVALID", "Expected method card");
     requireOracle(
       METHOD_ID.test(card.id ?? "") && Number.isSafeInteger(card.priority) && card.priority > 0
-        && uniqueStrings(card.evidence_markers, { nonempty: true }) && !methods.has(card.id),
+        && uniqueStrings(card.evidence_markers, { nonempty: true })
+        && uniqueStrings(card.activation_markers, { nonempty: true })
+        && orderedSubsequence(card.activation_markers, card.evidence_markers)
+        && !methods.has(card.id),
       "METHODS_V2_EXPECTATION_INVALID",
       "Expected method card is invalid",
     );
@@ -338,6 +353,14 @@ function validateEvidenceGraph(graph, expected, methods) {
     "METHODS_V2_GRAPH_METHOD_COVERAGE",
     "Evidence Graph loaded methods differ from the production scenario",
   );
+  for (const methodId of graph.loaded_method_ids) {
+    const activationMarkers = new Set(methods.get(methodId).activation_markers);
+    requireOracle(
+      graph.hits.some((item) => item.method_id === methodId && activationMarkers.has(item.marker)),
+      "METHODS_V2_GRAPH_METHOD_ACTIVATION_MISSING",
+      "Evidence Graph loaded method has no activation marker hit",
+    );
+  }
   for (const identity of expected.required_evidence_identities) {
     const matches = graph.events.filter((event) => event.method_id === identity.method_id
       && identity.identity_tokens.every((token) => event.identity_tokens.includes(token))
@@ -427,13 +450,23 @@ function validateRoleEvaluation(value, role, plan) {
   requireOracle(value.role === role && value.plan_ref === plan.plan_ref && typeof value.repair_used === "boolean" && Array.isArray(value.evaluations), "METHODS_V2_ROLE_IDENTITY_MISMATCH", `${role} evaluation identity is invalid`);
   const expectedRefs = plan.evaluations.map((item) => item.evaluation_ref);
   const actualRefs = [];
-  for (const item of value.evaluations) {
+  for (const [index, item] of value.evaluations.entries()) {
     exactKeys(item, ROLE_ITEM_FIELDS, "METHODS_V2_ROLE_ITEM_FIELDS_INVALID", `${role} output item`);
+    const planned = plan.evaluations[index];
+    const selected = new Set(item.supporting_event_refs ?? []);
+    const expectedOrder = planned?.evidence_event_refs.filter((ref) => selected.has(ref)) ?? [];
     requireOracle(
       EVALUATION_REF.test(item.evaluation_ref ?? "") && VERDICTS.has(item.verdict)
-        && typeof item.reason === "string" && item.reason.trim().length > 0,
+        && typeof item.reason === "string" && item.reason.trim().length > 0
+        && uniqueStrings(item.supporting_event_refs, {
+          nonempty: item.verdict === "CONFIRMED",
+          pattern: EVENT_REF,
+        })
+        && (item.verdict === "CONFIRMED" || item.supporting_event_refs.length === 0)
+        && item.supporting_event_refs.every((ref) => planned?.evidence_event_refs.includes(ref))
+        && canonicalJson(item.supporting_event_refs) === canonicalJson(expectedOrder),
       "METHODS_V2_ROLE_ITEM_INVALID",
-      `${role} output must contain only evaluation_ref, verdict, and reason`,
+      `${role} output must bind verdict to ordered supporting_event_refs`,
     );
     actualRefs.push(item.evaluation_ref);
   }
@@ -532,11 +565,14 @@ function validateJobAndOutcomes({ sourceJob, reviewerJob, sourceOutcome, reviewe
   const aligned = terminalSpecialist.evaluations.every((item, index) => (
     item.evaluation_ref === reviewer.evaluations[index].evaluation_ref
       && item.verdict === reviewer.evaluations[index].verdict
+      && canonicalJson(item.supporting_event_refs)
+        === canonicalJson(reviewer.evaluations[index].supporting_event_refs)
   ));
   const confirmed = terminalSpecialist.evaluations.filter((item) => item.verdict === "CONFIRMED");
   const confirmedRefs = confirmed.map((item) => item.evaluation_ref);
   const byRef = new Map(plan.evaluations.map((item) => [item.evaluation_ref, item]));
   const confirmedMethods = confirmedRefs.map((ref) => byRef.get(ref).method_id);
+  const confirmedEventRefs = confirmed.flatMap((item) => item.supporting_event_refs);
   if (expected.method_verdicts !== undefined) {
     const actualVerdicts = terminalSpecialist.evaluations.map((item) => ({
       method_id: byRef.get(item.evaluation_ref).method_id,
@@ -559,6 +595,7 @@ function validateJobAndOutcomes({ sourceJob, reviewerJob, sourceOutcome, reviewe
       && terminalState.consensus.plan_ref === plan.plan_ref
       && canonicalJson(terminalState.consensus.confirmed_evaluation_refs) === canonicalJson(confirmedRefs)
       && canonicalJson(terminalState.consensus.confirmed_method_ids) === canonicalJson(confirmedMethods)
+      && canonicalJson(terminalState.consensus.confirmed_event_refs) === canonicalJson(confirmedEventRefs)
       && canonicalJson(confirmedMethods) === canonicalJson(expected.confirmed_method_ids),
     "METHODS_V2_CONSENSUS_INVALID",
     "Specialist and blind Reviewer do not form the required complete resolved consensus",
@@ -591,21 +628,31 @@ function validateJobAndOutcomes({ sourceJob, reviewerJob, sourceOutcome, reviewe
     "METHODS_V2_REVIEWER_OUTCOME_MISMATCH",
     "Reviewer Outcome does not contain the normalized blind review",
   );
-  return { specialist, reviewer, confirmedRefs, confirmedMethods, projection };
+  return { specialist, reviewer, confirmedRefs, confirmedMethods, confirmedEventRefs, projection };
 }
 
-function validatePublicProjection({ projection, publicMethodsResult, terminalState, graph, plan, limitations, expected, confirmedRefs, confirmedMethods }) {
+function validatePublicProjection({ projection, publicMethodsResult, terminalState, graph, plan, limitations, expected, confirmedRefs, confirmedMethods, confirmedEventRefs }) {
   exactKeys(projection, PUBLIC_RESULT_FIELDS, "METHODS_V2_PUBLIC_FIELDS_INVALID", "Public Methods result");
   const confirmedPlan = confirmedRefs.map((ref) => plan.evaluations.find((item) => item.evaluation_ref === ref));
-  const confirmedEventRefs = [...new Set(confirmedPlan.flatMap((item) => item.evidence_event_refs))];
-  const confirmedHitRefs = [...new Set(confirmedPlan.flatMap((item) => item.evidence_hit_refs))];
-  const resultEvaluations = confirmedPlan.map((item) => ({
-    evaluation_ref: item.evaluation_ref,
-    method_id: item.method_id,
-    evidence_event_refs: item.evidence_event_refs,
-    evidence_hit_refs: item.evidence_hit_refs,
-    verdict: "CONFIRMED",
-  }));
+  const eventByRef = new Map(graph.events.map((item) => [item.event_ref, item]));
+  const specialistByRef = new Map(
+    terminalState.specialist_evaluation.evaluations.map((item) => [item.evaluation_ref, item]),
+  );
+  const confirmedHitRefs = [...new Set(
+    confirmedEventRefs.flatMap((ref) => eventByRef.get(ref).evidence_hit_refs),
+  )];
+  const resultEvaluations = confirmedPlan.map((item) => {
+    const selectedEvents = specialistByRef.get(item.evaluation_ref).supporting_event_refs;
+    return {
+      evaluation_ref: item.evaluation_ref,
+      method_id: item.method_id,
+      evidence_event_refs: selectedEvents,
+      evidence_hit_refs: [...new Set(
+        selectedEvents.flatMap((ref) => eventByRef.get(ref).evidence_hit_refs),
+      )],
+      verdict: "CONFIRMED",
+    };
+  });
   const resultRef = prefixedRef("result", "method-terminal-result-v2", {
     case_id: expected.case_id,
     source_job_id: expected.source_job_id,
@@ -697,6 +744,7 @@ export function validateMethodsV2ExecutionRecords({ files, expected, invocations
     expected,
     confirmedRefs: linked.confirmedRefs,
     confirmedMethods: linked.confirmedMethods,
+    confirmedEventRefs: linked.confirmedEventRefs,
   });
   validateInvocations(invocations, expected, linked);
   return {
@@ -711,6 +759,10 @@ export function validateMethodsV2ExecutionRecords({ files, expected, invocations
     result_ref: resultRef,
     diagnostic_id: documents.terminal_state.parsed.diagnostic_id,
     confirmed_method_ids: linked.confirmedMethods,
+    method_activation_markers_sha256: sha256Bytes(canonicalJson(expected.method_cards.map((card) => ({
+      method_id: card.id,
+      activation_markers: card.activation_markers,
+    })))),
     evaluation_count: plan.evaluations.length,
     evidence_event_count: graph.events.length,
     evidence_hit_count: graph.hits.length,

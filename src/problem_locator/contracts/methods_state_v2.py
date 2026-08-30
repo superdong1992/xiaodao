@@ -14,6 +14,7 @@ from .methods_reason_v2 import (
 )
 from .methods_v2 import (
     MethodConsensusV2,
+    MethodEvidenceGraphV2,
     MethodEvidenceEventRefV2,
     MethodEvidenceGraphRefV2,
     MethodEvidenceHitRefV2,
@@ -219,6 +220,54 @@ class MethodStateV2(_MethodStateContract):
             for item in self.consensus.confirmed_evaluation_refs
         ):
             raise ValueError("consensus confirms an evaluation outside the state plan")
+        if self.consensus is not None:
+            if self.specialist_evaluation is None or self.reviewer_evaluation is None:
+                raise ValueError("consensus requires both role evaluations")
+            specialist_blind = tuple(
+                (item.evaluation_ref, item.verdict, item.supporting_event_refs)
+                for item in self.specialist_evaluation.evaluations
+            )
+            reviewer_blind = tuple(
+                (item.evaluation_ref, item.verdict, item.supporting_event_refs)
+                for item in self.reviewer_evaluation.evaluations
+            )
+            verdicts = tuple(
+                item.verdict for item in self.specialist_evaluation.evaluations
+            )
+            resolved = (
+                specialist_blind == reviewer_blind
+                and "UNKNOWN" not in verdicts
+                and "CONFIRMED" in verdicts
+            )
+            expected_status = "RESOLVED" if resolved else "UNRESOLVED"
+            expected_evaluation_refs = (
+                tuple(
+                    item.evaluation_ref
+                    for item in self.specialist_evaluation.evaluations
+                    if item.verdict == "CONFIRMED"
+                )
+                if resolved
+                else ()
+            )
+            expected_event_refs = (
+                tuple(
+                    event_ref
+                    for item in self.specialist_evaluation.evaluations
+                    if item.verdict == "CONFIRMED"
+                    for event_ref in item.supporting_event_refs
+                )
+                if resolved
+                else ()
+            )
+            if (
+                self.consensus.status != expected_status
+                or self.consensus.confirmed_evaluation_refs
+                != expected_evaluation_refs
+                or self.consensus.confirmed_event_refs != expected_event_refs
+            ):
+                raise ValueError(
+                    "consensus event refs differ from the two role evaluations"
+                )
 
         if self.status in {"SPECIALIST_PENDING", "REVIEWER_PENDING"}:
             expected_role = (
@@ -535,8 +584,10 @@ def validate_method_terminal_result_v2(
     state: MethodStateV2,
     result: MethodTerminalResultV2,
     plan: MethodEvaluationPlanV2,
+    *,
+    evidence: MethodEvidenceGraphV2,
 ) -> MethodTerminalResultV2:
-    """Revalidate and bind one terminal result to its exact state and Plan."""
+    """Revalidate and bind one terminal result to its exact state, Plan, and Graph."""
 
     validated_state = MethodStateV2.model_validate(
         state.model_dump(mode="python")
@@ -546,6 +597,11 @@ def validate_method_terminal_result_v2(
     )
     validated_plan = MethodEvaluationPlanV2.model_validate(
         plan.model_dump(mode="python")
+    )
+    if not isinstance(evidence, MethodEvidenceGraphV2):
+        raise TypeError("evidence must be MethodEvidenceGraphV2")
+    validated_evidence = MethodEvidenceGraphV2.model_validate(
+        evidence.model_dump(mode="python")
     )
     planned_refs = tuple(
         item.evaluation_ref for item in validated_plan.evaluations
@@ -567,6 +623,11 @@ def validate_method_terminal_result_v2(
         or validated_result.reasons != validated_state.reasons
     ):
         raise ValueError("Methods terminal result differs from its production state and Plan")
+    if (
+        validated_evidence.graph_ref != validated_plan.evidence_graph_ref
+        or validated_result.evidence_graph_ref != validated_evidence.graph_ref
+    ):
+        raise ValueError("Methods terminal result differs from its Evidence Graph")
     if validated_state.status != "RESOLVED":
         return validated_result
 
@@ -585,28 +646,88 @@ def validate_method_terminal_result_v2(
         raise ValueError(
             "resolved state consensus references an evaluation outside the Plan"
         ) from exc
-    expected_evaluations = tuple(
-        MethodConfirmedEvaluationV2(
-            evaluation_ref=item.evaluation_ref,
-            method_id=item.method_id,
-            evidence_event_refs=item.evidence_event_refs,
-            evidence_hit_refs=item.evidence_hit_refs,
-            verdict="CONFIRMED",
-        )
+    specialist = validated_state.specialist_evaluation
+    reviewer = validated_state.reviewer_evaluation
+    if specialist is None or reviewer is None:
+        raise ValueError("resolved terminal result requires both role evaluations")
+    specialist_by_ref = {
+        item.evaluation_ref: item for item in specialist.evaluations
+    }
+    reviewer_by_ref = {
+        item.evaluation_ref: item for item in reviewer.evaluations
+    }
+    selected_event_refs = tuple(
+        specialist_by_ref[item.evaluation_ref].supporting_event_refs
         for item in confirmed_plan
     )
+    if any(
+        reviewer_by_ref[item.evaluation_ref].supporting_event_refs != selected
+        for item, selected in zip(
+            confirmed_plan,
+            selected_event_refs,
+            strict=True,
+        )
+    ):
+        raise ValueError("resolved role evaluations select different evidence events")
     expected_event_refs = tuple(
         dict.fromkeys(
-            ref for item in confirmed_plan for ref in item.evidence_event_refs
+            event_ref
+            for selected in selected_event_refs
+            for event_ref in selected
         )
     )
+    if expected_event_refs != consensus.confirmed_event_refs:
+        raise ValueError("resolved consensus differs from selected evidence events")
+
+    actual_by_ref = {
+        item.evaluation_ref: item for item in validated_result.evaluations
+    }
+    expected_evaluations: list[MethodConfirmedEvaluationV2] = []
+    graph_events = {item.event_ref: item for item in validated_evidence.events}
+    for planned, selected in zip(
+        confirmed_plan,
+        selected_event_refs,
+        strict=True,
+    ):
+        actual = actual_by_ref.get(planned.evaluation_ref)
+        if actual is None:
+            raise ValueError("resolved result omits a confirmed evaluation")
+        if any(event_ref not in planned.evidence_event_refs for event_ref in selected):
+            raise ValueError("selected evidence event lies outside its planned evaluation")
+        try:
+            selected_events = tuple(graph_events[event_ref] for event_ref in selected)
+        except KeyError as exc:
+            raise ValueError(
+                "selected evidence event lies outside the Evidence Graph"
+            ) from exc
+        if any(event.method_id != planned.method_id for event in selected_events):
+            raise ValueError("selected evidence event belongs to another method")
+        expected_item_hit_refs = tuple(
+            dict.fromkeys(
+                hit_ref
+                for event in selected_events
+                for hit_ref in event.evidence_hit_refs
+            )
+        )
+        expected_evaluations.append(
+            MethodConfirmedEvaluationV2(
+                evaluation_ref=planned.evaluation_ref,
+                method_id=planned.method_id,
+                evidence_event_refs=selected,
+                evidence_hit_refs=expected_item_hit_refs,
+                verdict="CONFIRMED",
+            )
+        )
+    frozen_expected_evaluations = tuple(expected_evaluations)
     expected_hit_refs = tuple(
         dict.fromkeys(
-            ref for item in confirmed_plan for ref in item.evidence_hit_refs
+            hit_ref
+            for item in frozen_expected_evaluations
+            for hit_ref in item.evidence_hit_refs
         )
     )
     if (
-        validated_result.evaluations != expected_evaluations
+        validated_result.evaluations != frozen_expected_evaluations
         or validated_result.confirmed_evaluation_refs
         != consensus.confirmed_evaluation_refs
         or validated_result.confirmed_method_ids != consensus.confirmed_method_ids

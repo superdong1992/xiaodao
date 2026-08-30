@@ -26,6 +26,16 @@ _SNAKE = re.compile(r"[a-z][a-z0-9]*(?:_[a-z0-9]+)*\Z")
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _SEMVER = re.compile(r"0|[1-9][0-9]*(?:\.(?:0|[1-9][0-9]*)){2}(?:[-+][0-9A-Za-z.-]+)?\Z")
 _LOG_PLACEHOLDER_PATTERN = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}|%[A-Za-z]")
+_METHOD_OUTPUT_CONTRACT_PATTERN = re.compile(
+    r"(?:只输出|仅输出|只能包含|仅包含|只包含|"
+    r"(?:only\s+(?:output|return|contain|contains))|"
+    r"(?:(?:output|return|contain|contains)\s+only))"
+    r"[\s\S]{0,512}?evaluation_ref"
+    r"[\s\S]{0,256}?verdict"
+    r"[\s\S]{0,256}?supporting_event_refs"
+    r"[\s\S]{0,256}?reason",
+    re.IGNORECASE,
+)
 _METHOD_HEADINGS = (
     "## 适用条件",
     "## 所需证据",
@@ -49,7 +59,14 @@ _METHODS_FIELDS = frozenset(
     }
 )
 _METHOD_FIELDS = frozenset(
-    {"id", "title", "reference", "priority", "evidence_markers"}
+    {
+        "id",
+        "title",
+        "reference",
+        "priority",
+        "evidence_markers",
+        "activation_markers",
+    }
 )
 _REGISTRATION_FIELDS = frozenset(
     {
@@ -399,6 +416,7 @@ class MethodCardV1:
     reference: str
     priority: int
     evidence_markers: tuple[str, ...]
+    activation_markers: tuple[str, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -504,11 +522,16 @@ def load_methods_package(
         "method-evaluation-plan.json",
         "evaluation_ref",
         "verdict",
+        "supporting_event_refs",
         "reason",
         "UNKNOWN",
     ):
         if phrase not in skill_text:
             raise ValueError(f"SKILL.md must mention {phrase}")
+    if _METHOD_OUTPUT_CONTRACT_PATTERN.search(skill_text) is None:
+        raise ValueError(
+            "SKILL.md must state the exact four-field Methods evaluation output"
+        )
 
     manifest, _ = _json_object(root / "methods.json", label="methods.json")
     _exact_fields(manifest, _METHODS_FIELDS, "methods.json")
@@ -602,6 +625,33 @@ def load_methods_package(
             or len(markers) != len(set(markers))
         ):
             raise ValueError(f"methods[{index}].evidence_markers are invalid")
+        activation_markers = raw_method["activation_markers"]
+        if (
+            not isinstance(activation_markers, list)
+            or not activation_markers
+            or len(activation_markers) > 100
+            or any(
+                not isinstance(marker, str)
+                or not marker
+                or "\n" in marker
+                or "\r" in marker
+                or len(marker.encode("utf-8")) > 1024
+                for marker in activation_markers
+            )
+            or len(activation_markers) != len(set(activation_markers))
+        ):
+            raise ValueError(f"methods[{index}].activation_markers are invalid")
+        activation_positions = tuple(
+            markers.index(marker) if marker in markers else -1
+            for marker in activation_markers
+        )
+        if -1 in activation_positions or activation_positions != tuple(
+            sorted(activation_positions)
+        ):
+            raise ValueError(
+                f"methods[{index}].activation_markers must be an "
+                "order-preserving subsequence of evidence_markers"
+            )
         methods.append(
             MethodCardV1(
                 id=method_id,
@@ -609,6 +659,7 @@ def load_methods_package(
                 reference=reference,
                 priority=priority,
                 evidence_markers=tuple(markers),
+                activation_markers=tuple(activation_markers),
             )
         )
     if priorities != list(range(1, len(methods) + 1)):

@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from problem_locator.contracts import MethodEvaluationPlanV2
+from problem_locator.contracts import MethodEvaluationPlanV2, MethodRoleEvaluationV2
 from problem_locator.runtime.methods_evidence_v2 import (
     build_method_evaluation_plan_v2,
     scan_method_evidence_v2,
@@ -38,6 +38,7 @@ def _skill() -> ResolvedSpecializedSkillV1:
             reference=f"references/{method_id}.md",
             priority=priority,
             evidence_markers=(marker,),
+            activation_markers=(marker,),
         )
         for priority, method_id, marker in (
             (1, "first-method", "FIRST_MARKER"),
@@ -99,16 +100,64 @@ def _plan() -> MethodEvaluationPlanV2:
     return build_method_evaluation_plan_v2(skill=skill, evidence=graph)
 
 
+def _same_method_target_and_noise_plan() -> MethodEvaluationPlanV2:
+    """Mirror the historical unrelated-log-noise shape at contract level."""
+
+    base = _skill()
+    skill = ResolvedSpecializedSkillV1(
+        registration_root=base.registration_root,
+        package_root=base.package_root,
+        registration=base.registration,
+        methods=MethodsManifestV1(
+            skill_name=base.methods.skill_name,
+            source_wiki_sha256=base.methods.source_wiki_sha256,
+            required_user_inputs=base.methods.required_user_inputs,
+            required_artifacts=base.methods.required_artifacts,
+            log_derived_fields=("request_id",),
+            shared_references=base.methods.shared_references,
+            methods=(
+                MethodCardV1(
+                    id="client-receive-blocked",
+                    title="client-receive-blocked",
+                    reference="references/client-receive-blocked.md",
+                    priority=1,
+                    evidence_markers=("LATE_RESPONSE",),
+                    activation_markers=("LATE_RESPONSE",),
+                ),
+            ),
+        ),
+        registration_sha256=base.registration_sha256,
+        package_tree_sha256=base.package_tree_sha256,
+        combined_sha256=base.combined_sha256,
+    )
+    graph = scan_method_evidence_v2(
+        skill=skill,
+        target_logs=(
+            _target(
+                "LATE_RESPONSE service=svc_noise api=NoiseApi request_id=999\n"
+                "LATE_RESPONSE service=svc_profile api=Lookup request_id=601\n"
+            ),
+        ),
+    )
+    plan = build_method_evaluation_plan_v2(skill=skill, evidence=graph)
+    assert len(plan.evaluations) == 1
+    assert len(plan.evaluations[0].evidence_event_refs) == 2
+    return plan
+
+
 def _response(
     plan: MethodEvaluationPlanV2,
     verdicts: tuple[str, ...] = ("CONFIRMED", "REJECTED"),
     *,
     reason_prefix: str = "reason",
-) -> list[dict[str, str]]:
+) -> list[dict[str, object]]:
     return [
         {
             "evaluation_ref": planned.evaluation_ref,
             "verdict": verdict,
+            "supporting_event_refs": (
+                list(planned.evidence_event_refs) if verdict == "CONFIRMED" else []
+            ),
             "reason": f"{reason_prefix}-{index}",
         }
         for index, (planned, verdict) in enumerate(
@@ -120,7 +169,17 @@ def _response(
 
 def test_response_root_is_array_with_exact_item_fields() -> None:
     plan = _plan()
-    payload = json.dumps(_response(plan)).encode("utf-8")
+    response = _response(plan)
+    assert all(
+        tuple(item) == (
+            "evaluation_ref",
+            "verdict",
+            "supporting_event_refs",
+            "reason",
+        )
+        for item in response
+    )
+    payload = json.dumps(response).encode("utf-8")
 
     parsed = parse_method_evaluation_response_v2(plan=plan, response=payload)
 
@@ -128,6 +187,8 @@ def test_response_root_is_array_with_exact_item_fields() -> None:
         item.evaluation_ref for item in plan.evaluations
     ]
     assert [item.verdict for item in parsed] == ["CONFIRMED", "REJECTED"]
+    assert parsed[0].supporting_event_refs == plan.evaluations[0].evidence_event_refs
+    assert parsed[1].supporting_event_refs == ()
     assert all(item.evaluation_ref.startswith("eval-") for item in parsed)
 
 
@@ -161,6 +222,58 @@ def test_response_rejects_order_coverage_and_extra_fields(mutation: object) -> N
 def test_response_rejects_non_array_or_ambiguous_json(response: object) -> None:
     with pytest.raises(MethodEvaluationResponseError):
         parse_method_evaluation_response_v2(plan=_plan(), response=response)
+
+
+@pytest.mark.parametrize(
+    ("verdict", "supporting"),
+    [
+        ("CONFIRMED", ()),
+        ("REJECTED", ("planned",)),
+        ("UNKNOWN", ("planned",)),
+    ],
+    ids=["confirmed-empty", "rejected-nonempty", "unknown-nonempty"],
+)
+def test_response_binds_supporting_event_presence_to_verdict(
+    verdict: str,
+    supporting: tuple[str, ...],
+) -> None:
+    plan = _plan()
+    response = _response(plan)
+    response[0]["verdict"] = verdict
+    response[0]["supporting_event_refs"] = [
+        plan.evaluations[0].evidence_event_refs[0] if ref == "planned" else ref
+        for ref in supporting
+    ]
+
+    with pytest.raises(MethodEvaluationResponseError):
+        parse_method_evaluation_response_v2(plan=plan, response=response)
+
+
+def test_response_rejects_duplicate_or_foreign_supporting_event_refs() -> None:
+    plan = _plan()
+    planned_ref = plan.evaluations[0].evidence_event_refs[0]
+    foreign_ref = plan.evaluations[1].evidence_event_refs[0]
+
+    duplicate = _response(plan)
+    duplicate[0]["supporting_event_refs"] = [planned_ref, planned_ref]
+    with pytest.raises(MethodEvaluationResponseError):
+        parse_method_evaluation_response_v2(plan=plan, response=duplicate)
+
+    foreign = _response(plan)
+    foreign[0]["supporting_event_refs"] = [foreign_ref]
+    with pytest.raises(MethodEvaluationResponseError, match="belong"):
+        parse_method_evaluation_response_v2(plan=plan, response=foreign)
+
+
+def test_response_requires_supporting_refs_in_current_evaluation_event_order() -> None:
+    plan = _same_method_target_and_noise_plan()
+    response = _response(plan, ("CONFIRMED",))
+    response[0]["supporting_event_refs"] = list(
+        reversed(plan.evaluations[0].evidence_event_refs)
+    )
+
+    with pytest.raises(MethodEvaluationResponseError, match="planned event order"):
+        parse_method_evaluation_response_v2(plan=plan, response=response)
 
 
 @pytest.mark.parametrize(
@@ -254,6 +367,115 @@ def test_blind_consensus_ignores_reason_and_resolves_complete_agreement() -> Non
     assert consensus.status == "RESOLVED"
     assert consensus.confirmed_evaluation_refs == (plan.evaluations[0].evaluation_ref,)
     assert consensus.confirmed_method_ids == ("first-method",)
+    assert consensus.confirmed_event_refs == (
+        plan.evaluations[0].evidence_event_refs[0],
+    )
+
+
+def test_consensus_keeps_only_target_event_from_same_method_noise() -> None:
+    plan = _same_method_target_and_noise_plan()
+    noise_ref, target_ref = plan.evaluations[0].evidence_event_refs
+    specialist_response = _response(plan, ("CONFIRMED",), reason_prefix="specialist")
+    reviewer_response = _response(plan, ("CONFIRMED",), reason_prefix="reviewer")
+    specialist_response[0]["supporting_event_refs"] = [target_ref]
+    reviewer_response[0]["supporting_event_refs"] = [target_ref]
+    specialist = evaluate_method_role_v2(
+        role="SPECIALIST",
+        plan=plan,
+        response=specialist_response,
+        attempt="PRIMARY",
+    )
+    reviewer = evaluate_method_role_v2(
+        role="REVIEWER",
+        plan=plan,
+        response=reviewer_response,
+        attempt="PRIMARY",
+    )
+
+    consensus = resolve_method_consensus_v2(
+        plan=plan,
+        first=specialist,
+        second=reviewer,
+    )
+
+    assert consensus.status == "RESOLVED"
+    assert consensus.confirmed_event_refs == (target_ref,)
+    assert noise_ref not in consensus.confirmed_event_refs
+
+
+def test_consensus_requires_exact_supporting_event_agreement() -> None:
+    plan = _same_method_target_and_noise_plan()
+    noise_ref, target_ref = plan.evaluations[0].evidence_event_refs
+    specialist_response = _response(plan, ("CONFIRMED",))
+    reviewer_response = _response(plan, ("CONFIRMED",))
+    specialist_response[0]["supporting_event_refs"] = [target_ref]
+    reviewer_response[0]["supporting_event_refs"] = [noise_ref]
+    specialist = evaluate_method_role_v2(
+        role="SPECIALIST",
+        plan=plan,
+        response=specialist_response,
+        attempt="PRIMARY",
+    )
+    reviewer = evaluate_method_role_v2(
+        role="REVIEWER",
+        plan=plan,
+        response=reviewer_response,
+        attempt="PRIMARY",
+    )
+
+    consensus = resolve_method_consensus_v2(
+        plan=plan,
+        first=specialist,
+        second=reviewer,
+    )
+
+    assert consensus.status == "UNRESOLVED"
+    assert consensus.confirmed_evaluation_refs == ()
+    assert consensus.confirmed_method_ids == ()
+    assert consensus.confirmed_event_refs == ()
+
+
+def test_consensus_revalidates_supporting_refs_against_its_plan() -> None:
+    plan = _plan()
+    specialist, reviewer = _roles(
+        plan,
+        ("CONFIRMED", "REJECTED"),
+        ("CONFIRMED", "REJECTED"),
+    )
+    payload = specialist.model_dump(mode="json")
+    payload["evaluations"][0]["supporting_event_refs"] = [
+        plan.evaluations[1].evidence_event_refs[0]
+    ]
+    foreign = MethodRoleEvaluationV2.model_validate(payload)
+
+    with pytest.raises(ValueError, match="belong"):
+        resolve_method_consensus_v2(
+            plan=plan,
+            first=foreign,
+            second=reviewer,
+        )
+
+
+def test_consensus_flattens_confirmed_events_in_plan_order() -> None:
+    plan = _plan()
+    specialist, reviewer = _roles(
+        plan,
+        ("CONFIRMED", "CONFIRMED"),
+        ("CONFIRMED", "CONFIRMED"),
+    )
+
+    consensus = resolve_method_consensus_v2(
+        plan=plan,
+        first=specialist,
+        second=reviewer,
+    )
+
+    assert consensus.status == "RESOLVED"
+    assert consensus.confirmed_event_refs == tuple(
+        event_ref
+        for evaluation in plan.evaluations
+        for event_ref in evaluation.evidence_event_refs
+    )
 
 
 @pytest.mark.parametrize(
@@ -281,3 +503,4 @@ def test_consensus_is_unresolved_for_disagreement_unknown_or_no_confirmation(
     assert consensus.status == "UNRESOLVED"
     assert consensus.confirmed_evaluation_refs == ()
     assert consensus.confirmed_method_ids == ()
+    assert consensus.confirmed_event_refs == ()

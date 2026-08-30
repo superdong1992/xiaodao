@@ -62,7 +62,14 @@ METHODS_ROOT_KEYS = {
     "shared_references",
     "methods",
 }
-METHOD_KEYS = {"id", "title", "reference", "priority", "evidence_markers"}
+METHOD_KEYS = {
+    "id",
+    "title",
+    "reference",
+    "priority",
+    "evidence_markers",
+    "activation_markers",
+}
 SOURCE_IDENTITY_KEYS = {
     "algorithm",
     "log_template_extraction_version",
@@ -116,6 +123,7 @@ REQUIRED_SKILL_PHRASES = (
     "method-evaluation-plan.json",
     "evaluation_ref",
     "verdict",
+    "supporting_event_refs",
     "reason",
     "UNKNOWN",
 )
@@ -161,11 +169,16 @@ REQUIRED_SKILL_SEMANTICS = (
         ),
     ),
     (
-        "return only evaluation_ref, verdict, and reason",
+        "return only evaluation_ref, verdict, supporting_event_refs, and reason",
         re.compile(
-            r"(?:只输出|仅输出).*evaluation_ref.*verdict.*reason"
-            r"|(?:only).*(?:output|return).*evaluation_ref.*verdict.*reason",
-            re.IGNORECASE | re.DOTALL,
+            r"(?:只输出|仅输出|只能包含|仅包含|只包含|"
+            r"(?:only\s+(?:output|return|contain|contains))|"
+            r"(?:(?:output|return|contain|contains)\s+only))"
+            r"[\s\S]{0,512}?evaluation_ref"
+            r"[\s\S]{0,256}?verdict"
+            r"[\s\S]{0,256}?supporting_event_refs"
+            r"[\s\S]{0,256}?reason",
+            re.IGNORECASE,
         ),
     ),
 )
@@ -441,6 +454,17 @@ def _wiki_canonical_evidence_markers(templates: list[str]) -> list[str]:
         if marker is not None and marker not in markers:
             markers.append(marker)
     return markers
+
+
+def _is_ordered_subsequence(candidate: list[str], sequence: list[str]) -> bool:
+    cursor = 0
+    for marker in candidate:
+        while cursor < len(sequence) and sequence[cursor] != marker:
+            cursor += 1
+        if cursor == len(sequence):
+            return False
+        cursor += 1
+    return True
 
 
 def _outside_html_comments(line: str, in_comment: bool) -> tuple[str, bool]:
@@ -822,6 +846,26 @@ def _validate_methods(
                 errors.append(
                     f"method {index} evidence marker is not a canonical stable Wiki log marker: {marker}"
                 )
+        activation_markers = method.get("activation_markers")
+        if (
+            not isinstance(activation_markers, list)
+            or not activation_markers
+            or len(activation_markers) > 100
+            or any(
+                not isinstance(marker, str)
+                or not marker
+                or "\n" in marker
+                or "\r" in marker
+                or len(marker.encode("utf-8")) > 1024
+                for marker in activation_markers
+            )
+            or len(activation_markers) != len(set(activation_markers))
+        ):
+            errors.append(f"method {index} activation_markers are invalid")
+        elif not _is_ordered_subsequence(activation_markers, markers):
+            errors.append(
+                f"method {index} activation_markers must be an ordered subsequence of evidence_markers"
+            )
         if reference is not None and reference != SOURCE_LOG_TEMPLATES_REFERENCE:
             marker_bindings.append((index, reference, markers))
     result["marker_count"] = marker_count

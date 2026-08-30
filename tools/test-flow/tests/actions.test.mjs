@@ -867,6 +867,11 @@ function passingSkillTraceAudit() {
       root: "workspace/output/diagnose-rpc-timeout",
       file_count: files.length,
       files,
+      method_marker_sets: [{
+        method_id: "method-1",
+        evidence_markers: ["LATE_RESPONSE service="],
+        activation_markers: ["LATE_RESPONSE service="],
+      }],
       content_tree_sha256: crypto.createHash("sha256").update(canonical({ version: 1, files: digestFiles })).digest("hex"),
     },
     source_log_templates: {
@@ -1333,6 +1338,7 @@ function passingCodexLunaBoundary() {
     generation_scope_audit: { schema_version: 1, status: "PASS", command_count: 1, legacy_contract_accesses: 0, oracle_accesses: 0, raw_input_accesses: 0, workspace_root_sha256: generationWorkspacePathSha256 },
     validator: { ok: true, skill_name: "diagnose-rpc-timeout", source_wiki_sha256: wikiSha256, method_count: 1, marker_count: 4, errors: [], runtime_identity_sha256: validatorRuntimeSha256, runtime_policy: "exact-planned-logparse-python-isolated-pre-and-post-v1" },
     method_ids: ["method-1"],
+    method_activation_markers: [{ method_id: "method-1", activation_markers: ["LATE_RESPONSE service="] }],
     generation_thread_id: calls[0].thread_id,
     durable_package: {
       path: "generated-skill",
@@ -1781,6 +1787,7 @@ test("Codex Luna PASS boundary rejects identity, effort, Logparse, auth and Skil
       value.bundle.security.auth_isolation.transmitted_fields = ["access_token", "account_id", "refresh_token"];
     }],
     ["Skill tree", (value) => { value.bundle.skill.package_tree_sha256 = "0".repeat(64); }],
+    ["Skill activation markers", (value) => { value.bundle.skill.method_activation_markers[0].activation_markers = []; }],
     ["generation final", (value) => { value.bundle.skill.generation_final_sha256 = "0".repeat(64); }],
     ["diagnosis final", (value) => { value.bundle.receipt.diagnoses[0].result_sha256 = "0".repeat(64); }],
     ["generation scope", (value) => { value.bundle.skill.generation_scope_audit.oracle_accesses = 1; }],

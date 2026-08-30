@@ -205,10 +205,11 @@ function writeReleaseRegistrationInput(root) {
       reference: `references/${filename}`,
       priority: index + 1,
       evidence_markers: expected.method_marker_sets[index].all_markers,
+      activation_markers: expected.method_marker_sets[index].activation_markers,
     })),
   };
   fs.writeFileSync(path.join(packageRoot, "methods.json"), `${JSON.stringify(methods, null, 2)}\n`);
-  fs.writeFileSync(path.join(packageRoot, "SKILL.md"), "---\nname: diagnose-rpc-timeout\ndescription: Test-owned production Runtime fixture.\n---\n\nRead request.json, method-evidence-graph.json, and method-evaluation-plan.json. Return only evaluation_ref, verdict, and reason; UNKNOWN is allowed.\n");
+  fs.writeFileSync(path.join(packageRoot, "SKILL.md"), "---\nname: diagnose-rpc-timeout\ndescription: Test-owned production Runtime fixture.\n---\n\nRead request.json, method-evidence-graph.json, and method-evaluation-plan.json. Return only evaluation_ref, verdict, supporting_event_refs, and reason; UNKNOWN is allowed.\n");
   const templates = [];
   let inFence = false;
   for (const rawLine of wiki.split(/\r?\n/u)) {

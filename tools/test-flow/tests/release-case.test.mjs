@@ -99,6 +99,20 @@ test("v2 loader exposes only Wiki, registration, driver, and frozen attachments"
   assert.equal(Object.hasOwn(inputs, "semantic_oracle"), false);
   assert.equal(Object.hasOwn(inputs.scenarios[0], "oracle"), false);
   assert.equal(oracle.semantic_oracle.oracle_visibility, "GATE_ONLY");
+  assert.deepEqual(
+    oracle.semantic_oracle.expected_package.method_marker_sets.map((item) => item.activation_markers),
+    [
+      ["LATE_RESPONSE service=", "API_COMPLETE service=", "DEADLOOP_DETECTED service="],
+      ["LATE_RESPONSE service=", "QUEUE_HISTORY print_time_ms="],
+      ["LATE_RESPONSE service="],
+    ],
+  );
+  assert.equal(
+    oracle.semantic_oracle.expected_package.method_marker_sets
+      .flatMap((item) => item.activation_markers)
+      .some((marker) => marker === "rpc call" || marker === "call unsuccess, reqid("),
+    false,
+  );
   assert.equal(oracle.scenarios[0].oracle.oracle_visibility, "GATE_ONLY");
   assert.equal(oracle.scenarios[0].oracle.expected_status, "RESOLVED");
   assert.deepEqual(oracle.scenarios[0].oracle.expected_method_verdicts.map((item) => item.verdict), ["REJECTED", "CONFIRMED", "REJECTED"]);
@@ -135,6 +149,37 @@ test("registration and semantic oracle bind the same Wiki and Methods package", 
   assert.equal(expected.method_marker_sets.length, 3);
   for (const item of expected.method_marker_sets) {
     for (const marker of item.all_markers) assert.equal(inputs.wiki.includes(marker), true);
+    let cursor = 0;
+    for (const marker of item.activation_markers) {
+      const index = item.all_markers.indexOf(marker, cursor);
+      assert.notEqual(index, -1);
+      cursor = index + 1;
+    }
+  }
+});
+
+test("release semantic oracle requires ordered per-method activation marker subsequences", async (context) => {
+  const cases = [
+    ["missing", (item) => { delete item.activation_markers; }, /expected method marker set fields are invalid/i],
+    ["empty", (item) => { item.activation_markers = []; }, /activation markers must contain valid strings/i],
+    ["duplicate", (item) => { item.activation_markers = ["LATE_RESPONSE service=", "LATE_RESPONSE service="]; }, /activation markers must contain valid strings/i],
+    ["non-member", (item) => { item.activation_markers = ["NOT_A_METHOD_MARKER"]; }, /ordered subsequence/i],
+    ["reordered", (item) => { item.activation_markers = ["API_COMPLETE service=", "LATE_RESPONSE service="]; }, /ordered subsequence/i],
+  ];
+  for (const [name, mutate, expectedError] of cases) {
+    await context.test(name, () => {
+      const root = cloneCase("methods-release-activation-");
+      try {
+        const oraclePath = path.join(root, "oracle.json");
+        const oracle = JSON.parse(fs.readFileSync(oraclePath, "utf8"));
+        mutate(oracle.expected_package.method_marker_sets[0]);
+        fs.writeFileSync(oraclePath, canonicalJson(oracle), "utf8");
+        refreshManifest(root);
+        assert.throws(() => loadReleaseCaseOracle(root), expectedError);
+      } finally {
+        fs.rmSync(path.dirname(root), { recursive: true, force: true });
+      }
+    });
   }
 });
 

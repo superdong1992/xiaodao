@@ -20,7 +20,7 @@ import {
 
 function prompt(role, attempt) {
   const output = role === "Specialist" ? "output/method-diagnosis.draft.json" : "output/method-review.draft.json";
-  return `frozen context\n<<<METHODS_EVIDENCE_V2_ROLE>>>\nRole: ${role}. Attempt: ${attempt}.\nWrite one JSON root array whose items contain only evaluation_ref, verdict, and reason.\nWrite only ${output}.\n<<<END METHODS_EVIDENCE_V2_ROLE>>>\n`;
+  return `frozen context\n<<<METHODS_EVIDENCE_V2_ROLE>>>\nRole: ${role}. Attempt: ${attempt}.\nWrite one JSON root array whose items contain only evaluation_ref, verdict, supporting_event_refs, and reason.\nWrite only ${output}.\n<<<END METHODS_EVIDENCE_V2_ROLE>>>\n`;
 }
 
 function workspace(root) {
@@ -105,7 +105,7 @@ test("role workspace accepts Write then Read of its own draft and rejects other 
   try {
     workspace(root);
     const output = path.join(root, "output", "method-diagnosis.draft.json");
-    const content = '[{"evaluation_ref":"eval-a","verdict":"CONFIRMED","reason":"ok"}]';
+    const content = '[{"evaluation_ref":"eval-a","verdict":"CONFIRMED","supporting_event_refs":["event-a"],"reason":"ok"}]';
     fs.writeFileSync(output, content);
     const receipt = auditRoleWorkspace({
       workspaceRoot: root,
@@ -162,7 +162,7 @@ test("wrapper preserves the raw evaluation array and records the exact productio
     fs.mkdirSync(values["config-root"]);
     const rawPrompt = prompt("Specialist", "primary evaluation");
     const output = path.join(root, "output", "method-diagnosis.draft.json");
-    const content = '[{"evaluation_ref":"eval-a","verdict":"CONFIRMED","reason":"ok"}]';
+    const content = '[{"evaluation_ref":"eval-a","verdict":"CONFIRMED","supporting_event_refs":["event-a"],"reason":"ok"}]';
     const chunks = [];
     const stdout = new Writable({ write(chunk, _encoding, callback) { chunks.push(Buffer.from(chunk)); callback(); } });
     const receipt = await runServiceInvocation(values, {
@@ -213,7 +213,7 @@ test("Specialist and Reviewer each own a two-dollar pool and repairs consume onl
       workspace(work);
       process.chdir(work);
       const output = path.join(work, "output", role === "SPECIALIST" ? "method-diagnosis.draft.json" : "method-review.draft.json");
-      const content = '[{"evaluation_ref":"eval-a","verdict":"CONFIRMED","reason":"ok"}]';
+      const content = '[{"evaluation_ref":"eval-a","verdict":"CONFIRMED","supporting_event_refs":["event-a"],"reason":"ok"}]';
       return runServiceInvocation(values, {
         stdin: Readable.from([prompt(label, attemptText)]),
         stdout: new Writable({ write(_chunk, _encoding, callback) { callback(); } }),
@@ -268,7 +268,7 @@ test("a repair with no role-pool balance closes before invoking the provider", a
     workspace(primaryWork);
     process.chdir(primaryWork);
     const output = path.join(primaryWork, "output", "method-diagnosis.draft.json");
-    const content = '[{"evaluation_ref":"eval-a","verdict":"UNKNOWN","reason":"unknown"}]';
+    const content = '[{"evaluation_ref":"eval-a","verdict":"UNKNOWN","supporting_event_refs":[],"reason":"unknown"}]';
     await runServiceInvocation(values, {
       stdin: Readable.from([prompt("Specialist", "primary evaluation")]),
       stdout: new Writable({ write(_chunk, _encoding, callback) { callback(); } }),

@@ -11,17 +11,81 @@ import {
   lightVerdict,
   parseArguments,
   REQUIRED_EVIDENCE,
+  safeFailure,
   sealLightGate,
 } from "../run.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
-test("standalone CLI keeps Methods generation and exposes one P2 model-cert scenario", () => {
+test("standalone CLI keeps the historical Fast E2E matrix separate from P2", () => {
   assert.equal(parseArguments(["--goal", "methods"]).goal, "methods");
+  assert.equal(parseArguments(["--goal", "fast-e2e", "--scenario", "api-execution-overrun"]).scenario, "api-execution-overrun");
+  assert.equal(parseArguments(["--goal", "fast-e2e", "--all-scenarios"])["all-scenarios"], true);
+  assert.throws(() => parseArguments(["--goal", "fast-e2e", "--scenario", "api-execution-overrun", "--all-scenarios"]), { code: "LUNA_SCENARIO_SELECTION_CONFLICT" });
+  assert.throws(() => parseArguments(["--goal", "fast-e2e", "--scenario", "release-decoy"]), { code: "LUNA_SCENARIO_INVALID" });
   assert.equal(parseArguments(["--goal", "e2e", "--scenario", "multiple-rpc-timeouts"]).scenario, "multiple-rpc-timeouts");
   assert.throws(() => parseArguments(["--goal", "e2e", "--all-scenarios"]), { code: "LUNA_MODEL_CERT_SUITE_FORBIDDEN" });
   assert.throws(() => parseArguments(["--goal", "e2e", "--scenario", "api-execution-overrun"]), { code: "LUNA_SCENARIO_INVALID" });
   assert.throws(() => parseArguments(["--goal", "release.full"]), { code: "LUNA_GOAL_INVALID" });
+});
+
+test("Fast failure receipts retain the mechanical reason and comparison details", () => {
+  const error = new Error("oracle mismatch");
+  error.code = "MACOS_CODEX_LUNA_DIAGNOSIS_STATUS_MISMATCH";
+  error.reason_code = "NO_MATCHING_METHOD_EVIDENCE";
+  error.diagnostic_id = "diag-example";
+  error.details = { expected: ["target"], actual: ["noise"], stderr: "driver failed" };
+  assert.deepEqual(safeFailure(error), {
+    code: error.code,
+    message: error.message,
+    reason_code: error.reason_code,
+    diagnostic_id: error.diagnostic_id,
+    details: error.details,
+  });
+});
+
+test("Fast E2E plan uses the nine historical inputs without Core or source snapshot", () => {
+  const options = defaults(parseArguments(["--goal", "fast-e2e", "--all-scenarios", "--plan-only"]));
+  const plan = buildPlan(options);
+  assert.equal(plan.mode, "fast-e2e-suite");
+  assert.deepEqual(plan.scenarios, [
+    "api-execution-overrun",
+    "client-receive-blocked",
+    "deadloop-detected",
+    "insufficient-evidence",
+    "multiple-rpc-timeouts",
+    "server-queue-delay",
+    "server-queue-five",
+    "server-queue-single",
+    "unrelated-log-noise",
+  ]);
+  assert.equal(plan.execution.expected_model_calls, 16);
+  assert.equal(plan.execution.model_call_hard_cap, 32);
+  const insufficient = plan.execution.per_scenario.find((item) => item.scenario_id === "insufficient-evidence");
+  assert.equal(insufficient.expected_model_calls, 0);
+  assert.equal(insufficient.model_call_hard_cap, 0);
+  assert.equal(insufficient.token_cap, 0);
+  assert.equal(insufficient.equivalent_usd_cap, 0);
+  assert.equal(plan.execution.token_cap, 16_000_000);
+  assert.equal(plan.execution.equivalent_usd_cap, 24);
+  assert.equal(plan.execution.source_snapshot, false);
+  assert.equal(plan.admission.blockers.some((item) => item.code === "LUNA_SOURCE_SNAPSHOT_REQUIRED"), false);
+  assert.equal(plan.admission.blockers.some((item) => item.code === "LUNA_CORE_VERDICT_REQUIRED"), false);
+  assert.equal(plan.inputs.source_snapshot_digest, null);
+  assert.equal(plan.inputs.core_verdict, null);
+});
+
+test("Fast evidence requires Reviewer records except on the zero-evaluation scenario", () => {
+  const normal = buildPlan(defaults(parseArguments([
+    "--goal", "fast-e2e", "--scenario", "api-execution-overrun", "--plan-only",
+  ])));
+  const insufficient = buildPlan(defaults(parseArguments([
+    "--goal", "fast-e2e", "--scenario", "insufficient-evidence", "--plan-only",
+  ])));
+  assert.equal(normal.evidence.includes("methods-reviewer-job.json"), true);
+  assert.equal(normal.evidence.includes("methods-reviewer-outcome-v2.json"), true);
+  assert.equal(insufficient.evidence.includes("methods-reviewer-job.json"), false);
+  assert.equal(insufficient.evidence.includes("methods-reviewer-outcome-v2.json"), false);
 });
 
 test("P2 plan freezes source/Core bindings, normal two calls and a four-call hard cap", () => {
@@ -75,6 +139,28 @@ test("light Gate accepts P2 normal/repair counts and rejects a fifth call", () =
   const fifth = path.join(root, "fifth");
   writeEvidence(fifth, required, 5);
   assert.equal(sealLightGate({ goal: "e2e", mode: "model-cert", evidenceRoot: fifth, expectedCalls: 2 }).status, "FAIL");
+});
+
+test("light Gate applies the same two/four call bound to one Fast E2E scenario", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "macos-luna-fast-light-gate-"));
+  for (const calls of [2, 4]) {
+    const evidenceRoot = path.join(root, String(calls));
+    writeEvidence(evidenceRoot, REQUIRED_EVIDENCE["fast-e2e"], calls);
+    assert.equal(sealLightGate({ goal: "fast-e2e", mode: "fast-e2e", evidenceRoot, expectedCalls: 2 }).status, "PASS");
+  }
+  const fifth = path.join(root, "5");
+  writeEvidence(fifth, REQUIRED_EVIDENCE["fast-e2e"], 5);
+  assert.equal(sealLightGate({ goal: "fast-e2e", mode: "fast-e2e", evidenceRoot: fifth, expectedCalls: 2 }).status, "FAIL");
+});
+
+test("insufficient-evidence Fast E2E rejects any model call", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "macos-luna-insufficient-light-gate-"));
+  const zero = path.join(root, "zero");
+  writeEvidence(zero, REQUIRED_EVIDENCE["fast-e2e"], 0);
+  assert.equal(sealLightGate({ goal: "fast-e2e", mode: "fast-e2e", evidenceRoot: zero, expectedCalls: 0, modelCallHardCap: 0 }).status, "PASS");
+  const one = path.join(root, "one");
+  writeEvidence(one, REQUIRED_EVIDENCE["fast-e2e"], 1);
+  assert.equal(sealLightGate({ goal: "fast-e2e", mode: "fast-e2e", evidenceRoot: one, expectedCalls: 0, modelCallHardCap: 0 }).status, "FAIL");
 });
 
 test("light verdict retains only the closed failure projection", () => {
