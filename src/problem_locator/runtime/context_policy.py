@@ -36,7 +36,10 @@ from .context_builder import (
     build_methods_specialist_method_cards_v2,
 )
 from .failures import runtime_failure
-from .methods_skill import load_specialized_skill_registration
+from .methods_skill import (
+    ResolvedSpecializedSkillV1,
+    load_specialized_skill_registration,
+)
 from .workspace import PreparedWorkspace
 
 
@@ -225,10 +228,11 @@ def _validate_resolved_asset(
     resolved: ResolvedAsset,
     expected_ref: VersionedRef,
     expected_kind: AssetKind,
-) -> Path:
+) -> tuple[Path, ResolvedSpecializedSkillV1 | None]:
     if resolved.ref != expected_ref or resolved.asset_kind is not expected_kind:
         raise _invalid_asset() from None
     root = Path(resolved.root_path)
+    specialized: ResolvedSpecializedSkillV1 | None = None
     try:
         metadata = root.stat(follow_symlinks=False)
         if root.is_symlink() or not stat.S_ISDIR(metadata.st_mode):
@@ -249,7 +253,7 @@ def _validate_resolved_asset(
             raise ValueError("asset directory content drifted")
     except (OSError, ValueError):
         raise _invalid_asset() from None
-    return root
+    return root, specialized
 
 
 def _load_entry_text(
@@ -259,9 +263,9 @@ def _load_entry_text(
     *,
     loaded_method_ids: Sequence[str] | None = None,
 ) -> str:
-    root = _validate_resolved_asset(resolved, expected_ref, expected_kind)
+    root, specialized = _validate_resolved_asset(resolved, expected_ref, expected_kind)
     if expected_kind is AssetKind.DIAGNOSIS_SKILL:
-        specialized = load_specialized_skill_registration(root)
+        assert specialized is not None
         package_root = specialized.package_root
         if loaded_method_ids is None:
             selected_method_ids = tuple(
@@ -320,15 +324,12 @@ def _skill_index_entry(
     resolved: ResolvedAsset,
     expected_ref: VersionedRef,
 ) -> dict[str, Any]:
-    root = _validate_resolved_asset(
+    _root, specialized = _validate_resolved_asset(
         resolved,
         expected_ref,
         AssetKind.DIAGNOSIS_SKILL,
     )
-    try:
-        specialized = load_specialized_skill_registration(root)
-    except (OSError, TypeError, ValueError):
-        raise _invalid_asset() from None
+    assert specialized is not None
     registration = specialized.registration
     return {
         "ref": expected_ref.model_dump(mode="json"),
@@ -348,9 +349,6 @@ class RuntimeAssetResolver:
         self._catalog = catalog
 
     def _resolve(self, ref: VersionedRef, kind: AssetKind) -> ResolvedAsset:
-        report = self._catalog.check([ref])
-        if not report.available or report.missing_refs:
-            raise _invalid_asset() from None
         try:
             resolved = self._catalog.resolve(ref)
         except ApplicationPortError as exc:
