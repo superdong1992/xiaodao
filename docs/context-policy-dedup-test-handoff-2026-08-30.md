@@ -1,8 +1,8 @@
-# 交接:ROUTE 资产解析去重改动的测试验证
+# ROUTE 资产解析去重改动的复核与收口记录
 
-> **交付对象**:测试验证 Agent(零上下文)。本文自包含,不要求阅读此前对话。
-> **仓库**:`/Users/shenyidong/Documents/xiaodao`,Problem Locator,Python 3.12。
-> **本轮范围**:验证 commit `428d35ee8f3a1924c7b50050e3eb9d558a15479c` 对 `src/problem_locator/runtime/context_policy.py` 的去重重构没有破坏行为,并同步更新一处已知需要改的测试断言。**这不是功能改动,只是消除重复计算,不改变任何可观察行为。**
+> **状态**：2026-09-01 已完成代码复核、专项复现和修正；最终验证以 `FIXED_ISSUES.md`
+> 对应条目的 Test Flow verdict 为准。本文保留原提交的调查背景，并修正其中关于 Fake 调用记录和
+> mtime/size 缓存的错误结论。
 
 ---
 
@@ -33,7 +33,12 @@
 
 两条路径在这条边上都是空,所以 `_invalid_asset()`(默认空)和 `_invalid_asset(exc.error.details)`(实际也是空)产生的异常在两个实现下都完全等价。
 
-**效果**:每个技能、每次 ROUTE 任务派发,重复加载从 5 次降到 3 次。没有改 `catalog.py`、没有改 `AssetCatalogPort` 接口、没有改"要不要过滤技能目录"这类行为语义。
+2026-09-01 的运行探针确认，`428d35e` 完成后每个 Skill 仍有 3 次加载：Catalog 新鲜度校验 1 次，
+Resolver 2 次。后续增加 Job 内 `_ResolvedSkillSnapshot`，把 `_resolve_skill()` 已验证的
+`ResolvedSpecializedSkillV1` 直接交给 `_skill_index_entry()`，不再为构造索引重新扫描目录。
+
+**最终效果**：每个 Skill、每次 ROUTE Job 从最初 5 次降到 2 次；Catalog 和 Resolver 各完整校验
+一次。没有修改 `AssetCatalogPort`，没有引入跨 Job 缓存，也没有削弱热更新漂移检测。
 
 ## 2. 已知需要同步修改的测试
 
@@ -45,17 +50,20 @@ assert catalog.check_calls == [(job.agent_profile_ref,)]
 
 这一行测的是"资产解析遇到第一个失败的 ref 就立刻停止,不会继续往下解析别的 ref"这个行为——测试用例只往 `FakeAssetCatalog` 里注册了 `agent_profile_ref` 一个资产,并通过 `catalog.inject_failure("resolve", typed_failure)` 对 `resolve()` 注入了一个失败,断言最终 `receipt.job_outcome.error` 的 code/details 符合预期,同时确认只有一次 `check()` 调用就停手了。
 
-因为 `check()` 调用被去掉了,这一行字面上会失败(`check_calls` 恒为 `[]`),但它想验证的行为(fail-fast、错误码/details 正确传播)本身没变,不受这次改动影响。改成:
+因为 `check()` 调用被去掉了，这一行必然失败。原交接文档建议直接改成 `resolve_calls`，但专项
+复现发现这个建议也不成立：`FakeAssetCatalog.resolve()` 会先执行注入失败，再追加
+`resolve_calls`，因此失败调用不会进入该列表。
 
-```python
-assert catalog.resolve_calls == [job.agent_profile_ref]
-```
+最终测试使用局部观测子类，在委托给 Fake 之前记录 attempted ref，再断言只尝试了
+`job.agent_profile_ref`；同时保留错误码、details、State 未读取、Backend 未启动和
+`check_calls == []`。这样验证的是实际 fail-fast 行为，不改变共享 Fake 的失败语义。
 
-`resolve_calls: list[VersionedRef]`(注意不是 tuple 套 tuple)是 `FakeAssetCatalog` 已有字段(`fakes.py:1926`),每次调用 `resolve()` 都会 `append`(`fakes.py:1965`),语义上是对等替换,不需要改这个测试的其他部分(1280-1286 行的断言应该原样保留、原样通过)。
+## 3. 专项回归
 
-## 3. 建议跑哪些测试
-
-- `tests/deterministic/unit/runtime/test_diagnosis_runtime.py`(先改完上面那一行断言)
+- `test_public_asset_fake_typed_resolve_failure_preserves_details_as_outcome`
+- `test_route_reuses_one_validated_skill_snapshot_for_the_index`
+- `test_asset_content_drift_never_substitutes_the_frozen_job_version`
+- `test_asset_content_drift_with_unchanged_size_and_mtime_is_rejected`
 - `tests/deterministic/integration/test_s07_settings_catalog_runtime_seam.py`
 - `tests/deterministic/integration/test_bootstrap_composition.py`
 - `tests/deterministic/contracts/test_execution_replay_scenarios.py` —— 这个文件里也有一处 `check_calls` 断言(`:157`),但它测的是 `application/external_commands.py:795` 那条**批量** `check(fixed_asset_refs(...))` 调用,跟本次改动的 `context_policy.py` 单 ref 调用点是两回事,预期不受影响。**如果它也挂了,说明我的判断有遗漏,要停下来重新排查,不要直接改断言糊过去。**
@@ -69,6 +77,8 @@ assert catalog.resolve_calls == [job.agent_profile_ref]
 
 ## 5. 不在本轮范围内(已分析,先不做)
 
-技能新鲜度校验本身(`catalog.py` 的 `_skill_is_current`)每次都做完整 SHA-256 内容哈希,即使技能包内容根本没变。可以用 mtime/size 做一层廉价前置指纹(只 `stat()`,不读文件内容),指纹没变就跳过完整哈希,只有疑似变化时才退回现在这套逻辑——这样能把"没有热更新发生"这个绝大多数情况下的校验成本降到接近零,且不削弱热更新检测的正确性。
+不得用 mtime/size 未变化作为跳过 SHA-256 的充分条件。等长内容可以在恢复 mtime 后绕过这种缓存，
+会削弱当前的字节级漂移检测；专项回归已经固定这条不可回归行为。
 
-这个改动会涉及给 `VersionedAssetCatalog`(跨请求复用的单例)加可变缓存状态,如果 dispatcher 是多线程的还要考虑加锁,风险和工作量都明显更大。已跟用户确认过设计方向,本轮不做,只记录在这里,留作后续可选项。
+如果 2 次完整加载仍是实测瓶颈，后续方向应是内容寻址的不可变 Skill 目录和原子 Catalog 绑定切换，
+让完整校验前移到注册阶段。该方案涉及部署合同和历史 Job 引用，本轮不实施。

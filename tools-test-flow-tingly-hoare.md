@@ -1,5 +1,12 @@
 # tools/test-flow 裁剪与优化 —— 实施说明书
 
+> **2026-09-01 复核结论**：本文不能再作为整包实施指令。T1 已按 fail-closed 语义收口：
+> `dev.quick` 在 affected 范围无法安全缩小时返回 `AFFECTED_SCOPE_REQUIRES_FULL`，只有计划中确实
+> 包含 `deterministic.full` 时才允许 `NOT_REQUIRED`。T2 不能直接替换 canonical JSON 实现，
+> 否则会改变尾换行和冻结哈希；T5、T7、T8、T10 分别涉及 admission 安全边界、CrossJob polling
+> 回归、机器可读 schema 和 identity 审计结构，均明确不执行。其余清理项必须拆成独立问题，先证明
+> 收益和行为等价，再单独验证，不得与 ROUTE 性能修复合并。
+
 > 本文档写给负责编码实现的 AI/工程师(执行者可能没有本次分析讨论的上下文),目标是让执行者
 > 不需要额外调查就能按顺序、安全地完成每一项改动。所有事实性断言(行号、引用关系、提交次数)
 > 都已经过直接读取源码/配置/git 历史验证,不是推测。请严格按"排除范围"和"任务列表"执行,
@@ -52,7 +59,7 @@
 
 ## 2. 任务列表
 
-### T1(优先级最高)新增快速内环 Goal
+### T1(已实施)新增快速内环 Goal
 
 **问题**:当前 `dev.default` 要求同时满足 `proof.deterministic-affected` 和
 `proof.deterministic-full`(见 `tools/test-flow/config/proofs.v2.json` 的
@@ -90,12 +97,11 @@ contracts/unit/integration/journey 四个目录的全部约 2600+ 个测试;`det
 `planAffectedSelection(context.repoRoot, context.changedFiles)`(定义在
 `lib/actions.mjs:1347`,依赖 `affectedSelectors()` 定义在 `lib/actions.mjs:1321`)。这个函数
 在改动范围太大时(比如改了 `pyproject.toml`/`uv.lock`)会返回 `selection.defer_to_full = true`,
-此时当前代码只是静默返回一个 0 测试的 `NOT_REQUIRED` 状态。**新增一步**:当
-`selection.defer_to_full` 为 true 时,在这个 Goal 的运行结果里明确输出提示文字,例如
-"改动范围超出快速检查能力,请运行 `dev.default` 获取完整结果",不要让开发者误以为 0 测试
-等于"改动是安全的"。这个提示可以加在 `executeGate` 返回 `NOT_REQUIRED` 之后、结果被写入
-run 摘要之前的位置,具体挂载点由实现者根据 `lib/status.mjs`/`lib/engine.mjs` 里摘要渲染的
-现有模式决定,保持和其他 gate 提示信息一致的格式。
+原实现会静默返回 0 测试的 `NOT_REQUIRED`。当前规则已经改为：只有计划闭包中确实包含
+`deterministic.full` 时，affected Gate 才能返回 `AFFECTED_SCOPE_DEFERRED_TO_FULL / NOT_REQUIRED`；
+`dev.quick` 不含 full，遇到同一情形必须返回
+`AFFECTED_SCOPE_REQUIRES_FULL / INCONCLUSIVE`，最终 verdict 为 `BLOCKED`。不得把提示文字当成
+状态语义的替代品。
 
 最后,在 `tools/test-flow/README.md` 里加一小节说明 `dev.quick` 的用途和限制(不完整、仅用于
 日常迭代、提交/发布前仍需 `dev.default`),放在现有"Dev 确定性测试"小节之后。
@@ -110,7 +116,8 @@ run 摘要之前的位置,具体挂载点由实现者根据 `lib/status.mjs`/`li
    Gate 的 `pytest-summary.json` 里的 `tests` 数量看出明显小于全量)。改完记得撤销这个临时
    修改。
 3. 临时修改 `pyproject.toml`(比如加一行空白注释性质的改动,不影响解析),运行同样的命令,
-   确认命中 `defer_to_full` 分支并展示了新增的提示文字。改完撤销这个临时修改。
+   确认命中 `defer_to_full` 分支并以 `AFFECTED_SCOPE_REQUIRES_FULL / BLOCKED` 收口，绝不能 PASS。
+   改完撤销这个临时修改。
 4. 运行 `./tools/test-flow/run.sh --track dev --goal dev.default --plan-only`,确认输出和
    改动前完全一致(`dev.default` 不受影响,新 Goal 是平行新增,不是替换)。
 

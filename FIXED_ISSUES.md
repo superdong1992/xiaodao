@@ -2028,3 +2028,71 @@
   `b41d74d70b8d6e1441ea1aee384f4f50ec7753adea8b7eb1a4cb5be38048fcdb`，源码快照为
   `git-visible-worktree-v1:5c9cf39747e1d0f02e4ebced9c26eb8c08298c4d2fd463d378858ad433a47459`
   （745 files）。本元数据行本身不宣称被其引用的快照覆盖。
+
+## PL-FIX-050：ROUTE 重复加载 Methods Skill，去重提交又留下失败测试
+
+- **状态**：已修复；验证结论以本条最终复验元数据为准。
+- **症状**：每个 ROUTE Job 会对每个可用 Methods Skill 重复读取、解析并哈希最多 5 次。
+  `428d35e` 首轮去重后仍有 3 次，而且删除 `catalog.check()` 后保留了断言该调用存在的旧测试，
+  导致 `test_public_asset_fake_typed_resolve_failure_preserves_details_as_outcome` 在当前主分支直接失败。
+- **受影响版本**：`5.0.0`，包括 `428d35e` 至本次修复前的主分支。
+- **根因**：`_validate_resolved_asset()` 已返回完整 `ResolvedSpecializedSkillV1`，但 `_resolve()`
+  丢弃该对象，`_skill_index_entry()` 为构造同一 Job 的索引再次扫描目录。测试交接又错误假设
+  `FakeAssetCatalog.resolve_calls` 会记录注入失败的调用；实际 Fake 在追加前先抛异常。
+- **不可回归行为**：Catalog 与 Runtime 必须继续各做一次完整内容校验；同一个 ROUTE Job 构造
+  `SKILL_INDEX` 时必须复用 Runtime 已验证的 Skill 快照，不得第三次加载。Skill 内容即使保持相同
+  文件大小并恢复 mtime，只要字节变化仍必须以 `ASSET_VERSION_UNAVAILABLE` fail closed。typed
+  `ApplicationPortError.details`、首个 ref fail-fast、State 未读取和 Backend 未启动语义保持不变。
+- **修复历史**：2026-09-01，先用当前源码专项复现旧断言失败，再用运行探针确认每个 Skill 的
+  Catalog/Resolver 加载数为 1+2。随后增加 Job 内 `_ResolvedSkillSnapshot`，把 Resolver 加载降为
+  1 次，总数降为 2；测试改为在 Fake 委托前记录实际尝试的 ref，不改变共享 Fake 的失败顺序。
+- **专项回归测试**：
+  - `tests/deterministic/unit/runtime/test_diagnosis_runtime.py::test_public_asset_fake_typed_resolve_failure_preserves_details_as_outcome`
+  - 同文件 `test_route_reuses_one_validated_skill_snapshot_for_the_index`
+  - 同文件 `test_asset_content_drift_never_substitutes_the_frozen_job_version`
+  - 同文件 `test_asset_content_drift_with_unchanged_size_and_mtime_is_rejected`
+  - `tests/deterministic/unit/runtime/test_methods_skill.py::test_catalog_routes_registered_methods_skill_for_empty_partial_and_extra_facts`
+  - `tests/deterministic/integration/test_s07_settings_catalog_runtime_seam.py`
+  - `tests/deterministic/integration/test_bootstrap_composition.py`
+  - `tests/deterministic/contracts/test_execution_replay_scenarios.py`
+- **最新 Test Flow verdict**：Dev `run-20260901T040141Z-d2f71825` 为 `PASS_WITH_WARNINGS`，仅因
+  性能基线尚未校准；`deterministic.full` 为 PASS，Core 108/108、contracts 602/602、unit
+  1953 passed/68 skipped、integration 68/68、SameJob 3/3，模型调用为 0。源码快照为
+  `git-visible-worktree-v1:86407911bd63718703d2ba23946e9415039d35777da0b4b0a4e00b11fcca235a`
+  （749 files），verdict verification 为 PASS。本元数据行本身不宣称被其引用的快照覆盖。
+
+## PL-FIX-051：dev.quick 要求 full 后又被同身份重试策略阻断，BLOCKED verdict 自身校验失败
+
+- **状态**：已修复；验证结论以本条最终复验元数据为准。
+- **症状**：宽范围改动下，`dev.quick` 正确生成
+  `AFFECTED_SCOPE_REQUIRES_FULL / BLOCKED`，但紧接着运行 `dev.default` 会被
+  `UNCHANGED_RETRY_INTENT_REQUIRED` 拦截，要求用户为同一失败重新填写 reason、hypothesis 和
+  expected evidence。该 admission-blocked 计划若包含可复用 Stage，候选收据又把这些 Stage 记为
+  `NOT_EXECUTED`，而审计器强制要求 `REUSED`，最终把本应可验证的 BLOCKED verdict 升级成 ERROR。
+- **受影响版本**：`dev.quick` 初始实现及 Test Flow V2 admission-blocked 收据审计路径。
+- **根因**：retry 策略不知道 `AFFECTED_SCOPE_REQUIRES_FULL` 是从 quick 升级到 full 的预期控制流；
+  receipt audit 也没有区分“计划决定可复用”和“整个计划未获准执行”，错误地要求 admission-blocked
+  candidate 实际采用复用结果。
+- **不可回归行为**：quick 的宽范围结果必须继续 fail closed；只有包含 `deterministic.full` 的计划
+  才能把该 code 视为已被更强证明覆盖。其他同身份失败仍要求结构化新假设。任何 admission-blocked
+  计划的所有 Stage 都必须保持 `NOT_EXECUTED`，且最终 BLOCKED verdict 必须通过自身收据校验；不得
+  在未获准执行时把历史复用 Stage 写成已采用的 PASS。
+- **修复历史**：2026-09-01，先实跑 `dev.quick` 取得
+  `run-20260901T034234Z-be9873a0` 的预期 BLOCKED，再用 `dev.default` 复现 retry blocker 和
+  `CANDIDATE_PLAN_STAGE_IDENTITY_MISMATCH`。随后只在 full 闭包中把
+  `AFFECTED_SCOPE_REQUIRES_FULL` 标记为已被升级覆盖，并让收据审计按 admission 状态校验 Stage
+  result source。
+- **专项回归测试**：
+  - `tools/test-flow/tests/actions.test.mjs` 中
+    `a broad affected selection fails closed when the quick plan has no full suite`
+  - 同文件 `a broad affected selection is not required only when full is in the plan`
+  - `tools/test-flow/tests/config-planner.test.mjs` 中
+    `Dev quick selects only the affected deterministic closure`
+  - 同文件 `a full deterministic plan supersedes the quick scope escalation`
+  - `tools/test-flow/tests/evidence.test.mjs` 中
+    `admission-blocked plans require every Stage to remain not executed`
+- **最新 Test Flow verdict**：预期阻断验证 `run-20260901T035500Z-87116ef7` 为 `BLOCKED` 且
+  verification PASS；最终 Dev `run-20260901T040141Z-d2f71825` 为 `PASS_WITH_WARNINGS`，
+  `dev.default` 在 quick 升级后正常获准，完整确定性闭包全部 PASS。源码快照为
+  `git-visible-worktree-v1:86407911bd63718703d2ba23946e9415039d35777da0b4b0a4e00b11fcca235a`
+  （749 files）。本元数据行本身不宣称被其引用的快照覆盖。

@@ -59,6 +59,23 @@ test("Dev default selects the complete cheap deterministic closure and no model 
   assert.equal(built.plan.stages[0].timeout_seconds, 300);
 });
 
+test("Dev quick selects only the affected deterministic closure", () => {
+  const built = buildIsolatedRunPlan({ track: "dev", goal: "dev.quick", planOnly: true });
+  assert.equal(built.plan.admission.status, "ADMITTED");
+  assert.deepEqual(built.plan.proofs.map((proof) => proof.id), [
+    "proof.framework",
+    "proof.repository-static",
+    "proof.deterministic-affected",
+  ]);
+  assert.deepEqual(built.plan.stages.map((stage) => stage.id), [
+    "framework.self-test",
+    "repository.static",
+    "deterministic.affected",
+  ]);
+  assert.equal(built.plan.stages.some((stage) => stage.id === "deterministic.full"), false);
+  assert.equal(built.plan.budget.normal_model_calls, 0);
+});
+
 test("Dev real requires one selected proof, explicit opt-in and a reason", () => {
   const built = buildIsolatedRunPlan({ track: "dev", goal: "dev.real", stage: "real.route", planOnly: true });
   assert.equal(built.plan.admission.status, "BLOCKED");
@@ -457,6 +474,35 @@ test("a later same-identity PASS resolves an earlier retry stop", () => {
     { verdict: { run_id: "run-passed", stages: [{ id: "deterministic.full", status: "PASS", ...identity }] } },
   ];
   assert.deepEqual(retryRequirement(history, { "deterministic.full": identity }), {
+    recommendation: "RUN",
+    reason: null,
+    previous_run_id: null,
+    stage_id: null,
+    previous_code: null,
+  });
+});
+
+test("a full deterministic plan supersedes the quick scope escalation", () => {
+  const identity = { producer_identity: "producer-affected", proof_identity: "proof-affected" };
+  const history = [{ verdict: {
+    run_id: "run-quick-needs-full",
+    stages: [{
+      id: "deterministic.affected",
+      status: "INCONCLUSIVE",
+      code: "AFFECTED_SCOPE_REQUIRES_FULL",
+      ...identity,
+    }],
+  } }];
+
+  assert.equal(
+    retryRequirement(history, { "deterministic.affected": identity }).recommendation,
+    "STOP",
+  );
+  assert.deepEqual(retryRequirement(
+    history,
+    { "deterministic.affected": identity },
+    { supersededFailureCodes: ["AFFECTED_SCOPE_REQUIRES_FULL"] },
+  ), {
     recommendation: "RUN",
     reason: null,
     previous_run_id: null,

@@ -4136,9 +4136,17 @@ export async function executeGate(context, stage, gateId, gate) {
     if (gate.selector_mode === "affected") {
       selection = planAffectedSelection(context.repoRoot, context.changedFiles);
       if (selection.defer_to_full) {
-        const summary = { schema_version: 2, tests: 0, passed: 0, failures: 0, errors: 0, skipped: 0, executed: 0, not_required: true };
+        const fullSuiteInPlan = context.plan?.stages?.some((item) => item.id === "deterministic.full") === true;
+        const summary = { schema_version: 2, tests: 0, passed: 0, failures: 0, errors: 0, skipped: 0, executed: 0, not_required: fullSuiteInPlan };
         writeJsonSync(path.join(root, "pytest-summary.json"), summary);
-        return { status: "NOT_REQUIRED", failure_domain: null, code: "AFFECTED_SCOPE_DEFERRED_TO_FULL", elapsed_seconds: 0, selection, pytest: summary };
+        return {
+          status: fullSuiteInPlan ? "NOT_REQUIRED" : "INCONCLUSIVE",
+          failure_domain: fullSuiteInPlan ? null : "CONTRACT",
+          code: fullSuiteInPlan ? "AFFECTED_SCOPE_DEFERRED_TO_FULL" : "AFFECTED_SCOPE_REQUIRES_FULL",
+          elapsed_seconds: 0,
+          selection,
+          pytest: summary,
+        };
       }
       selectors = selection.selectors;
     }

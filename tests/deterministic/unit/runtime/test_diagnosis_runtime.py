@@ -462,6 +462,45 @@ def test_route_skill_index_v2_exposes_only_the_complete_namespaced_ref(
     assert catalog.route_bindings().output_contract_ref.version == "3.0.0"
 
 
+def test_route_reuses_one_validated_skill_snapshot_for_the_index(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from problem_locator.runtime import catalog as catalog_module
+    from problem_locator.runtime import context_policy as context_policy_module
+
+    catalog = _make_route_catalog(tmp_path)
+    job = _job_from_catalog(catalog)
+    catalog_loader = catalog_module.load_specialized_skill_registration
+    resolver_loader = context_policy_module.load_specialized_skill_registration
+    calls = {"catalog": 0, "resolver": 0}
+
+    def load_for_catalog(root: Path):
+        calls["catalog"] += 1
+        return catalog_loader(root)
+
+    def load_for_resolver(root: Path):
+        calls["resolver"] += 1
+        return resolver_loader(root)
+
+    monkeypatch.setattr(
+        catalog_module,
+        "load_specialized_skill_registration",
+        load_for_catalog,
+    )
+    monkeypatch.setattr(
+        context_policy_module,
+        "load_specialized_skill_registration",
+        load_for_resolver,
+    )
+
+    resolved = RuntimeAssetResolver(catalog).resolve_job(job)
+
+    assert resolved.skill_index_text is not None
+    assert len(json.loads(resolved.skill_index_text)["skills"]) == 1
+    assert calls == {"catalog": 1, "resolver": 1}
+
+
 def _restore_permissions(root: Path) -> None:
     inputs = root / "inputs"
     if not inputs.exists():
@@ -521,6 +560,29 @@ def test_asset_content_drift_never_substitutes_the_frozen_job_version(
         assert captured.value.failure.code is ErrorCode.ASSET_VERSION_UNAVAILABLE
     finally:
         _restore_permissions(workspace.root)
+
+
+def test_asset_content_drift_with_unchanged_size_and_mtime_is_rejected(
+    tmp_path: Path,
+) -> None:
+    catalog = _make_route_catalog(tmp_path)
+    job = _job_from_catalog(catalog)
+    skill = catalog.resolve(job.available_skill_refs[0])
+    entry = Path(skill.root_path) / "package" / "manual-triage" / "SKILL.md"
+    original = entry.read_bytes()
+    marker = b"Manual"
+    assert marker in original
+    metadata = entry.stat()
+    entry.write_bytes(original.replace(marker, b"Nanual", 1))
+    os.utime(entry, ns=(metadata.st_atime_ns, metadata.st_mtime_ns))
+    assert entry.stat().st_size == metadata.st_size
+    assert entry.stat().st_mtime_ns == metadata.st_mtime_ns
+
+    with pytest.raises(RuntimeExecutionError) as captured:
+        RuntimeAssetResolver(catalog).resolve_job(job)
+
+    assert captured.value.failure.stage is ExecutionStage.ASSET_RESOLUTION
+    assert captured.value.failure.code is ErrorCode.ASSET_VERSION_UNAVAILABLE
 
 
 def _running_route_job(catalog: VersionedAssetCatalog) -> Job:
@@ -1251,7 +1313,14 @@ def test_public_asset_fake_typed_resolve_failure_preserves_details_as_outcome(
             ].application_retryable,
         )
     )
-    catalog = FakeAssetCatalog(
+    attempted_resolve_refs: list[VersionedRef] = []
+
+    class ObservedResolveFailureCatalog(FakeAssetCatalog):
+        def resolve(self, ref: VersionedRef) -> ResolvedAsset:
+            attempted_resolve_refs.append(ref.model_copy(deep=True))
+            return super().resolve(ref)
+
+    catalog = ObservedResolveFailureCatalog(
         assets=[
             ResolvedAsset(
                 ref=job.agent_profile_ref,
@@ -1284,7 +1353,8 @@ def test_public_asset_fake_typed_resolve_failure_preserves_details_as_outcome(
     assert state.calls == []
     assert records.log_sinks == {}
     assert len(records.publish_outcome_calls) == 1
-    assert catalog.check_calls == [(job.agent_profile_ref,)]
+    assert attempted_resolve_refs == [job.agent_profile_ref]
+    assert catalog.check_calls == []
 
 
 def test_runtime_executes_one_frozen_route_and_publishes_canonical_receipt(

@@ -1,6 +1,16 @@
 {
   "schema_version": 2,
   "goals": {
+    "dev.quick": {
+      "description": "Fast, incomplete feedback for the active edit; runs only the affected deterministic scope and requires dev.default when that scope cannot be narrowed safely.",
+      "tracks": ["dev"],
+      "required_proofs": [
+        "proof.framework",
+        "proof.repository-static",
+        "proof.deterministic-affected"
+      ],
+      "selectable_proofs": []
+    },
     "dev.default": {
       "description": "Complete deterministic feedback with no real-model activity.",
       "tracks": ["dev"],

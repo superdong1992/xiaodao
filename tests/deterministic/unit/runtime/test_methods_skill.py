@@ -1033,13 +1033,14 @@ def test_catalog_routes_registered_methods_skill_for_empty_partial_and_extra_fac
     assert all(route.available_skill_refs[0] == skill_ref for route in routes)
     assert skill_ref.id == "diagnosis-skill/test-timeout"
     assert catalog.resolve(skill_ref).root_path == str((store / "test-timeout").resolve())
-    assert catalog.resolved_specialized_skill(skill_ref).registration_id == "test-timeout"
+    resolved_specialized = catalog.resolved_specialized_skill(skill_ref)
+    assert resolved_specialized.registration_id == "test-timeout"
     resolved_asset = catalog.resolve(skill_ref)
     rendered = _load_entry_text(resolved_asset, skill_ref, AssetKind.DIAGNOSIS_SKILL)
     assert '<<<METHODS_SKILL_FILE path="SKILL.md">>>' in rendered
     assert '<<<METHODS_SKILL_FILE path="methods.json">>>' in rendered
     assert '<<<METHODS_SKILL_FILE path="references/slow-execution.md">>>' in rendered
-    index = _skill_index_entry(resolved_asset, skill_ref)
+    index = _skill_index_entry(resolved_specialized, skill_ref)
     assert "registration_id" not in index
     assert index["ref"] == skill_ref.model_dump(mode="json")
     assert index["required_user_inputs"] == [

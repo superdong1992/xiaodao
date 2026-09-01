@@ -10,6 +10,7 @@ import {
   collectProviderFailureObservability,
   collectIsolatedModelUsage,
   evidenceV2ProviderRuntimeInputs,
+  executeGate,
   exactGeneratedEvidenceMarker,
   evaluatePytestSummary,
   evaluateNodeTestSummary,
@@ -1982,6 +1983,56 @@ test("a broad affected selection is folded into the following full suite", () =>
     assert.equal(selection.covered_test_files, 4);
     assert.equal(selection.total_test_files, 4);
     assert.equal(selection.defer_to_full, true);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a broad affected selection fails closed when the quick plan has no full suite", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "test-flow-affected-quick-"));
+  try {
+    for (const name of ["a", "b", "c", "d"]) writeTest(path.join(root, "tests", "deterministic", "unit", `test_${name}.py`));
+    const changed = path.join(root, "tests", "deterministic", "unit", "conftest.py");
+    fs.writeFileSync(changed, "VALUE = 1\n");
+    const result = await executeGate({
+      repoRoot: root,
+      attemptRoot: path.join(root, "attempt"),
+      changedFiles: ["tests/deterministic/unit/conftest.py"],
+      plan: { stages: [{ id: "deterministic.affected" }] },
+    }, { id: "deterministic.affected" }, "det.affected", {
+      kind: "pytest",
+      selector_mode: "affected",
+    });
+
+    assert.equal(result.status, "INCONCLUSIVE");
+    assert.equal(result.failure_domain, "CONTRACT");
+    assert.equal(result.code, "AFFECTED_SCOPE_REQUIRES_FULL");
+    assert.equal(result.pytest.not_required, false);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a broad affected selection is not required only when full is in the plan", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "test-flow-affected-full-"));
+  try {
+    for (const name of ["a", "b", "c", "d"]) writeTest(path.join(root, "tests", "deterministic", "unit", `test_${name}.py`));
+    const changed = path.join(root, "tests", "deterministic", "unit", "conftest.py");
+    fs.writeFileSync(changed, "VALUE = 1\n");
+    const result = await executeGate({
+      repoRoot: root,
+      attemptRoot: path.join(root, "attempt"),
+      changedFiles: ["tests/deterministic/unit/conftest.py"],
+      plan: { stages: [{ id: "deterministic.affected" }, { id: "deterministic.full" }] },
+    }, { id: "deterministic.affected" }, "det.affected", {
+      kind: "pytest",
+      selector_mode: "affected",
+    });
+
+    assert.equal(result.status, "NOT_REQUIRED");
+    assert.equal(result.failure_domain, null);
+    assert.equal(result.code, "AFFECTED_SCOPE_DEFERRED_TO_FULL");
+    assert.equal(result.pytest.not_required, true);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

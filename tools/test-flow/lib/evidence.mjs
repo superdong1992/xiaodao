@@ -479,11 +479,16 @@ function auditCandidateAgainstPlan(attemptRoot, candidate, failures) {
   for (const stage of candidate.stages ?? []) {
     const planned = plannedStages.find((item) => item.id === stage.id);
     if (!planned) continue;
+    const resultSourceMatches = validPlannedStageResultSource(
+      planned,
+      stage,
+      candidate.admission?.status,
+    );
     if (
       planned.producer_identity !== stage.producer_identity
       || planned.proof_identity !== stage.proof_identity
       || planned.performance_identity !== stage.performance_identity
-      || (planned.decision === "REUSE") !== (stage.result_source === "REUSED")
+      || !resultSourceMatches
     ) failures.push({ code: "CANDIDATE_PLAN_STAGE_IDENTITY_MISMATCH", stage_id: stage.id });
     if (stage.result_source === "EXECUTED") {
       const summaries = stage.gates ?? [];
@@ -510,6 +515,11 @@ function auditCandidateAgainstPlan(attemptRoot, candidate, failures) {
     stages: (candidate.stages ?? []).map((stage) => ({ id: stage.id, digest: stage.stage_receipt_digest })),
   }));
   if (candidate.candidate_input_digest !== expectedInputDigest) failures.push({ code: "CANDIDATE_INPUT_DIGEST_INVALID" });
+}
+
+export function validPlannedStageResultSource(planned, stage, admissionStatus) {
+  if (admissionStatus !== "ADMITTED") return stage.result_source === "NOT_EXECUTED";
+  return (planned.decision === "REUSE") === (stage.result_source === "REUSED");
 }
 
 function auditCandidateReceipts(attemptRoot, candidate) {

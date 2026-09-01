@@ -7,6 +7,7 @@
 
 | Goal | Track | 含义 |
 | --- | --- | --- |
+| `dev.quick` | `dev` | 框架自测、仓库静态检查和可安全缩小的受影响确定性测试；只提供快速反馈，不替代提交或发布前验证 |
 | `dev.default` | `dev` | 框架自测、仓库静态检查、受影响确定性测试和完整确定性测试；不调用真实模型 |
 | `dev.real` | `dev` | 在 `dev.default` 闭包之外，显式选择一个真实 Proof/Stage |
 | `dev.macos-codex-luna-methods` | `dev` | 原生 macOS 或密封 Ubuntu 22.04 中，用一次 Codex CLI + gpt-5.6-luna 调用生成并冻结 Methods package |
@@ -33,6 +34,18 @@ V8 manifest、Core verdict、调用/repair、usage、prompt/profile/tool policy 
 attempt、同一 source snapshot、同一 Core 和同一 production registration 的 P1/P2 PASS 收据。
 
 ## Dev 确定性测试
+
+日常迭代可以先运行快速检查：
+
+```sh
+./tools/test-flow/run.sh --track dev --goal dev.quick --plan-only
+./tools/test-flow/run.sh --track dev --goal dev.quick
+```
+
+`dev.quick` 只在受影响范围可以安全缩小时运行对应测试。如果选择范围达到完整套件的一半，结果会以
+`AFFECTED_SCOPE_REQUIRES_FULL` 收口，不会把 0 个测试记成 PASS；此时必须运行 `dev.default`。
+这条 quick → default 升级是预期控制流，不受同身份失败重试策略阻止，也不要求填写新的失败假设。
+`dev.quick` 是不完整的开发反馈，不得用于 Release、修复台账或源码快照验证。
 
 先看计划，再运行同一 Goal：
 

@@ -112,7 +112,8 @@ export function releaseImageValidationMode(platform = process.platform, formalRu
   return platform === "darwin" ? "sealed-darwin-cache" : "portable-exact-server-image";
 }
 
-export function retryRequirement(history, stageIdentities) {
+export function retryRequirement(history, stageIdentities, { supersededFailureCodes = [] } = {}) {
+  const superseded = new Set(supersededFailureCodes);
   const unresolvedStageIds = new Set(Object.keys(stageIdentities));
   for (const entry of [...history].reverse()) {
     for (const stage of entry.verdict.stages ?? []) {
@@ -122,6 +123,7 @@ export function retryRequirement(history, stageIdentities) {
       if (stage.status === "NOT_RUN" && stage.code === "PRIOR_STAGE_NOT_PASSING") continue;
       unresolvedStageIds.delete(stage.id);
       if (["PASS", "NOT_REQUIRED"].includes(stage.status)) continue;
+      if (superseded.has(stage.code)) continue;
       return {
         recommendation: "STOP",
         reason: "UNCHANGED_FAILED_IDENTITY",
@@ -661,7 +663,11 @@ export function buildRunPlan(repoRoot, options = {}) {
   }
 
   const selectedStageIdentities = Object.fromEntries(closure.stages.map((stage) => [stage.id, stageIdentities[stage.id]]));
-  const retry = retryRequirement(history, selectedStageIdentities);
+  const retry = retryRequirement(history, selectedStageIdentities, {
+    supersededFailureCodes: closure.stages.some((stage) => stage.id === "deterministic.full")
+      ? ["AFFECTED_SCOPE_REQUIRES_FULL"]
+      : [],
+  });
   if (retry.recommendation === "STOP") {
     const fields = config.policy.retry.same_identity_requires;
     const structured = fields.every((field) => field === "expected_evidence" ? Boolean(options.expectedEvidence) : Boolean(options[field]));

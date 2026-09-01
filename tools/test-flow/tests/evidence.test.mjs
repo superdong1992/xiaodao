@@ -13,7 +13,7 @@ import {
   writeExecutedStageReceipt,
   writeGateReceipt,
 } from "../lib/engine.mjs";
-import { allowedEmptyEventFiles, createAttempt, finalizeAttempt, recoverStageAuditProgress, requiredEventFiles, verifyVerdict } from "../lib/evidence.mjs";
+import { allowedEmptyEventFiles, createAttempt, finalizeAttempt, recoverStageAuditProgress, requiredEventFiles, validPlannedStageResultSource, verifyVerdict } from "../lib/evidence.mjs";
 import { EventWriter } from "../lib/events.mjs";
 import { FAILURE_DIAGNOSTIC_FIELDS, projectCandidateFailureDiagnostic, validFailureDiagnostic } from "../lib/failure-diagnostic.mjs";
 import { zeroUsage } from "../lib/usage.mjs";
@@ -33,6 +33,31 @@ const PRODUCTION_RUNTIME_DRIVER = path.join(TOOL_ROOT, "quick-validation", "code
 const RELEASE_CASE_ROOT = path.join(REPO_ROOT, "tests", "cases", "release", "rpc-timeout-anonymized");
 const STATUS_POLICY = { pass: 0, pass_with_warnings: 0, fail: 1, blocked: 2, error: 3 };
 const ZERO_USAGE = zeroUsage();
+
+test("admission-blocked plans require every Stage to remain not executed", () => {
+  const reusedPlan = { decision: "REUSE" };
+  const runPlan = { decision: "RUN" };
+  assert.equal(validPlannedStageResultSource(
+    reusedPlan,
+    { result_source: "NOT_EXECUTED" },
+    "BLOCKED",
+  ), true);
+  assert.equal(validPlannedStageResultSource(
+    runPlan,
+    { result_source: "NOT_EXECUTED" },
+    "BLOCKED",
+  ), true);
+  assert.equal(validPlannedStageResultSource(
+    reusedPlan,
+    { result_source: "REUSED" },
+    "BLOCKED",
+  ), false);
+  assert.equal(validPlannedStageResultSource(
+    reusedPlan,
+    { result_source: "REUSED" },
+    "ADMITTED",
+  ), true);
+});
 
 function python312Executable(candidate) {
   if (!candidate) return null;

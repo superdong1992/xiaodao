@@ -154,6 +154,14 @@ class ResolvedJobAssets:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class _ResolvedSkillSnapshot:
+    """One validated Methods Skill view reused within a single Job resolution."""
+
+    asset: ResolvedAsset
+    specialized: ResolvedSpecializedSkillV1
+
+
 def _invalid_asset(
     details: Iterable[ApplicationErrorDetail] = (),
 ) -> Exception:
@@ -321,15 +329,9 @@ def _load_entry_text(
 
 
 def _skill_index_entry(
-    resolved: ResolvedAsset,
+    specialized: ResolvedSpecializedSkillV1,
     expected_ref: VersionedRef,
 ) -> dict[str, Any]:
-    _root, specialized = _validate_resolved_asset(
-        resolved,
-        expected_ref,
-        AssetKind.DIAGNOSIS_SKILL,
-    )
-    assert specialized is not None
     registration = specialized.registration
     return {
         "ref": expected_ref.model_dump(mode="json"),
@@ -360,6 +362,23 @@ class RuntimeAssetResolver:
         _validate_resolved_asset(resolved, ref, kind)
         return resolved
 
+    def _resolve_skill(self, ref: VersionedRef) -> _ResolvedSkillSnapshot:
+        try:
+            resolved = self._catalog.resolve(ref)
+        except ApplicationPortError as exc:
+            if exc.error.code is ErrorCode.ASSET_VERSION_UNAVAILABLE:
+                raise _invalid_asset(exc.error.details) from None
+            raise _invalid_asset() from None
+        except Exception:
+            raise _invalid_asset() from None
+        _root, specialized = _validate_resolved_asset(
+            resolved,
+            ref,
+            AssetKind.DIAGNOSIS_SKILL,
+        )
+        assert specialized is not None
+        return _ResolvedSkillSnapshot(asset=resolved, specialized=specialized)
+
     def resolve_job(self, job: Job) -> ResolvedJobAssets:
         """Resolve every exact version and entry before reading Case state."""
 
@@ -370,9 +389,12 @@ class RuntimeAssetResolver:
             job.output_contract_ref,
             AssetKind.OUTPUT_CONTRACT,
         )
-        available_skills = tuple(
-            self._resolve(ref, AssetKind.DIAGNOSIS_SKILL)
+        available_skill_snapshots = tuple(
+            self._resolve_skill(ref)
             for ref in job.available_skill_refs
+        )
+        available_skills = tuple(
+            snapshot.asset for snapshot in available_skill_snapshots
         )
         skill = (
             None
@@ -405,9 +427,9 @@ class RuntimeAssetResolver:
                 {
                     "schema_version": 2,
                     "skills": [
-                        _skill_index_entry(resolved, ref)
-                        for resolved, ref in zip(
-                            available_skills,
+                        _skill_index_entry(snapshot.specialized, ref)
+                        for snapshot, ref in zip(
+                            available_skill_snapshots,
                             job.available_skill_refs,
                             strict=True,
                         )
