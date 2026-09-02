@@ -77,6 +77,7 @@ from problem_locator.domain.methods_state_v2 import (
     accept_specialist_evaluation_v2,
     fail_method_state_v2,
     finalize_reviewer_consensus_v2,
+    finalize_specialist_evaluation_v2,
     interrupt_method_state_v2,
     method_consensus_subreason_v2,
     record_model_execution_failure_v2,
@@ -782,6 +783,7 @@ class DiagnosisRuntime:
         context_builder: ContextBuilder | None = None,
         backend_test_limits: BackendExecutionLimits | None = None,
         generic_locator_executor: GenericLocatorExecutor | None = None,
+        evidence_v2_reviewer_enabled: bool = False,
     ) -> None:
         self._state_repository = state_repository
         self._resource_store = resource_store
@@ -794,6 +796,7 @@ class DiagnosisRuntime:
         self._backend_test_limits = backend_test_limits
         self._clock = clock
         self._id_generator = id_generator
+        self._evidence_v2_reviewer_enabled = evidence_v2_reviewer_enabled
         self._publisher = OutcomePublisher(execution_records, clock, id_generator)
         self._generic_locator_executor = generic_locator_executor or GenericLocatorExecutor(
             backend=backend,
@@ -2620,6 +2623,31 @@ class DiagnosisRuntime:
             if isinstance(evaluated, RuntimeExecutionReceipt):
                 return evaluated
             evaluated_state, evaluation = evaluated
+            if not self._evidence_v2_reviewer_enabled:
+                try:
+                    terminal_state = finalize_specialist_evaluation_v2(
+                        state=evaluated_state,
+                        evaluation=evaluation,
+                    )
+                except (TypeError, ValueError):
+                    return self._fail_methods_terminal_v2(
+                        job=job,
+                        workspace=workspace,
+                        graph=graph,
+                        plan=plan,
+                        state=evaluated_state,
+                        reason_code="SERVER_INVARIANT_VIOLATION",
+                        reason="The Specialist evaluation could not be finalized.",
+                        limitations=limitations,
+                    )
+                return self._finish_methods_terminal_v2(
+                    job=job,
+                    workspace=workspace,
+                    graph=graph,
+                    plan=plan,
+                    state=terminal_state,
+                    limitations=limitations,
+                )
             return self._finish_methods_specialist_handoff_v2(
                 job=job,
                 workspace=workspace,
@@ -2629,6 +2657,7 @@ class DiagnosisRuntime:
                 evaluation=evaluation,
                 limitations=limitations,
             )
+
     def _read_methods_reviewer_state_v2(
         self,
         *,

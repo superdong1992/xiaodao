@@ -37,7 +37,7 @@ import {
   loadReleaseCaseOracle,
 } from "./release-case.mjs";
 import {
-  METHODS_V2_CAPTURED_FILES,
+  methodsV2CapturedFiles,
   validateMethodsV2ExecutionRecords,
 } from "./methods-oracle.mjs";
 import {
@@ -1076,26 +1076,28 @@ export function validMethodsV2OracleEvidence(context, receipt, generatedSkill) {
     const gateOracle = loadReleaseCaseOracle(caseRoot);
     const scenario = inputs.scenarios.find((item) => item.scenario_id === inputs.journey_scenario);
     const scenarioOracle = gateOracle.scenarios.find((item) => item.scenario_id === inputs.journey_scenario);
-    if (!scenario || !scenarioOracle || receipt?.methods_v2?.schema_version !== 2) return false;
+    const evaluationMode = receipt?.methods_v2?.evaluation_mode;
+    if (!scenario || !scenarioOracle || receipt?.methods_v2?.schema_version !== 2 || evaluationMode !== "SPECIALIST_ONLY") return false;
     const methodsExpectation = generatedMethodsExpectation(context, generatedSkill, inputs, gateOracle, scenarioOracle);
     const stageRoot = path.join(context.attemptRoot, "payload", "stages", "journey.cross-job.diagnose");
-    const files = Object.fromEntries(Object.entries(METHODS_V2_CAPTURED_FILES).map(([key, filename]) => (
+    const files = Object.fromEntries(Object.entries(methodsV2CapturedFiles(evaluationMode)).map(([key, filename]) => (
       [key, fs.readFileSync(path.join(stageRoot, filename))]
     )));
-    const reviewerOutcome = JSON.parse(files.reviewer_outcome.toString("utf8"));
+    const sourceOutcome = JSON.parse(files.source_outcome.toString("utf8"));
+    const publicMethodsResult = sourceOutcome.methods_terminal_projection;
     validateEvidenceV2ReleaseScenarioGraph({
       sourceRoot: context.repoRoot,
       methods: methodsExpectation.methods,
       graph: JSON.parse(files.evidence_graph.toString("utf8")),
-      publicMethodsResult: reviewerOutcome.methods_terminal_projection,
+      publicMethodsResult,
     });
     const validated = validateMethodsV2ExecutionRecords({
+      evaluationMode,
       files,
       invocations: (receipt.invocations ?? []).filter((invocation) => ["DIAGNOSE", "REVIEW"].includes(invocation?.job_type)),
-      publicMethodsResult: reviewerOutcome.methods_terminal_projection,
+      publicMethodsResult,
       expected: {
         source_job_id: receipt.methods_v2.source_job_id,
-        reviewer_job_id: receipt.methods_v2.reviewer_job_id,
         case_id: receipt.methods_v2.case_id,
         skill_ref: {
           id: inputs.product_registration.runtime_ref_id,
@@ -1170,6 +1172,7 @@ export function materializeEvidenceV2CoreVerdict({
 
 export function materializeEvidenceV2ModelCert({
   certificationTarget,
+  evaluationMode = "SPECIALIST_ONLY",
   sourceSnapshotDigest,
   sourceSnapshotRoot,
   attemptRoot,
@@ -1181,6 +1184,7 @@ export function materializeEvidenceV2ModelCert({
   );
   const cert = buildEvidenceV2ModelCert({
     certificationTarget,
+    evaluationMode,
     sourceSnapshotDigest,
     sourceRoot: sourceSnapshotRoot,
     coreVerdictPath,
@@ -1191,6 +1195,7 @@ export function materializeEvidenceV2ModelCert({
 }
 
 export function materializeEvidenceV2ReleaseVerdict({
+  evaluationMode = "SPECIALIST_ONLY",
   sourceSnapshotDigest,
   sourceSnapshotRoot,
   artifactRoot,
@@ -1200,6 +1205,7 @@ export function materializeEvidenceV2ReleaseVerdict({
   outputRoot = artifactRoot,
 }) {
   const verdict = buildEvidenceV2ReleaseVerdict({
+    evaluationMode,
     sourceSnapshotDigest,
     sourceRoot: sourceSnapshotRoot,
     artifactRoot,
@@ -1229,6 +1235,7 @@ export function attachEvidenceV2ModelCert(result, {
     const coreVerdictPath = path.join(context.attemptRoot, ...EVIDENCE_V2_CORE_VERDICT_PATH.split("/"));
     validateEvidenceV2ModelCert(modelCert, {
       certificationTarget: gate.certification_target,
+      evaluationMode: gate.evaluation_mode,
       sourceSnapshotDigest: context.sourceSnapshotDigest,
       sourceRoot: context.sourceSnapshotRoot,
       coreVerdictPath,
@@ -1245,8 +1252,9 @@ export function attachEvidenceV2ModelCert(result, {
   }
 }
 
-function evidenceV2ReleaseVerdict(context) {
+function evidenceV2ReleaseVerdict(context, gate) {
   const coreVerdictPath = path.join(context.attemptRoot, ...EVIDENCE_V2_CORE_VERDICT_PATH.split("/"));
+  const blindReview = gate.evaluation_mode === "BLIND_CONSENSUS";
   const certPath = (stageId) => path.join(
     context.attemptRoot,
     "payload", "stages", stageId, "gates", stageId,
@@ -1254,12 +1262,13 @@ function evidenceV2ReleaseVerdict(context) {
   );
   try {
     const verdict = materializeEvidenceV2ReleaseVerdict({
+      evaluationMode: gate.evaluation_mode,
       sourceSnapshotDigest: context.sourceSnapshotDigest,
       sourceSnapshotRoot: context.sourceSnapshotRoot,
       artifactRoot: context.attemptRoot,
       coreVerdictPath,
-      p1ModelCertPath: certPath("real.macos-claude-deepseek-e2e"),
-      p2ModelCertPath: certPath("real.macos-codex-luna-e2e"),
+      p1ModelCertPath: certPath(blindReview ? "real.macos-claude-deepseek-blind-review-e2e" : "real.macos-claude-deepseek-e2e"),
+      p2ModelCertPath: certPath(blindReview ? "real.macos-codex-luna-blind-review-e2e" : "real.macos-codex-luna-e2e"),
       outputRoot: context.gateRoot,
     });
     return {
@@ -3239,9 +3248,9 @@ function macosCodexInvocationProjection(invocation, hardCaps, invocationClass) {
   };
 }
 
-async function runMacosCodexLunaGate(context, stage, { workflow }) {
+async function runMacosCodexLunaGate(context, stage, { workflow, evaluationMode = "SPECIALIST_ONLY" }) {
   const outputRoot = gateRoot(context, stage);
-  const scratchRoot = quickValidationScratchRoot(context, workflow === "methods" ? "macos-codex-luna-methods" : "macos-codex-luna-e2e");
+  const scratchRoot = quickValidationScratchRoot(context, workflow === "methods" ? "macos-codex-luna-methods" : stage.id);
   ensureDirectory(scratchRoot);
   let staged;
   let pythonEntry;
@@ -3258,7 +3267,7 @@ async function runMacosCodexLunaGate(context, stage, { workflow }) {
   } catch (error) {
     return { status: "BLOCKED", failure_domain: "INFRA", code: String(error?.message ?? "MACOS_CODEX_LUNA_INPUT_INVALID"), elapsed_seconds: 0 };
   }
-  const usageRoot = path.join(context.attemptRoot, "payload", "model-usage", workflow === "methods" ? "macos-codex-luna-methods" : "macos-codex-luna-e2e");
+  const usageRoot = path.join(context.attemptRoot, "payload", "model-usage", workflow === "methods" ? "macos-codex-luna-methods" : stage.id);
   const runner = path.join(context.sourceSnapshotRoot, "tools", "test-flow", "quick-validation", "codex-luna", "runtime", workflow === "methods" ? "macos-codex-luna-methods-runner.mjs" : "macos-codex-luna-e2e-runner.mjs");
   const common = [
     "--codex-entry", staged.stagedEntry,
@@ -3289,6 +3298,7 @@ async function runMacosCodexLunaGate(context, stage, { workflow }) {
       "--source-snapshot-digest", providerInputs.sourceSnapshotDigest,
       "--core-verdict", providerInputs.coreVerdictPath,
       "--scenario", providerInputs.scenario,
+      "--evaluation-mode", evaluationMode,
     ];
   const result = await runProcess({
     repoRoot: context.repoRoot,
@@ -3406,17 +3416,27 @@ export function validClaudeDeepseekInvocationLedger(planStage, ledger) {
 export function validEvidenceV2ProviderInvocationLedger(planStage, ledger) {
   if (!Array.isArray(planStage?.invocation_caps) || planStage.invocation_caps.length !== 1 || ledger?.status !== "PASS" || !Array.isArray(ledger.invocations)) return false;
   const declaration = planStage.invocation_caps[0];
-  if (declaration.min_count !== 2 || declaration.max_count !== 4 || declaration.normal_count !== 2 || declaration.repair_max_count !== 2) return false;
+  const blindConsensus = declaration.phases?.some((phase) => phase.startsWith("REVIEWER:")) === true;
+  const expectedCounts = blindConsensus
+    ? { min: 2, max: 4, normal: 2, repairs: 2 }
+    : { min: 1, max: 2, normal: 1, repairs: 1 };
+  if (declaration.min_count !== expectedCounts.min
+    || declaration.max_count !== expectedCounts.max
+    || declaration.normal_count !== expectedCounts.normal
+    || declaration.repair_max_count !== expectedCounts.repairs) return false;
   if (ledger.invocations.length < declaration.min_count || ledger.invocations.length > declaration.max_count) return false;
   const topology = ledger.invocations.map((invocation) => {
     const attempt = invocation?.evaluation_attempt ?? invocation?.attempt;
     return `${invocation?.role}:${attempt}`;
   }).join(",");
-  const legal = new Set([
+  const legal = new Set(blindConsensus ? [
     "SPECIALIST:PRIMARY,REVIEWER:PRIMARY",
     "SPECIALIST:PRIMARY,SPECIALIST:REPAIR,REVIEWER:PRIMARY",
     "SPECIALIST:PRIMARY,REVIEWER:PRIMARY,REVIEWER:REPAIR",
     "SPECIALIST:PRIMARY,SPECIALIST:REPAIR,REVIEWER:PRIMARY,REVIEWER:REPAIR",
+  ] : [
+    "SPECIALIST:PRIMARY",
+    "SPECIALIST:PRIMARY,SPECIALIST:REPAIR",
   ]);
   return legal.has(topology)
     && new Set(ledger.invocations.map((invocation) => invocation?.invocation_id)).size === ledger.invocations.length
@@ -3745,9 +3765,9 @@ export function providerRunnerFailureResult({
   };
 }
 
-async function runMacosClaudeDeepseekGate(context, stage, { workflow }) {
+async function runMacosClaudeDeepseekGate(context, stage, { workflow, evaluationMode = "SPECIALIST_ONLY" }) {
   const outputRoot = gateRoot(context, stage);
-  const scratchRoot = quickValidationScratchRoot(context, workflow === "methods" ? "macos-claude-deepseek-methods" : "macos-claude-deepseek-e2e");
+  const scratchRoot = quickValidationScratchRoot(context, workflow === "methods" ? "macos-claude-deepseek-methods" : stage.id);
   ensureDirectory(scratchRoot);
   let pythonEntry;
   let providerInputs = null;
@@ -3756,7 +3776,7 @@ async function runMacosClaudeDeepseekGate(context, stage, { workflow }) {
     if (workflow === "e2e") providerInputs = evidenceV2ProviderRuntimeInputs(context);
   }
   catch (error) { return { status: "BLOCKED", failure_domain: "INFRA", code: String(error?.message ?? "CLAUDE_DEEPSEEK_PYTHON_RUNTIME_MISSING"), elapsed_seconds: 0 }; }
-  const usageRoot = path.join(context.attemptRoot, "payload", "model-usage", workflow === "methods" ? "macos-claude-deepseek-methods" : "macos-claude-deepseek-e2e");
+  const usageRoot = path.join(context.attemptRoot, "payload", "model-usage", workflow === "methods" ? "macos-claude-deepseek-methods" : stage.id);
   const runner = path.join(context.sourceSnapshotRoot, "tools", "test-flow", "quick-validation", "claude-deepseek", "runtime", workflow === "methods" ? "claude-deepseek-methods-runner.mjs" : "claude-deepseek-e2e-runner.mjs");
   const common = [
     runner,
@@ -3786,6 +3806,7 @@ async function runMacosClaudeDeepseekGate(context, stage, { workflow }) {
     "--source-snapshot-digest", providerInputs.sourceSnapshotDigest,
     "--core-verdict", providerInputs.coreVerdictPath,
     "--scenario", providerInputs.scenario,
+    "--evaluation-mode", evaluationMode,
   ];
   const result = await runProcess({
     repoRoot: context.repoRoot,
@@ -3895,8 +3916,8 @@ async function crossJob(context, stage) {
   const laterExecutedJourney = context.plan.stages.slice(stageIndex + 1).some((candidate) =>
     candidate.decision === "RUN" && candidate.id.startsWith("journey.cross-job."));
   if (!laterExecutedJourney) adapterArguments.push("--terminal-after-stage");
-  const checkpointStage = stage.id === "journey.cross-job.diagnose" ? "journey.cross-job.review" : stage.id;
-  if (["journey.cross-job.route", "journey.cross-job.upload", "journey.cross-job.review", "journey.cross-job.publish-restart"].includes(checkpointStage)) {
+  const checkpointStage = stage.id;
+  if (["journey.cross-job.route", "journey.cross-job.upload", "journey.cross-job.diagnose", "journey.cross-job.publish-restart"].includes(checkpointStage)) {
     adapterArguments.push(
       "--checkpoint-output-source",
       path.join(context.attemptRoot, "payload", "stages", checkpointStage, "checkpoint-source.json"),
@@ -4008,38 +4029,6 @@ async function crossJob(context, stage) {
       generated_skill: receipt.generated_skill,
     },
   };
-}
-
-function reviewObservation(context) {
-  const partsRoot = path.join(context.attemptRoot, "payload", "events", "parts");
-  const streams = fs.existsSync(partsRoot)
-    ? fs.readdirSync(partsRoot).filter((name) => name.endsWith(".journey.ndjson")).sort()
-    : [];
-  if (streams.length === 0) return { status: "ERROR", failure_domain: "HARNESS", code: "REVIEW_EVENT_STREAM_MISSING", elapsed_seconds: 0 };
-  const events = streams.flatMap((name) => fs.readFileSync(path.join(partsRoot, name), "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line)));
-  const reviewEvents = events.filter((event) => event?.data?.job_type === "REVIEW" && typeof event.job_id === "string");
-  const jobIds = [...new Set(reviewEvents.map((event) => event.job_id))];
-  if (jobIds.length !== 1) return { status: "FAIL", failure_domain: "CONTRACT", code: "REVIEW_JOB_IDENTITY_AMBIGUOUS", elapsed_seconds: 0 };
-  const reviewJob = reviewEvents.filter((event) => event.job_id === jobIds[0]);
-  const required = ["job.pending_persisted", "job.claimed", "job.outcome.produced", "job.outcome.applied"];
-  const producerIds = [...new Set(reviewJob.map((event) => event.producer_id))];
-  const ordinals = required.map((type) => reviewJob.find((event) => event.event_type === type)?.seq ?? null);
-  const failure = reviewJob.some((event) => ["job.claim.failed", "job.outcome.rejected", "job.outcome.stale"].includes(event.event_type));
-  const queued = reviewJob.some((event) => ["job.queued", "job.queue.duplicate"].includes(event.event_type));
-  const ordered = producerIds.length === 1 && ordinals.every(Number.isInteger) && ordinals.every((value, index) => index === 0 || value > ordinals[index - 1]);
-  const receipt = {
-    schema_version: 2,
-    status: queued && ordered && !failure ? "PASS" : "FAIL",
-    review_job_id: jobIds[0],
-    observed_review_events: reviewJob.length,
-    producer_id: producerIds.length === 1 ? producerIds[0] : null,
-    queued,
-    ordered,
-    failure_observed: failure,
-  };
-  writeJsonSync(path.join(gateRoot(context, { id: "journey.cross-job.review" }), "review-observation.json"), receipt);
-  if (receipt.status !== "PASS") return { status: "FAIL", failure_domain: "CONTRACT", code: "REVIEW_OBSERVATION_INCOMPLETE", elapsed_seconds: 0 };
-  return { status: "PASS", failure_domain: null, code: null, elapsed_seconds: 0, review_job_id: jobIds[0], observed_review_events: reviewJob.length };
 }
 
 function realEnvironment(context, profile) {
@@ -4200,18 +4189,17 @@ export async function executeGate(context, stage, gateId, gate) {
     if (gate.adapter === "server-linux-capability") return serverLinuxCapability(scoped, stage, gate);
     if (gate.adapter === "macos-codex-luna-methods") return runMacosCodexLunaGate(scoped, stage, { workflow: "methods" });
     if (gate.adapter === "macos-codex-luna-e2e") {
-      const result = await runMacosCodexLunaGate(scoped, stage, { workflow: "e2e" });
+      const result = await runMacosCodexLunaGate(scoped, stage, { workflow: "e2e", evaluationMode: gate.evaluation_mode });
       return attachEvidenceV2ModelCert(result, { context, gate, gateRoot: root });
     }
     if (gate.adapter === "macos-claude-deepseek-methods") return runMacosClaudeDeepseekGate(scoped, stage, { workflow: "methods" });
     if (gate.adapter === "macos-claude-deepseek-e2e") {
-      const result = await runMacosClaudeDeepseekGate(scoped, stage, { workflow: "e2e" });
+      const result = await runMacosClaudeDeepseekGate(scoped, stage, { workflow: "e2e", evaluationMode: gate.evaluation_mode });
       return attachEvidenceV2ModelCert(result, { context, gate, gateRoot: root });
     }
-    if (gate.adapter === "evidence-v2-release-verdict") return evidenceV2ReleaseVerdict(scoped);
+    if (gate.adapter === "evidence-v2-release-verdict") return evidenceV2ReleaseVerdict(scoped, gate);
   }
   if (gate.kind === "cross-job-adapter") return crossJob(scoped, stage);
-  if (gate.kind === "observation" && gate.observation === "review-state-transition") return reviewObservation(scoped);
   return { status: "ERROR", failure_domain: "HARNESS", code: "GATE_EXECUTOR_NOT_IMPLEMENTED", elapsed_seconds: 0 };
 }
 

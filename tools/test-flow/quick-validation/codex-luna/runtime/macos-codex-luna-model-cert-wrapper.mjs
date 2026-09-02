@@ -38,8 +38,10 @@ const ROLE_CONFIG = Object.freeze({
 });
 
 export const CODEX_LUNA_MODEL_CERT_WRAPPER_VERSION = 1;
-export const CODEX_LUNA_MODEL_CERT_NORMAL_CALLS = 2;
-export const CODEX_LUNA_MODEL_CERT_MAX_CALLS = 4;
+export const CODEX_LUNA_MODEL_CERT_NORMAL_CALLS = 1;
+export const CODEX_LUNA_MODEL_CERT_MAX_CALLS = 2;
+export const CODEX_LUNA_MODEL_CERT_BLIND_REVIEW_NORMAL_CALLS = 2;
+export const CODEX_LUNA_MODEL_CERT_BLIND_REVIEW_MAX_CALLS = 4;
 
 class ModelCertWrapperError extends Error {
   constructor(code, message, details = {}) {
@@ -186,19 +188,31 @@ function claimInvocation(privateRoot, role, attempt) {
   const claims = fs.readdirSync(claimsRoot, { recursive: true, withFileTypes: true })
     .filter((entry) => entry.isDirectory() && ["primary", "repair"].includes(entry.name));
   requireWrapper(
-    claims.length <= CODEX_LUNA_MODEL_CERT_MAX_CALLS,
+    claims.length <= CODEX_LUNA_MODEL_CERT_BLIND_REVIEW_MAX_CALLS,
     "CODEX_LUNA_MODEL_CERT_CALL_LIMIT",
     "Evidence V2 model cert exceeded the four-call hard limit",
   );
   return claim;
 }
 
-export function readModelCertInvocationReceipts(usageRoot, { allowFailurePrefix = false } = {}) {
+export function readModelCertInvocationReceipts(
+  usageRoot,
+  {
+    allowFailurePrefix = false,
+    evaluationMode = "SPECIALIST_ONLY",
+  } = {},
+) {
+  requireWrapper(
+    ["SPECIALIST_ONLY", "BLIND_CONSENSUS"].includes(evaluationMode),
+    "CODEX_LUNA_MODEL_CERT_EVALUATION_MODE_INVALID",
+    "Model cert evaluation mode is invalid",
+  );
+  const blindConsensus = evaluationMode === "BLIND_CONSENSUS";
   const root = path.resolve(usageRoot);
   const order = [
     ["SPECIALIST", "PRIMARY", "specialist-primary.json", true],
     ["SPECIALIST", "REPAIR", "specialist-repair.json", false],
-    ["REVIEWER", "PRIMARY", "reviewer-primary.json", true],
+    ["REVIEWER", "PRIMARY", "reviewer-primary.json", blindConsensus],
     ["REVIEWER", "REPAIR", "reviewer-repair.json", false],
   ];
   let names;
@@ -207,7 +221,9 @@ export function readModelCertInvocationReceipts(usageRoot, { allowFailurePrefix 
   } catch {
     fail("CODEX_LUNA_MODEL_CERT_USAGE_ROOT_INVALID", "Model cert usage root is unavailable");
   }
-  const allowed = new Set(order.map(([, , name]) => name));
+  const allowed = new Set(order
+    .filter(([role]) => blindConsensus || role === "SPECIALIST")
+    .map(([, , name]) => name));
   requireWrapper(
     names.every((name) => allowed.has(name)),
     "CODEX_LUNA_MODEL_CERT_USAGE_FILE_UNEXPECTED",
@@ -238,14 +254,21 @@ export function readModelCertInvocationReceipts(usageRoot, { allowFailurePrefix 
     receipts.push(receipt);
   }
   const sequence = receipts.map((receipt) => `${receipt.role}:${receipt.attempt}`).join(",");
-  const legalPrefixes = new Set([
+  const specialistSequences = [
     "SPECIALIST:PRIMARY",
     "SPECIALIST:PRIMARY,SPECIALIST:REPAIR",
+  ];
+  const blindSequences = [
     "SPECIALIST:PRIMARY,REVIEWER:PRIMARY",
     "SPECIALIST:PRIMARY,SPECIALIST:REPAIR,REVIEWER:PRIMARY",
     "SPECIALIST:PRIMARY,REVIEWER:PRIMARY,REVIEWER:REPAIR",
     "SPECIALIST:PRIMARY,SPECIALIST:REPAIR,REVIEWER:PRIMARY,REVIEWER:REPAIR",
-  ]);
+  ];
+  const legalPrefixes = new Set(
+    blindConsensus
+      ? [...specialistSequences, ...blindSequences]
+      : specialistSequences,
+  );
   if (allowFailurePrefix) {
     requireWrapper(
       receipts.length === 0
@@ -257,10 +280,11 @@ export function readModelCertInvocationReceipts(usageRoot, { allowFailurePrefix 
     return receipts;
   }
   requireWrapper(
-    receipts.length >= CODEX_LUNA_MODEL_CERT_NORMAL_CALLS
-      && receipts.length <= CODEX_LUNA_MODEL_CERT_MAX_CALLS,
+    new Set(blindConsensus ? blindSequences : specialistSequences).has(sequence),
     "CODEX_LUNA_MODEL_CERT_CALL_COUNT_INVALID",
-    "Model cert must contain two normal calls and no more than four calls",
+    blindConsensus
+      ? "Blind model cert must contain both required role calls and at most one repair per role"
+      : "Specialist-only model cert must contain one required call and at most one repair",
   );
   requireWrapper(receipts.every((receipt) => receipt.status === "PASS"), "CODEX_LUNA_MODEL_CERT_USAGE_RECEIPT_INVALID", "Successful model certification requires only successful role calls");
   return receipts;

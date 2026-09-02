@@ -39,6 +39,7 @@ from problem_locator.domain.methods_state_v2 import (
     accept_specialist_evaluation_v2,
     fail_method_state_v2,
     finalize_reviewer_consensus_v2,
+    finalize_specialist_evaluation_v2,
     record_model_execution_failure_v2,
     record_protocol_error_v2,
     record_semantic_invalid_v2,
@@ -499,6 +500,76 @@ def test_specialist_early_terminal_maps_status_job_and_failure(
     assert PRIVATE_REASON_SENTINEL not in view.model_dump_json()
 
 
+def test_specialist_only_resolved_result_reaches_candidate_free_case(
+    tmp_path,
+) -> None:
+    source, _, graph, plan = _flow_inputs(tmp_path)
+    specialist = _role(plan, "SPECIALIST", ("CONFIRMED", "REJECTED"))
+    state = finalize_specialist_evaluation_v2(
+        state=start_method_state_v2(
+            case_id=source.case_id,
+            source_job_id=source.job_id,
+            evaluation_id=EVALUATION_ID,
+            plan=plan,
+        ),
+        evaluation=specialist,
+    )
+    terminal_result = _terminal_result(
+        state,
+        plan,
+        graph,
+        terminal_job_id=source.job_id,
+    )
+    outcome = build_methods_specialist_terminal_outcome_v2(
+        source,
+        outcome_id=EARLY_OUTCOME_ID,
+        terminal_state=state,
+        terminal_result=terminal_result,
+        plan=plan,
+        evidence=graph,
+        produced_at="2026-07-31T00:03:20.000Z",
+    )
+
+    assert validate_outcome_for_job(source, outcome) is outcome
+    assert outcome.methods_review_target is None
+    assert outcome.methods_reviewer_result is None
+    projection = outcome.methods_terminal_projection
+    assert projection is not None and projection.status == "RESOLVED"
+    assert projection.confirmed_evaluation_refs == (
+        plan.evaluations[0].evaluation_ref,
+    )
+    snapshot = snapshot_with_active(source)
+    request = trigger(
+        snapshot,
+        trigger_type=TriggerType.DIAGNOSIS_OUTCOME,
+        payload=DiagnosisOutcomeTriggerPayload(job_outcome=outcome),
+        continuation_resources=continuation(
+            incoming_outcome_id=outcome.outcome_id,
+            job=source,
+        ),
+        occurred_at=outcome.produced_at,
+    )
+    transition = DomainCoordinator().plan(snapshot, request)
+    assert not isinstance(transition, ApplicationError)
+    assert transition.target_case_status is CaseStatus.RESOLVED
+    assert transition.next_job_spec is None
+    target_state = apply_diagnosis_state_delta(
+        snapshot.case.diagnosis_state,
+        transition.accepted_state_delta,
+        evidence_ids_by_proposal_key={},
+    )
+    case = apply_transition_plan_to_case(
+        snapshot.case,
+        transition,
+        target_state,
+        created_job=None,
+        processed_at=outcome.produced_at,
+    )
+    assert case.methods_result == projection
+    assert case.final_result is None
+    assert case.diagnosis_state.candidate_conclusion is None
+
+
 @pytest.mark.parametrize(
     "reason_code",
     [
@@ -640,13 +711,13 @@ def test_unresolved_reason_must_belong_to_source_job_stage(tmp_path) -> None:
         validate_outcome_for_job(source, outcome)
 
 
-def test_specialist_early_terminal_cannot_resolve_without_reviewer(tmp_path) -> None:
+def test_specialist_terminal_rejects_a_reviewed_consensus_state(tmp_path) -> None:
     flow = _review_terminal(
         tmp_path,
         specialist_verdicts=("CONFIRMED", "REJECTED"),
         reviewer_verdicts=("CONFIRMED", "REJECTED"),
     )
-    with pytest.raises(ValueError, match="early"):
+    with pytest.raises(ValueError, match="specialized DIAGNOSE"):
         build_methods_specialist_terminal_outcome_v2(
             flow.source,
             outcome_id=EARLY_OUTCOME_ID,
@@ -1020,7 +1091,7 @@ def test_terminal_workflow_identity_rejects_cross_case_reuse(tmp_path) -> None:
         source,
         case_id=OTHER_CASE_ID,
     )
-    with pytest.raises(ValueError, match="different Case|early terminal"):
+    with pytest.raises(ValueError, match="specialized DIAGNOSE"):
         build_methods_specialist_terminal_outcome_v2(
             foreign_case_job,
             outcome_id=EARLY_OUTCOME_ID,
@@ -1032,7 +1103,7 @@ def test_terminal_workflow_identity_rejects_cross_case_reuse(tmp_path) -> None:
         )
 
     foreign_source_job = rebuild(source, job_id=OTHER_JOB_ID)
-    with pytest.raises(ValueError, match="early terminal"):
+    with pytest.raises(ValueError, match="specialized DIAGNOSE"):
         build_methods_specialist_terminal_outcome_v2(
             foreign_source_job,
             outcome_id=EARLY_OUTCOME_ID,

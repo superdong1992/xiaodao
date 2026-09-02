@@ -7,7 +7,8 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import {
-  METHODS_V2_CAPTURED_FILES,
+  METHODS_V2_BLIND_CONSENSUS_CAPTURED_FILES,
+  METHODS_V2_SPECIALIST_ONLY_CAPTURED_FILES,
   validateMethodsV2ExecutionRecords,
   validateMethodsV2RestartSnapshot,
 } from "../lib/methods-oracle.mjs";
@@ -48,7 +49,7 @@ function productionBundle() {
   });
   assert.equal(completed.status, 0, completed.stderr);
   const manifest = JSON.parse(fs.readFileSync(path.join(outputRoot, "bundle-manifest.json"), "utf8"));
-  const files = Object.fromEntries(Object.entries(METHODS_V2_CAPTURED_FILES).map(([key, filename]) => [
+  const files = Object.fromEntries(Object.entries(METHODS_V2_BLIND_CONSENSUS_CAPTURED_FILES).map(([key, filename]) => [
     key,
     fs.readFileSync(path.join(manifest.evidence_root, filename)),
   ]));
@@ -63,6 +64,7 @@ function productionBundle() {
       expected: manifest.expected,
       invocations: manifest.invocations,
       publicMethodsResult: manifest.public_methods_result,
+      evaluationMode: "BLIND_CONSENSUS",
     },
   };
   return productionTemplate;
@@ -74,7 +76,97 @@ function copyFixture(fixture) {
     expected: structuredClone(fixture.expected),
     invocations: structuredClone(fixture.invocations),
     publicMethodsResult: structuredClone(fixture.publicMethodsResult),
+    evaluationMode: fixture.evaluationMode,
   };
+}
+
+function prefixedRef(prefix, kind, value) {
+  return `${prefix}-${sha256Bytes(canonicalJson({ kind, ...value }))}`;
+}
+
+function specialistOnlyFixture(blindFixture) {
+  const fixture = copyFixture(blindFixture);
+  const sourceJob = JSON.parse(fixture.files.source_job.toString("utf8"));
+  const terminalState = JSON.parse(fixture.files.terminal_state.toString("utf8"));
+  const graph = JSON.parse(fixture.files.evidence_graph.toString("utf8"));
+  const plan = JSON.parse(fixture.files.evaluation_plan.toString("utf8"));
+  const limitations = JSON.parse(fixture.files.limitations.toString("utf8"));
+  const sourceOutcome = JSON.parse(fixture.files.source_outcome.toString("utf8"));
+  const sourceState = {
+    ...terminalState,
+    consensus: null,
+    reviewer_evaluation: null,
+    reviewer_protocol_failures: 0,
+  };
+  sourceState.state_ref = prefixedRef("state", "method-state-v2", {
+    case_id: sourceState.case_id,
+    source_job_id: sourceState.source_job_id,
+    evaluation_id: sourceState.evaluation_id,
+    plan_ref: sourceState.plan_ref,
+    evaluation_refs: sourceState.evaluation_refs,
+    status: sourceState.status,
+    current_role: sourceState.current_role,
+    specialist_protocol_failures: sourceState.specialist_protocol_failures,
+    reviewer_protocol_failures: sourceState.reviewer_protocol_failures,
+    specialist_evaluation: sourceState.specialist_evaluation,
+    reviewer_evaluation: sourceState.reviewer_evaluation,
+    consensus: sourceState.consensus,
+    reason_code: sourceState.reason_code,
+    diagnostic_id: sourceState.diagnostic_id,
+    diagnostic_evaluation_ref: sourceState.diagnostic_evaluation_ref,
+    reasons: sourceState.reasons,
+  });
+  const confirmed = sourceState.specialist_evaluation.evaluations.filter((item) => item.verdict === "CONFIRMED");
+  const confirmedRefs = confirmed.map((item) => item.evaluation_ref);
+  const byEvaluationRef = new Map(plan.evaluations.map((item) => [item.evaluation_ref, item]));
+  const confirmedMethods = confirmedRefs.map((ref) => byEvaluationRef.get(ref).method_id);
+  const confirmedEventRefs = confirmed.flatMap((item) => item.supporting_event_refs);
+  const eventByRef = new Map(graph.events.map((item) => [item.event_ref, item]));
+  const confirmedHitRefs = [...new Set(confirmedEventRefs.flatMap((ref) => eventByRef.get(ref).evidence_hit_refs))];
+  const evaluations = confirmed.map((item) => {
+    const planned = byEvaluationRef.get(item.evaluation_ref);
+    return {
+      evaluation_ref: item.evaluation_ref,
+      method_id: planned.method_id,
+      evidence_event_refs: item.supporting_event_refs,
+      evidence_hit_refs: [...new Set(item.supporting_event_refs.flatMap((ref) => eventByRef.get(ref).evidence_hit_refs))],
+      verdict: "CONFIRMED",
+    };
+  });
+  const resultRef = prefixedRef("result", "method-terminal-result-v2", {
+    case_id: sourceJob.case_id,
+    source_job_id: sourceJob.job_id,
+    terminal_job_id: sourceJob.job_id,
+    evaluation_id: sourceState.evaluation_id,
+    status: "RESOLVED",
+    plan_ref: plan.plan_ref,
+    evidence_graph_ref: graph.graph_ref,
+    reason_code: null,
+    diagnostic_id: sourceState.diagnostic_id,
+    diagnostic_evaluation_ref: null,
+    evaluations,
+    confirmed_evaluation_refs: confirmedRefs,
+    confirmed_method_ids: confirmedMethods,
+    confirmed_event_refs: confirmedEventRefs,
+    confirmed_hit_refs: confirmedHitRefs,
+    limitations: limitations.limitations,
+    reasons: [],
+  });
+  const projection = {
+    ...fixture.publicMethodsResult,
+    source_job_id: sourceJob.job_id,
+    result_ref: resultRef,
+  };
+  delete sourceOutcome.methods_review_target;
+  sourceOutcome.methods_terminal_projection = projection;
+  fixture.files.source_state = Buffer.from(canonicalJson(sourceState), "utf8");
+  fixture.files.source_outcome = Buffer.from(canonicalJson(sourceOutcome), "utf8");
+  fixture.files = Object.fromEntries(Object.keys(METHODS_V2_SPECIALIST_ONLY_CAPTURED_FILES).map((key) => [key, fixture.files[key]]));
+  fixture.expected.reviewer_job_id = null;
+  fixture.invocations = fixture.invocations.filter((item) => item.job_type === "DIAGNOSE");
+  fixture.publicMethodsResult = projection;
+  fixture.evaluationMode = "SPECIALIST_ONLY";
+  return fixture;
 }
 
 function mutateRecord(fixture, key, mutate) {
@@ -114,7 +206,36 @@ test("Methods V2 replay accepts the production scanner's Straße to STRASSE case
     summary.method_activation_markers_sha256,
     sha256Bytes(canonicalJson([{ method_id: "casefold-method", activation_markers: ["Straße request_id="] }])),
   );
-  assert.deepEqual(Object.keys(summary.record_sha256).sort(), Object.keys(METHODS_V2_CAPTURED_FILES).sort());
+  assert.deepEqual(Object.keys(summary.record_sha256).sort(), Object.keys(METHODS_V2_BLIND_CONSENSUS_CAPTURED_FILES).sort());
+
+  const caseView = {
+    case_id: summary.case_id,
+    status: "RESOLVED",
+    final_result: null,
+    unresolved_result: null,
+    generic_result: null,
+    generic_result_v2: null,
+    methods_result: fixture.publicMethodsResult,
+    artifacts: [],
+  };
+  assert.equal(validateMethodsV2RestartSnapshot({
+    caseView,
+    artifacts: [],
+    methodsSummary: summary,
+    restartedFiles: fixture.files,
+    evaluationMode: "BLIND_CONSENSUS",
+  }), true);
+});
+
+test("Methods V2 replay accepts the Specialist-only terminal source records and rejects Reviewer evidence", () => {
+  const fixture = specialistOnlyFixture(productionBundle().fixture);
+  const summary = validateMethodsV2ExecutionRecords(fixture);
+  assert.equal(summary.status, "PASS");
+  assert.equal(summary.evaluation_mode, "SPECIALIST_ONLY");
+  assert.equal(summary.reviewer_job_id, null);
+  assert.equal(summary.reviewer_repair_used, false);
+  assert.equal(summary.service_model_calls, 1);
+  assert.deepEqual(Object.keys(summary.record_sha256).sort(), Object.keys(METHODS_V2_SPECIALIST_ONLY_CAPTURED_FILES).sort());
 
   const caseView = {
     case_id: summary.case_id,
@@ -132,6 +253,24 @@ test("Methods V2 replay accepts the production scanner's Straße to STRASSE case
     methodsSummary: summary,
     restartedFiles: fixture.files,
   }), true);
+
+  const reviewerInvocation = copyFixture(fixture);
+  reviewerInvocation.invocations.push({
+    job_id: "00000000-0000-0000-0000-000000000099",
+    job_type: "REVIEW",
+    effective_model: "zero-model-role-double",
+  });
+  assert.throws(
+    () => validateMethodsV2ExecutionRecords(reviewerInvocation),
+    (error) => error.code === "METHODS_V2_INVOCATION_CARDINALITY",
+  );
+
+  const reviewerFile = copyFixture(fixture);
+  reviewerFile.files.reviewer_job = productionBundle().fixture.files.reviewer_job;
+  assert.throws(
+    () => validateMethodsV2ExecutionRecords(reviewerFile),
+    (error) => error.code === "METHODS_V2_FILES_INVALID",
+  );
 });
 
 test("Methods V2 replay rejects one-field mutations of a production-generated bundle", () => {
@@ -213,7 +352,13 @@ test("Methods V2 replay rejects one-field mutations of a production-generated bu
     artifacts: [],
   };
   assert.throws(
-    () => validateMethodsV2RestartSnapshot({ caseView: changedCase, artifacts: [], methodsSummary: summary, restartedFiles: baseline.files }),
+    () => validateMethodsV2RestartSnapshot({
+      caseView: changedCase,
+      artifacts: [],
+      methodsSummary: summary,
+      restartedFiles: baseline.files,
+      evaluationMode: "BLIND_CONSENSUS",
+    }),
     (error) => error.code === "METHODS_V2_RESTART_CASE_MISMATCH",
   );
 });

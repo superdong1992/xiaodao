@@ -94,7 +94,12 @@ test("provider certification runs its production Python driver before either rea
   assert.deepEqual(config.gates.gates["quick.codex-luna.model-cert-driver"].selectors, [
     "tools/test-flow/quick-validation/codex-luna/tests/test_macos_codex_luna_model_cert_driver.py",
   ]);
-  for (const stageId of ["real.macos-claude-deepseek-e2e", "real.macos-codex-luna-e2e"]) {
+  for (const stageId of [
+    "real.macos-claude-deepseek-e2e",
+    "real.macos-claude-deepseek-blind-review-e2e",
+    "real.macos-codex-luna-e2e",
+    "real.macos-codex-luna-blind-review-e2e",
+  ]) {
     const stage = config.stages.stages.find((item) => item.id === stageId);
     assert.ok(stage.gates.indexOf(stageId) > 0);
   }
@@ -121,14 +126,13 @@ test("restoring legacy provider evidence fails configuration validation", () => 
   }, (root) => loadConfiguration(REPO_ROOT, root)), (error) => error.code === "CONFIG_MODEL_CERT_EVIDENCE");
 });
 
-test("release.full has one isolated Wiki generation Gate followed by one fresh six-stage CrossJob closure without Codex coupling", () => {
+test("release.full has one isolated Wiki generation Gate followed by one fresh five-stage Specialist-only CrossJob closure", () => {
   const config = loadConfiguration(REPO_ROOT);
   const expected = [
     "journey.cross-job.environment",
     "journey.cross-job.route",
     "journey.cross-job.upload",
     "journey.cross-job.diagnose",
-    "journey.cross-job.review",
     "journey.cross-job.publish-restart",
   ];
   for (const client of ["windows", "macos", "linux"]) {
@@ -166,6 +170,24 @@ test("the formal Evidence V2 certification goal closes Core, one shared registra
   const p2 = release.stages.find((stage) => stage.id === "real.macos-codex-luna-e2e");
   assert.ok([p1, p2].every((stage) => stage.depends_on.includes("real.skill-generation")));
   assert.ok([p1, p2].every((stage) => stage.platforms.includes("linux")));
+  assert.equal(config.gates.gates["real.macos-claude-deepseek-e2e"].evaluation_mode, "SPECIALIST_ONLY");
+  assert.equal(config.gates.gates["real.macos-codex-luna-e2e"].evaluation_mode, "SPECIALIST_ONLY");
+});
+
+test("the optional blind-review certification has isolated P1, P2 and release aggregation stages", () => {
+  const config = loadConfiguration(REPO_ROOT);
+  const release = resolveGoalClosure(config, {
+    goalId: "release.evidence-v2-blind-review-certification",
+    track: "release",
+    client: "linux",
+  });
+  assert.deepEqual(release.stages.slice(-3).map((stage) => stage.id), [
+    "real.macos-claude-deepseek-blind-review-e2e",
+    "real.macos-codex-luna-blind-review-e2e",
+    "evidence-v2.blind-review-release-verdict",
+  ]);
+  assert.equal(config.gates.gates["real.macos-claude-deepseek-blind-review-e2e"].evaluation_mode, "BLIND_CONSENSUS");
+  assert.equal(config.gates.gates["real.macos-codex-luna-blind-review-e2e"].evaluation_mode, "BLIND_CONSENSUS");
 });
 
 test("repository Python compilation covers runtime support scripts used by Release", () => {

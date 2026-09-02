@@ -18,8 +18,10 @@ export const MACOS_CODEX_LUNA_CLIENT_PROMPT_VERSION = 2;
 export const MACOS_CODEX_LUNA_SCENARIOS = Object.freeze(["multiple-rpc-timeouts"]);
 export const STANDALONE_CODEX_LUNA_SCENARIOS = MACOS_CODEX_LUNA_SCENARIOS;
 export const MACOS_CODEX_LUNA_METHODS_CALLS = 1;
-export const MACOS_CODEX_LUNA_E2E_CALLS = 2;
-export const MACOS_CODEX_LUNA_E2E_MAX_CALLS = 4;
+export const MACOS_CODEX_LUNA_E2E_CALLS = 1;
+export const MACOS_CODEX_LUNA_E2E_MAX_CALLS = 2;
+export const MACOS_CODEX_LUNA_BLIND_REVIEW_E2E_CALLS = 2;
+export const MACOS_CODEX_LUNA_BLIND_REVIEW_E2E_MAX_CALLS = 4;
 export const MACOS_CODEX_LUNA_METHODS_TOKEN_LIMIT = 1_000_000;
 export const MACOS_CODEX_LUNA_METHODS_USD_LIMIT = 2;
 export const MACOS_CODEX_LUNA_E2E_TOKEN_LIMIT = 2_000_000;
@@ -39,6 +41,9 @@ export const MACOS_CODEX_LUNA_PUBLIC_TOOLS = Object.freeze([
   "problem_locator_list_artifacts",
 ]);
 export const MACOS_CODEX_LUNA_SUCCESS_INVOCATIONS = Object.freeze([
+  "SPECIALIST",
+]);
+export const MACOS_CODEX_LUNA_BLIND_REVIEW_SUCCESS_INVOCATIONS = Object.freeze([
   "SPECIALIST",
   "REVIEWER",
 ]);
@@ -137,13 +142,27 @@ function normalizedScenarioId(value) {
   return value;
 }
 
-export function macosCodexLunaE2EPhases(scenarioId) {
+export function macosCodexLunaE2EPhases(
+  scenarioId,
+  evaluationMode = "SPECIALIST_ONLY",
+) {
   normalizedScenarioId(scenarioId);
-  return MACOS_CODEX_LUNA_SUCCESS_INVOCATIONS;
+  requireE2E(
+    ["SPECIALIST_ONLY", "BLIND_CONSENSUS"].includes(evaluationMode),
+    "MACOS_CODEX_LUNA_EVALUATION_MODE_INVALID",
+    "Evidence V2 evaluation mode is invalid",
+    { evaluation_mode: evaluationMode },
+  );
+  return evaluationMode === "BLIND_CONSENSUS"
+    ? MACOS_CODEX_LUNA_BLIND_REVIEW_SUCCESS_INVOCATIONS
+    : MACOS_CODEX_LUNA_SUCCESS_INVOCATIONS;
 }
 
-export function macosCodexLunaE2ECallCount(scenarioId) {
-  return macosCodexLunaE2EPhases(scenarioId).length;
+export function macosCodexLunaE2ECallCount(
+  scenarioId,
+  evaluationMode = "SPECIALIST_ONLY",
+) {
+  return macosCodexLunaE2EPhases(scenarioId, evaluationMode).length;
 }
 
 export function scenarioPaths(sourceRoot, scenarioId) {
@@ -502,10 +521,14 @@ export function aggregateCodexUsage(invocations) {
   return aggregate;
 }
 
-export function auditModelInvocations(invocations, { workflow, scenarioId = null }) {
+export function auditModelInvocations(invocations, {
+  workflow,
+  scenarioId = null,
+  evaluationMode = "SPECIALIST_ONLY",
+}) {
   const expectedPhases = workflow === "methods"
     ? ["METHODS_BOOTSTRAP"]
-    : macosCodexLunaE2EPhases(scenarioId);
+    : macosCodexLunaE2EPhases(scenarioId, evaluationMode);
   const tokenLimit = workflow === "methods" ? MACOS_CODEX_LUNA_METHODS_TOKEN_LIMIT : MACOS_CODEX_LUNA_E2E_TOKEN_LIMIT;
   const costLimit = workflow === "methods" ? MACOS_CODEX_LUNA_METHODS_USD_LIMIT : MACOS_CODEX_LUNA_E2E_USD_LIMIT;
   requireE2E(Array.isArray(invocations) && invocations.length === expectedPhases.length, "MACOS_CODEX_LUNA_INVOCATION_COUNT_INVALID", "Model invocation count drifted", { workflow, expected: expectedPhases.length, actual: invocations?.length ?? null });

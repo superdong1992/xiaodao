@@ -150,6 +150,45 @@ test("Evidence V2 provider ledgers allow only S:P,[S:R],R:P,[R:R] with two norma
   assert.equal(validEvidenceV2ProviderInvocationLedger({ invocation_caps: [{ ...planStage.invocation_caps[0], max_count: 5 }] }, { status: "PASS", invocations: primary }), false);
 });
 
+test("Evidence V2 Specialist-only ledgers allow only S:P,[S:R] with one normal and two maximum calls", () => {
+  const planStage = {
+    invocation_caps: [{
+      class: "claude-deepseek-macos-e2e",
+      phases: ["SPECIALIST:PRIMARY", "SPECIALIST:REPAIR?"],
+      min_count: 1,
+      max_count: 2,
+      normal_count: 1,
+      repair_max_count: 1,
+    }],
+  };
+  const invocation = (ordinal, attempt) => ({
+    invocation_id: `call-${ordinal}`,
+    role: "SPECIALIST",
+    evaluation_attempt: attempt,
+    status: "PASS",
+    terminal: true,
+  });
+  const primary = [invocation(1, "PRIMARY")];
+  const repaired = [invocation(1, "PRIMARY"), invocation(2, "REPAIR")];
+
+  assert.equal(validEvidenceV2ProviderInvocationLedger(planStage, { status: "PASS", invocations: primary }), true);
+  assert.equal(validEvidenceV2ProviderInvocationLedger(planStage, { status: "PASS", invocations: repaired }), true);
+  assert.equal(validEvidenceV2ProviderInvocationLedger(planStage, {
+    status: "PASS",
+    invocations: [...primary, {
+      invocation_id: "call-2",
+      role: "REVIEWER",
+      evaluation_attempt: "PRIMARY",
+      status: "PASS",
+      terminal: true,
+    }],
+  }), false);
+  assert.equal(validEvidenceV2ProviderInvocationLedger(planStage, {
+    status: "PASS",
+    invocations: [invocation(1, "PRIMARY"), invocation(2, "PRIMARY")],
+  }), false);
+});
+
 function evidenceV2ProviderPlanStage(invocationClass) {
   const deepseek = invocationClass === "claude-deepseek-macos-e2e";
   return {

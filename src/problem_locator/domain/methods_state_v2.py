@@ -250,6 +250,80 @@ def accept_specialist_evaluation_v2(
     )
 
 
+def finalize_specialist_evaluation_v2(
+    *,
+    state: MethodStateV2,
+    evaluation: MethodRoleEvaluationV2,
+) -> MethodStateV2:
+    """Terminate one workflow directly from its validated Specialist result."""
+
+    _pending_role(state, "SPECIALIST")
+    _validate_role_evaluation(state, evaluation, role="SPECIALIST")
+    _validate_repair_attempt(state, evaluation, role="SPECIALIST")
+    first_unknown = next(
+        (
+            item.evaluation_ref
+            for item in evaluation.evaluations
+            if item.verdict == "UNKNOWN"
+        ),
+        None,
+    )
+    if first_unknown is not None:
+        reason_code = "INCOMPLETE_EVALUATION"
+        return _replace(
+            state,
+            status="UNRESOLVED",
+            current_role=None,
+            specialist_evaluation=evaluation,
+            reason_code=reason_code,
+            diagnostic_id=_diagnostic(
+                state,
+                status="UNRESOLVED",
+                reason_code=reason_code,
+                evaluation_ref=first_unknown,
+            ),
+            diagnostic_evaluation_ref=first_unknown,
+            reasons=(METHOD_PUBLIC_REASON_TEXT_V2[reason_code],),
+        )
+    if any(item.verdict == "CONFIRMED" for item in evaluation.evaluations):
+        return _replace(
+            state,
+            status="RESOLVED",
+            current_role=None,
+            specialist_evaluation=evaluation,
+            reason_code=None,
+            diagnostic_id=_diagnostic(
+                state,
+                status="RESOLVED",
+                reason_code=None,
+                evaluation_ref=None,
+            ),
+            diagnostic_evaluation_ref=None,
+            reasons=(),
+        )
+    reason_code = "NO_CONFIRMED_METHOD"
+    first_evaluation_ref = (
+        evaluation.evaluations[0].evaluation_ref
+        if evaluation.evaluations
+        else None
+    )
+    return _replace(
+        state,
+        status="UNRESOLVED",
+        current_role=None,
+        specialist_evaluation=evaluation,
+        reason_code=reason_code,
+        diagnostic_id=_diagnostic(
+            state,
+            status="UNRESOLVED",
+            reason_code=reason_code,
+            evaluation_ref=first_evaluation_ref,
+        ),
+        diagnostic_evaluation_ref=first_evaluation_ref,
+        reasons=(METHOD_PUBLIC_REASON_TEXT_V2[reason_code],),
+    )
+
+
 def record_protocol_error_v2(
     *,
     state: MethodStateV2,
@@ -581,6 +655,7 @@ __all__ = [
     "MethodConsensusSubreasonV2",
     "accept_specialist_evaluation_v2",
     "fail_method_state_v2",
+    "finalize_specialist_evaluation_v2",
     "finalize_reviewer_consensus_v2",
     "interrupt_method_state_v2",
     "method_consensus_subreason_v2",

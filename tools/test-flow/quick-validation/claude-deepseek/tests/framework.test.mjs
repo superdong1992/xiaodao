@@ -26,6 +26,10 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 test("standalone entry separates the historical Fast E2E matrix from the fixed model-cert scenario", () => {
   assert.equal(parseArguments(["--goal", METHODS_GOAL]).goal, METHODS_GOAL);
   assert.equal(parseArguments(["--goal", E2E_GOAL, "--scenario", "multiple-rpc-timeouts"]).goal, E2E_GOAL);
+  assert.equal(defaults(parseArguments(["--goal", E2E_GOAL])).evaluationMode, "SPECIALIST_ONLY");
+  assert.equal(defaults(parseArguments(["--goal", E2E_GOAL, "--evaluation-mode", "BLIND_CONSENSUS"])).evaluationMode, "BLIND_CONSENSUS");
+  assert.throws(() => parseArguments(["--goal", E2E_GOAL, "--evaluation-mode", "invalid"]), (error) => error.code === "CLAUDE_DEEPSEEK_EVALUATION_MODE_INVALID");
+  assert.throws(() => parseArguments(["--goal", FAST_E2E_GOAL, "--evaluation-mode", "BLIND_CONSENSUS"]), (error) => error.code === "CLAUDE_DEEPSEEK_EVALUATION_MODE_FORBIDDEN");
   assert.equal(parseArguments(["--goal", FAST_E2E_GOAL, "--scenario", "api-execution-overrun"]).goal, FAST_E2E_GOAL);
   assert.equal(parseArguments(["--goal", FAST_E2E_GOAL, "--all-scenarios"])["all-scenarios"], true);
   assert.throws(() => parseArguments(["--goal", E2E_GOAL, "--all-scenarios"]), (error) => error.code === "CLAUDE_DEEPSEEK_MODEL_CERT_SUITE_FORBIDDEN");
@@ -131,16 +135,20 @@ test("Fast E2E suite continues after an oracle failure and stops after an engine
   assert.equal(engineering.verdict.summary.not_run, 8);
 });
 
-test("Claude model-cert plan freezes normal two calls, one repair per role, and Core bindings", () => {
+test("Claude model-cert plan defaults to Specialist-only and preserves explicit blind consensus", () => {
   const options = defaults(parseArguments(["--goal", E2E_GOAL, "--scenario", "multiple-rpc-timeouts", "--plan-only"]));
   const plan = buildPlan(options);
   assert.equal(plan.mode, "model-cert");
+  assert.equal(plan.evaluation_mode, "SPECIALIST_ONLY");
   assert.deepEqual(plan.scenarios, ["multiple-rpc-timeouts"]);
-  assert.equal(plan.execution.expected_model_processes, 2);
-  assert.equal(plan.execution.model_process_hard_cap, 4);
+  assert.equal(plan.execution.expected_model_processes, 1);
+  assert.equal(plan.execution.model_process_hard_cap, 2);
   assert.equal(plan.execution.stage_wall_seconds, 2700);
   assert.equal(plan.execution.per_process_wall_seconds, 600);
-  assert.equal(plan.execution.per_scenario[0].model_process_hard_cap, 4);
+  assert.equal(plan.execution.per_scenario[0].model_process_hard_cap, 2);
+  assert.equal(plan.evidence.includes("methods-reviewer-job.json"), false);
+  assert.equal(plan.evidence.includes("methods-terminal-state-v2.json"), false);
+  assert.equal(plan.evidence.includes("methods-reviewer-outcome-v2.json"), false);
   assert.equal(plan.execution.source_snapshot, true);
   assert.match(plan.inputs.provider_runtime.tree_sha256, /^[0-9a-f]{64}$/u);
   assert.equal(Object.hasOwn(plan.inputs.registration_cache, "path"), true);
@@ -148,6 +156,14 @@ test("Claude model-cert plan freezes normal two calls, one repair per role, and 
   assert.ok(plan.admission.blockers.some((item) => item.code === "CLAUDE_DEEPSEEK_SOURCE_SNAPSHOT_REQUIRED"));
   assert.ok(plan.admission.blockers.some((item) => item.code === "CLAUDE_DEEPSEEK_CORE_VERDICT_REQUIRED"));
   assert.equal(plan.admission.blockers.some((item) => item.code === "EVIDENCE_V2_REAL_DIAGNOSIS_ADAPTER_UNMIGRATED"), false);
+
+  const blind = buildPlan(defaults(parseArguments(["--goal", E2E_GOAL, "--evaluation-mode", "BLIND_CONSENSUS", "--plan-only"])));
+  assert.equal(blind.evaluation_mode, "BLIND_CONSENSUS");
+  assert.equal(blind.execution.expected_model_processes, 2);
+  assert.equal(blind.execution.model_process_hard_cap, 4);
+  assert.equal(blind.evidence.includes("methods-reviewer-job.json"), true);
+  assert.equal(blind.evidence.includes("methods-terminal-state-v2.json"), true);
+  assert.equal(blind.evidence.includes("methods-reviewer-outcome-v2.json"), true);
 });
 
 test("P1 plan preserves a deferred shared registration root instead of falling back to cache", () => {
@@ -214,7 +230,10 @@ test("central engine marks only Claude Quick deterministic contract Gates as zer
   const source = fs.readFileSync(path.join(ROOT, "..", "..", "lib", "engine.mjs"), "utf8");
   assert.match(source, /const claudeQuickContractGate = gate\.kind === "node-test"/);
   assert.match(source, /if \(claudeQuickContractGate\) \{\s*actionResult = \{ \.\.\.actionResult, usage_complete: true, invocations: \[\] \};/s);
-  assert.match(source, /\["real\.macos-claude-deepseek-methods", "real\.macos-claude-deepseek-e2e"\]\.includes\(stage\.id\)/);
+  assert.match(
+    source,
+    /\["real\.macos-claude-deepseek-methods", "real\.macos-claude-deepseek-e2e", "real\.macos-claude-deepseek-blind-review-e2e"\]\.includes\(stage\.id\)/,
+  );
 });
 
 test("central Claude generation keeps its meta Skill while model cert consumes the shared registration", () => {

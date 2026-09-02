@@ -1,5 +1,7 @@
 # 实施计划书:Evidence V2 UNRESOLVED 归因基线
 
+> 历史范围说明：本文分析的是 Reviewer 已开启的 `BLIND_CONSENSUS` 样本。当前产品和主认证默认使用 `SPECIALIST_ONLY`；只有显式盲评认证或开启 Reviewer 的运行才适用下述双角色归因。
+
 > **交付对象**:实施 Agent(零上下文)。本文自包含,不要求阅读此前的对话。
 > **仓库**:`D:\code\xiaodao`,Problem Locator 5.0.0,Python 3.12。
 > **本轮范围**:只做 GOAL 0 → 1 → 2。**附录 A 是未来候选工作,本轮不得实施。**

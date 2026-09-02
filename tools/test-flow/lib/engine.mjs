@@ -36,8 +36,11 @@ import {
 export function validEvidenceV2CurrentAttemptCorePlan(plan) {
   const requiresCurrentCore = plan?.stages?.some((stage) => [
     "real.macos-codex-luna-e2e",
+    "real.macos-codex-luna-blind-review-e2e",
     "real.macos-claude-deepseek-e2e",
+    "real.macos-claude-deepseek-blind-review-e2e",
     "evidence-v2.release-verdict",
+    "evidence-v2.blind-review-release-verdict",
   ].includes(stage.id));
   if (!requiresCurrentCore) return true;
   const core = plan.stages.find((stage) => stage.id === "deterministic.full");
@@ -676,7 +679,7 @@ export async function runFlow(repoRoot, options) {
           actionResult = { status: "ERROR", failure_domain: "HARNESS", code: "GATE_EXCEPTION", elapsed_seconds: 0, error: redactError(error) };
         }
         const claudeQuickContractGate = gate.kind === "node-test"
-          && ["real.macos-claude-deepseek-methods", "real.macos-claude-deepseek-e2e"].includes(stage.id);
+          && ["real.macos-claude-deepseek-methods", "real.macos-claude-deepseek-e2e", "real.macos-claude-deepseek-blind-review-e2e"].includes(stage.id);
         if (claudeQuickContractGate) {
           actionResult = { ...actionResult, usage_complete: true, invocations: [] };
         } else {

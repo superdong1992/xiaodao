@@ -1339,15 +1339,15 @@ latestCaseRevision = ready.case_revision;
 | `MethodsTerminalProjectionV2` | `case_id` | `uuid` | 所属 Case，必须与外层 `CaseView.case_id` 相同。 |
 | `MethodsTerminalProjectionV2` | `source_job_id` | `uuid` | 产生终态投影的 Job。 |
 | `MethodsTerminalProjectionV2` | `result_ref` | `string` | 服务端终态结果引用，格式为 `^result-[0-9a-f]{64}$`。 |
-| `MethodsTerminalProjectionV2` | `evaluation_id` | `uuid` | Specialist 和 Reviewer 两个隔离 Job 共用的评估 ID。 |
+| `MethodsTerminalProjectionV2` | `evaluation_id` | `uuid` | 当前 Evidence V2 评估 ID；只有开启 Reviewer 时，才由 Specialist 和 Reviewer 两个隔离 Job 共用。 |
 | `MethodsTerminalProjectionV2` | `status` | `RESOLVED \| UNRESOLVED \| FAILED` | Methods V2 终态，必须与外层 `CaseView.status` 相同；不包含 `PARTIALLY_RESOLVED`。 |
 | `MethodsTerminalProjectionV2` | `plan_ref` | `string` | 完整 Evaluation Plan 的固定引用，格式为 `^plan-[0-9a-f]{64}$`。 |
 | `MethodsTerminalProjectionV2` | `evidence_graph_ref` | `string` | 服务端生成的 Evidence Graph 固定引用，格式为 `^graph-[0-9a-f]{64}$`。 |
 | `MethodsTerminalProjectionV2` | `reason_code` | `MethodsTerminalReasonCodeV2 \| null` | `RESOLVED` 时为 `null`；`UNRESOLVED` 或 `FAILED` 时给出与状态匹配的稳定原因码。 |
 | `MethodsTerminalProjectionV2` | `diagnostic_id` | `string` | 稳定诊断 ID，格式为 `^diag-[0-9a-f]{64}$`；用于关联公开终态和执行记录。 |
 | `MethodsTerminalProjectionV2` | `diagnostic_evaluation_ref` | `string \| null` | 与本次终态诊断直接关联的 evaluation 引用；没有单一关联项时为 `null`，非空格式为 `^eval-[0-9a-f]{64}$`。 |
-| `MethodsTerminalProjectionV2` | `confirmed_evaluation_refs` | `string[]` | 双方一致确认的 evaluation 引用，格式为 `^eval-[0-9a-f]{64}$`；顺序与 `confirmed_method_ids` 一一对应。 |
-| `MethodsTerminalProjectionV2` | `confirmed_method_ids` | `string[]` | 双方一致确认的 method ID，格式为 `^[a-z0-9]+(?:-[a-z0-9]+)*$`；顺序与 `confirmed_evaluation_refs` 一一对应。 |
+| `MethodsTerminalProjectionV2` | `confirmed_evaluation_refs` | `string[]` | 当前裁决路径确认的 evaluation 引用，格式为 `^eval-[0-9a-f]{64}$`；顺序与 `confirmed_method_ids` 一一对应。单评取 Specialist 结果，盲评取双角色共识。 |
+| `MethodsTerminalProjectionV2` | `confirmed_method_ids` | `string[]` | 当前裁决路径确认的 method ID，格式为 `^[a-z0-9]+(?:-[a-z0-9]+)*$`；顺序与 `confirmed_evaluation_refs` 一一对应。 |
 | `MethodsTerminalProjectionV2` | `confirmed_event_refs` | `string[]` | 已确认 evaluation 对应的 Evidence event 引用，格式为 `^event-[0-9a-f]{64}$`。 |
 | `MethodsTerminalProjectionV2` | `confirmed_hit_refs` | `string[]` | 已确认 evaluation 对应的 Evidence hit 引用，格式为 `^hit-[0-9a-f]{64}$`。 |
 | `MethodsTerminalProjectionV2` | `limitations` | `text[]` | 冻结证据采集阶段已知的限制；任何 Methods V2 终态都应保留并展示。 |
@@ -1421,7 +1421,7 @@ Graph/Plan 生成前的 `FAILED` 不属于 `MethodsTerminalProjectionV2`，因�
 | `REVIEWER_MODEL_EXECUTION_FAILED` | `UNRESOLVED` | Reviewer 评估未完成。 |
 | `SPECIALIST_REVIEWER_DISAGREEMENT` | `UNRESOLVED` | Specialist 与 Reviewer 对至少一项 evaluation 的结论不一致。 |
 | `INCOMPLETE_EVALUATION` | `UNRESOLVED` | 至少一项 evaluation 的结论仍为 `UNKNOWN`。 |
-| `NO_CONFIRMED_METHOD` | `UNRESOLVED` | 没有 method 获得双方一致的 `CONFIRMED` 结论。 |
+| `NO_CONFIRMED_METHOD` | `UNRESOLVED` | 当前裁决路径中没有 method 获得 `CONFIRMED` 结论。 |
 | `NO_MATCHING_METHOD_EVIDENCE` | `UNRESOLVED` | 已加载 method 中没有匹配到证据的项。 |
 | `RESOURCE_SNAPSHOT_DRIFT` | `FAILED` | 评估完成前，冻结的资源快照发生变化。 |
 | `SERVER_INVARIANT_VIOLATION` | `FAILED` | 服务端未能保持 Evidence V2 的机械不变量。 |

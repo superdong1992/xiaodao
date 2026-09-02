@@ -1,4 +1,8 @@
 import { canonicalJson, sha256Bytes } from "./util.mjs";
+import {
+  EVIDENCE_V2_DEFAULT_EVALUATION_MODE,
+  isEvidenceV2EvaluationMode,
+} from "../../validation/evidence-v2-evaluation-mode.mjs";
 
 const SHA256 = /^[a-f0-9]{64}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -54,7 +58,16 @@ const PUBLIC_RESULT_FIELDS = Object.freeze([
   "schema_version", "source_job_id", "status",
 ]);
 
-export const METHODS_V2_CAPTURED_FILES = Object.freeze({
+export const METHODS_V2_SPECIALIST_ONLY_CAPTURED_FILES = Object.freeze({
+  source_job: "methods-source-job.json",
+  evidence_graph: "methods-evidence-graph-v2.json",
+  evaluation_plan: "methods-evaluation-plan-v2.json",
+  limitations: "methods-limitations-v2.json",
+  source_state: "methods-source-state-v2.json",
+  source_outcome: "methods-source-outcome-v2.json",
+});
+
+export const METHODS_V2_BLIND_CONSENSUS_CAPTURED_FILES = Object.freeze({
   source_job: "methods-source-job.json",
   reviewer_job: "methods-reviewer-job.json",
   evidence_graph: "methods-evidence-graph-v2.json",
@@ -65,6 +78,20 @@ export const METHODS_V2_CAPTURED_FILES = Object.freeze({
   terminal_state: "methods-terminal-state-v2.json",
   reviewer_outcome: "methods-reviewer-outcome-v2.json",
 });
+
+// Backward-compatible name follows the default evaluation mode.
+export const METHODS_V2_CAPTURED_FILES = METHODS_V2_SPECIALIST_ONLY_CAPTURED_FILES;
+
+export function methodsV2CapturedFiles(evaluationMode = EVIDENCE_V2_DEFAULT_EVALUATION_MODE) {
+  requireOracle(
+    isEvidenceV2EvaluationMode(evaluationMode),
+    "METHODS_V2_EVALUATION_MODE_INVALID",
+    "Evidence V2 evaluation mode is invalid",
+  );
+  return evaluationMode === "SPECIALIST_ONLY"
+    ? METHODS_V2_SPECIALIST_ONLY_CAPTURED_FILES
+    : METHODS_V2_BLIND_CONSENSUS_CAPTURED_FILES;
+}
 
 export class MethodsOracleError extends Error {
   constructor(code, message) {
@@ -147,11 +174,18 @@ function compareBusiness(left, right) {
   return 0;
 }
 
-function expectedMethodMap(expected) {
+function expectedMethodMap(expected, evaluationMode) {
   requireOracle(isPlainObject(expected), "METHODS_V2_EXPECTATION_INVALID", "Evidence V2 expectation must be an object");
-  for (const field of ["source_job_id", "reviewer_job_id", "case_id"]) {
+  for (const field of ["source_job_id", "case_id"]) {
     requireOracle(UUID.test(expected[field] ?? ""), "METHODS_V2_EXPECTATION_INVALID", `Expected ${field} is invalid`);
   }
+  requireOracle(
+    evaluationMode === "BLIND_CONSENSUS"
+      ? UUID.test(expected.reviewer_job_id ?? "")
+      : expected.reviewer_job_id === null || expected.reviewer_job_id === undefined,
+    "METHODS_V2_EXPECTATION_INVALID",
+    "Expected reviewer_job_id does not match the evaluation mode",
+  );
   exactKeys(expected.skill_ref, ["content_hash", "id", "version"], "METHODS_V2_EXPECTATION_INVALID", "Expected Skill ref");
   requireOracle(
     typeof expected.skill_ref.id === "string" && expected.skill_ref.id.length > 0
@@ -510,7 +544,74 @@ function validateStateBase(state, plan, expected) {
   );
 }
 
-function validateJobAndOutcomes({ sourceJob, reviewerJob, sourceOutcome, reviewerOutcome, sourceState, terminalState, graph, plan, expected }) {
+function validateSpecialistOnlyJobAndOutcome({ sourceJob, sourceOutcome, sourceState, graph, plan, expected }) {
+  requireOracle(
+    sourceJob.job_id === expected.source_job_id && sourceJob.case_id === expected.case_id
+      && sourceJob.job_type === "DIAGNOSE" && sourceJob.diagnosis_mode === "SPECIALIZED"
+      && canonicalJson(sourceJob.skill_ref) === canonicalJson(expected.skill_ref),
+    "METHODS_V2_SOURCE_JOB_MISMATCH",
+    "Source Job does not match the production Methods identity",
+  );
+  const projection = sourceOutcome.methods_terminal_projection;
+  requireOracle(
+    sourceOutcome.job_id === expected.source_job_id && sourceOutcome.case_id === expected.case_id
+      && sourceOutcome.job_type === "DIAGNOSE" && sourceOutcome.result_type === "COMPLETED"
+      && sourceOutcome.payload === null && sourceOutcome.error === null && sourceOutcome.decision_audit === null
+      && Array.isArray(sourceOutcome.consumed_evidence_refs) && sourceOutcome.consumed_evidence_refs.length === 0
+      && Array.isArray(sourceOutcome.proposed_evidence) && sourceOutcome.proposed_evidence.length === 0
+      && Array.isArray(sourceOutcome.proposed_artifacts) && sourceOutcome.proposed_artifacts.length === 0
+      && (sourceOutcome.methods_review_target === null || sourceOutcome.methods_review_target === undefined)
+      && (sourceOutcome.methods_reviewer_result === null || sourceOutcome.methods_reviewer_result === undefined)
+      && isPlainObject(projection),
+    "METHODS_V2_SOURCE_OUTCOME_MISMATCH",
+    "Source Outcome is not the direct Specialist terminal outcome",
+  );
+
+  validateStateBase(sourceState, plan, expected);
+  const specialist = validateRoleEvaluation(sourceState.specialist_evaluation, "SPECIALIST", plan);
+  const confirmed = specialist.evaluations.filter((item) => item.verdict === "CONFIRMED");
+  const confirmedRefs = confirmed.map((item) => item.evaluation_ref);
+  const byRef = new Map(plan.evaluations.map((item) => [item.evaluation_ref, item]));
+  const confirmedMethods = confirmedRefs.map((ref) => byRef.get(ref).method_id);
+  const confirmedEventRefs = confirmed.flatMap((item) => item.supporting_event_refs);
+  if (expected.method_verdicts !== undefined) {
+    const actualVerdicts = specialist.evaluations.map((item) => ({
+      method_id: byRef.get(item.evaluation_ref).method_id,
+      verdict: item.verdict,
+    }));
+    requireOracle(
+      canonicalJson(actualVerdicts) === canonicalJson(expected.method_verdicts),
+      "METHODS_V2_METHOD_VERDICTS_MISMATCH",
+      "Specialist verdicts differ from the explicit semantic oracle",
+    );
+  }
+  requireOracle(
+    sourceState.status === "RESOLVED" && sourceState.current_role === null
+      && sourceState.reason_code === null && sourceState.diagnostic_evaluation_ref === null
+      && sourceState.reasons.length === 0 && DIAGNOSTIC_ID.test(sourceState.diagnostic_id ?? "")
+      && sourceState.specialist_protocol_failures === (specialist.repair_used ? 1 : 0)
+      && sourceState.reviewer_protocol_failures === 0
+      && sourceState.reviewer_evaluation === null && sourceState.consensus === null
+      && specialist.evaluations.every((item) => item.verdict !== "UNKNOWN")
+      && confirmed.length > 0
+      && canonicalJson(confirmedMethods) === canonicalJson(expected.confirmed_method_ids),
+    "METHODS_V2_SPECIALIST_TERMINAL_INVALID",
+    "Specialist evaluation is not the required complete resolved terminal state",
+  );
+  const diagnostic = prefixedRef("diag", "method-diagnostic-v2", {
+    case_id: sourceState.case_id,
+    source_job_id: sourceState.source_job_id,
+    evaluation_id: sourceState.evaluation_id,
+    plan_ref: sourceState.plan_ref,
+    status: sourceState.status,
+    reason_code: sourceState.reason_code,
+    evaluation_ref: sourceState.diagnostic_evaluation_ref,
+  });
+  requireOracle(sourceState.diagnostic_id === diagnostic, "METHODS_V2_DIAGNOSTIC_ID_MISMATCH", "Terminal diagnostic ID is not stable");
+  return { specialist, reviewer: null, confirmedRefs, confirmedMethods, confirmedEventRefs, projection };
+}
+
+function validateBlindConsensusJobAndOutcomes({ sourceJob, reviewerJob, sourceOutcome, reviewerOutcome, sourceState, terminalState, graph, plan, expected }) {
   requireOracle(
     sourceJob.job_id === expected.source_job_id && sourceJob.case_id === expected.case_id
       && sourceJob.job_type === "DIAGNOSE" && sourceJob.diagnosis_mode === "SPECIALIZED"
@@ -631,7 +732,7 @@ function validateJobAndOutcomes({ sourceJob, reviewerJob, sourceOutcome, reviewe
   return { specialist, reviewer, confirmedRefs, confirmedMethods, confirmedEventRefs, projection };
 }
 
-function validatePublicProjection({ projection, publicMethodsResult, terminalState, graph, plan, limitations, expected, confirmedRefs, confirmedMethods, confirmedEventRefs }) {
+function validatePublicProjection({ projection, publicMethodsResult, terminalState, terminalJobId, graph, plan, limitations, expected, confirmedRefs, confirmedMethods, confirmedEventRefs }) {
   exactKeys(projection, PUBLIC_RESULT_FIELDS, "METHODS_V2_PUBLIC_FIELDS_INVALID", "Public Methods result");
   const confirmedPlan = confirmedRefs.map((ref) => plan.evaluations.find((item) => item.evaluation_ref === ref));
   const eventByRef = new Map(graph.events.map((item) => [item.event_ref, item]));
@@ -656,7 +757,7 @@ function validatePublicProjection({ projection, publicMethodsResult, terminalSta
   const resultRef = prefixedRef("result", "method-terminal-result-v2", {
     case_id: expected.case_id,
     source_job_id: expected.source_job_id,
-    terminal_job_id: expected.reviewer_job_id,
+    terminal_job_id: terminalJobId,
     evaluation_id: terminalState.evaluation_id,
     status: "RESOLVED",
     plan_ref: plan.plan_ref,
@@ -674,7 +775,7 @@ function validatePublicProjection({ projection, publicMethodsResult, terminalSta
   });
   requireOracle(
     projection.schema_version === 2 && projection.case_id === expected.case_id
-      && projection.source_job_id === expected.reviewer_job_id && projection.status === "RESOLVED"
+      && projection.source_job_id === terminalJobId && projection.status === "RESOLVED"
       && RESULT_REF.test(projection.result_ref ?? "") && projection.result_ref === resultRef
       && projection.evaluation_id === terminalState.evaluation_id
       && projection.plan_ref === plan.plan_ref && projection.evidence_graph_ref === graph.graph_ref
@@ -693,29 +794,45 @@ function validatePublicProjection({ projection, publicMethodsResult, terminalSta
   return resultRef;
 }
 
-function validateInvocations(invocations, expected, roles) {
+function validateInvocations(invocations, expected, roles, evaluationMode) {
   requireOracle(Array.isArray(invocations), "METHODS_V2_INVOCATIONS_INVALID", "Service invocations are missing");
   const source = invocations.filter((item) => item.job_id === expected.source_job_id && item.job_type === "DIAGNOSE");
   const reviewer = invocations.filter((item) => item.job_id === expected.reviewer_job_id && item.job_type === "REVIEW");
   const expectedSourceCalls = roles.specialist.repair_used ? 2 : 1;
-  const expectedReviewerCalls = roles.reviewer.repair_used ? 2 : 1;
+  const expectedReviewerCalls = evaluationMode === "BLIND_CONSENSUS"
+    ? (roles.reviewer.repair_used ? 2 : 1)
+    : 0;
   requireOracle(
     invocations.length === source.length + reviewer.length
       && source.length === expectedSourceCalls && reviewer.length === expectedReviewerCalls
-      && invocations.length >= 2 && invocations.length <= 4
+      && invocations.length >= (evaluationMode === "SPECIALIST_ONLY" ? 1 : 2)
+      && invocations.length <= (evaluationMode === "SPECIALIST_ONLY" ? 2 : 4)
       && invocations.every((item) => typeof item.effective_model === "string" && item.effective_model.length > 0)
       && new Set(invocations.map((item) => item.effective_model)).size === 1,
     "METHODS_V2_INVOCATION_CARDINALITY",
-    "Specialist and Reviewer calls do not match the one-repair-per-role contract",
+    "Service calls do not match the evaluation-mode topology",
   );
 }
 
-export function validateMethodsV2ExecutionRecords({ files, expected, invocations, publicMethodsResult }) {
-  const methods = expectedMethodMap(expected);
+export function validateMethodsV2ExecutionRecords({
+  files,
+  expected,
+  invocations,
+  publicMethodsResult,
+  evaluationMode = EVIDENCE_V2_DEFAULT_EVALUATION_MODE,
+}) {
+  requireOracle(
+    isEvidenceV2EvaluationMode(evaluationMode),
+    "METHODS_V2_EVALUATION_MODE_INVALID",
+    "Evidence V2 evaluation mode is invalid",
+  );
+  const methods = expectedMethodMap(expected, evaluationMode);
   requireOracle(isPlainObject(files), "METHODS_V2_FILES_INVALID", "Evidence V2 captured files are missing");
   const documents = {};
-  for (const key of Object.keys(METHODS_V2_CAPTURED_FILES)) {
-    documents[key] = parseObject(files[key], METHODS_V2_CAPTURED_FILES[key]);
+  const capturedFiles = methodsV2CapturedFiles(evaluationMode);
+  exactKeys(files, Object.keys(capturedFiles), "METHODS_V2_FILES_INVALID", "Evidence V2 captured files");
+  for (const [key, filename] of Object.entries(capturedFiles)) {
+    documents[key] = parseObject(files[key], filename);
   }
   const graph = documents.evidence_graph.parsed;
   const plan = documents.evaluation_plan.parsed;
@@ -723,21 +840,37 @@ export function validateMethodsV2ExecutionRecords({ files, expected, invocations
   const indexes = validateEvidenceGraph(graph, expected, methods);
   validateEvaluationPlan(plan, graph, indexes);
   validateLimitations(limitations, graph, plan, expected);
-  const linked = validateJobAndOutcomes({
-    sourceJob: documents.source_job.parsed,
-    reviewerJob: documents.reviewer_job.parsed,
-    sourceOutcome: documents.source_outcome.parsed,
-    reviewerOutcome: documents.reviewer_outcome.parsed,
-    sourceState: documents.source_state.parsed,
-    terminalState: documents.terminal_state.parsed,
-    graph,
-    plan,
-    expected,
-  });
+  const linked = evaluationMode === "SPECIALIST_ONLY"
+    ? validateSpecialistOnlyJobAndOutcome({
+      sourceJob: documents.source_job.parsed,
+      sourceOutcome: documents.source_outcome.parsed,
+      sourceState: documents.source_state.parsed,
+      graph,
+      plan,
+      expected,
+    })
+    : validateBlindConsensusJobAndOutcomes({
+      sourceJob: documents.source_job.parsed,
+      reviewerJob: documents.reviewer_job.parsed,
+      sourceOutcome: documents.source_outcome.parsed,
+      reviewerOutcome: documents.reviewer_outcome.parsed,
+      sourceState: documents.source_state.parsed,
+      terminalState: documents.terminal_state.parsed,
+      graph,
+      plan,
+      expected,
+    });
+  const terminalState = evaluationMode === "SPECIALIST_ONLY"
+    ? documents.source_state.parsed
+    : documents.terminal_state.parsed;
+  const terminalJobId = evaluationMode === "SPECIALIST_ONLY"
+    ? expected.source_job_id
+    : expected.reviewer_job_id;
   const resultRef = validatePublicProjection({
     projection: linked.projection,
     publicMethodsResult,
-    terminalState: documents.terminal_state.parsed,
+    terminalState,
+    terminalJobId,
     graph,
     plan,
     limitations,
@@ -746,18 +879,19 @@ export function validateMethodsV2ExecutionRecords({ files, expected, invocations
     confirmedMethods: linked.confirmedMethods,
     confirmedEventRefs: linked.confirmedEventRefs,
   });
-  validateInvocations(invocations, expected, linked);
+  validateInvocations(invocations, expected, linked, evaluationMode);
   return {
     schema_version: 2,
+    evaluation_mode: evaluationMode,
     status: "PASS",
     case_id: expected.case_id,
     source_job_id: expected.source_job_id,
-    reviewer_job_id: expected.reviewer_job_id,
+    reviewer_job_id: evaluationMode === "BLIND_CONSENSUS" ? expected.reviewer_job_id : null,
     graph_ref: graph.graph_ref,
     plan_ref: plan.plan_ref,
-    evaluation_id: documents.terminal_state.parsed.evaluation_id,
+    evaluation_id: terminalState.evaluation_id,
     result_ref: resultRef,
-    diagnostic_id: documents.terminal_state.parsed.diagnostic_id,
+    diagnostic_id: terminalState.diagnostic_id,
     confirmed_method_ids: linked.confirmedMethods,
     method_activation_markers_sha256: sha256Bytes(canonicalJson(expected.method_cards.map((card) => ({
       method_id: card.id,
@@ -767,14 +901,25 @@ export function validateMethodsV2ExecutionRecords({ files, expected, invocations
     evidence_event_count: graph.events.length,
     evidence_hit_count: graph.hits.length,
     specialist_repair_used: linked.specialist.repair_used,
-    reviewer_repair_used: linked.reviewer.repair_used,
+    reviewer_repair_used: linked.reviewer?.repair_used ?? false,
     service_model_calls: invocations.length,
     public_methods_result_sha256: sha256Bytes(canonicalJson(publicMethodsResult)),
     record_sha256: Object.fromEntries(Object.entries(documents).map(([key, document]) => [key, sha256Bytes(document.payload)])),
   };
 }
 
-export function validateMethodsV2RestartSnapshot({ caseView, artifacts, methodsSummary, restartedFiles }) {
+export function validateMethodsV2RestartSnapshot({
+  caseView,
+  artifacts,
+  methodsSummary,
+  restartedFiles,
+  evaluationMode = EVIDENCE_V2_DEFAULT_EVALUATION_MODE,
+}) {
+  requireOracle(
+    isEvidenceV2EvaluationMode(evaluationMode) && methodsSummary?.evaluation_mode === evaluationMode,
+    "METHODS_V2_EVALUATION_MODE_INVALID",
+    "Restart snapshot evaluation mode is invalid or inconsistent",
+  );
   requireOracle(isPlainObject(caseView), "METHODS_V2_RESTART_CASE_INVALID", "Restart Case view is invalid");
   requireOracle(
     caseView.case_id === methodsSummary.case_id && caseView.status === "RESOLVED"
@@ -786,9 +931,11 @@ export function validateMethodsV2RestartSnapshot({ caseView, artifacts, methodsS
   );
   requireOracle(Array.isArray(artifacts) && artifacts.length === 0 && Array.isArray(caseView.artifacts) && caseView.artifacts.length === 0, "METHODS_V2_RESTART_ARTIFACTS_PRESENT", "Evidence V2 terminal Cases must not publish legacy artifacts");
   requireOracle(isPlainObject(restartedFiles), "METHODS_V2_RESTART_RECORDS_INVALID", "Restart execution records are missing");
-  for (const key of Object.keys(METHODS_V2_CAPTURED_FILES)) {
-    const payload = bytes(restartedFiles[key], `restart-${METHODS_V2_CAPTURED_FILES[key]}`);
-    requireOracle(sha256Bytes(payload) === methodsSummary.record_sha256[key], "METHODS_V2_RESTART_RECORD_DRIFT", `Restart changed ${METHODS_V2_CAPTURED_FILES[key]}`);
+  const capturedFiles = methodsV2CapturedFiles(evaluationMode);
+  exactKeys(restartedFiles, Object.keys(capturedFiles), "METHODS_V2_RESTART_RECORDS_INVALID", "Restart execution records");
+  for (const [key, filename] of Object.entries(capturedFiles)) {
+    const payload = bytes(restartedFiles[key], `restart-${filename}`);
+    requireOracle(sha256Bytes(payload) === methodsSummary.record_sha256[key], "METHODS_V2_RESTART_RECORD_DRIFT", `Restart changed ${filename}`);
   }
   return true;
 }

@@ -8,6 +8,7 @@
     "schema_version",
     "receipt_type",
     "status",
+    "evaluation_mode",
     "source_snapshot_digest",
     "contract_manifest",
     "core_verdict",
@@ -15,9 +16,10 @@
     "model_certs"
   ],
   "properties": {
-    "schema_version": { "const": 1 },
+    "schema_version": { "const": 2 },
     "receipt_type": { "const": "evidence-v2-release-verdict" },
     "status": { "const": "PASS" },
+    "evaluation_mode": { "enum": ["SPECIALIST_ONLY", "BLIND_CONSENSUS"] },
     "source_snapshot_digest": { "$ref": "model-cert-input.schema.json#/$defs/sha256" },
     "contract_manifest": { "$ref": "model-cert-input.schema.json#/$defs/manifestBinding" },
     "core_verdict": { "$ref": "model-cert-input.schema.json#/$defs/coreBinding" },
@@ -33,13 +35,48 @@
       "maxItems": 2
     }
   },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "evaluation_mode": { "const": "SPECIALIST_ONLY" } },
+        "required": ["evaluation_mode"]
+      },
+      "then": {
+        "properties": {
+          "model_certs": {
+            "prefixItems": [
+              { "properties": { "evaluation_mode": { "const": "SPECIALIST_ONLY" } } },
+              { "properties": { "evaluation_mode": { "const": "SPECIALIST_ONLY" } } }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { "evaluation_mode": { "const": "BLIND_CONSENSUS" } },
+        "required": ["evaluation_mode"]
+      },
+      "then": {
+        "properties": {
+          "model_certs": {
+            "prefixItems": [
+              { "properties": { "evaluation_mode": { "const": "BLIND_CONSENSUS" } } },
+              { "properties": { "evaluation_mode": { "const": "BLIND_CONSENSUS" } } }
+            ]
+          }
+        }
+      }
+    }
+  ],
   "$defs": {
     "baseCert": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["certification_target", "path", "sha256", "provider", "model", "scenario_oracle", "methods_result"],
+      "required": ["certification_target", "evaluation_mode", "path", "sha256", "provider", "model", "scenario_oracle", "methods_result"],
       "properties": {
         "certification_target": { "enum": ["P1", "P2"] },
+        "evaluation_mode": { "enum": ["SPECIALIST_ONLY", "BLIND_CONSENSUS"] },
         "path": { "type": "string", "minLength": 1 },
         "sha256": { "$ref": "model-cert-input.schema.json#/$defs/sha256" },
         "provider": { "$ref": "model-cert-input.schema.json#/$defs/provider" },

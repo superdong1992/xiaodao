@@ -30,7 +30,7 @@ test("the v2 bundle resolves Goal to Proof to Stage to Gate in DAG order", () =>
   assert.equal(config.policy.tracks.release.requires_source_snapshot, true);
   const ordered = topologicalStages(config.stages.stages, ["journey.cross-job.publish-restart"]);
   assert.deepEqual(ordered.slice(-2).map((stage) => stage.id), [
-    "journey.cross-job.review",
+    "journey.cross-job.diagnose",
     "journey.cross-job.publish-restart",
   ]);
 });
@@ -100,13 +100,13 @@ test("Release is fresh, binds an immutable source snapshot and exposes exact per
   assert.equal(built.plan.resume, "fresh");
   assert.equal(built.options.crossJobAdapter, path.join(REPO_ROOT, "tools", "test-flow", "adapters", "macos-linux-release.mjs"));
   assert.deepEqual(built.plan.budget, {
-    estimated_tokens: 8100000,
-    sum_of_per_invocation_caps_usd: 31,
-    hard_cap_tokens: 12500000,
-    hard_cap_usd: 37,
-    normal_model_calls: 8,
-    repair_model_calls_max: 2,
-    hard_max_model_calls: 10,
+    estimated_tokens: 6100000,
+    sum_of_per_invocation_caps_usd: 28,
+    hard_cap_tokens: 8500000,
+    hard_cap_usd: 31,
+    normal_model_calls: 7,
+    repair_model_calls_max: 1,
+    hard_max_model_calls: 8,
     cumulative_spending_cap: null,
     per_invocation_hard_enforced: true,
   });
@@ -127,17 +127,17 @@ test("Release is fresh, binds an immutable source snapshot and exposes exact per
   ]);
   assert.deepEqual(diagnose.invocation_caps.map((entry) => [entry.class, entry.min_count, entry.max_count, entry.caps.max_total_tokens, entry.caps.max_budget_usd]), [
     ["host-client", 1, 1, 600000, 5],
-    ["server-agent", 2, 4, 2000000, 3],
+    ["server-agent", 1, 2, 2000000, 3],
   ]);
-  assert.deepEqual([diagnose.normal_model_calls, diagnose.repair_model_calls_max, diagnose.hard_max_model_calls], [3, 2, 5]);
-  assert.deepEqual(diagnose.normal_budget, { tokens: 4600000, cost_usd: 11 });
-  assert.deepEqual(diagnose.hard_budget, { tokens: 8600000, cost_usd: 17 });
+  assert.deepEqual([diagnose.normal_model_calls, diagnose.repair_model_calls_max, diagnose.hard_max_model_calls], [2, 1, 3]);
+  assert.deepEqual(diagnose.normal_budget, { tokens: 2600000, cost_usd: 8 });
+  assert.deepEqual(diagnose.hard_budget, { tokens: 4600000, cost_usd: 11 });
   assert.deepEqual(publish.invocation_caps.map((entry) => [entry.class, entry.min_count, entry.max_count, entry.caps.max_budget_usd]), [
     ["host-client", 1, 1, 1],
   ]);
 });
 
-test("formal Evidence V2 certification exposes normal two-call and four-call repair budgets", () => {
+test("formal Evidence V2 certification defaults both providers to one Specialist call and one repair", () => {
   const built = buildIsolatedRunPlan({
     track: "release",
     goal: "release.evidence-v2-certification",
@@ -157,15 +157,15 @@ test("formal Evidence V2 certification exposes normal two-call and four-call rep
       .filter((stage) => ["real.macos-codex-luna-e2e", "real.macos-claude-deepseek-e2e"].includes(stage.id))
       .map((stage) => [stage.id, stage.normal_model_calls, stage.repair_model_calls_max, stage.hard_max_model_calls]),
     [
-      ["real.macos-claude-deepseek-e2e", 2, 2, 4],
-      ["real.macos-codex-luna-e2e", 2, 2, 4],
+      ["real.macos-claude-deepseek-e2e", 1, 1, 2],
+      ["real.macos-codex-luna-e2e", 1, 1, 2],
     ],
   );
   assert.deepEqual(built.plan.budget.posthoc_aggregate_limits, {
     exception_id: "PSE-CODEX-LUNA-POSTHOC-001",
-    normal_calls: 2,
-    repair_calls_max: 2,
-    calls: 4,
+    normal_calls: 1,
+    repair_calls_max: 1,
+    calls: 2,
     tokens: 2000000,
     equivalent_usd: 3,
     enforcement: "posthoc-terminal-aggregate",
@@ -184,9 +184,9 @@ test("formal Evidence V2 certification exposes normal two-call and four-call rep
     estimated_cost_usd: 17,
     hard_cap_tokens: 5_000_000,
     hard_cap_usd: 17,
-    normal_model_calls: 5,
-    repair_model_calls_max: 4,
-    hard_max_model_calls: 9,
+    normal_model_calls: 3,
+    repair_model_calls_max: 2,
+    hard_max_model_calls: 5,
   });
   assert.ok(blockerCodes.includes("CLAUDE_ENTRY_REQUIRED"));
   assert.ok(blockerCodes.includes("CLAUDE_SETTINGS_REQUIRED"));
@@ -196,6 +196,29 @@ test("formal Evidence V2 certification exposes normal two-call and four-call rep
   assert.ok(["darwin-local-claude-deepseek-quick-validation", "sealed-ubuntu2204-container-claude-deepseek-quick-validation"].includes(built.plan.release_inputs.topology));
   assert.equal(built.plan.release_inputs.network_policy, "provider-plus-local-evidence-v2-runtime");
   assert.equal(built.plan.release_inputs.cross_job_adapter, null);
+});
+
+test("optional blind-review certification preserves the two-role two-to-four call topology", () => {
+  const built = buildIsolatedRunPlan({
+    track: "release",
+    goal: "release.evidence-v2-blind-review-certification",
+    client: process.platform === "linux" ? "linux" : "macos",
+    planOnly: true,
+    allowCodexPosthocBudget: true,
+  });
+  assert.deepEqual(
+    built.plan.stages
+      .filter((stage) => stage.id.endsWith("blind-review-e2e"))
+      .map((stage) => [stage.id, stage.invocation_caps[0].phases, stage.normal_model_calls, stage.repair_model_calls_max, stage.hard_max_model_calls]),
+    [
+      ["real.macos-claude-deepseek-blind-review-e2e", ["SPECIALIST:PRIMARY", "SPECIALIST:REPAIR?", "REVIEWER:PRIMARY", "REVIEWER:REPAIR?"], 2, 2, 4],
+      ["real.macos-codex-luna-blind-review-e2e", ["SPECIALIST:PRIMARY", "SPECIALIST:REPAIR?", "REVIEWER:PRIMARY", "REVIEWER:REPAIR?"], 2, 2, 4],
+    ],
+  );
+  assert.deepEqual(
+    [built.plan.budget.posthoc_aggregate_limits.normal_calls, built.plan.budget.posthoc_aggregate_limits.repair_calls_max, built.plan.budget.posthoc_aggregate_limits.calls],
+    [2, 2, 4],
+  );
 });
 
 test("a reusable historical PASS cannot replace the current-attempt Release Core", () => {
@@ -276,14 +299,14 @@ test("Luna package generation stays independent while P2 uses Core plus the shar
   ]);
   assert.equal(e2e.scenario, "multiple-rpc-timeouts");
   const e2eStage = e2e.stages.find((stage) => stage.id === "real.macos-codex-luna-e2e");
-  assert.deepEqual(e2eStage.invocation_caps[0].phases, ["SPECIALIST:PRIMARY", "SPECIALIST:REPAIR?", "REVIEWER:PRIMARY", "REVIEWER:REPAIR?"]);
-  assert.deepEqual([e2eStage.invocation_caps[0].min_count, e2eStage.invocation_caps[0].max_count], [2, 4]);
-  assert.deepEqual([e2eStage.normal_model_calls, e2eStage.repair_model_calls_max, e2eStage.hard_max_model_calls], [2, 2, 4]);
+  assert.deepEqual(e2eStage.invocation_caps[0].phases, ["SPECIALIST:PRIMARY", "SPECIALIST:REPAIR?"]);
+  assert.deepEqual([e2eStage.invocation_caps[0].min_count, e2eStage.invocation_caps[0].max_count], [1, 2]);
+  assert.deepEqual([e2eStage.normal_model_calls, e2eStage.repair_model_calls_max, e2eStage.hard_max_model_calls], [1, 1, 2]);
   assert.equal(e2eStage.invocation_caps[0].per_call_hard_timeout_seconds, 600);
   assert.ok(e2eStage.timeout_seconds > e2eStage.invocation_caps[0].max_count * e2eStage.invocation_caps[0].per_call_hard_timeout_seconds);
-  assert.equal(e2e.budget.posthoc_aggregate_limits.normal_calls, 2);
-  assert.equal(e2e.budget.posthoc_aggregate_limits.repair_calls_max, 2);
-  assert.equal(e2e.budget.posthoc_aggregate_limits.calls, 4);
+  assert.equal(e2e.budget.posthoc_aggregate_limits.normal_calls, 1);
+  assert.equal(e2e.budget.posthoc_aggregate_limits.repair_calls_max, 1);
+  assert.equal(e2e.budget.posthoc_aggregate_limits.calls, 2);
   assert.equal(e2e.budget.posthoc_aggregate_limits.tokens, 2_000_000);
   assert.equal(e2e.budget.posthoc_aggregate_limits.equivalent_usd, 3);
   assert.equal(e2e.admission.blockers.some((item) => item.code === "EVIDENCE_V2_REAL_DIAGNOSIS_ADAPTER_UNMIGRATED"), false);
@@ -300,7 +323,7 @@ test("Luna package generation stays independent while P2 uses Core plus the shar
   assert.ok(invalid.admission.blockers.some((item) => item.code === "MACOS_CODEX_LUNA_SCENARIO_INVALID"));
 });
 
-test("central P1 plan fixes the scenario and declares exactly the legal two-to-four call topology", () => {
+test("central P1 plan fixes the scenario and declares the Specialist-only topology", () => {
   const build = () => buildIsolatedRunPlan({
     track: "dev",
     goal: "dev.macos-claude-deepseek-e2e",
@@ -314,14 +337,14 @@ test("central P1 plan fixes the scenario and declares exactly the legal two-to-f
   assert.equal(normal.admission.blockers.some((item) => item.code === "EVIDENCE_V2_REAL_DIAGNOSIS_ADAPTER_UNMIGRATED"), false);
   const normalStage = normal.stages.find((stage) => stage.id === "real.macos-claude-deepseek-e2e");
   const declaration = normalStage.invocation_caps[0];
-  assert.deepEqual(declaration.phases, ["SPECIALIST:PRIMARY", "SPECIALIST:REPAIR?", "REVIEWER:PRIMARY", "REVIEWER:REPAIR?"]);
-  assert.deepEqual([declaration.min_count, declaration.max_count, declaration.normal_count, declaration.repair_max_count], [2, 4, 2, 2]);
-  assert.deepEqual([normalStage.normal_model_calls, normalStage.repair_model_calls_max, normalStage.hard_max_model_calls], [2, 2, 4]);
+  assert.deepEqual(declaration.phases, ["SPECIALIST:PRIMARY", "SPECIALIST:REPAIR?"]);
+  assert.deepEqual([declaration.min_count, declaration.max_count, declaration.normal_count, declaration.repair_max_count], [1, 2, 1, 1]);
+  assert.deepEqual([normalStage.normal_model_calls, normalStage.repair_model_calls_max, normalStage.hard_max_model_calls], [1, 1, 2]);
   assert.ok(normalStage.timeout_seconds > declaration.max_count * declaration.per_call_hard_timeout_seconds);
   assert.equal(normalStage.gates.find((gate) => gate.id === "quick.claude-deepseek-e2e.contracts").required_evidence[0], "node-test.tap");
 });
 
-test("Dev CrossJob diagnosis uses the Evidence V2 two-to-four service-call contract", () => {
+test("Dev CrossJob diagnosis uses the Evidence V2 Specialist-only service-call contract", () => {
   const built = buildIsolatedRunPlan({
     track: "dev",
     goal: "dev.real",
@@ -333,7 +356,7 @@ test("Dev CrossJob diagnosis uses the Evidence V2 two-to-four service-call contr
   });
   assert.equal(built.plan.admission.blockers.some((item) => item.code === "EVIDENCE_V2_REAL_DIAGNOSIS_ADAPTER_UNMIGRATED"), false);
   const declaration = built.plan.stages.find((stage) => stage.id === "journey.cross-job.diagnose").invocation_caps.find((item) => item.class === "server-agent");
-  assert.deepEqual([declaration.min_count, declaration.max_count, declaration.normal_count, declaration.repair_max_count], [2, 4, 2, 2]);
+  assert.deepEqual([declaration.min_count, declaration.max_count, declaration.normal_count, declaration.repair_max_count], [1, 2, 1, 1]);
   assert.equal(built.plan.admission.status, "BLOCKED");
 });
 

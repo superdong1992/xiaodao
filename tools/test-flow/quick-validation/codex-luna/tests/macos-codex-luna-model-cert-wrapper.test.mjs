@@ -7,6 +7,8 @@ import test from "node:test";
 
 import {
   CODEX_LUNA_MODEL_CERT_MAX_CALLS,
+  CODEX_LUNA_MODEL_CERT_BLIND_REVIEW_MAX_CALLS,
+  CODEX_LUNA_MODEL_CERT_BLIND_REVIEW_NORMAL_CALLS,
   CODEX_LUNA_MODEL_CERT_NORMAL_CALLS,
   modelRoleDeveloperInstructions,
   parseEvidenceV2RolePrompt,
@@ -97,9 +99,11 @@ test("Evidence V2 role parser accepts only the production role/attempt/output ma
   assert.throws(() => parseEvidenceV2RolePrompt(`${SPECIALIST_PROMPT}trailing`), { code: "CODEX_LUNA_MODEL_CERT_ROLE_MARKER_INVALID" });
 });
 
-test("model cert wrapper freezes two normal calls and a four-call hard cap", () => {
-  assert.equal(CODEX_LUNA_MODEL_CERT_NORMAL_CALLS, 2);
-  assert.equal(CODEX_LUNA_MODEL_CERT_MAX_CALLS, 4);
+test("model cert wrapper freezes default and blind-review call caps", () => {
+  assert.equal(CODEX_LUNA_MODEL_CERT_NORMAL_CALLS, 1);
+  assert.equal(CODEX_LUNA_MODEL_CERT_MAX_CALLS, 2);
+  assert.equal(CODEX_LUNA_MODEL_CERT_BLIND_REVIEW_NORMAL_CALLS, 2);
+  assert.equal(CODEX_LUNA_MODEL_CERT_BLIND_REVIEW_MAX_CALLS, 4);
   const instructions = modelRoleDeveloperInstructions("/tmp/evidence-v2-role", parseEvidenceV2RolePrompt(SPECIALIST_PROMPT));
   assert.match(instructions, /只写 output\/method-diagnosis\.draft\.json/);
   assert.match(instructions, /不得生成 Evidence、Candidate、Artifact、grounding、PARTIAL/);
@@ -342,10 +346,20 @@ test("invocation collector preserves the only legal role order and rejects extra
   };
   const write = (name, role, attempt) => fs.writeFileSync(path.join(root, name), JSON.stringify({ ...base, invocation_id: `run:${role}:${attempt}`, role, attempt, repair: attempt === "REPAIR" }));
   write("specialist-primary.json", "SPECIALIST", "PRIMARY");
+  assert.deepEqual(readModelCertInvocationReceipts(root).map((item) => `${item.role}:${item.attempt}`), ["SPECIALIST:PRIMARY"]);
+  assert.throws(
+    () => readModelCertInvocationReceipts(root, { evaluationMode: "BLIND_CONSENSUS" }),
+    { code: "CODEX_LUNA_MODEL_CERT_USAGE_RECEIPT_MISSING" },
+  );
   write("reviewer-primary.json", "REVIEWER", "PRIMARY");
-  assert.deepEqual(readModelCertInvocationReceipts(root).map((item) => `${item.role}:${item.attempt}`), ["SPECIALIST:PRIMARY", "REVIEWER:PRIMARY"]);
+  assert.throws(
+    () => readModelCertInvocationReceipts(root),
+    { code: "CODEX_LUNA_MODEL_CERT_USAGE_FILE_UNEXPECTED" },
+  );
+  assert.deepEqual(readModelCertInvocationReceipts(root, { evaluationMode: "BLIND_CONSENSUS" }).map((item) => `${item.role}:${item.attempt}`), ["SPECIALIST:PRIMARY", "REVIEWER:PRIMARY"]);
   write("specialist-repair.json", "SPECIALIST", "REPAIR");
-  assert.deepEqual(readModelCertInvocationReceipts(root).map((item) => `${item.role}:${item.attempt}`), ["SPECIALIST:PRIMARY", "SPECIALIST:REPAIR", "REVIEWER:PRIMARY"]);
+  assert.deepEqual(readModelCertInvocationReceipts(root, { evaluationMode: "BLIND_CONSENSUS" }).map((item) => `${item.role}:${item.attempt}`), ["SPECIALIST:PRIMARY", "SPECIALIST:REPAIR", "REVIEWER:PRIMARY"]);
   fs.writeFileSync(path.join(root, "fifth.json"), "{}\n");
-  assert.throws(() => readModelCertInvocationReceipts(root), { code: "CODEX_LUNA_MODEL_CERT_USAGE_FILE_UNEXPECTED" });
+  assert.throws(() => readModelCertInvocationReceipts(root, { evaluationMode: "BLIND_CONSENSUS" }), { code: "CODEX_LUNA_MODEL_CERT_USAGE_FILE_UNEXPECTED" });
+  assert.throws(() => readModelCertInvocationReceipts(root, { evaluationMode: "UNKNOWN" }), { code: "CODEX_LUNA_MODEL_CERT_EVALUATION_MODE_INVALID" });
 });

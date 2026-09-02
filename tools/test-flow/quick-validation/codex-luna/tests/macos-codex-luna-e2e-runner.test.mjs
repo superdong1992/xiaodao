@@ -48,12 +48,13 @@ function invocation(role, attempt, ordinal) {
   };
 }
 
-function runtimeReceipt(invocations) {
+function runtimeReceipt(invocations, evaluationMode = invocations.some((item) => item.role === "REVIEWER") ? "BLIND_CONSENSUS" : "SPECIALIST_ONLY") {
   return {
     schema_version: 1,
     receipt_type: "codex-luna-evidence-v2-runtime-result",
     status: "PASS",
     execution_mode: "real-model",
+    evaluation_mode: evaluationMode,
     production_runtime: "problem_locator.runtime.diagnosis_runtime.DiagnosisRuntime",
     runtime_driver: "codex-luna-model-cert-v1",
     scenario_id: "multiple-rpc-timeouts",
@@ -123,6 +124,9 @@ test("model-cert CLI requires source/Core/registration binding and one fixed sce
     "--scenario", "multiple-rpc-timeouts",
   ];
   assert.equal(parseArguments(args)["registration-root"], "/registration");
+  assert.equal(parseArguments(args)["evaluation-mode"], "SPECIALIST_ONLY");
+  assert.equal(parseArguments([...args, "--evaluation-mode", "BLIND_CONSENSUS"])["evaluation-mode"], "BLIND_CONSENSUS");
+  assert.throws(() => parseArguments([...args, "--evaluation-mode", "invalid"]), { code: "CODEX_LUNA_MODEL_CERT_EVALUATION_MODE_INVALID" });
   const wrong = [...args];
   wrong[wrong.length - 1] = "api-execution-overrun";
   assert.throws(() => parseArguments(wrong), { code: "CODEX_LUNA_MODEL_CERT_SCENARIO_INVALID" });
@@ -133,17 +137,17 @@ test("model-cert CLI requires source/Core/registration binding and one fixed sce
 test("provider calls bind exact production prompts and reject scenario mutations", () => {
   const invocations = [invocation("SPECIALIST", "PRIMARY", 1), invocation("REVIEWER", "PRIMARY", 2)];
   const receipt = runtimeReceipt(invocations);
-  assert.equal(auditRuntimeAndInvocations(receipt, invocations).prompt_count, 2);
+  assert.equal(auditRuntimeAndInvocations(receipt, invocations, { evaluationMode: "BLIND_CONSENSUS" }).prompt_count, 2);
   const promptDrift = structuredClone(invocations);
   promptDrift[1].prompt.sha256 = SHA("7");
-  assert.throws(() => auditRuntimeAndInvocations(receipt, promptDrift), { code: "CODEX_LUNA_MODEL_CERT_RUNTIME_INVOCATION_IDENTITY_MISMATCH" });
+  assert.throws(() => auditRuntimeAndInvocations(receipt, promptDrift, { evaluationMode: "BLIND_CONSENSUS" }), { code: "CODEX_LUNA_MODEL_CERT_RUNTIME_INVOCATION_IDENTITY_MISMATCH" });
   const wrongScenario = structuredClone(receipt);
   wrongScenario.scenario.scenario_id = "other";
-  assert.throws(() => auditRuntimeAndInvocations(wrongScenario, invocations), { code: "CODEX_LUNA_MODEL_CERT_SCENARIO_IDENTITY_INVALID" });
+  assert.throws(() => auditRuntimeAndInvocations(wrongScenario, invocations, { evaluationMode: "BLIND_CONSENSUS" }), { code: "CODEX_LUNA_MODEL_CERT_SCENARIO_IDENTITY_INVALID" });
 });
 
 test("P2 model-cert input binds provider revision, scenario, calls, usage, Core and methods_result", () => {
-  const invocations = [invocation("SPECIALIST", "PRIMARY", 1), invocation("REVIEWER", "PRIMARY", 2)];
+  const invocations = [invocation("SPECIALIST", "PRIMARY", 1)];
   const receipt = buildModelCertInput({
     sourceSnapshotDigest: SHA("a"),
     contractManifestSha256: SHA("b"),
@@ -154,13 +158,15 @@ test("P2 model-cert input binds provider revision, scenario, calls, usage, Core 
     runtimeReceipt: runtimeReceipt(invocations),
     sourceRoot: REPO_ROOT,
   });
-  assert.deepEqual(Object.keys(receipt).sort(), ["call_counts", "certification_target", "contract_manifest", "core_verdict", "scenario_oracle", "execution_identity", "invocations", "methods_result", "model", "provider", "receipt_type", "scenario", "schema_version", "source_snapshot_digest", "status", "usage"].sort());
+  assert.deepEqual(Object.keys(receipt).sort(), ["call_counts", "certification_target", "contract_manifest", "core_verdict", "evaluation_mode", "scenario_oracle", "execution_identity", "invocations", "methods_result", "model", "provider", "receipt_type", "scenario", "schema_version", "source_snapshot_digest", "status", "usage"].sort());
+  assert.equal(receipt.schema_version, 2);
   assert.equal(receipt.certification_target, "P2");
+  assert.equal(receipt.evaluation_mode, "SPECIALIST_ONLY");
   assert.deepEqual(receipt.provider, { id: "openai", transport: "codex-app-server" });
   assert.equal(receipt.model.id, "gpt-5.6-luna");
   assert.match(receipt.model.revision, /^[a-f0-9]{64}$/u);
-  assert.deepEqual(receipt.call_counts, { total_calls: 2, specialist_calls: 1, reviewer_calls: 1, specialist_repairs: 0, reviewer_repairs: 0, model_retries: 0 });
-  assert.equal(receipt.usage.total_tokens, 30);
+  assert.deepEqual(receipt.call_counts, { total_calls: 1, specialist_calls: 1, reviewer_calls: 0, specialist_repairs: 0, reviewer_repairs: 0, model_retries: 0 });
+  assert.equal(receipt.usage.total_tokens, 15);
   assert.equal(receipt.scenario.evidence_graph.ref, receipt.methods_result.evidence_graph_ref);
   assert.equal(receipt.scenario.evaluation_plan.ref, receipt.methods_result.plan_ref);
   assert.equal(validateEvidenceV2ModelCertInputSchema(receipt, { certificationTarget: "P2" }), receipt);
@@ -171,7 +177,7 @@ test("an injected provider receipt cannot mint a cert without production executi
   context.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const core = path.join(root, "core-verdict.json");
   fs.writeFileSync(core, "{}\n");
-  const invocations = [invocation("SPECIALIST", "PRIMARY", 1), invocation("REVIEWER", "PRIMARY", 2)];
+  const invocations = [invocation("SPECIALIST", "PRIMARY", 1)];
   const options = {
     sourceRoot: REPO_ROOT,
     codexEntry: path.join(root, "codex"),

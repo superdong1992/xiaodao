@@ -759,6 +759,8 @@ def _prompt_receipts(
 
 
 def run(options: argparse.Namespace) -> dict[str, Any]:
+    evaluation_mode = options.evaluation_mode
+    reviewer_enabled = evaluation_mode == "BLIND_CONSENSUS"
     work_root = _ordinary_empty_directory(options.work_root, "model-cert work root")
     runtime_root = work_root / "production-runtime"
     runtime_root.mkdir(mode=0o700)
@@ -871,6 +873,7 @@ def run(options: argparse.Namespace) -> dict[str, Any]:
         id_generator=DeterministicIdGenerator(seed="claude-deepseek-cert-specialist"),
         workspace_manager=WorkspaceManager(runtime_root / "specialist"),
         backend=specialist_backend,
+        evidence_v2_reviewer_enabled=reviewer_enabled,
     )
     specialist_receipt = specialist_runtime.execute(
         source_job,
@@ -911,6 +914,7 @@ def run(options: argparse.Namespace) -> dict[str, Any]:
             id_generator=DeterministicIdGenerator(seed="claude-deepseek-cert-reviewer"),
             workspace_manager=WorkspaceManager(runtime_root / "reviewer"),
             backend=_ReviewerBackend(reviewer_role),
+            evidence_v2_reviewer_enabled=reviewer_enabled,
         )
         reviewer_receipt = reviewer_runtime.execute(
             review_job,
@@ -929,7 +933,15 @@ def run(options: argparse.Namespace) -> dict[str, Any]:
     public_view = query.get_case(source_job.case_id).case_view
     methods_projection = public_view.methods_result
     if methods_projection is None:
-        _fail("CLAUDE_DEEPSEEK_METHODS_RESULT_MISSING", "The public Case has no Evidence V2 methods_result")
+        _fail(
+            "CLAUDE_DEEPSEEK_METHODS_RESULT_MISSING",
+            "The public Case has no Evidence V2 methods_result: "
+            f"specialist_result={specialist_receipt.job_outcome.result_type.value}; "
+            f"specialist_error={specialist_receipt.job_outcome.error.code.value if specialist_receipt.job_outcome.error is not None else None}; "
+            f"specialist_review={specialist_receipt.job_outcome.methods_review_target is not None}; "
+            f"specialist_terminal={specialist_receipt.job_outcome.methods_terminal_projection is not None}; "
+            f"case_status={public_view.status.value}",
+        )
     methods_result = methods_projection.model_dump(mode="json")
     encoded_public = canonical_json_bytes(public_view)
     if any(term in encoded_public for term in (b"specialist_evaluation", b"reviewer_evaluation", b"candidate_conclusion")):
@@ -966,15 +978,23 @@ def run(options: argparse.Namespace) -> dict[str, Any]:
         reviewer_job_id=None if review_job is None else review_job.job_id,
     )
     actual_attempts = [f"{item['role']}:{item['attempt']}" for item in prompts]
-    legal_attempts = {
-        (),
-        ("SPECIALIST:PRIMARY",),
-        ("SPECIALIST:PRIMARY", "SPECIALIST:REPAIR"),
-        ("SPECIALIST:PRIMARY", "REVIEWER:PRIMARY"),
-        ("SPECIALIST:PRIMARY", "SPECIALIST:REPAIR", "REVIEWER:PRIMARY"),
-        ("SPECIALIST:PRIMARY", "REVIEWER:PRIMARY", "REVIEWER:REPAIR"),
-        ("SPECIALIST:PRIMARY", "SPECIALIST:REPAIR", "REVIEWER:PRIMARY", "REVIEWER:REPAIR"),
-    }
+    legal_attempts = (
+        {
+            (),
+            ("SPECIALIST:PRIMARY",),
+            ("SPECIALIST:PRIMARY", "SPECIALIST:REPAIR"),
+        }
+        if evaluation_mode == "SPECIALIST_ONLY"
+        else {
+            (),
+            ("SPECIALIST:PRIMARY",),
+            ("SPECIALIST:PRIMARY", "SPECIALIST:REPAIR"),
+            ("SPECIALIST:PRIMARY", "REVIEWER:PRIMARY"),
+            ("SPECIALIST:PRIMARY", "SPECIALIST:REPAIR", "REVIEWER:PRIMARY"),
+            ("SPECIALIST:PRIMARY", "REVIEWER:PRIMARY", "REVIEWER:REPAIR"),
+            ("SPECIALIST:PRIMARY", "SPECIALIST:REPAIR", "REVIEWER:PRIMARY", "REVIEWER:REPAIR"),
+        }
+    )
     if options.mode == "fake" and tuple(actual_attempts) not in legal_attempts:
         _fail("CLAUDE_DEEPSEEK_FAKE_ATTEMPT_MISMATCH", "Deterministic role attempts did not follow the production repair state machine")
     methods_bytes = canonical_json_bytes(methods_result)
@@ -1042,6 +1062,7 @@ def run(options: argparse.Namespace) -> dict[str, Any]:
         "schema_version": 1,
         "status": "PASS",
         "execution_mode": "deterministic-zero-model" if options.mode == "fake" else "real-model",
+        "evaluation_mode": evaluation_mode,
         "production_runtime": "problem_locator.runtime.diagnosis_runtime.DiagnosisRuntime",
         "runtime_driver": "claude-deepseek-model-cert-v1",
         "scenario_id": options.scenario_id,
@@ -1085,6 +1106,11 @@ def run(options: argparse.Namespace) -> dict[str, Any]:
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", choices=("fake", "real"), required=True)
+    parser.add_argument(
+        "--evaluation-mode",
+        choices=("SPECIALIST_ONLY", "BLIND_CONSENSUS"),
+        default="SPECIALIST_ONLY",
+    )
     parser.add_argument("--source-root", type=Path, required=True)
     parser.add_argument("--source-wiki", type=Path)
     parser.add_argument("--scenario-root", type=Path)

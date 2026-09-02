@@ -1,6 +1,6 @@
 # TODO
 
-更新时间：2026-08-30
+更新时间：2026-09-02
 
 本文件是仓库活跃待办的唯一清单。已完成事项由代码、当前设计与 Git 历史证明，不在这里保留关闭项。
 
@@ -8,15 +8,15 @@
 
 - 零模型 Core、CrossJob 和两套 provider adapter 已接入 Evidence V2；旧 Codex/Luna 直接 Methods V1
   定位 Goal、Stage、Gate 和 action 路由已删除。正式结论仍须等待当前源码快照的真实 P1/P2 认证。
-- P1 Claude Code + DeepSeek 与 P2 Codex + Luna 必须各自运行生产 DiagnosisRuntime：服务端生成
-  Graph/Plan，模型只提交 Specialist/Reviewer evaluation 数组，每角色最多一次 repair；正常调用数为
-  2，硬上限为 4。
+- P1 Claude Code + DeepSeek 与 P2 Codex + Luna 默认各自运行生产 DiagnosisRuntime 的
+  Specialist-only 路径：正常调用数为 1，最多一次 repair，硬上限为 2。显式选择名称含
+  `blind-review` 的 Goal 时，才运行 Reviewer 并恢复每家 2–4 次调用合同。
 - 两份 `model-cert.json` 必须绑定同一 attempt 中的 production registration、source snapshot、V8 contract manifest 和
   `core-verdict.json`，并记录 provider/model/revision、prompt/profile/tool policy、调用/repair 次数、
   usage 与最终 `methods_result` 身份。
-- `release.evidence-v2-certification` 必须从同一 attempt 的 Core、P1、P2 生成
-  `release-verdict.json`。当前待办是完成 plan-only 审核、真实模型调用和最终权威 verdict；在此之前
-  不得登记为已修复。
+- `release.evidence-v2-certification` 必须从同一 attempt 的 Core、默认 Specialist-only P1、P2 生成
+  `release-verdict.json`。`release.evidence-v2-blind-review-certification` 只验证可选盲评，不阻塞默认
+  Release。当前待办是完成 plan-only 审核、真实模型调用和最终权威 verdict；在此之前不得登记为已修复。
 
 ## P0：Generic V2 最终集成与生产验收
 
@@ -41,7 +41,7 @@
   并从 `methods-consensus-attribution-v2.json` 统计共识子因和规模分布。当前确定性验收样本刻意让
   四个子因各出现 1 次，因此样本内各占 25%；这是覆盖证明，不是生产流量结论，不能据此放松共识
   或实施部分重叠 event 的新语义。
-- 下一步要在 P1/P2 真实模型认证或同身份生产运行中收集新的 execution records，再按 reason、子因、
+- 下一步要在显式盲评 P1/P2 认证或启用 Reviewer 的同身份生产运行中收集新的 execution records，再按 reason、子因、
   N、每项 event 数和激活率联合判断主因。若 `EVIDENCE_SET_MISMATCH` 主导，再单独评估证据交集规则；
   若 `INCOMPLETE_EVALUATION`、`NO_MATCHING_METHOD_EVIDENCE` 或 `*_SEMANTIC_INVALID` 主导，则分别处理
   UNKNOWN 全局门、marker 激活精度或模型输出合同，不能用放松共识替代。

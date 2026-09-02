@@ -7,6 +7,7 @@ from typing import Annotated, Literal, TypeAlias
 from pydantic import ConfigDict, Field, StringConstraints, model_validator
 
 from .methods_reason_v2 import (
+    CONSENSUS_UNRESOLVED_REASON_CODES_V2,
     FAILED_METHOD_REASON_CODES_V2,
     METHOD_PUBLIC_REASON_TEXT_V2,
     UNRESOLVED_METHOD_REASON_CODES_V2,
@@ -268,6 +269,10 @@ class MethodStateV2(_MethodStateContract):
                 raise ValueError(
                     "consensus event refs differ from the two role evaluations"
                 )
+        if (self.reviewer_evaluation is None) != (self.consensus is None):
+            raise ValueError(
+                "Reviewer evaluation and consensus must be present together"
+            )
 
         if self.status in {"SPECIALIST_PENDING", "REVIEWER_PENDING"}:
             expected_role = (
@@ -335,17 +340,75 @@ class MethodStateV2(_MethodStateContract):
                 if (
                     self.reason_code is not None
                     or self.specialist_evaluation is None
-                    or self.reviewer_evaluation is None
-                    or self.consensus is None
-                    or self.consensus.status != "RESOLVED"
                     or self.reasons
                 ):
-                    raise ValueError("resolved state requires complete resolved consensus")
+                    raise ValueError("resolved state requires a Specialist evaluation")
+                if self.consensus is None:
+                    specialist_verdicts = tuple(
+                        item.verdict
+                        for item in self.specialist_evaluation.evaluations
+                    )
+                    if (
+                        self.reviewer_evaluation is not None
+                        or self.reviewer_protocol_failures != 0
+                        or "UNKNOWN" in specialist_verdicts
+                        or "CONFIRMED" not in specialist_verdicts
+                    ):
+                        raise ValueError(
+                            "Specialist-only resolved state requires a confirmed complete evaluation"
+                        )
+                elif (
+                    self.reviewer_evaluation is None
+                    or self.consensus.status != "RESOLVED"
+                ):
+                    raise ValueError(
+                        "reviewed resolved state requires complete resolved consensus"
+                    )
             elif self.status == "UNRESOLVED":
                 if self.reason_code not in UNRESOLVED_METHOD_REASON_CODES_V2:
                     raise ValueError("unresolved state reason code is invalid")
                 if self.consensus is not None and self.consensus.status != "UNRESOLVED":
                     raise ValueError("unresolved state cannot retain resolved consensus")
+                if (
+                    self.consensus is not None
+                    and self.reason_code not in CONSENSUS_UNRESOLVED_REASON_CODES_V2
+                ):
+                    raise ValueError(
+                        "only a consensus reason may retain Reviewer consensus"
+                    )
+                if self.reason_code in {
+                    "INCOMPLETE_EVALUATION",
+                    "NO_CONFIRMED_METHOD",
+                } and self.consensus is None:
+                    if (
+                        self.specialist_evaluation is None
+                        or self.reviewer_protocol_failures != 0
+                    ):
+                        raise ValueError(
+                            "Specialist-only unresolved state requires its evaluation"
+                        )
+                    specialist_verdicts = tuple(
+                        item.verdict
+                        for item in self.specialist_evaluation.evaluations
+                    )
+                    if self.reason_code == "INCOMPLETE_EVALUATION":
+                        valid_specialist_terminal = "UNKNOWN" in specialist_verdicts
+                    else:
+                        valid_specialist_terminal = bool(specialist_verdicts) and all(
+                            verdict == "REJECTED"
+                            for verdict in specialist_verdicts
+                        )
+                    if not valid_specialist_terminal:
+                        raise ValueError(
+                            "Specialist-only unresolved reason differs from its verdicts"
+                        )
+                if (
+                    self.reason_code == "SPECIALIST_REVIEWER_DISAGREEMENT"
+                    and self.consensus is None
+                ):
+                    raise ValueError(
+                        "Specialist/Reviewer disagreement requires Reviewer consensus"
+                    )
             elif (
                 self.status == "FAILED"
                 and self.reason_code not in FAILED_METHOD_REASON_CODES_V2
@@ -522,11 +585,11 @@ class MethodTerminalResultV2(_MethodStateContract):
         )
         if self.status == "RESOLVED":
             if self.reason_code is not None or any(not value for value in confirmed_values):
-                raise ValueError("resolved result requires consensus-confirmed refs")
+                raise ValueError("resolved result requires validated confirmed refs")
             if evaluation_refs != self.confirmed_evaluation_refs:
-                raise ValueError("resolved evaluations must exactly match consensus refs")
+                raise ValueError("resolved evaluations must exactly match confirmed refs")
             if tuple(item.method_id for item in self.evaluations) != self.confirmed_method_ids:
-                raise ValueError("resolved evaluation methods must match consensus methods")
+                raise ValueError("resolved evaluation methods must match confirmed methods")
             mapped_event_refs = tuple(
                 dict.fromkeys(
                     ref for item in self.evaluations for ref in item.evidence_event_refs
@@ -631,44 +694,66 @@ def validate_method_terminal_result_v2(
     if validated_state.status != "RESOLVED":
         return validated_result
 
-    consensus = validated_state.consensus
-    if consensus is None or consensus.status != "RESOLVED":
-        raise ValueError("resolved terminal result requires resolved state consensus")
     by_ref = {
         item.evaluation_ref: item for item in validated_plan.evaluations
     }
+    specialist = validated_state.specialist_evaluation
+    reviewer = validated_state.reviewer_evaluation
+    consensus = validated_state.consensus
+    if specialist is None:
+        raise ValueError("resolved terminal result requires a Specialist evaluation")
+    if consensus is None:
+        if reviewer is not None:
+            raise ValueError(
+                "Specialist-only terminal result cannot retain a Reviewer evaluation"
+            )
+        confirmed_evaluation_refs = tuple(
+            item.evaluation_ref
+            for item in specialist.evaluations
+            if item.verdict == "CONFIRMED"
+        )
+        confirmed_method_ids = tuple(
+            by_ref[evaluation_ref].method_id
+            for evaluation_ref in confirmed_evaluation_refs
+        )
+    else:
+        if consensus.status != "RESOLVED" or reviewer is None:
+            raise ValueError(
+                "reviewed terminal result requires resolved state consensus"
+            )
+        confirmed_evaluation_refs = consensus.confirmed_evaluation_refs
+        confirmed_method_ids = consensus.confirmed_method_ids
     try:
         confirmed_plan = tuple(
             by_ref[evaluation_ref]
-            for evaluation_ref in consensus.confirmed_evaluation_refs
+            for evaluation_ref in confirmed_evaluation_refs
         )
     except KeyError as exc:
         raise ValueError(
-            "resolved state consensus references an evaluation outside the Plan"
+            "resolved state references an evaluation outside the Plan"
         ) from exc
-    specialist = validated_state.specialist_evaluation
-    reviewer = validated_state.reviewer_evaluation
-    if specialist is None or reviewer is None:
-        raise ValueError("resolved terminal result requires both role evaluations")
     specialist_by_ref = {
         item.evaluation_ref: item for item in specialist.evaluations
-    }
-    reviewer_by_ref = {
-        item.evaluation_ref: item for item in reviewer.evaluations
     }
     selected_event_refs = tuple(
         specialist_by_ref[item.evaluation_ref].supporting_event_refs
         for item in confirmed_plan
     )
-    if any(
-        reviewer_by_ref[item.evaluation_ref].supporting_event_refs != selected
-        for item, selected in zip(
-            confirmed_plan,
-            selected_event_refs,
-            strict=True,
-        )
-    ):
-        raise ValueError("resolved role evaluations select different evidence events")
+    if reviewer is not None:
+        reviewer_by_ref = {
+            item.evaluation_ref: item for item in reviewer.evaluations
+        }
+        if any(
+            reviewer_by_ref[item.evaluation_ref].supporting_event_refs != selected
+            for item, selected in zip(
+                confirmed_plan,
+                selected_event_refs,
+                strict=True,
+            )
+        ):
+            raise ValueError(
+                "resolved role evaluations select different evidence events"
+            )
     expected_event_refs = tuple(
         dict.fromkeys(
             event_ref
@@ -676,7 +761,7 @@ def validate_method_terminal_result_v2(
             for event_ref in selected
         )
     )
-    if expected_event_refs != consensus.confirmed_event_refs:
+    if consensus is not None and expected_event_refs != consensus.confirmed_event_refs:
         raise ValueError("resolved consensus differs from selected evidence events")
 
     actual_by_ref = {
@@ -729,8 +814,8 @@ def validate_method_terminal_result_v2(
     if (
         validated_result.evaluations != frozen_expected_evaluations
         or validated_result.confirmed_evaluation_refs
-        != consensus.confirmed_evaluation_refs
-        or validated_result.confirmed_method_ids != consensus.confirmed_method_ids
+        != confirmed_evaluation_refs
+        or validated_result.confirmed_method_ids != confirmed_method_ids
         or validated_result.confirmed_event_refs != expected_event_refs
         or validated_result.confirmed_hit_refs != expected_hit_refs
     ):

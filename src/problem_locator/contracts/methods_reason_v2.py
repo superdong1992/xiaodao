@@ -84,7 +84,7 @@ METHOD_PUBLIC_REASON_TEXT_V2: Mapping[str, str] = MappingProxyType(
             "Specialist 与 Reviewer 的判定不一致。"
         ),
         "INCOMPLETE_EVALUATION": "至少一项评估结果仍为 UNKNOWN。",
-        "NO_CONFIRMED_METHOD": "没有任何方法获得双方一致的 CONFIRMED 判定。",
+        "NO_CONFIRMED_METHOD": "没有任何方法获得 CONFIRMED 判定。",
         "NO_MATCHING_METHOD_EVIDENCE": "当前日志中没有匹配任何已加载方法的证据。",
         "RESOURCE_SNAPSHOT_DRIFT": (
             "评估完成前，冻结的资源快照已发生变化。"

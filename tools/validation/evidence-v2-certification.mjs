@@ -17,6 +17,11 @@ import {
   EVIDENCE_V2_SCENARIO_ORACLE_RECEIPT_FILENAME,
   validateEvidenceV2ScenarioOracleReceipt,
 } from "./evidence-v2-scenario-oracle.mjs";
+import {
+  EVIDENCE_V2_DEFAULT_EVALUATION_MODE,
+  EVIDENCE_V2_EVALUATION_MODES,
+  isEvidenceV2EvaluationMode,
+} from "./evidence-v2-evaluation-mode.mjs";
 
 const SHA256 = /^[a-f0-9]{64}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -44,7 +49,8 @@ const TARGET_IDENTITIES = Object.freeze({
 export const EVIDENCE_V2_MODEL_CERT_INPUT_RECEIPT = "evidence-v2-model-cert-input";
 export const EVIDENCE_V2_MODEL_CERT_RECEIPT = "evidence-v2-model-cert";
 export const EVIDENCE_V2_RELEASE_VERDICT_RECEIPT = "evidence-v2-release-verdict";
-export const EVIDENCE_V2_CERTIFICATION_SCHEMA_VERSION = 1;
+export { EVIDENCE_V2_DEFAULT_EVALUATION_MODE, EVIDENCE_V2_EVALUATION_MODES };
+export const EVIDENCE_V2_CERTIFICATION_SCHEMA_VERSION = 2;
 export const EVIDENCE_V2_CERTIFICATION_SCENARIO_ID = "multiple-rpc-timeouts";
 export const EVIDENCE_V2_MODEL_CERT_INPUT_FILENAME = "model-cert-input.json";
 export const EVIDENCE_V2_MODEL_CERT_FILENAME = "model-cert.json";
@@ -68,6 +74,11 @@ function sha256(value, code, label) {
 
 function safeCount(value, code, label, { positive = false } = {}) {
   assertFlow(Number.isSafeInteger(value) && value >= (positive ? 1 : 0), code, `${label} has an invalid count`);
+}
+
+function validateEvaluationMode(value, expected, code, label) {
+  assertFlow(isEvidenceV2EvaluationMode(value), code, `${label} is invalid`);
+  assertFlow(value === expected, `${code}_MISMATCH`, `${label} does not match the selected evaluation mode`);
 }
 
 function validateFileBinding(value, { expectedPath, code, label }) {
@@ -170,20 +181,31 @@ function expectedCallCounts(invocations) {
   };
 }
 
-function validateCalls(invocations, counts, aggregateUsage) {
+function validateCalls(invocations, counts, aggregateUsage, evaluationMode) {
   assertFlow(Array.isArray(invocations), "MODEL_CERT_INVOCATIONS", "model invocations must be an array");
-  assertFlow(invocations.length >= 2 && invocations.length <= 4, "MODEL_CERT_INVOCATION_COUNT", "model certification requires two primary calls and at most one repair per role");
+  assertFlow(
+    invocations.length >= (evaluationMode === "SPECIALIST_ONLY" ? 1 : 2)
+      && invocations.length <= (evaluationMode === "SPECIALIST_ONLY" ? 2 : 4),
+    "MODEL_CERT_INVOCATION_COUNT",
+    "model invocation count does not match the evaluation mode",
+  );
   invocations.forEach(validateInvocation);
   assertFlow(new Set(invocations.map((value) => value.invocation_id)).size === invocations.length, "MODEL_CERT_INVOCATION_ID", "model invocation ids must be unique");
-  assertFlow(
-    new Set([
+  const allowedTopologies = evaluationMode === "SPECIALIST_ONLY"
+    ? new Set([
+      "SPECIALIST:PRIMARY",
+      "SPECIALIST:PRIMARY,SPECIALIST:REPAIR",
+    ])
+    : new Set([
       "SPECIALIST:PRIMARY,REVIEWER:PRIMARY",
       "SPECIALIST:PRIMARY,SPECIALIST:REPAIR,REVIEWER:PRIMARY",
       "SPECIALIST:PRIMARY,REVIEWER:PRIMARY,REVIEWER:REPAIR",
       "SPECIALIST:PRIMARY,SPECIALIST:REPAIR,REVIEWER:PRIMARY,REVIEWER:REPAIR",
-    ]).has(invocationTopology(invocations)),
+    ]);
+  assertFlow(
+    allowedTopologies.has(invocationTopology(invocations)),
     "MODEL_CERT_INVOCATION_TOPOLOGY",
-    "model invocations must contain one primary call and at most one immediate repair for each isolated role",
+    "model invocations do not match the evaluation-mode topology",
   );
   exactKeys(
     counts,
@@ -291,6 +313,7 @@ function modelCertBodyFields(receiptType) {
     "schema_version",
     "receipt_type",
     "status",
+    "evaluation_mode",
     "certification_target",
     "source_snapshot_digest",
     "contract_manifest",
@@ -309,11 +332,16 @@ function modelCertBodyFields(receiptType) {
   return fields;
 }
 
-function validateModelCertBody(value, { receiptType, certificationTarget } = {}) {
+function validateModelCertBody(value, {
+  receiptType,
+  certificationTarget,
+  evaluationMode = EVIDENCE_V2_DEFAULT_EVALUATION_MODE,
+} = {}) {
   exactKeys(value, modelCertBodyFields(receiptType), "MODEL_CERT_FIELDS", "model certification receipt");
   assertFlow(value.schema_version === EVIDENCE_V2_CERTIFICATION_SCHEMA_VERSION, "MODEL_CERT_VERSION", "unsupported model certification schema version");
   assertFlow(value.receipt_type === receiptType, "MODEL_CERT_TYPE", "model certification receipt type is invalid");
   assertFlow(value.status === "PASS", "MODEL_CERT_STATUS", "model certification status must be PASS");
+  validateEvaluationMode(value.evaluation_mode, evaluationMode, "MODEL_CERT_EVALUATION_MODE", "model certification evaluation mode");
   assertFlow(TARGETS.includes(value.certification_target), "MODEL_CERT_TARGET", "model certification target is invalid");
   if (certificationTarget !== undefined) assertFlow(value.certification_target === certificationTarget, "MODEL_CERT_TARGET_MISMATCH", "model certification target does not match its Gate");
   sha256(value.source_snapshot_digest, "MODEL_CERT_SOURCE_DIGEST", "source snapshot digest");
@@ -337,7 +365,7 @@ function validateModelCertBody(value, { receiptType, certificationTarget } = {})
   validateModel(value.model);
   validateTargetIdentity(value);
   validateExecutionIdentity(value.execution_identity);
-  validateCalls(value.invocations, value.call_counts, value.usage);
+  validateCalls(value.invocations, value.call_counts, value.usage, evaluationMode);
   validateMethodsResult(value.methods_result);
   validateScenarioResultBinding(value.scenario, value.methods_result);
   if (receiptType === EVIDENCE_V2_MODEL_CERT_RECEIPT) {
@@ -399,18 +427,19 @@ export function validateEvidenceV2ModelCertSchema(value, options = {}) {
 
 export function validateEvidenceV2ModelCertInput(value, {
   certificationTarget,
+  evaluationMode = EVIDENCE_V2_DEFAULT_EVALUATION_MODE,
   sourceSnapshotDigest,
   sourceRoot,
   coreVerdictPath,
   certRoot,
 } = {}) {
-  validateEvidenceV2ModelCertInputSchema(value, { certificationTarget });
+  validateEvidenceV2ModelCertInputSchema(value, { certificationTarget, evaluationMode });
   validateCoreAndSource(value, { sourceSnapshotDigest, sourceRoot, coreVerdictPath });
-  if (certRoot !== undefined) replayScenarioOracle(value, { sourceRoot, certRoot });
+  if (certRoot !== undefined) replayScenarioOracle(value, { sourceRoot, certRoot, evaluationMode });
   return value;
 }
 
-function replayScenarioOracle(value, { sourceRoot, certRoot }) {
+function replayScenarioOracle(value, { sourceRoot, certRoot, evaluationMode }) {
   assertFlow(typeof certRoot === "string" && path.isAbsolute(certRoot), "MODEL_CERT_ROOT", "model certification root must be absolute");
   const receiptPath = path.join(certRoot, EVIDENCE_V2_SCENARIO_ORACLE_RECEIPT_FILENAME);
   requireFile(receiptPath, "MODEL_CERT_SCENARIO_ORACLE_MISSING", "scenario oracle receipt");
@@ -422,6 +451,7 @@ function replayScenarioOracle(value, { sourceRoot, certRoot }) {
     scenario: value.scenario,
     providerInvocations: value.invocations,
     modelId: value.model.id,
+    evaluationMode,
   });
   const summary = receipt.summary;
   const publicPath = path.join(certRoot, EVIDENCE_V2_PUBLIC_METHODS_RESULT_FILENAME);
@@ -430,7 +460,7 @@ function replayScenarioOracle(value, { sourceRoot, certRoot }) {
     value.methods_result.canonical_sha256 === sha256File(publicPath)
       && value.methods_result.canonical_size === fs.statSync(publicPath).size
       && value.methods_result.case_id === summary.case_id
-      && value.methods_result.source_job_id === summary.reviewer_job_id
+      && value.methods_result.source_job_id === (summary.reviewer_job_id ?? summary.source_job_id)
       && value.methods_result.result_ref === summary.result_ref
       && value.methods_result.evaluation_id === summary.evaluation_id
       && value.methods_result.status === "RESOLVED"
@@ -445,12 +475,13 @@ function replayScenarioOracle(value, { sourceRoot, certRoot }) {
 
 export function validateEvidenceV2ModelCert(value, {
   certificationTarget,
+  evaluationMode = EVIDENCE_V2_DEFAULT_EVALUATION_MODE,
   sourceSnapshotDigest,
   sourceRoot,
   coreVerdictPath,
   certRoot,
 } = {}) {
-  validateEvidenceV2ModelCertSchema(value, { certificationTarget });
+  validateEvidenceV2ModelCertSchema(value, { certificationTarget, evaluationMode });
   assertFlow(typeof certRoot === "string" && path.isAbsolute(certRoot), "MODEL_CERT_ROOT", "model certification root must be absolute");
   const inputPath = path.join(certRoot, EVIDENCE_V2_MODEL_CERT_INPUT_FILENAME);
   requireFile(inputPath, "MODEL_CERT_ADAPTER_INPUT_MISSING", "model certification adapter input");
@@ -458,6 +489,7 @@ export function validateEvidenceV2ModelCert(value, {
   const input = readJson(inputPath);
   validateEvidenceV2ModelCertInput(input, {
     certificationTarget,
+    evaluationMode,
     sourceSnapshotDigest,
     sourceRoot,
     coreVerdictPath,
@@ -469,6 +501,7 @@ export function validateEvidenceV2ModelCert(value, {
 
 export function buildEvidenceV2ModelCert({
   certificationTarget,
+  evaluationMode = EVIDENCE_V2_DEFAULT_EVALUATION_MODE,
   sourceSnapshotDigest,
   sourceRoot,
   coreVerdictPath,
@@ -480,6 +513,7 @@ export function buildEvidenceV2ModelCert({
   const input = readJson(inputPath);
   validateEvidenceV2ModelCertInput(input, {
     certificationTarget,
+    evaluationMode,
     sourceSnapshotDigest,
     sourceRoot,
     coreVerdictPath,
@@ -495,6 +529,7 @@ export function buildEvidenceV2ModelCert({
   };
   return validateEvidenceV2ModelCert(cert, {
     certificationTarget,
+    evaluationMode,
     sourceSnapshotDigest,
     sourceRoot,
     coreVerdictPath,
@@ -510,14 +545,15 @@ function relativeArtifactPath(artifactRoot, filePath, code) {
   return relative.split(path.sep).join("/");
 }
 
-function validateModelCertBinding(value, target) {
+function validateModelCertBinding(value, target, evaluationMode) {
   exactKeys(
     value,
-    ["certification_target", "path", "sha256", "provider", "model", "scenario_oracle", "methods_result"],
+    ["certification_target", "evaluation_mode", "path", "sha256", "provider", "model", "scenario_oracle", "methods_result"],
     "RELEASE_VERDICT_MODEL_CERT_FIELDS",
     `release ${target} model certification binding`,
   );
   assertFlow(value.certification_target === target, "RELEASE_VERDICT_MODEL_CERT_TARGET", `release model certification target must be ${target}`);
+  validateEvaluationMode(value.evaluation_mode, evaluationMode, "RELEASE_VERDICT_MODEL_CERT_EVALUATION_MODE", `${target} model certification evaluation mode`);
   nonEmptyString(value.path, "RELEASE_VERDICT_MODEL_CERT_PATH", "release model certification path");
   sha256(value.sha256, "RELEASE_VERDICT_MODEL_CERT_DIGEST", "release model certification digest");
   validateProvider(value.provider);
@@ -535,16 +571,19 @@ function validateModelCertBinding(value, target) {
   });
 }
 
-export function validateEvidenceV2ReleaseVerdictSchema(value) {
+export function validateEvidenceV2ReleaseVerdictSchema(value, {
+  evaluationMode = EVIDENCE_V2_DEFAULT_EVALUATION_MODE,
+} = {}) {
   exactKeys(
     value,
-    ["schema_version", "receipt_type", "status", "source_snapshot_digest", "contract_manifest", "core_verdict", "scenario", "model_certs"],
+    ["schema_version", "receipt_type", "status", "evaluation_mode", "source_snapshot_digest", "contract_manifest", "core_verdict", "scenario", "model_certs"],
     "RELEASE_VERDICT_FIELDS",
     "Evidence V2 release verdict",
   );
   assertFlow(value.schema_version === EVIDENCE_V2_CERTIFICATION_SCHEMA_VERSION, "RELEASE_VERDICT_VERSION", "unsupported Evidence V2 release verdict version");
   assertFlow(value.receipt_type === EVIDENCE_V2_RELEASE_VERDICT_RECEIPT, "RELEASE_VERDICT_TYPE", "Evidence V2 release verdict type is invalid");
   assertFlow(value.status === "PASS", "RELEASE_VERDICT_STATUS", "Evidence V2 release verdict status must be PASS");
+  validateEvaluationMode(value.evaluation_mode, evaluationMode, "RELEASE_VERDICT_EVALUATION_MODE", "release evaluation mode");
   sha256(value.source_snapshot_digest, "RELEASE_VERDICT_SOURCE_DIGEST", "release source snapshot digest");
   validateFileBinding(value.contract_manifest, {
     expectedPath: EVIDENCE_V2_CORE_MANIFEST_PATH,
@@ -558,17 +597,18 @@ export function validateEvidenceV2ReleaseVerdictSchema(value) {
   });
   validateScenario(value.scenario);
   assertFlow(Array.isArray(value.model_certs) && value.model_certs.length === 2, "RELEASE_VERDICT_MODEL_CERTS", "release verdict requires exactly P1 and P2 model certifications");
-  validateModelCertBinding(value.model_certs[0], "P1");
-  validateModelCertBinding(value.model_certs[1], "P2");
+  validateModelCertBinding(value.model_certs[0], "P1", evaluationMode);
+  validateModelCertBinding(value.model_certs[1], "P2", evaluationMode);
   return value;
 }
 
 export function validateEvidenceV2ReleaseVerdict(value, {
+  evaluationMode = EVIDENCE_V2_DEFAULT_EVALUATION_MODE,
   sourceSnapshotDigest,
   sourceRoot,
   artifactRoot,
 } = {}) {
-  validateEvidenceV2ReleaseVerdictSchema(value);
+  validateEvidenceV2ReleaseVerdictSchema(value, { evaluationMode });
   sha256(sourceSnapshotDigest, "RELEASE_VERDICT_EXPECTED_SOURCE_DIGEST", "expected release source snapshot digest");
   assertFlow(value.source_snapshot_digest === sourceSnapshotDigest, "RELEASE_VERDICT_SOURCE_MISMATCH", "release verdict does not bind the active source snapshot");
   const coreVerdictPath = path.join(artifactRoot, ...value.core_verdict.path.split("/"));
@@ -581,6 +621,7 @@ export function validateEvidenceV2ReleaseVerdict(value, {
     const cert = readJson(certPath);
     validateEvidenceV2ModelCert(cert, {
       certificationTarget: target,
+      evaluationMode,
       sourceSnapshotDigest,
       sourceRoot,
       coreVerdictPath,
@@ -598,6 +639,7 @@ export function validateEvidenceV2ReleaseVerdict(value, {
 }
 
 export function buildEvidenceV2ReleaseVerdict({
+  evaluationMode = EVIDENCE_V2_DEFAULT_EVALUATION_MODE,
   sourceSnapshotDigest,
   sourceRoot,
   artifactRoot,
@@ -620,6 +662,7 @@ export function buildEvidenceV2ReleaseVerdict({
     const cert = readJson(certPath);
     validateEvidenceV2ModelCert(cert, {
       certificationTarget: target,
+      evaluationMode,
       sourceSnapshotDigest,
       sourceRoot,
       coreVerdictPath,
@@ -629,6 +672,7 @@ export function buildEvidenceV2ReleaseVerdict({
     else assertFlow(canonicalJson(cert.scenario) === canonicalJson(scenario), "RELEASE_VERDICT_SCENARIO_MISMATCH", "P1 and P2 model certifications bind different scenarios");
     return {
       certification_target: target,
+      evaluation_mode: cert.evaluation_mode,
       path: relativeArtifactPath(artifactRoot, certPath, "RELEASE_VERDICT_MODEL_CERT_PATH"),
       sha256: sha256File(certPath),
       provider: cert.provider,
@@ -641,6 +685,7 @@ export function buildEvidenceV2ReleaseVerdict({
     schema_version: EVIDENCE_V2_CERTIFICATION_SCHEMA_VERSION,
     receipt_type: EVIDENCE_V2_RELEASE_VERDICT_RECEIPT,
     status: "PASS",
+    evaluation_mode: evaluationMode,
     source_snapshot_digest: sourceSnapshotDigest,
     contract_manifest: core.contract_manifest,
     core_verdict: {
@@ -651,6 +696,7 @@ export function buildEvidenceV2ReleaseVerdict({
     model_certs: modelCerts,
   };
   return validateEvidenceV2ReleaseVerdict(verdict, {
+    evaluationMode,
     sourceSnapshotDigest,
     sourceRoot,
     artifactRoot,

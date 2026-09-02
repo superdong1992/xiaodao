@@ -755,7 +755,11 @@ def run_production_model_cert(
     execution_mode: Literal["deterministic-zero-model", "real-model"] = (
         "deterministic-zero-model"
     ),
+    evaluation_mode: Literal["SPECIALIST_ONLY", "BLIND_CONSENSUS"] = (
+        "SPECIALIST_ONLY"
+    ),
 ) -> dict[str, object]:
+    reviewer_enabled = evaluation_mode == "BLIND_CONSENSUS"
     work_root = _ordinary_empty_directory(work_root, "model-cert work root")
     broker_factory = FakeLogparseBrokerFactory()
     guard = InMemoryPublicationCommitGuard()
@@ -834,6 +838,7 @@ def run_production_model_cert(
         id_generator=DeterministicIdGenerator(seed="p2-model-cert-specialist"),
         workspace_manager=WorkspaceManager(work_root / "specialist-runtime"),
         backend=backend,
+        evidence_v2_reviewer_enabled=reviewer_enabled,
     )
     specialist_receipt = specialist_runtime.execute(
         source_job,
@@ -879,6 +884,7 @@ def run_production_model_cert(
             id_generator=DeterministicIdGenerator(seed="p2-model-cert-reviewer"),
             workspace_manager=WorkspaceManager(work_root / "reviewer-runtime"),
             backend=backend,
+            evidence_v2_reviewer_enabled=reviewer_enabled,
         )
         reviewer_receipt = reviewer_runtime.execute(
             review_job,
@@ -1084,6 +1090,7 @@ def run_production_model_cert(
         "receipt_type": "codex-luna-evidence-v2-runtime-result",
         "status": "PASS",
         "execution_mode": execution_mode,
+        "evaluation_mode": evaluation_mode,
         "runtime_driver": "codex-luna-model-cert-v1",
         "production_runtime": (
             "problem_locator.runtime.diagnosis_runtime.DiagnosisRuntime"
@@ -1162,6 +1169,11 @@ def run_production_model_cert(
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", choices=("fake", "real"), required=True)
+    parser.add_argument(
+        "--evaluation-mode",
+        choices=("SPECIALIST_ONLY", "BLIND_CONSENSUS"),
+        default="SPECIALIST_ONLY",
+    )
     parser.add_argument("--source-root", type=Path, required=True)
     parser.add_argument("--registration-root", type=Path)
     parser.add_argument("--scenario-root", type=Path)
@@ -1310,6 +1322,7 @@ def main(argv: list[str] | None = None) -> int:
             scenario_id=values.scenario_id,
             evidence_root=values.evidence_root,
             execution_mode=execution_mode,
+            evaluation_mode=values.evaluation_mode,
         )
         raw = canonical_json_bytes(result)
         values.receipt_path.parent.mkdir(parents=True, exist_ok=True)

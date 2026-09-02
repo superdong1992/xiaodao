@@ -49,6 +49,7 @@ class Settings:
     logparse_python: Path
     dfx_log_level: str
     dfx_log_dir: Path | None
+    evidence_v2_reviewer_enabled: bool = False
 
     @classmethod
     def load(
@@ -145,6 +146,15 @@ class Settings:
         if dfx_log_dir is not None and not dfx_log_dir.is_absolute():
             raise SettingsError("DFX_LOG_DIR must be an absolute path")
 
+        raw_reviewer_enabled = values.get(
+            "EVIDENCE_V2_REVIEWER_ENABLED",
+            "false",
+        )
+        if raw_reviewer_enabled not in {"true", "false"}:
+            raise SettingsError(
+                "EVIDENCE_V2_REVIEWER_ENABLED must be true or false"
+            )
+
         return cls(
             data_root=paths["DATA_ROOT"],
             public_base_url=base_url.rstrip("/"),
@@ -158,6 +168,7 @@ class Settings:
             logparse_python=logparse_python,
             dfx_log_level=dfx_log_level,
             dfx_log_dir=dfx_log_dir,
+            evidence_v2_reviewer_enabled=raw_reviewer_enabled == "true",
         )
 
     def __repr__(self) -> str:
@@ -169,7 +180,9 @@ class Settings:
             "logparse_repo=<redacted>, logparse_config_path=<redacted>, "
             "logparse_python=<redacted>, "
             f"dfx_log_level={self.dfx_log_level!r}, "
-            f"dfx_log_dir={self.dfx_log_dir!r})"
+            f"dfx_log_dir={self.dfx_log_dir!r}, "
+            "evidence_v2_reviewer_enabled="
+            f"{self.evidence_v2_reviewer_enabled!r})"
         )
 
 

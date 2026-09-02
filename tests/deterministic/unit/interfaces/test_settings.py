@@ -77,6 +77,36 @@ def test_all_fixed_configuration_defaults_are_exact(tmp_path: Path) -> None:
     assert settings.logparse_python == Path(sys.executable)
     assert settings.dfx_log_level == "INFO"
     assert settings.dfx_log_dir is None
+    assert settings.evidence_v2_reviewer_enabled is False
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [("false", False), ("true", True)],
+)
+def test_evidence_v2_reviewer_switch_accepts_only_explicit_boolean_text(
+    tmp_path: Path,
+    value: str,
+    expected: bool,
+) -> None:
+    values = environment(tmp_path)
+    values["EVIDENCE_V2_REVIEWER_ENABLED"] = value
+
+    settings = Settings.load(environ=values)
+
+    assert settings.evidence_v2_reviewer_enabled is expected
+
+
+@pytest.mark.parametrize("value", ["", "TRUE", "False", "1", "yes"])
+def test_evidence_v2_reviewer_switch_rejects_noncanonical_values(
+    tmp_path: Path,
+    value: str,
+) -> None:
+    values = environment(tmp_path)
+    values["EVIDENCE_V2_REVIEWER_ENABLED"] = value
+
+    with pytest.raises(SettingsError, match="EVIDENCE_V2_REVIEWER_ENABLED"):
+        Settings.load(environ=values)
 
 
 def test_dfx_log_dir_accepts_an_absolute_path(tmp_path: Path) -> None:

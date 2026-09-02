@@ -38,7 +38,12 @@ FAKE_LOGPARSE_CONFIG = FAKE_LOGPARSE_REPO / "config.yaml"
 CASE_ID = "00000000-0000-0000-0000-000000000801"
 
 
-def _settings(data_root: Path, *, skill_dir: Path = SKILL_DIR) -> Settings:
+def _settings(
+    data_root: Path,
+    *,
+    skill_dir: Path = SKILL_DIR,
+    reviewer_enabled: bool = False,
+) -> Settings:
     return Settings.load(
         environ={
             "DATA_ROOT": str(data_root),
@@ -49,6 +54,9 @@ def _settings(data_root: Path, *, skill_dir: Path = SKILL_DIR) -> Settings:
             "LOGPARSE_CONFIG_PATH": str(FAKE_LOGPARSE_CONFIG),
             "LOGPARSE_PYTHON": sys.executable,
             "CLAUDE_COMMAND": "claude",
+            "EVIDENCE_V2_REVIEWER_ENABLED": (
+                "true" if reviewer_enabled else "false"
+            ),
         }
     )
 
@@ -168,6 +176,7 @@ def test_unique_object_graph_recovery_export_and_shutdown_lock_order(
         )
         assert graph.runtime._logparse_broker_factory is graph.logparse_broker_factory
         assert graph.runtime._asset_resolver._catalog is graph.asset_catalog
+        assert graph.runtime._evidence_v2_reviewer_enabled is False
 
         before = graph.state_admin.readiness()
         assert [check.name for check in before.checks] == [
@@ -208,6 +217,19 @@ def test_unique_object_graph_recovery_export_and_shutdown_lock_order(
     assert graph.retention.thread_alive is False
     replacement = FileInstanceLock(graph.layout.instance_lock).acquire()
     replacement.release()
+
+
+def test_production_composition_injects_enabled_evidence_v2_reviewer(
+    tmp_path: Path,
+) -> None:
+    graph = build_service(
+        _settings(tmp_path / "data", reviewer_enabled=True)
+    )
+    try:
+        assert graph.settings.evidence_v2_reviewer_enabled is True
+        assert graph.runtime._evidence_v2_reviewer_enabled is True
+    finally:
+        graph.close()
 
 
 def test_asgi_lifespan_runs_recovery_before_ingress_and_releases_lock(

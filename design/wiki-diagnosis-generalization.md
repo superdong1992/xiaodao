@@ -47,7 +47,7 @@ Agent 决定部署范围、Logparse anchor、运行时资产或权威业务结�
 | `.agents` Wiki 元 Skill | 把 Wiki 忠实转为闭合 Methods package | 产品路由、Logparse 产品/anchor、Agent profile 和 output contract |
 | `.claude` 局域网部署元 Skill | 生成完整生产 registration root；固定内置运行时绑定、内部默认 product、作者确认的 module 和双端 USER_FACT anchor | 不得改变 Wiki 诊断语义、固定 slot 或引入客户端本地运行链路 |
 | 产品 registration | 能力描述、部署范围、package 绑定、DIAGNOSE/REVIEW 资产、Logparse plan | 不得改写生成 package 的 Wiki 语义 |
-| Runtime | no-plan preflight、Logparse 冻结、单次证据扫描、Graph/Plan、隔离评估、共识和权威 Outcome | 不让模型扫描日志、自报证据或决定终态 |
+| Runtime | no-plan preflight、Logparse 冻结、单次证据扫描、Graph/Plan、Specialist 单评、可选盲评和权威 Outcome | 不让模型扫描日志、自报证据或决定终态 |
 | Test Flow Gate | 身份、工具轨迹、canonical validator、模型不可见的语义 oracle、主机/服务器证明 | 不向生成 Agent 泄露 oracle 或 registration |
 
 ## 闭合 Methods package
@@ -146,7 +146,7 @@ Workspace，只负责从上传包中选择 authoritative targets。服务端验�
 冻结 `request.json`、目标日志身份、Logparse receipt 和目标日志字节；随后撤销 broker
 环境。模型角色不能重新解包、选择生命周期、调用 Logparse 或遍历其他日志。
 
-冻结的目标日志只作为服务端证据构建输入。Specialist 和 Reviewer 的模型 Workspace
+冻结的目标日志只作为服务端证据构建输入。Specialist 和实际运行的 Reviewer Workspace
 都不包含 `target_logs.json`、`target-logs/`、上传附件、既有 Evidence/Artifact 或先前
 Outcome。
 
@@ -173,22 +173,28 @@ Graph。这个阶段不再读取原始行、不重新匹配 marker，也不全�
 `SkillLoadReceiptV1`；Evidence V2 根本不把这份 V1 receipt 带入评估链路。没有任何
 方法被激活时，服务端直接进入 `UNRESOLVED`，不启动 Specialist。
 
-## Specialist 与 Reviewer 隔离评估
+## Specialist 单评与可选 Reviewer 隔离评估
 
-Specialist 和 Reviewer 使用同一选定模型身份，但分别运行在独立 Job、Workspace 和
-上下文中。两者只读取：
+Specialist 始终先独立评估完整 Plan。默认 `EVIDENCE_V2_REVIEWER_ENABLED=false`，服务端校验
+Specialist 输出后直接形成终态，不创建 REVIEW Job。没有 `UNKNOWN` 且至少一项为
+`CONFIRMED` 时进入 `RESOLVED`；出现 `UNKNOWN` 或全部为 `REJECTED` 时进入 `UNRESOLVED`。
+该开关只属于当前服务进程，不写入 Case、Job、State 或公开投影；已经进入
+`REVIEWER_PENDING` 的任务和已有 REVIEW Job 仍按原流程完成。
+
+显式设置 `EVIDENCE_V2_REVIEWER_ENABLED=true` 后，Specialist 和 Reviewer 使用同一选定模型身份，
+但分别运行在独立 Job、Workspace 和上下文中。实际运行的角色只读取：
 
 - 当前角色自己的 `request.json`；
 - 同一份 `method-evidence-graph.json` 和 `method-evaluation-plan.json`；
 - `loaded_method_ids` 对应的方法卡及其显式共享引用。
 
-Specialist 先独立评估完整 Plan。其结果通过服务端生成的
+开启 Reviewer 后，Specialist 结果通过服务端生成的
 `methods_review_target` 只传递 Graph、Plan、Skill 和 evaluation 身份，Coordinator
 据此创建不含 Candidate 的 REVIEW Job。Reviewer 看不到 Specialist 的 verdict、reason、
 草稿、状态或上下文；Runtime 只在 Reviewer 模型调用返回后读取 Specialist 的已持久化
 评估，再执行机械共识。
 
-两个角色的输出合同完全相同：Specialist 写
+两个角色使用相同输出合同：Specialist 写
 `output/method-diagnosis.draft.json`，Reviewer 写
 `output/method-review.draft.json`。文件内容是一个 JSON 根数组，并按 Plan 顺序精确
 输出每个 evaluation。每项只能包含：
@@ -209,30 +215,32 @@ Specialist 先独立评估完整 Plan。其结果通过服务端生成的
 hash、identity token、hit ref 或任何证据 receipt。服务端只接受与 Plan 数量、顺序和
 `evaluation_ref` 完全一致的数组。
 
-每个角色第一次出现 JSON 结构或 Plan 覆盖错误时，最多获得一次 repair。repair 仍使用
+每个实际运行的角色第一次出现 JSON 结构或 Plan 覆盖错误时，最多获得一次 repair。repair 仍使用
 同一份 Graph、Plan 和方法卡，只提示重新提交完整数组；第二次仍不合格就进入
 `UNRESOLVED`。已经归档 primary rejection 的重启只运行 repair；primary 和 repair 都已
 归档时直接恢复终态，绝不发起第三次模型调用。
 
-## 共识与状态真值
+## 单评、共识与状态真值
 
-服务端裁决只比较两个角色逐项提交的 `(evaluation_ref, verdict, supporting_event_refs)`，不比较自由文本
-`reason`：
+默认单评直接使用已通过完整合同校验的 Specialist 结果。开启 Reviewer 后，服务端只比较两个角色
+逐项提交的 `(evaluation_ref, verdict, supporting_event_refs)`，不比较自由文本 `reason`：
 
 | 条件 | Methods 状态 |
 | --- | --- |
+| 默认单评没有 `UNKNOWN`，且至少一个 `CONFIRMED` | `RESOLVED` |
+| 默认单评存在 `UNKNOWN`，或全部为 `REJECTED` | `UNRESOLVED` |
 | 两次评估逐项一致、没有 `UNKNOWN`，且至少一个 `CONFIRMED` | `RESOLVED` |
 | 任一项分歧、存在 `UNKNOWN`，或一致但没有确认原因 | `UNRESOLVED` |
 | 没有匹配方法、角色模型失败、输出语义无效或 repair 耗尽 | `UNRESOLVED` |
 | 冻结资源漂移、服务端不变量破坏或审计归档失败 | `FAILED` |
 | 角色执行被取消 | `INTERRUPTED`，保留待执行角色，不发布终态投影 |
 
-`RESOLVED` 只发布两次评估共同确认的 evaluation、method、所选 event，以及由所选 event 机械派生的 hit ref。
+`RESOLVED` 只发布当前裁决路径确认的 evaluation、method、所选 event，以及由所选 event 机械派生的 hit ref。
 `UNRESOLVED` 与 `FAILED` 必须清空全部 confirmed ref，并发布固定 reason code、
 `diagnostic_id` 和公共原因文本。Methods V2 只有 `RESOLVED`、`UNRESOLVED`、`FAILED`
 三种终态，不产生 `PARTIALLY_RESOLVED`。
 
-Reviewer 完成机械共识后，Runtime 还会在该 Job 的 execution records 中写入一次不可变的
+只有 Reviewer 实际运行并完成机械共识后，Runtime 才会在该 Job 的 execution records 中写入一次不可变的
 `methods-consensus-attribution-v2.json`。它只用于内部分析，记录公开 reason code、evaluation
 数量、每项 event 数、激活方法数、package 总方法数，以及下列一个内部子因：
 
@@ -258,7 +266,7 @@ Reviewer 完成机械共识后，Runtime 还会在该 Job 的 execution records 
 ## limitations、公共投影与重放
 
 `limitations` 是服务端拥有的数据。它从 Logparse authoritative target caveat 进入
-Evidence Graph，同时写入独立 limitations record，并原样传到 Reviewer 和最终
+Evidence Graph，同时写入独立 limitations record，并原样传到实际运行的 Reviewer 和最终
 `MethodsTerminalProjectionV2`。无论诊断最终是确认、不可定论还是系统失败，已记录的
 观测限制都不能在跨 Job、重启或终态映射时丢失。
 
@@ -306,20 +314,20 @@ Test Flow 才在 package 外复制产品 registration，以同一 package 字节
    State、Outcome、Case 和 verdict 必须由生产代码生成；fixture 只手写用户输入、Wiki、日志、
    附件和原始不可信模型响应。
 2. Core 必须从真实 Case 入口覆盖 no-plan preflight、Logparse 冻结、单次扫描、casefold、
-   跨 method 相同 literal、Plan 全覆盖、两个隔离角色、每角色一次 repair、共识真值、
+   跨 method 相同 literal、Plan 全覆盖、默认 Specialist 单评、显式开启后的两个隔离角色、每个实际角色一次 repair、两种裁决真值、
    limitations、公共 MCP/REST 投影、重启恢复和 validation-only replay。
 3. 负向用例从生产生成的合法基线开始，每次只修改一个字段。删除关键校验、恢复 receipt
    全量比较、重新匹配 marker 或允许第三次调用时，对应 mutation 必须失败。
 4. Release 先用 `--plan-only` 审查 Proof、Stage、Gate、身份、模型预算、成本与
    admission blockers；Core PASS 之前不运行真实模型探针，同一失败身份不得盲目重试。
-5. 需要真实模型认证时，各 provider cert 必须绑定相同 source snapshot、Evidence V2
+5. 默认真实模型认证只运行 Specialist；显式选择盲评认证时才运行 Reviewer。各 provider cert 必须绑定相同 source snapshot、Evidence V2
    contract digest 和 Core verdict digest，并记录模型 revision、prompt/profile、调用次数、
    repair 次数和预算。只有 Core 与全部要求的 cert 都 PASS，最终 Release verdict 才成立。
 6. Release planning 冻结 Git 可见工作树；只有与该 source snapshot 精确绑定、最后原子写入且
    可重新校验的 `verdict.json` 能声明通过。
 
 Fast E2E 只能消费精确绑定的 registration/package 缓存，经公开 HTTP MCP 跑完 Case、
-ROUTE、LOGPARSE、DIAGNOSE、REVIEW 和 `methods_result` 投影。它的 standalone verdict
+ROUTE、LOGPARSE、DIAGNOSE、显式盲评和 `methods_result` 投影。它的 standalone verdict
 只证明自身声明的短路径，不替代中央 Test Flow 或 Release。
 
 模型名称、预算、超时、执行平台、可执行文件 hash 和缓存 admission 条件由 Test Flow
@@ -335,11 +343,12 @@ ROUTE、LOGPARSE、DIAGNOSE、REVIEW 和 `methods_result` 投影。它的 standa
 - 材料齐备后只运行一次服务端日志扫描。只有自身 activation marker 命中的 method 才进入 Graph，
   且它的全部上下文 hit 都会保留；Plan 精确覆盖全部 Graph event/hit。后续流程只按 ref 映射，
   不再扫描日志或匹配 marker。
-- Specialist 与 Reviewer 使用隔离 Job、Workspace 和上下文，Reviewer 在提交盲评前看不到
-  Specialist 结论；两个角色都只提交完整的
-  `evaluation_ref + verdict + supporting_event_refs + reason` 数组。
-- 每个角色最多一次 repair，重启不能增加调用次数；两次评估逐项一致、无 `UNKNOWN` 且至少
-  确认一个方法时才 `RESOLVED`，其余业务不可定论进入 `UNRESOLVED`。
+- 默认只运行 Specialist；无 `UNKNOWN` 且至少确认一个方法时直接 `RESOLVED`，含 `UNKNOWN`
+  或全部拒绝时进入 `UNRESOLVED`。
+- 显式开启后，Specialist 与 Reviewer 使用隔离 Job、Workspace 和上下文，Reviewer 在提交盲评前
+  看不到 Specialist 结论；两者只提交完整的 `evaluation_ref + verdict + supporting_event_refs + reason` 数组。
+- 每个实际运行的角色最多一次 repair，重启不能增加已开始角色的调用次数；盲评路径只有两次
+  评估逐项一致、无 `UNKNOWN` 且至少确认一个方法时才 `RESOLVED`。
 - Methods V2 不生成 Candidate、`DecisionAuditV2` 或 `PARTIALLY_RESOLVED`；只有资源漂移、
   服务端不变量破坏和审计归档失败进入 `FAILED`，取消则保留 `INTERRUPTED`。
 - Graph/Plan 生成前失败时不得伪造评估引用；Case、MCP 和 REST 必须从 `CaseFailure` 返回稳定

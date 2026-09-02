@@ -324,6 +324,7 @@ def test_fast_e2e_runtime_uses_production_v2_records_without_oracle_feedback(
             scenario_root=cases_root / scenario_id,
             scenario_id=scenario_id,
             role_backend=backend,
+            evaluation_mode="BLIND_CONSENSUS",
         )
         assert runtime_receipt["status"] == "PASS"
         assert runtime_receipt["scenario_id"] == scenario_id
@@ -350,6 +351,7 @@ def test_fast_e2e_oracle_accepts_a_result_not_derived_from_its_expectation(
         ),
         scenario_id=scenario_id,
         role_backend=FakeModelRoleBackend(),
+        evaluation_mode="BLIND_CONSENSUS",
     )
 
     completed = _audit_fast_e2e(
@@ -382,6 +384,7 @@ def test_fast_e2e_oracle_rejects_confirmed_unrelated_noise(
                 {"api-execution-slow", "server-queueing"}
             )
         ),
+        evaluation_mode="BLIND_CONSENSUS",
     )
 
     completed = _audit_fast_e2e(
@@ -413,6 +416,7 @@ def test_historical_insufficient_evidence_terminates_without_a_role_call(
         ),
         scenario_id=scenario_id,
         role_backend=backend,
+        evaluation_mode="BLIND_CONSENSUS",
     )
 
     assert backend.invocations == []
@@ -437,11 +441,9 @@ def test_production_runtime_generates_graph_plan_state_outcome_and_methods_resul
     assert result["production_runtime"] == (
         "problem_locator.runtime.diagnosis_runtime.DiagnosisRuntime"
     )
+    assert result["evaluation_mode"] == "SPECIALIST_ONLY"
     assert result["preprocessing_calls"] in {0, 1}
-    assert _sequence(backend) == [
-        ("SPECIALIST", "PRIMARY"),
-        ("REVIEWER", "PRIMARY"),
-    ]
+    assert _sequence(backend) == [("SPECIALIST", "PRIMARY")]
     assert result["public_case_status"] == "RESOLVED"
     assert result["methods_result"]["status"] == "RESOLVED"
     assert result["methods_result"]["confirmed_method_ids"] == [
@@ -456,45 +458,41 @@ def test_production_runtime_generates_graph_plan_state_outcome_and_methods_resul
     assert result["records"]["source_state"]["filename"] == (
         "methods-state-v2.json"
     )
-    assert result["records"]["source_state"]["status"] == "REVIEWER_PENDING"
-    assert result["records"]["terminal_state"]["filename"] == (
-        "methods-state-v2.json"
-    )
-    assert result["records"]["terminal_state"]["status"] == "RESOLVED"
+    assert result["records"]["source_state"]["status"] == "RESOLVED"
     assert result["records"]["specialist_outcome"]["filename"] == (
         "job_outcome.json"
     )
-    assert result["records"]["reviewer_outcome"]["filename"] == (
-        "job_outcome.json"
-    )
+    assert "reviewer_job" not in result["records"]
+    assert "terminal_state" not in result["records"]
+    assert "reviewer_outcome" not in result["records"]
     assert result["scenario_id"] == "deterministic-rpc-timeout"
     assert result["model_invocations"] == 0
     assert set(result["captured_execution_files"]) == {
         "source_job",
-        "reviewer_job",
         "evidence_graph",
         "evaluation_plan",
         "limitations",
         "source_state",
         "source_outcome",
-        "terminal_state",
-        "reviewer_outcome",
     }
     capture_root = tmp_path / "normal/model-cert-evidence"
     for name in (
         "methods-source-job.json",
-        "methods-reviewer-job.json",
         "methods-evidence-graph-v2.json",
         "methods-evaluation-plan-v2.json",
         "methods-limitations-v2.json",
         "methods-source-state-v2.json",
         "methods-source-outcome-v2.json",
-        "methods-terminal-state-v2.json",
-        "methods-reviewer-outcome-v2.json",
         "methods-result-v2.json",
         "methods.json",
     ):
         assert (capture_root / name).is_file(), name
+    for name in (
+        "methods-reviewer-job.json",
+        "methods-terminal-state-v2.json",
+        "methods-reviewer-outcome-v2.json",
+    ):
+        assert not (capture_root / name).exists(), name
 
 
 def test_production_runtime_allows_one_specialist_repair_only(
@@ -513,7 +511,6 @@ def test_production_runtime_allows_one_specialist_repair_only(
     assert _sequence(backend) == [
         ("SPECIALIST", "PRIMARY"),
         ("SPECIALIST", "REPAIR"),
-        ("REVIEWER", "PRIMARY"),
     ]
 
 
@@ -527,6 +524,7 @@ def test_production_runtime_allows_one_repair_per_role_and_four_calls_total(
     result = run_production_model_cert(
         work_root=tmp_path / "both-repair",
         role_backend=backend,
+        evaluation_mode="BLIND_CONSENSUS",
     )
 
     assert result["methods_result"]["status"] == "RESOLVED"
@@ -611,6 +609,9 @@ def test_production_runtime_archives_every_legal_early_terminal(
             work_root=tmp_path / name / "work",
             evidence_root=evidence_root,
             role_backend=backend,
+            evaluation_mode=(
+                "BLIND_CONSENSUS" if has_reviewer else "SPECIALIST_ONLY"
+            ),
         )
 
         assert result["status"] == "PASS", name
@@ -657,14 +658,18 @@ def test_production_bundle_passes_replayable_semantic_oracle_and_mutations_fail(
         evidence_root=valid_evidence,
         registration_root=registration_root,
         role_backend=FakeModelRoleBackend(
-            rejected_method_ids=frozenset({"server-queueing"})
+            rejected_method_ids=frozenset(
+                {"api-execution-slow", "client-receive-blocked"}
+            )
         ),
+        evaluation_mode="BLIND_CONSENSUS",
     )
     wrong = run_production_model_cert(
         work_root=tmp_path / "wrong-work",
         evidence_root=wrong_evidence,
         registration_root=registration_root,
         role_backend=FakeModelRoleBackend(),
+        evaluation_mode="BLIND_CONSENSUS",
     )
     valid_scenario = tmp_path / "valid-scenario.json"
     wrong_scenario = tmp_path / "wrong-scenario.json"
@@ -691,6 +696,7 @@ const options = (certRoot, scenarioPath) => ({
   scenario: JSON.parse(fs.readFileSync(scenarioPath, "utf8")),
   providerInvocations: invocations,
   modelId: "production-zero-model-fixture",
+  evaluationMode: "BLIND_CONSENSUS",
 });
 const baseline = oracle.buildEvidenceV2ScenarioOracleReceipt(options(validRoot, validScenarioPath));
 oracle.validateEvidenceV2ScenarioOracleReceipt(baseline, options(validRoot, validScenarioPath));

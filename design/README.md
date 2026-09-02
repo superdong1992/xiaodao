@@ -8,7 +8,7 @@
 
 - 产品使用、部署边界与公开行为：[`README.md`](../README.md)
 - 测试框架架构、不变量与完成判据：[`test-flow-architecture.md`](test-flow-architecture.md)
-- 真实 Wiki 转 Methods package、产品注册、Evidence Graph/Plan 与盲评边界：[`wiki-diagnosis-generalization.md`](wiki-diagnosis-generalization.md)
+- 真实 Wiki 转 Methods package、产品注册、Evidence Graph/Plan 与可选盲评边界：[`wiki-diagnosis-generalization.md`](wiki-diagnosis-generalization.md)
 - 测试操作与证据管理：[`tools/test-flow/README.md`](../tools/test-flow/README.md)
 - 当前活跃产品待办：[`TODO.md`](../TODO.md)
 - 已修复问题、回归历史与专项测试：[`FIXED_ISSUES.md`](../FIXED_ISSUES.md)
@@ -22,6 +22,6 @@
 
 Problem Locator 是 Linux 单实例 Server。Windows、macOS 和显式 Linux Client 使用本机 Host，通过 HTTP 直连 Server；客户端没有本地 MCP、代理、Hook 或 Problem Locator 专用 DFX。七个公开 MCP 工具只接受扁平根参数。
 
-State、Job 与权威 Outcome 当前使用 schema V8 / `v8-contract-r1`，并区分 SPECIALIZED/GENERIC DIAGNOSE。SPECIALIZED Agent 只提交 Evidence V2 evaluation verdict；服务端绑定产品 registration 与闭合 package，独立完成 Logparse 预处理、冻结输入、Evidence Graph、Evaluation Plan、共识裁决与权威 Outcome 生成。Methods package 和运行时资产的当前版本表见根 README。
+State、Job 与权威 Outcome 当前使用 schema V8 / `v8-contract-r1`，并区分 SPECIALIZED/GENERIC DIAGNOSE。SPECIALIZED Agent 只提交 Evidence V2 evaluation verdict；服务端绑定产品 registration 与闭合 package，独立完成 Logparse 预处理、冻结输入、Evidence Graph、Evaluation Plan 和权威 Outcome 生成。Reviewer 默认关闭，显式开启后才进入隔离盲评与共识裁决。Methods package 和运行时资产的当前版本表见根 README。
 
-Test Flow 使用 Goal → Proof → Stage → Gate → receipt → verdict 的单一链路。Dev 除快速确定性反馈和受控复用外，还提供两个独立的 Darwin arm64 Codex/Luna Goal：一次调用的 Methods cache bootstrap，以及依赖精确缓存、恰好五次调用的本机 Streamable HTTP MCP 单场景 E2E；二者都不产生 Release 或跨平台结论。Release 绑定当前全部身份，从 GENESIS 和空数据根执行一条 fresh CrossJob。详细语义只在测试架构文档中维护。
+Test Flow 使用 Goal → Proof → Stage → Gate → receipt → verdict 的单一链路。Dev 除快速确定性反馈和受控复用外，还提供独立的 Methods package 生成、默认 Specialist-only P1/P2，以及显式盲评 P1/P2 Goal。默认认证每家正常调用 Specialist 一次、最多 repair 一次；盲评认证保留每家 2–4 次调用，但不阻塞默认 Release。Release 绑定当前全部身份，从 GENESIS 和空数据根执行一条 fresh CrossJob。详细语义只在测试架构文档中维护。

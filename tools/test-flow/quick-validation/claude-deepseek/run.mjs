@@ -53,7 +53,8 @@ const E2E_GOAL = "dev.macos-claude-deepseek-e2e";
 const FAST_E2E_GOAL = "fast-e2e";
 const GOALS = new Set([METHODS_GOAL, E2E_GOAL, FAST_E2E_GOAL]);
 const FLAGS = new Set(["plan-only", "allow-real-model", "all-scenarios", "help"]);
-const VALUE_ARGUMENTS = new Set(["goal", "client", "claude-entry", "claude-settings", "cache-root", "registration-root", "runs-root", "python-entry", "scenario", "source-snapshot-digest", "core-verdict", "reason", "hypothesis", "expected-evidence"]);
+const VALUE_ARGUMENTS = new Set(["goal", "client", "claude-entry", "claude-settings", "cache-root", "registration-root", "runs-root", "python-entry", "scenario", "source-snapshot-digest", "core-verdict", "evaluation-mode", "reason", "hypothesis", "expected-evidence"]);
+const EVALUATION_MODES = new Set(["SPECIALIST_ONLY", "BLIND_CONSENSUS"]);
 
 const REQUIRED_EVIDENCE = Object.freeze({
   [METHODS_GOAL]: ["quick-codex-luna-contracts.tap", "quick-claude-methods-contracts.tap", "claude-identity.json", "model-invocations.json", "model-usage.json", "methods-package.json", "scenario-evaluation-audit.json", "security-audit.json", "adapter-receipt.json"],
@@ -63,6 +64,12 @@ const REQUIRED_EVIDENCE = Object.freeze({
 
 const FAST_E2E_REVIEW_EVIDENCE = Object.freeze([
   ...REQUIRED_EVIDENCE[FAST_E2E_GOAL],
+  "methods-reviewer-job.json",
+  "methods-terminal-state-v2.json",
+  "methods-reviewer-outcome-v2.json",
+]);
+
+const MODEL_CERT_REVIEW_EVIDENCE = new Set([
   "methods-reviewer-job.json",
   "methods-terminal-state-v2.json",
   "methods-reviewer-outcome-v2.json",
@@ -94,6 +101,8 @@ export function parseArguments(argv) {
   if (values["all-scenarios"] === true && values.scenario !== undefined) fail("CLAUDE_DEEPSEEK_SCENARIO_SELECTION_CONFLICT", "--all-scenarios and --scenario are mutually exclusive");
   if (values.goal === FAST_E2E_GOAL && values.scenario !== undefined && !FAST_E2E_SCENARIOS.includes(values.scenario)) fail("CLAUDE_DEEPSEEK_SCENARIO_INVALID", "--scenario is not in the historical Fast E2E matrix");
   if (values.goal === E2E_GOAL && values.scenario !== undefined && values.scenario !== "multiple-rpc-timeouts") fail("CLAUDE_DEEPSEEK_SCENARIO_INVALID", "Evidence V2 model-cert uses only multiple-rpc-timeouts");
+  if (values["evaluation-mode"] !== undefined && values.goal !== E2E_GOAL) fail("CLAUDE_DEEPSEEK_EVALUATION_MODE_FORBIDDEN", "--evaluation-mode belongs only to Evidence V2 model-cert");
+  if (values["evaluation-mode"] !== undefined && !EVALUATION_MODES.has(values["evaluation-mode"])) fail("CLAUDE_DEEPSEEK_EVALUATION_MODE_INVALID", "--evaluation-mode must be SPECIALIST_ONLY or BLIND_CONSENSUS");
   return values;
 }
 
@@ -114,6 +123,7 @@ export function defaults(values, environment = process.env) {
     scenario: values.scenario ?? (values.goal === FAST_E2E_GOAL ? "api-execution-overrun" : "multiple-rpc-timeouts"),
     sourceSnapshotDigest: values["source-snapshot-digest"] ?? null,
     coreVerdict: values["core-verdict"] ? path.resolve(values["core-verdict"]) : null,
+    evaluationMode: values["evaluation-mode"] ?? "SPECIALIST_ONLY",
     retryContext: { reason: values.reason ?? null, hypothesis: values.hypothesis ?? null, expected_evidence: values["expected-evidence"] ?? null },
   };
 }
@@ -125,12 +135,12 @@ function requiredDirectory(directory, code, label, blockers) {
   try { if (!fs.statSync(directory).isDirectory()) throw new Error("not-directory"); } catch { blockers.push({ code, detail: `${label} is unavailable` }); }
 }
 
-function scenarioCallCount(goal, scenario) {
-  return goal === FAST_E2E_GOAL ? fastE2ENormalCallCount(scenario) : 2;
+function scenarioCallCount(goal, scenario, evaluationMode = "SPECIALIST_ONLY") {
+  return goal === FAST_E2E_GOAL ? fastE2ENormalCallCount(scenario) : evaluationMode === "SPECIALIST_ONLY" ? 1 : 2;
 }
 
-function scenarioCallHardCap(goal, scenario) {
-  return goal === FAST_E2E_GOAL ? fastE2ECallHardCap(scenario) : 4;
+function scenarioCallHardCap(goal, scenario, evaluationMode = "SPECIALIST_ONLY") {
+  return goal === FAST_E2E_GOAL ? fastE2ECallHardCap(scenario) : evaluationMode === "SPECIALIST_ONLY" ? 2 : 4;
 }
 
 function scenarioTokenCap(goal, scenario) {
@@ -149,6 +159,12 @@ function fastRequiredEvidence(scenario) {
   return scenario === "insufficient-evidence"
     ? REQUIRED_EVIDENCE[FAST_E2E_GOAL]
     : FAST_E2E_REVIEW_EVIDENCE;
+}
+
+function modelCertRequiredEvidence(evaluationMode) {
+  return evaluationMode === "BLIND_CONSENSUS"
+    ? REQUIRED_EVIDENCE[E2E_GOAL]
+    : REQUIRED_EVIDENCE[E2E_GOAL].filter((name) => !MODEL_CERT_REVIEW_EVIDENCE.has(name));
 }
 
 export function buildPlan(options) {
@@ -255,9 +271,9 @@ export function buildPlan(options) {
     ? 0
     : options.goal === METHODS_GOAL
       ? CLAUDE_DEEPSEEK_METHODS_CALLS
-      : expectedSuiteCalls(scenarios, (scenario) => scenarioCallCount(options.goal, scenario));
+      : expectedSuiteCalls(scenarios, (scenario) => scenarioCallCount(options.goal, scenario, options.evaluationMode));
   const hardCap = [E2E_GOAL, FAST_E2E_GOAL].includes(options.goal)
-    ? scenarios.reduce((sum, scenario) => sum + scenarioCallHardCap(options.goal, scenario), 0)
+    ? scenarios.reduce((sum, scenario) => sum + scenarioCallHardCap(options.goal, scenario, options.evaluationMode), 0)
     : expectedCalls;
   const tokenCap = options.goal === METHODS_GOAL
     ? CLAUDE_DEEPSEEK_METHODS_TOKEN_LIMIT
@@ -266,17 +282,17 @@ export function buildPlan(options) {
     ? CLAUDE_DEEPSEEK_METHODS_USD_LIMIT
     : scenarios.reduce((sum, scenario) => sum + scenarioUsdCap(options.goal, scenario), 0);
   const core = {
-    schema_version: 1, framework: FRAMEWORK_ID, framework_version: FRAMEWORK_VERSION, goal: options.goal, mode, scenario: scenarios.length === 1 ? scenarios[0] : null, scenarios,
+    schema_version: 1, framework: FRAMEWORK_ID, framework_version: FRAMEWORK_VERSION, goal: options.goal, mode, evaluation_mode: options.goal === E2E_GOAL ? options.evaluationMode : null, scenario: scenarios.length === 1 ? scenarios[0] : null, scenarios,
     execution: {
       entry: "tools/test-flow/quick-validation/claude-deepseek/run.mjs", old_cross_job: false, old_test_flow_orchestrator: false, source_snapshot: options.goal === E2E_GOAL, history_reuse: false, automatic_model_retry: false,
       platform, expected_model_processes: expectedCalls, model: CLAUDE_DEEPSEEK_MODEL, token_cap: tokenCap, usd_cap: usdCap,
       model_process_hard_cap: hardCap,
-      per_scenario: scenarios.map((scenario) => ({ scenario_id: scenario, expected_model_processes: scenarioCallCount(options.goal, scenario), model_process_hard_cap: scenarioCallHardCap(options.goal, scenario), token_cap: scenarioTokenCap(options.goal, scenario), usd_cap: scenarioUsdCap(options.goal, scenario) })),
+      per_scenario: scenarios.map((scenario) => ({ scenario_id: scenario, expected_model_processes: scenarioCallCount(options.goal, scenario, options.evaluationMode), model_process_hard_cap: scenarioCallHardCap(options.goal, scenario, options.evaluationMode), token_cap: scenarioTokenCap(options.goal, scenario), usd_cap: scenarioUsdCap(options.goal, scenario) })),
       stage_wall_seconds: [E2E_GOAL, FAST_E2E_GOAL].includes(options.goal) ? CLAUDE_DEEPSEEK_STAGE_WALL_SECONDS * scenarios.length : CLAUDE_DEEPSEEK_STAGE_WALL_SECONDS, per_process_wall_seconds: options.goal === METHODS_GOAL ? 1800 : 600, no_progress_seconds: CLAUDE_DEEPSEEK_NO_PROGRESS_SECONDS, docker: false, browser: false, restart: false,
     },
     inputs: { repository_root: REPO_ROOT, source_snapshot_digest: options.goal === E2E_GOAL ? options.sourceSnapshotDigest : null, core_verdict: options.goal === E2E_GOAL ? options.coreVerdict : null, scratch_root: options.scratchRoot, provider_runtime: providerRuntimeIdentity, client: options.client, claude: identity, producer, production_registration: explicitRegistration ?? { source: options.goal === FAST_E2E_GOAL ? "explicit-required" : "standalone-cache", registration_root: cache.registration_root, registration_id: CLAUDE_DEEPSEEK_REGISTRATION_ID, skill_name: null, tree_sha256: cache.registration_tree_sha256, template_sha256: null, methods_sha256: null }, registration_cache: cache, module: CLAUDE_DEEPSEEK_MODULE, python_entry: options.pythonEntry, retry_context: options.retryContext },
     contracts: options.goal === METHODS_GOAL ? ["quick.codex-luna.contracts", "quick.claude-deepseek.methods.contracts"] : options.goal === FAST_E2E_GOAL ? ["quick.claude-deepseek.fast-e2e.contracts"] : ["quick.claude-deepseek.e2e.contracts"],
-    evidence: REQUIRED_EVIDENCE[options.goal],
+    evidence: options.goal === E2E_GOAL ? modelCertRequiredEvidence(options.evaluationMode) : REQUIRED_EVIDENCE[options.goal],
     admission: { status: blockers.length === 0 ? "READY" : "BLOCKED", blockers },
   };
   return { ...core, plan_sha256: sha256Bytes(canonicalJson(core)) };
@@ -394,7 +410,7 @@ async function executeOne(options, plan, {
   runContractsFirst = true,
   requiredEvidence = plan.goal === FAST_E2E_GOAL
     ? fastRequiredEvidence(plan.scenario)
-    : REQUIRED_EVIDENCE[plan.goal],
+    : plan.evidence,
 } = {}) {
   const roots = standaloneScenarioRoots({ runRoot, runId: id, scratchRoot: options.scratchRoot });
   const { scratch_run_root: scratchRunRoot, work_root: workRoot, private_root: privateRoot, evidence_root: evidenceRoot, usage_root: usageRoot } = roots;
@@ -427,7 +443,7 @@ async function executeOne(options, plan, {
           registrationRoot: plan.inputs.production_registration.registration_root,
           scenario: plan.scenario,
         });
-      } else await runE2E({ ...common, sourceSnapshotDigest: options.sourceSnapshotDigest, coreVerdict: options.coreVerdict, scenario: options.scenario });
+      } else await runE2E({ ...common, sourceSnapshotDigest: options.sourceSnapshotDigest, coreVerdict: options.coreVerdict, scenario: options.scenario, evaluationMode: options.evaluationMode });
     } catch (error) { failure = safeFailure(error); }
   }
   if (deterministicRoot !== null && deterministicRoot !== evidenceRoot) {
@@ -575,7 +591,7 @@ export async function execute(options, plan) {
   return plan.mode === "fast-e2e-suite" ? executeFastSuite(options, plan) : executeOne(options, plan);
 }
 
-function usage() { return `Usage:\n  ./tools/test-flow/quick-validation/claude-deepseek/run.sh --goal ${METHODS_GOAL} [--plan-only] [--allow-real-model]\n  ./tools/test-flow/quick-validation/claude-deepseek/run.sh --goal ${FAST_E2E_GOAL} (--scenario <historical-scenario> | --all-scenarios) --registration-root <path> [--plan-only] [--allow-real-model]\n  ./tools/test-flow/quick-validation/claude-deepseek/run.sh --goal ${E2E_GOAL} --registration-root <path> --scenario multiple-rpc-timeouts --source-snapshot-digest <sha256> --core-verdict <path> [--plan-only] [--allow-real-model]\n`; }
+function usage() { return `Usage:\n  ./tools/test-flow/quick-validation/claude-deepseek/run.sh --goal ${METHODS_GOAL} [--plan-only] [--allow-real-model]\n  ./tools/test-flow/quick-validation/claude-deepseek/run.sh --goal ${FAST_E2E_GOAL} (--scenario <historical-scenario> | --all-scenarios) --registration-root <path> [--plan-only] [--allow-real-model]\n  ./tools/test-flow/quick-validation/claude-deepseek/run.sh --goal ${E2E_GOAL} --registration-root <path> --scenario multiple-rpc-timeouts --source-snapshot-digest <sha256> --core-verdict <path> [--evaluation-mode SPECIALIST_ONLY|BLIND_CONSENSUS] [--plan-only] [--allow-real-model]\n`; }
 
 async function main() {
   try {

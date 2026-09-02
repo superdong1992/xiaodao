@@ -3731,9 +3731,9 @@ class JobOutcome(ContractModel):
                     "non-failed Methods V2 terminal Outcome must not carry an error"
                 )
             if self.job_type is JobType.DIAGNOSE:
-                if methods_terminal.status == "RESOLVED" or methods_reviewer:
+                if methods_reviewer:
                     raise ValueError(
-                        "Methods V2 DIAGNOSE terminal Outcome must be early and unresolved or failed"
+                        "Methods V2 DIAGNOSE terminal Outcome cannot carry a Reviewer result"
                     )
             else:
                 validate_methods_reviewer_terminal_v2(

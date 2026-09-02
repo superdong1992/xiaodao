@@ -41,7 +41,7 @@
         "proof.dev-cross-job-environment",
         "proof.dev-cross-job-route",
         "proof.dev-cross-job-upload",
-        "proof.dev-cross-job-diagnose-review",
+        "proof.dev-cross-job-diagnose",
         "proof.dev-cross-job-publish-restart"
       ]
     },
@@ -52,9 +52,15 @@
       "selectable_proofs": []
     },
     "dev.macos-codex-luna-e2e": {
-      "description": "Run one Evidence V2 P2 model certification with the same production registration, Core receipt and frozen multiple-rpc-timeouts inputs.",
+      "description": "Run one Specialist-only Evidence V2 P2 model certification with the same production registration, Core receipt and frozen multiple-rpc-timeouts inputs.",
       "tracks": ["dev"],
       "required_proofs": ["proof.real-macos-codex-luna-e2e"],
+      "selectable_proofs": []
+    },
+    "dev.macos-codex-luna-blind-review-e2e": {
+      "description": "Explicitly run the optional Evidence V2 P2 Specialist and blind Reviewer certification.",
+      "tracks": ["dev"],
+      "required_proofs": ["proof.real-macos-codex-luna-blind-review-e2e"],
       "selectable_proofs": []
     },
     "dev.macos-claude-deepseek-methods": {
@@ -64,9 +70,15 @@
       "selectable_proofs": []
     },
     "dev.macos-claude-deepseek-e2e": {
-      "description": "Run one Evidence V2 P1 model certification with the same production registration, Core receipt and frozen multiple-rpc-timeouts inputs.",
+      "description": "Run one Specialist-only Evidence V2 P1 model certification with the same production registration, Core receipt and frozen multiple-rpc-timeouts inputs.",
       "tracks": ["dev"],
       "required_proofs": ["proof.real-macos-claude-deepseek-e2e"],
+      "selectable_proofs": []
+    },
+    "dev.macos-claude-deepseek-blind-review-e2e": {
+      "description": "Explicitly run the optional Evidence V2 P1 Specialist and blind Reviewer certification.",
+      "tracks": ["dev"],
+      "required_proofs": ["proof.real-macos-claude-deepseek-blind-review-e2e"],
       "selectable_proofs": []
     },
     "release.full": {
@@ -87,7 +99,7 @@
       "selectable_proofs": []
     },
     "release.evidence-v2-certification": {
-      "description": "Produce the authoritative Evidence V2 release verdict from one source snapshot, one Core receipt, one production registration and both provider certifications.",
+      "description": "Produce the authoritative Specialist-only Evidence V2 release verdict from one source snapshot, one Core receipt, one production registration and both provider certifications.",
       "tracks": ["release"],
       "required_proofs": [
         "proof.framework",
@@ -97,6 +109,20 @@
         "proof.real-macos-claude-deepseek-e2e",
         "proof.real-macos-codex-luna-e2e",
         "proof.evidence-v2-release-verdict"
+      ],
+      "selectable_proofs": []
+    },
+    "release.evidence-v2-blind-review-certification": {
+      "description": "Explicitly certify the optional Evidence V2 blind Reviewer path without making it a dependency of the default Release.",
+      "tracks": ["release"],
+      "required_proofs": [
+        "proof.framework",
+        "proof.repository-static",
+        "proof.deterministic-full",
+        "proof.real-skill-generation",
+        "proof.real-macos-claude-deepseek-blind-review-e2e",
+        "proof.real-macos-codex-luna-blind-review-e2e",
+        "proof.evidence-v2-blind-review-release-verdict"
       ],
       "selectable_proofs": []
     }
@@ -158,9 +184,14 @@
       "stages": ["real.macos-codex-luna-methods"]
     },
     "proof.real-macos-codex-luna-e2e": {
-      "description": "The pinned Codex CLI and gpt-5.6-luna run Specialist and blind Reviewer against the server-built Evidence Graph and Evaluation Plan; normal execution is two calls and each role has at most one repair.",
+      "description": "The pinned Codex CLI and gpt-5.6-luna run Specialist against the server-built Evidence Graph and Evaluation Plan; normal execution is one call with at most one repair.",
       "acceptance": "all",
       "stages": ["real.macos-codex-luna-e2e"]
+    },
+    "proof.real-macos-codex-luna-blind-review-e2e": {
+      "description": "The pinned Codex CLI and gpt-5.6-luna explicitly run Specialist and blind Reviewer; normal execution is two calls and each role has at most one repair.",
+      "acceptance": "all",
+      "stages": ["real.macos-codex-luna-blind-review-e2e"]
     },
     "proof.real-macos-claude-deepseek-methods": {
       "description": "Migrated Codex contracts and Claude Methods contracts pass before one pinned Claude 2.1.89 plus DeepSeek Bootstrap process validates and freezes the Methods cache.",
@@ -168,14 +199,24 @@
       "stages": ["real.macos-claude-deepseek-methods"]
     },
     "proof.real-macos-claude-deepseek-e2e": {
-      "description": "Claude/DeepSeek run Specialist and blind Reviewer against the server-built Evidence Graph and Evaluation Plan; normal execution is two calls and each role has at most one repair.",
+      "description": "Claude/DeepSeek run Specialist against the server-built Evidence Graph and Evaluation Plan; normal execution is one call with at most one repair.",
       "acceptance": "all",
       "stages": ["real.macos-claude-deepseek-e2e"]
     },
+    "proof.real-macos-claude-deepseek-blind-review-e2e": {
+      "description": "Claude/DeepSeek explicitly run Specialist and blind Reviewer; normal execution is two calls and each role has at most one repair.",
+      "acceptance": "all",
+      "stages": ["real.macos-claude-deepseek-blind-review-e2e"]
+    },
     "proof.evidence-v2-release-verdict": {
-      "description": "A zero-model Gate validates and aggregates same-attempt Core, P1 and P2 receipts into release-verdict.json.",
+      "description": "A zero-model Gate validates and aggregates same-attempt Specialist-only Core, P1 and P2 receipts into release-verdict.json.",
       "acceptance": "all",
       "stages": ["evidence-v2.release-verdict"]
+    },
+    "proof.evidence-v2-blind-review-release-verdict": {
+      "description": "A zero-model Gate validates and aggregates the explicitly selected blind-review P1 and P2 receipts.",
+      "acceptance": "all",
+      "stages": ["evidence-v2.blind-review-release-verdict"]
     },
     "proof.real-route": {
       "description": "The isolated real ROUTE Agent contract passes.",
@@ -202,10 +243,10 @@
       "acceptance": "all",
       "stages": ["journey.cross-job.upload"]
     },
-    "proof.dev-cross-job-diagnose-review": {
-      "description": "DIAGNOSE plus automatic REVIEW completes as one indivisible Dev reuse segment.",
+    "proof.dev-cross-job-diagnose": {
+      "description": "The Specialist-only DIAGNOSE stage completes and seals its continuation boundary without creating a REVIEW Job.",
       "acceptance": "all",
-      "stages": ["journey.cross-job.diagnose", "journey.cross-job.review"]
+      "stages": ["journey.cross-job.diagnose"]
     },
     "proof.dev-cross-job-publish-restart": {
       "description": "The Dev CrossJob publish and restart segment completes.",
@@ -220,7 +261,6 @@
         "journey.cross-job.route",
         "journey.cross-job.upload",
         "journey.cross-job.diagnose",
-        "journey.cross-job.review",
         "journey.cross-job.publish-restart"
       ]
     },
@@ -236,12 +276,11 @@
       ]
     },
     "proof.real-agent-cross-job": {
-      "description": "The fresh CrossJob journey supplies the Release real Agent, ROUTE, DIAGNOSE and REVIEW claims.",
+      "description": "The fresh CrossJob journey supplies the Release real Agent, ROUTE and Specialist-only DIAGNOSE claims.",
       "acceptance": "all",
       "stages": [
         "journey.cross-job.route",
-        "journey.cross-job.diagnose",
-        "journey.cross-job.review"
+        "journey.cross-job.diagnose"
       ]
     },
     "proof.real-logparse-cross-job": {

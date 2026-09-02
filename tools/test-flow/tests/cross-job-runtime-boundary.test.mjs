@@ -1127,7 +1127,7 @@ test("every Docker-backed action re-probes identity after its process and before
   const sections = [
     ["async function hostCapability", "async function serverLinuxCapability", "if (result.status"],
     ["async function serverLinuxCapability", "function publicExternalGitIdentity", "let receipt"],
-    ["async function crossJob", "function reviewObservation", "const receiptPath"],
+    ["async function crossJob", "function realEnvironment", "const receiptPath"],
   ];
   for (const [startMarker, endMarker, evidenceMarker] of sections) {
     const start = source.indexOf(startMarker);

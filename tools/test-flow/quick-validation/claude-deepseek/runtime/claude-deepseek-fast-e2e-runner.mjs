@@ -114,6 +114,7 @@ export function productionRuntimeArguments(options) {
       "tools/test-flow/quick-validation/claude-deepseek/runtime/claude_deepseek_model_cert_runtime.py",
     ),
     "--mode", "real",
+    "--evaluation-mode", "BLIND_CONSENSUS",
     "--source-root", options.sourceRoot,
     "--scenario-root", options.scenarioRoot,
     "--scenario-id", options.scenario,
@@ -212,7 +213,7 @@ export function auditRuntime(runtimeReceipt, invocations, scenarioId) {
 
 export function auditFastInvocations(invocations, scenarioId) {
   if (scenarioId !== "insufficient-evidence") {
-    return auditClaudeModelCertInvocations(invocations);
+    return auditClaudeModelCertInvocations(invocations, { evaluationMode: "BLIND_CONSENSUS" });
   }
   requireFast(
     Array.isArray(invocations) && invocations.length === 0,

@@ -8,6 +8,7 @@
     "schema_version",
     "receipt_type",
     "status",
+    "evaluation_mode",
     "certification_target",
     "source_snapshot_digest",
     "contract_manifest",
@@ -23,9 +24,10 @@
     "methods_result"
   ],
   "properties": {
-    "schema_version": { "const": 1 },
+    "schema_version": { "const": 2 },
     "receipt_type": { "const": "evidence-v2-model-cert-input" },
     "status": { "const": "PASS" },
+    "evaluation_mode": { "enum": ["SPECIALIST_ONLY", "BLIND_CONSENSUS"] },
     "certification_target": { "enum": ["P1", "P2"] },
     "source_snapshot_digest": { "$ref": "#/$defs/sha256" },
     "contract_manifest": { "$ref": "#/$defs/manifestBinding" },
@@ -37,7 +39,7 @@
     "execution_identity": { "$ref": "#/$defs/executionIdentity" },
     "invocations": {
       "type": "array",
-      "minItems": 2,
+      "minItems": 1,
       "maxItems": 4,
       "items": { "$ref": "#/$defs/invocation" }
     },
@@ -91,6 +93,20 @@
           }
         }
       }
+    },
+    {
+      "if": {
+        "properties": { "evaluation_mode": { "const": "SPECIALIST_ONLY" } },
+        "required": ["evaluation_mode"]
+      },
+      "then": { "$ref": "#/$defs/specialistOnlyTopology" }
+    },
+    {
+      "if": {
+        "properties": { "evaluation_mode": { "const": "BLIND_CONSENSUS" } },
+        "required": ["evaluation_mode"]
+      },
+      "then": { "$ref": "#/$defs/blindConsensusTopology" }
     }
   ],
   "$defs": {
@@ -280,13 +296,178 @@
         "model_retries"
       ],
       "properties": {
-        "total_calls": { "type": "integer", "minimum": 2, "maximum": 4 },
+        "total_calls": { "type": "integer", "minimum": 1, "maximum": 4 },
         "specialist_calls": { "type": "integer", "minimum": 1, "maximum": 2 },
-        "reviewer_calls": { "type": "integer", "minimum": 1, "maximum": 2 },
+        "reviewer_calls": { "type": "integer", "minimum": 0, "maximum": 2 },
         "specialist_repairs": { "type": "integer", "minimum": 0, "maximum": 1 },
         "reviewer_repairs": { "type": "integer", "minimum": 0, "maximum": 1 },
         "model_retries": { "const": 0 }
       }
+    },
+    "specialistPrimaryInvocation": {
+      "type": "object",
+      "properties": {
+        "role": { "const": "SPECIALIST" },
+        "attempt": { "const": "PRIMARY" }
+      }
+    },
+    "specialistRepairInvocation": {
+      "type": "object",
+      "properties": {
+        "role": { "const": "SPECIALIST" },
+        "attempt": { "const": "REPAIR" }
+      }
+    },
+    "reviewerPrimaryInvocation": {
+      "type": "object",
+      "properties": {
+        "role": { "const": "REVIEWER" },
+        "attempt": { "const": "PRIMARY" }
+      }
+    },
+    "reviewerRepairInvocation": {
+      "type": "object",
+      "properties": {
+        "role": { "const": "REVIEWER" },
+        "attempt": { "const": "REPAIR" }
+      }
+    },
+    "specialistOnlyTopology": {
+      "oneOf": [
+        {
+          "properties": {
+            "invocations": {
+              "minItems": 1,
+              "maxItems": 1,
+              "prefixItems": [
+                { "$ref": "#/$defs/specialistPrimaryInvocation" }
+              ]
+            },
+            "call_counts": {
+              "properties": {
+                "total_calls": { "const": 1 },
+                "specialist_calls": { "const": 1 },
+                "reviewer_calls": { "const": 0 },
+                "specialist_repairs": { "const": 0 },
+                "reviewer_repairs": { "const": 0 }
+              }
+            }
+          }
+        },
+        {
+          "properties": {
+            "invocations": {
+              "minItems": 2,
+              "maxItems": 2,
+              "prefixItems": [
+                { "$ref": "#/$defs/specialistPrimaryInvocation" },
+                { "$ref": "#/$defs/specialistRepairInvocation" }
+              ]
+            },
+            "call_counts": {
+              "properties": {
+                "total_calls": { "const": 2 },
+                "specialist_calls": { "const": 2 },
+                "reviewer_calls": { "const": 0 },
+                "specialist_repairs": { "const": 1 },
+                "reviewer_repairs": { "const": 0 }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "blindConsensusTopology": {
+      "oneOf": [
+        {
+          "properties": {
+            "invocations": {
+              "minItems": 2,
+              "maxItems": 2,
+              "prefixItems": [
+                { "$ref": "#/$defs/specialistPrimaryInvocation" },
+                { "$ref": "#/$defs/reviewerPrimaryInvocation" }
+              ]
+            },
+            "call_counts": {
+              "properties": {
+                "total_calls": { "const": 2 },
+                "specialist_calls": { "const": 1 },
+                "reviewer_calls": { "const": 1 },
+                "specialist_repairs": { "const": 0 },
+                "reviewer_repairs": { "const": 0 }
+              }
+            }
+          }
+        },
+        {
+          "properties": {
+            "invocations": {
+              "minItems": 3,
+              "maxItems": 3,
+              "prefixItems": [
+                { "$ref": "#/$defs/specialistPrimaryInvocation" },
+                { "$ref": "#/$defs/specialistRepairInvocation" },
+                { "$ref": "#/$defs/reviewerPrimaryInvocation" }
+              ]
+            },
+            "call_counts": {
+              "properties": {
+                "total_calls": { "const": 3 },
+                "specialist_calls": { "const": 2 },
+                "reviewer_calls": { "const": 1 },
+                "specialist_repairs": { "const": 1 },
+                "reviewer_repairs": { "const": 0 }
+              }
+            }
+          }
+        },
+        {
+          "properties": {
+            "invocations": {
+              "minItems": 3,
+              "maxItems": 3,
+              "prefixItems": [
+                { "$ref": "#/$defs/specialistPrimaryInvocation" },
+                { "$ref": "#/$defs/reviewerPrimaryInvocation" },
+                { "$ref": "#/$defs/reviewerRepairInvocation" }
+              ]
+            },
+            "call_counts": {
+              "properties": {
+                "total_calls": { "const": 3 },
+                "specialist_calls": { "const": 1 },
+                "reviewer_calls": { "const": 2 },
+                "specialist_repairs": { "const": 0 },
+                "reviewer_repairs": { "const": 1 }
+              }
+            }
+          }
+        },
+        {
+          "properties": {
+            "invocations": {
+              "minItems": 4,
+              "maxItems": 4,
+              "prefixItems": [
+                { "$ref": "#/$defs/specialistPrimaryInvocation" },
+                { "$ref": "#/$defs/specialistRepairInvocation" },
+                { "$ref": "#/$defs/reviewerPrimaryInvocation" },
+                { "$ref": "#/$defs/reviewerRepairInvocation" }
+              ]
+            },
+            "call_counts": {
+              "properties": {
+                "total_calls": { "const": 4 },
+                "specialist_calls": { "const": 2 },
+                "reviewer_calls": { "const": 2 },
+                "specialist_repairs": { "const": 1 },
+                "reviewer_repairs": { "const": 1 }
+              }
+            }
+          }
+        }
+      ]
     },
     "methodsResult": {
       "type": "object",

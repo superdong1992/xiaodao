@@ -334,13 +334,17 @@ export async function runFastE2E(options, {
     usageRoot,
     registrationRoot: resolved.registration.root,
     scenarioRoot: scenario.root,
+    evaluationMode: "BLIND_CONSENSUS",
     skillSource: path.join(
       sourceRoot,
       "tools/test-flow/quick-validation/codex-luna/fixtures/model-cert-skill/codex-luna-evidence-v2-evaluator/SKILL.md",
     ),
     expectedCliVersion: codexLunaAppServerCliVersion(),
   }, { ambient, onProgress });
-  const invocations = readInvocations(usageRoot, { allowFailurePrefix: true });
+  const invocations = readInvocations(usageRoot, {
+    allowFailurePrefix: true,
+    evaluationMode: "BLIND_CONSENSUS",
+  });
   auditRuntime(runtimeReceipt, invocations, options.scenario);
 
   writeJsonNew(path.join(evidenceRoot, "codex-identity.json"), {

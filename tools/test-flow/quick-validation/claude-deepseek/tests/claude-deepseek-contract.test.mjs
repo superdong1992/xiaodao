@@ -9,11 +9,16 @@ import { canonicalJson } from "../../../lib/util.mjs";
 import { ISOLATED_AGENT_ENV_POLICY_VERSION, environmentKeySummary } from "../../../runtime-support/isolated-agent-env.mjs";
 import {
   CLAUDE_DEEPSEEK_CLI_SHA256,
+  CLAUDE_DEEPSEEK_BLIND_REVIEW_MODEL_CERT_MAX_CALLS,
+  CLAUDE_DEEPSEEK_BLIND_REVIEW_MODEL_CERT_NORMAL_CALLS,
+  CLAUDE_DEEPSEEK_BLIND_REVIEW_MODEL_CERT_PHASES,
   CLAUDE_DEEPSEEK_CLIENT_PROMPT_VERSION,
   CLAUDE_DEEPSEEK_CONTRACT_VERSION,
   CLAUDE_DEEPSEEK_MAX_OUTPUT_TOKENS,
   CLAUDE_DEEPSEEK_MODEL,
   CLAUDE_DEEPSEEK_MODEL_CERT_BUDGET_ENFORCEMENT,
+  CLAUDE_DEEPSEEK_MODEL_CERT_MAX_CALLS,
+  CLAUDE_DEEPSEEK_MODEL_CERT_NORMAL_CALLS,
   CLAUDE_DEEPSEEK_MODEL_CERT_PHASES,
   CLAUDE_DEEPSEEK_MODEL_CERT_ROLE_POOL_USD,
   CLAUDE_DEEPSEEK_MODEL_CERT_SCENARIO,
@@ -117,16 +122,26 @@ test("Claude identity constants freeze 2.1.89, CLI hash, DeepSeek model, and 64k
   assert.equal(CLAUDE_DEEPSEEK_MAX_OUTPUT_TOKENS, 64_000);
   assert.equal(CLAUDE_DEEPSEEK_MODEL_CERT_ROLE_POOL_USD, 2);
   assert.equal(CLAUDE_DEEPSEEK_MODEL_CERT_BUDGET_ENFORCEMENT, "claude-cli-threshold+terminal-posthoc-release-cap");
-  assert.deepEqual(CLAUDE_DEEPSEEK_MODEL_CERT_PHASES, ["SPECIALIST", "REVIEWER"]);
+  assert.equal(CLAUDE_DEEPSEEK_MODEL_CERT_NORMAL_CALLS, 1);
+  assert.equal(CLAUDE_DEEPSEEK_MODEL_CERT_MAX_CALLS, 2);
+  assert.equal(CLAUDE_DEEPSEEK_BLIND_REVIEW_MODEL_CERT_NORMAL_CALLS, 2);
+  assert.equal(CLAUDE_DEEPSEEK_BLIND_REVIEW_MODEL_CERT_MAX_CALLS, 4);
+  assert.deepEqual(CLAUDE_DEEPSEEK_MODEL_CERT_PHASES, ["SPECIALIST"]);
+  assert.deepEqual(CLAUDE_DEEPSEEK_BLIND_REVIEW_MODEL_CERT_PHASES, ["SPECIALIST", "REVIEWER"]);
   assert.deepEqual(CLAUDE_DEEPSEEK_PUBLIC_TOOLS, []);
 });
 
-test("Claude model cert owns one fixed production Runtime scenario and two normal calls", () => {
+test("Claude model cert defaults to Specialist-only and preserves explicit blind phases", () => {
   assert.equal(CLAUDE_DEEPSEEK_MODEL_CERT_SCENARIO, "multiple-rpc-timeouts");
-  assert.deepEqual(CLAUDE_DEEPSEEK_MODEL_CERT_PHASES, ["SPECIALIST", "REVIEWER"]);
+  assert.deepEqual(CLAUDE_DEEPSEEK_MODEL_CERT_PHASES, ["SPECIALIST"]);
   assert.deepEqual(CLAUDE_DEEPSEEK_SCENARIOS, ["multiple-rpc-timeouts"]);
   assert.deepEqual(claudeDeepseekE2EPhases(CLAUDE_DEEPSEEK_MODEL_CERT_SCENARIO), CLAUDE_DEEPSEEK_MODEL_CERT_PHASES);
-  assert.equal(claudeDeepseekE2ECallCount(CLAUDE_DEEPSEEK_MODEL_CERT_SCENARIO), 2);
+  assert.equal(claudeDeepseekE2ECallCount(CLAUDE_DEEPSEEK_MODEL_CERT_SCENARIO), 1);
+  assert.deepEqual(
+    claudeDeepseekE2EPhases(CLAUDE_DEEPSEEK_MODEL_CERT_SCENARIO, "BLIND_CONSENSUS"),
+    CLAUDE_DEEPSEEK_BLIND_REVIEW_MODEL_CERT_PHASES,
+  );
+  assert.equal(claudeDeepseekE2ECallCount(CLAUDE_DEEPSEEK_MODEL_CERT_SCENARIO, "BLIND_CONSENSUS"), 2);
 });
 
 test("registration producer identity includes settings and cache freezes the complete generated root", () => {
@@ -216,25 +231,31 @@ test("usage aggregation is cache-inclusive and enforces lifecycle-aware no-retry
   const methods = auditClaudeInvocations(invocations(["REGISTRATION_GENERATION"], "methods"), { workflow: "generation" });
   assert.equal(methods.aggregate.total_tokens, 20);
   const e2e = auditClaudeInvocations(invocations(CLAUDE_DEEPSEEK_MODEL_CERT_PHASES), { workflow: "e2e", scenarioId: CLAUDE_DEEPSEEK_MODEL_CERT_SCENARIO });
-  assert.equal(e2e.aggregate.total_tokens, 40);
+  assert.equal(e2e.aggregate.total_tokens, 20);
   assert.deepEqual(aggregateClaudeUsage(invocations(CLAUDE_DEEPSEEK_MODEL_CERT_PHASES)), {
+    schema_version: 1, input_tokens: 10, output_tokens: 5, cache_creation_input_tokens: 3, cache_read_input_tokens: 2, total_tokens: 20, cost_usd: 0.01,
+  });
+  const blindOptions = { workflow: "e2e", scenarioId: CLAUDE_DEEPSEEK_MODEL_CERT_SCENARIO, evaluationMode: "BLIND_CONSENSUS" };
+  const blind = auditClaudeInvocations(invocations(CLAUDE_DEEPSEEK_BLIND_REVIEW_MODEL_CERT_PHASES), blindOptions);
+  assert.equal(blind.aggregate.total_tokens, 40);
+  assert.deepEqual(aggregateClaudeUsage(invocations(CLAUDE_DEEPSEEK_BLIND_REVIEW_MODEL_CERT_PHASES)), {
     schema_version: 1, input_tokens: 20, output_tokens: 10, cache_creation_input_tokens: 6, cache_read_input_tokens: 4, total_tokens: 40, cost_usd: 0.02,
   });
-  assert.throws(() => auditClaudeInvocations(invocations(["SPECIALIST"]), { workflow: "e2e", scenarioId: CLAUDE_DEEPSEEK_MODEL_CERT_SCENARIO }), (error) => error.code === "CLAUDE_DEEPSEEK_INVOCATION_COUNT_INVALID");
-  const retried = invocations(CLAUDE_DEEPSEEK_MODEL_CERT_PHASES);
+  assert.throws(() => auditClaudeInvocations(invocations(CLAUDE_DEEPSEEK_BLIND_REVIEW_MODEL_CERT_PHASES), { workflow: "e2e", scenarioId: CLAUDE_DEEPSEEK_MODEL_CERT_SCENARIO }), (error) => error.code === "CLAUDE_DEEPSEEK_INVOCATION_COUNT_INVALID");
+  const retried = invocations(CLAUDE_DEEPSEEK_BLIND_REVIEW_MODEL_CERT_PHASES);
   retried[1].retry = 1;
-  assert.throws(() => auditClaudeInvocations(retried, { workflow: "e2e", scenarioId: CLAUDE_DEEPSEEK_MODEL_CERT_SCENARIO }), (error) => error.code === "CLAUDE_DEEPSEEK_INVOCATION_IDENTITY_INVALID");
-  const calibrated = invocations(CLAUDE_DEEPSEEK_MODEL_CERT_PHASES);
+  assert.throws(() => auditClaudeInvocations(retried, blindOptions), (error) => error.code === "CLAUDE_DEEPSEEK_INVOCATION_IDENTITY_INVALID");
+  const calibrated = invocations(CLAUDE_DEEPSEEK_BLIND_REVIEW_MODEL_CERT_PHASES);
   [1.25, 1.25].forEach((cost, index) => { calibrated[index].usage.cost_usd = cost; });
-  assert.equal(auditClaudeInvocations(calibrated, { workflow: "e2e", scenarioId: CLAUDE_DEEPSEEK_MODEL_CERT_SCENARIO }).aggregate.cost_usd, 2.5);
+  assert.equal(auditClaudeInvocations(calibrated, blindOptions).aggregate.cost_usd, 2.5);
   calibrated[1].usage.cost_usd = 3;
-  assert.throws(() => auditClaudeInvocations(calibrated, { workflow: "e2e", scenarioId: CLAUDE_DEEPSEEK_MODEL_CERT_SCENARIO }), (error) => error.code === "CLAUDE_DEEPSEEK_BUDGET_EXCEEDED");
+  assert.throws(() => auditClaudeInvocations(calibrated, blindOptions), (error) => error.code === "CLAUDE_DEEPSEEK_BUDGET_EXCEEDED");
   const over = invocations(CLAUDE_DEEPSEEK_MODEL_CERT_PHASES);
   over[0].usage.cache_read_input_tokens = 2_000_001;
   assert.throws(() => auditClaudeInvocations(over, { workflow: "e2e", scenarioId: CLAUDE_DEEPSEEK_MODEL_CERT_SCENARIO }), (error) => error.code === "CLAUDE_DEEPSEEK_BUDGET_EXCEEDED");
 });
 
-test("Evidence V2 model cert allows only S primary/repair then blind R primary/repair", () => {
+test("Evidence V2 model cert defaults to Specialist-only and preserves explicit blind consensus", () => {
   const roleInvocation = (role, evaluationAttempt) => {
     const priorCostUsd = evaluationAttempt === "PRIMARY" ? 0 : 0.01;
     const effectiveCallCapUsd = 2 - priorCostUsd;
@@ -295,8 +316,16 @@ test("Evidence V2 model cert allows only S primary/repair then blind R primary/r
       bash_call_count: 0,
     };
   };
+  const specialistOnly = [roleInvocation("SPECIALIST", "PRIMARY")];
+  const specialistRepair = [
+    roleInvocation("SPECIALIST", "PRIMARY"),
+    roleInvocation("SPECIALIST", "REPAIR"),
+  ];
+  assert.deepEqual(auditClaudeModelCertInvocations(specialistOnly).repair_counts, { specialist: 0, reviewer: 0 });
+  assert.equal(auditClaudeModelCertInvocations(specialistRepair).hard_call_cap, 2);
   const normal = [roleInvocation("SPECIALIST", "PRIMARY"), roleInvocation("REVIEWER", "PRIMARY")];
-  assert.deepEqual(auditClaudeModelCertInvocations(normal).repair_counts, { specialist: 0, reviewer: 0 });
+  const blind = { evaluationMode: "BLIND_CONSENSUS" };
+  assert.deepEqual(auditClaudeModelCertInvocations(normal, blind).repair_counts, { specialist: 0, reviewer: 0 });
   assert.deepEqual(normal[0].tool_policy.tools, ["Read", "Write"]);
   assert.match(normal[0].tool_policy.allowed_tools[2], /^Edit\(/u);
   const wrongPermissionCategory = structuredClone(normal);
@@ -304,18 +333,19 @@ test("Evidence V2 model cert allows only S primary/repair then blind R primary/r
   const wrongPermissionCore = { ...wrongPermissionCategory[0].tool_policy };
   delete wrongPermissionCore.sha256;
   wrongPermissionCategory[0].tool_policy.sha256 = crypto.createHash("sha256").update(canonicalJson(wrongPermissionCore)).digest("hex");
-  assert.throws(() => auditClaudeModelCertInvocations(wrongPermissionCategory), (error) => error.code === "CLAUDE_DEEPSEEK_ROLE_RECEIPT_TOOL_POLICY_INVALID");
+  assert.throws(() => auditClaudeModelCertInvocations(wrongPermissionCategory, blind), (error) => error.code === "CLAUDE_DEEPSEEK_ROLE_RECEIPT_TOOL_POLICY_INVALID");
   const repaired = [roleInvocation("SPECIALIST", "PRIMARY"), roleInvocation("SPECIALIST", "REPAIR"), roleInvocation("REVIEWER", "PRIMARY"), roleInvocation("REVIEWER", "REPAIR")];
-  assert.equal(auditClaudeModelCertInvocations(repaired).actual_call_count, 4);
-  assert.equal(auditClaudeModelCertInvocations(repaired).aggregate.cost_usd, 0.04);
+  assert.equal(auditClaudeModelCertInvocations(repaired, blind).actual_call_count, 4);
+  assert.equal(auditClaudeModelCertInvocations(repaired, blind).aggregate.cost_usd, 0.04);
   const overCallCap = structuredClone(normal);
   overCallCap[0].usage.cost_usd = 2.000001;
-  assert.throws(() => auditClaudeModelCertInvocations(overCallCap), (error) => error.code === "CLAUDE_DEEPSEEK_MODEL_CERT_BUDGET_RECEIPT_INVALID");
+  assert.throws(() => auditClaudeModelCertInvocations(overCallCap, blind), (error) => error.code === "CLAUDE_DEEPSEEK_MODEL_CERT_BUDGET_RECEIPT_INVALID");
   const wrongRepairRemainder = structuredClone(repaired);
   wrongRepairRemainder[1].budget.prior_cost_usd = 0;
   wrongRepairRemainder[1].budget.effective_call_cap_usd = 2;
   wrongRepairRemainder[1].max_budget_usd = 2;
-  assert.throws(() => auditClaudeModelCertInvocations(wrongRepairRemainder), (error) => error.code === "CLAUDE_DEEPSEEK_MODEL_CERT_BUDGET_RECEIPT_INVALID");
-  assert.throws(() => auditClaudeModelCertInvocations([...normal, roleInvocation("SPECIALIST", "REPAIR")]), (error) => error.code === "CLAUDE_DEEPSEEK_MODEL_CERT_SEQUENCE_INVALID");
-  assert.throws(() => auditClaudeModelCertInvocations([...repaired, roleInvocation("REVIEWER", "REPAIR")]), (error) => error.code === "CLAUDE_DEEPSEEK_MODEL_CERT_CALL_COUNT_INVALID");
+  assert.throws(() => auditClaudeModelCertInvocations(wrongRepairRemainder, blind), (error) => error.code === "CLAUDE_DEEPSEEK_MODEL_CERT_BUDGET_RECEIPT_INVALID");
+  assert.throws(() => auditClaudeModelCertInvocations(normal), (error) => error.code === "CLAUDE_DEEPSEEK_MODEL_CERT_SEQUENCE_INVALID");
+  assert.throws(() => auditClaudeModelCertInvocations([...normal, roleInvocation("SPECIALIST", "REPAIR")], blind), (error) => error.code === "CLAUDE_DEEPSEEK_MODEL_CERT_SEQUENCE_INVALID");
+  assert.throws(() => auditClaudeModelCertInvocations([...repaired, roleInvocation("REVIEWER", "REPAIR")], blind), (error) => error.code === "CLAUDE_DEEPSEEK_MODEL_CERT_CALL_COUNT_INVALID");
 });

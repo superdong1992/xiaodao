@@ -1198,6 +1198,7 @@ def _assemble(
             id_generator=ids,
             workspace_manager=WorkspaceManager(layout.data_root),
             backend=AgentBackend(settings.claude_command),
+            evidence_v2_reviewer_enabled=settings.evidence_v2_reviewer_enabled,
         )
         scheduler = SchedulerService(
             repository,

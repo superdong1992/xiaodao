@@ -18,6 +18,7 @@ from problem_locator.domain.methods_state_v2 import (
     accept_specialist_evaluation_v2,
     fail_method_state_v2,
     finalize_reviewer_consensus_v2,
+    finalize_specialist_evaluation_v2,
     interrupt_method_state_v2,
     record_model_execution_failure_v2,
     record_protocol_error_v2,
@@ -306,6 +307,69 @@ def test_state_reason_code_contract_is_exact() -> None:
         "SERVER_INVARIANT_VIOLATION",
         "AUDIT_ARCHIVE_FAILED",
     }
+
+
+@pytest.mark.parametrize(
+    ("verdicts", "expected_status", "expected_reason", "diagnostic_index"),
+    [
+        (("CONFIRMED", "REJECTED"), "RESOLVED", None, None),
+        (
+            ("CONFIRMED", "UNKNOWN"),
+            "UNRESOLVED",
+            "INCOMPLETE_EVALUATION",
+            1,
+        ),
+        (
+            ("REJECTED", "REJECTED"),
+            "UNRESOLVED",
+            "NO_CONFIRMED_METHOD",
+            0,
+        ),
+    ],
+)
+def test_specialist_only_truth_table_drives_terminal_state(
+    verdicts: tuple[str, str],
+    expected_status: str,
+    expected_reason: str | None,
+    diagnostic_index: int | None,
+) -> None:
+    plan = _plan()
+    specialist, _, _ = _evaluations(plan, specialist_verdicts=verdicts)
+
+    terminal = finalize_specialist_evaluation_v2(
+        state=_start(plan),
+        evaluation=specialist,
+    )
+
+    assert terminal.status == expected_status
+    assert terminal.reason_code == expected_reason
+    assert terminal.current_role is None
+    assert terminal.specialist_evaluation == specialist
+    assert terminal.reviewer_evaluation is None
+    assert terminal.consensus is None
+    assert terminal.reviewer_protocol_failures == 0
+    assert terminal.diagnostic_evaluation_ref == (
+        None
+        if diagnostic_index is None
+        else plan.evaluations[diagnostic_index].evaluation_ref
+    )
+
+
+def test_terminal_state_rejects_half_present_reviewer_consensus() -> None:
+    plan = _plan()
+    reviewed = _resolved(plan)
+    reviewer_without_consensus = _with_recomputed_state_ref(
+        reviewed,
+        consensus=None,
+    )
+
+    with pytest.raises(
+        ValidationError,
+        match="Reviewer evaluation and consensus must be present together",
+    ):
+        MethodStateV2.model_validate(
+            reviewer_without_consensus.model_dump(mode="python")
+        )
 
 
 @pytest.mark.parametrize(

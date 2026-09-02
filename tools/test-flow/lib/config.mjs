@@ -18,11 +18,15 @@ import {
   EVIDENCE_V2_RELEASE_VERDICT_FILENAME,
 } from "../../validation/evidence-v2-certification.mjs";
 import {
+  EVIDENCE_V2_DEFAULT_EVALUATION_MODE,
+  isEvidenceV2EvaluationMode,
+} from "../../validation/evidence-v2-evaluation-mode.mjs";
+import {
   EVIDENCE_V2_LOADED_METHODS_FILENAME,
   EVIDENCE_V2_PUBLIC_METHODS_RESULT_FILENAME,
   EVIDENCE_V2_SCENARIO_ORACLE_RECEIPT_FILENAME,
 } from "../../validation/evidence-v2-scenario-oracle.mjs";
-import { METHODS_V2_CAPTURED_FILES } from "./methods-oracle.mjs";
+import { methodsV2CapturedFiles } from "./methods-oracle.mjs";
 
 const IDENTIFIER = /^[a-z0-9][a-z0-9.-]*$/;
 const PLATFORMS = new Set(["windows", "macos", "linux"]);
@@ -169,7 +173,7 @@ const GATE_FIELDS = {
   "node-test": ["kind", "test_files", "test_glob", "exclude", "min_passed", "python_driver", "evidence"],
   pytest: ["kind", "selectors", "selector_mode", "pytest_args", "environment_profile", "min_passed", "skip_policy", "runtime_profile", "evidence", "isolated_agent_invocations", "result_receipt"],
   "repository-check": ["kind", "check", "paths", "evidence"],
-  "capability-adapter": ["kind", "adapter", "runtime_profile", "required_claims", "result_receipt", "certification_target", "evidence"],
+  "capability-adapter": ["kind", "adapter", "runtime_profile", "required_claims", "result_receipt", "certification_target", "evaluation_mode", "evidence"],
   "cross-job-adapter": ["kind", "phase", "runtime_profile", "evidence_contract", "evidence"],
   observation: ["kind", "observation", "evidence_contract", "evidence"],
 };
@@ -265,6 +269,7 @@ function validateGates(gates) {
       if (gate.result_receipt !== undefined) {
         assertFlow(gate.result_receipt === EVIDENCE_V2_MODEL_CERT_RECEIPT, "CONFIG_MODEL_CERT_RECEIPT", `${gateId} has an unsupported capability receipt`);
         assertFlow(["P1", "P2"].includes(gate.certification_target), "CONFIG_MODEL_CERT_TARGET", `${gateId} has an invalid certification target`);
+        assertFlow(isEvidenceV2EvaluationMode(gate.evaluation_mode), "CONFIG_MODEL_CERT_MODE", `${gateId} has an invalid evaluation mode`);
         const expectedAdapter = gate.certification_target === "P1"
           ? "macos-claude-deepseek-e2e"
           : "macos-codex-luna-e2e";
@@ -276,7 +281,7 @@ function validateGates(gates) {
           identityFilename,
           "model-invocations.json",
           "model-usage.json",
-          ...Object.values(METHODS_V2_CAPTURED_FILES),
+          ...Object.values(methodsV2CapturedFiles(gate.evaluation_mode)),
           EVIDENCE_V2_PUBLIC_METHODS_RESULT_FILENAME,
           EVIDENCE_V2_LOADED_METHODS_FILENAME,
           EVIDENCE_V2_SCENARIO_ORACLE_RECEIPT_FILENAME,
@@ -290,11 +295,14 @@ function validateGates(gates) {
           `${gateId} evidence files do not match the Evidence V2 provider receipt`,
         );
       } else if (gate.adapter === "evidence-v2-release-verdict") {
+        assertFlow(isEvidenceV2EvaluationMode(gate.evaluation_mode), "CONFIG_RELEASE_VERDICT_MODE", `${gateId} has an invalid evaluation mode`);
         assertFlow(
           canonicalJson(gate.evidence) === canonicalJson([EVIDENCE_V2_RELEASE_VERDICT_FILENAME]),
           "CONFIG_RELEASE_VERDICT_EVIDENCE",
           `${gateId} must retain exactly the Evidence V2 release verdict`,
         );
+      } else {
+        assertFlow(gate.evaluation_mode === undefined, "CONFIG_CAPABILITY_MODE_SCOPE", `${gateId} cannot declare an Evidence V2 evaluation mode`);
       }
     } else if (gate.kind === "cross-job-adapter") {
       assertFlow(CROSS_JOB_PHASES.has(gate.phase), "CONFIG_CROSS_JOB_PHASE", `${gateId} has invalid phase`);
@@ -518,7 +526,7 @@ function crossValidate(config) {
     if (stage.checkpoint?.next_stage) {
       assertFlow(stageIds.has(stage.checkpoint.next_stage), "CONFIG_CHECKPOINT_STAGE_UNKNOWN", `${stage.id} checkpoint references unknown stage`);
       const next = config.stages.stages.find((candidate) => candidate.id === stage.checkpoint.next_stage);
-      assertFlow(next.depends_on.includes(stage.id) || (stage.id === "journey.cross-job.review" && next.depends_on.includes(stage.id)), "CONFIG_CHECKPOINT_ORDER", `${stage.id} checkpoint next_stage is not its DAG successor`);
+      assertFlow(next.depends_on.includes(stage.id), "CONFIG_CHECKPOINT_ORDER", `${stage.id} checkpoint next_stage is not its DAG successor`);
     }
   }
   topologicalStages(config.stages.stages, [...stageIds]);
@@ -559,18 +567,34 @@ function crossValidate(config) {
   const modelCertStages = config.stages.stages.filter((stage) => stage.gates.some(
     (gateId) => config.gates.gates[gateId]?.result_receipt === EVIDENCE_V2_MODEL_CERT_RECEIPT,
   ));
-  assertFlow(modelCertStages.length === 2, "CONFIG_MODEL_CERT_STAGES", "Evidence V2 certification requires exactly P1 and P2 stages");
+  assertFlow(modelCertStages.length === 4, "CONFIG_MODEL_CERT_STAGES", "Evidence V2 certification requires one P1 and P2 stage for each evaluation mode");
   assertFlow(modelCertStages.every((stage) => stage.depends_on.includes("deterministic.full")), "CONFIG_MODEL_CERT_CORE_DEPENDENCY", "P1 and P2 must run only after the Evidence V2 Core stage");
   assertFlow(modelCertStages.every((stage) => stage.depends_on.includes("real.skill-generation")), "CONFIG_MODEL_CERT_REGISTRATION_DEPENDENCY", "P1 and P2 must consume the same production registration from real.skill-generation");
-  const releaseVerdictGate = config.gates.gates["evidence-v2.release-verdict"];
-  const releaseVerdictStage = config.stages.stages.find((stage) => stage.gates.includes("evidence-v2.release-verdict"));
-  assertFlow(releaseVerdictGate?.adapter === "evidence-v2-release-verdict", "CONFIG_RELEASE_VERDICT_GATE", "Evidence V2 release verdict Gate is missing");
-  assertFlow(
-    releaseVerdictStage?.depends_on.includes("real.macos-claude-deepseek-e2e")
-      && releaseVerdictStage?.depends_on.includes("real.macos-codex-luna-e2e"),
-    "CONFIG_RELEASE_VERDICT_DEPENDENCIES",
-    "Evidence V2 release verdict must consume P1 and P2 from the same attempt",
-  );
+  for (const evaluationMode of [EVIDENCE_V2_DEFAULT_EVALUATION_MODE, "BLIND_CONSENSUS"]) {
+    const stagesForMode = modelCertStages.filter((stage) => stage.gates.some((gateId) => (
+      config.gates.gates[gateId]?.result_receipt === EVIDENCE_V2_MODEL_CERT_RECEIPT
+      && config.gates.gates[gateId]?.evaluation_mode === evaluationMode
+    )));
+    const targets = stagesForMode.map((stage) => stage.gates
+      .map((gateId) => config.gates.gates[gateId])
+      .find((gate) => gate?.result_receipt === EVIDENCE_V2_MODEL_CERT_RECEIPT)
+      ?.certification_target).sort();
+    assertFlow(
+      stagesForMode.length === 2 && canonicalJson(targets) === canonicalJson(["P1", "P2"]),
+      "CONFIG_MODEL_CERT_MODE_TARGETS",
+      `${evaluationMode} must have exactly one P1 and one P2 model-cert stage`,
+    );
+    const releaseVerdictStage = config.stages.stages.find((stage) => stage.gates.some((gateId) => (
+      config.gates.gates[gateId]?.adapter === "evidence-v2-release-verdict"
+      && config.gates.gates[gateId]?.evaluation_mode === evaluationMode
+    )));
+    assertFlow(releaseVerdictStage, "CONFIG_RELEASE_VERDICT_GATE", `${evaluationMode} release verdict Gate is missing`);
+    assertFlow(
+      stagesForMode.every((stage) => releaseVerdictStage.depends_on.includes(stage.id)),
+      "CONFIG_RELEASE_VERDICT_DEPENDENCIES",
+      `${evaluationMode} release verdict must consume its P1 and P2 stages from the same attempt`,
+    );
+  }
   assertFlow(profileIds.has(config.policy.defaults.runtime_profile), "CONFIG_DEFAULT_RUNTIME_UNKNOWN", "Default runtime profile is unknown");
   for (const track of Object.values(config.policy.tracks)) assertFlow(Object.hasOwn(config.proofs.goals, track.default_goal), "CONFIG_TRACK_GOAL_UNKNOWN", `Unknown default goal ${track.default_goal}`);
 

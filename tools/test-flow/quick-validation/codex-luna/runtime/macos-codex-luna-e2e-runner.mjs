@@ -33,6 +33,7 @@ const MODULE_PATH = fileURLToPath(import.meta.url);
 const CORE_VERDICT_RECEIPT_PATH = "payload/stages/deterministic.full/gates/det.evidence-v2-core/core-verdict.json";
 const CONTRACT_MANIFEST_PATH = "schemas/v2/contract-manifest.json";
 const FIXED_SCENARIO = "multiple-rpc-timeouts";
+const EVALUATION_MODES = new Set(["SPECIALIST_ONLY", "BLIND_CONSENSUS"]);
 
 class ModelCertRunnerError extends Error {
   constructor(code, message, details = {}) {
@@ -49,6 +50,11 @@ function fail(code, message, details = {}) {
 
 function requireCert(condition, code, message, details = {}) {
   if (!condition) fail(code, message, details);
+}
+
+function evaluationMode(value = "SPECIALIST_ONLY") {
+  requireCert(EVALUATION_MODES.has(value), "CODEX_LUNA_MODEL_CERT_EVALUATION_MODE_INVALID", "Model-cert evaluation mode is invalid");
+  return value;
 }
 
 function createEmptyRoot(root, label) {
@@ -180,9 +186,13 @@ function validScenarioIdentity(runtimeReceipt) {
     && plan.canonical_size > 0;
 }
 
-export function auditRuntimeAndInvocations(runtimeReceipt, invocations) {
+export function auditRuntimeAndInvocations(runtimeReceipt, invocations, {
+  evaluationMode: expectedEvaluationMode = "SPECIALIST_ONLY",
+} = {}) {
+  const selectedMode = evaluationMode(expectedEvaluationMode);
   requireCert(runtimeReceipt?.status === "PASS" && runtimeReceipt.execution_mode === "real-model", "CODEX_LUNA_MODEL_CERT_RUNTIME_RECEIPT_INVALID", "Production Evidence V2 Runtime receipt is invalid");
   requireCert(runtimeReceipt.production_runtime === "problem_locator.runtime.diagnosis_runtime.DiagnosisRuntime", "CODEX_LUNA_MODEL_CERT_RUNTIME_IDENTITY_INVALID", "Model-cert did not use the production DiagnosisRuntime");
+  requireCert(runtimeReceipt.evaluation_mode === selectedMode, "CODEX_LUNA_MODEL_CERT_RUNTIME_EVALUATION_MODE_MISMATCH", "Production Runtime used a different evaluation mode");
   requireCert(runtimeReceipt.scenario_id === FIXED_SCENARIO && validScenarioIdentity(runtimeReceipt), "CODEX_LUNA_MODEL_CERT_SCENARIO_IDENTITY_INVALID", "Production Runtime did not bind the complete fixed release scenario");
   const prompts = promptAttempts(runtimeReceipt);
   requireCert(prompts.length === invocations.length, "CODEX_LUNA_MODEL_CERT_RUNTIME_INVOCATION_COUNT_MISMATCH", "Production prompt count differs from provider calls");
@@ -234,16 +244,18 @@ function modelCertInvocations(invocations) {
   }));
 }
 
-export function buildModelCertInput({ sourceSnapshotDigest, contractManifestSha256, coreVerdictSha256, scenarioOracleSha256, identity, invocations, runtimeReceipt, sourceRoot }) {
+export function buildModelCertInput({ sourceSnapshotDigest, contractManifestSha256, coreVerdictSha256, scenarioOracleSha256, identity, invocations, runtimeReceipt, sourceRoot, evaluationMode: requestedEvaluationMode = "SPECIALIST_ONLY" }) {
+  const selectedMode = evaluationMode(requestedEvaluationMode);
   const methods = runtimeReceipt.methods_result_identity;
   const repairs = runtimeReceipt.repair_counts;
   const specialistCalls = invocations.filter((item) => item.role === "SPECIALIST").length;
   const reviewerCalls = invocations.filter((item) => item.role === "REVIEWER").length;
   return Object.freeze({
-    schema_version: 1,
+    schema_version: 2,
     receipt_type: "evidence-v2-model-cert-input",
     status: "PASS",
     certification_target: "P2",
+    evaluation_mode: selectedMode,
     source_snapshot_digest: sourceSnapshotDigest,
     contract_manifest: { path: CONTRACT_MANIFEST_PATH, sha256: contractManifestSha256 },
     core_verdict: { path: CORE_VERDICT_RECEIPT_PATH, sha256: coreVerdictSha256 },
@@ -307,6 +319,7 @@ export async function runProductionRuntime(options, { ambient, onProgress }) {
   const args = [
     script,
     "--mode", "real",
+    "--evaluation-mode", evaluationMode(options.evaluationMode),
     "--source-root", options.sourceRoot,
     "--registration-root", options.registrationRoot,
     "--work-root", path.join(options.workRoot, "runtime-chain"),
@@ -378,13 +391,14 @@ export function defaultRegistrationInput({ options, sourceRoot, workRoot, identi
   return { registration: materializeCachedRegistration({ workRoot, cache, registrationTemplate }), producer, cache };
 }
 
-async function materializeStandaloneModelCert({ sourceRoot, sourceSnapshotDigest, coreVerdictPath, evidenceRoot }) {
+async function materializeStandaloneModelCert({ sourceRoot, sourceSnapshotDigest, coreVerdictPath, evidenceRoot, evaluationMode: requestedEvaluationMode = "SPECIALIST_ONLY" }) {
   const modulePath = path.join(sourceRoot, "tools/validation/evidence-v2-certification.mjs");
   requireCert(fs.existsSync(modulePath), "CODEX_LUNA_MODEL_CERT_SHARED_CONTRACT_MISSING", "Shared Evidence V2 certification builder is unavailable");
   const shared = await import(pathToFileURL(modulePath).href);
   requireCert(typeof shared.buildEvidenceV2ModelCert === "function", "CODEX_LUNA_MODEL_CERT_SHARED_CONTRACT_INVALID", "Shared Evidence V2 certification builder is invalid");
   const cert = shared.buildEvidenceV2ModelCert({
     certificationTarget: "P2",
+    evaluationMode: evaluationMode(requestedEvaluationMode),
     sourceSnapshotDigest,
     sourceRoot,
     coreVerdictPath,
@@ -404,6 +418,7 @@ export async function runE2E(options, {
   readInvocations = readModelCertInvocationReceipts,
   materializeModelCert = materializeStandaloneModelCert,
 } = {}) {
+  const selectedEvaluationMode = evaluationMode(options.evaluationMode);
   const sourceRoot = path.resolve(options.sourceRoot);
   const workRoot = createEmptyRoot(options.workRoot, "model-cert work root");
   const privateRoot = createEmptyRoot(options.privateRoot, "model-cert private root");
@@ -425,8 +440,12 @@ export async function runE2E(options, {
     registrationRoot: resolved.registration.root,
     skillSource: path.join(sourceRoot, "tools/test-flow/quick-validation/codex-luna/fixtures/model-cert-skill/codex-luna-evidence-v2-evaluator/SKILL.md"),
     expectedCliVersion: codexLunaAppServerCliVersion(),
+    evaluationMode: selectedEvaluationMode,
   }, { ambient, onProgress });
-  const invocations = readInvocations(usageRoot, { allowFailurePrefix: true });
+  const invocations = readInvocations(usageRoot, {
+    allowFailurePrefix: true,
+    evaluationMode: selectedEvaluationMode,
+  });
   const terminalFailure = projectEvidenceV2ProviderTerminalFailure({
     certificationTarget: "P2",
     methodsResult: runtimeReceipt?.methods_result,
@@ -445,7 +464,7 @@ export async function runE2E(options, {
       evaluation_ref: failureReceipt.evaluation_ref,
     });
   }
-  const runtimeAudit = auditRuntimeAndInvocations(runtimeReceipt, invocations);
+  const runtimeAudit = auditRuntimeAndInvocations(runtimeReceipt, invocations, { evaluationMode: selectedEvaluationMode });
   if (resolved.cache !== null) assertMethodsPackageUnchanged(resolved.cache);
   requireCert(
     treeDigest(resolved.registration.root) === resolved.registration.tree_sha256,
@@ -464,6 +483,7 @@ export async function runE2E(options, {
     scenario: runtimeReceipt.scenario,
     providerInvocations: normalizedInvocations,
     modelId: CODEX_LUNA_MODEL,
+    evaluationMode: selectedEvaluationMode,
   });
   writeJsonNew(path.join(evidenceRoot, EVIDENCE_V2_SCENARIO_ORACLE_RECEIPT_FILENAME), scenarioOracle);
   validateEvidenceV2ScenarioOracleReceipt(scenarioOracle, {
@@ -472,6 +492,7 @@ export async function runE2E(options, {
     scenario: runtimeReceipt.scenario,
     providerInvocations: normalizedInvocations,
     modelId: CODEX_LUNA_MODEL,
+    evaluationMode: selectedEvaluationMode,
   });
   const modelCertInput = buildModelCertInput({
     sourceSnapshotDigest: options.sourceSnapshotDigest,
@@ -482,6 +503,7 @@ export async function runE2E(options, {
     invocations,
     runtimeReceipt,
     sourceRoot,
+    evaluationMode: selectedEvaluationMode,
   });
   writeJsonNew(path.join(evidenceRoot, "model-cert-input.json"), modelCertInput);
   const modelCert = await materializeModelCert({
@@ -489,11 +511,13 @@ export async function runE2E(options, {
     sourceSnapshotDigest: options.sourceSnapshotDigest,
     coreVerdictPath,
     evidenceRoot,
+    evaluationMode: selectedEvaluationMode,
   });
   const gate = {
     schema_version: 1,
     status: "PASS",
     certification_target: "P2",
+    evaluation_mode: selectedEvaluationMode,
     checks: {
       core_binding: "PASS",
       registration_identity: "PASS",
@@ -514,7 +538,7 @@ export async function runE2E(options, {
 
 export function parseArguments(argv) {
   const values = {};
-  const names = new Set(["source-root", "codex-entry", "auth-source", "python-entry", "cache-root", "registration-root", "work-root", "private-root", "evidence-root", "usage-root", "run-id", "source-snapshot-digest", "core-verdict", "scenario"]);
+  const names = new Set(["source-root", "codex-entry", "auth-source", "python-entry", "cache-root", "registration-root", "work-root", "private-root", "evidence-root", "usage-root", "run-id", "source-snapshot-digest", "core-verdict", "scenario", "evaluation-mode"]);
   for (let index = 0; index < argv.length; index += 2) {
     const argument = argv[index];
     requireCert(argument?.startsWith("--") && index + 1 < argv.length && !argv[index + 1].startsWith("--"), "CODEX_LUNA_MODEL_CERT_ARGUMENT_INVALID", "Model-cert arguments must use --name value pairs");
@@ -527,6 +551,7 @@ export function parseArguments(argv) {
   requireCert(required.every((name) => typeof values[name] === "string" && values[name]), "CODEX_LUNA_MODEL_CERT_ARGUMENT_MISSING", "Model-cert arguments are incomplete");
   requireCert(values["registration-root"] || values["cache-root"], "CODEX_LUNA_MODEL_CERT_REGISTRATION_INPUT_MISSING", "Model-cert requires --registration-root or --cache-root");
   if (values.scenario !== undefined) requireCert(values.scenario === FIXED_SCENARIO, "CODEX_LUNA_MODEL_CERT_SCENARIO_INVALID", "Evidence V2 model-cert uses only multiple-rpc-timeouts");
+  values["evaluation-mode"] = evaluationMode(values["evaluation-mode"]);
   return values;
 }
 
@@ -552,6 +577,7 @@ async function main() {
       sourceSnapshotDigest: values["source-snapshot-digest"],
       coreVerdict: path.resolve(values["core-verdict"]),
       scenario: values.scenario ?? FIXED_SCENARIO,
+      evaluationMode: values["evaluation-mode"],
     };
     const result = await runE2E(options, { onProgress: (phase) => process.stdout.write(`TEST_FLOW_PROGRESS stage.progress codex-luna ${phase}\n`) });
     process.stdout.write(`${canonicalJson(result)}\n`);

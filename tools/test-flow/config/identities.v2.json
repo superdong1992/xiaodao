@@ -119,10 +119,6 @@
     "cross-job-diagnose": {
       "producer": ["product.source", "product.fixtures", "case.journey", "source.agent", "source.diagnose", "source.logparse", "skill.registration", "skill.logparse", "runtime.support", "adapter.cross-job", "external.logparse", "external.mcp", "runtime.claude", "runtime.settings", "runtime.release", "runtime.environment"],
       "proof": ["case.oracle", "proof.real", "framework.runner"]
-    },
-    "cross-job-review": {
-      "producer": ["product.source", "case.journey", "source.review", "skill.registration", "runtime.support", "adapter.cross-job", "runtime.release"],
-      "proof": ["case.oracle", "proof.real", "framework.runner"]
     }
   }
 }

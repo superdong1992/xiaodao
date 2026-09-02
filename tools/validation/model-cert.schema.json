@@ -8,6 +8,7 @@
     "schema_version",
     "receipt_type",
     "status",
+    "evaluation_mode",
     "certification_target",
     "source_snapshot_digest",
     "contract_manifest",
@@ -24,9 +25,10 @@
     "adapter_input"
   ],
   "properties": {
-    "schema_version": { "const": 1 },
+    "schema_version": { "const": 2 },
     "receipt_type": { "const": "evidence-v2-model-cert" },
     "status": { "const": "PASS" },
+    "evaluation_mode": { "enum": ["SPECIALIST_ONLY", "BLIND_CONSENSUS"] },
     "certification_target": { "enum": ["P1", "P2"] },
     "source_snapshot_digest": { "$ref": "model-cert-input.schema.json#/$defs/sha256" },
     "contract_manifest": { "$ref": "model-cert-input.schema.json#/$defs/manifestBinding" },
@@ -38,7 +40,7 @@
     "execution_identity": { "$ref": "model-cert-input.schema.json#/$defs/executionIdentity" },
     "invocations": {
       "type": "array",
-      "minItems": 2,
+      "minItems": 1,
       "maxItems": 4,
       "items": { "$ref": "model-cert-input.schema.json#/$defs/invocation" }
     },
@@ -101,6 +103,20 @@
           }
         }
       }
+    },
+    {
+      "if": {
+        "properties": { "evaluation_mode": { "const": "SPECIALIST_ONLY" } },
+        "required": ["evaluation_mode"]
+      },
+      "then": { "$ref": "model-cert-input.schema.json#/$defs/specialistOnlyTopology" }
+    },
+    {
+      "if": {
+        "properties": { "evaluation_mode": { "const": "BLIND_CONSENSUS" } },
+        "required": ["evaluation_mode"]
+      },
+      "then": { "$ref": "model-cert-input.schema.json#/$defs/blindConsensusTopology" }
     }
   ]
 }

@@ -697,9 +697,9 @@ test("model invocations preserve failed terminals while PASS still requires exac
   assert.match(core, /receipt\.job_sha256/);
   assert.match(core, /receipt\.job_outcome_sha256/);
   assert.match(core, /receipt\.methods_preflight_sha256/);
-  assert.match(core, /correspondence\.service_invocations\.length >= 2 && correspondence\.service_invocations\.length <= 4/);
+  assert.match(core, /correspondence\.service_invocations\.length >= 1 && correspondence\.service_invocations\.length <= 2/);
   assert.match(core, /diagnoseCalls\.length >= 1 && diagnoseCalls\.length <= 2/);
-  assert.match(core, /reviewCalls\.length >= 1 && reviewCalls\.length <= 2/);
+  assert.match(core, /reviewCalls\.length === 0/);
   assert.match(core, /DIAGNOSE_UNEXPECTED_PREFLIGHT_ACTIVITY/);
   assert.match(isolated, /WRAPPER_MODEL_CAP_EXCEEDED/);
   assert.match(isolated, /cache_creation_input_tokens/);

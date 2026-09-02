@@ -45,15 +45,21 @@ export const CLAUDE_DEEPSEEK_METHODS_PROMPT_VERSION = 3;
 export const CLAUDE_DEEPSEEK_CLIENT_PROMPT_VERSION = 3;
 export const CLAUDE_DEEPSEEK_METHODS_CALLS = 1;
 export const CLAUDE_DEEPSEEK_E2E_CALLS = 5;
-export const CLAUDE_DEEPSEEK_MODEL_CERT_NORMAL_CALLS = 2;
-export const CLAUDE_DEEPSEEK_MODEL_CERT_MAX_CALLS = 4;
+export const CLAUDE_DEEPSEEK_MODEL_CERT_NORMAL_CALLS = 1;
+export const CLAUDE_DEEPSEEK_MODEL_CERT_MAX_CALLS = 2;
+export const CLAUDE_DEEPSEEK_BLIND_REVIEW_MODEL_CERT_NORMAL_CALLS = 2;
+export const CLAUDE_DEEPSEEK_BLIND_REVIEW_MODEL_CERT_MAX_CALLS = 4;
 export const CLAUDE_DEEPSEEK_MODEL_CERT_SCENARIO = "multiple-rpc-timeouts";
-export const CLAUDE_DEEPSEEK_MODEL_CERT_PHASES = Object.freeze(["SPECIALIST", "REVIEWER"]);
+export const CLAUDE_DEEPSEEK_MODEL_CERT_PHASES = Object.freeze(["SPECIALIST"]);
+export const CLAUDE_DEEPSEEK_BLIND_REVIEW_MODEL_CERT_PHASES = Object.freeze([
+  "SPECIALIST",
+  "REVIEWER",
+]);
 export const CLAUDE_DEEPSEEK_METHODS_TOKEN_LIMIT = 1_000_000;
 export const CLAUDE_DEEPSEEK_METHODS_USD_LIMIT = 10;
 export const CLAUDE_DEEPSEEK_E2E_TOKEN_LIMIT = 2_000_000;
 export const CLAUDE_DEEPSEEK_E2E_USD_LIMIT = 4;
-export const CLAUDE_DEEPSEEK_MODEL_CERT_ROLE_POOL_USD = CLAUDE_DEEPSEEK_E2E_USD_LIMIT / CLAUDE_DEEPSEEK_MODEL_CERT_NORMAL_CALLS;
+export const CLAUDE_DEEPSEEK_MODEL_CERT_ROLE_POOL_USD = CLAUDE_DEEPSEEK_E2E_USD_LIMIT / CLAUDE_DEEPSEEK_BLIND_REVIEW_MODEL_CERT_NORMAL_CALLS;
 export const CLAUDE_DEEPSEEK_MODEL_CERT_BUDGET_ENFORCEMENT = "claude-cli-threshold+terminal-posthoc-release-cap";
 export const CLAUDE_DEEPSEEK_METHODS_MAX_TURNS = 16;
 export const CLAUDE_DEEPSEEK_E2E_MAX_TURNS = 50;
@@ -593,13 +599,19 @@ export function aggregateClaudeUsage(invocations) {
   return aggregate;
 }
 
-export function claudeDeepseekE2EPhases(scenarioId) {
+export function claudeDeepseekE2EPhases(
+  scenarioId,
+  evaluationMode = "SPECIALIST_ONLY",
+) {
   requireContract(CLAUDE_DEEPSEEK_SCENARIOS.includes(scenarioId), "CLAUDE_DEEPSEEK_SCENARIO_INVALID", "Scenario is outside the repository-owned matrix", { scenario_id: scenarioId });
-  return macosCodexLunaE2EPhases(scenarioId);
+  return macosCodexLunaE2EPhases(scenarioId, evaluationMode);
 }
 
-export function claudeDeepseekE2ECallCount(scenarioId) {
-  return claudeDeepseekE2EPhases(scenarioId).length;
+export function claudeDeepseekE2ECallCount(
+  scenarioId,
+  evaluationMode = "SPECIALIST_ONLY",
+) {
+  return claudeDeepseekE2EPhases(scenarioId, evaluationMode).length;
 }
 
 export function mapScenarioToCreateCase(facts) {
@@ -611,9 +623,15 @@ export function mapScenarioToCreateCase(facts) {
   });
 }
 
-export function auditClaudeInvocations(invocations, { workflow, scenarioId = null }) {
+export function auditClaudeInvocations(invocations, {
+  workflow,
+  scenarioId = null,
+  evaluationMode = "SPECIALIST_ONLY",
+}) {
   const generation = workflow === "generation";
-  const phases = generation ? ["REGISTRATION_GENERATION"] : claudeDeepseekE2EPhases(scenarioId);
+  const phases = generation
+    ? ["REGISTRATION_GENERATION"]
+    : claudeDeepseekE2EPhases(scenarioId, evaluationMode);
   const tokenLimit = generation ? CLAUDE_DEEPSEEK_METHODS_TOKEN_LIMIT : CLAUDE_DEEPSEEK_E2E_TOKEN_LIMIT;
   const costLimit = generation ? CLAUDE_DEEPSEEK_METHODS_USD_LIMIT : CLAUDE_DEEPSEEK_E2E_USD_LIMIT;
   const turnLimit = generation ? CLAUDE_DEEPSEEK_METHODS_MAX_TURNS : CLAUDE_DEEPSEEK_E2E_MAX_TURNS;
@@ -642,22 +660,41 @@ export function auditClaudeInvocations(invocations, { workflow, scenarioId = nul
   return { schema_version: 1, status: "PASS", workflow, expected_phases: phases, retry_count: 0, token_formula: "input_tokens+output_tokens+cache_creation_input_tokens+cache_read_input_tokens", aggregate };
 }
 
-export function auditClaudeModelCertInvocations(invocations) {
+export function auditClaudeModelCertInvocations(invocations, {
+  evaluationMode = "SPECIALIST_ONLY",
+} = {}) {
+  requireContract(
+    ["SPECIALIST_ONLY", "BLIND_CONSENSUS"].includes(evaluationMode),
+    "CLAUDE_DEEPSEEK_MODEL_CERT_EVALUATION_MODE_INVALID",
+    "Evidence V2 model-cert evaluation mode is invalid",
+    { evaluation_mode: evaluationMode },
+  );
+  const normalCallCount = evaluationMode === "SPECIALIST_ONLY"
+    ? CLAUDE_DEEPSEEK_MODEL_CERT_NORMAL_CALLS
+    : CLAUDE_DEEPSEEK_BLIND_REVIEW_MODEL_CERT_NORMAL_CALLS;
+  const hardCallCap = evaluationMode === "SPECIALIST_ONLY"
+    ? CLAUDE_DEEPSEEK_MODEL_CERT_MAX_CALLS
+    : CLAUDE_DEEPSEEK_BLIND_REVIEW_MODEL_CERT_MAX_CALLS;
   requireContract(
     Array.isArray(invocations)
-      && invocations.length >= CLAUDE_DEEPSEEK_MODEL_CERT_NORMAL_CALLS
-      && invocations.length <= CLAUDE_DEEPSEEK_MODEL_CERT_MAX_CALLS,
+      && invocations.length >= normalCallCount
+      && invocations.length <= hardCallCap,
     "CLAUDE_DEEPSEEK_MODEL_CERT_CALL_COUNT_INVALID",
-    "Evidence V2 model-cert must use two normal role calls and at most one repair per role",
-    { actual: invocations?.length ?? null },
+    "Evidence V2 model-cert call count differs from its evaluation mode",
+    { actual: invocations?.length ?? null, evaluation_mode: evaluationMode },
   );
   const attempts = invocations.map((item) => `${item?.role}:${item?.evaluation_attempt}`);
-  const legal = [
-    ["SPECIALIST:PRIMARY", "REVIEWER:PRIMARY"],
-    ["SPECIALIST:PRIMARY", "SPECIALIST:REPAIR", "REVIEWER:PRIMARY"],
-    ["SPECIALIST:PRIMARY", "REVIEWER:PRIMARY", "REVIEWER:REPAIR"],
-    ["SPECIALIST:PRIMARY", "SPECIALIST:REPAIR", "REVIEWER:PRIMARY", "REVIEWER:REPAIR"],
-  ];
+  const legal = evaluationMode === "SPECIALIST_ONLY"
+    ? [
+      ["SPECIALIST:PRIMARY"],
+      ["SPECIALIST:PRIMARY", "SPECIALIST:REPAIR"],
+    ]
+    : [
+      ["SPECIALIST:PRIMARY", "REVIEWER:PRIMARY"],
+      ["SPECIALIST:PRIMARY", "SPECIALIST:REPAIR", "REVIEWER:PRIMARY"],
+      ["SPECIALIST:PRIMARY", "REVIEWER:PRIMARY", "REVIEWER:REPAIR"],
+      ["SPECIALIST:PRIMARY", "SPECIALIST:REPAIR", "REVIEWER:PRIMARY", "REVIEWER:REPAIR"],
+    ];
   requireContract(
     legal.some((sequence) => canonicalJson(sequence) === canonicalJson(attempts)),
     "CLAUDE_DEEPSEEK_MODEL_CERT_SEQUENCE_INVALID",
@@ -703,8 +740,9 @@ export function auditClaudeModelCertInvocations(invocations) {
     schema_version: 1,
     status: "PASS",
     workflow: "evidence-v2-model-cert",
-    normal_call_count: CLAUDE_DEEPSEEK_MODEL_CERT_NORMAL_CALLS,
-    hard_call_cap: CLAUDE_DEEPSEEK_MODEL_CERT_MAX_CALLS,
+    evaluation_mode: evaluationMode,
+    normal_call_count: normalCallCount,
+    hard_call_cap: hardCallCap,
     actual_call_count: invocations.length,
     repair_counts: {
       specialist: attempts.includes("SPECIALIST:REPAIR") ? 1 : 0,

@@ -66,11 +66,12 @@ function scenarioIdentity() {
   };
 }
 
-function runtimeReceipt(invocations) {
+function runtimeReceipt(invocations, evaluationMode = invocations.some((item) => item.role === "REVIEWER") ? "BLIND_CONSENSUS" : "SPECIALIST_ONLY") {
   return {
     schema_version: 1,
     status: "PASS",
     execution_mode: "real-model",
+    evaluation_mode: evaluationMode,
     production_runtime: "problem_locator.runtime.diagnosis_runtime.DiagnosisRuntime",
     model_invocations: invocations.length,
     scenario: scenarioIdentity(),
@@ -84,6 +85,9 @@ function runtimeReceipt(invocations) {
 test("model-cert CLI requires source/Core bindings and rejects the former scenario suite", () => {
   const args = ["--source-root", "/source", "--claude-entry", "/cli", "--claude-settings", "/settings", "--python-entry", "/python", "--cache-root", "/cache", "--work-root", "/work", "--private-root", "/private", "--evidence-root", "/evidence", "--usage-root", "/usage", "--run-id", "run", "--source-snapshot-digest", "a".repeat(64), "--core-verdict", "/core/core-verdict.json", "--scenario", "multiple-rpc-timeouts"];
   assert.equal(parseArguments(args)["source-snapshot-digest"], "a".repeat(64));
+  assert.equal(parseArguments(args)["evaluation-mode"], "SPECIALIST_ONLY");
+  assert.equal(parseArguments([...args, "--evaluation-mode", "BLIND_CONSENSUS"])["evaluation-mode"], "BLIND_CONSENSUS");
+  assert.throws(() => parseArguments([...args, "--evaluation-mode", "invalid"]), (error) => error.code === "CLAUDE_DEEPSEEK_MODEL_CERT_EVALUATION_MODE_INVALID");
   const wrongScenario = [...args];
   wrongScenario[wrongScenario.length - 1] = "api-execution-overrun";
   assert.throws(() => parseArguments(wrongScenario), (error) => error.code === "CLAUDE_DEEPSEEK_MODEL_CERT_SCENARIO_INVALID");
@@ -95,14 +99,14 @@ test("model-cert CLI requires source/Core bindings and rejects the former scenar
 test("provider calls bind the exact production prompt sequence", () => {
   const invocations = [invocation("SPECIALIST", "PRIMARY", 1), invocation("REVIEWER", "PRIMARY", 2)];
   const receipt = runtimeReceipt(invocations);
-  assert.equal(auditRuntimeAndInvocations(receipt, invocations).prompt_count, 2);
+  assert.equal(auditRuntimeAndInvocations(receipt, invocations, { evaluationMode: "BLIND_CONSENSUS" }).prompt_count, 2);
   const drifted = structuredClone(invocations);
   drifted[1].prompt.sha256 = "f".repeat(64);
-  assert.throws(() => auditRuntimeAndInvocations(receipt, drifted), (error) => error.code === "CLAUDE_DEEPSEEK_RUNTIME_INVOCATION_IDENTITY_MISMATCH");
+  assert.throws(() => auditRuntimeAndInvocations(receipt, drifted, { evaluationMode: "BLIND_CONSENSUS" }), (error) => error.code === "CLAUDE_DEEPSEEK_RUNTIME_INVOCATION_IDENTITY_MISMATCH");
 });
 
 test("P1 model-cert input binds provider revision, calls, usage, Core, and methods_result", () => {
-  const invocations = [invocation("SPECIALIST", "PRIMARY", 1), invocation("REVIEWER", "PRIMARY", 2)];
+  const invocations = [invocation("SPECIALIST", "PRIMARY", 1)];
   const sourceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "deepseek-cert-source-"));
   try {
     const runtime = path.join(sourceRoot, "src", "problem_locator", "runtime");
@@ -111,13 +115,16 @@ test("P1 model-cert input binds provider revision, calls, usage, Core, and metho
     const receipt = buildModelCertInput({
       sourceSnapshotDigest: "a".repeat(64), contractManifestSha256: "b".repeat(64), coreVerdictSha256: "c".repeat(64), scenarioOracleSha256: "f".repeat(64),
       identity: { settings: { fingerprint: "d".repeat(64) }, cli: { version: "2.1.89" }, model: "deepseek-v4-flash[1m]", max_output_tokens: 64000 },
-      invocations, usage: { input_tokens: 2, output_tokens: 2, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, total_tokens: 4, cost_usd: 0 },
+      invocations, usage: { input_tokens: 1, output_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, total_tokens: 2, cost_usd: 0 },
       runtimeReceipt: runtimeReceipt(invocations), sourceRoot,
     });
-    assert.deepEqual(Object.keys(receipt).sort(), ["call_counts", "certification_target", "contract_manifest", "core_verdict", "scenario_oracle", "execution_identity", "invocations", "methods_result", "model", "provider", "receipt_type", "scenario", "schema_version", "source_snapshot_digest", "status", "usage"].sort());
+    assert.deepEqual(Object.keys(receipt).sort(), ["call_counts", "certification_target", "contract_manifest", "core_verdict", "evaluation_mode", "scenario_oracle", "execution_identity", "invocations", "methods_result", "model", "provider", "receipt_type", "scenario", "schema_version", "source_snapshot_digest", "status", "usage"].sort());
+    assert.equal(receipt.schema_version, 2);
     assert.equal(receipt.certification_target, "P1");
+    assert.equal(receipt.evaluation_mode, "SPECIALIST_ONLY");
     assert.equal(receipt.model.revision_source, "settings-fingerprint");
-    assert.equal(receipt.call_counts.total_calls, 2);
+    assert.equal(receipt.call_counts.total_calls, 1);
+    assert.equal(receipt.call_counts.reviewer_calls, 0);
     assert.equal(receipt.methods_result.status, "RESOLVED");
     assert.equal(validateEvidenceV2ModelCertInputSchema(receipt, { certificationTarget: "P1" }).scenario.registration_id, "rpc-timeout-methods-v1");
   } finally { fs.rmSync(sourceRoot, { recursive: true, force: true }); }
@@ -164,6 +171,7 @@ test("real Runtime invocation receives the validated registration and frozen rel
   assert.equal(value("--registration-root"), options.registrationRoot);
   assert.equal(value("--source-wiki"), options.sourceWiki);
   assert.equal(value("--scenario-root"), options.scenarioRoot);
+  assert.equal(value("--evaluation-mode"), "SPECIALIST_ONLY");
   assert.match(value("--scenario-root"), /multiple-rpc-timeouts$/u);
 });
 
@@ -194,44 +202,51 @@ test("real scenario audit binds frozen Wiki, registration, driver sources, and p
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
-test("provider-local zero-model driver proves the normal two calls and four-call repair cap", { skip: !process.env.TEST_FLOW_QUICK_PYTHON }, () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "deepseek-cert-zero-model-"));
+test("provider-local zero-model driver defaults to one role and preserves blind two-role execution", { skip: !process.env.TEST_FLOW_QUICK_PYTHON }, () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "dcm-"));
   try {
-    for (const repair of [false, true]) {
-      const caseRoot = path.join(root, repair ? "repair" : "normal");
+    for (const evaluationMode of ["SPECIALIST_ONLY", "BLIND_CONSENSUS"]) for (const repair of [false, true]) {
+      const caseRoot = path.join(root, `${evaluationMode === "SPECIALIST_ONLY" ? "s" : "b"}${repair ? "1" : "0"}`);
       fs.mkdirSync(caseRoot);
       const evidenceRoot = path.join(caseRoot, "evidence");
       const receipt = path.join(evidenceRoot, "runtime-receipt.json");
-      const args = [RUNTIME, "--mode", "fake", ...(repair ? ["--fake-repair"] : []), "--source-root", ROOT, "--work-root", path.join(caseRoot, "work"), "--evidence-root", evidenceRoot, "--receipt-path", receipt];
+      const args = [RUNTIME, "--mode", "fake", ...(evaluationMode === "BLIND_CONSENSUS" ? ["--evaluation-mode", evaluationMode] : []), ...(repair ? ["--fake-repair"] : []), "--source-root", ROOT, "--work-root", path.join(caseRoot, "work"), "--evidence-root", evidenceRoot, "--receipt-path", receipt];
       const bootstrap = "import runpy,sys,types; mark=types.SimpleNamespace(parametrize=lambda *a,**k:(lambda f:f)); sys.modules['pytest']=types.SimpleNamespace(fixture=lambda f:f,mark=mark); script=sys.argv[1]; sys.argv=sys.argv[1:]; runpy.run_path(script,run_name='__main__')";
       const result = spawnSync(process.env.TEST_FLOW_QUICK_PYTHON, ["-c", bootstrap, ...args], { cwd: ROOT, env: process.env, encoding: "utf8", timeout: 120_000 });
       assert.equal(result.status, 0, result.stderr);
       const value = JSON.parse(fs.readFileSync(receipt, "utf8"));
       assert.equal(value.production_runtime, "problem_locator.runtime.diagnosis_runtime.DiagnosisRuntime");
+      assert.equal(value.evaluation_mode, evaluationMode);
       assert.equal(value.model_invocations, 0);
-      assert.deepEqual(value.repair_counts, repair ? { reviewer: 1, specialist: 1 } : { reviewer: 0, specialist: 0 });
-      assert.deepEqual(value.role_attempts.map((item) => `${item.role}:${item.attempt}`), repair
-        ? ["SPECIALIST:PRIMARY", "SPECIALIST:REPAIR", "REVIEWER:PRIMARY", "REVIEWER:REPAIR"]
-        : ["SPECIALIST:PRIMARY", "REVIEWER:PRIMARY"]);
+      assert.deepEqual(value.repair_counts, repair
+        ? { reviewer: evaluationMode === "BLIND_CONSENSUS" ? 1 : 0, specialist: 1 }
+        : { reviewer: 0, specialist: 0 });
+      const specialistAttempts = repair ? ["SPECIALIST:PRIMARY", "SPECIALIST:REPAIR"] : ["SPECIALIST:PRIMARY"];
+      const reviewerAttempts = evaluationMode === "BLIND_CONSENSUS"
+        ? (repair ? ["REVIEWER:PRIMARY", "REVIEWER:REPAIR"] : ["REVIEWER:PRIMARY"])
+        : [];
+      assert.deepEqual(value.role_attempts.map((item) => `${item.role}:${item.attempt}`), [...specialistAttempts, ...reviewerAttempts]);
       assert.equal(value.methods_result.status, "RESOLVED");
       assert.equal(value.scenario.scenario_id, "multiple-rpc-timeouts");
       const releaseRoot = path.join(ROOT, "tests", "cases", "release", "rpc-timeout-anonymized");
-      const wikiBytes = fs.readFileSync(path.join(releaseRoot, "input", "wiki.md"));
+      const loadedMethods = JSON.parse(fs.readFileSync(path.join(evidenceRoot, "methods.json"), "utf8"));
       const driver = JSON.parse(fs.readFileSync(path.join(releaseRoot, "scenarios", "multiple-rpc-timeouts", "driver.json"), "utf8"));
       const inputProjection = { initial_user_fact_names: driver.initial_user_fact_names, initial_user_fact_values: driver.initial_user_fact_values };
-      assert.equal(value.scenario.source_wiki_sha256, crypto.createHash("sha256").update(wikiBytes).digest("hex"));
+      assert.equal(value.scenario.source_wiki_sha256, loadedMethods.source_wiki_sha256);
       assert.equal(value.scenario.user_inputs_sha256, crypto.createHash("sha256").update(canonicalJson(inputProjection)).digest("hex"));
       assert.equal(value.scenario.evidence_graph.ref, value.methods_result.evidence_graph_ref);
       assert.equal(value.scenario.evaluation_plan.ref, value.methods_result.plan_ref);
       assert.deepEqual(value.scenario.sources.map((item) => item.source_id), ["client", "server"]);
       assert.equal(Object.hasOwn(value, "hard_cut"), false);
       for (const name of [
-        "methods-source-job.json", "methods-reviewer-job.json",
+        "methods-source-job.json",
         "methods-evidence-graph-v2.json", "methods-evaluation-plan-v2.json",
         "methods-limitations-v2.json", "methods-source-state-v2.json",
-        "methods-source-outcome-v2.json", "methods-terminal-state-v2.json",
-        "methods-reviewer-outcome-v2.json", "methods-result-v2.json", "methods.json",
+        "methods-source-outcome-v2.json", "methods-result-v2.json", "methods.json",
       ]) assert.equal(fs.existsSync(path.join(evidenceRoot, name)), true, name);
+      for (const name of ["methods-reviewer-job.json", "methods-terminal-state-v2.json", "methods-reviewer-outcome-v2.json"]) {
+        assert.equal(fs.existsSync(path.join(evidenceRoot, name)), evaluationMode === "BLIND_CONSENSUS", name);
+      }
     }
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
@@ -244,6 +259,7 @@ test("provider-local production Runtime archives a disagreement as UNRESOLVED", 
     const args = [
       RUNTIME,
       "--mode", "fake",
+      "--evaluation-mode", "BLIND_CONSENSUS",
       "--fake-reviewer-rejected-method-id", "rpc-call-timeout",
       "--source-root", ROOT,
       "--work-root", path.join(root, "work"),
@@ -271,18 +287,18 @@ test("provider-local production Runtime archives a disagreement as UNRESOLVED", 
 });
 
 test("provider-local production Runtime archives every legal early terminal", { skip: !process.env.TEST_FLOW_QUICK_PYTHON }, () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "deepseek-cert-early-terminal-"));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "dce-"));
   try {
     const fixtures = [
       { name: "specialist-protocol", args: ["--fake-protocol-exhausted-role", "SPECIALIST"], status: "UNRESOLVED", reason: "SPECIALIST_PROTOCOL_REPAIR_EXHAUSTED", calls: 2 },
       { name: "specialist-model", args: ["--fake-model-failure-role", "SPECIALIST"], status: "UNRESOLVED", reason: "SPECIALIST_MODEL_EXECUTION_FAILED", calls: 1 },
       { name: "no-evidence", args: ["--fake-no-matching-evidence"], status: "UNRESOLVED", reason: "NO_MATCHING_METHOD_EVIDENCE", calls: 0 },
-      { name: "reviewer-model", args: ["--fake-model-failure-role", "REVIEWER"], status: "UNRESOLVED", reason: "REVIEWER_MODEL_EXECUTION_FAILED", calls: 2 },
+      { name: "reviewer-model", args: ["--evaluation-mode", "BLIND_CONSENSUS", "--fake-model-failure-role", "REVIEWER"], status: "UNRESOLVED", reason: "REVIEWER_MODEL_EXECUTION_FAILED", calls: 2 },
       { name: "specialist-failed", args: ["--fake-server-invariant-role", "SPECIALIST"], status: "FAILED", reason: "SERVER_INVARIANT_VIOLATION", calls: 1 },
     ];
     const bootstrap = "import runpy,sys,types; mark=types.SimpleNamespace(parametrize=lambda *a,**k:(lambda f:f)); sys.modules['pytest']=types.SimpleNamespace(fixture=lambda f:f,mark=mark); script=sys.argv[1]; sys.argv=sys.argv[1:]; runpy.run_path(script,run_name='__main__')";
-    for (const fixture of fixtures) {
-      const caseRoot = path.join(root, fixture.name);
+    for (const [index, fixture] of fixtures.entries()) {
+      const caseRoot = path.join(root, String(index));
       const evidenceRoot = path.join(caseRoot, "evidence");
       const receiptPath = path.join(evidenceRoot, "runtime-receipt.json");
       fs.mkdirSync(caseRoot);

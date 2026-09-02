@@ -24,11 +24,11 @@ State、Job 和权威 Outcome 已硬切到 V8。Problem Locator 5.0.0 只接受�
 - 产品注册只声明路由、必需用户输入/附件、Logparse 产品与 anchor，以及 DIAGNOSE/REVIEW 的内置运行时绑定。
 - `.agents` 下的 Wiki 元 Skill 只生成闭合的 Methods package；`.claude` 下的局域网部署元 Skill 生成完整的生产 registration root，并在其 `package/` 中放置同一 Methods package。两者都不生成 GenerationSpec、`diagnosis-skill.json` 或验证合同。
 - 产品拥有的 Logparse 预处理在独立 Workspace 中加载一次现装 `logparse-diagnose`，由 Helper 完成唯一一次 broker parse/reuse。服务端读取冻结目标日志，并且只扫描一次。
-- 服务端从单次扫描结果生成 method-qualified Evidence Graph 和完整 Evaluation Plan。Specialist 与 Reviewer 只读取请求、Graph、Plan 和精确方法卡，各自提交 `evaluation_ref + verdict + supporting_event_refs + reason`；最终状态由服务端共识裁决产生。
+- 服务端从单次扫描结果生成 method-qualified Evidence Graph 和完整 Evaluation Plan。默认只运行 Specialist；显式开启 Reviewer 后，两个角色分别读取请求、Graph、Plan 和精确方法卡，并提交 `evaluation_ref + verdict + supporting_event_refs + reason`。最终状态始终由服务端裁决。
 
 `.agents/skills/wiki-to-diagnosis-skill` 直接从一份已评审 Wiki 生成 `SKILL.md`、`methods.json` 和独立可加载的 `references/*.md` 方法卡。`methods.json` 固定声明源 Wiki SHA-256、必需用户输入、必需附件、日志派生字段、共享参考和有序方法索引；`shared_references[0]` 固定绑定逐项逐序保留源 Wiki 机械日志模板的 `references/source-log-templates.md`。每个方法用 `evidence_markers` 收齐判断所需日志，并用其保序子集 `activation_markers` 声明何时值得创建 evaluation。该入口仍由产品在包外提供 registration，供 Evidence V2 定位链路使用。
 
-仓库另提供 [`.claude/skills/wiki-to-logparse-diagnosis-skill`](.claude/skills/wiki-to-logparse-diagnosis-skill)，用于在局域网 Claude Code 中从 Wiki 生成可直接部署到 Linux Server `SKILL_DIR` 的完整 registration root。生成物包含 `registration-template.json` 与闭合 Methods package，固定要求 `client_slot`、`client_process_name`、`server_slot`、`server_process_name`，双端共用作者确认的 module，PID 仅在用户主动提供时使用。客户端不会加载这个业务 Skill，也不会在本地调用 Logparse；它只使用 `$problem-locator-client` 经 HTTP MCP 提交 Case。Server 完成 ROUTE、Helper 驱动的 Logparse 预处理、Methods 诊断、Review 和权威结果打包。
+仓库另提供 [`.claude/skills/wiki-to-logparse-diagnosis-skill`](.claude/skills/wiki-to-logparse-diagnosis-skill)，用于在局域网 Claude Code 中从 Wiki 生成可直接部署到 Linux Server `SKILL_DIR` 的完整 registration root。生成物包含 `registration-template.json` 与闭合 Methods package，固定要求 `client_slot`、`client_process_name`、`server_slot`、`server_process_name`，双端共用作者确认的 module，PID 仅在用户主动提供时使用。客户端不会加载这个业务 Skill，也不会在本地调用 Logparse；它只使用 `$problem-locator-client` 经 HTTP MCP 提交 Case。Server 完成 ROUTE、Helper 驱动的 Logparse 预处理、Methods 诊断、可选 Review 和权威结果打包。
 
 Logparse 产品可以省略。省略时 Runtime 记录有效产品 `default`，Broker 不向上游强制传入 `--product`；只有非默认产品才显式传参。生成定位 Skill 时，作者只声明 Logparse 归档 requirement 的数量约束，不填写 Content-Type；上传时用户也只选择归档文件。平台按文件后缀确定内部 Content-Type：`.gz/.tar.gz/.tgz` 为 `application/gzip`，`.zip` 为 `application/zip`，`.tar` 为 `application/x-tar`。
 
@@ -38,11 +38,11 @@ JSON 根数组；数组按 Evaluation Plan 顺序精确覆盖全部 evaluation�
   当前 evaluation 的非空 event ref 子集；其他 verdict 使用空数组。模型不回抄 marker、日志原文、
   行号、哈希、identity 或 hit ref，也不能创建 Evidence、Candidate、Artifact、requirement 或权威 Outcome。
 
-Specialist 与 Reviewer 使用隔离的 Job、Workspace 和上下文。Reviewer 在模型调用结束前看不到
-Specialist 的输出。每个角色首次发生结构或覆盖错误时最多执行一次受限 repair。两次 verdict
-逐项一致且至少确认一个原因时进入 `RESOLVED`；分歧、`UNKNOWN`、没有确认原因或 repair 耗尽
-进入 `UNRESOLVED`。Methods V2 不产生 `PARTIALLY_RESOLVED`。详细状态与审计语义见下文
-“Evidence V2、盲评与审计”。
+默认配置只运行 Specialist：没有 `UNKNOWN` 且至少一项为 `CONFIRMED` 时进入 `RESOLVED`；
+出现 `UNKNOWN`、全部为 `REJECTED` 或 repair 耗尽时进入 `UNRESOLVED`。设置
+`EVIDENCE_V2_REVIEWER_ENABLED=true` 后，Reviewer 才会在独立 Job、Workspace 和上下文中盲评；
+两次评估必须逐项一致。每个实际运行的角色最多执行一次受限 repair。Methods V2 不产生
+`PARTIALLY_RESOLVED`。详细语义见下文“Evidence V2、可选盲评与审计”。
 
 ### 发布验收
 
@@ -50,12 +50,13 @@ Specialist 的输出。每个角色首次发生结构或覆盖错误时最多执
 
 每次运行的本地证据保存在 `.tmp/test-flow-evidence/<run-id>`。`verdict.json` 是唯一权威结论；缺失就是 `UNFINALIZED`。证据在复用前会按当前配置、密钥扫描器和事件合同重新审计，且不会自动删除。
 
-真实模型认证只能在零模型 Core PASS 后单独执行。Provider cert 必须绑定同一 source snapshot、
+真实模型认证只能在零模型 Core PASS 后单独执行。默认 P1/P2 只认证 Specialist；可选盲评认证
+必须显式选择。Provider cert 必须绑定同一 source snapshot、
 Evidence V2 contract digest 和 Core verdict digest；旧 Methods V1 Fast E2E 或缓存结果不能作为
 Evidence V2 认证复用。任何 standalone verdict 只证明它声明的短路径，不代表完整 Test Flow、
 Release 或物理局域网部署验收。
 
-Problem Locator 是一个单实例故障诊断服务。它接收结构化问题，收集事实与附件，执行固定版本的路由、诊断和盲审任务。Methods V2 评估终态发布为 Case 的 `methods_result`，Graph/Plan 生成前的失败发布为 `failure`；Generic V2 终态发布 Markdown 结果。
+Problem Locator 是一个单实例故障诊断服务。它接收结构化问题，收集事实与附件，执行固定版本的路由和诊断任务；盲评 Reviewer 默认关闭。Methods V2 评估终态发布为 Case 的 `methods_result`，Graph/Plan 生成前的失败发布为 `failure`；Generic V2 终态发布 Markdown 结果。
 
 Problem Locator 5.0.0 使用本地 JSON 状态文件和文件系统资源实现持久化；所有业务写操作都通过应用服务及其仓储端口完成。
 
@@ -93,6 +94,7 @@ uv lock --check
 | `LOGPARSE_PYTHON` | 否 | 当前 Python | Logparse 使用的 Python 启动命令 |
 | `DFX_LOG_LEVEL` | 否 | `INFO` | 结构化诊断日志级别：`DEBUG`、`INFO`、`WARNING`、`ERROR` 或 `CRITICAL` |
 | `DFX_LOG_DIR` | 否 | 无 | 服务端可观测日志目录的绝对路径；配置后生成 `debug.jsonl`、`journey.jsonl` 和按 Case 渲染的人类可读日志 |
+| `EVIDENCE_V2_REVIEWER_ENABLED` | 否 | `false` | 只接受小写 `true` 或 `false`；开启后，新完成的 Specialist 评估才进入隔离盲评 |
 
 运行时限制是冻结的契约常量，不属于可配置项。5.0.0 会拒绝 `JOB_CONCURRENCY` 以及未知的 limit、max、retention 覆盖项，避免运维人员误以为某项实际上无效的限制已经生效。
 
@@ -347,7 +349,7 @@ uv run python -m problem_locator serve --env-file /absolute/path/to/service.env 
   2>> /absolute/path/to/problem-locator.log
 ```
 
-## Evidence V2、盲评与审计
+## Evidence V2、可选盲评与审计
 
 SPECIALIZED 定位使用 Evidence V2。服务端负责证据提取、引用和最终裁决，模型只判断已经
 编号的 evaluation：
@@ -362,19 +364,21 @@ SPECIALIZED 定位使用 Evidence V2。服务端负责证据提取、引用和�
    Evaluation Plan 与精确固定的方法卡。它只能提交根 JSON 数组；每项只有
    `evaluation_ref`、`verdict`、`supporting_event_refs` 和 `reason`。确认时只能选择当前计划项中的
    有序 event ref 子集，不回抄 marker、日志原文、行号、哈希、identity 或 hit ref。
-4. Reviewer 使用同一模型身份，但运行在另一个完全隔离的 Job、Workspace 和上下文中。
-   它读取同一份 Graph、Plan 和方法卡，盲评全部 evaluation；模型调用完成前看不到
-   Specialist 的 verdict、reason 或状态。
-5. 每个角色首次出现结构或覆盖错误时，最多再调用一次受限 repair。每次被拒绝的响应和精确
+4. 默认配置在 Specialist 结果通过服务端校验后直接终结；没有 `UNKNOWN` 且至少一项
+   `CONFIRMED` 时解决，含 `UNKNOWN` 或全部 `REJECTED` 时不可定论。
+5. 设置 `EVIDENCE_V2_REVIEWER_ENABLED=true` 后，Reviewer 使用同一模型身份，但运行在另一个
+   完全隔离的 Job、Workspace 和上下文中。它读取同一份 Graph、Plan 和方法卡，盲评全部
+   evaluation；模型调用完成前看不到 Specialist 的 verdict、reason 或状态。
+6. 每个实际运行的角色首次出现结构或覆盖错误时，最多再调用一次受限 repair。每次被拒绝的响应和精确
    prompt 都追加写入 execution records；重启会从已持久化阶段继续，绝不会产生第三次调用。
 
-服务端逐项比较两次评估。全部 evaluation 精确覆盖、两者 verdict 与 supporting event refs 一致，并且至少有一个
-`CONFIRMED` 时，Case 才进入 `RESOLVED`。分歧、`UNKNOWN`、没有确认原因或 repair 耗尽都进入
-`UNRESOLVED`。资源漂移、服务端不变量破坏或审计归档失败进入 `FAILED`；取消执行记为
+开启 Reviewer 后，服务端逐项比较两次评估。全部 evaluation 精确覆盖、两者 verdict 与
+supporting event refs 一致，并且至少有一个 `CONFIRMED` 时，Case 才进入 `RESOLVED`；分歧、
+`UNKNOWN`、没有确认方法或 repair 耗尽都进入 `UNRESOLVED`。资源漂移、服务端不变量破坏或审计归档失败进入 `FAILED`；取消执行记为
 `INTERRUPTED`。Methods V2 不产生 `PARTIALLY_RESOLVED`，也不创建 Candidate 或旧版
 `DecisionAuditV2`。
 
-Evidence Graph 同时保存扫描时发现的 limitations。它们会贯穿 Specialist、Reviewer、终态
+Evidence Graph 同时保存扫描时发现的 limitations。它们会贯穿 Specialist、实际运行的 Reviewer、终态
 Outcome 以及 MCP/REST 的 `methods_result`。公共结果只公开稳定 reason code、diagnostic ID、
 确认的 evaluation/method/event/hit refs 和 limitations。模型的自由文本 reason、被拒绝的响应、
 原始日志和内部校验细节仅保留在 execution records，不进入公共结果。Methods V2 不生成可下载

@@ -30,9 +30,9 @@ export const FAILURE_DIAGNOSTIC_FIELDS = Object.freeze([
   "provider_subtype",
 ]);
 
-const TARGET_GATE = Object.freeze({
-  P1: "real.macos-claude-deepseek-e2e",
-  P2: "real.macos-codex-luna-e2e",
+const TARGET_GATES = Object.freeze({
+  P1: Object.freeze(["real.macos-claude-deepseek-e2e", "real.macos-claude-deepseek-blind-review-e2e"]),
+  P2: Object.freeze(["real.macos-codex-luna-e2e", "real.macos-codex-luna-blind-review-e2e"]),
 });
 
 function exactKeys(value, keys) {
@@ -155,8 +155,8 @@ function projectGateFailureDiagnostic({ attemptRoot, stageId, gateSummary }) {
     || gateReceipt.code !== gateSummary.code) return null;
 
   const assertion = gateReceipt.assertions?.adapter;
-  const targetGate = TARGET_GATE[assertion?.certification_target];
-  if (targetGate === undefined || stageId !== targetGate || gateSummary.id !== targetGate) return null;
+  const targetGates = TARGET_GATES[assertion?.certification_target];
+  if (targetGates === undefined || !targetGates.includes(stageId) || gateSummary.id !== stageId) return null;
   const adapterPath = `payload/stages/${stageId}/gates/${gateSummary.id}/adapter-receipt.json`;
   const runtimePath = `payload/stages/${stageId}/gates/${gateSummary.id}/runtime-receipt.json`;
   const adapterFile = validEvidenceFile({ attemptRoot, gateReceipt, expectedPath: adapterPath });

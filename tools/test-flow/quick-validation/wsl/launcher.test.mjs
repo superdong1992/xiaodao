@@ -6,11 +6,15 @@ import { fileURLToPath } from "node:url";
 
 import { loadConfiguration, resolveGoalClosure } from "../../lib/config.mjs";
 import {
+  CLAUDE_DEEPSEEK_BLIND_REVIEW_MODEL_CERT_MAX_CALLS,
+  CLAUDE_DEEPSEEK_BLIND_REVIEW_MODEL_CERT_NORMAL_CALLS,
   CLAUDE_DEEPSEEK_METHODS_CALLS,
   CLAUDE_DEEPSEEK_MODEL_CERT_MAX_CALLS,
   CLAUDE_DEEPSEEK_MODEL_CERT_NORMAL_CALLS,
 } from "../claude-deepseek/runtime/claude-deepseek-contract.mjs";
 import {
+  MACOS_CODEX_LUNA_BLIND_REVIEW_E2E_CALLS,
+  MACOS_CODEX_LUNA_BLIND_REVIEW_E2E_MAX_CALLS,
   MACOS_CODEX_LUNA_E2E_CALLS,
   MACOS_CODEX_LUNA_E2E_MAX_CALLS,
 } from "../codex-luna/runtime/macos-codex-luna-e2e-contract.mjs";
@@ -154,12 +158,16 @@ test("central certification closure owns Core, one generation, P1, P2 and releas
   assert.equal(ids.at(-1), "evidence-v2.release-verdict");
 });
 
-test("provider call contracts remain generation 1, P1 2/4 and P2 2/4", () => {
+test("provider call contracts default to 1/2 and preserve optional blind 2/4", () => {
   assert.equal(CLAUDE_DEEPSEEK_METHODS_CALLS, 1);
-  assert.equal(CLAUDE_DEEPSEEK_MODEL_CERT_NORMAL_CALLS, 2);
-  assert.equal(CLAUDE_DEEPSEEK_MODEL_CERT_MAX_CALLS, 4);
-  assert.equal(MACOS_CODEX_LUNA_E2E_CALLS, 2);
-  assert.equal(MACOS_CODEX_LUNA_E2E_MAX_CALLS, 4);
+  assert.equal(CLAUDE_DEEPSEEK_MODEL_CERT_NORMAL_CALLS, 1);
+  assert.equal(CLAUDE_DEEPSEEK_MODEL_CERT_MAX_CALLS, 2);
+  assert.equal(CLAUDE_DEEPSEEK_BLIND_REVIEW_MODEL_CERT_NORMAL_CALLS, 2);
+  assert.equal(CLAUDE_DEEPSEEK_BLIND_REVIEW_MODEL_CERT_MAX_CALLS, 4);
+  assert.equal(MACOS_CODEX_LUNA_E2E_CALLS, 1);
+  assert.equal(MACOS_CODEX_LUNA_E2E_MAX_CALLS, 2);
+  assert.equal(MACOS_CODEX_LUNA_BLIND_REVIEW_E2E_CALLS, 2);
+  assert.equal(MACOS_CODEX_LUNA_BLIND_REVIEW_E2E_MAX_CALLS, 4);
 });
 
 test("container shell sources are LF-only", () => {

@@ -1979,7 +1979,7 @@ function phaseThreePrompt(state, releaseCase) {
 0. First call Skill with exact input {"skill":"problem-locator-client"}; do not call MCP before it succeeds.
 1. Call problem_locator_submit_supplement exactly once with request_id "${state.request_ids.submit_attachment}", case_id "${state.case_id}", expected_case_revision ${state.case_revision}, input_names [], input_values [], attachment_ids ["${state.attachment_id}"], wait_seconds 0.
 ${fixedGetCasePollingInvariant(state.case_id)}
-${supplement} Poll with the same literal get-case input. Observe REVIEWING, then continue unchanged until status RESOLVED with methods_result.status RESOLVED. Use wait_seconds 30 on every poll, do not rapid-poll, and do not skip REVIEWING.
+${supplement} Poll with the same literal get-case input until status RESOLVED with methods_result.status RESOLVED. Use wait_seconds 30 on every poll and do not rapid-poll. The default Evidence V2 path must not enter REVIEWING.
 5. Call problem_locator_list_artifacts exactly once for this Case and stop. Do not call another tool.`;
 }
 
@@ -1990,7 +1990,7 @@ function validatePhaseThree(audit, state, releaseCase) {
   const gets = successful.filter((record) => record.tool_name === "problem_locator_get_case");
   const lists = successful.filter((record) => record.tool_name === "problem_locator_list_artifacts");
   const hasSupplement = releaseCase.driver.supplement_input_names.length > 0;
-  requireCondition(submits.length === (hasSupplement ? 2 : 1) && gets.length >= (hasSupplement ? 3 : 2) && lists.length === 1, "PHASE3_CALL_CARDINALITY", "FAIL", "CONTRACT");
+  requireCondition(submits.length === (hasSupplement ? 2 : 1) && gets.length >= (hasSupplement ? 2 : 1) && lists.length === 1, "PHASE3_CALL_CARDINALITY", "FAIL", "CONTRACT");
   requireCondition(records[0] === submits[0] && records.at(-1) === lists[0], "PHASE3_CALL_ORDER", "FAIL", "CONTRACT");
   exactKeys(submits[0].input, ["request_id", "case_id", "expected_case_revision", "input_names", "input_values", "attachment_ids", "wait_seconds"], "PHASE3_ATTACHMENT_INPUT_SHAPE");
   requireCondition(submits[0].input.request_id === state.request_ids.submit_attachment && submits[0].input.case_id === state.case_id && submits[0].input.expected_case_revision === state.case_revision && canonicalJson(submits[0].input.attachment_ids) === canonicalJson([state.attachment_id]), "PHASE3_ATTACHMENT_INPUT", "FAIL", "CONTRACT");
@@ -2004,9 +2004,9 @@ function validatePhaseThree(audit, state, releaseCase) {
     terminalPredecessor = submits[1];
   }
   const reviewing = views.find((entry) => entry.ordinal > terminalPredecessor.ordinal && entry.view.status === "REVIEWING");
-  const resolved = [...views].reverse().find((entry) => entry.ordinal > (reviewing?.ordinal ?? Infinity) && entry.view.status === releaseCase.result_expectation.case_status);
+  const resolved = [...views].reverse().find((entry) => entry.ordinal > terminalPredecessor.ordinal && entry.view.status === releaseCase.result_expectation.case_status);
   requireCondition(
-    reviewing && resolved && resolved.view.methods_result?.schema_version === 2
+    !reviewing && resolved && resolved.view.methods_result?.schema_version === 2
       && resolved.view.methods_result.status === "RESOLVED"
       && resolved.view.final_result === null && resolved.view.unresolved_result === null
       && resolved.view.generic_result === null && resolved.view.generic_result_v2 === null,
@@ -3006,28 +3006,24 @@ async function auditServiceAgentUsage(configuration, state, instance) {
   return { invocations: receipt.invocations, noModelJobs: receipt.no_model_jobs };
 }
 
-const METHODS_V2_EXECUTION_SOURCES = Object.freeze({
+const METHODS_V2_SPECIALIST_EXECUTION_SOURCES = Object.freeze({
   source_job: ["SOURCE", "job.json"],
-  reviewer_job: ["REVIEWER", "job.json"],
   evidence_graph: ["SOURCE", "methods-evidence-graph-v2.json"],
   evaluation_plan: ["SOURCE", "methods-evaluation-plan-v2.json"],
   limitations: ["SOURCE", "methods-limitations-v2.json"],
   source_state: ["SOURCE", "methods-state-v2.json"],
   source_outcome: ["SOURCE", "job_outcome.json"],
-  terminal_state: ["REVIEWER", "methods-state-v2.json"],
-  reviewer_outcome: ["REVIEWER", "job_outcome.json"],
 });
 
-async function captureMethodsV2Files(configuration, state, { sourceJobId, reviewerJobId, prefix = "" }) {
+async function captureMethodsV2Files(configuration, state, { sourceJobId, prefix = "" }) {
   const captured = {};
-  for (const [key, [owner, sourceName]] of Object.entries(METHODS_V2_EXECUTION_SOURCES)) {
-    const jobId = owner === "SOURCE" ? sourceJobId : reviewerJobId;
+  for (const [key, [, sourceName]] of Object.entries(METHODS_V2_SPECIALIST_EXECUTION_SOURCES)) {
     const destinationName = `${prefix}${METHODS_V2_CAPTURED_FILES[key]}`;
     const destination = path.join(configuration.stageRoot, destinationName);
     requireCondition(!fs.existsSync(destination), "METHODS_V2_ORACLE_CAPTURE_ALREADY_EXISTS");
     const copied = await run("docker", dockerArgs(configuration.dockerContext, [
       "cp",
-      `${state.active_container}:/var/lib/problem-locator/jobs/${jobId}/${sourceName}`,
+      `${state.active_container}:/var/lib/problem-locator/jobs/${sourceJobId}/${sourceName}`,
       destination,
     ]), { forward: false });
     requireCondition(copied.status === 0, "METHODS_V2_EXECUTION_RECORD_MISSING", "FAIL", "CONTRACT");
@@ -3038,10 +3034,9 @@ async function captureMethodsV2Files(configuration, state, { sourceJobId, review
   return captured;
 }
 
-function methodsV2Expected(configuration, state, sourceJobId, reviewerJobId) {
+function methodsV2Expected(configuration, state, sourceJobId) {
   return {
     source_job_id: sourceJobId,
-    reviewer_job_id: reviewerJobId,
     case_id: state.case_id,
     skill_ref: {
       id: configuration.releaseCase.skill.runtime_ref_id,
@@ -3065,20 +3060,20 @@ async function captureMethodsV2Oracle(configuration, state, serviceInvocations) 
     .filter((invocation) => invocation.job_type === "REVIEW")
     .map((invocation) => invocation.job_id))];
   requireCondition(
-    sourceJobIds.length === 1 && reviewerJobIds.length === 1
-      && UUID.test(sourceJobIds[0] ?? "") && UUID.test(reviewerJobIds[0] ?? ""),
+    sourceJobIds.length === 1 && reviewerJobIds.length === 0
+      && UUID.test(sourceJobIds[0] ?? ""),
     "METHODS_V2_ROLE_JOB_IDENTITY_INVALID",
     "FAIL",
     "CONTRACT",
   );
   const sourceJobId = sourceJobIds[0];
-  const reviewerJobId = reviewerJobIds[0];
-  const files = await captureMethodsV2Files(configuration, state, { sourceJobId, reviewerJobId });
+  const files = await captureMethodsV2Files(configuration, state, { sourceJobId });
   let summary;
   try {
     summary = validateMethodsV2ExecutionRecords({
+      evaluationMode: "SPECIALIST_ONLY",
       files,
-      expected: methodsV2Expected(configuration, state, sourceJobId, reviewerJobId),
+      expected: methodsV2Expected(configuration, state, sourceJobId),
       invocations: serviceInvocations,
       publicMethodsResult: state.methods_result,
     });
@@ -3092,11 +3087,11 @@ async function captureMethodsV2Oracle(configuration, state, serviceInvocations) 
 async function verifyRestartMethodsV2(configuration, state, restartView) {
   const restartedFiles = await captureMethodsV2Files(configuration, state, {
     sourceJobId: state.methods_v2.source_job_id,
-    reviewerJobId: state.methods_v2.reviewer_job_id,
     prefix: "restart-",
   });
   try {
     validateMethodsV2RestartSnapshot({
+      evaluationMode: "SPECIALIST_ONLY",
       caseView: restartView.case_view,
       artifacts: restartView.artifacts,
       methodsSummary: state.methods_v2,
@@ -3478,8 +3473,8 @@ async function execute(configuration) {
     requireCondition(
       correspondence.service_invocations.length === diagnoseCalls.length + reviewCalls.length
         && diagnoseCalls.length >= 1 && diagnoseCalls.length <= 2
-        && reviewCalls.length >= 1 && reviewCalls.length <= 2
-        && correspondence.service_invocations.length >= 2 && correspondence.service_invocations.length <= 4,
+        && reviewCalls.length === 0
+        && correspondence.service_invocations.length >= 1 && correspondence.service_invocations.length <= 2,
       "METHODS_V2_SERVICE_AGENT_INVOCATIONS",
       "FAIL",
       "CONTRACT",
@@ -3498,7 +3493,6 @@ async function execute(configuration) {
       resolved_case_revision: state.resolved_case_revision,
       methods_result_ref: state.methods_result.result_ref,
       methods_source_job_id: methodsV2.source_job_id,
-      methods_reviewer_job_id: methodsV2.reviewer_job_id,
       observed_statuses: state.observed_statuses,
     });
     const invocations = [clientInvocation(configuration, "diagnose", audit, configuration.hardCaps), ...correspondence.service_invocations];
@@ -3530,7 +3524,6 @@ async function execute(configuration) {
       resolved_case_revision: state.resolved_case_revision,
       methods_result_ref: state.methods_result.result_ref,
       methods_source_job_id: state.methods_v2.source_job_id,
-      methods_reviewer_job_id: state.methods_v2.reviewer_job_id,
       restart_verified: true,
     });
     writeNew(path.join(configuration.stageRoot, "client-server-correspondence.json"), { schema_version: 1, ...correspondence });

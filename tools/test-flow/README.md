@@ -11,11 +11,14 @@
 | `dev.default` | `dev` | 框架自测、仓库静态检查、受影响确定性测试和完整确定性测试；不调用真实模型 |
 | `dev.real` | `dev` | 在 `dev.default` 闭包之外，显式选择一个真实 Proof/Stage |
 | `dev.macos-codex-luna-methods` | `dev` | 原生 macOS 或密封 Ubuntu 22.04 中，用一次 Codex CLI + gpt-5.6-luna 调用生成并冻结 Methods package |
-| `dev.macos-codex-luna-e2e` | `dev` | P2：用共同的 production registration、Core 收据和固定用例运行 Codex/Luna Evidence V2 model cert |
+| `dev.macos-codex-luna-e2e` | `dev` | P2：默认只运行 Specialist，正常一次调用、最多一次 repair |
+| `dev.macos-codex-luna-blind-review-e2e` | `dev` | 显式运行 P2 Specialist + 隔离 Reviewer 认证，不属于默认发布闭包 |
 | `dev.macos-claude-deepseek-methods` | `dev` | 先运行迁移后的 Codex 与 Claude 快测合同，再用 Claude Code 2.1.89 + DeepSeek 生成、校验并原子冻结完整 production registration cache |
-| `dev.macos-claude-deepseek-e2e` | `dev` | P1：用共同的 production registration、Core 收据和固定用例运行 Claude/DeepSeek Evidence V2 model cert |
+| `dev.macos-claude-deepseek-e2e` | `dev` | P1：默认只运行 Specialist，正常一次调用、最多一次 repair |
+| `dev.macos-claude-deepseek-blind-review-e2e` | `dev` | 显式运行 P1 Specialist + 隔离 Reviewer 认证，不属于默认发布闭包 |
 | `release.full` | `release` | 从空数据根运行生产 CrossJob 定位与重启闭包 |
-| `release.evidence-v2-certification` | `release` | 同一 attempt 内完成 Core、一次 production registration、P1、P2，并用零模型 Gate 生成 `release-verdict.json` |
+| `release.evidence-v2-certification` | `release` | 同一 attempt 内完成 Core、一次 production registration、默认 Specialist-only P1/P2，并生成 `release-verdict.json` |
+| `release.evidence-v2-blind-review-certification` | `release` | 显式认证可选双角色盲评；默认 Release 不依赖该结果 |
 
 Windows、macOS 和显式 Linux Client 都有仓库内置 adapter。`--client auto` 在当前主机上选择对应 adapter；所有 Client 都通过 HTTP 直连 Linux Server。adapter 不是任意命令扩展点，调用方不能注入外部执行器。host-client 的 Web API 正式浏览器证明要求当前稳定版 Google Chrome，可通过 `TEST_FLOW_CHROME` 指定绝对可执行文件路径；Darwin 上显式 Linux Client 则只使用冻结在 Client image 中的官方 Chrome Headless Shell，不读取宿主浏览器。planning 会先在无网络临时容器中完成零模型 DOM smoke，CrossJob environment 再用正式 source-owned runner 做 loopback DOM roundtrip。
 
@@ -30,8 +33,9 @@ P1 Claude/DeepSeek 和 P2 Codex/Luna Gate 已接入同一 `model-cert-input.json
 或改写该文件。adapter PASS 后由 Test Flow 统一复核 source snapshot、
 V8 manifest、Core verdict、调用/repair、usage、prompt/profile/tool policy 和最终
 `methods_result` 身份。两家模型都只能读取服务端生成的 Evidence Graph、Evaluation Plan 和方法卡；
-正常各调用两次，每个角色最多修复一次，总上限四次。`release-verdict.json` 聚合器只接受同一
-attempt、同一 source snapshot、同一 Core 和同一 production registration 的 P1/P2 PASS 收据。
+默认 `SPECIALIST_ONLY` 各调用一次，最多执行一次 Specialist repair；显式
+`BLIND_CONSENSUS` 才运行 Reviewer，正常两次调用、总上限四次。`release-verdict.json` 聚合器只接受
+同一模式、同一 attempt、同一 source snapshot、同一 Core 和同一 production registration 的 P1/P2 PASS 收据。
 
 ## Dev 确定性测试
 
@@ -111,7 +115,7 @@ registration，而是共同消费当前 attempt 中 `real.skill-generation` 生�
   --plan-only
 ```
 
-P2 计划必须同时显示一次 Skill generation、两个正常评估调用、每角色最多一次 repair，以及四次
+P2 默认计划必须同时显示一次 Skill generation、一次正常 Specialist 调用、最多一次 repair，以及两次
 provider 调用的硬上限。原生 macOS 使用 `--client macos`；Windows 主机上的密封 Ubuntu 22.04
 入口使用 `--client linux`：
 
@@ -133,7 +137,8 @@ provider 调用的硬上限。原生 macOS 使用 `--client macos`；Windows 主
 ```
 
 确认计划中的身份、正常调用数、repair 上限、token 和费用预算后，移除 `--plan-only` 才会调用模型。
-P1 使用 `dev.macos-claude-deepseek-e2e`，固定 scenario 和 production registration 规则相同。
+P1 使用 `dev.macos-claude-deepseek-e2e`，固定 scenario 和 production registration 规则相同。需要盲评时，
+必须改用名称含 `blind-review-e2e` 的 Goal；不得把环境变量或历史收据暗中混入默认认证。
 
 ## Release
 
@@ -168,7 +173,7 @@ Windows 使用 `--client windows`，显式 Linux Client 使用 `--client linux`�
 
 `verdict.json` 会同时记录 snapshot digest、base Git SHA、branch 和 planning 时的 dirty 状态。Git 提交不是 Release admission 条件；推荐在全部 Proof 通过后再提交完全相同的快照。提交若改变任何 Git 可见 path 或字节，原 verdict 不再证明新内容，必须重新运行 Release。
 
-Release 从 GENESIS 和新的空 `DATA_ROOT` 开始，不复用业务 checkpoint。它执行一条 CrossJob：Environment、Route、Upload、Diagnose、自动 Review、Publish/Restart，并同时证明真实 Agent、真实 Logparse、七工具扁平 schema、服务端 DFX、安装分发、重启恢复和证据完整性。Upload Stage 使用真实浏览器运行体跨源重放 REST 创建/查询/附件准备，并以 `Blob` 覆盖长度与哈希失败后完成上传；Diagnose Stage 在终态幂等重放补参，再验证 REST 查询、公开产物列表和逐字节下载。host-client 绑定 Google Chrome；显式 Linux Client 绑定官方 Chrome Headless Shell 的 product、版本、归档和可执行文件 SHA-256。浏览器脚本不会设置 `Content-Length`，超时路径必须封口整个私有进程组并证明无残留。
+Release 从 GENESIS 和新的空 `DATA_ROOT` 开始，不复用业务 checkpoint。它执行一条 CrossJob：Environment、Route、Upload、Specialist-only Diagnose、Publish/Restart，并同时证明真实 Agent、真实 Logparse、七工具扁平 schema、服务端 DFX、安装分发、重启恢复和证据完整性。Upload Stage 使用真实浏览器运行体跨源重放 REST 创建/查询/附件准备，并以 `Blob` 覆盖长度与哈希失败后完成上传；Diagnose Stage 在终态幂等重放补参，再验证 REST 查询、公开产物列表和逐字节下载。host-client 绑定 Google Chrome；显式 Linux Client 绑定官方 Chrome Headless Shell 的 product、版本、归档和可执行文件 SHA-256。浏览器脚本不会设置 `Content-Length`，超时路径必须封口整个私有进程组并证明无残留。
 
 正式用例的日志归档不是假设外部 Logparse 已预装业务产品配置。容器初始化会从已审阅 Diagnosis Skill 的 `logparse_product`、anchors 和 journey driver 机械生成独立的只读运行时配置，并把每份原始附件无损投影为当前 Logparse loose-diagnostic 输入；初始化阶段先用冻结 Logparse 提交完成一次无模型 smoke parse，逐一证明 module/slot/process anchor 可解析。配置摘要、归档投影版本和归档摘要写入 Release case 与容器收据，服务只使用该独立配置，外部 Logparse Git 快照仍保持未修改。
 
@@ -194,9 +199,13 @@ Windows 主机在密封 Ubuntu 22.04 WSL 入口中运行以下 Goal。它会在�
   --plan-only
 ```
 
-计划必须显示 P1、P2 各自正常两次调用、最多两次 repair、四次硬上限，以及聚合 Stage 的零模型
+默认计划必须显示 P1、P2 各自正常一次调用、最多一次 repair、两次硬上限，以及聚合 Stage 的零模型
 调用数。只有 `core-verdict.json`、两份 `model-cert.json` 和最终 `release-verdict.json` 都属于当前
 attempt，正式认证才成立。
+
+可选盲评使用 `release.evidence-v2-blind-review-certification`。该 Goal 显式把两家 provider 的
+`evaluation_mode` 设为 `BLIND_CONSENSUS`，保留每家正常两次、最多四次调用的原合同，但不阻塞
+默认 `release.full` 或 `release.evidence-v2-certification`。
 
 ## 预算、超时与性能
 

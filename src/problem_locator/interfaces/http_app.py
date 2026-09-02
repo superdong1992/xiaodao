@@ -487,7 +487,10 @@ _REST_FIELD_DESCRIPTIONS = {
     "error": "Structured error for failures; null for successful envelopes.",
     "evidence_refs": "UUIDs of evidence records supporting this statement.",
     "evidence_graph_ref": "Stable reference of the server-produced Evidence Graph.",
-    "evaluation_id": "Stable identifier shared by the Specialist and Reviewer Jobs.",
+    "evaluation_id": (
+        "Stable identifier for the Evidence V2 evaluation; shared by the "
+        "Specialist and Reviewer Jobs only when review is enabled."
+    ),
     "excluded_factors": "Investigated factors excluded by the available evidence.",
     "expected": "Expected value or state associated with the error detail.",
     "expected_behavior": "Behavior that should occur when the system works correctly.",

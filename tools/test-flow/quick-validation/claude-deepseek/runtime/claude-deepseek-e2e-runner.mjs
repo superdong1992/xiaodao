@@ -34,6 +34,7 @@ import { readRoleInvocationReceipts } from "./claude-deepseek-service-wrapper.mj
 const MODULE_PATH = fileURLToPath(import.meta.url);
 const CORE_VERDICT_RECEIPT_PATH = "payload/stages/deterministic.full/gates/det.evidence-v2-core/core-verdict.json";
 const CONTRACT_MANIFEST_PATH = "schemas/v2/contract-manifest.json";
+const EVALUATION_MODES = new Set(["SPECIALIST_ONLY", "BLIND_CONSENSUS"]);
 
 class ModelCertRunnerError extends Error {
   constructor(code, message, details = {}) {
@@ -50,6 +51,11 @@ function fail(code, message, details = {}) {
 
 function requireCert(condition, code, message, details = {}) {
   if (!condition) fail(code, message, details);
+}
+
+function evaluationMode(value = "SPECIALIST_ONLY") {
+  requireCert(EVALUATION_MODES.has(value), "CLAUDE_DEEPSEEK_MODEL_CERT_EVALUATION_MODE_INVALID", "Model-cert evaluation mode is invalid");
+  return value;
 }
 
 function createEmptyRoot(root, label) {
@@ -157,9 +163,13 @@ function promptAttempts(runtimeReceipt) {
   return runtimeReceipt.role_attempts.map((item) => ({ role: item.role, attempt: item.attempt, prompt: item.prompt }));
 }
 
-export function auditRuntimeAndInvocations(runtimeReceipt, invocations) {
+export function auditRuntimeAndInvocations(runtimeReceipt, invocations, {
+  evaluationMode: expectedEvaluationMode = "SPECIALIST_ONLY",
+} = {}) {
+  const selectedMode = evaluationMode(expectedEvaluationMode);
   requireCert(runtimeReceipt?.status === "PASS" && runtimeReceipt.execution_mode === "real-model", "CLAUDE_DEEPSEEK_RUNTIME_RECEIPT_INVALID", "Production Evidence V2 Runtime receipt is invalid");
   requireCert(runtimeReceipt.production_runtime === "problem_locator.runtime.diagnosis_runtime.DiagnosisRuntime", "CLAUDE_DEEPSEEK_RUNTIME_IDENTITY_INVALID", "Model-cert did not use the production DiagnosisRuntime");
+  requireCert(runtimeReceipt.evaluation_mode === selectedMode, "CLAUDE_DEEPSEEK_RUNTIME_EVALUATION_MODE_MISMATCH", "Production Runtime used a different evaluation mode");
   const prompts = promptAttempts(runtimeReceipt);
   requireCert(prompts.length === invocations.length, "CLAUDE_DEEPSEEK_RUNTIME_INVOCATION_COUNT_MISMATCH", "Production prompt count differs from provider model calls");
   for (const [index, invocation] of invocations.entries()) {
@@ -257,16 +267,19 @@ export function buildModelCertInput({
   usage,
   runtimeReceipt,
   sourceRoot,
+  evaluationMode: requestedEvaluationMode = "SPECIALIST_ONLY",
 }) {
+  const selectedMode = evaluationMode(requestedEvaluationMode);
   const methods = runtimeReceipt.methods_result_identity;
   const repairs = runtimeReceipt.repair_counts;
   const specialistCalls = invocations.filter((item) => item.role === "SPECIALIST").length;
   const reviewerCalls = invocations.filter((item) => item.role === "REVIEWER").length;
   return Object.freeze({
-    schema_version: 1,
+    schema_version: 2,
     receipt_type: "evidence-v2-model-cert-input",
     status: "PASS",
     certification_target: "P1",
+    evaluation_mode: selectedMode,
     source_snapshot_digest: sourceSnapshotDigest,
     contract_manifest: { path: CONTRACT_MANIFEST_PATH, sha256: contractManifestSha256 },
     core_verdict: { path: CORE_VERDICT_RECEIPT_PATH, sha256: coreVerdictSha256 },
@@ -327,6 +340,7 @@ export function productionRuntimeArguments(options) {
   return [
     script,
     "--mode", "real",
+    "--evaluation-mode", evaluationMode(options.evaluationMode),
     "--source-root", options.sourceRoot,
     "--source-wiki", options.sourceWiki,
     "--scenario-root", options.scenarioRoot,
@@ -374,6 +388,7 @@ async function runProductionRuntime(options, { ambient, onProgress }) {
 }
 
 export async function runE2E(options, { ambient = process.env, onProgress = null } = {}) {
+  const selectedEvaluationMode = evaluationMode(options.evaluationMode);
   const sourceRoot = path.resolve(options.sourceRoot);
   const workRoot = createEmptyRoot(options.workRoot, "model-cert work root");
   const privateRoot = createEmptyRoot(options.privateRoot, "model-cert private root");
@@ -417,6 +432,7 @@ export async function runE2E(options, { ambient = process.env, onProgress = null
     registrationRoot: cache.registration_root,
     sourceWiki,
     scenarioRoot,
+    evaluationMode: selectedEvaluationMode,
   }, { ambient, onProgress });
   const invocations = readRoleInvocationReceipts(usageRoot);
   const terminalFailure = projectEvidenceV2ProviderTerminalFailure({
@@ -439,8 +455,8 @@ export async function runE2E(options, { ambient = process.env, onProgress = null
       evaluation_ref: failureReceipt.evaluation_ref,
     });
   }
-  const modelAudit = auditClaudeModelCertInvocations(invocations);
-  const runtimeAudit = auditRuntimeAndInvocations(runtimeReceipt, invocations);
+  const modelAudit = auditClaudeModelCertInvocations(invocations, { evaluationMode: selectedEvaluationMode });
+  const runtimeAudit = auditRuntimeAndInvocations(runtimeReceipt, invocations, { evaluationMode: selectedEvaluationMode });
   const scenarioAudit = auditScenarioIdentity({ sourceWiki, scenarioRoot, producer, cache, runtimeReceipt });
   assertRegistrationUnchanged(cache);
   const identityReceipt = { schema_version: 1, status: "PASS", claude: identity, producer, registration: cache.manifest.registration };
@@ -456,6 +472,7 @@ export async function runE2E(options, { ambient = process.env, onProgress = null
     scenario: runtimeReceipt.scenario,
     providerInvocations: normalizedInvocations,
     modelId: CLAUDE_DEEPSEEK_MODEL,
+    evaluationMode: selectedEvaluationMode,
   });
   writeJsonNew(path.join(evidenceRoot, EVIDENCE_V2_SCENARIO_ORACLE_RECEIPT_FILENAME), scenarioOracle);
   validateEvidenceV2ScenarioOracleReceipt(scenarioOracle, {
@@ -464,6 +481,7 @@ export async function runE2E(options, { ambient = process.env, onProgress = null
     scenario: runtimeReceipt.scenario,
     providerInvocations: normalizedInvocations,
     modelId: CLAUDE_DEEPSEEK_MODEL,
+    evaluationMode: selectedEvaluationMode,
   });
   const modelCertInput = buildModelCertInput({
     sourceSnapshotDigest,
@@ -475,11 +493,13 @@ export async function runE2E(options, { ambient = process.env, onProgress = null
     usage: modelAudit.aggregate,
     runtimeReceipt,
     sourceRoot,
+    evaluationMode: selectedEvaluationMode,
   });
-  validateEvidenceV2ModelCertInputSchema(modelCertInput, { certificationTarget: "P1" });
+  validateEvidenceV2ModelCertInputSchema(modelCertInput, { certificationTarget: "P1", evaluationMode: selectedEvaluationMode });
   writeJsonNew(path.join(evidenceRoot, "model-cert-input.json"), modelCertInput);
   const modelCert = materializeStandaloneModelCert({
     certificationTarget: "P1",
+    evaluationMode: selectedEvaluationMode,
     sourceSnapshotDigest,
     sourceRoot,
     coreVerdictPath,
@@ -489,6 +509,7 @@ export async function runE2E(options, { ambient = process.env, onProgress = null
     schema_version: 1,
     status: "PASS",
     certification_target: "P1",
+    evaluation_mode: selectedEvaluationMode,
     checks: {
       core_binding: "PASS",
       registration_identity: "PASS",
@@ -510,7 +531,7 @@ export async function runE2E(options, { ambient = process.env, onProgress = null
 
 export function parseArguments(argv) {
   const values = {};
-  const names = new Set(["source-root", "runtime-root", "claude-entry", "claude-settings", "python-entry", "cache-root", "registration-root", "work-root", "private-root", "evidence-root", "usage-root", "run-id", "source-snapshot-digest", "core-verdict", "logparse-root", "scenario"]);
+  const names = new Set(["source-root", "runtime-root", "claude-entry", "claude-settings", "python-entry", "cache-root", "registration-root", "work-root", "private-root", "evidence-root", "usage-root", "run-id", "source-snapshot-digest", "core-verdict", "logparse-root", "scenario", "evaluation-mode"]);
   for (let index = 0; index < argv.length; index += 2) {
     const argument = argv[index];
     requireCert(argument?.startsWith("--") && index + 1 < argv.length && !argv[index + 1].startsWith("--"), "CLAUDE_DEEPSEEK_MODEL_CERT_ARGUMENT_INVALID", "Model-cert arguments must use --name value pairs");
@@ -523,6 +544,7 @@ export function parseArguments(argv) {
   requireCert(required.every((name) => typeof values[name] === "string" && values[name]), "CLAUDE_DEEPSEEK_MODEL_CERT_ARGUMENT_MISSING", "Model-cert arguments are incomplete");
   requireCert(Boolean(values["registration-root"] || values["cache-root"]), "CLAUDE_DEEPSEEK_MODEL_CERT_REGISTRATION_INPUT_MISSING", "Model-cert requires --registration-root or --cache-root");
   if (values.scenario !== undefined) requireCert(values.scenario === "multiple-rpc-timeouts", "CLAUDE_DEEPSEEK_MODEL_CERT_SCENARIO_INVALID", "Evidence V2 model-cert uses only multiple-rpc-timeouts");
+  values["evaluation-mode"] = evaluationMode(values["evaluation-mode"]);
   return values;
 }
 
@@ -549,6 +571,7 @@ async function main() {
       coreVerdict: values["core-verdict"],
       runId: values["run-id"],
       sourceSnapshotDigest: values["source-snapshot-digest"],
+      evaluationMode: values["evaluation-mode"],
     };
     for (const name of paths) options[name] = path.resolve(options[name]);
     if (options.cacheRoot !== null) options.cacheRoot = path.resolve(options.cacheRoot);

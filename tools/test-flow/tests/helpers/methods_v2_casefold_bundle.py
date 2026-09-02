@@ -189,6 +189,7 @@ def build_bundle(output_root: Path) -> dict[str, object]:
             evidence_root=evidence_root,
             registration_root=registration_root,
             role_backend=runtime_driver.FakeModelRoleBackend(),
+            evaluation_mode="BLIND_CONSENSUS",
         )
     finally:
         runtime_driver._fact_values = _ORIGINAL_FACT_VALUES

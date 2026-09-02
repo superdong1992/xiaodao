@@ -24,6 +24,10 @@ test("standalone CLI keeps the historical Fast E2E matrix separate from P2", () 
   assert.throws(() => parseArguments(["--goal", "fast-e2e", "--scenario", "api-execution-overrun", "--all-scenarios"]), { code: "LUNA_SCENARIO_SELECTION_CONFLICT" });
   assert.throws(() => parseArguments(["--goal", "fast-e2e", "--scenario", "release-decoy"]), { code: "LUNA_SCENARIO_INVALID" });
   assert.equal(parseArguments(["--goal", "e2e", "--scenario", "multiple-rpc-timeouts"]).scenario, "multiple-rpc-timeouts");
+  assert.equal(defaults(parseArguments(["--goal", "e2e"])).evaluationMode, "SPECIALIST_ONLY");
+  assert.equal(defaults(parseArguments(["--goal", "e2e", "--evaluation-mode", "BLIND_CONSENSUS"])).evaluationMode, "BLIND_CONSENSUS");
+  assert.throws(() => parseArguments(["--goal", "e2e", "--evaluation-mode", "invalid"]), { code: "LUNA_EVALUATION_MODE_INVALID" });
+  assert.throws(() => parseArguments(["--goal", "fast-e2e", "--evaluation-mode", "BLIND_CONSENSUS"]), { code: "LUNA_EVALUATION_MODE_FORBIDDEN" });
   assert.throws(() => parseArguments(["--goal", "e2e", "--all-scenarios"]), { code: "LUNA_MODEL_CERT_SUITE_FORBIDDEN" });
   assert.throws(() => parseArguments(["--goal", "e2e", "--scenario", "api-execution-overrun"]), { code: "LUNA_SCENARIO_INVALID" });
   assert.throws(() => parseArguments(["--goal", "release.full"]), { code: "LUNA_GOAL_INVALID" });
@@ -90,19 +94,31 @@ test("Fast evidence requires Reviewer records except on the zero-evaluation scen
   assert.equal(insufficient.evidence.includes("methods-reviewer-outcome-v2.json"), false);
 });
 
-test("P2 plan freezes source/Core bindings, normal two calls and a four-call hard cap", () => {
+test("P2 plan defaults to Specialist-only and preserves explicit blind consensus", () => {
   const options = defaults(parseArguments(["--goal", "e2e", "--scenario", "multiple-rpc-timeouts", "--plan-only"]));
   const plan = buildPlan(options);
   assert.equal(plan.mode, "model-cert");
+  assert.equal(plan.evaluation_mode, "SPECIALIST_ONLY");
   assert.deepEqual(plan.scenarios, ["multiple-rpc-timeouts"]);
-  assert.equal(plan.execution.expected_model_calls, 2);
-  assert.equal(plan.execution.model_call_hard_cap, 4);
+  assert.equal(plan.execution.expected_model_calls, 1);
+  assert.equal(plan.execution.model_call_hard_cap, 2);
   assert.equal(plan.execution.wall_timeout_seconds, 2700);
-  assert.equal(plan.execution.per_scenario[0].model_call_hard_cap, 4);
+  assert.equal(plan.execution.per_scenario[0].model_call_hard_cap, 2);
+  assert.equal(plan.evidence.includes("methods-reviewer-job.json"), false);
+  assert.equal(plan.evidence.includes("methods-terminal-state-v2.json"), false);
+  assert.equal(plan.evidence.includes("methods-reviewer-outcome-v2.json"), false);
   assert.equal(plan.execution.source_snapshot, true);
   assert.ok(plan.admission.blockers.some((item) => item.code === "LUNA_SOURCE_SNAPSHOT_REQUIRED"));
   assert.ok(plan.admission.blockers.some((item) => item.code === "LUNA_CORE_VERDICT_REQUIRED"));
   assert.equal(plan.admission.blockers.some((item) => item.code === "EVIDENCE_V2_REAL_DIAGNOSIS_ADAPTER_UNMIGRATED"), false);
+
+  const blind = buildPlan(defaults(parseArguments(["--goal", "e2e", "--evaluation-mode", "BLIND_CONSENSUS", "--plan-only"])));
+  assert.equal(blind.evaluation_mode, "BLIND_CONSENSUS");
+  assert.equal(blind.execution.expected_model_calls, 2);
+  assert.equal(blind.execution.model_call_hard_cap, 4);
+  assert.equal(blind.evidence.includes("methods-reviewer-job.json"), true);
+  assert.equal(blind.evidence.includes("methods-terminal-state-v2.json"), true);
+  assert.equal(blind.evidence.includes("methods-reviewer-outcome-v2.json"), true);
 });
 
 test("Methods generation does not inherit model-cert source/Core requirements", () => {
@@ -129,18 +145,23 @@ function writeEvidence(root, names, calls) {
   }
 }
 
-test("light Gate accepts P2 normal/repair counts and rejects a fifth call", () => {
+test("light Gate accepts default P2 one/two calls and optional blind two/four calls", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "macos-luna-light-gate-"));
-  const required = REQUIRED_EVIDENCE.e2e;
-  const normal = path.join(root, "normal");
-  writeEvidence(normal, required, 2);
-  assert.equal(sealLightGate({ goal: "e2e", mode: "model-cert", evidenceRoot: normal, expectedCalls: 2 }).status, "PASS");
-  const repaired = path.join(root, "repaired");
-  writeEvidence(repaired, required, 4);
-  assert.equal(sealLightGate({ goal: "e2e", mode: "model-cert", evidenceRoot: repaired, expectedCalls: 2 }).status, "PASS");
+  const reviewEvidence = new Set(["methods-reviewer-job.json", "methods-terminal-state-v2.json", "methods-reviewer-outcome-v2.json"]);
+  const specialistRequired = REQUIRED_EVIDENCE.e2e.filter((name) => !reviewEvidence.has(name));
+  for (const calls of [1, 2]) {
+    const evidenceRoot = path.join(root, `specialist-${calls}`);
+    writeEvidence(evidenceRoot, specialistRequired, calls);
+    assert.equal(sealLightGate({ goal: "e2e", mode: "model-cert", evidenceRoot, expectedCalls: 1, modelCallHardCap: 2, requiredEvidence: specialistRequired }).status, "PASS");
+  }
+  for (const calls of [2, 4]) {
+    const evidenceRoot = path.join(root, `blind-${calls}`);
+    writeEvidence(evidenceRoot, REQUIRED_EVIDENCE.e2e, calls);
+    assert.equal(sealLightGate({ goal: "e2e", mode: "model-cert", evidenceRoot, expectedCalls: 2, modelCallHardCap: 4 }).status, "PASS");
+  }
   const fifth = path.join(root, "fifth");
-  writeEvidence(fifth, required, 5);
-  assert.equal(sealLightGate({ goal: "e2e", mode: "model-cert", evidenceRoot: fifth, expectedCalls: 2 }).status, "FAIL");
+  writeEvidence(fifth, REQUIRED_EVIDENCE.e2e, 5);
+  assert.equal(sealLightGate({ goal: "e2e", mode: "model-cert", evidenceRoot: fifth, expectedCalls: 2, modelCallHardCap: 4 }).status, "FAIL");
 });
 
 test("light Gate applies the same two/four call bound to one Fast E2E scenario", () => {

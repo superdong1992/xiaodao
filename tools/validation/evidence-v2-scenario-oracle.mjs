@@ -2,9 +2,14 @@ import fs from "node:fs";
 import path from "node:path";
 
 import {
-  METHODS_V2_CAPTURED_FILES,
+  METHODS_V2_BLIND_CONSENSUS_CAPTURED_FILES,
+  methodsV2CapturedFiles,
   validateMethodsV2ExecutionRecords,
 } from "../test-flow/lib/methods-oracle.mjs";
+import {
+  EVIDENCE_V2_DEFAULT_EVALUATION_MODE,
+  isEvidenceV2EvaluationMode,
+} from "./evidence-v2-evaluation-mode.mjs";
 import {
   discoverReleaseCaseRoot,
   loadReleaseCaseInputs,
@@ -34,7 +39,7 @@ const METHOD_FIELDS = Object.freeze([
 ]);
 const SUMMARY_FIELDS = Object.freeze([
   "case_id", "confirmed_method_ids", "diagnostic_id", "evaluation_count",
-  "evaluation_id", "evidence_event_count", "evidence_hit_count", "graph_ref",
+  "evaluation_id", "evaluation_mode", "evidence_event_count", "evidence_hit_count", "graph_ref",
   "method_activation_markers_sha256", "plan_ref", "public_methods_result_sha256", "record_sha256",
   "result_ref", "reviewer_job_id", "reviewer_repair_used", "schema_version",
   "service_model_calls", "source_job_id", "specialist_repair_used", "status",
@@ -595,13 +600,21 @@ export function validateEvidenceV2ReleaseScenarioGraph({
   };
 }
 
-function invocationProjection(providerInvocations, modelId, sourceJob, reviewerJob) {
+function invocationProjection(providerInvocations, modelId, sourceJob, reviewerJob, evaluationMode) {
   assertFlow(Array.isArray(providerInvocations), "SCENARIO_ORACLE_PROVIDER_INVOCATIONS", "provider role receipts are missing");
-  return providerInvocations.map((invocation) => ({
-    effective_model: modelId,
-    job_id: invocation.role === "SPECIALIST" ? sourceJob.job_id : reviewerJob.job_id,
-    job_type: invocation.role === "SPECIALIST" ? "DIAGNOSE" : "REVIEW",
-  }));
+  return providerInvocations.map((invocation) => {
+    assertFlow(
+      invocation?.role === "SPECIALIST"
+        || (evaluationMode === "BLIND_CONSENSUS" && invocation?.role === "REVIEWER"),
+      "SCENARIO_ORACLE_PROVIDER_INVOCATION_ROLE",
+      "provider role receipt does not match the evaluation mode",
+    );
+    return {
+      effective_model: modelId,
+      job_id: invocation.role === "SPECIALIST" ? sourceJob.job_id : reviewerJob.job_id,
+      job_type: invocation.role === "SPECIALIST" ? "DIAGNOSE" : "REVIEW",
+    };
+  });
 }
 
 function summaryBinding(summary) {
@@ -615,10 +628,12 @@ export function buildEvidenceV2ScenarioOracleReceipt({
   scenario,
   providerInvocations,
   modelId,
+  evaluationMode = EVIDENCE_V2_DEFAULT_EVALUATION_MODE,
 }) {
   assertFlow(typeof sourceRoot === "string" && path.isAbsolute(sourceRoot), "SCENARIO_ORACLE_SOURCE_ROOT", "source root must be absolute");
   assertFlow(typeof certRoot === "string" && path.isAbsolute(certRoot), "SCENARIO_ORACLE_CERT_ROOT", "certification root must be absolute");
   assertFlow(typeof modelId === "string" && modelId.length > 0, "SCENARIO_ORACLE_MODEL_ID", "provider model id is missing");
+  assertFlow(isEvidenceV2EvaluationMode(evaluationMode), "SCENARIO_ORACLE_EVALUATION_MODE", "scenario oracle evaluation mode is invalid");
   const caseRoot = discoverReleaseCaseRoot(path.join(sourceRoot, "tests", "cases", "release"));
   const inputs = loadReleaseCaseInputs(caseRoot);
   const gateOracle = loadReleaseCaseOracle(caseRoot);
@@ -629,7 +644,20 @@ export function buildEvidenceV2ScenarioOracleReceipt({
 
   const methodsPath = requireFile(certRoot, EVIDENCE_V2_LOADED_METHODS_FILENAME, "SCENARIO_ORACLE_METHODS_MISSING", "copied methods.json");
   const methods = readJson(methodsPath);
-  const files = Object.fromEntries(Object.entries(METHODS_V2_CAPTURED_FILES).map(([key, filename]) => [
+  const capturedFiles = methodsV2CapturedFiles(evaluationMode);
+  if (evaluationMode === "SPECIALIST_ONLY") {
+    const requiredNames = new Set(Object.values(capturedFiles));
+    for (const filename of Object.values(METHODS_V2_BLIND_CONSENSUS_CAPTURED_FILES)) {
+      if (!requiredNames.has(filename)) {
+        assertFlow(
+          !fs.existsSync(path.join(certRoot, filename)),
+          "SCENARIO_ORACLE_REVIEWER_ARTIFACT_PRESENT",
+          `Specialist-only certification must not contain ${filename}`,
+        );
+      }
+    }
+  }
+  const files = Object.fromEntries(Object.entries(capturedFiles).map(([key, filename]) => [
     key,
     fs.readFileSync(requireFile(certRoot, filename, "SCENARIO_ORACLE_EXECUTION_FILE_MISSING", filename)),
   ]));
@@ -638,13 +666,16 @@ export function buildEvidenceV2ScenarioOracleReceipt({
   assertFlow(publicBytes.equals(Buffer.from(canonicalJson(JSON.parse(publicBytes.toString("utf8"))), "utf8")), "SCENARIO_ORACLE_PUBLIC_RESULT_NON_CANONICAL", "public methods_result is not canonical JSON bytes");
   const publicMethodsResult = JSON.parse(publicBytes.toString("utf8"));
   const sourceJob = JSON.parse(files.source_job.toString("utf8"));
-  const reviewerJob = JSON.parse(files.reviewer_job.toString("utf8"));
+  const reviewerJob = evaluationMode === "BLIND_CONSENSUS"
+    ? JSON.parse(files.reviewer_job.toString("utf8"))
+    : null;
   assertFlow(
-    sourceJob.case_id === reviewerJob.case_id
-      && sourceJob.skill_ref?.id === inputs.product_registration.runtime_ref_id
+    sourceJob.skill_ref?.id === inputs.product_registration.runtime_ref_id
       && sourceJob.skill_ref?.version === inputs.product_registration.version
-      && reviewerJob.skill_ref?.id === inputs.product_registration.runtime_ref_id
-      && reviewerJob.skill_ref?.version === inputs.product_registration.version,
+      && (evaluationMode === "SPECIALIST_ONLY"
+        || (sourceJob.case_id === reviewerJob.case_id
+          && reviewerJob.skill_ref?.id === inputs.product_registration.runtime_ref_id
+          && reviewerJob.skill_ref?.version === inputs.product_registration.version)),
     "SCENARIO_ORACLE_JOB_REGISTRATION_MISMATCH",
     "production Jobs do not bind the frozen product registration",
   );
@@ -659,23 +690,25 @@ export function buildEvidenceV2ScenarioOracleReceipt({
     files,
     expected: {
       source_job_id: sourceJob.job_id,
-      reviewer_job_id: reviewerJob.job_id,
+      reviewer_job_id: reviewerJob?.job_id ?? null,
       case_id: sourceJob.case_id,
       skill_ref: sourceJob.skill_ref,
       ...scenarioValidation.expected,
     },
-    invocations: invocationProjection(providerInvocations, modelId, sourceJob, reviewerJob),
+    invocations: invocationProjection(providerInvocations, modelId, sourceJob, reviewerJob, evaluationMode),
     publicMethodsResult,
+    evaluationMode,
   });
   assertFlow(summary.public_methods_result_sha256 === sha256Bytes(publicBytes), "SCENARIO_ORACLE_PUBLIC_RESULT_DIGEST", "public methods_result digest differs from the full oracle result");
-  const executionRecords = Object.fromEntries(Object.entries(METHODS_V2_CAPTURED_FILES).map(([key, filename]) => [key, {
+  const executionRecords = Object.fromEntries(Object.entries(capturedFiles).map(([key, filename]) => [key, {
     path: filename,
     sha256: sha256Bytes(files[key]),
   }]));
   return {
-    schema_version: 1,
+    schema_version: 2,
     receipt_type: EVIDENCE_V2_SCENARIO_ORACLE_RECEIPT,
     status: "PASS",
+    evaluation_mode: evaluationMode,
     scenario_id: inputs.journey_scenario,
     release_case: {
       case_id: inputs.case_id,
@@ -696,16 +729,22 @@ export function buildEvidenceV2ScenarioOracleReceipt({
   };
 }
 
-export function validateEvidenceV2ScenarioOracleReceipt(receipt, options) {
+export function validateEvidenceV2ScenarioOracleReceipt(receipt, options = {}) {
+  const evaluationMode = options.evaluationMode ?? EVIDENCE_V2_DEFAULT_EVALUATION_MODE;
   exactKeys(receipt, [
-    "execution_records", "methods", "provider_role_receipts_sha256",
+    "evaluation_mode", "execution_records", "methods", "provider_role_receipts_sha256",
     "public_methods_result", "receipt_type", "release_case", "scenario_id",
     "schema_version", "status", "summary",
   ], "SCENARIO_ORACLE_RECEIPT_FIELDS", "scenario oracle receipt");
-  assertFlow(receipt.schema_version === 1, "SCENARIO_ORACLE_RECEIPT_VERSION", "scenario oracle receipt schema_version must be 1");
+  assertFlow(receipt.schema_version === 2, "SCENARIO_ORACLE_RECEIPT_VERSION", "scenario oracle receipt schema_version must be 2");
   assertFlow(receipt.receipt_type === EVIDENCE_V2_SCENARIO_ORACLE_RECEIPT, "SCENARIO_ORACLE_RECEIPT_TYPE", "scenario oracle receipt type is invalid");
   assertFlow(receipt.status === "PASS", "SCENARIO_ORACLE_RECEIPT_STATUS", "scenario oracle receipt status must be PASS");
-  const replayed = buildEvidenceV2ScenarioOracleReceipt(options);
+  assertFlow(
+    isEvidenceV2EvaluationMode(evaluationMode) && receipt.evaluation_mode === evaluationMode,
+    "SCENARIO_ORACLE_EVALUATION_MODE",
+    "scenario oracle evaluation mode is invalid or inconsistent",
+  );
+  const replayed = buildEvidenceV2ScenarioOracleReceipt({ ...options, evaluationMode });
   assertFlow(canonicalJson(receipt) === canonicalJson(replayed), "SCENARIO_ORACLE_REPLAY_MISMATCH", "scenario oracle receipt does not match replayed production evidence");
   return receipt;
 }

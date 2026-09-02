@@ -74,10 +74,29 @@ def build_method_terminal_result_v2(
     confirmed_event_refs: tuple[str, ...] = ()
     confirmed_hit_refs: tuple[str, ...] = ()
     if state.status == "RESOLVED":
-        if state.consensus is None or state.consensus.status != "RESOLVED":
-            raise ValueError("resolved result requires resolved consensus")
-        confirmed_evaluation_refs = state.consensus.confirmed_evaluation_refs
-        confirmed_method_ids = state.consensus.confirmed_method_ids
+        specialist = state.specialist_evaluation
+        reviewer = state.reviewer_evaluation
+        if specialist is None:
+            raise ValueError("resolved result requires a Specialist evaluation")
+        if state.consensus is None:
+            if reviewer is not None:
+                raise ValueError(
+                    "Specialist-only resolved result cannot retain a Reviewer evaluation"
+                )
+            confirmed_evaluation_refs = tuple(
+                item.evaluation_ref
+                for item in specialist.evaluations
+                if item.verdict == "CONFIRMED"
+            )
+            confirmed_method_ids = tuple(
+                plan_by_ref[evaluation_ref].method_id
+                for evaluation_ref in confirmed_evaluation_refs
+            )
+        else:
+            if state.consensus.status != "RESOLVED" or reviewer is None:
+                raise ValueError("reviewed result requires resolved consensus")
+            confirmed_evaluation_refs = state.consensus.confirmed_evaluation_refs
+            confirmed_method_ids = state.consensus.confirmed_method_ids
         confirmed_items = tuple(
             plan_by_ref.get(evaluation_ref)
             for evaluation_ref in confirmed_evaluation_refs
@@ -88,27 +107,26 @@ def build_method_terminal_result_v2(
             item.method_id for item in confirmed_items if item is not None
         )
         if actual_method_ids != confirmed_method_ids:
-            raise ValueError("consensus method identities differ from the plan")
-        specialist = state.specialist_evaluation
-        reviewer = state.reviewer_evaluation
-        if specialist is None or reviewer is None:
-            raise ValueError("resolved result requires both role evaluations")
+            raise ValueError("confirmed method identities differ from the plan")
         specialist_by_ref = {
             item.evaluation_ref: item for item in specialist.evaluations
-        }
-        reviewer_by_ref = {
-            item.evaluation_ref: item for item in reviewer.evaluations
         }
         selected_by_ref = {
             evaluation_ref: specialist_by_ref[evaluation_ref].supporting_event_refs
             for evaluation_ref in confirmed_evaluation_refs
         }
-        if any(
-            reviewer_by_ref[evaluation_ref].supporting_event_refs
-            != selected_by_ref[evaluation_ref]
-            for evaluation_ref in confirmed_evaluation_refs
-        ):
-            raise ValueError("resolved role evaluations select different evidence events")
+        if reviewer is not None:
+            reviewer_by_ref = {
+                item.evaluation_ref: item for item in reviewer.evaluations
+            }
+            if any(
+                reviewer_by_ref[evaluation_ref].supporting_event_refs
+                != selected_by_ref[evaluation_ref]
+                for evaluation_ref in confirmed_evaluation_refs
+            ):
+                raise ValueError(
+                    "resolved role evaluations select different evidence events"
+                )
         flattened_selected_event_refs = _unique(
             tuple(
                 event_ref
@@ -116,8 +134,14 @@ def build_method_terminal_result_v2(
                 for event_ref in selected_by_ref[evaluation_ref]
             )
         )
-        if flattened_selected_event_refs != state.consensus.confirmed_event_refs:
-            raise ValueError("consensus event refs differ from selected evidence events")
+        if (
+            state.consensus is not None
+            and flattened_selected_event_refs
+            != state.consensus.confirmed_event_refs
+        ):
+            raise ValueError(
+                "consensus event refs differ from selected evidence events"
+            )
         for item in confirmed_items:
             if item is None:
                 continue

@@ -336,6 +336,7 @@ class _Stack:
             id_generator=self.ids,
             workspace_manager=WorkspaceManager(data_root),
             backend=backend,
+            evidence_v2_reviewer_enabled=True,
             backend_test_limits=BackendExecutionLimits(
                 wall_time_seconds=30.0,
                 stdout_stderr_bytes=1024 * 1024,

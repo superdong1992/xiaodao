@@ -15,7 +15,7 @@ import {
   buildMethodsProducerIdentity,
   MACOS_CODEX_LUNA_E2E_TOKEN_LIMIT,
   MACOS_CODEX_LUNA_E2E_USD_LIMIT,
-  MACOS_CODEX_LUNA_E2E_MAX_CALLS,
+  MACOS_CODEX_LUNA_BLIND_REVIEW_E2E_MAX_CALLS,
   macosCodexLunaE2ECallCount,
   MACOS_CODEX_LUNA_METHODS_CALLS,
   MACOS_CODEX_LUNA_METHODS_TOKEN_LIMIT,
@@ -55,6 +55,7 @@ const FRAMEWORK_ID = "macos-codex-luna-fast-e2e";
 const FRAMEWORK_VERSION = 1;
 const GOALS = new Set(["methods", "fast-e2e", "e2e"]);
 const FLAGS = new Set(["plan-only", "allow-real-model", "all-scenarios", "help"]);
+const EVALUATION_MODES = new Set(["SPECIALIST_ONLY", "BLIND_CONSENSUS"]);
 
 const REQUIRED_EVIDENCE = Object.freeze({
   methods: ["codex-identity.json", "model-invocations.json", "model-usage.json", "methods-package.json", "adapter-receipt.json"],
@@ -65,6 +66,12 @@ const REQUIRED_EVIDENCE = Object.freeze({
 const FAST_E2E_REVIEW_EVIDENCE = Object.freeze([
   ...REQUIRED_EVIDENCE["fast-e2e"],
   "methods-reviewer-job.json",
+  "methods-reviewer-outcome-v2.json",
+]);
+
+const MODEL_CERT_REVIEW_EVIDENCE = new Set([
+  "methods-reviewer-job.json",
+  "methods-terminal-state-v2.json",
   "methods-reviewer-outcome-v2.json",
 ]);
 
@@ -119,6 +126,8 @@ export function parseArguments(argv) {
   if (values["all-scenarios"] === true && values.scenario !== undefined) fail("LUNA_SCENARIO_SELECTION_CONFLICT", "--all-scenarios and --scenario are mutually exclusive");
   if (values.goal === "e2e" && values.scenario !== undefined && !STANDALONE_CODEX_LUNA_SCENARIOS.includes(values.scenario)) fail("LUNA_SCENARIO_INVALID", "Evidence V2 model-cert uses only its fixed Release scenario");
   if (values.goal === "e2e" && (values.scenario ?? "multiple-rpc-timeouts") !== "multiple-rpc-timeouts") fail("LUNA_SCENARIO_INVALID", "Evidence V2 model-cert uses only multiple-rpc-timeouts");
+  if (values["evaluation-mode"] !== undefined && values.goal !== "e2e") fail("LUNA_EVALUATION_MODE_FORBIDDEN", "--evaluation-mode belongs only to Evidence V2 model-cert");
+  if (values["evaluation-mode"] !== undefined && !EVALUATION_MODES.has(values["evaluation-mode"])) fail("LUNA_EVALUATION_MODE_INVALID", "--evaluation-mode must be SPECIALIST_ONLY or BLIND_CONSENSUS");
   return values;
 }
 
@@ -139,6 +148,7 @@ function defaults(values, environment = process.env) {
     registrationRoot: values["registration-root"] ? path.resolve(values["registration-root"]) : null,
     sourceSnapshotDigest: values["source-snapshot-digest"] ?? null,
     coreVerdict: values["core-verdict"] ? path.resolve(values["core-verdict"]) : null,
+    evaluationMode: values["evaluation-mode"] ?? "SPECIALIST_ONLY",
     retryContext: { reason: values.reason ?? null, hypothesis: values.hypothesis ?? null, expected_evidence: values["expected-evidence"] ?? null },
   };
 }
@@ -161,16 +171,18 @@ function requiredDirectory(directory, code, label, blockers) {
   }
 }
 
-function scenarioCallCount(goal, scenario) {
+function scenarioCallCount(goal, scenario, evaluationMode = "SPECIALIST_ONLY") {
   return goal === "fast-e2e"
     ? fastE2ENormalCallCount(scenario)
-    : macosCodexLunaE2ECallCount(scenario);
+    : macosCodexLunaE2ECallCount(scenario, evaluationMode);
 }
 
-function scenarioCallHardCap(goal, scenario) {
+function scenarioCallHardCap(goal, scenario, evaluationMode = "SPECIALIST_ONLY") {
   return goal === "fast-e2e"
     ? fastE2ECallHardCap(scenario)
-    : MACOS_CODEX_LUNA_E2E_MAX_CALLS;
+    : evaluationMode === "SPECIALIST_ONLY"
+      ? 2
+      : MACOS_CODEX_LUNA_BLIND_REVIEW_E2E_MAX_CALLS;
 }
 
 function scenarioTokenCap(goal, scenario) {
@@ -189,6 +201,12 @@ function fastRequiredEvidence(scenario) {
   return scenario === "insufficient-evidence"
     ? REQUIRED_EVIDENCE["fast-e2e"]
     : FAST_E2E_REVIEW_EVIDENCE;
+}
+
+function modelCertRequiredEvidence(evaluationMode) {
+  return evaluationMode === "BLIND_CONSENSUS"
+    ? REQUIRED_EVIDENCE.e2e
+    : REQUIRED_EVIDENCE.e2e.filter((name) => !MODEL_CERT_REVIEW_EVIDENCE.has(name));
 }
 
 export function buildPlan(options) {
@@ -287,7 +305,7 @@ export function buildPlan(options) {
     ? 0
     : options.goal === "methods"
       ? MACOS_CODEX_LUNA_METHODS_CALLS
-      : expectedSuiteCalls(scenarios, (scenario) => scenarioCallCount(options.goal, scenario));
+      : expectedSuiteCalls(scenarios, (scenario) => scenarioCallCount(options.goal, scenario, options.evaluationMode));
   const tokenCap = options.goal === "methods"
     ? MACOS_CODEX_LUNA_METHODS_TOKEN_LIMIT
     : scenarios.reduce((sum, scenario) => sum + scenarioTokenCap(options.goal, scenario), 0);
@@ -300,6 +318,7 @@ export function buildPlan(options) {
     framework_version: FRAMEWORK_VERSION,
     goal: options.goal,
     mode,
+    evaluation_mode: options.goal === "e2e" ? options.evaluationMode : null,
     scenario: scenarios.length === 1 ? scenarios[0] : null,
     scenarios,
     execution: {
@@ -312,9 +331,9 @@ export function buildPlan(options) {
       platform,
       expected_model_calls: expectedCalls,
       model_call_hard_cap: ["fast-e2e", "e2e"].includes(options.goal)
-        ? scenarios.reduce((sum, scenario) => sum + scenarioCallHardCap(options.goal, scenario), 0)
+        ? scenarios.reduce((sum, scenario) => sum + scenarioCallHardCap(options.goal, scenario, options.evaluationMode), 0)
         : expectedCalls,
-      per_scenario: scenarios.map((scenario) => ({ scenario_id: scenario, expected_model_calls: scenarioCallCount(options.goal, scenario), model_call_hard_cap: scenarioCallHardCap(options.goal, scenario), token_cap: scenarioTokenCap(options.goal, scenario), equivalent_usd_cap: scenarioCostCap(options.goal, scenario) })),
+      per_scenario: scenarios.map((scenario) => ({ scenario_id: scenario, expected_model_calls: scenarioCallCount(options.goal, scenario, options.evaluationMode), model_call_hard_cap: scenarioCallHardCap(options.goal, scenario, options.evaluationMode), token_cap: scenarioTokenCap(options.goal, scenario), equivalent_usd_cap: scenarioCostCap(options.goal, scenario) })),
       model: "gpt-5.6-luna",
       reasoning_effort: "medium",
       token_cap: tokenCap,
@@ -339,7 +358,7 @@ export function buildPlan(options) {
     },
     evidence: options.goal === "fast-e2e" && scenarios.length === 1
       ? fastRequiredEvidence(scenarios[0])
-      : REQUIRED_EVIDENCE[options.goal],
+      : options.goal === "e2e" ? modelCertRequiredEvidence(options.evaluationMode) : REQUIRED_EVIDENCE[options.goal],
     admission: { status: blockers.length === 0 ? "READY" : "BLOCKED", blockers },
   };
   return { ...planCore, plan_sha256: sha256Bytes(canonicalJson(planCore)) };
@@ -374,7 +393,8 @@ export function sealLightGate({ goal, mode, evidenceRoot, expectedCalls, modelCa
   if (names.has("model-usage.json")) usage = JSON.parse(fs.readFileSync(path.join(evidenceRoot, "model-usage.json"), "utf8")).aggregate ?? null;
   const adapterPass = names.has("adapter-receipt.json") && JSON.parse(fs.readFileSync(path.join(evidenceRoot, "adapter-receipt.json"), "utf8")).status === "PASS";
   const roleEvaluationGoal = goal === "e2e" || goal === "fast-e2e";
-  const hardCap = modelCallHardCap ?? (roleEvaluationGoal ? MACOS_CODEX_LUNA_E2E_MAX_CALLS : expectedCalls);
+  const hardCap = modelCallHardCap
+    ?? (roleEvaluationGoal ? MACOS_CODEX_LUNA_BLIND_REVIEW_E2E_MAX_CALLS : expectedCalls);
   const callCountPass = roleEvaluationGoal
     ? Number.isSafeInteger(invocationCount) && invocationCount >= expectedCalls && invocationCount <= hardCap
     : invocationCount === expectedCalls;
@@ -464,6 +484,7 @@ async function executeOne(options, plan, { id = runId(), runRoot = path.join(opt
     registrationRoot: options.registrationRoot,
     sourceSnapshotDigest: options.sourceSnapshotDigest,
     coreVerdict: options.coreVerdict,
+    evaluationMode: options.evaluationMode,
     workRoot,
     privateRoot,
     evidenceRoot,
@@ -492,6 +513,7 @@ async function executeOne(options, plan, { id = runId(), runRoot = path.join(opt
         ...common,
         sourceRoot: REPO_ROOT,
         scenario: "multiple-rpc-timeouts",
+        evaluationMode: options.evaluationMode,
       }, { onProgress: progressReporter() });
     }
   } catch (error) {
@@ -632,7 +654,7 @@ export async function execute(options, plan) {
 }
 
 function usage() {
-  return `Usage:\n  ./tools/test-flow/quick-validation/codex-luna/run.sh --goal methods [--plan-only] [--allow-real-model]\n  ./tools/test-flow/quick-validation/codex-luna/run.sh --goal fast-e2e (--scenario <historical-scenario> | --all-scenarios) --registration-root <path> [--plan-only] [--allow-real-model]\n  ./tools/test-flow/quick-validation/codex-luna/run.sh --goal e2e --scenario multiple-rpc-timeouts --source-snapshot-digest <sha256> --core-verdict <path> (--registration-root <path> | --cache-root <path>) [--plan-only] [--allow-real-model]\n\nFast E2E writes lightweight standalone verdicts. The e2e goal remains the formal P2 model-cert probe.\n`;
+  return `Usage:\n  ./tools/test-flow/quick-validation/codex-luna/run.sh --goal methods [--plan-only] [--allow-real-model]\n  ./tools/test-flow/quick-validation/codex-luna/run.sh --goal fast-e2e (--scenario <historical-scenario> | --all-scenarios) --registration-root <path> [--plan-only] [--allow-real-model]\n  ./tools/test-flow/quick-validation/codex-luna/run.sh --goal e2e --scenario multiple-rpc-timeouts --source-snapshot-digest <sha256> --core-verdict <path> (--registration-root <path> | --cache-root <path>) [--evaluation-mode SPECIALIST_ONLY|BLIND_CONSENSUS] [--plan-only] [--allow-real-model]\n\nFast E2E writes lightweight standalone verdicts. The e2e goal remains the formal P2 model-cert probe.\n`;
 }
 
 async function main() {

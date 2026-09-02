@@ -179,6 +179,7 @@ def test_runtime_submission_reviewer_and_public_projection_are_one_v2_journey(
         id_generator=DeterministicIdGenerator(seed="runtime-journey-specialist"),
         workspace_manager=WorkspaceManager(tmp_path / "specialist-runtime"),
         backend=specialist_backend,
+        evidence_v2_reviewer_enabled=True,
     )
 
     specialist_receipt = specialist_runtime.execute(

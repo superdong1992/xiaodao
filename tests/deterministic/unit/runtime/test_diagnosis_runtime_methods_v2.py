@@ -158,16 +158,27 @@ class _EvidenceV2SpecialistBackend(_MethodsTwoPassBackend):
                 message="injected cancellation",
                 retryable=True,
             )
-        if isinstance(response, str) and response in {"VALID", "VALID_SECRET"}:
+        if isinstance(response, str) and (
+            response in {"VALID", "VALID_SECRET"}
+            or response in {"VALID_UNKNOWN", "VALID_REJECTED"}
+        ):
             plan = parse_canonical_json_bytes(
                 (inputs / "method-evaluation-plan.json").read_bytes(),
                 MethodEvaluationPlanV2,
             )
+            verdict = {
+                "VALID_UNKNOWN": "UNKNOWN",
+                "VALID_REJECTED": "REJECTED",
+            }.get(response, "CONFIRMED")
             response = [
                 {
                     "evaluation_ref": item.evaluation_ref,
-                    "verdict": "CONFIRMED",
-                    "supporting_event_refs": list(item.evidence_event_refs),
+                    "verdict": verdict,
+                    "supporting_event_refs": (
+                        list(item.evidence_event_refs)
+                        if verdict == "CONFIRMED"
+                        else []
+                    ),
                     "reason": (
                         "contract-test-token-1"
                         if response == "VALID_SECRET"
@@ -339,6 +350,7 @@ def _runtime(
     *,
     records: InMemoryExecutionRecordStore | None = None,
     workspace_name: str = "runtime-data",
+    reviewer_enabled: bool = True,
 ) -> tuple[
     DiagnosisRuntime,
     Any,
@@ -376,6 +388,7 @@ def _runtime(
         id_generator=DeterministicIdGenerator(seed="methods-v2-runtime"),
         workspace_manager=WorkspaceManager(tmp_path / workspace_name),
         backend=backend,
+        evidence_v2_reviewer_enabled=reviewer_enabled,
     )
     return runtime, job, backend, records
 
@@ -668,6 +681,51 @@ def test_specialist_scans_once_hard_cuts_logs_and_publishes_handoff(
         attempt="PRIMARY",
     )
     assert prompt == backend.role_prompts[0].encode("utf-8")
+
+
+@pytest.mark.parametrize(
+    ("response", "expected_status", "expected_reason"),
+    [
+        ("VALID", "RESOLVED", None),
+        ("VALID_UNKNOWN", "UNRESOLVED", "INCOMPLETE_EVALUATION"),
+        ("VALID_REJECTED", "UNRESOLVED", "NO_CONFIRMED_METHOD"),
+    ],
+)
+def test_reviewer_disabled_finishes_from_specialist_without_review_artifacts(
+    tmp_path: Path,
+    response: str,
+    expected_status: str,
+    expected_reason: str | None,
+) -> None:
+    runtime, job, backend, records = _runtime(
+        tmp_path,
+        (response,),
+        reviewer_enabled=False,
+    )
+
+    receipt = runtime.execute(job, InMemoryCancellationSignal())
+
+    projection = receipt.job_outcome.methods_terminal_projection
+    assert projection is not None
+    assert projection.status == expected_status
+    assert projection.reason_code == expected_reason
+    assert receipt.job_outcome.methods_review_target is None
+    assert receipt.job_outcome.methods_reviewer_result is None
+    assert len(backend.calls) == 1
+    state = read_method_state_v2(records, job_id=job.job_id)
+    assert state is not None
+    assert state.status == expected_status
+    assert state.specialist_evaluation is not None
+    assert state.reviewer_evaluation is None
+    assert state.consensus is None
+    assert state.reviewer_protocol_failures == 0
+    assert read_method_prompt_v2(
+        records,
+        job_id=job.job_id,
+        role="REVIEWER",
+        attempt="PRIMARY",
+    ) is None
+    assert not tuple((tmp_path / "runtime-data").rglob("method-review.draft.json"))
 
 
 def test_specialist_uses_one_repair_then_stops(
@@ -1251,6 +1309,7 @@ def test_specialist_replacement_resumes_old_repair_without_rescan(
         id_generator=DeterministicIdGenerator(seed="specialist-replacement"),
         workspace_manager=WorkspaceManager(tmp_path / "replacement"),
         backend=backend,
+        evidence_v2_reviewer_enabled=True,
     )
     from problem_locator.runtime import diagnosis_runtime as runtime_module
 
@@ -1324,6 +1383,7 @@ def test_specialist_replacement_resource_drift_keeps_old_evaluation_lineage(
         id_generator=DeterministicIdGenerator(seed="specialist-replacement-drift"),
         workspace_manager=WorkspaceManager(tmp_path / "replacement-drift"),
         backend=backend,
+        evidence_v2_reviewer_enabled=True,
     )
 
     receipt = runtime.execute(replacement, InMemoryCancellationSignal())
@@ -1433,6 +1493,7 @@ def test_specialist_replacement_lineage_resumes_from_immediate_predecessor(
         id_generator=DeterministicIdGenerator(seed="specialist-second-replacement"),
         workspace_manager=WorkspaceManager(tmp_path / "second-replacement"),
         backend=backend,
+        evidence_v2_reviewer_enabled=True,
     )
 
     receipt = runtime.execute(second_replacement, InMemoryCancellationSignal())
@@ -1606,6 +1667,7 @@ def test_specialist_pending_state_wins_over_later_asset_drift(
         tmp_path / "restart",
         ("VALID",),
         records=records,
+        reviewer_enabled=False,
     )
     skill_file = next((tmp_path / "restart" / "logparse-skills").rglob("SKILL.md"))
     skill_file.write_text(

@@ -166,6 +166,16 @@
       "runtime_profile": "release",
       "result_receipt": "evidence-v2-model-cert",
       "certification_target": "P2",
+      "evaluation_mode": "SPECIALIST_ONLY",
+      "evidence": ["runtime-receipt.json", "methods-package.json", "codex-identity.json", "model-invocations.json", "model-usage.json", "methods-source-job.json", "methods-evidence-graph-v2.json", "methods-evaluation-plan-v2.json", "methods-limitations-v2.json", "methods-source-state-v2.json", "methods-source-outcome-v2.json", "methods-result-v2.json", "methods.json", "scenario-oracle-receipt.json", "model-cert-input.json", "model-cert.json", "adapter-receipt.json"]
+    },
+    "real.macos-codex-luna-blind-review-e2e": {
+      "kind": "capability-adapter",
+      "adapter": "macos-codex-luna-e2e",
+      "runtime_profile": "release",
+      "result_receipt": "evidence-v2-model-cert",
+      "certification_target": "P2",
+      "evaluation_mode": "BLIND_CONSENSUS",
       "evidence": ["runtime-receipt.json", "methods-package.json", "codex-identity.json", "model-invocations.json", "model-usage.json", "methods-source-job.json", "methods-reviewer-job.json", "methods-evidence-graph-v2.json", "methods-evaluation-plan-v2.json", "methods-limitations-v2.json", "methods-source-state-v2.json", "methods-source-outcome-v2.json", "methods-terminal-state-v2.json", "methods-reviewer-outcome-v2.json", "methods-result-v2.json", "methods.json", "scenario-oracle-receipt.json", "model-cert-input.json", "model-cert.json", "adapter-receipt.json"]
     },
     "quick.codex-luna.model-cert-driver": {
@@ -207,12 +217,30 @@
       "runtime_profile": "release",
       "result_receipt": "evidence-v2-model-cert",
       "certification_target": "P1",
+      "evaluation_mode": "SPECIALIST_ONLY",
+      "evidence": ["runtime-receipt.json", "methods-package.json", "claude-identity.json", "model-invocations.json", "model-usage.json", "methods-source-job.json", "methods-evidence-graph-v2.json", "methods-evaluation-plan-v2.json", "methods-limitations-v2.json", "methods-source-state-v2.json", "methods-source-outcome-v2.json", "methods-result-v2.json", "methods.json", "scenario-oracle-receipt.json", "model-cert-input.json", "model-cert.json", "adapter-receipt.json"]
+    },
+    "real.macos-claude-deepseek-blind-review-e2e": {
+      "kind": "capability-adapter",
+      "adapter": "macos-claude-deepseek-e2e",
+      "runtime_profile": "release",
+      "result_receipt": "evidence-v2-model-cert",
+      "certification_target": "P1",
+      "evaluation_mode": "BLIND_CONSENSUS",
       "evidence": ["runtime-receipt.json", "methods-package.json", "claude-identity.json", "model-invocations.json", "model-usage.json", "methods-source-job.json", "methods-reviewer-job.json", "methods-evidence-graph-v2.json", "methods-evaluation-plan-v2.json", "methods-limitations-v2.json", "methods-source-state-v2.json", "methods-source-outcome-v2.json", "methods-terminal-state-v2.json", "methods-reviewer-outcome-v2.json", "methods-result-v2.json", "methods.json", "scenario-oracle-receipt.json", "model-cert-input.json", "model-cert.json", "adapter-receipt.json"]
     },
     "evidence-v2.release-verdict": {
       "kind": "capability-adapter",
       "adapter": "evidence-v2-release-verdict",
       "runtime_profile": "release",
+      "evaluation_mode": "SPECIALIST_ONLY",
+      "evidence": ["release-verdict.json"]
+    },
+    "evidence-v2.blind-review-release-verdict": {
+      "kind": "capability-adapter",
+      "adapter": "evidence-v2-release-verdict",
+      "runtime_profile": "release",
+      "evaluation_mode": "BLIND_CONSENSUS",
       "evidence": ["release-verdict.json"]
     },
     "real.logparse": {
@@ -325,7 +353,7 @@
       "phase": "diagnose",
       "runtime_profile": "release",
       "evidence_contract": {
-        "id": "cross-job-diagnose-review-v2",
+        "id": "cross-job-specialist-diagnose-v2",
         "event_stream": {
           "instance": "diagnose",
           "pass_requires": ["diagnostics", "journey"],
@@ -334,12 +362,6 @@
         }
       },
       "evidence": ["adapter-result.json"]
-    },
-    "journey.review-observation": {
-      "kind": "observation",
-      "observation": "review-state-transition",
-      "evidence_contract": "review-observation-v2",
-      "evidence": ["review-observation.json"]
     },
     "journey.publish-restart": {
       "kind": "cross-job-adapter",

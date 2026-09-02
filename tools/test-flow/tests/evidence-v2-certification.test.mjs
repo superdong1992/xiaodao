@@ -16,7 +16,7 @@ import {
 } from "../lib/actions.mjs";
 import { loadConfiguration } from "../lib/config.mjs";
 import {
-  METHODS_V2_CAPTURED_FILES,
+  methodsV2CapturedFiles,
   validateMethodsV2ExecutionRecords,
 } from "../lib/methods-oracle.mjs";
 import { packageTreeIdentity } from "../lib/release-inputs.mjs";
@@ -30,6 +30,7 @@ import {
 } from "../lib/util.mjs";
 import {
   buildEvidenceV2ReleaseVerdict,
+  EVIDENCE_V2_DEFAULT_EVALUATION_MODE,
   EVIDENCE_V2_CORE_VERDICT_PATH,
   EVIDENCE_V2_MODEL_CERT_FILENAME,
   EVIDENCE_V2_MODEL_CERT_INPUT_FILENAME,
@@ -46,6 +47,7 @@ import {
   EVIDENCE_V2_SCENARIO_ORACLE_RECEIPT_FILENAME,
   buildEvidenceV2ReleaseScenarioExpectation,
   buildEvidenceV2ScenarioOracleReceipt,
+  validateEvidenceV2ScenarioOracleReceipt,
 } from "../../validation/evidence-v2-scenario-oracle.mjs";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
@@ -102,16 +104,19 @@ function methodsResult(runtimeReceipt) {
   };
 }
 
-function modelInput({ target, manifestSha256, coreSha256, runtimeReceipt, scenarioOracleSha256 }) {
-  const invocations = [
-    invocation(target, 1, "SPECIALIST", "PRIMARY"),
-    invocation(target, 2, "REVIEWER", "PRIMARY"),
-  ];
+function modelInput({ target, manifestSha256, coreSha256, runtimeReceipt, scenarioOracleSha256, evaluationMode = runtimeReceipt.evaluation_mode }) {
+  const invocations = evaluationMode === "SPECIALIST_ONLY"
+    ? [invocation(target, 1, "SPECIALIST", "PRIMARY")]
+    : [
+      invocation(target, 1, "SPECIALIST", "PRIMARY"),
+      invocation(target, 2, "REVIEWER", "PRIMARY"),
+    ];
   return {
-    schema_version: 1,
+    schema_version: 2,
     receipt_type: "evidence-v2-model-cert-input",
     status: "PASS",
     certification_target: target,
+    evaluation_mode: evaluationMode,
     source_snapshot_digest: SOURCE_DIGEST,
     contract_manifest: {
       path: "schemas/v2/contract-manifest.json",
@@ -137,9 +142,9 @@ function modelInput({ target, manifestSha256, coreSha256, runtimeReceipt, scenar
     },
     invocations,
     call_counts: {
-      total_calls: 2,
+      total_calls: invocations.length,
       specialist_calls: 1,
-      reviewer_calls: 1,
+      reviewer_calls: evaluationMode === "SPECIALIST_ONLY" ? 0 : 1,
       specialist_repairs: 0,
       reviewer_repairs: 0,
       model_retries: 0,
@@ -244,7 +249,11 @@ function writeReleaseRegistration(
 
 function executeProductionBundleAttempt(
   sourceRoot = REPO_ROOT,
-  { includeCompleteTemplates = true, runtimeScript = null } = {},
+  {
+    includeCompleteTemplates = true,
+    runtimeScript = null,
+    evaluationMode = EVIDENCE_V2_DEFAULT_EVALUATION_MODE,
+  } = {},
 ) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "evidence-v2-production-cert-"));
   const registrationRoot = path.join(root, "registration");
@@ -260,6 +269,7 @@ function executeProductionBundleAttempt(
     "--mode", "fake",
     "--fake-rejected-method-id", "api-execution-slow",
     "--fake-rejected-method-id", "client-receive-blocked",
+    "--evaluation-mode", evaluationMode,
     "--source-root", sourceRoot,
     "--registration-root", registrationRoot,
     "--work-root", path.join(root, "work"),
@@ -269,8 +279,8 @@ function executeProductionBundleAttempt(
   return { root, evidenceRoot, receiptPath, result };
 }
 
-function executeProductionBundle(sourceRoot = REPO_ROOT) {
-  const attempt = executeProductionBundleAttempt(sourceRoot);
+function executeProductionBundle(sourceRoot = REPO_ROOT, options = {}) {
+  const attempt = executeProductionBundleAttempt(sourceRoot, options);
   const { root, evidenceRoot, receiptPath, result } = attempt;
   assert.equal(result.status, 0, result.stderr);
   return { root, evidenceRoot, runtimeReceipt: JSON.parse(fs.readFileSync(receiptPath, "utf8")) };
@@ -336,39 +346,47 @@ function copiedProductionEvidence(change) {
 }
 
 function buildScenarioReceipt({ sourceRoot = REPO_ROOT, evidenceRoot, runtimeReceipt }) {
+  const evaluationMode = runtimeReceipt.evaluation_mode;
+  const providerInvocations = evaluationMode === "SPECIALIST_ONLY"
+    ? [{ role: "SPECIALIST" }]
+    : [{ role: "SPECIALIST" }, { role: "REVIEWER" }];
   return buildEvidenceV2ScenarioOracleReceipt({
     sourceRoot,
     certRoot: evidenceRoot,
     scenario: runtimeReceipt.scenario,
-    providerInvocations: [{ role: "SPECIALIST" }, { role: "REVIEWER" }],
+    providerInvocations,
     modelId: "zero-model-role-double",
+    evaluationMode,
   });
 }
 
-function genericMethodsSummary({ sourceRoot = REPO_ROOT, evidenceRoot }) {
+function genericMethodsSummary({ sourceRoot = REPO_ROOT, evidenceRoot, evaluationMode = EVIDENCE_V2_DEFAULT_EVALUATION_MODE }) {
   const methods = JSON.parse(fs.readFileSync(path.join(evidenceRoot, "methods.json"), "utf8"));
   const expectation = buildEvidenceV2ReleaseScenarioExpectation({ sourceRoot, methods });
-  const files = Object.fromEntries(Object.entries(METHODS_V2_CAPTURED_FILES).map(([key, filename]) => [
+  const files = Object.fromEntries(Object.entries(methodsV2CapturedFiles(evaluationMode)).map(([key, filename]) => [
     key,
     fs.readFileSync(path.join(evidenceRoot, filename)),
   ]));
   const sourceJob = JSON.parse(files.source_job.toString("utf8"));
-  const reviewerJob = JSON.parse(files.reviewer_job.toString("utf8"));
+  const reviewerJob = evaluationMode === "BLIND_CONSENSUS"
+    ? JSON.parse(files.reviewer_job.toString("utf8"))
+    : null;
   const publicMethodsResult = JSON.parse(fs.readFileSync(path.join(evidenceRoot, "methods-result-v2.json"), "utf8"));
   return validateMethodsV2ExecutionRecords({
     files,
     expected: {
       source_job_id: sourceJob.job_id,
-      reviewer_job_id: reviewerJob.job_id,
+      reviewer_job_id: reviewerJob?.job_id ?? null,
       case_id: sourceJob.case_id,
       skill_ref: sourceJob.skill_ref,
       ...expectation.expected,
     },
     invocations: [
       { job_id: sourceJob.job_id, job_type: "DIAGNOSE", effective_model: "zero-model-role-double" },
-      { job_id: reviewerJob.job_id, job_type: "REVIEW", effective_model: "zero-model-role-double" },
+      ...(reviewerJob === null ? [] : [{ job_id: reviewerJob.job_id, job_type: "REVIEW", effective_model: "zero-model-role-double" }]),
     ],
     publicMethodsResult,
+    evaluationMode,
   });
 }
 
@@ -421,10 +439,11 @@ function crossJobOracleFixture({ sourceRoot = REPO_ROOT, bundle, methodsSummary 
       combined_sha256: combinedSha256,
     },
     receipt: {
+      evaluation_mode: summary.evaluation_mode,
       methods_v2: summary,
       invocations: [
         { job_id: summary.source_job_id, job_type: "DIAGNOSE", effective_model: "zero-model-role-double" },
-        { job_id: summary.reviewer_job_id, job_type: "REVIEW", effective_model: "zero-model-role-double" },
+        ...(summary.reviewer_job_id === null ? [] : [{ job_id: summary.reviewer_job_id, job_type: "REVIEW", effective_model: "zero-model-role-double" }]),
       ],
     },
   };
@@ -440,17 +459,27 @@ test("DeepSeek and Luna fake provider baselines use the same explicit plan-order
     path.join(REPO_ROOT, "tools", "test-flow", "quick-validation", "codex-luna", "runtime", "macos_codex_luna_model_cert_driver.py"),
   ];
   for (const runtimeScript of drivers) {
-    const attempt = executeProductionBundleAttempt(REPO_ROOT, { runtimeScript });
-    try {
-      assert.equal(attempt.result.status, 0, attempt.result.stderr);
-      const sourceState = JSON.parse(fs.readFileSync(path.join(attempt.evidenceRoot, "methods-source-state-v2.json"), "utf8"));
-      const terminalState = JSON.parse(fs.readFileSync(path.join(attempt.evidenceRoot, "methods-terminal-state-v2.json"), "utf8"));
-      const expected = ["REJECTED", "CONFIRMED", "REJECTED"];
-      assert.deepEqual(sourceState.specialist_evaluation.evaluations.map((item) => item.verdict), expected);
-      assert.deepEqual(terminalState.reviewer_evaluation.evaluations.map((item) => item.verdict), expected);
-      assert.deepEqual(terminalState.consensus.confirmed_method_ids, ["server-queueing"]);
-    } finally {
-      fs.rmSync(attempt.root, { recursive: true, force: true });
+    for (const evaluationMode of ["SPECIALIST_ONLY", "BLIND_CONSENSUS"]) {
+      const attempt = executeProductionBundleAttempt(REPO_ROOT, { runtimeScript, evaluationMode });
+      try {
+        assert.equal(attempt.result.status, 0, attempt.result.stderr);
+        const sourceState = JSON.parse(fs.readFileSync(path.join(attempt.evidenceRoot, "methods-source-state-v2.json"), "utf8"));
+        const expected = ["REJECTED", "CONFIRMED", "REJECTED"];
+        assert.deepEqual(sourceState.specialist_evaluation.evaluations.map((item) => item.verdict), expected);
+        if (evaluationMode === "SPECIALIST_ONLY") {
+          assert.equal(sourceState.status, "RESOLVED");
+          assert.equal(sourceState.reviewer_evaluation, null);
+          assert.equal(sourceState.consensus, null);
+          assert.equal(fs.existsSync(path.join(attempt.evidenceRoot, "methods-reviewer-job.json")), false);
+          assert.equal(fs.existsSync(path.join(attempt.evidenceRoot, "methods-reviewer-outcome-v2.json")), false);
+        } else {
+          const terminalState = JSON.parse(fs.readFileSync(path.join(attempt.evidenceRoot, "methods-terminal-state-v2.json"), "utf8"));
+          assert.deepEqual(terminalState.reviewer_evaluation.evaluations.map((item) => item.verdict), expected);
+          assert.deepEqual(terminalState.consensus.confirmed_method_ids, ["server-queueing"]);
+        }
+      } finally {
+        fs.rmSync(attempt.root, { recursive: true, force: true });
+      }
     }
   }
 });
@@ -473,6 +502,43 @@ test("production Graph mechanically proves the explicit resolved Release verdict
       activation_markers: method.activation_markers,
     })))),
   );
+});
+
+test("scenario oracle receipt binds the selected evaluation mode", () => {
+  const production = productionBundle();
+  const receipt = buildScenarioReceipt({
+    evidenceRoot: production.evidenceRoot,
+    runtimeReceipt: production.runtimeReceipt,
+  });
+  const options = {
+    sourceRoot: REPO_ROOT,
+    certRoot: production.evidenceRoot,
+    scenario: production.runtimeReceipt.scenario,
+    providerInvocations: [{ role: "SPECIALIST" }],
+    modelId: "zero-model-role-double",
+    evaluationMode: "SPECIALIST_ONLY",
+  };
+  assert.equal(validateEvidenceV2ScenarioOracleReceipt(receipt, options), receipt);
+  const changed = clone(receipt);
+  changed.evaluation_mode = "BLIND_CONSENSUS";
+  assert.throws(
+    () => validateEvidenceV2ScenarioOracleReceipt(changed, options),
+    (error) => error.code === "SCENARIO_ORACLE_EVALUATION_MODE",
+  );
+});
+
+test("Specialist-only scenario oracle rejects persisted Reviewer execution records", () => {
+  const value = copiedProductionEvidence((evidenceRoot) => {
+    fs.writeFileSync(path.join(evidenceRoot, "methods-reviewer-job.json"), canonicalJson({ unexpected: true }));
+  });
+  try {
+    assert.throws(
+      () => buildScenarioReceipt({ evidenceRoot: value.evidenceRoot, runtimeReceipt: value.runtimeReceipt }),
+      (error) => error.code === "SCENARIO_ORACLE_REVIEWER_ARTIFACT_PRESENT",
+    );
+  } finally {
+    fs.rmSync(value.root, { recursive: true, force: true });
+  }
 });
 
 test("production event grouping keeps request 501 and decoy 502 distinct", () => {
@@ -534,6 +600,7 @@ function assertSharedOracleRejectsProductionMutation(mutation, baselineSummary) 
       methodsSummary = genericMethodsSummary({
         sourceRoot: value.sourceRoot,
         evidenceRoot: value.bundle.evidenceRoot,
+        evaluationMode: value.bundle.runtimeReceipt.evaluation_mode,
       });
       genericPassed = true;
     } catch {
@@ -767,8 +834,11 @@ test("scenario oracle binds exact ordered activation markers from the Release pa
   }
 });
 
-function fixture() {
-  const production = productionBundle();
+function fixture({ evaluationMode = EVIDENCE_V2_DEFAULT_EVALUATION_MODE } = {}) {
+  const ownsProduction = evaluationMode !== EVIDENCE_V2_DEFAULT_EVALUATION_MODE;
+  const production = ownsProduction
+    ? executeProductionBundle(REPO_ROOT, { evaluationMode })
+    : productionBundle();
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "evidence-v2-certification-"));
   const sourceRoot = REPO_ROOT;
   const artifactRoot = path.join(root, "artifact");
@@ -812,6 +882,7 @@ function fixture() {
       scenario: provisional.scenario,
       providerInvocations: provisional.invocations,
       modelId: provisional.model.id,
+      evaluationMode,
     });
     writeJsonSync(path.join(certRoot, EVIDENCE_V2_SCENARIO_ORACLE_RECEIPT_FILENAME), scenarioOracle);
     writeJsonSync(path.join(certRoot, EVIDENCE_V2_MODEL_CERT_INPUT_FILENAME), {
@@ -823,6 +894,7 @@ function fixture() {
     });
     const cert = materializeEvidenceV2ModelCert({
       certificationTarget: target,
+      evaluationMode,
       sourceSnapshotDigest: SOURCE_DIGEST,
       sourceSnapshotRoot: sourceRoot,
       attemptRoot: artifactRoot,
@@ -843,6 +915,8 @@ function fixture() {
     coreRoot,
     coreVerdictPath,
     certs,
+    evaluationMode,
+    ownedProductionRoot: ownsProduction ? production.root : null,
   };
 }
 
@@ -933,6 +1007,45 @@ test("shared Test Flow builders materialize P1, P2, and the final release verdic
   }
 });
 
+test("shared validators preserve the optional blind-consensus certification mode", () => {
+  const value = fixture({ evaluationMode: "BLIND_CONSENSUS" });
+  try {
+    for (const target of ["P1", "P2"]) {
+      const { cert, certRoot } = value.certs[target];
+      assert.equal(cert.schema_version, 2);
+      assert.equal(cert.evaluation_mode, "BLIND_CONSENSUS");
+      assert.equal(cert.call_counts.reviewer_calls, 1);
+      assert.equal(validateEvidenceV2ModelCert(cert, {
+        certificationTarget: target,
+        evaluationMode: "BLIND_CONSENSUS",
+        sourceSnapshotDigest: SOURCE_DIGEST,
+        sourceRoot: value.sourceRoot,
+        coreVerdictPath: value.coreVerdictPath,
+        certRoot,
+      }), cert);
+    }
+    const verdict = buildEvidenceV2ReleaseVerdict({
+      evaluationMode: "BLIND_CONSENSUS",
+      sourceSnapshotDigest: SOURCE_DIGEST,
+      sourceRoot: value.sourceRoot,
+      artifactRoot: value.artifactRoot,
+      coreVerdictPath: value.coreVerdictPath,
+      p1ModelCertPath: value.certs.P1.certPath,
+      p2ModelCertPath: value.certs.P2.certPath,
+    });
+    assert.equal(verdict.evaluation_mode, "BLIND_CONSENSUS");
+    assert.deepEqual(verdict.model_certs.map((cert) => cert.evaluation_mode), [
+      "BLIND_CONSENSUS",
+      "BLIND_CONSENSUS",
+    ]);
+  } finally {
+    fs.rmSync(value.root, { recursive: true, force: true });
+    if (value.ownedProductionRoot !== null) {
+      fs.rmSync(value.ownedProductionRoot, { recursive: true, force: true });
+    }
+  }
+});
+
 test("central attach validates the provider-owned model cert without rewriting it", () => {
   const value = fixture();
   try {
@@ -999,6 +1112,7 @@ test("central release-verdict Gate routes the same-attempt Core, P1, and P2 rece
     }, stage, gateId, {
       kind: "capability-adapter",
       adapter: "evidence-v2-release-verdict",
+      evaluation_mode: "SPECIALIST_ONLY",
     });
     assert.equal(result.status, "PASS");
     assert.deepEqual(result.adapter_receipt.model_cert_targets, ["P1", "P2"]);
@@ -1029,7 +1143,8 @@ test("model certification rejects one-field identity, topology, usage, and resul
       (item) => { item.execution_identity.prompt_policy.sha256 = "b".repeat(63); },
       (item) => { item.execution_identity.profile.extra = true; },
       (item) => { item.execution_identity.tool_policy.id = ""; },
-      (item) => { item.invocations[1].attempt = "REPAIR"; },
+      (item) => { item.evaluation_mode = "BLIND_CONSENSUS"; },
+      (item) => { item.invocations.push(invocation("P1", 2, "REVIEWER", "PRIMARY")); },
       (item) => { item.invocations[0].prompt.size = 0; },
       (item) => { item.invocations[0].usage.total_tokens += 1; },
       (item) => { item.call_counts.specialist_repairs = 1; },
@@ -1055,6 +1170,16 @@ test("model certification rejects one-field identity, topology, usage, and resul
     assert.equal(
       validateEvidenceV2ModelCertInputSchema(productOpaqueIds, { certificationTarget: "P1" }),
       productOpaqueIds,
+    );
+    const repaired = clone(baseline);
+    repaired.invocations.push(invocation("P1", 2, "SPECIALIST", "REPAIR"));
+    repaired.call_counts.total_calls = 2;
+    repaired.call_counts.specialist_calls = 2;
+    repaired.call_counts.specialist_repairs = 1;
+    repaired.usage = sumUsage(repaired.invocations.map((value) => value.usage));
+    assert.equal(
+      validateEvidenceV2ModelCertInputSchema(repaired, { certificationTarget: "P1" }),
+      repaired,
     );
     const bindingMutations = [
       (item) => { item.source_snapshot_digest = "b".repeat(64); },
@@ -1130,6 +1255,8 @@ test("release verdict exists only for PASS Core plus one exact P1 and P2 certifi
       (item) => { item.status = "FAIL"; },
       (item) => { item.model_certs.pop(); },
       (item) => { item.model_certs[1].certification_target = "P1"; },
+      (item) => { item.model_certs[1].evaluation_mode = "BLIND_CONSENSUS"; },
+      (item) => { item.evaluation_mode = "BLIND_CONSENSUS"; },
       (item) => { item.unexpected = true; },
     ];
     for (const mutate of schemaMutations) {
@@ -1185,15 +1312,35 @@ test("JSON Schemas close every shared certification receipt root", () => {
   assert.equal(schemas["model-cert-input.schema.json"].properties.status.const, "PASS");
   assert.equal(schemas["model-cert.schema.json"].properties.status.const, "PASS");
   assert.equal(schemas["release-verdict.schema.json"].properties.status.const, "PASS");
+  assert.equal(schemas["model-cert-input.schema.json"].properties.schema_version.const, 2);
+  assert.equal(schemas["model-cert.schema.json"].properties.schema_version.const, 2);
+  assert.equal(schemas["release-verdict.schema.json"].properties.schema_version.const, 2);
+  assert.deepEqual(schemas["model-cert-input.schema.json"].properties.evaluation_mode.enum, [
+    "SPECIALIST_ONLY",
+    "BLIND_CONSENSUS",
+  ]);
+  assert.equal(schemas["model-cert-input.schema.json"].$defs.specialistOnlyTopology.oneOf.length, 2);
+  assert.equal(schemas["model-cert-input.schema.json"].$defs.blindConsensusTopology.oneOf.length, 4);
+  assert.equal(
+    schemas["model-cert.schema.json"].allOf[2].then.$ref,
+    "model-cert-input.schema.json#/$defs/specialistOnlyTopology",
+  );
+  assert.equal(
+    schemas["model-cert.schema.json"].allOf[3].then.$ref,
+    "model-cert-input.schema.json#/$defs/blindConsensusTopology",
+  );
   assert.equal(schemas["release-verdict.schema.json"].properties.model_certs.minItems, 2);
   assert.equal(schemas["release-verdict.schema.json"].properties.model_certs.maxItems, 2);
   assert.equal(schemas["model-cert-input.schema.json"].$defs.scenario.additionalProperties, false);
   assert.equal(schemas["model-cert-input.schema.json"].$defs.scenarioSource.additionalProperties, false);
   assert.ok(schemas["model-cert-input.schema.json"].required.includes("scenario"));
   assert.ok(schemas["model-cert-input.schema.json"].required.includes("scenario_oracle"));
+  assert.ok(schemas["model-cert-input.schema.json"].required.includes("evaluation_mode"));
   assert.ok(schemas["model-cert.schema.json"].required.includes("scenario"));
   assert.ok(schemas["model-cert.schema.json"].required.includes("scenario_oracle"));
+  assert.ok(schemas["model-cert.schema.json"].required.includes("evaluation_mode"));
   assert.ok(schemas["release-verdict.schema.json"].required.includes("scenario"));
+  assert.ok(schemas["release-verdict.schema.json"].required.includes("evaluation_mode"));
 });
 
 function readJson(filePath) {

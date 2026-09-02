@@ -357,6 +357,7 @@ def validate_outcome_for_job(
             if terminal.status == "UNRESOLVED":
                 allowed_reasons = (
                     SPECIALIST_UNRESOLVED_REASON_CODES_V2
+                    | {"INCOMPLETE_EVALUATION", "NO_CONFIRMED_METHOD"}
                     if job.job_type is JobType.DIAGNOSE
                     else REVIEWER_UNRESOLVED_REASON_CODES_V2
                     | CONSENSUS_UNRESOLVED_REASON_CODES_V2
@@ -372,10 +373,6 @@ def validate_outcome_for_job(
                     review_job_id=job.job_id,
                     reviewed_state_revision=job.base_state_revision,
                     expected_target=job.methods_review_target,
-                )
-            elif terminal.status == "RESOLVED":
-                raise ValueError(
-                    "Methods V2 DIAGNOSE terminal Outcome cannot bypass Reviewer consensus"
                 )
             elif job.job_type is not JobType.DIAGNOSE:
                 raise ValueError(

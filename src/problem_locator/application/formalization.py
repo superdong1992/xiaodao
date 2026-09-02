@@ -287,7 +287,7 @@ def build_methods_specialist_terminal_outcome_v2(
     evidence: MethodEvidenceGraphV2,
     produced_at: str,
 ) -> JobOutcome:
-    """Create a Candidate-free early terminal Outcome for specialized DIAGNOSE."""
+    """Create a Candidate-free terminal Outcome for specialized DIAGNOSE."""
 
     validate_method_terminal_result_v2(
         terminal_state,
@@ -307,10 +307,11 @@ def build_methods_specialist_terminal_outcome_v2(
         or terminal_state.case_id != source_job.case_id
         or terminal_state.source_job_id != source_job.job_id
         or terminal_result.terminal_job_id != source_job.job_id
-        or terminal_result.status == "RESOLVED"
+        or terminal_state.reviewer_evaluation is not None
+        or terminal_state.consensus is not None
     ):
         raise ValueError(
-            "Methods V2 early terminal Outcome requires a Candidate-free specialized DIAGNOSE Job"
+            "Methods V2 terminal Outcome requires a Candidate-free specialized DIAGNOSE Job"
         )
     return JobOutcome(
         outcome_id=outcome_id,

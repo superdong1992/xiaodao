@@ -65,13 +65,16 @@ P1 只使用固定 `multiple-rpc-timeouts` 场景。调用方必须提供同一�
   --source-snapshot-digest <sha256> \
   --core-verdict <core-gate-root>/core-verdict.json \
   --registration-root <real.skill-generation registration root> \
+  --evaluation-mode SPECIALIST_ONLY \
   --plan-only
 ```
 
 `--registration-root` 优先使用同一次 `real.skill-generation` 产出的 production registration；未显式
 提供时才使用 standalone cache。规划结果会在 `inputs.production_registration` 列出实际根路径、tree、
-template 和 `methods.json` 摘要，并列出 provider/model/settings、Core 绑定、正常调用数 2、调用硬上限
-4、token/cost 和 admission blocker。审阅后才能移除 `--plan-only`，并加入 `--allow-real-model`。
+template 和 `methods.json` 摘要，并列出 provider/model/settings、Core 绑定、evaluation mode、调用上限、
+token/cost 和 admission blocker。`--evaluation-mode` 省略时使用 `SPECIALIST_ONLY`：正常调用 Specialist
+一次，协议 repair 后最多两次。显式传 `BLIND_CONSENSUS` 才会再调用 Reviewer，正常两次、最多四次。
+审阅后才能移除 `--plan-only`，并加入 `--allow-real-model`。
 
 认证驱动直接运行生产 `DiagnosisRuntime`：
 
@@ -79,14 +82,13 @@ template 和 `methods.json` 摘要，并列出 provider/model/settings、Core �
 2. 服务端生成 `methods-evidence-graph-v2.json` 和 `methods-evaluation-plan-v2.json`；
 3. Specialist 只读取 request、Graph、Plan 和方法卡，写
    `output/method-diagnosis.draft.json`；
-4. 生产 `OutcomeSubmissionService` 创建独立盲评 REVIEW Job；
-5. Reviewer 只读取自己的冻结上下文，写 `output/method-review.draft.json`；
-6. 生产 Runtime 机械共识并发布 Case 的 `methods_result`。
+4. `SPECIALIST_ONLY` 直接发布 Case 的 `methods_result`；
+5. `BLIND_CONSENSUS` 才由 `OutcomeSubmissionService` 创建独立 REVIEW Job，Reviewer 写
+   `output/method-review.draft.json`，随后由 Runtime 机械共识。
 
-两个角色都只提交 `evaluation_ref + verdict + supporting_event_refs + reason` 根数组。确认项只选
-当前计划项中的有序 event ref 子集。正常各调用一次；某角色第一次发生
-JSON 结构或 Plan 覆盖错误时，只允许一次 repair。每角色最多两次，总上限四次，没有模型重试。
-wrapper 不改写草稿，`harness_normalized=false`。
+角色只提交 `evaluation_ref + verdict + supporting_event_refs + reason` 根数组。确认项只选当前计划项中的
+有序 event ref 子集。每个启用的角色第一次发生 JSON 结构或 Plan 覆盖错误时，只允许一次 repair；
+没有模型重试。wrapper 不改写草稿，`harness_normalized=false`。
 
 该路径不创建或消费 Candidate，不产生 `PARTIALLY_RESOLVED`，不下载 `result.zip`，也不读取
 Methods V1 grounding。它不运行 Client、浏览器、上传、CrossJob 或 Release。
@@ -103,10 +105,11 @@ Gate 先写 `model-cert-input.json`，再用共享 builder 在同一 evidence �
 - 生产 Graph 的有序 sources 和 Graph/Plan canonical bytes identity；
 - 最终公开 `methods_result` 的 canonical identity。
 
-在写 model cert 前，production driver 会留下 source/reviewer Job、Graph、Plan、limitations、两份 state、
-两份 Outcome 共九个原始 execution record，同时留下 `methods-result-v2.json` 和实际加载的
-`methods.json`。`scenario-oracle-receipt.json` 只是这些原件的闭合索引；共享 validator 会重新读取原件
-并调用完整 Methods V2 oracle，不会信任 Runtime 自报的 `hard_cut` 或 PASS 布尔值。
+在写 model cert 前，production driver 会留下原始 execution records。`SPECIALIST_ONLY` 保存 source Job、
+Graph、Plan、limitations、终态 source state 和 source Outcome 共六份；`BLIND_CONSENSUS` 再保存 Reviewer
+Job、终态 Reviewer state 和 Reviewer Outcome，共九份。两种模式都会保存 `methods-result-v2.json` 和实际
+加载的 `methods.json`。`scenario-oracle-receipt.json` 只是这些原件的闭合索引；共享 validator 会重新读取
+原件并调用完整 Methods V2 oracle，不会信任 Runtime 自报的 PASS 布尔值。
 
 场景身份直接取生产 Runtime 生成的 Graph/Plan，并强制它们的 Skill hash 与当前
 `source_job.skill_ref.content_hash` 相同。`methods_result` 必须引用同一 Graph/Plan；测试侧不会重新匹配
