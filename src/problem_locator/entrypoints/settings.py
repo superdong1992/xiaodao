@@ -50,6 +50,8 @@ class Settings:
     dfx_log_level: str
     dfx_log_dir: Path | None
     evidence_v2_reviewer_enabled: bool = False
+    route_claude_command: str | None = None
+    diagnose_claude_command: str | None = None
 
     @classmethod
     def load(
@@ -118,8 +120,22 @@ class Settings:
 
         bind_host = values.get("BIND_HOST", "127.0.0.1")
         claude_command = values.get("CLAUDE_COMMAND", "claude")
+        route_claude_command = values.get(
+            "ROUTE_CLAUDE_COMMAND",
+            claude_command,
+        )
+        diagnose_claude_command = values.get(
+            "DIAGNOSE_CLAUDE_COMMAND",
+            claude_command,
+        )
         if not bind_host or bind_host.isspace() or not claude_command or claude_command.isspace():
             raise SettingsError("BIND_HOST and CLAUDE_COMMAND must be non-empty")
+        role_commands = (
+            route_claude_command,
+            diagnose_claude_command,
+        )
+        if any(not command or command.isspace() for command in role_commands):
+            raise SettingsError("Agent role command settings must be non-empty")
 
         generic_skill_name = values["GENERIC_SKILL_NAME"]
         if (
@@ -169,13 +185,18 @@ class Settings:
             dfx_log_level=dfx_log_level,
             dfx_log_dir=dfx_log_dir,
             evidence_v2_reviewer_enabled=raw_reviewer_enabled == "true",
+            route_claude_command=route_claude_command,
+            diagnose_claude_command=diagnose_claude_command,
         )
 
     def __repr__(self) -> str:
         return (
             "Settings(data_root=<configured>, public_base_url="
             f"{self.public_base_url!r}, bind_host={self.bind_host!r}, port={self.port}, "
-            "claude_command=<configured>, skill_dir=<configured>, "
+            "claude_command=<configured>, "
+            "route_claude_command=<configured>, "
+            "diagnose_claude_command=<configured>, "
+            "skill_dir=<configured>, "
             f"generic_skill_name={self.generic_skill_name!r}, "
             "logparse_repo=<redacted>, logparse_config_path=<redacted>, "
             "logparse_python=<redacted>, "

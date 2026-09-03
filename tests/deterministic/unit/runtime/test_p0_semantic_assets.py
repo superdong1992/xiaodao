@@ -100,6 +100,8 @@ def _production_plan() -> MethodEvaluationPlanV2:
 
 def test_methods_v2_asset_versions_match_the_builtin_catalog() -> None:
     expected = {
+        "tool-bundle/router": "3.0.0",
+        "output-contract/route": "5.0.0",
         "agent-profile/specialist": "6.0.0",
         "agent-profile/reviewer": "6.0.0",
         "context-policy/review": "2.0.0",
@@ -109,6 +111,19 @@ def test_methods_v2_asset_versions_match_the_builtin_catalog() -> None:
 
     for asset_id, version in expected.items():
         assert _BUILTIN_SPECS_BY_ID[asset_id].version == version
+
+
+def test_router_writes_one_server_finalized_draft_without_a_tool_round_trip() -> None:
+    contract_meta, contract = _asset("output-contracts/route")
+    tool_meta, tool_bundle_text = _asset("tool-bundles/router")
+    tool_bundle = json.loads(tool_bundle_text)
+
+    assert contract_meta["version"] == "5.0.0"
+    assert tool_meta["version"] == "3.0.0"
+    assert tool_bundle == {"schema_version": 1, "tools": []}
+    assert "then exit without invoking another tool" in contract
+    assert "problem-locator-seal-outcome-draft" not in contract
+    assert "independently parses, validates" in contract
 
 
 def test_specialist_assets_require_methods_v2_evaluation_output() -> None:

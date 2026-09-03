@@ -262,6 +262,22 @@ def test_skill_creates_case_before_requesting_missing_details() -> None:
     assert "call\n`problem_locator_create_case` as the first business action" in create_section
     assert "Do not first ask" in create_section
     assert "ask only for OPEN requirements returned by the latest\nCase view" in create_section
+    assert "start measuring, preparing, and uploading that exact file immediately" in skill
+    assert "Do not wait for `WAITING_ATTACHMENT` merely to begin file I/O" in skill
+
+
+def test_skill_batches_inputs_and_ready_attachments_without_ready_poll() -> None:
+    skill = _skill_text()
+    submit_section = skill[
+        skill.index("## Submit requested facts") :
+        skill.index("## Download a reviewed Artifact")
+    ]
+
+    assert "finish the uploads first" in submit_section
+    assert "one `problem_locator_submit_supplement` call" in submit_section
+    assert "Do not submit facts alone merely to enter `WAITING_ATTACHMENT`" in submit_section
+    assert "Never poll merely to confirm READY" in submit_section
+    assert "If ROUTE is still running because this was a pre-upload" in submit_section
 
     request = _json_example_after(skill, "`problem_locator_create_case`:")
     raw_problem_text = "订单接口偶发超时，需要定位原因。"

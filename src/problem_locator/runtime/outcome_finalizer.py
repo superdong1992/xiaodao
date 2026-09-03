@@ -1,4 +1,4 @@
-"""Server-installed tool that seals, but never decides, an Agent draft."""
+"""Server-owned sealing helper and compatibility CLI for an Agent draft."""
 
 from __future__ import annotations
 
@@ -31,8 +31,12 @@ DRAFT_OUTCOME_RELATIVE_PATH = "output/job_outcome.draft.json"
 SERVER_OUTCOME_RELATIVE_PATH = "output/job_outcome.json"
 
 
+class AgentOutcomeDraftSealWriteError(OSError):
+    """The server could not persist canonical draft or marker bytes."""
+
+
 class SealedAgentOutcomeDraftMarker(BaseModel):
-    """Private proof that the installed tool owns the current draft bytes."""
+    """Private proof that the server finalizer owns the current draft bytes."""
 
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
@@ -56,7 +60,7 @@ def _require_server_output_absent(root: Path) -> None:
 def seal_agent_outcome_draft(workspace_root: Path) -> SealedAgentOutcomeDraftMarker:
     """Normalize companion JSON and atomically seal the V2 Agent draft.
 
-    This command deliberately does not mint an Outcome ID, set server time,
+    This operation deliberately does not mint an Outcome ID, set server time,
     evaluate evidence, or write ``output/job_outcome.json``.  Those operations
     occur only after the Agent process tree has exited.
     """
@@ -78,7 +82,12 @@ def seal_agent_outcome_draft(workspace_root: Path) -> SealedAgentOutcomeDraftMar
     draft = AgentJobOutcomeDraftV2.model_validate(draft_value)
 
     draft_bytes = canonical_json_bytes(draft)
-    atomic_replace_agent_json(draft_path, draft_bytes)
+    try:
+        atomic_replace_agent_json(draft_path, draft_bytes)
+    except OSError as exc:
+        raise AgentOutcomeDraftSealWriteError(
+            "Server could not persist the canonical Agent draft"
+        ) from exc
     marker = SealedAgentOutcomeDraftMarker(
         schema_version=2,
         relative_path=DRAFT_OUTCOME_RELATIVE_PATH,
@@ -90,7 +99,12 @@ def seal_agent_outcome_draft(workspace_root: Path) -> SealedAgentOutcomeDraftMar
         DRAFT_FINALIZATION_MARKER_RELATIVE_PATH,
         must_exist=False,
     )
-    atomic_replace_agent_json(marker_path, canonical_json_bytes(marker))
+    try:
+        atomic_replace_agent_json(marker_path, canonical_json_bytes(marker))
+    except OSError as exc:
+        raise AgentOutcomeDraftSealWriteError(
+            "Server could not persist the Agent draft marker"
+        ) from exc
     return marker
 
 
@@ -114,6 +128,7 @@ if __name__ == "__main__":  # pragma: no cover
 
 
 __all__ = [
+    "AgentOutcomeDraftSealWriteError",
     "DRAFT_FINALIZATION_MARKER_NAME",
     "DRAFT_FINALIZATION_MARKER_RELATIVE_PATH",
     "DRAFT_OUTCOME_RELATIVE_PATH",

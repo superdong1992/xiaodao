@@ -14,6 +14,8 @@ from typing import Any
 
 import pytest
 
+import problem_locator.runtime.outcome_finalizer as outcome_finalizer_module
+
 from problem_locator.contracts import (
     AgentArtifactProposalDraft,
     AgentJobOutcomeDraftV2,
@@ -459,7 +461,7 @@ def test_route_skill_index_v2_exposes_only_the_complete_namespaced_ref(
     assert "complete `ref` object is the only valid source" in route_contract
     assert "never remove the `diagnosis-skill/` namespace" in route_contract
     assert "exactly equal to" in route_contract
-    assert catalog.route_bindings().output_contract_ref.version == "3.0.0"
+    assert catalog.route_bindings().output_contract_ref.version == "5.0.0"
 
 
 def test_route_reuses_one_validated_skill_snapshot_for_the_index(
@@ -761,7 +763,6 @@ class _RuntimeBackend:
                 temporary,
                 workspace_root / "output" / "job_outcome.draft.json",
             )
-            _write_finalization_marker(workspace_root, self.outcome_bytes)
         sinks: ExecutionLogSinks = kwargs["log_sinks"]
         unique = {id(sinks.stdout): sinks.stdout, id(sinks.stderr): sinks.stderr}
         for sink in unique.values():
@@ -866,7 +867,13 @@ def _runtime_fixture(
     job = _running_route_job(catalog)
     state = _StateView(_route_aggregate(job), failure=state_failure)
     actual_backend = backend or _RuntimeBackend(
-        canonical_json_bytes(_route_agent_outcome(job))
+        (
+            json.dumps(
+                _route_agent_outcome(job).model_dump(mode="json"),
+                indent=2,
+            )
+            + "\n"
+        ).encode("utf-8")
     )
     actual_records = records or InMemoryExecutionRecordStore()
     actual_resource_store = (
@@ -1402,14 +1409,98 @@ def test_runtime_executes_one_frozen_route_and_publishes_canonical_receipt(
     assert state.calls == [job.case_id]
     assert len(backend.calls) == 1  # type: ignore[union-attr]
     backend_call = backend.calls[0]  # type: ignore[union-attr]
+    workspace_root = Path(backend_call["workspace_root"])
     assert backend_call["prompt"] == (
-        Path(backend_call["workspace_root"]) / "runtime" / "context.txt"
+        workspace_root / "runtime" / "context.txt"
     ).read_text(encoding="utf-8")
+    assert (workspace_root / "output/job_outcome.draft.json").read_bytes() == (
+        canonical_json_bytes(_route_agent_outcome(job))
+    )
+    assert [
+        path.name for path in (workspace_root / "runtime/tool-state").iterdir()
+    ] == ["agent-job-outcome-draft.finalized"]
     assert records.publish_outcome_calls == [
         (job.job_id, canonical_json_bytes(receipt.job_outcome))
     ]
     replay = records.read_published_outcome(job.job_id)
     assert replay == receipt
+
+
+@pytest.mark.parametrize(
+    "failed_name",
+    [
+        "job_outcome.draft.json",
+        "agent-job-outcome-draft.finalized",
+    ],
+)
+def test_route_in_process_seal_write_failure_is_retryable_workspace_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failed_name: str,
+) -> None:
+    original = outcome_finalizer_module.atomic_replace_agent_json
+
+    def fail_selected_write(path: Path, data: bytes) -> None:
+        if path.name == failed_name:
+            raise OSError("injected server-side finalization write failure")
+        original(path, data)
+
+    monkeypatch.setattr(
+        outcome_finalizer_module,
+        "atomic_replace_agent_json",
+        fail_selected_write,
+    )
+    runtime, job, _, backend, _ = _runtime_fixture(tmp_path)
+
+    receipt = runtime.execute(job, InMemoryCancellationSignal())
+
+    assert receipt.job_outcome.error is not None
+    assert receipt.job_outcome.error.stage is ExecutionStage.OUTCOME_VALIDATE
+    assert receipt.job_outcome.error.code is ErrorCode.WORKSPACE_PREPARE_FAILED
+    assert receipt.job_outcome.error.retryable is True
+    workspace_root = Path(backend.calls[0]["workspace_root"])  # type: ignore[union-attr]
+    assert not (
+        workspace_root / DRAFT_FINALIZATION_MARKER_RELATIVE_PATH
+    ).exists()
+
+
+def test_post_seal_workspace_limit_stays_in_outcome_validation_stage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    journey_stream: io.StringIO,
+) -> None:
+    runtime, job, _, _, _ = _runtime_fixture(tmp_path)
+    monkeypatch.setattr(
+        WorkspaceManager,
+        "temporary_output_bytes",
+        staticmethod(lambda _workspace: job.resource_limits.workspace_bytes + 1),
+    )
+
+    with bind_diagnostics(
+        case_id=job.case_id,
+        job_id=job.job_id,
+        job_type=job.job_type.value,
+    ):
+        receipt = runtime.execute(job, InMemoryCancellationSignal())
+
+    assert receipt.job_outcome.error is not None
+    assert receipt.job_outcome.error.stage is ExecutionStage.OUTCOME_VALIDATE
+    assert receipt.job_outcome.error.code is ErrorCode.WORKSPACE_LIMIT
+    stage_events = [
+        json.loads(line)
+        for line in journey_stream.getvalue().splitlines()
+        if '"event":"job.stage.' in line
+    ]
+    assert not any(
+        event["event"] == "job.stage.failed"
+        and event["data"]["stage"] == "BACKEND_EXECUTE"
+        for event in stage_events
+    )
+    assert any(
+        event["event"] == "job.stage.failed"
+        and event["data"]["stage"] == "OUTCOME_VALIDATE"
+        for event in stage_events
+    )
 
 
 def test_runtime_context_never_reads_latest_case_diagnosis_state(

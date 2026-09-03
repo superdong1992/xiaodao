@@ -47,12 +47,14 @@ OFFICIAL_KEYS = {
     "BIND_HOST",
     "CLAUDE_COMMAND",
     "DATA_ROOT",
+    "DIAGNOSE_CLAUDE_COMMAND",
     "GENERIC_SKILL_NAME",
     "LOGPARSE_CONFIG_PATH",
     "LOGPARSE_PYTHON",
     "LOGPARSE_REPO",
     "PORT",
     "PUBLIC_BASE_URL",
+    "ROUTE_CLAUDE_COMMAND",
     "SKILL_DIR",
 }
 EXPECTED_RUNTIME_VERSIONS = {
@@ -604,6 +606,7 @@ def test_clean_installed_distribution_import_cli_and_server_gate(
         {
             "BIND_HOST": "127.0.0.1",
             "CLAUDE_COMMAND": os.environ.get("CLAUDE_COMMAND", "claude"),
+            "DIAGNOSE_CLAUDE_COMMAND": os.environ.get("CLAUDE_COMMAND", "claude"),
             "DATA_ROOT": os.fspath(data_root),
             "GENERIC_SKILL_NAME": "generic-problem-locator-smoke",
             "LOGPARSE_CONFIG_PATH": os.fspath(logparse_config),
@@ -611,6 +614,7 @@ def test_clean_installed_distribution_import_cli_and_server_gate(
             "LOGPARSE_REPO": os.fspath(logparse_repo),
             "PORT": str(port),
             "PUBLIC_BASE_URL": f"http://127.0.0.1:{port}",
+            "ROUTE_CLAUDE_COMMAND": os.environ.get("CLAUDE_COMMAND", "claude"),
             "SKILL_DIR": os.fspath(skill_dir),
         },
     )

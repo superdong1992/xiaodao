@@ -22,6 +22,7 @@ from problem_locator.bootstrap import (
 from problem_locator.contracts import (
     CLI_EXIT_CONFIG_OR_STATE_CORRUPT,
     ErrorCode,
+    Job,
     StateExport,
     canonical_json_bytes,
     parse_canonical_json_bytes,
@@ -43,22 +44,27 @@ def _settings(
     *,
     skill_dir: Path = SKILL_DIR,
     reviewer_enabled: bool = False,
+    route_command: str | None = None,
+    diagnose_command: str | None = None,
 ) -> Settings:
-    return Settings.load(
-        environ={
-            "DATA_ROOT": str(data_root),
-            "PUBLIC_BASE_URL": "http://127.0.0.1:8000",
-            "SKILL_DIR": str(skill_dir),
-            "GENERIC_SKILL_NAME": "generic-problem-locator-smoke",
-            "LOGPARSE_REPO": str(FAKE_LOGPARSE_REPO),
-            "LOGPARSE_CONFIG_PATH": str(FAKE_LOGPARSE_CONFIG),
-            "LOGPARSE_PYTHON": sys.executable,
-            "CLAUDE_COMMAND": "claude",
-            "EVIDENCE_V2_REVIEWER_ENABLED": (
-                "true" if reviewer_enabled else "false"
-            ),
-        }
-    )
+    environ = {
+        "DATA_ROOT": str(data_root),
+        "PUBLIC_BASE_URL": "http://127.0.0.1:8000",
+        "SKILL_DIR": str(skill_dir),
+        "GENERIC_SKILL_NAME": "generic-problem-locator-smoke",
+        "LOGPARSE_REPO": str(FAKE_LOGPARSE_REPO),
+        "LOGPARSE_CONFIG_PATH": str(FAKE_LOGPARSE_CONFIG),
+        "LOGPARSE_PYTHON": sys.executable,
+        "CLAUDE_COMMAND": "claude",
+        "EVIDENCE_V2_REVIEWER_ENABLED": (
+            "true" if reviewer_enabled else "false"
+        ),
+    }
+    if route_command is not None:
+        environ["ROUTE_CLAUDE_COMMAND"] = route_command
+    if diagnose_command is not None:
+        environ["DIAGNOSE_CLAUDE_COMMAND"] = diagnose_command
+    return Settings.load(environ=environ)
 
 
 def test_public_create_app_does_not_expose_the_test_skill_override(
@@ -228,6 +234,46 @@ def test_production_composition_injects_enabled_evidence_v2_reviewer(
     try:
         assert graph.settings.evidence_v2_reviewer_enabled is True
         assert graph.runtime._evidence_v2_reviewer_enabled is True
+    finally:
+        graph.close()
+
+
+def test_production_composition_routes_each_job_role_to_its_agent_backend(
+    tmp_path: Path,
+) -> None:
+    graph = build_service(
+        _settings(
+            tmp_path / "data",
+            route_command="route-agent --fast",
+            diagnose_command="diagnose-agent --deep",
+        )
+    )
+    try:
+        route_job = Job.model_validate_json(
+            (ROOT / "tests/fixtures/contracts/positive/job-route.json").read_bytes()
+        )
+        diagnose_job = Job.model_validate_json(
+            (ROOT / "tests/fixtures/contracts/positive/job-diagnose.json").read_bytes()
+        )
+        review_job = Job.model_validate_json(
+            (ROOT / "tests/fixtures/contracts/positive/job-review.json").read_bytes()
+        )
+
+        assert graph.runtime._route_backend._command == "route-agent --fast"
+        assert graph.runtime._diagnose_backend._command == "diagnose-agent --deep"
+        assert graph.runtime._backend_for_job(route_job) is graph.runtime._route_backend
+        assert (
+            graph.runtime._backend_for_job(diagnose_job)
+            is graph.runtime._diagnose_backend
+        )
+        assert (
+            graph.runtime._backend_for_job(review_job)
+            is graph.runtime._diagnose_backend
+        )
+        assert (
+            graph.runtime._generic_locator_executor._backend
+            is graph.runtime._diagnose_backend
+        )
     finally:
         graph.close()
 

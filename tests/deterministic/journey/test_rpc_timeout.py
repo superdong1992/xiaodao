@@ -248,9 +248,11 @@ class _RecordingMcpAdapter:
 
     def __init__(self, delegate: McpAdapter) -> None:
         self._delegate = delegate
+        self.calls: list[tuple[str, dict[str, object]]] = []
         self.responses: list[bytes] = []
 
     async def call(self, name: str, arguments: dict[str, object]) -> Any:
+        self.calls.append((name, dict(arguments)))
         result = await self._delegate.call(name, arguments)
         self.responses.append(canonical_json_bytes(result))
         return result
@@ -638,6 +640,159 @@ def test_cross_project_result_experience_baseline_is_self_contained() -> None:
         "<label>__<module_name>__slot_<slot>__<process_name>[-<pid>].log",
         "<label>__<module_name>__slot_<slot>__cpu_<cpu_id>__<process_name>[-<pid>].log",
     ]
+
+
+def test_attachment_preupload_during_route_batches_first_supplement(
+    tmp_path: Path,
+    monkeypatch,
+    request,
+) -> None:
+    data_root, logparse_checkout = _journey_storage_roots(tmp_path, "v2pre")
+    _remove_test_data_root(data_root)
+    _remove_test_data_root(logparse_checkout)
+    request.addfinalizer(lambda: _remove_test_data_root(data_root))
+    request.addfinalizer(lambda: _remove_test_data_root(logparse_checkout))
+    logparse_record = tmp_path / "preupload-logparse-invocations.json"
+    agent_record = tmp_path / "preupload-agent-sessions.jsonl"
+    review_entered = tmp_path / "preupload-review-entered"
+    review_release = tmp_path / "preupload-review-release"
+    for name, value in RAW_LOGPARSE_ENV.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setenv("S07_FAKE_LOGPARSE_RECORD", os.fspath(logparse_record))
+    stack = _Stack(
+        data_root,
+        logparse_record=logparse_record,
+        agent_record=agent_record,
+        review_entered=review_entered,
+        review_release=review_release,
+        seed="s08-rpc-timeout-v2-preupload",
+    )
+    archive = ARCHIVE.read_bytes()
+
+    created = _mcp(
+        stack.mcp,
+        "problem_locator_create_case",
+        {
+            "request_id": "s08-v2-preupload-create",
+            "raw_problem_text": "A payment service call to inventory times out.",
+            "statement": "A payment service call to inventory times out.",
+            "expected_behavior": "The payment request completes.",
+            "actual_behavior": "The payment request times out.",
+            "scope": "payment-to-inventory RPC",
+            "goals": ["Locate the timeout cause."],
+            "non_goals": [],
+            "constraints": [],
+            "completion_criteria": ["Identify the timed-out request."],
+            "initial_user_fact_names": [],
+            "initial_user_fact_values": [],
+            "wait_seconds": 0,
+        },
+    )
+    case_id = created["business_receipt"]["case_id"]
+    route_job_id = created["business_receipt"]["job_id"]
+    assert route_job_id is not None
+    before_preupload = stack.repository.read_snapshot().cases[case_id]
+    assert before_preupload.jobs[route_job_id].status is JobStatus.PENDING
+
+    prepared = _mcp(
+        stack.mcp,
+        "problem_locator_prepare_attachment",
+        {
+            "request_id": "s08-v2-preupload-prepare",
+            "case_id": case_id,
+            "expected_case_revision": created["case_view"]["case_revision"],
+            "name": "payment-inventory-rpc.zip",
+            "content_type": "application/zip",
+            "declared_size": len(archive),
+            "declared_sha256": hashlib.sha256(archive).hexdigest(),
+        },
+    )
+    attachment_id = prepared["upload"]["attachment_id"]
+    with TestClient(stack.http_app) as http:
+        upload = http.put(
+            f"/api/v1/attachments/{attachment_id}/content",
+            content=archive,
+            headers={
+                name: value
+                for name, value in prepared["upload"]["required_headers"].items()
+                if value is not None
+            },
+        )
+    assert upload.status_code == 200, upload.text
+    upload_data = upload.json()["data"]
+    assert upload_data["status"] == AttachmentStatus.READY.value
+    assert [name for name, _ in stack.mcp.calls] == [
+        "problem_locator_create_case",
+        "problem_locator_prepare_attachment",
+    ]
+
+    stack.start()
+    stack.wait_idle()
+    waiting = _query(stack.mcp, case_id)
+    assert waiting["status"] == CaseStatus.WAITING_INPUT.value
+    assert [
+        item["name"]
+        for item in waiting["pending_requirements"]
+        if item["status"] == RequirementStatus.OPEN.value
+    ] == [*PARAMETER_GROUP_A, "log_archive"]
+    after_preflight = stack.repository.read_snapshot().cases[case_id]
+    assert after_preflight.jobs[route_job_id].status is JobStatus.SUCCEEDED
+    assert any(
+        outcome.job_id == route_job_id
+        for outcome in after_preflight.outcomes.values()
+    )
+    preflight_jobs = [
+        job
+        for job in after_preflight.jobs.values()
+        if job.job_type is JobType.DIAGNOSE
+    ]
+    assert len(preflight_jobs) == 1
+    assert preflight_jobs[0].status is JobStatus.SUCCEEDED
+    assert [item["phase"] for item in _agent_records(agent_record)] == ["ROUTE"]
+    assert [name for name, _ in stack.mcp.calls] == [
+        "problem_locator_create_case",
+        "problem_locator_prepare_attachment",
+        "problem_locator_get_case",
+    ]
+
+    submitted = _mcp(
+        stack.mcp,
+        "problem_locator_submit_supplement",
+        {
+            "request_id": "s08-v2-preupload-submit",
+            "case_id": case_id,
+            "expected_case_revision": waiting["case_revision"],
+            "input_names": list(PARAMETER_GROUP_A),
+            "input_values": list(PARAMETER_GROUP_A.values()),
+            "attachment_ids": [attachment_id],
+            "wait_seconds": 0,
+        },
+    )
+    specialist_job_id = submitted["business_receipt"]["job_id"]
+    assert specialist_job_id is not None
+    after_submit = stack.repository.read_snapshot().cases[case_id]
+    assert after_submit.jobs[specialist_job_id].job_type is JobType.DIAGNOSE
+    assert after_submit.jobs[specialist_job_id].attachment_refs == [attachment_id]
+    assert [name for name, _ in stack.mcp.calls].count(
+        "problem_locator_submit_supplement"
+    ) == 1
+
+    review_release.write_text("release\n", encoding="utf-8")
+    stack.wait_idle()
+    resolved = _query(stack.mcp, case_id)
+    assert resolved["status"] == CaseStatus.RESOLVED.value, _case_failure_diagnostics(
+        stack,
+        case_id,
+    )
+    assert resolved["methods_result"]["confirmed_method_ids"] == [
+        "rpc-call-timeout"
+    ]
+    assert [item["phase"] for item in _agent_records(agent_record)] == [
+        "ROUTE",
+        "METHODS_DIAGNOSE",
+        "METHODS_REVIEW",
+    ]
+    stack.shutdown()
 
 
 def test_rpc_timeout_methods_v2_is_one_durable_same_job_path(

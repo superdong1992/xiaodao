@@ -165,7 +165,8 @@ After every write response, show the durable business receipt first. When `case_
 
 1. Copy the user's complete original problem description into `raw_problem_text` without trimming or normalization. Do not ask a question first.
 2. Build the eight flat ProblemSpec fields from the fixed create example above and call `problem_locator_create_case` with a fresh stable `request_id` as the first business action.
-3. Poll or finitely wait with `problem_locator_get_case`; never create a replacement Case merely because waiting timed out.
+3. If the user already selected a local Attachment in the same request, start measuring, preparing, and uploading that exact file immediately after Case creation while ROUTE continues. Do not wait for `WAITING_ATTACHMENT` merely to begin file I/O. Keep the resulting READY `attachment_id`; do not submit it until the latest Case view exposes the matching OPEN requirement. On a prepare revision conflict, refresh the Case once and retry the same logical prepare with its stable request ID.
+4. Otherwise poll or finitely wait with `problem_locator_get_case`; never create a replacement Case merely because waiting timed out.
 
 Use `problem_locator_resume_case` only for a persisted pending or interrupted Case. Use `problem_locator_submit_supplement` for a waiting Case. Use `problem_locator_cancel_case` only after confirming the current revision with the user when cancellation is not already explicit.
 
@@ -205,7 +206,9 @@ result is mutually exclusive with `generic_result`, `generic_result_v2`,
 
 ## Submit requested facts
 
-Read only the OPEN requirements from the latest Case view. Ask using each requirement's exact prompt. If there are no OPEN requirements, ask nothing. Put each exact requirement name in `input_names` and its answer at the same index in `input_values`, then call `problem_locator_submit_supplement` with a new stable `request_id`, the latest revision, and any READY `attachment_ids`. The arrays must have equal lengths and unique names. Preserve values exactly; do not trim, normalize, or invent missing facts.
+Read every OPEN requirement from the latest Case view before submitting anything. Ask using each INPUT requirement's exact prompt and collect every requested Attachment that the user can provide. When INPUT and ATTACHMENT requirements are open together, finish the uploads first, then make one `problem_locator_submit_supplement` call containing all collected `input_names`/`input_values` and READY `attachment_ids`. Do not submit facts alone merely to enter `WAITING_ATTACHMENT`, and do not submit each Attachment separately. If the user cannot provide one requirement yet, submit only when doing so makes useful progress and clearly report what remains open.
+
+Put each exact INPUT requirement name in `input_names` and its answer at the same index in `input_values`. The arrays must have equal lengths and unique names. Preserve values exactly; do not trim, normalize, or invent missing facts. Use a new stable `request_id`, the latest revision, and all READY `attachment_ids` in the single supplement.
 
 On `REVISION_CONFLICT`, call `problem_locator_get_case`, review the new state, update `expected_case_revision`, and retry the same logical submission without changing its stable request ID. Do not retry an `IDEMPOTENCY_CONFLICT` as if it were a revision conflict.
 
@@ -216,7 +219,7 @@ On `REVISION_CONFLICT`, call `problem_locator_get_case`, review the new state, u
 3. Use the returned `UploadDescriptor` verbatim. Require exactly its four headers. Read the complete local file to determine its byte count and lowercase SHA-256, stop if it exceeds `max_bytes`, and verify any non-null declared length/hash. Replace a null `Content-Length` or `X-Content-SHA256` with the measured value. Keep `Idempotency-Key` equal to `attachment_id` and do not reuse the prepare request ID for PUT.
 4. Invoke system `curl` with an argument array, or quote every URL, header value, and local path as an independent argument. Never concatenate an unquoted shell command. Support spaces, Unicode, quotes, and shell metacharacters in the local path.
 5. Read the PUT response's new `case_revision`.
-6. Call `problem_locator_submit_supplement` with a separate stable request ID and the READY `attachment_id`.
+6. The successful PUT response is authoritative for READY and the new revision. Never poll merely to confirm READY. If the latest Case view already exposes the matching OPEN requirement, call `problem_locator_submit_supplement` once with a separate stable request ID, the READY `attachment_id`, every other READY requested Attachment, and all collected INPUT values. If ROUTE is still running because this was a pre-upload, retain the READY ID and wait for the requirement instead of attempting an invalid early supplement.
 
 Treat READY as “upload published,” not “adopted by the diagnosis.” Uploading alone must never be reported as having continued the Case. Never place file bytes in an MCP request or response.
 

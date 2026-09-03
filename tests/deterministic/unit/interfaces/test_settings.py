@@ -45,6 +45,8 @@ def test_process_environment_overrides_utf8_env_file(tmp_path: Path) -> None:
     assert settings.public_base_url == "https://env.example.test/base"
     assert settings.bind_host == "127.0.0.1"
     assert settings.claude_command == "claude"
+    assert settings.route_claude_command == "claude"
+    assert settings.diagnose_claude_command == "claude"
     assert settings.generic_skill_name == "generic-problem-locator-smoke"
     assert settings.logparse_python.is_absolute()
 
@@ -52,6 +54,8 @@ def test_process_environment_overrides_utf8_env_file(tmp_path: Path) -> None:
 def test_settings_are_frozen_and_sensitive_paths_are_redacted(tmp_path: Path) -> None:
     values = environment(tmp_path)
     values["CLAUDE_COMMAND"] = "secret-agent --token hidden"
+    values["ROUTE_CLAUDE_COMMAND"] = "secret-route --token hidden-route"
+    values["DIAGNOSE_CLAUDE_COMMAND"] = "secret-diagnose --token hidden-diagnose"
     settings = Settings.load(environ=values)
 
     with pytest.raises(FrozenInstanceError):
@@ -60,6 +64,8 @@ def test_settings_are_frozen_and_sensitive_paths_are_redacted(tmp_path: Path) ->
     assert values["LOGPARSE_REPO"] not in rendered
     assert values["LOGPARSE_CONFIG_PATH"] not in rendered
     assert values["CLAUDE_COMMAND"] not in rendered
+    assert values["ROUTE_CLAUDE_COMMAND"] not in rendered
+    assert values["DIAGNOSE_CLAUDE_COMMAND"] not in rendered
 
 
 def test_all_fixed_configuration_defaults_are_exact(tmp_path: Path) -> None:
@@ -71,6 +77,8 @@ def test_all_fixed_configuration_defaults_are_exact(tmp_path: Path) -> None:
     assert settings.bind_host == "127.0.0.1"
     assert settings.port == 8000
     assert settings.claude_command == "claude"
+    assert settings.route_claude_command == settings.claude_command
+    assert settings.diagnose_claude_command == settings.claude_command
     assert settings.skill_dir == Path(values["SKILL_DIR"])
     assert settings.logparse_repo == Path(values["LOGPARSE_REPO"])
     assert settings.logparse_config_path == Path(values["LOGPARSE_CONFIG_PATH"])
@@ -78,6 +86,37 @@ def test_all_fixed_configuration_defaults_are_exact(tmp_path: Path) -> None:
     assert settings.dfx_log_level == "INFO"
     assert settings.dfx_log_dir is None
     assert settings.evidence_v2_reviewer_enabled is False
+
+
+def test_role_agent_commands_override_the_legacy_fallback_independently(
+    tmp_path: Path,
+) -> None:
+    values = environment(tmp_path)
+    values.update(
+        {
+            "CLAUDE_COMMAND": "default-agent",
+            "ROUTE_CLAUDE_COMMAND": "fast-route-agent",
+            "DIAGNOSE_CLAUDE_COMMAND": "deep-diagnose-agent",
+        }
+    )
+
+    settings = Settings.load(environ=values)
+
+    assert settings.claude_command == "default-agent"
+    assert settings.route_claude_command == "fast-route-agent"
+    assert settings.diagnose_claude_command == "deep-diagnose-agent"
+
+
+def test_legacy_agent_command_remains_the_role_fallback_when_overrides_are_omitted(
+    tmp_path: Path,
+) -> None:
+    values = environment(tmp_path)
+    values["CLAUDE_COMMAND"] = "custom-default-agent --flag"
+
+    settings = Settings.load(environ=values)
+
+    assert settings.route_claude_command == values["CLAUDE_COMMAND"]
+    assert settings.diagnose_claude_command == values["CLAUDE_COMMAND"]
 
 
 @pytest.mark.parametrize(
@@ -153,6 +192,8 @@ def test_legacy_dfx_log_file_is_always_rejected(
         ("RPC_LIMIT_BYTES", "1"),
         ("DFX_LOG_LEVEL", "VERBOSE"),
         ("DFX_LOG_DIR", "relative/logs"),
+        ("ROUTE_CLAUDE_COMMAND", ""),
+        ("DIAGNOSE_CLAUDE_COMMAND", "   "),
     ],
 )
 def test_invalid_or_fake_runtime_configuration_is_rejected(

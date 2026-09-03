@@ -12,10 +12,10 @@
 | Methods package | `SKILL.md` + `methods.json@1` + `references/*.md` |
 | Product registration | `registration-template.json@1` |
 | Methods evaluation protocol | `Evidence V2` |
-| ROUTE / DIAGNOSE / REVIEW output contract | `3.0.0` / `9.0.0` / `9.0.0` |
+| ROUTE / DIAGNOSE / REVIEW output contract | `5.0.0` / `9.0.0` / `9.0.0` |
 | GENERIC output contract / profile | `2.0.0` / `2.0.0` |
 | Specialist / Reviewer profile | `6.0.0` / `6.0.0` |
-| Router / Diagnose / Review tool bundle | `2.0.0` / `4.0.0` / `3.0.0` |
+| Router / Diagnose / Review tool bundle | `3.0.0` / `4.0.0` / `3.0.0` |
 
 State、Job 和权威 Outcome 已硬切到 V8。Problem Locator 5.0.0 只接受路径尚不存在或目录完全为空的全新 `DATA_ROOT`，首次启动会写入 canonical `data-format.json`；已有非空但无 marker、使用旧 marker 或 marker 被篡改的目录都会启动失败，服务不会迁移、改写或删除其中任何内容。升级前必须先备份旧目录，再使用新的 `DATA_ROOT`；需要保留的 V1/V2/V3/V4/V5/V6/V7 State、Job 或 Outcome 只能作为只读历史材料另行处理。
 
@@ -94,30 +94,38 @@ uv lock --check
 | `LOGPARSE_CONFIG_PATH` | 是 | 无 | Logparse 工作区内的配置文件 |
 | `BIND_HOST` | 否 | `127.0.0.1` | Uvicorn 监听地址 |
 | `PORT` | 否 | `8000` | Uvicorn 监听端口 |
-| `CLAUDE_COMMAND` | 否 | `claude` | Agent 命令，会原样解析为 argv 参数模板；服务不会自动追加 stream-json 参数 |
+| `CLAUDE_COMMAND` | 否 | `claude` | 默认 Agent 命令，会原样解析为 argv 参数模板；服务不会自动追加 stream-json 参数 |
+| `ROUTE_CLAUDE_COMMAND` | 否 | `CLAUDE_COMMAND` | ROUTE Agent 命令；可单独选择低延迟模型，不影响 DIAGNOSE 和 REVIEW |
+| `DIAGNOSE_CLAUDE_COMMAND` | 否 | `CLAUDE_COMMAND` | SPECIALIZED、GENERIC DIAGNOSE 和 REVIEW Agent 命令，也用于专用诊断的 Logparse 预处理 |
 | `LOGPARSE_PYTHON` | 否 | 当前 Python | Logparse 使用的 Python 启动命令 |
 | `DFX_LOG_LEVEL` | 否 | `INFO` | 结构化诊断日志级别：`DEBUG`、`INFO`、`WARNING`、`ERROR` 或 `CRITICAL` |
 | `DFX_LOG_DIR` | 否 | 无 | 服务端可观测日志目录的绝对路径；配置后生成 `debug.jsonl`、`journey.jsonl` 和按 Case 渲染的人类可读日志 |
 | `EVIDENCE_V2_REVIEWER_ENABLED` | 否 | `false` | 只接受小写 `true` 或 `false`；开启后，新完成的 Specialist 评估才进入隔离盲评 |
 
+追求最低端到端延迟时，可让 `ROUTE_CLAUDE_COMMAND` 使用低延迟模型和最小必要推理预算，
+让 `DIAGNOSE_CLAUDE_COMMAND` 保留诊断所需能力。ROUTE 的上下文只携带角色专用输出形状，
+也不再要求模型调用结果封装工具；Agent 退出后由服务进程在本地完成规范化、marker 封装和复验。
+Reviewer 必须继续复用 `DIAGNOSE_CLAUDE_COMMAND`，以保持与 Specialist 相同的模型身份。
+
 运行时限制是冻结的契约常量，不属于可配置项。5.0.0 会拒绝 `JOB_CONCURRENCY` 以及未知的 limit、max、retention 覆盖项，避免运维人员误以为某项实际上无效的限制已经生效。
 
 不要配置或持久化 `PROBLEM_LOCATOR_LOGPARSE_ENDPOINT` 和 `PROBLEM_LOCATOR_LOGPARSE_TOKEN`。这两个值会按任务临时创建，并在代理会话结束时删除。
 
-运行 `CLAUDE_COMMAND` 的 Linux 服务账号还必须在其 Agent 配置根中安装仓库当前
+运行 `DIAGNOSE_CLAUDE_COMMAND`（未设置时为 `CLAUDE_COMMAND`）的 Linux 服务账号还必须在其 Agent 配置根中安装仓库当前
 `.claude/skills/logparse-diagnose`。SPECIALIZED Logparse Pass 会先加载该 Helper，再使用任务级
 broker；Helper 缺失或加载失败时任务直接失败，不会绕过 Skill 改为直接调用 broker。
 
 ### 局域网通用定位 Skill
 
-`GENERIC_SKILL_NAME` 指向的是 Linux Server 上 `CLAUDE_COMMAND` 所启动 Agent 已经预装的
+`GENERIC_SKILL_NAME` 指向的是 Linux Server 上 `DIAGNOSE_CLAUDE_COMMAND`（未设置时为
+`CLAUDE_COMMAND`）所启动 Agent 已经预装的
 普通黑盒 Skill，不是 `SKILL_DIR` 中带产品注册与 Methods package 的专用定位 Skill。
 Windows、macOS 和显式 Linux Client 都只通过 HTTP 调用服务端，不安装或执行这个通用
 Skill。服务进程启动时只校验名称格式，不检查 Skill 是否真实存在或能否正确输出结果。
 只部署通用定位 Skill 时，`SKILL_DIR` 仍须指向一个实际绝对目录，但该目录可以为空；此时
 ROUTE 没有专用候选，会确定性转入 GENERIC DIAGNOSE，不调用路由 Agent。
 
-将 Skill 安装到运行 `CLAUDE_COMMAND` 的同一 Linux 服务账号和同一 Agent 配置根。例如，
+将 Skill 安装到运行 `DIAGNOSE_CLAUDE_COMMAND`（未设置时为 `CLAUDE_COMMAND`）的同一 Linux 服务账号和同一 Agent 配置根。例如，
 有效 Agent 配置根为 `/home/problem-locator/.claude`、Skill 名称为
 `lan-problem-locator` 时，最小目录为：
 
@@ -127,7 +135,7 @@ ROUTE 没有专用候选，会确定性转入 GENERIC DIAGNOSE，不调用路由
 ```
 
 如 Agent 使用自定义配置根，应安装到该配置根的 `skills/lan-problem-locator`，并确保
-`CLAUDE_COMMAND` 的实际进程环境能够发现它。Skill 目录名、`SKILL.md` frontmatter 中的
+`DIAGNOSE_CLAUDE_COMMAND` 的实际进程环境能够发现它。Skill 目录名、`SKILL.md` frontmatter 中的
 `name` 和服务配置中的 `GENERIC_SKILL_NAME` 必须逐字一致；名称只能包含小写字母、数字和
 单连字符分隔的片段，最长 64 个字符：
 
@@ -329,14 +337,15 @@ Top 3“主要耗时来源”；排名只说明时间主要花在哪里，不使
 不会伪装成最终结论。仓库内置的 [`.claude/skills/render-problem-locator-trace`](.claude/skills/render-problem-locator-trace)
 Skill 只调用该命令，不自行解析 Journey，也不回退到 debug 日志。
 
-Agent 细分是服务端对脱敏后 stdout 的被动观察。若 `CLAUDE_COMMAND` 输出受支持的 Claude
+Agent 细分是服务端对脱敏后 stdout 的被动观察。若当前 Job 实际使用的
+`CLAUDE_COMMAND`、`ROUTE_CLAUDE_COMMAND` 或 `DIAGNOSE_CLAUDE_COMMAND` 输出受支持的 Claude
 `stream-json`，详细日志可展示 CLI 报告的总耗时、模型 API 累计耗时、轮次和 token 数，以及
 thinking/text 块和受控工具名的首末到达窗口。thinking、text 和工具窗口可能重叠，只作为嵌套
 证据，不能与模型时间或 Case 总时间直接相加；日志不记录 prompt、模型正文、工具输入输出或
 隐藏思维内容。
 
-服务不会修改或自动补全 `CLAUDE_COMMAND`。需要完整 Agent 细分时，应由部署者在私有配置中
-显式提供相应参数，例如：
+服务不会修改或自动补全 `CLAUDE_COMMAND`，也不会补全两个角色覆盖命令。需要完整 Agent
+细分时，应由部署者在私有配置中显式提供相应参数，例如：
 
 ```dotenv
 CLAUDE_COMMAND="claude -p --output-format stream-json --verbose"
@@ -373,8 +382,9 @@ SPECIALIZED 定位使用 Evidence V2。服务端负责证据提取、引用和�
    有序 event ref 子集，不回抄 marker、日志原文、行号、哈希、identity 或 hit ref。
 4. 默认配置在 Specialist 结果通过服务端校验后直接终结；没有 `UNKNOWN` 且至少一项
    `CONFIRMED` 时解决，含 `UNKNOWN` 或全部 `REJECTED` 时不可定论。
-5. 设置 `EVIDENCE_V2_REVIEWER_ENABLED=true` 后，Reviewer 使用同一模型身份，但运行在另一个
-   完全隔离的 Job、Workspace 和上下文中。它读取由同一权威 Graph/Plan 派生的紧凑输入和同一组
+5. 设置 `EVIDENCE_V2_REVIEWER_ENABLED=true` 后，Reviewer 与 Specialist 使用同一个
+   `DIAGNOSE_CLAUDE_COMMAND`，但运行在另一个完全隔离的 Job、Workspace 和上下文中。
+   它读取由同一权威 Graph/Plan 派生的紧凑输入和同一组
    方法卡，盲评全部 evaluation；模型调用完成前看不到 Specialist 的 verdict、reason 或状态。
 6. 每个实际运行的角色首次出现结构或覆盖错误时，最多再调用一次受限 repair。每次被拒绝的响应和精确
    prompt 都追加写入 execution records；重启会从已持久化阶段继续，绝不会产生第三次调用。

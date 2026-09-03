@@ -23,6 +23,7 @@ from problem_locator.contracts import (
 from problem_locator.runtime.agent_backend import AgentBackend, BackendExecutionLimits
 from problem_locator.runtime.context_builder import ContextBuilder, ContextMaterials
 from problem_locator.runtime.failures import RuntimeExecutionError
+from problem_locator.runtime.outcome_finalizer import seal_agent_outcome_draft
 from problem_locator.runtime.output_reader import read_agent_output
 
 
@@ -85,12 +86,14 @@ def test_real_route_agent_synthesizes_valid_outcome_from_production_contract(
     )
     skill_index = canonical_json_bytes(
         {
-            "schema_version": 1,
+            "schema_version": 2,
             "skills": [
                 {
                     "capability": "rpc-timeout",
                     "logparse_product": None,
                     "ref": skill_ref.model_dump(mode="json"),
+                    "required_artifacts": [],
+                    "required_user_inputs": [],
                     "requires_logparse": False,
                     "summary": "Diagnose a payment-to-inventory RPC timeout.",
                 }
@@ -152,6 +155,8 @@ def test_real_route_agent_synthesizes_valid_outcome_from_production_contract(
         )
 
     assert execution.returncode == 0
+    assert list((runtime / "tool-state").iterdir()) == []
+    seal_agent_outcome_draft(workspace)
     validated = read_agent_output(workspace, job, manifest)
     assert validated.canonical_bytes == (
         output / "job_outcome.draft.json"
@@ -169,6 +174,9 @@ def test_real_route_agent_synthesizes_valid_outcome_from_production_contract(
         "inputs",
         "output",
         "runtime",
+    ]
+    assert [path.name for path in (runtime / "tool-state").iterdir()] == [
+        "agent-job-outcome-draft.finalized"
     ]
     assert json.loads(validated.canonical_bytes)["payload"]["skill_ref"] == json.loads(
         canonical_json_bytes(skill_ref)

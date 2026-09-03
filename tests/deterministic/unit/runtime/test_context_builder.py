@@ -429,17 +429,20 @@ def test_production_output_contract_materializes_the_role_specific_protocol(
     content = _section_content(context, output_index)
     assert b"{{S00_" not in content
     if job_type is JobType.ROUTE:
-        expected = schema_bundle_bytes()["agent-job-outcome-draft.schema.json"]
-        begin = b"<<<BEGIN S00 AGENT JOB OUTCOME DRAFT SCHEMA>>>\n"
-        end = b"<<<END S00 AGENT JOB OUTCOME DRAFT SCHEMA>>>"
-        assert content.count(begin) == 1
-        assert content.count(end) == 1
-        start = content.index(begin) + len(begin)
-        finish = content.index(end, start)
-        assert content[start:finish] == expected
+        shared_schema = schema_bundle_bytes()["agent-job-outcome-draft.schema.json"]
+        assert content == production_contract.encode("utf-8")
+        assert b"<<<BEGIN S00 AGENT JOB OUTCOME DRAFT SCHEMA>>>" not in content
+        assert b'"$defs"' not in content
+        assert len(content) < 4_096
+        assert len(shared_schema) - len(content) > 30_000
+        assert len(context.body.encode("utf-8")) < 8_192
+        assert b"exactly these twelve top-level" in content
+        assert b'`result_type="COMPLETED"`' in content
+        assert b'`result_type="NO_CAPABILITY"`' in content
+        assert b'`error`: `null`' in content
         assert b"every registered production Methods Skill" in content
         assert b"user-fact-name filter" in content
-        assert b"passed exact identity matching against all" not in content
+        assert b"decides semantic compatibility" in content
         return
 
     assert content == production_contract.encode("utf-8")

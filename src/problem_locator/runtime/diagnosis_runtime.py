@@ -106,6 +106,11 @@ from .context_policy import ResolvedJobAssets, RuntimeAssetResolver
 from .failures import RuntimeExecutionError, runtime_failure
 from .generic_locator import GenericLocatorExecutor
 from .input_profile import expand_profile_requirements
+from .outcome_finalizer import (
+    AgentOutcomeDraftSealWriteError,
+    DRAFT_FINALIZATION_MARKER_RELATIVE_PATH,
+    seal_agent_outcome_draft,
+)
 from .outcome_publisher import OutcomePublisher
 from .output_reader import (
     RejectedAgentOutputError,
@@ -533,6 +538,38 @@ def _method_role_prompt_suffix_v2(
     )
 
 
+def _seal_route_draft_after_backend(workspace: PreparedWorkspace) -> bool:
+    """Seal an unsealed ROUTE draft in-process after the Agent tree exits.
+
+    Older adapters may already have produced the marker.  Leave every present
+    node untouched so the output reader remains the sole authority that accepts
+    or rejects it. Agent-authored path or content failures remain unchanged for
+    that reader; server-side persistence failures keep their infrastructure
+    classification.
+    """
+
+    marker_path = workspace.root / DRAFT_FINALIZATION_MARKER_RELATIVE_PATH
+    try:
+        marker_path.stat(follow_symlinks=False)
+    except FileNotFoundError:
+        try:
+            seal_agent_outcome_draft(workspace.root)
+        except AgentOutcomeDraftSealWriteError:
+            raise runtime_failure(
+                stage=ExecutionStage.OUTCOME_VALIDATE,
+                code=ErrorCode.WORKSPACE_PREPARE_FAILED,
+                message="The ROUTE draft could not be finalized in the Workspace.",
+                retryable=True,
+            ) from None
+        except (OSError, TypeError, ValueError):
+            return False
+    except OSError:
+        return False
+    else:
+        return False
+    return True
+
+
 def _binding_user_fact_name(binding: object) -> str | None:
     if binding is None:
         return None
@@ -814,6 +851,8 @@ class DiagnosisRuntime:
         id_generator: IdGenerator,
         workspace_manager: WorkspaceManager,
         backend: AgentBackend,
+        route_backend: AgentBackend | None = None,
+        diagnose_backend: AgentBackend | None = None,
         context_builder: ContextBuilder | None = None,
         backend_test_limits: BackendExecutionLimits | None = None,
         generic_locator_executor: GenericLocatorExecutor | None = None,
@@ -825,7 +864,10 @@ class DiagnosisRuntime:
         self._logparse_broker_factory = logparse_broker_factory
         self._execution_records = execution_records
         self._workspace_manager = workspace_manager
-        self._backend = backend
+        self._route_backend = route_backend if route_backend is not None else backend
+        self._diagnose_backend = (
+            diagnose_backend if diagnose_backend is not None else backend
+        )
         self._context_builder = context_builder or ContextBuilder()
         self._backend_test_limits = backend_test_limits
         self._clock = clock
@@ -833,13 +875,18 @@ class DiagnosisRuntime:
         self._evidence_v2_reviewer_enabled = evidence_v2_reviewer_enabled
         self._publisher = OutcomePublisher(execution_records, clock, id_generator)
         self._generic_locator_executor = generic_locator_executor or GenericLocatorExecutor(
-            backend=backend,
+            backend=self._diagnose_backend,
             workspace_manager=workspace_manager,
             execution_records=execution_records,
             clock=clock,
             id_generator=id_generator,
             backend_test_limits=backend_test_limits,
         )
+
+    def _backend_for_job(self, job: Job) -> AgentBackend:
+        if job.job_type is JobType.ROUTE:
+            return self._route_backend
+        return self._diagnose_backend
 
     def execute(
         self,
@@ -1135,7 +1182,7 @@ class DiagnosisRuntime:
                     "not traverse output/, and write only output/method-diagnosis.draft.json.\n"
                     "<<<END METHODS_FROZEN_EXECUTION_BOUNDARY>>>\n"
                 )
-                self._backend.execute(
+                self._backend_for_job(job).execute(
                     prompt=methods_prompt,
                     workspace_root=workspace.root,
                     cancellation=cancellation,
@@ -1173,6 +1220,26 @@ class DiagnosisRuntime:
         if broker_audit_bytes is not None:
             self._publish_audit_bytes(job, "broker_audit.json", broker_audit_bytes)
         validating = record_stage_started(ExecutionStage.OUTCOME_VALIDATE)
+        if (
+            job.job_type is JobType.ROUTE
+            and _seal_route_draft_after_backend(workspace)
+        ):
+            try:
+                workspace_bytes = self._workspace_manager.temporary_output_bytes(
+                    workspace
+                )
+            except RuntimeExecutionError:
+                raise runtime_failure(
+                    stage=ExecutionStage.OUTCOME_VALIDATE,
+                    code=ErrorCode.WORKSPACE_LIMIT,
+                    message="Finalized ROUTE Workspace could not be measured safely.",
+                ) from None
+            if workspace_bytes > job.resource_limits.workspace_bytes:
+                raise runtime_failure(
+                    stage=ExecutionStage.OUTCOME_VALIDATE,
+                    code=ErrorCode.WORKSPACE_LIMIT,
+                    message="Finalized ROUTE Workspace exceeded the fixed byte limit.",
+                )
         try:
             validated_draft = read_agent_output(
                 workspace,
@@ -2074,7 +2141,7 @@ class DiagnosisRuntime:
             attempt=attempt,
             prompt_bytes=prompt_bytes,
         )
-        self._backend.execute(
+        self._backend_for_job(job).execute(
             prompt=prompt,
             workspace_root=workspace.root,
             cancellation=cancellation,
@@ -4026,7 +4093,7 @@ class DiagnosisRuntime:
                 )
                 broker_environment = session.agent_environment()
                 secrets = tuple(broker_environment.values())
-                self._backend.execute(
+                self._backend_for_job(job).execute(
                     prompt=prompt,
                     workspace_root=preprocessing_workspace.root,
                     cancellation=cancellation,
@@ -4168,7 +4235,7 @@ class DiagnosisRuntime:
         bytes | None,
     ]:
         if workspace.manifest.resolved_logparse_plan is None:
-            self._backend.execute(
+            self._backend_for_job(job).execute(
                 prompt=prompt,
                 workspace_root=workspace.root,
                 cancellation=cancellation,
@@ -4207,7 +4274,7 @@ class DiagnosisRuntime:
         try:
             broker_environment = session.agent_environment()
             secrets = tuple(broker_environment.values())
-            self._backend.execute(
+            self._backend_for_job(job).execute(
                 prompt=prompt,
                 workspace_root=workspace.root,
                 cancellation=cancellation,

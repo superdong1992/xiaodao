@@ -28,12 +28,14 @@ OFFICIAL_KEYS = {
     "BIND_HOST",
     "CLAUDE_COMMAND",
     "DATA_ROOT",
+    "DIAGNOSE_CLAUDE_COMMAND",
     "GENERIC_SKILL_NAME",
     "LOGPARSE_CONFIG_PATH",
     "LOGPARSE_PYTHON",
     "LOGPARSE_REPO",
     "PORT",
     "PUBLIC_BASE_URL",
+    "ROUTE_CLAUDE_COMMAND",
     "SKILL_DIR",
 }
 
@@ -202,6 +204,8 @@ def _run_native_startup_gate(expected_system: str, tmp_path: Path) -> None:
         "BIND_HOST": "127.0.0.1",
         "PORT": str(port),
         "CLAUDE_COMMAND": os.environ.get("CLAUDE_COMMAND", "claude"),
+        "ROUTE_CLAUDE_COMMAND": os.environ.get("CLAUDE_COMMAND", "claude"),
+        "DIAGNOSE_CLAUDE_COMMAND": os.environ.get("CLAUDE_COMMAND", "claude"),
         "GENERIC_SKILL_NAME": "generic-problem-locator-smoke",
         "SKILL_DIR": os.fspath(skill_dir),
         "LOGPARSE_REPO": os.fspath(logparse_repo),

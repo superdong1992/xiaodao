@@ -2157,3 +2157,68 @@
   `git-visible-worktree-v1:f2e9fcc3fa07caaf0654fb5b5103040b9081ba72bc4beed7dd8254dfd1c96ed7`
   （752 files），worktree/materialized source verification 均为 PASS。本元数据行本身不宣称被其引用的
   源码快照覆盖。
+
+## PL-FIX-053：ROUTE 大合同、统一模型命令与附件串行等待放大端到端耗时
+
+- **状态**：代码优化已完成；验证结论以本条最终复验元数据为准。
+- **症状**：实际环境一次完整定位耗时 12 分 10 秒，其中 ROUTE 的 `BACKEND_EXECUTE` 为
+  2 分 34 秒，等待用户材料和状态变化为 4 分 45 秒，第二轮正式 DIAGNOSE 的
+  `BACKEND_EXECUTE` 为 4 分 23 秒；三段合计占总耗时 96.2%，其余服务端处理只有秒或毫秒级。
+  代表性 ROUTE 输入为 38,413 字节，其中共享 `AgentJobOutcomeDraftV2` schema 为 33,213
+  字节，模型还必须在写完草稿后调用一次封装工具。客户端即使已经拿到本地日志，也会等到
+  `WAITING_ATTACHMENT` 后才开始上传，并把事实和附件拆成串行补充。
+- **受影响版本**：Problem Locator `5.0.0`，本轮基线
+  `5723e96cf537f3aaf33bb36c0418a3b5d0d98746`。
+- **根因**：ROUTE 只需要输出 `MATCHED` 或 `NO_CAPABILITY`，却内嵌了 DIAGNOSE、REVIEW 等
+  全角色共享 schema，并把 Canonical JSON 封装交给模型工具回合。所有角色又只能使用同一个
+  `CLAUDE_COMMAND`，部署者无法让低复杂度 ROUTE 与高复杂度 DIAGNOSE 采用不同延迟配置。
+  附件 prepare/PUT 本来允许在非终态 Case 上执行，PUT 回执也已经权威确认 READY，但客户端流程
+  没有把这段文件 I/O 与 ROUTE 重叠，也没有优先合并同批事实和附件。
+- **不可回归行为**：
+  - ROUTE 模型上下文只保留角色专用的十二字段、两个合法分支和完整 Skill ref 规则；服务端仍按
+    完整 `AgentJobOutcomeDraftV2`、Job/Case 绑定、秘密扫描、稳定快照和 Workspace 边界复验。
+    Router 必须继续看到全部有效 production Skill 并做语义选择；唯一候选也可能返回
+    `NO_CAPABILITY`，不得改成按候选数自动命中或重新引入 user-fact-name 过滤。
+  - Router 工具集不再暴露 `problem-locator-seal-outcome-draft`。Agent 进程树退出后，Runtime
+    在 `OUTCOME_VALIDATE` 内直接调用同一产品封装函数，再由原 output reader 校验 canonical draft
+    与 marker。旧 adapter 已产生 marker 时保持兼容并原样复验。服务端 draft/marker 写失败必须保留
+    retryable Workspace 故障分类；封装新增字节必须再次计入固定 Workspace 上限。
+  - `ROUTE_CLAUDE_COMMAND` 与 `DIAGNOSE_CLAUDE_COMMAND` 可独立覆盖默认命令；任一未配置时必须
+    精确回退 `CLAUDE_COMMAND`。SPECIALIZED、GENERIC、Logparse 预处理和可选 Reviewer 使用
+    DIAGNOSE 命令，Reviewer 与 Specialist 仍保持同一模型身份。
+  - 用户在创建 Case 时已经选择本地附件，客户端可以在 ROUTE 期间 prepare/PUT；PUT 成功回执
+    直接作为 READY 依据，不增加确认轮询。只有最新 Case 已出现匹配的 OPEN requirement 才能提交，
+    同批 INPUT 与全部 READY 附件应合并为一次 supplement；revision conflict 仍按同一逻辑请求 ID
+    刷新后重试。
+  - 不放宽 Agent Workspace 的 50ms 安全扫描、Methods `request.json` 单一用户事实来源、Evidence
+    校验、状态恢复和唯一 repair。它们不是本次分钟级耗时的已证实来源；不得用未经 A/B 的删减换取
+    不可审计的表面提速。
+- **修复历史**：2026-09-03，先按实际 Journey 拆分 730 秒墙钟并测量 ROUTE 输入，确认三段主导
+  96.2% 耗时。将 ROUTE output contract 从共享 schema 改为 2,811 字节的角色专用合同，代表性
+  完整上下文从 38,413 字节降至 4,318 字节，减少 88.76%；Router tool bundle 改为空，封装迁到
+  Agent 退出后的服务进程内执行。新增两个向后兼容的角色命令配置。客户端 Skill 改为已有附件
+  立即预上传、等待 requirement 后一次合并提交。审查期间撤回了把 Workspace 递归扫描从 50ms
+  降到 1 秒的方案，也没有把 Specialist request 复制进 prompt；前者会扩大瞬时越界节点窗口，
+  后者会破坏 PL-FIX-052 的事实来源和大请求完整读取合同。
+- **专项回归测试**：
+  - `tests/deterministic/unit/runtime/test_context_builder.py::test_production_output_contract_materializes_the_role_specific_protocol[ROUTE]`
+  - `tests/deterministic/unit/runtime/test_p0_semantic_assets.py::test_router_writes_one_server_finalized_draft_without_a_tool_round_trip`
+  - `tests/deterministic/unit/runtime/test_diagnosis_runtime.py::test_runtime_executes_one_frozen_route_and_publishes_canonical_receipt`
+  - 同文件 `test_route_in_process_seal_write_failure_is_retryable_workspace_failure`、
+    `test_post_seal_workspace_limit_stays_in_outcome_validation_stage` 和
+    `test_router_semantic_no_match_publishes_no_capability_after_backend`
+  - `tests/deterministic/integration/test_bootstrap_composition.py::test_production_composition_routes_each_job_role_to_its_agent_backend`
+  - `tests/deterministic/unit/interfaces/test_settings.py::test_role_agent_commands_override_the_legacy_fallback_independently`
+  - 同文件 `test_legacy_agent_command_remains_the_role_fallback_when_overrides_are_omitted`
+  - `tests/deterministic/journey/test_rpc_timeout.py::test_attachment_preupload_during_route_batches_first_supplement`
+  - `tests/deterministic/unit/interfaces/test_client_access_skill.py::test_skill_batches_inputs_and_ready_attachments_without_ready_poll`
+  - `tests/real/agent/test_real_route_agent_contract_gate.py::test_real_route_agent_synthesizes_valid_outcome_from_production_contract`
+- **最新 Test Flow verdict**：待本轮官方 `dev.default` 复验；零模型 Dev 只能证明结构与行为回归，
+  不证明真实环境墙钟降幅。12 分 10 秒场景必须在相同模型、网络和日志附件下重新 A/B 测量。
+  **最终复验元数据**：Dev `run-20260903T090251Z-66b9e1e4` 为 `PASS_WITH_WARNINGS`，仅因性能基线
+  尚未校准；functional、operation、verification 均为 `PASS`，模型调用、token 和费用均为 0。
+  `deterministic.full` 为 PASS：Evidence V2 Core 116/116、contracts 602/602、unit 1991 passed/68
+  skipped、integration 70/70、SameJob 4/4，全部 failure/error 为 0。验证源码快照
+  `git-visible-worktree-v1:3444c00ab0564c849dfbb2386be5ef7b24ee3416fbc92984619692cb425f4e60`
+  （752 files），worktree 与 materialized source verification 均为 PASS。本元数据行本身不宣称被其
+  引用的源码快照覆盖。
